@@ -1,5 +1,4 @@
-import { csrf } from 'hono/csrf'
-
+import { sameOriginForCookies } from './auth/csrf'
 import type { Deps } from './http/env'
 import { router } from './http/openapi'
 import { appRoutes } from './routes/apps'
@@ -12,8 +11,7 @@ import { VERSION } from './version'
 // 应用本身与监听端口分开，测试直接调 app.request，不用起服务
 export function createApp(deps: Deps) {
   const app = router()
-  // Cookie 会话的写请求要求同源；带 Bearer Key 的请求不靠 Cookie，不受影响
-  app.use('/v1/*', csrf())
+  app.use('/v1/*', sameOriginForCookies)
   app.route('/v1', health)
   app.route('/v1', setupRoutes(deps))
   app.route('/v1', authRoutes(deps))

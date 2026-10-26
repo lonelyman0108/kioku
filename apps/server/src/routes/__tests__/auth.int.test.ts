@@ -27,9 +27,11 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
     await resetDatabase(database)
   })
 
+  // 模拟浏览器的同源请求
+  const sameSite = { 'sec-fetch-site': 'same-origin' }
   const json = (method: string, body: unknown, cookie?: string) => ({
     method,
-    headers: { 'content-type': 'application/json', ...(cookie ? { cookie } : {}) },
+    headers: { 'content-type': 'application/json', ...sameSite, ...(cookie ? { cookie } : {}) },
     body: JSON.stringify(body),
   })
   const cookieOf = (res: Response) => res.headers.get('set-cookie')!.split(';')[0]!
@@ -121,7 +123,7 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
 
     const revoked = await app.request(`/v1/spaces/${spaceId}/apps/${appInfo.id}/keys/${key.id}`, {
       method: 'DELETE',
-      headers: { cookie },
+      headers: { cookie, ...sameSite },
     })
     expect(revoked.status).toBe(204)
     expect((await app.request('/v1/whoami', bearer)).status).toBe(401)
@@ -142,6 +144,25 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
       json('POST', { slug: 'x', name: 'X', runtimeFamily: 'mcp' }, cookie),
     )
     expect(res.status).toBe(403)
+  })
+
+  it('带 Cookie 的跨站写请求被拒绝', async () => {
+    const { cookie } = await setup()
+    const crossSite = await app.request('/v1/auth/logout', {
+      method: 'POST',
+      headers: { cookie, 'sec-fetch-site': 'cross-site' },
+    })
+    expect(crossSite.status).toBe(403)
+    const wrongOrigin = await app.request('/v1/auth/logout', {
+      method: 'POST',
+      headers: { cookie, origin: 'https://evil.example.com', host: 'kioku.example.com' },
+    })
+    expect(wrongOrigin.status).toBe(403)
+    const rightOrigin = await app.request('/v1/auth/logout', {
+      method: 'POST',
+      headers: { cookie, origin: 'https://kioku.example.com', host: 'kioku.example.com' },
+    })
+    expect(rightOrigin.status).toBe(204)
   })
 
   it('格式错误或伪造的 Key 返回 401', async () => {
