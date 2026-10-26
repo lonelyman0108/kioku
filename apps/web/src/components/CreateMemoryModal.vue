@@ -1,9 +1,10 @@
 <script setup lang="ts">
-import { SENSITIVITIES, URI_PATTERN, type Layer, type Sensitivity } from '@kioku/contracts'
+import { URI_PATTERN, type Layer, type Sensitivity } from '@kioku/contracts'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { creatableLayers, layerLabels, sensitivityLabels } from '../labels'
 
 const props = defineProps<{ spaceId: string; initialUri: string }>()
@@ -37,10 +38,12 @@ const domain = computed(() => form.uri.split('://')[0] ?? '')
 const layerFixed = computed(() => domain.value === 'persona' || domain.value === 'app')
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
 const layerItems = creatableLayers.map((l) => ({ label: layerLabels[l], value: l }))
-const sensitivityItems = [
+// editor 签不了 secret，选项里也不给
+const { sensitivities } = useMemoryPermissions(computed(() => props.spaceId))
+const sensitivityItems = computed(() => [
   { label: '按层默认', value: undefined },
-  ...SENSITIVITIES.map((s) => ({ label: sensitivityLabels[s], value: s })),
-]
+  ...sensitivities.value.map((s) => ({ label: sensitivityLabels[s], value: s })),
+])
 
 async function submit() {
   saving.value = true
