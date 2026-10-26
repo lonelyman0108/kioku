@@ -13,6 +13,9 @@ const PAGE = BATCH * 4
 // 不像 updated_at 依赖应用写入的时间戳（只有毫秒精度，同一毫秒内的两次修改分不出来）
 const stamp = sql<string>`memories.xmin::text`
 
+// 写回时正被别的事务锁着、这次没处理的记忆，交给调用方稍后重试
+export type OnSkipped = (ids: string[]) => void
+
 // 为一批记忆生成或刷新向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
 // 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
 // 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 xmin，期间被改过的不写回，
@@ -22,6 +25,7 @@ async function syncRows(
   embedder: Embedder,
   spaceId: string,
   ids: string[],
+  onSkipped?: OnSkipped,
 ): Promise<number> {
   if (!ids.length) return 0
 
@@ -85,14 +89,17 @@ async function syncRows(
     vectors.push(...(await embedder.embed(pending.slice(i, i + BATCH).map((p) => p.text))))
   }
 
-  return withSpace(db, spaceId, async (tx) => {
-    // 固定加锁顺序，两个重叠的任务不会互相等待成死锁
+  const { written, skipped } = await withSpace(db, spaceId, async (tx) => {
+    // 正被别的事务锁着的行跳过，不等它：移动记忆、让出 URI 会按自己的顺序锁多行，
+    // 在这里等锁可能和它们互相等待成死锁。那些行如果被改了，修改本身会再触发向量任务；
+    // 没改的由调用方稍后重试
     const current = await tx
       .select({ id: memories.id, stamp })
       .from(memories)
       .where(inArray(memories.id, ids))
-      .orderBy(memories.id)
-      .for('update')
+      .for('update', { skipLocked: true })
+    const locked = new Set(current.map((c) => c.id))
+    const skipped = [...stale, ...pending.map((p) => p.id)].filter((id) => !locked.has(id))
     const unchanged = new Set(current.filter((c) => c.stamp === readAt.get(c.id)).map((c) => c.id))
     const staleNow = stale.filter((id) => unchanged.has(id))
     if (staleNow.length) {
@@ -125,8 +132,10 @@ async function syncRows(
     }
     // 换过模型后，旧模型的向量不再参与检索，顺手清掉
     await tx.delete(memoryEmbeddings).where(cleanupOtherModels)
-    return writes.length
+    return { written: writes.length, skipped }
   })
+  if (skipped.length) onSkipped?.(skipped)
+  return written
 }
 
 export async function embedMemory(
@@ -134,12 +143,17 @@ export async function embedMemory(
   embedder: Embedder,
   spaceId: string,
   memoryId: string,
+  onSkipped?: OnSkipped,
 ): Promise<number> {
-  return syncRows(db, embedder, spaceId, [memoryId])
+  return syncRows(db, embedder, spaceId, [memoryId], onSkipped)
 }
 
 // 全量补齐：逐个空间、按 id 分页检查所有记忆，用于首次配置或更换模型之后
-export async function backfillEmbeddings(db: Db, embedder: Embedder): Promise<number> {
+export async function backfillEmbeddings(
+  db: Db,
+  embedder: Embedder,
+  onSkipped?: (spaceId: string, ids: string[]) => void,
+): Promise<number> {
   let total = 0
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
     let after: string | null = null
@@ -159,6 +173,7 @@ export async function backfillEmbeddings(db: Db, embedder: Embedder): Promise<nu
         embedder,
         spaceId,
         page.map((r) => r.id),
+        onSkipped && ((ids) => onSkipped(spaceId, ids)),
       )
       after = page[page.length - 1]!.id
     }

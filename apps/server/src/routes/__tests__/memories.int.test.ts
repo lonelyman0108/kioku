@@ -213,6 +213,29 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
       'core://agent/claudecode',
       'core://agent/codex',
     ])
+    expect(agent.truncated).toBe(false)
+  })
+
+  it('一级超过 500 个时只返回前 500 个并标记截断，priority 高的不会被截掉', async () => {
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memories).values(
+        Array.from({ length: 501 }, (_, i) => ({
+          spaceId: ws.spaceId,
+          form: 'curated' as const,
+          layer: 'base' as const,
+          sensitivity: 'public' as const,
+          provenance: 'agent' as const,
+          domain: 'bulk',
+          path: `n${String(i).padStart(3, '0')}`,
+          content: 'x',
+          priority: i === 500 ? 0 : 5,
+        })),
+      ),
+    )
+    const res = (await (await call('GET', '/memories/children?of=bulk')).json()) as MemoryChildren
+    expect(res.truncated).toBe(true)
+    expect(res.children).toHaveLength(500)
+    expect(res.children[0]!.uri).toBe('bulk://n500')
   })
 
   it('URI 格式错误返回 400', async () => {

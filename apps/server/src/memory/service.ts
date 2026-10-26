@@ -11,7 +11,7 @@ import type {
   Sensitivity,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
-import { and, asc, count, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gt, inArray, isNull, like, lte, or, sql } from 'drizzle-orm'
 
 import { canRead, canWrite, canWriteApp, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
@@ -75,8 +75,8 @@ const CHILDREN_LEVEL_LIMIT = 500
 export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
 
-  // URI 唯一约束冲突在这里转成 409，REST 与 MCP 都能拿到明确的提示。正常情况下 claimUri 已经用咨询锁
-  // 串行化了检查与写入，这里兜住遗漏的写入路径
+  // URI 冲突由数据库判断（同一归属的唯一索引，以及共享与成员节点互斥的触发器，二者都按唯一约束报错），
+  // 在这里转成 409，REST 与 MCP 都能拿到明确的提示
   private async run<T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>): Promise<T> {
     try {
       return await runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
@@ -107,9 +107,10 @@ export class MemoryService {
     return view
   }
 
-  // 按 URI 找当前调用方对应的那条：别的成员的 owner / private 记忆不在候选里；
-  // 同一个 URI 既有共享节点又有自己的私人节点时，先取自己的
+  // 按 URI 找当前调用方对应的、仍然有效的那条：别的成员的 owner / private 记忆不在候选里，
+  // 已失效或已过期的也不算。数据库保证这样的记录在一个 URI 上至多一条（共享与成员节点互斥），所以不用排序
   private async findLive(tx: Tx, parsed: ParsedUri): Promise<MemoryRow | undefined> {
+    const now = new Date()
     const [row] = await tx
       .select()
       .from(memories)
@@ -118,31 +119,30 @@ export class MemoryService {
           eq(memories.domain, parsed.domain),
           eq(memories.path, parsed.path),
           isNull(memories.deletedAt),
+          or(isNull(memories.validTo), gt(memories.validTo, now)),
+          or(isNull(memories.expiresAt), gt(memories.expiresAt, now)),
           or(
             isNull(memories.ownerAccountId),
             eq(memories.ownerAccountId, this.ctx.access.ownerAccountId),
           ),
         ),
       )
-      .orderBy(sql`${memories.ownerAccountId} is null`)
       .limit(1)
     return row
   }
 
   // 一个 URI 要么是共享的，要么按成员各自占用，二者不共存：否则成员自己的私人节点会遮住同名的共享节点。
-  // 所以写共享节点时与任何人的同名节点冲突，写成员节点时与共享节点和自己的同名节点冲突。
-  // 检查与写入用事务级咨询锁串行化，并发写同一个 URI 时后到的拿到 409 而不是唯一约束报错。
-  // 冲突的记录已失效或已过期时，不论属于谁都软删除并让出 URI（事件记在本次写入者名下，快照保留原内容），
-  // 否则谁都看不见它却永远占着这个 URI。数据库触发器 memories_uri_exclusive 是同一规则的兜底
+  // 冲突检查交给数据库：同一归属下的唯一索引 memories_uri_live_idx，以及共享与成员节点互斥的触发器
+  // memories_uri_exclusive（它对同一个 URI 加咨询锁串行检查，不看已失效或过期的记录），冲突时 run() 转成 409。
+  // 这里只做数据库做不了的一步：目标 URI 上已失效或过期、调用方又能让出的记录，软删除并让出 URI，
+  // 否则同一归属下谁都看不见它，却会一直撞上唯一索引
   private async claimUri(
     tx: Tx,
     parsed: ParsedUri,
     target: { ownerAccountId: string | null },
     released: string[],
   ): Promise<void> {
-    await tx.execute(
-      sql`select pg_advisory_xact_lock(hashtext(${`${this.ctx.spaceId}|${parsed.domain}://${parsed.path}`}))`,
-    )
+    const now = new Date()
     const rows = await tx
       .select()
       .from(memories)
@@ -151,6 +151,7 @@ export class MemoryService {
           eq(memories.domain, parsed.domain),
           eq(memories.path, parsed.path),
           isNull(memories.deletedAt),
+          or(lte(memories.validTo, now), lte(memories.expiresAt, now)),
           target.ownerAccountId
             ? or(
                 isNull(memories.ownerAccountId),
@@ -159,30 +160,25 @@ export class MemoryService {
             : undefined,
         ),
       )
-    const now = new Date()
     for (const row of rows) {
-      // 已失效或已过期的记录对任何人都不可见，软删除它不会暴露或丢失可见内容（事件里留有快照），
-      // 所以不论归属与写权限都可以让出 URI；否则别人的过期记录会永远挡住这个 URI
-      const expired = (row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)
-      // 能让出的过期记录：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它们对任何人都不可见，
-      // 又只属于那个成员，不让出就会永远挡住共享 URI。共享记录调用方写不了的，照样算冲突
+      // 能让出的：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
+      // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
+      // 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
       const foreignPrivate =
         row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
-      const releasable = expired && (foreignPrivate || canWrite(this.ctx.access, row))
-      if (!releasable) {
-        // 不说明是谁的、内容是什么；URI 被占用这件事本身无法对写入方隐藏
-        throw new MemoryError(409, `URI 已被占用：${formatUri(parsed.domain, parsed.path)}`)
-      }
+      if (!foreignPrivate && !canWrite(this.ctx.access, row)) continue
       const [gone] = await tx
         .update(memories)
         .set({ deletedAt: now, updatedAt: now })
-        .where(eq(memories.id, row.id))
+        .where(and(eq(memories.id, row.id), isNull(memories.deletedAt)))
         .returning()
+      // 并发的另一次写入已经让出了它
+      if (!gone) continue
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       // 让出的是别的成员的私人记录时，事件记在本次写入者名下，快照里不放对方的正文
       const keep = (r: MemoryRow) =>
         foreignPrivate ? { ...snapshot(r, glossary), content: null } : snapshot(r, glossary)
-      await this.event(tx, row.id, 'expire', keep(row), keep(gone!))
+      await this.event(tx, row.id, 'expire', keep(row), keep(gone))
       released.push(row.id)
     }
   }
@@ -533,17 +529,22 @@ export class MemoryService {
       const rest = sql`substr(${memories.path}, ${sql.raw(String(prefix.length + 1))})`
       const segment = sql<string>`split_part(${rest}, '/', 1)`
       const next = sql`split_part(${rest}, '/', 2)`
-      const own = <T>(column: unknown) =>
-        sql<T | null>`(array_agg(${column}) filter (where ${next} = ''))[1]`
-      const levels = await tx
+      // 这一级本身的记忆：各字段打包成一个对象聚合，取同一行，按 id 排序保证结果确定
+      const own = sql<{
+        id: string
+        layer: Layer
+        sensitivity: Sensitivity
+        priority: number
+        disclosure: string | null
+      } | null>`(array_agg(jsonb_build_object(
+          'id', ${memories.id}, 'layer', ${memories.layer}, 'sensitivity', ${memories.sensitivity},
+          'priority', ${memories.priority}, 'disclosure', ${memories.disclosure}
+        ) order by ${memories.id}) filter (where ${next} = ''))[1]`
+      const rows = await tx
         .select({
           segment,
           below: sql<number>`count(distinct ${next}) filter (where ${next} <> '')`,
-          id: own<string>(memories.id),
-          layer: own<Layer>(memories.layer),
-          sensitivity: own<Sensitivity>(memories.sensitivity),
-          priority: own<number>(memories.priority),
-          disclosure: own<string>(memories.disclosure),
+          own,
         })
         .from(memories)
         .where(
@@ -555,25 +556,21 @@ export class MemoryService {
           ),
         )
         .groupBy(sql`1`)
-        // 先按这一级自身记忆的 priority 排，虚拟节点在后，再截断；否则重要的节点可能被截掉
+        // 有记忆的按 priority 在前，虚拟节点在后，同级按路径；排序之后再截断，否则重要的节点可能被截掉。
+        // 多取一行，用来判断是否被截断
         .orderBy(sql`min(${memories.priority}) filter (where ${next} = '') nulls last`, sql`1`)
-        .limit(CHILDREN_LEVEL_LIMIT)
-      const children: MemorySummary[] = levels.map((level) => ({
+        .limit(CHILDREN_LEVEL_LIMIT + 1)
+      const truncated = rows.length > CHILDREN_LEVEL_LIMIT
+      const children: MemorySummary[] = rows.slice(0, CHILDREN_LEVEL_LIMIT).map((level) => ({
         uri: formatUri(domain, `${prefix}${level.segment}`),
-        exists: level.id !== null,
-        id: level.id,
-        layer: level.layer,
-        sensitivity: level.sensitivity,
-        priority: level.priority === null ? null : Number(level.priority),
-        disclosure: level.disclosure,
+        exists: level.own !== null,
+        id: level.own?.id ?? null,
+        layer: level.own?.layer ?? null,
+        sensitivity: level.own?.sensitivity ?? null,
+        priority: level.own?.priority ?? null,
+        disclosure: level.own?.disclosure ?? null,
         childCount: Number(level.below),
       }))
-      // 有记忆的按 priority 在前，虚拟节点在后，同级按路径
-      children.sort(
-        (a, b) =>
-          (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER) ||
-          a.uri.localeCompare(b.uri),
-      )
       const parentView = parent
         ? this.toView(parent, (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? [])
         : null
@@ -582,7 +579,7 @@ export class MemoryService {
       if (parsed && !parent && !children.length) {
         throw new MemoryError(404, `记忆不存在：${formatUri(parsed.domain, parsed.path)}`)
       }
-      return { parent: parentView, children }
+      return { parent: parentView, children, truncated }
     })
   }
 

@@ -20,7 +20,10 @@ export function formatChildren(result: MemoryChildren): string {
     if (!c.exists) return `- ${c.uri}（路径本身没有记忆${below}）`
     return `- ${c.uri}（${c.layer}，priority ${c.priority}${below}）${c.disclosure ? `：${c.disclosure}` : ''}`
   })
-  return `${head}子节点：\n${rows.join('\n')}`
+  const more = result.truncated
+    ? '\n（这一级太多，只列出了前面的一部分，用 kioku_search 查找其余的）'
+    : ''
+  return `${head}子节点：\n${rows.join('\n')}${more}`
 }
 
 export function formatDomains(domains: DomainSummary[]): string {

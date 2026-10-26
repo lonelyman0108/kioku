@@ -22,9 +22,17 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean)
-    // 有的负载均衡会写成「IP:端口」或「[IPv6 地址]:端口」，去掉端口；仍不是合法地址（例如 nginx 的 unknown）就退回连接对端
-    const picked = stripPort(hops[hops.length - trustedProxies] ?? '')
-    if (isIP(picked)) return { key: clientKey(picked), identified: true }
+    // 有的负载均衡会写成「IP:端口」或「[IPv6 地址]:端口」，去掉端口。
+    // 受信代理写了、但不是合法地址（例如 nginx 的 unknown、RFC 7239 的混淆标识）：分不清是谁，
+    // 归入「未知客户端」，不记到代理自己的地址上，否则这些客户端会和经过同一代理的其他人共用名额。
+    // 转发头的项数不够时（例如有人绕过代理直连后端）才退回连接对端
+    const hop = hops[hops.length - trustedProxies]
+    if (hop !== undefined) {
+      const picked = stripPort(hop)
+      return isIP(picked)
+        ? { key: clientKey(picked), identified: true }
+        : { key: 'unknown', identified: false }
+    }
   }
   let remote: string | undefined
   try {

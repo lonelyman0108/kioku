@@ -87,5 +87,7 @@ export const MemoryChildren = z.object({
   // 为 null 表示列的是 domain 根，或这一级路径本身没有可读的记忆
   parent: MemoryView.nullable(),
   children: z.array(MemorySummary),
+  // 这一级超过上限（500 个）时只返回前面的部分
+  truncated: z.boolean(),
 })
 export type MemoryChildren = z.infer<typeof MemoryChildren>

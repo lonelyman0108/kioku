@@ -47,6 +47,22 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   const embeddings = () =>
     withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings))
 
+  it('写回时记忆正被别的事务锁着就跳过、交给调用方重试，不等锁', async () => {
+    const embedder = fakeEmbedder()
+    const id = await create({ uri: 'core://agent', content: '先读正文再信任', layer: 'base' })
+    const skipped: string[][] = []
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx.execute(sql`select id from memories where id = ${id} for update`)
+      const written = await embedMemory(database.db, embedder, ws.spaceId, id, (ids) =>
+        skipped.push(ids),
+      )
+      expect(written).toBe(0)
+    })
+    expect(skipped).toEqual([[id]])
+    expect(await embeddings()).toHaveLength(0)
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+  })
+
   it('生成向量；正文不变时不重复请求，改了才重新生成', async () => {
     const embedder = fakeEmbedder()
     const id = await create({ uri: 'core://agent', content: '先读正文再信任', layer: 'base' })

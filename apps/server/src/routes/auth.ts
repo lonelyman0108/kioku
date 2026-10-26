@@ -14,7 +14,7 @@ import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
 import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
 import { clientIdentity } from '../http/clientIp'
-import { pruneAttempts, recordSuccess, refundAttempt, reserveAttempt } from '../auth/rateLimit'
+import { recordSuccess, refundAttempt, reserveAttempt } from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
 import { accounts, spaceMembers, spaces } from '../db/schema'
@@ -88,8 +88,6 @@ export function authRoutes(deps: Deps) {
       // 拿不到客户端地址时（没有底层连接，例如测试）传 null：失败计数归入「未知客户端」，校验闸门只用全局名额
       const identity = clientIdentity(c, deps.trustedProxies ?? 0)
       const client = identity.identified ? identity.key : null
-      // 偶尔顺手清理过期的失败计数，不单独起定时任务
-      if (Math.random() < 0.01) void pruneAttempts(deps.db).catch(() => {})
 
       const [account] = await deps.db
         .select()

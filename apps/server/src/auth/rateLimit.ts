@@ -1,4 +1,4 @@
-import { eq, lte, sql } from 'drizzle-orm'
+import { eq, inArray, lte, sql } from 'drizzle-orm'
 
 import type { Db, Tx } from '../db/client'
 import { loginAttempts } from '../db/schema'
@@ -95,7 +95,18 @@ export async function recordSuccess(
   if (!trustedDevice) await bump(db, totalKey(username), -1)
 }
 
-// 清掉已过期的计数；随机用户名刷出来的行过了窗口期就没有用了
-export async function pruneAttempts(db: Db): Promise<void> {
-  await db.delete(loginAttempts).where(lte(loginAttempts.resetAt, sql`now()`))
+// 清掉已过期的计数（随机用户名刷出来的行过了窗口期就没有用了），返回清掉的行数。
+// 跳过正被登录请求锁住的行：登录的计数事务先锁本客户端、再锁合计，这里按别的顺序等锁会和它互相等待成死锁；
+// 跳过的行下次再清
+export async function pruneAttempts(db: Db): Promise<number> {
+  const expired = db
+    .select({ username: loginAttempts.username })
+    .from(loginAttempts)
+    .where(lte(loginAttempts.resetAt, sql`now()`))
+    .for('update', { skipLocked: true })
+  const gone = await db
+    .delete(loginAttempts)
+    .where(inArray(loginAttempts.username, expired))
+    .returning({ username: loginAttempts.username })
+  return gone.length
 }

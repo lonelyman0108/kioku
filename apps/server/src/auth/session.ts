@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 
-import { and, eq, gt, lte } from 'drizzle-orm'
+import { and, eq, gt } from 'drizzle-orm'
 
 import type { Db } from '../db/client'
 import { sessions } from '../db/schema'
@@ -12,11 +12,8 @@ function hashToken(token: string): string {
   return createHash('sha256').update(token).digest('hex')
 }
 
+// 过期的会话由定时任务清理（jobs/cleanup.ts）
 export async function createSession(db: Db, accountId: string): Promise<string> {
-  // 顺手清掉这个账号已过期的会话，表不会无限增长
-  await db
-    .delete(sessions)
-    .where(and(eq(sessions.accountId, accountId), lte(sessions.expiresAt, new Date())))
   const token = randomBytes(32).toString('base64url')
   await db.insert(sessions).values({
     accountId,
