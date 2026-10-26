@@ -18,6 +18,7 @@ async function submit() {
   error.value = null
   try {
     const me = await api.setup(state)
+    queryClient.clear()
     queryClient.setQueryData(ME_KEY, me)
     await router.replace({ name: 'home' })
   } catch (err) {

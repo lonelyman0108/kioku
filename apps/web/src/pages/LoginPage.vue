@@ -17,7 +17,10 @@ async function submit() {
   submitting.value = true
   error.value = null
   try {
-    queryClient.setQueryData(ME_KEY, await api.login(state.username, state.password))
+    const me = await api.login(state.username, state.password)
+    // 换了账号：之前缓存的记忆、应用等都不能再用
+    queryClient.clear()
+    queryClient.setQueryData(ME_KEY, me)
     // 只接受站内路径，避免登录后被带到别的站点
     const next =
       typeof route.query.next === 'string' &&

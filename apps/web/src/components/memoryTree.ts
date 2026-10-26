@@ -50,3 +50,18 @@ export function parentOf(uri: string): string {
   const segments = path.split('/')
   return segments.length <= 1 ? domain! : `${domain}://${segments.slice(0, -1).join('/')}`
 }
+
+// 树里的深度：domain 根是 0，core://a 是 1
+export function depthOf(key: string): number {
+  const path = key.split('://')[1]
+  return path === undefined ? 0 : path.split('/').length
+}
+
+// 展开到某个节点要经过的各级：domain 根与每一级上层路径，不含节点自己
+export function ancestorsOf(uri: string): string[] {
+  const ancestors: string[] = []
+  for (let key = parentOf(uri); ; key = parentOf(key)) {
+    ancestors.unshift(key)
+    if (!key.includes('://')) return ancestors
+  }
+}

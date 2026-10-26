@@ -33,7 +33,10 @@ const nav = computed<NavigationMenuItem[]>(() => {
 })
 
 async function logout() {
-  await api.logout()
+  // 会话已经失效时（例如在别的标签页退出过）接口返回 401，照样清掉本地状态回到登录页
+  await api.logout().catch(() => {})
+  // 清掉全部缓存：下一个在这个标签页登录的人不能看到上一个人的记忆
+  queryClient.clear()
   queryClient.setQueryData(ME_KEY, null)
   await router.replace({ name: 'login' })
 }

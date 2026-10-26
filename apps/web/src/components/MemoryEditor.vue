@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import type { MemoryView, Sensitivity } from '@kioku/contracts'
-import { useQuery } from '@tanstack/vue-query'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
@@ -13,9 +13,11 @@ import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 const props = defineProps<{ spaceId: string; uri: string }>()
 const emit = defineEmits<{ deleted: [uri: string]; createChild: [parentUri: string] }>()
 const toast = useToast()
+const queryClient = useQueryClient()
 
+const queryKey = computed(() => ['memory', props.spaceId, props.uri])
 const memory = useQuery({
-  queryKey: computed(() => ['memory', props.spaceId, props.uri]),
+  queryKey,
   queryFn: () => api.memory(props.spaceId, props.uri),
 })
 
@@ -27,21 +29,21 @@ const form = reactive({
   glossary: [] as string[],
 })
 
+// 表单是从哪一版载入的：改动与保存时的版本号都以它为准，而不是缓存里最新的那份。
+// 否则后台重新拉取到别人改过的新版本，会悄悄覆盖还没保存的修改，或者让保存绕过冲突检查
+const base = ref<MemoryView | null>(null)
+
 function load(m: MemoryView) {
+  base.value = m
   form.content = m.content ?? ''
   form.disclosure = m.disclosure ?? ''
   form.priority = m.priority
   form.sensitivity = m.sensitivity
   form.glossary = [...m.glossary]
 }
-watch(
-  () => memory.data.value,
-  (m) => m && load(m),
-  { immediate: true },
-)
 
 const dirty = computed(() => {
-  const m = memory.data.value
+  const m = base.value
   if (!m) return false
   return (
     form.content !== (m.content ?? '') ||
@@ -52,10 +54,20 @@ const dirty = computed(() => {
   )
 })
 
-const permissions = useMemoryPermissions(computed(() => props.spaceId))
-const readOnly = computed(() =>
-  memory.data.value ? permissions.readOnlyReason(memory.data.value) : null,
+// 没有改动时跟上服务器上的新版本；有未保存的改动时保留它们，提示版本已变化，保存时由版本号检查冲突
+watch(
+  () => memory.data.value,
+  (m) => {
+    if (m && (!base.value || !dirty.value)) load(m)
+  },
+  { immediate: true },
 )
+const changedElsewhere = computed(
+  () => !!memory.data.value && !!base.value && memory.data.value.version !== base.value.version,
+)
+
+const permissions = useMemoryPermissions(computed(() => props.spaceId))
+const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.value) : null))
 const sensitivityItems = computed(() =>
   permissions.sensitivities.value.map((s) => ({ label: sensitivityLabels[s], value: s })),
 )
@@ -67,13 +79,13 @@ function failed(err: unknown, fallback: string) {
 }
 
 async function save() {
-  const m = memory.data.value
+  const m = base.value
   if (!m) return
   saving.value = true
   try {
     const next = await api.updateMemory(props.spaceId, {
       uri: m.uri,
-      // 带上读取时的版本号：别人刚改过时返回 409，不会悄悄覆盖
+      // 带上表单载入时的版本号：别人改过之后返回 409，不会悄悄覆盖
       expectedVersion: m.version,
       ...(form.content !== (m.content ?? '') ? { content: form.content } : {}),
       disclosure: form.disclosure.trim() ? form.disclosure.trim() : null,
@@ -82,7 +94,7 @@ async function save() {
       glossaryAdd: form.glossary.filter((k) => !m.glossary.includes(k)),
       glossaryRemove: m.glossary.filter((k) => !form.glossary.includes(k)),
     })
-    memory.refetch()
+    queryClient.setQueryData(queryKey.value, next)
     load(next)
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
@@ -107,21 +119,37 @@ async function remove() {
 <template>
   <div v-if="memory.isPending.value" class="p-4 text-muted">加载中……</div>
   <UAlert
-    v-else-if="memory.isError.value"
+    v-else-if="!base"
     color="error"
     variant="subtle"
     :title="memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败'"
   />
-  <div v-else-if="memory.data.value" class="space-y-4">
+  <div v-else class="space-y-4">
+    <!-- 已经载入过时，重新拉取失败（例如别处删除了它）也保留表单，免得丢掉正在编辑的内容 -->
+    <UAlert
+      v-if="memory.isError.value"
+      color="warning"
+      variant="subtle"
+      :title="`刷新失败：${memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败'}`"
+    />
+    <UAlert
+      v-else-if="changedElsewhere && dirty"
+      color="warning"
+      variant="subtle"
+      :title="`这条记忆在别处被改过（现在是版本 ${memory.data.value?.version}）。保存会提示冲突，可以先复制你的修改，再载入新版本。`"
+      :actions="[
+        { label: '载入新版本', onClick: () => memory.data.value && load(memory.data.value) },
+      ]"
+    />
     <div class="flex flex-wrap items-center gap-2">
-      <code class="text-sm font-semibold">{{ memory.data.value.uri }}</code>
-      <UBadge variant="subtle">{{ layerLabels[memory.data.value.layer] }}</UBadge>
-      <UBadge :color="sensitivityColors[memory.data.value.sensitivity]" variant="subtle">
-        {{ sensitivityLabels[memory.data.value.sensitivity] }}
+      <code class="text-sm font-semibold">{{ base.uri }}</code>
+      <UBadge variant="subtle">{{ layerLabels[base.layer] }}</UBadge>
+      <UBadge :color="sensitivityColors[base.sensitivity]" variant="subtle">
+        {{ sensitivityLabels[base.sensitivity] }}
       </UBadge>
       <span class="text-xs text-muted">
-        版本 {{ memory.data.value.version }} · 来源 {{ memory.data.value.provenance }} · 更新于
-        {{ new Date(memory.data.value.updatedAt).toLocaleString() }}
+        版本 {{ base.version }} · 来源 {{ base.provenance }} · 更新于
+        {{ new Date(base.updatedAt).toLocaleString() }}
       </span>
     </div>
 
