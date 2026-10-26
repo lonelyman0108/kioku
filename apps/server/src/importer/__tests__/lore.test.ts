@@ -32,7 +32,7 @@ describe('Lore 导入计划', () => {
         node('core://soul', { priority: 0 }),
         node('core://agent/claudecode', { priority: 0 }),
         node('preferences://user', { priority: 0 }),
-        node('infra://home_network', { priority: 1 }),
+        node('infra://office_network', { priority: 1 }),
       ),
       [],
       options,
@@ -42,7 +42,7 @@ describe('Lore 导入计划', () => {
       ['core://soul', 'persona://default/soul', 'persona'],
       ['core://agent/claudecode', 'app://claudecode/agent', 'app'],
       ['preferences://user', 'preferences://user', 'owner'],
-      ['infra://home_network', 'infra://home_network', 'private'],
+      ['infra://office_network', 'infra://office_network', 'private'],
     ])
     expect(plan.memories.map((m) => m.request.priority)).toEqual([0, 0, 0, 0, 1])
   })
@@ -138,15 +138,15 @@ describe('Lore 导入计划', () => {
       snapshot(
         node('core://notes/router', { aliases: ['infra://router/credentials'] }),
         node('infra://nas', { keywords: ['token: abcdef'] }),
-        node('infra://vault', { disclosure: '要用 password: 时' }),
+        node('infra://keystore', { disclosure: '要用 password: 时' }),
       ),
       [],
-      { ...options, secretUris: new Set(['infra://vault']) },
+      { ...options, secretUris: new Set(['infra://keystore']) },
     )
     expect(plan.warnings).toEqual([
       'core://notes/router 看起来是凭据，没有用 --secret 标记',
       'infra://nas 的正文里像有密码或 Token，没有用 --secret 标记',
-      'infra://vault 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文',
+      'infra://keystore 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文',
     ])
   })
 
@@ -162,10 +162,10 @@ describe('Lore 导入计划', () => {
   it('标成 secret 的导入为 secret（也可以写别名），对不上的 --secret 是错误；像凭据却没标的给出提醒', () => {
     const plan = planImport(
       snapshot(
-        node('infra://home_network/credentials', { aliases: ['infra://router/credentials'] }),
-        node('infra://vault/token'),
-        node('infra://pve', { content: 'root 密码：hunter2' }),
-        node('infra://notes', { content: '密码要同步到 Vaultwarden' }),
+        node('infra://office_network/credentials', { aliases: ['infra://router/credentials'] }),
+        node('infra://keystore/token'),
+        node('infra://hypervisor', { content: 'root 密码：hunter2' }),
+        node('infra://notes', { content: '密码要同步到密码库' }),
       ),
       [],
       { ...options, secretUris: new Set(['infra://router/credentials', 'infra://nope']) },
@@ -178,8 +178,8 @@ describe('Lore 导入计划', () => {
     ])
     expect(plan.errors).toEqual(['--secret 指定的 infra://nope 在 Lore 里不存在'])
     expect(plan.warnings).toEqual([
-      'infra://vault/token 看起来是凭据，没有用 --secret 标记',
-      'infra://pve 的正文里像有密码或 Token，没有用 --secret 标记',
+      'infra://keystore/token 看起来是凭据，没有用 --secret 标记',
+      'infra://hypervisor 的正文里像有密码或 Token，没有用 --secret 标记',
     ])
   })
 

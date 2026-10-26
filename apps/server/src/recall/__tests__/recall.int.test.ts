@@ -67,8 +67,8 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     await create({ uri: 'persona://doubao/soul', content: '直接、有观点、爱用 emoji', priority: 0 })
     await create({
       uri: 'infra://router',
-      content: '家里的主路由器是 RB5009，跑 RouterOS，负责 DHCP 和防火墙',
-      glossary: ['RB5009', '路由器'],
+      content: '办公室的主路由器是 XR500，跑开源固件，负责 DHCP 和防火墙',
+      glossary: ['XR500', '路由器'],
       priority: 1,
     })
     await create({
@@ -79,7 +79,7 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     })
     await create({
       uri: 'home://wifi',
-      content: 'RB5009 管理密码 hunter2',
+      content: 'XR500 管理密码 hunter2',
       sensitivity: 'secret',
       priority: 0,
     })
@@ -88,11 +88,11 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
 
   it('三路召回都能命中，结果按分数排序且不含 secret', async () => {
     await seed()
-    const res = await post('/recall', { query: '路由器 RB5009 的防火墙怎么配置', limit: 5 })
+    const res = await post('/recall', { query: '路由器 XR500 的防火墙怎么配置', limit: 5 })
     const { candidates } = (await res.json()) as RecallResponse
     expect(candidates[0]!.uri).toBe('infra://router')
     expect(candidates[0]!.via.sort()).toEqual(['fulltext', 'glossary', 'semantic'])
-    expect(candidates[0]!.cues).toEqual(['RB5009', '路由器'])
+    expect(candidates[0]!.cues).toEqual(['XR500', '路由器'])
     expect(candidates.map((c) => c.uri)).not.toContain('home://wifi')
     const scores = candidates.map((c) => c.score)
     expect([...scores].sort((a, b) => b - a)).toEqual(scores)
@@ -120,9 +120,9 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
       { appId, ownerAccountId: ws.accountId },
       { chatType: 'group', groupSubjectId: 'g1' },
     )
-    const semantic = await embedQuery(embedder, '路由器 RB5009')
+    const semantic = await embedQuery(embedder, '路由器 XR500')
     const candidates = await withSpace(database.db, ws.spaceId, (tx) =>
-      recall(tx, access, semantic, '路由器 RB5009', {
+      recall(tx, access, semantic, '路由器 XR500', {
         limit: 10,
         personaIds: [personaId],
         minScore: 0,
@@ -282,13 +282,13 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     const prompt = (await (
       await post('/lifecycle/event', {
         event: 'prompt.submit',
-        prompt: 'RB5009 路由器',
+        prompt: 'XR500 路由器',
         sessionId: 's1',
       })
     ).json()) as LifecycleResponse
     expect(prompt.hostOutput.mode).toBe('stdout_text')
     expect(prompt.hostOutput.value).toMatch(
-      /^<recall session_id="s1">\n[\d.]+ \| infra:\/\/router \| RB5009 · 路由器/,
+      /^<recall session_id="s1">\n[\d.]+ \| infra:\/\/router \| XR500 · 路由器/,
     )
     expect(prompt.nodeUris[0]).toBe('infra://router')
   })
@@ -405,7 +405,7 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     const started = Date.now()
     const res = await stuck.request(
       '/v1/lifecycle/event',
-      jsonRequest('POST', { event: 'prompt.submit', prompt: 'RB5009 路由器' }, bearer(key)),
+      jsonRequest('POST', { event: 'prompt.submit', prompt: 'XR500 路由器' }, bearer(key)),
     )
     const body = (await res.json()) as LifecycleResponse
     expect(Date.now() - started).toBeLessThan(4_000)
