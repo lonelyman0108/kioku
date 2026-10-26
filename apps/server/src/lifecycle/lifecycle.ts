@@ -1,8 +1,29 @@
-import type { HostOutput, LifecycleEvent, LifecycleResponse } from '@kioku/contracts'
+import type {
+  HostOutput,
+  LifecycleEvent,
+  LifecycleProject,
+  LifecycleResponse,
+} from '@kioku/contracts'
 
-import { formatBootBlock } from '../recall/boot'
+import { formatBootBlock, formatRecentBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
 import type { RecallScope } from './scope'
+
+const RECENT_LIMIT = 5
+const PROJECT_RECALL_LIMIT = 5
+
+// 目录名与仓库名去重后拼成一句查询，用来召回与当前项目相关的记忆
+function projectQuery(project: LifecycleProject | undefined): string {
+  const seen = new Set<string>()
+  const parts: string[] = []
+  for (const value of [project?.dirName, project?.repoName]) {
+    const text = value?.trim()
+    if (!text || seen.has(text.toLowerCase())) continue
+    seen.add(text.toLowerCase())
+    parts.push(text)
+  }
+  return parts.join(' ')
+}
 
 // 服务端下发的使用指引：插件里不放任何提示词，服务端改了指引所有接入方立即生效
 export const GUIDANCE = [
@@ -45,10 +66,26 @@ export async function handleLifecycle(
   input: LifecycleEvent,
 ): Promise<LifecycleResponse> {
   if (input.event === 'session.start') {
-    const result = await scope.boot()
+    const query = projectQuery(input.project)
+    const [result, recent, related] = await Promise.all([
+      scope.boot(),
+      scope.recent(RECENT_LIMIT),
+      query ? scope.recall(query, { limit: PROJECT_RECALL_LIMIT }) : Promise.resolve([]),
+    ])
+    // 已经在 boot 里展开的节点不再重复列出
+    const booted = new Set(result.entries.map((e) => e.uri))
+    const relatedNew = related.filter((c) => !booted.has(c.uri))
+    const relatedBlock = formatRecallBlock(relatedNew, input.sessionId)
+    const context = [
+      formatBootBlock(result, GUIDANCE),
+      formatRecentBlock(recent.filter((m) => !booted.has(m.uri))),
+      relatedBlock && `与当前项目相关的记忆，需要时用 kioku_get 读取：\n${relatedBlock}`,
+    ]
+      .filter(Boolean)
+      .join('\n\n')
     return {
-      hostOutput: hostOutput(runtimeFamily, input.event, formatBootBlock(result, GUIDANCE)),
-      nodeUris: result.entries.map((e) => e.uri),
+      hostOutput: hostOutput(runtimeFamily, input.event, context),
+      nodeUris: [...booted, ...relatedNew.map((c) => c.uri)],
     }
   }
 

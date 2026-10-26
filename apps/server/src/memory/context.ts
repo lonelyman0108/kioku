@@ -2,7 +2,7 @@ import { resolveAccess, type Access, type SessionContext } from '../access/acces
 import type { Tx } from '../db/client'
 import type { Deps, KeyPrincipal } from '../http/env'
 import type { RecallScope } from '../lifecycle/scope'
-import { boot } from '../recall/boot'
+import { boot, recentMemories } from '../recall/boot'
 import { embedQuery, normalizeQuery, recall } from '../recall/recall'
 import { runInSpace } from './personas'
 import { MemoryService } from './service'
@@ -61,5 +61,6 @@ export function recallScopeForKey(
       )
     },
     boot: () => run((tx, personaIds) => boot(tx, access, personaIds)),
+    recent: (limit) => run((tx, personaIds) => recentMemories(tx, access, personaIds, limit)),
   }
 }
