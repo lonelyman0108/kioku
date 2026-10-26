@@ -1,6 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import { Keyword, Layer, MemoryUri, RecallRequest, Sensitivity } from '@kioku/contracts'
+import {
+  Keyword,
+  Layer,
+  MemoryUri,
+  RecallRequest,
+  RemovableKeyword,
+  Sensitivity,
+} from '@kioku/contracts'
 import { z } from 'zod'
 
 import type { RecallScope } from '../lifecycle/scope'
@@ -124,7 +131,7 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         priority: z.number().int().min(0).max(99).optional(),
         sensitivity: Sensitivity.optional(),
         glossary_add: z.array(Keyword).optional(),
-        glossary_remove: z.array(z.string().trim().min(1).max(64)).optional(),
+        glossary_remove: z.array(RemovableKeyword).optional(),
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
       },
     },

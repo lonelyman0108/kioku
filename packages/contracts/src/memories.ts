@@ -13,6 +13,8 @@ export const DomainOrUri = z.string().min(1)
 
 // 至少两个字：召回按子串匹配关键词，单字几乎会命中所有提示语
 export const Keyword = z.string().trim().min(2, '关键词至少两个字').max(64)
+// 删除不限最短长度：要能清掉规则收紧之前写入的单字关键词
+export const RemovableKeyword = z.string().trim().min(1).max(64)
 
 export const MemoryView = z.object({
   id: z.uuid(),
@@ -66,8 +68,7 @@ export const UpdateMemoryRequest = z.object({
   priority: z.number().int().min(0).max(99).optional(),
   disclosure: z.string().max(500).nullable().optional(),
   glossaryAdd: z.array(Keyword).max(32).optional(),
-  // 删除不限最短长度：要能清掉规则收紧之前写入的单字关键词
-  glossaryRemove: z.array(z.string().trim().min(1).max(64)).max(32).optional(),
+  glossaryRemove: z.array(RemovableKeyword).max(32).optional(),
 })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>
 
