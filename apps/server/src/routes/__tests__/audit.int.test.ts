@@ -56,7 +56,12 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
   const keyAs = async (cookie: string, appId: string) =>
     app.request(
       `/v1/spaces/${ws.spaceId}/apps/${appId}/keys`,
-      jsonRequest('POST', { name: 'k', scopes: FULL_SCOPES }, { cookie }),
+      // editor 能签发的最高敏感级是 private
+      jsonRequest(
+        'POST',
+        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private' } },
+        { cookie },
+      ),
     )
   const create = (key: string, body: Record<string, unknown>) =>
     app.request('/v1/memories', jsonRequest('POST', body, bearer(key)))

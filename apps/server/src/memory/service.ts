@@ -516,7 +516,8 @@ export class MemoryService {
       const parent = parsed ? await this.findReadableOrNull(tx, parsed, personaIds) : null
       const prefix = parsed ? `${parsed.path}/` : ''
       // 在 SQL 里按下一级路径聚合：每一级一行，带上这一级本身的记忆（如果有）和它下面可见的下一级数量
-      const rest = sql`substr(${memories.path}, ${prefix.length + 1})`
+      // 前缀长度直接写进 SQL（整数，由我们自己算出），这样各处的 split_part 是同一个表达式，才能按它分组
+      const rest = sql`substr(${memories.path}, ${sql.raw(String(prefix.length + 1))})`
       const segment = sql<string>`split_part(${rest}, '/', 1)`
       const next = sql`split_part(${rest}, '/', 2)`
       const own = <T>(column: unknown) =>
@@ -540,8 +541,8 @@ export class MemoryService {
             prefix ? like(memories.path, `${escapeLike(prefix)}%`) : undefined,
           ),
         )
-        .groupBy(segment)
-        .orderBy(segment)
+        .groupBy(sql`1`)
+        .orderBy(sql`1`)
         .limit(CHILDREN_LEVEL_LIMIT)
       const children: MemorySummary[] = levels.map((level) => ({
         uri: formatUri(domain, `${prefix}${level.segment}`),
