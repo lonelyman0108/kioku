@@ -41,7 +41,7 @@ export function requireKey(deps: Deps) {
     // 应用与主人当前的角色一次查出来
     const [found] = await withSpace(deps.db, key.spaceId, (tx) =>
       tx
-        .select({ app: apps, ownerRole: spaceMembers.role })
+        .select({ app: apps, ownerRole: spaceMembers.role, memberSince: spaceMembers.createdAt })
         .from(apps)
         .leftJoin(
           spaceMembers,
@@ -55,6 +55,8 @@ export function requireKey(deps: Deps) {
     )
     // Key 的权限按应用主人计算：主人已经不在空间里，Key 作废；主人被降级，Key 的上限随之收紧
     if (!found?.ownerRole) return c.json(unauthorized, 401)
+    // 主人离开空间后又被重新加入：离开之前签发的 Key 不随之恢复
+    if (found.memberSince && key.createdAt < found.memberSince) return c.json(unauthorized, 401)
     const { app, ownerRole } = found
 
     // 最后使用时间只用于界面展示，失败不影响本次请求
