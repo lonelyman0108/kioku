@@ -15,7 +15,7 @@ RUN set -eux; \
     cd "/tmp/scws-${SCWS_VERSION}"; ./configure; make -j"$(nproc)"; make install; ldconfig; \
     curl -fsSL -o /tmp/zhparser.tar.gz "https://github.com/amutu/zhparser/archive/${ZHPARSER_COMMIT}.tar.gz"; \
     tar -xzf /tmp/zhparser.tar.gz -C /tmp; \
-    cd "/tmp/zhparser-${ZHPARSER_COMMIT}"; make -j"$(nproc)"; make install; \
+    cd "/tmp/zhparser-${ZHPARSER_COMMIT}"; make -j"$(nproc)" SCWS_HOME=/usr/local; make install SCWS_HOME=/usr/local; \
     apt-get purge -y --auto-remove build-essential postgresql-server-dev-16 curl bzip2; \
     rm -rf /var/lib/apt/lists/* /tmp/scws* /tmp/zhparser*
 
