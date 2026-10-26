@@ -385,7 +385,7 @@ export interface ImportResult {
   created: string[]
   // 之前导入过的（之后在 Kioku 里删除或移动了的也算），不再重复写入
   previouslyImported: string[]
-  // 这次要求 secret、但之前已经按明文导入过的：--secret 对它们不起作用，要在管理界面改
+  // 这次要求 secret、但之前导入过而且现在还是明文的：--secret 对它们不起作用，要在管理界面改
   secretAlreadyImported: string[]
   // URI 已被不是导入产生的记忆占用
   occupied: string[]
@@ -468,15 +468,15 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     }
   })
 
-  // 导入过的节点：去重键 → 当时是不是按 secret 导入的。
+  // 导入过的节点：去重键 → 对应的记忆现在的状态（是不是 secret，或者已经删除）。
   // 早期的导入事件没有记 targetPersona，人格从事件对应的记忆上补出来，去重键才与现在的一致
   const imported = await withSpace(db, spaceId, (tx) =>
     tx
       .select({
         context: memoryEvents.context,
-        after: memoryEvents.after,
         layer: memories.layer,
         sensitivity: memories.sensitivity,
+        deletedAt: memories.deletedAt,
         persona: personas.slug,
       })
       .from(memoryEvents)
@@ -486,16 +486,17 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
         and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
       ),
   )
-  const done = new Map<string, boolean>()
+  const done = new Map<string, 'secret' | 'plain' | 'deleted'>()
   for (const e of imported) {
     const context = e.context as ImportKeyParts
     const parts =
       context.targetPersona === undefined && e.layer === 'persona'
         ? { ...context, targetPersona: e.persona }
         : context
-    // 看记忆现在的敏感级：导入后在管理界面改成了 secret 的，也算已经是 secret
-    const sensitivity = e.sensitivity ?? (e.after as { sensitivity?: string } | null)?.sensitivity
-    done.set(importKeyOf(parts), sensitivity === 'secret')
+    // 看记忆现在的状态：导入后在管理界面改成了 secret 的，也算已经是 secret。
+    // 记忆被软删除，或整行已经不在（例如删除账号时级联删掉，事件的 memory_id 被置空，联表取不到），都算已经删除
+    const gone = e.deletedAt !== null || e.sensitivity === null
+    done.set(importKeyOf(parts), gone ? 'deleted' : e.sensitivity === 'secret' ? 'secret' : 'plain')
   }
 
   // 按空间 owner 的管理界面权限写入，来源记为 system
@@ -515,8 +516,8 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     }
     if (done.has(item.importKey)) {
       result.previouslyImported.push(item.request.uri)
-      // 只有当时按明文导入、这次要求 secret 的才提醒；当时已经是 secret 的照常跳过
-      if (item.request.sensitivity === 'secret' && !done.get(item.importKey)) {
+      // 这次要求 secret、对应的记忆现在却是明文的才提醒；已经是 secret 或已经删除的照常跳过
+      if (item.request.sensitivity === 'secret' && done.get(item.importKey) === 'plain') {
         result.secretAlreadyImported.push(item.request.uri)
       }
       continue

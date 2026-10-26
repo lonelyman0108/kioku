@@ -215,7 +215,7 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
   for (const uri of result.occupied) console.log(`  跳过 ${uri}：URI 已被别的记忆占用`)
   for (const uri of result.secretAlreadyImported) {
     console.log(
-      `  注意 ${uri}：之前已经按明文导入过，这次的 --secret 没有生效。请在管理界面把它改成 secret（会同时清除历史里的明文）`,
+      `  注意 ${uri}：之前导入过，现在还是明文，这次的 --secret 没有生效。请在管理界面把它改成 secret（会同时清除历史里的明文）`,
     )
   }
   for (const f of result.failed) console.log(`  失败 ${f.uri}：${f.reason}`)
