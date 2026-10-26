@@ -9,13 +9,14 @@ export type Tx = Parameters<Parameters<Db['transaction']>[0]>[0]
 
 export interface Database {
   db: Db
+  client: postgres.Sql
   close: () => Promise<void>
 }
 
 export function connect(url: string, options: { max?: number } = {}): Database {
   const client = postgres(url, { max: options.max ?? 10, onnotice: () => {} })
   const db = drizzle(client, { schema, casing: 'snake_case' })
-  return { db, close: () => client.end() }
+  return { db, client, close: () => client.end() }
 }
 
 // 内容表只能在这里面访问：事务内声明当前空间，RLS 据此过滤；事务结束后设置自动失效，不会串到连接池里的下一个请求

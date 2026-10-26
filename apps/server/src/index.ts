@@ -8,7 +8,7 @@ import { runMigrations } from './db/migrate'
 const config = loadConfig()
 const database = connect(config.databaseUrl)
 await assertRuntimeRole(database.db)
-await runMigrations(database.db, config.migrationsFolder)
+await runMigrations(database, config.migrationsFolder)
 
 const app = createApp({ db: database.db, cookieSecure: config.cookieSecure })
 

@@ -14,7 +14,7 @@ const migrationsFolder = fileURLToPath(new URL('../../migrations', import.meta.u
 
 export async function openTestDatabase(): Promise<Database> {
   const database = connect(testDatabaseUrl!, { max: 2 })
-  await runMigrations(database.db, migrationsFolder)
+  await runMigrations(database, migrationsFolder)
   return database
 }
 
