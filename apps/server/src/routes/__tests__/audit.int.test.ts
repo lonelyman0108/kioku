@@ -166,7 +166,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
   })
 
   it('并发登录也只放行 5 次尝试', async () => {
-    // 分不清客户端时（这里没有底层连接），失败计数只按用户名，并发请求也只放行 5 次
+    // 分不清客户端时（这里没有底层连接），这些请求共用「未知客户端」计数，并发请求也只放行 5 次
     const results = await Promise.all(
       Array.from({ length: 20 }, () =>
         app.request(
@@ -631,6 +631,58 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     expect(owner.status).toBe(200)
   })
 
+  it('合计超限期间在同一地址多试几次，同一网络里带设备 Cookie 的设备照样能登录', async () => {
+    const proxied = proxiedApp()
+    const first = await loginFrom(proxied, '203.0.113.200', 'correct horse battery')
+    const device = first.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('kioku_device='))!
+      .split(';')[0]!
+    for (let ip = 1; ip <= 11; ip++) {
+      for (let i = 0; i < 5; i++) await loginFrom(proxied, `198.51.100.${ip}`, 'wrong')
+    }
+    // 主人在家里另一个没有设备 Cookie 的浏览器上试了 6 次，都被合计挡下，没有校验密码
+    for (let i = 0; i < 6; i++) {
+      expect((await loginFrom(proxied, '203.0.113.200', 'correct horse battery')).status).toBe(429)
+    }
+    const owner = await proxied.request(
+      '/v1/auth/login',
+      jsonRequest(
+        'POST',
+        { username: 'alice', password: 'correct horse battery' },
+        { 'x-forwarded-for': '203.0.113.200', cookie: device },
+      ),
+    )
+    expect(owner.status).toBe(200)
+  })
+
+  it('合计超限期间同一地址并发重试，也不会占满本客户端的额度', async () => {
+    const proxied = proxiedApp()
+    const first = await loginFrom(proxied, '203.0.113.200', 'correct horse battery')
+    const device = first.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('kioku_device='))!
+      .split(';')[0]!
+    for (let ip = 1; ip <= 11; ip++) {
+      for (let i = 0; i < 5; i++) await loginFrom(proxied, `198.51.100.${ip}`, 'wrong')
+    }
+    const burst = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        loginFrom(proxied, '203.0.113.200', 'correct horse battery'),
+      ),
+    )
+    expect(burst.every((r) => r.status === 429)).toBe(true)
+    const owner = await proxied.request(
+      '/v1/auth/login',
+      jsonRequest(
+        'POST',
+        { username: 'alice', password: 'correct horse battery' },
+        { 'x-forwarded-for': '203.0.113.200', cookie: device },
+      ),
+    )
+    expect(owner.status).toBe(200)
+  })
+
   it('伪造的设备 Cookie 不起作用', async () => {
     const proxied = proxiedApp()
     for (let ip = 1; ip <= 11; ip++) {
@@ -687,15 +739,53 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     expect(res.status).toBe(429)
   })
 
-  it('主人登录成功不会重置「用户名合计」计数', async () => {
+  it('主人登录成功不清掉「用户名合计」里别人的失败，也不把这次成功算进去', async () => {
     const proxied = proxiedApp()
     for (let i = 0; i < 4; i++) await loginFrom(proxied, '198.51.100.1', 'wrong')
     expect((await loginFrom(proxied, '203.0.113.10', 'correct horse battery')).status).toBe(200)
     const [total] = await database.db
       .select()
       .from(loginAttempts)
-      .where(eq(loginAttempts.username, 'u:alice'))
-    expect(total?.count).toBe(5)
+      .where(eq(loginAttempts.username, JSON.stringify(['alice'])))
+    expect(total?.count).toBe(4)
+  })
+
+  it('用户名里带分隔符或引号，也拼不出别人的计数键', async () => {
+    const proxied = proxiedApp()
+    for (const username of ['alice|c:203.0.113.10', 'alice","203.0.113.10']) {
+      for (let ip = 1; ip <= 6; ip++) {
+        await proxied.request(
+          '/v1/auth/login',
+          jsonRequest(
+            'POST',
+            { username, password: 'wrong' },
+            { 'x-forwarded-for': `198.51.100.${ip}` },
+          ),
+        )
+      }
+    }
+    expect((await loginFrom(proxied, '203.0.113.10', 'correct horse battery')).status).toBe(200)
+  })
+
+  it('同一来源并发登录时，账号存在与否，被拒的表现一样', async () => {
+    const proxied = proxiedApp()
+    const burst = async (username: string) => {
+      const responses = await Promise.all(
+        Array.from({ length: 3 }, () =>
+          proxied.request(
+            '/v1/auth/login',
+            jsonRequest(
+              'POST',
+              { username, password: 'wrong' },
+              { 'x-forwarded-for': '203.0.113.77' },
+            ),
+          ),
+        ),
+      )
+      return responses.map((r) => r.status).sort()
+    }
+    expect(await burst('alice')).toEqual([401, 401, 429])
+    expect(await burst('nobody')).toEqual([401, 401, 429])
   })
 
   it('用户名不存在时同样计数，超限后同样返回 429', async () => {
