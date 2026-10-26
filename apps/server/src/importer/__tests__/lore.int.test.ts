@@ -128,6 +128,39 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       { db: database.db, spaceId: ws.spaceId, accountId: ws.accountId, masterKey },
       await plan(persona, secretUris),
     )
+  // 与 applyImport 相同的写入身份，用来模拟旧版本写下的导入事件
+  const importService = () =>
+    new MemoryService({
+      db: database.db,
+      spaceId: ws.spaceId,
+      access: { ...consoleAccess('owner', ws.accountId), writeProvenance: 'system' },
+      personaId: 'all',
+      masterKey,
+      actor: { accountId: ws.accountId },
+    })
+  // 去掉导入事件里的 targetPersona，模拟早期版本写下的事件
+  const dropTargetPersona = () =>
+    withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memoryEvents)
+        .set({ context: sql`${memoryEvents.context} - 'targetPersona'` })
+        .where(eq(memoryEvents.eventType, 'import')),
+    )
+  // 旧版本去重不上时，把人格设定按现在的格式再导入一条
+  const reimportSoul = async () => {
+    const soul = (await plan('default', [])).memories.find((m) => m.source === 'core://soul')!
+    await importService().create(soul.request, { eventType: 'import', eventContext: soul.context })
+  }
+  const remove = (uri: string) =>
+    app.request(`/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent(uri)}`, {
+      method: 'DELETE',
+      headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+    })
+  const move = (from: string, to: string) =>
+    app.request(
+      `/v1/spaces/${ws.spaceId}/memories/move`,
+      jsonRequest('POST', { from, to }, { cookie: ws.cookie }),
+    )
 
   it('读出节点、当前正文、旧版本数、关键词与召回事件数', async () => {
     const snapshot = await readLore(lore)
@@ -254,7 +287,18 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
   it('之前按明文导入过的节点，这次加 --secret 不会悄悄跳过', async () => {
     await run('default', [])
     const again = await run('default', ['infra://home_network/credentials'])
-    expect(again.secretAlreadyImported).toEqual(['infra://home_network/credentials'])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'infra://home_network/credentials', current: 'infra://home_network/credentials' },
+    ])
+  })
+
+  it('按明文导入后移动过的节点，提醒里给出它现在的 URI', async () => {
+    await run('default', [])
+    expect((await move('infra://home_network/credentials', 'infra://creds')).status).toBe(200)
+    const again = await run('default', ['infra://home_network/credentials'])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'infra://home_network/credentials', current: 'infra://creds' },
+    ])
   })
 
   it('已经按 secret 导入过的节点，再带 --secret 执行时不误报', async () => {
@@ -279,10 +323,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
   it('按明文导入后删掉了的节点，再带 --secret 执行时不提醒', async () => {
     await run('default', [])
-    await app.request(
-      `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('infra://home_network/credentials')}`,
-      { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
-    )
+    expect((await remove('infra://home_network/credentials')).status).toBe(204)
     const again = await run('default', ['infra://home_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([])
     expect(again.previouslyImported).toContain('infra://home_network/credentials')
@@ -303,33 +344,69 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
   it('早期没有记人格的导入事件也能去重：删掉的人格设定不会被写回', async () => {
     await run()
-    // 模拟早期版本写下的导入事件：context 里没有 targetPersona
+    await dropTargetPersona()
+    expect((await remove('persona://default/soul')).status).toBe(204)
+    const again = await run()
+    expect(again.created).toEqual([])
+    expect(again.previouslyImported).toContain('persona://default/soul')
+  })
+
+  it('早期没有记人格的导入事件，对应的记忆整行不在了也能去重', async () => {
+    await run()
+    await dropTargetPersona()
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
-        .update(memoryEvents)
-        .set({ context: sql`${memoryEvents.context} - 'targetPersona'` })
-        .where(eq(memoryEvents.eventType, 'import')),
-    )
-    await app.request(
-      `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('persona://default/soul')}`,
-      { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
+        .delete(memories)
+        .where(and(eq(memories.domain, 'persona'), eq(memories.path, 'default/soul'))),
     )
     const again = await run()
     expect(again.created).toEqual([])
     expect(again.previouslyImported).toContain('persona://default/soul')
   })
 
+  it('同一个节点导入过多条时，较早的一条还是明文就提醒，不被后一条的删除盖住', async () => {
+    await run('default', [])
+    await dropTargetPersona()
+    expect((await move('persona://default/soul', 'persona://default/soul_old')).status).toBe(200)
+    await reimportSoul()
+    expect((await remove('persona://default/soul')).status).toBe(204)
+    const again = await run('default', ['core://soul'])
+    expect(again.created).toEqual([])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'persona://default/soul', current: 'persona://default/soul_old' },
+    ])
+  })
+
+  it('同一个节点导入过多条时，较晚的一条还是明文就提醒，不被前一条的删除盖住', async () => {
+    await run('default', [])
+    await dropTargetPersona()
+    expect((await remove('persona://default/soul')).status).toBe(204)
+    await reimportSoul()
+    const again = await run('default', ['core://soul'])
+    expect(again.created).toEqual([])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'persona://default/soul', current: 'persona://default/soul' },
+    ])
+  })
+
+  it('同一个节点导入过多条、都还是明文时，每条都提醒，跳过只记一次', async () => {
+    await run('default', [])
+    await dropTargetPersona()
+    expect((await move('persona://default/soul', 'persona://default/soul_old')).status).toBe(200)
+    await reimportSoul()
+    const again = await run('default', ['core://soul'])
+    expect(again.created).toEqual([])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'persona://default/soul', current: 'persona://default/soul_old' },
+      { uri: 'persona://default/soul', current: 'persona://default/soul' },
+    ])
+    expect(again.previouslyImported.filter((u) => u === 'persona://default/soul')).toHaveLength(1)
+  })
+
   it('写入时应用已经不属于导入者，就不写进去', async () => {
     const claude = await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    const service = new MemoryService({
-      db: database.db,
-      spaceId: ws.spaceId,
-      access: { ...consoleAccess('owner', ws.accountId), writeProvenance: 'system' },
-      personaId: 'all',
-      masterKey,
-      actor: { accountId: ws.accountId },
-    })
+    const service = importService()
     // 计划时应用还是自己的，写入前被转给了 bob
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx.update(apps).set({ ownerAccountId: bob.accountId }).where(eq(apps.id, claude.id)),

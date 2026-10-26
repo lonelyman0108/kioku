@@ -385,8 +385,9 @@ export interface ImportResult {
   created: string[]
   // 之前导入过的（之后在 Kioku 里删除或移动了的也算），不再重复写入
   previouslyImported: string[]
-  // 这次要求 secret、但之前导入过而且现在还是明文的：--secret 对它们不起作用，要在管理界面改
-  secretAlreadyImported: string[]
+  // 这次要求 secret、但之前导入过而且现在还是明文的：--secret 对它们不起作用，要在管理界面改。
+  // current 是记忆现在的 URI，导入后移动过的与 uri 不同；同一个节点导入过多条的，每条明文各占一项
+  secretAlreadyImported: { uri: string; current: string }[]
   // URI 已被不是导入产生的记忆占用
   occupied: string[]
   failed: { uri: string; reason: string }[]
@@ -468,35 +469,46 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     }
   })
 
-  // 导入过的节点：去重键 → 对应的记忆现在的状态（是不是 secret，或者已经删除）。
-  // 早期的导入事件没有记 targetPersona，人格从事件对应的记忆上补出来，去重键才与现在的一致
+  // 导入过的节点：去重键 → 每条导入事件对应的记忆现在的状态（是不是 secret，或者已经删除）与现在的 URI。
+  // 早期版本去重不上时会把同一个节点再写一条，所以一个键可能对应多条记忆。
+  // 早期的导入事件没有记 targetPersona：人格层的从导入时的快照补出来（当时 URI 的第一段就是人格），
+  // 记忆后来删掉了也补得出，去重键才与现在的一致
   const imported = await withSpace(db, spaceId, (tx) =>
     tx
       .select({
         context: memoryEvents.context,
-        layer: memories.layer,
+        importedDomain: sql<string | null>`${memoryEvents.after}->>'domain'`,
+        importedPath: sql<string | null>`${memoryEvents.after}->>'path'`,
         sensitivity: memories.sensitivity,
         deletedAt: memories.deletedAt,
-        persona: personas.slug,
+        domain: memories.domain,
+        path: memories.path,
       })
       .from(memoryEvents)
       .leftJoin(memories, eq(memories.id, memoryEvents.memoryId))
-      .leftJoin(personas, eq(personas.id, memories.personaId))
       .where(
         and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
-      ),
+      )
+      .orderBy(memoryEvents.id),
   )
-  const done = new Map<string, 'secret' | 'plain' | 'deleted'>()
+  const done = new Map<string, { state: 'secret' | 'plain' | 'deleted'; uri: string | null }[]>()
   for (const e of imported) {
     const context = e.context as ImportKeyParts
     const parts =
-      context.targetPersona === undefined && e.layer === 'persona'
-        ? { ...context, targetPersona: e.persona }
+      context.targetPersona === undefined && e.importedDomain === PERSONA_DOMAIN
+        ? { ...context, targetPersona: e.importedPath?.split('/')[0] }
         : context
     // 看记忆现在的状态：导入后在管理界面改成了 secret 的，也算已经是 secret。
     // 记忆被软删除，或整行已经不在（例如删除账号时级联删掉，事件的 memory_id 被置空，联表取不到），都算已经删除
     const gone = e.deletedAt !== null || e.sensitivity === null
-    done.set(importKeyOf(parts), gone ? 'deleted' : e.sensitivity === 'secret' ? 'secret' : 'plain')
+    const key = importKeyOf(parts)
+    done.set(key, [
+      ...(done.get(key) ?? []),
+      {
+        state: gone ? 'deleted' : e.sensitivity === 'secret' ? 'secret' : 'plain',
+        uri: !gone && e.domain && e.path ? formatUri(e.domain, e.path) : null,
+      },
+    ])
   }
 
   // 按空间 owner 的管理界面权限写入，来源记为 system
@@ -514,11 +526,19 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
       result.failed.push({ uri: item.request.uri, reason: `应用 ${app} 不属于导入者，没有写入` })
       continue
     }
-    if (done.has(item.importKey)) {
+    const found = done.get(item.importKey)
+    if (found) {
       result.previouslyImported.push(item.request.uri)
-      // 这次要求 secret、对应的记忆现在却是明文的才提醒；已经是 secret 或已经删除的照常跳过
-      if (item.request.sensitivity === 'secret' && done.get(item.importKey) === 'plain') {
-        result.secretAlreadyImported.push(item.request.uri)
+      // 这次要求 secret、对应的记忆现在却是明文的才提醒；已经是 secret 或已经删除的照常跳过。
+      // 一个键对应多条时每条明文都提醒，不看先后；导入后移动过的，旧 URI 上可能已经是别的记忆，提醒里要给出它现在的位置
+      if (item.request.sensitivity === 'secret') {
+        for (const f of found) {
+          if (f.state !== 'plain') continue
+          result.secretAlreadyImported.push({
+            uri: item.request.uri,
+            current: f.uri ?? item.request.uri,
+          })
+        }
       }
       continue
     }
