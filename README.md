@@ -35,13 +35,53 @@ pnpm dev                  # 后端 http://localhost:18920，管理界面 http://
 
 ## 部署或安装
 
-<!-- 镜像、compose 示例、升级与回滚 -->
+服务端镜像同时托管管理界面，加上带 pgvector 与中文分词的 PostgreSQL，一共两个容器。在仓库根目录：
+
+```bash
+cp .env.example .env      # 按注释生成密码与主密钥
+docker compose -f docker-compose.example.yml up -d --build
+```
+
+启动前在 `.env` 里定下 `KIOKU_COOKIE_SECURE`：经 HTTPS 访问时保持 `true`；只在局域网用 `http://` 地址访问时改成 `false`，否则浏览器不保存登录 Cookie，登录后会一直回到登录页（`http://localhost` 例外，浏览器把它当安全地址）。
+
+打开 `http://<主机>:18920`，首次进入初始化页，建第一个账号和空间。之后在「应用与 Key」里为每个接入方建应用、签发 Key：
+
+- MCP：`http://<主机>:18920/v1/mcp`（Streamable HTTP，`Authorization: Bearer <Key>`）
+- 生命周期钩子：`POST /v1/lifecycle/event`；其他接口见 `/v1/openapi.json`
+
+**HTTPS 与反向代理**：对外提供服务时在前面加 HTTPS 反向代理，`KIOKU_COOKIE_SECURE` 保持 `true`，`KIOKU_TRUSTED_PROXIES` 设为代理层数（一层就是 `1`），登录限流才能拿到真实的客户端地址。同时在 `.env` 里设 `KIOKU_BIND=127.0.0.1`，端口只给本机的代理访问：否则别人可以绕过代理直连，自己填 `X-Forwarded-For`。是否发 HSTS 由代理决定，服务本身不发。
+
+**备份**：数据都在数据库里，`KIOKU_MASTER_KEY` 另外保存（丢了它，secret 级记忆无法解密）。备份要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。备份文件不要放在仓库目录里，构建镜像时会被带进构建上下文。
+
+```bash
+mkdir -p ~/kioku-backup
+docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F).dump
+```
+
+**升级**：先按上面备份，再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前。
+
+**回滚**：停掉服务，删掉已经迁移到新版本的库再建一个空库，把升级前的备份恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在备份里，会残留下来，下次升级时迁移会因为它们已存在而失败。
+
+```bash
+docker compose -f docker-compose.example.yml stop kioku
+docker compose -f docker-compose.example.yml exec db dropdb -U postgres --force kioku
+docker compose -f docker-compose.example.yml exec db createdb -U postgres -O kioku kioku
+docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/kioku-<日期>.dump
+```
 
 ## 配置项
 
 | 名称 | 默认值 | 说明 |
 |---|---|---|
-| | | |
+| `DATABASE_URL` | 必填 | PostgreSQL 连接串。角色不能是超级用户或带 `BYPASSRLS`，否则拒绝启动 |
+| `KIOKU_MASTER_KEY` | 空 | 32 字节随机数的 base64（`openssl rand -base64 32`）。用来加密 secret 级记忆和嵌入接口的 Key，不设置时这两项不能用 |
+| `KIOKU_COOKIE_SECURE` | `true` | 登录 Cookie 是否只走 HTTPS。浏览器在 localhost 上也接受；用局域网 HTTP 地址访问时设为 `false` |
+| `KIOKU_TRUSTED_PROXIES` | `0` | 前面有几层受信任的反向代理。按层数从 `X-Forwarded-For` 右边取客户端地址；没有代理时保持 `0`，否则地址可以伪造 |
+| `KIOKU_BIND` | `0.0.0.0` | 只用于 compose 示例：端口发布到哪个地址。放在反向代理后面时设为 `127.0.0.1` |
+| `PORT` | `18920` | 监听端口 |
+| `KIOKU_WEB_DIR` | `apps/web/dist` | 管理界面构建产物的目录；目录不存在时只提供 API |
+| `KIOKU_MIGRATIONS_DIR` | `apps/server/migrations` | 数据库迁移目录 |
+| `KIOKU_VERSION` | `dev` | `/v1/health` 显示的版本号 |
 
 ## 文档
 

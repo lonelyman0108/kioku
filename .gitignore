@@ -10,6 +10,8 @@
 *.pem
 *.mobileprovision
 secrets/
+# 数据库备份
+*.dump
 
 # ---- node ----
 node_modules/
