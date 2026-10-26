@@ -8,6 +8,7 @@ export interface Config {
   migrationsFolder: string
   cookieSecure: boolean
   masterKey: Buffer | null
+  trustProxy: boolean
 }
 
 // 迁移目录相对本文件所在目录的上一级解析：src/config.ts 与打包后的 dist/index.mjs 都在 apps/server 下一层
@@ -23,5 +24,6 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cookieSecure: env.KIOKU_COOKIE_SECURE !== 'false',
     // 生成：openssl rand -base64 32。丢失后已有的 secret 无法解密
     masterKey: env.KIOKU_MASTER_KEY ? parseMasterKey(env.KIOKU_MASTER_KEY) : null,
+    trustProxy: env.KIOKU_TRUST_PROXY === 'true',
   }
 }

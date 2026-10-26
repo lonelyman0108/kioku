@@ -6,6 +6,7 @@ import { deleteCookie, setCookie } from 'hono/cookie'
 import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
 import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
+import { clientIp } from '../http/clientIp'
 import { clearAttempts, pruneAttempts, reserveAttempt } from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
@@ -83,7 +84,7 @@ export function authRoutes(deps: Deps) {
       // 先排进校验闸门，再占失败次数名额：因为繁忙被拒的请求没有校验过密码，不该扣次数
       let outcome: 'ok' | 'wrong' | 'locked'
       try {
-        outcome = await withPasswordGate(async () => {
+        outcome = await withPasswordGate(clientIp(c, deps.trustProxy ?? false), async () => {
           if (!(await reserveAttempt(deps.db, username))) return 'locked'
           const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
           return account && ok ? 'ok' : 'wrong'

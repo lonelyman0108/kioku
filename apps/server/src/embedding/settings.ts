@@ -48,6 +48,11 @@ export async function saveEmbeddingConfig(
   const sameOrigin = stored
     ? new URL(stored.baseUrl).origin === new URL(input.baseUrl).origin
     : false
+  // 主机变了又没说怎么处理 Key：明确报错让管理员重填（或填 null 表示新接口不用 Key），
+  // 而不是悄悄清掉，否则之后的向量任务会在后台一直失败
+  if (!sameOrigin && stored?.apiKey && input.apiKey === undefined) {
+    throw new Error('接口主机变了，请重新填写 Key；新接口不需要 Key 时填 null')
+  }
   let apiKey = sameOrigin ? (stored?.apiKey ?? null) : null
   if (input.apiKey === null) apiKey = null
   if (typeof input.apiKey === 'string') {

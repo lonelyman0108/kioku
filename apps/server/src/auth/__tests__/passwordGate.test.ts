@@ -7,8 +7,10 @@ describe('密码校验并发闸门', () => {
     let running = 0
     let peak = 0
     const release: (() => void)[] = []
+    let n = 0
+    // 每个任务来自不同客户端，只测全局并发与排队
     const task = () =>
-      withPasswordGate(async () => {
+      withPasswordGate(`client-${n++}`, async () => {
         running++
         peak = Math.max(peak, running)
         await new Promise<void>((r) => release.push(r))
@@ -23,5 +25,18 @@ describe('密码校验并发闸门', () => {
     }
     await Promise.all(accepted)
     expect(peak).toBe(4)
+  })
+
+  it('同一个客户端同时最多占 2 个名额', async () => {
+    const release: (() => void)[] = []
+    const hold = () =>
+      withPasswordGate('same', () => new Promise<boolean>((r) => release.push(() => r(true))))
+    const a = hold()
+    const b = hold()
+    await expect(hold()).rejects.toBeInstanceOf(PasswordGateBusy)
+    await expect(withPasswordGate('other', async () => true)).resolves.toBe(true)
+    release.forEach((r) => r())
+    await Promise.all([a, b])
+    await expect(withPasswordGate('same', async () => true)).resolves.toBe(true)
   })
 })

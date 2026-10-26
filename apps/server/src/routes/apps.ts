@@ -16,7 +16,7 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { generateApiKey } from '../auth/keys'
 import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
-import { apiKeys, apps, personas } from '../db/schema'
+import { apiKeys, apps, personas, spaceMembers } from '../db/schema'
 import type { Tx } from '../db/client'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -177,14 +177,21 @@ export function appRoutes(deps: Deps) {
         if (role !== 'owner') return c.json({ error: '只有空间 owner 能转移应用' }, 403)
         if (Object.keys(changes).length)
           return c.json({ error: '转移所有权时不能同时修改其他字段' }, 400)
-        if (!(await roleOf(spaceId, ownerAccountId))) {
-          return c.json({ error: '新主人不是该空间成员' }, 400)
-        }
       }
       const rows = await withSpace(deps.db, spaceId, async (tx) => {
         const owner = await appOwnerOf(tx, appId)
         if (!owner) return []
         if (ownerAccountId !== undefined) {
+          // 在同一个事务里锁住新主人的成员记录再检查角色，避免检查之后、转移之前他被移出空间；
+          // 新主人要能管理应用和签发 Key，所以至少是 editor
+          const [member] = await tx
+            .select({ role: spaceMembers.role })
+            .from(spaceMembers)
+            .where(
+              and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, ownerAccountId)),
+            )
+            .for('update')
+          if (member?.role !== 'owner' && member?.role !== 'editor') return 'bad-owner' as const
           // Key 的权限按应用当前主人计算：不吊销的话，前一位主人手里的 Key 会转而读到新主人的私人层
           if (ownerAccountId !== owner) {
             await tx
@@ -206,6 +213,8 @@ export function appRoutes(deps: Deps) {
           .where(eq(apps.id, appId))
           .returning()
       })
+      if (rows === 'bad-owner')
+        return c.json({ error: '新主人必须是空间里的 owner 或 editor' }, 400)
       if (!rows) return c.json({ error: '只有应用的主人能修改它' }, 403)
       if (!rows[0]) return c.json({ error: '应用或默认人格不存在' }, 404)
       return c.json(toAppInfo(rows[0]), 200)

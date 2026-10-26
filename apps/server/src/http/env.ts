@@ -10,6 +10,8 @@ export interface Deps {
   // 没配置时不能读写 secret 级记忆
   masterKey: Buffer | null
   embedder: EmbedderSource
+  // 部署在反向代理后面时为 true，客户端地址取 X-Forwarded-For；默认 false
+  trustProxy?: boolean
   // 没有后台任务时（例如部分测试）写入不触发向量更新
   jobs: Jobs | null
 }

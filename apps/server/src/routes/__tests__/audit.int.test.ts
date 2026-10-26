@@ -137,7 +137,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     expect(((await (await get(key, 'home://ip')).json()) as MemoryView).content).toBe('新地址')
   })
 
-  it('换了嵌入接口的主机，旧 Key 不再沿用', async () => {
+  it('换了嵌入接口的主机必须重新说明 Key 怎么处理', async () => {
     const put = (body: Record<string, unknown>) =>
       app.request('/v1/settings/embedding', jsonRequest('PUT', body, { cookie: ws.cookie }))
     await put({ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-secret' })
@@ -146,19 +146,33 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     ).toMatchObject({
       hasApiKey: true,
     })
+    expect((await put({ baseUrl: 'https://other.example.net/v1', model: 'm' })).status).toBe(400)
     expect(
-      await (await put({ baseUrl: 'https://other.example.net/v1', model: 'm' })).json(),
-    ).toMatchObject({
-      hasApiKey: false,
-    })
+      await (
+        await put({ baseUrl: 'https://other.example.net/v1', model: 'm', apiKey: null })
+      ).json(),
+    ).toMatchObject({ hasApiKey: false })
   })
 
   it('并发登录也只放行 5 次尝试', async () => {
+    // 每个请求来自不同的客户端地址（文档专用网段），避开按客户端的并发上限，只测失败计数本身
+    const proxied = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey,
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+      trustProxy: true,
+    })
     const results = await Promise.all(
-      Array.from({ length: 20 }, () =>
-        app.request(
+      Array.from({ length: 20 }, (_, i) =>
+        proxied.request(
           '/v1/auth/login',
-          jsonRequest('POST', { username: 'alice', password: 'wrong' }),
+          jsonRequest(
+            'POST',
+            { username: 'alice', password: 'wrong' },
+            { 'x-forwarded-for': `203.0.113.${i + 1}` },
+          ),
         ),
       ),
     )
@@ -419,5 +433,37 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     await create(key, { uri: 'kb://aaa', content: 'x', layer: 'base', priority: 2 })
     await create(key, { uri: 'kb://zzz', content: 'x', layer: 'base', priority: 0 })
     expect((await children(key, 'kb')).children.map((c) => c.uri)).toEqual(['kb://zzz', 'kb://aaa'])
+  })
+  it('应用只能转给 owner 或 editor', async () => {
+    const v = await addMember(database.db, ws.spaceId, 'victor', 'viewer')
+    const aApp = (await ws.createApp('a-bot')).id
+    const res = await app.request(
+      `/v1/spaces/${ws.spaceId}/apps/${aApp}`,
+      jsonRequest('PATCH', { ownerAccountId: v.accountId }, { cookie: ws.cookie }),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('已过期的共享记录不挡住绕过服务层的写入', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(key, { uri: 'home://old', content: '旧', layer: 'base' })
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 1000) })
+        .where(eq(memories.path, 'old'))
+      await tx.insert(memories).values({
+        spaceId: ws.spaceId,
+        form: 'curated',
+        layer: 'private',
+        sensitivity: 'private',
+        provenance: 'agent',
+        ownerAccountId: ws.accountId,
+        domain: 'home',
+        path: 'old',
+        content: '新',
+      })
+    })
+    expect(((await (await get(key, 'home://old')).json()) as MemoryView).content).toBe('新')
   })
 })
