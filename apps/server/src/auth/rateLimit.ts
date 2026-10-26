@@ -6,19 +6,17 @@ import { loginAttempts } from '../db/schema'
 // 登录失败限流，计数在数据库里原子递增，并发请求也逐个计数。分两级：
 // - 同一用户名、同一客户端：15 分钟 5 次。攻击者只能锁住自己这一路，锁不住从别处登录的主人；
 // - 同一用户名、所有客户端合计：15 分钟 50 次，挡住换着地址的分布式尝试。
-// 分不清客户端时（例如在没有配置的代理后面）只能按用户名计数，上限回到 5 次
+// 拿不到客户端地址时（没有底层连接，例如测试）只能按用户名计数，上限回到 5 次
 const WINDOW_SECONDS = 15 * 60
 const PER_CLIENT_LIMIT = 5
 const PER_USER_LIMIT = 50
 
-function keysFor(username: string, client: string | null) {
+// trustedDevice：请求带着这个账号有效的设备 Cookie，不计入、也不受「用户名合计」上限约束
+function keysFor(username: string, client: string | null, trustedDevice = false) {
   const user = `u:${username.toLowerCase()}`
-  return client === null
-    ? [{ key: user, limit: PER_CLIENT_LIMIT }]
-    : [
-        { key: `${user}|c:${client}`, limit: PER_CLIENT_LIMIT },
-        { key: user, limit: PER_USER_LIMIT },
-      ]
+  if (client === null) return [{ key: user, limit: PER_CLIENT_LIMIT }]
+  const perClient = { key: `${user}|c:${client}`, limit: PER_CLIENT_LIMIT }
+  return trustedDevice ? [perClient] : [perClient, { key: user, limit: PER_USER_LIMIT }]
 }
 
 async function bump(db: Db, key: string): Promise<number> {
@@ -47,8 +45,9 @@ export async function reserveAttempt(
   db: Db,
   username: string,
   client: string | null,
+  trustedDevice = false,
 ): Promise<boolean> {
-  for (const { key, limit } of keysFor(username, client)) {
+  for (const { key, limit } of keysFor(username, client, trustedDevice)) {
     if ((await bump(db, key)) > limit) return false
   }
   return true

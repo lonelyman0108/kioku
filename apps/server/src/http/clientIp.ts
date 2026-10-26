@@ -1,3 +1,5 @@
+import { isIPv6 } from 'node:net'
+
 import { getConnInfo } from '@hono/node-server/conninfo'
 import type { Context } from 'hono'
 
@@ -21,7 +23,7 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
       .map((s) => s.trim())
       .filter(Boolean)
     const picked = hops[hops.length - trustedProxies]
-    if (picked) return { key: picked, identified: true }
+    if (picked) return { key: clientKey(picked), identified: true }
   }
   let remote: string | undefined
   try {
@@ -39,5 +41,23 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
       '收到 X-Forwarded-For 但没有设置 KIOKU_TRUSTED_PROXIES：如果部署在反向代理后面，请设置它，否则所有客户端会共用代理的地址',
     )
   }
-  return { key: remote, identified: true }
+  return { key: clientKey(remote), identified: true }
+}
+
+// 限流按客户端分桶：IPv4 用完整地址；IPv6 一个用户通常拿到整个 /64，按前 64 位分桶，
+// 否则换一下地址后缀就是一个新客户端。IPv4 映射地址（::ffff:a.b.c.d）还原成 IPv4
+export function clientKey(address: string): string {
+  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)
+  if (mapped) return mapped[1]!
+  if (!isIPv6(address)) return address
+  const [head = '', tail = ''] = address.split('%')[0]!.split('::')
+  const left = head ? head.split(':') : []
+  const right = tail ? tail.split(':') : []
+  const groups = address.includes('::')
+    ? [...left, ...Array<string>(8 - left.length - right.length).fill('0'), ...right]
+    : left
+  return `${groups
+    .slice(0, 4)
+    .map((g) => parseInt(g || '0', 16).toString(16))
+    .join(':')}::/64`
 }

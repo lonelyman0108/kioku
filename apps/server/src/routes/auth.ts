@@ -1,8 +1,15 @@
 import { createRoute } from '@hono/zod-openapi'
 import { ErrorResponse, LoginRequest, Me } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
-import { deleteCookie, setCookie } from 'hono/cookie'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 
+import {
+  DEVICE_COOKIE,
+  DEVICE_COOKIE_PATH,
+  DEVICE_TTL_SECONDS,
+  issueDeviceToken,
+  verifyDeviceToken,
+} from '../auth/deviceCookie'
 import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
 import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
@@ -73,7 +80,7 @@ export function authRoutes(deps: Deps) {
   return app
     .openapi(login, async (c) => {
       const { username, password } = c.req.valid('json')
-      // 分不清客户端时传 null：失败计数只按用户名，校验闸门只用全局名额
+      // 拿不到客户端地址时（没有底层连接，例如测试）传 null：失败计数只按用户名，校验闸门只用全局名额
       const identity = clientIdentity(c, deps.trustedProxies ?? 0)
       const client = identity.identified ? identity.key : null
       // 偶尔顺手清理过期的失败计数，不单独起定时任务
@@ -84,11 +91,14 @@ export function authRoutes(deps: Deps) {
         .from(accounts)
         .where(eq(accounts.username, username))
         .limit(1)
+      // 这台设备之前用这个账号成功登录过，就不受「用户名合计」上限约束（见 deviceCookie.ts）
+      const deviceAccount = await verifyDeviceToken(deps.db, getCookie(c, DEVICE_COOKIE))
+      const trustedDevice = account !== undefined && deviceAccount === account.id
       // 先排进校验闸门，再占失败次数名额：因为繁忙被拒的请求没有校验过密码，不该扣次数
       let outcome: 'ok' | 'wrong' | 'locked'
       try {
         outcome = await withPasswordGate(client, async () => {
-          if (!(await reserveAttempt(deps.db, username, client))) return 'locked'
+          if (!(await reserveAttempt(deps.db, username, client, trustedDevice))) return 'locked'
           const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
           return account && ok ? 'ok' : 'wrong'
         })
@@ -107,6 +117,13 @@ export function authRoutes(deps: Deps) {
         secure: deps.cookieSecure,
         path: '/',
         maxAge: SESSION_TTL_MS / 1000,
+      })
+      setCookie(c, DEVICE_COOKIE, await issueDeviceToken(deps.db, account.id), {
+        httpOnly: true,
+        sameSite: 'Strict',
+        secure: deps.cookieSecure,
+        path: DEVICE_COOKIE_PATH,
+        maxAge: DEVICE_TTL_SECONDS,
       })
       return c.json((await loadMe(deps.db, account.id))!, 200)
     })

@@ -9,8 +9,14 @@ ALTER TABLE memory_events NO FORCE ROW LEVEL SECURITY;
 UPDATE memory_events e
 SET before = CASE WHEN e.before IS NULL THEN NULL ELSE e.before - 'content' - 'fts' END,
     after = CASE WHEN e.after IS NULL THEN NULL ELSE e.after - 'content' - 'fts' END
-FROM memories m
-WHERE e.memory_id = m.id AND m.sensitivity = 'secret';
+-- 现在是 secret 的，以及曾经是 secret、后来又降级的记忆，历史里都可能留有改成 secret 之前的明文
+WHERE e.memory_id IN (
+  SELECT id FROM memories WHERE sensitivity = 'secret'
+  UNION
+  SELECT memory_id FROM memory_events
+  WHERE memory_id IS NOT NULL
+    AND (before ->> 'sensitivity' = 'secret' OR after ->> 'sensitivity' = 'secret')
+);
 --> statement-breakpoint
 -- 快照从此不再含全文向量（里面是正文分词），旧事件里的也一并去掉
 UPDATE memory_events

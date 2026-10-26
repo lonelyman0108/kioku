@@ -9,12 +9,13 @@ import { embeddingText, textHash } from './text'
 const BATCH = 32
 const PAGE = BATCH * 4
 
-// updated_at 的文本形式保留微秒；用它判断记忆有没有被改过，JS 的 Date 只有毫秒，同一毫秒内的修改会被漏掉
-const stamp = sql<string>`${memories.updatedAt}::text`
+// 判断记忆有没有被改过用 PostgreSQL 的 xmin（最后一次修改这一行的事务号）：每次 UPDATE 都会变，
+// 不像 updated_at 依赖应用写入的时间戳（只有毫秒精度，同一毫秒内的两次修改分不出来）
+const stamp = sql<string>`memories.xmin::text`
 
 // 为一批记忆生成或刷新向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
 // 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
-// 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 updated_at，期间被改过的不写回，
+// 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 xmin，期间被改过的不写回，
 // 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态（例如刚改成 secret 的记忆又被写上明文向量）
 async function syncRows(
   db: Db,
