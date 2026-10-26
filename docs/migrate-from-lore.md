@@ -25,7 +25,7 @@
 
    ```bash
    export DATABASE_URL=<Kioku 的连接串> LORE_DATABASE_URL=<Lore 的连接串> KIOKU_MASTER_KEY=<与服务相同>
-   node apps/server/dist/import-lore.mjs --account <用户名> --secret infra://home_network/credentials
+   node apps/server/dist/import-lore.mjs --account <用户名> --secret infra://office_network/credentials
    ```
 
    用 Docker 部署时在服务容器里执行，Lore 的库要能从容器里访问（例如 `docker network connect` 把服务容器接到 Lore 所在的网络）：

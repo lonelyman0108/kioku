@@ -103,7 +103,7 @@ describe('Claude Code 钩子转发', () => {
     })
     const result = await run('prompt.submit', {
       session_id: 's1',
-      prompt: '  家里的网络怎么配的  ',
+      prompt: '  办公室的网络怎么配的  ',
     })
     expect(JSON.parse(result.stdout)).toEqual({
       hookSpecificOutput: {
@@ -114,7 +114,7 @@ describe('Claude Code 钩子转发', () => {
     expect(requests[0].body).toEqual({
       event: 'prompt.submit',
       sessionId: 's1',
-      prompt: '家里的网络怎么配的',
+      prompt: '办公室的网络怎么配的',
     })
   })
 

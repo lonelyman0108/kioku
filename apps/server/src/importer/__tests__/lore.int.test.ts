@@ -85,13 +85,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     await seedNode('core://agent/claudecode', 'Claude Code 运行时约束', { priority: 0 })
     await seedNode('core://agent/zcode', 'zcode 运行时约束', { priority: 0 })
     await seedNode('preferences://user', '中文回复', { priority: 0, keywords: ['段', '中文'] })
-    await seedNode('infra://home_network', '家里的网络', {
+    await seedNode('infra://office_network', '办公室的网络', {
       priority: 1,
       disclosure: '排查网络时',
-      keywords: ['软路由', 'VLAN'],
+      keywords: ['交换机', 'VLAN'],
       old: ['旧的网络描述', '更旧的'],
     })
-    await seedNode('infra://home_network/credentials', '路由器密码 hunter2', { priority: 2 })
+    await seedNode('infra://office_network/credentials', '路由器密码 hunter2', { priority: 2 })
     await lore`insert into recall_events (query_text, node_uri) values ('q', 'core://agent')`
   })
   afterAll(async () => {
@@ -106,7 +106,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
   const plan = async (
     persona = 'default',
-    secretUris = ['infra://home_network/credentials'],
+    secretUris = ['infra://office_network/credentials'],
   ): Promise<ImportPlan> => {
     const existing = await withSpace(database.db, ws.spaceId, (tx) =>
       tx
@@ -165,14 +165,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
   it('读出节点、当前正文、旧版本数、关键词与召回事件数', async () => {
     const snapshot = await readLore(lore)
     expect(snapshot.recallEvents).toBe(1)
-    const network = snapshot.nodes.find((n) => n.uri === 'infra://home_network')!
+    const network = snapshot.nodes.find((n) => n.uri === 'infra://office_network')!
     expect(network).toMatchObject({
-      content: '家里的网络',
+      content: '办公室的网络',
       priority: 1,
       disclosure: '排查网络时',
       previousVersions: 2,
     })
-    expect(network.keywords.sort()).toEqual(['VLAN', '软路由'])
+    expect(network.keywords.sort()).toEqual(['VLAN', '交换机'])
   })
 
   it('按映射写入；应用与人格自动建好；secret 加密存储；事件记成 import', async () => {
@@ -187,8 +187,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         'app://claude-code/agent',
         'app://zcode/agent',
         'core://agent',
-        'infra://home_network',
-        'infra://home_network/credentials',
+        'infra://office_network',
+        'infra://office_network/credentials',
         'persona://default/soul',
         'preferences://user',
       ].sort(),
@@ -201,15 +201,15 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       layer: 'owner',
       ownerAccountId: ws.accountId,
     })
-    expect(byUri.get('infra://home_network')).toMatchObject({
+    expect(byUri.get('infra://office_network')).toMatchObject({
       layer: 'private',
       priority: 1,
       disclosure: '排查网络时',
     })
-    expect(byUri.get('infra://home_network')!.createdAt.toISOString()).toBe(
+    expect(byUri.get('infra://office_network')!.createdAt.toISOString()).toBe(
       '2025-03-01T00:00:00.000Z',
     )
-    const secret = byUri.get('infra://home_network/credentials')!
+    const secret = byUri.get('infra://office_network/credentials')!
     expect(secret).toMatchObject({ sensitivity: 'secret', content: null })
     expect(secret.ciphertext).not.toBeNull()
 
@@ -219,7 +219,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     expect(events).toHaveLength(1)
     expect(events[0]).toMatchObject({
       eventType: 'import',
-      context: { source: 'lore', loreUri: 'infra://home_network/credentials' },
+      context: { source: 'lore', loreUri: 'infra://office_network/credentials' },
     })
     expect(JSON.stringify(events)).not.toContain('hunter2')
 
@@ -238,11 +238,11 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         jsonRequest(method, body, { cookie: ws.cookie }),
       )
     await app.request(
-      `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('infra://home_network/credentials')}`,
+      `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('infra://office_network/credentials')}`,
       { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
     )
     expect(
-      (await viaConsole('POST', { from: 'infra://home_network', to: 'infra://network' })).status,
+      (await viaConsole('POST', { from: 'infra://office_network', to: 'infra://network' })).status,
     ).toBe(200)
 
     const again = await run()
@@ -253,9 +253,9 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     const live = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select({ path: memories.path, deletedAt: memories.deletedAt }).from(memories),
     )
-    expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain('home_network')
+    expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain('office_network')
     expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain(
-      'home_network/credentials',
+      'office_network/credentials',
     )
   })
 
@@ -286,18 +286,18 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
   it('之前按明文导入过的节点，这次加 --secret 不会悄悄跳过', async () => {
     await run('default', [])
-    const again = await run('default', ['infra://home_network/credentials'])
+    const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([
-      { uri: 'infra://home_network/credentials', current: 'infra://home_network/credentials' },
+      { uri: 'infra://office_network/credentials', current: 'infra://office_network/credentials' },
     ])
   })
 
   it('按明文导入后移动过的节点，提醒里给出它现在的 URI', async () => {
     await run('default', [])
-    expect((await move('infra://home_network/credentials', 'infra://creds')).status).toBe(200)
-    const again = await run('default', ['infra://home_network/credentials'])
+    expect((await move('infra://office_network/credentials', 'infra://creds')).status).toBe(200)
+    const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([
-      { uri: 'infra://home_network/credentials', current: 'infra://creds' },
+      { uri: 'infra://office_network/credentials', current: 'infra://creds' },
     ])
   })
 
@@ -313,20 +313,20 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       `/v1/spaces/${ws.spaceId}/memories`,
       jsonRequest(
         'PATCH',
-        { uri: 'infra://home_network/credentials', sensitivity: 'secret' },
+        { uri: 'infra://office_network/credentials', sensitivity: 'secret' },
         { cookie: ws.cookie },
       ),
     )
-    const again = await run('default', ['infra://home_network/credentials'])
+    const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([])
   })
 
   it('按明文导入后删掉了的节点，再带 --secret 执行时不提醒', async () => {
     await run('default', [])
-    expect((await remove('infra://home_network/credentials')).status).toBe(204)
-    const again = await run('default', ['infra://home_network/credentials'])
+    expect((await remove('infra://office_network/credentials')).status).toBe(204)
+    const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([])
-    expect(again.previouslyImported).toContain('infra://home_network/credentials')
+    expect(again.previouslyImported).toContain('infra://office_network/credentials')
   })
 
   it('按明文导入后整行都不在了的节点，再带 --secret 执行时也不提醒', async () => {
@@ -335,11 +335,11 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .delete(memories)
-        .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'home_network/credentials'))),
+        .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network/credentials'))),
     )
-    const again = await run('default', ['infra://home_network/credentials'])
+    const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([])
-    expect(again.previouslyImported).toContain('infra://home_network/credentials')
+    expect(again.previouslyImported).toContain('infra://office_network/credentials')
   })
 
   it('早期没有记人格的导入事件也能去重：删掉的人格设定不会被写回', async () => {
