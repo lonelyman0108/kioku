@@ -106,7 +106,7 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
       call('DELETE', `/memories?uri=${encodeURIComponent('core://z')}&expectedVersion=1`),
     ])
     const [patched, deleted] = results.map((r) => r.status)
-    // 要么删除先完成（修改得到 404），要么修改先完成（删除得到 409），不会两个都成功
+    // 要么删除先完成（修改得到 404 或 409），要么修改先完成（删除得到 409），不会两个都成功
     expect([patched, deleted].sort()).not.toEqual([200, 204])
   })
 

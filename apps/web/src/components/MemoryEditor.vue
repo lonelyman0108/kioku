@@ -85,7 +85,11 @@ const rearm = () => {
 const stopAfterEach = router.afterEach((_to, _from, failure) => {
   if (failure) rearm()
 })
-const stopOnError = router.onError(rearm)
+// 注册了 onError 之后 vue-router 不再自己打印错误，这里照样打出来，升级后页面加载失败还能查
+const stopOnError = router.onError((err) => {
+  rearm()
+  console.error(err)
+})
 function onBeforeUnload(event: BeforeUnloadEvent) {
   if (hasUnsavedChanges.value) event.preventDefault()
 }

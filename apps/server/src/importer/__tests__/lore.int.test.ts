@@ -263,6 +263,20 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     expect(again.secretAlreadyImported).toEqual([])
   })
 
+  it('按明文导入后在管理界面改成了 secret，再带 --secret 执行时也不再提醒', async () => {
+    await run('default', [])
+    await app.request(
+      `/v1/spaces/${ws.spaceId}/memories`,
+      jsonRequest(
+        'PATCH',
+        { uri: 'infra://home_network/credentials', sensitivity: 'secret' },
+        { cookie: ws.cookie },
+      ),
+    )
+    const again = await run('default', ['infra://home_network/credentials'])
+    expect(again.secretAlreadyImported).toEqual([])
+  })
+
   it('早期没有记人格的导入事件也能去重：删掉的人格设定不会被写回', async () => {
     await run()
     // 模拟早期版本写下的导入事件：context 里没有 targetPersona

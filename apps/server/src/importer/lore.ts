@@ -476,6 +476,7 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
         context: memoryEvents.context,
         after: memoryEvents.after,
         layer: memories.layer,
+        sensitivity: memories.sensitivity,
         persona: personas.slug,
       })
       .from(memoryEvents)
@@ -492,10 +493,9 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
       context.targetPersona === undefined && e.layer === 'persona'
         ? { ...context, targetPersona: e.persona }
         : context
-    done.set(
-      importKeyOf(parts),
-      (e.after as { sensitivity?: string } | null)?.sensitivity === 'secret',
-    )
+    // 看记忆现在的敏感级：导入后在管理界面改成了 secret 的，也算已经是 secret
+    const sensitivity = e.sensitivity ?? (e.after as { sensitivity?: string } | null)?.sensitivity
+    done.set(importKeyOf(parts), sensitivity === 'secret')
   }
 
   // 按空间 owner 的管理界面权限写入，来源记为 system

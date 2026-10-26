@@ -434,7 +434,14 @@ export class MemoryService {
           version: sql`${memories.version} + 1`,
           updatedAt: new Date(),
         })
-        .where(and(eq(memories.id, before.id), eq(memories.version, before.version)))
+        // 读完之后被别的请求改过或删掉了，都不写：不能把修改写进一条已经删除的记忆
+        .where(
+          and(
+            eq(memories.id, before.id),
+            eq(memories.version, before.version),
+            isNull(memories.deletedAt),
+          ),
+        )
         .returning()
       if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
 
@@ -552,11 +559,18 @@ export class MemoryService {
           version: sql`${memories.version} + 1`,
           updatedAt: new Date(),
         })
-        .where(eq(memories.id, before.id))
+        .where(
+          and(
+            eq(memories.id, before.id),
+            eq(memories.version, before.version),
+            isNull(memories.deletedAt),
+          ),
+        )
         .returning()
+      if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
       const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-      await this.event(tx, before.id, 'move', snapshot(before, glossary), snapshot(row!, glossary))
-      return this.toView(row!, glossary)
+      await this.event(tx, before.id, 'move', snapshot(before, glossary), snapshot(row, glossary))
+      return this.toView(row, glossary)
     })
   }
 
