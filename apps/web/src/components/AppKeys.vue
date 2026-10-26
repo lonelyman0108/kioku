@@ -61,7 +61,11 @@ function pickPreset(id: string) {
     }
 }
 
+// 签发中不接受第二次提交：连点两次会签出两把 Key，只有后一把的明文被展示
+const issuing = ref(false)
 async function issue() {
+  if (issuing.value) return
+  issuing.value = true
   try {
     issued.value = await api.createKey(props.spaceId, props.appId, {
       name: form.name || form.preset,
@@ -70,6 +74,8 @@ async function issue() {
     await queryClient.invalidateQueries({ queryKey: queryKey.value })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '签发失败', color: 'error' })
+  } finally {
+    issuing.value = false
   }
 }
 
@@ -146,9 +152,12 @@ const summary = (s: KeyScopes) =>
       <li v-if="keys.data.value?.length === 0" class="py-2 text-muted">还没有 Key。</li>
     </ul>
 
+    <!-- 明文 Key 显示期间不能点遮罩、按 Esc 或右上角关掉，只能点「我已保存」，免得没复制就丢了 -->
     <UModal
       :open="issueOpen"
       title="签发 API Key"
+      :dismissible="!issued"
+      :close="!issued"
       @update:open="(v) => (v ? (issueOpen = true) : closeIssue())"
     >
       <template #body>
@@ -221,7 +230,7 @@ const summary = (s: KeyScopes) =>
           <UButton v-if="issued" @click="closeIssue">我已保存</UButton>
           <template v-else>
             <UButton color="neutral" variant="ghost" @click="closeIssue">取消</UButton>
-            <UButton type="submit" form="issue-key">签发</UButton>
+            <UButton type="submit" form="issue-key" :loading="issuing">签发</UButton>
           </template>
         </div>
       </template>

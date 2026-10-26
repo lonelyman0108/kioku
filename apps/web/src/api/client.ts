@@ -29,7 +29,9 @@ export async function request<T = void>(
   for (const [key, value] of Object.entries(options.query ?? {})) {
     if (value !== undefined) params.set(key, String(value))
   }
-  const url = `/v1${path}${params.size ? `?${params}` : ''}`
+  // 不用 params.size：iOS 16.4 之前的 Safari 等构建目标内的浏览器还不支持它
+  const query = params.toString()
+  const url = `/v1${path}${query ? `?${query}` : ''}`
   const res = await fetch(url, {
     method,
     headers: options.body === undefined ? {} : { 'content-type': 'application/json' },

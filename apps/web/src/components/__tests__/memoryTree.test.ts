@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { lastSegment, parentOf, toTreeItems } from '../memoryTree'
+import { ancestorsOf, depthOf, lastSegment, parentOf, toTreeItems } from '../memoryTree'
 
 const icons = { folder: 'folder', file: 'file' }
 
@@ -8,6 +8,16 @@ describe('记忆树', () => {
   it('父级：一层路径的父级是 domain 根，多层取上一级', () => {
     expect(parentOf('core://agent')).toBe('core')
     expect(parentOf('core://agent/codex')).toBe('core://agent')
+  })
+
+  it('展开到一个节点要经过 domain 根和每一级上层路径；深度从 domain 根的 0 算起', () => {
+    expect(ancestorsOf('core://agent/claudecode/x')).toEqual([
+      'core',
+      'core://agent',
+      'core://agent/claudecode',
+    ])
+    expect(ancestorsOf('core://agent')).toEqual(['core'])
+    expect([depthOf('core'), depthOf('core://agent'), depthOf('core://agent/x')]).toEqual([0, 1, 2])
   })
 
   it('节点名取最后一段', () => {

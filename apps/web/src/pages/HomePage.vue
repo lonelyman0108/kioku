@@ -6,7 +6,7 @@ import { useSession } from '../composables/useSession'
 
 // 根路径跳到第一个空间的记忆页
 const router = useRouter()
-const { space } = useSession()
+const { me, space } = useSession()
 watchEffect(() => {
   if (space.value) void router.replace({ name: 'memories', params: { spaceId: space.value.id } })
 })
@@ -15,7 +15,10 @@ watchEffect(() => {
 <template>
   <UDashboardPanel id="home">
     <template #body>
-      <p class="text-muted">正在打开空间……</p>
+      <p v-if="me.data.value && !space" class="text-muted">
+        你还不在任何空间里：请空间的 owner 把你加入空间后再刷新。
+      </p>
+      <p v-else class="text-muted">正在打开空间……</p>
     </template>
   </UDashboardPanel>
 </template>
