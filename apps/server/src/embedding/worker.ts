@@ -51,7 +51,8 @@ async function syncRows(
         !row.domain ||
         !row.path
       ) {
-        stale.push(row.id)
+        // 只有确实有向量的才需要删，没有的不必为它锁行
+        if (hashes.has(row.id)) stale.push(row.id)
         continue
       }
       const text = embeddingText({

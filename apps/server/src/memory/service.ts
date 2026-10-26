@@ -164,7 +164,12 @@ export class MemoryService {
       // 已失效或已过期的记录对任何人都不可见，软删除它不会暴露或丢失可见内容（事件里留有快照），
       // 所以不论归属与写权限都可以让出 URI；否则别人的过期记录会永远挡住这个 URI
       const expired = (row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)
-      if (!expired) {
+      // 能让出的过期记录：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它们对任何人都不可见，
+      // 又只属于那个成员，不让出就会永远挡住共享 URI。共享记录调用方写不了的，照样算冲突
+      const foreignPrivate =
+        row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
+      const releasable = expired && (foreignPrivate || canWrite(this.ctx.access, row))
+      if (!releasable) {
         // 不说明是谁的、内容是什么；URI 被占用这件事本身无法对写入方隐藏
         throw new MemoryError(409, `URI 已被占用：${formatUri(parsed.domain, parsed.path)}`)
       }
@@ -574,6 +579,11 @@ export class MemoryService {
       const parentView = parent
         ? this.toView(parent, (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? [])
         : null
+      // 指定了路径、它本身没有可读的记忆、下面也没有可读的内容：和不存在一样返回 404，
+      // 拼错路径时不会看起来像一个空目录
+      if (parsed && !parent && !children.length) {
+        throw new MemoryError(404, `记忆不存在：${formatUri(parsed.domain, parsed.path)}`)
+      }
       return { parent: parentView, children }
     })
   }

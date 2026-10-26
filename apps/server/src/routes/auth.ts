@@ -7,22 +7,32 @@ import {
   DEVICE_COOKIE,
   DEVICE_COOKIE_PATH,
   DEVICE_TTL_SECONDS,
+  isTrustedDevice,
   issueDeviceToken,
-  verifyDeviceToken,
 } from '../auth/deviceCookie'
 import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
 import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
 import { clientIdentity } from '../http/clientIp'
-import { clearAttempts, pruneAttempts, reserveAttempt } from '../auth/rateLimit'
+import {
+  clearClientAttempts,
+  pruneAttempts,
+  refundAttempt,
+  reserveAttempt,
+} from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
 import { accounts, spaceMembers, spaces } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
-// 用户名不存在时也做一次同等开销的校验，避免按响应时间区分「用户不存在」和「密码错误」
-const DUMMY_HASH = hashPassword('kioku-timing-equalizer')
+// 一次密码校验大约耗时多少：启动时实测一次，用户名不存在时按这个时长等待后再返回
+let VERIFY_DURATION_MS = 100
+void (async () => {
+  const started = performance.now()
+  await hashPassword('kioku-timing-probe')
+  VERIFY_DURATION_MS = Math.round(performance.now() - started)
+})()
 
 export async function loadMe(db: Db, accountId: string) {
   const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1)
@@ -92,23 +102,28 @@ export function authRoutes(deps: Deps) {
         .where(eq(accounts.username, username))
         .limit(1)
       // 这台设备之前用这个账号成功登录过，就不受「用户名合计」上限约束（见 deviceCookie.ts）
-      const deviceAccount = await verifyDeviceToken(deps.db, getCookie(c, DEVICE_COOKIE))
-      const trustedDevice = account !== undefined && deviceAccount === account.id
-      // 先排进校验闸门，再占失败次数名额：因为繁忙被拒的请求没有校验过密码，不该扣次数
-      let outcome: 'ok' | 'wrong' | 'locked'
-      try {
-        outcome = await withPasswordGate(client, async () => {
-          if (!(await reserveAttempt(deps.db, username, client, trustedDevice))) return 'locked'
-          const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
-          return account && ok ? 'ok' : 'wrong'
-        })
-      } catch (err) {
-        if (err instanceof PasswordGateBusy) return c.json({ error: err.message }, 429)
-        throw err
+      const trustedDevice = await isTrustedDevice(deps.db, getCookie(c, DEVICE_COOKIE), account)
+      // 先计数再校验：超限的请求不花任何 CPU。用户名不存在也照样计数，行为与存在时一致，不暴露账号是否存在
+      if (!(await reserveAttempt(deps.db, username, client, trustedDevice))) {
+        return c.json({ error: '失败次数过多，请稍后再试' }, 429)
       }
-      if (outcome === 'locked') return c.json({ error: '失败次数过多，请稍后再试' }, 429)
-      if (outcome === 'wrong' || !account) return c.json({ error: '用户名或密码错误' }, 401)
-      await clearAttempts(deps.db, username, client)
+      // 用户名不存在时不跑 scrypt，等一段与一次校验相当的时间再返回：
+      // 既不暴露账号是否存在，又不能用随机用户名耗 CPU、占满校验闸门
+      if (!account) {
+        await new Promise((r) => setTimeout(r, VERIFY_DURATION_MS))
+        return c.json({ error: '用户名或密码错误' }, 401)
+      }
+      let ok: boolean
+      try {
+        ok = await withPasswordGate(client, () => verifyPassword(password, account.passwordHash))
+      } catch (err) {
+        if (!(err instanceof PasswordGateBusy)) throw err
+        // 没有真正校验密码，退回刚才占的名额
+        await refundAttempt(deps.db, username, client, trustedDevice)
+        return c.json({ error: err.message }, 429)
+      }
+      if (!ok) return c.json({ error: '用户名或密码错误' }, 401)
+      await clearClientAttempts(deps.db, username, client)
 
       const token = await createSession(deps.db, account.id)
       setCookie(c, SESSION_COOKIE, token, {
@@ -118,7 +133,7 @@ export function authRoutes(deps: Deps) {
         path: '/',
         maxAge: SESSION_TTL_MS / 1000,
       })
-      setCookie(c, DEVICE_COOKIE, await issueDeviceToken(deps.db, account.id), {
+      setCookie(c, DEVICE_COOKIE, await issueDeviceToken(deps.db, account), {
         httpOnly: true,
         sameSite: 'Strict',
         secure: deps.cookieSecure,

@@ -1,4 +1,4 @@
-import { createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, randomBytes, timingSafeEqual } from 'node:crypto'
 
 import { eq } from 'drizzle-orm'
 
@@ -32,31 +32,43 @@ async function secret(db: Db): Promise<Buffer> {
   return cachedSecret
 }
 
-function sign(key: Buffer, payload: string): string {
-  return createHmac('sha256', key).update(payload).digest('base64url')
+export interface DeviceAccount {
+  id: string
+  passwordHash: string
+}
+
+// 签名里带上当前密码哈希的指纹：改了密码，之前发出的设备 Cookie 全部失效，
+// 拿到过 Cookie 的人（例如曾经用泄露的密码登录过的人）不能继续越过合计上限
+function sign(key: Buffer, payload: string, passwordHash: string): string {
+  const fingerprint = createHash('sha256').update(passwordHash).digest('base64url')
+  return createHmac('sha256', key).update(`${payload}.${fingerprint}`).digest('base64url')
 }
 
 export async function issueDeviceToken(
   db: Db,
-  accountId: string,
+  account: DeviceAccount,
   now = Date.now(),
 ): Promise<string> {
-  const payload = `${accountId}.${Math.floor(now / 1000)}`
-  return `${payload}.${sign(await secret(db), payload)}`
+  const payload = `${account.id}.${Math.floor(now / 1000)}`
+  return `${payload}.${sign(await secret(db), payload, account.passwordHash)}`
 }
 
-// 返回令牌对应的账号；签名不对、格式不对或过期都返回 null
-export async function verifyDeviceToken(
+// 令牌是否属于这个账号且仍然有效：账号对不上、签名不对、格式不对、过期或改过密码都返回 false
+export async function isTrustedDevice(
   db: Db,
   token: string | undefined,
+  account: DeviceAccount | undefined,
   now = Date.now(),
-): Promise<string | null> {
+): Promise<boolean> {
   const parts = token?.split('.')
-  if (!parts || parts.length !== 3) return null
+  if (!account || !parts || parts.length !== 3) return false
   const [accountId, issued, signature] = parts as [string, string, string]
   const issuedAt = Number(issued)
-  if (!Number.isInteger(issuedAt) || now / 1000 - issuedAt > DEVICE_TTL_SECONDS) return null
-  const expected = Buffer.from(sign(await secret(db), `${accountId}.${issued}`))
+  if (accountId !== account.id) return false
+  if (!Number.isInteger(issuedAt) || now / 1000 - issuedAt > DEVICE_TTL_SECONDS) return false
+  const expected = Buffer.from(
+    sign(await secret(db), `${accountId}.${issued}`, account.passwordHash),
+  )
   const actual = Buffer.from(signature)
-  return actual.length === expected.length && timingSafeEqual(actual, expected) ? accountId : null
+  return actual.length === expected.length && timingSafeEqual(actual, expected)
 }

@@ -6,9 +6,12 @@ import { and, eq, isNull, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
+import { hashPassword } from '../../auth/password'
 import { withSpace, type Database } from '../../db/client'
 import {
+  accounts,
   apiKeys,
+  loginAttempts,
   memories,
   memoryEmbeddings,
   memoryEvents,
@@ -290,7 +293,11 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     await create(bKey, { uri: 'home://lab/secret-project', content: 'B 的私事', layer: 'private' })
     const key = await ws.issueKey((await ws.createApp('agent')).id)
     expect((await children(key, 'home')).children).toEqual([])
-    expect((await children(key, 'home://lab')).children).toEqual([])
+    // 对 A 来说这个路径下什么都读不到，和不存在一样是 404
+    const lab = await app.request(`/v1/memories/children?of=${encodeURIComponent('home://lab')}`, {
+      headers: bearer(key),
+    })
+    expect(lab.status).toBe(404)
     expect((await children(bKey, 'home')).children).toMatchObject([
       { uri: 'home://lab', exists: false },
     ])
@@ -655,5 +662,69 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
       .insert(spaceMembers)
       .values({ spaceId: ws.spaceId, accountId: b.accountId, role: 'editor' })
     expect((await app.request('/v1/whoami', { headers: bearer(oldKey) })).status).toBe(401)
+  })
+  it('改了密码之后，之前发出的设备 Cookie 不再有效', async () => {
+    const proxied = proxiedApp()
+    const first = await loginFrom(proxied, '203.0.113.200', 'correct horse battery')
+    const device = first.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('kioku_device='))!
+      .split(';')[0]!
+    await database.db
+      .update(accounts)
+      .set({ passwordHash: await hashPassword('another password 123') })
+    for (let ip = 1; ip <= 11; ip++) {
+      for (let i = 0; i < 5; i++) await loginFrom(proxied, `198.51.100.${ip}`, 'wrong')
+    }
+    const res = await proxied.request(
+      '/v1/auth/login',
+      jsonRequest(
+        'POST',
+        { username: 'alice', password: 'another password 123' },
+        { 'x-forwarded-for': '203.0.113.202', cookie: device },
+      ),
+    )
+    expect(res.status).toBe(429)
+  })
+
+  it('主人登录成功不会重置「用户名合计」计数', async () => {
+    const proxied = proxiedApp()
+    for (let i = 0; i < 4; i++) await loginFrom(proxied, '198.51.100.1', 'wrong')
+    expect((await loginFrom(proxied, '203.0.113.10', 'correct horse battery')).status).toBe(200)
+    const [total] = await database.db
+      .select()
+      .from(loginAttempts)
+      .where(eq(loginAttempts.username, 'u:alice'))
+    expect(total?.count).toBe(5)
+  })
+
+  it('用户名不存在时同样计数，超限后同样返回 429', async () => {
+    for (let i = 0; i < 5; i++) {
+      const res = await app.request(
+        '/v1/auth/login',
+        jsonRequest('POST', { username: 'nobody', password: 'x' }),
+      )
+      expect(res.status).toBe(401)
+    }
+    const res = await app.request(
+      '/v1/auth/login',
+      jsonRequest('POST', { username: 'nobody', password: 'x' }),
+    )
+    expect(res.status).toBe(429)
+  })
+
+  it('浏览一个不存在、下面也没有可读内容的路径返回 404', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(key, { uri: 'core://agent', content: 'x', layer: 'base' })
+    expect(
+      (
+        await app.request(`/v1/memories/children?of=${encodeURIComponent('core://agnet')}`, {
+          headers: bearer(key),
+        })
+      ).status,
+    ).toBe(404)
+    expect(
+      (await app.request('/v1/memories/children?of=emptydomain', { headers: bearer(key) })).status,
+    ).toBe(200)
   })
 })
