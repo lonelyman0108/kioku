@@ -1,5 +1,6 @@
 // 全仓一份 ESLint 配置：TypeScript 走 typescript-eslint，.vue 文件走 eslint-plugin-vue
 import js from '@eslint/js'
+import prettier from 'eslint-config-prettier'
 import vue from 'eslint-plugin-vue'
 import globals from 'globals'
 import tseslint from 'typescript-eslint'
@@ -28,12 +29,10 @@ export default tseslint.config(
     files: ['apps/server/**', 'packages/**', 'plugins/**', '*.js', '*.ts'],
     languageOptions: { globals: globals.node },
   },
+  // Prettier 负责排版：关掉所有与它冲突的格式类规则（包括 eslint-plugin-vue 的模板排版规则）
+  prettier,
   {
     rules: {
-      // Prettier 负责排版，这里关掉与之冲突的格式类规则
-      'vue/max-attributes-per-line': 'off',
-      'vue/singleline-html-element-content-newline': 'off',
-      'vue/html-self-closing': 'off',
       'vue/multi-word-component-names': 'off',
     },
   },

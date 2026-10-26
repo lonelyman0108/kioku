@@ -2,6 +2,10 @@
   "name": "@kioku/server",
   "private": true,
   "type": "module",
+  "files": [
+    "dist",
+    "migrations"
+  ],
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "start": "node dist/index.mjs",

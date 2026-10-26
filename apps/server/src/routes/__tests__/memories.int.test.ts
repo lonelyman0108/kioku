@@ -72,6 +72,22 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect((await get('core://nope')).status).toBe(404)
   })
 
+  it('删除后在同一个 URI 重建的是另一条记忆：带着旧 id 的修改返回 409', async () => {
+    const first = (await (
+      await create({ uri: 'core://x', content: '旧', layer: 'base' })
+    ).json()) as MemoryView
+    await call('DELETE', `/memories?uri=${encodeURIComponent('core://x')}`)
+    await create({ uri: 'core://x', content: '新', layer: 'base' })
+    const stale = await call('PATCH', '/memories', {
+      uri: 'core://x',
+      expectedId: first.id,
+      expectedVersion: first.version,
+      content: '覆盖',
+    })
+    expect(stale.status).toBe(409)
+    expect(((await (await get('core://x')).json()) as MemoryView).content).toBe('新')
+  })
+
   it('修改会递增版本，旧版本号返回 409', async () => {
     await create({ uri: 'core://agent', content: '第一版', layer: 'base' })
     const res = await call('PATCH', '/memories', {

@@ -9,6 +9,7 @@ export interface Config {
   cookieSecure: boolean
   masterKey: Buffer | null
   trustedProxies: number
+  webDir: string
 }
 
 // 迁移目录相对本文件所在目录的上一级解析：src/config.ts 与打包后的 dist/index.mjs 都在 apps/server 下一层
@@ -26,6 +27,8 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     masterKey: env.KIOKU_MASTER_KEY ? parseMasterKey(env.KIOKU_MASTER_KEY) : null,
     // 前面有几层受信任的反向代理；没有代理时保持 0，否则 X-Forwarded-For 可以伪造
     trustedProxies: parseTrustedProxies(env.KIOKU_TRUSTED_PROXIES),
+    // 默认取仓库里 apps/web/dist：src/config.ts 与 dist/index.mjs 都在 apps/server 下一层
+    webDir: env.KIOKU_WEB_DIR ?? fileURLToPath(new URL('../../web/dist', import.meta.url)),
   }
 }
 

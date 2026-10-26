@@ -68,6 +68,8 @@ export const UpdateMemoryRequest = z.object({
   uri: MemoryUri,
   // 填了就做乐观并发检查，版本不一致返回 409
   expectedVersion: z.number().int().optional(),
+  // 填了就核对是不是同一条记忆：删除后在同一个 URI 重建的记忆版本号从 1 重新开始，只看版本号分不出来
+  expectedId: z.uuid().optional(),
   content: z.string().min(1).max(20_000).optional(),
   sensitivity: Sensitivity.optional(),
   priority: z.number().int().min(0).max(99).optional(),
