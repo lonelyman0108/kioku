@@ -39,3 +39,7 @@ scripts/check.sh          # 门禁：与 CI 完全一致
 - agent 工作约定：[AGENTS.md](AGENTS.md)
 - 文档索引：[docs/README.md](docs/README.md)
 - 更新日志：[CHANGELOG.md](CHANGELOG.md)
+
+## 许可证
+
+[Apache-2.0](LICENSE)。部分算法源自 [Lore](https://github.com/FFatTiger/lore)（MIT），声明见 [NOTICE](NOTICE)。
