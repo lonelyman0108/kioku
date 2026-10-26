@@ -34,7 +34,9 @@ export function readableConditions(access: Access, options: ReadOptions): SQL {
     options.personaIds.length
       ? or(ne(memories.layer, 'persona'), inArray(memories.personaId, [...options.personaIds]))
       : ne(memories.layer, 'persona'),
-    or(ne(memories.layer, 'app'), eq(memories.appId, access.appId)),
+    access.appId === null
+      ? undefined
+      : or(ne(memories.layer, 'app'), eq(memories.appId, access.appId)),
   )
   return and(...conditions)!
 }

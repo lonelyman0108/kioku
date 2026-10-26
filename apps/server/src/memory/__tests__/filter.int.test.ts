@@ -1,7 +1,13 @@
 import { LAYERS, SENSITIVITIES, type KeyScopes } from '@kioku/contracts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { canRead, resolveAccess, type SessionContext } from '../../access/access'
+import {
+  canRead,
+  consoleAccess,
+  resolveAccess,
+  type Access,
+  type SessionContext,
+} from '../../access/access'
 import { withSpace, type Database } from '../../db/client'
 import { accounts, apps, memories, personas, spaces } from '../../db/schema'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -117,10 +123,24 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
     ['定时任务', full, { chatType: 'cron' }],
   ]
 
-  for (const [name, scopes, context] of cases) {
+  const accesses: [string, () => Access][] = [
+    ...cases.map(
+      ([name, scopes, context]) =>
+        [name, () => resolveAccess(scopes, { appId, ownerAccountId: owner }, context)] as [
+          string,
+          () => Access,
+        ],
+    ),
+    // 管理界面：不代表某个应用（appId 为 null），三种角色
+    ['管理界面 · owner', () => consoleAccess('owner', owner)],
+    ['管理界面 · editor', () => consoleAccess('editor', owner)],
+    ['管理界面 · viewer', () => consoleAccess('viewer', owner)],
+  ]
+
+  for (const [name, makeAccess] of accesses) {
     for (const explicit of [false, true]) {
       it(`${name}${explicit ? ' · 显式读取' : ''}`, async () => {
-        const access = resolveAccess(scopes, { appId, ownerAccountId: owner }, context)
+        const access = makeAccess()
         const options = { personaIds: [personaId], explicit }
         const all = await withSpace(database.db, spaceId, (tx) => tx.select().from(memories))
         const expected = all
