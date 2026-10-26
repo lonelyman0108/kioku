@@ -113,14 +113,17 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
       let pending!: Promise<Response>
       await side.begin(async (tx) => {
         await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
-        await tx`select id from memories where id = ${view.id} for update`
+        const locked = await tx`select id from memories where id = ${view.id} for update`
+        expect(locked).toHaveLength(1)
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
         pending = Promise.resolve(request())
+        // 等到确实有会话被这个事务的锁挡住；2 秒内等不到就报错，赶在 vitest 默认的 5 秒超时之前
         for (let i = 0; ; i++) {
           const [row] = await side<{ n: number }[]>`
             select count(*)::int as n from pg_stat_activity
-            where datname = current_database() and wait_event_type = 'Lock'`
+            where ${pid}::int = any(pg_blocking_pids(pid))`
           if (row!.n > 0) break
-          if (i > 200) throw new Error('请求没有等在行锁上')
+          if (i >= 80) throw new Error('请求没有等在行锁上')
           await new Promise((r) => setTimeout(r, 25))
         }
         await change(tx, view.id)

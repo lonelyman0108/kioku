@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type { BootResponse } from '@kioku/contracts'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -282,6 +282,19 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     await app.request(
       `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('infra://home_network/credentials')}`,
       { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
+    )
+    const again = await run('default', ['infra://home_network/credentials'])
+    expect(again.secretAlreadyImported).toEqual([])
+    expect(again.previouslyImported).toContain('infra://home_network/credentials')
+  })
+
+  it('按明文导入后整行都不在了的节点，再带 --secret 执行时也不提醒', async () => {
+    await run('default', [])
+    // 直接删掉这一行，导入事件的 memory_id 被置空
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .delete(memories)
+        .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'home_network/credentials'))),
     )
     const again = await run('default', ['infra://home_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([])

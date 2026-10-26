@@ -474,7 +474,6 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     tx
       .select({
         context: memoryEvents.context,
-        after: memoryEvents.after,
         layer: memories.layer,
         sensitivity: memories.sensitivity,
         deletedAt: memories.deletedAt,
@@ -494,13 +493,10 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
       context.targetPersona === undefined && e.layer === 'persona'
         ? { ...context, targetPersona: e.persona }
         : context
-    // 看记忆现在的状态：导入后在管理界面改成了 secret 的，也算已经是 secret；
-    // 记忆本身找不到（例如账号被删除时级联删掉了）时退回导入时的快照
-    const sensitivity = e.sensitivity ?? (e.after as { sensitivity?: string } | null)?.sensitivity
-    done.set(
-      importKeyOf(parts),
-      e.deletedAt ? 'deleted' : sensitivity === 'secret' ? 'secret' : 'plain',
-    )
+    // 看记忆现在的状态：导入后在管理界面改成了 secret 的，也算已经是 secret。
+    // 记忆被软删除，或整行已经不在（例如删除账号时级联删掉，事件的 memory_id 被置空，联表取不到），都算已经删除
+    const gone = e.deletedAt !== null || e.sensitivity === null
+    done.set(importKeyOf(parts), gone ? 'deleted' : e.sensitivity === 'secret' ? 'secret' : 'plain')
   }
 
   // 按空间 owner 的管理界面权限写入，来源记为 system
