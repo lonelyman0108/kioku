@@ -1,0 +1,21 @@
+# 本地开发与集成测试用的数据库。启动：docker compose -f docker-compose.dev.yml up -d --build
+# 连接串：postgres://kioku:kioku@localhost:55432/kioku
+name: kioku-dev
+services:
+  postgres:
+    build: docker/postgres
+    image: kioku-postgres:dev
+    environment:
+      POSTGRES_PASSWORD: postgres
+      KIOKU_DB_PASSWORD: kioku
+    ports:
+      - '55432:5432'
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U kioku -d kioku']
+      interval: 2s
+      timeout: 3s
+      retries: 30
+volumes:
+  pgdata:

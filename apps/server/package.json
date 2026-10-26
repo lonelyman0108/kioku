@@ -13,10 +13,13 @@
     "@hono/node-server": "2.1.5",
     "@hono/zod-openapi": "1.6.3",
     "@kioku/contracts": "workspace:*",
+    "drizzle-orm": "0.45.4",
     "hono": "4.13.14",
+    "postgres": "3.4.9",
     "zod": "4.6.7"
   },
   "devDependencies": {
+    "drizzle-kit": "0.31.11",
     "tsdown": "0.23.2",
     "tsx": "4.23.15"
   }
