@@ -2,7 +2,6 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import {
   CreateMemoryRequest,
-  Keyword,
   Layer,
   MemoryUri,
   RecallRequest,
@@ -97,8 +96,8 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         uri: MemoryUri.describe('新记忆的 URI'),
         content: CreateMemoryRequest.shape.content.describe('正文'),
         disclosure: CreateMemoryRequest.shape.disclosure.describe('什么场景下需要想起这条记忆'),
-        priority: z.number().int().min(0).max(99).optional().describe('0 最重要，默认 2'),
-        glossary: z.array(Keyword).max(32).optional().describe('关键词，用于召回'),
+        priority: CreateMemoryRequest.shape.priority.describe('0 最重要，默认 2'),
+        glossary: CreateMemoryRequest.shape.glossary.describe('关键词，用于召回'),
         layer: Layer.optional().describe('层：base / owner / private 等'),
         sensitivity: Sensitivity.optional().describe(
           '敏感级：public / internal / private / secret',
@@ -111,8 +110,8 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
           await memory.create({
             uri: args.uri,
             content: args.content,
-            priority: args.priority ?? 2,
-            glossary: args.glossary ?? [],
+            priority: args.priority,
+            glossary: args.glossary,
             ...(args.disclosure ? { disclosure: args.disclosure } : {}),
             ...(args.layer ? { layer: args.layer } : {}),
             ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
@@ -130,7 +129,7 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         uri: MemoryUri,
         content: UpdateMemoryRequest.shape.content.describe('新的完整正文'),
         disclosure: UpdateMemoryRequest.shape.disclosure,
-        priority: z.number().int().min(0).max(99).optional(),
+        priority: UpdateMemoryRequest.shape.priority,
         sensitivity: Sensitivity.optional(),
         glossary_add: UpdateMemoryRequest.shape.glossaryAdd,
         glossary_remove: UpdateMemoryRequest.shape.glossaryRemove,

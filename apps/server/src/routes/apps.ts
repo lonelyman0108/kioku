@@ -200,7 +200,14 @@ export function appRoutes(deps: Deps) {
       const { spaceId, appId } = c.req.valid('param')
       const body = c.req.valid('json')
       const accountId = c.get('console').accountId
-      if (!(await roleOf(spaceId, accountId))) return c.json({ error: '不是该空间成员' }, 403)
+      const role = await roleOf(spaceId, accountId)
+      // viewer 不能签发 Key；admin Key 能越过人格与应用命名空间的写入限制，只有空间 owner 能签发
+      if (role !== 'owner' && role !== 'editor') {
+        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      }
+      if (body.scopes.admin && role !== 'owner') {
+        return c.json({ error: '只有空间 owner 能签发 admin Key' }, 403)
+      }
       const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
       if (!owner) return c.json({ error: '应用不存在' }, 404)
       if (owner !== accountId) return c.json({ error: '只有应用的主人能签发它的 Key' }, 403)

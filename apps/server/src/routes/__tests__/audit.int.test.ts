@@ -6,8 +6,10 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memories, memoryEvents, settings } from '../../db/schema'
+import { memories, memoryEmbeddings, memoryEvents, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import { embedMemory } from '../../embedding/worker'
+import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
   addMember,
@@ -202,5 +204,105 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     const body = (await res.json()) as { result?: { isError?: boolean }; error?: unknown }
     expect(body.error ?? body.result?.isError).toBeTruthy()
     expect((await get(key, 'core://big')).status).toBe(404)
+  })
+  it('editor 不能签发 admin Key，普通 Key 可以', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bApp = await appAs(b.cookie, 'b-agent')
+    const admin = await app.request(
+      `/v1/spaces/${ws.spaceId}/apps/${bApp}/keys`,
+      jsonRequest(
+        'POST',
+        { name: 'k', scopes: { ...FULL_SCOPES, admin: true } },
+        { cookie: b.cookie },
+      ),
+    )
+    expect(admin.status).toBe(403)
+    expect((await keyAs(b.cookie, bApp)).status).toBe(201)
+  })
+
+  it('共享节点与私人节点不能占同一个 URI', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    expect((await create(key, { uri: 'home://wifi', content: '共享', layer: 'base' })).status).toBe(
+      201,
+    )
+    expect(
+      (await create(key, { uri: 'home://wifi', content: '私人', layer: 'private' })).status,
+    ).toBe(409)
+    expect(
+      (await create(key, { uri: 'prefs://user', content: '私人', layer: 'owner' })).status,
+    ).toBe(201)
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bKey = (
+      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
+    ).key
+    expect(
+      (await create(bKey, { uri: 'prefs://user', content: '共享', layer: 'base' })).status,
+    ).toBe(409)
+  })
+
+  it('共享节点不能挂在私人父节点下，父节点敏感级不能高于子节点', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(key, { uri: 'home://lab', content: '私人', layer: 'private' })
+    expect((await create(key, { uri: 'home://lab/nas', content: 'x', layer: 'base' })).status).toBe(
+      400,
+    )
+    await create(key, { uri: 'kb://infra', content: 'x', layer: 'base', sensitivity: 'internal' })
+    expect(
+      (
+        await create(key, {
+          uri: 'kb://infra/nas',
+          content: 'x',
+          layer: 'base',
+          sensitivity: 'public',
+        })
+      ).status,
+    ).toBe(400)
+  })
+
+  it('还有子节点时不能删除或移走父节点', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(key, { uri: 'core://agent', content: 'x', layer: 'base' })
+    await create(key, { uri: 'core://agent/codex', content: 'x', layer: 'base' })
+    const del = await app.request('/v1/memories?uri=core%3A%2F%2Fagent', {
+      method: 'DELETE',
+      headers: bearer(key),
+    })
+    expect(del.status).toBe(409)
+    const move = await app.request(
+      '/v1/memories/move',
+      jsonRequest('POST', { from: 'core://agent', to: 'core://agents' }, bearer(key)),
+    )
+    expect(move.status).toBe(409)
+  })
+
+  it('并发创建同一个 URI：一个成功，其余 409 而不是 500', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const results = await Promise.all(
+      Array.from({ length: 5 }, (_, i) => create(key, { uri: 'home://ip', content: `${i}` })),
+    )
+    expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409])
+  })
+
+  it('请求嵌入期间记忆改成了 secret，旧内容的向量不会写回', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const res = await create(key, { uri: 'home://router', content: '管理密码 hunter2' })
+    const id = ((await res.json()) as { id: string }).id
+    const inner = fakeEmbedder()
+    const racing = {
+      model: inner.model,
+      async embed(texts: string[]) {
+        // 模拟嵌入请求还没返回时，另一个请求把记忆改成了 secret
+        await app.request(
+          '/v1/memories',
+          jsonRequest('PATCH', { uri: 'home://router', sensitivity: 'secret' }, bearer(key)),
+        )
+        return inner.embed(texts)
+      },
+    }
+    await embedMemory(database.db, racing, ws.spaceId, id)
+    const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memoryEmbeddings),
+    )
+    expect(rows).toHaveLength(0)
   })
 })

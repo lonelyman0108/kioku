@@ -8,11 +8,12 @@ import type {
   MemorySummary,
   MemoryView,
   MoveMemoryRequest,
+  Sensitivity,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
 
-import { canRead, canWrite, type Access } from '../access/access'
+import { canRead, canWrite, sensitivityRank, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
 import { apps, memories, memoryEvents, memoryGlossary } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
@@ -68,7 +69,10 @@ function snapshot(row: MemoryRow, glossary: string[], redact = false) {
   return { ...rest, glossary }
 }
 
-const NIL_UUID = '00000000-0000-0000-0000-000000000000'
+// persona://<标识> 与 app://<标识> 本身是命名空间根，可以没有对应的记忆
+function isNamespaceRoot(parsed: ParsedUri): boolean {
+  return Boolean(parsed.namespaceSlug) && !parsed.path.includes('/')
+}
 
 export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
@@ -77,14 +81,19 @@ export class MemoryService {
     return runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
   }
 
+  // 本次写入顺带变更的其他记忆（例如让出 URI 的过期记录），提交后一起通知
+  private pending: string[] = []
+
   private changed(memoryId: string): void {
-    this.ctx.onChanged?.(memoryId)
+    for (const id of [memoryId, ...this.pending]) this.ctx.onChanged?.(id)
+    this.pending = []
   }
 
   // 写操作：事务提交之后再通知，回滚的写入不会触发向量更新
   private async write(
     fn: (tx: Tx, personaIds: string[]) => Promise<MemoryView>,
   ): Promise<MemoryView> {
+    this.pending = []
     const view = await this.run(fn)
     this.changed(view.id)
     return view
@@ -112,10 +121,19 @@ export class MemoryService {
     return row
   }
 
-  // 唯一键冲突检查：与 memories_uri_live_idx 一致，按 (URI, 归属成员) 判断。
-  // 已失效或已过期的旧记录让出 URI（软删除并记事件），否则谁都看不见它却永远占着这个 URI
-  private async claimUri(tx: Tx, parsed: ParsedUri, ownerAccountId: string | null): Promise<void> {
-    const [row] = await tx
+  // 一个 URI 要么是共享的，要么按成员各自占用，二者不共存：否则成员自己的私人节点会遮住同名的共享节点。
+  // 所以写共享节点时与任何人的同名节点冲突，写成员节点时与共享节点和自己的同名节点冲突。
+  // 检查与写入用事务级咨询锁串行化，并发写同一个 URI 时后到的拿到 409 而不是唯一约束报错。
+  // 已失效或已过期、且调用方有权写的旧记录让出 URI（软删除并记事件），否则谁都看不见它却永远占着这个 URI
+  private async claimUri(
+    tx: Tx,
+    parsed: ParsedUri,
+    target: { ownerAccountId: string | null },
+  ): Promise<void> {
+    await tx.execute(
+      sql`select pg_advisory_xact_lock(hashtext(${`${this.ctx.spaceId}|${parsed.domain}://${parsed.path}`}))`,
+    )
+    const rows = await tx
       .select()
       .from(memories)
       .where(
@@ -123,47 +141,95 @@ export class MemoryService {
           eq(memories.domain, parsed.domain),
           eq(memories.path, parsed.path),
           isNull(memories.deletedAt),
-          sql`coalesce(${memories.ownerAccountId}, ${NIL_UUID}::uuid) = coalesce(${ownerAccountId}::uuid, ${NIL_UUID}::uuid)`,
+          target.ownerAccountId
+            ? or(
+                isNull(memories.ownerAccountId),
+                eq(memories.ownerAccountId, target.ownerAccountId),
+              )
+            : undefined,
         ),
       )
-      .limit(1)
-    if (!row) return
     const now = new Date()
-    if ((row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)) {
-      const [expired] = await tx
+    for (const row of rows) {
+      const expired = (row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)
+      const mine =
+        row.ownerAccountId === null || row.ownerAccountId === this.ctx.access.ownerAccountId
+      if (!expired || !mine || !canWrite(this.ctx.access, row)) {
+        // 不说明是谁的、内容是什么；URI 被占用这件事本身无法对写入方隐藏
+        throw new MemoryError(409, `URI 已被占用：${formatUri(parsed.domain, parsed.path)}`)
+      }
+      const [gone] = await tx
         .update(memories)
         .set({ deletedAt: now, updatedAt: now })
         .where(eq(memories.id, row.id))
         .returning()
-      await this.event(tx, row.id, 'expire', snapshot(row, []), snapshot(expired!, []))
-      return
+      await this.event(tx, row.id, 'expire', snapshot(row, []), snapshot(gone!, []))
+      this.pending.push(row.id)
     }
-    // 不说明是谁的、内容是什么；共享层的 URI 被占用这件事本身无法对调用方隐藏
-    throw new MemoryError(409, `URI 已被占用：${formatUri(parsed.domain, parsed.path)}`)
   }
 
-  // 新节点的父节点必须是一条真实存在、调用方可见的记忆（persona:// 与 app:// 的标识根除外），
-  // 否则树浏览走不到它。父节点要先有内容，说明下面这些子节点为什么放在一起
-  private async requireParent(tx: Tx, parsed: ParsedUri, personaIds: string[]): Promise<void> {
+  // 新节点的父节点必须真实存在（persona:// 与 app:// 的标识根除外），而且凡是能看到子节点的人都要能看到父节点，
+  // 否则树浏览走不到子节点：共享节点的父节点也必须是共享的，父节点的敏感级不能比子节点高
+  private async requireParent(
+    tx: Tx,
+    parsed: ParsedUri,
+    child: { ownerAccountId: string | null; sensitivity: Sensitivity },
+    personaIds: string[],
+  ): Promise<void> {
     const segments = parsed.path.split('/')
-    if (segments.length === 1) return
-    if (parsed.namespaceSlug && segments.length === 2) return
-    const parent = { ...parsed, path: segments.slice(0, -1).join('/') }
-    const row = await this.findLive(tx, parent)
-    if (!row || !canRead(this.ctx.access, row, { personaIds, explicit: true })) {
+    if (
+      segments.length === 1 ||
+      isNamespaceRoot({ ...parsed, path: segments.slice(0, -1).join('/') })
+    )
+      return
+    const parentUri = { ...parsed, path: segments.slice(0, -1).join('/') }
+    const parent = await this.findReadableOrNull(tx, parentUri, personaIds)
+    const where = formatUri(parentUri.domain, parentUri.path)
+    if (!parent) throw new MemoryError(400, `父节点 ${where} 不存在，请先创建它，或换一个 URI`)
+    if (child.ownerAccountId === null && parent.ownerAccountId !== null) {
+      throw new MemoryError(400, `父节点 ${where} 是私人节点，共享节点不能放在它下面`)
+    }
+    if (sensitivityRank(parent.sensitivity) > sensitivityRank(child.sensitivity)) {
       throw new MemoryError(
         400,
-        `父节点 ${formatUri(parent.domain, parent.path)} 不存在，请先创建它，或换一个 URI`,
+        `父节点 ${where} 的敏感级（${parent.sensitivity}）高于新节点，能看到新节点的人会看不到父节点`,
       )
     }
   }
 
+  // 删除或移走一个节点前，它下面不能还有子节点，否则子节点在树里就再也走不到了
+  private async requireNoChildren(tx: Tx, parsed: ParsedUri): Promise<void> {
+    const [child] = await tx
+      .select({ id: memories.id })
+      .from(memories)
+      .where(
+        and(
+          eq(memories.domain, parsed.domain),
+          like(memories.path, `${escapeLike(parsed.path)}/%`),
+          isNull(memories.deletedAt),
+        ),
+      )
+      .limit(1)
+    if (child)
+      throw new MemoryError(
+        409,
+        `${formatUri(parsed.domain, parsed.path)} 下面还有子节点，先删除或移走它们`,
+      )
+  }
+
+  private async findReadableOrNull(
+    tx: Tx,
+    parsed: ParsedUri,
+    personaIds: string[],
+  ): Promise<MemoryRow | null> {
+    const row = await this.findLive(tx, parsed)
+    return row && canRead(this.ctx.access, row, { personaIds, explicit: true }) ? row : null
+  }
+
   // 读不到和不存在对调用方一样：都是 404，不泄露「这里有一条你看不见的记忆」
   private async findReadable(tx: Tx, parsed: ParsedUri, personaIds: string[]): Promise<MemoryRow> {
-    const row = await this.findLive(tx, parsed)
-    if (!row || !canRead(this.ctx.access, row, { personaIds, explicit: true })) {
-      throw new MemoryError(404, `记忆不存在：${formatUri(parsed.domain, parsed.path)}`)
-    }
+    const row = await this.findReadableOrNull(tx, parsed, personaIds)
+    if (!row) throw new MemoryError(404, `记忆不存在：${formatUri(parsed.domain, parsed.path)}`)
     return row
   }
 
@@ -293,8 +359,13 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, { layer: ownership.layer, sensitivity })) {
         throw new MemoryError(403, `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`)
       }
-      await this.requireParent(tx, parsed, personaIds)
-      await this.claimUri(tx, parsed, ownership.ownerAccountId)
+      await this.requireParent(
+        tx,
+        parsed,
+        { ownerAccountId: ownership.ownerAccountId, sensitivity },
+        personaIds,
+      )
+      await this.claimUri(tx, parsed, ownership)
 
       const id = randomUUID()
       const body =
@@ -426,6 +497,7 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: before.sensitivity })) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
       }
+      await this.requireNoChildren(tx, parsed)
       const [row] = await tx
         .update(memories)
         .set({ deletedAt: new Date(), updatedAt: new Date() })
@@ -461,8 +533,9 @@ export class MemoryService {
           `${PERSONA_DOMAIN}:// 与 ${APP_DOMAIN}:// 下的记忆只能在同一个标识下移动`,
         )
       }
-      await this.requireParent(tx, to, personaIds)
-      await this.claimUri(tx, to, before.ownerAccountId)
+      await this.requireNoChildren(tx, from)
+      await this.requireParent(tx, to, before, personaIds)
+      await this.claimUri(tx, to, before)
       const [row] = await tx
         .update(memories)
         .set({
@@ -488,13 +561,10 @@ export class MemoryService {
     return this.run(async (tx, personaIds) => {
       const readable = readableConditions(this.ctx.access, { personaIds })
       // persona://<标识> 与 app://<标识> 是命名空间根，本身可以没有记忆
-      const namespaceRoot = Boolean(parsed?.namespaceSlug && !parsed.path.includes('/'))
       const parent = !parsed
         ? null
-        : namespaceRoot
-          ? await this.findLive(tx, parsed).then((row) =>
-              row && canRead(this.ctx.access, row, { personaIds, explicit: true }) ? row : null,
-            )
+        : isNamespaceRoot(parsed)
+          ? await this.findReadableOrNull(tx, parsed, personaIds)
           : await this.findReadable(tx, parsed, personaIds)
       const prefix = parsed ? `${parsed.path}/` : ''
       const childPattern = parsed ? `^${escapeRegex(parsed.path)}/[^/]+$` : '^[^/]+$'

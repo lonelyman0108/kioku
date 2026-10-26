@@ -64,9 +64,22 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
   }
 
   await withSpace(db, spaceId, async (tx) => {
-    if (stale.length)
-      await tx.delete(memoryEmbeddings).where(inArray(memoryEmbeddings.memoryId, stale))
+    // 请求嵌入期间记忆可能又被改过（例如改成了 secret）：锁住这些行，updated_at 变了的不写回，
+    // 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态
+    const current = await tx
+      .select({ id: memories.id, updatedAt: memories.updatedAt })
+      .from(memories)
+      .where(inArray(memories.id, ids))
+      .for('update')
+    const readAt = new Map(rows.map((r) => [r.id, r.updatedAt.getTime()]))
+    const unchanged = new Set(
+      current.filter((c) => c.updatedAt.getTime() === readAt.get(c.id)).map((c) => c.id),
+    )
+    const staleNow = stale.filter((id) => unchanged.has(id))
+    if (staleNow.length)
+      await tx.delete(memoryEmbeddings).where(inArray(memoryEmbeddings.memoryId, staleNow))
     for (const [j, item] of pending.entries()) {
+      if (!unchanged.has(item.id)) continue
       await tx
         .insert(memoryEmbeddings)
         .values({

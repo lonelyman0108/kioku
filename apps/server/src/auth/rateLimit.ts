@@ -2,17 +2,23 @@
 // 目的是挡住在线暴力尝试，不是精确计数。
 const WINDOW_MS = 15 * 60 * 1000
 const MAX_ATTEMPTS = 5
-// 用随机用户名刷请求时表会一直长；超过上限先清过期项，仍超过就清掉最早的一批
+// 用随机用户名刷请求时表会一直长；满了就清过期项，仍满就淘汰最早的一成未锁定项。
+// 已锁定的项永不提前淘汰，否则刷一批随机用户名就能把被锁账号的计数挤掉
 const MAX_ENTRIES = 10_000
+const EVICT_BATCH = MAX_ENTRIES / 10
 
 const attempts = new Map<string, { count: number; resetAt: number }>()
 
 function prune(now: number): void {
   if (attempts.size < MAX_ENTRIES) return
   for (const [key, entry] of attempts) if (entry.resetAt <= now) attempts.delete(key)
-  for (const key of attempts.keys()) {
-    if (attempts.size < MAX_ENTRIES) break
+  if (attempts.size < MAX_ENTRIES) return
+  let evicted = 0
+  for (const [key, entry] of attempts) {
+    if (evicted >= EVICT_BATCH) break
+    if (entry.count >= MAX_ATTEMPTS) continue
     attempts.delete(key)
+    evicted++
   }
 }
 
