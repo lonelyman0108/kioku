@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -23,6 +23,8 @@ const personas = useQuery({
 const nameOf = (id: string | null) => personas.data.value?.find((p) => p.id === id)?.name ?? '—'
 
 const open = ref(false)
+// 切换空间时关掉新建窗口：里面的内容属于上一个空间
+watch(spaceId, () => (open.value = false))
 const form = reactive({ slug: '', name: '', extendsId: null as string | null, description: '' })
 const parentItems = computed(() => [
   { label: '不继承', value: null },

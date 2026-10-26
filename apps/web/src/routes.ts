@@ -2,15 +2,13 @@ import type { RouteRecordRaw, Router } from 'vue-router'
 
 import { api } from './api/endpoints'
 import { loadMe } from './composables/useSession'
+import UnavailablePage from './pages/UnavailablePage.vue'
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
   { path: '/login', name: 'login', component: () => import('./pages/LoginPage.vue') },
-  {
-    path: '/unavailable',
-    name: 'unavailable',
-    component: () => import('./pages/UnavailablePage.vue'),
-  },
+  // 静态引入：后端连不上时，按需加载的页面文件也拿不到
+  { path: '/unavailable', name: 'unavailable', component: UnavailablePage },
   {
     path: '/',
     component: () => import('./layouts/ConsoleLayout.vue'),
@@ -31,7 +29,12 @@ export const routes: RouteRecordRaw[] = [
         name: 'apps',
         component: () => import('./pages/AppsPage.vue'),
       },
-      { path: 'settings', name: 'settings', component: () => import('./pages/SettingsPage.vue') },
+      {
+        path: 'settings',
+        name: 'settings',
+        component: () => import('./pages/SettingsPage.vue'),
+        meta: { requiresAdmin: true },
+      },
     ],
   },
 ]
@@ -51,6 +54,7 @@ export function installGuards(router: Router): void {
       const me = await loadMe()
       if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }
       if (to.name === 'login') return { name: 'home' }
+      if (to.meta.requiresAdmin && !me.isAdmin) return { name: 'home' }
       return true
     } catch {
       // 后端暂时连不上（重启、升级、代理返回 502）：给出说明和重试，而不是一片空白

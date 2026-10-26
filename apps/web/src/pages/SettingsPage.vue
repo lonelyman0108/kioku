@@ -64,6 +64,15 @@ async function test() {
       <UDashboardNavbar title="实例设置" />
     </template>
     <template #body>
+      <UAlert
+        v-if="settings.isError.value"
+        color="error"
+        variant="subtle"
+        class="mb-4 max-w-2xl"
+        :title="
+          settings.error.value instanceof ApiError ? settings.error.value.message : '读取设置失败'
+        "
+      />
       <UCard class="max-w-2xl">
         <template #header>
           <h2 class="font-medium">嵌入模型</h2>

@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { confirmDiscard } from '../composables/unsavedChanges'
 import { ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { queryClient } from '../query'
@@ -48,6 +49,8 @@ const nav = computed<NavigationMenuItem[]>(() => {
 })
 
 async function logout() {
+  // 先确认未保存的修改，取消就什么都不做；确认之后再去服务端退出
+  if (!confirmDiscard()) return
   try {
     await api.logout()
   } catch (err) {
@@ -106,6 +109,14 @@ async function logout() {
       </template>
     </UDashboardSidebar>
 
-    <RouterView />
+    <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
+    <UDashboardPanel v-if="me.data.value && route.params.spaceId && !space" id="not-member">
+      <template #body>
+        <p class="text-muted">
+          你不是这个空间的成员，或者已经被移出。可以从左上角切换到你所在的空间。
+        </p>
+      </template>
+    </UDashboardPanel>
+    <RouterView v-else />
   </UDashboardGroup>
 </template>

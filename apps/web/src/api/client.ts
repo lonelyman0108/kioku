@@ -19,6 +19,13 @@ interface RequestOptions<T> {
   schema?: z.ZodType<T>
 }
 
+// 会话失效（过期、在别的标签页退出）时的处理，由入口注册；登录与查询当前账号本身返回 401 是正常结果，不触发
+let onUnauthorized: (() => void) | null = null
+export function setUnauthorizedHandler(handler: () => void): void {
+  onUnauthorized = handler
+}
+const SESSION_PATHS = ['/auth/login', '/auth/me', '/auth/logout']
+
 // 管理界面与后端同源，用浏览器的会话 Cookie 鉴权；浏览器会自动带上 Sec-Fetch-Site，后端据此做同源检查
 export async function request<T = void>(
   method: string,
@@ -38,6 +45,7 @@ export async function request<T = void>(
     body: options.body === undefined ? undefined : JSON.stringify(options.body),
   })
   if (!res.ok) {
+    if (res.status === 401 && !SESSION_PATHS.includes(path)) onUnauthorized?.()
     const payload = (await res.json().catch(() => null)) as { error?: string } | null
     throw new ApiError(res.status, payload?.error ?? `请求失败：HTTP ${res.status}`)
   }

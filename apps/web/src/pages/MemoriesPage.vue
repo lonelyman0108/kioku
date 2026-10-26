@@ -165,8 +165,15 @@ onMounted(async () => {
 })
 watch(spaceId, () => {
   expanded.value = []
+  // 新建窗口里的内容属于上一个空间，不能带到新空间去提交
+  createOpen.value = false
   void loadRoots()
 })
+
+// 树的选中状态跟着地址走：切换被取消（例如有未保存的修改）时，高亮也留在原来的节点
+const selectedItem = computed(() =>
+  selectedUri.value ? find(roots.value, selectedUri.value) : undefined,
+)
 </script>
 
 <template>
@@ -193,6 +200,7 @@ watch(spaceId, () => {
       </p>
       <UTree
         v-model:expanded="expanded"
+        :model-value="selectedItem"
         :items="roots"
         :get-key="(item) => item.uri"
         @toggle="onToggle"

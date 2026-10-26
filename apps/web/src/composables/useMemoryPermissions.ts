@@ -34,8 +34,13 @@ export function useMemoryPermissions(spaceId: Ref<string>) {
   // 不能改时给出原因，显示在编辑器上方
   function readOnlyReason(memory: MemoryView): string | null {
     if (!canWrite.value) return '你在这个空间是 viewer，只能查看。'
-    if (!canWriteUri(memory.uri))
+    if (!canWriteUri(memory.uri)) {
+      // editor 要知道应用是不是自己的，得先读到应用列表
+      if (apps.isPending.value) return '正在确认这个应用是不是你的……'
+      if (apps.isError.value)
+        return '应用列表读取失败，暂时无法确认能不能修改应用层记忆，请刷新重试。'
       return '这是别人的应用的应用层记忆，只有应用主人和空间 owner 能修改。'
+    }
     if (memory.sensitivity === 'secret' && role.value !== 'owner') {
       return 'secret 级记忆只有空间 owner 能修改。'
     }
