@@ -5,12 +5,14 @@ import {
   type Layer,
   type RuntimeFamily,
 } from '@kioku/contracts'
-import { and, eq, isNull } from 'drizzle-orm'
+import { and, eq, isNotNull, sql } from 'drizzle-orm'
 import type postgres from 'postgres'
 
 import { consoleAccess } from '../access/access'
+import { decryptSecret } from '../crypto/envelope'
 import { withSpace, type Db } from '../db/client'
-import { apps, personas } from '../db/schema'
+import { apps, memories, memoryEvents, personas } from '../db/schema'
+import { loadEmbeddingConfig } from '../embedding/settings'
 import { MemoryError, MemoryService } from '../memory/service'
 import { APP_DOMAIN, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
 
@@ -102,14 +104,17 @@ export async function readLore(sql: postgres.Sql): Promise<LoreSnapshot> {
 }
 
 export interface ImportOptions {
+  // 导入者：主人层、私人层归他；core://agent/<runtime> 只会写进他自己的应用
+  accountId: string
   persona: { slug: string; name: string }
-  // 这些 Lore URI 导入为 secret（加密存储）
+  // 这些 Lore URI（含别名）导入为 secret（加密存储）
   secretUris: ReadonlySet<string>
 }
 
 export interface ExistingApp {
   slug: string
   runtimeFamily: string
+  ownerAccountId: string
 }
 
 export interface AppMapping {
@@ -123,6 +128,8 @@ export interface PlannedMemory {
   request: CreateMemoryRequest
   createdAt: Date
   updatedAt: Date
+  // 同一个 Lore 节点写到同一个目标（应用）只导入一次，不论之后在 Kioku 里被删除还是移动
+  importKey: string
   context: Record<string, unknown>
 }
 
@@ -133,6 +140,13 @@ export interface ImportPlan {
   skipped: { source: string; reason: string }[]
   droppedKeywords: { source: string; keyword: string; reason: string }[]
   warnings: string[]
+  // 有这些问题时拒绝执行，例如 --secret 对不上任何节点：照常导入会把凭据写成明文
+  errors: string[]
+}
+
+// 导入事件 context 里记下的去重键：Lore 节点 uuid，加上写入的应用（core://agent/<runtime> 可能写进多个应用）
+export function importKeyOf(context: { loreNodeUuid?: unknown; targetApp?: unknown }): string {
+  return `${String(context.loreNodeUuid)}@${context.targetApp ? String(context.targetApp) : ''}`
 }
 
 const MAX_KEYWORDS = 32
@@ -156,36 +170,64 @@ export function planImport(
     skipped: [],
     droppedKeywords: [],
     warnings: [],
+    errors: [],
   }
 
-  // core://agent/<runtime> 对应的应用：标识相同的应用优先，其次是同一运行时类型的所有应用，都没有就新建
-  const appsByRuntime = new Map<string, AppMapping['apps'] | null>()
-  const appsFor = (runtime: string) => {
-    if (appsByRuntime.has(runtime)) return appsByRuntime.get(runtime)!
-    const slug = runtime.replace(/_/g, '-')
+  // core://agent/<runtime> 对应的应用，只在导入者自己的应用里找：别的成员的应用由他们自己管，
+  // 写进去会进入他们每次会话的启动上下文。标识相同的优先，其次是同一运行时类型的；
+  // 按类型匹配时跳过标识恰好是另一个运行时名的应用，它按标识归那个运行时。都没有就新建
+  const slugOf = (runtime: string) => runtime.replace(/_/g, '-')
+  const runtimes = new Set(
+    snapshot.nodes
+      .map((n) => /^core:\/\/agent\/([^/]+)/.exec(n.uri)?.[1])
+      .filter((r): r is string => !!r),
+  )
+  const own = existingApps.filter((a) => a.ownerAccountId === options.accountId)
+  const appsByRuntime = new Map<string, AppMapping['apps'] | string>()
+  const appsFor = (runtime: string): AppMapping['apps'] | string => {
+    const cached = appsByRuntime.get(runtime)
+    if (cached) return cached
+    const slug = slugOf(runtime)
+    const otherSlugs = new Set([...runtimes].filter((r) => r !== runtime).map(slugOf))
     const family = (RUNTIME_FAMILIES as readonly string[]).includes(runtime)
       ? (runtime as RuntimeFamily)
       : 'other'
-    const bySlug = existingApps.filter((a) => a.slug === slug)
-    const byFamily = existingApps.filter((a) => a.runtimeFamily === runtime)
+    const bySlug = own.filter((a) => a.slug === slug)
+    const byFamily = own.filter((a) => a.runtimeFamily === runtime && !otherSlugs.has(a.slug))
     const matched = bySlug.length ? bySlug : byFamily
-    let mapped: AppMapping['apps'] | null = matched.map((a) => ({
+    let result: AppMapping['apps'] | string = matched.map((a) => ({
       slug: a.slug,
       create: false,
       runtimeFamily: a.runtimeFamily as RuntimeFamily,
     }))
-    if (!mapped.length) {
-      mapped = Slug.safeParse(slug).success ? [{ slug, create: true, runtimeFamily: family }] : null
+    if (!result.length) {
+      if (existingApps.some((a) => a.slug === slug)) {
+        result = `应用标识 ${slug} 已被别的成员占用：先在管理界面建一个自己的、运行时类型为 ${family} 的应用，再重新导入`
+      } else if (!Slug.safeParse(slug).success) {
+        result = `运行时 ${runtime} 无法作为应用标识`
+      } else {
+        result = [{ slug, create: true, runtimeFamily: family }]
+      }
     }
-    appsByRuntime.set(runtime, mapped)
-    if (mapped) plan.apps.push({ runtime, apps: mapped })
-    return mapped
+    appsByRuntime.set(runtime, result)
+    if (typeof result !== 'string') plan.apps.push({ runtime, apps: result })
+    return result
   }
 
-  const sourceUris = new Set(snapshot.nodes.map((n) => n.uri))
-  for (const uri of options.secretUris) {
-    if (!sourceUris.has(uri)) plan.warnings.push(`--secret 指定的 ${uri} 在 Lore 里不存在`)
+  // --secret 也可以写别名；对不上任何节点时拒绝执行，免得拼错一个字就把凭据导成明文
+  const nodeByUri = new Map<string, LoreNode>()
+  for (const node of snapshot.nodes) {
+    nodeByUri.set(node.uri, node)
+    for (const alias of node.aliases) nodeByUri.set(alias, node)
   }
+  const secretNodes = new Set<string>()
+  for (const uri of options.secretUris) {
+    const node = nodeByUri.get(uri)
+    if (node) secretNodes.add(node.uuid)
+    else plan.errors.push(`--secret 指定的 ${uri} 在 Lore 里不存在`)
+  }
+  // 两个节点映射到同一个 URI 时只导入第一个
+  const plannedUris = new Map<string, string>()
 
   for (const node of snapshot.nodes) {
     for (const alias of node.aliases) {
@@ -206,7 +248,7 @@ export function planImport(
     }
 
     const segments = parsed.path.split('/')
-    let targets: { uri: string; layer: Layer }[]
+    let targets: { uri: string; layer: Layer; app?: string }[]
     if (parsed.domain === 'core' && segments[0] === 'soul') {
       targets = [
         {
@@ -216,13 +258,14 @@ export function planImport(
       ]
     } else if (parsed.domain === 'core' && segments[0] === 'agent' && segments.length > 1) {
       const mapped = appsFor(segments[1]!)
-      if (!mapped) {
-        plan.skipped.push({ source: node.uri, reason: `运行时 ${segments[1]} 无法作为应用标识` })
+      if (typeof mapped === 'string') {
+        plan.skipped.push({ source: node.uri, reason: mapped })
         continue
       }
       targets = mapped.map((app) => ({
         uri: formatUri(APP_DOMAIN, [app.slug, 'agent', ...segments.slice(2)].join('/')),
         layer: 'app',
+        app: app.slug,
       }))
     } else if (parsed.domain === 'core') {
       targets = [{ uri: node.uri, layer: 'base' }]
@@ -232,7 +275,7 @@ export function planImport(
       targets = [{ uri: node.uri, layer: 'private' }]
     }
 
-    const secret = options.secretUris.has(node.uri)
+    const secret = secretNodes.has(node.uuid)
     if (!secret && CREDENTIAL_PATH.test(node.uri)) {
       plan.warnings.push(`${node.uri} 看起来是凭据，没有用 --secret 标记`)
     } else if (!secret && CREDENTIAL_CONTENT.test(node.content)) {
@@ -246,6 +289,11 @@ export function planImport(
     const glossary = keywordsOf(node, plan)
 
     for (const target of targets) {
+      const earlier = plannedUris.get(target.uri)
+      if (earlier) {
+        plan.skipped.push({ source: node.uri, reason: `和 ${earlier} 映射到同一个 ${target.uri}` })
+        continue
+      }
       const request = CreateMemoryRequest.safeParse({
         uri: target.uri,
         content: node.content,
@@ -262,17 +310,21 @@ export function planImport(
         })
         continue
       }
+      plannedUris.set(target.uri, node.uri)
+      const context = {
+        source: 'lore',
+        loreUri: node.uri,
+        loreNodeUuid: node.uuid,
+        targetApp: target.app ?? null,
+        previousVersions: node.previousVersions,
+      }
       plan.memories.push({
         source: node.uri,
         request: request.data,
         createdAt: node.createdAt,
         updatedAt: node.updatedAt,
-        context: {
-          source: 'lore',
-          loreUri: node.uri,
-          loreNodeUuid: node.uuid,
-          previousVersions: node.previousVersions,
-        },
+        importKey: importKeyOf(context),
+        context,
       })
     }
   }
@@ -314,11 +366,14 @@ export interface ImportResult {
   // 已经在用别的人格：导入的 core://soul 不会进入它们的启动上下文
   appsOtherPersona: string[]
   created: string[]
-  existing: string[]
+  // 之前导入过的（之后在 Kioku 里删除或移动了的也算），不再重复写入
+  previouslyImported: string[]
+  // URI 已被不是导入产生的记忆占用
+  occupied: string[]
   failed: { uri: string; reason: string }[]
 }
 
-// 按计划写入。可以重复执行：已存在的 URI 跳过，已有的人格与应用直接复用
+// 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用
 export async function applyImport(target: ImportTarget, plan: ImportPlan): Promise<ImportResult> {
   const { db, spaceId, accountId } = target
   const result: ImportResult = {
@@ -327,9 +382,12 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     appsGivenPersona: [],
     appsOtherPersona: [],
     created: [],
-    existing: [],
+    previouslyImported: [],
+    occupied: [],
     failed: [],
   }
+  // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写
+  const blockedApps = new Set<string>()
 
   await withSpace(db, spaceId, async (tx) => {
     const [created] = await tx
@@ -347,8 +405,8 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
           .where(eq(personas.slug, plan.persona.slug))
       )[0]!.id
 
-    // Lore 里所有客户端都读同一个 core://soul，所以对应的应用都用导入的人格。
-    // 已有的应用只在还没有默认人格、且属于导入者时才设置，不改别人的配置
+    // Lore 里所有客户端都读同一个 core://soul，所以对应的应用都用导入的人格；
+    // 已有的应用只在还没有默认人格时设置
     for (const mapping of plan.apps) {
       for (const app of mapping.apps) {
         if (app.create) {
@@ -364,32 +422,42 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
             })
             .onConflictDoNothing()
             .returning({ slug: apps.slug })
-          if (rows.length) result.appsCreated.push(app.slug)
-        } else {
-          const rows = await tx
-            .update(apps)
-            .set({ defaultPersonaId: personaId, updatedAt: new Date() })
-            .where(
-              and(
-                eq(apps.slug, app.slug),
-                isNull(apps.defaultPersonaId),
-                eq(apps.ownerAccountId, accountId),
-              ),
-            )
-            .returning({ slug: apps.slug })
           if (rows.length) {
-            result.appsGivenPersona.push(app.slug)
+            result.appsCreated.push(app.slug)
             continue
           }
-          const [current] = await tx
-            .select({ personaId: apps.defaultPersonaId })
-            .from(apps)
+        }
+        const [current] = await tx
+          .select({ owner: apps.ownerAccountId, personaId: apps.defaultPersonaId })
+          .from(apps)
+          .where(eq(apps.slug, app.slug))
+          .for('update')
+        if (current?.owner !== accountId) {
+          blockedApps.add(app.slug)
+        } else if (current.personaId === null) {
+          await tx
+            .update(apps)
+            .set({ defaultPersonaId: personaId, updatedAt: new Date() })
             .where(eq(apps.slug, app.slug))
-          if (current?.personaId !== personaId) result.appsOtherPersona.push(app.slug)
+          result.appsGivenPersona.push(app.slug)
+        } else if (current.personaId !== personaId) {
+          result.appsOtherPersona.push(app.slug)
         }
       }
     }
   })
+
+  const imported = await withSpace(db, spaceId, (tx) =>
+    tx
+      .select({ context: memoryEvents.context })
+      .from(memoryEvents)
+      .where(
+        and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
+      ),
+  )
+  const done = new Set(
+    imported.map((e) => importKeyOf(e.context as { loreNodeUuid?: unknown; targetApp?: unknown })),
+  )
 
   // 按空间 owner 的管理界面权限写入，来源记为 system
   const service = new MemoryService({
@@ -401,12 +469,14 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     actor: { accountId },
   })
   for (const item of plan.memories) {
-    try {
-      await service.get(item.request.uri)
-      result.existing.push(item.request.uri)
+    const app = item.context.targetApp
+    if (typeof app === 'string' && blockedApps.has(app)) {
+      result.failed.push({ uri: item.request.uri, reason: `应用 ${app} 不属于导入者，没有写入` })
       continue
-    } catch (err) {
-      if (!(err instanceof MemoryError) || err.status !== 404) throw err
+    }
+    if (done.has(item.importKey)) {
+      result.previouslyImported.push(item.request.uri)
+      continue
     }
     try {
       await service.create(item.request, {
@@ -418,8 +488,41 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
       result.created.push(item.request.uri)
     } catch (err) {
       if (!(err instanceof MemoryError)) throw err
-      result.failed.push({ uri: item.request.uri, reason: err.message })
+      if (err.status === 409) result.occupied.push(item.request.uri)
+      else result.failed.push({ uri: item.request.uri, reason: err.message })
     }
   }
   return result
+}
+
+// 导入 secret 之前确认主密钥和服务用的是同一把：库里已有加密数据时试着解密一条。
+// 返回 false 表示库里还没有加密数据、没法确认；对不上时抛错
+export async function verifyMasterKey(
+  db: Db,
+  spaceId: string,
+  masterKey: Buffer,
+): Promise<boolean> {
+  try {
+    if (await loadEmbeddingConfig(db, masterKey).then((c) => c?.apiKey)) return true
+  } catch {
+    throw new Error('KIOKU_MASTER_KEY 解不开已保存的嵌入接口 Key：它和服务使用的主密钥不一致')
+  }
+  const [sealed] = await withSpace(db, spaceId, (tx) =>
+    tx
+      .select({ id: memories.id, ciphertext: memories.ciphertext, wrappedKey: memories.wrappedKey })
+      .from(memories)
+      .where(and(isNotNull(memories.ciphertext), isNotNull(memories.wrappedKey)))
+      .limit(1),
+  )
+  if (!sealed) return false
+  try {
+    decryptSecret(
+      masterKey,
+      { ciphertext: sealed.ciphertext!, wrappedKey: sealed.wrappedKey! },
+      sealed.id,
+    )
+    return true
+  } catch {
+    throw new Error('KIOKU_MASTER_KEY 解不开已有的 secret 记忆：它和服务使用的主密钥不一致')
+  }
 }

@@ -10,8 +10,8 @@ import { withSpace, type Database } from '../../db/client'
 import { apps, memories, memoryEvents, personas } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { bearer, bootstrap, type Workspace } from '../../testing/fixtures'
-import { applyImport, planImport, readLore, type ImportPlan } from '../lore'
+import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { applyImport, planImport, readLore, verifyMasterKey, type ImportPlan } from '../lore'
 
 // 在测试库里建一个只含导入用到的几张表的 Lore，结构取自 Lore 的 000_initial_schema.sql
 const LORE_SCHEMA = `
@@ -104,9 +104,16 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
   const plan = async (): Promise<ImportPlan> => {
     const existing = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select({ slug: apps.slug, runtimeFamily: apps.runtimeFamily }).from(apps),
+      tx
+        .select({
+          slug: apps.slug,
+          runtimeFamily: apps.runtimeFamily,
+          ownerAccountId: apps.ownerAccountId,
+        })
+        .from(apps),
     )
     return planImport(await readLore(lore), existing, {
+      accountId: ws.accountId,
       persona: { slug: 'default', name: '默认人格' },
       secretUris: new Set(['infra://home_network/credentials']),
     })
@@ -185,13 +192,60 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     expect(zcode).toMatchObject({ runtimeFamily: 'other', defaultPersonaId: persona!.id })
   })
 
-  it('重复执行只跳过，不重复写入', async () => {
+  it('重复执行只跳过，不重复写入；导入后删除或移动了的也不会被写回来', async () => {
     await run()
+    const viaConsole = (method: string, body: unknown) =>
+      app.request(
+        `/v1/spaces/${ws.spaceId}/memories${method === 'POST' ? '/move' : ''}`,
+        jsonRequest(method, body, { cookie: ws.cookie }),
+      )
+    await app.request(
+      `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('infra://home_network/credentials')}`,
+      { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
+    )
+    expect(
+      (await viaConsole('POST', { from: 'infra://home_network', to: 'infra://network' })).status,
+    ).toBe(200)
+
     const again = await run()
     expect(again.created).toEqual([])
-    expect(again.existing).toHaveLength(7)
+    expect(again.previouslyImported).toHaveLength(7)
     expect(again.personaCreated).toBe(false)
     expect(again.appsCreated).toEqual([])
+    const live = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ path: memories.path, deletedAt: memories.deletedAt }).from(memories),
+    )
+    expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain('home_network')
+    expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain(
+      'home_network/credentials',
+    )
+  })
+
+  it('别的成员的同类应用不会被写入，导入者另建自己的应用', async () => {
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bobApp = await app.request(
+      `/v1/spaces/${ws.spaceId}/apps`,
+      jsonRequest(
+        'POST',
+        { slug: 'bob-cc', name: 'bob-cc', runtimeFamily: 'claudecode' },
+        { cookie: bob.cookie },
+      ),
+    )
+    expect(bobApp.status).toBe(201)
+    const result = await run()
+    expect(result.created).toContain('app://claudecode/agent')
+    const appRows = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ path: memories.path }).from(memories).where(eq(memories.domain, 'app')),
+    )
+    expect(appRows.some((r) => r.path?.startsWith('bob-cc'))).toBe(false)
+  })
+
+  it('主密钥和导入时用的不一致时拒绝', async () => {
+    await run()
+    expect(await verifyMasterKey(database.db, ws.spaceId, masterKey)).toBe(true)
+    await expect(verifyMasterKey(database.db, ws.spaceId, randomBytes(32))).rejects.toThrow(
+      '不一致',
+    )
   })
 
   it('导入后 Claude Code 的启动上下文与 Lore 一致：基础、人格、本应用与主人画像', async () => {

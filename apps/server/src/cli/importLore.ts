@@ -12,6 +12,7 @@ import {
   applyImport,
   planImport,
   readLore,
+  verifyMasterKey,
   type ImportPlan,
   type ImportResult,
 } from '../importer/lore'
@@ -78,9 +79,16 @@ async function main(): Promise<void> {
     const lore = postgres(loreUrl, { max: 1, onnotice: () => {} })
     const snapshot = await readLore(lore).finally(() => lore.end())
     const existingApps = await withSpace(database.db, spaceId, (tx) =>
-      tx.select({ slug: apps.slug, runtimeFamily: apps.runtimeFamily }).from(apps),
+      tx
+        .select({
+          slug: apps.slug,
+          runtimeFamily: apps.runtimeFamily,
+          ownerAccountId: apps.ownerAccountId,
+        })
+        .from(apps),
     )
     const plan = planImport(snapshot, existingApps, {
+      accountId,
       persona: { slug: values.persona, name: values['persona-name'] },
       secretUris: new Set(values.secret),
     })
@@ -91,9 +99,22 @@ async function main(): Promise<void> {
         (snapshot.recallEvents === null ? '' : `；${snapshot.recallEvents} 条召回事件不迁移`),
     )
     printPlan(plan)
+    if (plan.errors.length) {
+      console.error(`\n计划有错误，不能执行：\n${plan.errors.map((e) => `  ${e}`).join('\n')}`)
+      process.exitCode = 2
+      return
+    }
     if (!values.apply) {
       console.log('\n以上是导入计划，没有写入任何数据。确认无误后加 --apply 执行。')
       return
+    }
+    // 有 secret 时，写入任何东西之前先确认主密钥可用、且和服务用的是同一把
+    if (plan.memories.some((m) => m.request.sensitivity === 'secret')) {
+      if (!config.masterKey)
+        throw new UsageError('要导入 secret，需要设置与服务相同的 KIOKU_MASTER_KEY')
+      if (!(await verifyMasterKey(database.db, spaceId, config.masterKey))) {
+        console.warn('库里还没有加密过的数据，无法确认 KIOKU_MASTER_KEY 与服务一致，请自行核对')
+      }
     }
 
     const result = await applyImport(
@@ -186,7 +207,11 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
       `  这些应用在用别的人格，core://soul 不会进入它们的启动上下文：${result.appsOtherPersona.join('、')}`,
     )
   }
-  console.log(`  新建记忆 ${result.created.length} 条，已存在跳过 ${result.existing.length} 条`)
+  console.log(
+    `  新建记忆 ${result.created.length} 条；之前导入过、跳过 ${result.previouslyImported.length} 条` +
+      `（包括导入后在 Kioku 里删除或移动了的）`,
+  )
+  for (const uri of result.occupied) console.log(`  跳过 ${uri}：URI 已被别的记忆占用`)
   for (const f of result.failed) console.log(`  失败 ${f.uri}：${f.reason}`)
   if (result.appsCreated.length) {
     console.log('  新建的应用还没有 Key：在管理界面「应用与 Key」里为要接入的应用签发')

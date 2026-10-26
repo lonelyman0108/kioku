@@ -17,7 +17,12 @@ const node = (uri: string, extra: Partial<LoreNode> = {}): LoreNode => ({
   ...extra,
 })
 const snapshot = (...nodes: LoreNode[]): LoreSnapshot => ({ nodes, recallEvents: null })
-const options = { persona: { slug: 'default', name: '默认人格' }, secretUris: new Set<string>() }
+const ME = 'me'
+const options = {
+  accountId: ME,
+  persona: { slug: 'default', name: '默认人格' },
+  secretUris: new Set<string>(),
+}
 
 describe('Lore 导入计划', () => {
   it('按 domain 映射到层，core://soul 进人格、core://agent/<runtime> 进应用', () => {
@@ -50,8 +55,8 @@ describe('Lore 导入计划', () => {
         node('core://agent/open_claw/tools'),
       ),
       [
-        { slug: 'claude-code', runtimeFamily: 'claudecode' },
-        { slug: 'claude-laptop', runtimeFamily: 'claudecode' },
+        { slug: 'claude-code', runtimeFamily: 'claudecode', ownerAccountId: ME },
+        { slug: 'claude-laptop', runtimeFamily: 'claudecode', ownerAccountId: ME },
       ],
       options,
     )
@@ -74,16 +79,70 @@ describe('Lore 导入计划', () => {
     ])
   })
 
-  it('标成 secret 的导入为 secret，像凭据却没标的给出提醒', () => {
+  it('只用导入者自己的应用：别人的同类应用不写，别人占了同名标识时跳过并说明', () => {
+    const plan = planImport(
+      snapshot(node('core://agent/claudecode'), node('core://agent/codex')),
+      [
+        { slug: 'bob-cc', runtimeFamily: 'claudecode', ownerAccountId: 'bob' },
+        { slug: 'codex', runtimeFamily: 'codex', ownerAccountId: 'bob' },
+      ],
+      options,
+    )
+    expect(plan.memories.map((m) => m.request.uri)).toEqual(['app://claudecode/agent'])
+    expect(plan.apps).toEqual([
+      {
+        runtime: 'claudecode',
+        apps: [{ slug: 'claudecode', create: true, runtimeFamily: 'claudecode' }],
+      },
+    ])
+    expect(plan.skipped).toEqual([
+      {
+        source: 'core://agent/codex',
+        reason:
+          '应用标识 codex 已被别的成员占用：先在管理界面建一个自己的、运行时类型为 codex 的应用，再重新导入',
+      },
+    ])
+  })
+
+  it('按类型匹配时不用标识归另一个运行时的应用；映射到同一个 URI 时只导入第一个', () => {
+    const plan = planImport(
+      snapshot(node('core://agent/claudecode'), node('core://agent/zcode')),
+      [
+        { slug: 'claude-code', runtimeFamily: 'claudecode', ownerAccountId: ME },
+        { slug: 'zcode', runtimeFamily: 'claudecode', ownerAccountId: ME },
+      ],
+      options,
+    )
+    expect(plan.memories.map((m) => [m.source, m.request.uri])).toEqual([
+      ['core://agent/claudecode', 'app://claude-code/agent'],
+      ['core://agent/zcode', 'app://zcode/agent'],
+    ])
+
+    const twice = planImport(
+      snapshot(
+        node('core://soul'),
+        node('persona://default/soul'),
+        node('core://soul', { uuid: 'x' }),
+      ),
+      [],
+      options,
+    )
+    expect(twice.memories).toHaveLength(1)
+    expect(twice.skipped.map((s) => s.reason)).toContain(
+      '和 core://soul 映射到同一个 persona://default/soul',
+    )
+  })
+
+  it('标成 secret 的导入为 secret（也可以写别名），对不上的 --secret 是错误；像凭据却没标的给出提醒', () => {
     const plan = planImport(
       snapshot(
-        node('infra://home_network/credentials'),
+        node('infra://home_network/credentials', { aliases: ['infra://router/credentials'] }),
         node('infra://vault/token'),
         node('infra://pve', { content: 'root 密码：hunter2' }),
         node('infra://notes', { content: '密码要同步到 Vaultwarden' }),
       ),
       [],
-      { ...options, secretUris: new Set(['infra://home_network/credentials', 'infra://nope']) },
+      { ...options, secretUris: new Set(['infra://router/credentials', 'infra://nope']) },
     )
     expect(plan.memories.map((m) => m.request.sensitivity)).toEqual([
       'secret',
@@ -91,8 +150,8 @@ describe('Lore 导入计划', () => {
       undefined,
       undefined,
     ])
+    expect(plan.errors).toEqual(['--secret 指定的 infra://nope 在 Lore 里不存在'])
     expect(plan.warnings).toEqual([
-      '--secret 指定的 infra://nope 在 Lore 里不存在',
       'infra://vault/token 看起来是凭据，没有用 --secret 标记',
       'infra://pve 的正文里像有密码或 Token，没有用 --secret 标记',
     ])
@@ -160,7 +219,9 @@ describe('Lore 导入计划', () => {
       source: 'lore',
       loreUri: 'projects://kioku',
       loreNodeUuid: 'projects://kioku',
+      targetApp: null,
       previousVersions: 4,
     })
+    expect(m!.importKey).toBe('projects://kioku@')
   })
 })
