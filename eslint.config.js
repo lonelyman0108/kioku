@@ -26,7 +26,7 @@ export default tseslint.config(
     languageOptions: { globals: globals.browser },
   },
   {
-    files: ['apps/server/**', 'packages/**', '*.js', '*.ts'],
+    files: ['apps/server/**', 'packages/**', 'plugins/**', '*.js', '*.ts'],
     languageOptions: { globals: globals.node },
   },
   // Prettier 负责排版：关掉所有与它冲突的格式类规则（包括 eslint-plugin-vue 的模板排版规则）
