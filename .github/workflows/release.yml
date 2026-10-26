@@ -1,0 +1,26 @@
+# 推送 vX.Y.Z tag 后：跑完整门禁，再建或更新 GitHub Release，正文取 CHANGELOG.md 里对应版本的一节。
+# tag 只由维护者打；不写 concurrency（避免误取消排队中的 job）。
+name: Release
+on:
+  push:
+    tags: ['v*']
+permissions:
+  contents: write
+# run 一律用 bash（-eo pipefail），不依赖 runner 镜像的默认 shell
+defaults:
+  run:
+    shell: bash
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: 门禁
+        run: scripts/check.sh --full
+      - name: Release 页
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: scripts/ci/release-page.sh "$GITHUB_REF_NAME"

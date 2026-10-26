@@ -1,0 +1,27 @@
+#!/usr/bin/env bash
+# 暂存区秒级快检：注释里的流程编号、疑似密钥。编译、测试等耗时检查放在 scripts/check.sh。
+set -u
+root=$(git rev-parse --show-toplevel) || exit 1
+
+lint=
+for p in scripts/lint/comments.sh scripts/lint-comments.sh; do
+  if [ -x "$root/$p" ]; then lint="$root/$p"; break; fi
+done
+if [ -n "$lint" ]; then
+  "$lint" --staged || exit 1
+fi
+
+# gitleaks 是可选工具：没装就跳过，CI 与发布闸门不依赖这一道
+if command -v gitleaks >/dev/null 2>&1; then
+  # 8.19 起暂存区扫描改为 gitleaks git --staged，旧的 protect 子命令已弃用；两种版本都兼容
+  if gitleaks git --help 2>/dev/null | grep -q -- '--staged'; then
+    leaks=(gitleaks git --staged --no-banner --redact --log-level warn "$root")
+  else
+    leaks=(gitleaks protect --staged --no-banner --redact --log-level warn --source "$root")
+  fi
+  if ! "${leaks[@]}"; then
+    echo "gitleaks 在暂存区发现疑似密钥。确认是误报时，在 .gitleaks.toml 的 allowlist 里登记，或在该行加 gitleaks:allow" >&2
+    exit 1
+  fi
+fi
+exit 0
