@@ -71,6 +71,13 @@
       "when": 1793021908919,
       "tag": "0009_uri_exclusive_expired",
       "breakpoints": true
+    },
+    {
+      "idx": 10,
+      "version": "7",
+      "when": 1793025684928,
+      "tag": "0010_scrub_secret_history",
+      "breakpoints": true
     }
   ]
 }

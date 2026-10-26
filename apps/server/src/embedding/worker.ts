@@ -64,6 +64,17 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
   }
 
   let written = 0
+  // 没有要写的也没有要删的，就不必锁行；只剩换模型后的旧向量清理
+  if (!pending.length && !stale.length) {
+    await withSpace(db, spaceId, (tx) =>
+      tx
+        .delete(memoryEmbeddings)
+        .where(
+          and(inArray(memoryEmbeddings.memoryId, ids), ne(memoryEmbeddings.model, embedder.model)),
+        ),
+    )
+    return 0
+  }
   await withSpace(db, spaceId, async (tx) => {
     // 请求嵌入期间记忆可能又被改过（例如改成了 secret）：锁住这些行，updated_at 变了的不写回，
     // 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态

@@ -61,7 +61,9 @@
 - 读权限的规则有两份：`access/access.ts` 的 `canRead`（单条判断）和 `memory/filter.ts` 的 `readableConditions`（SQL）。改一边必须改另一边，`filter.int.test.ts` 会逐条比对。
 - boot 会被宿主当作指令级上下文，只能收受信来源的策展层（`recall/boot.ts` 的 `BOOT_LAYERS` 与 provenance 过滤）。召回块里的线索文本要经 `inlineText` 处理。原因：群聊写入的内容不能变成主人 agent 的指令。
 - URI 要么是共享的，要么按成员各自占用（owner、private 层），二者不共存；`claimUri`、唯一索引 `memories_uri_live_idx` 与触发器 `memories_uri_exclusive` 的规则必须一致。已知代价：写共享节点撞上别的成员的私人 URI 时返回 409，写入方能知道这个 URI 被占用（不含内容）。
-- 部署在反向代理后面时要设 `KIOKU_TRUST_PROXY=true`，登录闸门才能按真实客户端地址分配名额；不在代理后面时不要打开，否则 `X-Forwarded-For` 可以伪造。
+- 部署在反向代理后面时要设 `KIOKU_TRUSTED_PROXIES=<受信代理层数>`，登录限流才能按真实客户端区分；客户端地址从 `X-Forwarded-For` 右边数，最左边的项由请求方填写、可以伪造。不在代理后面时保持 0。分不清客户端时，失败计数退回按用户名、闸门只用全局名额。
+- 迁移里要改 FORCE RLS 的表（`RLS_TABLES`）时，迁移连接没有设置 `app.space_id`，UPDATE / DELETE 会被策略过滤成零行而不报错；需要先 `NO FORCE`、改完再 `FORCE`（见 0010 迁移）。drizzle 把所有待执行的迁移放在一个事务里，中途失败会整体回滚。
+- Key 的有效上限 = 签发时的 scopes 再按应用主人当前角色收紧（`clampScopesToRole`）；主人离开空间后 Key 作废。
 - 树浏览由调用方读得到的后代推出，路径本身没有记忆的一级显示为虚拟节点（`exists: false`），所以不要求父节点存在、也不限制删除或移动父节点。原因：父子可见性受层、敏感级、来源作用域、成员、有效期共同影响，强制「看得到子就看得到父」会不断出现漏洞。
 - 应用的权限按应用主人算，所以只有应用主人能改应用配置、签发和查看它的 Key；空间 owner 只能吊销。
 - 记忆接口对「读不到」和「不存在」都返回 404，不要改成 403。原因：403 会暴露这里有一条调用方看不见的记忆。

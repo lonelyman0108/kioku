@@ -1,12 +1,20 @@
 import { randomBytes } from 'node:crypto'
+import { readFileSync } from 'node:fs'
 
 import type { CreatedKey, MemoryChildren, MemoryView } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memories, memoryEmbeddings, memoryEvents, settings } from '../../db/schema'
+import {
+  apiKeys,
+  memories,
+  memoryEmbeddings,
+  memoryEvents,
+  settings,
+  spaceMembers,
+} from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { embedMemory } from '../../embedding/worker'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
@@ -155,24 +163,12 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
   })
 
   it('并发登录也只放行 5 次尝试', async () => {
-    // 每个请求来自不同的客户端地址（文档专用网段），避开按客户端的并发上限，只测失败计数本身
-    const proxied = createApp({
-      db: database.db,
-      cookieSecure: false,
-      masterKey,
-      embedder: staticEmbedderSource(null),
-      jobs: null,
-      trustProxy: true,
-    })
+    // 分不清客户端时（这里没有底层连接），失败计数只按用户名，并发请求也只放行 5 次
     const results = await Promise.all(
-      Array.from({ length: 20 }, (_, i) =>
-        proxied.request(
+      Array.from({ length: 20 }, () =>
+        app.request(
           '/v1/auth/login',
-          jsonRequest(
-            'POST',
-            { username: 'alice', password: 'wrong' },
-            { 'x-forwarded-for': `203.0.113.${i + 1}` },
-          ),
+          jsonRequest('POST', { username: 'alice', password: 'wrong' }),
         ),
       ),
     )
@@ -465,5 +461,120 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
       })
     })
     expect(((await (await get(key, 'home://old')).json()) as MemoryView).content).toBe('新')
+  })
+  const proxiedApp = () =>
+    createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey,
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+      trustedProxies: 1,
+    })
+  const loginFrom = (
+    target: ReturnType<typeof createApp>,
+    forwardedFor: string,
+    password: string,
+  ) =>
+    target.request(
+      '/v1/auth/login',
+      jsonRequest('POST', { username: 'alice', password }, { 'x-forwarded-for': forwardedFor }),
+    )
+
+  it('别人连输密码只锁住他自己那一路，主人从别处仍能登录', async () => {
+    const proxied = proxiedApp()
+    for (let i = 0; i < 5; i++)
+      expect((await loginFrom(proxied, '203.0.113.66', 'wrong')).status).toBe(401)
+    expect((await loginFrom(proxied, '203.0.113.66', 'correct horse battery')).status).toBe(429)
+    expect((await loginFrom(proxied, '203.0.113.10', 'correct horse battery')).status).toBe(200)
+  })
+
+  it('伪造 X-Forwarded-For 最左边的项绕不过限流', async () => {
+    const proxied = proxiedApp()
+    for (let i = 0; i < 5; i++) {
+      expect((await loginFrom(proxied, `198.51.100.${i}, 203.0.113.66`, 'wrong')).status).toBe(401)
+    }
+    expect(
+      (await loginFrom(proxied, '198.51.100.99, 203.0.113.66', 'correct horse battery')).status,
+    ).toBe(429)
+  })
+  it('应用主人被降级后，他签的 Key 随之收紧；离开空间后 Key 作废', async () => {
+    const appId = (await ws.createApp('agent')).id
+    const key = await ws.issueKey(appId)
+    await create(key, { uri: 'home://wifi', content: 'hunter2', sensitivity: 'secret' })
+    expect((await get(key, 'home://wifi')).status).toBe(200)
+
+    // 另找一位 owner，再把原 owner 降成 editor
+    await addMember(database.db, ws.spaceId, 'olga', 'owner')
+    await database.db
+      .update(spaceMembers)
+      .set({ role: 'editor' })
+      .where(and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, ws.accountId)))
+    expect((await get(key, 'home://wifi')).status).toBe(404)
+    const who = (await (await app.request('/v1/whoami', { headers: bearer(key) })).json()) as {
+      scopes: { maxSensitivity: string; admin: boolean }
+    }
+    expect(who.scopes).toMatchObject({ maxSensitivity: 'private', admin: false })
+
+    await database.db
+      .delete(spaceMembers)
+      .where(and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, ws.accountId)))
+    expect((await app.request('/v1/whoami', { headers: bearer(key) })).status).toBe(401)
+  })
+
+  it('签发 Key 与转移所有权并发时，转移之后不会留下前任主人的有效 Key', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    for (let round = 0; round < 6; round++) {
+      const bApp = await appAs(b.cookie, `b-agent-${round}`)
+      const [, transfer] = await Promise.all([
+        keyAs(b.cookie, bApp),
+        app.request(
+          `/v1/spaces/${ws.spaceId}/apps/${bApp}`,
+          jsonRequest('PATCH', { ownerAccountId: ws.accountId }, { cookie: ws.cookie }),
+        ),
+      ])
+      expect(transfer.status).toBe(200)
+      const live = await database.db
+        .select({ id: apiKeys.id })
+        .from(apiKeys)
+        .where(and(eq(apiKeys.appId, bApp), isNull(apiKeys.revokedAt)))
+      expect(live).toEqual([])
+    }
+  })
+
+  it('历史清理迁移在 RLS 下也能清掉旧 secret 事件里的明文', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const res = await create(key, {
+      uri: 'home://router',
+      content: '管理密码 hunter2',
+      sensitivity: 'secret',
+    })
+    const id = ((await res.json()) as { id: string }).id
+    // 模拟清理上线之前留下的事件：快照里还有明文与全文向量
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memoryEvents).values({
+        spaceId: ws.spaceId,
+        memoryId: id,
+        eventType: 'update',
+        provenance: 'agent',
+        before: { content: '管理密码 hunter2', fts: "'hunter2':2" },
+        after: { content: null },
+      }),
+    )
+    const migration = readFileSync(
+      new URL('../../../migrations/0010_scrub_secret_history.sql', import.meta.url),
+      'utf8',
+    )
+    await database.db.transaction(async (tx) => {
+      for (const statement of migration.split('--> statement-breakpoint')) {
+        if (statement.replace(/--.*$/gm, '').trim()) await tx.execute(sql.raw(statement))
+      }
+    })
+    const events = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEvents))
+    expect(JSON.stringify(events)).not.toContain('hunter2')
+    const forced = await database.db.execute<{ relname: string; relforcerowsecurity: boolean }>(
+      sql`select relname, relforcerowsecurity from pg_class where relname in ('memories', 'memory_events')`,
+    )
+    expect(forced.every((r) => r.relforcerowsecurity)).toBe(true)
   })
 })
