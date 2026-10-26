@@ -599,4 +599,61 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
       await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings)),
     ).toHaveLength(0)
   })
+  it('别人从很多地址乱试密码，主人在登录过的设备上仍能登录', async () => {
+    const proxied = proxiedApp()
+    // 主人先在自己的设备上成功登录一次，拿到设备 Cookie
+    const first = await loginFrom(proxied, '203.0.113.200', 'correct horse battery')
+    const device = first.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('kioku_device='))!
+      .split(';')[0]!
+    // 攻击者从 11 个地址各输错 5 次，把「用户名合计」推过上限
+    for (let ip = 1; ip <= 11; ip++) {
+      for (let i = 0; i < 5; i++) await loginFrom(proxied, `198.51.100.${ip}`, 'wrong')
+    }
+    // 没有设备 Cookie 的新地址被挡住，带着设备 Cookie 的主人照常登录
+    expect((await loginFrom(proxied, '203.0.113.201', 'correct horse battery')).status).toBe(429)
+    const owner = await proxied.request(
+      '/v1/auth/login',
+      jsonRequest(
+        'POST',
+        { username: 'alice', password: 'correct horse battery' },
+        { 'x-forwarded-for': '203.0.113.202', cookie: device },
+      ),
+    )
+    expect(owner.status).toBe(200)
+  })
+
+  it('伪造的设备 Cookie 不起作用', async () => {
+    const proxied = proxiedApp()
+    for (let ip = 1; ip <= 11; ip++) {
+      for (let i = 0; i < 5; i++) await loginFrom(proxied, `198.51.100.${ip}`, 'wrong')
+    }
+    const forged = await proxied.request(
+      '/v1/auth/login',
+      jsonRequest(
+        'POST',
+        { username: 'alice', password: 'correct horse battery' },
+        {
+          'x-forwarded-for': '203.0.113.202',
+          cookie: `kioku_device=${ws.accountId}.${Math.floor(Date.now() / 1000)}.forged`,
+        },
+      ),
+    )
+    expect(forged.status).toBe(429)
+  })
+
+  it('主人离开空间又被重新加入后，旧 Key 不会恢复', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bApp = await appAs(b.cookie, 'b-agent')
+    const oldKey = ((await (await keyAs(b.cookie, bApp)).json()) as CreatedKey).key
+    await database.db
+      .delete(spaceMembers)
+      .where(and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, b.accountId)))
+    await new Promise((r) => setTimeout(r, 5))
+    await database.db
+      .insert(spaceMembers)
+      .values({ spaceId: ws.spaceId, accountId: b.accountId, role: 'editor' })
+    expect((await app.request('/v1/whoami', { headers: bearer(oldKey) })).status).toBe(401)
+  })
 })

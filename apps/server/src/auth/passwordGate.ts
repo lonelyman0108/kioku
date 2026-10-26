@@ -11,7 +11,7 @@ const perClient = new Map<string, number>()
 
 export class PasswordGateBusy extends Error {}
 
-// client 为 null 表示分不清客户端（例如在没有配置的代理后面）：此时只用全局闸门
+// client 为 null 表示拿不到客户端地址（没有底层连接，例如测试）：此时只用全局闸门
 export async function withPasswordGate<T>(client: string | null, fn: () => Promise<T>): Promise<T> {
   const key = client ?? ''
   const mine = client === null ? 0 : (perClient.get(key) ?? 0)
