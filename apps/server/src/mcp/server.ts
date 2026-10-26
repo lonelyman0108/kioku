@@ -1,13 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import { Keyword, Layer, MemoryUri, Sensitivity } from '@kioku/contracts'
+import { Keyword, Layer, MemoryUri, RecallRequest, Sensitivity } from '@kioku/contracts'
 import { z } from 'zod'
 
 import type { RecallScope } from '../lifecycle/scope'
 import { GUIDANCE } from '../lifecycle/lifecycle'
 import { MemoryError, type MemoryService } from '../memory/service'
-import { boot, formatBootBlock } from '../recall/boot'
-import { embedQuery, formatRecallBlock, recall } from '../recall/recall'
+import { formatBootBlock } from '../recall/boot'
+import { formatRecallBlock } from '../recall/recall'
 import { VERSION } from '../version'
 import { formatChildren, formatDomains, formatMemory } from './format'
 
@@ -34,13 +34,7 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         '读取启动基线：使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时调用一次。',
       annotations: { readOnlyHint: true },
     },
-    () =>
-      tool(async () =>
-        formatBootBlock(
-          await scope.run((tx, personaIds) => boot(tx, scope.access, personaIds)),
-          GUIDANCE,
-        ),
-      ),
+    () => tool(async () => formatBootBlock(await scope.boot(), GUIDANCE)),
   )
 
   server.registerTool(
@@ -48,21 +42,14 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
     {
       description: '按语义、全文和关键词搜索记忆，返回候选 URI 与线索；需要正文时再用 kioku_get。',
       inputSchema: {
-        query: z.string().min(1).describe('要找的内容，用自然语言描述'),
+        query: RecallRequest.shape.query.describe('要找的内容，用自然语言描述'),
         limit: z.number().int().min(1).max(30).optional().describe('最多返回几条，默认 10'),
       },
       annotations: { readOnlyHint: true },
     },
     ({ query, limit }) =>
       tool(async () => {
-        const semantic = await embedQuery(await scope.embedder(), query)
-        const candidates = await scope.run((tx, personaIds) =>
-          recall(tx, scope.access, semantic, query, {
-            limit: limit ?? 10,
-            personaIds,
-            minScore: 0,
-          }),
-        )
+        const candidates = await scope.recall(query, { limit: limit ?? 10, minScore: 0 })
         return formatRecallBlock(candidates) || '没有找到相关记忆'
       }),
   )

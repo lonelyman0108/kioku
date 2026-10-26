@@ -38,12 +38,15 @@ export type BootResponse = z.infer<typeof BootResponse>
 export const LIFECYCLE_EVENTS = ['session.start', 'prompt.submit'] as const
 export const LifecycleEventName = z.enum(LIFECYCLE_EVENTS)
 
-export const LifecycleEvent = z.object({
-  event: LifecycleEventName,
-  sessionId: z.string().max(200).optional(),
-  // prompt.submit 必填
-  prompt: z.string().max(20_000).optional(),
-})
+// 按事件区分字段：prompt.submit 缺 prompt 时直接 400，不让插件的字段错误变成悄无声息的「没有召回」
+export const LifecycleEvent = z.discriminatedUnion('event', [
+  z.object({ event: z.literal('session.start'), sessionId: z.string().max(200).optional() }),
+  z.object({
+    event: z.literal('prompt.submit'),
+    sessionId: z.string().max(200).optional(),
+    prompt: z.string().min(1).max(20_000),
+  }),
+])
 export type LifecycleEvent = z.infer<typeof LifecycleEvent>
 
 export const HostOutput = z.object({

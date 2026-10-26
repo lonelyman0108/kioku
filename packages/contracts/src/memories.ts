@@ -11,7 +11,8 @@ export const MemoryUri = z
   .regex(URI_PATTERN, 'URI 格式应为 domain://path，例如 core://agent')
 export const DomainOrUri = z.string().min(1)
 
-export const Keyword = z.string().trim().min(1).max(64)
+// 至少两个字：召回按子串匹配关键词，单字几乎会命中所有提示语
+export const Keyword = z.string().trim().min(2, '关键词至少两个字').max(64)
 
 export const MemoryView = z.object({
   id: z.uuid(),

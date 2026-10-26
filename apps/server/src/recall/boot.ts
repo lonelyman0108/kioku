@@ -1,5 +1,5 @@
 import type { BootResponse, Layer } from '@kioku/contracts'
-import { and, asc, inArray, lte, or, eq } from 'drizzle-orm'
+import { and, asc, eq, inArray, lte, ne, or } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
 import type { Tx } from '../db/client'
@@ -9,7 +9,9 @@ import { formatUri } from '../memory/uri'
 
 // boot 是会话开始时注入的固定基线：所有可读的 priority 0 节点，加上当前人格与本应用 priority ≤ 1 的节点。
 // 按层排序（基础规则在前、个人信息在后），超出字数预算的只列 URI，模型需要时再读。
-const LAYER_ORDER: Layer[] = ['base', 'persona', 'app', 'owner', 'private', 'subject', 'episode']
+// boot 会被宿主当作指令级上下文，所以只收受信来源的策展层：对象与情节层、以及 untrusted 写入的内容一律不进，
+// 否则群聊里的人可以把一条 priority 0 的「记忆」变成主人 agent 每次会话都读到的指令。
+const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
 export const BOOT_CHAR_BUDGET = 16_000
 
 export async function boot(
@@ -31,6 +33,8 @@ export async function boot(
       and(
         readableConditions(access, { personaIds }),
         eq(memories.form, 'curated'),
+        inArray(memories.layer, BOOT_LAYERS),
+        ne(memories.provenance, 'untrusted'),
         or(
           eq(memories.priority, 0),
           and(inArray(memories.layer, ['persona', 'app']), lte(memories.priority, 1)),
@@ -39,7 +43,7 @@ export async function boot(
     )
     .orderBy(asc(memories.priority), asc(memories.domain), asc(memories.path))
 
-  rows.sort((a, b) => LAYER_ORDER.indexOf(a.layer) - LAYER_ORDER.indexOf(b.layer))
+  rows.sort((a, b) => BOOT_LAYERS.indexOf(a.layer) - BOOT_LAYERS.indexOf(b.layer))
   const entries: BootResponse['entries'] = []
   const omitted: string[] = []
   let used = 0

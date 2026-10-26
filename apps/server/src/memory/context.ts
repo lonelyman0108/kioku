@@ -2,6 +2,8 @@ import { resolveAccess, type Access, type SessionContext } from '../access/acces
 import { withSpace } from '../db/client'
 import type { Deps, KeyPrincipal } from '../http/env'
 import type { RecallScope } from '../lifecycle/scope'
+import { boot } from '../recall/boot'
+import { embedQuery, recall } from '../recall/recall'
 import { personaChain } from './personas'
 import { MemoryService } from './service'
 
@@ -41,12 +43,25 @@ export function recallScopeForKey(
   key: KeyPrincipal,
   context: SessionContext = {},
 ): RecallScope {
+  const access = accessForKey(key, context)
+  const run: RecallScope['run'] = (fn) =>
+    withSpace(deps.db, key.spaceId, async (tx) =>
+      fn(tx, await personaChain(tx, key.app.defaultPersonaId)),
+    )
   return {
-    access: accessForKey(key, context),
-    run: (fn) =>
-      withSpace(deps.db, key.spaceId, async (tx) =>
-        fn(tx, await personaChain(tx, key.app.defaultPersonaId)),
-      ),
-    embedder: () => deps.embedder.get().catch(() => null),
+    access,
+    run,
+    async recall(query, options) {
+      // 嵌入设置读不出来（例如主密钥不对）时记录原因，召回退化为全文与关键词
+      const embedder = await deps.embedder.get().catch((err: unknown) => {
+        console.warn('读取嵌入设置失败，本次召回不使用向量', err)
+        return null
+      })
+      const semantic = await embedQuery(embedder, query)
+      return run((tx, personaIds) =>
+        recall(tx, access, semantic, query, { ...options, personaIds }),
+      )
+    },
+    boot: () => run((tx, personaIds) => boot(tx, access, personaIds)),
   }
 }

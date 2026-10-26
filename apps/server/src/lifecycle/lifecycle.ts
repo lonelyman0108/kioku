@@ -1,7 +1,7 @@
 import type { HostOutput, LifecycleEvent, LifecycleResponse } from '@kioku/contracts'
 
-import { boot, formatBootBlock } from '../recall/boot'
-import { embedQuery, formatRecallBlock, recall } from '../recall/recall'
+import { formatBootBlock } from '../recall/boot'
+import { formatRecallBlock } from '../recall/recall'
 import type { RecallScope } from './scope'
 
 // 服务端下发的使用指引：插件里不放任何提示词，服务端改了指引所有接入方立即生效
@@ -45,19 +45,14 @@ export async function handleLifecycle(
   input: LifecycleEvent,
 ): Promise<LifecycleResponse> {
   if (input.event === 'session.start') {
-    const result = await scope.run((tx, personaIds) => boot(tx, scope.access, personaIds))
+    const result = await scope.boot()
     return {
       hostOutput: hostOutput(runtimeFamily, input.event, formatBootBlock(result, GUIDANCE)),
       nodeUris: result.entries.map((e) => e.uri),
     }
   }
 
-  const prompt = input.prompt?.trim()
-  if (!prompt) return { hostOutput: { mode: 'none', value: null }, nodeUris: [] }
-  const semantic = await embedQuery(await scope.embedder(), prompt)
-  const candidates = await scope.run((tx, personaIds) =>
-    recall(tx, scope.access, semantic, prompt, { limit: 8, personaIds }),
-  )
+  const candidates = await scope.recall(input.prompt, { limit: 8 })
   return {
     hostOutput: hostOutput(
       runtimeFamily,

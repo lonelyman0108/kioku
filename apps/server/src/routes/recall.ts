@@ -13,8 +13,6 @@ import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { handleLifecycle } from '../lifecycle/lifecycle'
 import { recallScopeForKey } from '../memory/context'
-import { boot } from '../recall/boot'
-import { embedQuery, recall } from '../recall/recall'
 
 const security = [{ bearer: [] }]
 const errors = {
@@ -56,18 +54,13 @@ export function recallRoutes(deps: Deps) {
   for (const path of ['/recall', '/boot', '/lifecycle/event']) app.use(path, requireKey(deps))
   return app
     .openapi(recallRoute, async (c) => {
-      const scope = recallScopeForKey(deps, c.get('key'))
       const { query, limit } = c.req.valid('json')
-      const semantic = await embedQuery(await scope.embedder(), query)
-      const candidates = await scope.run((tx, personaIds) =>
-        recall(tx, scope.access, semantic, query, { limit, personaIds }),
-      )
+      const candidates = await recallScopeForKey(deps, c.get('key')).recall(query, { limit })
       return c.json({ candidates }, 200)
     })
-    .openapi(bootRoute, async (c) => {
-      const scope = recallScopeForKey(deps, c.get('key'))
-      return c.json(await scope.run((tx, personaIds) => boot(tx, scope.access, personaIds)), 200)
-    })
+    .openapi(bootRoute, async (c) =>
+      c.json(await recallScopeForKey(deps, c.get('key')).boot(), 200),
+    )
     .openapi(lifecycleRoute, async (c) => {
       const key = c.get('key')
       const scope = recallScopeForKey(deps, key)
