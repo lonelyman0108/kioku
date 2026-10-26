@@ -133,6 +133,32 @@ describe('Lore 导入计划', () => {
     )
   })
 
+  it('凭据提醒也看别名、disclosure 与关键词；secret 节点的 disclosure 与关键词是明文，也提醒', () => {
+    const plan = planImport(
+      snapshot(
+        node('core://notes/router', { aliases: ['infra://router/credentials'] }),
+        node('infra://nas', { keywords: ['token: abcdef'] }),
+        node('infra://vault', { disclosure: '要用 password: 时' }),
+      ),
+      [],
+      { ...options, secretUris: new Set(['infra://vault']) },
+    )
+    expect(plan.warnings).toEqual([
+      'core://notes/router 看起来是凭据，没有用 --secret 标记',
+      'infra://nas 的正文里像有密码或 Token，没有用 --secret 标记',
+      'infra://vault 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文',
+    ])
+  })
+
+  it('人格目标的去重键带上人格：换一个 --persona 是另一份', () => {
+    const a = planImport(snapshot(node('core://soul')), [], options)
+    const b = planImport(snapshot(node('core://soul')), [], {
+      ...options,
+      persona: { slug: 'work', name: 'work' },
+    })
+    expect(a.memories[0]!.importKey).not.toBe(b.memories[0]!.importKey)
+  })
+
   it('标成 secret 的导入为 secret（也可以写别名），对不上的 --secret 是错误；像凭据却没标的给出提醒', () => {
     const plan = planImport(
       snapshot(
@@ -220,6 +246,7 @@ describe('Lore 导入计划', () => {
       loreUri: 'projects://kioku',
       loreNodeUuid: 'projects://kioku',
       targetApp: null,
+      targetPersona: null,
       previousVersions: 4,
     })
     expect(m!.importKey).toBe('projects://kioku@')

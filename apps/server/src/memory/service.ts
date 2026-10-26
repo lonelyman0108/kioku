@@ -58,6 +58,9 @@ export interface CreateMeta {
   eventContext?: Record<string, unknown>
   createdAt?: Date
   updatedAt?: Date
+  // 写应用层时要求应用当前的主人是这个账号，在写入的同一个事务里锁住应用行核对：
+  // 导入是一个长循环，期间应用被转给别人，也不能把记忆写进别人的应用
+  requireAppOwner?: string
 }
 
 function parse(uri: string): ParsedUri {
@@ -334,6 +337,16 @@ export class MemoryService {
       const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
       if (!canWrite(this.ctx.access, { ...ownership, sensitivity })) {
         throw new MemoryError(403, `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`)
+      }
+      if (meta.requireAppOwner && ownership.appId) {
+        const [app] = await tx
+          .select({ owner: apps.ownerAccountId })
+          .from(apps)
+          .where(eq(apps.id, ownership.appId))
+          .for('share')
+        if (app?.owner !== meta.requireAppOwner) {
+          throw new MemoryError(403, '这个应用已经不属于导入者')
+        }
       }
       await this.claimUri(tx, parsed, ownership, released)
 
