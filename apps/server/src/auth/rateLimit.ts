@@ -40,17 +40,18 @@ async function bump(db: Db, key: string): Promise<number> {
   return row?.count ?? Number.MAX_SAFE_INTEGER
 }
 
-// 在校验密码之前先占一次名额。返回 false 表示已经超限；登录成功后调用 clearAttempts 清零
+// 在校验密码之前先占一次名额。返回 false 表示已经超限；登录成功后调用 clearAttempts 清零。
+// 逐级计数，某一级已经超限就停下、不再累加更大范围的计数：否则一个已经被锁住的客户端
+// 还能继续把「用户名合计」推到上限，连主人从别处登录也一起锁住
 export async function reserveAttempt(
   db: Db,
   username: string,
   client: string | null,
 ): Promise<boolean> {
-  let ok = true
   for (const { key, limit } of keysFor(username, client)) {
-    if ((await bump(db, key)) > limit) ok = false
+    if ((await bump(db, key)) > limit) return false
   }
-  return ok
+  return true
 }
 
 export async function clearAttempts(
