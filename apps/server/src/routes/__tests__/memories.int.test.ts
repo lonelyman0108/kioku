@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import type { MemoryChildren, MemoryView } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -99,15 +100,61 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect((await call('DELETE', q(`&expectedId=${first.id}&expectedVersion=2`))).status).toBe(204)
   })
 
-  it('删除与修改同时发生时，不会删掉检查之后才提交的那一版', async () => {
+  // 用另一条连接锁住这条记忆，让请求读完之后等在写入的行锁上，在锁里提交一次改动再放开，
+  // 稳定地复现「检查之后、写入之前被别人改了」
+  async function raceWithLockedRow(
+    uri: string,
+    request: () => Response | Promise<Response>,
+    change: (side: postgres.TransactionSql, id: string) => Promise<unknown>,
+  ): Promise<Response> {
+    const view = (await (await get(uri)).json()) as MemoryView
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    try {
+      let pending!: Promise<Response>
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select id from memories where id = ${view.id} for update`
+        pending = Promise.resolve(request())
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where datname = current_database() and wait_event_type = 'Lock'`
+          if (row!.n > 0) break
+          if (i > 200) throw new Error('请求没有等在行锁上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        await change(tx, view.id)
+      })
+      return await pending
+    } finally {
+      await side.end()
+    }
+  }
+
+  it('删除检查之后、写入之前被改过的记忆，不会被删掉', async () => {
     await create({ uri: 'core://z', content: '第一版', layer: 'base' })
-    const results = await Promise.all([
-      call('PATCH', '/memories', { uri: 'core://z', content: '第二版' }),
-      call('DELETE', `/memories?uri=${encodeURIComponent('core://z')}&expectedVersion=1`),
-    ])
-    const [patched, deleted] = results.map((r) => r.status)
-    // 要么删除先完成（修改得到 404 或 409），要么修改先完成（删除得到 409），不会两个都成功
-    expect([patched, deleted].sort()).not.toEqual([200, 204])
+    const deleted = await raceWithLockedRow(
+      'core://z',
+      () => call('DELETE', `/memories?uri=${encodeURIComponent('core://z')}&expectedVersion=1`),
+      (tx, id) =>
+        tx`update memories set version = version + 1, content = '第二版' where id = ${id}`,
+    )
+    expect(deleted.status).toBe(409)
+    expect(((await (await get('core://z')).json()) as MemoryView).content).toBe('第二版')
+  })
+
+  it('修改读完之后被删掉的记忆，修改不会写进去', async () => {
+    await create({ uri: 'core://w', content: '第一版', layer: 'base' })
+    const patched = await raceWithLockedRow(
+      'core://w',
+      () => call('PATCH', '/memories', { uri: 'core://w', content: '第二版' }),
+      (tx, id) => tx`update memories set deleted_at = now() where id = ${id}`,
+    )
+    expect(patched.status).toBe(409)
+    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ content: memories.content }).from(memories).where(eq(memories.path, 'w')),
+    )
+    expect(row?.content).toBe('第一版')
   })
 
   it('修改会递增版本，旧版本号返回 409', async () => {
