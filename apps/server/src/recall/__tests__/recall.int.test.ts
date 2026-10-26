@@ -1,12 +1,13 @@
 import { randomBytes } from 'node:crypto'
 
 import type { BootResponse, LifecycleResponse, RecallResponse } from '@kioku/contracts'
+import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { resolveAccess } from '../../access/access'
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memories } from '../../db/schema'
+import { memories, memoryGlossary } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { backfillEmbeddings } from '../../embedding/worker'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -203,6 +204,52 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
       ),
     )
     expect(candidates.map((c) => c.uri)).toEqual(['infra://nas'])
+  })
+
+  it('英文关键词按单词边界匹配', async () => {
+    await create({ uri: 'notes://ai', content: '模型选型笔记', glossary: ['AI'] })
+    const miss = (await (
+      await post('/recall', { query: 'he said the main thing' })
+    ).json()) as RecallResponse
+    expect(miss.candidates.map((c) => c.uri)).not.toContain('notes://ai')
+    const hit = (await (
+      await post('/recall', { query: 'which AI model should I use' })
+    ).json()) as RecallResponse
+    expect(hit.candidates.map((c) => c.uri)).toContain('notes://ai')
+  })
+
+  it('只有空白的查询不请求嵌入接口', async () => {
+    const before = embedder.calls.length
+    const res = await post('/recall', { query: '   ' })
+    expect(((await res.json()) as RecallResponse).candidates).toEqual([])
+    expect(embedder.calls.length).toBe(before)
+  })
+
+  it('boot 的字数预算优先给 priority 小的节点', async () => {
+    await create({ uri: 'persona://doubao/style', content: 's'.repeat(60), priority: 1 })
+    await create({ uri: 'prefs://user', content: 'u'.repeat(30), layer: 'owner', priority: 0 })
+    const access = resolveAccess(FULL_SCOPES, { appId, ownerAccountId: ws.accountId })
+    const result = await withSpace(database.db, ws.spaceId, (tx) =>
+      boot(tx, access, [personaId], 50),
+    )
+    expect(result.entries.map((e) => e.uri)).toEqual(['prefs://user'])
+    expect(result.omitted).toEqual(['persona://doubao/style'])
+  })
+
+  it('规则收紧之前写入的单字关键词仍然可以删除', async () => {
+    await create({ uri: 'core://legacy', content: 'x', layer: 'base', glossary: ['旧词'] })
+    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ id: memories.id }).from(memories).where(eq(memories.path, 'legacy')),
+    )
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memoryGlossary).values({ spaceId: ws.spaceId, memoryId: row!.id, keyword: '我' }),
+    )
+    const res = await app.request(
+      '/v1/memories',
+      jsonRequest('PATCH', { uri: 'core://legacy', glossaryRemove: ['我'] }, bearer(key)),
+    )
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as { glossary: string[] }).glossary).toEqual(['旧词'])
   })
 
   it('prompt.submit 缺 prompt 返回 400', async () => {

@@ -43,20 +43,24 @@ export async function boot(
     )
     .orderBy(asc(memories.priority), asc(memories.domain), asc(memories.path))
 
-  rows.sort((a, b) => BOOT_LAYERS.indexOf(a.layer) - BOOT_LAYERS.indexOf(b.layer))
-  const entries: BootResponse['entries'] = []
+  // 预算按 priority 分配（数字小的先放），放进来的再按层排序展示
+  const kept = new Set<string>()
   const omitted: string[] = []
   let used = 0
   for (const r of rows) {
     const uri = formatUri(r.domain!, r.path!)
-    const content = r.content ?? ''
-    if (used + content.length > budget) {
+    const length = r.content?.length ?? 0
+    if (used + length > budget) {
       omitted.push(uri)
       continue
     }
-    used += content.length
-    entries.push({ uri, layer: r.layer, content })
+    used += length
+    kept.add(uri)
   }
+  const entries: BootResponse['entries'] = rows
+    .filter((r) => kept.has(formatUri(r.domain!, r.path!)))
+    .sort((a, b) => BOOT_LAYERS.indexOf(a.layer) - BOOT_LAYERS.indexOf(b.layer))
+    .map((r) => ({ uri: formatUri(r.domain!, r.path!), layer: r.layer, content: r.content ?? '' }))
   return { entries, omitted }
 }
 

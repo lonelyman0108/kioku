@@ -13,11 +13,11 @@ import type {
 import { and, asc, count, desc, eq, inArray, isNull, like, sql } from 'drizzle-orm'
 
 import { canRead, canWrite, type Access } from '../access/access'
-import { withSpace, type Db, type Tx } from '../db/client'
+import type { Db, Tx } from '../db/client'
 import { apps, memories, memoryEvents, memoryGlossary } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { readableConditions } from './filter'
-import { personaChain, personaIdsBySlug } from './personas'
+import { personaIdsBySlug, runInSpace } from './personas'
 import {
   APP_DOMAIN,
   DEFAULT_SENSITIVITY,
@@ -69,9 +69,7 @@ export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
 
   private run<T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>): Promise<T> {
-    return withSpace(this.ctx.db, this.ctx.spaceId, async (tx) =>
-      fn(tx, await personaChain(tx, this.ctx.personaId)),
-    )
+    return runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
   }
 
   private changed(memoryId: string): void {

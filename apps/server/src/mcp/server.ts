@@ -124,7 +124,7 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         priority: z.number().int().min(0).max(99).optional(),
         sensitivity: Sensitivity.optional(),
         glossary_add: z.array(Keyword).optional(),
-        glossary_remove: z.array(Keyword).optional(),
+        glossary_remove: z.array(z.string().trim().min(1).max(64)).optional(),
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
       },
     },

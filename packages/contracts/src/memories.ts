@@ -66,7 +66,8 @@ export const UpdateMemoryRequest = z.object({
   priority: z.number().int().min(0).max(99).optional(),
   disclosure: z.string().max(500).nullable().optional(),
   glossaryAdd: z.array(Keyword).max(32).optional(),
-  glossaryRemove: z.array(Keyword).max(32).optional(),
+  // 删除不限最短长度：要能清掉规则收紧之前写入的单字关键词
+  glossaryRemove: z.array(z.string().trim().min(1).max(64)).max(32).optional(),
 })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>
 

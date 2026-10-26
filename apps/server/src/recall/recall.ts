@@ -1,5 +1,5 @@
-import type { RecallCandidate, RecallVia } from '@kioku/contracts'
-import { and, desc, eq, inArray, sql } from 'drizzle-orm'
+import type { Layer, RecallCandidate, RecallVia } from '@kioku/contracts'
+import { and, desc, eq, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
 import type { Tx } from '../db/client'
@@ -24,6 +24,11 @@ export const DEFAULT_MIN_SCORE = 0.2
 export const MAX_QUERY_CHARS = 2000
 // HNSW 先取近邻、再套权限与空间过滤；开启迭代扫描并放大候选数，过滤后仍能取够结果
 const HNSW_EF_SEARCH = 200
+// 关键词转成单词边界正则用的片段；作为绑定参数传给 PostgreSQL，避免在 SQL 模板里写反斜杠转义
+const WORD_START = '\\m'
+const WORD_END = '\\M'
+const REGEX_META = '([.^$*+?()\\[\\]{}|\\\\-])'
+const ESCAPE_MATCH = '\\\\\\1'
 
 export interface RecallOptions {
   limit: number
@@ -78,10 +83,28 @@ export async function recall(
     readableConditions(access, { personaIds: options.personaIds }),
     eq(memories.form, 'curated'),
   )
-  const hits = new Map<string, Hit>()
-  const hit = (id: string) => {
-    let h = hits.get(id)
-    if (!h) hits.set(id, (h = { semantic: 0, fulltext: 0, cues: new Set(), via: new Set() }))
+  // 各路都直接取出展示要用的字段，合并时不必再查一次库
+  const fields = {
+    id: memories.id,
+    domain: memories.domain,
+    path: memories.path,
+    layer: memories.layer,
+    priority: memories.priority,
+    disclosure: memories.disclosure,
+  }
+  type Row = {
+    id: string
+    domain: string | null
+    path: string | null
+    layer: Layer
+    priority: number
+    disclosure: string | null
+  }
+  const hits = new Map<string, Hit & { row: Row }>()
+  const hit = (row: Row) => {
+    let h = hits.get(row.id)
+    if (!h)
+      hits.set(row.id, (h = { row, semantic: 0, fulltext: 0, cues: new Set(), via: new Set() }))
     return h
   }
 
@@ -91,7 +114,7 @@ export async function recall(
     const literal = `[${semantic.vector.join(',')}]`
     const rows = await tx
       .select({
-        id: memories.id,
+        ...fields,
         similarity: sql<number>`1 - (${memoryEmbeddings.embedding} <=> ${literal}::vector)`,
       })
       .from(memoryEmbeddings)
@@ -100,81 +123,76 @@ export async function recall(
       .orderBy(sql`${memoryEmbeddings.embedding} <=> ${literal}::vector`)
       .limit(PER_PATH_LIMIT)
     for (const r of rows) {
-      const h = hit(r.id)
+      const h = hit(r)
       h.semantic = Math.max(0, Number(r.similarity))
       h.via.add('semantic')
     }
   }
 
-  // plainto_tsquery 把词用 & 连接，长句几乎不可能全部命中；把结果文本里的 & 换成 | 后直接转成 tsquery，
-  // 不再交给 to_tsquery 重新分词（那会把已经切好的词再切一遍）
-  const tsquery = sql`replace(plainto_tsquery('kioku_zh', ${query})::text, ' & ', ' | ')::tsquery`
+  // plainto_tsquery 用 & 连接各词、用 <-> 连接复合词的各部分，长句几乎不可能全部命中。
+  // 把这些运算符都换成 |，任一词命中即可；结果文本直接转成 tsquery，不再交给分词器切第二遍
+  const tsquery = sql`regexp_replace(plainto_tsquery('kioku_zh', ${query})::text, ' (&|<[0-9]+>|<->) ', ' | ', 'g')::tsquery`
   // 归一化参数 32 把 rank 映射到 0–1（rank / (rank + 1)），分数在不同查询之间可比
   const rank = sql<number>`ts_rank_cd(${memories.fts}, ${tsquery}, 32)`
   const ftsRows = await tx
-    .select({ id: memories.id, rank })
+    .select({ ...fields, rank })
     .from(memories)
     .where(and(readable, sql`${memories.fts} @@ ${tsquery}`))
     .orderBy(desc(rank))
     .limit(PER_PATH_LIMIT)
   for (const r of ftsRows) {
-    const h = hit(r.id)
+    const h = hit(r)
     h.fulltext = Math.min(1, Number(r.rank) * 4)
     h.via.add('fulltext')
   }
 
-  // 关键词至少两个字（见 contracts 的 Keyword），长的优先，命中多时保留更具体的
+  // 关键词按子串匹配，中文没有词边界只能这样；纯 ASCII 的关键词要求按单词边界匹配，
+  // 否则 AI 会命中 said、go 会命中 good。长的关键词优先，命中多时保留更具体的
+  const keyword = memoryGlossary.keyword
+  const glossaryMatch = sql`case when ${keyword} ~ '^[[:ascii:]]+$'
+    then lower(${query}) ~ (${WORD_START} || regexp_replace(lower(${keyword}), ${REGEX_META}, ${ESCAPE_MATCH}, 'g') || ${WORD_END})
+    else position(lower(${keyword}) in lower(${query})) > 0 end`
   const glossaryRows = await tx
-    .select({ id: memoryGlossary.memoryId, keyword: memoryGlossary.keyword })
+    .select({ ...fields, keyword })
     .from(memoryGlossary)
     .innerJoin(memories, eq(memories.id, memoryGlossary.memoryId))
-    .where(and(readable, sql`position(lower(${memoryGlossary.keyword}) in lower(${query})) > 0`))
-    .orderBy(desc(sql`length(${memoryGlossary.keyword})`), memoryGlossary.keyword)
+    .where(and(readable, glossaryMatch))
+    .orderBy(desc(sql`length(${keyword})`), keyword)
     .limit(PER_PATH_LIMIT * 4)
   for (const r of glossaryRows) {
-    const h = hit(r.id)
+    const h = hit(r)
     h.cues.add(r.keyword)
     h.via.add('glossary')
   }
 
-  if (!hits.size) return []
-  const rows = await tx
-    .select({
-      id: memories.id,
-      domain: memories.domain,
-      path: memories.path,
-      layer: memories.layer,
-      priority: memories.priority,
-      disclosure: memories.disclosure,
-    })
-    .from(memories)
-    .where(and(readable, inArray(memories.id, [...hits.keys()])))
-
   const minScore = options.minScore ?? DEFAULT_MIN_SCORE
-  return rows
-    .map((r) => {
-      const h = hits.get(r.id)!
-      const glossary = h.cues.size
-        ? WEIGHTS.glossaryFirst + (h.cues.size > 1 ? WEIGHTS.glossaryMore : 0)
-        : 0
-      const score =
-        WEIGHTS.semantic * h.semantic +
-        WEIGHTS.fulltext * h.fulltext +
-        glossary +
-        (WEIGHTS.priority * Math.max(0, 3 - r.priority)) / 3
-      return {
-        uri: formatUri(r.domain!, r.path!),
-        layer: r.layer,
-        priority: r.priority,
-        disclosure: r.disclosure,
+  return (
+    [...hits.values()]
+      .map((h) => {
+        const glossary = h.cues.size
+          ? WEIGHTS.glossaryFirst + (h.cues.size > 1 ? WEIGHTS.glossaryMore : 0)
+          : 0
+        const score =
+          WEIGHTS.semantic * h.semantic +
+          WEIGHTS.fulltext * h.fulltext +
+          glossary +
+          (WEIGHTS.priority * Math.max(0, 3 - h.row.priority)) / 3
+        return { h, score }
+      })
+      // 用未取整的分数和阈值比较，取整只用于展示
+      .filter(({ score }) => score >= minScore)
+      .sort((a, b) => b.score - a.score || a.h.row.priority - b.h.row.priority)
+      .slice(0, options.limit)
+      .map(({ h, score }) => ({
+        uri: formatUri(h.row.domain!, h.row.path!),
+        layer: h.row.layer,
+        priority: h.row.priority,
+        disclosure: h.row.disclosure,
         score: Math.round(score * 100) / 100,
         via: [...h.via],
         cues: [...h.cues].sort(),
-      }
-    })
-    .filter((c) => c.score >= minScore)
-    .sort((a, b) => b.score - a.score || a.priority - b.priority || a.uri.localeCompare(b.uri))
-    .slice(0, options.limit)
+      }))
+  )
 }
 
 // 召回块会原样进入宿主的上下文。disclosure 与关键词可能来自不可信的写入者，

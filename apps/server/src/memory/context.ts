@@ -1,10 +1,10 @@
 import { resolveAccess, type Access, type SessionContext } from '../access/access'
-import { withSpace } from '../db/client'
+import type { Tx } from '../db/client'
 import type { Deps, KeyPrincipal } from '../http/env'
 import type { RecallScope } from '../lifecycle/scope'
 import { boot } from '../recall/boot'
-import { embedQuery, recall } from '../recall/recall'
-import { personaChain } from './personas'
+import { embedQuery, normalizeQuery, recall } from '../recall/recall'
+import { runInSpace } from './personas'
 import { MemoryService } from './service'
 
 // 会话上下文在接入群聊（对象解析）之后才会传进来，目前都按无上下文处理
@@ -44,14 +44,12 @@ export function recallScopeForKey(
   context: SessionContext = {},
 ): RecallScope {
   const access = accessForKey(key, context)
-  const run: RecallScope['run'] = (fn) =>
-    withSpace(deps.db, key.spaceId, async (tx) =>
-      fn(tx, await personaChain(tx, key.app.defaultPersonaId)),
-    )
+  const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
+    runInSpace(deps.db, key.spaceId, key.app.defaultPersonaId, fn)
   return {
-    access,
-    run,
-    async recall(query, options) {
+    async recall(rawQuery, options) {
+      const query = normalizeQuery(rawQuery)
+      if (!query) return []
       // 嵌入设置读不出来（例如主密钥不对）时记录原因，召回退化为全文与关键词
       const embedder = await deps.embedder.get().catch((err: unknown) => {
         console.warn('读取嵌入设置失败，本次召回不使用向量', err)
