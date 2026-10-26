@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 
-import { clientIdentity, type ClientIdentity } from '../clientIp'
+import { clientIdentity, clientKey, type ClientIdentity } from '../clientIp'
 
 async function identify(
   trustedProxies: number,
@@ -44,5 +44,13 @@ describe('客户端地址', () => {
       key: '192.0.2.5',
       identified: true,
     })
+  })
+
+  it('IPv6 按 /64 分桶，IPv4 映射地址还原成 IPv4', () => {
+    expect(clientKey('2001:db8:1:2:aaaa::1')).toBe('2001:db8:1:2::/64')
+    expect(clientKey('2001:db8:1:2:bbbb:cccc:dddd:eeee')).toBe('2001:db8:1:2::/64')
+    expect(clientKey('2001:db8::1')).toBe('2001:db8:0:0::/64')
+    expect(clientKey('::ffff:192.0.2.5')).toBe('192.0.2.5')
+    expect(clientKey('192.0.2.5')).toBe('192.0.2.5')
   })
 })
