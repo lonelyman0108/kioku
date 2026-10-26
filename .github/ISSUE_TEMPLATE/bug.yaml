@@ -1,6 +1,6 @@
 name: 问题报告
 description: 使用中遇到的错误、崩溃或与说明不符的行为
-title: "[问题] "
+title: '[问题] '
 labels: []
 body:
   - type: markdown

@@ -16,3 +16,8 @@ node_modules/
 dist/
 coverage/
 *.tsbuildinfo
+
+# ---- web ----
+# Nuxt UI 的 Vite 插件在构建时生成的类型声明
+apps/web/auto-imports.d.ts
+apps/web/components.d.ts

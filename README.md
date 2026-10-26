@@ -20,7 +20,18 @@ scripts/bootstrap.sh      # 克隆后执行一次：启用提交钩子、检查�
 scripts/check.sh          # 门禁：与 CI 完全一致
 ```
 
-<!-- 代码结构建好后补充：依赖、启动命令、访问地址 -->
+需要 Node.js 22 及以上与 pnpm（`corepack enable pnpm`）。
+
+```bash
+pnpm install
+pnpm dev                  # 后端 http://localhost:18920，管理界面 http://localhost:5173（/v1 代理到后端）
+```
+
+| 目录 | 内容 |
+|---|---|
+| `apps/server` | 后端：Hono + zod-openapi，接口文档在 `/v1/openapi.json` |
+| `apps/web` | 管理界面：Vue 3 + Nuxt UI 4 单页应用 |
+| `packages/contracts` | 前后端与 SDK 共用的 zod 契约 |
 
 ## 部署或安装
 
