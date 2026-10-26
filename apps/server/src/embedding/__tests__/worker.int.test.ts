@@ -135,19 +135,19 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     const stored = await database.db.select().from(settings)
     expect(JSON.stringify(stored)).not.toContain('sk-very-secret')
 
-    // 只改地址不带 Key 时沿用原来的 Key
+    // 同一主机只改路径、不带 Key 时沿用原来的 Key
     await app.request(
       '/v1/settings/embedding',
       jsonRequest(
         'PUT',
-        { baseUrl: 'https://e2.example.com/v1', model: 'm' },
+        { baseUrl: 'https://e.example.com/v2', model: 'm' },
         { cookie: ws.cookie },
       ),
     )
     const view = await (
       await app.request('/v1/settings/embedding', { headers: { cookie: ws.cookie } })
     ).json()
-    expect(view).toMatchObject({ baseUrl: 'https://e2.example.com/v1', hasApiKey: true })
+    expect(view).toMatchObject({ baseUrl: 'https://e.example.com/v2', hasApiKey: true })
 
     expect((await app.request('/v1/settings/embedding')).status).toBe(401)
   })
