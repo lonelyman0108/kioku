@@ -42,8 +42,8 @@ export interface MemoryContext {
   db: Db
   spaceId: string
   access: Access
-  // 当前应用使用的人格；persona 层只读得到它及其祖先
-  personaId: string | null
+  // 当前应用使用的人格；persona 层只读得到它及其祖先。管理界面传 'all'，能看到全部人格
+  personaId: string | null | 'all'
   masterKey: Buffer | null
   actor: { keyId?: string; accountId?: string }
   // 写入提交后调用，用于安排向量更新

@@ -9,114 +9,142 @@ import {
   MoveMemoryRequest,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
+import type { Context } from 'hono'
 
-import { requireKey } from '../auth/middleware'
-import type { Deps } from '../http/env'
+import { memberRole, requireKey } from '../auth/middleware'
+import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { memoryServiceForKey } from '../memory/context'
+import { memoryServiceForConsole, memoryServiceForKey } from '../memory/context'
+import { MemoryError, type MemoryService } from '../memory/service'
 
 // URI 里有 :// 和 /，放在查询参数里，省去路径编码的麻烦
 const UriQuery = z.object({ uri: MemoryUri })
-const security = [{ bearer: [] }]
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
-  401: jsonResponse('Key 无效', ErrorResponse),
+  401: jsonResponse('未登录或凭据无效', ErrorResponse),
   403: jsonResponse('没有权限', ErrorResponse),
   404: jsonResponse('不存在或不可见', ErrorResponse),
   409: jsonResponse('冲突', ErrorResponse),
 }
 
-const get = createRoute({
-  method: 'get',
-  path: '/memories',
-  tags: ['memories'],
-  summary: '按 URI 读取一条记忆',
-  security,
-  request: { query: UriQuery },
-  responses: { 200: jsonResponse('记忆', MemoryView), ...errors },
-})
+interface RouteSet {
+  // 路径前缀，例如 '' 或 '/spaces/{spaceId}'
+  prefix: string
+  params: z.ZodObject
+  tag: string
+  security: { bearer: string[] }[] | undefined
+  resolve: (c: Context<AppEnv>) => Promise<MemoryService>
+}
 
-const children = createRoute({
-  method: 'get',
-  path: '/memories/children',
-  tags: ['memories'],
-  summary: '列出一个节点或 domain 根下的直接子节点',
-  security,
-  request: { query: z.object({ of: z.string().min(1) }) },
-  responses: { 200: jsonResponse('子节点', MemoryChildren), ...errors },
-})
+// 同一套记忆接口挂两次：接入方用 API Key 访问 /memories，管理界面用登录会话访问 /spaces/{spaceId}/memories。
+// 两边共用同一个服务层，只是权限来源不同
+function memoryRouteSet(set: RouteSet) {
+  const base = `${set.prefix}/memories`
+  const common = { tags: [set.tag], ...(set.security ? { security: set.security } : {}) }
+  const params = set.params
+  const get = createRoute({
+    ...common,
+    method: 'get',
+    path: base,
+    summary: '按 URI 读取一条记忆',
+    request: { params, query: UriQuery },
+    responses: { 200: jsonResponse('记忆', MemoryView), ...errors },
+  })
+  const children = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/children`,
+    summary: '列出一个节点或 domain 根下的直接子节点',
+    request: { params, query: z.object({ of: z.string().min(1) }) },
+    responses: { 200: jsonResponse('子节点', MemoryChildren), ...errors },
+  })
+  const domains = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/domains`,
+    summary: '列出可见的 domain 及节点数',
+    request: { params },
+    responses: { 200: jsonResponse('domain 列表', z.array(DomainSummary)), ...errors },
+  })
+  const create = createRoute({
+    ...common,
+    method: 'post',
+    path: base,
+    summary: '新建策展记忆',
+    request: { params, body: jsonBody(CreateMemoryRequest) },
+    responses: { 201: jsonResponse('已创建', MemoryView), ...errors },
+  })
+  const update = createRoute({
+    ...common,
+    method: 'patch',
+    path: base,
+    summary: '修改记忆正文、敏感级、priority、disclosure 或 glossary',
+    request: { params, body: jsonBody(UpdateMemoryRequest) },
+    responses: { 200: jsonResponse('已修改', MemoryView), ...errors },
+  })
+  const remove = createRoute({
+    ...common,
+    method: 'delete',
+    path: base,
+    summary: '删除记忆（保留历史事件）',
+    request: { params, query: UriQuery },
+    responses: { 204: { description: '已删除' }, ...errors },
+  })
+  const move = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/move`,
+    summary: '修改记忆的 URI',
+    request: { params, body: jsonBody(MoveMemoryRequest) },
+    responses: { 200: jsonResponse('已移动', MemoryView), ...errors },
+  })
 
-const domains = createRoute({
-  method: 'get',
-  path: '/memories/domains',
-  tags: ['memories'],
-  summary: '列出可见的 domain 及节点数',
-  security,
-  responses: { 200: jsonResponse('domain 列表', z.array(DomainSummary)), ...errors },
-})
-
-const create = createRoute({
-  method: 'post',
-  path: '/memories',
-  tags: ['memories'],
-  summary: '新建策展记忆',
-  security,
-  request: { body: jsonBody(CreateMemoryRequest) },
-  responses: { 201: jsonResponse('已创建', MemoryView), ...errors },
-})
-
-const update = createRoute({
-  method: 'patch',
-  path: '/memories',
-  tags: ['memories'],
-  summary: '修改记忆正文、敏感级、priority、disclosure 或 glossary',
-  security,
-  request: { body: jsonBody(UpdateMemoryRequest) },
-  responses: { 200: jsonResponse('已修改', MemoryView), ...errors },
-})
-
-const remove = createRoute({
-  method: 'delete',
-  path: '/memories',
-  tags: ['memories'],
-  summary: '删除记忆（保留历史事件）',
-  security,
-  request: { query: UriQuery },
-  responses: { 204: { description: '已删除' }, ...errors },
-})
-
-const move = createRoute({
-  method: 'post',
-  path: '/memories/move',
-  tags: ['memories'],
-  summary: '修改记忆的 URI',
-  security,
-  request: { body: jsonBody(MoveMemoryRequest) },
-  responses: { 200: jsonResponse('已移动', MemoryView), ...errors },
-})
+  const service = set.resolve
+  return router()
+    .openapi(get, async (c) => c.json(await (await service(c)).get(c.req.valid('query').uri), 200))
+    .openapi(children, async (c) =>
+      c.json(await (await service(c)).children(c.req.valid('query').of), 200),
+    )
+    .openapi(domains, async (c) => c.json(await (await service(c)).domains(), 200))
+    .openapi(create, async (c) => c.json(await (await service(c)).create(c.req.valid('json')), 201))
+    .openapi(update, async (c) => c.json(await (await service(c)).update(c.req.valid('json')), 200))
+    .openapi(remove, async (c) => {
+      await (await service(c)).delete(c.req.valid('query').uri)
+      return c.body(null, 204)
+    })
+    .openapi(move, async (c) => c.json(await (await service(c)).move(c.req.valid('json')), 200))
+}
 
 export function memoryRoutes(deps: Deps) {
   const app = router()
   // '/memories/*' 同时匹配 /memories 本身；再单独注册 '/memories' 会让鉴权执行两次
   app.use('/memories/*', requireKey(deps))
-  const service = (key: Parameters<typeof memoryServiceForKey>[1]) => memoryServiceForKey(deps, key)
+  app.route(
+    '/',
+    memoryRouteSet({
+      prefix: '',
+      params: z.object({}),
+      tag: 'memories',
+      security: [{ bearer: [] }],
+      resolve: async (c) => memoryServiceForKey(deps, c.get('key')),
+    }),
+  )
+  // 会话鉴权已在 app.ts 对 /v1/spaces/* 统一注册
+  app.route(
+    '/',
+    memoryRouteSet({
+      prefix: '/spaces/{spaceId}',
+      params: z.object({ spaceId: z.uuid() }),
+      tag: 'console',
+      security: undefined,
+      resolve: async (c) => {
+        const spaceId = c.req.param('spaceId')!
+        const accountId = c.get('console').accountId
+        const role = await memberRole(deps, spaceId, accountId)
+        if (!role) throw new MemoryError(403, '不是该空间成员')
+        return memoryServiceForConsole(deps, spaceId, accountId, role)
+      },
+    }),
+  )
   return app
-    .openapi(get, async (c) =>
-      c.json(await service(c.get('key')).get(c.req.valid('query').uri), 200),
-    )
-    .openapi(children, async (c) =>
-      c.json(await service(c.get('key')).children(c.req.valid('query').of), 200),
-    )
-    .openapi(domains, async (c) => c.json(await service(c.get('key')).domains(), 200))
-    .openapi(create, async (c) =>
-      c.json(await service(c.get('key')).create(c.req.valid('json')), 201),
-    )
-    .openapi(update, async (c) =>
-      c.json(await service(c.get('key')).update(c.req.valid('json')), 200),
-    )
-    .openapi(remove, async (c) => {
-      await service(c.get('key')).delete(c.req.valid('query').uri)
-      return c.body(null, 204)
-    })
-    .openapi(move, async (c) => c.json(await service(c.get('key')).move(c.req.valid('json')), 200))
 }

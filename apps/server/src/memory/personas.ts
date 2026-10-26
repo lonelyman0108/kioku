@@ -31,11 +31,18 @@ export async function personaIdsBySlug(tx: Tx, slugs: string[]): Promise<Map<str
 }
 
 // 在空间事务里执行，并带上当前人格链；记忆服务与召回都经由这里访问内容表
+// persona 为 'all' 时（管理界面）人格链是空间里的全部人格
 export function runInSpace<T>(
   db: Db,
   spaceId: string,
-  personaId: string | null,
+  persona: string | null | 'all',
   fn: (tx: Tx, personaIds: string[]) => Promise<T>,
 ): Promise<T> {
-  return withSpace(db, spaceId, async (tx) => fn(tx, await personaChain(tx, personaId)))
+  return withSpace(db, spaceId, async (tx) => {
+    const personaIds =
+      persona === 'all'
+        ? (await tx.select({ id: personas.id }).from(personas)).map((r) => r.id)
+        : await personaChain(tx, persona)
+    return fn(tx, personaIds)
+  })
 }

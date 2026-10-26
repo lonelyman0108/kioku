@@ -37,7 +37,8 @@ export interface Access {
   writeOriginScope: string
   writeProvenance: Provenance
   ownerAccountId: string
-  appId: string
+  // null 表示管理界面：不代表某个应用，能看到空间里所有应用的应用层记忆
+  appId: string | null
   // 允许按 URI 显式读取 secret；召回和搜索永远不返回 secret
   canReadSecret: boolean
   admin: boolean
@@ -174,7 +175,9 @@ export function canRead(access: Access, memory: MemoryFacts, options: ReadOption
   if (memory.layer === 'persona' && !options.personaIds.includes(memory.personaId ?? '')) {
     return false
   }
-  if (memory.layer === 'app' && memory.appId !== access.appId) return false
+  if (memory.layer === 'app' && access.appId !== null && memory.appId !== access.appId) {
+    return false
+  }
   return true
 }
 
@@ -189,12 +192,23 @@ export function canWrite(access: Access, intent: WriteIntent): boolean {
   return sensitivityRank(intent.sensitivity) <= sensitivityRank(access.maxSensitivity)
 }
 
-// 管理界面里主人本人的会话：读写自己能看到的一切
-export function ownerConsoleScopes(): KeyScopes {
+export type ConsoleRole = 'owner' | 'editor' | 'viewer'
+
+// 管理界面里成员本人的权限，与签发 Key 的规则一致：secret 只有空间 owner 能读写，viewer 只读。
+// 私人层与画像层只看得到自己的；所有人格、所有应用的记忆都能看到（personaIds 由调用方传入全部人格）
+export function consoleAccess(role: ConsoleRole, accountId: string): Access {
+  const all = new Set<Layer>(LAYERS)
   return {
-    readLayers: [...LAYERS],
-    writeLayers: [...LAYERS],
-    maxSensitivity: 'secret',
-    admin: true,
+    readLayers: all,
+    writeLayers: role === 'viewer' ? new Set() : all,
+    maxSensitivity: role === 'owner' ? 'secret' : 'private',
+    originScopes: null,
+    writeOriginScope: 'global',
+    writeProvenance: 'owner',
+    ownerAccountId: accountId,
+    appId: null,
+    canReadSecret: role === 'owner',
+    // 人在管理界面里可以编辑任何人格、任何应用命名空间下的记忆
+    admin: role !== 'viewer',
   }
 }
