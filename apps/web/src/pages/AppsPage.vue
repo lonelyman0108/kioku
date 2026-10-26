@@ -2,7 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import { RUNTIME_FAMILIES, type AppInfo, type RuntimeFamily } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -18,6 +18,9 @@ const { me, space } = useSession()
 const spaceId = computed(() => String(route.params.spaceId))
 const role = computed(() => space.value?.role ?? 'viewer')
 const canCreate = computed(() => role.value === 'owner' || role.value === 'editor')
+// 应用的设置与 Key 只有应用主人能管，而且主人在空间里还得是 owner 或 editor（被降为 viewer 后就不能改了）
+const ownsApp = (app: { ownerAccountId: string }) =>
+  canCreate.value && app.ownerAccountId === me.data.value?.id
 
 const apps = useQuery({
   queryKey: computed(() => ['apps', spaceId.value]),
@@ -48,6 +51,8 @@ async function update(app: AppInfo, body: Parameters<typeof api.updateApp>[2]) {
 }
 
 const open = ref(false)
+// 切换空间时关掉新建窗口：里面的内容属于上一个空间
+watch(spaceId, () => (open.value = false))
 const form = reactive({
   slug: '',
   name: '',
@@ -90,16 +95,11 @@ async function create() {
               <span class="font-medium">{{ app.name }}</span>
               <code class="text-xs text-muted">app://{{ app.slug }}</code>
               <UBadge variant="subtle">{{ app.runtimeFamily }}</UBadge>
-              <UBadge
-                v-if="app.ownerAccountId === me.data.value?.id"
-                color="primary"
-                variant="subtle"
-                >我的</UBadge
-              >
+              <UBadge v-if="ownsApp(app)" color="primary" variant="subtle">我的</UBadge>
             </div>
           </template>
           <div class="space-y-4">
-            <div v-if="app.ownerAccountId === me.data.value?.id" class="grid gap-4 sm:grid-cols-2">
+            <div v-if="ownsApp(app)" class="grid gap-4 sm:grid-cols-2">
               <UFormField label="默认人格" help="这个应用读写哪个人格的设定">
                 <USelect
                   :model-value="app.defaultPersonaId"
@@ -125,7 +125,7 @@ async function create() {
             <AppKeys
               :space-id="spaceId"
               :app-id="app.id"
-              :is-app-owner="app.ownerAccountId === me.data.value?.id"
+              :is-app-owner="ownsApp(app)"
               :is-space-owner="role === 'owner'"
             />
           </div>

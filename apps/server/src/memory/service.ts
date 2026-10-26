@@ -374,6 +374,9 @@ export class MemoryService {
     const parsed = parse(input.uri)
     return this.write(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
+      if (input.expectedId !== undefined && input.expectedId !== before.id) {
+        throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
+      }
       if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
         throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
       }

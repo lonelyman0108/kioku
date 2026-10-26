@@ -8,6 +8,7 @@ import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 
@@ -55,37 +56,38 @@ const dirty = computed(() => {
   )
 })
 
-// 没有改动时跟上服务器上的新版本；有未保存的改动时保留它们，提示版本已变化，保存时由版本号检查冲突。
-// 比表单载入的那一版还旧的数据不理会，例如保存之前发出的重新拉取晚到了
+// 有未保存的改动时保留它们，提示在别处被改过，保存时由 id 与版本号检查冲突。
+// 没有改动时跟上服务器：换成了另一条（删除后在同一个 URI 重建），或者有了更新的版本；
+// 同一条但比表单那一版还旧的数据不理会，例如保存之前发出的重新拉取晚到了
 watch(
   () => memory.data.value,
   (m) => {
     if (!m) return
-    if (!base.value) load(m)
-    else if (m.version >= base.value.version && !dirty.value) load(m)
+    if (!base.value) return load(m)
+    if (dirty.value) return
+    if (m.id !== base.value.id || m.version >= base.value.version) load(m)
   },
   { immediate: true },
 )
 
-// 有未保存的修改时，切到别的记忆、别的页面或关掉标签页之前先确认
+// 有未保存的修改时，切到别的记忆、别的页面、退出登录或关掉标签页之前先确认（见 unsavedChanges.ts）
 const leaving = ref(false)
-function confirmLeave(): boolean {
-  return (
-    leaving.value ||
-    !dirty.value ||
-    window.confirm('这条记忆有未保存的修改，离开后会丢失。确定离开吗？')
-  )
-}
+watch(dirty, (d) => (hasUnsavedChanges.value = d && !leaving.value), { immediate: true })
+const confirmLeave = () => leaving.value || confirmDiscard()
 onBeforeRouteUpdate(confirmLeave)
 onBeforeRouteLeave(confirmLeave)
 function onBeforeUnload(event: BeforeUnloadEvent) {
-  if (dirty.value) event.preventDefault()
+  if (hasUnsavedChanges.value) event.preventDefault()
 }
 onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
-onBeforeUnmount(() => window.removeEventListener('beforeunload', onBeforeUnload))
-const changedElsewhere = computed(
-  () => !!memory.data.value && !!base.value && memory.data.value.version !== base.value.version,
-)
+onBeforeUnmount(() => {
+  window.removeEventListener('beforeunload', onBeforeUnload)
+  hasUnsavedChanges.value = false
+})
+const changedElsewhere = computed(() => {
+  const [m, b] = [memory.data.value, base.value]
+  return !!m && !!b && (m.id !== b.id || m.version !== b.version)
+})
 
 const permissions = useMemoryPermissions(computed(() => props.spaceId))
 const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.value) : null))
@@ -108,7 +110,8 @@ async function save() {
   try {
     const next = await api.updateMemory(props.spaceId, {
       uri: m.uri,
-      // 带上表单载入时的版本号：别人改过之后返回 409，不会悄悄覆盖
+      // 带上表单载入时的 id 与版本号：别人改过、或删除后重建了之后返回 409，不会悄悄覆盖
+      expectedId: m.id,
       expectedVersion: m.version,
       ...(sent.content !== (m.content ?? '') ? { content: sent.content } : {}),
       disclosure: sent.disclosure.trim() ? sent.disclosure.trim() : null,
@@ -143,6 +146,7 @@ async function remove() {
     toast.add({ title: '已删除', color: 'success' })
     // 已经删除了，离开时不再提示未保存的修改
     leaving.value = true
+    hasUnsavedChanges.value = false
     emit('deleted', props.uri)
   } catch (err) {
     failed(err, '删除失败')
@@ -170,7 +174,7 @@ async function remove() {
       v-else-if="changedElsewhere && dirty"
       color="warning"
       variant="subtle"
-      :title="`这条记忆在别处被改过（现在是版本 ${memory.data.value?.version}）。保存会提示冲突，可以先复制你的修改，再载入新版本。`"
+      title="这条记忆在别处被改过，或被删除后重新创建了。保存会提示冲突，可以先复制你的修改，再载入新版本。"
       :actions="[
         { label: '载入新版本', onClick: () => memory.data.value && load(memory.data.value) },
       ]"

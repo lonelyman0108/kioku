@@ -26,10 +26,12 @@ export function loadMe(): Promise<Me | null> {
 export function useSession() {
   const me = useQuery({ queryKey: ME_KEY, queryFn: fetchMe })
   const route = useRoute()
+  // 路由里指定了空间时只认那个空间，不是它的成员就是 null（不借用别的空间的角色）；没指定时取第一个
   const space = computed(() => {
     const spaces = me.data.value?.spaces ?? []
     const id = route.params.spaceId
-    return spaces.find((s) => s.id === id) ?? spaces[0] ?? null
+    if (typeof id === 'string') return spaces.find((s) => s.id === id) ?? null
+    return spaces[0] ?? null
   })
   return { me, space }
 }
