@@ -6,7 +6,7 @@
 
 | 项 | 值 |
 |---|---|
-| 托管 | GitHub，私有仓库（计划开源时改为公开） |
+| 托管 | GitHub，公开仓库，Apache-2.0 |
 | 合并方式 | 只允许 squash，默认标题取 PR 标题、正文取 PR 描述；合并后自动删除分支 |
 | Auto-merge | 开启（`scripts/pr.sh` 用 `gh pr merge --auto`） |
 | Actions 令牌权限 | 默认只读；`release.yml` 自行声明 `contents: write` |
@@ -26,9 +26,25 @@ gh api repos/{owner}/{repo}/rulesets -X POST --input - <<'JSON'
 JSON
 ```
 
-私有仓库的规则集需要 GitHub Pro；没有时规则集不生效，`scripts/pr.sh` 会检测到没有必需检查而不预约自动合并。还没有 CI 时先去掉 `required_status_checks` 一条，第一次 PR 跑出检查后再加。
+规则集 `main` 已于 2026-10-26 创建并生效。仓库若改回私有，规则集需要 GitHub Pro 才生效；不生效时 `scripts/pr.sh` 会检测到没有必需检查而不预约自动合并。
 
-受保护标签：另建一条 `target: tag`、`include: ["refs/tags/v*"]` 的规则集，只允许维护者创建。
+受保护标签：规则集 `release-tags`，匹配 `refs/tags/v*`，禁止创建、更新、删除和强推，仓库管理员（RepositoryRole 5）可绕过，也就是只有维护者能打版本 tag：
+
+```bash
+gh api repos/{owner}/{repo}/rulesets -X POST --input - <<'JSON'
+{"name":"release-tags","target":"tag","enforcement":"active",
+ "conditions":{"ref_name":{"include":["refs/tags/v*"],"exclude":[]}},
+ "bypass_actors":[{"actor_id":5,"actor_type":"RepositoryRole","bypass_mode":"always"}],
+ "rules":[{"type":"creation"},{"type":"update"},{"type":"deletion"},{"type":"non_fast_forward"}]}
+JSON
+```
+
+合并选项（一次设好）：
+
+```bash
+gh api -X PATCH repos/{owner}/{repo} -F allow_squash_merge=true -F allow_merge_commit=false -F allow_rebase_merge=false \
+  -F allow_auto_merge=true -F delete_branch_on_merge=true -f squash_merge_commit_title=PR_TITLE -f squash_merge_commit_message=PR_BODY
+```
 
 ## Secrets 与 Variables
 
@@ -58,7 +74,7 @@ JSON
 ## 重建步骤
 
 1. 从备份或任意 clone 恢复仓库并推送到新的 GitHub 仓库。
-2. 按上文设置合并方式、Auto-merge、规则集。
+2. 按上文设置合并选项和两条规则集。
 3. 克隆后运行 `scripts/bootstrap.sh`，再跑 `scripts/check.sh`。
 
 ## 演练记录
