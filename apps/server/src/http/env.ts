@@ -5,6 +5,8 @@ import type { Db } from '../db/client'
 export interface Deps {
   db: Db
   cookieSecure: boolean
+  // 没配置时不能读写 secret 级记忆
+  masterKey: Buffer | null
 }
 
 export interface ConsolePrincipal {
@@ -24,6 +26,7 @@ export interface KeyPrincipal {
     name: string
     runtimeFamily: string
     ownerAccountId: string
+    defaultPersonaId: string | null
     config: AppConfig
   }
 }

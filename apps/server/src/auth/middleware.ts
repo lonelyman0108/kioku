@@ -60,6 +60,7 @@ export function requireKey(deps: Deps) {
         name: app.name,
         runtimeFamily: app.runtimeFamily,
         ownerAccountId: app.ownerAccountId,
+        defaultPersonaId: app.defaultPersonaId,
         config: AppConfig.parse(app.config),
       },
     })

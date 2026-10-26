@@ -18,7 +18,7 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({ db: database.db, cookieSecure: false })
+    app = createApp({ db: database.db, cookieSecure: false, masterKey: null })
   })
   afterAll(async () => {
     await database?.close()

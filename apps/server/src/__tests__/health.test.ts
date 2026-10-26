@@ -5,7 +5,7 @@ import { createApp } from '../app'
 import type { Db } from '../db/client'
 
 // health 与 OpenAPI 文档不访问数据库
-const app = createApp({ db: {} as Db, cookieSecure: true })
+const app = createApp({ db: {} as Db, cookieSecure: true, masterKey: null })
 
 describe('GET /v1/health', () => {
   it('返回 ok 与版本号', async () => {

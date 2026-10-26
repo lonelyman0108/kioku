@@ -56,9 +56,34 @@ export const CreateAppRequest = z.object({
   slug: Slug,
   name: z.string().min(1).max(64),
   runtimeFamily: RuntimeFamily,
+  defaultPersonaId: z.uuid().nullable().default(null),
   config: AppConfig.default({}),
 })
 export type CreateAppRequest = z.infer<typeof CreateAppRequest>
+
+export const UpdateAppRequest = z.object({
+  name: z.string().min(1).max(64).optional(),
+  defaultPersonaId: z.uuid().nullable().optional(),
+  config: AppConfig.optional(),
+})
+export type UpdateAppRequest = z.infer<typeof UpdateAppRequest>
+
+export const PersonaInfo = z.object({
+  id: z.uuid(),
+  slug: z.string(),
+  name: z.string(),
+  extendsId: z.uuid().nullable(),
+  description: z.string().nullable(),
+})
+export type PersonaInfo = z.infer<typeof PersonaInfo>
+
+export const CreatePersonaRequest = z.object({
+  slug: Slug,
+  name: z.string().min(1).max(64),
+  extendsId: z.uuid().nullable().default(null),
+  description: z.string().max(500).nullable().default(null),
+})
+export type CreatePersonaRequest = z.infer<typeof CreatePersonaRequest>
 
 export const AppInfo = z.object({
   id: z.uuid(),
@@ -66,6 +91,7 @@ export const AppInfo = z.object({
   name: z.string(),
   runtimeFamily: z.string(),
   ownerAccountId: z.uuid(),
+  defaultPersonaId: z.uuid().nullable(),
   config: AppConfig,
 })
 export type AppInfo = z.infer<typeof AppInfo>
