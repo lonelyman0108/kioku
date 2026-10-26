@@ -1,5 +1,5 @@
 import type { Layer, RecallCandidate, RecallVia } from '@kioku/contracts'
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, desc, eq, ne, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
 import type { Tx } from '../db/client'
@@ -35,6 +35,8 @@ export interface RecallOptions {
   minScore?: number
   // personaIds 用于 persona 层过滤；召回永远不返回 secret
   personaIds: string[]
+  // 只收受信来源（不含 untrusted 写入的）
+  trustedOnly?: boolean
 }
 
 interface Hit {
@@ -82,6 +84,7 @@ export async function recall(
   const readable = and(
     readableConditions(access, { personaIds: options.personaIds }),
     eq(memories.form, 'curated'),
+    options.trustedOnly ? ne(memories.provenance, 'untrusted') : undefined,
   )
   // 各路都直接取出展示要用的字段，合并时不必再查一次库
   const fields = {
