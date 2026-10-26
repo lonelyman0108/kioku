@@ -1,10 +1,13 @@
 import { fileURLToPath } from 'node:url'
 
+import { parseMasterKey } from './crypto/envelope'
+
 export interface Config {
   port: number
   databaseUrl: string
   migrationsFolder: string
   cookieSecure: boolean
+  masterKey: Buffer | null
 }
 
 // 迁移目录相对本文件所在目录的上一级解析：src/config.ts 与打包后的 dist/index.mjs 都在 apps/server 下一层
@@ -18,5 +21,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
       env.KIOKU_MIGRATIONS_DIR ?? fileURLToPath(new URL('../migrations', import.meta.url)),
     // 浏览器只在 HTTPS 或 localhost 下接受 Secure Cookie；用局域网 HTTP 地址访问时设为 false
     cookieSecure: env.KIOKU_COOKIE_SECURE !== 'false',
+    // 生成：openssl rand -base64 32。丢失后已有的 secret 无法解密
+    masterKey: env.KIOKU_MASTER_KEY ? parseMasterKey(env.KIOKU_MASTER_KEY) : null,
   }
 }

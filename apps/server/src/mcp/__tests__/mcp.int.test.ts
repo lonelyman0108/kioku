@@ -1,0 +1,92 @@
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+
+import { createApp } from '../../app'
+import type { Database } from '../../db/client'
+import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { bearer, bootstrap } from '../../testing/fixtures'
+
+describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
+  let database: Database
+  let app: ReturnType<typeof createApp>
+  let key: string
+
+  beforeAll(async () => {
+    database = await openTestDatabase()
+    app = createApp({ db: database.db, cookieSecure: false, masterKey: null })
+  })
+  afterAll(async () => {
+    await database?.close()
+  })
+  beforeEach(async () => {
+    await resetDatabase(database)
+    const ws = await bootstrap(app)
+    key = await ws.issueKey((await ws.createApp('claude-code')).id)
+  })
+
+  let id = 0
+  async function rpc(method: string, params: unknown, k = key) {
+    const res = await app.request('/v1/mcp', {
+      method: 'POST',
+      headers: {
+        ...bearer(k),
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
+      body: JSON.stringify({ jsonrpc: '2.0', id: ++id, method, params }),
+    })
+    // 测试里按需取字段，这里放宽类型
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const body: any = res.status === 200 ? await res.json() : await res.text()
+    return { status: res.status, body }
+  }
+  const callTool = async (name: string, args: Record<string, unknown>) =>
+    (await rpc('tools/call', { name, arguments: args })).body.result as {
+      content: { text: string }[]
+      isError?: boolean
+    }
+
+  it('没有 Key 返回 401', async () => {
+    const res = await app.request('/v1/mcp', { method: 'POST', body: '{}' })
+    expect(res.status).toBe(401)
+  })
+
+  it('初始化并列出工具', async () => {
+    const init = await rpc('initialize', {
+      protocolVersion: '2025-06-18',
+      capabilities: {},
+      clientInfo: { name: 'test', version: '0' },
+    })
+    expect(init.body.result.serverInfo.name).toBe('kioku')
+    const tools = await rpc('tools/list', {})
+    expect(tools.body.result.tools.map((t: { name: string }) => t.name).sort()).toEqual([
+      'kioku_create',
+      'kioku_delete',
+      'kioku_get',
+      'kioku_list',
+      'kioku_move',
+      'kioku_update',
+    ])
+  })
+
+  it('通过工具创建、读取、浏览', async () => {
+    const created = await callTool('kioku_create', {
+      uri: 'core://agent',
+      content: '先读正文再信任',
+      layer: 'base',
+      disclosure: '每次会话开始',
+      glossary: ['规则'],
+    })
+    expect(created.isError).toBeFalsy()
+    const got = await callTool('kioku_get', { uri: 'core://agent' })
+    expect(got.content[0]!.text).toContain('先读正文再信任')
+    expect(got.content[0]!.text).toContain('Disclosure: 每次会话开始')
+    const domains = await callTool('kioku_list', {})
+    expect(domains.content[0]!.text).toContain('core://（1 个节点）')
+  })
+
+  it('业务错误作为工具错误返回', async () => {
+    const missing = await callTool('kioku_get', { uri: 'core://nope' })
+    expect(missing.isError).toBe(true)
+    expect(missing.content[0]!.text).toContain('不存在')
+  })
+})

@@ -10,7 +10,11 @@ const database = connect(config.databaseUrl)
 await assertRuntimeRole(database.db)
 await runMigrations(database, config.migrationsFolder)
 
-const app = createApp({ db: database.db, cookieSecure: config.cookieSecure })
+const app = createApp({
+  db: database.db,
+  cookieSecure: config.cookieSecure,
+  masterKey: config.masterKey,
+})
 
 serve({ fetch: app.fetch, port: config.port }, (info) => {
   console.log(`Kioku 已启动：http://localhost:${info.port}`)

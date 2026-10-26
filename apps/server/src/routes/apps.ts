@@ -8,6 +8,7 @@ import {
   ErrorResponse,
   KeyInfo,
   KeyScopes,
+  UpdateAppRequest,
   type MemberRole,
 } from '@kioku/contracts'
 import { and, desc, eq, isNull } from 'drizzle-orm'
@@ -15,7 +16,8 @@ import { and, desc, eq, isNull } from 'drizzle-orm'
 import { generateApiKey } from '../auth/keys'
 import { memberRole, requireConsole } from '../auth/middleware'
 import { withSpace } from '../db/client'
-import { apiKeys, apps } from '../db/schema'
+import { apiKeys, apps, personas } from '../db/schema'
+import type { Tx } from '../db/client'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
@@ -32,6 +34,7 @@ const toAppInfo = (row: typeof apps.$inferSelect) => ({
   name: row.name,
   runtimeFamily: row.runtimeFamily,
   ownerAccountId: row.ownerAccountId,
+  defaultPersonaId: row.defaultPersonaId,
   config: AppConfig.parse(row.config),
 })
 
@@ -63,8 +66,18 @@ const createApp = createRoute({
   responses: {
     201: jsonResponse('已创建', AppInfo),
     403: forbidden,
+    404: jsonResponse('默认人格不存在', ErrorResponse),
     409: jsonResponse('标识已被占用', ErrorResponse),
   },
+})
+
+const updateApp = createRoute({
+  method: 'patch',
+  path: '/spaces/{spaceId}/apps/{appId}',
+  tags: ['apps'],
+  summary: '修改应用名称、默认人格或配置',
+  request: { params: AppParams, body: jsonBody(UpdateAppRequest) },
+  responses: { 200: jsonResponse('已修改', AppInfo), 403: forbidden, 404: notFound },
 })
 
 const listKeys = createRoute({
@@ -94,6 +107,16 @@ const revokeKey = createRoute({
   responses: { 204: { description: '已吊销' }, 403: forbidden, 404: notFound },
 })
 
+// 外键检查不受 RLS 约束，默认人格必须在 RLS 下可见，也就是同一空间
+async function personaVisible(tx: Tx, personaId: string | null | undefined): Promise<boolean> {
+  if (!personaId) return true
+  const [row] = await tx
+    .select({ id: personas.id })
+    .from(personas)
+    .where(eq(personas.id, personaId))
+  return Boolean(row)
+}
+
 const canManageApps = (role: MemberRole | null) => role === 'owner' || role === 'editor'
 // Key 决定接入方能读到什么，只有空间的 owner 能签发和吊销
 const canManageKeys = (role: MemberRole | null) => role === 'owner'
@@ -122,15 +145,34 @@ export function appRoutes(deps: Deps) {
       if (!canManageApps(await roleOf(spaceId, accountId))) {
         return c.json({ error: '需要 owner 或 editor 角色' }, 403)
       }
-      const rows = await withSpace(deps.db, spaceId, (tx) =>
-        tx
+      const rows = await withSpace(deps.db, spaceId, async (tx) => {
+        if (!(await personaVisible(tx, body.defaultPersonaId))) return null
+        return tx
           .insert(apps)
           .values({ spaceId, ...body, ownerAccountId: accountId })
           .onConflictDoNothing()
-          .returning(),
-      )
+          .returning()
+      })
+      if (!rows) return c.json({ error: '默认人格不存在' }, 404)
       if (!rows[0]) return c.json({ error: `标识 ${body.slug} 已被占用` }, 409)
       return c.json(toAppInfo(rows[0]), 201)
+    })
+    .openapi(updateApp, async (c) => {
+      const { spaceId, appId } = c.req.valid('param')
+      const body = c.req.valid('json')
+      if (!canManageApps(await roleOf(spaceId, c.get('console').accountId))) {
+        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      }
+      const rows = await withSpace(deps.db, spaceId, async (tx) => {
+        if (!(await personaVisible(tx, body.defaultPersonaId))) return []
+        return tx
+          .update(apps)
+          .set({ ...body, updatedAt: new Date() })
+          .where(eq(apps.id, appId))
+          .returning()
+      })
+      if (!rows[0]) return c.json({ error: '应用或默认人格不存在' }, 404)
+      return c.json(toAppInfo(rows[0]), 200)
     })
     .openapi(listKeys, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
