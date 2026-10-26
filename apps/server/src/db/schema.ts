@@ -27,7 +27,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
 
-// 表分两类：身份表（accounts、spaces、space_members、api_keys）在鉴权阶段就要跨空间查询，不开行级安全；
+// 表分两类：身份表（accounts、sessions、spaces、space_members、api_keys）在鉴权阶段就要跨空间查询，不开行级安全；
 // 其余内容表都带 space_id，由迁移里的 RLS 策略按会话变量 app.space_id 强制隔离。
 // 外键检查不受 RLS 约束，所以指向内容表的外键都带上 space_id（复合外键），保证不会关联到别的空间。
 
@@ -72,6 +72,21 @@ export const spaceMembers = pgTable(
     createdAt: createdAt(),
   },
   (t) => [primaryKey({ columns: [t.spaceId, t.accountId] })],
+)
+
+// 管理界面的登录会话；Cookie 里是随机令牌，库里只存它的 SHA-256
+export const sessions = pgTable(
+  'sessions',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    accountId: uuid()
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    tokenHash: text().notNull().unique(),
+    createdAt: createdAt(),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+  },
+  (t) => [index().on(t.accountId)],
 )
 
 // Key 明文只在创建时返回一次；库里存前缀（用于查找和显示）与整串的 SHA-256
