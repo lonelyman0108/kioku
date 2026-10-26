@@ -1,5 +1,14 @@
-import { resolveAccess, type Access, type SessionContext } from '../access/access'
-import type { Tx } from '../db/client'
+import { eq } from 'drizzle-orm'
+
+import {
+  consoleAccess,
+  resolveAccess,
+  type Access,
+  type ConsoleRole,
+  type SessionContext,
+} from '../access/access'
+import { withSpace, type Tx } from '../db/client'
+import { apps } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import type { RecallScope } from '../lifecycle/scope'
 import { boot } from '../recall/boot'
@@ -35,6 +44,35 @@ export function memoryServiceForKey(
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
+  })
+}
+
+// 管理界面：按成员角色给权限，能看到空间里全部人格与应用的记忆，私人层只看得到自己的；
+// editor 只能写自己是主人的应用的应用层
+export async function memoryServiceForConsole(
+  deps: Deps,
+  spaceId: string,
+  accountId: string,
+  role: ConsoleRole,
+): Promise<MemoryService> {
+  const owned =
+    role === 'editor'
+      ? await withSpace(deps.db, spaceId, (tx) =>
+          tx.select({ id: apps.id }).from(apps).where(eq(apps.ownerAccountId, accountId)),
+        )
+      : []
+  return new MemoryService({
+    db: deps.db,
+    spaceId,
+    access: consoleAccess(
+      role,
+      accountId,
+      owned.map((a) => a.id),
+    ),
+    personaId: 'all',
+    masterKey: deps.masterKey,
+    actor: { accountId },
+    onChanged: (memoryId) => deps.jobs?.enqueueEmbed(spaceId, memoryId),
   })
 }
 

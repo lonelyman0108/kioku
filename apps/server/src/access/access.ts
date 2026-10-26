@@ -38,7 +38,11 @@ export interface Access {
   writeOriginScope: string
   writeProvenance: Provenance
   ownerAccountId: string
-  appId: string
+  // null 表示管理界面：不代表某个应用，能看到空间里所有应用的应用层记忆
+  appId: string | null
+  // 能写哪些应用的应用层。'all'：admin Key 与管理界面里的空间 owner；Key 只能写自己的应用；
+  // 管理界面里的 editor 只能写自己是主人的应用，与签发 Key 的规则一致（Key 只能由应用主人签发）
+  writableAppIds: ReadonlySet<string> | 'all'
   // 允许按 URI 显式读取 secret；召回和搜索永远不返回 secret
   canReadSecret: boolean
   admin: boolean
@@ -68,6 +72,7 @@ export function resolveAccess(
   const common = {
     ownerAccountId: app.ownerAccountId,
     appId: app.appId,
+    writableAppIds: scopes.admin ? ('all' as const) : new Set([app.appId]),
     admin: scopes.admin,
   }
   const appScope = `app:${app.appId}`
@@ -187,27 +192,53 @@ export function canRead(access: Access, memory: MemoryFacts, options: ReadOption
   if (memory.layer === 'persona' && !options.personaIds.includes(memory.personaId ?? '')) {
     return false
   }
-  if (memory.layer === 'app' && memory.appId !== access.appId) return false
+  if (memory.layer === 'app' && access.appId !== null && memory.appId !== access.appId) {
+    return false
+  }
   return true
 }
 
 export interface WriteIntent {
   layer: Layer
   sensitivity: Sensitivity
+  // 应用层记忆所属的应用；其他层为 null
+  appId: string | null
 }
 
 export function canWrite(access: Access, intent: WriteIntent): boolean {
   if (!access.writeLayers.has(intent.layer)) return false
+  if (intent.layer === 'app' && !canWriteApp(access, intent.appId)) return false
   if (intent.sensitivity === 'secret') return access.canReadSecret
   return sensitivityRank(intent.sensitivity) <= sensitivityRank(access.maxSensitivity)
 }
 
-// 管理界面里主人本人的会话：读写自己能看到的一切
-export function ownerConsoleScopes(): KeyScopes {
+export function canWriteApp(access: Access, appId: string | null): boolean {
+  return access.writableAppIds === 'all' || (appId !== null && access.writableAppIds.has(appId))
+}
+
+export type ConsoleRole = 'owner' | 'editor' | 'viewer'
+
+// 管理界面里成员本人的权限，与签发 Key 的规则一致：secret 只有空间 owner 能读写，viewer 只读，
+// 应用层 editor 只能写自己是主人的应用（ownedAppIds）。私人层与画像层只看得到自己的；
+// 所有人格、所有应用的记忆都能看到（personaIds 由调用方传入全部人格）
+export function consoleAccess(
+  role: ConsoleRole,
+  accountId: string,
+  ownedAppIds: Iterable<string> = [],
+): Access {
+  const all = new Set<Layer>(LAYERS)
   return {
-    readLayers: [...LAYERS],
-    writeLayers: [...LAYERS],
-    maxSensitivity: 'secret',
-    admin: true,
+    readLayers: all,
+    writeLayers: role === 'viewer' ? new Set() : all,
+    maxSensitivity: role === 'owner' ? 'secret' : 'private',
+    originScopes: null,
+    writeOriginScope: 'global',
+    writeProvenance: 'owner',
+    ownerAccountId: accountId,
+    appId: null,
+    writableAppIds: role === 'owner' ? 'all' : new Set(role === 'editor' ? ownedAppIds : []),
+    canReadSecret: role === 'owner',
+    // 人格层不设限：editor 本来就能建一个用任意人格的应用、再用它的 Key 写那个人格
+    admin: role === 'owner',
   }
 }
