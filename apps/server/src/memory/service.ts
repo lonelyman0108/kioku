@@ -13,7 +13,7 @@ import type {
 } from '@kioku/contracts'
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
 
-import { canRead, canWrite, type Access } from '../access/access'
+import { canRead, canWrite, canWriteApp, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
 import { apps, memories, memoryEmbeddings, memoryEvents, memoryGlossary } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
@@ -315,8 +315,8 @@ export class MemoryService {
         .where(eq(apps.slug, parsed.namespaceSlug!))
         .limit(1)
       if (!row) throw new MemoryError(404, `应用不存在：${parsed.namespaceSlug}`)
-      if (!access.admin && row.id !== access.appId) {
-        throw new MemoryError(403, '只能写本应用的应用层记忆')
+      if (!canWriteApp(access, row.id)) {
+        throw new MemoryError(403, '没有权限写这个应用的应用层记忆')
       }
       ownership.appId = row.id
     }
@@ -336,7 +336,7 @@ export class MemoryService {
     return this.write(async (tx, personaIds, released) => {
       const ownership = await this.resolveOwnership(tx, parsed, input.layer, personaIds)
       const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
-      if (!canWrite(this.ctx.access, { layer: ownership.layer, sensitivity })) {
+      if (!canWrite(this.ctx.access, { ...ownership, sensitivity })) {
         throw new MemoryError(403, `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`)
       }
       await this.claimUri(tx, parsed, ownership, released)
@@ -398,7 +398,7 @@ export class MemoryService {
       }
       const sensitivity = input.sensitivity ?? before.sensitivity
       for (const s of new Set([before.sensitivity, sensitivity])) {
-        if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: s })) {
+        if (!canWrite(this.ctx.access, { ...before, sensitivity: s })) {
           throw new MemoryError(403, `没有权限改 ${before.layer} 层的 ${s} 级记忆`)
         }
       }
@@ -481,7 +481,7 @@ export class MemoryService {
     const parsed = parse(uri)
     const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
-      if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: before.sensitivity })) {
+      if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
       }
       const [row] = await tx
@@ -508,7 +508,7 @@ export class MemoryService {
     const to = parse(input.to)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, from, personaIds)
-      if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: before.sensitivity })) {
+      if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限移动 ${before.layer} 层的记忆`)
       }
       const sameNamespace = from.domain === to.domain && from.namespaceSlug === to.namespaceSlug
