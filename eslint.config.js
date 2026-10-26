@@ -25,7 +25,7 @@ export default tseslint.config(
     languageOptions: { globals: globals.browser },
   },
   {
-    files: ['apps/server/**', 'packages/**', '*.js', '*.ts'],
+    files: ['apps/server/**', 'packages/**', 'plugins/**', '*.js', '*.ts'],
     languageOptions: { globals: globals.node },
   },
   {
