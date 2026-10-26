@@ -15,7 +15,8 @@ const form = reactive({
   uri: '',
   content: '',
   layer: 'private' as Layer,
-  sensitivity: undefined as Sensitivity | undefined,
+  // null 表示按层默认；下拉框把 undefined 当成没有选，显示不出「按层默认」
+  sensitivity: null as Sensitivity | null,
   disclosure: '',
 })
 const error = ref<string | null>(null)
@@ -27,7 +28,7 @@ watch(open, (value) => {
     uri: props.initialUri,
     content: '',
     layer: 'private',
-    sensitivity: undefined,
+    sensitivity: null,
     disclosure: '',
   })
   error.value = null
@@ -41,7 +42,7 @@ const layerItems = creatableLayers.map((l) => ({ label: layerLabels[l], value: l
 // editor 签不了 secret，选项里也不给
 const { sensitivities } = useMemoryPermissions(computed(() => props.spaceId))
 const sensitivityItems = computed(() => [
-  { label: '按层默认', value: undefined },
+  { label: '按层默认', value: null },
   ...sensitivities.value.map((s) => ({ label: sensitivityLabels[s], value: s })),
 ])
 

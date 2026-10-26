@@ -423,6 +423,39 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     )
   })
 
+  it('写不了的过期共享记录留着：成员节点可以和它并存，同样是共享节点的写入照样冲突', async () => {
+    const ownerKey = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(ownerKey, {
+      uri: 'home://vault',
+      content: '旧密码',
+      layer: 'base',
+      sensitivity: 'secret',
+    })
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 1000) })
+        .where(eq(memories.path, 'vault')),
+    )
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bKey = (
+      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
+    ).key
+    expect(
+      (await create(bKey, { uri: 'home://vault', content: '共享', layer: 'base' })).status,
+    ).toBe(409)
+    expect(
+      (await create(bKey, { uri: 'home://vault', content: 'bob 自己的', layer: 'private' })).status,
+    ).toBe(201)
+    const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memories).where(eq(memories.path, 'vault')),
+    )
+    expect(rows.filter((r) => r.deletedAt === null)).toHaveLength(2)
+    expect(((await (await get(bKey, 'home://vault')).json()) as MemoryView).content).toBe(
+      'bob 自己的',
+    )
+  })
+
   it('超长用户名返回 400，不写入失败计数表', async () => {
     const res = await app.request(
       '/v1/auth/login',

@@ -20,7 +20,7 @@ import { VERSION } from './version'
 
 // 应用本身与监听端口分开，测试直接调 app.request，不用起服务
 export function createApp(deps: Deps) {
-  const app = router()
+  const app = router({ collapseSlashes: true })
   // 安全响应头。界面没有内联脚本；Nuxt UI 会写内联样式，所以 style-src 放开 unsafe-inline。
   // 不发 HSTS：服务自己不知道前面有没有 HTTPS，而 HSTS 会作用到整个主机名的所有端口和子域名，
   // 同一主机上别的 HTTP 服务会因此打不开，要不要发由前面的 HTTPS 反向代理决定

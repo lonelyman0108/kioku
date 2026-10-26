@@ -11,6 +11,8 @@ import { apps, memories, memoryEvents, personas } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { consoleAccess } from '../../access/access'
+import { MemoryService } from '../../memory/service'
 import { applyImport, planImport, readLore, verifyMasterKey, type ImportPlan } from '../lore'
 
 // 在测试库里建一个只含导入用到的几张表的 Lore，结构取自 Lore 的 000_initial_schema.sql
@@ -102,7 +104,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     ws = await bootstrap(app)
   })
 
-  const plan = async (): Promise<ImportPlan> => {
+  const plan = async (
+    persona = 'default',
+    secretUris = ['infra://home_network/credentials'],
+  ): Promise<ImportPlan> => {
     const existing = await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .select({
@@ -114,14 +119,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     )
     return planImport(await readLore(lore), existing, {
       accountId: ws.accountId,
-      persona: { slug: 'default', name: '默认人格' },
-      secretUris: new Set(['infra://home_network/credentials']),
+      persona: { slug: persona, name: persona },
+      secretUris: new Set(secretUris),
     })
   }
-  const run = async () =>
+  const run = async (persona?: string, secretUris?: string[]) =>
     applyImport(
       { db: database.db, spaceId: ws.spaceId, accountId: ws.accountId, masterKey },
-      await plan(),
+      await plan(persona, secretUris),
     )
 
   it('读出节点、当前正文、旧版本数、关键词与召回事件数', async () => {
@@ -238,6 +243,41 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       tx.select({ path: memories.path }).from(memories).where(eq(memories.domain, 'app')),
     )
     expect(appRows.some((r) => r.path?.startsWith('bob-cc'))).toBe(false)
+  })
+
+  it('换一个人格再导入时，core://soul 也写进新的人格', async () => {
+    await run()
+    const again = await run('work')
+    expect(again.created).toEqual(['persona://work/soul'])
+  })
+
+  it('之前按明文导入过的节点，这次加 --secret 不会悄悄跳过', async () => {
+    await run('default', [])
+    const again = await run('default', ['infra://home_network/credentials'])
+    expect(again.secretAlreadyImported).toEqual(['infra://home_network/credentials'])
+  })
+
+  it('写入时应用已经不属于导入者，就不写进去', async () => {
+    const claude = await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const service = new MemoryService({
+      db: database.db,
+      spaceId: ws.spaceId,
+      access: { ...consoleAccess('owner', ws.accountId), writeProvenance: 'system' },
+      personaId: 'all',
+      masterKey,
+      actor: { accountId: ws.accountId },
+    })
+    // 计划时应用还是自己的，写入前被转给了 bob
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(apps).set({ ownerAccountId: bob.accountId }).where(eq(apps.id, claude.id)),
+    )
+    await expect(
+      service.create(
+        { uri: 'app://claude-code/agent', content: '规则', priority: 0, glossary: [] },
+        { requireAppOwner: ws.accountId },
+      ),
+    ).rejects.toMatchObject({ status: 403 })
   })
 
   it('主密钥和导入时用的不一致时拒绝', async () => {

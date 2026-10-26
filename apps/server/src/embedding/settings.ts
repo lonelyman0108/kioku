@@ -1,6 +1,6 @@
 import { eq } from 'drizzle-orm'
 
-import { decryptSecret, encryptSecret } from '../crypto/envelope'
+import { decryptSecret, encryptSecret, type Sealed } from '../crypto/envelope'
 import type { Db } from '../db/client'
 import { settings } from '../db/schema'
 import type { EmbeddingConfig } from './provider'
@@ -13,6 +13,20 @@ interface Stored {
   baseUrl: string
   model: string
   apiKey: { ciphertext: string; wrappedKey: string } | null
+}
+
+// 只读出加密保存的嵌入接口 Key，不解密；没有保存 Key 时返回 null。用来核对主密钥是否一致
+export async function sealedEmbeddingKey(db: Db): Promise<{ sealed: Sealed; aad: string } | null> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, KEY)).limit(1)
+  const stored = row?.value as Stored | undefined
+  if (!stored?.apiKey) return null
+  return {
+    sealed: {
+      ciphertext: Buffer.from(stored.apiKey.ciphertext, 'base64'),
+      wrappedKey: Buffer.from(stored.apiKey.wrappedKey, 'base64'),
+    },
+    aad: AAD,
+  }
 }
 
 export async function loadEmbeddingConfig(

@@ -3,7 +3,7 @@ import { useToast } from '@nuxt/ui/composables'
 import type { MemoryView, Sensitivity } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
+import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -76,11 +76,16 @@ watch(dirty, (d) => (hasUnsavedChanges.value = d && !leaving.value), { immediate
 const confirmLeave = () => leaving.value || confirmDiscard()
 onBeforeRouteUpdate(confirmLeave)
 onBeforeRouteLeave(confirmLeave)
+// 确认过离开、导航却失败了（例如升级后页面文件加载不到）：修改还在，重新登记，下次离开还要确认
+const stopAfterEach = useRouter().afterEach((_to, _from, failure) => {
+  if (failure && dirty.value && !leaving.value) hasUnsavedChanges.value = true
+})
 function onBeforeUnload(event: BeforeUnloadEvent) {
   if (hasUnsavedChanges.value) event.preventDefault()
 }
 onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
 onBeforeUnmount(() => {
+  stopAfterEach()
   window.removeEventListener('beforeunload', onBeforeUnload)
   hasUnsavedChanges.value = false
 })
@@ -141,7 +146,9 @@ async function save() {
 
 async function remove() {
   try {
-    await api.deleteMemory(props.spaceId, props.uri)
+    // 带上表单载入时的 id 与版本号：期间被改过、或删除后重建了的记忆不会被一起删掉
+    if (!base.value) return
+    await api.deleteMemory(props.spaceId, props.uri, base.value)
     confirmDelete.value = false
     toast.add({ title: '已删除', color: 'success' })
     // 已经删除了，离开时不再提示未保存的修改
@@ -227,7 +234,7 @@ async function remove() {
         v-if="!readOnly"
         :icon="icons.save"
         :loading="saving"
-        :disabled="!dirty"
+        :disabled="!dirty || !form.content.trim()"
         @click="save"
       >
         保存

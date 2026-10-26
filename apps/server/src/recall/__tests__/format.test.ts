@@ -1,5 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
+import { formatBootBlock } from '../boot'
 import { formatRecallBlock, MAX_QUERY_CHARS, normalizeQuery } from '../recall'
 
 const candidate = {
@@ -28,5 +29,12 @@ describe('召回块格式', () => {
 
   it('过长的查询被截断', () => {
     expect(normalizeQuery('啊'.repeat(MAX_QUERY_CHARS + 100))).toHaveLength(MAX_QUERY_CHARS)
+  })
+
+  it('未展开的启动节点最多列 20 个，其余只给个数', () => {
+    const omitted = Array.from({ length: 25 }, (_, i) => `core://n${i}`)
+    const block = formatBootBlock({ entries: [], omitted }, '指引')
+    expect(block.match(/^- core:\/\/n/gm)).toHaveLength(20)
+    expect(block).toContain('还有 5 个')
   })
 })

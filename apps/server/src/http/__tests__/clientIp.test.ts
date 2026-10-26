@@ -54,12 +54,20 @@ describe('客户端地址', () => {
     expect(clientKey('192.0.2.5')).toBe('192.0.2.5')
   })
 
-  it('受信代理写的 ip:port 去掉端口；不是合法地址时退回连接对端', async () => {
+  it('受信代理写的 ip:port 去掉端口；不是合法地址时归入未知客户端，不记到代理的地址上', async () => {
     expect(stripPort('203.0.113.5:51234')).toBe('203.0.113.5')
     expect(stripPort('[2001:db8::1]:443')).toBe('2001:db8::1')
     expect(stripPort('2001:db8::1')).toBe('2001:db8::1')
     expect(await identify(1, '203.0.113.5:51234')).toEqual({ key: '203.0.113.5', identified: true })
-    expect(await identify(1, 'unknown', '192.0.2.5')).toEqual({
+    expect(await identify(1, 'unknown', '192.0.2.5')).toEqual({ key: 'unknown', identified: false })
+  })
+
+  it('转发头的项数不够时（绕过代理直连）退回连接对端', async () => {
+    expect(await identify(2, '203.0.113.9', '192.0.2.5')).toEqual({
+      key: '192.0.2.5',
+      identified: true,
+    })
+    expect(await identify(1, undefined, '192.0.2.5')).toEqual({
       key: '192.0.2.5',
       identified: true,
     })

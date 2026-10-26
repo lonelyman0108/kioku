@@ -6,7 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { confirmDiscard } from '../composables/unsavedChanges'
+import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { queryClient } from '../query'
@@ -50,13 +50,15 @@ const nav = computed<NavigationMenuItem[]>(() => {
 
 async function logout() {
   // 先确认未保存的修改，取消就什么都不做；确认之后再去服务端退出
+  const hadUnsaved = hasUnsavedChanges.value
   if (!confirmDiscard()) return
   try {
     await api.logout()
   } catch (err) {
     // 会话已经失效（例如在别的标签页退出过）时返回 401，照样清掉本地状态；
-    // 其他错误说明服务端的会话可能还在，不能装作已经退出
+    // 其他错误说明服务端的会话可能还在，不能装作已经退出，未保存的修改也还在，要继续受保护
     if (!(err instanceof ApiError && err.status === 401)) {
+      hasUnsavedChanges.value = hadUnsaved
       toast.add({
         title: err instanceof ApiError ? err.message : '退出失败，请重试',
         color: 'error',
@@ -112,9 +114,10 @@ async function logout() {
     <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
     <UDashboardPanel v-if="me.data.value && route.params.spaceId && !space" id="not-member">
       <template #body>
-        <p class="text-muted">
-          你不是这个空间的成员，或者已经被移出。可以从左上角切换到你所在的空间。
-        </p>
+        <div class="space-y-3">
+          <p class="text-muted">你不是这个空间的成员，或者已经被移出。</p>
+          <UButton :to="{ name: 'home' }" variant="subtle">回到我的空间</UButton>
+        </div>
       </template>
     </UDashboardPanel>
     <RouterView v-else />

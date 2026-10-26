@@ -12,8 +12,10 @@ import { inlineText } from './recall'
 // 按层排序（基础规则在前、个人信息在后），超出字数预算的只列 URI，模型需要时再读。
 // boot 会被宿主当作指令级上下文，所以只收受信来源的策展层：对象与情节层、以及 untrusted 写入的内容一律不进，
 // 否则群聊里的人可以把一条 priority 0 的「记忆」变成主人 agent 每次会话都读到的指令。
-const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
+export const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
 export const BOOT_CHAR_BUDGET = 16_000
+// 未展开的节点最多列这么多个，其余只给个数，免得列表本身撑爆宿主的上下文长度
+const MAX_OMITTED_LISTED = 20
 
 export async function boot(
   tx: Tx,
@@ -44,13 +46,14 @@ export async function boot(
     )
     .orderBy(asc(memories.priority), asc(memories.domain), asc(memories.path))
 
-  // 预算按 priority 分配（数字小的先放），放进来的再按层排序展示
+  // 预算按 priority 分配（数字小的先放），放进来的再按层排序展示。
+  // 每个节点的标题与分隔（「## <uri>」和空行）也算进预算，预算就是展开部分的实际长度
   const kept = new Set<string>()
   const omitted: string[] = []
   let used = 0
   for (const r of rows) {
     const uri = formatUri(r.domain!, r.path!)
-    const length = r.content?.length ?? 0
+    const length = (r.content?.length ?? 0) + uri.length + 7
     if (used + length > budget) {
       omitted.push(uri)
       continue
@@ -69,8 +72,11 @@ export function formatBootBlock(result: BootResponse, guidance: string): string 
   if (!result.entries.length && !result.omitted.length) return guidance
   const sections = result.entries.map((e) => `## ${e.uri}\n\n${e.content}`)
   if (result.omitted.length) {
+    const listed = result.omitted.slice(0, MAX_OMITTED_LISTED).map((u) => `- ${u}`)
+    const more = result.omitted.length - listed.length
+    if (more > 0) listed.push(`- ……还有 ${more} 个，用 kioku_list 浏览`)
     sections.push(
-      `## 未展开的启动节点\n\n超出字数预算，需要时用 kioku_get 读取：\n${result.omitted.map((u) => `- ${u}`).join('\n')}`,
+      `## 未展开的启动节点\n\n超出字数预算，需要时用 kioku_get 读取：\n${listed.join('\n')}`,
     )
   }
   return `${guidance}\n\n<kioku-boot>\n${sections.join('\n\n')}\n</kioku-boot>`

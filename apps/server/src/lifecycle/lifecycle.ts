@@ -5,12 +5,14 @@ import type {
   LifecycleResponse,
 } from '@kioku/contracts'
 
-import { formatBootBlock, formatRecentBlock } from '../recall/boot'
+import { BOOT_LAYERS, formatBootBlock, formatRecentBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
 import type { RecallScope } from './scope'
 
 const RECENT_LIMIT = 5
 const PROJECT_RECALL_LIMIT = 5
+// 每轮召回等嵌入接口的上限：插件的钩子 5 秒就放弃，要给全文与关键词留出时间
+const PROMPT_SEMANTIC_TIMEOUT_MS = 2_000
 // 宿主能完整接收的上下文长度。Claude Code 的钩子输出超过 1 万字时只给模型看开头 2KB 的预览，
 // 其余写进文件、要模型自己去读，所以留出余量，boot 按剩下的字数收，后面的附加块放不下就不放
 const HOST_CONTEXT_LIMIT: Record<string, number> = { claudecode: 9_500, codex: 9_500 }
@@ -79,7 +81,7 @@ export async function handleLifecycle(
     const booted = new Set(result.entries.map((e) => e.uri))
     const query = projectQuery(input.project)
     // 近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
-    // 也只收受信来源：它不需要用户提到任何东西就会注入
+    // 过滤也和 boot 一样（受信来源、boot 的那几层）：它不需要用户提到任何东西就会注入
     const [recent, related] = await Promise.allSettled([
       scope.recent(RECENT_LIMIT + booted.size),
       query
@@ -87,6 +89,7 @@ export async function handleLifecycle(
             limit: PROJECT_RECALL_LIMIT + booted.size,
             semantic: false,
             trustedOnly: true,
+            layers: BOOT_LAYERS,
           })
         : Promise.resolve([]),
     ])
@@ -117,7 +120,10 @@ export async function handleLifecycle(
     }
   }
 
-  const candidates = await scope.recall(input.prompt, { limit: 8 })
+  const candidates = await scope.recall(input.prompt, {
+    limit: 8,
+    semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
+  })
   return {
     hostOutput: hostOutput(
       runtimeFamily,

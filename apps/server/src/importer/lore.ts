@@ -12,11 +12,11 @@ import { consoleAccess } from '../access/access'
 import { decryptSecret } from '../crypto/envelope'
 import { withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
-import { loadEmbeddingConfig } from '../embedding/settings'
+import { sealedEmbeddingKey } from '../embedding/settings'
 import { MemoryError, MemoryService } from '../memory/service'
 import { APP_DOMAIN, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
 
-// 从 Lore 导入（设计第 11 节）。Lore 只读访问；映射规则：
+// 从 Lore 导入，规则与步骤见 docs/migrate-from-lore.md。Lore 只读访问；映射规则：
 // core://agent → 基础层；core://soul → 指定人格的 persona 层；core://agent/<runtime> → 对应应用的应用层；
 // preferences:// → 主人层；其余 domain → 导入者的私人层。
 // 历史版本不迁移，每条记忆记一条 import 事件，带上 Lore 的节点 uuid 与旧版本数；召回事件不迁移
@@ -144,9 +144,18 @@ export interface ImportPlan {
   errors: string[]
 }
 
-// 导入事件 context 里记下的去重键：Lore 节点 uuid，加上写入的应用（core://agent/<runtime> 可能写进多个应用）
-export function importKeyOf(context: { loreNodeUuid?: unknown; targetApp?: unknown }): string {
-  return `${String(context.loreNodeUuid)}@${context.targetApp ? String(context.targetApp) : ''}`
+export interface ImportKeyParts {
+  loreNodeUuid?: unknown
+  targetApp?: unknown
+  targetPersona?: unknown
+}
+
+// 导入事件 context 里记下的去重键：Lore 节点 uuid，加上写入的应用或人格
+// （core://agent/<runtime> 可能写进多个应用；core://soul 换个 --persona 就是另一份）
+export function importKeyOf(context: ImportKeyParts): string {
+  const app = context.targetApp ? String(context.targetApp) : ''
+  const persona = context.targetPersona ? `#${String(context.targetPersona)}` : ''
+  return `${String(context.loreNodeUuid)}@${app}${persona}`
 }
 
 const MAX_KEYWORDS = 32
@@ -248,12 +257,13 @@ export function planImport(
     }
 
     const segments = parsed.path.split('/')
-    let targets: { uri: string; layer: Layer; app?: string }[]
+    let targets: { uri: string; layer: Layer; app?: string; persona?: string }[]
     if (parsed.domain === 'core' && segments[0] === 'soul') {
       targets = [
         {
           uri: formatUri(PERSONA_DOMAIN, [options.persona.slug, ...segments].join('/')),
           layer: 'persona',
+          persona: options.persona.slug,
         },
       ]
     } else if (parsed.domain === 'core' && segments[0] === 'agent' && segments.length > 1) {
@@ -275,11 +285,17 @@ export function planImport(
       targets = [{ uri: node.uri, layer: 'private' }]
     }
 
+    // 路径看主路径和别名；正文之外 disclosure 与关键词也看：secret 只加密正文，这两项始终是明文
     const secret = secretNodes.has(node.uuid)
-    if (!secret && CREDENTIAL_PATH.test(node.uri)) {
+    const extras = [node.disclosure ?? '', ...node.keywords].join('\n')
+    if (!secret && [node.uri, ...node.aliases].some((u) => CREDENTIAL_PATH.test(u))) {
       plan.warnings.push(`${node.uri} 看起来是凭据，没有用 --secret 标记`)
-    } else if (!secret && CREDENTIAL_CONTENT.test(node.content)) {
+    } else if (!secret && CREDENTIAL_CONTENT.test(`${node.content}\n${extras}`)) {
       plan.warnings.push(`${node.uri} 的正文里像有密码或 Token，没有用 --secret 标记`)
+    } else if (secret && CREDENTIAL_CONTENT.test(extras)) {
+      plan.warnings.push(
+        `${node.uri} 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文`,
+      )
     }
     let disclosure = node.disclosure ?? undefined
     if (disclosure && disclosure.length > MAX_DISCLOSURE) {
@@ -316,6 +332,7 @@ export function planImport(
         loreUri: node.uri,
         loreNodeUuid: node.uuid,
         targetApp: target.app ?? null,
+        targetPersona: target.persona ?? null,
         previousVersions: node.previousVersions,
       }
       plan.memories.push({
@@ -368,6 +385,8 @@ export interface ImportResult {
   created: string[]
   // 之前导入过的（之后在 Kioku 里删除或移动了的也算），不再重复写入
   previouslyImported: string[]
+  // 这次要求 secret、但之前已经按明文导入过的：--secret 对它们不起作用，要在管理界面改
+  secretAlreadyImported: string[]
   // URI 已被不是导入产生的记忆占用
   occupied: string[]
   failed: { uri: string; reason: string }[]
@@ -383,10 +402,12 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     appsOtherPersona: [],
     created: [],
     previouslyImported: [],
+    secretAlreadyImported: [],
     occupied: [],
     failed: [],
   }
-  // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写
+  // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写。
+  // 写入期间才被转走的，由每次写入时同一个事务里的归属核对拦下（requireAppOwner）
   const blockedApps = new Set<string>()
 
   await withSpace(db, spaceId, async (tx) => {
@@ -455,9 +476,7 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
         and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
       ),
   )
-  const done = new Set(
-    imported.map((e) => importKeyOf(e.context as { loreNodeUuid?: unknown; targetApp?: unknown })),
-  )
+  const done = new Set(imported.map((e) => importKeyOf(e.context as ImportKeyParts)))
 
   // 按空间 owner 的管理界面权限写入，来源记为 system
   const service = new MemoryService({
@@ -476,6 +495,7 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     }
     if (done.has(item.importKey)) {
       result.previouslyImported.push(item.request.uri)
+      if (item.request.sensitivity === 'secret') result.secretAlreadyImported.push(item.request.uri)
       continue
     }
     try {
@@ -484,6 +504,7 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
         eventContext: item.context,
         createdAt: item.createdAt,
         updatedAt: item.updatedAt,
+        requireAppOwner: accountId,
       })
       result.created.push(item.request.uri)
     } catch (err) {
@@ -502,10 +523,15 @@ export async function verifyMasterKey(
   spaceId: string,
   masterKey: Buffer,
 ): Promise<boolean> {
-  try {
-    if (await loadEmbeddingConfig(db, masterKey).then((c) => c?.apiKey)) return true
-  } catch {
-    throw new Error('KIOKU_MASTER_KEY 解不开已保存的嵌入接口 Key：它和服务使用的主密钥不一致')
+  // 读库出错时原样抛出，只有解密失败才说是主密钥不一致
+  const stored = await sealedEmbeddingKey(db)
+  if (stored) {
+    try {
+      decryptSecret(masterKey, stored.sealed, stored.aad)
+      return true
+    } catch {
+      throw new Error('KIOKU_MASTER_KEY 解不开已保存的嵌入接口 Key：它和服务使用的主密钥不一致')
+    }
   }
   const [sealed] = await withSpace(db, spaceId, (tx) =>
     tx

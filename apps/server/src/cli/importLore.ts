@@ -23,7 +23,8 @@ const HELP = `从 Lore 导入记忆。
 
 用法：node dist/import-lore.mjs --account <用户名> [选项]
 
-默认只打印导入计划，确认无误后加 --apply 执行。可以重复执行：已经存在的 URI 会跳过。
+默认只打印导入计划，确认无误后加 --apply 执行。可以重复执行：按 Lore 节点去重，
+导入过的节点不再写入（导入后在 Kioku 里删除或移动了的也不会写回），URI 被别的记忆占用时跳过。
 
   --account <用户名>     导入到这个账号名下，需要是空间 owner。preferences:// 进它的主人层，
                          core:// 以外的其余 domain 进它的私人层
@@ -128,7 +129,7 @@ async function main(): Promise<void> {
         console.warn('没能安排向量补齐，服务下次启动时会补上', err),
       )
     }
-    if (result.failed.length) process.exitCode = 1
+    if (result.failed.length || result.secretAlreadyImported.length) process.exitCode = 1
   } finally {
     await database.close()
   }
@@ -212,6 +213,11 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
       `（包括导入后在 Kioku 里删除或移动了的）`,
   )
   for (const uri of result.occupied) console.log(`  跳过 ${uri}：URI 已被别的记忆占用`)
+  for (const uri of result.secretAlreadyImported) {
+    console.log(
+      `  注意 ${uri}：之前已经按明文导入过，这次的 --secret 没有生效。请在管理界面把它改成 secret（会同时清除历史里的明文）`,
+    )
+  }
   for (const f of result.failed) console.log(`  失败 ${f.uri}：${f.reason}`)
   if (result.appsCreated.length) {
     console.log('  新建的应用还没有 Key：在管理界面「应用与 Key」里为要接入的应用签发')

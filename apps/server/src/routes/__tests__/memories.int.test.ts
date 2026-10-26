@@ -88,6 +88,17 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect(((await (await get('core://x')).json()) as MemoryView).content).toBe('新')
   })
 
+  it('删除时带着旧的 id 或版本号返回 409，不会删掉别人刚改过或重建的记忆', async () => {
+    const first = (await (
+      await create({ uri: 'core://y', content: '旧', layer: 'base' })
+    ).json()) as MemoryView
+    await call('PATCH', '/memories', { uri: 'core://y', content: '改过' })
+    const q = (extra: string) => `/memories?uri=${encodeURIComponent('core://y')}${extra}`
+    expect((await call('DELETE', q(`&expectedVersion=${first.version}`))).status).toBe(409)
+    expect((await call('DELETE', q(`&expectedId=${crypto.randomUUID()}`))).status).toBe(409)
+    expect((await call('DELETE', q(`&expectedId=${first.id}&expectedVersion=2`))).status).toBe(204)
+  })
+
   it('修改会递增版本，旧版本号返回 409', async () => {
     await create({ uri: 'core://agent', content: '第一版', layer: 'base' })
     const res = await call('PATCH', '/memories', {
@@ -229,6 +240,29 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
       'core://agent/claudecode',
       'core://agent/codex',
     ])
+    expect(agent.truncated).toBe(false)
+  })
+
+  it('一级超过 500 个时只返回前 500 个并标记截断，priority 高的不会被截掉', async () => {
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memories).values(
+        Array.from({ length: 501 }, (_, i) => ({
+          spaceId: ws.spaceId,
+          form: 'curated' as const,
+          layer: 'base' as const,
+          sensitivity: 'public' as const,
+          provenance: 'agent' as const,
+          domain: 'bulk',
+          path: `n${String(i).padStart(3, '0')}`,
+          content: 'x',
+          priority: i === 500 ? 0 : 5,
+        })),
+      ),
+    )
+    const res = (await (await call('GET', '/memories/children?of=bulk')).json()) as MemoryChildren
+    expect(res.truncated).toBe(true)
+    expect(res.children).toHaveLength(500)
+    expect(res.children[0]!.uri).toBe('bulk://n500')
   })
 
   it('URI 格式错误返回 400', async () => {

@@ -40,15 +40,13 @@ function projectOf(cwd) {
 
 // 只把上下文文本交给 Claude Code，钩子输出的其他字段（例如 decision、continue）一律不透传：
 // 记忆服务能决定注入什么内容，但不能挡住用户的输入或改变会话
+// 两个事件都输出结构化的 JSON：纯文本如果恰好是一个 JSON 对象，Claude Code 会把它当成钩子的控制输出
 function writeContext(event, text) {
   if (typeof text !== 'string' || !text) return
-  if (event === 'session.start') {
-    const hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: text }
-    process.stdout.write(JSON.stringify({ hookSpecificOutput }))
-  } else {
-    // UserPromptSubmit 的标准输出纯文本会作为附加上下文
-    process.stdout.write(text)
-  }
+  const hookEventName = event === 'session.start' ? 'SessionStart' : 'UserPromptSubmit'
+  process.stdout.write(
+    JSON.stringify({ hookSpecificOutput: { hookEventName, additionalContext: text } }),
+  )
 }
 
 function contextOf(hostOutput) {

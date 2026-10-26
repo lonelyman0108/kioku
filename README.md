@@ -55,19 +55,21 @@ docker compose -f docker-compose.example.yml up -d --build
 
 ```bash
 mkdir -p ~/kioku-backup
-docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F).dump
+docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F-%H%M%S).dump
 ```
 
 **升级**：先按上面备份，再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前。
 
-**回滚**：停掉服务，删掉已经迁移到新版本的库再建一个空库，把升级前的备份恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在备份里，会残留下来，下次升级时迁移会因为它们已存在而失败。
+**回滚**：停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的备份恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在备份里，会残留下来，下次升级时迁移会因为它们已存在而失败。
 
 ```bash
 docker compose -f docker-compose.example.yml stop kioku
-docker compose -f docker-compose.example.yml exec db dropdb -U postgres --force kioku
+docker compose -f docker-compose.example.yml exec db psql -U postgres -c 'ALTER DATABASE kioku RENAME TO kioku_upgraded'
 docker compose -f docker-compose.example.yml exec db createdb -U postgres -O kioku kioku
-docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/kioku-<日期>.dump
+docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/<升级前的备份>.dump
 ```
+
+恢复失败时（例如备份文件不完整）删掉新建的 `kioku`，再把 `kioku_upgraded` 改回 `kioku`，回到升级后的状态。旧版本确认正常之后再删掉 `kioku_upgraded`（`exec db dropdb -U postgres kioku_upgraded`）。
 
 ## 配置项
 

@@ -17,12 +17,13 @@ export function lastSegment(uri: string): string {
   return path.split('/').pop() ?? path
 }
 
-// 把接口返回的一层子节点转成树节点；有下一级的先放一个「加载中」占位，展开时再替换
+// 把接口返回的一层子节点转成树节点；有下一级的先放一个「加载中」占位，展开时再替换。
+// 这一级超过上限被截断时，末尾放一个说明，不让人以为已经列全
 export function toTreeItems(
   result: MemoryChildren,
   icons: { folder: string; file: string },
 ): MemoryTreeItem[] {
-  return result.children.map((child) => ({
+  const items: MemoryTreeItem[] = result.children.map((child) => ({
     label: lastSegment(child.uri),
     uri: child.uri,
     exists: child.exists,
@@ -42,6 +43,16 @@ export function toTreeItems(
         }
       : {}),
   }))
+  if (result.truncated) {
+    items.push({
+      label: `这一级太多，只显示了前 ${result.children.length} 个`,
+      uri: `${result.children.at(-1)?.uri ?? ''}#more`,
+      exists: false,
+      loaded: true,
+      disabled: true,
+    })
+  }
+  return items
 }
 
 // 新建或删除之后，需要重新加载的父级：domain 根或上一级路径
