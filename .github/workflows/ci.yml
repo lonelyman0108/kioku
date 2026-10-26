@@ -51,3 +51,6 @@ jobs:
       - name: 完整检查
         if: steps.kind.outputs.code == 'true'
         run: scripts/check.sh --full
+      - name: 镜像
+        if: steps.kind.outputs.code == 'true'
+        run: scripts/ci/smoke-image.sh

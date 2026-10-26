@@ -1,0 +1,39 @@
+# 单机部署示例：PostgreSQL（pgvector + 中文分词）与 Kioku 两个容器。在仓库根目录运行：
+#   cp .env.example .env            # 填好密码与主密钥
+#   docker compose -f docker-compose.example.yml up -d --build
+# 管理界面与接口都在 http://<主机>:18920，首次打开会进入初始化页。
+# 对外提供服务时在前面加 HTTPS 反向代理，并按 README 设置 KIOKU_TRUSTED_PROXIES
+name: kioku
+services:
+  db:
+    build: docker/postgres
+    image: kioku-postgres:local
+    restart: unless-stopped
+    environment:
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?在 .env 里设置 POSTGRES_PASSWORD}
+      KIOKU_DB_PASSWORD: ${KIOKU_DB_PASSWORD:?在 .env 里设置 KIOKU_DB_PASSWORD}
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h 127.0.0.1 -U kioku -d kioku']
+      interval: 5s
+      timeout: 3s
+      retries: 30
+
+  kioku:
+    build: .
+    image: kioku:local
+    restart: unless-stopped
+    depends_on:
+      db:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgres://kioku:${KIOKU_DB_PASSWORD}@db:5432/kioku
+      KIOKU_MASTER_KEY: ${KIOKU_MASTER_KEY:?在 .env 里设置 KIOKU_MASTER_KEY}
+      KIOKU_COOKIE_SECURE: ${KIOKU_COOKIE_SECURE:-true}
+      KIOKU_TRUSTED_PROXIES: ${KIOKU_TRUSTED_PROXIES:-0}
+    ports:
+      - '18920:18920'
+
+volumes:
+  pgdata:

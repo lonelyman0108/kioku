@@ -1,0 +1,9 @@
+# 镜像只需要源码；依赖和构建产物在镜像里重新生成，本地配置与密钥不进构建上下文
+**/node_modules
+**/dist
+**/coverage
+**/*.tsbuildinfo
+.git
+.env
+.env.*
+!.env.example
