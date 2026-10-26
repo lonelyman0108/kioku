@@ -22,6 +22,20 @@
       "when": 1793012669521,
       "tag": "0002_sessions",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1793015563774,
+      "tag": "0003_embeddings",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1793015580065,
+      "tag": "0004_embeddings_rls",
+      "breakpoints": true
     }
   ]
 }

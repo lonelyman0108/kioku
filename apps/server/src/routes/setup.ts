@@ -45,7 +45,12 @@ export function setupRoutes(deps: Deps) {
         if ((existing?.n ?? 0) > 0) return null
         const [account] = await tx
           .insert(accounts)
-          .values({ username: body.username, displayName: body.displayName, passwordHash })
+          .values({
+            username: body.username,
+            displayName: body.displayName,
+            passwordHash,
+            isAdmin: true,
+          })
           .returning()
         const [space] = await tx.insert(spaces).values({ name: body.spaceName }).returning()
         await tx

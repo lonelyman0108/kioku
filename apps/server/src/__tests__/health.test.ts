@@ -2,10 +2,17 @@ import { HealthResponse } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { createApp } from '../app'
+import { staticEmbedderSource } from '../embedding/source'
 import type { Db } from '../db/client'
 
 // health 与 OpenAPI 文档不访问数据库
-const app = createApp({ db: {} as Db, cookieSecure: true, masterKey: null })
+const app = createApp({
+  db: {} as Db,
+  cookieSecure: true,
+  masterKey: null,
+  embedder: staticEmbedderSource(null),
+  jobs: null,
+})
 
 describe('GET /v1/health', () => {
   it('返回 ok 与版本号', async () => {

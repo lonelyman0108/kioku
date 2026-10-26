@@ -45,6 +45,8 @@ export interface MemoryContext {
   personaId: string | null
   masterKey: Buffer | null
   actor: { keyId?: string; accountId?: string }
+  // 写入提交后调用，用于安排向量更新
+  onChanged?: (memoryId: string) => void
 }
 
 type MemoryRow = typeof memories.$inferSelect
@@ -70,6 +72,19 @@ export class MemoryService {
     return withSpace(this.ctx.db, this.ctx.spaceId, async (tx) =>
       fn(tx, await personaChain(tx, this.ctx.personaId)),
     )
+  }
+
+  private changed(memoryId: string): void {
+    this.ctx.onChanged?.(memoryId)
+  }
+
+  // 写操作：事务提交之后再通知，回滚的写入不会触发向量更新
+  private async write(
+    fn: (tx: Tx, personaIds: string[]) => Promise<MemoryView>,
+  ): Promise<MemoryView> {
+    const view = await this.run(fn)
+    this.changed(view.id)
+    return view
   }
 
   private async findLive(tx: Tx, parsed: ParsedUri): Promise<MemoryRow | undefined> {
@@ -216,7 +231,7 @@ export class MemoryService {
 
   async create(input: CreateMemoryRequest): Promise<MemoryView> {
     const parsed = parse(input.uri)
-    return this.run(async (tx, personaIds) => {
+    return this.write(async (tx, personaIds) => {
       const ownership = await this.resolveOwnership(tx, parsed, input.layer, personaIds)
       const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
       if (!canWrite(this.ctx.access, { layer: ownership.layer, sensitivity })) {
@@ -265,7 +280,7 @@ export class MemoryService {
 
   async update(input: UpdateMemoryRequest): Promise<MemoryView> {
     const parsed = parse(input.uri)
-    return this.run(async (tx, personaIds) => {
+    return this.write(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
       if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
         throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
@@ -336,7 +351,7 @@ export class MemoryService {
 
   async delete(uri: string): Promise<void> {
     const parsed = parse(uri)
-    await this.run(async (tx, personaIds) => {
+    const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
       if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: before.sensitivity })) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
@@ -354,14 +369,16 @@ export class MemoryService {
         snapshot(before, glossary),
         snapshot(row!, glossary),
       )
+      return before.id
     })
+    this.changed(id)
   }
 
   // 改 URI 不能改变归属：人格层、应用层只能在同一个人格或应用的命名空间里移动
   async move(input: MoveMemoryRequest): Promise<MemoryView> {
     const from = parse(input.from)
     const to = parse(input.to)
-    return this.run(async (tx, personaIds) => {
+    return this.write(async (tx, personaIds) => {
       const before = await this.findReadable(tx, from, personaIds)
       if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: before.sensitivity })) {
         throw new MemoryError(403, `没有权限移动 ${before.layer} 层的记忆`)

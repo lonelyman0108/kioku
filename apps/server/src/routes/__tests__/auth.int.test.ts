@@ -2,6 +2,7 @@ import { LAYERS, type CreatedKey, type Me } from '@kioku/contracts'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
+import { staticEmbedderSource } from '../../embedding/source'
 import type { Database } from '../../db/client'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 
@@ -18,7 +19,13 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({ db: database.db, cookieSecure: false, masterKey: null })
+    app = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: null,
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+    })
   })
   afterAll(async () => {
     await database?.close()
