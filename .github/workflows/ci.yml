@@ -45,6 +45,9 @@ jobs:
       - name: 快速检查
         if: steps.kind.outputs.code != 'true'
         run: scripts/check.sh --quick
+      - name: 测试数据库
+        if: steps.kind.outputs.code == 'true'
+        run: scripts/ci/test-db.sh
       - name: 完整检查
         if: steps.kind.outputs.code == 'true'
         run: scripts/check.sh --full

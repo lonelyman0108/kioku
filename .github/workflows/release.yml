@@ -26,6 +26,8 @@ jobs:
           cache: pnpm
       - name: 安装工具
         run: scripts/ci/install-tools.sh
+      - name: 测试数据库
+        run: scripts/ci/test-db.sh
       - name: 门禁
         run: scripts/check.sh --full
       - name: Release 页
