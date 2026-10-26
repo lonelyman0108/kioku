@@ -39,4 +39,24 @@ describe('密码校验并发闸门', () => {
     await Promise.all([a, b])
     await expect(withPasswordGate('same', async () => true)).resolves.toBe(true)
   })
+
+  it('不占全局名额的任务照样占本客户端的名额，全局排满时照样被拒', async () => {
+    const release: (() => void)[] = []
+    const pending = () => new Promise<boolean>((r) => release.push(() => r(true)))
+    const light = (client: string) => withPasswordGate(client, pending, { global: false })
+    const held = [light('same'), light('same')]
+    await expect(light('same')).rejects.toBeInstanceOf(PasswordGateBusy)
+
+    // 它们没有占全局名额：全局仍能放进 4 个运行加 32 个排队
+    let n = 0
+    const full = Array.from({ length: 36 }, () => withPasswordGate(`client-${n++}`, pending))
+    await expect(withPasswordGate('another', pending)).rejects.toBeInstanceOf(PasswordGateBusy)
+    await expect(light('third')).rejects.toBeInstanceOf(PasswordGateBusy)
+
+    while (release.length) {
+      release.shift()!()
+      await new Promise((r) => setTimeout(r, 0))
+    }
+    await Promise.all([...held, ...full])
+  })
 })

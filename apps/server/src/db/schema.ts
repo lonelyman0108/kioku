@@ -109,6 +109,7 @@ export const sessions = pgTable(
 export const loginAttempts = pgTable(
   'login_attempts',
   {
+    // 计数键：用户名，或用户名加客户端，编码见 auth/rateLimit.ts
     username: text().primaryKey(),
     count: integer().notNull(),
     resetAt: timestamp({ withTimezone: true }).notNull(),

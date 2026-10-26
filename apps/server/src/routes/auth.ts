@@ -14,12 +14,7 @@ import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
 import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
 import { clientIdentity } from '../http/clientIp'
-import {
-  clearClientAttempts,
-  pruneAttempts,
-  refundAttempt,
-  reserveAttempt,
-} from '../auth/rateLimit'
+import { pruneAttempts, recordSuccess, refundAttempt, reserveAttempt } from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
 import { accounts, spaceMembers, spaces } from '../db/schema'
@@ -90,7 +85,7 @@ export function authRoutes(deps: Deps) {
   return app
     .openapi(login, async (c) => {
       const { username, password } = c.req.valid('json')
-      // 拿不到客户端地址时（没有底层连接，例如测试）传 null：失败计数只按用户名，校验闸门只用全局名额
+      // 拿不到客户端地址时（没有底层连接，例如测试）传 null：失败计数归入「未知客户端」，校验闸门只用全局名额
       const identity = clientIdentity(c, deps.trustedProxies ?? 0)
       const client = identity.identified ? identity.key : null
       // 偶尔顺手清理过期的失败计数，不单独起定时任务
@@ -107,23 +102,23 @@ export function authRoutes(deps: Deps) {
       if (!(await reserveAttempt(deps.db, username, client, trustedDevice))) {
         return c.json({ error: '失败次数过多，请稍后再试' }, 429)
       }
-      // 用户名不存在时不跑 scrypt，等一段与一次校验相当的时间再返回：
-      // 既不暴露账号是否存在，又不能用随机用户名耗 CPU、占满校验闸门
-      if (!account) {
-        await new Promise((r) => setTimeout(r, VERIFY_DURATION_MS))
-        return c.json({ error: '用户名或密码错误' }, 401)
-      }
+      // 用户名不存在时不跑 scrypt，改为等一段与一次校验相当的时间。它同样经过校验闸门，
+      // 占本客户端的名额、闸门排满时同样被拒，只是不占全局名额：繁忙时的表现与存在的账号一致，
+      // 不暴露账号是否存在；随机用户名也耗不了 CPU、挤不满闸门
+      const check = account
+        ? () => verifyPassword(password, account.passwordHash)
+        : () => new Promise<boolean>((r) => setTimeout(() => r(false), VERIFY_DURATION_MS))
       let ok: boolean
       try {
-        ok = await withPasswordGate(client, () => verifyPassword(password, account.passwordHash))
+        ok = await withPasswordGate(client, check, { global: account !== undefined })
       } catch (err) {
         if (!(err instanceof PasswordGateBusy)) throw err
         // 没有真正校验密码，退回刚才占的名额
         await refundAttempt(deps.db, username, client, trustedDevice)
         return c.json({ error: err.message }, 429)
       }
-      if (!ok) return c.json({ error: '用户名或密码错误' }, 401)
-      await clearClientAttempts(deps.db, username, client)
+      if (!ok || !account) return c.json({ error: '用户名或密码错误' }, 401)
+      await recordSuccess(deps.db, username, client, trustedDevice)
 
       const token = await createSession(deps.db, account.id)
       setCookie(c, SESSION_COOKIE, token, {
