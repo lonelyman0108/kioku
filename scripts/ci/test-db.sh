@@ -5,7 +5,12 @@ set -euo pipefail
 cd "$(dirname "$0")/../.."
 image=kioku-postgres:ci
 port=55432
-docker build -q -t "$image" docker/postgres
+log=$(mktemp)
+if ! docker build --progress=plain -t "$image" docker/postgres > "$log" 2>&1; then
+  tail -n 80 "$log" >&2
+  echo "数据库镜像构建失败" >&2
+  exit 1
+fi
 docker run -d --name kioku-test-db -p "$port:5432" \
   -e POSTGRES_PASSWORD=postgres -e KIOKU_DB_PASSWORD=kioku "$image" >/dev/null
 # 初始化阶段的临时实例只监听 unix socket，所以走 TCP 探测，确认的是初始化完成后的正式实例
