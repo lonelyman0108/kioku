@@ -88,7 +88,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     await seedNode('infra://office_network', '办公室的网络', {
       priority: 1,
       disclosure: '排查网络时',
-      keywords: ['软路由', 'VLAN'],
+      keywords: ['交换机', 'VLAN'],
       old: ['旧的网络描述', '更旧的'],
     })
     await seedNode('infra://office_network/credentials', '路由器密码 hunter2', { priority: 2 })
@@ -172,7 +172,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       disclosure: '排查网络时',
       previousVersions: 2,
     })
-    expect(network.keywords.sort()).toEqual(['VLAN', '软路由'])
+    expect(network.keywords.sort()).toEqual(['VLAN', '交换机'])
   })
 
   it('按映射写入；应用与人格自动建好；secret 加密存储；事件记成 import', async () => {

@@ -169,13 +169,13 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   })
 
   it('全文检索列由数据库生成，secret 不进索引', async () => {
-    await create({ uri: 'home://router', content: '路由器在书房', layer: 'private' })
-    await create({ uri: 'home://wifi', content: '书房无线密码', sensitivity: 'secret' })
+    await create({ uri: 'home://router', content: '路由器在机房', layer: 'private' })
+    await create({ uri: 'home://wifi', content: '机房无线密码', sensitivity: 'secret' })
     const matched = await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .select({ path: memories.path })
         .from(memories)
-        .where(sql`${memories.fts} @@ plainto_tsquery('kioku_zh', '书房')`),
+        .where(sql`${memories.fts} @@ plainto_tsquery('kioku_zh', '机房')`),
     )
     expect(matched.map((r) => r.path)).toEqual(['router'])
   })

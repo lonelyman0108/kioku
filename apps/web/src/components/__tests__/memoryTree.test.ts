@@ -21,7 +21,7 @@ describe('记忆树', () => {
   })
 
   it('节点名取最后一段', () => {
-    expect(lastSegment('infra://docker_hosts/lore')).toBe('lore')
+    expect(lastSegment('infra://servers/web')).toBe('web')
   })
 
   it('有下一级的节点放加载占位，展开时再加载；叶子没有 children', () => {

@@ -187,13 +187,13 @@ describe('Lore 导入计划', () => {
     const many = Array.from({ length: 34 }, (_, i) => `词${String(i).padStart(2, '0')}`)
     const plan = planImport(
       snapshot(
-        node('infra://a', { keywords: ['段', ' 群晖 ', '群晖', 'NAS'] }),
+        node('infra://a', { keywords: ['段', ' 文件服务器 ', '文件服务器', 'NAS'] }),
         node('infra://b', { keywords: [...many, '很长的一个关键词'] }),
       ),
       [],
       options,
     )
-    expect(plan.memories[0]!.request.glossary).toEqual(['NAS', '群晖'])
+    expect(plan.memories[0]!.request.glossary).toEqual(['NAS', '文件服务器'])
     expect(plan.memories[1]!.request.glossary).toHaveLength(32)
     expect(plan.memories[1]!.request.glossary).toContain('很长的一个关键词')
     expect(plan.droppedKeywords.map((k) => [k.source, k.keyword])).toEqual([
