@@ -16,6 +16,7 @@
     "@modelcontextprotocol/sdk": "1.32.2",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.14",
+    "pg-boss": "12.38.0",
     "postgres": "3.4.9",
     "zod": "4.6.7"
   },

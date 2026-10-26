@@ -8,6 +8,7 @@ import { mcpRoutes } from './routes/mcp'
 import { memoryRoutes } from './routes/memories'
 import { personaRoutes } from './routes/personas'
 import { MemoryError } from './memory/service'
+import { settingsRoutes } from './routes/settings'
 import { setupRoutes } from './routes/setup'
 import { whoamiRoutes } from './routes/whoami'
 import { VERSION } from './version'
@@ -24,6 +25,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', personaRoutes(deps))
   app.route('/v1', memoryRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
+  app.route('/v1', settingsRoutes(deps))
   // 业务规则错误带着自己的状态码；其余错误不把内部信息透给调用方
   app.onError((err, c) => {
     if (err instanceof MemoryError) return c.json({ error: err.message }, err.status)

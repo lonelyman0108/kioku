@@ -1,12 +1,17 @@
 import type { AppConfig, KeyScopes } from '@kioku/contracts'
 
 import type { Db } from '../db/client'
+import type { EmbedderSource } from '../embedding/source'
+import type { Jobs } from '../jobs/queue'
 
 export interface Deps {
   db: Db
   cookieSecure: boolean
   // 没配置时不能读写 secret 级记忆
   masterKey: Buffer | null
+  embedder: EmbedderSource
+  // 没有后台任务时（例如部分测试）写入不触发向量更新
+  jobs: Jobs | null
 }
 
 export interface ConsolePrincipal {

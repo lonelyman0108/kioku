@@ -26,5 +26,6 @@ export function memoryServiceForKey(
     personaId: key.app.defaultPersonaId,
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
+    onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
   })
 }

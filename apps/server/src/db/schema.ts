@@ -10,6 +10,7 @@ import {
 import { sql } from 'drizzle-orm'
 import {
   bigserial,
+  boolean,
   check,
   customType,
   foreignKey,
@@ -24,14 +25,19 @@ import {
   unique,
   uniqueIndex,
   uuid,
+  vector,
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
 
-// 表分两类：身份表（accounts、sessions、spaces、space_members、api_keys）在鉴权阶段就要跨空间查询，不开行级安全；
+// 表分两类：身份表（accounts、sessions、spaces、space_members、api_keys）与实例设置（settings）在鉴权阶段就要跨空间查询，不开行级安全；
 // 其余内容表都带 space_id，由迁移里的 RLS 策略按会话变量 app.space_id 强制隔离。
 // 外键检查不受 RLS 约束，所以指向内容表的外键都带上 space_id（复合外键），保证不会关联到别的空间。
 
 const bytea = customType<{ data: Buffer }>({ dataType: () => 'bytea' })
+const tsvector = customType<{ data: string }>({ dataType: () => 'tsvector' })
+
+// 整个实例只用一个嵌入模型和维度，向量才可比较。1024 维在 pgvector HNSW 索引的上限（2000）之内
+export const EMBEDDING_DIMENSIONS = 1024
 
 const createdAt = () => timestamp('created_at', { withTimezone: true }).notNull().defaultNow()
 const updatedAt = () => timestamp('updated_at', { withTimezone: true }).notNull().defaultNow()
@@ -50,7 +56,16 @@ export const accounts = pgTable('accounts', {
   username: text().notNull().unique(),
   displayName: text().notNull(),
   passwordHash: text().notNull(),
+  // 实例管理员：能改嵌入模型等全实例设置；首次初始化创建的账号是管理员
+  isAdmin: boolean().notNull().default(false),
   createdAt: createdAt(),
+})
+
+// 全实例设置（嵌入模型等），不属于任何空间
+export const settings = pgTable('settings', {
+  key: text().primaryKey(),
+  value: jsonb().notNull(),
+  updatedAt: updatedAt(),
 })
 
 export const spaces = pgTable('spaces', {
@@ -229,8 +244,13 @@ export const memories = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: timestamp({ withTimezone: true }),
+    // 中文全文检索；secret 的 content 为空，不会被索引
+    fts: tsvector().generatedAlwaysAs(
+      sql`to_tsvector('kioku_zh'::regconfig, coalesce(domain, '') || ' ' || coalesce(path, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(content, ''))`,
+    ),
   },
   (t) => [
+    index('memories_fts_idx').using('gin', t.fts),
     uniqueIndex('memories_uri_live_idx')
       .on(t.spaceId, t.domain, t.path)
       .where(sql`${t.deletedAt} is null`),
@@ -270,6 +290,29 @@ export const memories = pgTable(
       sql`${t.provenance} <> 'untrusted' or ${t.layer} in ('subject', 'episode')`,
     ),
     check('memories_priority_nonneg', sql`${t.priority} >= 0`),
+  ],
+)
+
+// 每条记忆在当前模型下一条向量；contentHash 是嵌入文本的哈希，没变就不重新请求
+export const memoryEmbeddings = pgTable(
+  'memory_embeddings',
+  {
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    memoryId: uuid().notNull(),
+    model: text().notNull(),
+    contentHash: text().notNull(),
+    embedding: vector({ dimensions: EMBEDDING_DIMENSIONS }).notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.memoryId, t.model] }),
+    index('memory_embeddings_hnsw_idx').using('hnsw', t.embedding.op('vector_cosine_ops')),
+    foreignKey({
+      columns: [t.spaceId, t.memoryId],
+      foreignColumns: [memories.spaceId, memories.id],
+    }).onDelete('cascade'),
   ],
 )
 
@@ -320,6 +363,7 @@ export const RLS_TABLES = [
   'subjects',
   'subject_identities',
   'memories',
+  'memory_embeddings',
   'memory_glossary',
   'memory_events',
 ] as const

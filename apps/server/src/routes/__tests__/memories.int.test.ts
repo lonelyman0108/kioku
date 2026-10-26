@@ -5,6 +5,7 @@ import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
+import { staticEmbedderSource } from '../../embedding/source'
 import { withSpace, type Database } from '../../db/client'
 import { memories, memoryEvents } from '../../db/schema'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -18,7 +19,13 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({ db: database.db, cookieSecure: false, masterKey: randomBytes(32) })
+    app = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: randomBytes(32),
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+    })
   })
   afterAll(async () => {
     await database?.close()

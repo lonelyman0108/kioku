@@ -1,6 +1,7 @@
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
+import { staticEmbedderSource } from '../../embedding/source'
 import type { Database } from '../../db/client'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bearer, bootstrap } from '../../testing/fixtures'
@@ -12,7 +13,13 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({ db: database.db, cookieSecure: false, masterKey: null })
+    app = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: null,
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+    })
   })
   afterAll(async () => {
     await database?.close()
