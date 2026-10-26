@@ -11,13 +11,15 @@ const perClient = new Map<string, number>()
 
 export class PasswordGateBusy extends Error {}
 
-export async function withPasswordGate<T>(client: string, fn: () => Promise<T>): Promise<T> {
-  const mine = perClient.get(client) ?? 0
+// client 为 null 表示分不清客户端（例如在没有配置的代理后面）：此时只用全局闸门
+export async function withPasswordGate<T>(client: string | null, fn: () => Promise<T>): Promise<T> {
+  const key = client ?? ''
+  const mine = client === null ? 0 : (perClient.get(key) ?? 0)
   if (mine >= PER_CLIENT) throw new PasswordGateBusy('登录请求太多，请稍后再试')
   if (running >= MAX_CONCURRENT && queue.length >= MAX_QUEUE) {
     throw new PasswordGateBusy('登录请求太多，请稍后再试')
   }
-  perClient.set(client, mine + 1)
+  if (client !== null) perClient.set(key, mine + 1)
   try {
     if (running >= MAX_CONCURRENT) await new Promise<void>((resolve) => queue.push(resolve))
     else running++
@@ -30,8 +32,10 @@ export async function withPasswordGate<T>(client: string, fn: () => Promise<T>):
       else running--
     }
   } finally {
-    const left = (perClient.get(client) ?? 1) - 1
-    if (left > 0) perClient.set(client, left)
-    else perClient.delete(client)
+    if (client !== null) {
+      const left = (perClient.get(key) ?? 1) - 1
+      if (left > 0) perClient.set(key, left)
+      else perClient.delete(key)
+    }
   }
 }

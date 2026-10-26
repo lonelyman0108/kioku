@@ -3,6 +3,7 @@ import { and, eq, isNull } from 'drizzle-orm'
 import { getCookie } from 'hono/cookie'
 import { createMiddleware } from 'hono/factory'
 
+import { clampScopesToRole } from '../access/access'
 import { withSpace } from '../db/client'
 import { apiKeys, apps, spaceMembers } from '../db/schema'
 import type { AppEnv, Deps } from '../http/env'
@@ -41,6 +42,9 @@ export function requireKey(deps: Deps) {
       tx.select().from(apps).where(eq(apps.id, key.appId)).limit(1),
     )
     if (!app) return c.json(unauthorized, 401)
+    // Key 的权限按应用主人计算：主人已经不在空间里，Key 作废；主人被降级，Key 的上限随之收紧
+    const ownerRole = await memberRole(deps, key.spaceId, app.ownerAccountId)
+    if (!ownerRole) return c.json(unauthorized, 401)
 
     // 最后使用时间只用于界面展示，失败不影响本次请求
     deps.db
@@ -53,7 +57,7 @@ export function requireKey(deps: Deps) {
       kind: 'key',
       keyId: key.id,
       spaceId: key.spaceId,
-      scopes: KeyScopes.parse(key.scopes),
+      scopes: clampScopesToRole(KeyScopes.parse(key.scopes), ownerRole),
       app: {
         id: app.id,
         slug: app.slug,

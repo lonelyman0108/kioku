@@ -104,7 +104,7 @@ export const sessions = pgTable(
   (t) => [index().on(t.accountId)],
 )
 
-// 登录失败计数，按用户名（小写）一行；放在数据库里而不是进程内存：
+// 登录失败计数，一个计数键一行（「用户名」或「用户名 + 客户端」，见 auth/rateLimit.ts）；放在数据库里而不是进程内存：
 // 并发请求用原子加一计数，不需要淘汰策略，也就不会被随机用户名挤掉或塞满
 export const loginAttempts = pgTable(
   'login_attempts',

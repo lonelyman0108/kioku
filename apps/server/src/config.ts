@@ -8,7 +8,7 @@ export interface Config {
   migrationsFolder: string
   cookieSecure: boolean
   masterKey: Buffer | null
-  trustProxy: boolean
+  trustedProxies: number
 }
 
 // 迁移目录相对本文件所在目录的上一级解析：src/config.ts 与打包后的 dist/index.mjs 都在 apps/server 下一层
@@ -24,6 +24,16 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
     cookieSecure: env.KIOKU_COOKIE_SECURE !== 'false',
     // 生成：openssl rand -base64 32。丢失后已有的 secret 无法解密
     masterKey: env.KIOKU_MASTER_KEY ? parseMasterKey(env.KIOKU_MASTER_KEY) : null,
-    trustProxy: env.KIOKU_TRUST_PROXY === 'true',
+    // 前面有几层受信任的反向代理；没有代理时保持 0，否则 X-Forwarded-For 可以伪造
+    trustedProxies: parseTrustedProxies(env.KIOKU_TRUSTED_PROXIES),
   }
+}
+
+function parseTrustedProxies(value: string | undefined): number {
+  if (value === undefined || value === '') return 0
+  const n = Number(value)
+  if (!Number.isInteger(n) || n < 0 || n > 10) {
+    throw new Error('KIOKU_TRUSTED_PROXIES 应为 0 到 10 之间的整数（前面受信任的反向代理层数）')
+  }
+  return n
 }

@@ -126,8 +126,11 @@ const canManageApps = (role: MemberRole | null) => role === 'owner' || role === 
 
 // 应用的权限按「主人」算：Key 读到的 owner / private 层就是应用主人的。
 // 所以只有应用主人能改配置、签发和查看 Key；空间 owner 可以吊销任何 Key（止损），但不能签发
-async function appOwnerOf(tx: Tx, appId: string): Promise<string | null> {
-  const [row] = await tx.select({ owner: apps.ownerAccountId }).from(apps).where(eq(apps.id, appId))
+// lock 为 true 时锁住应用这一行直到事务结束：签发 Key 与转移所有权都先拿这把锁，
+// 保证「检查主人 → 写 Key」与「吊销 Key → 换主人」不会交错，转移之后不会冒出前任主人的新 Key
+async function appOwnerOf(tx: Tx, appId: string, lock = false): Promise<string | null> {
+  const query = tx.select({ owner: apps.ownerAccountId }).from(apps).where(eq(apps.id, appId))
+  const [row] = lock ? await query.for('update') : await query
   return row?.owner ?? null
 }
 
@@ -179,7 +182,7 @@ export function appRoutes(deps: Deps) {
           return c.json({ error: '转移所有权时不能同时修改其他字段' }, 400)
       }
       const rows = await withSpace(deps.db, spaceId, async (tx) => {
-        const owner = await appOwnerOf(tx, appId)
+        const owner = await appOwnerOf(tx, appId, true)
         if (!owner) return []
         if (ownerAccountId !== undefined) {
           // 在同一个事务里锁住新主人的成员记录再检查角色，避免检查之后、转移之前他被移出空间；
@@ -251,23 +254,27 @@ export function appRoutes(deps: Deps) {
       if (role !== 'owner' && (body.scopes.admin || body.scopes.maxSensitivity === 'secret')) {
         return c.json({ error: '只有空间 owner 能签发 admin 或 secret 级的 Key' }, 403)
       }
-      const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
-      if (!owner) return c.json({ error: '应用不存在' }, 404)
-      if (owner !== accountId) return c.json({ error: '只有应用的主人能签发它的 Key' }, 403)
-
       const generated = generateApiKey()
-      const [row] = await deps.db
-        .insert(apiKeys)
-        .values({
-          spaceId,
-          appId,
-          name: body.name,
-          prefix: generated.prefix,
-          secretHash: generated.secretHash,
-          scopes: body.scopes,
-        })
-        .returning()
-      return c.json({ ...toKeyInfo(row!), key: generated.plaintext }, 201)
+      const result = await withSpace(deps.db, spaceId, async (tx) => {
+        const owner = await appOwnerOf(tx, appId, true)
+        if (!owner) return 'missing' as const
+        if (owner !== accountId) return 'not-owner' as const
+        const [row] = await tx
+          .insert(apiKeys)
+          .values({
+            spaceId,
+            appId,
+            name: body.name,
+            prefix: generated.prefix,
+            secretHash: generated.secretHash,
+            scopes: body.scopes,
+          })
+          .returning()
+        return row!
+      })
+      if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
+      if (result === 'not-owner') return c.json({ error: '只有应用的主人能签发它的 Key' }, 403)
+      return c.json({ ...toKeyInfo(result), key: generated.plaintext }, 201)
     })
     .openapi(revokeKey, async (c) => {
       const { spaceId, appId, keyId } = c.req.valid('param')

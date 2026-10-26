@@ -6,7 +6,7 @@ import { deleteCookie, setCookie } from 'hono/cookie'
 import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
 import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
-import { clientIp } from '../http/clientIp'
+import { clientIdentity } from '../http/clientIp'
 import { clearAttempts, pruneAttempts, reserveAttempt } from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
@@ -73,6 +73,9 @@ export function authRoutes(deps: Deps) {
   return app
     .openapi(login, async (c) => {
       const { username, password } = c.req.valid('json')
+      // 分不清客户端时传 null：失败计数只按用户名，校验闸门只用全局名额
+      const identity = clientIdentity(c, deps.trustedProxies ?? 0)
+      const client = identity.identified ? identity.key : null
       // 偶尔顺手清理过期的失败计数，不单独起定时任务
       if (Math.random() < 0.01) void pruneAttempts(deps.db).catch(() => {})
 
@@ -84,8 +87,8 @@ export function authRoutes(deps: Deps) {
       // 先排进校验闸门，再占失败次数名额：因为繁忙被拒的请求没有校验过密码，不该扣次数
       let outcome: 'ok' | 'wrong' | 'locked'
       try {
-        outcome = await withPasswordGate(clientIp(c, deps.trustProxy ?? false), async () => {
-          if (!(await reserveAttempt(deps.db, username))) return 'locked'
+        outcome = await withPasswordGate(client, async () => {
+          if (!(await reserveAttempt(deps.db, username, client))) return 'locked'
           const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
           return account && ok ? 'ok' : 'wrong'
         })
@@ -95,7 +98,7 @@ export function authRoutes(deps: Deps) {
       }
       if (outcome === 'locked') return c.json({ error: '失败次数过多，请稍后再试' }, 429)
       if (outcome === 'wrong' || !account) return c.json({ error: '用户名或密码错误' }, 401)
-      await clearAttempts(deps.db, username)
+      await clearAttempts(deps.db, username, client)
 
       const token = await createSession(deps.db, account.id)
       setCookie(c, SESSION_COOKIE, token, {
