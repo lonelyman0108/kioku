@@ -251,8 +251,15 @@ export const memories = pgTable(
   },
   (t) => [
     index('memories_fts_idx').using('gin', t.fts),
+    // URI 在空间内唯一，但 owner 与 private 层按成员各存一份：唯一键带上归属成员，
+    // 共享层（归属为空）合并成同一个键。两个成员可以各有一条 preferences://user
     uniqueIndex('memories_uri_live_idx')
-      .on(t.spaceId, t.domain, t.path)
+      .on(
+        t.spaceId,
+        t.domain,
+        t.path,
+        sql`coalesce(${t.ownerAccountId}, '00000000-0000-0000-0000-000000000000'::uuid)`,
+      )
       .where(sql`${t.deletedAt} is null`),
     index().on(t.spaceId, t.layer),
     index().on(t.subjectId),

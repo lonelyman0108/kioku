@@ -1,12 +1,13 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import {
+  CreateMemoryRequest,
   Keyword,
   Layer,
   MemoryUri,
   RecallRequest,
-  RemovableKeyword,
   Sensitivity,
+  UpdateMemoryRequest,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -92,11 +93,12 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         '新建一条长期记忆。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。' +
         'persona://<人格>/ 与 app://<应用>/ 下的记忆分别属于人格层和应用层；其余 domain 不指定 layer 时按私人层保存。',
       inputSchema: {
+        // 长度与数量限制和 REST 共用 contracts 里的定义
         uri: MemoryUri.describe('新记忆的 URI'),
-        content: z.string().min(1).describe('正文'),
-        disclosure: z.string().optional().describe('什么场景下需要想起这条记忆'),
+        content: CreateMemoryRequest.shape.content.describe('正文'),
+        disclosure: CreateMemoryRequest.shape.disclosure.describe('什么场景下需要想起这条记忆'),
         priority: z.number().int().min(0).max(99).optional().describe('0 最重要，默认 2'),
-        glossary: z.array(Keyword).optional().describe('关键词，用于召回'),
+        glossary: z.array(Keyword).max(32).optional().describe('关键词，用于召回'),
         layer: Layer.optional().describe('层：base / owner / private 等'),
         sensitivity: Sensitivity.optional().describe(
           '敏感级：public / internal / private / secret',
@@ -126,12 +128,12 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         '修改已有记忆。改之前先用 kioku_get 读正文；带上 expected_version 防止覆盖别人的修改。',
       inputSchema: {
         uri: MemoryUri,
-        content: z.string().min(1).optional().describe('新的完整正文'),
-        disclosure: z.string().nullable().optional(),
+        content: UpdateMemoryRequest.shape.content.describe('新的完整正文'),
+        disclosure: UpdateMemoryRequest.shape.disclosure,
         priority: z.number().int().min(0).max(99).optional(),
         sensitivity: Sensitivity.optional(),
-        glossary_add: z.array(Keyword).optional(),
-        glossary_remove: z.array(RemovableKeyword).optional(),
+        glossary_add: UpdateMemoryRequest.shape.glossaryAdd,
+        glossary_remove: UpdateMemoryRequest.shape.glossaryRemove,
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
       },
     },

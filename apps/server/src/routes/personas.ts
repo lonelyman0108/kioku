@@ -2,7 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi'
 import { CreatePersonaRequest, ErrorResponse, PersonaInfo } from '@kioku/contracts'
 import { asc, eq } from 'drizzle-orm'
 
-import { memberRole, requireConsole } from '../auth/middleware'
+import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
 import { personas } from '../db/schema'
 import type { Deps } from '../http/env'
@@ -46,7 +46,6 @@ const create = createRoute({
 
 export function personaRoutes(deps: Deps) {
   const app = router()
-  app.use('/spaces/*', requireConsole(deps))
   return app
     .openapi(list, async (c) => {
       const { spaceId } = c.req.valid('param')

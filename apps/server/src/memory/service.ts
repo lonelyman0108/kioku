@@ -10,7 +10,7 @@ import type {
   MoveMemoryRequest,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
-import { and, asc, count, desc, eq, inArray, isNull, like, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
 
 import { canRead, canWrite, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
@@ -57,13 +57,18 @@ function parse(uri: string): ParsedUri {
   return parsed
 }
 
-// 事件快照里不放密文和数据密钥；secret 的正文本来就是 null
-function snapshot(row: MemoryRow, glossary: string[]) {
+// 事件快照里不放密文、数据密钥和全文检索向量（向量里有正文分词）。
+// secret 的正文本来就是 null；redact 用于改成 secret 时把改之前的明文也抹掉
+function snapshot(row: MemoryRow, glossary: string[], redact = false) {
   const rest: Partial<MemoryRow> = { ...row }
   delete rest.ciphertext
   delete rest.wrappedKey
+  delete rest.fts
+  if (redact || row.sensitivity === 'secret') rest.content = null
   return { ...rest, glossary }
 }
+
+const NIL_UUID = '00000000-0000-0000-0000-000000000000'
 
 export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
@@ -85,6 +90,8 @@ export class MemoryService {
     return view
   }
 
+  // 按 URI 找当前调用方对应的那条：别的成员的 owner / private 记忆不在候选里；
+  // 同一个 URI 既有共享节点又有自己的私人节点时，先取自己的
   private async findLive(tx: Tx, parsed: ParsedUri): Promise<MemoryRow | undefined> {
     const [row] = await tx
       .select()
@@ -94,10 +101,61 @@ export class MemoryService {
           eq(memories.domain, parsed.domain),
           eq(memories.path, parsed.path),
           isNull(memories.deletedAt),
+          or(
+            isNull(memories.ownerAccountId),
+            eq(memories.ownerAccountId, this.ctx.access.ownerAccountId),
+          ),
+        ),
+      )
+      .orderBy(sql`${memories.ownerAccountId} is null`)
+      .limit(1)
+    return row
+  }
+
+  // 唯一键冲突检查：与 memories_uri_live_idx 一致，按 (URI, 归属成员) 判断。
+  // 已失效或已过期的旧记录让出 URI（软删除并记事件），否则谁都看不见它却永远占着这个 URI
+  private async claimUri(tx: Tx, parsed: ParsedUri, ownerAccountId: string | null): Promise<void> {
+    const [row] = await tx
+      .select()
+      .from(memories)
+      .where(
+        and(
+          eq(memories.domain, parsed.domain),
+          eq(memories.path, parsed.path),
+          isNull(memories.deletedAt),
+          sql`coalesce(${memories.ownerAccountId}, ${NIL_UUID}::uuid) = coalesce(${ownerAccountId}::uuid, ${NIL_UUID}::uuid)`,
         ),
       )
       .limit(1)
-    return row
+    if (!row) return
+    const now = new Date()
+    if ((row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)) {
+      const [expired] = await tx
+        .update(memories)
+        .set({ deletedAt: now, updatedAt: now })
+        .where(eq(memories.id, row.id))
+        .returning()
+      await this.event(tx, row.id, 'expire', snapshot(row, []), snapshot(expired!, []))
+      return
+    }
+    // 不说明是谁的、内容是什么；共享层的 URI 被占用这件事本身无法对调用方隐藏
+    throw new MemoryError(409, `URI 已被占用：${formatUri(parsed.domain, parsed.path)}`)
+  }
+
+  // 新节点的父节点必须是一条真实存在、调用方可见的记忆（persona:// 与 app:// 的标识根除外），
+  // 否则树浏览走不到它。父节点要先有内容，说明下面这些子节点为什么放在一起
+  private async requireParent(tx: Tx, parsed: ParsedUri, personaIds: string[]): Promise<void> {
+    const segments = parsed.path.split('/')
+    if (segments.length === 1) return
+    if (parsed.namespaceSlug && segments.length === 2) return
+    const parent = { ...parsed, path: segments.slice(0, -1).join('/') }
+    const row = await this.findLive(tx, parent)
+    if (!row || !canRead(this.ctx.access, row, { personaIds, explicit: true })) {
+      throw new MemoryError(
+        400,
+        `父节点 ${formatUri(parent.domain, parent.path)} 不存在，请先创建它，或换一个 URI`,
+      )
+    }
   }
 
   // 读不到和不存在对调用方一样：都是 404，不泄露「这里有一条你看不见的记忆」
@@ -235,7 +293,8 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, { layer: ownership.layer, sensitivity })) {
         throw new MemoryError(403, `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`)
       }
-      if (await this.findLive(tx, parsed)) throw new MemoryError(409, `记忆已存在：${input.uri}`)
+      await this.requireParent(tx, parsed, personaIds)
+      await this.claimUri(tx, parsed, ownership.ownerAccountId)
 
       const id = randomUUID()
       const body =
@@ -336,15 +395,28 @@ export class MemoryService {
           .onConflictDoNothing()
       }
       const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+      const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
       await this.event(
         tx,
         before.id,
         'update',
-        snapshot(before, beforeGlossary),
+        snapshot(before, beforeGlossary, becameSecret),
         snapshot(row, glossary),
       )
+      // 改成 secret 之后，历史事件里不能再留着明文
+      if (becameSecret) await this.scrubHistory(tx, before.id)
       return this.toView(row, glossary)
     })
+  }
+
+  private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
+    await tx
+      .update(memoryEvents)
+      .set({
+        before: sql`case when ${memoryEvents.before} is null then null else ${memoryEvents.before} - 'content' - 'fts' end`,
+        after: sql`case when ${memoryEvents.after} is null then null else ${memoryEvents.after} - 'content' - 'fts' end`,
+      })
+      .where(eq(memoryEvents.memoryId, memoryId))
   }
 
   async delete(uri: string): Promise<void> {
@@ -389,7 +461,8 @@ export class MemoryService {
           `${PERSONA_DOMAIN}:// 与 ${APP_DOMAIN}:// 下的记忆只能在同一个标识下移动`,
         )
       }
-      if (await this.findLive(tx, to)) throw new MemoryError(409, `目标已存在：${input.to}`)
+      await this.requireParent(tx, to, personaIds)
+      await this.claimUri(tx, to, before.ownerAccountId)
       const [row] = await tx
         .update(memories)
         .set({
@@ -414,7 +487,15 @@ export class MemoryService {
       throw new MemoryError(400, `domain 格式不对：${domain}`)
     return this.run(async (tx, personaIds) => {
       const readable = readableConditions(this.ctx.access, { personaIds })
-      const parent = parsed ? await this.findReadable(tx, parsed, personaIds) : null
+      // persona://<标识> 与 app://<标识> 是命名空间根，本身可以没有记忆
+      const namespaceRoot = Boolean(parsed?.namespaceSlug && !parsed.path.includes('/'))
+      const parent = !parsed
+        ? null
+        : namespaceRoot
+          ? await this.findLive(tx, parsed).then((row) =>
+              row && canRead(this.ctx.access, row, { personaIds, explicit: true }) ? row : null,
+            )
+          : await this.findReadable(tx, parsed, personaIds)
       const prefix = parsed ? `${parsed.path}/` : ''
       const childPattern = parsed ? `^${escapeRegex(parsed.path)}/[^/]+$` : '^[^/]+$'
       const rows = await tx

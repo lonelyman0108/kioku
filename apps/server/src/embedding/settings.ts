@@ -43,8 +43,12 @@ export async function saveEmbeddingConfig(
   input: { baseUrl: string; model: string; apiKey?: string | null | undefined },
 ): Promise<void> {
   const [row] = await db.select().from(settings).where(eq(settings.key, KEY)).limit(1)
-  const previous = (row?.value as Stored | undefined)?.apiKey ?? null
-  let apiKey = previous
+  const stored = row?.value as Stored | undefined
+  // 换了接口的主机就不能沿用旧 Key：否则改个地址再点测试，服务端就会把 Key 发给新主机
+  const sameOrigin = stored
+    ? new URL(stored.baseUrl).origin === new URL(input.baseUrl).origin
+    : false
+  let apiKey = sameOrigin ? (stored?.apiKey ?? null) : null
   if (input.apiKey === null) apiKey = null
   if (typeof input.apiKey === 'string') {
     if (!masterKey) throw new Error('保存嵌入接口的 Key 需要先配置 KIOKU_MASTER_KEY')

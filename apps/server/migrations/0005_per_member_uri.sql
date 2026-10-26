@@ -1,0 +1,2 @@
+DROP INDEX "memories_uri_live_idx";--> statement-breakpoint
+CREATE UNIQUE INDEX "memories_uri_live_idx" ON "memories" USING btree ("space_id","domain","path",coalesce("owner_account_id", '00000000-0000-0000-0000-000000000000'::uuid)) WHERE "memories"."deleted_at" is null;

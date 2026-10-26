@@ -14,7 +14,7 @@ import {
 import { and, desc, eq, isNull } from 'drizzle-orm'
 
 import { generateApiKey } from '../auth/keys'
-import { memberRole, requireConsole } from '../auth/middleware'
+import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
 import { apiKeys, apps, personas } from '../db/schema'
 import type { Tx } from '../db/client'
@@ -118,12 +118,16 @@ async function personaVisible(tx: Tx, personaId: string | null | undefined): Pro
 }
 
 const canManageApps = (role: MemberRole | null) => role === 'owner' || role === 'editor'
-// Key 决定接入方能读到什么，只有空间的 owner 能签发和吊销
-const canManageKeys = (role: MemberRole | null) => role === 'owner'
+
+// 应用的权限按「主人」算：Key 读到的 owner / private 层就是应用主人的。
+// 所以只有应用主人能改配置、签发和查看 Key；空间 owner 可以吊销任何 Key（止损），但不能签发
+async function appOwnerOf(tx: Tx, appId: string): Promise<string | null> {
+  const [row] = await tx.select({ owner: apps.ownerAccountId }).from(apps).where(eq(apps.id, appId))
+  return row?.owner ?? null
+}
 
 export function appRoutes(deps: Deps) {
   const app = router()
-  app.use('/spaces/*', requireConsole(deps))
 
   const roleOf = (spaceId: string, accountId: string) => memberRole(deps, spaceId, accountId)
 
@@ -160,10 +164,13 @@ export function appRoutes(deps: Deps) {
     .openapi(updateApp, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
       const body = c.req.valid('json')
-      if (!canManageApps(await roleOf(spaceId, c.get('console').accountId))) {
+      const accountId = c.get('console').accountId
+      if (!canManageApps(await roleOf(spaceId, accountId))) {
         return c.json({ error: '需要 owner 或 editor 角色' }, 403)
       }
       const rows = await withSpace(deps.db, spaceId, async (tx) => {
+        const owner = await appOwnerOf(tx, appId)
+        if (owner && owner !== accountId) return null
         if (!(await personaVisible(tx, body.defaultPersonaId))) return []
         return tx
           .update(apps)
@@ -171,14 +178,17 @@ export function appRoutes(deps: Deps) {
           .where(eq(apps.id, appId))
           .returning()
       })
+      if (!rows) return c.json({ error: '只有应用的主人能修改它' }, 403)
       if (!rows[0]) return c.json({ error: '应用或默认人格不存在' }, 404)
       return c.json(toAppInfo(rows[0]), 200)
     })
     .openapi(listKeys, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
-      if (!canManageKeys(await roleOf(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要 owner 角色' }, 403)
-      }
+      const accountId = c.get('console').accountId
+      if (!(await roleOf(spaceId, accountId))) return c.json({ error: '不是该空间成员' }, 403)
+      const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
+      if (!owner) return c.json({ error: '应用不存在' }, 404)
+      if (owner !== accountId) return c.json({ error: '只有应用的主人能查看它的 Key' }, 403)
       const rows = await deps.db
         .select()
         .from(apiKeys)
@@ -189,13 +199,11 @@ export function appRoutes(deps: Deps) {
     .openapi(createKey, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
       const body = c.req.valid('json')
-      if (!canManageKeys(await roleOf(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要 owner 角色' }, 403)
-      }
-      const [target] = await withSpace(deps.db, spaceId, (tx) =>
-        tx.select({ id: apps.id }).from(apps).where(eq(apps.id, appId)).limit(1),
-      )
-      if (!target) return c.json({ error: '应用不存在' }, 404)
+      const accountId = c.get('console').accountId
+      if (!(await roleOf(spaceId, accountId))) return c.json({ error: '不是该空间成员' }, 403)
+      const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
+      if (!owner) return c.json({ error: '应用不存在' }, 404)
+      if (owner !== accountId) return c.json({ error: '只有应用的主人能签发它的 Key' }, 403)
 
       const generated = generateApiKey()
       const [row] = await deps.db
@@ -213,8 +221,11 @@ export function appRoutes(deps: Deps) {
     })
     .openapi(revokeKey, async (c) => {
       const { spaceId, appId, keyId } = c.req.valid('param')
-      if (!canManageKeys(await roleOf(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要 owner 角色' }, 403)
+      const accountId = c.get('console').accountId
+      const role = await roleOf(spaceId, accountId)
+      const owner = role ? await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId)) : null
+      if (role !== 'owner' && owner !== accountId) {
+        return c.json({ error: '只有应用的主人或空间 owner 能吊销 Key' }, 403)
       }
       const rows = await deps.db
         .update(apiKeys)

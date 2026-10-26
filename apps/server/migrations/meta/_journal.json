@@ -36,6 +36,13 @@
       "when": 1793015580065,
       "tag": "0004_embeddings_rls",
       "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1793018052364,
+      "tag": "0005_per_member_uri",
+      "breakpoints": true
     }
   ]
 }

@@ -1,4 +1,4 @@
-import { and, eq, inArray, isNull, ne } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNull, ne } from 'drizzle-orm'
 
 import { withSpace, type Db } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary, spaces } from '../db/schema'
@@ -7,14 +7,18 @@ import type { Embedder } from './provider'
 import { embeddingText, textHash } from './text'
 
 const BATCH = 32
+const PAGE = BATCH * 4
 
 type Row = typeof memories.$inferSelect
 
-// 为一批记忆生成或刷新向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过
+// 为一批记忆生成或刷新向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
+// 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
+// 请求外部接口时不占着数据库连接和事务；两步之间记忆又被改了也没关系，那次修改会再触发一次任务
 async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]): Promise<number> {
   if (!rows.length) return 0
-  return withSpace(db, spaceId, async (tx) => {
-    const ids = rows.map((r) => r.id)
+  const ids = rows.map((r) => r.id)
+
+  const { stale, pending } = await withSpace(db, spaceId, async (tx) => {
     const glossaryRows = await tx
       .select()
       .from(memoryGlossary)
@@ -26,7 +30,6 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
         and(inArray(memoryEmbeddings.memoryId, ids), eq(memoryEmbeddings.model, embedder.model)),
       )
     const hashes = new Map(existing.map((e) => [e.memoryId, e.contentHash]))
-
     const stale: string[] = []
     const pending: { id: string; text: string; hash: string }[] = []
     for (const row of rows) {
@@ -52,28 +55,31 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
       const hash = textHash(embedder.model, text)
       if (hashes.get(row.id) !== hash) pending.push({ id: row.id, text, hash })
     }
+    return { stale, pending }
+  })
 
+  const vectors: number[][] = []
+  for (let i = 0; i < pending.length; i += BATCH) {
+    vectors.push(...(await embedder.embed(pending.slice(i, i + BATCH).map((p) => p.text))))
+  }
+
+  await withSpace(db, spaceId, async (tx) => {
     if (stale.length)
       await tx.delete(memoryEmbeddings).where(inArray(memoryEmbeddings.memoryId, stale))
-    for (let i = 0; i < pending.length; i += BATCH) {
-      const chunk = pending.slice(i, i + BATCH)
-      const vectors = await embedder.embed(chunk.map((p) => p.text))
-      for (const [j, item] of chunk.entries()) {
-        const values = {
+    for (const [j, item] of pending.entries()) {
+      await tx
+        .insert(memoryEmbeddings)
+        .values({
           spaceId,
           memoryId: item.id,
           model: embedder.model,
           contentHash: item.hash,
           embedding: vectors[j]!,
-        }
-        await tx
-          .insert(memoryEmbeddings)
-          .values(values)
-          .onConflictDoUpdate({
-            target: [memoryEmbeddings.memoryId, memoryEmbeddings.model],
-            set: { contentHash: item.hash, embedding: vectors[j]!, updatedAt: new Date() },
-          })
-      }
+        })
+        .onConflictDoUpdate({
+          target: [memoryEmbeddings.memoryId, memoryEmbeddings.model],
+          set: { contentHash: item.hash, embedding: vectors[j]!, updatedAt: new Date() },
+        })
     }
     // 换过模型后，旧模型的向量不再参与检索，顺手清掉
     await tx
@@ -81,8 +87,8 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
       .where(
         and(inArray(memoryEmbeddings.memoryId, ids), ne(memoryEmbeddings.model, embedder.model)),
       )
-    return pending.length
   })
+  return pending.length
 }
 
 export async function embedMemory(
@@ -97,15 +103,24 @@ export async function embedMemory(
   return syncRows(db, embedder, spaceId, rows)
 }
 
-// 全量补齐：逐个空间检查所有记忆，用于首次配置或更换模型之后
+// 全量补齐：逐个空间、按 id 分页检查所有记忆，用于首次配置或更换模型之后
 export async function backfillEmbeddings(db: Db, embedder: Embedder): Promise<number> {
   let total = 0
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    const rows = await withSpace(db, spaceId, (tx) =>
-      tx.select().from(memories).where(isNull(memories.deletedAt)),
-    )
-    for (let i = 0; i < rows.length; i += BATCH * 4) {
-      total += await syncRows(db, embedder, spaceId, rows.slice(i, i + BATCH * 4))
+    let after: string | null = null
+    for (;;) {
+      const cursor: string | null = after
+      const page: Row[] = await withSpace(db, spaceId, (tx) =>
+        tx
+          .select()
+          .from(memories)
+          .where(and(isNull(memories.deletedAt), cursor ? gt(memories.id, cursor) : undefined))
+          .orderBy(asc(memories.id))
+          .limit(PAGE),
+      )
+      if (!page.length) break
+      total += await syncRows(db, embedder, spaceId, page)
+      after = page[page.length - 1]!.id
     }
   }
   return total

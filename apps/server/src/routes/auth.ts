@@ -5,7 +5,7 @@ import { deleteCookie, setCookie } from 'hono/cookie'
 
 import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
-import { clearFailures, isLocked, recordFailure } from '../auth/rateLimit'
+import { clearAttempts, reserveAttempt } from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
 import { accounts, spaceMembers, spaces } from '../db/schema'
@@ -72,7 +72,7 @@ export function authRoutes(deps: Deps) {
     .openapi(login, async (c) => {
       const { username, password } = c.req.valid('json')
       const limitKey = username.toLowerCase()
-      if (isLocked(limitKey)) return c.json({ error: '失败次数过多，请稍后再试' }, 429)
+      if (!reserveAttempt(limitKey)) return c.json({ error: '失败次数过多，请稍后再试' }, 429)
 
       const [account] = await deps.db
         .select()
@@ -80,11 +80,8 @@ export function authRoutes(deps: Deps) {
         .where(eq(accounts.username, username))
         .limit(1)
       const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
-      if (!account || !ok) {
-        recordFailure(limitKey)
-        return c.json({ error: '用户名或密码错误' }, 401)
-      }
-      clearFailures(limitKey)
+      if (!account || !ok) return c.json({ error: '用户名或密码错误' }, 401)
+      clearAttempts(limitKey)
 
       const token = await createSession(deps.db, account.id)
       setCookie(c, SESSION_COOKIE, token, {
