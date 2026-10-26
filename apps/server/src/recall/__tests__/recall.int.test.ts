@@ -144,7 +144,8 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     await create({ uri: 'core://b', content: 'b'.repeat(30), layer: 'base', priority: 0 })
     const access = resolveAccess(FULL_SCOPES, { appId, ownerAccountId: ws.accountId })
     const result = await withSpace(database.db, ws.spaceId, (tx) =>
-      boot(tx, access, [personaId], 40),
+      // 每个节点按正文加标题算：30 + 「core://a」8 + 7 = 45，预算 50 只放得下第一个
+      boot(tx, access, [personaId], 50),
     )
     expect(result.entries.map((e) => e.uri)).toEqual(['core://a'])
     expect(result.omitted).toEqual(['core://b'])
@@ -324,7 +325,8 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
           originScope: 'global',
           domain: 'chat',
           path: 'episode',
-          content: '一段情节',
+          // 受信来源但属于情节层，而且能被项目名召回：项目召回也不能收
+          content: '关于 kioku 的一段情节',
         },
       ]),
     )
@@ -347,6 +349,7 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     expect(recent).not.toContain('home://wifi')
     expect(recent).not.toContain('chat://episode')
     expect(context).not.toContain('chat://injected')
+    expect(context).not.toContain('chat://episode')
     expect(context).toMatch(
       /与当前项目相关的记忆，需要时用 kioku_get 读取：\n<recall session_id="s1">\n[\d.]+ \| projects:\/\/kioku \| kioku/,
     )
@@ -388,6 +391,25 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
       hookSpecificOutput: { additionalContext: string }
     }
     expect(value.hookSpecificOutput.additionalContext).toContain('## core://agent')
+  })
+
+  it('嵌入接口卡住时，每轮召回到时间就只走全文与关键词', async () => {
+    await seed()
+    const stuck = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: randomBytes(32),
+      embedder: staticEmbedderSource({ model: embedder.model, embed: () => new Promise(() => {}) }),
+      jobs: null,
+    })
+    const started = Date.now()
+    const res = await stuck.request(
+      '/v1/lifecycle/event',
+      jsonRequest('POST', { event: 'prompt.submit', prompt: 'RB5009 路由器' }, bearer(key)),
+    )
+    const body = (await res.json()) as LifecycleResponse
+    expect(Date.now() - started).toBeLessThan(4_000)
+    expect(body.nodeUris[0]).toBe('infra://router')
   })
 
   it('Claude Code 的启动上下文不超过钩子能完整接收的长度，放不下的只列 URI', async () => {

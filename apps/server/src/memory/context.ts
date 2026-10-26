@@ -85,7 +85,7 @@ export function recallScopeForKey(
   const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
     runInSpace(deps.db, key.spaceId, key.app.defaultPersonaId, fn)
   return {
-    async recall(rawQuery, { semantic: useSemantic = true, ...options }) {
+    async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...options }) {
       const query = normalizeQuery(rawQuery)
       if (!query) return []
       // 嵌入设置读不出来（例如主密钥不对）时记录原因，召回退化为全文与关键词
@@ -95,7 +95,13 @@ export function recallScopeForKey(
             return null
           })
         : null
-      const semantic = await embedQuery(embedder, query)
+      // 嵌入接口慢时不拖住整个召回：到时间就放弃向量这一路
+      const semantic = await (semanticTimeoutMs === undefined
+        ? embedQuery(embedder, query)
+        : Promise.race([
+            embedQuery(embedder, query),
+            new Promise<null>((resolve) => setTimeout(() => resolve(null), semanticTimeoutMs)),
+          ]))
       return run((tx, personaIds) =>
         recall(tx, access, semantic, query, { ...options, personaIds }),
       )

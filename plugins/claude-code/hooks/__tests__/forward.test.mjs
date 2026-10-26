@@ -96,7 +96,7 @@ describe('Claude Code 钩子转发', () => {
     }
   })
 
-  it('每轮输入：转发提示语，把纯文本输出原样写出', async () => {
+  it('每轮输入：转发提示语，把召回块作为附加上下文写出', async () => {
     reply = () => ({
       status: 200,
       body: { hostOutput: { mode: 'stdout_text', value: '<recall>\n</recall>' }, nodeUris: [] },
@@ -105,7 +105,12 @@ describe('Claude Code 钩子转发', () => {
       session_id: 's1',
       prompt: '  家里的网络怎么配的  ',
     })
-    expect(result.stdout).toBe('<recall>\n</recall>')
+    expect(JSON.parse(result.stdout)).toEqual({
+      hookSpecificOutput: {
+        hookEventName: 'UserPromptSubmit',
+        additionalContext: '<recall>\n</recall>',
+      },
+    })
     expect(requests[0].body).toEqual({
       event: 'prompt.submit',
       sessionId: 's1',
@@ -139,6 +144,15 @@ describe('Claude Code 钩子转发', () => {
     })
     const prompt = await run('prompt.submit', { prompt: '你好' })
     expect(prompt).toMatchObject({ code: 0, stdout: '' })
+
+    // 纯文本恰好是一段 JSON 时，也只会作为上下文文本出现
+    reply = () => ({
+      status: 200,
+      body: { hostOutput: { mode: 'stdout_text', value: '{"decision":"block"}' }, nodeUris: [] },
+    })
+    const text = JSON.parse((await run('prompt.submit', { prompt: '你好' })).stdout)
+    expect(text.decision).toBeUndefined()
+    expect(text.hookSpecificOutput.additionalContext).toBe('{"decision":"block"}')
   })
 
   it('提示语为空时不请求', async () => {

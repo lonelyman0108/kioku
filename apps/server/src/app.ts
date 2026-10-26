@@ -17,7 +17,7 @@ import { VERSION } from './version'
 
 // 应用本身与监听端口分开，测试直接调 app.request，不用起服务
 export function createApp(deps: Deps) {
-  const app = router()
+  const app = router({ collapseSlashes: true })
   app.use('/v1/*', sameOriginForCookies)
   app.route('/v1', health)
   app.route('/v1', setupRoutes(deps))
