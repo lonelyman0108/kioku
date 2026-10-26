@@ -5,7 +5,9 @@
     "types": ["vite/client"],
     "paths": {
       "#build/ui/*": ["./node_modules/.nuxt-ui/ui/*"]
-    }
+    },
+    // Vue 模板里常给可选 props 传 undefined，组件库的类型没有按 exactOptionalPropertyTypes 写，界面这边关掉；服务端保持开启
+    "exactOptionalPropertyTypes": false
   },
   "include": ["src/**/*.ts", "src/**/*.vue", "auto-imports.d.ts", "components.d.ts"]
 }

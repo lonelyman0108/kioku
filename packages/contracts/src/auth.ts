@@ -33,6 +33,8 @@ export const Me = z.object({
   id: z.uuid(),
   username: z.string(),
   displayName: z.string(),
+  // 实例管理员：能改嵌入模型等全实例设置
+  isAdmin: z.boolean(),
   spaces: z.array(SpaceSummary),
 })
 export type Me = z.infer<typeof Me>

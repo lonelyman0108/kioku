@@ -1,21 +1,24 @@
 <script setup lang="ts">
-import { useQuery } from '@tanstack/vue-query'
+import { watchEffect } from 'vue'
+import { useRouter } from 'vue-router'
 
-import { fetchHealth } from '../api'
+import { useSession } from '../composables/useSession'
 
-const health = useQuery({ queryKey: ['health'], queryFn: fetchHealth })
+// 根路径跳到第一个空间的记忆页
+const router = useRouter()
+const { me, space } = useSession()
+watchEffect(() => {
+  if (space.value) void router.replace({ name: 'memories', params: { spaceId: space.value.id } })
+})
 </script>
 
 <template>
-  <UContainer class="py-16">
-    <h1 class="text-2xl font-semibold">Kioku</h1>
-    <p class="mt-2 text-muted">多账号、多人格、分层授权的长期记忆服务</p>
-    <div class="mt-8 flex items-center gap-2">
-      <UBadge v-if="health.isPending.value" color="neutral" variant="subtle">连接中</UBadge>
-      <UBadge v-else-if="health.isError.value" color="error" variant="subtle">后端不可用</UBadge>
-      <UBadge v-else color="success" variant="subtle">
-        后端正常 · {{ health.data.value?.version }}
-      </UBadge>
-    </div>
-  </UContainer>
+  <UDashboardPanel id="home">
+    <template #body>
+      <p v-if="me.data.value && !space" class="text-muted">
+        你还不在任何空间里：请空间的 owner 把你加入空间后再刷新。
+      </p>
+      <p v-else class="text-muted">正在打开空间……</p>
+    </template>
+  </UDashboardPanel>
 </template>
