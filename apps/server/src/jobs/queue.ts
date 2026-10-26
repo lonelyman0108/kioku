@@ -48,3 +48,17 @@ export async function startJobs(options: {
     stop: () => boss.stop({ graceful: true }),
   }
 }
+
+// 给命令行工具用：只投递一次全量补齐，不启动 worker，也不做 pg-boss 的定时维护。
+// 服务正在运行时由它的 worker 接手；没在运行时，下次启动也会补齐
+export async function requestBackfill(connectionString: string): Promise<void> {
+  const boss = new PgBoss({ connectionString, schema: 'pgboss', supervise: false, schedule: false })
+  boss.on('error', (err) => console.error('后台任务出错', err))
+  await boss.start()
+  try {
+    await boss.createQueue(BACKFILL, { policy: 'singleton' })
+    await boss.send(BACKFILL, {}, { retryLimit: 5, retryBackoff: true })
+  } finally {
+    await boss.stop({ graceful: false })
+  }
+}
