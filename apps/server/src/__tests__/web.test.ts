@@ -52,7 +52,20 @@ describe('托管管理界面', () => {
 
   it('路径穿越拿不到构建目录之外的文件', async () => {
     const res = await app.request('/..%2f..%2fetc%2fpasswd')
-    expect(await res.text()).toContain('<div id="app">')
+    expect(res.status).toBe(404)
+    expect(await res.text()).not.toContain('root:')
+  })
+
+  it('找不到的资源文件和像文件的路径返回 404，不回退到 index.html', async () => {
+    for (const path of [
+      '/assets/index-old.js',
+      '/missing.png',
+      '/.well-known/oauth-protected-resource',
+    ]) {
+      const res = await app.request(path)
+      expect(res.status).toBe(404)
+      expect(await res.text()).not.toContain('<div id="app">')
+    }
   })
 
   it('响应带安全头，禁止被嵌入别的页面；HSTS 留给前面的 HTTPS 代理决定', async () => {

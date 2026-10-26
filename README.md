@@ -54,14 +54,19 @@ docker compose -f docker-compose.example.yml up -d --build
 **备份**：数据都在数据库里，`KIOKU_MASTER_KEY` 另外保存（丢了它，secret 级记忆无法解密）。备份要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。备份文件不要放在仓库目录里，构建镜像时会被带进构建上下文。
 
 ```bash
+mkdir -p ~/kioku-backup
 docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F).dump
 ```
 
-**升级与回滚**：拉取新代码后重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前，回滚旧版本前先停掉服务，再用升级前的备份恢复数据库：
+**升级**：先按上面备份，再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前。
+
+**回滚**：停掉服务，删掉已经迁移到新版本的库再建一个空库，把升级前的备份恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在备份里，会残留下来，下次升级时迁移会因为它们已存在而失败。
 
 ```bash
 docker compose -f docker-compose.example.yml stop kioku
-docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --clean --if-exists -d kioku < ~/kioku-backup/kioku-<日期>.dump
+docker compose -f docker-compose.example.yml exec db dropdb -U postgres --force kioku
+docker compose -f docker-compose.example.yml exec db createdb -U postgres -O kioku kioku
+docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/kioku-<日期>.dump
 ```
 
 ## 配置项
