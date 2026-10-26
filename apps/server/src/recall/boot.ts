@@ -77,7 +77,8 @@ export function formatBootBlock(result: BootResponse, guidance: string): string 
 }
 
 // 最近更新的策展记忆，会话开始时列出 URI 与 disclosure，模型据此决定要不要读。
-// 和 boot 一样只收受信来源；读权限与召回相同，所以不含 secret
+// 它和 boot 一起作为指令级上下文注入，所以过滤与 boot 一致：只收 BOOT_LAYERS 里的层、只收受信来源；
+// 读权限与召回相同，所以不含 secret
 export async function recentMemories(
   tx: Tx,
   access: Access,
@@ -97,6 +98,7 @@ export async function recentMemories(
       and(
         readableConditions(access, { personaIds }),
         eq(memories.form, 'curated'),
+        inArray(memories.layer, BOOT_LAYERS),
         ne(memories.provenance, 'untrusted'),
       ),
     )

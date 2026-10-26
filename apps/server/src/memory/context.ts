@@ -47,20 +47,22 @@ export function recallScopeForKey(
   const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
     runInSpace(deps.db, key.spaceId, key.app.defaultPersonaId, fn)
   return {
-    async recall(rawQuery, options) {
+    async recall(rawQuery, { semantic: useSemantic = true, ...options }) {
       const query = normalizeQuery(rawQuery)
       if (!query) return []
       // 嵌入设置读不出来（例如主密钥不对）时记录原因，召回退化为全文与关键词
-      const embedder = await deps.embedder.get().catch((err: unknown) => {
-        console.warn('读取嵌入设置失败，本次召回不使用向量', err)
-        return null
-      })
+      const embedder = useSemantic
+        ? await deps.embedder.get().catch((err: unknown) => {
+            console.warn('读取嵌入设置失败，本次召回不使用向量', err)
+            return null
+          })
+        : null
       const semantic = await embedQuery(embedder, query)
       return run((tx, personaIds) =>
         recall(tx, access, semantic, query, { ...options, personaIds }),
       )
     },
-    boot: () => run((tx, personaIds) => boot(tx, access, personaIds)),
+    boot: (budget) => run((tx, personaIds) => boot(tx, access, personaIds, budget)),
     recent: (limit) => run((tx, personaIds) => recentMemories(tx, access, personaIds, limit)),
   }
 }

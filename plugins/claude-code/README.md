@@ -6,6 +6,8 @@
 
 ## 安装
 
+钩子用 Node.js 运行，需要 Node 18 或更新的版本在 `PATH` 里（`node -v` 能看到版本号）。用原生安装包装的 Claude Code 不带 Node，要另外安装。
+
 ```text
 /plugin install kioku --marketplace lonelyman0108/kioku
 ```
@@ -14,7 +16,7 @@
 
 启用时填写两项配置，之后可以在 `/plugin` 里修改：
 
-- **Kioku 服务地址**：例如 `https://kioku.example.com`，不带 `/v1`
+- **Kioku 服务地址**：例如 `https://kioku.example.com`，不带 `/v1`，末尾不要斜杠
 - **API Key**：在管理界面「应用与 Key」里，为运行时类型是 claudecode 的应用签发。Key 存在系统的凭据存储里，不写进 `settings.json`
 
 要让 agent 显式读取 secret 级记忆（例如导入时标成 secret 的凭据），签发 Key 时把最高敏感级设为 secret；召回和启动上下文永远不含 secret。

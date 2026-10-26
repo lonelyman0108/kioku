@@ -11,7 +11,7 @@
     "server_url": {
       "type": "string",
       "title": "Kioku 服务地址",
-      "description": "例如 https://kioku.example.com，不带 /v1",
+      "description": "例如 https://kioku.example.com，不带 /v1，末尾不要斜杠",
       "required": true
     },
     "api_key": {

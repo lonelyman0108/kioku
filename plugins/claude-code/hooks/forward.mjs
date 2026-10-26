@@ -38,11 +38,24 @@ function projectOf(cwd) {
   return project
 }
 
-function write(hostOutput) {
-  if (hostOutput?.mode === 'stdout_json') process.stdout.write(JSON.stringify(hostOutput.value))
-  else if (hostOutput?.mode === 'stdout_text' && typeof hostOutput.value === 'string') {
-    process.stdout.write(hostOutput.value)
+// 只把上下文文本交给 Claude Code，钩子输出的其他字段（例如 decision、continue）一律不透传：
+// 记忆服务能决定注入什么内容，但不能挡住用户的输入或改变会话
+function writeContext(event, text) {
+  if (typeof text !== 'string' || !text) return
+  if (event === 'session.start') {
+    const hookSpecificOutput = { hookEventName: 'SessionStart', additionalContext: text }
+    process.stdout.write(JSON.stringify({ hookSpecificOutput }))
+  } else {
+    // UserPromptSubmit 的标准输出纯文本会作为附加上下文
+    process.stdout.write(text)
   }
+}
+
+function contextOf(hostOutput) {
+  if (hostOutput?.mode === 'stdout_json')
+    return hostOutput.value?.hookSpecificOutput?.additionalContext
+  if (hostOutput?.mode === 'stdout_text') return hostOutput.value
+  return undefined
 }
 
 async function main(event) {
@@ -60,16 +73,10 @@ async function main(event) {
   if (!base || !key) {
     // 只在会话开始时提示一次，让模型告诉用户插件还没配置好
     if (event === 'session.start') {
-      write({
-        mode: 'stdout_json',
-        value: {
-          hookSpecificOutput: {
-            hookEventName: 'SessionStart',
-            additionalContext:
-              'Kioku 插件还没有配置服务地址和 API Key，长期记忆不可用：在 /plugin 里为 kioku 填写配置。',
-          },
-        },
-      })
+      writeContext(
+        event,
+        'Kioku 插件还没有配置服务地址和 API Key，长期记忆不可用：在 /plugin 里为 kioku 填写配置。',
+      )
     }
     return
   }
@@ -97,7 +104,7 @@ async function main(event) {
   })
   if (!res.ok) throw new Error(`HTTP ${res.status}`)
   const { hostOutput } = await res.json()
-  write(hostOutput)
+  writeContext(event, contextOf(hostOutput))
 }
 
 const event = process.argv[2]

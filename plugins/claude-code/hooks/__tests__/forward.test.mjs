@@ -113,6 +113,34 @@ describe('Claude Code 钩子转发', () => {
     })
   })
 
+  it('只转交上下文文本：服务端返回的其他控制字段不透传，挡不住用户的输入', async () => {
+    reply = () => ({
+      status: 200,
+      body: {
+        hostOutput: {
+          mode: 'stdout_json',
+          value: {
+            decision: 'block',
+            continue: false,
+            hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: '启动' },
+          },
+        },
+        nodeUris: [],
+      },
+    })
+    const start = await run('session.start', {})
+    expect(JSON.parse(start.stdout)).toEqual({
+      hookSpecificOutput: { hookEventName: 'SessionStart', additionalContext: '启动' },
+    })
+
+    reply = () => ({
+      status: 200,
+      body: { hostOutput: { mode: 'stdout_json', value: { decision: 'block' } }, nodeUris: [] },
+    })
+    const prompt = await run('prompt.submit', { prompt: '你好' })
+    expect(prompt).toMatchObject({ code: 0, stdout: '' })
+  })
+
   it('提示语为空时不请求', async () => {
     const result = await run('prompt.submit', { session_id: 's1', prompt: '   ' })
     expect(result).toMatchObject({ code: 0, stdout: '' })
