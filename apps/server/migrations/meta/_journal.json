@@ -50,6 +50,20 @@
       "when": 1793020350751,
       "tag": "0006_login_attempts",
       "breakpoints": true
+    },
+    {
+      "idx": 7,
+      "version": "7",
+      "when": 1793021180557,
+      "tag": "0007_login_attempts_index",
+      "breakpoints": true
+    },
+    {
+      "idx": 8,
+      "version": "7",
+      "when": 1793021180988,
+      "tag": "0008_uri_exclusive",
+      "breakpoints": true
     }
   ]
 }

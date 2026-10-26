@@ -351,4 +351,73 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
       ['kb://b', false, 1],
     ])
   })
+  it('转移应用所有权会吊销旧 Key，且不能夹带别的修改', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bApp = await appAs(b.cookie, 'b-agent')
+    const oldKey = ((await (await keyAs(b.cookie, bApp)).json()) as CreatedKey).key
+    const patch = (body: Record<string, unknown>) =>
+      app.request(
+        `/v1/spaces/${ws.spaceId}/apps/${bApp}`,
+        jsonRequest('PATCH', body, { cookie: ws.cookie }),
+      )
+    expect(
+      (await patch({ ownerAccountId: ws.accountId, config: { elevateOwnerDirect: 'internal' } }))
+        .status,
+    ).toBe(400)
+    expect((await patch({ ownerAccountId: ws.accountId })).status).toBe(200)
+    expect((await app.request('/v1/whoami', { headers: bearer(oldKey) })).status).toBe(401)
+  })
+
+  it('数据库层也不允许共享节点与成员节点占同一 URI', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(key, { uri: 'home://wifi', content: '共享', layer: 'base' })
+    await expect(
+      withSpace(database.db, ws.spaceId, (tx) =>
+        tx.insert(memories).values({
+          spaceId: ws.spaceId,
+          form: 'curated',
+          layer: 'private',
+          sensitivity: 'private',
+          provenance: 'agent',
+          ownerAccountId: ws.accountId,
+          domain: 'home',
+          path: 'wifi',
+          content: '绕过服务层',
+        }),
+      ),
+    ).rejects.toThrow()
+  })
+
+  it('别人的过期记录也会让出 URI', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bKey = (
+      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
+    ).key
+    await create(bKey, { uri: 'home://x', content: 'B 的旧事', layer: 'private' })
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 1000) })
+        .where(eq(memories.path, 'x')),
+    )
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    expect((await create(key, { uri: 'home://x', content: '共享', layer: 'base' })).status).toBe(
+      201,
+    )
+  })
+
+  it('超长用户名返回 400，不写入失败计数表', async () => {
+    const res = await app.request(
+      '/v1/auth/login',
+      jsonRequest('POST', { username: 'x'.repeat(3000), password: 'x' }),
+    )
+    expect(res.status).toBe(400)
+  })
+
+  it('浏览时 priority 高的节点排在前面', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(key, { uri: 'kb://aaa', content: 'x', layer: 'base', priority: 2 })
+    await create(key, { uri: 'kb://zzz', content: 'x', layer: 'base', priority: 0 })
+    expect((await children(key, 'kb')).children.map((c) => c.uri)).toEqual(['kb://zzz', 'kb://aaa'])
+  })
 })

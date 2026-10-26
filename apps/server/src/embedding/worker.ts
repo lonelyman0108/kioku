@@ -63,6 +63,7 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
     vectors.push(...(await embedder.embed(pending.slice(i, i + BATCH).map((p) => p.text))))
   }
 
+  let written = 0
   await withSpace(db, spaceId, async (tx) => {
     // 请求嵌入期间记忆可能又被改过（例如改成了 secret）：锁住这些行，updated_at 变了的不写回，
     // 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态
@@ -82,6 +83,7 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
       await tx.delete(memoryEmbeddings).where(inArray(memoryEmbeddings.memoryId, staleNow))
     for (const [j, item] of pending.entries()) {
       if (!unchanged.has(item.id)) continue
+      written++
       await tx
         .insert(memoryEmbeddings)
         .values({
@@ -103,7 +105,7 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
         and(inArray(memoryEmbeddings.memoryId, ids), ne(memoryEmbeddings.model, embedder.model)),
       )
   })
-  return pending.length
+  return written
 }
 
 export async function embedMemory(

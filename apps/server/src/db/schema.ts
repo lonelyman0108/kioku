@@ -106,11 +106,16 @@ export const sessions = pgTable(
 
 // 登录失败计数，按用户名（小写）一行；放在数据库里而不是进程内存：
 // 并发请求用原子加一计数，不需要淘汰策略，也就不会被随机用户名挤掉或塞满
-export const loginAttempts = pgTable('login_attempts', {
-  username: text().primaryKey(),
-  count: integer().notNull(),
-  resetAt: timestamp({ withTimezone: true }).notNull(),
-})
+export const loginAttempts = pgTable(
+  'login_attempts',
+  {
+    username: text().primaryKey(),
+    count: integer().notNull(),
+    resetAt: timestamp({ withTimezone: true }).notNull(),
+  },
+  // 清理过期计数按 reset_at 删除
+  (t) => [index().on(t.resetAt)],
+)
 
 // Key 明文只在创建时返回一次；库里存前缀（用于查找和显示）与整串的 SHA-256
 export const apiKeys = pgTable(

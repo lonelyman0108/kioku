@@ -72,9 +72,6 @@ export function authRoutes(deps: Deps) {
   return app
     .openapi(login, async (c) => {
       const { username, password } = c.req.valid('json')
-      if (!(await reserveAttempt(deps.db, username))) {
-        return c.json({ error: '失败次数过多，请稍后再试' }, 429)
-      }
       // 偶尔顺手清理过期的失败计数，不单独起定时任务
       if (Math.random() < 0.01) void pruneAttempts(deps.db).catch(() => {})
 
@@ -83,16 +80,20 @@ export function authRoutes(deps: Deps) {
         .from(accounts)
         .where(eq(accounts.username, username))
         .limit(1)
-      let ok: boolean
+      // 先排进校验闸门，再占失败次数名额：因为繁忙被拒的请求没有校验过密码，不该扣次数
+      let outcome: 'ok' | 'wrong' | 'locked'
       try {
-        ok = await withPasswordGate(async () =>
-          verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH)),
-        )
+        outcome = await withPasswordGate(async () => {
+          if (!(await reserveAttempt(deps.db, username))) return 'locked'
+          const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
+          return account && ok ? 'ok' : 'wrong'
+        })
       } catch (err) {
         if (err instanceof PasswordGateBusy) return c.json({ error: err.message }, 429)
         throw err
       }
-      if (!account || !ok) return c.json({ error: '用户名或密码错误' }, 401)
+      if (outcome === 'locked') return c.json({ error: '失败次数过多，请稍后再试' }, 429)
+      if (outcome === 'wrong' || !account) return c.json({ error: '用户名或密码错误' }, 401)
       await clearAttempts(deps.db, username)
 
       const token = await createSession(deps.db, account.id)

@@ -168,27 +168,41 @@ export function appRoutes(deps: Deps) {
     })
     .openapi(updateApp, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
-      const body = c.req.valid('json')
+      const { ownerAccountId, ...changes } = c.req.valid('json')
       const accountId = c.get('console').accountId
-      if (!canManageApps(await roleOf(spaceId, accountId))) {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
-      }
       const role = await roleOf(spaceId, accountId)
-      // 转移所有权只有空间 owner 能做，新主人必须是空间成员。转移后应用读的是新主人的私人层，
-      // 不会读到前一位主人的，所以成员离开后由空间 owner 接手是安全的
-      if (body.ownerAccountId !== undefined) {
+      if (!canManageApps(role)) return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      // 转移所有权只有空间 owner 能做，新主人必须是空间成员；转移请求不能夹带别的修改
+      if (ownerAccountId !== undefined) {
         if (role !== 'owner') return c.json({ error: '只有空间 owner 能转移应用' }, 403)
-        if (!(await roleOf(spaceId, body.ownerAccountId))) {
+        if (Object.keys(changes).length)
+          return c.json({ error: '转移所有权时不能同时修改其他字段' }, 400)
+        if (!(await roleOf(spaceId, ownerAccountId))) {
           return c.json({ error: '新主人不是该空间成员' }, 400)
         }
       }
       const rows = await withSpace(deps.db, spaceId, async (tx) => {
         const owner = await appOwnerOf(tx, appId)
-        if (owner && owner !== accountId && body.ownerAccountId === undefined) return null
-        if (!(await personaVisible(tx, body.defaultPersonaId))) return []
+        if (!owner) return []
+        if (ownerAccountId !== undefined) {
+          // Key 的权限按应用当前主人计算：不吊销的话，前一位主人手里的 Key 会转而读到新主人的私人层
+          if (ownerAccountId !== owner) {
+            await tx
+              .update(apiKeys)
+              .set({ revokedAt: new Date() })
+              .where(and(eq(apiKeys.appId, appId), isNull(apiKeys.revokedAt)))
+          }
+          return tx
+            .update(apps)
+            .set({ ownerAccountId, updatedAt: new Date() })
+            .where(eq(apps.id, appId))
+            .returning()
+        }
+        if (owner !== accountId) return null
+        if (!(await personaVisible(tx, changes.defaultPersonaId))) return []
         return tx
           .update(apps)
-          .set({ ...body, updatedAt: new Date() })
+          .set({ ...changes, updatedAt: new Date() })
           .where(eq(apps.id, appId))
           .returning()
       })

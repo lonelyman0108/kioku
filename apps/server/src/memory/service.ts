@@ -160,10 +160,10 @@ export class MemoryService {
       )
     const now = new Date()
     for (const row of rows) {
+      // 已失效或已过期的记录对任何人都不可见，软删除它不会暴露或丢失可见内容（事件里留有快照），
+      // 所以不论归属与写权限都可以让出 URI；否则别人的过期记录会永远挡住这个 URI
       const expired = (row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)
-      const mine =
-        row.ownerAccountId === null || row.ownerAccountId === this.ctx.access.ownerAccountId
-      if (!expired || !mine || !canWrite(this.ctx.access, row)) {
+      if (!expired) {
         // 不说明是谁的、内容是什么；URI 被占用这件事本身无法对写入方隐藏
         throw new MemoryError(409, `URI 已被占用：${formatUri(parsed.domain, parsed.path)}`)
       }
@@ -542,7 +542,8 @@ export class MemoryService {
           ),
         )
         .groupBy(sql`1`)
-        .orderBy(sql`1`)
+        // 先按这一级自身记忆的 priority 排，虚拟节点在后，再截断；否则重要的节点可能被截掉
+        .orderBy(sql`min(${memories.priority}) filter (where ${next} = '') nulls last`, sql`1`)
         .limit(CHILDREN_LEVEL_LIMIT)
       const children: MemorySummary[] = levels.map((level) => ({
         uri: formatUri(domain, `${prefix}${level.segment}`),
