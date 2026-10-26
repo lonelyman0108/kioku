@@ -39,7 +39,7 @@
 
 扩展类型 🌐 i18n、🎨 design 默认关闭，启用时改 `.githooks/commit.conf` 的 `EXTRA_TYPES`。
 
-常用 scope：`server`、`web`、`sdk`、`plugins`、`db`、`docs`、`ci`（模块建好后按实际目录更新）
+常用 scope：`server`、`web`、`contracts`、`sdk`、`plugins`、`db`、`docs`、`ci`
 
 钩子是本地第一道检查，CI 会用同一份规则复核 PR 标题和合并进 main 的提交。
 

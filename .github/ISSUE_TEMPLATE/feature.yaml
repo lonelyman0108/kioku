@@ -1,6 +1,6 @@
 name: 需求建议
 description: 希望新增或改进的功能
-title: "[需求] "
+title: '[需求] '
 labels: []
 body:
   - type: textarea

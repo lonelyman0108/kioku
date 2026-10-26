@@ -1,6 +1,6 @@
 name: 外部反馈
 description: 使用者反馈、接入方报告、运维告警等外部来源的输入
-title: "[反馈] "
+title: '[反馈] '
 labels: []
 body:
   - type: dropdown

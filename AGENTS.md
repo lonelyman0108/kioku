@@ -14,7 +14,7 @@
 - 一次性的进度写进 `docs/plans/` 的计划文档，不写进本文件。
 - 模块结构由维护者先建好，agent 在已有结构内实现；需要新增顶层包或目录时先在 PR 里说明。原因：维护者习惯自己定模块边界。
 - 许可证 Apache-2.0。从 Lore 或其他第三方项目复制、改写代码时，在 `NOTICE` 里登记来源与原许可证。原因：MIT 与 Apache-2.0 都要求保留原版权声明。
-- 仓库里不写任何私有部署信息（内网地址、自建服务域名、账号、邮箱）。原因：项目计划开源。示例一律用 `example.com`、`127.0.0.1`。
+- 仓库里不写任何私有部署信息（内网地址、自建服务域名、账号、邮箱）。原因：仓库公开。示例一律用 `example.com`、`127.0.0.1`。
 
 ## 禁区
 
@@ -31,7 +31,8 @@
 - 门禁：`scripts/check.sh`（`--quick` 只跑通用检查）
 - 初始化：`scripts/bootstrap.sh`
 - 开 PR：`scripts/pr.sh`（`--no-merge` 只开不合并）
-- 本地运行：<!-- 命令 -->
+- 本地运行：`pnpm dev`（后端 18920，管理界面 5173）
+- 单项检查：`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm test`、`pnpm build`
 
 ## 目录与约定
 
@@ -42,9 +43,15 @@
 | `docs/design.md` | 总体设计：数据模型、分层与授权、接入协议 |
 | `docs/plans/` | 计划文档，一个主题一份，持续勾选 |
 | `docs/adr/` | 长期决策记录 |
+| `apps/server` | 后端。`app.ts` 组装路由，`index.ts` 只负责监听端口；路由按资源放 `routes/` |
+| `apps/web` | 管理界面。页面放 `pages/`，后端调用集中在 `api.ts`，服务端状态用 TanStack Query |
+| `packages/contracts` | 只放 zod schema 与推出的类型，不放实现；后端路由和前端解析都从这里取 |
 
-<!-- 追加本仓的目录约定 -->
+- workspace 包以 TS 源码互相引用（`exports` 指向 `src/`），后端用 tsdown 打包时一并打进产物。原因：省掉各包单独构建的步骤。
+- 依赖版本写死、不加 `^`。pnpm 默认拒绝发布不足一天的新版本，遇到时换前一个版本，不要加 `minimumReleaseAgeExclude`。原因：给被投毒的包留出被发现的时间。
+- 管理界面的 `typecheck` 先跑一次 `vite build`：Nuxt UI 的 Vite 插件在构建时才生成 `auto-imports.d.ts`、`components.d.ts`，没有它们 vue-tsc 会报找不到组件。
 
 ## 已知的坑
 
-<!-- 每条写清现象、原因和做法 -->
+- typescript-eslint 8 只支持 TypeScript 6.0 以下，所以 TypeScript 固定在 6.0，不升到 7。
+- tsdown 产物是 `dist/index.mjs`，不是 `.js`。

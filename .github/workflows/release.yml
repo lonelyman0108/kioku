@@ -18,6 +18,12 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      # pnpm 版本取自 package.json 的 packageManager，Node 版本取自 .node-version
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .node-version
+          cache: pnpm
       - name: 安装工具
         run: scripts/ci/install-tools.sh
       - name: 门禁

@@ -1,0 +1,7 @@
+packages:
+  - apps/*
+  - packages/*
+# 只允许这些依赖运行安装脚本：esbuild 下载平台二进制，vue-demi 按 Vue 版本切换入口
+allowBuilds:
+  esbuild: true
+  vue-demi: true

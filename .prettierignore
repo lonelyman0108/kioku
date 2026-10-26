@@ -1,0 +1,6 @@
+pnpm-lock.yaml
+dist/
+coverage/
+apps/web/auto-imports.d.ts
+apps/web/components.d.ts
+*.md
