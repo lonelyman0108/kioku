@@ -180,10 +180,8 @@ export class MemoryService {
         .returning()
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       // 让出的是别的成员的私人记录时，事件记在本次写入者名下，快照里不放对方的正文
-      const foreign =
-        row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
       const keep = (r: MemoryRow) =>
-        foreign ? { ...snapshot(r, glossary), content: null } : snapshot(r, glossary)
+        foreignPrivate ? { ...snapshot(r, glossary), content: null } : snapshot(r, glossary)
       await this.event(tx, row.id, 'expire', keep(row), keep(gone!))
       released.push(row.id)
     }
