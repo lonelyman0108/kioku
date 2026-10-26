@@ -27,6 +27,15 @@ export type RecallRequest = z.infer<typeof RecallRequest>
 export const RecallResponse = z.object({ candidates: z.array(RecallCandidate) })
 export type RecallResponse = z.infer<typeof RecallResponse>
 
+// 最近更新的策展记忆：只有 URI 与 disclosure，不含正文，会话开始时列给模型
+export const RecentMemory = z.object({
+  uri: z.string(),
+  priority: z.number().int(),
+  disclosure: z.string().nullable(),
+  updatedAt: z.string(),
+})
+export type RecentMemory = z.infer<typeof RecentMemory>
+
 export const BootEntry = z.object({ uri: z.string(), layer: Layer, content: z.string() })
 export const BootResponse = z.object({
   entries: z.array(BootEntry),
@@ -38,9 +47,20 @@ export type BootResponse = z.infer<typeof BootResponse>
 export const LIFECYCLE_EVENTS = ['session.start', 'prompt.submit'] as const
 export const LifecycleEventName = z.enum(LIFECYCLE_EVENTS)
 
+// 宿主当前所在的项目：目录名与 git 仓库名。会话开始时用它们召回与当前项目相关的记忆
+export const LifecycleProject = z.object({
+  dirName: z.string().max(128).optional(),
+  repoName: z.string().max(128).optional(),
+})
+export type LifecycleProject = z.infer<typeof LifecycleProject>
+
 // 按事件区分字段：prompt.submit 缺 prompt 时直接 400，不让插件的字段错误变成悄无声息的「没有召回」
 export const LifecycleEvent = z.discriminatedUnion('event', [
-  z.object({ event: z.literal('session.start'), sessionId: z.string().max(200).optional() }),
+  z.object({
+    event: z.literal('session.start'),
+    sessionId: z.string().max(200).optional(),
+    project: LifecycleProject.optional(),
+  }),
   z.object({
     event: z.literal('prompt.submit'),
     sessionId: z.string().max(200).optional(),

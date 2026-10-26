@@ -1,11 +1,12 @@
-import type { BootResponse, Layer } from '@kioku/contracts'
-import { and, asc, eq, inArray, lte, ne, or } from 'drizzle-orm'
+import type { BootResponse, Layer, RecentMemory } from '@kioku/contracts'
+import { and, asc, desc, eq, inArray, lte, ne, or } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
 import type { Tx } from '../db/client'
 import { memories } from '../db/schema'
 import { readableConditions } from '../memory/filter'
 import { formatUri } from '../memory/uri'
+import { inlineText } from './recall'
 
 // boot 是会话开始时注入的固定基线：所有可读的 priority 0 节点，加上当前人格与本应用 priority ≤ 1 的节点。
 // 按层排序（基础规则在前、个人信息在后），超出字数预算的只列 URI，模型需要时再读。
@@ -73,4 +74,49 @@ export function formatBootBlock(result: BootResponse, guidance: string): string 
     )
   }
   return `${guidance}\n\n<kioku-boot>\n${sections.join('\n\n')}\n</kioku-boot>`
+}
+
+// 最近更新的策展记忆，会话开始时列出 URI 与 disclosure，模型据此决定要不要读。
+// 它和 boot 一起作为指令级上下文注入，所以过滤与 boot 一致：只收 BOOT_LAYERS 里的层、只收受信来源；
+// 读权限与召回相同，所以不含 secret
+export async function recentMemories(
+  tx: Tx,
+  access: Access,
+  personaIds: string[],
+  limit: number,
+): Promise<RecentMemory[]> {
+  const rows = await tx
+    .select({
+      domain: memories.domain,
+      path: memories.path,
+      priority: memories.priority,
+      disclosure: memories.disclosure,
+      updatedAt: memories.updatedAt,
+    })
+    .from(memories)
+    .where(
+      and(
+        readableConditions(access, { personaIds }),
+        eq(memories.form, 'curated'),
+        inArray(memories.layer, BOOT_LAYERS),
+        ne(memories.provenance, 'untrusted'),
+      ),
+    )
+    .orderBy(desc(memories.updatedAt), asc(memories.domain), asc(memories.path))
+    .limit(limit)
+  return rows.map((r) => ({
+    uri: formatUri(r.domain!, r.path!),
+    priority: r.priority,
+    disclosure: r.disclosure,
+    updatedAt: r.updatedAt.toISOString(),
+  }))
+}
+
+export function formatRecentBlock(recent: RecentMemory[]): string {
+  if (!recent.length) return ''
+  const lines = recent.map((m) => {
+    const note = m.disclosure ? `：${inlineText(m.disclosure)}` : ''
+    return `- ${m.uri}（priority ${m.priority}，更新于 ${m.updatedAt.slice(0, 10)}）${note}`
+  })
+  return ['## 近期更新的记忆', '', ...lines].join('\n')
 }
