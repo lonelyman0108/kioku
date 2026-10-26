@@ -1,7 +1,7 @@
 import { LAYERS, type KeyScopes } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { canRead, canWrite, resolveAccess, type MemoryFacts } from '../access'
+import { canRead, canWrite, consoleAccess, resolveAccess, type MemoryFacts } from '../access'
 
 const OWNER = 'owner-account'
 const app = { appId: 'app-1', ownerAccountId: OWNER }
@@ -74,9 +74,9 @@ describe('群聊', () => {
   it('只能以 untrusted 身份写对象层和情节层', () => {
     expect(access.writeProvenance).toBe('untrusted')
     expect(access.writeOriginScope).toBe('group:g1')
-    expect(canWrite(access, { layer: 'subject', sensitivity: 'public' })).toBe(true)
-    expect(canWrite(access, { layer: 'persona', sensitivity: 'public' })).toBe(false)
-    expect(canWrite(access, { layer: 'private', sensitivity: 'public' })).toBe(false)
+    expect(canWrite(access, { layer: 'subject', sensitivity: 'public', appId: null })).toBe(true)
+    expect(canWrite(access, { layer: 'persona', sensitivity: 'public', appId: null })).toBe(false)
+    expect(canWrite(access, { layer: 'private', sensitivity: 'public', appId: null })).toBe(false)
   })
 
   it('缺少群对象时拒绝解析', () => {
@@ -175,5 +175,31 @@ describe('有效期', () => {
     const appRule = memory({ layer: 'app', appId: 'app-1' })
     expect(canRead(access, appRule, opts)).toBe(true)
     expect(canRead(access, { ...appRule, appId: 'app-2' }, opts)).toBe(false)
+  })
+})
+
+describe('应用层的写入', () => {
+  const appRule = (appId: string) => ({
+    layer: 'app' as const,
+    sensitivity: 'internal' as const,
+    appId,
+  })
+
+  it('Key 只能写本应用的应用层，admin Key 不限', () => {
+    const access = resolveAccess(fullKey, app)
+    expect(canWrite(access, appRule('app-1'))).toBe(true)
+    expect(canWrite(access, appRule('app-2'))).toBe(false)
+    expect(canWrite(resolveAccess({ ...fullKey, admin: true }, app), appRule('app-2'))).toBe(true)
+  })
+
+  it('管理界面里 owner 能写所有应用，editor 只能写自己是主人的应用，viewer 都不能写', () => {
+    expect(canWrite(consoleAccess('owner', OWNER), appRule('app-2'))).toBe(true)
+    const editor = consoleAccess('editor', 'bob', ['app-bob'])
+    expect(canWrite(editor, appRule('app-bob'))).toBe(true)
+    expect(canWrite(editor, appRule('app-1'))).toBe(false)
+    expect(editor.admin).toBe(false)
+    expect(canWrite(consoleAccess('viewer', 'carol', ['app-carol']), appRule('app-carol'))).toBe(
+      false,
+    )
   })
 })

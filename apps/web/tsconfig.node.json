@@ -2,6 +2,8 @@
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
     "types": ["node"],
+    // vite.config.ts 由 Node 原生加载时，相对导入要写全扩展名
+    "allowImportingTsExtensions": true,
     "paths": {
       "#build/ui": ["./node_modules/.nuxt-ui/ui"]
     }

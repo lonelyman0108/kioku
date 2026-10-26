@@ -1,6 +1,6 @@
 import { eq, lte, sql } from 'drizzle-orm'
 
-import type { Db } from '../db/client'
+import type { Db, Tx } from '../db/client'
 import { loginAttempts } from '../db/schema'
 
 // 登录失败限流，计数在数据库里原子递增，并发请求也逐个计数。分两级：
@@ -28,7 +28,7 @@ function keysFor(username: string, client: string | null, trustedDevice: boolean
   return [own, { key: totalKey(username), limit: PER_USER_LIMIT }]
 }
 
-async function bump(db: Db, key: string, delta: number): Promise<number> {
+async function bump(db: Db | Tx, key: string, delta: number): Promise<number> {
   const [row] = await db
     .insert(loginAttempts)
     .values({
@@ -49,17 +49,28 @@ async function bump(db: Db, key: string, delta: number): Promise<number> {
 
 // 在校验密码之前先占一次名额，返回 false 表示已经超限。
 // 逐级计数，某一级已经超限就停下、不再累加更大范围的计数：否则一个已经被锁住的客户端
-// 还能继续把「用户名合计」推到上限，连主人从别处登录也一起锁住
+// 还能继续把「用户名合计」推到上限，连主人从别处登录也一起锁住。
+// 被后一级挡下时退回前面已经加上的：这次没有校验密码，不该占用本客户端的额度，
+// 否则主人在合计超限期间多试几次，同一网络里带设备 Cookie 的设备也会被本客户端的上限挡住。
+// 整个过程在一个事务里：upsert 锁住计数行，同一客户端的并发请求排队执行，看不到别人加了又退的中间值；
+// 各请求都按「本客户端 → 合计」的顺序加锁，不会互相等待成死锁
 export async function reserveAttempt(
   db: Db,
   username: string,
   client: string | null,
   trustedDevice: boolean,
 ): Promise<boolean> {
-  for (const { key, limit } of keysFor(username, client, trustedDevice)) {
-    if ((await bump(db, key, 1)) > limit) return false
-  }
-  return true
+  return db.transaction(async (tx) => {
+    const bumped: string[] = []
+    for (const { key, limit } of keysFor(username, client, trustedDevice)) {
+      if ((await bump(tx, key, 1)) > limit) {
+        for (const earlier of bumped) await bump(tx, earlier, -1)
+        return false
+      }
+      bumped.push(key)
+    }
+    return true
+  })
 }
 
 // 占了名额却没有真正校验密码（校验闸门繁忙）时退回

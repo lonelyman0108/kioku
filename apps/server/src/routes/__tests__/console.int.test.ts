@@ -75,6 +75,69 @@ describe.skipIf(!testDatabaseUrl)('管理界面的记忆接口', () => {
     expect((await consoleGet(ws.cookie, 'home://diary')).status).toBe(404)
   })
 
+  it('editor 在管理界面里只能改自己是主人的应用的应用层，owner 都能改', async () => {
+    const aliceApp = await ws.createApp('alice-bot')
+    const aliceKey = await ws.issueKey(aliceApp.id)
+    await app.request(
+      '/v1/memories',
+      jsonRequest(
+        'POST',
+        { uri: 'app://alice-bot/rules', content: '规则', priority: 0 },
+        bearer(aliceKey),
+      ),
+    )
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bobApp = await app.request(
+      `/v1/spaces/${ws.spaceId}/apps`,
+      jsonRequest(
+        'POST',
+        { slug: 'bob-bot', name: 'bob-bot', runtimeFamily: 'mcp' },
+        { cookie: bob.cookie },
+      ),
+    )
+    expect(bobApp.status).toBe(201)
+    const asBob = (method: string, path: string, body?: unknown) =>
+      app.request(
+        `${base()}${path}`,
+        body === undefined
+          ? { method, headers: { cookie: bob.cookie, 'sec-fetch-site': 'same-origin' } }
+          : jsonRequest(method, body, { cookie: bob.cookie }),
+      )
+
+    // 别人的应用：看得到，改、删、移动、新建都不行
+    expect((await consoleGet(bob.cookie, 'app://alice-bot/rules')).status).toBe(200)
+    expect(
+      (await asBob('PATCH', '', { uri: 'app://alice-bot/rules', content: '篡改' })).status,
+    ).toBe(403)
+    expect(
+      (await asBob('DELETE', `?uri=${encodeURIComponent('app://alice-bot/rules')}`)).status,
+    ).toBe(403)
+    expect(
+      (await asBob('POST', '/move', { from: 'app://alice-bot/rules', to: 'app://alice-bot/x' }))
+        .status,
+    ).toBe(403)
+    expect(
+      (await consoleCreate(bob.cookie, { uri: 'app://alice-bot/x', content: 'x' })).status,
+    ).toBe(403)
+    expect(
+      ((await (await consoleGet(ws.cookie, 'app://alice-bot/rules')).json()) as MemoryView).content,
+    ).toBe('规则')
+
+    // 自己的应用可以；空间 owner 能改任何应用的
+    expect(
+      (await consoleCreate(bob.cookie, { uri: 'app://bob-bot/rules', content: 'bob' })).status,
+    ).toBe(201)
+    const byOwner = await app.request(
+      base(),
+      jsonRequest(
+        'PATCH',
+        { uri: 'app://bob-bot/rules', content: 'owner 改过' },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(byOwner.status).toBe(200)
+  })
+
   it('viewer 只读，editor 读不到 secret，owner 可以', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')

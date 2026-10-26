@@ -8,6 +8,7 @@ import { api } from '../api/endpoints'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
 import { parentOf, toTreeItems, type MemoryTreeItem } from '../components/memoryTree'
+import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { icons } from '../icons'
 
 const route = useRoute()
@@ -15,6 +16,7 @@ const router = useRouter()
 const toast = useToast()
 const spaceId = computed(() => String(route.params.spaceId))
 const selectedUri = computed(() => (typeof route.query.uri === 'string' ? route.query.uri : null))
+const { canWrite } = useMemoryPermissions(spaceId)
 
 const roots = ref<MemoryTreeItem[]>([])
 const loadingRoots = ref(false)
@@ -118,13 +120,15 @@ watch(spaceId, loadRoots)
             aria-label="刷新"
             @click="loadRoots"
           />
-          <UButton :icon="icons.add" size="sm" @click="openCreate('')">新建</UButton>
+          <UButton v-if="canWrite" :icon="icons.add" size="sm" @click="openCreate('')">
+            新建
+          </UButton>
         </template>
       </UDashboardNavbar>
     </template>
     <template #body>
       <p v-if="!loadingRoots && !roots.length" class="text-sm text-muted">
-        还没有记忆。点「新建」写下第一条。
+        还没有记忆。{{ canWrite ? '点「新建」写下第一条。' : '' }}
       </p>
       <UTree :items="roots" :get-key="(item) => item.uri" @toggle="onToggle" @select="onSelect" />
     </template>

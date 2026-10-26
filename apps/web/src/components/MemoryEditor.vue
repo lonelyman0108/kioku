@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { SENSITIVITIES, type MemoryView, type Sensitivity } from '@kioku/contracts'
+import type { MemoryView, Sensitivity } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 
@@ -51,7 +52,13 @@ const dirty = computed(() => {
   )
 })
 
-const sensitivityItems = SENSITIVITIES.map((s) => ({ label: sensitivityLabels[s], value: s }))
+const permissions = useMemoryPermissions(computed(() => props.spaceId))
+const readOnly = computed(() =>
+  memory.data.value ? permissions.readOnlyReason(memory.data.value) : null,
+)
+const sensitivityItems = computed(() =>
+  permissions.sensitivities.value.map((s) => ({ label: sensitivityLabels[s], value: s })),
+)
 const saving = ref(false)
 const confirmDelete = ref(false)
 
@@ -118,27 +125,49 @@ async function remove() {
       </span>
     </div>
 
+    <UAlert v-if="readOnly" color="neutral" variant="subtle" :title="readOnly" />
+
     <UFormField label="正文" help="写清背景、为什么、在什么条件下适用">
-      <UTextarea v-model="form.content" :rows="14" autoresize class="w-full font-mono" />
+      <UTextarea
+        v-model="form.content"
+        :rows="14"
+        autoresize
+        :disabled="!!readOnly"
+        class="w-full font-mono"
+      />
     </UFormField>
     <UFormField label="Disclosure" help="什么场景下应该想起这条记忆">
-      <UInput v-model="form.disclosure" class="w-full" />
+      <UInput v-model="form.disclosure" :disabled="!!readOnly" class="w-full" />
     </UFormField>
     <div class="grid gap-4 sm:grid-cols-2">
       <UFormField label="Priority" help="0 最重要">
-        <UInputNumber v-model="form.priority" :min="0" :max="99" />
+        <UInputNumber v-model="form.priority" :min="0" :max="99" :disabled="!!readOnly" />
       </UFormField>
       <UFormField label="敏感级">
-        <USelect v-model="form.sensitivity" :items="sensitivityItems" class="w-full" />
+        <USelect
+          v-model="form.sensitivity"
+          :items="sensitivityItems"
+          :disabled="!!readOnly"
+          class="w-full"
+        />
       </UFormField>
     </div>
     <UFormField label="关键词" help="召回时按关键词命中，至少两个字">
-      <UInputTags v-model="form.glossary" class="w-full" />
+      <UInputTags v-model="form.glossary" :disabled="!!readOnly" class="w-full" />
     </UFormField>
 
     <div class="flex flex-wrap gap-2">
-      <UButton :icon="icons.save" :loading="saving" :disabled="!dirty" @click="save">保存</UButton>
       <UButton
+        v-if="!readOnly"
+        :icon="icons.save"
+        :loading="saving"
+        :disabled="!dirty"
+        @click="save"
+      >
+        保存
+      </UButton>
+      <UButton
+        v-if="permissions.canWriteUri(props.uri)"
         :icon="icons.add"
         color="neutral"
         variant="subtle"
@@ -147,6 +176,7 @@ async function remove() {
         新建子节点
       </UButton>
       <UButton
+        v-if="!readOnly"
         :icon="icons.remove"
         color="error"
         variant="ghost"
