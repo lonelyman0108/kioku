@@ -1,4 +1,4 @@
-import { isIPv6 } from 'node:net'
+import { isIP, isIPv6 } from 'node:net'
 
 import { getConnInfo } from '@hono/node-server/conninfo'
 import type { Context } from 'hono'
@@ -22,8 +22,9 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
       .split(',')
       .map((s) => s.trim())
       .filter(Boolean)
-    const picked = hops[hops.length - trustedProxies]
-    if (picked) return { key: clientKey(picked), identified: true }
+    // 有的负载均衡会写成「IP:端口」或「[IPv6 地址]:端口」，去掉端口；仍不是合法地址（例如 nginx 的 unknown）就退回连接对端
+    const picked = stripPort(hops[hops.length - trustedProxies] ?? '')
+    if (isIP(picked)) return { key: clientKey(picked), identified: true }
   }
   let remote: string | undefined
   try {
@@ -60,4 +61,12 @@ export function clientKey(address: string): string {
     .slice(0, 4)
     .map((g) => parseInt(g || '0', 16).toString(16))
     .join(':')}::/64`
+}
+
+export function stripPort(value: string): string {
+  const bracketed = /^\[([^\]]+)\](?::\d+)?$/.exec(value)
+  if (bracketed) return bracketed[1]!
+  // 恰好一个冒号的是 IPv4:port；多个冒号的是不带括号的 IPv6，原样保留
+  const ipv4WithPort = /^(\d+\.\d+\.\d+\.\d+):\d+$/.exec(value)
+  return ipv4WithPort ? ipv4WithPort[1]! : value
 }
