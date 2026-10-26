@@ -76,9 +76,8 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
 
   it('退出后 Cookie 失效', async () => {
     const { cookie } = await setup()
-    expect(
-      (await app.request('/v1/auth/logout', { method: 'POST', headers: { cookie } })).status,
-    ).toBe(204)
+    const logout = { method: 'POST', headers: { cookie, ...sameSite } }
+    expect((await app.request('/v1/auth/logout', logout)).status).toBe(204)
     expect((await app.request('/v1/auth/me', { headers: { cookie } })).status).toBe(401)
   })
 
