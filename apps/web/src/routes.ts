@@ -7,6 +7,11 @@ export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
   { path: '/login', name: 'login', component: () => import('./pages/LoginPage.vue') },
   {
+    path: '/unavailable',
+    name: 'unavailable',
+    component: () => import('./pages/UnavailablePage.vue'),
+  },
+  {
     path: '/',
     component: () => import('./layouts/ConsoleLayout.vue'),
     children: [
@@ -36,14 +41,20 @@ let setupDone = false
 
 export function installGuards(router: Router): void {
   router.beforeEach(async (to) => {
-    if (!setupDone) {
-      setupDone = !(await api.setupStatus()).needsSetup
-      if (!setupDone) return to.name === 'setup' ? true : { name: 'setup' }
+    if (to.name === 'unavailable') return true
+    try {
+      if (!setupDone) {
+        setupDone = !(await api.setupStatus()).needsSetup
+        if (!setupDone) return to.name === 'setup' ? true : { name: 'setup' }
+      }
+      if (to.name === 'setup') return { name: 'home' }
+      const me = await loadMe()
+      if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }
+      if (to.name === 'login') return { name: 'home' }
+      return true
+    } catch {
+      // 后端暂时连不上（重启、升级、代理返回 502）：给出说明和重试，而不是一片空白
+      return { name: 'unavailable', query: { next: to.fullPath } }
     }
-    if (to.name === 'setup') return { name: 'home' }
-    const me = await loadMe()
-    if (!me) return to.name === 'login' ? true : { name: 'login', query: { next: to.fullPath } }
-    if (to.name === 'login') return { name: 'home' }
-    return true
   })
 }

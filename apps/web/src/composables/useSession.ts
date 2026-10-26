@@ -5,9 +5,9 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { queryClient } from '../query'
+import { ME_KEY, queryClient } from '../query'
 
-export const ME_KEY = ['me'] as const
+export { ME_KEY }
 
 // 未登录时返回 null 而不是抛错，页面与守卫都按 null 判断
 export async function fetchMe(): Promise<Me | null> {

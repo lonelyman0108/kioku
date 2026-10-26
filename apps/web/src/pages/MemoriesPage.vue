@@ -39,8 +39,11 @@ function failed(err: unknown) {
 
 async function loadRoots() {
   loadingRoots.value = true
+  // 切换空间时上一次请求可能后到，结果属于别的空间就丢掉
+  const forSpace = spaceId.value
   try {
-    const domains = await api.memoryDomains(spaceId.value)
+    const domains = await api.memoryDomains(forSpace)
+    if (forSpace !== spaceId.value) return
     roots.value = domains.map((d) => ({
       label: `${d.domain}://`,
       // domain 根用 domain 名作为键，与 children 接口的参数一致
@@ -83,22 +86,25 @@ function find(items: MemoryTreeItem[] | undefined, uri: string): MemoryTreeItem 
 }
 
 // 重新载入某一级之后，之前展开着的节点在新的子节点里还没加载：由浅到深把它们重新加载，
-// 已经不存在的从展开列表里去掉；否则这些节点会一直显示「加载中」
+// 已经不存在的从展开列表里去掉；否则这些节点会一直显示「加载中」。
+// 只去掉不存在的，加载期间用户自己展开或收起的不受影响
 async function restoreExpanded() {
-  const keep: string[] = []
+  const dropped = new Set<string>()
   for (const key of [...expanded.value].sort((a, b) => depthOf(a) - depthOf(b))) {
     const item = find(roots.value, key)
-    if (!item?.children) continue
+    if (!item?.children) {
+      dropped.add(key)
+      continue
+    }
     if (!item.loaded) {
       try {
         await loadChildren(item)
       } catch {
-        continue
+        dropped.add(key)
       }
     }
-    keep.push(key)
   }
-  expanded.value = keep
+  if (dropped.size) expanded.value = expanded.value.filter((key) => !dropped.has(key))
 }
 
 // 展开到某个节点，例如打开带 ?uri= 的链接或新建之后
@@ -115,6 +121,8 @@ async function refreshAround(uri: string) {
     if (!parent) return loadRoots()
     try {
       await loadChildren(parent)
+      // domain 里的最后一条也删了：整棵重载，让这个 domain 从树里消失
+      if (!key.includes('://') && !parent.children) return loadRoots()
       return restoreExpanded()
     } catch (err) {
       if (!(err instanceof ApiError) || err.status !== 404 || !key.includes('://')) throw err
@@ -200,7 +208,7 @@ watch(spaceId, () => {
     <template #body>
       <MemoryEditor
         v-if="selectedUri"
-        :key="selectedUri"
+        :key="`${spaceId}|${selectedUri}`"
         :space-id="spaceId"
         :uri="selectedUri"
         @deleted="onDeleted"
