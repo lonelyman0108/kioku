@@ -139,7 +139,9 @@ async function onToggle(_event: unknown, item: MemoryTreeItem) {
   }
 }
 
-function onSelect(_event: unknown, item: MemoryTreeItem) {
+// 不让树自己记选中状态，选中只跟着地址走：切换被取消时高亮留在原处，点虚拟目录也不会高亮
+function onSelect(event: Event, item: MemoryTreeItem) {
+  event.preventDefault()
   if (item.exists) void router.replace({ query: { uri: item.uri } })
 }
 

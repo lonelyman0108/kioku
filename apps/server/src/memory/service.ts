@@ -489,10 +489,19 @@ export class MemoryService {
       .where(eq(memoryEvents.memoryId, memoryId))
   }
 
-  async delete(uri: string): Promise<void> {
+  async delete(
+    uri: string,
+    expected: { expectedId?: string | undefined; expectedVersion?: number | undefined } = {},
+  ): Promise<void> {
     const parsed = parse(uri)
     const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
+      if (expected.expectedId !== undefined && expected.expectedId !== before.id) {
+        throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
+      }
+      if (expected.expectedVersion !== undefined && expected.expectedVersion !== before.version) {
+        throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
+      }
       if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
       }

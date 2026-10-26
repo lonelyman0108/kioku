@@ -31,7 +31,11 @@ const parentItems = computed(() => [
   ...(personas.data.value ?? []).map((p) => ({ label: `${p.name}（${p.slug}）`, value: p.id })),
 ])
 
+// 创建中不接受第二次提交：连点两次会先成功、再报标识已被占用
+const creating = ref(false)
 async function create() {
+  if (creating.value) return
+  creating.value = true
   try {
     await api.createPersona(spaceId.value, {
       slug: form.slug,
@@ -45,6 +49,8 @@ async function create() {
     toast.add({ title: '已创建人格', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '创建失败', color: 'error' })
+  } finally {
+    creating.value = false
   }
 }
 </script>
@@ -102,7 +108,7 @@ async function create() {
     <template #footer>
       <div class="flex w-full justify-end gap-2">
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
-        <UButton type="submit" form="create-persona">创建</UButton>
+        <UButton type="submit" form="create-persona" :loading="creating">创建</UButton>
       </div>
     </template>
   </UModal>

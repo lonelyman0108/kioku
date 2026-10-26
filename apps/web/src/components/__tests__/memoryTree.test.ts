@@ -28,6 +28,7 @@ describe('记忆树', () => {
     const items = toTreeItems(
       {
         parent: null,
+        truncated: false,
         children: [
           {
             uri: 'core://agent',
@@ -69,5 +70,31 @@ describe('记忆树', () => {
       ['notes', false, 1, 'folder'],
     ])
     expect(items[2]!.exists).toBe(false)
+  })
+
+  it('这一级被截断时末尾放一个不能点的说明', () => {
+    const items = toTreeItems(
+      {
+        parent: null,
+        truncated: true,
+        children: [
+          {
+            uri: 'bulk://a',
+            exists: true,
+            id: '00000000-0000-4000-8000-000000000001',
+            layer: 'base',
+            sensitivity: 'public',
+            priority: 2,
+            disclosure: null,
+            childCount: 0,
+          },
+        ],
+      },
+      icons,
+    )
+    expect(items.map((i) => [i.label, i.disabled ?? false])).toEqual([
+      ['a', false],
+      ['这一级太多，只显示了前 1 个', true],
+    ])
   })
 })

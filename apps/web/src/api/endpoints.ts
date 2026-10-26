@@ -73,8 +73,10 @@ export const api = {
   ) => request('POST', `/spaces/${spaceId}/memories`, { body, schema: MemoryView }),
   updateMemory: (spaceId: string, body: UpdateMemoryRequest) =>
     request('PATCH', `/spaces/${spaceId}/memories`, { body, schema: MemoryView }),
-  deleteMemory: (spaceId: string, uri: string) =>
-    request('DELETE', `/spaces/${spaceId}/memories`, { query: { uri } }),
+  deleteMemory: (spaceId: string, uri: string, expected: { id: string; version: number }) =>
+    request('DELETE', `/spaces/${spaceId}/memories`, {
+      query: { uri, expectedId: expected.id, expectedVersion: expected.version },
+    }),
   moveMemory: (spaceId: string, body: MoveMemoryRequest) =>
     request('POST', `/spaces/${spaceId}/memories/move`, { body, schema: MemoryView }),
 

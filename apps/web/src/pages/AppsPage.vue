@@ -59,7 +59,11 @@ const form = reactive({
   runtimeFamily: 'claudecode' as RuntimeFamily,
   defaultPersonaId: null as string | null,
 })
+// 创建中不接受第二次提交：连点两次会先成功、再报标识已被占用
+const creating = ref(false)
 async function create() {
+  if (creating.value) return
+  creating.value = true
   try {
     await api.createApp(spaceId.value, { ...form })
     open.value = false
@@ -68,6 +72,8 @@ async function create() {
     toast.add({ title: '已创建应用', color: 'success' })
   } catch (err) {
     failed(err, '创建失败')
+  } finally {
+    creating.value = false
   }
 }
 </script>
@@ -125,7 +131,8 @@ async function create() {
             <AppKeys
               :space-id="spaceId"
               :app-id="app.id"
-              :is-app-owner="ownsApp(app)"
+              :is-app-owner="app.ownerAccountId === me.data.value?.id"
+              :can-issue="ownsApp(app)"
               :is-space-owner="role === 'owner'"
             />
           </div>
@@ -155,7 +162,7 @@ async function create() {
     <template #footer>
       <div class="flex w-full justify-end gap-2">
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
-        <UButton type="submit" form="create-app">创建</UButton>
+        <UButton type="submit" form="create-app" :loading="creating">创建</UButton>
       </div>
     </template>
   </UModal>

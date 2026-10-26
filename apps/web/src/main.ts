@@ -1,3 +1,5 @@
+// 最先执行：后面的模块一加载就会建 zod schema
+import './zod'
 import './assets/css/main.css'
 
 import ui from '@nuxt/ui/vue-plugin'

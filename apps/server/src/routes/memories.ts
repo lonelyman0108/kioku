@@ -19,6 +19,11 @@ import { MemoryError, type MemoryService } from '../memory/service'
 
 // URI 里有 :// 和 /，放在查询参数里，省去路径编码的麻烦
 const UriQuery = z.object({ uri: MemoryUri })
+// 删除时可以带上读取时的 id 与版本号：删除后在同一个 URI 重建的、或期间被改过的记忆，不会被当成同一条删掉
+const DeleteQuery = UriQuery.extend({
+  expectedId: z.uuid().optional(),
+  expectedVersion: z.coerce.number().int().optional(),
+})
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
   401: jsonResponse('未登录或凭据无效', ErrorResponse),
@@ -87,7 +92,7 @@ function memoryRouteSet(set: RouteSet) {
     method: 'delete',
     path: base,
     summary: '删除记忆（保留历史事件）',
-    request: { params, query: UriQuery },
+    request: { params, query: DeleteQuery },
     responses: { 204: { description: '已删除' }, ...errors },
   })
   const move = createRoute({
@@ -109,7 +114,8 @@ function memoryRouteSet(set: RouteSet) {
     .openapi(create, async (c) => c.json(await (await service(c)).create(c.req.valid('json')), 201))
     .openapi(update, async (c) => c.json(await (await service(c)).update(c.req.valid('json')), 200))
     .openapi(remove, async (c) => {
-      await (await service(c)).delete(c.req.valid('query').uri)
+      const { uri, ...expected } = c.req.valid('query')
+      await (await service(c)).delete(uri, expected)
       return c.body(null, 204)
     })
     .openapi(move, async (c) => c.json(await (await service(c)).move(c.req.valid('json')), 200))

@@ -20,6 +20,8 @@ const props = defineProps<{
   spaceId: string
   appId: string
   isAppOwner: boolean
+  // 签发还要求应用主人在空间里是 owner 或 editor；列表与吊销只看归属，被降级的主人仍能吊销泄露的 Key
+  canIssue: boolean
   isSpaceOwner: boolean
 }>()
 const toast = useToast()
@@ -127,7 +129,7 @@ const summary = (s: KeyScopes) =>
     <div class="flex items-center justify-between">
       <h3 class="text-sm font-medium">API Key</h3>
       <UButton
-        v-if="isAppOwner"
+        v-if="canIssue"
         :icon="icons.add"
         size="xs"
         variant="subtle"
