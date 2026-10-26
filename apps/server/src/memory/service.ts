@@ -52,6 +52,14 @@ export interface MemoryContext {
 
 type MemoryRow = typeof memories.$inferSelect
 
+// 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
+export interface CreateMeta {
+  eventType?: 'create' | 'import'
+  eventContext?: Record<string, unknown>
+  createdAt?: Date
+  updatedAt?: Date
+}
+
 function parse(uri: string): ParsedUri {
   const parsed = parseUri(uri)
   if (!parsed) throw new MemoryError(400, `URI 格式不对：${uri}`)
@@ -248,6 +256,7 @@ export class MemoryService {
     eventType: string,
     before: unknown,
     after: unknown,
+    context: Record<string, unknown> = {},
   ): Promise<void> {
     await tx.insert(memoryEvents).values({
       spaceId: this.ctx.spaceId,
@@ -258,6 +267,7 @@ export class MemoryService {
       provenance: this.ctx.access.writeProvenance,
       before: before ?? null,
       after: after ?? null,
+      context,
     })
   }
 
@@ -317,7 +327,7 @@ export class MemoryService {
     })
   }
 
-  async create(input: CreateMemoryRequest): Promise<MemoryView> {
+  async create(input: CreateMemoryRequest, meta: CreateMeta = {}): Promise<MemoryView> {
     const parsed = parse(input.uri)
     return this.write(async (tx, personaIds, released) => {
       const ownership = await this.resolveOwnership(tx, parsed, input.layer, personaIds)
@@ -347,6 +357,8 @@ export class MemoryService {
           ...body,
           priority: input.priority,
           disclosure: input.disclosure ?? null,
+          ...(meta.createdAt ? { createdAt: meta.createdAt, validFrom: meta.createdAt } : {}),
+          ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
         })
         .returning()
       const glossary = [...new Set(input.glossary)].sort()
@@ -355,7 +367,14 @@ export class MemoryService {
           .insert(memoryGlossary)
           .values(glossary.map((keyword) => ({ spaceId: this.ctx.spaceId, memoryId: id, keyword })))
       }
-      await this.event(tx, id, 'create', null, snapshot(row!, glossary))
+      await this.event(
+        tx,
+        id,
+        meta.eventType ?? 'create',
+        null,
+        snapshot(row!, glossary),
+        meta.eventContext,
+      )
       return this.toView(row!, glossary)
     })
   }
