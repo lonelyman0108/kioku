@@ -656,6 +656,33 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     expect(owner.status).toBe(200)
   })
 
+  it('合计超限期间同一地址并发重试，也不会占满本客户端的额度', async () => {
+    const proxied = proxiedApp()
+    const first = await loginFrom(proxied, '203.0.113.200', 'correct horse battery')
+    const device = first.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('kioku_device='))!
+      .split(';')[0]!
+    for (let ip = 1; ip <= 11; ip++) {
+      for (let i = 0; i < 5; i++) await loginFrom(proxied, `198.51.100.${ip}`, 'wrong')
+    }
+    const burst = await Promise.all(
+      Array.from({ length: 10 }, () =>
+        loginFrom(proxied, '203.0.113.200', 'correct horse battery'),
+      ),
+    )
+    expect(burst.every((r) => r.status === 429)).toBe(true)
+    const owner = await proxied.request(
+      '/v1/auth/login',
+      jsonRequest(
+        'POST',
+        { username: 'alice', password: 'correct horse battery' },
+        { 'x-forwarded-for': '203.0.113.200', cookie: device },
+      ),
+    )
+    expect(owner.status).toBe(200)
+  })
+
   it('伪造的设备 Cookie 不起作用', async () => {
     const proxied = proxiedApp()
     for (let ip = 1; ip <= 11; ip++) {
