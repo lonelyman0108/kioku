@@ -1,6 +1,9 @@
 import { LAYERS, type CreatedKey, type KeyScopes, type Me } from '@kioku/contracts'
 
+import { createSession } from '../auth/session'
 import type { createApp } from '../app'
+import type { Db } from '../db/client'
+import { accounts, spaceMembers } from '../db/schema'
 
 type App = ReturnType<typeof createApp>
 
@@ -82,3 +85,18 @@ export async function bootstrap(app: App, username = 'alice'): Promise<Workspace
 }
 
 export const bearer = (key: string) => ({ authorization: `Bearer ${key}` })
+
+// 往空间里直接加一个成员（还没有邀请接口），返回它的会话 Cookie
+export async function addMember(
+  db: Db,
+  spaceId: string,
+  username: string,
+  role: 'owner' | 'editor' | 'viewer',
+): Promise<{ accountId: string; cookie: string }> {
+  const [account] = await db
+    .insert(accounts)
+    .values({ username, displayName: username, passwordHash: 'x' })
+    .returning()
+  await db.insert(spaceMembers).values({ spaceId, accountId: account!.id, role })
+  return { accountId: account!.id, cookie: `kioku_session=${await createSession(db, account!.id)}` }
+}

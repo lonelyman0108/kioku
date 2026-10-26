@@ -97,7 +97,7 @@ const move = createRoute({
 
 export function memoryRoutes(deps: Deps) {
   const app = router()
-  app.use('/memories', requireKey(deps))
+  // '/memories/*' 同时匹配 /memories 本身；再单独注册 '/memories' 会让鉴权执行两次
   app.use('/memories/*', requireKey(deps))
   const service = (key: Parameters<typeof memoryServiceForKey>[1]) => memoryServiceForKey(deps, key)
   return app

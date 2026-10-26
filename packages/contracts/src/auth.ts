@@ -19,7 +19,11 @@ export const SetupRequest = z.object({
 })
 export type SetupRequest = z.infer<typeof SetupRequest>
 
-export const LoginRequest = z.object({ username: z.string(), password: z.string() })
+// 长度上限挡住超长输入：用户名会作为失败计数表的主键写入
+export const LoginRequest = z.object({
+  username: z.string().min(1).max(64),
+  password: z.string().max(256),
+})
 export type LoginRequest = z.infer<typeof LoginRequest>
 
 export const SpaceSummary = z.object({ id: z.uuid(), name: z.string(), role: MemberRole })
@@ -63,6 +67,8 @@ export type CreateAppRequest = z.infer<typeof CreateAppRequest>
 
 export const UpdateAppRequest = z.object({
   name: z.string().min(1).max(64).optional(),
+  // 只有空间 owner 能改：把应用转给空间里的另一个成员
+  ownerAccountId: z.uuid().optional(),
   defaultPersonaId: z.uuid().nullable().optional(),
   config: AppConfig.optional(),
 })

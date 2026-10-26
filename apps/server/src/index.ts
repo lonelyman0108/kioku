@@ -26,6 +26,7 @@ const app = createApp({
   cookieSecure: config.cookieSecure,
   masterKey: config.masterKey,
   embedder,
+  trustedProxies: config.trustedProxies,
   jobs,
 })
 

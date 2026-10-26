@@ -1,19 +1,33 @@
 import { createRoute } from '@hono/zod-openapi'
 import { ErrorResponse, LoginRequest, Me } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
-import { deleteCookie, setCookie } from 'hono/cookie'
+import { deleteCookie, getCookie, setCookie } from 'hono/cookie'
 
+import {
+  DEVICE_COOKIE,
+  DEVICE_COOKIE_PATH,
+  DEVICE_TTL_SECONDS,
+  isTrustedDevice,
+  issueDeviceToken,
+} from '../auth/deviceCookie'
 import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
-import { clearFailures, isLocked, recordFailure } from '../auth/rateLimit'
+import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
+import { clientIdentity } from '../http/clientIp'
+import { pruneAttempts, recordSuccess, refundAttempt, reserveAttempt } from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
 import { accounts, spaceMembers, spaces } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
-// 用户名不存在时也做一次同等开销的校验，避免按响应时间区分「用户不存在」和「密码错误」
-const DUMMY_HASH = hashPassword('kioku-timing-equalizer')
+// 一次密码校验大约耗时多少：启动时实测一次，用户名不存在时按这个时长等待后再返回
+let VERIFY_DURATION_MS = 100
+void (async () => {
+  const started = performance.now()
+  await hashPassword('kioku-timing-probe')
+  VERIFY_DURATION_MS = Math.round(performance.now() - started)
+})()
 
 export async function loadMe(db: Db, accountId: string) {
   const [account] = await db.select().from(accounts).where(eq(accounts.id, accountId)).limit(1)
@@ -71,20 +85,40 @@ export function authRoutes(deps: Deps) {
   return app
     .openapi(login, async (c) => {
       const { username, password } = c.req.valid('json')
-      const limitKey = username.toLowerCase()
-      if (isLocked(limitKey)) return c.json({ error: '失败次数过多，请稍后再试' }, 429)
+      // 拿不到客户端地址时（没有底层连接，例如测试）传 null：失败计数归入「未知客户端」，校验闸门只用全局名额
+      const identity = clientIdentity(c, deps.trustedProxies ?? 0)
+      const client = identity.identified ? identity.key : null
+      // 偶尔顺手清理过期的失败计数，不单独起定时任务
+      if (Math.random() < 0.01) void pruneAttempts(deps.db).catch(() => {})
 
       const [account] = await deps.db
         .select()
         .from(accounts)
         .where(eq(accounts.username, username))
         .limit(1)
-      const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
-      if (!account || !ok) {
-        recordFailure(limitKey)
-        return c.json({ error: '用户名或密码错误' }, 401)
+      // 这台设备之前用这个账号成功登录过，就不受「用户名合计」上限约束（见 deviceCookie.ts）
+      const trustedDevice = await isTrustedDevice(deps.db, getCookie(c, DEVICE_COOKIE), account)
+      // 先计数再校验：超限的请求不花任何 CPU。用户名不存在也照样计数，行为与存在时一致，不暴露账号是否存在
+      if (!(await reserveAttempt(deps.db, username, client, trustedDevice))) {
+        return c.json({ error: '失败次数过多，请稍后再试' }, 429)
       }
-      clearFailures(limitKey)
+      // 用户名不存在时不跑 scrypt，改为等一段与一次校验相当的时间。它同样经过校验闸门，
+      // 占本客户端的名额、闸门排满时同样被拒，只是不占全局名额：繁忙时的表现与存在的账号一致，
+      // 不暴露账号是否存在；随机用户名也耗不了 CPU、挤不满闸门
+      const check = account
+        ? () => verifyPassword(password, account.passwordHash)
+        : () => new Promise<boolean>((r) => setTimeout(() => r(false), VERIFY_DURATION_MS))
+      let ok: boolean
+      try {
+        ok = await withPasswordGate(client, check, { global: account !== undefined })
+      } catch (err) {
+        if (!(err instanceof PasswordGateBusy)) throw err
+        // 没有真正校验密码，退回刚才占的名额
+        await refundAttempt(deps.db, username, client, trustedDevice)
+        return c.json({ error: err.message }, 429)
+      }
+      if (!ok || !account) return c.json({ error: '用户名或密码错误' }, 401)
+      await recordSuccess(deps.db, username, client, trustedDevice)
 
       const token = await createSession(deps.db, account.id)
       setCookie(c, SESSION_COOKIE, token, {
@@ -93,6 +127,13 @@ export function authRoutes(deps: Deps) {
         secure: deps.cookieSecure,
         path: '/',
         maxAge: SESSION_TTL_MS / 1000,
+      })
+      setCookie(c, DEVICE_COOKIE, await issueDeviceToken(deps.db, account), {
+        httpOnly: true,
+        sameSite: 'Strict',
+        secure: deps.cookieSecure,
+        path: DEVICE_COOKIE_PATH,
+        maxAge: DEVICE_TTL_SECONDS,
       })
       return c.json((await loadMe(deps.db, account.id))!, 200)
     })

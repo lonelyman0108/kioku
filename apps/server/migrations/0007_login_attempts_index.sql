@@ -1,0 +1,1 @@
+CREATE INDEX "login_attempts_reset_at_index" ON "login_attempts" USING btree ("reset_at");

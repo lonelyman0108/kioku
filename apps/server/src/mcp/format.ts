@@ -15,12 +15,11 @@ export function formatMemory(m: MemoryView): string {
 export function formatChildren(result: MemoryChildren): string {
   const head = result.parent ? `${formatMemory(result.parent)}\n\n` : ''
   if (!result.children.length) return `${head}子节点：无`
-  const rows = result.children.map(
-    (c) =>
-      `- ${c.uri}（${c.layer}，priority ${c.priority}${c.childCount ? `，${c.childCount} 个子节点` : ''}）${
-        c.disclosure ? `：${c.disclosure}` : ''
-      }`,
-  )
+  const rows = result.children.map((c) => {
+    const below = c.childCount ? `，${c.childCount} 个子节点` : ''
+    if (!c.exists) return `- ${c.uri}（路径本身没有记忆${below}）`
+    return `- ${c.uri}（${c.layer}，priority ${c.priority}${below}）${c.disclosure ? `：${c.disclosure}` : ''}`
+  })
   return `${head}子节点：\n${rows.join('\n')}`
 }
 

@@ -1,4 +1,5 @@
 import { sameOriginForCookies } from './auth/csrf'
+import { requireConsole } from './auth/middleware'
 import type { Deps } from './http/env'
 import { router } from './http/openapi'
 import { appRoutes } from './routes/apps'
@@ -21,6 +22,8 @@ export function createApp(deps: Deps) {
   app.route('/v1', health)
   app.route('/v1', setupRoutes(deps))
   app.route('/v1', authRoutes(deps))
+  // 应用与人格路由共用 /spaces/*，会话鉴权在这里注册一次；各自注册会让每个请求查两次会话
+  app.use('/v1/spaces/*', requireConsole(deps))
   app.route('/v1', appRoutes(deps))
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))

@@ -20,5 +20,5 @@ export async function openTestDatabase(): Promise<Database> {
 
 // 清空所有数据；内容表都挂在 spaces 或 accounts 下，级联即可
 export async function resetDatabase(database: Database): Promise<void> {
-  await database.db.execute(sql`truncate spaces, accounts cascade`)
+  await database.db.execute(sql`truncate spaces, accounts, login_attempts cascade`)
 }
