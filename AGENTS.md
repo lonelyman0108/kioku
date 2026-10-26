@@ -60,7 +60,8 @@
 - 集成测试需要 `KIOKU_TEST_DATABASE_URL`：本地 `docker compose -f docker-compose.dev.yml up -d --build` 后设为 `postgres://kioku:kioku@localhost:55432/kioku`；没设置时跳过，CI 里没设置直接失败。
 - 读权限的规则有两份：`access/access.ts` 的 `canRead`（单条判断）和 `memory/filter.ts` 的 `readableConditions`（SQL）。改一边必须改另一边，`filter.int.test.ts` 会逐条比对。
 - boot 会被宿主当作指令级上下文，只能收受信来源的策展层（`recall/boot.ts` 的 `BOOT_LAYERS` 与 provenance 过滤）。召回块里的线索文本要经 `inlineText` 处理。原因：群聊写入的内容不能变成主人 agent 的指令。
-- URI 唯一性按 (URI, 归属成员) 判断：owner、private 层每个成员各一份，共享层合成一份（`memories_uri_live_idx` 与 `claimUri` 必须一致）。新节点的父节点必须真实存在，`persona://<标识>`、`app://<标识>` 这两个命名空间根除外。
+- URI 要么是共享的，要么按成员各自占用（owner、private 层），二者不共存；唯一索引 `memories_uri_live_idx` 与 `claimUri` 的冲突规则必须一致。
+- 树浏览由调用方读得到的后代推出，路径本身没有记忆的一级显示为虚拟节点（`exists: false`），所以不要求父节点存在、也不限制删除或移动父节点。原因：父子可见性受层、敏感级、来源作用域、成员、有效期共同影响，强制「看得到子就看得到父」会不断出现漏洞。
 - 应用的权限按应用主人算，所以只有应用主人能改应用配置、签发和查看它的 Key；空间 owner 只能吊销。
 - 记忆接口对「读不到」和「不存在」都返回 404，不要改成 403。原因：403 会暴露这里有一条调用方看不见的记忆。
 - 流程编号检查会把测试数据里「小写 v 加数字」的字符串当迭代标记，测试数据换成别的写法。

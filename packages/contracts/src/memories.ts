@@ -36,14 +36,19 @@ export const MemoryView = z.object({
 })
 export type MemoryView = z.infer<typeof MemoryView>
 
-export const MemorySummary = MemoryView.pick({
-  id: true,
-  uri: true,
-  layer: true,
-  sensitivity: true,
-  priority: true,
-  disclosure: true,
-}).extend({ childCount: z.number().int() })
+// 树浏览的一个子节点。exists 为 false 表示这一级路径本身没有记忆，只是下面有调用方读得到的后代，
+// 像文件系统里的目录一样显示出来；此时 id、layer 等字段为 null
+export const MemorySummary = z.object({
+  uri: z.string(),
+  exists: z.boolean(),
+  id: z.uuid().nullable(),
+  layer: Layer.nullable(),
+  sensitivity: Sensitivity.nullable(),
+  priority: z.number().int().nullable(),
+  disclosure: z.string().nullable(),
+  // 这一级下面还有几个可见的下一级路径
+  childCount: z.number().int(),
+})
 export type MemorySummary = z.infer<typeof MemorySummary>
 
 export const CreateMemoryRequest = z.object({
@@ -79,7 +84,7 @@ export const DomainSummary = z.object({ domain: z.string(), count: z.number().in
 export type DomainSummary = z.infer<typeof DomainSummary>
 
 export const MemoryChildren = z.object({
-  // 为 null 表示列的是 domain 根
+  // 为 null 表示列的是 domain 根，或这一级路径本身没有可读的记忆
   parent: MemoryView.nullable(),
   children: z.array(MemorySummary),
 })

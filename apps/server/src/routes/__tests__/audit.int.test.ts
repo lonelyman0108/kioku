@@ -1,6 +1,6 @@
 import { randomBytes } from 'node:crypto'
 
-import type { CreatedKey, MemoryView } from '@kioku/contracts'
+import type { CreatedKey, MemoryChildren, MemoryView } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -89,10 +89,6 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     const bApp = await appAs(b.cookie, 'b-agent')
     expect((await keyAs(ws.cookie, bApp)).status).toBe(403)
-    const list = await app.request(`/v1/spaces/${ws.spaceId}/apps/${bApp}/keys`, {
-      headers: { cookie: ws.cookie },
-    })
-    expect(list.status).toBe(403)
     const bKey = (await (await keyAs(b.cookie, bApp)).json()) as CreatedKey
     const revoke = await app.request(`/v1/spaces/${ws.spaceId}/apps/${bApp}/keys/${bKey.id}`, {
       method: 'DELETE',
@@ -121,22 +117,6 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     const events = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEvents))
     expect(events).toHaveLength(2)
     expect(JSON.stringify(events)).not.toContain('hunter2')
-  })
-
-  it('父节点不存在时不能创建子节点；命名空间根可以直接浏览', async () => {
-    const persona = await ws.createPersona('doubao')
-    const key = await ws.issueKey(
-      (await ws.createApp('agent', { defaultPersonaId: persona.id })).id,
-    )
-    expect((await create(key, { uri: 'projects://kioku/notes', content: 'x' })).status).toBe(400)
-    expect((await create(key, { uri: 'persona://doubao/soul', content: 'x' })).status).toBe(201)
-    const kids = await app.request(
-      `/v1/memories/children?of=${encodeURIComponent('persona://doubao')}`,
-      {
-        headers: bearer(key),
-      },
-    )
-    expect(kids.status).toBe(200)
   })
 
   it('已失效的记忆让出 URI', async () => {
@@ -240,41 +220,6 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     ).toBe(409)
   })
 
-  it('共享节点不能挂在私人父节点下，父节点敏感级不能高于子节点', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'home://lab', content: '私人', layer: 'private' })
-    expect((await create(key, { uri: 'home://lab/nas', content: 'x', layer: 'base' })).status).toBe(
-      400,
-    )
-    await create(key, { uri: 'kb://infra', content: 'x', layer: 'base', sensitivity: 'internal' })
-    expect(
-      (
-        await create(key, {
-          uri: 'kb://infra/nas',
-          content: 'x',
-          layer: 'base',
-          sensitivity: 'public',
-        })
-      ).status,
-    ).toBe(400)
-  })
-
-  it('还有子节点时不能删除或移走父节点', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'core://agent', content: 'x', layer: 'base' })
-    await create(key, { uri: 'core://agent/codex', content: 'x', layer: 'base' })
-    const del = await app.request('/v1/memories?uri=core%3A%2F%2Fagent', {
-      method: 'DELETE',
-      headers: bearer(key),
-    })
-    expect(del.status).toBe(409)
-    const move = await app.request(
-      '/v1/memories/move',
-      jsonRequest('POST', { from: 'core://agent', to: 'core://agents' }, bearer(key)),
-    )
-    expect(move.status).toBe(409)
-  })
-
   it('并发创建同一个 URI：一个成功，其余 409 而不是 500', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
     const results = await Promise.all(
@@ -304,5 +249,63 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
       tx.select().from(memoryEmbeddings),
     )
     expect(rows).toHaveLength(0)
+  })
+  const children = async (key: string, of: string) =>
+    (await (
+      await app.request(`/v1/memories/children?of=${encodeURIComponent(of)}`, {
+        headers: bearer(key),
+      })
+    ).json()) as MemoryChildren
+
+  it('父节点不存在时也能创建，并通过虚拟节点浏览到', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    expect((await create(key, { uri: 'projects://kioku/notes', content: 'x' })).status).toBe(201)
+    const root = await children(key, 'projects')
+    expect(root.children).toMatchObject([{ uri: 'projects://kioku', exists: false, childCount: 1 }])
+    const level = await children(key, 'projects://kioku')
+    expect(level.parent).toBeNull()
+    expect(level.children).toMatchObject([{ uri: 'projects://kioku/notes', exists: true }])
+  })
+
+  it('读不到的记忆不出现，也不会产生虚拟节点', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bKey = (
+      (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
+    ).key
+    await create(bKey, { uri: 'home://lab/secret-project', content: 'B 的私事', layer: 'private' })
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    expect((await children(key, 'home')).children).toEqual([])
+    expect((await children(key, 'home://lab')).children).toEqual([])
+    expect((await children(bKey, 'home')).children).toMatchObject([
+      { uri: 'home://lab', exists: false },
+    ])
+  })
+
+  it('删除或移走父节点后，子节点仍然可以浏览到', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    await create(key, { uri: 'core://agent', content: 'x', layer: 'base' })
+    await create(key, { uri: 'core://agent/codex', content: 'x', layer: 'base' })
+    const del = await app.request('/v1/memories?uri=core%3A%2F%2Fagent', {
+      method: 'DELETE',
+      headers: bearer(key),
+    })
+    expect(del.status).toBe(204)
+    expect((await children(key, 'core')).children).toMatchObject([
+      { uri: 'core://agent', exists: false },
+    ])
+    expect((await children(key, 'core://agent')).children).toMatchObject([
+      { uri: 'core://agent/codex' },
+    ])
+  })
+
+  it('空间 owner 能看到成员应用的 Key 列表（用于吊销）', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bApp = await appAs(b.cookie, 'b-agent')
+    await keyAs(b.cookie, bApp)
+    const list = await app.request(`/v1/spaces/${ws.spaceId}/apps/${bApp}/keys`, {
+      headers: { cookie: ws.cookie },
+    })
+    expect(list.status).toBe(200)
+    expect(JSON.stringify(await list.json())).not.toContain('kioku_')
   })
 })

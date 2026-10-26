@@ -8,12 +8,11 @@ import type {
   MemorySummary,
   MemoryView,
   MoveMemoryRequest,
-  Sensitivity,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
 
-import { canRead, canWrite, sensitivityRank, type Access } from '../access/access'
+import { canRead, canWrite, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
 import { apps, memories, memoryEvents, memoryGlossary } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
@@ -69,10 +68,8 @@ function snapshot(row: MemoryRow, glossary: string[], redact = false) {
   return { ...rest, glossary }
 }
 
-// persona://<标识> 与 app://<标识> 本身是命名空间根，可以没有对应的记忆
-function isNamespaceRoot(parsed: ParsedUri): boolean {
-  return Boolean(parsed.namespaceSlug) && !parsed.path.includes('/')
-}
+// 浏览一层时最多扫描的后代记忆数，个人规模足够；超过时结果可能不全
+const CHILDREN_SCAN_LIMIT = 5000
 
 export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
@@ -81,21 +78,18 @@ export class MemoryService {
     return runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
   }
 
-  // 本次写入顺带变更的其他记忆（例如让出 URI 的过期记录），提交后一起通知
-  private pending: string[] = []
-
-  private changed(memoryId: string): void {
-    for (const id of [memoryId, ...this.pending]) this.ctx.onChanged?.(id)
-    this.pending = []
+  private changed(ids: string[]): void {
+    for (const id of ids) this.ctx.onChanged?.(id)
   }
 
-  // 写操作：事务提交之后再通知，回滚的写入不会触发向量更新
+  // 写操作：事务提交之后再通知，回滚的写入不会触发向量更新。released 收集本次顺带变更的其他记忆
+  // （例如让出 URI 的过期记录），每次调用各用一份，同一个服务实例上的并发写入互不干扰
   private async write(
-    fn: (tx: Tx, personaIds: string[]) => Promise<MemoryView>,
+    fn: (tx: Tx, personaIds: string[], released: string[]) => Promise<MemoryView>,
   ): Promise<MemoryView> {
-    this.pending = []
-    const view = await this.run(fn)
-    this.changed(view.id)
+    const released: string[] = []
+    const view = await this.run((tx, personaIds) => fn(tx, personaIds, released))
+    this.changed([view.id, ...released])
     return view
   }
 
@@ -129,6 +123,7 @@ export class MemoryService {
     tx: Tx,
     parsed: ParsedUri,
     target: { ownerAccountId: string | null },
+    released: string[],
   ): Promise<void> {
     await tx.execute(
       sql`select pg_advisory_xact_lock(hashtext(${`${this.ctx.spaceId}|${parsed.domain}://${parsed.path}`}))`,
@@ -164,57 +159,8 @@ export class MemoryService {
         .where(eq(memories.id, row.id))
         .returning()
       await this.event(tx, row.id, 'expire', snapshot(row, []), snapshot(gone!, []))
-      this.pending.push(row.id)
+      released.push(row.id)
     }
-  }
-
-  // 新节点的父节点必须真实存在（persona:// 与 app:// 的标识根除外），而且凡是能看到子节点的人都要能看到父节点，
-  // 否则树浏览走不到子节点：共享节点的父节点也必须是共享的，父节点的敏感级不能比子节点高
-  private async requireParent(
-    tx: Tx,
-    parsed: ParsedUri,
-    child: { ownerAccountId: string | null; sensitivity: Sensitivity },
-    personaIds: string[],
-  ): Promise<void> {
-    const segments = parsed.path.split('/')
-    if (
-      segments.length === 1 ||
-      isNamespaceRoot({ ...parsed, path: segments.slice(0, -1).join('/') })
-    )
-      return
-    const parentUri = { ...parsed, path: segments.slice(0, -1).join('/') }
-    const parent = await this.findReadableOrNull(tx, parentUri, personaIds)
-    const where = formatUri(parentUri.domain, parentUri.path)
-    if (!parent) throw new MemoryError(400, `父节点 ${where} 不存在，请先创建它，或换一个 URI`)
-    if (child.ownerAccountId === null && parent.ownerAccountId !== null) {
-      throw new MemoryError(400, `父节点 ${where} 是私人节点，共享节点不能放在它下面`)
-    }
-    if (sensitivityRank(parent.sensitivity) > sensitivityRank(child.sensitivity)) {
-      throw new MemoryError(
-        400,
-        `父节点 ${where} 的敏感级（${parent.sensitivity}）高于新节点，能看到新节点的人会看不到父节点`,
-      )
-    }
-  }
-
-  // 删除或移走一个节点前，它下面不能还有子节点，否则子节点在树里就再也走不到了
-  private async requireNoChildren(tx: Tx, parsed: ParsedUri): Promise<void> {
-    const [child] = await tx
-      .select({ id: memories.id })
-      .from(memories)
-      .where(
-        and(
-          eq(memories.domain, parsed.domain),
-          like(memories.path, `${escapeLike(parsed.path)}/%`),
-          isNull(memories.deletedAt),
-        ),
-      )
-      .limit(1)
-    if (child)
-      throw new MemoryError(
-        409,
-        `${formatUri(parsed.domain, parsed.path)} 下面还有子节点，先删除或移走它们`,
-      )
   }
 
   private async findReadableOrNull(
@@ -353,19 +299,13 @@ export class MemoryService {
 
   async create(input: CreateMemoryRequest): Promise<MemoryView> {
     const parsed = parse(input.uri)
-    return this.write(async (tx, personaIds) => {
+    return this.write(async (tx, personaIds, released) => {
       const ownership = await this.resolveOwnership(tx, parsed, input.layer, personaIds)
       const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
       if (!canWrite(this.ctx.access, { layer: ownership.layer, sensitivity })) {
         throw new MemoryError(403, `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`)
       }
-      await this.requireParent(
-        tx,
-        parsed,
-        { ownerAccountId: ownership.ownerAccountId, sensitivity },
-        personaIds,
-      )
-      await this.claimUri(tx, parsed, ownership)
+      await this.claimUri(tx, parsed, ownership, released)
 
       const id = randomUUID()
       const body =
@@ -497,7 +437,6 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: before.sensitivity })) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
       }
-      await this.requireNoChildren(tx, parsed)
       const [row] = await tx
         .update(memories)
         .set({ deletedAt: new Date(), updatedAt: new Date() })
@@ -513,14 +452,14 @@ export class MemoryService {
       )
       return before.id
     })
-    this.changed(id)
+    this.changed([id])
   }
 
   // 改 URI 不能改变归属：人格层、应用层只能在同一个人格或应用的命名空间里移动
   async move(input: MoveMemoryRequest): Promise<MemoryView> {
     const from = parse(input.from)
     const to = parse(input.to)
-    return this.write(async (tx, personaIds) => {
+    return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, from, personaIds)
       if (!canWrite(this.ctx.access, { layer: before.layer, sensitivity: before.sensitivity })) {
         throw new MemoryError(403, `没有权限移动 ${before.layer} 层的记忆`)
@@ -533,9 +472,7 @@ export class MemoryService {
           `${PERSONA_DOMAIN}:// 与 ${APP_DOMAIN}:// 下的记忆只能在同一个标识下移动`,
         )
       }
-      await this.requireNoChildren(tx, from)
-      await this.requireParent(tx, to, before, personaIds)
-      await this.claimUri(tx, to, before)
+      await this.claimUri(tx, to, before, released)
       const [row] = await tx
         .update(memories)
         .set({
@@ -552,55 +489,65 @@ export class MemoryService {
     })
   }
 
-  // 列出直接子节点；target 是 domain 名时列 domain 根下的第一层
+  // 列出直接子节点；target 是 domain 名时列 domain 根下的第一层。
+  // 子节点由调用方读得到的后代推出：某一级路径本身没有记忆时显示为虚拟节点，所以不要求父节点存在，
+  // 删除或移走父节点也不会让子节点变得走不到；读不到的记忆既不出现，也不会产生虚拟节点
   async children(target: string): Promise<MemoryChildren> {
     const parsed = target.includes('://') ? parse(target) : null
     const domain = parsed?.domain ?? target
     if (!/^[a-z][a-z0-9_]{0,31}$/.test(domain))
       throw new MemoryError(400, `domain 格式不对：${domain}`)
     return this.run(async (tx, personaIds) => {
-      const readable = readableConditions(this.ctx.access, { personaIds })
-      // persona://<标识> 与 app://<标识> 是命名空间根，本身可以没有记忆
-      const parent = !parsed
-        ? null
-        : isNamespaceRoot(parsed)
-          ? await this.findReadableOrNull(tx, parsed, personaIds)
-          : await this.findReadable(tx, parsed, personaIds)
+      const parent = parsed ? await this.findReadableOrNull(tx, parsed, personaIds) : null
       const prefix = parsed ? `${parsed.path}/` : ''
-      const childPattern = parsed ? `^${escapeRegex(parsed.path)}/[^/]+$` : '^[^/]+$'
       const rows = await tx
-        .select()
-        .from(memories)
-        .where(and(readable, eq(memories.domain, domain), sql`${memories.path} ~ ${childPattern}`))
-        .orderBy(asc(memories.priority), asc(memories.path))
-      const counts = await tx
-        .select({ path: memories.path, n: count() })
+        .select({
+          id: memories.id,
+          path: memories.path,
+          layer: memories.layer,
+          sensitivity: memories.sensitivity,
+          priority: memories.priority,
+          disclosure: memories.disclosure,
+        })
         .from(memories)
         .where(
           and(
-            readable,
+            readableConditions(this.ctx.access, { personaIds }),
+            eq(memories.form, 'curated'),
             eq(memories.domain, domain),
-            like(memories.path, `${escapeLike(prefix)}%/%`),
+            prefix ? like(memories.path, `${escapeLike(prefix)}%`) : undefined,
           ),
         )
-        .groupBy(memories.path)
-      const childCount = (path: string) =>
-        counts.filter(
-          (c) => c.path!.startsWith(`${path}/`) && !c.path!.slice(path.length + 1).includes('/'),
-        ).length
-      const summaries: MemorySummary[] = rows.map((r) => ({
-        id: r.id,
-        uri: formatUri(r.domain!, r.path!),
-        layer: r.layer,
-        sensitivity: r.sensitivity,
-        priority: r.priority,
-        disclosure: r.disclosure,
-        childCount: childCount(r.path!),
+        .limit(CHILDREN_SCAN_LIMIT)
+
+      const levels = new Map<string, { row?: (typeof rows)[number]; below: Set<string> }>()
+      for (const row of rows) {
+        const [segment, next] = row.path!.slice(prefix.length).split('/')
+        const level = levels.get(segment!) ?? { below: new Set<string>() }
+        if (next === undefined) level.row = row
+        else level.below.add(next)
+        levels.set(segment!, level)
+      }
+      const children: MemorySummary[] = [...levels.entries()].map(([segment, level]) => ({
+        uri: formatUri(domain, `${prefix}${segment}`),
+        exists: Boolean(level.row),
+        id: level.row?.id ?? null,
+        layer: level.row?.layer ?? null,
+        sensitivity: level.row?.sensitivity ?? null,
+        priority: level.row?.priority ?? null,
+        disclosure: level.row?.disclosure ?? null,
+        childCount: level.below.size,
       }))
+      // 有记忆的按 priority 在前，虚拟节点在后，同级按路径
+      children.sort(
+        (a, b) =>
+          (a.priority ?? Number.MAX_SAFE_INTEGER) - (b.priority ?? Number.MAX_SAFE_INTEGER) ||
+          a.uri.localeCompare(b.uri),
+      )
       const parentView = parent
         ? this.toView(parent, (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? [])
         : null
-      return { parent: parentView, children: summaries }
+      return { parent: parentView, children }
     })
   }
 
@@ -617,10 +564,6 @@ export class MemoryService {
       return rows.map((r) => ({ domain: r.domain!, count: r.count }))
     })
   }
-}
-
-function escapeRegex(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
 }
 
 function escapeLike(s: string): string {

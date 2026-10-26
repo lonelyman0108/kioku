@@ -185,10 +185,14 @@ export function appRoutes(deps: Deps) {
     .openapi(listKeys, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      if (!(await roleOf(spaceId, accountId))) return c.json({ error: '不是该空间成员' }, 403)
+      const role = await roleOf(spaceId, accountId)
+      if (!role) return c.json({ error: '不是该空间成员' }, 403)
       const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
       if (!owner) return c.json({ error: '应用不存在' }, 404)
-      if (owner !== accountId) return c.json({ error: '只有应用的主人能查看它的 Key' }, 403)
+      // 列表只有元数据、不含明文；空间 owner 要能看到 Key 编号才能吊销泄露的 Key
+      if (owner !== accountId && role !== 'owner') {
+        return c.json({ error: '只有应用的主人或空间 owner 能查看 Key' }, 403)
+      }
       const rows = await deps.db
         .select()
         .from(apiKeys)

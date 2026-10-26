@@ -27,6 +27,8 @@ function prune(now: number): void {
 export function reserveAttempt(key: string, now = Date.now()): boolean {
   prune(now)
   const entry = attempts.get(key)
+  // 表里全是锁定项、淘汰不出空位时，新的用户名一律拒绝：宁可暂时挡住登录，也不让表无限增长
+  if (!entry && attempts.size >= MAX_ENTRIES) return false
   if (!entry || entry.resetAt <= now) {
     attempts.set(key, { count: 1, resetAt: now + WINDOW_MS })
     return true
@@ -38,4 +40,9 @@ export function reserveAttempt(key: string, now = Date.now()): boolean {
 
 export function clearAttempts(key: string): void {
   attempts.delete(key)
+}
+
+// 仅供测试检查表的大小
+export function trackedCount(): number {
+  return attempts.size
 }
