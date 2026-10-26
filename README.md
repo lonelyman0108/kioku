@@ -50,6 +50,7 @@ pnpm dev                  # 后端 http://localhost:18920，管理界面 http://
 - 贡献规范：[CONTRIBUTING.md](CONTRIBUTING.md)
 - agent 工作约定：[AGENTS.md](AGENTS.md)
 - 文档索引：[docs/README.md](docs/README.md)
+- Claude Code 插件：[plugins/claude-code/README.md](plugins/claude-code/README.md)
 - 更新日志：[CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证
