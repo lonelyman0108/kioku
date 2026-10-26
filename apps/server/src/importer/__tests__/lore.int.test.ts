@@ -389,6 +389,20 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     ])
   })
 
+  it('同一个节点导入过多条、都还是明文时，每条都提醒，跳过只记一次', async () => {
+    await run('default', [])
+    await dropTargetPersona()
+    expect((await move('persona://default/soul', 'persona://default/soul_old')).status).toBe(200)
+    await reimportSoul()
+    const again = await run('default', ['core://soul'])
+    expect(again.created).toEqual([])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'persona://default/soul', current: 'persona://default/soul_old' },
+      { uri: 'persona://default/soul', current: 'persona://default/soul' },
+    ])
+    expect(again.previouslyImported.filter((u) => u === 'persona://default/soul')).toHaveLength(1)
+  })
+
   it('写入时应用已经不属于导入者，就不写进去', async () => {
     const claude = await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
