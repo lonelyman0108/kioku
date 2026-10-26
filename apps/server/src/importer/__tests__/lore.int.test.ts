@@ -254,7 +254,26 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
   it('之前按明文导入过的节点，这次加 --secret 不会悄悄跳过', async () => {
     await run('default', [])
     const again = await run('default', ['infra://home_network/credentials'])
-    expect(again.secretAlreadyImported).toEqual(['infra://home_network/credentials'])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'infra://home_network/credentials', current: 'infra://home_network/credentials' },
+    ])
+  })
+
+  it('按明文导入后移动过的节点，提醒里给出它现在的 URI', async () => {
+    await run('default', [])
+    const moved = await app.request(
+      `/v1/spaces/${ws.spaceId}/memories/move`,
+      jsonRequest(
+        'POST',
+        { from: 'infra://home_network/credentials', to: 'infra://creds' },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(moved.status).toBe(200)
+    const again = await run('default', ['infra://home_network/credentials'])
+    expect(again.secretAlreadyImported).toEqual([
+      { uri: 'infra://home_network/credentials', current: 'infra://creds' },
+    ])
   })
 
   it('已经按 secret 导入过的节点，再带 --secret 执行时不误报', async () => {
@@ -314,6 +333,22 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('persona://default/soul')}`,
       { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
     )
+    const again = await run()
+    expect(again.created).toEqual([])
+    expect(again.previouslyImported).toContain('persona://default/soul')
+  })
+
+  it('早期没有记人格的导入事件，对应的记忆整行不在了也能去重', async () => {
+    await run()
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx
+        .update(memoryEvents)
+        .set({ context: sql`${memoryEvents.context} - 'targetPersona'` })
+        .where(eq(memoryEvents.eventType, 'import'))
+      await tx
+        .delete(memories)
+        .where(and(eq(memories.domain, 'persona'), eq(memories.path, 'default/soul')))
+    })
     const again = await run()
     expect(again.created).toEqual([])
     expect(again.previouslyImported).toContain('persona://default/soul')

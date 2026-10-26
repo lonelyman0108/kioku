@@ -213,9 +213,10 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
       `（包括导入后在 Kioku 里删除或移动了的）`,
   )
   for (const uri of result.occupied) console.log(`  跳过 ${uri}：URI 已被别的记忆占用`)
-  for (const uri of result.secretAlreadyImported) {
+  for (const { uri, current } of result.secretAlreadyImported) {
+    const moved = current === uri ? '' : `（导入后移到了 ${current}）`
     console.log(
-      `  注意 ${uri}：之前导入过，现在还是明文，这次的 --secret 没有生效。请在管理界面把它改成 secret（会同时清除历史里的明文）`,
+      `  注意 ${uri}${moved}：之前导入过，现在还是明文，这次的 --secret 没有生效。请在管理界面把 ${current} 改成 secret（会同时清除历史里的明文）`,
     )
   }
   for (const f of result.failed) console.log(`  失败 ${f.uri}：${f.reason}`)
