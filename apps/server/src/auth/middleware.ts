@@ -38,13 +38,24 @@ export function requireKey(deps: Deps) {
       .limit(1)
     if (!key || !verifyApiKey(plaintext, key.secretHash)) return c.json(unauthorized, 401)
 
-    const [app] = await withSpace(deps.db, key.spaceId, (tx) =>
-      tx.select().from(apps).where(eq(apps.id, key.appId)).limit(1),
+    // 应用与主人当前的角色一次查出来
+    const [found] = await withSpace(deps.db, key.spaceId, (tx) =>
+      tx
+        .select({ app: apps, ownerRole: spaceMembers.role })
+        .from(apps)
+        .leftJoin(
+          spaceMembers,
+          and(
+            eq(spaceMembers.spaceId, apps.spaceId),
+            eq(spaceMembers.accountId, apps.ownerAccountId),
+          ),
+        )
+        .where(eq(apps.id, key.appId))
+        .limit(1),
     )
-    if (!app) return c.json(unauthorized, 401)
     // Key 的权限按应用主人计算：主人已经不在空间里，Key 作废；主人被降级，Key 的上限随之收紧
-    const ownerRole = await memberRole(deps, key.spaceId, app.ownerAccountId)
-    if (!ownerRole) return c.json(unauthorized, 401)
+    if (!found?.ownerRole) return c.json(unauthorized, 401)
+    const { app, ownerRole } = found
 
     // 最后使用时间只用于界面展示，失败不影响本次请求
     deps.db

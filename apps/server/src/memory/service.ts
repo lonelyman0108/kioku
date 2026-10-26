@@ -15,7 +15,7 @@ import { and, asc, count, desc, eq, inArray, isNull, like, or, sql } from 'drizz
 
 import { canRead, canWrite, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
-import { apps, memories, memoryEvents, memoryGlossary } from '../db/schema'
+import { apps, memories, memoryEmbeddings, memoryEvents, memoryGlossary } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { readableConditions } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
@@ -174,7 +174,12 @@ export class MemoryService {
         .where(eq(memories.id, row.id))
         .returning()
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-      await this.event(tx, row.id, 'expire', snapshot(row, glossary), snapshot(gone!, glossary))
+      // 让出的是别的成员的私人记录时，事件记在本次写入者名下，快照里不放对方的正文
+      const foreign =
+        row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
+      const keep = (r: MemoryRow) =>
+        foreign ? { ...snapshot(r, glossary), content: null } : snapshot(r, glossary)
+      await this.event(tx, row.id, 'expire', keep(row), keep(gone!))
       released.push(row.id)
     }
   }
@@ -431,7 +436,11 @@ export class MemoryService {
         snapshot(row, glossary),
       )
       // 改成 secret 之后，历史事件里不能再留着明文
-      if (becameSecret) await this.scrubHistory(tx, before.id)
+      if (becameSecret) {
+        await this.scrubHistory(tx, before.id)
+        // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
+        await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
+      }
       return this.toView(row, glossary)
     })
   }

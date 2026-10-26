@@ -577,4 +577,26 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     )
     expect(forced.every((r) => r.relforcerowsecurity)).toBe(true)
   })
+  it('一个客户端被锁之后再怎么试，也不会把主人从别处登录一起锁住', async () => {
+    const proxied = proxiedApp()
+    for (let i = 0; i < 60; i++) await loginFrom(proxied, '203.0.113.66', 'wrong')
+    expect((await loginFrom(proxied, '203.0.113.10', 'correct horse battery')).status).toBe(200)
+  })
+
+  it('记忆改成 secret 时，它的向量在同一个事务里删除', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const res = await create(key, { uri: 'home://router', content: '管理密码 hunter2' })
+    const id = ((await res.json()) as { id: string }).id
+    await embedMemory(database.db, fakeEmbedder(), ws.spaceId, id)
+    expect(
+      await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings)),
+    ).toHaveLength(1)
+    await app.request(
+      '/v1/memories',
+      jsonRequest('PATCH', { uri: 'home://router', sensitivity: 'secret' }, bearer(key)),
+    )
+    expect(
+      await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings)),
+    ).toHaveLength(0)
+  })
 })

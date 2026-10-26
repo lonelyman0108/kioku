@@ -30,13 +30,14 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
     // 测试里直接调用 app.request，没有底层连接
   }
   if (!remote) return { key: 'unknown', identified: false }
-  // 没配置受信代理却收到了转发头：连接的对端多半是代理本身，所有人都会是同一个地址
-  if (forwarded && trustedProxies === 0) {
-    if (!warnedUntrustedForward) {
-      warnedUntrustedForward = true
-      console.warn('收到 X-Forwarded-For 但没有设置 KIOKU_TRUSTED_PROXIES，登录限流无法区分客户端')
-    }
-    return { key: remote, identified: false }
+  // 没配置受信代理却收到了转发头：要么部署在代理后面但没配置，要么是请求方伪造的。
+  // 两种情况都只按连接对端区分客户端，不让请求头改变限流行为（否则伪造一个头就能把限流降级）；
+  // 前一种情况所有人会共用代理的地址，只打一次警告提醒配置
+  if (forwarded && trustedProxies === 0 && !warnedUntrustedForward) {
+    warnedUntrustedForward = true
+    console.warn(
+      '收到 X-Forwarded-For 但没有设置 KIOKU_TRUSTED_PROXIES：如果部署在反向代理后面，请设置它，否则所有客户端会共用代理的地址',
+    )
   }
   return { key: remote, identified: true }
 }
