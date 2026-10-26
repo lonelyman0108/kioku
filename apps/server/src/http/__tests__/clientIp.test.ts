@@ -1,7 +1,7 @@
 import { Hono } from 'hono'
 import { describe, expect, it } from 'vitest'
 
-import { clientIdentity, clientKey, type ClientIdentity } from '../clientIp'
+import { clientIdentity, clientKey, stripPort, type ClientIdentity } from '../clientIp'
 
 async function identify(
   trustedProxies: number,
@@ -52,5 +52,16 @@ describe('客户端地址', () => {
     expect(clientKey('2001:db8::1')).toBe('2001:db8:0:0::/64')
     expect(clientKey('::ffff:192.0.2.5')).toBe('192.0.2.5')
     expect(clientKey('192.0.2.5')).toBe('192.0.2.5')
+  })
+
+  it('受信代理写的 ip:port 去掉端口；不是合法地址时退回连接对端', async () => {
+    expect(stripPort('203.0.113.5:51234')).toBe('203.0.113.5')
+    expect(stripPort('[2001:db8::1]:443')).toBe('2001:db8::1')
+    expect(stripPort('2001:db8::1')).toBe('2001:db8::1')
+    expect(await identify(1, '203.0.113.5:51234')).toEqual({ key: '203.0.113.5', identified: true })
+    expect(await identify(1, 'unknown', '192.0.2.5')).toEqual({
+      key: '192.0.2.5',
+      identified: true,
+    })
   })
 })
