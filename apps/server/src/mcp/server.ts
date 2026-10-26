@@ -3,7 +3,11 @@ import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/
 import { Keyword, Layer, MemoryUri, Sensitivity } from '@kioku/contracts'
 import { z } from 'zod'
 
+import type { RecallScope } from '../lifecycle/scope'
+import { GUIDANCE } from '../lifecycle/lifecycle'
 import { MemoryError, type MemoryService } from '../memory/service'
+import { boot, formatBootBlock } from '../recall/boot'
+import { embedQuery, formatRecallBlock, recall } from '../recall/recall'
 import { VERSION } from '../version'
 import { formatChildren, formatDomains, formatMemory } from './format'
 
@@ -20,8 +24,48 @@ async function tool(fn: () => Promise<string>): Promise<ToolResult> {
   }
 }
 
-export function buildMcpServer(memory: MemoryService): McpServer {
+export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpServer {
   const server = new McpServer({ name: 'kioku', version: VERSION })
+
+  server.registerTool(
+    'kioku_boot',
+    {
+      description:
+        '读取启动基线：使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时调用一次。',
+      annotations: { readOnlyHint: true },
+    },
+    () =>
+      tool(async () =>
+        formatBootBlock(
+          await scope.run((tx, personaIds) => boot(tx, scope.access, personaIds)),
+          GUIDANCE,
+        ),
+      ),
+  )
+
+  server.registerTool(
+    'kioku_search',
+    {
+      description: '按语义、全文和关键词搜索记忆，返回候选 URI 与线索；需要正文时再用 kioku_get。',
+      inputSchema: {
+        query: z.string().min(1).describe('要找的内容，用自然语言描述'),
+        limit: z.number().int().min(1).max(30).optional().describe('最多返回几条，默认 10'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    ({ query, limit }) =>
+      tool(async () => {
+        const semantic = await embedQuery(await scope.embedder(), query)
+        const candidates = await scope.run((tx, personaIds) =>
+          recall(tx, scope.access, semantic, query, {
+            limit: limit ?? 10,
+            personaIds,
+            minScore: 0,
+          }),
+        )
+        return formatRecallBlock(candidates) || '没有找到相关记忆'
+      }),
+  )
 
   server.registerTool(
     'kioku_get',
@@ -144,8 +188,12 @@ export function buildMcpServer(memory: MemoryService): McpServer {
 }
 
 // 无状态模式：每个请求一个服务器实例，不在进程里保存会话，方便多实例部署
-export async function handleMcpRequest(memory: MemoryService, request: Request): Promise<Response> {
-  const server = buildMcpServer(memory)
+export async function handleMcpRequest(
+  memory: MemoryService,
+  scope: RecallScope,
+  request: Request,
+): Promise<Response> {
+  const server = buildMcpServer(memory, scope)
   // 不传 sessionIdGenerator 即无状态模式
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
   await server.connect(transport)

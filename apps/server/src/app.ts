@@ -7,6 +7,7 @@ import { health } from './routes/health'
 import { mcpRoutes } from './routes/mcp'
 import { memoryRoutes } from './routes/memories'
 import { personaRoutes } from './routes/personas'
+import { recallRoutes } from './routes/recall'
 import { MemoryError } from './memory/service'
 import { settingsRoutes } from './routes/settings'
 import { setupRoutes } from './routes/setup'
@@ -24,6 +25,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))
   app.route('/v1', memoryRoutes(deps))
+  app.route('/v1', recallRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
   // 业务规则错误带着自己的状态码；其余错误不把内部信息透给调用方
