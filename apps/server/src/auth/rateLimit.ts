@@ -49,15 +49,22 @@ async function bump(db: Db, key: string, delta: number): Promise<number> {
 
 // 在校验密码之前先占一次名额，返回 false 表示已经超限。
 // 逐级计数，某一级已经超限就停下、不再累加更大范围的计数：否则一个已经被锁住的客户端
-// 还能继续把「用户名合计」推到上限，连主人从别处登录也一起锁住
+// 还能继续把「用户名合计」推到上限，连主人从别处登录也一起锁住。
+// 被后一级挡下时退回前面已经加上的：这次没有校验密码，不该占用本客户端的额度，
+// 否则主人在合计超限期间多试几次，同一网络里带设备 Cookie 的设备也会被本客户端的上限挡住
 export async function reserveAttempt(
   db: Db,
   username: string,
   client: string | null,
   trustedDevice: boolean,
 ): Promise<boolean> {
+  const bumped: string[] = []
   for (const { key, limit } of keysFor(username, client, trustedDevice)) {
-    if ((await bump(db, key, 1)) > limit) return false
+    if ((await bump(db, key, 1)) > limit) {
+      for (const earlier of bumped) await bump(db, earlier, -1)
+      return false
+    }
+    bumped.push(key)
   }
   return true
 }

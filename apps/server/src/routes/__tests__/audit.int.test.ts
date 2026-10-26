@@ -166,7 +166,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
   })
 
   it('并发登录也只放行 5 次尝试', async () => {
-    // 分不清客户端时（这里没有底层连接），失败计数只按用户名，并发请求也只放行 5 次
+    // 分不清客户端时（这里没有底层连接），这些请求共用「未知客户端」计数，并发请求也只放行 5 次
     const results = await Promise.all(
       Array.from({ length: 20 }, () =>
         app.request(
@@ -626,6 +626,31 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
         'POST',
         { username: 'alice', password: 'correct horse battery' },
         { 'x-forwarded-for': '203.0.113.202', cookie: device },
+      ),
+    )
+    expect(owner.status).toBe(200)
+  })
+
+  it('合计超限期间在同一地址多试几次，同一网络里带设备 Cookie 的设备照样能登录', async () => {
+    const proxied = proxiedApp()
+    const first = await loginFrom(proxied, '203.0.113.200', 'correct horse battery')
+    const device = first.headers
+      .getSetCookie()
+      .find((c) => c.startsWith('kioku_device='))!
+      .split(';')[0]!
+    for (let ip = 1; ip <= 11; ip++) {
+      for (let i = 0; i < 5; i++) await loginFrom(proxied, `198.51.100.${ip}`, 'wrong')
+    }
+    // 主人在家里另一个没有设备 Cookie 的浏览器上试了 6 次，都被合计挡下，没有校验密码
+    for (let i = 0; i < 6; i++) {
+      expect((await loginFrom(proxied, '203.0.113.200', 'correct horse battery')).status).toBe(429)
+    }
+    const owner = await proxied.request(
+      '/v1/auth/login',
+      jsonRequest(
+        'POST',
+        { username: 'alice', password: 'correct horse battery' },
+        { 'x-forwarded-for': '203.0.113.200', cookie: device },
       ),
     )
     expect(owner.status).toBe(200)
