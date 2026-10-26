@@ -55,9 +55,10 @@ describe('托管管理界面', () => {
     expect(await res.text()).toContain('<div id="app">')
   })
 
-  it('响应带安全头，禁止被嵌入别的页面', async () => {
+  it('响应带安全头，禁止被嵌入别的页面；HSTS 留给前面的 HTTPS 代理决定', async () => {
     const res = await app.request('/')
     expect(res.headers.get('content-security-policy')).toContain("frame-ancestors 'none'")
     expect(res.headers.get('x-content-type-options')).toBe('nosniff')
+    expect(res.headers.get('strict-transport-security')).toBeNull()
   })
 })
