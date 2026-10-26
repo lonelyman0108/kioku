@@ -2,7 +2,8 @@
 import { useToast } from '@nuxt/ui/composables'
 import type { MemoryView, Sensitivity } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
+import { onBeforeRouteLeave, onBeforeRouteUpdate } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -54,14 +55,34 @@ const dirty = computed(() => {
   )
 })
 
-// 没有改动时跟上服务器上的新版本；有未保存的改动时保留它们，提示版本已变化，保存时由版本号检查冲突
+// 没有改动时跟上服务器上的新版本；有未保存的改动时保留它们，提示版本已变化，保存时由版本号检查冲突。
+// 比表单载入的那一版还旧的数据不理会，例如保存之前发出的重新拉取晚到了
 watch(
   () => memory.data.value,
   (m) => {
-    if (m && (!base.value || !dirty.value)) load(m)
+    if (!m) return
+    if (!base.value) load(m)
+    else if (m.version >= base.value.version && !dirty.value) load(m)
   },
   { immediate: true },
 )
+
+// 有未保存的修改时，切到别的记忆、别的页面或关掉标签页之前先确认
+const leaving = ref(false)
+function confirmLeave(): boolean {
+  return (
+    leaving.value ||
+    !dirty.value ||
+    window.confirm('这条记忆有未保存的修改，离开后会丢失。确定离开吗？')
+  )
+}
+onBeforeRouteUpdate(confirmLeave)
+onBeforeRouteLeave(confirmLeave)
+function onBeforeUnload(event: BeforeUnloadEvent) {
+  if (dirty.value) event.preventDefault()
+}
+onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
+onBeforeUnmount(() => window.removeEventListener('beforeunload', onBeforeUnload))
 const changedElsewhere = computed(
   () => !!memory.data.value && !!base.value && memory.data.value.version !== base.value.version,
 )
@@ -82,23 +103,34 @@ async function save() {
   const m = base.value
   if (!m) return
   saving.value = true
+  // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
+  const sent = { ...form, glossary: [...form.glossary] }
   try {
     const next = await api.updateMemory(props.spaceId, {
       uri: m.uri,
       // 带上表单载入时的版本号：别人改过之后返回 409，不会悄悄覆盖
       expectedVersion: m.version,
-      ...(form.content !== (m.content ?? '') ? { content: form.content } : {}),
-      disclosure: form.disclosure.trim() ? form.disclosure.trim() : null,
-      priority: form.priority,
-      sensitivity: form.sensitivity,
-      glossaryAdd: form.glossary.filter((k) => !m.glossary.includes(k)),
-      glossaryRemove: m.glossary.filter((k) => !form.glossary.includes(k)),
+      ...(sent.content !== (m.content ?? '') ? { content: sent.content } : {}),
+      disclosure: sent.disclosure.trim() ? sent.disclosure.trim() : null,
+      priority: sent.priority,
+      sensitivity: sent.sensitivity,
+      glossaryAdd: sent.glossary.filter((k) => !m.glossary.includes(k)),
+      glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
     })
+    // 正在进行的重新拉取可能带回保存之前的版本，先取消，再把保存结果写进缓存
+    await queryClient.cancelQueries({ queryKey: queryKey.value })
     queryClient.setQueryData(queryKey.value, next)
-    load(next)
+    base.value = next
+    if (form.content === sent.content) form.content = next.content ?? ''
+    if (form.disclosure === sent.disclosure) form.disclosure = next.disclosure ?? ''
+    if (form.priority === sent.priority) form.priority = next.priority
+    if (form.sensitivity === sent.sensitivity) form.sensitivity = next.sensitivity
+    if (form.glossary.join('\n') === sent.glossary.join('\n')) form.glossary = [...next.glossary]
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     failed(err, '保存失败')
+    // 版本冲突时立刻重新拉取，好显示「载入新版本」
+    if (err instanceof ApiError && err.status === 409) void memory.refetch()
   } finally {
     saving.value = false
   }
@@ -109,6 +141,8 @@ async function remove() {
     await api.deleteMemory(props.spaceId, props.uri)
     confirmDelete.value = false
     toast.add({ title: '已删除', color: 'success' })
+    // 已经删除了，离开时不再提示未保存的修改
+    leaving.value = true
     emit('deleted', props.uri)
   } catch (err) {
     failed(err, '删除失败')

@@ -1,15 +1,30 @@
 <script setup lang="ts">
 import type { NavigationMenuItem } from '@nuxt/ui'
-import { computed } from 'vue'
-import { useRouter } from 'vue-router'
+import { useToast } from '@nuxt/ui/composables'
+import { computed, watch } from 'vue'
+import { useRoute, useRouter } from 'vue-router'
 
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { queryClient } from '../query'
 
 const router = useRouter()
+const route = useRoute()
+const toast = useToast()
 const { me, space } = useSession()
+
+// 会话过期或在别的标签页退出后，当前账号会变成 null：带人回登录页，登录后回到原来的页面
+let loggingOut = false
+watch(
+  () => me.data.value,
+  (m) => {
+    if (m === null && !loggingOut) {
+      void router.replace({ name: 'login', query: { next: route.fullPath } })
+    }
+  },
+)
 
 const spaceItems = computed(() =>
   (me.data.value?.spaces ?? []).map((s) => ({ label: s.name, value: s.id })),
@@ -33,8 +48,20 @@ const nav = computed<NavigationMenuItem[]>(() => {
 })
 
 async function logout() {
-  // 会话已经失效时（例如在别的标签页退出过）接口返回 401，照样清掉本地状态回到登录页
-  await api.logout().catch(() => {})
+  try {
+    await api.logout()
+  } catch (err) {
+    // 会话已经失效（例如在别的标签页退出过）时返回 401，照样清掉本地状态；
+    // 其他错误说明服务端的会话可能还在，不能装作已经退出
+    if (!(err instanceof ApiError && err.status === 401)) {
+      toast.add({
+        title: err instanceof ApiError ? err.message : '退出失败，请重试',
+        color: 'error',
+      })
+      return
+    }
+  }
+  loggingOut = true
   // 清掉全部缓存：下一个在这个标签页登录的人不能看到上一个人的记忆
   queryClient.clear()
   queryClient.setQueryData(ME_KEY, null)

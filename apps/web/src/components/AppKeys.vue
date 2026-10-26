@@ -8,7 +8,7 @@ import {
   type KeyScopes,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -79,10 +79,20 @@ async function issue() {
   }
 }
 
+// 关掉「逐项调整」时回到所选预设的权限，不让看不见的改动跟着签出去
+watch(
+  () => form.advanced,
+  (on) => {
+    if (!on) pickPreset(form.preset)
+  },
+)
+
 function closeIssue() {
   issueOpen.value = false
   issued.value = null
   form.name = ''
+  form.advanced = false
+  pickPreset(form.preset)
 }
 
 // 剪贴板接口只在 HTTPS 或 localhost 下可用；用局域网 HTTP 地址打开时提示手动复制
