@@ -29,7 +29,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
 
-// 表分两类：身份表（accounts、sessions、spaces、space_members、api_keys）与实例设置（settings）在鉴权阶段就要跨空间查询，不开行级安全；
+// 表分两类：身份表（accounts、sessions、login_attempts、spaces、space_members、api_keys）与实例设置（settings）在鉴权阶段就要跨空间查询，不开行级安全；
 // 其余内容表都带 space_id，由迁移里的 RLS 策略按会话变量 app.space_id 强制隔离。
 // 外键检查不受 RLS 约束，所以指向内容表的外键都带上 space_id（复合外键），保证不会关联到别的空间。
 
@@ -103,6 +103,14 @@ export const sessions = pgTable(
   },
   (t) => [index().on(t.accountId)],
 )
+
+// 登录失败计数，按用户名（小写）一行；放在数据库里而不是进程内存：
+// 并发请求用原子加一计数，不需要淘汰策略，也就不会被随机用户名挤掉或塞满
+export const loginAttempts = pgTable('login_attempts', {
+  username: text().primaryKey(),
+  count: integer().notNull(),
+  resetAt: timestamp({ withTimezone: true }).notNull(),
+})
 
 // Key 明文只在创建时返回一次；库里存前缀（用于查找和显示）与整串的 SHA-256
 export const apiKeys = pgTable(

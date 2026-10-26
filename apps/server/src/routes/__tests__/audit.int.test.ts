@@ -308,4 +308,42 @@ describe.skipIf(!testDatabaseUrl)('审查回归', () => {
     expect(list.status).toBe(200)
     expect(JSON.stringify(await list.json())).not.toContain('kioku_')
   })
+  it('editor 不能签发 secret 级 Key', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bApp = await appAs(b.cookie, 'b-agent')
+    const res = await app.request(
+      `/v1/spaces/${ws.spaceId}/apps/${bApp}/keys`,
+      jsonRequest(
+        'POST',
+        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'secret' } },
+        { cookie: b.cookie },
+      ),
+    )
+    expect(res.status).toBe(403)
+  })
+
+  it('空间 owner 可以把成员的应用转给自己，之后能签发 Key', async () => {
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bApp = await appAs(b.cookie, 'b-agent')
+    const patch = (body: Record<string, unknown>, cookie: string) =>
+      app.request(`/v1/spaces/${ws.spaceId}/apps/${bApp}`, jsonRequest('PATCH', body, { cookie }))
+    expect((await patch({ ownerAccountId: ws.accountId }, b.cookie)).status).toBe(403)
+    expect(
+      (await patch({ ownerAccountId: '00000000-0000-4000-8000-000000000000' }, ws.cookie)).status,
+    ).toBe(400)
+    expect((await patch({ ownerAccountId: ws.accountId }, ws.cookie)).status).toBe(200)
+    expect((await keyAs(ws.cookie, bApp)).status).toBe(201)
+  })
+
+  it('浏览结果按层聚合，每一级只出现一次', async () => {
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    for (const uri of ['kb://a', 'kb://a/x', 'kb://a/y', 'kb://a/y/z', 'kb://b/q']) {
+      await create(key, { uri, content: uri, layer: 'base' })
+    }
+    const root = await children(key, 'kb')
+    expect(root.children.map((c) => [c.uri, c.exists, c.childCount])).toEqual([
+      ['kb://a', true, 2],
+      ['kb://b', false, 1],
+    ])
+  })
 })

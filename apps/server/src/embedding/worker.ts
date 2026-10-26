@@ -70,6 +70,8 @@ async function syncRows(db: Db, embedder: Embedder, spaceId: string, rows: Row[]
       .select({ id: memories.id, updatedAt: memories.updatedAt })
       .from(memories)
       .where(inArray(memories.id, ids))
+      // 固定加锁顺序，两个重叠的任务不会互相等待成死锁
+      .orderBy(memories.id)
       .for('update')
     const readAt = new Map(rows.map((r) => [r.id, r.updatedAt.getTime()]))
     const unchanged = new Set(

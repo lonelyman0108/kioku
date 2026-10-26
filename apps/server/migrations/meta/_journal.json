@@ -43,6 +43,13 @@
       "when": 1793018052364,
       "tag": "0005_per_member_uri",
       "breakpoints": true
+    },
+    {
+      "idx": 6,
+      "version": "7",
+      "when": 1793020350751,
+      "tag": "0006_login_attempts",
+      "breakpoints": true
     }
   ]
 }

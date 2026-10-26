@@ -1,48 +1,39 @@
-// 登录失败限流：同一用户名在窗口期内尝试过多就暂时拒绝。单进程内存实现，重启即清零，
-// 目的是挡住在线暴力尝试，不是精确计数。
-const WINDOW_MS = 15 * 60 * 1000
+import { lte, sql } from 'drizzle-orm'
+
+import type { Db } from '../db/client'
+import { loginAttempts } from '../db/schema'
+
+// 登录失败限流：同一用户名在窗口期内最多尝试 5 次。计数在数据库里原子递增，
+// 并发请求也逐个计数；放行后才去做耗时的密码校验
+const WINDOW_SECONDS = 15 * 60
 const MAX_ATTEMPTS = 5
-// 用随机用户名刷请求时表会一直长；满了就清过期项，仍满就淘汰最早的一成未锁定项。
-// 已锁定的项永不提前淘汰，否则刷一批随机用户名就能把被锁账号的计数挤掉
-const MAX_ENTRIES = 10_000
-const EVICT_BATCH = MAX_ENTRIES / 10
 
-const attempts = new Map<string, { count: number; resetAt: number }>()
-
-function prune(now: number): void {
-  if (attempts.size < MAX_ENTRIES) return
-  for (const [key, entry] of attempts) if (entry.resetAt <= now) attempts.delete(key)
-  if (attempts.size < MAX_ENTRIES) return
-  let evicted = 0
-  for (const [key, entry] of attempts) {
-    if (evicted >= EVICT_BATCH) break
-    if (entry.count >= MAX_ATTEMPTS) continue
-    attempts.delete(key)
-    evicted++
-  }
+// 在校验密码之前先占一次名额。返回 false 表示已经超限；登录成功后调用 clearAttempts 清零
+export async function reserveAttempt(db: Db, username: string): Promise<boolean> {
+  const key = username.toLowerCase()
+  const [row] = await db
+    .insert(loginAttempts)
+    .values({
+      username: key,
+      count: 1,
+      resetAt: sql`now() + make_interval(secs => ${WINDOW_SECONDS})`,
+    })
+    .onConflictDoUpdate({
+      target: loginAttempts.username,
+      set: {
+        count: sql`case when ${loginAttempts.resetAt} <= now() then 1 else ${loginAttempts.count} + 1 end`,
+        resetAt: sql`case when ${loginAttempts.resetAt} <= now() then now() + make_interval(secs => ${WINDOW_SECONDS}) else ${loginAttempts.resetAt} end`,
+      },
+    })
+    .returning({ count: loginAttempts.count })
+  return (row?.count ?? MAX_ATTEMPTS + 1) <= MAX_ATTEMPTS
 }
 
-// 在校验密码之前先占一次名额：并发请求也逐个计数，不会因为 scrypt 还没算完就全部放行。
-// 返回 false 表示已经超限；登录成功后调用 clearAttempts 清零
-export function reserveAttempt(key: string, now = Date.now()): boolean {
-  prune(now)
-  const entry = attempts.get(key)
-  // 表里全是锁定项、淘汰不出空位时，新的用户名一律拒绝：宁可暂时挡住登录，也不让表无限增长
-  if (!entry && attempts.size >= MAX_ENTRIES) return false
-  if (!entry || entry.resetAt <= now) {
-    attempts.set(key, { count: 1, resetAt: now + WINDOW_MS })
-    return true
-  }
-  if (entry.count >= MAX_ATTEMPTS) return false
-  entry.count += 1
-  return true
+export async function clearAttempts(db: Db, username: string): Promise<void> {
+  await db.delete(loginAttempts).where(sql`${loginAttempts.username} = ${username.toLowerCase()}`)
 }
 
-export function clearAttempts(key: string): void {
-  attempts.delete(key)
-}
-
-// 仅供测试检查表的大小
-export function trackedCount(): number {
-  return attempts.size
+// 清掉已过期的计数；随机用户名刷出来的行过了窗口期就没有用了
+export async function pruneAttempts(db: Db): Promise<void> {
+  await db.delete(loginAttempts).where(lte(loginAttempts.resetAt, sql`now()`))
 }

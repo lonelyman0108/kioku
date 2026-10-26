@@ -63,6 +63,8 @@ export type CreateAppRequest = z.infer<typeof CreateAppRequest>
 
 export const UpdateAppRequest = z.object({
   name: z.string().min(1).max(64).optional(),
+  // 只有空间 owner 能改：把应用转给空间里的另一个成员
+  ownerAccountId: z.uuid().optional(),
   defaultPersonaId: z.uuid().nullable().optional(),
   config: AppConfig.optional(),
 })

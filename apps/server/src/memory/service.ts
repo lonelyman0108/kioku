@@ -8,6 +8,7 @@ import type {
   MemorySummary,
   MemoryView,
   MoveMemoryRequest,
+  Sensitivity,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
 import { and, asc, count, desc, eq, inArray, isNull, like, or, sql } from 'drizzle-orm'
@@ -57,25 +58,38 @@ function parse(uri: string): ParsedUri {
   return parsed
 }
 
-// 事件快照里不放密文、数据密钥和全文检索向量（向量里有正文分词）。
-// secret 的正文本来就是 null；redact 用于改成 secret 时把改之前的明文也抹掉
-function snapshot(row: MemoryRow, glossary: string[], redact = false) {
+// 事件快照里不放密文、数据密钥和全文检索向量（向量里有正文分词）。secret 的正文本来就是 null；
+// 改成 secret 时，之前快照里的明文由 scrubHistory 统一抹掉（包括本次事件的「改前」快照）
+function snapshot(row: MemoryRow, glossary: string[]) {
   const rest: Partial<MemoryRow> = { ...row }
   delete rest.ciphertext
   delete rest.wrappedKey
   delete rest.fts
-  if (redact || row.sensitivity === 'secret') rest.content = null
+  if (row.sensitivity === 'secret') rest.content = null
   return { ...rest, glossary }
 }
 
-// 浏览一层时最多扫描的后代记忆数，个人规模足够；超过时结果可能不全
-const CHILDREN_SCAN_LIMIT = 5000
+// 浏览时一层最多列出的子节点数，按路径排序后截断，结果稳定
+const CHILDREN_LEVEL_LIMIT = 500
 
 export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
 
-  private run<T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>): Promise<T> {
-    return runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
+  // URI 唯一约束冲突在这里转成 409，REST 与 MCP 都能拿到明确的提示。正常情况下 claimUri 已经用咨询锁
+  // 串行化了检查与写入，这里兜住遗漏的写入路径
+  private async run<T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>): Promise<T> {
+    try {
+      return await runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
+    } catch (err) {
+      const pg = ((err as { cause?: unknown })?.cause ?? err) as {
+        code?: string
+        constraint_name?: string
+      }
+      if (pg.code === '23505' && pg.constraint_name === 'memories_uri_live_idx') {
+        throw new MemoryError(409, 'URI 已被占用')
+      }
+      throw err
+    }
   }
 
   private changed(ids: string[]): void {
@@ -158,7 +172,8 @@ export class MemoryService {
         .set({ deletedAt: now, updatedAt: now })
         .where(eq(memories.id, row.id))
         .returning()
-      await this.event(tx, row.id, 'expire', snapshot(row, []), snapshot(gone!, []))
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      await this.event(tx, row.id, 'expire', snapshot(row, glossary), snapshot(gone!, glossary))
       released.push(row.id)
     }
   }
@@ -411,7 +426,7 @@ export class MemoryService {
         tx,
         before.id,
         'update',
-        snapshot(before, beforeGlossary, becameSecret),
+        snapshot(before, beforeGlossary),
         snapshot(row, glossary),
       )
       // 改成 secret 之后，历史事件里不能再留着明文
@@ -500,14 +515,21 @@ export class MemoryService {
     return this.run(async (tx, personaIds) => {
       const parent = parsed ? await this.findReadableOrNull(tx, parsed, personaIds) : null
       const prefix = parsed ? `${parsed.path}/` : ''
-      const rows = await tx
+      // 在 SQL 里按下一级路径聚合：每一级一行，带上这一级本身的记忆（如果有）和它下面可见的下一级数量
+      const rest = sql`substr(${memories.path}, ${prefix.length + 1})`
+      const segment = sql<string>`split_part(${rest}, '/', 1)`
+      const next = sql`split_part(${rest}, '/', 2)`
+      const own = <T>(column: unknown) =>
+        sql<T | null>`(array_agg(${column}) filter (where ${next} = ''))[1]`
+      const levels = await tx
         .select({
-          id: memories.id,
-          path: memories.path,
-          layer: memories.layer,
-          sensitivity: memories.sensitivity,
-          priority: memories.priority,
-          disclosure: memories.disclosure,
+          segment,
+          below: sql<number>`count(distinct ${next}) filter (where ${next} <> '')`,
+          id: own<string>(memories.id),
+          layer: own<Layer>(memories.layer),
+          sensitivity: own<Sensitivity>(memories.sensitivity),
+          priority: own<number>(memories.priority),
+          disclosure: own<string>(memories.disclosure),
         })
         .from(memories)
         .where(
@@ -518,25 +540,18 @@ export class MemoryService {
             prefix ? like(memories.path, `${escapeLike(prefix)}%`) : undefined,
           ),
         )
-        .limit(CHILDREN_SCAN_LIMIT)
-
-      const levels = new Map<string, { row?: (typeof rows)[number]; below: Set<string> }>()
-      for (const row of rows) {
-        const [segment, next] = row.path!.slice(prefix.length).split('/')
-        const level = levels.get(segment!) ?? { below: new Set<string>() }
-        if (next === undefined) level.row = row
-        else level.below.add(next)
-        levels.set(segment!, level)
-      }
-      const children: MemorySummary[] = [...levels.entries()].map(([segment, level]) => ({
-        uri: formatUri(domain, `${prefix}${segment}`),
-        exists: Boolean(level.row),
-        id: level.row?.id ?? null,
-        layer: level.row?.layer ?? null,
-        sensitivity: level.row?.sensitivity ?? null,
-        priority: level.row?.priority ?? null,
-        disclosure: level.row?.disclosure ?? null,
-        childCount: level.below.size,
+        .groupBy(segment)
+        .orderBy(segment)
+        .limit(CHILDREN_LEVEL_LIMIT)
+      const children: MemorySummary[] = levels.map((level) => ({
+        uri: formatUri(domain, `${prefix}${level.segment}`),
+        exists: level.id !== null,
+        id: level.id,
+        layer: level.layer,
+        sensitivity: level.sensitivity,
+        priority: level.priority === null ? null : Number(level.priority),
+        disclosure: level.disclosure,
+        childCount: Number(level.below),
       }))
       // 有记忆的按 priority 在前，虚拟节点在后，同级按路径
       children.sort(

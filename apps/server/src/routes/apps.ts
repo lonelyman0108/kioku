@@ -77,7 +77,12 @@ const updateApp = createRoute({
   tags: ['apps'],
   summary: '修改应用名称、默认人格或配置',
   request: { params: AppParams, body: jsonBody(UpdateAppRequest) },
-  responses: { 200: jsonResponse('已修改', AppInfo), 403: forbidden, 404: notFound },
+  responses: {
+    200: jsonResponse('已修改', AppInfo),
+    400: jsonResponse('新主人不是空间成员', ErrorResponse),
+    403: forbidden,
+    404: notFound,
+  },
 })
 
 const listKeys = createRoute({
@@ -168,9 +173,18 @@ export function appRoutes(deps: Deps) {
       if (!canManageApps(await roleOf(spaceId, accountId))) {
         return c.json({ error: '需要 owner 或 editor 角色' }, 403)
       }
+      const role = await roleOf(spaceId, accountId)
+      // 转移所有权只有空间 owner 能做，新主人必须是空间成员。转移后应用读的是新主人的私人层，
+      // 不会读到前一位主人的，所以成员离开后由空间 owner 接手是安全的
+      if (body.ownerAccountId !== undefined) {
+        if (role !== 'owner') return c.json({ error: '只有空间 owner 能转移应用' }, 403)
+        if (!(await roleOf(spaceId, body.ownerAccountId))) {
+          return c.json({ error: '新主人不是该空间成员' }, 400)
+        }
+      }
       const rows = await withSpace(deps.db, spaceId, async (tx) => {
         const owner = await appOwnerOf(tx, appId)
-        if (owner && owner !== accountId) return null
+        if (owner && owner !== accountId && body.ownerAccountId === undefined) return null
         if (!(await personaVisible(tx, body.defaultPersonaId))) return []
         return tx
           .update(apps)
@@ -209,8 +223,10 @@ export function appRoutes(deps: Deps) {
       if (role !== 'owner' && role !== 'editor') {
         return c.json({ error: '需要 owner 或 editor 角色' }, 403)
       }
-      if (body.scopes.admin && role !== 'owner') {
-        return c.json({ error: '只有空间 owner 能签发 admin Key' }, 403)
+      // Key 的上限不能超过签发人的角色：admin 与 secret 级只有空间 owner 能给。
+      // editor 签发的 Key 仍能读写应用主人（也就是 editor 自己）的私人层，以及 secret 以下的共享内容
+      if (role !== 'owner' && (body.scopes.admin || body.scopes.maxSensitivity === 'secret')) {
+        return c.json({ error: '只有空间 owner 能签发 admin 或 secret 级的 Key' }, 403)
       }
       const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
       if (!owner) return c.json({ error: '应用不存在' }, 404)

@@ -5,7 +5,8 @@ import { deleteCookie, setCookie } from 'hono/cookie'
 
 import { requireConsole } from '../auth/middleware'
 import { hashPassword, verifyPassword } from '../auth/password'
-import { clearAttempts, reserveAttempt } from '../auth/rateLimit'
+import { PasswordGateBusy, withPasswordGate } from '../auth/passwordGate'
+import { clearAttempts, pruneAttempts, reserveAttempt } from '../auth/rateLimit'
 import { createSession, deleteSession, SESSION_COOKIE, SESSION_TTL_MS } from '../auth/session'
 import type { Db } from '../db/client'
 import { accounts, spaceMembers, spaces } from '../db/schema'
@@ -71,17 +72,28 @@ export function authRoutes(deps: Deps) {
   return app
     .openapi(login, async (c) => {
       const { username, password } = c.req.valid('json')
-      const limitKey = username.toLowerCase()
-      if (!reserveAttempt(limitKey)) return c.json({ error: '失败次数过多，请稍后再试' }, 429)
+      if (!(await reserveAttempt(deps.db, username))) {
+        return c.json({ error: '失败次数过多，请稍后再试' }, 429)
+      }
+      // 偶尔顺手清理过期的失败计数，不单独起定时任务
+      if (Math.random() < 0.01) void pruneAttempts(deps.db).catch(() => {})
 
       const [account] = await deps.db
         .select()
         .from(accounts)
         .where(eq(accounts.username, username))
         .limit(1)
-      const ok = await verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH))
+      let ok: boolean
+      try {
+        ok = await withPasswordGate(async () =>
+          verifyPassword(password, account?.passwordHash ?? (await DUMMY_HASH)),
+        )
+      } catch (err) {
+        if (err instanceof PasswordGateBusy) return c.json({ error: err.message }, 429)
+        throw err
+      }
       if (!account || !ok) return c.json({ error: '用户名或密码错误' }, 401)
-      clearAttempts(limitKey)
+      await clearAttempts(deps.db, username)
 
       const token = await createSession(deps.db, account.id)
       setCookie(c, SESSION_COOKIE, token, {
