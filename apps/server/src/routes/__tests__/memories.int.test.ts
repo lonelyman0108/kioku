@@ -99,6 +99,17 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect((await call('DELETE', q(`&expectedId=${first.id}&expectedVersion=2`))).status).toBe(204)
   })
 
+  it('删除与修改同时发生时，不会删掉检查之后才提交的那一版', async () => {
+    await create({ uri: 'core://z', content: '第一版', layer: 'base' })
+    const results = await Promise.all([
+      call('PATCH', '/memories', { uri: 'core://z', content: '第二版' }),
+      call('DELETE', `/memories?uri=${encodeURIComponent('core://z')}&expectedVersion=1`),
+    ])
+    const [patched, deleted] = results.map((r) => r.status)
+    // 要么删除先完成（修改得到 404 或 409），要么修改先完成（删除得到 409），不会两个都成功
+    expect([patched, deleted].sort()).not.toEqual([200, 204])
+  })
+
   it('修改会递增版本，旧版本号返回 409', async () => {
     await create({ uri: 'core://agent', content: '第一版', layer: 'base' })
     const res = await call('PATCH', '/memories', {

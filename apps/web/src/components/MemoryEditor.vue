@@ -76,9 +76,19 @@ watch(dirty, (d) => (hasUnsavedChanges.value = d && !leaving.value), { immediate
 const confirmLeave = () => leaving.value || confirmDiscard()
 onBeforeRouteUpdate(confirmLeave)
 onBeforeRouteLeave(confirmLeave)
-// 确认过离开、导航却失败了（例如升级后页面文件加载不到）：修改还在，重新登记，下次离开还要确认
-const stopAfterEach = useRouter().afterEach((_to, _from, failure) => {
-  if (failure && dirty.value && !leaving.value) hasUnsavedChanges.value = true
+// 确认过离开、导航却没有完成：修改还在，重新登记，下次离开还要确认。
+// 被中止或取消的导航走 afterEach；页面文件加载不到（例如升级之后）这类报错走 onError
+const router = useRouter()
+const rearm = () => {
+  if (dirty.value && !leaving.value) hasUnsavedChanges.value = true
+}
+const stopAfterEach = router.afterEach((_to, _from, failure) => {
+  if (failure) rearm()
+})
+// 注册了 onError 之后 vue-router 不再自己打印错误，这里照样打出来，升级后页面加载失败还能查
+const stopOnError = router.onError((err) => {
+  rearm()
+  console.error(err)
 })
 function onBeforeUnload(event: BeforeUnloadEvent) {
   if (hasUnsavedChanges.value) event.preventDefault()
@@ -86,6 +96,7 @@ function onBeforeUnload(event: BeforeUnloadEvent) {
 onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
 onBeforeUnmount(() => {
   stopAfterEach()
+  stopOnError()
   window.removeEventListener('beforeunload', onBeforeUnload)
   hasUnsavedChanges.value = false
 })
