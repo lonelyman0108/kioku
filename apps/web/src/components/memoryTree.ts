@@ -1,0 +1,52 @@
+import type { MemoryChildren } from '@kioku/contracts'
+
+// 记忆树的一个节点。children 为 undefined 表示叶子；为数组时可以展开，loaded 为 false 时展开才去加载
+export interface MemoryTreeItem {
+  label: string
+  uri: string
+  // 这一级路径本身有没有记忆；没有时是虚拟节点，只能展开不能打开
+  exists: boolean
+  loaded: boolean
+  children?: MemoryTreeItem[]
+  icon?: string
+  [key: string]: unknown
+}
+
+export function lastSegment(uri: string): string {
+  const path = uri.split('://')[1] ?? uri
+  return path.split('/').pop() ?? path
+}
+
+// 把接口返回的一层子节点转成树节点；有下一级的先放一个「加载中」占位，展开时再替换
+export function toTreeItems(
+  result: MemoryChildren,
+  icons: { folder: string; file: string },
+): MemoryTreeItem[] {
+  return result.children.map((child) => ({
+    label: lastSegment(child.uri),
+    uri: child.uri,
+    exists: child.exists,
+    loaded: child.childCount === 0,
+    icon: child.childCount > 0 || !child.exists ? icons.folder : icons.file,
+    ...(child.childCount > 0
+      ? {
+          children: [
+            {
+              label: '加载中……',
+              uri: `${child.uri}#loading`,
+              exists: false,
+              loaded: true,
+              disabled: true,
+            },
+          ],
+        }
+      : {}),
+  }))
+}
+
+// 新建或删除之后，需要重新加载的父级：domain 根或上一级路径
+export function parentOf(uri: string): string {
+  const [domain, path = ''] = uri.split('://')
+  const segments = path.split('/')
+  return segments.length <= 1 ? domain! : `${domain}://${segments.slice(0, -1).join('/')}`
+}

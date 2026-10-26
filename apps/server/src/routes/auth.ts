@@ -30,6 +30,7 @@ export async function loadMe(db: Db, accountId: string) {
     id: account.id,
     username: account.username,
     displayName: account.displayName,
+    isAdmin: account.isAdmin,
     spaces: memberships,
   }
 }

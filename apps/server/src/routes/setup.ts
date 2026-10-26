@@ -73,6 +73,7 @@ export function setupRoutes(deps: Deps) {
           id: result.account.id,
           username: result.account.username,
           displayName: result.account.displayName,
+          isAdmin: result.account.isAdmin,
           spaces: [{ id: result.space.id, name: result.space.name, role: 'owner' as const }],
         },
         201,

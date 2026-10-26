@@ -6,8 +6,10 @@ import { createApp } from 'vue'
 import { createRouter, createWebHistory } from 'vue-router'
 
 import App from './App.vue'
-import { routes } from './routes'
+import { queryClient } from './query'
+import { installGuards, routes } from './routes'
 
 const router = createRouter({ history: createWebHistory(), routes })
+installGuards(router)
 
-createApp(App).use(router).use(ui).use(VueQueryPlugin).mount('#app')
+createApp(App).use(router).use(ui).use(VueQueryPlugin, { queryClient }).mount('#app')
