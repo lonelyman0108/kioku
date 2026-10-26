@@ -46,6 +46,7 @@ pnpm dev                  # 后端 http://localhost:18920，管理界面 http://
 ## 文档
 
 - 设计：[docs/design.md](docs/design.md)
+- 从 Lore 迁移：[docs/migrate-from-lore.md](docs/migrate-from-lore.md)
 - 贡献规范：[CONTRIBUTING.md](CONTRIBUTING.md)
 - agent 工作约定：[AGENTS.md](AGENTS.md)
 - 文档索引：[docs/README.md](docs/README.md)
