@@ -27,6 +27,7 @@ const app = createApp({
   masterKey: config.masterKey,
   embedder,
   trustedProxies: config.trustedProxies,
+  webDir: config.webDir,
   jobs,
 })
 

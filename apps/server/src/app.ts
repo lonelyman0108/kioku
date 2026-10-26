@@ -1,7 +1,10 @@
+import { secureHeaders } from 'hono/secure-headers'
+
 import { sameOriginForCookies } from './auth/csrf'
 import { requireConsole } from './auth/middleware'
 import type { Deps } from './http/env'
 import { router } from './http/openapi'
+import { mountWeb } from './http/web'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
 import { health } from './routes/health'
@@ -18,6 +21,22 @@ import { VERSION } from './version'
 // 应用本身与监听端口分开，测试直接调 app.request，不用起服务
 export function createApp(deps: Deps) {
   const app = router()
+  // 安全响应头。界面没有内联脚本；Nuxt UI 会写内联样式，所以 style-src 放开 unsafe-inline
+  app.use(
+    '*',
+    secureHeaders({
+      contentSecurityPolicy: {
+        defaultSrc: ["'self'"],
+        scriptSrc: ["'self'"],
+        styleSrc: ["'self'", "'unsafe-inline'"],
+        imgSrc: ["'self'", 'data:'],
+        connectSrc: ["'self'"],
+        frameAncestors: ["'none'"],
+        baseUri: ["'self'"],
+        formAction: ["'self'"],
+      },
+    }),
+  )
   app.use('/v1/*', sameOriginForCookies)
   app.route('/v1', health)
   app.route('/v1', setupRoutes(deps))
@@ -41,6 +60,10 @@ export function createApp(deps: Deps) {
     type: 'http',
     scheme: 'bearer',
   })
+  // 管理界面放在 API 之后挂载，未知的 /v1 路径仍返回 404 而不是界面
+  if (deps.webDir && !mountWeb(app, deps.webDir)) {
+    console.warn(`没有找到管理界面的构建产物：${deps.webDir}，只提供 API`)
+  }
   app.doc31('/v1/openapi.json', {
     openapi: '3.1.0',
     info: { title: 'Kioku API', version: VERSION },

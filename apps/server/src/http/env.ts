@@ -12,6 +12,8 @@ export interface Deps {
   embedder: EmbedderSource
   // 前面受信任的反向代理层数，用来从 X-Forwarded-For 取客户端地址；默认 0（不信任转发头）
   trustedProxies?: number
+  // 管理界面构建产物所在目录；不设置时只提供 API（开发时界面由 Vite 提供）
+  webDir?: string
   // 没有后台任务时（例如部分测试）写入不触发向量更新
   jobs: Jobs | null
 }
