@@ -18,6 +18,8 @@ jobs:
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
+      - name: 安装工具
+        run: scripts/ci/install-tools.sh
       - name: 门禁
         run: scripts/check.sh --full
       - name: Release 页
