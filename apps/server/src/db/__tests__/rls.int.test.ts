@@ -1,28 +1,18 @@
-import { fileURLToPath } from 'node:url'
-
 import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { assertRuntimeRole, connect, withSpace, type Database } from '../client'
-import { runMigrations } from '../migrate'
+import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { assertRuntimeRole, withSpace, type Database } from '../client'
 import { accounts, memories, personas, RLS_TABLES, spaces } from '../schema'
 
-// 需要真实 PostgreSQL：本地用 docker-compose.dev.yml 起库后设置 KIOKU_TEST_DATABASE_URL。
-// CI 里必须提供，没有就失败，避免集成测试被悄悄跳过。
-const url = process.env.KIOKU_TEST_DATABASE_URL
-if (!url && process.env.CI) throw new Error('CI 环境缺少 KIOKU_TEST_DATABASE_URL')
-
-const migrationsFolder = fileURLToPath(new URL('../../../migrations', import.meta.url))
-
-describe.skipIf(!url)('数据层与空间隔离', () => {
+describe.skipIf(!testDatabaseUrl)('数据层与空间隔离', () => {
   let database: Database
   let spaceA: string
   let spaceB: string
   let accountId: string
 
   beforeAll(async () => {
-    database = connect(url!, { max: 2 })
-    await runMigrations(database.db, migrationsFolder)
+    database = await openTestDatabase()
   })
 
   afterAll(async () => {
@@ -31,7 +21,7 @@ describe.skipIf(!url)('数据层与空间隔离', () => {
 
   beforeEach(async () => {
     const { db } = database
-    await db.execute(sql`truncate spaces, accounts cascade`)
+    await resetDatabase(database)
     const [a, b] = await db
       .insert(spaces)
       .values([{ name: 'A' }, { name: 'B' }])
