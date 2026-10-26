@@ -1,9 +1,20 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
-import { Keyword, Layer, MemoryUri, Sensitivity } from '@kioku/contracts'
+import {
+  Keyword,
+  Layer,
+  MemoryUri,
+  RecallRequest,
+  RemovableKeyword,
+  Sensitivity,
+} from '@kioku/contracts'
 import { z } from 'zod'
 
+import type { RecallScope } from '../lifecycle/scope'
+import { GUIDANCE } from '../lifecycle/lifecycle'
 import { MemoryError, type MemoryService } from '../memory/service'
+import { formatBootBlock } from '../recall/boot'
+import { formatRecallBlock } from '../recall/recall'
 import { VERSION } from '../version'
 import { formatChildren, formatDomains, formatMemory } from './format'
 
@@ -20,8 +31,35 @@ async function tool(fn: () => Promise<string>): Promise<ToolResult> {
   }
 }
 
-export function buildMcpServer(memory: MemoryService): McpServer {
+export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpServer {
   const server = new McpServer({ name: 'kioku', version: VERSION })
+
+  server.registerTool(
+    'kioku_boot',
+    {
+      description:
+        '读取启动基线：使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时调用一次。',
+      annotations: { readOnlyHint: true },
+    },
+    () => tool(async () => formatBootBlock(await scope.boot(), GUIDANCE)),
+  )
+
+  server.registerTool(
+    'kioku_search',
+    {
+      description: '按语义、全文和关键词搜索记忆，返回候选 URI 与线索；需要正文时再用 kioku_get。',
+      inputSchema: {
+        query: RecallRequest.shape.query.describe('要找的内容，用自然语言描述'),
+        limit: z.number().int().min(1).max(30).optional().describe('最多返回几条，默认 10'),
+      },
+      annotations: { readOnlyHint: true },
+    },
+    ({ query, limit }) =>
+      tool(async () => {
+        const candidates = await scope.recall(query, { limit: limit ?? 10, minScore: 0 })
+        return formatRecallBlock(candidates) || '没有找到相关记忆'
+      }),
+  )
 
   server.registerTool(
     'kioku_get',
@@ -93,7 +131,7 @@ export function buildMcpServer(memory: MemoryService): McpServer {
         priority: z.number().int().min(0).max(99).optional(),
         sensitivity: Sensitivity.optional(),
         glossary_add: z.array(Keyword).optional(),
-        glossary_remove: z.array(Keyword).optional(),
+        glossary_remove: z.array(RemovableKeyword).optional(),
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
       },
     },
@@ -144,8 +182,12 @@ export function buildMcpServer(memory: MemoryService): McpServer {
 }
 
 // 无状态模式：每个请求一个服务器实例，不在进程里保存会话，方便多实例部署
-export async function handleMcpRequest(memory: MemoryService, request: Request): Promise<Response> {
-  const server = buildMcpServer(memory)
+export async function handleMcpRequest(
+  memory: MemoryService,
+  scope: RecallScope,
+  request: Request,
+): Promise<Response> {
+  const server = buildMcpServer(memory, scope)
   // 不传 sessionIdGenerator 即无状态模式
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
   await server.connect(transport)

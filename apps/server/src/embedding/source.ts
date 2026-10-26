@@ -12,7 +12,13 @@ export function settingsEmbedderSource(db: Db, masterKey: Buffer | null): Embedd
   let cached: Promise<Embedder | null> | null = null
   return {
     get() {
-      cached ??= loadEmbeddingConfig(db, masterKey).then((c) => (c ? openAiEmbedder(c) : null))
+      // 读取失败不缓存，下次召回会重试，避免一次数据库抖动让向量召回在整个进程里失效
+      cached ??= loadEmbeddingConfig(db, masterKey)
+        .then((c) => (c ? openAiEmbedder(c) : null))
+        .catch((err: unknown) => {
+          cached = null
+          throw err
+        })
       return cached
     },
     invalidate() {

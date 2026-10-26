@@ -1,14 +1,15 @@
-import { resolveAccess, type SessionContext } from '../access/access'
+import { resolveAccess, type Access, type SessionContext } from '../access/access'
+import type { Tx } from '../db/client'
 import type { Deps, KeyPrincipal } from '../http/env'
+import type { RecallScope } from '../lifecycle/scope'
+import { boot } from '../recall/boot'
+import { embedQuery, normalizeQuery, recall } from '../recall/recall'
+import { runInSpace } from './personas'
 import { MemoryService } from './service'
 
-// 由 API Key 构造记忆服务；会话上下文在接入群聊（对象解析）之后才会传进来
-export function memoryServiceForKey(
-  deps: Deps,
-  key: KeyPrincipal,
-  context: SessionContext = {},
-): MemoryService {
-  const access = resolveAccess(
+// 会话上下文在接入群聊（对象解析）之后才会传进来，目前都按无上下文处理
+function accessForKey(key: KeyPrincipal, context: SessionContext): Access {
+  return resolveAccess(
     key.scopes,
     {
       appId: key.app.id,
@@ -19,13 +20,46 @@ export function memoryServiceForKey(
     },
     context,
   )
+}
+
+export function memoryServiceForKey(
+  deps: Deps,
+  key: KeyPrincipal,
+  context: SessionContext = {},
+): MemoryService {
   return new MemoryService({
     db: deps.db,
     spaceId: key.spaceId,
-    access,
+    access: accessForKey(key, context),
     personaId: key.app.defaultPersonaId,
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
   })
+}
+
+export function recallScopeForKey(
+  deps: Deps,
+  key: KeyPrincipal,
+  context: SessionContext = {},
+): RecallScope {
+  const access = accessForKey(key, context)
+  const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
+    runInSpace(deps.db, key.spaceId, key.app.defaultPersonaId, fn)
+  return {
+    async recall(rawQuery, options) {
+      const query = normalizeQuery(rawQuery)
+      if (!query) return []
+      // 嵌入设置读不出来（例如主密钥不对）时记录原因，召回退化为全文与关键词
+      const embedder = await deps.embedder.get().catch((err: unknown) => {
+        console.warn('读取嵌入设置失败，本次召回不使用向量', err)
+        return null
+      })
+      const semantic = await embedQuery(embedder, query)
+      return run((tx, personaIds) =>
+        recall(tx, access, semantic, query, { ...options, personaIds }),
+      )
+    },
+    boot: () => run((tx, personaIds) => boot(tx, access, personaIds)),
+  }
 }

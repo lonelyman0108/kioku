@@ -1,6 +1,6 @@
 import { eq, inArray } from 'drizzle-orm'
 
-import type { Tx } from '../db/client'
+import { withSpace, type Db, type Tx } from '../db/client'
 import { personas } from '../db/schema'
 
 const MAX_DEPTH = 8
@@ -28,4 +28,14 @@ export async function personaIdsBySlug(tx: Tx, slugs: string[]): Promise<Map<str
     .from(personas)
     .where(inArray(personas.slug, slugs))
   return new Map(rows.map((r) => [r.slug, r.id]))
+}
+
+// 在空间事务里执行，并带上当前人格链；记忆服务与召回都经由这里访问内容表
+export function runInSpace<T>(
+  db: Db,
+  spaceId: string,
+  personaId: string | null,
+  fn: (tx: Tx, personaIds: string[]) => Promise<T>,
+): Promise<T> {
+  return withSpace(db, spaceId, async (tx) => fn(tx, await personaChain(tx, personaId)))
 }

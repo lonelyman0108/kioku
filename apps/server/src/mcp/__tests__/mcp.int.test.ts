@@ -66,11 +66,13 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
     expect(init.body.result.serverInfo.name).toBe('kioku')
     const tools = await rpc('tools/list', {})
     expect(tools.body.result.tools.map((t: { name: string }) => t.name).sort()).toEqual([
+      'kioku_boot',
       'kioku_create',
       'kioku_delete',
       'kioku_get',
       'kioku_list',
       'kioku_move',
+      'kioku_search',
       'kioku_update',
     ])
   })
