@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type { BootResponse } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -255,6 +255,30 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     await run('default', [])
     const again = await run('default', ['infra://home_network/credentials'])
     expect(again.secretAlreadyImported).toEqual(['infra://home_network/credentials'])
+  })
+
+  it('已经按 secret 导入过的节点，再带 --secret 执行时不误报', async () => {
+    await run()
+    const again = await run()
+    expect(again.secretAlreadyImported).toEqual([])
+  })
+
+  it('早期没有记人格的导入事件也能去重：删掉的人格设定不会被写回', async () => {
+    await run()
+    // 模拟早期版本写下的导入事件：context 里没有 targetPersona
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memoryEvents)
+        .set({ context: sql`${memoryEvents.context} - 'targetPersona'` })
+        .where(eq(memoryEvents.eventType, 'import')),
+    )
+    await app.request(
+      `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('persona://default/soul')}`,
+      { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
+    )
+    const again = await run()
+    expect(again.created).toEqual([])
+    expect(again.previouslyImported).toContain('persona://default/soul')
   })
 
   it('写入时应用已经不属于导入者，就不写进去', async () => {

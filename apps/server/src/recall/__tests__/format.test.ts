@@ -37,4 +37,12 @@ describe('召回块格式', () => {
     expect(block.match(/^- core:\/\/n/gm)).toHaveLength(20)
     expect(block).toContain('还有 5 个')
   })
+
+  it('未展开的列表也按总长度截断：URI 很长时少列几个', () => {
+    const omitted = Array.from({ length: 10 }, (_, i) => `core://${'x'.repeat(300)}${i}`)
+    const block = formatBootBlock({ entries: [], omitted }, '指引')
+    const listed = block.match(/^- core:\/\//gm) ?? []
+    expect(listed.length).toBeLessThan(10)
+    expect(block).toContain(`还有 ${10 - listed.length} 个`)
+  })
 })

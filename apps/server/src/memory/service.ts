@@ -505,19 +505,22 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
       }
+      // 条件里带上读到的版本：检查之后、删除之前别人提交的修改不会被一起删掉，
+      // 事件里的「删除前」快照也就是真正被删掉的那一版
       const [row] = await tx
         .update(memories)
         .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(eq(memories.id, before.id))
+        .where(
+          and(
+            eq(memories.id, before.id),
+            eq(memories.version, before.version),
+            isNull(memories.deletedAt),
+          ),
+        )
         .returning()
+      if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
       const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-      await this.event(
-        tx,
-        before.id,
-        'delete',
-        snapshot(before, glossary),
-        snapshot(row!, glossary),
-      )
+      await this.event(tx, before.id, 'delete', snapshot(before, glossary), snapshot(row, glossary))
       return before.id
     })
     this.changed([id])
