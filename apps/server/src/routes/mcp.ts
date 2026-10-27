@@ -1,6 +1,7 @@
 import { Hono } from 'hono'
 
 import { requireKey } from '../auth/middleware'
+import { credentialServiceForKey } from '../credential/context'
 import type { AppEnv, Deps } from '../http/env'
 import { handleMcpRequest } from '../mcp/server'
 import { memoryServiceForKey, recallScopeForKey } from '../memory/context'
@@ -13,6 +14,7 @@ export function mcpRoutes(deps: Deps) {
     handleMcpRequest(
       memoryServiceForKey(deps, c.get('key')),
       recallScopeForKey(deps, c.get('key')),
+      credentialServiceForKey(deps, c.get('key')),
       c.req.raw,
     ),
   )

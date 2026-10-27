@@ -23,7 +23,7 @@ import { MemoryError, MemoryService } from './service'
 const CONSOLE_SEMANTIC_TIMEOUT_MS = 2_000
 
 // 会话上下文在接入群聊（对象解析）之后才会传进来，目前都按无上下文处理
-function accessForKey(key: KeyPrincipal, context: SessionContext): Access {
+export function accessForKey(key: KeyPrincipal, context: SessionContext = {}): Access {
   return resolveAccess(
     key.scopes,
     {

@@ -68,6 +68,9 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
     expect(tools.body.result.tools.map((t: { name: string }) => t.name).sort()).toEqual([
       'kioku_boot',
       'kioku_create',
+      'kioku_credential',
+      'kioku_credential_delete',
+      'kioku_credential_save',
       'kioku_delete',
       'kioku_get',
       'kioku_list',

@@ -1,7 +1,16 @@
 import { LAYERS, type KeyScopes } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { canRead, canWrite, consoleAccess, resolveAccess, type MemoryFacts } from '../access'
+import {
+  canManageCredentials,
+  canRead,
+  canReadCredential,
+  canRevealCredential,
+  canWrite,
+  consoleAccess,
+  resolveAccess,
+  type MemoryFacts,
+} from '../access'
 
 const OWNER = 'owner-account'
 const app = { appId: 'app-1', ownerAccountId: OWNER }
@@ -201,5 +210,87 @@ describe('应用层的写入', () => {
     expect(canWrite(consoleAccess('viewer', 'carol', ['app-carol']), appRule('app-carol'))).toBe(
       false,
     )
+  })
+})
+
+describe('凭据', () => {
+  const secretKey: KeyScopes = { ...fullKey, maxSensitivity: 'secret' }
+  const own = { ownerAccountId: OWNER, appIds: null }
+
+  it('和私人层一样：读说明要能读私人层、至少 private 级，取托管的值还要 secret 级', () => {
+    const privateLevel = resolveAccess(fullKey, app)
+    expect(canReadCredential(privateLevel, own)).toBe(true)
+    expect(canRevealCredential(privateLevel, own)).toBe(false)
+    const secretLevel = resolveAccess(secretKey, app)
+    expect(canRevealCredential(secretLevel, own)).toBe(true)
+    const internalOnly = resolveAccess({ ...secretKey, maxSensitivity: 'internal' }, app)
+    expect(canReadCredential(internalOnly, own)).toBe(false)
+    const noPrivate = resolveAccess(
+      { ...secretKey, readLayers: LAYERS.filter((l) => l !== 'private') },
+      app,
+    )
+    expect(canReadCredential(noPrivate, own)).toBe(false)
+    expect(canRevealCredential(noPrivate, own)).toBe(false)
+  })
+
+  it('只看得到这次访问代表的成员自己的凭据', () => {
+    const access = resolveAccess(secretKey, app)
+    expect(canReadCredential(access, { ...own, ownerAccountId: 'someone-else' })).toBe(false)
+  })
+
+  it('群聊、私聊（包括提升后的主人私聊）、定时任务与子 agent 都看不到凭据', () => {
+    const contexts = [
+      resolveAccess(secretKey, app, { chatType: 'group', groupSubjectId: 'g1' }),
+      resolveAccess(
+        secretKey,
+        { ...app, elevateOwnerDirect: 'internal' },
+        { chatType: 'direct', senderSubjectId: 's1', senderIsOwner: true },
+      ),
+      resolveAccess(secretKey, app, { chatType: 'cron' }),
+      resolveAccess(secretKey, app, { chatType: 'subagent' }),
+    ]
+    for (const access of contexts) {
+      expect(canReadCredential(access, own)).toBe(false)
+      expect(canManageCredentials(access)).toBe(false)
+    }
+  })
+
+  it('限定了应用的只给那些应用用，跨人格 / 应用写入的 Key 也不放宽；管理界面不受限', () => {
+    const limited = { ...own, appIds: ['app-2'] }
+    expect(canReadCredential(resolveAccess(secretKey, app), limited)).toBe(false)
+    expect(canReadCredential(resolveAccess({ ...secretKey, admin: true }, app), limited)).toBe(
+      false,
+    )
+    expect(canReadCredential(resolveAccess(secretKey, { ...app, appId: 'app-2' }), limited)).toBe(
+      true,
+    )
+    expect(canReadCredential(consoleAccess('owner', OWNER), limited)).toBe(true)
+  })
+
+  it('管理凭据要能读写私人层并且是 secret 级：只读、只写或 private 级的 Key 都不行', () => {
+    expect(canManageCredentials(resolveAccess(secretKey, app))).toBe(true)
+    expect(canManageCredentials(resolveAccess(fullKey, app))).toBe(false)
+    expect(
+      canManageCredentials(
+        resolveAccess({ ...secretKey, writeLayers: LAYERS.filter((l) => l !== 'private') }, app),
+      ),
+    ).toBe(false)
+    expect(
+      canManageCredentials(
+        resolveAccess({ ...secretKey, readLayers: LAYERS.filter((l) => l !== 'private') }, app),
+      ),
+    ).toBe(false)
+  })
+
+  it('管理界面里只有空间 owner 能管理凭据、查看托管的值；editor 与 viewer 只能看自己凭据的说明', () => {
+    for (const role of ['editor', 'viewer'] as const) {
+      const access = consoleAccess(role, OWNER)
+      expect(canReadCredential(access, own)).toBe(true)
+      expect(canRevealCredential(access, own)).toBe(false)
+      expect(canManageCredentials(access)).toBe(false)
+    }
+    const owner = consoleAccess('owner', OWNER)
+    expect(canRevealCredential(owner, own)).toBe(true)
+    expect(canManageCredentials(owner)).toBe(true)
   })
 })
