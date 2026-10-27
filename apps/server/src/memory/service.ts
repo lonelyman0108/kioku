@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
+import { SENSITIVITIES } from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
@@ -44,9 +45,10 @@ import {
   or,
   sql,
   type SQL,
+  type SQLWrapper,
 } from 'drizzle-orm'
 
-import { canRead, canWrite, canWriteApp, type Access } from '../access/access'
+import { canRead, canWrite, canWriteApp, sensitivityRank, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
 import {
   accounts,
@@ -475,7 +477,7 @@ export class MemoryService {
     tx: Tx,
     before: MemoryRow,
     input: UpdateFields,
-    meta: { eventType?: string; eventContext?: Record<string, unknown> } = {},
+    meta: { eventType?: string; eventContext?: Record<string, unknown>; glossary?: string[] } = {},
   ): Promise<MemoryView> {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
@@ -495,7 +497,8 @@ export class MemoryService {
         ? { content: null, ...this.seal(plaintext, before.id) }
         : { content: plaintext, ciphertext: null, wrappedKey: null }
 
-    const beforeGlossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    const beforeGlossary =
+      meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
     const [row] = await tx
       .update(memories)
       .set({
@@ -913,15 +916,27 @@ export class MemoryService {
     return row
   }
 
-  // 事件连同操作者的名字一起取出。记忆现在读不到、或整行已经不在的事件不列出
-  private eventRows(tx: Tx, where: SQL | undefined, order: SQL, limit: number) {
+  // 事件连同操作者一起取出，记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
+  // 只给应用主人与空间 owner（管理界面里 admin 就是空间 owner）看，别人只看到应用名。
+  // checkMemory 为 true 时只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断
+  private eventRows(
+    tx: Tx,
+    where: SQL | undefined,
+    order: SQL[],
+    limit: number,
+    checkMemory = true,
+  ) {
+    const keyVisible = this.ctx.access.admin
+      ? sql`true`
+      : sql`${apps.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
     return tx
       .select({
         event: memoryEvents,
+        createdMicros: sql<string>`${microsOf(memoryEvents.createdAt)}::text`,
         domain: memories.domain,
         path: memories.path,
         accountName: accounts.displayName,
-        keyName: apiKeys.name,
+        keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
         appName: apps.name,
       })
       .from(memoryEvents)
@@ -929,8 +944,8 @@ export class MemoryService {
       .leftJoin(accounts, eq(accounts.id, memoryEvents.actorAccountId))
       .leftJoin(apiKeys, eq(apiKeys.id, memoryEvents.actorKeyId))
       .leftJoin(apps, eq(apps.id, apiKeys.appId))
-      .where(and(where, this.manageable(), this.visibleEvent()))
-      .orderBy(order)
+      .where(and(where, checkMemory ? this.manageable() : undefined, this.visibleEvent()))
+      .orderBy(...order)
       .limit(limit)
   }
 
@@ -941,8 +956,9 @@ export class MemoryService {
       const rows = await this.eventRows(
         tx,
         eq(memoryEvents.memoryId, memoryId),
-        asc(memoryEvents.id),
+        [asc(memoryEvents.id)],
         HISTORY_LIMIT,
+        false,
       )
       return {
         memory: {
@@ -966,9 +982,10 @@ export class MemoryService {
     })
   }
 
-  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性
+  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性；
+  // 已经过期或失效的不列：撤销删除之后也看不到（例如让出 URI 时被软删除的过期记录）
   async deleted(query: PageQuery): Promise<DeletedMemoryList> {
-    const after = decodeTimeCursor(query.cursor)
+    const after = decodeTimeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
       const rows = await tx
         .select({
@@ -980,6 +997,7 @@ export class MemoryService {
           and(
             isNotNull(memories.deletedAt),
             eq(memories.form, 'curated'),
+            STILL_VALID,
             this.manageable(),
             after
               ? sql`(${DELETED_MICROS}, ${memories.id}) < (${after[0]}::bigint, ${after[1]}::uuid)`
@@ -1003,22 +1021,23 @@ export class MemoryService {
         })),
         nextCursor:
           rows.length > query.limit && last
-            ? Buffer.from(JSON.stringify([last.deletedMicros, last.row.id])).toString('base64url')
+            ? encodeTimeCursor(last.deletedMicros, last.row.id)
             : null,
       }
     })
   }
 
-  // 空间的活动流，最新的在前；游标是上一页最后一个事件的 id
+  // 空间的活动流，最新的在前。按时间排序走 (space_id, created_at) 索引，不必扫别的空间的事件；
+  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id
   async activity(query: PageQuery): Promise<ActivityList> {
-    if (query.cursor !== undefined && !/^\d{1,18}$/.test(query.cursor)) {
-      throw new MemoryError(400, '翻页参数无效，请从第一页重新开始')
-    }
+    const after = decodeTimeCursor(query.cursor, EVENT_ID)
     return this.run(async (tx) => {
       const rows = await this.eventRows(
         tx,
-        query.cursor ? lt(memoryEvents.id, Number(query.cursor)) : undefined,
-        desc(memoryEvents.id),
+        after
+          ? sql`(${microsOf(memoryEvents.createdAt)}, ${memoryEvents.id}) < (${after[0]}::bigint, ${after[1]}::bigint)`
+          : undefined,
+        [desc(memoryEvents.createdAt), desc(memoryEvents.id)],
         query.limit + 1,
       )
       const page = rows.slice(0, query.limit)
@@ -1032,13 +1051,17 @@ export class MemoryService {
           actor: actorOf(r),
           changes: changedFields(toSnapshot(r.event.before), toSnapshot(r.event.after)),
         })),
-        nextCursor: rows.length > query.limit && page.length ? String(page.at(-1)!.event.id) : null,
+        nextCursor:
+          rows.length > query.limit && page.length
+            ? encodeTimeCursor(page.at(-1)!.createdMicros, String(page.at(-1)!.event.id))
+            : null,
       }
     })
   }
 
   // 恢复到某个事件之后的那一版：只改正文、disclosure、priority 与关键词，不改 URI、层、主人、敏感级与有效期。
-  // 快照里没有正文（secret 的快照，或改成 secret 时被抹掉正文的旧快照）时正文保持不变
+  // 快照里没有正文（secret 的快照，或改成 secret 时被抹掉正文的旧快照）时正文保持不变。
+  // 只用和现在同一归属（层、主人、人格、应用）、敏感级不高于现在的版本：恢复不能把内容带到更宽的可见范围里
   async restore(input: RestoreRequest): Promise<MemoryView> {
     return this.write(async (tx) => {
       const current = await this.findManageable(tx, input.memoryId)
@@ -1058,6 +1081,24 @@ export class MemoryService {
       if (target.deletedAt != null) {
         throw new MemoryError(400, '这一版是删除之后的状态，要恢复删除请用撤销删除')
       }
+      const sameOwner =
+        target.layer === current.layer &&
+        (target.ownerAccountId ?? null) === current.ownerAccountId &&
+        (target.personaId ?? null) === current.personaId &&
+        (target.appId ?? null) === current.appId
+      if (!sameOwner) {
+        throw new MemoryError(400, '这一版和现在不在同一层或不属于同一方，先把层改回去再恢复')
+      }
+      const targetSensitivity = target.sensitivity as Sensitivity
+      if (
+        !SENSITIVITIES.includes(targetSensitivity) ||
+        sensitivityRank(targetSensitivity) > sensitivityRank(current.sensitivity)
+      ) {
+        throw new MemoryError(
+          400,
+          '这一版的敏感级比现在高，恢复会把内容放到更宽的可见范围里；先把敏感级调回去再恢复',
+        )
+      }
       const glossaryNow = (await this.glossaryOf(tx, [current.id])).get(current.id) ?? []
       const wanted = stringList(target.glossary)
       return this.applyUpdate(
@@ -1071,7 +1112,11 @@ export class MemoryService {
           glossaryAdd: wanted.filter((k) => !glossaryNow.includes(k)),
           glossaryRemove: glossaryNow.filter((k) => !wanted.includes(k)),
         },
-        { eventType: 'restore', eventContext: { fromEventId: input.eventId } },
+        {
+          eventType: 'restore',
+          eventContext: { fromEventId: input.eventId },
+          glossary: glossaryNow,
+        },
       )
     })
   }
@@ -1082,6 +1127,10 @@ export class MemoryService {
     return this.write(async (tx, _personaIds, released) => {
       const row = await this.findManageable(tx, input.memoryId)
       if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
+      const now = new Date()
+      if ((row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)) {
+        throw new MemoryError(409, '这条记忆已经过期，撤销删除之后也看不到')
+      }
       if (!canWrite(this.ctx.access, row)) {
         throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
       }
@@ -1114,9 +1163,22 @@ export class MemoryService {
 // 一条记忆的历史最多列这么多个事件
 const HISTORY_LIMIT = 500
 
-const DELETED_MICROS = sql`(extract(epoch from ${memories.deletedAt}) * 1000000)::bigint`
+// 时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
+const microsOf = (column: SQLWrapper) => sql`(extract(epoch from ${column}) * 1000000)::bigint`
+const DELETED_MICROS = microsOf(memories.deletedAt)
+// 微秒整数在 bigint 的范围里；事件 id 不超过 JS 能精确表示的整数
+const MICROS = /^\d{1,18}$/
+const EVENT_ID = /^\d{1,15}$/
 
-function decodeTimeCursor(cursor: string | undefined): [string, string] | null {
+// 还没有失效或过期
+const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
+
+// 「时间 + id」的游标：上一页最后一条的微秒时间与 id
+function encodeTimeCursor(micros: string, id: string): string {
+  return Buffer.from(JSON.stringify([micros, id])).toString('base64url')
+}
+
+function decodeTimeCursor(cursor: string | undefined, id: RegExp): [string, string] | null {
   if (!cursor) return null
   const invalid = new MemoryError(400, '翻页参数无效，请从第一页重新开始')
   let values: unknown
@@ -1129,9 +1191,9 @@ function decodeTimeCursor(cursor: string | undefined): [string, string] | null {
     !Array.isArray(values) ||
     values.length !== 2 ||
     typeof values[0] !== 'string' ||
-    !/^\d{1,18}$/.test(values[0]) ||
+    !MICROS.test(values[0]) ||
     typeof values[1] !== 'string' ||
-    !UUID.test(values[1])
+    !id.test(values[1])
   ) {
     throw invalid
   }
@@ -1194,8 +1256,7 @@ const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content}
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
 
-// 更新时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
-const UPDATED_MICROS = sql`(extract(epoch from ${memories.updatedAt}) * 1000000)::bigint`
+const UPDATED_MICROS = microsOf(memories.updatedAt)
 
 // 各种排序的排序键，最后都加上 id，保证顺序确定
 const LIST_ORDER: Record<MemoryListSort, SQL[]> = {
@@ -1246,7 +1307,7 @@ function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor 
   if (typeof id !== 'string' || !UUID.test(id)) throw invalid
   const ok =
     sort === 'updated'
-      ? values.length === 2 && typeof values[0] === 'string' && /^\d{1,18}$/.test(values[0])
+      ? values.length === 2 && typeof values[0] === 'string' && MICROS.test(values[0])
       : sort === 'priority'
         ? values.length === 4 &&
           Number.isInteger(values[0]) &&

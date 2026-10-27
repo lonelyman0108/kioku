@@ -231,7 +231,6 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
       content: '第二版',
       disclosure: '后来',
       priority: 1,
-      sensitivity: 'internal',
       glossaryAdd: ['丙丁'],
       glossaryRemove: ['甲乙'],
     })
@@ -248,8 +247,6 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
       disclosure: '最初',
       priority: 3,
       glossary: ['甲乙'],
-      // 敏感级不跟着恢复
-      sensitivity: 'internal',
       version: edited.version + 1,
     })
     const stale = await restoreRes(ws.cookie, {
@@ -367,6 +364,68 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     // editor 撤销不了自己看不到的
     const secretId = (await deleted(ws.cookie, 'limit=1')).items[0]!.id
     expect((await undeleteRes(editor.cookie, secretId)).status).toBe(404)
+  })
+
+  it('恢复不把内容带到更宽的可见范围：敏感级比现在高、或归属不同的版本都被拒', async () => {
+    const m = await create(ws.cookie, {
+      uri: 'kb://notes',
+      content: '内部细节',
+      layer: 'base',
+      sensitivity: 'private',
+    })
+    const edited = await patch(ws.cookie, {
+      uri: 'kb://notes',
+      content: '可以公开的版本',
+      sensitivity: 'public',
+    })
+    const first = (await history(ws.cookie, m.id)).events[0]!
+    const res = await restoreRes(ws.cookie, {
+      memoryId: m.id,
+      eventId: first.id,
+      expectedVersion: edited.version,
+    })
+    expect(res.status).toBe(400)
+
+    // 归属不同（这一版在主人的私人层）：即使主人自己看得到，也不能恢复进共享层
+    const before = await snapshotOf(m.id, { layer: 'private', ownerAccountId: ws.accountId })
+    const event = await insertEvent(m.id, before, before)
+    const crossed = await restoreRes(ws.cookie, {
+      memoryId: m.id,
+      eventId: event,
+      expectedVersion: edited.version,
+    })
+    expect(crossed.status).toBe(400)
+  })
+
+  it('Key 的名字只给应用主人与空间 owner 看，别人只看到应用名', async () => {
+    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const created = await app.request(
+      '/v1/memories',
+      jsonRequest('POST', { uri: 'kb://shared', content: '共享', layer: 'base' }, bearer(key)),
+    )
+    const m = (await created.json()) as MemoryView
+    const actor = async (cookie: string) => (await history(cookie, m.id)).events[0]!.actor
+    expect(await actor(ws.cookie)).toEqual({ accountName: null, keyName: 'test', appName: 'agent' })
+    expect(await actor(editor.cookie)).toEqual({
+      accountName: null,
+      keyName: null,
+      appName: 'agent',
+    })
+    expect((await activity(editor.cookie)).items[0]!.actor.keyName).toBeNull()
+  })
+
+  it('已经过期的记录不列在已删除里，也不能撤销删除', async () => {
+    const m = await create(ws.cookie, { uri: 'kb://stale', content: '旧的', layer: 'base' })
+    await remove(ws.cookie, m)
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 60_000) })
+        .where(eq(memories.id, m.id)),
+    )
+    expect((await deleted(ws.cookie)).items).toEqual([])
+    expect((await undeleteRes(ws.cookie, m.id)).status).toBe(409)
   })
 
   it('viewer 看得到历史，但不能撤销删除，也不能恢复', async () => {

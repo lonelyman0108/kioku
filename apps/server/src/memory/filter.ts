@@ -1,4 +1,4 @@
-import { SENSITIVITIES, type Layer, type Sensitivity } from '@kioku/contracts'
+import { LAYERS, SENSITIVITIES, type Layer, type Sensitivity } from '@kioku/contracts'
 import {
   and,
   eq,
@@ -60,17 +60,24 @@ export function snapshotColumns(snapshot: SQLWrapper): MemoryColumns {
   }
 }
 
-// 快照转成 canRead 要的字段，给只拿到单个快照的地方与一致性测试用
-export function snapshotFacts(snapshot: Record<string, unknown>): MemoryFacts {
+// 快照转成 canRead 要的字段，给只拿到单个快照的地方与一致性测试用。与 SQL 一侧的取值方式一致：
+// 层或敏感级缺失、不认识的快照返回 null，当作看不到（SQL 里这些字段为 NULL 时条件不成立）；
+// 缺来源作用域时记为空串，有作用域限制的访问照样读不到
+export function snapshotFacts(snapshot: Record<string, unknown>): MemoryFacts | null {
   const text = (key: string) => (typeof snapshot[key] === 'string' ? snapshot[key] : null)
   const time = (key: string) => {
     const value = text(key)
     return value ? new Date(value) : null
   }
+  const layer = text('layer') as Layer | null
+  const sensitivity = text('sensitivity') as Sensitivity | null
+  if (!layer || !LAYERS.includes(layer) || !sensitivity || !SENSITIVITIES.includes(sensitivity)) {
+    return null
+  }
   return {
-    layer: snapshot.layer as Layer,
-    sensitivity: snapshot.sensitivity as Sensitivity,
-    originScope: text('originScope') ?? 'global',
+    layer,
+    sensitivity,
+    originScope: text('originScope') ?? '',
     ownerAccountId: text('ownerAccountId'),
     personaId: text('personaId'),
     appId: text('appId'),

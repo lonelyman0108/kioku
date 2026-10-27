@@ -103,18 +103,35 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
         .insert(memories)
         .values(rows.map((r) => (r.layer === 'subject' ? { ...r, layer: 'episode' as const } : r)))
         .returning()
-      // 每条记忆再记一个事件，「改后」快照就是这一行，用来比对快照上的 SQL 条件
-      await tx.insert(memoryEvents).values(
-        inserted.map((m) => ({
+      // 每条记忆再记一个事件，「改后」快照就是这一行，用来比对快照上的 SQL 条件；
+      // 另外几十条缺字段的旧快照，两边的处理也要一致
+      const snap = (m: (typeof inserted)[number]) =>
+        JSON.parse(
+          JSON.stringify({ ...m, ciphertext: null, wrappedKey: null, fts: null }),
+        ) as Record<string, unknown>
+      const without = (m: (typeof inserted)[number], key: string) => {
+        const s = snap(m)
+        delete s[key]
+        return s
+      }
+      await tx.insert(memoryEvents).values([
+        ...inserted.map((m) => ({
           spaceId,
           memoryId: m.id,
           eventType: 'create',
           provenance: m.provenance,
-          after: JSON.parse(
-            JSON.stringify({ ...m, ciphertext: null, wrappedKey: null, fts: null }),
-          ),
+          after: snap(m),
         })),
-      )
+        ...inserted.slice(0, 40).flatMap((m) =>
+          ['layer', 'sensitivity', 'originScope', 'ownerAccountId'].map((key) => ({
+            spaceId,
+            memoryId: m.id,
+            eventType: 'update',
+            provenance: m.provenance,
+            after: without(m, key),
+          })),
+        ),
+      ])
     })
   })
 
@@ -186,21 +203,22 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
         const options = { personaIds: [personaId], ...mode }
         const events = await withSpace(database.db, spaceId, (tx) => tx.select().from(memoryEvents))
         const expected = events
-          .filter((e) =>
-            canRead(access, snapshotFacts(e.after as Record<string, unknown>), options),
-          )
-          .map((e) => e.memoryId)
-          .sort()
+          .filter((e) => {
+            const facts = snapshotFacts(e.after as Record<string, unknown>)
+            return facts !== null && canRead(access, facts, options)
+          })
+          .map((e) => e.id)
+          .sort((a, b) => a - b)
         const actual = (
           await withSpace(database.db, spaceId, (tx) =>
             tx
-              .select({ memoryId: memoryEvents.memoryId })
+              .select({ id: memoryEvents.id })
               .from(memoryEvents)
               .where(readableConditions(access, options, snapshotColumns(memoryEvents.after))),
           )
         )
-          .map((r) => r.memoryId)
-          .sort()
+          .map((r) => r.id)
+          .sort((a, b) => a - b)
         expect(events.length).toBeGreaterThan(400)
         expect(actual).toEqual(expected)
       })
