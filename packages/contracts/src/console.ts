@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { Layer, Provenance, Sensitivity } from './memory'
+import { Layer, PlainLayer, Provenance, Sensitivity } from './memory'
 import { RecallCandidate } from './recall'
 
 // 管理界面专用的接口：记忆列表、搜索与空间概览。只按成员本人的权限返回，Key 用不了
@@ -143,6 +143,9 @@ export const HistoryEvent = z.object({
   actor: EventActor,
   before: MemorySnapshot.nullable(),
   after: MemorySnapshot.nullable(),
+  // 这次改动之后，这条记忆离开了你的可见范围（例如被改进了别的成员的私人层，或改成了 secret）：
+  // 只给改前的版本，after 为 null，也不能拿来恢复
+  left: z.boolean(),
 })
 export type HistoryEvent = z.infer<typeof HistoryEvent>
 
@@ -192,12 +195,14 @@ export const ActivityItem = z.object({
   id: z.number().int(),
   type: z.string(),
   memoryId: z.uuid(),
-  // 记忆现在的 URI
+  // 记忆现在的 URI；离开了你的可见范围的（left 为 true），是改动之前的 URI
   uri: z.string(),
   createdAt: z.string(),
   actor: EventActor,
-  // 这次改了哪些字段：content、disclosure、priority、sensitivity、layer、uri、glossary
+  // 这次改了哪些字段：content、disclosure、priority、sensitivity、layer、uri、glossary；离开的事件为空
   changes: z.array(z.string()),
+  // 见 HistoryEvent.left
+  left: z.boolean(),
 })
 export type ActivityItem = z.infer<typeof ActivityItem>
 
@@ -230,3 +235,12 @@ export const SpaceOverview = z.object({
   recent: z.array(ActivityItem),
 })
 export type SpaceOverview = z.infer<typeof SpaceOverview>
+
+// 空间的 domain 默认层：管理界面新建记忆时按 domain 带出层。只是默认值，通过 Key 写入不受影响
+export const DomainLayers = z.object({
+  defaults: z
+    .record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'domain 格式不对'), PlainLayer)
+    .refine((r) => Object.keys(r).length <= 64, '最多配置 64 个 domain')
+    .refine((r) => !('persona' in r) && !('app' in r), 'persona 与 app 的层由 URI 决定，不用配置'),
+})
+export type DomainLayers = z.infer<typeof DomainLayers>

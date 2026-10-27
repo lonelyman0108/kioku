@@ -19,8 +19,8 @@ export const UpdateEmbeddingSettings = z.object({
 })
 export type UpdateEmbeddingSettings = z.infer<typeof UpdateEmbeddingSettings>
 
-// 为 false 表示服务没有启动后台任务（例如只提供 API 的测试环境），补齐不会执行
-export const EmbeddingRebuildResult = z.object({ queued: z.boolean() })
+// 排进了队列才返回；服务没有启动后台任务（例如只提供 API 的测试环境）或入队失败时是 503 与错误信息
+export const EmbeddingRebuildResult = z.object({ queued: z.literal(true) })
 export type EmbeddingRebuildResult = z.infer<typeof EmbeddingRebuildResult>
 
 export const EmbeddingTestResult = z.object({

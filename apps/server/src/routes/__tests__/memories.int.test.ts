@@ -188,7 +188,7 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect(JSON.stringify(events)).not.toContain('ciphertext')
   })
 
-  it('移动改 URI，人格层不能移出自己的命名空间', async () => {
+  it('移动改 URI，移出人格命名空间时不指定新的层返回 400', async () => {
     await create({ uri: 'core://a', content: 'x', layer: 'base' })
     const moved = await call('POST', '/memories/move', { from: 'core://a', to: 'core://b' })
     expect(((await moved.json()) as MemoryView).uri).toBe('core://b')

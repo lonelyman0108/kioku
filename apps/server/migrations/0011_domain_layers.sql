@@ -1,0 +1,1 @@
+ALTER TABLE "spaces" ADD COLUMN "domain_layers" jsonb DEFAULT '{}'::jsonb NOT NULL;

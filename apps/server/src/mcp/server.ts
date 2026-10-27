@@ -4,6 +4,7 @@ import {
   CreateMemoryRequest,
   Layer,
   MemoryUri,
+  PlainLayer,
   RecallRequest,
   Sensitivity,
   UpdateMemoryRequest,
@@ -131,6 +132,9 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         disclosure: UpdateMemoryRequest.shape.disclosure,
         priority: UpdateMemoryRequest.shape.priority,
         sensitivity: Sensitivity.optional(),
+        layer: PlainLayer.optional().describe(
+          '新的层。只能在 owner 与 private 之间改；与 base 互转会改变谁看得到它，要在管理界面里改',
+        ),
         glossary_add: UpdateMemoryRequest.shape.glossaryAdd,
         glossary_remove: UpdateMemoryRequest.shape.glossaryRemove,
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
@@ -145,6 +149,7 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
             ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
             ...(args.priority !== undefined ? { priority: args.priority } : {}),
             ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
+            ...(args.layer ? { layer: args.layer } : {}),
             ...(args.glossary_add ? { glossaryAdd: args.glossary_add } : {}),
             ...(args.glossary_remove ? { glossaryRemove: args.glossary_remove } : {}),
             ...(args.expected_version !== undefined
@@ -173,10 +178,16 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
     'kioku_move',
     {
       description:
-        '修改记忆的 URI（改名或移到别的父节点下）。人格层与应用层的记忆只能在同一个标识下移动。',
-      inputSchema: { from: MemoryUri, to: MemoryUri },
+        '修改记忆的 URI（改名或移到别的父节点下）。移到 persona:// 或 app:// 下时层跟着 URI 变；' +
+        '从那里移出时要用 layer 指定新的层（base、owner 或 private）。',
+      inputSchema: {
+        from: MemoryUri,
+        to: MemoryUri,
+        layer: PlainLayer.optional().describe('移出 persona:// 或 app:// 时的新层'),
+      },
     },
-    ({ from, to }) => tool(async () => formatMemory(await memory.move({ from, to }))),
+    ({ from, to, layer }) =>
+      tool(async () => formatMemory(await memory.move({ from, to, ...(layer ? { layer } : {}) }))),
   )
 
   return server

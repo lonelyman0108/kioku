@@ -1,14 +1,13 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import { ErrorResponse, SpaceOverview } from '@kioku/contracts'
-import { and, count, eq, inArray, isNull, max } from 'drizzle-orm'
+import { and, eq, inArray, isNull } from 'drizzle-orm'
 
-import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
-import { apiKeys, apps } from '../db/schema'
+import { apiKeys, apps, spaceMembers } from '../db/schema'
 import { embeddingSettingsView } from '../embedding/settings'
 import type { Deps } from '../http/env'
 import { jsonResponse, router } from '../http/openapi'
-import { memoryServiceForConsole } from '../memory/context'
+import { consoleMemberFor } from '../memory/context'
 
 // 概览里列出的最近改动数
 const RECENT_LIMIT = 8
@@ -29,13 +28,15 @@ export function overviewRoutes(deps: Deps) {
   return router().openapi(overview, async (c) => {
     const { spaceId } = c.req.valid('param')
     const accountId = c.get('console').accountId
-    const role = await memberRole(deps, spaceId, accountId)
-    if (!role) return c.json({ error: '不是该空间成员' }, 403)
-
-    const [settings, service, appRows] = await Promise.all([
+    // 先确认是成员，不是成员就不去查别的空间的数据
+    const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
+    const [settings, appRows, members] = await Promise.all([
       embeddingSettingsView(deps.db),
-      memoryServiceForConsole(deps, spaceId, accountId, role),
       withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
+      deps.db
+        .select({ accountId: spaceMembers.accountId, since: spaceMembers.createdAt })
+        .from(spaceMembers)
+        .where(eq(spaceMembers.spaceId, spaceId)),
     ])
     const [stats, recent] = await Promise.all([
       service.stats(settings.model),
@@ -49,8 +50,8 @@ export function overviewRoutes(deps: Deps) {
       ? await deps.db
           .select({
             appId: apiKeys.appId,
-            active: count(),
-            lastUsedAt: max(apiKeys.lastUsedAt),
+            createdAt: apiKeys.createdAt,
+            lastUsedAt: apiKeys.lastUsedAt,
           })
           .from(apiKeys)
           .where(
@@ -60,9 +61,21 @@ export function overviewRoutes(deps: Deps) {
               isNull(apiKeys.revokedAt),
             ),
           )
-          .groupBy(apiKeys.appId)
       : []
-    const keysByApp = new Map(keyRows.map((k) => [k.appId, k]))
+    // 有效的 Key 与鉴权的规则一致：没吊销、应用主人还在空间里、是主人这次加入之后签发的
+    const since = new Map(members.map((m) => [m.accountId, m.since]))
+    const ownerOf = new Map(appRows.map((a) => [a.id, a.ownerAccountId]))
+    const keysByApp = new Map<string, { active: number; lastUsedAt: Date | null }>()
+    for (const k of keyRows) {
+      const joined = since.get(ownerOf.get(k.appId) ?? '')
+      if (!joined || k.createdAt < joined) continue
+      const agg = keysByApp.get(k.appId) ?? { active: 0, lastUsedAt: null }
+      agg.active += 1
+      if (k.lastUsedAt && (!agg.lastUsedAt || k.lastUsedAt > agg.lastUsedAt)) {
+        agg.lastUsedAt = k.lastUsedAt
+      }
+      keysByApp.set(k.appId, agg)
+    }
 
     return c.json(
       {
