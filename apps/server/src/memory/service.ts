@@ -953,13 +953,15 @@ export class MemoryService {
   async history(memoryId: string): Promise<MemoryHistory> {
     return this.run(async (tx) => {
       const row = await this.findManageable(tx, memoryId)
-      const rows = await this.eventRows(
+      // 太多时保留最近的：最新的几版才是最常要看、要恢复的
+      const latest = await this.eventRows(
         tx,
         eq(memoryEvents.memoryId, memoryId),
-        [asc(memoryEvents.id)],
-        HISTORY_LIMIT,
+        [desc(memoryEvents.id)],
+        HISTORY_LIMIT + 1,
         false,
       )
+      const rows = latest.slice(0, HISTORY_LIMIT).reverse()
       return {
         memory: {
           id: row.id,
@@ -978,6 +980,7 @@ export class MemoryService {
           before: toSnapshot(r.event.before),
           after: toSnapshot(r.event.after),
         })),
+        truncated: latest.length > HISTORY_LIMIT,
       }
     })
   }
@@ -1035,7 +1038,7 @@ export class MemoryService {
       const rows = await this.eventRows(
         tx,
         after
-          ? sql`(${microsOf(memoryEvents.createdAt)}, ${memoryEvents.id}) < (${after[0]}::bigint, ${after[1]}::bigint)`
+          ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
           : undefined,
         [desc(memoryEvents.createdAt), desc(memoryEvents.id)],
         query.limit + 1,
@@ -1127,10 +1130,6 @@ export class MemoryService {
     return this.write(async (tx, _personaIds, released) => {
       const row = await this.findManageable(tx, input.memoryId)
       if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
-      const now = new Date()
-      if ((row.validTo && row.validTo <= now) || (row.expiresAt && row.expiresAt <= now)) {
-        throw new MemoryError(409, '这条记忆已经过期，撤销删除之后也看不到')
-      }
       if (!canWrite(this.ctx.access, row)) {
         throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
       }
@@ -1143,10 +1142,20 @@ export class MemoryService {
             eq(memories.id, row.id),
             eq(memories.version, row.version),
             isNotNull(memories.deletedAt),
+            STILL_VALID,
           ),
         )
         .returning()
-      if (!restored) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+      if (!restored) {
+        const [stale] = await tx
+          .select({ id: memories.id })
+          .from(memories)
+          .where(and(eq(memories.id, row.id), sql`not ${STILL_VALID}`))
+        throw new MemoryError(
+          409,
+          stale ? '这条记忆已经过期，撤销删除之后也看不到' : '记忆刚被其他请求修改，请重新读取',
+        )
+      }
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       await this.event(
         tx,
@@ -1166,6 +1175,9 @@ const HISTORY_LIMIT = 500
 // 时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
 const microsOf = (column: SQLWrapper) => sql`(extract(epoch from ${column}) * 1000000)::bigint`
 const DELETED_MICROS = microsOf(memories.deletedAt)
+// 游标里的微秒整数换回时间，按微秒精确换算，不经过浮点
+const fromMicros = (micros: string) =>
+  sql`('epoch'::timestamptz + ${micros}::bigint * interval '1 microsecond')`
 // 微秒整数在 bigint 的范围里；事件 id 不超过 JS 能精确表示的整数
 const MICROS = /^\d{1,18}$/
 const EVENT_ID = /^\d{1,15}$/

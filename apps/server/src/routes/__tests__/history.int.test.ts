@@ -138,6 +138,38 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     expect(h.events[3]!.actor).toEqual({ accountName: null, keyName: 'test', appName: 'agent' })
   })
 
+  it('事件太多时历史保留最近的 500 个，按时间正序，并标出截断', async () => {
+    const m = await create(ws.cookie, { uri: 'notes://busy', content: '常改的' })
+    const snap = await snapshotOf(m.id)
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memoryEvents).values(
+        Array.from({ length: 505 }, () => ({
+          spaceId: ws.spaceId,
+          memoryId: m.id,
+          eventType: 'update',
+          provenance: 'owner' as const,
+          before: snap,
+          after: snap,
+        })),
+      ),
+    )
+    const h = await history(ws.cookie, m.id)
+    expect(h.truncated).toBe(true)
+    expect(h.events).toHaveLength(500)
+    // 最早的新建事件被截掉，留下的是最近的，从早到晚
+    expect(h.events.map((e) => e.type)).not.toContain('create')
+    const ids = h.events.map((e) => e.id)
+    expect(ids).toEqual([...ids].sort((a, b) => a - b))
+    expect(
+      (
+        await history(
+          ws.cookie,
+          (await create(ws.cookie, { uri: 'notes://calm', content: '少改的' })).id,
+        )
+      ).truncated,
+    ).toBe(false)
+  })
+
   it('别的成员看不到私人记忆的历史；secret 的历史只给 owner，快照里没有正文', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     const diary = await create(ws.cookie, { uri: 'home://diary', content: '私事' })

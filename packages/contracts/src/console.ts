@@ -159,6 +159,8 @@ export const MemoryHistory = z.object({
   }),
   // 从早到晚；成员看不到的版本所在的事件不列出
   events: z.array(HistoryEvent),
+  // 事件太多时只列最近的那些，更早的没有列出
+  truncated: z.boolean(),
 })
 export type MemoryHistory = z.infer<typeof MemoryHistory>
 
