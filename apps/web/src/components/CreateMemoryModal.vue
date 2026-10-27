@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import { URI_PATTERN, type Layer, type Sensitivity } from '@kioku/contracts'
+import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
@@ -22,6 +23,9 @@ const form = reactive({
 const error = ref<string | null>(null)
 const saving = ref(false)
 
+// 手动选过层之后，就不再按 domain 默认层改它
+const layerTouched = ref(false)
+
 watch(open, (value) => {
   if (!value) return
   Object.assign(form, {
@@ -31,12 +35,32 @@ watch(open, (value) => {
     sensitivity: null,
     disclosure: '',
   })
+  layerTouched.value = false
   error.value = null
 })
 
 // persona:// 与 app:// 下的层由 URI 决定，不再让人选
 const domain = computed(() => form.uri.split('://')[0] ?? '')
 const layerFixed = computed(() => domain.value === 'persona' || domain.value === 'app')
+
+// 空间配置的 domain 默认层：没手动选过层时，按 URI 的 domain 带出，没配置的按私人层
+const domainLayers = useQuery({
+  queryKey: computed(() => ['domain-layers', props.spaceId]),
+  queryFn: () => api.domainLayers(props.spaceId),
+})
+const suggestedLayer = computed(() => domainLayers.data.value?.defaults[domain.value])
+watch(
+  [suggestedLayer, open],
+  ([suggested, isOpen]) => {
+    if (isOpen && !layerTouched.value && !layerFixed.value) form.layer = suggested ?? 'private'
+  },
+  { immediate: true },
+)
+const layerHelp = computed(() => {
+  if (layerFixed.value) return '由 URI 决定'
+  if (suggestedLayer.value && !layerTouched.value) return '按空间设置的 domain 默认层带出'
+  return undefined
+})
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
 const layerItems = creatableLayers.map((l) => ({ label: layerLabels[l], value: l }))
 // editor 签不了 secret，选项里也不给
@@ -75,12 +99,13 @@ async function submit() {
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
         </UFormField>
         <div class="grid gap-4 sm:grid-cols-2">
-          <UFormField label="层" :help="layerFixed ? '由 URI 决定' : undefined">
+          <UFormField label="层" :help="layerHelp">
             <USelect
               v-model="form.layer"
               :items="layerItems"
               :disabled="layerFixed"
               class="w-full"
+              @update:model-value="layerTouched = true"
             />
           </UFormField>
           <UFormField label="敏感级">

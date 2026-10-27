@@ -4,11 +4,11 @@ import { useRouter } from 'vue-router'
 
 import { useSession } from '../composables/useSession'
 
-// 根路径跳到第一个空间的记忆页
+// 根路径跳到第一个空间的概览
 const router = useRouter()
 const { me, space } = useSession()
 watchEffect(() => {
-  if (space.value) void router.replace({ name: 'memories', params: { spaceId: space.value.id } })
+  if (space.value) void router.replace({ name: 'overview', params: { spaceId: space.value.id } })
 })
 </script>
 

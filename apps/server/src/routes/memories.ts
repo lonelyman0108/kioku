@@ -97,7 +97,8 @@ function memoryRouteSet(set: RouteSet) {
     ...common,
     method: 'patch',
     path: base,
-    summary: '修改记忆正文、敏感级、priority、disclosure 或 glossary',
+    summary:
+      '修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间',
     request: { params, body: jsonBody(UpdateMemoryRequest) },
     responses: { 200: jsonResponse('已修改', MemoryView), ...errors },
   })

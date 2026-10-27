@@ -203,6 +203,8 @@ export const ActivityItem = z.object({
   changes: z.array(z.string()),
   // 见 HistoryEvent.left
   left: z.boolean(),
+  // 记忆现在已经删除（包括过期后让出 URI 的）：那个 URI 上可能已经是别的记忆了。离开了可见范围的一律为 false
+  deleted: z.boolean(),
 })
 export type ActivityItem = z.infer<typeof ActivityItem>
 

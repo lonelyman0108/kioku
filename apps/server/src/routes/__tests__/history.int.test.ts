@@ -475,6 +475,17 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     expect((await undeleteRes(viewer.cookie, m.id)).status).toBe(403)
   })
 
+  it('活动条目标出记忆现在是否已删除，撤销删除之后恢复', async () => {
+    const m = await create(ws.cookie, { uri: 'kb://gone', content: '一', layer: 'base' })
+    const edited = await patch(ws.cookie, { uri: 'kb://gone', content: '二' })
+    await remove(ws.cookie, edited)
+    const flags = async () =>
+      (await activity(ws.cookie)).items.filter((i) => i.memoryId === m.id).map((i) => i.deleted)
+    expect(await flags()).toEqual([true, true, true])
+    await ok<MemoryView>(await undeleteRes(ws.cookie, m.id))
+    expect(await flags()).toEqual([false, false, false, false])
+  })
+
   it('活动流：最新的在前，带 URI 与改了哪些字段，能翻页；概览里有最近的改动', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     await create(ws.cookie, { uri: 'kb://x', content: '一', layer: 'base' })

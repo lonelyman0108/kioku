@@ -2,13 +2,12 @@
 import { useToast } from '@nuxt/ui/composables'
 import type { MemoryView, Sensitivity } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, onBeforeUnmount, onMounted, reactive, ref, watch } from 'vue'
-import { onBeforeRouteLeave, onBeforeRouteUpdate, useRouter } from 'vue-router'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
-import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
+import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 
@@ -71,35 +70,7 @@ watch(
 )
 
 // 有未保存的修改时，切到别的记忆、别的页面、退出登录或关掉标签页之前先确认（见 unsavedChanges.ts）
-const leaving = ref(false)
-watch(dirty, (d) => (hasUnsavedChanges.value = d && !leaving.value), { immediate: true })
-const confirmLeave = () => leaving.value || confirmDiscard()
-onBeforeRouteUpdate(confirmLeave)
-onBeforeRouteLeave(confirmLeave)
-// 确认过离开、导航却没有完成：修改还在，重新登记，下次离开还要确认。
-// 被中止或取消的导航走 afterEach；页面文件加载不到（例如升级之后）这类报错走 onError
-const router = useRouter()
-const rearm = () => {
-  if (dirty.value && !leaving.value) hasUnsavedChanges.value = true
-}
-const stopAfterEach = router.afterEach((_to, _from, failure) => {
-  if (failure) rearm()
-})
-// 注册了 onError 之后 vue-router 不再自己打印错误，这里照样打出来，升级后页面加载失败还能查
-const stopOnError = router.onError((err) => {
-  rearm()
-  console.error(err)
-})
-function onBeforeUnload(event: BeforeUnloadEvent) {
-  if (hasUnsavedChanges.value) event.preventDefault()
-}
-onMounted(() => window.addEventListener('beforeunload', onBeforeUnload))
-onBeforeUnmount(() => {
-  stopAfterEach()
-  stopOnError()
-  window.removeEventListener('beforeunload', onBeforeUnload)
-  hasUnsavedChanges.value = false
-})
+const { leaving } = useUnsavedChangesGuard(dirty)
 const changedElsewhere = computed(() => {
   const [m, b] = [memory.data.value, base.value]
   return !!m && !!b && (m.id !== b.id || m.version !== b.version)

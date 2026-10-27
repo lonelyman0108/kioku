@@ -1036,6 +1036,7 @@ export class MemoryService {
         createdMicros: sql<string>`${microsOf(memoryEvents.createdAt)}::text`,
         domain: memories.domain,
         path: memories.path,
+        memoryDeleted: sql<boolean>`(${memories.deletedAt} is not null)`,
         accountName: accounts.displayName,
         keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
         appName: apps.name,
@@ -1165,6 +1166,8 @@ export class MemoryService {
             ? []
             : changedFields(toSnapshot(r.event.before), toSnapshot(r.event.after)),
           left: r.left,
+          // 离开了可见范围的，不透露它在别人那里现在是什么状态
+          deleted: !r.left && r.memoryDeleted,
         })),
         nextCursor:
           rows.length > query.limit && page.length
