@@ -37,9 +37,7 @@ async function save() {
     form.clearKey = false
     await queryClient.invalidateQueries({ queryKey: ['settings', 'embedding'] })
     toast.add({ title: '已保存，后台会为全部记忆重新生成向量', color: 'success' })
-    polling.value = true
-    clearTimeout(pollTimer)
-    pollTimer = setTimeout(() => (polling.value = false), POLL_DURATION_MS)
+    startPolling()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {
@@ -69,6 +67,11 @@ watch(
   },
 )
 onBeforeUnmount(() => clearTimeout(pollTimer))
+function startPolling() {
+  polling.value = true
+  clearTimeout(pollTimer)
+  pollTimer = setTimeout(() => (polling.value = false), POLL_DURATION_MS)
+}
 
 const rebuilding = ref(false)
 async function rebuild() {
@@ -76,9 +79,7 @@ async function rebuild() {
   try {
     await api.rebuildEmbeddings()
     toast.add({ title: '已排进队列，后台会检查全部记忆、补齐缺少或过时的向量', color: 'success' })
-    polling.value = true
-    clearTimeout(pollTimer)
-    pollTimer = setTimeout(() => (polling.value = false), POLL_DURATION_MS)
+    startPolling()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '排队失败', color: 'error' })
   } finally {

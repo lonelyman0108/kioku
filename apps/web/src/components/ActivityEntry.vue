@@ -17,6 +17,10 @@ const actor = computed(() => {
   return '未知'
 })
 const viaApp = computed(() => !props.item.actor.accountName && !!props.item.actor.appName)
+// 删除与让出 URI 之后，那个 URI 上可能已经是别的记忆了；离开了可见范围的 URI 是改动之前的。这几种不给链接
+const linkable = computed(
+  () => !props.item.left && props.item.type !== 'delete' && props.item.type !== 'expire',
+)
 </script>
 
 <template>
@@ -29,8 +33,7 @@ const viaApp = computed(() => !props.item.actor.accountName && !!props.item.acto
           {{ actor }}
         </span>
         <span class="text-muted">{{ kind.label }}</span>
-        <!-- 离开了可见范围的，URI 是改动之前的，那里可能已经是别的记忆了，不给链接 -->
-        <code v-if="item.left" class="truncate text-xs text-muted">{{ item.uri }}</code>
+        <code v-if="!linkable" class="truncate text-xs text-muted">{{ item.uri }}</code>
         <RouterLink
           v-else
           :to="{ name: 'memories', params: { spaceId }, query: { uri: item.uri } }"

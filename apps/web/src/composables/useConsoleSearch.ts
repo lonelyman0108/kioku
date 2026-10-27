@@ -2,6 +2,7 @@ import type { CommandPaletteGroup, CommandPaletteItem } from '@nuxt/ui'
 import type { ConsoleSearchResponse } from '@kioku/contracts'
 import { computed, onBeforeUnmount, ref, watch, type Ref } from 'vue'
 
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { layerLabels } from '../labels'
@@ -15,13 +16,17 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
   const term = ref('')
   const loading = ref(false)
   const results = ref<ConsoleSearchResponse | null>(null)
+  const failure = ref<string | null>(null)
   let timer: ReturnType<typeof setTimeout> | undefined
   let seq = 0
 
-  watch([term, spaceId], ([value, id]) => {
+  watch([term, spaceId], ([value, id], previous) => {
     clearTimeout(timer)
     const query = value.trim()
     const mine = ++seq
+    // 换了空间：上一个空间的结果立刻清掉，不能拿新空间的地址去开它们
+    if (previous[1] !== undefined && id !== previous[1]) results.value = null
+    failure.value = null
     if (!query || !id) {
       results.value = null
       loading.value = false
@@ -32,8 +37,10 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
       try {
         const found = await api.searchMemories(id, query)
         if (mine === seq) results.value = found
-      } catch {
-        if (mine === seq) results.value = null
+      } catch (err) {
+        if (mine !== seq) return
+        results.value = null
+        failure.value = err instanceof ApiError ? err.message : '搜索失败，请重试'
       } finally {
         if (mine === seq) loading.value = false
       }
@@ -46,6 +53,14 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
       { id: 'pages', label: '页面', items: pages.value },
     ]
     const id = spaceId.value
+    if (failure.value) {
+      list.push({
+        id: 'error',
+        label: '搜索失败',
+        ignoreFilter: true,
+        items: [{ label: failure.value, icon: icons.left, disabled: true }],
+      })
+    }
     const found = results.value
     if (!id || !found) return list
     const to = (uri: string) => ({ name: 'memories', params: { spaceId: id }, query: { uri } })

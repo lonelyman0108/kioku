@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { PLAIN_LAYERS, type PlainLayer } from '@kioku/contracts'
+import { DomainLayers, PLAIN_LAYERS, type PlainLayer } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { layerLabels } from '../labels'
@@ -26,45 +27,56 @@ interface Row {
   layer: PlainLayer
 }
 const rows = ref<Row[]>([])
-const saved = computed(() => layers.data.value?.defaults ?? {})
+// 表单是从哪一版载入的；还没载入时为 null，这时不算有改动，也不能保存。
+// 改动以它为准，而不是缓存里最新的那份：否则数据晚到时会被当成「有改动」而填不进表单
+const baseline = ref<Row[] | null>(null)
 const toRows = (defaults: Record<string, PlainLayer>) =>
   Object.entries(defaults)
     .map(([domain, layer]) => ({ domain, layer }))
     .sort((a, b) => a.domain.localeCompare(b.domain))
-const dirty = computed(
-  () => JSON.stringify(normalized(rows.value)) !== JSON.stringify(normalized(toRows(saved.value))),
-)
-// 没有改动时跟上服务端（例如换了空间、别的标签页保存过）
-watch(
-  saved,
-  (defaults) => {
-    if (!dirty.value) rows.value = toRows(defaults)
-  },
-  { immediate: true },
-)
-watch(spaceId, () => (rows.value = toRows(saved.value)))
-
-function normalized(list: Row[]) {
-  return list
+const normalized = (list: Row[]) =>
+  list
     .map((r) => ({ domain: r.domain.trim(), layer: r.layer }))
     .filter((r) => r.domain)
     .sort((a, b) => a.domain.localeCompare(b.domain))
-}
+const dirty = computed(
+  () =>
+    baseline.value !== null &&
+    JSON.stringify(normalized(rows.value)) !== JSON.stringify(normalized(baseline.value)),
+)
 
-const DOMAIN = /^[a-z][a-z0-9_]{0,31}$/
+function load(defaults: Record<string, PlainLayer>) {
+  rows.value = toRows(defaults)
+  baseline.value = toRows(defaults)
+}
+// 换了空间就重新载入；同一个空间里服务端的数据变了（例如别的标签页保存过），没有改动时才跟上
+watch(
+  [spaceId, () => layers.data.value],
+  ([id, data], previous) => {
+    // 第一次执行时 previous 是空数组
+    if (previous[0] !== undefined && id !== previous[0]) {
+      rows.value = []
+      baseline.value = null
+    }
+    if (data && (baseline.value === null || !dirty.value)) load(data.defaults)
+  },
+  { immediate: true },
+)
+// 有未保存的改动时，离开这一页、换空间、退出登录或关掉标签页之前先确认
+useUnsavedChangesGuard(dirty)
+
+// 校验规则与服务端用同一个 schema；重复的 domain 会被合并掉，单独查
 const problem = computed(() => {
   const list = normalized(rows.value)
-  const bad = list.find((r) => !DOMAIN.test(r.domain))
-  if (bad) return `domain「${bad.domain}」格式不对：小写字母开头，只用小写字母、数字和下划线`
-  if (list.some((r) => r.domain === 'persona' || r.domain === 'app')) {
-    return 'persona 与 app 下的层由 URI 决定，不用配置'
-  }
   const seen = new Set<string>()
   for (const r of list) {
     if (seen.has(r.domain)) return `domain「${r.domain}」重复了`
     seen.add(r.domain)
   }
-  return null
+  const parsed = DomainLayers.safeParse({
+    defaults: Object.fromEntries(list.map((r) => [r.domain, r.layer])),
+  })
+  return parsed.success ? null : (parsed.error.issues[0]?.message ?? '格式不对')
 })
 
 const layerItems = PLAIN_LAYERS.map((l) => ({ label: layerLabels[l], value: l }))
@@ -85,13 +97,15 @@ function fillSuggested() {
 
 const saving = ref(false)
 async function save() {
-  if (problem.value) return
+  if (problem.value || baseline.value === null) return
   saving.value = true
+  // 记下发起保存的空间：请求期间换了空间，结果不能写进新空间的表单
+  const forSpace = spaceId.value
   try {
     const defaults = Object.fromEntries(normalized(rows.value).map((r) => [r.domain, r.layer]))
-    const result = await api.saveDomainLayers(spaceId.value, defaults)
-    queryClient.setQueryData(queryKey.value, result)
-    rows.value = toRows(result.defaults)
+    const result = await api.saveDomainLayers(forSpace, defaults)
+    queryClient.setQueryData(['domain-layers', forSpace], result)
+    if (forSpace === spaceId.value) load(result.defaults)
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -123,6 +137,9 @@ async function save() {
           :title="layers.error.value instanceof ApiError ? layers.error.value.message : '读取失败'"
         />
         <div v-else class="space-y-3">
+          <div v-if="baseline === null" class="space-y-2">
+            <USkeleton v-for="n in 2" :key="n" class="h-8 w-full" />
+          </div>
           <p v-if="!isOwner" class="text-sm text-muted">只有空间 owner 能改。</p>
           <div v-for="(row, index) in rows" :key="index" class="flex items-center gap-2">
             <UInput
@@ -141,7 +158,7 @@ async function save() {
               @click="rows.splice(index, 1)"
             />
           </div>
-          <p v-if="!rows.length" class="text-sm text-muted">
+          <p v-if="baseline !== null && !rows.length" class="text-sm text-muted">
             还没有配置，所有 domain 新建时都默认私人层。
           </p>
           <UAlert v-if="problem" color="warning" variant="subtle" :title="problem" />
