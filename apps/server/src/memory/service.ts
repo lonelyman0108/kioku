@@ -60,7 +60,14 @@ import {
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { readableConditions, snapshotColumns, type MemoryColumns } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
-import { DEFAULT_SENSITIVITY, formatUri, layerForDomain, parseUri, type ParsedUri } from './uri'
+import {
+  DEFAULT_SENSITIVITY,
+  formatUri,
+  layerForDomain,
+  parseUri,
+  toParsed,
+  type ParsedUri,
+} from './uri'
 
 export class MemoryError extends Error {
   constructor(
@@ -103,6 +110,14 @@ type UpdateFields = Omit<UpdateMemoryRequest, 'uri' | 'expectedId'>
 // 一条记忆属于谁：层，以及按层填的主人、人格或应用
 type Ownership = Pick<MemoryRow, 'layer' | 'ownerAccountId' | 'personaId' | 'appId'>
 
+// 个人的层：按成员各存一份，只有本人读得到；其余的层是共享的
+const PER_MEMBER_LAYERS: readonly Layer[] = ['owner', 'private']
+const perMember = (layer: Layer) => PER_MEMBER_LAYERS.includes(layer)
+
+// 在共享的层与个人的层之间转换会改变谁看得到它（共享的记忆从别人那里消失，或个人的内容给了别人），
+// 所以只能由人在管理界面里做，通过 Key 改层或移动都不行
+const KEY_CROSS_OWNERSHIP = '通过 Key 不能把记忆在共享的层与个人的层之间转换，请在管理界面里改'
+
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
   eventType?: 'create' | 'import'
@@ -140,6 +155,11 @@ export class MemoryService {
   // 这个服务按什么权限读写；管理界面的搜索拿它去召回，不必再算一次
   get access(): Access {
     return this.ctx.access
+  }
+
+  // 这次是不是接入方通过 Key 来的：管理界面不代表某个应用，appId 为 null
+  private get viaKey(): boolean {
+    return this.ctx.access.appId !== null
   }
 
   // URI 冲突由数据库判断（同一归属的唯一索引，以及共享与成员节点互斥的触发器，二者都按唯一约束报错），
@@ -503,13 +523,16 @@ export class MemoryService {
           `${before.layer} 层的记忆不能直接改层；人格层与应用层要移动到别的命名空间`,
         )
       }
+      if (this.viaKey && perMember(layer) !== perMember(before.layer)) {
+        throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
+      }
       if (!canWrite(this.ctx.access, { layer, sensitivity, appId: null })) {
         throw new MemoryError(403, `没有权限把记忆改到 ${layer} 层的 ${sensitivity} 级`)
       }
       // 新归属下已失效或过期、又挡着 URI 的记录先让出；真冲突由触发器与唯一索引判断，返回 409
       await this.claimUri(
         tx,
-        parse(formatUri(before.domain!, before.path!)),
+        toParsed(before.domain!, before.path!),
         { ownerAccountId },
         meta.released ?? [],
       )
@@ -660,6 +683,10 @@ export class MemoryService {
         appId: before.appId,
       }
       if (crossing || (input.layer && input.layer !== before.layer)) {
+        // 对象层与情节层来自对话，不能借移动换到别的层：不可信的内容进不了受信的层
+        if (before.layer === 'subject' || before.layer === 'episode') {
+          throw new MemoryError(400, `${before.layer} 层的记忆不能改层，也不能移到别的命名空间`)
+        }
         if (!forced && !input.layer && layerForDomain(from.domain)) {
           throw new MemoryError(
             400,
@@ -672,6 +699,9 @@ export class MemoryService {
           forced ? undefined : (input.layer ?? before.layer),
           personaIds,
         )
+        if (this.viaKey && perMember(ownership.layer) !== perMember(before.layer)) {
+          throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
+        }
         if (!canWrite(this.ctx.access, { ...ownership, sensitivity: before.sensitivity })) {
           throw new MemoryError(403, `没有权限把记忆移到 ${ownership.layer} 层`)
         }
@@ -955,12 +985,23 @@ export class MemoryService {
     return readableConditions(this.ctx.access, { personaIds: [], management: true }, cols)
   }
 
+  // 管理读取下看得到这个快照；快照为空，或字段缺失（判断结果为 NULL）时都算看不到
+  private snapshotShown(snapshot: SQLWrapper): SQL {
+    return sql`(${snapshot} is not null and coalesce((${this.manageable(snapshotColumns(snapshot))}), false))`
+  }
+
   // 事件的前后快照各按管理读取判断，有一边看不到就整条不显示；为空的一边（新建事件没有「改前」）不参与
   private visibleEvent(): SQL {
-    return and(
-      or(isNull(memoryEvents.before), this.manageable(snapshotColumns(memoryEvents.before))),
-      or(isNull(memoryEvents.after), this.manageable(snapshotColumns(memoryEvents.after))),
-    )!
+    const { before, after } = memoryEvents
+    return sql`((${before} is null or ${this.snapshotShown(before)}) and (${after} is null or ${this.snapshotShown(after)}))`
+  }
+
+  // 「离开」：改前看得到、改后看不到，例如被别的成员改进了他的私人层，或改成了 secret。
+  // 对改前看得到的人保留这条记录，只给改前的版本、时间与操作者，改后的一概不给，也不能拿来恢复：
+  // 否则共享的记忆被人拿走之后，谁拿走的、什么时候拿走的，连空间 owner 都查不到
+  private departureEvent(): SQL {
+    const { before, after } = memoryEvents
+    return sql`(${this.snapshotShown(before)} and ${after} is not null and not ${this.snapshotShown(after)})`
   }
 
   // 按 id 找一条管理读取读得到的策展记忆，已删除的也算；读不到和不存在一样是 404
@@ -973,9 +1014,11 @@ export class MemoryService {
     return row
   }
 
-  // 事件连同操作者一起取出，记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
+  // 事件连同操作者一起取出：看得到的事件，加上「离开」的事件（left 为 true，见 departureEvent）；
+  // 记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
   // 只给应用主人与空间 owner（管理界面里 admin 就是空间 owner）看，别人只看到应用名。
-  // checkMemory 为 true 时只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断
+  // checkMemory 为 true 时普通事件只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断。
+  // 「离开」的事件不看记忆现在的状态：离开之后，原来看得到它的人本来就读不到了
   private eventRows(
     tx: Tx,
     where: SQL | undefined,
@@ -986,6 +1029,7 @@ export class MemoryService {
     const keyVisible = this.ctx.access.admin
       ? sql`true`
       : sql`${apps.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
+    const departure = this.departureEvent()
     return tx
       .select({
         event: memoryEvents,
@@ -995,13 +1039,19 @@ export class MemoryService {
         accountName: accounts.displayName,
         keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
         appName: apps.name,
+        left: sql<boolean>`${departure}`,
       })
       .from(memoryEvents)
       .innerJoin(memories, eq(memories.id, memoryEvents.memoryId))
       .leftJoin(accounts, eq(accounts.id, memoryEvents.actorAccountId))
       .leftJoin(apiKeys, eq(apiKeys.id, memoryEvents.actorKeyId))
       .leftJoin(apps, eq(apps.id, apiKeys.appId))
-      .where(and(where, checkMemory ? this.manageable() : undefined, this.visibleEvent()))
+      .where(
+        and(
+          where,
+          or(and(checkMemory ? this.manageable() : undefined, this.visibleEvent()), departure),
+        ),
+      )
       .orderBy(...order)
       .limit(limit)
   }
@@ -1035,7 +1085,8 @@ export class MemoryService {
           createdAt: r.event.createdAt.toISOString(),
           actor: actorOf(r),
           before: toSnapshot(r.event.before),
-          after: toSnapshot(r.event.after),
+          after: r.left ? null : toSnapshot(r.event.after),
+          left: r.left,
         })),
         truncated: latest.length > HISTORY_LIMIT,
       }
@@ -1106,10 +1157,14 @@ export class MemoryService {
           id: r.event.id,
           type: r.event.eventType,
           memoryId: r.event.memoryId!,
-          uri: formatUri(r.domain!, r.path!),
+          // 离开了可见范围的，只给改前的 URI：记忆现在的 URI 在别人那里
+          uri: r.left ? toSnapshot(r.event.before)!.uri : formatUri(r.domain!, r.path!),
           createdAt: r.event.createdAt.toISOString(),
           actor: actorOf(r),
-          changes: changedFields(toSnapshot(r.event.before), toSnapshot(r.event.after)),
+          changes: r.left
+            ? []
+            : changedFields(toSnapshot(r.event.before), toSnapshot(r.event.after)),
+          left: r.left,
         })),
         nextCursor:
           rows.length > query.limit && page.length
@@ -1190,7 +1245,7 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, row)) {
         throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
       }
-      await this.claimUri(tx, parse(formatUri(row.domain!, row.path!)), row, released)
+      await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released)
       const [restored] = await tx
         .update(memories)
         .set({ deletedAt: null, version: sql`${memories.version} + 1`, updatedAt: new Date() })

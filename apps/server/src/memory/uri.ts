@@ -13,8 +13,11 @@ export const APP_DOMAIN = 'app'
 export function parseUri(uri: string): ParsedUri | null {
   const match = URI_PATTERN.exec(uri)
   if (!match) return null
-  const domain = match[1]!
-  const path = match[2]!
+  return toParsed(match[1]!, match[2]!)
+}
+
+// 已经拆开的 domain 与 path（例如从数据库读出的一行），不必再拼成字符串重新解析
+export function toParsed(domain: string, path: string): ParsedUri {
   const namespaced = domain === PERSONA_DOMAIN || domain === APP_DOMAIN
   return { domain, path, namespaceSlug: namespaced ? path.split('/')[0]! : null }
 }

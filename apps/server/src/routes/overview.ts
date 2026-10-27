@@ -28,8 +28,9 @@ export function overviewRoutes(deps: Deps) {
   return router().openapi(overview, async (c) => {
     const { spaceId } = c.req.valid('param')
     const accountId = c.get('console').accountId
-    const [{ role, service }, settings, appRows, members] = await Promise.all([
-      consoleMemberFor(deps, spaceId, accountId),
+    // 先确认是成员，不是成员就不去查别的空间的数据
+    const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
+    const [settings, appRows, members] = await Promise.all([
       embeddingSettingsView(deps.db),
       withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
       deps.db

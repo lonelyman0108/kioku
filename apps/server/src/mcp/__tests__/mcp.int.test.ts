@@ -93,6 +93,16 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
     expect(domains.content[0]!.text).toContain('core://（1 个节点）')
   })
 
+  it('kioku_update 能在 owner 与 private 之间改层，不能改成共享的层', async () => {
+    await callTool('kioku_create', { uri: 'notes://plan', content: '计划' })
+    const toOwner = await callTool('kioku_update', { uri: 'notes://plan', layer: 'owner' })
+    expect(toOwner.isError).toBeFalsy()
+    expect(toOwner.content[0]!.text).toContain('owner')
+    const toBase = await callTool('kioku_update', { uri: 'notes://plan', layer: 'base' })
+    expect(toBase.isError).toBe(true)
+    expect(toBase.content[0]!.text).toContain('管理界面')
+  })
+
   it('业务错误作为工具错误返回', async () => {
     const missing = await callTool('kioku_get', { uri: 'core://nope' })
     expect(missing.isError).toBe(true)

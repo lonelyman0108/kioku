@@ -69,7 +69,7 @@ const rebuild = createRoute({
   responses: {
     202: jsonResponse('已排队', EmbeddingRebuildResult),
     400: jsonResponse('还没有保存嵌入设置', ErrorResponse),
-    503: jsonResponse('没有排进队列（服务没有启动后台任务，或入队失败）', EmbeddingRebuildResult),
+    503: jsonResponse('没有排进队列（服务没有启动后台任务，或入队失败）', ErrorResponse),
     403: forbidden,
   },
 })
@@ -127,6 +127,8 @@ export function settingsRoutes(deps: Deps) {
       }
       // 入队失败时如实返回，状态码也不报成已接受，不让管理员以为补齐已经在跑
       const queued = deps.jobs ? await deps.jobs.enqueueBackfill() : false
-      return queued ? c.json({ queued }, 202) : c.json({ queued }, 503)
+      return queued
+        ? c.json({ queued }, 202)
+        : c.json({ error: '没有排进队列：服务没有启动后台任务，或入队失败，请稍后重试' }, 503)
     })
 }

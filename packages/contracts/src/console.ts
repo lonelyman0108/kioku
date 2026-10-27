@@ -143,6 +143,9 @@ export const HistoryEvent = z.object({
   actor: EventActor,
   before: MemorySnapshot.nullable(),
   after: MemorySnapshot.nullable(),
+  // 这次改动之后，这条记忆离开了你的可见范围（例如被改进了别的成员的私人层，或改成了 secret）：
+  // 只给改前的版本，after 为 null，也不能拿来恢复
+  left: z.boolean(),
 })
 export type HistoryEvent = z.infer<typeof HistoryEvent>
 
@@ -192,12 +195,14 @@ export const ActivityItem = z.object({
   id: z.number().int(),
   type: z.string(),
   memoryId: z.uuid(),
-  // 记忆现在的 URI
+  // 记忆现在的 URI；离开了你的可见范围的（left 为 true），是改动之前的 URI
   uri: z.string(),
   createdAt: z.string(),
   actor: EventActor,
-  // 这次改了哪些字段：content、disclosure、priority、sensitivity、layer、uri、glossary
+  // 这次改了哪些字段：content、disclosure、priority、sensitivity、layer、uri、glossary；离开的事件为空
   changes: z.array(z.string()),
+  // 见 HistoryEvent.left
+  left: z.boolean(),
 })
 export type ActivityItem = z.infer<typeof ActivityItem>
 

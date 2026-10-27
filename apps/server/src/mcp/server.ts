@@ -132,6 +132,9 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
         disclosure: UpdateMemoryRequest.shape.disclosure,
         priority: UpdateMemoryRequest.shape.priority,
         sensitivity: Sensitivity.optional(),
+        layer: PlainLayer.optional().describe(
+          '新的层。只能在 owner 与 private 之间改；与 base 互转会改变谁看得到它，要在管理界面里改',
+        ),
         glossary_add: UpdateMemoryRequest.shape.glossaryAdd,
         glossary_remove: UpdateMemoryRequest.shape.glossaryRemove,
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
@@ -146,6 +149,7 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
             ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
             ...(args.priority !== undefined ? { priority: args.priority } : {}),
             ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
+            ...(args.layer ? { layer: args.layer } : {}),
             ...(args.glossary_add ? { glossaryAdd: args.glossary_add } : {}),
             ...(args.glossary_remove ? { glossaryRemove: args.glossary_remove } : {}),
             ...(args.expected_version !== undefined
