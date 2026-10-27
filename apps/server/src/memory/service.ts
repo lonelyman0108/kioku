@@ -476,9 +476,8 @@ export class MemoryService {
     const parsed = parse(input.uri)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, parsed, personaIds)
-      if (input.expectedId !== undefined && input.expectedId !== before.id) {
-        throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
-      }
+      // 版本号由 applyUpdate 核对，恢复也走那里
+      checkExpected(before, { expectedId: input.expectedId })
       return this.applyUpdate(tx, before, input, { released })
     })
   }
@@ -630,12 +629,7 @@ export class MemoryService {
     const parsed = parse(uri)
     const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
-      if (expected.expectedId !== undefined && expected.expectedId !== before.id) {
-        throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
-      }
-      if (expected.expectedVersion !== undefined && expected.expectedVersion !== before.version) {
-        throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
-      }
+      checkExpected(before, expected)
       if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
       }
@@ -668,6 +662,7 @@ export class MemoryService {
     const to = parse(input.to)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, from, personaIds)
+      checkExpected(before, input)
       if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限移动 ${before.layer} 层的记忆`)
       }
@@ -1310,6 +1305,19 @@ export class MemoryService {
 
 // 一条记忆的历史最多列这么多个事件
 const HISTORY_LIMIT = 500
+
+// 调用方带着读到的 id 与版本号时核对。删除后在同一个 URI 重建的记忆版本号从 1 重新开始，只看版本号分不出来
+function checkExpected(
+  before: MemoryRow,
+  expected: { expectedId?: string | undefined; expectedVersion?: number | undefined },
+) {
+  if (expected.expectedId !== undefined && expected.expectedId !== before.id) {
+    throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
+  }
+  if (expected.expectedVersion !== undefined && expected.expectedVersion !== before.version) {
+    throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
+  }
+}
 
 // 关键词索引最多给这么多条（关键词 × 记忆），个人用的空间远到不了
 const GLOSSARY_INDEX_LIMIT = 5000

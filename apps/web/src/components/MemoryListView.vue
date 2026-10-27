@@ -77,10 +77,10 @@ const sensitivityItems = [
 const sortItems = MEMORY_LIST_SORTS.map((s) => ({ label: `按${sortLabels[s]}`, value: s }))
 
 const list = useInfiniteQuery({
-  queryKey: computed(() => ['memory-list', props.spaceId, filters.value]),
-  queryFn: ({ pageParam }) => {
-    const f = filters.value
-    return api.memoryList(props.spaceId, {
+  queryKey: computed(() => ['memory-list', props.spaceId, filters.value] as const),
+  // 参数从键里取：换了筛选之后，旧键剩下的页还在重新拉取时，不会用上新的筛选条件
+  queryFn: ({ pageParam, queryKey: [, spaceId, f] }) => {
+    return api.memoryList(spaceId, {
       ...(f.domain ? { domain: f.domain } : {}),
       ...(f.layer ? { layer: f.layer } : {}),
       ...(f.sensitivity ? { sensitivity: f.sensitivity } : {}),
@@ -173,7 +173,7 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
             </span>
             <span class="mt-0.5 flex items-center gap-2 text-xs text-muted">
               <span class="min-w-0 flex-1 truncate">
-                {{ item.disclosure ?? '没写 disclosure' }}
+                {{ item.disclosure?.trim() || '没写 disclosure' }}
               </span>
               <time :datetime="item.updatedAt" :title="formatTime(item.updatedAt)" class="shrink-0">
                 {{ formatRelative(item.updatedAt) }}

@@ -1,32 +1,67 @@
 import DOMPurify from 'dompurify'
-import { Marked, type Tokens } from 'marked'
+import { Marked, type Token, type Tokens } from 'marked'
 
 import { splitByKeywords, type KeywordIndex } from './keywords'
 
-// 记忆正文是 Markdown，可能来自 agent、导入或别的成员，里面的 HTML 不能信任：
-// 渲染出来的 HTML 一律经过 DOMPurify。下面这些也一并去掉：
-// - 图片：页面的 CSP 只允许站内图片，外部图片会被拦下并报违规，自托管服务也不该替记忆去请求外部地址；
-//   Markdown 里的图片渲染成指向它的链接
-// - 表单控件、样式与 class、id、data 属性：正文不能伪装成界面上的按钮或提示，也不能冒充下面加的关键词链接
+// 记忆正文是 Markdown，可能来自 agent、导入或别的成员，不能信任。分两道：
+// - marked：正文里的文字一律转义，直接写的 HTML 只放行不带属性的几个排版标签（见 rawHtml）；
+//   图片渲染成指向它的链接，任务列表的勾选框画成字符，都不生成元素
+// - DOMPurify 按白名单清洗，只留 Markdown 会生成的标签与 href、title、align、start 属性。
+//   不要图片：页面的 CSP 只允许站内图片，外部图片会被拦下并报违规，自托管服务也不该替记忆去请求外部地址；
+//   不要表单控件、对话框、样式、class、id 与 data 属性：正文不能伪装成界面上的输入框、按钮或提示，
+//   也不能冒充下面加的关键词链接
 const PURIFY = {
-  FORBID_TAGS: [
-    'img',
-    'picture',
-    'video',
-    'audio',
-    'source',
-    'style',
-    'form',
-    'button',
-    'select',
-    'textarea',
+  ALLOWED_TAGS: [
+    'p',
+    'br',
+    'hr',
+    'h1',
+    'h2',
+    'h3',
+    'h4',
+    'h5',
+    'h6',
+    'blockquote',
+    'pre',
+    'code',
+    'ul',
+    'ol',
+    'li',
+    'table',
+    'thead',
+    'tbody',
+    'tr',
+    'th',
+    'td',
+    'a',
+    'strong',
+    'em',
+    'del',
+    'b',
+    'i',
+    'u',
+    's',
+    'ins',
+    'sub',
+    'sup',
+    'kbd',
+    'small',
+    'details',
+    'summary',
   ],
-  FORBID_ATTR: ['style', 'class', 'id'],
+  ALLOWED_ATTR: ['href', 'title', 'align', 'start'],
   ALLOW_DATA_ATTR: false,
+  ALLOW_ARIA_ATTR: false,
 }
 
 const escapeHtml = (s: string) =>
   s.replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;').replace(/"/g, '&quot;')
+
+// 与 marked 转义文字的方式一致：已经是字符引用的 &（例如 &copy;）留着，由浏览器显示成字符
+const escapeText = (s: string) =>
+  s.replace(/[<>"']|&(?!(#\d{1,7}|#[Xx][a-fA-F0-9]{1,6}|\w+);)/g, (c) =>
+    c === '&' ? '&amp;' : c === '<' ? '&lt;' : c === '>' ? '&gt;' : c === '"' ? '&quot;' : '&#39;',
+  )
 
 // 正文里直接写的 HTML 只放行不带属性的几个排版标签，其余原样显示成文字。
 // 带属性的标签交给 DOMPurify 也会被清掉，但浏览器只要解析到 onerror 这类事件属性，
@@ -38,18 +73,51 @@ export function rawHtml(html: string): string {
   return html.replace(PLAIN_TAG, '').includes('<') ? escapeHtml(html) : html
 }
 
+// 链接里面的图片（例如带链接的徽章）：只留替代文字，免得链接里再套一个链接
+const imagesInLinks = new WeakSet<Token>()
+function markImages(tokens: Token[]) {
+  for (const token of tokens) {
+    if (token.type === 'image') imagesInLinks.add(token)
+    if ('tokens' in token && token.tokens) markImages(token.tokens)
+  }
+}
+
 const marked = new Marked({
   gfm: true,
+  walkTokens(token) {
+    // 行内出现 <code>、<pre>、<kbd>、<script> 之后，marked 会把后面的文字标成「已经转义」原样输出，
+    // 直到对应的结束标签，没有结束标签就一直到正文末尾。这里一律交给渲染器转义，代码块也一样
+    if ((token.type === 'text' || token.type === 'code') && 'escaped' in token) {
+      token.escaped = false
+    }
+    if (token.type === 'link') markImages(token.tokens ?? [])
+  },
   renderer: {
     html({ text, block }: Tokens.HTML | Tokens.Tag) {
       const html = rawHtml(text)
       return block && html !== text ? `<p>${html}</p>` : html
     },
-    image({ href, text }: Tokens.Image) {
-      return `<a href="${escapeHtml(href)}">${escapeHtml(text || href)}</a>`
+    image(token: Tokens.Image) {
+      // 替代文字只取纯文本，与 marked 自己渲染图片时一样
+      const alt = escapeText(this.parser.parseInline(token.tokens, this.parser.textRenderer))
+      if (imagesInLinks.has(token)) return alt
+      const title = token.title ? ` title="${escapeText(token.title)}"` : ''
+      return `<a href="${escapeText(token.href)}"${title}>${alt || escapeText(token.href)}</a>`
+    },
+    checkbox({ checked }: Tokens.Checkbox) {
+      return checked ? '☑ ' : '☐ '
     },
   },
 })
+
+// 只做 Markdown 这一步，还没有清洗；渲染出错时（例如嵌套太深）退回原文
+export function markdownToHtml(source: string): string {
+  try {
+    return marked.parse(source, { async: false })
+  } catch {
+    return `<pre>${escapeHtml(source)}</pre>`
+  }
+}
 
 export interface KeywordLinks {
   index: KeywordIndex
@@ -58,8 +126,10 @@ export interface KeywordLinks {
 }
 
 export function renderMarkdown(source: string, keywords?: KeywordLinks | null): string {
-  const html = marked.parse(source, { async: false })
-  const fragment = DOMPurify.sanitize(html, { ...PURIFY, RETURN_DOM_FRAGMENT: true })
+  const fragment = DOMPurify.sanitize(markdownToHtml(source), {
+    ...PURIFY,
+    RETURN_DOM_FRAGMENT: true,
+  })
   // 正文里的链接都在新窗口打开，不带来源页
   for (const link of fragment.querySelectorAll('a[href]')) {
     link.setAttribute('target', '_blank')
@@ -72,12 +142,12 @@ export function renderMarkdown(source: string, keywords?: KeywordLinks | null): 
 }
 
 // 在清洗过的正文里标出关键词：别的记忆的关键词变成链接（data-uris 里是那些记忆，空格分隔），
-// 自己的关键词只加底色。链接、行内代码与代码块里的文字不动
+// 自己的关键词只加底色。链接、代码与折叠块的标题里的文字不动：标题里放了链接，点它就展不开了
 function markKeywords(root: DocumentFragment, { index, self }: KeywordLinks) {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   const texts: Text[] = []
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.parentElement?.closest('a, code, pre')) continue
+    if (node.parentElement?.closest('a, code, pre, summary')) continue
     texts.push(node as Text)
   }
   for (const text of texts) {

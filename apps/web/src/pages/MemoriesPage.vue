@@ -175,9 +175,23 @@ async function refreshAround(uri: string) {
   }
 }
 
+// 树的加载一次只跑一个：几次重载同时进行时，后面的会对着只载入一半的树判断哪些展开的节点已经不在了，
+// 把还在的节点收起来。只在事件处理里排队，上面的函数互相调用时不再排队，否则会等自己
+let treeTask: Promise<unknown> = Promise.resolve()
+function serially<T>(task: () => Promise<T>): Promise<T> {
+  const run = treeTask.then(task, task)
+  treeTask = run.catch(() => undefined)
+  return run
+}
+
+// 某个 URI 上的记忆没了或换了一条（删除、移走、新建）：清掉它的缓存，再打开时重新读取
+function resetMemory(uri: string) {
+  void queryClient.resetQueries({ queryKey: ['memory', spaceId.value, uri], exact: true })
+}
+
 function refresh() {
   invalidateLists()
-  void loadRoots()
+  void serially(loadRoots)
 }
 
 async function onToggle(_event: unknown, item: MemoryTreeItem) {
@@ -201,15 +215,20 @@ function openCreate(prefix: string) {
 }
 
 async function onCreated(uri: string) {
-  await refreshAround(uri).catch(failed)
+  // 这个 URI 上可能还留着之前删掉的那条的缓存
+  resetMemory(uri)
   invalidateLists()
+  await serially(() => refreshAround(uri)).catch(failed)
   await select(uri)
 }
 
 async function onDeleted(uri: string) {
   await select(null)
-  await refreshAround(uri).catch(failed)
+  // 等编辑器卸载之后再清缓存，免得它重新读取一次、闪出「不存在」
+  await nextTick()
+  resetMemory(uri)
   invalidateLists()
+  await serially(() => refreshAround(uri)).catch(failed)
 }
 
 // 保存、恢复或只改了层之后，树上这一项的标记跟着变
@@ -227,19 +246,22 @@ function onChanged(memory: MemoryView) {
 
 async function onMoved(memory: MemoryView, from: string) {
   if (memory.uri === from) return onChanged(memory)
-  await select(memory.uri)
-  // 原来的 URI 上已经没有这条记忆了，等原来的编辑器卸载后丢掉它的缓存，退回去时重新读取
-  await nextTick()
-  queryClient.removeQueries({ queryKey: ['memory', spaceId.value, from], exact: true })
-  await refreshAround(from).catch(failed)
-  await refreshAround(memory.uri).catch(failed)
-  await reveal(memory.uri)
   invalidateLists()
+  // 原来的 URI 上已经没有这条记忆了：等原来的编辑器卸载后清掉它的缓存，退回去时重新读取。
+  // 没切过去（导航被取消）时编辑器还在用它，不清。树展开到新的位置由下面对 selectedUri 的监听排队
+  if (!(await select(memory.uri))) {
+    await nextTick()
+    resetMemory(from)
+  }
+  await serially(async () => {
+    await refreshAround(from).catch(failed)
+    await refreshAround(memory.uri).catch(failed)
+  })
 }
 
 async function onUndeleted(uri: string) {
-  await refreshAround(uri).catch(failed)
   invalidateLists()
+  await serially(() => refreshAround(uri)).catch(failed)
   await select(uri)
 }
 
@@ -248,19 +270,21 @@ function openLinked(uri: string) {
   void router.push(withQuery({ uri }))
 }
 
-onMounted(async () => {
-  await loadRoots()
-  if (selectedUri.value) await reveal(selectedUri.value)
-})
+onMounted(() =>
+  serially(async () => {
+    await loadRoots()
+    if (selectedUri.value) await reveal(selectedUri.value)
+  }),
+)
 watch(spaceId, () => {
   expanded.value = []
   // 新建窗口里的内容属于上一个空间，不能带到新空间去提交
   createOpen.value = false
-  void loadRoots()
+  void serially(loadRoots)
 })
 // 从列表、搜索或正文的链接选中时，树也展开到那一条，切回树视图时看得到
 watch(selectedUri, (uri) => {
-  if (uri && roots.value.length) void reveal(uri)
+  if (uri) void serially(() => reveal(uri))
 })
 
 // 树的选中状态跟着地址走：切换被取消（例如有未保存的修改）时，高亮也留在原来的节点
@@ -364,13 +388,20 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
           </template>
         </UTree>
       </template>
-      <MemoryListView
-        v-else-if="view === 'list'"
-        :space-id="spaceId"
-        :selected-uri="selectedUri"
-        @select="select"
-      />
-      <DeletedMemories v-else :space-id="spaceId" :can-write="canWrite" @restored="onUndeleted" />
+      <!-- 列表与已删除切走时不卸载：保留筛选与位置，切走之前发出的撤销删除完成后也还能通知到这里 -->
+      <KeepAlive>
+        <MemoryListView
+          v-if="view === 'list'"
+          :space-id="spaceId"
+          :selected-uri="selectedUri"
+          @select="select"
+        />
+        <DeletedMemories
+          v-else-if="view === 'deleted'"
+          :space-id="spaceId"
+          @restored="onUndeleted"
+        />
+      </KeepAlive>
     </template>
   </UDashboardPanel>
 

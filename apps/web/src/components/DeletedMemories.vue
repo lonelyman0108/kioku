@@ -6,14 +6,17 @@ import { computed, ref } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { formatRelative, formatTime } from '../time'
 
-const props = defineProps<{ spaceId: string; canWrite: boolean }>()
+const props = defineProps<{ spaceId: string }>()
 const emit = defineEmits<{ restored: [uri: string] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
+// 和别处一样按条判断：editor 撤销不了别人的应用的应用层记忆
+const { canWriteUri } = useMemoryPermissions(computed(() => props.spaceId))
 
 const queryKey = computed(() => ['memory-deleted', props.spaceId])
 const deleted = useInfiniteQuery({
@@ -29,9 +32,11 @@ async function undelete(item: DeletedMemory) {
   restoring.value = item.id
   try {
     const memory = await api.undeleteMemory(props.spaceId, item.id)
+    // 写进这条记忆的缓存：删除前留下的缓存版本号对不上，打开后第一次保存会冲突
+    queryClient.setQueryData(['memory', props.spaceId, memory.uri], memory)
     toast.add({ title: `已撤销删除 ${memory.uri}`, color: 'success' })
-    await queryClient.invalidateQueries({ queryKey: queryKey.value })
     emit('restored', memory.uri)
+    void queryClient.invalidateQueries({ queryKey: queryKey.value })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '撤销删除失败', color: 'error' })
   } finally {
@@ -80,7 +85,7 @@ async function undelete(item: DeletedMemory) {
             </span>
           </div>
           <UButton
-            v-if="canWrite"
+            v-if="canWriteUri(item.uri)"
             :icon="icons.undelete"
             size="xs"
             color="neutral"

@@ -100,6 +100,20 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect((await call('DELETE', q(`&expectedId=${first.id}&expectedVersion=2`))).status).toBe(204)
   })
 
+  it('移动时带着旧的 id 或版本号返回 409，不会移走别人刚改过或重建的记忆', async () => {
+    const first = (await (
+      await create({ uri: 'core://m', content: '旧', layer: 'base' })
+    ).json()) as MemoryView
+    await call('PATCH', '/memories', { uri: 'core://m', content: '改过' })
+    const move = (expected: object) =>
+      call('POST', '/memories/move', { from: 'core://m', to: 'core://n', ...expected })
+    expect((await move({ expectedVersion: first.version })).status).toBe(409)
+    expect((await move({ expectedId: crypto.randomUUID() })).status).toBe(409)
+    expect((await get('core://n')).status).toBe(404)
+    const moved = await move({ expectedId: first.id, expectedVersion: first.version + 1 })
+    expect(((await moved.json()) as MemoryView).uri).toBe('core://n')
+  })
+
   // 用另一条连接锁住这条记忆，让请求读完之后等在写入的行锁上，在锁里提交一次改动再放开，
   // 稳定地复现「检查之后、写入之前被别人改了」
   async function raceWithLockedRow(

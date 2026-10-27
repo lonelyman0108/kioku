@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { HistoryEvent, MemorySnapshot, MemoryView } from '@kioku/contracts'
-import { useQuery } from '@tanstack/vue-query'
+import { SENSITIVITIES, type HistoryEvent, type MemorySnapshot } from '@kioku/contracts'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
 import { ApiError } from '../api/client'
@@ -12,8 +12,8 @@ import { actorLabel, eventLabel, layerLabels, sensitivityLabels } from '../label
 import { formatRelative, formatTime } from '../time'
 
 const props = defineProps<{ spaceId: string; memoryId: string; canRestore: boolean }>()
-const emit = defineEmits<{ restored: [memory: MemoryView] }>()
 const toast = useToast()
+const queryClient = useQueryClient()
 
 const history = useQuery({
   queryKey: computed(() => ['memory-history', props.spaceId, props.memoryId]),
@@ -48,32 +48,51 @@ function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): s
   return list
 }
 
-// 正文的对比：新建时整段算加上；两边都没有正文（secret）时看不出改没改
-function contentRows(event: HistoryEvent): DiffRow[] | 'secret' | null {
+// 这次改动里正文的情况。有一边是 secret 时那一边没有正文，对比不出改了什么：
+// 改成 secret 或从 secret 改回来时，整段都会算成改动
+function contentChange(event: HistoryEvent): 'none' | 'secret' | 'changed' {
   const { before, after } = event
-  if (!after) return null
-  if (!before) {
-    if (after.content === null) return 'secret'
-    return after.content.split('\n').map((text) => ({ kind: 'add' as const, text }))
-  }
-  if (before.content === null && after.content === null) return 'secret'
-  if (before.content === after.content) return null
-  return collapseUnchanged(diffLines(before.content ?? '', after.content ?? ''))
+  if (!after) return 'none'
+  if (after.content === null || (before && before.content === null)) return 'secret'
+  return before && before.content === after.content ? 'none' : 'changed'
 }
+
+// 只对展开的那一条做对比：每次渲染都对所有事件按行对比，事件多、正文长时很慢
+const open = ref<number | null>(null)
+const openRows = computed<DiffRow[]>(() => {
+  const event = events.value.find((e) => e.id === open.value)
+  if (!event || contentChange(event) !== 'changed') return []
+  const after = event.after?.content ?? ''
+  // 新建时整段算加上
+  if (!event.before) return after.split('\n').map((text) => ({ kind: 'add' as const, text }))
+  return collapseUnchanged(diffLines(event.before.content ?? '', after))
+})
 
 // 改动之后的那一版就是现在的样子
 const isCurrent = (event: HistoryEvent) =>
   !!event.after && !event.left && event.after.version === current.value?.version
-// 能拿来恢复的：看得到改后的那一版，不是删除之后的状态，也不是现在这一版
+// 服务端只恢复和现在同一归属、敏感级不高于现在的版本：改过层、移到别的人格或应用、
+// 或者调低过敏感级之后，之前的版本不能直接恢复
+const namespaceOf = (uri: string) => /^(?:persona|app):\/\/[^/]+/.exec(uri)?.[0] ?? null
+function sameScope(snapshot: MemorySnapshot): boolean {
+  const now = current.value
+  return (
+    !!now &&
+    snapshot.layer === now.layer &&
+    namespaceOf(snapshot.uri) === namespaceOf(now.uri) &&
+    SENSITIVITIES.indexOf(snapshot.sensitivity) <= SENSITIVITIES.indexOf(now.sensitivity)
+  )
+}
+// 能拿来恢复的：看得到改后的那一版，不是删除之后的状态，不是现在这一版，归属与敏感级也允许
 const restorable = (event: HistoryEvent) =>
   props.canRestore &&
   !current.value?.deletedAt &&
   !!event.after &&
   !event.left &&
   !event.after.deleted &&
-  !isCurrent(event)
+  !isCurrent(event) &&
+  sameScope(event.after)
 
-const open = ref<number | null>(null)
 const confirming = ref<HistoryEvent | null>(null)
 const restoring = ref(false)
 async function restore() {
@@ -89,7 +108,11 @@ async function restore() {
     })
     confirming.value = null
     toast.add({ title: '已恢复到这一版', color: 'success' })
-    emit('restored', restored)
+    // 直接写进这条记忆的缓存，编辑器会跟上（并通知页面）。不靠事件：侧栏在请求期间被关掉时，
+    // 这个组件已经卸载，发出的事件没人收到
+    const key = ['memory', props.spaceId, restored.uri]
+    await queryClient.cancelQueries({ queryKey: key, exact: true })
+    queryClient.setQueryData(key, restored)
     await history.refetch()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
@@ -114,7 +137,8 @@ async function restore() {
     </div>
     <template v-else>
       <p class="text-xs text-muted">
-        恢复只改正文、disclosure、priority 与关键词，不改 URI、层、敏感级与有效期。
+        恢复只改正文、disclosure、priority 与关键词，不改
+        URI、层、敏感级与有效期；层或归属和现在不同、敏感级比现在高的版本不能恢复。
         <template v-if="history.data.value?.truncated">只列出了最近的 500 次改动。</template>
       </p>
       <ol class="space-y-3">
@@ -149,7 +173,7 @@ async function restore() {
           </ul>
           <div v-if="!event.left" class="mt-2 flex flex-wrap gap-2">
             <UButton
-              v-if="contentRows(event) && contentRows(event) !== 'secret'"
+              v-if="contentChange(event) === 'changed'"
               size="xs"
               color="neutral"
               variant="ghost"
@@ -157,7 +181,7 @@ async function restore() {
             >
               {{ open === event.id ? '收起正文的改动' : '看正文的改动' }}
             </UButton>
-            <span v-else-if="contentRows(event) === 'secret'" class="text-xs text-muted">
+            <span v-else-if="contentChange(event) === 'secret'" class="text-xs text-muted">
               secret 的历史不含正文
             </span>
             <UButton
@@ -173,9 +197,9 @@ async function restore() {
             </UButton>
           </div>
           <pre
-            v-if="open === event.id && Array.isArray(contentRows(event))"
+            v-if="open === event.id && contentChange(event) === 'changed'"
             class="mt-2 max-h-96 overflow-auto rounded bg-elevated p-2 font-mono text-xs leading-relaxed"
-          ><template v-for="(row, index) in contentRows(event) as DiffRow[]" :key="index"><span
+          ><template v-for="(row, index) in openRows" :key="index"><span
             v-if="row.kind === 'skip'"
             class="block text-dimmed"
           >… 省略没变的 {{ row.count }} 行</span><span

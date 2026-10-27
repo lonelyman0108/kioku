@@ -77,10 +77,25 @@ watch(
     if (!m) return
     if (!base.value) return load(m)
     if (dirty.value) return
-    if (m.id !== base.value.id || m.version >= base.value.version) load(m)
+    if (m.id !== base.value.id || m.version >= base.value.version) adopt(m)
   },
   { immediate: true },
 )
+
+// 载入服务器上的一版；比表单那一版新时通知页面，树上的标记与列表跟着变（别处改过、或从历史里恢复了）
+function adopt(m: MemoryView) {
+  const b = base.value
+  const newer = !!b && (m.id !== b.id || m.version > b.version)
+  load(m)
+  if (newer) emit('changed', m)
+}
+
+// 服务器上最新的那一版。表单有改动时上面的监听会跳过新版本，开始或取消编辑时要从它载入
+function latest(): MemoryView | null {
+  const [m, b] = [memory.data.value, base.value]
+  if (!m || !b) return m ?? b
+  return m.id !== b.id || m.version >= b.version ? m : b
+}
 
 // 有未保存的修改时，切到别的记忆、别的页面、退出登录或关掉标签页之前先确认（见 unsavedChanges.ts）。
 // 换视图或筛选条件时编辑器还在，不用确认
@@ -100,12 +115,14 @@ const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.va
 const mode = ref<'read' | 'edit'>('read')
 const preview = ref(false)
 function startEditing() {
-  if (base.value) load(base.value)
+  const m = latest()
+  if (m) adopt(m)
   mode.value = 'edit'
 }
 function cancelEditing() {
   if (dirty.value && !window.confirm('放弃没保存的修改？')) return
-  if (base.value) load(base.value)
+  const m = latest()
+  if (m) adopt(m)
   mode.value = 'read'
 }
 
@@ -122,16 +139,13 @@ const keywordIndex = computed(() =>
 const historyOpen = ref(false)
 const moveOpen = ref(false)
 // 移动或改层之后把结果写进缓存：只改层时编辑器跟上新的层，移动后打开新 URI 时不用再读一次
-function onMoved(next: MemoryView, from: string) {
-  queryClient.setQueryData(['memory', props.spaceId, next.uri], next)
-  void queryClient.invalidateQueries({ queryKey: ['memory-glossary', props.spaceId] })
+async function onMoved(next: MemoryView, from: string) {
+  const key = ['memory', props.spaceId, next.uri]
+  // 先取消进行中的重新拉取，免得晚到的旧数据盖掉移动的结果
+  await queryClient.cancelQueries({ queryKey: key, exact: true })
+  queryClient.setQueryData(key, next)
+  void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
   emit('moved', next, from)
-}
-// 恢复之后历史与这条记忆都变了：写进缓存，表单没有改动时会跟上（见上面对 memory.data 的监听）
-function onRestored(next: MemoryView) {
-  queryClient.setQueryData(queryKey.value, next)
-  void queryClient.invalidateQueries({ queryKey: ['memory-glossary', props.spaceId] })
-  emit('changed', next)
 }
 
 const menu = computed<DropdownMenuItem[][]>(() => {
@@ -200,7 +214,7 @@ async function save() {
     toast.add({ title: '已保存', color: 'success' })
     // 保存期间没有再改，就回到阅读状态
     if (!dirty.value) mode.value = 'read'
-    void queryClient.invalidateQueries({ queryKey: ['memory-glossary', props.spaceId] })
+    void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
     emit('changed', next)
   } catch (err) {
     failed(err, '保存失败')
@@ -253,7 +267,7 @@ async function remove() {
       variant="subtle"
       title="这条记忆在别处被改过，或被删除后重新创建了。保存会提示冲突，可以先复制你的修改，再载入新版本。"
       :actions="[
-        { label: '载入新版本', onClick: () => memory.data.value && load(memory.data.value) },
+        { label: '载入新版本', onClick: () => memory.data.value && adopt(memory.data.value) },
       ]"
     />
 
@@ -310,9 +324,9 @@ async function remove() {
 
     <!-- 阅读：disclosure、关键词、渲染后的正文与来历 -->
     <template v-if="mode === 'read'">
-      <div v-if="base.disclosure || base.glossary.length" class="space-y-2">
+      <div v-if="base.disclosure?.trim() || base.glossary.length" class="space-y-2">
         <blockquote
-          v-if="base.disclosure"
+          v-if="base.disclosure?.trim()"
           class="border-l-2 border-accented pl-3 text-sm text-muted"
         >
           <span class="text-xs text-dimmed">什么时候想起：</span>{{ base.disclosure }}
@@ -330,7 +344,7 @@ async function remove() {
           </UBadge>
         </div>
       </div>
-      <p v-else class="text-xs text-warning">
+      <p v-if="!base.disclosure?.trim()" class="text-xs text-warning">
         没写 disclosure：写清什么场景下该想起它，召回时多一条线索。
       </p>
       <div class="rounded-lg border border-default p-4">
@@ -397,7 +411,6 @@ async function remove() {
           :space-id="spaceId"
           :memory-id="base.id"
           :can-restore="!readOnly && mode === 'read'"
-          @restored="onRestored"
         />
       </template>
     </USlideover>
