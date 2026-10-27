@@ -453,6 +453,32 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     }
   })
 
+  it('关键词索引按成员的可见范围：别人的私人层不在里面，secret 的只给能读 secret 的成员', async () => {
+    const editor = await seed()
+    await create(ws.cookie, { uri: 'projects://alpha2', content: '另一条', glossary: ['阿尔法'] })
+    await create(ws.cookie, {
+      uri: 'kb://lock',
+      content: '锁',
+      layer: 'base',
+      sensitivity: 'secret',
+      glossary: ['门锁'],
+    })
+    await create(editor.cookie, { uri: 'home://e', content: 'E 的', glossary: ['日记本'] })
+    type Index = { entries: { keyword: string; uris: string[] }[]; truncated: boolean }
+    const index = async (cookie: string) =>
+      Object.fromEntries(
+        (await get<Index>(cookie, '/memories/glossary')).entries.map((e) => [e.keyword, e.uris]),
+      )
+    const owner = await index(ws.cookie)
+    expect(owner['阿尔法']).toEqual(['projects://alpha', 'projects://alpha2'])
+    expect(owner['门锁']).toEqual(['kb://lock'])
+    expect(owner['日记本']).toBeUndefined()
+    const mine = await index(editor.cookie)
+    expect(mine['日记本']).toEqual(['home://e'])
+    expect(mine['阿尔法']).toBeUndefined()
+    expect(mine['门锁']).toBeUndefined()
+  })
+
   it('OpenAPI 文档里有新增的接口', async () => {
     const doc = (await (await app.request('/v1/openapi.json')).json()) as {
       paths: Record<string, unknown>

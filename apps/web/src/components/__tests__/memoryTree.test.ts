@@ -70,6 +70,13 @@ describe('记忆树', () => {
       ['notes', false, 1, 'folder'],
     ])
     expect(items[2]!.exists).toBe(false)
+    // 层、敏感级与 priority 带到节点上，树里标出来
+    expect([items[0]!.layer, items[0]!.sensitivity, items[0]!.priority]).toEqual([
+      'base',
+      'public',
+      0,
+    ])
+    expect([items[2]!.layer, items[2]!.priority]).toEqual([null, null])
   })
 
   it('这一级被截断时末尾放一个不能点的说明', () => {

@@ -9,6 +9,7 @@ import {
   EmbeddingRebuildResult,
   EmbeddingSettingsView,
   EmbeddingTestResult,
+  GlossaryIndex,
   HealthResponse,
   KeyInfo,
   Me,
@@ -99,6 +100,8 @@ export const api = {
       body: { query },
       schema: ConsoleSearchResponse,
     }),
+  glossaryIndex: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/memories/glossary`, { schema: GlossaryIndex }),
   memoryHistory: (spaceId: string, id: string) =>
     request('GET', `/spaces/${spaceId}/memories/history`, { query: { id }, schema: MemoryHistory }),
   deletedMemories: (spaceId: string, cursor?: string) =>

@@ -7,6 +7,7 @@ import {
   DeletedMemoryList,
   DomainSummary,
   ErrorResponse,
+  GlossaryIndex,
   MemoryChildren,
   MemoryHistory,
   MemoryHistoryQuery,
@@ -224,6 +225,14 @@ function consoleOnlyRoutes(deps: Deps) {
     request: { params, body: jsonBody(UndeleteRequest) },
     responses: { 200: jsonResponse('恢复后的记忆', MemoryView), ...errors },
   })
+  const glossary = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/memories/glossary',
+    tags: ['console'],
+    summary: '成员看得到的记忆的关键词，以及有这个关键词的记忆',
+    request: { params },
+    responses: { 200: jsonResponse('关键词', GlossaryIndex), ...errors },
+  })
   const activity = createRoute({
     method: 'get',
     path: '/spaces/{spaceId}/activity',
@@ -248,6 +257,10 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(undelete, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.undelete(c.req.valid('json')), 200)
+    })
+    .openapi(glossary, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.glossaryIndex(), 200)
     })
     .openapi(activity, async (c) => {
       const { service } = await consoleMember(deps, c)

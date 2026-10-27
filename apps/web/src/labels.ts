@@ -12,6 +12,17 @@ export const layerLabels: Record<Layer, string> = {
   episode: '情节',
 }
 
+// 树上与列表里放不下全名时用的简称
+export const layerShortLabels: Record<Layer, string> = {
+  base: '基础',
+  persona: '人格',
+  app: '应用',
+  owner: '画像',
+  private: '私人',
+  subject: '对象',
+  episode: '情节',
+}
+
 export const sensitivityLabels: Record<Sensitivity, string> = {
   public: '公开',
   internal: '内部',

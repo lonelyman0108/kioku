@@ -1,4 +1,4 @@
-import type { MemoryChildren } from '@kioku/contracts'
+import type { Layer, MemoryChildren, Sensitivity } from '@kioku/contracts'
 
 // 记忆树的一个节点。children 为 undefined 表示叶子；为数组时可以展开，loaded 为 false 时展开才去加载
 export interface MemoryTreeItem {
@@ -7,6 +7,10 @@ export interface MemoryTreeItem {
   // 这一级路径本身有没有记忆；没有时是虚拟节点，只能展开不能打开
   exists: boolean
   loaded: boolean
+  // 这一级本身的记忆的层、敏感级与 priority，树上标出来；虚拟节点为空
+  layer?: Layer | null
+  sensitivity?: Sensitivity | null
+  priority?: number | null
   children?: MemoryTreeItem[]
   icon?: string
   [key: string]: unknown
@@ -28,6 +32,9 @@ export function toTreeItems(
     uri: child.uri,
     exists: child.exists,
     loaded: child.childCount === 0,
+    layer: child.layer,
+    sensitivity: child.sensitivity,
+    priority: child.priority,
     icon: child.childCount > 0 || !child.exists ? icons.folder : icons.file,
     ...(child.childCount > 0
       ? {

@@ -8,6 +8,7 @@ import type {
   DeletedMemoryList,
   DomainSummary,
   EventActor,
+  GlossaryIndex,
   LayerCount,
   Layer,
   MemoryChildren,
@@ -893,6 +894,29 @@ export class MemoryService {
     })
   }
 
+  // 关键词 → 有这个关键词的记忆，可见范围与列表相同
+  async glossaryIndex(): Promise<GlossaryIndex> {
+    return this.run(async (tx, personaIds) => {
+      const rows = await tx
+        .select({ keyword: memoryGlossary.keyword, domain: memories.domain, path: memories.path })
+        .from(memoryGlossary)
+        .innerJoin(memories, eq(memories.id, memoryGlossary.memoryId))
+        .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
+        .orderBy(asc(memoryGlossary.keyword), asc(memories.domain), asc(memories.path))
+        .limit(GLOSSARY_INDEX_LIMIT + 1)
+      const byKeyword = new Map<string, string[]>()
+      for (const r of rows.slice(0, GLOSSARY_INDEX_LIMIT)) {
+        const uris = byKeyword.get(r.keyword) ?? []
+        uris.push(formatUri(r.domain!, r.path!))
+        byKeyword.set(r.keyword, uris)
+      }
+      return {
+        entries: [...byKeyword].map(([keyword, uris]) => ({ keyword, uris })),
+        truncated: rows.length > GLOSSARY_INDEX_LIMIT,
+      }
+    })
+  }
+
   // 快速跳转：URI 里含有查询词、或有关键词以它开头的记忆，priority 小的在前
   async matches(text: string, limit: number): Promise<MemoryMatch[]> {
     const needle = text.trim().toLowerCase()
@@ -1286,6 +1310,9 @@ export class MemoryService {
 
 // 一条记忆的历史最多列这么多个事件
 const HISTORY_LIMIT = 500
+
+// 关键词索引最多给这么多条（关键词 × 记忆），个人用的空间远到不了
+const GLOSSARY_INDEX_LIMIT = 5000
 
 // 时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
 const microsOf = (column: SQLWrapper) => sql`(extract(epoch from ${column}) * 1000000)::bigint`
