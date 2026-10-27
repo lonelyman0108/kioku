@@ -8,6 +8,7 @@ import {
   CredentialEventList,
   CredentialIdentifierQuery,
   CredentialProvider,
+  CredentialReferenceList,
   CredentialSummary,
   CredentialValues,
   ErrorResponse,
@@ -125,6 +126,14 @@ function consoleCredentialRoutes(deps: Deps) {
     request: { params: CredentialParams, query: PageQuery },
     responses: { 200: jsonResponse('事件', CredentialEventList), ...errors },
   })
+  const references = createRoute({
+    ...common,
+    method: 'get',
+    path: `${base}/{credentialId}/references`,
+    summary: '引用这条凭据的记忆（不含已删除、secret 与已失效的）',
+    request: { params: CredentialParams },
+    responses: { 200: jsonResponse('引用它的记忆', CredentialReferenceList), ...errors },
+  })
   const providers = createRoute({
     ...common,
     method: 'get',
@@ -193,6 +202,9 @@ function consoleCredentialRoutes(deps: Deps) {
         await (await service(c)).events(c.req.valid('param').credentialId, c.req.valid('query')),
         200,
       ),
+    )
+    .openapi(references, async (c) =>
+      c.json(await (await service(c)).references(c.req.valid('param').credentialId), 200),
     )
     .openapi(providers, async (c) => c.json(await (await service(c)).providers(), 200))
     .openapi(createProvider, async (c) =>

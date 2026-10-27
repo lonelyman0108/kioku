@@ -92,6 +92,13 @@
       "when": 1793142713567,
       "tag": "0012_credentials",
       "breakpoints": true
+    },
+    {
+      "idx": 13,
+      "version": "7",
+      "when": 1793142915193,
+      "tag": "0013_credential_refs",
+      "breakpoints": true
     }
   ]
 }

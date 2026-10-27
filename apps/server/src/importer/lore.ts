@@ -9,6 +9,7 @@ import { and, eq, isNotNull, sql } from 'drizzle-orm'
 import type postgres from 'postgres'
 
 import { consoleAccess } from '../access/access'
+import { looksLikePlaintextCredential } from '../credential/placeholders'
 import { decryptSecret } from '../crypto/envelope'
 import { withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
@@ -160,11 +161,9 @@ export function importKeyOf(context: ImportKeyParts): string {
 
 const MAX_KEYWORDS = 32
 const MAX_DISCLOSURE = 500
-// 路径里带这些词、或正文里有「密码：…」「token = …」这类写法的多半含凭据，没有标成 secret 时提醒。
+// 路径里带这些词、或正文像有明文凭据（规则见 contracts 的 PLAINTEXT_CREDENTIAL）的多半含凭据，没有标成 secret 时提醒。
 // 只提醒不自动标记：secret 不进召回和 boot，整条记忆都只能显式读取，要由人来权衡
 const CREDENTIAL_PATH = /credential|password|passwd|secret|token|密码|凭据/i
-const CREDENTIAL_CONTENT =
-  /(password|passwd|密码|口令|token|api[_ -]?key|secret)\s*[:：=]|sk-[A-Za-z0-9]{16,}/i
 
 // 计划只依赖读出来的数据和已有应用，不写库：先打印给人确认，再执行
 export function planImport(
@@ -290,9 +289,9 @@ export function planImport(
     const extras = [node.disclosure ?? '', ...node.keywords].join('\n')
     if (!secret && [node.uri, ...node.aliases].some((u) => CREDENTIAL_PATH.test(u))) {
       plan.warnings.push(`${node.uri} 看起来是凭据，没有用 --secret 标记`)
-    } else if (!secret && CREDENTIAL_CONTENT.test(`${node.content}\n${extras}`)) {
+    } else if (!secret && looksLikePlaintextCredential(`${node.content}\n${extras}`)) {
       plan.warnings.push(`${node.uri} 的正文里像有密码或 Token，没有用 --secret 标记`)
-    } else if (secret && CREDENTIAL_CONTENT.test(extras)) {
+    } else if (secret && looksLikePlaintextCredential(extras)) {
       plan.warnings.push(
         `${node.uri} 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文`,
       )

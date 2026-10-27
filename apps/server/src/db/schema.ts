@@ -495,6 +495,29 @@ export const credentialEvents = pgTable(
   ],
 )
 
+// 记忆正文里引用了哪些凭据标识：列出一条凭据被哪些记忆用着、挡住删除。每次写入按正文重写这条记忆的引用，
+// secret 的不进来（明文标识会透露加密正文写的是什么）。算不算数在查询时与记忆表关联判断
+// （没删除、不是 secret、仍有效、在凭据主人的私人层），所以删除、撤销删除、让出 URI 都不用另外维护
+export const memoryCredentialRefs = pgTable(
+  'memory_credential_refs',
+  {
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    memoryId: uuid().notNull(),
+    identifier: text().notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.memoryId, t.identifier] }),
+    index().on(t.spaceId, t.identifier),
+    foreignKey({
+      name: 'memory_credential_refs_memory_fk',
+      columns: [t.spaceId, t.memoryId],
+      foreignColumns: [memories.spaceId, memories.id],
+    }).onDelete('cascade'),
+  ],
+)
+
 // 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 export const RLS_TABLES = [
   'personas',
@@ -508,4 +531,5 @@ export const RLS_TABLES = [
   'credential_providers',
   'credentials',
   'credential_events',
+  'memory_credential_refs',
 ] as const

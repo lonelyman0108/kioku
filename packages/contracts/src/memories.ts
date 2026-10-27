@@ -78,6 +78,8 @@ export const UpdateMemoryRequest = z.object({
   disclosure: z.string().max(500).nullable().optional(),
   glossaryAdd: z.array(Keyword).max(32).optional(),
   glossaryRemove: z.array(RemovableKeyword).max(32).optional(),
+  // 从 secret 降级时正文还像有明文凭据，确认没有、仍要降级。只有管理界面里的空间 owner 能用，Key 不行
+  allowPlaintext: z.boolean().optional(),
 })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>
 

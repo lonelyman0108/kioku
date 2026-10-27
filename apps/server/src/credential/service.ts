@@ -11,6 +11,7 @@ import {
   type CredentialField,
   type CredentialInfo,
   type CredentialProvider,
+  type CredentialReferenceList,
   type CredentialSourceInput,
   type CredentialSourceUpdate,
   type CredentialSummary,
@@ -20,7 +21,7 @@ import {
   type UpdateCredentialProviderRequest,
   type UpdateCredentialRequest,
 } from '@kioku/contracts'
-import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, sql } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm'
 
 import {
   canManageCredentials,
@@ -37,8 +38,11 @@ import {
   credentialEvents,
   credentialProviders,
   credentials,
+  memories,
+  memoryCredentialRefs,
 } from '../db/schema'
-import { MemoryError } from '../memory/service'
+import { formatUri } from '../memory/uri'
+import { MemoryError, STILL_VALID } from '../memory/service'
 import { CREDENTIAL_NOTICE, externalMethod } from './methods'
 
 export interface CredentialContext {
@@ -51,7 +55,22 @@ export interface CredentialContext {
 }
 
 // 取用经由哪里，记在访问事件里
-export type CredentialVia = 'kioku_credential' | 'rest'
+export type CredentialVia = 'kioku_credential' | 'rest' | 'kioku_get'
+
+// kioku_get 末尾列出的一条凭据：读者取不了的只标「无权查看或不存在」，不给凭据源与条目位置
+export type PlaceholderCredential =
+  | { identifier: string; available: false }
+  | {
+      identifier: string
+      available: true
+      name: string
+      source: 'hosted' | 'external'
+      // 托管的：这把 Key 能不能取到值；外部的：凭据源、条目位置与取法（凭据源已删除时为 null）
+      revealable: boolean
+      provider: { kind: string; name: string } | null
+      location: string | null
+      method: string
+    }
 
 type CredentialRow = typeof credentials.$inferSelect
 type ProviderRow = typeof credentialProviders.$inferSelect
@@ -68,6 +87,19 @@ type CredentialChange =
 
 // 一次列出的凭据上限，个人用的空间远到不了
 const LIST_LIMIT = 1000
+// 凭据详情里最多列出这么多条引用它的记忆
+const REFERENCE_LIMIT = 200
+
+// 算数的引用：凭据主人私人层里没删除、不是 secret、仍有效的记忆（索引按正文重写，状态在这里判断）
+const effectiveRef = (ownerAccountId: string) =>
+  and(
+    eq(memories.id, memoryCredentialRefs.memoryId),
+    eq(memories.ownerAccountId, ownerAccountId),
+    eq(memories.layer, 'private'),
+    isNull(memories.deletedAt),
+    ne(memories.sensitivity, 'secret'),
+    STILL_VALID,
+  )
 const EVENT_ID = /^\d{1,15}$/
 
 // 托管的值整体加密，aad 绑定凭据 id：把一条凭据的密文挪到别的凭据或记忆上会解密失败
@@ -190,11 +222,16 @@ export class CredentialService {
     return { ...this.base(row, providers), fields: row.fields.map((f) => f.name) }
   }
 
-  private consoleView(row: CredentialRow, providers: Map<string, ProviderRow>): ConsoleCredential {
+  private consoleView(
+    row: CredentialRow,
+    providers: Map<string, ProviderRow>,
+    references: Map<string, number>,
+  ): ConsoleCredential {
     return {
       ...this.info(row, providers),
       appIds: row.appIds,
       deletedAt: row.deletedAt?.toISOString() ?? null,
+      referenceCount: references.get(row.identifier) ?? 0,
     }
   }
 
@@ -204,8 +241,24 @@ export class CredentialService {
     return new Map(provider ? [[provider.id, provider]] : [])
   }
 
+  // 各标识被多少条记忆引用（只算 effectiveRef 的）
+  private async referenceCounts(tx: Tx, identifiers: string[]): Promise<Map<string, number>> {
+    if (!identifiers.length) return new Map()
+    const rows = await tx
+      .select({ identifier: memoryCredentialRefs.identifier, n: count() })
+      .from(memoryCredentialRefs)
+      .innerJoin(memories, effectiveRef(this.owner))
+      .where(inArray(memoryCredentialRefs.identifier, [...new Set(identifiers)]))
+      .groupBy(memoryCredentialRefs.identifier)
+    return new Map(rows.map((r) => [r.identifier, r.n]))
+  }
+
   private async consoleViewOf(tx: Tx, written: Written): Promise<ConsoleCredential> {
-    return this.consoleView(written.row, await this.providersFor(tx, written))
+    return this.consoleView(
+      written.row,
+      await this.providersFor(tx, written),
+      await this.referenceCounts(tx, [written.row.identifier]),
+    )
   }
 
   private async summaryOf(tx: Tx, written: Written): Promise<CredentialSummary> {
@@ -422,6 +475,17 @@ export class CredentialService {
     if (expectedVersion !== undefined && expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
     }
+    // 先锁住凭据再数引用：和写入记忆时新增引用的检查互斥（那边以共享锁读凭据），
+    // 删除期间不会冒出新的引用。已删除与 secret 的记忆不挡删除
+    await tx
+      .select({ id: credentials.id })
+      .from(credentials)
+      .where(eq(credentials.id, before.id))
+      .for('update')
+    const used = (await this.referenceCounts(tx, [before.identifier])).get(before.identifier) ?? 0
+    if (used) {
+      throw new MemoryError(409, `还有 ${used} 条记忆引用这条凭据，先改掉这些引用再删除`)
+    }
     const [row] = await tx
       .update(credentials)
       .set({ deletedAt: new Date(), updatedAt: new Date() })
@@ -462,8 +526,12 @@ export class CredentialService {
         .limit(LIST_LIMIT + 1)
       const page = rows.slice(0, LIST_LIMIT)
       const providers = await this.providersOf(tx, page)
+      const references = await this.referenceCounts(
+        tx,
+        page.map((r) => r.identifier),
+      )
       return {
-        items: page.map((r) => this.consoleView(r, providers)),
+        items: page.map((r) => this.consoleView(r, providers, references)),
         truncated: rows.length > LIST_LIMIT,
       }
     })
@@ -509,10 +577,52 @@ export class CredentialService {
           ),
         )
         .returning()
-      if (!row) throw new MemoryError(409, '凭据刚被其他请求修改，请重新读取')
+      if (!row) {
+        // 检查之后被别的请求改了：说清楚是已经被恢复了，还是又被改过（给出现在的版本号）
+        const [now] = await tx
+          .select({ version: credentials.version, deletedAt: credentials.deletedAt })
+          .from(credentials)
+          .where(eq(credentials.id, id))
+        throw new MemoryError(
+          409,
+          now && !now.deletedAt
+            ? '这条凭据刚被别的请求恢复了'
+            : `版本已变化：当前是 ${now?.version ?? before.version}，请先重新读取`,
+        )
+      }
       await this.event(tx, id, 'undelete')
       return this.consoleViewOf(tx, { row })
     }, '同一个标识已经有一条有效的凭据，这一条不能恢复')
+  }
+
+  // 引用这条凭据的记忆，最近改过的在前
+  async references(id: string): Promise<CredentialReferenceList> {
+    this.requireRead()
+    return this.run(async (tx) => {
+      const row = await this.ownById(tx, id)
+      const rows = await tx
+        .select({
+          id: memories.id,
+          domain: memories.domain,
+          path: memories.path,
+          sensitivity: memories.sensitivity,
+          updatedAt: memories.updatedAt,
+        })
+        .from(memoryCredentialRefs)
+        .innerJoin(memories, effectiveRef(this.owner))
+        .where(eq(memoryCredentialRefs.identifier, row.identifier))
+        .orderBy(desc(memories.updatedAt), asc(memories.id))
+        .limit(REFERENCE_LIMIT + 1)
+      return {
+        items: rows.slice(0, REFERENCE_LIMIT).map((r) => ({
+          id: r.id,
+          uri: formatUri(r.domain!, r.path!),
+          sensitivity: r.sensitivity,
+          updatedAt: r.updatedAt.toISOString(),
+        })),
+        truncated: rows.length > REFERENCE_LIMIT,
+      }
+    })
   }
 
   // 查看托管的值，记一条访问事件。和 secret 一样，目前要求是空间 owner
@@ -762,6 +872,76 @@ export class CredentialService {
         method: externalMethod(provider.kind, row.location!, fields),
         notice: CREDENTIAL_NOTICE,
       }
+    })
+  }
+
+  // kioku_get 读到含占位符的记忆时，末尾列出这些凭据怎么取。权限检查与 kioku_credential 相同：
+  // 读者取不了的只标「无权查看或不存在」，不给凭据源与条目位置；给出外部绑定的记一条访问事件。
+  // 托管的值不在这里给，要显式调用 kioku_credential
+  async forPlaceholders(identifiers: string[]): Promise<PlaceholderCredential[]> {
+    const wanted = [...new Set(identifiers)]
+    const readable = canReadCredential(this.ctx.access, {
+      ownerAccountId: this.owner,
+      appIds: null,
+    })
+    if (!wanted.length || !readable) {
+      return wanted.map((identifier) => ({ identifier, available: false }))
+    }
+    return this.run(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(credentials)
+        .where(
+          and(
+            eq(credentials.ownerAccountId, this.owner),
+            inArray(credentials.identifier, wanted),
+            isNull(credentials.deletedAt),
+          ),
+        )
+      const providers = await this.providersOf(tx, rows)
+      const result: PlaceholderCredential[] = []
+      for (const identifier of wanted) {
+        const row = rows.find((r) => r.identifier === identifier)
+        if (!row || !canReadCredential(this.ctx.access, row)) {
+          result.push({ identifier, available: false })
+          continue
+        }
+        if (row.source === 'hosted') {
+          const revealable = canRevealCredential(this.ctx.access, row)
+          result.push({
+            identifier,
+            available: true,
+            name: row.name,
+            source: 'hosted',
+            revealable,
+            provider: null,
+            location: null,
+            method: revealable
+              ? '值由 Kioku 托管，用 kioku_credential 取'
+              : '值由 Kioku 托管，这把 Key 不是 secret 级，取不到',
+          })
+          continue
+        }
+        await this.event(tx, row.id, 'access', {
+          via: 'kioku_get' satisfies CredentialVia,
+          fields: row.fields.map((f) => f.name),
+        })
+        const provider = providers.get(row.providerId!)
+        const live = provider && !provider.deletedAt ? provider : null
+        result.push({
+          identifier,
+          available: true,
+          name: row.name,
+          source: 'external',
+          revealable: false,
+          provider: live ? { kind: live.kind, name: live.name } : null,
+          location: row.location,
+          method: live
+            ? externalMethod(live.kind, row.location!, row.fields)
+            : '这条凭据绑定的凭据源已被删除，取不到值；请主人在管理界面重新绑定',
+        })
+      }
+      return result
     })
   }
 
