@@ -57,7 +57,7 @@ export function formatCredentialAccess(a: CredentialAccess): string {
     lines.push(
       `来源：${a.provider ? `凭据源「${a.provider.name}」（${a.provider.kind}）` : '外部凭据源'}`,
     )
-    if (c.location) lines.push(`条目：${c.location}`)
+    if (c.location) lines.push(`条目：${JSON.stringify(c.location)}`)
     if (a.provider?.instructions) lines.push(`凭据源的使用说明：${a.provider.instructions}`)
   }
   lines.push(`取法：${a.method}`, '', a.notice)

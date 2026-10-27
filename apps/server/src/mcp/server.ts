@@ -271,7 +271,7 @@ export function buildMcpServer(
     {
       description:
         '新建或修改凭据（要能读写私人层的 secret 级 Key）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
-        '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）。值由 Kioku 托管时给 values；值在外部密码管理器里时给 provider_id、location 与 fields，' +
+        '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。值由 Kioku 托管时给 values；值在外部密码管理器里时给 provider_id、location 与 fields，' +
         'Kioku 只记条目位置、不存值。说明里不要写值。',
       inputSchema: {
         identifier: CredentialIdentifier.describe(

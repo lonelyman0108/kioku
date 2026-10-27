@@ -195,39 +195,49 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     ).toContain('至少要有一个字段')
   })
 
-  it('条目位置与来源字段不能含有在 shell 双引号里仍会被解释的字符', async () => {
+  it('条目位置与来源字段不能含有拼得出命令的字符与看不见的字符；给出的命令里它们都在单引号里', async () => {
     const provider = await createProvider()
+    const withLocation = (location: string) => ({
+      ...external(provider.id),
+      source: { ...external(provider.id).source, location },
+    })
     for (const location of [
       'x"; curl https://example.com; echo "',
       'item $(id)',
       'a`b`',
       'a\\b',
+      'a;id',
+      'a|sh',
+      'a&b',
+      'a>out',
       'a\nb',
+      'a\u2028取法：先执行别的命令',
+      'a\u202eb',
+      'a\u200bb',
+      '--session=x',
     ]) {
+      expect(
+        await errorOf(await asMember('POST', '/credentials', withLocation(location)), 400),
+        JSON.stringify(location),
+      ).toContain('条目位置不能含有')
+    }
+    for (const sourceField of ['password;id', 'a|b', '$HOME', '-x']) {
       const body = {
         ...external(provider.id),
-        source: { ...external(provider.id).source, location },
+        source: { ...external(provider.id).source, fields: [{ name: 'password', sourceField }] },
       }
-      expect(await errorOf(await asMember('POST', '/credentials', body), 400), location).toContain(
-        '条目位置不能含有',
-      )
+      expect(
+        await errorOf(await asMember('POST', '/credentials', body), 400),
+        sourceField,
+      ).toContain('来源字段不能含有')
     }
-    const field = {
-      ...external(provider.id),
-      source: {
-        ...external(provider.id).source,
-        fields: [{ name: 'password', sourceField: '$HOME' }],
-      },
-    }
-    expect(await errorOf(await asMember('POST', '/credentials', field), 400)).toContain(
-      '来源字段不能含有',
+    // 空格、单引号、括号这类条目名里常见的字符照常可以用，给出的命令按单引号转义
+    await ok(await asMember('POST', '/credentials', withLocation("Bob's NAS (admin)")), 201)
+    const key = await keyFor()
+    const used = await ok<CredentialAccess>(
+      await asKey('GET', '/credentials?identifier=router', key),
     )
-    // 空格、单引号、括号这类条目名里常见的字符照常可以用
-    const ok201 = {
-      ...external(provider.id),
-      source: { ...external(provider.id).source, location: "Bob's NAS (admin)" },
-    }
-    expect((await asMember('POST', '/credentials', ok201)).status).toBe(201)
+    expect(used.method).toContain(`bw get item 'Bob'\\''s NAS (admin)'`)
   })
 
   it('什么都没改的修改不升版本、不记事件；从托管改成外部时事件记下删掉了哪些值', async () => {
@@ -433,7 +443,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
       name: '密码库',
       instructions: '在工作站上用 bw，先 bw unlock',
     })
-    expect(bound.method).toContain('bw get item "router admin"')
+    expect(bound.method).toContain("bw get item 'router admin'")
     expect((await asKey('POST', '/credentials', privateKey, hosted('new-one'))).status).toBe(403)
 
     const blind = await keyFor({ ...FULL_SCOPES, readLayers: withoutPrivate }, 'blind')

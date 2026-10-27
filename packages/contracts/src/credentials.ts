@@ -89,10 +89,12 @@ export type ConsoleCredentialList = z.infer<typeof ConsoleCredentialList>
 const CredentialName = z.string().trim().min(1, '名称不能为空').max(100)
 const CredentialDescription = z.string().max(2000).nullable()
 const CredentialValue = z.string().min(1, '值不能为空').max(16_384)
-// 条目位置与来源字段会写进返回给 agent 的取值命令（例如 bw get item "<条目>"），
-// 不能有在双引号里仍会被 shell 解释的字符，否则改得了绑定的 Key 能给别的 agent 塞进一条命令
-const shellSafe = (v: string) => !/[`$\\"]/.test(v) && !/\p{Cc}/u.test(v)
-const SHELL_SAFE_MESSAGE = '不能含有 ` $ \\ " 与换行等控制字符'
+// 条目位置与来源字段会代入取值命令。服务端给出的命令里它们都放在单引号里；这里再挡掉放在引号外
+// 也能拼出新命令的字符、换行与看不见的格式字符（双向控制符、零宽字符等），以及开头的 -（会被当成选项）。
+// 否则改得了绑定的 Key 能借凭据源的使用说明，给别的 agent 塞进一条命令
+const BINDING_UNSAFE = /[;|&<>`$\\"]|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
+const shellSafe = (v: string) => !BINDING_UNSAFE.test(v) && !v.startsWith('-')
+const SHELL_SAFE_MESSAGE = '不能含有 ; | & < > ` $ \\ " 与换行等控制字符，也不能以 - 开头'
 const Location = z
   .string()
   .trim()
