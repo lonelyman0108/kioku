@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { Layer, Provenance, Sensitivity } from './memory'
+import { Layer, PlainLayer, Provenance, Sensitivity } from './memory'
 
 // URI = domain://path。domain 是小写标识；path 是用 / 分隔的段，每段小写字母、数字、_ 或 -。
 // 两个保留 domain：persona://<人格标识>/... 属于人格层，app://<应用标识>/... 属于应用层。
@@ -71,6 +71,8 @@ export const UpdateMemoryRequest = z.object({
   // 填了就核对是不是同一条记忆：删除后在同一个 URI 重建的记忆版本号从 1 重新开始，只看版本号分不出来
   expectedId: z.uuid().optional(),
   content: z.string().min(1).max(20_000).optional(),
+  // 改层：只在 base、owner、private 之间；改成人格层或应用层要移动到 persona:// 或 app:// 下
+  layer: PlainLayer.optional(),
   sensitivity: Sensitivity.optional(),
   priority: z.number().int().min(0).max(99).optional(),
   disclosure: z.string().max(500).nullable().optional(),
@@ -79,7 +81,13 @@ export const UpdateMemoryRequest = z.object({
 })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>
 
-export const MoveMemoryRequest = z.object({ from: MemoryUri, to: MemoryUri })
+// 移到 persona:// 或 app:// 下时层随 URI 变；从那里移出时要用 layer 指定新的层，
+// 普通 domain 之间移动时给了 layer 就顺便改层
+export const MoveMemoryRequest = z.object({
+  from: MemoryUri,
+  to: MemoryUri,
+  layer: PlainLayer.optional(),
+})
 export type MoveMemoryRequest = z.infer<typeof MoveMemoryRequest>
 
 export const DomainSummary = z.object({ domain: z.string(), count: z.number().int() })

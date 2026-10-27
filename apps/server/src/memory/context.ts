@@ -1,4 +1,4 @@
-import type { RecallCandidate } from '@kioku/contracts'
+import type { MemberRole, RecallCandidate } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 
 import {
@@ -8,6 +8,7 @@ import {
   type ConsoleRole,
   type SessionContext,
 } from '../access/access'
+import { memberRole } from '../auth/middleware'
 import { withSpace, type Tx } from '../db/client'
 import { apps } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
@@ -16,7 +17,7 @@ import type { RecallScope } from '../lifecycle/scope'
 import { boot, recentMemories } from '../recall/boot'
 import { embedQuery, normalizeQuery, recall, type QueryVector } from '../recall/recall'
 import { runInSpace } from './personas'
-import { MemoryService } from './service'
+import { MemoryError, MemoryService } from './service'
 
 // 管理界面的搜索等嵌入接口最多这么久，超时就只走全文与关键词，界面不必一直等
 const CONSOLE_SEMANTIC_TIMEOUT_MS = 2_000
@@ -56,22 +57,26 @@ async function accessForConsole(
   )
 }
 
-// 查询向量：嵌入设置读不出来（例如主密钥不对）时记录原因、不用向量；给了时限就最多等这么久
+// 查询向量：嵌入设置读不出来（例如主密钥不对）时记录原因、不用向量。
+// 给了时限就最多等这么久，读嵌入设置的时间也算在内
 async function semanticFor(
   deps: Deps,
   query: string,
   timeoutMs?: number,
 ): Promise<QueryVector | null> {
-  const embedder: Embedder | null = await deps.embedder.get().catch((err: unknown) => {
-    console.warn('读取嵌入设置失败，本次召回不使用向量', err)
-    return null
-  })
-  if (timeoutMs === undefined) return embedQuery(embedder, query)
-  // 嵌入先返回时清掉计时器，不留着它等到点
+  const compute = async () => {
+    const embedder: Embedder | null = await deps.embedder.get().catch((err: unknown) => {
+      console.warn('读取嵌入设置失败，本次召回不使用向量', err)
+      return null
+    })
+    return embedQuery(embedder, query)
+  }
+  if (timeoutMs === undefined) return compute()
+  // 先返回的一方胜出后清掉计时器，不留着它等到点
   let timer: ReturnType<typeof setTimeout> | undefined
   try {
     return await Promise.race([
-      embedQuery(embedder, query),
+      compute(),
       new Promise<null>((resolve) => {
         timer = setTimeout(() => resolve(null), timeoutMs)
       }),
@@ -79,6 +84,17 @@ async function semanticFor(
   } finally {
     clearTimeout(timer)
   }
+}
+
+// 管理界面的请求：先确认是空间成员（不是就 403），再按他的角色建记忆服务。各个管理界面接口都经过这里
+export async function consoleMemberFor(
+  deps: Deps,
+  spaceId: string,
+  accountId: string,
+): Promise<{ role: MemberRole; service: MemoryService }> {
+  const role = await memberRole(deps, spaceId, accountId)
+  if (!role) throw new MemoryError(403, '不是该空间成员')
+  return { role, service: await memoryServiceForConsole(deps, spaceId, accountId, role) }
 }
 
 export function memoryServiceForKey(

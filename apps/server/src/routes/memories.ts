@@ -22,11 +22,11 @@ import {
 } from '@kioku/contracts'
 import type { Context } from 'hono'
 
-import { memberRole, requireKey } from '../auth/middleware'
+import { requireKey } from '../auth/middleware'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { memoryServiceForConsole, memoryServiceForKey, recallForConsole } from '../memory/context'
-import { MemoryError, type MemoryService } from '../memory/service'
+import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
+import type { MemoryService } from '../memory/service'
 
 // 快速跳转最多列出的直接命中数
 const MATCH_LIMIT = 10
@@ -169,15 +169,7 @@ export function memoryRoutes(deps: Deps) {
 
 async function consoleMember(deps: Deps, c: Context<AppEnv>) {
   const spaceId = c.req.param('spaceId')!
-  const accountId = c.get('console').accountId
-  const role = await memberRole(deps, spaceId, accountId)
-  if (!role) throw new MemoryError(403, '不是该空间成员')
-  return {
-    spaceId,
-    accountId,
-    role,
-    service: await memoryServiceForConsole(deps, spaceId, accountId, role),
-  }
+  return { spaceId, ...(await consoleMemberFor(deps, spaceId, c.get('console').accountId)) }
 }
 
 // 只给管理界面的记忆接口：按条件列出、搜索、历史与恢复。Key 有 kioku_list 与召回，用不着这些

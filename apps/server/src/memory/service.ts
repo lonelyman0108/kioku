@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import { SENSITIVITIES } from '@kioku/contracts'
+import { PLAIN_LAYERS, SENSITIVITIES } from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
@@ -34,13 +34,11 @@ import {
   eq,
   exists,
   gt,
-  gte,
   ilike,
   inArray,
   isNotNull,
   isNull,
   like,
-  lt,
   lte,
   or,
   sql,
@@ -62,15 +60,7 @@ import {
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { readableConditions, snapshotColumns, type MemoryColumns } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
-import {
-  APP_DOMAIN,
-  DEFAULT_SENSITIVITY,
-  formatUri,
-  layerForDomain,
-  parseUri,
-  PERSONA_DOMAIN,
-  type ParsedUri,
-} from './uri'
+import { DEFAULT_SENSITIVITY, formatUri, layerForDomain, parseUri, type ParsedUri } from './uri'
 
 export class MemoryError extends Error {
   constructor(
@@ -109,6 +99,9 @@ type MemoryRow = typeof memories.$inferSelect
 
 // 修改时可以改的字段（URI 与 expectedId 由调用方先核对）
 type UpdateFields = Omit<UpdateMemoryRequest, 'uri' | 'expectedId'>
+
+// 一条记忆属于谁：层，以及按层填的主人、人格或应用
+type Ownership = Pick<MemoryRow, 'layer' | 'ownerAccountId' | 'personaId' | 'appId'>
 
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
@@ -343,7 +336,7 @@ export class MemoryService {
     parsed: ParsedUri,
     requested: Layer | undefined,
     personaIds: string[],
-  ): Promise<Pick<MemoryRow, 'layer' | 'ownerAccountId' | 'personaId' | 'appId'>> {
+  ): Promise<Ownership> {
     const access = this.ctx.access
     const forced = layerForDomain(parsed.domain)
     if (forced && requested && requested !== forced) {
@@ -357,10 +350,7 @@ export class MemoryService {
       throw new MemoryError(400, `${layer} 层由对话抽取写入，不能直接按 URI 创建`)
     }
 
-    const ownership = { layer, ownerAccountId: null, personaId: null, appId: null } as Pick<
-      MemoryRow,
-      'layer' | 'ownerAccountId' | 'personaId' | 'appId'
-    >
+    const ownership: Ownership = { layer, ownerAccountId: null, personaId: null, appId: null }
     if (layer === 'owner' || layer === 'private') ownership.ownerAccountId = access.ownerAccountId
     if (layer === 'persona') {
       const id = (await personaIdsBySlug(tx, [parsed.namespaceSlug!])).get(parsed.namespaceSlug!)
@@ -463,21 +453,27 @@ export class MemoryService {
 
   async update(input: UpdateMemoryRequest): Promise<MemoryView> {
     const parsed = parse(input.uri)
-    return this.write(async (tx, personaIds) => {
+    return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, parsed, personaIds)
       if (input.expectedId !== undefined && input.expectedId !== before.id) {
         throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
       }
-      return this.applyUpdate(tx, before, input)
+      return this.applyUpdate(tx, before, input, { released })
     })
   }
 
-  // 修改与恢复共用：在已经读出的那一行上改字段，检查权限、版本与 secret 的加解密，记一条事件
+  // 修改与恢复共用：在已经读出的那一行上改字段，检查权限、版本与 secret 的加解密，记一条事件。
+  // released 收集改层时顺带让出的过期记录（见 claimUri）
   private async applyUpdate(
     tx: Tx,
     before: MemoryRow,
     input: UpdateFields,
-    meta: { eventType?: string; eventContext?: Record<string, unknown>; glossary?: string[] } = {},
+    meta: {
+      eventType?: string
+      eventContext?: Record<string, unknown>
+      glossary?: string[]
+      released?: string[]
+    } = {},
   ): Promise<MemoryView> {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
@@ -487,6 +483,36 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, { ...before, sensitivity: s })) {
         throw new MemoryError(403, `没有权限改 ${before.layer} 层的 ${s} 级记忆`)
       }
+    }
+
+    // 改层只在 base、owner、private 之间：共享与按成员互转时归属跟着变，按成员的层归写入方
+    const layer = input.layer ?? before.layer
+    const ownerAccountId =
+      layer === before.layer
+        ? before.ownerAccountId
+        : layer === 'base'
+          ? null
+          : this.ctx.access.ownerAccountId
+    if (layer !== before.layer) {
+      if (
+        layerForDomain(before.domain!) ||
+        !(PLAIN_LAYERS as readonly Layer[]).includes(before.layer)
+      ) {
+        throw new MemoryError(
+          400,
+          `${before.layer} 层的记忆不能直接改层；人格层与应用层要移动到别的命名空间`,
+        )
+      }
+      if (!canWrite(this.ctx.access, { layer, sensitivity, appId: null })) {
+        throw new MemoryError(403, `没有权限把记忆改到 ${layer} 层的 ${sensitivity} 级`)
+      }
+      // 新归属下已失效或过期、又挡着 URI 的记录先让出；真冲突由触发器与唯一索引判断，返回 409
+      await this.claimUri(
+        tx,
+        parse(formatUri(before.domain!, before.path!)),
+        { ownerAccountId },
+        meta.released ?? [],
+      )
     }
 
     // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
@@ -503,6 +529,8 @@ export class MemoryService {
       .update(memories)
       .set({
         ...body,
+        layer,
+        ownerAccountId,
         sensitivity,
         priority: input.priority ?? before.priority,
         disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
@@ -608,7 +636,9 @@ export class MemoryService {
     this.changed([id])
   }
 
-  // 改 URI 不能改变归属：人格层、应用层只能在同一个人格或应用的命名空间里移动
+  // 改 URI。移进、移出 persona:// 与 app://，或在不同的人格、应用之间移动时，层与归属跟着目标 URI 变：
+  // 移到那里时层由 URI 决定，移出时要用 layer 指定新的层；普通 domain 之间给了 layer 就顺便改层。
+  // 原来与目标两边都要有写权限
   async move(input: MoveMemoryRequest): Promise<MemoryView> {
     const from = parse(input.from)
     const to = parse(input.to)
@@ -617,18 +647,40 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限移动 ${before.layer} 层的记忆`)
       }
-      const sameNamespace = from.domain === to.domain && from.namespaceSlug === to.namespaceSlug
-      const namespaced = layerForDomain(from.domain) || layerForDomain(to.domain)
-      if (namespaced && !sameNamespace) {
-        throw new MemoryError(
-          400,
-          `${PERSONA_DOMAIN}:// 与 ${APP_DOMAIN}:// 下的记忆只能在同一个标识下移动`,
-        )
+      const forced = layerForDomain(to.domain)
+      if (forced && input.layer) {
+        throw new MemoryError(400, `${to.domain}:// 下的层由 URI 决定，不用指定 layer`)
       }
-      await this.claimUri(tx, to, before, released)
+      const sameNamespace = from.domain === to.domain && from.namespaceSlug === to.namespaceSlug
+      const crossing = !sameNamespace && (layerForDomain(from.domain) !== null || forced !== null)
+      let ownership: Ownership = {
+        layer: before.layer,
+        ownerAccountId: before.ownerAccountId,
+        personaId: before.personaId,
+        appId: before.appId,
+      }
+      if (crossing || (input.layer && input.layer !== before.layer)) {
+        if (!forced && !input.layer && layerForDomain(from.domain)) {
+          throw new MemoryError(
+            400,
+            `移出 ${from.domain}:// 时要指定新的层（base、owner 或 private）`,
+          )
+        }
+        ownership = await this.resolveOwnership(
+          tx,
+          to,
+          forced ? undefined : (input.layer ?? before.layer),
+          personaIds,
+        )
+        if (!canWrite(this.ctx.access, { ...ownership, sensitivity: before.sensitivity })) {
+          throw new MemoryError(403, `没有权限把记忆移到 ${ownership.layer} 层`)
+        }
+      }
+      await this.claimUri(tx, to, ownership, released)
       const [row] = await tx
         .update(memories)
         .set({
+          ...ownership,
           domain: to.domain,
           path: to.path,
           version: sql`${memories.version} + 1`,
@@ -778,8 +830,13 @@ export class MemoryService {
               : undefined,
             query.missingDisclosure === 'true' ? MISSING_DISCLOSURE : undefined,
             query.missingDisclosure === 'false' ? sql`not ${MISSING_DISCLOSURE}` : undefined,
-            query.updatedAfter ? gte(memories.updatedAt, new Date(query.updatedAfter)) : undefined,
-            query.updatedBefore ? lt(memories.updatedAt, new Date(query.updatedBefore)) : undefined,
+            // 时间原样交给数据库换算：经过 JS 的 Date 会丢掉微秒
+            query.updatedAfter
+              ? sql`${memories.updatedAt} >= ${query.updatedAfter}::timestamptz`
+              : undefined,
+            query.updatedBefore
+              ? sql`${memories.updatedAt} < ${query.updatedBefore}::timestamptz`
+              : undefined,
             after ? afterCursor(query.sort, after) : undefined,
           ),
         )
@@ -1323,6 +1380,8 @@ function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor 
       : sort === 'priority'
         ? values.length === 4 &&
           Number.isInteger(values[0]) &&
+          (values[0] as number) >= 0 &&
+          (values[0] as number) <= 2_147_483_647 &&
           isDomain(values[1]) &&
           isPath(values[2])
         : values.length === 3 && isDomain(values[0]) && isPath(values[1])

@@ -8,12 +8,12 @@ import type {
   MemoryView,
   SpaceOverview,
 } from '@kioku/contracts'
-import { inArray } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memories, settings } from '../../db/schema'
+import { memories, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { embedMemory } from '../../embedding/worker'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
@@ -239,6 +239,19 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       headers: { cookie: ws.cookie },
     })
     expect(res.status).toBe(400)
+
+    // 精确到微秒：边界不能因为换算成 JS 的 Date 而挪动
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.execute(
+        sql`update memories set updated_at = '2026-02-01T00:00:00.000200Z' where path = 'mid'`,
+      ),
+    )
+    expect(
+      uris(await range(`updatedBefore=${encodeURIComponent('2026-02-01T00:00:00.000500Z')}`)),
+    ).toEqual(['notes://mid', 'notes://old'])
+    expect(
+      uris(await range(`updatedAfter=${encodeURIComponent('2026-02-01T00:00:00.000500Z')}`)),
+    ).toEqual(['notes://new'])
   })
 
   it('翻页参数无效时返回 400', async () => {
@@ -253,6 +266,8 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       `sort=updated&cursor=${uriCursor}`,
       // 超出 bigint 的范围，不能让数据库报错变成 500
       `sort=updated&cursor=${encode(['9999999999999999999', '00000000-0000-4000-8000-000000000000'])}`,
+      // priority 超出整数范围
+      `sort=priority&cursor=${encode([3000000000, 'notes', 'x', '00000000-0000-4000-8000-000000000000'])}`,
     ]) {
       const res = await app.request(`${space()}/memories/list?${query}`, {
         headers: { cookie: ws.cookie },
@@ -371,6 +386,28 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       active: 0,
       lastUsedAt: null,
     })
+
+    // 应用主人离开空间后，他的 Key 作废，不再算有效；重新加入后，之前签发的也不算
+    await ws.issueKey(ownerApp.id)
+    const another = await app.request(
+      `${space()}/apps/${eveApp.id}/keys`,
+      jsonRequest('POST', { name: 'k2', scopes: EDITOR_SCOPES }, { cookie: editor.cookie }),
+    )
+    expect(another.status).toBe(201)
+    await database.db
+      .delete(spaceMembers)
+      .where(
+        and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, editor.accountId)),
+      )
+    expect(keysOf(await get<SpaceOverview>(ws.cookie, '/overview'), 'eve-bot')).toEqual({
+      active: 0,
+      lastUsedAt: null,
+    })
+    await database.db
+      .insert(spaceMembers)
+      .values({ spaceId: ws.spaceId, accountId: editor.accountId, role: 'editor' })
+    expect(keysOf(await get<SpaceOverview>(ws.cookie, '/overview'), 'eve-bot')?.active).toBe(0)
+    expect(keysOf(await get<SpaceOverview>(ws.cookie, '/overview'), 'owner-bot')?.active).toBe(2)
   })
 
   it('实例的向量覆盖率与重建只给实例管理员', async () => {
@@ -392,8 +429,8 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
 
     await saveEmbedding()
     const res = await rebuild(ws.cookie)
-    expect(res.status).toBe(202)
-    // 测试里没有启动后台任务
+    // 测试里没有启动后台任务：没排进队列，不能返回已接受
+    expect(res.status).toBe(503)
     expect(await res.json()).toEqual({ queued: false })
 
     // 有后台任务时按入队结果返回，入队失败不能报成已排队
@@ -409,6 +446,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
         '/v1/settings/embedding/rebuild',
         jsonRequest('POST', {}, { cookie: ws.cookie }),
       )
+      expect(r.status).toBe(queued ? 202 : 503)
       expect(await r.json()).toEqual({ queued })
     }
   })

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { Layer, Provenance, Sensitivity } from './memory'
+import { Layer, PlainLayer, Provenance, Sensitivity } from './memory'
 import { RecallCandidate } from './recall'
 
 // 管理界面专用的接口：记忆列表、搜索与空间概览。只按成员本人的权限返回，Key 用不了
@@ -230,3 +230,12 @@ export const SpaceOverview = z.object({
   recent: z.array(ActivityItem),
 })
 export type SpaceOverview = z.infer<typeof SpaceOverview>
+
+// 空间的 domain 默认层：管理界面新建记忆时按 domain 带出层。只是默认值，通过 Key 写入不受影响
+export const DomainLayers = z.object({
+  defaults: z
+    .record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'domain 格式不对'), PlainLayer)
+    .refine((r) => Object.keys(r).length <= 64, '最多配置 64 个 domain')
+    .refine((r) => !('persona' in r) && !('app' in r), 'persona 与 app 的层由 URI 决定，不用配置'),
+})
+export type DomainLayers = z.infer<typeof DomainLayers>

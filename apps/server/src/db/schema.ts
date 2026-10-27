@@ -6,6 +6,7 @@ import {
   SENSITIVITIES,
   SUBJECT_KINDS,
   type KeyScopes,
+  type PlainLayer,
 } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import {
@@ -71,6 +72,8 @@ export const settings = pgTable('settings', {
 export const spaces = pgTable('spaces', {
   id: uuid().primaryKey().defaultRandom(),
   name: text().notNull(),
+  // domain → 管理界面新建记忆时带出的层（只能是 base、owner、private）
+  domainLayers: jsonb().$type<Record<string, PlainLayer>>().notNull().default({}),
   createdAt: createdAt(),
 })
 

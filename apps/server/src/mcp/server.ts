@@ -4,6 +4,7 @@ import {
   CreateMemoryRequest,
   Layer,
   MemoryUri,
+  PlainLayer,
   RecallRequest,
   Sensitivity,
   UpdateMemoryRequest,
@@ -173,10 +174,16 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
     'kioku_move',
     {
       description:
-        '修改记忆的 URI（改名或移到别的父节点下）。人格层与应用层的记忆只能在同一个标识下移动。',
-      inputSchema: { from: MemoryUri, to: MemoryUri },
+        '修改记忆的 URI（改名或移到别的父节点下）。移到 persona:// 或 app:// 下时层跟着 URI 变；' +
+        '从那里移出时要用 layer 指定新的层（base、owner 或 private）。',
+      inputSchema: {
+        from: MemoryUri,
+        to: MemoryUri,
+        layer: PlainLayer.optional().describe('移出 persona:// 或 app:// 时的新层'),
+      },
     },
-    ({ from, to }) => tool(async () => formatMemory(await memory.move({ from, to }))),
+    ({ from, to, layer }) =>
+      tool(async () => formatMemory(await memory.move({ from, to, ...(layer ? { layer } : {}) }))),
   )
 
   return server
