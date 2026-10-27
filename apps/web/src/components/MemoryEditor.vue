@@ -144,6 +144,8 @@ async function onMoved(next: MemoryView, from: string) {
   // 先取消进行中的重新拉取，免得晚到的旧数据盖掉移动的结果
   await queryClient.cancelQueries({ queryKey: key, exact: true })
   queryClient.setQueryData(key, next)
+  // 只改了层时还停在这一条上：先载入结果，否则监听会把它当成别处的新版本，再通知页面一次
+  if (next.uri === props.uri) load(next)
   void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
   emit('moved', next, from)
 }
@@ -167,7 +169,7 @@ const menu = computed<DropdownMenuItem[][]>(() => {
           label: '删除',
           icon: icons.remove,
           color: 'error',
-          onSelect: () => (confirmDelete.value = true),
+          onSelect: () => (deleting.value = base.value),
         },
       ]
     : []
@@ -177,7 +179,8 @@ const sensitivityItems = computed(() =>
   permissions.sensitivities.value.map((s) => ({ label: sensitivityLabels[s], value: s })),
 )
 const saving = ref(false)
-const confirmDelete = ref(false)
+// 要删除的那一版，在打开确认框时记下：确认期间编辑器可能载入了删除后重建的另一条，不能把它一起删掉
+const deleting = ref<MemoryView | null>(null)
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -226,11 +229,12 @@ async function save() {
 }
 
 async function remove() {
+  const m = deleting.value
+  if (!m) return
   try {
-    // 带上表单载入时的 id 与版本号：期间被改过、或删除后重建了的记忆不会被一起删掉
-    if (!base.value) return
-    await api.deleteMemory(props.spaceId, props.uri, base.value)
-    confirmDelete.value = false
+    // 带上确认的那一版的 id 与版本号：期间被改过、或删除后重建了的记忆不会被一起删掉
+    await api.deleteMemory(props.spaceId, props.uri, m)
+    deleting.value = null
     toast.add({ title: '已删除', color: 'success' })
     // 已经删除了，离开时不再提示未保存的修改
     leaving.value = true
@@ -238,6 +242,11 @@ async function remove() {
     emit('deleted', props.uri)
   } catch (err) {
     failed(err, '删除失败')
+    // 版本冲突：关掉确认框并重新读取，看过新的那一版再决定删不删
+    if (err instanceof ApiError && err.status === 409) {
+      deleting.value = null
+      void memory.refetch()
+    }
   }
 }
 </script>
@@ -417,7 +426,11 @@ async function remove() {
 
     <MoveMemoryModal v-model:open="moveOpen" :space-id="spaceId" :memory="base" @done="onMoved" />
 
-    <UModal v-model:open="confirmDelete" title="删除这条记忆？">
+    <UModal
+      :open="deleting !== null"
+      title="删除这条记忆？"
+      @update:open="(v) => !v && (deleting = null)"
+    >
       <template #body>
         <p class="text-sm">
           删除 <code>{{ props.uri }}</code
@@ -426,7 +439,7 @@ async function remove() {
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="confirmDelete = false">取消</UButton>
+          <UButton color="neutral" variant="ghost" @click="deleting = null">取消</UButton>
           <UButton color="error" @click="remove">删除</UButton>
         </div>
       </template>

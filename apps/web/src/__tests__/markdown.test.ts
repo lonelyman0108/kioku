@@ -54,6 +54,10 @@ describe('markdownToHtml', () => {
     expect(
       markdownToHtml('[![build](https://example.com/badge.svg)](https://example.com/ci)'),
     ).toBe('<p><a href="https://example.com/ci">build</a></p>\n')
+    // 没有替代文字时写图片的地址，不留一个看不见的空链接
+    expect(markdownToHtml('[![](https://example.com/badge.svg)](https://example.com/ci)')).toBe(
+      '<p><a href="https://example.com/ci">https://example.com/badge.svg</a></p>\n',
+    )
     expect(markdownToHtml('![**粗** 图](https://example.com/x.png "说明")')).toBe(
       '<p><a href="https://example.com/x.png" title="说明">粗 图</a></p>\n',
     )

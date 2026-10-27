@@ -176,7 +176,9 @@ async function refreshAround(uri: string) {
 }
 
 // 树的加载一次只跑一个：几次重载同时进行时，后面的会对着只载入一半的树判断哪些展开的节点已经不在了，
-// 把还在的节点收起来。只在事件处理里排队，上面的函数互相调用时不再排队，否则会等自己
+// 把还在的节点收起来。只在事件处理里排队，上面的函数互相调用时不再排队，否则会等自己。
+// 新建、移动、撤销删除之后先把刷新排进去再切到那一条：对 selectedUri 的监听把展开排在刷新后面，
+// 对着刷新过的树展开到新的位置；切过去也不用等树加载完
 let treeTask: Promise<unknown> = Promise.resolve()
 function serially<T>(task: () => Promise<T>): Promise<T> {
   const run = treeTask.then(task, task)
@@ -218,7 +220,7 @@ async function onCreated(uri: string) {
   // 这个 URI 上可能还留着之前删掉的那条的缓存
   resetMemory(uri)
   invalidateLists()
-  await serially(() => refreshAround(uri)).catch(failed)
+  void serially(() => refreshAround(uri)).catch(failed)
   await select(uri)
 }
 
@@ -247,21 +249,21 @@ function onChanged(memory: MemoryView) {
 async function onMoved(memory: MemoryView, from: string) {
   if (memory.uri === from) return onChanged(memory)
   invalidateLists()
+  void serially(async () => {
+    await refreshAround(from).catch(failed)
+    await refreshAround(memory.uri).catch(failed)
+  })
   // 原来的 URI 上已经没有这条记忆了：等原来的编辑器卸载后清掉它的缓存，退回去时重新读取。
-  // 没切过去（导航被取消）时编辑器还在用它，不清。树展开到新的位置由下面对 selectedUri 的监听排队
+  // 没切过去（导航被取消）时编辑器还在用它，不清
   if (!(await select(memory.uri))) {
     await nextTick()
     resetMemory(from)
   }
-  await serially(async () => {
-    await refreshAround(from).catch(failed)
-    await refreshAround(memory.uri).catch(failed)
-  })
 }
 
 async function onUndeleted(uri: string) {
   invalidateLists()
-  await serially(() => refreshAround(uri)).catch(failed)
+  void serially(() => refreshAround(uri)).catch(failed)
   await select(uri)
 }
 

@@ -73,7 +73,7 @@ export function rawHtml(html: string): string {
   return html.replace(PLAIN_TAG, '').includes('<') ? escapeHtml(html) : html
 }
 
-// 链接里面的图片（例如带链接的徽章）：只留替代文字，免得链接里再套一个链接
+// 链接里面的图片（例如带链接的徽章）：只留替代文字，没有替代文字时写图片的地址，免得链接里再套一个链接
 const imagesInLinks = new WeakSet<Token>()
 function markImages(tokens: Token[]) {
   for (const token of tokens) {
@@ -100,7 +100,7 @@ const marked = new Marked({
     image(token: Tokens.Image) {
       // 替代文字只取纯文本，与 marked 自己渲染图片时一样
       const alt = escapeText(this.parser.parseInline(token.tokens, this.parser.textRenderer))
-      if (imagesInLinks.has(token)) return alt
+      if (imagesInLinks.has(token)) return alt || escapeText(token.href)
       const title = token.title ? ` title="${escapeText(token.title)}"` : ''
       return `<a href="${escapeText(token.href)}"${title}>${alt || escapeText(token.href)}</a>`
     },

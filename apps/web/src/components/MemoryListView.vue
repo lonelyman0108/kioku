@@ -6,6 +6,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useActivated } from '../composables/useActivated'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { formatRelative, formatTime } from '../time'
 
@@ -58,9 +59,12 @@ watch(
 )
 onBeforeUnmount(() => clearTimeout(timer))
 
+// 切到树或已删除时这个视图留在 KeepAlive 里，查询跟着停用
+const active = useActivated()
 const domains = useQuery({
   queryKey: computed(() => ['memory-domains', props.spaceId]),
   queryFn: () => api.memoryDomains(props.spaceId),
+  enabled: active,
 })
 const domainItems = computed(() => [
   { label: '全部 domain', value: null },
@@ -92,6 +96,7 @@ const list = useInfiniteQuery({
   },
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
+  enabled: active,
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
 </script>

@@ -93,18 +93,23 @@ const restorable = (event: HistoryEvent) =>
   !isCurrent(event) &&
   sameScope(event.after)
 
-const confirming = ref<HistoryEvent | null>(null)
+// 点「恢复到这一版」时记下这条记忆与它现在的版本：确认期间历史重新拉取到了更新的版本，
+// 或编辑器换成了重建的另一条，恢复返回冲突，不会盖掉没看过的改动
+const confirming = ref<{ event: HistoryEvent; memoryId: string; version: number } | null>(null)
+function askRestore(event: HistoryEvent) {
+  const version = current.value?.version
+  if (version !== undefined) confirming.value = { event, memoryId: props.memoryId, version }
+}
 const restoring = ref(false)
 async function restore() {
-  const event = confirming.value
-  const version = current.value?.version
-  if (!event || version === undefined) return
+  const target = confirming.value
+  if (!target) return
   restoring.value = true
   try {
     const restored = await api.restoreMemory(props.spaceId, {
-      memoryId: props.memoryId,
-      eventId: event.id,
-      expectedVersion: version,
+      memoryId: target.memoryId,
+      eventId: target.event.id,
+      expectedVersion: target.version,
     })
     confirming.value = null
     toast.add({ title: '已恢复到这一版', color: 'success' })
@@ -116,7 +121,8 @@ async function restore() {
     await history.refetch()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
-    // 版本冲突等情况下历史可能已经变了
+    // 版本冲突等情况下历史可能已经变了；冲突时关掉确认框，看过新的历史再选
+    if (err instanceof ApiError && err.status === 409) confirming.value = null
     void history.refetch()
   } finally {
     restoring.value = false
@@ -191,7 +197,7 @@ async function restore() {
               color="neutral"
               variant="subtle"
               class="ml-auto"
-              @click="confirming = event"
+              @click="askRestore(event)"
             >
               恢复到这一版
             </UButton>
