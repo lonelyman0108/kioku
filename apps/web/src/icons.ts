@@ -1,6 +1,9 @@
 // 界面里用到的全部图标。vite.config.ts 用这份清单把图标打进构建产物：
 // 没列进来的图标会在运行时向公共 Iconify 接口请求，自托管服务不应该向第三方发请求
 export const icons = {
+  overview: 'i-lucide-layout-dashboard',
+  activity: 'i-lucide-history',
+  spaceSettings: 'i-lucide-sliders-horizontal',
   memories: 'i-lucide-brain',
   personas: 'i-lucide-drama',
   apps: 'i-lucide-key-round',
@@ -16,4 +19,15 @@ export const icons = {
   file: 'i-lucide-file-text',
   secret: 'i-lucide-lock',
   test: 'i-lucide-plug-zap',
+  vector: 'i-lucide-sparkles',
+  user: 'i-lucide-user',
+  bot: 'i-lucide-bot',
+  // 活动里各类改动
+  edit: 'i-lucide-pencil',
+  moved: 'i-lucide-arrow-right-left',
+  restore: 'i-lucide-rotate-ccw',
+  undelete: 'i-lucide-undo-2',
+  imported: 'i-lucide-download',
+  expired: 'i-lucide-clock',
+  left: 'i-lucide-eye-off',
 } as const

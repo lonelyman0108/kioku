@@ -15,9 +15,19 @@ export const routes: RouteRecordRaw[] = [
     children: [
       { path: '', name: 'home', component: () => import('./pages/HomePage.vue') },
       {
+        path: 'spaces/:spaceId',
+        name: 'overview',
+        component: () => import('./pages/OverviewPage.vue'),
+      },
+      {
         path: 'spaces/:spaceId/memories',
         name: 'memories',
         component: () => import('./pages/MemoriesPage.vue'),
+      },
+      {
+        path: 'spaces/:spaceId/activity',
+        name: 'activity',
+        component: () => import('./pages/ActivityPage.vue'),
       },
       {
         path: 'spaces/:spaceId/personas',
@@ -28,6 +38,11 @@ export const routes: RouteRecordRaw[] = [
         path: 'spaces/:spaceId/apps',
         name: 'apps',
         component: () => import('./pages/AppsPage.vue'),
+      },
+      {
+        path: 'spaces/:spaceId/settings',
+        name: 'space-settings',
+        component: () => import('./pages/SpaceSettingsPage.vue'),
       },
       {
         path: 'settings',

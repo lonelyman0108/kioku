@@ -1,20 +1,32 @@
 import {
+  ActivityList,
   AppInfo,
+  ConsoleSearchResponse,
   CreatedKey,
+  DeletedMemoryList,
+  DomainLayers,
+  EmbeddingCoverage,
+  EmbeddingRebuildResult,
   EmbeddingSettingsView,
   EmbeddingTestResult,
   HealthResponse,
   KeyInfo,
   Me,
   MemoryChildren,
+  MemoryHistory,
+  MemoryList,
   MemoryView,
   PersonaInfo,
   SetupStatus,
+  SpaceOverview,
   type CreateAppRequest,
   type CreateKeyRequest,
   type CreateMemoryRequest,
   type CreatePersonaRequest,
+  type MemoryListQuery,
   type MoveMemoryRequest,
+  type PlainLayer,
+  type RestoreRequest,
   type SetupRequest,
   type UpdateAppRequest,
   type UpdateEmbeddingSettings,
@@ -79,9 +91,47 @@ export const api = {
     }),
   moveMemory: (spaceId: string, body: MoveMemoryRequest) =>
     request('POST', `/spaces/${spaceId}/memories/move`, { body, schema: MemoryView }),
+  // 列表的筛选都是可选的；查询参数原样是字符串
+  memoryList: (spaceId: string, query: Partial<Record<keyof MemoryListQuery, string | number>>) =>
+    request('GET', `/spaces/${spaceId}/memories/list`, { query, schema: MemoryList }),
+  searchMemories: (spaceId: string, query: string) =>
+    request('POST', `/spaces/${spaceId}/memories/search`, {
+      body: { query },
+      schema: ConsoleSearchResponse,
+    }),
+  memoryHistory: (spaceId: string, id: string) =>
+    request('GET', `/spaces/${spaceId}/memories/history`, { query: { id }, schema: MemoryHistory }),
+  deletedMemories: (spaceId: string, cursor?: string) =>
+    request('GET', `/spaces/${spaceId}/memories/deleted`, {
+      query: { cursor },
+      schema: DeletedMemoryList,
+    }),
+  restoreMemory: (spaceId: string, body: RestoreRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/restore`, { body, schema: MemoryView }),
+  undeleteMemory: (spaceId: string, memoryId: string) =>
+    request('POST', `/spaces/${spaceId}/memories/undelete`, {
+      body: { memoryId },
+      schema: MemoryView,
+    }),
+
+  overview: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),
+  activity: (spaceId: string, cursor?: string) =>
+    request('GET', `/spaces/${spaceId}/activity`, { query: { cursor }, schema: ActivityList }),
+  domainLayers: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/domain-layers`, { schema: DomainLayers }),
+  saveDomainLayers: (spaceId: string, defaults: Record<string, PlainLayer>) =>
+    request('PUT', `/spaces/${spaceId}/domain-layers`, {
+      body: { defaults },
+      schema: DomainLayers,
+    }),
 
   embeddingSettings: () => request('GET', '/settings/embedding', { schema: EmbeddingSettingsView }),
   saveEmbeddingSettings: (body: UpdateEmbeddingSettings) =>
     request('PUT', '/settings/embedding', { body, schema: EmbeddingSettingsView }),
   testEmbedding: () => request('POST', '/settings/embedding/test', { schema: EmbeddingTestResult }),
+  embeddingStatus: () =>
+    request('GET', '/settings/embedding/status', { schema: EmbeddingCoverage }),
+  rebuildEmbeddings: () =>
+    request('POST', '/settings/embedding/rebuild', { schema: EmbeddingRebuildResult }),
 }
