@@ -169,18 +169,23 @@ export interface ReadOptions {
   personaIds: readonly string[]
   // 按 URI 显式读取时才可能读到 secret
   explicit?: boolean
+  // 管理读取：管理界面看历史、恢复时用。不看有效期与删除状态（历史就是给过期、被推翻和删掉的版本看的），
+  // 按显式读取算，人格层也不限人格（管理界面本来看得到全部人格，删掉的人格的旧快照照样看得到）
+  management?: boolean
   now?: Date
 }
 
 export function canRead(access: Access, memory: MemoryFacts, options: ReadOptions): boolean {
   const now = options.now ?? new Date()
-  if (memory.deletedAt) return false
-  if (memory.validTo && memory.validTo <= now) return false
-  if (memory.expiresAt && memory.expiresAt <= now) return false
+  if (!options.management) {
+    if (memory.deletedAt) return false
+    if (memory.validTo && memory.validTo <= now) return false
+    if (memory.expiresAt && memory.expiresAt <= now) return false
+  }
   if (!access.readLayers.has(memory.layer)) return false
 
   if (memory.sensitivity === 'secret') {
-    if (!options.explicit || !access.canReadSecret) return false
+    if (!(options.explicit || options.management) || !access.canReadSecret) return false
   } else if (sensitivityRank(memory.sensitivity) > sensitivityRank(access.maxSensitivity)) {
     return false
   }
@@ -189,7 +194,11 @@ export function canRead(access: Access, memory: MemoryFacts, options: ReadOption
   if (PRIVATE_LAYERS.includes(memory.layer) && memory.ownerAccountId !== access.ownerAccountId) {
     return false
   }
-  if (memory.layer === 'persona' && !options.personaIds.includes(memory.personaId ?? '')) {
+  if (
+    memory.layer === 'persona' &&
+    !options.management &&
+    !options.personaIds.includes(memory.personaId ?? '')
+  ) {
     return false
   }
   if (memory.layer === 'app' && access.appId !== null && memory.appId !== access.appId) {

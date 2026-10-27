@@ -1,16 +1,23 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  ActivityList,
   ConsoleSearchRequest,
   ConsoleSearchResponse,
   CreateMemoryRequest,
+  DeletedMemoryList,
   DomainSummary,
   ErrorResponse,
   MemoryChildren,
+  MemoryHistory,
+  MemoryHistoryQuery,
   MemoryList,
   MemoryListQuery,
   MemoryUri,
   MemoryView,
   MoveMemoryRequest,
+  PageQuery,
+  RestoreRequest,
+  UndeleteRequest,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
 import type { Context } from 'hono'
@@ -173,7 +180,7 @@ async function consoleMember(deps: Deps, c: Context<AppEnv>) {
   }
 }
 
-// 只给管理界面的记忆接口：按条件列出与搜索。Key 有 kioku_list 与召回，用不着这两个
+// 只给管理界面的记忆接口：按条件列出、搜索、历史与恢复。Key 有 kioku_list 与召回，用不着这些
 function consoleOnlyRoutes(deps: Deps) {
   const params = z.object({ spaceId: z.uuid() })
   const list = createRoute({
@@ -192,7 +199,67 @@ function consoleOnlyRoutes(deps: Deps) {
     request: { params, body: jsonBody(ConsoleSearchRequest) },
     responses: { 200: jsonResponse('搜索结果', ConsoleSearchResponse), ...errors },
   })
+  const history = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/memories/history',
+    tags: ['console'],
+    summary: '一条记忆的历史，按管理读取过滤',
+    request: { params, query: MemoryHistoryQuery },
+    responses: { 200: jsonResponse('历史', MemoryHistory), ...errors },
+  })
+  const deleted = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/memories/deleted',
+    tags: ['console'],
+    summary: '已删除的记忆，最近删除的在前',
+    request: { params, query: PageQuery },
+    responses: { 200: jsonResponse('已删除的记忆', DeletedMemoryList), ...errors },
+  })
+  const restore = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/restore',
+    tags: ['console'],
+    summary: '恢复到某个事件之后的那一版（只改正文、disclosure、priority 与关键词）',
+    request: { params, body: jsonBody(RestoreRequest) },
+    responses: { 200: jsonResponse('恢复后的记忆', MemoryView), ...errors },
+  })
+  const undelete = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/undelete',
+    tags: ['console'],
+    summary: '撤销删除',
+    request: { params, body: jsonBody(UndeleteRequest) },
+    responses: { 200: jsonResponse('恢复后的记忆', MemoryView), ...errors },
+  })
+  const activity = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/activity',
+    tags: ['console'],
+    summary: '空间里记忆的改动，最新的在前',
+    request: { params, query: PageQuery },
+    responses: { 200: jsonResponse('活动', ActivityList), ...errors },
+  })
   return router()
+    .openapi(history, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.history(c.req.valid('query').id), 200)
+    })
+    .openapi(deleted, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.deleted(c.req.valid('query')), 200)
+    })
+    .openapi(restore, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.restore(c.req.valid('json')), 200)
+    })
+    .openapi(undelete, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.undelete(c.req.valid('json')), 200)
+    })
+    .openapi(activity, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.activity(c.req.valid('query')), 200)
+    })
     .openapi(list, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.list(c.req.valid('query')), 200)

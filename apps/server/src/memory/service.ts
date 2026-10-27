@@ -1,19 +1,28 @@
 import { randomUUID } from 'node:crypto'
 
 import type {
+  ActivityItem,
+  ActivityList,
   CreateMemoryRequest,
+  DeletedMemoryList,
   DomainSummary,
+  EventActor,
   LayerCount,
   Layer,
   MemoryChildren,
+  MemoryHistory,
   MemoryList,
   MemoryListQuery,
   MemoryListSort,
   MemoryMatch,
+  MemorySnapshot,
   MemorySummary,
   MemoryView,
   MoveMemoryRequest,
+  PageQuery,
+  RestoreRequest,
   Sensitivity,
+  UndeleteRequest,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
 import {
@@ -27,6 +36,7 @@ import {
   gte,
   ilike,
   inArray,
+  isNotNull,
   isNull,
   like,
   lt,
@@ -38,9 +48,17 @@ import {
 
 import { canRead, canWrite, canWriteApp, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
-import { apps, memories, memoryEmbeddings, memoryEvents, memoryGlossary } from '../db/schema'
+import {
+  accounts,
+  apiKeys,
+  apps,
+  memories,
+  memoryEmbeddings,
+  memoryEvents,
+  memoryGlossary,
+} from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
-import { readableConditions } from './filter'
+import { readableConditions, snapshotColumns, type MemoryColumns } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
   APP_DOMAIN,
@@ -86,6 +104,9 @@ export interface MemoryStats {
 }
 
 type MemoryRow = typeof memories.$inferSelect
+
+// 修改时可以改的字段（URI 与 expectedId 由调用方先核对）
+type UpdateFields = Omit<UpdateMemoryRequest, 'uri' | 'expectedId'>
 
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
@@ -445,85 +466,96 @@ export class MemoryService {
       if (input.expectedId !== undefined && input.expectedId !== before.id) {
         throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
       }
-      if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
-        throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
-      }
-      const sensitivity = input.sensitivity ?? before.sensitivity
-      for (const s of new Set([before.sensitivity, sensitivity])) {
-        if (!canWrite(this.ctx.access, { ...before, sensitivity: s })) {
-          throw new MemoryError(403, `没有权限改 ${before.layer} 层的 ${s} 级记忆`)
-        }
-      }
+      return this.applyUpdate(tx, before, input)
+    })
+  }
 
-      // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
-      const plaintext = input.content ?? this.contentOf(before)
-      if (plaintext === null) throw new MemoryError(403, '没有权限读取这条 secret 的正文')
-      const body =
-        sensitivity === 'secret'
-          ? { content: null, ...this.seal(plaintext, before.id) }
-          : { content: plaintext, ciphertext: null, wrappedKey: null }
+  // 修改与恢复共用：在已经读出的那一行上改字段，检查权限、版本与 secret 的加解密，记一条事件
+  private async applyUpdate(
+    tx: Tx,
+    before: MemoryRow,
+    input: UpdateFields,
+    meta: { eventType?: string; eventContext?: Record<string, unknown> } = {},
+  ): Promise<MemoryView> {
+    if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
+      throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
+    }
+    const sensitivity = input.sensitivity ?? before.sensitivity
+    for (const s of new Set([before.sensitivity, sensitivity])) {
+      if (!canWrite(this.ctx.access, { ...before, sensitivity: s })) {
+        throw new MemoryError(403, `没有权限改 ${before.layer} 层的 ${s} 级记忆`)
+      }
+    }
 
-      const beforeGlossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-      const [row] = await tx
-        .update(memories)
-        .set({
-          ...body,
-          sensitivity,
-          priority: input.priority ?? before.priority,
-          disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
-          version: sql`${memories.version} + 1`,
-          updatedAt: new Date(),
-        })
-        // 读完之后被别的请求改过或删掉了，都不写：不能把修改写进一条已经删除的记忆
+    // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
+    const plaintext = input.content ?? this.contentOf(before)
+    if (plaintext === null) throw new MemoryError(403, '没有权限读取这条 secret 的正文')
+    const body =
+      sensitivity === 'secret'
+        ? { content: null, ...this.seal(plaintext, before.id) }
+        : { content: plaintext, ciphertext: null, wrappedKey: null }
+
+    const beforeGlossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    const [row] = await tx
+      .update(memories)
+      .set({
+        ...body,
+        sensitivity,
+        priority: input.priority ?? before.priority,
+        disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
+        version: sql`${memories.version} + 1`,
+        updatedAt: new Date(),
+      })
+      // 读完之后被别的请求改过或删掉了，都不写：不能把修改写进一条已经删除的记忆
+      .where(
+        and(
+          eq(memories.id, before.id),
+          eq(memories.version, before.version),
+          isNull(memories.deletedAt),
+        ),
+      )
+      .returning()
+    if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+
+    if (input.glossaryRemove?.length) {
+      await tx
+        .delete(memoryGlossary)
         .where(
           and(
-            eq(memories.id, before.id),
-            eq(memories.version, before.version),
-            isNull(memories.deletedAt),
+            eq(memoryGlossary.memoryId, before.id),
+            inArray(memoryGlossary.keyword, input.glossaryRemove),
           ),
         )
-        .returning()
-      if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
-
-      if (input.glossaryRemove?.length) {
-        await tx
-          .delete(memoryGlossary)
-          .where(
-            and(
-              eq(memoryGlossary.memoryId, before.id),
-              inArray(memoryGlossary.keyword, input.glossaryRemove),
-            ),
-          )
-      }
-      if (input.glossaryAdd?.length) {
-        await tx
-          .insert(memoryGlossary)
-          .values(
-            [...new Set(input.glossaryAdd)].map((keyword) => ({
-              spaceId: this.ctx.spaceId,
-              memoryId: before.id,
-              keyword,
-            })),
-          )
-          .onConflictDoNothing()
-      }
-      const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-      const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
-      await this.event(
-        tx,
-        before.id,
-        'update',
-        snapshot(before, beforeGlossary),
-        snapshot(row, glossary),
-      )
-      // 改成 secret 之后，历史事件里不能再留着明文
-      if (becameSecret) {
-        await this.scrubHistory(tx, before.id)
-        // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
-        await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
-      }
-      return this.toView(row, glossary)
-    })
+    }
+    if (input.glossaryAdd?.length) {
+      await tx
+        .insert(memoryGlossary)
+        .values(
+          [...new Set(input.glossaryAdd)].map((keyword) => ({
+            spaceId: this.ctx.spaceId,
+            memoryId: before.id,
+            keyword,
+          })),
+        )
+        .onConflictDoNothing()
+    }
+    const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
+    await this.event(
+      tx,
+      before.id,
+      meta.eventType ?? 'update',
+      snapshot(before, beforeGlossary),
+      snapshot(row, glossary),
+      meta.eventContext,
+    )
+    // 改成 secret 之后，历史事件里不能再留着明文
+    if (becameSecret) {
+      await this.scrubHistory(tx, before.id)
+      // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
+      await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
+    }
+    return this.toView(row, glossary)
   }
 
   private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
@@ -856,6 +888,300 @@ export class MemoryService {
       }
     })
   }
+  // ---- 历史、撤销删除与恢复（管理界面）----
+  // 可见性都用管理读取判断：读的规则去掉有效期与删除状态，人格不限（见 canRead 的 management）
+
+  private manageable(cols?: MemoryColumns): SQL {
+    return readableConditions(this.ctx.access, { personaIds: [], management: true }, cols)
+  }
+
+  // 事件的前后快照各按管理读取判断，有一边看不到就整条不显示；为空的一边（新建事件没有「改前」）不参与
+  private visibleEvent(): SQL {
+    return and(
+      or(isNull(memoryEvents.before), this.manageable(snapshotColumns(memoryEvents.before))),
+      or(isNull(memoryEvents.after), this.manageable(snapshotColumns(memoryEvents.after))),
+    )!
+  }
+
+  // 按 id 找一条管理读取读得到的策展记忆，已删除的也算；读不到和不存在一样是 404
+  private async findManageable(tx: Tx, memoryId: string): Promise<MemoryRow> {
+    const [row] = await tx
+      .select()
+      .from(memories)
+      .where(and(eq(memories.id, memoryId), eq(memories.form, 'curated'), this.manageable()))
+    if (!row) throw new MemoryError(404, '记忆不存在')
+    return row
+  }
+
+  // 事件连同操作者的名字一起取出。记忆现在读不到、或整行已经不在的事件不列出
+  private eventRows(tx: Tx, where: SQL | undefined, order: SQL, limit: number) {
+    return tx
+      .select({
+        event: memoryEvents,
+        domain: memories.domain,
+        path: memories.path,
+        accountName: accounts.displayName,
+        keyName: apiKeys.name,
+        appName: apps.name,
+      })
+      .from(memoryEvents)
+      .innerJoin(memories, eq(memories.id, memoryEvents.memoryId))
+      .leftJoin(accounts, eq(accounts.id, memoryEvents.actorAccountId))
+      .leftJoin(apiKeys, eq(apiKeys.id, memoryEvents.actorKeyId))
+      .leftJoin(apps, eq(apps.id, apiKeys.appId))
+      .where(and(where, this.manageable(), this.visibleEvent()))
+      .orderBy(order)
+      .limit(limit)
+  }
+
+  // 一条记忆的历史，从早到晚
+  async history(memoryId: string): Promise<MemoryHistory> {
+    return this.run(async (tx) => {
+      const row = await this.findManageable(tx, memoryId)
+      const rows = await this.eventRows(
+        tx,
+        eq(memoryEvents.memoryId, memoryId),
+        asc(memoryEvents.id),
+        HISTORY_LIMIT,
+      )
+      return {
+        memory: {
+          id: row.id,
+          uri: formatUri(row.domain!, row.path!),
+          layer: row.layer,
+          sensitivity: row.sensitivity,
+          version: row.version,
+          deletedAt: row.deletedAt?.toISOString() ?? null,
+        },
+        events: rows.map((r) => ({
+          id: r.event.id,
+          type: r.event.eventType,
+          provenance: r.event.provenance,
+          createdAt: r.event.createdAt.toISOString(),
+          actor: actorOf(r),
+          before: toSnapshot(r.event.before),
+          after: toSnapshot(r.event.after),
+        })),
+      }
+    })
+  }
+
+  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性
+  async deleted(query: PageQuery): Promise<DeletedMemoryList> {
+    const after = decodeTimeCursor(query.cursor)
+    return this.run(async (tx) => {
+      const rows = await tx
+        .select({
+          row: memories,
+          deletedMicros: sql<string>`${DELETED_MICROS}::text`,
+        })
+        .from(memories)
+        .where(
+          and(
+            isNotNull(memories.deletedAt),
+            eq(memories.form, 'curated'),
+            this.manageable(),
+            after
+              ? sql`(${DELETED_MICROS}, ${memories.id}) < (${after[0]}::bigint, ${after[1]}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(memories.deletedAt), desc(memories.id))
+        .limit(query.limit + 1)
+      const page = rows.slice(0, query.limit)
+      const last = page.at(-1)
+      return {
+        items: page.map(({ row }) => ({
+          id: row.id,
+          uri: formatUri(row.domain!, row.path!),
+          layer: row.layer,
+          sensitivity: row.sensitivity,
+          priority: row.priority,
+          disclosure: row.disclosure,
+          version: row.version,
+          deletedAt: row.deletedAt!.toISOString(),
+        })),
+        nextCursor:
+          rows.length > query.limit && last
+            ? Buffer.from(JSON.stringify([last.deletedMicros, last.row.id])).toString('base64url')
+            : null,
+      }
+    })
+  }
+
+  // 空间的活动流，最新的在前；游标是上一页最后一个事件的 id
+  async activity(query: PageQuery): Promise<ActivityList> {
+    if (query.cursor !== undefined && !/^\d{1,18}$/.test(query.cursor)) {
+      throw new MemoryError(400, '翻页参数无效，请从第一页重新开始')
+    }
+    return this.run(async (tx) => {
+      const rows = await this.eventRows(
+        tx,
+        query.cursor ? lt(memoryEvents.id, Number(query.cursor)) : undefined,
+        desc(memoryEvents.id),
+        query.limit + 1,
+      )
+      const page = rows.slice(0, query.limit)
+      return {
+        items: page.map((r): ActivityItem => ({
+          id: r.event.id,
+          type: r.event.eventType,
+          memoryId: r.event.memoryId!,
+          uri: formatUri(r.domain!, r.path!),
+          createdAt: r.event.createdAt.toISOString(),
+          actor: actorOf(r),
+          changes: changedFields(toSnapshot(r.event.before), toSnapshot(r.event.after)),
+        })),
+        nextCursor: rows.length > query.limit && page.length ? String(page.at(-1)!.event.id) : null,
+      }
+    })
+  }
+
+  // 恢复到某个事件之后的那一版：只改正文、disclosure、priority 与关键词，不改 URI、层、主人、敏感级与有效期。
+  // 快照里没有正文（secret 的快照，或改成 secret 时被抹掉正文的旧快照）时正文保持不变
+  async restore(input: RestoreRequest): Promise<MemoryView> {
+    return this.write(async (tx) => {
+      const current = await this.findManageable(tx, input.memoryId)
+      if (current.deletedAt) throw new MemoryError(409, '这条记忆已被删除，先撤销删除再恢复')
+      const [found] = await tx
+        .select({ after: memoryEvents.after })
+        .from(memoryEvents)
+        .where(
+          and(
+            eq(memoryEvents.id, input.eventId),
+            eq(memoryEvents.memoryId, input.memoryId),
+            this.visibleEvent(),
+          ),
+        )
+      const target = found?.after as Record<string, unknown> | null | undefined
+      if (!target) throw new MemoryError(404, '这一版不存在')
+      if (target.deletedAt != null) {
+        throw new MemoryError(400, '这一版是删除之后的状态，要恢复删除请用撤销删除')
+      }
+      const glossaryNow = (await this.glossaryOf(tx, [current.id])).get(current.id) ?? []
+      const wanted = stringList(target.glossary)
+      return this.applyUpdate(
+        tx,
+        current,
+        {
+          expectedVersion: input.expectedVersion,
+          ...(typeof target.content === 'string' ? { content: target.content } : {}),
+          disclosure: typeof target.disclosure === 'string' ? target.disclosure : null,
+          ...(typeof target.priority === 'number' ? { priority: target.priority } : {}),
+          glossaryAdd: wanted.filter((k) => !glossaryNow.includes(k)),
+          glossaryRemove: glossaryNow.filter((k) => !wanted.includes(k)),
+        },
+        { eventType: 'restore', eventContext: { fromEventId: input.eventId } },
+      )
+    })
+  }
+
+  // 撤销删除：清掉删除标记，这一行原样留下（secret 的密文也还在），不从快照重建。
+  // URI 已被别的记忆占用时返回 409；提交后重新排队生成向量
+  async undelete(input: UndeleteRequest): Promise<MemoryView> {
+    return this.write(async (tx, _personaIds, released) => {
+      const row = await this.findManageable(tx, input.memoryId)
+      if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
+      if (!canWrite(this.ctx.access, row)) {
+        throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
+      }
+      await this.claimUri(tx, parse(formatUri(row.domain!, row.path!)), row, released)
+      const [restored] = await tx
+        .update(memories)
+        .set({ deletedAt: null, version: sql`${memories.version} + 1`, updatedAt: new Date() })
+        .where(
+          and(
+            eq(memories.id, row.id),
+            eq(memories.version, row.version),
+            isNotNull(memories.deletedAt),
+          ),
+        )
+        .returning()
+      if (!restored) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      await this.event(
+        tx,
+        row.id,
+        'undelete',
+        snapshot(row, glossary),
+        snapshot(restored, glossary),
+      )
+      return this.toView(restored, glossary)
+    })
+  }
+}
+
+// 一条记忆的历史最多列这么多个事件
+const HISTORY_LIMIT = 500
+
+const DELETED_MICROS = sql`(extract(epoch from ${memories.deletedAt}) * 1000000)::bigint`
+
+function decodeTimeCursor(cursor: string | undefined): [string, string] | null {
+  if (!cursor) return null
+  const invalid = new MemoryError(400, '翻页参数无效，请从第一页重新开始')
+  let values: unknown
+  try {
+    values = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+  } catch {
+    throw invalid
+  }
+  if (
+    !Array.isArray(values) ||
+    values.length !== 2 ||
+    typeof values[0] !== 'string' ||
+    !/^\d{1,18}$/.test(values[0]) ||
+    typeof values[1] !== 'string' ||
+    !UUID.test(values[1])
+  ) {
+    throw invalid
+  }
+  return [values[0], values[1]]
+}
+
+function actorOf(r: {
+  accountName: string | null
+  keyName: string | null
+  appName: string | null
+}): EventActor {
+  return { accountName: r.accountName, keyName: r.keyName, appName: r.appName }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+// 快照里界面要用的部分；快照是写入事件时记下的整行（不含密文），secret 的没有正文
+function toSnapshot(raw: unknown): MemorySnapshot | null {
+  if (!raw || typeof raw !== 'object') return null
+  const s = raw as Record<string, unknown>
+  const text = (key: string) => (typeof s[key] === 'string' ? (s[key] as string) : null)
+  return {
+    uri: formatUri(text('domain') ?? '', text('path') ?? ''),
+    layer: s.layer as Layer,
+    sensitivity: s.sensitivity as Sensitivity,
+    priority: typeof s.priority === 'number' ? s.priority : 0,
+    disclosure: text('disclosure'),
+    glossary: stringList(s.glossary),
+    content: text('content'),
+    version: typeof s.version === 'number' ? s.version : 0,
+    deleted: s.deletedAt != null,
+  }
+}
+
+// 前后两版之间改了哪些字段；正文两边都没有（secret）时看不出改没改，不算
+function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | null): string[] {
+  if (!before || !after) return []
+  const changes: string[] = []
+  if (before.uri !== after.uri) changes.push('uri')
+  if (before.layer !== after.layer) changes.push('layer')
+  if (before.sensitivity !== after.sensitivity) changes.push('sensitivity')
+  if (before.priority !== after.priority) changes.push('priority')
+  if (before.disclosure !== after.disclosure) changes.push('disclosure')
+  if (before.glossary.join('\n') !== after.glossary.join('\n')) changes.push('glossary')
+  if (before.content !== after.content && (before.content !== null || after.content !== null)) {
+    changes.push('content')
+  }
+  return changes
 }
 
 function escapeLike(s: string): string {
