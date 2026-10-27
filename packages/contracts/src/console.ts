@@ -112,6 +112,113 @@ export const OverviewApp = z.object({
 })
 export type OverviewApp = z.infer<typeof OverviewApp>
 
+// 历史里的一个版本：事件前后记下的整条记忆里，界面要用的部分。secret 的快照没有正文
+export const MemorySnapshot = z.object({
+  uri: z.string(),
+  layer: Layer,
+  sensitivity: Sensitivity,
+  priority: z.number().int(),
+  disclosure: z.string().nullable(),
+  glossary: z.array(z.string()),
+  content: z.string().nullable(),
+  version: z.number().int(),
+  deleted: z.boolean(),
+})
+export type MemorySnapshot = z.infer<typeof MemorySnapshot>
+
+// 谁做的：管理界面里是成员，通过 Key 写入时是 Key 与它所属的应用
+export const EventActor = z.object({
+  accountName: z.string().nullable(),
+  keyName: z.string().nullable(),
+  appName: z.string().nullable(),
+})
+export type EventActor = z.infer<typeof EventActor>
+
+// 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete
+export const HistoryEvent = z.object({
+  id: z.number().int(),
+  type: z.string(),
+  provenance: Provenance,
+  createdAt: z.string(),
+  actor: EventActor,
+  before: MemorySnapshot.nullable(),
+  after: MemorySnapshot.nullable(),
+})
+export type HistoryEvent = z.infer<typeof HistoryEvent>
+
+export const MemoryHistoryQuery = z.object({ id: z.uuid() })
+
+export const MemoryHistory = z.object({
+  memory: z.object({
+    id: z.uuid(),
+    uri: z.string(),
+    layer: Layer,
+    sensitivity: Sensitivity,
+    version: z.number().int(),
+    deletedAt: z.string().nullable(),
+  }),
+  // 从早到晚；成员看不到的版本所在的事件不列出
+  events: z.array(HistoryEvent),
+  // 事件太多时只列最近的那些，更早的没有列出
+  truncated: z.boolean(),
+})
+export type MemoryHistory = z.infer<typeof MemoryHistory>
+
+export const PageQuery = z.object({
+  cursor: z.string().max(200).optional(),
+  limit: z.coerce.number().int().min(1).max(200).default(50),
+})
+export type PageQuery = z.infer<typeof PageQuery>
+
+export const DeletedMemory = z.object({
+  id: z.uuid(),
+  uri: z.string(),
+  layer: Layer,
+  sensitivity: Sensitivity,
+  priority: z.number().int(),
+  disclosure: z.string().nullable(),
+  version: z.number().int(),
+  deletedAt: z.string(),
+})
+export type DeletedMemory = z.infer<typeof DeletedMemory>
+
+export const DeletedMemoryList = z.object({
+  items: z.array(DeletedMemory),
+  nextCursor: z.string().nullable(),
+})
+export type DeletedMemoryList = z.infer<typeof DeletedMemoryList>
+
+export const ActivityItem = z.object({
+  id: z.number().int(),
+  type: z.string(),
+  memoryId: z.uuid(),
+  // 记忆现在的 URI
+  uri: z.string(),
+  createdAt: z.string(),
+  actor: EventActor,
+  // 这次改了哪些字段：content、disclosure、priority、sensitivity、layer、uri、glossary
+  changes: z.array(z.string()),
+})
+export type ActivityItem = z.infer<typeof ActivityItem>
+
+export const ActivityList = z.object({
+  items: z.array(ActivityItem),
+  nextCursor: z.string().nullable(),
+})
+export type ActivityList = z.infer<typeof ActivityList>
+
+// 恢复到某个事件之后的那一版：只改正文、disclosure、priority 与关键词。
+// expectedVersion 是界面上看到的当前版本号，期间被改过就返回 409
+export const RestoreRequest = z.object({
+  memoryId: z.uuid(),
+  eventId: z.number().int().positive(),
+  expectedVersion: z.number().int(),
+})
+export type RestoreRequest = z.infer<typeof RestoreRequest>
+
+export const UndeleteRequest = z.object({ memoryId: z.uuid() })
+export type UndeleteRequest = z.infer<typeof UndeleteRequest>
+
 export const SpaceOverview = z.object({
   // 成员读得到的策展记忆，按层与敏感级分组
   counts: z.array(LayerCount),
@@ -119,5 +226,7 @@ export const SpaceOverview = z.object({
   missingDisclosure: z.number().int(),
   embedding: EmbeddingCoverage,
   apps: z.array(OverviewApp),
+  // 最近的改动，和活动流同样的可见性
+  recent: z.array(ActivityItem),
 })
 export type SpaceOverview = z.infer<typeof SpaceOverview>

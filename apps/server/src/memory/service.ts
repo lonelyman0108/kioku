@@ -1,19 +1,29 @@
 import { randomUUID } from 'node:crypto'
 
+import { SENSITIVITIES } from '@kioku/contracts'
 import type {
+  ActivityItem,
+  ActivityList,
   CreateMemoryRequest,
+  DeletedMemoryList,
   DomainSummary,
+  EventActor,
   LayerCount,
   Layer,
   MemoryChildren,
+  MemoryHistory,
   MemoryList,
   MemoryListQuery,
   MemoryListSort,
   MemoryMatch,
+  MemorySnapshot,
   MemorySummary,
   MemoryView,
   MoveMemoryRequest,
+  PageQuery,
+  RestoreRequest,
   Sensitivity,
+  UndeleteRequest,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
 import {
@@ -27,6 +37,7 @@ import {
   gte,
   ilike,
   inArray,
+  isNotNull,
   isNull,
   like,
   lt,
@@ -34,13 +45,22 @@ import {
   or,
   sql,
   type SQL,
+  type SQLWrapper,
 } from 'drizzle-orm'
 
-import { canRead, canWrite, canWriteApp, type Access } from '../access/access'
+import { canRead, canWrite, canWriteApp, sensitivityRank, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
-import { apps, memories, memoryEmbeddings, memoryEvents, memoryGlossary } from '../db/schema'
+import {
+  accounts,
+  apiKeys,
+  apps,
+  memories,
+  memoryEmbeddings,
+  memoryEvents,
+  memoryGlossary,
+} from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
-import { readableConditions } from './filter'
+import { readableConditions, snapshotColumns, type MemoryColumns } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
   APP_DOMAIN,
@@ -86,6 +106,9 @@ export interface MemoryStats {
 }
 
 type MemoryRow = typeof memories.$inferSelect
+
+// 修改时可以改的字段（URI 与 expectedId 由调用方先核对）
+type UpdateFields = Omit<UpdateMemoryRequest, 'uri' | 'expectedId'>
 
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
@@ -445,85 +468,97 @@ export class MemoryService {
       if (input.expectedId !== undefined && input.expectedId !== before.id) {
         throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
       }
-      if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
-        throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
-      }
-      const sensitivity = input.sensitivity ?? before.sensitivity
-      for (const s of new Set([before.sensitivity, sensitivity])) {
-        if (!canWrite(this.ctx.access, { ...before, sensitivity: s })) {
-          throw new MemoryError(403, `没有权限改 ${before.layer} 层的 ${s} 级记忆`)
-        }
-      }
+      return this.applyUpdate(tx, before, input)
+    })
+  }
 
-      // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
-      const plaintext = input.content ?? this.contentOf(before)
-      if (plaintext === null) throw new MemoryError(403, '没有权限读取这条 secret 的正文')
-      const body =
-        sensitivity === 'secret'
-          ? { content: null, ...this.seal(plaintext, before.id) }
-          : { content: plaintext, ciphertext: null, wrappedKey: null }
+  // 修改与恢复共用：在已经读出的那一行上改字段，检查权限、版本与 secret 的加解密，记一条事件
+  private async applyUpdate(
+    tx: Tx,
+    before: MemoryRow,
+    input: UpdateFields,
+    meta: { eventType?: string; eventContext?: Record<string, unknown>; glossary?: string[] } = {},
+  ): Promise<MemoryView> {
+    if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
+      throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
+    }
+    const sensitivity = input.sensitivity ?? before.sensitivity
+    for (const s of new Set([before.sensitivity, sensitivity])) {
+      if (!canWrite(this.ctx.access, { ...before, sensitivity: s })) {
+        throw new MemoryError(403, `没有权限改 ${before.layer} 层的 ${s} 级记忆`)
+      }
+    }
 
-      const beforeGlossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-      const [row] = await tx
-        .update(memories)
-        .set({
-          ...body,
-          sensitivity,
-          priority: input.priority ?? before.priority,
-          disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
-          version: sql`${memories.version} + 1`,
-          updatedAt: new Date(),
-        })
-        // 读完之后被别的请求改过或删掉了，都不写：不能把修改写进一条已经删除的记忆
+    // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
+    const plaintext = input.content ?? this.contentOf(before)
+    if (plaintext === null) throw new MemoryError(403, '没有权限读取这条 secret 的正文')
+    const body =
+      sensitivity === 'secret'
+        ? { content: null, ...this.seal(plaintext, before.id) }
+        : { content: plaintext, ciphertext: null, wrappedKey: null }
+
+    const beforeGlossary =
+      meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    const [row] = await tx
+      .update(memories)
+      .set({
+        ...body,
+        sensitivity,
+        priority: input.priority ?? before.priority,
+        disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
+        version: sql`${memories.version} + 1`,
+        updatedAt: new Date(),
+      })
+      // 读完之后被别的请求改过或删掉了，都不写：不能把修改写进一条已经删除的记忆
+      .where(
+        and(
+          eq(memories.id, before.id),
+          eq(memories.version, before.version),
+          isNull(memories.deletedAt),
+        ),
+      )
+      .returning()
+    if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+
+    if (input.glossaryRemove?.length) {
+      await tx
+        .delete(memoryGlossary)
         .where(
           and(
-            eq(memories.id, before.id),
-            eq(memories.version, before.version),
-            isNull(memories.deletedAt),
+            eq(memoryGlossary.memoryId, before.id),
+            inArray(memoryGlossary.keyword, input.glossaryRemove),
           ),
         )
-        .returning()
-      if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
-
-      if (input.glossaryRemove?.length) {
-        await tx
-          .delete(memoryGlossary)
-          .where(
-            and(
-              eq(memoryGlossary.memoryId, before.id),
-              inArray(memoryGlossary.keyword, input.glossaryRemove),
-            ),
-          )
-      }
-      if (input.glossaryAdd?.length) {
-        await tx
-          .insert(memoryGlossary)
-          .values(
-            [...new Set(input.glossaryAdd)].map((keyword) => ({
-              spaceId: this.ctx.spaceId,
-              memoryId: before.id,
-              keyword,
-            })),
-          )
-          .onConflictDoNothing()
-      }
-      const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-      const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
-      await this.event(
-        tx,
-        before.id,
-        'update',
-        snapshot(before, beforeGlossary),
-        snapshot(row, glossary),
-      )
-      // 改成 secret 之后，历史事件里不能再留着明文
-      if (becameSecret) {
-        await this.scrubHistory(tx, before.id)
-        // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
-        await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
-      }
-      return this.toView(row, glossary)
-    })
+    }
+    if (input.glossaryAdd?.length) {
+      await tx
+        .insert(memoryGlossary)
+        .values(
+          [...new Set(input.glossaryAdd)].map((keyword) => ({
+            spaceId: this.ctx.spaceId,
+            memoryId: before.id,
+            keyword,
+          })),
+        )
+        .onConflictDoNothing()
+    }
+    const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
+    await this.event(
+      tx,
+      before.id,
+      meta.eventType ?? 'update',
+      snapshot(before, beforeGlossary),
+      snapshot(row, glossary),
+      meta.eventContext,
+    )
+    // 改成 secret 之后，历史事件里不能再留着明文
+    if (becameSecret) {
+      await this.scrubHistory(tx, before.id)
+      // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
+      await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
+    }
+    return this.toView(row, glossary)
   }
 
   private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
@@ -856,6 +891,371 @@ export class MemoryService {
       }
     })
   }
+  // ---- 历史、撤销删除与恢复（管理界面）----
+  // 可见性都用管理读取判断：读的规则去掉有效期与删除状态，人格不限（见 canRead 的 management）
+
+  private manageable(cols?: MemoryColumns): SQL {
+    return readableConditions(this.ctx.access, { personaIds: [], management: true }, cols)
+  }
+
+  // 事件的前后快照各按管理读取判断，有一边看不到就整条不显示；为空的一边（新建事件没有「改前」）不参与
+  private visibleEvent(): SQL {
+    return and(
+      or(isNull(memoryEvents.before), this.manageable(snapshotColumns(memoryEvents.before))),
+      or(isNull(memoryEvents.after), this.manageable(snapshotColumns(memoryEvents.after))),
+    )!
+  }
+
+  // 按 id 找一条管理读取读得到的策展记忆，已删除的也算；读不到和不存在一样是 404
+  private async findManageable(tx: Tx, memoryId: string): Promise<MemoryRow> {
+    const [row] = await tx
+      .select()
+      .from(memories)
+      .where(and(eq(memories.id, memoryId), eq(memories.form, 'curated'), this.manageable()))
+    if (!row) throw new MemoryError(404, '记忆不存在')
+    return row
+  }
+
+  // 事件连同操作者一起取出，记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
+  // 只给应用主人与空间 owner（管理界面里 admin 就是空间 owner）看，别人只看到应用名。
+  // checkMemory 为 true 时只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断
+  private eventRows(
+    tx: Tx,
+    where: SQL | undefined,
+    order: SQL[],
+    limit: number,
+    checkMemory = true,
+  ) {
+    const keyVisible = this.ctx.access.admin
+      ? sql`true`
+      : sql`${apps.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
+    return tx
+      .select({
+        event: memoryEvents,
+        createdMicros: sql<string>`${microsOf(memoryEvents.createdAt)}::text`,
+        domain: memories.domain,
+        path: memories.path,
+        accountName: accounts.displayName,
+        keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
+        appName: apps.name,
+      })
+      .from(memoryEvents)
+      .innerJoin(memories, eq(memories.id, memoryEvents.memoryId))
+      .leftJoin(accounts, eq(accounts.id, memoryEvents.actorAccountId))
+      .leftJoin(apiKeys, eq(apiKeys.id, memoryEvents.actorKeyId))
+      .leftJoin(apps, eq(apps.id, apiKeys.appId))
+      .where(and(where, checkMemory ? this.manageable() : undefined, this.visibleEvent()))
+      .orderBy(...order)
+      .limit(limit)
+  }
+
+  // 一条记忆的历史，从早到晚
+  async history(memoryId: string): Promise<MemoryHistory> {
+    return this.run(async (tx) => {
+      const row = await this.findManageable(tx, memoryId)
+      // 太多时保留最近的：最新的几版才是最常要看、要恢复的
+      const latest = await this.eventRows(
+        tx,
+        eq(memoryEvents.memoryId, memoryId),
+        [desc(memoryEvents.id)],
+        HISTORY_LIMIT + 1,
+        false,
+      )
+      const rows = latest.slice(0, HISTORY_LIMIT).reverse()
+      return {
+        memory: {
+          id: row.id,
+          uri: formatUri(row.domain!, row.path!),
+          layer: row.layer,
+          sensitivity: row.sensitivity,
+          version: row.version,
+          deletedAt: row.deletedAt?.toISOString() ?? null,
+        },
+        events: rows.map((r) => ({
+          id: r.event.id,
+          type: r.event.eventType,
+          provenance: r.event.provenance,
+          createdAt: r.event.createdAt.toISOString(),
+          actor: actorOf(r),
+          before: toSnapshot(r.event.before),
+          after: toSnapshot(r.event.after),
+        })),
+        truncated: latest.length > HISTORY_LIMIT,
+      }
+    })
+  }
+
+  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性；
+  // 已经过期或失效的不列：撤销删除之后也看不到（例如让出 URI 时被软删除的过期记录）
+  async deleted(query: PageQuery): Promise<DeletedMemoryList> {
+    const after = decodeTimeCursor(query.cursor, UUID)
+    return this.run(async (tx) => {
+      const rows = await tx
+        .select({
+          row: memories,
+          deletedMicros: sql<string>`${DELETED_MICROS}::text`,
+        })
+        .from(memories)
+        .where(
+          and(
+            isNotNull(memories.deletedAt),
+            eq(memories.form, 'curated'),
+            STILL_VALID,
+            this.manageable(),
+            after
+              ? sql`(${DELETED_MICROS}, ${memories.id}) < (${after[0]}::bigint, ${after[1]}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(memories.deletedAt), desc(memories.id))
+        .limit(query.limit + 1)
+      const page = rows.slice(0, query.limit)
+      const last = page.at(-1)
+      return {
+        items: page.map(({ row }) => ({
+          id: row.id,
+          uri: formatUri(row.domain!, row.path!),
+          layer: row.layer,
+          sensitivity: row.sensitivity,
+          priority: row.priority,
+          disclosure: row.disclosure,
+          version: row.version,
+          deletedAt: row.deletedAt!.toISOString(),
+        })),
+        nextCursor:
+          rows.length > query.limit && last
+            ? encodeTimeCursor(last.deletedMicros, last.row.id)
+            : null,
+      }
+    })
+  }
+
+  // 空间的活动流，最新的在前。按时间排序走 (space_id, created_at) 索引，不必扫别的空间的事件；
+  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id
+  async activity(query: PageQuery): Promise<ActivityList> {
+    const after = decodeTimeCursor(query.cursor, EVENT_ID)
+    return this.run(async (tx) => {
+      const rows = await this.eventRows(
+        tx,
+        after
+          ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
+          : undefined,
+        [desc(memoryEvents.createdAt), desc(memoryEvents.id)],
+        query.limit + 1,
+      )
+      const page = rows.slice(0, query.limit)
+      return {
+        items: page.map((r): ActivityItem => ({
+          id: r.event.id,
+          type: r.event.eventType,
+          memoryId: r.event.memoryId!,
+          uri: formatUri(r.domain!, r.path!),
+          createdAt: r.event.createdAt.toISOString(),
+          actor: actorOf(r),
+          changes: changedFields(toSnapshot(r.event.before), toSnapshot(r.event.after)),
+        })),
+        nextCursor:
+          rows.length > query.limit && page.length
+            ? encodeTimeCursor(page.at(-1)!.createdMicros, String(page.at(-1)!.event.id))
+            : null,
+      }
+    })
+  }
+
+  // 恢复到某个事件之后的那一版：只改正文、disclosure、priority 与关键词，不改 URI、层、主人、敏感级与有效期。
+  // 快照里没有正文（secret 的快照，或改成 secret 时被抹掉正文的旧快照）时正文保持不变。
+  // 只用和现在同一归属（层、主人、人格、应用）、敏感级不高于现在的版本：恢复不能把内容带到更宽的可见范围里
+  async restore(input: RestoreRequest): Promise<MemoryView> {
+    return this.write(async (tx) => {
+      const current = await this.findManageable(tx, input.memoryId)
+      if (current.deletedAt) throw new MemoryError(409, '这条记忆已被删除，先撤销删除再恢复')
+      const [found] = await tx
+        .select({ after: memoryEvents.after })
+        .from(memoryEvents)
+        .where(
+          and(
+            eq(memoryEvents.id, input.eventId),
+            eq(memoryEvents.memoryId, input.memoryId),
+            this.visibleEvent(),
+          ),
+        )
+      const target = found?.after as Record<string, unknown> | null | undefined
+      if (!target) throw new MemoryError(404, '这一版不存在')
+      if (target.deletedAt != null) {
+        throw new MemoryError(400, '这一版是删除之后的状态，要恢复删除请用撤销删除')
+      }
+      const sameOwner =
+        target.layer === current.layer &&
+        (target.ownerAccountId ?? null) === current.ownerAccountId &&
+        (target.personaId ?? null) === current.personaId &&
+        (target.appId ?? null) === current.appId
+      if (!sameOwner) {
+        throw new MemoryError(400, '这一版和现在不在同一层或不属于同一方，先把层改回去再恢复')
+      }
+      const targetSensitivity = target.sensitivity as Sensitivity
+      if (
+        !SENSITIVITIES.includes(targetSensitivity) ||
+        sensitivityRank(targetSensitivity) > sensitivityRank(current.sensitivity)
+      ) {
+        throw new MemoryError(
+          400,
+          '这一版的敏感级比现在高，恢复会把内容放到更宽的可见范围里；先把敏感级调回去再恢复',
+        )
+      }
+      const glossaryNow = (await this.glossaryOf(tx, [current.id])).get(current.id) ?? []
+      const wanted = stringList(target.glossary)
+      return this.applyUpdate(
+        tx,
+        current,
+        {
+          expectedVersion: input.expectedVersion,
+          ...(typeof target.content === 'string' ? { content: target.content } : {}),
+          disclosure: typeof target.disclosure === 'string' ? target.disclosure : null,
+          ...(typeof target.priority === 'number' ? { priority: target.priority } : {}),
+          glossaryAdd: wanted.filter((k) => !glossaryNow.includes(k)),
+          glossaryRemove: glossaryNow.filter((k) => !wanted.includes(k)),
+        },
+        {
+          eventType: 'restore',
+          eventContext: { fromEventId: input.eventId },
+          glossary: glossaryNow,
+        },
+      )
+    })
+  }
+
+  // 撤销删除：清掉删除标记，这一行原样留下（secret 的密文也还在），不从快照重建。
+  // URI 已被别的记忆占用时返回 409；提交后重新排队生成向量
+  async undelete(input: UndeleteRequest): Promise<MemoryView> {
+    return this.write(async (tx, _personaIds, released) => {
+      const row = await this.findManageable(tx, input.memoryId)
+      if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
+      if (!canWrite(this.ctx.access, row)) {
+        throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
+      }
+      await this.claimUri(tx, parse(formatUri(row.domain!, row.path!)), row, released)
+      const [restored] = await tx
+        .update(memories)
+        .set({ deletedAt: null, version: sql`${memories.version} + 1`, updatedAt: new Date() })
+        .where(
+          and(
+            eq(memories.id, row.id),
+            eq(memories.version, row.version),
+            isNotNull(memories.deletedAt),
+            STILL_VALID,
+          ),
+        )
+        .returning()
+      if (!restored) {
+        const [stale] = await tx
+          .select({ id: memories.id })
+          .from(memories)
+          .where(and(eq(memories.id, row.id), sql`not ${STILL_VALID}`))
+        throw new MemoryError(
+          409,
+          stale ? '这条记忆已经过期，撤销删除之后也看不到' : '记忆刚被其他请求修改，请重新读取',
+        )
+      }
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      await this.event(
+        tx,
+        row.id,
+        'undelete',
+        snapshot(row, glossary),
+        snapshot(restored, glossary),
+      )
+      return this.toView(restored, glossary)
+    })
+  }
+}
+
+// 一条记忆的历史最多列这么多个事件
+const HISTORY_LIMIT = 500
+
+// 时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
+const microsOf = (column: SQLWrapper) => sql`(extract(epoch from ${column}) * 1000000)::bigint`
+const DELETED_MICROS = microsOf(memories.deletedAt)
+// 游标里的微秒整数换回时间，按微秒精确换算，不经过浮点
+const fromMicros = (micros: string) =>
+  sql`('epoch'::timestamptz + ${micros}::bigint * interval '1 microsecond')`
+// 微秒整数在 bigint 的范围里；事件 id 不超过 JS 能精确表示的整数
+const MICROS = /^\d{1,18}$/
+const EVENT_ID = /^\d{1,15}$/
+
+// 还没有失效或过期
+const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
+
+// 「时间 + id」的游标：上一页最后一条的微秒时间与 id
+function encodeTimeCursor(micros: string, id: string): string {
+  return Buffer.from(JSON.stringify([micros, id])).toString('base64url')
+}
+
+function decodeTimeCursor(cursor: string | undefined, id: RegExp): [string, string] | null {
+  if (!cursor) return null
+  const invalid = new MemoryError(400, '翻页参数无效，请从第一页重新开始')
+  let values: unknown
+  try {
+    values = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+  } catch {
+    throw invalid
+  }
+  if (
+    !Array.isArray(values) ||
+    values.length !== 2 ||
+    typeof values[0] !== 'string' ||
+    !MICROS.test(values[0]) ||
+    typeof values[1] !== 'string' ||
+    !id.test(values[1])
+  ) {
+    throw invalid
+  }
+  return [values[0], values[1]]
+}
+
+function actorOf(r: {
+  accountName: string | null
+  keyName: string | null
+  appName: string | null
+}): EventActor {
+  return { accountName: r.accountName, keyName: r.keyName, appName: r.appName }
+}
+
+function stringList(value: unknown): string[] {
+  return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+// 快照里界面要用的部分；快照是写入事件时记下的整行（不含密文），secret 的没有正文
+function toSnapshot(raw: unknown): MemorySnapshot | null {
+  if (!raw || typeof raw !== 'object') return null
+  const s = raw as Record<string, unknown>
+  const text = (key: string) => (typeof s[key] === 'string' ? (s[key] as string) : null)
+  return {
+    uri: formatUri(text('domain') ?? '', text('path') ?? ''),
+    layer: s.layer as Layer,
+    sensitivity: s.sensitivity as Sensitivity,
+    priority: typeof s.priority === 'number' ? s.priority : 0,
+    disclosure: text('disclosure'),
+    glossary: stringList(s.glossary),
+    content: text('content'),
+    version: typeof s.version === 'number' ? s.version : 0,
+    deleted: s.deletedAt != null,
+  }
+}
+
+// 前后两版之间改了哪些字段；正文两边都没有（secret）时看不出改没改，不算
+function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | null): string[] {
+  if (!before || !after) return []
+  const changes: string[] = []
+  if (before.uri !== after.uri) changes.push('uri')
+  if (before.layer !== after.layer) changes.push('layer')
+  if (before.sensitivity !== after.sensitivity) changes.push('sensitivity')
+  if (before.priority !== after.priority) changes.push('priority')
+  if (before.disclosure !== after.disclosure) changes.push('disclosure')
+  if (before.glossary.join('\n') !== after.glossary.join('\n')) changes.push('glossary')
+  if (before.content !== after.content && (before.content !== null || after.content !== null)) {
+    changes.push('content')
+  }
+  return changes
 }
 
 function escapeLike(s: string): string {
@@ -868,8 +1268,7 @@ const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content}
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
 
-// 更新时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
-const UPDATED_MICROS = sql`(extract(epoch from ${memories.updatedAt}) * 1000000)::bigint`
+const UPDATED_MICROS = microsOf(memories.updatedAt)
 
 // 各种排序的排序键，最后都加上 id，保证顺序确定
 const LIST_ORDER: Record<MemoryListSort, SQL[]> = {
@@ -920,7 +1319,7 @@ function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor 
   if (typeof id !== 'string' || !UUID.test(id)) throw invalid
   const ok =
     sort === 'updated'
-      ? values.length === 2 && typeof values[0] === 'string' && /^\d{1,18}$/.test(values[0])
+      ? values.length === 2 && typeof values[0] === 'string' && MICROS.test(values[0])
       : sort === 'priority'
         ? values.length === 4 &&
           Number.isInteger(values[0]) &&

@@ -10,6 +10,9 @@ import type { Deps } from '../http/env'
 import { jsonResponse, router } from '../http/openapi'
 import { memoryServiceForConsole } from '../memory/context'
 
+// 概览里列出的最近改动数
+const RECENT_LIMIT = 8
+
 const overview = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/overview',
@@ -34,7 +37,10 @@ export function overviewRoutes(deps: Deps) {
       memoryServiceForConsole(deps, spaceId, accountId, role),
       withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
     ])
-    const stats = await service.stats(settings.model)
+    const [stats, recent] = await Promise.all([
+      service.stats(settings.model),
+      service.activity({ limit: RECENT_LIMIT }),
+    ])
     // Key 的情况与 Key 列表一样，只给应用主人和空间 owner 看
     const visible = appRows
       .filter((a) => role === 'owner' || a.ownerAccountId === accountId)
@@ -82,6 +88,7 @@ export function overviewRoutes(deps: Deps) {
               : null,
           }
         }),
+        recent: recent.items,
       },
       200,
     )

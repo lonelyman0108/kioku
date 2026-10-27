@@ -9,9 +9,9 @@ import {
   type SessionContext,
 } from '../../access/access'
 import { withSpace, type Database } from '../../db/client'
-import { accounts, apps, memories, personas, spaces } from '../../db/schema'
+import { accounts, apps, memories, memoryEvents, personas, spaces } from '../../db/schema'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { readableConditions } from '../filter'
+import { readableConditions, snapshotColumns, snapshotFacts } from '../filter'
 
 // 用同一批覆盖各种组合的记忆，逐条比对 SQL 过滤与 canRead 的结论
 describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
@@ -66,7 +66,7 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
       for (const layer of LAYERS) {
         for (const sensitivity of SENSITIVITIES) {
           for (const originScope of scopes) {
-            for (const variant of ['own', 'foreign', 'expired'] as const) {
+            for (const variant of ['own', 'foreign', 'expired', 'deleted'] as const) {
               n++
               const secret = sensitivity === 'secret'
               rows.push({
@@ -92,15 +92,46 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
                 appId: layer === 'app' ? (variant === 'foreign' ? otherApp : appId) : null,
                 subjectId: null,
                 validTo: variant === 'expired' ? past : null,
+                deletedAt: variant === 'deleted' ? past : null,
               })
             }
           }
         }
       }
       // subject 层需要真实对象，这里改为不挂对象的 episode 来覆盖来源作用域
-      await tx
+      const inserted = await tx
         .insert(memories)
         .values(rows.map((r) => (r.layer === 'subject' ? { ...r, layer: 'episode' as const } : r)))
+        .returning()
+      // 每条记忆再记一个事件，「改后」快照就是这一行，用来比对快照上的 SQL 条件；
+      // 另外几十条缺字段的旧快照，两边的处理也要一致
+      const snap = (m: (typeof inserted)[number]) =>
+        JSON.parse(
+          JSON.stringify({ ...m, ciphertext: null, wrappedKey: null, fts: null }),
+        ) as Record<string, unknown>
+      const without = (m: (typeof inserted)[number], key: string) => {
+        const s = snap(m)
+        delete s[key]
+        return s
+      }
+      await tx.insert(memoryEvents).values([
+        ...inserted.map((m) => ({
+          spaceId,
+          memoryId: m.id,
+          eventType: 'create',
+          provenance: m.provenance,
+          after: snap(m),
+        })),
+        ...inserted.slice(0, 40).flatMap((m) =>
+          ['layer', 'sensitivity', 'originScope', 'ownerAccountId'].map((key) => ({
+            spaceId,
+            memoryId: m.id,
+            eventType: 'update',
+            provenance: m.provenance,
+            after: without(m, key),
+          })),
+        ),
+      ])
     })
   })
 
@@ -137,11 +168,17 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
     ['管理界面 · viewer', () => consoleAccess('viewer', owner)],
   ]
 
+  const modes = [
+    ['', { explicit: false }],
+    [' · 显式读取', { explicit: true }],
+    [' · 管理读取', { management: true }],
+  ] as const
+
   for (const [name, makeAccess] of accesses) {
-    for (const explicit of [false, true]) {
-      it(`${name}${explicit ? ' · 显式读取' : ''}`, async () => {
+    for (const [suffix, mode] of modes) {
+      it(`${name}${suffix}`, async () => {
         const access = makeAccess()
-        const options = { personaIds: [personaId], explicit }
+        const options = { personaIds: [personaId], ...mode }
         const all = await withSpace(database.db, spaceId, (tx) => tx.select().from(memories))
         const expected = all
           .filter((m) => canRead(access, m, options))
@@ -160,6 +197,52 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
         expect(all.length).toBeGreaterThan(400)
         expect(actual).toEqual(expected)
       })
+
+      it(`${name}${suffix} · 事件快照`, async () => {
+        const access = makeAccess()
+        const options = { personaIds: [personaId], ...mode }
+        const events = await withSpace(database.db, spaceId, (tx) => tx.select().from(memoryEvents))
+        const expected = events
+          .filter((e) => {
+            const facts = snapshotFacts(e.after as Record<string, unknown>)
+            return facts !== null && canRead(access, facts, options)
+          })
+          .map((e) => e.id)
+          .sort((a, b) => a - b)
+        const actual = (
+          await withSpace(database.db, spaceId, (tx) =>
+            tx
+              .select({ id: memoryEvents.id })
+              .from(memoryEvents)
+              .where(readableConditions(access, options, snapshotColumns(memoryEvents.after))),
+          )
+        )
+          .map((r) => r.id)
+          .sort((a, b) => a - b)
+        expect(events.length).toBeGreaterThan(400)
+        expect(actual).toEqual(expected)
+      })
     }
   }
+
+  it('管理读取不看有效期、删除状态与人格，按显式读取算', () => {
+    const facts = {
+      layer: 'persona' as const,
+      sensitivity: 'secret' as const,
+      originScope: 'global',
+      ownerAccountId: null,
+      personaId: foreignPersona,
+      appId: null,
+      validTo: new Date(0),
+      expiresAt: null,
+      deletedAt: new Date(0),
+    }
+    const owner = consoleAccess('owner', 'someone')
+    expect(canRead(owner, facts, { personaIds: [], management: true })).toBe(true)
+    expect(canRead(owner, facts, { personaIds: [personaId], explicit: true })).toBe(false)
+    // secret 仍然只给读得到 secret 的成员
+    expect(
+      canRead(consoleAccess('editor', 'someone'), facts, { personaIds: [], management: true }),
+    ).toBe(false)
+  })
 })
