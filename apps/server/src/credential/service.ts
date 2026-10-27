@@ -398,12 +398,22 @@ export class CredentialService {
         ),
       )
       .returning()
-    if (!row) throw new MemoryError(409, '凭据刚被其他请求修改，请重新读取')
+    if (!row) throw await this.raced(tx, before.id)
     await this.event(tx, before.id, 'update', {
       changes,
       ...(changedValues.length ? { fields: changedValues } : {}),
     })
     return { row, provider }
+  }
+
+  // 读完之后、写入之前被别的请求改了：告诉调用方现在的版本号，接着改的时候带上它
+  private async raced(tx: Tx, id: string): Promise<MemoryError> {
+    const [now] = await tx
+      .select({ version: credentials.version, deletedAt: credentials.deletedAt })
+      .from(credentials)
+      .where(eq(credentials.id, id))
+    if (!now || now.deletedAt) return new MemoryError(409, '凭据刚被其他请求删除')
+    return new MemoryError(409, `版本已变化：当前是 ${now.version}，请先重新读取`)
   }
 
   private async remove(tx: Tx, before: CredentialRow, expectedVersion?: number): Promise<void> {
@@ -423,7 +433,7 @@ export class CredentialService {
         ),
       )
       .returning({ id: credentials.id })
-    if (!row) throw new MemoryError(409, '凭据刚被其他请求修改，请重新读取')
+    if (!row) throw await this.raced(tx, before.id)
     await this.event(tx, before.id, 'delete')
   }
 

@@ -89,12 +89,16 @@ export type ConsoleCredentialList = z.infer<typeof ConsoleCredentialList>
 const CredentialName = z.string().trim().min(1, '名称不能为空').max(100)
 const CredentialDescription = z.string().max(2000).nullable()
 const CredentialValue = z.string().min(1, '值不能为空').max(16_384)
-// 条目位置与来源字段会代入取值命令。服务端给出的命令里它们都放在单引号里；这里再挡掉放在引号外
-// 也能拼出新命令的字符、换行与看不见的格式字符（双向控制符、零宽字符等），以及开头的 -（会被当成选项）。
-// 否则改得了绑定的 Key 能借凭据源的使用说明，给别的 agent 塞进一条命令
-const BINDING_UNSAFE = /[;|&<>`$\\"]|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/u
+// 条目位置与来源字段会代入取值命令，服务端给出的命令里它们都放在单引号里。值里不能有单引号
+// （包括 PowerShell 也当作引号的弯引号）：这样单引号包起来在 bash、zsh 与 PowerShell 里都是字面量。
+// 再挡掉放在引号外也能拼出新命令的字符（; | & < > ` $ \ " %）、换行、看不见的字符
+// （双向控制符、零宽字符、变体选择符等），以及开头的 -（会被当成选项）。
+// 否则改得了绑定的 Key 能借取值命令或凭据源的使用说明，给别的 agent 塞进一条命令
+const BINDING_UNSAFE =
+  /[;|&<>`$\\"'%\u2018-\u201f]|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u
 const shellSafe = (v: string) => !BINDING_UNSAFE.test(v) && !v.startsWith('-')
-const SHELL_SAFE_MESSAGE = '不能含有 ; | & < > ` $ \\ " 与换行等控制字符，也不能以 - 开头'
+const SHELL_SAFE_MESSAGE =
+  '不能含有引号、; | & < > ` $ \\ % 与换行等看不见的字符，也不能以 - 开头；条目名里有这些字符时，改用条目的 id'
 const Location = z
   .string()
   .trim()

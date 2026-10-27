@@ -16,15 +16,16 @@ describe('外部来源的取法', () => {
     expect(externalMethod('bitwarden', 'router admin', fields)).toContain(
       "bw get item 'router admin'",
     )
+    // 不用 --fields：它按逗号拆分来源字段
     const op = externalMethod('1password', 'Private/router', fields)
-    expect(op).toContain(
-      "password 用 op item get 'Private/router' --fields 'label=password' --reveal",
-    )
-    expect(op).toContain("--fields 'label=API token'")
+    expect(op).toContain("op item get 'Private/router' --reveal --format json")
+    expect(op).not.toContain('--fields')
     expect(
       externalMethod('env', 'unused', [{ name: 'token', sourceField: 'API_TOKEN' }]),
     ).toContain("token 用 printenv 'API_TOKEN'")
-    expect(externalMethod('other', 'x', fields)).toContain(
+    const other = externalMethod('other', 'router admin', fields)
+    expect(other).toContain("条目 'router admin'；password → 'password'，token → 'API token'")
+    expect(other).toContain(
       '字段对应（占位符字段 → 条目里的字段）：password → "password"，token → "API token"',
     )
   })
