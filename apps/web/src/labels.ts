@@ -1,4 +1,11 @@
-import type { EventActor, Layer, Provenance, Sensitivity } from '@kioku/contracts'
+import type {
+  CredentialProviderKind,
+  CredentialSource,
+  EventActor,
+  Layer,
+  Provenance,
+  Sensitivity,
+} from '@kioku/contracts'
 
 import { icons } from './icons'
 
@@ -84,4 +91,44 @@ export const sensitivityColors: Record<Sensitivity, 'neutral' | 'info' | 'warnin
   internal: 'info',
   private: 'warning',
   secret: 'error',
+}
+
+export const providerKindLabels: Record<CredentialProviderKind, string> = {
+  bitwarden: 'Bitwarden',
+  '1password': '1Password',
+  env: '环境变量',
+  other: '其他',
+}
+
+export const credentialSourceLabels: Record<CredentialSource, string> = {
+  hosted: 'Kioku 托管',
+  external: '外部凭据源',
+}
+
+// 凭据事件：只有凭据的主人看得到，不进空间的活动记录
+export const credentialEventLabels: Record<string, { label: string; icon: string }> = {
+  create: { label: '新建', icon: icons.add },
+  update: { label: '修改', icon: icons.edit },
+  delete: { label: '删除', icon: icons.remove },
+  undelete: { label: '撤销删除', icon: icons.undelete },
+  access: { label: '取用', icon: icons.reveal },
+}
+
+// 取用经由哪里
+export const credentialViaLabels: Record<string, string> = {
+  console: '在管理界面查看',
+  kioku_credential: '通过 kioku_credential',
+  kioku_get: '读记忆时列出（kioku_get）',
+  rest: '通过 REST 接口',
+}
+
+export const credentialChangeLabels: Record<string, string> = {
+  name: '名称',
+  description: '说明',
+  source: '来源',
+  provider: '凭据源',
+  location: '条目位置',
+  fields: '字段',
+  values: '值',
+  appIds: '限定的应用',
 }
