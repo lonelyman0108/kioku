@@ -1,9 +1,13 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  ConsoleSearchRequest,
+  ConsoleSearchResponse,
   CreateMemoryRequest,
   DomainSummary,
   ErrorResponse,
   MemoryChildren,
+  MemoryList,
+  MemoryListQuery,
   MemoryUri,
   MemoryView,
   MoveMemoryRequest,
@@ -14,8 +18,11 @@ import type { Context } from 'hono'
 import { memberRole, requireKey } from '../auth/middleware'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { memoryServiceForConsole, memoryServiceForKey } from '../memory/context'
+import { memoryServiceForConsole, memoryServiceForKey, recallForConsole } from '../memory/context'
 import { MemoryError, type MemoryService } from '../memory/service'
+
+// 快速跳转最多列出的直接命中数
+const MATCH_LIMIT = 10
 
 // URI 里有 :// 和 /，放在查询参数里，省去路径编码的麻烦
 const UriQuery = z.object({ uri: MemoryUri })
@@ -144,13 +151,59 @@ export function memoryRoutes(deps: Deps) {
       tag: 'console',
       security: undefined,
       resolve: async (c) => {
-        const spaceId = c.req.param('spaceId')!
-        const accountId = c.get('console').accountId
-        const role = await memberRole(deps, spaceId, accountId)
-        if (!role) throw new MemoryError(403, '不是该空间成员')
-        return memoryServiceForConsole(deps, spaceId, accountId, role)
+        const { service } = await consoleMember(deps, c)
+        return service
       },
     }),
   )
+  app.route('/', consoleOnlyRoutes(deps))
   return app
+}
+
+async function consoleMember(deps: Deps, c: Context<AppEnv>) {
+  const spaceId = c.req.param('spaceId')!
+  const accountId = c.get('console').accountId
+  const role = await memberRole(deps, spaceId, accountId)
+  if (!role) throw new MemoryError(403, '不是该空间成员')
+  return {
+    spaceId,
+    accountId,
+    role,
+    service: await memoryServiceForConsole(deps, spaceId, accountId, role),
+  }
+}
+
+// 只给管理界面的记忆接口：按条件列出与搜索。Key 有 kioku_list 与召回，用不着这两个
+function consoleOnlyRoutes(deps: Deps) {
+  const params = z.object({ spaceId: z.uuid() })
+  const list = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/memories/list',
+    tags: ['console'],
+    summary: '按条件列出记忆，分页返回',
+    request: { params, query: MemoryListQuery },
+    responses: { 200: jsonResponse('记忆列表', MemoryList), ...errors },
+  })
+  const search = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/search',
+    tags: ['console'],
+    summary: '搜索记忆：URI 与关键词的直接命中，加上召回的候选',
+    request: { params, body: jsonBody(ConsoleSearchRequest) },
+    responses: { 200: jsonResponse('搜索结果', ConsoleSearchResponse), ...errors },
+  })
+  return router()
+    .openapi(list, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.list(c.req.valid('query')), 200)
+    })
+    .openapi(search, async (c) => {
+      const { spaceId, accountId, role, service } = await consoleMember(deps, c)
+      const { query, limit } = c.req.valid('json')
+      const [matches, candidates] = await Promise.all([
+        service.matches(query, MATCH_LIMIT),
+        recallForConsole(deps, spaceId, accountId, role, query, limit),
+      ])
+      return c.json({ matches, candidates }, 200)
+    })
 }

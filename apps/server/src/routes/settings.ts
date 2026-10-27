@@ -1,5 +1,7 @@
 import { createRoute } from '@hono/zod-openapi'
 import {
+  EmbeddingCoverage,
+  EmbeddingRebuildResult,
   EmbeddingSettingsView,
   EmbeddingTestResult,
   ErrorResponse,
@@ -10,6 +12,7 @@ import { createMiddleware } from 'hono/factory'
 
 import { requireConsole } from '../auth/middleware'
 import { accounts, EMBEDDING_DIMENSIONS } from '../db/schema'
+import { embeddingCoverage } from '../embedding/coverage'
 import { openAiEmbedder } from '../embedding/provider'
 import {
   embeddingSettingsView,
@@ -48,6 +51,26 @@ const test = createRoute({
   tags: ['settings'],
   summary: '用已保存的设置请求一次嵌入，检查连通性与维度',
   responses: { 200: jsonResponse('测试结果', EmbeddingTestResult), 403: forbidden },
+})
+
+const status = createRoute({
+  method: 'get',
+  path: '/settings/embedding/status',
+  tags: ['settings'],
+  summary: '整个实例的向量覆盖率：应当有向量的记忆里有多少已经生成',
+  responses: { 200: jsonResponse('覆盖率', EmbeddingCoverage), 403: forbidden },
+})
+
+const rebuild = createRoute({
+  method: 'post',
+  path: '/settings/embedding/rebuild',
+  tags: ['settings'],
+  summary: '在后台检查全部记忆，补齐缺少或过时的向量',
+  responses: {
+    202: jsonResponse('已排队', EmbeddingRebuildResult),
+    400: jsonResponse('还没有保存嵌入设置', ErrorResponse),
+    403: forbidden,
+  },
 })
 
 export function settingsRoutes(deps: Deps) {
@@ -91,5 +114,17 @@ export function settingsRoutes(deps: Deps) {
           200,
         )
       }
+    })
+    .openapi(status, async (c) => {
+      const view = await embeddingSettingsView(deps.db)
+      const coverage = await embeddingCoverage(deps.db, view.model)
+      return c.json({ configured: view.configured, model: view.model, ...coverage }, 200)
+    })
+    .openapi(rebuild, async (c) => {
+      if (!(await embeddingSettingsView(deps.db)).configured) {
+        return c.json({ error: '还没有保存嵌入设置' }, 400)
+      }
+      deps.jobs?.enqueueBackfill()
+      return c.json({ queued: deps.jobs !== null }, 202)
     })
 }

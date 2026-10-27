@@ -19,6 +19,10 @@ export const UpdateEmbeddingSettings = z.object({
 })
 export type UpdateEmbeddingSettings = z.infer<typeof UpdateEmbeddingSettings>
 
+// 为 false 表示服务没有启动后台任务（例如只提供 API 的测试环境），补齐不会执行
+export const EmbeddingRebuildResult = z.object({ queued: z.boolean() })
+export type EmbeddingRebuildResult = z.infer<typeof EmbeddingRebuildResult>
+
 export const EmbeddingTestResult = z.object({
   ok: z.boolean(),
   latencyMs: z.number().int(),
