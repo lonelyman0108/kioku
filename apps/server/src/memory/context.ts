@@ -67,10 +67,18 @@ async function semanticFor(
     return null
   })
   if (timeoutMs === undefined) return embedQuery(embedder, query)
-  return Promise.race([
-    embedQuery(embedder, query),
-    new Promise<null>((resolve) => setTimeout(() => resolve(null), timeoutMs)),
-  ])
+  // 嵌入先返回时清掉计时器，不留着它等到点
+  let timer: ReturnType<typeof setTimeout> | undefined
+  try {
+    return await Promise.race([
+      embedQuery(embedder, query),
+      new Promise<null>((resolve) => {
+        timer = setTimeout(() => resolve(null), timeoutMs)
+      }),
+    ])
+  } finally {
+    clearTimeout(timer)
+  }
 }
 
 export function memoryServiceForKey(
@@ -112,17 +120,16 @@ export async function memoryServiceForConsole(
 
 // 管理界面的搜索候选：和接入方的召回同一套打分，按成员本人的权限，看得到所有人格与应用的记忆。
 // 召回永远不含 secret；最低分放到 0，弱一些的命中也列出来，由人来判断
+// access 取自同一个请求里的管理界面记忆服务，权限只算一次
 export async function recallForConsole(
   deps: Deps,
   spaceId: string,
-  accountId: string,
-  role: ConsoleRole,
+  access: Access,
   rawQuery: string,
   limit: number,
 ): Promise<RecallCandidate[]> {
   const query = normalizeQuery(rawQuery)
   if (!query) return []
-  const access = await accessForConsole(deps, spaceId, accountId, role)
   const semantic = await semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS)
   return runInSpace(deps.db, spaceId, 'all', (tx, personaIds) =>
     recall(tx, access, semantic, query, { limit, minScore: 0, personaIds }),

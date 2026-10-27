@@ -198,11 +198,11 @@ function consoleOnlyRoutes(deps: Deps) {
       return c.json(await service.list(c.req.valid('query')), 200)
     })
     .openapi(search, async (c) => {
-      const { spaceId, accountId, role, service } = await consoleMember(deps, c)
+      const { spaceId, service } = await consoleMember(deps, c)
       const { query, limit } = c.req.valid('json')
       const [matches, candidates] = await Promise.all([
         service.matches(query, MATCH_LIMIT),
-        recallForConsole(deps, spaceId, accountId, role, query, limit),
+        recallForConsole(deps, spaceId, service.access, query, limit),
       ])
       return c.json({ matches, candidates }, 200)
     })

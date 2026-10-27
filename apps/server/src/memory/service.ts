@@ -24,11 +24,12 @@ import {
   eq,
   exists,
   gt,
+  gte,
   ilike,
   inArray,
-  isNotNull,
   isNull,
   like,
+  lt,
   lte,
   or,
   sql,
@@ -119,6 +120,11 @@ const CHILDREN_LEVEL_LIMIT = 500
 
 export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
+
+  // 这个服务按什么权限读写；管理界面的搜索拿它去召回，不必再算一次
+  get access(): Access {
+    return this.ctx.access
+  }
 
   // URI 冲突由数据库判断（同一归属的唯一索引，以及共享与成员节点互斥的触发器，二者都按唯一约束报错），
   // 在这里转成 409，REST 与 MCP 都能拿到明确的提示
@@ -737,6 +743,8 @@ export class MemoryService {
               : undefined,
             query.missingDisclosure === 'true' ? MISSING_DISCLOSURE : undefined,
             query.missingDisclosure === 'false' ? sql`not ${MISSING_DISCLOSURE}` : undefined,
+            query.updatedAfter ? gte(memories.updatedAt, new Date(query.updatedAfter)) : undefined,
+            query.updatedBefore ? lt(memories.updatedAt, new Date(query.updatedBefore)) : undefined,
             after ? afterCursor(query.sort, after) : undefined,
           ),
         )
@@ -813,39 +821,38 @@ export class MemoryService {
   // model 为 null（还没配置嵌入模型）时已有向量记为 0
   async stats(model: string | null): Promise<MemoryStats> {
     return this.run(async (tx, personaIds) => {
-      const counted = and(this.listable(personaIds), eq(memories.form, 'curated'))
       const groups = await tx
-        .select({ layer: memories.layer, sensitivity: memories.sensitivity, count: count() })
+        .select({
+          layer: memories.layer,
+          sensitivity: memories.sensitivity,
+          count: count(),
+          missing: sql<number>`count(*) filter (where ${MISSING_DISCLOSURE})`.mapWith(Number),
+        })
         .from(memories)
-        .where(counted)
+        .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
         .groupBy(memories.layer, memories.sensitivity)
         .orderBy(asc(memories.layer), asc(memories.sensitivity))
-      const [missing] = await tx
-        .select({ count: count() })
+      // 每条记忆在一个模型下至多一条向量（主键），左连接计数不会重复；没配置模型时一条也连不上
+      const [coverage] = await tx
+        .select({ eligible: count(), embedded: count(memoryEmbeddings.memoryId) })
         .from(memories)
-        .where(and(counted, MISSING_DISCLOSURE))
-      const embeddable = and(
-        readableConditions(this.ctx.access, { personaIds }),
-        eq(memories.form, 'curated'),
-        isNotNull(memories.content),
-      )
-      const [eligible] = await tx.select({ count: count() }).from(memories).where(embeddable)
-      const [embedded] = model
-        ? await tx
-            .select({ count: count() })
-            .from(memories)
-            .innerJoin(
-              memoryEmbeddings,
-              and(eq(memoryEmbeddings.memoryId, memories.id), eq(memoryEmbeddings.model, model)),
-            )
-            .where(embeddable)
-        : [{ count: 0 }]
+        .leftJoin(
+          memoryEmbeddings,
+          and(eq(memoryEmbeddings.memoryId, memories.id), eq(memoryEmbeddings.model, model ?? '')),
+        )
+        .where(
+          and(
+            readableConditions(this.ctx.access, { personaIds }),
+            eq(memories.form, 'curated'),
+            HAS_CONTENT,
+          ),
+        )
       return {
-        counts: groups,
+        counts: groups.map(({ layer, sensitivity, count }) => ({ layer, sensitivity, count })),
         total: groups.reduce((sum, g) => sum + g.count, 0),
-        missingDisclosure: missing?.count ?? 0,
-        eligible: eligible?.count ?? 0,
-        embedded: embedded?.count ?? 0,
+        missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
+        eligible: coverage?.eligible ?? 0,
+        embedded: coverage?.embedded ?? 0,
       }
     })
   }
@@ -854,6 +861,9 @@ export class MemoryService {
 function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, '\\$&')
 }
+
+// 有正文：与向量任务的口径一致，空字符串也不生成向量
+const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content} <> '')`
 
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
@@ -890,7 +900,11 @@ function encodeCursor(sort: MemoryListSort, row: CursorRow): string {
 }
 
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-const isText = (v: unknown): v is string => typeof v === 'string' && v.length <= 256
+// URI_PATTERN 允许的最长路径：16 段，每段 64 个字符，加 15 个分隔符
+const MAX_PATH_LENGTH = 16 * 64 + 15
+const isDomain = (v: unknown): v is string =>
+  typeof v === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(v)
+const isPath = (v: unknown): v is string => typeof v === 'string' && v.length <= MAX_PATH_LENGTH
 
 function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor | null {
   if (!cursor) return null
@@ -906,13 +920,13 @@ function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor 
   if (typeof id !== 'string' || !UUID.test(id)) throw invalid
   const ok =
     sort === 'updated'
-      ? values.length === 2 && typeof values[0] === 'string' && /^\d{1,20}$/.test(values[0])
+      ? values.length === 2 && typeof values[0] === 'string' && /^\d{1,18}$/.test(values[0])
       : sort === 'priority'
         ? values.length === 4 &&
           Number.isInteger(values[0]) &&
-          isText(values[1]) &&
-          isText(values[2])
-        : values.length === 3 && isText(values[0]) && isText(values[1])
+          isDomain(values[1]) &&
+          isPath(values[2])
+        : values.length === 3 && isDomain(values[0]) && isPath(values[1])
   if (!ok) throw invalid
   return values as Cursor
 }

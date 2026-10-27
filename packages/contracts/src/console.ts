@@ -22,10 +22,14 @@ export const MemoryListQuery = z.object({
   appId: z.uuid().optional(),
   // 在 URI 与 disclosure 里按子串查找，不区分大小写
   q: z.string().trim().min(1).max(200).optional(),
-  // true 只列没写 disclosure 的，false 只列写了的；查询参数是字符串，不做转换，OpenAPI 文档里才写得出来
+  // true 只列没写 disclosure 的，false 只列写了的；查询参数按字符串 'true' / 'false' 传
   missingDisclosure: z.enum(['true', 'false']).optional(),
+  // 更新时间在这个范围里：不早于 updatedAfter，早于 updatedBefore
+  updatedAfter: z.iso.datetime({ offset: true }).optional(),
+  updatedBefore: z.iso.datetime({ offset: true }).optional(),
   sort: MemoryListSort.default('updated'),
-  cursor: z.string().max(1000).optional(),
+  // 游标里有上一页最后一条的 URI，最长的 URI 编码后约 1500 个字符
+  cursor: z.string().max(4000).optional(),
   limit: z.coerce.number().int().min(1).max(200).default(50),
 })
 export type MemoryListQuery = z.infer<typeof MemoryListQuery>

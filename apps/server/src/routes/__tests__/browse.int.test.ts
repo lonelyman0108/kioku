@@ -201,6 +201,46 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     ])
   })
 
+  it('路径很长的记忆排在一页末尾时，游标照样能翻到下一页', async () => {
+    // URI 允许的最长路径：16 段，每段 64 个字符
+    const long = Array.from({ length: 16 }, (_, i) => String(i % 10).repeat(64)).join('/')
+    await create(ws.cookie, { uri: `notes://${long}`, content: '很长的路径', priority: 0 })
+    await create(ws.cookie, { uri: 'notes://short', content: '短的', priority: 1 })
+    for (const sort of ['uri', 'priority'] as const) {
+      const first = await list(ws.cookie, `sort=${sort}&limit=1`)
+      expect(uris(first)).toEqual([`notes://${long}`])
+      const second = await list(ws.cookie, `sort=${sort}&limit=1&cursor=${first.nextCursor}`)
+      expect(uris(second)).toEqual(['notes://short'])
+    }
+  })
+
+  it('列表可以按更新时间筛选', async () => {
+    for (const name of ['old', 'mid', 'new']) {
+      await create(ws.cookie, { uri: `notes://${name}`, content: name })
+    }
+    const at = (path: string, iso: string) =>
+      withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(memories)
+          .set({ updatedAt: new Date(iso) })
+          .where(inArray(memories.path, [path])),
+      )
+    await at('old', '2026-01-01T00:00:00Z')
+    await at('mid', '2026-02-01T00:00:00Z')
+    await at('new', '2026-03-01T00:00:00Z')
+    const range = (q: string) => list(ws.cookie, `sort=uri&${q}`)
+    expect(uris(await range(`updatedAfter=${encodeURIComponent('2026-02-01T00:00:00Z')}`))).toEqual(
+      ['notes://mid', 'notes://new'],
+    )
+    expect(
+      uris(await range(`updatedBefore=${encodeURIComponent('2026-02-01T00:00:00+00:00')}`)),
+    ).toEqual(['notes://old'])
+    const res = await app.request(`${space()}/memories/list?updatedAfter=yesterday`, {
+      headers: { cookie: ws.cookie },
+    })
+    expect(res.status).toBe(400)
+  })
+
   it('翻页参数无效时返回 400', async () => {
     await create(ws.cookie, { uri: 'notes://x', content: 'x' })
     const encode = (v: unknown) => Buffer.from(JSON.stringify(v)).toString('base64url')
@@ -211,6 +251,8 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       `cursor=${encode(['1', 'not-a-uuid'])}`,
       // 按 URI 排序的游标拿去按更新时间翻页
       `sort=updated&cursor=${uriCursor}`,
+      // 超出 bigint 的范围，不能让数据库报错变成 500
+      `sort=updated&cursor=${encode(['9999999999999999999', '00000000-0000-4000-8000-000000000000'])}`,
     ]) {
       const res = await app.request(`${space()}/memories/list?${query}`, {
         headers: { cookie: ws.cookie },
@@ -353,6 +395,22 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     expect(res.status).toBe(202)
     // 测试里没有启动后台任务
     expect(await res.json()).toEqual({ queued: false })
+
+    // 有后台任务时按入队结果返回，入队失败不能报成已排队
+    for (const queued of [true, false]) {
+      const withJobs = createApp({
+        db: database.db,
+        cookieSecure: false,
+        masterKey: randomBytes(32),
+        embedder: staticEmbedderSource(null),
+        jobs: { enqueueEmbed() {}, enqueueBackfill: async () => queued },
+      })
+      const r = await withJobs.request(
+        '/v1/settings/embedding/rebuild',
+        jsonRequest('POST', {}, { cookie: ws.cookie }),
+      )
+      expect(await r.json()).toEqual({ queued })
+    }
   })
 
   it('OpenAPI 文档里有新增的接口', async () => {

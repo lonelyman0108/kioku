@@ -98,7 +98,7 @@ export function settingsRoutes(deps: Deps) {
         return c.json({ error: (err as Error).message }, 400)
       }
       deps.embedder.invalidate()
-      deps.jobs?.enqueueBackfill()
+      void deps.jobs?.enqueueBackfill()
       return c.json(await current(), 200)
     })
     .openapi(test, async (c) => {
@@ -124,7 +124,8 @@ export function settingsRoutes(deps: Deps) {
       if (!(await embeddingSettingsView(deps.db)).configured) {
         return c.json({ error: '还没有保存嵌入设置' }, 400)
       }
-      deps.jobs?.enqueueBackfill()
-      return c.json({ queued: deps.jobs !== null }, 202)
+      // 入队失败时如实返回 queued: false，不让管理员以为补齐已经在跑
+      const queued = deps.jobs ? await deps.jobs.enqueueBackfill() : false
+      return c.json({ queued }, 202)
     })
 }

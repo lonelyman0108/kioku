@@ -29,12 +29,12 @@ export function overviewRoutes(deps: Deps) {
     const role = await memberRole(deps, spaceId, accountId)
     if (!role) return c.json({ error: '不是该空间成员' }, 403)
 
-    const settings = await embeddingSettingsView(deps.db)
-    const service = await memoryServiceForConsole(deps, spaceId, accountId, role)
+    const [settings, service, appRows] = await Promise.all([
+      embeddingSettingsView(deps.db),
+      memoryServiceForConsole(deps, spaceId, accountId, role),
+      withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
+    ])
     const stats = await service.stats(settings.model)
-    const appRows = await withSpace(deps.db, spaceId, (tx) =>
-      tx.select().from(apps).orderBy(apps.createdAt),
-    )
     // Key 的情况与 Key 列表一样，只给应用主人和空间 owner 看
     const visible = appRows
       .filter((a) => role === 'owner' || a.ownerAccountId === accountId)
