@@ -30,4 +30,5 @@ export const icons = {
   imported: 'i-lucide-download',
   expired: 'i-lucide-clock',
   left: 'i-lucide-eye-off',
+  error: 'i-lucide-circle-alert',
 } as const

@@ -76,7 +76,13 @@ const problem = computed(() => {
   const parsed = DomainLayers.safeParse({
     defaults: Object.fromEntries(list.map((r) => [r.domain, r.layer])),
   })
-  return parsed.success ? null : (parsed.error.issues[0]?.message ?? '格式不对')
+  if (parsed.success) return null
+  const issue = parsed.error.issues[0]
+  // domain（记录的键）不合法时，zod 只在外层给一句英文，这里点出是哪个 domain
+  if (issue?.code === 'invalid_key') {
+    return `domain「${String(issue.path.at(-1) ?? '')}」格式不对：小写字母开头，只用小写字母、数字和下划线`
+  }
+  return issue?.message ?? '格式不对'
 })
 
 const layerItems = PLAIN_LAYERS.map((l) => ({ label: layerLabels[l], value: l }))
@@ -96,6 +102,8 @@ function fillSuggested() {
 }
 
 const saving = ref(false)
+// 载入之前和保存期间不能改：载入会覆盖表单，保存的结果也会覆盖期间的改动
+const editable = computed(() => isOwner.value && baseline.value !== null && !saving.value)
 async function save() {
   if (problem.value || baseline.value === null) return
   saving.value = true
@@ -146,15 +154,16 @@ async function save() {
               v-model="row.domain"
               placeholder="domain，例如 core"
               class="flex-1 font-mono"
-              :disabled="!isOwner"
+              :disabled="!editable"
             />
-            <USelect v-model="row.layer" :items="layerItems" class="w-36" :disabled="!isOwner" />
+            <USelect v-model="row.layer" :items="layerItems" class="w-36" :disabled="!editable" />
             <UButton
               v-if="isOwner"
               :icon="icons.remove"
               color="neutral"
               variant="ghost"
               aria-label="删除这一行"
+              :disabled="!editable"
               @click="rows.splice(index, 1)"
             />
           </div>
@@ -163,10 +172,16 @@ async function save() {
           </p>
           <UAlert v-if="problem" color="warning" variant="subtle" :title="problem" />
           <div v-if="isOwner" class="flex flex-wrap gap-2">
-            <UButton :icon="icons.add" color="neutral" variant="subtle" @click="addRow">
+            <UButton
+              :icon="icons.add"
+              color="neutral"
+              variant="subtle"
+              :disabled="!editable"
+              @click="addRow"
+            >
               添加一行
             </UButton>
-            <UButton color="neutral" variant="ghost" @click="fillSuggested">
+            <UButton color="neutral" variant="ghost" :disabled="!editable" @click="fillSuggested">
               按导入 Lore 的规则填入
             </UButton>
             <UButton

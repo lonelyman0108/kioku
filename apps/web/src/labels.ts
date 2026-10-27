@@ -1,4 +1,4 @@
-import type { Layer, Provenance, Sensitivity } from '@kioku/contracts'
+import type { EventActor, Layer, Provenance, Sensitivity } from '@kioku/contracts'
 
 import { icons } from './icons'
 
@@ -43,6 +43,18 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
 
 export function eventLabel(type: string): { label: string; icon: string } {
   return eventLabels[type] ?? { label: type, icon: icons.edit }
+}
+
+// 谁做的：管理界面里是成员；通过 Key 写入时是应用（Key 的名字只给应用主人与空间 owner）
+export function actorLabel(actor: EventActor): { name: string; viaApp: boolean } {
+  if (actor.accountName) return { name: actor.accountName, viaApp: false }
+  if (actor.appName) {
+    return {
+      name: actor.keyName ? `${actor.appName}（${actor.keyName}）` : actor.appName,
+      viaApp: true,
+    }
+  }
+  return { name: '未知', viaApp: false }
 }
 
 // 活动里「改了哪些字段」

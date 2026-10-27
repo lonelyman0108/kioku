@@ -58,7 +58,7 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
         id: 'error',
         label: '搜索失败',
         ignoreFilter: true,
-        items: [{ label: failure.value, icon: icons.left, disabled: true }],
+        items: [{ label: failure.value, icon: icons.error, disabled: true }],
       })
     }
     const found = results.value

@@ -3,24 +3,16 @@ import type { ActivityItem } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { icons } from '../icons'
-import { changeLabels, eventLabel } from '../labels'
+import { actorLabel, changeLabels, eventLabel } from '../labels'
 import { formatRelative, formatTime } from '../time'
 
 const props = defineProps<{ item: ActivityItem; spaceId: string }>()
 
 const kind = computed(() => eventLabel(props.item.type))
-// 管理界面里是成员；通过 Key 写入时是应用（Key 的名字只给应用主人与空间 owner）
-const actor = computed(() => {
-  const { accountName, appName, keyName } = props.item.actor
-  if (accountName) return accountName
-  if (appName) return keyName ? `${appName}（${keyName}）` : appName
-  return '未知'
-})
-const viaApp = computed(() => !props.item.actor.accountName && !!props.item.actor.appName)
-// 删除与让出 URI 之后，那个 URI 上可能已经是别的记忆了；离开了可见范围的 URI 是改动之前的。这几种不给链接
-const linkable = computed(
-  () => !props.item.left && props.item.type !== 'delete' && props.item.type !== 'expire',
-)
+const actor = computed(() => actorLabel(props.item.actor))
+// 记忆已经删除（包括过期后让出 URI 的），那个 URI 上可能已经是别的记忆了；离开了可见范围的 URI 是改动之前的。
+// 这两种不给链接，同一条记忆更早的改动也一样
+const linkable = computed(() => !props.item.left && !props.item.deleted)
 </script>
 
 <template>
@@ -29,8 +21,8 @@ const linkable = computed(
     <div class="min-w-0 flex-1 space-y-1 text-sm">
       <div class="flex flex-wrap items-center gap-x-2 gap-y-1">
         <span class="inline-flex items-center gap-1 font-medium">
-          <UIcon v-if="viaApp" :name="icons.bot" class="size-3.5 text-muted" />
-          {{ actor }}
+          <UIcon v-if="actor.viaApp" :name="icons.bot" class="size-3.5 text-muted" />
+          {{ actor.name }}
         </span>
         <span class="text-muted">{{ kind.label }}</span>
         <code v-if="!linkable" class="truncate text-xs text-muted">{{ item.uri }}</code>
