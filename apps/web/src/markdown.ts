@@ -2,6 +2,7 @@ import DOMPurify from 'dompurify'
 import { Marked, type Token, type Tokens } from 'marked'
 
 import { splitByKeywords, type KeywordIndex } from './keywords'
+import { splitPlaceholders } from './placeholders'
 
 // 记忆正文是 Markdown，可能来自 agent、导入或别的成员，不能信任。分两道：
 // - marked：正文里的文字一律转义，直接写的 HTML 只放行不带属性的几个排版标签（见 rawHtml）；
@@ -125,7 +126,15 @@ export interface KeywordLinks {
   self: string
 }
 
-export function renderMarkdown(source: string, keywords?: KeywordLinks | null): string {
+// 正文引用的凭据怎么显示：只有读者自己私人层的记忆才解析，按标识找读者自己的有效凭据
+export interface CredentialLinks {
+  byIdentifier: ReadonlyMap<string, { id: string; name: string; fields: readonly string[] }>
+}
+
+export function renderMarkdown(
+  source: string,
+  options: { keywords?: KeywordLinks | null; credentials?: CredentialLinks | null } = {},
+): string {
   const fragment = DOMPurify.sanitize(markdownToHtml(source), {
     ...PURIFY,
     RETURN_DOM_FRAGMENT: true,
@@ -135,22 +144,68 @@ export function renderMarkdown(source: string, keywords?: KeywordLinks | null): 
     link.setAttribute('target', '_blank')
     link.setAttribute('rel', 'noopener noreferrer')
   }
-  if (keywords) markKeywords(fragment, keywords)
+  // 先画凭据的徽章，再标关键词：关键词可能出现在占位符里，先标关键词会把占位符拆开
+  if (options.credentials) markCredentials(fragment, options.credentials)
+  if (options.keywords) markKeywords(fragment, options.keywords)
   const box = document.createElement('div')
   box.append(fragment)
   return box.innerHTML
 }
 
-// 在清洗过的正文里标出关键词：别的记忆的关键词变成链接（data-uris 里是那些记忆，空格分隔），
-// 自己的关键词只加底色。链接、代码与折叠块的标题里的文字不动：标题里放了链接，点它就展不开了
-function markKeywords(root: DocumentFragment, { index, self }: KeywordLinks) {
+// 文字节点，跳过链接、代码与折叠块的标题，以及已经画好的凭据徽章
+function textNodes(root: DocumentFragment): Text[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   const texts: Text[] = []
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.parentElement?.closest('a, code, pre, summary')) continue
+    if (node.parentElement?.closest('a, code, pre, summary, .kioku-cred')) continue
     texts.push(node as Text)
   }
-  for (const text of texts) {
+  return texts
+}
+
+// 把占位符画成徽章：解析得到的是链接（data-credential 是凭据 id，点了去凭据页），
+// 解析不到或没有这个字段的标出来。代码里的占位符照原样显示
+function markCredentials(root: DocumentFragment, { byIdentifier }: CredentialLinks) {
+  for (const text of textNodes(root)) {
+    const segments = splitPlaceholders(text.data)
+    if (!segments.some((s) => s.ref)) continue
+    const replacement = document.createDocumentFragment()
+    for (const { text: part, ref } of segments) {
+      if (!ref) {
+        replacement.append(part)
+        continue
+      }
+      const label = `${ref.identifier}${ref.field ? `#${ref.field}` : ''}`
+      const credential = byIdentifier.get(ref.identifier)
+      const missingField =
+        credential && ref.field !== null && !credential.fields.includes(ref.field)
+      if (credential && !missingField) {
+        const link = document.createElement('a')
+        link.className = 'kioku-cred'
+        link.href = '#'
+        link.dataset.credential = credential.id
+        link.title = `凭据：${credential.name}`
+        link.setAttribute('aria-label', `凭据 ${label}`)
+        link.textContent = label
+        replacement.append(link)
+        continue
+      }
+      const badge = document.createElement('span')
+      badge.className = 'kioku-cred kioku-cred-missing'
+      badge.title = credential
+        ? `凭据 ${credential.name} 没有字段 ${ref.field}`
+        : '没有这条凭据，或者它已经删除'
+      badge.textContent = label
+      replacement.append(badge)
+    }
+    text.replaceWith(replacement)
+  }
+}
+
+// 在清洗过的正文里标出关键词：别的记忆的关键词变成链接（data-uris 里是那些记忆，空格分隔），
+// 自己的关键词只加底色。链接、代码与折叠块的标题里的文字不动：标题里放了链接，点它就展不开了
+function markKeywords(root: DocumentFragment, { index, self }: KeywordLinks) {
+  for (const text of textNodes(root)) {
     const segments = splitByKeywords(text.data, index)
     if (!segments.some((s) => s.keyword)) continue
     const replacement = document.createDocumentFragment()

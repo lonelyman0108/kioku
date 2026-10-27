@@ -56,11 +56,11 @@ const activeKeys = computed(() =>
           overview.error.value instanceof ApiError ? overview.error.value.message : '读取失败'
         "
       />
-      <div v-else-if="!data" class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
-        <USkeleton v-for="n in 4" :key="n" class="h-28" />
+      <div v-else-if="!data" class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
+        <USkeleton v-for="n in 5" :key="n" class="h-28" />
       </div>
       <div v-else class="space-y-6">
-        <div class="grid gap-4 sm:grid-cols-2 xl:grid-cols-4">
+        <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <div class="rounded-lg border border-default p-4">
             <p class="text-sm text-muted">记忆</p>
             <p class="mt-1 text-2xl font-semibold tabular-nums">{{ data.total }}</p>
@@ -86,6 +86,29 @@ const activeKeys = computed(() =>
                 }"
               >
                 逐条补上
+              </RouterLink>
+            </p>
+          </div>
+          <div class="rounded-lg border border-default p-4">
+            <p class="text-sm text-muted">像有明文凭据</p>
+            <p
+              class="mt-1 text-2xl font-semibold tabular-nums"
+              :class="data.plaintextCredentials ? 'text-warning' : ''"
+            >
+              {{ data.plaintextCredentials }}
+            </p>
+            <p class="mt-1 text-xs text-muted">
+              正文里像有密码或 Token，值该存成凭据、正文里换成占位符。
+              <RouterLink
+                v-if="data.plaintextCredentials"
+                class="underline"
+                :to="{
+                  name: 'memories',
+                  params: { spaceId },
+                  query: { view: 'list', plaintext: 'true' },
+                }"
+              >
+                逐条处理
               </RouterLink>
             </p>
           </div>

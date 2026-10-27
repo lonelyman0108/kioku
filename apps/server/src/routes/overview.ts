@@ -82,6 +82,7 @@ export function overviewRoutes(deps: Deps) {
         counts: stats.counts,
         total: stats.total,
         missingDisclosure: stats.missingDisclosure,
+        plaintextCredentials: stats.plaintextCredentials,
         embedding: {
           configured: settings.configured,
           model: settings.model,

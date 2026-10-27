@@ -24,6 +24,8 @@ export const MemoryListQuery = z.object({
   q: z.string().trim().min(1).max(200).optional(),
   // true 只列没写 disclosure 的，false 只列写了的；查询参数按字符串 'true' / 'false' 传
   missingDisclosure: z.enum(['true', 'false']).optional(),
+  // true 只列正文像有明文密码或 Token 的（规则见 PLAINTEXT_CREDENTIAL；secret 的正文是密文，不算）
+  plaintext: z.enum(['true', 'false']).optional(),
   // 更新时间在这个范围里：不早于 updatedAfter，早于 updatedBefore
   updatedAfter: z.iso.datetime({ offset: true }).optional(),
   updatedBefore: z.iso.datetime({ offset: true }).optional(),
@@ -239,6 +241,8 @@ export const SpaceOverview = z.object({
   counts: z.array(LayerCount),
   total: z.number().int(),
   missingDisclosure: z.number().int(),
+  // 正文像有明文密码或 Token、该换成凭据占位符的记忆数
+  plaintextCredentials: z.number().int(),
   embedding: EmbeddingCoverage,
   apps: z.array(OverviewApp),
   // 最近的改动，和活动流同样的可见性

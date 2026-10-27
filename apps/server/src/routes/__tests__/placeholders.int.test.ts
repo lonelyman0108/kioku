@@ -421,6 +421,32 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     ).toContain('disclosure 与关键词里不能有凭据占位符')
   })
 
+  it('规则之前写进 disclosure 的占位符不挡移动与撤销删除，只在写 disclosure 的时候检查', async () => {
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memories).values({
+        spaceId: ws.spaceId,
+        form: 'curated',
+        layer: 'base',
+        sensitivity: 'public',
+        provenance: 'owner',
+        domain: 'core',
+        path: 'old-cue',
+        content: '正文',
+        disclosure: '写法是 {{cred:x}}',
+      }),
+    )
+    await ok(await asMember('POST', '/memories/move', { from: 'core://old-cue', to: 'core://cue' }))
+    await ok(await asMember('DELETE', `/memories?uri=${encodeURIComponent('core://cue')}`), 204)
+    const [deleted] = (
+      await ok<{ items: { id: string }[] }>(await asMember('GET', '/memories/deleted'))
+    ).items
+    await ok(await asMember('POST', '/memories/undelete', { memoryId: deleted!.id }))
+    // 改 disclosure 时照常检查
+    expect(
+      await errorOf(await patchMemory({ uri: 'core://cue', disclosure: '还是 {{cred:x}}' }), 400),
+    ).toContain('disclosure 与关键词里不能有凭据占位符')
+  })
+
   it('导入工具（来源记为 system）能新增引用，别的后台写入不能', async () => {
     const asSystem = (allowCredentialRefs?: boolean) =>
       new MemoryService({

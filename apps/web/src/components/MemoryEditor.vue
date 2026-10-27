@@ -1,9 +1,10 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
-import type { MemoryView, Sensitivity } from '@kioku/contracts'
+import { PLAINTEXT_CREDENTIAL, type MemoryView, type Sensitivity } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -12,6 +13,8 @@ import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsave
 import { icons } from '../icons'
 import { buildKeywordIndex } from '../keywords'
 import { layerLabels, provenanceLabels, sensitivityColors, sensitivityLabels } from '../labels'
+import type { CredentialLinks } from '../markdown'
+import { placeholderOf } from '../placeholders'
 import { formatRelative, formatTime } from '../time'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
@@ -28,6 +31,7 @@ const emit = defineEmits<{
 }>()
 const toast = useToast()
 const queryClient = useQueryClient()
+const router = useRouter()
 
 const queryKey = computed(() => ['memory', props.spaceId, props.uri])
 const memory = useQuery({
@@ -136,6 +140,91 @@ const keywordIndex = computed(() =>
   glossary.data.value ? buildKeywordIndex(glossary.data.value.entries) : null,
 )
 
+// 凭据占位符按记忆的主人解析，而只有私人层的记忆能引用凭据：读得到的私人层记忆就是自己的，
+// 拿自己的凭据来画徽章；别的层不解析
+const ownsCredentials = computed(() => base.value?.layer === 'private')
+const credentials = useQuery({
+  queryKey: computed(() => ['credentials', props.spaceId] as const),
+  queryFn: ({ queryKey: [, spaceId] }) => api.credentials(spaceId),
+  enabled: ownsCredentials,
+  staleTime: 60_000,
+})
+const credentialLinks = computed<CredentialLinks | null>(() => {
+  const items = credentials.data.value?.items
+  if (!ownsCredentials.value || !items) return null
+  return {
+    byIdentifier: new Map(
+      items.map((c) => [
+        c.identifier,
+        { id: c.id, name: c.name, fields: c.fields.map((f) => f.name) },
+      ]),
+    ),
+  }
+})
+function openCredential(id: string) {
+  void router.push({ name: 'credentials', params: { spaceId: props.spaceId }, query: { id } })
+}
+
+// 插入凭据引用：服务端只收私人层、敏感级至少 private 的记忆里的占位符
+const canReference = computed(
+  () => ownsCredentials.value && (form.sensitivity === 'private' || form.sensitivity === 'secret'),
+)
+const contentInput = ref<{ textareaRef: HTMLTextAreaElement | null } | null>(null)
+const picking = ref(false)
+// 打开选择框时记下光标的位置：焦点移到选择框之后，正文框的选区就读不准了
+const caret = ref<[number, number] | null>(null)
+// 字段选「整条」时用 WHOLE：下拉框的选项不能用空字符串当值
+const WHOLE = '*'
+const pick = reactive({ credentialId: undefined as string | undefined, field: WHOLE })
+const pickItems = computed(() =>
+  (credentials.data.value?.items ?? []).map((c) => ({
+    label: `${c.name}（${c.identifier}）`,
+    value: c.id,
+  })),
+)
+const picked = computed(() => credentials.data.value?.items.find((c) => c.id === pick.credentialId))
+const fieldItems = computed(() => [
+  { label: '整条凭据', value: WHOLE },
+  ...(picked.value?.fields ?? []).map((f) => ({ label: f.name, value: f.name })),
+])
+const pickedPlaceholder = computed(() =>
+  picked.value
+    ? placeholderOf(picked.value.identifier, pick.field === WHOLE ? null : pick.field)
+    : '',
+)
+// 换了凭据，原来选的字段可能没有了
+watch(
+  () => pick.credentialId,
+  () => (pick.field = WHOLE),
+)
+function startPicking() {
+  const el = contentInput.value?.textareaRef
+  caret.value = el ? [el.selectionStart, el.selectionEnd] : null
+  pick.credentialId = undefined
+  pick.field = WHOLE
+  picking.value = true
+}
+function insertPlaceholder() {
+  const text = pickedPlaceholder.value
+  if (!text) return
+  const [start, end] = caret.value ?? [form.content.length, form.content.length]
+  form.content = form.content.slice(0, start) + text + form.content.slice(end)
+  picking.value = false
+  // 选择框关掉、焦点回到按钮之后，再把光标放回正文里插入的位置后面
+  afterPick = start + text.length
+}
+let afterPick: number | null = null
+function restoreCaret() {
+  const at = afterPick
+  afterPick = null
+  if (at === null) return
+  void nextTick(() => {
+    const el = contentInput.value?.textareaRef
+    el?.focus()
+    el?.setSelectionRange(at, at)
+  })
+}
+
 const historyOpen = ref(false)
 const moveOpen = ref(false)
 // 移动或改层之后把结果写进缓存：只改层时编辑器跟上新的层，移动后打开新 URI 时不用再读一次
@@ -186,7 +275,32 @@ function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 }
 
-async function save() {
+// 保存前看正文像不像有明文凭据：改了正文、或从 secret 降级时提醒。降级之后正文会进历史、全文检索和向量，
+// 服务端会拒绝带着明文降级，确认之后才带上 allowPlaintext 强制（只有空间 owner 能改 secret，也就只有他会走到这里）
+const plaintextWarning = ref<{ downgrade: boolean } | null>(null)
+// 写成一整句：模板里中文换行会多出一个空格
+const PLAINTEXT_DOWNGRADE_TEXT =
+  '从 secret 降级之后，正文会进历史、全文检索和向量，再也收不回来。先把值存成凭据、正文里换成占位符；确认正文里没有密码或 Token（这条规则会误判），才降级。'
+const PLAINTEXT_TEXT =
+  '正文里像有密码或 Token（例如「密码：…」）。建议把值存成凭据，正文里换成占位符，记忆就不带明文。'
+function requestSave() {
+  const m = base.value
+  if (!m) return
+  const downgrade = m.sensitivity === 'secret' && form.sensitivity !== 'secret'
+  const contentChanged = form.content !== (m.content ?? '')
+  if ((downgrade || contentChanged) && PLAINTEXT_CREDENTIAL.test(form.content)) {
+    plaintextWarning.value = { downgrade }
+    return
+  }
+  void save()
+}
+function confirmPlaintext() {
+  const allowPlaintext = plaintextWarning.value?.downgrade ?? false
+  plaintextWarning.value = null
+  void save(allowPlaintext)
+}
+
+async function save(allowPlaintext = false) {
   const m = base.value
   if (!m) return
   saving.value = true
@@ -204,6 +318,7 @@ async function save() {
       sensitivity: sent.sensitivity,
       glossaryAdd: sent.glossary.filter((k) => !m.glossary.includes(k)),
       glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
+      ...(allowPlaintext ? { allowPlaintext: true } : {}),
     })
     // 正在进行的重新拉取可能带回保存之前的版本，先取消，再把保存结果写进缓存
     await queryClient.cancelQueries({ queryKey: queryKey.value })
@@ -320,7 +435,7 @@ async function remove() {
             size="sm"
             :loading="saving"
             :disabled="!dirty || !form.content.trim()"
-            @click="save"
+            @click="requestSave"
           >
             保存
           </UButton>
@@ -362,7 +477,9 @@ async function remove() {
           :content="base.content"
           :keywords="keywordIndex"
           :self="base.uri"
+          :credentials="credentialLinks"
           @open="(uri) => emit('open', uri)"
+          @credential="openCredential"
         />
         <p v-else class="text-sm text-muted">secret 的正文只有能读 secret 的成员看得到。</p>
       </div>
@@ -383,9 +500,30 @@ async function remove() {
 
     <!-- 编辑：改原文，可以并排预览 -->
     <template v-else>
-      <UFormField label="正文" help="写清背景、为什么、在什么条件下适用；Markdown">
+      <UFormField
+        label="正文"
+        help="写清背景、为什么、在什么条件下适用；Markdown。密码、Token 存成凭据，正文里只放占位符"
+      >
+        <template #hint>
+          <UTooltip
+            :text="canReference ? undefined : '只有私人层、敏感级至少私密的记忆能引用凭据'"
+            :disabled="canReference"
+          >
+            <UButton
+              :icon="icons.credentials"
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :disabled="!canReference"
+              @click="startPicking"
+            >
+              插入凭据引用
+            </UButton>
+          </UTooltip>
+        </template>
         <div class="grid gap-3" :class="preview ? 'lg:grid-cols-2' : ''">
           <UTextarea
+            ref="contentInput"
             v-model="form.content"
             :rows="18"
             autoresize
@@ -393,7 +531,11 @@ async function remove() {
             class="w-full font-mono"
           />
           <div v-if="preview" class="overflow-auto rounded-lg border border-default p-4">
-            <MemoryContent :content="form.content" />
+            <MemoryContent
+              :content="form.content"
+              :credentials="credentialLinks"
+              @credential="openCredential"
+            />
           </div>
         </div>
       </UFormField>
@@ -425,6 +567,58 @@ async function remove() {
     </USlideover>
 
     <MoveMemoryModal v-model:open="moveOpen" :space-id="spaceId" :memory="base" @done="onMoved" />
+
+    <UModal v-model:open="picking" title="插入凭据引用" @after:leave="restoreCaret">
+      <template #body>
+        <div class="space-y-4">
+          <p v-if="!pickItems.length" class="text-sm text-muted">
+            还没有凭据。先在「凭据」页新建，再回来引用。
+          </p>
+          <template v-else>
+            <UFormField label="凭据">
+              <USelect v-model="pick.credentialId" :items="pickItems" class="w-full" />
+            </UFormField>
+            <UFormField label="字段" help="引用整条时，agent 取到的是全部字段">
+              <USelect v-model="pick.field" :items="fieldItems" class="w-full" />
+            </UFormField>
+            <p v-if="pickedPlaceholder" class="text-sm">
+              会插入 <code>{{ pickedPlaceholder }}</code>
+            </p>
+          </template>
+        </div>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton color="neutral" variant="ghost" @click="picking = false">取消</UButton>
+          <UButton :disabled="!pickedPlaceholder" @click="insertPlaceholder">插入</UButton>
+        </div>
+      </template>
+    </UModal>
+
+    <UModal
+      :open="plaintextWarning !== null"
+      :title="plaintextWarning?.downgrade ? '正文像有明文凭据，仍要降级？' : '正文像有明文凭据'"
+      @update:open="(v) => !v && (plaintextWarning = null)"
+    >
+      <template #body>
+        <p class="text-sm">
+          {{ plaintextWarning?.downgrade ? PLAINTEXT_DOWNGRADE_TEXT : PLAINTEXT_TEXT }}
+        </p>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton color="neutral" variant="ghost" @click="plaintextWarning = null">
+            返回修改
+          </UButton>
+          <UButton
+            :color="plaintextWarning?.downgrade ? 'error' : 'primary'"
+            @click="confirmPlaintext"
+          >
+            {{ plaintextWarning?.downgrade ? '确认没有，降级' : '仍然保存' }}
+          </UButton>
+        </div>
+      </template>
+    </UModal>
 
     <UModal
       :open="deleting !== null"

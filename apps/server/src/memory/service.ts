@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 
-import { CREDENTIAL_PLACEHOLDER_START, PLAIN_LAYERS, SENSITIVITIES } from '@kioku/contracts'
+import {
+  CREDENTIAL_PLACEHOLDER_START,
+  PLAIN_LAYERS,
+  PLAINTEXT_CREDENTIAL,
+  SENSITIVITIES,
+} from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
@@ -115,6 +120,7 @@ export interface MemoryStats {
   counts: LayerCount[]
   total: number
   missingDisclosure: number
+  plaintextCredentials: number
   eligible: number
   embedded: number
 }
@@ -149,7 +155,8 @@ interface RefBaseline {
 }
 
 // 占位符只能写在正文里：disclosure 与关键词会进召回与 boot 的线索，任何层的读者都看得到，
-// 写在那里就绕过了「只能在私人层」的规则
+// 写在那里就绕过了「只能在私人层」的规则。只查这次写进去的：规则之前已经写着的不挡移动与撤销删除，
+// 否则那样的记忆删了就撤销不了
 function checkOutsideContent(
   disclosure: string | null | undefined,
   glossary: readonly string[],
@@ -512,9 +519,7 @@ export class MemoryService {
     tx: Tx,
     row: MemoryRow,
     final: { layer: Layer; ownerAccountId: string | null },
-    glossary: readonly string[],
   ): Promise<void> {
-    checkOutsideContent(row.disclosure, glossary)
     if (
       row.layer === 'private' &&
       final.layer === 'private' &&
@@ -735,10 +740,7 @@ export class MemoryService {
 
     const beforeGlossary =
       meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-    checkOutsideContent(input.disclosure === undefined ? before.disclosure : input.disclosure, [
-      ...beforeGlossary.filter((k) => !input.glossaryRemove?.includes(k)),
-      ...(input.glossaryAdd ?? []),
-    ])
+    checkOutsideContent(input.disclosure, input.glossaryAdd ?? [])
     const [row] = await tx
       .update(memories)
       .set({
@@ -894,12 +896,7 @@ export class MemoryService {
           throw new MemoryError(403, `没有权限把记忆移到 ${ownership.layer} 层`)
         }
       }
-      await this.checkKeptRefs(
-        tx,
-        before,
-        ownership,
-        (await this.glossaryOf(tx, [before.id])).get(before.id) ?? [],
-      )
+      await this.checkKeptRefs(tx, before, ownership)
       await this.claimUri(tx, to, ownership, released)
       const [row] = await tx
         .update(memories)
@@ -1054,6 +1051,8 @@ export class MemoryService {
               : undefined,
             query.missingDisclosure === 'true' ? MISSING_DISCLOSURE : undefined,
             query.missingDisclosure === 'false' ? sql`not ${MISSING_DISCLOSURE}` : undefined,
+            query.plaintext === 'true' ? PLAINTEXT : undefined,
+            query.plaintext === 'false' ? sql`not coalesce(${PLAINTEXT}, false)` : undefined,
             // 时间原样交给数据库换算：经过 JS 的 Date 会丢掉微秒
             query.updatedAfter
               ? sql`${memories.updatedAt} >= ${query.updatedAfter}::timestamptz`
@@ -1166,6 +1165,7 @@ export class MemoryService {
           sensitivity: memories.sensitivity,
           count: count(),
           missing: sql<number>`count(*) filter (where ${MISSING_DISCLOSURE})`.mapWith(Number),
+          plaintext: sql<number>`count(*) filter (where ${PLAINTEXT})`.mapWith(Number),
         })
         .from(memories)
         .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
@@ -1190,6 +1190,7 @@ export class MemoryService {
         counts: groups.map(({ layer, sensitivity, count }) => ({ layer, sensitivity, count })),
         total: groups.reduce((sum, g) => sum + g.count, 0),
         missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
+        plaintextCredentials: groups.reduce((sum, g) => sum + g.plaintext, 0),
         eligible: coverage?.eligible ?? 0,
         embedded: coverage?.embedded ?? 0,
       }
@@ -1467,12 +1468,7 @@ export class MemoryService {
         throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
       }
       // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
-      await this.checkKeptRefs(
-        tx,
-        row,
-        row,
-        (await this.glossaryOf(tx, [row.id])).get(row.id) ?? [],
-      )
+      await this.checkKeptRefs(tx, row, row)
       await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released)
       const [restored] = await tx
         .update(memories)
@@ -1623,6 +1619,10 @@ const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content}
 
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
+
+// 正文像有明文密码或 Token：与界面、导入工具同一条规则（PLAINTEXT_CREDENTIAL），PostgreSQL 的正则照原样能用，
+// ~* 不区分大小写，对应它的 i 标记。secret 的正文是密文（content 为空），结果为 NULL，不算
+const PLAINTEXT = sql`(${memories.content} ~* ${PLAINTEXT_CREDENTIAL.source})`
 
 const UPDATED_MICROS = microsOf(memories.updatedAt)
 

@@ -34,6 +34,7 @@ const filters = computed(() => ({
   layer: oneOf('layer', LAYERS),
   sensitivity: oneOf('sensitivity', SENSITIVITIES),
   missingDisclosure: text('missingDisclosure') === 'true',
+  plaintext: text('plaintext') === 'true',
   q: text('q'),
   sort: oneOf('sort', MEMORY_LIST_SORTS) ?? 'updated',
 }))
@@ -89,6 +90,7 @@ const list = useInfiniteQuery({
       ...(f.layer ? { layer: f.layer } : {}),
       ...(f.sensitivity ? { sensitivity: f.sensitivity } : {}),
       ...(f.missingDisclosure ? { missingDisclosure: 'true' } : {}),
+      ...(f.plaintext ? { plaintext: 'true' } : {}),
       ...(f.q ? { q: f.q } : {}),
       sort: f.sort,
       ...(pageParam ? { cursor: pageParam } : {}),
@@ -136,11 +138,18 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
         @update:model-value="(v) => setFilter('sort', v === 'updated' ? null : (v as string))"
       />
     </div>
-    <UCheckbox
-      :model-value="filters.missingDisclosure"
-      label="只看没写 disclosure 的"
-      @update:model-value="(v) => setFilter('missingDisclosure', v ? 'true' : null)"
-    />
+    <div class="flex flex-wrap gap-x-4 gap-y-1">
+      <UCheckbox
+        :model-value="filters.missingDisclosure"
+        label="只看没写 disclosure 的"
+        @update:model-value="(v) => setFilter('missingDisclosure', v ? 'true' : null)"
+      />
+      <UCheckbox
+        :model-value="filters.plaintext"
+        label="只看像有明文凭据的"
+        @update:model-value="(v) => setFilter('plaintext', v ? 'true' : null)"
+      />
+    </div>
 
     <UAlert
       v-if="list.isError.value"

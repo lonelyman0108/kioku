@@ -2,22 +2,34 @@
 import { computed, ref } from 'vue'
 
 import type { KeywordIndex } from '../keywords'
-import { renderMarkdown } from '../markdown'
+import { renderMarkdown, type CredentialLinks } from '../markdown'
 
-const props = defineProps<{ content: string; keywords?: KeywordIndex | null; self?: string }>()
-const emit = defineEmits<{ open: [uri: string] }>()
+const props = defineProps<{
+  content: string
+  keywords?: KeywordIndex | null
+  self?: string
+  credentials?: CredentialLinks | null
+}>()
+const emit = defineEmits<{ open: [uri: string]; credential: [id: string] }>()
 
 const html = computed(() =>
-  renderMarkdown(
-    props.content,
-    props.keywords && props.self ? { index: props.keywords, self: props.self } : null,
-  ),
+  renderMarkdown(props.content, {
+    keywords: props.keywords && props.self ? { index: props.keywords, self: props.self } : null,
+    credentials: props.credentials ?? null,
+  }),
 )
 
 // 点了关键词：只有一条记忆有它就直接打开，有好几条就列出来选
 const choices = ref<{ keyword: string; uris: string[] } | null>(null)
 function onClick(event: MouseEvent) {
-  const link = (event.target as HTMLElement | null)?.closest<HTMLAnchorElement>('a.kioku-keyword')
+  const target = event.target as HTMLElement | null
+  const credential = target?.closest<HTMLAnchorElement>('a.kioku-cred')
+  if (credential?.dataset.credential) {
+    event.preventDefault()
+    emit('credential', credential.dataset.credential)
+    return
+  }
+  const link = target?.closest<HTMLAnchorElement>('a.kioku-keyword')
   if (!link?.dataset.uris) return
   event.preventDefault()
   const uris = link.dataset.uris.split(' ').filter(Boolean)
@@ -156,5 +168,32 @@ function choose(uri: string) {
   color: inherit;
   border-radius: 3px;
   padding: 0 0.1em;
+}
+/* 凭据占位符的徽章：值不在这里，点了去凭据页 */
+.kioku-markdown :deep(.kioku-cred) {
+  display: inline-block;
+  font-family: var(--font-mono, ui-monospace, monospace);
+  font-size: 0.85em;
+  line-height: 1.4;
+  padding: 0 0.4em;
+  border: 1px solid var(--ui-border-accented);
+  border-radius: 9999px;
+  background: var(--ui-bg-elevated);
+  color: inherit;
+  text-decoration: none;
+}
+/* 写在 a[href] 的规则后面、选择器更具体，盖过普通链接的颜色与下划线 */
+.kioku-markdown :deep(a.kioku-cred[href]) {
+  color: inherit;
+  text-decoration: none;
+  cursor: pointer;
+}
+.kioku-markdown :deep(a.kioku-cred::before) {
+  content: '🔑 ';
+}
+.kioku-markdown :deep(.kioku-cred-missing) {
+  border-color: var(--ui-warning);
+  color: var(--ui-warning);
+  text-decoration: line-through;
 }
 </style>

@@ -108,7 +108,7 @@ export function formatPlaceholderCredentials(items: PlaceholderCredential[]): st
     return [`- ${c.identifier}（${c.name}）：${where}`, ...indented].join('\n')
   })
   return [
-    '正文里引用的凭据（用到时才用 kioku_credential 取，取到的值不要写回记忆，也不要显示在回复里）：',
+    '正文里引用的凭据（用到时按各条的取法取，取到的值不要写回记忆，也不要显示在回复里）：',
     ...rows,
     '',
     CREDENTIAL_NOTICE,
