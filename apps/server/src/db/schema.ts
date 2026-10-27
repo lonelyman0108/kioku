@@ -1,10 +1,13 @@
 import {
+  CREDENTIAL_PROVIDER_KINDS,
+  CREDENTIAL_SOURCES,
   LAYERS,
   MEMBER_ROLES,
   MEMORY_FORMS,
   PROVENANCES,
   SENSITIVITIES,
   SUBJECT_KINDS,
+  type CredentialField,
   type KeyScopes,
   type PlainLayer,
 } from '@kioku/contracts'
@@ -49,6 +52,8 @@ export const provenance = pgEnum('provenance', PROVENANCES)
 export const memoryForm = pgEnum('memory_form', MEMORY_FORMS)
 export const memberRole = pgEnum('member_role', MEMBER_ROLES)
 export const subjectKind = pgEnum('subject_kind', SUBJECT_KINDS)
+export const credentialProviderKind = pgEnum('credential_provider_kind', CREDENTIAL_PROVIDER_KINDS)
+export const credentialSource = pgEnum('credential_source', CREDENTIAL_SOURCES)
 
 // ---- 身份表 ----
 
@@ -380,6 +385,116 @@ export const memoryEvents = pgTable(
   (t) => [index().on(t.spaceId, t.createdAt), index().on(t.memoryId, t.createdAt)],
 )
 
+// 凭据源：成员自己的密码管理器（或别的取值方式）以及给 agent 看的使用说明。和凭据一样归某个成员，
+// 只有他本人看得到、用得上：使用说明会下发给他的 agent，不能让别人改。软删除，绑定它的凭据仍指向它
+export const credentialProviders = pgTable(
+  'credential_providers',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    ownerAccountId: uuid()
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    kind: credentialProviderKind().notNull(),
+    name: text().notNull(),
+    instructions: text().notNull().default(''),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [index().on(t.spaceId, t.ownerAccountId), unique().on(t.spaceId, t.ownerAccountId, t.id)],
+)
+
+// 凭据：归某个成员，记忆正文用 {{cred:<标识>}} 引用。值要么由 Kioku 加密保存（hosted），
+// 要么在外部凭据源里、这里只存条目位置（external）。软删除，可以恢复
+export const credentials = pgTable(
+  'credentials',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    ownerAccountId: uuid()
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    // 创建后不能改：记忆按它引用
+    identifier: text().notNull(),
+    name: text().notNull(),
+    description: text(),
+    source: credentialSource().notNull(),
+    providerId: uuid(),
+    // 外部来源的条目位置
+    location: text(),
+    // 字段名，外部来源再加上条目里对应的字段；托管的值不在这里
+    fields: jsonb().$type<CredentialField[]>().notNull().default([]),
+    // 托管的值：各字段的值整体加密，aad 绑定凭据 id（见 credential/service.ts）
+    ciphertext: bytea(),
+    wrappedKey: bytea(),
+    // 只给这些应用用；null 表示不限定
+    appIds: uuid().array(),
+    version: integer().notNull().default(1),
+    createdAt: createdAt(),
+    updatedAt: updatedAt(),
+    deletedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [
+    // 标识在同一个成员的有效凭据里唯一：建凭据时不会因为别人用过同一个标识而冲突
+    uniqueIndex('credentials_identifier_live_idx')
+      .on(t.spaceId, t.ownerAccountId, t.identifier)
+      .where(sql`${t.deletedAt} is null`),
+    unique().on(t.spaceId, t.id),
+    // 数凭据源上绑着几条有效的凭据（凭据源列表、删除凭据源时）
+    index('credentials_provider_live_idx')
+      .on(t.providerId)
+      .where(sql`${t.deletedAt} is null`),
+    // 凭据源必须是同一个成员的：外键带上主人。自动生成的约束名超过 PostgreSQL 的 63 字符上限，这里起短名
+    foreignKey({
+      name: 'credentials_provider_fk',
+      columns: [t.spaceId, t.ownerAccountId, t.providerId],
+      foreignColumns: [
+        credentialProviders.spaceId,
+        credentialProviders.ownerAccountId,
+        credentialProviders.id,
+      ],
+    }),
+    check(
+      'credentials_source_shape',
+      sql`case when ${t.source} = 'hosted'
+        then ${t.ciphertext} is not null and ${t.wrappedKey} is not null and ${t.providerId} is null and ${t.location} is null
+        else ${t.ciphertext} is null and ${t.wrappedKey} is null and ${t.providerId} is not null and ${t.location} is not null end`,
+    ),
+  ],
+)
+
+// 凭据的事件：新建、修改、删除、撤销删除与取用。只有凭据的主人看得到，不进空间的活动记录；不含任何值
+export const credentialEvents = pgTable(
+  'credential_events',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    credentialId: uuid().notNull(),
+    eventType: text().notNull(),
+    actorKeyId: uuid(),
+    actorAccountId: uuid(),
+    // 取用经由哪里、取了哪些字段，修改了哪些部分
+    context: jsonb().$type<Record<string, unknown>>().notNull().default({}),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    // 一条凭据的事件按 id 倒序翻页
+    index().on(t.credentialId, t.id),
+    foreignKey({
+      name: 'credential_events_credential_fk',
+      columns: [t.spaceId, t.credentialId],
+      foreignColumns: [credentials.spaceId, credentials.id],
+    }).onDelete('cascade'),
+  ],
+)
+
 // 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 export const RLS_TABLES = [
   'personas',
@@ -390,4 +505,7 @@ export const RLS_TABLES = [
   'memory_embeddings',
   'memory_glossary',
   'memory_events',
+  'credential_providers',
+  'credentials',
+  'credential_events',
 ] as const

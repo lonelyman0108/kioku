@@ -48,7 +48,7 @@ import {
 } from 'drizzle-orm'
 
 import { canRead, canWrite, canWriteApp, sensitivityRank, type Access } from '../access/access'
-import type { Db, Tx } from '../db/client'
+import { isUniqueViolation, type Db, type Tx } from '../db/client'
 import {
   accounts,
   apiKeys,
@@ -169,13 +169,8 @@ export class MemoryService {
     try {
       return await runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
     } catch (err) {
-      const pg = ((err as { cause?: unknown })?.cause ?? err) as {
-        code?: string
-        constraint_name?: string
-      }
-      if (pg.code === '23505' && pg.constraint_name === 'memories_uri_live_idx') {
+      if (isUniqueViolation(err, 'memories_uri_live_idx'))
         throw new MemoryError(409, 'URI 已被占用')
-      }
       throw err
     }
   }

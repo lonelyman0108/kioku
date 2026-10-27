@@ -225,6 +225,36 @@ export function canWriteApp(access: Access, appId: string | null): boolean {
   return access.writableAppIds === 'all' || (appId !== null && access.writableAppIds.has(appId))
 }
 
+// 凭据归某个成员，和私人层一样：读说明与绑定要能读私人层、最高敏感级至少 private，
+// 凭据属于这次访问代表的成员（Key 是应用主人）。限定了应用的，只有那些应用的 Key 能用；
+// 跨人格 / 应用写入（admin）也不放宽。管理界面不代表某个应用，不受这个限制
+export interface CredentialFacts {
+  ownerAccountId: string
+  appIds: readonly string[] | null
+}
+
+export function canReadCredential(access: Access, credential: CredentialFacts): boolean {
+  if (credential.ownerAccountId !== access.ownerAccountId) return false
+  if (!access.readLayers.has('private')) return false
+  if (sensitivityRank(access.maxSensitivity) < sensitivityRank('private')) return false
+  return (
+    access.appId === null || credential.appIds === null || credential.appIds.includes(access.appId)
+  )
+}
+
+// 取托管的值：在能读之上还要 secret 级
+export function canRevealCredential(access: Access, credential: CredentialFacts): boolean {
+  return canReadCredential(access, credential) && access.canReadSecret
+}
+
+// 新建、修改、删除凭据（包括说明、字段、绑定与托管的值）：要能读、写私人层，并且是 secret 级。
+// 凭据的说明会下发给别的 agent，绑定决定 agent 去哪里取值，要求比读更高
+export function canManageCredentials(access: Access): boolean {
+  return (
+    access.readLayers.has('private') && access.writeLayers.has('private') && access.canReadSecret
+  )
+}
+
 export type ConsoleRole = 'owner' | 'editor' | 'viewer'
 
 // 管理界面里成员本人的权限，与签发 Key 的规则一致：secret 只有空间 owner 能读写，viewer 只读，

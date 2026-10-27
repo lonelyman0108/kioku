@@ -7,6 +7,7 @@ import { router } from './http/openapi'
 import { mountWeb } from './http/web'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
+import { credentialRoutes } from './routes/credentials'
 import { health } from './routes/health'
 import { mcpRoutes } from './routes/mcp'
 import { memoryRoutes } from './routes/memories'
@@ -52,6 +53,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))
   app.route('/v1', memoryRoutes(deps))
+  app.route('/v1', credentialRoutes(deps))
   app.route('/v1', overviewRoutes(deps))
   app.route('/v1', spaceRoutes(deps))
   app.route('/v1', recallRoutes(deps))

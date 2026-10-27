@@ -2,6 +2,10 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import {
   CreateMemoryRequest,
+  CredentialFieldName,
+  CredentialIdentifier,
+  KeyCreateCredentialRequest,
+  KeyUpdateCredentialRequest,
   Layer,
   MemoryUri,
   PlainLayer,
@@ -11,13 +15,21 @@ import {
 } from '@kioku/contracts'
 import { z } from 'zod'
 
+import type { CredentialService } from '../credential/service'
 import type { RecallScope } from '../lifecycle/scope'
 import { GUIDANCE } from '../lifecycle/lifecycle'
 import { MemoryError, type MemoryService } from '../memory/service'
 import { formatBootBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
 import { VERSION } from '../version'
-import { formatChildren, formatDomains, formatMemory } from './format'
+import {
+  formatChildren,
+  formatCredentialAccess,
+  formatCredentialList,
+  formatCredentialSummary,
+  formatDomains,
+  formatMemory,
+} from './format'
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
@@ -32,7 +44,47 @@ async function tool(fn: () => Promise<string>): Promise<ToolResult> {
   }
 }
 
-export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpServer {
+// 工具参数按 contracts 里的请求定义再校验一遍（例如字段名不能重复），不通过时作为工具错误返回
+function parse<T>(schema: z.ZodType<T>, value: unknown): T {
+  const result = schema.safeParse(value)
+  if (result.success) return result.data
+  const issue = result.error.issues[0]
+  const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
+  throw new MemoryError(400, `${where}${issue?.message ?? '参数格式错误'}`)
+}
+
+interface CredentialSourceArgs {
+  values?: Record<string, string | null> | undefined
+  provider_id?: string | undefined
+  location?: string | undefined
+  fields?: { name: string; source_field: string }[] | undefined
+}
+
+// 托管的给 values，外部的给 provider_id、location 与 fields；都没给表示不改来源
+function sourceFromArgs(args: CredentialSourceArgs) {
+  const external =
+    args.provider_id !== undefined || args.location !== undefined || args.fields !== undefined
+  if (args.values !== undefined && external) {
+    throw new MemoryError(
+      400,
+      'values（Kioku 托管）与 provider_id、location、fields（外部凭据源）只能给一种',
+    )
+  }
+  if (args.values !== undefined) return { kind: 'hosted' as const, values: args.values }
+  if (!external) return undefined
+  return {
+    kind: 'external' as const,
+    providerId: args.provider_id,
+    location: args.location,
+    fields: args.fields?.map((f) => ({ name: f.name, sourceField: f.source_field })),
+  }
+}
+
+export function buildMcpServer(
+  memory: MemoryService,
+  scope: RecallScope,
+  credentials: CredentialService,
+): McpServer {
   const server = new McpServer({ name: 'kioku', version: VERSION })
 
   server.registerTool(
@@ -190,6 +242,101 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
       tool(async () => formatMemory(await memory.move({ from, to, ...(layer ? { layer } : {}) }))),
   )
 
+  server.registerTool(
+    'kioku_credential',
+    {
+      description:
+        '取用凭据。记忆正文里的 {{cred:<标识>}} 与 {{cred:<标识>#<字段>}} 是凭据占位符：给标识时，' +
+        'Kioku 托管的返回值，外部凭据源的返回凭据源、条目位置和取法，取到时记一条访问事件；不给标识时列出看得到的凭据与凭据源。' +
+        '用到时才取，不要把值写回记忆，也不要显示在回复里。',
+      inputSchema: {
+        identifier: CredentialIdentifier.optional().describe(
+          '凭据的标识，即占位符里 cred: 后面的那一段',
+        ),
+        field: CredentialFieldName.optional().describe(
+          '只取一个字段，例如 password；不填取全部字段',
+        ),
+      },
+    },
+    ({ identifier, field }) =>
+      tool(async () =>
+        identifier
+          ? formatCredentialAccess(await credentials.use(identifier, field, 'kioku_credential'))
+          : formatCredentialList(await credentials.keyList()),
+      ),
+  )
+
+  server.registerTool(
+    'kioku_credential_save',
+    {
+      description:
+        '新建或修改凭据（要能读写私人层的 secret 级 Key）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
+        '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。值由 Kioku 托管时给 values；值在外部密码管理器里时给 provider_id、location 与 fields，' +
+        'Kioku 只记条目位置、不存值。说明里不要写值。',
+      inputSchema: {
+        identifier: CredentialIdentifier.describe(
+          '凭据的标识，创建后不能改；记忆里用 {{cred:<标识>#<字段>}} 引用',
+        ),
+        name: z.string().optional().describe('名称；新建时必填'),
+        description: z.string().nullable().optional().describe('说明：用途、在哪里用'),
+        values: z
+          .record(CredentialFieldName, z.string().nullable())
+          .optional()
+          .describe(
+            'Kioku 托管的值，字段名 → 值；修改时只给要改的字段，值为 null 表示删掉这个字段',
+          ),
+        provider_id: z
+          .string()
+          .optional()
+          .describe('外部凭据源的 id，用不带参数的 kioku_credential 列出'),
+        location: z.string().optional().describe('外部条目的位置：条目名、id 或路径'),
+        fields: z
+          .array(z.object({ name: CredentialFieldName, source_field: z.string() }))
+          .optional()
+          .describe('外部来源的字段对应：占位符里的字段名 → 条目里的字段'),
+        expected_version: z.number().int().optional().describe('修改时必填：读取时看到的版本号'),
+      },
+    },
+    (args) =>
+      tool(async () => {
+        const source = sourceFromArgs(args)
+        if (args.expected_version === undefined) {
+          const input = parse(KeyCreateCredentialRequest, {
+            identifier: args.identifier,
+            name: args.name,
+            description: args.description,
+            source,
+          })
+          return formatCredentialSummary('已新建', await credentials.keyCreate(input))
+        }
+        const { identifier, ...input } = parse(KeyUpdateCredentialRequest, {
+          identifier: args.identifier,
+          expectedVersion: args.expected_version,
+          name: args.name,
+          description: args.description,
+          source,
+        })
+        return formatCredentialSummary('已修改', await credentials.keyUpdate(identifier, input))
+      }),
+  )
+
+  server.registerTool(
+    'kioku_credential_delete',
+    {
+      description: '删除凭据（软删除，主人可以在管理界面恢复）。',
+      inputSchema: {
+        identifier: CredentialIdentifier,
+        expected_version: z.number().int().optional().describe('读取时看到的版本号'),
+      },
+      annotations: { destructiveHint: true },
+    },
+    ({ identifier, expected_version }) =>
+      tool(async () => {
+        await credentials.keyDelete(identifier, expected_version)
+        return `已删除凭据 ${identifier}`
+      }),
+  )
+
   return server
 }
 
@@ -197,9 +344,10 @@ export function buildMcpServer(memory: MemoryService, scope: RecallScope): McpSe
 export async function handleMcpRequest(
   memory: MemoryService,
   scope: RecallScope,
+  credentials: CredentialService,
   request: Request,
 ): Promise<Response> {
-  const server = buildMcpServer(memory, scope)
+  const server = buildMcpServer(memory, scope, credentials)
   // 不传 sessionIdGenerator 即无状态模式
   const transport = new WebStandardStreamableHTTPServerTransport({ enableJsonResponse: true })
   await server.connect(transport)
