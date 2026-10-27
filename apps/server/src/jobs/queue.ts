@@ -15,7 +15,8 @@ const RETRY_AFTER_SECONDS = 10
 
 export interface Jobs {
   enqueueEmbed(spaceId: string, memoryId: string): void
-  enqueueBackfill(): void
+  // 返回是否入队成功；失败只记录日志，不抛错
+  enqueueBackfill(): Promise<boolean>
 }
 
 // 后台任务都放在 PostgreSQL 里（pg-boss，schema 为 pgboss），不需要 Redis。
@@ -32,18 +33,23 @@ export async function startJobs(options: {
   await boss.createQueue(BACKFILL, { policy: 'singleton' })
   await boss.createQueue(CLEANUP, { policy: 'singleton' })
 
-  const send = (name: string, data: object, startAfter?: number) => {
+  const send = (name: string, data: object, startAfter?: number): Promise<boolean> =>
     boss
       .send(name, data, {
         retryLimit: 5,
         retryBackoff: true,
         ...(startAfter ? { startAfter } : {}),
       })
-      .catch((err) => console.error('入队失败', err))
-  }
+      .then(
+        () => true,
+        (err: unknown) => {
+          console.error('入队失败', err)
+          return false
+        },
+      )
   // 写回时被别的事务锁着而跳过的记忆，稍后逐条重试
   const retry = (spaceId: string, ids: string[]) => {
-    for (const memoryId of ids) send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)
+    for (const memoryId of ids) void send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)
   }
 
   await boss.work<{ spaceId: string; memoryId: string }>(EMBED, async (jobs) => {
@@ -68,7 +74,7 @@ export async function startJobs(options: {
   await boss.schedule(CLEANUP, CLEANUP_CRON)
 
   return {
-    enqueueEmbed: (spaceId, memoryId) => send(EMBED, { spaceId, memoryId }),
+    enqueueEmbed: (spaceId, memoryId) => void send(EMBED, { spaceId, memoryId }),
     enqueueBackfill: () => send(BACKFILL, {}),
     stop: () => boss.stop({ graceful: true }),
   }

@@ -10,6 +10,7 @@ import { authRoutes } from './routes/auth'
 import { health } from './routes/health'
 import { mcpRoutes } from './routes/mcp'
 import { memoryRoutes } from './routes/memories'
+import { overviewRoutes } from './routes/overview'
 import { personaRoutes } from './routes/personas'
 import { recallRoutes } from './routes/recall'
 import { MemoryError } from './memory/service'
@@ -50,6 +51,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))
   app.route('/v1', memoryRoutes(deps))
+  app.route('/v1', overviewRoutes(deps))
   app.route('/v1', recallRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))

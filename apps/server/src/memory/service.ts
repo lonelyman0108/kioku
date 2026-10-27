@@ -3,15 +3,38 @@ import { randomUUID } from 'node:crypto'
 import type {
   CreateMemoryRequest,
   DomainSummary,
+  LayerCount,
   Layer,
   MemoryChildren,
+  MemoryList,
+  MemoryListQuery,
+  MemoryListSort,
+  MemoryMatch,
   MemorySummary,
   MemoryView,
   MoveMemoryRequest,
   Sensitivity,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
-import { and, asc, count, desc, eq, gt, inArray, isNull, like, lte, or, sql } from 'drizzle-orm'
+import {
+  and,
+  asc,
+  count,
+  desc,
+  eq,
+  exists,
+  gt,
+  gte,
+  ilike,
+  inArray,
+  isNull,
+  like,
+  lt,
+  lte,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm'
 
 import { canRead, canWrite, canWriteApp, type Access } from '../access/access'
 import type { Db, Tx } from '../db/client'
@@ -48,6 +71,18 @@ export interface MemoryContext {
   actor: { keyId?: string; accountId?: string }
   // 写入提交后调用，用于安排向量更新
   onChanged?: (memoryId: string) => void
+  // 树、列表与快速匹配里是否列出 secret 记忆（只有元数据，正文仍要按 URI 显式读）。
+  // 只给管理界面里能显式读 secret 的成员；接入方的 Key 不列：secret 只能按 URI 显式读取
+  listSecret?: boolean
+}
+
+// 概览要的统计：成员读得到的策展记忆按层与敏感级计数，以及向量覆盖率
+export interface MemoryStats {
+  counts: LayerCount[]
+  total: number
+  missingDisclosure: number
+  eligible: number
+  embedded: number
 }
 
 type MemoryRow = typeof memories.$inferSelect
@@ -85,6 +120,11 @@ const CHILDREN_LEVEL_LIMIT = 500
 
 export class MemoryService {
   constructor(private readonly ctx: MemoryContext) {}
+
+  // 这个服务按什么权限读写；管理界面的搜索拿它去召回，不必再算一次
+  get access(): Access {
+    return this.ctx.access
+  }
 
   // URI 冲突由数据库判断（同一归属的唯一索引，以及共享与成员节点互斥的触发器，二者都按唯一约束报错），
   // 在这里转成 409，REST 与 MCP 都能拿到明确的提示
@@ -610,7 +650,7 @@ export class MemoryService {
         .from(memories)
         .where(
           and(
-            readableConditions(this.ctx.access, { personaIds }),
+            this.listable(personaIds),
             eq(memories.form, 'curated'),
             eq(memories.domain, domain),
             prefix ? like(memories.path, `${escapeLike(prefix)}%`) : undefined,
@@ -649,16 +689,255 @@ export class MemoryService {
       const rows = await tx
         .select({ domain: memories.domain, count: count() })
         .from(memories)
-        .where(
-          and(readableConditions(this.ctx.access, { personaIds }), eq(memories.form, 'curated')),
-        )
+        .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
         .groupBy(memories.domain)
         .orderBy(desc(count()), asc(memories.domain))
       return rows.map((r) => ({ domain: r.domain!, count: r.count }))
+    })
+  }
+
+  // 树、列表与快速匹配用的读权限条件：listSecret 时按显式读取算，secret 记忆也列出来（见 MemoryContext）
+  private listable(personaIds: string[]): SQL {
+    return readableConditions(this.ctx.access, {
+      personaIds,
+      explicit: this.ctx.listSecret === true,
+    })
+  }
+
+  // 管理界面的记忆列表。用键集分页：排序键加上 id，在上一页最后一条之后接着取，
+  // 翻页期间有记忆新建或删除也不会重复、跳过别的条目（offset 分页会）
+  async list(query: MemoryListQuery): Promise<MemoryList> {
+    const after = decodeCursor(query.sort, query.cursor)
+    const uriText = sql`${memories.domain} || '://' || ${memories.path}`
+    const contains = query.q ? `%${escapeLike(query.q)}%` : null
+    return this.run(async (tx, personaIds) => {
+      const rows = await tx
+        .select({
+          id: memories.id,
+          domain: memories.domain,
+          path: memories.path,
+          layer: memories.layer,
+          sensitivity: memories.sensitivity,
+          provenance: memories.provenance,
+          priority: memories.priority,
+          disclosure: memories.disclosure,
+          personaId: memories.personaId,
+          appId: memories.appId,
+          version: memories.version,
+          updatedAt: memories.updatedAt,
+          updatedMicros: sql<string>`${UPDATED_MICROS}::text`,
+        })
+        .from(memories)
+        .where(
+          and(
+            this.listable(personaIds),
+            eq(memories.form, 'curated'),
+            query.domain ? eq(memories.domain, query.domain) : undefined,
+            query.layer ? eq(memories.layer, query.layer) : undefined,
+            query.sensitivity ? eq(memories.sensitivity, query.sensitivity) : undefined,
+            query.provenance ? eq(memories.provenance, query.provenance) : undefined,
+            query.personaId ? eq(memories.personaId, query.personaId) : undefined,
+            query.appId ? eq(memories.appId, query.appId) : undefined,
+            contains
+              ? or(ilike(uriText, contains), ilike(memories.disclosure, contains))
+              : undefined,
+            query.missingDisclosure === 'true' ? MISSING_DISCLOSURE : undefined,
+            query.missingDisclosure === 'false' ? sql`not ${MISSING_DISCLOSURE}` : undefined,
+            query.updatedAfter ? gte(memories.updatedAt, new Date(query.updatedAfter)) : undefined,
+            query.updatedBefore ? lt(memories.updatedAt, new Date(query.updatedBefore)) : undefined,
+            after ? afterCursor(query.sort, after) : undefined,
+          ),
+        )
+        .orderBy(...LIST_ORDER[query.sort])
+        .limit(query.limit + 1)
+      const page = rows.slice(0, query.limit)
+      const last = page.at(-1)
+      return {
+        items: page.map((r) => ({
+          id: r.id,
+          uri: formatUri(r.domain!, r.path!),
+          layer: r.layer,
+          sensitivity: r.sensitivity,
+          provenance: r.provenance,
+          priority: r.priority,
+          disclosure: r.disclosure,
+          personaId: r.personaId,
+          appId: r.appId,
+          version: r.version,
+          updatedAt: r.updatedAt.toISOString(),
+        })),
+        nextCursor: rows.length > query.limit && last ? encodeCursor(query.sort, last) : null,
+      }
+    })
+  }
+
+  // 快速跳转：URI 里含有查询词、或有关键词以它开头的记忆，priority 小的在前
+  async matches(text: string, limit: number): Promise<MemoryMatch[]> {
+    const needle = text.trim().toLowerCase()
+    if (!needle) return []
+    const uriText = sql`lower(${memories.domain} || '://' || ${memories.path})`
+    return this.run(async (tx, personaIds) => {
+      const keywordHit = exists(
+        tx
+          .select({ one: sql`1` })
+          .from(memoryGlossary)
+          .where(
+            and(
+              eq(memoryGlossary.memoryId, memories.id),
+              like(sql`lower(${memoryGlossary.keyword})`, `${escapeLike(needle)}%`),
+            ),
+          ),
+      )
+      const rows = await tx
+        .select({
+          domain: memories.domain,
+          path: memories.path,
+          layer: memories.layer,
+          sensitivity: memories.sensitivity,
+          priority: memories.priority,
+          disclosure: memories.disclosure,
+        })
+        .from(memories)
+        .where(
+          and(
+            this.listable(personaIds),
+            eq(memories.form, 'curated'),
+            or(like(uriText, `%${escapeLike(needle)}%`), keywordHit),
+          ),
+        )
+        .orderBy(asc(memories.priority), asc(memories.domain), asc(memories.path))
+        .limit(limit)
+      return rows.map((r) => ({
+        uri: formatUri(r.domain!, r.path!),
+        layer: r.layer,
+        sensitivity: r.sensitivity,
+        priority: r.priority,
+        disclosure: r.disclosure,
+      }))
+    })
+  }
+
+  // 概览统计。向量覆盖率只算应当有向量的记忆：读得到、不是 secret、有正文；
+  // model 为 null（还没配置嵌入模型）时已有向量记为 0
+  async stats(model: string | null): Promise<MemoryStats> {
+    return this.run(async (tx, personaIds) => {
+      const groups = await tx
+        .select({
+          layer: memories.layer,
+          sensitivity: memories.sensitivity,
+          count: count(),
+          missing: sql<number>`count(*) filter (where ${MISSING_DISCLOSURE})`.mapWith(Number),
+        })
+        .from(memories)
+        .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
+        .groupBy(memories.layer, memories.sensitivity)
+        .orderBy(asc(memories.layer), asc(memories.sensitivity))
+      // 每条记忆在一个模型下至多一条向量（主键），左连接计数不会重复；没配置模型时一条也连不上
+      const [coverage] = await tx
+        .select({ eligible: count(), embedded: count(memoryEmbeddings.memoryId) })
+        .from(memories)
+        .leftJoin(
+          memoryEmbeddings,
+          and(eq(memoryEmbeddings.memoryId, memories.id), eq(memoryEmbeddings.model, model ?? '')),
+        )
+        .where(
+          and(
+            readableConditions(this.ctx.access, { personaIds }),
+            eq(memories.form, 'curated'),
+            HAS_CONTENT,
+          ),
+        )
+      return {
+        counts: groups.map(({ layer, sensitivity, count }) => ({ layer, sensitivity, count })),
+        total: groups.reduce((sum, g) => sum + g.count, 0),
+        missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
+        eligible: coverage?.eligible ?? 0,
+        embedded: coverage?.embedded ?? 0,
+      }
     })
   }
 }
 
 function escapeLike(s: string): string {
   return s.replace(/[\\%_]/g, '\\$&')
+}
+
+// 有正文：与向量任务的口径一致，空字符串也不生成向量
+const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content} <> '')`
+
+// 没写 disclosure：为空或只有空白
+const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
+
+// 更新时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
+const UPDATED_MICROS = sql`(extract(epoch from ${memories.updatedAt}) * 1000000)::bigint`
+
+// 各种排序的排序键，最后都加上 id，保证顺序确定
+const LIST_ORDER: Record<MemoryListSort, SQL[]> = {
+  updated: [desc(memories.updatedAt), desc(memories.id)],
+  priority: [asc(memories.priority), asc(memories.domain), asc(memories.path), asc(memories.id)],
+  uri: [asc(memories.domain), asc(memories.path), asc(memories.id)],
+}
+
+interface CursorRow {
+  id: string
+  domain: string | null
+  path: string | null
+  priority: number
+  updatedMicros: string
+}
+
+// 游标是上一页最后一条的排序键，按排序方式各取所需的几项
+type Cursor = (string | number)[]
+
+function encodeCursor(sort: MemoryListSort, row: CursorRow): string {
+  const values: Cursor =
+    sort === 'updated'
+      ? [row.updatedMicros, row.id]
+      : sort === 'priority'
+        ? [row.priority, row.domain!, row.path!, row.id]
+        : [row.domain!, row.path!, row.id]
+  return Buffer.from(JSON.stringify(values)).toString('base64url')
+}
+
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+// URI_PATTERN 允许的最长路径：16 段，每段 64 个字符，加 15 个分隔符
+const MAX_PATH_LENGTH = 16 * 64 + 15
+const isDomain = (v: unknown): v is string =>
+  typeof v === 'string' && /^[a-z][a-z0-9_]{0,31}$/.test(v)
+const isPath = (v: unknown): v is string => typeof v === 'string' && v.length <= MAX_PATH_LENGTH
+
+function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor | null {
+  if (!cursor) return null
+  const invalid = new MemoryError(400, '翻页参数无效，请从第一页重新开始')
+  let values: unknown
+  try {
+    values = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+  } catch {
+    throw invalid
+  }
+  if (!Array.isArray(values)) throw invalid
+  const id = values.at(-1)
+  if (typeof id !== 'string' || !UUID.test(id)) throw invalid
+  const ok =
+    sort === 'updated'
+      ? values.length === 2 && typeof values[0] === 'string' && /^\d{1,18}$/.test(values[0])
+      : sort === 'priority'
+        ? values.length === 4 &&
+          Number.isInteger(values[0]) &&
+          isDomain(values[1]) &&
+          isPath(values[2])
+        : values.length === 3 && isDomain(values[0]) && isPath(values[1])
+  if (!ok) throw invalid
+  return values as Cursor
+}
+
+// 接在游标之后的条件，比较方向与 LIST_ORDER 一致
+function afterCursor(sort: MemoryListSort, c: Cursor): SQL {
+  if (sort === 'updated') {
+    return sql`(${UPDATED_MICROS}, ${memories.id}) < (${c[0]}::bigint, ${c[1]}::uuid)`
+  }
+  if (sort === 'priority') {
+    return sql`(${memories.priority}, ${memories.domain}, ${memories.path}, ${memories.id}) > (${c[0]}, ${c[1]}, ${c[2]}, ${c[3]}::uuid)`
+  }
+  return sql`(${memories.domain}, ${memories.path}, ${memories.id}) > (${c[0]}, ${c[1]}, ${c[2]}::uuid)`
 }

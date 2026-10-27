@@ -19,7 +19,7 @@ const jobs = await startJobs({
   embedder: () => embedder.get(),
 })
 // 启动时补齐一次：处理上次停机期间没来得及生成的向量
-jobs.enqueueBackfill()
+void jobs.enqueueBackfill()
 
 const app = createApp({
   db: database.db,
