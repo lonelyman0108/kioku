@@ -1,4 +1,5 @@
 #!/usr/bin/env bash
+# 受管文件，来自 ci-workflows@v2.0.0 的 scripts/check-msg.sh：不在本仓直接改，见 CONTRIBUTING.md「受管文件」
 # CI 复核提交信息，规则全部在 commit-msg 钩子里，这里只负责取出要查的信息：
 #   PR 事件（PR_TITLE 非空）：查 PR 标题，它就是 squash 后 main 上的提交标题；
 #   push 事件：逐条查 BEFORE..HEAD 之间新进入的提交（不含合并提交），取不到 BEFORE 时只查 HEAD。
@@ -11,7 +12,7 @@ trap 'rm -f "$tmp"' EXIT
 
 if [ -n "${PR_TITLE:-}" ]; then
   title=$PR_TITLE
-  # WIP 前缀只用来标记未完成，不属于最终标题
+  # WIP 前缀表示还没做完（Gitea 据此阻止合并），不属于最终标题
   case "$title" in
     WIP:*) title=${title#WIP:} ;;
     '[WIP]'*) title=${title#\[WIP\]} ;;

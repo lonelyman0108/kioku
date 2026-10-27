@@ -1,9 +1,10 @@
 #!/usr/bin/env bash
+# 受管文件，来自 ci-workflows@v2.0.0 的 scripts/lint-comments.sh：不在本仓直接改，见 CONTRIBUTING.md「受管文件」
 # 注释与文案里的流程编号检查。
 #
 # 代码注释、脚本与 AGENTS.md 只讲代码本身：需求号、验收号、章节号、阶段号、决议号、画板号、
 # 迭代版本标记这类编号读者无从查证，约束应当直接写出内容。编号只允许出现在过程文档里
-# （默认 docs/ 与 CHANGELOG.md），本脚本不扫它们。
+# （默认 docs/ 与 CHANGELOG.md），本脚本不扫它们。pnpm 锁文件里的哈希和包名会误中编号规则，默认也不扫。
 #
 # 用法：
 #   lint-comments.sh            扫全仓受检文件
@@ -32,10 +33,10 @@ case "${1:-}" in
   *) echo "用法：$0 [--staged]" >&2; exit 2 ;;
 esac
 
-EXCLUDE="docs/* CHANGELOG.md"
+EXCLUDE="docs/* CHANGELOG.md pnpm-lock.yaml */pnpm-lock.yaml"
 EXTRA_EXCLUDE=
 INCLUDE="*.sh *.bash *.zsh *.py *.rb *.go *.rs *.java *.kt *.swift *.m *.mm *.h *.c *.cc *.cpp
-  *.js *.mjs *.cjs *.ts *.tsx *.jsx *.plist *.entitlements *.xcprivacy *.xcconfig
+  *.js *.mjs *.cjs *.ts *.tsx *.jsx *.vue *.plist *.entitlements *.xcprivacy *.xcconfig
   *.yml *.yaml *.toml Makefile */Makefile Dockerfile */Dockerfile
   AGENTS.md */AGENTS.md CLAUDE.md .githooks/* hooks/*"
 EXTRA_INCLUDE=

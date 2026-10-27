@@ -35,8 +35,8 @@ jobs:
         with:
           node-version-file: .node-version
           cache: pnpm
-      - name: 安装工具
-        run: scripts/ci/install-tools.sh
+      - name: 准备工具
+        run: scripts/ci/setup-tools.sh >> "$GITHUB_PATH"
       - name: 提交信息
         run: scripts/ci/check-msg.sh
       - name: 改动类型

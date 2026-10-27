@@ -43,6 +43,10 @@
 
 钩子是本地第一道检查，CI 会用同一份规则复核 PR 标题和合并进 main 的提交。
 
+## 受管文件
+
+第二行写着「受管文件，来自 ci-workflows@…」的文件（提交钩子、`scripts/ci/` 下的脚本、`scripts/pr.sh` 等）由维护者从共享的规范仓同步过来，各项目保持一致。不要在本仓直接改：要改的话开 Issue，或在 PR 里说明，由维护者改上游后再同步过来。
+
 ## 门禁
 
 `scripts/check.sh`（纯文档改动可用 `--quick`）：注释流程编号、shellcheck、actionlint，以及本仓技术栈的检查。

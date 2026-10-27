@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# 校验提交信息：首行结构、type 与 emoji 的固定对应、首行长度，以及禁止署名 trailer。
+# 受管文件，来自 ci-workflows@v2.0.0 的 hooks/commit-msg：不在本仓直接改，见 CONTRIBUTING.md「受管文件」
+# 校验提交信息：首行结构、type 与 emoji 的固定对应、首行长度，以及禁止署名与评审 trailer。
 # 本仓的方言与扩展类型写在同目录的 commit.conf；CI 用 scripts/ci/check-msg.sh 以同一脚本复核。
 # 兼容 macOS 自带的 bash 3.2 与 Linux，不依赖系统 locale。
 set -u
@@ -11,8 +12,6 @@ conf="$(dirname "$0")/commit.conf"
 [ -f "$conf" ] && . "$conf"
 # 约定式方言只允许通用类型，扩展类型与 release 都依赖 emoji 表达
 [ "$DIALECT" = gitmoji ] || EXTRA_TYPES=
-
-rules_doc='本仓 CONTRIBUTING.md「提交规范」'
 
 # git 的注释行和 --verbose 附带的 diff 都不属于提交信息
 body=$(sed -e '/^# ------------------------ >8 ------------------------$/,$d' -e '/^#/d' "$msg_file")
@@ -30,13 +29,14 @@ fail() {
     printf '  期望格式：feat(scope): 中文主题\n' >&2
     printf '  可用类型：feat fix perf refactor style test docs build ci chore revert\n' >&2
   fi
-  printf '  规则见%s\n' "$rules_doc" >&2
+  printf '  规则见本仓 CONTRIBUTING.md「提交规范」\n' >&2
   exit 1
 }
 
-# 署名 trailer 对所有提交都禁止，包括下面放行的 git 自动信息
-if printf '%s\n' "$body" | grep -Eiq '^[[:space:]]*(Co-authored-by|Co-committed-by|Signed-off-by|Generated-by|Assisted-by)[[:space:]]*:|Generated with \[?Claude'; then
-  fail "不允许署名 trailer（Co-authored-by、Signed-off-by 等）或工具署名行，删掉这些行后重新提交"
+# 署名与评审 trailer 对所有提交都禁止，包括下面放行的 git 自动信息。
+# Reviewed-on、Reviewed-by 是 Gitea 网页合并时默认写进正文的，带着平台地址和评审人邮箱
+if printf '%s\n' "$body" | grep -Eiq '^[[:space:]]*(Co-authored-by|Co-committed-by|Signed-off-by|Generated-by|Assisted-by|Reviewed-on|Reviewed-by)[[:space:]]*:|Generated with \[?Claude'; then
+  fail "不允许署名或评审 trailer（Co-authored-by、Signed-off-by、Reviewed-on 等）或工具署名行，删掉这些行后重新提交"
 fi
 
 [ -n "$header" ] || fail "提交信息为空"
@@ -80,7 +80,7 @@ case "$type" in
   style) want=💄 ;; test) want=✅ ;; docs) want=📝 ;; build) want=📦 ;;
   ci) want=👷 ;; chore) want=🔧 ;; revert) want=⏪ ;; release) want=🔖 ;;
   i18n) want=🌐 ;; design) want=🎨 ;;
-  *) fail "type「${type}」没有登记 emoji，先在 CONTRIBUTING.md 的类型表和本钩子里登记" ;;
+  *) fail "扩展类型「${type}」没有对应的 emoji：commit.conf 的 EXTRA_TYPES 只能填 i18n、design" ;;
 esac
 [ "$emoji" = "$want" ] || fail "type「${type}」应配 emoji $want"
 exit 0
