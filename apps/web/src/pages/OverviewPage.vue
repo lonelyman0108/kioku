@@ -74,7 +74,20 @@ const activeKeys = computed(() =>
             >
               {{ data.missingDisclosure }}
             </p>
-            <p class="mt-1 text-xs text-muted">没写什么场景下该想起，召回时少一条线索</p>
+            <p class="mt-1 text-xs text-muted">
+              没写什么场景下该想起，召回时少一条线索。
+              <RouterLink
+                v-if="data.missingDisclosure"
+                class="underline"
+                :to="{
+                  name: 'memories',
+                  params: { spaceId },
+                  query: { view: 'list', missingDisclosure: 'true' },
+                }"
+              >
+                逐条补上
+              </RouterLink>
+            </p>
           </div>
           <div class="rounded-lg border border-default p-4">
             <p class="text-sm text-muted">向量</p>

@@ -87,6 +87,9 @@ export const MoveMemoryRequest = z.object({
   from: MemoryUri,
   to: MemoryUri,
   layer: PlainLayer.optional(),
+  // 与修改相同：填了就核对 from 上现在是不是这一条、这一版，不是就返回 409
+  expectedId: z.uuid().optional(),
+  expectedVersion: z.number().int().optional(),
 })
 export type MoveMemoryRequest = z.infer<typeof MoveMemoryRequest>
 

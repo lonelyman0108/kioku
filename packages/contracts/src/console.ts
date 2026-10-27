@@ -223,6 +223,14 @@ export const RestoreRequest = z.object({
 })
 export type RestoreRequest = z.infer<typeof RestoreRequest>
 
+// 成员看得到的记忆的关键词：阅读正文时，出现别的记忆的关键词就标出来、点了跳过去
+export const GlossaryIndex = z.object({
+  entries: z.array(z.object({ keyword: z.string(), uris: z.array(z.string()) })),
+  // 关键词太多时只给前面的一部分
+  truncated: z.boolean(),
+})
+export type GlossaryIndex = z.infer<typeof GlossaryIndex>
+
 export const UndeleteRequest = z.object({ memoryId: z.uuid() })
 export type UndeleteRequest = z.infer<typeof UndeleteRequest>
 

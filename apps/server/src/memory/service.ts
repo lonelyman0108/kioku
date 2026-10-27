@@ -8,6 +8,7 @@ import type {
   DeletedMemoryList,
   DomainSummary,
   EventActor,
+  GlossaryIndex,
   LayerCount,
   Layer,
   MemoryChildren,
@@ -475,9 +476,8 @@ export class MemoryService {
     const parsed = parse(input.uri)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, parsed, personaIds)
-      if (input.expectedId !== undefined && input.expectedId !== before.id) {
-        throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
-      }
+      // 版本号由 applyUpdate 核对，恢复也走那里
+      checkExpected(before, { expectedId: input.expectedId })
       return this.applyUpdate(tx, before, input, { released })
     })
   }
@@ -629,12 +629,7 @@ export class MemoryService {
     const parsed = parse(uri)
     const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
-      if (expected.expectedId !== undefined && expected.expectedId !== before.id) {
-        throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
-      }
-      if (expected.expectedVersion !== undefined && expected.expectedVersion !== before.version) {
-        throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
-      }
+      checkExpected(before, expected)
       if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
       }
@@ -667,6 +662,7 @@ export class MemoryService {
     const to = parse(input.to)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, from, personaIds)
+      checkExpected(before, input)
       if (!canWrite(this.ctx.access, before)) {
         throw new MemoryError(403, `没有权限移动 ${before.layer} 层的记忆`)
       }
@@ -889,6 +885,29 @@ export class MemoryService {
           updatedAt: r.updatedAt.toISOString(),
         })),
         nextCursor: rows.length > query.limit && last ? encodeCursor(query.sort, last) : null,
+      }
+    })
+  }
+
+  // 关键词 → 有这个关键词的记忆，可见范围与列表相同
+  async glossaryIndex(): Promise<GlossaryIndex> {
+    return this.run(async (tx, personaIds) => {
+      const rows = await tx
+        .select({ keyword: memoryGlossary.keyword, domain: memories.domain, path: memories.path })
+        .from(memoryGlossary)
+        .innerJoin(memories, eq(memories.id, memoryGlossary.memoryId))
+        .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
+        .orderBy(asc(memoryGlossary.keyword), asc(memories.domain), asc(memories.path))
+        .limit(GLOSSARY_INDEX_LIMIT + 1)
+      const byKeyword = new Map<string, string[]>()
+      for (const r of rows.slice(0, GLOSSARY_INDEX_LIMIT)) {
+        const uris = byKeyword.get(r.keyword) ?? []
+        uris.push(formatUri(r.domain!, r.path!))
+        byKeyword.set(r.keyword, uris)
+      }
+      return {
+        entries: [...byKeyword].map(([keyword, uris]) => ({ keyword, uris })),
+        truncated: rows.length > GLOSSARY_INDEX_LIMIT,
       }
     })
   }
@@ -1286,6 +1305,22 @@ export class MemoryService {
 
 // 一条记忆的历史最多列这么多个事件
 const HISTORY_LIMIT = 500
+
+// 调用方带着读到的 id 与版本号时核对。删除后在同一个 URI 重建的记忆版本号从 1 重新开始，只看版本号分不出来
+function checkExpected(
+  before: MemoryRow,
+  expected: { expectedId?: string | undefined; expectedVersion?: number | undefined },
+) {
+  if (expected.expectedId !== undefined && expected.expectedId !== before.id) {
+    throw new MemoryError(409, '这条记忆已被删除并重新创建，请先重新读取')
+  }
+  if (expected.expectedVersion !== undefined && expected.expectedVersion !== before.version) {
+    throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
+  }
+}
+
+// 关键词索引最多给这么多条（关键词 × 记忆），个人用的空间远到不了
+const GLOSSARY_INDEX_LIMIT = 5000
 
 // 时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
 const microsOf = (column: SQLWrapper) => sql`(extract(epoch from ${column}) * 1000000)::bigint`
