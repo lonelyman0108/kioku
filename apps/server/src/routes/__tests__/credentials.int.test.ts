@@ -195,6 +195,68 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     ).toContain('至少要有一个字段')
   })
 
+  it('条目位置与来源字段不能含有在 shell 双引号里仍会被解释的字符', async () => {
+    const provider = await createProvider()
+    for (const location of [
+      'x"; curl https://example.com; echo "',
+      'item $(id)',
+      'a`b`',
+      'a\\b',
+      'a\nb',
+    ]) {
+      const body = {
+        ...external(provider.id),
+        source: { ...external(provider.id).source, location },
+      }
+      expect(await errorOf(await asMember('POST', '/credentials', body), 400), location).toContain(
+        '条目位置不能含有',
+      )
+    }
+    const field = {
+      ...external(provider.id),
+      source: {
+        ...external(provider.id).source,
+        fields: [{ name: 'password', sourceField: '$HOME' }],
+      },
+    }
+    expect(await errorOf(await asMember('POST', '/credentials', field), 400)).toContain(
+      '来源字段不能含有',
+    )
+    // 空格、单引号、括号这类条目名里常见的字符照常可以用
+    const ok201 = {
+      ...external(provider.id),
+      source: { ...external(provider.id).source, location: "Bob's NAS (admin)" },
+    }
+    expect((await asMember('POST', '/credentials', ok201)).status).toBe(201)
+  })
+
+  it('什么都没改的修改不升版本、不记事件；从托管改成外部时事件记下删掉了哪些值', async () => {
+    const created = await createCredential(hosted())
+    const same = await ok<ConsoleCredential>(
+      await asMember('PATCH', `/credentials/${created.id}`, {
+        expectedVersion: created.version,
+        name: created.name,
+        source: { kind: 'hosted', values: { password: PASSWORD } },
+      }),
+    )
+    expect(same.version).toBe(created.version)
+    const provider = await createProvider()
+    const switched = await ok<ConsoleCredential>(
+      await asMember('PATCH', `/credentials/${created.id}`, {
+        expectedVersion: created.version,
+        source: external(provider.id).source,
+      }),
+    )
+    expect(switched.version).toBe(created.version + 1)
+    const events = await ok<CredentialEventList>(
+      await asMember('GET', `/credentials/${created.id}/events`),
+    )
+    expect(events.items.map((e) => [e.type, e.changes, e.fields])).toEqual([
+      ['update', ['source', 'provider', 'location', 'fields', 'values'], ['password', 'username']],
+      ['create', [], []],
+    ])
+  })
+
   it('外部来源只存条目位置；凭据源还被有效的凭据绑定时不能删，删掉之后恢复的凭据显示凭据源已删除', async () => {
     const provider = await createProvider()
     const credential = await createCredential(external(provider.id))

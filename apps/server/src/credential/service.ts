@@ -29,7 +29,7 @@ import {
   type Access,
 } from '../access/access'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
-import { withSpace, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
   apiKeys,
@@ -55,6 +55,12 @@ export type CredentialVia = 'kioku_credential' | 'rest'
 
 type CredentialRow = typeof credentials.$inferSelect
 type ProviderRow = typeof credentialProviders.$inferSelect
+
+// 写入之后的一行，以及写入时读到的凭据源：null 是托管的，undefined 是这次没动来源
+interface Written {
+  row: CredentialRow
+  provider?: ProviderRow | null | undefined
+}
 
 // 改了凭据的哪些部分，记在修改事件里（不含任何值）
 type CredentialChange =
@@ -86,11 +92,7 @@ export class CredentialService {
     try {
       return await withSpace(this.ctx.db, this.ctx.spaceId, fn)
     } catch (err) {
-      const pg = ((err as { cause?: unknown })?.cause ?? err) as {
-        code?: string
-        constraint_name?: string
-      }
-      if (pg.code === '23505' && pg.constraint_name === 'credentials_identifier_live_idx') {
+      if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
         throw new MemoryError(409, conflict ?? '标识已被占用或不可用')
       }
       throw err
@@ -196,12 +198,18 @@ export class CredentialService {
     }
   }
 
-  private async consoleViewOf(tx: Tx, row: CredentialRow): Promise<ConsoleCredential> {
-    return this.consoleView(row, await this.providersOf(tx, [row]))
+  // 已经知道凭据源时直接用（写入时刚读过），否则查一次
+  private async providersFor(tx: Tx, { row, provider }: Written) {
+    if (provider === undefined) return this.providersOf(tx, [row])
+    return new Map(provider ? [[provider.id, provider]] : [])
   }
 
-  private async summaryOf(tx: Tx, row: CredentialRow): Promise<CredentialSummary> {
-    return this.summary(row, await this.providersOf(tx, [row]))
+  private async consoleViewOf(tx: Tx, written: Written): Promise<ConsoleCredential> {
+    return this.consoleView(written.row, await this.providersFor(tx, written))
+  }
+
+  private async summaryOf(tx: Tx, written: Written): Promise<CredentialSummary> {
+    return this.summary(written.row, await this.providersFor(tx, written))
   }
 
   // 管理界面：按 id 找成员自己的凭据，已删除的也算；不是自己的和不存在一样是 404
@@ -260,7 +268,7 @@ export class CredentialService {
     before: CredentialRow | null,
   ) {
     if (source.kind === 'external') {
-      await this.liveProvider(tx, source.providerId)
+      const provider = await this.liveProvider(tx, source.providerId)
       return {
         columns: {
           source: 'external' as const,
@@ -270,7 +278,10 @@ export class CredentialService {
           ciphertext: null,
           wrappedKey: null,
         },
-        changedValues: [] as string[],
+        // 从托管改成外部时，Kioku 里存的值就删掉了，事件里要记下是哪些字段
+        changedValues:
+          before?.source === 'hosted' ? before.fields.map((f) => f.name).sort() : ([] as string[]),
+        provider,
       }
     }
     const current = before?.source === 'hosted' ? this.open(before) : {}
@@ -296,6 +307,7 @@ export class CredentialService {
         ...this.seal(id, Object.fromEntries(names.map((n) => [n, merged[n]!]))),
       },
       changedValues,
+      provider: null,
     }
   }
 
@@ -305,10 +317,10 @@ export class CredentialService {
     tx: Tx,
     input: Omit<CreateCredentialRequest, 'appIds'>,
     appIds: string[] | null,
-  ): Promise<CredentialRow> {
+  ): Promise<Written> {
     this.requireManage()
     const id = randomUUID()
-    const { columns } = await this.sourceColumns(tx, id, input.source, null)
+    const { columns, provider } = await this.sourceColumns(tx, id, input.source, null)
     const [row] = await tx
       .insert(credentials)
       .values({
@@ -323,14 +335,14 @@ export class CredentialService {
       })
       .returning()
     await this.event(tx, id, 'create')
-    return row!
+    return { row: row!, provider }
   }
 
   private async modify(
     tx: Tx,
     before: CredentialRow,
     input: Omit<UpdateCredentialRequest, 'appIds'> & { appIds?: string[] | null | undefined },
-  ): Promise<CredentialRow> {
+  ): Promise<Written> {
     this.requireManage()
     if (before.deletedAt) throw new MemoryError(409, '这条凭据已被删除，先恢复再修改')
     if (input.expectedVersion !== before.version) {
@@ -347,10 +359,12 @@ export class CredentialService {
       changes.push('description')
     }
     let changedValues: string[] = []
+    let provider: ProviderRow | null | undefined
     if (input.source) {
       const next = await this.sourceColumns(tx, before.id, input.source, before)
       Object.assign(set, next.columns)
       changedValues = next.changedValues
+      provider = next.provider
       if (next.columns.source !== before.source) changes.push('source')
       if (next.columns.providerId !== before.providerId) changes.push('provider')
       if (next.columns.location !== before.location) changes.push('location')
@@ -366,6 +380,8 @@ export class CredentialService {
         changes.push('appIds')
       }
     }
+    // 什么都没改时不升版本、不记事件：别的页面拿着同一个版本号还能接着改
+    if (!changes.length) return { row: before, provider }
     const [row] = await tx
       .update(credentials)
       .set({ ...set, version: sql`${credentials.version} + 1`, updatedAt: new Date() })
@@ -382,7 +398,7 @@ export class CredentialService {
       changes,
       ...(changedValues.length ? { fields: changedValues } : {}),
     })
-    return row
+    return { row, provider }
   }
 
   private async remove(tx: Tx, before: CredentialRow, expectedVersion?: number): Promise<void> {
@@ -440,7 +456,7 @@ export class CredentialService {
 
   async get(id: string): Promise<ConsoleCredential> {
     this.requireRead()
-    return this.run(async (tx) => this.consoleViewOf(tx, await this.ownById(tx, id)))
+    return this.run(async (tx) => this.consoleViewOf(tx, { row: await this.ownById(tx, id) }))
   }
 
   async create(input: CreateCredentialRequest): Promise<ConsoleCredential> {
@@ -480,7 +496,7 @@ export class CredentialService {
         .returning()
       if (!row) throw new MemoryError(409, '凭据刚被其他请求修改，请重新读取')
       await this.event(tx, id, 'undelete')
-      return this.consoleViewOf(tx, row)
+      return this.consoleViewOf(tx, { row })
     }, '同一个标识已经有一条有效的凭据，这一条不能恢复')
   }
 
@@ -552,19 +568,23 @@ export class CredentialService {
 
   // ---- 凭据源（只在管理界面配置）----
 
+  private liveProviders(tx: Tx): Promise<ProviderRow[]> {
+    return tx
+      .select()
+      .from(credentialProviders)
+      .where(
+        and(
+          eq(credentialProviders.ownerAccountId, this.owner),
+          isNull(credentialProviders.deletedAt),
+        ),
+      )
+      .orderBy(asc(credentialProviders.createdAt), asc(credentialProviders.id))
+  }
+
   async providers(): Promise<CredentialProvider[]> {
     this.requireRead()
     return this.run(async (tx) => {
-      const rows = await tx
-        .select()
-        .from(credentialProviders)
-        .where(
-          and(
-            eq(credentialProviders.ownerAccountId, this.owner),
-            isNull(credentialProviders.deletedAt),
-          ),
-        )
-        .orderBy(asc(credentialProviders.createdAt), asc(credentialProviders.id))
+      const rows = await this.liveProviders(tx)
       if (!rows.length) return []
       const counts = await tx
         .select({ providerId: credentials.providerId, n: count() })
@@ -668,16 +688,7 @@ export class CredentialService {
       ).filter((r) => canReadCredential(this.ctx.access, r))
       const page = rows.slice(0, LIST_LIMIT)
       const providers = await this.providersOf(tx, page)
-      const live = await tx
-        .select()
-        .from(credentialProviders)
-        .where(
-          and(
-            eq(credentialProviders.ownerAccountId, this.owner),
-            isNull(credentialProviders.deletedAt),
-          ),
-        )
-        .orderBy(asc(credentialProviders.createdAt), asc(credentialProviders.id))
+      const live = await this.liveProviders(tx)
       return {
         items: page.map((r) => this.summary(r, providers)),
         providers: live.map((p) => ({ id: p.id, kind: p.kind, name: p.name, deleted: false })),

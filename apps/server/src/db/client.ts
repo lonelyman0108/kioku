@@ -27,6 +27,15 @@ export function withSpace<T>(db: Db, spaceId: string, fn: (tx: Tx) => Promise<T>
   })
 }
 
+// 违反了指定的唯一约束：drizzle 把驱动的错误包在 cause 里
+export function isUniqueViolation(err: unknown, constraint: string): boolean {
+  const pg = ((err as { cause?: unknown })?.cause ?? err) as {
+    code?: string
+    constraint_name?: string
+  }
+  return pg.code === '23505' && pg.constraint_name === constraint
+}
+
 // 超级用户和 BYPASSRLS 角色会绕过行级安全，空间隔离就形同虚设，所以直接拒绝启动
 export async function assertRuntimeRole(db: Db): Promise<void> {
   const rows = await db.execute<{ rolsuper: boolean; rolbypassrls: boolean; rolname: string }>(

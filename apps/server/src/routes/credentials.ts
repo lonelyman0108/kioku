@@ -212,7 +212,7 @@ function consoleCredentialRoutes(deps: Deps) {
     })
 }
 
-// 接入方：按标识访问应用主人的凭据，权限按 Key 算（见设计 4.5 节「权限」）
+// 接入方：按标识访问应用主人的凭据，权限按 Key 算：读说明同私人层，取托管的值与管理凭据要 secret 级
 function keyCredentialRoutes(deps: Deps) {
   const common = { tags: ['credentials'], security: [{ bearer: [] }] }
   const use = createRoute({

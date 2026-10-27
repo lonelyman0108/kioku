@@ -445,6 +445,10 @@ export const credentials = pgTable(
       .on(t.spaceId, t.ownerAccountId, t.identifier)
       .where(sql`${t.deletedAt} is null`),
     unique().on(t.spaceId, t.id),
+    // 数凭据源上绑着几条有效的凭据（凭据源列表、删除凭据源时）
+    index('credentials_provider_live_idx')
+      .on(t.providerId)
+      .where(sql`${t.deletedAt} is null`),
     // 凭据源必须是同一个成员的：外键带上主人。自动生成的约束名超过 PostgreSQL 的 63 字符上限，这里起短名
     foreignKey({
       name: 'credentials_provider_fk',
@@ -481,7 +485,8 @@ export const credentialEvents = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    index().on(t.credentialId, t.createdAt),
+    // 一条凭据的事件按 id 倒序翻页
+    index().on(t.credentialId, t.id),
     foreignKey({
       name: 'credential_events_credential_fk',
       columns: [t.spaceId, t.credentialId],

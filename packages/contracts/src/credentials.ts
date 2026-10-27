@@ -89,8 +89,22 @@ export type ConsoleCredentialList = z.infer<typeof ConsoleCredentialList>
 const CredentialName = z.string().trim().min(1, '名称不能为空').max(100)
 const CredentialDescription = z.string().max(2000).nullable()
 const CredentialValue = z.string().min(1, '值不能为空').max(16_384)
-const Location = z.string().trim().min(1, '条目位置不能为空').max(500)
-const SourceField = z.string().trim().min(1, '来源字段不能为空').max(200)
+// 条目位置与来源字段会写进返回给 agent 的取值命令（例如 bw get item "<条目>"），
+// 不能有在双引号里仍会被 shell 解释的字符，否则改得了绑定的 Key 能给别的 agent 塞进一条命令
+const shellSafe = (v: string) => !/[`$\\"]/.test(v) && !/\p{Cc}/u.test(v)
+const SHELL_SAFE_MESSAGE = '不能含有 ` $ \\ " 与换行等控制字符'
+const Location = z
+  .string()
+  .trim()
+  .min(1, '条目位置不能为空')
+  .max(500)
+  .refine(shellSafe, `条目位置${SHELL_SAFE_MESSAGE}`)
+const SourceField = z
+  .string()
+  .trim()
+  .min(1, '来源字段不能为空')
+  .max(200)
+  .refine(shellSafe, `来源字段${SHELL_SAFE_MESSAGE}`)
 const AppIds = z.array(z.uuid()).max(100).nullable()
 
 const fieldCount = (values: Record<string, unknown>) =>

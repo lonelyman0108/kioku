@@ -55,9 +55,10 @@ ALTER TABLE "credential_providers" ADD CONSTRAINT "credential_providers_owner_ac
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_owner_account_id_accounts_id_fk" FOREIGN KEY ("owner_account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "credentials" ADD CONSTRAINT "credentials_provider_fk" FOREIGN KEY ("space_id","owner_account_id","provider_id") REFERENCES "public"."credential_providers"("space_id","owner_account_id","id") ON DELETE no action ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "credential_events_credential_id_created_at_index" ON "credential_events" USING btree ("credential_id","created_at");--> statement-breakpoint
+CREATE INDEX "credential_events_credential_id_id_index" ON "credential_events" USING btree ("credential_id","id");--> statement-breakpoint
 CREATE INDEX "credential_providers_space_id_owner_account_id_index" ON "credential_providers" USING btree ("space_id","owner_account_id");--> statement-breakpoint
 CREATE UNIQUE INDEX "credentials_identifier_live_idx" ON "credentials" USING btree ("space_id","owner_account_id","identifier") WHERE "credentials"."deleted_at" is null;--> statement-breakpoint
+CREATE INDEX "credentials_provider_live_idx" ON "credentials" USING btree ("provider_id") WHERE "credentials"."deleted_at" is null;--> statement-breakpoint
 -- 凭据的三张表与其他内容表一样按 app.space_id 强制隔离（见 0001）
 DO $$
 DECLARE

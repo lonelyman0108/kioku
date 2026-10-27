@@ -1,5 +1,5 @@
 {
-  "id": "2b21b3b6-a9f2-45fc-9e50-7b27a209f083",
+  "id": "68497028-f08f-4d13-91d4-fe37060bf1c7",
   "prevId": "7388d03c-3ec0-443e-95ec-3efea2eaa2b0",
   "version": "7",
   "dialect": "postgresql",
@@ -367,8 +367,8 @@
         }
       },
       "indexes": {
-        "credential_events_credential_id_created_at_index": {
-          "name": "credential_events_credential_id_created_at_index",
+        "credential_events_credential_id_id_index": {
+          "name": "credential_events_credential_id_id_index",
           "columns": [
             {
               "expression": "credential_id",
@@ -377,7 +377,7 @@
               "nulls": "last"
             },
             {
-              "expression": "created_at",
+              "expression": "id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
@@ -671,6 +671,22 @@
             }
           ],
           "isUnique": true,
+          "where": "\"credentials\".\"deleted_at\" is null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "credentials_provider_live_idx": {
+          "name": "credentials_provider_live_idx",
+          "columns": [
+            {
+              "expression": "provider_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
           "where": "\"credentials\".\"deleted_at\" is null",
           "concurrently": false,
           "method": "btree",
