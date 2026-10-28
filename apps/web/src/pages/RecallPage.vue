@@ -7,6 +7,7 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { layerShortLabels, recallSourceLabels, sensitivityLabels } from '../labels'
+import { memoryRoute } from '../routes'
 import { formatTime } from '../time'
 
 const route = useRoute()
@@ -20,11 +21,7 @@ const stats = useQuery({
 const sourceSummary = (volume: AppRecallVolume) =>
   volume.sources.map((entry) => `${recallSourceLabels[entry.source]} ${entry.count}`).join(' · ')
 
-const memoryLink = (uri: string) => ({
-  name: 'memories',
-  params: { spaceId: spaceId.value },
-  query: { uri },
-})
+const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
 </script>
 
 <template>

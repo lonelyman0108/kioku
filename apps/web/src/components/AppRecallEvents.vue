@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { recallSourceLabels } from '../labels'
+import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 
 // 这个应用的召回记录：服务端只给事件发生时的应用主人，所以列的是你当主人时的那些
@@ -18,11 +19,7 @@ const events = useInfiniteQuery({
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
 const items = computed(() => events.data.value?.pages.flatMap((p) => p.items) ?? [])
-const memoryLink = (uri: string) => ({
-  name: 'memories',
-  params: { spaceId: props.spaceId },
-  query: { uri },
-})
+const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
 </script>
 
 <template>

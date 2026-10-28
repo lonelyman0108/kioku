@@ -102,7 +102,12 @@ async function saveRetention() {
   savingRetention.value = true
   try {
     await api.saveRecallSettings({ retentionDays: days })
-    await queryClient.invalidateQueries({ queryKey: ['settings', 'recall'] })
+    // 召回分析与概览的「从没被召回」都按保留天数算
+    await Promise.all([
+      queryClient.invalidateQueries({ queryKey: ['settings', 'recall'] }),
+      queryClient.invalidateQueries({ queryKey: ['recall-stats'] }),
+      queryClient.invalidateQueries({ queryKey: ['overview'] }),
+    ])
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -260,7 +265,17 @@ async function test() {
               每次召回的明细（命中的记忆、分数、打过码的提示语）保留这么多天，更早的只留下每条记忆被召回的累计次数。
             </p>
           </template>
-          <form class="flex flex-wrap items-end gap-2" @submit.prevent="saveRetention">
+          <UAlert
+            v-if="recallSettings.isError.value && !recallSettings.data.value"
+            color="error"
+            variant="subtle"
+            :title="
+              recallSettings.error.value instanceof ApiError
+                ? recallSettings.error.value.message
+                : '读取失败'
+            "
+          />
+          <form v-else class="flex flex-wrap items-end gap-2" @submit.prevent="saveRetention">
             <UFormField label="明细保留天数" help="1 到 365 天">
               <UInputNumber v-model="retentionDays" :min="1" :max="365" class="w-32" />
             </UFormField>

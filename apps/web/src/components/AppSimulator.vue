@@ -7,9 +7,10 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { layerShortLabels, readDenialLabels, sensitivityLabels } from '../labels'
+import { memoryRoute } from '../routes'
 
 // 启动预览与召回调试台：按应用的一把 Key 模拟，只给应用主人（会读到主人的私人层）
-// settings 是应用的默认人格与配置拼成的串：变了的话，之前的结果就不是现在的样子了
+// settings 是会影响模拟结果的应用设置（默认人格、主人私聊提升）拼成的串：变了的话，之前的结果就不是现在的样子了
 const props = defineProps<{ spaceId: string; appId: string; settings: string }>()
 
 const keys = useQuery({
@@ -38,10 +39,11 @@ const tabs = [
 ]
 
 const failure = ref<string | null>(null)
-// 每次模拟一个序号：结果、报错与 loading 都只认最近一次；换了应用、Key 或应用设置时作废进行中的那次
-let latest = 0
-const runningId = ref<number | null>(null)
-const running = computed(() => runningId.value !== null)
+// 每次模拟一个序号，current 是进行中的那次：结果、报错与 loading 都只认它；
+// 换了应用、Key 或应用设置时清掉，进行中的那次就作废了
+let counter = 0
+const current = ref<number | null>(null)
+const running = computed(() => current.value !== null)
 const project = reactive({ dirName: '', repoName: '' })
 const preview = ref<BootPreview | null>(null)
 const query = ref('')
@@ -49,8 +51,7 @@ const debug = ref<RecallDebug | null>(null)
 
 // 换了应用、Key 或应用设置时清掉上一次的结果：它们属于别的 Key，或是改之前的样子
 watch([() => props.spaceId, () => props.appId, keyId, () => props.settings], () => {
-  latest++
-  runningId.value = null
+  current.value = null
   preview.value = null
   debug.value = null
   failure.value = null
@@ -58,16 +59,16 @@ watch([() => props.spaceId, () => props.appId, keyId, () => props.settings], () 
 
 async function run<T>(call: () => Promise<T>, apply: (result: T) => void) {
   if (running.value || !keyId.value) return
-  const id = ++latest
-  runningId.value = id
+  const id = ++counter
+  current.value = id
   failure.value = null
   try {
     const result = await call()
-    if (id === latest) apply(result)
+    if (id === current.value) apply(result)
   } catch (err) {
-    if (id === latest) failure.value = err instanceof ApiError ? err.message : '模拟失败'
+    if (id === current.value) failure.value = err instanceof ApiError ? err.message : '模拟失败'
   } finally {
-    if (runningId.value === id) runningId.value = null
+    if (current.value === id) current.value = null
   }
 }
 
@@ -96,11 +97,7 @@ function runDebug() {
   )
 }
 
-const memoryLink = (uri: string) => ({
-  name: 'memories',
-  params: { spaceId: props.spaceId },
-  query: { uri },
-})
+const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
 const parts = (c: DebugCandidate) =>
   [
     ['向量', c.breakdown.semantic],

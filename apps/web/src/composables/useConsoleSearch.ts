@@ -6,6 +6,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { layerLabels } from '../labels'
+import { memoryRoute } from '../routes'
 
 // 输入停下来这么久之后再去服务端搜，免得每敲一个字都请求一次
 const SEARCH_DELAY_MS = 250
@@ -63,7 +64,7 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
     }
     const found = results.value
     if (!id || !found) return list
-    const to = (uri: string) => ({ name: 'memories', params: { spaceId: id }, query: { uri } })
+    const to = (uri: string) => memoryRoute(id, uri)
     const direct = new Set(found.matches.map((m) => m.uri))
     // 服务端已经按查询词筛过，不再交给搜索框按文字过滤
     list.push(

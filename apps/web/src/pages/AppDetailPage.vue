@@ -58,7 +58,11 @@ async function update(body: Parameters<typeof api.updateApp>[2], done = '已保�
   const sid = spaceId.value
   const id = appId.value
   try {
-    await api.updateApp(sid, id, body)
+    const saved = await api.updateApp(sid, id, body)
+    // 先把返回的这一版写进缓存：接着改别的设置时，拼的是这一版，不会盖掉刚保存的
+    queryClient.setQueryData<AppInfo[]>(['apps', sid], (list) =>
+      list?.map((a) => (a.id === id ? saved : a)),
+    )
     await refreshAppCaches(queryClient, sid, id)
     toast.add({ title: done, color: 'success' })
     return true
@@ -68,11 +72,20 @@ async function update(body: Parameters<typeof api.updateApp>[2], done = '已保�
   }
 }
 
-// 应用配置整个替换：改一项时带上其余几项，没设的不写（不设就是默认）
-function updateConfig(patch: Partial<AppConfig>) {
+// 应用配置整个替换：改一项时带上其余几项，没设的不写（不设就是默认）。保存期间两个开关都不能动，
+// 否则第二次拼的还是改之前的配置，会把第一次的改动盖掉
+const savingConfig = ref<string | null>(null)
+async function updateConfig(patch: Partial<AppConfig>) {
+  const id = appId.value
+  if (savingConfig.value === id) return
   const merged: Record<string, unknown> = { ...app.value?.config, ...patch }
   for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key]
-  return update({ config: merged as AppConfig })
+  savingConfig.value = id
+  try {
+    await update({ config: merged as AppConfig })
+  } finally {
+    if (savingConfig.value === id) savingConfig.value = null
+  }
 }
 
 // 还停在发请求时的那个应用的页面上吗：请求返回之后，换了页面就不再动这一页的弹窗与选择
@@ -97,13 +110,15 @@ const transferItems = computed(() =>
 const transferName = computed(
   () => members.data.value?.find((m) => m.accountId === transferTo.value)?.displayName,
 )
+// 转移与删除进行中记的是哪个应用：换到别的应用时，那边的按钮不跟着转圈
 const confirmingTransfer = ref(false)
-const transferring = ref(false)
+const transferringId = ref<string | null>(null)
+const transferring = computed(() => transferringId.value === appId.value)
 async function transfer() {
   if (!transferTo.value || transferring.value) return
-  transferring.value = true
   const sid = spaceId.value
   const id = appId.value
+  transferringId.value = id
   try {
     const done = await update({ ownerAccountId: transferTo.value }, '已转移，原来的 Key 都已吊销')
     if (done && stillOn(sid, id)) {
@@ -111,28 +126,31 @@ async function transfer() {
       transferTo.value = undefined
     }
   } finally {
-    transferring.value = false
+    if (transferringId.value === id) transferringId.value = null
   }
 }
 
 const confirmingDelete = ref(false)
-const deleting = ref(false)
+const deletingId = ref<string | null>(null)
+const deleting = computed(() => deletingId.value === appId.value)
 async function remove(target: AppInfo) {
   if (deleting.value) return
-  deleting.value = true
   const sid = spaceId.value
+  deletingId.value = target.id
   try {
     await api.deleteApp(sid, target.id)
-    // 请求期间离开了这个应用的页面就不再动它的弹窗，也不跳转
-    const here = stillOn(sid, target.id)
-    if (here) confirmingDelete.value = false
-    await forgetApp(queryClient, sid, target.id)
+    // 还停在这个应用的页面上就先离开，再刷新列表：否则会先闪一下「应用不存在」。
+    // 请求期间已经离开的，不再动它的弹窗，也不跳转
+    if (stillOn(sid, target.id)) {
+      confirmingDelete.value = false
+      await router.replace({ name: 'apps', params: { spaceId: sid } })
+    }
     toast.add({ title: `已删除应用「${target.name}」`, color: 'success' })
-    if (here) void router.replace({ name: 'apps', params: { spaceId: sid } })
+    await forgetApp(queryClient, sid, target.id)
   } catch (err) {
     failed(err, '删除失败')
   } finally {
-    deleting.value = false
+    if (deletingId.value === target.id) deletingId.value = null
   }
 }
 
@@ -227,7 +245,7 @@ watch([spaceId, appId], () => {
             >
               <USwitch
                 :model-value="app.config.elevateOwnerDirect === 'internal'"
-                :disabled="!canManage"
+                :disabled="!canManage || savingConfig === app.id"
                 @update:model-value="
                   (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
                 "
@@ -239,7 +257,7 @@ watch([spaceId, appId], () => {
             >
               <USwitch
                 :model-value="app.config.recordPrompt !== false"
-                :disabled="!canManage"
+                :disabled="!canManage || savingConfig === app.id"
                 @update:model-value="(v) => updateConfig({ recordPrompt: v ? undefined : false })"
               />
             </UFormField>
@@ -261,7 +279,7 @@ watch([spaceId, appId], () => {
           <AppSimulator
             :space-id="spaceId"
             :app-id="app.id"
-            :settings="`${app.defaultPersonaId}:${JSON.stringify(app.config)}`"
+            :settings="`${app.defaultPersonaId}:${app.config.elevateOwnerDirect ?? ''}`"
           />
         </UCard>
 
