@@ -42,11 +42,14 @@ export type ReviewList = z.infer<typeof ReviewList>
 
 export const ReviewRequest = z.object({
   action: z.enum(['confirm', 'delete']),
-  // 每一条带上列表里看到的版本
+  // 每一条带上列表里看到的版本；同一条只能出现一次
   items: z
     .array(z.object({ id: z.uuid(), version: z.number().int() }))
     .min(1)
-    .max(100),
+    .max(100)
+    .refine((items) => new Set(items.map((i) => i.id)).size === items.length, {
+      message: '同一条只能出现一次',
+    }),
 })
 export type ReviewRequest = z.infer<typeof ReviewRequest>
 

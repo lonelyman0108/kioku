@@ -764,6 +764,10 @@ export class MemoryService {
                 eq(memories.layer, 'subject'),
                 eq(memories.subjectId, item.subjectId),
                 readableConditions(this.ctx.access, { personaIds: [] }),
+                // 不可信的写入方改不了受信的行（canModify），也就不去锁它
+                this.ctx.access.writeProvenance === 'untrusted'
+                  ? eq(memories.provenance, 'untrusted')
+                  : undefined,
               ),
             )
             .for('update')
@@ -858,7 +862,7 @@ export class MemoryService {
         `没有权限改 ${before.layer} 层的 ${s} 级记忆`,
       )
     }
-    if (!canModify(this.ctx.access, before)) throw new MemoryError(403, UNTRUSTED_MODIFY)
+    this.assertModifiable(before, `没有权限改 ${before.layer} 层的记忆`)
 
     // 改层只在 base、owner、private 之间：共享与按成员互转时归属跟着变，按成员的层归写入方
     const layer = input.layer ?? before.layer
@@ -1034,7 +1038,8 @@ export class MemoryService {
   async review(input: ReviewRequest): Promise<ReviewResult> {
     const seen = new Map(input.items.map((i) => [i.id, i.version]))
     const done = await this.run(async (tx, personaIds) => {
-      // 按 id 的顺序锁住这几行：同时处理有重叠的几批时，加锁顺序一致，不会互相等成死锁
+      // 锁住这几行，但不等锁：别人正在处理、或抽取正在推翻的行直接跳过，
+      // 也就不会和抽取这类按别的顺序加锁的写入互相等成死锁
       const rows = await tx
         .select()
         .from(memories)
@@ -1042,7 +1047,7 @@ export class MemoryService {
           and(inArray(memories.id, [...seen.keys()]), pendingReview(this.ctx.access, personaIds)),
         )
         .orderBy(asc(memories.id))
-        .for('update')
+        .for('update', { skipLocked: true })
       const targets = rows.filter((r) => seen.get(r.id) === r.version)
       if (!targets.length) return []
       for (const row of targets) this.assertModifiable(row, `没有权限处理 ${row.layer} 层的记忆`)

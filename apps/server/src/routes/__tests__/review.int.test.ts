@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import type { ReviewList, ReviewResult, SessionContextInput } from '@kioku/contracts'
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -178,7 +179,9 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     const factIds = facts.map((f) => f.id)
     const summary = items.find((i) => i.layer === 'episode')!
 
-    expect(await act('confirm', [...facts, facts[0]!])).toEqual({
+    // 同一条出现两次的请求不收
+    expect((await act('confirm', [...facts, facts[0]!])).status).toBe(400)
+    expect(await act('confirm', facts)).toEqual({
       status: 200,
       body: { done: 2, skipped: 0 },
     })
@@ -222,6 +225,26 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     const [kept] = await rowsOf([fact.id])
     expect([kept!.provenance, kept!.validTo]).toEqual(['owner', null])
     expect((await queue('?layer=subject')).items.map((i) => i.content)).toContain('在学韩语')
+  })
+
+  it('正在被别的写入改着的行不等锁，直接跳过', async () => {
+    await chatInGroup()
+    const [first, second] = (await queue('?layer=subject')).items
+    const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select id from memories where id = ${first!.id} for update`
+        // 锁还在的时候处理：被锁住的那条跳过，另一条照常确认，请求不会卡住
+        expect(await act('confirm', [first!, second!])).toEqual({
+          status: 200,
+          body: { done: 1, skipped: 1 },
+        })
+      })
+    } finally {
+      await side.end()
+    }
+    expect((await queue('?layer=subject')).items.map((i) => i.id)).toEqual([first!.id])
   })
 
   it('viewer 只能看；别的空间的记忆碰不到', async () => {

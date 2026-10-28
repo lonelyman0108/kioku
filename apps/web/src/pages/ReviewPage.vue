@@ -39,45 +39,45 @@ const queue = useInfiniteQuery({
 const items = computed(() => queue.data.value?.pages.flatMap((page) => page.items) ?? [])
 const total = computed(() => queue.data.value?.pages[0]?.total ?? 0)
 
-// 选中的条目：换了空间或筛选就清空，处理完的也从选择里去掉
-const selected = ref(new Set<string>())
-watch([spaceId, layer], () => (selected.value = new Set()))
+// 选中的条目与勾选时看到的版本：换了空间或筛选就清空。版本在勾选时记下，
+// 之后刷新拿到的新版本不算，服务端按它跳过看过之后被改过的
+type Seen = { id: string; version: number }
+const selected = ref(new Map<string, number>())
+watch([spaceId, layer], () => (selected.value = new Map()))
 const allSelected = computed(
   () => items.value.length > 0 && items.value.every((i) => selected.value.has(i.id)),
 )
-function toggle(id: string, on: boolean) {
-  const next = new Set(selected.value)
-  if (on) next.add(id)
-  else next.delete(id)
+function toggle(item: Seen, on: boolean) {
+  const next = new Map(selected.value)
+  if (on) next.set(item.id, item.version)
+  else next.delete(item.id)
   selected.value = next
 }
 function toggleAll(on: boolean) {
-  selected.value = on ? new Set(items.value.map((i) => i.id)) : new Set()
+  selected.value = on ? new Map(items.value.map((i) => [i.id, i.version])) : new Map()
 }
+const chosen = (): Seen[] => [...selected.value].map(([id, version]) => ({ id, version }))
 
 const busy = ref(false)
-const deleting = ref<string[] | null>(null)
+const deleting = ref<Seen[] | null>(null)
 // 一次最多提交这么多条（接口的上限），选得多就分几批
 const BATCH = 100
 
-// 处理选中的条目：带上列表里看到的版本，看过之后被改过的服务端会跳过
-async function act(action: 'confirm' | 'delete', ids: string[]) {
+async function act(action: 'confirm' | 'delete', items: Seen[]) {
   const sid = spaceId.value
-  const versions = new Map(items.value.map((i) => [i.id, i.version]))
-  const chosen = ids.flatMap((id) => {
-    const version = versions.get(id)
-    return version === undefined ? [] : [{ id, version }]
-  })
+  const verb = action === 'confirm' ? '确认' : '删除'
   busy.value = true
   let done = 0
   let skipped = 0
+  const submitted: string[] = []
   try {
-    for (let i = 0; i < chosen.length; i += BATCH) {
-      const result = await api.review(sid, { action, items: chosen.slice(i, i + BATCH) })
+    for (let i = 0; i < items.length; i += BATCH) {
+      const batch = items.slice(i, i + BATCH)
+      const result = await api.review(sid, { action, items: batch })
       done += result.done
       skipped += result.skipped
+      submitted.push(...batch.map((b) => b.id))
     }
-    const verb = action === 'confirm' ? '确认' : '删除'
     toast.add({
       title: skipped
         ? `${verb}了 ${done} 条，${skipped} 条已经被处理或改动过`
@@ -85,9 +85,16 @@ async function act(action: 'confirm' | 'delete', ids: string[]) {
       color: 'success',
     })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '处理失败', color: 'error' })
+    const message = err instanceof ApiError ? err.message : '处理失败'
+    // 分批时前面几批已经提交了，告诉用户；没提交的留在选择里，可以再试
+    toast.add({
+      title: submitted.length ? `${message}（前面已经${verb}了 ${done} 条）` : message,
+      color: 'error',
+    })
   } finally {
-    selected.value = new Set([...selected.value].filter((id) => !ids.includes(id)))
+    const next = new Map(selected.value)
+    for (const id of submitted) next.delete(id)
+    selected.value = next
     // 处理过的会出现在对象页、记忆列表、已删除、活动与概览里
     for (const key of [
       'review',
@@ -157,7 +164,7 @@ async function act(action: 'confirm' | 'delete', ids: string[]) {
               :icon="icons.confirmed"
               :disabled="!selected.size"
               :loading="busy"
-              @click="act('confirm', [...selected])"
+              @click="act('confirm', chosen())"
               >确认</UButton
             >
             <UButton
@@ -166,7 +173,7 @@ async function act(action: 'confirm' | 'delete', ids: string[]) {
               variant="subtle"
               :icon="icons.remove"
               :disabled="!selected.size || busy"
-              @click="deleting = [...selected]"
+              @click="deleting = chosen()"
               >删除</UButton
             >
           </div>
@@ -178,7 +185,7 @@ async function act(action: 'confirm' | 'delete', ids: string[]) {
               :model-value="selected.has(item.id)"
               :aria-label="`选择：${item.content}`"
               class="pt-0.5"
-              @update:model-value="(v) => toggle(item.id, v === true)"
+              @update:model-value="(v) => toggle(item, v === true)"
             />
             <div class="min-w-0 flex-1 space-y-1">
               <p class="text-sm whitespace-pre-wrap">{{ item.content }}</p>
