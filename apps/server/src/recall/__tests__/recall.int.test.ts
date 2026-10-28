@@ -138,6 +138,16 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     expect(candidates.map((c) => c.uri)).toEqual(['infra://kioku_host', 'infra://backups'])
   })
 
+  it('只命中查询里最具体的那个词一次，单靠全文也能过阈值', async () => {
+    await create({
+      uri: 'infra://living_room_ap',
+      content: '客厅的无线接入点用 winbox 管理，固件每个季度升级一次，配置导出放在文件服务器上',
+    })
+    await create({ uri: 'notes://garden', content: '阳台的花每周浇一次水，夏天改成两天一次' })
+    const candidates = await recallText('winbox 怎么用')
+    expect(candidates.map((c) => c.uri)).toEqual(['infra://living_room_ap'])
+  })
+
   it('查询里的单字不会带进只命中单字的记忆', async () => {
     await create({
       uri: 'notes://checkup',

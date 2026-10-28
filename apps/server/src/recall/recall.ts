@@ -10,7 +10,7 @@ import { formatUri } from '../memory/uri'
 
 // 多路召回：向量相似度、中文全文检索、glossary 关键词命中。三路都先套同一套读权限过滤，
 // 再按加权分数合并。权重是经验值，召回分析做出来之后再调。
-// 单独一路命中就应当能过阈值：一个 glossary 关键词 0.3、全文命中两个较具体的词约 0.23、相似度 0.4 以上的向量命中。
+// 单独一路命中就应当能过阈值：一个 glossary 关键词 0.3、全文命中查询里最具体的那个词约 0.21、相似度 0.4 以上的向量命中。
 const WEIGHTS = {
   semantic: 0.6,
   fulltext: 0.35,
@@ -157,9 +157,8 @@ export async function recall(
   )
   const terms = searchTerms(lexemes?.terms ?? [])
   if (terms.length) {
-    const k1 = sql.raw(String(BM25.k1))
-    const b = sql.raw(String(BM25.b))
-    const minDocs = sql.raw(String(BM25.minDocs))
+    const k1 = sql`${BM25.k1}::float8`
+    const b = sql`${BM25.b}::float8`
     const ftsRows = await tx.execute<Row & { score: string; scale: string }>(sql`
       with cand as (
         select ${memories.id} as id, ${memories.domain} as domain, ${memories.path} as path,
@@ -175,7 +174,7 @@ export async function recall(
       ),
       idf as (
         select lexeme,
-          ln(1 + (greatest((select count(*) from ${memories} where ${readable}), ${minDocs}) - count(*) + 0.5) / (count(*) + 0.5)) as w
+          ln(1 + (greatest((select count(*) from ${memories} where ${readable}), ${BM25.minDocs}::int) - count(*) + 0.5) / (count(*) + 0.5)) as w
         from tf group by lexeme
       )
       select c.id, c.domain, c.path, c.layer, c.priority, c.disclosure,
@@ -183,15 +182,15 @@ export async function recall(
         (select max(w) from idf) as scale
       from cand c join tf on tf.id = c.id join idf on idf.lexeme = tf.lexeme
       group by c.id, c.domain, c.path, c.layer, c.priority, c.disclosure
-      order by score desc
+      order by score desc, c.priority, c.id
       limit ${PER_PATH_LIMIT}`)
     for (const r of ftsRows) {
       const h = hit(r)
-      // 压到 0–1：只命中查询里最具体的那个词一次约 0.5，命中的具体词越多越接近 1，不封顶。
+      // 压到 0–1：只命中查询里最具体的那个词一次约 0.59，单独这一路刚好过阈值；命中的具体词越多越接近 1，不封顶。
       // 尺度是这个词的 idf，分数不随库里记忆的多少整体变高变低；至少按出现在一成记忆里的词算（ln 10），
       // 查询里全是常见词时不会把只命中常见词的记忆抬上来
       const score = Number(r.score)
-      h.fulltext = score / (score + Math.max(Math.LN10, Number(r.scale)))
+      h.fulltext = score / (score + 0.7 * Math.max(Math.LN10, Number(r.scale)))
       h.via.add('fulltext')
     }
   }
