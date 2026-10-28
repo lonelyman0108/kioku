@@ -191,6 +191,14 @@ async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<voi
   if (app?.owner !== owner) throw new MemoryError(403, '这个应用已经不属于导入者')
 }
 
+// 抽取写下的记忆：对象层的事实要挂在对象上，情节层的会话摘要带到期时间
+export interface ExtractedInput {
+  layer: 'subject' | 'episode'
+  subjectId: string | null
+  content: string
+  expiresAt?: Date | null
+}
+
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
   eventType?: 'create' | 'import'
@@ -659,6 +667,98 @@ export class MemoryService {
       )
       return this.toView(row!, glossary)
     })
+  }
+
+  // 抽取写下的记忆：对象层的事实（挂在对象上）与情节层的会话摘要，没有 URI、不建向量。敏感级 public，
+  // 来源与来源作用域按这次的会话上下文；权限与凭据占位符的检查和按 URI 写入一样（对话来的内容不能新增引用）。
+  // 记一条 create 事件，返回新记忆的 id
+  async addExtracted(
+    input: ExtractedInput,
+    eventContext: Record<string, unknown>,
+  ): Promise<string> {
+    return this.run(async (tx) => {
+      const id = await this.insertExtracted(tx, input)
+      await this.event(tx, id, 'create', null, snapshot((await this.rowOf(tx, id))!, []), {
+        ...eventContext,
+      })
+      return id
+    })
+  }
+
+  // 新事实推翻旧事实：旧的那条设 valid_to、保留历史，再写一条新的，挂在同一个对象上。
+  // 旧的那条要是这次读得到、还有效的抽取事实，读不到和不存在一样是 404
+  async supersedeExtracted(
+    oldId: string,
+    content: string,
+    eventContext: Record<string, unknown>,
+  ): Promise<string> {
+    return this.run(async (tx) => {
+      const [before] = await tx
+        .select()
+        .from(memories)
+        .where(
+          and(
+            eq(memories.id, oldId),
+            eq(memories.form, 'extracted'),
+            eq(memories.layer, 'subject'),
+            readableConditions(this.ctx.access, { personaIds: [] }),
+          ),
+        )
+        .for('update')
+      if (!before) throw new MemoryError(404, '要更新的事实不存在')
+      this.assertWritable(before, '没有权限更新这条事实')
+      const id = await this.insertExtracted(tx, {
+        layer: 'subject',
+        subjectId: before.subjectId,
+        content,
+      })
+      const [after] = await tx
+        .update(memories)
+        .set({ validTo: sql`now()`, version: before.version + 1, updatedAt: sql`now()` })
+        .where(eq(memories.id, oldId))
+        .returning()
+      await this.event(tx, oldId, 'update', snapshot(before, []), snapshot(after!, []), {
+        ...eventContext,
+        supersededBy: id,
+      })
+      await this.event(tx, id, 'create', null, snapshot((await this.rowOf(tx, id))!, []), {
+        ...eventContext,
+        supersedes: oldId,
+      })
+      return id
+    })
+  }
+
+  private async insertExtracted(tx: Tx, input: ExtractedInput): Promise<string> {
+    const sensitivity = 'public' as const
+    this.assertWritable(
+      { layer: input.layer, sensitivity, appId: null, personaId: null },
+      `没有权限写 ${input.layer} 层的记忆`,
+    )
+    await this.checkCredentialRefs(
+      tx,
+      { layer: input.layer, sensitivity, ownerAccountId: null, content: input.content },
+      null,
+    )
+    const id = randomUUID()
+    await tx.insert(memories).values({
+      id,
+      spaceId: this.ctx.spaceId,
+      form: 'extracted',
+      layer: input.layer,
+      sensitivity,
+      provenance: this.ctx.access.writeProvenance,
+      originScope: this.ctx.access.writeOriginScope,
+      subjectId: input.layer === 'subject' ? input.subjectId : null,
+      content: input.content,
+      expiresAt: input.expiresAt ?? null,
+    })
+    return id
+  }
+
+  private async rowOf(tx: Tx, id: string): Promise<MemoryRow | undefined> {
+    const [row] = await tx.select().from(memories).where(eq(memories.id, id))
+    return row
   }
 
   private seal(plaintext: string, id: string) {
@@ -1439,7 +1539,8 @@ export class MemoryService {
   // 记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
   // 只给应用主人与空间 owner（管理界面里 admin 就是空间 owner）看，别人只看到应用名。
   // checkMemory 为 true 时普通事件只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断。
-  // 「离开」的事件不看记忆现在的状态：离开之后，原来看得到它的人本来就读不到了
+  // 「离开」的事件不看记忆现在的状态：离开之后，原来看得到它的人本来就读不到了。
+  // 只列策展记忆的事件：抽取的记忆没有 URI，活动流与历史都按 URI 展示，它们另在对象页里看
   private eventRows(
     tx: Tx,
     where: SQL | undefined,
@@ -1471,6 +1572,7 @@ export class MemoryService {
       .where(
         and(
           where,
+          eq(memories.form, 'curated'),
           or(and(checkMemory ? this.manageable() : undefined, this.visibleEvent()), departure),
         ),
       )

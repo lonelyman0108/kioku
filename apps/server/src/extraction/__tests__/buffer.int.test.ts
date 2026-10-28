@@ -214,13 +214,10 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
     expect((await turns()).filter((r) => r.scope !== seed.scope)).toHaveLength(1)
   })
 
-  it('抽取任务：缓冲之后抽取模型的设置被清掉了，就把这一批丢掉；配着时留给抽取', async () => {
+  it('抽取任务：缓冲之后抽取模型的设置被清掉了，就把这一批丢掉，别的批不动', async () => {
     await turnEnd({ sessionId: 'a', context: direct('1001'), user: '一', reply: '嗯' })
     await turnEnd({ sessionId: 'b', context: direct('1002'), user: '二', reply: '嗯' })
     const [first, second] = await turns()
-    await processSession(database.db, masterKey, batch(first!.scope))
-    expect((await turns()).map((r) => r.scope)).toEqual([first!.scope, second!.scope])
-
     await clearExtractionConfig(database.db)
     await processSession(database.db, masterKey, batch(first!.scope))
     expect((await turns()).map((r) => r.scope)).toEqual([second!.scope])

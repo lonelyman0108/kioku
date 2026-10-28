@@ -1,5 +1,5 @@
 import type { TurnEndEvent } from '@kioku/contracts'
-import { and, count, eq, sql } from 'drizzle-orm'
+import { and, count, eq, lte, sql } from 'drizzle-orm'
 
 import type { KeySession } from '../access/session'
 import { withSpace, type Db } from '../db/client'
@@ -72,13 +72,21 @@ export async function bufferTurn(
   void deps.jobs?.enqueueExtraction(target, buffered >= BATCH_TURNS ? 0 : IDLE_SECONDS)
 }
 
-// 丢掉一批缓冲，返回删了几轮
-export async function dropBuffered(db: Db, target: BufferedSession): Promise<number> {
+// 丢掉一批缓冲，返回删了几轮。upTo 给了时只删到这一轮（含）为止：抽取期间新进来的留给它们排的任务
+export async function dropBuffered(
+  db: Db,
+  target: BufferedSession,
+  upTo?: number,
+): Promise<number> {
   const gone = await withSpace(db, target.spaceId, (tx) =>
     tx
       .delete(conversationTurns)
       .where(
-        and(eq(conversationTurns.appId, target.appId), eq(conversationTurns.scope, target.scope)),
+        and(
+          eq(conversationTurns.appId, target.appId),
+          eq(conversationTurns.scope, target.scope),
+          upTo === undefined ? undefined : lte(conversationTurns.id, upTo),
+        ),
       )
       .returning({ id: conversationTurns.id }),
   )
