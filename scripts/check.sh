@@ -57,7 +57,7 @@ fi
 
 # ---- python ----
 # sdks/ 与 plugins/ 下一层带 pyproject.toml 的目录各是一个 uv 项目：按锁文件装依赖（锁文件过期时失败），
-# 跑 ruff 与 pytest。lint 只装开发工具，不构建项目本身
+# 跑 ruff 与 pytest。开发工具放在各项目的 dev 依赖组里，lint 只装这一组，不构建项目本身
 tracked ':(glob)sdks/*/pyproject.toml' ':(glob)plugins/*/pyproject.toml'
 py_projects=()
 if [ "${#files[@]}" -gt 0 ]; then

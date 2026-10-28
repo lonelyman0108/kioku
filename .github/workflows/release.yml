@@ -28,7 +28,7 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
         with:
           version: 0.13.5
-          # 发布不读缓存：缓存由别的分支的运行写入
+          # 发布不用 uv 的缓存（setup-uv 在 tag 推送时本来也不用，这里写明）
           enable-cache: false
       - name: 准备工具
         run: scripts/ci/setup-tools.sh >> "$GITHUB_PATH"

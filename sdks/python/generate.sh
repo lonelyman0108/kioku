@@ -31,17 +31,17 @@ uvx --exclude-newer "$exclude_newer" --from "$generator" openapi-python-client g
   --output-path "$out/kioku_client" \
   --overwrite
 # 显式给配置：--check 时生成的代码在临时目录里，按路径找不到 SDK 的配置
-uv run --locked --project "$here" ruff format --quiet --config "$here/pyproject.toml" "$out/kioku_client"
+uv run --locked --only-group dev --project "$here" \
+  ruff format --quiet --config "$here/pyproject.toml" "$out/kioku_client"
 
 if $check; then
-  # 只和 git 跟踪的文件比：没提交的杂项（.DS_Store、__pycache__）不算，新生成却没 git add 的文件会报出来
+  # 和暂存区比，也就是要提交的内容：没跟踪的杂项（.DS_Store、__pycache__）不算，
+  # 重新生成了却没 git add 的改动、新文件与删掉的文件都会报出来
   tracked=$work/tracked
-  while IFS= read -r -d '' f; do
-    [ -e "$here/$f" ] || continue
-    mkdir -p "$tracked/$(dirname "$f")"
-    cp "$here/$f" "$tracked/$f"
-  done < <(git -C "$here" ls-files -z -- openapi.json kioku_client)
-  if ! diff -ru "$tracked" "$out"; then
+  git -C "$here" ls-files -z -- openapi.json kioku_client |
+    git -C "$here" checkout-index -z --stdin --prefix="$tracked/"
+  # 导出的文件按仓库里的路径放
+  if ! diff -ru "$tracked/$(git -C "$here" rev-parse --show-prefix)" "$out"; then
     echo "Python SDK 和服务端的接口不一致：跑一遍 sdks/python/generate.sh，把生成的改动一起提交" >&2
     exit 1
   fi
