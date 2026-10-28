@@ -27,11 +27,18 @@ export const CREDENTIAL_PLACEHOLDER_START = '{{cred:'
 export const CREDENTIAL_PLACEHOLDER =
   /\{\{cred:([a-z0-9][a-z0-9_-]{0,63})(?:#([a-z0-9][a-z0-9_-]{0,63}))?\}\}/
 
+// 空白字符逐个写出来（与 JS 的 \s 同一个集合）：服务端把这条规则的 source 原样交给 PostgreSQL，
+// 它的 \s 随数据库的 locale 变，全角空格、BOM 这类字符两边会判断得不一样
+const SPACE =
+  ' \\t\\n\\v\\f\\r\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'
+
 // 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符的不算），
 // 或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
 // （管理界面里由空间 owner 确认后可以强制）
-export const PLAINTEXT_CREDENTIAL =
-  /(?:password|passwd|密码|口令|token|api[_ -]?key|secret)\s*[:：=]\s*(?!\{\{cred:)\S|sk-[A-Za-z0-9]{16,}/i
+export const PLAINTEXT_CREDENTIAL = new RegExp(
+  `(?:password|passwd|密码|口令|token|api[_ -]?key|secret)[${SPACE}]*[:：=][${SPACE}]*(?!\\{\\{cred:)[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
+  'i',
+)
 
 // 凭据源的类型。Bitwarden 兼容的自建服务端也选 bitwarden
 export const CREDENTIAL_PROVIDER_KINDS = ['bitwarden', '1password', 'env', 'other'] as const

@@ -3,7 +3,7 @@ import { useToast } from '@nuxt/ui/composables'
 import type { ConsoleCredential, CredentialProvider } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
-import { useRoute } from 'vue-router'
+import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -16,6 +16,7 @@ import { credentialSourceLabels, providerKindLabels, restrictedAppsLabel } from 
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
+const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
 const { me, space } = useSession()
@@ -74,8 +75,17 @@ const deletedColumns = [
   { id: 'actions', header: '' },
 ]
 
-// 详情：每次打开都按 id 重新读，删除、修改之后拿到的是最新的一版
-const selectedId = ref<string | null>(null)
+// 详情：每次打开都按 id 重新读，删除、修改之后拿到的是最新的一版。打开的是哪一条记在地址里，
+// 从记忆正文里的凭据徽章点过来时直接打开它
+const selectedId = computed<string | null>({
+  get: () => (typeof route.query.id === 'string' ? route.query.id : null),
+  set: (id) => {
+    const query = { ...route.query }
+    if (id) query.id = id
+    else delete query.id
+    void router.replace({ query })
+  },
+})
 const selected = useQuery({
   queryKey: computed(() => ['credential', spaceId.value, selectedId.value] as const),
   queryFn: ({ queryKey: [, sid, id] }) => api.credential(sid, id!),
@@ -85,13 +95,13 @@ const detail = computed(() =>
   selected.data.value && selected.data.value.id === selectedId.value ? selected.data.value : null,
 )
 
-// 切换空间时关掉打开着的面板与窗口：里面的内容属于上一个空间
 const formOpen = ref(false)
 const editing = ref<ConsoleCredential | null>(null)
 const providerOpen = ref(false)
 const editingProvider = ref<CredentialProvider | null>(null)
+// 切换空间时关掉打开着的窗口：里面的内容属于上一个空间。详情不关，它记在地址里、跟着地址走：
+// 按浏览历史在两个空间的凭据之间前进后退时，地址里的 id 本来就是那个空间的
 watch(spaceId, () => {
-  selectedId.value = null
   formOpen.value = false
   providerOpen.value = false
   removing.value = null

@@ -62,6 +62,8 @@ export type CredentialVia = 'kioku_credential' | 'rest' | 'kioku_get'
 interface Binding {
   provider: { kind: CredentialProviderKind; name: string; instructions: string } | null
   method: string
+  // 托管的值这次访问能不能取到：给不给值与取法的文字都按它，免得各算一次对不上
+  revealable: boolean
 }
 
 // kioku_get 末尾列出的一条凭据：读者取不了的只标「无权查看或不存在」，不给凭据源与条目位置
@@ -74,7 +76,7 @@ export type PlaceholderCredential =
       source: 'hosted' | 'external'
       // 外部来源的条目位置
       location: string | null
-    } & Binding)
+    } & Pick<Binding, 'provider' | 'method'>)
 
 type CredentialRow = typeof credentials.$inferSelect
 type ProviderRow = typeof credentialProviders.$inferSelect
@@ -843,6 +845,7 @@ export class CredentialService {
           provider: null,
           method:
             '值由 Kioku 托管，这把 Key 不是 secret 级，取不到；需要时请主人在管理界面查看，或换一把 secret 级的 Key。',
+          revealable: false,
         }
       }
       return {
@@ -850,6 +853,7 @@ export class CredentialService {
         method: inline
           ? '值由 Kioku 托管，就在 values 里。'
           : '值由 Kioku 托管，用 kioku_credential 取。',
+        revealable: true,
       }
     }
     const provider = providers.get(row.providerId!)
@@ -857,11 +861,13 @@ export class CredentialService {
       return {
         provider: null,
         method: '这条凭据绑定的凭据源已被删除，取不到值；请主人在管理界面重新绑定。',
+        revealable: false,
       }
     }
     return {
       provider: { kind: provider.kind, name: provider.name, instructions: provider.instructions },
       method: externalMethod(provider.kind, row.location!, fields),
+      revealable: false,
     }
   }
 
@@ -875,14 +881,13 @@ export class CredentialService {
       }
       const names = fields.map((f) => f.name)
       const providers = await this.providersOf(tx, [row])
-      const { provider, method } = this.binding(row, providers, fields, true)
-      const reveal = row.source === 'hosted' && canRevealCredential(this.ctx.access, row)
+      const { provider, method, revealable } = this.binding(row, providers, fields, true)
       let values: Record<string, string> | null = null
-      if (reveal) {
+      if (revealable) {
         const all = this.open(row)
         values = Object.fromEntries(names.flatMap((n) => (n in all ? [[n, all[n]!]] : [])))
       }
-      if (reveal || row.source === 'external') {
+      if (revealable || row.source === 'external') {
         await this.event(tx, row.id, 'access', { via, fields: names })
       }
       return {
@@ -932,13 +937,16 @@ export class CredentialService {
             fields: row.fields.map((f) => f.name),
           })
         }
+        // revealable 是 use() 决定给不给值用的，不放进给 agent 看的列表
+        const { provider, method } = this.binding(row, providers, row.fields, false)
         result.push({
           identifier,
           available: true,
           name: row.name,
           source: row.source,
           location: row.source === 'external' ? row.location : null,
-          ...this.binding(row, providers, row.fields, false),
+          provider,
+          method,
         })
       }
       return result
