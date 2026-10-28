@@ -510,7 +510,8 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     ])
   }
 
-  // 按空间 owner 的管理界面权限写入，来源记为 system
+  // 按空间 owner 的管理界面权限写入，来源记为 system。正文里已有的凭据占位符照常检查（要解析到导入者的凭据），
+  // 但允许新增：这是主人自己把数据搬进自己的私人层，不是抽取或 Dream
   const service = new MemoryService({
     db,
     spaceId,
@@ -518,6 +519,7 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     personaId: 'all',
     masterKey: target.masterKey,
     actor: { accountId },
+    allowCredentialRefs: true,
   })
   for (const item of plan.memories) {
     const app = item.context.targetApp

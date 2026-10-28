@@ -52,7 +52,7 @@ describe('凭据占位符', () => {
 })
 
 describe('明文凭据提醒', () => {
-  it('「密码：…」「token = …」这类写法与 sk- 开头的长串算像有明文', () => {
+  it('「密码：…」「token = …」这类写法与 sk- 开头的长串算像有明文，值写在下一行的也算', () => {
     for (const text of [
       '密码：hunter2',
       'password = abc',
@@ -60,16 +60,19 @@ describe('明文凭据提醒', () => {
       'api_key=xyz',
       '口令 ：1234',
       `key sk-${'a'.repeat(20)}`,
+      '密码：\n  hunter2',
+      'password\n: hunter2',
     ]) {
       expect(looksLikePlaintextCredential(text), text).toBe(true)
     }
   })
 
-  it('后面跟着占位符、冒号后面没有值、或只是词的一部分的不算', () => {
+  it('后面跟着占位符（换行之后的也算）、冒号后面没有值、或只是词的一部分的不算', () => {
     for (const text of [
       '密码：{{cred:file-server#password}}',
       'token = {{cred:api#token}}',
-      '密码：\n见下一行',
+      'token =\n  {{cred:api#token}}',
+      '密码：',
       'tokenizer: 分词器',
       'sk-short',
     ]) {

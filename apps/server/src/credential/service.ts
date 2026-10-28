@@ -11,6 +11,7 @@ import {
   type CredentialField,
   type CredentialInfo,
   type CredentialProvider,
+  type CredentialProviderKind,
   type CredentialReferenceList,
   type CredentialSourceInput,
   type CredentialSourceUpdate,
@@ -57,20 +58,23 @@ export interface CredentialContext {
 // 取用经由哪里，记在访问事件里
 export type CredentialVia = 'kioku_credential' | 'rest' | 'kioku_get'
 
+// 给 agent 的取法（不含值）：外部来源的凭据源（已删除时为 null）与按来源给出的说明
+interface Binding {
+  provider: { kind: CredentialProviderKind; name: string; instructions: string } | null
+  method: string
+}
+
 // kioku_get 末尾列出的一条凭据：读者取不了的只标「无权查看或不存在」，不给凭据源与条目位置
 export type PlaceholderCredential =
   | { identifier: string; available: false }
-  | {
+  | ({
       identifier: string
       available: true
       name: string
       source: 'hosted' | 'external'
-      // 托管的：这把 Key 能不能取到值；外部的：凭据源、条目位置与取法（凭据源已删除时为 null）
-      revealable: boolean
-      provider: { kind: string; name: string } | null
+      // 外部来源的条目位置
       location: string | null
-      method: string
-    }
+    } & Binding)
 
 type CredentialRow = typeof credentials.$inferSelect
 type ProviderRow = typeof credentialProviders.$inferSelect
@@ -231,7 +235,8 @@ export class CredentialService {
       ...this.info(row, providers),
       appIds: row.appIds,
       deletedAt: row.deletedAt?.toISOString() ?? null,
-      referenceCount: references.get(row.identifier) ?? 0,
+      // 引用按标识解析到有效的那一条；已删除的这条不算被谁引用（同名的有效凭据可能正被引用着）
+      referenceCount: row.deletedAt ? 0 : (references.get(row.identifier) ?? 0),
     }
   }
 
@@ -600,6 +605,8 @@ export class CredentialService {
     this.requireRead()
     return this.run(async (tx) => {
       const row = await this.ownById(tx, id)
+      // 已删除的凭据不算被引用：同一个标识的引用解析到有效的那一条（见 consoleView）
+      if (row.deletedAt) return { items: [], truncated: false }
       const rows = await tx
         .select({
           id: memories.id,
@@ -822,7 +829,43 @@ export class CredentialService {
     })
   }
 
-  // 取用一条凭据，记一条访问事件：托管的给值（要 secret 级），外部的给凭据源、条目位置与取法
+  // 怎么取到这条凭据的值，kioku_credential 与 kioku_get 共用。托管的看这次访问能不能取值，
+  // inline 为 true 表示值就在这次的结果里；外部的给凭据源、主人写的使用说明与按类型的取法
+  private binding(
+    row: CredentialRow,
+    providers: Map<string, ProviderRow>,
+    fields: readonly CredentialField[],
+    inline: boolean,
+  ): Binding {
+    if (row.source === 'hosted') {
+      if (!canRevealCredential(this.ctx.access, row)) {
+        return {
+          provider: null,
+          method:
+            '值由 Kioku 托管，这把 Key 不是 secret 级，取不到；需要时请主人在管理界面查看，或换一把 secret 级的 Key。',
+        }
+      }
+      return {
+        provider: null,
+        method: inline
+          ? '值由 Kioku 托管，就在 values 里。'
+          : '值由 Kioku 托管，用 kioku_credential 取。',
+      }
+    }
+    const provider = providers.get(row.providerId!)
+    if (!provider || provider.deletedAt) {
+      return {
+        provider: null,
+        method: '这条凭据绑定的凭据源已被删除，取不到值；请主人在管理界面重新绑定。',
+      }
+    }
+    return {
+      provider: { kind: provider.kind, name: provider.name, instructions: provider.instructions },
+      method: externalMethod(provider.kind, row.location!, fields),
+    }
+  }
+
+  // 取用一条凭据：托管的给值（要 secret 级），外部的给凭据源、条目位置与取法。取到值或绑定时记一条访问事件
   async use(identifier: string, field: string | undefined, via: CredentialVia) {
     return this.run(async (tx): Promise<CredentialAccess> => {
       const row = await this.visibleByIdentifier(tx, identifier)
@@ -832,44 +875,21 @@ export class CredentialService {
       }
       const names = fields.map((f) => f.name)
       const providers = await this.providersOf(tx, [row])
-      const credential = this.info(row, providers)
-      if (row.source === 'hosted') {
-        if (!canRevealCredential(this.ctx.access, row)) {
-          return {
-            credential,
-            values: null,
-            provider: null,
-            method:
-              '值由 Kioku 托管，这把 Key 不是 secret 级，取不到；需要时请主人在管理界面查看，或换一把 secret 级的 Key。',
-            notice: CREDENTIAL_NOTICE,
-          }
-        }
+      const { provider, method } = this.binding(row, providers, fields, true)
+      const reveal = row.source === 'hosted' && canRevealCredential(this.ctx.access, row)
+      let values: Record<string, string> | null = null
+      if (reveal) {
         const all = this.open(row)
-        await this.event(tx, row.id, 'access', { via, fields: names })
-        return {
-          credential,
-          values: Object.fromEntries(names.flatMap((n) => (n in all ? [[n, all[n]!]] : []))),
-          provider: null,
-          method: '值由 Kioku 托管，就在 values 里。',
-          notice: CREDENTIAL_NOTICE,
-        }
+        values = Object.fromEntries(names.flatMap((n) => (n in all ? [[n, all[n]!]] : [])))
       }
-      await this.event(tx, row.id, 'access', { via, fields: names })
-      const provider = providers.get(row.providerId!)
-      if (!provider || provider.deletedAt) {
-        return {
-          credential,
-          values: null,
-          provider: null,
-          method: '这条凭据绑定的凭据源已被删除，取不到值；请主人在管理界面重新绑定。',
-          notice: CREDENTIAL_NOTICE,
-        }
+      if (reveal || row.source === 'external') {
+        await this.event(tx, row.id, 'access', { via, fields: names })
       }
       return {
-        credential,
-        values: null,
-        provider: { kind: provider.kind, name: provider.name, instructions: provider.instructions },
-        method: externalMethod(provider.kind, row.location!, fields),
+        credential: this.info(row, providers),
+        values,
+        provider,
+        method,
         notice: CREDENTIAL_NOTICE,
       }
     })
@@ -906,39 +926,19 @@ export class CredentialService {
           result.push({ identifier, available: false })
           continue
         }
-        if (row.source === 'hosted') {
-          const revealable = canRevealCredential(this.ctx.access, row)
-          result.push({
-            identifier,
-            available: true,
-            name: row.name,
-            source: 'hosted',
-            revealable,
-            provider: null,
-            location: null,
-            method: revealable
-              ? '值由 Kioku 托管，用 kioku_credential 取'
-              : '值由 Kioku 托管，这把 Key 不是 secret 级，取不到',
+        if (row.source === 'external') {
+          await this.event(tx, row.id, 'access', {
+            via: 'kioku_get' satisfies CredentialVia,
+            fields: row.fields.map((f) => f.name),
           })
-          continue
         }
-        await this.event(tx, row.id, 'access', {
-          via: 'kioku_get' satisfies CredentialVia,
-          fields: row.fields.map((f) => f.name),
-        })
-        const provider = providers.get(row.providerId!)
-        const live = provider && !provider.deletedAt ? provider : null
         result.push({
           identifier,
           available: true,
           name: row.name,
-          source: 'external',
-          revealable: false,
-          provider: live ? { kind: live.kind, name: live.name } : null,
-          location: row.location,
-          method: live
-            ? externalMethod(live.kind, row.location!, row.fields)
-            : '这条凭据绑定的凭据源已被删除，取不到值；请主人在管理界面重新绑定',
+          source: row.source,
+          location: row.source === 'external' ? row.location : null,
+          ...this.binding(row, providers, row.fields, false),
         })
       }
       return result

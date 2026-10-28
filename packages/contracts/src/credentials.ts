@@ -27,10 +27,11 @@ export const CREDENTIAL_PLACEHOLDER_START = '{{cred:'
 export const CREDENTIAL_PLACEHOLDER =
   /\{\{cred:([a-z0-9][a-z0-9_-]{0,63})(?:#([a-z0-9][a-z0-9_-]{0,63}))?\}\}/
 
-// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（后面跟着占位符的不算），或者 sk- 开头的长串。
-// 启发式规则，会误判：只用来提醒，以及挡住带着明文从 secret 降级（管理界面里由空间 owner 确认后可以强制）
+// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符的不算），
+// 或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
+// （管理界面里由空间 owner 确认后可以强制）
 export const PLAINTEXT_CREDENTIAL =
-  /(?:password|passwd|密码|口令|token|api[_ -]?key|secret)[ \t]*[:：=][ \t]*(?!\{\{cred:)\S|sk-[A-Za-z0-9]{16,}/i
+  /(?:password|passwd|密码|口令|token|api[_ -]?key|secret)\s*[:：=]\s*(?!\{\{cred:)\S|sk-[A-Za-z0-9]{16,}/i
 
 // 凭据源的类型。Bitwarden 兼容的自建服务端也选 bitwarden
 export const CREDENTIAL_PROVIDER_KINDS = ['bitwarden', '1password', 'env', 'other'] as const
