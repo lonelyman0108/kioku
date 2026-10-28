@@ -52,8 +52,9 @@ const groupItems = computed(() => {
       value: g.id,
       description: g.identities.map((i) => `${i.platform} ${i.externalId}`).join('、'),
     }))
-  return picked.value && !found.some((g) => g.value === picked.value!.value)
-    ? [picked.value, ...found]
+  const keep = picked.value
+  return keep && !taken.has(keep.value) && !found.some((g) => g.value === keep.value)
+    ? [keep, ...found]
     : found
 })
 const newGroup = ref<string | undefined>()
@@ -61,6 +62,22 @@ watch(newGroup, (id) => {
   picked.value = id ? (groupItems.value.find((g) => g.value === id) ?? picked.value) : null
 })
 const newPersona = ref<string | undefined>()
+// 换了应用（同一个页面实例）就清掉选了一半的；选中的群已经有了规则（别处加的）也清掉
+watch(
+  () => [props.spaceId, props.appId],
+  () => {
+    newGroup.value = undefined
+    newPersona.value = undefined
+  },
+)
+watch(
+  () => rules.data.value,
+  (data) => {
+    if (newGroup.value && data?.rules.some((r) => r.subjectId === newGroup.value)) {
+      newGroup.value = undefined
+    }
+  },
+)
 
 const current = (): GroupPersonaRule[] =>
   (rules.data.value?.rules ?? []).map(({ subjectId, personaId }) => ({ subjectId, personaId }))
@@ -71,11 +88,13 @@ async function save(next: GroupPersonaRule[], done: string): Promise<boolean> {
   const id = props.appId
   const key = ['group-personas', sid, id]
   saving.value = true
-  // 先取消还没回来的读取：它读到的是保存之前的规则，后到的话会盖掉保存的结果
-  await queryClient.cancelQueries({ queryKey: key })
   try {
+    // 先取消还没回来的读取：它读到的是保存之前的规则，后到的话会盖掉保存的结果
+    await queryClient.cancelQueries({ queryKey: key })
     const saved = await api.saveGroupPersonas(sid, id, { rules: next })
     queryClient.setQueryData(key, saved)
+    // 保存期间又开始的读取同样可能读到旧的：再读一次，进行中的旧读取会被取消
+    void queryClient.invalidateQueries({ queryKey: key })
     toast.add({ title: done, color: 'success' })
     return true
   } catch (err) {

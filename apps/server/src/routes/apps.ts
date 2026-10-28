@@ -413,6 +413,7 @@ export function appRoutes(deps: Deps) {
             .onConflictDoUpdate({
               target: [appGroupPersonas.appId, appGroupPersonas.subjectId],
               set: { personaId: sql`excluded.persona_id` },
+              setWhere: sql`${appGroupPersonas.personaId} is distinct from excluded.persona_id`,
             })
         }
         return groupPersonaRules(tx, appId)
