@@ -40,3 +40,14 @@ export const keyPresets: KeyPreset[] = [
     scopes: { readLayers: [...LAYERS], writeLayers: [], maxSensitivity: 'private', admin: false },
   },
 ]
+
+// 两组权限是否相同（层的先后不算）
+export function sameScopes(a: KeyScopes, b: KeyScopes): boolean {
+  const same = (x: Layer[], y: Layer[]) => x.length === y.length && x.every((l) => y.includes(l))
+  return (
+    a.maxSensitivity === b.maxSensitivity &&
+    a.admin === b.admin &&
+    same(a.readLayers, b.readLayers) &&
+    same(a.writeLayers, b.writeLayers)
+  )
+}

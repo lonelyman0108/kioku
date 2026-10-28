@@ -14,8 +14,9 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useCopy } from '../composables/useCopy'
 import { icons } from '../icons'
-import { layerLabels, sensitivityLabels } from '../labels'
-import { keyPresets } from './keyPresets'
+import { ADMIN_SCOPE_LABEL, layerLabels, sensitivityLabels } from '../labels'
+import KeyMatrix from './KeyMatrix.vue'
+import { keyPresets, sameScopes } from './keyPresets'
 
 const props = defineProps<{
   spaceId: string
@@ -116,13 +117,23 @@ async function revoke() {
 }
 
 const summary = (s: KeyScopes) =>
-  `读 ${s.readLayers.length} 层 · 写 ${s.writeLayers.length} 层 · 最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? ' · admin' : ''}`
+  `读 ${s.readLayers.length} 层 · 写 ${s.writeLayers.length} 层 · 最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? ` · ${ADMIN_SCOPE_LABEL}` : ''}`
+
+// 当前有效上限与签发上限不同时（主人被降级），或 Key 已经作废（主人离开了空间）时要说明
+function effectiveNote(key: KeyInfo): string | null {
+  if (key.revokedAt) return null
+  if (!key.effectiveScopes) return '已作废：应用主人已不在空间里'
+  if (sameScopes(key.scopes, key.effectiveScopes)) return null
+  return `当前有效：${summary(key.effectiveScopes)}（按主人现在的角色收紧）`
+}
+
+const inspecting = ref<KeyInfo | null>(null)
 </script>
 
 <template>
   <div class="space-y-3">
     <div class="flex items-center justify-between">
-      <h3 class="text-sm font-medium">API Key</h3>
+      <h2 class="text-sm font-medium">API Key</h2>
       <UButton
         v-if="canIssue"
         :icon="icons.add"
@@ -136,25 +147,40 @@ const summary = (s: KeyScopes) =>
       只有应用的主人能查看和签发它的 Key。
     </p>
     <ul v-else class="divide-y divide-default text-sm">
-      <li v-for="key in keys.data.value ?? []" :key="key.id" class="flex items-center gap-3 py-2">
-        <code>{{ key.prefix }}</code>
-        <span>{{ key.name }}</span>
-        <span class="text-muted">{{ summary(key.scopes) }}</span>
-        <UBadge v-if="key.revokedAt" color="neutral" variant="subtle">已吊销</UBadge>
-        <span v-else class="ml-auto text-xs text-muted">
-          {{
-            key.lastUsedAt ? `最近使用 ${new Date(key.lastUsedAt).toLocaleString()}` : '尚未使用'
-          }}
-        </span>
-        <UButton
-          v-if="!key.revokedAt"
-          :icon="icons.remove"
-          size="xs"
-          color="error"
-          variant="ghost"
-          aria-label="吊销"
-          @click="revoking = key"
-        />
+      <li v-for="key in keys.data.value ?? []" :key="key.id" class="space-y-1 py-2">
+        <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
+          <code>{{ key.prefix }}</code>
+          <span>{{ key.name }}</span>
+          <span class="text-muted">签发：{{ summary(key.scopes) }}</span>
+          <UBadge v-if="key.revokedAt" color="neutral" variant="subtle">已吊销</UBadge>
+          <!-- 右侧这组一起换行，窄屏上按钮不会和使用时间分开 -->
+          <div v-else class="ml-auto flex items-center gap-1">
+            <span class="mr-1 text-xs text-muted">
+              {{
+                key.lastUsedAt
+                  ? `最近使用 ${new Date(key.lastUsedAt).toLocaleString()}`
+                  : '尚未使用'
+              }}
+            </span>
+            <UButton
+              v-if="key.effectiveScopes"
+              :icon="icons.matrix"
+              size="xs"
+              variant="ghost"
+              aria-label="权限矩阵"
+              @click="inspecting = key"
+            />
+            <UButton
+              :icon="icons.remove"
+              size="xs"
+              color="error"
+              variant="ghost"
+              aria-label="吊销"
+              @click="revoking = key"
+            />
+          </div>
+        </div>
+        <p v-if="effectiveNote(key)" class="text-xs text-warning">{{ effectiveNote(key) }}</p>
       </li>
       <li v-if="keys.data.value?.length === 0" class="py-2 text-muted">还没有 Key。</li>
     </ul>
@@ -227,7 +253,7 @@ const summary = (s: KeyScopes) =>
             <USwitch
               v-if="isSpaceOwner"
               v-model="form.scopes.admin"
-              label="admin：可以写任何人格与应用命名空间下的记忆"
+              :label="`${ADMIN_SCOPE_LABEL}：可以写任何人格与应用命名空间下的记忆`"
             />
           </template>
         </form>
@@ -240,6 +266,17 @@ const summary = (s: KeyScopes) =>
             <UButton type="submit" form="issue-key" :loading="issuing">签发</UButton>
           </template>
         </div>
+      </template>
+    </UModal>
+
+    <UModal
+      :open="inspecting !== null"
+      :title="`权限矩阵 · ${inspecting?.name ?? ''}`"
+      :ui="{ content: 'sm:max-w-2xl' }"
+      @update:open="(v) => !v && (inspecting = null)"
+    >
+      <template #body>
+        <KeyMatrix v-if="inspecting" :space-id="spaceId" :app-id="appId" :key-id="inspecting.id" />
       </template>
     </UModal>
 

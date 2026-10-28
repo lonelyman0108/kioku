@@ -7,7 +7,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { personas, spaceMembers } from '../../db/schema'
+import { personas, spaceMembers, spaces } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
@@ -135,8 +135,8 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
     it('读出之后被并发删除的人格，修改返回 404 而不是 500', async () => {
       const persona = await ws.createPersona('doubao')
       const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
       try {
-        let pending!: Promise<Response>
         await side.begin(async (tx) => {
           await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
           await tx`select id from personas where id = ${persona.id} for update`
@@ -154,8 +154,10 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
           }
           await tx`delete from personas where id = ${persona.id}`
         })
-        expect((await pending).status).toBe(404)
+        expect((await pending!).status).toBe(404)
       } finally {
+        // 用例中途失败时也等发出的请求结束，免得它和下一个用例的清库交错
+        await pending?.catch(() => {})
         await side.end()
       }
     })
@@ -296,6 +298,22 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
     })
   })
 
+  it('成员列表给出名字与角色，只给本空间的成员看', async () => {
+    await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const res = await as('GET', '/members')
+    expect(res.status).toBe(200)
+    expect(
+      ((await res.json()) as { username: string; role: string }[]).map((m) => [m.username, m.role]),
+    ).toEqual([
+      ['alice', 'owner'],
+      ['eve', 'editor'],
+    ])
+    // 别的空间的成员看不到
+    const [other] = await database.db.insert(spaces).values({ name: '别处' }).returning()
+    const stranger = await addMember(database.db, other!.id, 'oscar', 'owner')
+    expect((await as('GET', '/members', undefined, stranger.cookie)).status).toBe(403)
+  })
+
   describe('Key', () => {
     const keysOf = async (appId: string, cookie = ws.cookie) =>
       (await (await as('GET', `/apps/${appId}/keys`, undefined, cookie)).json()) as KeyInfo[]
@@ -376,7 +394,9 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       // 不是主人时，不存在的 Key 也是 403：探不出 Key 在不在
       const made = `/apps/${bot.id}/keys/00000000-0000-4000-8000-000000000000/matrix`
       expect((await as('GET', made, undefined, editor.cookie)).status).toBe(403)
-      expect((await as('GET', made)).status).toBe(404)
+      expect(await errorOf(await as('GET', made))).toBe('Key 不存在')
+      const noApp = `/apps/00000000-0000-4000-8000-000000000000/keys/${key!.id}/matrix`
+      expect(await errorOf(await as('GET', noApp))).toBe('应用不存在')
       expect((await as('DELETE', `/apps/${bot.id}/keys/${key!.id}`)).status).toBe(204)
       expect((await as('GET', path)).status).toBe(404)
     })

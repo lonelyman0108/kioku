@@ -29,6 +29,15 @@ export type LoginRequest = z.infer<typeof LoginRequest>
 export const SpaceSummary = z.object({ id: z.uuid(), name: z.string(), role: MemberRole })
 export type SpaceSummary = z.infer<typeof SpaceSummary>
 
+// 空间成员：成员之间互相看得到名字与角色（活动里本来就显示操作者）
+export const MemberInfo = z.object({
+  accountId: z.uuid(),
+  username: z.string(),
+  displayName: z.string(),
+  role: MemberRole,
+})
+export type MemberInfo = z.infer<typeof MemberInfo>
+
 export const Me = z.object({
   id: z.uuid(),
   username: z.string(),

@@ -1,13 +1,12 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { RUNTIME_FAMILIES, type AppInfo, type RuntimeFamily } from '@kioku/contracts'
+import { RUNTIME_FAMILIES, type RuntimeFamily } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import AppKeys from '../components/AppKeys.vue'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 
@@ -18,9 +17,6 @@ const { me, space } = useSession()
 const spaceId = computed(() => String(route.params.spaceId))
 const role = computed(() => space.value?.role ?? 'viewer')
 const canCreate = computed(() => role.value === 'owner' || role.value === 'editor')
-// 应用的设置与 Key 只有应用主人能管，而且主人在空间里还得是 owner 或 editor（被降为 viewer 后就不能改了）
-const ownsApp = (app: { ownerAccountId: string }) =>
-  canCreate.value && app.ownerAccountId === me.data.value?.id
 
 const apps = useQuery({
   queryKey: computed(() => ['apps', spaceId.value]),
@@ -30,24 +26,22 @@ const personas = useQuery({
   queryKey: computed(() => ['personas', spaceId.value]),
   queryFn: () => api.personas(spaceId.value),
 })
+const members = useQuery({
+  queryKey: computed(() => ['members', spaceId.value]),
+  queryFn: () => api.members(spaceId.value),
+})
 const personaItems = computed(() => [
   { label: '不使用人格', value: null },
   ...(personas.data.value ?? []).map((p) => ({ label: p.name, value: p.id })),
 ])
 const runtimeItems = RUNTIME_FAMILIES.map((r) => ({ label: r, value: r }))
+const personaName = (id: string | null) =>
+  personas.data.value?.find((p) => p.id === id)?.name ?? '—'
+const ownerName = (id: string) =>
+  members.data.value?.find((m) => m.accountId === id)?.displayName ?? '—'
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
-}
-
-async function update(app: AppInfo, body: Parameters<typeof api.updateApp>[2]) {
-  try {
-    await api.updateApp(spaceId.value, app.id, body)
-    await queryClient.invalidateQueries({ queryKey: ['apps', spaceId.value] })
-    toast.add({ title: '已保存', color: 'success' })
-  } catch (err) {
-    failed(err, '保存失败')
-  }
 }
 
 const open = ref(false)
@@ -92,53 +86,47 @@ async function create() {
     <template #body>
       <p class="mb-4 text-sm text-muted">
         每个接入方（Claude Code、AstrBot 等）是一个应用。应用读写的私人层属于它的主人；Key
-        的权限在签发时决定，且不会超过主人当前的角色。
+        的权限在签发时决定，且不会超过主人当前的角色。点名称进入应用的设置、Key 与权限矩阵。
       </p>
-      <div class="space-y-4">
-        <UCard v-for="app in apps.data.value ?? []" :key="app.id">
-          <template #header>
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="font-medium">{{ app.name }}</span>
-              <code class="text-xs text-muted">app://{{ app.slug }}</code>
-              <UBadge variant="subtle">{{ app.runtimeFamily }}</UBadge>
-              <UBadge v-if="ownsApp(app)" color="primary" variant="subtle">我的</UBadge>
-            </div>
-          </template>
-          <div class="space-y-4">
-            <div v-if="ownsApp(app)" class="grid gap-4 sm:grid-cols-2">
-              <UFormField label="默认人格" help="这个应用读写哪个人格的设定">
-                <USelect
-                  :model-value="app.defaultPersonaId"
-                  :items="personaItems"
-                  class="w-full"
-                  @update:model-value="
-                    (v) => update(app, { defaultPersonaId: (v as string | null) ?? null })
-                  "
-                />
-              </UFormField>
-              <UFormField
-                label="主人私聊提升"
-                help="平台账号认出是主人时，私聊可读到主人画像（内部级）"
-              >
-                <USwitch
-                  :model-value="app.config.elevateOwnerDirect === 'internal'"
-                  @update:model-value="
-                    (v) => update(app, { config: v ? { elevateOwnerDirect: 'internal' } : {} })
-                  "
-                />
-              </UFormField>
-            </div>
-            <AppKeys
-              :space-id="spaceId"
-              :app-id="app.id"
-              :is-app-owner="app.ownerAccountId === me.data.value?.id"
-              :can-issue="ownsApp(app)"
-              :is-space-owner="role === 'owner'"
-            />
-          </div>
-        </UCard>
-        <p v-if="apps.data.value?.length === 0" class="text-sm text-muted">还没有应用。</p>
-      </div>
+      <UTable
+        :data="apps.data.value ?? []"
+        :loading="apps.isPending.value"
+        :columns="[
+          { accessorKey: 'name', header: '名称' },
+          { accessorKey: 'slug', header: '标识' },
+          { accessorKey: 'runtimeFamily', header: '运行时' },
+          {
+            id: 'persona',
+            header: '默认人格',
+            cell: ({ row }) => personaName(row.original.defaultPersonaId),
+          },
+          {
+            id: 'owner',
+            header: '主人',
+            cell: ({ row }) => ownerName(row.original.ownerAccountId),
+          },
+        ]"
+        empty="还没有应用"
+      >
+        <template #name-cell="{ row }">
+          <RouterLink
+            :to="{ name: 'app', params: { spaceId, appId: row.original.id } }"
+            class="font-medium text-primary hover:underline"
+            >{{ row.original.name }}</RouterLink
+          >
+          <UBadge
+            v-if="row.original.ownerAccountId === me.data.value?.id"
+            class="ml-2"
+            color="primary"
+            variant="subtle"
+            size="sm"
+            >我的</UBadge
+          >
+        </template>
+        <template #slug-cell="{ row }">
+          <code class="text-xs">app://{{ row.original.slug }}</code>
+        </template>
+      </UTable>
     </template>
   </UDashboardPanel>
 

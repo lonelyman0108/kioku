@@ -17,12 +17,15 @@ import {
   EmbeddingTestResult,
   GlossaryIndex,
   HealthResponse,
+  KeyAccessMatrix,
   KeyInfo,
   Me,
+  MemberInfo,
   MemoryChildren,
   MemoryHistory,
   MemoryList,
   MemoryView,
+  PersonaDetail,
   PersonaInfo,
   SetupStatus,
   SpaceOverview,
@@ -42,6 +45,7 @@ import {
   type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
   type UpdateMemoryRequest,
+  type UpdatePersonaRequest,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -63,6 +67,14 @@ export const api = {
     spaceId: string,
     body: Partial<CreatePersonaRequest> & Pick<CreatePersonaRequest, 'slug' | 'name'>,
   ) => request('POST', `/spaces/${spaceId}/personas`, { body, schema: PersonaInfo }),
+  persona: (spaceId: string, personaId: string) =>
+    request('GET', `/spaces/${spaceId}/personas/${personaId}`, { schema: PersonaDetail }),
+  updatePersona: (spaceId: string, personaId: string, body: UpdatePersonaRequest) =>
+    request('PATCH', `/spaces/${spaceId}/personas/${personaId}`, { body, schema: PersonaInfo }),
+  deletePersona: (spaceId: string, personaId: string) =>
+    request('DELETE', `/spaces/${spaceId}/personas/${personaId}`),
+  members: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/members`, { schema: z.array(MemberInfo) }),
 
   apps: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),
@@ -72,12 +84,18 @@ export const api = {
   ) => request('POST', `/spaces/${spaceId}/apps`, { body, schema: AppInfo }),
   updateApp: (spaceId: string, appId: string, body: UpdateAppRequest) =>
     request('PATCH', `/spaces/${spaceId}/apps/${appId}`, { body, schema: AppInfo }),
+  deleteApp: (spaceId: string, appId: string) =>
+    request('DELETE', `/spaces/${spaceId}/apps/${appId}`),
   keys: (spaceId: string, appId: string) =>
     request('GET', `/spaces/${spaceId}/apps/${appId}/keys`, { schema: z.array(KeyInfo) }),
   createKey: (spaceId: string, appId: string, body: CreateKeyRequest) =>
     request('POST', `/spaces/${spaceId}/apps/${appId}/keys`, { body, schema: CreatedKey }),
   revokeKey: (spaceId: string, appId: string, keyId: string) =>
     request('DELETE', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}`),
+  keyMatrix: (spaceId: string, appId: string, keyId: string) =>
+    request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/matrix`, {
+      schema: KeyAccessMatrix,
+    }),
 
   memory: (spaceId: string, uri: string) =>
     request('GET', `/spaces/${spaceId}/memories`, { query: { uri }, schema: MemoryView }),

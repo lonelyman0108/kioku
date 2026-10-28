@@ -1,8 +1,10 @@
 import type {
+  AccessContext,
   AppInfo,
   CredentialProviderKind,
   CredentialSource,
   EventActor,
+  KeyAccessMatrix,
   Layer,
   Provenance,
   Sensitivity,
@@ -37,6 +39,26 @@ export const sensitivityLabels: Record<Sensitivity, string> = {
   private: '私密',
   secret: '机密',
 }
+
+// Key 的 admin 在界面上不叫 admin，免得被当成空间管理员
+export const ADMIN_SCOPE_LABEL = '跨人格 / 应用写入'
+
+export const accessContextLabels: Record<AccessContext, string> = {
+  none: '无上下文（本机 agent）',
+  direct: '陌生人私聊',
+  owner_direct: '主人私聊',
+  group: '群聊',
+  cron: '定时任务 / 子 agent',
+}
+
+// 权限矩阵里「读得到哪些来源作用域写下的记忆」
+export const originScopeLabels: Record<KeyAccessMatrix['contexts'][number]['originScope'], string> =
+  {
+    any: '不限来源',
+    app: '只含全局与本应用写下的',
+    group: '只含全局、本应用与本群里写下的',
+    direct: '只含全局、本应用与和此人的对话里写下的',
+  }
 
 // 按 URI 直接新建时可选的层：persona:// 与 app:// 由 URI 决定，对象与情节层由对话抽取写入
 export const creatableLayers: Layer[] = ['base', 'owner', 'private']
