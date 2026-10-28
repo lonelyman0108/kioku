@@ -7,6 +7,9 @@ import type {
   MemoryView,
 } from '@kioku/contracts'
 
+import { CREDENTIAL_NOTICE } from '../credential/methods'
+import type { PlaceholderCredential } from '../credential/service'
+
 // MCP 工具结果给模型读，用紧凑的文本而不是 JSON
 export function formatMemory(m: MemoryView): string {
   const lines = [
@@ -83,4 +86,31 @@ export function formatCredentialList(list: KeyCredentialList): string {
 
 export function formatCredentialSummary(verb: string, c: CredentialSummary): string {
   return `${verb}凭据 ${c.identifier}（${c.name}）：${sourceLabel(c)}，字段 ${c.fields.join('、')}，版本 ${c.version}`
+}
+
+export const PLAINTEXT_REMINDER =
+  '提醒：正文像有明文密码或 Token。凭据用 kioku_credential_save 存起来，正文里换成 {{cred:<标识>#<字段>}} 占位符。'
+
+// kioku_get 末尾的凭据列表：读者取不了的只标「无权查看或不存在」。取法与使用说明可能有好几行，
+// 续行缩进，免得和下一条混在一起
+export function formatPlaceholderCredentials(items: PlaceholderCredential[]): string {
+  const rows = items.map((c) => {
+    if (!c.available) return `- ${c.identifier}：无权查看或不存在`
+    const where =
+      c.source === 'hosted'
+        ? 'Kioku 托管'
+        : c.provider
+          ? `凭据源「${c.provider.name}」（${c.provider.kind}），条目 ${JSON.stringify(c.location)}`
+          : '外部凭据源'
+    const details = [`取法：${c.method}`]
+    if (c.provider?.instructions) details.push(`凭据源的使用说明：${c.provider.instructions}`)
+    const indented = details.flatMap((d) => d.split('\n')).map((line) => `  ${line}`)
+    return [`- ${c.identifier}（${c.name}）：${where}`, ...indented].join('\n')
+  })
+  return [
+    '正文里引用的凭据（用到时才用 kioku_credential 取，取到的值不要写回记忆，也不要显示在回复里）：',
+    ...rows,
+    '',
+    CREDENTIAL_NOTICE,
+  ].join('\n')
 }

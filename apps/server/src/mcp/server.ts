@@ -9,12 +9,14 @@ import {
   Layer,
   MemoryUri,
   PlainLayer,
+  type MemoryView,
   RecallRequest,
   Sensitivity,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
+import { looksLikePlaintextCredential, placeholderIdentifiers } from '../credential/placeholders'
 import type { CredentialService } from '../credential/service'
 import type { RecallScope } from '../lifecycle/scope'
 import { GUIDANCE } from '../lifecycle/lifecycle'
@@ -29,6 +31,8 @@ import {
   formatCredentialSummary,
   formatDomains,
   formatMemory,
+  formatPlaceholderCredentials,
+  PLAINTEXT_REMINDER,
 } from './format'
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
@@ -51,6 +55,14 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const issue = result.error.issues[0]
   const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
   throw new MemoryError(400, `${where}${issue?.message ?? '参数格式错误'}`)
+}
+
+// 写入的正文像有明文密码或 Token 时，在结果后面提醒换成占位符（规则与导入工具的提醒相同）
+function withPlaintextReminder(view: MemoryView): string {
+  const text = formatMemory(view)
+  return view.content && looksLikePlaintextCredential(view.content)
+    ? `${text}\n\n${PLAINTEXT_REMINDER}`
+    : text
 }
 
 interface CredentialSourceArgs {
@@ -121,7 +133,18 @@ export function buildMcpServer(
       inputSchema: { uri: MemoryUri.describe('记忆 URI，例如 core://agent') },
       annotations: { readOnlyHint: true },
     },
-    ({ uri }) => tool(async () => formatMemory(await memory.get(uri))),
+    ({ uri }) =>
+      tool(async () => {
+        const view = await memory.get(uri)
+        // 占位符按记忆的主人解析：只有私人层的记忆能引用凭据，主人就是读者自己
+        const identifiers = [...placeholderIdentifiers(view.content ?? '')]
+        if (!identifiers.length) return formatMemory(view)
+        const found =
+          view.layer === 'private'
+            ? await credentials.forPlaceholders(identifiers)
+            : identifiers.map((identifier) => ({ identifier, available: false as const }))
+        return `${formatMemory(view)}\n\n${formatPlaceholderCredentials(found)}`
+      }),
   )
 
   server.registerTool(
@@ -159,7 +182,7 @@ export function buildMcpServer(
     },
     (args) =>
       tool(async () =>
-        formatMemory(
+        withPlaintextReminder(
           await memory.create({
             uri: args.uri,
             content: args.content,
@@ -194,7 +217,7 @@ export function buildMcpServer(
     },
     (args) =>
       tool(async () =>
-        formatMemory(
+        withPlaintextReminder(
           await memory.update({
             uri: args.uri,
             ...(args.content !== undefined ? { content: args.content } : {}),

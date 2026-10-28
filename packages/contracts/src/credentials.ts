@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { EventActor } from './console'
+import { Sensitivity } from './memory'
 
 // 凭据的标识与字段名。记忆正文里用 {{cred:<标识>}} 引用整条凭据，{{cred:<标识>#<字段>}} 引用其中一个字段
 export const CREDENTIAL_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -19,6 +20,18 @@ export const CredentialFieldName = z
 
 // 一条凭据最多这么多个字段
 export const MAX_CREDENTIAL_FIELDS = 32
+
+// 记忆正文里的凭据占位符。正文里任何位置出现 {{cred: 都算引用（代码里的也算），格式不对时拒绝写入；
+// 要在正文里写到这种写法时去掉花括号。这里不带 g 标记，要找出全部时用它的 source 另建
+export const CREDENTIAL_PLACEHOLDER_START = '{{cred:'
+export const CREDENTIAL_PLACEHOLDER =
+  /\{\{cred:([a-z0-9][a-z0-9_-]{0,63})(?:#([a-z0-9][a-z0-9_-]{0,63}))?\}\}/
+
+// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符的不算），
+// 或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
+// （管理界面里由空间 owner 确认后可以强制）
+export const PLAINTEXT_CREDENTIAL =
+  /(?:password|passwd|密码|口令|token|api[_ -]?key|secret)\s*[:：=]\s*(?!\{\{cred:)\S|sk-[A-Za-z0-9]{16,}/i
 
 // 凭据源的类型。Bitwarden 兼容的自建服务端也选 bitwarden
 export const CREDENTIAL_PROVIDER_KINDS = ['bitwarden', '1password', 'env', 'other'] as const
@@ -71,11 +84,13 @@ export type CredentialInfo = z.infer<typeof CredentialInfo>
 export const CredentialSummary = CredentialBase.extend({ fields: z.array(z.string()) })
 export type CredentialSummary = z.infer<typeof CredentialSummary>
 
-// 管理界面看到的：再加上限定给哪些应用与删除时间
+// 管理界面看到的：再加上限定给哪些应用、删除时间与引用数
 export const ConsoleCredential = CredentialInfo.extend({
   // 只给这些应用用；null 表示不限定
   appIds: z.array(z.uuid()).nullable(),
   deletedAt: z.string().nullable(),
+  // 正文里引用这个标识的有效记忆数（不含 secret 的）；大于 0 时删不掉
+  referenceCount: z.number().int(),
 })
 export type ConsoleCredential = z.infer<typeof ConsoleCredential>
 
@@ -196,6 +211,21 @@ export const KeyDeleteCredentialQuery = z.object({
   identifier: CredentialIdentifier,
   expectedVersion: z.coerce.number().int().optional(),
 })
+
+// 引用一条凭据的记忆：凭据主人私人层里没删除、不是 secret、仍有效的
+export const CredentialReference = z.object({
+  id: z.uuid(),
+  uri: z.string(),
+  sensitivity: Sensitivity,
+  updatedAt: z.string(),
+})
+export type CredentialReference = z.infer<typeof CredentialReference>
+
+export const CredentialReferenceList = z.object({
+  items: z.array(CredentialReference),
+  truncated: z.boolean(),
+})
+export type CredentialReferenceList = z.infer<typeof CredentialReferenceList>
 
 // 管理界面查看托管的值（记一条访问事件）
 export const CredentialValues = z.object({ values: z.record(z.string(), z.string()) })

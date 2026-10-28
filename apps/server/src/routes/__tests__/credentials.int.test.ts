@@ -746,6 +746,33 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     }
   })
 
+  it('撤销删除的检查之后被别的请求恢复了，409 说明已经恢复', async () => {
+    const created = await createCredential(hosted())
+    await ok(await asMember('DELETE', `/credentials/${created.id}`), 204)
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    try {
+      let pending!: Promise<Response>
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select id from credentials where id = ${created.id} for update`
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending = Promise.resolve(asMember('POST', `/credentials/${created.id}/undelete`))
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where ${pid}::int = any(pg_blocking_pids(pid))`
+          if (row!.n > 0) break
+          if (i >= 80) throw new Error('请求没有等在凭据的行锁上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        await tx`update credentials set deleted_at = null, version = version + 1 where id = ${created.id}`
+      })
+      expect(await errorOf(await pending, 409)).toBe('这条凭据刚被别的请求恢复了')
+    } finally {
+      await side.end()
+    }
+  })
+
   it('删凭据源期间新建的绑定会等它结束，读到已删除就是 404', async () => {
     const provider = await createProvider()
     const created = await raceOnProvider(

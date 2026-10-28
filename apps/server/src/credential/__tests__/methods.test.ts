@@ -24,9 +24,11 @@ describe('外部来源的取法', () => {
       externalMethod('env', 'unused', [{ name: 'token', sourceField: 'API_TOKEN' }]),
     ).toContain("token 用 printenv 'API_TOKEN'")
     const other = externalMethod('other', 'router admin', fields)
-    expect(other).toContain("条目 'router admin'；password → 'password'，token → 'API token'")
+    expect(other).toContain("条目 'router admin'")
+    // 字段对应只写一遍，来源字段放在单引号里
     expect(other).toContain(
-      '字段对应（占位符字段 → 条目里的字段）：password → "password"，token → "API token"',
+      "字段对应（占位符字段 → 条目里的字段）：password → 'password'，token → 'API token'",
     )
+    expect(other.match(/API token/g)).toHaveLength(1)
   })
 })

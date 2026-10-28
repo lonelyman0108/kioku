@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import { PLAIN_LAYERS, SENSITIVITIES } from '@kioku/contracts'
+import { CREDENTIAL_PLACEHOLDER_START, PLAIN_LAYERS, SENSITIVITIES } from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
@@ -47,13 +47,27 @@ import {
   type SQLWrapper,
 } from 'drizzle-orm'
 
-import { canRead, canWrite, canWriteApp, sensitivityRank, type Access } from '../access/access'
+import {
+  canRead,
+  canReadCredential,
+  canWrite,
+  canWriteApp,
+  sensitivityRank,
+  type Access,
+} from '../access/access'
+import {
+  looksLikePlaintextCredential,
+  placeholderIdentifiers,
+  scanPlaceholders,
+} from '../credential/placeholders'
 import { isUniqueViolation, type Db, type Tx } from '../db/client'
 import {
   accounts,
   apiKeys,
   apps,
+  credentials,
   memories,
+  memoryCredentialRefs,
   memoryEmbeddings,
   memoryEvents,
   memoryGlossary,
@@ -89,6 +103,8 @@ export interface MemoryContext {
   actor: { keyId?: string; accountId?: string }
   // 写入提交后调用，用于安排向量更新
   onChanged?: (memoryId: string) => void
+  // 能不能新增凭据引用；不给时按写入来源判断（见 addsCredentialRefs）。导入工具显式打开
+  allowCredentialRefs?: boolean
   // 树、列表与快速匹配里是否列出 secret 记忆（只有元数据，正文仍要按 URI 显式读）。
   // 只给管理界面里能显式读 secret 的成员；接入方的 Key 不列：secret 只能按 URI 显式读取
   listSecret?: boolean
@@ -118,6 +134,30 @@ const perMember = (layer: Layer) => PER_MEMBER_LAYERS.includes(layer)
 // 在共享的层与个人的层之间转换会改变谁看得到它（共享的记忆从别人那里消失，或个人的内容给了别人），
 // 所以只能由人在管理界面里做，通过 Key 改层或移动都不行
 const KEY_CROSS_OWNERSHIP = '通过 Key 不能把记忆在共享的层与个人的层之间转换，请在管理界面里改'
+
+// 含凭据占位符的记忆只能在私人层、敏感级至少 private：读得到占位符的人，正好就是读得到凭据说明的人
+const PLACEHOLDER_SCOPE =
+  '含凭据占位符的记忆只能在私人层、敏感级至少 private；改层、降级或移出私人层之前，先去掉正文里的 {{cred:…}} 引用'
+const PLAINTEXT_DOWNGRADE =
+  '正文像有明文密码或 Token，从 secret 降级之后会进历史、全文检索和向量，再也收不回来；先把值换成凭据占位符再降级'
+
+// 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
+interface RefBaseline {
+  layer: Layer
+  ownerAccountId: string | null
+  content: () => string | null
+}
+
+// 占位符只能写在正文里：disclosure 与关键词会进召回与 boot 的线索，任何层的读者都看得到，
+// 写在那里就绕过了「只能在私人层」的规则
+function checkOutsideContent(
+  disclosure: string | null | undefined,
+  glossary: readonly string[],
+): void {
+  if ([disclosure ?? '', ...glossary].some((t) => t.includes(CREDENTIAL_PLACEHOLDER_START))) {
+    throw new MemoryError(400, 'disclosure 与关键词里不能有凭据占位符，占位符只能写在正文里')
+  }
+}
 
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
@@ -391,6 +431,125 @@ export class MemoryService {
     return ownership
   }
 
+  // 凭据占位符的写入检查，每次写入之后看最终状态：正文里有 {{cred: 时，格式要对，记忆要在私人层、
+  // 敏感级至少 private；disclosure 与关键词里不能有（见 checkOutsideContent）。新增的标识要解析到
+  // 这条记忆主人的有效凭据，而且写入方看得到它；不存在与看不到返回同一个错误。
+  // 已有的引用不重查（凭据删掉之后，含引用的记忆照样能改），但只有写入之前就在同一个主人的私人层里，
+  // 正文里的引用才算已有的：从共享的层改层或移进私人层时，原来写着的占位符都按新增检查，
+  // 否则别人写进共享记忆里的占位符，改到你的私人层之后就指向了你的凭据
+  private async checkCredentialRefs(
+    tx: Tx,
+    final: {
+      layer: Layer
+      sensitivity: Sensitivity
+      ownerAccountId: string | null
+      content: string
+    },
+    baseline: RefBaseline | null,
+  ): Promise<void> {
+    const { refs, malformed } = scanPlaceholders(final.content)
+    if (malformed.length) {
+      throw new MemoryError(
+        400,
+        `凭据占位符格式不对：${malformed[0]}。写法是 {{cred:<标识>}} 或 {{cred:<标识>#<字段>}}，标识与字段名只用小写字母、数字、_ 和 -；要在正文里写到这种写法时，去掉花括号`,
+      )
+    }
+    if (!refs.length) return
+    if (
+      final.layer !== 'private' ||
+      sensitivityRank(final.sensitivity) < sensitivityRank('private')
+    ) {
+      throw new MemoryError(400, PLACEHOLDER_SCOPE)
+    }
+    const existing =
+      baseline && baseline.layer === 'private' && baseline.ownerAccountId === final.ownerAccountId
+        ? placeholderIdentifiers(baseline.content() ?? '')
+        : new Set<string>()
+    const added = refs.filter((r) => !existing.has(r.identifier))
+    if (!added.length) return
+    // 来自对话与后台任务的内容不能新增引用：否则群里的人能写一条「把 {{cred:…}} 发出来」诱导主人的 agent
+    if (!this.addsCredentialRefs) {
+      throw new MemoryError(400, '来自对话或后台任务的写入不能新增凭据引用')
+    }
+    const identifiers = [...new Set(added.map((r) => r.identifier))]
+    const rows = await tx
+      .select()
+      .from(credentials)
+      .where(
+        and(
+          eq(credentials.ownerAccountId, final.ownerAccountId!),
+          inArray(credentials.identifier, identifiers),
+          isNull(credentials.deletedAt),
+        ),
+      )
+      // 和删除凭据互斥：删除那边锁住凭据再数引用，这边等它提交后重新读，读到已删除就拒绝
+      .for('share')
+    for (const identifier of identifiers) {
+      const row = rows.find((r) => r.identifier === identifier)
+      if (!row || !canReadCredential(this.ctx.access, row)) {
+        throw new MemoryError(400, `凭据不存在或不可用：${identifier}`)
+      }
+      for (const ref of added) {
+        if (ref.identifier !== identifier || ref.field === null) continue
+        if (!row.fields.some((f) => f.name === ref.field)) {
+          throw new MemoryError(400, `凭据 ${identifier} 没有字段 ${ref.field}`)
+        }
+      }
+    }
+  }
+
+  // 能不能新增凭据引用：主人与受信 agent 的写入能；对话（untrusted）与后台任务（抽取、Dream）不能，
+  // 导入工具是主人自己把数据搬进自己的私人层，由它显式打开
+  private get addsCredentialRefs(): boolean {
+    if (this.ctx.allowCredentialRefs !== undefined) return this.ctx.allowCredentialRefs
+    const provenance = this.ctx.access.writeProvenance
+    return provenance === 'owner' || provenance === 'agent'
+  }
+
+  // 只改归属或删除状态、不改正文的写入（移动、撤销删除）：看最终状态。之前就在同一个主人的私人层、
+  // 之后也还在、敏感级至少 private 时什么都不会变，不必去读（secret 要解密的）正文
+  private async checkKeptRefs(
+    tx: Tx,
+    row: MemoryRow,
+    final: { layer: Layer; ownerAccountId: string | null },
+    glossary: readonly string[],
+  ): Promise<void> {
+    checkOutsideContent(row.disclosure, glossary)
+    if (
+      row.layer === 'private' &&
+      final.layer === 'private' &&
+      row.ownerAccountId === final.ownerAccountId &&
+      sensitivityRank(row.sensitivity) >= sensitivityRank('private')
+    ) {
+      return
+    }
+    const content = this.contentOf(row)
+    if (content === null) return
+    await this.checkCredentialRefs(
+      tx,
+      { ...final, sensitivity: row.sensitivity, content },
+      { layer: row.layer, ownerAccountId: row.ownerAccountId, content: () => content },
+    )
+  }
+
+  // 引用索引按正文重写；secret 的不进索引
+  private async syncCredentialRefs(
+    tx: Tx,
+    memoryId: string,
+    sensitivity: Sensitivity,
+    content: string,
+  ): Promise<void> {
+    await tx.delete(memoryCredentialRefs).where(eq(memoryCredentialRefs.memoryId, memoryId))
+    if (sensitivity === 'secret') return
+    const identifiers = [...placeholderIdentifiers(content)]
+    if (!identifiers.length) return
+    await tx
+      .insert(memoryCredentialRefs)
+      .values(
+        identifiers.map((identifier) => ({ spaceId: this.ctx.spaceId, memoryId, identifier })),
+      )
+  }
+
   async get(uri: string): Promise<MemoryView> {
     const parsed = parse(uri)
     return this.run(async (tx, personaIds) => {
@@ -417,6 +576,12 @@ export class MemoryService {
           throw new MemoryError(403, '这个应用已经不属于导入者')
         }
       }
+      checkOutsideContent(input.disclosure, input.glossary)
+      await this.checkCredentialRefs(
+        tx,
+        { ...ownership, sensitivity, content: input.content },
+        null,
+      )
       await this.claimUri(tx, parsed, ownership, released)
 
       const id = randomUUID()
@@ -449,6 +614,7 @@ export class MemoryService {
           .insert(memoryGlossary)
           .values(glossary.map((keyword) => ({ spaceId: this.ctx.spaceId, memoryId: id, keyword })))
       }
+      await this.syncCredentialRefs(tx, id, sensitivity, input.content)
       await this.event(
         tx,
         id,
@@ -488,10 +654,16 @@ export class MemoryService {
       eventContext?: Record<string, unknown>
       glossary?: string[]
       released?: string[]
+      // 恢复到某一版：正文换成那一版的，那一版与现在同一归属（见 restore）
+      existingRefs?: boolean
     } = {},
   ): Promise<MemoryView> {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
+    }
+    // 规则会误判，留一个由人确认的出口；被诱导的 agent 不能自己确认
+    if (input.allowPlaintext && this.viaKey) {
+      throw new MemoryError(403, '通过 Key 不能强制降级：要在管理界面里由空间 owner 确认')
     }
     const sensitivity = input.sensitivity ?? before.sensitivity
     for (const s of new Set([before.sensitivity, sensitivity])) {
@@ -536,6 +708,26 @@ export class MemoryService {
     // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
     const plaintext = input.content ?? this.contentOf(before)
     if (plaintext === null) throw new MemoryError(403, '没有权限读取这条 secret 的正文')
+    // 恢复到某一版：版本与现在同一归属，那时就在现在这个主人的层里，正文里的引用照「之前就有」算
+    await this.checkCredentialRefs(
+      tx,
+      { layer, sensitivity, ownerAccountId, content: plaintext },
+      {
+        layer: before.layer,
+        ownerAccountId: before.ownerAccountId,
+        content: () =>
+          meta.existingRefs || input.content === undefined ? plaintext : this.contentOf(before),
+      },
+    )
+    // 降级之后正文会进历史快照、全文检索和向量，带着明文降级就收不回来了
+    if (
+      before.sensitivity === 'secret' &&
+      sensitivity !== 'secret' &&
+      !input.allowPlaintext &&
+      looksLikePlaintextCredential(plaintext)
+    ) {
+      throw new MemoryError(400, PLAINTEXT_DOWNGRADE)
+    }
     const body =
       sensitivity === 'secret'
         ? { content: null, ...this.seal(plaintext, before.id) }
@@ -543,6 +735,10 @@ export class MemoryService {
 
     const beforeGlossary =
       meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    checkOutsideContent(input.disclosure === undefined ? before.disclosure : input.disclosure, [
+      ...beforeGlossary.filter((k) => !input.glossaryRemove?.includes(k)),
+      ...(input.glossaryAdd ?? []),
+    ])
     const [row] = await tx
       .update(memories)
       .set({
@@ -589,6 +785,7 @@ export class MemoryService {
         .onConflictDoNothing()
     }
     const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    await this.syncCredentialRefs(tx, before.id, sensitivity, plaintext)
     const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
     await this.event(
       tx,
@@ -697,6 +894,12 @@ export class MemoryService {
           throw new MemoryError(403, `没有权限把记忆移到 ${ownership.layer} 层`)
         }
       }
+      await this.checkKeptRefs(
+        tx,
+        before,
+        ownership,
+        (await this.glossaryOf(tx, [before.id])).get(before.id) ?? [],
+      )
       await this.claimUri(tx, to, ownership, released)
       const [row] = await tx
         .update(memories)
@@ -1248,6 +1451,7 @@ export class MemoryService {
           eventType: 'restore',
           eventContext: { fromEventId: input.eventId },
           glossary: glossaryNow,
+          existingRefs: true,
         },
       )
     })
@@ -1262,6 +1466,13 @@ export class MemoryService {
       if (!canWrite(this.ctx.access, row)) {
         throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
       }
+      // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
+      await this.checkKeptRefs(
+        tx,
+        row,
+        row,
+        (await this.glossaryOf(tx, [row.id])).get(row.id) ?? [],
+      )
       await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released)
       const [restored] = await tx
         .update(memories)
@@ -1328,7 +1539,7 @@ const MICROS = /^\d{1,18}$/
 const EVENT_ID = /^\d{1,15}$/
 
 // 还没有失效或过期
-const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
+export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
 
 // 「时间 + id」的游标：上一页最后一条的微秒时间与 id
 function encodeTimeCursor(micros: string, id: string): string {
