@@ -56,15 +56,17 @@ if [ -f package.json ]; then
 fi
 
 # ---- python ----
-# 带 pyproject.toml 的目录各是一个 uv 项目（SDK、插件）：按锁文件装依赖（锁文件过期时失败），跑 ruff 与 pytest
-tracked '*/pyproject.toml'
+# sdks/ 与 plugins/ 下一层带 pyproject.toml 的目录各是一个 uv 项目：按锁文件装依赖（锁文件过期时失败），
+# 跑 ruff 与 pytest。lint 只装开发工具，不构建项目本身
+tracked ':(glob)sdks/*/pyproject.toml' ':(glob)plugins/*/pyproject.toml'
 py_projects=()
 if [ "${#files[@]}" -gt 0 ]; then
   for f in "${files[@]}"; do py_projects+=("$(dirname "$f")"); done
   need uv "brew install uv，或见 https://docs.astral.sh/uv/"
   for p in "${py_projects[@]}"; do
     step "Python lint 与格式：$p"
-    (cd "$p" && uv run --locked ruff check . && uv run --locked ruff format --check .)
+    (cd "$p" && uv run --locked --only-group dev ruff check . &&
+      uv run --locked --only-group dev ruff format --check .)
   done
 fi
 

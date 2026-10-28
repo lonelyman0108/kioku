@@ -28,6 +28,8 @@ jobs:
       - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e
         with:
           version: 0.13.5
+          # 发布不读缓存：缓存由别的分支的运行写入
+          enable-cache: false
       - name: 准备工具
         run: scripts/ci/setup-tools.sh >> "$GITHUB_PATH"
       - name: 测试数据库
