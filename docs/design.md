@@ -324,6 +324,7 @@ URI 在空间内唯一。人格私有节点放在人格命名空间下（如 `pe
 ## 11. 从 Lore 迁移
 
 - 导入工具：Lore 的节点、路径、priority、disclosure、glossary 进入指定空间，可以重复执行，按 Lore 节点去重（导入后删除或移动的不会写回）。历史版本不迁移，每条记忆记一条 import 事件，带 Lore 节点 uuid 与旧版本数，Lore 的库留作归档。
+- 同步（`--sync`）：并行期间 Lore 里改过的节点，按 Lore 现在的正文、priority、disclosure 与关键词更新，记一条 sync 事件。只更新最近一条事件还是导入工具写的记忆：在 Kioku 里改过、移动过、删除了的都不动，凭据迁移改过的节点也就不会被 Lore 里的明文盖回去。Lore 里换了路径的也不动，只列出来：移动可能改变层与可见范围，要由人决定。Lore 里删掉的节点只列出来，Kioku 里保留。
 - 映射规则：`core://agent` → base；`core://soul` → 默认人格；`core://agent/<runtime>` → 导入者自己的对应应用的 app 层（按标识或运行时类型匹配，没有就新建，别的成员的应用不写）；`preferences://` → owner；其余 domain 默认 private，导入后在界面里逐条调整（改层）。像凭据的节点只提醒，是否标 secret 由人决定；有了凭据管理之后，更推荐把其中的值换成占位符（4.5 节）。
 - 召回事件不迁移。Kioku 现在还不记录召回事件，要到 1.5 阶段的第 3 期才开始记录。步骤见 `docs/migrate-from-lore.md`。
 - 迁移期间两边并行，确认后再切换各客户端。

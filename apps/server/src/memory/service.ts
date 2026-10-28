@@ -166,6 +166,16 @@ function checkOutsideContent(
   }
 }
 
+// 在写入的同一个事务里锁住应用行，核对应用现在的主人（见 CreateMeta.requireAppOwner）
+async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<void> {
+  const [app] = await tx
+    .select({ owner: apps.ownerAccountId })
+    .from(apps)
+    .where(eq(apps.id, appId))
+    .for('share')
+  if (app?.owner !== owner) throw new MemoryError(403, '这个应用已经不属于导入者')
+}
+
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
   eventType?: 'create' | 'import'
@@ -174,6 +184,13 @@ export interface CreateMeta {
   updatedAt?: Date
   // 写应用层时要求应用当前的主人是这个账号，在写入的同一个事务里锁住应用行核对：
   // 导入是一个长循环，期间应用被转给别人，也不能把记忆写进别人的应用
+  requireAppOwner?: string
+}
+
+// 导入工具按来源系统同步已导入的记忆时用：事件记成 sync 并带上出处
+export interface UpdateMeta {
+  eventType?: 'update' | 'sync'
+  eventContext?: Record<string, unknown>
   requireAppOwner?: string
 }
 
@@ -572,14 +589,7 @@ export class MemoryService {
         throw new MemoryError(403, `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`)
       }
       if (meta.requireAppOwner && ownership.appId) {
-        const [app] = await tx
-          .select({ owner: apps.ownerAccountId })
-          .from(apps)
-          .where(eq(apps.id, ownership.appId))
-          .for('share')
-        if (app?.owner !== meta.requireAppOwner) {
-          throw new MemoryError(403, '这个应用已经不属于导入者')
-        }
+        await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
       }
       checkOutsideContent(input.disclosure, input.glossary)
       await this.checkCredentialRefs(
@@ -638,13 +648,20 @@ export class MemoryService {
     return encryptSecret(this.ctx.masterKey, plaintext, id)
   }
 
-  async update(input: UpdateMemoryRequest): Promise<MemoryView> {
+  async update(input: UpdateMemoryRequest, meta: UpdateMeta = {}): Promise<MemoryView> {
     const parsed = parse(input.uri)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, parsed, personaIds)
       // 版本号由 applyUpdate 核对，恢复也走那里
       checkExpected(before, { expectedId: input.expectedId })
-      return this.applyUpdate(tx, before, input, { released })
+      if (meta.requireAppOwner && before.appId) {
+        await assertAppOwner(tx, before.appId, meta.requireAppOwner)
+      }
+      return this.applyUpdate(tx, before, input, {
+        released,
+        ...(meta.eventType ? { eventType: meta.eventType } : {}),
+        ...(meta.eventContext ? { eventContext: meta.eventContext } : {}),
+      })
     })
   }
 

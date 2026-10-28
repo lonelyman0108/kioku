@@ -224,6 +224,28 @@ describe('Lore 导入计划', () => {
     ])
   })
 
+  it('格式不对的凭据占位符、写在 disclosure 或关键词里的占位符，在计划里就不导入并说明原因', () => {
+    const plan = planImport(
+      snapshot(
+        node('projects://notes', { content: '占位符写成 {{cred:<标识>#<字段>}}' }),
+        node('projects://ok', { content: '占位符写成 cred:<标识>#<字段>，外面套两层花括号' }),
+        node('infra://hint', { disclosure: '要用 {{cred:router#password}} 登录时' }),
+        node('infra://tagged', { keywords: ['{{cred:router}}'] }),
+      ),
+      [],
+      options,
+    )
+    expect(plan.memories.map((m) => m.source)).toEqual(['projects://ok'])
+    expect(plan.skipped).toEqual([
+      {
+        source: 'projects://notes',
+        reason: expect.stringContaining('格式不对的凭据占位符 {{cred:<标识>#<字段>}}'),
+      },
+      { source: 'infra://hint', reason: expect.stringContaining('占位符只能写在正文里') },
+      { source: 'infra://tagged', reason: expect.stringContaining('占位符只能写在正文里') },
+    ])
+  })
+
   it('保留 Lore 的 priority、disclosure 与时间，事件上下文记下出处', () => {
     const created = new Date('2025-05-01T00:00:00Z')
     const plan = planImport(

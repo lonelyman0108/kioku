@@ -1,15 +1,17 @@
 import {
+  CREDENTIAL_PLACEHOLDER_START,
   CreateMemoryRequest,
   RUNTIME_FAMILIES,
   Slug,
   type Layer,
   type RuntimeFamily,
+  type UpdateMemoryRequest,
 } from '@kioku/contracts'
-import { and, eq, isNotNull, sql } from 'drizzle-orm'
+import { and, desc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import type postgres from 'postgres'
 
 import { consoleAccess } from '../access/access'
-import { looksLikePlaintextCredential } from '../credential/placeholders'
+import { looksLikePlaintextCredential, scanPlaceholders } from '../credential/placeholders'
 import { decryptSecret } from '../crypto/envelope'
 import { withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
@@ -21,6 +23,7 @@ import { APP_DOMAIN, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
 // core://agent → 基础层；core://soul → 指定人格的 persona 层；core://agent/<runtime> → 对应应用的应用层；
 // preferences:// → 主人层；其余 domain → 导入者的私人层。
 // 历史版本不迁移，每条记忆记一条 import 事件，带上 Lore 的节点 uuid 与旧版本数；召回事件不迁移
+// 导入过的节点在 Lore 里又改了，用 planSync / applySync 同步（命令行的 --sync）
 
 // Lore 里一个节点导入时需要的信息。一个节点可能挂在多条路径上，最早的一条作为它的 URI，其余是别名
 export interface LoreNode {
@@ -243,6 +246,26 @@ export function planImport(
     }
     if (!node.content) {
       plan.skipped.push({ source: node.uri, reason: '没有正文' })
+      continue
+    }
+    // 占位符的写入规则在计划里先查一遍，不用等执行时逐条失败
+    const malformed = scanPlaceholders(node.content).malformed[0]
+    if (malformed) {
+      plan.skipped.push({
+        source: node.uri,
+        reason: `正文里有格式不对的凭据占位符 ${malformed}：写到这种写法的说明文字要去掉花括号`,
+      })
+      continue
+    }
+    if (
+      [node.disclosure ?? '', ...node.keywords].some((t) =>
+        t.includes(CREDENTIAL_PLACEHOLDER_START),
+      )
+    ) {
+      plan.skipped.push({
+        source: node.uri,
+        reason: 'disclosure 或关键词里有凭据占位符：占位符只能写在正文里',
+      })
       continue
     }
     const parsed = parseUri(node.uri)
@@ -468,59 +491,8 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     }
   })
 
-  // 导入过的节点：去重键 → 每条导入事件对应的记忆现在的状态（是不是 secret，或者已经删除）与现在的 URI。
-  // 早期版本去重不上时会把同一个节点再写一条，所以一个键可能对应多条记忆。
-  // 早期的导入事件没有记 targetPersona：人格层的从导入时的快照补出来（当时 URI 的第一段就是人格），
-  // 记忆后来删掉了也补得出，去重键才与现在的一致
-  const imported = await withSpace(db, spaceId, (tx) =>
-    tx
-      .select({
-        context: memoryEvents.context,
-        importedDomain: sql<string | null>`${memoryEvents.after}->>'domain'`,
-        importedPath: sql<string | null>`${memoryEvents.after}->>'path'`,
-        sensitivity: memories.sensitivity,
-        deletedAt: memories.deletedAt,
-        domain: memories.domain,
-        path: memories.path,
-      })
-      .from(memoryEvents)
-      .leftJoin(memories, eq(memories.id, memoryEvents.memoryId))
-      .where(
-        and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
-      )
-      .orderBy(memoryEvents.id),
-  )
-  const done = new Map<string, { state: 'secret' | 'plain' | 'deleted'; uri: string | null }[]>()
-  for (const e of imported) {
-    const context = e.context as ImportKeyParts
-    const parts =
-      context.targetPersona === undefined && e.importedDomain === PERSONA_DOMAIN
-        ? { ...context, targetPersona: e.importedPath?.split('/')[0] }
-        : context
-    // 看记忆现在的状态：导入后在管理界面改成了 secret 的，也算已经是 secret。
-    // 记忆被软删除，或整行已经不在（例如删除账号时级联删掉，事件的 memory_id 被置空，联表取不到），都算已经删除
-    const gone = e.deletedAt !== null || e.sensitivity === null
-    const key = importKeyOf(parts)
-    done.set(key, [
-      ...(done.get(key) ?? []),
-      {
-        state: gone ? 'deleted' : e.sensitivity === 'secret' ? 'secret' : 'plain',
-        uri: !gone && e.domain && e.path ? formatUri(e.domain, e.path) : null,
-      },
-    ])
-  }
-
-  // 按空间 owner 的管理界面权限写入，来源记为 system。正文里已有的凭据占位符照常检查（要解析到导入者的凭据），
-  // 但允许新增：这是主人自己把数据搬进自己的私人层，不是抽取或 Dream
-  const service = new MemoryService({
-    db,
-    spaceId,
-    access: { ...consoleAccess('owner', accountId), writeProvenance: 'system' },
-    personaId: 'all',
-    masterKey: target.masterKey,
-    actor: { accountId },
-    allowCredentialRefs: true,
-  })
+  const done = await importedMemories(db, spaceId)
+  const service = importerService(target)
   for (const item of plan.memories) {
     const app = item.context.targetApp
     if (typeof app === 'string' && blockedApps.has(app)) {
@@ -556,6 +528,224 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
       if (!(err instanceof MemoryError)) throw err
       if (err.status === 409) result.occupied.push(item.request.uri)
       else result.failed.push({ uri: item.request.uri, reason: err.message })
+    }
+  }
+  return result
+}
+
+interface ImportedMemory {
+  memoryId: string | null
+  loreNodeUuid: string
+  state: 'secret' | 'plain' | 'deleted'
+  // 记忆现在的 URI，已经删除的为 null
+  uri: string | null
+}
+
+// 导入过的节点：去重键 → 每条导入事件对应的记忆现在的状态（是不是 secret，或者已经删除）与现在的 URI。
+// 早期版本去重不上时会把同一个节点再写一条，所以一个键可能对应多条记忆。
+// 早期的导入事件没有记 targetPersona：人格层的从导入时的快照补出来（当时 URI 的第一段就是人格），
+// 记忆后来删掉了也补得出，去重键才与现在的一致
+async function importedMemories(db: Db, spaceId: string): Promise<Map<string, ImportedMemory[]>> {
+  const imported = await withSpace(db, spaceId, (tx) =>
+    tx
+      .select({
+        memoryId: memoryEvents.memoryId,
+        context: memoryEvents.context,
+        importedDomain: sql<string | null>`${memoryEvents.after}->>'domain'`,
+        importedPath: sql<string | null>`${memoryEvents.after}->>'path'`,
+        sensitivity: memories.sensitivity,
+        deletedAt: memories.deletedAt,
+        domain: memories.domain,
+        path: memories.path,
+      })
+      .from(memoryEvents)
+      .leftJoin(memories, eq(memories.id, memoryEvents.memoryId))
+      .where(
+        and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
+      )
+      .orderBy(memoryEvents.id),
+  )
+  const done = new Map<string, ImportedMemory[]>()
+  for (const e of imported) {
+    const context = e.context as ImportKeyParts
+    const parts =
+      context.targetPersona === undefined && e.importedDomain === PERSONA_DOMAIN
+        ? { ...context, targetPersona: e.importedPath?.split('/')[0] }
+        : context
+    // 看记忆现在的状态：导入后在管理界面改成了 secret 的，也算已经是 secret。
+    // 记忆被软删除，或整行已经不在（例如删除账号时级联删掉，事件的 memory_id 被置空，联表取不到），都算已经删除
+    const gone = e.deletedAt !== null || e.sensitivity === null
+    const key = importKeyOf(parts)
+    done.set(key, [
+      ...(done.get(key) ?? []),
+      {
+        memoryId: e.memoryId,
+        loreNodeUuid: String(context.loreNodeUuid),
+        state: gone ? 'deleted' : e.sensitivity === 'secret' ? 'secret' : 'plain',
+        uri: !gone && e.domain && e.path ? formatUri(e.domain, e.path) : null,
+      },
+    ])
+  }
+  return done
+}
+
+// 按空间 owner 的管理界面权限写入，来源记为 system。正文里已有的凭据占位符照常检查（要解析到导入者的凭据），
+// 但允许新增：这是主人自己把数据搬进自己的私人层，不是抽取或 Dream
+function importerService(target: ImportTarget): MemoryService {
+  return new MemoryService({
+    db: target.db,
+    spaceId: target.spaceId,
+    access: { ...consoleAccess('owner', target.accountId), writeProvenance: 'system' },
+    personaId: 'all',
+    masterKey: target.masterKey,
+    actor: { accountId: target.accountId },
+    allowCredentialRefs: true,
+  })
+}
+
+// 同步导入过的节点：把 Kioku 里的记忆改成 Lore 里现在的正文、priority、disclosure 与关键词，敏感级不动。
+// 只动导入（或上次同步）之后在 Kioku 里没人改过的：最近一条事件是导入工具写的才算。
+// 在 Kioku 里改过、移动过、删除了的一律不动，凭据迁移改过的凭据节点也就不会被 Lore 里的明文盖回去；
+// Lore 里路径变了的也不动，移动可能改变层（例如移进 core:// 就成了所有应用都读的基础层），要由人决定
+export type SyncState = 'update' | 'current' | 'edited' | 'moved' | 'deleted'
+
+export interface SyncItem {
+  source: string
+  // 记忆现在的 URI；在 Kioku 里删除了的是导入时的 URI
+  uri: string
+  state: SyncState
+  // state 为 moved 时，按 Lore 现在的路径应当在的 URI
+  target?: string
+  changes: ('content' | 'priority' | 'disclosure' | 'glossary')[]
+  request?: UpdateMemoryRequest
+  context?: Record<string, unknown>
+}
+
+export interface SyncPlan {
+  items: SyncItem[]
+  // 导入过、但 Lore 里已经没有这个节点的记忆现在的 URI：Kioku 里保留，要删由人决定
+  goneFromLore: string[]
+}
+
+// 只读：算出同步要做什么，打印给人确认；执行时再按版本号核对一次
+export async function planSync(
+  target: ImportTarget,
+  plan: ImportPlan,
+  snapshot: LoreSnapshot,
+): Promise<SyncPlan> {
+  const done = await importedMemories(target.db, target.spaceId)
+  const live = [...done.values()].flat().filter((m) => m.state !== 'deleted' && m.memoryId)
+  if (!target.masterKey && live.some((m) => m.state === 'secret')) {
+    throw new Error(
+      '导入过的记忆里有 secret：同步要读出来比对，需要设置与服务相同的 KIOKU_MASTER_KEY',
+    )
+  }
+  // 每条记忆最近的一条事件是不是导入工具写的
+  const latest = live.length
+    ? await withSpace(target.db, target.spaceId, (tx) =>
+        tx
+          .selectDistinctOn([memoryEvents.memoryId], {
+            memoryId: memoryEvents.memoryId,
+            eventType: memoryEvents.eventType,
+            source: sql<string | null>`${memoryEvents.context}->>'source'`,
+          })
+          .from(memoryEvents)
+          .where(
+            inArray(
+              memoryEvents.memoryId,
+              live.map((m) => m.memoryId!),
+            ),
+          )
+          .orderBy(memoryEvents.memoryId, desc(memoryEvents.id)),
+      )
+    : []
+  const untouched = new Set(
+    latest
+      .filter((e) => (e.eventType === 'import' || e.eventType === 'sync') && e.source === 'lore')
+      .map((e) => e.memoryId),
+  )
+
+  const service = importerService(target)
+  const sync: SyncPlan = { items: [], goneFromLore: [] }
+  for (const item of plan.memories) {
+    for (const m of done.get(item.importKey) ?? []) {
+      const base = { source: item.source, changes: [] }
+      if (m.state === 'deleted' || !m.uri) {
+        sync.items.push({ ...base, uri: item.request.uri, state: 'deleted' })
+      } else if (!untouched.has(m.memoryId)) {
+        sync.items.push({ ...base, uri: m.uri, state: 'edited' })
+      } else if (m.uri !== item.request.uri) {
+        sync.items.push({ ...base, uri: m.uri, state: 'moved', target: item.request.uri })
+      } else {
+        const current = await service.get(m.uri)
+        // 按 URI 读到的应当就是导入的那一条；对不上就当作在 Kioku 里动过，不去改它
+        if (current.id !== m.memoryId) {
+          sync.items.push({ ...base, uri: m.uri, state: 'edited' })
+          continue
+        }
+        const want = item.request
+        const request: UpdateMemoryRequest = {
+          uri: m.uri,
+          expectedId: current.id,
+          expectedVersion: current.version,
+        }
+        const changes: SyncItem['changes'] = []
+        if (current.content !== want.content) {
+          request.content = want.content
+          changes.push('content')
+        }
+        if (want.priority !== undefined && current.priority !== want.priority) {
+          request.priority = want.priority
+          changes.push('priority')
+        }
+        if ((current.disclosure ?? null) !== (want.disclosure ?? null)) {
+          request.disclosure = want.disclosure ?? null
+          changes.push('disclosure')
+        }
+        const wanted = new Set(want.glossary ?? [])
+        const add = [...wanted].filter((k) => !current.glossary.includes(k))
+        const remove = current.glossary.filter((k) => !wanted.has(k))
+        if (add.length || remove.length) {
+          if (add.length) request.glossaryAdd = add
+          if (remove.length) request.glossaryRemove = remove
+          changes.push('glossary')
+        }
+        sync.items.push(
+          changes.length
+            ? { ...base, uri: m.uri, state: 'update', changes, request, context: item.context }
+            : { ...base, uri: m.uri, state: 'current' },
+        )
+      }
+    }
+  }
+  const inLore = new Set(snapshot.nodes.map((n) => n.uuid))
+  for (const m of [...done.values()].flat()) {
+    if (m.uri && !inLore.has(m.loreNodeUuid)) sync.goneFromLore.push(m.uri)
+  }
+  return sync
+}
+
+export interface SyncResult {
+  updated: string[]
+  failed: { uri: string; reason: string }[]
+}
+
+export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<SyncResult> {
+  const result: SyncResult = { updated: [], failed: [] }
+  const service = importerService(target)
+  for (const item of sync.items) {
+    if (item.state !== 'update' || !item.request) continue
+    try {
+      // 计划之后有人改过、或者同一个 URI 上换了一条记忆，按 expectedId 与 expectedVersion 拒绝
+      await service.update(item.request, {
+        eventType: 'sync',
+        eventContext: { ...item.context, changes: item.changes },
+        requireAppOwner: target.accountId,
+      })
+      result.updated.push(item.uri)
+    } catch (err) {
+      if (!(err instanceof MemoryError)) throw err
+      result.failed.push({ uri: item.uri, reason: err.message })
     }
   }
   return result
