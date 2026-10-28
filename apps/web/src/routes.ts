@@ -40,6 +40,16 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/PersonasPage.vue'),
       },
       {
+        path: 'spaces/:spaceId/subjects',
+        name: 'subjects',
+        component: () => import('./pages/SubjectsPage.vue'),
+      },
+      {
+        path: 'spaces/:spaceId/subjects/:subjectId',
+        name: 'subject',
+        component: () => import('./pages/SubjectDetailPage.vue'),
+      },
+      {
         path: 'spaces/:spaceId/apps',
         name: 'apps',
         component: () => import('./pages/AppsPage.vue'),

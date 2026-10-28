@@ -38,6 +38,9 @@ import {
   RecallStats,
   SetupStatus,
   SpaceOverview,
+  SubjectDetail,
+  SubjectInfo,
+  SubjectList,
   type BootPreviewRequest,
   type CreateAppRequest,
   type CreateCredentialProviderRequest,
@@ -50,6 +53,7 @@ import {
   type PlainLayer,
   type RestoreRequest,
   type SetupRequest,
+  type SubjectListQuery,
   type UpdateAppRequest,
   type UpdateCredentialProviderRequest,
   type UpdateCredentialRequest,
@@ -58,6 +62,7 @@ import {
   type ExtractionBudget,
   type UpdateMemoryRequest,
   type UpdatePersonaRequest,
+  type UpdateSubjectRequest,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -225,6 +230,12 @@ export const api = {
 
   overview: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),
+  subjects: (spaceId: string, query: SubjectListQuery) =>
+    request('GET', `/spaces/${spaceId}/subjects`, { query, schema: SubjectList }),
+  subject: (spaceId: string, id: string) =>
+    request('GET', `/spaces/${spaceId}/subjects/${id}`, { schema: SubjectDetail }),
+  updateSubject: (spaceId: string, id: string, body: UpdateSubjectRequest) =>
+    request('PATCH', `/spaces/${spaceId}/subjects/${id}`, { body, schema: SubjectInfo }),
   activity: (spaceId: string, cursor?: string) =>
     request('GET', `/spaces/${spaceId}/activity`, { query: { cursor }, schema: ActivityList }),
   domainLayers: (spaceId: string) =>

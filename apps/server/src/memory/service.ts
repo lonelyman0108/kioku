@@ -73,6 +73,7 @@ import {
   scanPlaceholders,
 } from '../credential/placeholders'
 import { isUniqueViolation, type Db, type Tx } from '../db/client'
+import { escapeLike, fromMicros, MICROS, microsOf } from '../db/paging'
 import {
   accounts,
   apiKeys,
@@ -1825,14 +1826,8 @@ function checkExpected(
 // 关键词索引最多给这么多条（关键词 × 记忆），个人用的空间远到不了
 const GLOSSARY_INDEX_LIMIT = 5000
 
-// 时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
-const microsOf = (column: SQLWrapper) => sql`(extract(epoch from ${column}) * 1000000)::bigint`
 const DELETED_MICROS = microsOf(memories.deletedAt)
-// 游标里的微秒整数换回时间，按微秒精确换算，不经过浮点
-const fromMicros = (micros: string) =>
-  sql`('epoch'::timestamptz + ${micros}::bigint * interval '1 microsecond')`
-// 微秒整数在 bigint 的范围里；事件 id 不超过 JS 能精确表示的整数
-const MICROS = /^\d{1,18}$/
+// 事件 id 不超过 JS 能精确表示的整数
 const EVENT_ID = /^\d{1,15}$/
 
 // 还没有失效或过期
@@ -1909,10 +1904,6 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
     changes.push('content')
   }
   return changes
-}
-
-function escapeLike(s: string): string {
-  return s.replace(/[\\%_]/g, '\\$&')
 }
 
 // 有正文：与向量任务的口径一致，空字符串也不生成向量
