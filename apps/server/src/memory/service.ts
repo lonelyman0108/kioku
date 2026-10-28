@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contracts'
+import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, REVIEW_LAYERS, SENSITIVITIES } from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
@@ -30,6 +30,8 @@ import type {
   RecallSource,
   RecallVia,
   RestoreRequest,
+  ReviewRequest,
+  ReviewResult,
   Sensitivity,
   UndeleteRequest,
   UpdateMemoryRequest,
@@ -990,6 +992,55 @@ export class MemoryService {
       return before.id
     })
     this.changed([id])
+  }
+
+  // 待审队列里的处理：确认（来源改成主人）或删除。只处理还在队列里的（不可信来源、对象层或情节层、
+  // 现在有效、读得到），别人处理过的、删掉的、读不到的跳过；有一条写不了就整批不做
+  async review(input: ReviewRequest): Promise<ReviewResult> {
+    const ids = [...new Set(input.ids)]
+    const done = await this.run(async (tx, personaIds) => {
+      // 锁住这几行：同时处理同一批时，后到的等先到的提交，再按处理后的状态跳过
+      const rows = await tx
+        .select()
+        .from(memories)
+        .where(
+          and(
+            inArray(memories.id, ids),
+            eq(memories.provenance, 'untrusted'),
+            inArray(memories.layer, REVIEW_LAYERS),
+            readableConditions(this.ctx.access, { personaIds }),
+          ),
+        )
+        .for('update')
+      for (const row of rows) this.assertWritable(row, `没有权限处理 ${row.layer} 层的记忆`)
+      const glossaries = await this.glossaryOf(
+        tx,
+        rows.map((r) => r.id),
+      )
+      const now = new Date()
+      for (const row of rows) {
+        const [after] = await tx
+          .update(memories)
+          .set(
+            input.action === 'confirm'
+              ? { provenance: 'owner', version: row.version + 1, updatedAt: now }
+              : { deletedAt: now, updatedAt: now },
+          )
+          .where(eq(memories.id, row.id))
+          .returning()
+        const glossary = glossaries.get(row.id) ?? []
+        await this.event(
+          tx,
+          row.id,
+          input.action,
+          snapshot(row, glossary),
+          snapshot(after!, glossary),
+        )
+      }
+      return rows.map((r) => r.id)
+    })
+    if (input.action === 'delete') this.changed(done)
+    return { done: done.length, skipped: ids.length - done.length }
   }
 
   // 改 URI。移进、移出 persona:// 与 app://，或在不同的人格、应用之间移动时，层与归属跟着目标 URI 变：

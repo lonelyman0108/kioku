@@ -16,6 +16,7 @@ import { personaRoutes } from './routes/personas'
 import { previewRoutes } from './routes/preview'
 import { recallAnalysisRoutes } from './routes/recallAnalysis'
 import { recallRoutes } from './routes/recall'
+import { reviewRoutes } from './routes/review'
 import { MemoryError } from './memory/service'
 import { settingsRoutes } from './routes/settings'
 import { setupRoutes } from './routes/setup'
@@ -62,6 +63,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', overviewRoutes(deps))
   app.route('/v1', spaceRoutes(deps))
   app.route('/v1', subjectRoutes(deps))
+  app.route('/v1', reviewRoutes(deps))
   app.route('/v1', recallRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))

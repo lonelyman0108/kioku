@@ -144,6 +144,7 @@ domain 和层的关系：
 - 每条写入记录 `provenance`：`owner`（主人在受信上下文写的）、`agent`（受信 agent 写的）、`untrusted`（来自群聊、陌生人）、`system`（Dream、抽取任务）。
 - `untrusted` 来源只能写进 `subject` 和 `episode`，不能写进 `base`、`persona`、`owner`、`private`。
 - 只有 `owner`、`agent` 来源的记忆参与跨作用域的自动注入；`untrusted` 内容要经主人确认或 Dream 审核后才能提升。这是对记忆投毒的防线。
+- 管理界面的待审队列列出 `untrusted` 写进对象层与情节层、现在有效、查看者读得到的记忆。owner 与 editor 确认后来源改成 `owner`（版本加一，记一条 confirm 事件），来源作用域不变；删除和删记忆一样留历史。别人处理过的跳过，不报错。
 
 ### 4.4 时效
 
