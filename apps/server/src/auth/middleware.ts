@@ -6,7 +6,7 @@ import { createMiddleware } from 'hono/factory'
 import { keyEffectiveScopes } from '../access/access'
 import { withSpace } from '../db/client'
 import { apiKeys, apps, spaceMembers } from '../db/schema'
-import type { AppEnv, Deps } from '../http/env'
+import type { AppEnv, Deps, KeyPrincipal } from '../http/env'
 import { parseApiKey, verifyApiKey } from './keys'
 import { resolveSession, SESSION_COOKIE } from './session'
 
@@ -71,23 +71,32 @@ export function requireKey(deps: Deps) {
       .where(eq(apiKeys.id, key.id))
       .catch(() => {})
 
-    c.set('key', {
-      kind: 'key',
-      keyId: key.id,
-      spaceId: key.spaceId,
-      scopes,
-      app: {
-        id: app.id,
-        slug: app.slug,
-        name: app.name,
-        runtimeFamily: app.runtimeFamily,
-        ownerAccountId: app.ownerAccountId,
-        defaultPersonaId: app.defaultPersonaId,
-        config: AppConfig.parse(app.config),
-      },
-    })
+    c.set('key', keyPrincipal(key, app, scopes))
     await next()
   })
+}
+
+// 接入方的身份：Key、它所属的应用与有效上限。鉴权与管理界面的模拟（启动预览、召回调试）共用
+export function keyPrincipal(
+  key: { id: string; spaceId: string },
+  app: typeof apps.$inferSelect,
+  scopes: KeyScopes,
+): KeyPrincipal {
+  return {
+    kind: 'key',
+    keyId: key.id,
+    spaceId: key.spaceId,
+    scopes,
+    app: {
+      id: app.id,
+      slug: app.slug,
+      name: app.name,
+      runtimeFamily: app.runtimeFamily,
+      ownerAccountId: app.ownerAccountId,
+      defaultPersonaId: app.defaultPersonaId,
+      config: AppConfig.parse(app.config),
+    },
+  }
 }
 
 export async function memberRole(deps: Deps, spaceId: string, accountId: string) {

@@ -60,7 +60,7 @@ async function accessForConsole(
 
 // 查询向量：嵌入设置读不出来（例如主密钥不对）时记录原因、不用向量。
 // 给了时限就最多等这么久，读嵌入设置的时间也算在内
-async function semanticFor(
+export async function semanticFor(
   deps: Deps,
   query: string,
   timeoutMs?: number,

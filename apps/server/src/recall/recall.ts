@@ -1,4 +1,4 @@
-import type { Layer, RecallCandidate, RecallVia } from '@kioku/contracts'
+import type { DebugCandidate, Layer, RecallCandidate, RecallVia } from '@kioku/contracts'
 import { and, desc, eq, inArray, ne, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
@@ -87,6 +87,25 @@ export async function embedQuery(
   }
 }
 
+// 打过分的候选：调试台要看各路的得分（breakdown）、取整前的总分（rawScore）与记忆 id
+export interface ScoredCandidate extends DebugCandidate {
+  id: string
+  rawScore: number
+}
+
+// 给接入方的候选只有这些字段
+export function publicCandidate(c: ScoredCandidate): RecallCandidate {
+  return {
+    uri: c.uri,
+    layer: c.layer,
+    priority: c.priority,
+    disclosure: c.disclosure,
+    score: c.score,
+    via: c.via,
+    cues: c.cues,
+  }
+}
+
 export async function recall(
   tx: Tx,
   access: Access,
@@ -94,6 +113,16 @@ export async function recall(
   rawQuery: string,
   options: RecallOptions,
 ): Promise<RecallCandidate[]> {
+  return (await scoreRecall(tx, access, semantic, rawQuery, options)).map(publicCandidate)
+}
+
+export async function scoreRecall(
+  tx: Tx,
+  access: Access,
+  semantic: QueryVector | null,
+  rawQuery: string,
+  options: RecallOptions,
+): Promise<ScoredCandidate[]> {
   const query = normalizeQuery(rawQuery)
   if (!query) return []
   // 召回只面向有 URI 的策展记忆；抽取记忆另有展示方式，不能在各路里占掉名额
@@ -219,31 +248,46 @@ export async function recall(
   return (
     [...hits.values()]
       .map((h) => {
-        const glossary = h.cues.size
-          ? WEIGHTS.glossaryFirst + (h.cues.size > 1 ? WEIGHTS.glossaryMore : 0)
-          : 0
-        const score =
-          WEIGHTS.semantic * h.semantic +
-          WEIGHTS.fulltext * h.fulltext +
-          glossary +
-          (WEIGHTS.priority * Math.max(0, 3 - h.row.priority)) / 3
-        return { h, score }
+        // 各路加到总分上的分数，四项相加就是总分
+        const parts = {
+          semantic: WEIGHTS.semantic * h.semantic,
+          fulltext: WEIGHTS.fulltext * h.fulltext,
+          glossary: h.cues.size
+            ? WEIGHTS.glossaryFirst + (h.cues.size > 1 ? WEIGHTS.glossaryMore : 0)
+            : 0,
+          priority: (WEIGHTS.priority * Math.max(0, 3 - h.row.priority)) / 3,
+        }
+        return {
+          h,
+          parts,
+          score: parts.semantic + parts.fulltext + parts.glossary + parts.priority,
+        }
       })
       // 用未取整的分数和阈值比较，取整只用于展示
       .filter(({ score }) => score >= minScore)
       .sort((a, b) => b.score - a.score || a.h.row.priority - b.h.row.priority)
       .slice(0, options.limit)
-      .map(({ h, score }) => ({
+      .map(({ h, parts, score }) => ({
+        id: h.row.id,
         uri: formatUri(h.row.domain!, h.row.path!),
         layer: h.row.layer,
         priority: h.row.priority,
         disclosure: h.row.disclosure,
-        score: Math.round(score * 100) / 100,
+        score: round(score),
         via: [...h.via],
         cues: [...h.cues].sort(),
+        breakdown: {
+          semantic: round(parts.semantic),
+          fulltext: round(parts.fulltext),
+          glossary: round(parts.glossary),
+          priority: round(parts.priority),
+        },
+        rawScore: score,
       }))
   )
 }
+
+const round = (n: number) => Math.round(n * 100) / 100
 
 // 召回块会原样进入宿主的上下文。disclosure 与关键词可能来自不可信的写入者，
 // 压成单行并去掉尖括号，避免伪造 </recall> 闭合标签后注入任意文本

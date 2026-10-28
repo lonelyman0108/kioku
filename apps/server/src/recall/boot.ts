@@ -57,7 +57,7 @@ export async function boot(
   let used = 0
   for (const r of rows) {
     const uri = formatUri(r.domain!, r.path!)
-    const length = (r.content?.length ?? 0) + uri.length + 7
+    const length = bootEntryChars(uri, r.content ?? '')
     if (used + length > budget) {
       omitted.push(uri)
       continue
@@ -70,6 +70,11 @@ export async function boot(
     .sort((a, b) => BOOT_LAYERS.indexOf(a.layer) - BOOT_LAYERS.indexOf(b.layer))
     .map((r) => ({ uri: formatUri(r.domain!, r.path!), layer: r.layer, content: r.content ?? '' }))
   return { entries, omitted }
+}
+
+// 一个展开的启动节点占的字数：正文加上标题与分隔（「## <uri>」和空行）
+export function bootEntryChars(uri: string, content: string): number {
+  return content.length + uri.length + 7
 }
 
 export function formatBootBlock(result: BootResponse, guidance: string): string {

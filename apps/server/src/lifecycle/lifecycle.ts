@@ -1,8 +1,11 @@
 import type {
+  BootResponse,
   HostOutput,
   LifecycleEvent,
   LifecycleProject,
   LifecycleResponse,
+  RecallCandidate,
+  RecentMemory,
 } from '@kioku/contracts'
 
 import { BOOT_LAYERS, formatBootBlock, formatRecentBlock } from '../recall/boot'
@@ -11,8 +14,10 @@ import type { RecallScope } from './scope'
 
 const RECENT_LIMIT = 5
 const PROJECT_RECALL_LIMIT = 5
+// 每轮召回注入几条；召回调试台照这个模拟
+export const PROMPT_RECALL_LIMIT = 8
 // 每轮召回等嵌入接口的上限：插件的钩子 5 秒就放弃，要给全文与关键词留出时间
-const PROMPT_SEMANTIC_TIMEOUT_MS = 2_000
+export const PROMPT_SEMANTIC_TIMEOUT_MS = 2_000
 // 宿主能完整接收的上下文长度。Claude Code 的钩子输出超过 1 万字时只给模型看开头 2KB 的预览，
 // 其余写进文件、要模型自己去读，所以留出余量，boot 按剩下的字数收，后面的附加块放不下就不放
 const HOST_CONTEXT_LIMIT: Record<string, number> = { claudecode: 9_500, codex: 9_500 }
@@ -68,61 +73,93 @@ function hostOutput(
   }
 }
 
+// 会话开始时注入的内容，连同各部分：生命周期端点交给宿主的就是 context，启动预览把各部分列出来
+export interface SessionStart {
+  context: string
+  // 宿主能完整接收的字数；没有限制的宿主为 null
+  limit: number | null
+  boot: BootResponse
+  recent: RecentMemory[]
+  related: RecallCandidate[]
+  // 放不下、没有附上的附加块
+  dropped: ('recent' | 'related')[]
+}
+
+export async function sessionStart(
+  scope: RecallScope,
+  runtimeFamily: string,
+  input: { project?: LifecycleProject | undefined; sessionId?: string | undefined },
+): Promise<SessionStart> {
+  const limit = HOST_CONTEXT_LIMIT[runtimeFamily]
+  const result = await scope.boot(
+    limit ? Math.max(limit - GUIDANCE.length - CONTEXT_RESERVE, 1_000) : undefined,
+  )
+  // 已经在 boot 里展开的节点不再重复列出；多取几条，去掉它们之后仍能凑够
+  const booted = new Set(result.entries.map((e) => e.uri))
+  const query = projectQuery(input.project)
+  // 近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
+  // 过滤也和 boot 一样（受信来源、boot 的那几层）：它不需要用户提到任何东西就会注入
+  const [recent, related] = await Promise.allSettled([
+    scope.recent(RECENT_LIMIT + booted.size),
+    query
+      ? scope.recall(query, {
+          limit: PROJECT_RECALL_LIMIT + booted.size,
+          semantic: false,
+          trustedOnly: true,
+          layers: BOOT_LAYERS,
+        })
+      : Promise.resolve([]),
+  ])
+  for (const r of [recent, related]) {
+    if (r.status === 'rejected') console.warn('会话开始时附加的记忆读取失败', r.reason)
+  }
+  const recentList = (recent.status === 'fulfilled' ? recent.value : [])
+    .filter((m) => !booted.has(m.uri))
+    .slice(0, RECENT_LIMIT)
+  const relatedList = (related.status === 'fulfilled' ? related.value : [])
+    .filter((c) => !booted.has(c.uri))
+    .slice(0, PROJECT_RECALL_LIMIT)
+  const relatedBlock = formatRecallBlock(relatedList, input.sessionId)
+
+  const parts = [formatBootBlock(result, GUIDANCE)]
+  const extras = [
+    ['recent', formatRecentBlock(recentList)],
+    ['related', relatedBlock && `与当前项目相关的记忆，需要时用 kioku_get 读取：\n${relatedBlock}`],
+  ] as const
+  const dropped: SessionStart['dropped'] = []
+  for (const [name, extra] of extras) {
+    if (!extra) continue
+    if (limit && [...parts, extra].join('\n\n').length > limit) {
+      dropped.push(name)
+      continue
+    }
+    parts.push(extra)
+  }
+  return {
+    context: parts.join('\n\n'),
+    limit: limit ?? null,
+    boot: result,
+    recent: dropped.includes('recent') ? [] : recentList,
+    related: dropped.includes('related') ? [] : relatedList,
+    dropped,
+  }
+}
+
 export async function handleLifecycle(
   scope: RecallScope,
   runtimeFamily: string,
   input: LifecycleEvent,
 ): Promise<LifecycleResponse> {
   if (input.event === 'session.start') {
-    const limit = HOST_CONTEXT_LIMIT[runtimeFamily]
-    const result = await scope.boot(
-      limit ? Math.max(limit - GUIDANCE.length - CONTEXT_RESERVE, 1_000) : undefined,
-    )
-    // 已经在 boot 里展开的节点不再重复列出；多取几条，去掉它们之后仍能凑够
-    const booted = new Set(result.entries.map((e) => e.uri))
-    const query = projectQuery(input.project)
-    // 近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
-    // 过滤也和 boot 一样（受信来源、boot 的那几层）：它不需要用户提到任何东西就会注入
-    const [recent, related] = await Promise.allSettled([
-      scope.recent(RECENT_LIMIT + booted.size),
-      query
-        ? scope.recall(query, {
-            limit: PROJECT_RECALL_LIMIT + booted.size,
-            semantic: false,
-            trustedOnly: true,
-            layers: BOOT_LAYERS,
-          })
-        : Promise.resolve([]),
-    ])
-    for (const r of [recent, related]) {
-      if (r.status === 'rejected') console.warn('会话开始时附加的记忆读取失败', r.reason)
-    }
-    const recentList = (recent.status === 'fulfilled' ? recent.value : [])
-      .filter((m) => !booted.has(m.uri))
-      .slice(0, RECENT_LIMIT)
-    const relatedList = (related.status === 'fulfilled' ? related.value : [])
-      .filter((c) => !booted.has(c.uri))
-      .slice(0, PROJECT_RECALL_LIMIT)
-    const relatedBlock = formatRecallBlock(relatedList, input.sessionId)
-
-    const parts = [formatBootBlock(result, GUIDANCE)]
-    const extras = [
-      formatRecentBlock(recentList),
-      relatedBlock && `与当前项目相关的记忆，需要时用 kioku_get 读取：\n${relatedBlock}`,
-    ]
-    for (const extra of extras) {
-      if (!extra) continue
-      if (limit && [...parts, extra].join('\n\n').length > limit) continue
-      parts.push(extra)
-    }
+    const start = await sessionStart(scope, runtimeFamily, input)
     return {
-      hostOutput: hostOutput(runtimeFamily, input.event, parts.join('\n\n')),
-      nodeUris: [...booted, ...relatedList.map((c) => c.uri)],
+      hostOutput: hostOutput(runtimeFamily, input.event, start.context),
+      nodeUris: [...start.boot.entries.map((e) => e.uri), ...start.related.map((c) => c.uri)],
     }
   }
 
   const candidates = await scope.recall(input.prompt, {
-    limit: 8,
+    limit: PROMPT_RECALL_LIMIT,
     semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
   })
   return {
