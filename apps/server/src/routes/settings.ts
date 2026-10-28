@@ -1,8 +1,8 @@
 import { createRoute } from '@hono/zod-openapi'
 import {
-  EmbeddingCoverage,
   EmbeddingRebuildResult,
   EmbeddingSettingsView,
+  EmbeddingStatus,
   EmbeddingTestResult,
   ErrorResponse,
   ExtractionSettingsView,
@@ -17,11 +17,19 @@ import { createMiddleware } from 'hono/factory'
 import { requireConsole } from '../auth/middleware'
 import { accounts, EMBEDDING_DIMENSIONS } from '../db/schema'
 import { embeddingCoverage } from '../embedding/coverage'
+import { loadEmbeddingError } from '../embedding/errors'
 import { openAiEmbedder } from '../embedding/provider'
 import {
-  embeddingSettingsView,
-  loadEmbeddingConfig,
-  saveEmbeddingConfig,
+  clearNextEmbedding,
+  EmbeddingSettingsError,
+  embeddingView,
+  loadEmbeddingModels,
+  loadEmbeddingSetups,
+  saveActiveEmbedding,
+  saveNextEmbedding,
+  switchEmbedding,
+  type EmbeddingSetup,
+  type StoredEmbedding,
 } from '../embedding/settings'
 import { openAiChatModel } from '../extraction/provider'
 import {
@@ -48,7 +56,7 @@ const update = createRoute({
   method: 'put',
   path: '/settings/embedding',
   tags: ['settings'],
-  summary: '修改嵌入模型；之后在后台为全部记忆重新生成向量',
+  summary: '修改正在用的模型的渠道；还没配置时是第一次配置，之后在后台为全部记忆生成向量',
   request: { body: jsonBody(UpdateEmbeddingSettings) },
   responses: {
     200: jsonResponse('已保存', EmbeddingSettingsView),
@@ -57,20 +65,61 @@ const update = createRoute({
   },
 })
 
+const updateNext = createRoute({
+  method: 'put',
+  path: '/settings/embedding/next',
+  tags: ['settings'],
+  summary: '换模型，或改正在换过去的模型的渠道：后台补齐新模型的向量，补齐后切过去',
+  request: { body: jsonBody(UpdateEmbeddingSettings) },
+  responses: {
+    200: jsonResponse('已保存', EmbeddingSettingsView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const clearNext = createRoute({
+  method: 'delete',
+  path: '/settings/embedding/next',
+  tags: ['settings'],
+  summary: '放弃换模型：删掉新模型已经生成的向量',
+  responses: {
+    204: { description: '已放弃' },
+    404: jsonResponse('没有正在换的模型', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const switchNow = createRoute({
+  method: 'post',
+  path: '/settings/embedding/switch',
+  tags: ['settings'],
+  summary: '不等补齐，现在就切到新模型；还没有新模型向量的记忆暂时只能靠全文与关键词召回',
+  responses: {
+    200: jsonResponse('已切换', EmbeddingSettingsView),
+    400: jsonResponse('没有正在换的模型', ErrorResponse),
+    403: forbidden,
+  },
+})
+
 const test = createRoute({
   method: 'post',
   path: '/settings/embedding/test',
   tags: ['settings'],
-  summary: '用已保存的设置请求一次嵌入，检查连通性与维度',
-  responses: { 200: jsonResponse('测试结果', EmbeddingTestResult), 403: forbidden },
+  summary: '用已保存的设置逐个渠道请求一次嵌入，检查连通性、维度，以及是不是同一个模型',
+  responses: {
+    200: jsonResponse('测试结果', EmbeddingTestResult),
+    400: jsonResponse('读不出设置', ErrorResponse),
+    403: forbidden,
+  },
 })
 
 const status = createRoute({
   method: 'get',
   path: '/settings/embedding/status',
   tags: ['settings'],
-  summary: '整个实例的向量覆盖率：应当有向量的记忆里有多少已经生成',
-  responses: { 200: jsonResponse('覆盖率', EmbeddingCoverage), 403: forbidden },
+  summary: '整个实例的向量进度：应当有向量的记忆里，正在用的与正在换过去的模型各生成了多少',
+  responses: { 200: jsonResponse('进度', EmbeddingStatus), 403: forbidden },
 })
 
 const recallView = createRoute({
@@ -94,7 +143,7 @@ const rebuild = createRoute({
   method: 'post',
   path: '/settings/embedding/rebuild',
   tags: ['settings'],
-  summary: '在后台检查全部记忆，补齐缺少或过时的向量',
+  summary: '在后台检查全部记忆，补齐缺少或过时的向量；正在换模型时也接着补新模型的',
   responses: {
     202: jsonResponse('已排队', EmbeddingRebuildResult),
     400: jsonResponse('还没有保存嵌入设置', ErrorResponse),
@@ -152,41 +201,85 @@ export function settingsRoutes(deps: Deps) {
   const app = router()
   app.use('/settings/*', requireConsole(deps), requireAdmin)
 
-  const current = async () => ({
-    ...(await embeddingSettingsView(deps.db)),
+  const viewOf = (stored: StoredEmbedding) => ({
     dimensions: EMBEDDING_DIMENSIONS,
+    ...embeddingView(stored),
   })
+  // 管理员填的设置不成立时返回 400 与原因，别的错误照常抛出
+  const saving = async <T>(save: () => Promise<T>) => {
+    try {
+      return { ok: true as const, value: await save() }
+    } catch (err) {
+      if (err instanceof EmbeddingSettingsError) return { ok: false as const, error: err.message }
+      throw err
+    }
+  }
   return app
-    .openapi(view, async (c) => c.json(await current(), 200))
+    .openapi(view, async (c) => c.json(viewOf(await loadEmbeddingModels(deps.db)), 200))
     .openapi(update, async (c) => {
-      let saved
+      const saved = await saving(() =>
+        saveActiveEmbedding(deps.db, deps.masterKey, c.req.valid('json')),
+      )
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      deps.embedder.invalidate()
+      void deps.jobs?.enqueueBackfill()
+      return c.json(viewOf(saved.value), 200)
+    })
+    .openapi(updateNext, async (c) => {
+      const saved = await saving(() =>
+        saveNextEmbedding(deps.db, deps.masterKey, c.req.valid('json')),
+      )
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      deps.embedder.invalidate()
+      // 换成了另一个新模型：原来那个已经生成的向量用不上了
+      if (saved.value.replaced) void deps.jobs?.enqueuePrune()
+      void deps.jobs?.enqueueSwitch()
+      return c.json(viewOf(saved.value.stored), 200)
+    })
+    .openapi(clearNext, async (c) => {
+      const cleared = await clearNextEmbedding(deps.db)
+      if (cleared === null) return c.json({ error: '没有正在换的模型' }, 404)
+      deps.embedder.invalidate()
+      void deps.jobs?.enqueuePrune()
+      return c.body(null, 204)
+    })
+    .openapi(switchNow, async (c) => {
+      const { next } = await loadEmbeddingModels(deps.db)
+      if (!next || (await switchEmbedding(deps.db, next.model)) === null) {
+        return c.json({ error: '没有正在换的模型' }, 400)
+      }
+      deps.embedder.invalidate()
+      // 旧模型的向量删掉；还没有新模型向量的记忆接着补
+      void deps.jobs?.enqueuePrune()
+      void deps.jobs?.enqueueBackfill()
+      return c.json(viewOf(await loadEmbeddingModels(deps.db)), 200)
+    })
+    .openapi(test, async (c) => {
+      let setups
       try {
-        saved = await saveEmbeddingConfig(deps.db, deps.masterKey, c.req.valid('json'))
+        setups = await loadEmbeddingSetups(deps.db, deps.masterKey)
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400)
       }
-      deps.embedder.invalidate()
-      void deps.jobs?.enqueueBackfill()
-      return c.json({ ...saved, dimensions: EMBEDDING_DIMENSIONS }, 200)
-    })
-    .openapi(test, async (c) => {
-      const started = Date.now()
-      try {
-        const config = await loadEmbeddingConfig(deps.db, deps.masterKey)
-        if (!config) throw new Error('还没有保存嵌入设置')
-        await openAiEmbedder(config).embed(['连通性测试'])
-        return c.json({ ok: true, latencyMs: Date.now() - started, error: null }, 200)
-      } catch (err) {
-        return c.json(
-          { ok: false, latencyMs: Date.now() - started, error: (err as Error).message },
-          200,
-        )
-      }
+      const [active, next] = await Promise.all([
+        testChannels(setups.active),
+        testChannels(setups.next),
+      ])
+      return c.json({ active, next }, 200)
     })
     .openapi(status, async (c) => {
-      const view = await embeddingSettingsView(deps.db)
-      const coverage = await embeddingCoverage(deps.db, view.model)
-      return c.json({ configured: view.configured, model: view.model, ...coverage }, 200)
+      const stored = await loadEmbeddingModels(deps.db)
+      const models = [stored.active, stored.next].flatMap((s) => (s ? [s.model] : []))
+      const [{ eligible, embedded }, lastError] = await Promise.all([
+        embeddingCoverage(deps.db, models),
+        loadEmbeddingError(deps.db),
+      ])
+      const progress = (setup: StoredEmbedding['active']) =>
+        setup && { model: setup.model, embedded: embedded.get(setup.model) ?? 0 }
+      return c.json(
+        { eligible, active: progress(stored.active), next: progress(stored.next), lastError },
+        200,
+      )
     })
     .openapi(extractionView, async (c) => c.json(await extractionSettingsView(deps.db), 200))
     .openapi(extractionUpdate, async (c) => {
@@ -223,13 +316,53 @@ export function settingsRoutes(deps: Deps) {
       return c.json(value, 200)
     })
     .openapi(rebuild, async (c) => {
-      if (!(await embeddingSettingsView(deps.db)).configured) {
-        return c.json({ error: '还没有保存嵌入设置' }, 400)
-      }
+      const stored = await loadEmbeddingModels(deps.db)
+      if (!stored.active) return c.json({ error: '还没有保存嵌入设置' }, 400)
+      if (stored.next) void deps.jobs?.enqueueSwitch()
       // 入队失败时如实返回，状态码也不报成已接受，不让管理员以为补齐已经在跑
       const queued = deps.jobs ? await deps.jobs.enqueueBackfill() : false
       return queued
         ? c.json({ queued }, 202)
         : c.json({ error: '没有排进队列：服务没有启动后台任务，或入队失败，请稍后重试' }, 503)
     })
+}
+
+const PROBE = '连通性测试'
+
+function cosine(a: number[], b: number[]): number {
+  let dot = 0
+  let na = 0
+  let nb = 0
+  for (let i = 0; i < a.length; i++) {
+    dot += a[i]! * b[i]!
+    na += a[i]! * a[i]!
+    nb += b[i]! * b[i]!
+  }
+  return dot / (Math.sqrt(na) * Math.sqrt(nb) || 1)
+}
+
+// 一组渠道各请求一次同一段文本：维度不对算失败；和第一个通了的渠道比相似度，看是不是同一个模型
+async function testChannels(setup: EmbeddingSetup | null) {
+  if (!setup) return null
+  const results = await Promise.all(
+    setup.channels.map(async (channel) => {
+      const started = Date.now()
+      try {
+        const [vector] = await openAiEmbedder(channel).embed([PROBE])
+        return { vector: vector!, latencyMs: Date.now() - started, error: null }
+      } catch (err) {
+        return { vector: null, latencyMs: Date.now() - started, error: (err as Error).message }
+      }
+    }),
+  )
+  const reference = results.find((r) => r.vector)?.vector
+  return results.map((r) => ({
+    ok: r.vector !== null,
+    latencyMs: r.latencyMs,
+    error: r.error,
+    similarity:
+      r.vector && reference && r.vector !== reference
+        ? Math.round(cosine(reference, r.vector) * 10_000) / 10_000
+        : null,
+  }))
 }

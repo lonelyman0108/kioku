@@ -19,7 +19,7 @@ import {
 import { decryptSecret } from '../crypto/envelope'
 import { withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
-import { EMBEDDING_ENDPOINT } from '../embedding/settings'
+import { sealedEmbeddingKeys } from '../embedding/settings'
 import { EXTRACTION_ENDPOINT } from '../extraction/settings'
 import { MemoryError, MemoryService } from '../memory/service'
 import { sealedEndpointKey } from '../settings/endpoint'
@@ -881,16 +881,19 @@ export async function verifyMasterKey(
   spaceId: string,
   masterKey: Buffer,
 ): Promise<boolean> {
-  // 读库出错时原样抛出，只有解密失败才说是主密钥不一致。实例设置里加密保存的接口 Key 挨个试
-  for (const endpoint of [EMBEDDING_ENDPOINT, EXTRACTION_ENDPOINT]) {
-    const stored = await sealedEndpointKey(db, endpoint)
-    if (!stored) continue
+  // 读库出错时原样抛出，只有解密失败才说是主密钥不一致。实例设置里加密保存的接口 Key，有一个就拿来试
+  const extraction = await sealedEndpointKey(db, EXTRACTION_ENDPOINT)
+  const [stored] = [
+    ...(await sealedEmbeddingKeys(db)).map((k) => ({ ...k, label: '嵌入接口' })),
+    ...(extraction ? [{ ...extraction, label: EXTRACTION_ENDPOINT.label }] : []),
+  ]
+  if (stored) {
     try {
       decryptSecret(masterKey, stored.sealed, stored.aad)
       return true
     } catch {
       throw new Error(
-        `KIOKU_MASTER_KEY 解不开已保存的${endpoint.label} Key：它和服务使用的主密钥不一致`,
+        `KIOKU_MASTER_KEY 解不开已保存的${stored.label} Key：它和服务使用的主密钥不一致`,
       )
     }
   }

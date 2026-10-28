@@ -150,20 +150,27 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
   })
 
   it('换了嵌入接口的主机必须重新说明 Key 怎么处理', async () => {
-    const put = (body: Record<string, unknown>) =>
-      app.request('/v1/settings/embedding', jsonRequest('PUT', body, { cookie: ws.cookie }))
-    await put({ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-secret' })
+    type View = { active: { channels: { id: string; hasApiKey: boolean }[] } }
+    const put = (channel: Record<string, unknown>) =>
+      app.request(
+        '/v1/settings/embedding',
+        jsonRequest('PUT', { model: 'm', channels: [channel] }, { cookie: ws.cookie }),
+      )
+    const first = (await (
+      await put({ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-secret' })
+    ).json()) as View
+    const id = first.active.channels[0]!.id
     expect(
-      await (await put({ baseUrl: 'https://e.example.com/v2', model: 'm' })).json(),
-    ).toMatchObject({
-      hasApiKey: true,
-    })
-    expect((await put({ baseUrl: 'https://other.example.net/v1', model: 'm' })).status).toBe(400)
+      await (await put({ id, baseUrl: 'https://e.example.com/v2', model: 'm' })).json(),
+    ).toMatchObject({ active: { channels: [{ id, hasApiKey: true }] } })
+    expect((await put({ id, baseUrl: 'https://other.example.net/v1', model: 'm' })).status).toBe(
+      400,
+    )
     expect(
       await (
-        await put({ baseUrl: 'https://other.example.net/v1', model: 'm', apiKey: null })
+        await put({ id, baseUrl: 'https://other.example.net/v1', model: 'm', apiKey: null })
       ).json(),
-    ).toMatchObject({ hasApiKey: false })
+    ).toMatchObject({ active: { channels: [{ id, hasApiKey: false }] } })
   })
 
   it('并发登录也只放行 5 次尝试', async () => {

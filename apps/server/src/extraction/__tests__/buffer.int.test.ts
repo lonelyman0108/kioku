@@ -34,6 +34,8 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
+    enqueueSwitch: async () => true,
+    enqueuePrune: async () => true,
     enqueueExtraction: async (target, delay) => void queued.push([target, delay]),
   }
 
@@ -246,7 +248,7 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
     const real = await startJobs({
       connectionString: testDatabaseUrl!,
       db: database.db,
-      embedder: async () => null,
+      embedder: staticEmbedderSource(null),
       masterKey,
     })
     try {

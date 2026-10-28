@@ -33,6 +33,8 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
+    enqueueSwitch: async () => true,
+    enqueuePrune: async () => true,
     enqueueExtraction: async () => {},
   }
 

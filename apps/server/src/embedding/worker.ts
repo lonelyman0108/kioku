@@ -1,4 +1,4 @@
-import { and, asc, eq, gt, inArray, isNull, ne, sql } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 
 import { withSpace, type Db } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary, spaces } from '../db/schema'
@@ -16,16 +16,18 @@ const stamp = sql<string>`memories.xmin::text`
 // 写回时正被别的事务锁着、这次没处理的记忆，交给调用方稍后重试
 export type OnSkipped = (ids: string[]) => void
 
-// 为一批记忆生成或刷新向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
+// 为一批记忆生成或刷新这个模型的向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
 // 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
 // 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 xmin，期间被改过的不写回，
-// 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态（例如刚改成 secret 的记忆又被写上明文向量）
+// 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态（例如刚改成 secret 的记忆又被写上明文向量）。
+// keep 是还要留着向量的模型（正在用的与正在换过去的），这些记忆别的模型的向量顺手删掉
 async function syncRows(
   db: Db,
   embedder: Embedder,
   spaceId: string,
   ids: string[],
-  onSkipped?: OnSkipped,
+  onSkipped: OnSkipped | undefined,
+  keep: string[],
 ): Promise<number> {
   if (!ids.length) return 0
 
@@ -76,7 +78,7 @@ async function syncRows(
 
   const cleanupOtherModels = and(
     inArray(memoryEmbeddings.memoryId, ids),
-    ne(memoryEmbeddings.model, embedder.model),
+    notInArray(memoryEmbeddings.model, keep),
   )
   // 没有要写的也没有要删的，就不必锁行；只剩换模型后的旧向量清理
   if (!pending.length && !stale.length) {
@@ -144,15 +146,17 @@ export async function embedMemory(
   spaceId: string,
   memoryId: string,
   onSkipped?: OnSkipped,
+  keep = [embedder.model],
 ): Promise<number> {
-  return syncRows(db, embedder, spaceId, [memoryId], onSkipped)
+  return syncRows(db, embedder, spaceId, [memoryId], onSkipped, keep)
 }
 
-// 全量补齐：逐个空间、按 id 分页检查所有记忆，用于首次配置或更换模型之后
+// 全量补齐：逐个空间、按 id 分页检查所有记忆，用于首次配置或换模型
 export async function backfillEmbeddings(
   db: Db,
   embedder: Embedder,
   onSkipped?: (spaceId: string, ids: string[]) => void,
+  keep = [embedder.model],
 ): Promise<number> {
   let total = 0
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
@@ -174,9 +178,27 @@ export async function backfillEmbeddings(
         spaceId,
         page.map((r) => r.id),
         onSkipped && ((ids) => onSkipped(spaceId, ids)),
+        keep,
       )
       after = page[page.length - 1]!.id
     }
+  }
+  return total
+}
+
+// 删掉不在 keep 里的模型的向量：切换或放弃换模型之后，没被改过的记忆还留着另一个模型的向量。
+// keep 为空时什么都不删（还没配置嵌入模型，不知道该留哪个）
+export async function pruneEmbeddings(db: Db, keep: string[]): Promise<number> {
+  if (!keep.length) return 0
+  let total = 0
+  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
+    const removed = await withSpace(db, spaceId, (tx) =>
+      tx
+        .delete(memoryEmbeddings)
+        .where(notInArray(memoryEmbeddings.model, keep))
+        .returning({ id: memoryEmbeddings.memoryId }),
+    )
+    total += removed.length
   }
   return total
 }

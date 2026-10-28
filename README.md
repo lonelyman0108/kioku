@@ -60,6 +60,8 @@ docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kio
 
 **升级**：先按上面备份，再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前。
 
+**嵌入模型**：在「实例设置 → 嵌入模型」里配。一个模型可以配几个渠道（同一个模型的不同接口），按顺序请求，前一个出错时换下一个；服务商给模型改了名，只改渠道里「请求用的模型名」，不用重新生成向量。换成别的模型用「换模型」：填新模型的标识与渠道，后台为全部记忆生成新模型的向量，召回在补齐之前一直用原来的模型，补齐后自动切过去、删掉旧的向量；补不上时可以不等补齐直接切换，也可以放弃。整个过程不用改数据库。向量固定 1024 维，换的模型要能按 `dimensions` 参数输出 1024 维（「测试连通」会检查）。
+
 **回滚**：停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的备份恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在备份里，会残留下来，下次升级时迁移会因为它们已存在而失败。
 
 ```bash
@@ -76,7 +78,7 @@ docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres -
 | 名称 | 默认值 | 说明 |
 |---|---|---|
 | `DATABASE_URL` | 必填 | PostgreSQL 连接串。角色不能是超级用户或带 `BYPASSRLS`，否则拒绝启动 |
-| `KIOKU_MASTER_KEY` | 空 | 32 字节随机数的 base64（`openssl rand -base64 32`）。用来加密 secret 级记忆和嵌入接口的 Key，不设置时这两项不能用 |
+| `KIOKU_MASTER_KEY` | 空 | 32 字节随机数的 base64（`openssl rand -base64 32`）。用来加密 secret 级记忆、Kioku 托管的凭据值，以及实例设置里嵌入接口与抽取模型的 Key，不设置时这几项都不能用 |
 | `KIOKU_COOKIE_SECURE` | `true` | 登录 Cookie 是否只走 HTTPS。浏览器在 localhost 上也接受；用局域网 HTTP 地址访问时设为 `false` |
 | `KIOKU_TRUSTED_PROXIES` | `0` | 前面有几层受信任的反向代理。按层数从 `X-Forwarded-For` 右边取客户端地址；没有代理时保持 `0`，否则地址可以伪造 |
 | `KIOKU_BIND` | `0.0.0.0` | 只用于 compose 示例：端口发布到哪个地址。放在反向代理后面时设为 `127.0.0.1` |

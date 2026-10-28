@@ -50,6 +50,8 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
+    enqueueSwitch: async () => true,
+    enqueuePrune: async () => true,
     enqueueExtraction: async (target, delay) => {
       queued.push({ scope: target.scope, delay })
     },

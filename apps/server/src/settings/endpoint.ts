@@ -96,7 +96,7 @@ export async function loadEndpointConfig(
 
 // 同一个主机（协议、主机名与端口都相同）才能沿用已保存的 Key。只认 http 与 https：
 // 别的协议的 origin 都是 "null"，按字符串比较会把不同的主机当成同一个
-function sameOrigin(a: string, b: string): boolean {
+export function sameOrigin(a: string, b: string): boolean {
   const left = new URL(a)
   const right = new URL(b)
   const web = (u: URL) => u.protocol === 'http:' || u.protocol === 'https:'

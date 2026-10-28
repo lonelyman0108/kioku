@@ -43,7 +43,7 @@ export function overviewRoutes(deps: Deps) {
       extractionUsage(deps.db, spaceId),
     ])
     const [stats, recent] = await Promise.all([
-      service.stats(settings.model, {
+      service.stats(settings.active?.model ?? null, {
         retentionDays: recall.settings.retentionDays,
         recordingSince: recall.recordingSince,
       }),
@@ -92,8 +92,8 @@ export function overviewRoutes(deps: Deps) {
         plaintextCredentials: stats.plaintextCredentials,
         neverRecalled: stats.neverRecalled,
         embedding: {
-          configured: settings.configured,
-          model: settings.model,
+          configured: settings.active !== null,
+          model: settings.active?.model ?? null,
           eligible: stats.eligible,
           embedded: stats.embedded,
         },

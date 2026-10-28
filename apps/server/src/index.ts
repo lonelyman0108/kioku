@@ -17,11 +17,12 @@ const embedder = settingsEmbedderSource(database.db, config.masterKey)
 const jobs = await startJobs({
   connectionString: config.databaseUrl,
   db: database.db,
-  embedder: () => embedder.get(),
+  embedder,
   masterKey: config.masterKey,
 })
-// 启动时补齐一次：处理上次停机期间没来得及生成的向量
+// 启动时补齐一次：处理上次停机期间没来得及生成的向量；换模型换到一半的接着换
 void jobs.enqueueBackfill()
+void jobs.enqueueSwitch()
 
 const app = createApp({
   db: database.db,

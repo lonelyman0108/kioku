@@ -34,6 +34,8 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
       jobs: {
         enqueueEmbed: (_spaceId, memoryId) => void queued.push(memoryId),
         enqueueBackfill: async () => true,
+        enqueueSwitch: async () => true,
+        enqueuePrune: async () => true,
         enqueueExtraction: async () => {},
       },
     })
