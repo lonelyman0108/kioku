@@ -47,6 +47,41 @@ describe('OpenAI 兼容的抽取模型客户端', () => {
     expect(headers.authorization).toBeUndefined()
   })
 
+  it('正文是分段数组时把文字段拼起来', async () => {
+    const model = openAiChatModel(
+      { baseUrl: 'https://llm.example.com/v1', model: 'm', apiKey: null },
+      (async () =>
+        Response.json({
+          choices: [
+            {
+              message: {
+                content: [
+                  { type: 'text', text: '{"facts":' },
+                  { type: 'image_url', image_url: { url: 'https://img.example.com/a.png' } },
+                  { type: 'text', text: '[]}' },
+                ],
+              },
+            },
+          ],
+        })) as unknown as typeof fetch,
+    )
+    expect((await model.complete([{ role: 'user', content: 'x' }])).content).toBe('{"facts":[]}')
+  })
+
+  it('超时给出中文说明', async () => {
+    const hanging = (async (_url: string, init: RequestInit) =>
+      new Promise((_resolve, reject) => {
+        init.signal!.addEventListener('abort', () => reject(init.signal!.reason))
+      })) as unknown as typeof fetch
+    const model = openAiChatModel(
+      { baseUrl: 'https://llm.example.com/v1', model: 'm', apiKey: null },
+      hanging,
+    )
+    await expect(
+      model.complete([{ role: 'user', content: 'x' }], { timeoutMs: 20 }),
+    ).rejects.toThrow('抽取模型 1 秒内没有返回')
+  })
+
   it('非 2xx 时带上状态码与响应片段；没有 choices 时报错', async () => {
     const failing = openAiChatModel(
       { baseUrl: 'https://llm.example.com/v1', model: 'm', apiKey: null },

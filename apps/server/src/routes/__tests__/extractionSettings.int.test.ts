@@ -49,6 +49,8 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
   })
   afterAll(async () => {
     await new Promise((resolve) => server?.close(resolve))
+    // 实例设置不挂在空间下，resetDatabase 清不到：不给后面的测试留下用别的主密钥加密的 Key
+    await database?.db.delete(settings).where(eq(settings.key, 'extraction'))
     await database?.close()
   })
   beforeEach(async () => {
@@ -124,6 +126,16 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
     const failed = await test()
     expect(failed.ok).toBe(false)
     expect(failed.error).toContain('HTTP 502')
+  })
+
+  it('接口地址只收 http 与 https：别的协议的 origin 都是 "null"，会被当成同一个主机', async () => {
+    const res = await call('PUT', '', {
+      baseUrl: 'ftp://a.example.com/v1',
+      model: 'm',
+      apiKey: 'sk',
+    })
+    expect(res.status).toBe(400)
+    expect(await view()).toMatchObject({ configured: false })
   })
 
   it('保存 Key 需要主密钥', async () => {

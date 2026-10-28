@@ -119,6 +119,19 @@ async function saveRetention() {
 
 const testing = ref(false)
 const result = ref<EmbeddingTestResult | null>(null)
+// 「测试连通」测的是已保存的设置：表单有没保存的改动时先保存再测，改动之后旧的测试结果也不再显示
+const dirty = computed(() => {
+  const saved = settings.data.value
+  return (
+    form.baseUrl !== (saved?.baseUrl ?? '') ||
+    form.model !== (saved?.model ?? '') ||
+    form.apiKey !== '' ||
+    form.clearKey
+  )
+})
+watch(dirty, (changed) => {
+  if (changed) result.value = null
+})
 async function test() {
   testing.value = true
   try {
@@ -191,11 +204,14 @@ async function test() {
                 color="neutral"
                 variant="subtle"
                 :loading="testing"
-                :disabled="!settings.data.value?.configured"
+                :disabled="!settings.data.value?.configured || dirty"
                 @click="test"
               >
                 测试连通
               </UButton>
+              <span v-if="dirty && settings.data.value?.configured" class="text-sm text-muted"
+                >改动保存之后才能测试</span
+              >
               <span
                 v-if="result"
                 class="text-sm"

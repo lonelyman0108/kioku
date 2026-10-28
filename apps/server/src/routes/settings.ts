@@ -140,9 +140,6 @@ const extractionTest = createRoute({
   responses: { 200: jsonResponse('测试结果', ExtractionTestResult), 403: forbidden },
 })
 
-// 连通性测试的输入很短，不用等抽取那么久
-const EXTRACTION_TEST_TIMEOUT_MS = 30_000
-
 export function settingsRoutes(deps: Deps) {
   const requireAdmin = createMiddleware<AppEnv>(async (c, next) => {
     const [account] = await deps.db
@@ -162,14 +159,15 @@ export function settingsRoutes(deps: Deps) {
   return app
     .openapi(view, async (c) => c.json(await current(), 200))
     .openapi(update, async (c) => {
+      let saved
       try {
-        await saveEmbeddingConfig(deps.db, deps.masterKey, c.req.valid('json'))
+        saved = await saveEmbeddingConfig(deps.db, deps.masterKey, c.req.valid('json'))
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400)
       }
       deps.embedder.invalidate()
       void deps.jobs?.enqueueBackfill()
-      return c.json(await current(), 200)
+      return c.json({ ...saved, dimensions: EMBEDDING_DIMENSIONS }, 200)
     })
     .openapi(test, async (c) => {
       const started = Date.now()
@@ -193,11 +191,10 @@ export function settingsRoutes(deps: Deps) {
     .openapi(extractionView, async (c) => c.json(await extractionSettingsView(deps.db), 200))
     .openapi(extractionUpdate, async (c) => {
       try {
-        await saveExtractionConfig(deps.db, deps.masterKey, c.req.valid('json'))
+        return c.json(await saveExtractionConfig(deps.db, deps.masterKey, c.req.valid('json')), 200)
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400)
       }
-      return c.json(await extractionSettingsView(deps.db), 200)
     })
     .openapi(extractionClear, async (c) => {
       await clearExtractionConfig(deps.db)
@@ -208,10 +205,9 @@ export function settingsRoutes(deps: Deps) {
       try {
         const config = await loadExtractionConfig(deps.db, deps.masterKey)
         if (!config) throw new Error('还没有保存抽取模型的设置')
-        await openAiChatModel(config).complete(
-          [{ role: 'user', content: '这是连通性测试，只回复 ok。' }],
-          { timeoutMs: EXTRACTION_TEST_TIMEOUT_MS },
-        )
+        await openAiChatModel(config).complete([
+          { role: 'user', content: '这是连通性测试，只回复 ok。' },
+        ])
         return c.json({ ok: true, latencyMs: Date.now() - started, error: null }, 200)
       } catch (err) {
         return c.json(

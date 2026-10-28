@@ -19,8 +19,10 @@ import {
 import { decryptSecret } from '../crypto/envelope'
 import { withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
-import { sealedEmbeddingKey } from '../embedding/settings'
+import { EMBEDDING_ENDPOINT } from '../embedding/settings'
+import { EXTRACTION_ENDPOINT } from '../extraction/settings'
 import { MemoryError, MemoryService } from '../memory/service'
+import { sealedEndpointKey } from '../settings/endpoint'
 import { APP_DOMAIN, DEFAULT_SENSITIVITY, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
 
 // 从 Lore 导入，规则与步骤见 docs/migrate-from-lore.md。Lore 只读访问；映射规则：
@@ -879,14 +881,17 @@ export async function verifyMasterKey(
   spaceId: string,
   masterKey: Buffer,
 ): Promise<boolean> {
-  // 读库出错时原样抛出，只有解密失败才说是主密钥不一致
-  const stored = await sealedEmbeddingKey(db)
-  if (stored) {
+  // 读库出错时原样抛出，只有解密失败才说是主密钥不一致。实例设置里加密保存的接口 Key 挨个试
+  for (const endpoint of [EMBEDDING_ENDPOINT, EXTRACTION_ENDPOINT]) {
+    const stored = await sealedEndpointKey(db, endpoint)
+    if (!stored) continue
     try {
       decryptSecret(masterKey, stored.sealed, stored.aad)
       return true
     } catch {
-      throw new Error('KIOKU_MASTER_KEY 解不开已保存的嵌入接口 Key：它和服务使用的主密钥不一致')
+      throw new Error(
+        `KIOKU_MASTER_KEY 解不开已保存的${endpoint.label} Key：它和服务使用的主密钥不一致`,
+      )
     }
   }
   const [sealed] = await withSpace(db, spaceId, (tx) =>

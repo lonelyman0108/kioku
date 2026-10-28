@@ -11,8 +11,8 @@ export const EmbeddingSettingsView = z.object({
 export type EmbeddingSettingsView = z.infer<typeof EmbeddingSettingsView>
 
 export const UpdateEmbeddingSettings = z.object({
-  // OpenAI 兼容接口的根地址，例如 https://api.example.com/v1
-  baseUrl: z.url(),
+  // OpenAI 兼容接口的根地址，例如 https://api.example.com/v1；只收 http 与 https
+  baseUrl: z.url({ protocol: /^https?$/, error: '接口地址要以 http:// 或 https:// 开头' }),
   model: z.string().min(1).max(128),
   // 不填表示沿用已保存的 Key；填 null 表示清除
   apiKey: z.string().min(1).nullable().optional(),
