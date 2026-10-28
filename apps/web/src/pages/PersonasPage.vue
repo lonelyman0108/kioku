@@ -26,14 +26,16 @@ const personas = useQuery({
 const nameOf = (id: string | null) => personas.data.value?.find((p) => p.id === id)?.name ?? '—'
 
 // 打开的是哪个人格记在地址里，从应用详情点过来时直接打开它
+function selectPersona(id: string | null) {
+  const query = { ...route.query }
+  if (id) query.id = id
+  else delete query.id
+  return router.replace({ query })
+}
+const closeDetail = () => selectPersona(null)
 const selectedId = computed<string | null>({
   get: () => (typeof route.query.id === 'string' ? route.query.id : null),
-  set: (id) => {
-    const query = { ...route.query }
-    if (id) query.id = id
-    else delete query.id
-    void router.replace({ query })
-  },
+  set: (id) => void selectPersona(id),
 })
 const selected = useQuery({
   queryKey: computed(() => ['persona', spaceId.value, selectedId.value] as const),
@@ -106,15 +108,17 @@ const saving = ref(false)
 async function save() {
   if (saving.value) return
   saving.value = true
-  // 请求期间切换了空间，结果不能写进新空间的界面
+  // 请求期间切换了空间，结果不能写进新空间的界面；保存的是哪个表单也先记下
   const sid = spaceId.value
+  const target = editing.value
   try {
     const description = form.description.trim() || null
-    if (editing.value) {
-      await api.updatePersona(sid, editing.value.id, {
+    if (target) {
+      // 继承没变时不带上：改继承要锁住空间里的继承关系，只改名称与说明用不着
+      await api.updatePersona(sid, target.id, {
         name: form.name,
         description,
-        extendsId: form.extendsId,
+        ...(form.extendsId !== target.extendsId ? { extendsId: form.extendsId } : {}),
       })
     } else {
       await api.createPersona(sid, {
@@ -125,9 +129,9 @@ async function save() {
       })
     }
     if (sid !== spaceId.value) return
-    open.value = false
+    if (editing.value === target) open.value = false
     await refresh()
-    toast.add({ title: editing.value ? '已保存' : '已创建人格', color: 'success' })
+    toast.add({ title: target ? '已保存' : '已创建人格', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {
@@ -141,11 +145,14 @@ async function remove() {
   if (!removing.value || deleting.value) return
   deleting.value = true
   const sid = spaceId.value
+  const id = removing.value.id
   try {
-    await api.deletePersona(sid, removing.value.id)
+    await api.deletePersona(sid, id)
     if (sid !== spaceId.value) return
     removing.value = null
-    selectedId.value = null
+    // 先关掉详情、去掉它的缓存再刷新，免得已删人格的详情再请求一次、闪一下「不存在」
+    if (selectedId.value === id) await closeDetail()
+    queryClient.removeQueries({ queryKey: ['persona', sid, id] })
     await refresh()
     toast.add({ title: '已删除人格', color: 'success' })
   } catch (err) {
@@ -221,7 +228,14 @@ async function remove() {
     </template>
   </USlideover>
 
-  <UModal v-model:open="open" :title="editing ? '修改人格' : '新建人格'">
+  <!-- 保存期间不能关：关掉再打开别的表单，保存结果会落到换上来的那个 -->
+  <UModal
+    :open="open"
+    :title="editing ? '修改人格' : '新建人格'"
+    :dismissible="!saving"
+    :close="!saving"
+    @update:open="(v) => (v ? (open = true) : !saving && (open = false))"
+  >
     <template #body>
       <form id="persona-form" class="space-y-4" @submit.prevent="save">
         <UFormField
@@ -252,7 +266,9 @@ async function remove() {
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
-        <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
+        <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false"
+          >取消</UButton
+        >
         <UButton type="submit" form="persona-form" :loading="saving">{{
           editing ? '保存' : '创建'
         }}</UButton>
