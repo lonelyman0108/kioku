@@ -113,6 +113,58 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     expect(candidates[0]!.via).not.toContain('semantic')
   })
 
+  const recallText = (query: string, minScore = 0.2) =>
+    withSpace(database.db, ws.spaceId, (tx) =>
+      recall(tx, resolveAccess(FULL_SCOPES, { appId, ownerAccountId: ws.accountId }), null, query, {
+        limit: 8,
+        personaIds: [personaId],
+        minScore,
+      }),
+    )
+
+  it('全文按命中的具体词打分：只是反复出现一个常见词的记忆不会靠 priority 排到前面', async () => {
+    await create({
+      uri: 'infra://kioku_host',
+      content:
+        'Kioku 部署在家里的服务器上：升级前先备份数据库，再拉代码重新构建镜像，启动时自动迁移',
+    })
+    await create({
+      uri: 'infra://backups',
+      content:
+        '所有服务的数据库每天凌晨备份一次，备份保留三十天，备份文件放在共享存储，备份失败会发通知',
+      priority: 1,
+    })
+    const candidates = await recallText('帮我升级一下 Kioku，顺便看看备份怎么做')
+    expect(candidates.map((c) => c.uri)).toEqual(['infra://kioku_host', 'infra://backups'])
+  })
+
+  it('只命中查询里最具体的那个词一次，单靠全文也能过阈值', async () => {
+    await create({
+      uri: 'infra://living_room_ap',
+      content: '客厅的无线接入点用 winbox 管理，固件每个季度升级一次，配置导出放在文件服务器上',
+    })
+    await create({ uri: 'notes://garden', content: '阳台的花每周浇一次水，夏天改成两天一次' })
+    const candidates = await recallText('winbox 怎么用')
+    expect(candidates.map((c) => c.uri)).toEqual(['infra://living_room_ap'])
+  })
+
+  it('查询里的单字不会带进只命中单字的记忆', async () => {
+    await create({
+      uri: 'notes://checkup',
+      content: '上周做了体检，这周做了复查，下周还要做一次，上午做 B 超，下午做心电图',
+      priority: 0,
+    })
+    await create({ uri: 'infra://router', content: '路由器的配置用 winbox 改，改完导出备份' })
+    const candidates = await recallText('帮我做一下路由器的配置')
+    expect(candidates.map((c) => c.uri)).toEqual(['infra://router'])
+  })
+
+  it('查询里带单引号的词也能检索', async () => {
+    await create({ uri: 'notes://books', content: "O'Reilly 的书放在书房" })
+    const candidates = await recallText("O'Reilly 那本书在哪", 0)
+    expect(candidates.map((c) => c.uri)).toEqual(['notes://books'])
+  })
+
   it('群聊上下文召回不到私人层，即使三路都能命中', async () => {
     await seed()
     const access = resolveAccess(
