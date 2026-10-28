@@ -521,7 +521,6 @@ export const memoryCredentialRefs = pgTable(
   ],
 )
 
-// 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 // 召回事件：会话开始的项目召回、每轮输入的召回、MCP 搜索与 REST 召回各记一条，管理界面里的搜索与调试不记。
 // 明细保留一段时间（实例设置），清理前把次数并入 memory_recall_stats。明细只给事件发生时的应用主人看：
 // 里面有那位主人的提示语和私人层的命中，应用转给别人之后不跟着转。不挂应用的外键：删掉应用之后，
@@ -593,6 +592,7 @@ export const memoryRecallStats = pgTable(
   ],
 )
 
+// 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 export const RLS_TABLES = [
   'personas',
   'apps',

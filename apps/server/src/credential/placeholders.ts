@@ -53,19 +53,21 @@ export function looksLikePlaintextCredential(text: string): boolean {
   return PLAINTEXT_CREDENTIAL.test(text)
 }
 
-// 把像明文凭据的片段打码：和 looksLikePlaintextCredential 同一条规则，命中的值连同后面到空白为止的部分换成星号。
-// 规则会漏，认不出的照原样留下；召回事件存提示语之前用它
+// 把像明文凭据的片段打码：和 looksLikePlaintextCredential 同一条规则。「密码：…」这类写法从值开始盖到行尾
+// （值里可能有空格，例如口令短语）；sk- 开头的串盖到下一个空白。挨着的几处凭据各自打码，
+// 前一处盖住的范围里开始的匹配接着往后盖，不会因为重叠漏掉。规则会漏，认不出的照原样留下
 const PLAINTEXT_ALL = new RegExp(PLAINTEXT_CREDENTIAL.source, 'gi')
 export function maskPlaintextCredentials(text: string): string {
   let out = ''
   let last = 0
   for (const m of text.matchAll(PLAINTEXT_ALL)) {
-    // 落在上一段已经打码的值里的，跳过
-    if (m.index < last) continue
+    const token = /^sk-/i.test(m[0])
     // 「密码：x」这类只匹配到值的第一个字，sk- 开头的整串都是值
-    const valueAt = m.index + (/^sk-/i.test(m[0]) ? 0 : m[0].length - 1)
-    let end = m.index + m[0].length
-    while (end < text.length && !/\s/.test(text[end]!)) end++
+    const valueAt = Math.max(last, m.index + (token ? 0 : m[0].length - 1))
+    let end = Math.max(last, m.index + m[0].length)
+    const stop = token ? /\s/ : /[\n\r\u2028\u2029]/
+    while (end < text.length && !stop.test(text[end]!)) end++
+    if (end <= last) continue
     out += `${text.slice(last, valueAt)}***`
     last = end
   }

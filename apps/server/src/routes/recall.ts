@@ -13,7 +13,6 @@ import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { handleLifecycle } from '../lifecycle/lifecycle'
 import { recallScopeForKey } from '../memory/context'
-import { publicCandidate } from '../recall/recall'
 
 const security = [{ bearer: [] }]
 const errors = {
@@ -59,7 +58,7 @@ export function recallRoutes(deps: Deps) {
       const scope = recallScopeForKey(deps, c.get('key'))
       const candidates = await scope.recall(query, { limit })
       scope.record('rest.recall', query, candidates)
-      return c.json({ candidates: candidates.map(publicCandidate) }, 200)
+      return c.json({ candidates }, 200)
     })
     .openapi(bootRoute, async (c) =>
       c.json(await recallScopeForKey(deps, c.get('key')).boot(), 200),

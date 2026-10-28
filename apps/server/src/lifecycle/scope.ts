@@ -1,6 +1,6 @@
 import type { BootResponse, Layer, RecallSource, RecentMemory } from '@kioku/contracts'
 
-import type { ScoredCandidate } from '../recall/recall'
+import type { RecordableCandidate } from '../recall/recall'
 
 // 召回与 boot 的执行范围：权限、空间与人格链都已绑定。
 // REST、MCP 与生命周期端点都只通过它调用，召回流程只有这一份
@@ -18,11 +18,11 @@ export interface ScopeRecallOptions {
 }
 
 export interface RecallScope {
-  // 候选带着记忆 id 与各路得分：记召回事件要用；交给接入方之前用 publicCandidate 去掉
-  recall(query: string, options: ScopeRecallOptions): Promise<ScoredCandidate[]>
+  // 候选在 Symbol 键上带着记忆 id（记召回事件要用），序列化时不会带出去
+  recall(query: string, options: ScopeRecallOptions): Promise<RecordableCandidate[]>
   // budget 是正文字数预算，不传时用默认值
   boot(budget?: number): Promise<BootResponse>
   recent(limit: number): Promise<RecentMemory[]>
   // 记一条召回事件，不等它写完。只有接入方真的拿到召回结果的地方调用，管理界面的预览与调试不调用
-  record(source: RecallSource, query: string, hits: readonly ScoredCandidate[]): void
+  record(source: RecallSource, query: string, hits: readonly RecordableCandidate[]): void
 }

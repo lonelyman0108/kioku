@@ -4,15 +4,19 @@ import { maskPlaintextCredentials } from '../credential/placeholders'
 import { withSpace } from '../db/client'
 import { recallEventHits, recallEvents } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
-import type { ScoredCandidate } from './recall'
+import { CANDIDATE_ID, type RecordableCandidate } from './recall'
 
 // 召回事件里最多存提示语的这么多字
 export const RECALL_QUERY_CHARS = 200
 
-// 存下来的提示语：先打码再截断（截在值的中间时就认不出来了）；应用关掉了记录提示语时为空
+// 存下来的提示语：先打码再截断（截在值的中间时就认不出来了）；应用关掉了记录提示语时为空。
+// 只处理开头一段：打码最多盖到行尾或下一个空白，起点在保留范围之外的匹配本来就存不下来
 export function storedQuery(query: string, recordPrompt: boolean | undefined): string | null {
   if (recordPrompt === false) return null
-  return maskPlaintextCredentials(query).slice(0, RECALL_QUERY_CHARS)
+  return maskPlaintextCredentials(query.slice(0, RECALL_QUERY_CHARS * 4)).slice(
+    0,
+    RECALL_QUERY_CHARS,
+  )
 }
 
 // 还没写完的召回事件：服务退出前、测试清库前等它们写完，免得写到一半被打断，或和清库互相等锁
@@ -29,8 +33,10 @@ export function recordRecall(
   key: KeyPrincipal,
   source: RecallSource,
   query: string,
-  hits: readonly ScoredCandidate[],
+  hits: readonly RecordableCandidate[],
 ): Promise<void> {
+  // 打码在事务外算好，不占着连接
+  const stored = storedQuery(query, key.app.config.recordPrompt)
   const write = withSpace(deps.db, key.spaceId, async (tx) => {
     const [event] = await tx
       .insert(recallEvents)
@@ -40,7 +46,7 @@ export function recordRecall(
         keyId: key.keyId,
         ownerAccountId: key.app.ownerAccountId,
         source,
-        query: storedQuery(query, key.app.config.recordPrompt),
+        query: stored,
       })
       .returning({ id: recallEvents.id })
     if (!hits.length) return
@@ -48,7 +54,7 @@ export function recordRecall(
       hits.map((h, i) => ({
         eventId: event!.id,
         spaceId: key.spaceId,
-        memoryId: h.id,
+        memoryId: h[CANDIDATE_ID],
         rank: i + 1,
         score: h.score,
         via: h.via,

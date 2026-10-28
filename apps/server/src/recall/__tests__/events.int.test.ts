@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import type { KeyInfo } from '@kioku/contracts'
 import { asc, eq, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -59,8 +60,9 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
     await post('/recall', { query: 'kioku 怎么部署' })
     await post('/lifecycle/event', { event: 'prompt.submit', prompt: 'kioku 部署' })
     await post('/lifecycle/event', { event: 'session.start', project: { dirName: 'kioku' } })
-    // 没有项目的会话开始不召回，也就不记
+    // 没有项目的会话开始不召回，只有空白的输入也不召回，都不记
     await post('/lifecycle/event', { event: 'session.start' })
+    await post('/lifecycle/event', { event: 'prompt.submit', prompt: '   ' })
     await expect.poll(eventCount).toBe(3)
 
     const rows = await events()
@@ -99,12 +101,12 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
   })
 
   it('提示语先打码再截到 200 字；应用关掉记录提示语时不存', async () => {
-    const prompt = `路由器密码：hunter2 ${'很长的一段话'.repeat(60)}`
+    const prompt = `路由器密码：hunter2 别记下来\n${'很长的一段话'.repeat(60)}`
     await post('/recall', { query: prompt })
     await expect.poll(eventCount).toBe(1)
     const [first] = await events()
     expect(first!.query).toHaveLength(200)
-    expect(first!.query).toContain('密码：***')
+    expect(first!.query!.startsWith('路由器密码：***\n很长的一段话')).toBe(true)
     expect(first!.query).not.toContain('hunter2')
 
     const res = await app.request(
@@ -192,6 +194,51 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
     expect(after.reduce((sum, s) => sum + s.count, 0)).toBe(
       stats.reduce((sum, s) => sum + s.count, 0) + 1,
     )
+  })
+
+  it('两次清理同时跑时不会把同一批明细并入两次', async () => {
+    await post('/recall', { query: 'kioku' })
+    await post('/recall', { query: 'kioku' })
+    await expect.poll(eventCount).toBe(2)
+    // 另一条连接锁住全部明细，让两次清理都等在锁上，再放开
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    const pending: Promise<number>[] = []
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select id from recall_events for update`
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending.push(pruneRecallEvents(database.db, 0), pruneRecallEvents(database.db, 0))
+        // 后一个清理排在前一个后面等同一批行锁，它被前一个挡住，不是直接被锁行的连接挡住
+        for (let i = 0; ; i++) {
+          const rows = await side<{ pid: number; by: number[] }[]>`
+            select pid, pg_blocking_pids(pid) as by from pg_stat_activity
+            where cardinality(pg_blocking_pids(pid)) > 0`
+          const waiting = new Set([pid])
+          for (let grew = true; grew;) {
+            grew = false
+            for (const row of rows) {
+              if (!waiting.has(row.pid) && row.by.some((b) => waiting.has(b))) {
+                waiting.add(row.pid)
+                grew = true
+              }
+            }
+          }
+          if (waiting.size >= 3) break
+          if (i >= 80) throw new Error('两次清理没有都等在明细的行锁上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+      })
+      const removed = await Promise.all(pending)
+      expect(removed.reduce((a, b) => a + b, 0)).toBe(2)
+    } finally {
+      await Promise.allSettled(pending)
+      await side.end()
+    }
+    const stats = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memoryRecallStats),
+    )
+    expect(stats.map((s) => s.count)).toEqual([2])
   })
 
   it('保留天数在实例设置里改，默认 30 天，只有实例管理员能改', async () => {

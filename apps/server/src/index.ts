@@ -39,9 +39,11 @@ const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
 // 收到停止信号时先停止接收请求，再等后台任务收尾
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
-    server.close()
-    void Promise.all([jobs.stop(), settleRecallEvents()]).finally(() =>
-      database.close().finally(() => process.exit(0)),
-    )
+    // 先等正在处理的请求结束（它们还会记召回事件），再等事件写完，最后关库
+    server.close(() => {
+      void Promise.all([jobs.stop(), settleRecallEvents()]).finally(() =>
+        database.close().finally(() => process.exit(0)),
+      )
+    })
   })
 }

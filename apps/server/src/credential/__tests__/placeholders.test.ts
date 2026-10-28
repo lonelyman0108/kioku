@@ -83,13 +83,28 @@ describe('明文凭据提醒', () => {
 })
 
 describe('提示语打码', () => {
-  it('把值连同后面到空白为止的部分换成星号，前后的文字不动', () => {
-    expect(maskPlaintextCredentials('路由器密码：hunter2 怎么改')).toBe('路由器密码：*** 怎么改')
+  it('「密码：…」这类写法从值开始盖到行尾，sk- 开头的串盖到下一个空白', () => {
+    expect(maskPlaintextCredentials('路由器密码：hunter2 怎么改')).toBe('路由器密码：***')
     expect(maskPlaintextCredentials('token=abc.def\n下一行')).toBe('token=***\n下一行')
     expect(maskPlaintextCredentials('用 sk-abcdefghijklmnopqrst 调接口')).toBe('用 *** 调接口')
-    expect(maskPlaintextCredentials('password: a1 和 api_key = b2')).toBe(
-      'password: *** 和 api_key = ***',
+    expect(maskPlaintextCredentials('password = "correct horse battery staple"')).toBe(
+      'password = ***',
     )
+  })
+
+  it('挨着的几处凭据都打码，重叠的匹配不会漏掉后面的值', () => {
+    for (const text of [
+      'token=abc,password: hunter2',
+      'token=abc&secret=\tS3cr3t!',
+      'apikey=xyz,api_key=\nsk-abcdefghijklmnopqrstuv',
+      '密码：a1\n口令：b2\n用 sk-abcdefghijklmnopqrst 调接口',
+    ]) {
+      const masked = maskPlaintextCredentials(text)
+      for (const secret of ['hunter2', 'S3cr3t!', 'sk-abcdefghijklmnopqrstuv', 'a1', 'b2']) {
+        expect(masked).not.toContain(secret)
+      }
+    }
+    expect(maskPlaintextCredentials('密码：a1\n口令：b2')).toBe('密码：***\n口令：***')
   })
 
   it('没有像凭据的片段时原样返回，占位符不打码', () => {

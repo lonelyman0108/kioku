@@ -1,5 +1,5 @@
 import { DEFAULT_RECALL_RETENTION_DAYS, RecallSettings } from '@kioku/contracts'
-import { eq, lt, sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 
 import { withSpace, type Db } from '../db/client'
 import { recallEvents, settings, spaces } from '../db/schema'
@@ -27,20 +27,25 @@ export async function pruneRecallEvents(db: Db, retentionDays: number): Promise<
   for (const space of all) {
     removed += await withSpace(db, space.id, async (tx) => {
       const cutoff = sql`now() - make_interval(days => ${retentionDays}::int)`
-      await tx.execute(sql`
-        insert into memory_recall_stats (memory_id, space_id, count, last_recalled_at)
-        select h.memory_id, h.space_id, count(*)::int, max(e.created_at)
-        from recall_event_hits h join recall_events e on e.id = h.event_id
-        where e.created_at < ${cutoff}
-        group by h.memory_id, h.space_id
-        on conflict (memory_id) do update
-          set count = memory_recall_stats.count + excluded.count,
-            last_recalled_at = greatest(memory_recall_stats.last_recalled_at, excluded.last_recalled_at)`)
-      const gone = await tx
-        .delete(recallEvents)
-        .where(lt(recallEvents.createdAt, cutoff))
-        .returning({ id: recallEvents.id })
-      return gone.length
+      // 删除与并入在同一条语句里：两次清理同时跑时，后一条要等前一条删掉的行，删不到也就不会再并入一次。
+      // 命中随事件级联删除，同一条语句里还读得到它们
+      const [row] = await tx.execute<{ removed: number }>(sql`
+        with gone as (
+          delete from ${recallEvents} where ${recallEvents.createdAt} < ${cutoff}
+          returning id, created_at
+        ),
+        merged as (
+          insert into memory_recall_stats (memory_id, space_id, count, last_recalled_at)
+          select h.memory_id, h.space_id, count(*)::int, max(g.created_at)
+          from recall_event_hits h join gone g on g.id = h.event_id
+          group by h.memory_id, h.space_id
+          on conflict (memory_id) do update
+            set count = memory_recall_stats.count + excluded.count,
+              last_recalled_at = greatest(memory_recall_stats.last_recalled_at, excluded.last_recalled_at)
+          returning 1
+        )
+        select count(*)::int as removed from gone`)
+      return row?.removed ?? 0
     })
   }
   return removed

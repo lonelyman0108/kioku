@@ -93,8 +93,13 @@ export interface ScoredCandidate extends DebugCandidate {
   rawScore: number
 }
 
-// 给接入方的候选只有这些字段
-export function publicCandidate(c: ScoredCandidate): RecallCandidate {
+// 召回候选对应的记忆 id，记召回事件要用。放在 Symbol 键上：JSON 序列化时不会带出去，
+// 候选交给接入方时不会把内部的 id 一起发出去
+export const CANDIDATE_ID = Symbol('recall candidate memory id')
+export type RecordableCandidate = RecallCandidate & { readonly [CANDIDATE_ID]: string }
+
+// 给接入方的候选只有这些字段（加上 Symbol 键上的记忆 id）
+export function publicCandidate(c: ScoredCandidate): RecordableCandidate {
   return {
     uri: c.uri,
     layer: c.layer,
@@ -103,6 +108,7 @@ export function publicCandidate(c: ScoredCandidate): RecallCandidate {
     score: c.score,
     via: c.via,
     cues: c.cues,
+    [CANDIDATE_ID]: c.id,
   }
 }
 
