@@ -13,14 +13,13 @@ export const SUBJECT_FACT_LIMIT = 8
 const SUBJECT_FACT_CHARS = 200
 const SUBJECT_NAME_CHARS = 40
 
-// 对象直连（设计 7 节第 2 步）：当前发言人与本群的对象层里抽取的事实，不看查询直接注入。
+// 对象直连：当前发言人与本群的对象层里抽取的事实，不看查询直接注入。
 // 仍然先套读权限：来源作用域只含全局、本应用与本群（私聊时是与此人的对话），群里读不到私聊里记下的事实。
 // 只收抽取的事实：策展的对象层节点有 URI，照常走各路召回。没有事实的对象不列
 export async function subjectFacts(
   tx: Tx,
   access: Access,
   subjects: readonly SessionSubject[],
-  personaIds: string[],
 ): Promise<SubjectFacts[]> {
   const result: SubjectFacts[] = []
   for (const subject of subjects) {
@@ -29,7 +28,8 @@ export async function subjectFacts(
       .from(memories)
       .where(
         and(
-          readableConditions(access, { personaIds }),
+          // 只看对象层，人格的挑选用不上
+          readableConditions(access, { personaIds: [] }),
           eq(memories.layer, 'subject'),
           eq(memories.form, 'extracted'),
           eq(memories.subjectId, subject.id),

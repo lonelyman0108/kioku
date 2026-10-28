@@ -261,8 +261,40 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
       platformName: '明哥',
       name: '同事小明',
     })
-    // Telegram 的全名、群名可以超过 100 字，不能因为名字长就拒掉整个请求
-    expect((await recall('规则', direct('10002', '长'.repeat(150)))).status).toBe(200)
+  })
+
+  it('群里报的发言人名字（可能是群名片）只在第一次见到这个人时用；群名照常更新', async () => {
+    await recall('规则', {
+      chatType: 'group',
+      platform: 'qq',
+      group: { id: '3000', name: '读书会' },
+      sender: { id: '3001', name: '群名片甲' },
+    })
+    await recall('规则', {
+      chatType: 'group',
+      platform: 'qq',
+      group: { id: '3000', name: '读书会（周五）' },
+      sender: { id: '3001', name: '群名片乙' },
+    })
+    expect(await identities()).toMatchObject([
+      { kind: 'person', externalId: '3001', platformName: '群名片甲', name: '群名片甲' },
+      { kind: 'group', externalId: '3000', platformName: '读书会（周五）', name: '读书会（周五）' },
+    ])
+    await recall('规则', direct('3001', '昵称'))
+    expect((await identities())[0]).toMatchObject({ platformName: '昵称', name: '昵称' })
+  })
+
+  it('名字只记前 128 个字，不因为长拒掉请求；只拒绝离谱的长度', async () => {
+    const long = '长'.repeat(300)
+    expect((await recall('规则', direct('10002', long))).status).toBe(200)
+    expect((await identities())[0]).toMatchObject({
+      platformName: '长'.repeat(128),
+      name: '长'.repeat(128),
+    })
+    // 按字符截断，不切开表情符号
+    expect((await recall('规则', direct('10003', '😀'.repeat(200)))).status).toBe(200)
+    expect((await identities())[1]!.platformName).toBe('😀'.repeat(128))
+    expect((await recall('规则', direct('10004', 'x'.repeat(1001)))).status).toBe(400)
   })
 
   it('同一个新账号的并发请求只建出一个对象：等在咨询锁上的请求认出先建好的那个', async () => {
@@ -489,6 +521,18 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
         facts: [expect.objectContaining({ content: '私下说过要换工作' })],
       },
     ])
+    // 主人在管理界面起的名字可能是私下的备注，注入时用平台上的名字（这次上报的，没报时取上次记下的）
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(subjects).set({ displayName: '前同事，别信他' }).where(eq(subjects.id, s)),
+    )
+    const renamed = await event({
+      event: 'prompt.submit',
+      prompt: '今天读什么',
+      context: group('1000', '1001'),
+    })
+    expect(injected(renamed.body)).toContain('发言人「人1001」')
+    expect(injected(renamed.body)).not.toContain('别信他')
+    expect((await recall('今天读什么', direct('1001'))).body.subjects[0]!.name).toBe('人1001')
     // 不带上下文、没有发言人的群聊、定时任务：没有发言人的事实
     expect((await recall('今天读什么')).body.subjects).toEqual([])
     expect((await recall('今天读什么', { chatType: 'cron' })).body.subjects).toEqual([])

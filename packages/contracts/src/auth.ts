@@ -157,7 +157,8 @@ export const AppInfo = z.object({
 })
 export type AppInfo = z.infer<typeof AppInfo>
 
-// 按群换人格：应用在这个群（或频道）里用别的人格，boot、召回与写入都按它；没有规则的群与私聊用默认人格
+// 按群换人格：带着这个群（或频道）的会话上下文的请求用规则里的人格，boot、召回与写入都按它；
+// 没有规则的群、私聊与不带上下文的请求（GET /boot、MCP）用默认人格
 export const GroupPersonaRule = z.object({ subjectId: z.uuid(), personaId: z.uuid() })
 export type GroupPersonaRule = z.infer<typeof GroupPersonaRule>
 

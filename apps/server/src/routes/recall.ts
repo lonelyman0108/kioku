@@ -8,11 +8,11 @@ import {
   RecallResponse,
 } from '@kioku/contracts'
 
-import { resolveSession } from '../access/session'
+import { resolveKeySession } from '../access/session'
 import { requireKey } from '../auth/middleware'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { handleLifecycle } from '../lifecycle/lifecycle'
+import { handleLifecycle, optionalSubjects } from '../lifecycle/lifecycle'
 import { recallScopeForKey } from '../memory/context'
 
 const security = [{ bearer: [] }]
@@ -58,10 +58,10 @@ export function recallRoutes(deps: Deps) {
     .openapi(recallRoute, async (c) => {
       const { query, limit, context } = c.req.valid('json')
       const key = c.get('key')
-      const scope = recallScopeForKey(deps, key, await resolveSession(deps, key, context))
+      const scope = recallScopeForKey(deps, key, await resolveKeySession(deps, key, context))
       const [candidates, subjects] = await Promise.all([
         scope.recall(query, { limit }),
-        scope.subjects(),
+        optionalSubjects(scope),
       ])
       scope.record('rest.recall', query, candidates)
       return c.json({ candidates, subjects }, 200)
@@ -72,7 +72,7 @@ export function recallRoutes(deps: Deps) {
     .openapi(lifecycleRoute, async (c) => {
       const key = c.get('key')
       const input = c.req.valid('json')
-      const scope = recallScopeForKey(deps, key, await resolveSession(deps, key, input.context))
+      const scope = recallScopeForKey(deps, key, await resolveKeySession(deps, key, input.context))
       return c.json(await handleLifecycle(scope, key.app.runtimeFamily, input), 200)
     })
 }

@@ -30,7 +30,7 @@ export type RecallBreakdown = z.infer<typeof RecallBreakdown>
 export const DebugCandidate = RecallCandidate.extend({ breakdown: RecallBreakdown })
 export type DebugCandidate = z.infer<typeof DebugCandidate>
 
-// 会话上下文：由接入方（插件）上报，只能收紧权限、不能放宽（设计 4.2 节）。平台账号原样上报，
+// 会话上下文：由接入方（插件）上报，只能收紧权限、不能放宽。平台账号原样上报，
 // 服务端按平台、种类（人或群）与账号解析成对象，没见过的就新建
 export const CHAT_TYPES = ['direct', 'group', 'channel', 'cron', 'subagent'] as const
 export const ChatType = z.enum(CHAT_TYPES)
@@ -38,9 +38,9 @@ export type ChatType = z.infer<typeof ChatType>
 
 export const PlatformRef = z.object({
   id: z.string().trim().min(1).max(200),
-  // 平台上的显示名，随上报更新；空字符串当作没带。上限放宽到 Telegram 全名与群名的长度，
-  // 名字太长导致整个请求被拒的话，插件只能放弃这一轮的召回
-  name: z.string().trim().max(256).optional(),
+  // 平台上的显示名，随上报更新；空字符串当作没带。服务端只记前 128 个字，这里只拒绝离谱的长度：
+  // 名字长导致整个请求被拒的话，插件只能放弃这一轮的召回
+  name: z.string().trim().max(1000).optional(),
 })
 export type PlatformRef = z.infer<typeof PlatformRef>
 

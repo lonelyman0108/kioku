@@ -26,7 +26,7 @@ import { MemoryError, MemoryService } from './service'
 // 管理界面的搜索等嵌入接口最多这么久，超时就只走全文与关键词，界面不必一直等
 const CONSOLE_SEMANTIC_TIMEOUT_MS = 2_000
 
-// 会话由 resolveSession 从接入方上报的会话上下文解析出来；不带上下文时按应用的默认人格、不收紧
+// 会话由 resolveKeySession 从接入方上报的会话上下文解析出来；不带上下文时按应用的默认人格、不收紧
 export function accessForKey(key: KeyPrincipal, session: KeySession = defaultSession(key)): Access {
   return resolveAccess(
     key.scopes,
@@ -180,9 +180,10 @@ export function recallScopeForKey(
       run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
+    // 对象层不用人格链，不经过 run
     subjects: async () =>
       session.subjects.length
-        ? run((tx, personaIds) => subjectFacts(tx, access, session.subjects, personaIds))
+        ? withSpace(deps.db, key.spaceId, (tx) => subjectFacts(tx, access, session.subjects))
         : [],
     record: (source, query, hits) => void recordRecall(deps, key, source, query, hits),
   }

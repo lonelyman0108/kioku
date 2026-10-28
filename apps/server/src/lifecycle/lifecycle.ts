@@ -5,6 +5,7 @@ import type {
   LifecycleProject,
   LifecycleResponse,
   RecentMemory,
+  SubjectFacts,
 } from '@kioku/contracts'
 
 import { BOOT_LAYERS } from '../memory/filter'
@@ -149,6 +150,14 @@ export async function sessionStart(
   }
 }
 
+// 对象直连只是附加的线索：读取失败时记日志、不带，不影响召回本身（和会话开始时的附加块一样）
+export function optionalSubjects(scope: RecallScope): Promise<SubjectFacts[]> {
+  return scope.subjects().catch((err: unknown) => {
+    console.warn('读取对象直连的事实失败', err)
+    return []
+  })
+}
+
 export async function handleLifecycle(
   scope: RecallScope,
   runtimeFamily: string,
@@ -170,7 +179,7 @@ export async function handleLifecycle(
       limit: PROMPT_RECALL_LIMIT,
       semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
     }),
-    scope.subjects(),
+    optionalSubjects(scope),
   ])
   scope.record('prompt.submit', input.prompt, candidates)
   const context = [formatRecallBlock(candidates, input.sessionId), formatSubjectBlock(subjects)]
