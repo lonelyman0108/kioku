@@ -6,17 +6,19 @@ import {
   CreatedKey,
   CreateKeyRequest,
   ErrorResponse,
+  KeyAccessMatrix,
   KeyInfo,
   KeyScopes,
   UpdateAppRequest,
   type MemberRole,
 } from '@kioku/contracts'
-import { and, desc, eq, isNull } from 'drizzle-orm'
+import { and, count, desc, eq, isNull } from 'drizzle-orm'
 
+import { accessMatrix, keyEffectiveScopes } from '../access/access'
 import { generateApiKey } from '../auth/keys'
 import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
-import { apiKeys, apps, personas, spaceMembers } from '../db/schema'
+import { apiKeys, apps, memories, personas, spaceMembers } from '../db/schema'
 import type { Tx } from '../db/client'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -38,15 +40,35 @@ const toAppInfo = (row: typeof apps.$inferSelect) => ({
   config: AppConfig.parse(row.config),
 })
 
-const toKeyInfo = (row: typeof apiKeys.$inferSelect) => ({
-  id: row.id,
-  name: row.name,
-  prefix: row.prefix,
-  scopes: KeyScopes.parse(row.scopes),
-  createdAt: row.createdAt.toISOString(),
-  lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
-  revokedAt: row.revokedAt?.toISOString() ?? null,
-})
+// 应用主人现在在空间里的角色与加入时间；不在空间里时为 undefined。Key 的当前有效上限按它算
+type OwnerMembership = { role: MemberRole; memberSince: Date } | undefined
+
+const toKeyInfo = (row: typeof apiKeys.$inferSelect, owner: OwnerMembership) => {
+  const scopes = KeyScopes.parse(row.scopes)
+  return {
+    id: row.id,
+    name: row.name,
+    prefix: row.prefix,
+    scopes,
+    effectiveScopes: keyEffectiveScopes({ ...row, scopes }, owner),
+    createdAt: row.createdAt.toISOString(),
+    lastUsedAt: row.lastUsedAt?.toISOString() ?? null,
+    revokedAt: row.revokedAt?.toISOString() ?? null,
+  }
+}
+
+async function ownerMembership(
+  deps: Deps,
+  spaceId: string,
+  accountId: string,
+): Promise<OwnerMembership> {
+  const [row] = await deps.db
+    .select({ role: spaceMembers.role, memberSince: spaceMembers.createdAt })
+    .from(spaceMembers)
+    .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
+    .limit(1)
+  return row
+}
 
 const listApps = createRoute({
   method: 'get',
@@ -85,6 +107,20 @@ const updateApp = createRoute({
   },
 })
 
+const deleteApp = createRoute({
+  method: 'delete',
+  path: '/spaces/{spaceId}/apps/{appId}',
+  tags: ['apps'],
+  summary: '删除应用：还有应用层记忆（含已删除的）时不能删；它的 Key 一起删除',
+  request: { params: AppParams },
+  responses: {
+    204: { description: '已删除' },
+    403: forbidden,
+    404: notFound,
+    409: jsonResponse('还有应用层记忆', ErrorResponse),
+  },
+})
+
 const listKeys = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/apps/{appId}/keys',
@@ -101,6 +137,19 @@ const createKey = createRoute({
   summary: '签发 API Key，明文只在这次响应里出现',
   request: { params: AppParams, body: jsonBody(CreateKeyRequest) },
   responses: { 201: jsonResponse('已签发', CreatedKey), 403: forbidden, 404: notFound },
+})
+
+const keyMatrix = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/matrix',
+  tags: ['apps'],
+  summary: '一把 Key 在各种会话上下文下能读写哪些层、哪些敏感级（按当前有效上限）',
+  request: { params: KeyParams },
+  responses: {
+    200: jsonResponse('权限矩阵', KeyAccessMatrix),
+    403: forbidden,
+    404: notFound,
+  },
 })
 
 const revokeKey = createRoute({
@@ -222,6 +271,39 @@ export function appRoutes(deps: Deps) {
       if (!rows[0]) return c.json({ error: '应用或默认人格不存在' }, 404)
       return c.json(toAppInfo(rows[0]), 200)
     })
+    .openapi(deleteApp, async (c) => {
+      const { spaceId, appId } = c.req.valid('param')
+      const accountId = c.get('console').accountId
+      const role = await roleOf(spaceId, accountId)
+      if (!canManageApps(role)) return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      const result = await withSpace(deps.db, spaceId, async (tx) => {
+        // 锁住应用这一行：写应用层记忆时的外键检查要等这把锁，检查之后不会再冒出一条被连带删掉的记忆
+        const owner = await appOwnerOf(tx, appId, true)
+        if (!owner) return 'missing' as const
+        if (owner !== accountId && role !== 'owner') return 'forbidden' as const
+        // 删除应用会把应用层记忆连带硬删除，已删除、还能撤销删除的也算
+        const [stored] = await tx
+          .select({ n: count() })
+          .from(memories)
+          .where(eq(memories.appId, appId))
+        if (stored!.n > 0) return 'stored' as const
+        await tx.delete(apps).where(eq(apps.id, appId))
+        return 'deleted' as const
+      })
+      if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
+      if (result === 'forbidden')
+        return c.json({ error: '只有应用的主人或空间 owner 能删除应用' }, 403)
+      // 不给条数：空间 owner 写进来的 secret 记忆，应用主人可能读不到
+      if (result === 'stored') {
+        return c.json(
+          {
+            error: '还有应用层记忆（含已删除、还能撤销删除的），移到别的命名空间之后才能删除应用',
+          },
+          409,
+        )
+      }
+      return c.body(null, 204)
+    })
     .openapi(listKeys, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
       const accountId = c.get('console').accountId
@@ -238,7 +320,11 @@ export function appRoutes(deps: Deps) {
         .from(apiKeys)
         .where(and(eq(apiKeys.spaceId, spaceId), eq(apiKeys.appId, appId)))
         .orderBy(desc(apiKeys.createdAt))
-      return c.json(rows.map(toKeyInfo), 200)
+      const membership = await ownerMembership(deps, spaceId, owner)
+      return c.json(
+        rows.map((row) => toKeyInfo(row, membership)),
+        200,
+      )
     })
     .openapi(createKey, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
@@ -274,7 +360,45 @@ export function appRoutes(deps: Deps) {
       })
       if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
       if (result === 'not-owner') return c.json({ error: '只有应用的主人能签发它的 Key' }, 403)
-      return c.json({ ...toKeyInfo(result), key: generated.plaintext }, 201)
+      const membership = await ownerMembership(deps, spaceId, accountId)
+      return c.json({ ...toKeyInfo(result, membership), key: generated.plaintext }, 201)
+    })
+    .openapi(keyMatrix, async (c) => {
+      const { spaceId, appId, keyId } = c.req.valid('param')
+      const accountId = c.get('console').accountId
+      const role = await roleOf(spaceId, accountId)
+      if (!role) return c.json({ error: '不是该空间成员' }, 403)
+      const found = await withSpace(deps.db, spaceId, async (tx) => {
+        const [app] = await tx.select().from(apps).where(eq(apps.id, appId))
+        // 和 Key 列表一样，只给应用主人与空间 owner 看；先查权限再找 Key，别人探不出 Key 在不在
+        if (!app) return 'missing' as const
+        if (app.ownerAccountId !== accountId && role !== 'owner') return 'forbidden' as const
+        const [key] = await tx
+          .select()
+          .from(apiKeys)
+          .where(and(eq(apiKeys.id, keyId), eq(apiKeys.appId, appId)))
+        return key ? { app, key } : ('missing' as const)
+      })
+      if (found === 'missing') return c.json({ error: 'Key 不存在' }, 404)
+      if (found === 'forbidden') {
+        return c.json({ error: '只有应用的主人或空间 owner 能查看 Key' }, 403)
+      }
+      const { app, key } = found
+      const scopes = keyEffectiveScopes(
+        { ...key, scopes: KeyScopes.parse(key.scopes) },
+        await ownerMembership(deps, spaceId, app.ownerAccountId),
+      )
+      if (!scopes) return c.json({ error: 'Key 已作废' }, 404)
+      const config = AppConfig.parse(app.config)
+      return c.json(
+        accessMatrix(scopes, {
+          appId: app.id,
+          ownerAccountId: app.ownerAccountId,
+          personaId: app.defaultPersonaId,
+          ...(config.elevateOwnerDirect ? { elevateOwnerDirect: config.elevateOwnerDirect } : {}),
+        }),
+        200,
+      )
     })
     .openapi(revokeKey, async (c) => {
       const { spaceId, appId, keyId } = c.req.valid('param')

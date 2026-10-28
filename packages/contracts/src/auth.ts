@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { KeyScopes, MemberRole } from './memory'
+import { KeyScopes, Layer, MemberRole, Sensitivity } from './memory'
 
 export const Username = z
   .string()
@@ -93,6 +93,48 @@ export const CreatePersonaRequest = z.object({
 })
 export type CreatePersonaRequest = z.infer<typeof CreatePersonaRequest>
 
+// 标识不能改：人格层记忆的 URI（persona://<标识>/…）里写着它
+export const UpdatePersonaRequest = z.object({
+  name: z.string().min(1).max(64).optional(),
+  description: z.string().max(500).nullable().optional(),
+  // 不能成环，继承链（含自己）最多 8 层
+  extendsId: z.uuid().nullable().optional(),
+})
+export type UpdatePersonaRequest = z.infer<typeof UpdatePersonaRequest>
+
+// 人格详情里的一个人格层节点
+export const PersonaNode = z.object({
+  uri: z.string(),
+  personaId: z.uuid(),
+  priority: z.number().int(),
+  sensitivity: Sensitivity,
+  disclosure: z.string().nullable(),
+  // 被继承链上更近的人格的哪个节点覆盖（同一相对路径）；没被覆盖时为 null
+  overriddenBy: z.string().nullable(),
+})
+export type PersonaNode = z.infer<typeof PersonaNode>
+
+export const AppRef = z.object({ id: z.uuid(), slug: z.string(), name: z.string() })
+export type AppRef = z.infer<typeof AppRef>
+
+// 节点按查看者在管理界面里读得到的算：私人层不在人格层里，secret 只给读得到的成员
+export const PersonaDetail = PersonaInfo.extend({
+  // 从直接继承的那个到最远的祖先
+  ancestors: z.array(PersonaInfo),
+  // 直接继承它的人格
+  children: z.array(PersonaInfo),
+  // 自己的节点
+  own: z.array(PersonaNode),
+  // 祖先的节点：overriddenBy 为 null 的继承下来，不为 null 的被覆盖
+  inherited: z.array(PersonaNode),
+  // 默认人格是它的应用
+  apps: z.array(AppRef),
+  // 查看者在管理界面里看得到的人格层记忆总数，含已删除、已过期的：删除人格会把它们连带硬删除，
+  // 所以有记忆时删不掉（删除时还会算上查看者读不到的）
+  storedMemories: z.number().int(),
+})
+export type PersonaDetail = z.infer<typeof PersonaDetail>
+
 export const AppInfo = z.object({
   id: z.uuid(),
   slug: z.string(),
@@ -114,7 +156,11 @@ export const KeyInfo = z.object({
   id: z.uuid(),
   name: z.string(),
   prefix: z.string(),
+  // 签发上限
   scopes: KeyScopes,
+  // 当前有效上限：签发上限按应用主人现在的角色收紧。Key 已吊销，或主人已经离开空间
+  // （离开后重新加入的，离开之前签发的 Key 不恢复）时为 null，Key 用不了
+  effectiveScopes: KeyScopes.nullable(),
   createdAt: z.string(),
   lastUsedAt: z.string().nullable(),
   revokedAt: z.string().nullable(),
@@ -124,6 +170,38 @@ export type KeyInfo = z.infer<typeof KeyInfo>
 // 只在创建时返回一次明文
 export const CreatedKey = KeyInfo.extend({ key: z.string() })
 export type CreatedKey = z.infer<typeof CreatedKey>
+
+// 权限矩阵的会话上下文：无上下文（本机 agent）、陌生人私聊、主人私聊、群聊、定时任务与子 agent
+export const ACCESS_CONTEXTS = ['none', 'direct', 'owner_direct', 'group', 'cron'] as const
+export const AccessContext = z.enum(ACCESS_CONTEXTS)
+export type AccessContext = z.infer<typeof AccessContext>
+
+// 一格：这一层这一级的记忆。read 为 explicit 时只能按 URI 显式读取（secret），recall 时也进召回与 boot。
+// 对象层与情节层的 write 指对话抽取能写进去，不能按 URI 直接写
+export const AccessCell = z.object({
+  read: z.enum(['none', 'explicit', 'recall']),
+  write: z.boolean(),
+})
+export type AccessCell = z.infer<typeof AccessCell>
+
+export const AccessMatrixRow = z.object({
+  layer: Layer,
+  cells: z.array(AccessCell.extend({ sensitivity: Sensitivity })),
+})
+
+// 一把 Key 在各种会话上下文下实际能读写什么，按当前有效上限与应用配置计算
+export const KeyAccessMatrix = z.object({
+  contexts: z.array(
+    z.object({
+      context: AccessContext,
+      rows: z.array(AccessMatrixRow),
+      // 读得到哪些来源作用域写下的记忆：any 不限；app 只含全局与本应用写下的；
+      // group、direct 再加上本群、与此人的对话里写下的
+      originScope: z.enum(['any', 'app', 'group', 'direct']),
+    }),
+  ),
+})
+export type KeyAccessMatrix = z.infer<typeof KeyAccessMatrix>
 
 export const WhoAmI = z.object({
   spaceId: z.uuid(),
