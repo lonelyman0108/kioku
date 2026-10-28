@@ -641,6 +641,7 @@ export const memoryRecallStats = pgTable(
 
 // 会话缓冲：私聊与群聊里一轮轮的对话，只是抽取的输入。攒批抽取完就删，空闲超过一天的也删，
 // 不进召回、不进活动，也没有读取的接口（群聊原文里有别人的话，不该长期留）。
+// 按应用与来源作用域（本群，或与此人的私聊）分批，不按插件给的会话标识：标识重了也不会把私聊混进群里的那一批。
 // 会话上下文按这一轮解析出的对象记下；抽取时按写入这一轮的 Key 重新算权限，Key 吊销或作废就不抽取
 export const conversationTurns = pgTable(
   'conversation_turns',
@@ -653,6 +654,9 @@ export const conversationTurns = pgTable(
     keyId: uuid()
       .notNull()
       .references(() => apiKeys.id, { onDelete: 'cascade' }),
+    // group:<群对象> 或 direct:<发言人对象>，和这一批抽取写下的记忆的来源作用域相同
+    scope: text().notNull(),
+    // 插件给的会话标识，只做记录
     sessionId: text().notNull(),
     // direct | group | channel
     chatType: text().notNull(),
@@ -665,8 +669,7 @@ export const conversationTurns = pgTable(
     createdAt: createdAt(),
   },
   (t) => [
-    index().on(t.appId, t.sessionId, t.id),
-    index().on(t.createdAt),
+    index().on(t.appId, t.scope, t.id),
     foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
       'cascade',
     ),

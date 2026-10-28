@@ -6,7 +6,8 @@ import { sessions } from '../db/schema'
 import { pruneConversationTurns } from '../extraction/buffer'
 import { loadRecallSettings, pruneRecallEvents } from '../recall/retention'
 
-// 定时清理已经过期的数据，由后台任务每小时执行一次，不再在登录时顺带清理
+// 定时清理已经过期的数据，由后台任务每小时执行一次，不再在登录时顺带清理：会话、登录失败计数、
+// 超过保留天数的召回事件明细，以及空闲超过一天的会话缓冲
 export async function cleanupExpired(
   db: Db,
 ): Promise<{ sessions: number; attempts: number; recallEvents: number; turns: number }> {

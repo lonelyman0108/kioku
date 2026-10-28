@@ -11,14 +11,14 @@ const EMBED = 'embed-memory'
 const BACKFILL = 'embed-backfill'
 const CLEANUP = 'cleanup-expired'
 const EXTRACT = 'extract-session'
-// 每小时清一次过期的会话与登录失败计数
+// 每小时清一次过期的数据（见 cleanupExpired）
 const CLEANUP_CRON = '17 * * * *'
 // 写回向量时记忆正被别的事务锁着，隔这么久再试
 const RETRY_AFTER_SECONDS = 10
 
 export interface Jobs {
   enqueueEmbed(spaceId: string, memoryId: string): void
-  // 排一次会话的抽取，delaySeconds 秒之后开始。同一个会话只排一个：已经排着的就把开始时间改成这次的，
+  // 排一批缓冲的抽取，delaySeconds 秒之后开始。同一批只排一个：已经排着的就把开始时间改成这次的，
   // 所以空闲计时从最后一轮算起；正在抽取时另排一个，等它做完再接着处理新进来的。
   // 入队失败只记录日志，不抛错：缓冲还在，下一轮或清理会处理它
   enqueueExtraction(target: BufferedSession, delaySeconds: number): Promise<void>
@@ -92,8 +92,9 @@ export async function startJobs(options: {
     enqueueExtraction: (target, delaySeconds) =>
       boss
         .upsert(EXTRACT, target, {
-          singletonKey: `${target.appId}:${target.sessionId}`,
+          singletonKey: `${target.appId}|${target.scope}`,
           startAfter: delaySeconds,
+          // 每次重试都要再请求一次模型，比向量任务少试几次
           retryLimit: 3,
           retryBackoff: true,
         })

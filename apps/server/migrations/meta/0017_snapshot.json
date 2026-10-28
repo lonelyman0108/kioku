@@ -1,5 +1,5 @@
 {
-  "id": "3370afa1-64bc-44de-a1cb-a1e3bf8b1a3b",
+  "id": "b86369fe-c1c1-4234-a09f-b4d49671331a",
   "prevId": "7d8af571-0bef-418e-9e4b-1d6aab4c9618",
   "version": "7",
   "dialect": "postgresql",
@@ -456,6 +456,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "scope": {
+          "name": "scope",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
         "session_id": {
           "name": "session_id",
           "type": "text",
@@ -507,8 +513,8 @@
         }
       },
       "indexes": {
-        "conversation_turns_app_id_session_id_id_index": {
-          "name": "conversation_turns_app_id_session_id_id_index",
+        "conversation_turns_app_id_scope_id_index": {
+          "name": "conversation_turns_app_id_scope_id_index",
           "columns": [
             {
               "expression": "app_id",
@@ -517,28 +523,13 @@
               "nulls": "last"
             },
             {
-              "expression": "session_id",
+              "expression": "scope",
               "isExpression": false,
               "asc": true,
               "nulls": "last"
             },
             {
               "expression": "id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
-        "conversation_turns_created_at_index": {
-          "name": "conversation_turns_created_at_index",
-          "columns": [
-            {
-              "expression": "created_at",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

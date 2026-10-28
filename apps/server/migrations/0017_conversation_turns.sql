@@ -3,6 +3,7 @@ CREATE TABLE "conversation_turns" (
 	"space_id" uuid NOT NULL,
 	"app_id" uuid NOT NULL,
 	"key_id" uuid NOT NULL,
+	"scope" text NOT NULL,
 	"session_id" text NOT NULL,
 	"chat_type" text NOT NULL,
 	"group_subject_id" uuid,
@@ -20,8 +21,7 @@ ALTER TABLE "conversation_turns" ADD CONSTRAINT "conversation_turns_key_id_api_k
 ALTER TABLE "conversation_turns" ADD CONSTRAINT "conversation_turns_space_id_app_id_apps_space_id_id_fk" FOREIGN KEY ("space_id","app_id") REFERENCES "public"."apps"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "conversation_turns" ADD CONSTRAINT "conversation_turns_group_fk" FOREIGN KEY ("space_id","group_subject_id") REFERENCES "public"."subjects"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "conversation_turns" ADD CONSTRAINT "conversation_turns_sender_fk" FOREIGN KEY ("space_id","sender_subject_id") REFERENCES "public"."subjects"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-CREATE INDEX "conversation_turns_app_id_session_id_id_index" ON "conversation_turns" USING btree ("app_id","session_id","id");--> statement-breakpoint
-CREATE INDEX "conversation_turns_created_at_index" ON "conversation_turns" USING btree ("created_at");--> statement-breakpoint
+CREATE INDEX "conversation_turns_app_id_scope_id_index" ON "conversation_turns" USING btree ("app_id","scope","id");--> statement-breakpoint
 -- 与其他内容表一样按 app.space_id 强制隔离
 ALTER TABLE conversation_turns ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint

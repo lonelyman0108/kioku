@@ -10,7 +10,7 @@ import {
 
 import { resolveKeySession } from '../access/session'
 import { requireKey } from '../auth/middleware'
-import { bufferTurn } from '../extraction/buffer'
+import { bufferTurn, canBufferTurns } from '../extraction/buffer'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { handleLifecycle } from '../lifecycle/lifecycle'
@@ -74,11 +74,13 @@ export function recallRoutes(deps: Deps) {
     .openapi(lifecycleRoute, async (c) => {
       const key = c.get('key')
       const input = c.req.valid('json')
-      const session = await resolveKeySession(deps, key, input.context)
       if (input.event === 'turn.end') {
-        await bufferTurn(deps, key, session, input)
+        if (canBufferTurns(key)) {
+          await bufferTurn(deps, key, await resolveKeySession(deps, key, input.context), input)
+        }
         return c.json({ hostOutput: { mode: 'none' as const, value: null }, nodeUris: [] }, 200)
       }
+      const session = await resolveKeySession(deps, key, input.context)
       const scope = recallScopeForKey(deps, key, session)
       return c.json(await handleLifecycle(scope, key.app.runtimeFamily, input), 200)
     })
