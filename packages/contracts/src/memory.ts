@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 // 层：这条记忆属于谁
 export const LAYERS = ['base', 'persona', 'app', 'owner', 'private', 'subject', 'episode'] as const
-export const Layer = z.enum(LAYERS)
+export const Layer = z.enum(LAYERS).meta({ id: 'Layer' })
 export type Layer = z.infer<typeof Layer>
 
 // 不由 URI 决定的层：新建时可以选、之后可以直接互改。人格层与应用层由 persona:// 与 app:// 决定，
@@ -13,12 +13,12 @@ export type PlainLayer = z.infer<typeof PlainLayer>
 
 // 敏感级：能给谁看，按从宽到严排列，比较大小时用下标
 export const SENSITIVITIES = ['public', 'internal', 'private', 'secret'] as const
-export const Sensitivity = z.enum(SENSITIVITIES)
+export const Sensitivity = z.enum(SENSITIVITIES).meta({ id: 'Sensitivity' })
 export type Sensitivity = z.infer<typeof Sensitivity>
 
 // 写入来源：untrusted 只能写 subject 与 episode，且不参与跨作用域的自动注入
 export const PROVENANCES = ['owner', 'agent', 'untrusted', 'system'] as const
-export const Provenance = z.enum(PROVENANCES)
+export const Provenance = z.enum(PROVENANCES).meta({ id: 'Provenance' })
 export type Provenance = z.infer<typeof Provenance>
 
 // 形态：curated 是 URI 树上的策展节点，extracted 是从对话自动抽取的扁平事实

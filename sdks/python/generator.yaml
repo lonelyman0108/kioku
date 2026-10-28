@@ -1,0 +1,5 @@
+# openapi-python-client 的配置
+project_name_override: kioku-client
+package_name_override: kioku_client
+# 格式化交给 generate.sh 用这里写死的 ruff 来做，和检查用的是同一个版本
+post_hooks: []
