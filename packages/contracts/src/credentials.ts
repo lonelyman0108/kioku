@@ -101,9 +101,9 @@ export const ConsoleCredentialList = z.object({
 })
 export type ConsoleCredentialList = z.infer<typeof ConsoleCredentialList>
 
-const CredentialName = z.string().trim().min(1, '名称不能为空').max(100)
-const CredentialDescription = z.string().max(2000).nullable()
-const CredentialValue = z.string().min(1, '值不能为空').max(16_384)
+const CredentialName = z.string().trim().min(1, '名称不能为空').max(100, '名称最多 100 个字')
+const CredentialDescription = z.string().max(2000, '说明最多 2000 个字').nullable()
+const CredentialValue = z.string().min(1, '值不能为空').max(16_384, '一个值最多 16384 个字符')
 // 条目位置与来源字段会代入取值命令，服务端给出的命令里它们都放在单引号里。值里不能有单引号
 // （包括 PowerShell 也当作引号的弯引号）：这样单引号包起来在 bash、zsh 与 PowerShell 里都是字面量。
 // 再挡掉放在引号外也能拼出新命令的字符（; | & < > ` $ \ " %）、换行、看不见的字符
@@ -118,15 +118,15 @@ const Location = z
   .string()
   .trim()
   .min(1, '条目位置不能为空')
-  .max(500)
+  .max(500, '条目位置最多 500 个字')
   .refine(shellSafe, `条目位置${SHELL_SAFE_MESSAGE}`)
 const SourceField = z
   .string()
   .trim()
   .min(1, '来源字段不能为空')
-  .max(200)
+  .max(200, '来源字段最多 200 个字')
   .refine(shellSafe, `来源字段${SHELL_SAFE_MESSAGE}`)
-const AppIds = z.array(z.uuid()).max(100).nullable()
+const AppIds = z.array(z.uuid()).max(100, '最多限定 100 个应用').nullable()
 
 const fieldCount = (values: Record<string, unknown>) =>
   Object.keys(values).length <= MAX_CREDENTIAL_FIELDS
@@ -141,7 +141,7 @@ const ExternalSource = z.object({
   fields: z
     .array(z.object({ name: CredentialFieldName, sourceField: SourceField }))
     .min(1, '至少要有一个字段')
-    .max(MAX_CREDENTIAL_FIELDS)
+    .max(MAX_CREDENTIAL_FIELDS, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`)
     .refine(distinctNames, '字段名不能重复'),
 })
 
@@ -288,7 +288,7 @@ export const CredentialProvider = z.object({
 })
 export type CredentialProvider = z.infer<typeof CredentialProvider>
 
-const ProviderInstructions = z.string().max(4000)
+const ProviderInstructions = z.string().max(4000, '使用说明最多 4000 个字')
 
 export const CreateCredentialProviderRequest = z.object({
   kind: CredentialProviderKind,

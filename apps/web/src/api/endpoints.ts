@@ -1,7 +1,13 @@
 import {
   ActivityList,
   AppInfo,
+  ConsoleCredential,
+  ConsoleCredentialList,
   ConsoleSearchResponse,
+  CredentialEventList,
+  CredentialProvider,
+  CredentialReferenceList,
+  CredentialValues,
   CreatedKey,
   DeletedMemoryList,
   DomainLayers,
@@ -21,6 +27,8 @@ import {
   SetupStatus,
   SpaceOverview,
   type CreateAppRequest,
+  type CreateCredentialProviderRequest,
+  type CreateCredentialRequest,
   type CreateKeyRequest,
   type CreateMemoryRequest,
   type CreatePersonaRequest,
@@ -30,6 +38,8 @@ import {
   type RestoreRequest,
   type SetupRequest,
   type UpdateAppRequest,
+  type UpdateCredentialProviderRequest,
+  type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
   type UpdateMemoryRequest,
 } from '@kioku/contracts'
@@ -116,6 +126,50 @@ export const api = {
       body: { memoryId },
       schema: MemoryView,
     }),
+
+  credentials: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
+  deletedCredentials: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/credentials/deleted`, { schema: ConsoleCredentialList }),
+  credential: (spaceId: string, id: string) =>
+    request('GET', `/spaces/${spaceId}/credentials/${id}`, { schema: ConsoleCredential }),
+  createCredential: (spaceId: string, body: CreateCredentialRequest) =>
+    request('POST', `/spaces/${spaceId}/credentials`, { body, schema: ConsoleCredential }),
+  updateCredential: (spaceId: string, id: string, body: UpdateCredentialRequest) =>
+    request('PATCH', `/spaces/${spaceId}/credentials/${id}`, { body, schema: ConsoleCredential }),
+  deleteCredential: (spaceId: string, id: string, expectedVersion: number) =>
+    request('DELETE', `/spaces/${spaceId}/credentials/${id}`, { query: { expectedVersion } }),
+  undeleteCredential: (spaceId: string, id: string) =>
+    request('POST', `/spaces/${spaceId}/credentials/${id}/undelete`, {
+      schema: ConsoleCredential,
+    }),
+  revealCredential: (spaceId: string, id: string) =>
+    request('POST', `/spaces/${spaceId}/credentials/${id}/reveal`, { schema: CredentialValues }),
+  credentialEvents: (spaceId: string, id: string, cursor?: string) =>
+    request('GET', `/spaces/${spaceId}/credentials/${id}/events`, {
+      query: { cursor },
+      schema: CredentialEventList,
+    }),
+  credentialReferences: (spaceId: string, id: string) =>
+    request('GET', `/spaces/${spaceId}/credentials/${id}/references`, {
+      schema: CredentialReferenceList,
+    }),
+  credentialProviders: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/credential-providers`, {
+      schema: z.array(CredentialProvider),
+    }),
+  createCredentialProvider: (spaceId: string, body: CreateCredentialProviderRequest) =>
+    request('POST', `/spaces/${spaceId}/credential-providers`, {
+      body,
+      schema: CredentialProvider,
+    }),
+  updateCredentialProvider: (spaceId: string, id: string, body: UpdateCredentialProviderRequest) =>
+    request('PATCH', `/spaces/${spaceId}/credential-providers/${id}`, {
+      body,
+      schema: CredentialProvider,
+    }),
+  deleteCredentialProvider: (spaceId: string, id: string) =>
+    request('DELETE', `/spaces/${spaceId}/credential-providers/${id}`),
 
   overview: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),

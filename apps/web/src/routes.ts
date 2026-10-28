@@ -30,6 +30,11 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/ActivityPage.vue'),
       },
       {
+        path: 'spaces/:spaceId/credentials',
+        name: 'credentials',
+        component: () => import('./pages/CredentialsPage.vue'),
+      },
+      {
         path: 'spaces/:spaceId/personas',
         name: 'personas',
         component: () => import('./pages/PersonasPage.vue'),
