@@ -89,6 +89,7 @@ import {
 } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { readableConditions, snapshotColumns, type MemoryColumns } from './filter'
+import { BOOT_ELIGIBLE } from '../recall/boot'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
   DEFAULT_SENSITIVITY,
@@ -1190,22 +1191,12 @@ export class MemoryService {
 
   // 概览统计。向量覆盖率只算应当有向量的记忆：读得到、不是 secret、有正文；
   // model 为 null（还没配置嵌入模型）时已有向量记为 0
-  async stats(model: string | null, recallRetentionDays: number): Promise<MemoryStats> {
+  async stats(model: string | null, recall: RecallWindow): Promise<MemoryStats> {
     return this.run(async (tx, personaIds) => {
-      // 建了超过保留天数还没被召回过的：刚建的记忆还没来得及被用到，不算
       const [never] = await tx
         .select({ n: count() })
         .from(memories)
-        .where(
-          and(
-            this.listable(personaIds),
-            NEVER_RECALLED,
-            lte(
-              memories.createdAt,
-              sql`now() - make_interval(days => ${recallRetentionDays}::int)`,
-            ),
-          ),
-        )
+        .where(and(this.listable(personaIds), neverRecalled(recall)))
       const groups = await tx
         .select({
           layer: memories.layer,
@@ -1248,11 +1239,11 @@ export class MemoryService {
   // 记忆按成员在管理界面里看得到的算，累计次数跟着记忆的可见性走。
   // 次数 = 还留着的明细里的命中次数 + 清理明细时并入的累计
 
-  // 被召回次数最多的，与从没被召回的（secret 本来就不进召回，不算）
-  async recallRanking(limits: {
-    top: number
-    never: number
-  }): Promise<{ top: RecalledMemory[]; never: NeverRecalledMemory[]; neverTotal: number }> {
+  // 被召回次数最多的，与从没被召回的（规则见 neverRecalled，和概览的提醒是同一个口径）
+  async recallRanking(
+    limits: { top: number; never: number },
+    recall: RecallWindow,
+  ): Promise<{ top: RecalledMemory[]; never: NeverRecalledMemory[]; neverTotal: number }> {
     return this.run(async (tx, personaIds) => {
       const visible = and(this.listable(personaIds), eq(memories.form, 'curated'))
       const top = await tx.execute<{
@@ -1280,7 +1271,7 @@ export class MemoryService {
         where ${visible} and (r.hits is not null or s.count is not null)
         order by total desc, last desc, ${memories.id}
         limit ${limits.top}`)
-      const neverWhere = and(visible, NEVER_RECALLED)
+      const neverWhere = and(visible, neverRecalled(recall))
       const [never, [total]] = await Promise.all([
         tx
           .select({
@@ -1831,10 +1822,24 @@ const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content}
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
 
-// 从没被召回过：保留期内的明细里没有，清理时也没并入过累计。secret 本来就不进召回，不算
-const NEVER_RECALLED = sql`(${memories.sensitivity} <> 'secret'
-  and not exists (select 1 from ${recallEventHits} h where h.memory_id = ${memories.id})
-  and not exists (select 1 from ${memoryRecallStats} s where s.memory_id = ${memories.id}))`
+// 召回事件的保留天数与开始记录的时间（没有记录时为 null），判断「从没被召回」用
+export interface RecallWindow {
+  retentionDays: number
+  recordingSince: Date | null
+}
+
+// 从没被召回过：策展记忆里，保留期内的明细里没有、清理时也没并入过累计的。不算的：secret 本来就不进召回；
+// 会进启动上下文的节点每次会话开始都注入，只是不记成召回；建了、或开始记录召回事件，都还不到保留天数的，
+// 还没来得及被用到（从 Lore 导入的记忆保留原来的建立时间，升级之后不会一下子全算进来）
+function neverRecalled(recall: RecallWindow): SQL {
+  const settled = sql`now() - make_interval(days => ${recall.retentionDays}::int)`
+  const since = recall.recordingSince?.toISOString() ?? null
+  return sql`(${memories.form} = 'curated' and ${memories.sensitivity} <> 'secret'
+    and not (${BOOT_ELIGIBLE})
+    and greatest(${memories.createdAt}, ${since}::timestamptz) <= ${settled}
+    and not exists (select 1 from ${recallEventHits} h where h.memory_id = ${memories.id})
+    and not exists (select 1 from ${memoryRecallStats} s where s.memory_id = ${memories.id}))`
+}
 
 // 正文像有明文密码或 Token：与界面、导入工具同一条规则（PLAINTEXT_CREDENTIAL），PostgreSQL 的正则照原样能用，
 // ~* 不区分大小写，对应它的 i 标记。secret 的正文是密文（content 为空），结果为 NULL，不算

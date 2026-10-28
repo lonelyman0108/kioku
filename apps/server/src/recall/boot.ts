@@ -16,6 +16,18 @@ import { inlineText } from './recall'
 // 否则群聊里的人可以把一条 priority 0 的「记忆」变成主人 agent 每次会话都读到的指令。
 export const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
 export const BOOT_CHAR_BUDGET = 16_000
+
+// 会进启动上下文的节点：受信来源的策展层里 priority 0 的，加上人格与应用层 priority ≤ 1 的。
+// boot 按它挑选；召回分析的「从没被召回」不算它们：每次会话开始都注入，只是不记成召回
+export const BOOT_ELIGIBLE = and(
+  eq(memories.form, 'curated'),
+  inArray(memories.layer, BOOT_LAYERS),
+  ne(memories.provenance, 'untrusted'),
+  or(
+    eq(memories.priority, 0),
+    and(inArray(memories.layer, ['persona', 'app']), lte(memories.priority, 1)),
+  ),
+)!
 // 未展开的节点最多列这么多个、合计这么多字，其余只给个数，免得列表本身撑爆宿主的上下文长度
 const MAX_OMITTED_LISTED = 20
 const MAX_OMITTED_CHARS = 1_200
@@ -39,13 +51,7 @@ export async function boot(
       and(
         readableConditions(access, { personaIds: personas.personaIds }),
         personaOverride(access, personas),
-        eq(memories.form, 'curated'),
-        inArray(memories.layer, BOOT_LAYERS),
-        ne(memories.provenance, 'untrusted'),
-        or(
-          eq(memories.priority, 0),
-          and(inArray(memories.layer, ['persona', 'app']), lte(memories.priority, 1)),
-        ),
+        BOOT_ELIGIBLE,
       ),
     )
     .orderBy(asc(memories.priority), asc(memories.domain), asc(memories.path))

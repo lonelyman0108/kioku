@@ -5,6 +5,7 @@ import { withSpace, type Db } from '../db/client'
 import { recallEvents, settings, spaces } from '../db/schema'
 
 const KEY = 'recall'
+const STARTED_KEY = 'recall-started'
 
 export async function loadRecallSettings(db: Db): Promise<RecallSettings> {
   const [row] = await db.select().from(settings).where(eq(settings.key, KEY)).limit(1)
@@ -17,6 +18,13 @@ export async function saveRecallSettings(db: Db, value: RecallSettings): Promise
     .insert(settings)
     .values({ key: KEY, value })
     .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+}
+
+// 开始记录召回事件的时间（0015 迁移写入，也就是升级到记录召回事件的版本时）；没有这一行时为 null。
+// 之前的记忆没机会被记下召回，「从没被召回」要等记录满保留天数之后才算
+export async function recallRecordingSince(db: Db): Promise<Date | null> {
+  const [row] = await db.select().from(settings).where(eq(settings.key, STARTED_KEY)).limit(1)
+  return typeof row?.value === 'string' ? new Date(row.value) : null
 }
 
 // 删掉超过保留天数的召回事件明细，删之前把每条记忆被召回的次数与最后一次的时间并入累计统计，

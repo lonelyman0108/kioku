@@ -543,7 +543,12 @@ export const recallEvents = pgTable(
     query: text(),
     createdAt: createdAt(),
   },
-  (t) => [index().on(t.spaceId, t.createdAt), index().on(t.appId, t.createdAt)],
+  (t) => [
+    index().on(t.spaceId, t.createdAt),
+    index().on(t.appId, t.createdAt),
+    // 明细只给事件里记下的主人，按主人翻页
+    index().on(t.spaceId, t.ownerAccountId, t.id),
+  ],
 )
 
 // 一次召回命中了哪些记忆：名次（从 1 开始）、分数与来路

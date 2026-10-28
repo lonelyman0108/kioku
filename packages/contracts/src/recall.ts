@@ -207,10 +207,13 @@ export type AppRecallVolume = z.infer<typeof AppRecallVolume>
 // 各应用的调用量只列查看者能管 Key 的应用（应用主人与空间 owner）
 export const RecallStats = z.object({
   retentionDays: z.number().int(),
+  // 开始记录召回事件的时间；之前的记忆没机会被记下召回，记录满保留天数之后才算「从没被召回」
+  recordingSince: z.string().nullable(),
   apps: z.array(AppRecallVolume),
   // 被召回次数最多的
   top: z.array(RecalledMemory),
-  // 从没被召回的（secret 本来就不进召回，不算），最早建的在前；neverTotal 是总数
+  // 从没被召回的，最早建的在前；neverTotal 是总数。不算 secret（不进召回）、会进启动上下文的节点
+  // （每次会话开始都注入），以及建了或开始记录都还不到保留天数的
   never: z.array(NeverRecalledMemory),
   neverTotal: z.number().int(),
 })

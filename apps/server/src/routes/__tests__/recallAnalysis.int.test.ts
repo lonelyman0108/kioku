@@ -64,6 +64,16 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     const res = await app.request(`/v1/spaces/${ws.spaceId}${path}`, { headers: { cookie } })
     return { status: res.status, body: (await res.json()) as T }
   }
+  // 把记忆的建立时间往前挪；开始记录召回事件的时间（0015 迁移写的那一行）按需设置，测试开头会清掉设置表
+  const backdate = (days: number) =>
+    withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(memories).set({ createdAt: sql`now() - make_interval(days => ${days}::int)` }),
+    )
+  const recordingStarted = (daysAgo: number) =>
+    database.db.insert(settings).values({
+      key: 'recall-started',
+      value: sql`to_jsonb(now() - make_interval(days => ${daysAgo}::int))`,
+    })
   const idOf = async (uri: string) => {
     const [domain, path] = uri.split('://') as [string, string]
     const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
@@ -79,8 +89,10 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     await recallAs('kioku')
     await recallAs('kioku 部署')
     await recallAs('kioku')
+    await backdate(31)
     const { body } = await get<RecallStats>('/recall/stats')
     expect(body.retentionDays).toBe(30)
+    expect(body.recordingSince).toBeNull()
     expect(body.top.map((m) => [m.uri, m.total])).toEqual([
       ['projects://kioku', 3],
       ['notes://deploy', 1],
@@ -184,6 +196,30 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     expect(res.status).toBe(200)
     expect((await get<RecallEventList>('/recall/events', bob.cookie)).body.items).toEqual([])
     expect((await get<RecallEventList>(`/recall/events?appId=${appId}`)).body.items).toHaveLength(1)
+  })
+
+  it('从没被召回的不算会进启动上下文的节点，也要等建了、开始记录都满保留天数', async () => {
+    await create({ uri: 'core://agent', content: '基础规则', layer: 'base', priority: 0 })
+    await create({ uri: 'notes://fresh', content: '刚建的' })
+    await backdate(31)
+    await create({ uri: 'notes://newer', content: '昨天建的' })
+    const stats = (await get<RecallStats>('/recall/stats')).body
+    // core://agent 每次会话开始都注入；notes://newer 建了还不到 30 天
+    expect(stats.never.map((m) => m.uri).sort()).toEqual([
+      'notes://deploy',
+      'notes://fresh',
+      'notes://idle',
+      'projects://kioku',
+    ])
+    expect((await get<SpaceOverview>('/overview')).body.neverRecalled).toBe(4)
+
+    // 开始记录召回事件才 1 天：之前的记忆没机会被记下召回，都不算
+    await recordingStarted(1)
+    const recent = (await get<RecallStats>('/recall/stats')).body
+    expect(recent.never).toEqual([])
+    expect(recent.neverTotal).toBe(0)
+    expect(recent.recordingSince).not.toBeNull()
+    expect((await get<SpaceOverview>('/overview')).body.neverRecalled).toBe(0)
   })
 
   it('概览的「从没被召回」只数建了超过保留天数的', async () => {
