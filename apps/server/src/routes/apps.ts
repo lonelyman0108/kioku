@@ -6,19 +6,28 @@ import {
   CreatedKey,
   CreateKeyRequest,
   ErrorResponse,
+  GroupPersonaRules,
   KeyAccessMatrix,
   KeyInfo,
   KeyScopes,
   UpdateAppRequest,
   type MemberRole,
 } from '@kioku/contracts'
-import { and, count, desc, eq, isNull } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, isNull } from 'drizzle-orm'
 
 import { accessMatrix, keyEffectiveScopes } from '../access/access'
 import { generateApiKey } from '../auth/keys'
 import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
-import { apiKeys, apps, memories, personas, spaceMembers } from '../db/schema'
+import {
+  apiKeys,
+  appGroupPersonas,
+  apps,
+  memories,
+  personas,
+  spaceMembers,
+  subjects,
+} from '../db/schema'
 import type { Tx } from '../db/client'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -121,6 +130,29 @@ const deleteApp = createRoute({
   },
 })
 
+const listGroupPersonas = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}/apps/{appId}/group-personas',
+  tags: ['apps'],
+  summary: '按群换人格的规则：应用在这些群（或频道）里用规则里的人格，其余的群与私聊用默认人格',
+  request: { params: AppParams },
+  responses: { 200: jsonResponse('规则', GroupPersonaRules), 403: forbidden, 404: notFound },
+})
+
+const replaceGroupPersonas = createRoute({
+  method: 'put',
+  path: '/spaces/{spaceId}/apps/{appId}/group-personas',
+  tags: ['apps'],
+  summary: '整组替换按群换人格的规则，只有应用主人能改',
+  request: { params: AppParams, body: jsonBody(GroupPersonaRules) },
+  responses: {
+    200: jsonResponse('替换后的规则', GroupPersonaRules),
+    400: jsonResponse('规则不合法', ErrorResponse),
+    403: forbidden,
+    404: notFound,
+  },
+})
+
 const listKeys = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/apps/{appId}/keys',
@@ -172,6 +204,14 @@ async function personaVisible(tx: Tx, personaId: string | null | undefined): Pro
 }
 
 const canManageApps = (role: MemberRole | null) => role === 'owner' || role === 'editor'
+
+function groupPersonaRules(tx: Tx, appId: string) {
+  return tx
+    .select({ subjectId: appGroupPersonas.subjectId, personaId: appGroupPersonas.personaId })
+    .from(appGroupPersonas)
+    .where(eq(appGroupPersonas.appId, appId))
+    .orderBy(asc(appGroupPersonas.createdAt), asc(appGroupPersonas.subjectId))
+}
 
 // 应用的权限按「主人」算：Key 读到的 owner / private 层就是应用主人的。
 // 所以只有应用主人能改配置、签发和查看 Key；空间 owner 可以吊销任何 Key（止损），但不能签发
@@ -303,6 +343,66 @@ export function appRoutes(deps: Deps) {
         )
       }
       return c.body(null, 204)
+    })
+    .openapi(listGroupPersonas, async (c) => {
+      const { spaceId, appId } = c.req.valid('param')
+      if (!(await roleOf(spaceId, c.get('console').accountId))) {
+        return c.json({ error: '不是该空间成员' }, 403)
+      }
+      const rules = await withSpace(deps.db, spaceId, async (tx) => {
+        if (!(await appOwnerOf(tx, appId))) return null
+        return groupPersonaRules(tx, appId)
+      })
+      if (!rules) return c.json({ error: '应用不存在' }, 404)
+      return c.json({ rules }, 200)
+    })
+    .openapi(replaceGroupPersonas, async (c) => {
+      const { spaceId, appId } = c.req.valid('param')
+      const { rules } = c.req.valid('json')
+      const accountId = c.get('console').accountId
+      if (!canManageApps(await roleOf(spaceId, accountId))) {
+        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      }
+      const subjectIds = [...new Set(rules.map((r) => r.subjectId))]
+      if (subjectIds.length !== rules.length) {
+        return c.json({ error: '同一个群只能有一条规则' }, 400)
+      }
+      const personaIds = [...new Set(rules.map((r) => r.personaId))]
+      const result = await withSpace(deps.db, spaceId, async (tx) => {
+        const owner = await appOwnerOf(tx, appId, true)
+        if (!owner) return 'no-app' as const
+        if (owner !== accountId) return 'forbidden' as const
+        // 引用的群与人格加 key share 锁再检查：删除人格先锁住那一行、再数用到它的规则，
+        // 两边按同一行排队，检查过的人格不会在写入规则之前被删掉
+        const groups = subjectIds.length
+          ? await tx
+              .select({ id: subjects.id, kind: subjects.kind })
+              .from(subjects)
+              .where(inArray(subjects.id, subjectIds))
+              .for('key share')
+          : []
+        if (groups.length !== subjectIds.length) return 'no-group' as const
+        if (groups.some((g) => g.kind !== 'group')) return 'not-group' as const
+        const found = personaIds.length
+          ? await tx
+              .select({ id: personas.id })
+              .from(personas)
+              .where(inArray(personas.id, personaIds))
+              .for('key share')
+          : []
+        if (found.length !== personaIds.length) return 'no-persona' as const
+        await tx.delete(appGroupPersonas).where(eq(appGroupPersonas.appId, appId))
+        if (rules.length) {
+          await tx.insert(appGroupPersonas).values(rules.map((r) => ({ spaceId, appId, ...r })))
+        }
+        return groupPersonaRules(tx, appId)
+      })
+      if (result === 'no-app') return c.json({ error: '应用不存在' }, 404)
+      if (result === 'forbidden') return c.json({ error: '只有应用的主人能修改它' }, 403)
+      if (result === 'no-group') return c.json({ error: '群不存在' }, 404)
+      if (result === 'not-group') return c.json({ error: '规则只能按群（或频道）配' }, 400)
+      if (result === 'no-persona') return c.json({ error: '人格不存在' }, 404)
+      return c.json({ rules: result }, 200)
     })
     .openapi(listKeys, async (c) => {
       const { spaceId, appId } = c.req.valid('param')

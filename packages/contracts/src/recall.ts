@@ -30,13 +30,68 @@ export type RecallBreakdown = z.infer<typeof RecallBreakdown>
 export const DebugCandidate = RecallCandidate.extend({ breakdown: RecallBreakdown })
 export type DebugCandidate = z.infer<typeof DebugCandidate>
 
+// 会话上下文：由接入方（插件）上报，只能收紧权限、不能放宽。平台账号原样上报，
+// 服务端按平台、种类（人或群）与账号解析成对象，没见过的就新建
+export const CHAT_TYPES = ['direct', 'group', 'channel', 'cron', 'subagent'] as const
+export const ChatType = z.enum(CHAT_TYPES)
+export type ChatType = z.infer<typeof ChatType>
+
+export const PlatformRef = z.object({
+  id: z.string().trim().min(1).max(200),
+  // 平台上的显示名，随上报更新；空字符串当作没带。服务端只记前 128 个字，这里只拒绝离谱的长度
+  // （上限按 UTF-16 码元算，放得很宽）：名字长导致整个请求被拒的话，插件只能放弃这一轮的召回
+  name: z.string().trim().max(4000).optional(),
+})
+export type PlatformRef = z.infer<typeof PlatformRef>
+
+export const SessionContextInput = z
+  .object({
+    chatType: ChatType,
+    // 平台标识，例如 qq、telegram；带了群或发言人时必填。同一个人在不同平台的账号由管理界面合并
+    platform: z
+      .string()
+      .regex(/^[a-z0-9][a-z0-9_.-]{0,31}$/, '平台标识只用小写字母、数字和 _.-')
+      .optional(),
+    // 群聊、频道里必填；别的会话不看
+    group: PlatformRef.optional(),
+    // 私聊里必填；群聊、频道里是这次发言的人，可以不带；定时任务与子 agent 不看
+    sender: PlatformRef.optional(),
+  })
+  .superRefine((c, ctx) => {
+    if ((c.chatType === 'group' || c.chatType === 'channel') && !c.group) {
+      ctx.addIssue({ code: 'custom', path: ['group'], message: '群聊与频道要带上群' })
+    }
+    if (c.chatType === 'direct' && !c.sender) {
+      ctx.addIssue({ code: 'custom', path: ['sender'], message: '私聊要带上发言人' })
+    }
+    if ((c.group || c.sender) && !c.platform) {
+      ctx.addIssue({ code: 'custom', path: ['platform'], message: '带了群或发言人时要带上平台' })
+    }
+  })
+export type SessionContextInput = z.infer<typeof SessionContextInput>
+
 export const RecallRequest = z.object({
   query: z.string().min(1).max(4000),
   limit: z.number().int().min(1).max(50).default(8),
+  context: SessionContextInput.optional(),
 })
 export type RecallRequest = z.infer<typeof RecallRequest>
 
-export const RecallResponse = z.object({ candidates: z.array(RecallCandidate) })
+// 对象直连：当前发言人与本群的对象层里抽取的事实，不看查询，直接带正文（抽取的事实没有 URI）。
+// 只在带了会话上下文时有；事实来自对话，可能是别人写进来的，只能当参考资料
+export const SubjectFacts = z.object({
+  // sender：当前发言人；group：本群
+  role: z.enum(['sender', 'group']),
+  // 平台上的名字；不知道时为 null（不拿平台账号凑数）
+  name: z.string().nullable(),
+  facts: z.array(z.object({ content: z.string(), updatedAt: z.string() })),
+})
+export type SubjectFacts = z.infer<typeof SubjectFacts>
+
+export const RecallResponse = z.object({
+  candidates: z.array(RecallCandidate),
+  subjects: z.array(SubjectFacts),
+})
 export type RecallResponse = z.infer<typeof RecallResponse>
 
 // 最近更新的策展记忆：只有 URI 与 disclosure，不含正文，会话开始时列给模型
@@ -71,11 +126,13 @@ export const LifecycleEvent = z.discriminatedUnion('event', [
   z.object({
     event: z.literal('session.start'),
     sessionId: z.string().max(200).optional(),
+    context: SessionContextInput.optional(),
     project: LifecycleProject.optional(),
   }),
   z.object({
     event: z.literal('prompt.submit'),
     sessionId: z.string().max(200).optional(),
+    context: SessionContextInput.optional(),
     prompt: z.string().min(1).max(20_000),
   }),
 ])

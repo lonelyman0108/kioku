@@ -1,13 +1,8 @@
 import type { MemberRole, RecallCandidate } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 
-import {
-  consoleAccess,
-  resolveAccess,
-  type Access,
-  type ConsoleRole,
-  type SessionContext,
-} from '../access/access'
+import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
+import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
 import { withSpace, type Tx } from '../db/client'
 import { apps } from '../db/schema'
@@ -16,6 +11,7 @@ import type { Deps, KeyPrincipal } from '../http/env'
 import type { RecallScope } from '../lifecycle/scope'
 import { boot, recentMemories } from '../recall/boot'
 import { recordRecall } from '../recall/events'
+import { subjectFacts } from '../recall/subjects'
 import {
   embedQuery,
   normalizeQuery,
@@ -30,19 +26,19 @@ import { MemoryError, MemoryService } from './service'
 // 管理界面的搜索等嵌入接口最多这么久，超时就只走全文与关键词，界面不必一直等
 const CONSOLE_SEMANTIC_TIMEOUT_MS = 2_000
 
-// 会话上下文在接入群聊（对象解析）之后才会传进来，目前都按无上下文处理
-export function accessForKey(key: KeyPrincipal, context: SessionContext = {}): Access {
+// 会话由 resolveKeySession 从接入方上报的会话上下文解析出来；不带上下文时按应用的默认人格、不收紧
+export function accessForKey(key: KeyPrincipal, session: KeySession = defaultSession(key)): Access {
   return resolveAccess(
     key.scopes,
     {
       appId: key.app.id,
       ownerAccountId: key.app.ownerAccountId,
-      personaId: key.app.defaultPersonaId,
+      personaId: session.personaId,
       ...(key.app.config.elevateOwnerDirect
         ? { elevateOwnerDirect: key.app.config.elevateOwnerDirect }
         : {}),
     },
-    context,
+    session.context,
   )
 }
 
@@ -109,13 +105,13 @@ export async function consoleMemberFor(
 export function memoryServiceForKey(
   deps: Deps,
   key: KeyPrincipal,
-  context: SessionContext = {},
+  session: KeySession = defaultSession(key),
 ): MemoryService {
   return new MemoryService({
     db: deps.db,
     spaceId: key.spaceId,
-    access: accessForKey(key, context),
-    personaId: key.app.defaultPersonaId,
+    access: accessForKey(key, session),
+    personaId: session.personaId,
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
@@ -164,11 +160,11 @@ export async function recallForConsole(
 export function recallScopeForKey(
   deps: Deps,
   key: KeyPrincipal,
-  context: SessionContext = {},
+  session: KeySession = defaultSession(key),
 ): RecallScope {
-  const access = accessForKey(key, context)
+  const access = accessForKey(key, session)
   const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
-    runInSpace(deps.db, key.spaceId, key.app.defaultPersonaId, fn)
+    runInSpace(deps.db, key.spaceId, session.personaId, fn)
   return {
     async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...options }) {
       const query = normalizeQuery(rawQuery)
@@ -184,6 +180,18 @@ export function recallScopeForKey(
       run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
+    // 对象层不用人格链，不经过 run。对象直连只是附加的线索：读取失败时记日志、返回空，不影响召回本身
+    subjects: async () => {
+      if (!session.subjects.length) return []
+      try {
+        return await withSpace(deps.db, key.spaceId, (tx) =>
+          subjectFacts(tx, access, session.subjects),
+        )
+      } catch (err) {
+        console.warn('读取对象直连的事实失败', err)
+        return []
+      }
+    },
     record: (source, query, hits) => void recordRecall(deps, key, source, query, hits),
   }
 }

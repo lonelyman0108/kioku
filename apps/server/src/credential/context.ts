@@ -1,4 +1,5 @@
-import { consoleAccess, type SessionContext } from '../access/access'
+import { consoleAccess } from '../access/access'
+import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { accessForKey } from '../memory/context'
@@ -9,12 +10,12 @@ import { CredentialService } from './service'
 export function credentialServiceForKey(
   deps: Deps,
   key: KeyPrincipal,
-  context: SessionContext = {},
+  session: KeySession = defaultSession(key),
 ): CredentialService {
   return new CredentialService({
     db: deps.db,
     spaceId: key.spaceId,
-    access: accessForKey(key, context),
+    access: accessForKey(key, session),
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
   })

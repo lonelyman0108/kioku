@@ -209,10 +209,17 @@ export const subjects = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
   },
-  (t) => [index().on(t.spaceId), unique().on(t.spaceId, t.id)],
+  (t) => [
+    index().on(t.spaceId),
+    unique().on(t.spaceId, t.id),
+    // 平台账号按种类挂到对象上（见 subject_identities 的外键）
+    unique().on(t.spaceId, t.id, t.kind),
+  ],
 )
 
-// 平台账号到对象的映射；合并对象就是把多条 identity 指向同一个 subject
+// 平台账号到对象的映射；合并对象就是把多条 identity 指向同一个 subject。
+// 账号按种类区分：QQ 的群号与 QQ 号是两套编号，同一个数字可能既是群又是人。
+// 外键带上种类，平台账号只能挂到同种类的对象上，人和群合并不到一起
 export const subjectIdentities = pgTable(
   'subject_identities',
   {
@@ -221,17 +228,52 @@ export const subjectIdentities = pgTable(
       .notNull()
       .references(() => spaces.id, { onDelete: 'cascade' }),
     subjectId: uuid().notNull(),
+    kind: subjectKind().notNull(),
     platform: text().notNull(),
     externalId: text().notNull(),
+    // 平台上的显示名，随上报更新
+    displayName: text(),
     createdAt: createdAt(),
   },
   (t) => [
-    uniqueIndex().on(t.spaceId, t.platform, t.externalId),
+    uniqueIndex().on(t.spaceId, t.platform, t.kind, t.externalId),
     index().on(t.subjectId),
+    foreignKey({
+      name: 'subject_identities_subject_fk',
+      columns: [t.spaceId, t.subjectId, t.kind],
+      foreignColumns: [subjects.spaceId, subjects.id, subjects.kind],
+    }).onDelete('cascade'),
+  ],
+)
+
+// 按群换人格：应用在某个群（或频道）里用的人格。没有规则的群与私聊用应用的默认人格。
+// 人格被规则用着时不能删（删除人格的接口先检查，外键兜底）；群对象或应用删掉时规则跟着删
+export const appGroupPersonas = pgTable(
+  'app_group_personas',
+  {
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid().notNull(),
+    subjectId: uuid().notNull(),
+    personaId: uuid().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.appId, t.subjectId] }),
+    index().on(t.personaId),
+    index().on(t.subjectId),
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
     foreignKey({
       columns: [t.spaceId, t.subjectId],
       foreignColumns: [subjects.spaceId, subjects.id],
     }).onDelete('cascade'),
+    foreignKey({
+      columns: [t.spaceId, t.personaId],
+      foreignColumns: [personas.spaceId, personas.id],
+    }),
   ],
 )
 
@@ -603,6 +645,7 @@ export const RLS_TABLES = [
   'apps',
   'subjects',
   'subject_identities',
+  'app_group_personas',
   'memories',
   'memory_embeddings',
   'memory_glossary',
