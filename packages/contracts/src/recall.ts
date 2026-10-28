@@ -208,7 +208,7 @@ export type AppRecallVolume = z.infer<typeof AppRecallVolume>
 export const RecallStats = z.object({
   retentionDays: z.number().int(),
   // 开始记录召回事件的时间；之前的记忆没机会被记下召回，记录满保留天数之后才算「从没被召回」
-  recordingSince: z.string().nullable(),
+  recordingSince: z.string(),
   apps: z.array(AppRecallVolume),
   // 被召回次数最多的
   top: z.array(RecalledMemory),

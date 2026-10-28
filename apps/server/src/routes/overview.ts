@@ -8,7 +8,7 @@ import { embeddingSettingsView } from '../embedding/settings'
 import type { Deps } from '../http/env'
 import { jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
-import { loadRecallSettings, recallRecordingSince } from '../recall/retention'
+import { loadRecallWindow } from '../recall/retention'
 
 // 概览里列出的最近改动数
 const RECENT_LIMIT = 8
@@ -31,10 +31,9 @@ export function overviewRoutes(deps: Deps) {
     const accountId = c.get('console').accountId
     // 先确认是成员，不是成员就不去查别的空间的数据
     const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
-    const [settings, recallSettings, recordingSince, appRows, members] = await Promise.all([
+    const [settings, recall, appRows, members] = await Promise.all([
       embeddingSettingsView(deps.db),
-      loadRecallSettings(deps.db),
-      recallRecordingSince(deps.db),
+      loadRecallWindow(deps.db),
       withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
       deps.db
         .select({ accountId: spaceMembers.accountId, since: spaceMembers.createdAt })
@@ -43,8 +42,8 @@ export function overviewRoutes(deps: Deps) {
     ])
     const [stats, recent] = await Promise.all([
       service.stats(settings.model, {
-        retentionDays: recallSettings.retentionDays,
-        recordingSince,
+        retentionDays: recall.settings.retentionDays,
+        recordingSince: recall.recordingSince,
       }),
       service.activity({ limit: RECENT_LIMIT }),
     ])

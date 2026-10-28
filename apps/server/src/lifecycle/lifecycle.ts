@@ -7,7 +7,8 @@ import type {
   RecentMemory,
 } from '@kioku/contracts'
 
-import { BOOT_LAYERS, formatBootBlock, formatRecentBlock } from '../recall/boot'
+import { BOOT_LAYERS } from '../memory/filter'
+import { formatBootBlock, formatRecentBlock } from '../recall/boot'
 import { formatRecallBlock, type RecordableCandidate } from '../recall/recall'
 import type { RecallScope } from './scope'
 

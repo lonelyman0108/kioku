@@ -1,5 +1,5 @@
 import { DEFAULT_RECALL_RETENTION_DAYS, RecallSettings } from '@kioku/contracts'
-import { eq, sql } from 'drizzle-orm'
+import { inArray, sql } from 'drizzle-orm'
 
 import { withSpace, type Db } from '../db/client'
 import { recallEvents, settings, spaces } from '../db/schema'
@@ -8,9 +8,25 @@ const KEY = 'recall'
 const STARTED_KEY = 'recall-started'
 
 export async function loadRecallSettings(db: Db): Promise<RecallSettings> {
-  const [row] = await db.select().from(settings).where(eq(settings.key, KEY)).limit(1)
-  const parsed = RecallSettings.safeParse(row?.value)
-  return parsed.success ? parsed.data : { retentionDays: DEFAULT_RECALL_RETENTION_DAYS }
+  return (await loadRecallWindow(db)).settings
+}
+
+// 召回设置与开始记录召回事件的时间，一次查出。开始记录的时间由 0015 迁移写入；这一行缺了或读不出日期时
+// 当作刚开始记录：宁可暂时不列「从没被召回」，也不把之前没机会被记下召回的旧记忆一下子全算进来
+export async function loadRecallWindow(
+  db: Db,
+): Promise<{ settings: RecallSettings; recordingSince: Date }> {
+  const rows = await db
+    .select()
+    .from(settings)
+    .where(inArray(settings.key, [KEY, STARTED_KEY]))
+  const stored = RecallSettings.safeParse(rows.find((r) => r.key === KEY)?.value)
+  const started = rows.find((r) => r.key === STARTED_KEY)?.value
+  const since = typeof started === 'string' ? new Date(started) : null
+  return {
+    settings: stored.success ? stored.data : { retentionDays: DEFAULT_RECALL_RETENTION_DAYS },
+    recordingSince: since && !Number.isNaN(since.getTime()) ? since : new Date(),
+  }
 }
 
 export async function saveRecallSettings(db: Db, value: RecallSettings): Promise<void> {
@@ -18,13 +34,6 @@ export async function saveRecallSettings(db: Db, value: RecallSettings): Promise
     .insert(settings)
     .values({ key: KEY, value })
     .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
-}
-
-// 开始记录召回事件的时间（0015 迁移写入，也就是升级到记录召回事件的版本时）；没有这一行时为 null。
-// 之前的记忆没机会被记下召回，「从没被召回」要等记录满保留天数之后才算
-export async function recallRecordingSince(db: Db): Promise<Date | null> {
-  const [row] = await db.select().from(settings).where(eq(settings.key, STARTED_KEY)).limit(1)
-  return typeof row?.value === 'string' ? new Date(row.value) : null
 }
 
 // 删掉超过保留天数的召回事件明细，删之前把每条记忆被召回的次数与最后一次的时间并入累计统计，

@@ -1,5 +1,5 @@
 {
-  "id": "b3b482a3-9c04-4d9f-b5a6-39b7de443c68",
+  "id": "71d0a973-21f6-4e5a-b7a8-06ebf7633bf8",
   "prevId": "6cbb1c47-f6cc-4bae-9a8e-154bfd1ae9d0",
   "version": "7",
   "dialect": "postgresql",
@@ -1886,8 +1886,8 @@
           "method": "btree",
           "with": {}
         },
-        "recall_events_space_id_owner_account_id_id_index": {
-          "name": "recall_events_space_id_owner_account_id_id_index",
+        "recall_events_space_id_owner_account_id_app_id_id_index": {
+          "name": "recall_events_space_id_owner_account_id_app_id_id_index",
           "columns": [
             {
               "expression": "space_id",
@@ -1897,6 +1897,12 @@
             },
             {
               "expression": "owner_account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "app_id",
               "isExpression": false,
               "asc": true,
               "nulls": "last"

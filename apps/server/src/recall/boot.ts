@@ -1,10 +1,10 @@
-import type { BootResponse, Layer, RecentMemory } from '@kioku/contracts'
-import { and, asc, desc, eq, inArray, lte, ne, or } from 'drizzle-orm'
+import type { BootResponse, RecentMemory } from '@kioku/contracts'
+import { and, asc, desc, eq, inArray, ne } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
 import type { Tx } from '../db/client'
 import { memories } from '../db/schema'
-import { readableConditions } from '../memory/filter'
+import { BOOT_ELIGIBLE, BOOT_LAYERS, readableConditions } from '../memory/filter'
 import { personaOverride, type PersonaSelection } from '../memory/personas'
 import { formatUri } from '../memory/uri'
 import { inlineText } from './recall'
@@ -12,22 +12,10 @@ import { inlineText } from './recall'
 // boot 是会话开始时注入的固定基线：所有可读的 priority 0 节点，加上当前人格与本应用 priority ≤ 1 的节点。
 // 人格按 personas 挑选，接入方传当前人格的继承链、子人格覆盖祖先（见 personaOverride）。
 // 按层排序（基础规则在前、个人信息在后），超出字数预算的只列 URI，模型需要时再读。
-// boot 会被宿主当作指令级上下文，所以只收受信来源的策展层：对象与情节层、以及 untrusted 写入的内容一律不进，
-// 否则群聊里的人可以把一条 priority 0 的「记忆」变成主人 agent 每次会话都读到的指令。
-export const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
+// boot 会被宿主当作指令级上下文，所以只收受信来源的策展层（BOOT_LAYERS、BOOT_ELIGIBLE，在 memory/filter.ts）：
+// 对象与情节层、以及 untrusted 写入的内容一律不进，否则群聊里的人可以把一条 priority 0 的「记忆」
+// 变成主人 agent 每次会话都读到的指令。
 export const BOOT_CHAR_BUDGET = 16_000
-
-// 会进启动上下文的节点：受信来源的策展层里 priority 0 的，加上人格与应用层 priority ≤ 1 的。
-// boot 按它挑选；召回分析的「从没被召回」不算它们：每次会话开始都注入，只是不记成召回
-export const BOOT_ELIGIBLE = and(
-  eq(memories.form, 'curated'),
-  inArray(memories.layer, BOOT_LAYERS),
-  ne(memories.provenance, 'untrusted'),
-  or(
-    eq(memories.priority, 0),
-    and(inArray(memories.layer, ['persona', 'app']), lte(memories.priority, 1)),
-  ),
-)!
 // 未展开的节点最多列这么多个、合计这么多字，其余只给个数，免得列表本身撑爆宿主的上下文长度
 const MAX_OMITTED_LISTED = 20
 const MAX_OMITTED_CHARS = 1_200

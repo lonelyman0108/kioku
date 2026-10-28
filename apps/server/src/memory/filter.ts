@@ -5,6 +5,7 @@ import {
   gt,
   inArray,
   isNull,
+  lte,
   ne,
   notInArray,
   or,
@@ -16,6 +17,22 @@ import {
 import type { Access, MemoryFacts, ReadOptions } from '../access/access'
 import { sensitivityRank } from '../access/access'
 import { memories } from '../db/schema'
+
+// 启动上下文只收受信来源的这几个策展层（理由见 recall/boot.ts）
+export const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
+
+// 会进启动上下文的节点：受信来源的策展层里 priority 0 的，加上人格与应用层 priority ≤ 1 的。
+// boot 按它挑选（再套读权限、继承覆盖与字数预算）；召回分析的「从没被召回」不算它们：
+// 每次会话开始都注入，只是不记成召回
+export const BOOT_ELIGIBLE = and(
+  eq(memories.form, 'curated'),
+  inArray(memories.layer, BOOT_LAYERS),
+  ne(memories.provenance, 'untrusted'),
+  or(
+    eq(memories.priority, 0),
+    and(inArray(memories.layer, ['persona', 'app']), lte(memories.priority, 1)),
+  ),
+)!
 
 // 读权限要看的那几个字段从哪里取。记忆表上就是这些列；事件的前后快照（jsonb）里有同名字段，
 // 用 snapshotColumns 取出来，这样历史也用同一套条件判断，不另写一份规则

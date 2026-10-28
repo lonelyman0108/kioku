@@ -546,8 +546,8 @@ export const recallEvents = pgTable(
   (t) => [
     index().on(t.spaceId, t.createdAt),
     index().on(t.appId, t.createdAt),
-    // 明细只给事件里记下的主人，按主人翻页
-    index().on(t.spaceId, t.ownerAccountId, t.id),
+    // 明细只给事件里记下的主人，按主人与应用翻页（应用详情里看的就是这样）
+    index().on(t.spaceId, t.ownerAccountId, t.appId, t.id),
   ],
 )
 

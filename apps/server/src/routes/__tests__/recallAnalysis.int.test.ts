@@ -90,9 +90,10 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     await recallAs('kioku 部署')
     await recallAs('kioku')
     await backdate(31)
+    await recordingStarted(40)
     const { body } = await get<RecallStats>('/recall/stats')
     expect(body.retentionDays).toBe(30)
-    expect(body.recordingSince).toBeNull()
+    expect(Date.now() - new Date(body.recordingSince).getTime()).toBeGreaterThan(39 * 86_400_000)
     expect(body.top.map((m) => [m.uri, m.total])).toEqual([
       ['projects://kioku', 3],
       ['notes://deploy', 1],
@@ -200,11 +201,23 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
 
   it('从没被召回的不算会进启动上下文的节点，也要等建了、开始记录都满保留天数', async () => {
     await create({ uri: 'core://agent', content: '基础规则', layer: 'base', priority: 0 })
+    await ws.createPersona('doubao')
+    // 人格层由管理界面写：这个应用没有人格，它的 Key 写不了
+    const persona = await app.request(
+      `/v1/spaces/${ws.spaceId}/memories`,
+      jsonRequest(
+        'POST',
+        { uri: 'persona://doubao/tone', content: '口吻', priority: 1 },
+        { cookie: ws.cookie },
+      ),
+    )
+    expect(persona.status).toBe(201)
     await create({ uri: 'notes://fresh', content: '刚建的' })
     await backdate(31)
+    await recordingStarted(40)
     await create({ uri: 'notes://newer', content: '昨天建的' })
     const stats = (await get<RecallStats>('/recall/stats')).body
-    // core://agent 每次会话开始都注入；notes://newer 建了还不到 30 天
+    // core://agent 与 persona 层 priority 1 的节点每次会话开始都注入；notes://newer 建了还不到 30 天
     expect(stats.never.map((m) => m.uri).sort()).toEqual([
       'notes://deploy',
       'notes://fresh',
@@ -214,12 +227,16 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     expect((await get<SpaceOverview>('/overview')).body.neverRecalled).toBe(4)
 
     // 开始记录召回事件才 1 天：之前的记忆没机会被记下召回，都不算
+    await database.db.delete(settings)
     await recordingStarted(1)
     const recent = (await get<RecallStats>('/recall/stats')).body
     expect(recent.never).toEqual([])
     expect(recent.neverTotal).toBe(0)
-    expect(recent.recordingSince).not.toBeNull()
     expect((await get<SpaceOverview>('/overview')).body.neverRecalled).toBe(0)
+
+    // 开始记录的时间缺了（或读不出日期）时当作刚开始记录：不会把旧记忆一下子全算进来
+    await database.db.delete(settings)
+    expect((await get<RecallStats>('/recall/stats')).body.neverTotal).toBe(0)
   })
 
   it('概览的「从没被召回」只数建了超过保留天数的', async () => {
@@ -229,6 +246,9 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx.update(memories).set({ createdAt: sql`now() - interval '31 days'` }),
     )
+    // 开始记录召回事件的时间也要满保留天数
+    expect((await get<SpaceOverview>('/overview')).body.neverRecalled).toBe(0)
+    await recordingStarted(40)
     const after = (await get<SpaceOverview>('/overview')).body
     // notes://deploy 与 notes://idle 没被召回；secret 不算
     expect(after.neverRecalled).toBe(2)

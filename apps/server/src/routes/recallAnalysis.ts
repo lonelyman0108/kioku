@@ -15,7 +15,7 @@ import { apps, recallEvents } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
-import { loadRecallSettings, recallRecordingSince } from '../recall/retention'
+import { loadRecallWindow } from '../recall/retention'
 
 const SpaceParams = z.object({ spaceId: z.uuid() })
 const forbidden = jsonResponse('不是该空间成员', ErrorResponse)
@@ -60,10 +60,10 @@ export function recallAnalysisRoutes(deps: Deps) {
       const { spaceId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
-      const [{ retentionDays }, recordingSince] = await Promise.all([
-        loadRecallSettings(deps.db),
-        recallRecordingSince(deps.db),
-      ])
+      const {
+        settings: { retentionDays },
+        recordingSince,
+      } = await loadRecallWindow(deps.db)
       const [ranking, rows] = await Promise.all([
         service.recallRanking(
           { top: TOP_LIMIT, never: NEVER_LIMIT },
@@ -100,7 +100,7 @@ export function recallAnalysisRoutes(deps: Deps) {
       return c.json(
         {
           retentionDays,
-          recordingSince: recordingSince?.toISOString() ?? null,
+          recordingSince: recordingSince.toISOString(),
           apps: [...volumes.values()].sort((a, b) => b.total - a.total),
           ...ranking,
         },

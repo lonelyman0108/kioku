@@ -88,8 +88,7 @@ import {
   recallEvents,
 } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
-import { readableConditions, snapshotColumns, type MemoryColumns } from './filter'
-import { BOOT_ELIGIBLE } from '../recall/boot'
+import { BOOT_ELIGIBLE, readableConditions, snapshotColumns, type MemoryColumns } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
   DEFAULT_SENSITIVITY,
@@ -1825,7 +1824,7 @@ const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memori
 // 召回事件的保留天数与开始记录的时间（没有记录时为 null），判断「从没被召回」用
 export interface RecallWindow {
   retentionDays: number
-  recordingSince: Date | null
+  recordingSince: Date
 }
 
 // 从没被召回过：策展记忆里，保留期内的明细里没有、清理时也没并入过累计的。不算的：secret 本来就不进召回；
@@ -1833,7 +1832,7 @@ export interface RecallWindow {
 // 还没来得及被用到（从 Lore 导入的记忆保留原来的建立时间，升级之后不会一下子全算进来）
 function neverRecalled(recall: RecallWindow): SQL {
   const settled = sql`now() - make_interval(days => ${recall.retentionDays}::int)`
-  const since = recall.recordingSince?.toISOString() ?? null
+  const since = recall.recordingSince.toISOString()
   return sql`(${memories.form} = 'curated' and ${memories.sensitivity} <> 'secret'
     and not (${BOOT_ELIGIBLE})
     and greatest(${memories.createdAt}, ${since}::timestamptz) <= ${settled}
