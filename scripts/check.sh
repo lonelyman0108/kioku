@@ -55,6 +55,19 @@ if [ -f package.json ]; then
   "$pm" run --if-present format:check
 fi
 
+# ---- python ----
+# 带 pyproject.toml 的目录各是一个 uv 项目（SDK、插件）：按锁文件装依赖（锁文件过期时失败），跑 ruff 与 pytest
+tracked '*/pyproject.toml'
+py_projects=()
+if [ "${#files[@]}" -gt 0 ]; then
+  for f in "${files[@]}"; do py_projects+=("$(dirname "$f")"); done
+  need uv "brew install uv，或见 https://docs.astral.sh/uv/"
+  for p in "${py_projects[@]}"; do
+    step "Python lint 与格式：$p"
+    (cd "$p" && uv run --locked ruff check . && uv run --locked ruff format --check .)
+  done
+fi
+
 if [ "$mode" = --quick ]; then
   printf '\n快速检查通过\n'
   exit 0
@@ -66,6 +79,18 @@ if [ -n "$pm" ]; then
   "$pm" run --if-present test
   step 构建
   "$pm" run --if-present build
+fi
+
+# ---- python ----
+if [ "${#py_projects[@]}" -gt 0 ]; then
+  for p in "${py_projects[@]}"; do
+    step "Python 测试：$p"
+    (cd "$p" && uv run --locked pytest)
+  done
+fi
+if [ -f sdks/python/generate.sh ]; then
+  step Python SDK 与服务端的接口同步
+  sdks/python/generate.sh --check
 fi
 
 printf '\n完整检查通过\n'
