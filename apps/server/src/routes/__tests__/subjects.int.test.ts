@@ -507,13 +507,87 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       tx.select().from(memories).where(eq(memories.form, 'extracted')),
     )
     expect(written).toEqual([])
-    const runs = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(extractionRuns))
-    expect(runs.map((r) => r.error)).toEqual([BATCH_MOVED])
+    // 记录跟着对话换到合并后的对象上，对象页看得到
+    expect((await detailOf(keep.id)).runs).toMatchObject([
+      { error: BATCH_MOVED, scope: { kind: 'direct' } },
+    ])
     // 那一轮对话还在，在合并后的批次里
     const turns = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select().from(conversationTurns),
     )
     expect(turns.map((t) => t.scope).sort()).toEqual([`direct:${keep.id}`, `direct:${keep.id}`])
+  })
+
+  it('群里的发言人在抽取期间被合并：这一批不写，也不撞外键', async () => {
+    await say('我在学日语', group('1001', '小明'))
+    await say('我喜欢猫', group('1002', '小红'))
+    const all = await listOf()
+    const [turn] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns).limit(1),
+    )
+    await processSession(
+      database.db,
+      masterKey,
+      { spaceId: ws.spaceId, appId, scope: turn!.scope },
+      () => ({
+        model: 'fake-model',
+        async complete() {
+          const res = await api('POST', `/subjects/${find(all, '小明').id}/merge`, {
+            from: find(all, '小红').id,
+          })
+          expect(res.status).toBe(200)
+          return {
+            content: JSON.stringify({
+              facts: [{ subject: 'M2', op: 'add', content: '喜欢猫' }],
+              summary: '群里聊了猫',
+            }),
+            usage: { promptTokens: 40, completionTokens: 10 },
+          }
+        },
+      }),
+    )
+    const written = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memories).where(eq(memories.form, 'extracted')),
+    )
+    expect(written).toEqual([])
+    const runs = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(extractionRuns))
+    expect(runs.map((r) => [r.error, r.scope])).toEqual([[BATCH_MOVED, turn!.scope]])
+    expect(runs[0]!.subjectIds).toContain(find(all, '小明').id)
+    expect(runs[0]!.subjectIds).not.toContain(find(all, '小红').id)
+    // 两轮都还在，留给合并后的批次
+    const left = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(left).toHaveLength(2)
+  })
+
+  it('合并在抽取期间把更早的对话移进正在抽取的批次：这一批只删自己读到的，移进来的留着', async () => {
+    await say('我住在上海', direct('u1', '明', 'tg'))
+    await say('你好', direct('1001', '小明'))
+    const all = await listOf()
+    const keep = find(all, '小明')
+    const gone = find(all, '明')
+    await processSession(
+      database.db,
+      masterKey,
+      { spaceId: ws.spaceId, appId, scope: `direct:${keep.id}` },
+      () => ({
+        model: 'fake-model',
+        async complete() {
+          expect((await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })).status).toBe(
+            200,
+          )
+          return {
+            content: JSON.stringify({ summary: '打了个招呼' }),
+            usage: { promptTokens: 40, completionTokens: 10 },
+          }
+        },
+      }),
+    )
+    const left = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(left.map((t) => [t.userText, t.scope])).toEqual([['我住在上海', `direct:${keep.id}`]])
   })
 
   it('合并的限制：人和群、自己都不行；viewer 不能合并；标记成别的成员的对象谁都不能并', async () => {

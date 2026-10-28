@@ -12,7 +12,7 @@ import {
 import { and, arrayContains, asc, desc, eq, ilike, inArray, or, sql, type SQL } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
-import { withSpace, type Tx } from '../db/client'
+import { pgErrorCode, withSpace, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
   encodeTimeCursor,
@@ -483,7 +483,7 @@ export function subjectRoutes(deps: Deps) {
         result = await merged
       } catch (err) {
         // 等锁超时（55P03）或和别的写入互相等成死锁（40P01）：都没改动，稍后再试就行
-        const code = (err as { code?: string }).code
+        const code = pgErrorCode(err)
         if (code === '55P03' || code === '40P01') {
           return c.json({ error: '这两个对象正在被别的操作使用（例如正在抽取），请稍后再试' }, 409)
         }

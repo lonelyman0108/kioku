@@ -44,19 +44,19 @@ watch(
 // 对象改了之后要刷新的：对象页与几个选对象的下拉框、应用里按群换人格的群名、待审、
 // 删掉的事实所在的记忆列表、已删除与活动
 function refreshSubjectCaches(sid: string) {
-  for (const key of [
-    'subject',
-    'subjects',
-    'merge-picker',
-    'group-personas',
-    'group-picker',
-    'review',
-    'memory-list',
-    'memory-deleted',
-    'activity',
-  ]) {
-    void queryClient.invalidateQueries({ queryKey: [key, sid] })
-  }
+  return Promise.all(
+    [
+      'subject',
+      'subjects',
+      'merge-picker',
+      'group-personas',
+      'group-picker',
+      'review',
+      'memory-list',
+      'memory-deleted',
+      'activity',
+    ].map((key) => queryClient.invalidateQueries({ queryKey: [key, sid] })),
+  )
 }
 
 const saving = ref(false)
@@ -71,7 +71,7 @@ async function update(body: UpdateSubjectRequest, done: string) {
       name.value = saved.displayName
       synced = saved.displayName
     }
-    refreshSubjectCaches(sid)
+    await refreshSubjectCaches(sid)
     toast.add({ title: done, color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -96,7 +96,7 @@ async function removeFact() {
   } finally {
     removing.value = false
     deletingFact.value = null
-    refreshSubjectCaches(sid)
+    void refreshSubjectCaches(sid)
   }
 }
 
@@ -150,7 +150,7 @@ async function merge() {
   } finally {
     merging.value = false
     confirmMerge.value = false
-    refreshSubjectCaches(sid)
+    void refreshSubjectCaches(sid)
   }
 }
 
