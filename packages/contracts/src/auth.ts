@@ -129,7 +129,8 @@ export const PersonaDetail = PersonaInfo.extend({
   inherited: z.array(PersonaNode),
   // 默认人格是它的应用
   apps: z.array(AppRef),
-  // 它的人格层记忆总数，含已删除、已过期的：删除人格会把它们连带硬删除，所以不为零时删不掉
+  // 查看者在管理界面里看得到的人格层记忆总数，含已删除、已过期的：删除人格会把它们连带硬删除，
+  // 所以有记忆时删不掉（删除时还会算上查看者读不到的）
   storedMemories: z.number().int(),
 })
 export type PersonaDetail = z.infer<typeof PersonaDetail>
@@ -175,7 +176,8 @@ export const ACCESS_CONTEXTS = ['none', 'direct', 'owner_direct', 'group', 'cron
 export const AccessContext = z.enum(ACCESS_CONTEXTS)
 export type AccessContext = z.infer<typeof AccessContext>
 
-// 一格：这一层这一级的记忆。read 为 explicit 时只能按 URI 显式读取（secret），recall 时也进召回与 boot
+// 一格：这一层这一级的记忆。read 为 explicit 时只能按 URI 显式读取（secret），recall 时也进召回与 boot。
+// 对象层与情节层的 write 指对话抽取能写进去，不能按 URI 直接写
 export const AccessCell = z.object({
   read: z.enum(['none', 'explicit', 'recall']),
   write: z.boolean(),

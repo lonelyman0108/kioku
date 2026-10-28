@@ -286,17 +286,18 @@ export function appRoutes(deps: Deps) {
           .select({ n: count() })
           .from(memories)
           .where(eq(memories.appId, appId))
-        if (stored!.n > 0) return stored!.n
+        if (stored!.n > 0) return 'stored' as const
         await tx.delete(apps).where(eq(apps.id, appId))
         return 'deleted' as const
       })
       if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
       if (result === 'forbidden')
         return c.json({ error: '只有应用的主人或空间 owner 能删除应用' }, 403)
-      if (result !== 'deleted') {
+      // 不给条数：空间 owner 写进来的 secret 记忆，应用主人可能读不到
+      if (result === 'stored') {
         return c.json(
           {
-            error: `还有 ${result} 条应用层记忆（含已删除、还能撤销删除的），移到别的命名空间之后才能删除应用`,
+            error: '还有应用层记忆（含已删除、还能撤销删除的），移到别的命名空间之后才能删除应用',
           },
           409,
         )
@@ -369,19 +370,20 @@ export function appRoutes(deps: Deps) {
       if (!role) return c.json({ error: '不是该空间成员' }, 403)
       const found = await withSpace(deps.db, spaceId, async (tx) => {
         const [app] = await tx.select().from(apps).where(eq(apps.id, appId))
-        if (!app) return null
+        // 和 Key 列表一样，只给应用主人与空间 owner 看；先查权限再找 Key，别人探不出 Key 在不在
+        if (!app) return 'missing' as const
+        if (app.ownerAccountId !== accountId && role !== 'owner') return 'forbidden' as const
         const [key] = await tx
           .select()
           .from(apiKeys)
           .where(and(eq(apiKeys.id, keyId), eq(apiKeys.appId, appId)))
-        return key ? { app, key } : null
+        return key ? { app, key } : ('missing' as const)
       })
-      if (!found) return c.json({ error: 'Key 不存在' }, 404)
-      const { app, key } = found
-      // 和 Key 列表一样，只给应用主人与空间 owner 看
-      if (app.ownerAccountId !== accountId && role !== 'owner') {
+      if (found === 'missing') return c.json({ error: 'Key 不存在' }, 404)
+      if (found === 'forbidden') {
         return c.json({ error: '只有应用的主人或空间 owner 能查看 Key' }, 403)
       }
+      const { app, key } = found
       const scopes = keyEffectiveScopes(
         { ...key, scopes: KeyScopes.parse(key.scopes) },
         await ownerMembership(deps, spaceId, app.ownerAccountId),

@@ -2,11 +2,12 @@ import { randomBytes } from 'node:crypto'
 
 import type { KeyAccessMatrix, KeyInfo, PersonaDetail, PersonaInfo } from '@kioku/contracts'
 import { and, eq } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import type { Database } from '../../db/client'
-import { spaceMembers } from '../../db/schema'
+import { withSpace, type Database } from '../../db/client'
+import { personas, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
@@ -109,6 +110,56 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       expect((await as('PATCH', `/personas/${root.id}`, { extendsId: sixth })).status).toBe(200)
     })
 
+    it('继承没变时不重新检查层数：上限之前建出的更深的链照样能改名', async () => {
+      // 直接插一条 9 层的链，模拟加上上限之前建出来的数据
+      let parent: string | null = null
+      for (let i = 1; i <= 9; i++) {
+        const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+          tx
+            .insert(personas)
+            .values({ spaceId: ws.spaceId, slug: `old${i}`, name: `old${i}`, extendsId: parent })
+            .returning(),
+        )
+        parent = row!.id
+      }
+      const [deepest] = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.select().from(personas).where(eq(personas.slug, 'old9')),
+      )
+      const res = await as('PATCH', `/personas/${deepest!.id}`, {
+        name: '改个名',
+        extendsId: deepest!.extendsId,
+      })
+      expect(res.status).toBe(200)
+    })
+
+    it('读出之后被并发删除的人格，修改返回 404 而不是 500', async () => {
+      const persona = await ws.createPersona('doubao')
+      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      try {
+        let pending!: Promise<Response>
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+          await tx`select id from personas where id = ${persona.id} for update`
+          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
+            { pid: number },
+          ]
+          pending = Promise.resolve(as('PATCH', `/personas/${persona.id}`, { name: '改名' }))
+          for (let i = 0; ; i++) {
+            const [row] = await side<{ n: number }[]>`
+              select count(*)::int as n from pg_stat_activity
+              where ${pid}::int = any(pg_blocking_pids(pid))`
+            if (row!.n > 0) break
+            if (i >= 80) throw new Error('修改没有等在人格的行锁上')
+            await new Promise((r) => setTimeout(r, 25))
+          }
+          await tx`delete from personas where id = ${persona.id}`
+        })
+        expect((await pending).status).toBe(404)
+      } finally {
+        await side.end()
+      }
+    })
+
     it('viewer 不能改、不能删', async () => {
       const persona = await ws.createPersona('doubao')
       const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
@@ -193,7 +244,19 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
         await as('GET', `/personas/${persona.id}`, undefined, editor.cookie)
       ).json()) as PersonaDetail
       expect(editorView.own.map((n) => n.uri)).toEqual(['persona://doubao/soul'])
-      expect(editorView.storedMemories).toBe(2)
+      expect(editorView.storedMemories).toBe(1)
+      expect(ownerView.storedMemories).toBe(2)
+    })
+
+    it('删除被挡住时不说有几条记忆：里面可能有查看者读不到的 secret', async () => {
+      const persona = await ws.createPersona('doubao')
+      await createMemory({ uri: 'persona://doubao/vault', content: '机密', sensitivity: 'secret' })
+      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+      const res = await as('DELETE', `/personas/${persona.id}`, undefined, editor.cookie)
+      expect(res.status).toBe(409)
+      const error = await errorOf(res)
+      expect(error).toContain('人格层记忆')
+      expect(error).not.toMatch(/\d/)
     })
   })
 
@@ -205,7 +268,9 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       await deleteMemory('app://bot/rules')
       const blocked = await as('DELETE', `/apps/${bot.id}`)
       expect(blocked.status).toBe(409)
-      expect(await errorOf(blocked)).toContain('1 条应用层记忆')
+      const error = await errorOf(blocked)
+      expect(error).toContain('应用层记忆')
+      expect(error).not.toMatch(/\d/)
 
       const other = await ws.createApp('other')
       const otherKey = await ws.issueKey(other.id)
@@ -308,6 +373,10 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       const [key] = await keysOf(bot.id)
       const path = `/apps/${bot.id}/keys/${key!.id}/matrix`
       expect((await as('GET', path, undefined, editor.cookie)).status).toBe(403)
+      // 不是主人时，不存在的 Key 也是 403：探不出 Key 在不在
+      const made = `/apps/${bot.id}/keys/00000000-0000-4000-8000-000000000000/matrix`
+      expect((await as('GET', made, undefined, editor.cookie)).status).toBe(403)
+      expect((await as('GET', made)).status).toBe(404)
       expect((await as('DELETE', `/apps/${bot.id}/keys/${key!.id}`)).status).toBe(204)
       expect((await as('GET', path)).status).toBe(404)
     })

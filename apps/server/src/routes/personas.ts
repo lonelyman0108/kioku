@@ -217,7 +217,16 @@ export function personaRoutes(deps: Deps) {
               ),
             )
             .orderBy(asc(memories.path)),
-          tx.select({ n: count() }).from(memories).where(eq(memories.personaId, personaId)),
+          // 只数查看者用管理读取看得到的（含已删除、已过期的），看不到的 secret 不透露条数
+          tx
+            .select({ n: count() })
+            .from(memories)
+            .where(
+              and(
+                eq(memories.personaId, personaId),
+                readableConditions(access, { personaIds: [], management: true }),
+              ),
+            ),
         ])
         const byId = new Map(related.map((p) => [p.id, p]))
         const toNode = (n: (typeof nodes)[number]) => ({
@@ -256,7 +265,8 @@ export function personaRoutes(deps: Deps) {
         if (body.extendsId !== undefined) await lockPersonaGraph(tx, spaceId)
         const [row] = await tx.select().from(personas).where(eq(personas.id, personaId))
         if (!row) return 'missing' as const
-        if (body.extendsId) {
+        // 继承没变时不重新检查：上限加上之前建出的更深的链，照样能改名称与说明
+        if (body.extendsId && body.extendsId !== row.extendsId) {
           const problem = await inheritanceProblem(tx, personaId, body.extendsId)
           if (problem === 'missing') return 'missing-parent' as const
           if (problem) return problem
@@ -266,7 +276,8 @@ export function personaRoutes(deps: Deps) {
           .set({ ...body, updatedAt: new Date() })
           .where(eq(personas.id, personaId))
           .returning()
-        return updated!
+        // 只改名称与说明时不加锁，读出之后被并发删除的就当作不存在
+        return updated ?? ('missing' as const)
       })
       if (result === 'missing') return c.json({ error: '人格不存在' }, 404)
       if (result === 'missing-parent') return c.json({ error: '被继承的人格不存在' }, 404)
@@ -297,7 +308,8 @@ export function personaRoutes(deps: Deps) {
         const reasons = [
           users!.n ? `${users!.n} 个应用以它为默认人格` : '',
           heirs!.n ? `${heirs!.n} 个人格继承它` : '',
-          stored!.n ? `还有 ${stored!.n} 条人格层记忆（含已删除、还能撤销删除的）` : '',
+          // 不给条数：里面可能有查看者读不到的 secret 记忆
+          stored!.n ? '还有人格层记忆（含已删除、还能撤销删除的）' : '',
         ].filter(Boolean)
         if (reasons.length) return reasons
         await tx.delete(personas).where(eq(personas.id, personaId))
