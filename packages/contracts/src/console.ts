@@ -236,6 +236,23 @@ export type GlossaryIndex = z.infer<typeof GlossaryIndex>
 export const UndeleteRequest = z.object({ memoryId: z.uuid() })
 export type UndeleteRequest = z.infer<typeof UndeleteRequest>
 
+// 抽取预算（每个空间）：每月最多用多少 token（UTC 自然月，抽取用的，不含嵌入）、每个对象每天最多写几条事实。
+// 用到八成时概览提醒；用完之后只写会话摘要、不再抽取事实，下个月恢复
+export const DEFAULT_EXTRACTION_MONTHLY_TOKENS = 2_000_000
+export const DEFAULT_EXTRACTION_DAILY_WRITES = 20
+export const ExtractionBudget = z.object({
+  monthlyTokens: z.number().int().min(0).max(1_000_000_000),
+  dailyWritesPerSubject: z.number().int().min(0).max(1000),
+})
+export type ExtractionBudget = z.infer<typeof ExtractionBudget>
+
+export const ExtractionUsage = ExtractionBudget.extend({
+  // 本月已经用掉的 token，从 periodStart 算起
+  usedTokens: z.number().int(),
+  periodStart: z.string(),
+})
+export type ExtractionUsage = z.infer<typeof ExtractionUsage>
+
 export const SpaceOverview = z.object({
   // 成员读得到的策展记忆，按层与敏感级分组
   counts: z.array(LayerCount),
@@ -246,6 +263,8 @@ export const SpaceOverview = z.object({
   // 从没被召回过的记忆数，和召回分析页同一个口径（见 RecallStats 的 never）
   neverRecalled: z.number().int(),
   embedding: EmbeddingCoverage,
+  // 本月抽取用掉的 token 与预算，用到八成时概览提醒
+  extraction: ExtractionUsage,
   apps: z.array(OverviewApp),
   // 最近的改动，和活动流同样的可见性
   recent: z.array(ActivityItem),

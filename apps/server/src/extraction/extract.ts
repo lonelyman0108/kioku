@@ -17,7 +17,8 @@ import { MemoryService, type ExtractedWrite } from '../memory/service'
 import { oneLine } from '../recall/recall'
 import { readableSubjectFacts } from '../recall/subjects'
 import type { BufferedSession } from './buffer'
-import { extractionMessages, parseExtraction, type PromptSubject } from './prompt'
+import { extractionUsage, writesToday } from './budget'
+import { extractionMessages, parseExtraction, summaryMessages, type PromptSubject } from './prompt'
 import type { ChatModel } from './provider'
 
 // 会话摘要在情节层留这么多天
@@ -160,15 +161,18 @@ export async function extractBatch(
     }
   }
   const handleOf = new Map(subjects.map((s) => [s.id, s.handle]))
-  const messages = extractionMessages(
-    subjects,
-    turns.map((t) => ({
-      speaker: handleOf.get(t.senderSubjectId)!,
-      speakerName: t.senderName,
-      user: t.userText,
-      reply: t.replyText,
-    })),
-  )
+  const transcript = turns.map((t) => ({
+    speaker: handleOf.get(t.senderSubjectId)!,
+    speakerName: t.senderName,
+    user: t.userText,
+    reply: t.replyText,
+  }))
+  // 本月的 token 预算用完了就只要会话摘要，不再抽取事实，下个月恢复
+  const budget = await extractionUsage(db, target.spaceId)
+  const summaryOnly = budget.usedTokens >= budget.monthlyTokens
+  const messages = summaryOnly
+    ? summaryMessages(transcript)
+    : extractionMessages(subjects, transcript)
 
   let completion
   try {
@@ -198,11 +202,11 @@ export async function extractBatch(
 
   // 挑出要写的候选：对象不对、格式不对、太长、像明文凭据、带凭据占位符的丢掉；这一批的 Key 写不了对象层时
   // 事实一条都不写，写不了情节层时不写摘要。和这一批里已经要写的一字不差的（不计大小写与空白）算已经记过
-  const counts = { unchanged: 0, dropped: 0 }
+  const counts = { unchanged: 0, dropped: 0, limited: 0 }
   const proposed: Extract<ExtractedWrite, { layer: 'subject' }>[] = []
   const bySubjectHandle = new Map(subjects.map((s) => [s.handle, s]))
   const pending = new Set<string>()
-  for (const candidate of parsed.candidates) {
+  for (const candidate of summaryOnly ? [] : parsed.candidates) {
     const subject = candidate && bySubjectHandle.get(candidate.subject.trim().toUpperCase())
     const op = candidate?.op.trim().toLowerCase()
     if (!candidate || !subject || !op) {
@@ -247,10 +251,20 @@ export async function extractBatch(
   const existing = await withSpace(db, target.spaceId, (tx) =>
     knownFacts(tx, writer.access, proposed),
   )
+  // 每个对象每天最多写这么多条（推翻旧事实写下的新一条也算），写满了的这次不写
+  const today = await withSpace(db, target.spaceId, (tx) => writesToday(tx, subjectIds))
   const writes: ExtractedWrite[] = proposed.filter((f) => {
-    const known = existing.has(`${f.subjectId}|${f.content.toLowerCase()}`)
-    if (known) counts.unchanged++
-    return !known
+    if (existing.has(`${f.subjectId}|${f.content.toLowerCase()}`)) {
+      counts.unchanged++
+      return false
+    }
+    const written = today.get(f.subjectId) ?? 0
+    if (written >= budget.dailyWritesPerSubject) {
+      counts.limited++
+      return false
+    }
+    today.set(f.subjectId, written + 1)
+    return true
   })
   const summary = maskPlaintextCredentials(oneLine(parsed.summary))
   if (
@@ -285,6 +299,8 @@ export async function extractBatch(
         unchanged: counts.unchanged,
         dropped: counts.dropped + count('subject', 'skipped'),
         summarized: count('episode', 'added') > 0,
+        summaryOnly,
+        limited: counts.limited,
       })
     })
   } catch (err) {

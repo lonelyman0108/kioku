@@ -1,9 +1,16 @@
 import { createRoute, z } from '@hono/zod-openapi'
-import { DomainLayers, ErrorResponse, MemberInfo } from '@kioku/contracts'
+import {
+  DomainLayers,
+  ErrorResponse,
+  ExtractionBudget,
+  ExtractionUsage,
+  MemberInfo,
+} from '@kioku/contracts'
 import { asc, eq } from 'drizzle-orm'
 
 import { memberRole } from '../auth/middleware'
 import { accounts, spaceMembers, spaces } from '../db/schema'
+import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
@@ -27,6 +34,28 @@ const save = createRoute({
   request: { params, body: jsonBody(DomainLayers) },
   responses: {
     200: jsonResponse('已保存', DomainLayers),
+    400: jsonResponse('请求不合法', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const budget = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}/extraction-budget',
+  tags: ['console'],
+  summary: '抽取预算与本月用量：每月的 token 上限、每个对象每天最多写几条事实',
+  request: { params },
+  responses: { 200: jsonResponse('预算与用量', ExtractionUsage), 403: forbidden },
+})
+
+const saveBudget = createRoute({
+  method: 'put',
+  path: '/spaces/{spaceId}/extraction-budget',
+  tags: ['console'],
+  summary: '修改抽取预算（只有空间 owner）：用完之后只写会话摘要，下个月恢复',
+  request: { params, body: jsonBody(ExtractionBudget) },
+  responses: {
+    200: jsonResponse('预算与用量', ExtractionUsage),
     400: jsonResponse('请求不合法', ErrorResponse),
     403: forbidden,
   },
@@ -61,6 +90,22 @@ export function spaceRoutes(deps: Deps) {
         .where(eq(spaceMembers.spaceId, spaceId))
         .orderBy(asc(spaceMembers.createdAt))
       return c.json(rows, 200)
+    })
+    .openapi(budget, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
+        return c.json({ error: '不是该空间成员' }, 403)
+      }
+      return c.json(await extractionUsage(deps.db, spaceId), 200)
+    })
+    .openapi(saveBudget, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      // 预算管的是花钱的事，和 domain 默认层一样只有空间 owner 能改
+      if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
+        return c.json({ error: '只有空间 owner 能改抽取预算' }, 403)
+      }
+      await saveExtractionBudget(deps.db, spaceId, c.req.valid('json'))
+      return c.json(await extractionUsage(deps.db, spaceId), 200)
     })
     .openapi(read, async (c) => {
       const { spaceId } = c.req.valid('param')

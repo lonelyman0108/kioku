@@ -17,6 +17,7 @@ import {
   EmbeddingSettingsView,
   EmbeddingTestResult,
   ExtractionSettingsView,
+  ExtractionUsage,
   ExtractionTestResult,
   GlossaryIndex,
   HealthResponse,
@@ -54,6 +55,7 @@ import {
   type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
   type UpdateExtractionSettings,
+  type ExtractionBudget,
   type UpdateMemoryRequest,
   type UpdatePersonaRequest,
 } from '@kioku/contracts'
@@ -227,6 +229,10 @@ export const api = {
     request('GET', `/spaces/${spaceId}/activity`, { query: { cursor }, schema: ActivityList }),
   domainLayers: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/domain-layers`, { schema: DomainLayers }),
+  extractionBudget: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/extraction-budget`, { schema: ExtractionUsage }),
+  saveExtractionBudget: (spaceId: string, body: ExtractionBudget) =>
+    request('PUT', `/spaces/${spaceId}/extraction-budget`, { body, schema: ExtractionUsage }),
   saveDomainLayers: (spaceId: string, defaults: Record<string, PlainLayer>) =>
     request('PUT', `/spaces/${spaceId}/domain-layers`, {
       body: { defaults },

@@ -37,6 +37,22 @@ const coverage = computed(() => {
   const e = data.value?.embedding
   return e && e.eligible ? Math.round((e.embedded / e.eligible) * 100) : null
 })
+// 本月抽取的 token 用到八成时提醒；用完之后只写会话摘要、不再抽取事实
+const budgetWarning = computed(() => {
+  const e = data.value?.extraction
+  if (!e || e.usedTokens < e.monthlyTokens * 0.8) return null
+  const over = e.usedTokens >= e.monthlyTokens
+  const used = `已用 ${e.usedTokens.toLocaleString()} / ${e.monthlyTokens.toLocaleString()} token。`
+  return {
+    over,
+    title: over
+      ? '本月的抽取预算用完了'
+      : `本月的抽取预算已用 ${Math.round((e.usedTokens / e.monthlyTokens) * 100)}%`,
+    description: over
+      ? `${used}之后只写会话摘要、不再抽取事实，下个月恢复；空间 owner 可以在空间设置里调高。`
+      : `${used}用完之后只写会话摘要、不再抽取事实。`,
+  }
+})
 const activeKeys = computed(() =>
   (data.value?.apps ?? []).reduce((n, app) => n + (app.keys?.active ?? 0), 0),
 )
@@ -60,6 +76,13 @@ const activeKeys = computed(() =>
         <USkeleton v-for="n in 5" :key="n" class="h-28" />
       </div>
       <div v-else class="space-y-6">
+        <UAlert
+          v-if="budgetWarning"
+          :color="budgetWarning.over ? 'error' : 'warning'"
+          variant="subtle"
+          :title="budgetWarning.title"
+          :description="budgetWarning.description"
+        />
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <div class="rounded-lg border border-default p-4">
             <p class="text-sm text-muted">记忆</p>

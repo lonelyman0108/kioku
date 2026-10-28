@@ -7,6 +7,7 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import ExtractionBudget from '../components/ExtractionBudget.vue'
 import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
@@ -196,6 +197,8 @@ async function save() {
           </div>
         </div>
       </UCard>
+
+      <ExtractionBudget :space-id="spaceId" :editable="isOwner" />
     </template>
   </UDashboardPanel>
 </template>

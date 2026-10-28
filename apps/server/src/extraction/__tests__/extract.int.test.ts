@@ -449,7 +449,9 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
           originScope: scope,
           subjectId: old,
           content: i === 0 ? '很早以前记下的事' : `第 ${i} 件事`,
-          updatedAt: new Date(Date.now() - (31 - i) * 60_000),
+          // 都是前些天写下的，不占今天每个对象的写入条数
+          createdAt: new Date(Date.now() - (40 - i) * 86_400_000),
+          updatedAt: new Date(Date.now() - (40 - i) * 86_400_000),
         })),
       ),
     )
