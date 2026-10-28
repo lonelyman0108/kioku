@@ -30,6 +30,11 @@ export function scanPlaceholders(text: string): { refs: PlaceholderRef[]; malfor
   return { refs, malformed }
 }
 
+// disclosure 与关键词里不能有占位符（会进召回与 boot 的线索）：写入与导入计划都按这条判断
+export function mentionsPlaceholder(text: string): boolean {
+  return text.includes(CREDENTIAL_PLACEHOLDER_START)
+}
+
 export function placeholderIdentifiers(text: string): Set<string> {
   return new Set(scanPlaceholders(text).refs.map((r) => r.identifier))
 }

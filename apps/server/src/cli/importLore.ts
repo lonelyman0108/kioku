@@ -132,7 +132,7 @@ async function main(): Promise<void> {
       }
     }
 
-    const result = await applyImport(target, plan)
+    const result = await applyImport(target, plan, sync ? { skip: sync.skipCreate } : {})
     printResult(plan, result)
     const synced = sync ? await applySync(target, sync) : null
     if (synced) printSyncResult(synced)
@@ -271,6 +271,14 @@ function printSync(sync: SyncPlan): void {
   list(
     '在 Kioku 里删除了，不同步',
     of('deleted').map((i) => i.uri),
+  )
+  list(
+    '这次的导入计划不导入这个节点，没有同步（原因见上面的「不导入」）',
+    of('skipped').map((i) => `${i.uri}：${i.reason}`),
+  )
+  list(
+    '读不出来，没有同步',
+    of('unreadable').map((i) => `${i.uri}：${i.reason}`),
   )
   list('Lore 里已经没有这个节点，Kioku 里保留（要删就在管理界面删）', sync.goneFromLore)
 }

@@ -224,25 +224,62 @@ describe('Lore 导入计划', () => {
     ])
   })
 
-  it('格式不对的凭据占位符、写在 disclosure 或关键词里的占位符，在计划里就不导入并说明原因', () => {
+  it('格式不对的凭据占位符、写在 disclosure 里的占位符，在计划里就不导入并说明原因', () => {
     const plan = planImport(
       snapshot(
         node('projects://notes', { content: '占位符写成 {{cred:<标识>#<字段>}}' }),
         node('projects://ok', { content: '占位符写成 cred:<标识>#<字段>，外面套两层花括号' }),
         node('infra://hint', { disclosure: '要用 {{cred:router#password}} 登录时' }),
-        node('infra://tagged', { keywords: ['{{cred:router}}'] }),
+        // 截断之后才是真正写进去的 disclosure，后面的部分不算
+        node('infra://long', { disclosure: `${'长'.repeat(500)}{{cred:router}}` }),
       ),
       [],
       options,
     )
-    expect(plan.memories.map((m) => m.source)).toEqual(['projects://ok'])
+    expect(plan.memories.map((m) => m.source)).toEqual(['projects://ok', 'infra://long'])
     expect(plan.skipped).toEqual([
       {
         source: 'projects://notes',
         reason: expect.stringContaining('格式不对的凭据占位符 {{cred:<标识>#<字段>}}'),
       },
       { source: 'infra://hint', reason: expect.stringContaining('占位符只能写在正文里') },
-      { source: 'infra://tagged', reason: expect.stringContaining('占位符只能写在正文里') },
+    ])
+  })
+
+  it('关键词里的占位符只丢掉那个关键词，节点照常导入', () => {
+    const plan = planImport(
+      snapshot(node('infra://tagged', { keywords: ['{{cred:router}}', '路由器'] })),
+      [],
+      options,
+    )
+    expect(plan.memories.map((m) => m.request.glossary)).toEqual([['路由器']])
+    expect(plan.droppedKeywords).toEqual([
+      {
+        source: 'infra://tagged',
+        keyword: '{{cred:router}}',
+        reason: expect.stringContaining('占位符只能写在正文里'),
+      },
+    ])
+  })
+
+  it('正文里有占位符的节点只能进私人层：映射到基础层、主人层的在计划里就不导入', () => {
+    const body = '登录用 {{cred:router#password}}'
+    const plan = planImport(
+      snapshot(
+        node('projects://router', { content: body }),
+        node('core://router', { content: body }),
+        node('preferences://router', { content: body }),
+      ),
+      [],
+      options,
+    )
+    expect(plan.memories.map((m) => m.source)).toEqual(['projects://router'])
+    expect(plan.skipped).toEqual([
+      { source: 'core://router', reason: expect.stringContaining('core://router 是 base 层') },
+      {
+        source: 'preferences://router',
+        reason: expect.stringContaining('preferences://router 是 owner 层'),
+      },
     ])
   })
 

@@ -1,11 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import {
-  CREDENTIAL_PLACEHOLDER_START,
-  PLAIN_LAYERS,
-  PLAINTEXT_CREDENTIAL,
-  SENSITIVITIES,
-} from '@kioku/contracts'
+import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
@@ -62,6 +57,7 @@ import {
 } from '../access/access'
 import {
   looksLikePlaintextCredential,
+  mentionsPlaceholder,
   placeholderIdentifiers,
   scanPlaceholders,
 } from '../credential/placeholders'
@@ -161,7 +157,7 @@ function checkOutsideContent(
   disclosure: string | null | undefined,
   glossary: readonly string[],
 ): void {
-  if ([disclosure ?? '', ...glossary].some((t) => t.includes(CREDENTIAL_PLACEHOLDER_START))) {
+  if ([disclosure ?? '', ...glossary].some(mentionsPlaceholder)) {
     throw new MemoryError(400, 'disclosure 与关键词里不能有凭据占位符，占位符只能写在正文里')
   }
 }

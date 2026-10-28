@@ -702,11 +702,103 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       }
     })
 
-    it('导入过 secret 时，没有主密钥就不能同步', async () => {
+    it('要比对的 secret 没有主密钥就不能同步；secret 在 Kioku 里改过之后就不再需要', async () => {
       await run()
       await expect(
         planSync({ ...target(), masterKey: null }, await plan(), await readLore(lore)),
       ).rejects.toThrow('KIOKU_MASTER_KEY')
+      expect(
+        (await consoleUpdate({ uri: 'infra://office_network/credentials', priority: 1 })).status,
+      ).toBe(200)
+      const sync = await planSync(
+        { ...target(), masterKey: null },
+        await plan(),
+        await readLore(lore),
+      )
+      expect(sync.items.find((i) => i.uri === 'infra://office_network/credentials')).toMatchObject({
+        state: 'edited',
+      })
+    })
+
+    it('按版本号判断有没有人改过：最近一条事件仍是导入，版本号变了也算改过', async () => {
+      await run()
+      const undo = await editLore('infra://office_network', { content: 'Lore 里的新正文' })
+      try {
+        // 不经过服务、不记事件地改一次，相当于查事件与读记忆之间有人写入
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx
+            .update(memories)
+            .set({ content: '有人刚改的', version: sql`${memories.version} + 1` })
+            .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network'))),
+        )
+        const sync = await syncPlan()
+        expect(sync.items.find((i) => i.uri === 'infra://office_network')).toMatchObject({
+          state: 'edited',
+        })
+        expect((await applySync(target(), sync)).updated).toEqual([])
+        expect((await importService().get('infra://office_network')).content).toBe('有人刚改的')
+      } finally {
+        await undo()
+      }
+    })
+
+    it('Lore 里换了路径、映射到别的层的节点只列出来，导入时也不在新位置再建一条', async () => {
+      await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+      await run()
+      const undoRename = await renameLore('core://agent/claudecode', 'claude_rules')
+      try {
+        const sync = await syncPlan()
+        expect(sync.items.filter((i) => i.state === 'moved')).toEqual([
+          expect.objectContaining({
+            source: 'core://claude_rules',
+            uri: 'app://claude-code/agent',
+            target: 'core://claude_rules',
+          }),
+        ])
+        const result = await applyImport(target(), await plan(), { skip: sync.skipCreate })
+        expect(result.created).toEqual([])
+        expect(result.previouslyImported).toContain('core://claude_rules')
+        const core = await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select({ path: memories.path }).from(memories).where(eq(memories.domain, 'core')),
+        )
+        expect(core.map((r) => r.path)).not.toContain('claude_rules')
+      } finally {
+        await undoRename()
+      }
+    })
+
+    it('这次的导入计划不导入的节点，同步时列出原因', async () => {
+      await run()
+      const undo = await editLore('infra://office_network', { content: '改坏了 {{cred:Bad Name}}' })
+      try {
+        const sync = await syncPlan()
+        expect(sync.items.filter((i) => i.state === 'skipped')).toEqual([
+          expect.objectContaining({
+            source: 'infra://office_network',
+            uri: 'infra://office_network',
+            reason: expect.stringContaining('格式不对的凭据占位符'),
+          }),
+        ])
+      } finally {
+        await undo()
+      }
+    })
+
+    it('单条读不出来时只记下这一条，不中止整次同步', async () => {
+      await run()
+      // 版本号不变、过期之后按 URI 读不到
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(memories)
+          .set({ expiresAt: new Date(Date.now() - 86_400_000) })
+          .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network'))),
+      )
+      const sync = await syncPlan()
+      expect(sync.items.find((i) => i.uri === 'infra://office_network')).toMatchObject({
+        state: 'unreadable',
+        reason: expect.stringContaining('记忆不存在'),
+      })
+      expect(sync.items.filter((i) => i.state === 'current').length).toBeGreaterThan(0)
     })
   })
 })
