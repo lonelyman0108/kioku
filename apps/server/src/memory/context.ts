@@ -1,11 +1,11 @@
 import type { MemberRole, RecallCandidate } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { and, eq, inArray } from 'drizzle-orm'
 
 import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
 import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
 import { withSpace, type Tx } from '../db/client'
-import { apps } from '../db/schema'
+import { apps, memories } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import type { Deps, KeyPrincipal } from '../http/env'
 import type { RecallScope } from '../lifecycle/scope'
@@ -20,6 +20,7 @@ import {
   scoreRecall,
   type QueryVector,
 } from '../recall/recall'
+import { readableConditions } from './filter'
 import { runInSpace } from './personas'
 import { MemoryError, MemoryService } from './service'
 
@@ -191,6 +192,22 @@ export function recallScopeForKey(
         console.warn('读取对象直连的事实失败', err)
         return []
       }
+    },
+    contents: async (ids) => {
+      if (!ids.length) return new Map()
+      const rows = await run((tx, personaIds) =>
+        tx
+          .select({ id: memories.id, content: memories.content })
+          .from(memories)
+          .where(
+            and(
+              inArray(memories.id, [...ids]),
+              eq(memories.form, 'curated'),
+              readableConditions(access, { personaIds }),
+            ),
+          ),
+      )
+      return new Map(rows.map((r) => [r.id, r.content ?? '']))
     },
     record: (source, query, hits) => void recordRecall(deps, key, source, query, hits),
   }

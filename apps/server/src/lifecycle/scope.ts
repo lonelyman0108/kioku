@@ -31,6 +31,8 @@ export interface RecallScope {
   recent(limit: number): Promise<RecentMemory[]>
   // 对象直连：当前发言人与本群的事实；不带会话上下文时没有。只是附加的线索，读取失败时返回空、不抛错
   subjects(): Promise<SubjectFacts[]>
+  // 召回候选的正文（记忆 id → 正文），读权限和召回相同；给读不了正文的宿主直接带上
+  contents(ids: readonly string[]): Promise<Map<string, string>>
   // 记一条召回事件，不等它写完。只有接入方真的拿到召回结果的地方调用，管理界面的预览与调试不调用
   record(source: RecallSource, query: string, hits: readonly RecordableCandidate[]): void
 }

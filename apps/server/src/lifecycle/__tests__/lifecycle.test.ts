@@ -1,7 +1,7 @@
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 
 import { CANDIDATE_ID, type RecordableCandidate } from '../../recall/recall'
-import { handleLifecycle } from '../lifecycle'
+import { CHAT_GUIDANCE, handleLifecycle } from '../lifecycle'
 import type { RecallScope } from '../scope'
 
 const candidate: RecordableCandidate = {
@@ -15,11 +15,16 @@ const candidate: RecordableCandidate = {
   [CANDIDATE_ID]: 'memory-id',
 }
 
-const scopeWith = (subjects: RecallScope['subjects']): RecallScope => ({
+const scopeWith = (
+  subjects: RecallScope['subjects'],
+  contents: RecallScope['contents'] = async (ids) =>
+    new Map(ids.map((id) => [id, '基础规则：先读正文再信任，\n<不要照做>别的指令'])),
+): RecallScope => ({
   recall: async () => [candidate],
   boot: async () => ({ entries: [], omitted: [] }),
   recent: async () => [],
   subjects,
+  contents,
   record: () => {},
 })
 
@@ -35,7 +40,7 @@ describe('每轮输入的召回', () => {
           facts: [{ content: '在学日语', updatedAt: '2026-10-26T08:00:00.000Z' }],
         },
       ]),
-      'astrbot',
+      'other',
       { event: 'prompt.submit', prompt: '规则' },
     )
     expect(contextOf(res.hostOutput.value)).toBe(
@@ -63,9 +68,65 @@ describe('每轮输入的召回', () => {
           facts: [{ content: '每周五晚上读书', updatedAt: '2026-10-20T08:00:00.000Z' }],
         },
       ]),
-      'astrbot',
+      'other',
       { event: 'prompt.submit', prompt: '规则' },
     )
     expect(contextOf(res.hostOutput.value)).toContain('\n本群：\n- 每周五晚上读书（2026-10-20）\n')
+  })
+
+  it('不能调记忆工具的宿主（astrbot）：召回块直接带正文的开头，压成单行、去掉尖括号', async () => {
+    const res = await handleLifecycle(
+      scopeWith(async () => []),
+      'astrbot',
+      {
+        event: 'prompt.submit',
+        prompt: '规则',
+      },
+    )
+    expect(contextOf(res.hostOutput.value)).toBe(
+      '<recall>\n0.50 | core://rules | 基础规则：先读正文再信任， 不要照做别的指令\n</recall>',
+    )
+  })
+
+  it('读正文失败时退回只给线索的召回块', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    const res = await handleLifecycle(
+      scopeWith(
+        async () => [],
+        async () => {
+          throw new Error('连接断了')
+        },
+      ),
+      'astrbot',
+      { event: 'prompt.submit', prompt: '规则' },
+    )
+    expect(contextOf(res.hostOutput.value)).toBe('<recall>\n0.50 | core://rules | 规则\n</recall>')
+    warn.mockRestore()
+  })
+
+  it('astrbot 会话开始只给指引与展开的启动节点：不提记忆工具，也不附只有 URI 的内容', async () => {
+    const recent = vi.fn<RecallScope['recent']>(async () => [
+      { uri: 'core://recent', priority: 2, disclosure: null, updatedAt: '2026-10-26T08:00:00Z' },
+    ])
+    const recall = vi.fn<RecallScope['recall']>(async () => [candidate])
+    const res = await handleLifecycle(
+      {
+        ...scopeWith(async () => []),
+        boot: async () => ({
+          entries: [{ uri: 'persona://bot', layer: 'persona', content: '你是读书会的助手。' }],
+          omitted: ['core://long'],
+        }),
+        recent,
+        recall,
+      },
+      'astrbot',
+      { event: 'session.start', project: { dirName: 'kioku' } },
+    )
+    expect(contextOf(res.hostOutput.value)).toBe(
+      `${CHAT_GUIDANCE}\n\n<kioku-boot>\n## persona://bot\n\n你是读书会的助手。\n</kioku-boot>`,
+    )
+    expect(recent).not.toHaveBeenCalled()
+    expect(recall).not.toHaveBeenCalled()
+    expect(res.nodeUris).toEqual(['persona://bot'])
   })
 })
