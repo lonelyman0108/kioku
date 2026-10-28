@@ -1,6 +1,7 @@
 import {
   ActivityList,
   AppInfo,
+  BootPreview,
   ConsoleCredential,
   ConsoleCredentialList,
   ConsoleSearchResponse,
@@ -27,8 +28,10 @@ import {
   MemoryView,
   PersonaDetail,
   PersonaInfo,
+  RecallDebug,
   SetupStatus,
   SpaceOverview,
+  type BootPreviewRequest,
   type CreateAppRequest,
   type CreateCredentialProviderRequest,
   type CreateCredentialRequest,
@@ -92,6 +95,16 @@ export const api = {
     request('POST', `/spaces/${spaceId}/apps/${appId}/keys`, { body, schema: CreatedKey }),
   revokeKey: (spaceId: string, appId: string, keyId: string) =>
     request('DELETE', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}`),
+  bootPreview: (spaceId: string, appId: string, keyId: string, body: BootPreviewRequest) =>
+    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/preview`, {
+      body,
+      schema: BootPreview,
+    }),
+  recallDebug: (spaceId: string, appId: string, keyId: string, query: string) =>
+    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/debug`, {
+      body: { query },
+      schema: RecallDebug,
+    }),
   keyMatrix: (spaceId: string, appId: string, keyId: string) =>
     request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/matrix`, {
       schema: KeyAccessMatrix,

@@ -8,6 +8,8 @@ export const icons = {
   personas: 'i-lucide-drama',
   inherits: 'i-lucide-arrow-right',
   matrix: 'i-lucide-table',
+  preview: 'i-lucide-play',
+  debug: 'i-lucide-bug',
   transfer: 'i-lucide-user-round-cog',
   apps: 'i-lucide-key-round',
   credentials: 'i-lucide-vault',

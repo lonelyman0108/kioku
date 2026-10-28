@@ -7,6 +7,7 @@ import type {
   KeyAccessMatrix,
   Layer,
   Provenance,
+  ReadDenial,
   Sensitivity,
 } from '@kioku/contracts'
 
@@ -59,6 +60,20 @@ export const originScopeLabels: Record<KeyAccessMatrix['contexts'][number]['orig
     group: '只含全局、本应用与本群里写下的',
     direct: '只含全局、本应用与和此人的对话里写下的',
   }
+
+// 召回调试台里一条记忆被这把 Key 过滤掉的原因
+export const readDenialLabels: Record<ReadDenial, string> = {
+  deleted: '已删除',
+  expired: '已失效或过期',
+  layer: '这把 Key 读不到这一层',
+  sensitivity: '敏感级超出这把 Key 的上限',
+  secret: 'secret 只能按 URI 读取，不进召回',
+  origin: '来源作用域不在范围内',
+  owner: '别的成员的画像或私人层',
+  persona: '人格不在这个应用的继承链上',
+  app: '别的应用的应用层',
+  override: '被继承链上更近的人格的同一路径覆盖',
+}
 
 // 按 URI 直接新建时可选的层：persona:// 与 app:// 由 URI 决定，对象与情节层由对话抽取写入
 export const creatableLayers: Layer[] = ['base', 'owner', 'private']

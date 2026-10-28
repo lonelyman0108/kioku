@@ -8,6 +8,7 @@ import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import AppKeys from '../components/AppKeys.vue'
+import AppSimulator from '../components/AppSimulator.vue'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 
@@ -50,11 +51,23 @@ function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 }
 
+// 应用的改动会影响别处的缓存：Key 的权限矩阵按应用配置、默认人格与主人算，人格详情列出用它的应用
+function refreshAfterChange(sid: string, id: string) {
+  return Promise.all([
+    queryClient.invalidateQueries({ queryKey: ['apps', sid] }),
+    queryClient.invalidateQueries({ queryKey: ['keys', sid, id] }),
+    queryClient.invalidateQueries({ queryKey: ['key-matrix', sid, id] }),
+    queryClient.invalidateQueries({ queryKey: ['persona', sid] }),
+  ])
+}
+
+// 发请求时的空间与应用记下来：请求期间换了页面，刷新的仍是被改的那个应用
 async function update(body: Parameters<typeof api.updateApp>[2], done = '已保存') {
   const sid = spaceId.value
+  const id = appId.value
   try {
-    await api.updateApp(sid, appId.value, body)
-    await queryClient.invalidateQueries({ queryKey: ['apps', sid] })
+    await api.updateApp(sid, id, body)
+    await refreshAfterChange(sid, id)
     toast.add({ title: done, color: 'success' })
     return true
   } catch (err) {
@@ -90,7 +103,6 @@ async function transfer() {
     if (await update({ ownerAccountId: transferTo.value }, '已转移，原来的 Key 都已吊销')) {
       confirmingTransfer.value = false
       transferTo.value = undefined
-      await queryClient.invalidateQueries({ queryKey: ['keys', spaceId.value, appId.value] })
     }
   } finally {
     transferring.value = false
@@ -106,9 +118,12 @@ async function remove(target: AppInfo) {
   try {
     await api.deleteApp(sid, target.id)
     confirmingDelete.value = false
-    await queryClient.invalidateQueries({ queryKey: ['apps', sid] })
+    await refreshAfterChange(sid, target.id)
     toast.add({ title: `已删除应用「${target.name}」`, color: 'success' })
-    if (sid === spaceId.value) void router.replace({ name: 'apps', params: { spaceId: sid } })
+    // 请求期间离开了这个应用的页面就不再跳转
+    if (route.name === 'app' && route.params.appId === target.id) {
+      void router.replace({ name: 'apps', params: { spaceId: sid } })
+    }
   } catch (err) {
     failed(err, '删除失败')
   } finally {
@@ -143,6 +158,12 @@ watch([spaceId, appId], () => {
     <template #body>
       <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
       <UAlert
+        v-else-if="apps.isError.value"
+        color="error"
+        variant="subtle"
+        :title="apps.error.value instanceof ApiError ? apps.error.value.message : '读取失败'"
+      />
+      <UAlert
         v-else-if="!app"
         color="neutral"
         variant="subtle"
@@ -174,6 +195,17 @@ watch([spaceId, appId], () => {
               </div>
             </UFormField>
             <UFormField label="默认人格" help="这个应用读写哪个人格的设定">
+              <template v-if="app.defaultPersonaId" #hint>
+                <RouterLink
+                  :to="{
+                    name: 'personas',
+                    params: { spaceId },
+                    query: { id: app.defaultPersonaId },
+                  }"
+                  class="text-primary hover:underline"
+                  >查看人格</RouterLink
+                >
+              </template>
               <USelect
                 :model-value="app.defaultPersonaId"
                 :items="personaItems"
@@ -207,6 +239,11 @@ watch([spaceId, appId], () => {
             :can-issue="canManage"
             :is-space-owner="isSpaceOwner"
           />
+        </UCard>
+
+        <!-- 模拟会读到应用主人的私人层，只给应用主人 -->
+        <UCard v-if="isAppOwner">
+          <AppSimulator :space-id="spaceId" :app-id="app.id" />
         </UCard>
 
         <UCard v-if="isSpaceOwner">
