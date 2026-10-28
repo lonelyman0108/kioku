@@ -157,6 +157,14 @@ export const AppInfo = z.object({
 })
 export type AppInfo = z.infer<typeof AppInfo>
 
+// 按群换人格：应用在这个群（或频道）里用别的人格，boot、召回与写入都按它；没有规则的群与私聊用默认人格
+export const GroupPersonaRule = z.object({ subjectId: z.uuid(), personaId: z.uuid() })
+export type GroupPersonaRule = z.infer<typeof GroupPersonaRule>
+
+// 整组替换：没列出的规则删掉
+export const GroupPersonaRules = z.object({ rules: z.array(GroupPersonaRule).max(200) })
+export type GroupPersonaRules = z.infer<typeof GroupPersonaRules>
+
 export const CreateKeyRequest = z.object({
   name: z.string().min(1).max(64),
   scopes: KeyScopes,

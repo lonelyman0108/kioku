@@ -1,4 +1,10 @@
-import type { BootResponse, Layer, RecallSource, RecentMemory } from '@kioku/contracts'
+import type {
+  BootResponse,
+  Layer,
+  RecallSource,
+  RecentMemory,
+  SubjectFacts,
+} from '@kioku/contracts'
 
 import type { RecordableCandidate } from '../recall/recall'
 
@@ -23,6 +29,8 @@ export interface RecallScope {
   // budget 是正文字数预算，不传时用默认值
   boot(budget?: number): Promise<BootResponse>
   recent(limit: number): Promise<RecentMemory[]>
+  // 对象直连：当前发言人与本群的事实；不带会话上下文时没有
+  subjects(): Promise<SubjectFacts[]>
   // 记一条召回事件，不等它写完。只有接入方真的拿到召回结果的地方调用，管理界面的预览与调试不调用
   record(source: RecallSource, query: string, hits: readonly RecordableCandidate[]): void
 }

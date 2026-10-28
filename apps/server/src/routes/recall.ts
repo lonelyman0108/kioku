@@ -8,6 +8,7 @@ import {
   RecallResponse,
 } from '@kioku/contracts'
 
+import { resolveSession } from '../access/session'
 import { requireKey } from '../auth/middleware'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -24,7 +25,8 @@ const recallRoute = createRoute({
   method: 'post',
   path: '/recall',
   tags: ['recall'],
-  summary: '按一段文本召回候选记忆（只返回 URI 与线索，正文用 GET /memories 读）',
+  summary:
+    '按一段文本召回候选记忆（只返回 URI 与线索，正文用 GET /memories 读）；带了会话上下文时按它收紧权限，并附上当前发言人与本群的事实',
   security,
   request: { body: jsonBody(RecallRequest) },
   responses: { 200: jsonResponse('候选', RecallResponse), ...errors },
@@ -54,18 +56,23 @@ export function recallRoutes(deps: Deps) {
   for (const path of ['/recall', '/boot', '/lifecycle/event']) app.use(path, requireKey(deps))
   return app
     .openapi(recallRoute, async (c) => {
-      const { query, limit } = c.req.valid('json')
-      const scope = recallScopeForKey(deps, c.get('key'))
-      const candidates = await scope.recall(query, { limit })
+      const { query, limit, context } = c.req.valid('json')
+      const key = c.get('key')
+      const scope = recallScopeForKey(deps, key, await resolveSession(deps, key, context))
+      const [candidates, subjects] = await Promise.all([
+        scope.recall(query, { limit }),
+        scope.subjects(),
+      ])
       scope.record('rest.recall', query, candidates)
-      return c.json({ candidates }, 200)
+      return c.json({ candidates, subjects }, 200)
     })
     .openapi(bootRoute, async (c) =>
       c.json(await recallScopeForKey(deps, c.get('key')).boot(), 200),
     )
     .openapi(lifecycleRoute, async (c) => {
       const key = c.get('key')
-      const scope = recallScopeForKey(deps, key)
-      return c.json(await handleLifecycle(scope, key.app.runtimeFamily, c.req.valid('json')), 200)
+      const input = c.req.valid('json')
+      const scope = recallScopeForKey(deps, key, await resolveSession(deps, key, input.context))
+      return c.json(await handleLifecycle(scope, key.app.runtimeFamily, input), 200)
     })
 }

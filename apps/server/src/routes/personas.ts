@@ -10,7 +10,7 @@ import { and, asc, count, eq, inArray, sql } from 'drizzle-orm'
 
 import { memberRole } from '../auth/middleware'
 import { withSpace, type Tx } from '../db/client'
-import { apps, memories, personas } from '../db/schema'
+import { appGroupPersonas, apps, memories, personas } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
@@ -299,14 +299,19 @@ export function personaRoutes(deps: Deps) {
           .where(eq(personas.id, personaId))
           .for('update')
         if (!row) return null
-        const [[users], [heirs], [stored]] = await Promise.all([
+        const [[users], [rules], [heirs], [stored]] = await Promise.all([
           tx.select({ n: count() }).from(apps).where(eq(apps.defaultPersonaId, personaId)),
+          tx
+            .select({ n: count() })
+            .from(appGroupPersonas)
+            .where(eq(appGroupPersonas.personaId, personaId)),
           tx.select({ n: count() }).from(personas).where(eq(personas.extendsId, personaId)),
           // 人格层记忆会被连带硬删除，已删除、还能撤销删除的也算
           tx.select({ n: count() }).from(memories).where(eq(memories.personaId, personaId)),
         ])
         const reasons = [
           users!.n ? `${users!.n} 个应用以它为默认人格` : '',
+          rules!.n ? `${rules!.n} 条按群换人格的规则用它` : '',
           heirs!.n ? `${heirs!.n} 个人格继承它` : '',
           // 不给条数：里面可能有查看者读不到的 secret 记忆
           stored!.n ? '还有人格层记忆（含已删除、还能撤销删除的）' : '',

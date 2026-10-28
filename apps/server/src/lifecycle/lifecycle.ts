@@ -10,6 +10,7 @@ import type {
 import { BOOT_LAYERS } from '../memory/filter'
 import { formatBootBlock, formatRecentBlock } from '../recall/boot'
 import { formatRecallBlock, type RecordableCandidate } from '../recall/recall'
+import { formatSubjectBlock } from '../recall/subjects'
 import type { RecallScope } from './scope'
 
 const RECENT_LIMIT = 5
@@ -163,17 +164,20 @@ export async function handleLifecycle(
     }
   }
 
-  const candidates = await scope.recall(input.prompt, {
-    limit: PROMPT_RECALL_LIMIT,
-    semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
-  })
+  // 召回块之后跟着当前发言人与本群的事实（对象直连），只有带了会话上下文时才有
+  const [candidates, subjects] = await Promise.all([
+    scope.recall(input.prompt, {
+      limit: PROMPT_RECALL_LIMIT,
+      semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
+    }),
+    scope.subjects(),
+  ])
   scope.record('prompt.submit', input.prompt, candidates)
+  const context = [formatRecallBlock(candidates, input.sessionId), formatSubjectBlock(subjects)]
+    .filter(Boolean)
+    .join('\n\n')
   return {
-    hostOutput: hostOutput(
-      runtimeFamily,
-      input.event,
-      formatRecallBlock(candidates, input.sessionId),
-    ),
+    hostOutput: hostOutput(runtimeFamily, input.event, context),
     nodeUris: candidates.map((c) => c.uri),
   }
 }
