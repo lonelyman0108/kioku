@@ -170,6 +170,12 @@ export type GroupPersonaRule = z.infer<typeof GroupPersonaRule>
 export const GroupPersonaRules = z.object({ rules: z.array(GroupPersonaRule).max(200) })
 export type GroupPersonaRules = z.infer<typeof GroupPersonaRules>
 
+// 列出规则时带上群现在的名字，管理界面按名字显示
+export const GroupPersonaRuleView = GroupPersonaRule.extend({ groupName: z.string() })
+export type GroupPersonaRuleView = z.infer<typeof GroupPersonaRuleView>
+export const GroupPersonaRuleList = z.object({ rules: z.array(GroupPersonaRuleView) })
+export type GroupPersonaRuleList = z.infer<typeof GroupPersonaRuleList>
+
 export const CreateKeyRequest = z.object({
   name: z.string().min(1).max(64),
   scopes: KeyScopes,

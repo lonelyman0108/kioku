@@ -6,6 +6,7 @@ import {
   CreatedKey,
   CreateKeyRequest,
   ErrorResponse,
+  GroupPersonaRuleList,
   GroupPersonaRules,
   KeyAccessMatrix,
   KeyInfo,
@@ -136,7 +137,7 @@ const listGroupPersonas = createRoute({
   tags: ['apps'],
   summary: '按群换人格的规则：应用在这些群（或频道）里用规则里的人格，其余的群与私聊用默认人格',
   request: { params: AppParams },
-  responses: { 200: jsonResponse('规则', GroupPersonaRules), 403: forbidden, 404: notFound },
+  responses: { 200: jsonResponse('规则', GroupPersonaRuleList), 403: forbidden, 404: notFound },
 })
 
 const replaceGroupPersonas = createRoute({
@@ -146,7 +147,7 @@ const replaceGroupPersonas = createRoute({
   summary: '整组替换按群换人格的规则，只有应用主人能改',
   request: { params: AppParams, body: jsonBody(GroupPersonaRules) },
   responses: {
-    200: jsonResponse('替换后的规则', GroupPersonaRules),
+    200: jsonResponse('替换后的规则', GroupPersonaRuleList),
     400: jsonResponse('规则不合法', ErrorResponse),
     403: forbidden,
     404: notFound,
@@ -207,8 +208,13 @@ const canManageApps = (role: MemberRole | null) => role === 'owner' || role === 
 
 function groupPersonaRules(tx: Tx, appId: string) {
   return tx
-    .select({ subjectId: appGroupPersonas.subjectId, personaId: appGroupPersonas.personaId })
+    .select({
+      subjectId: appGroupPersonas.subjectId,
+      personaId: appGroupPersonas.personaId,
+      groupName: subjects.displayName,
+    })
     .from(appGroupPersonas)
+    .innerJoin(subjects, eq(subjects.id, appGroupPersonas.subjectId))
     .where(eq(appGroupPersonas.appId, appId))
     .orderBy(asc(appGroupPersonas.createdAt), asc(appGroupPersonas.subjectId))
 }
