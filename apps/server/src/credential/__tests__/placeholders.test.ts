@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   looksLikePlaintextCredential,
+  maskPlaintextCredentials,
   placeholderIdentifiers,
   scanPlaceholders,
 } from '../placeholders'
@@ -78,5 +79,43 @@ describe('明文凭据提醒', () => {
     ]) {
       expect(looksLikePlaintextCredential(text), text).toBe(false)
     }
+  })
+})
+
+describe('提示语打码', () => {
+  it('从值开始盖到行尾，下一行照常', () => {
+    expect(maskPlaintextCredentials('路由器密码：hunter2 怎么改')).toBe('路由器密码：***')
+    expect(maskPlaintextCredentials('token=abc.def\n下一行')).toBe('token=***\n下一行')
+    expect(maskPlaintextCredentials('用 sk-abcdefghijklmnopqrst 调接口')).toBe('用 ***')
+    expect(maskPlaintextCredentials('password = "correct horse battery staple"')).toBe(
+      'password = ***',
+    )
+  })
+
+  it('挨着的几处凭据都打码，重叠的匹配不会漏掉后面的值', () => {
+    for (const text of [
+      'token=abc,password: hunter2',
+      'token=abc&secret=\tS3cr3t!',
+      'apikey=xyz,api_key=\nsk-abcdefghijklmnopqrstuv',
+      '密码：a1\n口令：b2\n用 sk-abcdefghijklmnopqrst 调接口',
+    ]) {
+      const masked = maskPlaintextCredentials(text)
+      for (const secret of ['hunter2', 'S3cr3t!', 'sk-abcdefghijklmnopqrstuv', 'a1', 'b2']) {
+        expect(masked).not.toContain(secret)
+      }
+    }
+    expect(maskPlaintextCredentials('密码：a1\n口令：b2')).toBe('密码：***\n口令：***')
+    // sk- 串吞掉后面紧跟的关键词时，照样盖到行尾；挨着的两处合成一段
+    expect(maskPlaintextCredentials('sk-AAAAAAAAAAAAAAAApassword:correct horse battery')).toBe(
+      '***',
+    )
+    expect(maskPlaintextCredentials('前 sk-abcdefghijklmnopqrst密码：hunter2 x')).toBe('前 ***')
+  })
+
+  it('没有像凭据的片段时原样返回，占位符不打码', () => {
+    expect(maskPlaintextCredentials('帮我看看今天的天气')).toBe('帮我看看今天的天气')
+    expect(maskPlaintextCredentials('密码：{{cred:router#password}}')).toBe(
+      '密码：{{cred:router#password}}',
+    )
   })
 })

@@ -4,12 +4,11 @@ import type {
   LifecycleEvent,
   LifecycleProject,
   LifecycleResponse,
-  RecallCandidate,
   RecentMemory,
 } from '@kioku/contracts'
 
 import { BOOT_LAYERS, formatBootBlock, formatRecentBlock } from '../recall/boot'
-import { formatRecallBlock } from '../recall/recall'
+import { formatRecallBlock, type RecordableCandidate } from '../recall/recall'
 import type { RecallScope } from './scope'
 
 const RECENT_LIMIT = 5
@@ -80,7 +79,9 @@ export interface SessionStart {
   limit: number | null
   boot: BootResponse
   recent: RecentMemory[]
-  related: RecallCandidate[]
+  // 项目召回的查询（目录名与仓库名）与注入的候选；没有项目、或项目召回失败时查询为空
+  query: string
+  related: RecordableCandidate[]
   // 放不下、没有附上的附加块
   dropped: ('recent' | 'related')[]
 }
@@ -139,6 +140,7 @@ export async function sessionStart(
     context: parts.join('\n\n'),
     limit: limit ?? null,
     boot: result,
+    query: related.status === 'fulfilled' ? query : '',
     recent: dropped.includes('recent') ? [] : recentList,
     related: dropped.includes('related') ? [] : relatedList,
     dropped,
@@ -152,6 +154,8 @@ export async function handleLifecycle(
 ): Promise<LifecycleResponse> {
   if (input.event === 'session.start') {
     const start = await sessionStart(scope, runtimeFamily, input)
+    // 只有做了项目召回才记：没有项目时会话开始不召回
+    if (start.query) scope.record('session.start', start.query, start.related)
     return {
       hostOutput: hostOutput(runtimeFamily, input.event, start.context),
       nodeUris: [...start.boot.entries.map((e) => e.uri), ...start.related.map((c) => c.uri)],
@@ -162,6 +166,7 @@ export async function handleLifecycle(
     limit: PROMPT_RECALL_LIMIT,
     semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
   })
+  scope.record('prompt.submit', input.prompt, candidates)
   return {
     hostOutput: hostOutput(
       runtimeFamily,

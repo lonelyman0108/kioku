@@ -15,7 +15,15 @@ import type { Embedder } from '../embedding/provider'
 import type { Deps, KeyPrincipal } from '../http/env'
 import type { RecallScope } from '../lifecycle/scope'
 import { boot, recentMemories } from '../recall/boot'
-import { embedQuery, normalizeQuery, recall, type QueryVector } from '../recall/recall'
+import { recordRecall } from '../recall/events'
+import {
+  embedQuery,
+  normalizeQuery,
+  publicCandidate,
+  recall,
+  scoreRecall,
+  type QueryVector,
+} from '../recall/recall'
 import { runInSpace } from './personas'
 import { MemoryError, MemoryService } from './service'
 
@@ -167,13 +175,15 @@ export function recallScopeForKey(
       if (!query) return []
       // 嵌入接口慢时不拖住整个召回：到时间就放弃向量这一路
       const semantic = useSemantic ? await semanticFor(deps, query, semanticTimeoutMs) : null
-      return run((tx, personaIds) =>
-        recall(tx, access, semantic, query, { ...options, personaIds, inheritance: true }),
+      const scored = await run((tx, personaIds) =>
+        scoreRecall(tx, access, semantic, query, { ...options, personaIds, inheritance: true }),
       )
+      return scored.map(publicCandidate)
     },
     boot: (budget) =>
       run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
+    record: (source, query, hits) => void recordRecall(deps, key, source, query, hits),
   }
 }

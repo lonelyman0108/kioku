@@ -13,6 +13,7 @@ import {
 } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import {
+  bigint,
   bigserial,
   boolean,
   check,
@@ -24,6 +25,8 @@ import {
   pgEnum,
   pgTable,
   primaryKey,
+  real,
+  smallint,
   text,
   timestamp,
   unique,
@@ -518,6 +521,77 @@ export const memoryCredentialRefs = pgTable(
   ],
 )
 
+// 召回事件：会话开始的项目召回、每轮输入的召回、MCP 搜索与 REST 召回各记一条，管理界面里的搜索与调试不记。
+// 明细保留一段时间（实例设置），清理前把次数并入 memory_recall_stats。明细只给事件发生时的应用主人看：
+// 里面有那位主人的提示语和私人层的命中，应用转给别人之后不跟着转。不挂应用的外键：删掉应用之后，
+// 它召回过的次数仍算在记忆上，明细到期照常清理
+export const recallEvents = pgTable(
+  'recall_events',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid().notNull(),
+    keyId: uuid(),
+    // 事件发生时的应用主人
+    ownerAccountId: uuid()
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    source: text().notNull(),
+    // 提示语的前 200 字，像凭据的片段已打码；应用关掉了记录提示语时为空
+    query: text(),
+    createdAt: createdAt(),
+  },
+  (t) => [index().on(t.spaceId, t.createdAt), index().on(t.appId, t.createdAt)],
+)
+
+// 一次召回命中了哪些记忆：名次（从 1 开始）、分数与来路
+export const recallEventHits = pgTable(
+  'recall_event_hits',
+  {
+    eventId: bigint({ mode: 'number' })
+      .notNull()
+      .references(() => recallEvents.id, { onDelete: 'cascade' }),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    memoryId: uuid().notNull(),
+    rank: smallint().notNull(),
+    score: real().notNull(),
+    via: text().array().notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.eventId, t.memoryId] }),
+    index().on(t.spaceId, t.memoryId),
+    foreignKey({
+      name: 'recall_event_hits_memory_fk',
+      columns: [t.spaceId, t.memoryId],
+      foreignColumns: [memories.spaceId, memories.id],
+    }).onDelete('cascade'),
+  ],
+)
+
+// 每条记忆的累计召回次数：清理明细前并入，之后只剩次数与最后一次召回的时间
+export const memoryRecallStats = pgTable(
+  'memory_recall_stats',
+  {
+    memoryId: uuid().primaryKey(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    count: integer().notNull(),
+    lastRecalledAt: timestamp({ withTimezone: true }).notNull(),
+  },
+  (t) => [
+    foreignKey({
+      name: 'memory_recall_stats_memory_fk',
+      columns: [t.spaceId, t.memoryId],
+      foreignColumns: [memories.spaceId, memories.id],
+    }).onDelete('cascade'),
+  ],
+)
+
 // 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 export const RLS_TABLES = [
   'personas',
@@ -532,4 +606,7 @@ export const RLS_TABLES = [
   'credentials',
   'credential_events',
   'memory_credential_refs',
+  'recall_events',
+  'recall_event_hits',
+  'memory_recall_stats',
 ] as const

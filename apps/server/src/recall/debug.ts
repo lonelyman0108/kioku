@@ -49,6 +49,7 @@ export async function bootPreview(
     })),
     omitted: start.boot.omitted,
     recent: start.recent,
+    // Symbol 键上的记忆 id 序列化时带不出去
     related: start.related,
     dropped: start.dropped,
   }

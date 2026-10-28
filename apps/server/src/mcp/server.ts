@@ -122,6 +122,7 @@ export function buildMcpServer(
     ({ query, limit }) =>
       tool(async () => {
         const candidates = await scope.recall(query, { limit: limit ?? 10, minScore: 0 })
+        scope.record('mcp.search', query, candidates)
         return formatRecallBlock(candidates) || '没有找到相关记忆'
       }),
   )

@@ -55,7 +55,9 @@ export function recallRoutes(deps: Deps) {
   return app
     .openapi(recallRoute, async (c) => {
       const { query, limit } = c.req.valid('json')
-      const candidates = await recallScopeForKey(deps, c.get('key')).recall(query, { limit })
+      const scope = recallScopeForKey(deps, c.get('key'))
+      const candidates = await scope.recall(query, { limit })
+      scope.record('rest.recall', query, candidates)
       return c.json({ candidates }, 200)
     })
     .openapi(bootRoute, async (c) =>
