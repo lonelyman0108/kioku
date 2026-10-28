@@ -113,6 +113,25 @@ const activeKeys = computed(() =>
             </p>
           </div>
           <div class="rounded-lg border border-default p-4">
+            <p class="text-sm text-muted">从没被召回</p>
+            <p
+              class="mt-1 text-2xl font-semibold tabular-nums"
+              :class="data.neverRecalled ? 'text-warning' : ''"
+            >
+              {{ data.neverRecalled }}
+            </p>
+            <p class="mt-1 text-xs text-muted">
+              建了一段时间还没被召回过，可能缺关键词、写得太笼统，或者已经没用了。
+              <RouterLink
+                v-if="data.neverRecalled"
+                class="underline"
+                :to="{ name: 'recall', params: { spaceId } }"
+              >
+                去看看
+              </RouterLink>
+            </p>
+          </div>
+          <div class="rounded-lg border border-default p-4">
             <p class="text-sm text-muted">向量</p>
             <template v-if="data.embedding.configured">
               <p class="mt-1 text-2xl font-semibold tabular-nums">

@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import { icons } from '../icons'
 import { sensitivityLabels } from '../labels'
 import { lostFromBoot } from '../personas'
+import { memoryRoute } from '../routes'
 
 const props = defineProps<{
   spaceId: string
@@ -29,11 +30,7 @@ const blockers = computed(() =>
       : '',
   ].filter(Boolean),
 )
-const memoryLink = (uri: string) => ({
-  name: 'memories',
-  params: { spaceId: props.spaceId },
-  query: { uri },
-})
+const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
 </script>
 
 <template>

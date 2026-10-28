@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { AppInfo } from '@kioku/contracts'
+import type { AppConfig, AppInfo } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -8,7 +8,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import AppKeys from '../components/AppKeys.vue'
+import AppRecallEvents from '../components/AppRecallEvents.vue'
 import AppSimulator from '../components/AppSimulator.vue'
+import { forgetApp, refreshAppCaches } from '../appQueries'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 
@@ -51,23 +53,17 @@ function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 }
 
-// 应用的改动会影响别处的缓存：Key 的权限矩阵按应用配置、默认人格与主人算，人格详情列出用它的应用
-function refreshAfterChange(sid: string, id: string) {
-  return Promise.all([
-    queryClient.invalidateQueries({ queryKey: ['apps', sid] }),
-    queryClient.invalidateQueries({ queryKey: ['keys', sid, id] }),
-    queryClient.invalidateQueries({ queryKey: ['key-matrix', sid, id] }),
-    queryClient.invalidateQueries({ queryKey: ['persona', sid] }),
-  ])
-}
-
 // 发请求时的空间与应用记下来：请求期间换了页面，刷新的仍是被改的那个应用
 async function update(body: Parameters<typeof api.updateApp>[2], done = '已保存') {
   const sid = spaceId.value
   const id = appId.value
   try {
-    await api.updateApp(sid, id, body)
-    await refreshAfterChange(sid, id)
+    const saved = await api.updateApp(sid, id, body)
+    // 先把返回的这一版写进缓存：接着改别的设置时，拼的是这一版，不会盖掉刚保存的
+    queryClient.setQueryData<AppInfo[]>(['apps', sid], (list) =>
+      list?.map((a) => (a.id === id ? saved : a)),
+    )
+    await refreshAppCaches(queryClient, sid, id)
     toast.add({ title: done, color: 'success' })
     return true
   } catch (err) {
@@ -75,6 +71,26 @@ async function update(body: Parameters<typeof api.updateApp>[2], done = '已保�
     return false
   }
 }
+
+// 应用配置整个替换：改一项时带上其余几项，没设的不写（不设就是默认）。保存期间两个开关都不能动，
+// 否则第二次拼的还是改之前的配置，会把第一次的改动盖掉
+const savingConfig = ref<string | null>(null)
+async function updateConfig(patch: Partial<AppConfig>) {
+  const id = appId.value
+  if (savingConfig.value === id) return
+  const merged: Record<string, unknown> = { ...app.value?.config, ...patch }
+  for (const key of Object.keys(merged)) if (merged[key] === undefined) delete merged[key]
+  savingConfig.value = id
+  try {
+    await update({ config: merged as AppConfig })
+  } finally {
+    if (savingConfig.value === id) savingConfig.value = null
+  }
+}
+
+// 还停在发请求时的那个应用的页面上吗：请求返回之后，换了页面就不再动这一页的弹窗与选择
+const stillOn = (sid: string, id: string) =>
+  route.name === 'app' && route.params.spaceId === sid && route.params.appId === id
 
 // 名称在输入框里改，点保存才提交；换了应用（或数据重新读出来）时回到服务端的值
 const name = ref('')
@@ -94,40 +110,47 @@ const transferItems = computed(() =>
 const transferName = computed(
   () => members.data.value?.find((m) => m.accountId === transferTo.value)?.displayName,
 )
+// 转移与删除进行中记的是哪个应用：换到别的应用时，那边的按钮不跟着转圈
 const confirmingTransfer = ref(false)
-const transferring = ref(false)
+const transferringId = ref<string | null>(null)
+const transferring = computed(() => transferringId.value === appId.value)
 async function transfer() {
   if (!transferTo.value || transferring.value) return
-  transferring.value = true
+  const sid = spaceId.value
+  const id = appId.value
+  transferringId.value = id
   try {
-    if (await update({ ownerAccountId: transferTo.value }, '已转移，原来的 Key 都已吊销')) {
+    const done = await update({ ownerAccountId: transferTo.value }, '已转移，原来的 Key 都已吊销')
+    if (done && stillOn(sid, id)) {
       confirmingTransfer.value = false
       transferTo.value = undefined
     }
   } finally {
-    transferring.value = false
+    if (transferringId.value === id) transferringId.value = null
   }
 }
 
 const confirmingDelete = ref(false)
-const deleting = ref(false)
+const deletingId = ref<string | null>(null)
+const deleting = computed(() => deletingId.value === appId.value)
 async function remove(target: AppInfo) {
   if (deleting.value) return
-  deleting.value = true
   const sid = spaceId.value
+  deletingId.value = target.id
   try {
     await api.deleteApp(sid, target.id)
-    confirmingDelete.value = false
-    await refreshAfterChange(sid, target.id)
-    toast.add({ title: `已删除应用「${target.name}」`, color: 'success' })
-    // 请求期间离开了这个应用的页面就不再跳转
-    if (route.name === 'app' && route.params.appId === target.id) {
-      void router.replace({ name: 'apps', params: { spaceId: sid } })
+    // 还停在这个应用的页面上就先离开，再刷新列表：否则会先闪一下「应用不存在」。
+    // 请求期间已经离开的，不再动它的弹窗，也不跳转
+    if (stillOn(sid, target.id)) {
+      confirmingDelete.value = false
+      await router.replace({ name: 'apps', params: { spaceId: sid } })
     }
+    toast.add({ title: `已删除应用「${target.name}」`, color: 'success' })
+    await forgetApp(queryClient, sid, target.id)
   } catch (err) {
     failed(err, '删除失败')
   } finally {
-    deleting.value = false
+    if (deletingId.value === target.id) deletingId.value = null
   }
 }
 
@@ -158,7 +181,7 @@ watch([spaceId, appId], () => {
     <template #body>
       <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
       <UAlert
-        v-else-if="apps.isError.value"
+        v-else-if="apps.isError.value && !apps.data.value"
         color="error"
         variant="subtle"
         :title="apps.error.value instanceof ApiError ? apps.error.value.message : '读取失败'"
@@ -222,10 +245,20 @@ watch([spaceId, appId], () => {
             >
               <USwitch
                 :model-value="app.config.elevateOwnerDirect === 'internal'"
-                :disabled="!canManage"
+                :disabled="!canManage || savingConfig === app.id"
                 @update:model-value="
-                  (v) => update({ config: v ? { elevateOwnerDirect: 'internal' } : {} })
+                  (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
                 "
+              />
+            </UFormField>
+            <UFormField
+              label="召回事件记录提示语"
+              help="记下每次召回时提示语的前 200 字（像凭据的片段打码），只有你看得到"
+            >
+              <USwitch
+                :model-value="app.config.recordPrompt !== false"
+                :disabled="!canManage || savingConfig === app.id"
+                @update:model-value="(v) => updateConfig({ recordPrompt: v ? undefined : false })"
               />
             </UFormField>
           </div>
@@ -243,7 +276,15 @@ watch([spaceId, appId], () => {
 
         <!-- 模拟会读到应用主人的私人层，只给应用主人 -->
         <UCard v-if="isAppOwner">
-          <AppSimulator :space-id="spaceId" :app-id="app.id" />
+          <AppSimulator
+            :space-id="spaceId"
+            :app-id="app.id"
+            :settings="`${app.defaultPersonaId}:${app.config.elevateOwnerDirect ?? ''}`"
+          />
+        </UCard>
+
+        <UCard>
+          <AppRecallEvents :space-id="spaceId" :app-id="app.id" />
         </UCard>
 
         <UCard v-if="isSpaceOwner">

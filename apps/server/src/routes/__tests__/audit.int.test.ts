@@ -32,7 +32,8 @@ import {
 } from '../../testing/fixtures'
 
 // 对已合并代码补做审查时发现的问题，每条一个回归用例
-describe.skipIf(!testDatabaseUrl)('审查回归', () => {
+// 登录防护的几个用例要试几十次密码，每次都是真的 scrypt（N = 2^15），本机两三秒，CI 机器上常常超过默认的 5 秒
+describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
   let database: Database
   let app: ReturnType<typeof createApp>
   let ws: Workspace

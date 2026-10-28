@@ -25,10 +25,14 @@ import {
   MemoryChildren,
   MemoryHistory,
   MemoryList,
+  MemoryRecallStat,
   MemoryView,
   PersonaDetail,
   PersonaInfo,
   RecallDebug,
+  RecallEventList,
+  RecallSettings,
+  RecallStats,
   SetupStatus,
   SpaceOverview,
   type BootPreviewRequest,
@@ -95,6 +99,18 @@ export const api = {
     request('POST', `/spaces/${spaceId}/apps/${appId}/keys`, { body, schema: CreatedKey }),
   revokeKey: (spaceId: string, appId: string, keyId: string) =>
     request('DELETE', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}`),
+  recallStats: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/recall/stats`, { schema: RecallStats }),
+  recallEvents: (spaceId: string, query: { appId?: string; cursor?: string }) =>
+    request('GET', `/spaces/${spaceId}/recall/events`, { query, schema: RecallEventList }),
+  memoryRecallStat: (spaceId: string, memoryId: string) =>
+    request('GET', `/spaces/${spaceId}/recall/memory`, {
+      query: { id: memoryId },
+      schema: MemoryRecallStat,
+    }),
+  recallSettings: () => request('GET', '/settings/recall', { schema: RecallSettings }),
+  saveRecallSettings: (body: RecallSettings) =>
+    request('PUT', '/settings/recall', { body, schema: RecallSettings }),
   bootPreview: (spaceId: string, appId: string, keyId: string, body: BootPreviewRequest) =>
     request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/preview`, {
       body,

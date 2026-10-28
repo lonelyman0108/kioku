@@ -7,9 +7,11 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { layerShortLabels, readDenialLabels, sensitivityLabels } from '../labels'
+import { memoryRoute } from '../routes'
 
 // 启动预览与召回调试台：按应用的一把 Key 模拟，只给应用主人（会读到主人的私人层）
-const props = defineProps<{ spaceId: string; appId: string }>()
+// settings 是会影响模拟结果的应用设置（默认人格、主人私聊提升）拼成的串：变了的话，之前的结果就不是现在的样子了
+const props = defineProps<{ spaceId: string; appId: string; settings: string }>()
 
 const keys = useQuery({
   queryKey: computed(() => ['keys', props.spaceId, props.appId]),
@@ -37,32 +39,36 @@ const tabs = [
 ]
 
 const failure = ref<string | null>(null)
-const running = ref(false)
+// 每次模拟一个序号，current 是进行中的那次：结果、报错与 loading 都只认它；
+// 换了应用、Key 或应用设置时清掉，进行中的那次就作废了
+let counter = 0
+const current = ref<number | null>(null)
+const running = computed(() => current.value !== null)
 const project = reactive({ dirName: '', repoName: '' })
 const preview = ref<BootPreview | null>(null)
 const query = ref('')
 const debug = ref<RecallDebug | null>(null)
 
-// 换了应用或 Key 时清掉上一次的结果：它们属于别的 Key
-watch([() => props.spaceId, () => props.appId, keyId], () => {
+// 换了应用、Key 或应用设置时清掉上一次的结果：它们属于别的 Key，或是改之前的样子
+watch([() => props.spaceId, () => props.appId, keyId, () => props.settings], () => {
+  current.value = null
   preview.value = null
   debug.value = null
   failure.value = null
 })
 
-// 请求期间换了 Key 或应用，结果不写回来
 async function run<T>(call: () => Promise<T>, apply: (result: T) => void) {
   if (running.value || !keyId.value) return
-  running.value = true
+  const id = ++counter
+  current.value = id
   failure.value = null
-  const context = [props.spaceId, props.appId, keyId.value].join('/')
   try {
     const result = await call()
-    if (context === [props.spaceId, props.appId, keyId.value].join('/')) apply(result)
+    if (id === current.value) apply(result)
   } catch (err) {
-    failure.value = err instanceof ApiError ? err.message : '模拟失败'
+    if (id === current.value) failure.value = err instanceof ApiError ? err.message : '模拟失败'
   } finally {
-    running.value = false
+    if (current.value === id) current.value = null
   }
 }
 
@@ -91,11 +97,7 @@ function runDebug() {
   )
 }
 
-const memoryLink = (uri: string) => ({
-  name: 'memories',
-  params: { spaceId: props.spaceId },
-  query: { uri },
-})
+const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
 const parts = (c: DebugCandidate) =>
   [
     ['向量', c.breakdown.semantic],
@@ -121,7 +123,13 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
         class="ml-auto min-w-56"
       />
     </div>
-    <p v-if="keys.isSuccess.value && !keyItems.length" class="text-muted">
+    <UAlert
+      v-if="keys.isError.value && !keys.data.value"
+      color="error"
+      variant="subtle"
+      :title="keys.error.value instanceof ApiError ? keys.error.value.message : '读取 Key 失败'"
+    />
+    <p v-else-if="keys.isSuccess.value && !keyItems.length" class="text-muted">
       这个应用还没有有效的 Key，先签发一把再模拟。
     </p>
     <template v-else>

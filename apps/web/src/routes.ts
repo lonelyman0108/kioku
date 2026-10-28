@@ -50,6 +50,11 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/AppDetailPage.vue'),
       },
       {
+        path: 'spaces/:spaceId/recall',
+        name: 'recall',
+        component: () => import('./pages/RecallPage.vue'),
+      },
+      {
         path: 'spaces/:spaceId/settings',
         name: 'space-settings',
         component: () => import('./pages/SpaceSettingsPage.vue'),
@@ -63,6 +68,13 @@ export const routes: RouteRecordRaw[] = [
     ],
   },
 ]
+
+// 记忆页打开某条记忆的地址；各处链到记忆都用它
+export const memoryRoute = (spaceId: string, uri: string) => ({
+  name: 'memories',
+  params: { spaceId },
+  query: { uri },
+})
 
 // 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求
 let setupDone = false

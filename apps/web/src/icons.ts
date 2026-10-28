@@ -10,6 +10,7 @@ export const icons = {
   matrix: 'i-lucide-table',
   preview: 'i-lucide-play',
   debug: 'i-lucide-bug',
+  recall: 'i-lucide-chart-column',
   transfer: 'i-lucide-user-round-cog',
   apps: 'i-lucide-key-round',
   credentials: 'i-lucide-vault',
