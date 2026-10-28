@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ExtractionRunInfo, OriginScope, UpdateSubjectRequest } from '@kioku/contracts'
+import type { ExtractionRunInfo, UpdateSubjectRequest } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -9,7 +9,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { provenanceLabels } from '../labels'
+import { originScopeText, provenanceLabels } from '../labels'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -61,19 +61,6 @@ async function update(body: UpdateSubjectRequest, done: string) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {
     saving.value = false
-  }
-}
-
-function scopeLabel(scope: OriginScope): string {
-  switch (scope.kind) {
-    case 'group':
-      return scope.name ? `群「${scope.name}」` : '已删除的群'
-    case 'direct':
-      return scope.name ? `和「${scope.name}」的私聊` : '已删除的私聊对象'
-    case 'app':
-      return scope.name ? `应用「${scope.name}」` : '已删除的应用'
-    default:
-      return '全局'
   }
 }
 
@@ -231,7 +218,7 @@ function runCounts(run: ExtractionRunInfo): string {
             <li v-for="fact in data.facts" :key="fact.id" class="space-y-1 py-2">
               <p class="text-sm whitespace-pre-wrap">{{ fact.content }}</p>
               <p class="flex flex-wrap gap-2 text-xs text-muted">
-                <span>{{ scopeLabel(fact.scope) }}</span>
+                <span>{{ originScopeText(fact.scope) }}</span>
                 <span>{{ provenanceLabels[fact.provenance] }}</span>
                 <span>{{ formatRelative(fact.updatedAt) }}</span>
               </p>
@@ -268,7 +255,7 @@ function runCounts(run: ExtractionRunInfo): string {
               <div class="flex flex-wrap items-center gap-2">
                 <span>{{ formatTime(run.createdAt) }}</span>
                 <span class="text-muted">{{ run.app?.name ?? '已删除的应用' }}</span>
-                <span class="text-muted">{{ scopeLabel(run.scope) }}</span>
+                <span class="text-muted">{{ originScopeText(run.scope) }}</span>
                 <UBadge v-if="run.summaryOnly" color="warning" variant="subtle" size="sm"
                   >预算用完，只写了摘要</UBadge
                 >

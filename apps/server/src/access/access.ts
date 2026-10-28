@@ -313,6 +313,15 @@ export function canWrite(access: Access, intent: WriteIntent): boolean {
   return sensitivityRank(intent.sensitivity) <= sensitivityRank(access.maxSensitivity)
 }
 
+// 改动已有的记录（修改、移动、删除、推翻、恢复）：在能写这一层之上，不可信来源（群聊、陌生人私聊）
+// 只能动不可信来源写下的记录。否则群里的人能改掉受信的记忆（例如主人确认过的事实），来源却仍显示受信
+export function canModify(access: Access, row: WriteIntent & { provenance: Provenance }): boolean {
+  return (
+    canWrite(access, row) &&
+    (access.writeProvenance !== 'untrusted' || row.provenance === 'untrusted')
+  )
+}
+
 export function canWriteApp(access: Access, appId: string | null): boolean {
   return access.writableAppIds === 'all' || (appId !== null && access.writableAppIds.has(appId))
 }

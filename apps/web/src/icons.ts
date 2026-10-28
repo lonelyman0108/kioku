@@ -7,6 +7,8 @@ export const icons = {
   memories: 'i-lucide-brain',
   personas: 'i-lucide-drama',
   subjects: 'i-lucide-users',
+  review: 'i-lucide-inbox',
+  confirmed: 'i-lucide-shield-check',
   group: 'i-lucide-messages-square',
   inherits: 'i-lucide-arrow-right',
   matrix: 'i-lucide-table',

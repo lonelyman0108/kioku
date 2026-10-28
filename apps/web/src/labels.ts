@@ -6,6 +6,7 @@ import type {
   EventActor,
   KeyAccessMatrix,
   Layer,
+  OriginScope,
   Provenance,
   ReadDenial,
   RecallSource,
@@ -105,10 +106,25 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
   restore: { label: '恢复到旧版本', icon: icons.restore },
   undelete: { label: '撤销删除', icon: icons.undelete },
   expire: { label: '过期后让出 URI', icon: icons.expired },
+  confirm: { label: '确认来源', icon: icons.confirmed },
 }
 
 export function eventLabel(type: string): { label: string; icon: string } {
   return eventLabels[type] ?? { label: type, icon: icons.edit }
+}
+
+// 记忆从哪里来：哪个群、和谁的私聊、哪个应用；名字为空说明那个群、对象或应用已经删掉了
+export function originScopeText(scope: OriginScope): string {
+  switch (scope.kind) {
+    case 'group':
+      return scope.name ? `群「${scope.name}」` : '已删除的群'
+    case 'direct':
+      return scope.name ? `和「${scope.name}」的私聊` : '已删除的私聊对象'
+    case 'app':
+      return scope.name ? `应用「${scope.name}」` : '已删除的应用'
+    default:
+      return '全局'
+  }
 }
 
 // 谁做的：管理界面里是成员；通过 Key 写入时是应用（Key 的名字只给应用主人与空间 owner）

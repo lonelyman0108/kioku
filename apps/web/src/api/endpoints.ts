@@ -36,6 +36,8 @@ import {
   RecallEventList,
   RecallSettings,
   RecallStats,
+  ReviewList,
+  ReviewResult,
   SetupStatus,
   SpaceOverview,
   SubjectDetail,
@@ -52,6 +54,8 @@ import {
   type MoveMemoryRequest,
   type PlainLayer,
   type RestoreRequest,
+  type ReviewQuery,
+  type ReviewRequest,
   type SetupRequest,
   type SubjectListQuery,
   type UpdateAppRequest,
@@ -236,6 +240,10 @@ export const api = {
     request('GET', `/spaces/${spaceId}/subjects/${id}`, { schema: SubjectDetail }),
   updateSubject: (spaceId: string, id: string, body: UpdateSubjectRequest) =>
     request('PATCH', `/spaces/${spaceId}/subjects/${id}`, { body, schema: SubjectInfo }),
+  reviewQueue: (spaceId: string, query: ReviewQuery) =>
+    request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),
+  review: (spaceId: string, body: ReviewRequest) =>
+    request('POST', `/spaces/${spaceId}/review`, { body, schema: ReviewResult }),
   activity: (spaceId: string, cursor?: string) =>
     request('GET', `/spaces/${spaceId}/activity`, { query: { cursor }, schema: ActivityList }),
   domainLayers: (spaceId: string) =>
