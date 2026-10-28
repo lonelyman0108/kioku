@@ -78,6 +78,13 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
       'kioku_search',
       'kioku_update',
     ])
+    // 输入 schema 里不能有 $ref 与 definitions：不少调工具的后端不认。契约里起了名的 schema
+    // 会进 zod 的全局注册表，工具的输入 schema 也按它生成，所以工具参数用到的枚举不起名
+    for (const tool of tools.body.result.tools as { name: string; inputSchema: unknown }[]) {
+      const schema = JSON.stringify(tool.inputSchema)
+      expect(schema, tool.name).not.toContain('$ref')
+      expect(schema, tool.name).not.toContain('definitions')
+    }
   })
 
   it('通过工具创建、读取、浏览', async () => {

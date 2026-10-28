@@ -62,11 +62,13 @@ export const RUNTIME_FAMILIES = [
 export const RuntimeFamily = z.enum(RUNTIME_FAMILIES)
 export type RuntimeFamily = z.infer<typeof RuntimeFamily>
 
-export const AppConfig = z.object({
-  elevateOwnerDirect: z.literal('internal').optional(),
-  // 召回事件里记不记提示语（前 200 字，像凭据的片段打码）；不设时记
-  recordPrompt: z.boolean().optional(),
-})
+export const AppConfig = z
+  .object({
+    elevateOwnerDirect: z.literal('internal').optional(),
+    // 召回事件里记不记提示语（前 200 字，像凭据的片段打码）；不设时记
+    recordPrompt: z.boolean().optional(),
+  })
+  .meta({ id: 'AppConfig' })
 export type AppConfig = z.infer<typeof AppConfig>
 
 export const CreateAppRequest = z.object({
@@ -146,15 +148,17 @@ export const PersonaDetail = PersonaInfo.extend({
 })
 export type PersonaDetail = z.infer<typeof PersonaDetail>
 
-export const AppInfo = z.object({
-  id: z.uuid(),
-  slug: z.string(),
-  name: z.string(),
-  runtimeFamily: z.string(),
-  ownerAccountId: z.uuid(),
-  defaultPersonaId: z.uuid().nullable(),
-  config: AppConfig,
-})
+export const AppInfo = z
+  .object({
+    id: z.uuid(),
+    slug: z.string(),
+    name: z.string(),
+    runtimeFamily: z.string(),
+    ownerAccountId: z.uuid(),
+    defaultPersonaId: z.uuid().nullable(),
+    config: AppConfig,
+  })
+  .meta({ id: 'AppInfo' })
 export type AppInfo = z.infer<typeof AppInfo>
 
 // 按群换人格：带着这个群（或频道）的会话上下文的请求用规则里的人格，boot、召回与写入都按它；
@@ -223,12 +227,14 @@ export const KeyAccessMatrix = z.object({
 })
 export type KeyAccessMatrix = z.infer<typeof KeyAccessMatrix>
 
-export const WhoAmI = z.object({
-  spaceId: z.uuid(),
-  app: AppInfo,
-  scopes: KeyScopes,
-})
+export const WhoAmI = z
+  .object({
+    spaceId: z.uuid(),
+    app: AppInfo,
+    scopes: KeyScopes,
+  })
+  .meta({ id: 'WhoAmI' })
 export type WhoAmI = z.infer<typeof WhoAmI>
 
-export const ErrorResponse = z.object({ error: z.string() })
+export const ErrorResponse = z.object({ error: z.string() }).meta({ id: 'ErrorResponse' })
 export type ErrorResponse = z.infer<typeof ErrorResponse>

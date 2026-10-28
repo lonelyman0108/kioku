@@ -1,0 +1,1722 @@
+{
+  "openapi": "3.1.0",
+  "info": {
+    "title": "Kioku API",
+    "version": "dev"
+  },
+  "components": {
+    "securitySchemes": {
+      "bearer": {
+        "type": "http",
+        "scheme": "bearer"
+      }
+    },
+    "schemas": {
+      "ErrorResponse": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "AppInfo": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "slug": {
+            "type": "string"
+          },
+          "name": {
+            "type": "string"
+          },
+          "runtimeFamily": {
+            "type": "string"
+          },
+          "ownerAccountId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "defaultPersonaId": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "config": {
+            "$ref": "#/components/schemas/AppConfig"
+          }
+        },
+        "required": [
+          "id",
+          "slug",
+          "name",
+          "runtimeFamily",
+          "ownerAccountId",
+          "defaultPersonaId",
+          "config"
+        ]
+      },
+      "AppConfig": {
+        "type": "object",
+        "properties": {
+          "elevateOwnerDirect": {
+            "type": "string",
+            "enum": [
+              "internal"
+            ]
+          },
+          "recordPrompt": {
+            "type": "boolean"
+          }
+        }
+      },
+      "WhoAmI": {
+        "type": "object",
+        "properties": {
+          "spaceId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "app": {
+            "$ref": "#/components/schemas/AppInfo"
+          },
+          "scopes": {
+            "type": "object",
+            "properties": {
+              "readLayers": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "base",
+                    "persona",
+                    "app",
+                    "owner",
+                    "private",
+                    "subject",
+                    "episode"
+                  ]
+                }
+              },
+              "writeLayers": {
+                "type": "array",
+                "items": {
+                  "type": "string",
+                  "enum": [
+                    "base",
+                    "persona",
+                    "app",
+                    "owner",
+                    "private",
+                    "subject",
+                    "episode"
+                  ]
+                }
+              },
+              "maxSensitivity": {
+                "type": "string",
+                "enum": [
+                  "public",
+                  "internal",
+                  "private",
+                  "secret"
+                ]
+              },
+              "admin": {
+                "type": "boolean"
+              }
+            },
+            "required": [
+              "readLayers",
+              "writeLayers",
+              "maxSensitivity",
+              "admin"
+            ]
+          }
+        },
+        "required": [
+          "spaceId",
+          "app",
+          "scopes"
+        ]
+      },
+      "RecallCandidate": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string"
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "disclosure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "score": {
+            "type": "number"
+          },
+          "via": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecallVia"
+            }
+          },
+          "cues": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "uri",
+          "layer",
+          "priority",
+          "disclosure",
+          "score",
+          "via",
+          "cues"
+        ]
+      },
+      "RecallVia": {
+        "type": "string",
+        "enum": [
+          "semantic",
+          "fulltext",
+          "glossary"
+        ]
+      },
+      "LifecycleProject": {
+        "type": "object",
+        "properties": {
+          "dirName": {
+            "type": "string",
+            "maxLength": 128
+          },
+          "repoName": {
+            "type": "string",
+            "maxLength": 128
+          }
+        }
+      },
+      "MemoryView": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "uri": {
+            "type": "string"
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
+          },
+          "provenance": {
+            "type": "string",
+            "enum": [
+              "owner",
+              "agent",
+              "untrusted",
+              "system"
+            ]
+          },
+          "originScope": {
+            "type": "string"
+          },
+          "content": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "priority": {
+            "type": "integer"
+          },
+          "disclosure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "glossary": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          },
+          "validFrom": {
+            "type": "string"
+          },
+          "validTo": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "version": {
+            "type": "integer"
+          },
+          "createdAt": {
+            "type": "string"
+          },
+          "updatedAt": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "id",
+          "uri",
+          "layer",
+          "sensitivity",
+          "provenance",
+          "originScope",
+          "content",
+          "priority",
+          "disclosure",
+          "glossary",
+          "validFrom",
+          "validTo",
+          "version",
+          "createdAt",
+          "updatedAt"
+        ]
+      },
+      "MemoryChildren": {
+        "type": "object",
+        "properties": {
+          "parent": {
+            "anyOf": [
+              {
+                "$ref": "#/components/schemas/MemoryView"
+              },
+              {
+                "type": "null"
+              }
+            ]
+          },
+          "children": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/MemorySummary"
+            }
+          },
+          "truncated": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "parent",
+          "children",
+          "truncated"
+        ]
+      },
+      "MemorySummary": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string"
+          },
+          "exists": {
+            "type": "boolean"
+          },
+          "id": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "uuid"
+          },
+          "layer": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode",
+              null
+            ]
+          },
+          "sensitivity": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret",
+              null
+            ]
+          },
+          "priority": {
+            "type": [
+              "integer",
+              "null"
+            ]
+          },
+          "disclosure": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "childCount": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "uri",
+          "exists",
+          "id",
+          "layer",
+          "sensitivity",
+          "priority",
+          "disclosure",
+          "childCount"
+        ]
+      },
+      "DomainSummary": {
+        "type": "object",
+        "properties": {
+          "domain": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "domain",
+          "count"
+        ]
+      },
+      "CreateMemoryRequest": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string",
+            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 99,
+            "default": 2
+          },
+          "disclosure": {
+            "type": "string",
+            "maxLength": 500
+          },
+          "glossary": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 64
+            },
+            "maxItems": 32,
+            "default": []
+          }
+        },
+        "required": [
+          "uri",
+          "content"
+        ]
+      },
+      "UpdateMemoryRequest": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string",
+            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+          },
+          "expectedVersion": {
+            "type": "integer"
+          },
+          "expectedId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "content": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "base",
+              "owner",
+              "private"
+            ]
+          },
+          "sensitivity": {
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
+          },
+          "priority": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 99
+          },
+          "disclosure": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "maxLength": 500
+          },
+          "glossaryAdd": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 2,
+              "maxLength": 64
+            },
+            "maxItems": 32
+          },
+          "glossaryRemove": {
+            "type": "array",
+            "items": {
+              "type": "string",
+              "minLength": 1,
+              "maxLength": 64
+            },
+            "maxItems": 32
+          },
+          "allowPlaintext": {
+            "type": "boolean"
+          }
+        },
+        "required": [
+          "uri"
+        ]
+      },
+      "MoveMemoryRequest": {
+        "type": "object",
+        "properties": {
+          "from": {
+            "type": "string",
+            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+          },
+          "to": {
+            "type": "string",
+            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "base",
+              "owner",
+              "private"
+            ]
+          },
+          "expectedId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "expectedVersion": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "from",
+          "to"
+        ]
+      },
+      "RecallResponse": {
+        "type": "object",
+        "properties": {
+          "candidates": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/RecallCandidate"
+            }
+          },
+          "subjects": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/SubjectFacts"
+            }
+          }
+        },
+        "required": [
+          "candidates",
+          "subjects"
+        ]
+      },
+      "SubjectFacts": {
+        "type": "object",
+        "properties": {
+          "role": {
+            "type": "string",
+            "enum": [
+              "sender",
+              "group"
+            ]
+          },
+          "name": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "facts": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "properties": {
+                "content": {
+                  "type": "string"
+                },
+                "updatedAt": {
+                  "type": "string"
+                }
+              },
+              "required": [
+                "content",
+                "updatedAt"
+              ]
+            }
+          }
+        },
+        "required": [
+          "role",
+          "name",
+          "facts"
+        ]
+      },
+      "RecallRequest": {
+        "type": "object",
+        "properties": {
+          "query": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 4000
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 50,
+            "default": 8
+          },
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          }
+        },
+        "required": [
+          "query"
+        ]
+      },
+      "SessionContext": {
+        "type": "object",
+        "properties": {
+          "chatType": {
+            "$ref": "#/components/schemas/ChatType"
+          },
+          "platform": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_.-]{0,31}$"
+          },
+          "group": {
+            "$ref": "#/components/schemas/PlatformRef"
+          },
+          "sender": {
+            "$ref": "#/components/schemas/PlatformRef"
+          }
+        },
+        "required": [
+          "chatType"
+        ]
+      },
+      "ChatType": {
+        "type": "string",
+        "enum": [
+          "direct",
+          "group",
+          "channel",
+          "cron",
+          "subagent"
+        ]
+      },
+      "PlatformRef": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "name": {
+            "type": "string",
+            "maxLength": 4000
+          }
+        },
+        "required": [
+          "id"
+        ]
+      },
+      "BootResponse": {
+        "type": "object",
+        "properties": {
+          "entries": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/BootEntry"
+            }
+          },
+          "omitted": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "entries",
+          "omitted"
+        ]
+      },
+      "BootEntry": {
+        "type": "object",
+        "properties": {
+          "uri": {
+            "type": "string"
+          },
+          "layer": {
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
+          },
+          "content": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "uri",
+          "layer",
+          "content"
+        ]
+      },
+      "LifecycleResponse": {
+        "type": "object",
+        "properties": {
+          "hostOutput": {
+            "$ref": "#/components/schemas/HostOutput"
+          },
+          "nodeUris": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        },
+        "required": [
+          "hostOutput",
+          "nodeUris"
+        ]
+      },
+      "HostOutput": {
+        "type": "object",
+        "properties": {
+          "mode": {
+            "type": "string",
+            "enum": [
+              "none",
+              "stdout_json",
+              "stdout_text",
+              "return_value"
+            ]
+          },
+          "value": {}
+        },
+        "required": [
+          "mode"
+        ]
+      },
+      "SessionStartEvent": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string",
+            "enum": [
+              "session.start"
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          },
+          "project": {
+            "$ref": "#/components/schemas/LifecycleProject"
+          }
+        },
+        "required": [
+          "event"
+        ]
+      },
+      "PromptSubmitEvent": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string",
+            "enum": [
+              "prompt.submit"
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "maxLength": 200
+          },
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          },
+          "prompt": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          }
+        },
+        "required": [
+          "event",
+          "prompt"
+        ]
+      },
+      "TurnEndEvent": {
+        "type": "object",
+        "properties": {
+          "event": {
+            "type": "string",
+            "enum": [
+              "turn.end"
+            ]
+          },
+          "sessionId": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 200
+          },
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          },
+          "user": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 20000
+          },
+          "reply": {
+            "type": "string",
+            "maxLength": 20000
+          }
+        },
+        "required": [
+          "event",
+          "sessionId",
+          "context",
+          "user",
+          "reply"
+        ]
+      }
+    },
+    "parameters": {}
+  },
+  "paths": {
+    "/v1/whoami": {
+      "get": {
+        "tags": [
+          "auth"
+        ],
+        "summary": "当前 API Key 对应的空间、应用与授权上限",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "Key 信息",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/WhoAmI"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memories": {
+      "get": {
+        "tags": [
+          "memories"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "按 URI 读取一条记忆",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            },
+            "required": true,
+            "name": "uri",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "记忆",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "memories"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "新建策展记忆",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateMemoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "201": {
+            "description": "已创建",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "patch": {
+        "tags": [
+          "memories"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateMemoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已修改",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "delete": {
+        "tags": [
+          "memories"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "删除记忆（保留历史事件）",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            },
+            "required": true,
+            "name": "uri",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            },
+            "required": false,
+            "name": "expectedId",
+            "in": "query"
+          },
+          {
+            "schema": {
+              "type": [
+                "integer",
+                "null"
+              ]
+            },
+            "required": false,
+            "name": "expectedVersion",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "204": {
+            "description": "已删除"
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memories/children": {
+      "get": {
+        "tags": [
+          "memories"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "列出一个节点或 domain 根下的直接子节点",
+        "parameters": [
+          {
+            "schema": {
+              "type": "string",
+              "minLength": 1
+            },
+            "required": true,
+            "name": "of",
+            "in": "query"
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "子节点",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryChildren"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memories/domains": {
+      "get": {
+        "tags": [
+          "memories"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "列出可见的 domain 及节点数",
+        "responses": {
+          "200": {
+            "description": "domain 列表",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/DomainSummary"
+                  }
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/memories/move": {
+      "post": {
+        "tags": [
+          "memories"
+        ],
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "summary": "修改记忆的 URI",
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/MoveMemoryRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "已移动",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/MemoryView"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "未登录或凭据无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "没有权限",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "404": {
+            "description": "不存在或不可见",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "冲突",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/recall": {
+      "post": {
+        "tags": [
+          "recall"
+        ],
+        "summary": "按一段文本召回候选记忆（只返回 URI 与线索，正文用 GET /memories 读）；带了会话上下文时按它收紧权限，并附上当前发言人与本群的事实",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/RecallRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "候选",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/RecallResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/boot": {
+      "get": {
+        "tags": [
+          "recall"
+        ],
+        "summary": "会话开始时应注入的启动节点",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "启动节点",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BootResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/lifecycle/event": {
+      "post": {
+        "tags": [
+          "lifecycle"
+        ],
+        "summary": "插件转发宿主的生命周期事件，返回宿主可直接使用的输出；turn.end 把这一轮对话放进会话缓冲，攒批后抽取",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "oneOf": [
+                  {
+                    "$ref": "#/components/schemas/SessionStartEvent"
+                  },
+                  {
+                    "$ref": "#/components/schemas/PromptSubmitEvent"
+                  },
+                  {
+                    "$ref": "#/components/schemas/TurnEndEvent"
+                  }
+                ],
+                "discriminator": {
+                  "propertyName": "event",
+                  "mapping": {
+                    "session.start": "#/components/schemas/SessionStartEvent",
+                    "prompt.submit": "#/components/schemas/PromptSubmitEvent",
+                    "turn.end": "#/components/schemas/TurnEndEvent"
+                  }
+                }
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "宿主输出",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/LifecycleResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "请求不合法",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "webhooks": {}
+}
