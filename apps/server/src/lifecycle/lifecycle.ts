@@ -5,6 +5,7 @@ import type {
   LifecycleProject,
   LifecycleResponse,
   RecentMemory,
+  TurnEndEvent,
 } from '@kioku/contracts'
 
 import { BOOT_LAYERS } from '../memory/filter'
@@ -149,10 +150,11 @@ export async function sessionStart(
   }
 }
 
+// 召回类的事件：会话开始与每轮输入。turn.end 不召回，由生命周期端点放进会话缓冲
 export async function handleLifecycle(
   scope: RecallScope,
   runtimeFamily: string,
-  input: LifecycleEvent,
+  input: Exclude<LifecycleEvent, TurnEndEvent>,
 ): Promise<LifecycleResponse> {
   if (input.event === 'session.start') {
     const start = await sessionStart(scope, runtimeFamily, input)

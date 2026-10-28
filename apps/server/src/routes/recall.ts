@@ -10,6 +10,7 @@ import {
 
 import { resolveKeySession } from '../access/session'
 import { requireKey } from '../auth/middleware'
+import { bufferTurn, canBufferTurns } from '../extraction/buffer'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { handleLifecycle } from '../lifecycle/lifecycle'
@@ -45,7 +46,8 @@ const lifecycleRoute = createRoute({
   method: 'post',
   path: '/lifecycle/event',
   tags: ['lifecycle'],
-  summary: '插件转发宿主的生命周期事件，返回宿主可直接使用的输出',
+  summary:
+    '插件转发宿主的生命周期事件，返回宿主可直接使用的输出；turn.end 把这一轮对话放进会话缓冲，攒批后抽取',
   security,
   request: { body: jsonBody(LifecycleEvent) },
   responses: { 200: jsonResponse('宿主输出', LifecycleResponse), ...errors },
@@ -72,7 +74,14 @@ export function recallRoutes(deps: Deps) {
     .openapi(lifecycleRoute, async (c) => {
       const key = c.get('key')
       const input = c.req.valid('json')
-      const scope = recallScopeForKey(deps, key, await resolveKeySession(deps, key, input.context))
+      if (input.event === 'turn.end') {
+        if (canBufferTurns(key)) {
+          await bufferTurn(deps, key, await resolveKeySession(deps, key, input.context), input)
+        }
+        return c.json({ hostOutput: { mode: 'none' as const, value: null }, nodeUris: [] }, 200)
+      }
+      const session = await resolveKeySession(deps, key, input.context)
+      const scope = recallScopeForKey(deps, key, session)
       return c.json(await handleLifecycle(scope, key.app.runtimeFamily, input), 200)
     })
 }

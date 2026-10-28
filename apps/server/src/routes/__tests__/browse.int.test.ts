@@ -440,7 +440,11 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
         cookieSecure: false,
         masterKey: randomBytes(32),
         embedder: staticEmbedderSource(null),
-        jobs: { enqueueEmbed() {}, enqueueBackfill: async () => queued },
+        jobs: {
+          enqueueEmbed() {},
+          enqueueBackfill: async () => queued,
+          enqueueExtraction: async () => {},
+        },
       })
       const r = await withJobs.request(
         '/v1/settings/embedding/rebuild',

@@ -111,7 +111,7 @@ export const BootResponse = z.object({
 })
 export type BootResponse = z.infer<typeof BootResponse>
 
-export const LIFECYCLE_EVENTS = ['session.start', 'prompt.submit'] as const
+export const LIFECYCLE_EVENTS = ['session.start', 'prompt.submit', 'turn.end'] as const
 export const LifecycleEventName = z.enum(LIFECYCLE_EVENTS)
 
 // 宿主当前所在的项目：目录名与 git 仓库名。会话开始时用它们召回与当前项目相关的记忆
@@ -135,8 +135,39 @@ export const LifecycleEvent = z.discriminatedUnion('event', [
     context: SessionContextInput.optional(),
     prompt: z.string().min(1).max(20_000),
   }),
+  // 一轮对话结束：用户说的话与 bot 的回复进会话缓冲，攒批之后由后台任务抽取。只缓冲私聊、群聊与频道，
+  // 群里要带上这一轮的发言人（事实要记到人身上）
+  z
+    .object({
+      event: z.literal('turn.end'),
+      // 缓冲按应用与会话分，插件用宿主的会话标识（例如 AstrBot 的 unified_msg_origin）
+      sessionId: z.string().min(1).max(200),
+      context: SessionContextInput,
+      user: z.string().min(1).max(20_000),
+      reply: z.string().max(20_000),
+    })
+    .superRefine((e, ctx) => {
+      if (e.context.chatType === 'cron' || e.context.chatType === 'subagent') {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['context', 'chatType'],
+          message: '只缓冲私聊、群聊与频道的对话',
+        })
+      }
+      if (
+        (e.context.chatType === 'group' || e.context.chatType === 'channel') &&
+        !e.context.sender
+      ) {
+        ctx.addIssue({
+          code: 'custom',
+          path: ['context', 'sender'],
+          message: '群聊与频道要带上这一轮的发言人',
+        })
+      }
+    }),
 ])
 export type LifecycleEvent = z.infer<typeof LifecycleEvent>
+export type TurnEndEvent = Extract<LifecycleEvent, { event: 'turn.end' }>
 
 export const HostOutput = z.object({
   // stdout_json / stdout_text：插件原样写到标准输出；return_value：插件把 value 交给宿主 API
