@@ -1,5 +1,7 @@
 import {
   CREDENTIAL_PROVIDER_KINDS,
+  DEFAULT_EXTRACTION_DAILY_WRITES,
+  DEFAULT_EXTRACTION_MONTHLY_TOKENS,
   CREDENTIAL_SOURCES,
   LAYERS,
   MEMBER_ROLES,
@@ -82,6 +84,9 @@ export const spaces = pgTable('spaces', {
   name: text().notNull(),
   // domain → 管理界面新建记忆时带出的层（只能是 base、owner、private）
   domainLayers: jsonb().$type<Record<string, PlainLayer>>().notNull().default({}),
+  // 抽取预算：每月最多用多少 token（UTC 自然月），每个对象每天最多写几条事实
+  extractionMonthlyTokens: integer().notNull().default(DEFAULT_EXTRACTION_MONTHLY_TOKENS),
+  extractionDailyWrites: integer().notNull().default(DEFAULT_EXTRACTION_DAILY_WRITES),
   createdAt: createdAt(),
 })
 
@@ -717,6 +722,10 @@ export const extractionRuns = pgTable(
     // 丢掉的候选：对象不对、太长、像明文凭据、写不进去
     dropped: integer().notNull().default(0),
     summarized: boolean().notNull().default(false),
+    // 本月的 token 预算用完了，这一批只写了会话摘要
+    summaryOnly: boolean().notNull().default(false),
+    // 对象当天写满了条数、没写的事实
+    limited: integer().notNull().default(0),
     error: text(),
     createdAt: createdAt(),
   },

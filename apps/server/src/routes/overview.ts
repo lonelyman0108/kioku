@@ -5,6 +5,7 @@ import { and, eq, inArray, isNull } from 'drizzle-orm'
 import { withSpace } from '../db/client'
 import { apiKeys, apps, spaceMembers } from '../db/schema'
 import { embeddingSettingsView } from '../embedding/settings'
+import { extractionUsage } from '../extraction/budget'
 import type { Deps } from '../http/env'
 import { jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
@@ -17,7 +18,7 @@ const overview = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/overview',
   tags: ['console'],
-  summary: '空间概览：记忆的分布、向量覆盖率与各应用 Key 的使用情况',
+  summary: '空间概览：记忆的分布、向量覆盖率、本月抽取的用量与各应用 Key 的使用情况',
   request: { params: z.object({ spaceId: z.uuid() }) },
   responses: {
     200: jsonResponse('概览', SpaceOverview),
@@ -31,7 +32,7 @@ export function overviewRoutes(deps: Deps) {
     const accountId = c.get('console').accountId
     // 先确认是成员，不是成员就不去查别的空间的数据
     const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
-    const [settings, recall, appRows, members] = await Promise.all([
+    const [settings, recall, appRows, members, extraction] = await Promise.all([
       embeddingSettingsView(deps.db),
       loadRecallWindow(deps.db),
       withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
@@ -39,6 +40,7 @@ export function overviewRoutes(deps: Deps) {
         .select({ accountId: spaceMembers.accountId, since: spaceMembers.createdAt })
         .from(spaceMembers)
         .where(eq(spaceMembers.spaceId, spaceId)),
+      extractionUsage(deps.db, spaceId),
     ])
     const [stats, recent] = await Promise.all([
       service.stats(settings.model, {
@@ -95,6 +97,7 @@ export function overviewRoutes(deps: Deps) {
           eligible: stats.eligible,
           embedded: stats.embedded,
         },
+        extraction,
         apps: appRows.map((a) => {
           const keys = keysByApp.get(a.id)
           return {
