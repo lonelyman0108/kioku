@@ -4,19 +4,16 @@ import { maskPlaintextCredentials } from '../credential/placeholders'
 import { withSpace } from '../db/client'
 import { recallEventHits, recallEvents } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
-import { CANDIDATE_ID, type RecordableCandidate } from './recall'
+import { CANDIDATE_ID, normalizeQuery, type RecordableCandidate } from './recall'
 
 // 召回事件里最多存提示语的这么多字
 export const RECALL_QUERY_CHARS = 200
 
-// 存下来的提示语：先打码再截断（截在值的中间时就认不出来了）；应用关掉了记录提示语时为空。
-// 只处理开头一段：打码最多盖到行尾或下一个空白，起点在保留范围之外的匹配本来就存不下来
+// 存下来的提示语：整段先打码再截断（先截的话，截在值的中间就认不出来了；打码之后文字变短，
+// 后面的内容也会挪进保留的范围）；应用关掉了记录提示语时为空
 export function storedQuery(query: string, recordPrompt: boolean | undefined): string | null {
   if (recordPrompt === false) return null
-  return maskPlaintextCredentials(query.slice(0, RECALL_QUERY_CHARS * 4)).slice(
-    0,
-    RECALL_QUERY_CHARS,
-  )
+  return maskPlaintextCredentials(query).slice(0, RECALL_QUERY_CHARS)
 }
 
 // 还没写完的召回事件：服务退出前、测试清库前等它们写完，免得写到一半被打断，或和清库互相等锁
@@ -35,6 +32,8 @@ export function recordRecall(
   query: string,
   hits: readonly RecordableCandidate[],
 ): Promise<void> {
+  // 只有空白的查询不会召回，也就不记；接入方的几处都经过这里
+  if (!normalizeQuery(query)) return Promise.resolve()
   // 打码在事务外算好，不占着连接
   const stored = storedQuery(query, key.app.config.recordPrompt)
   const write = withSpace(deps.db, key.spaceId, async (tx) => {

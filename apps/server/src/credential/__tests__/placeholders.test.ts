@@ -83,10 +83,10 @@ describe('明文凭据提醒', () => {
 })
 
 describe('提示语打码', () => {
-  it('「密码：…」这类写法从值开始盖到行尾，sk- 开头的串盖到下一个空白', () => {
+  it('从值开始盖到行尾，下一行照常', () => {
     expect(maskPlaintextCredentials('路由器密码：hunter2 怎么改')).toBe('路由器密码：***')
     expect(maskPlaintextCredentials('token=abc.def\n下一行')).toBe('token=***\n下一行')
-    expect(maskPlaintextCredentials('用 sk-abcdefghijklmnopqrst 调接口')).toBe('用 *** 调接口')
+    expect(maskPlaintextCredentials('用 sk-abcdefghijklmnopqrst 调接口')).toBe('用 ***')
     expect(maskPlaintextCredentials('password = "correct horse battery staple"')).toBe(
       'password = ***',
     )
@@ -105,6 +105,11 @@ describe('提示语打码', () => {
       }
     }
     expect(maskPlaintextCredentials('密码：a1\n口令：b2')).toBe('密码：***\n口令：***')
+    // sk- 串吞掉后面紧跟的关键词时，照样盖到行尾；挨着的两处合成一段
+    expect(maskPlaintextCredentials('sk-AAAAAAAAAAAAAAAApassword:correct horse battery')).toBe(
+      '***',
+    )
+    expect(maskPlaintextCredentials('前 sk-abcdefghijklmnopqrst密码：hunter2 x')).toBe('前 ***')
   })
 
   it('没有像凭据的片段时原样返回，占位符不打码', () => {

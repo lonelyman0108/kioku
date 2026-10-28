@@ -11,6 +11,7 @@ import { memoryRecallStats, recallEventHits, recallEvents, settings } from '../.
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { storedQuery } from '../events'
 import { pruneRecallEvents } from '../retention'
 
 describe.skipIf(!testDatabaseUrl)('召回事件', () => {
@@ -63,6 +64,7 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
     // 没有项目的会话开始不召回，只有空白的输入也不召回，都不记
     await post('/lifecycle/event', { event: 'session.start' })
     await post('/lifecycle/event', { event: 'prompt.submit', prompt: '   ' })
+    await post('/recall', { query: '   ' })
     await expect.poll(eventCount).toBe(3)
 
     const rows = await events()
@@ -117,6 +119,13 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
     await post('/recall', { query: 'kioku' })
     await expect.poll(eventCount).toBe(2)
     expect((await events())[1]!.query).toBeNull()
+  })
+
+  it('整段先打码再截断：打码让文字变短时，后面的内容挪进来也认得出', () => {
+    const key = 'sk-ABCDEFGHIJKLMNOPQRSTUV'
+    const stored = storedQuery(`密码：${'x'.repeat(780)}\n${key} 调接口`, undefined)!
+    expect(stored).toBe('密码：***\n***')
+    expect(storedQuery('kioku', false)).toBeNull()
   })
 
   it('管理界面的启动预览与召回调试不记', async () => {

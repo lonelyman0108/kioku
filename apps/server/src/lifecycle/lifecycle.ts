@@ -166,8 +166,7 @@ export async function handleLifecycle(
     limit: PROMPT_RECALL_LIMIT,
     semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
   })
-  // 输入只有空白时不会召回，也就不记
-  if (input.prompt.trim()) scope.record('prompt.submit', input.prompt, candidates)
+  scope.record('prompt.submit', input.prompt, candidates)
   return {
     hostOutput: hostOutput(
       runtimeFamily,
