@@ -109,6 +109,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       connectionString: testDatabaseUrl!,
       db: database.db,
       embedder: async () => embedder,
+      masterKey,
     })
     const withJobs = createApp({
       db: database.db,

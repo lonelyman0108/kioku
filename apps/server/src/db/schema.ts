@@ -639,6 +639,55 @@ export const memoryRecallStats = pgTable(
   ],
 )
 
+// 会话缓冲：私聊与群聊里一轮轮的对话，只是抽取的输入。攒批抽取完就删，空闲超过一天的也删，
+// 不进召回、不进活动，也没有读取的接口（群聊原文里有别人的话，不该长期留）。
+// 会话上下文按这一轮解析出的对象记下；抽取时按写入这一轮的 Key 重新算权限，Key 吊销或作废就不抽取
+export const conversationTurns = pgTable(
+  'conversation_turns',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid().notNull(),
+    keyId: uuid()
+      .notNull()
+      .references(() => apiKeys.id, { onDelete: 'cascade' }),
+    sessionId: text().notNull(),
+    // direct | group | channel
+    chatType: text().notNull(),
+    groupSubjectId: uuid(),
+    senderSubjectId: uuid().notNull(),
+    // 这一轮上报的发言人名字（群里可能是群名片），抽取时给模型分清谁说的
+    senderName: text(),
+    userText: text().notNull(),
+    replyText: text().notNull(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index().on(t.appId, t.sessionId, t.id),
+    index().on(t.createdAt),
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
+    foreignKey({
+      name: 'conversation_turns_group_fk',
+      columns: [t.spaceId, t.groupSubjectId],
+      foreignColumns: [subjects.spaceId, subjects.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'conversation_turns_sender_fk',
+      columns: [t.spaceId, t.senderSubjectId],
+      foreignColumns: [subjects.spaceId, subjects.id],
+    }).onDelete('cascade'),
+    check(
+      'conversation_turns_chat_type',
+      sql`${t.chatType} in ('direct', 'group', 'channel')
+        and (${t.chatType} = 'direct') = (${t.groupSubjectId} is null)`,
+    ),
+  ],
+)
+
 // 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 export const RLS_TABLES = [
   'personas',
@@ -657,4 +706,5 @@ export const RLS_TABLES = [
   'recall_events',
   'recall_event_hits',
   'memory_recall_stats',
+  'conversation_turns',
 ] as const

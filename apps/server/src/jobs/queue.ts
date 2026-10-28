@@ -3,11 +3,14 @@ import { PgBoss } from 'pg-boss'
 import type { Db } from '../db/client'
 import type { Embedder } from '../embedding/provider'
 import { backfillEmbeddings, embedMemory } from '../embedding/worker'
+import type { BufferedSession } from '../extraction/buffer'
+import { processSession } from '../extraction/worker'
 import { cleanupExpired } from './cleanup'
 
 const EMBED = 'embed-memory'
 const BACKFILL = 'embed-backfill'
 const CLEANUP = 'cleanup-expired'
+const EXTRACT = 'extract-session'
 // 每小时清一次过期的会话与登录失败计数
 const CLEANUP_CRON = '17 * * * *'
 // 写回向量时记忆正被别的事务锁着，隔这么久再试
@@ -15,6 +18,10 @@ const RETRY_AFTER_SECONDS = 10
 
 export interface Jobs {
   enqueueEmbed(spaceId: string, memoryId: string): void
+  // 排一次会话的抽取，delaySeconds 秒之后开始。同一个会话只排一个：已经排着的就把开始时间改成这次的，
+  // 所以空闲计时从最后一轮算起；正在抽取时另排一个，等它做完再接着处理新进来的。
+  // 入队失败只记录日志，不抛错：缓冲还在，下一轮或清理会处理它
+  enqueueExtraction(target: BufferedSession, delaySeconds: number): Promise<void>
   // 返回是否入队成功；失败只记录日志，不抛错
   enqueueBackfill(): Promise<boolean>
 }
@@ -25,6 +32,8 @@ export async function startJobs(options: {
   connectionString: string
   db: Db
   embedder: () => Promise<Embedder | null>
+  // 解密实例设置里抽取模型的 Key
+  masterKey: Buffer | null
 }): Promise<Jobs & { stop: () => Promise<void> }> {
   const boss = new PgBoss({ connectionString: options.connectionString, schema: 'pgboss' })
   boss.on('error', (err) => console.error('后台任务出错', err))
@@ -32,6 +41,8 @@ export async function startJobs(options: {
   await boss.createQueue(EMBED)
   await boss.createQueue(BACKFILL, { policy: 'singleton' })
   await boss.createQueue(CLEANUP, { policy: 'singleton' })
+  // stately：每个会话（singletonKey）排队的与正在跑的各最多一个
+  await boss.createQueue(EXTRACT, { policy: 'stately' })
 
   const send = (name: string, data: object, startAfter?: number): Promise<boolean> =>
     boss
@@ -71,10 +82,25 @@ export async function startJobs(options: {
   await boss.work(CLEANUP, async () => {
     await cleanupExpired(options.db)
   })
+  await boss.work<BufferedSession>(EXTRACT, async (jobs) => {
+    for (const { data } of jobs) await processSession(options.db, options.masterKey, data)
+  })
   await boss.schedule(CLEANUP, CLEANUP_CRON)
 
   return {
     enqueueEmbed: (spaceId, memoryId) => void send(EMBED, { spaceId, memoryId }),
+    enqueueExtraction: (target, delaySeconds) =>
+      boss
+        .upsert(EXTRACT, target, {
+          singletonKey: `${target.appId}:${target.sessionId}`,
+          startAfter: delaySeconds,
+          retryLimit: 3,
+          retryBackoff: true,
+        })
+        .then(
+          () => {},
+          (err: unknown) => console.error('入队失败', err),
+        ),
     enqueueBackfill: () => send(BACKFILL, {}),
     stop: () => boss.stop({ graceful: true }),
   }
