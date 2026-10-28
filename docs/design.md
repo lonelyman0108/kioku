@@ -232,7 +232,7 @@ URI 在空间内唯一。人格私有节点放在人格命名空间下（如 `pe
 | 接口 | 给谁 | 说明 |
 |---|---|---|
 | MCP（HTTP） | 会调工具的 agent | `kioku_boot`、`kioku_get`、`kioku_list`、`kioku_search`、`kioku_create`、`kioku_update`、`kioku_delete`、`kioku_move`；凭据用 `kioku_credential`、`kioku_credential_save`、`kioku_credential_delete`；权限由 Key 决定 |
-| REST + OpenAPI | 插件、脚本、管理界面 | 由 zod 定义生成 OpenAPI，再生成 TS / Python SDK |
+| REST + OpenAPI | 插件、脚本、管理界面 | 由 zod 定义生成 OpenAPI，再生成 TS / Python SDK（Python 的在 `sdks/python`） |
 | 生命周期端点 | 有钩子的运行时 | 见 6.1 |
 
 ### 6.3 群聊 bot 插件（AstrBot）
@@ -250,6 +250,8 @@ URI 在空间内唯一。人格私有节点放在人格命名空间下（如 `pe
 
 - 每个对象每天有写入条数上限，防刷；
 - 每个空间有月度 token 预算（抽取与 Dream 共用，管理界面可调）。用到 80% 时告警；超出后降级为只写会话摘要（`episode`），不再做事实抽取，直到下个周期或主人调高预算。
+
+抽取用的模型和嵌入接口一样在实例设置里配（OpenAI 兼容的接口、模型与 Key），没配时既不抽取事实、也不写会话摘要，对话缓冲到期后直接丢弃。
 
 默认开启；模型主动调工具写入作为补充，不计入抽取预算。
 
@@ -356,5 +358,7 @@ URI 在空间内唯一。人格私有节点放在人格命名空间下（如 `pe
 | 2026-10-27 | 凭据怎么存 | 记忆里只放不写来源的占位符；值由 Kioku 托管或放在外部凭据源，外部的由客户端取 | 4.5 节 |
 | 2026-10-27 | 召回事件存多久 | 明细 30 天，提示语最多存 200 字（应用可关），清理前并入累计统计 | 7 节 |
 | 2026-10-27 | 正文用什么编辑 | 编辑原文，阅读时渲染 Markdown | 10 节 |
+| 2026-10-28 | 自动抽取用什么模型 | 走 OpenAI 兼容接口，和嵌入接口一样在实例设置里配接口、模型与 Key | 6.4 节 |
+| 2026-10-28 | Python SDK 放哪 | 新的顶层目录 `sdks/python`，由 OpenAPI 生成，AstrBot 插件依赖它 | 6.2 节 |
 
 新的待定问题在这里追加，定下来后移进上表。
