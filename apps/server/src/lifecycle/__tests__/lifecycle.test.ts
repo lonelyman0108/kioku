@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from 'vitest'
+import { describe, expect, it } from 'vitest'
 
 import { CANDIDATE_ID, type RecordableCandidate } from '../../recall/recall'
 import { handleLifecycle } from '../lifecycle'
@@ -26,10 +26,6 @@ const scopeWith = (subjects: RecallScope['subjects']): RecallScope => ({
 const contextOf = (value: unknown) => (value as { context: string }).context
 
 describe('每轮输入的召回', () => {
-  afterEach(() => {
-    vi.restoreAllMocks()
-  })
-
   it('召回块之后跟着当前发言人与本群的事实', async () => {
     const res = await handleLifecycle(
       scopeWith(async () => [
@@ -58,16 +54,18 @@ describe('每轮输入的召回', () => {
     expect(res.nodeUris).toEqual(['core://rules'])
   })
 
-  it('对象直连读取失败时照样返回召回块，只是不带事实', async () => {
-    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+  it('不知道名字时只写身份，不拿平台账号凑数', async () => {
     const res = await handleLifecycle(
-      scopeWith(async () => {
-        throw new Error('连接断了')
-      }),
+      scopeWith(async () => [
+        {
+          role: 'group',
+          name: null,
+          facts: [{ content: '每周五晚上读书', updatedAt: '2026-10-20T08:00:00.000Z' }],
+        },
+      ]),
       'astrbot',
       { event: 'prompt.submit', prompt: '规则' },
     )
-    expect(contextOf(res.hostOutput.value)).toBe('<recall>\n0.50 | core://rules | 规则\n</recall>')
-    expect(warn).toHaveBeenCalledWith('读取对象直连的事实失败', expect.any(Error))
+    expect(contextOf(res.hostOutput.value)).toContain('\n本群：\n- 每周五晚上读书（2026-10-20）\n')
   })
 })

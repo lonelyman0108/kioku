@@ -29,7 +29,7 @@ export interface RecallScope {
   // budget 是正文字数预算，不传时用默认值
   boot(budget?: number): Promise<BootResponse>
   recent(limit: number): Promise<RecentMemory[]>
-  // 对象直连：当前发言人与本群的事实；不带会话上下文时没有
+  // 对象直连：当前发言人与本群的事实；不带会话上下文时没有。只是附加的线索，读取失败时返回空、不抛错
   subjects(): Promise<SubjectFacts[]>
   // 记一条召回事件，不等它写完。只有接入方真的拿到召回结果的地方调用，管理界面的预览与调试不调用
   record(source: RecallSource, query: string, hits: readonly RecordableCandidate[]): void

@@ -4,6 +4,7 @@ import { and, eq, sql } from 'drizzle-orm'
 import { withSpace, type Tx } from '../db/client'
 import { appGroupPersonas, subjectIdentities, subjects } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
+import { clipChars } from '../recall/recall'
 import type { SessionContext } from './access'
 
 // 平台上的名字最多记这么多字（按字符算），超出的截掉：契约只拒绝离谱的长度，
@@ -20,13 +21,15 @@ export interface KeySession {
 export interface SessionSubject {
   id: string
   role: 'sender' | 'group'
-  // 平台上的名字：这次上报的，没报时取上次记下的。主人在管理界面给对象起的名字可能是私下的备注，不往对话里放
-  name: string
+  // 往对话里放的名字，只用平台上的名字：这次上报的；没报时，群名与私聊对象取上次记下的，
+  // 群里的发言人不取（记下的可能是别的群的群名片）。都没有时为 null，不拿平台账号凑数。
+  // 主人在管理界面给对象起的名字可能是私下的备注，不往对话里放
+  name: string | null
 }
 
 interface ResolvedSubject {
   id: string
-  name: string
+  name: string | null
   accountId: string | null
 }
 
@@ -51,7 +54,7 @@ export async function resolveKeySession(
   // 带了群或发言人时契约要求带上平台
   const platform = input.platform!
   return withSpace(deps.db, key.spaceId, async (tx) => {
-    // 群里报的发言人名字可能是群名片，每个群不一样，跟着它改会来回变：只在第一次见到这个人时记下，
+    // 群里报的发言人名字可能是群名片，每个群不一样，跟着它改会来回变：只在还没记下名字时记，
     // 之后只按私聊里报的名字更新
     const sender = input.sender
       ? await resolveSubject(tx, key.spaceId, platform, 'person', input.sender, {
@@ -100,11 +103,17 @@ async function resolveSubject(
   options: { refresh: boolean },
 ): Promise<ResolvedSubject> {
   // 平台上没设名字时插件可能报空字符串，当作没带
-  const reported = ref.name ? clip(ref.name, PLATFORM_NAME_CHARS) : undefined
+  const reported = ref.name ? clipChars(ref.name, PLATFORM_NAME_CHARS) : undefined
   const known = async () => {
     const found = await findIdentity(tx, platform, kind, ref.id)
     if (!found) return undefined
-    return options.refresh ? refreshName(tx, found, reported) : resolvedFrom(found, reported)
+    // 不更新名字的上报，在还没记下名字时也记一次
+    if (options.refresh || found.identityName === null) await refreshName(tx, found, reported)
+    return {
+      id: found.subjectId,
+      name: reported ?? (options.refresh ? found.identityName : null),
+      accountId: found.accountId,
+    }
   }
   const existing = await known()
   if (existing) return existing
@@ -114,10 +123,9 @@ async function resolveSubject(
   )
   const raced = await known()
   if (raced) return raced
-  const name = reported ?? ref.id
   const [subject] = await tx
     .insert(subjects)
-    .values({ spaceId, kind, displayName: name })
+    .values({ spaceId, kind, displayName: reported ?? ref.id })
     .returning({ id: subjects.id })
   await tx.insert(subjectIdentities).values({
     spaceId,
@@ -127,7 +135,7 @@ async function resolveSubject(
     externalId: ref.id,
     displayName: reported ?? null,
   })
-  return { id: subject!.id, name, accountId: null }
+  return { id: subject!.id, name: reported ?? null, accountId: null }
 }
 
 interface FoundIdentity {
@@ -166,23 +174,10 @@ async function findIdentity(
   return row
 }
 
-function resolvedFrom(found: FoundIdentity, reported: string | undefined): ResolvedSubject {
-  return {
-    id: found.subjectId,
-    name: reported ?? found.identityName ?? found.externalId,
-    accountId: found.accountId,
-  }
-}
-
 // 平台上的显示名变了就记下来。对象的名字还是从这个账号带过来的（等于它之前的显示名，主人没改过）时一起改；
 // 主人改过名字，或名字来自合并进来的别的账号时不动
-async function refreshName(
-  tx: Tx,
-  found: FoundIdentity,
-  name: string | undefined,
-): Promise<ResolvedSubject> {
-  const resolved = resolvedFrom(found, name)
-  if (name === undefined || name === found.identityName) return resolved
+async function refreshName(tx: Tx, found: FoundIdentity, name: string | undefined): Promise<void> {
+  if (name === undefined || name === found.identityName) return
   await tx
     .update(subjectIdentities)
     .set({ displayName: name })
@@ -194,11 +189,4 @@ async function refreshName(
       .set({ displayName: name, updatedAt: new Date() })
       .where(and(eq(subjects.id, found.subjectId), eq(subjects.displayName, previous)))
   }
-  return resolved
-}
-
-// 按字符（不是 UTF-16 码元）截断，免得切开表情符号
-function clip(text: string, max: number): string {
-  const chars = [...text]
-  return chars.length > max ? chars.slice(0, max).join('') : text
 }

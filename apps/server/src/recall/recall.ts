@@ -301,6 +301,12 @@ export function inlineText(text: string): string {
   return text.replace(/[<>]/g, '').replace(/\s+/g, ' ').trim()
 }
 
+// 按字符（不是 UTF-16 码元）截断，免得切开表情符号；截掉了才接上 suffix
+export function clipChars(text: string, max: number, suffix = ''): string {
+  const chars = [...text]
+  return chars.length > max ? `${chars.slice(0, max).join('')}${suffix}` : text
+}
+
 // 与 Lore 的 <recall> 块格式一致：每行「分数 | URI | 线索」
 export function formatRecallBlock(candidates: RecallCandidate[], sessionId?: string): string {
   if (!candidates.length) return ''

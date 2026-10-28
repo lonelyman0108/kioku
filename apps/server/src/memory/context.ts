@@ -180,11 +180,18 @@ export function recallScopeForKey(
       run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
-    // 对象层不用人格链，不经过 run
-    subjects: async () =>
-      session.subjects.length
-        ? withSpace(deps.db, key.spaceId, (tx) => subjectFacts(tx, access, session.subjects))
-        : [],
+    // 对象层不用人格链，不经过 run。对象直连只是附加的线索：读取失败时记日志、返回空，不影响召回本身
+    subjects: async () => {
+      if (!session.subjects.length) return []
+      try {
+        return await withSpace(deps.db, key.spaceId, (tx) =>
+          subjectFacts(tx, access, session.subjects),
+        )
+      } catch (err) {
+        console.warn('读取对象直连的事实失败', err)
+        return []
+      }
+    },
     record: (source, query, hits) => void recordRecall(deps, key, source, query, hits),
   }
 }

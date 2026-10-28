@@ -38,9 +38,9 @@ export type ChatType = z.infer<typeof ChatType>
 
 export const PlatformRef = z.object({
   id: z.string().trim().min(1).max(200),
-  // 平台上的显示名，随上报更新；空字符串当作没带。服务端只记前 128 个字，这里只拒绝离谱的长度：
-  // 名字长导致整个请求被拒的话，插件只能放弃这一轮的召回
-  name: z.string().trim().max(1000).optional(),
+  // 平台上的显示名，随上报更新；空字符串当作没带。服务端只记前 128 个字，这里只拒绝离谱的长度
+  // （上限按 UTF-16 码元算，放得很宽）：名字长导致整个请求被拒的话，插件只能放弃这一轮的召回
+  name: z.string().trim().max(4000).optional(),
 })
 export type PlatformRef = z.infer<typeof PlatformRef>
 
@@ -82,7 +82,8 @@ export type RecallRequest = z.infer<typeof RecallRequest>
 export const SubjectFacts = z.object({
   // sender：当前发言人；group：本群
   role: z.enum(['sender', 'group']),
-  name: z.string(),
+  // 平台上的名字；不知道时为 null（不拿平台账号凑数）
+  name: z.string().nullable(),
   facts: z.array(z.object({ content: z.string(), updatedAt: z.string() })),
 })
 export type SubjectFacts = z.infer<typeof SubjectFacts>

@@ -8,17 +8,27 @@ import type {
 } from '@kioku/contracts'
 import { and, asc, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
 import { memories, subjectIdentities, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import type { Deps, KeyPrincipal } from '../../http/env'
+import { recallScopeForKey } from '../../memory/context'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import {
+  addMember,
+  bearer,
+  bootstrap,
+  FULL_SCOPES,
+  jsonRequest,
+  type Workspace,
+} from '../../testing/fixtures'
 
 describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
   let database: Database
+  let deps: Deps
   let app: ReturnType<typeof createApp>
   let ws: Workspace
   let appId: string
@@ -28,13 +38,14 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({
+    deps = {
       db: database.db,
       cookieSecure: false,
       masterKey: randomBytes(32),
       embedder: staticEmbedderSource(null),
       jobs: null,
-    })
+    }
+    app = createApp(deps)
   })
   afterAll(async () => {
     await database?.close()
@@ -284,6 +295,69 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
     expect((await identities())[0]).toMatchObject({ platformName: '昵称', name: '昵称' })
   })
 
+  it('群里第一次见到时没报名字的人，之后群里报了就记下，已有名字时不改；群里没报名字时不带名字', async () => {
+    const inGroup = (name?: string): SessionContextInput => ({
+      chatType: 'group',
+      platform: 'qq',
+      group: { id: '3100', name: '读书会' },
+      sender: { id: '3101', ...(name ? { name } : {}) },
+    })
+    await recall('规则', inGroup())
+    expect((await identities())[0]).toMatchObject({ platformName: null, name: '3101' })
+    await recall('规则', inGroup('群名片甲'))
+    expect((await identities())[0]).toMatchObject({ platformName: '群名片甲', name: '群名片甲' })
+    await recall('规则', inGroup('群名片乙'))
+    expect((await identities())[0]).toMatchObject({ platformName: '群名片甲', name: '群名片甲' })
+
+    // 记下的名字可能是别的群的群名片：群里没报名字时只写「发言人」，也不拿平台账号凑数
+    const person = await subjectOf('qq', 'person', '3101')
+    const g = await subjectOf('qq', 'group', '3100')
+    await fact(person, '在学日语', `group:${g}`)
+    const { body } = await recall('今天读什么', inGroup())
+    expect(body.subjects).toEqual([
+      { role: 'sender', name: null, facts: [expect.objectContaining({ content: '在学日语' })] },
+    ])
+    const submitted = await event({
+      event: 'prompt.submit',
+      prompt: '今天读什么',
+      context: inGroup(),
+    })
+    expect(injected(submitted.body)).toContain('\n发言人：\n- 在学日语（')
+    expect(injected(submitted.body)).not.toContain('3101')
+  })
+
+  it('对象直连读取失败时返回空、记日志，召回照常', async () => {
+    const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const principal: KeyPrincipal = {
+        kind: 'key',
+        keyId: crypto.randomUUID(),
+        spaceId: ws.spaceId,
+        scopes: FULL_SCOPES,
+        app: {
+          id: appId,
+          slug: 'qq-bot',
+          name: 'qq-bot',
+          runtimeFamily: 'astrbot',
+          ownerAccountId: ws.accountId,
+          defaultPersonaId: doubaoId,
+          config: {},
+        },
+      }
+      // 对象 id 不是 UUID，查询必然出错
+      const scope = recallScopeForKey(deps, principal, {
+        context: {},
+        personaId: doubaoId,
+        subjects: [{ id: 'not-a-uuid', role: 'sender', name: null }],
+      })
+      expect(await scope.subjects()).toEqual([])
+      expect(warn).toHaveBeenCalledWith('读取对象直连的事实失败', expect.anything())
+      expect((await scope.recall('规则', { limit: 5 })).map((c) => c.uri)).toContain('core://rules')
+    } finally {
+      warn.mockRestore()
+    }
+  })
+
   it('名字只记前 128 个字，不因为长拒掉请求；只拒绝离谱的长度', async () => {
     const long = '长'.repeat(300)
     expect((await recall('规则', direct('10002', long))).status).toBe(200)
@@ -294,7 +368,7 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
     // 按字符截断，不切开表情符号
     expect((await recall('规则', direct('10003', '😀'.repeat(200)))).status).toBe(200)
     expect((await identities())[1]!.platformName).toBe('😀'.repeat(128))
-    expect((await recall('规则', direct('10004', 'x'.repeat(1001)))).status).toBe(400)
+    expect((await recall('规则', direct('10004', 'x'.repeat(4001)))).status).toBe(400)
   })
 
   it('同一个新账号的并发请求只建出一个对象：等在咨询锁上的请求认出先建好的那个', async () => {

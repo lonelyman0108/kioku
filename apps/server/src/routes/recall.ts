@@ -12,7 +12,7 @@ import { resolveKeySession } from '../access/session'
 import { requireKey } from '../auth/middleware'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { handleLifecycle, optionalSubjects } from '../lifecycle/lifecycle'
+import { handleLifecycle } from '../lifecycle/lifecycle'
 import { recallScopeForKey } from '../memory/context'
 
 const security = [{ bearer: [] }]
@@ -61,7 +61,7 @@ export function recallRoutes(deps: Deps) {
       const scope = recallScopeForKey(deps, key, await resolveKeySession(deps, key, context))
       const [candidates, subjects] = await Promise.all([
         scope.recall(query, { limit }),
-        optionalSubjects(scope),
+        scope.subjects(),
       ])
       scope.record('rest.recall', query, candidates)
       return c.json({ candidates, subjects }, 200)
