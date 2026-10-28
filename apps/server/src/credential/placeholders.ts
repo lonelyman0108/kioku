@@ -2,7 +2,11 @@ import {
   CREDENTIAL_PLACEHOLDER,
   CREDENTIAL_PLACEHOLDER_START,
   PLAINTEXT_CREDENTIAL,
+  type Layer,
+  type Sensitivity,
 } from '@kioku/contracts'
+
+import { sensitivityRank } from '../access/access'
 
 export interface PlaceholderRef {
   identifier: string
@@ -28,6 +32,12 @@ export function scanPlaceholders(text: string): { refs: PlaceholderRef[]; malfor
     if (!valid.has(at)) malformed.push(text.slice(at, at + 48).split('\n')[0]!)
   }
   return { refs, malformed }
+}
+
+// 占位符只能放在私人层、敏感级至少 private 的记忆里：按记忆主人解析，别的层的读者解析不到。
+// 写入检查与导入计划都按这条判断
+export function placeholderAllowed(layer: Layer, sensitivity: Sensitivity): boolean {
+  return layer === 'private' && sensitivityRank(sensitivity) >= sensitivityRank('private')
 }
 
 // disclosure 与关键词里不能有占位符（会进召回与 boot 的线索）：写入与导入计划都按这条判断

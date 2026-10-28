@@ -58,6 +58,7 @@ import {
 import {
   looksLikePlaintextCredential,
   mentionsPlaceholder,
+  placeholderAllowed,
   placeholderIdentifiers,
   scanPlaceholders,
 } from '../credential/placeholders'
@@ -475,10 +476,7 @@ export class MemoryService {
       )
     }
     if (!refs.length) return
-    if (
-      final.layer !== 'private' ||
-      sensitivityRank(final.sensitivity) < sensitivityRank('private')
-    ) {
+    if (!placeholderAllowed(final.layer, final.sensitivity)) {
       throw new MemoryError(400, PLACEHOLDER_SCOPE)
     }
     const existing =

@@ -132,7 +132,7 @@ async function main(): Promise<void> {
       }
     }
 
-    const result = await applyImport(target, plan, sync ? { skip: sync.skipCreate } : {})
+    const result = await applyImport(target, plan)
     printResult(plan, result)
     const synced = sync ? await applySync(target, sync) : null
     if (synced) printSyncResult(synced)
@@ -228,6 +228,13 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
       `（包括导入后在 Kioku 里删除或移动了的）`,
   )
   for (const uri of result.occupied) console.log(`  跳过 ${uri}：URI 已被别的记忆占用`)
+  for (const { uri, current } of result.movedInLore) {
+    console.log(
+      current
+        ? `  跳过 ${uri}：Lore 里换了路径，之前导入的那条还在 ${current}，没有在新位置再建一条（要跟着移动就在管理界面移）`
+        : `  跳过 ${uri}：Lore 里换了路径，之前导入的那条在 Kioku 里删除了，没有在新位置再建一条`,
+    )
+  }
   for (const { uri, current } of result.secretAlreadyImported) {
     const moved = current === uri ? '' : `（导入后移到了 ${current}）`
     console.log(
@@ -275,6 +282,10 @@ function printSync(sync: SyncPlan): void {
   list(
     '这次的导入计划不导入这个节点，没有同步（原因见上面的「不导入」）',
     of('skipped').map((i) => `${i.uri}：${i.reason}`),
+  )
+  list(
+    '这次的计划没有映射到它（例如换了 --persona，或者对应的应用不在了），没有同步',
+    of('unmapped').map((i) => i.uri),
   )
   list(
     '读不出来，没有同步',

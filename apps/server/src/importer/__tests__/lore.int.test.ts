@@ -742,7 +742,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       }
     })
 
-    it('Lore 里换了路径、映射到别的层的节点只列出来，导入时也不在新位置再建一条', async () => {
+    it('Lore 里换了路径、映射到别的层的节点只列出来；不加 --sync 重新导入也不在新位置再建一条', async () => {
       await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
       await run()
       const undoRename = await renameLore('core://agent/claudecode', 'claude_rules')
@@ -755,15 +755,99 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
             target: 'core://claude_rules',
           }),
         ])
-        const result = await applyImport(target(), await plan(), { skip: sync.skipCreate })
+        const result = await run()
         expect(result.created).toEqual([])
-        expect(result.previouslyImported).toContain('core://claude_rules')
+        expect(result.movedInLore).toEqual([
+          { uri: 'core://claude_rules', current: 'app://claude-code/agent' },
+        ])
         const core = await withSpace(database.db, ws.spaceId, (tx) =>
           tx.select({ path: memories.path }).from(memories).where(eq(memories.domain, 'core')),
         )
         expect(core.map((r) => r.path)).not.toContain('claude_rules')
+
+        // 照提示在管理界面移到新位置之后，再同步就算在 Kioku 里改过，不再提示移动
+        const moved = await app.request(
+          `/v1/spaces/${ws.spaceId}/memories/move`,
+          jsonRequest(
+            'POST',
+            { from: 'app://claude-code/agent', to: 'core://claude_rules', layer: 'base' },
+            { cookie: ws.cookie },
+          ),
+        )
+        expect(moved.status).toBe(200)
+        const after = await syncPlan()
+        expect(after.items.filter((i) => i.source === 'core://claude_rules')).toEqual([
+          expect.objectContaining({ uri: 'core://claude_rules', state: 'edited' }),
+        ])
+        expect((await run()).created).toEqual([])
       } finally {
         await undoRename()
+      }
+    })
+
+    it('Lore 里换了路径的节点照样提醒 --secret 没有生效', async () => {
+      await run('default', [])
+      const undoRename = await renameLore('core://agent/zcode', 'zcode_rules')
+      try {
+        const result = await run('default', ['core://zcode_rules'])
+        expect(result.secretAlreadyImported).toEqual([
+          { uri: 'core://zcode_rules', current: 'app://zcode/agent' },
+        ])
+      } finally {
+        await undoRename()
+      }
+    })
+
+    it('同一个节点多了一个同类应用：新应用照常导入，不当成换了路径', async () => {
+      await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+      await run()
+      await ws.createApp('claude-two', { runtimeFamily: 'claudecode' })
+      // 同时在 Lore 里换到同一个运行时下的另一个路径：原来的应用按同一个键认出是换了路径
+      const undoRename = await renameLore('core://agent/claudecode', 'agent/claudecode/rules')
+      try {
+        const sync = await syncPlan()
+        expect(sync.items.filter((i) => i.state === 'moved')).toEqual([
+          expect.objectContaining({
+            uri: 'app://claude-code/agent',
+            target: 'app://claude-code/agent/rules',
+          }),
+        ])
+        const result = await run()
+        expect(result.created).toEqual(['app://claude-two/agent/rules'])
+        expect(result.movedInLore).toEqual([])
+      } finally {
+        await undoRename()
+      }
+    })
+
+    it('换了 --persona，Lore 里的人格设定也换了路径：新人格照常导入，旧人格的列为没有映射到', async () => {
+      await run()
+      const undoRename = await renameLore('core://soul', 'soul/style')
+      try {
+        const result = await run('other')
+        expect(result.created).toEqual(['persona://other/soul/style'])
+        expect(result.movedInLore).toEqual([])
+        const sync = await planSync(target(), await plan('other'), await readLore(lore))
+        expect(sync.items.filter((i) => i.uri === 'persona://default/soul')).toEqual([
+          expect.objectContaining({ state: 'unmapped' }),
+        ])
+      } finally {
+        await undoRename()
+      }
+    })
+
+    it('Lore 里删掉的 secret 节点不用读出来，没有主密钥也能同步', async () => {
+      await run()
+      const undoDrop = await dropLore('infra://office_network/credentials')
+      try {
+        const sync = await planSync(
+          { ...target(), masterKey: null },
+          await plan('default', []),
+          await readLore(lore),
+        )
+        expect(sync.goneFromLore).toEqual(['infra://office_network/credentials'])
+      } finally {
+        await undoDrop()
       }
     })
 

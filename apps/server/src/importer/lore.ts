@@ -9,10 +9,11 @@ import {
 import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import type postgres from 'postgres'
 
-import { consoleAccess, sensitivityRank } from '../access/access'
+import { consoleAccess } from '../access/access'
 import {
   looksLikePlaintextCredential,
   mentionsPlaceholder,
+  placeholderAllowed,
   scanPlaceholders,
 } from '../credential/placeholders'
 import { decryptSecret } from '../crypto/envelope'
@@ -333,12 +334,9 @@ export function planImport(
         plan.skipped.push({ source: node.uri, reason: `和 ${earlier} 映射到同一个 ${target.uri}` })
         continue
       }
-      // 占位符只能放在私人层、敏感级至少 private 的记忆里（规则见 memory/service.ts 的写入检查）
+      // 占位符的位置规则与写入检查相同
       const sensitivity = secret ? 'secret' : DEFAULT_SENSITIVITY[target.layer]
-      if (
-        hasRefs &&
-        (target.layer !== 'private' || sensitivityRank(sensitivity) < sensitivityRank('private'))
-      ) {
+      if (hasRefs && !placeholderAllowed(target.layer, sensitivity)) {
         plan.skipped.push({
           source: node.uri,
           reason: `正文里有凭据占位符，只能放在私人层、敏感级至少 private 的记忆里，${target.uri} 是 ${target.layer} 层`,
@@ -431,16 +429,14 @@ export interface ImportResult {
   secretAlreadyImported: { uri: string; current: string }[]
   // URI 已被不是导入产生的记忆占用
   occupied: string[]
+  // Lore 里换了路径、映射到别的应用或层的节点（见 movedInLore）：没有在 uri 新建，之前导入的那条留在 current
+  // （在 Kioku 里删除了的为 null）
+  movedInLore: { uri: string; current: string | null }[]
   failed: { uri: string; reason: string }[]
 }
 
 // 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用
-export async function applyImport(
-  target: ImportTarget,
-  plan: ImportPlan,
-  // 同步时发现 Lore 里换了路径、映射到别处的节点（见 SyncPlan.skipCreate），不在新位置再建一条
-  options: { skip?: ReadonlySet<string> } = {},
-): Promise<ImportResult> {
+export async function applyImport(target: ImportTarget, plan: ImportPlan): Promise<ImportResult> {
   const { db, spaceId, accountId } = target
   const result: ImportResult = {
     personaCreated: false,
@@ -451,6 +447,7 @@ export async function applyImport(
     previouslyImported: [],
     secretAlreadyImported: [],
     occupied: [],
+    movedInLore: [],
     failed: [],
   }
   // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写。
@@ -516,6 +513,7 @@ export async function applyImport(
   })
 
   const done = await importedMemories(db, spaceId)
+  const moved = movedInLore(plan, done)
   const service = importerService(target)
   for (const item of plan.memories) {
     const app = item.context.targetApp
@@ -523,11 +521,10 @@ export async function applyImport(
       result.failed.push({ uri: item.request.uri, reason: `应用 ${app} 不属于导入者，没有写入` })
       continue
     }
-    if (options.skip?.has(item.importKey)) {
-      result.previouslyImported.push(item.request.uri)
-      continue
-    }
-    const found = done.get(item.importKey)
+    const earlier = moved.get(item.importKey)
+    for (const m of earlier ?? [])
+      result.movedInLore.push({ uri: item.request.uri, current: m.uri })
+    const found = done.get(item.importKey) ?? earlier
     if (found) {
       result.previouslyImported.push(item.request.uri)
       // 这次要求 secret、对应的记忆现在却是明文的才提醒；已经是 secret 或已经删除的照常跳过。
@@ -567,6 +564,9 @@ interface ImportedMemory {
   loreNodeUuid: string
   // 导入时这个节点在 Lore 里的 URI；事件里没记的为 null，不拿它判断换没换路径
   loreUri: string | null
+  targetPersona: string | null
+  // 导入时写到的 URI（导入事件的快照里有），记忆删掉之后报告时用
+  importedUri: string | null
   state: 'secret' | 'plain' | 'deleted'
   // 记忆现在的 URI 与版本号，已经删除的为 null
   uri: string | null
@@ -616,6 +616,9 @@ async function importedMemories(db: Db, spaceId: string): Promise<Map<string, Im
         memoryId: e.memoryId,
         loreNodeUuid: String(context.loreNodeUuid),
         loreUri: typeof context.loreUri === 'string' ? context.loreUri : null,
+        targetPersona: parts.targetPersona ? String(parts.targetPersona) : null,
+        importedUri:
+          e.importedDomain && e.importedPath ? formatUri(e.importedDomain, e.importedPath) : null,
         state: gone ? 'deleted' : e.sensitivity === 'secret' ? 'secret' : 'plain',
         uri: !gone && e.domain && e.path ? formatUri(e.domain, e.path) : null,
         version: gone ? null : e.version,
@@ -623,6 +626,35 @@ async function importedMemories(db: Db, spaceId: string): Promise<Map<string, Im
     ])
   }
   return done
+}
+
+// Lore 里换了路径、映射到别的应用或层的节点：去重键跟着变了，按键找不到之前的导入，不认出来就会在新位置再建一条。
+// 按节点 uuid 认：之前导入时的键这次的计划已经不再产生、Lore 里的 URI 也变了，才算换了路径。
+// 加了一个同类应用（节点多了一个目标）时原来的键仍在计划里，换个 --persona 时人格层两边的人格不同，都不算；
+// 之前的导入事件没记 loreUri 的不判断。返回：这次计划里的去重键 → 之前按别的键导入的那些记忆
+function movedInLore(
+  plan: ImportPlan,
+  done: Map<string, ImportedMemory[]>,
+): Map<string, ImportedMemory[]> {
+  const planned = new Set(plan.memories.map((m) => m.importKey))
+  const byNode = new Map<string, ImportedMemory[]>()
+  for (const m of [...done.values()].flat()) {
+    byNode.set(m.loreNodeUuid, [...(byNode.get(m.loreNodeUuid) ?? []), m])
+  }
+  const moved = new Map<string, ImportedMemory[]>()
+  for (const item of plan.memories) {
+    if (done.has(item.importKey)) continue
+    const persona = item.context.targetPersona
+    const earlier = (byNode.get(String(item.context.loreNodeUuid)) ?? []).filter(
+      (m) =>
+        !planned.has(m.key) &&
+        m.loreUri !== null &&
+        m.loreUri !== item.source &&
+        !(persona && m.targetPersona && m.targetPersona !== persona),
+    )
+    if (earlier.length) moved.set(item.importKey, earlier)
+  }
+  return moved
 }
 
 // 按空间 owner 的管理界面权限写入，来源记为 system。正文里已有的凭据占位符照常检查（要解析到导入者的凭据），
@@ -645,7 +677,7 @@ function importerService(target: ImportTarget): MemoryService {
 // 凭据迁移改过的凭据节点也就不会被 Lore 里的明文盖回去；
 // Lore 里路径变了的也不动，移动可能改变层（例如移进 core:// 就成了所有应用都读的基础层），要由人决定
 export type SyncState =
-  'update' | 'current' | 'edited' | 'moved' | 'deleted' | 'skipped' | 'unreadable'
+  'update' | 'current' | 'edited' | 'moved' | 'deleted' | 'skipped' | 'unmapped' | 'unreadable'
 
 export interface SyncItem {
   source: string
@@ -665,8 +697,6 @@ export interface SyncPlan {
   items: SyncItem[]
   // 导入过、但 Lore 里已经没有这个节点的记忆现在的 URI：Kioku 里保留，要删由人决定
   goneFromLore: string[]
-  // Lore 里换了路径、映射到别的应用或人格的节点：去重键跟着变了，导入时不要在新位置再建一条
-  skipCreate: Set<string>
 }
 
 // 只读：算出同步要做什么，打印给人确认；执行时再按版本号核对一次
@@ -703,112 +733,115 @@ export async function planSync(
   const writtenVersion = new Map(written.map((w) => [w.memoryId, w.version]))
   const untouched = (m: ImportedMemory) =>
     m.version !== null && writtenVersion.get(m.memoryId) === m.version
-  // 只有真要读出来比对的 secret 才需要主密钥
-  if (!target.masterKey && live.some((m) => m.state === 'secret' && untouched(m))) {
-    throw new Error('导入过的 secret 记忆要读出来比对：同步需要设置与服务相同的 KIOKU_MASTER_KEY')
-  }
 
   const service = importerService(target)
-  const sync: SyncPlan = { items: [], goneFromLore: [], skipCreate: new Set() }
+  const sync: SyncPlan = { items: [], goneFromLore: [] }
   const reported = new Set<ImportedMemory>()
-  const report = (m: ImportedMemory, item: Omit<SyncItem, 'changes'>) => {
+  const report = (m: ImportedMemory, item: Omit<SyncItem, 'changes'> & Partial<SyncItem>) => {
     reported.add(m)
-    sync.items.push({ ...item, changes: [] })
+    sync.items.push({ changes: [], ...item })
   }
+  const moved = movedInLore(plan, done)
   for (const item of plan.memories) {
-    const same = done.get(item.importKey)
-    if (!same) {
-      // 同一个 Lore 节点之前按别的去重键导入过（Lore 里换了路径，映射到了别的应用或人格）：
-      // 和同一个键下换了路径一样只列出来，不在新位置再建一条。换个 --persona 再导入时 Lore 的 URI 不变，不算
-      const earlier = all.filter(
-        (m) =>
-          m.loreNodeUuid === item.context.loreNodeUuid &&
-          m.loreUri !== null &&
-          m.loreUri !== item.source,
-      )
-      if (earlier.length) sync.skipCreate.add(item.importKey)
-      for (const m of earlier) {
-        if (m.state === 'deleted' || !m.uri) {
-          report(m, { source: item.source, uri: item.request.uri, state: 'deleted' })
-        } else {
-          report(m, { source: item.source, uri: m.uri, state: 'moved', target: item.request.uri })
-        }
-      }
-      continue
-    }
-    for (const m of same) {
-      const base = { source: item.source }
+    const source = item.source
+    // 去重键变了的：已经被人移到新位置的算改过，其余列为换了路径
+    for (const m of moved.get(item.importKey) ?? []) {
       if (m.state === 'deleted' || !m.uri) {
-        report(m, { ...base, uri: item.request.uri, state: 'deleted' })
-      } else if (!untouched(m)) {
-        report(m, { ...base, uri: m.uri, state: 'edited' })
-      } else if (m.uri !== item.request.uri) {
-        report(m, { ...base, uri: m.uri, state: 'moved', target: item.request.uri })
+        report(m, { source, uri: m.importedUri ?? item.request.uri, state: 'deleted' })
+      } else if (m.uri === item.request.uri) {
+        report(m, { source, uri: m.uri, state: 'edited' })
       } else {
-        let current
-        try {
-          current = await service.get(m.uri)
-        } catch (err) {
-          if (!(err instanceof MemoryError)) throw err
-          report(m, { ...base, uri: m.uri, state: 'unreadable', reason: err.message })
-          continue
-        }
-        // 读到的应当就是导入的那一条，而且版本没变；对不上就是刚刚有人动过，不去改它
-        if (current.id !== m.memoryId || current.version !== m.version) {
-          report(m, { ...base, uri: m.uri, state: 'edited' })
-          continue
-        }
-        const want = item.request
-        const request: UpdateMemoryRequest = {
-          uri: m.uri,
-          expectedId: current.id,
-          expectedVersion: current.version,
-        }
-        const changes: SyncItem['changes'] = []
-        if (current.content !== want.content) {
-          request.content = want.content
-          changes.push('content')
-        }
-        if (want.priority !== undefined && current.priority !== want.priority) {
-          request.priority = want.priority
-          changes.push('priority')
-        }
-        if ((current.disclosure ?? null) !== (want.disclosure ?? null)) {
-          request.disclosure = want.disclosure ?? null
-          changes.push('disclosure')
-        }
-        const wanted = new Set(want.glossary ?? [])
-        const add = [...wanted].filter((k) => !current.glossary.includes(k))
-        const remove = current.glossary.filter((k) => !wanted.has(k))
-        if (add.length || remove.length) {
-          if (add.length) request.glossaryAdd = add
-          if (remove.length) request.glossaryRemove = remove
-          changes.push('glossary')
-        }
-        reported.add(m)
-        sync.items.push(
-          changes.length
-            ? { ...base, uri: m.uri, state: 'update', changes, request, context: item.context }
-            : { ...base, uri: m.uri, state: 'current', changes: [] },
+        report(m, { source, uri: m.uri, state: 'moved', target: item.request.uri })
+      }
+    }
+    for (const m of done.get(item.importKey) ?? []) {
+      if (m.state === 'deleted' || !m.uri) {
+        report(m, { source, uri: m.importedUri ?? item.request.uri, state: 'deleted' })
+        continue
+      }
+      if (!untouched(m)) {
+        report(m, { source, uri: m.uri, state: 'edited' })
+        continue
+      }
+      if (m.uri !== item.request.uri) {
+        report(m, { source, uri: m.uri, state: 'moved', target: item.request.uri })
+        continue
+      }
+      // 只有真要读出来比对的 secret 才需要主密钥
+      if (m.state === 'secret' && !target.masterKey) {
+        throw new Error(
+          `${m.uri} 是 secret，同步要读出来比对：需要设置与服务相同的 KIOKU_MASTER_KEY`,
         )
       }
+      let current
+      try {
+        current = await service.get(m.uri)
+      } catch (err) {
+        if (!(err instanceof MemoryError)) throw err
+        report(m, { source, uri: m.uri, state: 'unreadable', reason: err.message })
+        continue
+      }
+      // 读到的应当就是导入的那一条，而且版本没变；对不上就是刚刚有人动过，不去改它
+      if (current.id !== m.memoryId || current.version !== m.version) {
+        report(m, { source, uri: m.uri, state: 'edited' })
+        continue
+      }
+      const want = item.request
+      const request: UpdateMemoryRequest = {
+        uri: m.uri,
+        expectedId: current.id,
+        expectedVersion: current.version,
+      }
+      const changes: SyncItem['changes'] = []
+      if (current.content !== want.content) {
+        request.content = want.content
+        changes.push('content')
+      }
+      if (want.priority !== undefined && current.priority !== want.priority) {
+        request.priority = want.priority
+        changes.push('priority')
+      }
+      if ((current.disclosure ?? null) !== (want.disclosure ?? null)) {
+        request.disclosure = want.disclosure ?? null
+        changes.push('disclosure')
+      }
+      const wanted = new Set(want.glossary ?? [])
+      const add = [...wanted].filter((k) => !current.glossary.includes(k))
+      const remove = current.glossary.filter((k) => !wanted.has(k))
+      if (add.length || remove.length) {
+        if (add.length) request.glossaryAdd = add
+        if (remove.length) request.glossaryRemove = remove
+        changes.push('glossary')
+      }
+      report(
+        m,
+        changes.length
+          ? { source, uri: m.uri, state: 'update', changes, request, context: item.context }
+          : { source, uri: m.uri, state: 'current' },
+      )
     }
   }
-  // 导入过、节点还在 Lore 里，这次的计划却不导入它（例如正文清空了、写进了格式不对的占位符）：
-  // 列出来并给出原因，不能悄悄不同步
+  // 剩下的是这次的计划没有对应目标的：节点不在 Lore 里了的只列出来；
+  // 还在 Lore 里的，计划不导入它就给出原因，否则是计划没有映射到它（例如换了 --persona，或者对应的应用不在了），
+  // 都列出来，不能悄悄不同步
   const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
+  const skipReasons = new Map<string, string[]>()
+  for (const s of plan.skipped)
+    skipReasons.set(s.source, [...(skipReasons.get(s.source) ?? []), s.reason])
   for (const m of all) {
-    if (reported.has(m)) continue
+    if (reported.has(m) || m.state === 'deleted' || !m.uri) continue
     const node = nodeByUuid.get(m.loreNodeUuid)
     if (!node) {
-      if (m.uri) sync.goneFromLore.push(m.uri)
+      sync.goneFromLore.push(m.uri)
       continue
     }
-    if (m.state === 'deleted' || !m.uri) continue
-    const reason = plan.skipped.find((s) => s.source === node.uri)?.reason
-    if (reason) {
-      sync.items.push({ source: node.uri, uri: m.uri, state: 'skipped', reason, changes: [] })
-    }
+    const reasons = skipReasons.get(node.uri)
+    report(
+      m,
+      reasons
+        ? { source: node.uri, uri: m.uri, state: 'skipped', reason: reasons.join('；') }
+        : { source: node.uri, uri: m.uri, state: 'unmapped' },
+    )
   }
   return sync
 }
