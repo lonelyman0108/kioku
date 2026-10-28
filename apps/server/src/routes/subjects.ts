@@ -11,9 +11,16 @@ import {
 import { and, arrayContains, asc, desc, eq, ilike, inArray, or, sql, type SQL } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
-import { memberRole } from '../auth/middleware'
 import { withSpace, type Tx } from '../db/client'
-import { escapeLike, MICROS, microsOf } from '../db/paging'
+import {
+  decodeTimeCursor,
+  encodeTimeCursor,
+  escapeLike,
+  fromMicros,
+  INVALID_CURSOR,
+  microsOf,
+  UUID,
+} from '../db/paging'
 import { accounts, apps, extractionRuns, memories, subjectIdentities, subjects } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -76,33 +83,6 @@ const readable = (access: Access) => readableConditions(access, { personaIds: []
 const factsOf = (access: Access) =>
   and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject'), readable(access))!
 
-const UPDATED_MICROS = microsOf(subjects.updatedAt)
-
-const encodeCursor = (micros: string, id: string) =>
-  Buffer.from(JSON.stringify([micros, id])).toString('base64url')
-
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
-
-function decodeCursor(cursor: string | undefined): [string, string] | null | 'invalid' {
-  if (!cursor) return null
-  try {
-    const values: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
-    if (
-      Array.isArray(values) &&
-      values.length === 2 &&
-      typeof values[0] === 'string' &&
-      MICROS.test(values[0]) &&
-      typeof values[1] === 'string' &&
-      UUID.test(values[1])
-    ) {
-      return [values[0], values[1]]
-    }
-  } catch {
-    // 落到下面
-  }
-  return 'invalid'
-}
-
 // 列表与修改后返回的对象信息：平台账号与事实条数按对象一次查出
 async function subjectInfos(
   tx: Tx,
@@ -117,16 +97,18 @@ async function subjectInfos(
       displayName: subjects.displayName,
       accountId: subjects.accountId,
       accountName: accounts.displayName,
+      nameLocked: subjects.nameLocked,
       createdAt: subjects.createdAt,
       updatedAt: subjects.updatedAt,
-      updatedMicros: sql<string>`${UPDATED_MICROS}::text`,
+      createdMicros: sql<string>`${microsOf(subjects.createdAt)}::text`,
       factCount: sql<number>`(select count(*)::int from ${memories}
         where ${memories.subjectId} = ${subjects.id} and ${factsOf(access)})`,
     })
     .from(subjects)
     .leftJoin(accounts, eq(accounts.id, subjects.accountId))
     .where(where)
-    .orderBy(desc(subjects.updatedAt), desc(subjects.id))
+    // 按第一次遇到的时间排：改名、标记都不会让对象在翻页时挪位置
+    .orderBy(desc(subjects.createdAt), desc(subjects.id))
     .limit(options.limit ?? PAGE_SIZE)
   const ids = rows.map((r) => r.id)
   const identities = ids.length
@@ -142,6 +124,7 @@ async function subjectInfos(
       id: r.id,
       kind: r.kind,
       displayName: r.displayName,
+      nameLocked: r.nameLocked,
       account: r.accountId ? { id: r.accountId, displayName: r.accountName ?? '' } : null,
       identities: identities
         .filter((i) => i.subjectId === r.id)
@@ -197,8 +180,8 @@ export function subjectRoutes(deps: Deps) {
       const { spaceId } = c.req.valid('param')
       const query = c.req.valid('query')
       const { service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
-      const after = decodeCursor(query.cursor)
-      if (after === 'invalid') return c.json({ error: '翻页参数无效，请从第一页重新开始' }, 400)
+      const after = decodeTimeCursor(query.cursor, UUID)
+      if (after === 'invalid') return c.json({ error: INVALID_CURSOR }, 400)
       const needle = query.q ? `%${escapeLike(query.q)}%` : null
       const page = await withSpace(deps.db, spaceId, (tx) =>
         subjectInfos(
@@ -216,7 +199,7 @@ export function subjectRoutes(deps: Deps) {
                 )
               : undefined,
             after
-              ? sql`(${UPDATED_MICROS}, ${subjects.id}) < (${after[0]}::bigint, ${after[1]}::uuid)`
+              ? sql`(${subjects.createdAt}, ${subjects.id}) < (${fromMicros(after[0])}, ${after[1]}::uuid)`
               : undefined,
           ),
           { limit: PAGE_SIZE + 1 },
@@ -229,7 +212,7 @@ export function subjectRoutes(deps: Deps) {
           items: items.map((p) => p.info),
           nextCursor:
             page.length > PAGE_SIZE && last
-              ? encodeCursor(last.row.updatedMicros, last.row.id)
+              ? encodeTimeCursor(last.row.createdMicros, last.row.id)
               : null,
         },
         200,
@@ -237,7 +220,7 @@ export function subjectRoutes(deps: Deps) {
     })
     .openapi(detail, async (c) => {
       const { spaceId, subjectId } = c.req.valid('param')
-      const { service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
+      const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
       const access = service.access
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         const [found] = await subjectInfos(tx, access, eq(subjects.id, subjectId))
@@ -306,7 +289,8 @@ export function subjectRoutes(deps: Deps) {
             limited: run.limited,
             summarized: run.summarized,
             summaryOnly: run.summaryOnly,
-            error: run.error,
+            // 失败原因里可能有模型接口返回的原文，只给 owner 与 editor 看
+            error: run.error && role === 'viewer' ? '抽取失败' : run.error,
           })),
         }
       })
@@ -317,11 +301,12 @@ export function subjectRoutes(deps: Deps) {
       const { spaceId, subjectId } = c.req.valid('param')
       const body = c.req.valid('json')
       const me = c.get('console').accountId
-      const role = await memberRole(deps, spaceId, me)
-      if (role !== 'owner' && role !== 'editor') {
+      const { role, service } = await consoleMemberFor(deps, spaceId, me)
+      // 取消自己的标记谁都可以：被降为 viewer 之后也撤得掉；别的改动要 owner 或 editor
+      const unlinkOnly = body.displayName === undefined && body.linkedToMe === false
+      if (role === 'viewer' && !unlinkOnly) {
         return c.json({ error: '需要 owner 或 editor 角色' }, 403)
       }
-      const { service } = await consoleMemberFor(deps, spaceId, me)
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         // 锁住这一行：两个成员同时标记同一个人时只有一个成功
         const [row] = await tx
@@ -351,6 +336,7 @@ export function subjectRoutes(deps: Deps) {
           .update(subjects)
           .set({
             displayName: body.displayName ?? row.displayName,
+            nameLocked: body.displayName !== undefined || row.nameLocked,
             accountId,
             updatedAt: new Date(),
           })

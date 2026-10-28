@@ -16,6 +16,8 @@ export const SubjectInfo = z.object({
   id: z.uuid(),
   kind: SubjectKind,
   displayName: z.string(),
+  // 成员改过名字：之后平台上的显示名再变也不跟着改
+  nameLocked: z.boolean(),
   // 关联的空间成员：对象就是这个成员本人（「这是我」），他的应用把这个人的私聊算作主人私聊
   account: z.object({ id: z.uuid(), displayName: z.string() }).nullable(),
   identities: z.array(SubjectIdentity),
@@ -95,7 +97,7 @@ export const SubjectDetail = SubjectInfo.extend({
 export type SubjectDetail = z.infer<typeof SubjectDetail>
 
 // 改名之后，平台上的显示名再变也不跟着改。linkedToMe 只能把人关联到自己（或取消自己的关联）：
-// 关联到别的成员会让陌生人的私聊被当作那个成员的主人私聊
+// 关联到别的成员会让陌生人的私聊被当作那个成员的主人私聊。取消自己的关联 viewer 也可以
 export const UpdateSubjectRequest = z
   .object({
     displayName: z.string().trim().min(1).max(128).optional(),

@@ -67,7 +67,7 @@ function accounts(subject: SubjectInfo) {
     <template #body>
       <p class="mb-4 text-sm text-muted">
         bot
-        在群聊与私聊里遇到的人和群，以及从对话里记下的关于他们的事。把你自己在各个平台的账号标记为「这是我」，你的应用就会把这些私聊当作主人私聊。
+        在群聊与私聊里遇到的人和群（新遇到的在前），以及从对话里记下的关于他们的事。把你自己在各个平台的账号标记为「这是我」，你的应用就会把这些私聊当作主人私聊。
       </p>
       <div class="mb-4 flex flex-wrap items-center gap-3">
         <UTabs v-model="kind" :items="tabs" :content="false" size="sm" class="w-auto" />
@@ -118,9 +118,11 @@ function accounts(subject: SubjectInfo) {
               <p class="truncate text-xs text-muted">{{ accounts(subject) || '没有平台账号' }}</p>
             </div>
             <span class="shrink-0 text-xs text-muted">{{ subject.factCount }} 条事实</span>
-            <span class="hidden w-20 shrink-0 text-right text-xs text-muted sm:inline">{{
-              formatRelative(subject.updatedAt)
-            }}</span>
+            <span
+              class="hidden w-24 shrink-0 text-right text-xs text-muted sm:inline"
+              title="第一次遇到"
+              >{{ formatRelative(subject.createdAt) }}</span
+            >
           </li>
         </ul>
         <p v-if="!items.length" class="text-sm text-muted">

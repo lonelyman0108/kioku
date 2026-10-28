@@ -209,6 +209,8 @@ export const subjects = pgTable(
       .references(() => spaces.id, { onDelete: 'cascade' }),
     kind: subjectKind().notNull(),
     displayName: text().notNull(),
+    // 成员在管理界面改过名字：之后平台上的显示名再变也不跟着改
+    nameLocked: boolean().notNull().default(false),
     // 对象就是空间成员本人时填；用来认出「主人」
     accountId: uuid().references(() => accounts.id, { onDelete: 'set null' }),
     createdAt: createdAt(),
@@ -216,6 +218,8 @@ export const subjects = pgTable(
   },
   (t) => [
     index().on(t.spaceId),
+    // 对象页按第一次遇到的时间从新到旧翻页
+    index().on(t.spaceId, t.createdAt, t.id),
     unique().on(t.spaceId, t.id),
     // 平台账号按种类挂到对象上（见 subject_identities 的外键）
     unique().on(t.spaceId, t.id, t.kind),

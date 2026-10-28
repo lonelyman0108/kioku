@@ -149,20 +149,23 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect((await listOf('?q=%25')).items).toEqual([])
   })
 
-  it('翻页：每页 50 个，新的在前；游标无效时返回 400', async () => {
+  it('翻页：每页 50 个，新遇到的在前；改名、标记不会让对象挪位置；游标无效时返回 400', async () => {
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx.insert(subjects).values(
         Array.from({ length: 55 }, (_, i) => ({
           spaceId: ws.spaceId,
           kind: 'person' as const,
           displayName: `人${i}`,
-          updatedAt: new Date(Date.UTC(2026, 9, 1, 0, 0, i)),
+          createdAt: new Date(Date.UTC(2026, 9, 1, 0, 0, i)),
         })),
       ),
     )
     const first = await listOf()
     expect(first.items).toHaveLength(50)
     expect(first.items[0]!.displayName).toBe('人54')
+    // 翻页之间改了第二页上的一个对象
+    const third = (await listOf('?q=人3')).items.find((s) => s.displayName === '人3')!
+    expect((await api('PATCH', `/subjects/${third.id}`, { linkedToMe: true })).status).toBe(200)
     const second = await listOf(`?cursor=${first.nextCursor}`)
     expect(second.items.map((s) => s.displayName)).toEqual(['人4', '人3', '人2', '人1', '人0'])
     expect(second.nextCursor).toBeNull()
@@ -228,8 +231,13 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     await say('我改名了', direct('1001', '小明明'))
     expect(await detailOf(id)).toMatchObject({
       displayName: '明明',
+      nameLocked: true,
       identities: [{ displayName: '小明明' }],
     })
+    // 改回和平台上一样的名字也算改过：之后平台上再改名不跟
+    await api('PATCH', `/subjects/${id}`, { displayName: '小明明' })
+    await say('我又改名了', direct('1001', '小明三'))
+    expect((await detailOf(id)).displayName).toBe('小明明')
     expect((await api('PATCH', `/subjects/${id}`, {})).status).toBe(400)
   })
 
@@ -293,6 +301,35 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     )
     const cleared = await api('PATCH', `/subjects/${id}`, { linkedToMe: false })
     expect(((await cleared.json()) as SubjectInfo).account).toBeNull()
+
+    // 被降为 viewer 的成员撤得掉自己当初的标记，但不能标记、不能改名
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(subjects).set({ accountId: carol.accountId }).where(eq(subjects.id, id)),
+    )
+    expect(
+      (await api('PATCH', `/subjects/${id}`, { linkedToMe: false }, carol.cookie)).status,
+    ).toBe(200)
+    expect((await api('PATCH', `/subjects/${id}`, { linkedToMe: true }, carol.cookie)).status).toBe(
+      403,
+    )
+
+    // 抽取的失败原因可能带着模型接口的原文，viewer 只看到失败
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(extractionRuns).values({
+        spaceId: ws.spaceId,
+        appId,
+        scope: `direct:${id}`,
+        subjectIds: [id],
+        turns: 1,
+        error: '抽取模型返回 HTTP 401：令牌无效',
+      }),
+    )
+    const runError = async (cookie: string) => {
+      const res = await api('GET', `/subjects/${id}`, undefined, cookie)
+      return ((await res.json()) as SubjectDetail).runs[0]!.error
+    }
+    expect(await runError(ws.cookie)).toBe('抽取模型返回 HTTP 401：令牌无效')
+    expect(await runError(carol.cookie)).toBe('抽取失败')
   })
 
   it('别的空间的对象看不到也改不了', async () => {

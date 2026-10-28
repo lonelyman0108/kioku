@@ -28,10 +28,15 @@ const subject = useQuery({
 const data = computed(() => subject.data.value ?? null)
 const linkedToMe = computed(() => data.value?.account?.id === me.data.value?.id)
 
+// 输入框只在没被改动时跟着服务端的名字走：刷新时不冲掉正在输入的内容
 const name = ref('')
+let synced = ''
 watch(
   () => data.value?.displayName,
-  (value) => (name.value = value ?? ''),
+  (value) => {
+    if (name.value === synced) name.value = value ?? ''
+    synced = value ?? ''
+  },
   { immediate: true },
 )
 
@@ -116,7 +121,14 @@ function runCounts(run: ExtractionRunInfo): string {
             </div>
           </template>
           <div class="space-y-4">
-            <UFormField label="名字" help="改过之后，平台上的显示名再变也不跟着改">
+            <UFormField
+              label="名字"
+              :help="
+                data.nameLocked
+                  ? '改过名字了，平台上的显示名再变也不跟着改'
+                  : '改过之后，平台上的显示名再变也不跟着改'
+              "
+            >
               <div class="flex gap-2">
                 <UInput
                   v-model="name"
@@ -153,8 +165,8 @@ function runCounts(run: ExtractionRunInfo): string {
                 </template>
                 <template v-else-if="linkedToMe">
                   <UBadge color="primary" variant="subtle">这是你</UBadge>
+                  <!-- 取消自己的标记 viewer 也可以 -->
                   <UButton
-                    v-if="canEdit"
                     size="sm"
                     color="neutral"
                     variant="subtle"
@@ -204,8 +216,11 @@ function runCounts(run: ExtractionRunInfo): string {
 
         <UCard>
           <template #header>
-            <h2 class="text-sm font-medium">记下的事实（{{ data.facts.length }}）</h2>
+            <h2 class="text-sm font-medium">记下的事实（{{ data.factCount }}）</h2>
           </template>
+          <p v-if="data.factCount > data.facts.length" class="mb-2 text-xs text-muted">
+            只列出最近更新的 {{ data.facts.length }} 条。
+          </p>
           <p v-if="!data.facts.length" class="text-sm text-muted">还没有记下关于它的事。</p>
           <ul v-else class="divide-y divide-default">
             <li v-for="fact in data.facts" :key="fact.id" class="space-y-1 py-2">
