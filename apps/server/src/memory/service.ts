@@ -1033,6 +1033,37 @@ export class MemoryService {
     this.changed([id])
   }
 
+  // 删掉对象页上的一条事实（从对话里抽取、挂在这个对象上的）。确认过的也能删：
+  // 群里的新说法不会推翻确认过的事实，要不要留由成员在这里决定。看过之后被改过（版本变了）的不删
+  async deleteFact(subjectId: string, factId: string, version: number): Promise<void> {
+    await this.run(async (tx, personaIds) => {
+      const [row] = await tx
+        .select()
+        .from(memories)
+        .where(
+          and(
+            eq(memories.id, factId),
+            eq(memories.form, 'extracted'),
+            eq(memories.layer, 'subject'),
+            eq(memories.subjectId, subjectId),
+            readableConditions(this.ctx.access, { personaIds }),
+          ),
+        )
+        .for('update')
+      if (!row) throw new MemoryError(404, '事实不存在')
+      if (row.version !== version) throw new MemoryError(409, '这条事实刚被改过，请刷新后再删')
+      this.assertModifiable(row, `没有权限删除 ${row.layer} 层的记忆`)
+      const [gone] = await tx
+        .update(memories)
+        .set({ deletedAt: new Date(), updatedAt: new Date() })
+        .where(eq(memories.id, row.id))
+        .returning()
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      await this.event(tx, row.id, 'delete', snapshot(row, glossary), snapshot(gone!, glossary))
+    })
+    this.changed([factId])
+  }
+
   // 待审队列里的处理：确认（来源改成主人）或删除。只处理还在队列里的（pendingReview），
   // 别人处理过的、删掉的、读不到的、看过之后被改过（版本变了）的跳过；有一条改不了就整批不做
   async review(input: ReviewRequest): Promise<ReviewResult> {

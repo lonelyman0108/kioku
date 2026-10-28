@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type {
+  GroupPersonaRuleList,
   RecallResponse,
   SessionContextInput,
   SubjectDetail,
@@ -96,11 +97,41 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     group: { id: '2001', name: '读书会' },
     sender: { id: sender, name },
   })
-  const direct = (sender: string, name?: string): SessionContextInput => ({
+  const direct = (sender: string, name?: string, platform = 'qq'): SessionContextInput => ({
     chatType: 'direct',
-    platform: 'qq',
+    platform,
     sender: { id: sender, ...(name ? { name } : {}) },
   })
+  // 直接写一条抽取出的记忆（对象层的事实或情节层的摘要）
+  const extracted = (values: {
+    layer: 'subject' | 'episode'
+    content: string
+    originScope: string
+    subjectId?: string
+  }) =>
+    withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .insert(memories)
+        .values({
+          spaceId: ws.spaceId,
+          form: 'extracted',
+          sensitivity: 'public',
+          provenance: 'untrusted',
+          subjectId: values.subjectId ?? null,
+          expiresAt: values.layer === 'episode' ? new Date(Date.now() + 86_400_000) : null,
+          ...values,
+        })
+        .returning(),
+    )
+  const recallSubjects = async (context: SessionContextInput) => {
+    const res = await app.request(
+      '/v1/recall',
+      jsonRequest('POST', { query: '你好', context }, bearer(key)),
+    )
+    return ((await res.json()) as RecallResponse).subjects.flatMap((s) =>
+      s.facts.map((f) => f.content),
+    )
+  }
   const lifecycle = (body: Record<string, unknown>) =>
     app.request('/v1/lifecycle/event', jsonRequest('POST', body, bearer(key)))
   const say = async (user: string, context: SessionContextInput) => {
@@ -377,6 +408,143 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       tx.update(extractionRuns).set({ error: NO_USABLE_KEY }),
     )
     expect(await runError(carol.cookie)).toBe(NO_USABLE_KEY)
+  })
+
+  it('合并两个人：平台账号、事实、私聊里记下的与缓冲都归到保留的那个，私聊作用域换过来，群里记下的不动', async () => {
+    await chatInGroup()
+    await say('你好', direct('u1', '明', 'tg'))
+    const all = await listOf()
+    const keep = find(all, '小明')
+    const gone = find(all, '明')
+    await extracted({
+      layer: 'subject',
+      content: '住在上海',
+      originScope: `direct:${gone.id}`,
+      subjectId: gone.id,
+    })
+    await extracted({
+      layer: 'episode',
+      content: '私聊里聊了上海',
+      originScope: `direct:${gone.id}`,
+    })
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(extractionRuns).values({
+        spaceId: ws.spaceId,
+        appId,
+        scope: `direct:${gone.id}`,
+        subjectIds: [gone.id],
+        turns: 1,
+      }),
+    )
+
+    const res = await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as SubjectInfo).identities.map((i) => i.platform).sort()).toEqual([
+      'qq',
+      'tg',
+    ])
+    expect((await api('GET', `/subjects/${gone.id}`)).status).toBe(404)
+    const merged = await detailOf(keep.id)
+    expect(merged.facts.map((f) => [f.content, f.scope.kind, f.scope.name]).sort()).toEqual([
+      ['住在上海', 'direct', '小明'],
+      ['在学日语', 'group', '读书会'],
+    ])
+    expect(merged.summaries.map((s) => s.content)).toEqual(['私聊里聊了上海'])
+    expect(merged.runs.map((r) => r.scope.kind).sort()).toEqual(['direct', 'group'])
+    // 缓冲里还没抽取的那一轮也跟过来
+    const turns = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(turns.map((t) => [t.senderSubjectId, t.scope])).toContainEqual([
+      keep.id,
+      `direct:${keep.id}`,
+    ])
+    // 合并后用哪个平台账号私聊，都读得到私聊里记下的；群里记下的照旧只在群里
+    expect(await recallSubjects(direct('u1', undefined, 'tg'))).toEqual(['住在上海'])
+    expect(await recallSubjects(direct('1001'))).toEqual(['住在上海'])
+  })
+
+  it('合并的限制：人和群、自己、不同的成员都不行；viewer 不能合并', async () => {
+    await chatInGroup()
+    const all = await listOf()
+    const ming = find(all, '小明')
+    const hong = find(all, '小红')
+    expect(
+      (await api('POST', `/subjects/${ming.id}/merge`, { from: find(all, '读书会').id })).status,
+    ).toBe(400)
+    expect((await api('POST', `/subjects/${ming.id}/merge`, { from: ming.id })).status).toBe(400)
+    expect(
+      (await api('POST', `/subjects/${ming.id}/merge`, { from: crypto.randomUUID() })).status,
+    ).toBe(404)
+    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    expect(
+      (await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id }, carol.cookie)).status,
+    ).toBe(403)
+    // 两个都标记了、又是不同的成员
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: true })
+    await api('PATCH', `/subjects/${hong.id}`, { linkedToMe: true }, bob.cookie)
+    expect((await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id })).status).toBe(409)
+    // 只有被合并的那个标记了时，标记跟过来
+    await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: false })
+    const res = await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id })
+    expect(((await res.json()) as SubjectInfo).account?.id).toBe(bob.accountId)
+  })
+
+  it('合并两个群：按群换人格的规则跟过来，两边在同一个应用都有规则时留保留的那个', async () => {
+    await say('你好', group('1001', '小明'))
+    await say('hi', {
+      chatType: 'group',
+      platform: 'tg',
+      group: { id: 'g2', name: '读书会 TG' },
+      sender: { id: 'u1', name: '明' },
+    })
+    const all = await listOf('?kind=group')
+    const keep = find(all, '读书会')
+    const gone = find(all, '读书会 TG')
+    const serious = (await ws.createPersona('serious')).id
+    const cute = (await ws.createPersona('cute')).id
+    const other = (await ws.createApp('tg-bot', { runtimeFamily: 'astrbot' })).id
+    const rules = (id: string, list: unknown) =>
+      api('PUT', `/apps/${id}/group-personas`, { rules: list })
+    expect((await rules(appId, [{ subjectId: gone.id, personaId: serious }])).status).toBe(200)
+    await rules(other, [
+      { subjectId: keep.id, personaId: cute },
+      { subjectId: gone.id, personaId: serious },
+    ])
+
+    expect((await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })).status).toBe(200)
+    const listed = async (id: string) =>
+      (
+        (await (await api('GET', `/apps/${id}/group-personas`)).json()) as GroupPersonaRuleList
+      ).rules.map((r) => [r.subjectId, r.personaId])
+    expect(await listed(appId)).toEqual([[keep.id, serious]])
+    expect(await listed(other)).toEqual([[keep.id, cute]])
+  })
+
+  it('对象页能删事实：确认过的也能删；版本对不上返回 409；viewer 不能删；别的对象下的找不到', async () => {
+    await chatInGroup()
+    const all = await listOf()
+    const ming = find(all, '小明')
+    const [fact] = (await detailOf(ming.id)).facts
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(memories).set({ provenance: 'owner', version: 2 }).where(eq(memories.id, fact!.id)),
+    )
+    const del = (subject: string, version: number, cookie = ws.cookie) =>
+      app.request(
+        `/v1/spaces/${ws.spaceId}/subjects/${subject}/facts/${fact!.id}?version=${version}`,
+        {
+          method: 'DELETE',
+          headers: { cookie, 'sec-fetch-site': 'same-origin' },
+        },
+      )
+    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    expect((await del(ming.id, 2, carol.cookie)).status).toBe(403)
+    expect((await del(find(all, '小红').id, 2)).status).toBe(404)
+    expect((await del(ming.id, 1)).status).toBe(409)
+    expect((await del(ming.id, 2)).status).toBe(204)
+    expect((await detailOf(ming.id)).facts).toEqual([])
+    expect(find(await listOf(), '小明').factCount).toBe(0)
   })
 
   it('别的空间的对象看不到也改不了', async () => {

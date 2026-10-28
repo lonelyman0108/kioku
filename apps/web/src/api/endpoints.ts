@@ -242,6 +242,15 @@ export const api = {
     request('GET', `/spaces/${spaceId}/subjects/${id}`, { schema: SubjectDetail }),
   updateSubject: (spaceId: string, id: string, body: UpdateSubjectRequest) =>
     request('PATCH', `/spaces/${spaceId}/subjects/${id}`, { body, schema: SubjectInfo }),
+  mergeSubject: (spaceId: string, id: string, from: string) =>
+    request('POST', `/spaces/${spaceId}/subjects/${id}/merge`, {
+      body: { from },
+      schema: SubjectInfo,
+    }),
+  deleteFact: (spaceId: string, subjectId: string, factId: string, version: number) =>
+    request('DELETE', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}`, {
+      query: { version },
+    }),
   reviewQueue: (spaceId: string, query: ReviewQuery) =>
     request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),
   review: (spaceId: string, body: ReviewRequest) =>
