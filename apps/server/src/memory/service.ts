@@ -17,11 +17,18 @@ import type {
   MemoryListQuery,
   MemoryListSort,
   MemoryMatch,
+  MemoryRecallStat,
   MemorySnapshot,
   MemorySummary,
   MemoryView,
   MoveMemoryRequest,
+  NeverRecalledMemory,
   PageQuery,
+  RecalledMemory,
+  RecallEventList,
+  RecallEventQuery,
+  RecallSource,
+  RecallVia,
   RestoreRequest,
   Sensitivity,
   UndeleteRequest,
@@ -40,6 +47,7 @@ import {
   isNotNull,
   isNull,
   like,
+  lt,
   lte,
   or,
   sql,
@@ -75,6 +83,9 @@ import {
   memoryEmbeddings,
   memoryEvents,
   memoryGlossary,
+  memoryRecallStats,
+  recallEventHits,
+  recallEvents,
 } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { readableConditions, snapshotColumns, type MemoryColumns } from './filter'
@@ -120,6 +131,7 @@ export interface MemoryStats {
   total: number
   missingDisclosure: number
   plaintextCredentials: number
+  neverRecalled: number
   eligible: number
   embedded: number
 }
@@ -1178,8 +1190,22 @@ export class MemoryService {
 
   // 概览统计。向量覆盖率只算应当有向量的记忆：读得到、不是 secret、有正文；
   // model 为 null（还没配置嵌入模型）时已有向量记为 0
-  async stats(model: string | null): Promise<MemoryStats> {
+  async stats(model: string | null, recallRetentionDays: number): Promise<MemoryStats> {
     return this.run(async (tx, personaIds) => {
+      // 建了超过保留天数还没被召回过的：刚建的记忆还没来得及被用到，不算
+      const [never] = await tx
+        .select({ n: count() })
+        .from(memories)
+        .where(
+          and(
+            this.listable(personaIds),
+            NEVER_RECALLED,
+            lte(
+              memories.createdAt,
+              sql`now() - make_interval(days => ${recallRetentionDays}::int)`,
+            ),
+          ),
+        )
       const groups = await tx
         .select({
           layer: memories.layer,
@@ -1212,11 +1238,177 @@ export class MemoryService {
         total: groups.reduce((sum, g) => sum + g.count, 0),
         missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
         plaintextCredentials: groups.reduce((sum, g) => sum + g.plaintext, 0),
+        neverRecalled: never?.n ?? 0,
         eligible: coverage?.eligible ?? 0,
         embedded: coverage?.embedded ?? 0,
       }
     })
   }
+  // ---- 召回统计（管理界面）----
+  // 记忆按成员在管理界面里看得到的算，累计次数跟着记忆的可见性走。
+  // 次数 = 还留着的明细里的命中次数 + 清理明细时并入的累计
+
+  // 被召回次数最多的，与从没被召回的（secret 本来就不进召回，不算）
+  async recallRanking(limits: {
+    top: number
+    never: number
+  }): Promise<{ top: RecalledMemory[]; never: NeverRecalledMemory[]; neverTotal: number }> {
+    return this.run(async (tx, personaIds) => {
+      const visible = and(this.listable(personaIds), eq(memories.form, 'curated'))
+      const top = await tx.execute<{
+        id: string
+        domain: string
+        path: string
+        layer: Layer
+        sensitivity: Sensitivity
+        recent: number
+        total: number
+        last: string | null
+      }>(sql`
+        with recent as (
+          select h.memory_id, count(*)::int as hits, max(e.created_at) as last
+          from ${recallEventHits} h join ${recallEvents} e on e.id = h.event_id
+          group by h.memory_id
+        )
+        select ${memories.id} as id, ${memories.domain} as domain, ${memories.path} as path,
+          ${memories.layer} as layer, ${memories.sensitivity} as sensitivity,
+          coalesce(r.hits, 0) as recent, coalesce(r.hits, 0) + coalesce(s.count, 0) as total,
+          greatest(r.last, s.last_recalled_at) as last
+        from ${memories}
+        left join recent r on r.memory_id = ${memories.id}
+        left join ${memoryRecallStats} s on s.memory_id = ${memories.id}
+        where ${visible} and (r.hits is not null or s.count is not null)
+        order by total desc, last desc, ${memories.id}
+        limit ${limits.top}`)
+      const neverWhere = and(visible, NEVER_RECALLED)
+      const [never, [total]] = await Promise.all([
+        tx
+          .select({
+            id: memories.id,
+            domain: memories.domain,
+            path: memories.path,
+            layer: memories.layer,
+            sensitivity: memories.sensitivity,
+            createdAt: memories.createdAt,
+          })
+          .from(memories)
+          .where(neverWhere)
+          .orderBy(asc(memories.createdAt), asc(memories.id))
+          .limit(limits.never),
+        tx.select({ n: count() }).from(memories).where(neverWhere),
+      ])
+      return {
+        top: top.map((r) => ({
+          id: r.id,
+          uri: formatUri(r.domain, r.path),
+          layer: r.layer,
+          sensitivity: r.sensitivity,
+          recent: Number(r.recent),
+          total: Number(r.total),
+          lastRecalledAt: r.last ? new Date(r.last).toISOString() : null,
+        })),
+        never: never.map((r) => ({
+          id: r.id,
+          uri: formatUri(r.domain!, r.path!),
+          layer: r.layer,
+          sensitivity: r.sensitivity,
+          createdAt: r.createdAt.toISOString(),
+        })),
+        neverTotal: total?.n ?? 0,
+      }
+    })
+  }
+
+  // 一条记忆被召回的次数；管理读取读不到时和不存在一样是 404
+  async recallStat(memoryId: string): Promise<MemoryRecallStat> {
+    return this.run(async (tx) => {
+      await this.findManageable(tx, memoryId)
+      const [recent] = await tx
+        .select({ n: count(), last: sql<string | null>`max(${recallEvents.createdAt})` })
+        .from(recallEventHits)
+        .innerJoin(recallEvents, eq(recallEvents.id, recallEventHits.eventId))
+        .where(eq(recallEventHits.memoryId, memoryId))
+      const [merged] = await tx
+        .select()
+        .from(memoryRecallStats)
+        .where(eq(memoryRecallStats.memoryId, memoryId))
+      const times = [recent?.last ? new Date(recent.last) : null, merged?.lastRecalledAt ?? null]
+        .filter((t): t is Date => t !== null)
+        .map((t) => t.getTime())
+      return {
+        recent: recent?.n ?? 0,
+        total: (recent?.n ?? 0) + (merged?.count ?? 0),
+        lastRecalledAt: times.length ? new Date(Math.max(...times)).toISOString() : null,
+      }
+    })
+  }
+
+  // 召回事件的明细只给事件发生时的应用主人：按这位成员是事件里记下的主人过滤。
+  // 命中的记忆现在按管理读取看不到的（例如被移进了别的成员的私人层），不给 URI
+  async recallEvents(query: RecallEventQuery, limit: number): Promise<RecallEventList> {
+    return this.run(async (tx) => {
+      const keyVisible = this.ctx.access.admin
+        ? sql`true`
+        : sql`${apps.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
+      const rows = await tx
+        .select({
+          event: recallEvents,
+          appName: apps.name,
+          keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
+        })
+        .from(recallEvents)
+        .leftJoin(apps, eq(apps.id, recallEvents.appId))
+        .leftJoin(apiKeys, eq(apiKeys.id, recallEvents.keyId))
+        .where(
+          and(
+            eq(recallEvents.ownerAccountId, this.ctx.access.ownerAccountId),
+            query.appId ? eq(recallEvents.appId, query.appId) : undefined,
+            query.cursor ? lt(recallEvents.id, Number(query.cursor)) : undefined,
+          ),
+        )
+        .orderBy(desc(recallEvents.id))
+        .limit(limit + 1)
+      const items = rows.slice(0, limit)
+      const ids = items.map((r) => r.event.id)
+      const hits = ids.length
+        ? await tx
+            .select({
+              eventId: recallEventHits.eventId,
+              rank: recallEventHits.rank,
+              score: recallEventHits.score,
+              via: recallEventHits.via,
+              domain: memories.domain,
+              path: memories.path,
+              shown: sql<boolean>`coalesce(${this.manageable()}, false)`,
+            })
+            .from(recallEventHits)
+            .leftJoin(memories, eq(memories.id, recallEventHits.memoryId))
+            .where(inArray(recallEventHits.eventId, ids))
+            .orderBy(asc(recallEventHits.eventId), asc(recallEventHits.rank))
+        : []
+      return {
+        items: items.map((r) => ({
+          id: r.event.id,
+          appId: r.event.appId,
+          appName: r.appName,
+          keyName: r.keyName,
+          source: r.event.source as RecallSource,
+          query: r.event.query,
+          createdAt: r.event.createdAt.toISOString(),
+          hits: hits
+            .filter((h) => h.eventId === r.event.id)
+            .map((h) => ({
+              uri: h.shown && h.domain && h.path ? formatUri(h.domain, h.path) : null,
+              rank: h.rank,
+              score: Math.round(h.score * 100) / 100,
+              via: h.via as RecallVia[],
+            })),
+        })),
+        nextCursor: rows.length > limit && items.length ? String(items.at(-1)!.event.id) : null,
+      }
+    })
+  }
+
   // ---- 历史、撤销删除与恢复（管理界面）----
   // 可见性都用管理读取判断：读的规则去掉有效期与删除状态，人格不限（见 canRead 的 management）
 
@@ -1638,6 +1830,11 @@ const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content}
 
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
+
+// 从没被召回过：保留期内的明细里没有，清理时也没并入过累计。secret 本来就不进召回，不算
+const NEVER_RECALLED = sql`(${memories.sensitivity} <> 'secret'
+  and not exists (select 1 from ${recallEventHits} h where h.memory_id = ${memories.id})
+  and not exists (select 1 from ${memoryRecallStats} s where s.memory_id = ${memories.id}))`
 
 // 正文像有明文密码或 Token：与界面、导入工具同一条规则（PLAINTEXT_CREDENTIAL），PostgreSQL 的正则照原样能用，
 // ~* 不区分大小写，对应它的 i 标记。secret 的正文是密文（content 为空），结果为 NULL，不算

@@ -243,6 +243,8 @@ export const SpaceOverview = z.object({
   missingDisclosure: z.number().int(),
   // 正文像有明文密码或 Token、该换成凭据占位符的记忆数
   plaintextCredentials: z.number().int(),
+  // 建了超过召回事件保留天数、却从没被召回过的记忆数（secret 不算）
+  neverRecalled: z.number().int(),
   embedding: EmbeddingCoverage,
   apps: z.array(OverviewApp),
   // 最近的改动，和活动流同样的可见性

@@ -167,3 +167,90 @@ export const RECALL_SOURCES = [
 ] as const
 export const RecallSource = z.enum(RECALL_SOURCES)
 export type RecallSource = z.infer<typeof RecallSource>
+
+// 一条记忆被召回的次数：recent 是保留期内的明细里的次数，total 再加上清理时并入的累计
+export const MemoryRecallStat = z.object({
+  recent: z.number().int(),
+  total: z.number().int(),
+  // 最后一次被召回的时间；从没被召回时为 null
+  lastRecalledAt: z.string().nullable(),
+})
+export type MemoryRecallStat = z.infer<typeof MemoryRecallStat>
+
+export const RecalledMemory = MemoryRecallStat.extend({
+  id: z.uuid(),
+  uri: z.string(),
+  layer: Layer,
+  sensitivity: Sensitivity,
+})
+export type RecalledMemory = z.infer<typeof RecalledMemory>
+
+export const NeverRecalledMemory = z.object({
+  id: z.uuid(),
+  uri: z.string(),
+  layer: Layer,
+  sensitivity: Sensitivity,
+  createdAt: z.string(),
+})
+export type NeverRecalledMemory = z.infer<typeof NeverRecalledMemory>
+
+// 一个应用在保留期内的召回次数，按来路分；应用已经删掉时 name 为 null
+export const AppRecallVolume = z.object({
+  appId: z.uuid(),
+  name: z.string().nullable(),
+  total: z.number().int(),
+  sources: z.array(z.object({ source: RecallSource, count: z.number().int() })),
+})
+export type AppRecallVolume = z.infer<typeof AppRecallVolume>
+
+// 召回分析：记忆按查看者在管理界面里看得到的算，累计次数跟着记忆的可见性走；
+// 各应用的调用量只列查看者能管 Key 的应用（应用主人与空间 owner）
+export const RecallStats = z.object({
+  retentionDays: z.number().int(),
+  apps: z.array(AppRecallVolume),
+  // 被召回次数最多的
+  top: z.array(RecalledMemory),
+  // 从没被召回的（secret 本来就不进召回，不算），最早建的在前；neverTotal 是总数
+  never: z.array(NeverRecalledMemory),
+  neverTotal: z.number().int(),
+})
+export type RecallStats = z.infer<typeof RecallStats>
+
+// 召回事件的明细只给事件发生时的应用主人看
+export const RecallEventView = z.object({
+  id: z.number().int(),
+  appId: z.uuid(),
+  appName: z.string().nullable(),
+  keyName: z.string().nullable(),
+  source: RecallSource,
+  // 打过码的提示语前 200 字；应用关掉了记录提示语时为 null
+  query: z.string().nullable(),
+  createdAt: z.string(),
+  // 命中的记忆；现在看不到了的（例如被移进别的成员的私人层）uri 为 null
+  hits: z.array(
+    z.object({
+      uri: z.string().nullable(),
+      rank: z.number().int(),
+      score: z.number(),
+      via: z.array(RecallVia),
+    }),
+  ),
+})
+export type RecallEventView = z.infer<typeof RecallEventView>
+
+export const RecallEventQuery = z.object({
+  appId: z.uuid().optional(),
+  // 上一页最后一条的 id
+  cursor: z
+    .string()
+    .regex(/^\d{1,18}$/)
+    .optional(),
+})
+export type RecallEventQuery = z.infer<typeof RecallEventQuery>
+
+export const RecallEventList = z.object({
+  items: z.array(RecallEventView),
+  // 为 null 表示已经是最后一页
+  nextCursor: z.string().nullable(),
+})
+export type RecallEventList = z.infer<typeof RecallEventList>
