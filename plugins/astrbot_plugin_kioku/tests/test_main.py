@@ -57,7 +57,8 @@ def test_group_turn_injects_boot_and_recall_and_reports_the_turn():
         sender_name="群名片",
         text="周五读什么",
     )
-    req = asyncio.run(one_turn(plugin_with(sent), event))
+    plugin = plugin_with(sent)
+    req = asyncio.run(one_turn(plugin, event))
     # 很少变的人格与基础规则进系统提示；每轮的召回作为临时的额外内容，不进对话历史
     assert req.system_prompt == "你是豆包。\n\n人格与基础规则"
     assert [(p.text, p.temp) for p in req.extra_user_content_parts] == [
@@ -68,6 +69,8 @@ def test_group_turn_injects_boot_and_recall_and_reports_the_turn():
     assert turn_end["context"]["group"] == {"id": "2001"}
     assert turn_end["context"]["sender"] == {"id": "1002", "name": "群名片"}
     assert (turn_end["user"], turn_end["reply"]) == ("周五读什么", "还没定")
+    # 停用或重载插件时等上报发完，再关掉连接池
+    assert plugin.bridge._client.get_async_httpx_client().is_closed
 
 
 def test_private_and_owner_private_turns_report_the_sender():

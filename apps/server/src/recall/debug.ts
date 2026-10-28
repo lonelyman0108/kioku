@@ -10,6 +10,7 @@ import type { Deps, KeyPrincipal } from '../http/env'
 import {
   PROMPT_RECALL_LIMIT,
   PROMPT_SEMANTIC_TIMEOUT_MS,
+  recallBlock,
   sessionStart,
 } from '../lifecycle/lifecycle'
 import { accessForKey, recallScopeForKey, semanticFor } from '../memory/context'
@@ -18,7 +19,6 @@ import { formatUri } from '../memory/uri'
 import { bootEntryChars } from './boot'
 import {
   DEFAULT_MIN_SCORE,
-  formatRecallBlock,
   normalizeQuery,
   publicCandidate,
   scoreRecall,
@@ -97,7 +97,12 @@ export async function recallDebug(
     injected: injected.map(toDebug),
     others: scored.filter((c) => !shown.has(c.id)).map(toDebug),
     minScore: DEFAULT_MIN_SCORE,
-    block: formatRecallBlock(injected),
+    // 和每轮输入用同一段代码：群聊 bot 的召回块带正文
+    block: await recallBlock(
+      recallScopeForKey(deps, key),
+      key.app.runtimeFamily,
+      injected.map(publicCandidate),
+    ),
     semantic: semantic !== null,
     filtered,
   }

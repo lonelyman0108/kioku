@@ -319,8 +319,15 @@ export function clipChars(text: string, max: number, suffix = ''): string {
 // 带正文时每条最多这么多字
 const INLINE_CONTENT_CHARS = 300
 
+// 正文的开头，压成单行、去掉尖括号。正文可能很长，先粗截一段再处理；截掉了内容就接上省略号
+function contentHead(content: string): string {
+  const head = clipChars(content, INLINE_CONTENT_CHARS * 4)
+  const text = clipChars(inlineText(head), INLINE_CONTENT_CHARS, '…')
+  return head !== content && !text.endsWith('…') ? `${text}…` : text
+}
+
 // 与 Lore 的 <recall> 块格式一致：每行「分数 | URI | 线索」。contents（URI → 正文）给了时第三栏换成正文的开头：
-// 给读不了正文的宿主（例如不能调记忆工具的群聊 bot）用。正文同样压成单行、去掉尖括号
+// 给读不了正文的宿主（例如不能调记忆工具的群聊 bot）用；正文处理完是空的就仍给线索
 export function formatRecallBlock(
   candidates: RecallCandidate[],
   sessionId?: string,
@@ -331,9 +338,9 @@ export function formatRecallBlock(
   const open = safeSession ? `<recall session_id="${safeSession}">` : '<recall>'
   const lines = candidates.map((c) => {
     const content = contents?.get(c.uri)
-    const cues = content
-      ? clipChars(inlineText(content), INLINE_CONTENT_CHARS, '…')
-      : inlineText(c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''))
+    const cues =
+      (content && contentHead(content)) ||
+      inlineText(c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''))
     return `${c.score.toFixed(2)} | ${c.uri}${cues ? ` | ${cues}` : ''}`
   })
   return [open, ...lines, '</recall>'].join('\n')

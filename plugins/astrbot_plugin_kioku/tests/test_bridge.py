@@ -4,7 +4,16 @@ import asyncio
 import json
 
 import httpx
-from astrbot_plugin_kioku.bridge import BOOT_TTL_SECONDS, KiokuBridge, Turn, platform_of
+from astrbot_plugin_kioku.bridge import (
+    BOOT_RETRY_SECONDS,
+    BOOT_TTL_SECONDS,
+    MAX_SESSION_ID,
+    MAX_TEXT,
+    KiokuBridge,
+    Turn,
+    clip,
+    platform_of,
+)
 
 PRIVATE = Turn(
     platform="aiocqhttp",
@@ -87,6 +96,30 @@ def test_boot_is_cached_per_session(monkeypatch):
     clock[0] += BOOT_TTL_SECONDS + 1
     asyncio.run(bridge.boot(GROUP))
     assert len(sent) == 3
+
+
+def test_boot_failures_are_retried_after_a_while(monkeypatch):
+    bridge, sent = bridge_with(lambda _r: httpx.Response(500, text="服务内部错误"))
+    clock = [1000.0]
+    monkeypatch.setattr("astrbot_plugin_kioku.bridge.time.monotonic", lambda: clock[0])
+    assert asyncio.run(bridge.boot(GROUP)) is None
+    assert asyncio.run(bridge.boot(GROUP)) is None
+    assert len(sent) == 1
+    clock[0] += BOOT_RETRY_SECONDS + 1
+    asyncio.run(bridge.boot(GROUP))
+    assert len(sent) == 2
+
+
+def test_long_text_is_clipped_by_utf16_length():
+    # 服务端按 JS 字符串的长度数：表情符号一个占两个码元，按字数截会超出上限
+    bridge, sent = bridge_with(answer("<recall>…</recall>"))
+    long_turn = Turn(**{**GROUP.__dict__, "session_id": "s" * 300, "text": "😀" * 15_000})
+    asyncio.run(bridge.recall(long_turn))
+    assert sent[0]["prompt"] == "😀" * (MAX_TEXT // 2)
+    assert sent[0]["sessionId"] == "s" * MAX_SESSION_ID
+    # 截断处落在一个表情符号中间时整个丢掉，不留半个
+    assert clip("a" + "😀" * 3, 4) == "a😀"
+    assert clip("短", 4) == "短"
 
 
 def test_turn_end_reports_the_reply_and_skips_empty_turns():

@@ -88,6 +88,24 @@ describe('每轮输入的召回', () => {
     )
   })
 
+  it('正文太长只带开头、接上省略号；处理完是空的仍给线索', async () => {
+    const lineFor = async (body: string) => {
+      const res = await handleLifecycle(
+        scopeWith(
+          async () => [],
+          async (ids) => new Map(ids.map((id) => [id, body])),
+        ),
+        'astrbot',
+        { event: 'prompt.submit', prompt: '规则' },
+      )
+      return contextOf(res.hostOutput.value).split('\n')[1]
+    }
+    expect(await lineFor('长'.repeat(1_000))).toBe(`0.50 | core://rules | ${'长'.repeat(300)}…`)
+    // 粗截的那一段压完空白只剩两个字，也要标出后面还有
+    expect(await lineFor(`开头${' '.repeat(2_000)}结尾`)).toBe('0.50 | core://rules | 开头…')
+    expect(await lineFor('<<>>\n\t')).toBe('0.50 | core://rules | 规则')
+  })
+
   it('读正文失败时退回只给线索的召回块', async () => {
     const warn = vi.spyOn(console, 'warn').mockImplementation(() => {})
     const res = await handleLifecycle(
@@ -125,6 +143,8 @@ describe('每轮输入的召回', () => {
     expect(contextOf(res.hostOutput.value)).toBe(
       `${CHAT_GUIDANCE}\n\n<kioku-boot>\n## persona://bot\n\n你是读书会的助手。\n</kioku-boot>`,
     )
+    // 取不到凭据，但要知道占位符不能念出来
+    expect(CHAT_GUIDANCE).toContain('{{cred:')
     expect(recent).not.toHaveBeenCalled()
     expect(recall).not.toHaveBeenCalled()
     expect(res.nodeUris).toEqual(['persona://bot'])

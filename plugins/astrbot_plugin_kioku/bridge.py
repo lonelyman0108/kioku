@@ -32,10 +32,13 @@ logger = logging.getLogger("astrbot_plugin_kioku")
 
 # 服务端的平台标识只收小写字母、数字和 _.-，开头是字母或数字，最长 32 个字
 NOT_PLATFORM = re.compile(r"[^a-z0-9_.-]")
-# 服务端的消息长度上限
+# 服务端的长度上限：消息与会话标识，按 UTF-16 码元数（JS 字符串的长度）
 MAX_TEXT = 20_000
+MAX_SESSION_ID = 200
 # 会话开始的启动上下文（人格与基础规则）很少变，按会话缓存这么久，不必每轮都请求
 BOOT_TTL_SECONDS = 600
+# 启动上下文没取到（Kioku 不可用或没有内容）时，过这么久再试
+BOOT_RETRY_SECONDS = 60
 
 
 @dataclass(frozen=True)
@@ -48,6 +51,14 @@ class Turn:
     sender_id: str
     sender_name: str | None
     text: str
+
+
+def clip(text: str, limit: int) -> str:
+    """按 UTF-16 码元截断：服务端按 JS 字符串的长度数，表情符号这类字占两个。不切开代理对。"""
+    units = text.encode("utf-16-le", "surrogatepass")
+    if len(units) <= limit * 2:
+        return text
+    return units[: limit * 2].decode("utf-16-le", "ignore")
 
 
 def platform_of(name: str) -> str:
@@ -91,31 +102,30 @@ class KiokuBridge:
             if base_url and key
             else None
         )
-        self._boot: dict[str, tuple[float, str]] = {}
+        # 会话标识 → （到期时间，启动上下文）
+        self._boot: dict[str, tuple[float, str | None]] = {}
 
     @property
     def enabled(self) -> bool:
         return self._client is not None
 
     async def boot(self, turn: Turn) -> str | None:
-        """会话开始时注入的人格与基础规则，按会话缓存。"""
+        """会话开始时注入的人格与基础规则，按会话缓存；没取到的也记下，过一会儿再试。"""
         now = time.monotonic()
         cached = self._boot.get(turn.session_id)
-        if cached and now - cached[0] < BOOT_TTL_SECONDS:
+        if cached and now < cached[0]:
             return cached[1]
         context = await self._send(
             SessionStartEvent(
                 event=SessionStartEventEvent.SESSION_START,
-                session_id=turn.session_id,
+                session_id=clip(turn.session_id, MAX_SESSION_ID),
                 context=session_context(turn),
             )
         )
-        if context is not None:
-            # 顺手清掉过期的，缓存不会越攒越多
-            self._boot = {
-                sid: entry for sid, entry in self._boot.items() if now - entry[0] < BOOT_TTL_SECONDS
-            }
-            self._boot[turn.session_id] = (now, context)
+        # 顺手清掉过期的，缓存不会越攒越多
+        self._boot = {sid: entry for sid, entry in self._boot.items() if now < entry[0]}
+        ttl = BOOT_TTL_SECONDS if context is not None else BOOT_RETRY_SECONDS
+        self._boot[turn.session_id] = (now + ttl, context)
         return context
 
     async def recall(self, turn: Turn) -> str | None:
@@ -125,8 +135,8 @@ class KiokuBridge:
         return await self._send(
             PromptSubmitEvent(
                 event=PromptSubmitEventEvent.PROMPT_SUBMIT,
-                prompt=turn.text[:MAX_TEXT],
-                session_id=turn.session_id,
+                prompt=clip(turn.text, MAX_TEXT),
+                session_id=clip(turn.session_id, MAX_SESSION_ID),
                 context=session_context(turn),
             )
         )
@@ -138,12 +148,17 @@ class KiokuBridge:
         await self._send(
             TurnEndEvent(
                 event=TurnEndEventEvent.TURN_END,
-                session_id=turn.session_id,
+                session_id=clip(turn.session_id, MAX_SESSION_ID),
                 context=session_context(turn),
-                user=turn.text[:MAX_TEXT],
-                reply=reply[:MAX_TEXT],
+                user=clip(turn.text, MAX_TEXT),
+                reply=clip(reply, MAX_TEXT),
             )
         )
+
+    async def aclose(self) -> None:
+        """关掉到 Kioku 的连接池，插件停用或重载时调用。"""
+        if self._client is not None:
+            await self._client.get_async_httpx_client().aclose()
 
     async def _send(self, body: SessionStartEvent | PromptSubmitEvent | TurnEndEvent) -> str | None:
         if self._client is None:

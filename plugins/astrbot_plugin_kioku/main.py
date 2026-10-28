@@ -73,6 +73,7 @@ class KiokuPlugin(Star):
     async def terminate(self) -> None:
         if self._pending:
             await asyncio.gather(*self._pending, return_exceptions=True)
+        await self.bridge.aclose()
 
 
 async def _nothing() -> None:
