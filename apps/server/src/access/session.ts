@@ -75,23 +75,34 @@ export async function resolveKeySession(
     const group = await resolveSubject(tx, key.spaceId, platform, 'group', input.group!, {
       refresh: true,
     })
-    const [rule] = await tx
-      .select({ personaId: appGroupPersonas.personaId })
-      .from(appGroupPersonas)
-      .where(and(eq(appGroupPersonas.appId, key.app.id), eq(appGroupPersonas.subjectId, group.id)))
     return {
       context: {
         chatType,
         groupSubjectId: group.id,
         ...(sender ? { senderSubjectId: sender.id } : {}),
       },
-      personaId: rule?.personaId ?? key.app.defaultPersonaId,
+      personaId: await groupPersona(tx, key, group.id),
       subjects: [
         ...(sender ? [{ id: sender.id, role: 'sender' as const, name: sender.name }] : []),
         { id: group.id, role: 'group', name: group.name },
       ],
     }
   })
+}
+
+// 群里用的人格：有按群换人格的规则时用规则里的，没有时用应用的默认人格
+export async function groupPersona(
+  tx: Tx,
+  key: KeyPrincipal,
+  groupSubjectId: string,
+): Promise<string | null> {
+  const [rule] = await tx
+    .select({ personaId: appGroupPersonas.personaId })
+    .from(appGroupPersonas)
+    .where(
+      and(eq(appGroupPersonas.appId, key.app.id), eq(appGroupPersonas.subjectId, groupSubjectId)),
+    )
+  return rule?.personaId ?? key.app.defaultPersonaId
 }
 
 async function resolveSubject(

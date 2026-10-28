@@ -191,6 +191,13 @@ async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<voi
   if (app?.owner !== owner) throw new MemoryError(403, '这个应用已经不属于导入者')
 }
 
+// 抽取写下的记忆：对象层的事实挂在对象上，可以推翻同一个对象的一条旧事实；情节层的会话摘要带到期时间
+export type ExtractedWrite =
+  | { layer: 'subject'; subjectId: string; content: string; replaces?: string | undefined }
+  | { layer: 'episode'; content: string; expiresAt: Date }
+
+export type ExtractedOutcome = 'added' | 'updated' | 'skipped'
+
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
   eventType?: 'create' | 'import'
@@ -659,6 +666,97 @@ export class MemoryService {
       )
       return this.toView(row!, glossary)
     })
+  }
+
+  // 写下一批抽取的结果（对象层的事实与情节层的会话摘要，没有 URI、不建向量），连同调用方的收尾
+  // （记抽取记录、删掉用过的缓冲）在同一个事务里：中途失败整批回滚，后台任务重试时不会重复写入。
+  // 敏感级 public，来源与来源作用域按这次的会话上下文；逐条检查权限与凭据占位符（对话来的内容不能新增引用），
+  // 写不进去的那条跳过。replaces 指向这次读得到、写得了、还有效的同一个对象的事实时推翻它：旧的设 valid_to
+  // 保留历史，再写一条新的；找不到或写不了时当作新的事实
+  async writeExtraction(
+    items: readonly ExtractedWrite[],
+    eventContext: Record<string, unknown>,
+    finish: (tx: Tx, outcomes: ExtractedOutcome[]) => Promise<void>,
+  ): Promise<ExtractedOutcome[]> {
+    return this.run(async (tx) => {
+      const outcomes: ExtractedOutcome[] = []
+      for (const item of items) outcomes.push(await this.writeExtracted(tx, item, eventContext))
+      await finish(tx, outcomes)
+      return outcomes
+    })
+  }
+
+  private async writeExtracted(
+    tx: Tx,
+    item: ExtractedWrite,
+    eventContext: Record<string, unknown>,
+  ): Promise<ExtractedOutcome> {
+    const sensitivity = 'public' as const
+    try {
+      this.assertWritable(
+        { layer: item.layer, sensitivity, appId: null, personaId: null },
+        `没有权限写 ${item.layer} 层的记忆`,
+      )
+      await this.checkCredentialRefs(
+        tx,
+        { layer: item.layer, sensitivity, ownerAccountId: null, content: item.content },
+        null,
+      )
+    } catch (err) {
+      if (err instanceof MemoryError) return 'skipped'
+      throw err
+    }
+    const [found] =
+      item.layer === 'subject' && item.replaces
+        ? await tx
+            .select()
+            .from(memories)
+            .where(
+              and(
+                eq(memories.id, item.replaces),
+                eq(memories.form, 'extracted'),
+                eq(memories.layer, 'subject'),
+                eq(memories.subjectId, item.subjectId),
+                readableConditions(this.ctx.access, { personaIds: [] }),
+              ),
+            )
+            .for('update')
+        : []
+    // 推翻也是改那一条：读得到但写不了时不动它，当作新的事实
+    const before = found && canWrite(this.ctx.access, found) ? found : undefined
+    const [row] = await tx
+      .insert(memories)
+      .values({
+        id: randomUUID(),
+        spaceId: this.ctx.spaceId,
+        form: 'extracted',
+        layer: item.layer,
+        sensitivity,
+        provenance: this.ctx.access.writeProvenance,
+        originScope: this.ctx.access.writeOriginScope,
+        subjectId: item.layer === 'subject' ? item.subjectId : null,
+        content: item.content,
+        expiresAt: item.layer === 'episode' ? item.expiresAt : null,
+      })
+      .returning()
+    if (!before) {
+      await this.event(tx, row!.id, 'create', null, snapshot(row!, []), eventContext)
+      return 'added'
+    }
+    const [after] = await tx
+      .update(memories)
+      .set({ validTo: sql`now()`, version: before.version + 1, updatedAt: sql`now()` })
+      .where(eq(memories.id, before.id))
+      .returning()
+    await this.event(tx, before.id, 'update', snapshot(before, []), snapshot(after!, []), {
+      ...eventContext,
+      supersededBy: row!.id,
+    })
+    await this.event(tx, row!.id, 'create', null, snapshot(row!, []), {
+      ...eventContext,
+      supersedes: before.id,
+    })
+    return 'updated'
   }
 
   private seal(plaintext: string, id: string) {
@@ -1439,7 +1537,8 @@ export class MemoryService {
   // 记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
   // 只给应用主人与空间 owner（管理界面里 admin 就是空间 owner）看，别人只看到应用名。
   // checkMemory 为 true 时普通事件只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断。
-  // 「离开」的事件不看记忆现在的状态：离开之后，原来看得到它的人本来就读不到了
+  // 「离开」的事件不看记忆现在的状态：离开之后，原来看得到它的人本来就读不到了。
+  // 只列策展记忆的事件：抽取的记忆没有 URI，活动流与历史都按 URI 展示，它们另在对象页里看
   private eventRows(
     tx: Tx,
     where: SQL | undefined,
@@ -1471,6 +1570,7 @@ export class MemoryService {
       .where(
         and(
           where,
+          eq(memories.form, 'curated'),
           or(and(checkMemory ? this.manageable() : undefined, this.visibleEvent()), departure),
         ),
       )

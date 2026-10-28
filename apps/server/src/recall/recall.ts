@@ -295,10 +295,19 @@ export async function scoreRecall(
 
 const round = (n: number) => Math.round(n * 100) / 100
 
+// 压成单行：去掉控制字符（数据库的文本里存不了 \u0000），连续的空白换成一个空格
+export function oneLine(text: string): string {
+  const printable = [...text].filter((ch) => {
+    const code = ch.codePointAt(0)!
+    return code >= 0x20 ? code !== 0x7f : /\s/.test(ch)
+  })
+  return printable.join('').replace(/\s+/g, ' ').trim()
+}
+
 // 召回块会原样进入宿主的上下文。disclosure 与关键词可能来自不可信的写入者，
 // 压成单行并去掉尖括号，避免伪造 </recall> 闭合标签后注入任意文本
 export function inlineText(text: string): string {
-  return text.replace(/[<>]/g, '').replace(/\s+/g, ' ').trim()
+  return oneLine(text.replace(/[<>]/g, ''))
 }
 
 // 按字符（不是 UTF-16 码元）截断，免得切开表情符号；截掉了才接上 suffix

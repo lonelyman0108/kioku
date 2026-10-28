@@ -691,6 +691,44 @@ export const conversationTurns = pgTable(
   ],
 )
 
+// 抽取记录：每抽取一批缓冲记一条，给对象页看抽取了什么、用了多少 token；失败的也记，带上原因
+export const extractionRuns = pgTable(
+  'extraction_runs',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid().notNull(),
+    // 这一批的来源作用域，见 conversation_turns.scope
+    scope: text().notNull(),
+    // 这一批涉及的对象（发言人与群），对象页按它找抽取记录
+    subjectIds: uuid().array().notNull(),
+    // 给模型看了几轮；写入它们的 Key 吊销、作废或写不了的那几轮没给模型看，单独计数，随这一批删掉
+    turns: integer().notNull(),
+    skippedTurns: integer().notNull().default(0),
+    model: text(),
+    promptTokens: integer().notNull().default(0),
+    completionTokens: integer().notNull().default(0),
+    added: integer().notNull().default(0),
+    updated: integer().notNull().default(0),
+    // 模型认为已经记过的（NONE），以及和已有事实一字不差的
+    unchanged: integer().notNull().default(0),
+    // 丢掉的候选：对象不对、太长、像明文凭据、写不进去
+    dropped: integer().notNull().default(0),
+    summarized: boolean().notNull().default(false),
+    error: text(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index().on(t.spaceId, t.createdAt),
+    index().using('gin', t.subjectIds),
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
+  ],
+)
+
 // 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 export const RLS_TABLES = [
   'personas',
@@ -710,4 +748,5 @@ export const RLS_TABLES = [
   'recall_event_hits',
   'memory_recall_stats',
   'conversation_turns',
+  'extraction_runs',
 ] as const
