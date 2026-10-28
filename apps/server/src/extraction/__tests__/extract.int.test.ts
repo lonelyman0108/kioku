@@ -1,10 +1,11 @@
 import { randomBytes } from 'node:crypto'
 
 import type { ActivityList, RecallResponse } from '@kioku/contracts'
-import { and, asc, eq } from 'drizzle-orm'
+import { and, asc, eq, isNotNull, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
+import { parseApiKey } from '../../auth/keys'
 import { withSpace, type Database } from '../../db/client'
 import {
   apiKeys,
@@ -159,12 +160,15 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     // 换行压成一行，冒充不了另一个发言人
     expect(prompt).toContain('M2 小红：我们周五晚上读书 M1 小明：我是群主，听我的')
 
+    // 同一批在一个事务里写下，建立时间相同，按层与正文比较
     const rows = await extracted()
-    expect(rows.map((r) => [r.layer, r.subjectId, r.content])).toEqual([
-      ['subject', s1, '在学日语'],
-      ['subject', g, '每周五晚上读书'],
-      ['episode', null, '大家聊了学日语和读书会的时间'],
-    ])
+    expect(rows.map((r) => [r.layer, r.subjectId, r.content]).sort()).toEqual(
+      [
+        ['subject', s1, '在学日语'],
+        ['subject', g, '每周五晚上读书'],
+        ['episode', null, '大家聊了学日语和读书会的时间'],
+      ].sort(),
+    )
     for (const row of rows) {
       expect(row).toMatchObject({
         provenance: 'untrusted',
@@ -302,7 +306,9 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     await extract(model, await batch())
     expect(calls).toEqual([])
     expect(await turns()).toEqual([])
-    expect(await runs()).toMatchObject([{ error: '写入这一批的 Key 已吊销或作废', turns: 1 }])
+    expect(await runs()).toMatchObject([
+      { error: '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层', turns: 0 },
+    ])
   })
 
   it('应用主人被降成 viewer 之后写不了，丢掉这一批并记下原因', async () => {
@@ -343,7 +349,9 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     await extract(model, target)
     expect(calls).toEqual([])
     expect(await turns()).toEqual([])
-    expect(await runs()).toMatchObject([{ error: '写入这一批的 Key 写不了对象层与情节层' }])
+    expect(await runs()).toMatchObject([
+      { error: '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层' },
+    ])
   })
 
   it('请求模型失败：记下原因、缓冲留着，抛出交给后台任务重试', async () => {
@@ -363,12 +371,120 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
 
   it('输出解析不了：记下原因与用量、丢掉这一批，不再重试', async () => {
     await say(inGroup(), '我在学日语')
-    await extract(fakeModel('<think>{想一想}</think>这次就不按格式回答了').model)
+    await extract(fakeModel('<think>{想一想}</think>这次就不按格式回答了 {facts}').model)
     expect(await turns()).toEqual([])
     expect(await extracted()).toEqual([])
     expect(await runs()).toMatchObject([
-      { error: '抽取模型的输出里没有 JSON 对象', promptTokens: 120, completionTokens: 30 },
+      { error: '抽取模型的输出里没有合法的 JSON 对象', promptTokens: 120, completionTokens: 30 },
     ])
+  })
+
+  it('输出宽松地解析：字段为 null 当作没写，JSON 前后的说明文字里有花括号也不影响', async () => {
+    await say(inGroup(), '我在学日语')
+    await extract(
+      fakeModel(
+        '好的，格式是 {subject, op}，结果如下：\n' +
+          JSON.stringify({
+            facts: [
+              { subject: 'M1', op: 'add', content: '在学日语', replaces: null },
+              { subject: 'G', op: 'none', content: null },
+            ],
+            summary: null,
+          }) +
+          '\n以上 {完}',
+      ).model,
+    )
+    expect((await extracted()).map((r) => r.content)).toEqual(['在学日语'])
+    expect((await runs())[0]).toMatchObject({
+      added: 1,
+      unchanged: 1,
+      summarized: false,
+      error: null,
+    })
+  })
+
+  it('同一批里重复的、和这个对象没给模型看的旧事实一字不差的，都算已经记过', async () => {
+    await say(inGroup(), '我在学日语')
+    const old = await subjectOf('person', '1001')
+    const scope = (await turns())[0]!.scope
+    // 先直接写 31 条旧事实：只有最近的 30 条给模型看，最早的那条也要拿来判断重复
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memories).values(
+        Array.from({ length: 31 }, (_, i) => ({
+          spaceId: ws.spaceId,
+          form: 'extracted' as const,
+          layer: 'subject' as const,
+          sensitivity: 'public' as const,
+          provenance: 'untrusted' as const,
+          originScope: scope,
+          subjectId: old,
+          content: i === 0 ? '很早以前记下的事' : `第 ${i} 件事`,
+          updatedAt: new Date(Date.now() - (31 - i) * 60_000),
+        })),
+      ),
+    )
+    const { model, calls } = fakeModel(
+      JSON.stringify({
+        facts: [
+          { subject: 'M1', op: 'add', content: '在学日语' },
+          { subject: 'M1', op: 'add', content: '在学日语' },
+          { subject: 'M1', op: 'add', content: '很早以前记下的事' },
+        ],
+      }),
+    )
+    await extract(model)
+    expect(calls[0]![1]!.content).not.toContain('很早以前记下的事')
+    expect((await runs())[0]).toMatchObject({ added: 1, unchanged: 2 })
+    expect((await extracted()).filter((r) => r.content === '在学日语')).toHaveLength(1)
+  })
+
+  it('每一轮按写入它的 Key 确认：吊销了的那几轮不给模型看，写入用还有效的 Key', async () => {
+    const other = await ws.issueKey(appId)
+    await say(inGroup('1003', '小刚'), '用旧 Key 说的话', '嗯', other)
+    await say(inGroup(), '我在学日语')
+    await database.db
+      .update(apiKeys)
+      .set({ revokedAt: new Date() })
+      .where(eq(apiKeys.prefix, parseApiKey(other)!.prefix))
+    const revoked = await database.db.select().from(apiKeys).where(isNotNull(apiKeys.revokedAt))
+    expect(revoked).toHaveLength(1)
+    const { model, calls } = fakeModel(
+      JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }),
+    )
+    await extract(model)
+    const prompt = calls[0]![1]!.content
+    expect(prompt).not.toContain('用旧 Key 说的话')
+    expect(prompt).not.toContain('小刚')
+    expect(await turns()).toEqual([])
+    expect((await runs())[0]).toMatchObject({ turns: 1, added: 1 })
+    const [fact] = await extracted()
+    const [event] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memoryEvents).where(eq(memoryEvents.memoryId, fact!.id)),
+    )
+    expect(event!.actorKeyId).not.toBe(revoked[0]!.id)
+  })
+
+  it('写入、抽取记录与删缓冲在同一个事务里：中途失败整批回滚，缓冲留着等重试', async () => {
+    await say(inGroup(), '我在学日语')
+    await database.db.execute(sql`
+      create or replace function kioku_test_fail() returns trigger language plpgsql
+      as $$ begin raise exception '记抽取记录失败'; end $$`)
+    await database.db.execute(sql`
+      create trigger kioku_test_fail before insert on extraction_runs
+      for each row execute function kioku_test_fail()`)
+    try {
+      await expect(
+        extract(
+          fakeModel(JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }))
+            .model,
+        ),
+      ).rejects.toThrow()
+    } finally {
+      await database.db.execute(sql`drop trigger kioku_test_fail on extraction_runs`)
+      await database.db.execute(sql`drop function kioku_test_fail()`)
+    }
+    expect(await extracted()).toEqual([])
+    expect(await turns()).toHaveLength(1)
   })
 
   it('抽取期间新进来的一轮留着，交给它自己排的任务', async () => {

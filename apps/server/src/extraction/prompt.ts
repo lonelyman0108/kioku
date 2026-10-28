@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { clipChars, inlineText } from '../recall/recall'
 import type { ChatMessage } from './provider'
 
 // 给模型看的内容各留多少字：太长的输入又慢又贵，模型也容易漏看。聊天记录从最近的往前取，放不下的更早几轮不给
@@ -43,17 +44,19 @@ export function extractionMessages(
   turns: readonly PromptTurn[],
 ): ChatMessage[] {
   const subjectLines = subjects.flatMap((s) => [
-    `${s.handle}：${s.name ? oneLine(s.name) : '（不知道名字）'}（${s.role === 'sender' ? '发言人' : '本群'}）`,
+    `${s.handle}：${s.name ? inlineText(s.name) : '（不知道名字）'}（${s.role === 'sender' ? '发言人' : '本群'}）`,
     ...(s.facts.length
-      ? s.facts.map((f) => `  ${f.handle}：${oneLine(clip(f.content, FACT_CHARS))}`)
+      ? s.facts.map((f) => `  ${f.handle}：${clip(f.content, FACT_CHARS)}`)
       : ['  （还没有记下的事实）']),
   ])
   const blocks: string[] = []
   let used = 0
   for (const turn of [...turns].reverse()) {
-    const speaker = turn.speakerName ? `${turn.speaker} ${oneLine(turn.speakerName)}` : turn.speaker
-    const lines = [`${speaker}：${oneLine(clip(turn.user, USER_TEXT_CHARS))}`]
-    if (turn.reply.trim()) lines.push(`机器人：${oneLine(clip(turn.reply, REPLY_TEXT_CHARS))}`)
+    const speaker = turn.speakerName
+      ? `${turn.speaker} ${inlineText(turn.speakerName)}`
+      : turn.speaker
+    const lines = [`${speaker}：${clip(turn.user, USER_TEXT_CHARS)}`]
+    if (turn.reply.trim()) lines.push(`机器人：${clip(turn.reply, REPLY_TEXT_CHARS)}`)
     const block = lines.join('\n')
     if (blocks.length && used + block.length > TRANSCRIPT_CHARS) break
     used += block.length
@@ -68,17 +71,18 @@ export function extractionMessages(
   ]
 }
 
+// 模型常把没有的字段写成 null，和没写一样对待
 const Candidate = z.object({
   subject: z.string(),
   op: z.string(),
-  content: z.string().optional(),
-  replaces: z.string().optional(),
+  content: z.string().nullish(),
+  replaces: z.string().nullish(),
 })
 export type Candidate = z.infer<typeof Candidate>
 
 const Output = z.object({
-  facts: z.array(z.unknown()).default([]),
-  summary: z.string().optional(),
+  facts: z.array(z.unknown()).nullish(),
+  summary: z.string().nullish(),
 })
 
 // 格式不对的候选为 null，计入丢掉的；整体不是约定的 JSON 时抛错
@@ -87,22 +91,30 @@ export interface ParsedExtraction {
   summary: string
 }
 
-// 宽松地取出 JSON：有的模型会把思考过程写在 <think> 里、或者给 JSON 套上代码块
+// 宽松地取出 JSON：有的模型把思考过程写在 <think> 里，给 JSON 套上代码块，或者在前后加几句说明。
+// 先看代码块里的，再从头找第一个能解析的完整对象（说明文字里的花括号不算数）
 export function parseExtraction(text: string): ParsedExtraction {
   const body = text.replace(/<think>[\s\S]*?<\/think>/g, '')
-  const start = body.indexOf('{')
-  const end = body.lastIndexOf('}')
-  if (start < 0 || end <= start) throw new Error('抽取模型的输出里没有 JSON 对象')
+  const fenced = [...body.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((m) => m[1]!)
   let raw: unknown
-  try {
-    raw = JSON.parse(body.slice(start, end + 1))
-  } catch {
-    throw new Error('抽取模型的输出不是合法的 JSON')
+  let found = false
+  for (const source of [...fenced, body]) {
+    for (const candidate of jsonObjects(source)) {
+      try {
+        raw = JSON.parse(candidate)
+        found = true
+        break
+      } catch {
+        // 不是合法的 JSON，接着找下一个
+      }
+    }
+    if (found) break
   }
+  if (!found) throw new Error('抽取模型的输出里没有合法的 JSON 对象')
   const parsed = Output.safeParse(raw)
   if (!parsed.success) throw new Error('抽取模型的输出不是约定的格式')
   return {
-    candidates: parsed.data.facts.map((f) => {
+    candidates: (parsed.data.facts ?? []).map((f) => {
       const candidate = Candidate.safeParse(f)
       return candidate.success ? candidate.data : null
     }),
@@ -110,13 +122,27 @@ export function parseExtraction(text: string): ParsedExtraction {
   }
 }
 
-// 压成一行：换行会让一句话冒充聊天记录里的另一个发言人
-function oneLine(text: string): string {
-  return text.replace(/\s+/g, ' ').trim()
+// 文字里一段段花括号配平的对象，按出现的先后。字符串里的花括号不算
+function* jsonObjects(text: string): Generator<string> {
+  for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+    let depth = 0
+    let inString = false
+    for (let i = start; i < text.length; i++) {
+      const ch = text[i]
+      if (inString) {
+        if (ch === '\\') i++
+        else if (ch === '"') inString = false
+      } else if (ch === '"') inString = true
+      else if (ch === '{') depth++
+      else if (ch === '}' && --depth === 0) {
+        yield text.slice(start, i + 1)
+        break
+      }
+    }
+  }
 }
 
-// 按字符截断，免得切开表情符号
+// 压成一行（换行会让一句话冒充聊天记录里的另一个发言人）再按字符截断
 function clip(text: string, max: number): string {
-  const chars = [...text]
-  return chars.length > max ? `${chars.slice(0, max).join('')}…` : text
+  return clipChars(inlineText(text), max, '…')
 }

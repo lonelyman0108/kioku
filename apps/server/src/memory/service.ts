@@ -191,13 +191,12 @@ async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<voi
   if (app?.owner !== owner) throw new MemoryError(403, '这个应用已经不属于导入者')
 }
 
-// 抽取写下的记忆：对象层的事实要挂在对象上，情节层的会话摘要带到期时间
-export interface ExtractedInput {
-  layer: 'subject' | 'episode'
-  subjectId: string | null
-  content: string
-  expiresAt?: Date | null
-}
+// 抽取写下的记忆：对象层的事实挂在对象上，可以推翻同一个对象的一条旧事实；情节层的会话摘要带到期时间
+export type ExtractedWrite =
+  | { layer: 'subject'; subjectId: string; content: string; replaces?: string | undefined }
+  | { layer: 'episode'; content: string; expiresAt: Date }
+
+export type ExtractedOutcome = 'added' | 'updated' | 'skipped'
 
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
@@ -669,96 +668,93 @@ export class MemoryService {
     })
   }
 
-  // 抽取写下的记忆：对象层的事实（挂在对象上）与情节层的会话摘要，没有 URI、不建向量。敏感级 public，
-  // 来源与来源作用域按这次的会话上下文；权限与凭据占位符的检查和按 URI 写入一样（对话来的内容不能新增引用）。
-  // 记一条 create 事件，返回新记忆的 id
-  async addExtracted(
-    input: ExtractedInput,
+  // 写下一批抽取的结果（对象层的事实与情节层的会话摘要，没有 URI、不建向量），连同调用方的收尾
+  // （记抽取记录、删掉用过的缓冲）在同一个事务里：中途失败整批回滚，后台任务重试时不会重复写入。
+  // 敏感级 public，来源与来源作用域按这次的会话上下文；逐条检查权限与凭据占位符（对话来的内容不能新增引用），
+  // 写不进去的那条跳过。replaces 指向这次读得到、还有效的同一个对象的事实时推翻它：旧的设 valid_to 保留历史，
+  // 再写一条新的；找不到时当作新的事实
+  async writeExtraction(
+    items: readonly ExtractedWrite[],
     eventContext: Record<string, unknown>,
-  ): Promise<string> {
+    finish: (tx: Tx, outcomes: ExtractedOutcome[]) => Promise<void>,
+  ): Promise<ExtractedOutcome[]> {
     return this.run(async (tx) => {
-      const id = await this.insertExtracted(tx, input)
-      await this.event(tx, id, 'create', null, snapshot((await this.rowOf(tx, id))!, []), {
-        ...eventContext,
-      })
-      return id
+      const outcomes: ExtractedOutcome[] = []
+      for (const item of items) outcomes.push(await this.writeExtracted(tx, item, eventContext))
+      await finish(tx, outcomes)
+      return outcomes
     })
   }
 
-  // 新事实推翻旧事实：旧的那条设 valid_to、保留历史，再写一条新的，挂在同一个对象上。
-  // 旧的那条要是这次读得到、还有效的抽取事实，读不到和不存在一样是 404
-  async supersedeExtracted(
-    oldId: string,
-    content: string,
+  private async writeExtracted(
+    tx: Tx,
+    item: ExtractedWrite,
     eventContext: Record<string, unknown>,
-  ): Promise<string> {
-    return this.run(async (tx) => {
-      const [before] = await tx
-        .select()
-        .from(memories)
-        .where(
-          and(
-            eq(memories.id, oldId),
-            eq(memories.form, 'extracted'),
-            eq(memories.layer, 'subject'),
-            readableConditions(this.ctx.access, { personaIds: [] }),
-          ),
-        )
-        .for('update')
-      if (!before) throw new MemoryError(404, '要更新的事实不存在')
-      this.assertWritable(before, '没有权限更新这条事实')
-      const id = await this.insertExtracted(tx, {
-        layer: 'subject',
-        subjectId: before.subjectId,
-        content,
-      })
-      const [after] = await tx
-        .update(memories)
-        .set({ validTo: sql`now()`, version: before.version + 1, updatedAt: sql`now()` })
-        .where(eq(memories.id, oldId))
-        .returning()
-      await this.event(tx, oldId, 'update', snapshot(before, []), snapshot(after!, []), {
-        ...eventContext,
-        supersededBy: id,
-      })
-      await this.event(tx, id, 'create', null, snapshot((await this.rowOf(tx, id))!, []), {
-        ...eventContext,
-        supersedes: oldId,
-      })
-      return id
-    })
-  }
-
-  private async insertExtracted(tx: Tx, input: ExtractedInput): Promise<string> {
+  ): Promise<ExtractedOutcome> {
     const sensitivity = 'public' as const
-    this.assertWritable(
-      { layer: input.layer, sensitivity, appId: null, personaId: null },
-      `没有权限写 ${input.layer} 层的记忆`,
-    )
-    await this.checkCredentialRefs(
-      tx,
-      { layer: input.layer, sensitivity, ownerAccountId: null, content: input.content },
-      null,
-    )
-    const id = randomUUID()
-    await tx.insert(memories).values({
-      id,
-      spaceId: this.ctx.spaceId,
-      form: 'extracted',
-      layer: input.layer,
-      sensitivity,
-      provenance: this.ctx.access.writeProvenance,
-      originScope: this.ctx.access.writeOriginScope,
-      subjectId: input.layer === 'subject' ? input.subjectId : null,
-      content: input.content,
-      expiresAt: input.expiresAt ?? null,
+    try {
+      this.assertWritable(
+        { layer: item.layer, sensitivity, appId: null, personaId: null },
+        `没有权限写 ${item.layer} 层的记忆`,
+      )
+      await this.checkCredentialRefs(
+        tx,
+        { layer: item.layer, sensitivity, ownerAccountId: null, content: item.content },
+        null,
+      )
+    } catch (err) {
+      if (err instanceof MemoryError) return 'skipped'
+      throw err
+    }
+    const [before] =
+      item.layer === 'subject' && item.replaces
+        ? await tx
+            .select()
+            .from(memories)
+            .where(
+              and(
+                eq(memories.id, item.replaces),
+                eq(memories.form, 'extracted'),
+                eq(memories.layer, 'subject'),
+                eq(memories.subjectId, item.subjectId),
+                readableConditions(this.ctx.access, { personaIds: [] }),
+              ),
+            )
+            .for('update')
+        : []
+    const [row] = await tx
+      .insert(memories)
+      .values({
+        id: randomUUID(),
+        spaceId: this.ctx.spaceId,
+        form: 'extracted',
+        layer: item.layer,
+        sensitivity,
+        provenance: this.ctx.access.writeProvenance,
+        originScope: this.ctx.access.writeOriginScope,
+        subjectId: item.layer === 'subject' ? item.subjectId : null,
+        content: item.content,
+        expiresAt: item.layer === 'episode' ? item.expiresAt : null,
+      })
+      .returning()
+    if (!before) {
+      await this.event(tx, row!.id, 'create', null, snapshot(row!, []), eventContext)
+      return 'added'
+    }
+    const [after] = await tx
+      .update(memories)
+      .set({ validTo: sql`now()`, version: before.version + 1, updatedAt: sql`now()` })
+      .where(eq(memories.id, before.id))
+      .returning()
+    await this.event(tx, before.id, 'update', snapshot(before, []), snapshot(after!, []), {
+      ...eventContext,
+      supersededBy: row!.id,
     })
-    return id
-  }
-
-  private async rowOf(tx: Tx, id: string): Promise<MemoryRow | undefined> {
-    const [row] = await tx.select().from(memories).where(eq(memories.id, id))
-    return row
+    await this.event(tx, row!.id, 'create', null, snapshot(row!, []), {
+      ...eventContext,
+      supersedes: before.id,
+    })
+    return 'updated'
   }
 
   private seal(plaintext: string, id: string) {
