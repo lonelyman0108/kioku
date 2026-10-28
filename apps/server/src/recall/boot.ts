@@ -5,12 +5,12 @@ import type { Access } from '../access/access'
 import type { Tx } from '../db/client'
 import { memories } from '../db/schema'
 import { readableConditions } from '../memory/filter'
-import { personaOverride } from '../memory/personas'
+import { personaOverride, type PersonaSelection } from '../memory/personas'
 import { formatUri } from '../memory/uri'
 import { inlineText } from './recall'
 
 // boot 是会话开始时注入的固定基线：所有可读的 priority 0 节点，加上当前人格与本应用 priority ≤ 1 的节点。
-// personaIds 是当前人格的继承链，子人格的节点覆盖祖先同一相对路径的节点（见 personaOverride）。
+// 人格按 personas 挑选，接入方传当前人格的继承链、子人格覆盖祖先（见 personaOverride）。
 // 按层排序（基础规则在前、个人信息在后），超出字数预算的只列 URI，模型需要时再读。
 // boot 会被宿主当作指令级上下文，所以只收受信来源的策展层：对象与情节层、以及 untrusted 写入的内容一律不进，
 // 否则群聊里的人可以把一条 priority 0 的「记忆」变成主人 agent 每次会话都读到的指令。
@@ -23,7 +23,7 @@ const MAX_OMITTED_CHARS = 1_200
 export async function boot(
   tx: Tx,
   access: Access,
-  personaIds: string[],
+  personas: PersonaSelection,
   budget = BOOT_CHAR_BUDGET,
 ): Promise<BootResponse> {
   const rows = await tx
@@ -37,8 +37,8 @@ export async function boot(
     .from(memories)
     .where(
       and(
-        readableConditions(access, { personaIds }),
-        personaOverride(access, personaIds),
+        readableConditions(access, { personaIds: personas.personaIds }),
+        personaOverride(access, personas),
         eq(memories.form, 'curated'),
         inArray(memories.layer, BOOT_LAYERS),
         ne(memories.provenance, 'untrusted'),
@@ -98,7 +98,7 @@ export function formatBootBlock(result: BootResponse, guidance: string): string 
 export async function recentMemories(
   tx: Tx,
   access: Access,
-  personaIds: string[],
+  personas: PersonaSelection,
   limit: number,
 ): Promise<RecentMemory[]> {
   const rows = await tx
@@ -112,8 +112,8 @@ export async function recentMemories(
     .from(memories)
     .where(
       and(
-        readableConditions(access, { personaIds }),
-        personaOverride(access, personaIds),
+        readableConditions(access, { personaIds: personas.personaIds }),
+        personaOverride(access, personas),
         eq(memories.form, 'curated'),
         inArray(memories.layer, BOOT_LAYERS),
         ne(memories.provenance, 'untrusted'),

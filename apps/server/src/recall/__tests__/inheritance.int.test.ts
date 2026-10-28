@@ -108,6 +108,17 @@ describe.skipIf(!testDatabaseUrl)('人格继承的覆盖', () => {
     expect(await bootUris()).toEqual(['persona://doubao/soul'])
   })
 
+  it('覆盖之后按子人格那条的 priority 挑选：它进不了 boot 时，boot 里就没有这个路径', async () => {
+    await consoleCreate({ uri: 'persona://doubao/soul', content: '主人格的设定', priority: 0 })
+    await consoleCreate({
+      uri: 'persona://doubao-group/soul',
+      content: '群聊版的设定',
+      priority: 2,
+    })
+    expect(await bootUris()).toEqual([])
+    expect(await recallUris('群聊版的设定')).toEqual(['persona://doubao-group/soul'])
+  })
+
   it('多级继承按最近的人格覆盖，人格根节点也按相对路径算', async () => {
     const grandchild = (await ws.createPersona('doubao-night', childId)).id
     const nightApp = (await ws.createApp('night-bot', { defaultPersonaId: grandchild })).id
@@ -158,7 +169,12 @@ describe.skipIf(!testDatabaseUrl)('人格继承的覆盖', () => {
 
     const scopes = { appId, ownerAccountId: ws.accountId, personaId: childId }
     const recent = await runInSpace(database.db, ws.spaceId, childId, (tx, chain) =>
-      recentMemories(tx, resolveAccess(FULL_SCOPES, scopes), chain, 10),
+      recentMemories(
+        tx,
+        resolveAccess(FULL_SCOPES, scopes),
+        { personaIds: chain, inheritance: true },
+        10,
+      ),
     )
     expect(recent.map((m) => m.uri).sort()).toEqual([
       'persona://doubao-group/catchphrase',
@@ -224,6 +240,32 @@ describe.skipIf(!testDatabaseUrl)('人格继承的覆盖', () => {
         { headers: bearer(key) },
       )
       expect(((await soul.json()) as { content: string }).content).toBe('主人格的设定')
+    })
+
+    it('Key 不能写人格层时，报的是没有权限而不是人格不对', async () => {
+      await consoleCreate({ uri: 'persona://doubao/soul', content: '主人格的设定', priority: 0 })
+      const noPersona = await ws.issueKey(appId, {
+        ...FULL_SCOPES,
+        writeLayers: FULL_SCOPES.writeLayers.filter((l) => l !== 'persona'),
+      })
+      const attempts = [
+        keyRequest(
+          'PATCH',
+          '/memories',
+          { uri: 'persona://doubao/soul', content: '改掉设定' },
+          noPersona,
+        ),
+        keyRequest(
+          'POST',
+          '/memories',
+          { uri: 'persona://doubao-group/rule', content: '群里不聊工作' },
+          noPersona,
+        ),
+      ]
+      for (const res of await Promise.all(attempts)) {
+        expect(res.status).toBe(403)
+        expect(((await res.json()) as { error: string }).error).not.toContain('当前应用所用人格')
+      }
     })
 
     it('跨人格 / 应用写入的 Key 与管理界面的 editor 能写祖先人格', async () => {

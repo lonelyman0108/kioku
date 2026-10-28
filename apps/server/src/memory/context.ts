@@ -171,7 +171,9 @@ export function recallScopeForKey(
         recall(tx, access, semantic, query, { ...options, personaIds, inheritance: true }),
       )
     },
-    boot: (budget) => run((tx, personaIds) => boot(tx, access, personaIds, budget)),
-    recent: (limit) => run((tx, personaIds) => recentMemories(tx, access, personaIds, limit)),
+    boot: (budget) =>
+      run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
+    recent: (limit) =>
+      run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
   }
 }

@@ -197,7 +197,7 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     const access = resolveAccess(FULL_SCOPES, { appId, ownerAccountId: ws.accountId })
     const result = await withSpace(database.db, ws.spaceId, (tx) =>
       // 每个节点按正文加标题算：30 + 「core://a」8 + 7 = 45，预算 50 只放得下第一个
-      boot(tx, access, [personaId], 50),
+      boot(tx, access, { personaIds: [personaId] }, 50),
     )
     expect(result.entries.map((e) => e.uri)).toEqual(['core://a'])
     expect(result.omitted).toEqual(['core://b'])
@@ -283,7 +283,7 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
     await create({ uri: 'prefs://user', content: 'u'.repeat(30), layer: 'owner', priority: 0 })
     const access = resolveAccess(FULL_SCOPES, { appId, ownerAccountId: ws.accountId })
     const result = await withSpace(database.db, ws.spaceId, (tx) =>
-      boot(tx, access, [personaId], 50),
+      boot(tx, access, { personaIds: [personaId] }, 50),
     )
     expect(result.entries.map((e) => e.uri)).toEqual(['prefs://user'])
     expect(result.omitted).toEqual(['persona://doubao/style'])

@@ -141,7 +141,8 @@ const perMember = (layer: Layer) => PER_MEMBER_LAYERS.includes(layer)
 const KEY_CROSS_OWNERSHIP = '通过 Key 不能把记忆在共享的层与个人的层之间转换，请在管理界面里改'
 
 // Key 只能写应用当前的人格：继承来的祖先人格也被别的应用用着，群聊版的应用不能改掉主人格的设定
-const PERSONA_WRITE = '通过 Key 只能写当前应用所用人格的记忆，继承来的人格请在管理界面里改'
+const PERSONA_WRITE =
+  '通过 Key 只能写当前应用所用人格的记忆，别的人格（包括继承来的）请在管理界面里改'
 
 // 含凭据占位符的记忆只能在私人层、敏感级至少 private：读得到占位符的人，正好就是读得到凭据说明的人
 const PLACEHOLDER_SCOPE =
@@ -348,12 +349,14 @@ export class MemoryService {
     return row
   }
 
-  // 写不了时报 403。人格层单独说明：Key 读得到继承来的祖先人格，却只能写应用当前的人格
+  // 写不了时报 403。能写人格层、只是人格不对的单独说明：Key 读得到继承来的祖先人格，却只能写应用当前的人格
   private assertWritable(intent: WriteIntent, message: string): void {
-    if (intent.layer === 'persona' && !canWritePersona(this.ctx.access, intent.personaId)) {
-      throw new MemoryError(403, PERSONA_WRITE)
-    }
-    if (!canWrite(this.ctx.access, intent)) throw new MemoryError(403, message)
+    if (canWrite(this.ctx.access, intent)) return
+    const wrongPersona =
+      intent.layer === 'persona' &&
+      this.ctx.access.writeLayers.has('persona') &&
+      !canWritePersona(this.ctx.access, intent.personaId)
+    throw new MemoryError(403, wrongPersona ? PERSONA_WRITE : message)
   }
 
   private async glossaryOf(tx: Tx, ids: string[]): Promise<Map<string, string[]>> {
@@ -420,7 +423,7 @@ export class MemoryService {
     })
   }
 
-  // 解析写入目标的层和归属；Key 的人格层只能写应用当前的人格，应用层只能写本应用，admin 例外
+  // 解析写入目标的层和归属；应用层只能写本应用（admin 例外），人格由调用方随后用 assertWritable 检查
   private async resolveOwnership(
     tx: Tx,
     parsed: ParsedUri,
@@ -444,7 +447,6 @@ export class MemoryService {
     if (layer === 'persona') {
       const id = (await personaIdsBySlug(tx, [parsed.namespaceSlug!])).get(parsed.namespaceSlug!)
       if (!id) throw new MemoryError(404, `人格不存在：${parsed.namespaceSlug}`)
-      if (!canWritePersona(access, id)) throw new MemoryError(403, PERSONA_WRITE)
       ownership.personaId = id
     }
     if (layer === 'app') {
