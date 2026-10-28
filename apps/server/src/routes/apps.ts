@@ -371,7 +371,7 @@ export function appRoutes(deps: Deps) {
       const found = await withSpace(deps.db, spaceId, async (tx) => {
         const [app] = await tx.select().from(apps).where(eq(apps.id, appId))
         // 和 Key 列表一样，只给应用主人与空间 owner 看；先查权限再找 Key，别人探不出 Key 在不在
-        if (!app) return 'missing' as const
+        if (!app) return 'no-app' as const
         if (app.ownerAccountId !== accountId && role !== 'owner') return 'forbidden' as const
         const [key] = await tx
           .select()
@@ -379,6 +379,7 @@ export function appRoutes(deps: Deps) {
           .where(and(eq(apiKeys.id, keyId), eq(apiKeys.appId, appId)))
         return key ? { app, key } : ('missing' as const)
       })
+      if (found === 'no-app') return c.json({ error: '应用不存在' }, 404)
       if (found === 'missing') return c.json({ error: 'Key 不存在' }, 404)
       if (found === 'forbidden') {
         return c.json({ error: '只有应用的主人或空间 owner 能查看 Key' }, 403)

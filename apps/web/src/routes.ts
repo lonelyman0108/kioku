@@ -45,6 +45,11 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/AppsPage.vue'),
       },
       {
+        path: 'spaces/:spaceId/apps/:appId',
+        name: 'app',
+        component: () => import('./pages/AppDetailPage.vue'),
+      },
+      {
         path: 'spaces/:spaceId/settings',
         name: 'space-settings',
         component: () => import('./pages/SpaceSettingsPage.vue'),

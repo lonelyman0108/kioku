@@ -1,9 +1,9 @@
 import { createRoute, z } from '@hono/zod-openapi'
-import { DomainLayers, ErrorResponse } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { DomainLayers, ErrorResponse, MemberInfo } from '@kioku/contracts'
+import { asc, eq } from 'drizzle-orm'
 
 import { memberRole } from '../auth/middleware'
-import { spaces } from '../db/schema'
+import { accounts, spaceMembers, spaces } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
@@ -32,9 +32,36 @@ const save = createRoute({
   },
 })
 
+const members = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}/members',
+  tags: ['console'],
+  summary: '空间成员：名字与角色（转移应用时选新主人用）',
+  request: { params },
+  responses: { 200: jsonResponse('成员列表', z.array(MemberInfo)), 403: forbidden },
+})
+
 // 空间级的设置。spaces 是身份表，不在 RLS 里，按成员关系自己检查权限
 export function spaceRoutes(deps: Deps) {
   return router()
+    .openapi(members, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
+        return c.json({ error: '不是该空间成员' }, 403)
+      }
+      const rows = await deps.db
+        .select({
+          accountId: accounts.id,
+          username: accounts.username,
+          displayName: accounts.displayName,
+          role: spaceMembers.role,
+        })
+        .from(spaceMembers)
+        .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
+        .where(eq(spaceMembers.spaceId, spaceId))
+        .orderBy(asc(spaceMembers.createdAt))
+      return c.json(rows, 200)
+    })
     .openapi(read, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
