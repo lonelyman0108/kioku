@@ -9,8 +9,11 @@ import type {
 } from '@kioku/contracts'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { and, eq } from 'drizzle-orm'
+
 import { createApp } from '../../app'
-import type { Database } from '../../db/client'
+import { withSpace, type Database } from '../../db/client'
+import { memories } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
@@ -126,8 +129,10 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
       sensitivity: 'internal',
     })
     const project = { dirName: 'kioku' }
+    // 会话 id 会写进召回块，两边用同一个才能逐字比较
+    const sessionId = '6f1c0d2e-9a4b-4c3d-8e2f-1a2b3c4d5e6f'
 
-    const res = await as('POST', `/apps/${appId}/keys/${keyId}/preview`, { project })
+    const res = await as('POST', `/apps/${appId}/keys/${keyId}/preview`, { project, sessionId })
     expect(res.status).toBe(200)
     const preview = (await res.json()) as BootPreview
     expect(preview.runtimeFamily).toBe('claudecode')
@@ -143,11 +148,51 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
 
     const lifecycle = await app.request(
       '/v1/lifecycle/event',
-      jsonRequest('POST', { event: 'session.start', project }, bearer(key)),
+      jsonRequest('POST', { event: 'session.start', project, sessionId }, bearer(key)),
     )
     const { hostOutput } = (await lifecycle.json()) as LifecycleResponse
     const value = hostOutput.value as { hookSpecificOutput: { additionalContext: string } }
     expect(preview.context).toBe(value.hookSpecificOutput.additionalContext)
+    expect(preview.context).toContain(`session_id="${sessionId}"`)
+  })
+
+  it('过滤原因按查看者看到的那条记忆给出：同一 URI 上另有一条过期的共享记录时不会认错', async () => {
+    // 先有一条共享的，再让它过期；写不了基础层的 Key 在同一个 URI 上建私人记录时，过期的共享记录留着
+    await createMemory({
+      uri: 'notes://dup',
+      content: '重复的路径',
+      glossary: ['重复'],
+      layer: 'base',
+    })
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 60_000) })
+        .where(and(eq(memories.domain, 'notes'), eq(memories.path, 'dup'))),
+    )
+    const writer = await ws.issueKey(appId, {
+      ...FULL_SCOPES,
+      writeLayers: ['private'],
+      maxSensitivity: 'private',
+    })
+    const created = await app.request(
+      '/v1/memories',
+      jsonRequest(
+        'POST',
+        {
+          uri: 'notes://dup',
+          content: '私下重复的路径',
+          glossary: ['重复'],
+          sensitivity: 'private',
+        },
+        bearer(writer),
+      ),
+    )
+    expect(created.status).toBe(201)
+
+    const res = await as('POST', `/apps/${appId}/keys/${keyId}/debug`, { query: '重复' })
+    const debug = (await res.json()) as RecallDebug
+    expect(debug.filtered.map((f) => [f.uri, f.reason])).toEqual([['notes://dup', 'sensitivity']])
   })
 
   it('只给应用主人：空间 owner 也不能模拟成员的 Key；作废与不存在的 Key 返回 404', async () => {

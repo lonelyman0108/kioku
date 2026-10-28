@@ -133,7 +133,11 @@ export const RecallDebug = z.object({
 })
 export type RecallDebug = z.infer<typeof RecallDebug>
 
-export const BootPreviewRequest = z.object({ project: LifecycleProject.optional() })
+export const BootPreviewRequest = z.object({
+  project: LifecycleProject.optional(),
+  // 会话 id 会写进召回块：不给时用一个随机的 UUID，长度和真实会话差不多，临近字数上限时预览才准
+  sessionId: z.string().max(200).optional(),
+})
 export type BootPreviewRequest = z.infer<typeof BootPreviewRequest>
 
 // 启动预览：按一把 Key 模拟会话开始时注入的内容

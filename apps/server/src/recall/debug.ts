@@ -1,9 +1,11 @@
-import type { BootPreview, LifecycleProject, RecallDebug } from '@kioku/contracts'
-import { and, eq, inArray, isNull, not, or } from 'drizzle-orm'
+import { randomUUID } from 'node:crypto'
+
+import type { BootPreview, BootPreviewRequest, RecallDebug } from '@kioku/contracts'
+import { and, inArray, not } from 'drizzle-orm'
 
 import { readDenial, type Access } from '../access/access'
 import type { Tx } from '../db/client'
-import { memories, personas } from '../db/schema'
+import { memories } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import {
   PROMPT_RECALL_LIMIT,
@@ -14,7 +16,14 @@ import { accessForKey, recallScopeForKey, semanticFor } from '../memory/context'
 import { personaOverride, runInSpace } from '../memory/personas'
 import { formatUri } from '../memory/uri'
 import { bootEntryChars } from './boot'
-import { DEFAULT_MIN_SCORE, formatRecallBlock, normalizeQuery, recall, scoreRecall } from './recall'
+import {
+  DEFAULT_MIN_SCORE,
+  formatRecallBlock,
+  normalizeQuery,
+  publicCandidate,
+  scoreRecall,
+  type ScoredCandidate,
+} from './recall'
 
 // 调试台多看一些候选：没注入的、以及管理界面搜得到这把 Key 却读不到的，都从这么多条里找
 const DEBUG_LIMIT = 30
@@ -23,10 +32,11 @@ const DEBUG_LIMIT = 30
 export async function bootPreview(
   deps: Deps,
   key: KeyPrincipal,
-  project: LifecycleProject | undefined,
+  request: BootPreviewRequest,
 ): Promise<BootPreview> {
   const start = await sessionStart(recallScopeForKey(deps, key), key.app.runtimeFamily, {
-    project,
+    project: request.project,
+    sessionId: request.sessionId ?? randomUUID(),
   })
   return {
     runtimeFamily: key.app.runtimeFamily,
@@ -56,6 +66,10 @@ export async function recallDebug(
   const keyAccess = accessForKey(key)
   // 向量只算一次，两边共用；和每轮输入时一样有时限
   const semantic = await semanticFor(deps, query, PROMPT_SEMANTIC_TIMEOUT_MS)
+  // 管理界面看得到全部人格，不按继承覆盖，和管理界面的搜索一样
+  const visible = await runInSpace(deps.db, key.spaceId, 'all', (tx, personaIds) =>
+    scoreRecall(tx, member, semantic, query, { limit: DEBUG_LIMIT, minScore: 0, personaIds }),
+  )
   const { scored, filtered } = await runInSpace(
     deps.db,
     key.spaceId,
@@ -67,36 +81,20 @@ export async function recallDebug(
         personaIds: chain,
         inheritance: true,
       })
-      // 管理界面看得到全部人格，不按继承覆盖
-      const allPersonas = await tx.select({ id: personas.id }).from(personas)
-      const visible = await recall(tx, member, semantic, query, {
-        limit: DEBUG_LIMIT,
-        minScore: 0,
-        personaIds: allPersonas.map((p) => p.id),
-      })
-      const seen = new Set(scored.map((c) => c.uri))
-      const missing = visible.filter((c) => !seen.has(c.uri)).map((c) => c.uri)
-      return { scored, filtered: await explainHidden(tx, keyAccess, chain, member, missing) }
+      // 按记忆 id 比对：同一个 URI 上可能还有别的记录（例如过期的共享记录），按 URI 会找错
+      const seen = new Set(scored.map((c) => c.id))
+      const missing = visible.filter((c) => !seen.has(c.id)).map((c) => c.id)
+      return { scored, filtered: await explainHidden(tx, keyAccess, chain, missing) }
     },
   )
   const injected = scored
     .filter((c) => c.rawScore >= DEFAULT_MIN_SCORE)
     .slice(0, PROMPT_RECALL_LIMIT)
-  const shown = new Set(injected.map((c) => c.uri))
-  // 取整前的总分只用来和阈值比较，不返回
-  const strip = (c: (typeof scored)[number]) => ({
-    uri: c.uri,
-    layer: c.layer,
-    priority: c.priority,
-    disclosure: c.disclosure,
-    score: c.score,
-    via: c.via,
-    cues: c.cues,
-    breakdown: c.breakdown,
-  })
+  const shown = new Set(injected.map((c) => c.id))
+  const toDebug = (c: ScoredCandidate) => ({ ...publicCandidate(c), breakdown: c.breakdown })
   return {
-    injected: injected.map(strip),
-    others: scored.filter((c) => !shown.has(c.uri)).map(strip),
+    injected: injected.map(toDebug),
+    others: scored.filter((c) => !shown.has(c.id)).map(toDebug),
     minScore: DEFAULT_MIN_SCORE,
     block: formatRecallBlock(injected),
     semantic: semantic !== null,
@@ -104,63 +102,43 @@ export async function recallDebug(
   }
 }
 
-// 这些 URI 上查看者看得到的那条，这把 Key 为什么读不到：读权限的原因，或被继承链上更近的人格覆盖。
-// 读得到又没被覆盖的只是分数排在后面，不算被过滤
+// 查看者搜得到的这些记忆，这把 Key 为什么读不到：读权限的原因，或被继承链上更近的人格覆盖。
+// 读得到又没被覆盖的只是分数排在后面，不算被过滤。顺序与管理界面的搜索结果一致
 async function explainHidden(
   tx: Tx,
   keyAccess: Access,
   chain: string[],
-  member: Access,
-  uris: string[],
+  ids: string[],
 ): Promise<RecallDebug['filtered']> {
-  if (!uris.length) return []
-  const pairs = uris.map((uri) => {
-    const [domain, path] = uri.split('://') as [string, string]
-    return and(eq(memories.domain, domain), eq(memories.path, path))
-  })
-  const rows = await tx
-    .select()
-    .from(memories)
-    .where(
-      and(
-        or(...pairs),
-        isNull(memories.deletedAt),
-        or(isNull(memories.ownerAccountId), eq(memories.ownerAccountId, member.ownerAccountId)),
-      ),
-    )
+  if (!ids.length) return []
+  const rows = await tx.select().from(memories).where(inArray(memories.id, ids))
   const override = personaOverride(keyAccess, { personaIds: chain, inheritance: true })
   const overridden = new Set(
-    override && rows.length
+    override
       ? (
           await tx
             .select({ id: memories.id })
             .from(memories)
-            .where(
-              and(
-                inArray(
-                  memories.id,
-                  rows.map((r) => r.id),
-                ),
-                not(override),
-              ),
-            )
+            .where(and(inArray(memories.id, ids), not(override)))
         ).map((r) => r.id)
       : [],
   )
-  const order = new Map(uris.map((uri, i) => [uri, i]))
-  return rows
-    .map((row) => ({
-      row,
-      reason:
-        readDenial(keyAccess, row, { personaIds: chain }) ??
-        (overridden.has(row.id) ? ('override' as const) : null),
-    }))
-    .filter((r) => r.reason !== null)
-    .map(({ row, reason }) => ({
-      uri: formatUri(row.domain!, row.path!),
-      layer: row.layer,
-      sensitivity: row.sensitivity,
-      reason: reason!,
-    }))
-    .sort((a, b) => order.get(a.uri)! - order.get(b.uri)!)
+  const byId = new Map(rows.map((row) => [row.id, row]))
+  return ids.flatMap((id) => {
+    const row = byId.get(id)
+    if (!row) return []
+    const reason =
+      readDenial(keyAccess, row, { personaIds: chain }) ??
+      (overridden.has(id) ? ('override' as const) : null)
+    return reason
+      ? [
+          {
+            uri: formatUri(row.domain!, row.path!),
+            layer: row.layer,
+            sensitivity: row.sensitivity,
+            reason,
+          },
+        ]
+      : []
+  })
 }

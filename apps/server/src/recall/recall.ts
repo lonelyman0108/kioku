@@ -87,9 +87,23 @@ export async function embedQuery(
   }
 }
 
-// 打过分的候选：调试台要看各路的得分（breakdown）与取整前的总分（rawScore）
+// 打过分的候选：调试台要看各路的得分（breakdown）、取整前的总分（rawScore）与记忆 id
 export interface ScoredCandidate extends DebugCandidate {
+  id: string
   rawScore: number
+}
+
+// 给接入方的候选只有这些字段
+export function publicCandidate(c: ScoredCandidate): RecallCandidate {
+  return {
+    uri: c.uri,
+    layer: c.layer,
+    priority: c.priority,
+    disclosure: c.disclosure,
+    score: c.score,
+    via: c.via,
+    cues: c.cues,
+  }
 }
 
 export async function recall(
@@ -99,16 +113,7 @@ export async function recall(
   rawQuery: string,
   options: RecallOptions,
 ): Promise<RecallCandidate[]> {
-  const scored = await scoreRecall(tx, access, semantic, rawQuery, options)
-  return scored.map((c) => ({
-    uri: c.uri,
-    layer: c.layer,
-    priority: c.priority,
-    disclosure: c.disclosure,
-    score: c.score,
-    via: c.via,
-    cues: c.cues,
-  }))
+  return (await scoreRecall(tx, access, semantic, rawQuery, options)).map(publicCandidate)
 }
 
 export async function scoreRecall(
@@ -263,6 +268,7 @@ export async function scoreRecall(
       .sort((a, b) => b.score - a.score || a.h.row.priority - b.h.row.priority)
       .slice(0, options.limit)
       .map(({ h, parts, score }) => ({
+        id: h.row.id,
         uri: formatUri(h.row.domain!, h.row.path!),
         layer: h.row.layer,
         priority: h.row.priority,

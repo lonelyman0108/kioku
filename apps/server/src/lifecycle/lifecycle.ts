@@ -90,63 +90,58 @@ export async function sessionStart(
   runtimeFamily: string,
   input: { project?: LifecycleProject | undefined; sessionId?: string | undefined },
 ): Promise<SessionStart> {
-  {
-    const limit = HOST_CONTEXT_LIMIT[runtimeFamily]
-    const result = await scope.boot(
-      limit ? Math.max(limit - GUIDANCE.length - CONTEXT_RESERVE, 1_000) : undefined,
-    )
-    // 已经在 boot 里展开的节点不再重复列出；多取几条，去掉它们之后仍能凑够
-    const booted = new Set(result.entries.map((e) => e.uri))
-    const query = projectQuery(input.project)
-    // 近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
-    // 过滤也和 boot 一样（受信来源、boot 的那几层）：它不需要用户提到任何东西就会注入
-    const [recent, related] = await Promise.allSettled([
-      scope.recent(RECENT_LIMIT + booted.size),
-      query
-        ? scope.recall(query, {
-            limit: PROJECT_RECALL_LIMIT + booted.size,
-            semantic: false,
-            trustedOnly: true,
-            layers: BOOT_LAYERS,
-          })
-        : Promise.resolve([]),
-    ])
-    for (const r of [recent, related]) {
-      if (r.status === 'rejected') console.warn('会话开始时附加的记忆读取失败', r.reason)
-    }
-    const recentList = (recent.status === 'fulfilled' ? recent.value : [])
-      .filter((m) => !booted.has(m.uri))
-      .slice(0, RECENT_LIMIT)
-    const relatedList = (related.status === 'fulfilled' ? related.value : [])
-      .filter((c) => !booted.has(c.uri))
-      .slice(0, PROJECT_RECALL_LIMIT)
-    const relatedBlock = formatRecallBlock(relatedList, input.sessionId)
+  const limit = HOST_CONTEXT_LIMIT[runtimeFamily]
+  const result = await scope.boot(
+    limit ? Math.max(limit - GUIDANCE.length - CONTEXT_RESERVE, 1_000) : undefined,
+  )
+  // 已经在 boot 里展开的节点不再重复列出；多取几条，去掉它们之后仍能凑够
+  const booted = new Set(result.entries.map((e) => e.uri))
+  const query = projectQuery(input.project)
+  // 近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
+  // 过滤也和 boot 一样（受信来源、boot 的那几层）：它不需要用户提到任何东西就会注入
+  const [recent, related] = await Promise.allSettled([
+    scope.recent(RECENT_LIMIT + booted.size),
+    query
+      ? scope.recall(query, {
+          limit: PROJECT_RECALL_LIMIT + booted.size,
+          semantic: false,
+          trustedOnly: true,
+          layers: BOOT_LAYERS,
+        })
+      : Promise.resolve([]),
+  ])
+  for (const r of [recent, related]) {
+    if (r.status === 'rejected') console.warn('会话开始时附加的记忆读取失败', r.reason)
+  }
+  const recentList = (recent.status === 'fulfilled' ? recent.value : [])
+    .filter((m) => !booted.has(m.uri))
+    .slice(0, RECENT_LIMIT)
+  const relatedList = (related.status === 'fulfilled' ? related.value : [])
+    .filter((c) => !booted.has(c.uri))
+    .slice(0, PROJECT_RECALL_LIMIT)
+  const relatedBlock = formatRecallBlock(relatedList, input.sessionId)
 
-    const parts = [formatBootBlock(result, GUIDANCE)]
-    const extras = [
-      ['recent', formatRecentBlock(recentList)],
-      [
-        'related',
-        relatedBlock && `与当前项目相关的记忆，需要时用 kioku_get 读取：\n${relatedBlock}`,
-      ],
-    ] as const
-    const dropped: SessionStart['dropped'] = []
-    for (const [name, extra] of extras) {
-      if (!extra) continue
-      if (limit && [...parts, extra].join('\n\n').length > limit) {
-        dropped.push(name)
-        continue
-      }
-      parts.push(extra)
+  const parts = [formatBootBlock(result, GUIDANCE)]
+  const extras = [
+    ['recent', formatRecentBlock(recentList)],
+    ['related', relatedBlock && `与当前项目相关的记忆，需要时用 kioku_get 读取：\n${relatedBlock}`],
+  ] as const
+  const dropped: SessionStart['dropped'] = []
+  for (const [name, extra] of extras) {
+    if (!extra) continue
+    if (limit && [...parts, extra].join('\n\n').length > limit) {
+      dropped.push(name)
+      continue
     }
-    return {
-      context: parts.join('\n\n'),
-      limit: limit ?? null,
-      boot: result,
-      recent: dropped.includes('recent') ? [] : recentList,
-      related: dropped.includes('related') ? [] : relatedList,
-      dropped,
-    }
+    parts.push(extra)
+  }
+  return {
+    context: parts.join('\n\n'),
+    limit: limit ?? null,
+    boot: result,
+    recent: dropped.includes('recent') ? [] : recentList,
+    related: dropped.includes('related') ? [] : relatedList,
+    dropped,
   }
 }
 

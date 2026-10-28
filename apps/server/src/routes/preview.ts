@@ -1,6 +1,5 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
-  AppConfig,
   BootPreview,
   BootPreviewRequest,
   ErrorResponse,
@@ -12,7 +11,7 @@ import { and, eq } from 'drizzle-orm'
 import type { Context } from 'hono'
 
 import { keyEffectiveScopes } from '../access/access'
-import { memberRole } from '../auth/middleware'
+import { keyPrincipal, memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
 import { apiKeys, apps, spaceMembers } from '../db/schema'
 import type { AppEnv, Deps, KeyPrincipal } from '../http/env'
@@ -74,23 +73,7 @@ async function keyToSimulate(deps: Deps, c: Context<AppEnv>): Promise<Found> {
     .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
   const scopes = keyEffectiveScopes({ ...key, scopes: KeyScopes.parse(key.scopes) }, owner)
   if (!scopes) return { error: 'Key 已作废', status: 404 }
-  return {
-    key: {
-      kind: 'key',
-      keyId: key.id,
-      spaceId,
-      scopes,
-      app: {
-        id: app.id,
-        slug: app.slug,
-        name: app.name,
-        runtimeFamily: app.runtimeFamily,
-        ownerAccountId: app.ownerAccountId,
-        defaultPersonaId: app.defaultPersonaId,
-        config: AppConfig.parse(app.config),
-      },
-    },
-  }
+  return { key: keyPrincipal(key, app, scopes) }
 }
 
 export function previewRoutes(deps: Deps) {
@@ -98,7 +81,7 @@ export function previewRoutes(deps: Deps) {
     .openapi(preview, async (c) => {
       const found = await keyToSimulate(deps, c)
       if ('error' in found) return c.json({ error: found.error }, found.status)
-      return c.json(await bootPreview(deps, found.key, c.req.valid('json').project), 200)
+      return c.json(await bootPreview(deps, found.key, c.req.valid('json')), 200)
     })
     .openapi(debug, async (c) => {
       const found = await keyToSimulate(deps, c)
