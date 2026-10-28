@@ -55,6 +55,9 @@ async function update(body: UpdateSubjectRequest, done: string) {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['subject', sid, id] }),
       queryClient.invalidateQueries({ queryKey: ['subjects', sid] }),
+      // 群名也显示在应用的按群换人格里
+      queryClient.invalidateQueries({ queryKey: ['group-personas', sid] }),
+      queryClient.invalidateQueries({ queryKey: ['group-picker', sid] }),
     ])
     toast.add({ title: done, color: 'success' })
   } catch (err) {

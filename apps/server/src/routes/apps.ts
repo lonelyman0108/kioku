@@ -14,7 +14,7 @@ import {
   UpdateAppRequest,
   type MemberRole,
 } from '@kioku/contracts'
-import { and, asc, count, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 
 import { accessMatrix, keyEffectiveScopes } from '../access/access'
 import { generateApiKey } from '../auth/keys'
@@ -397,9 +397,23 @@ export function appRoutes(deps: Deps) {
               .for('key share')
           : []
         if (found.length !== personaIds.length) return 'no-persona' as const
-        await tx.delete(appGroupPersonas).where(eq(appGroupPersonas.appId, appId))
+        // 只删掉不要的、改有变化的、加新的：留下的规则保持原来的建立时间，列表顺序不跟着每次保存变
+        await tx
+          .delete(appGroupPersonas)
+          .where(
+            and(
+              eq(appGroupPersonas.appId, appId),
+              subjectIds.length ? notInArray(appGroupPersonas.subjectId, subjectIds) : undefined,
+            ),
+          )
         if (rules.length) {
-          await tx.insert(appGroupPersonas).values(rules.map((r) => ({ spaceId, appId, ...r })))
+          await tx
+            .insert(appGroupPersonas)
+            .values(rules.map((r) => ({ spaceId, appId, ...r })))
+            .onConflictDoUpdate({
+              target: [appGroupPersonas.appId, appGroupPersonas.subjectId],
+              set: { personaId: sql`excluded.persona_id` },
+            })
         }
         return groupPersonaRules(tx, appId)
       })

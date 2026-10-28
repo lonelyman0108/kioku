@@ -6,10 +6,18 @@ import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useDebounced } from '../composables/useDebounced'
 import { icons } from '../icons'
 
 // 按群换人格的规则：应用在这些群里用规则里的人格。整组替换，改一条就把整组发回去；只有应用主人能改
-const props = defineProps<{ spaceId: string; appId: string; canManage: boolean }>()
+const props = defineProps<{
+  spaceId: string
+  appId: string
+  canManage: boolean
+  // 人格列表由应用详情页查好传进来
+  personas: { id: string; name: string }[]
+  personasLoaded: boolean
+}>()
 const toast = useToast()
 const queryClient = useQueryClient()
 
@@ -18,40 +26,40 @@ const rules = useQuery({
   queryKey: rulesKey,
   queryFn: () => api.groupPersonas(props.spaceId, props.appId),
 })
-const personas = useQuery({
-  queryKey: computed(() => ['personas', props.spaceId]),
-  queryFn: () => api.personas(props.spaceId),
-})
-const personaItems = computed(() =>
-  (personas.data.value ?? []).map((p) => ({ label: p.name, value: p.id })),
-)
+const personaItems = computed(() => props.personas.map((p) => ({ label: p.name, value: p.id })))
+// 规则用着的人格删不掉，找不到只会是人格列表还没加载出来
 const personaName = (id: string) =>
-  personas.data.value?.find((p) => p.id === id)?.name ?? '已删除的人格'
+  props.personasLoaded ? (props.personas.find((p) => p.id === id)?.name ?? id) : '…'
 
-// 选群：按群名或群号到服务端查，输入停下来再查
+// 选群：按群名或群号到服务端查，输入停下来再查；下拉框打开时才查
 const searchTerm = ref('')
-const term = ref('')
-let timer: ReturnType<typeof setTimeout> | undefined
-watch(searchTerm, (value) => {
-  clearTimeout(timer)
-  timer = setTimeout(() => (term.value = value.trim()), 300)
-})
+const term = useDebounced(searchTerm)
+const pickerOpen = ref(false)
 const groups = useQuery({
   queryKey: computed(() => ['group-picker', props.spaceId, term.value]),
   queryFn: () => api.subjects(props.spaceId, { kind: 'group', q: term.value || undefined }),
-  enabled: computed(() => props.canManage),
+  enabled: computed(() => props.canManage && pickerOpen.value),
 })
+type GroupItem = { label: string; value: string; description: string }
+// 选中的群单独留着：查找词清空后列表换了一页，选中的那个还要显示名字
+const picked = ref<GroupItem | null>(null)
 const groupItems = computed(() => {
   const taken = new Set(rules.data.value?.rules.map((r) => r.subjectId))
-  return (groups.data.value?.items ?? [])
+  const found: GroupItem[] = (groups.data.value?.items ?? [])
     .filter((g) => !taken.has(g.id))
     .map((g) => ({
       label: g.displayName,
       value: g.id,
       description: g.identities.map((i) => `${i.platform} ${i.externalId}`).join('、'),
     }))
+  return picked.value && !found.some((g) => g.value === picked.value!.value)
+    ? [picked.value, ...found]
+    : found
 })
 const newGroup = ref<string | undefined>()
+watch(newGroup, (id) => {
+  picked.value = id ? (groupItems.value.find((g) => g.value === id) ?? picked.value) : null
+})
 const newPersona = ref<string | undefined>()
 
 const current = (): GroupPersonaRule[] =>
@@ -61,14 +69,19 @@ const saving = ref(false)
 async function save(next: GroupPersonaRule[], done: string): Promise<boolean> {
   const sid = props.spaceId
   const id = props.appId
+  const key = ['group-personas', sid, id]
   saving.value = true
+  // 先取消还没回来的读取：它读到的是保存之前的规则，后到的话会盖掉保存的结果
+  await queryClient.cancelQueries({ queryKey: key })
   try {
     const saved = await api.saveGroupPersonas(sid, id, { rules: next })
-    queryClient.setQueryData(['group-personas', sid, id], saved)
+    queryClient.setQueryData(key, saved)
     toast.add({ title: done, color: 'success' })
     return true
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
+    // 失败多半是手里的规则已经过时（群删掉了、别处改过），重新读一次，下次按新的保存
+    void queryClient.invalidateQueries({ queryKey: key })
     return false
   } finally {
     saving.value = false
@@ -151,6 +164,7 @@ function remove(subjectId: string) {
         <USelectMenu
           v-model="newGroup"
           v-model:search-term="searchTerm"
+          v-model:open="pickerOpen"
           :items="groupItems"
           value-key="value"
           ignore-filter

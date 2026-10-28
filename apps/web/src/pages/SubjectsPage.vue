@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import type { SubjectInfo, SubjectKind } from '@kioku/contracts'
 import { useInfiniteQuery } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { formatRelative } from '../time'
@@ -21,14 +22,8 @@ const tabs = [
   { label: '群', value: 'group', icon: icons.group },
 ]
 
-// 输入停下来再查，免得每敲一个字发一次请求
 const search = ref('')
-const q = ref('')
-let timer: ReturnType<typeof setTimeout> | undefined
-watch(search, (value) => {
-  clearTimeout(timer)
-  timer = setTimeout(() => (q.value = value.trim()), 300)
-})
+const q = useDebounced(search)
 
 const subjects = useInfiniteQuery({
   queryKey: computed(() => ['subjects', spaceId.value, kind.value, q.value]),

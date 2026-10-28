@@ -266,7 +266,13 @@ watch([spaceId, appId], () => {
         </UCard>
 
         <UCard>
-          <AppGroupPersonas :space-id="spaceId" :app-id="app.id" :can-manage="canManage" />
+          <AppGroupPersonas
+            :space-id="spaceId"
+            :app-id="app.id"
+            :can-manage="canManage"
+            :personas="personas.data.value ?? []"
+            :personas-loaded="personas.isSuccess.value"
+          />
         </UCard>
 
         <UCard>
