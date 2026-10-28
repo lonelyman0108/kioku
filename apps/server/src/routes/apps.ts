@@ -6,6 +6,7 @@ import {
   CreatedKey,
   CreateKeyRequest,
   ErrorResponse,
+  GroupPersonaRuleList,
   GroupPersonaRules,
   KeyAccessMatrix,
   KeyInfo,
@@ -13,7 +14,7 @@ import {
   UpdateAppRequest,
   type MemberRole,
 } from '@kioku/contracts'
-import { and, asc, count, desc, eq, inArray, isNull } from 'drizzle-orm'
+import { and, asc, count, desc, eq, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 
 import { accessMatrix, keyEffectiveScopes } from '../access/access'
 import { generateApiKey } from '../auth/keys'
@@ -136,7 +137,7 @@ const listGroupPersonas = createRoute({
   tags: ['apps'],
   summary: '按群换人格的规则：应用在这些群（或频道）里用规则里的人格，其余的群与私聊用默认人格',
   request: { params: AppParams },
-  responses: { 200: jsonResponse('规则', GroupPersonaRules), 403: forbidden, 404: notFound },
+  responses: { 200: jsonResponse('规则', GroupPersonaRuleList), 403: forbidden, 404: notFound },
 })
 
 const replaceGroupPersonas = createRoute({
@@ -146,7 +147,7 @@ const replaceGroupPersonas = createRoute({
   summary: '整组替换按群换人格的规则，只有应用主人能改',
   request: { params: AppParams, body: jsonBody(GroupPersonaRules) },
   responses: {
-    200: jsonResponse('替换后的规则', GroupPersonaRules),
+    200: jsonResponse('替换后的规则', GroupPersonaRuleList),
     400: jsonResponse('规则不合法', ErrorResponse),
     403: forbidden,
     404: notFound,
@@ -207,8 +208,13 @@ const canManageApps = (role: MemberRole | null) => role === 'owner' || role === 
 
 function groupPersonaRules(tx: Tx, appId: string) {
   return tx
-    .select({ subjectId: appGroupPersonas.subjectId, personaId: appGroupPersonas.personaId })
+    .select({
+      subjectId: appGroupPersonas.subjectId,
+      personaId: appGroupPersonas.personaId,
+      groupName: subjects.displayName,
+    })
     .from(appGroupPersonas)
+    .innerJoin(subjects, eq(subjects.id, appGroupPersonas.subjectId))
     .where(eq(appGroupPersonas.appId, appId))
     .orderBy(asc(appGroupPersonas.createdAt), asc(appGroupPersonas.subjectId))
 }
@@ -391,9 +397,24 @@ export function appRoutes(deps: Deps) {
               .for('key share')
           : []
         if (found.length !== personaIds.length) return 'no-persona' as const
-        await tx.delete(appGroupPersonas).where(eq(appGroupPersonas.appId, appId))
+        // 只删掉不要的、改有变化的、加新的：留下的规则保持原来的建立时间，列表顺序不跟着每次保存变
+        await tx
+          .delete(appGroupPersonas)
+          .where(
+            and(
+              eq(appGroupPersonas.appId, appId),
+              subjectIds.length ? notInArray(appGroupPersonas.subjectId, subjectIds) : undefined,
+            ),
+          )
         if (rules.length) {
-          await tx.insert(appGroupPersonas).values(rules.map((r) => ({ spaceId, appId, ...r })))
+          await tx
+            .insert(appGroupPersonas)
+            .values(rules.map((r) => ({ spaceId, appId, ...r })))
+            .onConflictDoUpdate({
+              target: [appGroupPersonas.appId, appGroupPersonas.subjectId],
+              set: { personaId: sql`excluded.persona_id` },
+              setWhere: sql`${appGroupPersonas.personaId} is distinct from excluded.persona_id`,
+            })
         }
         return groupPersonaRules(tx, appId)
       })

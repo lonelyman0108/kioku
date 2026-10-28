@@ -20,6 +20,7 @@ import {
   ExtractionUsage,
   ExtractionTestResult,
   GlossaryIndex,
+  GroupPersonaRuleList,
   HealthResponse,
   KeyAccessMatrix,
   KeyInfo,
@@ -50,6 +51,7 @@ import {
   type CreateKeyRequest,
   type CreateMemoryRequest,
   type CreatePersonaRequest,
+  type GroupPersonaRules,
   type MemoryListQuery,
   type MoveMemoryRequest,
   type PlainLayer,
@@ -244,6 +246,15 @@ export const api = {
     request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),
   review: (spaceId: string, body: ReviewRequest) =>
     request('POST', `/spaces/${spaceId}/review`, { body, schema: ReviewResult }),
+  groupPersonas: (spaceId: string, appId: string) =>
+    request('GET', `/spaces/${spaceId}/apps/${appId}/group-personas`, {
+      schema: GroupPersonaRuleList,
+    }),
+  saveGroupPersonas: (spaceId: string, appId: string, body: GroupPersonaRules) =>
+    request('PUT', `/spaces/${spaceId}/apps/${appId}/group-personas`, {
+      body,
+      schema: GroupPersonaRuleList,
+    }),
   activity: (spaceId: string, cursor?: string) =>
     request('GET', `/spaces/${spaceId}/activity`, { query: { cursor }, schema: ActivityList }),
   domainLayers: (spaceId: string) =>

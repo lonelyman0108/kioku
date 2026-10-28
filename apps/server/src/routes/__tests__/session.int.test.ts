@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type {
-  GroupPersonaRules,
+  GroupPersonaRuleList,
   LifecycleResponse,
   RecallResponse,
   SessionContextInput,
@@ -452,8 +452,8 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
       rules: [{ subjectId: g700, personaId: seriousId }],
     })
     expect(put.status).toBe(200)
-    expect(((await put.json()) as GroupPersonaRules).rules).toEqual([
-      { subjectId: g700, personaId: seriousId },
+    expect(((await put.json()) as GroupPersonaRuleList).rules).toEqual([
+      { subjectId: g700, personaId: seriousId, groupName: '群700' },
     ])
 
     const bootOf = async (context: SessionContextInput) => {
@@ -499,9 +499,35 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
     expect((await put([{ subjectId: g800, personaId: spare }])).status).toBe(200)
     const listed = await asOwner('GET', path, undefined, vic.cookie)
     expect(listed.status).toBe(200)
-    expect(((await listed.json()) as GroupPersonaRules).rules).toEqual([
-      { subjectId: g800, personaId: spare },
+    // 列出时带上群现在的名字
+    expect(((await listed.json()) as GroupPersonaRuleList).rules).toEqual([
+      { subjectId: g800, personaId: spare, groupName: '群800' },
     ])
+
+    // 保存时留下的规则保持原来的建立时间，列表顺序不跟着变。先加 id 较大的群：
+    // 要是每次保存都整组重建，几条规则的建立时间相同，就会按 id 排、顺序反过来
+    await recall('规则', group('802'))
+    const [earlier, later] = [g800, await subjectOf('qq', 'group', '802')].sort()
+    await put([{ subjectId: later!, personaId: spare }])
+    await put([
+      { subjectId: later!, personaId: spare },
+      { subjectId: earlier!, personaId: seriousId },
+    ])
+    expect(
+      (
+        await put([
+          { subjectId: later!, personaId: doubaoId },
+          { subjectId: earlier!, personaId: seriousId },
+        ])
+      ).status,
+    ).toBe(200)
+    const reordered = (await (await asOwner('GET', path)).json()) as GroupPersonaRuleList
+    expect(reordered.rules.map((r) => [r.subjectId, r.personaId])).toEqual([
+      [later, doubaoId],
+      [earlier, seriousId],
+    ])
+    expect((await put([{ subjectId: g800, personaId: spare }])).status).toBe(200)
+
     const removed = await asOwner('DELETE', `/personas/${spare}`)
     expect(removed.status).toBe(409)
     expect(((await removed.json()) as { error: string }).error).toContain('1 条按群换人格的规则')

@@ -7,6 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
 import AppRecallEvents from '../components/AppRecallEvents.vue'
 import AppSimulator from '../components/AppSimulator.vue'
@@ -262,6 +263,16 @@ watch([spaceId, appId], () => {
               />
             </UFormField>
           </div>
+        </UCard>
+
+        <UCard>
+          <AppGroupPersonas
+            :space-id="spaceId"
+            :app-id="app.id"
+            :can-manage="canManage"
+            :personas="personas.data.value ?? []"
+            :personas-loaded="personas.isSuccess.value"
+          />
         </UCard>
 
         <UCard>
