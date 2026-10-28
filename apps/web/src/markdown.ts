@@ -129,6 +129,8 @@ export interface KeywordLinks {
 // 正文引用的凭据怎么显示：只有读者自己私人层的记忆才解析，按标识找读者自己的有效凭据
 export interface CredentialLinks {
   byIdentifier: ReadonlyMap<string, { id: string; name: string; fields: readonly string[] }>
+  // 凭据详情的地址
+  href: (id: string) => string
 }
 
 export function renderMarkdown(
@@ -165,7 +167,7 @@ function textNodes(root: DocumentFragment): Text[] {
 
 // 把占位符画成徽章：解析得到的是链接（data-credential 是凭据 id，点了去凭据页），
 // 解析不到或没有这个字段的标出来。代码里的占位符照原样显示
-function markCredentials(root: DocumentFragment, { byIdentifier }: CredentialLinks) {
+function markCredentials(root: DocumentFragment, { byIdentifier, href }: CredentialLinks) {
   for (const text of textNodes(root)) {
     const segments = splitPlaceholders(text.data)
     if (!segments.some((s) => s.ref)) continue
@@ -182,7 +184,7 @@ function markCredentials(root: DocumentFragment, { byIdentifier }: CredentialLin
       if (credential && !missingField) {
         const link = document.createElement('a')
         link.className = 'kioku-cred'
-        link.href = '#'
+        link.href = href(credential.id)
         link.dataset.credential = credential.id
         link.title = `凭据：${credential.name}`
         link.setAttribute('aria-label', `凭据 ${label}`)

@@ -76,7 +76,7 @@ export type PlaceholderCredential =
       source: 'hosted' | 'external'
       // 外部来源的条目位置
       location: string | null
-    } & Binding)
+    } & Pick<Binding, 'provider' | 'method'>)
 
 type CredentialRow = typeof credentials.$inferSelect
 type ProviderRow = typeof credentialProviders.$inferSelect
@@ -937,13 +937,16 @@ export class CredentialService {
             fields: row.fields.map((f) => f.name),
           })
         }
+        // revealable 是 use() 决定给不给值用的，不放进给 agent 看的列表
+        const { provider, method } = this.binding(row, providers, row.fields, false)
         result.push({
           identifier,
           available: true,
           name: row.name,
           source: row.source,
           location: row.source === 'external' ? row.location : null,
-          ...this.binding(row, providers, row.fields, false),
+          provider,
+          method,
         })
       }
       return result

@@ -153,6 +153,10 @@ const credentialLinks = computed<CredentialLinks | null>(() => {
   const items = credentials.data.value?.items
   if (!ownsCredentials.value || !items) return null
   return {
+    // 徽章是真的链接：中键、在新标签页打开也能到凭据页
+    href: (id) =>
+      router.resolve({ name: 'credentials', params: { spaceId: props.spaceId }, query: { id } })
+        .href,
     byIdentifier: new Map(
       items.map((c) => [
         c.identifier,
@@ -171,8 +175,9 @@ const canReference = computed(
 )
 const contentInput = ref<{ textareaRef: HTMLTextAreaElement | null } | null>(null)
 const picking = ref(false)
-// 打开选择框时记下光标的位置：焦点移到选择框之后，正文框的选区就读不准了
-const caret = ref<[number, number] | null>(null)
+// 打开选择框时记下光标的位置与当时的正文：焦点移到选择框之后，正文框的选区就读不准了；
+// 选择框开着时正文被换掉（例如跟上了别处保存的新版本），原来的位置就不对了，改为插在末尾
+const caret = ref<{ start: number; end: number; content: string } | null>(null)
 // 字段选「整条」时用 WHOLE：下拉框的选项不能用空字符串当值
 const WHOLE = '*'
 const pick = reactive({ credentialId: undefined as string | undefined, field: WHOLE })
@@ -199,7 +204,9 @@ watch(
 )
 function startPicking() {
   const el = contentInput.value?.textareaRef
-  caret.value = el ? [el.selectionStart, el.selectionEnd] : null
+  caret.value = el
+    ? { start: el.selectionStart, end: el.selectionEnd, content: form.content }
+    : null
   pick.credentialId = undefined
   pick.field = WHOLE
   picking.value = true
@@ -207,7 +214,11 @@ function startPicking() {
 function insertPlaceholder() {
   const text = pickedPlaceholder.value
   if (!text) return
-  const [start, end] = caret.value ?? [form.content.length, form.content.length]
+  const at = caret.value
+  const [start, end] =
+    at && at.content === form.content
+      ? [at.start, at.end]
+      : [form.content.length, form.content.length]
   form.content = form.content.slice(0, start) + text + form.content.slice(end)
   picking.value = false
   // 选择框关掉、焦点回到按钮之后，再把光标放回正文里插入的位置后面
@@ -285,7 +296,7 @@ const PLAINTEXT_TEXT =
   '正文里像有密码或 Token（例如「密码：…」）。建议把值存成凭据，正文里换成占位符，记忆就不带明文。'
 function requestSave() {
   const m = base.value
-  if (!m) return
+  if (!m || saving.value) return
   const downgrade = m.sensitivity === 'secret' && form.sensitivity !== 'secret'
   const contentChanged = form.content !== (m.content ?? '')
   if ((downgrade || contentChanged) && PLAINTEXT_CREDENTIAL.test(form.content)) {
@@ -295,14 +306,16 @@ function requestSave() {
   void save()
 }
 function confirmPlaintext() {
-  const allowPlaintext = plaintextWarning.value?.downgrade ?? false
+  // 确认框关闭的动画期间再点一次：已经在保存了，不再发第二个请求
+  const warning = plaintextWarning.value
+  if (!warning || saving.value) return
   plaintextWarning.value = null
-  void save(allowPlaintext)
+  void save(warning.downgrade)
 }
 
 async function save(allowPlaintext = false) {
   const m = base.value
-  if (!m) return
+  if (!m || saving.value) return
   saving.value = true
   // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
   const sent = { ...form, glossary: [...form.glossary] }
@@ -313,7 +326,10 @@ async function save(allowPlaintext = false) {
       expectedId: m.id,
       expectedVersion: m.version,
       ...(sent.content !== (m.content ?? '') ? { content: sent.content } : {}),
-      disclosure: sent.disclosure.trim() ? sent.disclosure.trim() : null,
+      // 只在改了的时候发：服务端会检查写进去的 disclosure，规则之前写着的不该挡住改别的
+      ...((sent.disclosure.trim() || null) !== (m.disclosure ?? null)
+        ? { disclosure: sent.disclosure.trim() || null }
+        : {}),
       priority: sent.priority,
       sensitivity: sent.sensitivity,
       glossaryAdd: sent.glossary.filter((k) => !m.glossary.includes(k)),

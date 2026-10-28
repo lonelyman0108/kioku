@@ -95,13 +95,13 @@ const detail = computed(() =>
   selected.data.value && selected.data.value.id === selectedId.value ? selected.data.value : null,
 )
 
-// 切换空间时关掉打开着的面板与窗口：里面的内容属于上一个空间
 const formOpen = ref(false)
 const editing = ref<ConsoleCredential | null>(null)
 const providerOpen = ref(false)
 const editingProvider = ref<CredentialProvider | null>(null)
+// 切换空间时关掉打开着的窗口：里面的内容属于上一个空间。详情不关，它记在地址里、跟着地址走：
+// 按浏览历史在两个空间的凭据之间前进后退时，地址里的 id 本来就是那个空间的
 watch(spaceId, () => {
-  selectedId.value = null
   formOpen.value = false
   providerOpen.value = false
   removing.value = null

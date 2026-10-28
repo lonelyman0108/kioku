@@ -25,6 +25,11 @@ const SAMPLES = [
   'tokenizer: 分词器',
   'sk-short',
   '普通的一段话',
+  // 非 ASCII 的空白：两边要按同一个集合判断
+  '密码：\u3000{{cred:x}}',
+  '密码：\ufeff{{cred:x}}',
+  '密码：\u00a0hunter2',
+  'password\u3000: abc',
 ]
 
 describe.skipIf(!testDatabaseUrl)('明文凭据提醒', () => {
