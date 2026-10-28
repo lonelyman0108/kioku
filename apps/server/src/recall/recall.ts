@@ -6,6 +6,7 @@ import type { Tx } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import { readableConditions } from '../memory/filter'
+import { personaOverride, type PersonaSelection } from '../memory/personas'
 import { formatUri } from '../memory/uri'
 
 // 多路召回：向量相似度、中文全文检索、glossary 关键词命中。三路都先套同一套读权限过滤，
@@ -33,11 +34,10 @@ const WORD_END = '\\M'
 const REGEX_META = '([.^$*+?()\\[\\]{}|\\\\-])'
 const ESCAPE_MATCH = '\\\\\\1'
 
-export interface RecallOptions {
+// 人格按 PersonaSelection 挑选（persona 层过滤与继承覆盖）；召回永远不返回 secret
+export interface RecallOptions extends PersonaSelection {
   limit: number
   minScore?: number
-  // personaIds 用于 persona 层过滤；召回永远不返回 secret
-  personaIds: string[]
   // 只收受信来源（不含 untrusted 写入的）
   trustedOnly?: boolean
   // 只收这些层
@@ -99,6 +99,7 @@ export async function recall(
   // 召回只面向有 URI 的策展记忆；抽取记忆另有展示方式，不能在各路里占掉名额
   const readable = and(
     readableConditions(access, { personaIds: options.personaIds }),
+    personaOverride(access, options),
     eq(memories.form, 'curated'),
     options.trustedOnly ? ne(memories.provenance, 'untrusted') : undefined,
     options.layers ? inArray(memories.layer, options.layers) : undefined,

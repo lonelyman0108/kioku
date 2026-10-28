@@ -83,9 +83,10 @@ describe('群聊', () => {
   it('只能以 untrusted 身份写对象层和情节层', () => {
     expect(access.writeProvenance).toBe('untrusted')
     expect(access.writeOriginScope).toBe('group:g1')
-    expect(canWrite(access, { layer: 'subject', sensitivity: 'public', appId: null })).toBe(true)
-    expect(canWrite(access, { layer: 'persona', sensitivity: 'public', appId: null })).toBe(false)
-    expect(canWrite(access, { layer: 'private', sensitivity: 'public', appId: null })).toBe(false)
+    const intent = { sensitivity: 'public', appId: null, personaId: null } as const
+    expect(canWrite(access, { ...intent, layer: 'subject' })).toBe(true)
+    expect(canWrite(access, { ...intent, layer: 'persona' })).toBe(false)
+    expect(canWrite(access, { ...intent, layer: 'private' })).toBe(false)
   })
 
   it('缺少群对象时拒绝解析', () => {
@@ -192,6 +193,7 @@ describe('应用层的写入', () => {
     layer: 'app' as const,
     sensitivity: 'internal' as const,
     appId,
+    personaId: null,
   })
 
   it('Key 只能写本应用的应用层，admin Key 不限', () => {
@@ -210,6 +212,38 @@ describe('应用层的写入', () => {
     expect(canWrite(consoleAccess('viewer', 'carol', ['app-carol']), appRule('app-carol'))).toBe(
       false,
     )
+  })
+})
+
+describe('人格层的写入', () => {
+  const personaRule = (personaId: string) => ({
+    layer: 'persona' as const,
+    sensitivity: 'public' as const,
+    appId: null,
+    personaId,
+  })
+  const withPersona = { ...app, personaId: 'persona-child' }
+
+  it('Key 只能写应用当前的人格，不能写继承链上的祖先；admin Key 不限', () => {
+    const access = resolveAccess(fullKey, withPersona)
+    expect(canWrite(access, personaRule('persona-child'))).toBe(true)
+    expect(canWrite(access, personaRule('persona-parent'))).toBe(false)
+    expect(
+      canWrite(
+        resolveAccess({ ...fullKey, admin: true }, withPersona),
+        personaRule('persona-parent'),
+      ),
+    ).toBe(true)
+  })
+
+  it('应用没有人格时 Key 写不了人格层', () => {
+    expect(canWrite(resolveAccess(fullKey, app), personaRule('persona-child'))).toBe(false)
+  })
+
+  it('管理界面里 owner 与 editor 能写任何人格，viewer 不能写', () => {
+    expect(canWrite(consoleAccess('owner', OWNER), personaRule('persona-parent'))).toBe(true)
+    expect(canWrite(consoleAccess('editor', 'bob'), personaRule('persona-parent'))).toBe(true)
+    expect(canWrite(consoleAccess('viewer', 'carol'), personaRule('persona-parent'))).toBe(false)
   })
 })
 
