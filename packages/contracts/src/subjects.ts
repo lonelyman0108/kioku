@@ -56,6 +56,8 @@ export const SubjectFact = z.object({
   content: z.string(),
   provenance: Provenance,
   scope: OriginScope,
+  // 删除时带回来：看过之后被改过的不删
+  version: z.number().int(),
   createdAt: z.iso.datetime(),
   updatedAt: z.iso.datetime(),
 })
@@ -107,3 +109,11 @@ export const UpdateSubjectRequest = z
     message: '没有要改的内容',
   })
 export type UpdateSubjectRequest = z.infer<typeof UpdateSubjectRequest>
+
+// 把另一个对象（同一个人在别的平台的账号、同一个群）合并进来：它的平台账号、挂在它身上的事实、
+// 和它的私聊（或群）里记下的内容都归到这个对象，按群换人格的规则跟过来，然后删掉它
+export const MergeSubjectRequest = z.object({ from: z.uuid() })
+export type MergeSubjectRequest = z.infer<typeof MergeSubjectRequest>
+
+export const DeleteFactQuery = z.object({ version: z.coerce.number().int() })
+export type DeleteFactQuery = z.infer<typeof DeleteFactQuery>

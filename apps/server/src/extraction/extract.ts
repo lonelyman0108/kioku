@@ -1,4 +1,4 @@
-import { and, asc, eq, inArray, lte, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 
 import type { Access, SessionContext } from '../access/access'
 import { groupPersona, type KeySession } from '../access/session'
@@ -9,7 +9,13 @@ import {
   mentionsPlaceholder,
 } from '../credential/placeholders'
 import { withSpace, type Db, type Tx } from '../db/client'
-import { conversationTurns, extractionRuns, memories, subjectIdentities } from '../db/schema'
+import {
+  conversationTurns,
+  extractionRuns,
+  memories,
+  subjectIdentities,
+  subjects as subjectTable,
+} from '../db/schema'
 import type { KeyPrincipal } from '../http/env'
 import { accessForKey } from '../memory/context'
 import { readableConditions } from '../memory/filter'
@@ -25,6 +31,10 @@ import type { ChatModel } from './provider'
 export const NO_USABLE_KEY = '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层'
 export const BUDGET_NO_SUMMARY = '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要'
 
+// 抽取期间这一批对话被合并到了别的对象：这一批不写，交给合并后的批次
+export const BATCH_MOVED = '抽取期间对象被合并，这一批交给合并后的批次重新抽取'
+class BatchMoved extends Error {}
+
 // 会话摘要在情节层留这么多天
 export const EPISODE_TTL_DAYS = 30
 // 每个对象给模型看最近这么多条已有事实，用来判断是新的、更新还是已经记过
@@ -36,6 +46,18 @@ const MAX_SUMMARY_CHARS = 500
 type RunFields = Omit<
   typeof extractionRuns.$inferInsert,
   'id' | 'spaceId' | 'appId' | 'scope' | 'subjectIds' | 'turns' | 'createdAt'
+>
+
+// 一轮对话现在所在的作用域与对象
+const placeColumns = {
+  id: conversationTurns.id,
+  scope: conversationTurns.scope,
+  senderSubjectId: conversationTurns.senderSubjectId,
+  groupSubjectId: conversationTurns.groupSubjectId,
+}
+type Place = Pick<
+  typeof conversationTurns.$inferSelect,
+  'id' | 'scope' | 'senderSubjectId' | 'groupSubjectId'
 >
 
 // 抽取一批缓冲：让模型按 JSON 给出候选事实，与相关对象已有的事实比对后写进对象层，会话摘要写进情节层，
@@ -96,27 +118,51 @@ export async function extractBatch(
   }
   const senderIds = [...new Set(turns.map((t) => t.senderSubjectId))]
   const subjectIds = groupId ? [...senderIds, groupId] : senderIds
-  const runOf = (fields: RunFields): typeof extractionRuns.$inferInsert => ({
-    spaceId: target.spaceId,
-    appId: target.appId,
-    scope: target.scope,
-    subjectIds,
-    turns: turns.length,
-    skippedTurns: all.length - turns.length,
-    ...fields,
-  })
-  // 记一条抽取记录，并删掉这一批用过的缓冲
+  // 抽取记录挂在这一批对话现在所在的作用域与对象上：模型还在算时对象被合并，对话跟着换了过去，
+  // 记录也跟过去，合并后的对象页才看得到
+  const before = new Map(all.map((t) => [t.id, t]))
+  const runOf = (fields: RunFields, now: Place[]): typeof extractionRuns.$inferInsert => {
+    const moved = new Map<string, string>()
+    for (const row of now) {
+      const turn = before.get(row.id)!
+      moved.set(turn.senderSubjectId, row.senderSubjectId)
+      if (turn.groupSubjectId && row.groupSubjectId) {
+        moved.set(turn.groupSubjectId, row.groupSubjectId)
+      }
+    }
+    return {
+      spaceId: target.spaceId,
+      appId: target.appId,
+      scope: now[0]?.scope ?? target.scope,
+      subjectIds: [...new Set(subjectIds.map((id) => moved.get(id) ?? id))],
+      turns: turns.length,
+      skippedTurns: all.length - turns.length,
+      ...fields,
+    }
+  }
+  const batch = and(
+    eq(conversationTurns.appId, target.appId),
+    inArray(conversationTurns.id, [...before.keys()]),
+  )
+  const record = async (tx: Tx, fields: RunFields) => {
+    const now = await tx.select(placeColumns).from(conversationTurns).where(batch)
+    await tx.insert(extractionRuns).values(runOf(fields, now))
+  }
+  // 记一条抽取记录，并删掉这一批读到的那几轮：抽取期间合并移进这个批次的对话还没抽取，留着
   const close = async (tx: Tx, fields: RunFields) => {
-    await tx.insert(extractionRuns).values(runOf(fields))
-    await tx
-      .delete(conversationTurns)
-      .where(
-        and(
-          eq(conversationTurns.appId, target.appId),
-          eq(conversationTurns.scope, target.scope),
-          lte(conversationTurns.id, last.id),
-        ),
-      )
+    const now = await tx.delete(conversationTurns).where(batch).returning(placeColumns)
+    await tx.insert(extractionRuns).values(runOf(fields, now))
+  }
+  // 写之前锁住这一批涉及的对象、确认都还在：抽取期间被合并掉的对象已经删了，写下的东西会挂在它们上面。
+  // 和合并一样先按 id 的顺序锁对象，两边不会互相等成死锁；锁住之后合并要等这一批写完
+  const stillHere = async (tx: Tx) => {
+    const rows = await tx
+      .select({ id: subjectTable.id })
+      .from(subjectTable)
+      .where(inArray(subjectTable.id, subjectIds))
+      .orderBy(asc(subjectTable.id))
+      .for('key share')
+    if (rows.length < subjectIds.length) throw new BatchMoved()
   }
   const writer = turns.length ? writers.get(turns.at(-1)!.keyId) : undefined
   if (!writer || (!layers.subject && !layers.episode)) {
@@ -192,9 +238,7 @@ export async function extractBatch(
     completion = await model.complete(messages)
   } catch (err) {
     await withSpace(db, target.spaceId, (tx) =>
-      tx
-        .insert(extractionRuns)
-        .values(runOf({ model: model.model, error: (err as Error).message })),
+      record(tx, { model: model.model, error: (err as Error).message }),
     )
     throw err
   }
@@ -302,26 +346,33 @@ export async function extractBatch(
     actor: { keyId: writer.key.keyId },
   })
   try {
-    await service.writeExtraction(writes, { source: 'extraction' }, (tx, outcomes) => {
-      const count = (layer: ExtractedWrite['layer'], outcome: string) =>
-        outcomes.filter((o, i) => writes[i]!.layer === layer && o === outcome).length
-      return close(tx, {
-        ...usage,
-        added: count('subject', 'added'),
-        updated: count('subject', 'updated'),
-        unchanged: counts.unchanged,
-        dropped: counts.dropped + count('subject', 'skipped'),
-        summarized: count('episode', 'added') > 0,
-        summaryOnly,
-        limited: counts.limited,
-      })
-    })
+    await service.writeExtraction(
+      writes,
+      { source: 'extraction' },
+      (tx, outcomes) => {
+        const count = (layer: ExtractedWrite['layer'], outcome: string) =>
+          outcomes.filter((o, i) => writes[i]!.layer === layer && o === outcome).length
+        return close(tx, {
+          ...usage,
+          added: count('subject', 'added'),
+          updated: count('subject', 'updated'),
+          unchanged: counts.unchanged,
+          dropped: counts.dropped + count('subject', 'skipped'),
+          summarized: count('episode', 'added') > 0,
+          summaryOnly,
+          limited: counts.limited,
+        })
+      },
+      stillHere,
+    )
   } catch (err) {
+    if (err instanceof BatchMoved) {
+      await withSpace(db, target.spaceId, (tx) => record(tx, { ...usage, error: BATCH_MOVED }))
+      return
+    }
     // 整批已经回滚：单独记下原因再抛出，交给后台任务重试，缓冲留着
     await withSpace(db, target.spaceId, (tx) =>
-      tx
-        .insert(extractionRuns)
-        .values(runOf({ ...usage, error: `写入失败：${(err as Error).message}` })),
+      record(tx, { ...usage, error: `写入失败：${(err as Error).message}` }),
     )
     throw err
   }

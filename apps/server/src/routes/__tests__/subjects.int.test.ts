@@ -1,6 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type {
+  GroupPersonaRuleList,
   RecallResponse,
   SessionContextInput,
   SubjectDetail,
@@ -23,7 +24,7 @@ import {
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { ChatModel } from '../../extraction/provider'
-import { NO_USABLE_KEY } from '../../extraction/extract'
+import { BATCH_MOVED, NO_USABLE_KEY } from '../../extraction/extract'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
@@ -44,10 +45,14 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   let appId: string
   let key: string
   const masterKey = randomBytes(32)
+  // 排进抽取队列的批次与延迟，合并之后看有没有按合并后的批次排
+  const queued: { scope: string; delay: number }[] = []
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
-    enqueueExtraction: async () => {},
+    enqueueExtraction: async (target, delay) => {
+      queued.push({ scope: target.scope, delay })
+    },
   }
 
   beforeAll(async () => {
@@ -96,11 +101,41 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     group: { id: '2001', name: '读书会' },
     sender: { id: sender, name },
   })
-  const direct = (sender: string, name?: string): SessionContextInput => ({
+  const direct = (sender: string, name?: string, platform = 'qq'): SessionContextInput => ({
     chatType: 'direct',
-    platform: 'qq',
+    platform,
     sender: { id: sender, ...(name ? { name } : {}) },
   })
+  // 直接写一条抽取出的记忆（对象层的事实或情节层的摘要）
+  const extracted = (values: {
+    layer: 'subject' | 'episode'
+    content: string
+    originScope: string
+    subjectId?: string
+  }) =>
+    withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .insert(memories)
+        .values({
+          spaceId: ws.spaceId,
+          form: 'extracted',
+          sensitivity: 'public',
+          provenance: 'untrusted',
+          subjectId: values.subjectId ?? null,
+          expiresAt: values.layer === 'episode' ? new Date(Date.now() + 86_400_000) : null,
+          ...values,
+        })
+        .returning(),
+    )
+  const recallSubjects = async (context: SessionContextInput) => {
+    const res = await app.request(
+      '/v1/recall',
+      jsonRequest('POST', { query: '你好', context }, bearer(key)),
+    )
+    return ((await res.json()) as RecallResponse).subjects.flatMap((s) =>
+      s.facts.map((f) => f.content),
+    )
+  }
   const lifecycle = (body: Record<string, unknown>) =>
     app.request('/v1/lifecycle/event', jsonRequest('POST', body, bearer(key)))
   const say = async (user: string, context: SessionContextInput) => {
@@ -377,6 +412,272 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       tx.update(extractionRuns).set({ error: NO_USABLE_KEY }),
     )
     expect(await runError(carol.cookie)).toBe(NO_USABLE_KEY)
+  })
+
+  it('合并两个人：平台账号、事实、私聊里记下的与缓冲都归到保留的那个，私聊作用域换过来，群里记下的不动', async () => {
+    await chatInGroup()
+    await say('你好', direct('u1', '明', 'tg'))
+    const all = await listOf()
+    const keep = find(all, '小明')
+    const gone = find(all, '明')
+    await extracted({
+      layer: 'subject',
+      content: '住在上海',
+      originScope: `direct:${gone.id}`,
+      subjectId: gone.id,
+    })
+    await extracted({
+      layer: 'episode',
+      content: '私聊里聊了上海',
+      originScope: `direct:${gone.id}`,
+    })
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(extractionRuns).values({
+        spaceId: ws.spaceId,
+        appId,
+        scope: `direct:${gone.id}`,
+        subjectIds: [gone.id, keep.id],
+        turns: 1,
+      }),
+    )
+
+    queued.length = 0
+    const res = await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as SubjectInfo).identities.map((i) => i.platform).sort()).toEqual([
+      'qq',
+      'tg',
+    ])
+    expect((await api('GET', `/subjects/${gone.id}`)).status).toBe(404)
+    const merged = await detailOf(keep.id)
+    expect(merged.facts.map((f) => [f.content, f.scope.kind, f.scope.name]).sort()).toEqual([
+      ['住在上海', 'direct', '小明'],
+      ['在学日语', 'group', '读书会'],
+    ])
+    expect(merged.summaries.map((s) => s.content)).toEqual(['私聊里聊了上海'])
+    expect(merged.runs.map((r) => r.scope.kind).sort()).toEqual(['direct', 'group'])
+    // 两个都在同一批里时，换完不留两个一样的 id
+    const runIds = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ ids: extractionRuns.subjectIds }).from(extractionRuns),
+    )
+    expect(runIds.some((r) => r.ids.length !== new Set(r.ids).size)).toBe(false)
+    // 移过来的缓冲按合并后的批次排抽取：只有一轮，等空闲
+    expect(queued).toEqual([{ scope: `direct:${keep.id}`, delay: 600 }])
+    // 缓冲里还没抽取的那一轮也跟过来
+    const turns = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(turns.map((t) => [t.senderSubjectId, t.scope])).toContainEqual([
+      keep.id,
+      `direct:${keep.id}`,
+    ])
+    // 合并后用哪个平台账号私聊，都读得到私聊里记下的；群里记下的照旧只在群里
+    expect(await recallSubjects(direct('u1', undefined, 'tg'))).toEqual(['住在上海'])
+    expect(await recallSubjects(direct('1001'))).toEqual(['住在上海'])
+  })
+
+  it('抽取期间对象被合并：这一批不写，记下原因，对话留给合并后的批次', async () => {
+    await say('你好', direct('1001', '小明'))
+    await say('我住在上海', direct('u1', '明', 'tg'))
+    const all = await listOf()
+    const keep = find(all, '小明')
+    const gone = find(all, '明')
+    await processSession(
+      database.db,
+      masterKey,
+      { spaceId: ws.spaceId, appId, scope: `direct:${gone.id}` },
+      () => ({
+        model: 'fake-model',
+        async complete() {
+          // 模型还在算的时候，有人把这个人合并了
+          expect((await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })).status).toBe(
+            200,
+          )
+          return {
+            content: JSON.stringify({
+              facts: [{ subject: 'M1', op: 'add', content: '住在上海' }],
+              summary: '私聊里聊了上海',
+            }),
+            usage: { promptTokens: 40, completionTokens: 10 },
+          }
+        },
+      }),
+    )
+    const written = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memories).where(eq(memories.form, 'extracted')),
+    )
+    expect(written).toEqual([])
+    // 记录跟着对话换到合并后的对象上，对象页看得到
+    expect((await detailOf(keep.id)).runs).toMatchObject([
+      { error: BATCH_MOVED, scope: { kind: 'direct' } },
+    ])
+    // 那一轮对话还在，在合并后的批次里
+    const turns = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(turns.map((t) => t.scope).sort()).toEqual([`direct:${keep.id}`, `direct:${keep.id}`])
+  })
+
+  it('群里的发言人在抽取期间被合并：这一批不写，也不撞外键', async () => {
+    await say('我在学日语', group('1001', '小明'))
+    await say('我喜欢猫', group('1002', '小红'))
+    const all = await listOf()
+    const [turn] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns).limit(1),
+    )
+    await processSession(
+      database.db,
+      masterKey,
+      { spaceId: ws.spaceId, appId, scope: turn!.scope },
+      () => ({
+        model: 'fake-model',
+        async complete() {
+          const res = await api('POST', `/subjects/${find(all, '小明').id}/merge`, {
+            from: find(all, '小红').id,
+          })
+          expect(res.status).toBe(200)
+          return {
+            content: JSON.stringify({
+              facts: [{ subject: 'M2', op: 'add', content: '喜欢猫' }],
+              summary: '群里聊了猫',
+            }),
+            usage: { promptTokens: 40, completionTokens: 10 },
+          }
+        },
+      }),
+    )
+    const written = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memories).where(eq(memories.form, 'extracted')),
+    )
+    expect(written).toEqual([])
+    const runs = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(extractionRuns))
+    expect(runs.map((r) => [r.error, r.scope])).toEqual([[BATCH_MOVED, turn!.scope]])
+    expect(runs[0]!.subjectIds).toContain(find(all, '小明').id)
+    expect(runs[0]!.subjectIds).not.toContain(find(all, '小红').id)
+    // 两轮都还在，留给合并后的批次
+    const left = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(left).toHaveLength(2)
+  })
+
+  it('合并在抽取期间把更早的对话移进正在抽取的批次：这一批只删自己读到的，移进来的留着', async () => {
+    await say('我住在上海', direct('u1', '明', 'tg'))
+    await say('你好', direct('1001', '小明'))
+    const all = await listOf()
+    const keep = find(all, '小明')
+    const gone = find(all, '明')
+    await processSession(
+      database.db,
+      masterKey,
+      { spaceId: ws.spaceId, appId, scope: `direct:${keep.id}` },
+      () => ({
+        model: 'fake-model',
+        async complete() {
+          expect((await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })).status).toBe(
+            200,
+          )
+          return {
+            content: JSON.stringify({ summary: '打了个招呼' }),
+            usage: { promptTokens: 40, completionTokens: 10 },
+          }
+        },
+      }),
+    )
+    const left = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(left.map((t) => [t.userText, t.scope])).toEqual([['我住在上海', `direct:${keep.id}`]])
+  })
+
+  it('合并的限制：人和群、自己都不行；viewer 不能合并；标记成别的成员的对象谁都不能并', async () => {
+    await chatInGroup()
+    const all = await listOf()
+    const ming = find(all, '小明')
+    const hong = find(all, '小红')
+    expect(
+      (await api('POST', `/subjects/${ming.id}/merge`, { from: find(all, '读书会').id })).status,
+    ).toBe(400)
+    expect((await api('POST', `/subjects/${ming.id}/merge`, { from: ming.id })).status).toBe(400)
+    expect(
+      (await api('POST', `/subjects/${ming.id}/merge`, { from: crypto.randomUUID() })).status,
+    ).toBe(404)
+    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    expect(
+      (await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id }, carol.cookie)).status,
+    ).toBe(403)
+    // alice 把小明标记成自己。bob 不能把别的账号并进小明，也不能把小明并进别人：
+    // 那等于把平台账号挂到 alice 的标记下，那个账号的私聊就成了 alice 的主人私聊
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: true })
+    const merge = (into: string, from: string, cookie?: string) =>
+      api('POST', `/subjects/${into}/merge`, { from }, cookie)
+    expect((await merge(ming.id, hong.id, bob.cookie)).status).toBe(403)
+    expect((await merge(hong.id, ming.id, bob.cookie)).status).toBe(403)
+    // 空间 owner 也不能并别人标记的
+    await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: false })
+    await api('PATCH', `/subjects/${hong.id}`, { linkedToMe: true }, bob.cookie)
+    expect((await merge(ming.id, hong.id)).status).toBe(403)
+    // 标记成自己的可以并，标记跟着到保留的那个
+    const res = await merge(ming.id, hong.id, bob.cookie)
+    expect(res.status).toBe(200)
+    expect(((await res.json()) as SubjectInfo).account?.id).toBe(bob.accountId)
+  })
+
+  it('合并两个群：按群换人格的规则跟过来，两边在同一个应用都有规则时留保留的那个', async () => {
+    await say('你好', group('1001', '小明'))
+    await say('hi', {
+      chatType: 'group',
+      platform: 'tg',
+      group: { id: 'g2', name: '读书会 TG' },
+      sender: { id: 'u1', name: '明' },
+    })
+    const all = await listOf('?kind=group')
+    const keep = find(all, '读书会')
+    const gone = find(all, '读书会 TG')
+    const serious = (await ws.createPersona('serious')).id
+    const cute = (await ws.createPersona('cute')).id
+    const other = (await ws.createApp('tg-bot', { runtimeFamily: 'astrbot' })).id
+    const rules = (id: string, list: unknown) =>
+      api('PUT', `/apps/${id}/group-personas`, { rules: list })
+    expect((await rules(appId, [{ subjectId: gone.id, personaId: serious }])).status).toBe(200)
+    await rules(other, [
+      { subjectId: keep.id, personaId: cute },
+      { subjectId: gone.id, personaId: serious },
+    ])
+
+    expect((await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })).status).toBe(200)
+    const listed = async (id: string) =>
+      (
+        (await (await api('GET', `/apps/${id}/group-personas`)).json()) as GroupPersonaRuleList
+      ).rules.map((r) => [r.subjectId, r.personaId])
+    expect(await listed(appId)).toEqual([[keep.id, serious]])
+    expect(await listed(other)).toEqual([[keep.id, cute]])
+  })
+
+  it('对象页能删事实：确认过的也能删；版本对不上返回 409；viewer 不能删；别的对象下的找不到', async () => {
+    await chatInGroup()
+    const all = await listOf()
+    const ming = find(all, '小明')
+    const [fact] = (await detailOf(ming.id)).facts
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(memories).set({ provenance: 'owner', version: 2 }).where(eq(memories.id, fact!.id)),
+    )
+    const del = (subject: string, version: number, cookie = ws.cookie) =>
+      app.request(
+        `/v1/spaces/${ws.spaceId}/subjects/${subject}/facts/${fact!.id}?version=${version}`,
+        {
+          method: 'DELETE',
+          headers: { cookie, 'sec-fetch-site': 'same-origin' },
+        },
+      )
+    const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+    expect((await del(ming.id, 2, carol.cookie)).status).toBe(403)
+    expect((await del(find(all, '小红').id, 2)).status).toBe(404)
+    expect((await del(ming.id, 1)).status).toBe(409)
+    expect((await del(ming.id, 2)).status).toBe(204)
+    expect((await detailOf(ming.id)).facts).toEqual([])
+    expect(find(await listOf(), '小明').factCount).toBe(0)
   })
 
   it('别的空间的对象看不到也改不了', async () => {

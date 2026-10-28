@@ -1,12 +1,13 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ExtractionRunInfo, UpdateSubjectRequest } from '@kioku/contracts'
+import type { ExtractionRunInfo, SubjectFact, UpdateSubjectRequest } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { originScopeText, provenanceLabels } from '../labels'
@@ -40,6 +41,24 @@ watch(
   { immediate: true },
 )
 
+// 对象改了之后要刷新的：对象页与几个选对象的下拉框、应用里按群换人格的群名、待审、
+// 删掉的事实所在的记忆列表、已删除与活动
+function refreshSubjectCaches(sid: string) {
+  return Promise.all(
+    [
+      'subject',
+      'subjects',
+      'merge-picker',
+      'group-personas',
+      'group-picker',
+      'review',
+      'memory-list',
+      'memory-deleted',
+      'activity',
+    ].map((key) => queryClient.invalidateQueries({ queryKey: [key, sid] })),
+  )
+}
+
 const saving = ref(false)
 async function update(body: UpdateSubjectRequest, done: string) {
   const sid = spaceId.value
@@ -52,18 +71,86 @@ async function update(body: UpdateSubjectRequest, done: string) {
       name.value = saved.displayName
       synced = saved.displayName
     }
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['subject', sid, id] }),
-      queryClient.invalidateQueries({ queryKey: ['subjects', sid] }),
-      // 群名也显示在应用的按群换人格里
-      queryClient.invalidateQueries({ queryKey: ['group-personas', sid] }),
-      queryClient.invalidateQueries({ queryKey: ['group-picker', sid] }),
-    ])
+    await refreshSubjectCaches(sid)
     toast.add({ title: done, color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {
     saving.value = false
+  }
+}
+
+// 删一条事实：确认框打开时记下这一版，期间被改过服务端会返回冲突
+const deletingFact = ref<SubjectFact | null>(null)
+const removing = ref(false)
+async function removeFact() {
+  const fact = deletingFact.value
+  if (!fact) return
+  const sid = spaceId.value
+  removing.value = true
+  try {
+    await api.deleteFact(sid, subjectId.value, fact.id, fact.version)
+    toast.add({ title: '已删除这条事实', color: 'success' })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '删除失败', color: 'error' })
+  } finally {
+    removing.value = false
+    deletingFact.value = null
+    void refreshSubjectCaches(sid)
+  }
+}
+
+// 合并：选同种类的另一个对象并进来。下拉框打开时才按名字或平台账号去查
+const mergeTerm = ref('')
+const mergeQuery = useDebounced(mergeTerm)
+const mergeOpen = ref(false)
+const candidates = useQuery({
+  queryKey: computed(() => ['merge-picker', spaceId.value, data.value?.kind, mergeQuery.value]),
+  queryFn: () =>
+    api.subjects(spaceId.value, { kind: data.value!.kind, q: mergeQuery.value || undefined }),
+  enabled: computed(() => canEdit.value && mergeOpen.value && data.value !== null),
+})
+type Candidate = { label: string; value: string; description: string }
+// 选中的单独留着：查找词清空后列表换了一页，选中的那个还要显示名字
+const mergePicked = ref<Candidate | null>(null)
+const candidateItems = computed(() => {
+  const found: Candidate[] = (candidates.data.value?.items ?? [])
+    .filter((s) => s.id !== subjectId.value)
+    .map((s) => ({
+      label: s.displayName,
+      value: s.id,
+      description: s.identities.map((i) => `${i.platform} ${i.externalId}`).join('、'),
+    }))
+  const keep = mergePicked.value
+  return keep && !found.some((c) => c.value === keep.value) ? [keep, ...found] : found
+})
+const mergeFrom = ref<string | undefined>()
+watch(mergeFrom, (id) => {
+  mergePicked.value = id
+    ? (candidateItems.value.find((c) => c.value === id) ?? mergePicked.value)
+    : null
+})
+watch(subjectId, () => {
+  mergeFrom.value = undefined
+  deletingFact.value = null
+})
+const confirmMerge = ref(false)
+const merging = ref(false)
+async function merge() {
+  const from = mergeFrom.value
+  if (!from) return
+  const sid = spaceId.value
+  merging.value = true
+  try {
+    await api.mergeSubject(sid, subjectId.value, from)
+    toast.add({ title: `已把「${mergePicked.value?.label ?? '对象'}」合并进来`, color: 'success' })
+    mergeFrom.value = undefined
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '合并失败', color: 'error' })
+  } finally {
+    merging.value = false
+    confirmMerge.value = false
+    void refreshSubjectCaches(sid)
   }
 }
 
@@ -209,6 +296,40 @@ function runCounts(run: ExtractionRunInfo): string {
           </div>
         </UCard>
 
+        <UCard v-if="canEdit">
+          <template #header><h2 class="text-sm font-medium">合并</h2></template>
+          <p class="mb-3 text-xs text-muted">
+            同一个{{
+              data.kind === 'group' ? '群' : '人'
+            }}在别的平台的账号可以合并进来：它的平台账号、记下的事实，以及{{
+              data.kind === 'group' ? '它的群里' : '和它的私聊里'
+            }}记下的内容都归到「{{
+              data.displayName
+            }}」名下，按群换人格的规则也跟过来，然后它被删掉。不能撤销。
+          </p>
+          <div class="flex flex-wrap items-center gap-2">
+            <USelectMenu
+              v-model="mergeFrom"
+              v-model:search-term="mergeTerm"
+              v-model:open="mergeOpen"
+              :items="candidateItems"
+              value-key="value"
+              ignore-filter
+              :search-input="{
+                name: 'merge-q',
+                placeholder: '名字或平台账号',
+                loading: candidates.isFetching.value,
+              }"
+              :placeholder="data.kind === 'group' ? '选择要合并进来的群' : '选择要合并进来的人'"
+              aria-label="选择要合并进来的对象"
+              class="w-full sm:w-64"
+            />
+            <UButton variant="subtle" :disabled="!mergeFrom" @click="confirmMerge = true"
+              >合并</UButton
+            >
+          </div>
+        </UCard>
+
         <UCard>
           <template #header>
             <h2 class="text-sm font-medium">记下的事实（{{ data.factCount }}）</h2>
@@ -218,13 +339,24 @@ function runCounts(run: ExtractionRunInfo): string {
           </p>
           <p v-if="!data.facts.length" class="text-sm text-muted">还没有记下关于它的事。</p>
           <ul v-else class="divide-y divide-default">
-            <li v-for="fact in data.facts" :key="fact.id" class="space-y-1 py-2">
-              <p class="text-sm whitespace-pre-wrap">{{ fact.content }}</p>
-              <p class="flex flex-wrap gap-2 text-xs text-muted">
-                <span>{{ originScopeText(fact.scope) }}</span>
-                <span>{{ provenanceLabels[fact.provenance] }}</span>
-                <span>{{ formatRelative(fact.updatedAt) }}</span>
-              </p>
+            <li v-for="fact in data.facts" :key="fact.id" class="flex gap-2 py-2">
+              <div class="min-w-0 flex-1 space-y-1">
+                <p class="text-sm whitespace-pre-wrap">{{ fact.content }}</p>
+                <p class="flex flex-wrap gap-2 text-xs text-muted">
+                  <span>{{ originScopeText(fact.scope) }}</span>
+                  <span>{{ provenanceLabels[fact.provenance] }}</span>
+                  <span>{{ formatRelative(fact.updatedAt) }}</span>
+                </p>
+              </div>
+              <UButton
+                v-if="canEdit"
+                :icon="icons.remove"
+                color="neutral"
+                variant="ghost"
+                size="sm"
+                :aria-label="`删除事实：${fact.content}`"
+                @click="deletingFact = fact"
+              />
             </li>
           </ul>
         </UCard>
@@ -272,6 +404,42 @@ function runCounts(run: ExtractionRunInfo): string {
           </ul>
         </UCard>
       </div>
+      <UModal
+        :open="deletingFact !== null"
+        title="删除这条事实？"
+        @update:open="(v) => !v && (deletingFact = null)"
+      >
+        <template #body>
+          <p class="text-sm">「{{ deletingFact?.content }}」删掉之后不再注入对话。</p>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton color="neutral" variant="ghost" @click="deletingFact = null">取消</UButton>
+            <UButton color="error" :loading="removing" @click="removeFact">删除</UButton>
+          </div>
+        </template>
+      </UModal>
+      <UModal
+        :open="confirmMerge"
+        title="合并对象？"
+        @update:open="(v) => !v && (confirmMerge = false)"
+      >
+        <template #body>
+          <p class="text-sm">
+            把「{{ mergePicked?.label }}」合并进「{{
+              data?.displayName
+            }}」：它的平台账号与记下的内容都归到「{{
+              data?.displayName
+            }}」，然后它被删掉。不能撤销。
+          </p>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton color="neutral" variant="ghost" @click="confirmMerge = false">取消</UButton>
+            <UButton color="error" :loading="merging" @click="merge">合并</UButton>
+          </div>
+        </template>
+      </UModal>
     </template>
   </UDashboardPanel>
 </template>

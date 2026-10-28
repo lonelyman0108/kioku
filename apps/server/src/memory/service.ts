@@ -401,6 +401,25 @@ export class MemoryService {
     throw new MemoryError(403, wrongPersona ? PERSONA_WRITE : message)
   }
 
+  // 删掉读到的这一版：条件里带上版本，检查之后、删除之前别人提交的修改不会被一起删掉，
+  // 事件里的「删除前」快照也就是真正被删掉的那一版
+  private async softDelete(tx: Tx, before: MemoryRow): Promise<void> {
+    const [row] = await tx
+      .update(memories)
+      .set({ deletedAt: new Date(), updatedAt: new Date() })
+      .where(
+        and(
+          eq(memories.id, before.id),
+          eq(memories.version, before.version),
+          isNull(memories.deletedAt),
+        ),
+      )
+      .returning()
+    if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+    const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
+    await this.event(tx, before.id, 'delete', snapshot(before, glossary), snapshot(row, glossary))
+  }
+
   // 改动已有的记录：能写这一层之外，不可信来源还只能动不可信来源写下的（canModify）
   private assertModifiable(row: MemoryRow, message: string): void {
     this.assertWritable(row, message)
@@ -723,8 +742,11 @@ export class MemoryService {
     items: readonly ExtractedWrite[],
     eventContext: Record<string, unknown>,
     finish: (tx: Tx, outcomes: ExtractedOutcome[]) => Promise<void>,
+    // 写之前在同一个事务里先做的检查，抛错就整批不写
+    start?: (tx: Tx) => Promise<void>,
   ): Promise<ExtractedOutcome[]> {
     return this.run(async (tx) => {
+      await start?.(tx)
       const outcomes: ExtractedOutcome[] = []
       for (const item of items) outcomes.push(await this.writeExtracted(tx, item, eventContext))
       await finish(tx, outcomes)
@@ -1012,25 +1034,35 @@ export class MemoryService {
       const before = await this.findReadable(tx, parsed, personaIds)
       checkExpected(before, expected)
       this.assertModifiable(before, `没有权限删除 ${before.layer} 层的记忆`)
-      // 条件里带上读到的版本：检查之后、删除之前别人提交的修改不会被一起删掉，
-      // 事件里的「删除前」快照也就是真正被删掉的那一版
-      const [row] = await tx
-        .update(memories)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(
-          and(
-            eq(memories.id, before.id),
-            eq(memories.version, before.version),
-            isNull(memories.deletedAt),
-          ),
-        )
-        .returning()
-      if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
-      const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-      await this.event(tx, before.id, 'delete', snapshot(before, glossary), snapshot(row, glossary))
+      await this.softDelete(tx, before)
       return before.id
     })
     this.changed([id])
+  }
+
+  // 删掉对象页上的一条事实（从对话里抽取、挂在这个对象上的）。确认过的也能删：
+  // 群里的新说法不会推翻确认过的事实，要不要留由成员在这里决定。看过之后被改过（版本变了）的不删
+  async deleteFact(subjectId: string, factId: string, version: number): Promise<void> {
+    await this.run(async (tx, personaIds) => {
+      const [row] = await tx
+        .select()
+        .from(memories)
+        .where(
+          and(
+            eq(memories.id, factId),
+            eq(memories.form, 'extracted'),
+            eq(memories.layer, 'subject'),
+            eq(memories.subjectId, subjectId),
+            readableConditions(this.ctx.access, { personaIds }),
+          ),
+        )
+        .for('update')
+      if (!row) throw new MemoryError(404, '事实不存在')
+      if (row.version !== version) throw new MemoryError(409, '这条事实刚被改过，请刷新后再删')
+      this.assertModifiable(row, `没有权限删除 ${row.layer} 层的记忆`)
+      await this.softDelete(tx, row)
+    })
+    this.changed([factId])
   }
 
   // 待审队列里的处理：确认（来源改成主人）或删除。只处理还在队列里的（pendingReview），

@@ -1,9 +1,14 @@
-import type { OriginScope } from '@kioku/contracts'
+import type { OriginScope, SubjectKind } from '@kioku/contracts'
 import { inArray } from 'drizzle-orm'
 
 import type { Tx } from '../db/client'
 import { UUID } from '../db/paging'
 import { apps, subjects } from '../db/schema'
+
+// 对象自己的来源作用域：群里的，或和这个人的私聊里的
+export function subjectScope(kind: SubjectKind, id: string): string {
+  return `${kind === 'group' ? 'group' : 'direct'}:${id}`
+}
 
 // 来源作用域（global、app:<id>、group:<对象>、direct:<对象>）换成带名字的形式；应用或对象删掉了时名字为空
 export async function scopeNames(
