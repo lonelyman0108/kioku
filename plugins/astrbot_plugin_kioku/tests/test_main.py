@@ -90,6 +90,23 @@ def test_private_and_owner_private_turns_report_the_sender():
         }
 
 
+def test_replies_after_terminate_are_not_reported():
+    sent: list[dict] = []
+    plugin = plugin_with(sent)
+    event = AstrMessageEvent(
+        platform="webchat", session="webchat:FriendMessage:admin", sender_id="admin", text="你好"
+    )
+
+    async def reload() -> None:
+        await plugin.terminate()
+        await plugin.remember(event, LLMResponse(completion_text="嗯"))
+        # 停用时还在路上的回复不再上报：不建上报任务，不会撞上关掉的连接池
+        assert not plugin._pending
+
+    asyncio.run(reload())
+    assert sent == []
+
+
 def test_boot_can_be_turned_off():
     sent: list[dict] = []
     event = AstrMessageEvent(

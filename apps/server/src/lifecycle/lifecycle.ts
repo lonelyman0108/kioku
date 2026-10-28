@@ -108,11 +108,9 @@ export async function sessionStart(
   const limit = HOST_CONTEXT_LIMIT[runtimeFamily]
   const chat = CHAT_FAMILIES.has(runtimeFamily)
   const guidance = chat ? CHAT_GUIDANCE : GUIDANCE
-  const fetched = await scope.boot(
+  const result = await scope.boot(
     limit ? Math.max(limit - guidance.length - CONTEXT_RESERVE, 1_000) : undefined,
   )
-  // 群聊 bot 读不了未展开的节点，连 URI 也不列；启动预览按同一份结果展示
-  const result = chat ? { ...fetched, omitted: [] } : fetched
   // 已经在 boot 里展开的节点不再重复列出；多取几条，去掉它们之后仍能凑够
   const booted = new Set(result.entries.map((e) => e.uri))
   const query = chat ? '' : projectQuery(input.project)
@@ -140,7 +138,8 @@ export async function sessionStart(
     .slice(0, PROJECT_RECALL_LIMIT)
   const relatedBlock = formatRecallBlock(relatedList, input.sessionId)
 
-  const parts = [formatBootBlock(result, guidance)]
+  // 群聊 bot 读不了未展开的节点，连 URI 也不列；启动预览照样列出，看得出哪些没注入
+  const parts = [formatBootBlock(chat ? { ...result, omitted: [] } : result, guidance)]
   const extras = [
     ['recent', formatRecentBlock(recentList)],
     ['related', relatedBlock && `与当前项目相关的记忆，需要时用 kioku_get 读取：\n${relatedBlock}`],

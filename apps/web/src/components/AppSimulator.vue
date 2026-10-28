@@ -184,7 +184,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             </ul>
             <p v-else class="text-muted">没有启动节点。</p>
             <p v-if="preview.omitted.length" class="text-xs text-muted">
-              超出预算、只列出 URI 的：{{ preview.omitted.join('、') }}
+              超出预算、没有展开的：{{ preview.omitted.join('、') }}
             </p>
           </section>
           <section v-if="preview.recent.length" class="space-y-1">

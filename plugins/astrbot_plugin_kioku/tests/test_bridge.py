@@ -7,6 +7,7 @@ import httpx
 from astrbot_plugin_kioku.bridge import (
     BOOT_RETRY_SECONDS,
     BOOT_TTL_SECONDS,
+    MAX_NAME,
     MAX_SESSION_ID,
     MAX_TEXT,
     KiokuBridge,
@@ -113,10 +114,19 @@ def test_boot_failures_are_retried_after_a_while(monkeypatch):
 def test_long_text_is_clipped_by_utf16_length():
     # 服务端按 JS 字符串的长度数：表情符号一个占两个码元，按字数截会超出上限
     bridge, sent = bridge_with(answer("<recall>…</recall>"))
-    long_turn = Turn(**{**GROUP.__dict__, "session_id": "s" * 300, "text": "😀" * 15_000})
+    long_turn = Turn(
+        **{
+            **GROUP.__dict__,
+            "session_id": "s" * 300,
+            "sender_name": "名" * 5_000,
+            "text": "😀" * 15_000,
+        }
+    )
     asyncio.run(bridge.recall(long_turn))
     assert sent[0]["prompt"] == "😀" * (MAX_TEXT // 2)
     assert sent[0]["sessionId"] == "s" * MAX_SESSION_ID
+    # 名字服务端只记前 128 个字，长了整个请求会被拒
+    assert sent[0]["context"]["sender"]["name"] == "名" * MAX_NAME
     # 截断处落在一个表情符号中间时整个丢掉，不留半个
     assert clip("a" + "😀" * 3, 4) == "a😀"
     assert clip("短", 4) == "短"

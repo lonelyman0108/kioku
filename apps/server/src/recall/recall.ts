@@ -319,10 +319,12 @@ export function clipChars(text: string, max: number, suffix = ''): string {
 // 带正文时每条最多这么多字
 const INLINE_CONTENT_CHARS = 300
 
-// 正文的开头，压成单行、去掉尖括号。正文可能很长，先粗截一段再处理；截掉了内容就接上省略号
+// 正文的开头，压成单行、去掉尖括号。正文可能很长，先粗截一段再处理；截掉了内容就接上省略号。
+// 处理完是空的返回空串，由调用方退回线索
 function contentHead(content: string): string {
   const head = clipChars(content, INLINE_CONTENT_CHARS * 4)
   const text = clipChars(inlineText(head), INLINE_CONTENT_CHARS, '…')
+  if (!text) return ''
   return head !== content && !text.endsWith('…') ? `${text}…` : text
 }
 

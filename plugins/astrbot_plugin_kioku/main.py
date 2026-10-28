@@ -47,6 +47,7 @@ class KiokuPlugin(Star):
         self.boot_enabled = bool(config.get("boot", True))
         # 正在上报的 turn.end：留着引用，任务才不会被提前回收
         self._pending: set[asyncio.Task] = set()
+        self._closing = False
 
     @filter.on_llm_request()
     async def inject(self, event: AstrMessageEvent, req: ProviderRequest) -> None:
@@ -64,13 +65,15 @@ class KiokuPlugin(Star):
 
     @filter.on_llm_response()
     async def remember(self, event: AstrMessageEvent, resp: LLMResponse) -> None:
-        if not self.bridge.enabled:
+        if not self.bridge.enabled or self._closing:
             return
         task = asyncio.create_task(self.bridge.turn_end(turn_of(event), resp.completion_text or ""))
         self._pending.add(task)
         task.add_done_callback(self._pending.discard)
 
     async def terminate(self) -> None:
+        # 停用之后的回复不再上报；正在上报的等它发完，再关掉连接池
+        self._closing = True
         if self._pending:
             await asyncio.gather(*self._pending, return_exceptions=True)
         await self.bridge.aclose()

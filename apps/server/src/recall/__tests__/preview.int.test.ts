@@ -156,7 +156,7 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     expect(preview.context).toContain(`session_id="${sessionId}"`)
   })
 
-  it('群聊 bot（astrbot）：调试台的召回块和宿主收到的一样带正文；启动预览不列没展开的节点', async () => {
+  it('群聊 bot（astrbot）：调试台的召回块和宿主收到的一样带正文；没展开的节点不给 bot、预览里照样列出', async () => {
     const chatApp = (await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })).id
     const chatKey = await ws.issueKey(chatApp, internal)
     const chatKeyId = (await keysOf(chatApp))[0]!.id
@@ -191,7 +191,8 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
       await as('POST', `/apps/${chatApp}/keys/${chatKeyId}/preview`, {})
     ).json()) as BootPreview
     expect(preview.entries.map((e) => e.uri)).toEqual(['core://long-a'])
-    expect(preview.omitted).toEqual([])
+    // 预览列出没展开的，看得出哪些没注入；给 bot 的内容里连 URI 也没有
+    expect(preview.omitted).toEqual(['core://long-b'])
     expect(preview.context).not.toContain('core://long-b')
     const start = await app.request(
       '/v1/lifecycle/event',

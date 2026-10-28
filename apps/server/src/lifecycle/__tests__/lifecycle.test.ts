@@ -104,6 +104,8 @@ describe('每轮输入的召回', () => {
     // 粗截的那一段压完空白只剩两个字，也要标出后面还有
     expect(await lineFor(`开头${' '.repeat(2_000)}结尾`)).toBe('0.50 | core://rules | 开头…')
     expect(await lineFor('<<>>\n\t')).toBe('0.50 | core://rules | 规则')
+    // 粗截的那一段全是空白，后面才有字：同样退回线索，不只给一个省略号
+    expect(await lineFor(`${' '.repeat(1_300)}正文`)).toBe('0.50 | core://rules | 规则')
   })
 
   it('读正文失败时退回只给线索的召回块', async () => {

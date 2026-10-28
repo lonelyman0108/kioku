@@ -35,6 +35,8 @@ NOT_PLATFORM = re.compile(r"[^a-z0-9_.-]")
 # 服务端的长度上限：消息与会话标识，按 UTF-16 码元数（JS 字符串的长度）
 MAX_TEXT = 20_000
 MAX_SESSION_ID = 200
+# 服务端只记名字的前 128 个字（按字符），太长的整个请求会被拒，这边先截
+MAX_NAME = 128
 # 会话开始的启动上下文（人格与基础规则）很少变，按会话缓存这么久，不必每轮都请求
 BOOT_TTL_SECONDS = 600
 # 启动上下文没取到（Kioku 不可用或没有内容）时，过这么久再试
@@ -69,7 +71,7 @@ def platform_of(name: str) -> str:
 def session_context(turn: Turn) -> SessionContext:
     """会话上下文：平台账号原样上报，由服务端解析成对象、判断是不是主人。"""
     sender = (
-        PlatformRef(id=turn.sender_id, name=turn.sender_name)
+        PlatformRef(id=turn.sender_id, name=turn.sender_name[:MAX_NAME])
         if turn.sender_name
         else PlatformRef(id=turn.sender_id)
     )

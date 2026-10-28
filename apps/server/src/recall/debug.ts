@@ -97,7 +97,7 @@ export async function recallDebug(
     injected: injected.map(toDebug),
     others: scored.filter((c) => !shown.has(c.id)).map(toDebug),
     minScore: DEFAULT_MIN_SCORE,
-    // 和每轮输入用同一段代码：群聊 bot 的召回块带正文
+    // 和每轮输入用同一段代码，群聊 bot 的召回块同样带正文。调试台按无上下文模拟，也没有会话标识
     block: await recallBlock(
       recallScopeForKey(deps, key),
       key.app.runtimeFamily,
