@@ -10,11 +10,15 @@ import { pendingMigrations } from '../db/migrate'
 import { accounts, apps, spaceMembers } from '../db/schema'
 import {
   applyImport,
+  applySync,
   planImport,
+  planSync,
   readLore,
   verifyMasterKey,
   type ImportPlan,
   type ImportResult,
+  type SyncPlan,
+  type SyncResult,
 } from '../importer/lore'
 import { requestBackfill } from '../jobs/queue'
 import { DEFAULT_SENSITIVITY } from '../memory/uri'
@@ -25,6 +29,8 @@ const HELP = `从 Lore 导入记忆。
 
 默认只打印导入计划，确认无误后加 --apply 执行。可以重复执行：按 Lore 节点去重，
 导入过的节点不再写入（导入后在 Kioku 里删除或移动了的也不会写回），URI 被别的记忆占用时跳过。
+加 --sync 时，导入过的节点也按 Lore 现在的内容更新，但只更新导入（或上次同步）之后
+在 Kioku 里没人改过的；改过、移动过、删除了的，以及 Lore 里换了路径的，都只列出来。
 
   --account <用户名>     导入到这个账号名下，需要是空间 owner。preferences:// 进它的主人层，
                          core:// 以外的其余 domain 进它的私人层
@@ -32,12 +38,13 @@ const HELP = `从 Lore 导入记忆。
   --persona <标识>       core://soul 导入成这个人格的设定，默认 default，不存在时新建
   --persona-name <名称>  新建人格时用的名称，默认「默认人格」
   --secret <Lore URI>    把这条记忆导入为 secret（加密存储），可以重复
-  --apply               执行导入；不加时只打印计划
+  --sync                同步导入过的节点：正文、priority、disclosure 与关键词改成 Lore 里现在的
+  --apply               执行导入（与同步）；不加时只打印计划
 
 环境变量：
   DATABASE_URL       Kioku 的数据库，与服务相同
   LORE_DATABASE_URL  Lore 的数据库，只读访问
-  KIOKU_MASTER_KEY   导入 secret 时需要，与服务相同`
+  KIOKU_MASTER_KEY   导入或同步 secret 时需要，与服务相同`
 
 class UsageError extends Error {}
 
@@ -49,6 +56,7 @@ async function main(): Promise<void> {
       persona: { type: 'string', default: 'default' },
       'persona-name': { type: 'string', default: '默认人格' },
       secret: { type: 'string', multiple: true, default: [] },
+      sync: { type: 'boolean', default: false },
       apply: { type: 'boolean', default: false },
       help: { type: 'boolean', short: 'h', default: false },
     },
@@ -105,6 +113,12 @@ async function main(): Promise<void> {
       process.exitCode = 2
       return
     }
+    const target = { db: database.db, spaceId, accountId, masterKey: config.masterKey }
+    // 同步要读出 secret 记忆来比对：先确认主密钥和服务用的是同一把，免得解密失败时才发现
+    if (values.sync && config.masterKey)
+      await verifyMasterKey(database.db, spaceId, config.masterKey)
+    const sync = values.sync ? await planSync(target, plan, snapshot) : null
+    if (sync) printSync(sync)
     if (!values.apply) {
       console.log('\n以上是导入计划，没有写入任何数据。确认无误后加 --apply 执行。')
       return
@@ -118,18 +132,19 @@ async function main(): Promise<void> {
       }
     }
 
-    const result = await applyImport(
-      { db: database.db, spaceId, accountId, masterKey: config.masterKey },
-      plan,
-    )
+    const result = await applyImport(target, plan)
     printResult(plan, result)
-    if (result.created.length) {
+    const synced = sync ? await applySync(target, sync) : null
+    if (synced) printSyncResult(synced)
+    if (result.created.length || synced?.updated.length) {
       // 向量由服务的后台任务生成；服务没在运行时，下次启动也会补齐
       await requestBackfill(config.databaseUrl).catch((err: unknown) =>
         console.warn('没能安排向量补齐，服务下次启动时会补上', err),
       )
     }
-    if (result.failed.length || result.secretAlreadyImported.length) process.exitCode = 1
+    if (result.failed.length || result.secretAlreadyImported.length || synced?.failed.length) {
+      process.exitCode = 1
+    }
   } finally {
     await database.close()
   }
@@ -213,6 +228,13 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
       `（包括导入后在 Kioku 里删除或移动了的）`,
   )
   for (const uri of result.occupied) console.log(`  跳过 ${uri}：URI 已被别的记忆占用`)
+  for (const { uri, current } of result.movedInLore) {
+    console.log(
+      current
+        ? `  跳过 ${uri}：Lore 里换了路径，之前导入的那条还在 ${current}，没有在新位置再建一条（要跟着移动就在管理界面移）`
+        : `  跳过 ${uri}：Lore 里换了路径，之前导入的那条在 Kioku 里删除了，没有在新位置再建一条`,
+    )
+  }
   for (const { uri, current } of result.secretAlreadyImported) {
     const moved = current === uri ? '' : `（导入后移到了 ${current}）`
     console.log(
@@ -223,6 +245,58 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
   if (result.appsCreated.length) {
     console.log('  新建的应用还没有 Key：在管理界面「应用与 Key」里为要接入的应用签发')
   }
+}
+
+const CHANGE_LABELS = {
+  content: '正文',
+  priority: 'priority',
+  disclosure: 'disclosure',
+  glossary: '关键词',
+}
+
+function printSync(sync: SyncPlan): void {
+  const of = (state: string) => sync.items.filter((i) => i.state === state)
+  console.log('\n同步导入过的节点：')
+  const updates = of('update')
+  console.log(`  按 Lore 更新 ${updates.length} 条，已是最新 ${of('current').length} 条`)
+  for (const i of updates) {
+    console.log(`    ${i.uri}：${i.changes.map((c) => CHANGE_LABELS[c]).join('、')}`)
+  }
+  const list = (title: string, lines: string[]) => {
+    if (!lines.length) return
+    console.log(`  ${title}：`)
+    for (const line of lines) console.log(`    ${line}`)
+  }
+  list(
+    '导入后在 Kioku 里改过或移动过，不同步（要跟上 Lore 就在管理界面手动改）',
+    of('edited').map((i) => i.uri),
+  )
+  list(
+    'Lore 里换了路径，不同步：移动可能改变层与可见范围，要在管理界面手动移动（移动之后这条就只能手动更新）',
+    of('moved').map((i) => `${i.uri} → ${i.target}`),
+  )
+  list(
+    '在 Kioku 里删除了，不同步',
+    of('deleted').map((i) => i.uri),
+  )
+  list(
+    '这次的导入计划不导入这个节点，没有同步（原因见上面的「不导入」）',
+    of('skipped').map((i) => `${i.uri}：${i.reason}`),
+  )
+  list(
+    '这次的计划没有映射到它（例如换了 --persona，或者对应的应用不在了），没有同步',
+    of('unmapped').map((i) => i.uri),
+  )
+  list(
+    '读不出来，没有同步',
+    of('unreadable').map((i) => `${i.uri}：${i.reason}`),
+  )
+  list('Lore 里已经没有这个节点，Kioku 里保留（要删就在管理界面删）', sync.goneFromLore)
+}
+
+function printSyncResult(result: SyncResult): void {
+  console.log(`\n同步完成：更新 ${result.updated.length} 条`)
+  for (const f of result.failed) console.log(`  失败 ${f.uri}：${f.reason}`)
 }
 
 main().catch((err: unknown) => {

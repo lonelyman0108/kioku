@@ -52,6 +52,7 @@ export const provenanceLabels: Record<Provenance, string> = {
 export const eventLabels: Record<string, { label: string; icon: string }> = {
   create: { label: '新建', icon: icons.add },
   import: { label: '导入', icon: icons.imported },
+  sync: { label: '同步导入', icon: icons.imported },
   update: { label: '修改', icon: icons.edit },
   move: { label: '移动', icon: icons.moved },
   delete: { label: '删除', icon: icons.remove },
