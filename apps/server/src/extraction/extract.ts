@@ -21,6 +21,10 @@ import { extractionUsage, writesToday } from './budget'
 import { extractionMessages, parseExtraction, summaryMessages, type PromptSubject } from './prompt'
 import type { ChatModel } from './provider'
 
+// 服务端自己判断出的失败原因，不带模型接口或数据库的原文，对象页里所有成员都看得到
+export const NO_USABLE_KEY = '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层'
+export const BUDGET_NO_SUMMARY = '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要'
+
 // 会话摘要在情节层留这么多天
 export const EPISODE_TTL_DAYS = 30
 // 每个对象给模型看最近这么多条已有事实，用来判断是新的、更新还是已经记过
@@ -116,9 +120,7 @@ export async function extractBatch(
   }
   const writer = turns.length ? writers.get(turns.at(-1)!.keyId) : undefined
   if (!writer || (!layers.subject && !layers.episode)) {
-    await withSpace(db, target.spaceId, (tx) =>
-      close(tx, { error: '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层' }),
-    )
+    await withSpace(db, target.spaceId, (tx) => close(tx, { error: NO_USABLE_KEY }))
     return
   }
   // 本月的 token 预算用完了就只要会话摘要，不再抽取事实，下个月恢复；连摘要也写不了时不请求模型
@@ -128,7 +130,7 @@ export async function extractBatch(
     await withSpace(db, target.spaceId, (tx) =>
       close(tx, {
         summaryOnly,
-        error: '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要',
+        error: BUDGET_NO_SUMMARY,
       }),
     )
     return

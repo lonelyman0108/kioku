@@ -74,6 +74,17 @@ import {
 } from '../credential/placeholders'
 import { isUniqueViolation, type Db, type Tx } from '../db/client'
 import {
+  decodeTimeCursor,
+  encodeTimeCursor,
+  escapeLike,
+  fromMicros,
+  INVALID_CURSOR,
+  MICROS,
+  microsOf,
+  parseCursor,
+  UUID,
+} from '../db/paging'
+import {
   accounts,
   apiKeys,
   apps,
@@ -1618,7 +1629,7 @@ export class MemoryService {
   // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性；
   // 已经过期或失效的不列：撤销删除之后也看不到（例如让出 URI 时被软删除的过期记录）
   async deleted(query: PageQuery): Promise<DeletedMemoryList> {
-    const after = decodeTimeCursor(query.cursor, UUID)
+    const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
       const rows = await tx
         .select({
@@ -1663,7 +1674,7 @@ export class MemoryService {
   // 空间的活动流，最新的在前。按时间排序走 (space_id, created_at) 索引，不必扫别的空间的事件；
   // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id
   async activity(query: PageQuery): Promise<ActivityList> {
-    const after = decodeTimeCursor(query.cursor, EVENT_ID)
+    const after = timeCursor(query.cursor, EVENT_ID)
     return this.run(async (tx) => {
       const rows = await this.eventRows(
         tx,
@@ -1825,44 +1836,18 @@ function checkExpected(
 // 关键词索引最多给这么多条（关键词 × 记忆），个人用的空间远到不了
 const GLOSSARY_INDEX_LIMIT = 5000
 
-// 时间换成微秒整数参与翻页比较：JS 的 Date 只到毫秒，比数据库的精度低，用它做游标会漏掉或重复条目
-const microsOf = (column: SQLWrapper) => sql`(extract(epoch from ${column}) * 1000000)::bigint`
 const DELETED_MICROS = microsOf(memories.deletedAt)
-// 游标里的微秒整数换回时间，按微秒精确换算，不经过浮点
-const fromMicros = (micros: string) =>
-  sql`('epoch'::timestamptz + ${micros}::bigint * interval '1 microsecond')`
-// 微秒整数在 bigint 的范围里；事件 id 不超过 JS 能精确表示的整数
-const MICROS = /^\d{1,18}$/
+// 事件 id 不超过 JS 能精确表示的整数
 const EVENT_ID = /^\d{1,15}$/
 
 // 还没有失效或过期
 export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
 
-// 「时间 + id」的游标：上一页最后一条的微秒时间与 id
-function encodeTimeCursor(micros: string, id: string): string {
-  return Buffer.from(JSON.stringify([micros, id])).toString('base64url')
-}
-
-function decodeTimeCursor(cursor: string | undefined, id: RegExp): [string, string] | null {
-  if (!cursor) return null
-  const invalid = new MemoryError(400, '翻页参数无效，请从第一页重新开始')
-  let values: unknown
-  try {
-    values = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
-  } catch {
-    throw invalid
-  }
-  if (
-    !Array.isArray(values) ||
-    values.length !== 2 ||
-    typeof values[0] !== 'string' ||
-    !MICROS.test(values[0]) ||
-    typeof values[1] !== 'string' ||
-    !id.test(values[1])
-  ) {
-    throw invalid
-  }
-  return [values[0], values[1]]
+// 「时间 + id」的游标，解不开时报 400
+function timeCursor(cursor: string | undefined, id: RegExp): [string, string] | null {
+  const after = decodeTimeCursor(cursor, id)
+  if (after === 'invalid') throw new MemoryError(400, INVALID_CURSOR)
+  return after
 }
 
 function actorOf(r: {
@@ -1909,10 +1894,6 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
     changes.push('content')
   }
   return changes
-}
-
-function escapeLike(s: string): string {
-  return s.replace(/[\\%_]/g, '\\$&')
 }
 
 // 有正文：与向量任务的口径一致，空字符串也不生成向量
@@ -1974,7 +1955,6 @@ function encodeCursor(sort: MemoryListSort, row: CursorRow): string {
   return Buffer.from(JSON.stringify(values)).toString('base64url')
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 // URI_PATTERN 允许的最长路径：16 段，每段 64 个字符，加 15 个分隔符
 const MAX_PATH_LENGTH = 16 * 64 + 15
 const isDomain = (v: unknown): v is string =>
@@ -1983,14 +1963,9 @@ const isPath = (v: unknown): v is string => typeof v === 'string' && v.length <=
 
 function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor | null {
   if (!cursor) return null
-  const invalid = new MemoryError(400, '翻页参数无效，请从第一页重新开始')
-  let values: unknown
-  try {
-    values = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
-  } catch {
-    throw invalid
-  }
-  if (!Array.isArray(values)) throw invalid
+  const invalid = new MemoryError(400, INVALID_CURSOR)
+  const values = parseCursor(cursor)
+  if (values === 'invalid') throw invalid
   const id = values.at(-1)
   if (typeof id !== 'string' || !UUID.test(id)) throw invalid
   const ok =

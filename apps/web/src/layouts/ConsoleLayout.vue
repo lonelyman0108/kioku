@@ -46,6 +46,7 @@ const nav = computed<NavigationMenuItem[]>(() => {
     { label: '活动', icon: icons.activity, to: { name: 'activity', params } },
     { label: '凭据', icon: icons.credentials, to: { name: 'credentials', params } },
     { label: '人格', icon: icons.personas, to: { name: 'personas', params } },
+    { label: '对象', icon: icons.subjects, to: { name: 'subjects', params } },
     { label: '应用与 Key', icon: icons.apps, to: { name: 'apps', params } },
     { label: '召回分析', icon: icons.recall, to: { name: 'recall', params } },
     { label: '空间设置', icon: icons.spaceSettings, to: { name: 'space-settings', params } },

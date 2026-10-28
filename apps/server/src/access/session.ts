@@ -155,6 +155,7 @@ interface FoundIdentity {
   identityName: string | null
   subjectId: string
   subjectName: string
+  nameLocked: boolean
   accountId: string | null
 }
 
@@ -171,6 +172,7 @@ async function findIdentity(
       identityName: subjectIdentities.displayName,
       subjectId: subjects.id,
       subjectName: subjects.displayName,
+      nameLocked: subjects.nameLocked,
       accountId: subjects.accountId,
     })
     .from(subjectIdentities)
@@ -186,7 +188,7 @@ async function findIdentity(
 }
 
 // 平台上的显示名变了就记下来。对象的名字还是从这个账号带过来的（等于它之前的显示名，主人没改过）时一起改；
-// 主人改过名字，或名字来自合并进来的别的账号时不动
+// 成员在管理界面改过名字（nameLocked），或名字来自合并进来的别的账号时不动
 async function refreshName(tx: Tx, found: FoundIdentity, name: string | undefined): Promise<void> {
   if (name === undefined || name === found.identityName) return
   await tx
@@ -194,10 +196,17 @@ async function refreshName(tx: Tx, found: FoundIdentity, name: string | undefine
     .set({ displayName: name })
     .where(eq(subjectIdentities.id, found.identityId))
   const previous = found.identityName ?? found.externalId
-  if (found.subjectName === previous) {
+  if (!found.nameLocked && found.subjectName === previous) {
     await tx
       .update(subjects)
       .set({ displayName: name, updatedAt: new Date() })
-      .where(and(eq(subjects.id, found.subjectId), eq(subjects.displayName, previous)))
+      // 条件里再看一次改名锁：读到之后成员刚好改了名（哪怕改成和原来一样），这里就不覆盖
+      .where(
+        and(
+          eq(subjects.id, found.subjectId),
+          eq(subjects.displayName, previous),
+          eq(subjects.nameLocked, false),
+        ),
+      )
   }
 }
