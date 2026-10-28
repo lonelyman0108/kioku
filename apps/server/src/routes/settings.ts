@@ -21,7 +21,6 @@ import { loadEmbeddingError } from '../embedding/errors'
 import { openAiEmbedder } from '../embedding/provider'
 import {
   clearNextEmbedding,
-  EmbeddingSettingsError,
   embeddingView,
   loadEmbeddingModels,
   loadEmbeddingSetups,
@@ -41,6 +40,7 @@ import {
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
+import { SettingsInputError } from '../settings/endpoint'
 
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 
@@ -210,7 +210,7 @@ export function settingsRoutes(deps: Deps) {
     try {
       return { ok: true as const, value: await save() }
     } catch (err) {
-      if (err instanceof EmbeddingSettingsError) return { ok: false as const, error: err.message }
+      if (err instanceof SettingsInputError) return { ok: false as const, error: err.message }
       throw err
     }
   }

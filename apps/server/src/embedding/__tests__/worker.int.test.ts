@@ -47,6 +47,8 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   }
   const embeddings = () =>
     withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings))
+  // 只留默认的假模型的向量
+  const keep = ['fake-embedding']
 
   it('写回时记忆正被别的事务锁着就跳过、交给调用方重试，不等锁', async () => {
     const embedder = fakeEmbedder()
@@ -54,21 +56,21 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     const skipped: string[][] = []
     await withSpace(database.db, ws.spaceId, async (tx) => {
       await tx.execute(sql`select id from memories where id = ${id} for update`)
-      const written = await embedMemory(database.db, embedder, ws.spaceId, id, (ids) =>
+      const written = await embedMemory(database.db, embedder, ws.spaceId, id, keep, (ids) =>
         skipped.push(ids),
       )
       expect(written).toBe(0)
     })
     expect(skipped).toEqual([[id]])
     expect(await embeddings()).toHaveLength(0)
-    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id, keep)).toBe(1)
   })
 
   it('生成向量；正文不变时不重复请求，改了才重新生成', async () => {
     const embedder = fakeEmbedder()
     const id = await create({ uri: 'core://agent', content: '先读正文再信任', layer: 'base' })
-    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
-    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(0)
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id, keep)).toBe(1)
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id, keep)).toBe(0)
     expect(embedder.calls).toHaveLength(1)
     expect(embedder.calls[0]![0]).toContain('core://agent')
 
@@ -76,7 +78,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       '/v1/memories',
       jsonRequest('PATCH', { uri: 'core://agent', content: '新正文' }, bearer(key)),
     )
-    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id, keep)).toBe(1)
     const rows = await embeddings()
     expect(rows).toHaveLength(1)
     expect(rows[0]!.embedding).toHaveLength(1024)
@@ -85,21 +87,21 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   it('secret 不生成向量；删除后向量随之清除', async () => {
     const embedder = fakeEmbedder()
     const secret = await create({ uri: 'home://wifi', content: 'hunter2', sensitivity: 'secret' })
-    expect(await embedMemory(database.db, embedder, ws.spaceId, secret)).toBe(0)
+    expect(await embedMemory(database.db, embedder, ws.spaceId, secret, keep)).toBe(0)
     expect(embedder.calls).toHaveLength(0)
 
     const id = await create({ uri: 'core://x', content: 'x', layer: 'base' })
-    await embedMemory(database.db, embedder, ws.spaceId, id)
+    await embedMemory(database.db, embedder, ws.spaceId, id, keep)
     await app.request('/v1/memories?uri=core%3A%2F%2Fx', { method: 'DELETE', headers: bearer(key) })
-    await embedMemory(database.db, embedder, ws.spaceId, id)
+    await embedMemory(database.db, embedder, ws.spaceId, id, keep)
     expect(await embeddings()).toHaveLength(0)
   })
 
   it('全量补齐覆盖所有记忆；换模型后旧向量被替换', async () => {
     for (const p of ['a', 'b', 'c']) await create({ uri: `core://${p}`, content: p, layer: 'base' })
-    expect(await backfillEmbeddings(database.db, fakeEmbedder('m1'))).toBe(3)
-    expect(await backfillEmbeddings(database.db, fakeEmbedder('m1'))).toBe(0)
-    expect(await backfillEmbeddings(database.db, fakeEmbedder('m2'))).toBe(3)
+    expect(await backfillEmbeddings(database.db, fakeEmbedder('m1'), ['m1'])).toBe(3)
+    expect(await backfillEmbeddings(database.db, fakeEmbedder('m1'), ['m1'])).toBe(0)
+    expect(await backfillEmbeddings(database.db, fakeEmbedder('m2'), ['m2'])).toBe(3)
     const rows = await embeddings()
     expect(new Set(rows.map((r) => r.model))).toEqual(new Set(['m2']))
   })

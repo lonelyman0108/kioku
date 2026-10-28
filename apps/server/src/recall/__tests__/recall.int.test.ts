@@ -83,7 +83,7 @@ describe.skipIf(!testDatabaseUrl)('召回、boot 与生命周期', () => {
       sensitivity: 'secret',
       priority: 0,
     })
-    await backfillEmbeddings(database.db, embedder)
+    await backfillEmbeddings(database.db, embedder, [embedder.model])
   }
 
   it('三路召回都能命中，结果按分数排序且不含 secret', async () => {

@@ -6,6 +6,7 @@ import type {
   EmbeddingTestResult,
   RecallResponse,
 } from '@kioku/contracts'
+import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -19,7 +20,7 @@ import {
 } from '../../testing/fakeEmbeddingServer'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { backfillJob, embedJob, pruneJob, switchJob } from '../jobs'
-import { settingsEmbedderSource } from '../source'
+import { settingsEmbedderSource, type EmbedderSource } from '../source'
 
 describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
   let database: Database
@@ -127,7 +128,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(await modelsOf(id)).toEqual(['old-model'])
   })
 
-  it('渠道按顺序回退：出错换下一个，请求本身有问题时不换；最近的错误记下来', async () => {
+  it('渠道按顺序回退：出什么错都换下一个；都失败时记下最近的错误，成功后清掉', async () => {
     await put('', { model: 'm1', channels: [channel('down', 'm1'), channel('b', 'm1')] })
     server.fail('down', 503)
     const first = await create('第一条')
@@ -135,22 +136,28 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(await modelsOf(first)).toEqual(['m1'])
     expect(server.requests.map((r) => r.channel)).toEqual(['down', 'b'])
 
+    // 网关常把「这个渠道没有这个模型」报成 400，也换下一个
     server.requests.length = 0
     server.fail('down', 400)
     const second = await create('第二条')
-    await expect(embedJob(database.db, source, ws.spaceId, second, noRetry)).rejects.toThrow(
-      'HTTP 400',
-    )
-    expect(server.requests.map((r) => r.channel)).toEqual(['down'])
-    expect((await status()).lastError).toMatchObject({
-      model: 'm1',
-      message: expect.stringContaining('HTTP 400'),
-    })
-
-    // 连接断开也换下一个；生成成功后错误清掉
-    server.fail('down', null)
     await embedJob(database.db, source, ws.spaceId, second, noRetry)
     expect(await modelsOf(second)).toEqual(['m1'])
+    expect(server.requests.map((r) => r.channel)).toEqual(['down', 'b'])
+
+    server.fail('down', null)
+    server.fail('b', 500)
+    const third = await create('第三条')
+    await expect(embedJob(database.db, source, ws.spaceId, third, noRetry)).rejects.toThrow(
+      '所有渠道都失败了',
+    )
+    expect((await status()).lastError).toMatchObject({
+      model: 'm1',
+      message: expect.stringContaining('HTTP 500'),
+    })
+
+    server.fail('b', undefined)
+    await embedJob(database.db, source, ws.spaceId, third, noRetry)
+    expect(await modelsOf(third)).toEqual(['m1'])
     expect((await status()).lastError).toBeNull()
   })
 
@@ -201,6 +208,55 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(await modelsOf(id)).toEqual(['m1'])
     expect(await view()).toMatchObject({ active: { model: 'm1' }, next: null })
     expect((await call('DELETE', '/next')).status).toBe(404)
+  })
+
+  it('补的时候被放弃了：后面的页不再请求新模型的接口，返回让队列再清一次向量', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    // 多于一页（每页 128 条），放弃之后第二页不该再补
+    for (let i = 0; i < 130; i++) await create(`第 ${i} 条`)
+    await backfillJob(database.db, source, noRetry)
+    await put('/next', { model: 'm2', channels: [channel('b', 'm2')] })
+    let abandoned = false
+    // 第一批向量还在路上时，管理员点了放弃
+    const abandoning: EmbedderSource = {
+      get: () => source.get(),
+      next: async () => {
+        const next = (await source.next())!
+        return {
+          model: next.model,
+          async embed(texts, signal) {
+            if (!abandoned) {
+              abandoned = true
+              expect((await call('DELETE', '/next')).status).toBe(204)
+            }
+            return next.embed(texts, signal)
+          },
+        }
+      },
+      invalidate: () => source.invalidate(),
+    }
+    expect(await switchJob(database.db, abandoning, noRetry)).toBe('cancelled')
+    const written = (await modelsOf()).filter((m) => m === 'm2').length
+    expect(written).toBeGreaterThan(0)
+    expect(written).toBeLessThan(130)
+    expect(await pruneJob(database.db)).toBe(written)
+    expect(await modelsOf()).not.toContain('m2')
+  })
+
+  it('补的时候有被锁着跳过、已经排了重试的，不算补不上', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    const locked = await create('第一条')
+    const other = await create('第二条')
+    await backfillJob(database.db, source, noRetry)
+    await put('/next', { model: 'm2', channels: [channel('a', 'm2')] })
+    await embedJob(database.db, source, ws.spaceId, other, noRetry)
+    const retried: string[][] = []
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx.execute(sql`select id from memories where id = ${locked} for update`)
+      expect(await switchJob(database.db, source, (_space, ids) => retried.push(ids))).toBe('again')
+    })
+    expect(retried).toEqual([[locked]])
+    expect((await status()).lastError).toBeNull()
   })
 
   it('新模型补不上时记下原因，管理员可以现在就切换', async () => {
@@ -255,6 +311,22 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       model: 'm2',
       channels: [{ id, baseUrl: server.url('a'), model: 'm2' }],
     })
+    const nextId = next.next!.channels[0]!.id
+    // 换成另一个新模型时，原来新模型的渠道保存的 Key 照样沿用，换了主机又没填时报错
+    const renamed = await put('/next', {
+      model: 'm2b',
+      channels: [{ id: nextId, baseUrl: server.url('a'), model: 'm2b' }],
+    })
+    expect(renamed.next!.channels[0]).toMatchObject({ id: nextId, hasApiKey: true })
+    expect(
+      (
+        await call('PUT', '/next', {
+          model: 'm2c',
+          channels: [{ id: nextId, baseUrl: 'https://other.example.net/v1', model: 'm2c' }],
+        })
+      ).status,
+    ).toBe(400)
+    await put('/next', { model: 'm2', channels: [{ id, baseUrl: server.url('a'), model: 'm2' }] })
     expect(next.next!.channels[0]).toMatchObject({ hasApiKey: true })
     expect(next.next!.channels[0]!.id).not.toBe(id)
     expect(

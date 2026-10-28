@@ -1,11 +1,12 @@
-import { and, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
+import { and, count, eq, isNull, ne, sql } from 'drizzle-orm'
+import { alias } from 'drizzle-orm/pg-core'
 
 import { withSpace, type Db } from '../db/client'
 import { memories, memoryEmbeddings, spaces } from '../db/schema'
 
 // 整个实例的向量覆盖率，给实例设置页看补齐进度：应当有向量的记忆，以及其中各模型已经生成了多少。
 // 应当有向量的记忆与后台任务的口径一致：没删除、不是 secret、有正文（空字符串不算）的策展记忆。
-// 逐个空间统计，内容表只能在空间事务里读
+// 逐个空间统计（内容表只能在空间事务里读），每个空间一条查询：换模型时页面会一直刷新进度
 export async function embeddingCoverage(
   db: Db,
   models: string[],
@@ -18,22 +19,30 @@ export async function embeddingCoverage(
     eq(memories.form, 'curated'),
     sql`(${memories.content} is not null and ${memories.content} <> '')`,
   )
+  // 每个模型左连接一次：每条记忆在一个模型下至多一条向量（主键），计数不会重复
+  const joined = models.map((model, i) => ({ model, table: alias(memoryEmbeddings, `e${i}`) }))
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    const { total, perModel } = await withSpace(db, spaceId, async (tx) => {
-      const [row] = await tx.select({ total: count() }).from(memories).where(embeddable)
-      // 每条记忆在一个模型下至多一条向量（主键），按模型分组计数不会重复
-      const perModel = models.length
-        ? await tx
-            .select({ model: memoryEmbeddings.model, embedded: count() })
-            .from(memoryEmbeddings)
-            .innerJoin(memories, eq(memories.id, memoryEmbeddings.memoryId))
-            .where(and(embeddable, inArray(memoryEmbeddings.model, models)))
-            .groupBy(memoryEmbeddings.model)
-        : []
-      return { total: row?.total ?? 0, perModel }
+    const [row] = await withSpace(db, spaceId, (tx) => {
+      let query = tx
+        .select({
+          total: count(),
+          ...Object.fromEntries(joined.map((j, i) => [`m${i}`, count(j.table.memoryId)])),
+        })
+        .from(memories)
+        .$dynamic()
+      for (const j of joined) {
+        query = query.leftJoin(
+          j.table,
+          and(eq(j.table.memoryId, memories.id), eq(j.table.model, j.model)),
+        )
+      }
+      return query.where(embeddable)
     })
-    eligible += total
-    for (const r of perModel) embedded.set(r.model, (embedded.get(r.model) ?? 0) + r.embedded)
+    const counts = row as Record<string, number> | undefined
+    eligible += counts?.total ?? 0
+    joined.forEach((j, i) =>
+      embedded.set(j.model, embedded.get(j.model)! + (counts?.[`m${i}`] ?? 0)),
+    )
   }
   return { eligible, embedded }
 }

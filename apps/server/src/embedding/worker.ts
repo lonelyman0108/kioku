@@ -140,28 +140,37 @@ async function syncRows(
   return written
 }
 
+// keep 没有默认值：漏传会把正在换过去的模型的向量当作多余的删掉
 export async function embedMemory(
   db: Db,
   embedder: Embedder,
   spaceId: string,
   memoryId: string,
+  keep: string[],
   onSkipped?: OnSkipped,
-  keep = [embedder.model],
 ): Promise<number> {
   return syncRows(db, embedder, spaceId, [memoryId], onSkipped, keep)
+}
+
+export interface BackfillOptions {
+  onSkipped?: (spaceId: string, ids: string[]) => void
+  // 每补一页之前问一次，返回 false 就停下（例如换模型被放弃了，不再请求它的接口）
+  shouldContinue?: () => Promise<boolean>
 }
 
 // 全量补齐：逐个空间、按 id 分页检查所有记忆，用于首次配置或换模型
 export async function backfillEmbeddings(
   db: Db,
   embedder: Embedder,
-  onSkipped?: (spaceId: string, ids: string[]) => void,
-  keep = [embedder.model],
+  keep: string[],
+  options: BackfillOptions = {},
 ): Promise<number> {
+  const { onSkipped, shouldContinue } = options
   let total = 0
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
     let after: string | null = null
     for (;;) {
+      if (shouldContinue && !(await shouldContinue())) return total
       const cursor: string | null = after
       const page: { id: string }[] = await withSpace(db, spaceId, (tx) =>
         tx

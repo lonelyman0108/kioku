@@ -2,10 +2,17 @@ import type { EmbeddingChannelInput, UpdateEmbeddingSettings } from '@kioku/cont
 import { eq } from 'drizzle-orm'
 import { randomBytes } from 'node:crypto'
 
-import { decryptSecret, encryptSecret, type Sealed } from '../crypto/envelope'
+import type { Sealed } from '../crypto/envelope'
 import type { Db, Tx } from '../db/client'
 import { settings } from '../db/schema'
-import { sameOrigin, type EndpointConfig } from '../settings/endpoint'
+import {
+  openApiKey,
+  resolveApiKey,
+  SettingsInputError,
+  unsealJson,
+  type EndpointConfig,
+  type SealedJson,
+} from '../settings/endpoint'
 
 // 嵌入设置：召回与写入正在用的模型（active），和正在换过去的模型（next），各带一组按顺序回退的渠道。
 // 向量按模型标识存；各渠道请求时用的模型名可以不同，服务商改名只改渠道，不用重新生成向量。
@@ -13,11 +20,6 @@ import { sameOrigin, type EndpointConfig } from '../settings/endpoint'
 const KEY = 'embedding'
 const AAD = `settings:${KEY}`
 const LABEL = '嵌入接口'
-
-interface SealedJson {
-  ciphertext: string
-  wrappedKey: string
-}
 
 interface StoredChannel {
   id: string
@@ -47,9 +49,6 @@ export interface EmbeddingSetup {
   model: string
   channels: EndpointConfig[]
 }
-
-// 管理员填的设置不成立，原因可以直接给管理员看
-export class EmbeddingSettingsError extends Error {}
 
 function normalize(value: unknown): StoredEmbedding {
   if (!value) return { active: null, next: null }
@@ -93,25 +92,15 @@ export async function embeddingSettingsView(db: Db) {
   return embeddingView(await loadStored(db))
 }
 
-const unseal = (sealed: SealedJson): Sealed => ({
-  ciphertext: Buffer.from(sealed.ciphertext, 'base64'),
-  wrappedKey: Buffer.from(sealed.wrappedKey, 'base64'),
-})
-
 function openSetup(masterKey: Buffer | null, setup: StoredSetup | null): EmbeddingSetup | null {
   if (!setup) return null
   return {
     model: setup.model,
-    channels: setup.channels.map((c) => {
-      if (c.apiKey && !masterKey) {
-        throw new Error(`${LABEL}的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
-      }
-      return {
-        baseUrl: c.baseUrl,
-        model: c.model,
-        apiKey: c.apiKey ? decryptSecret(masterKey!, unseal(c.apiKey), AAD) : null,
-      }
-    }),
+    channels: setup.channels.map((c) => ({
+      baseUrl: c.baseUrl,
+      model: c.model,
+      apiKey: c.apiKey ? openApiKey(masterKey, c.apiKey, AAD, LABEL) : null,
+    })),
   }
 }
 
@@ -126,14 +115,13 @@ export async function sealedEmbeddingKeys(db: Db): Promise<{ sealed: Sealed; aad
   const stored = await loadStored(db)
   return [...(stored.active?.channels ?? []), ...(stored.next?.channels ?? [])]
     .filter((c) => c.apiKey)
-    .map((c) => ({ sealed: unseal(c.apiKey!), aad: AAD }))
+    .map((c) => ({ sealed: unsealJson(c.apiKey!), aad: AAD }))
 }
 
 const newId = () => randomBytes(6).toString('base64url')
 
-// 按填的渠道建出要保存的渠道。带了 id 的沿用那个渠道保存的 Key（另一组里的也行，例如换模型时照抄现在的渠道），
-// 但接口主机变了就不能沿用：否则改个地址，服务端就会把 Key 发给新主机。主机变了又没说 Key 怎么处理时报错让管理员重填，
-// 而不是悄悄清掉，否则之后的后台任务会一直失败
+// 按填的渠道建出要保存的渠道。带了 id 的按那个渠道保存的 Key 处理（另一组里的也行，例如换模型时照抄现在的渠道），
+// 沿用的规则和抽取模型一样（resolveApiKey：同一个主机才沿用，主机变了又没说怎么处理时报错）
 function buildChannels(
   inputs: EmbeddingChannelInput[],
   own: StoredChannel[],
@@ -141,28 +129,11 @@ function buildChannels(
   masterKey: Buffer | null,
 ): StoredChannel[] {
   const ids = inputs.flatMap((c) => (c.id ? [c.id] : []))
-  if (new Set(ids).size !== ids.length) throw new EmbeddingSettingsError('同一个渠道填了两次')
+  if (new Set(ids).size !== ids.length) throw new SettingsInputError('同一个渠道填了两次')
   return inputs.map((input, i) => {
     const mine = input.id ? own.find((c) => c.id === input.id) : undefined
     const previous = mine ?? (input.id ? others.find((c) => c.id === input.id) : undefined)
-    const keep = previous ? sameOrigin(previous.baseUrl, input.baseUrl) : false
-    if (!keep && previous?.apiKey && input.apiKey === undefined) {
-      throw new EmbeddingSettingsError(
-        `第 ${i + 1} 个渠道的接口主机变了，请重新填写 Key；不需要 Key 时填 null`,
-      )
-    }
-    let apiKey = keep ? previous!.apiKey : null
-    if (input.apiKey === null) apiKey = null
-    if (typeof input.apiKey === 'string') {
-      if (!masterKey) {
-        throw new EmbeddingSettingsError(`保存${LABEL}的 Key 需要先配置 KIOKU_MASTER_KEY`)
-      }
-      const sealed = encryptSecret(masterKey, input.apiKey, AAD)
-      apiKey = {
-        ciphertext: sealed.ciphertext.toString('base64'),
-        wrappedKey: sealed.wrappedKey.toString('base64'),
-      }
-    }
+    const apiKey = resolveApiKey(previous, input, masterKey, AAD, LABEL, `第 ${i + 1} 个渠道的`)
     return { id: mine?.id ?? newId(), baseUrl: input.baseUrl, model: input.model, apiKey }
   })
 }
@@ -193,7 +164,7 @@ export async function saveActiveEmbedding(
 ): Promise<StoredEmbedding> {
   return mutate(db, (stored) => {
     if (stored.active && stored.active.model !== input.model) {
-      throw new EmbeddingSettingsError('要换模型请用「换模型」：新模型的向量补齐之后才切过去')
+      throw new SettingsInputError('要换模型请用「换模型」：新模型的向量补齐之后才切过去')
     }
     const channels = buildChannels(
       input.channels,
@@ -213,14 +184,19 @@ export async function saveNextEmbedding(
   input: UpdateEmbeddingSettings,
 ): Promise<{ stored: StoredEmbedding; replaced: string | null }> {
   return mutate(db, (stored) => {
-    if (!stored.active) throw new EmbeddingSettingsError('还没有配置嵌入模型，先配好要用的模型')
+    if (!stored.active) throw new SettingsInputError('还没有配置嵌入模型，先配好要用的模型')
     if (stored.active.model === input.model) {
-      throw new EmbeddingSettingsError(
+      throw new SettingsInputError(
         '新模型的标识和现在的一样；只是换接口或改请求用的模型名，改现在的渠道就行',
       )
     }
-    const own = stored.next?.model === input.model ? channelsOf(stored.next) : []
-    const channels = buildChannels(input.channels, own, channelsOf(stored.active), masterKey)
+    // 换成另一个新模型时照样认得原来新模型的渠道：沿用它们保存的 Key，换了主机又没填 Key 时报错，不悄悄清掉
+    const channels = buildChannels(
+      input.channels,
+      channelsOf(stored.next),
+      channelsOf(stored.active),
+      masterKey,
+    )
     const replaced = stored.next && stored.next.model !== input.model ? stored.next.model : null
     const value = { ...stored, next: { model: input.model, channels } }
     return { value, result: { stored: value, replaced } }

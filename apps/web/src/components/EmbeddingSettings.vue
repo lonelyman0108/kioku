@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { EmbeddingChannelTest, EmbeddingTestResult } from '@kioku/contracts'
+import type {
+  EmbeddingChannelTest,
+  EmbeddingSetupView,
+  EmbeddingTestResult,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
@@ -12,7 +16,7 @@ import EmbeddingChannels from './EmbeddingChannels.vue'
 
 const toast = useToast()
 const queryClient = useQueryClient()
-const POLL_INTERVAL_MS = 3_000
+const POLL_INTERVAL_MS = 5_000
 const failed = (err: unknown, fallback: string) =>
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 
@@ -54,15 +58,22 @@ const refresh = () => queryClient.invalidateQueries({ queryKey: ['settings', 'em
 const modelId = ref('')
 const activeDrafts = ref<ChannelDraft[]>([draftOf()])
 let syncedActive = ''
+function syncActive(value: EmbeddingSetupView | null) {
+  syncedActive = JSON.stringify(value)
+  modelId.value = value?.model ?? ''
+  activeDrafts.value = value ? value.channels.map(draftOf) : [draftOf()]
+}
 watch(
   active,
-  (value) => {
-    // 跟进进度时设置每隔几秒读一次，内容没变就不重填，不冲掉正在编辑的内容
-    const snapshot = JSON.stringify(value)
-    if (snapshot === syncedActive) return
-    syncedActive = snapshot
-    modelId.value = value?.model ?? ''
-    activeDrafts.value = value ? value.channels.map(draftOf) : [draftOf()]
+  (value, previous) => {
+    // 跟进进度时设置每隔几秒读一次，内容没变就不重填，不冲掉正在编辑的内容；自己保存的已经按返回的同步过了
+    if (JSON.stringify(value) === syncedActive) return
+    // 设置在后台变了（例如换模型补齐后自动切过去）：没保存的改动对不上新的设置，丢掉并说一声
+    const discarded = previous ? draftsChanged(activeDrafts.value, previous.channels) : false
+    syncActive(value)
+    if (discarded) {
+      toast.add({ title: '嵌入设置在后台变了，没保存的渠道改动已经丢掉', color: 'warning' })
+    }
   },
   { immediate: true },
 )
@@ -76,10 +87,11 @@ async function saveActive() {
   const first = !active.value
   saving.value = true
   try {
-    await api.saveEmbeddingSettings({
+    const saved = await api.saveEmbeddingSettings({
       model: modelId.value.trim(),
       channels: activeDrafts.value.map(inputOf),
     })
+    syncActive(saved.active)
     await refresh()
     toast.add({
       title: first ? '已保存，后台会为全部记忆生成向量' : '已保存',
@@ -98,17 +110,19 @@ const starting = ref(false)
 const nextModel = ref('')
 const nextDrafts = ref<ChannelDraft[]>([])
 let syncedNext = ''
+function syncNext(value: EmbeddingSetupView | null) {
+  syncedNext = JSON.stringify(value)
+  if (!value) return
+  nextModel.value = value.model
+  nextDrafts.value = value.channels.map(draftOf)
+  starting.value = false
+}
 watch(
   next,
   (value, previous) => {
-    const snapshot = JSON.stringify(value)
-    if (snapshot === syncedNext) return
-    syncedNext = snapshot
-    if (value) {
-      nextModel.value = value.model
-      nextDrafts.value = value.channels.map(draftOf)
-      starting.value = false
-    } else if (previous && active.value?.model === previous.model) {
+    if (JSON.stringify(value) === syncedNext) return
+    syncNext(value)
+    if (!value && previous && active.value?.model === previous.model) {
       toast.add({ title: `已换成 ${previous.model}，旧模型的向量会在后台删掉`, color: 'success' })
     }
   },
@@ -130,10 +144,11 @@ async function saveNext() {
   const begin = !next.value
   savingNext.value = true
   try {
-    await api.saveNextEmbedding({
+    const saved = await api.saveNextEmbedding({
       model: nextModel.value.trim(),
       channels: nextDrafts.value.map(inputOf),
     })
+    syncNext(saved.next)
     await refresh()
     toast.add({
       title: begin ? '开始换模型：后台为全部记忆生成新模型的向量' : '已保存',
@@ -320,6 +335,17 @@ async function rebuild() {
           <UButton type="submit" :icon="icons.save" :loading="savingNext" :disabled="!nextDirty"
             >保存</UButton
           >
+          <UButton
+            v-if="errorOf(next.model)"
+            :icon="icons.refresh"
+            color="neutral"
+            variant="subtle"
+            :loading="rebuilding"
+            :disabled="nextDirty"
+            @click="rebuild"
+          >
+            重试
+          </UButton>
           <UButton
             :icon="icons.moved"
             color="neutral"

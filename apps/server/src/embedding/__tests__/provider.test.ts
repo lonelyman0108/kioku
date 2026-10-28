@@ -79,17 +79,19 @@ describe('一组渠道按顺序回退', () => {
     return { embedder, asked }
   }
 
-  it('鉴权失败、限流、维度不对、连不上都换下一个', async () => {
-    const { embedder, asked } = await run(['auth', 'busy', 'narrow', 'offline', 'ok'])
+  it('出什么错都换下一个：鉴权失败、限流、请求被拒、维度不对、连不上', async () => {
+    const { embedder, asked } = await run(['auth', 'busy', 'toolarge', 'narrow', 'offline', 'ok'])
     expect(embedder.model).toBe('logical')
     expect(await embedder.embed(['a'])).toHaveLength(1)
-    expect(asked).toEqual(['auth', 'busy', 'narrow', 'offline', 'ok'])
+    expect(asked).toEqual(['auth', 'busy', 'toolarge', 'narrow', 'offline', 'ok'])
   })
 
-  it('请求本身有问题时不换渠道', async () => {
-    const { embedder, asked } = await run(['toolarge', 'ok'])
-    await expect(embedder.embed(['a'])).rejects.toThrow('HTTP 413')
-    expect(asked).toEqual(['toolarge'])
+  it('调用方的总时限到了就不再试后面的渠道', async () => {
+    const { embedder, asked } = await run(['auth', 'ok'])
+    const deadline = new AbortController()
+    deadline.abort()
+    await expect(embedder.embed(['a'], deadline.signal)).rejects.toThrow('等待时间用完了')
+    expect(asked).toEqual([])
   })
 
   it('都失败时把各个渠道的错误一起报出来', async () => {
