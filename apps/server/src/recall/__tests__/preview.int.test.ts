@@ -156,6 +156,52 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     expect(preview.context).toContain(`session_id="${sessionId}"`)
   })
 
+  it('群聊 bot（astrbot）：调试台的召回块和宿主收到的一样带正文；没展开的节点不给 bot、预览里照样列出', async () => {
+    const chatApp = (await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })).id
+    const chatKey = await ws.issueKey(chatApp, internal)
+    const chatKeyId = (await keysOf(chatApp))[0]!.id
+    await createMemory({
+      uri: 'core://rules',
+      content: '群里讲话要友善，\n读书会每周五晚上八点开始。',
+      layer: 'base',
+      glossary: ['读书会'],
+    })
+    // 两个启动节点合计超出 boot 的字数预算，后一个展不开
+    for (const name of ['a', 'b']) {
+      await createMemory({
+        uri: `core://long-${name}`,
+        content: name.repeat(9_000),
+        layer: 'base',
+        priority: 0,
+      })
+    }
+
+    const debug = (await (
+      await as('POST', `/apps/${chatApp}/keys/${chatKeyId}/debug`, { query: '读书会几点' })
+    ).json()) as RecallDebug
+    expect(debug.block).toContain('core://rules | 群里讲话要友善， 读书会每周五晚上八点开始。')
+    const submit = await app.request(
+      '/v1/lifecycle/event',
+      jsonRequest('POST', { event: 'prompt.submit', prompt: '读书会几点' }, bearer(chatKey)),
+    )
+    const submitted = ((await submit.json()) as LifecycleResponse).hostOutput.value
+    expect((submitted as { context: string }).context).toBe(debug.block)
+
+    const preview = (await (
+      await as('POST', `/apps/${chatApp}/keys/${chatKeyId}/preview`, {})
+    ).json()) as BootPreview
+    expect(preview.entries.map((e) => e.uri)).toEqual(['core://long-a'])
+    // 预览列出没展开的，看得出哪些没注入；给 bot 的内容里连 URI 也没有
+    expect(preview.omitted).toEqual(['core://long-b'])
+    expect(preview.context).not.toContain('core://long-b')
+    const start = await app.request(
+      '/v1/lifecycle/event',
+      jsonRequest('POST', { event: 'session.start' }, bearer(chatKey)),
+    )
+    const started = ((await start.json()) as LifecycleResponse).hostOutput.value
+    expect((started as { context: string }).context).toBe(preview.context)
+  })
+
   it('过滤原因按查看者看到的那条记忆给出：同一 URI 上另有一条过期的共享记录时不会认错', async () => {
     // 先有一条共享的，再让它过期；写不了基础层的 Key 在同一个 URI 上建私人记录时，过期的共享记录留着
     await createMemory({

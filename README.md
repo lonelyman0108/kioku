@@ -93,6 +93,7 @@ docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres -
 - agent 工作约定：[AGENTS.md](AGENTS.md)
 - 文档索引：[docs/README.md](docs/README.md)
 - Claude Code 插件：[plugins/claude-code/README.md](plugins/claude-code/README.md)
+- AstrBot 插件（群聊 bot）：[plugins/astrbot_plugin_kioku/README.md](plugins/astrbot_plugin_kioku/README.md)
 - 更新日志：[CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证
