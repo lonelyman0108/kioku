@@ -217,8 +217,7 @@ export const subjects = pgTable(
     updatedAt: updatedAt(),
   },
   (t) => [
-    index().on(t.spaceId),
-    // 对象页按第一次遇到的时间从新到旧翻页
+    // 对象页按第一次遇到的时间从新到旧翻页；只按空间查的也用它
     index().on(t.spaceId, t.createdAt, t.id),
     unique().on(t.spaceId, t.id),
     // 平台账号按种类挂到对象上（见 subject_identities 的外键）

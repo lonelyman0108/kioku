@@ -81,6 +81,7 @@ import {
   INVALID_CURSOR,
   MICROS,
   microsOf,
+  parseCursor,
   UUID,
 } from '../db/paging'
 import {
@@ -1963,13 +1964,8 @@ const isPath = (v: unknown): v is string => typeof v === 'string' && v.length <=
 function decodeCursor(sort: MemoryListSort, cursor: string | undefined): Cursor | null {
   if (!cursor) return null
   const invalid = new MemoryError(400, INVALID_CURSOR)
-  let values: unknown
-  try {
-    values = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
-  } catch {
-    throw invalid
-  }
-  if (!Array.isArray(values)) throw invalid
+  const values = parseCursor(cursor)
+  if (values === 'invalid') throw invalid
   const id = values.at(-1)
   if (typeof id !== 'string' || !UUID.test(id)) throw invalid
   const ok =

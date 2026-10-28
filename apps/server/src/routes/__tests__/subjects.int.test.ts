@@ -8,6 +8,7 @@ import type {
   SubjectList,
 } from '@kioku/contracts'
 import { asc, eq, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -22,6 +23,7 @@ import {
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { ChatModel } from '../../extraction/provider'
+import { NO_USABLE_KEY } from '../../extraction/extract'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
@@ -241,6 +243,40 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect((await api('PATCH', `/subjects/${id}`, {})).status).toBe(400)
   })
 
+  it('平台改名读到「没锁」之后成员刚好把名字改回原样：写名字时再看一次锁，不覆盖', async () => {
+    await say('你好', direct('1001', '小明'))
+    const id = (await listOf()).items[0]!.id
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    let pending: Promise<void> | undefined
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select id from subjects where id = ${id} for update`
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending = say('我改名了', direct('1001', '小明二'))
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where ${pid}::int = any(pg_blocking_pids(pid))`
+          if (row!.n > 0) break
+          if (i >= 80) throw new Error('请求没有等在对象这一行上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        // 成员把名字「改」成原来的样子：名字没变，但从此锁住
+        await tx`update subjects set name_locked = true where id = ${id}`
+      })
+      await pending
+      expect(await detailOf(id)).toMatchObject({
+        displayName: '小明',
+        nameLocked: true,
+        identities: [{ displayName: '小明二' }],
+      })
+    } finally {
+      await pending?.catch(() => {})
+      await side.end()
+    }
+  })
+
   it('标记为自己：只有人能标记；标记之后这个人的私聊算主人私聊', async () => {
     await chatInGroup()
     const all = await listOf()
@@ -312,6 +348,10 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect((await api('PATCH', `/subjects/${id}`, { linkedToMe: true }, carol.cookie)).status).toBe(
       403,
     )
+    // 没标记在她身上的，viewer 连「取消」也碰不了
+    expect(
+      (await api('PATCH', `/subjects/${id}`, { linkedToMe: false }, carol.cookie)).status,
+    ).toBe(403)
 
     // 抽取的失败原因可能带着模型接口的原文，viewer 只看到失败
     await withSpace(database.db, ws.spaceId, (tx) =>
@@ -328,8 +368,15 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       const res = await api('GET', `/subjects/${id}`, undefined, cookie)
       return ((await res.json()) as SubjectDetail).runs[0]!.error
     }
+    // 模型接口的原文只给实例管理员（alice 是初始化时建的管理员），空间里的 editor、viewer 都看不到
     expect(await runError(ws.cookie)).toBe('抽取模型返回 HTTP 401：令牌无效')
-    expect(await runError(carol.cookie)).toBe('抽取失败')
+    expect(await runError(bob.cookie)).toBe('抽取失败（原因只有实例管理员看得到）')
+    expect(await runError(carol.cookie)).toBe('抽取失败（原因只有实例管理员看得到）')
+    // 服务端自己判断出的原因不带外部原文，谁都看得到
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(extractionRuns).set({ error: NO_USABLE_KEY }),
+    )
+    expect(await runError(carol.cookie)).toBe(NO_USABLE_KEY)
   })
 
   it('别的空间的对象看不到也改不了', async () => {

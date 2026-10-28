@@ -22,6 +22,7 @@ import {
   UUID,
 } from '../db/paging'
 import { accounts, apps, extractionRuns, memories, subjectIdentities, subjects } from '../db/schema'
+import { BUDGET_NO_SUMMARY, NO_USABLE_KEY } from '../extraction/extract'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
@@ -34,6 +35,8 @@ const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在', ErrorResponse)
 
 const PAGE_SIZE = 50
+// 服务端自己判断出的失败原因，所有成员都看得到
+const PLAIN_RUN_ERRORS = new Set([NO_USABLE_KEY, BUDGET_NO_SUMMARY])
 // 详情里各部分最多列这么多条
 const DETAIL_FACTS = 200
 const DETAIL_SUMMARIES = 20
@@ -220,8 +223,18 @@ export function subjectRoutes(deps: Deps) {
     })
     .openapi(detail, async (c) => {
       const { spaceId, subjectId } = c.req.valid('param')
-      const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
+      const accountId = c.get('console').accountId
+      const { service } = await consoleMemberFor(deps, spaceId, accountId)
       const access = service.access
+      const [viewer] = await deps.db
+        .select({ isAdmin: accounts.isAdmin })
+        .from(accounts)
+        .where(eq(accounts.id, accountId))
+      // 模型接口或数据库报的原文可能带着内部的地址与响应，抽取模型由实例管理员配，原文只给他看
+      const errorOf = (error: string | null) =>
+        !error || viewer?.isAdmin || PLAIN_RUN_ERRORS.has(error)
+          ? error
+          : '抽取失败（原因只有实例管理员看得到）'
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         const [found] = await subjectInfos(tx, access, eq(subjects.id, subjectId))
         if (!found) return null
@@ -289,8 +302,7 @@ export function subjectRoutes(deps: Deps) {
             limited: run.limited,
             summarized: run.summarized,
             summaryOnly: run.summaryOnly,
-            // 失败原因里可能有模型接口返回的原文，只给 owner 与 editor 看
-            error: run.error && role === 'viewer' ? '抽取失败' : run.error,
+            error: errorOf(run.error),
           })),
         }
       })
@@ -315,6 +327,9 @@ export function subjectRoutes(deps: Deps) {
           .where(eq(subjects.id, subjectId))
           .for('update')
         if (!row) return { status: 404 as const, error: '对象不存在' }
+        if (role === 'viewer' && row.accountId !== me) {
+          return { status: 403 as const, error: '只能取消标记为自己的' }
+        }
         let accountId = row.accountId
         if (body.linkedToMe !== undefined) {
           if (row.kind !== 'person') {

@@ -1,5 +1,5 @@
 {
-  "id": "4facb454-b54f-466a-bee5-700b24b2f0b1",
+  "id": "a53a1425-f494-4cb8-abf6-3c4eeb661f97",
   "prevId": "118f4e65-1160-4350-a890-bf3b9b6c793e",
   "version": "7",
   "dialect": "postgresql",
@@ -2845,21 +2845,6 @@
         }
       },
       "indexes": {
-        "subjects_space_id_index": {
-          "name": "subjects_space_id_index",
-          "columns": [
-            {
-              "expression": "space_id",
-              "isExpression": false,
-              "asc": true,
-              "nulls": "last"
-            }
-          ],
-          "isUnique": false,
-          "concurrently": false,
-          "method": "btree",
-          "with": {}
-        },
         "subjects_space_id_created_at_id_index": {
           "name": "subjects_space_id_created_at_id_index",
           "columns": [

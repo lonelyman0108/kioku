@@ -200,6 +200,13 @@ async function refreshName(tx: Tx, found: FoundIdentity, name: string | undefine
     await tx
       .update(subjects)
       .set({ displayName: name, updatedAt: new Date() })
-      .where(and(eq(subjects.id, found.subjectId), eq(subjects.displayName, previous)))
+      // 条件里再看一次改名锁：读到之后成员刚好改了名（哪怕改成和原来一样），这里就不覆盖
+      .where(
+        and(
+          eq(subjects.id, found.subjectId),
+          eq(subjects.displayName, previous),
+          eq(subjects.nameLocked, false),
+        ),
+      )
   }
 }

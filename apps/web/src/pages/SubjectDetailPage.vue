@@ -28,13 +28,13 @@ const subject = useQuery({
 const data = computed(() => subject.data.value ?? null)
 const linkedToMe = computed(() => data.value?.account?.id === me.data.value?.id)
 
-// 输入框只在没被改动时跟着服务端的名字走：刷新时不冲掉正在输入的内容
+// 换了对象就重新填；同一个对象只在输入框没被改动时跟着服务端的名字走，刷新时不冲掉正在输入的内容
 const name = ref('')
 let synced = ''
 watch(
-  () => data.value?.displayName,
-  (value) => {
-    if (name.value === synced) name.value = value ?? ''
+  [subjectId, () => data.value?.displayName],
+  ([id, value], [previousId]) => {
+    if (id !== previousId || name.value === synced) name.value = value ?? ''
     synced = value ?? ''
   },
   { immediate: true },
@@ -46,7 +46,12 @@ async function update(body: UpdateSubjectRequest, done: string) {
   const id = subjectId.value
   saving.value = true
   try {
-    await api.updateSubject(sid, id, body)
+    const saved = await api.updateSubject(sid, id, body)
+    // 服务端会去掉首尾空白：输入框换成保存下来的名字，之后才能接着跟服务端同步
+    if (body.displayName !== undefined && id === subjectId.value) {
+      name.value = saved.displayName
+      synced = saved.displayName
+    }
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ['subject', sid, id] }),
       queryClient.invalidateQueries({ queryKey: ['subjects', sid] }),

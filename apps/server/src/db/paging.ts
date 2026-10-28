@@ -15,6 +15,16 @@ export const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{1
 
 export const INVALID_CURSOR = '翻页参数无效，请从第一页重新开始'
 
+// 游标是 base64url 编码的 JSON 数组；解不开或不是数组时返回 'invalid'
+export function parseCursor(cursor: string): unknown[] | 'invalid' {
+  try {
+    const values: unknown = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
+    return Array.isArray(values) ? values : 'invalid'
+  } catch {
+    return 'invalid'
+  }
+}
+
 // 「时间 + id」的游标：上一页最后一条的微秒时间与 id
 export function encodeTimeCursor(micros: string, id: string): string {
   return Buffer.from(JSON.stringify([micros, id])).toString('base64url')
@@ -26,14 +36,9 @@ export function decodeTimeCursor(
   id: RegExp,
 ): [string, string] | null | 'invalid' {
   if (!cursor) return null
-  let values: unknown
-  try {
-    values = JSON.parse(Buffer.from(cursor, 'base64url').toString('utf8'))
-  } catch {
-    return 'invalid'
-  }
+  const values = parseCursor(cursor)
   if (
-    !Array.isArray(values) ||
+    values === 'invalid' ||
     values.length !== 2 ||
     typeof values[0] !== 'string' ||
     !MICROS.test(values[0]) ||
