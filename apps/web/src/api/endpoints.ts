@@ -16,6 +16,8 @@ import {
   EmbeddingRebuildResult,
   EmbeddingSettingsView,
   EmbeddingTestResult,
+  ExtractionSettingsView,
+  ExtractionTestResult,
   GlossaryIndex,
   HealthResponse,
   KeyAccessMatrix,
@@ -51,6 +53,7 @@ import {
   type UpdateCredentialProviderRequest,
   type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
+  type UpdateExtractionSettings,
   type UpdateMemoryRequest,
   type UpdatePersonaRequest,
 } from '@kioku/contracts'
@@ -238,4 +241,12 @@ export const api = {
     request('GET', '/settings/embedding/status', { schema: EmbeddingCoverage }),
   rebuildEmbeddings: () =>
     request('POST', '/settings/embedding/rebuild', { schema: EmbeddingRebuildResult }),
+
+  extractionSettings: () =>
+    request('GET', '/settings/extraction', { schema: ExtractionSettingsView }),
+  saveExtractionSettings: (body: UpdateExtractionSettings) =>
+    request('PUT', '/settings/extraction', { body, schema: ExtractionSettingsView }),
+  clearExtractionSettings: () => request('DELETE', '/settings/extraction'),
+  testExtraction: () =>
+    request('POST', '/settings/extraction/test', { schema: ExtractionTestResult }),
 }

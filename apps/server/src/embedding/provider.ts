@@ -1,15 +1,12 @@
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
+import type { EndpointConfig } from '../settings/endpoint'
 
 export interface Embedder {
   model: string
   embed(texts: string[]): Promise<number[][]>
 }
 
-export interface EmbeddingConfig {
-  baseUrl: string
-  model: string
-  apiKey: string | null
-}
+export type EmbeddingConfig = EndpointConfig
 
 const TIMEOUT_MS = 30_000
 

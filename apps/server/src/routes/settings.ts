@@ -5,8 +5,11 @@ import {
   EmbeddingSettingsView,
   EmbeddingTestResult,
   ErrorResponse,
+  ExtractionSettingsView,
+  ExtractionTestResult,
   RecallSettings,
   UpdateEmbeddingSettings,
+  UpdateExtractionSettings,
 } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 import { createMiddleware } from 'hono/factory'
@@ -20,6 +23,13 @@ import {
   loadEmbeddingConfig,
   saveEmbeddingConfig,
 } from '../embedding/settings'
+import { openAiChatModel } from '../extraction/provider'
+import {
+  clearExtractionConfig,
+  extractionSettingsView,
+  loadExtractionConfig,
+  saveExtractionConfig,
+} from '../extraction/settings'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
@@ -93,6 +103,43 @@ const rebuild = createRoute({
   },
 })
 
+const extractionView = createRoute({
+  method: 'get',
+  path: '/settings/extraction',
+  tags: ['settings'],
+  summary: '抽取模型设置（不返回 Key）',
+  responses: { 200: jsonResponse('设置', ExtractionSettingsView), 403: forbidden },
+})
+
+const extractionUpdate = createRoute({
+  method: 'put',
+  path: '/settings/extraction',
+  tags: ['settings'],
+  summary: '修改抽取模型：从对话里抽取事实、写会话摘要用的 OpenAI 兼容接口',
+  request: { body: jsonBody(UpdateExtractionSettings) },
+  responses: {
+    200: jsonResponse('已保存', ExtractionSettingsView),
+    400: jsonResponse('无法保存', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const extractionClear = createRoute({
+  method: 'delete',
+  path: '/settings/extraction',
+  tags: ['settings'],
+  summary: '清掉抽取模型的设置：抽取随即停止，对话缓冲到期后直接丢弃',
+  responses: { 204: { description: '已清除' }, 403: forbidden },
+})
+
+const extractionTest = createRoute({
+  method: 'post',
+  path: '/settings/extraction/test',
+  tags: ['settings'],
+  summary: '用已保存的设置请求一次抽取模型，检查连通性',
+  responses: { 200: jsonResponse('测试结果', ExtractionTestResult), 403: forbidden },
+})
+
 export function settingsRoutes(deps: Deps) {
   const requireAdmin = createMiddleware<AppEnv>(async (c, next) => {
     const [account] = await deps.db
@@ -112,14 +159,15 @@ export function settingsRoutes(deps: Deps) {
   return app
     .openapi(view, async (c) => c.json(await current(), 200))
     .openapi(update, async (c) => {
+      let saved
       try {
-        await saveEmbeddingConfig(deps.db, deps.masterKey, c.req.valid('json'))
+        saved = await saveEmbeddingConfig(deps.db, deps.masterKey, c.req.valid('json'))
       } catch (err) {
         return c.json({ error: (err as Error).message }, 400)
       }
       deps.embedder.invalidate()
       void deps.jobs?.enqueueBackfill()
-      return c.json(await current(), 200)
+      return c.json({ ...saved, dimensions: EMBEDDING_DIMENSIONS }, 200)
     })
     .openapi(test, async (c) => {
       const started = Date.now()
@@ -139,6 +187,34 @@ export function settingsRoutes(deps: Deps) {
       const view = await embeddingSettingsView(deps.db)
       const coverage = await embeddingCoverage(deps.db, view.model)
       return c.json({ configured: view.configured, model: view.model, ...coverage }, 200)
+    })
+    .openapi(extractionView, async (c) => c.json(await extractionSettingsView(deps.db), 200))
+    .openapi(extractionUpdate, async (c) => {
+      try {
+        return c.json(await saveExtractionConfig(deps.db, deps.masterKey, c.req.valid('json')), 200)
+      } catch (err) {
+        return c.json({ error: (err as Error).message }, 400)
+      }
+    })
+    .openapi(extractionClear, async (c) => {
+      await clearExtractionConfig(deps.db)
+      return c.body(null, 204)
+    })
+    .openapi(extractionTest, async (c) => {
+      const started = Date.now()
+      try {
+        const config = await loadExtractionConfig(deps.db, deps.masterKey)
+        if (!config) throw new Error('还没有保存抽取模型的设置')
+        await openAiChatModel(config).complete([
+          { role: 'user', content: '这是连通性测试，只回复 ok。' },
+        ])
+        return c.json({ ok: true, latencyMs: Date.now() - started, error: null }, 200)
+      } catch (err) {
+        return c.json(
+          { ok: false, latencyMs: Date.now() - started, error: (err as Error).message },
+          200,
+        )
+      }
     })
     .openapi(recallView, async (c) => c.json(await loadRecallSettings(deps.db), 200))
     .openapi(recallUpdate, async (c) => {

@@ -7,8 +7,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { apps, memories, memoryEvents, personas } from '../../db/schema'
+import { apps, memories, memoryEvents, personas, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import { saveExtractionConfig } from '../../extraction/settings'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { consoleAccess } from '../../access/access'
@@ -109,6 +110,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
   })
   beforeEach(async () => {
     await resetDatabase(database)
+    // 实例设置不挂在空间下，resetDatabase 清不到；别的测试留下的接口 Key 用的是别的主密钥
+    await database.db.delete(settings)
     ws = await bootstrap(app)
   })
 
@@ -425,6 +428,18 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         { requireAppOwner: ws.accountId },
       ),
     ).rejects.toMatchObject({ status: 403 })
+  })
+
+  it('库里只有加密保存的抽取模型 Key 时，也用它核对主密钥', async () => {
+    await saveExtractionConfig(database.db, masterKey, {
+      baseUrl: 'https://llm.example.com/v1',
+      model: 'm',
+      apiKey: 'sk-extract',
+    })
+    expect(await verifyMasterKey(database.db, ws.spaceId, masterKey)).toBe(true)
+    await expect(verifyMasterKey(database.db, ws.spaceId, randomBytes(32))).rejects.toThrow(
+      '解不开已保存的抽取模型 Key',
+    )
   })
 
   it('主密钥和导入时用的不一致时拒绝', async () => {
