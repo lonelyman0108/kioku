@@ -12,6 +12,7 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useCopy } from '../composables/useCopy'
 import { icons } from '../icons'
 import { layerLabels, sensitivityLabels } from '../labels'
 import { keyPresets } from './keyPresets'
@@ -98,14 +99,8 @@ function closeIssue() {
 }
 
 // 剪贴板接口只在 HTTPS 或 localhost 下可用；用局域网 HTTP 地址打开时提示手动复制
-async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text)
-    toast.add({ title: '已复制', color: 'success' })
-  } catch {
-    toast.add({ title: '浏览器不允许自动复制，请手动选中 Key 复制', color: 'warning' })
-  }
-}
+const copyText = useCopy()
+const copy = (text: string) => copyText(text, '浏览器不允许自动复制，请手动选中 Key 复制')
 
 const revoking = ref<KeyInfo | null>(null)
 async function revoke() {

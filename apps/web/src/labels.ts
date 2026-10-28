@@ -1,4 +1,5 @@
 import type {
+  AppInfo,
   CredentialProviderKind,
   CredentialSource,
   EventActor,
@@ -131,4 +132,23 @@ export const credentialChangeLabels: Record<string, string> = {
   fields: '字段',
   values: '值',
   appIds: '限定的应用',
+}
+
+// 凭据限定给哪些应用，显示成名字。应用列表还没读出来时不下结论；不是自己的应用标出来：
+// Key 按应用主人取凭据，别人的应用的 Key 用不了你的凭据
+export function restrictedAppsLabel(
+  appIds: readonly string[] | null,
+  apps: readonly AppInfo[] | undefined,
+  me: string | undefined,
+): string {
+  if (appIds === null) return '不限定'
+  if (!appIds.length) return '不给任何应用'
+  if (!apps) return '…'
+  return appIds
+    .map((id) => {
+      const app = apps.find((a) => a.id === id)
+      if (!app) return '已删除的应用'
+      return app.ownerAccountId === me ? app.name : `${app.name}（不是你的应用，用不了）`
+    })
+    .join('、')
 }

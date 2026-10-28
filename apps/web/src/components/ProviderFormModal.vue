@@ -2,6 +2,8 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   CREDENTIAL_PROVIDER_KINDS,
+  CreateCredentialProviderRequest,
+  UpdateCredentialProviderRequest,
   type CredentialProvider,
   type CredentialProviderKind,
 } from '@kioku/contracts'
@@ -13,7 +15,8 @@ import { providerKindLabels } from '../labels'
 
 const props = defineProps<{ spaceId: string; provider: CredentialProvider | null }>()
 const open = defineModel<boolean>('open', { required: true })
-const emit = defineEmits<{ saved: [] }>()
+// 事件带上提交时的空间：保存期间切换了空间，页面刷新的是保存到的那个空间
+const emit = defineEmits<{ saved: [spaceId: string] }>()
 const toast = useToast()
 
 const kindHelp: Record<CredentialProviderKind, string> = {
@@ -42,17 +45,24 @@ watch(open, (isOpen) => {
 })
 
 const saving = ref(false)
-const valid = computed(() => form.name.trim().length > 0)
+const body = () => ({ kind: form.kind, name: form.name.trim(), instructions: form.instructions })
+// 按接口的定义检查（名称与使用说明的长度等），提示与服务端一致
+const problem = computed<string | null>(() => {
+  const result = editingId.value
+    ? UpdateCredentialProviderRequest.safeParse(body())
+    : CreateCredentialProviderRequest.safeParse(body())
+  return result.success ? null : (result.error.issues[0]?.message ?? '填写的内容不对')
+})
 async function submit() {
-  if (saving.value || !valid.value) return
+  if (saving.value || problem.value) return
   saving.value = true
-  const body = { kind: form.kind, name: form.name.trim(), instructions: form.instructions }
+  const spaceId = props.spaceId
   try {
-    if (editingId.value) await api.updateCredentialProvider(props.spaceId, editingId.value, body)
-    else await api.createCredentialProvider(props.spaceId, body)
+    if (editingId.value) await api.updateCredentialProvider(spaceId, editingId.value, body())
+    else await api.createCredentialProvider(spaceId, body())
     open.value = false
     toast.add({ title: editingId.value ? '已保存' : '已添加凭据源', color: 'success' })
-    emit('saved')
+    emit('saved', spaceId)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {
@@ -86,9 +96,10 @@ async function submit() {
       </form>
     </template>
     <template #footer>
-      <div class="flex w-full justify-end gap-2">
+      <div class="flex w-full items-center justify-end gap-2">
+        <span v-if="problem" class="mr-auto text-xs text-muted">{{ problem }}</span>
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
-        <UButton type="submit" form="provider-form" :loading="saving" :disabled="!valid">
+        <UButton type="submit" form="provider-form" :loading="saving" :disabled="!!problem">
           {{ editingId ? '保存' : '添加' }}
         </UButton>
       </div>

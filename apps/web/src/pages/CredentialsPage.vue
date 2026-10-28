@@ -12,13 +12,13 @@ import CredentialFormModal from '../components/CredentialFormModal.vue'
 import ProviderFormModal from '../components/ProviderFormModal.vue'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { credentialSourceLabels, providerKindLabels } from '../labels'
+import { credentialSourceLabels, providerKindLabels, restrictedAppsLabel } from '../labels'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { space } = useSession()
+const { me, space } = useSession()
 const spaceId = computed(() => String(route.params.spaceId))
 // 管理凭据要 secret 级，和签发 Key 的规则一样只有空间 owner 有；别的成员只能看自己凭据的说明
 const canManage = computed(() => space.value?.role === 'owner')
@@ -56,11 +56,7 @@ const sourceOf = (c: ConsoleCredential) =>
       ? `${c.provider.name}${c.provider.deleted ? '（已删除）' : ''}`
       : credentialSourceLabels.external
 const appsOf = (c: ConsoleCredential) =>
-  c.appIds === null
-    ? '不限定'
-    : c.appIds
-        .map((id) => apps.data.value?.find((a) => a.id === id)?.name ?? '已删除的应用')
-        .join('、') || '不给任何应用'
+  restrictedAppsLabel(c.appIds, apps.data.value, me.data.value?.id)
 
 const columns = [
   { accessorKey: 'name', header: '名称' },
@@ -118,11 +114,11 @@ function openEdit() {
   editing.value = detail.value
   formOpen.value = true
 }
-function onSaved(credential: ConsoleCredential) {
-  const sid = spaceId.value
+// 按保存到的空间写缓存；保存期间换了空间，就不在新空间里打开它
+function onSaved(credential: ConsoleCredential, sid: string) {
   queryClient.setQueryData(['credential', sid, credential.id], credential)
   void refreshLists(sid)
-  selectedId.value = credential.id
+  if (sid === spaceId.value) selectedId.value = credential.id
 }
 function onConflict() {
   void selected.refetch()
@@ -141,6 +137,8 @@ async function remove() {
     removing.value = null
     toast.add({ title: `已删除凭据 ${target.identifier}`, color: 'success' })
     if (selectedId.value === target.id) selectedId.value = null
+    // 缓存里的详情还是删除前的样子，从「已删除」里再打开时要重新读
+    queryClient.removeQueries({ queryKey: ['credential', sid, target.id], exact: true })
     await refreshLists(sid)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '删除失败', color: 'error' })
@@ -392,7 +390,7 @@ async function removeProvider() {
         v-else-if="detail"
         :space-id="spaceId"
         :credential="detail"
-        :apps="apps.data.value ?? []"
+        :apps="apps.data.value"
         :can-manage="canManage"
         @edit="openEdit"
         @remove="removing = detail"
@@ -415,7 +413,7 @@ async function removeProvider() {
     v-model:open="providerOpen"
     :space-id="spaceId"
     :provider="editingProvider"
-    @saved="refreshLists(spaceId)"
+    @saved="(sid) => refreshLists(sid)"
   />
 
   <UModal

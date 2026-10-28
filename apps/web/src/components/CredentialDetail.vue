@@ -6,6 +6,8 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useCopy } from '../composables/useCopy'
+import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
   actorLabel,
@@ -14,6 +16,7 @@ import {
   credentialSourceLabels,
   credentialViaLabels,
   providerKindLabels,
+  restrictedAppsLabel,
   sensitivityLabels,
 } from '../labels'
 import { formatRelative, formatTime } from '../time'
@@ -21,7 +24,8 @@ import { formatRelative, formatTime } from '../time'
 const props = defineProps<{
   spaceId: string
   credential: ConsoleCredential
-  apps: AppInfo[]
+  // 还没读出来时为 undefined
+  apps: AppInfo[] | undefined
   canManage: boolean
 }>()
 const emit = defineEmits<{ edit: []; remove: []; undelete: [] }>()
@@ -29,22 +33,10 @@ const toast = useToast()
 
 const c = computed(() => props.credential)
 const placeholder = (field?: string) => `{{cred:${c.value.identifier}${field ? `#${field}` : ''}}}`
-const appNames = computed(() =>
-  c.value.appIds === null
-    ? '不限定'
-    : c.value.appIds
-        .map((id) => props.apps.find((a) => a.id === id)?.name ?? '已删除的应用')
-        .join('、') || '不给任何应用',
-)
+const { me } = useSession()
+const appNames = computed(() => restrictedAppsLabel(c.value.appIds, props.apps, me.data.value?.id))
 
-async function copy(text: string) {
-  try {
-    await navigator.clipboard.writeText(text)
-    toast.add({ title: '已复制', color: 'success' })
-  } catch {
-    toast.add({ title: '浏览器不允许自动复制，请手动选中复制', color: 'warning' })
-  }
-}
+const copy = useCopy()
 
 const references = useQuery({
   queryKey: computed(() => ['credential-references', props.spaceId, c.value.id] as const),
@@ -84,13 +76,13 @@ watch(
 )
 onBeforeUnmount(() => (revealed.value = null))
 async function reveal() {
-  const { id } = c.value
+  const { id, version } = c.value
   revealing.value = true
   try {
     const { values } = await api.revealCredential(props.spaceId, id)
     confirmingReveal.value = false
-    // 请求期间换成了别的凭据：不显示
-    if (c.value.id === id) revealed.value = values
+    // 请求期间换成了别的凭据、或这条被改过：值可能已经不对，不显示
+    if (c.value.id === id && c.value.version === version) revealed.value = values
     void events.refetch()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '查看失败', color: 'error' })

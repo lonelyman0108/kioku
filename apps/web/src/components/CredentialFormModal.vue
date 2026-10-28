@@ -2,6 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   CREDENTIAL_NAME_PATTERN,
+  MAX_CREDENTIAL_FIELDS,
   CreateCredentialRequest,
   UpdateCredentialRequest,
   type AppInfo,
@@ -14,6 +15,7 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { providerKindLabels } from '../labels'
 
@@ -25,7 +27,11 @@ const props = defineProps<{
   apps: AppInfo[]
 }>()
 const open = defineModel<boolean>('open', { required: true })
-const emit = defineEmits<{ saved: [credential: ConsoleCredential]; conflict: [] }>()
+// 事件带上提交时的空间：保存期间切换了空间，页面不能把结果写进新空间
+const emit = defineEmits<{
+  saved: [credential: ConsoleCredential, spaceId: string]
+  conflict: []
+}>()
 const toast = useToast()
 
 // 托管的一行：existing 表示修改时已有的字段，值留空就是不改，removed 表示删掉它
@@ -112,7 +118,17 @@ const providerItems = computed(() =>
     value: p.id,
   })),
 )
-const appItems = computed(() => props.apps.map((a) => ({ label: a.name, value: a.id })))
+// 只列出自己是主人的应用：Key 按应用主人取凭据，别人的应用的 Key 用不了你的凭据。
+// 已经限定了的照样列出来，免得改别的地方时被悄悄去掉
+const { me } = useSession()
+const appItems = computed(() =>
+  props.apps
+    .filter((a) => a.ownerAccountId === me.data.value?.id || form.appIds.includes(a.id))
+    .map((a) => ({
+      label: a.ownerAccountId === me.data.value?.id ? a.name : `${a.name}（不是你的应用，用不了）`,
+      value: a.id,
+    })),
+)
 const sourceItems = computed(() => [
   { label: 'Kioku 托管', description: '值由 Kioku 用主密钥加密保存', value: 'hosted' },
   {
@@ -135,6 +151,8 @@ const problem = computed<string | null>(() => {
   if (!form.name.trim()) return '名称不能为空'
   const rows = form.kind === 'hosted' ? liveHosted.value : externalRows.value
   if (!rows.length) return '至少要有一个字段'
+  // 修改托管的只发改了的字段，合并之后的总数要在这里看
+  if (rows.length > MAX_CREDENTIAL_FIELDS) return `一条凭据最多 ${MAX_CREDENTIAL_FIELDS} 个字段`
   const names = rows.map((r) => r.name)
   if (names.some((n) => !validName(n))) return '字段名只用小写字母、数字、_ 和 -'
   if (new Set(names).size !== names.length) return '字段名不能重复'
@@ -233,7 +251,7 @@ async function submit() {
     for (const row of hostedRows.value) row.value = ''
     open.value = false
     toast.add({ title: before ? '已保存' : `已新建凭据 ${saved.identifier}`, color: 'success' })
-    emit('saved', saved)
+    emit('saved', saved, spaceId)
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
     // 版本冲突：期间别处改过，关掉重开看过新的那一版再改
@@ -378,7 +396,7 @@ watch(open, (isOpen) => {
 
         <UFormField
           label="限定应用"
-          help="只给选中的应用的 Key 用。通过 Key 新建的凭据默认只给那个应用；只有这里能改"
+          help="只给选中的应用的 Key 用（只列出你是主人的应用）。通过 Key 新建的凭据默认只给那个应用；只有这里能改"
         >
           <div class="space-y-2">
             <USwitch v-model="form.restrict" label="只给部分应用用" />
