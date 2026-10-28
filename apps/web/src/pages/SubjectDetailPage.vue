@@ -41,6 +41,24 @@ watch(
   { immediate: true },
 )
 
+// 对象改了之后要刷新的：对象页与几个选对象的下拉框、应用里按群换人格的群名、待审、
+// 删掉的事实所在的记忆列表、已删除与活动
+function refreshSubjectCaches(sid: string) {
+  for (const key of [
+    'subject',
+    'subjects',
+    'merge-picker',
+    'group-personas',
+    'group-picker',
+    'review',
+    'memory-list',
+    'memory-deleted',
+    'activity',
+  ]) {
+    void queryClient.invalidateQueries({ queryKey: [key, sid] })
+  }
+}
+
 const saving = ref(false)
 async function update(body: UpdateSubjectRequest, done: string) {
   const sid = spaceId.value
@@ -53,25 +71,12 @@ async function update(body: UpdateSubjectRequest, done: string) {
       name.value = saved.displayName
       synced = saved.displayName
     }
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['subject', sid, id] }),
-      queryClient.invalidateQueries({ queryKey: ['subjects', sid] }),
-      // 群名也显示在应用的按群换人格里
-      queryClient.invalidateQueries({ queryKey: ['group-personas', sid] }),
-      queryClient.invalidateQueries({ queryKey: ['group-picker', sid] }),
-    ])
+    refreshSubjectCaches(sid)
     toast.add({ title: done, color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
   } finally {
     saving.value = false
-  }
-}
-
-// 对象改了之后要刷新的：对象页、应用里按群换人格的群名、待审
-function refreshSubjectCaches(sid: string) {
-  for (const key of ['subject', 'subjects', 'group-personas', 'group-picker', 'review']) {
-    void queryClient.invalidateQueries({ queryKey: [key, sid] })
   }
 }
 

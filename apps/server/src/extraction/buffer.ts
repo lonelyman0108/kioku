@@ -2,7 +2,7 @@ import type { TurnEndEvent } from '@kioku/contracts'
 import { and, count, eq, sql } from 'drizzle-orm'
 
 import type { KeySession } from '../access/session'
-import { withSpace, type Db } from '../db/client'
+import { withSpace, type Db, type Tx } from '../db/client'
 import { conversationTurns, spaces } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { extractionSettingsView } from './settings'
@@ -57,19 +57,29 @@ export async function bufferTurn(
       userText: input.user,
       replyText: input.reply,
     })
-    const inBatch = and(eq(conversationTurns.appId, key.app.id), eq(conversationTurns.scope, scope))
-    await tx.execute(sql`
-      delete from ${conversationTurns}
-      where ${inBatch} and ${conversationTurns.id} <= (
-        select ${conversationTurns.id} from ${conversationTurns} where ${inBatch}
-        order by ${conversationTurns.id} desc offset ${MAX_BUFFERED_TURNS} limit 1
-      )`)
-    const [row] = await tx.select({ n: count() }).from(conversationTurns).where(inBatch)
-    return row!.n
+    return trimBatch(tx, key.app.id, scope)
   })
   // 两轮同时进来时，后入队的可能把「马上」改回「等空闲」，这一批最多晚一个空闲时长：
   // 下一轮进来或空闲到点时照样处理，不丢对话
-  void deps.jobs?.enqueueExtraction(target, buffered >= BATCH_TURNS ? 0 : IDLE_SECONDS)
+  void deps.jobs?.enqueueExtraction(target, extractionDelay(buffered))
+}
+
+// 一批最多留 MAX_BUFFERED_TURNS 轮，多出的删掉最早的；返回剩下几轮
+export async function trimBatch(tx: Tx, appId: string, scope: string): Promise<number> {
+  const inBatch = and(eq(conversationTurns.appId, appId), eq(conversationTurns.scope, scope))
+  await tx.execute(sql`
+    delete from ${conversationTurns}
+    where ${inBatch} and ${conversationTurns.id} <= (
+      select ${conversationTurns.id} from ${conversationTurns} where ${inBatch}
+      order by ${conversationTurns.id} desc offset ${MAX_BUFFERED_TURNS} limit 1
+    )`)
+  const [row] = await tx.select({ n: count() }).from(conversationTurns).where(inBatch)
+  return row!.n
+}
+
+// 攒满一批马上抽取，不满时等空闲
+export function extractionDelay(buffered: number): number {
+  return buffered >= BATCH_TURNS ? 0 : IDLE_SECONDS
 }
 
 // 丢掉一批缓冲，返回删了几轮

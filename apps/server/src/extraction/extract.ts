@@ -25,6 +25,10 @@ import type { ChatModel } from './provider'
 export const NO_USABLE_KEY = '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层'
 export const BUDGET_NO_SUMMARY = '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要'
 
+// 抽取期间这一批对话被合并到了别的对象：这一批不写，交给合并后的批次
+export const BATCH_MOVED = '抽取期间对象被合并，这一批交给合并后的批次重新抽取'
+class BatchMoved extends Error {}
+
 // 会话摘要在情节层留这么多天
 export const EPISODE_TTL_DAYS = 30
 // 每个对象给模型看最近这么多条已有事实，用来判断是新的、更新还是已经记过
@@ -105,18 +109,25 @@ export async function extractBatch(
     skippedTurns: all.length - turns.length,
     ...fields,
   })
+  const thisBatch = and(
+    eq(conversationTurns.appId, target.appId),
+    eq(conversationTurns.scope, target.scope),
+    lte(conversationTurns.id, last.id),
+  )
   // 记一条抽取记录，并删掉这一批用过的缓冲
   const close = async (tx: Tx, fields: RunFields) => {
     await tx.insert(extractionRuns).values(runOf(fields))
-    await tx
-      .delete(conversationTurns)
-      .where(
-        and(
-          eq(conversationTurns.appId, target.appId),
-          eq(conversationTurns.scope, target.scope),
-          lte(conversationTurns.id, last.id),
-        ),
-      )
+    await tx.delete(conversationTurns).where(thisBatch)
+  }
+  // 写之前锁住这一批缓冲、确认还在：抽取期间对象被合并时，缓冲跟着移到了合并后的批次，
+  // 写下的东西会挂在已经删掉的对象上。锁住之后合并要等这一批写完
+  const stillHere = async (tx: Tx) => {
+    const rows = await tx
+      .select({ id: conversationTurns.id })
+      .from(conversationTurns)
+      .where(thisBatch)
+      .for('update')
+    if (rows.length < all.length) throw new BatchMoved()
   }
   const writer = turns.length ? writers.get(turns.at(-1)!.keyId) : undefined
   if (!writer || (!layers.subject && !layers.episode)) {
@@ -302,21 +313,32 @@ export async function extractBatch(
     actor: { keyId: writer.key.keyId },
   })
   try {
-    await service.writeExtraction(writes, { source: 'extraction' }, (tx, outcomes) => {
-      const count = (layer: ExtractedWrite['layer'], outcome: string) =>
-        outcomes.filter((o, i) => writes[i]!.layer === layer && o === outcome).length
-      return close(tx, {
-        ...usage,
-        added: count('subject', 'added'),
-        updated: count('subject', 'updated'),
-        unchanged: counts.unchanged,
-        dropped: counts.dropped + count('subject', 'skipped'),
-        summarized: count('episode', 'added') > 0,
-        summaryOnly,
-        limited: counts.limited,
-      })
-    })
+    await service.writeExtraction(
+      writes,
+      { source: 'extraction' },
+      (tx, outcomes) => {
+        const count = (layer: ExtractedWrite['layer'], outcome: string) =>
+          outcomes.filter((o, i) => writes[i]!.layer === layer && o === outcome).length
+        return close(tx, {
+          ...usage,
+          added: count('subject', 'added'),
+          updated: count('subject', 'updated'),
+          unchanged: counts.unchanged,
+          dropped: counts.dropped + count('subject', 'skipped'),
+          summarized: count('episode', 'added') > 0,
+          summaryOnly,
+          limited: counts.limited,
+        })
+      },
+      stillHere,
+    )
   } catch (err) {
+    if (err instanceof BatchMoved) {
+      await withSpace(db, target.spaceId, (tx) =>
+        tx.insert(extractionRuns).values(runOf({ ...usage, error: BATCH_MOVED })),
+      )
+      return
+    }
     // 整批已经回滚：单独记下原因再抛出，交给后台任务重试，缓冲留着
     await withSpace(db, target.spaceId, (tx) =>
       tx

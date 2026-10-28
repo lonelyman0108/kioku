@@ -24,7 +24,7 @@ import {
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { ChatModel } from '../../extraction/provider'
-import { NO_USABLE_KEY } from '../../extraction/extract'
+import { BATCH_MOVED, NO_USABLE_KEY } from '../../extraction/extract'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
@@ -45,10 +45,14 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
   let appId: string
   let key: string
   const masterKey = randomBytes(32)
+  // 排进抽取队列的批次与延迟，合并之后看有没有按合并后的批次排
+  const queued: { scope: string; delay: number }[] = []
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
-    enqueueExtraction: async () => {},
+    enqueueExtraction: async (target, delay) => {
+      queued.push({ scope: target.scope, delay })
+    },
   }
 
   beforeAll(async () => {
@@ -432,11 +436,12 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
         spaceId: ws.spaceId,
         appId,
         scope: `direct:${gone.id}`,
-        subjectIds: [gone.id],
+        subjectIds: [gone.id, keep.id],
         turns: 1,
       }),
     )
 
+    queued.length = 0
     const res = await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })
     expect(res.status).toBe(200)
     expect(((await res.json()) as SubjectInfo).identities.map((i) => i.platform).sort()).toEqual([
@@ -451,6 +456,13 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     ])
     expect(merged.summaries.map((s) => s.content)).toEqual(['私聊里聊了上海'])
     expect(merged.runs.map((r) => r.scope.kind).sort()).toEqual(['direct', 'group'])
+    // 两个都在同一批里时，换完不留两个一样的 id
+    const runIds = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ ids: extractionRuns.subjectIds }).from(extractionRuns),
+    )
+    expect(runIds.some((r) => r.ids.length !== new Set(r.ids).size)).toBe(false)
+    // 移过来的缓冲按合并后的批次排抽取：只有一轮，等空闲
+    expect(queued).toEqual([{ scope: `direct:${keep.id}`, delay: 600 }])
     // 缓冲里还没抽取的那一轮也跟过来
     const turns = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select().from(conversationTurns),
@@ -464,7 +476,47 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(await recallSubjects(direct('1001'))).toEqual(['住在上海'])
   })
 
-  it('合并的限制：人和群、自己、不同的成员都不行；viewer 不能合并', async () => {
+  it('抽取期间对象被合并：这一批不写，记下原因，对话留给合并后的批次', async () => {
+    await say('你好', direct('1001', '小明'))
+    await say('我住在上海', direct('u1', '明', 'tg'))
+    const all = await listOf()
+    const keep = find(all, '小明')
+    const gone = find(all, '明')
+    await processSession(
+      database.db,
+      masterKey,
+      { spaceId: ws.spaceId, appId, scope: `direct:${gone.id}` },
+      () => ({
+        model: 'fake-model',
+        async complete() {
+          // 模型还在算的时候，有人把这个人合并了
+          expect((await api('POST', `/subjects/${keep.id}/merge`, { from: gone.id })).status).toBe(
+            200,
+          )
+          return {
+            content: JSON.stringify({
+              facts: [{ subject: 'M1', op: 'add', content: '住在上海' }],
+              summary: '私聊里聊了上海',
+            }),
+            usage: { promptTokens: 40, completionTokens: 10 },
+          }
+        },
+      }),
+    )
+    const written = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memories).where(eq(memories.form, 'extracted')),
+    )
+    expect(written).toEqual([])
+    const runs = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(extractionRuns))
+    expect(runs.map((r) => r.error)).toEqual([BATCH_MOVED])
+    // 那一轮对话还在，在合并后的批次里
+    const turns = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(conversationTurns),
+    )
+    expect(turns.map((t) => t.scope).sort()).toEqual([`direct:${keep.id}`, `direct:${keep.id}`])
+  })
+
+  it('合并的限制：人和群、自己都不行；viewer 不能合并；标记成别的成员的对象谁都不能并', async () => {
     await chatInGroup()
     const all = await listOf()
     const ming = find(all, '小明')
@@ -480,14 +532,21 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(
       (await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id }, carol.cookie)).status,
     ).toBe(403)
-    // 两个都标记了、又是不同的成员
+    // alice 把小明标记成自己。bob 不能把别的账号并进小明，也不能把小明并进别人：
+    // 那等于把平台账号挂到 alice 的标记下，那个账号的私聊就成了 alice 的主人私聊
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: true })
-    await api('PATCH', `/subjects/${hong.id}`, { linkedToMe: true }, bob.cookie)
-    expect((await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id })).status).toBe(409)
-    // 只有被合并的那个标记了时，标记跟过来
+    const merge = (into: string, from: string, cookie?: string) =>
+      api('POST', `/subjects/${into}/merge`, { from }, cookie)
+    expect((await merge(ming.id, hong.id, bob.cookie)).status).toBe(403)
+    expect((await merge(hong.id, ming.id, bob.cookie)).status).toBe(403)
+    // 空间 owner 也不能并别人标记的
     await api('PATCH', `/subjects/${ming.id}`, { linkedToMe: false })
-    const res = await api('POST', `/subjects/${ming.id}/merge`, { from: hong.id })
+    await api('PATCH', `/subjects/${hong.id}`, { linkedToMe: true }, bob.cookie)
+    expect((await merge(ming.id, hong.id)).status).toBe(403)
+    // 标记成自己的可以并，标记跟着到保留的那个
+    const res = await merge(ming.id, hong.id, bob.cookie)
+    expect(res.status).toBe(200)
     expect(((await res.json()) as SubjectInfo).account?.id).toBe(bob.accountId)
   })
 
