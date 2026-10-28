@@ -671,8 +671,8 @@ export class MemoryService {
   // 写下一批抽取的结果（对象层的事实与情节层的会话摘要，没有 URI、不建向量），连同调用方的收尾
   // （记抽取记录、删掉用过的缓冲）在同一个事务里：中途失败整批回滚，后台任务重试时不会重复写入。
   // 敏感级 public，来源与来源作用域按这次的会话上下文；逐条检查权限与凭据占位符（对话来的内容不能新增引用），
-  // 写不进去的那条跳过。replaces 指向这次读得到、还有效的同一个对象的事实时推翻它：旧的设 valid_to 保留历史，
-  // 再写一条新的；找不到时当作新的事实
+  // 写不进去的那条跳过。replaces 指向这次读得到、写得了、还有效的同一个对象的事实时推翻它：旧的设 valid_to
+  // 保留历史，再写一条新的；找不到或写不了时当作新的事实
   async writeExtraction(
     items: readonly ExtractedWrite[],
     eventContext: Record<string, unknown>,
@@ -706,7 +706,7 @@ export class MemoryService {
       if (err instanceof MemoryError) return 'skipped'
       throw err
     }
-    const [before] =
+    const [found] =
       item.layer === 'subject' && item.replaces
         ? await tx
             .select()
@@ -722,6 +722,8 @@ export class MemoryService {
             )
             .for('update')
         : []
+    // 推翻也是改那一条：读得到但写不了时不动它，当作新的事实
+    const before = found && canWrite(this.ctx.access, found) ? found : undefined
     const [row] = await tx
       .insert(memories)
       .values({

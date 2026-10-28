@@ -5,6 +5,7 @@ CREATE TABLE "extraction_runs" (
 	"scope" text NOT NULL,
 	"subject_ids" uuid[] NOT NULL,
 	"turns" integer NOT NULL,
+	"skipped_turns" integer DEFAULT 0 NOT NULL,
 	"model" text,
 	"prompt_tokens" integer DEFAULT 0 NOT NULL,
 	"completion_tokens" integer DEFAULT 0 NOT NULL,

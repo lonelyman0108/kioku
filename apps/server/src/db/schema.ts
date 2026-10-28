@@ -704,7 +704,9 @@ export const extractionRuns = pgTable(
     scope: text().notNull(),
     // 这一批涉及的对象（发言人与群），对象页按它找抽取记录
     subjectIds: uuid().array().notNull(),
+    // 给模型看了几轮；写入它们的 Key 吊销、作废或写不了的那几轮没给模型看，单独计数，随这一批删掉
     turns: integer().notNull(),
+    skippedTurns: integer().notNull().default(0),
     model: text(),
     promptTokens: integer().notNull().default(0),
     completionTokens: integer().notNull().default(0),

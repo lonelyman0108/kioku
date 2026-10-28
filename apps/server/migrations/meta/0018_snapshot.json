@@ -1,5 +1,5 @@
 {
-  "id": "074c003f-4625-4557-8884-6dc308d3509b",
+  "id": "bd4fca01-c491-41c9-a07c-496e7fd1efd6",
   "prevId": "b86369fe-c1c1-4234-a09f-b4d49671331a",
   "version": "7",
   "dialect": "postgresql",
@@ -1066,6 +1066,13 @@
           "type": "integer",
           "primaryKey": false,
           "notNull": true
+        },
+        "skipped_turns": {
+          "name": "skipped_turns",
+          "type": "integer",
+          "primaryKey": false,
+          "notNull": true,
+          "default": 0
         },
         "model": {
           "name": "model",

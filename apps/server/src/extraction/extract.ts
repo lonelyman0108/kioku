@@ -1,4 +1,4 @@
-import { and, asc, eq, lte } from 'drizzle-orm'
+import { and, asc, eq, inArray, lte, sql } from 'drizzle-orm'
 
 import type { Access, SessionContext } from '../access/access'
 import { groupPersona, type KeySession } from '../access/session'
@@ -9,11 +9,12 @@ import {
   mentionsPlaceholder,
 } from '../credential/placeholders'
 import { withSpace, type Db, type Tx } from '../db/client'
-import { conversationTurns, extractionRuns, subjectIdentities } from '../db/schema'
+import { conversationTurns, extractionRuns, memories, subjectIdentities } from '../db/schema'
 import type { KeyPrincipal } from '../http/env'
 import { accessForKey } from '../memory/context'
+import { readableConditions } from '../memory/filter'
 import { MemoryService, type ExtractedWrite } from '../memory/service'
-import { inlineText } from '../recall/recall'
+import { oneLine } from '../recall/recall'
 import { readableSubjectFacts } from '../recall/subjects'
 import type { BufferedSession } from './buffer'
 import { extractionMessages, parseExtraction, type PromptSubject } from './prompt'
@@ -61,22 +62,33 @@ export async function extractBatch(
     ? { chatType: last.chatType === 'channel' ? 'channel' : 'group', groupSubjectId: groupId }
     : { chatType: 'direct', senderSubjectId: last.senderSubjectId }
 
+  const keyIds = [...new Set(all.map((t) => t.keyId))]
+  const principals = (await Promise.all(keyIds.map((id) => principalForKeyId(db, id)))).filter(
+    (key): key is KeyPrincipal => key !== null,
+  )
+  // 同一批的 Key 都属于这个应用，按群换人格的规则只用查一次
+  const personaId = !principals[0]
+    ? null
+    : groupId
+      ? await withSpace(db, target.spaceId, (tx) => groupPersona(tx, principals[0]!, groupId))
+      : principals[0].app.defaultPersonaId
   const writers = new Map<string, { key: KeyPrincipal; session: KeySession; access: Access }>()
-  for (const keyId of new Set(all.map((t) => t.keyId))) {
-    const key = await principalForKeyId(db, keyId)
-    if (!key) continue
-    const personaId = groupId
-      ? await withSpace(db, target.spaceId, (tx) => groupPersona(tx, key, groupId))
-      : key.app.defaultPersonaId
+  for (const key of principals) {
     const session: KeySession = { context, personaId, subjects: [] }
     const access = accessForKey(key, session)
     // 来源作用域由会话上下文算出，和缓冲分批用的是同一个
     const writable = access.writeLayers.has('subject') || access.writeLayers.has('episode')
     if (access.writeOriginScope === target.scope && writable) {
-      writers.set(keyId, { key, session, access })
+      writers.set(key.keyId, { key, session, access })
     }
   }
   const turns = all.filter((t) => writers.has(t.keyId))
+  // 这一批的内容只写进每一轮的 Key 都写得了的层：只能写情节层的 Key 说的话，不能借别的 Key 进对象层
+  const used = [...new Set(turns.map((t) => t.keyId))].map((id) => writers.get(id)!.access)
+  const layers = {
+    subject: used.every((a) => a.writeLayers.has('subject')),
+    episode: used.every((a) => a.writeLayers.has('episode')),
+  }
   const senderIds = [...new Set(turns.map((t) => t.senderSubjectId))]
   const subjectIds = groupId ? [...senderIds, groupId] : senderIds
   const runOf = (fields: RunFields): typeof extractionRuns.$inferInsert => ({
@@ -85,6 +97,7 @@ export async function extractBatch(
     scope: target.scope,
     subjectIds,
     turns: turns.length,
+    skippedTurns: all.length - turns.length,
     ...fields,
   })
   // 记一条抽取记录，并删掉这一批用过的缓冲
@@ -101,17 +114,21 @@ export async function extractBatch(
       )
   }
   const writer = turns.length ? writers.get(turns.at(-1)!.keyId) : undefined
-  if (!writer) {
+  if (!writer || (!layers.subject && !layers.episode)) {
     await withSpace(db, target.spaceId, (tx) =>
       close(tx, { error: '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层' }),
     )
     return
   }
 
-  // 对象与它们读得到的全部有效事实：最近的几条给模型看，全部用来判断是不是已经记过。
-  // 发言人用这一批里最后报上来的名字，群用平台上的名字
+  // 对象与它们读得到的、最近的几条有效事实（给模型看）。发言人用这一批里最后报上来的名字，群用平台上的名字
   const { facts, groupName } = await withSpace(db, target.spaceId, async (tx) => {
-    const facts = await readableSubjectFacts(tx, writer.access, subjectIds)
+    const facts = await readableSubjectFacts(
+      tx,
+      writer.access,
+      subjectIds,
+      EXISTING_FACTS_PER_SUBJECT,
+    )
     const [identity] = groupId
       ? await tx
           .select({ name: subjectIdentities.displayName })
@@ -135,11 +152,8 @@ export async function extractBatch(
       : []),
   ]
   const shown = new Map<string, { id: string; subjectId: string }>()
-  const known = new Map<string, Set<string>>(subjectIds.map((id) => [id, new Set()]))
   for (const subject of subjects) {
-    const own = facts.filter((f) => f.subjectId === subject.id)
-    for (const fact of own) known.get(subject.id)!.add(normalized(fact.content))
-    for (const fact of own.slice(0, EXISTING_FACTS_PER_SUBJECT)) {
+    for (const fact of facts.filter((f) => f.subjectId === subject.id)) {
       const handle = `F${shown.size + 1}`
       shown.set(handle, { id: fact.id, subjectId: subject.id })
       subject.facts.push({ handle, content: fact.content })
@@ -182,11 +196,12 @@ export async function extractBatch(
     return
   }
 
-  // 挑出要写的候选：对象不对、格式不对、太长、像明文凭据、带凭据占位符的丢掉；和这个对象已有的
-  // （或这一批里已经要写的）一字不差的算已经记过（不计大小写与空白）
+  // 挑出要写的候选：对象不对、格式不对、太长、像明文凭据、带凭据占位符的丢掉；这一批的 Key 写不了对象层时
+  // 事实一条都不写，写不了情节层时不写摘要。和这一批里已经要写的一字不差的（不计大小写与空白）算已经记过
   const counts = { unchanged: 0, dropped: 0 }
-  const writes: ExtractedWrite[] = []
+  const proposed: Extract<ExtractedWrite, { layer: 'subject' }>[] = []
   const bySubjectHandle = new Map(subjects.map((s) => [s.handle, s]))
+  const pending = new Set<string>()
   for (const candidate of parsed.candidates) {
     const subject = candidate && bySubjectHandle.get(candidate.subject.trim().toUpperCase())
     const op = candidate?.op.trim().toLowerCase()
@@ -198,8 +213,9 @@ export async function extractBatch(
       counts.unchanged++
       continue
     }
-    const content = inlineText(candidate.content ?? '')
+    const content = oneLine(candidate.content ?? '')
     if (
+      !layers.subject ||
       (op !== 'add' && op !== 'update') ||
       !content ||
       [...content].length > MAX_FACT_CHARS ||
@@ -209,26 +225,40 @@ export async function extractBatch(
       counts.dropped++
       continue
     }
-    const seen = known.get(subject.id)!
-    if (seen.has(normalized(content))) {
+    const key = `${subject.id}|${content.toLowerCase()}`
+    if (pending.has(key)) {
       counts.unchanged++
       continue
     }
-    seen.add(normalized(content))
+    pending.add(key)
     // 要推翻的那条不属于这个对象时当作新的事实，免得把别人的事实改掉
     const old =
       op === 'update' && candidate.replaces
         ? shown.get(candidate.replaces.trim().toUpperCase())
         : undefined
-    writes.push({
+    proposed.push({
       layer: 'subject',
       subjectId: subject.id,
       content,
       replaces: old && old.subjectId === subject.id ? old.id : undefined,
     })
   }
-  const summary = maskPlaintextCredentials(inlineText(parsed.summary))
-  if (summary && [...summary].length <= MAX_SUMMARY_CHARS && !mentionsPlaceholder(summary)) {
+  // 和这个对象已有的有效事实一字不差的（不只是给模型看的那些）也算已经记过：按正文去库里查，不必把全部事实读出来
+  const existing = await withSpace(db, target.spaceId, (tx) =>
+    knownFacts(tx, writer.access, proposed),
+  )
+  const writes: ExtractedWrite[] = proposed.filter((f) => {
+    const known = existing.has(`${f.subjectId}|${f.content.toLowerCase()}`)
+    if (known) counts.unchanged++
+    return !known
+  })
+  const summary = maskPlaintextCredentials(oneLine(parsed.summary))
+  if (
+    layers.episode &&
+    summary &&
+    [...summary].length <= MAX_SUMMARY_CHARS &&
+    !mentionsPlaceholder(summary)
+  ) {
     writes.push({
       layer: 'episode',
       content: summary,
@@ -244,20 +274,50 @@ export async function extractBatch(
     masterKey,
     actor: { keyId: writer.key.keyId },
   })
-  await service.writeExtraction(writes, { source: 'extraction' }, (tx, outcomes) => {
-    const count = (layer: ExtractedWrite['layer'], outcome: string) =>
-      outcomes.filter((o, i) => writes[i]!.layer === layer && o === outcome).length
-    return close(tx, {
-      ...usage,
-      added: count('subject', 'added'),
-      updated: count('subject', 'updated'),
-      unchanged: counts.unchanged,
-      dropped: counts.dropped + count('subject', 'skipped'),
-      summarized: count('episode', 'added') > 0,
+  try {
+    await service.writeExtraction(writes, { source: 'extraction' }, (tx, outcomes) => {
+      const count = (layer: ExtractedWrite['layer'], outcome: string) =>
+        outcomes.filter((o, i) => writes[i]!.layer === layer && o === outcome).length
+      return close(tx, {
+        ...usage,
+        added: count('subject', 'added'),
+        updated: count('subject', 'updated'),
+        unchanged: counts.unchanged,
+        dropped: counts.dropped + count('subject', 'skipped'),
+        summarized: count('episode', 'added') > 0,
+      })
     })
-  })
+  } catch (err) {
+    // 整批已经回滚：单独记下原因再抛出，交给后台任务重试，缓冲留着
+    await withSpace(db, target.spaceId, (tx) =>
+      tx
+        .insert(extractionRuns)
+        .values(runOf({ ...usage, error: `写入失败：${(err as Error).message}` })),
+    )
+    throw err
+  }
 }
 
-function normalized(text: string): string {
-  return inlineText(text).toLowerCase()
+// 候选里哪些和对象已有的有效事实一字不差（不计大小写；正文写入时已经压过空白），返回「对象|小写正文」
+async function knownFacts(
+  tx: Tx,
+  access: Access,
+  facts: readonly { subjectId: string; content: string }[],
+): Promise<Set<string>> {
+  if (!facts.length) return new Set()
+  const rows = await tx
+    .select({ subjectId: memories.subjectId, content: sql<string>`lower(${memories.content})` })
+    .from(memories)
+    .where(
+      and(
+        readableConditions(access, { personaIds: [] }),
+        eq(memories.layer, 'subject'),
+        eq(memories.form, 'extracted'),
+        inArray(memories.subjectId, [...new Set(facts.map((f) => f.subjectId))]),
+        inArray(sql`lower(${memories.content})`, [
+          ...new Set(facts.map((f) => f.content.toLowerCase())),
+        ]),
+      ),
+    )
+  return new Set(rows.map((r) => `${r.subjectId}|${r.content}`))
 }

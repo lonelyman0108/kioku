@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { clipChars, inlineText } from '../recall/recall'
+import { clipChars, oneLine } from '../recall/recall'
 import type { ChatMessage } from './provider'
 
 // 给模型看的内容各留多少字：太长的输入又慢又贵，模型也容易漏看。聊天记录从最近的往前取，放不下的更早几轮不给
@@ -44,7 +44,7 @@ export function extractionMessages(
   turns: readonly PromptTurn[],
 ): ChatMessage[] {
   const subjectLines = subjects.flatMap((s) => [
-    `${s.handle}：${s.name ? inlineText(s.name) : '（不知道名字）'}（${s.role === 'sender' ? '发言人' : '本群'}）`,
+    `${s.handle}：${s.name ? oneLine(s.name) : '（不知道名字）'}（${s.role === 'sender' ? '发言人' : '本群'}）`,
     ...(s.facts.length
       ? s.facts.map((f) => `  ${f.handle}：${clip(f.content, FACT_CHARS)}`)
       : ['  （还没有记下的事实）']),
@@ -52,9 +52,7 @@ export function extractionMessages(
   const blocks: string[] = []
   let used = 0
   for (const turn of [...turns].reverse()) {
-    const speaker = turn.speakerName
-      ? `${turn.speaker} ${inlineText(turn.speakerName)}`
-      : turn.speaker
+    const speaker = turn.speakerName ? `${turn.speaker} ${oneLine(turn.speakerName)}` : turn.speaker
     const lines = [`${speaker}：${clip(turn.user, USER_TEXT_CHARS)}`]
     if (turn.reply.trim()) lines.push(`机器人：${clip(turn.reply, REPLY_TEXT_CHARS)}`)
     const block = lines.join('\n')
@@ -91,42 +89,40 @@ export interface ParsedExtraction {
   summary: string
 }
 
-// 宽松地取出 JSON：有的模型把思考过程写在 <think> 里，给 JSON 套上代码块，或者在前后加几句说明。
-// 先看代码块里的，再从头找第一个能解析的完整对象（说明文字里的花括号不算数）
+// 宽松地取出 JSON：有的模型把思考过程写在 <think> 里，给 JSON 套上代码块，或者在前后加几句说明、举个格式示例。
+// 在整段文字里找花括号配平的顶层对象，只认带 facts 或 summary 的，有几个时取最后一个（示例多在前、答案在后）。
+// 外层对象坏了（多了逗号、被截断）时不退到里面的某一条事实上：那样会把解析失败当成「什么都没抽到」
 export function parseExtraction(text: string): ParsedExtraction {
   const body = text.replace(/<think>[\s\S]*?<\/think>/g, '')
-  const fenced = [...body.matchAll(/```(?:json)?\s*([\s\S]*?)```/gi)].map((m) => m[1]!)
-  let raw: unknown
-  let found = false
-  for (const source of [...fenced, body]) {
-    for (const candidate of jsonObjects(source)) {
-      try {
-        raw = JSON.parse(candidate)
-        found = true
-        break
-      } catch {
-        // 不是合法的 JSON，接着找下一个
-      }
+  let found: z.infer<typeof Output> | undefined
+  for (const source of topLevelObjects(body)) {
+    let raw: unknown
+    try {
+      raw = JSON.parse(source)
+    } catch {
+      continue
     }
-    if (found) break
+    if (typeof raw !== 'object' || raw === null || !('facts' in raw || 'summary' in raw)) continue
+    const parsed = Output.safeParse(raw)
+    if (parsed.success) found = parsed.data
   }
-  if (!found) throw new Error('抽取模型的输出里没有合法的 JSON 对象')
-  const parsed = Output.safeParse(raw)
-  if (!parsed.success) throw new Error('抽取模型的输出不是约定的格式')
+  if (!found) throw new Error('抽取模型的输出里没有约定格式的 JSON 对象')
   return {
-    candidates: (parsed.data.facts ?? []).map((f) => {
+    candidates: (found.facts ?? []).map((f) => {
       const candidate = Candidate.safeParse(f)
       return candidate.success ? candidate.data : null
     }),
-    summary: parsed.data.summary?.trim() ?? '',
+    summary: found.summary?.trim() ?? '',
   }
 }
 
-// 文字里一段段花括号配平的对象，按出现的先后。字符串里的花括号不算
-function* jsonObjects(text: string): Generator<string> {
-  for (let start = text.indexOf('{'); start >= 0; start = text.indexOf('{', start + 1)) {
+// 文字里一段段花括号配平的对象，按出现的先后；配平了的对象里面嵌套的不再单独给出。字符串里的花括号不算
+function* topLevelObjects(text: string): Generator<string> {
+  let start = text.indexOf('{')
+  while (start >= 0) {
     let depth = 0
     let inString = false
+    let end = -1
     for (let i = start; i < text.length; i++) {
       const ch = text[i]
       if (inString) {
@@ -135,14 +131,21 @@ function* jsonObjects(text: string): Generator<string> {
       } else if (ch === '"') inString = true
       else if (ch === '{') depth++
       else if (ch === '}' && --depth === 0) {
-        yield text.slice(start, i + 1)
+        end = i
         break
       }
     }
+    if (end < 0) {
+      // 没配平（例如输出被截断）：从下一个花括号接着找
+      start = text.indexOf('{', start + 1)
+      continue
+    }
+    yield text.slice(start, end + 1)
+    start = text.indexOf('{', end + 1)
   }
 }
 
 // 压成一行（换行会让一句话冒充聊天记录里的另一个发言人）再按字符截断
 function clip(text: string, max: number): string {
-  return clipChars(inlineText(text), max, '…')
+  return clipChars(oneLine(text), max, '…')
 }

@@ -375,8 +375,38 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     expect(await turns()).toEqual([])
     expect(await extracted()).toEqual([])
     expect(await runs()).toMatchObject([
-      { error: '抽取模型的输出里没有合法的 JSON 对象', promptTokens: 120, completionTokens: 30 },
+      {
+        error: '抽取模型的输出里没有约定格式的 JSON 对象',
+        promptTokens: 120,
+        completionTokens: 30,
+      },
     ])
+  })
+
+  it('外层的 JSON 坏了（多了逗号、被截断）时记成解析失败，不退到里面的某一条事实上当作没抽到', async () => {
+    for (const broken of [
+      '{"facts":[{"subject":"M1","op":"add","content":"在学日语"},],"summary":"聊了学日语"}',
+      '{"facts":[{"subject":"M1","op":"add","content":"在学日语"}],"summary":"聊了学',
+    ]) {
+      await say(inGroup(), '我在学日语')
+      await extract(fakeModel(broken).model)
+    }
+    expect(await extracted()).toEqual([])
+    expect((await runs()).map((r) => r.error)).toEqual([
+      '抽取模型的输出里没有约定格式的 JSON 对象',
+      '抽取模型的输出里没有约定格式的 JSON 对象',
+    ])
+  })
+
+  it('前面举了格式示例、后面才是答案时取后面的', async () => {
+    await say(inGroup(), '我在学日语')
+    await extract(
+      fakeModel(
+        '格式示例：```json\n{"facts":[],"summary":""}\n```\n答案：' +
+          JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }),
+      ).model,
+    )
+    expect((await extracted()).map((r) => r.content)).toEqual(['在学日语'])
   })
 
   it('输出宽松地解析：字段为 null 当作没写，JSON 前后的说明文字里有花括号也不影响', async () => {
@@ -456,12 +486,74 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     expect(prompt).not.toContain('用旧 Key 说的话')
     expect(prompt).not.toContain('小刚')
     expect(await turns()).toEqual([])
-    expect((await runs())[0]).toMatchObject({ turns: 1, added: 1 })
+    expect((await runs())[0]).toMatchObject({ turns: 1, skippedTurns: 1, added: 1 })
     const [fact] = await extracted()
     const [event] = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select().from(memoryEvents).where(eq(memoryEvents.memoryId, fact!.id)),
     )
     expect(event!.actorKeyId).not.toBe(revoked[0]!.id)
+  })
+
+  it('只能写情节层的 Key 也说了话的一批，事实一条都不写，只写摘要', async () => {
+    const episodeOnly = await ws.issueKey(appId, {
+      readLayers: ['base', 'subject', 'episode'],
+      writeLayers: ['episode'],
+      maxSensitivity: 'public',
+      admin: false,
+    })
+    await say(inGroup('1003', '小刚'), '我在学法语', '嗯', episodeOnly)
+    await say(inGroup(), '我在学日语')
+    await extract(
+      fakeModel(
+        JSON.stringify({
+          facts: [
+            { subject: 'M1', op: 'add', content: '在学法语' },
+            { subject: 'M2', op: 'add', content: '在学日语' },
+          ],
+          summary: '大家聊了学外语',
+        }),
+      ).model,
+    )
+    expect((await extracted()).map((r) => r.layer)).toEqual(['episode'])
+    expect((await runs())[0]).toMatchObject({ added: 0, dropped: 2, summarized: true })
+  })
+
+  it('写入出错时整批回滚，单独记下原因再抛出，缓冲留着等重试', async () => {
+    await say(inGroup(), '我在学日语')
+    await database.db.execute(sql`
+      create or replace function kioku_test_fail() returns trigger language plpgsql
+      as $$ begin raise exception '写不进去'; end $$`)
+    await database.db.execute(sql`
+      create trigger kioku_test_fail before insert on memories
+      for each row execute function kioku_test_fail()`)
+    try {
+      await expect(
+        extract(
+          fakeModel(JSON.stringify({ facts: [{ subject: 'M1', op: 'add', content: '在学日语' }] }))
+            .model,
+        ),
+      ).rejects.toThrow()
+    } finally {
+      await database.db.execute(sql`drop trigger kioku_test_fail on memories`)
+      await database.db.execute(sql`drop function kioku_test_fail()`)
+    }
+    expect(await extracted()).toEqual([])
+    expect(await turns()).toHaveLength(1)
+    const [run] = await runs()
+    expect(run!.error).toMatch(/^写入失败：/)
+    expect(run).toMatchObject({ promptTokens: 120, added: 0 })
+  })
+
+  it('事实只压空白、去掉控制字符，尖括号这类正文照样留着', async () => {
+    await say(inGroup(), '我觉得 C++ 比 <Rust> 好')
+    await extract(
+      fakeModel(
+        JSON.stringify({
+          facts: [{ subject: 'M1', op: 'add', content: '觉得  C++ 比 <Rust>\u0000 好' }],
+        }),
+      ).model,
+    )
+    expect((await extracted()).map((r) => r.content)).toEqual(['觉得 C++ 比 <Rust> 好'])
   })
 
   it('写入、抽取记录与删缓冲在同一个事务里：中途失败整批回滚，缓冲留着等重试', async () => {
