@@ -30,6 +30,17 @@ export const EmbeddingTestResult = z.object({
 })
 export type EmbeddingTestResult = z.infer<typeof EmbeddingTestResult>
 
+// 抽取模型：OpenAI 兼容的 chat completions 接口（例如 new-api），和嵌入接口一样在实例设置里配。
+// 没配时不从对话里抽取事实，对话缓冲到期后直接丢弃
+export const ExtractionSettingsView = EmbeddingSettingsView.omit({ dimensions: true })
+export type ExtractionSettingsView = z.infer<typeof ExtractionSettingsView>
+
+export const UpdateExtractionSettings = UpdateEmbeddingSettings
+export type UpdateExtractionSettings = z.infer<typeof UpdateExtractionSettings>
+
+export const ExtractionTestResult = EmbeddingTestResult
+export type ExtractionTestResult = z.infer<typeof ExtractionTestResult>
+
 // 召回事件明细保留多少天：清理任务删掉更早的明细，删之前把次数并入每条记忆的累计统计
 export const DEFAULT_RECALL_RETENTION_DAYS = 30
 export const RecallSettings = z.object({

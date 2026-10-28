@@ -6,6 +6,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import ExtractionSettings from '../components/ExtractionSettings.vue'
 import { icons } from '../icons'
 
 const toast = useToast()
@@ -257,6 +258,8 @@ async function test() {
             </div>
           </div>
         </UCard>
+
+        <ExtractionSettings />
 
         <UCard>
           <template #header>
