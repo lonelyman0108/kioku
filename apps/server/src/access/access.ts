@@ -8,6 +8,7 @@ import {
   type Layer,
   type MemberRole,
   type Provenance,
+  type ReadDenial,
   type Sensitivity,
 } from '@kioku/contracts'
 
@@ -256,35 +257,44 @@ export interface ReadOptions {
 }
 
 export function canRead(access: Access, memory: MemoryFacts, options: ReadOptions): boolean {
+  return readDenial(access, memory, options) === null
+}
+
+// 读不到的第一个原因，读得到时为 null。canRead 就是它，召回调试台用它说明一条记忆为什么被过滤掉
+export function readDenial(
+  access: Access,
+  memory: MemoryFacts,
+  options: ReadOptions,
+): Exclude<ReadDenial, 'override'> | null {
   const now = options.now ?? new Date()
   if (!options.management) {
-    if (memory.deletedAt) return false
-    if (memory.validTo && memory.validTo <= now) return false
-    if (memory.expiresAt && memory.expiresAt <= now) return false
+    if (memory.deletedAt) return 'deleted'
+    if (memory.validTo && memory.validTo <= now) return 'expired'
+    if (memory.expiresAt && memory.expiresAt <= now) return 'expired'
   }
-  if (!access.readLayers.has(memory.layer)) return false
+  if (!access.readLayers.has(memory.layer)) return 'layer'
 
   if (memory.sensitivity === 'secret') {
-    if (!(options.explicit || options.management) || !access.canReadSecret) return false
+    if (!(options.explicit || options.management) || !access.canReadSecret) return 'secret'
   } else if (sensitivityRank(memory.sensitivity) > sensitivityRank(access.maxSensitivity)) {
-    return false
+    return 'sensitivity'
   }
 
-  if (access.originScopes && !access.originScopes.has(memory.originScope)) return false
+  if (access.originScopes && !access.originScopes.has(memory.originScope)) return 'origin'
   if (PRIVATE_LAYERS.includes(memory.layer) && memory.ownerAccountId !== access.ownerAccountId) {
-    return false
+    return 'owner'
   }
   if (
     memory.layer === 'persona' &&
     !options.management &&
     !options.personaIds.includes(memory.personaId ?? '')
   ) {
-    return false
+    return 'persona'
   }
   if (memory.layer === 'app' && access.appId !== null && memory.appId !== access.appId) {
-    return false
+    return 'app'
   }
-  return true
+  return null
 }
 
 export interface WriteIntent {

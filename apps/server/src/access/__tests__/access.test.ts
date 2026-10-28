@@ -8,6 +8,7 @@ import {
   canRevealCredential,
   canWrite,
   consoleAccess,
+  readDenial,
   resolveAccess,
   type MemoryFacts,
 } from '../access'
@@ -326,5 +327,35 @@ describe('凭据', () => {
     const owner = consoleAccess('owner', OWNER)
     expect(canRevealCredential(owner, own)).toBe(true)
     expect(canManageCredentials(owner)).toBe(true)
+  })
+})
+
+describe('读不到的原因', () => {
+  const access = resolveAccess(fullKey, app)
+
+  it('按 canRead 的顺序给出第一个原因，读得到时为 null', () => {
+    expect(readDenial(access, privateFact, opts)).toBeNull()
+    expect(readDenial(access, memory({ deletedAt: new Date() }), opts)).toBe('deleted')
+    expect(readDenial(access, memory({ validTo: new Date(0) }), opts)).toBe('expired')
+    expect(readDenial(resolveAccess({ ...fullKey, readLayers: [] }, app), memory(), opts)).toBe(
+      'layer',
+    )
+    expect(readDenial(access, memory({ sensitivity: 'secret' }), opts)).toBe('secret')
+    expect(
+      readDenial(
+        access,
+        memory({ layer: 'private', sensitivity: 'private', ownerAccountId: 'x' }),
+        opts,
+      ),
+    ).toBe('owner')
+    expect(readDenial(access, memory({ layer: 'persona', personaId: 'other' }), opts)).toBe(
+      'persona',
+    )
+    expect(
+      readDenial(access, memory({ layer: 'app', sensitivity: 'internal', appId: 'app-2' }), opts),
+    ).toBe('app')
+    const group = resolveAccess(fullKey, app, { chatType: 'group', groupSubjectId: 'g1' })
+    expect(readDenial(group, memory({ sensitivity: 'internal' }), opts)).toBe('sensitivity')
+    expect(readDenial(group, memory({ originScope: 'group:g2' }), opts)).toBe('origin')
   })
 })

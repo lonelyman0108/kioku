@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { Layer } from './memory'
+import { Layer, Sensitivity } from './memory'
 
 export const RECALL_VIAS = ['semantic', 'fulltext', 'glossary'] as const
 export const RecallVia = z.enum(RECALL_VIAS)
@@ -17,6 +17,18 @@ export const RecallCandidate = z.object({
   cues: z.array(z.string()),
 })
 export type RecallCandidate = z.infer<typeof RecallCandidate>
+
+// 各路的得分，调试台用：相似度与全文都已压到 0–1，关键词与 priority 是加上去的分
+export const RecallBreakdown = z.object({
+  semantic: z.number(),
+  fulltext: z.number(),
+  glossary: z.number(),
+  priority: z.number(),
+})
+export type RecallBreakdown = z.infer<typeof RecallBreakdown>
+
+export const DebugCandidate = RecallCandidate.extend({ breakdown: RecallBreakdown })
+export type DebugCandidate = z.infer<typeof DebugCandidate>
 
 export const RecallRequest = z.object({
   query: z.string().min(1).max(4000),
@@ -81,3 +93,63 @@ export const LifecycleResponse = z.object({
   nodeUris: z.array(z.string()),
 })
 export type LifecycleResponse = z.infer<typeof LifecycleResponse>
+
+// 一条记忆这次读不到的原因：deleted、expired 已删除或失效；layer 层不在可读范围；sensitivity 超出最高敏感级；
+// secret 只能按 URI 显式读取；origin 来源作用域不在范围；owner 别的成员的画像或私人层；persona 不在人格继承链上；
+// app 别的应用的应用层；override 被继承链上更近的人格同一相对路径的节点覆盖
+export const READ_DENIALS = [
+  'deleted',
+  'expired',
+  'layer',
+  'sensitivity',
+  'secret',
+  'origin',
+  'owner',
+  'persona',
+  'app',
+  'override',
+] as const
+export const ReadDenial = z.enum(READ_DENIALS)
+export type ReadDenial = z.infer<typeof ReadDenial>
+
+export const RecallDebugRequest = z.object({ query: z.string().trim().min(1).max(4000) })
+export type RecallDebugRequest = z.infer<typeof RecallDebugRequest>
+
+// 召回调试台：按一把 Key 模拟每轮输入时的召回
+export const RecallDebug = z.object({
+  // 会注入的：和每轮输入时一样，过了阈值的前几条
+  injected: z.array(DebugCandidate),
+  // 没注入的：没过阈值或排在后面的
+  others: z.array(DebugCandidate),
+  minScore: z.number(),
+  // 注入的 <recall> 块，原样就是宿主收到的文字
+  block: z.string(),
+  // 这次有没有走向量这一路（嵌入接口没配、出错或超时时没有）
+  semantic: z.boolean(),
+  // 管理界面里搜得到、这把 Key 却读不到的记忆，以及原因
+  filtered: z.array(
+    z.object({ uri: z.string(), layer: Layer, sensitivity: Sensitivity, reason: ReadDenial }),
+  ),
+})
+export type RecallDebug = z.infer<typeof RecallDebug>
+
+export const BootPreviewRequest = z.object({ project: LifecycleProject.optional() })
+export type BootPreviewRequest = z.infer<typeof BootPreviewRequest>
+
+// 启动预览：按一把 Key 模拟会话开始时注入的内容
+export const BootPreview = z.object({
+  runtimeFamily: z.string(),
+  // 宿主能完整接收的字数；没有限制的宿主为 null
+  limit: z.number().int().nullable(),
+  // 原样就是宿主收到的文字
+  context: z.string(),
+  // 展开的启动节点与各自占的字数（含标题）
+  entries: z.array(z.object({ uri: z.string(), layer: Layer, chars: z.number().int() })),
+  // 超出预算、只列出 URI 的启动节点
+  omitted: z.array(z.string()),
+  recent: z.array(RecentMemory),
+  related: z.array(RecallCandidate),
+  // 放不下、没有附上的附加块
+  dropped: z.array(z.enum(['recent', 'related'])),
+})
+export type BootPreview = z.infer<typeof BootPreview>
