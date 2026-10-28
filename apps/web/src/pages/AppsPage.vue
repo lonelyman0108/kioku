@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
+import { refreshAppCaches } from '../appQueries'
 import { icons } from '../icons'
 
 const route = useRoute()
@@ -62,7 +63,7 @@ async function create() {
     await api.createApp(spaceId.value, { ...form })
     open.value = false
     Object.assign(form, { slug: '', name: '', runtimeFamily: 'claudecode', defaultPersonaId: null })
-    await queryClient.invalidateQueries({ queryKey: ['apps', spaceId.value] })
+    await refreshAppCaches(queryClient, spaceId.value)
     toast.add({ title: '已创建应用', color: 'success' })
   } catch (err) {
     failed(err, '创建失败')

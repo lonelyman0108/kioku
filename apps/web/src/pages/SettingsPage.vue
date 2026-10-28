@@ -87,6 +87,30 @@ async function rebuild() {
   }
 }
 
+// 召回事件明细的保留天数：更早的明细在下一次清理时并入每条记忆的累计次数后删除
+const recallSettings = useQuery({ queryKey: ['settings', 'recall'], queryFn: api.recallSettings })
+const retentionDays = ref<number | undefined>()
+watch(
+  () => recallSettings.data.value?.retentionDays,
+  (days) => (retentionDays.value = days),
+  { immediate: true },
+)
+const savingRetention = ref(false)
+async function saveRetention() {
+  const days = retentionDays.value
+  if (savingRetention.value || !days) return
+  savingRetention.value = true
+  try {
+    await api.saveRecallSettings({ retentionDays: days })
+    await queryClient.invalidateQueries({ queryKey: ['settings', 'recall'] })
+    toast.add({ title: '已保存', color: 'success' })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
+  } finally {
+    savingRetention.value = false
+  }
+}
+
 const testing = ref(false)
 const result = ref<EmbeddingTestResult | null>(null)
 async function test() {
@@ -227,6 +251,28 @@ async function test() {
               <span v-if="polling" class="text-sm text-muted">正在跟进进度……</span>
             </div>
           </div>
+        </UCard>
+
+        <UCard>
+          <template #header>
+            <h2 class="font-medium">召回事件</h2>
+            <p class="mt-1 text-sm text-muted">
+              每次召回的明细（命中的记忆、分数、打过码的提示语）保留这么多天，更早的只留下每条记忆被召回的累计次数。
+            </p>
+          </template>
+          <form class="flex flex-wrap items-end gap-2" @submit.prevent="saveRetention">
+            <UFormField label="明细保留天数" help="1 到 365 天">
+              <UInputNumber v-model="retentionDays" :min="1" :max="365" class="w-32" />
+            </UFormField>
+            <UButton
+              type="submit"
+              :loading="savingRetention"
+              :disabled="
+                !retentionDays || retentionDays === recallSettings.data.value?.retentionDays
+              "
+              >保存</UButton
+            >
+          </form>
         </UCard>
       </div>
     </template>

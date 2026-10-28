@@ -8,6 +8,7 @@ import type {
   Layer,
   Provenance,
   ReadDenial,
+  RecallSource,
   Sensitivity,
 } from '@kioku/contracts'
 
@@ -60,6 +61,14 @@ export const originScopeLabels: Record<KeyAccessMatrix['contexts'][number]['orig
     group: '只含全局、本应用与本群里写下的',
     direct: '只含全局、本应用与和此人的对话里写下的',
   }
+
+// 召回事件的来路
+export const recallSourceLabels: Record<RecallSource, string> = {
+  'session.start': '会话开始的项目召回',
+  'prompt.submit': '每轮输入',
+  'mcp.search': 'MCP 搜索',
+  'rest.recall': 'REST 召回',
+}
 
 // 召回调试台里一条记忆被这把 Key 过滤掉的原因
 export const readDenialLabels: Record<ReadDenial, string> = {

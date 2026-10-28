@@ -113,6 +113,13 @@ const changedElsewhere = computed(() => {
 })
 
 const permissions = useMemoryPermissions(computed(() => props.spaceId))
+
+// 被召回的次数：保留期内的明细加上清理时并入的累计；secret 不进召回，不用查
+const recallStat = useQuery({
+  queryKey: computed(() => ['memory-recall', props.spaceId, base.value?.id]),
+  queryFn: () => api.memoryRecallStat(props.spaceId, base.value!.id),
+  enabled: computed(() => !!base.value && base.value.sensitivity !== 'secret'),
+})
 const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.value) : null))
 
 // 默认是阅读状态，点「编辑」才改原文
@@ -511,6 +518,20 @@ async function remove() {
           {{ formatRelative(base.updatedAt) }}
         </time>
         <template v-if="base.validTo"> · 有效到 {{ formatTime(base.validTo) }}</template>
+        <template v-if="recallStat.data.value">
+          ·
+          <template v-if="recallStat.data.value.total">
+            被召回 {{ recallStat.data.value.total }} 次（保留期内
+            {{ recallStat.data.value.recent }} 次），最后一次
+            <time
+              v-if="recallStat.data.value.lastRecalledAt"
+              :datetime="recallStat.data.value.lastRecalledAt"
+              :title="formatTime(recallStat.data.value.lastRecalledAt)"
+              >{{ formatRelative(recallStat.data.value.lastRecalledAt) }}</time
+            >
+          </template>
+          <template v-else>还没被召回过</template>
+        </template>
       </p>
     </template>
 
