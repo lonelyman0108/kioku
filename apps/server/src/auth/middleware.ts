@@ -3,7 +3,7 @@ import { and, eq, isNull } from 'drizzle-orm'
 import { getCookie } from 'hono/cookie'
 import { createMiddleware } from 'hono/factory'
 
-import { clampScopesToRole } from '../access/access'
+import { keyEffectiveScopes } from '../access/access'
 import { withSpace } from '../db/client'
 import { apiKeys, apps, spaceMembers } from '../db/schema'
 import type { AppEnv, Deps } from '../http/env'
@@ -53,11 +53,16 @@ export function requireKey(deps: Deps) {
         .where(eq(apps.id, key.appId))
         .limit(1),
     )
-    // Key 的权限按应用主人计算：主人已经不在空间里，Key 作废；主人被降级，Key 的上限随之收紧
-    if (!found?.ownerRole) return c.json(unauthorized, 401)
-    // 主人离开空间后又被重新加入：离开之前签发的 Key 不随之恢复
-    if (found.memberSince && key.createdAt < found.memberSince) return c.json(unauthorized, 401)
-    const { app, ownerRole } = found
+    // Key 的权限按应用主人计算：主人已经不在空间里（或离开后又被重新加入、Key 签发在那之前），Key 作废；
+    // 主人被降级，Key 的上限随之收紧
+    const scopes = found
+      ? keyEffectiveScopes(
+          { ...key, scopes: KeyScopes.parse(key.scopes) },
+          { role: found.ownerRole, memberSince: found.memberSince },
+        )
+      : null
+    if (!found || !scopes) return c.json(unauthorized, 401)
+    const { app } = found
 
     // 最后使用时间只用于界面展示，失败不影响本次请求
     deps.db
@@ -70,7 +75,7 @@ export function requireKey(deps: Deps) {
       kind: 'key',
       keyId: key.id,
       spaceId: key.spaceId,
-      scopes: clampScopesToRole(KeyScopes.parse(key.scopes), ownerRole),
+      scopes,
       app: {
         id: app.id,
         slug: app.slug,

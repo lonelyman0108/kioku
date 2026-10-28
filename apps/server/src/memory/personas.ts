@@ -6,13 +6,14 @@ import { withSpace, type Db, type Tx } from '../db/client'
 import { memories, personas } from '../db/schema'
 import { readableConditions } from './filter'
 
-const MAX_DEPTH = 8
+// 继承链（含自己）最多这么多层：新建与修改继承时检查，读的时候超出的部分不再往上找
+export const MAX_PERSONA_DEPTH = 8
 
 // 人格及其继承链，从自己到最远的祖先；遇到环或超过深度就停
 export async function personaChain(tx: Tx, personaId: string | null): Promise<string[]> {
   const chain: string[] = []
   let current = personaId
-  while (current && chain.length < MAX_DEPTH && !chain.includes(current)) {
+  while (current && chain.length < MAX_PERSONA_DEPTH && !chain.includes(current)) {
     chain.push(current)
     const [row] = await tx
       .select({ extendsId: personas.extendsId })
@@ -68,20 +69,35 @@ export interface PersonaSelection {
 export function personaOverride(access: Access, selection: PersonaSelection): SQL | undefined {
   const chain = selection.personaIds
   if (!selection.inheritance || chain.length < 2) return undefined
-  const ids = sql`array[${sql.join(
-    chain.map((id) => sql`${id}::uuid`),
-    sql`, `,
-  )}]`
+  return or(
+    ne(memories.layer, 'persona'),
+    // 别名表在 sql 模板里只渲染出别名本身，FROM 要自己写全
+    sql`not exists (select 1 from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain)})`,
+  )
+}
+
+// 覆盖这一行的节点的 URI（继承链上最近的人格的那条），没被覆盖时为 null。人格详情用，规则与 personaOverride 相同
+export function overriddenBy(access: Access, chain: readonly string[]): SQL<string | null> {
+  return sql<string | null>`(select ${nearer.domain} || '://' || ${nearer.path}
+    from ${memories} as ${sql.identifier(NEARER)} where ${overrides(access, chain)}
+    order by array_position(${chainArray(chain)}, ${nearer.personaId}) limit 1)`
+}
+
+// nearer 覆盖 memories 的这一行：同一相对路径、继承链上更近的人格、这次请求读得到
+function overrides(access: Access, chain: readonly string[]): SQL {
+  const ids = chainArray(chain)
   const relative = (path: SQLWrapper) => sql`regexp_replace(${path}, '^[^/]+', '')`
-  const overriding = and(
+  return and(
     eq(nearer.layer, 'persona'),
     readableConditions(access, { personaIds: chain }, nearer),
     sql`array_position(${ids}, ${nearer.personaId}) < array_position(${ids}, ${memories.personaId})`,
     sql`${relative(nearer.path)} = ${relative(memories.path)}`,
-  )
-  return or(
-    ne(memories.layer, 'persona'),
-    // 别名表在 sql 模板里只渲染出别名本身，FROM 要自己写全
-    sql`not exists (select 1 from ${memories} as ${sql.identifier(NEARER)} where ${overriding})`,
-  )
+  )!
+}
+
+function chainArray(chain: readonly string[]): SQL {
+  return sql`array[${sql.join(
+    chain.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  )}]`
 }

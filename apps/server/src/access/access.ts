@@ -1,6 +1,9 @@
 import {
+  ACCESS_CONTEXTS,
   LAYERS,
   SENSITIVITIES,
+  type AccessContext,
+  type KeyAccessMatrix,
   type KeyScopes,
   type Layer,
   type MemberRole,
@@ -156,6 +159,75 @@ export function clampScopesToRole(scopes: KeyScopes, role: MemberRole): KeyScope
     writeLayers: role === 'viewer' ? [] : scopes.writeLayers,
     maxSensitivity: minSensitivity(scopes.maxSensitivity, 'private'),
     admin: false,
+  }
+}
+
+// Key 现在的有效上限：签发上限按应用主人当前的角色收紧。Key 已吊销、主人已经不在空间里，
+// 或主人离开后又被重新加入、而 Key 签发在重新加入之前，Key 都作废，返回 null。鉴权与 Key 列表都按这里算
+export function keyEffectiveScopes(
+  key: { scopes: KeyScopes; createdAt: Date; revokedAt: Date | null },
+  owner: { role: MemberRole | null; memberSince: Date | null } | undefined,
+): KeyScopes | null {
+  if (key.revokedAt || !owner?.role) return null
+  if (owner.memberSince && key.createdAt < owner.memberSince) return null
+  return clampScopesToRole(key.scopes, owner.role)
+}
+
+// 权限矩阵用的会话上下文：对象只是占位，矩阵只看层与敏感级，来源作用域另外说明
+const MATRIX_CONTEXTS: Record<AccessContext, SessionContext> = {
+  none: {},
+  direct: { chatType: 'direct', senderSubjectId: 'sender' },
+  owner_direct: { chatType: 'direct', senderSubjectId: 'owner', senderIsOwner: true },
+  group: { chatType: 'group', groupSubjectId: 'group' },
+  cron: { chatType: 'cron' },
+}
+
+// 一把 Key 在各种会话上下文下实际能读写哪些层、哪些敏感级：每一格按 canRead 与 canWrite 判断一条
+// 属于这个应用、应用主人与当前人格的记忆，不另写一份规则
+export function accessMatrix(scopes: KeyScopes, app: AppAccessConfig): KeyAccessMatrix {
+  const personaId = app.personaId ?? null
+  const personaIds = personaId ? [personaId] : []
+  return {
+    contexts: ACCESS_CONTEXTS.map((context) => {
+      const access = resolveAccess(scopes, app, MATRIX_CONTEXTS[context])
+      const origins = access.originScopes ? [...access.originScopes] : null
+      return {
+        context,
+        originScope: !origins
+          ? 'any'
+          : origins.some((o) => o.startsWith('group:'))
+            ? 'group'
+            : origins.some((o) => o.startsWith('direct:'))
+              ? 'direct'
+              : 'app',
+        rows: LAYERS.map((layer) => ({
+          layer,
+          cells: SENSITIVITIES.map((sensitivity) => {
+            const facts: MemoryFacts = {
+              layer,
+              sensitivity,
+              originScope: 'global',
+              ownerAccountId: app.ownerAccountId,
+              personaId,
+              appId: app.appId,
+              validTo: null,
+              expiresAt: null,
+              deletedAt: null,
+            }
+            const read = !canRead(access, facts, { personaIds, explicit: true })
+              ? 'none'
+              : canRead(access, facts, { personaIds })
+                ? 'recall'
+                : 'explicit'
+            return {
+              sensitivity,
+              read,
+              write: canWrite(access, { layer, sensitivity, appId: app.appId, personaId }),
+            } as const
+          }),
+        })),
+      }
+    }),
   }
 }
 
