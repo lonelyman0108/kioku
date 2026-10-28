@@ -7,7 +7,7 @@ import {
   ReviewRequest,
   ReviewResult,
 } from '@kioku/contracts'
-import { and, count, desc, eq, inArray, sql } from 'drizzle-orm'
+import { and, count, desc, eq, sql } from 'drizzle-orm'
 
 import { withSpace } from '../db/client'
 import {
@@ -22,7 +22,7 @@ import { memories, subjects } from '../db/schema'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
-import { readableConditions } from '../memory/filter'
+import { pendingReview } from '../memory/filter'
 import { scopeNames } from '../memory/scopes'
 import { formatUri } from '../memory/uri'
 
@@ -65,9 +65,8 @@ export function reviewRoutes(deps: Deps) {
       if (after === 'invalid') return c.json({ error: INVALID_CURSOR }, 400)
       // 对象层与情节层不分人格，读权限里的人格限制用不上
       const pending = and(
-        eq(memories.provenance, 'untrusted'),
-        query.layer ? eq(memories.layer, query.layer) : inArray(memories.layer, REVIEW_LAYERS),
-        readableConditions(service.access, { personaIds: [] }),
+        pendingReview(service.access, []),
+        query.layer ? eq(memories.layer, query.layer) : undefined,
       )
       const page = await withSpace(deps.db, spaceId, async (tx) => {
         const rows = await tx
@@ -89,12 +88,13 @@ export function reviewRoutes(deps: Deps) {
           )
           .orderBy(desc(memories.createdAt), desc(memories.id))
           .limit(PAGE_SIZE + 1)
-        const [total] = await tx.select({ n: count() }).from(memories).where(pending)
+        // 总数只在第一页算：翻页时界面用的还是第一页的
+        const [total] = after ? [] : await tx.select({ n: count() }).from(memories).where(pending)
         const named = await scopeNames(
           tx,
           rows.map((r) => r.row.originScope),
         )
-        return { rows, total: total?.n ?? 0, named }
+        return { rows, total: after ? null : (total?.n ?? 0), named }
       })
       const items = page.rows.slice(0, PAGE_SIZE)
       const last = items.at(-1)
@@ -110,6 +110,7 @@ export function reviewRoutes(deps: Deps) {
                 ? { id: row.subjectId, kind: subjectKind, displayName: subjectName }
                 : null,
             scope: page.named(row.originScope),
+            version: row.version,
             createdAt: row.createdAt.toISOString(),
           })),
           total: page.total,

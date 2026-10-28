@@ -57,27 +57,49 @@ function toggleAll(on: boolean) {
 
 const busy = ref(false)
 const deleting = ref<string[] | null>(null)
+// 一次最多提交这么多条（接口的上限），选得多就分几批
+const BATCH = 100
+
+// 处理选中的条目：带上列表里看到的版本，看过之后被改过的服务端会跳过
 async function act(action: 'confirm' | 'delete', ids: string[]) {
   const sid = spaceId.value
+  const versions = new Map(items.value.map((i) => [i.id, i.version]))
+  const chosen = ids.flatMap((id) => {
+    const version = versions.get(id)
+    return version === undefined ? [] : [{ id, version }]
+  })
   busy.value = true
+  let done = 0
+  let skipped = 0
   try {
-    const result = await api.review(sid, { action, ids })
-    selected.value = new Set([...selected.value].filter((id) => !ids.includes(id)))
-    await Promise.all([
-      queryClient.invalidateQueries({ queryKey: ['review', sid] }),
-      queryClient.invalidateQueries({ queryKey: ['subjects', sid] }),
-      queryClient.invalidateQueries({ queryKey: ['subject', sid] }),
-    ])
+    for (let i = 0; i < chosen.length; i += BATCH) {
+      const result = await api.review(sid, { action, items: chosen.slice(i, i + BATCH) })
+      done += result.done
+      skipped += result.skipped
+    }
     const verb = action === 'confirm' ? '确认' : '删除'
     toast.add({
-      title: result.skipped
-        ? `${verb}了 ${result.done} 条，${result.skipped} 条已经被处理过`
-        : `${verb}了 ${result.done} 条`,
+      title: skipped
+        ? `${verb}了 ${done} 条，${skipped} 条已经被处理或改动过`
+        : `${verb}了 ${done} 条`,
       color: 'success',
     })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '处理失败', color: 'error' })
   } finally {
+    selected.value = new Set([...selected.value].filter((id) => !ids.includes(id)))
+    // 处理过的会出现在对象页、记忆列表、已删除、活动与概览里
+    for (const key of [
+      'review',
+      'subjects',
+      'subject',
+      'memory-list',
+      'memory-deleted',
+      'activity',
+      'overview',
+    ]) {
+      void queryClient.invalidateQueries({ queryKey: [key, sid] })
+    }
     busy.value = false
     deleting.value = null
   }
@@ -124,7 +146,7 @@ async function act(action: 'confirm' | 'delete', ids: string[]) {
         >
           <UCheckbox
             :model-value="allSelected"
-            label="全选这一页"
+            label="全选已加载的"
             @update:model-value="(v) => toggleAll(v === true)"
           />
           <span class="text-xs text-muted">已选 {{ selected.size }} 条</span>

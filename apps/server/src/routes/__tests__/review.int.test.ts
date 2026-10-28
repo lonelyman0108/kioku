@@ -70,8 +70,10 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     expect(res.status).toBe(200)
     return (await res.json()) as ReviewList
   }
-  const act = async (action: 'confirm' | 'delete', ids: string[], cookie = ws.cookie) => {
-    const res = await api('POST', '/review', { action, ids }, cookie)
+  type Seen = { id: string; version: number }
+  const act = async (action: 'confirm' | 'delete', items: Seen[], cookie = ws.cookie) => {
+    const body = { action, items: items.map(({ id, version }) => ({ id, version })) }
+    const res = await api('POST', '/review', body, cookie)
     return { status: res.status, body: (await res.json()) as ReviewResult }
   }
   const group: SessionContextInput = {
@@ -81,7 +83,15 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     sender: { id: '1001', name: '小明' },
   }
   // 群里说一句，抽取出小明与群的两条事实和一条会话摘要（都是不可信来源）
-  const chatInGroup = async () => {
+  const chatInGroup = async (
+    reply: unknown = {
+      facts: [
+        { subject: 'M1', op: 'add', content: '在学日语' },
+        { subject: 'G', op: 'add', content: '是个读书会' },
+      ],
+      summary: '群里聊了学日语',
+    },
+  ) => {
     const res = await app.request(
       '/v1/lifecycle/event',
       jsonRequest(
@@ -98,14 +108,7 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
       database.db,
       masterKey,
       { spaceId: ws.spaceId, appId, scope: turn!.scope },
-      () =>
-        fakeModel({
-          facts: [
-            { subject: 'M1', op: 'add', content: '在学日语' },
-            { subject: 'G', op: 'add', content: '是个读书会' },
-          ],
-          summary: '群里聊了学日语',
-        }),
+      () => fakeModel(reply),
     )
   }
   const rowsOf = (ids: string[]) =>
@@ -146,45 +149,87 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     )
     expect((await queue()).total).toBe(2)
     expect((await api('GET', '/review?cursor=abc')).status).toBe(400)
+
+    // 每页 50 条；总数只在第一页给
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memories).values(
+        Array.from({ length: 55 }, (_, i) => ({
+          spaceId: ws.spaceId,
+          form: 'extracted' as const,
+          layer: 'episode' as const,
+          sensitivity: 'public' as const,
+          provenance: 'untrusted' as const,
+          originScope: 'global',
+          content: `摘要${i}`,
+          expiresAt: new Date(Date.now() + 86_400_000),
+        })),
+      ),
+    )
+    const first = await queue('?layer=episode')
+    expect([first.items.length, first.total]).toEqual([50, 56])
+    const second = await queue(`?layer=episode&cursor=${first.nextCursor}`)
+    expect([second.items.length, second.total, second.nextCursor]).toEqual([6, null, null])
   })
 
   it('确认：来源改成主人、记一条确认事件，离开队列；删除和删记忆一样；处理过的再处理就跳过', async () => {
     await chatInGroup()
     const items = (await queue()).items
-    const facts = items.filter((i) => i.layer === 'subject').map((i) => i.id)
-    const summary = items.find((i) => i.layer === 'episode')!.id
+    const facts = items.filter((i) => i.layer === 'subject')
+    const factIds = facts.map((f) => f.id)
+    const summary = items.find((i) => i.layer === 'episode')!
 
     expect(await act('confirm', [...facts, facts[0]!])).toEqual({
       status: 200,
       body: { done: 2, skipped: 0 },
     })
-    expect((await rowsOf(facts)).map((r) => [r.provenance, r.version])).toEqual([
+    expect((await rowsOf(factIds)).map((r) => [r.provenance, r.version])).toEqual([
       ['owner', 2],
       ['owner', 2],
     ])
-    expect(await eventsOf(facts)).toEqual([
+    expect(await eventsOf(factIds)).toEqual([
       { type: 'confirm', accountId: ws.accountId },
       { type: 'confirm', accountId: ws.accountId },
     ])
-    expect((await queue()).items.map((i) => i.id)).toEqual([summary])
+    expect((await queue()).items.map((i) => i.id)).toEqual([summary.id])
 
+    // 看过之后被改过（版本对不上）的不处理
+    expect(await act('delete', [{ id: summary.id, version: summary.version + 1 }])).toEqual({
+      status: 200,
+      body: { done: 0, skipped: 1 },
+    })
     expect(await act('delete', [summary])).toEqual({ status: 200, body: { done: 1, skipped: 0 } })
-    expect((await rowsOf([summary]))[0]!.deletedAt).not.toBeNull()
+    expect((await rowsOf([summary.id]))[0]!.deletedAt).not.toBeNull()
     expect((await queue()).total).toBe(0)
 
     // 已经处理过、删掉了、不存在的都跳过
-    expect(await act('confirm', [...facts, summary, crypto.randomUUID()])).toEqual({
+    expect(
+      await act('confirm', [...facts, summary, { id: crypto.randomUUID(), version: 1 }]),
+    ).toEqual({
       status: 200,
       body: { done: 0, skipped: 4 },
     })
   })
 
+  it('确认过的事实不会被群里的抽取推翻：模型说要更新它时，当作一条新的待审事实', async () => {
+    await chatInGroup()
+    const fact = (await queue('?layer=subject')).items.find((i) => i.content === '在学日语')!
+    expect((await act('confirm', [fact])).body.done).toBe(1)
+
+    // 抽取时给模型看的已有事实里，确认过的这条是 F1
+    await chatInGroup({
+      facts: [{ subject: 'M1', op: 'update', replaces: 'F1', content: '在学韩语' }],
+    })
+    const [kept] = await rowsOf([fact.id])
+    expect([kept!.provenance, kept!.validTo]).toEqual(['owner', null])
+    expect((await queue('?layer=subject')).items.map((i) => i.content)).toContain('在学韩语')
+  })
+
   it('viewer 只能看；别的空间的记忆碰不到', async () => {
     await chatInGroup()
     const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
-    const ids = (await queue('', carol.cookie)).items.map((i) => i.id)
-    expect(ids).toHaveLength(3)
-    expect((await act('confirm', ids, carol.cookie)).status).toBe(403)
+    const seen = (await queue('', carol.cookie)).items
+    expect(seen).toHaveLength(3)
+    expect((await act('confirm', seen, carol.cookie)).status).toBe(403)
     expect((await queue()).total).toBe(3)
 
     // 另一个空间的同一批 id 读不到，当作不在队列里
@@ -192,7 +237,11 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     const outsider = await addMember(database.db, other!.id, 'dave', 'owner')
     const res = await app.request(
       `/v1/spaces/${other!.id}/review`,
-      jsonRequest('POST', { action: 'delete', ids }, { cookie: outsider.cookie }),
+      jsonRequest(
+        'POST',
+        { action: 'delete', items: seen.map(({ id, version }) => ({ id, version })) },
+        { cookie: outsider.cookie },
+      ),
     )
     expect(await res.json()).toEqual({ done: 0, skipped: 3 })
     expect((await queue()).total).toBe(3)

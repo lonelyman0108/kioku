@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto'
 
-import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, REVIEW_LAYERS, SENSITIVITIES } from '@kioku/contracts'
+import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
@@ -59,6 +59,7 @@ import {
 
 import {
   canRead,
+  canModify,
   canReadCredential,
   canWrite,
   canWriteApp,
@@ -101,7 +102,13 @@ import {
   recallEvents,
 } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
-import { BOOT_ELIGIBLE, readableConditions, snapshotColumns, type MemoryColumns } from './filter'
+import {
+  BOOT_ELIGIBLE,
+  pendingReview,
+  readableConditions,
+  snapshotColumns,
+  type MemoryColumns,
+} from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
   DEFAULT_SENSITIVITY,
@@ -168,6 +175,9 @@ const KEY_CROSS_OWNERSHIP = '通过 Key 不能把记忆在共享的层与个人�
 // Key 只能写应用当前的人格：继承来的祖先人格也被别的应用用着，群聊版的应用不能改掉主人格的设定
 const PERSONA_WRITE =
   '通过 Key 只能写当前应用所用人格的记忆，别的人格（包括继承来的）请在管理界面里改'
+
+// 不可信来源只能改动不可信来源写下的记录（见 canModify）
+const UNTRUSTED_MODIFY = '来自群聊或陌生人私聊的写入不能改动受信的记忆'
 
 // 含凭据占位符的记忆只能在私人层、敏感级至少 private：读得到占位符的人，正好就是读得到凭据说明的人
 const PLACEHOLDER_SCOPE =
@@ -348,7 +358,7 @@ export class MemoryService {
       // 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
       const foreignPrivate =
         row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
-      if (!foreignPrivate && !canWrite(this.ctx.access, row)) continue
+      if (!foreignPrivate && !canModify(this.ctx.access, row)) continue
       const [gone] = await tx
         .update(memories)
         .set({ deletedAt: now, updatedAt: now })
@@ -389,6 +399,12 @@ export class MemoryService {
       this.ctx.access.writeLayers.has('persona') &&
       !canWritePersona(this.ctx.access, intent.personaId)
     throw new MemoryError(403, wrongPersona ? PERSONA_WRITE : message)
+  }
+
+  // 改动已有的记录：能写这一层之外，不可信来源还只能动不可信来源写下的（canModify）
+  private assertModifiable(row: MemoryRow, message: string): void {
+    this.assertWritable(row, message)
+    if (!canModify(this.ctx.access, row)) throw new MemoryError(403, UNTRUSTED_MODIFY)
   }
 
   private async glossaryOf(tx: Tx, ids: string[]): Promise<Map<string, string[]>> {
@@ -442,17 +458,34 @@ export class MemoryService {
     after: unknown,
     context: Record<string, unknown> = {},
   ): Promise<void> {
-    await tx.insert(memoryEvents).values({
-      spaceId: this.ctx.spaceId,
-      memoryId,
-      eventType,
-      actorKeyId: this.ctx.actor.keyId ?? null,
-      actorAccountId: this.ctx.actor.accountId ?? null,
-      provenance: this.ctx.access.writeProvenance,
-      before: before ?? null,
-      after: after ?? null,
-      context,
-    })
+    await this.events(tx, [{ memoryId, eventType, before, after, context }])
+  }
+
+  // 一次记下多条事件，批量处理时用
+  private async events(
+    tx: Tx,
+    entries: {
+      memoryId: string
+      eventType: string
+      before: unknown
+      after: unknown
+      context?: Record<string, unknown>
+    }[],
+  ): Promise<void> {
+    if (!entries.length) return
+    await tx.insert(memoryEvents).values(
+      entries.map((e) => ({
+        spaceId: this.ctx.spaceId,
+        memoryId: e.memoryId,
+        eventType: e.eventType,
+        actorKeyId: this.ctx.actor.keyId ?? null,
+        actorAccountId: this.ctx.actor.accountId ?? null,
+        provenance: this.ctx.access.writeProvenance,
+        before: e.before ?? null,
+        after: e.after ?? null,
+        context: e.context ?? {},
+      })),
+    )
   }
 
   // 解析写入目标的层和归属；应用层只能写本应用（admin 例外），人格由调用方随后用 assertWritable 检查
@@ -735,8 +768,9 @@ export class MemoryService {
             )
             .for('update')
         : []
-    // 推翻也是改那一条：读得到但写不了时不动它，当作新的事实
-    const before = found && canWrite(this.ctx.access, found) ? found : undefined
+    // 推翻也是改那一条：读得到但改不了时（写不了这一层，或它是受信的而这一批来自不可信来源）
+    // 不动它，当作新的事实
+    const before = found && canModify(this.ctx.access, found) ? found : undefined
     const [row] = await tx
       .insert(memories)
       .values({
@@ -824,6 +858,7 @@ export class MemoryService {
         `没有权限改 ${before.layer} 层的 ${s} 级记忆`,
       )
     }
+    if (!canModify(this.ctx.access, before)) throw new MemoryError(403, UNTRUSTED_MODIFY)
 
     // 改层只在 base、owner、private 之间：共享与按成员互转时归属跟着变，按成员的层归写入方
     const layer = input.layer ?? before.layer
@@ -972,7 +1007,7 @@ export class MemoryService {
     const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
       checkExpected(before, expected)
-      this.assertWritable(before, `没有权限删除 ${before.layer} 层的记忆`)
+      this.assertModifiable(before, `没有权限删除 ${before.layer} 层的记忆`)
       // 条件里带上读到的版本：检查之后、删除之前别人提交的修改不会被一起删掉，
       // 事件里的「删除前」快照也就是真正被删掉的那一版
       const [row] = await tx
@@ -994,53 +1029,52 @@ export class MemoryService {
     this.changed([id])
   }
 
-  // 待审队列里的处理：确认（来源改成主人）或删除。只处理还在队列里的（不可信来源、对象层或情节层、
-  // 现在有效、读得到），别人处理过的、删掉的、读不到的跳过；有一条写不了就整批不做
+  // 待审队列里的处理：确认（来源改成主人）或删除。只处理还在队列里的（pendingReview），
+  // 别人处理过的、删掉的、读不到的、看过之后被改过（版本变了）的跳过；有一条改不了就整批不做
   async review(input: ReviewRequest): Promise<ReviewResult> {
-    const ids = [...new Set(input.ids)]
+    const seen = new Map(input.items.map((i) => [i.id, i.version]))
     const done = await this.run(async (tx, personaIds) => {
-      // 锁住这几行：同时处理同一批时，后到的等先到的提交，再按处理后的状态跳过
+      // 按 id 的顺序锁住这几行：同时处理有重叠的几批时，加锁顺序一致，不会互相等成死锁
       const rows = await tx
         .select()
         .from(memories)
         .where(
-          and(
-            inArray(memories.id, ids),
-            eq(memories.provenance, 'untrusted'),
-            inArray(memories.layer, REVIEW_LAYERS),
-            readableConditions(this.ctx.access, { personaIds }),
-          ),
+          and(inArray(memories.id, [...seen.keys()]), pendingReview(this.ctx.access, personaIds)),
         )
+        .orderBy(asc(memories.id))
         .for('update')
-      for (const row of rows) this.assertWritable(row, `没有权限处理 ${row.layer} 层的记忆`)
-      const glossaries = await this.glossaryOf(
-        tx,
-        rows.map((r) => r.id),
-      )
+      const targets = rows.filter((r) => seen.get(r.id) === r.version)
+      if (!targets.length) return []
+      for (const row of targets) this.assertModifiable(row, `没有权限处理 ${row.layer} 层的记忆`)
+      const ids = targets.map((r) => r.id)
       const now = new Date()
-      for (const row of rows) {
-        const [after] = await tx
-          .update(memories)
-          .set(
-            input.action === 'confirm'
-              ? { provenance: 'owner', version: row.version + 1, updatedAt: now }
-              : { deletedAt: now, updatedAt: now },
-          )
-          .where(eq(memories.id, row.id))
-          .returning()
-        const glossary = glossaries.get(row.id) ?? []
-        await this.event(
-          tx,
-          row.id,
-          input.action,
-          snapshot(row, glossary),
-          snapshot(after!, glossary),
+      const updated = await tx
+        .update(memories)
+        .set(
+          input.action === 'confirm'
+            ? { provenance: 'owner', version: sql`${memories.version} + 1`, updatedAt: now }
+            : { deletedAt: now, updatedAt: now },
         )
-      }
-      return rows.map((r) => r.id)
+        .where(inArray(memories.id, ids))
+        .returning()
+      const after = new Map(updated.map((r) => [r.id, r]))
+      const glossaries = await this.glossaryOf(tx, ids)
+      await this.events(
+        tx,
+        targets.map((row) => {
+          const glossary = glossaries.get(row.id) ?? []
+          return {
+            memoryId: row.id,
+            eventType: input.action,
+            before: snapshot(row, glossary),
+            after: snapshot(after.get(row.id)!, glossary),
+          }
+        }),
+      )
+      return ids
     })
     if (input.action === 'delete') this.changed(done)
-    return { done: done.length, skipped: ids.length - done.length }
+    return { done: done.length, skipped: seen.size - done.length }
   }
 
   // 改 URI。移进、移出 persona:// 与 app://，或在不同的人格、应用之间移动时，层与归属跟着目标 URI 变：
@@ -1052,7 +1086,7 @@ export class MemoryService {
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, from, personaIds)
       checkExpected(before, input)
-      this.assertWritable(before, `没有权限移动 ${before.layer} 层的记忆`)
+      this.assertModifiable(before, `没有权限移动 ${before.layer} 层的记忆`)
       const forced = layerForDomain(to.domain)
       if (forced && input.layer) {
         throw new MemoryError(400, `${to.domain}:// 下的层由 URI 决定，不用指定 layer`)
@@ -1829,7 +1863,7 @@ export class MemoryService {
     return this.write(async (tx, _personaIds, released) => {
       const row = await this.findManageable(tx, input.memoryId)
       if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
-      this.assertWritable(row, `没有权限恢复 ${row.layer} 层的记忆`)
+      this.assertModifiable(row, `没有权限恢复 ${row.layer} 层的记忆`)
       // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
       await this.checkKeptRefs(tx, row, row)
       await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released)

@@ -1,4 +1,10 @@
-import { LAYERS, SENSITIVITIES, type Layer, type Sensitivity } from '@kioku/contracts'
+import {
+  LAYERS,
+  REVIEW_LAYERS,
+  SENSITIVITIES,
+  type Layer,
+  type Sensitivity,
+} from '@kioku/contracts'
 import {
   and,
   eq,
@@ -145,4 +151,13 @@ export function readableConditions(
     access.appId === null ? undefined : or(ne(cols.layer, 'app'), eq(cols.appId, access.appId)),
   )
   return and(...conditions)!
+}
+
+// 待审队列里的：不可信来源写进对象层与情节层、现在有效、读得到的。列表与处理都按它
+export function pendingReview(access: Access, personaIds: readonly string[]): SQL {
+  return and(
+    eq(memories.provenance, 'untrusted'),
+    inArray(memories.layer, REVIEW_LAYERS),
+    readableConditions(access, { personaIds }),
+  )!
 }

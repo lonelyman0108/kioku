@@ -19,6 +19,8 @@ export const ReviewItem = z.object({
   // 对象层的记忆挂在哪个对象上；情节层的为 null
   subject: z.object({ id: z.uuid(), kind: SubjectKind, displayName: z.string() }).nullable(),
   scope: OriginScope,
+  // 处理时带回来：看过之后被改过的不处理，免得确认了没看过的内容
+  version: z.number().int(),
   createdAt: z.iso.datetime(),
 })
 export type ReviewItem = z.infer<typeof ReviewItem>
@@ -32,19 +34,23 @@ export type ReviewQuery = z.infer<typeof ReviewQuery>
 
 export const ReviewList = z.object({
   items: z.array(ReviewItem),
-  // 符合筛选的待审条数
-  total: z.number().int(),
+  // 符合筛选的待审条数，只在第一页（不带 cursor）给
+  total: z.number().int().nullable(),
   nextCursor: z.string().nullable(),
 })
 export type ReviewList = z.infer<typeof ReviewList>
 
 export const ReviewRequest = z.object({
   action: z.enum(['confirm', 'delete']),
-  ids: z.array(z.uuid()).min(1).max(100),
+  // 每一条带上列表里看到的版本
+  items: z
+    .array(z.object({ id: z.uuid(), version: z.number().int() }))
+    .min(1)
+    .max(100),
 })
 export type ReviewRequest = z.infer<typeof ReviewRequest>
 
-// 已经不在队列里的（别人处理过、删掉了、读不到）跳过，计进 skipped
+// 已经不在队列里的（别人处理过、删掉了、读不到）与看过之后被改过的跳过，计进 skipped
 export const ReviewResult = z.object({
   done: z.number().int(),
   skipped: z.number().int(),

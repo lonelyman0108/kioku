@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   canManageCredentials,
+  canModify,
   canRead,
   canReadCredential,
   canRevealCredential,
@@ -88,6 +89,17 @@ describe('群聊', () => {
     expect(canWrite(access, { ...intent, layer: 'subject' })).toBe(true)
     expect(canWrite(access, { ...intent, layer: 'persona' })).toBe(false)
     expect(canWrite(access, { ...intent, layer: 'private' })).toBe(false)
+  })
+
+  it('只能改动不可信来源写下的记录：受信的（主人确认过的、agent 写的）动不了', () => {
+    const row = { layer: 'subject', sensitivity: 'public', appId: null, personaId: null } as const
+    expect(canModify(access, { ...row, provenance: 'untrusted' })).toBe(true)
+    expect(canModify(access, { ...row, provenance: 'owner' })).toBe(false)
+    expect(canModify(access, { ...row, provenance: 'agent' })).toBe(false)
+    // 受信的写入方不受这条限制
+    const agent = resolveAccess(fullKey, app, {})
+    expect(canModify(agent, { ...row, provenance: 'untrusted' })).toBe(true)
+    expect(canModify(agent, { ...row, provenance: 'owner' })).toBe(true)
   })
 
   it('缺少群对象时拒绝解析', () => {
