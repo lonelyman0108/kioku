@@ -14,6 +14,7 @@ import { memoryRoutes } from './routes/memories'
 import { overviewRoutes } from './routes/overview'
 import { personaRoutes } from './routes/personas'
 import { previewRoutes } from './routes/preview'
+import { recallAnalysisRoutes } from './routes/recallAnalysis'
 import { recallRoutes } from './routes/recall'
 import { MemoryError } from './memory/service'
 import { settingsRoutes } from './routes/settings'
@@ -54,6 +55,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))
   app.route('/v1', previewRoutes(deps))
+  app.route('/v1', recallAnalysisRoutes(deps))
   app.route('/v1', memoryRoutes(deps))
   app.route('/v1', credentialRoutes(deps))
   app.route('/v1', overviewRoutes(deps))
