@@ -78,27 +78,6 @@
           }
         }
       },
-      "Layer": {
-        "type": "string",
-        "enum": [
-          "base",
-          "persona",
-          "app",
-          "owner",
-          "private",
-          "subject",
-          "episode"
-        ]
-      },
-      "Sensitivity": {
-        "type": "string",
-        "enum": [
-          "public",
-          "internal",
-          "private",
-          "secret"
-        ]
-      },
       "WhoAmI": {
         "type": "object",
         "properties": {
@@ -115,17 +94,41 @@
               "readLayers": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/components/schemas/Layer"
+                  "type": "string",
+                  "enum": [
+                    "base",
+                    "persona",
+                    "app",
+                    "owner",
+                    "private",
+                    "subject",
+                    "episode"
+                  ]
                 }
               },
               "writeLayers": {
                 "type": "array",
                 "items": {
-                  "$ref": "#/components/schemas/Layer"
+                  "type": "string",
+                  "enum": [
+                    "base",
+                    "persona",
+                    "app",
+                    "owner",
+                    "private",
+                    "subject",
+                    "episode"
+                  ]
                 }
               },
               "maxSensitivity": {
-                "$ref": "#/components/schemas/Sensitivity"
+                "type": "string",
+                "enum": [
+                  "public",
+                  "internal",
+                  "private",
+                  "secret"
+                ]
               },
               "admin": {
                 "type": "boolean"
@@ -152,7 +155,16 @@
             "type": "string"
           },
           "layer": {
-            "$ref": "#/components/schemas/Layer"
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
           },
           "priority": {
             "type": "integer"
@@ -221,13 +233,34 @@
             "type": "string"
           },
           "layer": {
-            "$ref": "#/components/schemas/Layer"
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
           },
           "sensitivity": {
-            "$ref": "#/components/schemas/Sensitivity"
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
           },
           "provenance": {
-            "$ref": "#/components/schemas/Provenance"
+            "type": "string",
+            "enum": [
+              "owner",
+              "agent",
+              "untrusted",
+              "system"
+            ]
           },
           "originScope": {
             "type": "string"
@@ -290,15 +323,6 @@
           "updatedAt"
         ]
       },
-      "Provenance": {
-        "type": "string",
-        "enum": [
-          "owner",
-          "agent",
-          "untrusted",
-          "system"
-        ]
-      },
       "MemoryChildren": {
         "type": "object",
         "properties": {
@@ -345,23 +369,32 @@
             "format": "uuid"
           },
           "layer": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Layer"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode",
+              null
             ]
           },
           "sensitivity": {
-            "anyOf": [
-              {
-                "$ref": "#/components/schemas/Sensitivity"
-              },
-              {
-                "type": "null"
-              }
+            "type": [
+              "string",
+              "null"
+            ],
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret",
+              null
             ]
           },
           "priority": {
@@ -419,10 +452,25 @@
             "maxLength": 20000
           },
           "layer": {
-            "$ref": "#/components/schemas/Layer"
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
           },
           "sensitivity": {
-            "$ref": "#/components/schemas/Sensitivity"
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
           },
           "priority": {
             "type": "integer",
@@ -478,7 +526,13 @@
             ]
           },
           "sensitivity": {
-            "$ref": "#/components/schemas/Sensitivity"
+            "type": "string",
+            "enum": [
+              "public",
+              "internal",
+              "private",
+              "secret"
+            ]
           },
           "priority": {
             "type": "integer",
@@ -710,7 +764,16 @@
             "type": "string"
           },
           "layer": {
-            "$ref": "#/components/schemas/Layer"
+            "type": "string",
+            "enum": [
+              "base",
+              "persona",
+              "app",
+              "owner",
+              "private",
+              "subject",
+              "episode"
+            ]
           },
           "content": {
             "type": "string"

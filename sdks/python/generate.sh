@@ -6,16 +6,20 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd -P)
 root=$(git -C "$here" rev-parse --show-toplevel)
 generator=openapi-python-client==0.29.1
+# 生成工具的依赖也按日期锁住：只用这一天之前发布的版本，和 pnpm 拒绝太新的版本是同一个理由
+exclude_newer=2026-10-14T00:00:00Z
 
 full=$(mktemp)
-trap 'rm -f "$full"' EXIT
+filtered=$(mktemp)
+trap 'rm -f "$full" "$filtered"' EXIT
 (cd "$root/apps/server" && pnpm --silent exec tsx src/cli/openapi.ts) >"$full"
-python3 "$here/filter_openapi.py" "$full" >"$here/openapi.json"
-uvx --from "$generator" openapi-python-client generate \
+# 先写到临时文件，过滤成功了再换上，失败时不留下半截的 openapi.json
+python3 "$here/filter_openapi.py" "$full" >"$filtered"
+mv "$filtered" "$here/openapi.json"
+uvx --exclude-newer "$exclude_newer" --from "$generator" openapi-python-client generate \
   --path "$here/openapi.json" \
   --config "$here/generator.yaml" \
   --meta none \
   --output-path "$here/kioku_client" \
   --overwrite
-uv run --project "$here" ruff check --quiet --fix-only "$here/kioku_client"
 uv run --project "$here" ruff format --quiet "$here/kioku_client"

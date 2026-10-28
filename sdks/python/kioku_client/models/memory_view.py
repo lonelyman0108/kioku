@@ -8,9 +8,9 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.layer import Layer
-from ..models.provenance import Provenance
-from ..models.sensitivity import Sensitivity
+from ..models.memory_view_layer import MemoryViewLayer
+from ..models.memory_view_provenance import MemoryViewProvenance
+from ..models.memory_view_sensitivity import MemoryViewSensitivity
 from typing import cast
 from uuid import UUID
 
@@ -24,9 +24,9 @@ class MemoryView:
     Attributes:
         id (UUID):
         uri (str):
-        layer (Layer):
-        sensitivity (Sensitivity):
-        provenance (Provenance):
+        layer (MemoryViewLayer):
+        sensitivity (MemoryViewSensitivity):
+        provenance (MemoryViewProvenance):
         origin_scope (str):
         content (None | str):
         priority (int):
@@ -41,9 +41,9 @@ class MemoryView:
 
     id: UUID
     uri: str
-    layer: Layer
-    sensitivity: Sensitivity
-    provenance: Provenance
+    layer: MemoryViewLayer
+    sensitivity: MemoryViewSensitivity
+    provenance: MemoryViewProvenance
     origin_scope: str
     content: None | str
     priority: int
@@ -121,11 +121,11 @@ class MemoryView:
 
         uri = d.pop("uri")
 
-        layer = Layer(d.pop("layer"))
+        layer = MemoryViewLayer(d.pop("layer"))
 
-        sensitivity = Sensitivity(d.pop("sensitivity"))
+        sensitivity = MemoryViewSensitivity(d.pop("sensitivity"))
 
-        provenance = Provenance(d.pop("provenance"))
+        provenance = MemoryViewProvenance(d.pop("provenance"))
 
         origin_scope = d.pop("originScope")
 

@@ -1,7 +1,7 @@
 from enum import StrEnum
 
 
-class Layer(StrEnum):
+class BootEntryLayer(StrEnum):
     APP = "app"
     BASE = "base"
     EPISODE = "episode"

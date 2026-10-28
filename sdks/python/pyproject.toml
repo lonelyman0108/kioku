@@ -4,7 +4,8 @@ version = "0.1.0"
 description = "Kioku 接入接口的 Python 客户端，由服务端的 OpenAPI 生成"
 readme = "README.md"
 license = "Apache-2.0"
-requires-python = ">=3.10"
+# 生成的代码用了 enum.StrEnum 与 typing.Self，要 3.11 以上
+requires-python = ">=3.11"
 # 会装进宿主（例如 AstrBot）的环境，和宿主自己的依赖共用，所以只给范围；开发工具在下面写死
 dependencies = ["attrs>=22.2.0", "httpx>=0.23.0,<1"]
 
@@ -20,7 +21,7 @@ packages = ["kioku_client"]
 
 [tool.ruff]
 line-length = 100
-target-version = "py310"
+target-version = "py311"
 
 [tool.ruff.lint]
 # 生成的代码只管格式，写法按生成工具的来

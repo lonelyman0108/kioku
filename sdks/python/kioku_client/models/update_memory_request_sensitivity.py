@@ -1,7 +1,7 @@
 from enum import StrEnum
 
 
-class Sensitivity(StrEnum):
+class UpdateMemoryRequestSensitivity(StrEnum):
     INTERNAL = "internal"
     PRIVATE = "private"
     PUBLIC = "public"

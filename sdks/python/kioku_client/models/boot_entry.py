@@ -8,7 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.layer import Layer
+from ..models.boot_entry_layer import BootEntryLayer
 
 
 T = TypeVar("T", bound="BootEntry")
@@ -19,12 +19,12 @@ class BootEntry:
     """
     Attributes:
         uri (str):
-        layer (Layer):
+        layer (BootEntryLayer):
         content (str):
     """
 
     uri: str
-    layer: Layer
+    layer: BootEntryLayer
     content: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -52,7 +52,7 @@ class BootEntry:
         d = dict(src_dict)
         uri = d.pop("uri")
 
-        layer = Layer(d.pop("layer"))
+        layer = BootEntryLayer(d.pop("layer"))
 
         content = d.pop("content")
 

@@ -86,12 +86,15 @@ def test_turn_end_and_validation_error():
         assert body["user"] == "我在学日语"
         return httpx.Response(400, json={"error": "群聊与频道要带上这一轮的发言人"})
 
+    # 群里不带发言人，服务端会拒绝
     result = post_v1_lifecycle_event.sync(
         client=client_with(handler),
         body=TurnEndEvent(
             event=TurnEndEventEvent.TURN_END,
             session_id="qq:group:2001",
-            context=group_context(),
+            context=SessionContext(
+                chat_type=ChatType.GROUP, platform="qq", group=PlatformRef(id="2001")
+            ),
             user="我在学日语",
             reply="加油",
         ),

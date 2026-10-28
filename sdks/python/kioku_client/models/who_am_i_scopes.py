@@ -8,8 +8,9 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.layer import Layer
-from ..models.sensitivity import Sensitivity
+from ..models.who_am_i_scopes_max_sensitivity import WhoAmIScopesMaxSensitivity
+from ..models.who_am_i_scopes_read_layers_item import WhoAmIScopesReadLayersItem
+from ..models.who_am_i_scopes_write_layers_item import WhoAmIScopesWriteLayersItem
 from typing import cast
 
 
@@ -20,15 +21,15 @@ T = TypeVar("T", bound="WhoAmIScopes")
 class WhoAmIScopes:
     """
     Attributes:
-        read_layers (list[Layer]):
-        write_layers (list[Layer]):
-        max_sensitivity (Sensitivity):
+        read_layers (list[WhoAmIScopesReadLayersItem]):
+        write_layers (list[WhoAmIScopesWriteLayersItem]):
+        max_sensitivity (WhoAmIScopesMaxSensitivity):
         admin (bool):
     """
 
-    read_layers: list[Layer]
-    write_layers: list[Layer]
-    max_sensitivity: Sensitivity
+    read_layers: list[WhoAmIScopesReadLayersItem]
+    write_layers: list[WhoAmIScopesWriteLayersItem]
+    max_sensitivity: WhoAmIScopesMaxSensitivity
     admin: bool
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -66,18 +67,18 @@ class WhoAmIScopes:
         read_layers = []
         _read_layers = d.pop("readLayers")
         for read_layers_item_data in _read_layers:
-            read_layers_item = Layer(read_layers_item_data)
+            read_layers_item = WhoAmIScopesReadLayersItem(read_layers_item_data)
 
             read_layers.append(read_layers_item)
 
         write_layers = []
         _write_layers = d.pop("writeLayers")
         for write_layers_item_data in _write_layers:
-            write_layers_item = Layer(write_layers_item_data)
+            write_layers_item = WhoAmIScopesWriteLayersItem(write_layers_item_data)
 
             write_layers.append(write_layers_item)
 
-        max_sensitivity = Sensitivity(d.pop("maxSensitivity"))
+        max_sensitivity = WhoAmIScopesMaxSensitivity(d.pop("maxSensitivity"))
 
         admin = d.pop("admin")
 

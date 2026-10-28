@@ -8,8 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.layer import Layer
-from ..models.sensitivity import Sensitivity
+from ..models.create_memory_request_layer import CreateMemoryRequestLayer
+from ..models.create_memory_request_sensitivity import CreateMemoryRequestSensitivity
 from ..types import UNSET, Unset
 from typing import cast
 
@@ -23,8 +23,8 @@ class CreateMemoryRequest:
     Attributes:
         uri (str):
         content (str):
-        layer (Layer | Unset):
-        sensitivity (Sensitivity | Unset):
+        layer (CreateMemoryRequestLayer | Unset):
+        sensitivity (CreateMemoryRequestSensitivity | Unset):
         priority (int | Unset):  Default: 2.
         disclosure (str | Unset):
         glossary (list[str] | Unset):
@@ -32,8 +32,8 @@ class CreateMemoryRequest:
 
     uri: str
     content: str
-    layer: Layer | Unset = UNSET
-    sensitivity: Sensitivity | Unset = UNSET
+    layer: CreateMemoryRequestLayer | Unset = UNSET
+    sensitivity: CreateMemoryRequestSensitivity | Unset = UNSET
     priority: int | Unset = 2
     disclosure: str | Unset = UNSET
     glossary: list[str] | Unset = UNSET
@@ -89,18 +89,18 @@ class CreateMemoryRequest:
         content = d.pop("content")
 
         _layer = d.pop("layer", UNSET)
-        layer: Layer | Unset
+        layer: CreateMemoryRequestLayer | Unset
         if isinstance(_layer, Unset):
             layer = UNSET
         else:
-            layer = Layer(_layer)
+            layer = CreateMemoryRequestLayer(_layer)
 
         _sensitivity = d.pop("sensitivity", UNSET)
-        sensitivity: Sensitivity | Unset
+        sensitivity: CreateMemoryRequestSensitivity | Unset
         if isinstance(_sensitivity, Unset):
             sensitivity = UNSET
         else:
-            sensitivity = Sensitivity(_sensitivity)
+            sensitivity = CreateMemoryRequestSensitivity(_sensitivity)
 
         priority = d.pop("priority", UNSET)
 

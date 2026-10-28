@@ -8,8 +8,8 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.sensitivity import Sensitivity
 from ..models.update_memory_request_layer import UpdateMemoryRequestLayer
+from ..models.update_memory_request_sensitivity import UpdateMemoryRequestSensitivity
 from ..types import UNSET, Unset
 from typing import cast
 from uuid import UUID
@@ -27,7 +27,7 @@ class UpdateMemoryRequest:
         expected_id (UUID | Unset):
         content (str | Unset):
         layer (UpdateMemoryRequestLayer | Unset):
-        sensitivity (Sensitivity | Unset):
+        sensitivity (UpdateMemoryRequestSensitivity | Unset):
         priority (int | Unset):
         disclosure (None | str | Unset):
         glossary_add (list[str] | Unset):
@@ -40,7 +40,7 @@ class UpdateMemoryRequest:
     expected_id: UUID | Unset = UNSET
     content: str | Unset = UNSET
     layer: UpdateMemoryRequestLayer | Unset = UNSET
-    sensitivity: Sensitivity | Unset = UNSET
+    sensitivity: UpdateMemoryRequestSensitivity | Unset = UNSET
     priority: int | Unset = UNSET
     disclosure: None | str | Unset = UNSET
     glossary_add: list[str] | Unset = UNSET
@@ -139,11 +139,11 @@ class UpdateMemoryRequest:
             layer = UpdateMemoryRequestLayer(_layer)
 
         _sensitivity = d.pop("sensitivity", UNSET)
-        sensitivity: Sensitivity | Unset
+        sensitivity: UpdateMemoryRequestSensitivity | Unset
         if isinstance(_sensitivity, Unset):
             sensitivity = UNSET
         else:
-            sensitivity = Sensitivity(_sensitivity)
+            sensitivity = UpdateMemoryRequestSensitivity(_sensitivity)
 
         priority = d.pop("priority", UNSET)
 

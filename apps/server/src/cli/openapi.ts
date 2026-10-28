@@ -11,4 +11,8 @@ const app = createApp({
   jobs: null,
 })
 const res = await app.request('/v1/openapi.json')
+if (!res.ok) {
+  console.error(`生成 OpenAPI 文档失败：HTTP ${res.status} ${await res.text()}`)
+  process.exit(1)
+}
 process.stdout.write(`${JSON.stringify(await res.json(), null, 2)}\n`)

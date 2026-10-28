@@ -1,7 +1,7 @@
 from enum import StrEnum
 
 
-class Provenance(StrEnum):
+class MemoryViewProvenance(StrEnum):
     AGENT = "agent"
     OWNER = "owner"
     SYSTEM = "system"

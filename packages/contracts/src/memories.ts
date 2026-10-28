@@ -113,7 +113,8 @@ export type DomainSummary = z.infer<typeof DomainSummary>
 export const MemoryChildren = z
   .object({
     // 为 null 表示列的是 domain 根，或这一级路径本身没有可读的记忆
-    parent: MemoryView.nullable(),
+    // 写成并集而不是 .nullable()：OpenAPI 文档里才是 anyOf [$ref, null]，生成客户端的工具认得
+    parent: z.union([MemoryView, z.null()]),
     children: z.array(MemorySummary),
     // 这一级超过上限（500 个）时只返回前面的部分
     truncated: z.boolean(),

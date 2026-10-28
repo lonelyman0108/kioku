@@ -8,8 +8,12 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.layer import Layer
-from ..models.sensitivity import Sensitivity
+from ..models.memory_summary_layer_type_1 import MemorySummaryLayerType1
+from ..models.memory_summary_layer_type_2_type_1 import MemorySummaryLayerType2Type1
+from ..models.memory_summary_layer_type_3_type_1 import MemorySummaryLayerType3Type1
+from ..models.memory_summary_sensitivity_type_1 import MemorySummarySensitivityType1
+from ..models.memory_summary_sensitivity_type_2_type_1 import MemorySummarySensitivityType2Type1
+from ..models.memory_summary_sensitivity_type_3_type_1 import MemorySummarySensitivityType3Type1
 from typing import cast
 from uuid import UUID
 
@@ -24,8 +28,9 @@ class MemorySummary:
         uri (str):
         exists (bool):
         id (None | UUID):
-        layer (Layer | None):
-        sensitivity (None | Sensitivity):
+        layer (MemorySummaryLayerType1 | MemorySummaryLayerType2Type1 | MemorySummaryLayerType3Type1 | None):
+        sensitivity (MemorySummarySensitivityType1 | MemorySummarySensitivityType2Type1 |
+            MemorySummarySensitivityType3Type1 | None):
         priority (int | None):
         disclosure (None | str):
         child_count (int):
@@ -34,8 +39,15 @@ class MemorySummary:
     uri: str
     exists: bool
     id: None | UUID
-    layer: Layer | None
-    sensitivity: None | Sensitivity
+    layer: (
+        MemorySummaryLayerType1 | MemorySummaryLayerType2Type1 | MemorySummaryLayerType3Type1 | None
+    )
+    sensitivity: (
+        MemorySummarySensitivityType1
+        | MemorySummarySensitivityType2Type1
+        | MemorySummarySensitivityType3Type1
+        | None
+    )
     priority: int | None
     disclosure: None | str
     child_count: int
@@ -53,13 +65,21 @@ class MemorySummary:
             id = self.id
 
         layer: None | str
-        if isinstance(self.layer, Layer):
+        if isinstance(self.layer, MemorySummaryLayerType1):
+            layer = self.layer.value
+        elif isinstance(self.layer, MemorySummaryLayerType2Type1):
+            layer = self.layer.value
+        elif isinstance(self.layer, MemorySummaryLayerType3Type1):
             layer = self.layer.value
         else:
             layer = self.layer
 
         sensitivity: None | str
-        if isinstance(self.sensitivity, Sensitivity):
+        if isinstance(self.sensitivity, MemorySummarySensitivityType1):
+            sensitivity = self.sensitivity.value
+        elif isinstance(self.sensitivity, MemorySummarySensitivityType2Type1):
+            sensitivity = self.sensitivity.value
+        elif isinstance(self.sensitivity, MemorySummarySensitivityType3Type1):
             sensitivity = self.sensitivity.value
         else:
             sensitivity = self.sensitivity
@@ -111,33 +131,91 @@ class MemorySummary:
 
         id = _parse_id(d.pop("id"))
 
-        def _parse_layer(data: object) -> Layer | None:
+        def _parse_layer(
+            data: object,
+        ) -> (
+            MemorySummaryLayerType1
+            | MemorySummaryLayerType2Type1
+            | MemorySummaryLayerType3Type1
+            | None
+        ):
             if data is None:
                 return data
             try:
                 if not isinstance(data, str):
                     raise TypeError()
-                layer_type_0 = Layer(data)
+                layer_type_1 = MemorySummaryLayerType1(data)
 
-                return layer_type_0
+                return layer_type_1
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(Layer | None, data)
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                layer_type_2_type_1 = MemorySummaryLayerType2Type1(data)
+
+                return layer_type_2_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                layer_type_3_type_1 = MemorySummaryLayerType3Type1(data)
+
+                return layer_type_3_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(
+                MemorySummaryLayerType1
+                | MemorySummaryLayerType2Type1
+                | MemorySummaryLayerType3Type1
+                | None,
+                data,
+            )
 
         layer = _parse_layer(d.pop("layer"))
 
-        def _parse_sensitivity(data: object) -> None | Sensitivity:
+        def _parse_sensitivity(
+            data: object,
+        ) -> (
+            MemorySummarySensitivityType1
+            | MemorySummarySensitivityType2Type1
+            | MemorySummarySensitivityType3Type1
+            | None
+        ):
             if data is None:
                 return data
             try:
                 if not isinstance(data, str):
                     raise TypeError()
-                sensitivity_type_0 = Sensitivity(data)
+                sensitivity_type_1 = MemorySummarySensitivityType1(data)
 
-                return sensitivity_type_0
+                return sensitivity_type_1
             except (TypeError, ValueError, AttributeError, KeyError):
                 pass
-            return cast(None | Sensitivity, data)
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                sensitivity_type_2_type_1 = MemorySummarySensitivityType2Type1(data)
+
+                return sensitivity_type_2_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                sensitivity_type_3_type_1 = MemorySummarySensitivityType3Type1(data)
+
+                return sensitivity_type_3_type_1
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(
+                MemorySummarySensitivityType1
+                | MemorySummarySensitivityType2Type1
+                | MemorySummarySensitivityType3Type1
+                | None,
+                data,
+            )
 
         sensitivity = _parse_sensitivity(d.pop("sensitivity"))
 

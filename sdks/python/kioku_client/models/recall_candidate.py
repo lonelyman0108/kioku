@@ -8,7 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.layer import Layer
+from ..models.recall_candidate_layer import RecallCandidateLayer
 from ..models.recall_via import RecallVia
 from typing import cast
 
@@ -21,7 +21,7 @@ class RecallCandidate:
     """
     Attributes:
         uri (str):
-        layer (Layer):
+        layer (RecallCandidateLayer):
         priority (int):
         disclosure (None | str):
         score (float):
@@ -30,7 +30,7 @@ class RecallCandidate:
     """
 
     uri: str
-    layer: Layer
+    layer: RecallCandidateLayer
     priority: int
     disclosure: None | str
     score: float
@@ -78,7 +78,7 @@ class RecallCandidate:
         d = dict(src_dict)
         uri = d.pop("uri")
 
-        layer = Layer(d.pop("layer"))
+        layer = RecallCandidateLayer(d.pop("layer"))
 
         priority = d.pop("priority")
 
