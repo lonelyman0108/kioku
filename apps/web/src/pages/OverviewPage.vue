@@ -47,7 +47,7 @@ const budgetWarning = computed(() => {
     over,
     title: over
       ? '本月的抽取预算用完了'
-      : `本月的抽取预算已用 ${Math.round((e.usedTokens / e.monthlyTokens) * 100)}%`,
+      : `本月的抽取预算已用 ${Math.floor((e.usedTokens / e.monthlyTokens) * 100)}%`,
     description: over
       ? `${used}之后只写会话摘要、不再抽取事实，下个月恢复；空间 owner 可以在空间设置里调高。`
       : `${used}用完之后只写会话摘要、不再抽取事实。`,

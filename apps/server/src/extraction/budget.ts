@@ -8,7 +8,8 @@ import { extractionRuns, memories, spaces } from '../db/schema'
 const MONTH_START = sql`date_trunc('month', now(), 'UTC')`
 const DAY_START = sql`date_trunc('day', now(), 'UTC')`
 
-// 这个空间的抽取预算与本月用掉的 token（抽取记录里的用量之和，失败的那几次也算：token 已经花出去了）
+// 这个空间的抽取预算与本月用掉的 token：抽取记录里的用量之和，解析失败、写入失败的那几次也算（token 已经花出去了）；
+// 请求模型失败时拿不到用量，记的是 0。预算是软上限：同时在跑的几批各自检查，可能一起超出一点
 export async function extractionUsage(db: Db, spaceId: string): Promise<ExtractionUsage> {
   const [space] = await db
     .select({
@@ -21,7 +22,8 @@ export async function extractionUsage(db: Db, spaceId: string): Promise<Extracti
     tx
       .select({
         used: sql<string>`coalesce(sum(${extractionRuns.promptTokens} + ${extractionRuns.completionTokens}), 0)::bigint`,
-        periodStart: sql<string>`${MONTH_START}::text`,
+        // 按秒数取出，不经过文本：文本格式随数据库的 DateStyle 变
+        periodStart: sql<number>`extract(epoch from ${MONTH_START})::float8`,
       })
       .from(extractionRuns)
       .where(gte(extractionRuns.createdAt, MONTH_START)),
@@ -30,7 +32,7 @@ export async function extractionUsage(db: Db, spaceId: string): Promise<Extracti
     monthlyTokens: space!.monthlyTokens,
     dailyWritesPerSubject: space!.dailyWritesPerSubject,
     usedTokens: Number(row?.used ?? 0),
-    periodStart: new Date(row!.periodStart).toISOString(),
+    periodStart: new Date(Number(row!.periodStart) * 1000).toISOString(),
   }
 }
 

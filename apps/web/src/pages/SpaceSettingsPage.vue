@@ -63,8 +63,9 @@ watch(
   },
   { immediate: true },
 )
-// 有未保存的改动时，离开这一页、换空间、退出登录或关掉标签页之前先确认
-useUnsavedChangesGuard(dirty)
+// 有未保存的改动时（domain 默认层或抽取预算），离开这一页、换空间、退出登录或关掉标签页之前先确认
+const budgetDirty = ref(false)
+useUnsavedChangesGuard(computed(() => dirty.value || budgetDirty.value))
 
 // 校验规则与服务端用同一个 schema；重复的 domain 会被合并掉，单独查
 const problem = computed(() => {
@@ -198,7 +199,7 @@ async function save() {
         </div>
       </UCard>
 
-      <ExtractionBudget :space-id="spaceId" :editable="isOwner" />
+      <ExtractionBudget v-model:dirty="budgetDirty" :space-id="spaceId" :editable="isOwner" />
     </template>
   </UDashboardPanel>
 </template>

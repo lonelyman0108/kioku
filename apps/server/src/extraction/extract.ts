@@ -121,9 +121,23 @@ export async function extractBatch(
     )
     return
   }
+  // 本月的 token 预算用完了就只要会话摘要，不再抽取事实，下个月恢复；连摘要也写不了时不请求模型
+  const budget = await extractionUsage(db, target.spaceId)
+  const summaryOnly = budget.usedTokens >= budget.monthlyTokens
+  if (summaryOnly && !layers.episode) {
+    await withSpace(db, target.spaceId, (tx) =>
+      close(tx, {
+        summaryOnly,
+        error: '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要',
+      }),
+    )
+    return
+  }
 
-  // 对象与它们读得到的、最近的几条有效事实（给模型看）。发言人用这一批里最后报上来的名字，群用平台上的名字
+  // 对象与它们读得到的、最近的几条有效事实（给模型看；只要摘要时不用）。
+  // 发言人用这一批里最后报上来的名字，群用平台上的名字
   const { facts, groupName } = await withSpace(db, target.spaceId, async (tx) => {
+    if (summaryOnly) return { facts: [], groupName: null }
     const facts = await readableSubjectFacts(
       tx,
       writer.access,
@@ -167,9 +181,6 @@ export async function extractBatch(
     user: t.userText,
     reply: t.replyText,
   }))
-  // 本月的 token 预算用完了就只要会话摘要，不再抽取事实，下个月恢复
-  const budget = await extractionUsage(db, target.spaceId)
-  const summaryOnly = budget.usedTokens >= budget.monthlyTokens
   const messages = summaryOnly
     ? summaryMessages(transcript)
     : extractionMessages(subjects, transcript)
@@ -248,11 +259,11 @@ export async function extractBatch(
     })
   }
   // 和这个对象已有的有效事实一字不差的（不只是给模型看的那些）也算已经记过：按正文去库里查，不必把全部事实读出来
-  const existing = await withSpace(db, target.spaceId, (tx) =>
-    knownFacts(tx, writer.access, proposed),
-  )
   // 每个对象每天最多写这么多条（推翻旧事实写下的新一条也算），写满了的这次不写
-  const today = await withSpace(db, target.spaceId, (tx) => writesToday(tx, subjectIds))
+  const { existing, today } = await withSpace(db, target.spaceId, async (tx) => ({
+    existing: await knownFacts(tx, writer.access, proposed),
+    today: await writesToday(tx, subjectIds),
+  }))
   const writes: ExtractedWrite[] = proposed.filter((f) => {
     if (existing.has(`${f.subjectId}|${f.content.toLowerCase()}`)) {
       counts.unchanged++

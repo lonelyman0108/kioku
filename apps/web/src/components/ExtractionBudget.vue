@@ -9,32 +9,46 @@ import { icons } from '../icons'
 import { formatTime } from '../time'
 
 const props = defineProps<{ spaceId: string; editable: boolean }>()
+// 有没有没保存的修改：交给页面统一做离开前的确认
+const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
 const queryKey = computed(() => ['extraction-budget', props.spaceId])
 const usage = useQuery({ queryKey, queryFn: () => api.extractionBudget(props.spaceId) })
 
+// 表单从哪一版预算载入；用量隔一会儿就刷新，只有预算本身变了、而且没有改动时才跟上，免得冲掉没保存的输入
 const form = reactive<{ monthlyTokens?: number; dailyWritesPerSubject?: number }>({})
+const baseline = ref<{ monthlyTokens: number; dailyWritesPerSubject: number } | null>(null)
+const dirty = computed(
+  () =>
+    baseline.value !== null &&
+    (form.monthlyTokens !== baseline.value.monthlyTokens ||
+      form.dailyWritesPerSubject !== baseline.value.dailyWritesPerSubject),
+)
 watch(
   () => usage.data.value,
   (u) => {
-    if (!u) return
+    if (!u || dirty.value) return
+    baseline.value = {
+      monthlyTokens: u.monthlyTokens,
+      dailyWritesPerSubject: u.dailyWritesPerSubject,
+    }
     form.monthlyTokens = u.monthlyTokens
     form.dailyWritesPerSubject = u.dailyWritesPerSubject
   },
   { immediate: true },
 )
-const dirty = computed(
-  () =>
-    !!usage.data.value &&
-    (form.monthlyTokens !== usage.data.value.monthlyTokens ||
-      form.dailyWritesPerSubject !== usage.data.value.dailyWritesPerSubject),
-)
-const percent = computed(() => {
+watch(dirty, (d) => (dirtyModel.value = d), { immediate: true })
+// 向下取整：差一点用完时不显示成 100%；颜色看是不是真的用完了，和服务端换成只写摘要的条件一致
+const progress = computed(() => {
   const u = usage.data.value
   if (!u) return null
-  return u.monthlyTokens ? Math.min(100, Math.round((u.usedTokens / u.monthlyTokens) * 100)) : 100
+  const over = u.usedTokens >= u.monthlyTokens
+  return {
+    percent: over ? 100 : Math.floor((u.usedTokens / u.monthlyTokens) * 100),
+    color: over ? 'error' : u.usedTokens >= u.monthlyTokens * 0.8 ? 'warning' : 'primary',
+  } as const
 })
 
 const saving = ref(false)
@@ -42,10 +56,14 @@ async function save() {
   if (form.monthlyTokens === undefined || form.dailyWritesPerSubject === undefined) return
   saving.value = true
   try {
-    await api.saveExtractionBudget(props.spaceId, {
+    const saved = await api.saveExtractionBudget(props.spaceId, {
       monthlyTokens: form.monthlyTokens,
       dailyWritesPerSubject: form.dailyWritesPerSubject,
     })
+    baseline.value = {
+      monthlyTokens: saved.monthlyTokens,
+      dailyWritesPerSubject: saved.dailyWritesPerSubject,
+    }
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: queryKey.value }),
       queryClient.invalidateQueries({ queryKey: ['overview', props.spaceId] }),
@@ -88,11 +106,7 @@ async function save() {
             >（从 {{ formatTime(usage.data.value.periodStart) }} 起）</span
           >
         </p>
-        <UProgress
-          v-if="percent !== null"
-          :model-value="percent"
-          :color="percent >= 100 ? 'error' : percent >= 80 ? 'warning' : 'primary'"
-        />
+        <UProgress v-if="progress" :model-value="progress.percent" :color="progress.color" />
       </div>
       <form v-if="editable" class="flex flex-wrap items-end gap-3" @submit.prevent="save">
         <UFormField label="每月 token 上限">

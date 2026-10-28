@@ -202,6 +202,29 @@ describe.skipIf(!testDatabaseUrl)('抽取预算', () => {
     expect((await runs()).at(-1)).toMatchObject({ summaryOnly: false, added: 1 })
   })
 
+  it('预算用完了、这一批的 Key 又写不了会话摘要时，不请求模型', async () => {
+    key = await ws.issueKey(appId, {
+      readLayers: ['base', 'subject', 'episode'],
+      writeLayers: ['subject'],
+      maxSensitivity: 'public',
+      admin: false,
+    })
+    await setBudget(1_000, 20)
+    await seedRun(1_000)
+    await say('我在学日语')
+    const { model, calls } = fakeModel(JSON.stringify({ summary: '聊了学日语' }))
+    await extract(model)
+    expect(calls).toEqual([])
+    expect(await facts()).toEqual([])
+    expect((await runs()).at(-1)).toMatchObject({
+      summaryOnly: true,
+      error: '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要',
+    })
+    expect(
+      await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(conversationTurns)),
+    ).toEqual([])
+  })
+
   it('每个对象每天最多写这么多条，写满了的这次不写、计进 limited', async () => {
     await setBudget(2_000_000, 1)
     await say('我在学日语，也在学法语')
