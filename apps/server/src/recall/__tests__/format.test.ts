@@ -1,7 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
 import { formatBootBlock } from '../boot'
-import { formatRecallBlock, MAX_QUERY_CHARS, normalizeQuery } from '../recall'
+import {
+  anyTermQuery,
+  formatRecallBlock,
+  MAX_QUERY_CHARS,
+  normalizeQuery,
+  searchTerms,
+} from '../recall'
 
 const candidate = {
   uri: 'subject://x',
@@ -44,5 +50,18 @@ describe('召回块格式', () => {
     const listed = block.match(/^- core:\/\//gm) ?? []
     expect(listed.length).toBeLessThan(10)
     expect(block).toContain(`还有 ${10 - listed.length} 个`)
+  })
+})
+
+describe('全文检索的查询词', () => {
+  it('还有更长的词时去掉单字，只剩单字时保留', () => {
+    expect(searchTerms(['帮', '升级', '做', 'kioku'])).toEqual(['升级', 'kioku'])
+    expect(searchTerms(['猫', '狗'])).toEqual(['猫', '狗'])
+    expect(searchTerms([])).toEqual([])
+  })
+
+  it('拼成任一词命中的 tsquery，单引号与反斜杠转义', () => {
+    expect(anyTermQuery(['升级', 'kioku'])).toBe("'升级' | 'kioku'")
+    expect(anyTermQuery(["o'reilly", 'a\\b'])).toBe("'o''reilly' | 'a\\\\b'")
   })
 })
