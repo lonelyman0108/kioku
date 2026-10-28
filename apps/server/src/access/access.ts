@@ -24,6 +24,8 @@ export interface SessionContext {
 export interface AppAccessConfig {
   appId: string
   ownerAccountId: string
+  // 应用当前的人格。Key 写人格层只能写它，不能改继承链上的祖先；没有人格时人格层一条也写不了
+  personaId?: string | null
   // 主人私聊时最多提升到哪一级；不配置就不提升，和陌生人私聊一样
   elevateOwnerDirect?: 'internal'
 }
@@ -43,6 +45,9 @@ export interface Access {
   // 能写哪些应用的应用层。'all'：admin Key 与管理界面里的空间 owner；Key 只能写自己的应用；
   // 管理界面里的 editor 只能写自己是主人的应用，与签发 Key 的规则一致（Key 只能由应用主人签发）
   writableAppIds: ReadonlySet<string> | 'all'
+  // 能写哪些人格的人格层。'all'：admin Key 与管理界面；Key 只能写应用当前的人格，
+  // 否则群聊版的应用能改掉它继承的主人格的设定
+  writablePersonaIds: ReadonlySet<string> | 'all'
   // 允许按 URI 显式读取 secret；召回和搜索永远不返回 secret
   canReadSecret: boolean
   admin: boolean
@@ -73,6 +78,9 @@ export function resolveAccess(
     ownerAccountId: app.ownerAccountId,
     appId: app.appId,
     writableAppIds: scopes.admin ? ('all' as const) : new Set([app.appId]),
+    writablePersonaIds: scopes.admin
+      ? ('all' as const)
+      : new Set(app.personaId ? [app.personaId] : []),
     admin: scopes.admin,
   }
   const appScope = `app:${app.appId}`
@@ -210,19 +218,28 @@ export function canRead(access: Access, memory: MemoryFacts, options: ReadOption
 export interface WriteIntent {
   layer: Layer
   sensitivity: Sensitivity
-  // 应用层记忆所属的应用；其他层为 null
+  // 应用层记忆所属的应用、人格层记忆所属的人格；其他层为 null
   appId: string | null
+  personaId: string | null
 }
 
 export function canWrite(access: Access, intent: WriteIntent): boolean {
   if (!access.writeLayers.has(intent.layer)) return false
   if (intent.layer === 'app' && !canWriteApp(access, intent.appId)) return false
+  if (intent.layer === 'persona' && !canWritePersona(access, intent.personaId)) return false
   if (intent.sensitivity === 'secret') return access.canReadSecret
   return sensitivityRank(intent.sensitivity) <= sensitivityRank(access.maxSensitivity)
 }
 
 export function canWriteApp(access: Access, appId: string | null): boolean {
   return access.writableAppIds === 'all' || (appId !== null && access.writableAppIds.has(appId))
+}
+
+export function canWritePersona(access: Access, personaId: string | null): boolean {
+  return (
+    access.writablePersonaIds === 'all' ||
+    (personaId !== null && access.writablePersonaIds.has(personaId))
+  )
 }
 
 // 凭据归某个成员，和私人层一样：读说明与绑定要能读私人层、最高敏感级至少 private，
@@ -276,8 +293,9 @@ export function consoleAccess(
     ownerAccountId: accountId,
     appId: null,
     writableAppIds: role === 'owner' ? 'all' : new Set(role === 'editor' ? ownedAppIds : []),
-    canReadSecret: role === 'owner',
     // 人格层不设限：editor 本来就能建一个用任意人格的应用、再用它的 Key 写那个人格
+    writablePersonaIds: 'all',
+    canReadSecret: role === 'owner',
     admin: role === 'owner',
   }
 }

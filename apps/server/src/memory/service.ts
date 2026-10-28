@@ -52,8 +52,10 @@ import {
   canReadCredential,
   canWrite,
   canWriteApp,
+  canWritePersona,
   sensitivityRank,
   type Access,
+  type WriteIntent,
 } from '../access/access'
 import {
   looksLikePlaintextCredential,
@@ -137,6 +139,9 @@ const perMember = (layer: Layer) => PER_MEMBER_LAYERS.includes(layer)
 // 在共享的层与个人的层之间转换会改变谁看得到它（共享的记忆从别人那里消失，或个人的内容给了别人），
 // 所以只能由人在管理界面里做，通过 Key 改层或移动都不行
 const KEY_CROSS_OWNERSHIP = '通过 Key 不能把记忆在共享的层与个人的层之间转换，请在管理界面里改'
+
+// Key 只能写应用当前的人格：继承来的祖先人格也被别的应用用着，群聊版的应用不能改掉主人格的设定
+const PERSONA_WRITE = '通过 Key 只能写当前应用所用人格的记忆，继承来的人格请在管理界面里改'
 
 // 含凭据占位符的记忆只能在私人层、敏感级至少 private：读得到占位符的人，正好就是读得到凭据说明的人
 const PLACEHOLDER_SCOPE =
@@ -343,6 +348,14 @@ export class MemoryService {
     return row
   }
 
+  // 写不了时报 403。人格层单独说明：Key 读得到继承来的祖先人格，却只能写应用当前的人格
+  private assertWritable(intent: WriteIntent, message: string): void {
+    if (intent.layer === 'persona' && !canWritePersona(this.ctx.access, intent.personaId)) {
+      throw new MemoryError(403, PERSONA_WRITE)
+    }
+    if (!canWrite(this.ctx.access, intent)) throw new MemoryError(403, message)
+  }
+
   private async glossaryOf(tx: Tx, ids: string[]): Promise<Map<string, string[]>> {
     const map = new Map<string, string[]>()
     if (!ids.length) return map
@@ -407,12 +420,11 @@ export class MemoryService {
     })
   }
 
-  // 解析写入目标的层和归属；人格层只能写当前人格链上的人格，应用层只能写本应用，admin 例外
+  // 解析写入目标的层和归属；Key 的人格层只能写应用当前的人格，应用层只能写本应用，admin 例外
   private async resolveOwnership(
     tx: Tx,
     parsed: ParsedUri,
     requested: Layer | undefined,
-    personaIds: string[],
   ): Promise<Ownership> {
     const access = this.ctx.access
     const forced = layerForDomain(parsed.domain)
@@ -432,9 +444,7 @@ export class MemoryService {
     if (layer === 'persona') {
       const id = (await personaIdsBySlug(tx, [parsed.namespaceSlug!])).get(parsed.namespaceSlug!)
       if (!id) throw new MemoryError(404, `人格不存在：${parsed.namespaceSlug}`)
-      if (!access.admin && !personaIds.includes(id)) {
-        throw new MemoryError(403, '只能写当前应用所用人格及其祖先的记忆')
-      }
+      if (!canWritePersona(access, id)) throw new MemoryError(403, PERSONA_WRITE)
       ownership.personaId = id
     }
     if (layer === 'app') {
@@ -576,12 +586,13 @@ export class MemoryService {
 
   async create(input: CreateMemoryRequest, meta: CreateMeta = {}): Promise<MemoryView> {
     const parsed = parse(input.uri)
-    return this.write(async (tx, personaIds, released) => {
-      const ownership = await this.resolveOwnership(tx, parsed, input.layer, personaIds)
+    return this.write(async (tx, _personaIds, released) => {
+      const ownership = await this.resolveOwnership(tx, parsed, input.layer)
       const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
-      if (!canWrite(this.ctx.access, { ...ownership, sensitivity })) {
-        throw new MemoryError(403, `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`)
-      }
+      this.assertWritable(
+        { ...ownership, sensitivity },
+        `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`,
+      )
       if (meta.requireAppOwner && ownership.appId) {
         await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
       }
@@ -683,9 +694,10 @@ export class MemoryService {
     }
     const sensitivity = input.sensitivity ?? before.sensitivity
     for (const s of new Set([before.sensitivity, sensitivity])) {
-      if (!canWrite(this.ctx.access, { ...before, sensitivity: s })) {
-        throw new MemoryError(403, `没有权限改 ${before.layer} 层的 ${s} 级记忆`)
-      }
+      this.assertWritable(
+        { ...before, sensitivity: s },
+        `没有权限改 ${before.layer} 层的 ${s} 级记忆`,
+      )
     }
 
     // 改层只在 base、owner、private 之间：共享与按成员互转时归属跟着变，按成员的层归写入方
@@ -709,7 +721,7 @@ export class MemoryService {
       if (this.viaKey && perMember(layer) !== perMember(before.layer)) {
         throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
       }
-      if (!canWrite(this.ctx.access, { layer, sensitivity, appId: null })) {
+      if (!canWrite(this.ctx.access, { layer, sensitivity, appId: null, personaId: null })) {
         throw new MemoryError(403, `没有权限把记忆改到 ${layer} 层的 ${sensitivity} 级`)
       }
       // 新归属下已失效或过期、又挡着 URI 的记录先让出；真冲突由触发器与唯一索引判断，返回 409
@@ -835,9 +847,7 @@ export class MemoryService {
     const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
       checkExpected(before, expected)
-      if (!canWrite(this.ctx.access, before)) {
-        throw new MemoryError(403, `没有权限删除 ${before.layer} 层的记忆`)
-      }
+      this.assertWritable(before, `没有权限删除 ${before.layer} 层的记忆`)
       // 条件里带上读到的版本：检查之后、删除之前别人提交的修改不会被一起删掉，
       // 事件里的「删除前」快照也就是真正被删掉的那一版
       const [row] = await tx
@@ -868,9 +878,7 @@ export class MemoryService {
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, from, personaIds)
       checkExpected(before, input)
-      if (!canWrite(this.ctx.access, before)) {
-        throw new MemoryError(403, `没有权限移动 ${before.layer} 层的记忆`)
-      }
+      this.assertWritable(before, `没有权限移动 ${before.layer} 层的记忆`)
       const forced = layerForDomain(to.domain)
       if (forced && input.layer) {
         throw new MemoryError(400, `${to.domain}:// 下的层由 URI 决定，不用指定 layer`)
@@ -898,14 +906,14 @@ export class MemoryService {
           tx,
           to,
           forced ? undefined : (input.layer ?? before.layer),
-          personaIds,
         )
         if (this.viaKey && perMember(ownership.layer) !== perMember(before.layer)) {
           throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
         }
-        if (!canWrite(this.ctx.access, { ...ownership, sensitivity: before.sensitivity })) {
-          throw new MemoryError(403, `没有权限把记忆移到 ${ownership.layer} 层`)
-        }
+        this.assertWritable(
+          { ...ownership, sensitivity: before.sensitivity },
+          `没有权限把记忆移到 ${ownership.layer} 层`,
+        )
       }
       await this.checkKeptRefs(tx, before, ownership)
       await this.claimUri(tx, to, ownership, released)
@@ -1475,9 +1483,7 @@ export class MemoryService {
     return this.write(async (tx, _personaIds, released) => {
       const row = await this.findManageable(tx, input.memoryId)
       if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
-      if (!canWrite(this.ctx.access, row)) {
-        throw new MemoryError(403, `没有权限恢复 ${row.layer} 层的记忆`)
-      }
+      this.assertWritable(row, `没有权限恢复 ${row.layer} 层的记忆`)
       // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
       await this.checkKeptRefs(tx, row, row)
       await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released)

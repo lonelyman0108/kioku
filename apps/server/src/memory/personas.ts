@@ -1,7 +1,10 @@
-import { eq, inArray } from 'drizzle-orm'
+import { and, eq, inArray, ne, or, sql, type SQL, type SQLWrapper } from 'drizzle-orm'
+import { alias } from 'drizzle-orm/pg-core'
 
+import type { Access } from '../access/access'
 import { withSpace, type Db, type Tx } from '../db/client'
-import { personas } from '../db/schema'
+import { memories, personas } from '../db/schema'
+import { readableConditions } from './filter'
 
 const MAX_DEPTH = 8
 
@@ -45,4 +48,30 @@ export function runInSpace<T>(
         : await personaChain(tx, persona)
     return fn(tx, personaIds)
   })
+}
+
+// 人格继承的覆盖：子人格有同一相对路径（persona://<人格>/ 之后的部分）的节点时，boot、召回与近期列表里
+// 不再放祖先的那条。只在这次请求读得到的节点之间比较，子人格的那条读不到时照常用祖先的。
+// 这是挑选规则，不是权限：按 URI 读取和树浏览照样看得到祖先的节点。chain 是从当前人格到最远祖先的继承链
+const NEARER = 'nearer'
+const nearer = alias(memories, NEARER)
+
+export function personaOverride(access: Access, chain: readonly string[]): SQL | undefined {
+  if (chain.length < 2) return undefined
+  const ids = sql`array[${sql.join(
+    chain.map((id) => sql`${id}::uuid`),
+    sql`, `,
+  )}]`
+  const relative = (path: SQLWrapper) => sql`regexp_replace(${path}, '^[^/]+', '')`
+  const overriding = and(
+    eq(nearer.layer, 'persona'),
+    readableConditions(access, { personaIds: chain }, nearer),
+    sql`array_position(${ids}, ${nearer.personaId}) < array_position(${ids}, ${memories.personaId})`,
+    sql`${relative(nearer.path)} = ${relative(memories.path)}`,
+  )
+  return or(
+    ne(memories.layer, 'persona'),
+    // 别名表在 sql 模板里只渲染出别名本身，FROM 要自己写全
+    sql`not exists (select 1 from ${memories} as ${sql.identifier(NEARER)} where ${overriding})`,
+  )
 }

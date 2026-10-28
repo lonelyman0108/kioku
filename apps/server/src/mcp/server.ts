@@ -166,7 +166,8 @@ export function buildMcpServer(
     {
       description:
         '新建一条长期记忆。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。' +
-        'persona://<人格>/ 与 app://<应用>/ 下的记忆分别属于人格层和应用层；其余 domain 不指定 layer 时按私人层保存。',
+        'persona://<人格>/ 与 app://<应用>/ 下的记忆分别属于人格层和应用层，只能写本应用当前的人格与本应用；' +
+        '其余 domain 不指定 layer 时按私人层保存。',
       inputSchema: {
         // 长度与数量限制和 REST 共用 contracts 里的定义
         uri: MemoryUri.describe('新记忆的 URI'),
