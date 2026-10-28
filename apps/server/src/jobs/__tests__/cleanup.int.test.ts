@@ -46,7 +46,7 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
       { username: '["old"]', count: 3, resetAt: past() },
       { username: '["live"]', count: 3, resetAt: future() },
     ])
-    expect(await cleanupExpired(database.db)).toEqual({ sessions: 1, attempts: 1 })
+    expect(await cleanupExpired(database.db)).toEqual({ sessions: 1, attempts: 1, recallEvents: 0 })
     // 初始化时登录的那个会话和 live 都还在
     const left = await database.db.select({ hash: sessions.tokenHash }).from(sessions)
     expect(left).toHaveLength(2)

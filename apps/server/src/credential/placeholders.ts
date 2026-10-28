@@ -52,3 +52,22 @@ export function placeholderIdentifiers(text: string): Set<string> {
 export function looksLikePlaintextCredential(text: string): boolean {
   return PLAINTEXT_CREDENTIAL.test(text)
 }
+
+// 把像明文凭据的片段打码：和 looksLikePlaintextCredential 同一条规则，命中的值连同后面到空白为止的部分换成星号。
+// 规则会漏，认不出的照原样留下；召回事件存提示语之前用它
+const PLAINTEXT_ALL = new RegExp(PLAINTEXT_CREDENTIAL.source, 'gi')
+export function maskPlaintextCredentials(text: string): string {
+  let out = ''
+  let last = 0
+  for (const m of text.matchAll(PLAINTEXT_ALL)) {
+    // 落在上一段已经打码的值里的，跳过
+    if (m.index < last) continue
+    // 「密码：x」这类只匹配到值的第一个字，sk- 开头的整串都是值
+    const valueAt = m.index + (/^sk-/i.test(m[0]) ? 0 : m[0].length - 1)
+    let end = m.index + m[0].length
+    while (end < text.length && !/\s/.test(text[end]!)) end++
+    out += `${text.slice(last, valueAt)}***`
+    last = end
+  }
+  return out + text.slice(last)
+}

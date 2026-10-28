@@ -49,7 +49,7 @@ export async function bootPreview(
     })),
     omitted: start.boot.omitted,
     recent: start.recent,
-    related: start.related,
+    related: start.related.map(publicCandidate),
     dropped: start.dropped,
   }
 }

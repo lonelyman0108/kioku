@@ -64,6 +64,8 @@ export type RuntimeFamily = z.infer<typeof RuntimeFamily>
 
 export const AppConfig = z.object({
   elevateOwnerDirect: z.literal('internal').optional(),
+  // 召回事件里记不记提示语（前 200 字，像凭据的片段打码）；不设时记
+  recordPrompt: z.boolean().optional(),
 })
 export type AppConfig = z.infer<typeof AppConfig>
 

@@ -157,3 +157,13 @@ export const BootPreview = z.object({
   dropped: z.array(z.enum(['recent', 'related'])),
 })
 export type BootPreview = z.infer<typeof BootPreview>
+
+// 召回事件的来路：会话开始的项目召回、每轮输入的召回、MCP 搜索、REST 召回。管理界面里的搜索与调试不记
+export const RECALL_SOURCES = [
+  'session.start',
+  'prompt.submit',
+  'mcp.search',
+  'rest.recall',
+] as const
+export const RecallSource = z.enum(RECALL_SOURCES)
+export type RecallSource = z.infer<typeof RecallSource>

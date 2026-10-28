@@ -6,6 +6,7 @@ import { assertRuntimeRole, connect } from './db/client'
 import { runMigrations } from './db/migrate'
 import { settingsEmbedderSource } from './embedding/source'
 import { startJobs } from './jobs/queue'
+import { settleRecallEvents } from './recall/events'
 
 const config = loadConfig()
 const database = connect(config.databaseUrl)
@@ -39,6 +40,8 @@ const server = serve({ fetch: app.fetch, port: config.port }, (info) => {
 for (const signal of ['SIGINT', 'SIGTERM'] as const) {
   process.once(signal, () => {
     server.close()
-    void jobs.stop().finally(() => database.close().finally(() => process.exit(0)))
+    void Promise.all([jobs.stop(), settleRecallEvents()]).finally(() =>
+      database.close().finally(() => process.exit(0)),
+    )
   })
 }

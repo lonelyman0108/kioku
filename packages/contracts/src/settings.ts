@@ -29,3 +29,10 @@ export const EmbeddingTestResult = z.object({
   error: z.string().nullable(),
 })
 export type EmbeddingTestResult = z.infer<typeof EmbeddingTestResult>
+
+// 召回事件明细保留多少天：清理任务删掉更早的明细，删之前把次数并入每条记忆的累计统计
+export const DEFAULT_RECALL_RETENTION_DAYS = 30
+export const RecallSettings = z.object({
+  retentionDays: z.number().int().min(1).max(365),
+})
+export type RecallSettings = z.infer<typeof RecallSettings>

@@ -5,6 +5,7 @@ import {
   EmbeddingSettingsView,
   EmbeddingTestResult,
   ErrorResponse,
+  RecallSettings,
   UpdateEmbeddingSettings,
 } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
@@ -21,6 +22,7 @@ import {
 } from '../embedding/settings'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
 
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 
@@ -59,6 +61,23 @@ const status = createRoute({
   tags: ['settings'],
   summary: '整个实例的向量覆盖率：应当有向量的记忆里有多少已经生成',
   responses: { 200: jsonResponse('覆盖率', EmbeddingCoverage), 403: forbidden },
+})
+
+const recallView = createRoute({
+  method: 'get',
+  path: '/settings/recall',
+  tags: ['settings'],
+  summary: '召回事件明细保留多少天',
+  responses: { 200: jsonResponse('召回设置', RecallSettings), 403: forbidden },
+})
+
+const recallUpdate = createRoute({
+  method: 'put',
+  path: '/settings/recall',
+  tags: ['settings'],
+  summary: '修改召回事件明细的保留天数；更早的明细在下一次清理时并入累计统计后删除',
+  request: { body: jsonBody(RecallSettings) },
+  responses: { 200: jsonResponse('召回设置', RecallSettings), 403: forbidden },
 })
 
 const rebuild = createRoute({
@@ -120,6 +139,12 @@ export function settingsRoutes(deps: Deps) {
       const view = await embeddingSettingsView(deps.db)
       const coverage = await embeddingCoverage(deps.db, view.model)
       return c.json({ configured: view.configured, model: view.model, ...coverage }, 200)
+    })
+    .openapi(recallView, async (c) => c.json(await loadRecallSettings(deps.db), 200))
+    .openapi(recallUpdate, async (c) => {
+      const value = c.req.valid('json')
+      await saveRecallSettings(deps.db, value)
+      return c.json(value, 200)
     })
     .openapi(rebuild, async (c) => {
       if (!(await embeddingSettingsView(deps.db)).configured) {
