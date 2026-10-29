@@ -8,6 +8,8 @@ export interface S3Location {
   bucket: string
   accessKeyId: string
   secretAccessKey: string
+  // 临时凭据（例如角色换来的）带的会话令牌
+  sessionToken?: string
 }
 
 export interface S3Object {
@@ -49,6 +51,7 @@ export function s3Client(location: S3Location) {
   const aws = new AwsClient({
     accessKeyId: location.accessKeyId,
     secretAccessKey: location.secretAccessKey,
+    ...(location.sessionToken ? { sessionToken: location.sessionToken } : {}),
     region: location.region,
     service: 's3',
     retries: 2,
@@ -76,9 +79,14 @@ export function s3Client(location: S3Location) {
     return res
   }
 
+  // 用不到的响应正文也读完：不然连接要等到垃圾回收才放回连接池
+  const drain = async (res: Response) => {
+    await res.arrayBuffer()
+  }
+
   return {
     async put(key: string, body: Uint8Array): Promise<void> {
-      await request('PUT', urlOf(key), { body, timeoutMs: TRANSFER_TIMEOUT_MS })
+      await drain(await request('PUT', urlOf(key), { body, timeoutMs: TRANSFER_TIMEOUT_MS }))
     },
 
     async get(key: string): Promise<Buffer> {
@@ -87,10 +95,10 @@ export function s3Client(location: S3Location) {
     },
 
     async delete(key: string): Promise<void> {
-      await request('DELETE', urlOf(key))
+      await drain(await request('DELETE', urlOf(key)))
     },
 
-    // 列出前缀下的全部对象（按页取完）
+    // 列出前缀这一层的对象（按页取完）：带上分隔符，下面的子目录不展开
     async list(prefix: string): Promise<S3Object[]> {
       const objects: S3Object[] = []
       let token: string | undefined
@@ -98,6 +106,7 @@ export function s3Client(location: S3Location) {
         const url = new URL(base)
         url.searchParams.set('list-type', '2')
         url.searchParams.set('prefix', prefix)
+        url.searchParams.set('delimiter', '/')
         if (token) url.searchParams.set('continuation-token', token)
         const xml = await (await request('GET', url.toString())).text()
         for (const [, entry] of xml.matchAll(/<Contents>([\s\S]*?)<\/Contents>/g)) {

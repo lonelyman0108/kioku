@@ -1,4 +1,6 @@
 import { randomBytes } from 'node:crypto'
+import { Writable } from 'node:stream'
+import { fileURLToPath } from 'node:url'
 
 import type { BackupObjectList, BackupSettingsView, BackupTestResult } from '@kioku/contracts'
 import { inArray } from 'drizzle-orm'
@@ -13,9 +15,17 @@ import type { Jobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { startFakeS3Server, type FakeS3Server } from '../../testing/fakeS3Server'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
-import { readBackup } from '../restore'
-import { loadBackupConfig, loadBackupStatus } from '../settings'
+import { createBackup } from '../export'
+import { readBackup, restoreBackup } from '../restore'
+import {
+  backupSettingsView,
+  loadBackupConfig,
+  loadBackupStatus,
+  recordBackupSuccess,
+} from '../settings'
 import { backupJob, fetchBackup } from '../storage'
+
+const migrationsFolder = fileURLToPath(new URL('../../../migrations', import.meta.url))
 
 describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
   let database: Database
@@ -128,8 +138,11 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect(moved.status).toBe(400)
     expect(await moved.text()).toContain('接口主机变了')
 
-    const bad = await send('PUT', '', settingsInput({ prefix: '/kioku/' }))
-    expect(bad.status).toBe(400)
+    expect((await send('PUT', '', settingsInput({ prefix: '/kioku/' }))).status).toBe(400)
+    // 接口地址带查询串或片段：拼出的对象地址会错，不让保存
+    expect((await send('PUT', '', settingsInput({ endpoint: `${s3.endpoint}/?x=1` }))).status).toBe(
+      400,
+    )
 
     const member = await addMember(database.db, ws.spaceId, 'bob', 'owner')
     expect((await send('GET', '', undefined, member.cookie)).status).toBe(403)
@@ -149,6 +162,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     old('kioku/kioku-2026-01-01T00-00-00Z.backup')
     old('kioku/kioku-2026-01-02T00-00-00Z.backup')
     old('kioku/notes.txt')
+    old('kioku/sub/kioku-2026-01-01T00-00-00Z.backup')
     old('other/kioku-2026-01-01T00-00-00Z.backup')
 
     expect((await send('POST', '/run')).status).toBe(202)
@@ -163,8 +177,13 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       `kioku-test/kioku/kioku-2026-01-02T00-00-00Z.backup`,
       `kioku-test/${made.object}`,
       'kioku-test/kioku/notes.txt',
+      'kioku-test/kioku/sub/kioku-2026-01-01T00-00-00Z.backup',
       'kioku-test/other/kioku-2026-01-01T00-00-00Z.backup',
     ])
+    // 列出时只看前缀这一层，子目录不展开
+    expect(
+      s3.requests.filter((r) => r.method === 'GET').every((r) => r.query.includes('delimiter=%2F')),
+    ).toBe(true)
     const uploaded = s3.objects.get(`kioku-test/${made.object}`)!.body
     expect(uploaded.length).toBe(made.bytes)
     expect(readBackup(masterKey, uploaded).header.format).toBe('kioku-backup')
@@ -190,6 +209,65 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       (await fetchBackup(location, 'kioku', 'kioku/kioku-2026-01-02T00-00-00Z.backup')).file,
     ).toEqual(Buffer.from('old'))
     await expect(fetchBackup(location, 'nothing', null)).rejects.toThrow('下没有备份')
+    // 临时凭据带上会话令牌
+    s3.requests.length = 0
+    await fetchBackup({ ...location, sessionToken: 'session-token' }, 'kioku', null)
+    expect(s3.requests.length).toBeGreaterThan(0)
+    expect(s3.requests.every((r) => r.token === 'session-token')).toBe(true)
+  })
+
+  it('删旧的时刚传上去的这份总留着：存储桶里有时间更晚的也不删它', async () => {
+    await save({ keep: 1 })
+    s3.objects.set('kioku-test/kioku/kioku-2099-01-01T00-00-00Z.backup', {
+      body: Buffer.from('future'),
+      at: '2099-01-01T00:00:00Z',
+    })
+    expect(await backupJob(database.db, masterKey, true)).toBe('done')
+    const made = (await loadBackupStatus(database.db)).lastSuccess!
+    expect(keys()).toEqual([`kioku-test/${made.object}`])
+  })
+
+  it('结果只算给做备份时的存储位置：换了位置清掉，清掉设置之后做完的不再记下', async () => {
+    await save()
+    expect(await backupJob(database.db, masterKey, true)).toBe('done')
+    const config = (await loadBackupConfig(database.db, masterKey))!
+    const run = (await loadBackupStatus(database.db)).lastSuccess!
+    // 换了前缀：之前的结果不算数，下一个小时的检查往新位置做一份
+    await save({ prefix: 'moved', secretAccessKey: undefined })
+    expect((await loadBackupStatus(database.db)).lastSuccess).toBeNull()
+    expect(await backupJob(database.db, masterKey, false)).toBe('done')
+    expect((await loadBackupStatus(database.db)).lastSuccess?.object).toMatch(/^moved\//)
+    // 正在做的时候换了位置、或者清掉了设置：做完也不记下
+    await recordBackupSuccess(database.db, config, run)
+    expect((await loadBackupStatus(database.db)).lastSuccess?.object).toMatch(/^moved\//)
+    expect((await send('DELETE', '')).status).toBe(204)
+    await recordBackupSuccess(database.db, { ...config, prefix: 'moved' }, run)
+    expect((await loadBackupStatus(database.db)).lastSuccess).toBeNull()
+  })
+
+  it('恢复出的实例不沿用备份设置', async () => {
+    await save()
+    const chunks: Buffer[] = []
+    await createBackup(
+      database.db,
+      masterKey,
+      new Writable({
+        write(chunk: Buffer, _encoding, done) {
+          chunks.push(chunk)
+          done()
+        },
+      }),
+    )
+    await resetDatabase(database)
+    await database.db.delete(settings)
+    const result = await restoreBackup(database, {
+      migrationsFolder,
+      masterKey,
+      file: Buffer.concat(chunks),
+    })
+    expect(result.backupCleared).toBe(true)
+    expect(await backupJob(database.db, masterKey, true)).toBe('skipped')
+    expect((await backupSettingsView(database.db)).configured).toBe(false)
   })
 
   it('定时：到了钟点才做，做过了不重复做', async () => {

@@ -1,22 +1,16 @@
 import type { BackupSettingsView, BackupStatus, UpdateBackupSettings } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { eq, inArray } from 'drizzle-orm'
 
 import type { Sealed } from '../crypto/envelope'
 import type { MasterKey } from '../crypto/keyring'
-import type { Db } from '../db/client'
+import type { Db, Tx } from '../db/client'
 import { settings } from '../db/schema'
-import {
-  openApiKey,
-  resolveApiKey,
-  sameOrigin,
-  SettingsInputError,
-  unsealJson,
-  type SealedJson,
-} from '../settings/endpoint'
+import { openApiKey, resolveApiKey, unsealJson, type SealedJson } from '../settings/endpoint'
 import type { S3Location } from './s3'
 
 // 备份存储的设置与最近的结果，存在 settings 表里。Secret Access Key 用主密钥加密，aad 绑定设置项名；
-// 结果单独存一项：后台任务记结果不会和管理员保存设置互相覆盖
+// 结果单独存一项：后台任务记结果不会和管理员保存设置互相覆盖。结果只对一个存储位置（接口、存储桶、前缀）有效：
+// 换了位置就清掉；任务记结果时位置已经变了、或者设置清掉了，就不记
 const KEY = 'backup'
 const STATUS_KEY = 'backup-status'
 const AAD = `settings:${KEY}`
@@ -39,6 +33,10 @@ export interface BackupConfig extends S3Location {
   keep: number
 }
 
+type Location = Pick<Stored, 'endpoint' | 'bucket' | 'prefix'>
+const sameLocation = (a: Location, b: Location) =>
+  a.endpoint === b.endpoint && a.bucket === b.bucket && a.prefix === b.prefix
+
 async function loadStored(db: Db): Promise<Stored | undefined> {
   const [row] = await db.select().from(settings).where(eq(settings.key, KEY)).limit(1)
   return row?.value as Stored | undefined
@@ -49,8 +47,16 @@ export async function loadBackupStatus(db: Db): Promise<BackupStatus> {
   return (row?.value as BackupStatus | undefined) ?? { lastSuccess: null, lastError: null }
 }
 
-async function saveStatus(db: Db, change: (status: BackupStatus) => BackupStatus): Promise<void> {
+// 记结果：锁住设置，确认还是做备份时的那个位置才写
+async function saveStatus(
+  db: Db,
+  location: Location,
+  change: (status: BackupStatus) => BackupStatus,
+): Promise<void> {
   await db.transaction(async (tx) => {
+    const [config] = await tx.select().from(settings).where(eq(settings.key, KEY)).for('share')
+    const stored = config?.value as Stored | undefined
+    if (!stored || !sameLocation(stored, location)) return
     const [row] = await tx.select().from(settings).where(eq(settings.key, STATUS_KEY)).for('update')
     const value = change(
       (row?.value as BackupStatus | undefined) ?? { lastSuccess: null, lastError: null },
@@ -65,17 +71,18 @@ async function saveStatus(db: Db, change: (status: BackupStatus) => BackupStatus
 // 记下做成的一份；warning 是做成之后的小问题（例如删旧的出错），没有就清掉之前的错误
 export function recordBackupSuccess(
   db: Db,
+  location: Location,
   run: NonNullable<BackupStatus['lastSuccess']>,
   warning: string | null = null,
 ): Promise<void> {
-  return saveStatus(db, () => ({
+  return saveStatus(db, location, () => ({
     lastSuccess: run,
     lastError: warning ? { message: warning.slice(0, 500), at: run.at } : null,
   }))
 }
 
-export function recordBackupError(db: Db, message: string): Promise<void> {
-  return saveStatus(db, (status) => ({
+export function recordBackupError(db: Db, location: Location, message: string): Promise<void> {
+  return saveStatus(db, location, (status) => ({
     ...status,
     lastError: { message: message.slice(0, 500), at: new Date().toISOString() },
   }))
@@ -98,7 +105,8 @@ export async function backupSettingsView(db: Db): Promise<BackupSettingsView> {
 }
 
 // 保存：Secret 不填表示沿用已保存的，规则同模型接口的 Key（换了接口主机就要重填，免得把密钥发给新主机）。
-// 读出、改、写回在一个事务里并锁住这一行，沿用的 Secret 不会把轮换主密钥刚换好的包装覆盖回去
+// 读出、改、写回在一个事务里并锁住这一行，沿用的 Secret 不会把轮换主密钥刚换好的包装覆盖回去。
+// 换了存储位置，之前的结果不再算数：清掉，下一个小时的检查就往新位置做一份
 export async function saveBackupSettings(
   db: Db,
   masterKey: MasterKey | null,
@@ -107,21 +115,14 @@ export async function saveBackupSettings(
   await db.transaction(async (tx) => {
     const [row] = await tx.select().from(settings).where(eq(settings.key, KEY)).for('update')
     const stored = row?.value as Stored | undefined
-    if (
-      stored &&
-      input.secretAccessKey === undefined &&
-      !sameOrigin(stored.endpoint, input.endpoint)
-    ) {
-      throw new SettingsInputError('接口主机变了，请重新填写 Secret Access Key')
-    }
     const secretAccessKey = resolveApiKey(
       stored && { baseUrl: stored.endpoint, apiKey: stored.secretAccessKey },
       { baseUrl: input.endpoint, apiKey: input.secretAccessKey },
       masterKey,
       AAD,
       BACKUP_LABEL,
-    )
-    if (!secretAccessKey) throw new SettingsInputError('请填写 Secret Access Key')
+      { name: 'Secret Access Key', required: true },
+    )!
     const value: Stored = {
       endpoint: input.endpoint,
       region: input.region,
@@ -136,15 +137,25 @@ export async function saveBackupSettings(
       .insert(settings)
       .values({ key: KEY, value })
       .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+    if (!stored || !sameLocation(stored, value)) {
+      await tx.delete(settings).where(eq(settings.key, STATUS_KEY))
+    }
   })
 }
 
 // 清掉设置，定时备份随即停止；最近的结果一起清掉。存储桶里已有的备份不动
 export async function clearBackupSettings(db: Db): Promise<void> {
-  await db.transaction(async (tx) => {
-    await tx.delete(settings).where(eq(settings.key, KEY))
-    await tx.delete(settings).where(eq(settings.key, STATUS_KEY))
-  })
+  await db.delete(settings).where(inArray(settings.key, [KEY, STATUS_KEY]))
+}
+
+// 恢复出的实例不沿用备份设置：试恢复的实例会和正在用的实例往同一个目录写、互相把对方的备份当旧的删掉。
+// 在恢复的事务里清掉，返回之前是否配着
+export async function forgetBackupSettings(tx: Tx): Promise<boolean> {
+  const removed = await tx
+    .delete(settings)
+    .where(inArray(settings.key, [KEY, STATUS_KEY]))
+    .returning({ key: settings.key })
+  return removed.some((r) => r.key === KEY)
 }
 
 export async function loadBackupConfig(

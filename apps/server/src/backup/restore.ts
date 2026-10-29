@@ -3,10 +3,11 @@ import { readMigrationFiles } from 'drizzle-orm/migrator'
 import { z } from 'zod'
 
 import type { MasterKey } from '../crypto/keyring'
-import type { Database, Tx } from '../db/client'
+import type { Database, Db, Tx } from '../db/client'
 import { applyMigrations, lastMigration, lockMigrations } from '../db/migrate'
 import { BACKUP_FORMAT, BACKUP_VERSION } from './export'
 import { openBackup } from './format'
+import { forgetBackupSettings } from './settings'
 
 const Header = z.object({
   format: z.literal(BACKUP_FORMAT),
@@ -97,6 +98,27 @@ export interface RestoreSummary {
   rows: Record<string, number>
   // 备份来自较早的版本时，写回之后又执行了几个这个版本新增的迁移
   upgraded: number
+  // 备份里配着备份存储，恢复时清掉了
+  backupCleared: boolean
+}
+
+const initializedError = (accounts: number, spaces: number) =>
+  new Error(
+    `这个实例已经初始化过（${accounts} 个账号、${spaces} 个空间）：只能恢复到没有账号和空间的新实例`,
+  )
+
+// 恢复之前先看一眼：库还没建表、或者没有账号和空间才能恢复。写回时在事务里锁住表再查一遍
+export async function assertUninitialized(db: Db): Promise<void> {
+  const [table] = await db.execute<{ exists: boolean }>(
+    sql`select to_regclass('public.accounts') is not null as exists`,
+  )
+  if (!table?.exists) return
+  const [existing] = await db.execute<{ accounts: number; spaces: number }>(sql`
+    select (select count(*) from public.accounts)::int as accounts,
+      (select count(*) from public.spaces)::int as spaces`)
+  if (existing!.accounts || existing!.spaces) {
+    throw initializedError(existing!.accounts, existing!.spaces)
+  }
 }
 
 // 把备份恢复到一个没有初始化的实例（没有账号和空间）。库是新建的空库时，先把迁移执行到做备份时的位置
@@ -130,7 +152,7 @@ export async function restoreBackup(
       if (!(await lastMigration(tx))) await applyMigrations(tx, local.slice(0, position))
     })
   }
-  const rows = await db.transaction(async (tx) => {
+  const { rows, backupCleared } = await db.transaction(async (tx) => {
     // 先拿到迁移的锁再核对库停在哪里：同时启动的服务要等这个事务结束才能迁移
     await lockMigrations(tx)
     const applied = await lastMigration(tx)
@@ -144,9 +166,9 @@ export async function restoreBackup(
     // 迁移按没有设置空间的连接执行，和服务启动时一样
     await tx.execute(sql`select set_config('app.space_id', '', true)`)
     await applyMigrations(tx, local.slice(position))
-    return counts
+    return { rows: counts, backupCleared: await forgetBackupSettings(tx) }
   })
-  return { header, rows, upgraded: local.length - position }
+  return { header, rows, upgraded: local.length - position, backupCleared }
 }
 
 // 写回一段时每批最多多少行、多少字节
@@ -192,9 +214,7 @@ async function writeSections(
     select (select count(*) from public.accounts)::int as accounts,
       (select count(*) from public.spaces)::int as spaces`)
   if (existing!.accounts || existing!.spaces) {
-    throw new Error(
-      `这个实例已经初始化过（${existing!.accounts} 个账号、${existing!.spaces} 个空间）：只能恢复到没有账号和空间的新实例`,
-    )
+    throw initializedError(existing!.accounts, existing!.spaces)
   }
   // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：URI 互斥的检查每行一把咨询锁，
   // 上万条记忆放在一个事务里会占满锁表；触发器写下的派生数据本身也在备份里，再执行一遍会重复。外键照常检查。

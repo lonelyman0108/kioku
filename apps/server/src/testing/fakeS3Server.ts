@@ -7,7 +7,8 @@ export interface FakeS3Server {
   endpoint: string
   // 存着的对象：键是「存储桶/对象名」
   objects: Map<string, { body: Buffer; at: string }>
-  requests: { method: string; path: string }[]
+  // 收到的请求：方法、路径、查询串与带没带会话令牌
+  requests: { method: string; path: string; query: string; token: string | null }[]
   // 之后这种方法的请求（不给就是全部）返回这个状态码；undefined 恢复正常
   fail(status: number | undefined, method?: string): void
   // 列出时每页最多几个
@@ -32,7 +33,13 @@ export async function startFakeS3Server(accessKeyId: string): Promise<FakeS3Serv
     req.on('end', () => {
       const method = req.method ?? 'GET'
       const url = new URL(req.url ?? '/', 'http://127.0.0.1')
-      requests.push({ method, path: url.pathname })
+      const token = req.headers['x-amz-security-token']
+      requests.push({
+        method,
+        path: url.pathname,
+        query: url.search,
+        token: typeof token === 'string' ? token : null,
+      })
       const reply = (status: number, body = '', type = 'application/xml') =>
         res.writeHead(status, { 'content-type': type }).end(body)
       const failure = failures.get(method) ?? failures.get('*')
@@ -46,9 +53,14 @@ export async function startFakeS3Server(accessKeyId: string): Promise<FakeS3Serv
       const id = `${bucket}/${key}`
       if (!key && method === 'GET') {
         const prefix = url.searchParams.get('prefix') ?? ''
+        const delimiter = url.searchParams.get('delimiter')
         const start = Number(url.searchParams.get('continuation-token') ?? 0)
+        // 带了分隔符时只列前缀这一层，下面子目录里的不列
         const matching = [...objects.keys()]
           .filter((k) => k.startsWith(`${bucket}/${prefix}`))
+          .filter(
+            (k) => !delimiter || !k.slice(bucket!.length + 1 + prefix.length).includes(delimiter),
+          )
           .sort()
         const page = matching.slice(start, start + state.pageSize)
         const truncated = start + state.pageSize < matching.length

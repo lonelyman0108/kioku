@@ -143,7 +143,9 @@ function buildChannels(
   return inputs.map((input, i) => {
     const mine = input.id ? own.find((c) => c.id === input.id) : undefined
     const previous = mine ?? (input.id ? others.find((c) => c.id === input.id) : undefined)
-    const apiKey = resolveApiKey(previous, input, masterKey, AAD, LABEL, `第 ${i + 1} 个渠道的`)
+    const apiKey = resolveApiKey(previous, input, masterKey, AAD, LABEL, {
+      where: `第 ${i + 1} 个渠道的`,
+    })
     return { id: mine?.id ?? newId(), baseUrl: input.baseUrl, model: input.model, apiKey }
   })
 }

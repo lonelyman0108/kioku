@@ -172,8 +172,14 @@ const ObjectPrefix = z
     '前缀是存储桶里的目录，例如 kioku 或 backups/kioku：只用字母、数字和 . _ - /，首尾不带 /',
   )
 
+// 对象地址是在接口地址后面接上存储桶与对象名拼出来的，接口地址不能带查询串与片段
+const StorageEndpoint = BaseUrl.refine(
+  (value) => !/[?#]/.test(value),
+  '接口地址不要带 ? 和 # 后面的部分',
+)
+
 export const UpdateBackupSettings = z.object({
-  endpoint: BaseUrl,
+  endpoint: StorageEndpoint,
   region: z.string().min(1).max(64).default('us-east-1'),
   bucket: BucketName,
   prefix: ObjectPrefix.default(''),

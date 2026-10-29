@@ -34,8 +34,8 @@ export async function listBackups(client: S3Client, prefix: string): Promise<S3O
     .sort((a, b) => b.key.localeCompare(a.key))
 }
 
-// 做一份备份传上去，再删掉超出保留份数的旧备份。整份加密后的备份在内存里攒齐再上传（一次 PUT 要知道长度）；
-// 删旧的出错不算这份没做成，作为提醒返回
+// 做一份备份传上去，再删掉超出保留份数的旧备份（刚传上去的这份总留着，其余的按名字留最新的几份）。
+// 整份加密后的备份在内存里攒齐再上传（一次 PUT 要知道长度）；删旧的出错不算这份没做成，作为提醒返回
 export async function uploadBackup(
   db: Db,
   masterKey: MasterKey,
@@ -52,41 +52,43 @@ export async function uploadBackup(
       },
     }),
   )
+  const body = Buffer.concat(chunks)
+  chunks.length = 0
   const client = s3Client(config)
   const object = `${dirOf(config.prefix)}${nameOf(summary.createdAt)}`
-  await client.put(object, Buffer.concat(chunks))
+  await client.put(object, body)
   let warning: string | null = null
   try {
-    for (const stale of (await listBackups(client, config.prefix)).slice(config.keep)) {
-      await client.delete(stale.key)
-    }
+    const others = (await listBackups(client, config.prefix)).filter((o) => o.key !== object)
+    for (const stale of others.slice(config.keep - 1)) await client.delete(stale.key)
   } catch (err) {
     warning = `备份已经传上去，但删旧备份时出错：${(err as Error).message}`
   }
   return { run: { at: summary.createdAt, object, bytes: summary.bytes }, warning }
 }
 
-// 后台任务：每小时检查一次，到了钟点就做；force 是管理员点了「立即备份」，不看钟点。结果记在设置里给管理员看
+// 后台任务：每小时检查一次，到了钟点就做；force 是管理员点了「立即备份」，不看钟点。
+// 结果记在设置里给管理员看（只记给做备份时的那个存储位置）
 export async function backupJob(
   db: Db,
   masterKey: MasterKey | null,
   force: boolean,
 ): Promise<'skipped' | 'done' | 'failed'> {
-  try {
-    const config = await loadBackupConfig(db, masterKey)
-    if (!config) return 'skipped'
-    if (!force) {
-      const { lastSuccess } = await loadBackupStatus(db)
-      if (!isDue(new Date(), config.hour, lastSuccess ? new Date(lastSuccess.at) : null)) {
-        return 'skipped'
-      }
+  const config = await loadBackupConfig(db, masterKey)
+  if (!config) return 'skipped'
+  if (!force) {
+    const { lastSuccess } = await loadBackupStatus(db)
+    if (!isDue(new Date(), config.hour, lastSuccess ? new Date(lastSuccess.at) : null)) {
+      return 'skipped'
     }
+  }
+  try {
     if (!masterKey) throw new Error('备份用主密钥加密：服务端没有配置 KIOKU_MASTER_KEY')
     const { run, warning } = await uploadBackup(db, masterKey, config)
-    await recordBackupSuccess(db, run, warning)
+    await recordBackupSuccess(db, config, run, warning)
     return 'done'
   } catch (err) {
-    await recordBackupError(db, (err as Error).message)
+    await recordBackupError(db, config, (err as Error).message)
     return 'failed'
   }
 }

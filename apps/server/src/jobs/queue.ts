@@ -75,7 +75,9 @@ export async function startJobs(options: {
   await boss.createQueue(CLEANUP, { policy: 'singleton' })
   // stately：每个会话（singletonKey）排队的与正在跑的各最多一个
   await boss.createQueue(EXTRACT, { policy: 'stately' })
-  await boss.createQueue(BACKUP, { policy: 'singleton' })
+  // 一份备份要读库、加密、上传（上传最长 10 分钟），可能超过 pg-boss 默认的 15 分钟过期时限：过期会被当成卡住、
+  // 另排一次，和还在跑的那次同时做。所以放宽到一小时；出错不重试，结果记在设置里，下一个小时的检查会补做
+  await boss.createQueue(BACKUP, { policy: 'singleton', expireInSeconds: 3600, retryLimit: 0 })
 
   const send = (name: string, data: object, startAfter?: number): Promise<boolean> =>
     boss
@@ -142,7 +144,6 @@ export async function startJobs(options: {
   await boss.work<BufferedSession>(EXTRACT, async (jobs) => {
     for (const { data } of jobs) await processSession(options.db, options.masterKey, data)
   })
-  // 备份的结果（含出错）记在设置里给管理员看，不交给 pg-boss 重试：下一个小时的检查会补做
   await boss.work<{ force?: boolean }>(BACKUP, async (jobs) => {
     for (const { data } of jobs) {
       const outcome = await backupJob(options.db, options.masterKey, Boolean(data?.force))
@@ -172,7 +173,15 @@ export async function startJobs(options: {
     enqueueBackfill: () => send(BACKFILL, {}),
     enqueueSwitch: () => send(SWITCH, {}),
     enqueuePrune: () => send(PRUNE, {}, PRUNE_AFTER_SECONDS),
-    enqueueBackup: () => send(BACKUP, { force: true }),
+    // 用队列上的选项（不重试、一小时过期），不用 send 给别的任务的重试设置
+    enqueueBackup: () =>
+      boss.send(BACKUP, { force: true }).then(
+        () => true,
+        (err: unknown) => {
+          console.error('入队失败', err)
+          return false
+        },
+      ),
     stop: () => boss.stop({ graceful: true }),
   }
 }
