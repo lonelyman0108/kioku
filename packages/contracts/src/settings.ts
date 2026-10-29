@@ -153,20 +153,40 @@ export const RetentionCounts = z.object({
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 
 export const RetentionStatus = z.object({
-  // 最近一次清理：开始的时间、按多少天算的、每一类删了多少
-  lastRun: z.object({ at: z.string(), days: z.number().int(), counts: RetentionCounts }).nullable(),
-  // 最近一次清理出的错（有一类没删成也算）；之后整次没出错就清掉
+  // 最近一次做完的清理：开始的时间、按多少天算的、是不是在暂停中（只清了删账号留下的历史）、每一类删了多少
+  lastRun: z
+    .object({
+      at: z.string(),
+      days: z.number().int(),
+      paused: z.boolean(),
+      counts: RetentionCounts,
+    })
+    .nullable(),
+  // 还没做完的一次（时间用完了，或者有一类出了错）：从什么时候开始、已经删了多少；下一个小时接着做，做完并进最近一次
+  unfinished: z.object({ since: z.string(), counts: RetentionCounts }).nullable(),
+  // 最近一次清理出的错（有一类没删成也算）；之后整次做完、没出错就清掉
   lastError: z.object({ message: z.string(), at: z.string() }).nullable(),
 })
 export type RetentionStatus = z.infer<typeof RetentionStatus>
 
+// 暂停按天数的清理的原因：从备份恢复（恢复出的已删除记录早已到期）、保留期第一次生效（升级之前删掉的都还能撤销）
+export const RETENTION_PAUSE_REASONS = ['restored', 'started'] as const
+export const RetentionPauseReason = z.enum(RETENTION_PAUSE_REASONS)
+export type RetentionPauseReason = z.infer<typeof RetentionPauseReason>
+
 export const RetentionView = RetentionSettings.extend({
-  // 从备份恢复出的实例暂停清理，到恢复的时间加上保留天数为止：这段时间里到期的都是恢复之前删掉的，
-  // 留一个完整的保留期去找回。调保留天数时结束时间跟着变；没有暂停时为 null
-  pause: z.object({ restoredAt: z.string(), until: z.string() }).nullable(),
+  // 暂停到起点加上保留天数为止：这段时间里到期的都是起点之前删掉的，留一个完整的保留期去找回。
+  // 调保留天数时结束时间跟着变；删账号留下的历史照常清理。没有暂停（或者已经结束）时为 null
+  pause: z
+    .object({ reason: RetentionPauseReason, since: z.string(), until: z.string() })
+    .nullable(),
   status: RetentionStatus,
 })
 export type RetentionView = z.infer<typeof RetentionView>
+
+// 提前结束暂停之后：queued 为马上排上了一次清理；没排上时下一次定时清理（每小时）照样会做
+export const RetentionResumed = RetentionView.extend({ queued: z.boolean() })
+export type RetentionResumed = z.infer<typeof RetentionResumed>
 
 // 备份到兼容S3的对象存储：每天到了设定的钟点（UTC）做一份全实例的加密备份传上去，存储桶里只留最近的几份。
 // Secret Access Key 用主密钥加密后存库，不返回

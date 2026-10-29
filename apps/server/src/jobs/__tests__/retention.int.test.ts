@@ -6,6 +6,7 @@ import type {
   MemoryHistory,
   MemoryView,
   RetentionCounts,
+  RetentionResumed,
   RetentionView,
 } from '@kioku/contracts'
 import { asc, eq, inArray, sql } from 'drizzle-orm'
@@ -647,12 +648,34 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(await inSpace((tx) => tx.select().from(memoryEvents))).toEqual([])
   })
 
-  it('一天（UTC）做一次，结果记在设置里；有一类出错时记下原因、别的照常删，之后整次没出错就清掉', async () => {
+  // ---- 定时任务、暂停与设置 ----
+
+  const EMPTY_STATUS = { lastRun: null, unfinished: null, lastError: null }
+  const view = async () =>
+    ok<RetentionView>(
+      await app.request('/v1/settings/retention', { headers: { cookie: ws.cookie } }),
+    )
+  const put = (body: unknown, cookie = ws.cookie) =>
+    app.request('/v1/settings/retention', jsonRequest('PUT', body, { cookie }))
+  const resume = (target = app, cookie = ws.cookie) =>
+    target.request('/v1/settings/retention/resume', jsonRequest('POST', {}, { cookie }))
+  // 实例上已经有保留期的状态、没有暂停（像是已经生效过一阵子）
+  const active = () => database.db.insert(settings).values({ key: 'retention', value: {} })
+  const storedSettings = async () =>
+    (await database.db.select().from(settings).where(eq(settings.key, 'retention')))[0]?.value
+  const plantDeleted = async (uri: string, days: number) => {
+    const memory = await createMemory({ uri, content: '早就删了' })
+    await deleteMemory(uri)
+    await deletedDaysAgo(memory.id, days)
+    return memory.id
+  }
+  const after = (from: Date, days: number) => new Date(from.getTime() + days * DAY)
+
+  it('一天（UTC）做一次；有一类出错时不记做完、只记原因，下一个小时再试，做完才把各类条数一起记下', async () => {
+    await active()
     const bot = await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })
     const plant = async (uri: string) => {
-      const memory = await createMemory({ uri, content: '早就删了' })
-      await deleteMemory(uri)
-      await deletedDaysAgo(memory.id, 40)
+      await plantDeleted(uri, 40)
       await inSpace((tx) =>
         tx.insert(extractionRuns).values({
           spaceId: ws.spaceId,
@@ -664,20 +687,9 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         }),
       )
     }
-    const view = async () =>
-      ok<RetentionView>(
-        await app.request('/v1/settings/retention', {
-          headers: { cookie: ws.cookie },
-        }),
-      )
-    expect(await view()).toEqual({
-      days: 30,
-      pause: null,
-      status: { lastRun: null, lastError: null },
-    })
+    expect(await view()).toEqual({ days: 30, pause: null, status: EMPTY_STATUS })
 
     await plant('notes://first')
-    const day1 = new Date('2030-05-01T08:00:00Z')
     await database.db.execute(sql`
       create or replace function retention_test_fail() returns trigger language plpgsql
       as $$ begin raise exception '测试里故意出的错'; end $$`)
@@ -685,122 +697,256 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       create trigger retention_test_fail before delete on extraction_runs
       for each row execute function retention_test_fail()`)
     try {
-      const first = await retentionJob(database.db, day1)
-      expect(first?.counts).toEqual({ ...ZERO, deletedMemories: 1 })
+      const first = await retentionJob(database.db, new Date('2030-05-01T08:00:00Z'))
+      expect(first).toMatchObject({
+        complete: false,
+        paused: false,
+        counts: { ...ZERO, deletedMemories: 1 },
+      })
+      const status = (await view()).status
+      expect(status.lastRun).toBeNull()
+      expect(status.unfinished).toEqual({
+        since: '2030-05-01T08:00:00.000Z',
+        counts: { ...ZERO, deletedMemories: 1 },
+      })
+      expect(status.lastError?.message).toContain('抽取记录：测试里故意出的错')
+      // 同一天的下一个小时再试，还是出错：接着记在没做完里
+      expect(await retentionJob(database.db, new Date('2030-05-01T09:17:00Z'))).toMatchObject({
+        complete: false,
+        counts: ZERO,
+      })
     } finally {
       await database.db.execute(sql`drop trigger if exists retention_test_fail on extraction_runs`)
       await database.db.execute(sql`drop function if exists retention_test_fail()`)
     }
-    let status = (await view()).status
-    expect(status.lastRun).toEqual({
-      at: day1.toISOString(),
-      days: 30,
-      counts: { ...ZERO, deletedMemories: 1 },
+    // 错误排除之后的下一个小时做完：连同之前没做完时删掉的一起记下，错误清掉
+    expect(await retentionJob(database.db, new Date('2030-05-01T10:17:00Z'))).toMatchObject({
+      complete: true,
+      counts: { ...ZERO, extractionRuns: 1 },
     })
-    expect(status.lastError?.message).toContain('抽取记录：测试里故意出的错')
+    expect((await view()).status).toEqual({
+      lastRun: {
+        at: '2030-05-01T10:17:00.000Z',
+        days: 30,
+        paused: false,
+        counts: { ...ZERO, deletedMemories: 1, extractionRuns: 1 },
+      },
+      unfinished: null,
+      lastError: null,
+    })
 
-    // 同一天（UTC）不再做
+    // 今天做完了，同一天不再做；第二天照常
     await plant('notes://second')
-    expect(await retentionJob(database.db, new Date('2030-05-01T23:00:00Z'))).toBeNull()
-    expect((await view()).status.lastRun?.at).toBe(day1.toISOString())
-
-    const day2 = new Date('2030-05-02T00:17:00Z')
-    expect((await retentionJob(database.db, day2))?.counts).toEqual({
+    expect(await retentionJob(database.db, new Date('2030-05-01T23:17:00Z'))).toBeNull()
+    expect((await retentionJob(database.db, new Date('2030-05-02T00:17:00Z')))?.counts).toEqual({
       ...ZERO,
       deletedMemories: 1,
-      extractionRuns: 2,
+      extractionRuns: 1,
     })
-    status = (await view()).status
-    expect(status.lastRun?.at).toBe(day2.toISOString())
-    expect(status.lastError).toBeNull()
   })
 
-  it('保留天数只有实例管理员能看、能改；改了之后按新的天数删', async () => {
-    const put = (body: unknown, cookie = ws.cookie) =>
-      app.request('/v1/settings/retention', jsonRequest('PUT', body, { cookie }))
+  it('一次清理有时间预算：用完了不记做完，下一个小时接着删，做完时连同之前删掉的一起记下', async () => {
+    await active()
+    const total = RETENTION_BATCH + 20
+    await inSpace((tx) =>
+      tx.execute(sql`
+        insert into memories (space_id, form, layer, sensitivity, provenance, content, deleted_at)
+        select ${ws.spaceId}::uuid, 'extracted'::memory_form, 'episode'::memory_layer,
+          'public'::sensitivity, 'untrusted'::provenance, '摘要 ' || g, ${ago(40).toISOString()}::timestamptz
+        from generate_series(1, ${total}::int) g`),
+    )
+    const now = new Date()
+    // 预算为 0：第一批总会做，之后就不再开新批次
+    expect(await retentionJob(database.db, now, 0)).toMatchObject({
+      complete: false,
+      counts: { ...ZERO, deletedMemories: RETENTION_BATCH },
+    })
+    expect((await view()).status).toEqual({
+      lastRun: null,
+      unfinished: {
+        since: now.toISOString(),
+        counts: { ...ZERO, deletedMemories: RETENTION_BATCH },
+      },
+      lastError: null,
+    })
+    const next = new Date(now.getTime() + 3_600_000)
+    expect(await retentionJob(database.db, next)).toMatchObject({
+      complete: true,
+      counts: { ...ZERO, deletedMemories: 20 },
+    })
+    expect((await view()).status).toEqual({
+      lastRun: {
+        at: next.toISOString(),
+        days: 30,
+        paused: false,
+        counts: { ...ZERO, deletedMemories: total },
+      },
+      unfinished: null,
+      lastError: null,
+    })
+    expect(await memoryIds()).toEqual([])
+  })
+
+  it('保留期第一次生效时先暂停一个保留期：之前删掉的不删，删账号留下的历史照常每天清；到期之后照常清理', async () => {
+    const old = await plantDeleted('notes://before-upgrade', 400)
+    // 删账号时数据库连带删掉的记忆留下的历史
+    await inSpace((tx) =>
+      tx.insert(memoryEvents).values({
+        spaceId: ws.spaceId,
+        memoryId: null,
+        eventType: 'update',
+        provenance: 'owner',
+        after: { content: '删账号留下的正文' },
+      }),
+    )
+    const now = new Date()
+    expect(await retentionJob(database.db, now)).toMatchObject({
+      paused: true,
+      complete: true,
+      counts: { ...ZERO, orphanEvents: 1 },
+    })
+    expect(await memoryIds()).toContain(old)
+    expect(await view()).toEqual({
+      days: 30,
+      pause: { reason: 'started', since: now.toISOString(), until: after(now, 30).toISOString() },
+      status: {
+        lastRun: {
+          at: now.toISOString(),
+          days: 30,
+          paused: true,
+          counts: { ...ZERO, orphanEvents: 1 },
+        },
+        unfinished: null,
+        lastError: null,
+      },
+    })
+    // 暂停中每天照常做删账号留下的历史，按天数的几类不做
+    expect(await retentionJob(database.db, after(now, 1))).toMatchObject({
+      paused: true,
+      counts: ZERO,
+    })
+    expect(await memoryIds()).toContain(old)
+    // 过了一个保留期，暂停自动结束、照常清理
+    expect(await retentionJob(database.db, after(now, 31))).toMatchObject({
+      paused: false,
+      counts: { ...ZERO, deletedMemories: 1 },
+    })
+    expect(await storedSettings()).toEqual({})
+  })
+
+  it('暂停自然结束后清掉：之后调大天数不会又算出一段暂停，照常清理', async () => {
+    // 30 天的暂停十天前就结束了
+    await database.db.transaction((tx) => markRestored(tx, ago(40)))
+    const first = await plantDeleted('notes://first', 45)
+    expect((await view()).pause).toBeNull()
+    expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
+    expect(await memoryIds()).not.toContain(first)
+    // 清理时把结束了的暂停去掉了
+    expect(await storedSettings()).toEqual({})
+    expect((await ok<RetentionView>(await put({ days: 60 }))).pause).toBeNull()
+    const second = await plantDeleted('notes://second', 65)
+    expect((await retentionJob(database.db, after(new Date(), 1)))?.counts.deletedMemories).toBe(1)
+    expect(await memoryIds()).not.toContain(second)
+  })
+
+  it('按原来的天数已经结束的暂停，保存天数时在同一条语句里去掉', async () => {
+    await database.db.transaction((tx) => markRestored(tx, ago(40)))
+    // 不去掉的话，调成 60 天又会暂停到 20 天以后
+    const saved = await ok<RetentionView>(await put({ days: 60 }))
+    expect(saved.pause).toBeNull()
+    expect(await storedSettings()).toEqual({ days: 60 })
+    const old = await plantDeleted('notes://old', 65)
+    expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
+    expect(await memoryIds()).not.toContain(old)
+  })
+
+  it('保留天数只有实例管理员能看、能改；第一次保存时保留期从现在起生效、先暂停，提前开始之后按新的天数删', async () => {
     expect((await put({ days: 0 })).status).toBe(400)
     expect((await put({ days: 3651 })).status).toBe(400)
     const saved = await ok<RetentionView>(await put({ days: 7 }))
-    expect(saved).toEqual({ days: 7, pause: null, status: { lastRun: null, lastError: null } })
+    expect(saved.days).toBe(7)
+    expect(saved.status).toEqual(EMPTY_STATUS)
+    expect(saved.pause?.reason).toBe('started')
+    expect(new Date(saved.pause!.until).getTime() - new Date(saved.pause!.since).getTime()).toBe(
+      7 * DAY,
+    )
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     expect(
       (await app.request('/v1/settings/retention', { headers: { cookie: editor.cookie } })).status,
     ).toBe(403)
     expect((await put({ days: 30 }, editor.cookie)).status).toBe(403)
-    expect(
-      (
-        await app.request(
-          '/v1/settings/retention/resume',
-          jsonRequest('POST', {}, { cookie: editor.cookie }),
-        )
-      ).status,
-    ).toBe(403)
+    expect((await resume(app, editor.cookie)).status).toBe(403)
 
-    const memory = await createMemory({ uri: 'notes://week', content: '删了八天' })
-    await deleteMemory('notes://week')
-    await deletedDaysAgo(memory.id, 8)
+    const week = await plantDeleted('notes://week', 8)
+    expect(await retentionJob(database.db)).toMatchObject({ paused: true, counts: ZERO })
+    expect(await memoryIds()).toContain(week)
+    // 没有后台任务时排不上，如实返回
+    const resumed = await ok<RetentionResumed>(await resume())
+    expect(resumed).toMatchObject({ days: 7, pause: null, queued: false })
+    // 当天暂停中做过的那次不挡住提前开始之后的完整清理
     expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
+    expect(await memoryIds()).not.toContain(week)
   })
 
-  it('从备份恢复之后暂停到恢复时间加保留天数；调大天数暂停跟着延长；提前开始之后马上能清', async () => {
-    const view = async () =>
-      ok<RetentionView>(
-        await app.request('/v1/settings/retention', { headers: { cookie: ws.cookie } }),
-      )
+  it('从备份恢复之后暂停到恢复时间加保留天数：暂停中只清删账号留下的历史；调大天数暂停跟着延长；提前开始之后马上能清', async () => {
     const restoredAt = new Date()
-    const plant = async (uri: string, days: number) => {
-      const memory = await createMemory({ uri, content: '恢复之前就删了的' })
-      await deleteMemory(uri)
-      await deletedDaysAgo(memory.id, days)
-      return memory.id
-    }
-    const kept = await plant('notes://restored', 40)
+    const kept = await plantDeleted('notes://restored', 40)
     // 上一个实例最近一次清理的结果随恢复清掉
     await database.db.insert(settings).values({
       key: 'retention-status',
-      value: { lastRun: null, lastError: { message: '旧的', at: restoredAt.toISOString() } },
+      value: { ...EMPTY_STATUS, lastError: { message: '旧的', at: restoredAt.toISOString() } },
     })
     const until = await database.db.transaction((tx) => markRestored(tx, restoredAt))
-    expect(until.getTime()).toBe(restoredAt.getTime() + 30 * DAY)
+    expect(until.getTime()).toBe(after(restoredAt, 30).getTime())
     expect(await view()).toEqual({
       days: 30,
-      pause: { restoredAt: restoredAt.toISOString(), until: until.toISOString() },
-      status: { lastRun: null, lastError: null },
+      pause: { reason: 'restored', since: restoredAt.toISOString(), until: until.toISOString() },
+      status: EMPTY_STATUS,
     })
 
-    const later = (days: number) => new Date(restoredAt.getTime() + days * DAY)
-    expect(await retentionJob(database.db, later(1))).toBeNull()
+    expect(await retentionJob(database.db, after(restoredAt, 1))).toMatchObject({
+      paused: true,
+      counts: ZERO,
+    })
     expect(await memoryIds()).toContain(kept)
 
     // 调大天数：暂停的结束时间跟着往后挪，保存不会结束暂停
-    const saved = await ok<RetentionView>(
-      await app.request(
-        '/v1/settings/retention',
-        jsonRequest('PUT', { days: 60 }, { cookie: ws.cookie }),
-      ),
-    )
+    const saved = await ok<RetentionView>(await put({ days: 60 }))
     expect(saved.pause).toEqual({
-      restoredAt: restoredAt.toISOString(),
-      until: later(60).toISOString(),
+      reason: 'restored',
+      since: restoredAt.toISOString(),
+      until: after(restoredAt, 60).toISOString(),
     })
-    expect(await retentionJob(database.db, later(45))).toBeNull()
+    expect(await retentionJob(database.db, after(restoredAt, 45))).toMatchObject({ paused: true })
     expect(await memoryIds()).toContain(kept)
     // 过了恢复时间加天数之后照常清
-    expect((await retentionJob(database.db, later(61)))?.counts.deletedMemories).toBe(1)
+    expect((await retentionJob(database.db, after(restoredAt, 61)))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(kept)
 
-    // 再恢复一次，点「现在开始清理」：暂停清掉，马上就能清（保留天数现在是 60）
-    const again = await plant('notes://again', 70)
+    // 再恢复一次，点「现在开始清理」：暂停清掉、马上排一次清理，当天就能清（保留天数现在是 60）
+    const again = await plantDeleted('notes://again', 70)
     await database.db.transaction((tx) => markRestored(tx, new Date()))
-    expect(await retentionJob(database.db)).toBeNull()
-    const resumed = await ok<RetentionView>(
-      await app.request(
-        '/v1/settings/retention/resume',
-        jsonRequest('POST', {}, { cookie: ws.cookie }),
-      ),
-    )
-    expect(resumed.pause).toBeNull()
-    expect(resumed.days).toBe(60)
+    expect(await retentionJob(database.db)).toMatchObject({ paused: true, counts: ZERO })
+    let cleanups = 0
+    const withJobs = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: randomBytes(32),
+      embedder: staticEmbedderSource(null),
+      jobs: {
+        enqueueEmbed() {},
+        enqueueExtraction: async () => {},
+        enqueueBackfill: async () => true,
+        enqueueSwitch: async () => true,
+        enqueuePrune: async () => true,
+        enqueueBackup: async () => null,
+        backupRun: async () => null,
+        enqueueCleanup: async () => (cleanups++, true),
+      },
+    })
+    const resumed = await ok<RetentionResumed>(await resume(withJobs))
+    expect(resumed).toMatchObject({ days: 60, pause: null, queued: true })
+    expect(cleanups).toBe(1)
     expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(again)
   })

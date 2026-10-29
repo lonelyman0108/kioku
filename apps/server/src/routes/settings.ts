@@ -9,6 +9,7 @@ import {
   ExtractionTestResult,
   MasterKeyStatus,
   RecallSettings,
+  RetentionResumed,
   RetentionSettings,
   RetentionView,
   UpdateEmbeddingSettings,
@@ -191,8 +192,9 @@ const retentionResume = createRoute({
   method: 'post',
   path: '/settings/retention/resume',
   tags: ['settings'],
-  summary: '提前结束从备份恢复之后的暂停，并马上排一次清理',
-  responses: { 200: jsonResponse('保留期', RetentionView), 403: forbidden },
+  summary:
+    '提前结束暂停（从备份恢复之后、保留期第一次生效时），并马上排一次清理；queued 为是否排上了，没排上时下一次定时清理照样会做',
+  responses: { 200: jsonResponse('保留期', RetentionResumed), 403: forbidden },
 })
 
 const rebuild = createRoute({
@@ -387,9 +389,9 @@ export function settingsRoutes(deps: Deps) {
     })
     .openapi(retentionResume, async (c) => {
       await resumeRetention(deps.db)
-      // 定时清理每小时一次，这里不等它：排不进去时下一个小时照样会做
-      void deps.jobs?.enqueueCleanup()
-      return c.json(await retentionView(deps.db), 200)
+      // 只等排队、不等清理做完；排不上时如实告诉界面，下一次定时清理（每小时）照样会做
+      const queued = deps.jobs ? await deps.jobs.enqueueCleanup() : false
+      return c.json({ ...(await retentionView(deps.db)), queued }, 200)
     })
     .openapi(rebuild, async (c) => {
       const stored = await loadEmbeddingModels(deps.db)

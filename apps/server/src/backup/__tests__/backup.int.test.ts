@@ -293,7 +293,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       (row) => (JSON.parse(row) as { key: string }).key === 'retention',
     )
     expect((JSON.parse(pause!) as { value: unknown }).value).toEqual({
-      restoredAt: expect.any(String),
+      pause: { since: expect.any(String), reason: 'restored' },
     })
     expect(result.retentionPausedUntil.getTime()).toBeGreaterThanOrEqual(started + 30 * 86_400_000)
     expect({ ...restored, settings: restored.settings!.filter((row) => row !== pause) }).toEqual(

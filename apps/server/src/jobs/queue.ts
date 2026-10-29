@@ -78,7 +78,12 @@ export async function startJobs(options: {
   await boss.createQueue(SWITCH, { policy: 'singleton' })
   await boss.createQueue(PRUNE, { policy: 'singleton' })
   await boss.createQueue(ROTATE, { policy: 'singleton' })
-  await boss.createQueue(CLEANUP, { policy: 'singleton' })
+  // 定时清理里有保留期的硬删除，积压多时（例如升级之后的第一次）一次最多做半小时（见 retentionJob）。
+  // pg-boss 默认 15 分钟就当作卡住、另排一次，会和还在跑的那次同时做，所以和备份一样放宽到一小时。
+  // 队列一直是 singleton（同时只跑一个）；队列已经存在时建队列不改选项，所以再更新一遍
+  const cleanupQueue = { expireInSeconds: 3600 }
+  await boss.createQueue(CLEANUP, { policy: 'singleton', ...cleanupQueue })
+  await boss.updateQueue(CLEANUP, cleanupQueue)
   // stately：每个会话（singletonKey）排队的与正在跑的各最多一个
   await boss.createQueue(EXTRACT, { policy: 'stately' })
   // 一份备份要读库、加密、上传（上传最长 10 分钟），可能超过 pg-boss 默认的 15 分钟过期时限：过期会被当成卡住、
@@ -166,6 +171,9 @@ export async function startJobs(options: {
       const total = Object.values(retained.counts).reduce((a, b) => a + b, 0)
       if (total) console.log(`保留期清理：删掉或抹掉了 ${total} 条`)
       for (const error of retained.errors) console.error(`保留期清理出错：${error}`)
+      if (!retained.complete && !retained.errors.length) {
+        console.log('保留期清理这次没做完，下一个小时接着做')
+      }
     }
     if (expired) throw expired
   })
