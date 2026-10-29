@@ -169,6 +169,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       currentId: keyIdOf(newKey),
       previousId: keyIdOf(oldKey),
       remaining: { memories: 2, credentials: 1, settings: 2 },
+      lastError: null,
     })
     // 轮换期间新写下的用新密钥
     expect(await read(appWith(rotating), 'home://wifi')).toBe('无线密码 hunter2')
@@ -212,6 +213,22 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     })
     expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 1, remaining: 0 })
     expect(await read(appWith(newKey), 'home://wifi')).toBe('无线密码')
+  })
+
+  it('有一行用旧主密钥也解不开：跳过它、记下原因，不拦住别的', async () => {
+    await secret(appWith(oldKey), 'home://wifi', '无线密码')
+    await secret(appWith(oldKey), 'home://broken', '坏掉的那条')
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memories)
+        .set({ wrappedKey: randomBytes(60) })
+        .where(eq(memories.path, 'broken')),
+    )
+    expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 1, remaining: 1 })
+    expect(await read(appWith(newKey), 'home://wifi')).toBe('无线密码')
+    expect((await masterKeyStatus(database.db, rotating)).lastError).toMatchObject({
+      message: expect.stringContaining('1 条用旧主密钥也解不开'),
+    })
   })
 
   it('还没换完就去掉了旧的那把：拒绝启动，并说清要配回去', async () => {
@@ -327,6 +344,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       currentId: keyIdOf(oldKey),
       previousId: null,
       remaining: { memories: 0, credentials: 0, settings: 0 },
+      lastError: null,
     })
   })
 })

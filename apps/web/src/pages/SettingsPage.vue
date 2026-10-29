@@ -11,13 +11,16 @@ import ExtractionSettings from '../components/ExtractionSettings.vue'
 const toast = useToast()
 const queryClient = useQueryClient()
 
-// 主密钥：轮换还没换完时每隔几秒刷新，看得到还剩多少条是旧主密钥包装的
+// 主密钥：轮换还没换完时每隔几秒刷新，看得到还剩多少条是旧主密钥包装的；出了错就不再刷新（错误显示出来）
 const masterKey = useQuery({
   queryKey: ['settings', 'master-key'],
   queryFn: api.masterKeyStatus,
   refetchInterval: (query) => {
-    const r = query.state.data?.remaining
-    return r && r.memories + r.credentials + r.settings > 0 ? 5_000 : false
+    const data = query.state.data
+    const left = data
+      ? data.remaining.memories + data.remaining.credentials + data.remaining.settings
+      : 0
+    return left > 0 && !data?.lastError ? 5_000 : false
   },
 })
 const remaining = computed(() => {
@@ -100,6 +103,12 @@ async function saveRetention() {
                   {{ masterKey.data.value.remaining.credentials }}、接口 Key
                   {{ masterKey.data.value.remaining.settings }}）
                 </p>
+                <UAlert
+                  v-if="masterKey.data.value.lastError"
+                  color="error"
+                  variant="subtle"
+                  :title="masterKey.data.value.lastError.message"
+                />
                 <p v-if="remaining === 0" class="text-success">
                   已经换完：可以从配置里去掉 KIOKU_MASTER_KEY_PREVIOUS，再重启服务。
                 </p>

@@ -115,6 +115,8 @@ export const MasterKeyStatus = z.object({
     credentials: z.number().int(),
     settings: z.number().int(),
   }),
+  // 轮换出的错（例如有记录用旧主密钥也解不开）；换完之后清掉
+  lastError: z.object({ message: z.string(), at: z.string() }).nullable(),
 })
 export type MasterKeyStatus = z.infer<typeof MasterKeyStatus>
 

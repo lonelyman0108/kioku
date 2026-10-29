@@ -1,14 +1,14 @@
 import { fileURLToPath } from 'node:url'
 
 import { parseMasterKey } from './crypto/envelope'
-import { keyIdOf, type MasterKey } from './crypto/keyring'
+import { keyIdOf, type Keyring } from './crypto/keyring'
 
 export interface Config {
   port: number
   databaseUrl: string
   migrationsFolder: string
   cookieSecure: boolean
-  masterKey: MasterKey | null
+  masterKey: Keyring | null
   trustedProxies: number
   webDir: string
 }
@@ -38,7 +38,7 @@ export function loadConfig(env: NodeJS.ProcessEnv = process.env): Config {
 function parseMasterKeys(
   current: string | undefined,
   previous: string | undefined,
-): MasterKey | null {
+): Keyring | null {
   if (!current) {
     if (previous) throw new Error('配置了 KIOKU_MASTER_KEY_PREVIOUS，却没有配置 KIOKU_MASTER_KEY')
     return null
