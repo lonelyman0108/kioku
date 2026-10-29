@@ -10,6 +10,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import DeletedMemories from '../components/DeletedMemories.vue'
+import ExpiredMemories from '../components/ExpiredMemories.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
 import MemoryListView from '../components/MemoryListView.vue'
 import {
@@ -45,12 +46,13 @@ function select(uri: string | null) {
   return router.replace(withQuery({ uri }))
 }
 
-type View = 'tree' | 'list' | 'deleted'
-const views: View[] = ['tree', 'list', 'deleted']
+type View = 'tree' | 'list' | 'deleted' | 'expired'
+const views: View[] = ['tree', 'list', 'deleted', 'expired']
 const viewItems: TabsItem[] = [
   { label: '树', value: 'tree', icon: icons.tree },
   { label: '列表', value: 'list', icon: icons.list },
   { label: '已删除', value: 'deleted', icon: icons.remove },
+  { label: '已过期', value: 'expired', icon: icons.expired },
 ]
 const view = computed<View>(() => views.find((v) => v === route.query.view) ?? 'tree')
 function setView(value: string | number) {
@@ -75,9 +77,15 @@ function failed(err: unknown) {
   toast.add({ title: err instanceof ApiError ? err.message : '读取失败', color: 'error' })
 }
 
-// 列表、已删除、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新
+// 列表、已删除、已过期、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新
 function invalidateLists() {
-  for (const key of ['memory-list', 'memory-deleted', 'memory-domains', 'memory-glossary']) {
+  for (const key of [
+    'memory-list',
+    'memory-deleted',
+    'memory-expired',
+    'memory-domains',
+    'memory-glossary',
+  ]) {
     void queryClient.invalidateQueries({ queryKey: [key, spaceId.value] })
   }
 }
@@ -261,7 +269,8 @@ async function onMoved(memory: MemoryView, from: string) {
   }
 }
 
-async function onUndeleted(uri: string) {
+// 撤销删除或重新生效之后，这条记忆回到了树上：刷新那一级并选中它
+async function onRevived(uri: string) {
   invalidateLists()
   void serially(() => refreshAround(uri)).catch(failed)
   await select(uri)
@@ -390,7 +399,7 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
           </template>
         </UTree>
       </template>
-      <!-- 列表与已删除切走时不卸载：保留筛选与位置，切走之前发出的撤销删除完成后也还能通知到这里 -->
+      <!-- 列表、已删除与已过期切走时不卸载：保留筛选与位置，切走之前发出的撤销删除、重新生效完成后也还能通知到这里 -->
       <KeepAlive>
         <MemoryListView
           v-if="view === 'list'"
@@ -398,10 +407,11 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
           :selected-uri="selectedUri"
           @select="select"
         />
-        <DeletedMemories
-          v-else-if="view === 'deleted'"
+        <DeletedMemories v-else-if="view === 'deleted'" :space-id="spaceId" @restored="onRevived" />
+        <ExpiredMemories
+          v-else-if="view === 'expired'"
           :space-id="spaceId"
-          @restored="onUndeleted"
+          @reactivated="onRevived"
         />
       </KeepAlive>
     </template>

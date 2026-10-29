@@ -491,6 +491,10 @@
             },
             "maxItems": 32,
             "default": []
+          },
+          "validTo": {
+            "type": "string",
+            "format": "date-time"
           }
         },
         "required": [
@@ -563,6 +567,13 @@
               "maxLength": 64
             },
             "maxItems": 32
+          },
+          "validTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
           },
           "allowPlaintext": {
             "type": "boolean"
@@ -1040,7 +1051,7 @@
             "bearer": []
           }
         ],
-        "summary": "新建策展记忆",
+        "summary": "新建策展记忆；带 validTo 时到期后不再召回、不进 boot",
         "requestBody": {
           "required": true,
           "content": {
@@ -1123,7 +1134,7 @@
             "bearer": []
           }
         ],
-        "summary": "修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间",
+        "summary": "修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间",
         "requestBody": {
           "required": true,
           "content": {

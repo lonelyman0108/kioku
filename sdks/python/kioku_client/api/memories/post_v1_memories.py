@@ -88,7 +88,7 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: CreateMemoryRequest,
 ) -> Response[ErrorResponse | MemoryView]:
-    """新建策展记忆
+    """新建策展记忆；带 validTo 时到期后不再召回、不进 boot
 
     Args:
         body (CreateMemoryRequest):
@@ -117,7 +117,7 @@ def sync(
     client: AuthenticatedClient,
     body: CreateMemoryRequest,
 ) -> ErrorResponse | MemoryView | None:
-    """新建策展记忆
+    """新建策展记忆；带 validTo 时到期后不再召回、不进 boot
 
     Args:
         body (CreateMemoryRequest):
@@ -141,7 +141,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: CreateMemoryRequest,
 ) -> Response[ErrorResponse | MemoryView]:
-    """新建策展记忆
+    """新建策展记忆；带 validTo 时到期后不再召回、不进 boot
 
     Args:
         body (CreateMemoryRequest):
@@ -168,7 +168,7 @@ async def asyncio(
     client: AuthenticatedClient,
     body: CreateMemoryRequest,
 ) -> ErrorResponse | MemoryView | None:
-    """新建策展记忆
+    """新建策展记忆；带 validTo 时到期后不再召回、不进 boot
 
     Args:
         body (CreateMemoryRequest):

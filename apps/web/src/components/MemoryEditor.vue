@@ -3,7 +3,7 @@ import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { PLAINTEXT_CREDENTIAL, type MemoryView, type Sensitivity } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, reactive, ref, watch } from 'vue'
+import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -15,7 +15,14 @@ import { buildKeywordIndex } from '../keywords'
 import { layerLabels, provenanceLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import type { CredentialLinks } from '../markdown'
 import { placeholderOf } from '../placeholders'
-import { formatRelative, formatTime } from '../time'
+import {
+  formatRelative,
+  formatShort,
+  formatTime,
+  fromLocalInput,
+  isExpired,
+  toLocalInput,
+} from '../time'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
@@ -45,11 +52,16 @@ const form = reactive({
   priority: 2,
   sensitivity: 'private' as Sensitivity,
   glossary: [] as string[],
+  // 有效到，datetime-local 输入框的本地时间；空表示一直有效
+  validTo: '',
 })
 
 // 表单是从哪一版载入的：改动与保存时的版本号都以它为准，而不是缓存里最新的那份。
 // 否则后台重新拉取到别人改过的新版本，会悄悄覆盖还没保存的修改，或者让保存绕过冲突检查
 const base = ref<MemoryView | null>(null)
+
+// 有效到在输入框里的样子：只到分钟，没改过时和载入的那一版比较也按分钟
+const validToInput = (m: MemoryView) => (m.validTo ? toLocalInput(m.validTo) : '')
 
 function load(m: MemoryView) {
   base.value = m
@@ -58,6 +70,7 @@ function load(m: MemoryView) {
   form.priority = m.priority
   form.sensitivity = m.sensitivity
   form.glossary = [...m.glossary]
+  form.validTo = validToInput(m)
 }
 
 const dirty = computed(() => {
@@ -68,9 +81,18 @@ const dirty = computed(() => {
     form.disclosure !== (m.disclosure ?? '') ||
     form.priority !== m.priority ||
     form.sensitivity !== m.sensitivity ||
-    form.glossary.join('\n') !== m.glossary.join('\n')
+    form.glossary.join('\n') !== m.glossary.join('\n') ||
+    form.validTo !== validToInput(m)
   )
 })
+
+// 现在的时间，每半分钟更新一次：开着的这条到了有效到时显示已过期
+const now = ref(Date.now())
+const ticking = setInterval(() => (now.value = Date.now()), 30_000)
+onBeforeUnmount(() => clearInterval(ticking))
+const expiredNow = computed(
+  () => !!base.value && isExpired(base.value.validTo, new Date(now.value)),
+)
 
 // 有未保存的改动时保留它们，提示在别处被改过，保存时由 id 与版本号检查冲突。
 // 没有改动时跟上服务器：换成了另一条（删除后在同一个 URI 重建），或者有了更新的版本；
@@ -126,9 +148,12 @@ const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.va
 // 默认是阅读状态，点「编辑」才改原文
 const mode = ref<'read' | 'edit'>('read')
 const preview = ref(false)
+// 有效到最早能选到下一分钟：服务端只收晚于现在的时间
+const minValidTo = ref('')
 function startEditing() {
   const m = latest()
   if (m) adopt(m)
+  minValidTo.value = toLocalInput(new Date(Date.now() + 60_000).toISOString())
   mode.value = 'edit'
 }
 function cancelEditing() {
@@ -324,9 +349,15 @@ function confirmPlaintext() {
 async function save(allowPlaintext = false) {
   const m = base.value
   if (!m || saving.value) return
-  saving.value = true
   // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
   const sent = { ...form, glossary: [...form.glossary] }
+  const validToChanged = sent.validTo !== validToInput(m)
+  const validTo = sent.validTo ? fromLocalInput(sent.validTo) : null
+  if (validToChanged && sent.validTo && !validTo) {
+    toast.add({ title: '有效到的日期和时间没填完整', color: 'error' })
+    return
+  }
+  saving.value = true
   try {
     const next = await api.updateMemory(props.spaceId, {
       uri: m.uri,
@@ -342,6 +373,8 @@ async function save(allowPlaintext = false) {
       sensitivity: sent.sensitivity,
       glossaryAdd: sent.glossary.filter((k) => !m.glossary.includes(k)),
       glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
+      // 只在改了的时候发：输入框只到分钟，原样发回去会抹掉原来的秒
+      ...(validToChanged ? { validTo } : {}),
       ...(allowPlaintext ? { allowPlaintext: true } : {}),
     })
     // 正在进行的重新拉取可能带回保存之前的版本，先取消，再把保存结果写进缓存
@@ -353,6 +386,7 @@ async function save(allowPlaintext = false) {
     if (form.priority === sent.priority) form.priority = next.priority
     if (form.sensitivity === sent.sensitivity) form.sensitivity = next.sensitivity
     if (form.glossary.join('\n') === sent.glossary.join('\n')) form.glossary = [...next.glossary]
+    if (form.validTo === sent.validTo) form.validTo = validToInput(next)
     toast.add({ title: '已保存', color: 'success' })
     // 保存期间没有再改，就回到阅读状态
     if (!dirty.value) mode.value = 'read'
@@ -427,6 +461,15 @@ async function remove() {
         {{ sensitivityLabels[base.sensitivity] }}
       </UBadge>
       <UBadge variant="outline" color="neutral">priority {{ base.priority }}</UBadge>
+      <UBadge
+        v-if="base.validTo"
+        variant="outline"
+        :color="expiredNow ? 'error' : 'neutral'"
+        :icon="icons.validity"
+        :title="`有效到 ${formatTime(base.validTo)}`"
+      >
+        {{ expiredNow ? '已过期' : `有效到 ${formatShort(base.validTo)}` }}
+      </UBadge>
       <div class="ml-auto flex items-center gap-1">
         <template v-if="mode === 'read'">
           <UButton v-if="!readOnly" :icon="icons.edit" size="sm" @click="startEditing">
@@ -469,6 +512,13 @@ async function remove() {
     </div>
 
     <UAlert v-if="readOnly" color="neutral" variant="subtle" :title="readOnly" />
+    <UAlert
+      v-if="expiredNow"
+      color="warning"
+      variant="subtle"
+      :icon="icons.expired"
+      title="这条记忆已经过期，不再召回、不进 boot。在「已过期」里可以让它重新生效。"
+    />
 
     <!-- 阅读：disclosure、关键词、渲染后的正文与来历 -->
     <template v-if="mode === 'read'">
@@ -591,6 +641,29 @@ async function remove() {
       </div>
       <UFormField label="关键词" help="召回时按关键词命中，至少两个字">
         <UInputTags v-model="form.glossary" class="w-full" />
+      </UFormField>
+      <UFormField
+        label="有效到"
+        help="只在一段时间内成立的事才设。到了这个时间就不再召回、不进 boot，历史里照样看得到，之后可以在「已过期」里让它重新生效；留空表示一直有效"
+      >
+        <div class="flex flex-wrap items-center gap-2">
+          <UInput
+            v-model="form.validTo"
+            type="datetime-local"
+            :min="minValidTo"
+            aria-label="有效到"
+            class="w-full sm:w-64"
+          />
+          <UButton
+            v-if="form.validTo"
+            size="sm"
+            color="neutral"
+            variant="ghost"
+            @click="form.validTo = ''"
+          >
+            改成一直有效
+          </UButton>
+        </div>
       </UFormField>
     </template>
 

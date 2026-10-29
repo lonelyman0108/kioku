@@ -52,6 +52,9 @@ export const icons = {
   undelete: 'i-lucide-undo-2',
   imported: 'i-lucide-download',
   expired: 'i-lucide-clock',
+  reactivate: 'i-lucide-clock-arrow-up',
+  // 有效到
+  validity: 'i-lucide-calendar-clock',
   left: 'i-lucide-eye-off',
   error: 'i-lucide-circle-alert',
 } as const

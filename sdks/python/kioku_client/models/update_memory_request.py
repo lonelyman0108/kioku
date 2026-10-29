@@ -13,6 +13,7 @@ from ..models.update_memory_request_sensitivity import UpdateMemoryRequestSensit
 from ..types import UNSET, Unset
 from typing import cast
 from uuid import UUID
+import datetime
 
 
 T = TypeVar("T", bound="UpdateMemoryRequest")
@@ -32,6 +33,7 @@ class UpdateMemoryRequest:
         disclosure (None | str | Unset):
         glossary_add (list[str] | Unset):
         glossary_remove (list[str] | Unset):
+        valid_to (datetime.datetime | None | Unset):
         allow_plaintext (bool | Unset):
     """
 
@@ -45,6 +47,7 @@ class UpdateMemoryRequest:
     disclosure: None | str | Unset = UNSET
     glossary_add: list[str] | Unset = UNSET
     glossary_remove: list[str] | Unset = UNSET
+    valid_to: datetime.datetime | None | Unset = UNSET
     allow_plaintext: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -83,6 +86,14 @@ class UpdateMemoryRequest:
         if not isinstance(self.glossary_remove, Unset):
             glossary_remove = self.glossary_remove
 
+        valid_to: None | str | Unset
+        if isinstance(self.valid_to, Unset):
+            valid_to = UNSET
+        elif isinstance(self.valid_to, datetime.datetime):
+            valid_to = self.valid_to.isoformat()
+        else:
+            valid_to = self.valid_to
+
         allow_plaintext = self.allow_plaintext
 
         field_dict: dict[str, Any] = {}
@@ -110,6 +121,8 @@ class UpdateMemoryRequest:
             field_dict["glossaryAdd"] = glossary_add
         if glossary_remove is not UNSET:
             field_dict["glossaryRemove"] = glossary_remove
+        if valid_to is not UNSET:
+            field_dict["validTo"] = valid_to
         if allow_plaintext is not UNSET:
             field_dict["allowPlaintext"] = allow_plaintext
 
@@ -160,6 +173,23 @@ class UpdateMemoryRequest:
 
         glossary_remove = cast(list[str], d.pop("glossaryRemove", UNSET))
 
+        def _parse_valid_to(data: object) -> datetime.datetime | None | Unset:
+            if data is None:
+                return data
+            if isinstance(data, Unset):
+                return data
+            try:
+                if not isinstance(data, str):
+                    raise TypeError()
+                valid_to_type_0 = datetime.datetime.fromisoformat(data)
+
+                return valid_to_type_0
+            except (TypeError, ValueError, AttributeError, KeyError):
+                pass
+            return cast(datetime.datetime | None | Unset, data)
+
+        valid_to = _parse_valid_to(d.pop("validTo", UNSET))
+
         allow_plaintext = d.pop("allowPlaintext", UNSET)
 
         update_memory_request = cls(
@@ -173,6 +203,7 @@ class UpdateMemoryRequest:
             disclosure=disclosure,
             glossary_add=glossary_add,
             glossary_remove=glossary_remove,
+            valid_to=valid_to,
             allow_plaintext=allow_plaintext,
         )
 
