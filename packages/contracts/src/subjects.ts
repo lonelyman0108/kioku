@@ -63,6 +63,15 @@ export const SubjectFact = z.object({
 })
 export type SubjectFact = z.infer<typeof SubjectFact>
 
+// 被新的说法推翻了的事实：不再注入对话，能让它重新生效。保留期过了会被清理掉
+export const SupersededFact = SubjectFact.extend({
+  // 什么时候被推翻的
+  supersededAt: z.iso.datetime(),
+  // 推翻它的那条事实的正文；那条已经删掉、或者看不到时为 null
+  supersededBy: z.string().nullable(),
+})
+export type SupersededFact = z.infer<typeof SupersededFact>
+
 // 情节层里的会话摘要，到期自动失效
 export const ConversationSummary = z.object({
   id: z.uuid(),
@@ -93,6 +102,8 @@ export type ExtractionRunInfo = z.infer<typeof ExtractionRunInfo>
 // 对象详情：事实是挂在这个对象上的；会话摘要是群里（或和这个人的私聊里）的；抽取记录是涉及它的最近几批
 export const SubjectDetail = SubjectInfo.extend({
   facts: z.array(SubjectFact),
+  // 最近被推翻的事实，新的在前
+  supersededFacts: z.array(SupersededFact),
   summaries: z.array(ConversationSummary),
   runs: z.array(ExtractionRunInfo),
 })
@@ -117,3 +128,7 @@ export type MergeSubjectRequest = z.infer<typeof MergeSubjectRequest>
 
 export const DeleteFactQuery = z.object({ version: z.coerce.number().int() })
 export type DeleteFactQuery = z.infer<typeof DeleteFactQuery>
+
+// 让被推翻的事实重新生效，带上看到的版本：期间被改过就返回 409。推翻它的那条照样有效，要不要留由成员决定
+export const ReactivateFactRequest = z.object({ version: z.number().int() })
+export type ReactivateFactRequest = z.infer<typeof ReactivateFactRequest>

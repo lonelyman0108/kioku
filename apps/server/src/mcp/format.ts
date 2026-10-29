@@ -16,6 +16,7 @@ export function formatMemory(m: MemoryView): string {
     `URI: ${m.uri}`,
     `层: ${m.layer}，敏感级: ${m.sensitivity}，priority: ${m.priority}，版本: ${m.version}`,
   ]
+  if (m.validTo) lines.push(`有效到: ${m.validTo}（到期后不再召回）`)
   if (m.disclosure) lines.push(`Disclosure: ${m.disclosure}`)
   if (m.glossary.length) lines.push(`Glossary: ${m.glossary.join(', ')}`)
   lines.push('', m.content ?? '（secret 正文需要显式读取权限）')

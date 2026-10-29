@@ -16,6 +16,10 @@ export const Keyword = z.string().trim().min(2, '关键词至少两个字').max(
 // 删除不限最短长度：要能清掉规则收紧之前写入的单字关键词
 export const RemovableKeyword = z.string().trim().min(1).max(64)
 
+// 有效到：ISO 8601，要带时区（例如 2026-12-31T23:59:00+08:00）。到了这个时间就不再召回、不进 boot，
+// 按 URI 也读不到；历史里照样看得到，管理界面里能让它重新生效。写入时要晚于现在
+export const ValidTo = z.iso.datetime({ offset: true })
+
 export const MemoryView = z
   .object({
     id: z.uuid(),
@@ -30,6 +34,7 @@ export const MemoryView = z
     disclosure: z.string().nullable(),
     glossary: z.array(z.string()),
     validFrom: z.string(),
+    // 有效到；null 表示一直有效
     validTo: z.string().nullable(),
     version: z.number().int(),
     createdAt: z.string(),
@@ -66,6 +71,8 @@ export const CreateMemoryRequest = z
     priority: z.number().int().min(0).max(99).default(2),
     disclosure: z.string().max(500).optional(),
     glossary: z.array(Keyword).max(32).default([]),
+    // 不填就一直有效
+    validTo: ValidTo.optional(),
   })
   .meta({ id: 'CreateMemoryRequest' })
 export type CreateMemoryRequest = z.infer<typeof CreateMemoryRequest>
@@ -85,6 +92,8 @@ export const UpdateMemoryRequest = z
     disclosure: z.string().max(500).nullable().optional(),
     glossaryAdd: z.array(Keyword).max(32).optional(),
     glossaryRemove: z.array(RemovableKeyword).max(32).optional(),
+    // 改有效期；null 清掉，一直有效
+    validTo: ValidTo.nullable().optional(),
     // 从 secret 降级时正文还像有明文凭据，确认没有、仍要降级。只有管理界面里的空间 owner 能用，Key 不行
     allowPlaintext: z.boolean().optional(),
   })

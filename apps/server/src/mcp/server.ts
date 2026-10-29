@@ -57,6 +57,11 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   throw new MemoryError(400, `${where}${issue?.message ?? '参数格式错误'}`)
 }
 
+// 有效到参数的说明，新建与修改共用
+const VALID_TO_HELP =
+  '有效到：ISO 8601，要带时区（例如 2026-12-31T23:59:00+08:00），要晚于现在。' +
+  '只在一段时间内成立的事（临时安排、截止日期）才填，到期后不再召回、不进 boot，不填就一直有效'
+
 // 写入的正文像有明文密码或 Token 时，在结果后面提醒换成占位符（规则与导入工具的提醒相同）
 function withPlaintextReminder(view: MemoryView): string {
   const text = formatMemory(view)
@@ -180,6 +185,7 @@ export function buildMcpServer(
         sensitivity: Sensitivity.optional().describe(
           '敏感级：public / internal / private / secret',
         ),
+        valid_to: CreateMemoryRequest.shape.validTo.describe(VALID_TO_HELP),
       },
     },
     (args) =>
@@ -193,6 +199,7 @@ export function buildMcpServer(
             ...(args.disclosure ? { disclosure: args.disclosure } : {}),
             ...(args.layer ? { layer: args.layer } : {}),
             ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
+            ...(args.valid_to ? { validTo: args.valid_to } : {}),
           }),
         ),
       ),
@@ -214,6 +221,9 @@ export function buildMcpServer(
         ),
         glossary_add: UpdateMemoryRequest.shape.glossaryAdd,
         glossary_remove: UpdateMemoryRequest.shape.glossaryRemove,
+        valid_to: UpdateMemoryRequest.shape.validTo.describe(
+          `${VALID_TO_HELP}；填 null 清掉，一直有效`,
+        ),
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
       },
     },
@@ -229,6 +239,7 @@ export function buildMcpServer(
             ...(args.layer ? { layer: args.layer } : {}),
             ...(args.glossary_add ? { glossaryAdd: args.glossary_add } : {}),
             ...(args.glossary_remove ? { glossaryRemove: args.glossary_remove } : {}),
+            ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
             ...(args.expected_version !== undefined
               ? { expectedVersion: args.expected_version }
               : {}),

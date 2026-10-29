@@ -3,13 +3,27 @@ import {
   DeleteFactQuery,
   ErrorResponse,
   MergeSubjectRequest,
+  ReactivateFactRequest,
   SubjectDetail,
   SubjectInfo,
   SubjectList,
   SubjectListQuery,
   UpdateSubjectRequest,
 } from '@kioku/contracts'
-import { and, arrayContains, asc, desc, eq, ilike, inArray, or, sql, type SQL } from 'drizzle-orm'
+import {
+  and,
+  arrayContains,
+  asc,
+  desc,
+  eq,
+  ilike,
+  inArray,
+  isNull,
+  lte,
+  or,
+  sql,
+  type SQL,
+} from 'drizzle-orm'
 
 import type { Access } from '../access/access'
 import { isInstanceAdmin } from '../auth/middleware'
@@ -30,6 +44,7 @@ import {
   conversationTurns,
   extractionRuns,
   memories,
+  memoryEvents,
   subjectIdentities,
   subjects,
 } from '../db/schema'
@@ -52,6 +67,7 @@ const PAGE_SIZE = 50
 const PLAIN_RUN_ERRORS = new Set([NO_USABLE_KEY, BUDGET_NO_SUMMARY, BATCH_MOVED])
 // 详情里各部分最多列这么多条
 const DETAIL_FACTS = 200
+const DETAIL_SUPERSEDED = 50
 const DETAIL_SUMMARIES = 20
 const DETAIL_RUNS = 20
 
@@ -125,12 +141,83 @@ const deleteFact = createRoute({
   },
 })
 
+const reactivateFact = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/subjects/{subjectId}/facts/{factId}/reactivate',
+  tags: ['subjects'],
+  summary: '让挂在这个对象上的一条被推翻的事实重新生效（推翻它的那条照样有效）',
+  request: {
+    params: SubjectParams.extend({ factId: z.uuid() }),
+    body: jsonBody(ReactivateFactRequest),
+  },
+  responses: {
+    204: { description: '已重新生效' },
+    403: forbidden,
+    404: notFound,
+    409: jsonResponse('现在是有效的，或看过之后被改过', ErrorResponse),
+  },
+})
+
 // 对象层与情节层不分人格，读权限里的人格限制用不上
 const readable = (access: Access) => readableConditions(access, { personaIds: [] })
 
 // 现在有效、查看者读得到的抽取事实
 const factsOf = (access: Access) =>
   and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject'), readable(access))!
+
+// 被推翻的事实：推翻时设了 valid_to、还没删除、按管理读取（不看有效期）看得到的
+const supersededOf = (access: Access) =>
+  and(
+    eq(memories.form, 'extracted'),
+    eq(memories.layer, 'subject'),
+    isNull(memories.deletedAt),
+    lte(memories.validTo, sql`now()`),
+    readableConditions(access, { personaIds: [], management: true }),
+  )!
+
+// 推翻了这些事实的那几条的正文：推翻时在旧事实的修改事件里记下了新事实的 id（supersededBy），取最近的一次。
+// 新的那条已经删掉、或者按管理读取看不到时不给
+async function supersedingContents(
+  tx: Tx,
+  access: Access,
+  factIds: string[],
+): Promise<Map<string, string>> {
+  if (!factIds.length) return new Map()
+  const links = await tx
+    .selectDistinctOn([memoryEvents.memoryId], {
+      factId: memoryEvents.memoryId,
+      by: sql<string>`${memoryEvents.context} ->> 'supersededBy'`,
+    })
+    .from(memoryEvents)
+    .where(
+      and(
+        inArray(memoryEvents.memoryId, factIds),
+        sql`(${memoryEvents.context} ->> 'supersededBy') is not null`,
+      ),
+    )
+    .orderBy(memoryEvents.memoryId, desc(memoryEvents.id))
+  const ids = [...new Set(links.map((l) => l.by).filter((id) => UUID.test(id)))]
+  const rows = ids.length
+    ? await tx
+        .select({ id: memories.id, content: memories.content })
+        .from(memories)
+        .where(
+          and(
+            inArray(memories.id, ids),
+            eq(memories.form, 'extracted'),
+            isNull(memories.deletedAt),
+            readableConditions(access, { personaIds: [], management: true }),
+          ),
+        )
+    : []
+  const contents = new Map(rows.map((r) => [r.id, r.content ?? '']))
+  return new Map(
+    links.flatMap((l) => {
+      const content = contents.get(l.by)
+      return l.factId && content !== undefined ? [[l.factId, content] as const] : []
+    }),
+  )
+}
 
 // 列表与修改后返回的对象信息：平台账号与事实条数按对象一次查出
 async function subjectInfos(
@@ -317,13 +404,19 @@ export function subjectRoutes(deps: Deps) {
         if (!found) return null
         // 会话摘要按来源作用域找：群里的，或和这个人的私聊里的
         const scope = subjectScope(found.info.kind, subjectId)
-        const [facts, summaries, runs] = await Promise.all([
+        const [facts, superseded, summaries, runs] = await Promise.all([
           tx
             .select()
             .from(memories)
             .where(and(eq(memories.subjectId, subjectId), factsOf(access)))
             .orderBy(desc(memories.updatedAt), desc(memories.id))
             .limit(DETAIL_FACTS),
+          tx
+            .select()
+            .from(memories)
+            .where(and(eq(memories.subjectId, subjectId), supersededOf(access)))
+            .orderBy(desc(memories.validTo), desc(memories.id))
+            .limit(DETAIL_SUPERSEDED),
           tx
             .select()
             .from(memories)
@@ -347,18 +440,30 @@ export function subjectRoutes(deps: Deps) {
         ])
         const named = await scopeNames(tx, [
           ...facts.map((f) => f.originScope),
+          ...superseded.map((f) => f.originScope),
           ...runs.map((r) => r.run.scope),
         ])
+        const superseding = await supersedingContents(
+          tx,
+          access,
+          superseded.map((f) => f.id),
+        )
+        const fact = (f: (typeof facts)[number]) => ({
+          id: f.id,
+          content: f.content ?? '',
+          provenance: f.provenance,
+          version: f.version,
+          scope: named(f.originScope),
+          createdAt: f.createdAt.toISOString(),
+          updatedAt: f.updatedAt.toISOString(),
+        })
         return {
           ...found.info,
-          facts: facts.map((f) => ({
-            id: f.id,
-            content: f.content ?? '',
-            provenance: f.provenance,
-            version: f.version,
-            scope: named(f.originScope),
-            createdAt: f.createdAt.toISOString(),
-            updatedAt: f.updatedAt.toISOString(),
+          facts: facts.map(fact),
+          supersededFacts: superseded.map((f) => ({
+            ...fact(f),
+            supersededAt: f.validTo!.toISOString(),
+            supersededBy: superseding.get(f.id) ?? null,
           })),
           summaries: summaries.map((s) => ({
             id: s.id,
@@ -502,6 +607,14 @@ export function subjectRoutes(deps: Deps) {
       const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
       if (role === 'viewer') return c.json({ error: '需要 owner 或 editor 角色' }, 403)
       await service.deleteFact(subjectId, factId, version)
+      return c.body(null, 204)
+    })
+    .openapi(reactivateFact, async (c) => {
+      const { spaceId, subjectId, factId } = c.req.valid('param')
+      const { version } = c.req.valid('json')
+      const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
+      if (role === 'viewer') return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      await service.reactivateFact(subjectId, factId, version)
       return c.body(null, 204)
     })
 }

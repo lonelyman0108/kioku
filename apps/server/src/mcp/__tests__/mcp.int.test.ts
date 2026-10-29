@@ -113,6 +113,37 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
     expect(toBase.content[0]!.text).toContain('管理界面')
   })
 
+  it('kioku_create 与 kioku_update 能设、清掉有效到，设在过去时返回工具错误', async () => {
+    const tools = await rpc('tools/list', {})
+    const schemaOf = (name: string) =>
+      (tools.body.result.tools as { name: string; inputSchema: { properties: object } }[]).find(
+        (t) => t.name === name,
+      )!.inputSchema.properties
+    expect(schemaOf('kioku_create')).toHaveProperty('valid_to')
+    expect(schemaOf('kioku_update')).toHaveProperty('valid_to')
+
+    const until = new Date(Date.now() + 86_400_000).toISOString()
+    const created = await callTool('kioku_create', {
+      uri: 'trip://plan',
+      content: '下周出差',
+      valid_to: until,
+    })
+    expect(created.isError).toBeFalsy()
+    expect(created.content[0]!.text).toContain(`有效到: ${until}`)
+    expect((await callTool('kioku_get', { uri: 'trip://plan' })).content[0]!.text).toContain(
+      `有效到: ${until}`,
+    )
+    const past = await callTool('kioku_update', {
+      uri: 'trip://plan',
+      valid_to: new Date(Date.now() - 60_000).toISOString(),
+    })
+    expect(past.isError).toBe(true)
+    expect(past.content[0]!.text).toContain('晚于现在')
+    const cleared = await callTool('kioku_update', { uri: 'trip://plan', valid_to: null })
+    expect(cleared.isError).toBeFalsy()
+    expect(cleared.content[0]!.text).not.toContain('有效到')
+  })
+
   it('业务错误作为工具错误返回', async () => {
     const missing = await callTool('kioku_get', { uri: 'core://nope' })
     expect(missing.isError).toBe(true)
