@@ -3,6 +3,7 @@ import { eq } from 'drizzle-orm'
 import { randomBytes } from 'node:crypto'
 
 import type { Sealed } from '../crypto/envelope'
+import type { MasterKey } from '../crypto/keyring'
 import type { Db, Tx } from '../db/client'
 import { settings } from '../db/schema'
 import {
@@ -99,7 +100,7 @@ export async function embeddingSettingsView(db: Db) {
   return embeddingView(await loadStored(db))
 }
 
-function openSetup(masterKey: Buffer | null, setup: StoredSetup | null): EmbeddingSetup | null {
+function openSetup(masterKey: MasterKey | null, setup: StoredSetup | null): EmbeddingSetup | null {
   if (!setup) return null
   return {
     model: setup.model,
@@ -112,17 +113,19 @@ function openSetup(masterKey: Buffer | null, setup: StoredSetup | null): Embeddi
 }
 
 // 解密出两组渠道，给请求嵌入接口用
-export async function loadEmbeddingSetups(db: Db, masterKey: Buffer | null) {
+export async function loadEmbeddingSetups(db: Db, masterKey: MasterKey | null) {
   const stored = await loadStored(db)
   return { active: openSetup(masterKey, stored.active), next: openSetup(masterKey, stored.next) }
 }
 
 // 只读出加密保存的各渠道 Key，不解密。用来核对主密钥是否一致
-export async function sealedEmbeddingKeys(db: Db): Promise<{ sealed: Sealed; aad: string }[]> {
+export async function sealedEmbeddingKeys(
+  db: Db,
+): Promise<{ sealed: Sealed; aad: string; keyId: string | null }[]> {
   const stored = await loadStored(db)
   return [...(stored.active?.channels ?? []), ...(stored.next?.channels ?? [])]
     .filter((c) => c.apiKey)
-    .map((c) => ({ sealed: unsealJson(c.apiKey!), aad: AAD }))
+    .map((c) => ({ sealed: unsealJson(c.apiKey!), aad: AAD, keyId: c.apiKey!.keyId ?? null }))
 }
 
 const newId = () => randomBytes(6).toString('base64url')
@@ -133,7 +136,7 @@ function buildChannels(
   inputs: EmbeddingChannelInput[],
   own: StoredChannel[],
   others: StoredChannel[],
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
 ): StoredChannel[] {
   const ids = inputs.flatMap((c) => (c.id ? [c.id] : []))
   if (new Set(ids).size !== ids.length) throw new SettingsInputError('同一个渠道填了两次')
@@ -145,19 +148,44 @@ function buildChannels(
   })
 }
 
-// 读出、改、写回在一个事务里，并锁住这一行：管理员的保存和后台任务的切换不会互相覆盖
+// 读出、改、写回在一个事务里，并锁住这一行：管理员的保存和后台任务的切换不会互相覆盖。value 为 null 时不写回
 async function mutate<T>(
   db: Db,
-  change: (stored: StoredEmbedding) => { value: StoredEmbedding; result: T },
+  change: (stored: StoredEmbedding) => { value: StoredEmbedding | null; result: T },
 ): Promise<T> {
   return db.transaction(async (tx) => {
     const [row] = await tx.select().from(settings).where(eq(settings.key, KEY)).for('update')
     const { value, result } = change(normalize(row?.value))
-    await tx
-      .insert(settings)
-      .values({ key: KEY, value })
-      .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+    if (value) {
+      await tx
+        .insert(settings)
+        .values({ key: KEY, value })
+        .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+    }
     return result
+  })
+}
+
+// 改写各渠道保存着的 Key（轮换主密钥时补上标识、换成新密钥的包装）：change 原样返回就不写回。返回改了几个
+export async function mapEmbeddingKeys(
+  db: Db,
+  change: (sealed: SealedJson, aad: string) => SealedJson,
+): Promise<number> {
+  return mutate(db, (stored) => {
+    let changed = 0
+    const mapSetup = (setup: StoredSetup | null) =>
+      setup && {
+        ...setup,
+        channels: setup.channels.map((c) => {
+          if (!c.apiKey) return c
+          const apiKey = change(c.apiKey, AAD)
+          if (apiKey === c.apiKey) return c
+          changed++
+          return { ...c, apiKey }
+        }),
+      }
+    const value = { active: mapSetup(stored.active), next: mapSetup(stored.next) }
+    return { value: changed ? value : null, result: changed }
   })
 }
 
@@ -166,7 +194,7 @@ const channelsOf = (setup: StoredSetup | null) => setup?.channels ?? []
 // 改正在用的模型的渠道；还没配置时就是第一次配置。模型标识变了要走换模型
 export async function saveActiveEmbedding(
   db: Db,
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   input: UpdateEmbeddingSettings,
 ): Promise<StoredEmbedding> {
   return mutate(db, (stored) => {
@@ -187,7 +215,7 @@ export async function saveActiveEmbedding(
 // 开始换模型，或改正在换过去的模型的渠道。换成另一个新模型时，原来那个的向量要清掉，返回它的标识
 export async function saveNextEmbedding(
   db: Db,
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   input: UpdateEmbeddingSettings,
 ): Promise<{ stored: StoredEmbedding; replaced: string | null }> {
   return mutate(db, (stored) => {

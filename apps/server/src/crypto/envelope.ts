@@ -49,6 +49,16 @@ export function decryptSecret(masterKey: Buffer, sealed: Sealed, aad: string): s
   return open(dataKey, sealed.ciphertext, binding).toString('utf8')
 }
 
+// 这把主密钥解不解得开这个包装过的数据密钥：用来认出记录是哪把主密钥加密的
+export function canUnwrap(masterKey: Buffer, wrappedKey: Buffer, aad: string): boolean {
+  try {
+    open(masterKey, wrappedKey, Buffer.from(aad))
+    return true
+  } catch {
+    return false
+  }
+}
+
 export function rewrapKey(oldKey: Buffer, newKey: Buffer, wrappedKey: Buffer, aad: string): Buffer {
   const binding = Buffer.from(aad)
   return seal(newKey, open(oldKey, wrappedKey, binding), binding)

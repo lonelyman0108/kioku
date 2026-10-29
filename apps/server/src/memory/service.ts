@@ -102,6 +102,7 @@ import {
   recallEvents,
 } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
+import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
 import {
   BOOT_ELIGIBLE,
   pendingReview,
@@ -134,7 +135,7 @@ export interface MemoryContext {
   access: Access
   // 当前应用使用的人格；persona 层只读得到它及其祖先。管理界面传 'all'，能看到全部人格
   personaId: string | null | 'all'
-  masterKey: Buffer | null
+  masterKey: MasterKey | null
   actor: { keyId?: string; accountId?: string }
   // 写入提交后调用，用于安排向量更新
   onChanged?: (memoryId: string) => void
@@ -251,6 +252,7 @@ function snapshot(row: MemoryRow, glossary: string[]) {
   const rest: Partial<MemoryRow> = { ...row }
   delete rest.ciphertext
   delete rest.wrappedKey
+  delete rest.keyId
   delete rest.fts
   if (row.sensitivity === 'secret') rest.content = null
   return { ...rest, glossary }
@@ -443,7 +445,7 @@ export class MemoryService {
     if (!this.ctx.access.canReadSecret || !row.ciphertext || !row.wrappedKey) return null
     if (!this.ctx.masterKey) throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，无法解密')
     return decryptSecret(
-      this.ctx.masterKey,
+      decryptionKey(this.ctx.masterKey, row.keyId),
       { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
       row.id,
     )
@@ -694,7 +696,7 @@ export class MemoryService {
       const body =
         sensitivity === 'secret'
           ? { content: null, ...this.seal(input.content, id) }
-          : { content: input.content, ciphertext: null, wrappedKey: null }
+          : { content: input.content, ciphertext: null, wrappedKey: null, keyId: null }
       const [row] = await tx
         .insert(memories)
         .values({
@@ -835,7 +837,8 @@ export class MemoryService {
   private seal(plaintext: string, id: string) {
     if (!this.ctx.masterKey)
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，不能保存 secret')
-    return encryptSecret(this.ctx.masterKey, plaintext, id)
+    const { key, id: keyId } = encryptionKey(this.ctx.masterKey)
+    return { ...encryptSecret(key, plaintext, id), keyId }
   }
 
   async update(input: UpdateMemoryRequest, meta: UpdateMeta = {}): Promise<MemoryView> {
@@ -945,7 +948,7 @@ export class MemoryService {
     const body =
       sensitivity === 'secret'
         ? { content: null, ...this.seal(plaintext, before.id) }
-        : { content: plaintext, ciphertext: null, wrappedKey: null }
+        : { content: plaintext, ciphertext: null, wrappedKey: null, keyId: null }
 
     const beforeGlossary =
       meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []

@@ -1,3 +1,4 @@
+import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import type { EndpointConfig } from '../settings/endpoint'
 import { dropBuffered, type BufferedSession } from './buffer'
@@ -9,7 +10,7 @@ import { loadExtractionConfig } from './settings'
 // modelFor 只在测试里换成假的模型
 export async function processSession(
   db: Db,
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   target: BufferedSession,
   modelFor: (config: EndpointConfig) => ChatModel = openAiChatModel,
 ): Promise<void> {

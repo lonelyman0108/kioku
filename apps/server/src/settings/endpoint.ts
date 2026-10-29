@@ -1,6 +1,7 @@
 import { eq } from 'drizzle-orm'
 
 import { decryptSecret, encryptSecret, type Sealed } from '../crypto/envelope'
+import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { settings } from '../db/schema'
 
@@ -32,10 +33,11 @@ export interface EndpointSettingsView {
   hasApiKey: boolean
 }
 
-// 加密保存的 Key，JSON 里按 base64 存
+// 加密保存的 Key，JSON 里按 base64 存；keyId 是包装数据密钥用的主密钥的标识（加上标识之前保存的没有）
 export interface SealedJson {
   ciphertext: string
   wrappedKey: string
+  keyId?: string
 }
 
 // 管理员填的设置不成立，原因可以直接给管理员看
@@ -56,13 +58,13 @@ export const unsealJson = (sealed: SealedJson): Sealed => ({
 
 // 解开加密保存的 Key；没配主密钥时说清是哪一项
 export function openApiKey(
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   sealed: SealedJson,
   aad: string,
   label: string,
 ): string {
   if (!masterKey) throw new Error(`${label}的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
-  return decryptSecret(masterKey, unsealJson(sealed), aad)
+  return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
 }
 
 // 同一个主机（协议、主机名与端口都相同）才能沿用已保存的 Key。只认 http 与 https：
@@ -80,7 +82,7 @@ export function sameOrigin(a: string, b: string): boolean {
 export function resolveApiKey(
   previous: { baseUrl: string; apiKey: SealedJson | null } | undefined,
   input: { baseUrl: string; apiKey?: string | null | undefined },
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   aad: string,
   label: string,
   where = '',
@@ -92,10 +94,12 @@ export function resolveApiKey(
   if (input.apiKey === null) return null
   if (typeof input.apiKey === 'string') {
     if (!masterKey) throw new SettingsInputError(`保存${label}的 Key 需要先配置 KIOKU_MASTER_KEY`)
-    const sealed = encryptSecret(masterKey, input.apiKey, aad)
+    const { key, id } = encryptionKey(masterKey)
+    const sealed = encryptSecret(key, input.apiKey, aad)
     return {
       ciphertext: sealed.ciphertext.toString('base64'),
       wrappedKey: sealed.wrappedKey.toString('base64'),
+      keyId: id,
     }
   }
   return keep ? (previous?.apiKey ?? null) : null
@@ -119,15 +123,43 @@ function viewOf(stored: Stored | undefined): EndpointSettingsView {
 export async function sealedEndpointKey(
   db: Db,
   endpoint: ModelEndpoint,
-): Promise<{ sealed: Sealed; aad: string } | null> {
+): Promise<{ sealed: Sealed; aad: string; keyId: string | null } | null> {
   const stored = await loadStored(db, endpoint)
   if (!stored?.apiKey) return null
-  return { sealed: unsealJson(stored.apiKey), aad: aadOf(endpoint) }
+  return {
+    sealed: unsealJson(stored.apiKey),
+    aad: aadOf(endpoint),
+    keyId: stored.apiKey.keyId ?? null,
+  }
+}
+
+// 改写保存着的 Key（轮换主密钥时补上标识、换成新密钥的包装）：change 原样返回就不写回。返回改了几个
+export async function mapEndpointKey(
+  db: Db,
+  endpoint: ModelEndpoint,
+  change: (sealed: SealedJson, aad: string) => SealedJson,
+): Promise<number> {
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(settings)
+      .where(eq(settings.key, endpoint.key))
+      .for('update')
+    const stored = row?.value as Stored | undefined
+    if (!stored?.apiKey) return 0
+    const apiKey = change(stored.apiKey, aadOf(endpoint))
+    if (apiKey === stored.apiKey) return 0
+    await tx
+      .update(settings)
+      .set({ value: { ...stored, apiKey }, updatedAt: new Date() })
+      .where(eq(settings.key, endpoint.key))
+    return 1
+  })
 }
 
 export async function loadEndpointConfig(
   db: Db,
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   endpoint: ModelEndpoint,
 ): Promise<EndpointConfig | null> {
   const stored = await loadStored(db, endpoint)
@@ -144,18 +176,26 @@ export async function loadEndpointConfig(
 // 保存并返回保存后的视图
 export async function saveEndpointConfig(
   db: Db,
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   endpoint: ModelEndpoint,
   input: EndpointInput,
 ): Promise<EndpointSettingsView> {
-  const stored = await loadStored(db, endpoint)
-  const apiKey = resolveApiKey(stored, input, masterKey, aadOf(endpoint), endpoint.label)
-  const value: Stored = { baseUrl: input.baseUrl, model: input.model, apiKey }
-  await db
-    .insert(settings)
-    .values({ key: endpoint.key, value })
-    .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
-  return viewOf(value)
+  // 读出、改、写回在一个事务里并锁住这一行：沿用的 Key 不会把轮换主密钥刚换好的包装覆盖回去
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(settings)
+      .where(eq(settings.key, endpoint.key))
+      .for('update')
+    const stored = row?.value as Stored | undefined
+    const apiKey = resolveApiKey(stored, input, masterKey, aadOf(endpoint), endpoint.label)
+    const value: Stored = { baseUrl: input.baseUrl, model: input.model, apiKey }
+    await tx
+      .insert(settings)
+      .values({ key: endpoint.key, value })
+      .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+    return viewOf(value)
+  })
 }
 
 export async function endpointSettingsView(

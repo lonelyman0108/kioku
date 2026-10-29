@@ -1,3 +1,4 @@
+import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import { channelEmbedder, type Embedder } from './provider'
 import { loadEmbeddingSetups, type EmbeddingSetup } from './settings'
@@ -14,7 +15,7 @@ export interface EmbedderSource {
 const embedderOf = (setup: EmbeddingSetup | null) =>
   setup && channelEmbedder(setup.model, setup.channels)
 
-export function settingsEmbedderSource(db: Db, masterKey: Buffer | null): EmbedderSource {
+export function settingsEmbedderSource(db: Db, masterKey: MasterKey | null): EmbedderSource {
   let cached: Promise<{ active: Embedder | null; next: Embedder | null }> | null = null
   const load = () => {
     // 读取失败不缓存，下次召回会重试，避免一次数据库抖动让向量召回在整个进程里失效
