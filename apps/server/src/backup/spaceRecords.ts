@@ -30,8 +30,26 @@ export const SPACE_EXPORT_VERSION = 1
 export const SPACE_EXPORT_MAX_PLAIN_BYTES = 128 * 1024 * 1024
 
 const Id = z.guid()
-// 要写进库的文字：PostgreSQL 的 text 与 jsonb 都存不了 NUL 字符，在这里先挡下，报错时点得出是哪一行
-const Text = z.string().refine((s) => !s.includes('\0'), '不能含有 NUL 字符')
+// 要写进库的文字，在这里先挡下存不进去的字符，报错时点得出是哪一行、哪个字段：PostgreSQL 的 text 与 jsonb
+// 都存不了 NUL；落单的 UTF-16 代理项（JSON 里 "\ud800" 这样的转义解出来的）写进 text 时被悄悄换成 U+FFFD，
+// 写进 jsonb（导入事件的快照）时报错，两个只差在代理项上的关键词还会变成同一个
+const storable = (s: string) => !s.includes('\0') && !/\p{Cs}/u.test(s)
+const UNSTORABLE = '含有存不进数据库的字符（NUL 或落单的代理项）'
+const Text = z.string().refine(storable, UNSTORABLE)
+
+// 用接口的定义检查的部分（外部凭据的来源）不管上面这一条：其中的字符串（包括键）逐个查
+function allStorable(value: unknown, ctx: z.RefinementCtx, path: (string | number)[] = []): void {
+  if (typeof value === 'string') {
+    if (!storable(value)) ctx.addIssue({ code: 'custom', path, message: UNSTORABLE })
+  } else if (Array.isArray(value)) {
+    value.forEach((item, i) => allStorable(item, ctx, [...path, i]))
+  } else if (value !== null && typeof value === 'object') {
+    for (const [key, item] of Object.entries(value)) {
+      if (!storable(key)) ctx.addIssue({ code: 'custom', path, message: UNSTORABLE })
+      allStorable(item, ctx, [...path, key])
+    }
+  }
+}
 // 时间：格式对、确实是个日期，年份在 PostgreSQL 存得下的范围里（没有公元 0 年）
 const Time = z.iso.datetime({ offset: true }).refine((value) => {
   const at = new Date(value)
@@ -51,7 +69,7 @@ export const SpaceExportHeader = z.object({
   version: z.literal(SPACE_EXPORT_VERSION),
   createdAt: Time,
   // 做导出的 Kioku 版本，导入出错时提示用
-  kioku: z.string(),
+  kioku: Text,
   // 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据
   exporter: z.object({ displayName: Text.max(200) }),
   // 空间级的设置：名字（导入时没填名字就用它）、domain 默认层与抽取预算
@@ -138,7 +156,12 @@ export const CredentialRecord = z.object({
   identifier: CredentialIdentifier,
   name: Text.min(1).max(100),
   description: Text.max(2000).nullable(),
-  source: z.discriminatedUnion('kind', [HostedCredentialSource, ExternalCredentialSource]),
+  // 外部的条目位置与字段对应照原样写进库；托管的值加密之后才存，不受上面那一条限制
+  source: z
+    .discriminatedUnion('kind', [HostedCredentialSource, ExternalCredentialSource])
+    .superRefine((source, ctx) => {
+      if (source.kind === 'external') allStorable(source, ctx)
+    }),
   // 只给这些应用用；null 表示不限定。导出里没有的应用（已经删掉的）导入时去掉
   appIds: z.array(Id).max(100).nullable(),
   createdAt: Time,

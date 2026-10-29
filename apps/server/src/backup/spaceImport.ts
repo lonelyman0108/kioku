@@ -641,8 +641,9 @@ async function writeSpace(
           .returning(SNAPSHOT_COLUMNS)
       ).map((r) => [r.id, r]),
     )
-    // 关键词（去重、排过序的）、引用索引与导入事件是从记忆派生出来的，分开标出
-    derived('记忆的关键词', batch)
+    // 关键词是文件里的值（只是去了重、排了序），写不进去算文件的问题；
+    // 引用索引与导入事件是服务端派生的（事件的快照是写进库之后取回的记录，加上已经检查过的关键词），分开标出
+    step('记忆的关键词', batch)
     const keywords = prepared.flatMap((p) =>
       p.glossary.map((keyword) => ({ spaceId, memoryId: p.id, keyword })),
     )

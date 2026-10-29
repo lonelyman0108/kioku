@@ -1,9 +1,11 @@
 import { MemoryError } from '../memory/service'
 
-// 空间的导出、检查与导入：整个操作占一个名额，做完才放。这几样都要大块内存（上传的文件最多 32 MB、
-// 口令派生上百 MiB、解压最多 128 MiB 再逐行解析、导出的文件攒在内存里直到发完），又是很少用的管理操作：
+// 空间的导出、检查与导入：整个操作占一个名额，做完才放。这几样都要大块内存（口令派生上百 MiB、
+// 解密与解压最多 128 MiB 再逐行解析、导出的文件攒在内存里直到发完），又是很少用的管理操作：
 // 同时只做一个，其余排队；排队的有上限，每个账号同时最多占一个名额（排着或正在做）。满了直接拒绝（429）：
 // 排队不设上限的话，任何一个空间 owner 连着点导出，就能让所有人的导出、导入都卡住。
+// 检查与导入读完上传的表单才来拿名额：太大的上传在那之前就按大小挡下（413），慢的上传也不占着名额；
+// 这两个只有实例管理员能用，同时上传的个数不另外限制。
 // 排着队的请求断开了（客户端超时、关掉页面），就从队列里移除、放掉名额，不等轮到它再白做一次
 const RUNNING = 1
 const QUEUE = 4
@@ -69,5 +71,19 @@ export async function acquireTransferSlot(
     if (next) next()
     else running--
     leave(account)
+  }
+}
+
+// 占着一个名额做完 fn，成功或出错都放掉
+export async function withTransferSlot<T>(
+  account: string,
+  signal: AbortSignal | undefined,
+  fn: () => Promise<T>,
+): Promise<T> {
+  const release = await acquireTransferSlot(account, signal)
+  try {
+    return await fn()
+  } finally {
+    release()
   }
 }

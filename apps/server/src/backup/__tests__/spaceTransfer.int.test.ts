@@ -1,4 +1,5 @@
 import { randomBytes, randomUUID } from 'node:crypto'
+import { getEventListeners } from 'node:events'
 
 import type {
   AppInfo,
@@ -28,7 +29,7 @@ import { createApp } from '../../app'
 import { decryptSecret } from '../../crypto/envelope'
 import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
-import { memories, settings, spaces } from '../../db/schema'
+import { credentialEvents, memories, settings, spaces } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
@@ -932,6 +933,20 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(((await res.json()) as { error: string }).error).toBe('文件超过 32 MB 的上限')
   })
 
+  it('超大的上传马上 413：先看大小、读完表单才拿名额，不排队也不占名额', async () => {
+    const alice = await bootstrap(source, 'alice')
+    // 正在做的与排队的名额都满了：先拿名额的话就是 429
+    const running = await acquireTransferSlot('other-0')
+    const queued = Array.from({ length: 4 }, (_, i) => acquireTransferSlot(`other-${i + 1}`))
+    const huge = new Blob([new Uint8Array(33 * 1024 * 1024)])
+    for (const send of [importRequest, inspectRequest]) {
+      expect((await send(source, alice.cookie, huge)).status).toBe(413)
+    }
+    expect(queuedTransfers()).toBe(4)
+    running()
+    for (const next of queued) (await next)()
+  })
+
   it('文件里的内容对不上时拒绝：URI 冲突、继承成环、层与 URI 不符、指向不在的对象', async () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()
@@ -987,7 +1002,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
     await importing(
       [curated('home://nul', { content: '前\u0000后' })],
-      '第 2 行 content：不能含有 NUL 字符',
+      '第 2 行 content：含有存不进数据库的字符（NUL 或落单的代理项）',
     )
     expect(await spaceCount()).toBe(before)
   })
@@ -996,7 +1011,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()
     // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束；
-    // 关键词是「坏关键词」时也报违反约束（关键词是导入时派生的，不算文件的问题）
+    // 关键词是「坏关键词」时也报违反约束（关键词是文件里的值，算文件的问题）；
+    // 正文是「事件出错」的记忆，写它的导入事件时报违反约束（导入事件是服务端派生的，不算文件的问题）
     await database.db.execute(
       sql.raw(`create or replace function kioku_test_reject() returns trigger language plpgsql as $$
       begin
@@ -1008,13 +1024,17 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           if new.display_name = '冲突的' then
             raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
           end if;
-        elsif new.keyword = '坏关键词' then
+        elsif tg_table_name = 'memory_glossary' then
+          if new.keyword = '坏关键词' then
+            raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
+          end if;
+        elsif new.after ->> 'content' = '事件出错' then
           raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
         end if;
         return new;
       end $$`),
     )
-    for (const table of ['subjects', 'memory_glossary']) {
+    for (const table of ['subjects', 'memory_glossary', 'memory_events']) {
       await database.db.execute(sql.raw(`drop trigger if exists kioku_test_reject on ${table}`))
       await database.db.execute(
         sql.raw(
@@ -1054,23 +1074,87 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         '导出文件的内容不对：第 3–4 行的对象写不进数据库（违反了约束 kioku_test_check）',
       )
       expect(wasLogged('第 3–4 行的对象', '23514', 'kioku_test_check')).toBe(true)
-      // 关键词是服务端派生的：出错是服务端的缺陷，不说成文件的问题
-      const derived = await importRequest(
+      // 关键词是文件里的值：写不进去算文件的问题
+      const keyword = await importRequest(
         source,
         alice.cookie,
         await craft([curated('home://a', { glossary: ['坏关键词'] })]),
       )
+      expect(keyword.status, await keyword.clone().text()).toBe(400)
+      expect(((await keyword.json()) as { error: string }).error).toBe(
+        '导出文件的内容不对：第 2 行的记忆的关键词写不进数据库（违反了约束 kioku_test_check）',
+      )
+      expect(wasLogged('第 2 行的记忆的关键词', '23514', 'kioku_test_check')).toBe(true)
+      // 导入事件是服务端派生的：出错是服务端的缺陷，不说成文件的问题
+      const derived = await importRequest(
+        source,
+        alice.cookie,
+        await craft([curated('home://a', { content: '事件出错' })]),
+      )
       expect(derived.status).toBe(500)
       expect(((await derived.json()) as { error: string }).error).toBe('服务内部错误')
-      expect(wasLogged('第 2 行的记忆的关键词', '23514', 'kioku_test_check')).toBe(true)
+      expect(wasLogged('第 2 行的记忆的导入事件', '23514', 'kioku_test_check')).toBe(true)
       expect(await spaceCount()).toBe(before)
     } finally {
       logged.mockRestore()
-      for (const table of ['subjects', 'memory_glossary']) {
+      for (const table of ['subjects', 'memory_glossary', 'memory_events']) {
         await database.db.execute(sql.raw(`drop trigger if exists kioku_test_reject on ${table}`))
       }
       await database.db.execute(sql.raw('drop function if exists kioku_test_reject()'))
     }
+  })
+
+  it('文件里的文字有存不进数据库的字符（落单的代理项、NUL）：返回 400，指出是哪一行、哪个字段', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const before = await spaceCount()
+    const rejected = async (records: SpaceExportRecord[], where: string) => {
+      const res = await importRequest(source, alice.cookie, await craft(records))
+      expect(res.status, await res.clone().text()).toBe(400)
+      expect(((await res.json()) as { error: string }).error).toBe(
+        `导出文件的内容不对：${where}：含有存不进数据库的字符（NUL 或落单的代理项）`,
+      )
+    }
+    // JSON 里的 "\ud800" 解出来是落单的代理项：写进 text 会被换成 U+FFFD，写进 jsonb（导入事件）会报错
+    await rejected(
+      [curated('home://a'), curated('home://b', { content: '半个\ud800字' })],
+      '第 3 行 content',
+    )
+    await rejected([curated('home://a', { glossary: ['好的', '\udc00坏'] })], '第 2 行 glossary.1')
+    await rejected([curated('home://a', { disclosure: '有\u0000的' })], '第 2 行 disclosure')
+    // 外部凭据的条目位置用的是接口的定义，也一样查
+    const provider = randomUUID()
+    await rejected(
+      [
+        {
+          type: 'provider',
+          id: provider,
+          kind: 'bitwarden',
+          name: 'Vaultwarden',
+          instructions: '',
+          deletedAt: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+        {
+          type: 'credential',
+          id: randomUUID(),
+          identifier: 'mail',
+          name: '邮箱',
+          description: null,
+          source: {
+            kind: 'external',
+            providerId: provider,
+            location: 'mail\ud800item',
+            fields: [{ name: 'password', sourceField: 'password' }],
+          },
+          appIds: null,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ],
+      '第 3 行 source.location',
+    )
+    expect(await spaceCount()).toBe(before)
   })
 
   it('外部凭据没有字段、或者字段重名：导入时被拒，导出时也被拒', async () => {
@@ -1256,6 +1340,54 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(res.status, await res.clone().text()).toBe(429)
     expect(((await res.json()) as { error: string }).error).toBe('导出导入正忙，稍后再试')
   }
+  // 带着断开信号导出：测客户端断开
+  const exportWithSignal = (spaceId: string, cookie: string, signal: AbortSignal) =>
+    Promise.resolve(
+      source.request(`/v1/spaces/${spaceId}/export`, {
+        ...jsonRequest('POST', { passphrase: PASSPHRASE }, { cookie }),
+        signal,
+      }),
+    )
+  // 最多等 3 秒：等不到时报错，后面的清理照样做
+  const within = <T>(promise: Promise<T>, ms = 3000) =>
+    Promise.race([
+      promise,
+      new Promise<never>((_, reject) => setTimeout(() => reject(new Error('等不到结果')), ms)),
+    ])
+  // 另开一条连接锁住一张表：导出读到它时就卡在锁上。body 做完（或者调了 unlock）才放锁
+  const whileLocked = async (table: string, body: (unlock: () => void) => Promise<void>) => {
+    const locker = connect(testDatabaseUrl!, { max: 1 })
+    let unlock!: () => void
+    const unlocked = new Promise<void>((resolve) => (unlock = resolve))
+    let taken!: () => void
+    const lockTaken = new Promise<void>((resolve) => (taken = resolve))
+    const holding = locker.db.transaction(async (tx) => {
+      await tx.execute(sql.raw(`lock table ${table} in access exclusive mode`))
+      taken()
+      await unlocked
+    })
+    try {
+      await Promise.race([lockTaken, holding])
+      await body(unlock)
+    } finally {
+      unlock()
+      await holding
+      await locker.close()
+    }
+  }
+  // 有请求卡在表锁上
+  const blockedOnLock = async () => {
+    const [row] = await database.db.execute<{ n: number }>(
+      sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event_type = 'Lock'`,
+    )
+    return row!.n > 0
+  }
+  // 名额空着：别人来拿不用排队
+  const slotFree = async () => {
+    const next = acquireTransferSlot('next')
+    expect(queuedTransfers()).toBe(0)
+    ;(await next)()
+  }
 
   it('导出导入正忙时，导出、检查与导入都直接返回 429，放开之后照常', async () => {
     const alice = await bootstrap(source, 'alice')
@@ -1371,34 +1503,94 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect((await leaving).status).toBe(400)
   })
 
-  it('导出期间或者拿到响应之后客户端断开：响应流没人读，名额照样放掉', async () => {
+  it('拿到响应、文件还没读时客户端断开：没人读响应流，名额照样放掉', async () => {
     const alice = await bootstrap(source, 'alice')
-    const exportWith = (signal: AbortSignal) =>
-      Promise.resolve(
-        source.request(`/v1/spaces/${alice.spaceId}/export`, {
-          ...jsonRequest('POST', { passphrase: PASSPHRASE }, { cookie: alice.cookie }),
-          signal,
-        }),
-      )
-    // 轮到它、开始导出之后就断开：node 的服务端之后既不读也不取消这个响应流
-    const holder = await acquireTransferSlot('holder')
-    const early = new AbortController()
-    const leaving = exportWith(early.signal)
-    await until(() => queuedTransfers() === 1)
-    holder()
-    early.abort()
-    expect((await leaving).status).toBe(200)
-    const next = acquireTransferSlot('next')
-    expect(queuedTransfers()).toBe(0)
-    ;(await next)()
-    // 拿到响应、文件还没读时断开：读之前名额一直占着，断开就放
+    // node 的服务端在客户端断开之后既不读也不取消这个响应流：读之前名额一直占着，断开就放
     const late = new AbortController()
-    const res = await exportWith(late.signal)
+    const res = await exportWithSignal(alice.spaceId, alice.cookie, late.signal)
     expect(res.status).toBe(200)
     const probe = acquireTransferSlot('probe')
     expect(queuedTransfers()).toBe(1)
     late.abort()
     ;(await probe)()
+  })
+
+  it('派生口令期间客户端断开：派生完就停下、马上放掉名额，不再读库', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const holder = await acquireTransferSlot('holder')
+    const controller = new AbortController()
+    const leaving = exportWithSignal(alice.spaceId, alice.cookie, controller.signal)
+    await until(() => queuedTransfers() === 1)
+    // 空间表锁着：派生完要是接着开事务读库，就卡在锁上、一直占着名额
+    await whileLocked('spaces', async () => {
+      // 轮到它就开始派生，这时断开
+      holder()
+      controller.abort()
+      expect((await within(leaving)).status).toBe(400)
+      await slotFree()
+    })
+  })
+
+  it('读库期间客户端断开：读下一批之前停下，不把文件做完', async () => {
+    const alice = await bootstrap(source, 'alice')
+    // 记忆表一直锁着：导出要是不停、接着往下读，就卡在它上面
+    await whileLocked('memories', async () => {
+      await whileLocked('personas', async (unlockPersonas) => {
+        const controller = new AbortController()
+        const leaving = exportWithSignal(alice.spaceId, alice.cookie, controller.signal)
+        // 派生完、开了事务，卡在人格表上时断开，再放开人格表
+        await until(blockedOnLock)
+        controller.abort()
+        unlockPersonas()
+        expect((await within(leaving)).status).toBe(400)
+        await slotFree()
+      })
+    })
+  })
+
+  it('读完最后一批时客户端已经断开：文件交不出去，不记凭据的访问事件', async () => {
+    const alice = await bootstrap(source, 'alice')
+    await ok(
+      send(
+        source,
+        'POST',
+        `/v1/spaces/${alice.spaceId}/credentials`,
+        { identifier: 'nas', name: 'NAS', source: { kind: 'hosted', values: { password: 'pw' } } },
+        { cookie: alice.cookie },
+      ),
+      201,
+    )
+    await whileLocked('memories', async (unlockMemories) => {
+      const controller = new AbortController()
+      const leaving = exportWithSignal(alice.spaceId, alice.cookie, controller.signal)
+      // 卡在最后一批（记忆）上时断开：读完这一批就没有下一批了
+      await until(blockedOnLock)
+      controller.abort()
+      unlockMemories()
+      expect((await within(leaving)).status).toBe(400)
+    })
+    const accessed = await withSpace(database.db, alice.spaceId, (tx) =>
+      tx.select().from(credentialEvents).where(eq(credentialEvents.eventType, 'access')),
+    )
+    expect(accessed).toEqual([])
+    await slotFree()
+  })
+
+  it('导出的文件发完之后不再监听断开', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const request = new Request(
+      `http://localhost/v1/spaces/${alice.spaceId}/export`,
+      jsonRequest('POST', { passphrase: PASSPHRASE }, { cookie: alice.cookie }),
+    )
+    const listeners = () => getEventListeners(request.signal, 'abort').length
+    const before = listeners()
+    const res = await source.request(request)
+    expect(res.status).toBe(200)
+    // 文件还没发完：等着客户端断开时放名额
+    expect(listeners()).toBe(before + 1)
+    await res.arrayBuffer()
+    expect(listeners()).toBe(before)
+    await slotFree()
   })
 
   it(

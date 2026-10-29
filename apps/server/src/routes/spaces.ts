@@ -15,12 +15,11 @@ import {
 import { asc, eq } from 'drizzle-orm'
 import { bodyLimit } from 'hono/body-limit'
 import type { MiddlewareHandler } from 'hono'
-import { createMiddleware } from 'hono/factory'
 
 import { memberRole, requireInstanceAdmin } from '../auth/middleware'
-import { exportSpace } from '../backup/spaceExport'
+import { exportSpace, type SpaceExport } from '../backup/spaceExport'
 import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
-import { acquireTransferSlot } from '../backup/transferGate'
+import { acquireTransferSlot, withTransferSlot } from '../backup/transferGate'
 import { accounts, spaceMembers, spaces } from '../db/schema'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
@@ -28,7 +27,7 @@ import { jsonBody, jsonResponse, router } from '../http/openapi'
 
 const params = z.object({ spaceId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
-// 口令派生同时只跑一个、排队有上限、每个账号同时最多一个：满了就是这个
+// 导出、检查与导入同时只做一个、排队有上限、每个账号同时最多占一个：满了就是这个
 const busy = jsonResponse('导出导入正忙，稍后再试', ErrorResponse)
 
 const read = createRoute({
@@ -107,22 +106,13 @@ const exportRoute = createRoute({
   },
 })
 
-// 整个检查或导入占一个名额（见 transferGate.ts），做完才放；先占名额再读表单，排着队的请求不先把文件读进内存
-const transferSlot = createMiddleware<AppEnv>(async (c, next) => {
-  const release = await acquireTransferSlot(c.get('console').accountId, c.req.raw.signal)
-  try {
-    await next()
-  } finally {
-    release()
-  }
-})
-
-// 上传导出文件的两个接口共用：先确认是实例管理员、再占名额、看大小，最后才读表单，别人上传的大文件不读进内存。
-// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量
+// 上传导出文件的两个接口共用：先确认是实例管理员、再看大小，最后才读表单，别人上传的大文件不读进内存。
+// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量。名额等表单读完才在处理函数里拿（见 transferGate.ts）：
+// 太大的上传在这之前就是 413，不排队、不占名额，慢的上传也不占着名额。这两个接口只有实例管理员能用，
+// 同时上传的个数不另外限制
 function uploadMiddleware(deps: Deps): MiddlewareHandler<AppEnv>[] {
   return [
     requireInstanceAdmin(deps, '只有实例管理员能导入空间'),
-    transferSlot,
     bodyLimit({
       maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
       onError: (c) =>
@@ -170,8 +160,38 @@ function importRoute(deps: Deps) {
   })
 }
 
-// 导出的文件发完才放掉名额：文件攒在内存里，要等发给浏览器之后才释放。发送途中客户端断开时响应流被取消，也放掉
-function releasingBody(file: Uint8Array, release: () => void): ReadableStream<Uint8Array> {
+// 整个导出占一个名额：文件攒在内存里，要等发给浏览器之后才释放。名额只在 settle 里放、只放一次，放的时候移除断开的监听；
+// 哪种情况先到都走它：导出出错或停下、文件发完、发送途中响应流被取消、文件做好之后客户端断开。
+// 导出期间不靠断开的监听放：客户端断开时 exportSpace 在下一个检查点自己停下，停下之后才放，
+// 名额不会在它还在派生、读库时就让给别人。文件做好之后才断开的，node 的服务端既不读这个响应流、也不取消它，
+// 只能在断开时放
+async function exportHoldingSlot(
+  accountId: string,
+  signal: AbortSignal,
+  run: () => Promise<SpaceExport>,
+): Promise<{ exported: SpaceExport; body: ReadableStream<Uint8Array> }> {
+  const release = await acquireTransferSlot(accountId, signal)
+  let settled = false
+  const settle = () => {
+    if (settled) return
+    settled = true
+    signal.removeEventListener('abort', settle)
+    release()
+  }
+  let exported: SpaceExport
+  try {
+    exported = await run()
+  } catch (err) {
+    settle()
+    throw err
+  }
+  if (signal.aborted) settle()
+  else signal.addEventListener('abort', settle, { once: true })
+  return { exported, body: fileBody(exported.file, settle) }
+}
+
+// 响应流：整个文件一次交出去，读完或者被取消时调 done
+function fileBody(file: Uint8Array, done: () => void): ReadableStream<Uint8Array> {
   let sent = false
   return new ReadableStream({
     pull(controller) {
@@ -181,10 +201,10 @@ function releasingBody(file: Uint8Array, release: () => void): ReadableStream<Ui
         return
       }
       controller.close()
-      release()
+      done()
     },
     cancel() {
-      release()
+      done()
     },
   })
 }
@@ -207,25 +227,16 @@ export function spaceRoutes(deps: Deps) {
       if (!role) return c.json({ error: '不是该空间成员' }, 403)
       // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
       if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
-      // 整个导出占一个名额，文件发完才放（见 releasingBody）
       const signal = c.req.raw.signal
-      const release = await acquireTransferSlot(accountId, signal)
-      let exported
-      try {
-        exported = await exportSpace(deps.db, deps.masterKey, {
+      const { exported, body } = await exportHoldingSlot(accountId, signal, () =>
+        exportSpace(deps.db, deps.masterKey, {
           spaceId,
           accountId,
           passphrase: c.req.valid('json').passphrase,
-        })
-      } catch (err) {
-        release()
-        throw err
-      }
-      // 客户端在导出期间就断开了的，node 的服务端既不读这个响应流、也不取消它，名额不会经响应流放掉：
-      // 已经断开的在这里放，之后断开的在断开时放
-      if (signal.aborted) release()
-      else signal.addEventListener('abort', release, { once: true })
-      return c.body(releasingBody(exported.file, release), 200, {
+          signal,
+        }),
+      )
+      return c.body(body, 200, {
         'content-type': 'application/octet-stream',
         'content-length': String(exported.file.length),
         'content-disposition': attachment(exported.spaceName, exported.createdAt),
@@ -234,20 +245,30 @@ export function spaceRoutes(deps: Deps) {
     })
     .openapi(inspectRoute(deps), async (c) => {
       const form = c.req.valid('form')
-      const preview = await inspectSpaceImport(deps.masterKey, {
-        file: Buffer.from(await form.file.arrayBuffer()),
-        passphrase: form.passphrase,
-      })
+      // 表单读完了才拿名额：解密、解压与解析都占着它
+      const preview = await withTransferSlot(
+        c.get('console').accountId,
+        c.req.raw.signal,
+        async () =>
+          inspectSpaceImport(deps.masterKey, {
+            file: Buffer.from(await form.file.arrayBuffer()),
+            passphrase: form.passphrase,
+          }),
+      )
       return c.json(preview, 200)
     })
     .openapi(importRoute(deps), async (c) => {
       const form = c.req.valid('form')
-      const result = await importSpace(deps.db, deps.masterKey, {
-        accountId: c.get('console').accountId,
-        file: Buffer.from(await form.file.arrayBuffer()),
-        passphrase: form.passphrase,
-        name: form.name,
-      })
+      const accountId = c.get('console').accountId
+      // 表单读完了才拿名额：解密、解压、解析与写库都占着它
+      const result = await withTransferSlot(accountId, c.req.raw.signal, async () =>
+        importSpace(deps.db, deps.masterKey, {
+          accountId,
+          file: Buffer.from(await form.file.arrayBuffer()),
+          passphrase: form.passphrase,
+          name: form.name,
+        }),
+      )
       // 向量不在文件里，按这个实例的嵌入设置重新生成
       void deps.jobs?.enqueueBackfill()
       return c.json(result, 201)

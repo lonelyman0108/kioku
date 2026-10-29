@@ -51,13 +51,27 @@ export interface SpaceExport {
 // 每次读多少条记忆
 const PAGE = 500
 
+// 请求断开了（客户端超时、关掉页面）：文件交不出去，不再接着做。响应没人收，状态码只是给日志看的
+function stopIfGone(signal: AbortSignal | undefined): void {
+  if (signal?.aborted) throw new MemoryError(400, '请求已经断开，导出停下')
+}
+
 export async function exportSpace(
   db: Db,
   masterKey: MasterKey | null,
-  options: { spaceId: string; accountId: string; passphrase: string; kdf?: KdfParams },
+  options: {
+    spaceId: string
+    accountId: string
+    passphrase: string
+    kdf?: KdfParams
+    // 请求的断开信号：派生之后、开事务之前与每读一批之前看一眼，断开了就停下
+    signal?: AbortSignal
+  },
 ): Promise<SpaceExport> {
-  // 先派生密钥再开事务：派生要排队、要几百毫秒，不占着读库的事务
+  const { signal } = options
+  // 先派生密钥再开事务：派生要几百毫秒，不占着读库的事务
   const exportKey = await deriveExportKey(options.passphrase, options.kdf)
+  stopIfGone(signal)
   const createdAt = new Date().toISOString()
   // 导出了哪些凭据、各带了哪些字段：读完之后记访问事件
   const exported = new Map<string, string[]>()
@@ -89,7 +103,13 @@ export async function exportSpace(
             extractionDailyWrites: space.extractionDailyWrites,
           },
         })
-        const source = lines(tx, { header, accountId: options.accountId, masterKey, exported })
+        const source = lines(tx, {
+          header,
+          accountId: options.accountId,
+          masterKey,
+          exported,
+          signal,
+        })
         try {
           return await sealSpaceExport(exportKey, source, {
             maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
@@ -111,6 +131,8 @@ export async function exportSpace(
     }
     throw err
   }
+  // 文件做好时客户端已经断开：文件交不出去，也就不记访问事件
+  stopIfGone(signal)
   // 托管的值与外部的绑定都随文件带走了，和取用一样给凭据的主人记一条访问事件，事后查得到
   if (exported.size) {
     await withSpace(db, options.spaceId, (tx) =>
@@ -144,6 +166,7 @@ interface LinesContext {
   accountId: string
   masterKey: MasterKey | null
   exported: Map<string, string[]>
+  signal: AbortSignal | undefined
 }
 
 const line = (record: SpaceExportHeader | SpaceExportRecord) => `${JSON.stringify(record)}\n`
@@ -153,8 +176,11 @@ const iso = (value: Date | null) => value?.toISOString() ?? null
 
 async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
   const { accountId } = ctx
+  // 每读一批之前看一眼：请求断开了就停下，不接着读库、压缩与加密
+  const next = () => stopIfGone(ctx.signal)
   yield line(ctx.header)
 
+  next()
   const personaRows = await tx
     .select()
     .from(personas)
@@ -174,6 +200,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     )
     .join('')
 
+  next()
   const appRows = await tx.select().from(apps).orderBy(asc(apps.createdAt), asc(apps.id))
   yield appRows
     .map((a) =>
@@ -191,6 +218,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     )
     .join('')
 
+  next()
   const subjectRows = await tx
     .select()
     .from(subjects)
@@ -209,6 +237,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
       }),
     )
     .join('')
+  next()
   const identityRows = await tx
     .select()
     .from(subjectIdentities)
@@ -226,6 +255,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
       }),
     )
     .join('')
+  next()
   const ruleRows = await tx
     .select()
     .from(appGroupPersonas)
@@ -243,6 +273,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     .join('')
 
   // 凭据与凭据源只有导出人自己的；凭据只导出有效的。已删除的凭据源只在还有导出的凭据绑着它时带上
+  next()
   const credentialRows = await tx
     .select()
     .from(credentials)
@@ -296,6 +327,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
   })
   let after: string | null = null
   for (;;) {
+    next()
     const rows = await tx
       .select()
       .from(memories)

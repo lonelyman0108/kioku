@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { MemoryError } from '../../memory/service'
-import { acquireTransferSlot, queuedTransfers } from '../transferGate'
+import { acquireTransferSlot, queuedTransfers, withTransferSlot } from '../transferGate'
 
 const busy = (p: Promise<unknown>) =>
   expect(p).rejects.toSatisfy((err) => err instanceof MemoryError && err.status === 429)
@@ -66,6 +66,18 @@ describe('导出导入的闸门', () => {
     // 已经断开的请求不再排
     await expect(acquireTransferSlot('late', AbortSignal.abort())).rejects.toThrow('请求已经断开')
     expect(queuedTransfers()).toBe(0)
+  })
+
+  it('占着名额做一件事：做完或出错都放掉', async () => {
+    await expect(
+      withTransferSlot('worker', undefined, async () => {
+        throw new Error('坏了')
+      }),
+    ).rejects.toThrow('坏了')
+    expect(await withTransferSlot('worker', undefined, async () => 1)).toBe(1)
+    const next = acquireTransferSlot('next')
+    expect(queuedTransfers()).toBe(0)
+    ;(await next)()
   })
 
   it('轮到之后才断开不影响已经拿到的名额', async () => {
