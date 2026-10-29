@@ -172,6 +172,7 @@ export const credentialSourceLabels: Record<CredentialSource, string> = {
 // 凭据事件：只有凭据的主人看得到，不进空间的活动记录
 export const credentialEventLabels: Record<string, { label: string; icon: string }> = {
   create: { label: '新建', icon: icons.add },
+  import: { label: '从导出文件导入', icon: icons.imported },
   update: { label: '修改', icon: icons.edit },
   delete: { label: '删除', icon: icons.remove },
   undelete: { label: '撤销删除', icon: icons.undelete },
@@ -181,6 +182,7 @@ export const credentialEventLabels: Record<string, { label: string; icon: string
 // 取用经由哪里
 export const credentialViaLabels: Record<string, string> = {
   console: '在管理界面查看',
+  export: '随空间导出',
   kioku_credential: '通过 kioku_credential',
   kioku_get: '读记忆时列出（kioku_get）',
   rest: '通过 REST 接口',

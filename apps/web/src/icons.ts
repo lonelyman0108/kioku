@@ -42,6 +42,9 @@ export const icons = {
   secret: 'i-lucide-lock',
   test: 'i-lucide-plug-zap',
   backup: 'i-lucide-cloud-upload',
+  // 按空间导出与导入
+  exportSpace: 'i-lucide-file-down',
+  importSpace: 'i-lucide-file-up',
   vector: 'i-lucide-sparkles',
   user: 'i-lucide-user',
   bot: 'i-lucide-bot',
