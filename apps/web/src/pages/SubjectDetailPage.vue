@@ -12,10 +12,12 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import SubjectBindings from '../components/SubjectBindings.vue'
 import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { originScopeText, provenanceLabels } from '../labels'
+import { refreshSubjectCaches as refreshCaches } from '../subjectQueries'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -46,23 +48,11 @@ watch(
   { immediate: true },
 )
 
-// 对象改了之后要刷新的：对象页与几个选对象的下拉框、应用里按群换人格的群名、待审、
-// 删掉的事实所在的记忆列表、已删除与活动
-function refreshSubjectCaches(sid: string) {
-  return Promise.all(
-    [
-      'subject',
-      'subjects',
-      'merge-picker',
-      'group-personas',
-      'group-picker',
-      'review',
-      'memory-list',
-      'memory-deleted',
-      'activity',
-    ].map((key) => queryClient.invalidateQueries({ queryKey: [key, sid] })),
-  )
-}
+const refreshSubjectCaches = (sid: string) => refreshCaches(queryClient, sid)
+// 等你确认的绑定：卡片标题上提醒
+const waitingForMe = computed(
+  () => data.value?.bindings.filter((b) => b.canConfirm || b.canReject).length ?? 0,
+)
 
 const saving = ref(false)
 async function update(body: UpdateSubjectRequest, done: string) {
@@ -319,6 +309,28 @@ function runCounts(run: ExtractionRunInfo): string {
               </ul>
             </div>
           </div>
+        </UCard>
+
+        <UCard v-if="data.kind === 'person'">
+          <template #header>
+            <div class="flex items-center gap-2">
+              <h2 class="text-sm font-medium">绑定</h2>
+              <UBadge v-if="waitingForMe" color="warning" variant="subtle" size="sm"
+                >{{ waitingForMe }} 个等你处理</UBadge
+              >
+            </div>
+          </template>
+          <p class="mb-2 text-xs text-muted">
+            在 bot 的私聊里发 /bind 拿绑定码、到另一个平台私聊同一个 bot 发 /bind
+            加上绑定码，那个平台的账号就并进申请的这个人。申请的人标记了成员时，要那个成员本人在这里或概览里确认后才合并。
+          </p>
+          <SubjectBindings
+            v-if="data.bindings.length"
+            :space-id="spaceId"
+            :items="data.bindings"
+            :subject-id="subjectId"
+          />
+          <p v-else class="text-sm text-muted">还没有绑定记录。</p>
         </UCard>
 
         <UCard v-if="canEdit">

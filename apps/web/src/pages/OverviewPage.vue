@@ -8,6 +8,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { backupNotice } from '../backup'
 import ActivityEntry from '../components/ActivityEntry.vue'
+import SubjectBindings from '../components/SubjectBindings.vue'
 import { useSession } from '../composables/useSession'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { formatRelative, formatTime } from '../time'
@@ -89,6 +90,19 @@ const activeKeys = computed(() =>
             { label: '去实例设置', color: 'neutral', variant: 'outline', to: { name: 'settings' } },
           ]"
         />
+        <section
+          v-if="data.pendingBindings.length"
+          class="rounded-lg border border-warning/40 bg-warning/5 p-4"
+        >
+          <h2 class="text-sm font-medium">
+            有 {{ data.pendingBindings.length }} 个平台账号想绑到你
+          </h2>
+          <p class="mt-1 text-xs text-muted">
+            有人在 bot
+            的私聊里用绑定码申请把自己的账号并进标记成你的对象。确认之后，这些账号的私聊都算你的主人私聊；不认识的请拒绝。
+          </p>
+          <SubjectBindings :space-id="spaceId" :items="data.pendingBindings" />
+        </section>
         <UAlert
           v-if="budgetWarning"
           :color="budgetWarning.over ? 'error' : 'warning'"
