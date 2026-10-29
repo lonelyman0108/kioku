@@ -407,7 +407,12 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
           :selected-uri="selectedUri"
           @select="select"
         />
-        <DeletedMemories v-else-if="view === 'deleted'" :space-id="spaceId" @restored="onRevived" />
+        <DeletedMemories
+          v-else-if="view === 'deleted'"
+          :space-id="spaceId"
+          @restored="onRevived"
+          @show-expired="setView('expired')"
+        />
         <ExpiredMemories
           v-else-if="view === 'expired'"
           :space-id="spaceId"

@@ -10,10 +10,11 @@ import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
-import { formatRelative, formatTime } from '../time'
+import { formatRelative, formatTime, isExpired } from '../time'
 
 const props = defineProps<{ spaceId: string }>()
-const emit = defineEmits<{ restored: [uri: string] }>()
+// restored：撤销删除之后回到了树上；showExpired：撤销之后它是过期的，要去「已过期」里看
+const emit = defineEmits<{ restored: [uri: string]; showExpired: [] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
 // 和别处一样按条判断：editor 撤销不了别人的应用的应用层记忆
@@ -38,10 +39,29 @@ async function undelete(item: DeletedMemory) {
   restoring.value = item.id
   try {
     const memory = await api.undeleteMemory(spaceId, item.id)
-    // 写进这条记忆的缓存：删除前留下的缓存版本号对不上，打开后第一次保存会冲突
-    queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
-    toast.add({ title: `已撤销删除 ${memory.uri}`, color: 'success' })
-    if (props.spaceId === spaceId) emit('restored', memory.uri)
+    if (isExpired(memory.validTo)) {
+      // 撤销删除不动有效期：删掉之后才到期的，撤销之后还是过期的，按 URI 读不到，不写那个 URI 的缓存，也不跳过去
+      toast.add({
+        title: '已撤销删除；这条已经过期，在「已过期」里可以让它重新生效',
+        color: 'success',
+        actions: [
+          {
+            label: '去已过期',
+            color: 'neutral',
+            variant: 'subtle',
+            onClick: () => {
+              if (props.spaceId === spaceId) emit('showExpired')
+            },
+          },
+        ],
+      })
+      void queryClient.invalidateQueries({ queryKey: ['memory-expired', spaceId] })
+    } else {
+      // 写进这条记忆的缓存：删除前留下的缓存版本号对不上，打开后第一次保存会冲突
+      queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
+      toast.add({ title: `已撤销删除 ${memory.uri}`, color: 'success' })
+      if (props.spaceId === spaceId) emit('restored', memory.uri)
+    }
     // 等列表重新拉取完、这一行消失之后按钮才恢复，免得再点一次。页面收到通知时已经发出了重新拉取，接着等它
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
@@ -55,7 +75,8 @@ async function undelete(item: DeletedMemory) {
 <template>
   <div class="space-y-3">
     <p class="text-xs text-muted">
-      删除的记忆可以撤销删除，原样回来；同一个 URI 上已经有别的记忆时不能撤销。
+      删除的记忆可以撤销删除，原样回来；同一个 URI
+      上已经有别的记忆时不能撤销。撤销删除不动有效期：标着「已过期」的，撤销之后回到「已过期」里，在那里可以让它重新生效。
     </p>
     <UAlert
       v-if="deleted.isError.value"
@@ -82,6 +103,16 @@ async function undelete(item: DeletedMemory) {
                 class="shrink-0"
               >
                 {{ sensitivityLabels[item.sensitivity] }}
+              </UBadge>
+              <UBadge
+                v-if="isExpired(item.validTo)"
+                size="sm"
+                variant="outline"
+                color="warning"
+                class="shrink-0"
+                :title="`删掉之后在 ${formatTime(item.validTo!)} 过期了，撤销删除之后回到「已过期」`"
+              >
+                已过期
               </UBadge>
             </span>
             <span class="text-xs text-muted">
