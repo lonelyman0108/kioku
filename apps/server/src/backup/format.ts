@@ -17,6 +17,9 @@ const HEADER_LENGTH = MAGIC.length + KEY_ID_LENGTH + SALT_LENGTH + IV_LENGTH
 const deriveKey = (master: Buffer, salt: Buffer) =>
   Buffer.from(hkdfSync('sha256', master, salt, 'kioku-backup', 32))
 
+// 开头是不是备份文件的格式标记：把备份误当成别的文件（例如空间的导出文件）上传时说清楚
+export const isBackupFile = (file: Buffer) => file.subarray(0, MAGIC.length).equals(MAGIC)
+
 // 正文边生成边压缩、加密，逐块交出：文件头、密文，最后是认证标签。调用方直接写进文件或上传，不用把整份放在内存里
 export async function* sealBackup(
   masterKey: MasterKey,

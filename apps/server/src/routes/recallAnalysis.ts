@@ -63,7 +63,7 @@ export function recallAnalysisRoutes(deps: Deps) {
       const {
         settings: { retentionDays },
         recordingSince,
-      } = await loadRecallWindow(deps.db)
+      } = await loadRecallWindow(deps.db, spaceId)
       const [ranking, rows] = await Promise.all([
         service.recallRanking(
           { top: TOP_LIMIT, never: NEVER_LIMIT },

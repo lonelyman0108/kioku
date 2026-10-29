@@ -1,4 +1,5 @@
 import { sql } from 'drizzle-orm'
+import type { PgTransactionConfig } from 'drizzle-orm/pg-core'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
 
@@ -19,22 +20,38 @@ export function connect(url: string, options: { max?: number } = {}): Database {
   return { db, url, close: () => client.end() }
 }
 
-// 内容表只能在这里面访问：事务内声明当前空间，RLS 据此过滤；事务结束后设置自动失效，不会串到连接池里的下一个请求
-export function withSpace<T>(db: Db, spaceId: string, fn: (tx: Tx) => Promise<T>): Promise<T> {
+// 内容表只能在这里面访问：事务内声明当前空间，RLS 据此过滤；事务结束后设置自动失效，不会串到连接池里的下一个请求。
+// config 是事务的选项，例如导出时要一个可重复读的只读事务
+export function withSpace<T>(
+  db: Db,
+  spaceId: string,
+  fn: (tx: Tx) => Promise<T>,
+  config?: PgTransactionConfig,
+): Promise<T> {
   return db.transaction(async (tx) => {
     await tx.execute(sql`select set_config('app.space_id', ${spaceId}, true)`)
     return fn(tx)
-  })
+  }, config)
 }
 
 // 数据库报的错：drizzle 把驱动的错误包在 cause 里
-function pgError(err: unknown): { code?: string; constraint_name?: string } {
+function pgError(err: unknown): { code?: string; constraint_name?: string; message?: string } {
   return ((err as { cause?: unknown })?.cause ?? err) as { code?: string }
+}
+
+// 数据库给的错误说明（例如哪个值超出了范围），没有时为 undefined
+export function pgMessage(err: unknown): string | undefined {
+  return pgError(err).message
 }
 
 // 数据库报错的 SQLSTATE
 export function pgErrorCode(err: unknown): string | undefined {
   return pgError(err).code
+}
+
+// 违反的是哪一条约束（唯一、外键、检查约束），数据库没给出时为 undefined
+export function pgConstraint(err: unknown): string | undefined {
+  return pgError(err).constraint_name
 }
 
 // 违反了指定的唯一约束

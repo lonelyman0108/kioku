@@ -350,6 +350,48 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect((await purge()).counts).toEqual(ZERO)
   })
 
+  it('只有 Lore 的导入事件留作去重记录：按空间导入的导入事件随记忆硬删除，之前削成 URI 留下的也删掉', async () => {
+    const fromLore = await createMemory({ uri: 'notes://from-lore', content: '从 Lore 导进来的' })
+    const fromFile = await createMemory({ uri: 'notes://from-file', content: '从导出文件导进来的' })
+    const moved = { source: 'space-export', exportedAt: '2026-10-01T00:00:00.000Z' }
+    await inSpace(async (tx) => {
+      await tx
+        .update(memoryEvents)
+        .set({ eventType: 'import', context: { source: 'lore', loreNodeUuid: 'node-lore' } })
+        .where(eq(memoryEvents.memoryId, fromLore.id))
+      await tx
+        .update(memoryEvents)
+        .set({ eventType: 'import', context: { ...moved, previousVersions: 0 } })
+        .where(eq(memoryEvents.memoryId, fromFile.id))
+      // 之前的清理把按空间导入的导入事件也削成了 URI 留着：记忆整行早就不在了
+      await tx.insert(memoryEvents).values({
+        spaceId: ws.spaceId,
+        memoryId: null,
+        eventType: 'import',
+        provenance: 'system',
+        before: null,
+        after: { domain: 'notes', path: 'long-gone' },
+        context: { ...moved, previousVersions: 2 },
+      })
+    })
+    await deleteMemory('notes://from-lore')
+    await deleteMemory('notes://from-file')
+    await deletedDaysAgo(fromLore.id, 31)
+    await deletedDaysAgo(fromFile.id, 31)
+
+    expect((await purge()).counts).toEqual({ ...ZERO, deletedMemories: 2, orphanEvents: 1 })
+    expect(await inSpace((tx) => tx.select().from(memoryEvents))).toEqual([
+      expect.objectContaining({
+        memoryId: null,
+        eventType: 'import',
+        before: null,
+        after: { domain: 'notes', path: 'from-lore' },
+        context: { source: 'lore', loreNodeUuid: 'node-lore' },
+      }),
+    ])
+    expect((await purge()).counts).toEqual(ZERO)
+  })
+
   it('删账号留下的快照：记忆整行不在的事件删掉、导入事件削成 URI；已删账号个人层的快照抹掉正文，别人看到的历史不变', async () => {
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     // 只在 bob 的私人层：删账号时数据库连带删掉

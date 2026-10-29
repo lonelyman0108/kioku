@@ -48,7 +48,7 @@ export function overviewRoutes(deps: Deps) {
     const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
     const [settings, recall, appRows, members, extraction, backup] = await Promise.all([
       embeddingSettingsView(deps.db),
-      loadRecallWindow(deps.db),
+      loadRecallWindow(deps.db, spaceId),
       withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
       deps.db
         .select({ accountId: spaceMembers.accountId, since: spaceMembers.createdAt })

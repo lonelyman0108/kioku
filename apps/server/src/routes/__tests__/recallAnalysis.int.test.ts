@@ -12,7 +12,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memories, recallEvents, settings } from '../../db/schema'
+import { memories, recallEvents, settings, spaces } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { settleRecallEvents } from '../../recall/events'
 import { pruneRecallEvents } from '../../recall/retention'
@@ -64,11 +64,17 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     const res = await app.request(`/v1/spaces/${ws.spaceId}${path}`, { headers: { cookie } })
     return { status: res.status, body: (await res.json()) as T }
   }
-  // 把记忆的建立时间往前挪；开始记录召回事件的时间（0015 迁移写的那一行）按需设置，测试开头会清掉设置表
-  const backdate = (days: number) =>
-    withSpace(database.db, ws.spaceId, (tx) =>
+  // 把记忆的建立时间往前挪，空间当作早就建了（空间建立之前不算开始记录召回事件）；
+  // 开始记录召回事件的时间（0015 迁移写的那一行）按需设置，测试开头会清掉设置表
+  const backdate = async (days: number) => {
+    await database.db
+      .update(spaces)
+      .set({ createdAt: sql`now() - interval '400 days'` })
+      .where(eq(spaces.id, ws.spaceId))
+    await withSpace(database.db, ws.spaceId, (tx) =>
       tx.update(memories).set({ createdAt: sql`now() - make_interval(days => ${days}::int)` }),
     )
+  }
   const recordingStarted = (daysAgo: number) =>
     database.db.insert(settings).values({
       key: 'recall-started',
@@ -243,9 +249,7 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     await recallAs('kioku')
     const before = (await get<SpaceOverview>('/overview')).body
     expect(before.neverRecalled).toBe(0)
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.update(memories).set({ createdAt: sql`now() - interval '31 days'` }),
-    )
+    await backdate(31)
     // 开始记录召回事件的时间也要满保留天数
     expect((await get<SpaceOverview>('/overview')).body.neverRecalled).toBe(0)
     await recordingStarted(40)

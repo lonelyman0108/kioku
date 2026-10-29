@@ -5,17 +5,30 @@ import {
   ExtractionBudget,
   ExtractionUsage,
   MemberInfo,
+  SPACE_EXPORT_MAX_BYTES,
+  SpaceExportRequest,
+  SpaceImportForm,
+  SpaceImportInspectForm,
+  SpaceImportPreview,
+  SpaceImportResult,
 } from '@kioku/contracts'
 import { asc, eq } from 'drizzle-orm'
+import { bodyLimit } from 'hono/body-limit'
+import type { MiddlewareHandler } from 'hono'
 
-import { memberRole } from '../auth/middleware'
+import { memberRole, requireInstanceAdmin } from '../auth/middleware'
+import { exportSpace, type SpaceExport } from '../backup/spaceExport'
+import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
+import { acquireTransferSlot, withTransferSlot } from '../backup/transferGate'
 import { accounts, spaceMembers, spaces } from '../db/schema'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
-import type { Deps } from '../http/env'
+import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
 const params = z.object({ spaceId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
+// 导出、检查与导入同时只做一个、排队有上限、每个账号同时最多占一个：满了就是这个
+const busy = jsonResponse('导出导入正忙，稍后再试', ErrorResponse)
 
 const read = createRoute({
   method: 'get',
@@ -70,9 +83,196 @@ const members = createRoute({
   responses: { 200: jsonResponse('成员列表', z.array(MemberInfo)), 403: forbidden },
 })
 
+const exportRoute = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/export',
+  tags: ['console'],
+  summary:
+    '导出这个空间（只有空间 owner）：共享的内容加上自己的画像、私人层与凭据，用口令加密成一个文件，可以导入到另一个实例的新空间',
+  request: { params, body: jsonBody(SpaceExportRequest) },
+  responses: {
+    200: {
+      description: '导出文件',
+      content: {
+        'application/octet-stream': {
+          schema: z.string().meta({ type: 'string', format: 'binary' }),
+        },
+      },
+    },
+    400: jsonResponse('导出不了（例如超过导入的大小上限）', ErrorResponse),
+    403: forbidden,
+    409: jsonResponse('有导出了也导入不了、或者解不开的内容（点名是哪一条）', ErrorResponse),
+    429: busy,
+  },
+})
+
+// 上传导出文件的两个接口共用：先确认是实例管理员、再看大小，最后才读表单，别人上传的大文件不读进内存。
+// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量。名额等表单读完才在处理函数里拿（见 transferGate.ts）：
+// 太大的上传在这之前就是 413，不排队、不占名额，慢的上传也不占着名额。这两个接口只有实例管理员能用，
+// 同时上传的个数不另外限制
+function uploadMiddleware(deps: Deps): MiddlewareHandler<AppEnv>[] {
+  return [
+    requireInstanceAdmin(deps, '只有实例管理员能导入空间'),
+    bodyLimit({
+      maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
+      onError: (c) =>
+        c.json({ error: `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
+    }),
+  ]
+}
+const uploadErrors = {
+  400: jsonResponse('导入不了（口令不对、文件被改过、内容对不上、没配主密钥等）', ErrorResponse),
+  403: forbidden,
+  413: jsonResponse('文件太大', ErrorResponse),
+  429: busy,
+}
+
+function inspectRoute(deps: Deps) {
+  return createRoute({
+    method: 'post',
+    path: '/spaces/import/inspect',
+    tags: ['console'],
+    summary:
+      '导入之前先检查导出文件（只有实例管理员）：是谁导出的、有多少，导入后哪些归你；导入会遇到的问题这一步就报出来，不写库',
+    middleware: uploadMiddleware(deps),
+    request: {
+      body: {
+        required: true,
+        content: { 'multipart/form-data': { schema: SpaceImportInspectForm } },
+      },
+    },
+    responses: { 200: jsonResponse('文件的内容', SpaceImportPreview), ...uploadErrors },
+  })
+}
+
+function importRoute(deps: Deps) {
+  return createRoute({
+    method: 'post',
+    path: '/spaces/import',
+    tags: ['console'],
+    summary:
+      '把导出文件导入成一个新空间（只有实例管理员），导入人是新空间的 owner，导出人的画像层、私人层与凭据都归导入人；Key 不在文件里，要重新签发',
+    middleware: uploadMiddleware(deps),
+    request: {
+      body: { required: true, content: { 'multipart/form-data': { schema: SpaceImportForm } } },
+    },
+    responses: { 201: jsonResponse('已导入', SpaceImportResult), ...uploadErrors },
+  })
+}
+
+// 整个导出占一个名额：文件攒在内存里，要等发给浏览器之后才释放。名额只在 settle 里放、只放一次，放的时候移除断开的监听；
+// 哪种情况先到都走它：导出出错或停下、文件发完、发送途中响应流被取消、文件做好之后客户端断开。
+// 导出期间不靠断开的监听放：客户端断开时 exportSpace 在下一个检查点自己停下，停下之后才放，
+// 名额不会在它还在派生、读库时就让给别人。文件做好之后才断开的，node 的服务端既不读这个响应流、也不取消它，
+// 只能在断开时放
+async function exportHoldingSlot(
+  accountId: string,
+  signal: AbortSignal,
+  run: () => Promise<SpaceExport>,
+): Promise<{ exported: SpaceExport; body: ReadableStream<Uint8Array> }> {
+  const release = await acquireTransferSlot(accountId, signal)
+  let settled = false
+  const settle = () => {
+    if (settled) return
+    settled = true
+    signal.removeEventListener('abort', settle)
+    release()
+  }
+  let exported: SpaceExport
+  try {
+    exported = await run()
+  } catch (err) {
+    settle()
+    throw err
+  }
+  if (signal.aborted) settle()
+  else signal.addEventListener('abort', settle, { once: true })
+  return { exported, body: fileBody(exported.file, settle) }
+}
+
+// 响应流：整个文件一次交出去，读完或者被取消时调 done
+function fileBody(file: Uint8Array, done: () => void): ReadableStream<Uint8Array> {
+  let sent = false
+  return new ReadableStream({
+    pull(controller) {
+      if (!sent) {
+        sent = true
+        controller.enqueue(file)
+        return
+      }
+      controller.close()
+      done()
+    },
+    cancel() {
+      done()
+    },
+  })
+}
+
+// 下载的文件名：空间名加导出时间（UTC）。空间名里放不进文件名的字符换成 _，另给一个只有 ASCII 的备用名
+function attachment(spaceName: string, createdAt: string): string {
+  const stamp = createdAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
+  const safe = spaceName.replace(/[\\/:*?"<>|\p{Cc}\p{Cf}]/gu, '_').trim() || 'space'
+  const fallback = `kioku-space-${stamp}.kioku-space`
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(`${safe}-${stamp}.kioku-space`)}`
+}
+
 // 空间级的设置。spaces 是身份表，不在 RLS 里，按成员关系自己检查权限
 export function spaceRoutes(deps: Deps) {
   return router()
+    .openapi(exportRoute, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const accountId = c.get('console').accountId
+      const role = await memberRole(deps, spaceId, accountId)
+      if (!role) return c.json({ error: '不是该空间成员' }, 403)
+      // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
+      if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
+      const signal = c.req.raw.signal
+      const { exported, body } = await exportHoldingSlot(accountId, signal, () =>
+        exportSpace(deps.db, deps.masterKey, {
+          spaceId,
+          accountId,
+          passphrase: c.req.valid('json').passphrase,
+          signal,
+        }),
+      )
+      return c.body(body, 200, {
+        'content-type': 'application/octet-stream',
+        'content-length': String(exported.file.length),
+        'content-disposition': attachment(exported.spaceName, exported.createdAt),
+        'cache-control': 'no-store',
+      })
+    })
+    .openapi(inspectRoute(deps), async (c) => {
+      const form = c.req.valid('form')
+      // 表单读完了才拿名额：解密、解压与解析都占着它
+      const preview = await withTransferSlot(
+        c.get('console').accountId,
+        c.req.raw.signal,
+        async () =>
+          inspectSpaceImport(deps.masterKey, {
+            file: Buffer.from(await form.file.arrayBuffer()),
+            passphrase: form.passphrase,
+          }),
+      )
+      return c.json(preview, 200)
+    })
+    .openapi(importRoute(deps), async (c) => {
+      const form = c.req.valid('form')
+      const accountId = c.get('console').accountId
+      // 表单读完了才拿名额：解密、解压、解析与写库都占着它
+      const result = await withTransferSlot(accountId, c.req.raw.signal, async () =>
+        importSpace(deps.db, deps.masterKey, {
+          accountId,
+          file: Buffer.from(await form.file.arrayBuffer()),
+          passphrase: form.passphrase,
+          name: form.name,
+        }),
+      )
+      // 向量不在文件里，按这个实例的嵌入设置重新生成
+      void deps.jobs?.enqueueBackfill()
+      return c.json(result, 201)
+    })
     .openapi(members, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {

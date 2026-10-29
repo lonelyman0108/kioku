@@ -15,9 +15,7 @@ import {
   UpdateEmbeddingSettings,
   UpdateExtractionSettings,
 } from '@kioku/contracts'
-import { createMiddleware } from 'hono/factory'
-
-import { isInstanceAdmin, requireConsole } from '../auth/middleware'
+import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import { masterKeyStatus } from '../crypto/rotation'
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
 import { embeddingCoverage } from '../embedding/coverage'
@@ -41,7 +39,7 @@ import {
   loadExtractionConfig,
   saveExtractionConfig,
 } from '../extraction/settings'
-import type { AppEnv, Deps } from '../http/env'
+import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { endPause, retentionView, saveRetentionDays } from '../jobs/retention'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
@@ -248,14 +246,8 @@ const extractionTest = createRoute({
 })
 
 export function settingsRoutes(deps: Deps) {
-  const requireAdmin = createMiddleware<AppEnv>(async (c, next) => {
-    if (!(await isInstanceAdmin(deps.db, c.get('console').accountId))) {
-      return c.json({ error: '需要实例管理员' }, 403)
-    }
-    await next()
-  })
   const app = router()
-  app.use('/settings/*', requireConsole(deps), requireAdmin)
+  app.use('/settings/*', requireConsole(deps), requireInstanceAdmin(deps))
   app.route('/', backupRoutes(deps))
 
   const viewOf = (stored: StoredEmbedding) => ({

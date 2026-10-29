@@ -713,6 +713,27 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await rowOf(m.id)).deletedAt).not.toBeNull()
     })
 
+    it('撤销删除一条删掉之后才过期的共享记忆：成员的私人节点占着同一个 URI 时照样撤销，重新生效时才拦下', async () => {
+      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+      const shared = await ok<MemoryView>(
+        await create({ uri: 'kb://door', content: '旧门禁码', layer: 'base', validTo: inDays(1) }),
+        201,
+      )
+      await remove(shared)
+      await deletedThenExpired(shared.id)
+      const note = await ok<MemoryView>(
+        await create({ uri: 'kb://door', content: 'eve 的笔记' }, editor.cookie),
+        201,
+      )
+      // 它自己已经过期，不和成员节点互斥（触发器不检查被写入的这一行已经过期的情况）：撤销之后回到已过期里
+      await ok<MemoryView>(await undelete(shared.id))
+      expect((await rowOf(shared.id)).deletedAt).toBeNull()
+      expect((await expired()).items).toMatchObject([{ id: shared.id, released: false }])
+      expect((await get(note.uri, editor.cookie)).status).toBe(200)
+      const version = (await rowOf(shared.id)).version
+      expect(await errorOf(await reactivate(shared.id, version), 409)).toContain('另一条记忆占用')
+    })
+
     it('共享的过期记忆和成员的私人节点并存时，重新生效返回 409；直接改库清掉有效期也被触发器拦下', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
       // editor 写不了 secret，让不出这条过期的共享记忆，只能和它并存
