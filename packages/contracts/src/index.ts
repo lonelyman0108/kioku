@@ -2,6 +2,7 @@
 export * from './auth'
 export * from './console'
 export * from './credentials'
+export * from './dream'
 export * from './health'
 export * from './memories'
 export * from './memory'

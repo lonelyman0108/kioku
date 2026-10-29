@@ -753,6 +753,106 @@ export const extractionRuns = pgTable(
   ],
 )
 
+// Dream 的运行记录：一次整理（每天一次或手动）逐个范围记一条，整次没走到范围时（没配模型、预算用完、没有新内容）
+// 记一条范围为空的；同一次整理的几条 run_id 相同。用量计入抽取的同一份月度预算（见 extraction/budget.ts），
+// 保留期的清理和抽取记录一样留着本月的。范围是某个成员的画像层或私人层时记下这个成员，只给他看
+export const dreamRuns = pgTable(
+  'dream_runs',
+  {
+    id: bigserial({ mode: 'number' }).primaryKey(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    runId: uuid().notNull(),
+    // scheduled | manual
+    trigger: text().notNull(),
+    // 范围，见 memory/scopes.ts 的 dreamScopeKey
+    scope: text(),
+    ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'set null' }),
+    model: text(),
+    promptTokens: integer().notNull().default(0),
+    completionTokens: integer().notNull().default(0),
+    // 给模型看了几条：上次以来新增或改动的，以及连同近邻一共几条
+    changed: integer().notNull().default(0),
+    considered: integer().notNull().default(0),
+    // 新提的建议、和已有的建议一样的（包括拒绝过的）、不合规则丢掉的
+    suggested: integer().notNull().default(0),
+    known: integer().notNull().default(0),
+    dropped: integer().notNull().default(0),
+    // 这个范围还有没看完的，下次接着整理
+    more: boolean().notNull().default(false),
+    // 没整理的原因：no-model | budget | idle
+    skipped: text(),
+    error: text(),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    index().on(t.spaceId, t.createdAt),
+    check('dream_runs_trigger', sql`${t.trigger} in ('scheduled', 'manual')`),
+  ],
+)
+
+// Dream 的建议：进待审，成员确认后才按建议执行，Dream 自己不写记忆。涉及的记忆与生成时各自的版本按下标对应，
+// 执行时版本对不上就不执行。指纹是「种类 + 涉及的记忆 id 与版本」，在空间里唯一：还在待审的、执行过的、拒绝过的
+// 都不再提；涉及的记忆改过之后版本变了，指纹也跟着变，可以再提。范围是某个成员的画像层或私人层时记下这个成员
+export const dreamSuggestions = pgTable(
+  'dream_suggestions',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    scope: text().notNull(),
+    ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    // merge | distill | stale | review
+    kind: text().notNull(),
+    memoryIds: uuid().array().notNull(),
+    versions: integer().array().notNull(),
+    // 合并：保留的那一条
+    keepId: uuid(),
+    // 合并后的正文；提炼的草稿正文、URI 与 disclosure
+    content: text(),
+    uri: text(),
+    disclosure: text(),
+    // 审核：confirm | delete
+    verdict: text(),
+    reason: text().notNull(),
+    fingerprint: text().notNull(),
+    // pending | applied | rejected
+    status: text().notNull().default('pending'),
+    decidedBy: uuid().references(() => accounts.id, { onDelete: 'set null' }),
+    decidedAt: timestamp({ withTimezone: true }),
+    createdAt: createdAt(),
+  },
+  (t) => [
+    uniqueIndex('dream_suggestions_fingerprint_idx').on(t.spaceId, t.fingerprint),
+    // 待审里按状态与时间翻页
+    index().on(t.spaceId, t.status, t.createdAt),
+    check('dream_suggestions_kind', sql`${t.kind} in ('merge', 'distill', 'stale', 'review')`),
+    check('dream_suggestions_status', sql`${t.status} in ('pending', 'applied', 'rejected')`),
+    check(
+      'dream_suggestions_memories',
+      sql`cardinality(${t.memoryIds}) >= 1 and cardinality(${t.memoryIds}) = cardinality(${t.versions})`,
+    ),
+  ],
+)
+
+// Dream 每个范围整理到了哪里：下次只看在这之后新增或改动的记忆（按更新时间与 id 排）
+export const dreamCursors = pgTable(
+  'dream_cursors',
+  {
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    scope: text().notNull(),
+    ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    at: timestamp({ withTimezone: true }).notNull(),
+    lastId: uuid().notNull(),
+    updatedAt: updatedAt(),
+  },
+  (t) => [primaryKey({ columns: [t.spaceId, t.scope] })],
+)
+
 // 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
 export const RLS_TABLES = [
   'personas',
@@ -773,4 +873,7 @@ export const RLS_TABLES = [
   'memory_recall_stats',
   'conversation_turns',
   'extraction_runs',
+  'dream_runs',
+  'dream_suggestions',
+  'dream_cursors',
 ] as const

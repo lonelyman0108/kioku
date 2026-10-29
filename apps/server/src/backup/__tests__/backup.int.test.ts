@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -14,7 +14,16 @@ import { createApp } from '../../app'
 import { prepareMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { lastMigration, pendingMigrations, runMigrations } from '../../db/migrate'
-import { extractionRuns, memoryRecallStats, settings, spaces, subjects } from '../../db/schema'
+import {
+  dreamCursors,
+  dreamRuns,
+  dreamSuggestions,
+  extractionRuns,
+  memoryRecallStats,
+  settings,
+  spaces,
+  subjects,
+} from '../../db/schema'
 import { backfillJob } from '../../embedding/jobs'
 import { staticEmbedderSource } from '../../embedding/source'
 import { settleRecallEvents } from '../../recall/events'
@@ -192,6 +201,40 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         turns: 4,
         model: 'm',
         added: 1,
+      })
+      // Dream 的运行记录、一条拒绝过的建议（指纹要跟着恢复，不然同样的建议会再提）与整理到的位置
+      const scope = `private:${ws.accountId}`
+      await tx.insert(dreamRuns).values({
+        spaceId: ws.spaceId,
+        runId: randomUUID(),
+        trigger: 'scheduled',
+        scope,
+        ownerAccountId: ws.accountId,
+        model: 'm',
+        promptTokens: 40,
+        changed: 1,
+        considered: 1,
+        suggested: 1,
+      })
+      await tx.insert(dreamSuggestions).values({
+        spaceId: ws.spaceId,
+        scope,
+        ownerAccountId: ws.accountId,
+        kind: 'stale',
+        memoryIds: [nas.id],
+        versions: [nas.version],
+        reason: '可能已经搬走了',
+        fingerprint: 'stale-fingerprint',
+        status: 'rejected',
+        decidedBy: ws.accountId,
+        decidedAt: new Date(),
+      })
+      await tx.insert(dreamCursors).values({
+        spaceId: ws.spaceId,
+        scope,
+        ownerAccountId: ws.accountId,
+        at: new Date(),
+        lastId: nas.id,
       })
     })
 

@@ -54,6 +54,8 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     },
     backupRun: async (id) => (queued.includes(id) ? { state: 'queued', outcome: null } : null),
     enqueueCleanup: async () => true,
+    enqueueDream: async () => null,
+    dreamRun: async () => null,
   }
 
   beforeAll(async () => {

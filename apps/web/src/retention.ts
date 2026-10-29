@@ -15,6 +15,8 @@ export const retentionLabels: Record<keyof RetentionCounts, string> = {
   orphanEvents: '记忆已经不在的历史',
   scrubbedSnapshots: '抹掉正文的历史快照',
   extractionRuns: '抽取记录',
+  dreamRuns: 'Dream 的运行记录',
+  dreamSuggestions: '处理过或作废的 Dream 建议',
   credentialEvents: '凭据事件',
   deletedCredentials: '已删除的凭据',
   deletedProviders: '已删除的凭据源',

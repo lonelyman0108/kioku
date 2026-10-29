@@ -40,6 +40,8 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
         backupRun: async () => null,
         enqueueExtraction: async () => {},
         enqueueCleanup: async () => true,
+        enqueueDream: async () => null,
+        dreamRun: async () => null,
       },
     })
   })

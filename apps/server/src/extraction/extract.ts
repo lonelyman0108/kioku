@@ -41,7 +41,7 @@ export const EPISODE_TTL_DAYS = 30
 // 每个对象给模型看最近这么多条已有事实，用来判断是新的、更新还是已经记过
 const EXISTING_FACTS_PER_SUBJECT = 30
 // 一条事实、一段摘要最多这么多字：更长的不像一条事实，多半是模型把原话抄了进来
-const MAX_FACT_CHARS = 200
+export const MAX_FACT_CHARS = 200
 const MAX_SUMMARY_CHARS = 500
 
 type RunFields = Omit<

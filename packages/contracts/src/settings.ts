@@ -128,7 +128,7 @@ export const RecallSettings = z.object({
 export type RecallSettings = z.infer<typeof RecallSettings>
 
 // 保留期：删掉的记忆（连同历史、向量、关键词、凭据引用与召回统计）、被推翻的抽取事实、过期的会话摘要，
-// 以及抽取记录、凭据事件、已删除的凭据与凭据源，过了这么多天由每天一次的清理硬删除。
+// 以及抽取记录、Dream 的运行记录与处理过的建议、凭据事件、已删除的凭据与凭据源，过了这么多天由每天一次的清理硬删除。
 // 和召回事件明细的保留天数是两回事
 export const DEFAULT_RETENTION_DAYS = 30
 export const RetentionSettings = z.object({
@@ -146,6 +146,9 @@ export const RetentionCounts = z.object({
   // 事件留着、快照里的正文抹掉了的：已删账号的画像层与私人层快照，记忆已经不在的导入事件
   scrubbedSnapshots: z.number().int(),
   extractionRuns: z.number().int(),
+  dreamRuns: z.number().int(),
+  // Dream 的建议：处理过的（执行或拒绝的）、没处理但已经作废的，涉及的记忆改过、删掉或过期之后清掉
+  dreamSuggestions: z.number().int(),
   credentialEvents: z.number().int(),
   deletedCredentials: z.number().int(),
   deletedProviders: z.number().int(),

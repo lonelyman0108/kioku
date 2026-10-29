@@ -2,16 +2,17 @@ import type { ExtractionBudget, ExtractionUsage } from '@kioku/contracts'
 import { and, count, eq, gte, inArray, sql, type SQL } from 'drizzle-orm'
 
 import { withSpace, type Db, type Tx } from '../db/client'
-import { extractionRuns, memories, spaces } from '../db/schema'
+import { dreamRuns, extractionRuns, memories, spaces } from '../db/schema'
 
-// 预算按 UTC 的自然月、自然日算，和服务器所在的时区无关。本月用量是本月抽取记录的用量之和，
-// 保留期的清理据此留着本月的抽取记录
+// 预算按 UTC 的自然月、自然日算，和服务器所在的时区无关。本月用量是本月抽取记录与 Dream 运行记录的用量之和，
+// 保留期的清理据此留着本月的这两种记录
 export const monthStart = (at: SQL): SQL => sql`date_trunc('month', ${at}, 'UTC')`
 const MONTH_START = monthStart(sql`now()`)
 const DAY_START = sql`date_trunc('day', now(), 'UTC')`
 
-// 这个空间的抽取预算与本月用掉的 token：抽取记录里的用量之和，解析失败、写入失败的那几次也算（token 已经花出去了）；
-// 请求模型失败时拿不到用量，记的是 0。预算是软上限：同时在跑的几批各自检查，可能一起超出一点
+// 这个空间的抽取预算与本月用掉的 token：抽取记录与 Dream 的运行记录里的用量之和（两者共用一份预算），
+// 解析失败、写入失败的那几次也算（token 已经花出去了）；请求模型失败时拿不到用量，记的是 0。
+// 预算是软上限：同时在跑的几批各自检查，可能一起超出一点
 export async function extractionUsage(db: Db, spaceId: string): Promise<ExtractionUsage> {
   const [space] = await db
     .select({
@@ -24,6 +25,8 @@ export async function extractionUsage(db: Db, spaceId: string): Promise<Extracti
     tx
       .select({
         used: sql<string>`coalesce(sum(${extractionRuns.promptTokens} + ${extractionRuns.completionTokens}), 0)::bigint`,
+        dream: sql<string>`(select coalesce(sum(${dreamRuns.promptTokens} + ${dreamRuns.completionTokens}), 0)::bigint
+          from ${dreamRuns} where ${gte(dreamRuns.createdAt, MONTH_START)})`,
         // 按秒数取出，不经过文本：文本格式随数据库的 DateStyle 变
         periodStart: sql<number>`extract(epoch from ${MONTH_START})::float8`,
       })
@@ -33,7 +36,7 @@ export async function extractionUsage(db: Db, spaceId: string): Promise<Extracti
   return {
     monthlyTokens: space!.monthlyTokens,
     dailyWritesPerSubject: space!.dailyWritesPerSubject,
-    usedTokens: Number(row?.used ?? 0),
+    usedTokens: Number(row?.used ?? 0) + Number(row?.dream ?? 0),
     periodStart: new Date(Number(row!.periodStart) * 1000).toISOString(),
   }
 }

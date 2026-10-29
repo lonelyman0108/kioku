@@ -25,6 +25,7 @@ import type {
   MoveMemoryRequest,
   NeverRecalledMemory,
   PageQuery,
+  PlainLayer,
   RecalledMemory,
   RecallEventList,
   RecallEventQuery,
@@ -225,6 +226,30 @@ export type ExtractedWrite =
 
 export type ExtractedOutcome = 'added' | 'updated' | 'skipped'
 
+// Dream 的一条建议要做的事（成员执行前改过的已经换进来）：合并到保留的那条，提炼成一条新的策展记忆，
+// 设为过时，确认或删除不可信来源写下的
+export type SuggestionAction =
+  | { kind: 'merge'; keepId: string; content: string }
+  | {
+      kind: 'distill'
+      draft: { uri: string; layer?: PlainLayer; content: string; disclosure: string | null }
+    }
+  | { kind: 'stale' }
+  | { kind: 'review'; verdict: 'confirm' | 'delete' }
+
+// 锁住的一条建议：涉及的记忆与生成时各自的版本，是不是还没处理，以及要做的事。要做的事在确认查看者看得到它、
+// 它也还没处理之后才取（成员的修改不对时报 400），看不到的建议不能借报错的差别探出来
+export interface LockedSuggestion {
+  memories: { id: string; version: number }[]
+  pending: boolean
+  action: () => SuggestionAction
+}
+
+const SUGGESTION_MISSING = '建议不存在'
+const SUGGESTION_STALE = '建议生成之后这些记忆被改过，等下次整理或手动处理'
+const SUGGESTION_URI_CONFLICT = '这个 URI 已被另一条记忆占用，换一个 URI 再执行'
+const SUGGESTION_CONSOLE_ONLY = 'Dream 的建议只能在管理界面里处理'
+
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
 export interface CreateMeta {
   eventType?: 'create' | 'import'
@@ -422,7 +447,12 @@ export class MemoryService {
   // 事件里的「删除前」快照也就是真正被删掉的那一版。只删这一刻还有效的，删除时间就写这一刻：
   // 用户删掉的删除时间总早于过期时间，和过期之后被让出的（不早于过期时间，见 isReleased）分得开。
   // 读到之后刚好到期的，和读不到一样是 404（notFound 是给调用方的说法）
-  private async softDelete(tx: Tx, before: MemoryRow, notFound: string): Promise<void> {
+  private async softDelete(
+    tx: Tx,
+    before: MemoryRow,
+    notFound: string,
+    eventContext?: Record<string, unknown>,
+  ): Promise<void> {
     const now = new Date()
     const [row] = await tx
       .update(memories)
@@ -441,7 +471,14 @@ export class MemoryService {
       throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
     }
     const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-    await this.event(tx, before.id, 'delete', snapshot(before, glossary), snapshot(row, glossary))
+    await this.event(
+      tx,
+      before.id,
+      'delete',
+      snapshot(before, glossary),
+      snapshot(row, glossary),
+      eventContext,
+    )
   }
 
   // 改动已有的记录：能写这一层之外，不可信来源还只能动不可信来源写下的（canModify）
@@ -695,69 +732,73 @@ export class MemoryService {
   }
 
   async create(input: CreateMemoryRequest, meta: CreateMeta = {}): Promise<MemoryView> {
+    return this.write((tx, _personaIds, released) => this.insertCurated(tx, input, meta, released))
+  }
+
+  // 新建一条策展记忆，在调用方的事务里：检查权限与凭据占位符、让出挡着 URI 的过期记录、记一条事件
+  private async insertCurated(
+    tx: Tx,
+    input: CreateMemoryRequest,
+    meta: CreateMeta,
+    released: string[],
+  ): Promise<MemoryView> {
     const parsed = parse(input.uri)
     const validFrom = meta.createdAt ?? new Date()
     const validTo = input.validTo === undefined ? null : checkValidTo(input.validTo, validFrom)
-    return this.write(async (tx, _personaIds, released) => {
-      const ownership = await this.resolveOwnership(tx, parsed, input.layer)
-      const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
-      this.assertWritable(
-        { ...ownership, sensitivity },
-        `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`,
-      )
-      if (meta.requireAppOwner && ownership.appId) {
-        await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
-      }
-      checkOutsideContent(input.disclosure, input.glossary)
-      await this.checkCredentialRefs(
-        tx,
-        { ...ownership, sensitivity, content: input.content },
-        null,
-      )
-      await this.claimUri(tx, parsed, ownership, released)
+    const ownership = await this.resolveOwnership(tx, parsed, input.layer)
+    const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
+    this.assertWritable(
+      { ...ownership, sensitivity },
+      `没有权限写 ${ownership.layer} 层的 ${sensitivity} 级记忆`,
+    )
+    if (meta.requireAppOwner && ownership.appId) {
+      await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
+    }
+    checkOutsideContent(input.disclosure, input.glossary)
+    await this.checkCredentialRefs(tx, { ...ownership, sensitivity, content: input.content }, null)
+    await this.claimUri(tx, parsed, ownership, released)
 
-      const id = randomUUID()
-      const body =
-        sensitivity === 'secret'
-          ? { content: null, ...this.seal(input.content, id) }
-          : { content: input.content, ciphertext: null, wrappedKey: null, keyId: null }
-      const [row] = await tx
-        .insert(memories)
-        .values({
-          id,
-          spaceId: this.ctx.spaceId,
-          form: 'curated',
-          ...ownership,
-          sensitivity,
-          provenance: this.ctx.access.writeProvenance,
-          originScope: this.ctx.access.writeOriginScope,
-          domain: parsed.domain,
-          path: parsed.path,
-          ...body,
-          priority: input.priority,
-          disclosure: input.disclosure ?? null,
-          validTo,
-          ...(meta.createdAt ? { createdAt: meta.createdAt, validFrom: meta.createdAt } : {}),
-          ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
-        })
-        .returning()
-      const glossary = [...new Set(input.glossary)].sort()
-      if (glossary.length) {
-        await tx
-          .insert(memoryGlossary)
-          .values(glossary.map((keyword) => ({ spaceId: this.ctx.spaceId, memoryId: id, keyword })))
-      }
-      await this.syncCredentialRefs(tx, id, sensitivity, input.content)
-      await this.event(
-        tx,
+    const id = randomUUID()
+    const body =
+      sensitivity === 'secret'
+        ? { content: null, ...this.seal(input.content, id) }
+        : { content: input.content, ciphertext: null, wrappedKey: null, keyId: null }
+    const [row] = await tx
+      .insert(memories)
+      .values({
         id,
-        meta.eventType ?? 'create',
-        null,
-        snapshot(row!, glossary),
-        meta.eventContext,
-      )
-      return this.toView(row!, glossary)
-    })
+        spaceId: this.ctx.spaceId,
+        form: 'curated',
+        ...ownership,
+        sensitivity,
+        provenance: this.ctx.access.writeProvenance,
+        originScope: this.ctx.access.writeOriginScope,
+        domain: parsed.domain,
+        path: parsed.path,
+        ...body,
+        priority: input.priority,
+        disclosure: input.disclosure ?? null,
+        validTo,
+        ...(meta.createdAt ? { createdAt: meta.createdAt, validFrom: meta.createdAt } : {}),
+        ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
+      })
+      .returning()
+    const glossary = [...new Set(input.glossary)].sort()
+    if (glossary.length) {
+      await tx
+        .insert(memoryGlossary)
+        .values(glossary.map((keyword) => ({ spaceId: this.ctx.spaceId, memoryId: id, keyword })))
+    }
+    await this.syncCredentialRefs(tx, id, sensitivity, input.content)
+    await this.event(
+      tx,
+      id,
+      meta.eventType ?? 'create',
+      null,
+      snapshot(row!, glossary),
+      meta.eventContext,
+    )
+    return this.toView(row!, glossary)
   }
 
   // 写下一批抽取的结果（对象层的事实与情节层的会话摘要，没有 URI、不建向量），连同调用方的收尾
@@ -896,6 +937,8 @@ export class MemoryService {
       released?: string[]
       // 恢复到某一版：正文换成那一版的，那一版与现在同一归属（见 restore）
       existingRefs?: boolean
+      // 来源改成这次写入的来源：按 Dream 的建议合并时，正文是成员确认过的（见 applySuggestion）
+      reattribute?: boolean
     } = {},
   ): Promise<MemoryView> {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
@@ -994,6 +1037,7 @@ export class MemoryService {
         layer,
         ownerAccountId,
         sensitivity,
+        ...(meta.reattribute ? { provenance: this.ctx.access.writeProvenance } : {}),
         priority: input.priority ?? before.priority,
         disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
         ...(validTo !== undefined ? { validTo } : {}),
@@ -1211,6 +1255,251 @@ export class MemoryService {
     })
     if (input.action === 'delete') this.changed(done)
     return { done: done.length, skipped: seen.size - done.length }
+  }
+
+  // ---- Dream 的建议（管理界面）----
+  // 建议存在 dream_suggestions 里：调用方锁住那一行，按建议与成员的修改给出要做的事（lock），处理完在同一个事务里
+  // 把它标成执行过或拒绝了（done）。这里管记忆这一边：涉及的每条记忆按管理读取都读得到，这条建议对查看者才存在，
+  // 否则和不存在一样是 404；处理要每条都写得了（canModify，应用层按记忆的 appId）。
+  // 执行时的写入来源记为确认的成员：Dream 自己不写记忆，确认之前模型给出的文字不进任何记忆
+
+  // 按建议执行，所有改动在一个事务里。带上建议生成时各条记忆的版本：锁住这几行再核对，任何一条改过、删掉或过期了就 409。
+  // 合并：保留的那条换成合并后的正文（URI 与层不变，来源记为确认的成员），其余几条删掉；提炼：新建一条策展记忆
+  // （默认放在执行的成员自己的私人层），作为来源的事实不动；过时：有效到设为现在（服务端写入，不受「至少晚一分钟」的限制），
+  // 之后能重新生效；审核：和待审队列一样确认或删除。每一步照常记事件、过写入检查。返回提炼时新建的记忆
+  async applySuggestion(
+    lock: (tx: Tx) => Promise<LockedSuggestion | null>,
+    done: (tx: Tx) => Promise<void>,
+    context: Record<string, unknown>,
+  ): Promise<MemoryView | null> {
+    if (this.viaKey) throw new MemoryError(403, SUGGESTION_CONSOLE_ONLY)
+    const released: string[] = []
+    const changed: string[] = []
+    const created = await this.run(async (tx) => {
+      const suggestion = await this.openSuggestion(tx, lock)
+      const action = suggestion.action()
+      const rows = await this.lockSuggested(tx, suggestion)
+      for (const row of rows) this.assertModifiable(row, `没有权限改 ${row.layer} 层的记忆`)
+      let view: MemoryView | null = null
+      switch (action.kind) {
+        case 'merge': {
+          const keep = rows.find((r) => r.id === action.keepId)
+          if (!keep) throw new MemoryError(409, SUGGESTION_STALE)
+          const others = rows.filter((r) => r !== keep)
+          const keepContext = { ...context, mergedFrom: others.map((r) => r.id) }
+          if (keep.form === 'curated') {
+            await this.applyUpdate(
+              tx,
+              keep,
+              { content: action.content, expectedVersion: keep.version },
+              { eventContext: keepContext, released, reattribute: true },
+            )
+          } else {
+            await this.rewriteFact(tx, keep, action.content, keepContext)
+          }
+          for (const other of others) {
+            await this.softDelete(tx, other, SUGGESTION_STALE, { ...context, mergedInto: keep.id })
+          }
+          changed.push(...rows.map((r) => r.id))
+          break
+        }
+        case 'distill': {
+          const { draft } = action
+          view = await this.insertCurated(
+            tx,
+            {
+              uri: draft.uri,
+              content: draft.content,
+              ...(draft.layer ? { layer: draft.layer } : {}),
+              ...(draft.disclosure ? { disclosure: draft.disclosure } : {}),
+              priority: 2,
+              glossary: [],
+            },
+            { eventContext: { ...context, distilledFrom: rows.map((r) => r.id) } },
+            released,
+          )
+          break
+        }
+        case 'stale':
+          for (const row of rows) await this.endNow(tx, row, context)
+          changed.push(...rows.map((r) => r.id))
+          break
+        case 'review':
+          for (const row of rows) {
+            if (row.provenance !== 'untrusted') throw new MemoryError(409, SUGGESTION_STALE)
+            if (action.verdict === 'delete') {
+              await this.softDelete(tx, row, SUGGESTION_STALE, context)
+            } else {
+              await this.confirmRow(tx, row, context)
+            }
+          }
+          changed.push(...rows.map((r) => r.id))
+          break
+      }
+      await done(tx)
+      return view
+    }, SUGGESTION_URI_CONFLICT)
+    this.changed([...changed, ...released, ...(created ? [created.id] : [])])
+    return created
+  }
+
+  // 拒绝一条建议：和执行一样，要读得到、也写得了涉及的每条记忆，记忆本身不动
+  async rejectSuggestion(
+    lock: (tx: Tx) => Promise<LockedSuggestion | null>,
+    done: (tx: Tx) => Promise<void>,
+  ): Promise<void> {
+    if (this.viaKey) throw new MemoryError(403, SUGGESTION_CONSOLE_ONLY)
+    await this.run(async (tx) => {
+      const suggestion = await this.openSuggestion(tx, lock)
+      const rows = await tx
+        .select()
+        .from(memories)
+        .where(
+          inArray(
+            memories.id,
+            suggestion.memories.map((m) => m.id),
+          ),
+        )
+      for (const row of rows) this.assertModifiable(row, `没有权限处理 ${row.layer} 层的记忆`)
+      await done(tx)
+    })
+  }
+
+  // 锁住建议，确认查看者看得到它（涉及的每条记忆按管理读取都读得到），再看它是不是还没处理
+  private async openSuggestion(
+    tx: Tx,
+    lock: (tx: Tx) => Promise<LockedSuggestion | null>,
+  ): Promise<LockedSuggestion> {
+    const suggestion = await lock(tx)
+    if (!suggestion) throw new MemoryError(404, SUGGESTION_MISSING)
+    const ids = [...new Set(suggestion.memories.map((m) => m.id))]
+    const [visible] = await tx
+      .select({ n: count() })
+      .from(memories)
+      .where(and(inArray(memories.id, ids), this.manageable()))
+    if ((visible?.n ?? 0) < ids.length) throw new MemoryError(404, SUGGESTION_MISSING)
+    if (!suggestion.pending) throw new MemoryError(409, '这条建议已经处理过了')
+    return suggestion
+  }
+
+  // 按 id 的顺序锁住建议涉及的记忆，核对还是生成建议时的那一版、没删除、现在有效；按建议里的顺序返回
+  private async lockSuggested(tx: Tx, suggestion: LockedSuggestion): Promise<MemoryRow[]> {
+    const rows = await tx
+      .select()
+      .from(memories)
+      .where(
+        and(
+          inArray(
+            memories.id,
+            suggestion.memories.map((m) => m.id),
+          ),
+          this.manageable(),
+        ),
+      )
+      .orderBy(asc(memories.id))
+      .for('update')
+    const now = new Date()
+    const byId = new Map(rows.map((r) => [r.id, r]))
+    return suggestion.memories.map(({ id, version }) => {
+      const row = byId.get(id)
+      if (!row || row.version !== version || row.deletedAt || !isValidAt(row, now)) {
+        throw new MemoryError(409, SUGGESTION_STALE)
+      }
+      return row
+    })
+  }
+
+  // 换掉一条事实的正文（合并时保留的那条），来源记为这次写入的来源。事实在对象层，占位符写不进去
+  private async rewriteFact(
+    tx: Tx,
+    row: MemoryRow,
+    content: string,
+    eventContext: Record<string, unknown>,
+  ): Promise<void> {
+    await this.checkCredentialRefs(
+      tx,
+      {
+        layer: row.layer,
+        sensitivity: row.sensitivity,
+        ownerAccountId: row.ownerAccountId,
+        content,
+      },
+      null,
+    )
+    const [after] = await tx
+      .update(memories)
+      .set({
+        content,
+        provenance: this.ctx.access.writeProvenance,
+        version: sql`${memories.version} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(
+        and(eq(memories.id, row.id), eq(memories.version, row.version), isNull(memories.deletedAt)),
+      )
+      .returning()
+    if (!after) throw new MemoryError(409, SUGGESTION_STALE)
+    await this.event(tx, row.id, 'update', snapshot(row, []), snapshot(after, []), eventContext)
+  }
+
+  // 有效到设为现在：策展记忆之后在「已过期」里能重新生效，抽取的事实等于被推翻（对象页上能重新生效）
+  private async endNow(
+    tx: Tx,
+    row: MemoryRow,
+    eventContext: Record<string, unknown>,
+  ): Promise<void> {
+    const [after] = await tx
+      .update(memories)
+      .set({ validTo: sql`now()`, version: sql`${memories.version} + 1`, updatedAt: new Date() })
+      .where(
+        and(eq(memories.id, row.id), eq(memories.version, row.version), isNull(memories.deletedAt)),
+      )
+      .returning()
+    if (!after) throw new MemoryError(409, SUGGESTION_STALE)
+    const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+    await this.event(
+      tx,
+      row.id,
+      'update',
+      snapshot(row, glossary),
+      snapshot(after, glossary),
+      eventContext,
+    )
+  }
+
+  // 确认一条不可信来源写下的记忆：来源改成这次写入的来源（管理界面里是成员本人），和待审队列的确认一样
+  private async confirmRow(
+    tx: Tx,
+    row: MemoryRow,
+    eventContext: Record<string, unknown>,
+  ): Promise<void> {
+    const now = new Date()
+    const [after] = await tx
+      .update(memories)
+      .set({
+        provenance: this.ctx.access.writeProvenance,
+        version: sql`${memories.version} + 1`,
+        updatedAt: now,
+      })
+      .where(
+        and(
+          eq(memories.id, row.id),
+          eq(memories.version, row.version),
+          isNull(memories.deletedAt),
+          validAt(now),
+        ),
+      )
+      .returning()
+    if (!after) throw new MemoryError(409, SUGGESTION_STALE)
+    const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+    await this.event(
+      tx,
+      row.id,
+      'confirm',
+      snapshot(row, glossary),
+      snapshot(after, glossary),
+      eventContext,
+    )
   }
 
   // 改 URI。移进、移出 persona:// 与 app://，或在不同的人格、应用之间移动时，层与归属跟着目标 URI 变：

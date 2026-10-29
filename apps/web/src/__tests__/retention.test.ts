@@ -10,6 +10,8 @@ const zero: RetentionCounts = {
   orphanEvents: 0,
   scrubbedSnapshots: 0,
   extractionRuns: 0,
+  dreamRuns: 0,
+  dreamSuggestions: 0,
   credentialEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,

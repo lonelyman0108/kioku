@@ -8,6 +8,7 @@ import { mountWeb } from './http/web'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
 import { credentialRoutes } from './routes/credentials'
+import { dreamRoutes } from './routes/dream'
 import { health } from './routes/health'
 import { mcpRoutes } from './routes/mcp'
 import { memoryRoutes } from './routes/memories'
@@ -64,6 +65,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', spaceRoutes(deps))
   app.route('/v1', subjectRoutes(deps))
   app.route('/v1', reviewRoutes(deps))
+  app.route('/v1', dreamRoutes(deps))
   app.route('/v1', recallRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))

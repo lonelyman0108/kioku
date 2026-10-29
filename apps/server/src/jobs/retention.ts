@@ -29,6 +29,8 @@ import {
   credentialEvents,
   credentialProviders,
   credentials,
+  dreamRuns,
+  dreamSuggestions,
   extractionRuns,
   memories,
   memoryEvents,
@@ -233,6 +235,21 @@ export function retentionRules(now: Date, days: number) {
       lt(extractionRuns.createdAt, cutoff),
       lt(extractionRuns.createdAt, monthStart(at(now))),
     )!,
+    // Dream 的运行记录：和抽取记录一样，本月的留着（用量计入同一份预算）
+    dreamRuns: and(lt(dreamRuns.createdAt, cutoff), lt(dreamRuns.createdAt, monthStart(at(now))))!,
+    // Dream 的建议：处理之后（没处理的从提出时算）过了保留期，并且已经作废的——涉及的记忆有一条改过（版本不对）、
+    // 删掉、过期或者不在了。还作数的留着：拒绝过的指纹靠它们挡住同样的建议，没处理的还在待审里等着
+    dreamSuggestions: and(
+      lt(sql`coalesce(${dreamSuggestions.decidedAt}, ${dreamSuggestions.createdAt})`, cutoff),
+      sql`exists (
+        select 1 from unnest(${dreamSuggestions.memoryIds}, ${dreamSuggestions.versions}) as item(id, version)
+        where not exists (
+          select 1 from ${memories}
+          where ${memories.id} = item.id and ${memories.version} = item.version
+            and ${memories.deletedAt} is null
+            and (${memories.validTo} is null or ${memories.validTo} > ${at(now)})
+            and (${memories.expiresAt} is null or ${memories.expiresAt} > ${at(now)})))`,
+    )!,
     credentialEvents: lt(credentialEvents.createdAt, cutoff),
     deletedCredentials: lt(credentials.deletedAt, cutoff),
     // 已删除的凭据源：还有凭据指着它的留着，已删除、还在保留期里的凭据也算
@@ -404,6 +421,16 @@ const STEPS: Step[] = [
     ),
   },
   {
+    label: 'Dream 的运行记录',
+    batch: single('dreamRuns', (tx, r) => tableBatch(tx, dreamRuns, dreamRuns.id, r.dreamRuns)),
+  },
+  {
+    label: 'Dream 的建议',
+    batch: single('dreamSuggestions', (tx, r) =>
+      tableBatch(tx, dreamSuggestions, dreamSuggestions.id, r.dreamSuggestions),
+    ),
+  },
+  {
     label: '凭据事件',
     batch: single('credentialEvents', (tx, r) =>
       tableBatch(tx, credentialEvents, credentialEvents.id, r.credentialEvents),
@@ -431,6 +458,8 @@ const emptyCounts = (): RetentionCounts => ({
   orphanEvents: 0,
   scrubbedSnapshots: 0,
   extractionRuns: 0,
+  dreamRuns: 0,
+  dreamSuggestions: 0,
   credentialEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,
