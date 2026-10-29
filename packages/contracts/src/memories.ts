@@ -17,8 +17,11 @@ export const Keyword = z.string().trim().min(2, '关键词至少两个字').max(
 export const RemovableKeyword = z.string().trim().min(1).max(64)
 
 // 有效到：ISO 8601，要带时区（例如 2026-12-31T23:59:00+08:00）。到了这个时间就不再召回、不进 boot，
-// 按 URI 也读不到；历史里照样看得到，管理界面里能让它重新生效。写入时要晚于现在
-export const ValidTo = z.iso.datetime({ offset: true })
+// 按 URI 也读不到；历史里照样看得到，管理界面里能让它重新生效。写入时要比现在晚至少一分钟。
+// 说明写进 OpenAPI：生成的客户端（例如 Python 的 datetime）不带时区时会被拒绝，要在文档里看得到
+const VALID_TO_FORMAT =
+  'ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟'
+export const ValidTo = z.iso.datetime({ offset: true }).describe(VALID_TO_FORMAT)
 
 export const MemoryView = z
   .object({
@@ -72,7 +75,9 @@ export const CreateMemoryRequest = z
     disclosure: z.string().max(500).optional(),
     glossary: z.array(Keyword).max(32).default([]),
     // 不填就一直有效
-    validTo: ValidTo.optional(),
+    validTo: ValidTo.optional().describe(
+      `有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；不填就一直有效`,
+    ),
   })
   .meta({ id: 'CreateMemoryRequest' })
 export type CreateMemoryRequest = z.infer<typeof CreateMemoryRequest>
@@ -93,7 +98,9 @@ export const UpdateMemoryRequest = z
     glossaryAdd: z.array(Keyword).max(32).optional(),
     glossaryRemove: z.array(RemovableKeyword).max(32).optional(),
     // 改有效期；null 清掉，一直有效
-    validTo: ValidTo.nullable().optional(),
+    validTo: ValidTo.nullable()
+      .optional()
+      .describe(`有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；填 null 清掉，一直有效`),
     // 从 secret 降级时正文还像有明文凭据，确认没有、仍要降级。只有管理界面里的空间 owner 能用，Key 不行
     allowPlaintext: z.boolean().optional(),
   })

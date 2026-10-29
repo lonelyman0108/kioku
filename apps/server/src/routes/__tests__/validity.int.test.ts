@@ -13,6 +13,7 @@ import type {
   SubjectDetail,
 } from '@kioku/contracts'
 import { and, asc, eq } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -23,6 +24,7 @@ import {
   memoryEvents,
   settings,
   subjectIdentities,
+  subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { ChatModel } from '../../extraction/provider'
@@ -218,19 +220,28 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(changes).toEqual([['priority'], ['validTo'], ['content'], ['validTo'], []])
     })
 
-    it('有效到要晚于现在：设在过去、正好现在、不带时区的都拒绝，原来的有效期不变', async () => {
+    it('有效到要比现在晚至少一分钟：过去的、正好现在的、半分钟之后的、不带时区的都拒绝，原来的有效期不变', async () => {
       const past = new Date(Date.now() - 60_000).toISOString()
-      expect(
-        await errorOf(await keyCreate({ uri: 'a://b', content: 'x', validTo: past }), 400),
-      ).toContain('晚于现在')
-      expect(
-        await errorOf(await create({ uri: 'a://b', content: 'x', validTo: past }), 400),
-      ).toContain('晚于现在')
+      const soon = new Date(Date.now() + 30_000).toISOString()
+      for (const validTo of [past, soon]) {
+        expect(
+          await errorOf(await keyCreate({ uri: 'a://b', content: 'x', validTo }), 400),
+        ).toContain('晚至少一分钟')
+        expect(await errorOf(await create({ uri: 'a://b', content: 'x', validTo }), 400)).toContain(
+          '晚至少一分钟',
+        )
+      }
       // 不带时区的时间说不清是哪个时刻
       expect(
         (await keyCreate({ uri: 'a://b', content: 'x', validTo: '2030-01-01T00:00:00' })).status,
       ).toBe(400)
       expect((await keyGet('a://b')).status).toBe(404)
+      // 两分钟之后的可以
+      const later = new Date(Date.now() + 120_000).toISOString()
+      expect(
+        (await ok<MemoryView>(await keyCreate({ uri: 'a://c', content: 'y', validTo: later }), 201))
+          .validTo,
+      ).toBe(later)
 
       const until = inDays(2)
       const m = await ok<MemoryView>(
@@ -238,6 +249,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         201,
       )
       expect(await errorOf(await keyPatch({ uri: m.uri, validTo: past }), 400)).toContain('删掉它')
+      expect((await keyPatch({ uri: m.uri, validTo: soon })).status).toBe(400)
       expect(
         (await keyPatch({ uri: m.uri, validTo: new Date().toISOString(), content: '新的' })).status,
       ).toBe(400)
@@ -247,22 +259,153 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         version: 1,
       })
     })
+  })
 
-    it('有效到一过就读不到了', async () => {
-      // 留足写入与第一次读取的时间（机器忙时请求也可能慢），再等到有效到过了之后读
-      const until = Date.now() + 2_500
-      const m = await ok<MemoryView>(
-        await keyCreate({
-          uri: 'flash://note',
-          content: '马上过期',
-          validTo: new Date(until).toISOString(),
-        }),
+  describe('并发与到期的边界', () => {
+    // 另开一条连接，在事务里拿住锁，发出请求；等请求确实等在这把锁上（pg_blocking_pids）之后做 between，
+    // 再提交、放开锁，返回请求的结果。不靠睡眠猜时机
+    async function whileBlocking(
+      lock: (tx: postgres.TransactionSql) => Promise<unknown>,
+      request: () => Response | Promise<Response>,
+      between: (tx: postgres.TransactionSql) => Promise<unknown>,
+    ): Promise<Response> {
+      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
+      try {
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+          await lock(tx)
+          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
+            { pid: number },
+          ]
+          pending = Promise.resolve(request())
+          for (let i = 0; ; i++) {
+            const [row] = await side<{ n: number }[]>`
+              select count(*)::int as n from pg_stat_activity
+              where ${pid}::int = any(pg_blocking_pids(pid))`
+            if (row!.n > 0) break
+            if (i >= 200) throw new Error('请求没有等在这把锁上')
+            await new Promise((r) => setTimeout(r, 25))
+          }
+          await between(tx)
+        })
+        return await pending!
+      } finally {
+        // 用例中途失败时也等发出的请求结束，免得它和下一个用例的清库交错
+        await pending?.catch(() => {})
+        await side.end()
+      }
+    }
+    const sleepUntil = (at: Date) =>
+      new Promise((resolve) => setTimeout(resolve, Math.max(0, at.getTime() - Date.now())))
+
+    it('让出 URI 时，读到之后被别的事务重新生效的记录不会被软删除', async () => {
+      const old = await ok<MemoryView>(
+        await keyCreate({ uri: 'notes://race', content: '旧的', validTo: inDays(1) }),
         201,
       )
-      expect((await keyGet(m.uri)).status).toBe(200)
-      await new Promise((resolve) => setTimeout(resolve, until + 300 - Date.now()))
-      expect((await keyGet(m.uri)).status).toBe(404)
-      expect((await expired()).items.map((i) => i.id)).toEqual([m.id])
+      await expire(old.id)
+      const res = await whileBlocking(
+        (tx) => tx`select id from memories where id = ${old.id} for update`,
+        () => keyCreate({ uri: 'notes://race', content: '新的' }),
+        // 新建等在让出这一条的行锁上时，另一个事务让它重新生效
+        (tx) => tx`update memories set valid_to = null where id = ${old.id}`,
+      )
+      expect(res.status).toBe(409)
+      expect(await rowOf(old.id)).toMatchObject({ deletedAt: null, validTo: null })
+      expect((await history(old.id)).events.map((e) => e.type)).toEqual(['create'])
+    })
+
+    it('重新生效时，读到之后被别的事务让出的记录返回 409，不会留在删除的状态里却报成功', async () => {
+      const m = await ok<MemoryView>(
+        await keyCreate({ uri: 'notes://race2', content: '过期的', validTo: inDays(1) }),
+        201,
+      )
+      await expire(m.id)
+      const res = await whileBlocking(
+        (tx) => tx`select id from memories where id = ${m.id} for update`,
+        () => reactivate(m.id, m.version),
+        // 重新生效等在这一行的锁上时，另一个事务让出了它：软删除，版本号不变
+        (tx) => tx`update memories set deleted_at = now() where id = ${m.id}`,
+      )
+      expect(await errorOf(res, 409)).toContain('刚被其他请求修改')
+      const row = await rowOf(m.id)
+      expect(row.deletedAt).not.toBeNull()
+      expect(row.validTo).not.toBeNull()
+    })
+
+    it('删除时刚好到期：和读不到一样返回 404，删除标记不写，免得被当成过期之后让出的', async () => {
+      // 删对象页上的事实时先锁住那一行再删：锁住时它还有效，等锁的这段时间里到期。
+      // 按 URI 删的路径在删之前紧挨着又按当时的时间判断一次能不能读，中间没有能等住的地方
+      const [subject] = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .insert(subjects)
+          .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })
+          .returning(),
+      )
+      const until = new Date(Date.now() + 3_000)
+      const [fact] = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .insert(memories)
+          .values({
+            spaceId: ws.spaceId,
+            form: 'extracted',
+            layer: 'subject',
+            subjectId: subject!.id,
+            sensitivity: 'public',
+            provenance: 'untrusted',
+            originScope: 'global',
+            content: '在学日语',
+            validTo: until,
+          })
+          .returning(),
+      )
+      const res = await whileBlocking(
+        (tx) => tx`select id from memories where id = ${fact!.id} for update`,
+        () =>
+          app.request(
+            `${space()}/subjects/${subject!.id}/facts/${fact!.id}?version=${fact!.version}`,
+            { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
+          ),
+        // 过了有效到再放开：删除读出它时还有效，到写删除标记的那一刻已经过期了
+        () => sleepUntil(new Date(until.getTime() + 200)),
+      )
+      expect(await errorOf(res, 404)).toContain('事实不存在')
+      expect((await rowOf(fact!.id)).deletedAt).toBeNull()
+    })
+
+    it('待审里删除时刚好到期：跳过，不写删除标记', async () => {
+      const until = new Date(Date.now() + 3_000)
+      const [item] = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .insert(memories)
+          .values({
+            spaceId: ws.spaceId,
+            form: 'extracted',
+            layer: 'episode',
+            sensitivity: 'public',
+            provenance: 'untrusted',
+            originScope: 'global',
+            content: '群里说下周三停电',
+            expiresAt: until,
+          })
+          .returning(),
+      )
+      const res = await whileBlocking(
+        (tx) => tx`lock table memories in access exclusive mode`,
+        () =>
+          app.request(
+            `${space()}/review`,
+            jsonRequest(
+              'POST',
+              { action: 'delete', items: [{ id: item!.id, version: item!.version }] },
+              { cookie: ws.cookie },
+            ),
+          ),
+        () => sleepUntil(new Date(until.getTime() + 200)),
+      )
+      expect(await ok<{ done: number; skipped: number }>(res)).toEqual({ done: 0, skipped: 1 })
+      expect((await rowOf(item!.id)).deletedAt).toBeNull()
     })
   })
 
@@ -655,7 +798,10 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         '改过',
       )
 
+      queued.length = 0
       expect((await reactivateFact(id, old.id, old.version)).status).toBe(204)
+      // 和别的写入一样，提交后通知（安排向量更新）
+      expect(queued).toEqual([old.id])
       const after = await detail(id)
       expect(after.facts.map((f) => f.content).sort()).toEqual(['在学日语', '在学韩语'])
       expect(after.supersededFacts).toEqual([])

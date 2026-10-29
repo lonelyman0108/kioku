@@ -33,7 +33,8 @@ class UpdateMemoryRequest:
         disclosure (None | str | Unset):
         glossary_add (list[str] | Unset):
         glossary_remove (list[str] | Unset):
-        valid_to (datetime.datetime | None | Unset):
+        valid_to (datetime.datetime | None | Unset): 有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或
+            2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；填 null 清掉，一直有效
         allow_plaintext (bool | Unset):
     """
 

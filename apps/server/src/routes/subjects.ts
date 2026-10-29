@@ -438,16 +438,18 @@ export function subjectRoutes(deps: Deps) {
             .orderBy(desc(extractionRuns.createdAt), desc(extractionRuns.id))
             .limit(DETAIL_RUNS),
         ])
-        const named = await scopeNames(tx, [
-          ...facts.map((f) => f.originScope),
-          ...superseded.map((f) => f.originScope),
-          ...runs.map((r) => r.run.scope),
+        const [named, superseding] = await Promise.all([
+          scopeNames(tx, [
+            ...facts.map((f) => f.originScope),
+            ...superseded.map((f) => f.originScope),
+            ...runs.map((r) => r.run.scope),
+          ]),
+          supersedingContents(
+            tx,
+            access,
+            superseded.map((f) => f.id),
+          ),
         ])
-        const superseding = await supersedingContents(
-          tx,
-          access,
-          superseded.map((f) => f.id),
-        )
         const fact = (f: (typeof facts)[number]) => ({
           id: f.id,
           content: f.content ?? '',
