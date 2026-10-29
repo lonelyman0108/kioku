@@ -162,6 +162,13 @@
       "when": 1793250356924,
       "tag": "0022_uri_exclusive_validity",
       "breakpoints": true
+    },
+    {
+      "idx": 23,
+      "version": "7",
+      "when": 1793259962336,
+      "tag": "0023_import_uri_lock",
+      "breakpoints": true
     }
   ]
 }
