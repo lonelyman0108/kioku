@@ -18,6 +18,7 @@ export const retentionLabels: Record<keyof RetentionCounts, string> = {
   credentialEvents: '凭据事件',
   deletedCredentials: '已删除的凭据',
   deletedProviders: '已删除的凭据源',
+  subjectBindings: '处理完的绑定记录',
 }
 
 // 删了东西的那几类，一条都没删的不列

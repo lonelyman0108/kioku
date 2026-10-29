@@ -276,6 +276,12 @@ export const api = {
     request('POST', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}/reactivate`, {
       body: { version },
     }),
+  confirmBinding: (spaceId: string, bindingId: string) =>
+    request('POST', `/spaces/${spaceId}/subject-bindings/${bindingId}/confirm`, {
+      schema: SubjectInfo,
+    }),
+  rejectBinding: (spaceId: string, bindingId: string) =>
+    request('POST', `/spaces/${spaceId}/subject-bindings/${bindingId}/reject`),
   reviewQueue: (spaceId: string, query: ReviewQuery) =>
     request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),
   review: (spaceId: string, body: ReviewRequest) =>

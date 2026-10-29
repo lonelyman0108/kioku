@@ -128,7 +128,7 @@ export const RecallSettings = z.object({
 export type RecallSettings = z.infer<typeof RecallSettings>
 
 // 保留期：删掉的记忆（连同历史、向量、关键词、凭据引用与召回统计）、被推翻的抽取事实、过期的会话摘要，
-// 以及抽取记录、凭据事件、已删除的凭据与凭据源，过了这么多天由每天一次的清理硬删除。
+// 以及抽取记录、凭据事件、已删除的凭据与凭据源、处理完的绑定记录，过了这么多天由每天一次的清理硬删除。
 // 和召回事件明细的保留天数是两回事
 export const DEFAULT_RETENTION_DAYS = 30
 export const RetentionSettings = z.object({
@@ -149,6 +149,8 @@ export const RetentionCounts = z.object({
   credentialEvents: z.number().int(),
   deletedCredentials: z.number().int(),
   deletedProviders: z.number().int(),
+  // 处理完的绑定记录（合并了、确认、拒绝、作废或过期的）。之前记下的清理结果里没有这一类，读出来当作 0
+  subjectBindings: z.number().int().default(0),
 })
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 

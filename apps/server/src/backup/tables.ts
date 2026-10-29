@@ -7,9 +7,16 @@ import { RLS_TABLES } from '../db/schema'
 
 // 备份里有哪些表、按什么顺序写回。表的清单从 drizzle 的表定义里取，新加的表自动进备份，
 // 不该进的在这里排除：会话与登录计数（恢复后重新登录）、对话缓冲（抽取完就删的临时数据）、
-// 向量（恢复后按设置重新生成，换了模型也不用改备份）
+// 向量（恢复后按设置重新生成，换了模型也不用改备份）、绑定码与输错绑定码的计数（只活几分钟到一小时，恢复后重新申请）
 
-const EXCLUDED = new Set(['sessions', 'login_attempts', 'conversation_turns', 'memory_embeddings'])
+const EXCLUDED = new Set([
+  'sessions',
+  'login_attempts',
+  'conversation_turns',
+  'memory_embeddings',
+  'subject_bind_codes',
+  'subject_bind_attempts',
+])
 
 export interface BackupTable {
   name: string

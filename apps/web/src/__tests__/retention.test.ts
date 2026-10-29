@@ -13,6 +13,7 @@ const zero: RetentionCounts = {
   credentialEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,
+  subjectBindings: 0,
 }
 
 describe('保留期清理的结果', () => {
