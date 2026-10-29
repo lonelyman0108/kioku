@@ -30,6 +30,8 @@ services:
     environment:
       DATABASE_URL: postgres://kioku:${KIOKU_DB_PASSWORD}@db:5432/kioku
       KIOKU_MASTER_KEY: ${KIOKU_MASTER_KEY:?在 .env 里设置 KIOKU_MASTER_KEY}
+      # 只在轮换主密钥期间、或恢复轮换之前做的备份时配：旧的那把主密钥
+      KIOKU_MASTER_KEY_PREVIOUS: ${KIOKU_MASTER_KEY_PREVIOUS:-}
       KIOKU_COOKIE_SECURE: ${KIOKU_COOKIE_SECURE:-true}
       KIOKU_TRUSTED_PROXIES: ${KIOKU_TRUSTED_PROXIES:-0}
     # 放在反向代理后面时在 .env 里设 KIOKU_BIND=127.0.0.1，端口只给本机的代理访问

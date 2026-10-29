@@ -51,29 +51,41 @@ docker compose -f docker-compose.example.yml up -d --build
 
 **HTTPS 与反向代理**：对外提供服务时在前面加 HTTPS 反向代理，`KIOKU_COOKIE_SECURE` 保持 `true`，`KIOKU_TRUSTED_PROXIES` 设为代理层数（一层就是 `1`），登录限流才能拿到真实的客户端地址。同时在 `.env` 里设 `KIOKU_BIND=127.0.0.1`，端口只给本机的代理访问：否则别人可以绕过代理直连，自己填 `X-Forwarded-For`。是否发 HSTS 由代理决定，服务本身不发。
 
-**备份**：数据都在数据库里，`KIOKU_MASTER_KEY` 另外保存（丢了它，secret 级记忆无法解密）。备份要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。备份文件不要放在仓库目录里，构建镜像时会被带进构建上下文。
+**备份**：把整个实例导出成一个加密的文件，服务运行时也可以做。文件用主密钥派生的密钥加密，`KIOKU_MASTER_KEY` 另外保存（丢了它，备份和 secret 级记忆都解不开）。备份里没有会话与登录计数、对话缓冲和向量，其余全在。备份文件不要放在仓库目录里，构建镜像时会被带进构建上下文。
 
 ```bash
 mkdir -p ~/kioku-backup
-docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F-%H%M%S).dump
+docker compose -f docker-compose.example.yml exec -T kioku node server/dist/backup.mjs --out - > ~/kioku-backup/kioku-$(date +%F-%H%M%S).backup
 ```
 
-**升级**：先按上面备份，再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前。
+**恢复到新实例**：新实例的 `.env` 里配做备份时的 `KIOKU_MASTER_KEY`（备份之后轮换过的话，新的那把配在 `KIOKU_MASTER_KEY`，做备份时的配在 `KIOKU_MASTER_KEY_PREVIOUS`），数据库是新建的空库，恢复之前不要启动服务。恢复先核对格式、主密钥与迁移，把迁移执行到做备份时的位置，再按原来的 id 写回并执行这个版本新增的迁移（较早版本做的备份也能用新版本恢复）；写回与新增的迁移在一个事务里，失败时数据一条也不留下，可以直接重试；库里已经有账号或空间时拒绝。恢复先把整份备份解开、核对过才写库，内存要放得下解压后的备份（通常是备份文件的几倍大）。恢复之后所有人重新登录，Key 照常可用，向量在后台重新生成。
+
+```bash
+docker compose -f docker-compose.example.yml build
+docker compose -f docker-compose.example.yml run --rm -T kioku node server/dist/restore.mjs --file - < ~/kioku-backup/<备份>.backup
+docker compose -f docker-compose.example.yml up -d
+```
+
+**升级**：先做一份整库快照（回滚时用），再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前。快照要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。
+
+```bash
+docker compose -f docker-compose.example.yml exec db pg_dump -U postgres -Fc kioku > ~/kioku-backup/kioku-$(date +%F-%H%M%S).dump
+```
 
 **轮换主密钥**：把现在的主密钥移到 `KIOKU_MASTER_KEY_PREVIOUS`，新生成的一把填进 `KIOKU_MASTER_KEY`，重启。后台会把还是旧密钥包装的数据密钥逐条换成新的包装（正文的密文不动，已删除的也换），「实例设置 → 主密钥」里看得到还剩多少条；显示换完之后删掉 `KIOKU_MASTER_KEY_PREVIOUS` 再重启，新密钥另外保存好。没换完就去掉旧的那把，服务会拒绝启动并提示配回去。轮换之后，之前的备份要用旧主密钥恢复。
 
 **嵌入模型**：在「实例设置 → 嵌入模型」里配。一个模型可以配几个渠道（同一个模型的不同接口），按顺序请求，前一个出错时换下一个；服务商给模型改了名，只改渠道里「请求用的模型名」，不用重新生成向量。换成别的模型用「换模型」：填新模型的标识与渠道，后台为全部记忆生成新模型的向量，召回在补齐之前一直用原来的模型，补齐后自动切过去、删掉旧的向量；补不上时可以不等补齐直接切换，也可以放弃。整个过程不用改数据库。向量固定 1024 维，换的模型要能按 `dimensions` 参数输出 1024 维（「测试连通」会检查）。
 
-**回滚**：停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的备份恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在备份里，会残留下来，下次升级时迁移会因为它们已存在而失败。
+**回滚**：停掉服务，把已经迁移到新版本的库改名留着，建一个空库，把升级前的快照恢复进去，然后换回旧版本的代码启动。不能直接往旧库里 `pg_restore --clean`：新版本建的表和函数不在快照里，会残留下来，下次升级时迁移会因为它们已存在而失败。
 
 ```bash
 docker compose -f docker-compose.example.yml stop kioku
 docker compose -f docker-compose.example.yml exec db psql -U postgres -c 'ALTER DATABASE kioku RENAME TO kioku_upgraded'
 docker compose -f docker-compose.example.yml exec db createdb -U postgres -O kioku kioku
-docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/<升级前的备份>.dump
+docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres --exit-on-error -d kioku < ~/kioku-backup/<升级前的快照>.dump
 ```
 
-恢复失败时（例如备份文件不完整）删掉新建的 `kioku`，再把 `kioku_upgraded` 改回 `kioku`，回到升级后的状态。旧版本确认正常之后再删掉 `kioku_upgraded`（`exec db dropdb -U postgres kioku_upgraded`）。
+恢复失败时（例如快照文件不完整）删掉新建的 `kioku`，再把 `kioku_upgraded` 改回 `kioku`，回到升级后的状态。旧版本确认正常之后再删掉 `kioku_upgraded`（`exec db dropdb -U postgres kioku_upgraded`）。
 
 ## 配置项
 

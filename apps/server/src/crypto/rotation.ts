@@ -70,6 +70,15 @@ function identify(ring: Keyring, wrappedKey: Buffer, aad: string): string | null
 // 新写下的又用了另一把，越来越乱。每个空间先在一个事务里数：标识对不上的只数一数；有没记标识的才一批批认，
 // 不把加密的行一次全读进内存
 export async function prepareMasterKey(db: Db, masterKey: MasterKey | null): Promise<void> {
+  await inspectMasterKey(db, masterKey, true)
+}
+
+// 按启动检查的规则核对主密钥，但不补标识、不写库：服务运行时命令行工具（例如备份）用
+export async function checkMasterKey(db: Db, masterKey: MasterKey | null): Promise<void> {
+  await inspectMasterKey(db, masterKey, false)
+}
+
+async function inspectMasterKey(db: Db, masterKey: MasterKey | null, fill: boolean): Promise<void> {
   const ring = masterKey ? keyringOf(masterKey) : null
   const known = ring ? knownIds(ring) : []
   const problems = new Map<string, number>()
@@ -117,7 +126,7 @@ export async function prepareMasterKey(db: Db, masterKey: MasterKey | null): Pro
           for (const row of batch) {
             const id = identify(ring, row.wrappedKey!, aad(row.id))
             if (!id) problem(label)
-            else await tx.update(table).set({ keyId: id }).where(eq(table.id, row.id))
+            else if (fill) await tx.update(table).set({ keyId: id }).where(eq(table.id, row.id))
           }
           return batch
         })
@@ -129,6 +138,12 @@ export async function prepareMasterKey(db: Db, masterKey: MasterKey | null): Pro
   const settingsLabel = '实例设置里的接口 Key'
   if (!ring) {
     problem(settingsLabel, (await sealedSettingsKeys(db)).length)
+  } else if (!fill) {
+    for (const { sealed, aad, keyId } of await sealedSettingsKeys(db)) {
+      if (keyId ? !known.includes(keyId) : !identify(ring, sealed.wrappedKey, aad)) {
+        problem(settingsLabel)
+      }
+    }
   } else {
     await mapSettingsKeys(db, (sealed, aad) => {
       if (sealed.keyId) {
