@@ -5,10 +5,17 @@ import {
   ExtractionBudget,
   ExtractionUsage,
   MemberInfo,
+  SPACE_EXPORT_MAX_BYTES,
+  SpaceExportRequest,
+  SpaceImportForm,
+  SpaceImportResult,
 } from '@kioku/contracts'
 import { asc, eq } from 'drizzle-orm'
+import { bodyLimit } from 'hono/body-limit'
 
-import { memberRole } from '../auth/middleware'
+import { memberRole, requireInstanceAdmin } from '../auth/middleware'
+import { exportSpace } from '../backup/spaceExport'
+import { importSpace } from '../backup/spaceImport'
 import { accounts, spaceMembers, spaces } from '../db/schema'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { Deps } from '../http/env'
@@ -70,9 +77,97 @@ const members = createRoute({
   responses: { 200: jsonResponse('成员列表', z.array(MemberInfo)), 403: forbidden },
 })
 
+const exportRoute = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/export',
+  tags: ['console'],
+  summary:
+    '导出这个空间（只有空间 owner）：共享的内容加上自己的画像、私人层与凭据，用口令加密成一个文件，可以导入到另一个实例的新空间',
+  request: { params, body: jsonBody(SpaceExportRequest) },
+  responses: {
+    200: {
+      description: '导出文件',
+      content: {
+        'application/octet-stream': {
+          schema: z.string().meta({ type: 'string', format: 'binary' }),
+        },
+      },
+    },
+    400: jsonResponse('导出不了（例如超过导入的大小上限）', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+// 导入要先确认是实例管理员、再看大小，最后才读表单：别人上传的大文件不读进内存。
+// 上限按文件算，表单里的口令、名字与分隔行另外留一点余量
+function importRoute(deps: Deps) {
+  return createRoute({
+    method: 'post',
+    path: '/spaces/import',
+    tags: ['console'],
+    summary:
+      '把导出文件导入成一个新空间（只有实例管理员），导入人是新空间的 owner；Key 不在文件里，要重新签发',
+    middleware: [
+      requireInstanceAdmin(deps, '只有实例管理员能导入空间'),
+      bodyLimit({
+        maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
+        onError: (c) =>
+          c.json({ error: `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
+      }),
+    ] as const,
+    request: {
+      body: { required: true, content: { 'multipart/form-data': { schema: SpaceImportForm } } },
+    },
+    responses: {
+      201: jsonResponse('已导入', SpaceImportResult),
+      400: jsonResponse('导入不了（口令不对、文件被改过、没配主密钥等）', ErrorResponse),
+      403: forbidden,
+      413: jsonResponse('文件太大', ErrorResponse),
+    },
+  })
+}
+
+// 下载的文件名：空间名加导出时间（UTC）。空间名里放不进文件名的字符换成 _，另给一个只有 ASCII 的备用名
+function attachment(spaceName: string, createdAt: string): string {
+  const stamp = createdAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
+  const safe = spaceName.replace(/[\\/:*?"<>|\p{Cc}\p{Cf}]/gu, '_').trim() || 'space'
+  const fallback = `kioku-space-${stamp}.kioku-space`
+  return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(`${safe}-${stamp}.kioku-space`)}`
+}
+
 // 空间级的设置。spaces 是身份表，不在 RLS 里，按成员关系自己检查权限
 export function spaceRoutes(deps: Deps) {
   return router()
+    .openapi(exportRoute, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const accountId = c.get('console').accountId
+      const role = await memberRole(deps, spaceId, accountId)
+      if (!role) return c.json({ error: '不是该空间成员' }, 403)
+      // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
+      if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
+      const exported = await exportSpace(deps.db, deps.masterKey, {
+        spaceId,
+        accountId,
+        passphrase: c.req.valid('json').passphrase,
+      })
+      return c.body(new Uint8Array(exported.file), 200, {
+        'content-type': 'application/octet-stream',
+        'content-disposition': attachment(exported.spaceName, exported.createdAt),
+        'cache-control': 'no-store',
+      })
+    })
+    .openapi(importRoute(deps), async (c) => {
+      const form = c.req.valid('form')
+      const result = await importSpace(deps.db, deps.masterKey, {
+        accountId: c.get('console').accountId,
+        file: Buffer.from(await form.file.arrayBuffer()),
+        passphrase: form.passphrase,
+        name: form.name,
+      })
+      // 向量不在文件里，按这个实例的嵌入设置重新生成
+      void deps.jobs?.enqueueBackfill()
+      return c.json(result, 201)
+    })
     .openapi(members, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {

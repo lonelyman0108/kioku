@@ -1,5 +1,5 @@
 import { DEFAULT_RECALL_RETENTION_DAYS, RecallSettings } from '@kioku/contracts'
-import { inArray, sql } from 'drizzle-orm'
+import { eq, inArray, sql } from 'drizzle-orm'
 
 import { withSpace, type Db } from '../db/client'
 import { recallEvents, settings, spaces } from '../db/schema'
@@ -12,20 +12,29 @@ export async function loadRecallSettings(db: Db): Promise<RecallSettings> {
 }
 
 // 召回设置与开始记录召回事件的时间，一次查出。开始记录的时间由 0015 迁移写入；这一行缺了或读不出日期时
-// 当作刚开始记录：宁可暂时不列「从没被召回」，也不把之前没机会被记下召回的旧记忆一下子全算进来
+// 当作刚开始记录：宁可暂时不列「从没被召回」，也不把之前没机会被记下召回的旧记忆一下子全算进来。
+// 给了空间时，空间建立之前不算开始记录：从别的实例导入的空间保留着记忆原来的建立时间，召回统计却没有带过来
 export async function loadRecallWindow(
   db: Db,
+  spaceId?: string,
 ): Promise<{ settings: RecallSettings; recordingSince: Date }> {
-  const rows = await db
-    .select()
-    .from(settings)
-    .where(inArray(settings.key, [KEY, STARTED_KEY]))
+  const [rows, space] = await Promise.all([
+    db
+      .select()
+      .from(settings)
+      .where(inArray(settings.key, [KEY, STARTED_KEY])),
+    spaceId
+      ? db.select({ createdAt: spaces.createdAt }).from(spaces).where(eq(spaces.id, spaceId))
+      : [],
+  ])
   const stored = RecallSettings.safeParse(rows.find((r) => r.key === KEY)?.value)
   const started = rows.find((r) => r.key === STARTED_KEY)?.value
   const since = typeof started === 'string' ? new Date(started) : null
+  const recording = since && !Number.isNaN(since.getTime()) ? since : new Date()
+  const created = space[0]?.createdAt
   return {
     settings: stored.success ? stored.data : { retentionDays: DEFAULT_RECALL_RETENTION_DAYS },
-    recordingSince: since && !Number.isNaN(since.getTime()) ? since : new Date(),
+    recordingSince: created && created > recording ? created : recording,
   }
 }
 

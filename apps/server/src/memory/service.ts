@@ -247,8 +247,9 @@ function parse(uri: string): ParsedUri {
 }
 
 // 事件快照里不放密文、数据密钥和全文检索向量（向量里有正文分词）。secret 的正文本来就是 null；
-// 改成 secret 时，之前快照里的明文由 scrubHistory 统一抹掉（包括本次事件的「改前」快照）
-function snapshot(row: MemoryRow, glossary: string[]) {
+// 改成 secret 时，之前快照里的明文由 scrubHistory 统一抹掉（包括本次事件的「改前」快照）。
+// 空间的导入也用它记导入事件，快照的形状和别的写入一致
+export function snapshot(row: MemoryRow, glossary: string[]) {
   const rest: Partial<MemoryRow> = { ...row }
   delete rest.ciphertext
   delete rest.wrappedKey

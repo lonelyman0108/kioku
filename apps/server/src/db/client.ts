@@ -37,6 +37,11 @@ export function pgErrorCode(err: unknown): string | undefined {
   return pgError(err).code
 }
 
+// 违反的是哪一条约束（唯一、外键、检查约束），数据库没给出时为 undefined
+export function pgConstraint(err: unknown): string | undefined {
+  return pgError(err).constraint_name
+}
+
 // 违反了指定的唯一约束
 export function isUniqueViolation(err: unknown, constraint: string): boolean {
   const pg = pgError(err)
