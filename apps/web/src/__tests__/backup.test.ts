@@ -1,6 +1,6 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { backupNotice, defaultHour, errorKind, formatBytes, hourLabel } from '../backup'
+import { backupNotice, classifyError, defaultHour, formatBytes, hourLabel } from '../backup'
 
 describe('备份的显示', () => {
   // 在有夏令时的时区里核对：UTC 钟点与本地钟点的换算要按当天，固定用冬天的日期夏天就差一小时
@@ -16,7 +16,13 @@ describe('备份的显示', () => {
   it('钟点同时给出 UTC 与本地时间，大小按单位换算', () => {
     expect(hourLabel(3)).toMatch(/^03:00 UTC（本地 \d{2}:\d{2}）$/)
     // 本地的零点写成 00:00，不会是 24:00；默认的钟点换回本地正好是凌晨 3 点（夏天冬天都按当天换算）
-    for (const day of [new Date('2026-01-15T12:00:00Z'), new Date('2026-07-15T12:00:00Z')]) {
+    // 冬天、夏天，以及夏令时结束前一晚的 21 点（那时 UTC 已经是第二天）
+    const days = [
+      new Date('2026-01-15T12:00:00Z'),
+      new Date('2026-07-15T12:00:00Z'),
+      new Date('2026-11-01T01:00:00Z'),
+    ]
+    for (const day of days) {
       for (let hour = 0; hour < 24; hour++) expect(hourLabel(hour, day)).not.toContain('24:')
       expect(hourLabel(defaultHour(day), day)).toContain('本地 03:00')
     }
@@ -38,10 +44,11 @@ describe('概览里的备份提醒', () => {
   })
 
   it('最近的错误比最近一份晚是没做成，同时记下的是提醒', () => {
-    expect(errorKind(null, null)).toBeNull()
-    expect(errorKind(null, { at: hoursAgo(1) })).toBe('error')
-    expect(errorKind(hoursAgo(6), { at: hoursAgo(1) })).toBe('error')
-    expect(errorKind(hoursAgo(6), { at: hoursAgo(6) })).toBe('warning')
+    const failed = { at: hoursAgo(1) }
+    expect(classifyError(null, null)).toBeNull()
+    expect(classifyError(null, failed)).toEqual({ kind: 'error', error: failed })
+    expect(classifyError(hoursAgo(6), failed)?.kind).toBe('error')
+    expect(classifyError(hoursAgo(6), { at: hoursAgo(6) })?.kind).toBe('warning')
   })
 
   it('不是实例管理员、或者一切正常时不提醒', () => {

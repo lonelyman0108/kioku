@@ -206,6 +206,14 @@ export type BackupObjectList = z.infer<typeof BackupObjectList>
 export const BackupTestResult = z.object({ ok: z.boolean(), error: z.string().nullable() })
 export type BackupTestResult = z.infer<typeof BackupTestResult>
 
-// 立即备份排上队的时间（服务器时间）：之后开始的那一次有了结果，最近一次成功或出错的时间就不早于它
-export const BackupQueued = z.object({ queuedAt: z.string() })
+// 立即备份排进后台任务后的编号：管理界面按它查这一次做得怎么样
+export const BackupQueued = z.object({ runId: z.string() })
 export type BackupQueued = z.infer<typeof BackupQueued>
+
+// 一次立即备份的状态：排着、正在做、做完了。做完了的结果：做成、没做成（原因见设置里的最近错误）、
+// 没做（开始时设置已经清掉）
+export const BackupRunStatus = z.object({
+  state: z.enum(['queued', 'running', 'finished']),
+  outcome: z.enum(['done', 'failed', 'skipped']).nullable(),
+})
+export type BackupRunStatus = z.infer<typeof BackupRunStatus>

@@ -89,7 +89,7 @@ export function recordBackupSuccess(
   }))
 }
 
-// at 是这次备份开始的时间（和成功时记的一样），管理界面据此认出是不是自己排的那一次
+// at 是这次备份开始的时间：比最近一份成功晚，就是那之后的一次没做成；和那份成功同时记下的才是做成之后的提醒
 export function recordBackupError(
   db: Db,
   location: Location,

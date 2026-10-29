@@ -3,6 +3,7 @@ import {
   AppInfo,
   BackupObjectList,
   BackupQueued,
+  BackupRunStatus,
   BackupSettingsView,
   BackupTestResult,
   BootPreview,
@@ -315,5 +316,7 @@ export const api = {
   clearBackupSettings: () => request('DELETE', '/settings/backup'),
   testBackup: () => request('POST', '/settings/backup/test', { schema: BackupTestResult }),
   runBackup: () => request('POST', '/settings/backup/run', { schema: BackupQueued }),
+  backupRun: (runId: string) =>
+    request('GET', `/settings/backup/runs/${runId}`, { schema: BackupRunStatus }),
   backupObjects: () => request('GET', '/settings/backup/objects', { schema: BackupObjectList }),
 }

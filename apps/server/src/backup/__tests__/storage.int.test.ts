@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
@@ -16,7 +16,7 @@ import { checkMasterKey, rotateMasterKey } from '../../crypto/rotation'
 import type { Database } from '../../db/client'
 import { settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import type { Jobs } from '../../jobs/queue'
+import { startJobs, type Jobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { startFakeS3Server, type FakeS3Server } from '../../testing/fakeS3Server'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -47,7 +47,12 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     enqueueBackfill: async () => true,
     enqueueSwitch: async () => true,
     enqueuePrune: async () => true,
-    enqueueBackup: async () => (queued.push('backup'), true),
+    enqueueBackup: async () => {
+      const id = randomUUID()
+      queued.push(id)
+      return id
+    },
+    backupRun: async (id) => (queued.includes(id) ? { state: 'queued', outcome: null } : null),
   }
 
   beforeAll(async () => {
@@ -172,16 +177,19 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
 
     const run = await send('POST', '/run')
     expect(run.status).toBe(202)
-    // 排上队的服务器时间：管理界面等的是那之后开始的那一次
-    const { queuedAt } = (await run.json()) as { queuedAt: string }
-    expect(Date.parse(queuedAt)).toBeLessThanOrEqual(Date.now())
-    expect(queued).toEqual(['backup'])
+    // 返回任务编号，按编号查这一次的状态
+    const { runId } = (await run.json()) as { runId: string }
+    expect(queued).toEqual([runId])
+    expect(await (await send('GET', `/runs/${runId}`)).json()).toEqual({
+      state: 'queued',
+      outcome: null,
+    })
+    expect((await send('GET', `/runs/${randomUUID()}`)).status).toBe(404)
     expect(await backupJob(database.db, masterKey, true)).toBe('done')
 
     const status = await loadBackupStatus(database.db)
     expect(status.lastError).toBeNull()
     const made = status.lastSuccess!
-    expect(made.at >= queuedAt).toBe(true)
     expect(made.object).toMatch(/^kioku\/kioku-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.backup$/)
     expect(keys()).toEqual([
       `kioku-test/kioku/kioku-2026-01-02T00-00-00Z.backup`,
@@ -358,6 +366,37 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     })
     const member = await addMember(database.db, ws.spaceId, 'bob', 'owner')
     expect(await overview(member.cookie)).toBeNull()
+  })
+
+  it('真实的后台任务：立即备份按编号查得到状态与结果', { timeout: 30_000 }, async () => {
+    const real = await startJobs({
+      connectionString: testDatabaseUrl!,
+      db: database.db,
+      embedder: staticEmbedderSource(null),
+      masterKey,
+    })
+    const finished = async (id: string) => {
+      for (let i = 0; i < 100; i++) {
+        const status = await real.backupRun(id)
+        if (status?.state === 'finished') return status
+        await new Promise((resolve) => setTimeout(resolve, 100))
+      }
+      throw new Error('立即备份没有做完')
+    }
+    try {
+      await save()
+      const id = await real.enqueueBackup()
+      expect(id).toBeTruthy()
+      expect(await finished(id!)).toEqual({ state: 'finished', outcome: 'done' })
+      expect((await loadBackupStatus(database.db)).lastSuccess).not.toBeNull()
+      // 设置清掉之后才轮到的：没做
+      expect((await send('DELETE', '')).status).toBe(204)
+      const skipped = await real.enqueueBackup()
+      expect(await finished(skipped!)).toEqual({ state: 'finished', outcome: 'skipped' })
+      expect(await real.backupRun(randomUUID())).toBeNull()
+    } finally {
+      await real.stop()
+    }
   })
 
   it('测试连通：放一个小文件、列一遍再删掉；出错时说清原因', async () => {

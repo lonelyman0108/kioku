@@ -1,8 +1,16 @@
 import type { OverviewBackup } from '@kioku/contracts'
 
-// 每天几点（UTC）做备份：选项里同时给出浏览器所在时区的钟点。按今天换算，夏令时的地区也对得上
+// UTC 钟点与本地钟点按今天换算，夏令时的地区也对得上。两个方向都从本地今天中午出发，落在同一天，
+// 夜里快到夏令时切换时也不会一个按今天、一个按明天
+const noonOf = (today: Date) => {
+  const noon = new Date(today)
+  noon.setHours(12, 0, 0, 0)
+  return noon
+}
+
+// 每天几点（UTC）做备份：选项里同时给出浏览器所在时区的钟点
 export function hourLabel(hour: number, today: Date = new Date()): string {
-  const at = new Date(today)
+  const at = noonOf(today)
   at.setUTCHours(hour, 0, 0, 0)
   const local = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
   return `${String(hour).padStart(2, '0')}:00 UTC（本地 ${local}）`
@@ -10,7 +18,7 @@ export function hourLabel(hour: number, today: Date = new Date()): string {
 
 // 没设置过时默认本地凌晨 3 点：换成 UTC 的钟点
 export function defaultHour(today: Date = new Date()): number {
-  const at = new Date(today)
+  const at = noonOf(today)
   at.setHours(3, 0, 0, 0)
   return at.getUTCHours()
 }
@@ -26,12 +34,13 @@ export function formatBytes(bytes: number): string {
 const STALE_MS = 2 * 24 * 3600_000
 
 // 最近的错误是没做成（比最近一份成功晚），还是做成之后的提醒（和那份成功同时记下）
-export function errorKind(
+export function classifyError<E extends { at: string }>(
   lastSuccessAt: string | null,
-  lastError: { at: string } | null,
-): 'error' | 'warning' | null {
+  lastError: E | null,
+): { kind: 'error' | 'warning'; error: E } | null {
   if (!lastError) return null
-  return lastSuccessAt && lastError.at <= lastSuccessAt ? 'warning' : 'error'
+  const kind = lastSuccessAt && lastError.at <= lastSuccessAt ? 'warning' : 'error'
+  return { kind, error: lastError }
 }
 
 export interface BackupNotice {
@@ -54,13 +63,13 @@ export function backupNotice(
         '数据只在这台服务器的数据库里。在实例设置里配一个兼容S3的对象存储，每天自动加密备份。',
     }
   }
-  const { lastSuccessAt, lastError } = backup
-  const kind = errorKind(lastSuccessAt, lastError)
-  if (kind === 'error') {
+  const { lastSuccessAt } = backup
+  const problem = classifyError(lastSuccessAt, backup.lastError)
+  if (problem?.kind === 'error') {
     return {
       color: 'error',
       title: '备份没做成',
-      description: `${lastError!.message}。下一个小时会再试，详情见实例设置。`,
+      description: `${problem.error.message}。下一个小时会再试，详情见实例设置。`,
     }
   }
   if (!lastSuccessAt) {
@@ -79,8 +88,8 @@ export function backupNotice(
     }
   }
   // 做成之后的提醒（例如删旧备份出错）：好几天没有新的一份时先说那个
-  if (kind === 'warning') {
-    return { color: 'warning', title: '备份做成了，但有提醒', description: lastError!.message }
+  if (problem?.kind === 'warning') {
+    return { color: 'warning', title: '备份做成了，但有提醒', description: problem.error.message }
   }
   return null
 }
