@@ -15,7 +15,7 @@ import { prepareMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { lastMigration, pendingMigrations, runMigrations } from '../../db/migrate'
 import {
-  dreamCursors,
+  dreamMarks,
   dreamRuns,
   dreamSuggestions,
   extractionRuns,
@@ -241,7 +241,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         model: 'm',
         added: 1,
       })
-      // Dream 的运行记录、一条拒绝过的建议（指纹要跟着恢复，不然同样的建议会再提）与整理到的位置
+      // Dream 的运行记录、一条拒绝过的建议（指纹要跟着恢复，不然同样的建议会再提）与整理过的标记
       const scope = `private:${ws.accountId}`
       await tx.insert(dreamRuns).values({
         spaceId: ws.spaceId,
@@ -268,13 +268,9 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         decidedBy: ws.accountId,
         decidedAt: new Date(),
       })
-      await tx.insert(dreamCursors).values({
-        spaceId: ws.spaceId,
-        scope,
-        ownerAccountId: ws.accountId,
-        at: new Date(),
-        lastId: nas.id,
-      })
+      await tx
+        .insert(dreamMarks)
+        .values({ spaceId: ws.spaceId, memoryId: nas.id, version: nas.version })
     })
 
     for (const [path, body] of [

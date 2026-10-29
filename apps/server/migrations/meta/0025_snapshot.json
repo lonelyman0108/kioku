@@ -1,5 +1,5 @@
 {
-  "id": "793f3d78-4ec8-465d-af90-445372e3c520",
+  "id": "eec62656-b5bc-4610-8702-9fe9802d093a",
   "prevId": "3551688d-b667-44da-a63d-1085809f1653",
   "version": "7",
   "dialect": "postgresql",
@@ -1055,82 +1055,51 @@
       },
       "isRLSEnabled": false
     },
-    "public.dream_cursors": {
-      "name": "dream_cursors",
+    "public.dream_marks": {
+      "name": "dream_marks",
       "schema": "",
       "columns": {
+        "memory_id": {
+          "name": "memory_id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true
+        },
         "space_id": {
           "name": "space_id",
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
         },
-        "scope": {
-          "name": "scope",
-          "type": "text",
+        "version": {
+          "name": "version",
+          "type": "integer",
           "primaryKey": false,
           "notNull": true
-        },
-        "owner_account_id": {
-          "name": "owner_account_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": false
-        },
-        "at": {
-          "name": "at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "last_id": {
-          "name": "last_id",
-          "type": "uuid",
-          "primaryKey": false,
-          "notNull": true
-        },
-        "seen": {
-          "name": "seen",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
-        },
-        "updated_at": {
-          "name": "updated_at",
-          "type": "timestamp with time zone",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "now()"
         }
       },
       "indexes": {},
       "foreignKeys": {
-        "dream_cursors_space_id_spaces_id_fk": {
-          "name": "dream_cursors_space_id_spaces_id_fk",
-          "tableFrom": "dream_cursors",
+        "dream_marks_space_id_spaces_id_fk": {
+          "name": "dream_marks_space_id_spaces_id_fk",
+          "tableFrom": "dream_marks",
           "tableTo": "spaces",
           "columnsFrom": ["space_id"],
           "columnsTo": ["id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         },
-        "dream_cursors_owner_account_id_accounts_id_fk": {
-          "name": "dream_cursors_owner_account_id_accounts_id_fk",
-          "tableFrom": "dream_cursors",
-          "tableTo": "accounts",
-          "columnsFrom": ["owner_account_id"],
-          "columnsTo": ["id"],
+        "dream_marks_memory_fk": {
+          "name": "dream_marks_memory_fk",
+          "tableFrom": "dream_marks",
+          "tableTo": "memories",
+          "columnsFrom": ["space_id", "memory_id"],
+          "columnsTo": ["space_id", "id"],
           "onDelete": "cascade",
           "onUpdate": "no action"
         }
       },
-      "compositePrimaryKeys": {
-        "dream_cursors_space_id_scope_pk": {
-          "name": "dream_cursors_space_id_scope_pk",
-          "columns": ["space_id", "scope"]
-        }
-      },
+      "compositePrimaryKeys": {},
       "uniqueConstraints": {},
       "policies": {},
       "checkConstraints": {},

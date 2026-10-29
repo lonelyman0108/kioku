@@ -9,20 +9,13 @@ import {
   type DreamSuggestionKind,
   type DreamTrigger,
 } from '@kioku/contracts'
-import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm'
 
-import {
-  looksLikePlaintextCredential,
-  maskPlaintextCredentials,
-  mentionsPlaceholder,
-  placeholderIdentifiers,
-  scanPlaceholders,
-} from '../credential/placeholders'
+import { maskPlaintextCredentials, mentionsPlaceholder } from '../credential/placeholders'
 import type { MasterKey } from '../crypto/keyring'
 import { withSpace, type Db, type Tx } from '../db/client'
-import { fromMicros, microsOf } from '../db/paging'
 import {
-  dreamCursors,
+  dreamMarks,
   dreamRuns,
   dreamSuggestions,
   memories,
@@ -53,7 +46,13 @@ import {
   type DreamPromptItem,
   type DreamPromptScope,
 } from './dreamPrompt'
-import { MAX_FACT_CHARS } from './extract'
+import {
+  DISCLOSURE_CHARS,
+  disclosureProblem,
+  draftProblem,
+  factProblem,
+  mergedNodeProblem,
+} from './dreamText'
 import { openAiChatModel, type ChatModel } from './provider'
 import { loadExtractionConfig } from './settings'
 
@@ -74,12 +73,9 @@ const FACT_CHARS = 300
 // 每条新增或改动的策展记忆找几条近邻；每个对象带几条别的事实
 const NEIGHBORS_EACH = 3
 const FACT_NEIGHBORS_EACH = 6
-// 模型的输出：一次最多收这么多条建议；合并后的正文、提炼的草稿、理由、disclosure 的长度上限
+// 模型的输出：一次最多收这么多条建议；理由的长度上限（要写进记忆的文字的规则见 dreamText.ts）
 const MAX_SUGGESTIONS = 20
-const MERGED_NODE_CHARS = 6_000
-const DRAFT_CHARS = 2_000
 const REASON_CHARS = 200
-const DISCLOSURE_CHARS = 200
 
 // 服务端自己判断出的出错原因，不带模型接口或数据库的原文，所有成员都看得到
 const PLAIN_ERRORS = new Set([DREAM_PARSE_ERROR])
@@ -127,7 +123,8 @@ type RunFields = Omit<
 // 整理一个空间：没配抽取模型、本月的预算用完了、上次以来没有新增或改动的内容时不整理，记下原因。
 // 否则按范围逐个请求模型，同一个范围没看完的排到后面再来，请求次数或用量到了上限就停，剩下的下次接着整理。
 // 中途出了没料到的错（例如抽取模型的 Key 解不开、读库出错）也记一条运行记录写明原因：当天就算整理过，
-// 每小时的检查不会接着一遍遍再排；连这一条都写不进去时，只能交给下一个小时
+// 每小时的检查不会接着一遍遍再排。连这一条都写不进去时，两个错误都记进日志，原来的错误照样抛出去，
+// 由后台任务记下这次失败；没有运行记录，下一个小时会再排
 export async function dreamSpace(
   db: Db,
   masterKey: MasterKey | null,
@@ -136,9 +133,15 @@ export async function dreamSpace(
   try {
     return await dreamOnce(db, masterKey, options)
   } catch (err) {
-    await withSpace(db, options.spaceId, (tx) =>
-      recordRun(tx, options, { error: `整理出错：${messageOf(err)}` }),
-    ).catch(() => {})
+    try {
+      await withSpace(db, options.spaceId, (tx) =>
+        recordRun(tx, options, { error: `整理出错：${messageOf(err)}` }),
+      )
+    } catch (recordErr) {
+      console.error('Dream 整理出错', err)
+      console.error('Dream 的运行记录也写不进去', recordErr)
+      throw err
+    }
     return { outcome: 'failed', reason: null }
   }
 }
@@ -212,7 +215,13 @@ interface PendingScope {
   owner: string | null
 }
 
-// 上次以来有新增或改动的范围，上次整理得早的（从没整理过的最先）排在前面
+// 这次要看的记忆：没整理过的，或者整理之后改过的（标记记着整理时的版本，和现在的不一样）。不看更新时间：
+// 导入的记忆带着原来的更新时间，写了很久才提交的写入更新时间也早，按时间推进的位置会把它们漏掉
+const UNMARKED = sql`not exists (
+  select 1 from ${dreamMarks}
+  where ${dreamMarks.memoryId} = ${memories.id} and ${dreamMarks.version} = ${memories.version})`
+
+// 有要看的记忆的范围，上次整理得早的（从没整理过、记录已经清掉的最先）排在前面
 async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
   const members = new Set(
     (
@@ -222,20 +231,17 @@ async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
         .where(eq(spaceMembers.spaceId, spaceId))
     ).map((m) => m.id),
   )
-  // 和 loadBatch 取记忆的条件相同（见 unseen）：排在游标之后、又不是 seen 里记下的那一版
   const rows = await withSpace(db, spaceId, (tx) =>
     tx.execute<{ scope: string }>(sql`
-      with live as (
-        select ${DREAM_SCOPE_KEY} as scope, ${memories.updatedAt} as updated_at, ${memories.id} as id,
-          ${memories.version} as version
-        from ${memories} where ${CANDIDATE}
+      with pending as (
+        select distinct ${DREAM_SCOPE_KEY} as scope from ${memories} where ${CANDIDATE} and ${UNMARKED}
+      ), last as (
+        select ${dreamRuns.scope} as scope, max(${dreamRuns.createdAt}) as at from ${dreamRuns}
+        where ${dreamRuns.scope} is not null group by ${dreamRuns.scope}
       )
-      select live.scope from live
-      left join ${dreamCursors} c on c.scope = live.scope
-      where c.scope is null or ((live.updated_at, live.id) > (c.at, c.last_id)
-        and (c.seen -> live.id::text ->> 0) is distinct from live.version::text)
-      group by live.scope, c.at
-      order by c.at nulls first, live.scope`),
+      select pending.scope from pending
+      left join last on last.scope = pending.scope
+      order by last.at nulls first, pending.scope`),
   )
   return rows.flatMap(({ scope: key }) => {
     const scope = parseDreamScope(key)
@@ -249,130 +255,46 @@ async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
 // 给模型看的一条记忆
 interface Picked {
   row: MemoryRow
-  // 更新时间的微秒数：游标按它记，经过 JS 的 Date 会丢掉微秒
-  micros: string
   fresh: boolean
   truncated: boolean
   content: string
 }
 
-function pick(row: MemoryRow, micros: string, fresh: boolean): Picked {
+function pick(row: MemoryRow, fresh: boolean): Picked {
   const content = row.content ?? ''
   const chars = [...content]
   const max = row.form === 'curated' ? NODE_CHARS : FACT_CHARS
   const truncated = chars.length > max
-  return {
-    row,
-    micros,
-    fresh,
-    truncated,
-    content: truncated ? chars.slice(0, max).join('') : content,
-  }
+  return { row, fresh, truncated, content: truncated ? chars.slice(0, max).join('') : content }
 }
 
-const MICROS = sql<string>`${microsOf(memories.updatedAt)}::text`
-
-// ---- 游标 ----
-// 位置是（更新时间的微秒数, id），按这个顺序整理。更新时间是写入提交之前取的：时间早、提交晚的写入会排在已经整理过的位置前面，
-// 所以位置最多推进到读取时刻往前 SETTLE 的那一刻（那之前更新的都已经提交，读得到），这之后整理过的记在 seen 里，
-// 下次照样从位置往后取、跳过 seen 里的那一版。这样晚提交的照样看得到，整理过、没改过的也不会再给模型看
-const SETTLE = sql`interval '5 minutes'`
-const MIN_UUID = '00000000-0000-0000-0000-000000000000'
-
-interface Position {
-  micros: string
-  id: string
-}
-
-interface Cursor extends Position {
-  seen: Record<string, [number, string]>
-}
-
-const isBefore = (a: Position, b: Position) => {
-  const x = BigInt(a.micros)
-  const y = BigInt(b.micros)
-  return x < y || (x === y && a.id < b.id)
-}
-
-// 排在游标之后、又不是 seen 里记下的那一版
-function unseen(cursor: Cursor | null): SQL | undefined {
-  if (!cursor) return undefined
-  return sql`((${memories.updatedAt}, ${memories.id}) > (${fromMicros(cursor.micros)}, ${cursor.id}::uuid)
-    and (${JSON.stringify(cursor.seen)}::jsonb -> ${memories.id}::text ->> 0) is distinct from ${memories.version}::text)`
-}
-
-// 整理完一批之后的游标：位置推进到这一批的最后一条，但不越过读取时刻往前 SETTLE 的那一刻（settled），也不往回退；
-// 位置之后整理过的（以前记下的与这一批的）记进 seen
-export function nextCursor(
-  previous: Cursor | null,
-  batch: readonly { id: string; version: number; micros: string }[],
-  settled: string,
-): Cursor {
-  const last = batch.at(-1)!
-  const cap: Position = { micros: settled, id: MIN_UUID }
-  let position: Position = isBefore({ micros: last.micros, id: last.id }, cap)
-    ? { micros: last.micros, id: last.id }
-    : cap
-  if (previous && isBefore(position, previous))
-    position = { micros: previous.micros, id: previous.id }
-  const seen: Cursor['seen'] = {}
-  const entries: [string, number, string][] = [
-    ...Object.entries(previous?.seen ?? {}).map(
-      ([id, [version, micros]]) => [id, version, micros] as [string, number, string],
-    ),
-    ...batch.map((b) => [b.id, b.version, b.micros] as [string, number, string]),
-  ]
-  for (const [id, version, micros] of entries) {
-    if (isBefore(position, { micros, id })) seen[id] = [version, micros]
-  }
-  return { ...position, seen }
-}
-
-// 这一次给模型看的记忆：游标之后新增或改动的（按更新时间与 id，正文合计不超过上限），以及它们的近邻
+// 这一次给模型看的记忆：没整理过或整理之后改过的（按更新时间与 id，正文合计不超过上限），以及它们的近邻
 async function loadBatch(
   tx: Tx,
   pending: PendingScope,
   activeModel: string | null,
-): Promise<{
-  changed: Picked[]
-  neighbors: Picked[]
-  more: boolean
-  cursor: Cursor | null
-  settled: string
-}> {
+): Promise<{ changed: Picked[]; neighbors: Picked[]; more: boolean }> {
   const inScope = and(dreamScopeCondition(pending.scope), CANDIDATE)!
-  const [found] = await tx
-    .select({
-      micros: sql<string>`${microsOf(dreamCursors.at)}::text`,
-      id: dreamCursors.lastId,
-      seen: dreamCursors.seen,
-    })
-    .from(dreamCursors)
-    .where(eq(dreamCursors.scope, pending.key))
-  const cursor = found ?? null
-  const [clock] = await tx.execute<{ settled: string }>(
-    sql`select ${microsOf(sql`now() - ${SETTLE}`)}::text as settled`,
-  )
   const rows = await tx
-    .select({ row: memories, micros: MICROS })
+    .select()
     .from(memories)
-    .where(and(inScope, unseen(cursor)))
+    .where(and(inScope, UNMARKED))
     .orderBy(asc(memories.updatedAt), asc(memories.id))
     .limit(DREAM_CHANGED_PER_CALL + 1)
   let used = 0
   const changed: Picked[] = []
-  for (const { row, micros } of rows.slice(0, DREAM_CHANGED_PER_CALL)) {
-    const item = pick(row, micros, true)
+  for (const row of rows.slice(0, DREAM_CHANGED_PER_CALL)) {
+    const item = pick(row, true)
     if (changed.length && used + item.content.length > INPUT_CHARS) break
     used += item.content.length
     changed.push(item)
   }
   const seen = new Set(changed.map((c) => c.row.id))
   const neighbors: Picked[] = []
-  const add = (found: { row: MemoryRow; micros: string }[]) => {
-    for (const { row, micros } of found) {
+  const add = (found: MemoryRow[]) => {
+    for (const row of found) {
       if (seen.has(row.id) || neighbors.length >= NEIGHBORS_PER_CALL) continue
-      const item = pick(row, micros, false)
+      const item = pick(row, false)
       if (used + item.content.length > INPUT_CHARS) continue
       used += item.content.length
       seen.add(row.id)
@@ -386,7 +308,7 @@ async function loadBatch(
     ]
     if (subjectIds.length) {
       const others = await tx
-        .select({ row: memories, micros: MICROS })
+        .select()
         .from(memories)
         .where(
           and(
@@ -400,7 +322,7 @@ async function loadBatch(
         .orderBy(desc(memories.updatedAt), asc(memories.id))
         .limit(NEIGHBORS_PER_CALL * FACT_NEIGHBORS_EACH)
       for (const subjectId of subjectIds) {
-        add(others.filter((o) => o.row.subjectId === subjectId).slice(0, FACT_NEIGHBORS_EACH))
+        add(others.filter((o) => o.subjectId === subjectId).slice(0, FACT_NEIGHBORS_EACH))
       }
     }
   } else {
@@ -414,13 +336,7 @@ async function loadBatch(
       add(await nearby(tx, inScope, c.row, [...seen], activeModel))
     }
   }
-  return {
-    changed,
-    neighbors,
-    more: rows.length > changed.length,
-    cursor,
-    settled: clock!.settled,
-  }
+  return { changed, neighbors, more: rows.length > changed.length }
 }
 
 async function nearby(
@@ -429,7 +345,7 @@ async function nearby(
   row: MemoryRow,
   exclude: string[],
   activeModel: string | null,
-): Promise<{ row: MemoryRow; micros: string }[]> {
+): Promise<MemoryRow[]> {
   if (activeModel) {
     const [own] = await tx
       .select({ vector: sql<string>`${memoryEmbeddings.embedding}::text` })
@@ -437,7 +353,7 @@ async function nearby(
       .where(and(eq(memoryEmbeddings.memoryId, row.id), eq(memoryEmbeddings.model, activeModel)))
     if (own) {
       const found = await tx
-        .select({ row: memories, micros: MICROS })
+        .select({ row: memories })
         .from(memoryEmbeddings)
         .innerJoin(memories, eq(memories.id, memoryEmbeddings.memoryId))
         .where(
@@ -445,7 +361,7 @@ async function nearby(
         )
         .orderBy(sql`${memoryEmbeddings.embedding} <=> ${own.vector}::vector`)
         .limit(NEIGHBORS_EACH)
-      if (found.length) return found
+      if (found.length) return found.map((f) => f.row)
     }
   }
   const [lexemes] = await tx.execute<{ terms: string[] }>(
@@ -455,7 +371,7 @@ async function nearby(
   if (!terms.length) return []
   const query = sql`${anyTermQuery(terms)}::tsquery`
   return tx
-    .select({ row: memories, micros: MICROS })
+    .select()
     .from(memories)
     .where(and(inScope, sql`${memories.fts} @@ ${query}`, notInArray(memories.id, exclude)))
     .orderBy(desc(sql`ts_rank(${memories.fts}, ${query})`), asc(memories.id))
@@ -496,8 +412,8 @@ interface ScopeResult {
   failed: boolean
 }
 
-// 整理一个范围：读出这一次的记忆，请求模型，挑出合规的建议，在一个事务里存下建议、挪动游标、记一条运行记录。
-// 请求模型失败时只记原因、不挪游标（下次重来）；输出解析不了时记下原因与用量、挪动游标：
+// 整理一个范围：读出这一次的记忆，请求模型，挑出合规的建议，在一个事务里存下建议、给这一批记下整理过的版本、记一条运行记录。
+// 请求模型失败时只记原因、不记整理过（下次重来）；输出解析不了时记下原因与用量、记下整理过：
 // 同样的输入多半还是解析不了，重试只会白花 token。没有要看的记忆时（期间被删掉了）返回 null
 async function dreamScope(
   db: Db,
@@ -546,20 +462,12 @@ async function dreamScope(
   const owner = pending.owner
   const record = (tx: Tx, fields: RunFields) =>
     recordRun(tx, options, { scope: pending.key, ownerAccountId: owner, ...counts, ...fields })
-  const next = nextCursor(
-    batch.cursor,
-    batch.changed.map((c) => ({ id: c.row.id, version: c.row.version, micros: c.micros })),
-    batch.settled,
-  )
-  const position = { at: fromMicros(next.micros), lastId: next.id, seen: next.seen }
-  const advance = (tx: Tx) =>
+  // 这一批整理过了：记下每条当时的版本，之后没改过的不再给模型看。近邻只是对照，不记
+  const mark = (tx: Tx) =>
     tx
-      .insert(dreamCursors)
-      .values({ spaceId, scope: pending.key, ownerAccountId: owner, ...position })
-      .onConflictDoUpdate({
-        target: [dreamCursors.spaceId, dreamCursors.scope],
-        set: { ...position, updatedAt: new Date() },
-      })
+      .insert(dreamMarks)
+      .values(batch.changed.map((c) => ({ spaceId, memoryId: c.row.id, version: c.row.version })))
+      .onConflictDoUpdate({ target: dreamMarks.memoryId, set: { version: sql`excluded.version` } })
 
   let completion
   try {
@@ -583,7 +491,7 @@ async function dreamScope(
     candidates = parseDream(completion.content)
   } catch (err) {
     await withSpace(db, spaceId, async (tx) => {
-      await advance(tx)
+      await mark(tx)
       await record(tx, { ...usage, more: batch.more, error: (err as Error).message })
     })
     return { tokens, more: batch.more, failed: false }
@@ -615,7 +523,7 @@ async function dreamScope(
             })
             .returning({ id: dreamSuggestions.id })
         : []
-      await advance(tx)
+      await mark(tx)
       await record(tx, {
         ...usage,
         suggested: inserted.length,
@@ -625,7 +533,7 @@ async function dreamScope(
       })
     })
   } catch (err) {
-    // 整个事务已经回滚：单独记下原因，游标没动，下次重来
+    // 整个事务已经回滚：单独记下原因，这一批没记成整理过，下次重来
     await withSpace(db, spaceId, (tx) =>
       record(tx, { ...usage, error: `写入失败：${(err as Error).message}` }),
     )
@@ -659,18 +567,6 @@ export function suggestionFingerprint(
     .digest('hex')
 }
 
-// 像有明文凭据、或者带凭据占位符的文字：Dream 从记忆里生成的内容不能带进来
-const unsafe = (text: string) => looksLikePlaintextCredential(text) || mentionsPlaceholder(text)
-
-// 合并后的正文里的占位符只能是这几条记忆里本来就有的：Dream 不能新增凭据引用。格式不对的也不收
-function placeholdersFrom(content: string, rows: readonly MemoryRow[]): boolean {
-  const { refs, malformed } = scanPlaceholders(content)
-  if (malformed.length) return false
-  if (!refs.length) return true
-  const known = new Set(rows.flatMap((r) => [...placeholderIdentifiers(r.content ?? '')]))
-  return refs.every((ref) => known.has(ref.identifier))
-}
-
 // 理由压成一行、打码像明文凭据的片段、截到上限；带占位符的不收
 function cleanReason(reason: string): string | null {
   const text = maskPlaintextCredentials(oneLine(reason))
@@ -681,7 +577,7 @@ function cleanReason(reason: string): string | null {
 // 按规则检查模型给的一条建议，不合规就丢掉（返回 null）：只能引用这次给出的代号，至少涉及一条新增或改动的记忆；
 // 合并要求几条的敏感级与来源作用域都相同（合并到保留的那条之后，内容不会给到更宽的可见范围），事实还要是同一个对象的，
 // 正文给全了的才能合并；提炼只收事实；过时只收策展记忆与事实；审核只收不可信来源写进对象层与情节层的。
-// 正文与草稿像有明文凭据、或者带了这几条记忆里没有的凭据占位符时丢掉
+// 要写进记忆的文字和执行时过同一套检查（见 dreamText.ts），不合规就丢掉；disclosure 先截到上限，不合规的只去掉它
 function validate(
   candidate: DreamCandidate | null,
   byHandle: ReadonlyMap<string, Picked>,
@@ -727,16 +623,16 @@ function validate(
       if (talk) {
         if (!rows.every(isFact) || new Set(rows.map((r) => r.subjectId)).size !== 1) return null
         const content = oneLine(candidate.content)
-        if (!content || [...content].length > MAX_FACT_CHARS || unsafe(content)) return null
+        if (factProblem(content)) return null
         return proposal({ keepId: keep.row.id, content }, ordered)
       }
       if (!rows.every((r) => r.form === 'curated')) return null
       const content = candidate.content.trim()
       if (
-        !content ||
-        [...content].length > MERGED_NODE_CHARS ||
-        looksLikePlaintextCredential(content) ||
-        !placeholdersFrom(content, rows)
+        mergedNodeProblem(
+          content,
+          rows.map((r) => r.content),
+        )
       ) {
         return null
       }
@@ -749,14 +645,14 @@ function validate(
       // persona:// 与 app:// 下的层由 URI 决定，草稿默认放在执行的成员自己的私人层，不收这两种
       if (!match || layerForDomain(match[1]!)) return null
       const content = candidate.content.trim()
-      if (!content || [...content].length > DRAFT_CHARS || unsafe(content)) return null
+      if (draftProblem(content)) return null
       const disclosure = candidate.disclosure
         ? clipChars(oneLine(candidate.disclosure), DISCLOSURE_CHARS)
         : ''
       return proposal({
         uri,
         content,
-        disclosure: disclosure && !unsafe(disclosure) ? disclosure : null,
+        disclosure: disclosure && !disclosureProblem(disclosure) ? disclosure : null,
       })
     }
     case 'stale': {

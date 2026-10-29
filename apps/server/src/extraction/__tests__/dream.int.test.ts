@@ -8,12 +8,13 @@ import type {
   MemoryView,
 } from '@kioku/contracts'
 import { asc, eq, sql } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import postgres from 'postgres'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import {
-  dreamCursors,
+  dreamMarks,
   dreamRuns,
   dreamSuggestions,
   extractionRuns,
@@ -179,7 +180,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     )
   const runs = (spaceId = ws.spaceId) =>
     inSpace((tx) => tx.select().from(dreamRuns).orderBy(asc(dreamRuns.id)), spaceId)
-  const forget = () => inSpace((tx) => tx.delete(dreamCursors))
+  const forget = () => inSpace((tx) => tx.delete(dreamMarks))
 
   it('提出四种建议：策展记忆的合并与过时，事实的合并、提炼与过时，不可信内容的审核；每个范围请求一次', async () => {
     const a = await remember({ uri: 'core://style', content: '回答用中文', layer: 'base' })
@@ -534,7 +535,9 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     const { model, calls } = fakeChatModel(() => answer)
     await dream(model)
     expect(calls).toHaveLength(1)
-    expect(await inSpace((tx) => tx.select().from(dreamCursors))).toHaveLength(1)
+    // 三条都记下了整理时的版本
+    const marks = await inSpace((tx) => tx.select().from(dreamMarks))
+    expect(marks.map((m) => m.version)).toEqual([1, 1, 1])
 
     expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
     expect(calls).toHaveLength(1)
@@ -564,7 +567,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect((await runs()).at(-1)).toMatchObject({ changed: 1, considered: 2, dropped: 1 })
   })
 
-  it('一次最多看这么多条新增或改动的，剩下的同一次接着请求；游标停在看过的最后一条', async () => {
+  it('一次最多看这么多条新增或改动的，剩下的同一次接着请求；看过的都记下，下次不再看', async () => {
     await inSpace((tx) =>
       tx.insert(memories).values(
         Array.from({ length: DREAM_CHANGED_PER_CALL + 5 }, (_, i) => ({
@@ -726,7 +729,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     ])
   })
 
-  it('请求模型失败时记下原因、不挪游标，这次就停下；输出解析不了时记下原因与用量、挪游标', async () => {
+  it('请求模型失败时记下原因、不记整理过，这次就停下；输出解析不了时记下原因与用量、记下整理过', async () => {
     await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
     await remember({ uri: 'home://note', content: '自己的笔记' })
     const failing: ChatModel = {
@@ -739,7 +742,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect(await runs()).toMatchObject([
       { scope: 'base', error: '抽取模型返回 HTTP 502：bad gateway', promptTokens: 0 },
     ])
-    expect(await inSpace((tx) => tx.select().from(dreamCursors))).toEqual([])
+    expect(await inSpace((tx) => tx.select().from(dreamMarks))).toEqual([])
 
     const { model, calls } = fakeChatModel('今天没什么好整理的')
     expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
@@ -751,46 +754,62 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
   })
 
-  it('游标：时间戳早、提交晚的写入照样看得到；整理过、没改过的不再给模型看', async () => {
-    // 一小时前写下的：比读取时刻往前五分钟还早，游标可以越过它
-    await remember({ uri: 'core://old', content: '早就写下的', layer: 'base' })
-    await inSpace((tx) =>
-      tx
-        .update(memories)
-        .set({ updatedAt: sql`now() - interval '1 hour'` })
-        .where(eq(memories.path, 'old')),
-    )
-    const a = await remember({ uri: 'core://a', content: '刚写下的', layer: 'base' })
-    const { model, calls } = fakeChatModel(reply([]))
-    await dream(model)
-    expect(calls).toHaveLength(1)
-    // 位置停在读取时刻往前五分钟：越过了一小时前的那条，没越过刚写下的那条，它记在 seen 里
-    const [cursor] = await inSpace((tx) => tx.select().from(dreamCursors))
-    expect(Object.keys(cursor!.seen)).toEqual([a.id])
+  it('不按时间判断：写了很久才提交的、导入的（带着原来的更新时间）都会整理；整理过、没改过的不再给模型看', async () => {
+    await remember({ uri: 'core://a', content: '刚写下的', layer: 'base' })
+    // 另一条连接里写下一条、先不提交：更新时间是十分钟前（像是事务开始得早、过了很久才提交）
+    const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+    let commit!: () => void
+    const committed = new Promise<void>((resolve) => (commit = resolve))
+    try {
+      const late = side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`
+          insert into memories (space_id, form, layer, sensitivity, provenance, domain, path, content, updated_at)
+          values (${ws.spaceId}, 'curated', 'base', 'public', 'owner', 'core', 'late', '晚提交的',
+            now() - interval '10 minutes')`
+        await committed
+      })
+      const { model, calls } = fakeChatModel(reply([]))
+      const fresh = () =>
+        dreamLines(calls.at(-1)!)
+          .filter((l) => l.new)
+          .map((l) => l.content)
+      await dream(model)
+      expect(fresh()).toEqual(['刚写下的'])
+      commit()
+      await late
 
-    // 晚提交的写入：更新时间比刚整理过的那条还早一秒
-    const [row] = await inSpace((tx) => tx.select().from(memories).where(eq(memories.id, a.id)))
-    await inSpace((tx) =>
-      tx.insert(memories).values({
-        spaceId: ws.spaceId,
-        form: 'curated',
-        layer: 'base',
-        sensitivity: 'public',
-        provenance: 'owner',
-        domain: 'core',
-        path: 'late',
-        content: '晚提交的',
-        updatedAt: new Date(row!.updatedAt.getTime() - 1_000),
-      }),
-    )
-    await dream(model)
-    expect(calls).toHaveLength(2)
-    expect(
-      dreamLines(calls[1]!)
-        .filter((l) => l.new)
-        .map((l) => l.content),
-    ).toEqual(['晚提交的'])
-    expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+      // 提交之后，比整理过的那条早十分钟的这条照样看得到
+      await dream(model)
+      expect(calls).toHaveLength(2)
+      expect(fresh()).toEqual(['晚提交的'])
+
+      // 导入的记忆带着原来的更新时间（一年前）
+      await inSpace((tx) =>
+        tx.insert(memories).values({
+          spaceId: ws.spaceId,
+          form: 'curated',
+          layer: 'base',
+          sensitivity: 'public',
+          provenance: 'owner',
+          domain: 'core',
+          path: 'imported',
+          content: '导入的',
+          createdAt: new Date(Date.now() - 365 * 86_400_000),
+          updatedAt: new Date(Date.now() - 365 * 86_400_000),
+        }),
+      )
+      await dream(model)
+      expect(calls).toHaveLength(3)
+      expect(fresh()).toEqual(['导入的'])
+
+      // 都整理过、没改过：不再请求模型
+      expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+      expect(calls).toHaveLength(3)
+    } finally {
+      commit()
+      await side.end()
+    }
   })
 
   it('整理中途出了没料到的错也记一条运行记录、写明原因，当天就算整理过', async () => {
@@ -818,6 +837,47 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       },
     ])
     expect(await dreamsDue(database.db)).toEqual([])
+  })
+
+  it('连运行记录都写不进去时，两个错误都记进日志，原来的错误照样抛出去（后台任务记成失败）', async () => {
+    await saveExtractionConfig(database.db, masterKey, {
+      baseUrl: 'https://llm.example.com/v1',
+      model: 'm',
+      apiKey: 'test-api-key',
+    })
+    await database.db.execute(sql`
+      create or replace function dream_test_fail() returns trigger language plpgsql
+      as $$ begin raise exception '测试里故意出的错'; end $$`)
+    await database.db.execute(sql`
+      create trigger dream_test_fail before insert on dream_runs
+      for each row execute function dream_test_fail()`)
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      await expect(
+        dreamSpace(database.db, null, {
+          spaceId: ws.spaceId,
+          runId: randomUUID(),
+          trigger: 'scheduled',
+          modelFor: () => fakeChatModel(reply([])).model,
+        }),
+      ).rejects.toThrow('服务端没有配置 KIOKU_MASTER_KEY')
+      // 数据库报的错由 drizzle 包在 cause 里
+      const messageOf = (err: unknown) => {
+        const e = err as Error & { cause?: Error }
+        return e.cause?.message ?? e.message
+      }
+      expect(logged.mock.calls.map(([label, err]) => [label, messageOf(err)])).toEqual([
+        ['Dream 整理出错', '抽取模型的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY'],
+        ['Dream 的运行记录也写不进去', '测试里故意出的错'],
+      ])
+    } finally {
+      logged.mockRestore()
+      await database.db.execute(sql`drop trigger if exists dream_test_fail on dream_runs`)
+      await database.db.execute(sql`drop function if exists dream_test_fail()`)
+    }
+    // 没有运行记录：下一个小时照样会排
+    expect(await runs()).toEqual([])
+    expect(await dreamsDue(database.db)).toEqual([ws.spaceId])
   })
 
   it('每天一次：今天（UTC）还没做过定时整理的空间才到期；手动整理不算', async () => {

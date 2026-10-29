@@ -1,12 +1,7 @@
-CREATE TABLE "dream_cursors" (
+CREATE TABLE "dream_marks" (
+	"memory_id" uuid PRIMARY KEY NOT NULL,
 	"space_id" uuid NOT NULL,
-	"scope" text NOT NULL,
-	"owner_account_id" uuid,
-	"at" timestamp with time zone NOT NULL,
-	"last_id" uuid NOT NULL,
-	"seen" jsonb DEFAULT '{}'::jsonb NOT NULL,
-	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
-	CONSTRAINT "dream_cursors_space_id_scope_pk" PRIMARY KEY("space_id","scope")
+	"version" integer NOT NULL
 );
 --> statement-breakpoint
 CREATE TABLE "dream_runs" (
@@ -55,8 +50,8 @@ CREATE TABLE "dream_suggestions" (
 	CONSTRAINT "dream_suggestions_memories" CHECK (cardinality("dream_suggestions"."memory_ids") >= 1 and cardinality("dream_suggestions"."memory_ids") = cardinality("dream_suggestions"."versions"))
 );
 --> statement-breakpoint
-ALTER TABLE "dream_cursors" ADD CONSTRAINT "dream_cursors_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
-ALTER TABLE "dream_cursors" ADD CONSTRAINT "dream_cursors_owner_account_id_accounts_id_fk" FOREIGN KEY ("owner_account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "dream_marks" ADD CONSTRAINT "dream_marks_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+ALTER TABLE "dream_marks" ADD CONSTRAINT "dream_marks_memory_fk" FOREIGN KEY ("space_id","memory_id") REFERENCES "public"."memories"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "dream_runs" ADD CONSTRAINT "dream_runs_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "dream_runs" ADD CONSTRAINT "dream_runs_owner_account_id_accounts_id_fk" FOREIGN KEY ("owner_account_id") REFERENCES "public"."accounts"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "dream_suggestions" ADD CONSTRAINT "dream_suggestions_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -82,10 +77,10 @@ CREATE POLICY space_isolation ON dream_suggestions
   USING (space_id = nullif(current_setting('app.space_id', true), '')::uuid)
   WITH CHECK (space_id = nullif(current_setting('app.space_id', true), '')::uuid);
 --> statement-breakpoint
-ALTER TABLE dream_cursors ENABLE ROW LEVEL SECURITY;
+ALTER TABLE dream_marks ENABLE ROW LEVEL SECURITY;
 --> statement-breakpoint
-ALTER TABLE dream_cursors FORCE ROW LEVEL SECURITY;
+ALTER TABLE dream_marks FORCE ROW LEVEL SECURITY;
 --> statement-breakpoint
-CREATE POLICY space_isolation ON dream_cursors
+CREATE POLICY space_isolation ON dream_marks
   USING (space_id = nullif(current_setting('app.space_id', true), '')::uuid)
   WITH CHECK (space_id = nullif(current_setting('app.space_id', true), '')::uuid);

@@ -899,7 +899,7 @@ export const dreamRuns = pgTable(
     runId: uuid().notNull(),
     // scheduled | manual
     trigger: text().notNull(),
-    // 范围，见 memory/scopes.ts 的 dreamScopeKey
+    // 范围，见 memory/scopes.ts 的 DREAM_SCOPE_KEY
     scope: text(),
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'set null' }),
     model: text(),
@@ -970,23 +970,24 @@ export const dreamSuggestions = pgTable(
   ],
 )
 
-// Dream 每个范围整理到了哪里：下次只看排在这个位置（更新时间与 id）之后、又不在 seen 里的记忆。
-// 更新时间是写入提交之前取的，时间早、提交晚的写入会落在已经整理过的位置后面，所以位置最多推进到读取时刻往前五分钟；
-// 推进不到的那一段里已经整理过的记在 seen（id → [版本, 更新时间的微秒数]），下次不再给模型看，改过之后版本变了照样再看
-export const dreamCursors = pgTable(
-  'dream_cursors',
+// Dream 整理过的记忆与当时的版本：下次只看没有标记、或者标记之后改过（版本变了）的记忆。不按时间判断，
+// 导入的（带着原来的更新时间）、写了很久才提交的都看得到；整理过、没改过的不会再给模型看。随记忆一起删掉
+export const dreamMarks = pgTable(
+  'dream_marks',
   {
+    memoryId: uuid().primaryKey(),
     spaceId: uuid()
       .notNull()
       .references(() => spaces.id, { onDelete: 'cascade' }),
-    scope: text().notNull(),
-    ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
-    at: timestamp({ withTimezone: true }).notNull(),
-    lastId: uuid().notNull(),
-    seen: jsonb().$type<Record<string, [number, string]>>().notNull().default({}),
-    updatedAt: updatedAt(),
+    version: integer().notNull(),
   },
-  (t) => [primaryKey({ columns: [t.spaceId, t.scope] })],
+  (t) => [
+    foreignKey({
+      name: 'dream_marks_memory_fk',
+      columns: [t.spaceId, t.memoryId],
+      foreignColumns: [memories.spaceId, memories.id],
+    }).onDelete('cascade'),
+  ],
 )
 
 // 迁移里据此给这些表开启并强制 RLS；新增内容表时同步加进来
@@ -1014,5 +1015,5 @@ export const RLS_TABLES = [
   'subject_bind_attempts',
   'dream_runs',
   'dream_suggestions',
-  'dream_cursors',
+  'dream_marks',
 ] as const

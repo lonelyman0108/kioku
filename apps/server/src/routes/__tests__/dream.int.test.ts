@@ -239,6 +239,68 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect((await send('GET', '/dream/suggestions?cursor=abc')).status).toBe(400)
   })
 
+  it('每页 50 条、新的在前，总数只在第一页给；每条带上涉及的全部记忆，按建议里的顺序', async () => {
+    const notes = await inSpace((tx) =>
+      tx
+        .insert(memories)
+        .values(
+          Array.from({ length: 52 }, (_, i) => ({
+            spaceId: ws.spaceId,
+            form: 'curated' as const,
+            layer: 'base' as const,
+            sensitivity: 'public' as const,
+            provenance: 'owner' as const,
+            domain: 'core',
+            path: `note-${String(i).padStart(2, '0')}`,
+            content: `第 ${i} 条笔记`,
+          })),
+        )
+        .returning(),
+    )
+    const at = (i: number) => new Date(Date.now() - (100 - i) * 1000)
+    await inSpace((tx) =>
+      tx.insert(dreamSuggestions).values([
+        // 最早的一条：合并两条，保留的是排在后面的那条
+        {
+          spaceId: ws.spaceId,
+          scope: 'base',
+          kind: 'merge',
+          memoryIds: [notes[51]!.id, notes[50]!.id],
+          versions: [1, 1],
+          keepId: notes[51]!.id,
+          content: '合并后的笔记',
+          reason: '重复',
+          fingerprint: 'fp-merge',
+          createdAt: at(0),
+        },
+        ...notes.slice(0, 50).map((note, i) => ({
+          spaceId: ws.spaceId,
+          scope: 'base',
+          kind: 'stale',
+          memoryIds: [note.id],
+          versions: [1],
+          reason: `第 ${i} 条过时了`,
+          fingerprint: `fp-${i}`,
+          createdAt: at(i + 1),
+        })),
+      ]),
+    )
+    const first = await list()
+    expect([first.items.length, first.total]).toEqual([50, 51])
+    expect([first.items[0]!.reason, first.items.at(-1)!.reason]).toEqual([
+      '第 49 条过时了',
+      '第 0 条过时了',
+    ])
+    const second = await ok<DreamSuggestionList>(
+      await send('GET', `/dream/suggestions?cursor=${first.nextCursor}`),
+    )
+    expect([second.items.length, second.total, second.nextCursor]).toEqual([1, null, null])
+    expect(second.items[0]!.memories.map((m) => m.content)).toEqual([
+      '第 51 条笔记',
+      '第 50 条笔记',
+    ])
+  })
+
   it('合并策展记忆：保留的那条换成（可以先改的）正文，来源记为执行的成员，其余几条删掉，都记事件', async () => {
     // 通过 Key 写下的，来源是 agent
     const key = await ws.issueKey((await ws.createApp('agent')).id)
@@ -266,6 +328,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect(await errorOf(await apply(suggestion.id, { uri: 'core://other' }), 400)).toBe(
       '合并只能改合并后的正文',
     )
+    // 改过的正文和模型给的过同一套检查
+    expect(
+      await errorOf(await apply(suggestion.id, { content: '回答用中文，token = abc123' }), 400),
+    ).toBe('合并后的正文像有明文密码或 Token：Dream 的建议里不写凭据的值')
     expect(
       await ok<DreamApplied>(await apply(suggestion.id, { content: '回答一律用中文' })),
     ).toEqual({ memory: null })
@@ -299,10 +365,11 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect(await errorOf(await reject(suggestion.id), 409)).toBe('这条建议已经处理过了')
   })
 
-  it('建议生成之后涉及的记忆被改过就不执行，返回 409；正被别的写入锁着时不等锁，马上返回 409', async () => {
+  it('建议生成之后涉及的记忆被改过就不执行，返回 409；正被别的写入改着时不等锁，马上返回 409；只是被外键引用着照常执行', async () => {
     await remember({ uri: 'core://a', content: '回答用中文', layer: 'base' })
     await remember({ uri: 'core://b', content: '用中文回答', layer: 'base' })
     await remember({ uri: 'core://c', content: '周五交周报', layer: 'base' })
+    await remember({ uri: 'core://d', content: '周一开例会', layer: 'base' })
     await dream((_, h) => [
       {
         kind: 'merge',
@@ -311,10 +378,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
         reason: '重复',
       },
       { kind: 'stale', memories: [h('周五交周报')], reason: '过了' },
+      { kind: 'stale', memories: [h('周一开例会')], reason: '改到周二了' },
     ])
     const { items } = await list()
     const merge = items.find((i) => i.kind === 'merge')!
-    const stale = items.find((i) => i.kind === 'stale')!
+    const staleOf = (content: string) =>
+      items.find((i) => i.kind === 'stale' && i.memories[0]!.content === content)!
     await edit({ uri: 'core://b', content: '用中文回答，先给结论' })
     expect(await errorOf(await apply(merge.id), 409)).toBe(
       '建议生成之后这些记忆被改过，等下次整理或手动处理',
@@ -322,27 +391,36 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect((await rowOf(merge.memories[0]!.id)).content).toBe('回答用中文')
     expect((await suggestionRow(merge.id)).status).toBe('pending')
 
-    // 另一条连接锁住那条记忆（例如抽取正在推翻它）：执行不等锁，马上返回 409，不会和按别的顺序加锁的写入等成死锁。
-    // 放开之后照常执行
-    const target = stale.memories[0]!.id
     const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
-    try {
-      await side.begin(async (tx) => {
+    // 另一条连接锁着那条记忆，在 3 秒内拿到执行的结果（等锁的话就是 waited）
+    const whileLocked = (memoryId: string, lock: 'for update' | 'for key share', id: string) =>
+      side.begin(async (tx) => {
         await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
-        await tx`select id from memories where id = ${target} for update`
+        await tx.unsafe(`select id from memories where id = $1 ${lock}`, [memoryId])
         const waited = new Promise<'waited'>((resolve) =>
           setTimeout(() => resolve('waited'), 3_000),
         )
-        const res = await Promise.race([apply(stale.id), waited])
+        const res = await Promise.race([apply(id), waited])
         expect(res).not.toBe('waited')
-        expect(await errorOf(res as Response, 409)).toBe('这些记忆正被别的写入改动，请稍后再试')
+        return res as Response
       })
+    try {
+      // 别的表插入指向这条记忆的行（记事件、写关键词与向量）时，外键检查加的是 KEY SHARE 锁：不算「正在改」，照常执行
+      const weekly = staleOf('周一开例会')
+      await ok(await whileLocked(weekly.memories[0]!.id, 'for key share', weekly.id))
+      expect((await rowOf(weekly.memories[0]!.id)).validTo).not.toBeNull()
+
+      // 锁住要改它（例如抽取正在推翻它）：不等锁，马上返回 409，不会和按别的顺序加锁的写入等成死锁；放开之后照常执行
+      const report = staleOf('周五交周报')
+      expect(
+        await errorOf(await whileLocked(report.memories[0]!.id, 'for update', report.id), 409),
+      ).toBe('这些记忆正被别的写入改动，请稍后再试')
+      expect((await suggestionRow(report.id)).status).toBe('pending')
+      await ok(await apply(report.id))
+      expect((await rowOf(report.memories[0]!.id)).validTo).not.toBeNull()
     } finally {
       await side.end()
     }
-    expect((await suggestionRow(stale.id)).status).toBe('pending')
-    await ok(await apply(stale.id))
-    expect((await rowOf(target)).validTo).not.toBeNull()
   })
 
   it('合并事实：保留的那条换成合并后的一句话、来源记为成员（离开待审队列），另一条删掉；太长的不收', async () => {
@@ -366,6 +444,14 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect(
       await errorOf(await apply(suggestion.id, { content: '在学日语'.repeat(60) }), 400),
     ).toContain('一句话')
+    // 成员改过的正文和模型给的过同一套检查：像有明文密码的、带凭据占位符的不收
+    expect(
+      await errorOf(await apply(suggestion.id, { content: '在学日语，网站密码：hunter2' }), 400),
+    ).toBe('合并后的事实像有明文密码或 Token：Dream 的建议里不写凭据的值')
+    expect(
+      await errorOf(await apply(suggestion.id, { content: '在学日语，账号见 {{cred:xm}}' }), 400),
+    ).toBe('合并后的事实里不能带凭据占位符')
+    expect((await suggestionRow(suggestion.id)).status).toBe('pending')
     await ok(await apply(suggestion.id, { content: '在学日语，\n准备考 N2' }))
     expect(await rowOf(f1.id)).toMatchObject({
       content: '在学日语， 准备考 N2',
@@ -418,7 +504,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     }
   })
 
-  it('提炼时改的 URI 被占用返回 409；改到写不了的层返回 403；草稿带凭据占位符时照常过写入检查', async () => {
+  it('提炼时改的 URI 被占用返回 409；改到写不了的层返回 403；改过的草稿和模型给的一样不能带凭据占位符', async () => {
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     // alice 的应用：bob 是 editor，写不了它的应用层
     await ws.createApp('qq-bot')
@@ -443,16 +529,19 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect((await apply(suggestion.id, { uri: `app://qq-bot/xiaoming` }, bob.cookie)).status).toBe(
       403,
     )
-    // 占位符只能在私人层、敏感级至少 private
+    // 草稿从事实提炼，事实里没有凭据引用：改过的也不能带占位符，disclosure 也一样
     expect(
       await errorOf(
         await apply(suggestion.id, {
-          layer: 'base',
+          layer: 'private',
           content: '小明的账号见 {{cred:xm}}',
         }),
         400,
       ),
-    ).toContain('私人层')
+    ).toBe('提炼的正文里不能带凭据占位符')
+    expect(
+      await errorOf(await apply(suggestion.id, { disclosure: '登录时，密码：hunter2' }), 400),
+    ).toBe('disclosure 里不能有明文密码、Token 或凭据占位符')
     expect((await suggestionRow(suggestion.id)).status).toBe('pending')
     // 能改成别的 URI 与层
     const applied = await ok<DreamApplied>(
@@ -494,6 +583,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
 
     const node = await rowOf(report.id)
     expect(node.validTo).not.toBeNull()
+    // 有效到与更新时间都是执行前核对用的那一刻
+    expect(node.validTo).toEqual(node.updatedAt)
     expect(node).toMatchObject({ version: 2, deletedAt: null })
     expect((await send('GET', `/memories?uri=${encodeURIComponent(report.uri)}`)).status).toBe(404)
     const expired = await ok<ExpiredMemoryList>(await send('GET', '/memories/expired'))

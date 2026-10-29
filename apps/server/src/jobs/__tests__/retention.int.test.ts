@@ -1008,11 +1008,12 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(await ok<RetentionView>(await put({ days: 13 }))).toMatchObject({ days: 13 })
   })
 
-  it('升级之前存下的清理结果（计数里还没有 Dream 的两类）照样读得出，同一天不再整个清理一遍', async () => {
+  it('升级之前存下的清理结果（计数里还没有后来加的几类）照样读得出，同一天不再整个清理一遍', async () => {
     await active()
     const at = new Date('2030-06-01T03:17:00Z').toISOString()
+    const later = ['dreamRuns', 'dreamSuggestions', 'subjectBindings']
     const counts = {
-      ...Object.fromEntries(Object.entries(ZERO).filter(([key]) => !key.startsWith('dream'))),
+      ...Object.fromEntries(Object.entries(ZERO).filter(([key]) => !later.includes(key))),
       deletedMemories: 2,
     }
     await database.db.insert(settings).values({
