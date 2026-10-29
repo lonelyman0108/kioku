@@ -1,14 +1,22 @@
 import { createRoute } from '@hono/zod-openapi'
-import { BindCode, BindCodeRequest, BindRequest, BindResult, ErrorResponse } from '@kioku/contracts'
+import {
+  BindCode,
+  BindCodeRequest,
+  BindRequest,
+  BindResult,
+  ErrorResponse,
+  VoidBindCodeRequest,
+} from '@kioku/contracts'
 
 import {
   CODE_TTL_SECONDS,
   canBindWithKey,
-  clearAttempts,
   issueCode,
   normalizeCode,
   redeemCode,
+  refundAttempt,
   reserveAttempt,
+  voidCode,
   type AttemptLimit,
 } from '../access/binding'
 import { resolveKeySession } from '../access/session'
@@ -45,15 +53,32 @@ const bindRoute = createRoute({
   path: '/bind',
   tags: ['binding'],
   summary:
-    '在另一个平台的私聊里使用绑定码：把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员时，要那个成员在管理界面确认后才合并',
+    '在另一个平台的私聊里使用绑定码：先预览要并到谁那里，同一个账号预览过之后带上 confirm 再发才把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员（这边没标记成同一个成员）时，还要那个成员在管理界面确认',
   security,
   request: { body: jsonBody(BindRequest) },
   responses: {
-    200: jsonResponse('已合并，或在等确认', BindResult),
+    200: jsonResponse('预览、已合并，或在等确认', BindResult),
     400: jsonResponse('不是私聊、码的格式不对，或者码不对、已失效', ErrorResponse),
     401: jsonResponse('Key 无效', ErrorResponse),
     403: jsonResponse('Key 写不了对象层，或者这个账号标记成了别的成员', ErrorResponse),
     409: jsonResponse('已经是同一个人，或者正忙', ErrorResponse),
+    429: jsonResponse('输错的次数太多', ErrorResponse),
+  },
+})
+
+const voidRoute = createRoute({
+  method: 'post',
+  path: '/bind/void',
+  tags: ['binding'],
+  summary:
+    '群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；按发言人计输错的次数，免得拿它试码',
+  security,
+  request: { body: jsonBody(VoidBindCodeRequest) },
+  responses: {
+    204: { description: '这个码（如果有的话）已经作废' },
+    400: jsonResponse('不是群聊，或者没带发言人', ErrorResponse),
+    401: jsonResponse('Key 无效', ErrorResponse),
+    403: jsonResponse('Key 写不了对象层', ErrorResponse),
     429: jsonResponse('输错的次数太多', ErrorResponse),
   },
 })
@@ -68,7 +93,7 @@ function limitMessage(limit: AttemptLimit): string {
 
 export function bindingRoutes(deps: Deps) {
   const app = router()
-  for (const path of ['/bind', '/bind/code']) app.use(path, requireKey(deps))
+  for (const path of ['/bind', '/bind/code', '/bind/void']) app.use(path, requireKey(deps))
   return app
     .openapi(codeRoute, async (c) => {
       const key = c.get('key')
@@ -80,6 +105,7 @@ export function bindingRoutes(deps: Deps) {
       // 契约保证私聊带着平台与发言人
       const issued = await issueCode(
         deps.db,
+        deps.masterKey,
         key,
         session,
         context.platform!,
@@ -102,7 +128,7 @@ export function bindingRoutes(deps: Deps) {
       const key = c.get('key')
       const body = c.req.valid('json')
       const { context } = body
-      // 群里不收码：发在群里的码大家都看得到，谁都能抢先用
+      // 群里不收码：发在群里的码大家都看得到，谁都能抢先用（插件会把它作废）
       if (context.chatType !== 'direct') return c.json({ error: '只能在私聊里绑定' }, 400)
       if (!canBindWithKey(key)) return c.json({ error: NOT_ALLOWED }, 403)
       // 格式不对的不可能是哪个码，不算输错
@@ -121,21 +147,45 @@ export function bindingRoutes(deps: Deps) {
         externalId: sender.id,
         displayName: session.subjects.find((s) => s.role === 'sender')?.name ?? null,
       }
-      const result = await redeemCode(deps.db, key, session, code, redeemer).catch(
-        (err: unknown) => {
-          if (isLockBusy(err)) return { kind: 'busy' as const }
-          throw err
-        },
-      )
+      const result = await redeemCode(
+        deps.db,
+        deps.masterKey,
+        key,
+        session,
+        code,
+        redeemer,
+        body.confirm,
+      ).catch((err: unknown) => {
+        if (isLockBusy(err)) return { kind: 'busy' as const }
+        throw err
+      })
+      // 只有码不对才算输错，别的结果都退回这一次的名额。绑定已经提交时，退回失败只记日志、照样返回成功
+      if (result.kind !== 'invalid') {
+        await refundAttempt(deps.db, key, platform, sender.id).catch((err: unknown) => {
+          console.error('退回绑定码的输错名额失败', err)
+        })
+      }
       switch (result.kind) {
-        case 'merged':
-          await clearAttempts(deps.db, key, platform, sender.id)
-          await enqueueMerged(deps, key.spaceId, result.outcome)
-          return c.json({ status: 'merged' as const, expiresAt: null }, 200)
-        case 'pending':
-          await clearAttempts(deps.db, key, platform, sender.id)
+        case 'preview':
           return c.json(
-            { status: 'pending' as const, expiresAt: result.expiresAt.toISOString() },
+            {
+              status: 'preview' as const,
+              target: result.target,
+              needsApproval: result.needsApproval,
+              expiresAt: null,
+            },
+            200,
+          )
+        case 'merged':
+          await enqueueMerged(deps, key.spaceId, result.outcome)
+          return c.json({ status: 'merged' as const, needsApproval: false, expiresAt: null }, 200)
+        case 'pending':
+          return c.json(
+            {
+              status: 'pending' as const,
+              needsApproval: true,
+              expiresAt: result.expiresAt.toISOString(),
+            },
             200,
           )
         case 'invalid':
@@ -156,5 +206,27 @@ export function bindingRoutes(deps: Deps) {
         case 'busy':
           return c.json({ error: BUSY }, 409)
       }
+    })
+    .openapi(voidRoute, async (c) => {
+      const key = c.get('key')
+      const body = c.req.valid('json')
+      const { context } = body
+      if (context.chatType !== 'group' && context.chatType !== 'channel') {
+        return c.json({ error: '只作废在群里发出来的绑定码' }, 400)
+      }
+      // 按发言人计次数：不带发言人就没法拦住拿它试码
+      if (!context.sender) return c.json({ error: '要带上这条消息的发言人' }, 400)
+      if (!canBindWithKey(key)) return c.json({ error: NOT_ALLOWED }, 403)
+      // 格式不对的不可能是哪个码，什么都不用做
+      const code = normalizeCode(body.code)
+      if (!code) return c.body(null, 204)
+      // 每次都算一次：作废了一个真的码也不退，免得能从计数看出码存不存在
+      const limit = await reserveAttempt(deps.db, key, context.platform!, context.sender.id)
+      if (limit) {
+        c.header('Retry-After', String(limit.waitSeconds))
+        return c.json({ error: limitMessage(limit) }, 429)
+      }
+      await voidCode(deps.db, deps.masterKey, key, code)
+      return c.body(null, 204)
     })
 }

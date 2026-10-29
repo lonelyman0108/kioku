@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto'
 
 import type {
   BindCode,
@@ -48,12 +48,15 @@ const INVALID = '绑定码不对或已经失效，请重新申请'
 describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   let database: Database
   let app: ReturnType<typeof createApp>
+  // 没配主密钥的实例：码的哈希退回不带密钥的 SHA-256
+  let keyless: ReturnType<typeof createApp>
   let ws: Workspace
   let appId: string
   let key: string
   const masterKey = randomBytes(32)
-  // 排进抽取队列的批次与延迟，合并之后看有没有按合并后的批次排
+  // 排进抽取队列的批次与延迟，合并之后看有没有按合并后的批次排；failEnqueue 时排队出错
   const queued: { scope: string; delay: number }[] = []
+  let failEnqueue = false
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
@@ -63,19 +66,20 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     backupRun: async () => null,
     enqueueCleanup: async () => true,
     enqueueExtraction: async (target, delay) => {
+      if (failEnqueue) throw new Error('队列不可用')
       queued.push({ scope: target.scope, delay })
     },
   }
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({
+    const deps = {
       db: database.db,
       cookieSecure: false,
-      masterKey,
       embedder: staticEmbedderSource(null),
-      jobs,
-    })
+    }
+    app = createApp({ ...deps, masterKey, jobs })
+    keyless = createApp({ ...deps, masterKey: null, jobs: null })
   })
   afterAll(async () => {
     await database?.db.delete(settings).where(eq(settings.key, 'extraction'))
@@ -92,6 +96,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       model: 'm',
     })
     queued.length = 0
+    failEnqueue = false
   })
 
   const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
@@ -107,16 +112,18 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     sender: { id: sender, name: '小明' },
   })
 
-  // 接入方：申请与使用绑定码
-  const issue = (context: SessionContextInput, k = key) =>
-    app.request('/v1/bind/code', jsonRequest('POST', { context }, bearer(k)))
-  const codeFor = async (context: SessionContextInput, k = key) => {
-    const res = await issue(context, k)
+  // 接入方：申请、预览与确认、在群里作废
+  const issue = (context: SessionContextInput, k = key, via = app) =>
+    via.request('/v1/bind/code', jsonRequest('POST', { context }, bearer(k)))
+  const codeFor = async (context: SessionContextInput, k = key, via = app) => {
+    const res = await issue(context, k, via)
     expect(res.status, await res.clone().text()).toBe(200)
     return ((await res.json()) as BindCode).code
   }
-  const redeem = (code: string, context: SessionContextInput, k = key) =>
-    app.request('/v1/bind', jsonRequest('POST', { code, context }, bearer(k)))
+  const redeem = (code: string, context: SessionContextInput, k = key, confirm = false) =>
+    app.request('/v1/bind', jsonRequest('POST', { code, context, confirm }, bearer(k)))
+  const voidIn = (code: string, context: SessionContextInput, k = key) =>
+    app.request('/v1/bind/void', jsonRequest('POST', { code, context }, bearer(k)))
   const errorOf = async (res: Response, status: number) => {
     expect(res.status, await res.clone().text()).toBe(status)
     return ((await res.json()) as { error: string }).error
@@ -124,6 +131,11 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   const resultOf = async (res: Response) => {
     expect(res.status, await res.clone().text()).toBe(200)
     return (await res.json()) as BindResult
+  }
+  // 先预览、再确认：和插件里先发 /bind <码>、再发 /bind <码> 确认一样
+  const bind = async (code: string, context: SessionContextInput, k = key) => {
+    expect((await resultOf(await redeem(code, context, k))).status).toBe('preview')
+    return resultOf(await redeem(code, context, k, true))
   }
   // 一次私聊：没见过的平台账号会建出对象
   const meet = async (context: SessionContextInput) => {
@@ -185,6 +197,17 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
         ...values,
       }),
     )
+  const storedCodes = () => inSpace((tx) => tx.select().from(subjectBindCodes))
+  // 码的哈希：配了主密钥时是用从它派生的密钥算的 HMAC，没配时是不带密钥的 SHA-256
+  const plainHash = (code: string) =>
+    createHash('sha256').update(`kioku-bind-code\u0000${appId}\u0000${code}`).digest('hex')
+  const keyedHash = (code: string) =>
+    createHmac(
+      'sha256',
+      Buffer.from(hkdfSync('sha256', masterKey, Buffer.alloc(0), 'kioku-bind-code-hmac', 32)),
+    )
+      .update(`kioku-bind-code\u0000${appId}\u0000${code}`)
+      .digest('hex')
 
   // 管理界面
   const api = (method: string, path: string, body?: unknown, cookie = ws.cookie) =>
@@ -223,8 +246,9 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     )
   const accountCounter = (platform: string, id: string) => JSON.stringify(['account', platform, id])
   const APP_COUNTER = JSON.stringify(['app'])
+  const wrongFor = (code: string) => (code === '22222222' ? '33333333' : '22222222')
 
-  it('私聊里申请绑定码，到另一个平台的私聊里用它：收码的对象并进发码的对象，平台账号、事实、私聊里记下的与缓冲都归过去', async () => {
+  it('私聊里申请绑定码，到另一个平台的私聊里先预览、再确认：收码的对象并进发码的对象，平台账号、事实、私聊里记下的与缓冲都归过去', async () => {
     await say('你好', direct('1001', 'qq', '小明'))
     await say('我住在上海', direct('u1', 'tg', '明'))
     const a = (await subjectIdOf('qq', '1001'))!
@@ -244,17 +268,28 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(issued.code).toMatch(/^[2-9A-HJKMNP-Z]{8}$/)
     expect(issued.expiresInSeconds).toBe(600)
     expect(new Date(issued.expiresAt).getTime() - Date.now()).toBeGreaterThan(590_000)
-    // 库里只有哈希，记着谁、用哪个平台账号申请的
-    const [stored] = await inSpace((tx) => tx.select().from(subjectBindCodes))
-    expect(stored!.codeHash).toMatch(/^[0-9a-f]{64}$/)
+    // 库里只有哈希（配了主密钥，是用它派生的密钥算的 HMAC），记着谁、用哪个平台账号申请的
+    const [stored] = await storedCodes()
+    expect(stored!.codeHash).toBe(keyedHash(issued.code))
+    expect(stored!.codeHash).not.toBe(plainHash(issued.code))
     expect(JSON.stringify(stored)).not.toContain(issued.code)
     expect(stored).toMatchObject({ subjectId: a, platform: 'qq', externalId: '1001', usedAt: null })
 
-    queued.length = 0
-    // 不分大小写，空格与连字符不算
-    const typed = ` ${issued.code.slice(0, 4).toLowerCase()}-${issued.code.slice(4)} `
+    // 先预览：不分大小写，空格与连字符不算。告诉收码的人要并到谁那里，什么都还没并，码也没用掉
+    const typed = ` ${issued.code.slice(0, 4).toLowerCase()} -${issued.code.slice(4)} `
     expect(await resultOf(await redeem(typed, direct('u1', 'tg', '明')))).toEqual({
+      status: 'preview',
+      target: { platform: 'qq', displayName: '小明', accountHint: '1***' },
+      needsApproval: false,
+      expiresAt: null,
+    })
+    expect(await subjectIdOf('tg', 'u1')).toBe(b)
+    expect((await storedCodes())[0]).toMatchObject({ usedAt: null, previewedBy: [b] })
+
+    queued.length = 0
+    expect(await resultOf(await redeem(typed, direct('u1', 'tg', '明'), key, true))).toEqual({
       status: 'merged',
+      needsApproval: false,
       expiresAt: null,
     })
     expect((await api('GET', `/subjects/${b}`)).status).toBe(404)
@@ -287,8 +322,26 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       },
     ])
     expect(merged.bindings[0]!.decidedAt).not.toBeNull()
-    const [used] = await inSpace((tx) => tx.select().from(subjectBindCodes))
-    expect(used!.usedAt).not.toBeNull()
+    expect((await storedCodes())[0]!.usedAt).not.toBeNull()
+  })
+
+  it('没预览过就带上确认的只给预览；预览过的账号再确认才合并，别的账号预览过不算', async () => {
+    const code = await codeFor(direct('1001'))
+    await meet(direct('u1', 'tg'))
+    // 钓鱼的人让对方第一句就发「/bind 码 确认」：照样先看到要并到谁那里
+    expect((await resultOf(await redeem(code, direct('u1', 'tg'), key, true))).status).toBe(
+      'preview',
+    )
+    expect(await subjectIdOf('tg', 'u1')).not.toBe(await subjectIdOf('qq', '1001'))
+    // 别的账号预览过，不让 u2 直接确认
+    expect((await resultOf(await redeem(code, direct('u2', 'tg'), key, true))).status).toBe(
+      'preview',
+    )
+    expect((await resultOf(await redeem(code, direct('u1', 'tg'), key, true))).status).toBe(
+      'merged',
+    )
+    expect(await subjectIdOf('tg', 'u1')).toBe(await subjectIdOf('qq', '1001'))
+    expect(await subjectIdOf('tg', 'u2')).not.toBe(await subjectIdOf('qq', '1001'))
   })
 
   it('同一个人再申请时旧码作废；码只能用一次；过期的不认', async () => {
@@ -296,22 +349,24 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const second = await codeFor(direct('1001'))
     expect(second).not.toBe(first)
     expect(await errorOf(await redeem(first, direct('u1', 'tg')), 400)).toBe(INVALID)
-    expect((await resultOf(await redeem(second, direct('u2', 'tg')))).status).toBe('merged')
+    expect((await bind(second, direct('u2', 'tg'))).status).toBe('merged')
     const a = await subjectIdOf('qq', '1001')
     expect(await subjectIdOf('tg', 'u2')).toBe(a)
-    // 用过的码换一个账号再用也不认
+    // 用过的码换一个账号再用也不认，预览也不行
     expect(await errorOf(await redeem(second, direct('u3', 'tg')), 400)).toBe(INVALID)
+    expect(await errorOf(await redeem(second, direct('u3', 'tg'), key, true), 400)).toBe(INVALID)
     expect(await subjectIdOf('tg', 'u1')).not.toBe(a)
     expect(await subjectIdOf('tg', 'u3')).not.toBe(a)
 
     const third = await codeFor(direct('1002'))
+    expect((await resultOf(await redeem(third, direct('u4', 'tg')))).status).toBe('preview')
     await inSpace((tx) =>
       tx
         .update(subjectBindCodes)
         .set({ expiresAt: sql`now() - interval '1 second'` })
         .where(eq(subjectBindCodes.platform, 'qq')),
     )
-    expect(await errorOf(await redeem(third, direct('u4', 'tg')), 400)).toBe(INVALID)
+    expect(await errorOf(await redeem(third, direct('u4', 'tg'), key, true), 400)).toBe(INVALID)
     expect(await subjectIdOf('tg', 'u4')).not.toBe(await subjectIdOf('qq', '1002'))
   })
 
@@ -320,10 +375,59 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect((await issue({ chatType: 'cron' })).status).toBe(400)
     const code = await codeFor(direct('1001'))
     expect(await errorOf(await redeem(code, inGroup('1002')), 400)).toBe('只能在私聊里绑定')
+    expect(await errorOf(await redeem(code, inGroup('1002'), key, true), 400)).toBe(
+      '只能在私聊里绑定',
+    )
     // 群和群里的人都没建出来；码也还在
     const all = await inSpace((tx) => tx.select().from(subjectIdentities))
     expect(all.map((i) => i.externalId)).toEqual(['1001'])
-    expect((await resultOf(await redeem(code, direct('u1', 'tg')))).status).toBe('merged')
+    expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
+  })
+
+  it('群里发了绑定码：作废它，私聊里就用不了；码存不存在、是否已经作废，结果都一样；按发言人计次数', async () => {
+    const code = await codeFor(direct('1001'))
+    await resultOf(await redeem(code, direct('u1', 'tg')))
+    const res = await voidIn(` ${code.toLowerCase()} `, inGroup('2002'))
+    expect(res.status).toBe(204)
+    expect(await res.text()).toBe('')
+    expect(await storedCodes()).toEqual([])
+    // 已经预览过的也不能接着确认了
+    expect(await errorOf(await redeem(code, direct('u1', 'tg'), key, true), 400)).toBe(INVALID)
+    // 再作废一次、作废一个从来没有的码、格式不对的：结果都一样
+    for (const again of [code, wrongFor(code), 'hello']) {
+      const other = await voidIn(again, inGroup('2002'))
+      expect([other.status, await other.text()]).toEqual([204, ''])
+    }
+    // 作废时格式不对的不计，别的每次都计（作废了真的码也不退，免得从计数看出码存不存在）；
+    // 作废之后 u1 再确认，码已经不在了，算它输错一次
+    expect(await counters()).toEqual({
+      [accountCounter('tg', 'u1')]: 1,
+      [accountCounter('qq', '2002')]: 3,
+      [APP_COUNTER]: 4,
+    })
+    // 不建对象：群和发言人都没有
+    expect(await subjectIdOf('qq', '2002')).toBeUndefined()
+
+    // 拿它试码：同一个发言人超了上限之后，真的码也不作废，提示只看计数
+    const live = await codeFor(direct('1001'))
+    await voidIn(wrongFor(live), inGroup('2002'))
+    await voidIn(wrongFor(live), inGroup('2002'))
+    expect(await errorOf(await voidIn(live, inGroup('2002')), 429)).toMatch(
+      /^输错的次数太多了，\d+ 分钟后再试$/,
+    )
+    expect(await storedCodes()).toHaveLength(1)
+    expect((await bind(live, direct('u2', 'tg'))).status).toBe('merged')
+
+    // 只收群里的，要带发言人
+    expect(await errorOf(await voidIn(live, direct('u3', 'tg')), 400)).toBe(
+      '只作废在群里发出来的绑定码',
+    )
+    expect(
+      await errorOf(
+        await voidIn(live, { chatType: 'group', platform: 'qq', group: { id: '2001' } }),
+        400,
+      ),
+    ).toBe('要带上这条消息的发言人')
   })
 
   it('不能绑自己：用申请的账号自己收码、或者已经并在一起的账号收码都不行', async () => {
@@ -331,19 +435,21 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(await errorOf(await redeem(code, direct('1001')), 409)).toBe(
       '这个账号和申请绑定码的账号已经是同一个人了',
     )
-    expect((await resultOf(await redeem(code, direct('u1', 'tg')))).status).toBe('merged')
+    expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
     const again = await codeFor(direct('u1', 'tg'))
     expect((await redeem(again, direct('1001'))).status).toBe(409)
   })
 
-  it('Key 在私聊里写不了对象层时不能申请也不能使用，也不建对象', async () => {
+  it('Key 在私聊里写不了对象层时不能申请、使用，也不能作废，不建对象', async () => {
     const episodeOnly = await ws.issueKey(appId, { ...FULL_SCOPES, writeLayers: ['episode'] })
     const notAllowed = '这个 bot 的 Key 写不了对象层，不能绑定账号'
     expect(await errorOf(await issue(direct('1001'), episodeOnly), 403)).toBe(notAllowed)
     const code = await codeFor(direct('1002'))
     expect(await errorOf(await redeem(code, direct('u1', 'tg'), episodeOnly), 403)).toBe(notAllowed)
+    expect(await errorOf(await voidIn(code, inGroup('2002'), episodeOnly), 403)).toBe(notAllowed)
     expect(await subjectIdOf('qq', '1001')).toBeUndefined()
     expect(await subjectIdOf('tg', 'u1')).toBeUndefined()
+    expect(await storedCodes()).toHaveLength(1)
 
     // 应用主人被降为 viewer 之后，他的 Key 什么都写不了
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
@@ -375,12 +481,12 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect((await issue(direct('1003'), bobKey)).status).toBe(403)
   })
 
-  it('收码的对象标记成了别的成员时拒绝，码不作废；标记成同一个成员时可以，等那个成员确认', async () => {
+  it('收码的对象标记成了别的成员时拒绝，码不作废；两边标记成同一个成员时直接合并，不用等确认', async () => {
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     await meet(direct('u1', 'tg'))
     const b = (await subjectIdOf('tg', 'u1'))!
     await link(b, bob.cookie)
-    // 发码的没标记，收码的标记成 bob：合并会把发码的账号挂到 bob 名下
+    // 发码的没标记，收码的标记成 bob：合并会把发码的账号挂到 bob 名下。预览时就说清
     const code = await codeFor(direct('1001'))
     expect(await errorOf(await redeem(code, direct('u1', 'tg')), 403)).toContain(
       '标记成了空间里的成员',
@@ -388,7 +494,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(await subjectIdOf('tg', 'u1')).toBe(b)
     expect((await detailOf(b)).account?.id).toBe(bob.accountId)
     // 码没有作废：没标记的账号照样能用
-    expect((await resultOf(await redeem(code, direct('u2', 'tg')))).status).toBe('merged')
+    expect((await bind(code, direct('u2', 'tg'))).status).toBe('merged')
 
     // 发码的标记成 alice、收码的标记成 bob：也不行
     const a = (await subjectIdOf('qq', '1001'))!
@@ -397,19 +503,22 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(await errorOf(await redeem(second, direct('u1', 'tg')), 403)).toBe(
       '两个账号标记成了不同的成员，不能绑在一起',
     )
-    // 收码的也标记成 alice：可以，等 alice 确认
+    // 收码的也标记成 alice：只有本人能把对象标记成自己，没人能冒充，直接合并
     await link(b, bob.cookie, false)
     await link(b)
-    expect((await resultOf(await redeem(second, direct('u1', 'tg')))).status).toBe('pending')
-    const [pending] = await pendingOf()
-    expect((await (await confirm(pending!)).json()) as SubjectInfo).toMatchObject({
-      id: a,
-      account: { id: ws.accountId },
+    expect(await resultOf(await redeem(second, direct('u1', 'tg')))).toMatchObject({
+      status: 'preview',
+      needsApproval: false,
     })
+    expect((await resultOf(await redeem(second, direct('u1', 'tg'), key, true))).status).toBe(
+      'merged',
+    )
     expect(await subjectIdOf('tg', 'u1')).toBe(a)
+    expect(await pendingOf()).toEqual([])
+    expect((await detailOf(a)).account?.id).toBe(ws.accountId)
   })
 
-  it('发码的对象标记了成员：等那个成员本人确认，空间 owner 也不能代办；确认后按合并对象执行', async () => {
+  it('发码的对象标记了成员、收码的没标记：收码方确认之后等那个成员本人确认，空间 owner 也不能代办；确认后按合并对象执行', async () => {
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
     await meet(direct('1001', 'qq', '小明'))
@@ -425,15 +534,22 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     })
 
     const code = await codeFor(direct('1001'))
-    const result = await resultOf(await redeem(code, direct('u1', 'tg', '明')))
-    expect(result.status).toBe('pending')
+    // 预览时就说清确认之后还要那边的成员同意
+    expect(await resultOf(await redeem(code, direct('u1', 'tg', '明')))).toMatchObject({
+      status: 'preview',
+      needsApproval: true,
+    })
+    expect(await pendingOf(bob.cookie)).toEqual([])
+    const result = await resultOf(await redeem(code, direct('u1', 'tg', '明'), key, true))
+    expect(result).toMatchObject({ status: 'pending', needsApproval: true })
+    expect(result).not.toHaveProperty('target')
     expect(new Date(result.expiresAt!).getTime() - Date.now()).toBeGreaterThan(6.9 * DAY)
     // 还没合并；码已经用掉了
     expect(await subjectIdOf('tg', 'u1')).toBe(b)
     expect(await errorOf(await redeem(code, direct('u2', 'tg')), 400)).toBe(INVALID)
     // 同一对对象再来一次时沿用那一条
     const again = await codeFor(direct('1001'))
-    expect(await resultOf(await redeem(again, direct('u1', 'tg')))).toEqual(result)
+    expect(await bind(again, direct('u1', 'tg'))).toEqual(result)
     expect(await inSpace((tx) => tx.select().from(subjectBindings))).toHaveLength(1)
 
     // 只有 bob 在概览里看得到、能处理；对象页里大家都看得到这一条在等谁
@@ -497,9 +613,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const a = (await subjectIdOf('qq', '1001'))!
     await link(a, bob.cookie)
 
-    expect(
-      (await resultOf(await redeem(await codeFor(direct('1001')), direct('u1', 'tg')))).status,
-    ).toBe('pending')
+    expect((await bind(await codeFor(direct('1001')), direct('u1', 'tg'))).status).toBe('pending')
     const [first] = await pendingOf(bob.cookie)
     expect((await reject(first!, bob.cookie)).status).toBe(204)
     expect(await subjectIdOf('tg', 'u1')).not.toBe(a)
@@ -508,9 +622,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       { id: first!.id, status: 'rejected', decidedBy: { id: bob.accountId } },
     ])
 
-    expect(
-      (await resultOf(await redeem(await codeFor(direct('1001')), direct('u2', 'tg')))).status,
-    ).toBe('pending')
+    expect((await bind(await codeFor(direct('1001')), direct('u2', 'tg'))).status).toBe('pending')
     const [second] = await pendingOf(bob.cookie)
     await inSpace((tx) =>
       tx
@@ -529,9 +641,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(expired.decidedAt).toBe(expired.expiresAt)
 
     // 被标记的成员降成了 viewer：合并要写权限，确认不了，能拒绝
-    expect(
-      (await resultOf(await redeem(await codeFor(direct('1001')), direct('u3', 'tg')))).status,
-    ).toBe('pending')
+    expect((await bind(await codeFor(direct('1001')), direct('u3', 'tg'))).status).toBe('pending')
     await database.db
       .update(spaceMembers)
       .set({ role: 'viewer' })
@@ -552,7 +662,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const b = (await subjectIdOf('tg', 'u1'))!
     const d = (await subjectIdOf('wx', 'u9'))!
     await link(a, bob.cookie)
-    await resultOf(await redeem(await codeFor(direct('1001')), direct('u1', 'tg')))
+    await bind(await codeFor(direct('1001')), direct('u1', 'tg'))
     const [pending] = await pendingOf(bob.cookie)
     // 有人在管理界面把别的账号并进了收码的对象：确认的话会连这个账号一起并过去，bob 看到的已经不是这样
     expect((await api('POST', `/subjects/${b}/merge`, { from: d })).status).toBe(200)
@@ -566,7 +676,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     ])
 
     // bob 取消了「这是我」：确认时作废
-    await resultOf(await redeem(await codeFor(direct('1001')), direct('u1', 'tg')))
+    await bind(await codeFor(direct('1001')), direct('u1', 'tg'))
     const [next] = await pendingOf(bob.cookie)
     await link(a, bob.cookie, false)
     expect(await errorOf(await confirm(next!, bob.cookie), 409)).toBe(
@@ -581,7 +691,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
 
   it('输错上限：同一个平台账号一小时 5 次；超了之后对的码也不认，提示里看不出码存不存在', async () => {
     const code = await codeFor(direct('1001'))
-    const wrong = code === '22222222' ? '33333333' : '22222222'
+    const wrong = wrongFor(code)
     for (let i = 0; i < ACCOUNT_ATTEMPTS; i++) {
       expect(await errorOf(await redeem(wrong, direct('u9', 'tg')), 400)).toBe(INVALID)
     }
@@ -593,10 +703,10 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect((await errorOf(right, 429)).replace(/\d+/, 'N')).toBe(message.replace(/\d+/, 'N'))
     expect(await subjectIdOf('tg', 'u9')).not.toBe(await subjectIdOf('qq', '1001'))
     // 别的账号不受影响，码也没被用掉
-    expect((await resultOf(await redeem(code, direct('u1', 'tg')))).status).toBe('merged')
+    expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
   })
 
-  it('格式不对的码不算输错；绑定成了清掉这个账号的计数、退回整个应用的那一次，别人的不清', async () => {
+  it('只有码不对才算输错：格式不对不占名额；预览、不能绑自己、标记冲突、绑成了都退回这一次，之前输错的留着', async () => {
     for (let i = 0; i < ACCOUNT_ATTEMPTS + 1; i++) {
       expect(await errorOf(await redeem('hello', direct('u9', 'tg')), 400)).toBe(
         '绑定码是 8 位字母和数字',
@@ -604,19 +714,41 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     }
     expect(await counters()).toEqual({})
     const code = await codeFor(direct('1001'))
-    const wrong = code === '22222222' ? '33333333' : '22222222'
+    const wrong = wrongFor(code)
     for (let i = 0; i < 2; i++) await redeem(wrong, direct('u8', 'tg'))
     for (let i = 0; i < 3; i++) await redeem(wrong, direct('u9', 'tg'))
-    expect(await counters()).toEqual({
+    const afterWrong = {
       [accountCounter('tg', 'u8')]: 2,
       [accountCounter('tg', 'u9')]: 3,
       [APP_COUNTER]: 5,
+    }
+    expect(await counters()).toEqual(afterWrong)
+    // 码是对的，只是预览、不能绑自己、标记冲突：都不算输错
+    for (let i = 0; i < ACCOUNT_ATTEMPTS + 1; i++) {
+      expect((await resultOf(await redeem(code, direct('u9', 'tg')))).status).toBe('preview')
+    }
+    expect((await redeem(code, direct('1001'))).status).toBe(409)
+    await meet(direct('u7', 'tg'))
+    await link((await subjectIdOf('tg', 'u7'))!)
+    expect((await redeem(code, direct('u7', 'tg'))).status).toBe(403)
+    expect(await counters()).toEqual({
+      ...afterWrong,
+      [accountCounter('qq', '1001')]: 0,
+      [accountCounter('tg', 'u7')]: 0,
     })
-    expect((await resultOf(await redeem(code, direct('u9', 'tg')))).status).toBe('merged')
-    expect(await counters()).toEqual({ [accountCounter('tg', 'u8')]: 2, [APP_COUNTER]: 5 })
+    // 绑成了：只退这一次，之前输错的 3 次留着
+    expect((await resultOf(await redeem(code, direct('u9', 'tg'), key, true))).status).toBe(
+      'merged',
+    )
+    expect(await counters()).toEqual({
+      ...afterWrong,
+      [accountCounter('qq', '1001')]: 0,
+      [accountCounter('tg', 'u7')]: 0,
+    })
   })
 
-  it('同一个应用合计一小时 100 次：换着账号猜也会被挡下，被挡下的不占这个账号的次数、不建对象，别的应用不受影响', async () => {
+  it('同一个应用合计一小时 1000 次：换着账号猜也会被挡下，被挡下的不占这个账号的次数、不建对象', async () => {
+    expect(APP_ATTEMPTS).toBe(1000)
     const code = await codeFor(direct('1001'))
     await inSpace((tx) =>
       tx.insert(subjectBindAttempts).values({
@@ -638,7 +770,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     await inSpace((tx) =>
       tx.update(subjectBindAttempts).set({ resetAt: sql`now() - interval '1 second'` }),
     )
-    expect((await resultOf(await redeem(code, direct('fresh', 'tg')))).status).toBe('merged')
+    expect((await bind(code, direct('fresh', 'tg'))).status).toBe('merged')
   })
 
   it('别的应用、别的空间的码不认', async () => {
@@ -668,19 +800,22 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     )
     const foreignKey = ((await issued.json()) as CreatedKey).key
     expect(await errorOf(await redeem(code, direct('u1', 'tg'), foreignKey), 400)).toBe(INVALID)
+    // 别的应用、别的空间也作废不了它
+    expect((await voidIn(code, inGroup('2002'), otherKey)).status).toBe(204)
+    expect((await voidIn(code, inGroup('2002'), foreignKey)).status).toBe(204)
 
     // 原来的应用里照样能用
-    expect((await resultOf(await redeem(code, direct('u1', 'tg')))).status).toBe('merged')
+    expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
     expect(await subjectIdOf('tg', 'u1')).toBe(await subjectIdOf('qq', '1001'))
   })
 
-  it('同一个码被两边同时用：只有一边成功', async () => {
+  it('同一个码被两边同时确认：只有一边成功', async () => {
     const code = await codeFor(direct('1001'))
-    await meet(direct('u1', 'tg'))
-    await meet(direct('u2', 'tg'))
+    await resultOf(await redeem(code, direct('u1', 'tg')))
+    await resultOf(await redeem(code, direct('u2', 'tg')))
     const a = (await subjectIdOf('qq', '1001'))!
-    const [held] = await inSpace((tx) => tx.select().from(subjectBindCodes))
-    // 另开一条连接锁住这个码，两个请求都发出去；等它们确实都等在锁上（一个等这个码，
+    const [held] = await storedCodes()
+    // 另开一条连接锁住这个码，两个确认都发出去；等它们确实都等在锁上（一个等这个码，
     // 另一个等前一个锁住的发码的对象）之后放开，不靠睡眠猜时机
     const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
     let pending: Promise<Response[]> | undefined
@@ -688,7 +823,10 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       await side.begin(async (tx) => {
         await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
         await tx`select id from subject_bind_codes where id = ${held!.id} for update`
-        pending = Promise.all([redeem(code, direct('u1', 'tg')), redeem(code, direct('u2', 'tg'))])
+        pending = Promise.all([
+          redeem(code, direct('u1', 'tg'), key, true),
+          redeem(code, direct('u2', 'tg'), key, true),
+        ])
         for (let i = 0; ; i++) {
           const [row] = await side<{ n: number }[]>`
             select count(*)::int as n from pg_stat_activity
@@ -701,6 +839,8 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       })
       const results = await pending!
       expect(results.map((r) => r.status).sort()).toEqual([200, 400])
+      const won = results.find((r) => r.status === 200)!
+      expect(((await won.json()) as BindResult).status).toBe('merged')
     } finally {
       await pending?.catch(() => {})
       await side.end()
@@ -708,8 +848,43 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const owners = [await subjectIdOf('tg', 'u1'), await subjectIdOf('tg', 'u2')]
     expect(owners.filter((id) => id === a)).toHaveLength(1)
     expect(await inSpace((tx) => tx.select().from(subjectBindings))).toHaveLength(1)
-    const [used] = await inSpace((tx) => tx.select().from(subjectBindCodes))
-    expect(used!.usedAt).not.toBeNull()
+    expect((await storedCodes())[0]!.usedAt).not.toBeNull()
     expect(await inSpace((tx) => tx.select({ id: subjects.id }).from(subjects))).toHaveLength(2)
+  })
+
+  it('合并已经提交之后排抽取出错：只记日志，接入方与管理界面照样返回成功', async () => {
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    await say('你好', direct('1001'))
+    await say('我住在上海', direct('u1', 'tg'))
+    await say('我住在北京', direct('u2', 'tg'))
+    const a = (await subjectIdOf('qq', '1001'))!
+    const code = await codeFor(direct('1001'))
+    await resultOf(await redeem(code, direct('u1', 'tg')))
+    queued.length = 0
+    failEnqueue = true
+    expect((await resultOf(await redeem(code, direct('u1', 'tg'), key, true))).status).toBe(
+      'merged',
+    )
+    expect(await subjectIdOf('tg', 'u1')).toBe(a)
+
+    // 管理界面里确认之后排抽取出错也一样
+    await link(a, bob.cookie)
+    expect((await bind(await codeFor(direct('1001')), direct('u2', 'tg'))).status).toBe('pending')
+    const [pending] = await pendingOf(bob.cookie)
+    expect((await confirm(pending!, bob.cookie)).status).toBe(200)
+    expect(await subjectIdOf('tg', 'u2')).toBe(a)
+    expect(queued).toEqual([])
+  })
+
+  it('没配主密钥时码的哈希退回不带密钥的 SHA-256，照样能用', async () => {
+    const code = await codeFor(direct('1001'), key, keyless)
+    expect((await storedCodes())[0]!.codeHash).toBe(plainHash(code))
+    const preview = await keyless.request(
+      '/v1/bind',
+      jsonRequest('POST', { code, context: direct('u1', 'tg') }, bearer(key)),
+    )
+    expect(((await preview.json()) as BindResult).status).toBe('preview')
+    // 配了主密钥的实例算出的是另一个哈希，对不上
+    expect(await errorOf(await redeem(code, direct('u2', 'tg')), 400)).toBe(INVALID)
   })
 })

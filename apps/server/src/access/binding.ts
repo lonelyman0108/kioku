@@ -1,9 +1,10 @@
-import { createHash, randomInt, timingSafeEqual } from 'node:crypto'
+import { createHash, createHmac, hkdfSync, randomInt, timingSafeEqual } from 'node:crypto'
 
 import type { BindingStatus, MemberRole, SubjectBinding } from '@kioku/contracts'
 import { and, asc, desc, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 
+import { encryptionKey, type MasterKey } from '../crypto/keyring'
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
@@ -22,8 +23,9 @@ import type { KeySession } from './session'
 import { linkedToOthers, lockSubjects, mergeSubjects, type MergeOutcome } from './subjects'
 
 // 验证码自助绑定：在一个平台的私聊里用 Key 申请绑定码，到另一个平台的私聊里带上码，
-// 把那个平台账号的对象并进申请的对象。规则同合并对象（同种类、标记的限制）；
-// 申请的对象标记了成员时，要那个成员本人在管理界面确认后才合并
+// 把那个平台账号的对象并进申请的对象。规则同合并对象（同种类、标记的限制）。
+// 收码的人先看到要并到谁那里，再确认一次才合并；申请的对象标记了成员（收码的对象没标记成同一个成员）时，
+// 还要那个成员本人在管理界面确认
 
 // 8 位，字符集去掉了容易看混的 0、O、1、I、L；10 分钟有效，只能用一次
 const CODE_ALPHABET = '23456789ABCDEFGHJKMNPQRSTUVWXYZ'
@@ -31,10 +33,14 @@ const CODE_FORMAT = new RegExp(`^[${CODE_ALPHABET}]{8}$`)
 export const CODE_TTL_SECONDS = 600
 // 等成员确认的绑定这么多天内有效
 export const PENDING_TTL_DAYS = 7
-// 输错上限，一小时一个窗口：同一个收码的平台账号 5 次；同一个应用合计 100 次，挡住换着账号猜
+// 一个码最多记这么多个预览过的收码对象，多了丢掉最早的
+const PREVIEWERS = 10
+// 输错上限，一小时一个窗口：同一个收码的平台账号 5 次；同一个应用合计 1000 次，挡住换着账号猜。
+// 应用的上限放得宽，几十个小号也挡不住别人正常绑定：码有 31^8（约 8.5×10^11）种、只活 10 分钟，
+// 照每小时 1000 次猜，一个码活着的 10 分钟里最多被猜约 170 次，猜中的概率约 2×10^-10，可以忽略
 export const ATTEMPT_WINDOW_SECONDS = 3600
 export const ACCOUNT_ATTEMPTS = 5
-export const APP_ATTEMPTS = 100
+export const APP_ATTEMPTS = 1000
 
 export function generateCode(): string {
   let code = ''
@@ -48,9 +54,28 @@ export function normalizeCode(input: string): string | null {
   return CODE_FORMAT.test(code) ? code : null
 }
 
-// 库里只存哈希。带上应用：码只在同一个应用里用得了
-export function hashCode(appId: string, code: string): string {
-  return createHash('sha256').update(`kioku-bind-code\u0000${appId}\u0000${code}`).digest('hex')
+// 算码的 HMAC 用的密钥：从主密钥派生，用途标签写明是绑定码，和备份等别的用途分开
+const codeKey = (master: MasterKey) =>
+  Buffer.from(
+    hkdfSync('sha256', encryptionKey(master).key, Buffer.alloc(0), 'kioku-bind-code-hmac', 32),
+  )
+
+// 库里只存哈希，带上应用：码只在同一个应用里用得了。配了主密钥时算 HMAC，密钥从主密钥派生：
+// 读得到库、拿不到主密钥的人，没法在码的 10 分钟有效期里把它暴力算出来。没配主密钥时只能用不带密钥的 SHA-256，
+// 这种情况更弱：码只有 31^8 种，读得到库的人用 GPU 几分钟就能算出来。换了主密钥之后之前申请的码对不上，重新申请就行
+export function hashCode(master: MasterKey | null, appId: string, code: string): string {
+  const input = `kioku-bind-code\u0000${appId}\u0000${code}`
+  return master
+    ? createHmac('sha256', codeKey(master)).update(input).digest('hex')
+    : createHash('sha256').update(input).digest('hex')
+}
+
+// 平台账号只露出头尾几位：收码的人认得出是不是自己的另一个账号，码落到别人手里也不把整个账号给出去
+export function maskAccount(id: string): string {
+  const chars = [...id]
+  return chars.length <= 4
+    ? `${chars[0] ?? ''}***`
+    : `${chars.slice(0, 2).join('')}***${chars.slice(-2).join('')}`
 }
 
 // 在这个应用现在有效的码里找：逐条用常量时间比较、每条都比完，不按哈希去库里查，
@@ -115,10 +140,10 @@ export interface AttemptLimit {
   waitSeconds: number
 }
 
-// 核对绑定码之前先占一次名额，超限时返回哪一级超了。和登录的失败计数一样逐级计数：这个账号已经超限就停下，
-// 不再推高整个应用的计数（否则一个被挡住的账号还能把整个应用的名额耗光）；被应用的上限挡下时退回这个账号的这一次。
-// 在一个事务里按「这个账号 → 整个应用」的顺序锁计数行，同一个账号的并发请求排队，不会互相等成死锁。
-// 只看发来的平台账号，不建对象：超限的请求不解析会话
+// 核对绑定码之前先占一次名额，超限时返回哪一级超了；只有码不对时这次才算输错，别的结果由调用方退回（refundAttempt）。
+// 和登录的失败计数一样逐级计数：这个账号已经超限就停下，不再推高整个应用的计数（否则一个被挡住的账号还能把整个应用的名额耗光）；
+// 被应用的上限挡下时退回这个账号的这一次。在一个事务里按「这个账号 → 整个应用」的顺序锁计数行，
+// 同一个账号的并发请求排队，不会互相等成死锁。只看发来的平台账号，不建对象：超限的请求不解析会话
 export async function reserveAttempt(
   db: Db,
   key: KeyPrincipal,
@@ -138,22 +163,16 @@ export async function reserveAttempt(
   })
 }
 
-// 绑定成了（合并或等确认）：清掉这个平台账号的计数，退回这次在整个应用的计数里占的名额；别人输错的不清
-export async function clearAttempts(
+// 码是对的，只是预览、绑成了或者因为别的原因没绑成：退回这一次占的名额，两级各减一。
+// 只退这一次，之前输错的不清：否则拿一个自己的码反复预览，就能把输错的次数清零、接着猜别人的码
+export async function refundAttempt(
   db: Db,
   key: KeyPrincipal,
   platform: string,
   externalId: string,
 ): Promise<void> {
   await withSpace(db, key.spaceId, async (tx) => {
-    await tx
-      .delete(subjectBindAttempts)
-      .where(
-        and(
-          eq(subjectBindAttempts.appId, key.app.id),
-          eq(subjectBindAttempts.key, accountKey(platform, externalId)),
-        ),
-      )
+    await bump(tx, key, accountKey(platform, externalId), -1)
     await bump(tx, key, APP_KEY, -1)
   })
 }
@@ -190,6 +209,7 @@ export async function pruneBindingData(db: Db): Promise<{ codes: number; attempt
 // 码在同一个应用里不重复，撞上了（概率极小）就重新生成。发言人的对象在解析之后刚好被合并掉时返回 null
 export async function issueCode(
   db: Db,
+  master: MasterKey | null,
   key: KeyPrincipal,
   session: KeySession,
   platform: string,
@@ -211,7 +231,7 @@ export async function issueCode(
           subjectId,
           platform,
           externalId,
-          codeHash: hashCode(key.app.id, code),
+          codeHash: hashCode(master, key.app.id, code),
           expiresAt: sql`now() + make_interval(secs => ${CODE_TTL_SECONDS})`,
         })
         .onConflictDoNothing()
@@ -228,10 +248,18 @@ export interface Redeemer {
   displayName: string | null
 }
 
+export interface BindTarget {
+  platform: string
+  displayName: string | null
+  accountHint: string
+}
+
 export type RedeemResult =
+  // 码是对的，还没合并：告诉收码的人要并到谁那里；needsApproval 时确认之后还要那边标记的成员同意
+  | { kind: 'preview'; target: BindTarget; needsApproval: boolean }
   | { kind: 'merged'; outcome: MergeOutcome }
   | { kind: 'pending'; expiresAt: Date }
-  // 码不对、过期了、用过了或被新码换掉了：一律这样说，不透露是哪种
+  // 码不对、过期了、用过了、作废了或被新码换掉了，或是别的应用的：一律这样说，不透露是哪种
   | { kind: 'invalid' }
   // 收码的就是发码的对象（同一个账号，或者已经并在一起）
   | { kind: 'same' }
@@ -242,38 +270,45 @@ export type RedeemResult =
   // 收码的对象在解析之后刚好被合并掉了，再试一次就行
   | { kind: 'busy' }
 
-// 使用绑定码，全部检查与合并在一个事务里。session 是收码的这次私聊
+// 这个应用现在有效的码：只认这个应用的，别的空间的码在 RLS 之外，根本读不到
+function liveCodes(tx: Tx, appId: string) {
+  return tx
+    .select({
+      id: subjectBindCodes.id,
+      subjectId: subjectBindCodes.subjectId,
+      codeHash: subjectBindCodes.codeHash,
+    })
+    .from(subjectBindCodes)
+    .where(
+      and(
+        eq(subjectBindCodes.appId, appId),
+        isNull(subjectBindCodes.usedAt),
+        gt(subjectBindCodes.expiresAt, sql`now()`),
+      ),
+    )
+}
+
+// 使用绑定码，全部检查与合并在一个事务里。session 是收码的这次私聊。
+// 不带 confirm、或者这个收码的对象还没预览过这个码时只预览：记下是谁预览的，码不用掉。
+// 预览过的对象带上 confirm 再来才用掉码、合并（或等那边标记的成员确认）
 export async function redeemCode(
   db: Db,
+  master: MasterKey | null,
   key: KeyPrincipal,
   session: KeySession,
   code: string,
   redeemer: Redeemer,
+  confirm: boolean,
 ): Promise<RedeemResult> {
   const fromId = session.context.senderSubjectId!
-  const hash = hashCode(key.app.id, code)
+  const hash = hashCode(master, key.app.id, code)
   return withSpace(db, key.spaceId, async (tx) => {
-    // 只认这个应用的码；别的空间的码在 RLS 之外，根本读不到
-    const live = await tx
-      .select({
-        id: subjectBindCodes.id,
-        subjectId: subjectBindCodes.subjectId,
-        codeHash: subjectBindCodes.codeHash,
-      })
-      .from(subjectBindCodes)
-      .where(
-        and(
-          eq(subjectBindCodes.appId, key.app.id),
-          isNull(subjectBindCodes.usedAt),
-          gt(subjectBindCodes.expiresAt, sql`now()`),
-        ),
-      )
-    const match = matchCode(live, hash)
+    const match = matchCode(await liveCodes(tx, key.app.id), hash)
     if (!match) return { kind: 'invalid' }
     if (match.subjectId === fromId) return { kind: 'same' }
     // 先按 id 的顺序锁住两个对象，再锁码：和合并对象的加锁顺序一致（合并删掉对象时连带删它的码）
     const rows = await lockSubjects(tx, [match.subjectId, fromId])
-    // 锁住之后再核对一次：等锁期间码可能被别人用掉、被新码换掉，或者随发码的对象被合并掉而删了
+    // 锁住之后再核对一次：等锁期间码可能被别人用掉、作废、被新码换掉，或者随发码的对象被合并掉而删了
     const [held] = await tx
       .select()
       .from(subjectBindCodes)
@@ -294,6 +329,39 @@ export async function redeemCode(
     if (linkedToOthers([from], into.accountId)) {
       return { kind: 'linked', issuerLinked: into.accountId !== null }
     }
+    // 发码的对象标记了成员、收码的对象没标记成同一个成员时，要那个成员本人确认：这个对象的私聊算那个成员的主人私聊，
+    // 码泄露了别人就能把自己的账号挂过来。两边标记成同一个成员时不用：只有本人能把对象标记成自己，别人冒充不了
+    const approver =
+      into.accountId !== null && from.accountId !== into.accountId ? into.accountId : null
+
+    const previewed = held.previewedBy.includes(from.id)
+    if (!confirm || !previewed) {
+      if (!previewed) {
+        await tx
+          .update(subjectBindCodes)
+          .set({ previewedBy: [...held.previewedBy, from.id].slice(-PREVIEWERS) })
+          .where(eq(subjectBindCodes.id, held.id))
+      }
+      const [identity] = await tx
+        .select({ displayName: subjectIdentities.displayName })
+        .from(subjectIdentities)
+        .where(
+          and(
+            eq(subjectIdentities.platform, held.platform),
+            eq(subjectIdentities.kind, 'person'),
+            eq(subjectIdentities.externalId, held.externalId),
+          ),
+        )
+      return {
+        kind: 'preview',
+        target: {
+          platform: held.platform,
+          displayName: identity?.displayName ?? null,
+          accountHint: maskAccount(held.externalId),
+        },
+        needsApproval: approver !== null,
+      }
+    }
 
     await tx
       .update(subjectBindCodes)
@@ -312,14 +380,13 @@ export async function redeemCode(
       issuedExternalId: held.externalId,
       issuedAt: held.createdAt,
     }
-    if (into.accountId === null) {
+    if (approver === null) {
       await tx
         .insert(subjectBindings)
         .values({ ...record, status: 'merged', decidedAt: sql`now()` })
       return { kind: 'merged', outcome: await mergeSubjects(tx, from, into) }
     }
-    // 发码的对象标记了成员：这个对象的私聊算那个成员的主人私聊，码泄露了别人就能把自己的账号挂过来，
-    // 所以等那个成员本人确认。同一对对象已经有一条在等同一个成员的，沿用那一条
+    // 同一对对象已经有一条在等同一个成员的，沿用那一条
     const [waiting] = await tx
       .select({ expiresAt: subjectBindings.expiresAt })
       .from(subjectBindings)
@@ -327,7 +394,7 @@ export async function redeemCode(
         and(
           eq(subjectBindings.subjectId, into.id),
           eq(subjectBindings.fromSubjectId, from.id),
-          eq(subjectBindings.accountId, into.accountId),
+          eq(subjectBindings.accountId, approver),
           eq(subjectBindings.status, 'pending'),
           gt(subjectBindings.expiresAt, sql`now()`),
         ),
@@ -338,11 +405,26 @@ export async function redeemCode(
       .values({
         ...record,
         status: 'pending',
-        accountId: into.accountId,
+        accountId: approver,
         expiresAt: sql`now() + make_interval(days => ${PENDING_TTL_DAYS})`,
       })
       .returning({ expiresAt: subjectBindings.expiresAt })
     return { kind: 'pending', expiresAt: created!.expiresAt! }
+  })
+}
+
+// 群里发出来的码大家都看得到：作废它（删掉），不合并。码不对、已经用过、过期或者已经作废时什么也不做，
+// 调用方不管哪种都给同样的结果，不透露码存不存在
+export async function voidCode(
+  db: Db,
+  master: MasterKey | null,
+  key: KeyPrincipal,
+  code: string,
+): Promise<void> {
+  const hash = hashCode(master, key.app.id, code)
+  await withSpace(db, key.spaceId, async (tx) => {
+    const match = matchCode(await liveCodes(tx, key.app.id), hash)
+    if (match) await tx.delete(subjectBindCodes).where(eq(subjectBindCodes.id, match.id))
   })
 }
 

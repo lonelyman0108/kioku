@@ -16,6 +16,7 @@ CREATE TABLE "subject_bind_codes" (
 	"platform" text NOT NULL,
 	"external_id" text NOT NULL,
 	"code_hash" text NOT NULL,
+	"previewed_by" uuid[] DEFAULT '{}' NOT NULL,
 	"created_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"expires_at" timestamp with time zone NOT NULL,
 	"used_at" timestamp with time zone

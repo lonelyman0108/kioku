@@ -169,23 +169,51 @@ export const BindCode = z
   .meta({ id: 'BindCode' })
 export type BindCode = z.infer<typeof BindCode>
 
-// 使用绑定码：在另一个平台的私聊里带上码。不分大小写，中间的空格与连字符不算
+// 使用绑定码：在另一个平台的私聊里带上码。不分大小写，中间的空格与连字符不算。
+// 先不带 confirm 发一次，看清要并到谁那里（预览，码不用掉）；同一个账号预览过之后再带上 confirm 发一次才合并。
+// 没预览过就带 confirm 的，也只返回预览
 export const BindRequest = z
   .object({
     code: z.string().max(64),
     context: SessionContextInput,
+    confirm: z.boolean().default(false),
   })
   .meta({ id: 'BindRequest' })
 export type BindRequest = z.infer<typeof BindRequest>
 
+// 要并到的那个对象：申请绑定码时用的平台账号。平台上的名字，以及只露出头尾几位的账号，
+// 收码的人认得出是不是自己的另一个账号
+export const BindTarget = z
+  .object({
+    platform: z.string(),
+    displayName: z.string().nullable(),
+    accountHint: z.string(),
+  })
+  .meta({ id: 'BindTarget' })
+export type BindTarget = z.infer<typeof BindTarget>
+
+// preview：码是对的，还没合并，target 是要并到的对象，确认后两边私聊里记下的内容互相读得到；
 // merged：已经合并；pending：发码的对象标记了成员，等那个成员在管理界面确认，expiresAt 之前有效
 export const BindResult = z
   .object({
-    status: z.enum(['merged', 'pending']),
+    status: z.enum(['preview', 'merged', 'pending']),
+    // 只在预览时有
+    target: BindTarget.optional(),
+    // 确认之后还要发码的对象标记成的成员在管理界面同意（预览与等确认时）
+    needsApproval: z.boolean(),
     expiresAt: z.iso.datetime().nullable(),
   })
   .meta({ id: 'BindResult' })
 export type BindResult = z.infer<typeof BindResult>
+
+// 群里有人发了绑定码：作废它，不合并。码存不存在、是否已经失效，结果都一样
+export const VoidBindCodeRequest = z
+  .object({
+    code: z.string().max(64),
+    context: SessionContextInput,
+  })
+  .meta({ id: 'VoidBindCodeRequest' })
+export type VoidBindCodeRequest = z.infer<typeof VoidBindCodeRequest>
 
 // 对象详情：事实是挂在这个对象上的；会话摘要是群里（或和这个人的私聊里）的；抽取记录是涉及它的最近几批
 export const SubjectDetail = SubjectInfo.extend({

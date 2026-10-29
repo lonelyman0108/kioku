@@ -754,7 +754,7 @@ export const extractionRuns = pgTable(
 )
 
 // 绑定码：在私聊里用 Key 申请，到另一个平台的私聊里带上它，把那边的对象并进申请的对象（见 access/binding.ts）。
-// 库里只存哈希。同一个对象再申请时旧的删掉；过期的（用过的也是 10 分钟就过期）由每小时的清理删掉。
+// 库里只存哈希。同一个对象再申请时旧的删掉，在群里发出来的也删掉；过期的（用过的也是 10 分钟就过期）由每小时的清理删掉。
 // 发码的对象被合并掉时跟着删。只活几分钟，不进备份
 export const subjectBindCodes = pgTable(
   'subject_bind_codes',
@@ -772,6 +772,12 @@ export const subjectBindCodes = pgTable(
     platform: text().notNull(),
     externalId: text().notNull(),
     codeHash: text().notNull(),
+    // 预览过这个码的收码对象（只留最近几个）：预览过的才能接着确认合并，没预览过就确认的先给预览，
+    // 收码的人总会先看到要并到谁那里
+    previewedBy: uuid()
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
     createdAt: createdAt(),
     expiresAt: timestamp({ withTimezone: true }).notNull(),
     usedAt: timestamp({ withTimezone: true }),

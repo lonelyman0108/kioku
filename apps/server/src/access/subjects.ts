@@ -155,16 +155,21 @@ export async function mergeSubjects(
   return { scope, batches }
 }
 
-// 合并的事务提交之后排抽取：满一批的马上抽取，不满的等空闲
+// 合并的事务提交之后排抽取：满一批的马上抽取，不满的等空闲。合并已经成了，排不上只记日志、不报错：
+// 这一批等这个作用域的下一轮对话进缓冲时会再排上
 export async function enqueueMerged(
   deps: Deps,
   spaceId: string,
   outcome: MergeOutcome,
 ): Promise<void> {
   for (const { appId, turns } of outcome.batches) {
-    await deps.jobs?.enqueueExtraction(
-      { spaceId, appId, scope: outcome.scope },
-      extractionDelay(turns),
-    )
+    try {
+      await deps.jobs?.enqueueExtraction(
+        { spaceId, appId, scope: outcome.scope },
+        extractionDelay(turns),
+      )
+    } catch (err) {
+      console.error('合并之后排抽取失败，这一批等下一轮对话时再排', err)
+    }
   }
 }
