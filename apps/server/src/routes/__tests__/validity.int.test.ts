@@ -220,6 +220,29 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(changes).toEqual([['priority'], ['validTo'], ['content'], ['validTo'], []])
     })
 
+    it('修改时原样带回没改过的有效到不检查：在最后一分钟里改别的字段照样成功，换成别的近时间照样拒绝', async () => {
+      const m = await ok<MemoryView>(
+        await keyCreate({ uri: 'notes://last', content: '旧的', validTo: inDays(1) }),
+        201,
+      )
+      // 只剩半分钟（接口不收这么近的时间，直接改库）
+      const soon = new Date(Date.now() + 30_000)
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.update(memories).set({ validTo: soon }).where(eq(memories.id, m.id)),
+      )
+      // 读到整条记忆再原样送回来，只改了正文
+      const read = await ok<MemoryView>(await keyGet(m.uri))
+      expect(read.validTo).toBe(soon.toISOString())
+      const saved = await ok<MemoryView>(
+        await keyPatch({ uri: m.uri, content: '新的', validTo: read.validTo }),
+      )
+      expect(saved).toMatchObject({ content: '新的', validTo: soon.toISOString() })
+      const other = new Date(soon.getTime() + 10_000).toISOString()
+      expect(await errorOf(await keyPatch({ uri: m.uri, validTo: other }), 400)).toContain(
+        '晚至少一分钟',
+      )
+    })
+
     it('有效到要比现在晚至少一分钟：过去的、正好现在的、半分钟之后的、不带时区的都拒绝，原来的有效期不变', async () => {
       const past = new Date(Date.now() - 60_000).toISOString()
       const soon = new Date(Date.now() + 30_000).toISOString()
@@ -316,7 +339,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await history(old.id)).events.map((e) => e.type)).toEqual(['create'])
     })
 
-    it('重新生效时，读到之后被别的事务让出的记录返回 409，不会留在删除的状态里却报成功', async () => {
+    it('重新生效先锁住这一行再判断：等锁期间被让出、新记录占了 URI 时按现在的状态返回 409，不会报成功', async () => {
       const m = await ok<MemoryView>(
         await keyCreate({ uri: 'notes://race2', content: '过期的', validTo: inDays(1) }),
         201,
@@ -325,13 +348,98 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       const res = await whileBlocking(
         (tx) => tx`select id from memories where id = ${m.id} for update`,
         () => reactivate(m.id, m.version),
-        // 重新生效等在这一行的锁上时，另一个事务让出了它：软删除，版本号不变
-        (tx) => tx`update memories set deleted_at = now() where id = ${m.id}`,
+        // 重新生效等在这一行的锁上时，另一次写入让出了它（软删除，版本号不变）、在这个 URI 上写了新的
+        async (tx) => {
+          await tx`update memories set deleted_at = now() where id = ${m.id}`
+          await tx`insert into memories (space_id, form, layer, sensitivity, provenance, owner_account_id, domain, path, content)
+            values (${ws.spaceId}, 'curated', 'private', 'private', 'agent', ${ws.accountId}, 'notes', 'race2', '新的')`
+        },
       )
-      expect(await errorOf(res, 409)).toContain('刚被其他请求修改')
+      expect(await errorOf(res, 409)).toContain('先把那条移走或删掉')
       const row = await rowOf(m.id)
       expect(row.deletedAt).not.toBeNull()
       expect(row.validTo).not.toBeNull()
+    })
+
+    it('重新生效时版本号和锁到的那一版比：等锁期间被改过的返回版本已变化', async () => {
+      const m = await ok<MemoryView>(
+        await keyCreate({ uri: 'notes://race3', content: '过期的', validTo: inDays(1) }),
+        201,
+      )
+      await expire(m.id)
+      const res = await whileBlocking(
+        (tx) => tx`select id from memories where id = ${m.id} for update`,
+        () => reactivate(m.id, m.version),
+        // 例如在历史里恢复到了旧的一版：版本号加一，仍然过期
+        (tx) =>
+          tx`update memories set content = '恢复的旧版', version = version + 1 where id = ${m.id}`,
+      )
+      expect(await errorOf(res, 409)).toContain('版本已变化')
+      expect((await rowOf(m.id)).validTo).not.toBeNull()
+    })
+
+    it('让出 URI 时锁住候选行，事件里的「改前」是锁到的那一版', async () => {
+      const old = await ok<MemoryView>(
+        await keyCreate({ uri: 'notes://snap', content: '第一版', validTo: inDays(1) }),
+        201,
+      )
+      await expire(old.id)
+      const res = await whileBlocking(
+        (tx) => tx`select id from memories where id = ${old.id} for update`,
+        () => keyCreate({ uri: 'notes://snap', content: '新的' }),
+        // 新建等在这一行的锁上时，它被改过（仍然过期）
+        (tx) =>
+          tx`update memories set content = '改过的', version = version + 1 where id = ${old.id}`,
+      )
+      expect(res.status).toBe(201)
+      const expireEvent = (await history(old.id)).events.find((e) => e.type === 'expire')!
+      expect(expireEvent.before).toMatchObject({ content: '改过的', version: old.version + 1 })
+    })
+
+    it('重新生效时被别的写入锁着的候选跳过，不和按 id 顺序加锁的写入互相等成死锁', async () => {
+      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+      // 同一个 URI 上：共享的过期记忆（secret，editor 让不出它），和 editor 已经过期的私人记忆，两者并存
+      const shared = await ok<MemoryView>(
+        await create({
+          uri: 'kb://plan',
+          content: '共享的',
+          layer: 'base',
+          sensitivity: 'secret',
+          validTo: inDays(1),
+        }),
+        201,
+      )
+      await expire(shared.id)
+      const mine = await ok<MemoryView>(
+        await create({ uri: 'kb://plan', content: 'eve 的', validTo: inDays(1) }, editor.cookie),
+        201,
+      )
+      await expire(mine.id)
+      // 另一次写入（例如 editor 在这个 URI 上新建，按 id 顺序加锁）已经锁住了 editor 的那一条，还要来等共享的那一条。
+      // 共享的那一条重新生效时先锁住了自己：让出 URI 时再等 editor 那一条的锁，两边就互相等成死锁。
+      // 所以锁还拿着的时候，重新生效就该做完
+      const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
+      let outcome = 'blocked' as Response | 'blocked'
+      try {
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+          await tx`select id from memories where id = ${mine.id} for update`
+          pending = Promise.resolve(reactivate(shared.id, shared.version))
+          outcome = await Promise.race([
+            pending,
+            new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 3_000)),
+          ])
+        })
+      } finally {
+        await pending?.catch(() => {})
+        await side.end()
+      }
+      expect(outcome).not.toBe('blocked')
+      expect((outcome as Response).status).toBe(200)
+      expect(await rowOf(shared.id)).toMatchObject({ validTo: null, deletedAt: null })
+      // 被锁着的那一条没有被让出
+      expect((await rowOf(mine.id)).deletedAt).toBeNull()
     })
 
     it('删除时刚好到期：和读不到一样返回 404，删除标记不写，免得被当成过期之后让出的', async () => {
@@ -816,8 +924,44 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(events.map((e) => e.eventType)).toEqual(['create', 'update', 'reactivate'])
       expect((events[2]!.after as { validTo: unknown }).validTo).toBeNull()
       expect(await errorOf(await reactivateFact(id, old.id, old.version + 1), 409)).toContain(
-        '现在是有效的',
+        '没有被推翻',
       )
+    })
+
+    it('事实的重新生效只看推翻时设的 valid_to：因为到期时间失效的返回 409，不会报成功却还是失效的', async () => {
+      const id = await subjectId()
+      const insertFact = async (values: { validTo?: Date; expiresAt?: Date }) =>
+        (
+          await withSpace(database.db, ws.spaceId, (tx) =>
+            tx
+              .insert(memories)
+              .values({
+                spaceId: ws.spaceId,
+                form: 'extracted',
+                layer: 'subject',
+                subjectId: id,
+                sensitivity: 'public',
+                provenance: 'untrusted',
+                originScope: 'global',
+                content: '只在这段时间成立的事',
+                ...values,
+              })
+              .returning(),
+          )
+        )[0]!
+      const past = new Date(Date.now() - 60_000)
+      const lapsed = await insertFact({ expiresAt: past })
+      expect(await errorOf(await reactivateFact(id, lapsed.id, lapsed.version), 409)).toContain(
+        '没有被推翻',
+      )
+      // 被推翻了、到期时间也过了：清掉 valid_to 之后照样看不到
+      const both = await insertFact({ validTo: past, expiresAt: past })
+      expect(await errorOf(await reactivateFact(id, both.id, both.version), 409)).toContain(
+        '到期时间',
+      )
+      for (const fact of [lapsed, both]) {
+        expect(await rowOf(fact.id)).toMatchObject({ validTo: fact.validTo, version: 1 })
+      }
     })
 
     it('抽取的记忆不走记忆的重新生效：被推翻的事实与到期的会话摘要都返回 409，原样不动', async () => {
