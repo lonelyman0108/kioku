@@ -1,6 +1,13 @@
 import { describe, expect, it } from 'vitest'
 
-import { draftOf, draftsChanged, inputOf, switchEnded } from '../embeddingDrafts'
+import {
+  draftOf,
+  draftsChanged,
+  followEmbedding,
+  inputOf,
+  switchEnded,
+  switchTracker,
+} from '../embeddingDrafts'
 
 const saved = { id: 'c1', baseUrl: 'https://e.example.com/v1', model: 'm', hasApiKey: true }
 
@@ -40,5 +47,49 @@ describe('换模型结束', () => {
     expect(switchEnded(fresh, other, old)).toBeNull()
     expect(switchEnded(undefined, null, old)).toBeNull()
     expect(switchEnded(null, null, old)).toBeNull()
+  })
+
+  it('页面开着时读到的变化才算：打开前缓存里的「正在换」不拿来比较', () => {
+    // 回到页面：缓存里还在换，打开之后读到的已经切过去了，不提示
+    const back = switchTracker()
+    expect(back(false, fresh, old)).toBeNull()
+    expect(back(true, null, fresh)).toBeNull()
+    // 打开之后先读到还在换，再读到切过去或者被放弃
+    const watching = switchTracker()
+    expect(watching(false, fresh, old)).toBeNull()
+    expect(watching(true, fresh, old)).toBeNull()
+    expect(watching(true, fresh, old)).toBeNull()
+    expect(watching(true, null, fresh)).toBe('switched')
+    expect(watching(true, null, fresh)).toBeNull()
+    const abandoned = switchTracker()
+    expect(abandoned(true, fresh, old)).toBeNull()
+    expect(abandoned(true, null, old)).toBe('abandoned')
+  })
+})
+
+describe('向量进度要不要接着刷新', () => {
+  const progress = (model: string, embedded: number) => ({ model, embedded })
+  const status = (eligible: number, active: number | null, next: number | null = null) => ({
+    eligible,
+    active: active === null ? null : progress('old', active),
+    next: next === null ? null : progress('new', next),
+    lastError: null,
+  })
+
+  it('正在换模型时一直刷，补齐了也要等它切过去', () => {
+    expect(followEmbedding(status(10, 10, 3))).toBe(true)
+    expect(followEmbedding(status(10, 10, 10))).toBe(true)
+  })
+
+  it('正在用的模型还有记忆没有向量时接着刷（现在切换之后、刚配好、补不上的）', () => {
+    expect(followEmbedding(status(10, 4))).toBe(true)
+    expect(followEmbedding(status(10, 0))).toBe(true)
+  })
+
+  it('补齐了、没配模型、还没读到进度时不刷', () => {
+    expect(followEmbedding(status(10, 10))).toBe(false)
+    expect(followEmbedding(status(0, 0))).toBe(false)
+    expect(followEmbedding(status(10, null))).toBe(false)
+    expect(followEmbedding(undefined)).toBe(false)
   })
 })
