@@ -48,6 +48,8 @@ export const MemoryListItem = z.object({
   appId: z.uuid().nullable(),
   version: z.number().int(),
   updatedAt: z.string(),
+  // 有效到；null 表示一直有效。列表只列现在有效的，过期的在「已过期」里
+  validTo: z.string().nullable(),
 })
 export type MemoryListItem = z.infer<typeof MemoryListItem>
 
@@ -125,6 +127,8 @@ export const MemorySnapshot = z.object({
   content: z.string().nullable(),
   version: z.number().int(),
   deleted: z.boolean(),
+  // 这一版的有效到；null 表示一直有效
+  validTo: z.string().nullable(),
 })
 export type MemorySnapshot = z.infer<typeof MemorySnapshot>
 
@@ -136,7 +140,8 @@ export const EventActor = z.object({
 })
 export type EventActor = z.infer<typeof EventActor>
 
-// 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete
+// 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete、
+// reactivate（让过期的记忆重新生效）
 export const HistoryEvent = z.object({
   id: z.number().int(),
   type: z.string(),
@@ -161,6 +166,10 @@ export const MemoryHistory = z.object({
     sensitivity: Sensitivity,
     version: z.number().int(),
     deletedAt: z.string().nullable(),
+    // 有效到；null 表示一直有效。已经过去时这条记忆过期了，不再召回、不进 boot
+    validTo: z.string().nullable(),
+    // 过期之后让出了 URI（同一个 URI 上写了新的记忆，它被软删除），见 ExpiredMemory.released
+    released: z.boolean(),
   }),
   // 从早到晚；成员看不到的版本所在的事件不列出
   events: z.array(HistoryEvent),
@@ -175,6 +184,8 @@ export const PageQuery = z.object({
 })
 export type PageQuery = z.infer<typeof PageQuery>
 
+// 用户删掉的记忆（删除时还有效），能撤销删除。删掉之后才到期的也在这里，撤销删除只清删除标记，
+// 之后回到已过期里；过期之后被让出 URI 的不在这里，在已过期里重新生效
 export const DeletedMemory = z.object({
   id: z.uuid(),
   uri: z.string(),
@@ -184,6 +195,8 @@ export const DeletedMemory = z.object({
   disclosure: z.string().nullable(),
   version: z.number().int(),
   deletedAt: z.string(),
+  // 有效到；null 表示一直有效，已经过去时这条删掉之后又过期了
+  validTo: z.string().nullable(),
 })
 export type DeletedMemory = z.infer<typeof DeletedMemory>
 
@@ -192,6 +205,29 @@ export const DeletedMemoryList = z.object({
   nextCursor: z.string().nullable(),
 })
 export type DeletedMemoryList = z.infer<typeof DeletedMemoryList>
+
+// 已过期的记忆：有效期已过、不再召回的策展记忆，能让它重新生效。用户删掉的（删除时还有效）不在这里，在已删除里
+export const ExpiredMemory = z.object({
+  id: z.uuid(),
+  uri: z.string(),
+  layer: Layer,
+  sensitivity: Sensitivity,
+  priority: z.number().int(),
+  disclosure: z.string().nullable(),
+  version: z.number().int(),
+  // 什么时候过期的
+  expiredAt: z.string(),
+  // 过期之后让出了 URI：同一个 URI 上写了新的记忆，它被软删除。重新生效时一并撤销删除；
+  // URI 还被那条新的占着时不行，要先把那条移走或删掉
+  released: z.boolean(),
+})
+export type ExpiredMemory = z.infer<typeof ExpiredMemory>
+
+export const ExpiredMemoryList = z.object({
+  items: z.array(ExpiredMemory),
+  nextCursor: z.string().nullable(),
+})
+export type ExpiredMemoryList = z.infer<typeof ExpiredMemoryList>
 
 export const ActivityItem = z.object({
   id: z.number().int(),
@@ -207,6 +243,8 @@ export const ActivityItem = z.object({
   left: z.boolean(),
   // 记忆现在已经删除（包括过期后让出 URI 的）：那个 URI 上可能已经是别的记忆了。离开了可见范围的一律为 false
   deleted: z.boolean(),
+  // 记忆现在已经过期：按 URI 读不到它，那个 URI 上可能是别的成员的记忆。离开了可见范围的一律为 false
+  expired: z.boolean(),
 })
 export type ActivityItem = z.infer<typeof ActivityItem>
 
@@ -235,6 +273,15 @@ export type GlossaryIndex = z.infer<typeof GlossaryIndex>
 
 export const UndeleteRequest = z.object({ memoryId: z.uuid() })
 export type UndeleteRequest = z.infer<typeof UndeleteRequest>
+
+// 让过期的策展记忆重新生效：清掉有效期，一直有效；过期之后让出了 URI 的一并撤销删除。
+// 抽取的记忆不在这里：被推翻的事实在对象页上重新生效，会话摘要按设计到期。
+// expectedVersion 是界面上看到的版本号，期间被改过就返回 409
+export const ReactivateRequest = z.object({
+  memoryId: z.uuid(),
+  expectedVersion: z.number().int(),
+})
+export type ReactivateRequest = z.infer<typeof ReactivateRequest>
 
 // 抽取预算（每个空间）：每月最多用多少 token（UTC 自然月，抽取用的，不含嵌入）、每个对象每天最多写几条事实。
 // 用到八成时概览提醒；用完之后只写会话摘要、不再抽取事实，下个月恢复

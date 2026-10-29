@@ -5,6 +5,7 @@ import { z } from 'zod'
 import type { MasterKey } from '../crypto/keyring'
 import type { Database, Db, Tx } from '../db/client'
 import { applyMigrations, lastMigration, lockMigrations } from '../db/migrate'
+import { markRestored } from '../jobs/retention'
 import { BACKUP_FORMAT, BACKUP_VERSION } from './export'
 import { openBackup } from './format'
 import { forgetBackupSettings } from './settings'
@@ -100,6 +101,8 @@ export interface RestoreSummary {
   upgraded: number
   // 备份里配着备份存储，恢复时清掉了
   backupCleared: boolean
+  // 保留期的清理暂停到什么时候（恢复的时间加上保留天数）
+  retentionPausedUntil: Date
 }
 
 const initializedError = (accounts: number, spaces: number) =>
@@ -156,7 +159,7 @@ export async function restoreBackup(
       if (!(await lastMigration(tx))) await applyMigrations(tx, local.slice(0, position))
     })
   }
-  const { rows, backupCleared } = await db.transaction(async (tx) => {
+  const { rows, backupCleared, retentionPausedUntil } = await db.transaction(async (tx) => {
     // 先拿到迁移的锁再核对库停在哪里：同时启动的服务要等这个事务结束才能迁移
     await lockMigrations(tx)
     const applied = await lastMigration(tx)
@@ -170,9 +173,20 @@ export async function restoreBackup(
     // 迁移按没有设置空间的连接执行，和服务启动时一样
     await tx.execute(sql`select set_config('app.space_id', '', true)`)
     await applyMigrations(tx, local.slice(position))
-    return { rows: counts, backupCleared: await forgetBackupSettings(tx) }
+    return {
+      rows: counts,
+      backupCleared: await forgetBackupSettings(tx),
+      // 恢复出的已删除记录按删除的时间早就过了保留期，照常清理的话启动后第一次清理就把要找回的删掉了
+      retentionPausedUntil: await markRestored(tx),
+    }
   })
-  return { header, rows, upgraded: local.length - position, backupCleared }
+  return {
+    header,
+    rows,
+    upgraded: local.length - position,
+    backupCleared,
+    retentionPausedUntil,
+  }
 }
 
 // 写回一段时每批最多多少行、多少字节

@@ -8,6 +8,7 @@ import type {
   DeletedMemoryList,
   DomainSummary,
   EventActor,
+  ExpiredMemoryList,
   GlossaryIndex,
   LayerCount,
   Layer,
@@ -29,6 +30,7 @@ import type {
   RecallEventQuery,
   RecallSource,
   RecallVia,
+  ReactivateRequest,
   RestoreRequest,
   ReviewRequest,
   ReviewResult,
@@ -52,6 +54,7 @@ import {
   like,
   lt,
   lte,
+  ne,
   or,
   sql,
   type SQL,
@@ -303,13 +306,15 @@ export class MemoryService {
   }
 
   // URI 冲突由数据库判断（同一归属的唯一索引，以及共享与成员节点互斥的触发器，二者都按唯一约束报错），
-  // 在这里转成 409，REST 与 MCP 都能拿到明确的提示
-  private async run<T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>): Promise<T> {
+  // 在这里转成 409，REST 与 MCP 都能拿到明确的提示；conflict 是给这次操作的更具体的说法
+  private async run<T>(
+    fn: (tx: Tx, personaIds: string[]) => Promise<T>,
+    conflict = 'URI 已被占用',
+  ): Promise<T> {
     try {
       return await runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
     } catch (err) {
-      if (isUniqueViolation(err, 'memories_uri_live_idx'))
-        throw new MemoryError(409, 'URI 已被占用')
+      if (isUniqueViolation(err, 'memories_uri_live_idx')) throw new MemoryError(409, conflict)
       throw err
     }
   }
@@ -322,9 +327,10 @@ export class MemoryService {
   // （例如让出 URI 的过期记录），每次调用各用一份，同一个服务实例上的并发写入互不干扰
   private async write(
     fn: (tx: Tx, personaIds: string[], released: string[]) => Promise<MemoryView>,
+    conflict?: string,
   ): Promise<MemoryView> {
     const released: string[] = []
-    const view = await this.run((tx, personaIds) => fn(tx, personaIds, released))
+    const view = await this.run((tx, personaIds) => fn(tx, personaIds, released), conflict)
     this.changed([view.id, ...released])
     return view
   }
@@ -332,7 +338,6 @@ export class MemoryService {
   // 按 URI 找当前调用方对应的、仍然有效的那条：别的成员的 owner / private 记忆不在候选里，
   // 已失效或已过期的也不算。数据库保证这样的记录在一个 URI 上至多一条（共享与成员节点互斥），所以不用排序
   private async findLive(tx: Tx, parsed: ParsedUri): Promise<MemoryRow | undefined> {
-    const now = new Date()
     const [row] = await tx
       .select()
       .from(memories)
@@ -341,8 +346,7 @@ export class MemoryService {
           eq(memories.domain, parsed.domain),
           eq(memories.path, parsed.path),
           isNull(memories.deletedAt),
-          or(isNull(memories.validTo), gt(memories.validTo, now)),
-          or(isNull(memories.expiresAt), gt(memories.expiresAt, now)),
+          validAt(new Date()),
           or(
             isNull(memories.ownerAccountId),
             eq(memories.ownerAccountId, this.ctx.access.ownerAccountId),
@@ -357,15 +361,21 @@ export class MemoryService {
   // 冲突检查交给数据库：同一归属下的唯一索引 memories_uri_live_idx，以及共享与成员节点互斥的触发器
   // memories_uri_exclusive（它对同一个 URI 加咨询锁串行检查，不看已失效或过期的记录），冲突时 run() 转成 409。
   // 这里只做数据库做不了的一步：目标 URI 上已失效或过期、调用方又能让出的记录，软删除并让出 URI，
-  // 否则同一归属下谁都看不见它，却会一直撞上唯一索引
+  // 否则同一归属下谁都看不见它，却会一直撞上唯一索引。让出的记录删除时间不早于过期时间（见 isReleased）。
+  // reviving 是让过期的记录重新生效：它自己也是这个 URI 上过期的记录，不能被让出（except）；它在这之前已经锁住了，
+  // 再等别的候选行的锁，会和按 id 顺序加锁的另一次写入互相等成死锁，所以被锁着的候选跳过，
+  // 没让出的照样由唯一索引与触发器判断
   private async claimUri(
     tx: Tx,
     parsed: ParsedUri,
     target: { ownerAccountId: string | null },
     released: string[],
+    reviving?: { except: string },
   ): Promise<void> {
     const now = new Date()
-    const rows = await tx
+    // 锁住候选行再判断，快照用锁到的那一版；按 id 排序，几次写入同时让出几行时加锁的顺序一样。
+    // 等到锁时已经被别的事务让出、重新生效或延长了有效期的，条件不再成立，不会返回
+    const candidates = tx
       .select()
       .from(memories)
       .where(
@@ -373,7 +383,8 @@ export class MemoryService {
           eq(memories.domain, parsed.domain),
           eq(memories.path, parsed.path),
           isNull(memories.deletedAt),
-          or(lte(memories.validTo, now), lte(memories.expiresAt, now)),
+          endedAt(now),
+          reviving ? ne(memories.id, reviving.except) : undefined,
           target.ownerAccountId
             ? or(
                 isNull(memories.ownerAccountId),
@@ -382,6 +393,10 @@ export class MemoryService {
             : undefined,
         ),
       )
+      .orderBy(asc(memories.id))
+    const rows = reviving
+      ? await candidates.for('update', { skipLocked: true })
+      : await candidates.for('update')
     for (const row of rows) {
       // 能让出的：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
       // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
@@ -389,12 +404,12 @@ export class MemoryService {
       const foreignPrivate =
         row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
       if (!foreignPrivate && !canModify(this.ctx.access, row)) continue
+      // 只让出这一刻仍然过期的，删除时间就是这一刻（不早于过期时间，见 isReleased）。行已经锁住，这里只是复查
       const [gone] = await tx
         .update(memories)
         .set({ deletedAt: now, updatedAt: now })
-        .where(and(eq(memories.id, row.id), isNull(memories.deletedAt)))
+        .where(and(eq(memories.id, row.id), isNull(memories.deletedAt), endedAt(now)))
         .returning()
-      // 并发的另一次写入已经让出了它
       if (!gone) continue
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       // 让出的是别的成员的私人记录时，事件记在本次写入者名下，快照里不放对方的正文
@@ -432,20 +447,27 @@ export class MemoryService {
   }
 
   // 删掉读到的这一版：条件里带上版本，检查之后、删除之前别人提交的修改不会被一起删掉，
-  // 事件里的「删除前」快照也就是真正被删掉的那一版
-  private async softDelete(tx: Tx, before: MemoryRow): Promise<void> {
+  // 事件里的「删除前」快照也就是真正被删掉的那一版。只删这一刻还有效的，删除时间就写这一刻：
+  // 用户删掉的删除时间总早于过期时间，和过期之后被让出的（不早于过期时间，见 isReleased）分得开。
+  // 读到之后刚好到期的，和读不到一样是 404（notFound 是给调用方的说法）
+  private async softDelete(tx: Tx, before: MemoryRow, notFound: string): Promise<void> {
+    const now = new Date()
     const [row] = await tx
       .update(memories)
-      .set({ deletedAt: new Date(), updatedAt: new Date() })
+      .set({ deletedAt: now, updatedAt: now })
       .where(
         and(
           eq(memories.id, before.id),
           eq(memories.version, before.version),
           isNull(memories.deletedAt),
+          validAt(now),
         ),
       )
       .returning()
-    if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+    if (!row) {
+      if (!isValidAt(before, now)) throw new MemoryError(404, notFound)
+      throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+    }
     const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
     await this.event(tx, before.id, 'delete', snapshot(before, glossary), snapshot(row, glossary))
   }
@@ -702,6 +724,8 @@ export class MemoryService {
 
   async create(input: CreateMemoryRequest, meta: CreateMeta = {}): Promise<MemoryView> {
     const parsed = parse(input.uri)
+    const validFrom = meta.createdAt ?? new Date()
+    const validTo = input.validTo === undefined ? null : checkValidTo(input.validTo, validFrom)
     return this.write(async (tx, _personaIds, released) => {
       const ownership = await this.resolveOwnership(tx, parsed, input.layer)
       const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
@@ -740,6 +764,7 @@ export class MemoryService {
           ...body,
           priority: input.priority,
           disclosure: input.disclosure ?? null,
+          validTo,
           ...(meta.createdAt ? { createdAt: meta.createdAt, validFrom: meta.createdAt } : {}),
           ...(meta.updatedAt ? { updatedAt: meta.updatedAt } : {}),
         })
@@ -915,6 +940,15 @@ export class MemoryService {
       )
     }
     this.assertModifiable(before, `没有权限改 ${before.layer} 层的记忆`)
+    // 有效期：不给就不动，null 清掉（一直有效），给了就要比现在晚至少一分钟（见 checkValidTo）。
+    // 和现在存的一样时不算改动、也不检查：读到整条记忆再原样送回来（MCP 与 SDK 常这样做）时，
+    // 不能在它的最后一分钟里因为「至少晚一分钟」被拒。只在要改时写这一列：URI 互斥的触发器在有效期变化时也检查
+    const validTo =
+      input.validTo === undefined || sameTime(input.validTo, before.validTo)
+        ? undefined
+        : input.validTo === null
+          ? null
+          : checkValidTo(input.validTo, before.validFrom)
 
     // 改层只在 base、owner、private 之间：共享与按成员互转时归属跟着变，按成员的层归写入方
     const layer = input.layer ?? before.layer
@@ -989,6 +1023,7 @@ export class MemoryService {
         sensitivity,
         priority: input.priority ?? before.priority,
         disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
+        ...(validTo !== undefined ? { validTo } : {}),
         version: sql`${memories.version} + 1`,
         updatedAt: new Date(),
       })
@@ -1064,39 +1099,91 @@ export class MemoryService {
       const before = await this.findReadable(tx, parsed, personaIds)
       checkExpected(before, expected)
       this.assertModifiable(before, `没有权限删除 ${before.layer} 层的记忆`)
-      await this.softDelete(tx, before)
+      await this.softDelete(tx, before, `记忆不存在：${uri}`)
       return before.id
     })
     this.changed([id])
   }
 
-  // 删掉对象页上的一条事实（从对话里抽取、挂在这个对象上的）。确认过的也能删：
+  // 对象页上的一条事实（从对话里抽取、挂在这个对象上的对象层记忆），锁住这一行。删除与重新生效只是读得到的条件不同。
+  // state 时一起算出它是不是被推翻了（推翻时设的 valid_to 已过）、是不是已经到期（expires_at 已过），
+  // 都按数据库的时间，和已过期列表同一个时钟；删除不要，不算。找不到和读不到一样是 404
+  private async lockFact(
+    tx: Tx,
+    subjectId: string,
+    factId: string,
+    readable: SQL,
+    options: { state?: boolean } = {},
+  ): Promise<{ row: MemoryRow; superseded: boolean | null; lapsed: boolean | null }> {
+    const unknown = sql<boolean | null>`null::boolean`
+    const [found] = await tx
+      .select({
+        row: memories,
+        superseded: options.state ? SUPERSEDED : unknown,
+        lapsed: options.state ? LAPSED : unknown,
+      })
+      .from(memories)
+      .where(
+        and(
+          eq(memories.id, factId),
+          eq(memories.form, 'extracted'),
+          eq(memories.layer, 'subject'),
+          eq(memories.subjectId, subjectId),
+          readable,
+        ),
+      )
+      .for('update')
+    if (!found) throw new MemoryError(404, '事实不存在')
+    return found
+  }
+
+  // 删掉对象页上的一条事实（现在有效、读得到的）。确认过的也能删：
   // 群里的新说法不会推翻确认过的事实，要不要留由成员在这里决定。看过之后被改过（版本变了）的不删
   async deleteFact(subjectId: string, factId: string, version: number): Promise<void> {
     await this.run(async (tx, personaIds) => {
-      const [row] = await tx
-        .select()
-        .from(memories)
-        .where(
-          and(
-            eq(memories.id, factId),
-            eq(memories.form, 'extracted'),
-            eq(memories.layer, 'subject'),
-            eq(memories.subjectId, subjectId),
-            readableConditions(this.ctx.access, { personaIds }),
-          ),
-        )
-        .for('update')
-      if (!row) throw new MemoryError(404, '事实不存在')
+      const { row } = await this.lockFact(
+        tx,
+        subjectId,
+        factId,
+        readableConditions(this.ctx.access, { personaIds }),
+      )
       if (row.version !== version) throw new MemoryError(409, '这条事实刚被改过，请刷新后再删')
       this.assertModifiable(row, `没有权限删除 ${row.layer} 层的记忆`)
-      await this.softDelete(tx, row)
+      await this.softDelete(tx, row, '事实不存在')
+    })
+    this.changed([factId])
+  }
+
+  // 让对象页上一条被推翻的事实重新生效：清掉推翻时设的 valid_to。推翻它的那条照样有效，
+  // 要不要留由成员在对象页上决定（能删事实）。要按管理读取读得到、也写得了它；没删除的才收，
+  // 读不到和不存在一样是 404，看过之后被改过（版本变了）的返回 409。和别的写入一样，提交后通知（安排向量更新）
+  async reactivateFact(subjectId: string, factId: string, version: number): Promise<void> {
+    await this.run(async (tx) => {
+      const { row, superseded, lapsed } = await this.lockFact(
+        tx,
+        subjectId,
+        factId,
+        and(isNull(memories.deletedAt), this.manageable())!,
+        { state: true },
+      )
+      if (row.version !== version) throw new MemoryError(409, '这条事实刚被改过，请刷新后再试')
+      // 只看推翻时设的 valid_to，清掉的也只有它；到期时间也过了的，清掉之后照样看不到，不能报成功
+      if (!superseded) throw new MemoryError(409, '这条事实没有被推翻，不用重新生效')
+      if (lapsed) throw new MemoryError(409, '这条事实已经过了到期时间，重新生效之后也看不到')
+      this.assertModifiable(row, `没有权限改 ${row.layer} 层的记忆`)
+      const [after] = await tx
+        .update(memories)
+        .set({ validTo: null, version: row.version + 1, updatedAt: new Date() })
+        .where(eq(memories.id, row.id))
+        .returning()
+      await this.event(tx, row.id, 'reactivate', snapshot(row, []), snapshot(after!, []))
     })
     this.changed([factId])
   }
 
   // 待审队列里的处理：确认（来源改成主人）或删除。只处理还在队列里的（pendingReview），
-  // 别人处理过的、删掉的、读不到的、看过之后被改过（版本变了）的跳过；有一条改不了就整批不做
+  // 别人处理过的、删掉的、读不到的、看过之后被改过（版本变了）的跳过；有一条改不了就整批不做。
+  // 只处理写入这一刻还有效的（删除时间就写这一刻，和 softDelete 一样），读到之后刚好到期的也跳过
   async review(input: ReviewRequest): Promise<ReviewResult> {
     const seen = new Map(input.items.map((i) => [i.id, i.version]))
     const done = await this.run(async (tx, personaIds) => {
@@ -1113,7 +1200,6 @@ export class MemoryService {
       const targets = rows.filter((r) => seen.get(r.id) === r.version)
       if (!targets.length) return []
       for (const row of targets) this.assertModifiable(row, `没有权限处理 ${row.layer} 层的记忆`)
-      const ids = targets.map((r) => r.id)
       const now = new Date()
       const updated = await tx
         .update(memories)
@@ -1122,13 +1208,23 @@ export class MemoryService {
             ? { provenance: 'owner', version: sql`${memories.version} + 1`, updatedAt: now }
             : { deletedAt: now, updatedAt: now },
         )
-        .where(inArray(memories.id, ids))
+        .where(
+          and(
+            inArray(
+              memories.id,
+              targets.map((r) => r.id),
+            ),
+            validAt(now),
+          ),
+        )
         .returning()
       const after = new Map(updated.map((r) => [r.id, r]))
+      const handled = targets.filter((row) => after.has(row.id))
+      const ids = handled.map((r) => r.id)
       const glossaries = await this.glossaryOf(tx, ids)
       await this.events(
         tx,
-        targets.map((row) => {
+        handled.map((row) => {
           const glossary = glossaries.get(row.id) ?? []
           return {
             memoryId: row.id,
@@ -1328,6 +1424,7 @@ export class MemoryService {
           version: memories.version,
           updatedAt: memories.updatedAt,
           updatedMicros: sql<string>`${UPDATED_MICROS}::text`,
+          validTo: memories.validTo,
         })
         .from(memories)
         .where(
@@ -1374,6 +1471,7 @@ export class MemoryService {
           appId: r.appId,
           version: r.version,
           updatedAt: r.updatedAt.toISOString(),
+          validTo: r.validTo?.toISOString() ?? null,
         })),
         nextCursor: rows.length > query.limit && last ? encodeCursor(query.sort, last) : null,
       }
@@ -1686,14 +1784,32 @@ export class MemoryService {
     return sql`(${this.snapshotShown(before)} and ${after} is not null and not ${this.snapshotShown(after)})`
   }
 
-  // 按 id 找一条管理读取读得到的策展记忆，已删除的也算；读不到和不存在一样是 404
-  private async findManageable(tx: Tx, memoryId: string): Promise<MemoryRow> {
-    const [row] = await tx
-      .select()
+  // 按 id 找一条管理读取读得到的记忆，已删除的也算；读不到和不存在一样是 404。默认只找策展记忆，
+  // anyForm 时抽取的也找出来（由调用方说明为什么不能对它这样做）；lock 时锁住这一行；
+  // ended 时一起算出它现在是不是已经失效或过期（按数据库的时间，和已过期列表一致），不要的时候不算
+  private async findManageable(
+    tx: Tx,
+    memoryId: string,
+    options: { anyForm?: boolean; lock?: boolean; ended?: boolean } = {},
+  ): Promise<{ row: MemoryRow; ended: boolean | null }> {
+    const query = tx
+      .select({
+        row: memories,
+        ended: options.ended
+          ? sql<boolean | null>`(not ${STILL_VALID})`
+          : sql<boolean | null>`null::boolean`,
+      })
       .from(memories)
-      .where(and(eq(memories.id, memoryId), eq(memories.form, 'curated'), this.manageable()))
-    if (!row) throw new MemoryError(404, '记忆不存在')
-    return row
+      .where(
+        and(
+          eq(memories.id, memoryId),
+          options.anyForm ? undefined : eq(memories.form, 'curated'),
+          this.manageable(),
+        ),
+      )
+    const [found] = options.lock ? await query.for('update') : await query
+    if (!found) throw new MemoryError(404, '记忆不存在')
+    return found
   }
 
   // 事件连同操作者一起取出：看得到的事件，加上「离开」的事件（left 为 true，见 departureEvent）；
@@ -1720,6 +1836,7 @@ export class MemoryService {
         domain: memories.domain,
         path: memories.path,
         memoryDeleted: sql<boolean>`(${memories.deletedAt} is not null)`,
+        memoryExpired: sql<boolean>`(not ${STILL_VALID})`,
         accountName: accounts.displayName,
         keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
         appName: apps.name,
@@ -1744,7 +1861,7 @@ export class MemoryService {
   // 一条记忆的历史，从早到晚
   async history(memoryId: string): Promise<MemoryHistory> {
     return this.run(async (tx) => {
-      const row = await this.findManageable(tx, memoryId)
+      const { row } = await this.findManageable(tx, memoryId)
       // 太多时保留最近的：最新的几版才是最常要看、要恢复的
       const latest = await this.eventRows(
         tx,
@@ -1762,6 +1879,8 @@ export class MemoryService {
           sensitivity: row.sensitivity,
           version: row.version,
           deletedAt: row.deletedAt?.toISOString() ?? null,
+          validTo: endOf(row)?.toISOString() ?? null,
+          released: isReleased(row),
         },
         events: rows.map((r) => ({
           id: r.event.id,
@@ -1778,8 +1897,9 @@ export class MemoryService {
     })
   }
 
-  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性；
-  // 已经过期或失效的不列：撤销删除之后也看不到（例如让出 URI 时被软删除的过期记录）
+  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性。
+  // 只列用户删掉的（删除时还有效），删掉之后才到期的也列出来：撤销删除和过期互不相干，撤销之后它回到过期的状态。
+  // 过期之后被让出 URI 的不在这里，在已过期里重新生效
   async deleted(query: PageQuery): Promise<DeletedMemoryList> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
@@ -1791,9 +1911,8 @@ export class MemoryService {
         .from(memories)
         .where(
           and(
-            isNotNull(memories.deletedAt),
+            USER_DELETED,
             eq(memories.form, 'curated'),
-            STILL_VALID,
             this.manageable(),
             after
               ? sql`(${DELETED_MICROS}, ${memories.id}) < (${after[0]}::bigint, ${after[1]}::uuid)`
@@ -1814,10 +1933,54 @@ export class MemoryService {
           disclosure: row.disclosure,
           version: row.version,
           deletedAt: row.deletedAt!.toISOString(),
+          validTo: endOf(row)?.toISOString() ?? null,
         })),
         nextCursor:
           rows.length > query.limit && last
             ? encodeTimeCursor(last.deletedMicros, last.row.id)
+            : null,
+      }
+    })
+  }
+
+  // 已过期的记忆，最近过期的在前：有效期已过、按管理读取看得到的策展记忆，包括过期之后让出了 URI 的
+  // （isReleased）。这些都能重新生效（reactivate）。用户删掉的（删除时还有效）不在这里，在已删除里走撤销删除
+  async expired(query: PageQuery): Promise<ExpiredMemoryList> {
+    const after = timeCursor(query.cursor, UUID)
+    return this.run(async (tx) => {
+      const rows = await tx
+        .select({ row: memories, endedMicros: sql<string>`${ENDED_MICROS}::text` })
+        .from(memories)
+        .where(
+          and(
+            eq(memories.form, 'curated'),
+            sql`not ${STILL_VALID}`,
+            or(isNull(memories.deletedAt), RELEASED),
+            this.manageable(),
+            after
+              ? sql`(${ENDED_MICROS}, ${memories.id}) < (${after[0]}::bigint, ${after[1]}::uuid)`
+              : undefined,
+          ),
+        )
+        .orderBy(desc(ENDED), desc(memories.id))
+        .limit(query.limit + 1)
+      const page = rows.slice(0, query.limit)
+      const last = page.at(-1)
+      return {
+        items: page.map(({ row }) => ({
+          id: row.id,
+          uri: formatUri(row.domain!, row.path!),
+          layer: row.layer,
+          sensitivity: row.sensitivity,
+          priority: row.priority,
+          disclosure: row.disclosure,
+          version: row.version,
+          expiredAt: endOf(row)!.toISOString(),
+          released: isReleased(row),
+        })),
+        nextCursor:
+          rows.length > query.limit && last
+            ? encodeTimeCursor(last.endedMicros, last.row.id)
             : null,
       }
     })
@@ -1852,6 +2015,7 @@ export class MemoryService {
           left: r.left,
           // 离开了可见范围的，不透露它在别人那里现在是什么状态
           deleted: !r.left && r.memoryDeleted,
+          expired: !r.left && r.memoryExpired,
         })),
         nextCursor:
           rows.length > query.limit && page.length
@@ -1866,7 +2030,7 @@ export class MemoryService {
   // 只用和现在同一归属（层、主人、人格、应用）、敏感级不高于现在的版本：恢复不能把内容带到更宽的可见范围里
   async restore(input: RestoreRequest): Promise<MemoryView> {
     return this.write(async (tx) => {
-      const current = await this.findManageable(tx, input.memoryId)
+      const { row: current } = await this.findManageable(tx, input.memoryId)
       if (current.deletedAt) throw new MemoryError(409, '这条记忆已被删除，先撤销删除再恢复')
       const [found] = await tx
         .select({ after: memoryEvents.after })
@@ -1924,12 +2088,20 @@ export class MemoryService {
     })
   }
 
-  // 撤销删除：清掉删除标记，这一行原样留下（secret 的密文也还在），不从快照重建。
-  // URI 已被别的记忆占用时返回 409；提交后重新排队生成向量
+  // 撤销删除：清掉删除标记，这一行原样留下（secret 的密文也还在），不从快照重建，也不动有效期：
+  // 撤销删除和过期互不相干，删掉之后才到期的撤销之后回到过期的状态，在已过期里能重新生效。
+  // 过期之后被让出 URI 的不走这里（见 reactivate）。URI 已被同一归属的别的记录占用时由唯一索引判断，返回 409；
+  // 这一行自己已经过期时不和成员节点或共享节点互斥（触发器不看过期的记录），重新生效时才检查。提交后重新排队生成向量
   async undelete(input: UndeleteRequest): Promise<MemoryView> {
     return this.write(async (tx, _personaIds, released) => {
-      const row = await this.findManageable(tx, input.memoryId)
+      const { row } = await this.findManageable(tx, input.memoryId)
       if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
+      if (isReleased(row)) {
+        throw new MemoryError(
+          409,
+          '这条记忆是过期之后让出了 URI，不是删掉的；在「已过期」里让它重新生效',
+        )
+      }
       this.assertModifiable(row, `没有权限恢复 ${row.layer} 层的记忆`)
       // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
       await this.checkKeptRefs(tx, row, row)
@@ -1942,20 +2114,10 @@ export class MemoryService {
             eq(memories.id, row.id),
             eq(memories.version, row.version),
             isNotNull(memories.deletedAt),
-            STILL_VALID,
           ),
         )
         .returning()
-      if (!restored) {
-        const [stale] = await tx
-          .select({ id: memories.id })
-          .from(memories)
-          .where(and(eq(memories.id, row.id), sql`not ${STILL_VALID}`))
-        throw new MemoryError(
-          409,
-          stale ? '这条记忆已经过期，撤销删除之后也看不到' : '记忆刚被其他请求修改，请重新读取',
-        )
-      }
+      if (!restored) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       await this.event(
         tx,
@@ -1965,7 +2127,69 @@ export class MemoryService {
         snapshot(restored, glossary),
       )
       return this.toView(restored, glossary)
-    })
+    }, UNDELETE_CONFLICT)
+  }
+
+  // 让过期的策展记忆重新生效：清掉有效期，之后一直有效；过期之后让出了 URI 的（isReleased）在同一个操作里撤销删除。
+  // 用户删掉的（删除时还有效）不收，走撤销删除。抽取的记忆也不收：被推翻的事实在对象页上重新生效（reactivateFact），
+  // 会话摘要按设计到期，不能变成一直有效。要按管理读取读得到、也写得了它，读不到和不存在一样是 404。
+  // 这个 URI 已经被别的有效记录占用时由数据库判断（唯一索引与互斥触发器，触发器在有效期变化时也检查），返回 409；
+  // 同一归属下挡着 URI 的别的过期记录先让出（claimUri）。正文与归属不变，提交后重新排队生成向量
+  async reactivate(input: ReactivateRequest): Promise<MemoryView> {
+    return this.write(async (tx, _personaIds, released) => {
+      // 先锁住这一行再做各项检查，版本号和锁到的那一版比。不限形态地找：读得到的抽取记忆要说清楚
+      // 为什么不在这里重新生效，读不到的照样 404。是不是已经过期按数据库的时间判断，和已过期列表一致
+      const { row, ended } = await this.findManageable(tx, input.memoryId, {
+        anyForm: true,
+        lock: true,
+        ended: true,
+      })
+      if (row.form !== 'curated') {
+        throw new MemoryError(
+          409,
+          '从对话里抽取的记忆不在这里重新生效：被推翻的事实在对象页上让它重新生效，会话摘要按设计到期，不能改成一直有效',
+        )
+      }
+      if (row.version !== input.expectedVersion) {
+        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+      }
+      if (!ended) throw new MemoryError(409, '这条记忆现在是有效的，不用重新生效')
+      if (row.deletedAt && !isReleased(row)) {
+        throw new MemoryError(409, '这条记忆是删掉的，不是过期后让出的；要恢复它用撤销删除')
+      }
+      this.assertModifiable(row, `没有权限让 ${row.layer} 层的记忆重新生效`)
+      // 正文不变，归属也不变，不算新增引用（和撤销删除一样）
+      await this.checkKeptRefs(tx, row, row)
+      await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released, { except: row.id })
+      const [revived] = await tx
+        .update(memories)
+        .set({
+          validTo: null,
+          expiresAt: null,
+          ...(row.deletedAt ? { deletedAt: null } : {}),
+          version: sql`${memories.version} + 1`,
+          updatedAt: new Date(),
+        })
+        // 让出 URI 不改版本号：读到之后它可能刚被让出，条件里还要带上读到时的删除状态（和撤销删除一样）
+        .where(
+          and(
+            eq(memories.id, row.id),
+            eq(memories.version, row.version),
+            row.deletedAt ? isNotNull(memories.deletedAt) : isNull(memories.deletedAt),
+          ),
+        )
+        .returning()
+      if (!revived) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      await this.event(
+        tx,
+        row.id,
+        'reactivate',
+        snapshot(row, glossary),
+        snapshot(revived, glossary),
+      )
+      return this.toView(revived, glossary)
+    }, REACTIVATE_CONFLICT)
   }
 }
 
@@ -1994,6 +2218,78 @@ const EVENT_ID = /^\d{1,15}$/
 
 // 还没有失效或过期
 export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
+
+// 事实被推翻了：推翻时设的 valid_to 已经过去；已经到期：expires_at 已经过去。都按数据库的时间（见 lockFact）
+const SUPERSEDED = sql<
+  boolean | null
+>`(${memories.validTo} is not null and ${memories.validTo} <= now())`
+const LAPSED = sql<
+  boolean | null
+>`(${memories.expiresAt} is not null and ${memories.expiresAt} <= now())`
+
+// 有效期到什么时候为止：有效到与到期时间里早的那个，都没有时为 null（一直有效）
+function endOf(row: Pick<MemoryRow, 'validTo' | 'expiresAt'>): Date | null {
+  const times = [row.validTo, row.expiresAt].filter((t): t is Date => t !== null)
+  return times.length ? new Date(Math.min(...times.map((t) => t.getTime()))) : null
+}
+
+// 在 at 这一刻还有效 / 已经失效或过期。和 STILL_VALID 是同一条规则，只是时间由调用方给定：
+// 条件里判断的时间与写下的删除时间要是同一个时刻（见 softDelete、claimUri）
+function validAt(at: Date): SQL {
+  return and(
+    or(isNull(memories.validTo), gt(memories.validTo, at)),
+    or(isNull(memories.expiresAt), gt(memories.expiresAt, at)),
+  )!
+}
+function endedAt(at: Date): SQL {
+  return or(lte(memories.validTo, at), lte(memories.expiresAt, at))!
+}
+// validAt 的 JS 版本，判断读到的那一版
+function isValidAt(row: Pick<MemoryRow, 'validTo' | 'expiresAt'>, at: Date): boolean {
+  const ended = endOf(row)
+  return ended === null || ended.getTime() > at.getTime()
+}
+
+// 过期之后让出了 URI：claimUri 只软删除在那一刻已经过期的记录，删除时间就是那一刻，不早于过期时间；
+// 用户删除只删在那一刻还有效的记录，删除时间早于过期时间（见 softDelete）。两边用的都是同一个时刻，分得开
+function isReleased(row: Pick<MemoryRow, 'validTo' | 'expiresAt' | 'deletedAt'>): boolean {
+  const ended = endOf(row)
+  return row.deletedAt !== null && ended !== null && ended.getTime() <= row.deletedAt.getTime()
+}
+
+// endOf 与 isReleased 的 SQL 版本；least 不看 NULL，两个都为空时是 NULL，没有有效期的不算让出的
+const ENDED = sql`least(${memories.validTo}, ${memories.expiresAt})`
+const ENDED_MICROS = microsOf(ENDED)
+const RELEASED = sql`(${memories.deletedAt} is not null and coalesce(${ENDED} <= ${memories.deletedAt}, false))`
+// 用户删掉的：删除时还有效（一直有效，或者删掉之后才到期），不是过期之后被让出的
+const USER_DELETED = sql`(${memories.deletedAt} is not null and not ${RELEASED})`
+
+// 重新生效、撤销删除时 URI 已被占用：多半就是在这个 URI 上新写的那条记忆
+const REACTIVATE_CONFLICT = '这个 URI 现在被另一条记忆占用，先把那条移走或删掉，再让它重新生效'
+const UNDELETE_CONFLICT = '这个 URI 现在被另一条记忆占用，先把那条移走或删掉，再撤销删除'
+
+// 写入的有效到至少要比现在晚这么久：已经过去或马上就到的时间写进去，记忆马上就读不到了，多半是算错了
+// （时区、日期）；留出一段也避开到期的边界与应用、数据库之间的时钟差
+const MIN_VALIDITY_MS = 60_000
+
+// 请求里的有效到（null 是一直有效）和存着的是不是同一个时刻
+function sameTime(value: string | null, stored: Date | null): boolean {
+  if (value === null || stored === null) return value === null && stored === null
+  return new Date(value).getTime() === stored.getTime()
+}
+
+// 有效到至少比现在晚一分钟（见 MIN_VALIDITY_MS）。要它现在就不再生效就删掉它（之后能撤销删除）。
+// 也要晚于生效时间，生效时间不会晚于现在，这一条一般自然满足
+function checkValidTo(value: string, validFrom: Date): Date {
+  const at = new Date(value)
+  if (at.getTime() < Date.now() + MIN_VALIDITY_MS || at.getTime() <= validFrom.getTime()) {
+    throw new MemoryError(
+      400,
+      '有效到要比现在晚至少一分钟；要让这条记忆现在就不再生效，删掉它（之后可以撤销删除）',
+    )
+  }
+  return at
+}
 
 // 「时间 + id」的游标，解不开时报 400
 function timeCursor(cursor: string | undefined, id: RegExp): [string, string] | null {
@@ -2029,6 +2325,7 @@ function toSnapshot(raw: unknown): MemorySnapshot | null {
     content: text('content'),
     version: typeof s.version === 'number' ? s.version : 0,
     deleted: s.deletedAt != null,
+    validTo: text('validTo'),
   }
 }
 
@@ -2045,6 +2342,7 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
   if (before.content !== after.content && (before.content !== null || after.content !== null)) {
     changes.push('content')
   }
+  if (before.validTo !== after.validTo) changes.push('validTo')
   return changes
 }
 

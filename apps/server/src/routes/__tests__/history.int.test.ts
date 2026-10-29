@@ -39,6 +39,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
         enqueueBackup: async () => null,
         backupRun: async () => null,
         enqueueExtraction: async () => {},
+        enqueueCleanup: async () => true,
       },
     })
   })
@@ -453,9 +454,10 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     expect((await activity(editor.cookie)).items[0]!.actor.keyName).toBeNull()
   })
 
-  it('已经过期的记录不列在已删除里，也不能撤销删除', async () => {
+  it('过期之后被让出 URI 的不列在已删除里，也不能撤销删除', async () => {
     const m = await create(ws.cookie, { uri: 'kb://stale', content: '旧的', layer: 'base' })
     await remove(ws.cookie, m)
+    // 有效到早于删除时间：删除时已经过期，和让出 URI 的记录一样（删掉之后才到期的见 validity.int.test.ts）
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)

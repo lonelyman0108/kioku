@@ -106,6 +106,7 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
   restore: { label: '恢复到旧版本', icon: icons.restore },
   undelete: { label: '撤销删除', icon: icons.undelete },
   expire: { label: '过期后让出 URI', icon: icons.expired },
+  reactivate: { label: '重新生效', icon: icons.reactivate },
   confirm: { label: '确认来源', icon: icons.confirmed },
 }
 
@@ -148,6 +149,7 @@ export const changeLabels: Record<string, string> = {
   layer: '层',
   uri: 'URI',
   glossary: '关键词',
+  validTo: '有效期',
 }
 
 export const sensitivityColors: Record<Sensitivity, 'neutral' | 'info' | 'warning' | 'error'> = {

@@ -127,6 +127,79 @@ export const RecallSettings = z.object({
 })
 export type RecallSettings = z.infer<typeof RecallSettings>
 
+// 保留期：删掉的记忆（连同历史、向量、关键词、凭据引用与召回统计）、被推翻的抽取事实、过期的会话摘要，
+// 以及抽取记录、凭据事件、已删除的凭据与凭据源，过了这么多天由每天一次的清理硬删除。
+// 和召回事件明细的保留天数是两回事
+export const DEFAULT_RETENTION_DAYS = 30
+export const RetentionSettings = z.object({
+  days: z.number().int().min(1).max(3650),
+})
+export type RetentionSettings = z.infer<typeof RetentionSettings>
+
+// 一次清理每一类删了多少
+export const RetentionCounts = z.object({
+  deletedMemories: z.number().int(),
+  supersededFacts: z.number().int(),
+  expiredSummaries: z.number().int(),
+  // 记忆整行已经不在的历史事件（例如删账号时数据库连带删掉的记忆留下的）
+  orphanEvents: z.number().int(),
+  // 事件留着、快照里的正文抹掉了的：已删账号的画像层与私人层快照，记忆已经不在的导入事件
+  scrubbedSnapshots: z.number().int(),
+  extractionRuns: z.number().int(),
+  credentialEvents: z.number().int(),
+  deletedCredentials: z.number().int(),
+  deletedProviders: z.number().int(),
+})
+export type RetentionCounts = z.infer<typeof RetentionCounts>
+
+// 一次清理没做完（有一类出错，或者到了时间）时下一个小时再试；同一天（UTC）最多试这么多次，第二天再来
+export const RETENTION_DAILY_TRIES = 3
+
+export const RetentionStatus = z.object({
+  // 最近一次完整做完的清理：开始的时间、按多少天算的、是不是在暂停中（只清了删账号留下的历史）、每一类删了多少
+  lastRun: z
+    .object({
+      at: z.string(),
+      days: z.number().int(),
+      paused: z.boolean(),
+      counts: RetentionCounts,
+    })
+    .nullable(),
+  // 最近一次尝试，只记它自己做了什么：开始的时间、是不是在暂停中、做完了没有、删了多少，
+  // 以及这一天（UTC）同一种（暂停中与否）试到第几次
+  lastAttempt: z
+    .object({
+      at: z.string(),
+      paused: z.boolean(),
+      complete: z.boolean(),
+      counts: RetentionCounts,
+      tries: z.number().int(),
+    })
+    .nullable(),
+  // 最近一次清理出的错（有一类没删成也算）；之后整次做完、没出错就清掉
+  lastError: z.object({ message: z.string(), at: z.string() }).nullable(),
+})
+export type RetentionStatus = z.infer<typeof RetentionStatus>
+
+// 暂停按天数的清理的原因：从备份恢复（恢复出的已删除记录早已到期）、保留期第一次生效（升级之前删掉的都还能撤销）
+export const RETENTION_PAUSE_REASONS = ['restored', 'started'] as const
+export const RetentionPauseReason = z.enum(RETENTION_PAUSE_REASONS)
+export type RetentionPauseReason = z.infer<typeof RetentionPauseReason>
+
+export const RetentionView = RetentionSettings.extend({
+  // 暂停到起点加上保留天数为止：这段时间里到期的都是起点之前删掉的，留一个完整的保留期去找回。
+  // 调保留天数时结束时间跟着变；删账号留下的历史照常清理。没有暂停（或者已经结束）时为 null
+  pause: z
+    .object({ reason: RetentionPauseReason, since: z.string(), until: z.string() })
+    .nullable(),
+  status: RetentionStatus,
+})
+export type RetentionView = z.infer<typeof RetentionView>
+
+// 提前结束暂停之后：queued 为马上排上了一次清理；没排上时下一次定时清理（每小时）照样会做
+export const RetentionResumed = RetentionView.extend({ queued: z.boolean() })
+export type RetentionResumed = z.infer<typeof RetentionResumed>
+
 // 备份到兼容S3的对象存储：每天到了设定的钟点（UTC）做一份全实例的加密备份传上去，存储桶里只留最近的几份。
 // Secret Access Key 用主密钥加密后存库，不返回
 const BackupRun = z.object({

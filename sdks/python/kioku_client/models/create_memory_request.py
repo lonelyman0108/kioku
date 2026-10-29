@@ -12,6 +12,7 @@ from ..models.create_memory_request_layer import CreateMemoryRequestLayer
 from ..models.create_memory_request_sensitivity import CreateMemoryRequestSensitivity
 from ..types import UNSET, Unset
 from typing import cast
+import datetime
 
 
 T = TypeVar("T", bound="CreateMemoryRequest")
@@ -28,6 +29,8 @@ class CreateMemoryRequest:
         priority (int | Unset):  Default: 2.
         disclosure (str | Unset):
         glossary (list[str] | Unset):
+        valid_to (datetime.datetime | Unset): 有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或
+            2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；不填就一直有效
     """
 
     uri: str
@@ -37,6 +40,7 @@ class CreateMemoryRequest:
     priority: int | Unset = 2
     disclosure: str | Unset = UNSET
     glossary: list[str] | Unset = UNSET
+    valid_to: datetime.datetime | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -60,6 +64,10 @@ class CreateMemoryRequest:
         if not isinstance(self.glossary, Unset):
             glossary = self.glossary
 
+        valid_to: str | Unset = UNSET
+        if not isinstance(self.valid_to, Unset):
+            valid_to = self.valid_to.isoformat()
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -78,6 +86,8 @@ class CreateMemoryRequest:
             field_dict["disclosure"] = disclosure
         if glossary is not UNSET:
             field_dict["glossary"] = glossary
+        if valid_to is not UNSET:
+            field_dict["validTo"] = valid_to
 
         return field_dict
 
@@ -108,6 +118,13 @@ class CreateMemoryRequest:
 
         glossary = cast(list[str], d.pop("glossary", UNSET))
 
+        _valid_to = d.pop("validTo", UNSET)
+        valid_to: datetime.datetime | Unset
+        if isinstance(_valid_to, Unset):
+            valid_to = UNSET
+        else:
+            valid_to = datetime.datetime.fromisoformat(_valid_to)
+
         create_memory_request = cls(
             uri=uri,
             content=content,
@@ -116,6 +133,7 @@ class CreateMemoryRequest:
             priority=priority,
             disclosure=disclosure,
             glossary=glossary,
+            valid_to=valid_to,
         )
 
         create_memory_request.additional_properties = d

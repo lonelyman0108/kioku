@@ -21,6 +21,7 @@ import {
   EmbeddingSettingsView,
   EmbeddingStatus,
   EmbeddingTestResult,
+  ExpiredMemoryList,
   ExtractionSettingsView,
   ExtractionUsage,
   ExtractionTestResult,
@@ -43,6 +44,8 @@ import {
   RecallEventList,
   RecallSettings,
   RecallStats,
+  RetentionResumed,
+  RetentionView,
   ReviewList,
   ReviewResult,
   SetupStatus,
@@ -63,8 +66,10 @@ import {
   type MemoryListQuery,
   type MoveMemoryRequest,
   type PlainLayer,
+  type ReactivateRequest,
   type RestoreRequest,
   type ReviewQuery,
+  type RetentionSettings,
   type ReviewRequest,
   type SetupRequest,
   type SubjectListQuery,
@@ -198,6 +203,13 @@ export const api = {
       body: { memoryId },
       schema: MemoryView,
     }),
+  expiredMemories: (spaceId: string, cursor?: string) =>
+    request('GET', `/spaces/${spaceId}/memories/expired`, {
+      query: { cursor },
+      schema: ExpiredMemoryList,
+    }),
+  reactivateMemory: (spaceId: string, body: ReactivateRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/reactivate`, { body, schema: MemoryView }),
 
   credentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
@@ -260,6 +272,10 @@ export const api = {
     request('DELETE', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}`, {
       query: { version },
     }),
+  reactivateFact: (spaceId: string, subjectId: string, factId: string, version: number) =>
+    request('POST', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}/reactivate`, {
+      body: { version },
+    }),
   reviewQueue: (spaceId: string, query: ReviewQuery) =>
     request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),
   review: (spaceId: string, body: ReviewRequest) =>
@@ -320,6 +336,12 @@ export const api = {
     request('POST', '/settings/embedding/rebuild', { schema: EmbeddingRebuildResult }),
 
   masterKeyStatus: () => request('GET', '/settings/master-key', { schema: MasterKeyStatus }),
+
+  retentionSettings: () => request('GET', '/settings/retention', { schema: RetentionView }),
+  saveRetentionDays: (body: RetentionSettings) =>
+    request('PUT', '/settings/retention', { body, schema: RetentionView }),
+  resumeRetention: () =>
+    request('POST', '/settings/retention/resume', { schema: RetentionResumed }),
 
   extractionSettings: () =>
     request('GET', '/settings/extraction', { schema: ExtractionSettingsView }),

@@ -73,6 +73,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     enqueuePrune: async () => true,
     enqueueBackup: async () => null,
     backupRun: async () => null,
+    enqueueCleanup: async () => true,
   }
   const appWith = (masterKey: Buffer | null) =>
     createApp({

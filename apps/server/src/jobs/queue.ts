@@ -11,6 +11,7 @@ import type { EmbedderSource } from '../embedding/source'
 import type { BufferedSession } from '../extraction/buffer'
 import { processSession } from '../extraction/worker'
 import { cleanupExpired } from './cleanup'
+import { retentionJob } from './retention'
 
 const EMBED = 'embed-memory'
 const BACKFILL = 'embed-backfill'
@@ -20,7 +21,7 @@ const ROTATE = 'rotate-master-key'
 const CLEANUP = 'cleanup-expired'
 const EXTRACT = 'extract-session'
 const BACKUP = 'backup'
-// 每小时清一次过期的数据（见 cleanupExpired）
+// 每小时清一次过期的数据（见 cleanupExpired）；保留期的硬删除跟在后面，一天做一次（见 retentionJob）
 const CLEANUP_CRON = '17 * * * *'
 // 写回向量时记忆正被别的事务锁着，隔这么久再试
 const RETRY_AFTER_SECONDS = 10
@@ -54,6 +55,8 @@ export interface Jobs {
   enqueueBackup(): Promise<string | null>
   // 按编号查一次立即备份的状态；编号不对、或者早就清理掉了时为 null
   backupRun(id: string): Promise<BackupRunStatus | null>
+  // 马上做一次定时清理（例如提前结束了从备份恢复之后的保留期暂停）；返回是否入队成功
+  enqueueCleanup(): Promise<boolean>
 }
 
 // 后台任务都放在 PostgreSQL 里（pg-boss，schema 为 pgboss），不需要 Redis。
@@ -75,7 +78,12 @@ export async function startJobs(options: {
   await boss.createQueue(SWITCH, { policy: 'singleton' })
   await boss.createQueue(PRUNE, { policy: 'singleton' })
   await boss.createQueue(ROTATE, { policy: 'singleton' })
-  await boss.createQueue(CLEANUP, { policy: 'singleton' })
+  // 定时清理里有保留期的硬删除，积压多时（例如升级之后的第一次）一次最多做半小时（见 retentionJob）。
+  // pg-boss 默认 15 分钟就当作卡住、另排一次，会和还在跑的那次同时做，所以和备份一样放宽到一小时。
+  // 队列一直是 singleton（同时只跑一个）；队列已经存在时建队列不改选项，所以再更新一遍
+  const cleanupQueue = { expireInSeconds: 3600 }
+  await boss.createQueue(CLEANUP, { policy: 'singleton', ...cleanupQueue })
+  await boss.updateQueue(CLEANUP, cleanupQueue)
   // stately：每个会话（singletonKey）排队的与正在跑的各最多一个
   await boss.createQueue(EXTRACT, { policy: 'stately' })
   // 一份备份要读库、加密、上传（上传最长 10 分钟），可能超过 pg-boss 默认的 15 分钟过期时限：过期会被当成卡住、
@@ -151,8 +159,23 @@ export async function startJobs(options: {
     }
   })
   if (masterKey && keyringOf(masterKey).previous) void send(ROTATE, {})
+  // 保留期的硬删除放在同一个任务里、清完过期的数据之后再做：和召回明细的清理不会同时跑、互相等锁。
+  // 两步各做各的，前一步出错不挡住后一步
   await boss.work(CLEANUP, async () => {
-    await cleanupExpired(options.db)
+    const expired = await cleanupExpired(options.db).then(
+      () => null,
+      (err: unknown) => err,
+    )
+    const retained = await retentionJob(options.db)
+    if (retained) {
+      const total = Object.values(retained.counts).reduce((a, b) => a + b, 0)
+      if (total) console.log(`保留期清理：删掉或抹掉了 ${total} 条`)
+      for (const error of retained.errors) console.error(`保留期清理出错：${error}`)
+      if (!retained.complete && !retained.errors.length) {
+        console.log('保留期清理这次没做完，下一个小时接着做')
+      }
+    }
+    if (expired) throw expired
   })
   await boss.work<BufferedSession>(EXTRACT, async (jobs) => {
     for (const { data } of jobs) await processSession(options.db, options.masterKey, data)
@@ -187,6 +210,7 @@ export async function startJobs(options: {
     enqueueSwitch: () => send(SWITCH, {}).then(queued),
     enqueuePrune: () => send(PRUNE, {}, PRUNE_AFTER_SECONDS).then(queued),
     enqueueBackup: () => send(BACKUP, { force: true }, undefined, false).then((id) => id ?? null),
+    enqueueCleanup: () => send(CLEANUP, {}).then(queued),
     backupRun: async (id) => {
       const job = await boss.getJobById<{ force?: boolean }>(BACKUP, id).catch(() => null)
       if (!job) return null

@@ -8,6 +8,7 @@ import { api } from '../api/endpoints'
 import BackupSettings from '../components/BackupSettings.vue'
 import EmbeddingSettings from '../components/EmbeddingSettings.vue'
 import ExtractionSettings from '../components/ExtractionSettings.vue'
+import RetentionSettings from '../components/RetentionSettings.vue'
 import SpaceImport from '../components/SpaceImport.vue'
 
 const toast = useToast()
@@ -122,6 +123,8 @@ async function saveRetention() {
         <BackupSettings />
 
         <SpaceImport />
+
+        <RetentionSettings />
 
         <UCard>
           <template #header>

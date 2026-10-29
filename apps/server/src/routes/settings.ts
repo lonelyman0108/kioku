@@ -9,6 +9,9 @@ import {
   ExtractionTestResult,
   MasterKeyStatus,
   RecallSettings,
+  RetentionResumed,
+  RetentionSettings,
+  RetentionView,
   UpdateEmbeddingSettings,
   UpdateExtractionSettings,
 } from '@kioku/contracts'
@@ -38,6 +41,7 @@ import {
 } from '../extraction/settings'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { endPause, retentionView, saveRetentionDays } from '../jobs/retention'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
 import { SettingsInputError } from '../settings/endpoint'
 import { backupRoutes } from './backup'
@@ -158,6 +162,37 @@ const recallUpdate = createRoute({
   summary: '修改召回事件明细的保留天数；更早的明细在下一次清理时并入累计统计后删除',
   request: { body: jsonBody(RecallSettings) },
   responses: { 200: jsonResponse('召回设置', RecallSettings), 403: forbidden },
+})
+
+const retentionGet = createRoute({
+  method: 'get',
+  path: '/settings/retention',
+  tags: ['settings'],
+  summary: '保留期：天数、从备份恢复之后的暂停，以及最近一次清理每一类删了多少',
+  responses: { 200: jsonResponse('保留期', RetentionView), 403: forbidden },
+})
+
+const retentionUpdate = createRoute({
+  method: 'put',
+  path: '/settings/retention',
+  tags: ['settings'],
+  summary:
+    '修改保留天数：之后的清理按新的天数硬删除。从备份恢复之后的暂停不结束，结束时间跟着天数变',
+  request: { body: jsonBody(RetentionSettings) },
+  responses: {
+    200: jsonResponse('保留期', RetentionView),
+    400: jsonResponse('天数不对', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+const retentionResume = createRoute({
+  method: 'post',
+  path: '/settings/retention/resume',
+  tags: ['settings'],
+  summary:
+    '提前结束暂停（从备份恢复之后、保留期第一次生效时），并马上排一次清理；queued 为是否排上了，没排上时下一次定时清理照样会做',
+  responses: { 200: jsonResponse('保留期', RetentionResumed), 403: forbidden },
 })
 
 const rebuild = createRoute({
@@ -338,6 +373,17 @@ export function settingsRoutes(deps: Deps) {
       const value = c.req.valid('json')
       await saveRecallSettings(deps.db, value)
       return c.json(value, 200)
+    })
+    .openapi(retentionGet, async (c) => c.json(await retentionView(deps.db), 200))
+    .openapi(retentionUpdate, async (c) => {
+      await saveRetentionDays(deps.db, c.req.valid('json'))
+      return c.json(await retentionView(deps.db), 200)
+    })
+    .openapi(retentionResume, async (c) => {
+      await endPause(deps.db)
+      // 只等排队、不等清理做完；排不上时如实告诉界面，下一次定时清理（每小时）照样会做
+      const queued = deps.jobs ? await deps.jobs.enqueueCleanup() : false
+      return c.json({ ...(await retentionView(deps.db)), queued }, 200)
     })
     .openapi(rebuild, async (c) => {
       const stored = await loadEmbeddingModels(deps.db)

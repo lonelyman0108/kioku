@@ -7,6 +7,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { creatableLayers, layerLabels, sensitivityLabels } from '../labels'
+import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 
 const props = defineProps<{ spaceId: string; initialUri: string }>()
 const open = defineModel<boolean>('open', { required: true })
@@ -19,9 +20,13 @@ const form = reactive({
   // null 表示按层默认；下拉框把 undefined 当成没有选，显示不出「按层默认」
   sensitivity: null as Sensitivity | null,
   disclosure: '',
+  // 有效到，datetime-local 输入框的本地时间；空表示一直有效
+  validTo: '',
 })
 const error = ref<string | null>(null)
 const saving = ref(false)
+// 有效到最早能选的时间（见 earliestValidTo）：打开、聚焦选择器与提交之前重新算
+const minValidTo = ref('')
 
 // 手动选过层之后，就不再按 domain 默认层改它
 const layerTouched = ref(false)
@@ -34,7 +39,9 @@ watch(open, (value) => {
     layer: 'private',
     sensitivity: null,
     disclosure: '',
+    validTo: '',
   })
+  minValidTo.value = earliestValidTo()
   layerTouched.value = false
   error.value = null
 })
@@ -73,6 +80,17 @@ const sensitivityItems = computed(() => [
 ])
 
 async function submit() {
+  const validTo = form.validTo ? fromLocalInput(form.validTo) : null
+  if (form.validTo && !validTo) {
+    error.value = '有效到的日期和时间没填完整'
+    return
+  }
+  // 表单开得久了，当时能选的最早时间现在可能已经太近
+  if (validTo && validToTooSoon(form.validTo)) {
+    minValidTo.value = earliestValidTo()
+    error.value = '有效到要比现在晚至少一分钟'
+    return
+  }
   saving.value = true
   error.value = null
   try {
@@ -82,6 +100,7 @@ async function submit() {
       ...(layerFixed.value ? {} : { layer: form.layer }),
       ...(form.sensitivity ? { sensitivity: form.sensitivity } : {}),
       ...(form.disclosure.trim() ? { disclosure: form.disclosure.trim() } : {}),
+      ...(validTo ? { validTo } : {}),
     })
     open.value = false
     emit('created', created.uri)
@@ -126,6 +145,19 @@ async function submit() {
         />
         <UFormField label="Disclosure" help="什么场景下应该想起这条记忆">
           <UInput v-model="form.disclosure" class="w-full" />
+        </UFormField>
+        <UFormField
+          label="有效到"
+          help="只在一段时间内成立的事才设，到期后不再召回、不进 boot；留空表示一直有效"
+        >
+          <UInput
+            v-model="form.validTo"
+            type="datetime-local"
+            :min="minValidTo"
+            aria-label="有效到"
+            class="w-full sm:w-64"
+            @focus="minValidTo = earliestValidTo()"
+          />
         </UFormField>
         <UAlert v-if="error" color="error" variant="subtle" :title="error" />
       </form>

@@ -7,6 +7,7 @@ import {
   DeletedMemoryList,
   DomainSummary,
   ErrorResponse,
+  ExpiredMemoryList,
   GlossaryIndex,
   MemoryChildren,
   MemoryHistory,
@@ -17,6 +18,7 @@ import {
   MemoryView,
   MoveMemoryRequest,
   PageQuery,
+  ReactivateRequest,
   RestoreRequest,
   UndeleteRequest,
   UpdateMemoryRequest,
@@ -90,7 +92,7 @@ function memoryRouteSet(set: RouteSet) {
     ...common,
     method: 'post',
     path: base,
-    summary: '新建策展记忆',
+    summary: '新建策展记忆；带 validTo 时到期后不再召回、不进 boot',
     request: { params, body: jsonBody(CreateMemoryRequest) },
     responses: { 201: jsonResponse('已创建', MemoryView), ...errors },
   })
@@ -99,7 +101,7 @@ function memoryRouteSet(set: RouteSet) {
     method: 'patch',
     path: base,
     summary:
-      '修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间',
+      '修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间',
     request: { params, body: jsonBody(UpdateMemoryRequest) },
     responses: { 200: jsonResponse('已修改', MemoryView), ...errors },
   })
@@ -225,6 +227,22 @@ function consoleOnlyRoutes(deps: Deps) {
     request: { params, body: jsonBody(UndeleteRequest) },
     responses: { 200: jsonResponse('恢复后的记忆', MemoryView), ...errors },
   })
+  const expired = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/memories/expired',
+    tags: ['console'],
+    summary: '已过期的记忆（包括过期之后让出了 URI 的），最近过期的在前',
+    request: { params, query: PageQuery },
+    responses: { 200: jsonResponse('已过期的记忆', ExpiredMemoryList), ...errors },
+  })
+  const reactivate = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/reactivate',
+    tags: ['console'],
+    summary: '让过期的记忆重新生效（清掉有效期；过期之后让出了 URI 的一并撤销删除）',
+    request: { params, body: jsonBody(ReactivateRequest) },
+    responses: { 200: jsonResponse('重新生效的记忆', MemoryView), ...errors },
+  })
   const glossary = createRoute({
     method: 'get',
     path: '/spaces/{spaceId}/memories/glossary',
@@ -257,6 +275,14 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(undelete, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.undelete(c.req.valid('json')), 200)
+    })
+    .openapi(expired, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.expired(c.req.valid('query')), 200)
+    })
+    .openapi(reactivate, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.reactivate(c.req.valid('json')), 200)
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)
