@@ -6,11 +6,18 @@ import type {
   EmbeddingTestResult,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, onBeforeUnmount, ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { draftOf, draftsChanged, inputOf, type ChannelDraft } from '../embeddingDrafts'
+import {
+  draftOf,
+  draftsChanged,
+  followEmbedding,
+  inputOf,
+  switchTracker,
+  type ChannelDraft,
+} from '../embeddingDrafts'
 import { icons } from '../icons'
 import EmbeddingChannels from './EmbeddingChannels.vue'
 
@@ -29,21 +36,14 @@ const settings = useQuery({
 const active = computed(() => settings.data.value?.active ?? null)
 const next = computed(() => settings.data.value?.next ?? null)
 
-// 保存或补齐之后的一段时间里也刷新进度
-const POLL_DURATION_MS = 120_000
-const polling = ref(false)
-let pollTimer: ReturnType<typeof setTimeout> | undefined
-onBeforeUnmount(() => clearTimeout(pollTimer))
-function startPolling() {
-  polling.value = true
-  clearTimeout(pollTimer)
-  pollTimer = setTimeout(() => (polling.value = false), POLL_DURATION_MS)
-}
+// 进度刷不刷只看进度本身（见 followEmbedding）：换模型、补齐时一直跟着，补齐了就停。
+// 保存、切换、补齐之后都会重新读一次进度，读到还没补齐就接着刷
 const status = useQuery({
   queryKey: ['settings', 'embedding', 'status'],
   queryFn: api.embeddingStatus,
-  refetchInterval: computed(() => (next.value || polling.value ? POLL_INTERVAL_MS : false)),
+  refetchInterval: (query) => (followEmbedding(query.state.data) ? POLL_INTERVAL_MS : false),
 })
+const following = computed(() => followEmbedding(status.data.value))
 const percent = (embedded: number) => {
   const eligible = status.data.value?.eligible ?? 0
   return eligible ? Math.round((embedded / eligible) * 100) : null
@@ -97,7 +97,6 @@ async function saveActive() {
       title: first ? '已保存，后台会为全部记忆生成向量' : '已保存',
       color: 'success',
     })
-    if (first) startPolling()
   } catch (err) {
     failed(err, '保存失败')
   } finally {
@@ -123,14 +122,35 @@ watch(
     if (JSON.stringify(value) === syncedNext) return
     const discarded = previous ? draftsChanged(nextDrafts.value, previous.channels) : false
     syncNext(value)
-    if (!value && previous && active.value?.model === previous.model) {
-      toast.add({ title: `已换成 ${previous.model}，旧模型的向量会在后台删掉`, color: 'success' })
-    }
     if (discarded) {
       toast.add({ title: '换模型的设置在后台变了，没保存的渠道改动已经丢掉', color: 'warning' })
     }
   },
   { immediate: true },
+)
+
+// 换模型结束（补齐后自动切过去、现在切换或放弃）的提示，只给这个页面开着时读到的变化（见 switchTracker）。
+// ending 是这个页面自己点的「现在切换」「放弃」：放弃由点的地方提示，进度也已经跟着设置一起重新读了
+const sawSwitch = switchTracker()
+let ending: 'switch' | 'abort' | null = null
+watch(
+  () => settings.dataUpdatedAt.value,
+  () => {
+    const ended = sawSwitch(settings.isFetchedAfterMount.value, next.value, active.value)
+    if (!ended) return
+    const own = ending !== null
+    ending = null
+    // 后台结束的（设置的轮询发现的）：进度可能还停在换模型的时候，读一次；正在读的就等它，不重发
+    if (!own) void status.refetch({ cancelRefetch: false })
+    if (ended === 'switched') {
+      toast.add({
+        title: `已换成 ${active.value?.model}，旧模型的向量会在后台删掉`,
+        color: 'success',
+      })
+    } else if (!own) {
+      toast.add({ title: '换模型已被放弃（可能是别人操作的）', color: 'warning' })
+    }
+  },
 )
 function openStart() {
   nextModel.value = ''
@@ -184,10 +204,12 @@ const confirmSwitch = ref(false)
 const switching = ref(false)
 async function switchNow() {
   switching.value = true
+  ending = 'switch'
   try {
     await api.switchEmbedding()
     await refresh()
   } catch (err) {
+    ending = null
     failed(err, '切换失败')
   } finally {
     switching.value = false
@@ -198,11 +220,13 @@ const confirmAbort = ref(false)
 const aborting = ref(false)
 async function abort() {
   aborting.value = true
+  ending = 'abort'
   try {
     await api.abortNextEmbedding()
     await refresh()
     toast.add({ title: '已放弃换模型，新模型生成的向量会在后台删掉', color: 'success' })
   } catch (err) {
+    ending = null
     failed(err, '放弃失败')
   } finally {
     aborting.value = false
@@ -246,7 +270,8 @@ async function rebuild() {
   try {
     await api.rebuildEmbeddings()
     toast.add({ title: '已排进队列，后台会检查全部记忆、补齐缺少或过时的向量', color: 'success' })
-    startPolling()
+    // 重新读一次进度：缺向量的话就接着刷到补齐
+    void status.refetch({ cancelRefetch: false })
   } catch (err) {
     failed(err, '排队失败')
   } finally {
@@ -464,7 +489,7 @@ async function rebuild() {
         >
           刷新
         </UButton>
-        <span v-if="polling || next" class="text-sm text-muted">正在跟进进度……</span>
+        <span v-if="following" class="text-sm text-muted">正在跟进进度……</span>
       </div>
     </div>
   </UCard>
