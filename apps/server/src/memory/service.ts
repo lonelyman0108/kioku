@@ -1714,12 +1714,19 @@ export class MemoryService {
     return sql`(${this.snapshotShown(before)} and ${after} is not null and not ${this.snapshotShown(after)})`
   }
 
-  // 按 id 找一条管理读取读得到的策展记忆，已删除的也算；读不到和不存在一样是 404
-  private async findManageable(tx: Tx, memoryId: string): Promise<MemoryRow> {
+  // 按 id 找一条管理读取读得到的策展记忆，已删除的也算；读不到和不存在一样是 404。
+  // anyForm 时抽取的记忆也找出来，由调用方说明为什么不能对它这样做
+  private async findManageable(tx: Tx, memoryId: string, anyForm = false): Promise<MemoryRow> {
     const [row] = await tx
       .select()
       .from(memories)
-      .where(and(eq(memories.id, memoryId), eq(memories.form, 'curated'), this.manageable()))
+      .where(
+        and(
+          eq(memories.id, memoryId),
+          anyForm ? undefined : eq(memories.form, 'curated'),
+          this.manageable(),
+        ),
+      )
     if (!row) throw new MemoryError(404, '记忆不存在')
     return row
   }
@@ -1809,8 +1816,9 @@ export class MemoryService {
     })
   }
 
-  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性；
-  // 已经过期或失效的不列：撤销删除之后也看不到。其中让出 URI 时被软删除的过期记录列在已过期里，能重新生效
+  // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性。
+  // 只列用户删掉的（删除时还有效），删掉之后才到期的也列出来：撤销删除和过期互不相干，撤销之后它回到过期的状态。
+  // 过期之后被让出 URI 的不在这里，在已过期里重新生效
   async deleted(query: PageQuery): Promise<DeletedMemoryList> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
@@ -1822,9 +1830,8 @@ export class MemoryService {
         .from(memories)
         .where(
           and(
-            isNotNull(memories.deletedAt),
+            USER_DELETED,
             eq(memories.form, 'curated'),
-            STILL_VALID,
             this.manageable(),
             after
               ? sql`(${DELETED_MICROS}, ${memories.id}) < (${after[0]}::bigint, ${after[1]}::uuid)`
@@ -1845,6 +1852,7 @@ export class MemoryService {
           disclosure: row.disclosure,
           version: row.version,
           deletedAt: row.deletedAt!.toISOString(),
+          validTo: endOf(row)?.toISOString() ?? null,
         })),
         nextCursor:
           rows.length > query.limit && last
@@ -1999,12 +2007,20 @@ export class MemoryService {
     })
   }
 
-  // 撤销删除：清掉删除标记，这一行原样留下（secret 的密文也还在），不从快照重建。
-  // URI 已被别的记忆占用时返回 409；提交后重新排队生成向量
+  // 撤销删除：清掉删除标记，这一行原样留下（secret 的密文也还在），不从快照重建，也不动有效期：
+  // 撤销删除和过期互不相干，删掉之后才到期的撤销之后回到过期的状态，在已过期里能重新生效。
+  // 过期之后被让出 URI 的不走这里（见 reactivate）。URI 已被同一归属的别的记录占用时由唯一索引判断，返回 409；
+  // 这一行自己已经过期时不和成员节点或共享节点互斥（触发器不看过期的记录），重新生效时才检查。提交后重新排队生成向量
   async undelete(input: UndeleteRequest): Promise<MemoryView> {
     return this.write(async (tx, _personaIds, released) => {
       const row = await this.findManageable(tx, input.memoryId)
       if (!row.deletedAt) throw new MemoryError(409, '这条记忆没有被删除')
+      if (isReleased(row)) {
+        throw new MemoryError(
+          409,
+          '这条记忆是过期之后让出了 URI，不是删掉的；在「已过期」里让它重新生效',
+        )
+      }
       this.assertModifiable(row, `没有权限恢复 ${row.layer} 层的记忆`)
       // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
       await this.checkKeptRefs(tx, row, row)
@@ -2017,24 +2033,10 @@ export class MemoryService {
             eq(memories.id, row.id),
             eq(memories.version, row.version),
             isNotNull(memories.deletedAt),
-            STILL_VALID,
           ),
         )
         .returning()
-      if (!restored) {
-        const [stale] = await tx
-          .select({ id: memories.id })
-          .from(memories)
-          .where(and(eq(memories.id, row.id), sql`not ${STILL_VALID}`))
-        throw new MemoryError(
-          409,
-          !stale
-            ? '记忆刚被其他请求修改，请重新读取'
-            : isReleased(row)
-              ? '这条记忆过期之后让出了 URI，不能撤销删除；在「已过期」里让它重新生效'
-              : '这条记忆已经过期，撤销删除之后也看不到',
-        )
-      }
+      if (!restored) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       await this.event(
         tx,
@@ -2044,16 +2046,23 @@ export class MemoryService {
         snapshot(restored, glossary),
       )
       return this.toView(restored, glossary)
-    })
+    }, UNDELETE_CONFLICT)
   }
 
-  // 让过期的记忆重新生效：清掉有效期，之后一直有效；过期之后让出了 URI 的（isReleased）在同一个操作里撤销删除。
-  // 用户删掉的（删除时还有效）不收，走撤销删除。要按管理读取读得到、也写得了它，读不到和不存在一样是 404。
+  // 让过期的策展记忆重新生效：清掉有效期，之后一直有效；过期之后让出了 URI 的（isReleased）在同一个操作里撤销删除。
+  // 用户删掉的（删除时还有效）不收，走撤销删除。抽取的记忆也不收：被推翻的事实在对象页上重新生效（reactivateFact），
+  // 会话摘要按设计到期，不能变成一直有效。要按管理读取读得到、也写得了它，读不到和不存在一样是 404。
   // 这个 URI 已经被别的有效记录占用时由数据库判断（唯一索引与互斥触发器，触发器在有效期变化时也检查），返回 409；
   // 同一归属下挡着 URI 的别的过期记录先让出（claimUri）。正文与归属不变，提交后重新排队生成向量
   async reactivate(input: ReactivateRequest): Promise<MemoryView> {
     return this.write(async (tx, _personaIds, released) => {
-      const row = await this.findManageable(tx, input.memoryId)
+      const row = await this.findManageable(tx, input.memoryId, true)
+      if (row.form !== 'curated') {
+        throw new MemoryError(
+          409,
+          '从对话里抽取的记忆不在这里重新生效：被推翻的事实在对象页上让它重新生效，会话摘要按设计到期，不能改成一直有效',
+        )
+      }
       if (row.version !== input.expectedVersion) {
         throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
       }
@@ -2132,13 +2141,16 @@ function isReleased(row: Pick<MemoryRow, 'validTo' | 'expiresAt' | 'deletedAt'>)
   return row.deletedAt !== null && ended !== null && ended.getTime() <= row.deletedAt.getTime()
 }
 
-// endOf 与 isReleased 的 SQL 版本；least 不看 NULL，两个都为空时是 NULL
+// endOf 与 isReleased 的 SQL 版本；least 不看 NULL，两个都为空时是 NULL，没有有效期的不算让出的
 const ENDED = sql`least(${memories.validTo}, ${memories.expiresAt})`
 const ENDED_MICROS = microsOf(ENDED)
-const RELEASED = sql`(${memories.deletedAt} is not null and ${ENDED} <= ${memories.deletedAt})`
+const RELEASED = sql`(${memories.deletedAt} is not null and coalesce(${ENDED} <= ${memories.deletedAt}, false))`
+// 用户删掉的：删除时还有效（一直有效，或者删掉之后才到期），不是过期之后被让出的
+const USER_DELETED = sql`(${memories.deletedAt} is not null and not ${RELEASED})`
 
-// 重新生效时 URI 已被占用：多半就是过期之后在这个 URI 上写下的那条新记忆
+// 重新生效、撤销删除时 URI 已被占用：多半就是在这个 URI 上新写的那条记忆
 const REACTIVATE_CONFLICT = '这个 URI 现在被另一条记忆占用，先把那条移走或删掉，再让它重新生效'
+const UNDELETE_CONFLICT = '这个 URI 现在被另一条记忆占用，先把那条移走或删掉，再撤销删除'
 
 // 写入的有效到要晚于现在：已经过去的时间写进去，记忆马上就读不到了，多半是算错了（时区、日期）；
 // 要它现在就不再生效就删掉它（之后能撤销删除）。也要晚于生效时间，生效时间不会晚于现在，这一条一般自然满足

@@ -184,6 +184,8 @@ export const PageQuery = z.object({
 })
 export type PageQuery = z.infer<typeof PageQuery>
 
+// 用户删掉的记忆（删除时还有效），能撤销删除。删掉之后才到期的也在这里，撤销删除只清删除标记，
+// 之后回到已过期里；过期之后被让出 URI 的不在这里，在已过期里重新生效
 export const DeletedMemory = z.object({
   id: z.uuid(),
   uri: z.string(),
@@ -193,6 +195,8 @@ export const DeletedMemory = z.object({
   disclosure: z.string().nullable(),
   version: z.number().int(),
   deletedAt: z.string(),
+  // 有效到；null 表示一直有效，已经过去时这条删掉之后又过期了
+  validTo: z.string().nullable(),
 })
 export type DeletedMemory = z.infer<typeof DeletedMemory>
 
@@ -270,7 +274,8 @@ export type GlossaryIndex = z.infer<typeof GlossaryIndex>
 export const UndeleteRequest = z.object({ memoryId: z.uuid() })
 export type UndeleteRequest = z.infer<typeof UndeleteRequest>
 
-// 让过期的记忆重新生效：清掉有效期，一直有效；过期之后让出了 URI 的一并撤销删除。
+// 让过期的策展记忆重新生效：清掉有效期，一直有效；过期之后让出了 URI 的一并撤销删除。
+// 抽取的记忆不在这里：被推翻的事实在对象页上重新生效，会话摘要按设计到期。
 // expectedVersion 是界面上看到的版本号，期间被改过就返回 409
 export const ReactivateRequest = z.object({
   memoryId: z.uuid(),
