@@ -49,6 +49,8 @@ import {
   ReviewList,
   ReviewResult,
   SetupStatus,
+  SpaceImportPreview,
+  SpaceImportResult,
   SpaceOverview,
   SubjectDetail,
   SubjectInfo,
@@ -84,7 +86,7 @@ import {
 } from '@kioku/contracts'
 import { z } from 'zod'
 
-import { request } from './client'
+import { download, request } from './client'
 
 export const api = {
   health: () => request('GET', '/health', { schema: HealthResponse }),
@@ -306,6 +308,23 @@ export const api = {
       body: { defaults },
       schema: DomainLayers,
     }),
+  // 导出文件是用口令加密的二进制文件，整个下载下来交给浏览器保存
+  exportSpace: (spaceId: string, passphrase: string) =>
+    download('POST', `/spaces/${spaceId}/export`, { passphrase }),
+  // 导入之前先检查：是谁导出的、有多少，导入后哪些归你；不写库
+  inspectSpaceImport: (file: File, passphrase: string) => {
+    const form = new FormData()
+    form.set('file', file)
+    form.set('passphrase', passphrase)
+    return request('POST', '/spaces/import/inspect', { body: form, schema: SpaceImportPreview })
+  },
+  importSpace: (file: File, passphrase: string, name: string) => {
+    const form = new FormData()
+    form.set('file', file)
+    form.set('passphrase', passphrase)
+    if (name.trim()) form.set('name', name.trim())
+    return request('POST', '/spaces/import', { body: form, schema: SpaceImportResult })
+  },
 
   embeddingSettings: () => request('GET', '/settings/embedding', { schema: EmbeddingSettingsView }),
   saveEmbeddingSettings: (body: UpdateEmbeddingSettings) =>

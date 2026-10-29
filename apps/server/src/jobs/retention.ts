@@ -15,7 +15,6 @@ import {
   isNotNull,
   isNull,
   lt,
-  ne,
   or,
   sql,
   type SQL,
@@ -252,24 +251,28 @@ export function retentionRules(now: Date, days: number) {
 
 type Rules = ReturnType<typeof retentionRules>
 
-// 导入事件削成只剩写到的 URI：导入工具按导入事件去重，记忆整行不在了（memory_id 为空）也认得出
+// Lore 导入工具写下的导入事件（context 里的出处 source 是 lore）：它按这些事件去重（见 importer/lore.ts），
+// 记忆硬删除之后也要留下。别的导入事件没人拿来去重（例如按空间导入的，出处是 space-export），
+// 和普通事件一样删掉：留着只会一直攒下去，私人层的 URI 也一直留在库里。没有出处的也不算，条件不会是 NULL
+const LORE_IMPORT = sql`(${memoryEvents.eventType} = 'import' and coalesce(${memoryEvents.context} ->> 'source', '') = 'lore')`
+// Lore 的导入事件削成只剩写到的 URI：记忆整行不在了（memory_id 为空）导入工具也认得出
 // 「导入过、后来删掉了」，不会再写回来；正文、disclosure 与关键词都不留
 const IMPORT_TRACE = sql`case when ${memoryEvents.after} is null then null
   else jsonb_build_object('domain', ${memoryEvents.after} -> 'domain', 'path', ${memoryEvents.after} -> 'path') end`
-// 已经削好的导入事件：除了 URI 什么都没留下。永久留着当去重记录，每天的清理不必再看它
+// 已经削好的导入事件：除了 URI 什么都没留下。Lore 的永久留着当去重记录，每天的清理不必再看它
 const TRIMMED = sql`(${memoryEvents.before} is null and (${memoryEvents.after} is null or ${memoryEvents.after} - 'domain' - 'path' = '{}'::jsonb))`
 
-// 记忆硬删除之后的历史：导入事件留下当作去重记录（memory_id 置空，快照只留 URI），别的事件都删掉。
+// 记忆硬删除之后的历史：Lore 的导入事件留下当作去重记录（memory_id 置空，快照只留 URI），别的事件都删掉。
 // 返回删掉了几条、削了几条
 async function dropHistory(tx: Tx, where: SQL): Promise<{ removed: number; trimmed: number }> {
   const trimmed = await tx
     .update(memoryEvents)
     .set({ memoryId: null, before: null, after: IMPORT_TRACE })
-    .where(and(where, eq(memoryEvents.eventType, 'import')))
+    .where(and(where, LORE_IMPORT))
     .returning({ id: memoryEvents.id })
   const removed = await tx
     .delete(memoryEvents)
-    .where(and(where, ne(memoryEvents.eventType, 'import')))
+    .where(and(where, sql`not ${LORE_IMPORT}`))
     .returning({ id: memoryEvents.id })
   return { removed: removed.length, trimmed: trimmed.length }
 }
@@ -292,17 +295,13 @@ async function memoryBatch(tx: Tx, where: SQL): Promise<number> {
 }
 
 // 记忆整行已经不在的历史：删账号时数据库连带删掉他的画像层、私人层记忆，外键把事件的 memory_id 置空，
-// 快照里的正文却留着。管理界面里看不到（历史与活动只列记忆还在的），和硬删除时一样处理
+// 快照里的正文却留着。管理界面里看不到（历史与活动只列记忆还在的），和硬删除时一样处理。
+// 只跳过已经削好的 Lore 导入事件；别的导入事件削好了也删（之前的清理把它们也削成了 URI 留着）
 async function orphanBatch(tx: Tx) {
   const rows = await tx
     .select({ id: memoryEvents.id })
     .from(memoryEvents)
-    .where(
-      and(
-        isNull(memoryEvents.memoryId),
-        or(ne(memoryEvents.eventType, 'import'), sql`not ${TRIMMED}`),
-      ),
-    )
+    .where(and(isNull(memoryEvents.memoryId), sql`not (${LORE_IMPORT} and ${TRIMMED})`))
     .orderBy(asc(memoryEvents.id))
     .limit(RETENTION_BATCH)
   if (!rows.length) return { picked: 0, counts: {} }

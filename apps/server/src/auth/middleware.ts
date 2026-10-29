@@ -121,6 +121,16 @@ export async function isInstanceAdmin(db: Db, accountId: string): Promise<boolea
   return Boolean(account?.isAdmin)
 }
 
+// 只给实例管理员的接口，放在 requireConsole 之后
+export function requireInstanceAdmin(deps: Deps, message = '需要实例管理员') {
+  return createMiddleware<AppEnv>(async (c, next) => {
+    if (!(await isInstanceAdmin(deps.db, c.get('console').accountId))) {
+      return c.json({ error: message }, 403)
+    }
+    await next()
+  })
+}
+
 export async function memberRole(deps: Deps, spaceId: string, accountId: string) {
   const [row] = await deps.db
     .select({ role: spaceMembers.role })
