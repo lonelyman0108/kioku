@@ -1,13 +1,18 @@
 import type { OverviewBackup } from '@kioku/contracts'
 
-// 每天几点（UTC）做备份：选项里同时给出浏览器所在时区的钟点
-export function hourLabel(hour: number): string {
-  const local = new Date(Date.UTC(2000, 0, 1, hour)).toLocaleTimeString([], {
-    hour: '2-digit',
-    minute: '2-digit',
-    hour12: false,
-  })
+// 每天几点（UTC）做备份：选项里同时给出浏览器所在时区的钟点。按今天换算，夏令时的地区也对得上
+export function hourLabel(hour: number, today: Date = new Date()): string {
+  const at = new Date(today)
+  at.setUTCHours(hour, 0, 0, 0)
+  const local = at.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' })
   return `${String(hour).padStart(2, '0')}:00 UTC（本地 ${local}）`
+}
+
+// 没设置过时默认本地凌晨 3 点：换成 UTC 的钟点
+export function defaultHour(today: Date = new Date()): number {
+  const at = new Date(today)
+  at.setHours(3, 0, 0, 0)
+  return at.getUTCHours()
 }
 
 export function formatBytes(bytes: number): string {
@@ -19,6 +24,15 @@ export function formatBytes(bytes: number): string {
 
 // 超过这么久没做成一份就提醒：每天一份，留一天的余量
 const STALE_MS = 2 * 24 * 3600_000
+
+// 最近的错误是没做成（比最近一份成功晚），还是做成之后的提醒（和那份成功同时记下）
+export function errorKind(
+  lastSuccessAt: string | null,
+  lastError: { at: string } | null,
+): 'error' | 'warning' | null {
+  if (!lastError) return null
+  return lastSuccessAt && lastError.at <= lastSuccessAt ? 'warning' : 'error'
+}
 
 export interface BackupNotice {
   color: 'error' | 'warning' | 'info'
@@ -41,16 +55,13 @@ export function backupNotice(
     }
   }
   const { lastSuccessAt, lastError } = backup
-  // 做成之后的提醒（例如删旧备份出错）和这份成功的时间相同，不算没做成
-  if (lastError && (!lastSuccessAt || lastError.at > lastSuccessAt)) {
+  const kind = errorKind(lastSuccessAt, lastError)
+  if (kind === 'error') {
     return {
       color: 'error',
       title: '备份没做成',
-      description: `${lastError.message}。下一个小时会再试，详情见实例设置。`,
+      description: `${lastError!.message}。下一个小时会再试，详情见实例设置。`,
     }
-  }
-  if (lastError) {
-    return { color: 'warning', title: '备份做成了，但有提醒', description: lastError.message }
   }
   if (!lastSuccessAt) {
     return {
@@ -66,6 +77,10 @@ export function backupNotice(
       title: '好几天没有新的备份',
       description: `最近一份做于 ${Math.floor(age / (24 * 3600_000))} 天前，备份按天做，去实例设置里看看最近的结果。`,
     }
+  }
+  // 做成之后的提醒（例如删旧备份出错）：好几天没有新的一份时先说那个
+  if (kind === 'warning') {
+    return { color: 'warning', title: '备份做成了，但有提醒', description: lastError!.message }
   }
   return null
 }

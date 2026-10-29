@@ -5,7 +5,7 @@ import { createMiddleware } from 'hono/factory'
 
 import { keyEffectiveScopes } from '../access/access'
 import { withSpace, type Db } from '../db/client'
-import { apiKeys, apps, spaceMembers } from '../db/schema'
+import { accounts, apiKeys, apps, spaceMembers } from '../db/schema'
 import type { AppEnv, Deps, KeyPrincipal } from '../http/env'
 import { parseApiKey, verifyApiKey } from './keys'
 import { resolveSession, SESSION_COOKIE } from './session'
@@ -110,6 +110,15 @@ export function keyPrincipal(
       config: AppConfig.parse(app.config),
     },
   }
+}
+
+// 是不是实例管理员：实例设置、备份与模型接口的原始报错只给他们
+export async function isInstanceAdmin(db: Db, accountId: string): Promise<boolean> {
+  const [account] = await db
+    .select({ isAdmin: accounts.isAdmin })
+    .from(accounts)
+    .where(eq(accounts.id, accountId))
+  return Boolean(account?.isAdmin)
 }
 
 export async function memberRole(deps: Deps, spaceId: string, accountId: string) {

@@ -75,6 +75,7 @@ export async function backupJob(
   masterKey: MasterKey | null,
   force: boolean,
 ): Promise<'skipped' | 'done' | 'failed'> {
+  const startedAt = new Date().toISOString()
   const target = await loadBackupTarget(db)
   if (!target) return 'skipped'
   if (!force) {
@@ -92,7 +93,7 @@ export async function backupJob(
     await recordBackupSuccess(db, config, run, warning)
     return 'done'
   } catch (err) {
-    await recordBackupError(db, target, (err as Error).message)
+    await recordBackupError(db, target, (err as Error).message, startedAt)
     return 'failed'
   }
 }

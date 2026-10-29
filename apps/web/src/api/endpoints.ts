@@ -2,6 +2,7 @@ import {
   ActivityList,
   AppInfo,
   BackupObjectList,
+  BackupQueued,
   BackupSettingsView,
   BackupTestResult,
   BootPreview,
@@ -313,6 +314,6 @@ export const api = {
     request('PUT', '/settings/backup', { body, schema: BackupSettingsView }),
   clearBackupSettings: () => request('DELETE', '/settings/backup'),
   testBackup: () => request('POST', '/settings/backup/test', { schema: BackupTestResult }),
-  runBackup: () => request('POST', '/settings/backup/run'),
+  runBackup: () => request('POST', '/settings/backup/run', { schema: BackupQueued }),
   backupObjects: () => request('GET', '/settings/backup/objects', { schema: BackupObjectList }),
 }

@@ -2,9 +2,10 @@ import { createRoute, z } from '@hono/zod-openapi'
 import { ErrorResponse, SpaceOverview } from '@kioku/contracts'
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 
+import { isInstanceAdmin } from '../auth/middleware'
 import { backupSettingsView } from '../backup/settings'
 import { withSpace, type Db } from '../db/client'
-import { accounts, apiKeys, apps, spaceMembers } from '../db/schema'
+import { apiKeys, apps, spaceMembers } from '../db/schema'
 import { embeddingSettingsView } from '../embedding/settings'
 import { extractionUsage } from '../extraction/budget'
 import type { Deps } from '../http/env'
@@ -30,11 +31,7 @@ const overview = createRoute({
 
 // 备份是整个实例的事，只给实例管理员看
 async function backupSummary(db: Db, accountId: string) {
-  const [viewer] = await db
-    .select({ isAdmin: accounts.isAdmin })
-    .from(accounts)
-    .where(eq(accounts.id, accountId))
-  if (!viewer?.isAdmin) return null
+  if (!(await isInstanceAdmin(db, accountId))) return null
   const view = await backupSettingsView(db)
   return {
     configured: view.configured,

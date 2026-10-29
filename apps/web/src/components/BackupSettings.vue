@@ -2,11 +2,11 @@
 import { useToast } from '@nuxt/ui/composables'
 import type { BackupSettingsView, BackupTestResult } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { formatBytes, hourLabel } from '../backup'
+import { defaultHour, errorKind, formatBytes, hourLabel } from '../backup'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
 
@@ -15,13 +15,14 @@ const queryClient = useQueryClient()
 const queryKey = ['settings', 'backup']
 const objectsKey = ['settings', 'backup', 'objects']
 
-// 点了「立即备份」之后每隔几秒看一眼结果，最近一次成功或出错的时间变了就停（最多等十分钟）
-const waitingSince = ref<number | null>(null)
+// 点了「立即备份」之后每隔几秒看一眼结果：等的是排上队（服务器时间）之后开始的那一次，
+// 别的任务（例如整点的定时备份）的结果不算；最多等十分钟
+const waitingFor = ref<string | null>(null)
 // 用计算属性而不是函数：函数只在每次取数之后才重新算，查询空闲时开始等待不会触发轮询
 const settings = useQuery({
   queryKey,
   queryFn: api.backupSettings,
-  refetchInterval: computed(() => (waitingSince.value ? 3_000 : false)),
+  refetchInterval: computed(() => (waitingFor.value ? 3_000 : false)),
 })
 const view = computed(() => settings.data.value)
 const configured = computed(() => Boolean(view.value?.configured))
@@ -33,8 +34,7 @@ const objects = useQuery({
 })
 
 const hours = Array.from({ length: 24 }, (_, hour) => ({ label: hourLabel(hour), value: hour }))
-// 没设置过时默认本地凌晨 3 点
-const DEFAULT_HOUR = new Date(2000, 0, 1, 3).getUTCHours()
+const DEFAULT_HOUR = defaultHour()
 const DEFAULT_KEEP = 7
 
 // secretAccessKey 留空表示沿用已保存的
@@ -59,12 +59,16 @@ const fill = (s: BackupSettingsView) => {
 }
 // 只在第一次读到、或者自己保存之后同步表单：等结果时的刷新不能冲掉正在填的内容
 let synced = false
-watch(view, (s) => {
-  if (s && !synced) {
-    fill(s)
-    synced = true
-  }
-})
+watch(
+  view,
+  (s) => {
+    if (s && !synced) {
+      fill(s)
+      synced = true
+    }
+  },
+  { immediate: true },
+)
 
 const dirty = computed(() => {
   const s = view.value
@@ -124,30 +128,41 @@ async function test() {
   }
 }
 
-// 最近一次结果的时间：做成或出错，有一个变了就是这次立即备份有了结果
+// 最近一次结果的时间：成功与出错记的都是那一次开始的时间
 const lastEvent = computed(() =>
   [view.value?.status.lastSuccess?.at, view.value?.status.lastError?.at]
     .filter((at): at is string => Boolean(at))
     .sort()
     .at(-1),
 )
-let waitingFrom: string | undefined
+const lastErrorKind = computed(() =>
+  errorKind(view.value?.status.lastSuccess?.at ?? null, view.value?.status.lastError ?? null),
+)
+const starting = ref(false)
+let giveUp: ReturnType<typeof setTimeout> | undefined
+function stopWaiting() {
+  waitingFor.value = null
+  clearTimeout(giveUp)
+}
+onBeforeUnmount(stopWaiting)
 async function runNow() {
+  if (starting.value || waitingFor.value) return
+  starting.value = true
   try {
-    await api.runBackup()
-    waitingFrom = lastEvent.value
-    waitingSince.value = Date.now()
+    const { queuedAt } = await api.runBackup()
+    waitingFor.value = queuedAt
+    giveUp = setTimeout(stopWaiting, 10 * 60_000)
     toast.add({ title: '已排进后台任务，做完会在下面显示', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '没能开始备份', color: 'error' })
+  } finally {
+    starting.value = false
   }
 }
-watch([lastEvent, () => settings.dataUpdatedAt.value], async ([at]) => {
-  if (!waitingSince.value) return
-  if (at !== waitingFrom || Date.now() - waitingSince.value > 10 * 60_000) {
-    waitingSince.value = null
-    await queryClient.invalidateQueries({ queryKey: objectsKey })
-  }
+watch(lastEvent, async (at) => {
+  if (!waitingFor.value || !at || at < waitingFor.value) return
+  stopWaiting()
+  await queryClient.invalidateQueries({ queryKey: objectsKey })
 })
 
 const confirmingClear = ref(false)
@@ -158,12 +173,12 @@ async function clear() {
     await api.clearBackupSettings()
     confirmingClear.value = false
     result.value = null
-    waitingSince.value = null
+    stopWaiting()
     form.secretAccessKey = ''
-    // 清掉之后表单回到空白：刷新回来时按新的（空的）设置重新填
+    // 清掉之后表单回到空白：刷新回来时按新的（空的）设置重新填。存储桶里的列表直接扔掉，不再去列
     synced = false
-    await queryClient.invalidateQueries({ queryKey })
     queryClient.removeQueries({ queryKey: objectsKey })
+    await queryClient.invalidateQueries({ queryKey, exact: true })
     toast.add({ title: '已清除，定时备份停止', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '清除失败', color: 'error' })
@@ -258,7 +273,7 @@ async function clear() {
             :icon="icons.backup"
             color="neutral"
             variant="subtle"
-            :loading="Boolean(waitingSince)"
+            :loading="starting || Boolean(waitingFor)"
             :disabled="!configured || dirty"
             @click="runNow"
           >
@@ -280,12 +295,8 @@ async function clear() {
         <USeparator />
         <div class="space-y-3 text-sm">
           <UAlert
-            v-if="view.status.lastError"
-            :color="
-              view.status.lastSuccess && view.status.lastError.at === view.status.lastSuccess.at
-                ? 'warning'
-                : 'error'
-            "
+            v-if="view.status.lastError && lastErrorKind"
+            :color="lastErrorKind"
             variant="subtle"
             :title="view.status.lastError.message"
             :description="`${formatTime(view.status.lastError.at)}（${formatRelative(view.status.lastError.at)}）`"

@@ -89,10 +89,16 @@ export function recordBackupSuccess(
   }))
 }
 
-export function recordBackupError(db: Db, location: Location, message: string): Promise<void> {
+// at 是这次备份开始的时间（和成功时记的一样），管理界面据此认出是不是自己排的那一次
+export function recordBackupError(
+  db: Db,
+  location: Location,
+  message: string,
+  at: string,
+): Promise<void> {
   return saveStatus(db, location, (status) => ({
     ...status,
-    lastError: { message: message.slice(0, 500), at: new Date().toISOString() },
+    lastError: { message: message.slice(0, 500), at },
   }))
 }
 

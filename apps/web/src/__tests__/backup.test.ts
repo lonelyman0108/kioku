@@ -1,10 +1,25 @@
-import { describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { backupNotice, formatBytes, hourLabel } from '../backup'
+import { backupNotice, defaultHour, errorKind, formatBytes, hourLabel } from '../backup'
 
 describe('备份的显示', () => {
+  // 在有夏令时的时区里核对：UTC 钟点与本地钟点的换算要按当天，固定用冬天的日期夏天就差一小时
+  const zone = process.env.TZ
+  beforeAll(() => {
+    process.env.TZ = 'America/New_York'
+  })
+  afterAll(() => {
+    if (zone === undefined) delete process.env.TZ
+    else process.env.TZ = zone
+  })
+
   it('钟点同时给出 UTC 与本地时间，大小按单位换算', () => {
     expect(hourLabel(3)).toMatch(/^03:00 UTC（本地 \d{2}:\d{2}）$/)
+    // 本地的零点写成 00:00，不会是 24:00；默认的钟点换回本地正好是凌晨 3 点（夏天冬天都按当天换算）
+    for (const day of [new Date('2026-01-15T12:00:00Z'), new Date('2026-07-15T12:00:00Z')]) {
+      for (let hour = 0; hour < 24; hour++) expect(hourLabel(hour, day)).not.toContain('24:')
+      expect(hourLabel(defaultHour(day), day)).toContain('本地 03:00')
+    }
     expect(formatBytes(512)).toBe('512 B')
     expect(formatBytes(2048)).toBe('2.0 KB')
     expect(formatBytes(5 * 1024 * 1024)).toBe('5.0 MB')
@@ -20,6 +35,13 @@ describe('概览里的备份提醒', () => {
     lastSuccessAt: hoursAgo(6),
     lastError: null,
     ...extra,
+  })
+
+  it('最近的错误比最近一份晚是没做成，同时记下的是提醒', () => {
+    expect(errorKind(null, null)).toBeNull()
+    expect(errorKind(null, { at: hoursAgo(1) })).toBe('error')
+    expect(errorKind(hoursAgo(6), { at: hoursAgo(1) })).toBe('error')
+    expect(errorKind(hoursAgo(6), { at: hoursAgo(6) })).toBe('warning')
   })
 
   it('不是实例管理员、或者一切正常时不提醒', () => {
@@ -50,11 +72,15 @@ describe('概览里的备份提醒', () => {
     })
   })
 
-  it('超过两天没有新的备份时提醒', () => {
+  it('超过两天没有新的备份时提醒，比做成之后的提醒优先', () => {
     expect(backupNotice(configured({ lastSuccessAt: hoursAgo(47) }), now)).toBeNull()
     expect(backupNotice(configured({ lastSuccessAt: hoursAgo(73) }), now)).toMatchObject({
       color: 'warning',
       title: '好几天没有新的备份',
     })
+    const warned = { message: '删旧备份时出错', at: hoursAgo(120) }
+    expect(
+      backupNotice(configured({ lastSuccessAt: hoursAgo(120), lastError: warned }), now),
+    ).toMatchObject({ title: '好几天没有新的备份' })
   })
 })

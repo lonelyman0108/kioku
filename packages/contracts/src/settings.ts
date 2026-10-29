@@ -205,3 +205,7 @@ export type BackupObjectList = z.infer<typeof BackupObjectList>
 
 export const BackupTestResult = z.object({ ok: z.boolean(), error: z.string().nullable() })
 export type BackupTestResult = z.infer<typeof BackupTestResult>
+
+// 立即备份排上队的时间（服务器时间）：之后开始的那一次有了结果，最近一次成功或出错的时间就不早于它
+export const BackupQueued = z.object({ queuedAt: z.string() })
+export type BackupQueued = z.infer<typeof BackupQueued>

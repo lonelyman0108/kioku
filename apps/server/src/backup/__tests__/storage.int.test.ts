@@ -170,13 +170,18 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     old('kioku/sub/kioku-2026-01-01T00-00-00Z.backup')
     old('other/kioku-2026-01-01T00-00-00Z.backup')
 
-    expect((await send('POST', '/run')).status).toBe(202)
+    const run = await send('POST', '/run')
+    expect(run.status).toBe(202)
+    // 排上队的服务器时间：管理界面等的是那之后开始的那一次
+    const { queuedAt } = (await run.json()) as { queuedAt: string }
+    expect(Date.parse(queuedAt)).toBeLessThanOrEqual(Date.now())
     expect(queued).toEqual(['backup'])
     expect(await backupJob(database.db, masterKey, true)).toBe('done')
 
     const status = await loadBackupStatus(database.db)
     expect(status.lastError).toBeNull()
     const made = status.lastSuccess!
+    expect(made.at >= queuedAt).toBe(true)
     expect(made.object).toMatch(/^kioku\/kioku-\d{4}-\d{2}-\d{2}T\d{2}-\d{2}-\d{2}Z\.backup$/)
     expect(keys()).toEqual([
       `kioku-test/kioku/kioku-2026-01-02T00-00-00Z.backup`,
@@ -301,9 +306,12 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     )
 
     s3.fail(403, 'PUT')
+    const before = new Date().toISOString()
     expect(await backupJob(database.db, masterKey, true)).toBe('failed')
     let status = await loadBackupStatus(database.db)
     expect(status.lastSuccess).toBeNull()
+    // 出错记的是这一次开始的时间
+    expect(status.lastError!.at >= before).toBe(true)
     expect(status.lastError?.message).toContain('存储返回 403（AccessDenied：故意出错）')
 
     s3.fail(undefined, 'PUT')
