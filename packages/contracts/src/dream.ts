@@ -102,12 +102,14 @@ export const DREAM_TRIGGERS = ['scheduled', 'manual'] as const
 export const DreamTrigger = z.enum(DREAM_TRIGGERS)
 export type DreamTrigger = z.infer<typeof DreamTrigger>
 
-// 没整理的原因：没配抽取模型、本月的抽取预算用完了、上次以来没有新增或改动的内容
-export const DREAM_SKIP_REASONS = ['no-model', 'budget', 'idle'] as const
+// 没整理的原因：没配抽取模型、本月的抽取预算用完了、上次以来没有新增或改动的内容；
+// opted-out：请求模型期间这一组的主人关掉了 Dream 整理画像层与私人层，这一次的结果没有存（只有本人看得到）
+export const DREAM_SKIP_REASONS = ['no-model', 'budget', 'idle', 'opted-out'] as const
 export const DreamSkipReason = z.enum(DREAM_SKIP_REASONS)
 export type DreamSkipReason = z.infer<typeof DreamSkipReason>
 
-// 一次整理里的一项：整理了一个范围，或者整次没走到范围（scope 为 null，带上没整理的原因）
+// 一次整理里的一项：整理了一个范围（预算用完、主人关掉了时带上没整理的原因），
+// 或者整次没走到范围（scope 为 null，带上没整理的原因）
 export const DreamRunEntry = z.object({
   scope: DreamScope.nullable(),
   model: z.string().nullable(),
@@ -150,7 +152,8 @@ export type DreamMemberSettings = z.infer<typeof DreamMemberSettings>
 export const DreamQueued = z.object({ runId: z.uuid() })
 export type DreamQueued = z.infer<typeof DreamQueued>
 
-// 一次整理的状态：排着、正在整理、做完了。做完了的结果：整理过了、没整理（原因见 reason）、出错了
+// 一次整理的状态：排着、正在整理、做完了。做完了的结果：整理过了、没整理（原因见 reason）、出错了。
+// 结果和运行记录一样按查看者看得到的那部分算：别的成员的画像层与私人层整理了没有、出没出错都不影响
 export const DreamRunStatus = z.object({
   state: z.enum(['queued', 'running', 'finished']),
   outcome: z.enum(['done', 'skipped', 'failed']).nullable(),

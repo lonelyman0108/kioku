@@ -66,7 +66,11 @@ export const skipReasonLabels: Record<DreamSkipReason, string> = {
   'no-model': '没整理：还没配抽取模型（实例设置里配）',
   budget: '没整理：本月的抽取预算用完了',
   idle: '没有要整理的：上次以来没有新增或改动的内容',
+  'opted-out': '没存：请求模型期间你关掉了整理画像层与私人层，这次的结果没有存，打开后会重新整理',
 }
+
+// 自己在这个空间里的 Dream 设置的查询键：空间设置里的开关与待审页的说明共用一份缓存
+export const dreamSettingsKey = (spaceId: string) => ['dream-settings', spaceId] as const
 
 // 运行记录里一个范围的情况：用了多少 token、看了几条、提了几条建议
 export function runEntrySummary(entry: DreamRunEntry): string {

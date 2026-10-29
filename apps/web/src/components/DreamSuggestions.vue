@@ -15,6 +15,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
   dreamScopeText,
+  dreamSettingsKey,
   runEntrySummary,
   runOutcome,
   suggestionKinds,
@@ -46,7 +47,7 @@ const runs = useQuery({
 })
 // 自己的画像层与私人层整理不整理：在空间设置里改，这里说一声
 const mine = useQuery({
-  queryKey: computed(() => ['dream-settings', props.spaceId] as const),
+  queryKey: computed(() => dreamSettingsKey(props.spaceId)),
   queryFn: ({ queryKey: [, spaceId] }) => api.dreamSettings(spaceId),
 })
 

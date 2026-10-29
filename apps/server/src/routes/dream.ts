@@ -14,7 +14,7 @@ import { and, eq } from 'drizzle-orm'
 
 import { isInstanceAdmin, memberRole } from '../auth/middleware'
 import { spaceMembers } from '../db/schema'
-import { dreamRunList } from '../extraction/dream'
+import { dreamRunList, dreamRunOutcome } from '../extraction/dream'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
@@ -93,7 +93,8 @@ const status = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/dream/runs/{runId}',
   tags: ['review'],
-  summary: '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）',
+  summary:
+    '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）；结果按查看者看得到的运行记录算，别的成员的画像层与私人层不影响',
   request: { params: SpaceParams.extend({ runId: z.uuid() }) },
   responses: {
     200: jsonResponse('状态', DreamRunStatus),
@@ -178,13 +179,17 @@ export function dreamRoutes(deps: Deps) {
     })
     .openapi(status, async (c) => {
       const { spaceId, runId } = c.req.valid('param')
-      if (!(await member(spaceId, c.get('console').accountId))) {
+      const accountId = c.get('console').accountId
+      if (!(await member(spaceId, accountId))) {
         return c.json({ error: '不是该空间成员' }, 403)
       }
       if (!deps.jobs) return c.json({ error: '服务没有启动后台任务' }, 503)
       const found = await deps.jobs.dreamRun(spaceId, runId)
       if (!found) return c.json({ error: '没有这次整理' }, 404)
-      return c.json(found, 200)
+      if (found.state !== 'finished') return c.json(found, 200)
+      // 做完了：结果按查看者看得到的运行记录算。一条记录都没写下（连记录都写不进去，任务失败）时用任务自己的结果
+      const seen = await dreamRunOutcome(deps.db, spaceId, runId, accountId)
+      return c.json(seen ? { state: 'finished' as const, ...seen } : found, 200)
     })
     .openapi(mySettings, async (c) => {
       const { spaceId } = c.req.valid('param')

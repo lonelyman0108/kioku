@@ -39,6 +39,7 @@ import {
   SPACE_EXPORT_MAX_PLAIN_BYTES,
   SPACE_EXPORT_VERSION,
   SpaceExportHeader,
+  SpaceExportHeaderV1,
   SpaceExportRecord,
   type AppRecord,
   type CredentialRecord,
@@ -90,6 +91,12 @@ function parseLine<T>(value: unknown, schema: z.ZodType<T>, lineNo: number): T {
   return parsed.data
 }
 
+// 认得的文件头，按格式版本：这个版本写的，和更早的（读进来换成这个版本的样子）
+const HEADERS = new Map<unknown, z.ZodType<SpaceExportHeader>>([
+  [1, SpaceExportHeaderV1],
+  [SPACE_EXPORT_VERSION, SpaceExportHeader],
+])
+
 // 解开之后的正文按行读出：第一行是文件头，之后每行一条记录。先认格式与版本，再按这个版本的定义检查
 export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   const text = plain.toString('utf8')
@@ -99,14 +106,15 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   if (first?.format !== SPACE_EXPORT_FORMAT) {
     throw new MemoryError(400, '不是 Kioku 的空间导出文件')
   }
-  if (first.version !== SPACE_EXPORT_VERSION) {
+  const header = HEADERS.get(first.version)
+  if (!header) {
     throw new MemoryError(
       400,
-      `导出文件的格式版本是 ${String(first.version)}，这个版本的 Kioku 只认 ${SPACE_EXPORT_VERSION}：升级到导出它的版本（或更新的）再导入`,
+      `导出文件的格式版本是 ${String(first.version)}，这个版本的 Kioku 认 1 到 ${SPACE_EXPORT_VERSION}：升级到导出它的版本（或更新的）再导入`,
     )
   }
   const result: ParsedSpaceExport = {
-    header: parseLine(first, SpaceExportHeader, 1),
+    header: parseLine(first, header, 1),
     personas: [],
     apps: [],
     subjects: [],
