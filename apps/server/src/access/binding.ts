@@ -235,8 +235,8 @@ export type RedeemResult =
   | { kind: 'invalid' }
   // 收码的就是发码的对象（同一个账号，或者已经并在一起）
   | { kind: 'same' }
-  // 收码的对象标记成了别的成员
-  | { kind: 'linked' }
+  // 收码的对象标记成了别的成员；issuerLinked：发码的对象也标记了成员（两边是不同的成员）
+  | { kind: 'linked'; issuerLinked: boolean }
   // 不是同种类（都在私聊里认出来的，按理都是人）
   | { kind: 'kind' }
   // 收码的对象在解析之后刚好被合并掉了，再试一次就行
@@ -291,7 +291,9 @@ export async function redeemCode(
     if (!from) return { kind: 'busy' }
     if (into.kind !== from.kind) return { kind: 'kind' }
     // 收码的对象只能是没标记的，或者和发码的对象标记成同一个成员：否则这个平台账号会被挂到别人的标记下
-    if (linkedToOthers([from], into.accountId)) return { kind: 'linked' }
+    if (linkedToOthers([from], into.accountId)) {
+      return { kind: 'linked', issuerLinked: into.accountId !== null }
+    }
 
     await tx
       .update(subjectBindCodes)

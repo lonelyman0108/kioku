@@ -145,8 +145,9 @@ export function bindingRoutes(deps: Deps) {
         case 'linked':
           return c.json(
             {
-              error:
-                '这个账号标记成了空间里的成员，不能并到别人那里；可以反过来，用这个账号申请绑定码',
+              error: result.issuerLinked
+                ? '两个账号标记成了不同的成员，不能绑在一起'
+                : '这个账号标记成了空间里的成员，不能并到别的账号里；可以反过来，用这个账号申请绑定码',
             },
             403,
           )

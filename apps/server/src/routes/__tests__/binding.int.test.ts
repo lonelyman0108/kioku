@@ -394,7 +394,9 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const a = (await subjectIdOf('qq', '1001'))!
     await link(a)
     const second = await codeFor(direct('1001'))
-    expect((await redeem(second, direct('u1', 'tg'))).status).toBe(403)
+    expect(await errorOf(await redeem(second, direct('u1', 'tg')), 403)).toBe(
+      '两个账号标记成了不同的成员，不能绑在一起',
+    )
     // 收码的也标记成 alice：可以，等 alice 确认
     await link(b, bob.cookie, false)
     await link(b)
