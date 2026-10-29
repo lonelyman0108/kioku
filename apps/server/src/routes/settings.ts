@@ -43,6 +43,7 @@ import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
 import { SettingsInputError } from '../settings/endpoint'
+import { backupRoutes } from './backup'
 
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 
@@ -223,6 +224,7 @@ export function settingsRoutes(deps: Deps) {
   })
   const app = router()
   app.use('/settings/*', requireConsole(deps), requireAdmin)
+  app.route('/', backupRoutes(deps))
 
   const viewOf = (stored: StoredEmbedding) => ({
     dimensions: EMBEDDING_DIMENSIONS,

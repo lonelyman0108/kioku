@@ -1,5 +1,6 @@
 import { PgBoss } from 'pg-boss'
 
+import { backupJob } from '../backup/storage'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
 import { masterKeyStatus, recordMasterKeyError, rotateMasterKey } from '../crypto/rotation'
@@ -17,6 +18,7 @@ const PRUNE = 'embed-prune'
 const ROTATE = 'rotate-master-key'
 const CLEANUP = 'cleanup-expired'
 const EXTRACT = 'extract-session'
+const BACKUP = 'backup'
 // 每小时清一次过期的数据（见 cleanupExpired）
 const CLEANUP_CRON = '17 * * * *'
 // 写回向量时记忆正被别的事务锁着，隔这么久再试
@@ -30,6 +32,8 @@ const SWITCH_CRON = '*/10 * * * *'
 // （没配旧主密钥时这个任务什么都不做）
 const ROTATE_AGAIN_SECONDS = 60
 const ROTATE_CRON = '*/10 * * * *'
+// 每小时看一次要不要做备份：到了设定的钟点、那之后还没做成就做（服务停过、做失败了，下一个小时接着补）
+const BACKUP_CRON = '7 * * * *'
 // 切换或放弃之后等一会儿再清向量：写向量时会锁住设置、按当时的设置决定写不写，这里只是多留一点余量
 const PRUNE_AFTER_SECONDS = 30
 
@@ -45,6 +49,8 @@ export interface Jobs {
   enqueueSwitch(): Promise<boolean>
   // 删掉既不是正在用、也不是正在换过去的模型的向量（切换或放弃换模型之后）
   enqueuePrune(): Promise<boolean>
+  // 立即做一份备份传到存储桶（管理员点了「立即备份」），不看钟点
+  enqueueBackup(): Promise<boolean>
 }
 
 // 后台任务都放在 PostgreSQL 里（pg-boss，schema 为 pgboss），不需要 Redis。
@@ -69,6 +75,7 @@ export async function startJobs(options: {
   await boss.createQueue(CLEANUP, { policy: 'singleton' })
   // stately：每个会话（singletonKey）排队的与正在跑的各最多一个
   await boss.createQueue(EXTRACT, { policy: 'stately' })
+  await boss.createQueue(BACKUP, { policy: 'singleton' })
 
   const send = (name: string, data: object, startAfter?: number): Promise<boolean> =>
     boss
@@ -135,7 +142,15 @@ export async function startJobs(options: {
   await boss.work<BufferedSession>(EXTRACT, async (jobs) => {
     for (const { data } of jobs) await processSession(options.db, options.masterKey, data)
   })
+  // 备份的结果（含出错）记在设置里给管理员看，不交给 pg-boss 重试：下一个小时的检查会补做
+  await boss.work<{ force?: boolean }>(BACKUP, async (jobs) => {
+    for (const { data } of jobs) {
+      const outcome = await backupJob(options.db, options.masterKey, Boolean(data?.force))
+      if (outcome === 'failed') console.error('备份没做成，原因见实例设置里的备份')
+    }
+  })
   await boss.schedule(CLEANUP, CLEANUP_CRON)
+  await boss.schedule(BACKUP, BACKUP_CRON)
   await boss.schedule(SWITCH, SWITCH_CRON)
   await boss.schedule(ROTATE, ROTATE_CRON)
 
@@ -157,6 +172,7 @@ export async function startJobs(options: {
     enqueueBackfill: () => send(BACKFILL, {}),
     enqueueSwitch: () => send(SWITCH, {}),
     enqueuePrune: () => send(PRUNE, {}, PRUNE_AFTER_SECONDS),
+    enqueueBackup: () => send(BACKUP, { force: true }),
     stop: () => boss.stop({ graceful: true }),
   }
 }

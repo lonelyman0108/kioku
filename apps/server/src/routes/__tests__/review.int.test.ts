@@ -35,6 +35,7 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     enqueueBackfill: async () => true,
     enqueueSwitch: async () => true,
     enqueuePrune: async () => true,
+    enqueueBackup: async () => true,
     enqueueExtraction: async () => {},
   }
 
