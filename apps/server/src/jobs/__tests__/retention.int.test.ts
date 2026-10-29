@@ -35,7 +35,7 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
-import { markRestored, purgeExpired, RETENTION_BATCH, retentionJob } from '../retention'
+import { endPause, markRestored, purgeExpired, RETENTION_BATCH, retentionJob } from '../retention'
 
 const DAY = 86_400_000
 const ago = (days: number, from = Date.now()) => new Date(from - days * DAY)
@@ -650,7 +650,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
 
   // ---- 定时任务、暂停与设置 ----
 
-  const EMPTY_STATUS = { lastRun: null, unfinished: null, lastError: null }
+  const EMPTY_STATUS = { lastRun: null, lastAttempt: null, lastError: null }
   const view = async () =>
     ok<RetentionView>(
       await app.request('/v1/settings/retention', { headers: { cookie: ws.cookie } }),
@@ -671,7 +671,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   }
   const after = (from: Date, days: number) => new Date(from.getTime() + days * DAY)
 
-  it('一天（UTC）做一次；有一类出错时不记做完、只记原因，下一个小时再试，做完才把各类条数一起记下', async () => {
+  it('有一类一直出错时每次只记自己做了什么、下一个小时再试，同一天最多试 3 次；第二天照常再试，做完才记成最近一次', async () => {
     await active()
     const bot = await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })
     const plant = async (uri: string) => {
@@ -697,55 +697,56 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       create trigger retention_test_fail before delete on extraction_runs
       for each row execute function retention_test_fail()`)
     try {
-      const first = await retentionJob(database.db, new Date('2030-05-01T08:00:00Z'))
-      expect(first).toMatchObject({
+      for (const [i, hour] of ['08', '09', '10'].entries()) {
+        const at = new Date(`2030-05-01T${hour}:17:00Z`)
+        const counts = { ...ZERO, deletedMemories: i === 0 ? 1 : 0 }
+        expect(await retentionJob(database.db, at)).toMatchObject({
+          complete: false,
+          paused: false,
+          counts,
+        })
+        const status = (await view()).status
+        expect(status.lastRun).toBeNull()
+        expect(status.lastAttempt).toEqual({
+          at: at.toISOString(),
+          paused: false,
+          complete: false,
+          counts,
+          tries: i + 1,
+        })
+        expect(status.lastError?.message).toContain('抽取记录：测试里故意出的错')
+      }
+      // 今天已经试了 3 次，不再试；第二天照常再试，从第 1 次算起
+      expect(await retentionJob(database.db, new Date('2030-05-01T11:17:00Z'))).toBeNull()
+      expect(await retentionJob(database.db, new Date('2030-05-02T00:17:00Z'))).toMatchObject({
         complete: false,
-        paused: false,
-        counts: { ...ZERO, deletedMemories: 1 },
       })
-      const status = (await view()).status
-      expect(status.lastRun).toBeNull()
-      expect(status.unfinished).toEqual({
-        since: '2030-05-01T08:00:00.000Z',
-        counts: { ...ZERO, deletedMemories: 1 },
-      })
-      expect(status.lastError?.message).toContain('抽取记录：测试里故意出的错')
-      // 同一天的下一个小时再试，还是出错：接着记在没做完里
-      expect(await retentionJob(database.db, new Date('2030-05-01T09:17:00Z'))).toMatchObject({
-        complete: false,
-        counts: ZERO,
-      })
+      expect((await view()).status.lastAttempt?.tries).toBe(1)
     } finally {
       await database.db.execute(sql`drop trigger if exists retention_test_fail on extraction_runs`)
       await database.db.execute(sql`drop function if exists retention_test_fail()`)
     }
-    // 错误排除之后的下一个小时做完：连同之前没做完时删掉的一起记下，错误清掉
-    expect(await retentionJob(database.db, new Date('2030-05-01T10:17:00Z'))).toMatchObject({
-      complete: true,
-      counts: { ...ZERO, extractionRuns: 1 },
-    })
+    // 错误排除之后的下一个小时做完：只记这一次删了多少，错误清掉
+    const done = new Date('2030-05-02T01:17:00Z')
+    const counts = { ...ZERO, extractionRuns: 1 }
+    expect(await retentionJob(database.db, done)).toMatchObject({ complete: true, counts })
     expect((await view()).status).toEqual({
-      lastRun: {
-        at: '2030-05-01T10:17:00.000Z',
-        days: 30,
-        paused: false,
-        counts: { ...ZERO, deletedMemories: 1, extractionRuns: 1 },
-      },
-      unfinished: null,
+      lastRun: { at: done.toISOString(), days: 30, paused: false, counts },
+      lastAttempt: { at: done.toISOString(), paused: false, complete: true, counts, tries: 2 },
       lastError: null,
     })
 
     // 今天做完了，同一天不再做；第二天照常
     await plant('notes://second')
-    expect(await retentionJob(database.db, new Date('2030-05-01T23:17:00Z'))).toBeNull()
-    expect((await retentionJob(database.db, new Date('2030-05-02T00:17:00Z')))?.counts).toEqual({
+    expect(await retentionJob(database.db, new Date('2030-05-02T23:17:00Z'))).toBeNull()
+    expect((await retentionJob(database.db, new Date('2030-05-03T00:17:00Z')))?.counts).toEqual({
       ...ZERO,
       deletedMemories: 1,
       extractionRuns: 1,
     })
   })
 
-  it('一次清理有时间预算：用完了不记做完，下一个小时接着删，做完时连同之前删掉的一起记下', async () => {
+  it('一次清理有时间预算：到了时间不记做完，下一个小时接着删，做完才记成最近一次（只记那一次删的）', async () => {
     await active()
     const total = RETENTION_BATCH + 20
     await inSpace((tx) =>
@@ -755,36 +756,105 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
           'public'::sensitivity, 'untrusted'::provenance, '摘要 ' || g, ${ago(40).toISOString()}::timestamptz
         from generate_series(1, ${total}::int) g`),
     )
-    const now = new Date()
+    const first = new Date('2030-06-01T08:17:00Z')
     // 预算为 0：第一批总会做，之后就不再开新批次
-    expect(await retentionJob(database.db, now, 0)).toMatchObject({
+    const partial = { ...ZERO, deletedMemories: RETENTION_BATCH }
+    expect(await retentionJob(database.db, first, 0)).toMatchObject({
       complete: false,
-      counts: { ...ZERO, deletedMemories: RETENTION_BATCH },
+      counts: partial,
     })
     expect((await view()).status).toEqual({
       lastRun: null,
-      unfinished: {
-        since: now.toISOString(),
-        counts: { ...ZERO, deletedMemories: RETENTION_BATCH },
+      lastAttempt: {
+        at: first.toISOString(),
+        paused: false,
+        complete: false,
+        counts: partial,
+        tries: 1,
       },
       lastError: null,
     })
-    const next = new Date(now.getTime() + 3_600_000)
-    expect(await retentionJob(database.db, next)).toMatchObject({
-      complete: true,
-      counts: { ...ZERO, deletedMemories: 20 },
-    })
+    const next = new Date('2030-06-01T09:17:00Z')
+    const rest = { ...ZERO, deletedMemories: 20 }
+    expect(await retentionJob(database.db, next)).toMatchObject({ complete: true, counts: rest })
     expect((await view()).status).toEqual({
-      lastRun: {
+      lastRun: { at: next.toISOString(), days: 30, paused: false, counts: rest },
+      lastAttempt: {
         at: next.toISOString(),
-        days: 30,
         paused: false,
-        counts: { ...ZERO, deletedMemories: total },
+        complete: true,
+        counts: rest,
+        tries: 2,
       },
-      unfinished: null,
       lastError: null,
     })
     expect(await memoryIds()).toEqual([])
+  })
+
+  it('设置里存的值不对（手改过）时，保存天数与清理照常，写回整理过的值', async () => {
+    await database.db.insert(settings).values({
+      key: 'retention',
+      value: { days: 'abc', pause: { since: '不是时间', reason: 'restored' }, extra: 1 },
+    })
+    const old = await plantDeleted('notes://old', 40)
+    expect(await view()).toMatchObject({ days: 30, pause: null })
+    expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
+    expect(await memoryIds()).not.toContain(old)
+    expect(await ok<RetentionView>(await put({ days: 10 }))).toMatchObject({
+      days: 10,
+      pause: null,
+    })
+    expect(await storedSettings()).toEqual({ days: 10 })
+    // 存的根本不是对象
+    await database.db.update(settings).set({ value: 'oops' }).where(eq(settings.key, 'retention'))
+    expect(await ok<RetentionView>(await put({ days: 12 }))).toMatchObject({
+      days: 12,
+      pause: null,
+    })
+    expect(await storedSettings()).toEqual({ days: 12 })
+    await database.db.execute(
+      sql`update settings set value = 'null'::jsonb where key = 'retention'`,
+    )
+    expect(await retentionJob(database.db, after(new Date(), 1))).toMatchObject({ paused: false })
+    expect(await ok<RetentionView>(await put({ days: 13 }))).toMatchObject({ days: 13 })
+  })
+
+  it('暂停中试满了 3 次也不挡住提前开始之后当天的完整清理：每种（暂停中与否）各自计数', async () => {
+    const restoredAt = new Date('2030-07-01T00:00:00Z')
+    await database.db.transaction((tx) => markRestored(tx, restoredAt))
+    // 删账号留下的历史这一步删不掉：暂停中的每一次都没做完
+    await database.db.execute(sql`
+      create or replace function retention_test_fail() returns trigger language plpgsql
+      as $$ begin raise exception '测试里故意出的错'; end $$`)
+    await database.db.execute(sql`
+      create trigger retention_test_fail before delete on memory_events
+      for each row execute function retention_test_fail()`)
+    try {
+      await inSpace((tx) =>
+        tx.insert(memoryEvents).values({
+          spaceId: ws.spaceId,
+          memoryId: null,
+          eventType: 'update',
+          provenance: 'owner',
+          after: { content: '删账号留下的正文' },
+        }),
+      )
+      for (const hour of ['01', '02', '03']) {
+        expect(
+          await retentionJob(database.db, new Date(`2030-07-02T${hour}:17:00Z`)),
+        ).toMatchObject({ paused: true, complete: false })
+      }
+      expect(await retentionJob(database.db, new Date('2030-07-02T04:17:00Z'))).toBeNull()
+      // 提前开始：这一天完整的清理还没试过，照样做
+      await endPause(database.db)
+      expect(await retentionJob(database.db, new Date('2030-07-02T05:17:00Z'))).toMatchObject({
+        paused: false,
+      })
+      expect((await view()).status.lastAttempt).toMatchObject({ paused: false, tries: 1 })
+    } finally {
+      await database.db.execute(sql`drop trigger if exists retention_test_fail on memory_events`)
+      await database.db.execute(sql`drop function if exists retention_test_fail()`)
+    }
   })
 
   it('保留期第一次生效时先暂停一个保留期：之前删掉的不删，删账号留下的历史照常每天清；到期之后照常清理', async () => {
@@ -800,23 +870,19 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       }),
     )
     const now = new Date()
+    const counts = { ...ZERO, orphanEvents: 1 }
     expect(await retentionJob(database.db, now)).toMatchObject({
       paused: true,
       complete: true,
-      counts: { ...ZERO, orphanEvents: 1 },
+      counts,
     })
     expect(await memoryIds()).toContain(old)
     expect(await view()).toEqual({
       days: 30,
       pause: { reason: 'started', since: now.toISOString(), until: after(now, 30).toISOString() },
       status: {
-        lastRun: {
-          at: now.toISOString(),
-          days: 30,
-          paused: true,
-          counts: { ...ZERO, orphanEvents: 1 },
-        },
-        unfinished: null,
+        lastRun: { at: now.toISOString(), days: 30, paused: true, counts },
+        lastAttempt: { at: now.toISOString(), paused: true, complete: true, counts, tries: 1 },
         lastError: null,
       },
     })

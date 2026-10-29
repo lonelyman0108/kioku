@@ -1,7 +1,7 @@
 import type { RetentionCounts } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { pauseText, retentionSummary, retentionTotal } from '../retention'
+import { attemptNote, pauseText, retentionSummary, retentionTotal } from '../retention'
 
 const zero: RetentionCounts = {
   deletedMemories: 0,
@@ -48,5 +48,34 @@ describe('暂停的说法', () => {
     expect(text.description).toContain('之前删掉的到现在都还能撤销')
     expect(text.description).toContain('删账号留下的历史照常每天清理')
     expect(text.confirm).toContain('已经删除超过 7 天的')
+  })
+})
+
+describe('最近一次没做完的说法', () => {
+  const now = new Date('2026-10-29T10:00:00Z')
+  const attempt = (at: string, tries: number, complete = false) => ({
+    at,
+    paused: false,
+    complete,
+    counts: { ...zero, deletedMemories: 7 },
+    tries,
+  })
+
+  it('做完了、还没试过时不说', () => {
+    expect(attemptNote(null, now)).toBeNull()
+    expect(attemptNote(attempt('2026-10-29T09:17:00.000Z', 1, true), now)).toBeNull()
+  })
+
+  it('没做完时说删了多少、下一个小时再试', () => {
+    const note = attemptNote(attempt('2026-10-29T09:17:00.000Z', 2), now)
+    expect(note).toContain('这次删了 7 条')
+    expect(note).toMatch(/下一个小时再试$/)
+  })
+
+  it('今天（UTC）已经试满了：明天再试；昨天试满的今天照常再试', () => {
+    expect(attemptNote(attempt('2026-10-29T09:17:00.000Z', 3), now)).toMatch(
+      /今天已经试了 3 次，明天再试$/,
+    )
+    expect(attemptNote(attempt('2026-10-28T23:17:00.000Z', 3), now)).toMatch(/下一个小时再试$/)
   })
 })

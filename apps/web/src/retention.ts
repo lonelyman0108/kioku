@@ -1,4 +1,9 @@
-import type { RetentionCounts, RetentionView } from '@kioku/contracts'
+import {
+  RETENTION_DAILY_TRIES,
+  type RetentionCounts,
+  type RetentionStatus,
+  type RetentionView,
+} from '@kioku/contracts'
 
 import { formatTime } from './time'
 
@@ -24,6 +29,19 @@ export function retentionSummary(counts: RetentionCounts): { label: string; coun
 
 export function retentionTotal(counts: RetentionCounts): number {
   return Object.values(counts).reduce((a, b) => a + b, 0)
+}
+
+// 最近一次尝试没做完时的说法：下一个小时再试，或者今天（UTC）已经试满了、明天再试。做完了、还没试过时为 null
+export function attemptNote(
+  attempt: RetentionStatus['lastAttempt'],
+  now: Date = new Date(),
+): string | null {
+  if (!attempt || attempt.complete) return null
+  const head = `最近一次（${formatTime(attempt.at)}）没做完（出错或者到了时间，这次删了 ${retentionTotal(attempt.counts)} 条）`
+  const today = attempt.at.slice(0, 10) === now.toISOString().slice(0, 10)
+  return today && attempt.tries >= RETENTION_DAILY_TRIES
+    ? `${head}，今天已经试了 ${attempt.tries} 次，明天再试`
+    : `${head}，下一个小时再试`
 }
 
 // 暂停按原因给说法：卡片上的标题与说明，以及提前开始时确认框里的话

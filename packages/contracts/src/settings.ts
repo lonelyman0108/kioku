@@ -152,8 +152,11 @@ export const RetentionCounts = z.object({
 })
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 
+// 一次清理没做完（有一类出错，或者到了时间）时下一个小时再试；同一天（UTC）最多试这么多次，第二天再来
+export const RETENTION_DAILY_TRIES = 3
+
 export const RetentionStatus = z.object({
-  // 最近一次做完的清理：开始的时间、按多少天算的、是不是在暂停中（只清了删账号留下的历史）、每一类删了多少
+  // 最近一次完整做完的清理：开始的时间、按多少天算的、是不是在暂停中（只清了删账号留下的历史）、每一类删了多少
   lastRun: z
     .object({
       at: z.string(),
@@ -162,8 +165,17 @@ export const RetentionStatus = z.object({
       counts: RetentionCounts,
     })
     .nullable(),
-  // 还没做完的一次（时间用完了，或者有一类出了错）：从什么时候开始、已经删了多少；下一个小时接着做，做完并进最近一次
-  unfinished: z.object({ since: z.string(), counts: RetentionCounts }).nullable(),
+  // 最近一次尝试，只记它自己做了什么：开始的时间、是不是在暂停中、做完了没有、删了多少，
+  // 以及这一天（UTC）同一种（暂停中与否）试到第几次
+  lastAttempt: z
+    .object({
+      at: z.string(),
+      paused: z.boolean(),
+      complete: z.boolean(),
+      counts: RetentionCounts,
+      tries: z.number().int(),
+    })
+    .nullable(),
   // 最近一次清理出的错（有一类没删成也算）；之后整次做完、没出错就清掉
   lastError: z.object({ message: z.string(), at: z.string() }).nullable(),
 })

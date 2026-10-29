@@ -43,7 +43,7 @@ import {
 } from '../extraction/settings'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { resumeRetention, retentionView, saveRetentionDays } from '../jobs/retention'
+import { endPause, retentionView, saveRetentionDays } from '../jobs/retention'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
 import { SettingsInputError } from '../settings/endpoint'
 import { backupRoutes } from './backup'
@@ -388,7 +388,7 @@ export function settingsRoutes(deps: Deps) {
       return c.json(await retentionView(deps.db), 200)
     })
     .openapi(retentionResume, async (c) => {
-      await resumeRetention(deps.db)
+      await endPause(deps.db)
       // 只等排队、不等清理做完；排不上时如实告诉界面，下一次定时清理（每小时）照样会做
       const queued = deps.jobs ? await deps.jobs.enqueueCleanup() : false
       return c.json({ ...(await retentionView(deps.db)), queued }, 200)

@@ -7,14 +7,15 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
-import { pauseText, retentionSummary, retentionTotal } from '../retention'
+import { attemptNote, pauseText, retentionSummary } from '../retention'
 import { formatRelative, formatTime } from '../time'
 
 const toast = useToast()
 const queryClient = useQueryClient()
 const queryKey = ['settings', 'retention']
 
-// 点了「现在开始清理」之后每隔几秒刷新，等这一次清理的结果出来（最多等两分钟）。
+// 点了「现在开始清理」之后每隔几秒刷新，等这一次清理的结果出来。清理队列同时只跑一个，正有一次在跑时要等它做完
+// （最长约半小时），所以只等两分钟，之后不再转圈、提示稍后再看。
 // 轮询间隔用计算属性：写成函数时，查询空闲着才开始等，不会触发轮询
 const waiting = ref(false)
 const settings = useQuery({
@@ -61,7 +62,24 @@ async function save() {
   }
 }
 
+const pause = computed(() =>
+  view.value?.pause ? pauseText(view.value.pause, view.value.days) : null,
+)
+
+// 确认框的话在打开时记下一份；开着的时候暂停没了（到期了，或者别人已经提前开始），就关掉并说明
 const confirmingResume = ref(false)
+const confirmText = ref('')
+function askResume() {
+  if (!pause.value) return
+  confirmText.value = pause.value.confirm
+  confirmingResume.value = true
+}
+watch(pause, (now) => {
+  if (now || !confirmingResume.value || resuming.value) return
+  confirmingResume.value = false
+  toast.add({ title: '暂停已经结束，不用再提前开始', color: 'info' })
+})
+
 const resuming = ref(false)
 async function resume() {
   if (resuming.value) return
@@ -75,8 +93,16 @@ async function resume() {
       seen = outcomeOf(next)
       waiting.value = true
       clearTimeout(giveUp)
-      giveUp = setTimeout(stopWaiting, 2 * 60_000)
-      toast.add({ title: '暂停已结束，马上开始清理', color: 'success' })
+      giveUp = setTimeout(() => {
+        if (!waiting.value) return
+        stopWaiting()
+        toast.add({ title: '清理在后台进行，稍后再看', color: 'info' })
+      }, 2 * 60_000)
+      toast.add({
+        title: '已排进清理队列',
+        description: '正有一次在跑时会等它结束再开始',
+        color: 'success',
+      })
     } else {
       toast.add({ title: '已结束暂停，下一次定时清理时开始', color: 'info' })
     }
@@ -91,9 +117,7 @@ const removed = computed(() => {
   const counts = view.value?.status.lastRun?.counts
   return counts ? retentionSummary(counts) : []
 })
-const pause = computed(() =>
-  view.value?.pause ? pauseText(view.value.pause, view.value.days) : null,
-)
+const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? null))
 </script>
 
 <template>
@@ -119,12 +143,7 @@ const pause = computed(() =>
           :title="pause.title"
           :description="pause.description"
         />
-        <UButton
-          color="neutral"
-          variant="subtle"
-          :loading="resuming"
-          @click="confirmingResume = true"
-        >
+        <UButton color="neutral" variant="subtle" :loading="resuming" @click="askResume">
           现在开始清理
         </UButton>
       </div>
@@ -154,10 +173,7 @@ const pause = computed(() =>
           :title="view.status.lastError.message"
           :description="`${formatTime(view.status.lastError.at)}（${formatRelative(view.status.lastError.at)}）`"
         />
-        <p v-if="view.status.unfinished" class="text-warning">
-          还没清理完：从 {{ formatTime(view.status.unfinished.since) }} 开始已经删了
-          {{ retentionTotal(view.status.unfinished.counts) }} 条，下一个小时接着做。
-        </p>
+        <p v-if="attempt" class="text-warning">{{ attempt }}</p>
         <template v-if="view.status.lastRun">
           <p>
             最近一次清理：{{ formatTime(view.status.lastRun.at) }}（{{
@@ -181,7 +197,7 @@ const pause = computed(() =>
           <p v-else class="text-muted">没有到期的</p>
         </template>
         <p v-else-if="waiting" class="text-muted">正在清理…</p>
-        <p v-else-if="!view.status.unfinished" class="text-muted">
+        <p v-else-if="!view.status.lastAttempt" class="text-muted">
           还没有清理过：每天一次，跟在每小时的定时清理后面做。
         </p>
       </div>
@@ -195,7 +211,7 @@ const pause = computed(() =>
     @update:open="(v) => !v && !resuming && (confirmingResume = false)"
   >
     <template #body>
-      <p class="text-sm">{{ pause?.confirm }}</p>
+      <p class="text-sm">{{ confirmText }}</p>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">

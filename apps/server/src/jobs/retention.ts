@@ -1,5 +1,6 @@
 import {
   DEFAULT_RETENTION_DAYS,
+  RETENTION_DAILY_TRIES,
   RetentionPauseReason,
   RetentionSettings,
   RetentionStatus,
@@ -40,6 +41,8 @@ import { monthStart } from '../extraction/budget'
 // 天数与暂停存在实例设置的一项里；最近一次清理的结果单独存一项，清理任务记结果不会和管理员保存设置互相覆盖
 const KEY = 'retention'
 const STATUS_KEY = 'retention-status'
+// 改天数与暂停时在事务里拿这把咨询锁：设置那一行还不存在（第一次生效）时也串得起来，读出、算好、写回之间不会插进别的写入
+const LOCK = 'kioku.retention'
 const DAY = 86_400_000
 const MAX_MESSAGE = 500
 
@@ -55,32 +58,37 @@ export interface RetentionPause {
 
 export interface RetentionState {
   days: number
+  // 设置里存着的天数；没存过（按默认）时为 null，写回时不替它记下默认值
+  storedDays: number | null
   // 暂停按天数的清理：从起点到起点加上保留天数
   pause: RetentionPause | null
   status: RetentionStatus
-  // 实例上还没有任何保留期的状态（设置与清理结果都没有）：保留期第一次生效
+  // 实例上还没有任何保留期的状态（设置与清理结果都没有）
   fresh: boolean
 }
 
-const EMPTY_STATUS: RetentionStatus = { lastRun: null, unfinished: null, lastError: null }
+const EMPTY_STATUS: RetentionStatus = { lastRun: null, lastAttempt: null, lastError: null }
 
-// 天数、暂停与最近一次清理的结果，一次查出。存的值缺了或认不出时按默认：30 天、没有暂停、还没清理过
-export async function loadRetention(db: Db): Promise<RetentionState> {
-  const rows = await db
+const readRows = (db: Db | Tx) =>
+  db
     .select()
     .from(settings)
     .where(inArray(settings.key, [KEY, STATUS_KEY]))
-  const row = rows.find((r) => r.key === KEY)
-  const stored = (row?.value ?? {}) as {
-    days?: unknown
-    pause?: { since?: unknown; reason?: unknown }
-  }
+
+// 天数、暂停与最近一次清理的结果，读和改都按这一套解析。存的值缺了或认不出（例如手改过）时按默认：
+// 30 天、没有暂停、还没清理过
+function parseRetention(rows: { key: string; value: unknown }[]): RetentionState {
+  const record = (value: unknown) =>
+    (value && typeof value === 'object' ? value : {}) as Record<string, unknown>
+  const stored = record(rows.find((r) => r.key === KEY)?.value)
   const days = RetentionSettings.shape.days.safeParse(stored.days)
-  const reason = RetentionPauseReason.safeParse(stored.pause?.reason)
-  const since = typeof stored.pause?.since === 'string' ? new Date(stored.pause.since) : null
+  const pause = record(stored.pause)
+  const reason = RetentionPauseReason.safeParse(pause.reason)
+  const since = typeof pause.since === 'string' ? new Date(pause.since) : null
   const status = RetentionStatus.safeParse(rows.find((r) => r.key === STATUS_KEY)?.value)
   return {
     days: days.success ? days.data : DEFAULT_RETENTION_DAYS,
+    storedDays: days.success ? days.data : null,
     pause:
       reason.success && since && !Number.isNaN(since.getTime())
         ? { reason: reason.data, since }
@@ -88,6 +96,10 @@ export async function loadRetention(db: Db): Promise<RetentionState> {
     status: status.success ? status.data : EMPTY_STATUS,
     fresh: rows.length === 0,
   }
+}
+
+export async function loadRetention(db: Db): Promise<RetentionState> {
+  return parseRetention(await readRows(db))
 }
 
 // 还在暂停中的话，暂停到什么时候：起点加上现在的保留天数。这段时间里到期的都是起点之前删掉的，
@@ -116,82 +128,82 @@ export async function retentionView(db: Db, now = new Date()): Promise<Retention
 }
 
 // ---- 设置里的天数与暂停 ----
-// 存成 { days?, pause?: { since, reason } }。下面的 SQL 在语句里按存着的值判断暂停结束了没有，和别的写入同时发生也不会算错
 
-const at = (d: Date) => sql`${d.toISOString()}::timestamptz`
-// 存着的值不是对象时从头写
-const stored = sql`(case when jsonb_typeof(${settings.value}) = 'object' then ${settings.value} else '{}'::jsonb end)`
-const storedDays = sql`coalesce(case when jsonb_typeof(${stored} -> 'days') = 'number' then (${stored} ->> 'days')::int end, ${DEFAULT_RETENTION_DAYS}::int)`
-// 按存着的天数，暂停已经结束。一天按 24 小时加（和 activePause 一样），不随数据库时区的夏令时变
-const pauseEnded = (now: Date) =>
-  sql`(${stored} ? 'pause' and (${stored} #>> '{pause,since}')::timestamptz + make_interval(hours => ${storedDays} * 24) <= ${at(now)})`
-const pauseOf = (reason: RetentionPauseReason, since: Date) =>
-  sql`jsonb_build_object('pause', jsonb_build_object('since', ${since.toISOString()}::text, 'reason', ${reason}::text))`
-const hasStatus = sql`exists (select 1 from ${settings} where ${settings.key} = ${STATUS_KEY})`
+type StoredSettings = { days?: number; pause?: { since: string; reason: RetentionPauseReason } }
 
-// 只改天数。暂停不因此结束，结束时间跟着天数变（调大就是多留些时间找回）；按原来的天数已经结束的暂停在同一条语句里去掉，
-// 免得调大天数又算出一段暂停。实例上还没有保留期的状态时，从现在起先暂停一个保留期（和第一次清理时一样）
+// 写进设置的值：存过的天数与暂停。暂停的 JSON 只在这里拼
+function storedValue(days: number | null, pause: RetentionPause | null): StoredSettings {
+  return {
+    ...(days === null ? {} : { days }),
+    ...(pause ? { pause: { since: pause.since.toISOString(), reason: pause.reason } } : {}),
+  }
+}
+
+// 保留期第一次生效（实例上还没有保留期的设置与清理结果）：第一次清理、第一次保存天数都从这时起先暂停一个保留期，
+// 之前删掉的（到这个版本为止都还能撤销）有一个完整的保留期可以撤销删除。不是第一次时为 null
+function firstPause(state: RetentionState, now: Date): RetentionPause | null {
+  return state.fresh ? { reason: 'started', since: now } : null
+}
+
+// 改天数与暂停：在事务里拿住锁，按 parseRetention 读出现在的状态，算出新的值整个写回（change 返回 null 时不改）。
+// 返回改完之后的状态
+async function changeSettings(
+  db: Db | Tx,
+  change: (state: RetentionState) => StoredSettings | null,
+): Promise<RetentionState> {
+  return db.transaction(async (tx) => {
+    await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${LOCK}))`)
+    const state = parseRetention(await readRows(tx))
+    const next = change(state)
+    if (!next) return state
+    await tx
+      .insert(settings)
+      .values({ key: KEY, value: next })
+      .onConflictDoUpdate({ target: settings.key, set: { value: next, updatedAt: new Date() } })
+    return parseRetention(await readRows(tx))
+  })
+}
+
+// 只改天数。暂停不因此结束，结束时间跟着天数变（调大就是多留些时间找回）；按原来的天数已经结束的暂停一并去掉，
+// 免得调大天数又算出一段暂停。保留期第一次生效时从现在起先暂停一个保留期
 export async function saveRetentionDays(
   db: Db,
   value: RetentionSettings,
   now = new Date(),
 ): Promise<void> {
-  const days = sql`jsonb_build_object('days', ${value.days}::int)`
-  await db
-    .insert(settings)
-    .values({
-      key: KEY,
-      value: sql`${days} || case when ${hasStatus} then '{}'::jsonb else ${pauseOf('started', now)} end`,
-    })
-    .onConflictDoUpdate({
-      target: settings.key,
-      set: {
-        value: sql`(case when ${pauseEnded(now)} then ${stored} - 'pause' else ${stored} end) || ${days}`,
-        updatedAt: new Date(),
-      },
-    })
+  await changeSettings(db, (state) => {
+    const ongoing = activePause(state, now) ? state.pause : null
+    return storedValue(value.days, firstPause(state, now) ?? ongoing)
+  })
 }
 
-// 提前结束暂停
-export async function resumeRetention(db: Db): Promise<void> {
-  await db
-    .update(settings)
-    .set({ value: sql`${stored} - 'pause'`, updatedAt: new Date() })
-    .where(eq(settings.key, KEY))
+// 结束暂停：给了 endedBy 时只去掉到那时已经结束了的（定时清理时），不给时提前结束（管理员点了「现在开始清理」）。
+// 返回之后的状态
+export async function endPause(db: Db, endedBy?: Date): Promise<RetentionState> {
+  return changeSettings(db, (state) =>
+    state.pause && !(endedBy && activePause(state, endedBy))
+      ? storedValue(state.storedDays, null)
+      : null,
+  )
+}
+
+// 保留期第一次生效时从现在起先暂停一个保留期（见 firstPause）
+async function startIfFirst(db: Db, now: Date): Promise<void> {
+  await changeSettings(db, (state) => {
+    const pause = firstPause(state, now)
+    return pause && storedValue(state.storedDays, pause)
+  })
 }
 
 // 从备份恢复时在恢复的事务里调用：记下恢复的时间，按天数的清理暂停到它加上保留天数。上一个实例最近一次清理的结果清掉：
 // 结果说的是那个实例做过什么，留着的话卡片上会显示这里没做过的一次，「今天做过没有」也会按那边的时间算。
 // 返回暂停到什么时候
 export async function markRestored(tx: Tx, now = new Date()): Promise<Date> {
-  const [row] = await tx
-    .insert(settings)
-    .values({ key: KEY, value: pauseOf('restored', now) })
-    .onConflictDoUpdate({
-      target: settings.key,
-      set: { value: sql`${stored} || excluded.value`, updatedAt: new Date() },
-    })
-    .returning()
+  const state = await changeSettings(tx, (s) =>
+    storedValue(s.storedDays, { reason: 'restored', since: now }),
+  )
   await tx.delete(settings).where(eq(settings.key, STATUS_KEY))
-  const days = RetentionSettings.shape.days.safeParse((row!.value as { days?: unknown }).days)
-  return new Date(now.getTime() + (days.success ? days.data : DEFAULT_RETENTION_DAYS) * DAY)
-}
-
-// 保留期第一次生效：先暂停一个保留期，之前删掉的（到这个版本为止都还能撤销）有一个完整的保留期可以撤销删除。
-// 已经有了设置（例如管理员刚保存了天数）时不动
-async function startPause(db: Db, now: Date): Promise<void> {
-  await db
-    .insert(settings)
-    .values({ key: KEY, value: pauseOf('started', now) })
-    .onConflictDoNothing()
-}
-
-// 暂停已经结束（按存着的天数）时清掉，之后调大天数不会又算出一段暂停
-async function clearEndedPause(db: Db, now: Date): Promise<void> {
-  await db
-    .update(settings)
-    .set({ value: sql`${stored} - 'pause'`, updatedAt: new Date() })
-    .where(and(eq(settings.key, KEY), pauseEnded(now)))
+  return new Date(now.getTime() + state.days * DAY)
 }
 
 async function saveStatus(db: Db, value: RetentionStatus): Promise<void> {
@@ -200,6 +212,8 @@ async function saveStatus(db: Db, value: RetentionStatus): Promise<void> {
     .values({ key: STATUS_KEY, value })
     .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
 }
+
+const at = (d: Date) => sql`${d.toISOString()}::timestamptz`
 
 // ---- 删什么 ----
 
@@ -482,33 +496,37 @@ const errorRecord = (messages: string[]) => ({
   at: new Date().toISOString(),
 })
 
+const utcDay = (iso: string) => iso.slice(0, 10)
+
 export interface RetentionRun extends PurgeResult {
   // 这次在暂停中，只做了删账号留下的历史
   paused: boolean
 }
 
-// 每小时的定时清理里调用，保留期的清理一天（UTC）做一次：今天做完过的不做（暂停中做完的那次不挡住暂停结束之后当天的完整清理）。
-// 实例上还没有保留期的状态时先暂停一个保留期；暂停已经结束的清掉。暂停期间只做删账号留下的历史。
-// 时间用完或者有一类出错时不记做完，删掉的条数先记在「还没做完」里，下一个小时接着做；错误记在设置里给实例管理员看，不抛出。
-// 没做时返回 null
+// 每小时的定时清理里调用，保留期的清理一天（UTC）做一次。保留期第一次生效时先暂停一个保留期；暂停已经结束的去掉；
+// 暂停期间只做删账号留下的历史。今天已经完整做完的不做（暂停中做完的那次不挡住暂停结束、提前开始之后当天的完整清理）；
+// 没做完（有一类出错，或者到了时间）时下一个小时再试，同一天同一种最多试 RETENTION_DAILY_TRIES 次，第二天再来。
+// 每次尝试只记它自己做了什么；全部做完才记成最近一次完整的清理。错误记在设置里给实例管理员看，不抛出。没做时返回 null
 export async function retentionJob(
   db: Db,
   now = new Date(),
   budgetMs = RETENTION_BUDGET_MS,
 ): Promise<RetentionRun | null> {
-  let state = await loadRetention(db)
-  if (state.fresh) {
-    await startPause(db, now)
-    state = await loadRetention(db)
-  } else if (state.pause && !activePause(state, now)) {
-    await clearEndedPause(db, now)
-    state = await loadRetention(db)
-  }
+  await startIfFirst(db, now)
+  const state = await endPause(db, now)
   const paused = activePause(state, now) !== null
-  const last = state.status.lastRun
-  if (last && last.at.slice(0, 10) === now.toISOString().slice(0, 10) && (paused || !last.paused)) {
-    return null
-  }
+  const today = utcDay(now.toISOString())
+  const { lastRun, lastAttempt } = state.status
+  if (lastRun && utcDay(lastRun.at) === today && (paused || !lastRun.paused)) return null
+  const tries =
+    lastAttempt &&
+    !lastAttempt.complete &&
+    lastAttempt.paused === paused &&
+    utcDay(lastAttempt.at) === today
+      ? lastAttempt.tries
+      : 0
+  if (tries >= RETENTION_DAILY_TRIES) return null
+
   let result: PurgeResult
   try {
     result = await purgeExpired(db, {
@@ -518,24 +536,26 @@ export async function retentionJob(
       deadline: Date.now() + budgetMs,
     })
   } catch (err) {
-    await saveStatus(db, { ...state.status, lastError: errorRecord([messageOf(err)]) })
-    return null
+    // 整次都没做成（例如读不出空间）：和有一类出错一样算一次没做完的尝试
+    result = { counts: emptyCounts(), errors: [messageOf(err)], complete: false }
   }
-  const carried = state.status.unfinished
-  const counts = addCounts(carried ? { ...carried.counts } : emptyCounts(), result.counts)
-  await saveStatus(
-    db,
-    result.complete
-      ? {
-          lastRun: { at: now.toISOString(), days: state.days, paused, counts },
-          unfinished: null,
-          lastError: null,
-        }
-      : {
-          lastRun: state.status.lastRun,
-          unfinished: { since: carried?.since ?? now.toISOString(), counts },
-          lastError: result.errors.length ? errorRecord(result.errors) : state.status.lastError,
-        },
-  )
+  const startedAt = now.toISOString()
+  await saveStatus(db, {
+    lastRun: result.complete
+      ? { at: startedAt, days: state.days, paused, counts: result.counts }
+      : lastRun,
+    lastAttempt: {
+      at: startedAt,
+      paused,
+      complete: result.complete,
+      counts: result.counts,
+      tries: tries + 1,
+    },
+    lastError: result.errors.length
+      ? errorRecord(result.errors)
+      : result.complete
+        ? null
+        : state.status.lastError,
+  })
   return { ...result, paused }
 }
