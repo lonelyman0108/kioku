@@ -1,12 +1,13 @@
 import { AppConfig, SPACE_EXPORT_MAX_BYTES, type RuntimeFamily } from '@kioku/contracts'
-import { and, asc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNull, or } from 'drizzle-orm'
+import type { z } from 'zod'
 
 import { consoleAccess } from '../access/access'
 import { openCredentialValues } from '../credential/service'
-import { decryptSecret } from '../crypto/envelope'
-import { decryptionKey, type MasterKey } from '../crypto/keyring'
+import type { MasterKey } from '../crypto/keyring'
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
+  accounts,
   appGroupPersonas,
   apps,
   credentialEvents,
@@ -20,7 +21,7 @@ import {
   subjects,
 } from '../db/schema'
 import { readableConditions } from '../memory/filter'
-import { MemoryError } from '../memory/service'
+import { MemoryError, openMemoryContent } from '../memory/service'
 import { formatUri } from '../memory/uri'
 import { VERSION } from '../version'
 import { deriveExportKey, ExportTooLarge, sealSpaceExport, type KdfParams } from './spaceFormat'
@@ -28,10 +29,10 @@ import {
   SPACE_EXPORT_FORMAT,
   SPACE_EXPORT_MAX_PLAIN_BYTES,
   SPACE_EXPORT_VERSION,
+  SpaceExportHeader,
+  SpaceExportRecord,
   type CredentialRecord,
   type MemoryRecord,
-  type SpaceExportHeader,
-  type SpaceExportRecord,
 } from './spaceRecords'
 
 // 按空间导出：只导出导出人读得到的。导出人是空间 owner（路由检查），按他在管理界面里的权限读：
@@ -40,21 +41,10 @@ import {
 // 不导出：Key、会话、召回事件与召回统计、对话缓冲、抽取记录、记忆与凭据的历史、向量；
 // 已删除、已过期与被推翻的记忆（只导出现在有效的，和读权限的规则一致）
 
-export interface SpaceExportCounts {
-  personas: number
-  apps: number
-  subjects: number
-  memories: number
-  secrets: number
-  credentials: number
-  providers: number
-}
-
 export interface SpaceExport {
-  file: Buffer
+  file: Buffer<ArrayBuffer>
   spaceName: string
   createdAt: string
-  counts: SpaceExportCounts
 }
 
 // 每次读多少条记忆
@@ -66,48 +56,42 @@ export async function exportSpace(
   options: { spaceId: string; accountId: string; passphrase: string; kdf?: KdfParams },
 ): Promise<SpaceExport> {
   // 先派生密钥再开事务：派生要排队、要几百毫秒，不占着读库的事务
-  const exportKey = await deriveExportKey(options.passphrase, options.kdf)
+  const exportKey = await deriveExportKey(options.passphrase, {
+    account: options.accountId,
+    ...(options.kdf ? { kdf: options.kdf } : {}),
+  })
   const createdAt = new Date().toISOString()
-  const counts: SpaceExportCounts = {
-    personas: 0,
-    apps: 0,
-    subjects: 0,
-    memories: 0,
-    secrets: 0,
-    credentials: 0,
-    providers: 0,
-  }
   // 导出了哪些凭据、各带了哪些字段：读完之后记访问事件
   const exported = new Map<string, string[]>()
   let spaceName = ''
-  let file: Buffer
+  let file: Buffer<ArrayBuffer>
   try {
     // 整份在一个可重复读的只读事务里读，各表是同一时刻的快照
-    file = await db.transaction(
+    file = await withSpace(
+      db,
+      options.spaceId,
       async (tx) => {
-        await tx.execute(sql`select set_config('app.space_id', ${options.spaceId}, true)`)
         const [space] = await tx.select().from(spaces).where(eq(spaces.id, options.spaceId))
-        if (!space) throw new MemoryError(404, '空间不存在')
+        const [exporter] = await tx
+          .select({ displayName: accounts.displayName })
+          .from(accounts)
+          .where(eq(accounts.id, options.accountId))
+        if (!space || !exporter) throw new MemoryError(404, '空间不存在')
         spaceName = space.name
-        const header: SpaceExportHeader = {
+        const header = checked(SpaceExportHeader, '空间的设置或导出人的名字', {
           format: SPACE_EXPORT_FORMAT,
           version: SPACE_EXPORT_VERSION,
           createdAt,
           kioku: VERSION,
+          exporter: { displayName: exporter.displayName },
           space: {
             name: space.name,
             domainLayers: space.domainLayers,
             extractionMonthlyTokens: space.extractionMonthlyTokens,
             extractionDailyWrites: space.extractionDailyWrites,
           },
-        }
-        const source = lines(tx, {
-          header,
-          accountId: options.accountId,
-          masterKey,
-          counts,
-          exported,
         })
+        const source = lines(tx, { header, accountId: options.accountId, masterKey, exported })
         try {
           return await sealSpaceExport(exportKey, source, {
             maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
@@ -143,32 +127,45 @@ export async function exportSpace(
       ),
     )
   }
-  return { file, spaceName, createdAt, counts }
+  return { file, spaceName, createdAt }
+}
+
+// 写进文件之前按导入时的定义检查：写得出来的就一定导入得了。通不过的（例如规则收紧之前存下的值）
+// 点名是哪一条，改掉再导出，不交出一个导入不了的文件
+function checked<T>(schema: z.ZodType<T>, label: string, value: unknown): T {
+  const parsed = schema.safeParse(value)
+  if (parsed.success) return parsed.data
+  const issue = parsed.error.issues[0]
+  const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
+  throw new MemoryError(
+    409,
+    `${label}导出后导入不了（${where}${issue?.message ?? '格式不对'}），在管理界面改掉再导出`,
+  )
 }
 
 interface LinesContext {
   header: SpaceExportHeader
   accountId: string
   masterKey: MasterKey | null
-  counts: SpaceExportCounts
   exported: Map<string, string[]>
 }
 
 const line = (record: SpaceExportHeader | SpaceExportRecord) => `${JSON.stringify(record)}\n`
+const record = (label: string, value: SpaceExportRecord) =>
+  line(checked(SpaceExportRecord, label, value))
 const iso = (value: Date | null) => value?.toISOString() ?? null
 
 async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
-  const { accountId, counts } = ctx
+  const { accountId } = ctx
   yield line(ctx.header)
 
   const personaRows = await tx
     .select()
     .from(personas)
     .orderBy(asc(personas.createdAt), asc(personas.id))
-  counts.personas = personaRows.length
   yield inheritanceOrder(personaRows)
     .map((p) =>
-      line({
+      record(`人格 ${p.slug} `, {
         type: 'persona',
         id: p.id,
         slug: p.slug,
@@ -182,10 +179,9 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     .join('')
 
   const appRows = await tx.select().from(apps).orderBy(asc(apps.createdAt), asc(apps.id))
-  counts.apps = appRows.length
   yield appRows
     .map((a) =>
-      line({
+      record(`应用 ${a.slug} `, {
         type: 'app',
         id: a.id,
         slug: a.slug,
@@ -203,10 +199,9 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     .select()
     .from(subjects)
     .orderBy(asc(subjects.createdAt), asc(subjects.id))
-  counts.subjects = subjectRows.length
   yield subjectRows
     .map((s) =>
-      line({
+      record(`对象「${s.displayName}」`, {
         type: 'subject',
         id: s.id,
         kind: s.kind,
@@ -224,7 +219,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     .orderBy(asc(subjectIdentities.createdAt), asc(subjectIdentities.id))
   yield identityRows
     .map((i) =>
-      line({
+      record(`平台账号 ${i.platform}:${i.externalId} `, {
         type: 'identity',
         subjectId: i.subjectId,
         kind: i.kind,
@@ -241,7 +236,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     .orderBy(asc(appGroupPersonas.createdAt), asc(appGroupPersonas.appId))
   yield ruleRows
     .map((r) =>
-      line({
+      record('按群换人格的规则', {
         type: 'groupPersona',
         appId: r.appId,
         subjectId: r.subjectId,
@@ -275,10 +270,9 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
       ),
     )
     .orderBy(asc(credentialProviders.createdAt), asc(credentialProviders.id))
-  counts.providers = providerRows.length
   yield providerRows
     .map((p) =>
-      line({
+      record(`凭据源「${p.name}」`, {
         type: 'provider',
         id: p.id,
         kind: p.kind,
@@ -290,12 +284,11 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
       }),
     )
     .join('')
-  counts.credentials = credentialRows.length
   yield credentialRows
     .map((c) => {
-      const record = credentialRecord(c, ctx.masterKey)
+      const text = record(`凭据 ${c.identifier} `, credentialRecord(c, ctx.masterKey))
       ctx.exported.set(c.id, c.fields.map((f) => f.name).sort())
-      return line(record)
+      return text
     })
     .join('')
 
@@ -327,10 +320,13 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
       .orderBy(asc(memoryGlossary.keyword))) {
       glossary.set(g.memoryId, [...(glossary.get(g.memoryId) ?? []), g.keyword])
     }
-    counts.memories += rows.length
-    counts.secrets += rows.filter((r) => r.sensitivity === 'secret').length
     yield rows
-      .map((row) => line(memoryRecord(row, glossary.get(row.id) ?? [], ctx.masterKey)))
+      .map((row) =>
+        record(
+          `记忆 ${memoryLabel(row)} `,
+          memoryRecord(row, glossary.get(row.id) ?? [], ctx.masterKey),
+        ),
+      )
       .join('')
     after = rows[rows.length - 1]!.id
     if (rows.length < PAGE) break
@@ -355,6 +351,16 @@ function inheritanceOrder<T extends { id: string; extendsId: string | null }>(ro
   return [...result, ...left]
 }
 
+const memoryLabel = (row: typeof memories.$inferSelect) =>
+  row.domain && row.path ? formatUri(row.domain, row.path) : row.id
+
+// 解不开的托管凭据或 secret 记忆（密文缺了、被改过，或者主密钥对不上）：整个导出停下，点名是哪一条
+const unreadable = (what: string) =>
+  new MemoryError(
+    409,
+    `${what}解不开（密文缺失、被改过或主密钥对不上），导出不了：先在管理界面重新填它的内容，或者删掉它`,
+  )
+
 function credentialRecord(
   row: typeof credentials.$inferSelect,
   masterKey: MasterKey | null,
@@ -364,21 +370,26 @@ function credentialRecord(
     if (!masterKey) {
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，解不开托管的凭据，不能导出')
     }
-    source = {
-      kind: 'hosted',
-      values: openCredentialValues(masterKey, {
-        id: row.id,
-        ciphertext: row.ciphertext!,
-        wrappedKey: row.wrappedKey!,
-        keyId: row.keyId,
-      }),
+    if (!row.ciphertext || !row.wrappedKey) throw unreadable(`托管的凭据 ${row.identifier} `)
+    try {
+      source = {
+        kind: 'hosted',
+        values: openCredentialValues(masterKey, {
+          ...row,
+          ciphertext: row.ciphertext,
+          wrappedKey: row.wrappedKey,
+        }),
+      }
+    } catch {
+      throw unreadable(`托管的凭据 ${row.identifier} `)
     }
   } else {
     source = {
       kind: 'external',
       providerId: row.providerId!,
       location: row.location!,
-      fields: row.fields.map((f) => ({ name: f.name, sourceField: f.sourceField ?? '' })),
+      // 没有来源字段的照原样写 null：取值时按字段名取，导入后也一样
+      fields: row.fields.map((f) => ({ name: f.name, sourceField: f.sourceField ?? null })),
     }
   }
   return {
@@ -404,11 +415,16 @@ function memoryRecord(
     if (!masterKey) {
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，解不开 secret 记忆，不能导出')
     }
-    content = decryptSecret(
-      decryptionKey(masterKey, row.keyId),
-      { ciphertext: row.ciphertext!, wrappedKey: row.wrappedKey! },
-      row.id,
-    )
+    if (!row.ciphertext || !row.wrappedKey) throw unreadable(`secret 记忆 ${memoryLabel(row)} `)
+    try {
+      content = openMemoryContent(masterKey, {
+        ...row,
+        ciphertext: row.ciphertext,
+        wrappedKey: row.wrappedKey,
+      })
+    } catch {
+      throw unreadable(`secret 记忆 ${memoryLabel(row)} `)
+    }
   }
   return {
     type: 'memory',
@@ -422,7 +438,7 @@ function memoryRecord(
     appId: row.appId,
     subjectId: row.subjectId,
     uri: row.domain && row.path ? formatUri(row.domain, row.path) : null,
-    content: content!,
+    content: content ?? '',
     priority: row.priority,
     disclosure: row.disclosure,
     glossary,

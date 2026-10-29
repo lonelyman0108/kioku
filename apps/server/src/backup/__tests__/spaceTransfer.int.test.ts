@@ -15,6 +15,7 @@ import type {
   PersonaInfo,
   RecallStats,
   ReviewList,
+  SpaceImportPreview,
   SpaceImportResult,
   SpaceOverview,
   SubjectDetail,
@@ -33,7 +34,13 @@ import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, FULL_SCOPES, jsonRequest } from '../../testing/fixtures'
-import { deriveExportKey, openSpaceExport, sealSpaceExport, type KdfParams } from '../spaceFormat'
+import {
+  deriveExportKey,
+  openSpaceExport,
+  sealSpaceExport,
+  withKdfGate,
+  type KdfParams,
+} from '../spaceFormat'
 import { parseSpaceExport, type ParsedSpaceExport } from '../spaceImport'
 import {
   SPACE_EXPORT_FORMAT,
@@ -131,7 +138,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
     return Buffer.from(await res.arrayBuffer())
   }
-  const importRequest = (
+  const upload = (
+    path: string,
     app: App,
     cookie: string,
     file: Buffer | Blob,
@@ -146,14 +154,20 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
     form.set('passphrase', passphrase)
     if (name !== undefined) form.set('name', name)
-    return app.request('/v1/spaces/import', {
-      method: 'POST',
-      headers: { ...sameSite, cookie },
-      body: form,
-    })
+    return app.request(path, { method: 'POST', headers: { ...sameSite, cookie }, body: form })
   }
+  const importRequest = (...args: [App, string, Buffer | Blob, string?, string?]) =>
+    upload('/v1/spaces/import', ...args)
+  const inspectRequest = (...args: [App, string, Buffer | Blob, string?]) =>
+    upload('/v1/spaces/import/inspect', ...args)
+  const plainOf = (file: Buffer) =>
+    openSpaceExport(file, {
+      passphrase: PASSPHRASE,
+      account: 'reader',
+      maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
+    })
   const contents = async (file: Buffer): Promise<ParsedSpaceExport> =>
-    parseSpaceExport(await openSpaceExport(PASSPHRASE, file, SPACE_EXPORT_MAX_PLAIN_BYTES))
+    parseSpaceExport(await plainOf(file))
   const spaceCount = async () =>
     (await database.db.execute<{ n: number }>(sql`select count(*)::int as n from spaces`))[0]!.n
 
@@ -163,6 +177,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     version: SPACE_EXPORT_VERSION,
     createdAt: new Date().toISOString(),
     kioku: 'test',
+    exporter: { displayName: '拼文件的人' },
     space: { name, domainLayers: {}, extractionMonthlyTokens: 1000, extractionDailyWrites: 5 },
   })
   async function craft(records: SpaceExportRecord[], head = header()): Promise<Buffer> {
@@ -170,10 +185,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       yield `${JSON.stringify(head)}\n`
       for (const r of records) yield `${JSON.stringify(r)}\n`
     }
-    return sealSpaceExport(await deriveExportKey(PASSPHRASE, FAST), lines(), {
-      maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
-      maxBytes: 64 * 1024 * 1024,
-    })
+    return sealSpaceExport(
+      await deriveExportKey(PASSPHRASE, { account: 'crafter', kdf: FAST }),
+      lines(),
+      {
+        maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
+        maxBytes: 64 * 1024 * 1024,
+      },
+    )
   }
   const now = new Date().toISOString()
   const curated = (uri: string, extra: Partial<MemoryRecord> = {}): MemoryRecord => ({
@@ -470,6 +489,12 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         sql`update credentials set app_ids = array[${agent.id}::uuid, ${randomUUID()}::uuid] where id = ${mail.id}`,
       ),
     )
+    // 字段没有来源字段（取值时按字段名取）：导出时原样写成 null，导入照样认
+    await withSpace(database.db, spaceId, (tx) =>
+      tx.execute(
+        sql`update credentials set fields = '[{"name":"password","sourceField":null}]'::jsonb where id = ${mail.id}`,
+      ),
+    )
     return { alice, bob, spaceId, agentKey, botKey, orphanGroup }
   }
 
@@ -518,6 +543,12 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         kind: 'hosted',
         values: { password: 'nas-pass', user: 'admin' },
       })
+      expect(parsed.credentials.find((c) => c.identifier === 'mail')!.source).toMatchObject({
+        kind: 'external',
+        fields: [{ name: 'password', sourceField: null }],
+      })
+      // 文件里记着导出人是谁
+      expect(parsed.header.exporter).toEqual({ displayName: 'alice' })
       // 没有凭据绑着的已删除凭据源（旧的密码本）与 bob 的凭据源都不在
       expect(parsed.providers.map((p) => [p.name, p.deletedAt !== null])).toEqual([
         ['Vaultwarden', false],
@@ -530,9 +561,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         ['读书会', false],
       ])
       // Key、召回事件、召回时的提示语都不在文件里
-      const plain = (
-        await openSpaceExport(PASSPHRASE, file, SPACE_EXPORT_MAX_PLAIN_BYTES)
-      ).toString()
+      const plain = (await plainOf(file)).toString()
       for (const text of [
         agentKey,
         agentKey.slice(0, 12),
@@ -567,18 +596,34 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         .onConflictDoUpdate({ target: settings.key, set: { value: '2000-01-01T00:00:00.000Z' } })
       const carol = await bootstrap(target, 'carol')
       const cookie = { cookie: carol.cookie }
+      // 导入之前先检查：说清是谁导出的、哪些会归导入人，不写库
+      const counts = {
+        personas: 2,
+        apps: 3,
+        subjects: 3,
+        linkedSubjects: 1,
+        memories: 11,
+        ownerMemories: 1,
+        privateMemories: 2,
+        secrets: 1,
+        credentials: 3,
+        providers: 2,
+      }
+      const spacesBefore = await spaceCount()
+      const preview = await ok<SpaceImportPreview>(inspectRequest(target, carol.cookie, file))
+      expect(preview).toEqual({
+        exporter: { displayName: 'alice' },
+        spaceName: '家',
+        exportedAt: parsed.header.createdAt,
+        counts,
+      })
+      expect(await spaceCount()).toBe(spacesBefore)
       const result = await ok<SpaceImportResult>(importRequest(target, carol.cookie, file), 201)
-      expect(result).toMatchObject({
+      expect(result).toEqual({
+        spaceId: expect.any(String),
         name: '家',
-        counts: {
-          personas: 2,
-          apps: 3,
-          subjects: 3,
-          memories: 11,
-          secrets: 1,
-          credentials: 3,
-          providers: 2,
-        },
+        exporter: { displayName: 'alice' },
+        counts,
       })
       expect(backfills).toBe(1)
       const newSpace = result.spaceId
@@ -701,6 +746,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(credentialList.items.find((c) => c.identifier === 'mail')).toMatchObject({
         source: 'external',
         location: 'mail-item',
+        fields: [{ name: 'password', sourceField: null }],
         provider: { name: 'Vaultwarden', deleted: false },
         appIds: [app('agent').id],
       })
@@ -831,6 +877,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(denied.status).toBe(403)
     expect(((await denied.json()) as { error: string }).error).toBe('只有实例管理员能导入空间')
     expect((await importRequest(source, bob.cookie, file)).status).toBe(403)
+    expect((await inspectRequest(source, stranger.cookie, file)).status).toBe(403)
     expect(await spaceCount()).toBe(before)
   })
 
@@ -843,6 +890,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(((await res.json()) as { error: string }).error).toContain(message)
     }
     await rejected(await importRequest(source, alice.cookie, file, 'wrong passphrase'), '口令不对')
+    await rejected(await inspectRequest(source, alice.cookie, file, 'wrong passphrase'), '口令不对')
     const tampered = Buffer.from(file)
     tampered[tampered.length - 100]! ^= 1
     await rejected(await importRequest(source, alice.cookie, tampered), '文件不完整或被改过')
@@ -915,7 +963,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       [curated('core://agent', { layer: 'base', sensitivity: 'public' }), curated('core://agent')],
       '既有共享的记忆，又有个人的记忆',
     )
-    await importing([curated('home://a'), curated('home://a')], 'URI home://a 重复')
+    await importing([curated('home://a'), curated('home://a')], '第 3 行记忆 home://a 的 URI 重复')
     const [a, b] = [randomUUID(), randomUUID()]
     await importing([persona(a, 'a', b), persona(b, 'b', a)], '继承关系成环')
     await importing(
@@ -941,7 +989,179 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       ],
       '挂的对象不在文件里',
     )
+    // 数据库存不下的值在检查文件时就挡下，说清是第几行：公元 0 年的时间、NUL 字符
+    await importing(
+      [curated('home://old', { createdAt: '0000-06-01T00:00:00.000Z' })],
+      '第 2 行 createdAt：不是有效的时间',
+    )
+    await importing(
+      [curated('home://nul', { content: '前\u0000后' })],
+      '第 2 行 content：不能含有 NUL 字符',
+    )
     expect(await spaceCount()).toBe(before)
+  })
+
+  it('数据库拒绝写入时（值超出范围、违反约束）整个撤销，说清是哪几行', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const before = await spaceCount()
+    // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束
+    await database.db.execute(
+      sql.raw(`create or replace function kioku_test_reject() returns trigger language plpgsql as $$
+      begin
+        if new.display_name = '坏的' then
+          raise exception '时间超出范围' using errcode = 'datetime_field_overflow';
+        end if;
+        if new.display_name = '冲突的' then
+          raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
+        end if;
+        return new;
+      end $$`),
+    )
+    await database.db.execute(sql.raw('drop trigger if exists kioku_test_reject on subjects'))
+    await database.db.execute(
+      sql.raw(
+        'create trigger kioku_test_reject before insert on subjects for each row execute function kioku_test_reject()',
+      ),
+    )
+    try {
+      const subject = (displayName: string): SpaceExportRecord => ({
+        type: 'subject',
+        id: randomUUID(),
+        kind: 'person',
+        displayName,
+        nameLocked: false,
+        linkedToExporter: false,
+        createdAt: now,
+        updatedAt: now,
+      })
+      const rejected = async (name: string, message: string) => {
+        const file = await craft([curated('home://a'), subject('好的'), subject(name)])
+        const res = await importRequest(source, alice.cookie, file)
+        expect(res.status, await res.clone().text()).toBe(400)
+        expect(((await res.json()) as { error: string }).error).toBe(message)
+      }
+      await rejected('坏的', '导出文件的内容不对：第 3–4 行的对象写不进数据库（时间超出范围）')
+      await rejected(
+        '冲突的',
+        '导出文件的内容不对：第 3–4 行的对象写不进数据库（违反了约束 kioku_test_check）',
+      )
+      expect(await spaceCount()).toBe(before)
+    } finally {
+      await database.db.execute(sql.raw('drop trigger if exists kioku_test_reject on subjects'))
+      await database.db.execute(sql.raw('drop function if exists kioku_test_reject()'))
+    }
+  })
+
+  it(
+    '托管的凭据或 secret 记忆解不开、或者有导出了也导入不了的内容时，导出停下并点名是哪一条',
+    { timeout: 30_000 },
+    async () => {
+      const alice = await bootstrap(source, 'alice')
+      const cookie = { cookie: alice.cookie }
+      const space = alice.spaceId
+      const inSpace = (query: ReturnType<typeof sql>) =>
+        withSpace(database.db, space, (tx) => tx.execute(query))
+      const failing = async (message: string) => {
+        const res = await exportRequest(source, space, alice.cookie)
+        expect(res.status, await res.clone().text()).toBe(409)
+        expect(((await res.json()) as { error: string }).error).toContain(message)
+      }
+      await ok(
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${space}/credentials`,
+          { identifier: 'nas', name: 'NAS', source: { kind: 'hosted', values: { password: 'p' } } },
+          cookie,
+        ),
+        201,
+      )
+      await inSpace(sql`update credentials set ciphertext = ${randomBytes(48)}`)
+      await failing('托管的凭据 nas 解不开')
+      await inSpace(sql`update credentials set deleted_at = now()`)
+
+      await ok(
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${space}/memories`,
+          { uri: 'home://wifi', content: '无线密码', sensitivity: 'secret' },
+          cookie,
+        ),
+        201,
+      )
+      await inSpace(sql`update memories set wrapped_key = ${randomBytes(60)}`)
+      await failing('secret 记忆 home://wifi 解不开')
+      await inSpace(sql`update memories set deleted_at = now()`)
+
+      // 规则收紧之前存下的条目位置（带分号）：导出了也导入不了，导出时就点名
+      const vault = await ok<{ id: string }>(
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${space}/credential-providers`,
+          { kind: 'bitwarden', name: 'Vaultwarden' },
+          cookie,
+        ),
+        201,
+      )
+      await ok(
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${space}/credentials`,
+          {
+            identifier: 'mail',
+            name: '邮箱',
+            source: {
+              kind: 'external',
+              providerId: vault.id,
+              location: 'mail-item',
+              fields: [{ name: 'password', sourceField: 'password' }],
+            },
+          },
+          cookie,
+        ),
+        201,
+      )
+      await inSpace(sql`update credentials set location = 'mail;item' where identifier = 'mail'`)
+      await failing('凭据 mail 导出后导入不了（source.location：')
+      // 导出没做成：不记导出的访问事件
+      const [row] = await inSpace(
+        sql`select count(*)::int as n from credential_events where event_type = 'access'`,
+      )
+      expect(row).toEqual({ n: 0 })
+    },
+  )
+
+  it('口令派生正忙时，导出、检查与导入都直接返回 429，放开之后照常', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    const held: (() => void)[] = []
+    const hold = (account: string) =>
+      withKdfGate(account, () => new Promise<void>((resolve) => held.push(resolve)))
+    const busy = async (res: Response) => {
+      expect(res.status, await res.clone().text()).toBe(429)
+      expect(((await res.json()) as { error: string }).error).toBe('导出导入正忙，稍后再试')
+    }
+    const releaseAll = async (holds: Promise<void>[]) => {
+      while (held.length) {
+        held.shift()!()
+        await new Promise((r) => setTimeout(r, 0))
+      }
+      await Promise.all(holds)
+    }
+    // 同一个账号已经占着一个名额
+    const mine = hold(alice.accountId)
+    await busy(await exportRequest(source, alice.spaceId, alice.cookie))
+    await busy(await importRequest(source, alice.cookie, file))
+    await busy(await inspectRequest(source, alice.cookie, file))
+    await releaseAll([mine])
+    // 别的账号占满了运行与排队的名额
+    const others = Array.from({ length: 5 }, (_, i) => hold(`other-${i}`))
+    await busy(await exportRequest(source, alice.spaceId, alice.cookie))
+    await releaseAll(others)
+    expect((await exportRequest(source, alice.spaceId, alice.cookie)).status).toBe(200)
   })
 
   it(
@@ -965,6 +1185,22 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(row).toEqual({ n: 20_000, events: 20_000 })
     },
   )
+
+  it('导出在 withSpace 给的可重复读、只读事务里读', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const [row] = await withSpace(
+      database.db,
+      alice.spaceId,
+      (tx) =>
+        tx.execute<{ isolation: string; readOnly: string; space: string }>(
+          sql`select current_setting('transaction_isolation') as isolation,
+            current_setting('transaction_read_only') as "readOnly",
+            current_setting('app.space_id') as space`,
+        ),
+      { isolationLevel: 'repeatable read', accessMode: 'read only' },
+    )
+    expect(row).toEqual({ isolation: 'repeatable read', readOnly: 'on', space: alice.spaceId })
+  })
 
   describe('URI 互斥的触发器', () => {
     // 单独的一条连接：这个会话里从来没设过 app.importing_space

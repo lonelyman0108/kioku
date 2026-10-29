@@ -1,14 +1,13 @@
 import { randomUUID } from 'node:crypto'
 
-import type { SpaceImportResult } from '@kioku/contracts'
+import type { SpaceImportCounts, SpaceImportPreview, SpaceImportResult } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import type { z } from 'zod'
 
 import { placeholderIdentifiers } from '../credential/placeholders'
 import { sealCredentialValues } from '../credential/service'
-import { encryptSecret } from '../crypto/envelope'
-import { encryptionKey, type MasterKey } from '../crypto/keyring'
-import { pgConstraint, pgErrorCode, type Db, type Tx } from '../db/client'
+import type { MasterKey } from '../crypto/keyring'
+import { pgConstraint, pgErrorCode, pgMessage, withSpace, type Db, type Tx } from '../db/client'
 import {
   appGroupPersonas,
   apps,
@@ -26,7 +25,12 @@ import {
   subjects,
 } from '../db/schema'
 import { MAX_PERSONA_DEPTH } from '../memory/personas'
-import { MemoryError, snapshot as memorySnapshot } from '../memory/service'
+import {
+  MemoryError,
+  SNAPSHOT_COLUMNS,
+  sealMemoryContent,
+  snapshot as memorySnapshot,
+} from '../memory/service'
 import { APP_DOMAIN, PERSONA_DOMAIN, parseUri } from '../memory/uri'
 import { openSpaceExport } from './spaceFormat'
 import {
@@ -47,22 +51,26 @@ import {
 
 // 把空间的导出文件导入成这个实例里的一个新空间，导入人是新空间的 owner。全部在一个事务里写：
 // 失败时什么都不留下，新空间也不会出现。id 全部重新生成，文件里的互相指认按新 id 对上；
-// 画像、私人层、凭据与凭据源归导入人，对象上「这是我」的标记也换成导入人。
+// 导出人的画像层、私人层、凭据与凭据源归导入人，对象上「这是我」的标记也换成导入人
+// （画像层会进导入人的 agent 的启动上下文，所以导入之前先用 inspectSpaceImport 告诉他文件是谁导出的、有多少）。
 // secret 记忆与托管的凭据值用这个实例的主密钥重新加密（新的数据密钥，aad 绑新的 id）；
 // 没配主密钥而文件里有这两样时拒绝导入，不悄悄丢掉。
 // 记忆按导出时的样子写回（来源、来源作用域、有效期、时间都不变；不可信来源的仍是不可信，照样进待审），
 // 版本从 1 开始，每条记一条 import 事件；写入时已经通过了导出实例的检查，这里只核对影响数据库约束与读权限的部分
 
+// 记录带上它在正文里是第几行，出错时说得出是哪一行
+type Lined<T> = T & { line: number }
+
 export interface ParsedSpaceExport {
   header: SpaceExportHeader
-  personas: PersonaRecord[]
-  apps: AppRecord[]
-  subjects: SubjectRecord[]
-  identities: IdentityRecord[]
-  groupPersonas: GroupPersonaRecord[]
-  providers: ProviderRecord[]
-  credentials: CredentialRecord[]
-  memories: MemoryRecord[]
+  personas: Lined<PersonaRecord>[]
+  apps: Lined<AppRecord>[]
+  subjects: Lined<SubjectRecord>[]
+  identities: Lined<IdentityRecord>[]
+  groupPersonas: Lined<GroupPersonaRecord>[]
+  providers: Lined<ProviderRecord>[]
+  credentials: Lined<CredentialRecord>[]
+  memories: Lined<MemoryRecord>[]
 }
 
 const invalid = (detail: string) => new MemoryError(400, `导出文件的内容不对：${detail}`)
@@ -112,90 +120,95 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
     memories: [],
   }
   rows.slice(1).forEach((row, i) => {
-    const record = parseLine(jsonLine(row, i + 2), SpaceExportRecord, i + 2)
+    const line = i + 2
+    const record = parseLine(jsonLine(row, line), SpaceExportRecord, line)
     switch (record.type) {
       case 'persona':
-        return void result.personas.push(record)
+        return void result.personas.push({ ...record, line })
       case 'app':
-        return void result.apps.push(record)
+        return void result.apps.push({ ...record, line })
       case 'subject':
-        return void result.subjects.push(record)
+        return void result.subjects.push({ ...record, line })
       case 'identity':
-        return void result.identities.push(record)
+        return void result.identities.push({ ...record, line })
       case 'groupPersona':
-        return void result.groupPersonas.push(record)
+        return void result.groupPersonas.push({ ...record, line })
       case 'provider':
-        return void result.providers.push(record)
+        return void result.providers.push({ ...record, line })
       case 'credential':
-        return void result.credentials.push(record)
+        return void result.credentials.push({ ...record, line })
       case 'memory':
-        return void result.memories.push(record)
+        return void result.memories.push({ ...record, line })
     }
   })
   return result
 }
 
-function byId<T extends { id: string }>(items: T[], what: string): Map<string, T> {
+function byId<T extends { id: string; line: number }>(items: T[], what: string): Map<string, T> {
   const map = new Map<string, T>()
   for (const item of items) {
-    if (map.has(item.id)) throw invalid(`${what}的 id 重复：${item.id}`)
+    if (map.has(item.id)) throw invalid(`第 ${item.line} 行${what}的 id 重复：${item.id}`)
     map.set(item.id, item)
   }
   return map
 }
 
-function distinct<T>(items: T[], key: (item: T) => string, what: string): void {
+function distinct<T extends { line: number }>(
+  items: T[],
+  key: (item: T) => string,
+  what: string,
+): void {
   const seen = new Set<string>()
   for (const item of items) {
     const k = key(item)
-    if (seen.has(k)) throw invalid(`${what}重复：${k}`)
+    if (seen.has(k)) throw invalid(`第 ${item.line} 行${what}重复：${k}`)
     seen.add(k)
   }
 }
 
 const PER_MEMBER_LAYERS = new Set(['owner', 'private'])
 
-// 文件里的互相指认要对得上，URI 不能冲突，层与归属要一致：写库之前查一遍，出错时说清是哪一条，
+// 文件里的互相指认要对得上，URI 不能冲突，层与归属要一致：写库之前查一遍，出错时说清是哪一行，
 // 不等写到一半被数据库的约束拦下
 export function checkSpaceExport(x: ParsedSpaceExport): void {
   const personaById = byId(x.personas, '人格')
   distinct(x.personas, (p) => p.slug, '人格的标识')
   for (const p of x.personas) {
     if (p.extendsId && !personaById.has(p.extendsId)) {
-      throw invalid(`人格 ${p.slug} 继承的人格不在文件里`)
+      throw invalid(`第 ${p.line} 行人格 ${p.slug} 继承的人格不在文件里`)
     }
     // 继承关系不能成环，继承链（含自己）最多 MAX_PERSONA_DEPTH 层，和新建、修改人格时的规则一样
     const chain = new Set<string>()
     for (let at: PersonaRecord | undefined = p; at;) {
-      if (chain.has(at.id)) throw invalid(`人格 ${p.slug} 的继承关系成环`)
+      if (chain.has(at.id)) throw invalid(`第 ${p.line} 行人格 ${p.slug} 的继承关系成环`)
       chain.add(at.id)
       at = at.extendsId ? personaById.get(at.extendsId) : undefined
     }
     if (chain.size > MAX_PERSONA_DEPTH) {
-      throw invalid(`人格 ${p.slug} 的继承链超过 ${MAX_PERSONA_DEPTH} 层`)
+      throw invalid(`第 ${p.line} 行人格 ${p.slug} 的继承链超过 ${MAX_PERSONA_DEPTH} 层`)
     }
   }
   const appById = byId(x.apps, '应用')
   distinct(x.apps, (a) => a.slug, '应用的标识')
   for (const a of x.apps) {
     if (a.defaultPersonaId && !personaById.has(a.defaultPersonaId)) {
-      throw invalid(`应用 ${a.slug} 的默认人格不在文件里`)
+      throw invalid(`第 ${a.line} 行应用 ${a.slug} 的默认人格不在文件里`)
     }
   }
   const subjectById = byId(x.subjects, '对象')
   for (const i of x.identities) {
     const subject = subjectById.get(i.subjectId)
-    if (!subject) throw invalid(`平台账号 ${i.platform}:${i.externalId} 挂的对象不在文件里`)
-    if (subject.kind !== i.kind)
-      throw invalid(`平台账号 ${i.platform}:${i.externalId} 和对象的种类不同`)
+    const label = `第 ${i.line} 行平台账号 ${i.platform}:${i.externalId}`
+    if (!subject) throw invalid(`${label} 挂的对象不在文件里`)
+    if (subject.kind !== i.kind) throw invalid(`${label} 和对象的种类不同`)
   }
   distinct(x.identities, (i) => `${i.platform}/${i.kind}/${i.externalId}`, '平台账号')
   for (const r of x.groupPersonas) {
     if (!appById.has(r.appId) || !personaById.has(r.personaId)) {
-      throw invalid('按群换人格的规则指向的应用或人格不在文件里')
+      throw invalid(`第 ${r.line} 行按群换人格的规则指向的应用或人格不在文件里`)
     }
     if (subjectById.get(r.subjectId)?.kind !== 'group') {
-      throw invalid('按群换人格的规则指向的不是文件里的群')
+      throw invalid(`第 ${r.line} 行按群换人格的规则指向的不是文件里的群`)
     }
   }
   distinct(x.groupPersonas, (r) => `${r.appId}/${r.subjectId}`, '按群换人格的规则')
@@ -204,7 +217,7 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
   distinct(x.credentials, (c) => c.identifier, '凭据的标识')
   for (const c of x.credentials) {
     if (c.source.kind === 'external' && !providerById.has(c.source.providerId)) {
-      throw invalid(`凭据 ${c.identifier} 绑的凭据源不在文件里`)
+      throw invalid(`第 ${c.line} 行凭据 ${c.identifier} 绑的凭据源不在文件里`)
     }
   }
 
@@ -213,7 +226,7 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
   const shared = new Set<string>()
   const mine = new Set<string>()
   for (const m of x.memories) {
-    const label = m.uri ?? `抽取的记忆 ${m.id}`
+    const label = `第 ${m.line} 行${m.uri ? `记忆 ${m.uri}` : '抽取的记忆'}`
     if ((m.form === 'curated') !== (m.uri !== null)) throw invalid(`${label} 的形态与 URI 对不上`)
     if (m.provenance === 'untrusted' && m.layer !== 'subject' && m.layer !== 'episode') {
       throw invalid(`${label} 来自不可信来源，只能在对象层或情节层`)
@@ -246,7 +259,7 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
     }
     if (!m.uri) continue
     const bucket = PER_MEMBER_LAYERS.has(m.layer) ? mine : shared
-    if (bucket.has(m.uri)) throw invalid(`URI ${m.uri} 重复`)
+    if (bucket.has(m.uri)) throw invalid(`${label} 的 URI 重复`)
     bucket.add(m.uri)
   }
   for (const uri of mine) {
@@ -271,11 +284,61 @@ function requireMasterKey(x: ParsedSpaceExport, masterKey: MasterKey | null): vo
   )
 }
 
-export interface ImportSpaceOptions {
-  // 导入人：实例管理员（路由检查），成为新空间的 owner
+function countsOf(x: ParsedSpaceExport): SpaceImportCounts {
+  const layer = (name: string) => x.memories.filter((m) => m.layer === name).length
+  return {
+    personas: x.personas.length,
+    apps: x.apps.length,
+    subjects: x.subjects.length,
+    linkedSubjects: x.subjects.filter((s) => s.linkedToExporter).length,
+    memories: x.memories.length,
+    ownerMemories: layer('owner'),
+    privateMemories: layer('private'),
+    secrets: x.memories.filter((m) => m.sensitivity === 'secret').length,
+    credentials: x.credentials.length,
+    providers: x.providers.length,
+  }
+}
+
+export interface InspectSpaceOptions {
+  // 导入人：实例管理员（路由检查）。口令派生按账号经过闸门
   accountId: string
   file: Buffer
   passphrase: string
+}
+
+// 解开文件、按导入时的规则核对一遍，不写库：返回解开的内容
+async function openAndCheck(
+  masterKey: MasterKey | null,
+  options: InspectSpaceOptions,
+): Promise<ParsedSpaceExport> {
+  const plain = await openSpaceExport(options.file, {
+    passphrase: options.passphrase,
+    account: options.accountId,
+    maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
+  })
+  const x = parseSpaceExport(plain)
+  checkSpaceExport(x)
+  requireMasterKey(x, masterKey)
+  return x
+}
+
+// 导入之前先看：文件是谁导出的、从哪个空间、有多少，导入后哪些归你。导入会遇到的问题（口令不对、文件被改过、
+// 内容对不上、没配主密钥）这一步就报出来
+export async function inspectSpaceImport(
+  masterKey: MasterKey | null,
+  options: InspectSpaceOptions,
+): Promise<SpaceImportPreview> {
+  const x = await openAndCheck(masterKey, options)
+  return {
+    exporter: x.header.exporter,
+    spaceName: x.header.space.name,
+    exportedAt: x.header.createdAt,
+    counts: countsOf(x),
+  }
+}
+
+export interface ImportSpaceOptions extends InspectSpaceOptions {
   // 新空间的名字；不填时用导出时的空间名
   name?: string | undefined
 }
@@ -285,40 +348,26 @@ export async function importSpace(
   masterKey: MasterKey | null,
   options: ImportSpaceOptions,
 ): Promise<SpaceImportResult> {
-  const plain = await openSpaceExport(
-    options.passphrase,
-    options.file,
-    SPACE_EXPORT_MAX_PLAIN_BYTES,
-  )
-  const x = parseSpaceExport(plain)
-  checkSpaceExport(x)
-  requireMasterKey(x, masterKey)
+  const x = await openAndCheck(masterKey, options)
   const name = options.name?.trim() || x.header.space.name
-  let spaceId: string
+  // 新空间的 id 先定下来：整个导入在 withSpace 里，内容表按这个空间过滤
+  const spaceId = randomUUID()
+  const progress = { step: '' }
   try {
-    spaceId = await db.transaction((tx) =>
-      writeSpace(tx, x, { accountId: options.accountId, masterKey, name }),
+    await withSpace(db, spaceId, (tx) =>
+      writeSpace(tx, x, { spaceId, accountId: options.accountId, masterKey, name, progress }),
     )
   } catch (err) {
-    // 上面的检查之外，数据库的约束还拦下了什么（例如被人改过、但口令对得上的文件）：整个撤销，说清是哪一条约束
-    if (pgErrorCode(err)?.startsWith('23')) {
-      throw invalid(`写入时违反了数据库的约束 ${pgConstraint(err) ?? pgErrorCode(err)}`)
+    // 上面的检查之外，数据库还拒绝了什么（例如被人改过、但口令对得上的文件）：整个撤销，
+    // 说清是哪几行、违反了哪一条约束。22 类是值本身不对（例如时间超出范围），23 类是违反约束
+    const code = pgErrorCode(err)
+    if (code?.startsWith('22') || code?.startsWith('23')) {
+      const why = pgConstraint(err) ? `违反了约束 ${pgConstraint(err)}` : (pgMessage(err) ?? code)
+      throw invalid(`${progress.step}写不进数据库（${why}）`)
     }
     throw err
   }
-  return {
-    spaceId,
-    name,
-    counts: {
-      personas: x.personas.length,
-      apps: x.apps.length,
-      subjects: x.subjects.length,
-      memories: x.memories.length,
-      secrets: x.memories.filter((m) => m.sensitivity === 'secret').length,
-      credentials: x.credentials.length,
-      providers: x.providers.length,
-    },
-  }
+  return { spaceId, name, exporter: x.header.exporter, counts: countsOf(x) }
 }
 
 // 一条语句最多写这么多行：参数个数不超过 PostgreSQL 的上限（65535）
@@ -331,29 +380,36 @@ function* chunks<T>(items: T[], size = BATCH): Generator<T[]> {
 const time = (value: string) => new Date(value)
 const optionalTime = (value: string | null) => (value === null ? null : new Date(value))
 
-// 按文件建出新空间与里面的全部内容，返回新空间的 id
+// 按文件建出新空间与里面的全部内容。progress.step 记着正在写哪几行，数据库报错时说得出是哪里
 async function writeSpace(
   tx: Tx,
   x: ParsedSpaceExport,
-  ctx: { accountId: string; masterKey: MasterKey | null; name: string },
-): Promise<string> {
-  const { accountId, masterKey } = ctx
-  const [space] = await tx
-    .insert(spaces)
-    .values({
-      name: ctx.name,
-      domainLayers: x.header.space.domainLayers,
-      extractionMonthlyTokens: x.header.space.extractionMonthlyTokens,
-      extractionDailyWrites: x.header.space.extractionDailyWrites,
-    })
-    .returning({ id: spaces.id })
-  const spaceId = space!.id
+  ctx: {
+    spaceId: string
+    accountId: string
+    masterKey: MasterKey | null
+    name: string
+    progress: { step: string }
+  },
+): Promise<void> {
+  const { spaceId, accountId, masterKey, progress } = ctx
+  const step = (what: string, batch: { line: number }[]) => {
+    const from = batch[0]?.line
+    const to = batch[batch.length - 1]?.line
+    progress.step = from === to ? `第 ${from} 行的${what}` : `第 ${from}–${to} 行的${what}`
+  }
+  progress.step = '空间的设置'
+  await tx.insert(spaces).values({
+    id: spaceId,
+    name: ctx.name,
+    domainLayers: x.header.space.domainLayers,
+    extractionMonthlyTokens: x.header.space.extractionMonthlyTokens,
+    extractionDailyWrites: x.header.space.extractionDailyWrites,
+  })
   await tx.insert(spaceMembers).values({ spaceId, accountId, role: 'owner' })
-  // 内容表按 app.space_id 过滤。app.importing_space 告诉 URI 互斥的触发器：这是导入新空间的事务，
-  // 空间这一行刚写下、别的事务还看不到它，不用为每个 URI 加咨询锁（见 0022 迁移）
-  await tx.execute(
-    sql`select set_config('app.space_id', ${spaceId}, true), set_config('app.importing_space', ${spaceId}, true)`,
-  )
+  // app.importing_space 告诉 URI 互斥的触发器：这是导入新空间的事务，空间这一行刚写下、
+  // 别的事务还看不到它，不用为每个 URI 加咨询锁（见 0022 迁移）
+  await tx.execute(sql`select set_config('app.importing_space', ${spaceId}, true)`)
 
   const personaIds = new Map(x.personas.map((p) => [p.id, randomUUID()]))
   const appIds = new Map(x.apps.map((a) => [a.id, randomUUID()]))
@@ -363,6 +419,7 @@ async function writeSpace(
     id === null ? null : map.get(id)!
 
   if (x.personas.length) {
+    step('人格', x.personas)
     // 外键在语句结束时才检查，同一条语句里先写子人格也不要紧
     await tx.insert(personas).values(
       x.personas.map((p) => ({
@@ -378,6 +435,7 @@ async function writeSpace(
     )
   }
   if (x.apps.length) {
+    step('应用', x.apps)
     await tx.insert(apps).values(
       x.apps.map((a) => ({
         id: appIds.get(a.id)!,
@@ -394,6 +452,7 @@ async function writeSpace(
     )
   }
   for (const batch of chunks(x.subjects)) {
+    step('对象', batch)
     await tx.insert(subjects).values(
       batch.map((s) => ({
         id: subjectIds.get(s.id)!,
@@ -408,6 +467,7 @@ async function writeSpace(
     )
   }
   for (const batch of chunks(x.identities)) {
+    step('平台账号', batch)
     await tx.insert(subjectIdentities).values(
       batch.map((i) => ({
         spaceId,
@@ -421,6 +481,7 @@ async function writeSpace(
     )
   }
   for (const batch of chunks(x.groupPersonas)) {
+    step('按群换人格的规则', batch)
     await tx.insert(appGroupPersonas).values(
       batch.map((r) => ({
         spaceId,
@@ -433,6 +494,7 @@ async function writeSpace(
   }
 
   if (x.providers.length) {
+    step('凭据源', x.providers)
     await tx.insert(credentialProviders).values(
       x.providers.map((p) => ({
         id: providerIds.get(p.id)!,
@@ -486,6 +548,7 @@ async function writeSpace(
 
   const context = { source: 'space-export', exportedAt: x.header.createdAt }
   for (const batch of chunks(x.credentials)) {
+    step('凭据', batch)
     const rows = batch.map((c) => ({ id: randomUUID(), record: c }))
     await tx.insert(credentials).values(rows.map(({ id, record }) => credentialRow(id, record)))
     await tx.insert(credentialEvents).values(
@@ -510,11 +573,8 @@ async function writeSpace(
     if (!orphans.has(id)) orphans.set(id, randomUUID())
     return `${kind}:${orphans.get(id)!}`
   }
-  const seal = (plaintext: string, id: string) => {
-    const { key, id: keyId } = encryptionKey(masterKey!)
-    return { ...encryptSecret(key, plaintext, id), keyId }
-  }
   for (const batch of chunks(x.memories)) {
+    step('记忆', batch)
     const prepared = batch.map((m) => {
       const id = randomUUID()
       const parsed = m.uri ? parseUri(m.uri)! : null
@@ -538,7 +598,7 @@ async function writeSpace(
           domain: parsed?.domain ?? null,
           path: parsed?.path ?? null,
           ...(m.sensitivity === 'secret'
-            ? { content: null, ...seal(m.content, id) }
+            ? { content: null, ...sealMemoryContent(masterKey!, id, m.content) }
             : { content: m.content, ciphertext: null, wrappedKey: null, keyId: null }),
           priority: m.priority,
           disclosure: m.disclosure,
@@ -550,12 +610,13 @@ async function writeSpace(
         },
       }
     })
+    // 只取回写快照用得到的列，不把密文与全文检索向量也取回来
     const written = new Map(
       (
         await tx
           .insert(memories)
           .values(prepared.map((p) => p.row))
-          .returning()
+          .returning(SNAPSHOT_COLUMNS)
       ).map((r) => [r.id, r]),
     )
     const keywords = prepared.flatMap((p) =>
@@ -586,5 +647,4 @@ async function writeSpace(
       })),
     )
   }
-  return spaceId
 }

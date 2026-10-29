@@ -18,30 +18,55 @@ export const SpaceExportRequest = z.object({
 })
 export type SpaceExportRequest = z.infer<typeof SpaceExportRequest>
 
-// 上传的表单：导出文件、导出时设的口令，以及新空间的名字（留空时用导出时的空间名）。
+const ExportFile = z
+  .file('要上传导出文件')
+  .max(SPACE_EXPORT_MAX_BYTES, `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限`)
+  .meta({ type: 'string', format: 'binary' })
 // 口令只要求不为空：以后调高长度要求时，之前导出的文件照样能导入
-export const SpaceImportForm = z.object({
-  file: z
-    .file('要上传导出文件')
-    .max(SPACE_EXPORT_MAX_BYTES, `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限`)
-    .meta({ type: 'string', format: 'binary' }),
-  passphrase: z.string().min(1, '要填导出时设的口令').max(PASSPHRASE_MAX),
+const ImportPassphrase = z.string().min(1, '要填导出时设的口令').max(PASSPHRASE_MAX)
+
+// 导入之前先检查文件：解开、核对内容，说清是谁导出的、导入后有哪些归你，不写库
+export const SpaceImportInspectForm = z.object({ file: ExportFile, passphrase: ImportPassphrase })
+export type SpaceImportInspectForm = z.infer<typeof SpaceImportInspectForm>
+
+// 上传的表单：导出文件、导出时设的口令，以及新空间的名字（留空时用导出时的空间名）
+export const SpaceImportForm = SpaceImportInspectForm.extend({
   name: z.string().trim().max(64, '空间名最多 64 个字').optional(),
 })
 export type SpaceImportForm = z.infer<typeof SpaceImportForm>
 
+// 文件里有多少。导出人的画像层（ownerMemories）、私人层（privateMemories）、凭据、凭据源与标记成他本人的对象
+// （linkedSubjects）导入后都归导入人；secrets 是其中要用这个实例的主密钥重新加密的 secret 记忆
+export const SpaceImportCounts = z.object({
+  personas: z.number().int(),
+  apps: z.number().int(),
+  subjects: z.number().int(),
+  linkedSubjects: z.number().int(),
+  memories: z.number().int(),
+  ownerMemories: z.number().int(),
+  privateMemories: z.number().int(),
+  secrets: z.number().int(),
+  credentials: z.number().int(),
+  providers: z.number().int(),
+})
+export type SpaceImportCounts = z.infer<typeof SpaceImportCounts>
+
+// 导出人：导出时的显示名
+const SpaceExporter = z.object({ displayName: z.string() })
+
+export const SpaceImportPreview = z.object({
+  exporter: SpaceExporter,
+  // 导出时的空间名，也是导入时不填名字的默认值
+  spaceName: z.string(),
+  exportedAt: z.string(),
+  counts: SpaceImportCounts,
+})
+export type SpaceImportPreview = z.infer<typeof SpaceImportPreview>
+
 export const SpaceImportResult = z.object({
   spaceId: z.uuid(),
   name: z.string(),
-  // 导入了多少：记忆里 secret 的条数单独列出（它们用这个实例的主密钥重新加密了）
-  counts: z.object({
-    personas: z.number().int(),
-    apps: z.number().int(),
-    subjects: z.number().int(),
-    memories: z.number().int(),
-    secrets: z.number().int(),
-    credentials: z.number().int(),
-    providers: z.number().int(),
-  }),
+  exporter: SpaceExporter,
+  counts: SpaceImportCounts,
 })
 export type SpaceImportResult = z.infer<typeof SpaceImportResult>

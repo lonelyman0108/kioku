@@ -1,11 +1,15 @@
 import {
   AppConfig,
+  CredentialFieldName,
   CredentialIdentifier,
+  CredentialLocation,
   CredentialProviderKind,
+  CredentialSourceField,
   CredentialSourceInput,
   DomainLayers,
   ExtractionBudget,
   Layer,
+  MAX_CREDENTIAL_FIELDS,
   MemoryForm,
   MemoryUri,
   Provenance,
@@ -20,7 +24,8 @@ import { z } from 'zod'
 // 记录里的 id 是导出时的 id，只用来在文件里互相指认（人格的继承、应用的默认人格、记忆挂的人格、应用与对象、
 // 按群换人格、凭据绑的凭据源与限定的应用）；导入时全部重新生成。归属成员的东西（画像、私人层、凭据、凭据源）
 // 只有导出人自己的，不记是谁的：导入后全部归导入人。
-// 记忆按导出时的样子写出（secret 是明文，整个文件另用口令加密），不含历史、向量与召回统计
+// 记忆按导出时的样子写出（secret 是明文，整个文件另用口令加密），不含历史、向量与召回统计。
+// 导出时每条记录先按这里的定义检查一遍，写得出来的就一定导入得了
 export const SPACE_EXPORT_FORMAT = 'kioku-space-export'
 export const SPACE_EXPORT_VERSION = 1
 
@@ -28,7 +33,13 @@ export const SPACE_EXPORT_VERSION = 1
 export const SPACE_EXPORT_MAX_PLAIN_BYTES = 128 * 1024 * 1024
 
 const Id = z.guid()
-const Time = z.iso.datetime({ offset: true })
+// 要写进库的文字：PostgreSQL 的 text 与 jsonb 都存不了 NUL 字符，在这里先挡下，报错时点得出是哪一行
+const Text = z.string().refine((s) => !s.includes('\0'), '不能含有 NUL 字符')
+// 时间：格式对、确实是个日期，年份在 PostgreSQL 存得下的范围里（没有公元 0 年）
+const Time = z.iso.datetime({ offset: true }).refine((value) => {
+  const at = new Date(value)
+  return !Number.isNaN(at.getTime()) && at.getUTCFullYear() >= 1
+}, '不是有效的时间')
 const UUID_TEXT = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 
 export const SpaceExportHeader = z.object({
@@ -37,9 +48,11 @@ export const SpaceExportHeader = z.object({
   createdAt: Time,
   // 做导出的 Kioku 版本，导入出错时提示用
   kioku: z.string(),
+  // 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据
+  exporter: z.object({ displayName: Text.max(200) }),
   // 空间级的设置：名字（导入时没填名字就用它）、domain 默认层与抽取预算
   space: z.object({
-    name: z.string().min(1).max(64),
+    name: Text.min(1).max(64),
     domainLayers: DomainLayers.shape.defaults,
     extractionMonthlyTokens: ExtractionBudget.shape.monthlyTokens,
     extractionDailyWrites: ExtractionBudget.shape.dailyWritesPerSubject,
@@ -51,9 +64,9 @@ export const PersonaRecord = z.object({
   type: z.literal('persona'),
   id: Id,
   slug: Slug,
-  name: z.string().min(1).max(64),
+  name: Text.min(1).max(64),
   extendsId: Id.nullable(),
-  description: z.string().max(500).nullable(),
+  description: Text.max(500).nullable(),
   createdAt: Time,
   updatedAt: Time,
 })
@@ -62,7 +75,7 @@ export const AppRecord = z.object({
   type: z.literal('app'),
   id: Id,
   slug: Slug,
-  name: z.string().min(1).max(64),
+  name: Text.min(1).max(64),
   runtimeFamily: RuntimeFamily,
   defaultPersonaId: Id.nullable(),
   config: AppConfig,
@@ -74,7 +87,7 @@ export const SubjectRecord = z.object({
   type: z.literal('subject'),
   id: Id,
   kind: SubjectKind,
-  displayName: z.string().min(1).max(1000),
+  displayName: Text.min(1).max(1000),
   nameLocked: z.boolean(),
   // 导出人在对象页里把这个人标记成了「这是我」：导入后标记成导入人。标记成别的成员的不带过去
   linkedToExporter: z.boolean(),
@@ -86,9 +99,9 @@ export const IdentityRecord = z.object({
   type: z.literal('identity'),
   subjectId: Id,
   kind: SubjectKind,
-  platform: z.string().min(1).max(64),
-  externalId: z.string().min(1).max(200),
-  displayName: z.string().max(1000).nullable(),
+  platform: Text.min(1).max(64),
+  externalId: Text.min(1).max(200),
+  displayName: Text.max(1000).nullable(),
   createdAt: Time,
 })
 
@@ -104,23 +117,34 @@ export const ProviderRecord = z.object({
   type: z.literal('provider'),
   id: Id,
   kind: CredentialProviderKind,
-  name: z.string().min(1).max(100),
-  instructions: z.string().max(4000),
+  name: Text.min(1).max(100),
+  instructions: Text.max(4000),
   // 已删除的凭据源只在还有导出的凭据绑着它时导出（恢复删除的凭据之后可能这样），导入后照样是已删除
   deletedAt: Time.nullable(),
   createdAt: Time,
   updatedAt: Time,
 })
 
-// 来源与新建凭据的接口同一个形状：托管的带着字段值（明文，整个文件另用口令加密），外部的带着条目位置。
-// 条目位置与来源字段会代入给 agent 的取值命令，导入时照样按接口的规则检查
+// 托管的和新建凭据的接口同一个形状，带着字段值（明文，整个文件另用口令加密）。
+// 外部的带着条目位置与字段对应：条目位置与来源字段会代入给 agent 的取值命令，照样按接口的规则检查；
+// 来源字段为 null 的按字段名取（和取值时一样），原样带过去
+const [HostedSource] = CredentialSourceInput.options
+const ExternalSource = z.object({
+  kind: z.literal('external'),
+  providerId: Id,
+  location: CredentialLocation,
+  fields: z
+    .array(z.object({ name: CredentialFieldName, sourceField: CredentialSourceField.nullable() }))
+    .max(MAX_CREDENTIAL_FIELDS),
+})
+
 export const CredentialRecord = z.object({
   type: z.literal('credential'),
   id: Id,
   identifier: CredentialIdentifier,
-  name: z.string().min(1).max(100),
-  description: z.string().max(2000).nullable(),
-  source: CredentialSourceInput,
+  name: Text.min(1).max(100),
+  description: Text.max(2000).nullable(),
+  source: z.discriminatedUnion('kind', [HostedSource, ExternalSource]),
   // 只给这些应用用；null 表示不限定。导出里没有的应用（已经删掉的）导入时去掉
   appIds: z.array(Id).max(100).nullable(),
   createdAt: Time,
@@ -141,11 +165,11 @@ export const MemoryRecord = z.object({
   subjectId: Id.nullable(),
   // 策展记忆的 URI；抽取的记忆没有
   uri: MemoryUri.nullable(),
-  content: z.string().min(1).max(20_000),
+  content: Text.min(1).max(20_000),
   priority: z.number().int().min(0).max(99),
-  disclosure: z.string().max(500).nullable(),
+  disclosure: Text.max(500).nullable(),
   // 规则收紧之前写下的单字关键词也照样带过去
-  glossary: z.array(z.string().min(1).max(64)).max(256),
+  glossary: z.array(Text.min(1).max(64)).max(256),
   validFrom: Time,
   validTo: Time.nullable(),
   expiresAt: Time.nullable(),

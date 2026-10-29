@@ -121,13 +121,13 @@ const BINDING_UNSAFE =
 const shellSafe = (v: string) => !BINDING_UNSAFE.test(v) && !v.startsWith('-')
 const SHELL_SAFE_MESSAGE =
   '不能含有引号、; | & < > ` $ \\ % 与换行等看不见的字符，也不能以 - 开头；条目名里有这些字符时，改用条目的 id'
-const Location = z
+export const CredentialLocation = z
   .string()
   .trim()
   .min(1, '条目位置不能为空')
   .max(500, '条目位置最多 500 个字')
   .refine(shellSafe, `条目位置${SHELL_SAFE_MESSAGE}`)
-const SourceField = z
+export const CredentialSourceField = z
   .string()
   .trim()
   .min(1, '来源字段不能为空')
@@ -144,9 +144,9 @@ const distinctNames = (fields: { name: string }[]) =>
 const ExternalSource = z.object({
   kind: z.literal('external'),
   providerId: z.uuid(),
-  location: Location,
+  location: CredentialLocation,
   fields: z
-    .array(z.object({ name: CredentialFieldName, sourceField: SourceField }))
+    .array(z.object({ name: CredentialFieldName, sourceField: CredentialSourceField }))
     .min(1, '至少要有一个字段')
     .max(MAX_CREDENTIAL_FIELDS, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`)
     .refine(distinctNames, '字段名不能重复'),

@@ -8,21 +8,26 @@ import {
   SPACE_EXPORT_MAX_BYTES,
   SpaceExportRequest,
   SpaceImportForm,
+  SpaceImportInspectForm,
+  SpaceImportPreview,
   SpaceImportResult,
 } from '@kioku/contracts'
 import { asc, eq } from 'drizzle-orm'
 import { bodyLimit } from 'hono/body-limit'
+import type { MiddlewareHandler } from 'hono'
 
 import { memberRole, requireInstanceAdmin } from '../auth/middleware'
 import { exportSpace } from '../backup/spaceExport'
-import { importSpace } from '../backup/spaceImport'
+import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
 import { accounts, spaceMembers, spaces } from '../db/schema'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
-import type { Deps } from '../http/env'
+import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
 const params = z.object({ spaceId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
+// 口令派生同时只跑一个、排队有上限、每个账号同时最多一个：满了就是这个
+const busy = jsonResponse('导出导入正忙，稍后再试', ErrorResponse)
 
 const read = createRoute({
   method: 'get',
@@ -95,35 +100,60 @@ const exportRoute = createRoute({
     },
     400: jsonResponse('导出不了（例如超过导入的大小上限）', ErrorResponse),
     403: forbidden,
+    409: jsonResponse('有导出了也导入不了、或者解不开的内容（点名是哪一条）', ErrorResponse),
+    429: busy,
   },
 })
 
-// 导入要先确认是实例管理员、再看大小，最后才读表单：别人上传的大文件不读进内存。
+// 上传导出文件的两个接口共用：先确认是实例管理员、再看大小，最后才读表单，别人上传的大文件不读进内存。
 // 上限按文件算，表单里的口令、名字与分隔行另外留一点余量
+function uploadMiddleware(deps: Deps): MiddlewareHandler<AppEnv>[] {
+  return [
+    requireInstanceAdmin(deps, '只有实例管理员能导入空间'),
+    bodyLimit({
+      maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
+      onError: (c) =>
+        c.json({ error: `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
+    }),
+  ]
+}
+const uploadErrors = {
+  400: jsonResponse('导入不了（口令不对、文件被改过、内容对不上、没配主密钥等）', ErrorResponse),
+  403: forbidden,
+  413: jsonResponse('文件太大', ErrorResponse),
+  429: busy,
+}
+
+function inspectRoute(deps: Deps) {
+  return createRoute({
+    method: 'post',
+    path: '/spaces/import/inspect',
+    tags: ['console'],
+    summary:
+      '导入之前先检查导出文件（只有实例管理员）：是谁导出的、有多少，导入后哪些归你；导入会遇到的问题这一步就报出来，不写库',
+    middleware: uploadMiddleware(deps),
+    request: {
+      body: {
+        required: true,
+        content: { 'multipart/form-data': { schema: SpaceImportInspectForm } },
+      },
+    },
+    responses: { 200: jsonResponse('文件的内容', SpaceImportPreview), ...uploadErrors },
+  })
+}
+
 function importRoute(deps: Deps) {
   return createRoute({
     method: 'post',
     path: '/spaces/import',
     tags: ['console'],
     summary:
-      '把导出文件导入成一个新空间（只有实例管理员），导入人是新空间的 owner；Key 不在文件里，要重新签发',
-    middleware: [
-      requireInstanceAdmin(deps, '只有实例管理员能导入空间'),
-      bodyLimit({
-        maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
-        onError: (c) =>
-          c.json({ error: `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限` }, 413),
-      }),
-    ] as const,
+      '把导出文件导入成一个新空间（只有实例管理员），导入人是新空间的 owner，导出人的画像层、私人层与凭据都归导入人；Key 不在文件里，要重新签发',
+    middleware: uploadMiddleware(deps),
     request: {
       body: { required: true, content: { 'multipart/form-data': { schema: SpaceImportForm } } },
     },
-    responses: {
-      201: jsonResponse('已导入', SpaceImportResult),
-      400: jsonResponse('导入不了（口令不对、文件被改过、没配主密钥等）', ErrorResponse),
-      403: forbidden,
-      413: jsonResponse('文件太大', ErrorResponse),
-    },
+    responses: { 201: jsonResponse('已导入', SpaceImportResult), ...uploadErrors },
   })
 }
 
@@ -150,11 +180,20 @@ export function spaceRoutes(deps: Deps) {
         accountId,
         passphrase: c.req.valid('json').passphrase,
       })
-      return c.body(new Uint8Array(exported.file), 200, {
+      return c.body(exported.file, 200, {
         'content-type': 'application/octet-stream',
         'content-disposition': attachment(exported.spaceName, exported.createdAt),
         'cache-control': 'no-store',
       })
+    })
+    .openapi(inspectRoute(deps), async (c) => {
+      const form = c.req.valid('form')
+      const preview = await inspectSpaceImport(deps.masterKey, {
+        accountId: c.get('console').accountId,
+        file: Buffer.from(await form.file.arrayBuffer()),
+        passphrase: form.passphrase,
+      })
+      return c.json(preview, 200)
     })
     .openapi(importRoute(deps), async (c) => {
       const form = c.req.valid('form')
