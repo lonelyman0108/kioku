@@ -4,6 +4,7 @@ CREATE TABLE "dream_cursors" (
 	"owner_account_id" uuid,
 	"at" timestamp with time zone NOT NULL,
 	"last_id" uuid NOT NULL,
+	"seen" jsonb DEFAULT '{}'::jsonb NOT NULL,
 	"updated_at" timestamp with time zone DEFAULT now() NOT NULL,
 	CONSTRAINT "dream_cursors_space_id_scope_pk" PRIMARY KEY("space_id","scope")
 );

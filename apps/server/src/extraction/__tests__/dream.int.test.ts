@@ -328,6 +328,11 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     await fact(xm, '在学日语', scope)
     await fact(xh, '在学法语', scope)
     await fact(xm, '是群主', scope, 'owner')
+    // 同一个对象、敏感级不同的两条事实：合并到 public 的那条会把 internal 的内容给更多人看
+    const inner = await fact(xh, '每周二去上法语课', scope)
+    await inSpace((tx) =>
+      tx.update(memories).set({ sensitivity: 'internal' }).where(eq(memories.id, inner.id)),
+    )
     await summary('聊了学外语', scope)
     const { model } = fakeChatModel((messages) => {
       const h = (content: string) => handleOf(messages, content)!
@@ -349,6 +354,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
           memories: [h('在学日语'), h('在学法语')],
           content: '在学外语',
           reason: '不是同一个对象',
+        },
+        {
+          kind: 'merge',
+          memories: [h('在学法语'), h('每周二去上法语课')],
+          content: '在学法语，每周二上课',
+          reason: '敏感级不同的事实',
         },
         { kind: 'review', memories: [h('是群主')], verdict: 'delete', reason: '已经确认过的' },
         { kind: 'stale', memories: [h('聊了学外语')], reason: '会话摘要不收过时' },
@@ -380,7 +391,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     )
     expect((await runs()).map((r) => [r.suggested, r.dropped])).toEqual([
       [1, 2],
-      [1, 7],
+      [1, 8],
     ])
   })
 
@@ -738,6 +749,75 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       { error: '模型的输出里没有约定格式的 JSON 对象', promptTokens: 120 },
     ])
     expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+  })
+
+  it('游标：时间戳早、提交晚的写入照样看得到；整理过、没改过的不再给模型看', async () => {
+    // 一小时前写下的：比读取时刻往前五分钟还早，游标可以越过它
+    await remember({ uri: 'core://old', content: '早就写下的', layer: 'base' })
+    await inSpace((tx) =>
+      tx
+        .update(memories)
+        .set({ updatedAt: sql`now() - interval '1 hour'` })
+        .where(eq(memories.path, 'old')),
+    )
+    const a = await remember({ uri: 'core://a', content: '刚写下的', layer: 'base' })
+    const { model, calls } = fakeChatModel(reply([]))
+    await dream(model)
+    expect(calls).toHaveLength(1)
+    // 位置停在读取时刻往前五分钟：越过了一小时前的那条，没越过刚写下的那条，它记在 seen 里
+    const [cursor] = await inSpace((tx) => tx.select().from(dreamCursors))
+    expect(Object.keys(cursor!.seen)).toEqual([a.id])
+
+    // 晚提交的写入：更新时间比刚整理过的那条还早一秒
+    const [row] = await inSpace((tx) => tx.select().from(memories).where(eq(memories.id, a.id)))
+    await inSpace((tx) =>
+      tx.insert(memories).values({
+        spaceId: ws.spaceId,
+        form: 'curated',
+        layer: 'base',
+        sensitivity: 'public',
+        provenance: 'owner',
+        domain: 'core',
+        path: 'late',
+        content: '晚提交的',
+        updatedAt: new Date(row!.updatedAt.getTime() - 1_000),
+      }),
+    )
+    await dream(model)
+    expect(calls).toHaveLength(2)
+    expect(
+      dreamLines(calls[1]!)
+        .filter((l) => l.new)
+        .map((l) => l.content),
+    ).toEqual(['晚提交的'])
+    expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+  })
+
+  it('整理中途出了没料到的错也记一条运行记录、写明原因，当天就算整理过', async () => {
+    await saveExtractionConfig(database.db, masterKey, {
+      baseUrl: 'https://llm.example.com/v1',
+      model: 'm',
+      apiKey: 'test-api-key',
+    })
+    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+    const { model, calls } = fakeChatModel(reply([]))
+    // 没配主密钥：抽取模型的 Key 解不开，读设置时就出错
+    const outcome = await dreamSpace(database.db, null, {
+      spaceId: ws.spaceId,
+      runId: randomUUID(),
+      trigger: 'scheduled',
+      modelFor: () => model,
+    })
+    expect(outcome).toEqual({ outcome: 'failed', reason: null })
+    expect(calls).toEqual([])
+    expect(await runs()).toMatchObject([
+      {
+        trigger: 'scheduled',
+        scope: null,
+        error: '整理出错：抽取模型的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+      },
+    ])
+    expect(await dreamsDue(database.db)).toEqual([])
   })
 
   it('每天一次：今天（UTC）还没做过定时整理的空间才到期；手动整理不算', async () => {

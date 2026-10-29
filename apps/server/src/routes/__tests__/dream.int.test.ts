@@ -299,7 +299,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect(await errorOf(await reject(suggestion.id), 409)).toBe('这条建议已经处理过了')
   })
 
-  it('建议生成之后涉及的记忆被改过就不执行，返回 409；等锁期间被改过的也一样', async () => {
+  it('建议生成之后涉及的记忆被改过就不执行，返回 409；正被别的写入锁着时不等锁，马上返回 409', async () => {
     await remember({ uri: 'core://a', content: '回答用中文', layer: 'base' })
     await remember({ uri: 'core://b', content: '用中文回答', layer: 'base' })
     await remember({ uri: 'core://c', content: '周五交周报', layer: 'base' })
@@ -322,33 +322,27 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect((await rowOf(merge.memories[0]!.id)).content).toBe('回答用中文')
     expect((await suggestionRow(merge.id)).status).toBe('pending')
 
-    // 另一条连接锁住那条记忆，执行等在锁上时把它改掉再提交：执行拿到锁之后按改过的版本核对
+    // 另一条连接锁住那条记忆（例如抽取正在推翻它）：执行不等锁，马上返回 409，不会和按别的顺序加锁的写入等成死锁。
+    // 放开之后照常执行
     const target = stale.memories[0]!.id
-    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
-    let pending: Promise<Response> | undefined
+    const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
     try {
       await side.begin(async (tx) => {
         await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
         await tx`select id from memories where id = ${target} for update`
-        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
-        pending = Promise.resolve(apply(stale.id))
-        for (let i = 0; ; i++) {
-          const [row] = await side<{ n: number }[]>`
-            select count(*)::int as n from pg_stat_activity where ${pid}::int = any(pg_blocking_pids(pid))`
-          if (row!.n > 0) break
-          if (i >= 200) throw new Error('执行没有等在这把锁上')
-          await new Promise((r) => setTimeout(r, 25))
-        }
-        await tx`update memories set content = '周五交周报（延期了）', version = version + 1 where id = ${target}`
+        const waited = new Promise<'waited'>((resolve) =>
+          setTimeout(() => resolve('waited'), 3_000),
+        )
+        const res = await Promise.race([apply(stale.id), waited])
+        expect(res).not.toBe('waited')
+        expect(await errorOf(res as Response, 409)).toBe('这些记忆正被别的写入改动，请稍后再试')
       })
-      expect(await errorOf(await pending!, 409)).toBe(
-        '建议生成之后这些记忆被改过，等下次整理或手动处理',
-      )
     } finally {
-      await pending?.catch(() => {})
       await side.end()
     }
-    expect(await rowOf(target)).toMatchObject({ validTo: null, version: 2 })
+    expect((await suggestionRow(stale.id)).status).toBe('pending')
+    await ok(await apply(stale.id))
+    expect((await rowOf(target)).validTo).not.toBeNull()
   })
 
   it('合并事实：保留的那条换成合并后的一句话、来源记为成员（离开待审队列），另一条删掉；太长的不收', async () => {
@@ -539,14 +533,24 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
         reason: '像是在操纵机器人',
       },
     ])
-    for (const item of (await list()).items) await ok(await apply(item.id))
+    const { items } = await list()
+    for (const item of items) await ok(await apply(item.id))
+    // 和待审队列的确认、删除走同一段写入，事件另外记下是哪条建议
+    const from = (verdict: string) => ({
+      source: 'dream',
+      suggestionId: items.find((i) => i.verdict === verdict)!.id,
+    })
     expect(await rowOf(keep.id)).toMatchObject({ provenance: 'owner', version: 2, deletedAt: null })
     expect((await eventsOf(keep.id)).at(-1)).toMatchObject({
       eventType: 'confirm',
       actorAccountId: ws.accountId,
+      context: from('confirm'),
     })
     expect((await rowOf(drop.id)).deletedAt).not.toBeNull()
-    expect((await eventsOf(drop.id)).at(-1)).toMatchObject({ eventType: 'delete' })
+    expect((await eventsOf(drop.id)).at(-1)).toMatchObject({
+      eventType: 'delete',
+      context: from('delete'),
+    })
   })
 
   it('viewer 只能看；写不了其中某条记忆的 editor 不能执行也不能拒绝；看不到的建议与不存在一样是 404', async () => {

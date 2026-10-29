@@ -53,35 +53,13 @@ export async function scopeNames(
 // （owner:<成员>、private:<成员>），关于它们的建议只有本人看得到；对象层与情节层按来源作用域分
 // （talk:<来源作用域>，同一个群、同一个人的私聊里记下的），合并不会把私聊里的事带进群里
 
-// 一条记忆所在的范围，SQL 与 JS 两个版本的规则相同
+// 一条记忆所在的范围；dreamScopeCondition 是反过来按范围取记忆的条件，两边要对得上
 export const DREAM_SCOPE_KEY = sql<string>`(case
   when ${memories.layer} = 'base' then 'base'
   when ${memories.layer} = 'persona' then 'persona:' || ${memories.personaId}::text
   when ${memories.layer} = 'app' then 'app:' || ${memories.appId}::text
   when ${memories.layer} in ('owner', 'private') then ${memories.layer}::text || ':' || ${memories.ownerAccountId}::text
   else 'talk:' || ${memories.originScope} end)`
-
-export function dreamScopeKey(row: {
-  layer: string
-  personaId: string | null
-  appId: string | null
-  ownerAccountId: string | null
-  originScope: string
-}): string {
-  switch (row.layer) {
-    case 'base':
-      return 'base'
-    case 'persona':
-      return `persona:${row.personaId}`
-    case 'app':
-      return `app:${row.appId}`
-    case 'owner':
-    case 'private':
-      return `${row.layer}:${row.ownerAccountId}`
-    default:
-      return `talk:${row.originScope}`
-  }
-}
 
 export type DreamScopeKind = DreamScope['kind']
 

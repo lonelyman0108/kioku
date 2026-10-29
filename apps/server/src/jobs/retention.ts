@@ -15,6 +15,7 @@ import {
   isNotNull,
   isNull,
   lt,
+  not,
   or,
   sql,
   type SQL,
@@ -37,6 +38,7 @@ import {
   spaces,
 } from '../db/schema'
 import { monthStart } from '../extraction/budget'
+import { suggestionCurrent } from '../memory/service'
 
 // 保留期：删掉的、被推翻的、过期的内容与它们的历史，过了保留天数由每天一次的清理硬删除，删了就找不回来。
 // 天数与暂停存在实例设置的一项里；最近一次清理的结果单独存一项，清理任务记结果不会和管理员保存设置互相覆盖
@@ -240,14 +242,7 @@ export function retentionRules(now: Date, days: number) {
     // 删掉、过期或者不在了。还作数的留着：拒绝过的指纹靠它们挡住同样的建议，没处理的还在待审里等着
     dreamSuggestions: and(
       lt(sql`coalesce(${dreamSuggestions.decidedAt}, ${dreamSuggestions.createdAt})`, cutoff),
-      sql`exists (
-        select 1 from unnest(${dreamSuggestions.memoryIds}, ${dreamSuggestions.versions}) as item(id, version)
-        where not exists (
-          select 1 from ${memories}
-          where ${memories.id} = item.id and ${memories.version} = item.version
-            and ${memories.deletedAt} is null
-            and (${memories.validTo} is null or ${memories.validTo} > ${at(now)})
-            and (${memories.expiresAt} is null or ${memories.expiresAt} > ${at(now)})))`,
+      not(suggestionCurrent(dreamSuggestions.memoryIds, dreamSuggestions.versions, { at: now })),
     )!,
     credentialEvents: lt(credentialEvents.createdAt, cutoff),
     deletedCredentials: lt(credentials.deletedAt, cutoff),

@@ -9,7 +9,7 @@ import type {
 } from '@kioku/contracts'
 import { and, count, desc, eq, inArray, sql } from 'drizzle-orm'
 
-import { canModify } from '../access/access'
+import { canModify, canRead, type Access } from '../access/access'
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
@@ -25,13 +25,16 @@ import { oneLine } from '../recall/recall'
 import { readableConditions } from './filter'
 import { dreamScopeNames, parseDreamScope } from './scopes'
 import {
+  isCurrentVersion,
   MemoryError,
-  STILL_VALID,
+  suggestionCurrent,
   type LockedSuggestion,
   type MemoryService,
   type SuggestionAction,
 } from './service'
 import { formatUri } from './uri'
+
+type MemoryRow = typeof memories.$inferSelect
 
 // 待审里的「建议」：Dream 提出、还没处理的建议。查看者看得到的（涉及的每条记忆按管理读取都读得到），
 // 并且涉及的记忆都还是生成建议时的那一版、没删除、现在有效：之后改过的建议作废，不再列出，
@@ -51,15 +54,11 @@ export async function listSuggestions(
   const after = decodeTimeCursor(query.cursor, UUID)
   if (after === 'invalid') throw new MemoryError(400, INVALID_CURSOR)
   const access = service.access
-  const manageable = readableConditions(access, { personaIds: [], management: true })
   const open = and(
     eq(dreamSuggestions.status, 'pending'),
-    sql`not exists (
-      select 1 from unnest(${dreamSuggestions.memoryIds}, ${dreamSuggestions.versions}) as item(id, version)
-      where not exists (
-        select 1 from ${memories}
-        where ${memories.id} = item.id and ${memories.version} = item.version
-          and ${memories.deletedAt} is null and ${STILL_VALID} and ${manageable}))`,
+    suggestionCurrent(dreamSuggestions.memoryIds, dreamSuggestions.versions, {
+      extra: readableConditions(access, { personaIds: [], management: true }),
+    }),
   )
   return withSpace(db, spaceId, async (tx) => {
     const rows = await tx
@@ -90,16 +89,18 @@ export async function listSuggestions(
           .where(inArray(memories.id, ids))
       : []
     const byId = new Map(found.map((f) => [f.row.id, f]))
+    const memoryRows = new Map(found.map((f) => [f.row.id, f.row]))
     const named = await dreamScopeNames(
       tx,
       page.map((r) => r.suggestion.scope),
     )
+    const now = new Date()
     const last = page.at(-1)
     return {
       items: page.flatMap(({ suggestion: s }) => {
-        const involved = s.memoryIds.flatMap((id) => byId.get(id) ?? [])
-        // 两次查询之间记忆被清掉了（保留期的清理）：这条建议已经作废，这一页不列
-        if (involved.length < s.memoryIds.length) return []
+        // 两次查询之间涉及的记忆被改过（例如移进了别人的私人层、改了正文）或清掉了：这条建议作废，不列
+        if (!listable(s, memoryRows, access, now)) return []
+        const involved = s.memoryIds.map((id) => byId.get(id)!)
         return {
           id: s.id,
           kind: s.kind as DreamSuggestionKind,
@@ -131,6 +132,23 @@ export async function listSuggestions(
       nextCursor:
         rows.length > PAGE_SIZE && last ? encodeTimeCursor(last.micros, last.suggestion.id) : null,
     }
+  })
+}
+
+// 一条建议现在还能不能列给查看者：涉及的每条记忆都还作数（isCurrentVersion，和列表的 SQL 条件、执行时的核对是同一条规则），
+// 查看者按管理读取也都读得到（canRead，readableConditions 的 JS 版本）。行是在列表的第二次查询里取的
+export function listable(
+  suggestion: Pick<SuggestionRow, 'memoryIds' | 'versions'>,
+  rows: ReadonlyMap<string, MemoryRow>,
+  access: Access,
+  now: Date,
+): boolean {
+  return suggestion.memoryIds.every((id, i) => {
+    const row = rows.get(id)
+    return (
+      isCurrentVersion(row, suggestion.versions[i]!, now) &&
+      canRead(access, row!, { personaIds: [], management: true })
+    )
   })
 }
 

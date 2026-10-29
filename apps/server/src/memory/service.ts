@@ -61,6 +61,7 @@ import {
   type SQL,
   type SQLWrapper,
 } from 'drizzle-orm'
+import type { PgUpdateSetSource } from 'drizzle-orm/pg-core'
 
 import {
   canRead,
@@ -248,6 +249,7 @@ export interface LockedSuggestion {
 
 const SUGGESTION_MISSING = '建议不存在'
 const SUGGESTION_STALE = '建议生成之后这些记忆被改过，等下次整理或手动处理'
+const SUGGESTION_BUSY = '这些记忆正被别的写入改动，请稍后再试'
 const SUGGESTION_URI_CONFLICT = '这个 URI 已被另一条记忆占用，换一个 URI 再执行'
 const SUGGESTION_CONSOLE_ONLY = 'Dream 的建议只能在管理界面里处理'
 
@@ -474,14 +476,15 @@ export class MemoryService {
   // 删掉读到的这一版：条件里带上版本，检查之后、删除之前别人提交的修改不会被一起删掉，
   // 事件里的「删除前」快照也就是真正被删掉的那一版。只删这一刻还有效的，删除时间就写这一刻：
   // 用户删掉的删除时间总早于过期时间，和过期之后被让出的（不早于过期时间，见 isReleased）分得开。
-  // 读到之后刚好到期的，和读不到一样是 404（notFound 是给调用方的说法）
+  // 读到之后刚好到期的抛 ended（按调用方的约定：按 URI 删除时和读不到一样是 404）。
+  // now 由调用方给时，判断有效与写下删除时间用的是调用方先前核对时的同一刻
   private async softDelete(
     tx: Tx,
     before: MemoryRow,
-    notFound: string,
+    ended: MemoryError,
     eventContext?: Record<string, unknown>,
+    now = new Date(),
   ): Promise<void> {
-    const now = new Date()
     const [row] = await tx
       .update(memories)
       .set({ deletedAt: now, updatedAt: now })
@@ -495,7 +498,7 @@ export class MemoryService {
       )
       .returning()
     if (!row) {
-      if (!isValidAt(before, now)) throw new MemoryError(404, notFound)
+      if (!isValidAt(before, now)) throw ended
       throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
     }
     const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
@@ -1143,7 +1146,7 @@ export class MemoryService {
       const before = await this.findReadable(tx, parsed, personaIds)
       checkExpected(before, expected)
       this.assertModifiable(before, `没有权限删除 ${before.layer} 层的记忆`)
-      await this.softDelete(tx, before, `记忆不存在：${uri}`)
+      await this.softDelete(tx, before, new MemoryError(404, `记忆不存在：${uri}`))
       return before.id
     })
     this.changed([id])
@@ -1193,7 +1196,7 @@ export class MemoryService {
       )
       if (row.version !== version) throw new MemoryError(409, '这条事实刚被改过，请刷新后再删')
       this.assertModifiable(row, `没有权限删除 ${row.layer} 层的记忆`)
-      await this.softDelete(tx, row, '事实不存在')
+      await this.softDelete(tx, row, new MemoryError(404, '事实不存在'))
     })
     this.changed([factId])
   }
@@ -1244,44 +1247,60 @@ export class MemoryService {
       const targets = rows.filter((r) => seen.get(r.id) === r.version)
       if (!targets.length) return []
       for (const row of targets) this.assertModifiable(row, `没有权限处理 ${row.layer} 层的记忆`)
-      const now = new Date()
-      const updated = await tx
-        .update(memories)
-        .set(
-          input.action === 'confirm'
-            ? { provenance: 'owner', version: sql`${memories.version} + 1`, updatedAt: now }
-            : { deletedAt: now, updatedAt: now },
-        )
-        .where(
-          and(
-            inArray(
-              memories.id,
-              targets.map((r) => r.id),
-            ),
-            validAt(now),
-          ),
-        )
-        .returning()
-      const after = new Map(updated.map((r) => [r.id, r]))
-      const handled = targets.filter((row) => after.has(row.id))
-      const ids = handled.map((r) => r.id)
-      const glossaries = await this.glossaryOf(tx, ids)
-      await this.events(
-        tx,
-        handled.map((row) => {
-          const glossary = glossaries.get(row.id) ?? []
-          return {
-            memoryId: row.id,
-            eventType: input.action,
-            before: snapshot(row, glossary),
-            after: snapshot(after.get(row.id)!, glossary),
-          }
-        }),
-      )
-      return ids
+      const handled = await this.settleReview(tx, targets, input.action, new Date())
+      return handled.map((r) => r.id)
     })
     if (input.action === 'delete') this.changed(done)
     return { done: done.length, skipped: seen.size - done.length }
+  }
+
+  // 待审的处理，待审队列与 Dream 的审核建议共用：确认（来源改成主人，版本加一）或删除（删除时间写 now）。
+  // 调用方已经锁住这几行、核对过版本与权限；只改 now 这一刻还有效的（读到之后刚好到期的不改，和 softDelete 一样），
+  // 各记一条事件，返回改到的那几行
+  private async settleReview(
+    tx: Tx,
+    rows: MemoryRow[],
+    action: 'confirm' | 'delete',
+    now: Date,
+    eventContext?: Record<string, unknown>,
+  ): Promise<MemoryRow[]> {
+    const updated = await tx
+      .update(memories)
+      .set(
+        action === 'confirm'
+          ? { provenance: 'owner', version: sql`${memories.version} + 1`, updatedAt: now }
+          : { deletedAt: now, updatedAt: now },
+      )
+      .where(
+        and(
+          inArray(
+            memories.id,
+            rows.map((r) => r.id),
+          ),
+          validAt(now),
+        ),
+      )
+      .returning()
+    const after = new Map(updated.map((r) => [r.id, r]))
+    const handled = rows.filter((row) => after.has(row.id))
+    const glossaries = await this.glossaryOf(
+      tx,
+      handled.map((r) => r.id),
+    )
+    await this.events(
+      tx,
+      handled.map((row) => {
+        const glossary = glossaries.get(row.id) ?? []
+        return {
+          memoryId: row.id,
+          eventType: action,
+          before: snapshot(row, glossary),
+          after: snapshot(after.get(row.id)!, glossary),
+          ...(eventContext ? { context: eventContext } : {}),
+        }
+      }),
+    )
+    return handled
   }
 
   // ---- Dream 的建议（管理界面）----
@@ -1305,13 +1324,16 @@ export class MemoryService {
     const created = await this.run(async (tx) => {
       const suggestion = await this.openSuggestion(tx, lock)
       const action = suggestion.action()
-      const rows = await this.lockSuggested(tx, suggestion)
+      // 核对与之后的写入用同一刻：核对时还有效的，删除与确认时也按有效算，不会在两步之间到期
+      const now = new Date()
+      const rows = await this.lockSuggested(tx, suggestion, now)
       for (const row of rows) this.assertModifiable(row, `没有权限改 ${row.layer} 层的记忆`)
+      const stale = new MemoryError(409, SUGGESTION_STALE)
       let view: MemoryView | null = null
       switch (action.kind) {
         case 'merge': {
           const keep = rows.find((r) => r.id === action.keepId)
-          if (!keep) throw new MemoryError(409, SUGGESTION_STALE)
+          if (!keep) throw stale
           const others = rows.filter((r) => r !== keep)
           const keepContext = { ...context, mergedFrom: others.map((r) => r.id) }
           if (keep.form === 'curated') {
@@ -1322,10 +1344,26 @@ export class MemoryService {
               { eventContext: keepContext, released, reattribute: true },
             )
           } else {
-            await this.rewriteFact(tx, keep, action.content, keepContext)
+            // 事实在对象层，占位符写不进去（最终状态检查照常走）
+            await this.checkCredentialRefs(
+              tx,
+              {
+                layer: keep.layer,
+                sensitivity: keep.sensitivity,
+                ownerAccountId: keep.ownerAccountId,
+                content: action.content,
+              },
+              null,
+            )
+            await this.rewriteRow(
+              tx,
+              keep,
+              { content: action.content, provenance: 'owner' },
+              keepContext,
+            )
           }
           for (const other of others) {
-            await this.softDelete(tx, other, SUGGESTION_STALE, { ...context, mergedInto: keep.id })
+            await this.softDelete(tx, other, stale, { ...context, mergedInto: keep.id }, now)
           }
           changed.push(...rows.map((r) => r.id))
           break
@@ -1348,20 +1386,18 @@ export class MemoryService {
           break
         }
         case 'stale':
-          for (const row of rows) await this.endNow(tx, row, context)
+          // 有效到设为现在：策展记忆之后在「已过期」里能重新生效，抽取的事实等于被推翻（对象页上能重新生效）。
+          // 服务端写入，不受接口「至少晚一分钟」的限制
+          for (const row of rows) await this.rewriteRow(tx, row, { validTo: sql`now()` }, context)
           changed.push(...rows.map((r) => r.id))
           break
-        case 'review':
-          for (const row of rows) {
-            if (row.provenance !== 'untrusted') throw new MemoryError(409, SUGGESTION_STALE)
-            if (action.verdict === 'delete') {
-              await this.softDelete(tx, row, SUGGESTION_STALE, context)
-            } else {
-              await this.confirmRow(tx, row, context)
-            }
-          }
+        case 'review': {
+          if (rows.some((r) => r.provenance !== 'untrusted')) throw stale
+          const handled = await this.settleReview(tx, rows, action.verdict, now, context)
+          if (handled.length < rows.length) throw stale
           changed.push(...rows.map((r) => r.id))
           break
+        }
       }
       await done(tx)
       return view
@@ -1409,75 +1445,45 @@ export class MemoryService {
     return suggestion
   }
 
-  // 按 id 的顺序锁住建议涉及的记忆，核对还是生成建议时的那一版、没删除、现在有效；按建议里的顺序返回
-  private async lockSuggested(tx: Tx, suggestion: LockedSuggestion): Promise<MemoryRow[]> {
+  // 锁住建议涉及的记忆，但不等锁（和 review 一样）：正被别的写入锁着的（例如抽取正在推翻其中的事实）直接返回 409，
+  // 不会和按别的顺序加锁的写入互相等成死锁。锁到之后核对每条还作数（isCurrentVersion，和建议列表、保留期的清理是同一条规则）、
+  // 查看者也还读得到；按建议里的顺序返回。now 是核对与之后的写入共用的那一刻
+  private async lockSuggested(
+    tx: Tx,
+    suggestion: LockedSuggestion,
+    now: Date,
+  ): Promise<MemoryRow[]> {
+    const ids = [...new Set(suggestion.memories.map((m) => m.id))]
     const rows = await tx
       .select()
       .from(memories)
-      .where(
-        and(
-          inArray(
-            memories.id,
-            suggestion.memories.map((m) => m.id),
-          ),
-          this.manageable(),
-        ),
-      )
+      .where(inArray(memories.id, ids))
       .orderBy(asc(memories.id))
-      .for('update')
-    const now = new Date()
+      .for('update', { skipLocked: true })
+    if (rows.length < ids.length) throw new MemoryError(409, SUGGESTION_BUSY)
     const byId = new Map(rows.map((r) => [r.id, r]))
     return suggestion.memories.map(({ id, version }) => {
-      const row = byId.get(id)
-      if (!row || row.version !== version || row.deletedAt || !isValidAt(row, now)) {
+      const row = byId.get(id)!
+      if (
+        !isCurrentVersion(row, version, now) ||
+        !canRead(this.ctx.access, row, { personaIds: [], management: true })
+      ) {
         throw new MemoryError(409, SUGGESTION_STALE)
       }
       return row
     })
   }
 
-  // 换掉一条事实的正文（合并时保留的那条），来源记为这次写入的来源。事实在对象层，占位符写不进去
-  private async rewriteFact(
+  // 改一条已经锁住、核对过的记录：写上 fields，版本加一，记一条 update 事件（Dream 的过时、事实的合并）
+  private async rewriteRow(
     tx: Tx,
     row: MemoryRow,
-    content: string,
-    eventContext: Record<string, unknown>,
-  ): Promise<void> {
-    await this.checkCredentialRefs(
-      tx,
-      {
-        layer: row.layer,
-        sensitivity: row.sensitivity,
-        ownerAccountId: row.ownerAccountId,
-        content,
-      },
-      null,
-    )
-    const [after] = await tx
-      .update(memories)
-      .set({
-        content,
-        provenance: this.ctx.access.writeProvenance,
-        version: sql`${memories.version} + 1`,
-        updatedAt: new Date(),
-      })
-      .where(
-        and(eq(memories.id, row.id), eq(memories.version, row.version), isNull(memories.deletedAt)),
-      )
-      .returning()
-    if (!after) throw new MemoryError(409, SUGGESTION_STALE)
-    await this.event(tx, row.id, 'update', snapshot(row, []), snapshot(after, []), eventContext)
-  }
-
-  // 有效到设为现在：策展记忆之后在「已过期」里能重新生效，抽取的事实等于被推翻（对象页上能重新生效）
-  private async endNow(
-    tx: Tx,
-    row: MemoryRow,
+    fields: PgUpdateSetSource<typeof memories>,
     eventContext: Record<string, unknown>,
   ): Promise<void> {
     const [after] = await tx
       .update(memories)
-      .set({ validTo: sql`now()`, version: sql`${memories.version} + 1`, updatedAt: new Date() })
+      .set({ ...fields, version: sql`${memories.version} + 1`, updatedAt: new Date() })
       .where(
         and(eq(memories.id, row.id), eq(memories.version, row.version), isNull(memories.deletedAt)),
       )
@@ -1488,41 +1494,6 @@ export class MemoryService {
       tx,
       row.id,
       'update',
-      snapshot(row, glossary),
-      snapshot(after, glossary),
-      eventContext,
-    )
-  }
-
-  // 确认一条不可信来源写下的记忆：来源改成这次写入的来源（管理界面里是成员本人），和待审队列的确认一样
-  private async confirmRow(
-    tx: Tx,
-    row: MemoryRow,
-    eventContext: Record<string, unknown>,
-  ): Promise<void> {
-    const now = new Date()
-    const [after] = await tx
-      .update(memories)
-      .set({
-        provenance: this.ctx.access.writeProvenance,
-        version: sql`${memories.version} + 1`,
-        updatedAt: now,
-      })
-      .where(
-        and(
-          eq(memories.id, row.id),
-          eq(memories.version, row.version),
-          isNull(memories.deletedAt),
-          validAt(now),
-        ),
-      )
-      .returning()
-    if (!after) throw new MemoryError(409, SUGGESTION_STALE)
-    const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-    await this.event(
-      tx,
-      row.id,
-      'confirm',
       snapshot(row, glossary),
       snapshot(after, glossary),
       eventContext,
@@ -2537,6 +2508,31 @@ function endedAt(at: Date): SQL {
 function isValidAt(row: Pick<MemoryRow, 'validTo' | 'expiresAt'>, at: Date): boolean {
   const ended = endOf(row)
   return ended === null || ended.getTime() > at.getTime()
+}
+
+// Dream 的建议还作不作数：涉及的每条记忆都还是生成建议时的那一版、没删除、在那一刻有效。规则只在这里写：
+// SQL 版本给建议列表与保留期的清理（ids 与 versions 是建议表上按下标对应的两列，extra 是对每条记忆另加的条件，
+// 例如管理读取；不给 at 时按数据库的现在），JS 版本给锁到行、取到行之后的核对
+export function suggestionCurrent(
+  ids: SQLWrapper,
+  versions: SQLWrapper,
+  options: { at?: Date; extra?: SQL } = {},
+): SQL {
+  const valid = options.at ? validAt(options.at) : STILL_VALID
+  return sql`not exists (
+    select 1 from unnest(${ids}, ${versions}) as item(id, version)
+    where not exists (
+      select 1 from ${memories}
+      where ${memories.id} = item.id and ${memories.version} = item.version
+        and ${memories.deletedAt} is null and ${valid}${options.extra ? sql` and ${options.extra}` : sql``}))`
+}
+
+export function isCurrentVersion(
+  row: Pick<MemoryRow, 'version' | 'deletedAt' | 'validTo' | 'expiresAt'> | undefined,
+  version: number,
+  at: Date,
+): boolean {
+  return row !== undefined && row.version === version && !row.deletedAt && isValidAt(row, at)
 }
 
 // 过期之后让出了 URI：claimUri 只软删除在那一刻已经过期的记录，删除时间就是那一刻，不早于过期时间；

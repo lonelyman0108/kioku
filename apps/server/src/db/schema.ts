@@ -837,7 +837,9 @@ export const dreamSuggestions = pgTable(
   ],
 )
 
-// Dream 每个范围整理到了哪里：下次只看在这之后新增或改动的记忆（按更新时间与 id 排）
+// Dream 每个范围整理到了哪里：下次只看排在这个位置（更新时间与 id）之后、又不在 seen 里的记忆。
+// 更新时间是写入提交之前取的，时间早、提交晚的写入会落在已经整理过的位置后面，所以位置最多推进到读取时刻往前五分钟；
+// 推进不到的那一段里已经整理过的记在 seen（id → [版本, 更新时间的微秒数]），下次不再给模型看，改过之后版本变了照样再看
 export const dreamCursors = pgTable(
   'dream_cursors',
   {
@@ -848,6 +850,7 @@ export const dreamCursors = pgTable(
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
     at: timestamp({ withTimezone: true }).notNull(),
     lastId: uuid().notNull(),
+    seen: jsonb().$type<Record<string, [number, string]>>().notNull().default({}),
     updatedAt: updatedAt(),
   },
   (t) => [primaryKey({ columns: [t.spaceId, t.scope] })],

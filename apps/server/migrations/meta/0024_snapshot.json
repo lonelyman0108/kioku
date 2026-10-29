@@ -1,5 +1,5 @@
 {
-  "id": "bcf00e8c-3f47-473e-9cc3-bb5247665f13",
+  "id": "7e122aa6-6942-44f2-939e-fd86cb3882cc",
   "prevId": "5f45930a-784f-406a-b1b7-4b4e4731fe9e",
   "version": "7",
   "dialect": "postgresql",
@@ -1088,6 +1088,13 @@
           "type": "uuid",
           "primaryKey": false,
           "notNull": true
+        },
+        "seen": {
+          "name": "seen",
+          "type": "jsonb",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "'{}'::jsonb"
         },
         "updated_at": {
           "name": "updated_at",

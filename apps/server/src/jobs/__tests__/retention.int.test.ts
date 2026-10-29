@@ -943,6 +943,31 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(await ok<RetentionView>(await put({ days: 13 }))).toMatchObject({ days: 13 })
   })
 
+  it('升级之前存下的清理结果（计数里还没有 Dream 的两类）照样读得出，同一天不再整个清理一遍', async () => {
+    await active()
+    const at = new Date('2030-06-01T03:17:00Z').toISOString()
+    const counts = {
+      ...Object.fromEntries(Object.entries(ZERO).filter(([key]) => !key.startsWith('dream'))),
+      deletedMemories: 2,
+    }
+    await database.db.insert(settings).values({
+      key: 'retention-status',
+      value: {
+        lastRun: { at, days: 30, paused: false, counts },
+        lastAttempt: { at, paused: false, complete: true, counts, tries: 1 },
+        lastError: null,
+      },
+    })
+    const full = { ...ZERO, deletedMemories: 2 }
+    expect((await view()).status).toEqual({
+      lastRun: { at, days: 30, paused: false, counts: full },
+      lastAttempt: { at, paused: false, complete: true, counts: full, tries: 1 },
+      lastError: null,
+    })
+    // 读不出的话会当作还没清理过：同一天又整个清理一遍
+    expect(await retentionJob(database.db, new Date('2030-06-01T04:17:00Z'))).toBeNull()
+  })
+
   it('暂停中试满了 3 次也不挡住提前开始之后当天的完整清理：每种（暂停中与否）各自计数', async () => {
     const restoredAt = new Date('2030-07-01T00:00:00Z')
     await database.db.transaction((tx) => markRestored(tx, restoredAt))

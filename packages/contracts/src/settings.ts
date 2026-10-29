@@ -146,9 +146,10 @@ export const RetentionCounts = z.object({
   // 事件留着、快照里的正文抹掉了的：已删账号的画像层与私人层快照，记忆已经不在的导入事件
   scrubbedSnapshots: z.number().int(),
   extractionRuns: z.number().int(),
-  dreamRuns: z.number().int(),
+  // 后来加的两类带默认值：升级之前存下的清理结果里没有它们，照样读得出
+  dreamRuns: z.number().int().default(0),
   // Dream 的建议：处理过的（执行或拒绝的）、没处理但已经作废的，涉及的记忆改过、删掉或过期之后清掉
-  dreamSuggestions: z.number().int(),
+  dreamSuggestions: z.number().int().default(0),
   credentialEvents: z.number().int(),
   deletedCredentials: z.number().int(),
   deletedProviders: z.number().int(),
