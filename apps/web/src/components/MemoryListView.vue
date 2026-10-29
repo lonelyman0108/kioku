@@ -7,8 +7,9 @@ import { useRoute, useRouter } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
+import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
-import { formatRelative, formatTime } from '../time'
+import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 
 const props = defineProps<{ spaceId: string; selectedUri: string | null }>()
 const emit = defineEmits<{ select: [uri: string] }>()
@@ -188,6 +189,16 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
             <span class="mt-0.5 flex items-center gap-2 text-xs text-muted">
               <span class="min-w-0 flex-1 truncate">
                 {{ item.disclosure?.trim() || '没写 disclosure' }}
+              </span>
+              <!-- 列表只列有效的；载入之后才到期的在这里显示已过期 -->
+              <span
+                v-if="item.validTo"
+                class="flex shrink-0 items-center gap-0.5"
+                :class="isExpired(item.validTo) ? 'text-error' : ''"
+                :title="`有效到 ${formatTime(item.validTo)}`"
+              >
+                <UIcon :name="icons.validity" class="size-3" />
+                {{ isExpired(item.validTo) ? '已过期' : formatShort(item.validTo) }}
               </span>
               <time :datetime="item.updatedAt" :title="formatTime(item.updatedAt)" class="shrink-0">
                 {{ formatRelative(item.updatedAt) }}

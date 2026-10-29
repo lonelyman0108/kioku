@@ -21,6 +21,7 @@ import {
   EmbeddingSettingsView,
   EmbeddingStatus,
   EmbeddingTestResult,
+  ExpiredMemoryList,
   ExtractionSettingsView,
   ExtractionUsage,
   ExtractionTestResult,
@@ -63,6 +64,7 @@ import {
   type MemoryListQuery,
   type MoveMemoryRequest,
   type PlainLayer,
+  type ReactivateRequest,
   type RestoreRequest,
   type ReviewQuery,
   type RetentionSettings,
@@ -199,6 +201,13 @@ export const api = {
       body: { memoryId },
       schema: MemoryView,
     }),
+  expiredMemories: (spaceId: string, cursor?: string) =>
+    request('GET', `/spaces/${spaceId}/memories/expired`, {
+      query: { cursor },
+      schema: ExpiredMemoryList,
+    }),
+  reactivateMemory: (spaceId: string, body: ReactivateRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/reactivate`, { body, schema: MemoryView }),
 
   credentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
@@ -260,6 +269,10 @@ export const api = {
   deleteFact: (spaceId: string, subjectId: string, factId: string, version: number) =>
     request('DELETE', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}`, {
       query: { version },
+    }),
+  reactivateFact: (spaceId: string, subjectId: string, factId: string, version: number) =>
+    request('POST', `/spaces/${spaceId}/subjects/${subjectId}/facts/${factId}/reactivate`, {
+      body: { version },
     }),
   reviewQueue: (spaceId: string, query: ReviewQuery) =>
     request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),

@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ExtractionRunInfo, SubjectFact, UpdateSubjectRequest } from '@kioku/contracts'
+import type {
+  ExtractionRunInfo,
+  SubjectFact,
+  SupersededFact,
+  UpdateSubjectRequest,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -96,6 +101,26 @@ async function removeFact() {
   } finally {
     removing.value = false
     deletingFact.value = null
+    void refreshSubjectCaches(sid)
+  }
+}
+
+// 让一条被推翻的事实重新生效，带上看到的版本：期间被改过服务端会返回冲突
+const reactivating = ref<string | null>(null)
+async function reactivateFact(fact: SupersededFact) {
+  if (reactivating.value) return
+  const sid = spaceId.value
+  reactivating.value = fact.id
+  try {
+    await api.reactivateFact(sid, subjectId.value, fact.id, fact.version)
+    toast.add({
+      title: fact.supersededBy ? '已重新生效，推翻它的那条也还有效' : '已重新生效',
+      color: 'success',
+    })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '重新生效失败', color: 'error' })
+  } finally {
+    reactivating.value = null
     void refreshSubjectCaches(sid)
   }
 }
@@ -357,6 +382,47 @@ function runCounts(run: ExtractionRunInfo): string {
                 :aria-label="`删除事实：${fact.content}`"
                 @click="deletingFact = fact"
               />
+            </li>
+          </ul>
+        </UCard>
+
+        <UCard v-if="data.supersededFacts.length">
+          <template #header>
+            <h2 class="text-sm font-medium">被推翻的事实（{{ data.supersededFacts.length }}）</h2>
+          </template>
+          <p class="mb-2 text-xs text-muted">
+            后来的说法推翻了这些事实，它们不再注入对话。重新生效之后和推翻它的那条同时有效，不要的那条可以删掉；过了保留期会被清理掉。
+          </p>
+          <ul class="divide-y divide-default">
+            <li v-for="fact in data.supersededFacts" :key="fact.id" class="flex gap-2 py-2">
+              <div class="min-w-0 flex-1 space-y-1">
+                <p class="text-sm whitespace-pre-wrap text-muted">{{ fact.content }}</p>
+                <p v-if="fact.supersededBy" class="text-xs text-muted">
+                  被「{{ fact.supersededBy }}」推翻
+                </p>
+                <p class="flex flex-wrap gap-2 text-xs text-muted">
+                  <span>{{ originScopeText(fact.scope) }}</span>
+                  <span>{{ provenanceLabels[fact.provenance] }}</span>
+                  <span>
+                    被推翻于
+                    <time :datetime="fact.supersededAt" :title="formatTime(fact.supersededAt)">
+                      {{ formatRelative(fact.supersededAt) }}
+                    </time>
+                  </span>
+                </p>
+              </div>
+              <UButton
+                v-if="canEdit"
+                :icon="icons.reactivate"
+                color="neutral"
+                variant="subtle"
+                size="sm"
+                class="shrink-0 self-start"
+                :loading="reactivating === fact.id"
+                @click="reactivateFact(fact)"
+              >
+                重新生效
+              </UButton>
             </li>
           </ul>
         </UCard>

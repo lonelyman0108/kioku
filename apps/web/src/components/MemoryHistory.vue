@@ -9,9 +9,18 @@ import { api } from '../api/endpoints'
 import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import { icons } from '../icons'
 import { actorLabel, eventLabel, layerLabels, sensitivityLabels } from '../labels'
-import { formatRelative, formatTime } from '../time'
+import { formatRelative, formatTime, isExpired } from '../time'
 
-const props = defineProps<{ spaceId: string; memoryId: string; canRestore: boolean }>()
+const props = defineProps<{
+  spaceId: string
+  memoryId: string
+  canRestore: boolean
+  // 过期了时能不能让它重新生效；重新生效由打开历史的地方去做（已过期列表）
+  canReactivate?: boolean
+  reactivating?: boolean
+}>()
+// 带上历史里看到的版本：在这里恢复过旧版本之后，列表里的版本就旧了
+const emit = defineEmits<{ reactivate: [version: number] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
 
@@ -22,6 +31,12 @@ const history = useQuery({
 // 最近的在上面
 const events = computed(() => [...(history.data.value?.events ?? [])].reverse())
 const current = computed(() => history.data.value?.memory)
+// 这条记忆现在过期了：已经让出 URI 的也算；删掉之后才到期的不算（它走撤销删除，见已删除）
+const expiredNow = computed(() => {
+  const m = current.value
+  return !!m && isExpired(m.validTo) && (!m.deletedAt || m.released)
+})
+const validToText = (validTo: string | null) => (validTo ? formatTime(validTo) : '一直有效')
 
 // 一次改动里变了的属性；正文另外按行对比
 function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): string[] {
@@ -45,6 +60,9 @@ function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): s
   const removed = before.glossary.filter((k) => !after.glossary.includes(k))
   if (added.length) list.push(`加关键词：${added.join('、')}`)
   if (removed.length) list.push(`去掉关键词：${removed.join('、')}`)
+  if (before.validTo !== after.validTo) {
+    list.push(`有效到：${validToText(before.validTo)} → ${validToText(after.validTo)}`)
+  }
   return list
 }
 
@@ -68,9 +86,13 @@ const openRows = computed<DiffRow[]>(() => {
   return collapseUnchanged(diffLines(event.before.content ?? '', after))
 })
 
-// 改动之后的那一版就是现在的样子
-const isCurrent = (event: HistoryEvent) =>
-  !!event.after && !event.left && event.after.version === current.value?.version
+// 改动之后的那一版就是现在的样子。删除、过期后让出 URI 不改版本号，同一个版本号可能有好几个事件，只标最近的那个
+const currentEventId = computed(
+  () =>
+    events.value.find((e) => !!e.after && !e.left && e.after.version === current.value?.version)
+      ?.id ?? null,
+)
+const isCurrent = (event: HistoryEvent) => event.id === currentEventId.value
 // 服务端只恢复和现在同一归属、敏感级不高于现在的版本：改过层、移到别的人格或应用、
 // 或者调低过敏感级之后，之前的版本不能直接恢复
 const namespaceOf = (uri: string) => /^(?:persona|app):\/\/[^/]+/.exec(uri)?.[0] ?? null
@@ -114,10 +136,14 @@ async function restore() {
     confirming.value = null
     toast.add({ title: '已恢复到这一版', color: 'success' })
     // 直接写进这条记忆的缓存，编辑器会跟上（并通知页面）。不靠事件：侧栏在请求期间被关掉时，
-    // 这个组件已经卸载，发出的事件没人收到
-    const key = ['memory', props.spaceId, restored.uri]
-    await queryClient.cancelQueries({ queryKey: key, exact: true })
-    queryClient.setQueryData(key, restored)
+    // 这个组件已经卸载，发出的事件没人收到。过期的记忆按 URI 读不到，不写进那个 URI 的缓存
+    if (!isExpired(restored.validTo)) {
+      const key = ['memory', props.spaceId, restored.uri]
+      await queryClient.cancelQueries({ queryKey: key, exact: true })
+      queryClient.setQueryData(key, restored)
+    }
+    // 版本变了，已过期列表里记着的版本也要跟上
+    void queryClient.invalidateQueries({ queryKey: ['memory-expired', props.spaceId] })
     await history.refetch()
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
@@ -142,9 +168,35 @@ async function restore() {
       <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
     </div>
     <template v-else>
+      <UAlert
+        v-if="expiredNow && current?.validTo"
+        color="warning"
+        variant="subtle"
+        :icon="icons.expired"
+        :title="`这条记忆已于 ${formatTime(current.validTo)} 过期，不再召回、不进 boot`"
+        :description="
+          current.released
+            ? '过期之后同一个 URI 上写了新的记忆，它让出了 URI；那条还在时，要先把它移走或删掉才能重新生效。'
+            : undefined
+        "
+        :actions="
+          canReactivate
+            ? [
+                {
+                  label: '重新生效',
+                  icon: icons.reactivate,
+                  color: 'neutral',
+                  variant: 'subtle',
+                  loading: reactivating,
+                  onClick: () => current && emit('reactivate', current.version),
+                },
+              ]
+            : []
+        "
+      />
       <p class="text-xs text-muted">
         恢复只改正文、disclosure、priority 与关键词，不改
-        URI、层、敏感级与有效期；层或归属和现在不同、敏感级比现在高的版本不能恢复。
+        URI、层、敏感级与有效期（过期的记忆在「已过期」里重新生效）；层或归属和现在不同、敏感级比现在高的版本不能恢复。
         <template v-if="history.data.value?.truncated">只列出了最近的 500 次改动。</template>
       </p>
       <ol class="space-y-3">

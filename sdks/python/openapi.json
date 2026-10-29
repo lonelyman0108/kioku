@@ -491,6 +491,11 @@
             },
             "maxItems": 32,
             "default": []
+          },
+          "validTo": {
+            "type": "string",
+            "format": "date-time",
+            "description": "有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；不填就一直有效"
           }
         },
         "required": [
@@ -563,6 +568,14 @@
               "maxLength": 64
             },
             "maxItems": 32
+          },
+          "validTo": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time",
+            "description": "有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；填 null 清掉，一直有效"
           },
           "allowPlaintext": {
             "type": "boolean"
@@ -1040,7 +1053,7 @@
             "bearer": []
           }
         ],
-        "summary": "新建策展记忆",
+        "summary": "新建策展记忆；带 validTo 时到期后不再召回、不进 boot",
         "requestBody": {
           "required": true,
           "content": {
@@ -1123,7 +1136,7 @@
             "bearer": []
           }
         ],
-        "summary": "修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间",
+        "summary": "修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间",
         "requestBody": {
           "required": true,
           "content": {

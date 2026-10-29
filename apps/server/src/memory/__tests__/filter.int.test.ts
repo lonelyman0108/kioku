@@ -13,6 +13,9 @@ import { accounts, apps, memories, memoryEvents, personas, spaces } from '../../
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { readableConditions, snapshotColumns, snapshotFacts } from '../filter'
 
+// edge 那几条的有效到：按时间点判断时，正好在这一刻前后比对
+const EDGE = new Date('2030-01-01T00:00:00.000Z')
+
 // 用同一批覆盖各种组合的记忆，逐条比对 SQL 过滤与 canRead 的结论
 describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
   let database: Database
@@ -60,13 +63,16 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
       const otherApp = as[1]!.id
 
       const past = new Date(Date.now() - 86_400_000)
+      const future = new Date(Date.now() + 86_400_000)
       const scopes = ['global', `app:${appId}`, 'group:g1', 'group:g2', 'direct:s1']
       const rows: (typeof memories.$inferInsert)[] = []
       let n = 0
+      // expired 是有效到已过，lapsed 是到期时间已过，future 是有效到还没到，edge 的有效到正好是 EDGE
+      const variants = ['own', 'foreign', 'expired', 'lapsed', 'future', 'edge', 'deleted'] as const
       for (const layer of LAYERS) {
         for (const sensitivity of SENSITIVITIES) {
           for (const originScope of scopes) {
-            for (const variant of ['own', 'foreign', 'expired', 'deleted'] as const) {
+            for (const variant of variants) {
               n++
               const secret = sensitivity === 'secret'
               rows.push({
@@ -91,7 +97,15 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
                   layer === 'persona' ? (variant === 'foreign' ? foreignPersona : personaId) : null,
                 appId: layer === 'app' ? (variant === 'foreign' ? otherApp : appId) : null,
                 subjectId: null,
-                validTo: variant === 'expired' ? past : null,
+                validTo:
+                  variant === 'expired'
+                    ? past
+                    : variant === 'future'
+                      ? future
+                      : variant === 'edge'
+                        ? EDGE
+                        : null,
+                expiresAt: variant === 'lapsed' ? past : null,
                 deletedAt: variant === 'deleted' ? past : null,
               })
             }
@@ -224,6 +238,53 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
       })
     }
   }
+
+  it('有效期的边界：到了有效到的那一刻就算过期，记忆表与快照两边都和 canRead 一致', async () => {
+    const access = consoleAccess('owner', owner)
+    const all = await withSpace(database.db, spaceId, (tx) => tx.select().from(memories))
+    const events = await withSpace(database.db, spaceId, (tx) => tx.select().from(memoryEvents))
+    const edge = all.filter((m) => m.validTo?.getTime() === EDGE.getTime()).map((m) => m.id)
+    expect(edge.length).toBeGreaterThan(0)
+    for (const [offset, readable] of [
+      [-1, true],
+      [0, false],
+      [1, false],
+    ] as const) {
+      const options = { personaIds: [personaId], now: new Date(EDGE.getTime() + offset) }
+      const expected = all
+        .filter((m) => canRead(access, m, options))
+        .map((m) => m.id)
+        .sort()
+      const actual = (
+        await withSpace(database.db, spaceId, (tx) =>
+          tx.select({ id: memories.id }).from(memories).where(readableConditions(access, options)),
+        )
+      )
+        .map((r) => r.id)
+        .sort()
+      expect(actual).toEqual(expected)
+      expect(edge.some((id) => expected.includes(id))).toBe(readable)
+
+      const expectedEvents = events
+        .filter((e) => {
+          const facts = snapshotFacts(e.after as Record<string, unknown>)
+          return facts !== null && canRead(access, facts, options)
+        })
+        .map((e) => e.id)
+        .sort((a, b) => a - b)
+      const actualEvents = (
+        await withSpace(database.db, spaceId, (tx) =>
+          tx
+            .select({ id: memoryEvents.id })
+            .from(memoryEvents)
+            .where(readableConditions(access, options, snapshotColumns(memoryEvents.after))),
+        )
+      )
+        .map((r) => r.id)
+        .sort((a, b) => a - b)
+      expect(actualEvents).toEqual(expectedEvents)
+    }
+  })
 
   it('管理读取不看有效期、删除状态与人格，按显式读取算', () => {
     const facts = {

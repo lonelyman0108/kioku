@@ -88,7 +88,7 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: UpdateMemoryRequest,
 ) -> Response[ErrorResponse | MemoryView]:
-    """修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间
+    """修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间
 
     Args:
         body (UpdateMemoryRequest):
@@ -117,7 +117,7 @@ def sync(
     client: AuthenticatedClient,
     body: UpdateMemoryRequest,
 ) -> ErrorResponse | MemoryView | None:
-    """修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间
+    """修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间
 
     Args:
         body (UpdateMemoryRequest):
@@ -141,7 +141,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: UpdateMemoryRequest,
 ) -> Response[ErrorResponse | MemoryView]:
-    """修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间
+    """修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间
 
     Args:
         body (UpdateMemoryRequest):
@@ -168,7 +168,7 @@ async def asyncio(
     client: AuthenticatedClient,
     body: UpdateMemoryRequest,
 ) -> ErrorResponse | MemoryView | None:
-    """修改记忆正文、敏感级、层、priority、disclosure 或 glossary；通过 Key 改层只能在 owner 与 private 之间
+    """修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间
 
     Args:
         body (UpdateMemoryRequest):

@@ -10,9 +10,9 @@ const props = defineProps<{ item: ActivityItem; spaceId: string }>()
 
 const kind = computed(() => eventLabel(props.item.type))
 const actor = computed(() => actorLabel(props.item.actor))
-// 记忆已经删除（包括过期后让出 URI 的），那个 URI 上可能已经是别的记忆了；离开了可见范围的 URI 是改动之前的。
-// 这两种不给链接，同一条记忆更早的改动也一样
-const linkable = computed(() => !props.item.left && !props.item.deleted)
+// 记忆已经删除（包括过期后让出 URI 的）或过期了，按 URI 打开的是那里别的记忆、或者读不到；
+// 离开了可见范围的 URI 是改动之前的。这几种不给链接，同一条记忆更早的改动也一样
+const linkable = computed(() => !props.item.left && !props.item.deleted && !props.item.expired)
 </script>
 
 <template>
@@ -41,6 +41,9 @@ const linkable = computed(() => !props.item.left && !props.item.deleted)
           variant="subtle"
         >
           {{ changeLabels[change] ?? change }}
+        </UBadge>
+        <UBadge v-if="item.expired && !item.deleted" size="sm" color="warning" variant="outline">
+          现在已过期
         </UBadge>
       </div>
       <p v-if="item.left" class="text-xs text-muted">
