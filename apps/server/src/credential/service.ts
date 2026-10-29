@@ -31,6 +31,7 @@ import {
   type Access,
 } from '../access/access'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
+import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
 import { isUniqueViolation, withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
@@ -51,7 +52,7 @@ export interface CredentialContext {
   spaceId: string
   // 凭据按这次访问代表的成员找：管理界面是成员本人，Key 是应用主人
   access: Access
-  masterKey: Buffer | null
+  masterKey: MasterKey | null
   actor: { keyId?: string; accountId?: string }
 }
 
@@ -109,7 +110,7 @@ const effectiveRef = (ownerAccountId: string) =>
 const EVENT_ID = /^\d{1,15}$/
 
 // 托管的值整体加密，aad 绑定凭据 id：把一条凭据的密文挪到别的凭据或记忆上会解密失败
-const aadOf = (id: string) => `credential:${id}`
+export const credentialAad = (id: string) => `credential:${id}`
 
 const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
@@ -154,7 +155,8 @@ export class CredentialService {
     if (!this.ctx.masterKey) {
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，不能保存托管的凭据')
     }
-    return encryptSecret(this.ctx.masterKey, JSON.stringify(values), aadOf(id))
+    const { key, id: keyId } = encryptionKey(this.ctx.masterKey)
+    return { ...encryptSecret(key, JSON.stringify(values), credentialAad(id)), keyId }
   }
 
   private open(row: CredentialRow): Record<string, string> {
@@ -163,9 +165,9 @@ export class CredentialService {
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，无法解密托管的凭据')
     }
     const text = decryptSecret(
-      this.ctx.masterKey,
+      decryptionKey(this.ctx.masterKey, row.keyId),
       { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
-      aadOf(row.id),
+      credentialAad(row.id),
     )
     return JSON.parse(text) as Record<string, string>
   }
@@ -337,6 +339,7 @@ export class CredentialService {
           fields: source.fields,
           ciphertext: null,
           wrappedKey: null,
+          keyId: null,
         },
         // 从托管改成外部时，Kioku 里存的值就删掉了，事件里要记下是哪些字段
         changedValues:
@@ -361,7 +364,7 @@ export class CredentialService {
     // 值没变时沿用原来的密文，不再加密一遍
     const sealed =
       before?.source === 'hosted' && !changedValues.length
-        ? { ciphertext: before.ciphertext, wrappedKey: before.wrappedKey }
+        ? { ciphertext: before.ciphertext, wrappedKey: before.wrappedKey, keyId: before.keyId }
         : this.seal(id, Object.fromEntries(names.map((n) => [n, merged[n]!])))
     return {
       columns: {

@@ -104,6 +104,20 @@ export const ExtractionTestResult = z.object({
 })
 export type ExtractionTestResult = z.infer<typeof ExtractionTestResult>
 
+// 主密钥：标识是哈希，推不出密钥本身，用来核对配的是哪一把。轮换期间配着旧的那把，
+// 后台把还是旧密钥包装的数据密钥换成新的包装，remaining 都是 0 之后就可以去掉 KIOKU_MASTER_KEY_PREVIOUS
+export const MasterKeyStatus = z.object({
+  configured: z.boolean(),
+  currentId: z.string().nullable(),
+  previousId: z.string().nullable(),
+  remaining: z.object({
+    memories: z.number().int(),
+    credentials: z.number().int(),
+    settings: z.number().int(),
+  }),
+})
+export type MasterKeyStatus = z.infer<typeof MasterKeyStatus>
+
 // 召回事件明细保留多少天：清理任务删掉更早的明细，删之前把次数并入每条记忆的累计统计
 export const DEFAULT_RECALL_RETENTION_DAYS = 30
 export const RecallSettings = z.object({

@@ -7,6 +7,7 @@ import {
   ErrorResponse,
   ExtractionSettingsView,
   ExtractionTestResult,
+  MasterKeyStatus,
   RecallSettings,
   UpdateEmbeddingSettings,
   UpdateExtractionSettings,
@@ -15,6 +16,7 @@ import { eq } from 'drizzle-orm'
 import { createMiddleware } from 'hono/factory'
 
 import { requireConsole } from '../auth/middleware'
+import { masterKeyStatus } from '../crypto/rotation'
 import { accounts, EMBEDDING_DIMENSIONS } from '../db/schema'
 import { embeddingCoverage } from '../embedding/coverage'
 import { loadEmbeddingError } from '../embedding/errors'
@@ -133,6 +135,14 @@ const status = createRoute({
   tags: ['settings'],
   summary: '整个实例的向量进度：应当有向量的记忆里，正在用的与正在换过去的模型各生成了多少',
   responses: { 200: jsonResponse('进度', EmbeddingStatus), 403: forbidden },
+})
+
+const masterKey = createRoute({
+  method: 'get',
+  path: '/settings/master-key',
+  tags: ['settings'],
+  summary: '主密钥的标识，以及轮换期间还剩多少条是旧主密钥包装的',
+  responses: { 200: jsonResponse('主密钥', MasterKeyStatus), 403: forbidden },
 })
 
 const recallView = createRoute({
@@ -331,6 +341,7 @@ export function settingsRoutes(deps: Deps) {
         )
       }
     })
+    .openapi(masterKey, async (c) => c.json(await masterKeyStatus(deps.db, deps.masterKey), 200))
     .openapi(recallView, async (c) => c.json(await loadRecallSettings(deps.db), 200))
     .openapi(recallUpdate, async (c) => {
       const value = c.req.valid('json')

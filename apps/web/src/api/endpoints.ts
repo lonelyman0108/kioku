@@ -19,6 +19,7 @@ import {
   ExtractionSettingsView,
   ExtractionUsage,
   ExtractionTestResult,
+  MasterKeyStatus,
   GlossaryIndex,
   GroupPersonaRuleList,
   HealthResponse,
@@ -292,6 +293,8 @@ export const api = {
   embeddingStatus: () => request('GET', '/settings/embedding/status', { schema: EmbeddingStatus }),
   rebuildEmbeddings: () =>
     request('POST', '/settings/embedding/rebuild', { schema: EmbeddingRebuildResult }),
+
+  masterKeyStatus: () => request('GET', '/settings/master-key', { schema: MasterKeyStatus }),
 
   extractionSettings: () =>
     request('GET', '/settings/extraction', { schema: ExtractionSettingsView }),

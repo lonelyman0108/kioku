@@ -310,6 +310,8 @@ export const memories = pgTable(
     content: text(),
     ciphertext: bytea(),
     wrappedKey: bytea(),
+    // 包装数据密钥用的主密钥的标识（crypto/keyring.ts）：轮换时按它找出还是旧密钥包装的记录
+    keyId: text(),
     priority: integer().notNull().default(2),
     disclosure: text(),
     validFrom: timestamp({ withTimezone: true }).notNull().defaultNow(),
@@ -485,6 +487,8 @@ export const credentials = pgTable(
     // 托管的值：各字段的值整体加密，aad 绑定凭据 id（见 credential/service.ts）
     ciphertext: bytea(),
     wrappedKey: bytea(),
+    // 包装数据密钥用的主密钥的标识，同记忆的 keyId
+    keyId: text(),
     // 只给这些应用用；null 表示不限定
     appIds: uuid().array(),
     version: integer().notNull().default(1),

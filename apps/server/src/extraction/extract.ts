@@ -8,6 +8,7 @@ import {
   maskPlaintextCredentials,
   mentionsPlaceholder,
 } from '../credential/placeholders'
+import type { MasterKey } from '../crypto/keyring'
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
   conversationTurns,
@@ -69,7 +70,7 @@ type Place = Pick<
 // 同样的输入多半还是解析不了，重试只会白花 token
 export async function extractBatch(
   db: Db,
-  masterKey: Buffer | null,
+  masterKey: MasterKey | null,
   model: ChatModel,
   target: BufferedSession,
 ): Promise<void> {

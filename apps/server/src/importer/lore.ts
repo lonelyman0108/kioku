@@ -17,6 +17,7 @@ import {
   scanPlaceholders,
 } from '../credential/placeholders'
 import { decryptSecret } from '../crypto/envelope'
+import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
 import { sealedEmbeddingKeys } from '../embedding/settings'
@@ -413,7 +414,7 @@ export interface ImportTarget {
   db: Db
   spaceId: string
   accountId: string
-  masterKey: Buffer | null
+  masterKey: MasterKey | null
 }
 
 export interface ImportResult {
@@ -879,7 +880,7 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
 export async function verifyMasterKey(
   db: Db,
   spaceId: string,
-  masterKey: Buffer,
+  masterKey: MasterKey,
 ): Promise<boolean> {
   // 读库出错时原样抛出，只有解密失败才说是主密钥不一致。实例设置里加密保存的接口 Key，有一个就拿来试
   const extraction = await sealedEndpointKey(db, EXTRACTION_ENDPOINT)
@@ -889,7 +890,7 @@ export async function verifyMasterKey(
   ]
   if (stored) {
     try {
-      decryptSecret(masterKey, stored.sealed, stored.aad)
+      decryptSecret(decryptionKey(masterKey, stored.keyId), stored.sealed, stored.aad)
       return true
     } catch {
       throw new Error(
@@ -899,7 +900,12 @@ export async function verifyMasterKey(
   }
   const [sealed] = await withSpace(db, spaceId, (tx) =>
     tx
-      .select({ id: memories.id, ciphertext: memories.ciphertext, wrappedKey: memories.wrappedKey })
+      .select({
+        id: memories.id,
+        ciphertext: memories.ciphertext,
+        wrappedKey: memories.wrappedKey,
+        keyId: memories.keyId,
+      })
       .from(memories)
       .where(and(isNotNull(memories.ciphertext), isNotNull(memories.wrappedKey)))
       .limit(1),
@@ -907,7 +913,7 @@ export async function verifyMasterKey(
   if (!sealed) return false
   try {
     decryptSecret(
-      masterKey,
+      decryptionKey(masterKey, sealed.keyId),
       { ciphertext: sealed.ciphertext!, wrappedKey: sealed.wrappedKey! },
       sealed.id,
     )

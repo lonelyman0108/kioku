@@ -2,6 +2,7 @@ import { serve } from '@hono/node-server'
 
 import { createApp } from './app'
 import { loadConfig } from './config'
+import { prepareMasterKey } from './crypto/rotation'
 import { assertRuntimeRole, connect } from './db/client'
 import { runMigrations } from './db/migrate'
 import { settingsEmbedderSource } from './embedding/source'
@@ -12,6 +13,8 @@ const config = loadConfig()
 const database = connect(config.databaseUrl)
 await assertRuntimeRole(database.db)
 await runMigrations(database, config.migrationsFolder)
+// 给加密的数据补上主密钥的标识，主密钥对不上时拒绝启动
+await prepareMasterKey(database.db, config.masterKey)
 
 const embedder = settingsEmbedderSource(database.db, config.masterKey)
 const jobs = await startJobs({

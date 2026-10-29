@@ -1,3 +1,4 @@
+import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import {
   clearEndpointConfig,
@@ -15,10 +16,10 @@ export const EXTRACTION_ENDPOINT: ModelEndpoint = { key: 'extraction', label: 'æ
 
 export const sealedExtractionKey = (db: Db) => sealedEndpointKey(db, EXTRACTION_ENDPOINT)
 
-export const loadExtractionConfig = (db: Db, masterKey: Buffer | null) =>
+export const loadExtractionConfig = (db: Db, masterKey: MasterKey | null) =>
   loadEndpointConfig(db, masterKey, EXTRACTION_ENDPOINT)
 
-export const saveExtractionConfig = (db: Db, masterKey: Buffer | null, input: EndpointInput) =>
+export const saveExtractionConfig = (db: Db, masterKey: MasterKey | null, input: EndpointInput) =>
   saveEndpointConfig(db, masterKey, EXTRACTION_ENDPOINT, input)
 
 export const extractionSettingsView = (db: Db) => endpointSettingsView(db, EXTRACTION_ENDPOINT)

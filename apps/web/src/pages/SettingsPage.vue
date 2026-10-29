@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { ref, watch } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -10,6 +10,17 @@ import ExtractionSettings from '../components/ExtractionSettings.vue'
 
 const toast = useToast()
 const queryClient = useQueryClient()
+
+// 主密钥：轮换期间每隔几秒刷新，看得到还剩多少条是旧主密钥包装的
+const masterKey = useQuery({
+  queryKey: ['settings', 'master-key'],
+  queryFn: api.masterKeyStatus,
+  refetchInterval: (query) => (query.state.data?.previousId ? 5_000 : false),
+})
+const remaining = computed(() => {
+  const r = masterKey.data.value?.remaining
+  return r ? r.memories + r.credentials + r.settings : 0
+})
 
 // 召回事件明细的保留天数：更早的明细在下一次清理时并入每条记忆的累计次数后删除
 const recallSettings = useQuery({ queryKey: ['settings', 'recall'], queryFn: api.recallSettings })
@@ -52,6 +63,47 @@ async function saveRetention() {
         <EmbeddingSettings />
 
         <ExtractionSettings />
+
+        <UCard>
+          <template #header>
+            <h2 class="font-medium">主密钥</h2>
+            <p class="mt-1 text-sm text-muted">
+              加密 secret 记忆、托管的凭据值与这里的接口 Key，配在服务器的 KIOKU_MASTER_KEY
+              里。标识是哈希，推不出密钥本身，用来核对配的是哪一把。
+            </p>
+          </template>
+          <UAlert
+            v-if="masterKey.isError.value"
+            color="error"
+            variant="subtle"
+            :title="
+              masterKey.error.value instanceof ApiError ? masterKey.error.value.message : '读取失败'
+            "
+          />
+          <div v-else-if="masterKey.data.value" class="space-y-2 text-sm">
+            <p v-if="!masterKey.data.value.configured" class="text-muted">
+              没有配置主密钥：secret 记忆、托管的凭据与接口 Key 都不能保存。
+            </p>
+            <template v-else>
+              <p>
+                标识 <span class="font-mono">{{ masterKey.data.value.currentId }}</span>
+              </p>
+              <template v-if="masterKey.data.value.previousId">
+                <p>
+                  正在轮换：旧主密钥
+                  <span class="font-mono">{{ masterKey.data.value.previousId }}</span> 包装的还剩
+                  {{ remaining }} 条（secret 记忆
+                  {{ masterKey.data.value.remaining.memories }}、托管的凭据
+                  {{ masterKey.data.value.remaining.credentials }}、接口 Key
+                  {{ masterKey.data.value.remaining.settings }}）
+                </p>
+                <p v-if="remaining === 0" class="text-success">
+                  已经换完：可以从配置里去掉 KIOKU_MASTER_KEY_PREVIOUS，再重启服务。
+                </p>
+              </template>
+            </template>
+          </div>
+        </UCard>
 
         <UCard>
           <template #header>

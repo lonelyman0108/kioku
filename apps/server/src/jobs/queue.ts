@@ -1,5 +1,8 @@
 import { PgBoss } from 'pg-boss'
 
+import type { MasterKey } from '../crypto/keyring'
+import { keyringOf } from '../crypto/keyring'
+import { rotateMasterKey } from '../crypto/rotation'
 import type { Db } from '../db/client'
 import { backfillJob, embedJob, pruneJob, switchJob } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
@@ -11,6 +14,7 @@ const EMBED = 'embed-memory'
 const BACKFILL = 'embed-backfill'
 const SWITCH = 'embed-switch'
 const PRUNE = 'embed-prune'
+const ROTATE = 'rotate-master-key'
 const CLEANUP = 'cleanup-expired'
 const EXTRACT = 'extract-session'
 // 每小时清一次过期的数据（见 cleanupExpired）
@@ -22,6 +26,8 @@ const SWITCH_AGAIN_SECONDS = 30
 // 换模型补了一遍一条都没补上、或者出了错时不自己再排，由定时任务每十分钟再试一遍：接口恢复了能自己补完，
 // 出错时也不会一直请求；没在换模型时这个任务读一下设置就结束
 const SWITCH_CRON = '*/10 * * * *'
+// 轮换主密钥时有正被别的事务锁着、这次没换的行，隔这么久再来
+const ROTATE_AGAIN_SECONDS = 60
 // 切换或放弃之后等一会儿再清向量：写向量时会锁住设置、按当时的设置决定写不写，这里只是多留一点余量
 const PRUNE_AFTER_SECONDS = 30
 
@@ -46,7 +52,7 @@ export async function startJobs(options: {
   db: Db
   embedder: EmbedderSource
   // 解密实例设置里抽取模型的 Key
-  masterKey: Buffer | null
+  masterKey: MasterKey | null
 }): Promise<Jobs & { stop: () => Promise<void> }> {
   const boss = new PgBoss({ connectionString: options.connectionString, schema: 'pgboss' })
   boss.on('error', (err) => console.error('后台任务出错', err))
@@ -57,6 +63,7 @@ export async function startJobs(options: {
   // 不能用只留一个排队位的策略：先排上的延迟任务会把管理员的重试挤掉
   await boss.createQueue(SWITCH, { policy: 'singleton' })
   await boss.createQueue(PRUNE, { policy: 'singleton' })
+  await boss.createQueue(ROTATE, { policy: 'singleton' })
   await boss.createQueue(CLEANUP, { policy: 'singleton' })
   // stately：每个会话（singletonKey）排队的与正在跑的各最多一个
   await boss.createQueue(EXTRACT, { policy: 'stately' })
@@ -103,6 +110,15 @@ export async function startJobs(options: {
     const removed = await pruneJob(options.db)
     if (removed) console.log(`删掉了 ${removed} 条不再用的向量`)
   })
+  // 配了旧主密钥时把还是旧密钥包装的数据密钥换成新的；有被锁着没换的，过一会儿再来
+  const masterKey = options.masterKey
+  await boss.work(ROTATE, async () => {
+    if (!masterKey) return
+    const { rewrapped, remaining } = await rotateMasterKey(options.db, masterKey)
+    console.log(`主密钥轮换：这次换了 ${rewrapped} 条，还剩 ${remaining} 条`)
+    if (remaining) void send(ROTATE, {}, ROTATE_AGAIN_SECONDS)
+  })
+  if (masterKey && keyringOf(masterKey).previous) void send(ROTATE, {})
   await boss.work(CLEANUP, async () => {
     await cleanupExpired(options.db)
   })
