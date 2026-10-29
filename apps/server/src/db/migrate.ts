@@ -1,8 +1,5 @@
-import { readFileSync } from 'node:fs'
-import { join } from 'node:path'
-
 import { sql } from 'drizzle-orm'
-import type { MigrationMeta } from 'drizzle-orm/migrator'
+import { readMigrationFiles, type MigrationMeta } from 'drizzle-orm/migrator'
 import { drizzle } from 'drizzle-orm/postgres-js'
 import { migrate } from 'drizzle-orm/postgres-js/migrator'
 import postgres from 'postgres'
@@ -29,10 +26,9 @@ export async function lockMigrations(tx: Tx): Promise<void> {
   await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${MIGRATE_LOCK}))`)
 }
 
-// 在调用方的事务里执行给出的迁移。做法和 drizzle 的迁移器一样：逐段执行语句，
-// 再在 drizzle.__drizzle_migrations 里记下哈希与时间戳。恢复备份时用，迁移与写回的数据同进同退
+// 在调用方的事务里执行给出的迁移，调用方要先在这个事务里 lockMigrations。做法和 drizzle 的迁移器一样：
+// 逐段执行语句，再在 drizzle.__drizzle_migrations 里记下哈希与时间戳。恢复备份时用，迁移与写回的数据同进同退
 export async function applyMigrations(tx: Tx, migrations: MigrationMeta[]): Promise<void> {
-  await lockMigrations(tx)
   await tx.execute(sql`create schema if not exists drizzle`)
   await tx.execute(sql`
     create table if not exists drizzle.__drizzle_migrations (
@@ -46,35 +42,25 @@ export async function applyMigrations(tx: Tx, migrations: MigrationMeta[]): Prom
   }
 }
 
-// 还有几个迁移没在这个库上执行。命令行工具据此拒绝在结构不对的库上写入，
+// 还有几个迁移没在这个库上执行；库里最后一个迁移不在这个版本里（库比这个版本新，或者走岔了）时为 null。
+// 和 drizzle 一样按最后一个迁移的时间戳判断。命令行工具据此拒绝在结构不对的库上写入，
 // 迁移只交给服务启动时执行：工具与服务版本不一致时，不能让工具替库升级
-export async function pendingMigrations(db: Db, migrationsFolder: string): Promise<number> {
-  const journal = JSON.parse(
-    readFileSync(join(migrationsFolder, 'meta/_journal.json'), 'utf8'),
-  ) as {
-    entries: unknown[]
-  }
-  return journal.entries.length - (await appliedMigrations(db)).count
+export async function pendingMigrations(db: Db, migrationsFolder: string): Promise<number | null> {
+  const local = readMigrationFiles({ migrationsFolder })
+  const last = await lastMigration(db)
+  if (!last) return local.length
+  const position = local.findIndex((m) => m.folderMillis === last.at) + 1
+  return position ? local.length - position : null
 }
 
-// 库里已经执行过的迁移：一共几个，以及最后一个（按时间戳）的哈希与时间戳。drizzle 记的哈希是迁移文件内容的 sha256，
-// 判断哪些迁移还没执行只看最后一个的时间戳
-export interface AppliedMigrations {
-  count: number
-  last: { hash: string; at: number } | null
-}
-
-export async function appliedMigrations(db: Db | Tx): Promise<AppliedMigrations> {
+// 库里执行到的最后一个迁移（按时间戳）：它的哈希（drizzle 记的是迁移文件内容的 sha256）与时间戳。还没迁移过时为 null
+export async function lastMigration(db: Db | Tx): Promise<{ hash: string; at: number } | null> {
   const [table] = await db.execute<{ exists: boolean }>(
     sql`select to_regclass('drizzle.__drizzle_migrations') is not null as exists`,
   )
-  if (!table?.exists) return { count: 0, last: null }
-  const [row] = await db.execute<{ count: number; hash: string | null; at: string | null }>(sql`
-    select count(*)::int as count, (array_agg(hash order by created_at desc))[1] as hash,
-      max(created_at)::text as at
-    from drizzle.__drizzle_migrations`)
-  return {
-    count: row?.count ?? 0,
-    last: row?.hash && row.at ? { hash: row.hash, at: Number(row.at) } : null,
-  }
+  if (!table?.exists) return null
+  const [row] = await db.execute<{ hash: string; at: string }>(sql`
+    select hash, created_at::text as at from drizzle.__drizzle_migrations
+    order by created_at desc limit 1`)
+  return row ? { hash: row.hash, at: Number(row.at) } : null
 }

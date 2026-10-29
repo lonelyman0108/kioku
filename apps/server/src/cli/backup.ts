@@ -3,7 +3,7 @@ import { parseArgs } from 'node:util'
 
 import { createBackup } from '../backup/export'
 import { loadConfig } from '../config'
-import { prepareMasterKey } from '../crypto/rotation'
+import { checkMasterKey } from '../crypto/rotation'
 import { assertRuntimeRole, connect } from '../db/client'
 import { pendingMigrations } from '../db/migrate'
 import { runCli, UsageError } from './common'
@@ -20,8 +20,9 @@ const HELP = `把整个实例备份成一个加密的文件。
   --out <文件>   写到这个文件，已存在时不覆盖；写 - 时输出到标准输出
 
 环境变量：
-  DATABASE_URL       Kioku 的数据库，与服务相同
-  KIOKU_MASTER_KEY   与服务相同`
+  DATABASE_URL               Kioku 的数据库，与服务相同
+  KIOKU_MASTER_KEY           与服务相同
+  KIOKU_MASTER_KEY_PREVIOUS  轮换主密钥期间与服务相同`
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -58,9 +59,9 @@ async function main(): Promise<void> {
     if ((await pendingMigrations(database.db, config.migrationsFolder)) !== 0) {
       throw new Error('数据库的迁移与这个版本不一致：用与服务相同的版本备份')
     }
-    // 备份里的 secret 与托管的凭据仍由库里记着的主密钥包装：和服务启动时一样核对一遍，
+    // 备份里的 secret 与托管的凭据仍由库里记着的主密钥包装：按服务启动时的规则核对一遍（只读），
     // 配的主密钥和服务的不一样时，做出来的备份恢复之后服务起不来
-    await prepareMasterKey(database.db, config.masterKey).catch((err: unknown) => {
+    await checkMasterKey(database.db, config.masterKey).catch((err: unknown) => {
       throw new Error(`备份要用与服务相同的主密钥。${(err as Error).message}`)
     })
     const summary = await createBackup(

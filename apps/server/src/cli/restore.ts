@@ -1,4 +1,5 @@
 import { readFile } from 'node:fs/promises'
+import { buffer } from 'node:stream/consumers'
 import { parseArgs } from 'node:util'
 
 import { restoreBackup } from '../backup/restore'
@@ -24,12 +25,8 @@ const HELP = `把备份恢复到一个新实例。
   KIOKU_MASTER_KEY           做备份时的主密钥
   KIOKU_MASTER_KEY_PREVIOUS  备份之后轮换过主密钥时：KIOKU_MASTER_KEY 配新的，这里配做备份时的那把`
 
-async function readInput(file: string): Promise<Buffer> {
-  if (file !== '-') return readFile(file)
-  const chunks: Buffer[] = []
-  for await (const chunk of process.stdin) chunks.push(chunk as Buffer)
-  return Buffer.concat(chunks)
-}
+const readInput = (file: string): Promise<Buffer> =>
+  file === '-' ? buffer(process.stdin) : readFile(file)
 
 async function main(): Promise<void> {
   const { values } = parseArgs({

@@ -16,7 +16,7 @@ import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../..
 import { credentialAad } from '../../credential/service'
 import { rewrapKey } from '../envelope'
 import { keyIdOf, type MasterKey } from '../keyring'
-import { masterKeyStatus, prepareMasterKey, rotateMasterKey } from '../rotation'
+import { checkMasterKey, masterKeyStatus, prepareMasterKey, rotateMasterKey } from '../rotation'
 
 describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
   let database: Database
@@ -229,6 +229,29 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     expect((await masterKeyStatus(database.db, rotating)).lastError).toMatchObject({
       message: expect.stringContaining('1 条用旧主密钥也解不开'),
     })
+  })
+
+  it('只核对不写库：没记标识的认得出就通过但不补，认不出的和启动检查一样报错', async () => {
+    await seed()
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(memories).set({ keyId: null }).where(eq(memories.path, 'wifi')),
+    )
+    await database.db.execute(
+      sql`update settings set value = value #- '{apiKey,keyId}' where key = 'extraction'`,
+    )
+    await checkMasterKey(database.db, oldKey)
+    const [wifi] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ keyId: memories.keyId }).from(memories).where(eq(memories.path, 'wifi')),
+    )
+    expect(wifi?.keyId).toBeNull()
+    const [extraction] = await database.db
+      .select()
+      .from(settings)
+      .where(eq(settings.key, 'extraction'))
+    expect(JSON.stringify(extraction?.value)).not.toContain('keyId')
+    await expect(checkMasterKey(database.db, newKey)).rejects.toThrow(
+      /主密钥对不上：secret 记忆 2 条、托管的凭据 1 条、实例设置里的接口 Key 2 条解不开/,
+    )
   })
 
   it('还没换完就去掉了旧的那把：拒绝启动，并说清要配回去', async () => {

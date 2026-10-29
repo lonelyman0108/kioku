@@ -4,7 +4,7 @@ import { z } from 'zod'
 
 import type { MasterKey } from '../crypto/keyring'
 import type { Database, Tx } from '../db/client'
-import { appliedMigrations, applyMigrations, lockMigrations } from '../db/migrate'
+import { applyMigrations, lastMigration, lockMigrations } from '../db/migrate'
 import { BACKUP_FORMAT, BACKUP_VERSION } from './export'
 import { openBackup } from './format'
 
@@ -123,13 +123,17 @@ export async function restoreBackup(
   }
 
   const db = database.db
-  if (!(await appliedMigrations(db)).last) {
-    await db.transaction((tx) => applyMigrations(tx, local.slice(0, position)))
+  if (!(await lastMigration(db))) {
+    await db.transaction(async (tx) => {
+      await lockMigrations(tx)
+      // 拿到锁之前别的连接（例如同时启动的服务）可能已经迁移过了：那就不再执行，交给下面的核对
+      if (!(await lastMigration(tx))) await applyMigrations(tx, local.slice(0, position))
+    })
   }
   const rows = await db.transaction(async (tx) => {
     // 先拿到迁移的锁再核对库停在哪里：同时启动的服务要等这个事务结束才能迁移
     await lockMigrations(tx)
-    const applied = (await appliedMigrations(tx)).last
+    const applied = await lastMigration(tx)
     if (!applied || applied.at !== backup.at || applied.hash !== backup.hash) {
       const at = applied ? positionOf(applied.at) : 0
       throw new Error(

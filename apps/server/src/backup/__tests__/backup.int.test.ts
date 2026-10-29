@@ -13,7 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../app'
 import { prepareMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database, type Tx } from '../../db/client'
-import { appliedMigrations } from '../../db/migrate'
+import { lastMigration, pendingMigrations, runMigrations } from '../../db/migrate'
 import { extractionRuns, memoryRecallStats, settings, spaces, subjects } from '../../db/schema'
 import { backfillJob } from '../../embedding/jobs'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -327,6 +327,15 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     await expect(restore(file)).rejects.toThrow('这个实例已经初始化过（2 个账号、1 个空间）')
   })
 
+  it('实例级的表在备份里是空的：新库里迁移写下的默认值也以备份为准清掉', async () => {
+    await database.db.delete(settings)
+    const { file, summary } = await backup()
+    expect(summary.rows.settings).toBe(0)
+    await wipe('2030-01-01T00:00:00.000Z')
+    await restore(file)
+    expect(await database.db.select().from(settings)).toEqual([])
+  })
+
   it('两万条带 URI 的记忆也在一个事务里写回：不逐行加 URI 互斥检查的咨询锁', async () => {
     // 写入时每行一把咨询锁，一个事务里放不下这么多，分批写
     for (let i = 0; i < 20_000; i += 1000) {
@@ -339,6 +348,20 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     }
     const { file, summary } = await backup()
     expect(summary.rows.memories).toBe(20_000)
+
+    // 写出中途出错（例如磁盘满了）：备份失败，读正文的查询停在事务里，连接照常可用
+    let chunks = 0
+    const full = new Writable({
+      write(_chunk, _encoding, done) {
+        done(++chunks > 1 ? new Error('磁盘满了') : null)
+      },
+    })
+    await expect(createBackup(database.db, masterKey, full)).rejects.toThrow('磁盘满了')
+    const [state] = await database.db.execute<{ open: number }>(sql`
+      select count(*)::int as open from pg_stat_activity
+      where datname = current_database() and state like 'idle in transaction%'`)
+    expect(state!.open).toBe(0)
+
     await wipe('2030-01-01T00:00:00.000Z')
     expect((await restore(file)).rows.memories).toBe(20_000)
   })
@@ -427,16 +450,17 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     try {
       // 新增的迁移读写回的数据：能看出它是在写回之后执行的
       await wipe('2030-01-01T00:00:00.000Z')
-      const result = await restore(
-        file,
-        masterKey,
-        await newer('CREATE TABLE restore_probe AS SELECT username FROM accounts'),
-      )
+      const probe = await newer('CREATE TABLE restore_probe AS SELECT username FROM accounts')
+      expect(await pendingMigrations(database.db, probe)).toBe(1)
+      const result = await restore(file, masterKey, probe)
       expect(result.upgraded).toBe(1)
       expect(await database.db.execute(sql`select username from restore_probe`)).toEqual([
         { username: 'alice' },
       ])
-      expect((await appliedMigrations(database.db)).last?.at).toBe(latest.folderMillis + 1000)
+      expect((await lastMigration(database.db))?.at).toBe(latest.folderMillis + 1000)
+      // 恢复时自己执行的迁移记录，drizzle 的迁移器认得：服务启动时不会再执行一遍
+      expect(await pendingMigrations(database.db, probe)).toBe(0)
+      await runMigrations(database, probe)
       await forget()
 
       await wipe('2030-01-01T00:00:00.000Z')
@@ -445,7 +469,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         sql`select count(*)::int as accounts from accounts`,
       )
       expect(state!.accounts).toBe(0)
-      expect((await appliedMigrations(database.db)).last?.at).toBe(latest.folderMillis)
+      expect((await lastMigration(database.db))?.at).toBe(latest.folderMillis)
     } finally {
       await forget()
       for (const folder of folders) await rm(folder, { recursive: true, force: true })
