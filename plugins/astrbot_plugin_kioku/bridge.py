@@ -2,6 +2,7 @@
 
 插件里没有记忆逻辑，也没有提示词：注入什么、怎么抽取，都由服务端决定。
 Kioku 不可用、超时或拒绝请求时只记日志、返回空，不打断对话。
+/bind 绑定账号时把结果回复给发命令的人，Kioku 给的错误说明原样转达。
 """
 
 from __future__ import annotations
@@ -14,9 +15,16 @@ from dataclasses import dataclass
 import httpx
 
 from .kioku_client import AuthenticatedClient
+from .kioku_client.api.binding import post_v1_bind, post_v1_bind_code
 from .kioku_client.api.lifecycle import post_v1_lifecycle_event
 from .kioku_client.models import (
+    BindCode,
+    BindCodeRequest,
+    BindRequest,
+    BindResult,
+    BindResultStatus,
     ChatType,
+    ErrorResponse,
     LifecycleResponse,
     PlatformRef,
     PromptSubmitEvent,
@@ -41,6 +49,15 @@ MAX_NAME = 128
 BOOT_TTL_SECONDS = 600
 # 启动上下文没取到（Kioku 不可用或没有内容）时，过这么久再试
 BOOT_RETRY_SECONDS = 60
+# 服务端收的绑定码最长这么多个字，太长的整个请求会被拒
+MAX_CODE = 64
+
+# /bind 的回复：直接发给发命令的人，要短
+GROUP_HINT = "绑定账号请私聊我发 /bind。"
+NOT_CONFIGURED = "还没有接入 Kioku，绑定不了。"
+UNAVAILABLE = "Kioku 暂时用不了，请稍后再试。"
+BOUND = "绑定好了。"
+WAITING = "已提交，等对方在管理界面确认。"
 
 
 @dataclass(frozen=True)
@@ -156,6 +173,41 @@ class KiokuBridge:
                 reply=clip(reply, MAX_TEXT),
             )
         )
+
+    async def bind(self, turn: Turn, code: str) -> str:
+        """/bind 申请绑定码，/bind <码> 用别的平台拿到的码把这个账号绑过去。只在私聊里，群里只提示去私聊。"""
+        if turn.group_id:
+            return GROUP_HINT
+        if self._client is None:
+            return NOT_CONFIGURED
+        context = session_context(turn)
+        code = code.strip()
+        try:
+            if code:
+                response = await post_v1_bind.asyncio_detailed(
+                    client=self._client, body=BindRequest(code=code[:MAX_CODE], context=context)
+                )
+            else:
+                response = await post_v1_bind_code.asyncio_detailed(
+                    client=self._client, body=BindCodeRequest(context=context)
+                )
+        except Exception as err:  # noqa: BLE001  Kioku 出什么错都只回一句，不让命令报错
+            logger.warning("请求 Kioku 失败：%s", err)
+            return UNAVAILABLE
+        result = response.parsed
+        if isinstance(result, BindCode):
+            minutes = max(1, round(result.expires_in_seconds / 60))
+            return (
+                f"绑定码：{result.code}\n"
+                f"{minutes} 分钟内到另一个平台私聊我，发「/bind {result.code}」。"
+            )
+        if isinstance(result, BindResult):
+            return BOUND if result.status == BindResultStatus.MERGED else WAITING
+        # Key 无效是 bot 主人的配置问题，不把说明转给发命令的人
+        if isinstance(result, ErrorResponse) and response.status_code != 401:
+            return result.error
+        logger.warning("Kioku 没有接受绑定请求：HTTP %s", int(response.status_code))
+        return UNAVAILABLE
 
     async def aclose(self) -> None:
         """关掉到 Kioku 的连接池，插件停用或重载时调用。"""

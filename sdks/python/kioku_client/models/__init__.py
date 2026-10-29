@@ -3,6 +3,11 @@
 from .app_config import AppConfig
 from .app_config_elevate_owner_direct import AppConfigElevateOwnerDirect
 from .app_info import AppInfo
+from .bind_code import BindCode
+from .bind_code_request import BindCodeRequest
+from .bind_request import BindRequest
+from .bind_result import BindResult
+from .bind_result_status import BindResultStatus
 from .boot_entry import BootEntry
 from .boot_entry_layer import BootEntryLayer
 from .boot_response import BootResponse
@@ -59,6 +64,11 @@ __all__ = (
     "AppConfig",
     "AppConfigElevateOwnerDirect",
     "AppInfo",
+    "BindCode",
+    "BindCodeRequest",
+    "BindRequest",
+    "BindResult",
+    "BindResultStatus",
     "BootEntry",
     "BootEntryLayer",
     "BootResponse",
