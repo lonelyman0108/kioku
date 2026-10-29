@@ -1370,6 +1370,36 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect((await leaving).status).toBe(400)
   })
 
+  it('导出期间或者拿到响应之后客户端断开：响应流没人读，名额照样放掉', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const exportWith = (signal: AbortSignal) =>
+      Promise.resolve(
+        source.request(`/v1/spaces/${alice.spaceId}/export`, {
+          ...jsonRequest('POST', { passphrase: PASSPHRASE }, { cookie: alice.cookie }),
+          signal,
+        }),
+      )
+    // 轮到它、开始导出之后就断开：node 的服务端之后既不读也不取消这个响应流
+    const holder = await acquireTransferSlot('holder')
+    const early = new AbortController()
+    const leaving = exportWith(early.signal)
+    await until(() => queuedTransfers() === 1)
+    holder()
+    early.abort()
+    expect((await leaving).status).toBe(200)
+    const next = acquireTransferSlot('next')
+    expect(queuedTransfers()).toBe(0)
+    ;(await next)()
+    // 拿到响应、文件还没读时断开：读之前名额一直占着，断开就放
+    const late = new AbortController()
+    const res = await exportWith(late.signal)
+    expect(res.status).toBe(200)
+    const probe = acquireTransferSlot('probe')
+    expect(queuedTransfers()).toBe(1)
+    late.abort()
+    ;(await probe)()
+  })
+
   it(
     '一次导入两万条带 URI 的记忆：不为每个 URI 加咨询锁，锁表不会被占满',
     { timeout: 120_000 },

@@ -170,7 +170,7 @@ function importRoute(deps: Deps) {
   })
 }
 
-// 导出的文件发完才放掉名额：文件攒在内存里，要等发给浏览器之后才释放。客户端中途断开时响应流被取消，也放掉
+// 导出的文件发完才放掉名额：文件攒在内存里，要等发给浏览器之后才释放。发送途中客户端断开时响应流被取消，也放掉
 function releasingBody(file: Uint8Array, release: () => void): ReadableStream<Uint8Array> {
   let sent = false
   return new ReadableStream({
@@ -208,7 +208,8 @@ export function spaceRoutes(deps: Deps) {
       // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
       if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
       // 整个导出占一个名额，文件发完才放（见 releasingBody）
-      const release = await acquireTransferSlot(accountId, c.req.raw.signal)
+      const signal = c.req.raw.signal
+      const release = await acquireTransferSlot(accountId, signal)
       let exported
       try {
         exported = await exportSpace(deps.db, deps.masterKey, {
@@ -220,6 +221,10 @@ export function spaceRoutes(deps: Deps) {
         release()
         throw err
       }
+      // 客户端在导出期间就断开了的，node 的服务端既不读这个响应流、也不取消它，名额不会经响应流放掉：
+      // 已经断开的在这里放，之后断开的在断开时放
+      if (signal.aborted) release()
+      else signal.addEventListener('abort', release, { once: true })
       return c.body(releasingBody(exported.file, release), 200, {
         'content-type': 'application/octet-stream',
         'content-length': String(exported.file.length),
