@@ -1,11 +1,13 @@
 import type { ExtractionBudget, ExtractionUsage } from '@kioku/contracts'
-import { and, count, eq, gte, inArray, sql } from 'drizzle-orm'
+import { and, count, eq, gte, inArray, sql, type SQL } from 'drizzle-orm'
 
 import { withSpace, type Db, type Tx } from '../db/client'
 import { extractionRuns, memories, spaces } from '../db/schema'
 
-// 预算按 UTC 的自然月、自然日算，和服务器所在的时区无关
-const MONTH_START = sql`date_trunc('month', now(), 'UTC')`
+// 预算按 UTC 的自然月、自然日算，和服务器所在的时区无关。本月用量是本月抽取记录的用量之和，
+// 保留期的清理据此留着本月的抽取记录
+export const monthStart = (at: SQL): SQL => sql`date_trunc('month', ${at}, 'UTC')`
+const MONTH_START = monthStart(sql`now()`)
 const DAY_START = sql`date_trunc('day', now(), 'UTC')`
 
 // 这个空间的抽取预算与本月用掉的 token：抽取记录里的用量之和，解析失败、写入失败的那几次也算（token 已经花出去了）；

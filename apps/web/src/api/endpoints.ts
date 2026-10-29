@@ -43,6 +43,8 @@ import {
   RecallEventList,
   RecallSettings,
   RecallStats,
+  RetentionResumed,
+  RetentionView,
   ReviewList,
   ReviewResult,
   SetupStatus,
@@ -63,6 +65,7 @@ import {
   type PlainLayer,
   type RestoreRequest,
   type ReviewQuery,
+  type RetentionSettings,
   type ReviewRequest,
   type SetupRequest,
   type SubjectListQuery,
@@ -301,6 +304,12 @@ export const api = {
     request('POST', '/settings/embedding/rebuild', { schema: EmbeddingRebuildResult }),
 
   masterKeyStatus: () => request('GET', '/settings/master-key', { schema: MasterKeyStatus }),
+
+  retentionSettings: () => request('GET', '/settings/retention', { schema: RetentionView }),
+  saveRetentionDays: (body: RetentionSettings) =>
+    request('PUT', '/settings/retention', { body, schema: RetentionView }),
+  resumeRetention: () =>
+    request('POST', '/settings/retention/resume', { schema: RetentionResumed }),
 
   extractionSettings: () =>
     request('GET', '/settings/extraction', { schema: ExtractionSettingsView }),

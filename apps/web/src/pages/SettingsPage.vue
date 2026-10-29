@@ -8,6 +8,7 @@ import { api } from '../api/endpoints'
 import BackupSettings from '../components/BackupSettings.vue'
 import EmbeddingSettings from '../components/EmbeddingSettings.vue'
 import ExtractionSettings from '../components/ExtractionSettings.vue'
+import RetentionSettings from '../components/RetentionSettings.vue'
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -119,6 +120,8 @@ async function saveRetention() {
         </UCard>
 
         <BackupSettings />
+
+        <RetentionSettings />
 
         <UCard>
           <template #header>

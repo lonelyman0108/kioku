@@ -451,6 +451,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
           enqueueBackup: async () => null,
           backupRun: async () => null,
           enqueueExtraction: async () => {},
+          enqueueCleanup: async () => true,
         },
       })
       const r = await withJobs.request(

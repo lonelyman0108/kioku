@@ -39,6 +39,7 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
     enqueueBackup: async () => null,
     backupRun: async () => null,
     enqueueExtraction: async (target, delay) => void queued.push([target, delay]),
+    enqueueCleanup: async () => true,
   }
 
   beforeAll(async () => {

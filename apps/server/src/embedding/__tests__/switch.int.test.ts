@@ -41,6 +41,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     enqueuePrune: async () => (queued.push('prune'), true),
     enqueueBackup: async () => null,
     backupRun: async () => null,
+    enqueueCleanup: async () => true,
   }
   const noRetry = () => {}
 

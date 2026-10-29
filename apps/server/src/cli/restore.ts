@@ -115,11 +115,14 @@ async function main(): Promise<void> {
     // 取备份之前先确认能恢复到这个库，免得白白下载一大份
     await assertUninitialized(database.db)
     const file = bucket ? await download(bucket) : await readInput(values.file!)
-    const { header, rows, upgraded, backupCleared } = await restoreBackup(database, {
-      migrationsFolder: config.migrationsFolder,
-      masterKey: config.masterKey,
-      file,
-    })
+    const { header, rows, upgraded, backupCleared, retentionPausedUntil } = await restoreBackup(
+      database,
+      {
+        migrationsFolder: config.migrationsFolder,
+        masterKey: config.masterKey,
+        file,
+      },
+    )
     const total = Object.values(rows).reduce((a, b) => a + b, 0)
     console.log(`恢复完成：备份做于 ${header.createdAt}（Kioku ${header.kioku}），写回 ${total} 行`)
     console.log(
@@ -143,6 +146,11 @@ async function main(): Promise<void> {
           '确认这个实例要接着用之后，在实例设置里重新配备份。',
       )
     }
+    console.warn(
+      `\n保留期的清理暂停到 ${retentionPausedUntil.toISOString()}（恢复的时间加上保留天数）：` +
+        '恢复出的已删除记录不会马上被永久删掉，要从这份备份里找回的在这之前撤销删除；之后自动照常清理，' +
+        '也可以在实例设置的「保留期」里提前开始。',
+    )
     console.log('\n现在可以启动服务：向量会在后台重新生成，所有人需要重新登录。')
   } finally {
     await database.close()
