@@ -86,9 +86,13 @@ const openRows = computed<DiffRow[]>(() => {
   return collapseUnchanged(diffLines(event.before.content ?? '', after))
 })
 
-// 改动之后的那一版就是现在的样子
-const isCurrent = (event: HistoryEvent) =>
-  !!event.after && !event.left && event.after.version === current.value?.version
+// 改动之后的那一版就是现在的样子。删除、过期后让出 URI 不改版本号，同一个版本号可能有好几个事件，只标最近的那个
+const currentEventId = computed(
+  () =>
+    events.value.find((e) => !!e.after && !e.left && e.after.version === current.value?.version)
+      ?.id ?? null,
+)
+const isCurrent = (event: HistoryEvent) => event.id === currentEventId.value
 // 服务端只恢复和现在同一归属、敏感级不高于现在的版本：改过层、移到别的人格或应用、
 // 或者调低过敏感级之后，之前的版本不能直接恢复
 const namespaceOf = (uri: string) => /^(?:persona|app):\/\/[^/]+/.exec(uri)?.[0] ?? null

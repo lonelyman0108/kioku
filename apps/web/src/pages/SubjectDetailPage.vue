@@ -113,7 +113,10 @@ async function reactivateFact(fact: SupersededFact) {
   reactivating.value = fact.id
   try {
     await api.reactivateFact(sid, subjectId.value, fact.id, fact.version)
-    toast.add({ title: '已重新生效，推翻它的那条还在', color: 'success' })
+    toast.add({
+      title: fact.supersededBy ? '已重新生效，推翻它的那条也还有效' : '已重新生效',
+      color: 'success',
+    })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '重新生效失败', color: 'error' })
   } finally {
