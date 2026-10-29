@@ -1,4 +1,4 @@
-import { createHash, createHmac, hkdfSync, randomBytes } from 'node:crypto'
+import { createHash, createHmac, hkdfSync, randomBytes, randomUUID } from 'node:crypto'
 
 import type {
   BindCode,
@@ -15,7 +15,7 @@ import { and, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { ACCOUNT_ATTEMPTS, APP_ATTEMPTS } from '../../access/binding'
+import { ACCOUNT_ATTEMPTS, APP_ATTEMPTS, PREVIEWERS, VOID_REQUESTS } from '../../access/binding'
 import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import {
@@ -246,6 +246,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     )
   const accountCounter = (platform: string, id: string) => JSON.stringify(['account', platform, id])
   const APP_COUNTER = JSON.stringify(['app'])
+  const voidCounter = (platform: string, id: string) => JSON.stringify(['void', platform, id])
   const wrongFor = (code: string) => (code === '22222222' ? '33333333' : '22222222')
 
   it('私聊里申请绑定码，到另一个平台的私聊里先预览、再确认：收码的对象并进发码的对象，平台账号、事实、私聊里记下的与缓冲都归过去', async () => {
@@ -344,7 +345,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(await subjectIdOf('tg', 'u2')).not.toBe(await subjectIdOf('qq', '1001'))
   })
 
-  it('同一个人再申请时旧码作废；码只能用一次；过期的不认', async () => {
+  it('同一个人再申请时旧码作废；码只能用一次；过期的不认；对得上这些失效的码不算输错，对不上任何一条的才算', async () => {
     const first = await codeFor(direct('1001'))
     const second = await codeFor(direct('1001'))
     expect(second).not.toBe(first)
@@ -368,6 +369,10 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     )
     expect(await errorOf(await redeem(third, direct('u4', 'tg'), key, true), 400)).toBe(INVALID)
     expect(await subjectIdOf('tg', 'u4')).not.toBe(await subjectIdOf('qq', '1002'))
+    // 被换掉、用过、过期的码都对得上记录，不算输错；对不上任何一条的才算
+    expect(Object.values(await counters()).every((n) => n === 0)).toBe(true)
+    expect(await errorOf(await redeem(wrongFor(third), direct('u4', 'tg')), 400)).toBe(INVALID)
+    expect(await counters()).toMatchObject({ [accountCounter('tg', 'u4')]: 1, [APP_COUNTER]: 1 })
   })
 
   it('群里不发码也不收码，不因此建对象', async () => {
@@ -384,39 +389,46 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
   })
 
-  it('群里发了绑定码：作废它，私聊里就用不了；码存不存在、是否已经作废，结果都一样；按发言人计次数', async () => {
+  it('群里发了绑定码：作废它，私聊里就用不了；码存不存在、是否已经作废，结果都一样；不占输错的名额，只按发言人限制请求次数', async () => {
     const code = await codeFor(direct('1001'))
     await resultOf(await redeem(code, direct('u1', 'tg')))
     const res = await voidIn(` ${code.toLowerCase()} `, inGroup('2002'))
     expect(res.status).toBe(204)
     expect(await res.text()).toBe('')
-    expect(await storedCodes()).toEqual([])
-    // 已经预览过的也不能接着确认了
+    // 作废就是让它马上过期，留到每小时的清理再删
+    const [voided] = await inSpace((tx) =>
+      tx.execute<{ dead: boolean }>(
+        sql`select expires_at <= now() as dead from subject_bind_codes`,
+      ),
+    )
+    expect(voided!.dead).toBe(true)
+    // 已经预览过的也不能接着确认了；码对得上作废了的记录，不算 u1 输错
     expect(await errorOf(await redeem(code, direct('u1', 'tg'), key, true), 400)).toBe(INVALID)
     // 再作废一次、作废一个从来没有的码、格式不对的：结果都一样
     for (const again of [code, wrongFor(code), 'hello']) {
       const other = await voidIn(again, inGroup('2002'))
       expect([other.status, await other.text()]).toEqual([204, ''])
     }
-    // 作废时格式不对的不计，别的每次都计（作废了真的码也不退，免得从计数看出码存不存在）；
-    // 作废之后 u1 再确认，码已经不在了，算它输错一次
+    // 作废不碰输错的名额：误把码贴到群里的人在私聊里一次机会也不少；只按发言人计请求次数，格式不对的不计
     expect(await counters()).toEqual({
-      [accountCounter('tg', 'u1')]: 1,
-      [accountCounter('qq', '2002')]: 3,
-      [APP_COUNTER]: 4,
+      [accountCounter('tg', 'u1')]: 0,
+      [APP_COUNTER]: 0,
+      [voidCounter('qq', '2002')]: 3,
     })
     // 不建对象：群和发言人都没有
     expect(await subjectIdOf('qq', '2002')).toBeUndefined()
 
-    // 拿它试码：同一个发言人超了上限之后，真的码也不作废，提示只看计数
+    // 在群里刷命令：同一个发言人一小时超过上限之后不再作废，提示只看计数
+    for (let i = 3; i < VOID_REQUESTS; i++) await voidIn(wrongFor(code), inGroup('2002'))
     const live = await codeFor(direct('1001'))
-    await voidIn(wrongFor(live), inGroup('2002'))
-    await voidIn(wrongFor(live), inGroup('2002'))
     expect(await errorOf(await voidIn(live, inGroup('2002')), 429)).toMatch(
-      /^输错的次数太多了，\d+ 分钟后再试$/,
+      /^作废的请求太多了，\d+ 分钟后再试$/,
     )
-    expect(await storedCodes()).toHaveLength(1)
     expect((await bind(live, direct('u2', 'tg'))).status).toBe('merged')
+    // 别的发言人照常作废
+    const next = await codeFor(direct('1001'))
+    expect((await voidIn(next, inGroup('2003'))).status).toBe(204)
+    expect(await errorOf(await redeem(next, direct('u5', 'tg')), 400)).toBe(INVALID)
 
     // 只收群里的，要带发言人
     expect(await errorOf(await voidIn(live, direct('u3', 'tg')), 400)).toBe(
@@ -809,6 +821,49 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(await subjectIdOf('tg', 'u1')).toBe(await subjectIdOf('qq', '1001'))
   })
 
+  it('拿到码的人换着账号预览也挤不走真正的用户；记满了就不再记新的预览者，已经记下的照样能确认', async () => {
+    const code = await codeFor(direct('1001'))
+    await resultOf(await redeem(code, direct('u1', 'tg')))
+    for (let i = 0; i < 12; i++) {
+      expect((await resultOf(await redeem(code, direct(`x${i}`, 'tg')))).status).toBe('preview')
+    }
+    // 补满上限：之后来的预览照样给，但不记下，也就确认不了
+    const [row] = await storedCodes()
+    const filler = Array.from({ length: PREVIEWERS - row!.previewedBy.length }, () => randomUUID())
+    await inSpace((tx) =>
+      tx.update(subjectBindCodes).set({ previewedBy: [...row!.previewedBy, ...filler] }),
+    )
+    for (let i = 0; i < 2; i++) {
+      expect((await resultOf(await redeem(code, direct('late', 'tg'), key, true))).status).toBe(
+        'preview',
+      )
+    }
+    expect((await storedCodes())[0]!.previewedBy).toHaveLength(PREVIEWERS)
+    expect((await resultOf(await redeem(code, direct('u1', 'tg'), key, true))).status).toBe(
+      'merged',
+    )
+    expect(await subjectIdOf('tg', 'u1')).toBe(await subjectIdOf('qq', '1001'))
+  })
+
+  it('中途出错时退回这一次的名额，不算输错', async () => {
+    const code = await codeFor(direct('1001'))
+    // 让预览时记下预览者的那一步出错
+    await database.db.execute(
+      sql`create function bind_test_fail() returns trigger language plpgsql as $$ begin raise exception '测试用的故障'; end $$`,
+    )
+    await database.db.execute(
+      sql`create trigger bind_test_fail before update on subject_bind_codes for each row execute function bind_test_fail()`,
+    )
+    try {
+      expect((await redeem(code, direct('u1', 'tg'))).status).toBe(500)
+    } finally {
+      await database.db.execute(sql`drop trigger bind_test_fail on subject_bind_codes`)
+      await database.db.execute(sql`drop function bind_test_fail()`)
+    }
+    expect(await counters()).toEqual({ [accountCounter('tg', 'u1')]: 0, [APP_COUNTER]: 0 })
+    expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
+  })
+
   it('同一个码被两边同时确认：只有一边成功', async () => {
     const code = await codeFor(direct('1001'))
     await resultOf(await redeem(code, direct('u1', 'tg')))
@@ -841,6 +896,12 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       expect(results.map((r) => r.status).sort()).toEqual([200, 400])
       const won = results.find((r) => r.status === 200)!
       expect(((await won.json()) as BindResult).status).toBe('merged')
+      // 输掉的一边码是对的、只是被抢先用了，不算输错
+      expect(await counters()).toEqual({
+        [accountCounter('tg', 'u1')]: 0,
+        [accountCounter('tg', 'u2')]: 0,
+        [APP_COUNTER]: 0,
+      })
     } finally {
       await pending?.catch(() => {})
       await side.end()

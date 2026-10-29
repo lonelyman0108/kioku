@@ -4,7 +4,7 @@ import type { BindingStatus, MemberRole, SubjectBinding } from '@kioku/contracts
 import { and, asc, desc, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 
-import { encryptionKey, type MasterKey } from '../crypto/keyring'
+import { keyringOf, type MasterKey } from '../crypto/keyring'
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
@@ -33,14 +33,17 @@ const CODE_FORMAT = new RegExp(`^[${CODE_ALPHABET}]{8}$`)
 export const CODE_TTL_SECONDS = 600
 // 等成员确认的绑定这么多天内有效
 export const PENDING_TTL_DAYS = 7
-// 一个码最多记这么多个预览过的收码对象，多了丢掉最早的
-const PREVIEWERS = 10
+// 一个码最多记这么多个预览过的收码对象。记满了就不再记新的，已经记下的不会被挤掉：
+// 拿到码的人换着账号预览，挤不走真正的用户；预览本身受码的 10 分钟有效期限制
+export const PREVIEWERS = 1000
 // 输错上限，一小时一个窗口：同一个收码的平台账号 5 次；同一个应用合计 1000 次，挡住换着账号猜。
 // 应用的上限放得宽，几十个小号也挡不住别人正常绑定：码有 31^8（约 8.5×10^11）种、只活 10 分钟，
 // 照每小时 1000 次猜，一个码活着的 10 分钟里最多被猜约 170 次，猜中的概率约 2×10^-10，可以忽略
 export const ATTEMPT_WINDOW_SECONDS = 3600
 export const ACCOUNT_ATTEMPTS = 5
 export const APP_ATTEMPTS = 1000
+// 在群里作废公开了的码：结果总是一样，探不出码，所以不占上面的输错名额，只按发言人限制请求的次数
+export const VOID_REQUESTS = 30
 
 export function generateCode(): string {
   let code = ''
@@ -54,11 +57,18 @@ export function normalizeCode(input: string): string | null {
   return CODE_FORMAT.test(code) ? code : null
 }
 
-// 算码的 HMAC 用的密钥：从主密钥派生，用途标签写明是绑定码，和备份等别的用途分开
-const codeKey = (master: MasterKey) =>
-  Buffer.from(
-    hkdfSync('sha256', encryptionKey(master).key, Buffer.alloc(0), 'kioku-bind-code-hmac', 32),
-  )
+// 算码的 HMAC 用的密钥：从当前的主密钥派生，用途标签写明是绑定码，和备份等别的用途分开。
+// 派生出的密钥按主密钥的 Buffer 缓存，不用每次用码都重跑 HKDF；换了主密钥就是另一个键
+const derivedKeys = new WeakMap<Buffer, Buffer>()
+function codeKey(master: MasterKey): Buffer {
+  const { current } = keyringOf(master)
+  let derived = derivedKeys.get(current)
+  if (!derived) {
+    derived = Buffer.from(hkdfSync('sha256', current, Buffer.alloc(0), 'kioku-bind-code-hmac', 32))
+    derivedKeys.set(current, derived)
+  }
+  return derived
+}
 
 // 库里只存哈希，带上应用：码只在同一个应用里用得了。配了主密钥时算 HMAC，密钥从主密钥派生：
 // 读得到库、拿不到主密钥的人，没法在码的 10 分钟有效期里把它暴力算出来。没配主密钥时只能用不带密钥的 SHA-256，
@@ -70,12 +80,14 @@ export function hashCode(master: MasterKey | null, appId: string, code: string):
     : createHash('sha256').update(input).digest('hex')
 }
 
-// 平台账号只露出头尾几位：收码的人认得出是不是自己的另一个账号，码落到别人手里也不把整个账号给出去
+// 平台账号只露出头尾几位，露出的不超过三分之一，开头多露一位：码落到别人手里也不把账号给出去。
+// 收码的人主要靠平台上的名字认出是不是自己的另一个账号，露出的几位只是帮着核对
 export function maskAccount(id: string): string {
   const chars = [...id]
-  return chars.length <= 4
-    ? `${chars[0] ?? ''}***`
-    : `${chars.slice(0, 2).join('')}***${chars.slice(-2).join('')}`
+  const shown = Math.floor(chars.length / 3)
+  const head = Math.ceil(shown / 2)
+  const tail = shown - head
+  return `${chars.slice(0, head).join('')}***${tail ? chars.slice(-tail).join('') : ''}`
 }
 
 // 在这个应用现在有效的码里找：逐条用常量时间比较、每条都比完，不按哈希去库里查，
@@ -107,6 +119,8 @@ export function canBindWithKey(key: KeyPrincipal): boolean {
 const accountKey = (platform: string, externalId: string) =>
   JSON.stringify(['account', platform, externalId])
 const APP_KEY = JSON.stringify(['app'])
+const voidKey = (platform: string, externalId: string) =>
+  JSON.stringify(['void', platform, externalId])
 
 async function bump(tx: Tx, key: KeyPrincipal, counter: string, delta: number) {
   const fresh = Math.max(delta, 0)
@@ -134,8 +148,8 @@ async function bump(tx: Tx, key: KeyPrincipal, counter: string, delta: number) {
 }
 
 export interface AttemptLimit {
-  // 哪一级超了：这个平台账号，或者整个应用
-  scope: 'account' | 'app'
+  // 哪一级超了：这个平台账号输错的次数、整个应用输错的次数，或者这个平台账号作废码的请求次数
+  scope: 'account' | 'app' | 'void'
   // 多久之后能再试
   waitSeconds: number
 }
@@ -177,6 +191,20 @@ export async function refundAttempt(
   })
 }
 
+// 在群里作废码的请求先占一次名额，按发言人计、不退：作废的结果总是一样，探不出码，所以不碰输错的名额，
+// 只限制请求的次数，免得在群里刷命令
+export async function reserveVoid(
+  db: Db,
+  key: KeyPrincipal,
+  platform: string,
+  externalId: string,
+): Promise<AttemptLimit | null> {
+  return withSpace(db, key.spaceId, async (tx) => {
+    const row = await bump(tx, key, voidKey(platform, externalId), 1)
+    return row.count > VOID_REQUESTS ? { scope: 'void', waitSeconds: row.waitSeconds } : null
+  })
+}
+
 // 每小时的清理：过期的绑定码（用过的也是到期就删）与过了窗口的输错计数。内容表开了 RLS，逐个空间处理。
 // 正被锁着的行跳过、下次再清：用码的请求按「这个账号 → 整个应用」的顺序锁计数行，这里按别的顺序等锁会互相等成死锁
 export async function pruneBindingData(db: Db): Promise<{ codes: number; attempts: number }> {
@@ -205,7 +233,8 @@ export async function pruneBindingData(db: Db): Promise<{ codes: number; attempt
 
 // ---- 申请与使用绑定码 ----
 
-// 申请绑定码：锁住发码的对象（同一个对象同时申请两次时排队），删掉它之前的码（旧码作废），换一个新的。
+// 申请绑定码：锁住发码的对象（同一个对象同时申请两次时排队），让它之前还有效的码马上过期（旧码作废），换一个新的。
+// 旧码留到每小时的清理再删：有人发来旧码时认得出是作废了的码，不算输错。
 // 码在同一个应用里不重复，撞上了（概率极小）就重新生成。发言人的对象在解析之后刚好被合并掉时返回 null
 export async function issueCode(
   db: Db,
@@ -219,7 +248,12 @@ export async function issueCode(
   return withSpace(db, key.spaceId, async (tx) => {
     const [subject] = await lockSubjects(tx, [subjectId])
     if (!subject) return null
-    await tx.delete(subjectBindCodes).where(eq(subjectBindCodes.subjectId, subjectId))
+    await tx
+      .update(subjectBindCodes)
+      .set({ expiresAt: sql`now()` })
+      .where(
+        and(eq(subjectBindCodes.subjectId, subjectId), gt(subjectBindCodes.expiresAt, sql`now()`)),
+      )
     for (let tries = 0; tries < 5; tries++) {
       const code = generateCode()
       const [row] = await tx
@@ -259,8 +293,9 @@ export type RedeemResult =
   | { kind: 'preview'; target: BindTarget; needsApproval: boolean }
   | { kind: 'merged'; outcome: MergeOutcome }
   | { kind: 'pending'; expiresAt: Date }
-  // 码不对、过期了、用过了、作废了或被新码换掉了，或是别的应用的：一律这样说，不透露是哪种
-  | { kind: 'invalid' }
+  // 码不对、过期了、用过了、作废了或被新码换掉了，或是别的应用的：一律这样说，不透露是哪种。
+  // wrong：对不上任何一条记录，算一次输错；对得上、只是已经失效的不算
+  | { kind: 'invalid'; wrong: boolean }
   // 收码的就是发码的对象（同一个账号，或者已经并在一起）
   | { kind: 'same' }
   // 收码的对象标记成了别的成员；issuerLinked：发码的对象也标记了成员（两边是不同的成员）
@@ -270,22 +305,18 @@ export type RedeemResult =
   // 收码的对象在解析之后刚好被合并掉了，再试一次就行
   | { kind: 'busy' }
 
-// 这个应用现在有效的码：只认这个应用的，别的空间的码在 RLS 之外，根本读不到
-function liveCodes(tx: Tx, appId: string) {
+// 这个应用还留着的码，连同现在还能不能用：用过、过期与作废的留到每小时的清理才删，对得上它们的不算输错。
+// 只认这个应用的，别的空间的码在 RLS 之外，根本读不到
+function appCodes(tx: Tx, appId: string) {
   return tx
     .select({
       id: subjectBindCodes.id,
       subjectId: subjectBindCodes.subjectId,
       codeHash: subjectBindCodes.codeHash,
+      live: sql<boolean>`${subjectBindCodes.usedAt} is null and ${subjectBindCodes.expiresAt} > now()`,
     })
     .from(subjectBindCodes)
-    .where(
-      and(
-        eq(subjectBindCodes.appId, appId),
-        isNull(subjectBindCodes.usedAt),
-        gt(subjectBindCodes.expiresAt, sql`now()`),
-      ),
-    )
+    .where(eq(subjectBindCodes.appId, appId))
 }
 
 // 使用绑定码，全部检查与合并在一个事务里。session 是收码的这次私聊。
@@ -303,8 +334,9 @@ export async function redeemCode(
   const fromId = session.context.senderSubjectId!
   const hash = hashCode(master, key.app.id, code)
   return withSpace(db, key.spaceId, async (tx) => {
-    const match = matchCode(await liveCodes(tx, key.app.id), hash)
-    if (!match) return { kind: 'invalid' }
+    const match = matchCode(await appCodes(tx, key.app.id), hash)
+    if (!match) return { kind: 'invalid', wrong: true }
+    if (!match.live) return { kind: 'invalid', wrong: false }
     if (match.subjectId === fromId) return { kind: 'same' }
     // 先按 id 的顺序锁住两个对象，再锁码：和合并对象的加锁顺序一致（合并删掉对象时连带删它的码）
     const rows = await lockSubjects(tx, [match.subjectId, fromId])
@@ -322,7 +354,7 @@ export async function redeemCode(
       .for('update')
     const into = rows.find((r) => r.id === match.subjectId)
     const from = rows.find((r) => r.id === fromId)
-    if (!held || !into) return { kind: 'invalid' }
+    if (!held || !into) return { kind: 'invalid', wrong: false }
     if (!from) return { kind: 'busy' }
     if (into.kind !== from.kind) return { kind: 'kind' }
     // 收码的对象只能是没标记的，或者和发码的对象标记成同一个成员：否则这个平台账号会被挂到别人的标记下
@@ -336,10 +368,10 @@ export async function redeemCode(
 
     const previewed = held.previewedBy.includes(from.id)
     if (!confirm || !previewed) {
-      if (!previewed) {
+      if (!previewed && held.previewedBy.length < PREVIEWERS) {
         await tx
           .update(subjectBindCodes)
-          .set({ previewedBy: [...held.previewedBy, from.id].slice(-PREVIEWERS) })
+          .set({ previewedBy: [...held.previewedBy, from.id] })
           .where(eq(subjectBindCodes.id, held.id))
       }
       const [identity] = await tx
@@ -413,7 +445,7 @@ export async function redeemCode(
   })
 }
 
-// 群里发出来的码大家都看得到：作废它（删掉），不合并。码不对、已经用过、过期或者已经作废时什么也不做，
+// 群里发出来的码大家都看得到：作废它（让它马上过期），不合并。码不对、已经用过、过期或者已经作废时什么也不做，
 // 调用方不管哪种都给同样的结果，不透露码存不存在
 export async function voidCode(
   db: Db,
@@ -423,8 +455,13 @@ export async function voidCode(
 ): Promise<void> {
   const hash = hashCode(master, key.app.id, code)
   await withSpace(db, key.spaceId, async (tx) => {
-    const match = matchCode(await liveCodes(tx, key.app.id), hash)
-    if (match) await tx.delete(subjectBindCodes).where(eq(subjectBindCodes.id, match.id))
+    const match = matchCode(await appCodes(tx, key.app.id), hash)
+    if (match?.live) {
+      await tx
+        .update(subjectBindCodes)
+        .set({ expiresAt: sql`now()` })
+        .where(and(eq(subjectBindCodes.id, match.id), gt(subjectBindCodes.expiresAt, sql`now()`)))
+    }
   })
 }
 

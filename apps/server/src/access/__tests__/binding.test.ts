@@ -37,11 +37,18 @@ describe('绑定码', () => {
     expect(hashCode(master, 'other', 'ABCD2345')).not.toBe(hashCode(master, 'app', 'ABCD2345'))
   })
 
-  it('平台账号只露出头尾几位', () => {
-    expect(maskAccount('10086001')).toBe('10***01')
+  it('平台账号只露出头尾几位，露出的不超过三分之一', () => {
+    expect(maskAccount('12345678901')).toBe('12***1')
+    expect(maskAccount('10086001')).toBe('1***1')
+    expect(maskAccount('123456')).toBe('1***6')
+    expect(maskAccount('12345')).toBe('1***')
     expect(maskAccount('1001')).toBe('1***')
-    expect(maskAccount('u1')).toBe('u***')
+    expect(maskAccount('u1')).toBe('***')
     expect(maskAccount('')).toBe('***')
-    expect(maskAccount('😀😀😀😀😀')).toBe('😀😀***😀😀')
+    expect(maskAccount('😀😀😀😀😀😀')).toBe('😀***😀')
+    for (const id of ['1', '12', '123', '1234', '12345', '123456', '1234567', '123456789012']) {
+      const shown = maskAccount(id).replace('***', '').length
+      expect(shown * 3).toBeLessThanOrEqual(id.length)
+    }
   })
 })

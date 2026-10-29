@@ -16,8 +16,10 @@ import {
   redeemCode,
   refundAttempt,
   reserveAttempt,
+  reserveVoid,
   voidCode,
   type AttemptLimit,
+  type RedeemResult,
 } from '../access/binding'
 import { resolveKeySession } from '../access/session'
 import { enqueueMerged, isLockBusy } from '../access/subjects'
@@ -71,7 +73,7 @@ const voidRoute = createRoute({
   path: '/bind/void',
   tags: ['binding'],
   summary:
-    '群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；按发言人计输错的次数，免得拿它试码',
+    '群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；不占输错的次数，只按发言人限制请求的次数',
   security,
   request: { body: jsonBody(VoidBindCodeRequest) },
   responses: {
@@ -79,16 +81,27 @@ const voidRoute = createRoute({
     400: jsonResponse('不是群聊，或者没带发言人', ErrorResponse),
     401: jsonResponse('Key 无效', ErrorResponse),
     403: jsonResponse('Key 写不了对象层', ErrorResponse),
-    429: jsonResponse('输错的次数太多', ErrorResponse),
+    429: jsonResponse('请求太多', ErrorResponse),
   },
 })
 
-// 超了上限时的提示只看计数，不看码：不透露发来的码存不存在
-function limitMessage(limit: AttemptLimit): string {
+const LIMIT_MESSAGES: Record<AttemptLimit['scope'], string> = {
+  account: '输错的次数太多了',
+  app: '最近输错绑定码的太多',
+  void: '作废的请求太多了',
+}
+
+// 占一次名额。超了时设好 Retry-After，返回给人看的提示，调用方拿它回 429；没超时为 null。
+// 提示只看计数，不看码：不透露发来的码存不存在
+async function overLimit(
+  c: { header: (name: string, value: string) => void },
+  reserve: Promise<AttemptLimit | null>,
+): Promise<string | null> {
+  const limit = await reserve
+  if (!limit) return null
+  c.header('Retry-After', String(limit.waitSeconds))
   const minutes = Math.max(1, Math.ceil(limit.waitSeconds / 60))
-  return limit.scope === 'account'
-    ? `输错的次数太多了，${minutes} 分钟后再试`
-    : `最近输错绑定码的太多，${minutes} 分钟后再试`
+  return `${LIMIT_MESSAGES[limit.scope]}，${minutes} 分钟后再试`
 }
 
 export function bindingRoutes(deps: Deps) {
@@ -136,34 +149,38 @@ export function bindingRoutes(deps: Deps) {
       if (!code) return c.json({ error: '绑定码是 8 位字母和数字' }, 400)
       const platform = context.platform!
       const sender = context.sender!
-      const limit = await reserveAttempt(deps.db, key, platform, sender.id)
-      if (limit) {
-        c.header('Retry-After', String(limit.waitSeconds))
-        return c.json({ error: limitMessage(limit) }, 429)
-      }
-      const session = await resolveKeySession(deps, key, context)
-      const redeemer = {
-        platform,
-        externalId: sender.id,
-        displayName: session.subjects.find((s) => s.role === 'sender')?.name ?? null,
-      }
-      const result = await redeemCode(
-        deps.db,
-        deps.masterKey,
-        key,
-        session,
-        code,
-        redeemer,
-        body.confirm,
-      ).catch((err: unknown) => {
-        if (isLockBusy(err)) return { kind: 'busy' as const }
-        throw err
-      })
-      // 只有码不对才算输错，别的结果都退回这一次的名额。绑定已经提交时，退回失败只记日志、照样返回成功
-      if (result.kind !== 'invalid') {
-        await refundAttempt(deps.db, key, platform, sender.id).catch((err: unknown) => {
-          console.error('退回绑定码的输错名额失败', err)
+      const tooMany = await overLimit(c, reserveAttempt(deps.db, key, platform, sender.id))
+      if (tooMany) return c.json({ error: tooMany }, 429)
+      // 只有码对不上任何一条记录才算输错：别的结果（码对得上、只是已经失效，预览、绑成了或因为别的原因没绑成，
+      // 以及中途出错）都在 finally 里退回这一次的名额。绑定已经提交时，退回失败只记日志、照样返回成功
+      let wrong = false
+      let result: RedeemResult
+      try {
+        const session = await resolveKeySession(deps, key, context)
+        const redeemer = {
+          platform,
+          externalId: sender.id,
+          displayName: session.subjects.find((s) => s.role === 'sender')?.name ?? null,
+        }
+        result = await redeemCode(
+          deps.db,
+          deps.masterKey,
+          key,
+          session,
+          code,
+          redeemer,
+          body.confirm,
+        ).catch((err: unknown) => {
+          if (isLockBusy(err)) return { kind: 'busy' as const }
+          throw err
         })
+        wrong = result.kind === 'invalid' && result.wrong
+      } finally {
+        if (!wrong) {
+          await refundAttempt(deps.db, key, platform, sender.id).catch((err: unknown) => {
+            console.error('退回绑定码的输错名额失败', err)
+          })
+        }
       }
       switch (result.kind) {
         case 'preview':
@@ -220,12 +237,12 @@ export function bindingRoutes(deps: Deps) {
       // 格式不对的不可能是哪个码，什么都不用做
       const code = normalizeCode(body.code)
       if (!code) return c.body(null, 204)
-      // 每次都算一次：作废了一个真的码也不退，免得能从计数看出码存不存在
-      const limit = await reserveAttempt(deps.db, key, context.platform!, context.sender.id)
-      if (limit) {
-        c.header('Retry-After', String(limit.waitSeconds))
-        return c.json({ error: limitMessage(limit) }, 429)
-      }
+      // 不占输错的名额（结果总是一样，探不出码），只按发言人限制请求的次数，免得在群里刷命令
+      const tooMany = await overLimit(
+        c,
+        reserveVoid(deps.db, key, context.platform!, context.sender.id),
+      )
+      if (tooMany) return c.json({ error: tooMany }, 429)
       await voidCode(deps.db, deps.masterKey, key, code)
       return c.body(null, 204)
     })
