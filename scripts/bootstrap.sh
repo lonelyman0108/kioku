@@ -14,10 +14,10 @@ git config core.hooksPath .githooks
 echo "core.hooksPath = $(git config core.hooksPath)"
 
 echo "工具检查："
-for t in node pnpm shellcheck actionlint gh gitleaks git-cliff; do
+for t in node pnpm uv shellcheck actionlint gh gitleaks git-cliff; do
   case "$t" in
     node|pnpm) level=必需 ;;
-    shellcheck|actionlint) level=门禁必需 ;;
+    uv|shellcheck|actionlint) level=门禁必需 ;;
     gh) level='pr.sh 与发布' ;;
     *) level=可选 ;;
   esac
