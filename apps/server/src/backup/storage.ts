@@ -8,6 +8,7 @@ import { s3Client, type S3Client, type S3Location, type S3Object } from './s3'
 import {
   loadBackupConfig,
   loadBackupStatus,
+  loadBackupTarget,
   recordBackupError,
   recordBackupSuccess,
   type BackupConfig,
@@ -74,21 +75,24 @@ export async function backupJob(
   masterKey: MasterKey | null,
   force: boolean,
 ): Promise<'skipped' | 'done' | 'failed'> {
-  const config = await loadBackupConfig(db, masterKey)
-  if (!config) return 'skipped'
+  const target = await loadBackupTarget(db)
+  if (!target) return 'skipped'
   if (!force) {
     const { lastSuccess } = await loadBackupStatus(db)
-    if (!isDue(new Date(), config.hour, lastSuccess ? new Date(lastSuccess.at) : null)) {
+    if (!isDue(new Date(), target.hour, lastSuccess ? new Date(lastSuccess.at) : null)) {
       return 'skipped'
     }
   }
+  // 解开设置里的 Secret 也算在里面：解不开（例如没配主密钥）同样记下原因给管理员看
   try {
     if (!masterKey) throw new Error('备份用主密钥加密：服务端没有配置 KIOKU_MASTER_KEY')
+    const config = await loadBackupConfig(db, masterKey)
+    if (!config) return 'skipped'
     const { run, warning } = await uploadBackup(db, masterKey, config)
     await recordBackupSuccess(db, config, run, warning)
     return 'done'
   } catch (err) {
-    await recordBackupError(db, config, (err as Error).message)
+    await recordBackupError(db, target, (err as Error).message)
     return 'failed'
   }
 }

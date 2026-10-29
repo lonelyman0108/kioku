@@ -232,6 +232,9 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect(await backupJob(database.db, masterKey, true)).toBe('done')
     const config = (await loadBackupConfig(database.db, masterKey))!
     const run = (await loadBackupStatus(database.db)).lastSuccess!
+    // 接口地址末尾多一个 /：还是同一个位置，结果照样算数
+    await save({ endpoint: `${s3.endpoint}/`, secretAccessKey: undefined })
+    expect((await loadBackupStatus(database.db)).lastSuccess).toEqual(run)
     // 换了前缀：之前的结果不算数，下一个小时的检查往新位置做一份
     await save({ prefix: 'moved', secretAccessKey: undefined })
     expect((await loadBackupStatus(database.db)).lastSuccess).toBeNull()
@@ -284,6 +287,14 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
 
   it('传不上去时记下原因；删旧的出错时这份照样算做成，记下提醒', async () => {
     await save()
+    // 设置里的 Secret 解不开、或者没配主密钥：也记下原因
+    expect(await backupJob(database.db, randomBytes(32), true)).toBe('failed')
+    expect((await loadBackupStatus(database.db)).lastError).not.toBeNull()
+    expect(await backupJob(database.db, null, true)).toBe('failed')
+    expect((await loadBackupStatus(database.db)).lastError?.message).toContain(
+      '没有配置 KIOKU_MASTER_KEY',
+    )
+
     s3.fail(403, 'PUT')
     expect(await backupJob(database.db, masterKey, true)).toBe('failed')
     let status = await loadBackupStatus(database.db)

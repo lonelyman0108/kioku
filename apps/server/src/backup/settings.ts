@@ -1,5 +1,5 @@
 import type { BackupSettingsView, BackupStatus, UpdateBackupSettings } from '@kioku/contracts'
-import { eq, inArray } from 'drizzle-orm'
+import { eq } from 'drizzle-orm'
 
 import type { Sealed } from '../crypto/envelope'
 import type { MasterKey } from '../crypto/keyring'
@@ -40,6 +40,14 @@ const sameLocation = (a: Location, b: Location) =>
 async function loadStored(db: Db): Promise<Stored | undefined> {
   const [row] = await db.select().from(settings).where(eq(settings.key, KEY)).limit(1)
   return row?.value as Stored | undefined
+}
+
+// 不用解密就读得到的部分：存储位置与每天的钟点。设置解不开时，后台任务也能把错误记到这个位置上
+export async function loadBackupTarget(db: Db): Promise<(Location & { hour: number }) | null> {
+  const stored = await loadStored(db)
+  return stored
+    ? { endpoint: stored.endpoint, bucket: stored.bucket, prefix: stored.prefix, hour: stored.hour }
+    : null
 }
 
 export async function loadBackupStatus(db: Db): Promise<BackupStatus> {
@@ -124,7 +132,8 @@ export async function saveBackupSettings(
       { name: 'Secret Access Key', required: true },
     )!
     const value: Stored = {
-      endpoint: input.endpoint,
+      // 去掉末尾的 /：同一个地址写法不同，不该算成换了位置
+      endpoint: input.endpoint.replace(/\/+$/, ''),
       region: input.region,
       bucket: input.bucket,
       prefix: input.prefix,
@@ -143,20 +152,21 @@ export async function saveBackupSettings(
   })
 }
 
+// 先删设置、再删结果：和记结果时加锁的顺序一样（先设置、后结果），同时发生也不会互相等成死锁
+async function removeSettings(tx: Tx): Promise<boolean> {
+  const removed = await tx.delete(settings).where(eq(settings.key, KEY)).returning()
+  await tx.delete(settings).where(eq(settings.key, STATUS_KEY))
+  return removed.length > 0
+}
+
 // 清掉设置，定时备份随即停止；最近的结果一起清掉。存储桶里已有的备份不动
 export async function clearBackupSettings(db: Db): Promise<void> {
-  await db.delete(settings).where(inArray(settings.key, [KEY, STATUS_KEY]))
+  await db.transaction(removeSettings)
 }
 
 // 恢复出的实例不沿用备份设置：试恢复的实例会和正在用的实例往同一个目录写、互相把对方的备份当旧的删掉。
 // 在恢复的事务里清掉，返回之前是否配着
-export async function forgetBackupSettings(tx: Tx): Promise<boolean> {
-  const removed = await tx
-    .delete(settings)
-    .where(inArray(settings.key, [KEY, STATUS_KEY]))
-    .returning({ key: settings.key })
-  return removed.some((r) => r.key === KEY)
-}
+export const forgetBackupSettings = (tx: Tx): Promise<boolean> => removeSettings(tx)
 
 export async function loadBackupConfig(
   db: Db,

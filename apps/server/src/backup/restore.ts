@@ -107,18 +107,22 @@ const initializedError = (accounts: number, spaces: number) =>
     `这个实例已经初始化过（${accounts} 个账号、${spaces} 个空间）：只能恢复到没有账号和空间的新实例`,
   )
 
-// 恢复之前先看一眼：库还没建表、或者没有账号和空间才能恢复。写回时在事务里锁住表再查一遍
-export async function assertUninitialized(db: Db): Promise<void> {
-  const [table] = await db.execute<{ exists: boolean }>(
-    sql`select to_regclass('public.accounts') is not null as exists`,
-  )
-  if (!table?.exists) return
+// 实例初始化过（有账号或空间）时报错：恢复只能写到新实例
+async function assertNoAccounts(db: Db | Tx): Promise<void> {
   const [existing] = await db.execute<{ accounts: number; spaces: number }>(sql`
     select (select count(*) from public.accounts)::int as accounts,
       (select count(*) from public.spaces)::int as spaces`)
   if (existing!.accounts || existing!.spaces) {
     throw initializedError(existing!.accounts, existing!.spaces)
   }
+}
+
+// 恢复之前先看一眼：库还没建表、或者没有账号和空间才能恢复。写回时在事务里锁住表再查一遍
+export async function assertUninitialized(db: Db): Promise<void> {
+  const [table] = await db.execute<{ exists: boolean }>(
+    sql`select to_regclass('public.accounts') is not null as exists`,
+  )
+  if (table?.exists) await assertNoAccounts(db)
 }
 
 // 把备份恢复到一个没有初始化的实例（没有账号和空间）。库是新建的空库时，先把迁移执行到做备份时的位置
@@ -210,12 +214,7 @@ async function writeSections(
   const tables = [...new Set(sections.map((s) => s.table))]
   // 恢复期间别的连接（例如没停的服务）不能初始化这个实例
   await tx.execute(sql`lock table public.accounts, public.spaces in share mode`)
-  const [existing] = await tx.execute<{ accounts: number; spaces: number }>(sql`
-    select (select count(*) from public.accounts)::int as accounts,
-      (select count(*) from public.spaces)::int as spaces`)
-  if (existing!.accounts || existing!.spaces) {
-    throw initializedError(existing!.accounts, existing!.spaces)
-  }
+  await assertNoAccounts(tx)
   // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：URI 互斥的检查每行一把咨询锁，
   // 上万条记忆放在一个事务里会占满锁表；触发器写下的派生数据本身也在备份里，再执行一遍会重复。外键照常检查。
   // 到事务结束前这些表别的连接也写不进来
