@@ -283,10 +283,22 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       tx.execute<{ max: number }>(sql`select max(id)::int as max from memory_events`),
     )
     await wipe('2030-01-01T00:00:00.000Z')
+    const started = Date.now()
     const result = await restore(file)
     expect(result.rows).toEqual(summary.rows)
     expect(result.upgraded).toBe(0)
-    expect(await snapshot()).toEqual(before)
+    // 和备份时一样，只多出恢复时记下的恢复时间：保留期的清理暂停到它加上保留天数
+    const restored = await snapshot()
+    const pause = restored.settings!.find(
+      (row) => (JSON.parse(row) as { key: string }).key === 'retention',
+    )
+    expect((JSON.parse(pause!) as { value: unknown }).value).toEqual({
+      restoredAt: expect.any(String),
+    })
+    expect(result.retentionPausedUntil.getTime()).toBeGreaterThanOrEqual(started + 30 * 86_400_000)
+    expect({ ...restored, settings: restored.settings!.filter((row) => row !== pause) }).toEqual(
+      before,
+    )
     await prepareMasterKey(database.db, masterKey)
 
     // 会话不在备份里，要重新登录
@@ -333,7 +345,8 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     expect(summary.rows.settings).toBe(0)
     await wipe('2030-01-01T00:00:00.000Z')
     await restore(file)
-    expect(await database.db.select().from(settings)).toEqual([])
+    // 只剩恢复时记下的恢复时间（保留期的清理暂停到它加上保留天数）
+    expect((await database.db.select().from(settings)).map((s) => s.key)).toEqual(['retention'])
   })
 
   it('两万条带 URI 的记忆也在一个事务里写回：不逐行加 URI 互斥检查的咨询锁', async () => {

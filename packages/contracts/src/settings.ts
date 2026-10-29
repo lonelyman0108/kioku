@@ -127,6 +127,47 @@ export const RecallSettings = z.object({
 })
 export type RecallSettings = z.infer<typeof RecallSettings>
 
+// 保留期：删掉的记忆（连同历史、向量、关键词、凭据引用与召回统计）、被推翻的抽取事实、过期的会话摘要，
+// 以及抽取记录、凭据事件、已删除的凭据与凭据源，过了这么多天由每天一次的清理硬删除。
+// 和召回事件明细的保留天数是两回事
+export const DEFAULT_RETENTION_DAYS = 30
+export const RetentionSettings = z.object({
+  days: z.number().int().min(1).max(3650),
+})
+export type RetentionSettings = z.infer<typeof RetentionSettings>
+
+// 一次清理每一类删了多少
+export const RetentionCounts = z.object({
+  deletedMemories: z.number().int(),
+  supersededFacts: z.number().int(),
+  expiredSummaries: z.number().int(),
+  // 记忆整行已经不在的历史事件（例如删账号时数据库连带删掉的记忆留下的）
+  orphanEvents: z.number().int(),
+  // 事件留着、快照里的正文抹掉了的：已删账号的画像层与私人层快照，记忆已经不在的导入事件
+  scrubbedSnapshots: z.number().int(),
+  extractionRuns: z.number().int(),
+  credentialEvents: z.number().int(),
+  deletedCredentials: z.number().int(),
+  deletedProviders: z.number().int(),
+})
+export type RetentionCounts = z.infer<typeof RetentionCounts>
+
+export const RetentionStatus = z.object({
+  // 最近一次清理：开始的时间、按多少天算的、每一类删了多少
+  lastRun: z.object({ at: z.string(), days: z.number().int(), counts: RetentionCounts }).nullable(),
+  // 最近一次清理出的错（有一类没删成也算）；之后整次没出错就清掉
+  lastError: z.object({ message: z.string(), at: z.string() }).nullable(),
+})
+export type RetentionStatus = z.infer<typeof RetentionStatus>
+
+export const RetentionView = RetentionSettings.extend({
+  // 从备份恢复出的实例暂停清理，到恢复的时间加上保留天数为止：这段时间里到期的都是恢复之前删掉的，
+  // 留一个完整的保留期去找回。调保留天数时结束时间跟着变；没有暂停时为 null
+  pause: z.object({ restoredAt: z.string(), until: z.string() }).nullable(),
+  status: RetentionStatus,
+})
+export type RetentionView = z.infer<typeof RetentionView>
+
 // 备份到兼容S3的对象存储：每天到了设定的钟点（UTC）做一份全实例的加密备份传上去，存储桶里只留最近的几份。
 // Secret Access Key 用主密钥加密后存库，不返回
 const BackupRun = z.object({

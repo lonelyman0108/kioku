@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type { BootResponse } from '@kioku/contracts'
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq, isNull, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -13,6 +13,7 @@ import { saveExtractionConfig } from '../../extraction/settings'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { consoleAccess } from '../../access/access'
+import { purgeExpired } from '../../jobs/retention'
 import { MemoryService } from '../../memory/service'
 import {
   applyImport,
@@ -614,6 +615,56 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       } finally {
         await undoPrefs()
         await undoNetwork()
+      }
+    })
+
+    it('导入后删掉的记忆过了保留期被硬删除：同步与再导入都不写回，导入事件只剩写到的 URI', async () => {
+      await run()
+      expect((await remove('infra://office_network')).status).toBe(204)
+      const network = and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network'))
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(memories)
+          .set({ deletedAt: new Date(Date.now() - 31 * 86_400_000) })
+          .where(network),
+      )
+      expect((await purgeExpired(database.db, { days: 30, now: new Date() })).counts).toMatchObject(
+        { deletedMemories: 1 },
+      )
+      const traces = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.select().from(memoryEvents).where(isNull(memoryEvents.memoryId)),
+      )
+      expect(traces).toEqual([
+        expect.objectContaining({
+          eventType: 'import',
+          before: null,
+          after: { domain: 'infra', path: 'office_network' },
+          context: expect.objectContaining({
+            source: 'lore',
+            loreUri: 'infra://office_network',
+          }) as unknown,
+        }),
+      ])
+      expect(JSON.stringify(traces)).not.toContain('办公室的网络')
+      expect(JSON.stringify(traces)).not.toContain('排查网络时')
+
+      const undo = await editLore('infra://office_network', { content: 'Lore 里又改了' })
+      try {
+        const sync = await syncPlan()
+        expect(sync.items.find((i) => i.source === 'infra://office_network')).toMatchObject({
+          state: 'deleted',
+          uri: 'infra://office_network',
+        })
+        expect((await applySync(target(), sync)).updated).toEqual([])
+        const again = await run()
+        expect(again.created).toEqual([])
+        expect(again.previouslyImported).toContain('infra://office_network')
+        const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select().from(memories).where(network),
+        )
+        expect(rows).toEqual([])
+      } finally {
+        await undo()
       }
     })
 

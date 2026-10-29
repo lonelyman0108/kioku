@@ -38,6 +38,7 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     enqueueBackup: async () => null,
     backupRun: async () => null,
     enqueueExtraction: async () => {},
+    enqueueCleanup: async () => true,
   }
 
   beforeAll(async () => {

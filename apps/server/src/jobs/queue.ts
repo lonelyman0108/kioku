@@ -11,6 +11,7 @@ import type { EmbedderSource } from '../embedding/source'
 import type { BufferedSession } from '../extraction/buffer'
 import { processSession } from '../extraction/worker'
 import { cleanupExpired } from './cleanup'
+import { retentionJob } from './retention'
 
 const EMBED = 'embed-memory'
 const BACKFILL = 'embed-backfill'
@@ -20,7 +21,7 @@ const ROTATE = 'rotate-master-key'
 const CLEANUP = 'cleanup-expired'
 const EXTRACT = 'extract-session'
 const BACKUP = 'backup'
-// 每小时清一次过期的数据（见 cleanupExpired）
+// 每小时清一次过期的数据（见 cleanupExpired）；保留期的硬删除跟在后面，一天做一次（见 retentionJob）
 const CLEANUP_CRON = '17 * * * *'
 // 写回向量时记忆正被别的事务锁着，隔这么久再试
 const RETRY_AFTER_SECONDS = 10
@@ -54,6 +55,8 @@ export interface Jobs {
   enqueueBackup(): Promise<string | null>
   // 按编号查一次立即备份的状态；编号不对、或者早就清理掉了时为 null
   backupRun(id: string): Promise<BackupRunStatus | null>
+  // 马上做一次定时清理（例如提前结束了从备份恢复之后的保留期暂停）；返回是否入队成功
+  enqueueCleanup(): Promise<boolean>
 }
 
 // 后台任务都放在 PostgreSQL 里（pg-boss，schema 为 pgboss），不需要 Redis。
@@ -151,8 +154,20 @@ export async function startJobs(options: {
     }
   })
   if (masterKey && keyringOf(masterKey).previous) void send(ROTATE, {})
+  // 保留期的硬删除放在同一个任务里、清完过期的数据之后再做：和召回明细的清理不会同时跑、互相等锁。
+  // 两步各做各的，前一步出错不挡住后一步
   await boss.work(CLEANUP, async () => {
-    await cleanupExpired(options.db)
+    const expired = await cleanupExpired(options.db).then(
+      () => null,
+      (err: unknown) => err,
+    )
+    const retained = await retentionJob(options.db)
+    if (retained) {
+      const total = Object.values(retained.counts).reduce((a, b) => a + b, 0)
+      if (total) console.log(`保留期清理：删掉或抹掉了 ${total} 条`)
+      for (const error of retained.errors) console.error(`保留期清理出错：${error}`)
+    }
+    if (expired) throw expired
   })
   await boss.work<BufferedSession>(EXTRACT, async (jobs) => {
     for (const { data } of jobs) await processSession(options.db, options.masterKey, data)
@@ -187,6 +202,7 @@ export async function startJobs(options: {
     enqueueSwitch: () => send(SWITCH, {}).then(queued),
     enqueuePrune: () => send(PRUNE, {}, PRUNE_AFTER_SECONDS).then(queued),
     enqueueBackup: () => send(BACKUP, { force: true }, undefined, false).then((id) => id ?? null),
+    enqueueCleanup: () => send(CLEANUP, {}).then(queued),
     backupRun: async (id) => {
       const job = await boss.getJobById<{ force?: boolean }>(BACKUP, id).catch(() => null)
       if (!job) return null

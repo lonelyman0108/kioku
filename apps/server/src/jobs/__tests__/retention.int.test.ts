@@ -1,0 +1,807 @@
+import { randomBytes, randomUUID } from 'node:crypto'
+
+import type {
+  ConsoleCredential,
+  CredentialProvider,
+  MemoryHistory,
+  MemoryView,
+  RetentionCounts,
+  RetentionView,
+} from '@kioku/contracts'
+import { asc, eq, inArray, sql } from 'drizzle-orm'
+import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+
+import { createApp } from '../../app'
+import { withSpace, type Database, type Tx } from '../../db/client'
+import {
+  accounts,
+  credentialEvents,
+  credentialProviders,
+  credentials,
+  extractionRuns,
+  memories,
+  memoryCredentialRefs,
+  memoryEmbeddings,
+  memoryEvents,
+  memoryGlossary,
+  memoryRecallStats,
+  recallEventHits,
+  recallEvents,
+  settings,
+  spaces,
+  subjects,
+} from '../../db/schema'
+import { staticEmbedderSource } from '../../embedding/source'
+import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { markRestored, purgeExpired, RETENTION_BATCH, retentionJob } from '../retention'
+
+const DAY = 86_400_000
+const ago = (days: number, from = Date.now()) => new Date(from - days * DAY)
+const KEYS = ['retention', 'retention-status']
+
+const ZERO: RetentionCounts = {
+  deletedMemories: 0,
+  supersededFacts: 0,
+  expiredSummaries: 0,
+  orphanEvents: 0,
+  scrubbedSnapshots: 0,
+  extractionRuns: 0,
+  credentialEvents: 0,
+  deletedCredentials: 0,
+  deletedProviders: 0,
+}
+
+describe.skipIf(!testDatabaseUrl)('保留期', () => {
+  let database: Database
+  let app: ReturnType<typeof createApp>
+  let ws: Workspace
+
+  // 实例设置不挂在空间下，resetDatabase 清不到：只清保留期的两项，结束时也清掉
+  const clearSettings = () => database.db.delete(settings).where(inArray(settings.key, KEYS))
+
+  beforeAll(async () => {
+    database = await openTestDatabase()
+    app = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: randomBytes(32),
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+    })
+  })
+  afterAll(async () => {
+    if (!database) return
+    await clearSettings()
+    await database.close()
+  })
+  beforeEach(async () => {
+    await resetDatabase(database)
+    await clearSettings()
+    ws = await bootstrap(app)
+  })
+
+  const inSpace = <T>(fn: (tx: Tx) => Promise<T>, spaceId = ws.spaceId) =>
+    withSpace(database.db, spaceId, fn)
+  // 管理界面的请求，默认是空间 owner（alice）
+  const send = (
+    method: string,
+    path: string,
+    body?: unknown,
+    cookie = ws.cookie,
+    spaceId = ws.spaceId,
+  ) =>
+    app.request(
+      `/v1/spaces/${spaceId}${path}`,
+      body === undefined
+        ? { method, headers: { cookie, 'sec-fetch-site': 'same-origin' } }
+        : jsonRequest(method, body, { cookie }),
+    )
+  const ok = async <T>(res: Response, status = 200): Promise<T> => {
+    if (res.status !== status) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
+    return (status === 204 ? undefined : await res.json()) as T
+  }
+  const createMemory = async (body: object, cookie = ws.cookie, spaceId = ws.spaceId) =>
+    ok<MemoryView>(await send('POST', '/memories', body, cookie, spaceId), 201)
+  const updateMemory = async (body: object, cookie = ws.cookie) =>
+    ok<MemoryView>(await send('PATCH', '/memories', body, cookie))
+  const deleteMemory = async (uri: string, cookie = ws.cookie, spaceId = ws.spaceId) =>
+    ok(
+      await send('DELETE', `/memories?uri=${encodeURIComponent(uri)}`, undefined, cookie, spaceId),
+      204,
+    )
+  const history = async (id: string) =>
+    ok<MemoryHistory>(await send('GET', `/memories/history?id=${id}`))
+  // 把删除的时间挪到 days 天前
+  const deletedDaysAgo = (id: string, days: number, spaceId = ws.spaceId) =>
+    inSpace(
+      (tx) =>
+        tx
+          .update(memories)
+          .set({ deletedAt: ago(days) })
+          .where(eq(memories.id, id)),
+      spaceId,
+    )
+  const purge = (days = 30, now = new Date()) => purgeExpired(database.db, { days, now })
+  const memoryIds = async (spaceId = ws.spaceId) =>
+    (await inSpace((tx) => tx.select({ id: memories.id }).from(memories), spaceId)).map((r) => r.id)
+  // 一条记忆留下的事件：按 memory_id 找，也按快照里记下的 id 找（memory_id 被置空的也算）
+  const eventsAbout = (id: string) =>
+    inSpace((tx) =>
+      tx
+        .select()
+        .from(memoryEvents)
+        .where(
+          sql`${memoryEvents.memoryId} = ${id} or ${memoryEvents.before} ->> 'id' = ${id} or ${memoryEvents.after} ->> 'id' = ${id}`,
+        )
+        .orderBy(asc(memoryEvents.id)),
+    )
+
+  it('已删除的记忆过了保留期连同历史、向量、关键词、凭据引用、召回明细与累计统计一起删掉；没到期的留着', async () => {
+    await ok(
+      await send('POST', '/credentials', {
+        identifier: 'nas',
+        name: 'NAS',
+        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+      }),
+      201,
+    )
+    const old = await createMemory({
+      uri: 'notes://old',
+      content: 'NAS 的密码见 {{cred:nas#password}}',
+      glossary: ['旧笔记'],
+    })
+    await updateMemory({ uri: 'notes://old', content: 'NAS 在书房，密码见 {{cred:nas#password}}' })
+    const recent = await createMemory({
+      uri: 'notes://recent',
+      content: '最近才删的，密码见 {{cred:nas#password}}',
+      glossary: ['新笔记'],
+    })
+    const live = await createMemory({ uri: 'notes://live', content: '还在用的' })
+    await deleteMemory('notes://old')
+    await deleteMemory('notes://recent')
+    await deletedDaysAgo(old.id, 31)
+    await deletedDaysAgo(recent.id, 29)
+    // 向量、召回明细与累计统计直接写进表里
+    await inSpace(async (tx) => {
+      const [event] = await tx
+        .insert(recallEvents)
+        .values({
+          spaceId: ws.spaceId,
+          appId: randomUUID(),
+          ownerAccountId: ws.accountId,
+          source: 'rest.recall',
+        })
+        .returning()
+      for (const [rank, m] of [old, recent, live].entries()) {
+        await tx.insert(memoryEmbeddings).values({
+          spaceId: ws.spaceId,
+          memoryId: m.id,
+          model: 'm',
+          contentHash: 'h',
+          embedding: Array.from({ length: 1024 }, () => 0.1),
+        })
+        await tx.insert(memoryRecallStats).values({
+          spaceId: ws.spaceId,
+          memoryId: m.id,
+          count: 3,
+          lastRecalledAt: ago(40),
+        })
+        await tx.insert(recallEventHits).values({
+          eventId: event!.id,
+          spaceId: ws.spaceId,
+          memoryId: m.id,
+          rank: rank + 1,
+          score: 1,
+          via: ['fts'],
+        })
+      }
+    })
+    expect(await eventsAbout(old.id)).toHaveLength(3)
+
+    const { counts, errors } = await purge()
+    expect(errors).toEqual([])
+    expect(counts).toEqual({ ...ZERO, deletedMemories: 1 })
+    expect((await memoryIds()).sort()).toEqual([recent.id, live.id].sort())
+    expect(await eventsAbout(old.id)).toEqual([])
+    expect((await eventsAbout(recent.id)).map((e) => e.eventType)).toEqual(['create', 'delete'])
+    const left = await inSpace(async (tx) => ({
+      embeddings: await tx.select({ id: memoryEmbeddings.memoryId }).from(memoryEmbeddings),
+      glossary: await tx.select({ id: memoryGlossary.memoryId }).from(memoryGlossary),
+      refs: await tx.select({ id: memoryCredentialRefs.memoryId }).from(memoryCredentialRefs),
+      hits: await tx.select({ id: recallEventHits.memoryId }).from(recallEventHits),
+      stats: await tx.select({ id: memoryRecallStats.memoryId }).from(memoryRecallStats),
+      events: await tx.select().from(recallEvents),
+    }))
+    const ids = (rows: { id: string | null }[]) => rows.map((r) => r.id).sort()
+    expect(ids(left.embeddings)).toEqual([recent.id, live.id].sort())
+    expect(ids(left.glossary)).toEqual([recent.id])
+    expect(ids(left.refs)).toEqual([recent.id])
+    expect(ids(left.hits)).toEqual([recent.id, live.id].sort())
+    expect(ids(left.stats)).toEqual([recent.id, live.id].sort())
+    // 召回事件本身留着，按召回明细自己的保留天数清理
+    expect(left.events).toHaveLength(1)
+    // 已经删干净了，再清一次什么都不做
+    expect((await purge()).counts).toEqual(ZERO)
+  })
+
+  it('被推翻的抽取事实与过期的会话摘要过了保留期删掉；到期的策展记忆没删除就留着，让出 URI 时软删除的照「已删除」清', async () => {
+    const [subject] = await inSpace((tx) =>
+      tx
+        .insert(subjects)
+        .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })
+        .returning(),
+    )
+    const extracted = {
+      spaceId: ws.spaceId,
+      form: 'extracted' as const,
+      sensitivity: 'public' as const,
+      provenance: 'untrusted' as const,
+      originScope: `direct:${subject!.id}`,
+    }
+    const fact = (content: string, validTo: Date | null) => ({
+      ...extracted,
+      layer: 'subject' as const,
+      subjectId: subject!.id,
+      content,
+      validTo,
+    })
+    const summary = (content: string, expiresAt: Date) => ({
+      ...extracted,
+      layer: 'episode' as const,
+      content,
+      expiresAt,
+    })
+    const curated = (path: string, extra: { validTo: Date; deletedAt?: Date }) => ({
+      spaceId: ws.spaceId,
+      form: 'curated' as const,
+      layer: 'base' as const,
+      sensitivity: 'internal' as const,
+      provenance: 'owner' as const,
+      domain: 'notes',
+      path,
+      content: `${path} 的正文`,
+      ...extra,
+    })
+    const rows = await inSpace((tx) =>
+      tx
+        .insert(memories)
+        .values([
+          fact('推翻了很久的', ago(31)),
+          fact('推翻了更久的', ago(35)),
+          fact('刚被推翻的', ago(29)),
+          fact('还有效的', null),
+          summary('过期很久的摘要', ago(31)),
+          summary('刚过期的摘要', ago(29)),
+          summary('还没过期的摘要', ago(-10)),
+          curated('expired', { validTo: ago(40) }),
+          curated('released', { validTo: ago(45), deletedAt: ago(40) }),
+        ])
+        .returning(),
+    )
+    const byContent = (content: string) => rows.find((r) => r.content === content)!.id
+    const superseded = byContent('推翻了很久的')
+    await inSpace((tx) =>
+      tx.insert(memoryEvents).values(
+        ['create', 'update'].map((eventType) => ({
+          spaceId: ws.spaceId,
+          memoryId: superseded,
+          eventType,
+          provenance: 'untrusted' as const,
+          after: { id: superseded, content: '推翻了很久的' },
+        })),
+      ),
+    )
+
+    const { counts } = await purge()
+    expect(counts).toEqual({
+      ...ZERO,
+      deletedMemories: 1,
+      supersededFacts: 2,
+      expiredSummaries: 1,
+    })
+    const left = await inSpace((tx) =>
+      tx.select({ content: memories.content }).from(memories).orderBy(asc(memories.content)),
+    )
+    expect(left.map((r) => r.content).sort()).toEqual(
+      [
+        '刚被推翻的',
+        '还有效的',
+        '刚过期的摘要',
+        '还没过期的摘要',
+        // 到期的策展记忆一直留着，等人决定要不要重新生效
+        'expired 的正文',
+      ].sort(),
+    )
+    expect(await eventsAbout(superseded)).toEqual([])
+  })
+
+  it('记忆硬删除时导入事件留下当作去重记录：memory_id 置空，快照只剩 URI', async () => {
+    const imported = await createMemory({
+      uri: 'notes://imported',
+      content: '从 Lore 导进来的正文',
+      disclosure: '想起 Lore 时',
+      glossary: ['导入'],
+    })
+    // 和导入工具写下的一样：事件类型是 import，context 里是去重用的出处
+    await inSpace((tx) =>
+      tx
+        .update(memoryEvents)
+        .set({ eventType: 'import', context: { source: 'lore', loreNodeUuid: 'node-1' } })
+        .where(eq(memoryEvents.memoryId, imported.id)),
+    )
+    await updateMemory({ uri: 'notes://imported', content: '在 Kioku 里改过' })
+    await deleteMemory('notes://imported')
+    await deletedDaysAgo(imported.id, 31)
+
+    expect((await purge()).counts).toEqual({ ...ZERO, deletedMemories: 1 })
+    const traces = await inSpace((tx) => tx.select().from(memoryEvents))
+    expect(traces).toEqual([
+      expect.objectContaining({
+        memoryId: null,
+        eventType: 'import',
+        before: null,
+        after: { domain: 'notes', path: 'imported' },
+        context: { source: 'lore', loreNodeUuid: 'node-1' },
+      }),
+    ])
+    // 已经削过的不再算一次
+    expect((await purge()).counts).toEqual(ZERO)
+  })
+
+  it('删账号留下的快照：记忆整行不在的事件删掉、导入事件削成 URI；已删账号个人层的快照抹掉正文，别人看到的历史不变', async () => {
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    // 只在 bob 的私人层：删账号时数据库连带删掉
+    const diary = await createMemory(
+      {
+        uri: 'notes://diary',
+        content: '鲍勃的日记',
+        disclosure: '写日记时',
+        glossary: ['日记'],
+      },
+      bob.cookie,
+    )
+    await updateMemory({ uri: 'notes://diary', content: '鲍勃的日记，第二天' }, bob.cookie)
+    await inSpace((tx) =>
+      tx.insert(memoryEvents).values({
+        spaceId: ws.spaceId,
+        memoryId: diary.id,
+        eventType: 'import',
+        provenance: 'system',
+        after: { domain: 'notes', path: 'diary', content: '鲍勃的日记（导入）' },
+        context: { source: 'lore', loreNodeUuid: 'node-diary' },
+      }),
+    )
+    // 在 bob 的私人层写过草稿，之后改成了共享的基础层：记忆留着，私人层时的快照里有草稿
+    const draft = await createMemory(
+      { uri: 'notes://draft', content: '鲍勃私下的草稿', disclosure: '草稿' },
+      bob.cookie,
+    )
+    await updateMemory(
+      { uri: 'notes://draft', content: '公开的版本', layer: 'base', sensitivity: 'internal' },
+      bob.cookie,
+    )
+    await updateMemory({ uri: 'notes://draft', content: '公开的版本，alice 改过' })
+    // alice 的共享记忆被 bob 拿进私人层又放回来：alice 看得到一条「离开」
+    const shared = await createMemory({
+      uri: 'notes://shared',
+      content: '共享的笔记',
+      layer: 'base',
+      sensitivity: 'internal',
+    })
+    await updateMemory(
+      { uri: 'notes://shared', layer: 'private', content: '在鲍勃那里改过的' },
+      bob.cookie,
+    )
+    await updateMemory(
+      { uri: 'notes://shared', layer: 'base', sensitivity: 'internal', content: '放回来的版本' },
+      bob.cookie,
+    )
+    // 还在的账号的私人层历史不动
+    const mine = await createMemory({ uri: 'notes://mine', content: 'alice 的私事' })
+    await updateMemory({ uri: 'notes://mine', content: 'alice 的私事，改过' })
+
+    await database.db.delete(accounts).where(eq(accounts.id, bob.accountId))
+    expect(await memoryIds()).not.toContain(diary.id)
+    // 删账号之后、清理之前 alice 看到的历史（bob 的名字已经随账号没了）
+    const before = {
+      draft: await history(draft.id),
+      shared: await history(shared.id),
+      mine: await history(mine.id),
+    }
+    expect(before.shared.events.map((e) => [e.type, e.left])).toEqual([
+      ['create', false],
+      ['update', true],
+    ])
+    expect(before.mine.events.map((e) => e.after?.content)).toEqual([
+      'alice 的私事',
+      'alice 的私事，改过',
+    ])
+
+    const { counts } = await purge()
+    // 日记的新建与修改两条删掉、导入的那条削掉；草稿的两条与共享笔记的两条抹掉正文
+    expect(counts).toEqual({ ...ZERO, orphanEvents: 2, scrubbedSnapshots: 5 })
+    const rows = await inSpace((tx) => tx.select().from(memoryEvents))
+    const text = JSON.stringify(rows)
+    for (const secret of ['鲍勃的日记', '鲍勃私下的草稿', '在鲍勃那里改过的', '写日记时', '日记']) {
+      expect(text).not.toContain(secret)
+    }
+    expect(rows.filter((r) => r.memoryId === null)).toEqual([
+      expect.objectContaining({
+        eventType: 'import',
+        after: { domain: 'notes', path: 'diary' },
+        context: { source: 'lore', loreNodeUuid: 'node-diary' },
+      }),
+    ])
+    // 抹掉的只是正文、disclosure 与关键词，判断可见性的字段留着：alice 看到的历史和之前一样
+    expect({
+      draft: await history(draft.id),
+      shared: await history(shared.id),
+      mine: await history(mine.id),
+    }).toEqual(before)
+    expect((await purge()).counts).toEqual(ZERO)
+  })
+
+  it('抽取记录与凭据事件按时间删；本月（UTC）的抽取记录留着，抽取预算按它们算用量', async () => {
+    const now = new Date('2026-03-10T12:00:00Z')
+    const bot = await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })
+    const run = (createdAt: string) => ({
+      spaceId: ws.spaceId,
+      appId: bot.id,
+      scope: 'group:x',
+      subjectIds: [],
+      turns: 1,
+      createdAt: new Date(createdAt),
+    })
+    const credential = await ok<ConsoleCredential>(
+      await send('POST', '/credentials', {
+        identifier: 'nas',
+        name: 'NAS',
+        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+      }),
+      201,
+    )
+    const event = (createdAt: string) => ({
+      spaceId: ws.spaceId,
+      credentialId: credential.id,
+      eventType: 'access',
+      createdAt: new Date(createdAt),
+    })
+    await inSpace(async (tx) => {
+      await tx
+        .insert(extractionRuns)
+        .values([
+          run('2026-02-20T00:00:00Z'),
+          run('2026-03-05T00:00:00Z'),
+          run('2026-03-09T00:00:00Z'),
+        ])
+      await tx
+        .insert(credentialEvents)
+        .values([event('2026-03-01T00:00:00Z'), event('2026-03-08T00:00:00Z')])
+    })
+
+    // 保留 3 天：3 月 7 日中午之前的到期；3 月 5 日的抽取记录在本月，留着
+    const { counts } = await purge(3, now)
+    expect(counts).toEqual({ ...ZERO, extractionRuns: 1, credentialEvents: 1 })
+    const runs = await inSpace((tx) =>
+      tx.select({ at: extractionRuns.createdAt }).from(extractionRuns),
+    )
+    expect(runs.map((r) => r.at.toISOString()).sort()).toEqual([
+      '2026-03-05T00:00:00.000Z',
+      '2026-03-09T00:00:00.000Z',
+    ])
+    const events = await inSpace((tx) =>
+      tx
+        .select({ type: credentialEvents.eventType, at: credentialEvents.createdAt })
+        .from(credentialEvents),
+    )
+    // 新建凭据时记下的事件是现在写的，还没到期
+    expect(events.map((e) => e.type).sort()).toEqual(['access', 'create'])
+  })
+
+  it('已删除的凭据与凭据源过了保留期删掉；还有凭据指着的凭据源留着，保留期里已删除的凭据也算', async () => {
+    const provider = async (name: string) =>
+      ok<CredentialProvider>(
+        await send('POST', '/credential-providers', { kind: 'bitwarden', name }),
+        201,
+      )
+    const external = async (identifier: string, providerId: string) =>
+      ok<ConsoleCredential>(
+        await send('POST', '/credentials', {
+          identifier,
+          name: identifier,
+          source: {
+            kind: 'external',
+            providerId,
+            location: `${identifier} item`,
+            fields: [{ name: 'password', sourceField: 'password' }],
+          },
+        }),
+        201,
+      )
+    const hosted = async (identifier: string) =>
+      ok<ConsoleCredential>(
+        await send('POST', '/credentials', {
+          identifier,
+          name: identifier,
+          source: { kind: 'hosted', values: { password: 'pw' } },
+        }),
+        201,
+      )
+    const removeCredential = async (id: string) =>
+      ok(await send('DELETE', `/credentials/${id}`), 204)
+    const removeProvider = async (id: string) =>
+      ok(await send('DELETE', `/credential-providers/${id}`), 204)
+
+    // 没有凭据指着的凭据源
+    const lonely = await provider('没人用的')
+    await removeProvider(lonely.id)
+    // 凭据删掉、凭据源删掉之后又把凭据恢复了：凭据还在用，显示「凭据源已删除」
+    const revived = await provider('凭据恢复了的')
+    const router = await external('router', revived.id)
+    await removeCredential(router.id)
+    await removeProvider(revived.id)
+    await ok(await send('POST', `/credentials/${router.id}/undelete`))
+    // 凭据最近才删：还能恢复，凭据源也留着
+    const pending = await provider('凭据刚删的')
+    const nas = await external('nas', pending.id)
+    await removeCredential(nas.id)
+    await removeProvider(pending.id)
+    // 凭据与凭据源都早就删了：一起删掉
+    const gone = await provider('都删了很久的')
+    const wifi = await external('wifi', gone.id)
+    await removeCredential(wifi.id)
+    await removeProvider(gone.id)
+    const oldHosted = await hosted('old-hosted')
+    await removeCredential(oldHosted.id)
+    const newHosted = await hosted('new-hosted')
+    await removeCredential(newHosted.id)
+    await inSpace(async (tx) => {
+      const setCredential = (id: string, days: number) =>
+        tx
+          .update(credentials)
+          .set({ deletedAt: ago(days) })
+          .where(eq(credentials.id, id))
+      const setProvider = (id: string, days: number) =>
+        tx
+          .update(credentialProviders)
+          .set({ deletedAt: ago(days) })
+          .where(eq(credentialProviders.id, id))
+      for (const p of [lonely, revived, pending, gone]) await setProvider(p.id, 40)
+      await setCredential(nas.id, 10)
+      await setCredential(wifi.id, 40)
+      await setCredential(oldHosted.id, 31)
+      await setCredential(newHosted.id, 29)
+    })
+
+    const { counts, errors } = await purge()
+    expect(errors).toEqual([])
+    expect(counts).toEqual({ ...ZERO, deletedCredentials: 2, deletedProviders: 2 })
+    const left = await inSpace(async (tx) => ({
+      credentials: await tx.select({ id: credentials.id }).from(credentials),
+      providers: await tx.select({ id: credentialProviders.id }).from(credentialProviders),
+      // 删掉的凭据的事件随凭据一起删掉
+      events: await tx.selectDistinct({ id: credentialEvents.credentialId }).from(credentialEvents),
+    }))
+    const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort()
+    expect(ids(left.credentials)).toEqual([router.id, nas.id, newHosted.id].sort())
+    expect(ids(left.providers)).toEqual([revived.id, pending.id].sort())
+    expect(ids(left.events)).toEqual([router.id, nas.id, newHosted.id].sort())
+    const view = await ok<ConsoleCredential>(await send('GET', `/credentials/${router.id}`))
+    expect(view.provider).toMatchObject({ id: revived.id, deleted: true })
+  })
+
+  it('正被别的事务锁着的记忆（例如正在撤销删除）这次跳过、不等锁，下一次再删', async () => {
+    const busy = await createMemory({ uri: 'notes://busy', content: '正在撤销删除' })
+    const idle = await createMemory({ uri: 'notes://idle', content: '没人碰' })
+    for (const m of [busy, idle]) {
+      await deleteMemory(m.uri)
+      await deletedDaysAgo(m.id, 40)
+    }
+    await database.db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('app.space_id', ${ws.spaceId}, true)`)
+      await tx.execute(sql`select 1 from memories where id = ${busy.id} for update`)
+      expect((await purge()).counts).toEqual({ ...ZERO, deletedMemories: 1 })
+    })
+    expect(await memoryIds()).toEqual([busy.id])
+    expect((await purge()).counts).toEqual({ ...ZERO, deletedMemories: 1 })
+    expect(await memoryIds()).toEqual([])
+  })
+
+  it('跨空间各删各的', async () => {
+    const [other] = await database.db.insert(spaces).values({ name: '别人家' }).returning()
+    const dave = await addMember(database.db, other!.id, 'dave', 'owner')
+    const plant = async (cookie: string, spaceId: string) => {
+      const old = await createMemory({ uri: 'notes://old', content: '早就删了' }, cookie, spaceId)
+      const recent = await createMemory({ uri: 'notes://recent', content: '刚删' }, cookie, spaceId)
+      await deleteMemory('notes://old', cookie, spaceId)
+      await deleteMemory('notes://recent', cookie, spaceId)
+      await deletedDaysAgo(old.id, 40, spaceId)
+      await deletedDaysAgo(recent.id, 10, spaceId)
+      return recent.id
+    }
+    const mine = await plant(ws.cookie, ws.spaceId)
+    const theirs = await plant(dave.cookie, other!.id)
+
+    const { counts } = await purge()
+    expect(counts.deletedMemories).toBe(2)
+    expect(await memoryIds()).toEqual([mine])
+    expect(await memoryIds(other!.id)).toEqual([theirs])
+  })
+
+  it('超过一批的分几批删完', async () => {
+    const total = RETENTION_BATCH + 20
+    await inSpace(async (tx) => {
+      await tx.execute(sql`
+        insert into memories (space_id, form, layer, sensitivity, provenance, content, deleted_at)
+        select ${ws.spaceId}::uuid, 'extracted'::memory_form, 'episode'::memory_layer,
+          'public'::sensitivity, 'untrusted'::provenance, '摘要 ' || g, ${ago(40).toISOString()}::timestamptz
+        from generate_series(1, ${total}::int) g`)
+      await tx.execute(sql`
+        insert into memory_events (space_id, memory_id, event_type, provenance, after)
+        select space_id, id, 'create', provenance, jsonb_build_object('content', content)
+        from memories`)
+    })
+    expect((await purge()).counts).toEqual({ ...ZERO, deletedMemories: total })
+    expect(await memoryIds()).toEqual([])
+    expect(await inSpace((tx) => tx.select().from(memoryEvents))).toEqual([])
+  })
+
+  it('一天（UTC）做一次，结果记在设置里；有一类出错时记下原因、别的照常删，之后整次没出错就清掉', async () => {
+    const bot = await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })
+    const plant = async (uri: string) => {
+      const memory = await createMemory({ uri, content: '早就删了' })
+      await deleteMemory(uri)
+      await deletedDaysAgo(memory.id, 40)
+      await inSpace((tx) =>
+        tx.insert(extractionRuns).values({
+          spaceId: ws.spaceId,
+          appId: bot.id,
+          scope: 'group:x',
+          subjectIds: [],
+          turns: 1,
+          createdAt: ago(400),
+        }),
+      )
+    }
+    const view = async () =>
+      ok<RetentionView>(
+        await app.request('/v1/settings/retention', {
+          headers: { cookie: ws.cookie },
+        }),
+      )
+    expect(await view()).toEqual({
+      days: 30,
+      pause: null,
+      status: { lastRun: null, lastError: null },
+    })
+
+    await plant('notes://first')
+    const day1 = new Date('2030-05-01T08:00:00Z')
+    await database.db.execute(sql`
+      create or replace function retention_test_fail() returns trigger language plpgsql
+      as $$ begin raise exception '测试里故意出的错'; end $$`)
+    await database.db.execute(sql`
+      create trigger retention_test_fail before delete on extraction_runs
+      for each row execute function retention_test_fail()`)
+    try {
+      const first = await retentionJob(database.db, day1)
+      expect(first?.counts).toEqual({ ...ZERO, deletedMemories: 1 })
+    } finally {
+      await database.db.execute(sql`drop trigger if exists retention_test_fail on extraction_runs`)
+      await database.db.execute(sql`drop function if exists retention_test_fail()`)
+    }
+    let status = (await view()).status
+    expect(status.lastRun).toEqual({
+      at: day1.toISOString(),
+      days: 30,
+      counts: { ...ZERO, deletedMemories: 1 },
+    })
+    expect(status.lastError?.message).toContain('抽取记录：测试里故意出的错')
+
+    // 同一天（UTC）不再做
+    await plant('notes://second')
+    expect(await retentionJob(database.db, new Date('2030-05-01T23:00:00Z'))).toBeNull()
+    expect((await view()).status.lastRun?.at).toBe(day1.toISOString())
+
+    const day2 = new Date('2030-05-02T00:17:00Z')
+    expect((await retentionJob(database.db, day2))?.counts).toEqual({
+      ...ZERO,
+      deletedMemories: 1,
+      extractionRuns: 2,
+    })
+    status = (await view()).status
+    expect(status.lastRun?.at).toBe(day2.toISOString())
+    expect(status.lastError).toBeNull()
+  })
+
+  it('保留天数只有实例管理员能看、能改；改了之后按新的天数删', async () => {
+    const put = (body: unknown, cookie = ws.cookie) =>
+      app.request('/v1/settings/retention', jsonRequest('PUT', body, { cookie }))
+    expect((await put({ days: 0 })).status).toBe(400)
+    expect((await put({ days: 3651 })).status).toBe(400)
+    const saved = await ok<RetentionView>(await put({ days: 7 }))
+    expect(saved).toEqual({ days: 7, pause: null, status: { lastRun: null, lastError: null } })
+    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    expect(
+      (await app.request('/v1/settings/retention', { headers: { cookie: editor.cookie } })).status,
+    ).toBe(403)
+    expect((await put({ days: 30 }, editor.cookie)).status).toBe(403)
+    expect(
+      (
+        await app.request(
+          '/v1/settings/retention/resume',
+          jsonRequest('POST', {}, { cookie: editor.cookie }),
+        )
+      ).status,
+    ).toBe(403)
+
+    const memory = await createMemory({ uri: 'notes://week', content: '删了八天' })
+    await deleteMemory('notes://week')
+    await deletedDaysAgo(memory.id, 8)
+    expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
+  })
+
+  it('从备份恢复之后暂停到恢复时间加保留天数；调大天数暂停跟着延长；提前开始之后马上能清', async () => {
+    const view = async () =>
+      ok<RetentionView>(
+        await app.request('/v1/settings/retention', { headers: { cookie: ws.cookie } }),
+      )
+    const restoredAt = new Date()
+    const plant = async (uri: string, days: number) => {
+      const memory = await createMemory({ uri, content: '恢复之前就删了的' })
+      await deleteMemory(uri)
+      await deletedDaysAgo(memory.id, days)
+      return memory.id
+    }
+    const kept = await plant('notes://restored', 40)
+    // 上一个实例最近一次清理的结果随恢复清掉
+    await database.db.insert(settings).values({
+      key: 'retention-status',
+      value: { lastRun: null, lastError: { message: '旧的', at: restoredAt.toISOString() } },
+    })
+    const until = await database.db.transaction((tx) => markRestored(tx, restoredAt))
+    expect(until.getTime()).toBe(restoredAt.getTime() + 30 * DAY)
+    expect(await view()).toEqual({
+      days: 30,
+      pause: { restoredAt: restoredAt.toISOString(), until: until.toISOString() },
+      status: { lastRun: null, lastError: null },
+    })
+
+    const later = (days: number) => new Date(restoredAt.getTime() + days * DAY)
+    expect(await retentionJob(database.db, later(1))).toBeNull()
+    expect(await memoryIds()).toContain(kept)
+
+    // 调大天数：暂停的结束时间跟着往后挪，保存不会结束暂停
+    const saved = await ok<RetentionView>(
+      await app.request(
+        '/v1/settings/retention',
+        jsonRequest('PUT', { days: 60 }, { cookie: ws.cookie }),
+      ),
+    )
+    expect(saved.pause).toEqual({
+      restoredAt: restoredAt.toISOString(),
+      until: later(60).toISOString(),
+    })
+    expect(await retentionJob(database.db, later(45))).toBeNull()
+    expect(await memoryIds()).toContain(kept)
+    // 过了恢复时间加天数之后照常清
+    expect((await retentionJob(database.db, later(61)))?.counts.deletedMemories).toBe(1)
+    expect(await memoryIds()).not.toContain(kept)
+
+    // 再恢复一次，点「现在开始清理」：暂停清掉，马上就能清（保留天数现在是 60）
+    const again = await plant('notes://again', 70)
+    await database.db.transaction((tx) => markRestored(tx, new Date()))
+    expect(await retentionJob(database.db)).toBeNull()
+    const resumed = await ok<RetentionView>(
+      await app.request(
+        '/v1/settings/retention/resume',
+        jsonRequest('POST', {}, { cookie: ws.cookie }),
+      ),
+    )
+    expect(resumed.pause).toBeNull()
+    expect(resumed.days).toBe(60)
+    expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
+    expect(await memoryIds()).not.toContain(again)
+  })
+})
