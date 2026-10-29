@@ -10,7 +10,7 @@ import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { draftOf, draftsChanged, inputOf, type ChannelDraft } from '../embeddingDrafts'
+import { draftOf, draftsChanged, inputOf, switchEnded, type ChannelDraft } from '../embeddingDrafts'
 import { icons } from '../icons'
 import EmbeddingChannels from './EmbeddingChannels.vue'
 
@@ -123,8 +123,15 @@ watch(
     if (JSON.stringify(value) === syncedNext) return
     const discarded = previous ? draftsChanged(nextDrafts.value, previous.channels) : false
     syncNext(value)
-    if (!value && previous && active.value?.model === previous.model) {
-      toast.add({ title: `已换成 ${previous.model}，旧模型的向量会在后台删掉`, color: 'success' })
+    const ended = switchEnded(previous, value, active.value)
+    // 进度只在换模型期间自己刷新：换模型结束（补齐后自动切过去、现在切换或放弃）之后再读一次、接着跟一会儿，
+    // 不然向量卡片停在原来那个模型的数字上；现在切换之后，还没有新向量的记忆在后台接着补
+    if (ended) {
+      startPolling()
+      void status.refetch()
+    }
+    if (ended === 'switched') {
+      toast.add({ title: `已换成 ${previous!.model}，旧模型的向量会在后台删掉`, color: 'success' })
     }
     if (discarded) {
       toast.add({ title: '换模型的设置在后台变了，没保存的渠道改动已经丢掉', color: 'warning' })

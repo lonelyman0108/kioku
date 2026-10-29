@@ -1,4 +1,8 @@
-import type { EmbeddingChannelInput, EmbeddingChannelView } from '@kioku/contracts'
+import type {
+  EmbeddingChannelInput,
+  EmbeddingChannelView,
+  EmbeddingSetupView,
+} from '@kioku/contracts'
 
 // 一个嵌入渠道的编辑草稿：同一个模型的几个接口，按顺序请求，前一个出错时换下一个
 export interface ChannelDraft {
@@ -51,4 +55,14 @@ export function draftsChanged(drafts: ChannelDraft[], saved: EmbeddingChannelVie
       )
     })
   )
+}
+
+// 设置里正在换过去的模型没了：切过去了（它成了正在用的模型），还是放弃了。还在换、本来就没在换时为 null
+export function switchEnded(
+  previous: EmbeddingSetupView | null | undefined,
+  next: EmbeddingSetupView | null,
+  active: EmbeddingSetupView | null,
+): 'switched' | 'abandoned' | null {
+  if (!previous || next) return null
+  return active?.model === previous.model ? 'switched' : 'abandoned'
 }
