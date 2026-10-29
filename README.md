@@ -58,7 +58,7 @@ mkdir -p ~/kioku-backup
 docker compose -f docker-compose.example.yml exec -T kioku node server/dist/backup.mjs --out - > ~/kioku-backup/kioku-$(date +%F-%H%M%S).backup
 ```
 
-**恢复到新实例**：新实例的 `.env` 里配做备份时的 `KIOKU_MASTER_KEY`（备份之后轮换过的话，新的那把配在 `KIOKU_MASTER_KEY`，做备份时的配在 `KIOKU_MASTER_KEY_PREVIOUS`），数据库是新建的空库，恢复之前不要启动服务。恢复先执行迁移，核对格式、主密钥与迁移，再按原来的 id 写回，在一个事务里做完，失败时什么都不留下；库里已经有账号或空间时拒绝。较早版本做的备份也能用新版本恢复。恢复之后所有人重新登录，Key 照常可用，向量在后台重新生成。
+**恢复到新实例**：新实例的 `.env` 里配做备份时的 `KIOKU_MASTER_KEY`（备份之后轮换过的话，新的那把配在 `KIOKU_MASTER_KEY`，做备份时的配在 `KIOKU_MASTER_KEY_PREVIOUS`），数据库是新建的空库，恢复之前不要启动服务。恢复先核对格式、主密钥与迁移，把迁移执行到做备份时的位置，再按原来的 id 写回并执行这个版本新增的迁移（较早版本做的备份也能用新版本恢复）；写回与新增的迁移在一个事务里，失败时数据一条也不留下，可以直接重试；库里已经有账号或空间时拒绝。恢复之后所有人重新登录，Key 照常可用，向量在后台重新生成。
 
 ```bash
 docker compose -f docker-compose.example.yml build

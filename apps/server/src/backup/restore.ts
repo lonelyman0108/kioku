@@ -3,9 +3,9 @@ import { readMigrationFiles } from 'drizzle-orm/migrator'
 import { z } from 'zod'
 
 import type { MasterKey } from '../crypto/keyring'
-import type { Database, Db, Tx } from '../db/client'
-import { appliedMigrations, runMigrations } from '../db/migrate'
-import { BACKUP_FORMAT, BACKUP_VERSION, type BackupSection } from './export'
+import type { Database, Tx } from '../db/client'
+import { appliedMigrations, applyMigrations, lockMigrations } from '../db/migrate'
+import { BACKUP_FORMAT, BACKUP_VERSION } from './export'
 import { openBackup } from './format'
 
 const Header = z.object({
@@ -13,25 +13,24 @@ const Header = z.object({
   version: z.literal(BACKUP_VERSION),
   createdAt: z.string(),
   kioku: z.string(),
-  migrations: z.object({
-    count: z.number().int().positive(),
-    last: z.object({ hash: z.string(), at: z.number().int() }),
-  }),
+  migrations: z.object({ hash: z.string(), at: z.number().int() }),
 })
 
-const Section = z.object({
-  table: z.string().regex(/^[a-z_][a-z0-9_]*$/),
-  space: z.guid().nullable(),
-  rows: z.number().int().positive(),
-})
+const SectionHead = z.tuple([z.string().regex(/^[a-z_][a-z0-9_]*$/), z.guid().nullable()])
 
 type Header = z.infer<typeof Header>
 
-// 一段记录在正文里的位置：[start, end) 是这一段的记录行
-interface ParsedSection extends BackupSection {
+// 一段：哪张表、哪个空间，记录行在正文里的位置 [start, end) 与行数
+interface Section {
+  table: string
+  space: string | null
+  rows: number
   start: number
   end: number
 }
+
+const OPEN_BRACKET = 0x5b
+const OPEN_BRACE = 0x7b
 
 // 正文按行切开：每行在 [from, to) 里的起止位置。UTF-8 的多字节字符里不会出现换行符的字节
 function* lineRanges(plain: Buffer, from = 0, to = plain.length): Generator<[number, number]> {
@@ -43,15 +42,17 @@ function* lineRanges(plain: Buffer, from = 0, to = plain.length): Generator<[num
   }
 }
 
+const malformed = () => new Error('备份的内容不是预期的格式')
+
 function parseLine<T>(plain: Buffer, [start, end]: [number, number], schema: z.ZodType<T>): T {
   let value: unknown
   try {
     value = JSON.parse(plain.toString('utf8', start, end))
   } catch {
-    throw new Error('备份的内容不是预期的格式')
+    throw malformed()
   }
   const parsed = schema.safeParse(value)
-  if (!parsed.success) throw new Error('备份的内容不是预期的格式')
+  if (!parsed.success) throw malformed()
   return parsed.data
 }
 
@@ -59,7 +60,7 @@ function parseLine<T>(plain: Buffer, [start, end]: [number, number], schema: z.Z
 export function readBackup(
   masterKey: MasterKey,
   file: Buffer,
-): { header: Header; plain: Buffer; sections: ParsedSection[] } {
+): { header: Header; plain: Buffer; sections: Section[] } {
   const plain = openBackup(masterKey, file)
   const ranges = lineRanges(plain)
   const first = ranges.next()
@@ -72,17 +73,20 @@ export function readBackup(
     )
   }
   const header = parseLine(plain, first.value, Header)
-  const sections: ParsedSection[] = []
+  const sections: Section[] = []
+  let current: Section | null = null
   for (let next = ranges.next(); !next.done; next = ranges.next()) {
-    const section = parseLine(plain, next.value, Section)
-    const start = next.value[1] + 1
-    let end = start
-    for (let i = 0; i < section.rows; i++) {
-      const row = ranges.next()
-      if (row.done) throw new Error(`备份不完整：${section.table} 少了记录`)
-      end = row.value[1]
+    const [start, end] = next.value
+    if (plain[start] === OPEN_BRACKET) {
+      const [table, space] = parseLine(plain, next.value, SectionHead)
+      current = { table, space, rows: 0, start: end + 1, end: end + 1 }
+      sections.push(current)
+    } else if (plain[start] === OPEN_BRACE && current) {
+      current.rows++
+      current.end = end
+    } else {
+      throw malformed()
     }
-    sections.push({ ...section, start, end })
   }
   return { header, plain, sections }
 }
@@ -95,43 +99,50 @@ export interface RestoreSummary {
   upgraded: number
 }
 
-// 把备份恢复到一个没有初始化的实例（没有账号和空间）。库是新建的空库时先执行迁移，只迁移到备份时的位置，
-// 写回之后再执行这个版本新增的迁移：较早的备份也能用新版本恢复，数据走一遍和升级时一样的迁移。
-// 写回在一个事务里，失败时什么都不留下，可以直接重试
+// 把备份恢复到一个没有初始化的实例（没有账号和空间）。库是新建的空库时，先把迁移执行到做备份时的位置
+// （单独提交：之后失败了，库还是空的、停在备份的位置，可以直接重试）；然后在一个事务里写回全部数据，
+// 再执行这个版本新增的迁移：较早的备份也能用新版本恢复，数据走一遍和升级时一样的迁移，失败时一起撤销
 export async function restoreBackup(
   database: Database,
   options: { migrationsFolder: string; masterKey: MasterKey; file: Buffer },
 ): Promise<RestoreSummary> {
   const { header, plain, sections } = readBackup(options.masterKey, options.file)
   const local = readMigrationFiles({ migrationsFolder: options.migrationsFolder })
-  // 按时间戳在这个版本的迁移里找到备份时执行到的那一个，和 drizzle 判断执行到哪里的办法一样
+  // 按时间戳在这个版本的迁移里找到备份时执行到的那一个，和 drizzle 判断执行到哪里的办法一样；
+  // 哈希也要对上，库的结构才和备份时一样
   const positionOf = (at: number) => local.findIndex((m) => m.folderMillis === at) + 1
-  const { last } = header.migrations
-  const position = positionOf(last.at)
-  if (!position && last.at > local[local.length - 1]!.folderMillis) {
+  const backup = header.migrations
+  const position = positionOf(backup.at)
+  if (!position && backup.at > local[local.length - 1]!.folderMillis) {
     throw new Error(
       `备份来自更新的版本（${header.kioku}），有这个版本没有的迁移：用不低于它的版本恢复`,
     )
   }
-  if (!position || local[position - 1]!.hash !== last.hash) {
+  if (!position || local[position - 1]!.hash !== backup.hash) {
     throw new Error(`备份的迁移与这个版本的对不上：用做备份的版本（${header.kioku}）恢复`)
   }
-  const applied = (await appliedMigrations(database.db)).last
-  if (!applied) {
-    await runMigrations(database, options.migrationsFolder, position)
-  } else if (applied.at !== last.at || applied.hash !== last.hash) {
-    const at = positionOf(applied.at)
-    throw new Error(
-      `这个库已经执行过迁移（到第 ${at || '?'} 个），备份是在第 ${position} 个时做的：恢复到一个新建的空库（恢复之前不要启动服务）`,
-    )
+
+  const db = database.db
+  if (!(await appliedMigrations(db)).last) {
+    await db.transaction((tx) => applyMigrations(tx, local.slice(0, position)))
   }
-  const rows = await writeSections(database.db, plain, sections)
-  let upgraded = 0
-  if (position < local.length) {
-    await runMigrations(database, options.migrationsFolder)
-    upgraded = local.length - position
-  }
-  return { header, rows, upgraded }
+  const rows = await db.transaction(async (tx) => {
+    // 先拿到迁移的锁再核对库停在哪里：同时启动的服务要等这个事务结束才能迁移
+    await lockMigrations(tx)
+    const applied = (await appliedMigrations(tx)).last
+    if (!applied || applied.at !== backup.at || applied.hash !== backup.hash) {
+      const at = applied ? positionOf(applied.at) : 0
+      throw new Error(
+        `这个库已经执行过迁移（到第 ${at || '?'} 个），备份是在第 ${position} 个时做的：恢复到一个新建的空库（恢复之前不要启动服务）`,
+      )
+    }
+    const counts = await writeSections(tx, plain, sections)
+    // 迁移按没有设置空间的连接执行，和服务启动时一样
+    await tx.execute(sql`select set_config('app.space_id', '', true)`)
+    await applyMigrations(tx, local.slice(position))
+    return counts
+  })
+  return { header, rows, upgraded: local.length - position }
 }
 
 // 写回一段时每批最多多少行、多少字节
@@ -166,87 +177,86 @@ async function tableColumns(tx: Tx, table: string): Promise<TableColumns> {
 const tableRef = (table: string) => sql`public.${sql.identifier(table)}`
 
 async function writeSections(
-  db: Db,
+  tx: Tx,
   plain: Buffer,
-  sections: ParsedSection[],
+  sections: Section[],
 ): Promise<Record<string, number>> {
   const tables = [...new Set(sections.map((s) => s.table))]
-  return db.transaction(async (tx) => {
-    const columns = new Map<string, TableColumns>()
-    for (const table of tables) columns.set(table, await tableColumns(tx, table))
-    // 恢复期间别的连接（例如没停的服务）不能初始化这个实例
-    await tx.execute(sql`lock table public.accounts, public.spaces in share mode`)
-    const [existing] = await tx.execute<{ accounts: number; spaces: number }>(sql`
-      select (select count(*) from public.accounts)::int as accounts,
-        (select count(*) from public.spaces)::int as spaces`)
-    if (existing!.accounts || existing!.spaces) {
-      throw new Error(
-        `这个实例已经初始化过（${existing!.accounts} 个账号、${existing!.spaces} 个空间）：只能恢复到没有账号和空间的新实例`,
-      )
-    }
-    // 写回的是做备份时库里已有的数据，表上的触发器不再执行（例如 URI 互斥的检查：每行一把咨询锁，
-    // 上万条记忆放在一个事务里会占满锁表），外键照常检查。到事务结束前这些表别的连接也写不进来
-    for (const table of tables) {
-      await tx.execute(sql`alter table ${tableRef(table)} disable trigger user`)
-    }
-    // 没初始化的实例里，实例级的表只会有迁移或服务写下的默认值（例如开始记录召回的时间），以备份为准
-    for (const table of new Set(sections.filter((s) => !s.space).map((s) => s.table))) {
-      await tx.execute(sql`delete from ${tableRef(table)}`)
-    }
+  // 恢复期间别的连接（例如没停的服务）不能初始化这个实例
+  await tx.execute(sql`lock table public.accounts, public.spaces in share mode`)
+  const [existing] = await tx.execute<{ accounts: number; spaces: number }>(sql`
+    select (select count(*) from public.accounts)::int as accounts,
+      (select count(*) from public.spaces)::int as spaces`)
+  if (existing!.accounts || existing!.spaces) {
+    throw new Error(
+      `这个实例已经初始化过（${existing!.accounts} 个账号、${existing!.spaces} 个空间）：只能恢复到没有账号和空间的新实例`,
+    )
+  }
+  // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：URI 互斥的检查每行一把咨询锁，
+  // 上万条记忆放在一个事务里会占满锁表；触发器写下的派生数据本身也在备份里，再执行一遍会重复。外键照常检查。
+  // 到事务结束前这些表别的连接也写不进来
+  for (const table of tables) {
+    await tx.execute(sql`alter table ${tableRef(table)} disable trigger user`)
+  }
+  const columns = new Map<string, TableColumns>()
+  for (const table of tables) columns.set(table, await tableColumns(tx, table))
+  // 没初始化的实例里，实例级的表只会有迁移或服务写下的默认值（例如开始记录召回的时间），以备份为准
+  for (const table of new Set(sections.filter((s) => !s.space).map((s) => s.table))) {
+    await tx.execute(sql`delete from ${tableRef(table)}`)
+  }
 
-    const counts: Record<string, number> = {}
-    const maxima = new Map<string, bigint>()
-    for (const section of sections) {
-      const { names, serials } = columns.get(section.table)!
-      const name = tableRef(section.table)
-      const list = sql.join(
-        names.map((c) => sql.identifier(c)),
-        sql`, `,
-      )
-      await tx.execute(sql`select set_config('app.space_id', ${section.space ?? ''}, true)`)
-      const insert = async (batch: string[]) => {
-        const statement = sql`insert into ${name} (${list})
-          select ${list} from jsonb_populate_recordset(null::${name}, ${`[${batch.join(',')}]`}::jsonb)`
-        if (!serials.length) {
-          await tx.execute(statement)
-          return
-        }
-        const [row] = await tx.execute<{ maxima: (string | null)[] }>(sql`
-          with inserted as (${statement} returning ${sql.join(
-            serials.map((s) => sql.identifier(s.column)),
-            sql`, `,
-          )})
-          select array[${sql.join(
-            serials.map((s) => sql`max(${sql.identifier(s.column)})::text`),
-            sql`, `,
-          )}] as maxima from inserted`)
-        serials.forEach((s, i) => {
-          const value = row!.maxima[i]
-          if (value === null || value === undefined) return
-          const max = BigInt(value)
-          if (max > (maxima.get(s.sequence) ?? 0n)) maxima.set(s.sequence, max)
-        })
+  const counts: Record<string, number> = {}
+  const maxima = new Map<string, bigint>()
+  for (const section of sections) {
+    const { names, serials } = columns.get(section.table)!
+    const name = tableRef(section.table)
+    const list = sql.join(
+      names.map((c) => sql.identifier(c)),
+      sql`, `,
+    )
+    await tx.execute(sql`select set_config('app.space_id', ${section.space ?? ''}, true)`)
+    const insert = async (batch: string[]) => {
+      const statement = sql`insert into ${name} (${list})
+        select ${list} from jsonb_populate_recordset(null::${name}, ${`[${batch.join(',')}]`}::jsonb)`
+      if (!serials.length) {
+        await tx.execute(statement)
+        return
       }
-      let batch: string[] = []
-      let bytes = 0
-      for (const [start, end] of lineRanges(plain, section.start, section.end)) {
-        batch.push(plain.toString('utf8', start, end))
-        bytes += end - start
-        if (batch.length >= BATCH_ROWS || bytes >= BATCH_BYTES) {
-          await insert(batch)
-          batch = []
-          bytes = 0
-        }
+      const [row] = await tx.execute<{ maxima: (string | null)[] }>(sql`
+        with inserted as (${statement} returning ${sql.join(
+          serials.map((s) => sql.identifier(s.column)),
+          sql`, `,
+        )})
+        select array[${sql.join(
+          serials.map((s) => sql`max(${sql.identifier(s.column)})::text`),
+          sql`, `,
+        )}] as maxima from inserted`)
+      serials.forEach((s, i) => {
+        const value = row!.maxima[i]
+        if (value === null || value === undefined) return
+        const max = BigInt(value)
+        if (max > (maxima.get(s.sequence) ?? 0n)) maxima.set(s.sequence, max)
+      })
+    }
+    let batch: string[] = []
+    let bytes = 0
+    for (const [start, end] of lineRanges(plain, section.start, section.end)) {
+      batch.push(plain.toString('utf8', start, end))
+      bytes += end - start
+      if (batch.length >= BATCH_ROWS || bytes >= BATCH_BYTES) {
+        await insert(batch)
+        batch = []
+        bytes = 0
       }
-      if (batch.length) await insert(batch)
-      counts[section.table] = (counts[section.table] ?? 0) + section.rows
     }
-    for (const [sequence, max] of maxima) {
-      await tx.execute(sql`select setval(${sequence}::regclass, ${max.toString()}::bigint)`)
-    }
-    for (const table of tables) {
-      await tx.execute(sql`alter table ${tableRef(table)} enable trigger user`)
-    }
-    return counts
-  })
+    if (batch.length) await insert(batch)
+    counts[section.table] = (counts[section.table] ?? 0) + section.rows
+  }
+  for (const [sequence, max] of maxima) {
+    await tx.execute(sql`select setval(${sequence}::regclass, ${max.toString()}::bigint)`)
+  }
+  for (const table of tables) {
+    await tx.execute(sql`alter table ${tableRef(table)} enable trigger user`)
+  }
+  return counts
 }

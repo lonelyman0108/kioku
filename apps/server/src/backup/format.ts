@@ -1,5 +1,5 @@
 import { createCipheriv, createDecipheriv, hkdfSync, randomBytes } from 'node:crypto'
-import { pipeline } from 'node:stream/promises'
+import { pipeline, Readable } from 'node:stream'
 import { createGzip, gunzipSync } from 'node:zlib'
 
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
@@ -17,22 +17,20 @@ const HEADER_LENGTH = MAGIC.length + KEY_ID_LENGTH + SALT_LENGTH + IV_LENGTH
 const deriveKey = (master: Buffer, salt: Buffer) =>
   Buffer.from(hkdfSync('sha256', master, salt, 'kioku-backup', 32))
 
-// 正文边生成边压缩、加密，内存里只留加密后的结果
-export async function sealBackup(
+// 正文边生成边压缩、加密，逐块交出：文件头、密文，最后是认证标签。调用方直接写进文件或上传，不用把整份放在内存里
+export async function* sealBackup(
   masterKey: MasterKey,
   plain: AsyncIterable<string>,
-): Promise<Buffer> {
+): AsyncGenerator<Buffer> {
   const { key, id } = encryptionKey(masterKey)
   const salt = randomBytes(SALT_LENGTH)
   const iv = randomBytes(IV_LENGTH)
   const cipher = createCipheriv('aes-256-gcm', deriveKey(key, salt), iv)
   cipher.setAAD(MAGIC)
-  const chunks: Buffer[] = [MAGIC, Buffer.from(id, 'ascii'), salt, iv]
-  await pipeline(plain, createGzip(), cipher, async (encrypted: AsyncIterable<Buffer>) => {
-    for await (const chunk of encrypted) chunks.push(chunk)
-  })
-  chunks.push(cipher.getAuthTag())
-  return Buffer.concat(chunks)
+  yield Buffer.concat([MAGIC, Buffer.from(id, 'ascii'), salt, iv])
+  // 管道里哪一段出错，整条管道连同正文的来源一起销毁，这里读密文的循环随之抛出那个错误
+  yield* pipeline(Readable.from(plain), createGzip(), cipher, () => {}) as AsyncIterable<Buffer>
+  yield cipher.getAuthTag()
 }
 
 // 备份文件头里记的主密钥标识，不用解密就能看
@@ -43,6 +41,7 @@ export function backupKeyId(file: Buffer): string {
   return file.subarray(MAGIC.length, MAGIC.length + KEY_ID_LENGTH).toString('ascii')
 }
 
+// 整份解开、核对过认证标签之后才交出正文：恢复要先确认文件没被改过、没有缺，再往库里写
 export function openBackup(masterKey: MasterKey, file: Buffer): Buffer {
   const keyId = backupKeyId(file)
   let master: Buffer

@@ -22,6 +22,7 @@ import {
 } from '../importer/lore'
 import { requestBackfill } from '../jobs/queue'
 import { DEFAULT_SENSITIVITY } from '../memory/uri'
+import { runCli, UsageError } from './common'
 
 const HELP = `从 Lore 导入记忆。
 
@@ -45,8 +46,6 @@ const HELP = `从 Lore 导入记忆。
   DATABASE_URL       Kioku 的数据库，与服务相同
   LORE_DATABASE_URL  Lore 的数据库，只读访问
   KIOKU_MASTER_KEY   导入或同步 secret 时需要，与服务相同`
-
-class UsageError extends Error {}
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
@@ -299,12 +298,4 @@ function printSyncResult(result: SyncResult): void {
   for (const f of result.failed) console.log(`  失败 ${f.uri}：${f.reason}`)
 }
 
-main().catch((err: unknown) => {
-  if (err instanceof UsageError) {
-    console.error(`${err.message}\n\n${HELP}`)
-    process.exitCode = 2
-    return
-  }
-  console.error(err instanceof Error ? err.message : err)
-  process.exitCode = 1
-})
+runCli(HELP, main)

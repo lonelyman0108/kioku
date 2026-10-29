@@ -1,4 +1,8 @@
 import { randomBytes } from 'node:crypto'
+import { cp, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
+import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
 import type { CredentialValues, MemoryView } from '@kioku/contracts'
@@ -9,6 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../app'
 import { prepareMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database, type Tx } from '../../db/client'
+import { appliedMigrations } from '../../db/migrate'
 import { extractionRuns, memoryRecallStats, settings, spaces, subjects } from '../../db/schema'
 import { backfillJob } from '../../embedding/jobs'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -25,6 +30,12 @@ const migrationsFolder = fileURLToPath(new URL('../../../migrations', import.met
 
 async function* parts(...texts: string[]) {
   yield* texts
+}
+
+async function collect(chunks: AsyncIterable<Buffer>): Promise<Buffer> {
+  const all: Buffer[] = []
+  for await (const chunk of chunks) all.push(chunk)
+  return Buffer.concat(all)
 }
 
 describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
@@ -228,15 +239,26 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     )
     return row!.n
   }
-  const restore = (file: Buffer, key: Buffer = masterKey) =>
-    restoreBackup(database, { migrationsFolder, masterKey: key, file })
+  const restore = (file: Buffer, key: Buffer = masterKey, folder = migrationsFolder) =>
+    restoreBackup(database, { migrationsFolder: folder, masterKey: key, file })
+  const backup = async () => {
+    const chunks: Buffer[] = []
+    const out = new Writable({
+      write(chunk: Buffer, _encoding, done) {
+        chunks.push(chunk)
+        done()
+      },
+    })
+    const summary = await createBackup(database.db, masterKey, out)
+    return { file: Buffer.concat(chunks), summary }
+  }
 
   it('恢复到新实例后数据与备份时一致：登录、Key、secret、托管的凭据、历史都在，向量重新补齐', async () => {
     const { credentialId, base, child } = await seed()
     const vectors = await embeddings()
     expect(vectors).toBeGreaterThan(0)
     const before = await snapshot()
-    const { file, summary } = await createBackup(database.db, masterKey)
+    const { file, summary } = await backup()
     for (const table of BACKUP_TABLES)
       expect(summary.rows[table.name], table.name).toBeGreaterThan(0)
     expect(summary.rows).not.toHaveProperty('sessions')
@@ -315,20 +337,20 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
           from generate_series(${i}::int, ${i + 999}::int) g`),
       )
     }
-    const { file, summary } = await createBackup(database.db, masterKey)
+    const { file, summary } = await backup()
     expect(summary.rows.memories).toBe(20_000)
     await wipe('2030-01-01T00:00:00.000Z')
     expect((await restore(file)).rows.memories).toBe(20_000)
   })
 
-  it('主密钥不对、格式版本或迁移对不上、内容不完整时拒绝；写回到一半失败时什么都不留下', async () => {
+  it('主密钥不对、格式版本或迁移对不上、内容不对时拒绝；写回到一半失败时什么都不留下', async () => {
     await write('POST', { uri: 'home://wifi', content: '无线密码', sensitivity: 'secret' })
     await write('POST', { uri: 'home://nas', content: 'NAS 在书房', glossary: ['书房存储'] })
-    const { file } = await createBackup(database.db, masterKey)
+    const { file } = await backup()
     const lines = readBackup(masterKey, file).plain.toString('utf8').split('\n')
     const header = JSON.parse(lines[0]!) as Record<string, unknown>
     const reseal = (changed: object, rest = lines.slice(1)) =>
-      sealBackup(masterKey, parts([JSON.stringify(changed), ...rest].join('\n')))
+      collect(sealBackup(masterKey, parts([JSON.stringify(changed), ...rest].join('\n'))))
     const local = readMigrationFiles({ migrationsFolder })
     await wipe('2030-01-01T00:00:00.000Z')
 
@@ -337,8 +359,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       '备份的格式版本是 2',
     )
     const latest = local[local.length - 1]!
-    const migrated = (last: { hash: string; at: number }) =>
-      reseal({ ...header, migrations: { count: 1, last } })
+    const migrated = (migrations: { hash: string; at: number }) => reseal({ ...header, migrations })
     await expect(
       restore(await migrated({ hash: 'x', at: latest.folderMillis + 1 })),
     ).rejects.toThrow('备份来自更新的版本')
@@ -352,18 +373,14 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     ).rejects.toThrow(
       `这个库已经执行过迁移（到第 ${local.length} 个），备份是在第 ${local.length - 1} 个时做的`,
     )
-    // 最后一段少了记录（正文末尾是空行，去掉它前面的一行）
-    await expect(restore(await reseal(header, lines.slice(1, -2)))).rejects.toThrow('备份不完整')
+    // 记录出现在任何段头之前
+    await expect(restore(await reseal(header, [lines[2]!, ...lines.slice(1)]))).rejects.toThrow(
+      '备份的内容不是预期的格式',
+    )
 
     // 关键词那一段多出一行重复的：前面的账号、记忆都已写下，失败后整个撤销，触发器也照常开着
-    const at = lines.findIndex((l) => l.startsWith('{"table":"memory_glossary"'))
-    const section = JSON.parse(lines[at]!) as { rows: number }
-    const duplicated = [
-      ...lines.slice(1, at),
-      JSON.stringify({ ...section, rows: section.rows + 1 }),
-      lines[at + 1]!,
-      ...lines.slice(at + 1),
-    ]
+    const at = lines.findIndex((l) => l.startsWith('["memory_glossary"'))
+    const duplicated = [...lines.slice(1, at + 2), lines[at + 1]!, ...lines.slice(at + 2)]
     await expect(restore(await reseal(header, duplicated))).rejects.toThrow()
     const [state] = await database.db.execute<{ accounts: number; trigger: string }>(sql`
       select (select count(*) from accounts)::int as accounts,
@@ -374,5 +391,64 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     await restore(file)
     const wifi = await send('GET', '/v1/memories?uri=home%3A%2F%2Fwifi', undefined, bearer(key))
     expect(((await wifi.json()) as MemoryView).content).toBe('无线密码')
+  })
+
+  it('较早的备份：写回之后在同一个事务里执行这个版本新增的迁移；新增的迁移失败时数据一条也不留下', async () => {
+    await write('POST', { uri: 'home://nas', content: 'NAS 在书房' })
+    const { file } = await backup()
+    const latest = readMigrationFiles({ migrationsFolder }).at(-1)!
+    const folders: string[] = []
+    // 模拟更新的版本：迁移目录里多一个迁移
+    const newer = async (statement: string) => {
+      const folder = await mkdtemp(join(tmpdir(), 'kioku-test-migrations-'))
+      folders.push(folder)
+      await cp(migrationsFolder, folder, { recursive: true })
+      const journalFile = join(folder, 'meta/_journal.json')
+      const journal = JSON.parse(await readFile(journalFile, 'utf8')) as {
+        entries: { idx: number; when: number; tag: string }[]
+      }
+      const last = journal.entries[journal.entries.length - 1]!
+      journal.entries.push({
+        ...last,
+        idx: last.idx + 1,
+        when: latest.folderMillis + 1000,
+        tag: '9999_probe',
+      })
+      await writeFile(journalFile, JSON.stringify(journal))
+      await writeFile(join(folder, '9999_probe.sql'), statement)
+      return folder
+    }
+    const forget = async () => {
+      await database.db.execute(sql`drop table if exists restore_probe`)
+      await database.db.execute(
+        sql`delete from drizzle.__drizzle_migrations where created_at > ${latest.folderMillis}`,
+      )
+    }
+    try {
+      // 新增的迁移读写回的数据：能看出它是在写回之后执行的
+      await wipe('2030-01-01T00:00:00.000Z')
+      const result = await restore(
+        file,
+        masterKey,
+        await newer('CREATE TABLE restore_probe AS SELECT username FROM accounts'),
+      )
+      expect(result.upgraded).toBe(1)
+      expect(await database.db.execute(sql`select username from restore_probe`)).toEqual([
+        { username: 'alice' },
+      ])
+      expect((await appliedMigrations(database.db)).last?.at).toBe(latest.folderMillis + 1000)
+      await forget()
+
+      await wipe('2030-01-01T00:00:00.000Z')
+      await expect(restore(file, masterKey, await newer('SELECT 1 / 0'))).rejects.toThrow()
+      const [state] = await database.db.execute<{ accounts: number }>(
+        sql`select count(*)::int as accounts from accounts`,
+      )
+      expect(state!.accounts).toBe(0)
+      expect((await appliedMigrations(database.db)).last?.at).toBe(latest.folderMillis)
+    } finally {
+      await forget()
+      for (const folder of folders) await rm(folder, { recursive: true, force: true })
+    }
   })
 })

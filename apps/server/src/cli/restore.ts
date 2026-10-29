@@ -5,25 +5,24 @@ import { restoreBackup } from '../backup/restore'
 import { loadConfig } from '../config'
 import { prepareMasterKey } from '../crypto/rotation'
 import { assertRuntimeRole, connect } from '../db/client'
+import { runCli, UsageError } from './common'
 
 const HELP = `把备份恢复到一个新实例。
 
 用法：node dist/restore.mjs --file <备份文件>
 
-恢复到新建的空库，恢复之前不要启动服务：先执行迁移，核对备份的格式版本、主密钥与迁移，再按原来的 id
-写回全部数据，在一个事务里做完，失败时什么都不留下，可以直接重试。库里已经有账号或空间时拒绝恢复。
-较早版本做的备份也能恢复：先迁移到做备份时的位置，写回之后再执行这个版本新增的迁移。
+恢复到新建的空库，恢复之前不要启动服务：核对备份的格式版本、主密钥与迁移，先把迁移执行到做备份时的位置，
+再按原来的 id 写回全部数据，并执行这个版本新增的迁移（较早版本做的备份也能恢复）。写回与新增的迁移在一个事务里，
+失败时数据一条也不留下，可以直接重试。库里已经有账号或空间时拒绝恢复。
 
 恢复之后启动服务：向量在后台重新生成，生成完之前召回只靠全文检索；所有人要重新登录，Key 照常可用。
 
-  --file <备份文件>   backup 命令或定时备份做出的文件；写 - 时从标准输入读
+  --file <备份文件>   backup 命令做出的文件；写 - 时从标准输入读
 
 环境变量：
   DATABASE_URL               新实例的数据库
   KIOKU_MASTER_KEY           做备份时的主密钥
   KIOKU_MASTER_KEY_PREVIOUS  备份之后轮换过主密钥时：KIOKU_MASTER_KEY 配新的，这里配做备份时的那把`
-
-class UsageError extends Error {}
 
 async function readInput(file: string): Promise<Buffer> {
   if (file !== '-') return readFile(file)
@@ -80,12 +79,4 @@ async function main(): Promise<void> {
   }
 }
 
-main().catch((err: unknown) => {
-  if (err instanceof UsageError) {
-    console.error(`${err.message}\n\n${HELP}`)
-    process.exitCode = 2
-    return
-  }
-  console.error(err instanceof Error ? err.message : err)
-  process.exitCode = 1
-})
+runCli(HELP, main)
