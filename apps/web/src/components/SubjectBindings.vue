@@ -114,7 +114,7 @@ const incomingText = (binding: SubjectBinding) =>
               confirming.subject.displayName
             }}」：它们记下的事实、私聊里的内容都归过去，之后这些账号的私聊也算你的主人私聊。不能撤销。
           </p>
-          <p class="text-muted">不认识这些账号、或者不是你自己发的绑定码时，请拒绝。</p>
+          <p class="text-muted">不认识这些账号，或者绑定码不是你自己申请的，请拒绝。</p>
         </div>
       </template>
       <template #footer>
