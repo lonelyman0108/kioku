@@ -40,7 +40,7 @@ export function bindingOutcome(binding: SubjectBinding, now: Date = new Date()):
     case 'pending':
       return `等${member(binding.confirmer)}确认，${formatShort(binding.expiresAt!, now)} 之前有效`
     case 'merged':
-      return '发码的对象没有标记成员，直接合并了'
+      return '收码的人确认后直接合并了，不用成员同意'
     case 'confirmed':
       return `${member(binding.decidedBy)}确认后合并了`
     case 'rejected':

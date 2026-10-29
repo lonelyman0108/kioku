@@ -3,6 +3,7 @@ import { useToast } from '@nuxt/ui/composables'
 import type { SubjectBinding } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
 import { ref } from 'vue'
+import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -21,6 +22,7 @@ import { formatRelative, formatTime } from '../time'
 const props = defineProps<{ spaceId: string; items: SubjectBinding[]; subjectId?: string }>()
 const toast = useToast()
 const queryClient = useQueryClient()
+const router = useRouter()
 
 // 要确认的那一条：确认框打开时记下，框里列出确认之后会并进来的全部平台账号
 const confirming = ref<SubjectBinding | null>(null)
@@ -32,8 +34,12 @@ async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
   busy.value = binding.id
   try {
     if (action === 'confirm') {
-      await api.confirmBinding(spaceId, binding.id)
-      toast.add({ title: `已并进「${binding.subject.displayName}」`, color: 'success' })
+      const kept = await api.confirmBinding(spaceId, binding.id)
+      toast.add({ title: `已并进「${kept.displayName}」`, color: 'success' })
+      // 在收码那个对象的页面上确认的：它已经并进别的对象、不在了，换到保留的那个对象
+      if (props.subjectId && props.subjectId !== kept.id && props.spaceId === spaceId) {
+        await router.replace({ name: 'subject', params: { spaceId, subjectId: kept.id } })
+      }
     } else {
       await api.rejectBinding(spaceId, binding.id)
       toast.add({ title: '已拒绝，没有合并', color: 'success' })

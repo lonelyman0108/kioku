@@ -321,8 +321,8 @@ function runCounts(run: ExtractionRunInfo): string {
             </div>
           </template>
           <p class="mb-2 text-xs text-muted">
-            在 bot 的私聊里发 /bind 拿绑定码、到另一个平台私聊同一个 bot 发 /bind
-            加上绑定码，那个平台的账号就并进申请的这个人。申请的人标记了成员时，要那个成员本人在这里或概览里确认后才合并。
+            在 bot 的私聊里发 /bind 拿绑定码，到另一个平台私聊同一个 bot 发 /bind
+            加上绑定码，看清要绑到谁之后再发一次确认，那个平台的账号就并进申请的这个人。申请的人标记了成员、另一边没标记成同一个成员时，还要那个成员本人在这里或概览里确认后才合并。
           </p>
           <SubjectBindings
             v-if="data.bindings.length"

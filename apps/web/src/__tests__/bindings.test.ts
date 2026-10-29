@@ -43,7 +43,7 @@ describe('绑定记录的说法', () => {
   it('每种状态说清现在怎样了；成员的账号删掉了也说得出来', () => {
     expect(bindingOutcome(binding({}), now)).toBe('等「bob」确认，10-31 10:30 之前有效')
     expect(bindingOutcome(binding({ status: 'merged', confirmer: null }), now)).toBe(
-      '发码的对象没有标记成员，直接合并了',
+      '收码的人确认后直接合并了，不用成员同意',
     )
     expect(
       bindingOutcome(
