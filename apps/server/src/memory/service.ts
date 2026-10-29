@@ -46,6 +46,7 @@ import {
   desc,
   eq,
   exists,
+  getTableColumns,
   gt,
   ilike,
   inArray,
@@ -126,7 +127,7 @@ import {
 
 export class MemoryError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409,
+    readonly status: 400 | 403 | 404 | 409 | 429,
     message: string,
   ) {
     super(message)
@@ -274,14 +275,41 @@ function parse(uri: string): ParsedUri {
   return parsed
 }
 
-// 事件快照里不放密文、数据密钥和全文检索向量（向量里有正文分词）。secret 的正文本来就是 null；
-// 改成 secret 时，之前快照里的明文由 scrubHistory 统一抹掉（包括本次事件的「改前」快照）
-function snapshot(row: MemoryRow, glossary: string[]) {
+// secret 记忆的正文用主密钥信封加密，aad 绑记忆 id：把一条记忆的密文挪到别的记忆上会解密失败。
+// 记忆服务与空间的导入导出共用
+export function sealMemoryContent(masterKey: MasterKey, id: string, plaintext: string) {
+  const { key, id: keyId } = encryptionKey(masterKey)
+  return { ...encryptSecret(key, plaintext, id), keyId }
+}
+
+export function openMemoryContent(
+  masterKey: MasterKey,
+  row: { id: string; ciphertext: Buffer; wrappedKey: Buffer; keyId: string | null },
+): string {
+  return decryptSecret(
+    decryptionKey(masterKey, row.keyId),
+    { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
+    row.id,
+  )
+}
+
+// 事件快照里不放的列：密文、数据密钥与它的主密钥标识、全文检索向量（向量里有正文分词）
+const UNSNAPSHOTTED = ['ciphertext', 'wrappedKey', 'keyId', 'fts'] as const
+export type SnapshotRow = Omit<MemoryRow, (typeof UNSNAPSHOTTED)[number]>
+
+// 写快照用得到的列：批量写入时只取回这些，不把密文与全文检索向量也取回来
+type MemoryColumnMap = ReturnType<typeof getTableColumns<typeof memories>>
+export const SNAPSHOT_COLUMNS = (() => {
+  const columns: Partial<MemoryColumnMap> = { ...getTableColumns(memories) }
+  for (const name of UNSNAPSHOTTED) delete columns[name]
+  return columns as Omit<MemoryColumnMap, (typeof UNSNAPSHOTTED)[number]>
+})()
+
+// secret 的正文本来就是 null；改成 secret 时，之前快照里的明文由 scrubHistory 统一抹掉
+// （包括本次事件的「改前」快照）。空间的导入也用它记导入事件，快照的形状和别的写入一致
+export function snapshot(row: SnapshotRow, glossary: string[]) {
   const rest: Partial<MemoryRow> = { ...row }
-  delete rest.ciphertext
-  delete rest.wrappedKey
-  delete rest.keyId
-  delete rest.fts
+  for (const name of UNSNAPSHOTTED) delete rest[name]
   if (row.sensitivity === 'secret') rest.content = null
   return { ...rest, glossary }
 }
@@ -503,11 +531,11 @@ export class MemoryService {
     if (row.sensitivity !== 'secret') return row.content
     if (!this.ctx.access.canReadSecret || !row.ciphertext || !row.wrappedKey) return null
     if (!this.ctx.masterKey) throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，无法解密')
-    return decryptSecret(
-      decryptionKey(this.ctx.masterKey, row.keyId),
-      { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
-      row.id,
-    )
+    return openMemoryContent(this.ctx.masterKey, {
+      ...row,
+      ciphertext: row.ciphertext,
+      wrappedKey: row.wrappedKey,
+    })
   }
 
   private toView(row: MemoryRow, glossary: string[]): MemoryView {
@@ -903,8 +931,7 @@ export class MemoryService {
   private seal(plaintext: string, id: string) {
     if (!this.ctx.masterKey)
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，不能保存 secret')
-    const { key, id: keyId } = encryptionKey(this.ctx.masterKey)
-    return { ...encryptSecret(key, plaintext, id), keyId }
+    return sealMemoryContent(this.ctx.masterKey, id, plaintext)
   }
 
   async update(input: UpdateMemoryRequest, meta: UpdateMeta = {}): Promise<MemoryView> {

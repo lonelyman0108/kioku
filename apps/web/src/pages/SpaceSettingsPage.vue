@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import ExtractionBudget from '../components/ExtractionBudget.vue'
+import SpaceExport from '../components/SpaceExport.vue'
 import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
@@ -200,6 +201,8 @@ async function save() {
       </UCard>
 
       <ExtractionBudget v-model:dirty="budgetDirty" :space-id="spaceId" :editable="isOwner" />
+
+      <SpaceExport :space-id="spaceId" :space-name="space?.name ?? ''" :editable="isOwner" />
     </template>
   </UDashboardPanel>
 </template>

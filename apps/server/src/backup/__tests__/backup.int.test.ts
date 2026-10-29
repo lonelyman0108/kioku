@@ -392,6 +392,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     expect((await database.db.select().from(settings)).map((s) => s.key)).toEqual(['retention'])
   })
 
+  // 先写两万条再备份、恢复，CI 的机器上要五秒上下，单独放宽时限
   it('两万条带 URI 的记忆也在一个事务里写回：不逐行加 URI 互斥检查的咨询锁', async () => {
     // 写入时每行一把咨询锁，一个事务里放不下这么多，分批写
     for (let i = 0; i < 20_000; i += 1000) {
@@ -420,7 +421,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
 
     await wipe('2030-01-01T00:00:00.000Z')
     expect((await restore(file)).rows.memories).toBe(20_000)
-  })
+  }, 30_000)
 
   it('主密钥不对、格式版本或迁移对不上、内容不对时拒绝；写回到一半失败时什么都不留下', async () => {
     await write('POST', { uri: 'home://wifi', content: '无线密码', sensitivity: 'secret' })

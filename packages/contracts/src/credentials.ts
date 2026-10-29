@@ -141,7 +141,8 @@ const fieldCount = (values: Record<string, unknown>) =>
 const distinctNames = (fields: { name: string }[]) =>
   new Set(fields.map((f) => f.name)).size === fields.length
 
-const ExternalSource = z.object({
+// 外部来源：凭据源、条目位置与字段对应。新建、修改凭据与空间的导入导出都按它检查
+export const ExternalCredentialSource = z.object({
   kind: z.literal('external'),
   providerId: z.uuid(),
   location: Location,
@@ -152,16 +153,19 @@ const ExternalSource = z.object({
     .refine(distinctNames, '字段名不能重复'),
 })
 
+// 托管的来源：全部字段的值。新建凭据与空间的导入导出都按它检查
+export const HostedCredentialSource = z.object({
+  kind: z.literal('hosted'),
+  values: z
+    .record(CredentialFieldName, CredentialValue)
+    .refine((v) => Object.keys(v).length > 0, '至少要有一个字段')
+    .refine(fieldCount, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`),
+})
+
 // 新建时的来源：托管的给出全部字段的值，外部的给出凭据源、条目位置与字段对应
 export const CredentialSourceInput = z.discriminatedUnion('kind', [
-  z.object({
-    kind: z.literal('hosted'),
-    values: z
-      .record(CredentialFieldName, CredentialValue)
-      .refine((v) => Object.keys(v).length > 0, '至少要有一个字段')
-      .refine(fieldCount, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`),
-  }),
-  ExternalSource,
+  HostedCredentialSource,
+  ExternalCredentialSource,
 ])
 export type CredentialSourceInput = z.infer<typeof CredentialSourceInput>
 
@@ -174,7 +178,7 @@ export const CredentialSourceUpdate = z.discriminatedUnion('kind', [
       .record(CredentialFieldName, CredentialValue.nullable())
       .refine(fieldCount, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`),
   }),
-  ExternalSource,
+  ExternalCredentialSource,
 ])
 export type CredentialSourceUpdate = z.infer<typeof CredentialSourceUpdate>
 

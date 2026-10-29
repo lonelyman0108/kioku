@@ -112,6 +112,28 @@ const EVENT_ID = /^\d{1,15}$/
 // 托管的值整体加密，aad 绑定凭据 id：把一条凭据的密文挪到别的凭据或记忆上会解密失败
 export const credentialAad = (id: string) => `credential:${id}`
 
+// 托管的值：各字段整体写成一个 JSON 对象加密。服务与空间的导入导出共用
+export function sealCredentialValues(
+  masterKey: MasterKey,
+  id: string,
+  values: Record<string, string>,
+): { ciphertext: Buffer; wrappedKey: Buffer; keyId: string } {
+  const { key, id: keyId } = encryptionKey(masterKey)
+  return { ...encryptSecret(key, JSON.stringify(values), credentialAad(id)), keyId }
+}
+
+export function openCredentialValues(
+  masterKey: MasterKey,
+  row: { id: string; ciphertext: Buffer; wrappedKey: Buffer; keyId: string | null },
+): Record<string, string> {
+  const text = decryptSecret(
+    decryptionKey(masterKey, row.keyId),
+    { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
+    credentialAad(row.id),
+  )
+  return JSON.parse(text) as Record<string, string>
+}
+
 const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 export class CredentialService {
@@ -155,8 +177,7 @@ export class CredentialService {
     if (!this.ctx.masterKey) {
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，不能保存托管的凭据')
     }
-    const { key, id: keyId } = encryptionKey(this.ctx.masterKey)
-    return { ...encryptSecret(key, JSON.stringify(values), credentialAad(id)), keyId }
+    return sealCredentialValues(this.ctx.masterKey, id, values)
   }
 
   private open(row: CredentialRow): Record<string, string> {
@@ -164,12 +185,11 @@ export class CredentialService {
     if (!this.ctx.masterKey) {
       throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，无法解密托管的凭据')
     }
-    const text = decryptSecret(
-      decryptionKey(this.ctx.masterKey, row.keyId),
-      { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
-      credentialAad(row.id),
-    )
-    return JSON.parse(text) as Record<string, string>
+    return openCredentialValues(this.ctx.masterKey, {
+      ...row,
+      ciphertext: row.ciphertext,
+      wrappedKey: row.wrappedKey,
+    })
   }
 
   private async event(
