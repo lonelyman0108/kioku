@@ -88,7 +88,8 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: BindRequest,
 ) -> Response[BindResult | ErrorResponse]:
-    """在另一个平台的私聊里使用绑定码：把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员时，要那个成员在管理界面确认后才合并
+    """在另一个平台的私聊里使用绑定码：先预览要并到谁那里，同一个账号预览过之后带上 confirm
+    再发才把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员（这边没标记成同一个成员）时，还要那个成员在管理界面确认
 
     Args:
         body (BindRequest):
@@ -117,7 +118,8 @@ def sync(
     client: AuthenticatedClient,
     body: BindRequest,
 ) -> BindResult | ErrorResponse | None:
-    """在另一个平台的私聊里使用绑定码：把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员时，要那个成员在管理界面确认后才合并
+    """在另一个平台的私聊里使用绑定码：先预览要并到谁那里，同一个账号预览过之后带上 confirm
+    再发才把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员（这边没标记成同一个成员）时，还要那个成员在管理界面确认
 
     Args:
         body (BindRequest):
@@ -141,7 +143,8 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: BindRequest,
 ) -> Response[BindResult | ErrorResponse]:
-    """在另一个平台的私聊里使用绑定码：把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员时，要那个成员在管理界面确认后才合并
+    """在另一个平台的私聊里使用绑定码：先预览要并到谁那里，同一个账号预览过之后带上 confirm
+    再发才把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员（这边没标记成同一个成员）时，还要那个成员在管理界面确认
 
     Args:
         body (BindRequest):
@@ -168,7 +171,8 @@ async def asyncio(
     client: AuthenticatedClient,
     body: BindRequest,
 ) -> BindResult | ErrorResponse | None:
-    """在另一个平台的私聊里使用绑定码：把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员时，要那个成员在管理界面确认后才合并
+    """在另一个平台的私聊里使用绑定码：先预览要并到谁那里，同一个账号预览过之后带上 confirm
+    再发才把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员（这边没标记成同一个成员）时，还要那个成员在管理界面确认
 
     Args:
         body (BindRequest):

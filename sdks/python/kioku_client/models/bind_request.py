@@ -8,6 +8,7 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
+from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
@@ -23,10 +24,12 @@ class BindRequest:
     Attributes:
         code (str):
         context (SessionContext):
+        confirm (bool | Unset):  Default: False.
     """
 
     code: str
     context: SessionContext
+    confirm: bool | Unset = False
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -36,6 +39,8 @@ class BindRequest:
 
         context = self.context.to_dict()
 
+        confirm = self.confirm
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -44,6 +49,8 @@ class BindRequest:
                 "context": context,
             }
         )
+        if confirm is not UNSET:
+            field_dict["confirm"] = confirm
 
         return field_dict
 
@@ -56,9 +63,12 @@ class BindRequest:
 
         context = SessionContext.from_dict(d.pop("context"))
 
+        confirm = d.pop("confirm", UNSET)
+
         bind_request = cls(
             code=code,
             context=context,
+            confirm=confirm,
         )
 
         bind_request.additional_properties = d

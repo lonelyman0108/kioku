@@ -957,9 +957,16 @@
           "status": {
             "type": "string",
             "enum": [
+              "preview",
               "merged",
               "pending"
             ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/BindTarget"
+          },
+          "needsApproval": {
+            "type": "boolean"
           },
           "expiresAt": {
             "type": [
@@ -971,10 +978,53 @@
         },
         "required": [
           "status",
+          "needsApproval",
           "expiresAt"
         ]
       },
+      "BindTarget": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "accountHint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "displayName",
+          "accountHint"
+        ]
+      },
       "BindRequest": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          },
+          "confirm": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "code",
+          "context"
+        ]
+      },
+      "VoidBindCodeRequest": {
         "type": "object",
         "properties": {
           "code": {
@@ -1880,7 +1930,7 @@
         "tags": [
           "binding"
         ],
-        "summary": "在另一个平台的私聊里使用绑定码：把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员时，要那个成员在管理界面确认后才合并",
+        "summary": "在另一个平台的私聊里使用绑定码：先预览要并到谁那里，同一个账号预览过之后带上 confirm 再发才把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员（这边没标记成同一个成员）时，还要那个成员在管理界面确认",
         "security": [
           {
             "bearer": []
@@ -1898,7 +1948,7 @@
         },
         "responses": {
           "200": {
-            "description": "已合并，或在等确认",
+            "description": "预览、已合并，或在等确认",
             "content": {
               "application/json": {
                 "schema": {
@@ -1939,6 +1989,74 @@
           },
           "409": {
             "description": "已经是同一个人，或者正忙",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "输错的次数太多",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bind/void": {
+      "post": {
+        "tags": [
+          "binding"
+        ],
+        "summary": "群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；按发言人计输错的次数，免得拿它试码",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VoidBindCodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "这个码（如果有的话）已经作废"
+          },
+          "400": {
+            "description": "不是群聊，或者没带发言人",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key 写不了对象层",
             "content": {
               "application/json": {
                 "schema": {
