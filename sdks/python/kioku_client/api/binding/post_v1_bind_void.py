@@ -81,7 +81,7 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: VoidBindCodeRequest,
 ) -> Response[Any | ErrorResponse]:
-    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；按发言人计输错的次数，免得拿它试码
+    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；不占输错的次数，只按发言人限制请求的次数
 
     Args:
         body (VoidBindCodeRequest):
@@ -110,7 +110,7 @@ def sync(
     client: AuthenticatedClient,
     body: VoidBindCodeRequest,
 ) -> Any | ErrorResponse | None:
-    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；按发言人计输错的次数，免得拿它试码
+    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；不占输错的次数，只按发言人限制请求的次数
 
     Args:
         body (VoidBindCodeRequest):
@@ -134,7 +134,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: VoidBindCodeRequest,
 ) -> Response[Any | ErrorResponse]:
-    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；按发言人计输错的次数，免得拿它试码
+    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；不占输错的次数，只按发言人限制请求的次数
 
     Args:
         body (VoidBindCodeRequest):
@@ -161,7 +161,7 @@ async def asyncio(
     client: AuthenticatedClient,
     body: VoidBindCodeRequest,
 ) -> Any | ErrorResponse | None:
-    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；按发言人计输错的次数，免得拿它试码
+    """群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；不占输错的次数，只按发言人限制请求的次数
 
     Args:
         body (VoidBindCodeRequest):

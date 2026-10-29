@@ -58,6 +58,7 @@ CONFIRM_WORDS = ("确认", "confirm")
 
 # /bind 的回复：直接发给发命令的人，要短
 GROUP_HINT = "绑定账号请私聊我发 /bind。"
+CONFIRM_NEEDS_CODE = "确认要带上码：/bind <码> 确认"
 GROUP_VOIDED = "这个码已经在群里公开，作废了，请在私聊里重新申请。"
 GROUP_PUBLIC = "这个码已经在群里公开了，请在私聊里发 /bind 重新申请，旧码会作废。"
 NOT_CONFIGURED = "还没有接入 Kioku，绑定不了。"
@@ -110,18 +111,21 @@ def session_context(turn: Turn) -> SessionContext:
 
 
 def command_args(message: str, command: str = "bind") -> str:
-    """命令后面的整段文字。AstrBot 交来的消息可能还带着唤醒前缀（例如 /），一并去掉。"""
+    """命令后面的整段文字。AstrBot 交来的消息可能还带着唤醒前缀（例如 /），
+    Telegram 的命令常带着机器人名（/bind@MyBot），都去掉。"""
     text = message.strip()
-    match = re.match(rf"\W*{command}(?:\s+|$)", text, re.IGNORECASE)
+    match = re.match(rf"\W*{command}(?:@\S*)?(?:\s+|$)", text, re.IGNORECASE)
     return text[match.end() :] if match else ""
 
 
 def parse_code(args: str) -> tuple[str, bool]:
-    """绑定码，以及是不是确认合并（末尾带确认词）。码里的空白去掉，大小写与连字符交给服务端认。"""
+    """绑定码，以及是不是确认合并（开头或末尾带确认词）。码里的空白去掉，大小写与连字符交给服务端认。"""
     text = args.strip()
     for word in CONFIRM_WORDS:
         if text.lower().endswith(word):
             return re.sub(r"\s+", "", text[: -len(word)]), True
+        if text.lower().startswith(word):
+            return re.sub(r"\s+", "", text[len(word) :]), True
     return re.sub(r"\s+", "", text), False
 
 
@@ -221,6 +225,9 @@ class KiokuBridge:
         code, confirm = parse_code(args)
         if turn.group_id and not code:
             return GROUP_HINT
+        # 只有确认词、没带码：不能当成申请新码（那样会把手上的码作废）
+        if confirm and not code:
+            return CONFIRM_NEEDS_CODE
         if self._client is None:
             return NOT_CONFIGURED
         context = session_context(turn)

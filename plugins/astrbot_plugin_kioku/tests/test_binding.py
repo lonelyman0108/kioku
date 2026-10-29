@@ -12,6 +12,7 @@ from astrbot.api.event import AstrMessageEvent
 from astrbot.api.star import Context
 from astrbot_plugin_kioku.bridge import (
     BOUND,
+    CONFIRM_NEEDS_CODE,
     GROUP_HINT,
     GROUP_PUBLIC,
     GROUP_VOIDED,
@@ -93,10 +94,15 @@ def test_command_text_is_split_into_code_and_confirmation():
     assert command_args("/bind ABCD 2345") == "ABCD 2345"
     assert command_args("bind abcd-2345 确认") == "abcd-2345 确认"
     assert command_args("/bind") == ""
+    # Telegram 的命令常带着机器人名
+    assert command_args("/bind@MyBot ABCD 2345") == "ABCD 2345"
+    assert command_args("/bind@MyBot") == ""
     assert parse_code("ABCD 2345") == ("ABCD2345", False)
     assert parse_code(" abcd-2345 确认 ") == ("abcd-2345", True)
     assert parse_code("ABCD2345确认") == ("ABCD2345", True)
     assert parse_code("ABCD 2345 Confirm") == ("ABCD2345", True)
+    assert parse_code("确认 ABCD2345") == ("ABCD2345", True)
+    assert parse_code("确认") == ("", True)
     assert parse_code("") == ("", False)
 
 
@@ -156,6 +162,28 @@ def test_a_code_first_shows_whom_it_binds_to_and_how_to_confirm():
             "确认请发：/bind ABCD2345 确认"
         )
     ]
+
+
+def test_telegram_commands_with_the_bot_name_are_understood():
+    # 私聊里带着机器人名发码：照样先预览，不会去申请新码
+    plugin, sent = plugin_answering(preview())
+    event = AstrMessageEvent(**PRIVATE_TG, text="/bind@MyBot ABCD 2345")
+    assert replies(plugin, event)[0].startswith("要把这个账号绑到")
+    assert sent == [("/v1/bind", {"code": "ABCD2345", "context": TG_CONTEXT, "confirm": False})]
+    # 群里带着机器人名发码：照样作废
+    plugin, sent = plugin_answering(lambda _r: httpx.Response(204))
+    event = AstrMessageEvent(**GROUP, text="/bind@MyBot ABCD2345")
+    assert replies(plugin, event) == [GROUP_VOIDED]
+    assert [path for path, _ in sent] == ["/v1/bind/void"]
+
+
+def test_confirming_without_a_code_asks_for_it_and_does_not_issue_a_new_one():
+    for text in ("/bind 确认", "/bind confirm", "/bind@MyBot 确认"):
+        plugin, sent = plugin_answering(lambda _r: httpx.Response(500))
+        event = AstrMessageEvent(**PRIVATE_TG, text=text)
+        assert replies(plugin, event) == [CONFIRM_NEEDS_CODE]
+        assert event.is_stopped()
+        assert sent == []
 
 
 def test_confirming_binds_or_waits_for_the_member():
