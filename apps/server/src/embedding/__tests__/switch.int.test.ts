@@ -39,6 +39,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     enqueueBackfill: async () => (queued.push('backfill'), true),
     enqueueSwitch: async () => (queued.push('switch'), true),
     enqueuePrune: async () => (queued.push('prune'), true),
+    enqueueBackup: async () => true,
   }
   const noRetry = () => {}
 

@@ -1,6 +1,7 @@
 import type { MasterKeyStatus } from '@kioku/contracts'
 import { and, asc, count, eq, gt, isNotNull, isNull, notInArray, sql } from 'drizzle-orm'
 
+import { BACKUP_LABEL, mapBackupKey, sealedBackupKey } from '../backup/settings'
 import { credentialAad } from '../credential/service'
 import { withSpace, type Db } from '../db/client'
 import { credentials, memories, settings, spaces } from '../db/schema'
@@ -37,6 +38,14 @@ const SETTINGS: {
       return key ? [key] : []
     },
     map: (db, change) => mapEndpointKey(db, EXTRACTION_ENDPOINT, change),
+  },
+  {
+    label: BACKUP_LABEL,
+    read: async (db) => {
+      const key = await sealedBackupKey(db)
+      return key ? [key] : []
+    },
+    map: mapBackupKey,
   },
 ]
 

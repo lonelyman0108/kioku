@@ -448,6 +448,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
           enqueueBackfill: async () => queued,
           enqueueSwitch: async () => true,
           enqueuePrune: async () => true,
+          enqueueBackup: async () => true,
           enqueueExtraction: async () => {},
         },
       })

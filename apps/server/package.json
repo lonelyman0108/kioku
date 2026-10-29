@@ -18,6 +18,7 @@
     "@hono/zod-openapi": "1.6.3",
     "@kioku/contracts": "workspace:*",
     "@modelcontextprotocol/sdk": "1.32.2",
+    "aws4fetch": "1.0.20",
     "drizzle-orm": "0.45.4",
     "hono": "4.13.14",
     "pg-boss": "12.38.0",

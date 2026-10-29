@@ -66,6 +66,15 @@ docker compose -f docker-compose.example.yml run --rm -T kioku node server/dist/
 docker compose -f docker-compose.example.yml up -d
 ```
 
+定时备份传到了 S3 兼容存储时，也可以直接从存储桶取最新的一份恢复：先在当前终端里 `export AWS_ACCESS_KEY_ID=… AWS_SECRET_ACCESS_KEY=…`（区域不是 `us-east-1` 时再加 `AWS_REGION`，临时凭据再加 `AWS_SESSION_TOKEN`），再把上面的 `restore.mjs --file -` 一行换成：
+
+```bash
+docker compose -f docker-compose.example.yml run --rm -T -e AWS_ACCESS_KEY_ID -e AWS_SECRET_ACCESS_KEY -e AWS_SESSION_TOKEN -e AWS_REGION kioku \
+  node server/dist/restore.mjs --s3-endpoint https://s3.example.com --s3-bucket <存储桶> --s3-prefix <前缀>
+```
+
+恢复时会清掉备份存储的设置，免得试恢复的实例和正在用的实例往同一个目录写、互相删掉对方的备份；确认新实例要接着用之后，在实例设置里重新配备份。
+
 **升级**：先做一份整库快照（回滚时用），再拉取新代码、重新执行 `up -d --build`，启动时自动迁移数据库。迁移只向前。快照要用数据库超级用户：应用角色受行级安全约束，用它导出会报错。
 
 ```bash

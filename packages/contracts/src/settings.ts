@@ -126,3 +126,82 @@ export const RecallSettings = z.object({
   retentionDays: z.number().int().min(1).max(365),
 })
 export type RecallSettings = z.infer<typeof RecallSettings>
+
+// 备份到兼容S3的对象存储：每天到了设定的钟点（UTC）做一份全实例的加密备份传上去，存储桶里只留最近的几份。
+// Secret Access Key 用主密钥加密后存库，不返回
+const BackupRun = z.object({
+  at: z.string(),
+  // 存储桶里的对象名
+  object: z.string(),
+  bytes: z.number().int(),
+})
+
+export const BackupStatus = z.object({
+  lastSuccess: BackupRun.nullable(),
+  // 最近一次出的错（备份没做成，或者做成了但删旧的出错）；之后整次成功就清掉
+  lastError: z.object({ message: z.string(), at: z.string() }).nullable(),
+})
+export type BackupStatus = z.infer<typeof BackupStatus>
+
+export const BackupSettingsView = z.object({
+  configured: z.boolean(),
+  endpoint: z.string().nullable(),
+  region: z.string().nullable(),
+  bucket: z.string().nullable(),
+  prefix: z.string().nullable(),
+  accessKeyId: z.string().nullable(),
+  hasSecret: z.boolean(),
+  hour: z.number().int().nullable(),
+  keep: z.number().int().nullable(),
+  status: BackupStatus,
+})
+export type BackupSettingsView = z.infer<typeof BackupSettingsView>
+
+// 存储桶名按对象存储通行的规则；前缀是存储桶里的目录（可以为空），备份文件放在它下面
+const BucketName = z
+  .string()
+  .regex(
+    /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/,
+    '存储桶名只用小写字母、数字、点和连字符，3 到 63 个字',
+  )
+const ObjectPrefix = z
+  .string()
+  .max(200)
+  .regex(
+    /^([A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*)?$/,
+    '前缀是存储桶里的目录，例如 kioku 或 backups/kioku：只用字母、数字和 . _ - /，首尾不带 /',
+  )
+
+// 对象地址是在接口地址后面接上存储桶与对象名拼出来的，接口地址不能带查询串与片段
+const StorageEndpoint = BaseUrl.refine(
+  (value) => !/[?#]/.test(value),
+  '接口地址不要带 ? 和 # 后面的部分',
+)
+
+export const UpdateBackupSettings = z.object({
+  endpoint: StorageEndpoint,
+  region: z.string().min(1).max(64).default('us-east-1'),
+  bucket: BucketName,
+  prefix: ObjectPrefix.default(''),
+  accessKeyId: z.string().min(1).max(256),
+  // 不填表示沿用已保存的（接口主机没变时）
+  secretAccessKey: z.string().min(1).max(256).optional(),
+  // 每天几点（UTC）做备份
+  hour: z.number().int().min(0).max(23),
+  // 存储桶里留几份，更早的删掉
+  keep: z.number().int().min(1).max(365),
+})
+export type UpdateBackupSettings = z.infer<typeof UpdateBackupSettings>
+
+export const BackupObject = z.object({
+  object: z.string(),
+  bytes: z.number().int(),
+  at: z.string(),
+})
+export type BackupObject = z.infer<typeof BackupObject>
+
+export const BackupObjectList = z.object({ objects: z.array(BackupObject) })
+export type BackupObjectList = z.infer<typeof BackupObjectList>
+
+export const BackupTestResult = z.object({ ok: z.boolean(), error: z.string().nullable() })
+export type BackupTestResult = z.infer<typeof BackupTestResult>

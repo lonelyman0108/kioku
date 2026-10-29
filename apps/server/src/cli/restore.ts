@@ -2,7 +2,9 @@ import { readFile } from 'node:fs/promises'
 import { buffer } from 'node:stream/consumers'
 import { parseArgs } from 'node:util'
 
-import { restoreBackup } from '../backup/restore'
+import { assertUninitialized, restoreBackup } from '../backup/restore'
+import type { S3Location } from '../backup/s3'
+import { fetchBackup } from '../backup/storage'
 import { loadConfig } from '../config'
 import { prepareMasterKey } from '../crypto/rotation'
 import { assertRuntimeRole, connect } from '../db/client'
@@ -11,6 +13,7 @@ import { runCli, UsageError } from './common'
 const HELP = `把备份恢复到一个新实例。
 
 用法：node dist/restore.mjs --file <备份文件>
+      node dist/restore.mjs --s3-endpoint <接口地址> --s3-bucket <存储桶> [--s3-prefix <前缀>] [--s3-object <对象名>]
 
 恢复到新建的空库，恢复之前不要启动服务：核对备份的格式版本、主密钥与迁移，先把迁移执行到做备份时的位置，
 再按原来的 id 写回全部数据，并执行这个版本新增的迁移（较早版本做的备份也能恢复）。写回与新增的迁移在一个事务里，
@@ -18,20 +21,78 @@ const HELP = `把备份恢复到一个新实例。
 
 恢复之后启动服务：向量在后台重新生成，生成完之前召回只靠全文检索；所有人要重新登录，Key 照常可用。
 
-  --file <备份文件>   backup 命令做出的文件；写 - 时从标准输入读
+  --file <备份文件>       backup 命令做出的文件；写 - 时从标准输入读
+  --s3-endpoint <地址>    从对象存储取定时备份：接口地址、存储桶与前缀和实例设置里填的一样
+  --s3-bucket <存储桶>
+  --s3-prefix <前缀>      备份所在的目录，没填过就不加
+  --s3-object <对象名>    取这一份（完整的对象名）；不加时取前缀下最新的一份
 
 环境变量：
   DATABASE_URL               新实例的数据库
   KIOKU_MASTER_KEY           做备份时的主密钥
-  KIOKU_MASTER_KEY_PREVIOUS  备份之后轮换过主密钥时：KIOKU_MASTER_KEY 配新的，这里配做备份时的那把`
+  KIOKU_MASTER_KEY_PREVIOUS  备份之后轮换过主密钥时：KIOKU_MASTER_KEY 配新的，这里配做备份时的那把
+  AWS_ACCESS_KEY_ID          从存储桶取备份时用的访问密钥
+  AWS_SECRET_ACCESS_KEY
+  AWS_SESSION_TOKEN          访问密钥是临时凭据时带上
+  AWS_REGION                 存储的区域，默认 us-east-1`
 
 const readInput = (file: string): Promise<Buffer> =>
   file === '-' ? buffer(process.stdin) : readFile(file)
+
+interface BucketSource {
+  location: S3Location
+  prefix: string
+  object: string | null
+}
+
+// 从存储桶取备份的参数：位置写在命令行里，访问密钥从环境变量读（不出现在命令行里）。连库之前先核对，用法写错了马上说
+function bucketSource(values: {
+  's3-endpoint': string
+  's3-bucket'?: string | undefined
+  's3-prefix'?: string | undefined
+  's3-object'?: string | undefined
+}): BucketSource {
+  const endpoint = values['s3-endpoint']
+  // 和实例设置里的规则一样：对象地址是在接口地址后面接上存储桶与对象名拼出来的，不能带查询串与片段
+  if (!/^https?:\/\/[^?#]+$/.test(endpoint) || !URL.canParse(endpoint)) {
+    throw new UsageError('--s3-endpoint 要以 http:// 或 https:// 开头，不带 ? 和 #')
+  }
+  const bucket = values['s3-bucket']
+  if (!bucket) throw new UsageError('缺少 --s3-bucket')
+  const accessKeyId = process.env.AWS_ACCESS_KEY_ID
+  const secretAccessKey = process.env.AWS_SECRET_ACCESS_KEY
+  if (!accessKeyId || !secretAccessKey) {
+    throw new UsageError('从存储桶取备份需要环境变量 AWS_ACCESS_KEY_ID 与 AWS_SECRET_ACCESS_KEY')
+  }
+  const sessionToken = process.env.AWS_SESSION_TOKEN
+  return {
+    location: {
+      endpoint,
+      region: process.env.AWS_REGION || 'us-east-1',
+      bucket,
+      accessKeyId,
+      secretAccessKey,
+      ...(sessionToken ? { sessionToken } : {}),
+    },
+    prefix: (values['s3-prefix'] ?? '').replace(/^\/+|\/+$/g, ''),
+    object: values['s3-object'] ?? null,
+  }
+}
+
+async function download(source: BucketSource): Promise<Buffer> {
+  const { object, file } = await fetchBackup(source.location, source.prefix, source.object)
+  console.log(`从存储桶取了 ${object}（${(file.length / 1024).toFixed(1)} KB）`)
+  return file
+}
 
 async function main(): Promise<void> {
   const { values } = parseArgs({
     options: {
       file: { type: 'string' },
+      's3-endpoint': { type: 'string' },
+      's3-bucket': { type: 'string' },
+      's3-prefix': { type: 'string' },
+      's3-object': { type: 'string' },
       help: { type: 'boolean', short: 'h', default: false },
     },
   })
@@ -39,16 +100,22 @@ async function main(): Promise<void> {
     console.log(HELP)
     return
   }
-  if (!values.file) throw new UsageError('缺少 --file')
+  const endpoint = values['s3-endpoint']
+  if (Boolean(values.file) === Boolean(endpoint)) {
+    throw new UsageError('用 --file 指定备份文件，或者用 --s3-endpoint 等从存储桶取，二选一')
+  }
+  const bucket = endpoint ? bucketSource({ ...values, 's3-endpoint': endpoint }) : null
   const config = loadConfig()
   if (!config.masterKey) {
     throw new UsageError('备份用主密钥加密：需要设置做备份时的 KIOKU_MASTER_KEY')
   }
-  const file = await readInput(values.file)
   const database = connect(config.databaseUrl, { max: 2 })
   try {
     await assertRuntimeRole(database.db)
-    const { header, rows, upgraded } = await restoreBackup(database, {
+    // 取备份之前先确认能恢复到这个库，免得白白下载一大份
+    await assertUninitialized(database.db)
+    const file = bucket ? await download(bucket) : await readInput(values.file!)
+    const { header, rows, upgraded, backupCleared } = await restoreBackup(database, {
       migrationsFolder: config.migrationsFolder,
       masterKey: config.masterKey,
       file,
@@ -69,6 +136,12 @@ async function main(): Promise<void> {
       console.error(`数据已经写回，但服务会拒绝启动：${(err as Error).message}`)
       process.exitCode = 1
       return
+    }
+    if (backupCleared) {
+      console.warn(
+        '\n恢复时清掉了备份存储的设置，免得和原来的实例往同一个目录写、互相删掉对方的备份。' +
+          '确认这个实例要接着用之后，在实例设置里重新配备份。',
+      )
     }
     console.log('\n现在可以启动服务：向量会在后台重新生成，所有人需要重新登录。')
   } finally {

@@ -78,31 +78,38 @@ export function sameOrigin(a: string, b: string): boolean {
 
 // 保存时这个接口用哪个 Key：新填的就加密保存，null 是不用 Key，不填是沿用之前的。
 // 换了接口的主机就不能沿用：否则改个地址，服务端就会把 Key 发给新主机。主机变了又没说 Key 怎么处理时报错让管理员重填，
-// 而不是悄悄清掉，否则之后的请求会一直失败。where 是报错时的称呼，例如「第 2 个渠道的」
+// 而不是悄悄清掉，否则之后的请求会一直失败。where 是报错时的称呼，例如「第 2 个渠道的」；name 是这个密钥叫什么；
+// required 时一定要有密钥（例如对象存储的 Secret），不能清除
 export function resolveApiKey(
   previous: { baseUrl: string; apiKey: SealedJson | null } | undefined,
   input: { baseUrl: string; apiKey?: string | null | undefined },
   masterKey: MasterKey | null,
   aad: string,
   label: string,
-  where = '',
+  options: { where?: string; name?: string; required?: boolean } = {},
 ): SealedJson | null {
+  const { where = '', name = 'Key', required = false } = options
   const keep = previous ? sameOrigin(previous.baseUrl, input.baseUrl) : false
   if (!keep && previous?.apiKey && input.apiKey === undefined) {
-    throw new SettingsInputError(`${where}接口主机变了，请重新填写 Key；不需要 Key 时填 null`)
+    throw new SettingsInputError(
+      `${where}接口主机变了，请重新填写 ${name}${required ? '' : `；不需要 ${name} 时填 null`}`,
+    )
   }
-  if (input.apiKey === null) return null
+  let result: SealedJson | null = keep ? (previous?.apiKey ?? null) : null
+  if (input.apiKey === null) result = null
   if (typeof input.apiKey === 'string') {
-    if (!masterKey) throw new SettingsInputError(`保存${label}的 Key 需要先配置 KIOKU_MASTER_KEY`)
+    if (!masterKey)
+      throw new SettingsInputError(`保存${label}的 ${name} 需要先配置 KIOKU_MASTER_KEY`)
     const { key, id } = encryptionKey(masterKey)
     const sealed = encryptSecret(key, input.apiKey, aad)
-    return {
+    result = {
       ciphertext: sealed.ciphertext.toString('base64'),
       wrappedKey: sealed.wrappedKey.toString('base64'),
       keyId: id,
     }
   }
-  return keep ? (previous?.apiKey ?? null) : null
+  if (required && !result) throw new SettingsInputError(`请填写 ${name}`)
+  return result
 }
 
 async function loadStored(db: Db, endpoint: ModelEndpoint): Promise<Stored | undefined> {
