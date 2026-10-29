@@ -6,6 +6,7 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { backupNotice } from '../backup'
 import ActivityEntry from '../components/ActivityEntry.vue'
 import { useSession } from '../composables/useSession'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
@@ -53,6 +54,8 @@ const budgetWarning = computed(() => {
       : `${used}用完之后只写会话摘要、不再抽取事实。`,
   }
 })
+// 备份只给实例管理员提醒（别人拿到的是 null）
+const backup = computed(() => backupNotice(data.value?.backup ?? null))
 const activeKeys = computed(() =>
   (data.value?.apps ?? []).reduce((n, app) => n + (app.keys?.active ?? 0), 0),
 )
@@ -76,6 +79,16 @@ const activeKeys = computed(() =>
         <USkeleton v-for="n in 5" :key="n" class="h-28" />
       </div>
       <div v-else class="space-y-6">
+        <UAlert
+          v-if="backup"
+          :color="backup.color"
+          variant="subtle"
+          :title="backup.title"
+          :description="backup.description"
+          :actions="[
+            { label: '去实例设置', color: 'neutral', variant: 'outline', to: { name: 'settings' } },
+          ]"
+        />
         <UAlert
           v-if="budgetWarning"
           :color="budgetWarning.over ? 'error' : 'warning'"

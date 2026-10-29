@@ -2,7 +2,9 @@ import { createRoute, z } from '@hono/zod-openapi'
 import { ErrorResponse, SpaceOverview } from '@kioku/contracts'
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 
-import { withSpace } from '../db/client'
+import { isInstanceAdmin } from '../auth/middleware'
+import { backupSettingsView } from '../backup/settings'
+import { withSpace, type Db } from '../db/client'
 import { apiKeys, apps, spaceMembers } from '../db/schema'
 import { embeddingSettingsView } from '../embedding/settings'
 import { extractionUsage } from '../extraction/budget'
@@ -18,7 +20,8 @@ const overview = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/overview',
   tags: ['console'],
-  summary: '空间概览：记忆的分布、向量覆盖率、本月抽取的用量与各应用 Key 的使用情况',
+  summary:
+    '空间概览：记忆的分布、向量覆盖率、本月抽取的用量、各应用 Key 的使用情况，实例管理员还看得到备份的情况',
   request: { params: z.object({ spaceId: z.uuid() }) },
   responses: {
     200: jsonResponse('概览', SpaceOverview),
@@ -26,13 +29,24 @@ const overview = createRoute({
   },
 })
 
+// 备份是整个实例的事，只给实例管理员看
+async function backupSummary(db: Db, accountId: string) {
+  if (!(await isInstanceAdmin(db, accountId))) return null
+  const view = await backupSettingsView(db)
+  return {
+    configured: view.configured,
+    lastSuccessAt: view.status.lastSuccess?.at ?? null,
+    lastError: view.status.lastError,
+  }
+}
+
 export function overviewRoutes(deps: Deps) {
   return router().openapi(overview, async (c) => {
     const { spaceId } = c.req.valid('param')
     const accountId = c.get('console').accountId
     // 先确认是成员，不是成员就不去查别的空间的数据
     const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
-    const [settings, recall, appRows, members, extraction] = await Promise.all([
+    const [settings, recall, appRows, members, extraction, backup] = await Promise.all([
       embeddingSettingsView(deps.db),
       loadRecallWindow(deps.db),
       withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
@@ -41,6 +55,7 @@ export function overviewRoutes(deps: Deps) {
         .from(spaceMembers)
         .where(eq(spaceMembers.spaceId, spaceId)),
       extractionUsage(deps.db, spaceId),
+      backupSummary(deps.db, accountId),
     ])
     const [stats, recent] = await Promise.all([
       service.stats(settings.active?.model ?? null, {
@@ -112,6 +127,7 @@ export function overviewRoutes(deps: Deps) {
           }
         }),
         recent: recent.items,
+        backup,
       },
       200,
     )

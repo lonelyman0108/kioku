@@ -12,12 +12,11 @@ import {
   UpdateEmbeddingSettings,
   UpdateExtractionSettings,
 } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
 import { createMiddleware } from 'hono/factory'
 
-import { requireConsole } from '../auth/middleware'
+import { isInstanceAdmin, requireConsole } from '../auth/middleware'
 import { masterKeyStatus } from '../crypto/rotation'
-import { accounts, EMBEDDING_DIMENSIONS } from '../db/schema'
+import { EMBEDDING_DIMENSIONS } from '../db/schema'
 import { embeddingCoverage } from '../embedding/coverage'
 import { loadEmbeddingError } from '../embedding/errors'
 import { openAiEmbedder } from '../embedding/provider'
@@ -215,11 +214,9 @@ const extractionTest = createRoute({
 
 export function settingsRoutes(deps: Deps) {
   const requireAdmin = createMiddleware<AppEnv>(async (c, next) => {
-    const [account] = await deps.db
-      .select({ isAdmin: accounts.isAdmin })
-      .from(accounts)
-      .where(eq(accounts.id, c.get('console').accountId))
-    if (!account?.isAdmin) return c.json({ error: '需要实例管理员' }, 403)
+    if (!(await isInstanceAdmin(deps.db, c.get('console').accountId))) {
+      return c.json({ error: '需要实例管理员' }, 403)
+    }
     await next()
   })
   const app = router()

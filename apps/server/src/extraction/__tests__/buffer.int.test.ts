@@ -36,7 +36,8 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
     enqueueBackfill: async () => true,
     enqueueSwitch: async () => true,
     enqueuePrune: async () => true,
-    enqueueBackup: async () => true,
+    enqueueBackup: async () => null,
+    backupRun: async () => null,
     enqueueExtraction: async (target, delay) => void queued.push([target, delay]),
   }
 

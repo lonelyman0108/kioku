@@ -53,7 +53,8 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     enqueueBackfill: async () => true,
     enqueueSwitch: async () => true,
     enqueuePrune: async () => true,
-    enqueueBackup: async () => true,
+    enqueueBackup: async () => null,
+    backupRun: async () => null,
     enqueueExtraction: async () => {},
   }
 

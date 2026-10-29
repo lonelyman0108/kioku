@@ -1,3 +1,4 @@
+import type { BackupRunStatus } from '@kioku/contracts'
 import { PgBoss } from 'pg-boss'
 
 import { backupJob } from '../backup/storage'
@@ -49,8 +50,10 @@ export interface Jobs {
   enqueueSwitch(): Promise<boolean>
   // 删掉既不是正在用、也不是正在换过去的模型的向量（切换或放弃换模型之后）
   enqueuePrune(): Promise<boolean>
-  // 立即做一份备份传到存储桶（管理员点了「立即备份」），不看钟点
-  enqueueBackup(): Promise<boolean>
+  // 立即做一份备份传到存储桶（管理员点了「立即备份」），不看钟点。返回任务编号，没排进去时为 null
+  enqueueBackup(): Promise<string | null>
+  // 按编号查一次立即备份的状态；编号不对、或者早就清理掉了时为 null
+  backupRun(id: string): Promise<BackupRunStatus | null>
 }
 
 // 后台任务都放在 PostgreSQL 里（pg-boss，schema 为 pgboss），不需要 Redis。
@@ -82,20 +85,27 @@ export async function startJobs(options: {
   await boss.createQueue(BACKUP, { policy: 'singleton', ...backupQueue })
   await boss.updateQueue(BACKUP, backupQueue)
 
+  // 入队，返回任务编号（队列的策略挡下、没有建新任务时为 null）；入队失败时返回 undefined，只记日志。
   // 失败后默认重试几次；retry 为 false 时用队列上的选项（例如备份不重试）
-  const send = (name: string, data: object, startAfter?: number, retry = true): Promise<boolean> =>
+  const send = (
+    name: string,
+    data: object,
+    startAfter?: number,
+    retry = true,
+  ): Promise<string | null | undefined> =>
     boss
       .send(name, data, {
         ...(retry ? { retryLimit: 5, retryBackoff: true } : {}),
         ...(startAfter ? { startAfter } : {}),
       })
       .then(
-        () => true,
+        (id) => id,
         (err: unknown) => {
           console.error('入队失败', err)
-          return false
+          return undefined
         },
       )
+  const queued = (id: string | null | undefined) => id !== undefined
   // 写回时被别的事务锁着而跳过的记忆，稍后逐条重试
   const retry = (spaceId: string, ids: string[]) => {
     for (const memoryId of ids) void send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)
@@ -147,11 +157,11 @@ export async function startJobs(options: {
   await boss.work<BufferedSession>(EXTRACT, async (jobs) => {
     for (const { data } of jobs) await processSession(options.db, options.masterKey, data)
   })
-  await boss.work<{ force?: boolean }>(BACKUP, async (jobs) => {
-    for (const { data } of jobs) {
-      const outcome = await backupJob(options.db, options.masterKey, Boolean(data?.force))
-      if (outcome === 'failed') console.error('备份没做成，原因见实例设置里的备份')
-    }
+  // 一次取一个任务；结果存成任务的输出，管理界面按任务编号查「立即备份」做得怎么样
+  await boss.work<{ force?: boolean }>(BACKUP, async ([job]) => {
+    const outcome = await backupJob(options.db, options.masterKey, Boolean(job?.data?.force))
+    if (outcome === 'failed') console.error('备份没做成，原因见实例设置里的备份')
+    return { outcome }
   })
   await boss.schedule(CLEANUP, CLEANUP_CRON)
   await boss.schedule(BACKUP, BACKUP_CRON)
@@ -173,10 +183,22 @@ export async function startJobs(options: {
           () => {},
           (err: unknown) => console.error('入队失败', err),
         ),
-    enqueueBackfill: () => send(BACKFILL, {}),
-    enqueueSwitch: () => send(SWITCH, {}),
-    enqueuePrune: () => send(PRUNE, {}, PRUNE_AFTER_SECONDS),
-    enqueueBackup: () => send(BACKUP, { force: true }, undefined, false),
+    enqueueBackfill: () => send(BACKFILL, {}).then(queued),
+    enqueueSwitch: () => send(SWITCH, {}).then(queued),
+    enqueuePrune: () => send(PRUNE, {}, PRUNE_AFTER_SECONDS).then(queued),
+    enqueueBackup: () => send(BACKUP, { force: true }, undefined, false).then((id) => id ?? null),
+    backupRun: async (id) => {
+      const job = await boss.getJobById<{ force?: boolean }>(BACKUP, id).catch(() => null)
+      if (!job) return null
+      if (job.state === 'created' || job.state === 'retry')
+        return { state: 'queued', outcome: null }
+      if (job.state === 'active') return { state: 'running', outcome: null }
+      const outcome = (job.output as { outcome?: BackupRunStatus['outcome'] } | null)?.outcome
+      return {
+        state: 'finished',
+        outcome: job.state === 'completed' && outcome ? outcome : 'failed',
+      }
+    },
     stop: () => boss.stop({ graceful: true }),
   }
 }

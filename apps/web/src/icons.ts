@@ -41,6 +41,7 @@ export const icons = {
   file: 'i-lucide-file-text',
   secret: 'i-lucide-lock',
   test: 'i-lucide-plug-zap',
+  backup: 'i-lucide-cloud-upload',
   vector: 'i-lucide-sparkles',
   user: 'i-lucide-user',
   bot: 'i-lucide-bot',

@@ -12,6 +12,7 @@ import {
 import { and, arrayContains, asc, desc, eq, ilike, inArray, or, sql, type SQL } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
+import { isInstanceAdmin } from '../auth/middleware'
 import { pgErrorCode, withSpace, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
@@ -305,13 +306,10 @@ export function subjectRoutes(deps: Deps) {
       const accountId = c.get('console').accountId
       const { service } = await consoleMemberFor(deps, spaceId, accountId)
       const access = service.access
-      const [viewer] = await deps.db
-        .select({ isAdmin: accounts.isAdmin })
-        .from(accounts)
-        .where(eq(accounts.id, accountId))
+      const admin = await isInstanceAdmin(deps.db, accountId)
       // 模型接口或数据库报的原文可能带着内部的地址与响应，抽取模型由实例管理员配，原文只给他看
       const errorOf = (error: string | null) =>
-        !error || viewer?.isAdmin || PLAIN_RUN_ERRORS.has(error)
+        !error || admin || PLAIN_RUN_ERRORS.has(error)
           ? error
           : '抽取失败（原因只有实例管理员看得到）'
       const result = await withSpace(deps.db, spaceId, async (tx) => {

@@ -1,6 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
   BackupObjectList,
+  BackupQueued,
+  BackupRunStatus,
   BackupSettingsView,
   BackupTestResult,
   ErrorResponse,
@@ -68,12 +70,26 @@ const run = createRoute({
   method: 'post',
   path: '/settings/backup/run',
   tags: ['settings'],
-  summary: '立即做一份备份传上去（排进后台任务，结果看设置里的最近一次）',
+  summary: '立即做一份备份传上去：排进后台任务，返回任务编号，按编号查这一次做得怎么样',
   responses: {
-    202: jsonResponse('已排队', z.object({})),
+    202: jsonResponse('已排队', BackupQueued),
     400: notConfigured,
     403: forbidden,
     503: jsonResponse('没有排进队列（服务没有启动后台任务，或入队失败）', ErrorResponse),
+  },
+})
+
+const runStatus = createRoute({
+  method: 'get',
+  path: '/settings/backup/runs/{runId}',
+  tags: ['settings'],
+  summary: '一次立即备份的状态：排着、正在做、做完了（做成、没做成、没做）',
+  request: { params: z.object({ runId: z.uuid() }) },
+  responses: {
+    200: jsonResponse('状态', BackupRunStatus),
+    403: forbidden,
+    404: jsonResponse('没有这次备份', ErrorResponse),
+    503: jsonResponse('服务没有启动后台任务', ErrorResponse),
   },
 })
 
@@ -118,10 +134,15 @@ export function backupRoutes(deps: Deps) {
     .openapi(run, async (c) => {
       const config = await configured()
       if (!config) return c.json({ error: NOT_CONFIGURED }, 400)
-      if (!(await deps.jobs?.enqueueBackup())) {
-        return c.json({ error: '没有排进后台任务，稍后再试' }, 503)
-      }
-      return c.json({}, 202)
+      const runId = await deps.jobs?.enqueueBackup()
+      if (!runId) return c.json({ error: '没有排进后台任务，稍后再试' }, 503)
+      return c.json({ runId }, 202)
+    })
+    .openapi(runStatus, async (c) => {
+      if (!deps.jobs) return c.json({ error: '服务没有启动后台任务' }, 503)
+      const status = await deps.jobs.backupRun(c.req.valid('param').runId)
+      if (!status) return c.json({ error: '没有这次备份' }, 404)
+      return c.json(status, 200)
     })
     .openapi(objects, async (c) => {
       const config = await configured()
