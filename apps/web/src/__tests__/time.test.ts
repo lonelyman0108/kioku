@@ -1,6 +1,13 @@
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { formatRelative, formatShort, fromLocalInput, isExpired, toLocalInput } from '../time'
+import {
+  earliestValidTo,
+  formatRelative,
+  formatShort,
+  fromLocalInput,
+  isExpired,
+  toLocalInput,
+} from '../time'
 
 describe('相对时间', () => {
   const now = new Date('2026-10-27T12:00:00')
@@ -38,6 +45,15 @@ describe('有效到', () => {
     expect(toLocalInput('2026-12-31T16:30:00Z')).toBe('2027-01-01T00:30')
     expect(fromLocalInput(toLocalInput('2027-01-01T00:30:00.000Z'))).toBe(
       '2027-01-01T00:30:00.000Z',
+    )
+  })
+
+  it('有效到最早能选的时间比现在晚至少一分钟（输入框截掉秒之后也是）', () => {
+    const now = new Date('2026-10-31T10:05:59.900Z')
+    const earliest = earliestValidTo(now)
+    expect(earliest).toBe('2026-10-31T18:07')
+    expect(new Date(fromLocalInput(earliest)!).getTime() - now.getTime()).toBeGreaterThanOrEqual(
+      60_000,
     )
   })
 

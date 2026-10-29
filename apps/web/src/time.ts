@@ -31,6 +31,11 @@ export function toLocalInput(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
+// 有效到最早能选的时间：服务端要求比现在晚至少一分钟，输入框只到分钟（秒被截掉），所以从两分钟之后算
+export function earliestValidTo(now: Date = new Date()): string {
+  return toLocalInput(new Date(now.getTime() + 120_000).toISOString())
+}
+
 // 输入框里的本地时间换成带时区的 ISO 时间（接口要带时区的写法）；没填完整时为 null
 export function fromLocalInput(value: string): string | null {
   if (!/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}(:\d{2}(\.\d+)?)?$/.test(value)) return null

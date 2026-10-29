@@ -16,6 +16,7 @@ import { layerLabels, provenanceLabels, sensitivityColors, sensitivityLabels } f
 import type { CredentialLinks } from '../markdown'
 import { placeholderOf } from '../placeholders'
 import {
+  earliestValidTo,
   formatRelative,
   formatShort,
   formatTime,
@@ -148,12 +149,12 @@ const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.va
 // 默认是阅读状态，点「编辑」才改原文
 const mode = ref<'read' | 'edit'>('read')
 const preview = ref(false)
-// 有效到最早能选到下一分钟：服务端只收晚于现在的时间
+// 有效到最早能选的时间（见 earliestValidTo），开始编辑时算一次
 const minValidTo = ref('')
 function startEditing() {
   const m = latest()
   if (m) adopt(m)
-  minValidTo.value = toLocalInput(new Date(Date.now() + 60_000).toISOString())
+  minValidTo.value = earliestValidTo()
   mode.value = 'edit'
 }
 function cancelEditing() {

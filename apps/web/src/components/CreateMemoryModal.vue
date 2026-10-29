@@ -7,7 +7,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { creatableLayers, layerLabels, sensitivityLabels } from '../labels'
-import { fromLocalInput, toLocalInput } from '../time'
+import { earliestValidTo, fromLocalInput } from '../time'
 
 const props = defineProps<{ spaceId: string; initialUri: string }>()
 const open = defineModel<boolean>('open', { required: true })
@@ -25,7 +25,7 @@ const form = reactive({
 })
 const error = ref<string | null>(null)
 const saving = ref(false)
-// 有效到最早能选到下一分钟：服务端只收晚于现在的时间
+// 有效到最早能选的时间（见 earliestValidTo），打开时算一次
 const minValidTo = ref('')
 
 // 手动选过层之后，就不再按 domain 默认层改它
@@ -41,7 +41,7 @@ watch(open, (value) => {
     disclosure: '',
     validTo: '',
   })
-  minValidTo.value = toLocalInput(new Date(Date.now() + 60_000).toISOString())
+  minValidTo.value = earliestValidTo()
   layerTouched.value = false
   error.value = null
 })
