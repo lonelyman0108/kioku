@@ -236,16 +236,18 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
     })
 
     it('有效到一过就读不到了', async () => {
+      // 留足写入与第一次读取的时间（机器忙时请求也可能慢），再等到有效到过了之后读
+      const until = Date.now() + 2_500
       const m = await ok<MemoryView>(
         await keyCreate({
           uri: 'flash://note',
           content: '马上过期',
-          validTo: new Date(Date.now() + 1_000).toISOString(),
+          validTo: new Date(until).toISOString(),
         }),
         201,
       )
       expect((await keyGet(m.uri)).status).toBe(200)
-      await new Promise((resolve) => setTimeout(resolve, 1_300))
+      await new Promise((resolve) => setTimeout(resolve, until + 300 - Date.now()))
       expect((await keyGet(m.uri)).status).toBe(404)
       expect((await expired()).items.map((i) => i.id)).toEqual([m.id])
     })
