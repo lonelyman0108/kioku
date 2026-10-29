@@ -1,6 +1,9 @@
 import {
   ActivityList,
   AppInfo,
+  BackupObjectList,
+  BackupSettingsView,
+  BackupTestResult,
   BootPreview,
   ConsoleCredential,
   ConsoleCredentialList,
@@ -62,6 +65,7 @@ import {
   type SetupRequest,
   type SubjectListQuery,
   type UpdateAppRequest,
+  type UpdateBackupSettings,
   type UpdateCredentialProviderRequest,
   type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
@@ -303,4 +307,12 @@ export const api = {
   clearExtractionSettings: () => request('DELETE', '/settings/extraction'),
   testExtraction: () =>
     request('POST', '/settings/extraction/test', { schema: ExtractionTestResult }),
+
+  backupSettings: () => request('GET', '/settings/backup', { schema: BackupSettingsView }),
+  saveBackupSettings: (body: UpdateBackupSettings) =>
+    request('PUT', '/settings/backup', { body, schema: BackupSettingsView }),
+  clearBackupSettings: () => request('DELETE', '/settings/backup'),
+  testBackup: () => request('POST', '/settings/backup/test', { schema: BackupTestResult }),
+  runBackup: () => request('POST', '/settings/backup/run'),
+  backupObjects: () => request('GET', '/settings/backup/objects', { schema: BackupObjectList }),
 }

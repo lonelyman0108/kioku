@@ -253,6 +253,14 @@ export const ExtractionUsage = ExtractionBudget.extend({
 })
 export type ExtractionUsage = z.infer<typeof ExtractionUsage>
 
+// 备份的情况：只给实例管理员看，没配、出错或者好几天没做成时概览提醒
+export const OverviewBackup = z.object({
+  configured: z.boolean(),
+  lastSuccessAt: z.string().nullable(),
+  lastError: z.object({ message: z.string(), at: z.string() }).nullable(),
+})
+export type OverviewBackup = z.infer<typeof OverviewBackup>
+
 export const SpaceOverview = z.object({
   // 成员读得到的策展记忆，按层与敏感级分组
   counts: z.array(LayerCount),
@@ -268,6 +276,8 @@ export const SpaceOverview = z.object({
   apps: z.array(OverviewApp),
   // 最近的改动，和活动流同样的可见性
   recent: z.array(ActivityItem),
+  // 不是实例管理员时为 null
+  backup: OverviewBackup.nullable(),
 })
 export type SpaceOverview = z.infer<typeof SpaceOverview>
 

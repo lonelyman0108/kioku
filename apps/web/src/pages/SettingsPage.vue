@@ -5,6 +5,7 @@ import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import BackupSettings from '../components/BackupSettings.vue'
 import EmbeddingSettings from '../components/EmbeddingSettings.vue'
 import ExtractionSettings from '../components/ExtractionSettings.vue'
 
@@ -116,6 +117,8 @@ async function saveRetention() {
             </template>
           </div>
         </UCard>
+
+        <BackupSettings />
 
         <UCard>
           <template #header>

@@ -2,7 +2,12 @@ import { randomBytes } from 'node:crypto'
 import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
-import type { BackupObjectList, BackupSettingsView, BackupTestResult } from '@kioku/contracts'
+import type {
+  BackupObjectList,
+  BackupSettingsView,
+  BackupTestResult,
+  SpaceOverview,
+} from '@kioku/contracts'
 import { inArray } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -320,6 +325,31 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     s3.fail(undefined, 'DELETE')
     expect(await backupJob(database.db, masterKey, true)).toBe('done')
     expect((await loadBackupStatus(database.db)).lastError).toBeNull()
+  })
+
+  it('概览里的备份情况只给实例管理员看', async () => {
+    const overview = async (cookie: string) => {
+      const res = await api.request(`/v1/spaces/${ws.spaceId}/overview`, {
+        headers: { cookie, 'sec-fetch-site': 'same-origin' },
+      })
+      expect(res.status).toBe(200)
+      return ((await res.json()) as SpaceOverview).backup
+    }
+    expect(await overview(ws.cookie)).toEqual({
+      configured: false,
+      lastSuccessAt: null,
+      lastError: null,
+    })
+    await save()
+    expect(await backupJob(database.db, masterKey, true)).toBe('done')
+    const status = await loadBackupStatus(database.db)
+    expect(await overview(ws.cookie)).toEqual({
+      configured: true,
+      lastSuccessAt: status.lastSuccess!.at,
+      lastError: null,
+    })
+    const member = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    expect(await overview(member.cookie)).toBeNull()
   })
 
   it('测试连通：放一个小文件、列一遍再删掉；出错时说清原因', async () => {
