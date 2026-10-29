@@ -60,6 +60,8 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
     enqueueBackup: async () => null,
     backupRun: async () => null,
     enqueueCleanup: async () => true,
+    enqueueDream: async () => null,
+    dreamRun: async () => null,
     enqueueExtraction: async () => {},
   }
 

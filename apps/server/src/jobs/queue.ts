@@ -1,4 +1,4 @@
-import type { BackupRunStatus } from '@kioku/contracts'
+import type { BackupRunStatus, DreamRunStatus, DreamTrigger } from '@kioku/contracts'
 import { PgBoss } from 'pg-boss'
 
 import { backupJob } from '../backup/storage'
@@ -9,6 +9,7 @@ import type { Db } from '../db/client'
 import { backfillJob, embedJob, pruneJob, switchJob } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
 import type { BufferedSession } from '../extraction/buffer'
+import { dreamsDue, dreamSpace, type DreamOutcome } from '../extraction/dream'
 import { processSession } from '../extraction/worker'
 import { cleanupExpired } from './cleanup'
 import { retentionJob } from './retention'
@@ -21,6 +22,10 @@ const ROTATE = 'rotate-master-key'
 const CLEANUP = 'cleanup-expired'
 const EXTRACT = 'extract-session'
 const BACKUP = 'backup'
+const DREAM = 'dream'
+const DREAM_TICK = 'dream-tick'
+// 每小时看一次哪些空间今天（UTC）还没做过定时的 Dream 整理，排上（见 dreamsDue）
+const DREAM_CRON = '41 * * * *'
 // 每小时清一次过期的数据（见 cleanupExpired）；保留期的硬删除跟在后面，一天做一次（见 retentionJob）
 const CLEANUP_CRON = '17 * * * *'
 // 写回向量时记忆正被别的事务锁着，隔这么久再试
@@ -57,6 +62,16 @@ export interface Jobs {
   backupRun(id: string): Promise<BackupRunStatus | null>
   // 马上做一次定时清理（例如提前结束了从备份恢复之后的保留期暂停）；返回是否入队成功
   enqueueCleanup(): Promise<boolean>
+  // 马上整理一次这个空间（成员点了「现在整理一次」）。返回任务编号：这个空间已经有一次排着的整理时给那一次的；
+  // 没排进去时为 null
+  enqueueDream(spaceId: string): Promise<string | null>
+  // 按编号查这个空间的一次整理的状态；编号不对、不是这个空间的、或者早就清理掉了时为 null
+  dreamRun(spaceId: string, id: string): Promise<DreamRunStatus | null>
+}
+
+interface DreamJob {
+  spaceId: string
+  trigger: DreamTrigger
 }
 
 // 后台任务都放在 PostgreSQL 里（pg-boss，schema 为 pgboss），不需要 Redis。
@@ -92,6 +107,12 @@ export async function startJobs(options: {
   const backupQueue = { expireInSeconds: 3600, retryLimit: 0 }
   await boss.createQueue(BACKUP, { policy: 'singleton', ...backupQueue })
   await boss.updateQueue(BACKUP, backupQueue)
+  // Dream：stately 加上按空间的 singletonKey，同一个空间排着的、正在整理的各最多一个。一次整理可能请求好几次模型，
+  // 和备份一样一小时过期、出错不重试：结果记在运行记录里，第二天的定时整理或者手动再来
+  const dreamQueue = { expireInSeconds: 3600, retryLimit: 0 }
+  await boss.createQueue(DREAM, { policy: 'stately', ...dreamQueue })
+  await boss.updateQueue(DREAM, dreamQueue)
+  await boss.createQueue(DREAM_TICK, { policy: 'singleton' })
 
   // 入队，返回任务编号（队列的策略挡下、没有建新任务时为 null）；入队失败时返回 undefined，只记日志。
   // 失败后默认重试几次；retry 为 false 时用队列上的选项（例如备份不重试）
@@ -186,10 +207,39 @@ export async function startJobs(options: {
     if (outcome === 'failed') console.error('备份没做成，原因见实例设置里的备份')
     return { outcome }
   })
+  // 排一次整理；这个空间已经有一次排着的（stately 不收第二个）就给那一次的编号。失败只记日志
+  const sendDream = async (spaceId: string, trigger: DreamTrigger): Promise<string | null> => {
+    try {
+      const id = await boss.send(DREAM, { spaceId, trigger } satisfies DreamJob, {
+        singletonKey: spaceId,
+      })
+      if (id) return id
+      const [queued] = await boss.findJobs<DreamJob>(DREAM, { key: spaceId, queued: true })
+      return queued?.id ?? null
+    } catch (err) {
+      console.error('入队失败', err)
+      return null
+    }
+  }
+  // 一次取一个任务；结果存成任务的输出，管理界面按任务编号查「现在整理一次」做得怎么样
+  await boss.work<DreamJob>(DREAM, async ([job]) => {
+    if (!job) return
+    const outcome = await dreamSpace(options.db, options.masterKey, {
+      spaceId: job.data.spaceId,
+      runId: job.id,
+      trigger: job.data.trigger,
+    })
+    if (outcome.outcome === 'failed') console.error('Dream 整理出错，原因见待审页的运行记录')
+    return outcome
+  })
+  await boss.work(DREAM_TICK, async () => {
+    for (const spaceId of await dreamsDue(options.db)) await sendDream(spaceId, 'scheduled')
+  })
   await boss.schedule(CLEANUP, CLEANUP_CRON)
   await boss.schedule(BACKUP, BACKUP_CRON)
   await boss.schedule(SWITCH, SWITCH_CRON)
   await boss.schedule(ROTATE, ROTATE_CRON)
+  await boss.schedule(DREAM_TICK, DREAM_CRON)
 
   return {
     enqueueEmbed: (spaceId, memoryId) => void send(EMBED, { spaceId, memoryId }),
@@ -222,6 +272,19 @@ export async function startJobs(options: {
         state: 'finished',
         outcome: job.state === 'completed' && outcome ? outcome : 'failed',
       }
+    },
+    enqueueDream: (spaceId) => sendDream(spaceId, 'manual'),
+    dreamRun: async (spaceId, id) => {
+      const [job] = await boss.findJobs<DreamJob>(DREAM, { id }).catch(() => [])
+      if (!job || job.data?.spaceId !== spaceId) return null
+      if (job.state === 'created' || job.state === 'retry') {
+        return { state: 'queued', outcome: null, reason: null }
+      }
+      if (job.state === 'active') return { state: 'running', outcome: null, reason: null }
+      const output = job.output as Partial<DreamOutcome> | null
+      return job.state === 'completed' && output?.outcome
+        ? { state: 'finished', outcome: output.outcome, reason: output.reason ?? null }
+        : { state: 'finished', outcome: 'failed', reason: null }
     },
     stop: () => boss.stop({ graceful: true }),
   }

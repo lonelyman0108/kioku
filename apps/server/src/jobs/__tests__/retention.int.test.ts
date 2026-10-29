@@ -19,6 +19,8 @@ import {
   credentialEvents,
   credentialProviders,
   credentials,
+  dreamRuns,
+  dreamSuggestions,
   extractionRuns,
   memories,
   memoryCredentialRefs,
@@ -49,6 +51,8 @@ const ZERO: RetentionCounts = {
   orphanEvents: 0,
   scrubbedSnapshots: 0,
   extractionRuns: 0,
+  dreamRuns: 0,
+  dreamSuggestions: 0,
   credentialEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,
@@ -544,6 +548,84 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(events.map((e) => e.type).sort()).toEqual(['access', 'create'])
   })
 
+  it('Dream 的运行记录和抽取记录一样留着本月的；建议过了保留期、并且已经作废的才删，还作数的留着', async () => {
+    const now = new Date('2026-03-10T12:00:00Z')
+    const live = await createMemory({ uri: 'core://live', content: '没改过', layer: 'base' })
+    const other = await createMemory({ uri: 'core://other', content: '也没改过', layer: 'base' })
+    const changed = await createMemory({ uri: 'core://changed', content: '改过', layer: 'base' })
+    await updateMemory({ uri: changed.uri, content: '改过了' })
+    const gone = await createMemory({ uri: 'core://gone', content: '删掉了', layer: 'base' })
+    await deleteMemory(gone.uri)
+    const ended = await createMemory({ uri: 'core://ended', content: '过期了', layer: 'base' })
+    await inSpace((tx) =>
+      tx
+        .update(memories)
+        .set({ validTo: new Date('2026-03-08T00:00:00Z') })
+        .where(eq(memories.id, ended.id)),
+    )
+    const run = (createdAt: string) => ({
+      spaceId: ws.spaceId,
+      runId: randomUUID(),
+      trigger: 'scheduled',
+      scope: 'base',
+      createdAt: new Date(createdAt),
+    })
+    let n = 0
+    const suggestion = (
+      status: 'pending' | 'applied' | 'rejected',
+      at: string,
+      ...involved: MemoryView[]
+    ) => ({
+      spaceId: ws.spaceId,
+      scope: 'base',
+      kind: involved.length > 1 ? 'distill' : 'stale',
+      memoryIds: involved.map((m) => m.id),
+      versions: involved.map(() => 1),
+      reason: `第 ${++n} 条`,
+      fingerprint: `fp-${n}`,
+      status,
+      ...(status === 'pending'
+        ? { createdAt: new Date(at) }
+        : { createdAt: new Date(at), decidedAt: new Date(at), decidedBy: ws.accountId }),
+    })
+    await inSpace(async (tx) => {
+      await tx
+        .insert(dreamRuns)
+        .values([
+          run('2026-02-20T00:00:00Z'),
+          run('2026-03-05T00:00:00Z'),
+          run('2026-03-09T00:00:00Z'),
+        ])
+      await tx.insert(dreamSuggestions).values([
+        // 拒绝过、涉及的记忆没改过：指纹还要挡住同样的建议，留着
+        suggestion('rejected', '2026-03-01T00:00:00Z', live),
+        // 执行过的提炼，作为来源的事实没改过：同样的提炼不再提，留着
+        suggestion('applied', '2026-03-01T00:00:00Z', live, other),
+        // 还在待审里的留着
+        suggestion('pending', '2026-03-01T00:00:00Z', other),
+        // 作废了、但处理还不到保留期的留着
+        suggestion('rejected', '2026-03-09T00:00:00Z', changed),
+        // 作废了、过了保留期：改过的、删掉的、过期的
+        suggestion('rejected', '2026-03-01T00:00:00Z', changed),
+        suggestion('applied', '2026-03-01T00:00:00Z', gone),
+        suggestion('pending', '2026-03-01T00:00:00Z', ended),
+      ])
+    })
+
+    // 保留 3 天：3 月 7 日中午之前的到期；3 月 5 日的运行记录在本月，留着
+    const { counts } = await purge(3, now)
+    expect(counts).toEqual({ ...ZERO, dreamRuns: 1, dreamSuggestions: 3 })
+    const runs = await inSpace((tx) => tx.select({ at: dreamRuns.createdAt }).from(dreamRuns))
+    expect(runs.map((r) => r.at.toISOString()).sort()).toEqual([
+      '2026-03-05T00:00:00.000Z',
+      '2026-03-09T00:00:00.000Z',
+    ])
+    const left = await inSpace((tx) =>
+      tx.select({ reason: dreamSuggestions.reason }).from(dreamSuggestions),
+    )
+    expect(left.map((s) => s.reason).sort()).toEqual(['第 1 条', '第 2 条', '第 3 条', '第 4 条'])
+  })
+
   it('已删除的凭据与凭据源过了保留期删掉；还有凭据指着的凭据源留着，保留期里已删除的凭据也算', async () => {
     const provider = async (name: string) =>
       ok<CredentialProvider>(
@@ -926,6 +1008,32 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(await ok<RetentionView>(await put({ days: 13 }))).toMatchObject({ days: 13 })
   })
 
+  it('升级之前存下的清理结果（计数里还没有后来加的几类）照样读得出，同一天不再整个清理一遍', async () => {
+    await active()
+    const at = new Date('2030-06-01T03:17:00Z').toISOString()
+    const later = ['dreamRuns', 'dreamSuggestions', 'subjectBindings']
+    const counts = {
+      ...Object.fromEntries(Object.entries(ZERO).filter(([key]) => !later.includes(key))),
+      deletedMemories: 2,
+    }
+    await database.db.insert(settings).values({
+      key: 'retention-status',
+      value: {
+        lastRun: { at, days: 30, paused: false, counts },
+        lastAttempt: { at, paused: false, complete: true, counts, tries: 1 },
+        lastError: null,
+      },
+    })
+    const full = { ...ZERO, deletedMemories: 2 }
+    expect((await view()).status).toEqual({
+      lastRun: { at, days: 30, paused: false, counts: full },
+      lastAttempt: { at, paused: false, complete: true, counts: full, tries: 1 },
+      lastError: null,
+    })
+    // 读不出的话会当作还没清理过：同一天又整个清理一遍
+    expect(await retentionJob(database.db, new Date('2030-06-01T04:17:00Z'))).toBeNull()
+  })
+
   it('暂停中试满了 3 次也不挡住提前开始之后当天的完整清理：每种（暂停中与否）各自计数', async () => {
     const restoredAt = new Date('2030-07-01T00:00:00Z')
     await database.db.transaction((tx) => markRestored(tx, restoredAt))
@@ -1115,6 +1223,8 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         enqueueBackup: async () => null,
         backupRun: async () => null,
         enqueueCleanup: async () => (cleanups++, true),
+        enqueueDream: async () => null,
+        dreamRun: async () => null,
       },
     })
     const resumed = await ok<RetentionResumed>(await resume(withJobs))

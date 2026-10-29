@@ -114,19 +114,7 @@ export interface ParsedExtraction {
 // 在整段文字里找花括号配平的顶层对象，只认带 facts 或 summary 的，有几个时取最后一个（示例多在前、答案在后）。
 // 外层对象坏了（多了逗号、被截断）时不退到里面的某一条事实上：那样会把解析失败当成「什么都没抽到」
 export function parseExtraction(text: string): ParsedExtraction {
-  const body = text.replace(/<think>[\s\S]*?<\/think>/g, '')
-  let found: z.infer<typeof Output> | undefined
-  for (const source of topLevelObjects(body)) {
-    let raw: unknown
-    try {
-      raw = JSON.parse(source)
-    } catch {
-      continue
-    }
-    if (typeof raw !== 'object' || raw === null || !('facts' in raw || 'summary' in raw)) continue
-    const parsed = Output.safeParse(raw)
-    if (parsed.success) found = parsed.data
-  }
+  const found = lastJsonObject(text, ['facts', 'summary'], Output)
   if (!found) throw new Error('抽取模型的输出里没有约定格式的 JSON 对象')
   return {
     candidates: (found.facts ?? []).map((f) => {
@@ -135,6 +123,28 @@ export function parseExtraction(text: string): ParsedExtraction {
     }),
     summary: found.summary?.trim() ?? '',
   }
+}
+
+// 模型输出里最后一个带着其中某个键、符合 schema 的顶层 JSON 对象（规则见 parseExtraction），没有时为 undefined
+export function lastJsonObject<T extends z.ZodType>(
+  text: string,
+  keys: readonly string[],
+  schema: T,
+): z.infer<T> | undefined {
+  const body = text.replace(/<think>[\s\S]*?<\/think>/g, '')
+  let found: z.infer<T> | undefined
+  for (const source of topLevelObjects(body)) {
+    let raw: unknown
+    try {
+      raw = JSON.parse(source)
+    } catch {
+      continue
+    }
+    if (typeof raw !== 'object' || raw === null || !keys.some((k) => k in raw)) continue
+    const parsed = schema.safeParse(raw)
+    if (parsed.success) found = parsed.data
+  }
+  return found
 }
 
 // 文字里一段段花括号配平的对象，按出现的先后；配平了的对象里面嵌套的不再单独给出。字符串里的花括号不算

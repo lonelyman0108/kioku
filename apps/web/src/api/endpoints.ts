@@ -17,6 +17,11 @@ import {
   CreatedKey,
   DeletedMemoryList,
   DomainLayers,
+  DreamApplied,
+  DreamQueued,
+  DreamRunList,
+  DreamRunStatus,
+  DreamSuggestionList,
   EmbeddingRebuildResult,
   EmbeddingSettingsView,
   EmbeddingStatus,
@@ -55,6 +60,7 @@ import {
   SubjectDetail,
   SubjectInfo,
   SubjectList,
+  type ApplyDreamSuggestion,
   type BootPreviewRequest,
   type CreateAppRequest,
   type CreateCredentialProviderRequest,
@@ -286,6 +292,24 @@ export const api = {
     request('GET', `/spaces/${spaceId}/review`, { query, schema: ReviewList }),
   review: (spaceId: string, body: ReviewRequest) =>
     request('POST', `/spaces/${spaceId}/review`, { body, schema: ReviewResult }),
+  dreamSuggestions: (spaceId: string, cursor?: string) =>
+    request('GET', `/spaces/${spaceId}/dream/suggestions`, {
+      query: { cursor },
+      schema: DreamSuggestionList,
+    }),
+  applyDreamSuggestion: (spaceId: string, id: string, body: ApplyDreamSuggestion) =>
+    request('POST', `/spaces/${spaceId}/dream/suggestions/${id}/apply`, {
+      body,
+      schema: DreamApplied,
+    }),
+  rejectDreamSuggestion: (spaceId: string, id: string) =>
+    request('POST', `/spaces/${spaceId}/dream/suggestions/${id}/reject`),
+  startDream: (spaceId: string) =>
+    request('POST', `/spaces/${spaceId}/dream/runs`, { schema: DreamQueued }),
+  dreamRun: (spaceId: string, runId: string) =>
+    request('GET', `/spaces/${spaceId}/dream/runs/${runId}`, { schema: DreamRunStatus }),
+  dreamRuns: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/dream/runs`, { schema: DreamRunList }),
   groupPersonas: (spaceId: string, appId: string) =>
     request('GET', `/spaces/${spaceId}/apps/${appId}/group-personas`, {
       schema: GroupPersonaRuleList,

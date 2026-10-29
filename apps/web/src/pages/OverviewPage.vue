@@ -39,7 +39,7 @@ const coverage = computed(() => {
   const e = data.value?.embedding
   return e && e.eligible ? Math.round((e.embedded / e.eligible) * 100) : null
 })
-// 本月抽取的 token 用到八成时提醒；用完之后只写会话摘要、不再抽取事实
+// 本月抽取（含 Dream 的整理）的 token 用到八成时提醒；用完之后只写会话摘要、不再抽取事实，Dream 也不整理
 const budgetWarning = computed(() => {
   const e = data.value?.extraction
   if (!e || e.usedTokens < e.monthlyTokens * 0.8) return null
@@ -51,8 +51,8 @@ const budgetWarning = computed(() => {
       ? '本月的抽取预算用完了'
       : `本月的抽取预算已用 ${Math.floor((e.usedTokens / e.monthlyTokens) * 100)}%`,
     description: over
-      ? `${used}之后只写会话摘要、不再抽取事实，下个月恢复；空间 owner 可以在空间设置里调高。`
-      : `${used}用完之后只写会话摘要、不再抽取事实。`,
+      ? `${used}之后只写会话摘要、不再抽取事实，Dream 也不再整理，下个月恢复；空间 owner 可以在空间设置里调高。`
+      : `${used}用完之后只写会话摘要、不再抽取事实，Dream 也不再整理。`,
   }
 })
 // 备份只给实例管理员提醒（别人拿到的是 null）

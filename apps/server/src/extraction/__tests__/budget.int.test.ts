@@ -43,6 +43,8 @@ describe.skipIf(!testDatabaseUrl)('抽取预算', () => {
     backupRun: async () => null,
     enqueueExtraction: async () => {},
     enqueueCleanup: async () => true,
+    enqueueDream: async () => null,
+    dreamRun: async () => null,
   }
 
   beforeAll(async () => {

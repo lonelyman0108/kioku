@@ -55,6 +55,8 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     enqueueBackup: async () => null,
     backupRun: async () => null,
     enqueueCleanup: async () => true,
+    enqueueDream: async () => null,
+    dreamRun: async () => null,
     enqueueExtraction: async (target, delay) => {
       queued.push({ scope: target.scope, delay })
     },

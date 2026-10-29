@@ -69,6 +69,8 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       if (failEnqueue) throw new Error('队列不可用')
       queued.push({ scope: target.scope, delay })
     },
+    enqueueDream: async () => null,
+    dreamRun: async () => null,
   }
 
   beforeAll(async () => {
