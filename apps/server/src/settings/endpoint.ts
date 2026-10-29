@@ -180,14 +180,22 @@ export async function saveEndpointConfig(
   endpoint: ModelEndpoint,
   input: EndpointInput,
 ): Promise<EndpointSettingsView> {
-  const stored = await loadStored(db, endpoint)
-  const apiKey = resolveApiKey(stored, input, masterKey, aadOf(endpoint), endpoint.label)
-  const value: Stored = { baseUrl: input.baseUrl, model: input.model, apiKey }
-  await db
-    .insert(settings)
-    .values({ key: endpoint.key, value })
-    .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
-  return viewOf(value)
+  // 读出、改、写回在一个事务里并锁住这一行：沿用的 Key 不会把轮换主密钥刚换好的包装覆盖回去
+  return db.transaction(async (tx) => {
+    const [row] = await tx
+      .select()
+      .from(settings)
+      .where(eq(settings.key, endpoint.key))
+      .for('update')
+    const stored = row?.value as Stored | undefined
+    const apiKey = resolveApiKey(stored, input, masterKey, aadOf(endpoint), endpoint.label)
+    const value: Stored = { baseUrl: input.baseUrl, model: input.model, apiKey }
+    await tx
+      .insert(settings)
+      .values({ key: endpoint.key, value })
+      .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+    return viewOf(value)
+  })
 }
 
 export async function endpointSettingsView(

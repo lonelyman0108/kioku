@@ -340,6 +340,10 @@ export const memories = pgTable(
       .where(sql`${t.deletedAt} is null`),
     index().on(t.spaceId, t.layer),
     index().on(t.subjectId),
+    // 轮换主密钥时按主密钥的标识找加密的行；只建在加密的行上（secret 不多）
+    index('memories_key_id_idx')
+      .on(t.spaceId, t.keyId)
+      .where(sql`${t.wrappedKey} is not null`),
     unique().on(t.spaceId, t.id),
     foreignKey({
       columns: [t.spaceId, t.personaId],
@@ -506,6 +510,10 @@ export const credentials = pgTable(
     index('credentials_provider_live_idx')
       .on(t.providerId)
       .where(sql`${t.deletedAt} is null`),
+    // 轮换主密钥时按主密钥的标识找托管的凭据
+    index('credentials_key_id_idx')
+      .on(t.spaceId, t.keyId)
+      .where(sql`${t.wrappedKey} is not null`),
     // 凭据源必须是同一个成员的：外键带上主人。自动生成的约束名超过 PostgreSQL 的 63 字符上限，这里起短名
     foreignKey({
       name: 'credentials_provider_fk',

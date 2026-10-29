@@ -96,6 +96,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     const rest: Record<string, unknown> = { ...row, glossary: [] }
     delete rest.ciphertext
     delete rest.wrappedKey
+    delete rest.keyId
     delete rest.fts
     return JSON.parse(JSON.stringify({ ...rest, ...overrides })) as Record<string, unknown>
   }

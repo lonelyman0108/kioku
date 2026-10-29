@@ -1,43 +1,40 @@
-import { and, count, eq, isNotNull, isNull, notInArray, or } from 'drizzle-orm'
+import type { MasterKeyStatus } from '@kioku/contracts'
+import { and, asc, count, eq, gt, isNotNull, isNull, notInArray } from 'drizzle-orm'
 
 import { credentialAad } from '../credential/service'
 import { withSpace, type Db } from '../db/client'
 import { credentials, memories, spaces } from '../db/schema'
 import { mapEmbeddingKeys, sealedEmbeddingKeys } from '../embedding/settings'
-import { EXTRACTION_ENDPOINT } from '../extraction/settings'
-import { mapEndpointKey, sealedEndpointKey, type SealedJson } from '../settings/endpoint'
-import { canUnwrap, rewrapKey } from './envelope'
+import { EXTRACTION_ENDPOINT, sealedExtractionKey } from '../extraction/settings'
+import { mapEndpointKey, type SealedJson } from '../settings/endpoint'
+import { canUnwrap, rewrapKey, type Sealed } from './envelope'
 import { keyIdOf, keyringOf, type Keyring, type MasterKey } from './keyring'
 
 // 主密钥的准备与轮换。加密的数据有三处：secret 记忆、托管的凭据值、实例设置里的接口 Key，
 // 都是信封加密：正文用各自的数据密钥加密，数据密钥再由主密钥包装，旁边记着主密钥的标识。
 // 轮换只换数据密钥的包装，正文的密文不动
 
-// 记忆与凭据：加密的行、aad 怎么算
+// 记忆与凭据：加密的行、aad 怎么算。查询都带上 wrapped_key 不为空：key_id 的索引只建在加密的行上
 const TABLES = [
   { label: 'secret 记忆', table: memories, aad: (id: string) => id },
   { label: '托管的凭据', table: credentials, aad: credentialAad },
 ] as const
 
-// 一批重新包装多少行：每批一个短事务
+// 一批处理多少行：每批一个短事务
 const BATCH = 100
 
-// 一条加密记录是哪把主密钥包装的：记了标识的按标识认；没记的（加上标识之前写下的）挨个试当前的与旧的。认不出时返回 null
-function identify(
-  ring: Keyring,
-  wrappedKey: Buffer,
-  aad: string,
-  keyId: string | null | undefined,
-): string | null {
-  const known = [ring.current, ring.previous].flatMap((k) => (k ? [k] : []))
-  if (keyId) return known.some((k) => keyIdOf(k) === keyId) ? keyId : null
-  const key = known.find((k) => canUnwrap(k, wrappedKey, aad))
-  return key ? keyIdOf(key) : null
+// 实例设置里加密保存的接口 Key，只读不解密。新加了加密的设置项要加在这里，轮换、启动检查与核对主密钥都按它
+export async function sealedSettingsKeys(
+  db: Db,
+): Promise<{ sealed: Sealed; aad: string; keyId: string | null; label: string }[]> {
+  const extraction = await sealedExtractionKey(db)
+  return [
+    ...(await sealedEmbeddingKeys(db)).map((k) => ({ ...k, label: '嵌入接口' })),
+    ...(extraction ? [{ ...extraction, label: EXTRACTION_ENDPOINT.label }] : []),
+  ]
 }
 
-const toBuffer = (base64: string) => Buffer.from(base64, 'base64')
-
-// 实例设置里加密保存的接口 Key（嵌入渠道与抽取模型）逐个改写
+// 同上，逐个改写：change 原样返回就不写回
 async function mapSettingsKeys(
   db: Db,
   change: (sealed: SealedJson, aad: string) => SealedJson,
@@ -47,44 +44,80 @@ async function mapSettingsKeys(
   )
 }
 
+const knownIds = (ring: Keyring) =>
+  [ring.current, ring.previous].flatMap((k) => (k ? [keyIdOf(k)] : []))
+
+// 没记标识的记录（加上标识之前写下的）是哪把主密钥包装的：当前的与旧的挨个试，认不出时返回 null
+function identify(ring: Keyring, wrappedKey: Buffer, aad: string): string | null {
+  const key = [ring.current, ring.previous].find((k) => k && canUnwrap(k, wrappedKey, aad))
+  return key ? keyIdOf(key) : null
+}
+
 // 启动时调用：给还没记标识的加密记录补上标识，并确认每一条都解得开。有认不出的（主密钥配错了，
 // 或者轮换没换完就去掉了旧的那把），或者库里有加密的数据却没配主密钥时，拒绝启动：带病启动只会让这些数据都读不出来，
-// 新写下的又用了另一把，越来越乱
+// 新写下的又用了另一把，越来越乱。标识对不上的只数一数；没记标识的一批批认，不把加密的行一次全读进内存
 export async function prepareMasterKey(db: Db, masterKey: MasterKey | null): Promise<void> {
   const ring = masterKey ? keyringOf(masterKey) : null
-  const known = ring ? [ring.current, ring.previous].flatMap((k) => (k ? [keyIdOf(k)] : [])) : []
+  const known = ring ? knownIds(ring) : []
   const problems = new Map<string, number>()
-  const problem = (label: string) => problems.set(label, (problems.get(label) ?? 0) + 1)
+  const problem = (label: string, n = 1) => {
+    if (n) problems.set(label, (problems.get(label) ?? 0) + n)
+  }
 
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    await withSpace(db, spaceId, async (tx) => {
-      for (const { label, table, aad } of TABLES) {
-        // 只看没记标识的与标识对不上的；正常情况下一行都没有
-        const rows = await tx
-          .select({ id: table.id, wrappedKey: table.wrappedKey, keyId: table.keyId })
+    for (const { label, table, aad } of TABLES) {
+      const encrypted = isNotNull(table.wrappedKey)
+      const [unknown] = await withSpace(db, spaceId, (tx) =>
+        tx
+          .select({ n: count() })
           .from(table)
           .where(
-            and(
-              isNotNull(table.wrappedKey),
-              known.length ? or(isNull(table.keyId), notInArray(table.keyId, known)) : undefined,
-            ),
-          )
-        for (const row of rows) {
-          const id = ring && identify(ring, row.wrappedKey!, aad(row.id), row.keyId)
-          if (!id) problem(label)
-          else if (!row.keyId) await tx.update(table).set({ keyId: id }).where(eq(table.id, row.id))
-        }
+            ring
+              ? and(encrypted, isNotNull(table.keyId), notInArray(table.keyId, known))
+              : encrypted,
+          ),
+      )
+      problem(label, unknown?.n ?? 0)
+      if (!ring) continue
+      let after: string | null = null
+      for (;;) {
+        const cursor: string | null = after
+        const rows: { id: string }[] = await withSpace(db, spaceId, async (tx) => {
+          const legacy = await tx
+            .select({ id: table.id, wrappedKey: table.wrappedKey })
+            .from(table)
+            .where(and(encrypted, isNull(table.keyId), cursor ? gt(table.id, cursor) : undefined))
+            .orderBy(asc(table.id))
+            .limit(BATCH)
+          for (const row of legacy) {
+            const id = identify(ring, row.wrappedKey!, aad(row.id))
+            if (!id) problem(label)
+            else await tx.update(table).set({ keyId: id }).where(eq(table.id, row.id))
+          }
+          return legacy
+        })
+        if (rows.length < BATCH) break
+        after = rows[rows.length - 1]!.id
       }
+    }
+  }
+  const settingsLabel = '实例设置里的接口 Key'
+  if (!ring) {
+    problem(settingsLabel, (await sealedSettingsKeys(db)).length)
+  } else {
+    await mapSettingsKeys(db, (sealed, aad) => {
+      if (sealed.keyId) {
+        if (!known.includes(sealed.keyId)) problem(settingsLabel)
+        return sealed
+      }
+      const id = identify(ring, Buffer.from(sealed.wrappedKey, 'base64'), aad)
+      if (!id) {
+        problem(settingsLabel)
+        return sealed
+      }
+      return { ...sealed, keyId: id }
     })
   }
-  await mapSettingsKeys(db, (sealed, aad) => {
-    const id = ring && identify(ring, toBuffer(sealed.wrappedKey), aad, sealed.keyId)
-    if (!id) {
-      problem('实例设置里的接口 Key')
-      return sealed
-    }
-    return sealed.keyId ? sealed : { ...sealed, keyId: id }
-  })
 
   if (problems.size) {
     const what = [...problems].map(([label, n]) => `${label} ${n} 条`).join('、')
@@ -114,7 +147,7 @@ export async function rotateMasterKey(
           const rows = await tx
             .select({ id: table.id, wrappedKey: table.wrappedKey })
             .from(table)
-            .where(eq(table.keyId, previousId))
+            .where(and(isNotNull(table.wrappedKey), eq(table.keyId, previousId)))
             .limit(BATCH)
             .for('update', { skipLocked: true })
           for (const row of rows) {
@@ -132,25 +165,18 @@ export async function rotateMasterKey(
     sealed.keyId === previousId
       ? {
           ...sealed,
-          wrappedKey: rewrapKey(previous, current, toBuffer(sealed.wrappedKey), aad).toString(
-            'base64',
-          ),
+          wrappedKey: rewrapKey(
+            previous,
+            current,
+            Buffer.from(sealed.wrappedKey, 'base64'),
+            aad,
+          ).toString('base64'),
           keyId: currentId,
         }
       : sealed,
   )
-  const status = await masterKeyStatus(db, masterKey)
-  const remaining =
-    status.remaining.memories + status.remaining.credentials + status.remaining.settings
-  return { rewrapped, remaining }
-}
-
-export interface MasterKeyStatus {
-  configured: boolean
-  currentId: string | null
-  previousId: string | null
-  // 还是旧主密钥包装的：换完之后就可以去掉 KIOKU_MASTER_KEY_PREVIOUS
-  remaining: { memories: number; credentials: number; settings: number }
+  const { remaining } = await masterKeyStatus(db, masterKey)
+  return { rewrapped, remaining: remaining.memories + remaining.credentials + remaining.settings }
 }
 
 export async function masterKeyStatus(
@@ -163,21 +189,19 @@ export async function masterKeyStatus(
   if (previousId) {
     for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
       await withSpace(db, spaceId, async (tx) => {
-        const [m] = await tx
-          .select({ n: count() })
-          .from(memories)
-          .where(eq(memories.keyId, previousId))
-        const [c] = await tx
-          .select({ n: count() })
-          .from(credentials)
-          .where(eq(credentials.keyId, previousId))
-        remaining.memories += m?.n ?? 0
-        remaining.credentials += c?.n ?? 0
+        for (const [field, { table }] of [
+          ['memories', TABLES[0]],
+          ['credentials', TABLES[1]],
+        ] as const) {
+          const [row] = await tx
+            .select({ n: count() })
+            .from(table)
+            .where(and(isNotNull(table.wrappedKey), eq(table.keyId, previousId)))
+          remaining[field] += row?.n ?? 0
+        }
       })
     }
-    const extraction = await sealedEndpointKey(db, EXTRACTION_ENDPOINT)
-    const settingsKeys = [...(await sealedEmbeddingKeys(db)), ...(extraction ? [extraction] : [])]
-    remaining.settings = settingsKeys.filter((k) => k.keyId === previousId).length
+    remaining.settings = (await sealedSettingsKeys(db)).filter((k) => k.keyId === previousId).length
   }
   return {
     configured: ring !== null,

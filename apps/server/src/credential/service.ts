@@ -361,10 +361,10 @@ export class CredentialService {
     const changedValues = [...new Set([...Object.keys(current), ...names])]
       .filter((name) => current[name] !== merged[name])
       .sort()
-    // 值没变时沿用原来的密文，不再加密一遍
+    // 值没变时不动密文这几列：不再加密一遍，也不把读到的旧值写回去（轮换主密钥可能刚换过它们的包装）
     const sealed =
       before?.source === 'hosted' && !changedValues.length
-        ? { ciphertext: before.ciphertext, wrappedKey: before.wrappedKey, keyId: before.keyId }
+        ? {}
         : this.seal(id, Object.fromEntries(names.map((n) => [n, merged[n]!])))
     return {
       columns: {

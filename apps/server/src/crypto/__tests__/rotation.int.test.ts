@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import type { CredentialValues, MasterKeyStatus, MemoryView } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -12,6 +13,8 @@ import { staticEmbedderSource } from '../../embedding/source'
 import { loadExtractionConfig } from '../../extraction/settings'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { credentialAad } from '../../credential/service'
+import { rewrapKey } from '../envelope'
 import { keyIdOf, type MasterKey } from '../keyring'
 import { masterKeyStatus, prepareMasterKey, rotateMasterKey } from '../rotation'
 
@@ -214,6 +217,98 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
   it('还没换完就去掉了旧的那把：拒绝启动，并说清要配回去', async () => {
     await secret(appWith(oldKey), 'home://wifi', '无线密码')
     await expect(prepareMasterKey(database.db, newKey)).rejects.toThrow('KIOKU_MASTER_KEY_PREVIOUS')
+  })
+
+  // 另开一条连接锁住一行，发出请求、等它被这一行挡住，在锁里模拟轮换换好包装再放开
+  async function rotatedWhileBlocked(
+    lock: (tx: postgres.TransactionSql) => Promise<unknown>,
+    request: () => Response | Promise<Response>,
+    rewrap: (tx: postgres.TransactionSql) => Promise<unknown>,
+  ) {
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    let pending: Promise<Response> | undefined
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await lock(tx)
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending = Promise.resolve(request())
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where ${pid}::int = any(pg_blocking_pids(pid))`
+          if (row!.n > 0) break
+          if (i >= 80) throw new Error('请求没有等在这一行上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        await rewrap(tx)
+      })
+      expect((await pending!).status).toBe(200)
+    } finally {
+      await pending?.catch(() => {})
+      await side.end()
+    }
+  }
+
+  it('轮换时改了托管凭据（值没变）：不把读到的旧包装写回去', async () => {
+    const { credentialId } = await seed()
+    await rotatedWhileBlocked(
+      (tx) => tx`select id from credentials where id = ${credentialId} for update`,
+      () =>
+        send(
+          appWith(rotating),
+          'PATCH',
+          `/v1/spaces/${ws.spaceId}/credentials/${credentialId}`,
+          { expectedVersion: 1, name: 'NAS 2', source: { kind: 'hosted', values: {} } },
+          { cookie: ws.cookie },
+        ),
+      async (tx) => {
+        const [row] =
+          (await tx`select wrapped_key from credentials where id = ${credentialId}`) as unknown as [
+            { wrapped_key: Buffer },
+          ]
+        const wrapped = rewrapKey(oldKey, newKey, row.wrapped_key, credentialAad(credentialId))
+        await tx`update credentials set wrapped_key = ${wrapped}, key_id = ${keyIdOf(newKey)} where id = ${credentialId}`
+      },
+    )
+    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(credentials).where(eq(credentials.id, credentialId)),
+    )
+    expect(row).toMatchObject({ name: 'NAS 2', keyId: keyIdOf(newKey) })
+  })
+
+  it('轮换时改了抽取模型的设置（沿用 Key）：不把读到的旧包装写回去', async () => {
+    await seed()
+    await rotatedWhileBlocked(
+      (tx) => tx`select key from settings where key = 'extraction' for update`,
+      () =>
+        send(
+          appWith(rotating),
+          'PUT',
+          '/v1/settings/extraction',
+          { baseUrl: 'https://x.example.com/v1', model: 'x2' },
+          { cookie: ws.cookie },
+        ),
+      async (tx) => {
+        const [row] =
+          (await tx`select value from settings where key = 'extraction'`) as unknown as [
+            { value: { apiKey: { wrappedKey: string; keyId: string } } },
+          ]
+        const apiKey = row.value.apiKey
+        const wrapped = rewrapKey(
+          oldKey,
+          newKey,
+          Buffer.from(apiKey.wrappedKey, 'base64'),
+          'settings:extraction',
+        )
+        const value = {
+          ...row.value,
+          apiKey: { ...apiKey, wrappedKey: wrapped.toString('base64'), keyId: keyIdOf(newKey) },
+        }
+        await tx`update settings set value = ${tx.json(value)} where key = 'extraction'`
+      },
+    )
+    expect((await loadExtractionConfig(database.db, newKey))?.apiKey).toBe('sk-extract')
   })
 
   it('主密钥状态只给实例管理员', async () => {

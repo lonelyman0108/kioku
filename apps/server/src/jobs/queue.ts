@@ -26,8 +26,10 @@ const SWITCH_AGAIN_SECONDS = 30
 // 换模型补了一遍一条都没补上、或者出了错时不自己再排，由定时任务每十分钟再试一遍：接口恢复了能自己补完，
 // 出错时也不会一直请求；没在换模型时这个任务读一下设置就结束
 const SWITCH_CRON = '*/10 * * * *'
-// 轮换主密钥时有正被别的事务锁着、这次没换的行，隔这么久再来
+// 轮换主密钥时有正被别的事务锁着、这次没换的行，隔这么久再来；出了错由每十分钟一次的定时任务再试
+// （没配旧主密钥时这个任务什么都不做）
 const ROTATE_AGAIN_SECONDS = 60
+const ROTATE_CRON = '*/10 * * * *'
 // 切换或放弃之后等一会儿再清向量：写向量时会锁住设置、按当时的设置决定写不写，这里只是多留一点余量
 const PRUNE_AFTER_SECONDS = 30
 
@@ -113,10 +115,14 @@ export async function startJobs(options: {
   // 配了旧主密钥时把还是旧密钥包装的数据密钥换成新的；有被锁着没换的，过一会儿再来
   const masterKey = options.masterKey
   await boss.work(ROTATE, async () => {
-    if (!masterKey) return
-    const { rewrapped, remaining } = await rotateMasterKey(options.db, masterKey)
-    console.log(`主密钥轮换：这次换了 ${rewrapped} 条，还剩 ${remaining} 条`)
-    if (remaining) void send(ROTATE, {}, ROTATE_AGAIN_SECONDS)
+    if (!masterKey || !keyringOf(masterKey).previous) return
+    try {
+      const { rewrapped, remaining } = await rotateMasterKey(options.db, masterKey)
+      console.log(`主密钥轮换：这次换了 ${rewrapped} 条，还剩 ${remaining} 条`)
+      if (remaining) void send(ROTATE, {}, ROTATE_AGAIN_SECONDS)
+    } catch (err) {
+      console.error('主密钥轮换出错，定时任务会再试', err)
+    }
   })
   if (masterKey && keyringOf(masterKey).previous) void send(ROTATE, {})
   await boss.work(CLEANUP, async () => {
@@ -127,6 +133,7 @@ export async function startJobs(options: {
   })
   await boss.schedule(CLEANUP, CLEANUP_CRON)
   await boss.schedule(SWITCH, SWITCH_CRON)
+  await boss.schedule(ROTATE, ROTATE_CRON)
 
   return {
     enqueueEmbed: (spaceId, memoryId) => void send(EMBED, { spaceId, memoryId }),

@@ -44,7 +44,7 @@ function parseMasterKeys(
     return null
   }
   const key = parseMasterKey(current)
-  if (!previous) return key
+  if (!previous) return { current: key, previous: null }
   const old = parseMasterKey(previous)
   if (keyIdOf(old) === keyIdOf(key)) {
     throw new Error('KIOKU_MASTER_KEY_PREVIOUS 和 KIOKU_MASTER_KEY 是同一把密钥')

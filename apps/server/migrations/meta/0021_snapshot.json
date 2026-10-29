@@ -1,5 +1,5 @@
 {
-  "id": "9d60a84c-39dc-444d-ba75-edf36793ab78",
+  "id": "9bff442b-ab3e-4aae-831a-53c097369752",
   "prevId": "a53a1425-f494-4cb8-abf6-3c4eeb661f97",
   "version": "7",
   "dialect": "postgresql",
@@ -985,6 +985,28 @@
           "concurrently": false,
           "method": "btree",
           "with": {}
+        },
+        "credentials_key_id_idx": {
+          "name": "credentials_key_id_idx",
+          "columns": [
+            {
+              "expression": "space_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"credentials\".\"wrapped_key\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1538,6 +1560,28 @@
             }
           ],
           "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "memories_key_id_idx": {
+          "name": "memories_key_id_idx",
+          "columns": [
+            {
+              "expression": "space_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "key_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"memories\".\"wrapped_key\" is not null",
           "concurrently": false,
           "method": "btree",
           "with": {}

@@ -35,7 +35,10 @@ describe('主密钥', () => {
         KIOKU_MASTER_KEY_PREVIOUS: encode(previous),
       }).masterKey,
     ).toEqual(ring)
-    expect(loadConfig({ ...base, KIOKU_MASTER_KEY: encode(current) }).masterKey).toEqual(current)
+    expect(loadConfig({ ...base, KIOKU_MASTER_KEY: encode(current) }).masterKey).toEqual({
+      current,
+      previous: null,
+    })
     expect(loadConfig(base).masterKey).toBeNull()
     expect(() => loadConfig({ ...base, KIOKU_MASTER_KEY_PREVIOUS: encode(previous) })).toThrow(
       '却没有配置 KIOKU_MASTER_KEY',

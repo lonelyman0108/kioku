@@ -11,9 +11,16 @@ export type MasterKey = Buffer | Keyring
 export const keyringOf = (key: MasterKey): Keyring =>
   Buffer.isBuffer(key) ? { current: key, previous: null } : key
 
-// 主密钥的标识，记在包装好的数据密钥旁边：轮换时按它找出还是旧密钥包装的记录。是哈希，推不出密钥本身
+// 主密钥的标识，记在包装好的数据密钥旁边：轮换时按它找出还是旧密钥包装的记录。是哈希，推不出密钥本身。
+// 每次加解密都要用，按密钥缓存
+const ids = new WeakMap<Buffer, string>()
 export function keyIdOf(key: Buffer): string {
-  return createHash('sha256').update('kioku-master-key-id\0').update(key).digest('hex').slice(0, 16)
+  let id = ids.get(key)
+  if (!id) {
+    id = createHash('sha256').update('kioku-master-key-id\0').update(key).digest('hex').slice(0, 16)
+    ids.set(key, id)
+  }
+  return id
 }
 
 // 加密用的主密钥与它的标识

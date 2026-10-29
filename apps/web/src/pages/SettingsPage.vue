@@ -11,11 +11,14 @@ import ExtractionSettings from '../components/ExtractionSettings.vue'
 const toast = useToast()
 const queryClient = useQueryClient()
 
-// 主密钥：轮换期间每隔几秒刷新，看得到还剩多少条是旧主密钥包装的
+// 主密钥：轮换还没换完时每隔几秒刷新，看得到还剩多少条是旧主密钥包装的
 const masterKey = useQuery({
   queryKey: ['settings', 'master-key'],
   queryFn: api.masterKeyStatus,
-  refetchInterval: (query) => (query.state.data?.previousId ? 5_000 : false),
+  refetchInterval: (query) => {
+    const r = query.state.data?.remaining
+    return r && r.memories + r.credentials + r.settings > 0 ? 5_000 : false
+  },
 })
 const remaining = computed(() => {
   const r = masterKey.data.value?.remaining
