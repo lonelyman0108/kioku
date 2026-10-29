@@ -82,9 +82,9 @@ async function save() {
     <template #header>
       <h2 class="font-medium">抽取预算</h2>
       <p class="mt-1 text-sm text-muted">
-        从群聊与私聊里抽取事实花的
-        token。用到八成时概览会提醒；用完之后只写会话摘要、不再抽取事实，下个月恢复（按 UTC
-        的自然月算）。每个对象每天最多写这么多条事实，防止被人刷。
+        从群聊与私聊里抽取事实、Dream 整理记忆花的
+        token，两者共用。用到八成时概览会提醒；用完之后只写会话摘要、不再抽取事实，Dream
+        也不再整理，下个月恢复（按 UTC 的自然月算）。每个对象每天最多写这么多条事实，防止被人刷。
       </p>
     </template>
     <UAlert

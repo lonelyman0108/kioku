@@ -57,4 +57,10 @@ export const icons = {
   validity: 'i-lucide-calendar-clock',
   left: 'i-lucide-eye-off',
   error: 'i-lucide-circle-alert',
+  // Dream 的整理与四种建议
+  dream: 'i-lucide-moon-star',
+  merge: 'i-lucide-merge',
+  distill: 'i-lucide-flask-conical',
+  stale: 'i-lucide-calendar-x',
+  apply: 'i-lucide-check',
 } as const
