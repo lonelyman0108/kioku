@@ -162,7 +162,9 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       </UDashboardNavbar>
     </template>
     <template #body>
-      <UTabs v-model="section" :items="sections" :content="false" class="mb-4 w-auto" />
+      <div class="mb-4 flex">
+        <UTabs v-model="section" :items="sections" :content="false" class="w-auto" />
+      </div>
       <div v-if="section === 'dream'">
         <DreamSuggestions :space-id="spaceId" :can-act="canAct" />
       </div>

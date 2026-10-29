@@ -322,21 +322,22 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               </ul>
 
               <template v-if="item.kind === 'merge'">
-                <p class="text-xs font-medium">合并后的正文</p>
-                <UTextarea
-                  v-if="drafts.has(item.id)"
-                  v-model="drafts.get(item.id)!.content"
-                  :rows="4"
-                  autoresize
-                  class="w-full font-mono"
-                  aria-label="合并后的正文"
-                />
-                <p
-                  v-else
-                  class="max-h-48 overflow-y-auto rounded-md bg-elevated p-2 text-sm break-words whitespace-pre-wrap"
-                >
-                  {{ item.content }}
-                </p>
+                <UFormField v-if="drafts.has(item.id)" label="合并后的正文">
+                  <UTextarea
+                    v-model="drafts.get(item.id)!.content"
+                    :rows="4"
+                    autoresize
+                    class="w-full font-mono"
+                  />
+                </UFormField>
+                <template v-else>
+                  <p class="text-xs font-medium">合并后的正文</p>
+                  <p
+                    class="max-h-48 overflow-y-auto rounded-md bg-elevated p-2 text-sm break-words whitespace-pre-wrap"
+                  >
+                    {{ item.content }}
+                  </p>
+                </template>
               </template>
               <template v-else-if="item.kind === 'distill'">
                 <p class="text-xs font-medium">草稿</p>
