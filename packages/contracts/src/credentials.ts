@@ -121,13 +121,13 @@ const BINDING_UNSAFE =
 const shellSafe = (v: string) => !BINDING_UNSAFE.test(v) && !v.startsWith('-')
 const SHELL_SAFE_MESSAGE =
   '不能含有引号、; | & < > ` $ \\ % 与换行等看不见的字符，也不能以 - 开头；条目名里有这些字符时，改用条目的 id'
-export const CredentialLocation = z
+const Location = z
   .string()
   .trim()
   .min(1, '条目位置不能为空')
   .max(500, '条目位置最多 500 个字')
   .refine(shellSafe, `条目位置${SHELL_SAFE_MESSAGE}`)
-export const CredentialSourceField = z
+const SourceField = z
   .string()
   .trim()
   .min(1, '来源字段不能为空')
@@ -141,27 +141,31 @@ const fieldCount = (values: Record<string, unknown>) =>
 const distinctNames = (fields: { name: string }[]) =>
   new Set(fields.map((f) => f.name)).size === fields.length
 
-const ExternalSource = z.object({
+// 外部来源：凭据源、条目位置与字段对应。新建、修改凭据与空间的导入导出都按它检查
+export const ExternalCredentialSource = z.object({
   kind: z.literal('external'),
   providerId: z.uuid(),
-  location: CredentialLocation,
+  location: Location,
   fields: z
-    .array(z.object({ name: CredentialFieldName, sourceField: CredentialSourceField }))
+    .array(z.object({ name: CredentialFieldName, sourceField: SourceField }))
     .min(1, '至少要有一个字段')
     .max(MAX_CREDENTIAL_FIELDS, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`)
     .refine(distinctNames, '字段名不能重复'),
 })
 
+// 托管的来源：全部字段的值。新建凭据与空间的导入导出都按它检查
+export const HostedCredentialSource = z.object({
+  kind: z.literal('hosted'),
+  values: z
+    .record(CredentialFieldName, CredentialValue)
+    .refine((v) => Object.keys(v).length > 0, '至少要有一个字段')
+    .refine(fieldCount, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`),
+})
+
 // 新建时的来源：托管的给出全部字段的值，外部的给出凭据源、条目位置与字段对应
 export const CredentialSourceInput = z.discriminatedUnion('kind', [
-  z.object({
-    kind: z.literal('hosted'),
-    values: z
-      .record(CredentialFieldName, CredentialValue)
-      .refine((v) => Object.keys(v).length > 0, '至少要有一个字段')
-      .refine(fieldCount, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`),
-  }),
-  ExternalSource,
+  HostedCredentialSource,
+  ExternalCredentialSource,
 ])
 export type CredentialSourceInput = z.infer<typeof CredentialSourceInput>
 
@@ -174,7 +178,7 @@ export const CredentialSourceUpdate = z.discriminatedUnion('kind', [
       .record(CredentialFieldName, CredentialValue.nullable())
       .refine(fieldCount, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`),
   }),
-  ExternalSource,
+  ExternalCredentialSource,
 ])
 export type CredentialSourceUpdate = z.infer<typeof CredentialSourceUpdate>
 

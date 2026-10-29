@@ -3,14 +3,12 @@ import { randomBytes } from 'node:crypto'
 import { describe, expect, it } from 'vitest'
 
 import { sealBackup } from '../format'
-import { MemoryError } from '../../memory/service'
 import {
   DEFAULT_KDF,
   deriveExportKey,
   ExportTooLarge,
   openSpaceExport,
   sealSpaceExport,
-  withKdfGate,
   type KdfParams,
 } from '../spaceFormat'
 
@@ -23,16 +21,11 @@ const LIMITS = { maxPlainBytes: 1024 * 1024, maxBytes: 1024 * 1024 }
 const FAST: KdfParams = { logN: 14, r: 8, p: 1 }
 
 async function seal(passphrase: string, texts: string[], kdf = FAST, limits = LIMITS) {
-  return sealSpaceExport(
-    await deriveExportKey(passphrase, { account: 'tester', kdf }),
-    parts(...texts),
-    limits,
-  )
+  return sealSpaceExport(await deriveExportKey(passphrase, kdf), parts(...texts), limits)
 }
 
-// 解开导出文件；口令派生按账号经过闸门
 const open = (passphrase: string, file: Buffer, maxPlainBytes = LIMITS.maxPlainBytes) =>
-  openSpaceExport(file, { passphrase, account: 'tester', maxPlainBytes })
+  openSpaceExport(file, { passphrase, maxPlainBytes })
 
 describe('空间导出文件的加密', () => {
   const passphrase = 'correct horse battery staple'
@@ -110,56 +103,5 @@ describe('空间导出文件的加密', () => {
     await expect(
       seal(passphrase, [noise], FAST, { maxPlainBytes: 1024 * 1024, maxBytes: 128 * 1024 }),
     ).rejects.toBeInstanceOf(ExportTooLarge)
-  })
-})
-
-describe('口令派生的闸门', () => {
-  const busy = (p: Promise<unknown>) =>
-    expect(p).rejects.toSatisfy((err) => err instanceof MemoryError && err.status === 429)
-  // 拿住名额不放，直到调用 release
-  const held: (() => void)[] = []
-  const hold = (account: string) =>
-    withKdfGate(account, () => new Promise<void>((resolve) => held.push(resolve)))
-  const releaseAll = async () => {
-    while (held.length) {
-      held.shift()!()
-      await new Promise((r) => setTimeout(r, 0))
-    }
-  }
-
-  it('同时只跑一个，排队最多 4 个，满了直接拒绝（429），放开之后照常', async () => {
-    let running = 0
-    let peak = 0
-    const tasks = Array.from({ length: 5 }, (_, i) =>
-      withKdfGate(`account-${i}`, async () => {
-        running++
-        peak = Math.max(peak, running)
-        await new Promise<void>((resolve) => held.push(resolve))
-        running--
-      }),
-    )
-    await busy(hold('account-5'))
-    await releaseAll()
-    await Promise.all(tasks)
-    expect(peak).toBe(1)
-    await expect(withKdfGate('account-5', async () => 'ok')).resolves.toBe('ok')
-  })
-
-  it('每个账号同时只占一个名额：排着的也算，别的账号照样排得进去', async () => {
-    const first = hold('same')
-    await busy(withKdfGate('same', async () => 'second'))
-    const other = withKdfGate('other', async () => 'other')
-    await releaseAll()
-    await Promise.all([first, other])
-    await expect(withKdfGate('same', async () => 'again')).resolves.toBe('again')
-  })
-
-  it('派生出错时名额照样放开', async () => {
-    await expect(
-      withKdfGate('failing', async () => {
-        throw new Error('scrypt 出错')
-      }),
-    ).rejects.toThrow('scrypt 出错')
-    await expect(withKdfGate('failing', async () => 'ok')).resolves.toBe('ok')
   })
 })

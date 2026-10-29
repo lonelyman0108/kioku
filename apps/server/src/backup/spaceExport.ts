@@ -26,6 +26,7 @@ import { formatUri } from '../memory/uri'
 import { VERSION } from '../version'
 import { deriveExportKey, ExportTooLarge, sealSpaceExport, type KdfParams } from './spaceFormat'
 import {
+  describeIssue,
   SPACE_EXPORT_FORMAT,
   SPACE_EXPORT_MAX_PLAIN_BYTES,
   SPACE_EXPORT_VERSION,
@@ -56,10 +57,7 @@ export async function exportSpace(
   options: { spaceId: string; accountId: string; passphrase: string; kdf?: KdfParams },
 ): Promise<SpaceExport> {
   // 先派生密钥再开事务：派生要排队、要几百毫秒，不占着读库的事务
-  const exportKey = await deriveExportKey(options.passphrase, {
-    account: options.accountId,
-    ...(options.kdf ? { kdf: options.kdf } : {}),
-  })
+  const exportKey = await deriveExportKey(options.passphrase, options.kdf)
   const createdAt = new Date().toISOString()
   // 导出了哪些凭据、各带了哪些字段：读完之后记访问事件
   const exported = new Map<string, string[]>()
@@ -135,11 +133,9 @@ export async function exportSpace(
 function checked<T>(schema: z.ZodType<T>, label: string, value: unknown): T {
   const parsed = schema.safeParse(value)
   if (parsed.success) return parsed.data
-  const issue = parsed.error.issues[0]
-  const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
   throw new MemoryError(
     409,
-    `${label}导出后导入不了（${where}${issue?.message ?? '格式不对'}），在管理界面改掉再导出`,
+    `${label}导出后导入不了（${describeIssue(parsed.error)}），在管理界面改掉再导出`,
   )
 }
 
@@ -388,8 +384,8 @@ function credentialRecord(
       kind: 'external',
       providerId: row.providerId!,
       location: row.location!,
-      // 没有来源字段的照原样写 null：取值时按字段名取，导入后也一样
-      fields: row.fields.map((f) => ({ name: f.name, sourceField: f.sourceField ?? null })),
+      // 没有来源字段的取值时按字段名取：导出时就写成字段名，和新建凭据的接口一样必填，导入后取法不变
+      fields: row.fields.map((f) => ({ name: f.name, sourceField: f.sourceField ?? f.name })),
     }
   }
   return {

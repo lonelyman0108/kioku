@@ -15,10 +15,12 @@ import {
 import { asc, eq } from 'drizzle-orm'
 import { bodyLimit } from 'hono/body-limit'
 import type { MiddlewareHandler } from 'hono'
+import { createMiddleware } from 'hono/factory'
 
 import { memberRole, requireInstanceAdmin } from '../auth/middleware'
 import { exportSpace } from '../backup/spaceExport'
 import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
+import { acquireTransferSlot } from '../backup/transferGate'
 import { accounts, spaceMembers, spaces } from '../db/schema'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
@@ -105,11 +107,22 @@ const exportRoute = createRoute({
   },
 })
 
-// 上传导出文件的两个接口共用：先确认是实例管理员、再看大小，最后才读表单，别人上传的大文件不读进内存。
+// 整个检查或导入占一个名额（见 transferGate.ts），做完才放；先占名额再读表单，排着队的请求不先把文件读进内存
+const transferSlot = createMiddleware<AppEnv>(async (c, next) => {
+  const release = await acquireTransferSlot(c.get('console').accountId, c.req.raw.signal)
+  try {
+    await next()
+  } finally {
+    release()
+  }
+})
+
+// 上传导出文件的两个接口共用：先确认是实例管理员、再占名额、看大小，最后才读表单，别人上传的大文件不读进内存。
 // 上限按文件算，表单里的口令、名字与分隔行另外留一点余量
 function uploadMiddleware(deps: Deps): MiddlewareHandler<AppEnv>[] {
   return [
     requireInstanceAdmin(deps, '只有实例管理员能导入空间'),
+    transferSlot,
     bodyLimit({
       maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
       onError: (c) =>
@@ -157,6 +170,25 @@ function importRoute(deps: Deps) {
   })
 }
 
+// 导出的文件发完才放掉名额：文件攒在内存里，要等发给浏览器之后才释放。客户端中途断开时响应流被取消，也放掉
+function releasingBody(file: Uint8Array, release: () => void): ReadableStream<Uint8Array> {
+  let sent = false
+  return new ReadableStream({
+    pull(controller) {
+      if (!sent) {
+        sent = true
+        controller.enqueue(file)
+        return
+      }
+      controller.close()
+      release()
+    },
+    cancel() {
+      release()
+    },
+  })
+}
+
 // 下载的文件名：空间名加导出时间（UTC）。空间名里放不进文件名的字符换成 _，另给一个只有 ASCII 的备用名
 function attachment(spaceName: string, createdAt: string): string {
   const stamp = createdAt.replace(/[-:]/g, '').replace(/\.\d+Z$/, 'Z')
@@ -175,13 +207,22 @@ export function spaceRoutes(deps: Deps) {
       if (!role) return c.json({ error: '不是该空间成员' }, 403)
       // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
       if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
-      const exported = await exportSpace(deps.db, deps.masterKey, {
-        spaceId,
-        accountId,
-        passphrase: c.req.valid('json').passphrase,
-      })
-      return c.body(exported.file, 200, {
+      // 整个导出占一个名额，文件发完才放（见 releasingBody）
+      const release = await acquireTransferSlot(accountId, c.req.raw.signal)
+      let exported
+      try {
+        exported = await exportSpace(deps.db, deps.masterKey, {
+          spaceId,
+          accountId,
+          passphrase: c.req.valid('json').passphrase,
+        })
+      } catch (err) {
+        release()
+        throw err
+      }
+      return c.body(releasingBody(exported.file, release), 200, {
         'content-type': 'application/octet-stream',
+        'content-length': String(exported.file.length),
         'content-disposition': attachment(exported.spaceName, exported.createdAt),
         'cache-control': 'no-store',
       })
@@ -189,7 +230,6 @@ export function spaceRoutes(deps: Deps) {
     .openapi(inspectRoute(deps), async (c) => {
       const form = c.req.valid('form')
       const preview = await inspectSpaceImport(deps.masterKey, {
-        accountId: c.get('console').accountId,
         file: Buffer.from(await form.file.arrayBuffer()),
         passphrase: form.passphrase,
       })

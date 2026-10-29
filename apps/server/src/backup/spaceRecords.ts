@@ -1,15 +1,12 @@
 import {
   AppConfig,
-  CredentialFieldName,
   CredentialIdentifier,
-  CredentialLocation,
   CredentialProviderKind,
-  CredentialSourceField,
-  CredentialSourceInput,
   DomainLayers,
+  ExternalCredentialSource,
   ExtractionBudget,
+  HostedCredentialSource,
   Layer,
-  MAX_CREDENTIAL_FIELDS,
   MemoryForm,
   MemoryUri,
   Provenance,
@@ -41,6 +38,13 @@ const Time = z.iso.datetime({ offset: true }).refine((value) => {
   return !Number.isNaN(at.getTime()) && at.getUTCFullYear() >= 1
 }, '不是有效的时间')
 const UUID_TEXT = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+
+// 检查没通过时给人看的说明：哪个字段、什么问题。导出时点名哪一条导入不了、导入时说清第几行不对，都用它
+export function describeIssue(error: z.ZodError): string {
+  const issue = error.issues[0]
+  const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
+  return `${where}${issue?.message ?? '格式不对'}`
+}
 
 export const SpaceExportHeader = z.object({
   format: z.literal(SPACE_EXPORT_FORMAT),
@@ -125,18 +129,8 @@ export const ProviderRecord = z.object({
   updatedAt: Time,
 })
 
-// 托管的和新建凭据的接口同一个形状，带着字段值（明文，整个文件另用口令加密）。
-// 外部的带着条目位置与字段对应：条目位置与来源字段会代入给 agent 的取值命令，照样按接口的规则检查；
-// 来源字段为 null 的按字段名取（和取值时一样），原样带过去
-const [HostedSource] = CredentialSourceInput.options
-const ExternalSource = z.object({
-  kind: z.literal('external'),
-  providerId: Id,
-  location: CredentialLocation,
-  fields: z
-    .array(z.object({ name: CredentialFieldName, sourceField: CredentialSourceField.nullable() }))
-    .max(MAX_CREDENTIAL_FIELDS),
-})
+// 来源和新建凭据的接口同一个形状，用同一份定义检查：托管的带着字段值（明文，整个文件另用口令加密），
+// 外部的带着条目位置与字段对应（条目位置与来源字段会代入给 agent 的取值命令）
 
 export const CredentialRecord = z.object({
   type: z.literal('credential'),
@@ -144,7 +138,7 @@ export const CredentialRecord = z.object({
   identifier: CredentialIdentifier,
   name: Text.min(1).max(100),
   description: Text.max(2000).nullable(),
-  source: z.discriminatedUnion('kind', [HostedSource, ExternalSource]),
+  source: z.discriminatedUnion('kind', [HostedCredentialSource, ExternalCredentialSource]),
   // 只给这些应用用；null 表示不限定。导出里没有的应用（已经删掉的）导入时去掉
   appIds: z.array(Id).max(100).nullable(),
   createdAt: Time,

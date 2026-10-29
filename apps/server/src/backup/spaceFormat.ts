@@ -57,57 +57,20 @@ function acceptable(kdf: KdfParams): boolean {
   )
 }
 
-// 口令派生的闸门：每次派生要上百 MiB 内存，同时只跑一个，其余排队；排队的有上限，每个账号同时最多占一个名额
-// （排着或正在跑）。满了直接拒绝：排队不设上限的话，任何一个空间 owner 连着点导出，就能让所有人的导出、导入都卡住
-const KDF_RUNNING = 1
-const KDF_QUEUE = 4
-const KDF_PER_ACCOUNT = 1
-const BUSY = '导出导入正忙，稍后再试'
-
-let running = 0
-const queue: (() => void)[] = []
-const perAccount = new Map<string, number>()
-
-export async function withKdfGate<T>(account: string, fn: () => Promise<T>): Promise<T> {
-  const mine = perAccount.get(account) ?? 0
-  if (mine >= KDF_PER_ACCOUNT) throw new MemoryError(429, BUSY)
-  if (running >= KDF_RUNNING && queue.length >= KDF_QUEUE) throw new MemoryError(429, BUSY)
-  perAccount.set(account, mine + 1)
-  try {
-    if (running >= KDF_RUNNING) await new Promise<void>((resolve) => queue.push(resolve))
-    else running++
-    try {
-      return await fn()
-    } finally {
-      // 有排队的就把名额直接交给下一个，否则释放
-      const next = queue.shift()
-      if (next) next()
-      else running--
-    }
-  } finally {
-    const left = (perAccount.get(account) ?? 1) - 1
-    if (left > 0) perAccount.set(account, left)
-    else perAccount.delete(account)
-  }
-}
-
-const scryptAsync = (passphrase: string, salt: Buffer, kdf: KdfParams, account: string) =>
-  withKdfGate(
-    account,
-    () =>
-      new Promise<Buffer>((resolve, reject) =>
-        scrypt(
-          // 和账号密码一样先做 NFKC：不同输入法打出的全角、半角字符派生出同一把密钥
-          passphrase.normalize('NFKC'),
-          salt,
-          64,
-          { N: 2 ** kdf.logN, r: kdf.r, p: kdf.p, maxmem: kdfMemory(kdf) + 32 * 1024 * 1024 },
-          (err, key) => (err ? reject(err) : resolve(key)),
-        ),
-      ),
+// 派生一次要上百 MiB 内存：同时跑几个由调用方的闸门管（见 transferGate.ts）
+const scryptAsync = (passphrase: string, salt: Buffer, kdf: KdfParams) =>
+  new Promise<Buffer>((resolve, reject) =>
+    scrypt(
+      // 和账号密码一样先做 NFKC：不同输入法打出的全角、半角字符派生出同一把密钥
+      passphrase.normalize('NFKC'),
+      salt,
+      64,
+      { N: 2 ** kdf.logN, r: kdf.r, p: kdf.p, maxmem: kdfMemory(kdf) + 32 * 1024 * 1024 },
+      (err, key) => (err ? reject(err) : resolve(key)),
+    ),
   )
 
-// 口令派生出的密钥与文件头。导出时先派生好，再开读库的事务：派生要排队、要几百毫秒，不该占着事务
+// 口令派生出的密钥与文件头。导出时先派生好，再开读库的事务：派生要几百毫秒，不该占着事务
 export interface ExportKey {
   key: Buffer
   header: Buffer
@@ -120,16 +83,14 @@ function checkValue(material: Buffer): Buffer {
     .subarray(0, CHECK_LENGTH)
 }
 
-// account 是发起导出的账号：派生要经过闸门，按账号限制同时占的名额
 export async function deriveExportKey(
   passphrase: string,
-  options: { account: string; kdf?: KdfParams },
+  kdf: KdfParams = DEFAULT_KDF,
 ): Promise<ExportKey> {
-  const kdf = options.kdf ?? DEFAULT_KDF
   if (!acceptable(kdf)) throw new Error('scrypt 参数超出了导入时接受的范围')
   const salt = randomBytes(SALT_LENGTH)
   const iv = randomBytes(IV_LENGTH)
-  const derived = await scryptAsync(passphrase, salt, kdf, options.account)
+  const derived = await scryptAsync(passphrase, salt, kdf)
   const header = Buffer.concat([
     MAGIC,
     Buffer.from([kdf.logN, kdf.r, kdf.p]),
@@ -181,10 +142,10 @@ export async function sealSpaceExport(
 const gunzipAsync = promisify(gunzip)
 
 // 解开导出文件：先核对口令，再整份解密、核对认证标签，最后解压。解压后超过 maxPlainBytes 时拒绝（压缩炸弹）。
-// 出错时抛出给用户看的 MemoryError（400；闸门满了是 429）。account 是发起导入的账号
+// 出错时抛出给用户看的 MemoryError（400）
 export async function openSpaceExport(
   file: Buffer,
-  options: { passphrase: string; account: string; maxPlainBytes: number },
+  options: { passphrase: string; maxPlainBytes: number },
 ): Promise<Buffer> {
   const { passphrase, maxPlainBytes } = options
   if (isBackupFile(file)) {
@@ -205,7 +166,7 @@ export async function openSpaceExport(
   const salt = header.subarray(at, (at += SALT_LENGTH))
   const iv = header.subarray(at, (at += IV_LENGTH))
   const expected = header.subarray(at, at + CHECK_LENGTH)
-  const derived = await scryptAsync(passphrase, salt, kdf, options.account)
+  const derived = await scryptAsync(passphrase, salt, kdf)
   if (!timingSafeEqual(checkValue(derived.subarray(32)), expected)) {
     throw new MemoryError(400, '口令不对（也可能是文件头被改过）')
   }

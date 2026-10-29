@@ -34,6 +34,7 @@ import {
 import { APP_DOMAIN, PERSONA_DOMAIN, parseUri } from '../memory/uri'
 import { openSpaceExport } from './spaceFormat'
 import {
+  describeIssue,
   SPACE_EXPORT_FORMAT,
   SPACE_EXPORT_MAX_PLAIN_BYTES,
   SPACE_EXPORT_VERSION,
@@ -85,11 +86,7 @@ function jsonLine(text: string, lineNo: number): unknown {
 
 function parseLine<T>(value: unknown, schema: z.ZodType<T>, lineNo: number): T {
   const parsed = schema.safeParse(value)
-  if (!parsed.success) {
-    const issue = parsed.error.issues[0]
-    const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
-    throw invalid(`第 ${lineNo} 行 ${where}${issue?.message ?? '格式不对'}`)
-  }
+  if (!parsed.success) throw invalid(`第 ${lineNo} 行 ${describeIssue(parsed.error)}`)
   return parsed.data
 }
 
@@ -301,8 +298,6 @@ function countsOf(x: ParsedSpaceExport): SpaceImportCounts {
 }
 
 export interface InspectSpaceOptions {
-  // 导入人：实例管理员（路由检查）。口令派生按账号经过闸门
-  accountId: string
   file: Buffer
   passphrase: string
 }
@@ -314,7 +309,6 @@ async function openAndCheck(
 ): Promise<ParsedSpaceExport> {
   const plain = await openSpaceExport(options.file, {
     passphrase: options.passphrase,
-    account: options.accountId,
     maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
   })
   const x = parseSpaceExport(plain)
@@ -339,6 +333,8 @@ export async function inspectSpaceImport(
 }
 
 export interface ImportSpaceOptions extends InspectSpaceOptions {
+  // 导入人：实例管理员（路由检查），成为新空间的 owner
+  accountId: string
   // 新空间的名字；不填时用导出时的空间名
   name?: string | undefined
 }
@@ -352,16 +348,25 @@ export async function importSpace(
   const name = options.name?.trim() || x.header.space.name
   // 新空间的 id 先定下来：整个导入在 withSpace 里，内容表按这个空间过滤
   const spaceId = randomUUID()
-  const progress = { step: '' }
+  const progress: Progress = { step: '', fromFile: false }
   try {
     await withSpace(db, spaceId, (tx) =>
       writeSpace(tx, x, { spaceId, accountId: options.accountId, masterKey, name, progress }),
     )
   } catch (err) {
-    // 上面的检查之外，数据库还拒绝了什么（例如被人改过、但口令对得上的文件）：整个撤销，
-    // 说清是哪几行、违反了哪一条约束。22 类是值本身不对（例如时间超出范围），23 类是违反约束
     const code = pgErrorCode(err)
-    if (code?.startsWith('22') || code?.startsWith('23')) {
+    if (code) {
+      // 数据库报的错都把 SQLSTATE、约束名与说明记进日志，不管最后算谁的问题
+      console.error(`导入空间时数据库报错：${progress.step}`, {
+        code,
+        constraint: pgConstraint(err),
+        message: pgMessage(err),
+      })
+    }
+    // 上面的检查之外，数据库还拒绝了文件里的什么（例如被人改过、但口令对得上的文件）：整个撤销，
+    // 说清是哪几行、违反了哪一条约束。22 类是值本身不对（例如时间超出范围），23 类是违反约束。
+    // 只有正在写文件里来的值时才算文件的问题；成员、关键词、引用与事件是服务端自己派生的，出错是服务端的缺陷，照常 500
+    if (progress.fromFile && (code?.startsWith('22') || code?.startsWith('23'))) {
       const why = pgConstraint(err) ? `违反了约束 ${pgConstraint(err)}` : (pgMessage(err) ?? code)
       throw invalid(`${progress.step}写不进数据库（${why}）`)
     }
@@ -380,7 +385,13 @@ function* chunks<T>(items: T[], size = BATCH): Generator<T[]> {
 const time = (value: string) => new Date(value)
 const optionalTime = (value: string | null) => (value === null ? null : new Date(value))
 
-// 按文件建出新空间与里面的全部内容。progress.step 记着正在写哪几行，数据库报错时说得出是哪里
+// 正在写哪一步：哪几行的什么，写的是不是文件里来的值（服务端自己派生的不算）
+interface Progress {
+  step: string
+  fromFile: boolean
+}
+
+// 按文件建出新空间与里面的全部内容。progress 记着正在写哪一步，数据库报错时说得出是哪里、算不算文件的问题
 async function writeSpace(
   tx: Tx,
   x: ParsedSpaceExport,
@@ -389,16 +400,25 @@ async function writeSpace(
     accountId: string
     masterKey: MasterKey | null
     name: string
-    progress: { step: string }
+    progress: Progress
   },
 ): Promise<void> {
   const { spaceId, accountId, masterKey, progress } = ctx
+  // 写文件里来的值：报错时算文件的问题
   const step = (what: string, batch: { line: number }[]) => {
     const from = batch[0]?.line
     const to = batch[batch.length - 1]?.line
     progress.step = from === to ? `第 ${from} 行的${what}` : `第 ${from}–${to} 行的${what}`
+    progress.fromFile = true
+  }
+  // 写服务端自己派生的：报错是服务端的缺陷
+  const derived = (what: string, batch?: { line: number }[]) => {
+    if (batch) step(what, batch)
+    else progress.step = what
+    progress.fromFile = false
   }
   progress.step = '空间的设置'
+  progress.fromFile = true
   await tx.insert(spaces).values({
     id: spaceId,
     name: ctx.name,
@@ -406,6 +426,7 @@ async function writeSpace(
     extractionMonthlyTokens: x.header.space.extractionMonthlyTokens,
     extractionDailyWrites: x.header.space.extractionDailyWrites,
   })
+  derived('新空间的成员')
   await tx.insert(spaceMembers).values({ spaceId, accountId, role: 'owner' })
   // app.importing_space 告诉 URI 互斥的触发器：这是导入新空间的事务，空间这一行刚写下、
   // 别的事务还看不到它，不用为每个 URI 加咨询锁（见 0022 迁移）
@@ -551,6 +572,7 @@ async function writeSpace(
     step('凭据', batch)
     const rows = batch.map((c) => ({ id: randomUUID(), record: c }))
     await tx.insert(credentials).values(rows.map(({ id, record }) => credentialRow(id, record)))
+    derived('凭据的导入事件', batch)
     await tx.insert(credentialEvents).values(
       rows.map(({ id }) => ({
         spaceId,
@@ -619,11 +641,14 @@ async function writeSpace(
           .returning(SNAPSHOT_COLUMNS)
       ).map((r) => [r.id, r]),
     )
+    // 关键词（去重、排过序的）、引用索引与导入事件是从记忆派生出来的，分开标出
+    derived('记忆的关键词', batch)
     const keywords = prepared.flatMap((p) =>
       p.glossary.map((keyword) => ({ spaceId, memoryId: p.id, keyword })),
     )
     for (const part of chunks(keywords, BATCH * 4)) await tx.insert(memoryGlossary).values(part)
     // 引用索引和写入时一样按正文重建，secret 的不进索引
+    derived('记忆的凭据引用', batch)
     const refs = prepared.flatMap((p) =>
       p.record.sensitivity === 'secret'
         ? []
@@ -634,6 +659,7 @@ async function writeSpace(
           })),
     )
     for (const part of chunks(refs, BATCH * 4)) await tx.insert(memoryCredentialRefs).values(part)
+    derived('记忆的导入事件', batch)
     await tx.insert(memoryEvents).values(
       prepared.map((p) => ({
         spaceId,

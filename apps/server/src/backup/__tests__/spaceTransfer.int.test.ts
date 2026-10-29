@@ -22,7 +22,7 @@ import type {
   SubjectList,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { decryptSecret } from '../../crypto/envelope'
@@ -34,14 +34,9 @@ import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, FULL_SCOPES, jsonRequest } from '../../testing/fixtures'
-import {
-  deriveExportKey,
-  openSpaceExport,
-  sealSpaceExport,
-  withKdfGate,
-  type KdfParams,
-} from '../spaceFormat'
+import { deriveExportKey, openSpaceExport, sealSpaceExport, type KdfParams } from '../spaceFormat'
 import { parseSpaceExport, type ParsedSpaceExport } from '../spaceImport'
+import { acquireTransferSlot, queuedTransfers } from '../transferGate'
 import {
   SPACE_EXPORT_FORMAT,
   SPACE_EXPORT_MAX_PLAIN_BYTES,
@@ -163,7 +158,6 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
   const plainOf = (file: Buffer) =>
     openSpaceExport(file, {
       passphrase: PASSPHRASE,
-      account: 'reader',
       maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
     })
   const contents = async (file: Buffer): Promise<ParsedSpaceExport> =>
@@ -185,14 +179,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       yield `${JSON.stringify(head)}\n`
       for (const r of records) yield `${JSON.stringify(r)}\n`
     }
-    return sealSpaceExport(
-      await deriveExportKey(PASSPHRASE, { account: 'crafter', kdf: FAST }),
-      lines(),
-      {
-        maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
-        maxBytes: 64 * 1024 * 1024,
-      },
-    )
+    return sealSpaceExport(await deriveExportKey(PASSPHRASE, FAST), lines(), {
+      maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
+      maxBytes: 64 * 1024 * 1024,
+    })
   }
   const now = new Date().toISOString()
   const curated = (uri: string, extra: Partial<MemoryRecord> = {}): MemoryRecord => ({
@@ -489,7 +479,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         sql`update credentials set app_ids = array[${agent.id}::uuid, ${randomUUID()}::uuid] where id = ${mail.id}`,
       ),
     )
-    // 字段没有来源字段（取值时按字段名取）：导出时原样写成 null，导入照样认
+    // 字段没有来源字段（取值时按字段名取）：导出时写成字段名，和新建凭据的接口一样，导入后取法不变
     await withSpace(database.db, spaceId, (tx) =>
       tx.execute(
         sql`update credentials set fields = '[{"name":"password","sourceField":null}]'::jsonb where id = ${mail.id}`,
@@ -545,7 +535,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       })
       expect(parsed.credentials.find((c) => c.identifier === 'mail')!.source).toMatchObject({
         kind: 'external',
-        fields: [{ name: 'password', sourceField: null }],
+        fields: [{ name: 'password', sourceField: 'password' }],
       })
       // 文件里记着导出人是谁
       expect(parsed.header.exporter).toEqual({ displayName: 'alice' })
@@ -746,7 +736,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(credentialList.items.find((c) => c.identifier === 'mail')).toMatchObject({
         source: 'external',
         location: 'mail-item',
-        fields: [{ name: 'password', sourceField: null }],
+        fields: [{ name: 'password', sourceField: 'password' }],
         provider: { name: 'Vaultwarden', deleted: false },
         appIds: [app('agent').id],
       })
@@ -1001,28 +991,37 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(await spaceCount()).toBe(before)
   })
 
-  it('数据库拒绝写入时（值超出范围、违反约束）整个撤销，说清是哪几行', async () => {
+  it('写文件里来的值时数据库拒绝（值超出范围、违反约束）算文件的问题，说清是哪几行；派生的出错照常 500，都记日志', async () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()
-    // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束
+    // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束；
+    // 关键词是「坏关键词」时也报违反约束（关键词是导入时派生的，不算文件的问题）
     await database.db.execute(
       sql.raw(`create or replace function kioku_test_reject() returns trigger language plpgsql as $$
       begin
-        if new.display_name = '坏的' then
-          raise exception '时间超出范围' using errcode = 'datetime_field_overflow';
-        end if;
-        if new.display_name = '冲突的' then
+        -- 按表分开判断：PL/pgSQL 不短路，别的表的行上没有这些字段
+        if tg_table_name = 'subjects' then
+          if new.display_name = '坏的' then
+            raise exception '时间超出范围' using errcode = 'datetime_field_overflow';
+          end if;
+          if new.display_name = '冲突的' then
+            raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
+          end if;
+        elsif new.keyword = '坏关键词' then
           raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
         end if;
         return new;
       end $$`),
     )
-    await database.db.execute(sql.raw('drop trigger if exists kioku_test_reject on subjects'))
-    await database.db.execute(
-      sql.raw(
-        'create trigger kioku_test_reject before insert on subjects for each row execute function kioku_test_reject()',
-      ),
-    )
+    for (const table of ['subjects', 'memory_glossary']) {
+      await database.db.execute(sql.raw(`drop trigger if exists kioku_test_reject on ${table}`))
+      await database.db.execute(
+        sql.raw(
+          `create trigger kioku_test_reject before insert on ${table} for each row execute function kioku_test_reject()`,
+        ),
+      )
+    }
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     try {
       const subject = (displayName: string): SpaceExportRecord => ({
         type: 'subject',
@@ -1034,6 +1033,13 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         createdAt: now,
         updatedAt: now,
       })
+      const wasLogged = (step: string, code: string, constraint?: string) =>
+        logged.mock.calls.some(
+          ([message, detail]) =>
+            String(message).includes(step) &&
+            (detail as { code?: string }).code === code &&
+            (detail as { constraint?: string }).constraint === constraint,
+        )
       const rejected = async (name: string, message: string) => {
         const file = await craft([curated('home://a'), subject('好的'), subject(name)])
         const res = await importRequest(source, alice.cookie, file)
@@ -1041,14 +1047,118 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         expect(((await res.json()) as { error: string }).error).toBe(message)
       }
       await rejected('坏的', '导出文件的内容不对：第 3–4 行的对象写不进数据库（时间超出范围）')
+      expect(wasLogged('第 3–4 行的对象', '22008')).toBe(true)
       await rejected(
         '冲突的',
         '导出文件的内容不对：第 3–4 行的对象写不进数据库（违反了约束 kioku_test_check）',
       )
+      expect(wasLogged('第 3–4 行的对象', '23514', 'kioku_test_check')).toBe(true)
+      // 关键词是服务端派生的：出错是服务端的缺陷，不说成文件的问题
+      const derived = await importRequest(
+        source,
+        alice.cookie,
+        await craft([curated('home://a', { glossary: ['坏关键词'] })]),
+      )
+      expect(derived.status).toBe(500)
+      expect(((await derived.json()) as { error: string }).error).toBe('服务内部错误')
+      expect(wasLogged('第 2 行的记忆的关键词', '23514', 'kioku_test_check')).toBe(true)
       expect(await spaceCount()).toBe(before)
     } finally {
-      await database.db.execute(sql.raw('drop trigger if exists kioku_test_reject on subjects'))
+      logged.mockRestore()
+      for (const table of ['subjects', 'memory_glossary']) {
+        await database.db.execute(sql.raw(`drop trigger if exists kioku_test_reject on ${table}`))
+      }
       await database.db.execute(sql.raw('drop function if exists kioku_test_reject()'))
+    }
+  })
+
+  it('外部凭据没有字段、或者字段重名：导入时被拒，导出时也被拒', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const cookie = { cookie: alice.cookie }
+    const space = alice.spaceId
+    const provider = randomUUID()
+    const external = (fields: { name: string; sourceField: string }[]): SpaceExportRecord[] => [
+      {
+        type: 'provider',
+        id: provider,
+        kind: 'bitwarden',
+        name: 'Vaultwarden',
+        instructions: '',
+        deletedAt: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+      {
+        type: 'credential',
+        id: randomUUID(),
+        identifier: 'mail',
+        name: '邮箱',
+        description: null,
+        source: { kind: 'external', providerId: provider, location: 'mail-item', fields },
+        appIds: null,
+        createdAt: now,
+        updatedAt: now,
+      },
+    ]
+    const before = await spaceCount()
+    for (const [fields, message] of [
+      [[], '第 3 行 source.fields：至少要有一个字段'],
+      [
+        [
+          { name: 'password', sourceField: 'a' },
+          { name: 'password', sourceField: 'b' },
+        ],
+        '第 3 行 source.fields：字段名不能重复',
+      ],
+    ] as const) {
+      const res = await importRequest(source, alice.cookie, await craft(external([...fields])))
+      expect(res.status, await res.clone().text()).toBe(400)
+      expect(((await res.json()) as { error: string }).error).toContain(message)
+    }
+    expect(await spaceCount()).toBe(before)
+
+    const vault = await ok<{ id: string }>(
+      send(
+        source,
+        'POST',
+        `/v1/spaces/${space}/credential-providers`,
+        { kind: 'bitwarden', name: 'Vaultwarden' },
+        cookie,
+      ),
+      201,
+    )
+    await ok(
+      send(
+        source,
+        'POST',
+        `/v1/spaces/${space}/credentials`,
+        {
+          identifier: 'mail',
+          name: '邮箱',
+          source: {
+            kind: 'external',
+            providerId: vault.id,
+            location: 'mail-item',
+            fields: [{ name: 'password', sourceField: 'password' }],
+          },
+        },
+        cookie,
+      ),
+      201,
+    )
+    for (const [fields, message] of [
+      ['[]', '凭据 mail 导出后导入不了（source.fields：至少要有一个字段）'],
+      [
+        '[{"name":"password","sourceField":"a"},{"name":"password","sourceField":"b"}]',
+        '凭据 mail 导出后导入不了（source.fields：字段名不能重复）',
+      ],
+    ] as const) {
+      await withSpace(database.db, space, (tx) =>
+        tx.execute(sql`update credentials set fields = ${fields}::jsonb where identifier = 'mail'`),
+      )
+      const res = await exportRequest(source, space, alice.cookie)
+      expect(res.status, await res.clone().text()).toBe(409)
+      expect(((await res.json()) as { error: string }).error).toContain(message)
     }
   })
 
@@ -1134,34 +1244,130 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     },
   )
 
-  it('口令派生正忙时，导出、检查与导入都直接返回 429，放开之后照常', async () => {
+  // 等到条件成立（例如请求已经排进队里），最多等 5 秒
+  const until = async (check: () => boolean | Promise<boolean>) => {
+    for (const started = Date.now(); !(await check());) {
+      if (Date.now() - started > 5000) throw new Error('等不到条件成立')
+      await new Promise((r) => setTimeout(r, 10))
+    }
+  }
+  const busy = async (res: Response) => {
+    expect(res.status, await res.clone().text()).toBe(429)
+    expect(((await res.json()) as { error: string }).error).toBe('导出导入正忙，稍后再试')
+  }
+
+  it('导出导入正忙时，导出、检查与导入都直接返回 429，放开之后照常', async () => {
     const alice = await bootstrap(source, 'alice')
     const file = await exportSpace(source, alice.spaceId, alice.cookie)
-    const held: (() => void)[] = []
-    const hold = (account: string) =>
-      withKdfGate(account, () => new Promise<void>((resolve) => held.push(resolve)))
-    const busy = async (res: Response) => {
-      expect(res.status, await res.clone().text()).toBe(429)
-      expect(((await res.json()) as { error: string }).error).toBe('导出导入正忙，稍后再试')
-    }
-    const releaseAll = async (holds: Promise<void>[]) => {
-      while (held.length) {
-        held.shift()!()
-        await new Promise((r) => setTimeout(r, 0))
-      }
-      await Promise.all(holds)
-    }
     // 同一个账号已经占着一个名额
-    const mine = hold(alice.accountId)
+    const mine = await acquireTransferSlot(alice.accountId)
     await busy(await exportRequest(source, alice.spaceId, alice.cookie))
     await busy(await importRequest(source, alice.cookie, file))
     await busy(await inspectRequest(source, alice.cookie, file))
-    await releaseAll([mine])
+    mine()
     // 别的账号占满了运行与排队的名额
-    const others = Array.from({ length: 5 }, (_, i) => hold(`other-${i}`))
+    const running = await acquireTransferSlot('other-0')
+    const queued = Array.from({ length: 4 }, (_, i) => acquireTransferSlot(`other-${i + 1}`))
     await busy(await exportRequest(source, alice.spaceId, alice.cookie))
-    await releaseAll(others)
-    expect((await exportRequest(source, alice.spaceId, alice.cookie)).status).toBe(200)
+    running()
+    for (const next of queued) (await next)()
+    await exportSpace(source, alice.spaceId, alice.cookie)
+  })
+
+  it('一个导入还在写库时，别的导出、检查与导入都在排队，做完一个才轮到下一个', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'owner')
+    // 让导入卡在写库这一步：对象的名字是「慢的」时触发器睡一会儿
+    await database.db.execute(
+      sql.raw(`create or replace function kioku_test_slow() returns trigger language plpgsql as $$
+      begin
+        if new.display_name = '慢的' then perform pg_sleep(1); end if;
+        return new;
+      end $$`),
+    )
+    await database.db.execute(sql.raw('drop trigger if exists kioku_test_slow on subjects'))
+    await database.db.execute(
+      sql.raw(
+        'create trigger kioku_test_slow before insert on subjects for each row execute function kioku_test_slow()',
+      ),
+    )
+    try {
+      const file = await craft([
+        {
+          type: 'subject',
+          id: randomUUID(),
+          kind: 'person',
+          displayName: '慢的',
+          nameLocked: false,
+          linkedToExporter: false,
+          createdAt: now,
+          updatedAt: now,
+        },
+      ])
+      const finished: string[] = []
+      const importing = Promise.resolve(importRequest(source, alice.cookie, file)).then((res) => {
+        finished.push('import')
+        return res
+      })
+      // 导入已经在写库（触发器睡着）时，bob 的导出进来：排在后面，不同时做
+      await until(async () => {
+        const [row] = await database.db.execute<{ n: number }>(
+          sql`select count(*)::int as n from pg_stat_activity where datname = current_database() and wait_event = 'PgSleep'`,
+        )
+        return row!.n > 0
+      })
+      const exporting = Promise.resolve(exportRequest(source, alice.spaceId, bob.cookie)).then(
+        async (res) => {
+          finished.push('export')
+          expect(res.status, await res.clone().text()).toBe(200)
+          await res.arrayBuffer()
+        },
+      )
+      await until(() => queuedTransfers() === 1)
+      expect(finished).toEqual([])
+      expect((await importing).status).toBe(201)
+      await exporting
+      expect(finished).toEqual(['import', 'export'])
+    } finally {
+      await database.db.execute(sql.raw('drop trigger if exists kioku_test_slow on subjects'))
+      await database.db.execute(sql.raw('drop function if exists kioku_test_slow()'))
+    }
+  })
+
+  it('导出的文件发完才放名额：文件还在等着发时，别的导出在排队', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'owner')
+    const first = await exportRequest(source, alice.spaceId, alice.cookie)
+    expect(first.status).toBe(200)
+    const second = exportRequest(source, alice.spaceId, bob.cookie)
+    await until(() => queuedTransfers() === 1)
+    // 第一个的文件读完（发完），才轮到第二个
+    expect((await first.arrayBuffer()).byteLength).toBe(Number(first.headers.get('content-length')))
+    const res = await second
+    expect(res.status, await res.clone().text()).toBe(200)
+    await res.arrayBuffer()
+  })
+
+  it('排着队的请求断开之后，同一个账号马上能再排', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const holder = await acquireTransferSlot('holder')
+    const controller = new AbortController()
+    const leaving = source.request(`/v1/spaces/${alice.spaceId}/export`, {
+      ...jsonRequest('POST', { passphrase: PASSPHRASE }, { cookie: alice.cookie }),
+      signal: controller.signal,
+    })
+    await until(() => queuedTransfers() === 1)
+    // 它还排着时，同一个账号再来就是 429
+    await busy(await exportRequest(source, alice.spaceId, alice.cookie))
+    controller.abort()
+    await until(() => queuedTransfers() === 0)
+    const again = exportRequest(source, alice.spaceId, alice.cookie)
+    await until(() => queuedTransfers() === 1)
+    holder()
+    const res = await again
+    expect(res.status, await res.clone().text()).toBe(200)
+    await res.arrayBuffer()
+    expect((await leaving).status).toBe(400)
   })
 
   it(

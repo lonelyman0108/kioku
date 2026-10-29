@@ -40,7 +40,8 @@ const tooLarge = computed(() => (file.value ? file.value.size > SPACE_EXPORT_MAX
 const ready = computed(
   () => Boolean(file.value) && !tooLarge.value && Boolean(passphrase.value) && !busy.value,
 )
-const exporter = computed(() => preview.value?.exporter.displayName || '导出人')
+// 文件里写的导出人：是文件自带的，谁都能填，界面上不当成核实过的事实
+const exporter = computed(() => preview.value?.exporter.displayName || '（没写）')
 
 async function inspect() {
   if (!ready.value || !file.value) return
@@ -74,7 +75,7 @@ async function importSpace() {
   const c = result.counts
   toast.add({
     title: `已导入「${result.name}」`,
-    description: `「${result.exporter.displayName || '导出人'}」的画像层 ${c.ownerMemories} 条、私人层 ${c.privateMemories} 条记忆与 ${c.credentials} 条凭据已归你，共 ${c.memories} 条记忆。Key 没有带过来，给应用重新签发；向量在后台重新生成。`,
+    description: `文件里导出人的画像层 ${c.ownerMemories} 条、私人层 ${c.privateMemories} 条记忆与 ${c.credentials} 条凭据已归你，共 ${c.memories} 条记忆。Key 没有带过来，给应用重新签发；向量在后台重新生成。`,
     color: 'success',
   })
   // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员
@@ -132,22 +133,23 @@ async function importSpace() {
         <UAlert
           color="warning"
           variant="subtle"
-          :title="`这个文件是「${exporter}」在 ${formatTime(preview.exportedAt)} 从空间「${preview.spaceName}」导出的`"
+          :title="`文件里写的导出人：「${exporter}」（文件自带的信息，核实不了）`"
         >
           <template #description>
             <p>
-              共 {{ preview.counts.memories }} 条记忆（其中 secret
-              {{ preview.counts.secrets }} 条）、{{ preview.counts.personas }} 个人格、{{
+              文件里写着从空间「{{ preview.spaceName }}」导出，导出时间
+              {{ formatTime(preview.exportedAt) }}。共 {{ preview.counts.memories }} 条记忆（其中
+              secret {{ preview.counts.secrets }} 条）、{{ preview.counts.personas }} 个人格、{{
                 preview.counts.apps
               }}
               个应用、{{ preview.counts.subjects }} 个对象。
             </p>
             <p class="mt-1">
-              导入后，「{{ exporter }}」的画像层 {{ preview.counts.ownerMemories }} 条、私人层
+              导入后，文件里导出人的画像层 {{ preview.counts.ownerMemories }} 条、私人层
               {{ preview.counts.privateMemories }} 条记忆，{{ preview.counts.credentials }} 条凭据与
-              {{ preview.counts.providers }} 个凭据源，以及标记成「{{ exporter }}」本人的
+              {{ preview.counts.providers }} 个凭据源，以及标记成导出人本人的
               {{ preview.counts.linkedSubjects }} 个对象都归你；画像层会进你的 agent
-              的启动上下文。只导入你自己导出的、或者「{{ exporter }}」同意交给你的文件。
+              的启动上下文。只导入你自己导出的、或者导出人同意交给你的文件。
             </p>
           </template>
         </UAlert>

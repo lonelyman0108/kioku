@@ -281,10 +281,7 @@ export const SNAPSHOT_COLUMNS = (() => {
 // （包括本次事件的「改前」快照）。空间的导入也用它记导入事件，快照的形状和别的写入一致
 export function snapshot(row: SnapshotRow, glossary: string[]) {
   const rest: Partial<MemoryRow> = { ...row }
-  delete rest.ciphertext
-  delete rest.wrappedKey
-  delete rest.keyId
-  delete rest.fts
+  for (const name of UNSNAPSHOTTED) delete rest[name]
   if (row.sensitivity === 'secret') rest.content = null
   return { ...rest, glossary }
 }
