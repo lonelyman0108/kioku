@@ -51,8 +51,8 @@ export const SpaceImportCounts = z.object({
 })
 export type SpaceImportCounts = z.infer<typeof SpaceImportCounts>
 
-// 导出人：导出时的显示名
-const SpaceExporter = z.object({ displayName: z.string() })
+// 导出人：导出时的显示名，以及他让不让 Dream 整理画像层与私人层（导入后照样用在导入人身上）
+const SpaceExporter = z.object({ displayName: z.string(), dreamPrivate: z.boolean() })
 
 export const SpaceImportPreview = z.object({
   exporter: SpaceExporter,

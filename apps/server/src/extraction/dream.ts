@@ -83,12 +83,22 @@ const HIDDEN_ERROR = '整理出错（原因只有实例管理员看得到）'
 
 type MemoryRow = typeof memories.$inferSelect
 
-// 能提建议的记忆：没删除、现在有效、不是 secret（Dream 读不到 secret，连 URI 都不给模型看），并且至少有一种建议用得上：
-// 策展层的策展记忆（合并、过时）；对象层抽取的事实（合并、提炼、过时、审核）；不可信来源写进对象层与情节层的（审核）
+// 画像层与私人层的记忆只在它的主人现在还是成员、并且让 Dream 整理（space_members.dream_private，默认开）时才看：
+// 离开了空间的成员看不到建议，整理了也白花 token；关掉了的不发给模型，也就不记整理标记，再打开时接着看
+const OWNER_ALLOWS = sql`(${memories.layer} not in ('owner', 'private') or exists (
+  select 1 from ${spaceMembers}
+  where ${spaceMembers.spaceId} = ${memories.spaceId}
+    and ${spaceMembers.accountId} = ${memories.ownerAccountId}
+    and ${spaceMembers.dreamPrivate}))`
+
+// 能提建议的记忆：没删除、现在有效、不是 secret（Dream 读不到 secret，连 URI 都不给模型看），主人允许整理（见上），
+// 并且至少有一种建议用得上：策展层的策展记忆（合并、过时）；对象层抽取的事实（合并、提炼、过时、审核）；
+// 不可信来源写进对象层与情节层的（审核）。选范围、取这一次的记忆与近邻都按它，每次请求模型之前都重新判断
 const CANDIDATE = and(
   isNull(memories.deletedAt),
   STILL_VALID,
   ne(memories.sensitivity, 'secret'),
+  OWNER_ALLOWS,
   or(
     and(eq(memories.form, 'curated'), notInArray(memories.layer, ['subject', 'episode'])),
     and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject')),
@@ -194,7 +204,7 @@ async function dreamOnce(
     if (result.failed) return { outcome: 'failed', reason: null }
     if (result.more) queue.push(scope)
   }
-  // 要看的记忆在这期间都被删掉了：一次都没请求，也要记一条，每天的检查据此知道今天整理过
+  // 要看的记忆在这期间都被删掉了（或者主人关掉了整理）：一次都没请求，也要记一条，每天的检查据此知道今天整理过
   if (!calls) return skip('idle')
   return { outcome: 'done', reason: null }
 }
@@ -221,16 +231,9 @@ const UNMARKED = sql`not exists (
   select 1 from ${dreamMarks}
   where ${dreamMarks.memoryId} = ${memories.id} and ${dreamMarks.version} = ${memories.version})`
 
-// 有要看的记忆的范围，上次整理得早的（从没整理过、记录已经清掉的最先）排在前面
+// 有要看的记忆的范围，上次整理得早的（从没整理过、记录已经清掉的最先）排在前面。
+// 画像层与私人层的范围只有主人还是成员、并且让 Dream 整理时才有（见 OWNER_ALLOWS）
 async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
-  const members = new Set(
-    (
-      await db
-        .select({ id: spaceMembers.accountId })
-        .from(spaceMembers)
-        .where(eq(spaceMembers.spaceId, spaceId))
-    ).map((m) => m.id),
-  )
   const rows = await withSpace(db, spaceId, (tx) =>
     tx.execute<{ scope: string }>(sql`
       with pending as (
@@ -245,10 +248,7 @@ async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
   )
   return rows.flatMap(({ scope: key }) => {
     const scope = parseDreamScope(key)
-    const owner = dreamScopeOwner(key)
-    // 只整理现在还是成员的人的画像层与私人层：离开了空间的成员看不到建议，整理了也白花 token
-    if (!scope || (owner && !members.has(owner))) return []
-    return [{ key, scope, owner }]
+    return scope ? [{ key, scope, owner: dreamScopeOwner(key) }] : []
   })
 }
 
@@ -414,7 +414,7 @@ interface ScopeResult {
 
 // 整理一个范围：读出这一次的记忆，请求模型，挑出合规的建议，在一个事务里存下建议、给这一批记下整理过的版本、记一条运行记录。
 // 请求模型失败时只记原因、不记整理过（下次重来）；输出解析不了时记下原因与用量、记下整理过：
-// 同样的输入多半还是解析不了，重试只会白花 token。没有要看的记忆时（期间被删掉了）返回 null
+// 同样的输入多半还是解析不了，重试只会白花 token。没有要看的记忆时（期间被删掉了，或者主人关掉了整理）返回 null
 async function dreamScope(
   db: Db,
   model: ChatModel,

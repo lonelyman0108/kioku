@@ -1,0 +1,1 @@
+ALTER TABLE "space_members" ADD COLUMN "dream_private" boolean DEFAULT true NOT NULL;

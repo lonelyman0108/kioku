@@ -139,6 +139,12 @@ export type DreamRunInfo = z.infer<typeof DreamRunInfo>
 export const DreamRunList = z.object({ runs: z.array(DreamRunInfo) })
 export type DreamRunList = z.infer<typeof DreamRunList>
 
+// 成员自己在一个空间里的 Dream 设置，只有本人能看、能改。includePrivate：让不让 Dream 整理自己的画像层与私人层
+// （secret 本来就不读），默认整理。开着时这两层会发给实例配置的抽取模型；关掉之后只整理共享的内容，
+// 已经生成的建议留着，再打开时接着整理关掉期间新增与改动的
+export const DreamMemberSettings = z.object({ includePrivate: z.boolean() })
+export type DreamMemberSettings = z.infer<typeof DreamMemberSettings>
+
 // 「现在整理一次」排进后台任务后的编号：管理界面按它查这一次做得怎么样。
 // 这个空间已经有一次排着的整理时，给的是那一次的编号
 export const DreamQueued = z.object({ runId: z.uuid() })

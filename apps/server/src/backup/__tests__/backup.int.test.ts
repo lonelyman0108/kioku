@@ -21,6 +21,7 @@ import {
   extractionRuns,
   memoryRecallStats,
   settings,
+  spaceMembers,
   spaces,
   subjectBindings,
   subjects,
@@ -103,12 +104,23 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   }
   const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
 
-  // 每张进备份的表都写上数据：成员、继承的人格、两个应用与 Key、各种记忆（secret、带关键词与凭据引用、
-  // 改过的、删掉的）、凭据源与托管的凭据、召回记录与命中、群聊里认出的对象、按群换人格、召回统计、
-  // 抽取记录、等确认的绑定、嵌入接口与抽取模型的设置，以及（不进备份的）向量
+  // 每张进备份的表都写上数据：成员（有一个关掉了 Dream 整理画像层与私人层）、继承的人格、两个应用与 Key、
+  // 各种记忆（secret、带关键词与凭据引用、改过的、删掉的）、凭据源与托管的凭据、召回记录与命中、群聊里认出的对象、
+  // 按群换人格、召回统计、抽取记录、等确认的绑定、嵌入接口与抽取模型的设置，以及（不进备份的）向量
   async function seed() {
     const cookie = { cookie: ws.cookie }
-    await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    // bob 关掉了 Dream 整理他的画像层与私人层：成员的设置也要跟着恢复
+    expect(
+      (
+        await send(
+          'PUT',
+          `/v1/spaces/${ws.spaceId}/me/dream`,
+          { includePrivate: false },
+          { cookie: bob.cookie },
+        )
+      ).status,
+    ).toBe(200)
     // 被继承的排在后面：按标识排序、按存放的位置（改过之后新版本的行落在 child 后面）都是 child 在前，
     // 导出时仍要把 base 排在前面
     const base = await ws.createPersona('zeta-base')
@@ -289,7 +301,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       expect((await send('PUT', path, body, cookie)).status).toBe(200)
     }
     await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), () => {})
-    return { credentialId, base, child }
+    return { credentialId, base, child, bob }
   }
 
   // 每张表的全部数据（按空间的表逐个空间读），排好序方便比较。Key 的最后使用时间是请求返回之后才异步写的，
@@ -332,7 +344,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   }
 
   it('恢复到新实例后数据与备份时一致：登录、Key、secret、托管的凭据、历史都在，向量重新补齐', async () => {
-    const { credentialId, base, child } = await seed()
+    const { credentialId, base, child, bob } = await seed()
     const vectors = await embeddings()
     expect(vectors).toBeGreaterThan(0)
     const before = await snapshot()
@@ -378,6 +390,14 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       before,
     )
     await prepareMasterKey(database.db, masterKey)
+    // 成员的设置跟着恢复：bob 关掉的 Dream 整理还关着，别人的照旧开着
+    const members = await database.db
+      .select({ id: spaceMembers.accountId, dreamPrivate: spaceMembers.dreamPrivate })
+      .from(spaceMembers)
+    expect(Object.fromEntries(members.map((m) => [m.id, m.dreamPrivate]))).toEqual({
+      [ws.accountId]: true,
+      [bob.accountId]: false,
+    })
 
     // 会话不在备份里，要重新登录
     expect((await send('GET', '/v1/auth/me', undefined, { cookie: ws.cookie })).status).toBe(401)

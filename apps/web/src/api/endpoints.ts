@@ -18,6 +18,7 @@ import {
   DeletedMemoryList,
   DomainLayers,
   DreamApplied,
+  DreamMemberSettings,
   DreamQueued,
   DreamRunList,
   DreamRunStatus,
@@ -310,6 +311,11 @@ export const api = {
     request('GET', `/spaces/${spaceId}/dream/runs/${runId}`, { schema: DreamRunStatus }),
   dreamRuns: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/dream/runs`, { schema: DreamRunList }),
+  // 自己在这个空间里的 Dream 设置（只有本人能看、能改）
+  dreamSettings: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/me/dream`, { schema: DreamMemberSettings }),
+  saveDreamSettings: (spaceId: string, body: DreamMemberSettings) =>
+    request('PUT', `/spaces/${spaceId}/me/dream`, { body, schema: DreamMemberSettings }),
   groupPersonas: (spaceId: string, appId: string) =>
     request('GET', `/spaces/${spaceId}/apps/${appId}/group-personas`, {
       schema: GroupPersonaRuleList,

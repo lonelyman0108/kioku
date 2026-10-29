@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi'
 import {
   ApplyDreamSuggestion,
   DreamApplied,
+  DreamMemberSettings,
   DreamQueued,
   DreamRunList,
   DreamRunStatus,
@@ -9,8 +10,10 @@ import {
   DreamSuggestionQuery,
   ErrorResponse,
 } from '@kioku/contracts'
+import { and, eq } from 'drizzle-orm'
 
 import { isInstanceAdmin, memberRole } from '../auth/middleware'
+import { spaceMembers } from '../db/schema'
 import { dreamRunList } from '../extraction/dream'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -100,9 +103,36 @@ const status = createRoute({
   },
 })
 
-// 成员都能看，处理建议与手动整理要 owner 或 editor
+const mySettings = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}/me/dream',
+  tags: ['review'],
+  summary: '自己在这个空间里的 Dream 设置：让不让 Dream 整理自己的画像层与私人层',
+  request: { params: SpaceParams },
+  responses: { 200: jsonResponse('设置', DreamMemberSettings), 403: forbidden },
+})
+
+const saveMySettings = createRoute({
+  method: 'put',
+  path: '/spaces/{spaceId}/me/dream',
+  tags: ['review'],
+  summary:
+    '改自己的 Dream 设置（只改得了自己的）：关掉之后自己的画像层与私人层不再发给抽取模型，已经生成的建议留着',
+  request: { params: SpaceParams, body: jsonBody(DreamMemberSettings) },
+  responses: {
+    200: jsonResponse('已保存', DreamMemberSettings),
+    400: jsonResponse('请求不合法', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+// 成员都能看，处理建议与手动整理要 owner 或 editor。自己的 Dream 设置每个成员（viewer 也算）都能看、能改，
+// 只改得了自己的：成员那一行按会话里的账号找，请求里指定不了别的成员，空间 owner 也改不了别人的；
+// /spaces/* 只认管理界面的会话，Key 改不了
 export function dreamRoutes(deps: Deps) {
   const member = (spaceId: string, accountId: string) => memberRole(deps, spaceId, accountId)
+  const mine = (spaceId: string, accountId: string) =>
+    and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId))
   return router()
     .openapi(list, async (c) => {
       const { spaceId } = c.req.valid('param')
@@ -155,5 +185,24 @@ export function dreamRoutes(deps: Deps) {
       const found = await deps.jobs.dreamRun(spaceId, runId)
       if (!found) return c.json({ error: '没有这次整理' }, 404)
       return c.json(found, 200)
+    })
+    .openapi(mySettings, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const [row] = await deps.db
+        .select({ includePrivate: spaceMembers.dreamPrivate })
+        .from(spaceMembers)
+        .where(mine(spaceId, c.get('console').accountId))
+      if (!row) return c.json({ error: '不是该空间成员' }, 403)
+      return c.json(row, 200)
+    })
+    .openapi(saveMySettings, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const [row] = await deps.db
+        .update(spaceMembers)
+        .set({ dreamPrivate: c.req.valid('json').includePrivate })
+        .where(mine(spaceId, c.get('console').accountId))
+        .returning({ includePrivate: spaceMembers.dreamPrivate })
+      if (!row) return c.json({ error: '不是该空间成员' }, 403)
+      return c.json(row, 200)
     })
 }

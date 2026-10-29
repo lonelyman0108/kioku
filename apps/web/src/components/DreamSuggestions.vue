@@ -44,6 +44,11 @@ const runs = useQuery({
   queryKey: runsKey,
   queryFn: ({ queryKey: [, spaceId] }) => api.dreamRuns(spaceId),
 })
+// 自己的画像层与私人层整理不整理：在空间设置里改，这里说一声
+const mine = useQuery({
+  queryKey: computed(() => ['dream-settings', props.spaceId] as const),
+  queryFn: ({ queryKey: [, spaceId] }) => api.dreamSettings(spaceId),
+})
 
 // 正在改的合并正文与提炼草稿，按建议记下；没改的按建议原样执行。层为 default 时用默认的（自己的私人层）
 type LayerChoice = PlainLayer | 'default'
@@ -222,10 +227,23 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
 <template>
   <div class="space-y-4">
     <div class="flex flex-wrap items-start gap-3">
-      <p class="min-w-0 flex-1 text-sm text-muted">
-        Dream
-        每天整理一次记忆，只提建议：合并重复的、把几条事实提炼成一个节点、指出可能过时的、对不可信的内容建议确认或删除。你执行之后才会改，写入的来源记为你；拒绝的同样的建议不再提。
-      </p>
+      <div class="min-w-0 flex-1 space-y-1 text-sm text-muted">
+        <p>
+          Dream
+          每天整理一次记忆，只提建议：合并重复的、把几条事实提炼成一个节点、指出可能过时的、对不可信的内容建议确认或删除。你执行之后才会改，写入的来源记为你；拒绝的同样的建议不再提。
+        </p>
+        <p v-if="mine.data.value">
+          {{
+            mine.data.value.includePrivate
+              ? '你的画像层与私人层（secret 除外）也会发给实例配置的抽取模型整理，'
+              : '你关掉了整理你的画像层与私人层，现在只整理共享的内容，'
+          }}<RouterLink
+            :to="{ name: 'space-settings', params: { spaceId } }"
+            class="text-primary hover:underline"
+            >在空间设置里{{ mine.data.value.includePrivate ? '可以关掉' : '可以打开' }}</RouterLink
+          >。
+        </p>
+      </div>
       <UButton
         v-if="canAct"
         :icon="icons.dream"

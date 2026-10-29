@@ -427,7 +427,13 @@ async function writeSpace(
     extractionDailyWrites: x.header.space.extractionDailyWrites,
   })
   derived('新空间的成员')
-  await tx.insert(spaceMembers).values({ spaceId, accountId, role: 'owner' })
+  // 导出人的画像层与私人层归了导入人，导出人关掉的 Dream 整理在导入人身上也关着，由导入人决定要不要打开
+  await tx.insert(spaceMembers).values({
+    spaceId,
+    accountId,
+    role: 'owner',
+    dreamPrivate: x.header.exporter.dreamPrivate,
+  })
   // app.importing_space 告诉 URI 互斥的触发器：这是导入新空间的事务，空间这一行刚写下、
   // 别的事务还看不到它，不用为每个 URI 加咨询锁（见 0023 迁移）
   await tx.execute(sql`select set_config('app.importing_space', ${spaceId}, true)`)

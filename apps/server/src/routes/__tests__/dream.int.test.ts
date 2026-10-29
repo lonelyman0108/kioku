@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import type {
   BootResponse,
   DreamApplied,
+  DreamMemberSettings,
   DreamRunList,
   DreamSuggestionList,
   ExpiredMemoryList,
@@ -24,6 +25,7 @@ import {
   memories,
   memoryEvents,
   settings,
+  spaceMembers,
   subjectIdentities,
   subjects,
 } from '../../db/schema'
@@ -807,5 +809,80 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     )
     expect((await send('GET', '/dream/runs', undefined, stranger.cookie)).status).toBe(403)
     expect((await send('GET', '/dream/suggestions', undefined, stranger.cookie)).status).toBe(403)
+  })
+
+  it('自己的 Dream 设置：默认整理画像层与私人层；只改得了自己的，别的成员、空间 owner 与 Key 都改不了', async () => {
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const vera = await addMember(database.db, ws.spaceId, 'vera', 'viewer')
+    const mine = async (cookie: string) =>
+      ok<DreamMemberSettings>(await send('GET', '/me/dream', undefined, cookie))
+    const save = (body: object, cookie: string) => send('PUT', '/me/dream', body, cookie)
+    // 库里每个成员的设置
+    const stored = async () =>
+      Object.fromEntries(
+        (
+          await database.db
+            .select({ id: spaceMembers.accountId, on: spaceMembers.dreamPrivate })
+            .from(spaceMembers)
+            .where(eq(spaceMembers.spaceId, ws.spaceId))
+        ).map((m) => [m.id, m.on]),
+      )
+
+    for (const cookie of [ws.cookie, bob.cookie, vera.cookie]) {
+      expect(await mine(cookie)).toEqual({ includePrivate: true })
+    }
+    // bob 关掉的只是他自己的
+    expect(await ok(await save({ includePrivate: false }, bob.cookie))).toEqual({
+      includePrivate: false,
+    })
+    expect(await mine(bob.cookie)).toEqual({ includePrivate: false })
+    expect(await mine(ws.cookie)).toEqual({ includePrivate: true })
+    expect(await stored()).toEqual({
+      [ws.accountId]: true,
+      [bob.accountId]: false,
+      [vera.accountId]: true,
+    })
+    // 空间 owner 也只改得了自己的：请求里带上别人的 id 不管用
+    expect(
+      await ok(await save({ includePrivate: true, accountId: bob.accountId }, ws.cookie)),
+    ).toEqual({ includePrivate: true })
+    expect(
+      await ok(await save({ includePrivate: false, accountId: vera.accountId }, ws.cookie)),
+    ).toEqual({ includePrivate: false })
+    expect(await stored()).toEqual({
+      [ws.accountId]: false,
+      [bob.accountId]: false,
+      [vera.accountId]: true,
+    })
+    // viewer 也能改自己的
+    expect(await ok(await save({ includePrivate: false }, vera.cookie))).toEqual({
+      includePrivate: false,
+    })
+    expect(await ok(await save({ includePrivate: true }, ws.cookie))).toEqual({
+      includePrivate: true,
+    })
+
+    // Key 改不了：这里只认管理界面的会话
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const viaKey = await app.request(
+      `/v1/spaces/${ws.spaceId}/me/dream`,
+      jsonRequest('PUT', { includePrivate: false }, bearer(key)),
+    )
+    expect(viaKey.status).toBe(401)
+    expect(
+      (await app.request(`/v1/spaces/${ws.spaceId}/me/dream`, { headers: bearer(key) })).status,
+    ).toBe(401)
+    expect(await stored()).toEqual({
+      [ws.accountId]: true,
+      [bob.accountId]: false,
+      [vera.accountId]: false,
+    })
+    // 不合法的请求 400；不是成员的 403
+    expect((await save({}, bob.cookie)).status).toBe(400)
+    expect((await save({ includePrivate: 'no' }, bob.cookie)).status).toBe(400)
+    await database.db.execute(sql`delete from space_members where account_id = ${vera.accountId}`)
+    expect((await send('GET', '/me/dream', undefined, vera.cookie)).status).toBe(403)
+    expect((await save({ includePrivate: true }, vera.cookie)).status).toBe(403)
+    expect(await stored()).toEqual({ [ws.accountId]: true, [bob.accountId]: false })
   })
 })

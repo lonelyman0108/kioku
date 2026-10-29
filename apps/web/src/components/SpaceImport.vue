@@ -151,6 +151,10 @@ async function importSpace() {
               {{ preview.counts.linkedSubjects }} 个对象都归你；画像层会进你的 agent
               的启动上下文。只导入你自己导出的、或者导出人同意交给你的文件。
             </p>
+            <p v-if="!preview.exporter.dreamPrivate" class="mt-1">
+              导出人关掉了「让 Dream
+              整理我的画像层与私人层」：导入后在新空间里你的也是关着的，这两层不发给抽取模型，要整理时在新空间的空间设置里打开。
+            </p>
           </template>
         </UAlert>
         <UFormField label="新空间的名字" :help="`留空时用导出时的空间名「${preview.spaceName}」`">

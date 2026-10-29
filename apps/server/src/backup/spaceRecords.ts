@@ -70,8 +70,10 @@ export const SpaceExportHeader = z.object({
   createdAt: Time,
   // 做导出的 Kioku 版本，导入出错时提示用
   kioku: Text,
-  // 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据
-  exporter: z.object({ displayName: Text.max(200) }),
+  // 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据。
+  // dreamPrivate：导出人让不让 Dream 整理他的画像层与私人层，导入后照样用在导入人身上（这两层归了导入人）。
+  // 有这一项之前导出的文件没有它，那时还关不掉，按开着
+  exporter: z.object({ displayName: Text.max(200), dreamPrivate: z.boolean().default(true) }),
   // 空间级的设置：名字（导入时没填名字就用它）、domain 默认层与抽取预算
   space: z.object({
     name: Text.min(1).max(64),

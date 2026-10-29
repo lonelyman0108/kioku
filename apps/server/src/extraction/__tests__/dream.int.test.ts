@@ -513,6 +513,115 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect((await send('POST', `/dream/suggestions/${bobs.id}/reject`)).status).toBe(404)
   })
 
+  describe('成员让不让 Dream 整理自己的画像层与私人层', () => {
+    const setting = async (includePrivate: boolean, cookie: string) => {
+      const res = await send('PUT', '/me/dream', { includePrivate }, cookie)
+      expect(res.status, await res.clone().text()).toBe(200)
+    }
+    // 一次请求里新增或改动的（不算近邻）
+    const fresh = (messages: ChatMessage[]) =>
+      dreamLines(messages)
+        .filter((l) => l.new)
+        .map((l) => l.content)
+        .sort()
+    const marks = async () =>
+      new Map(
+        (await inSpace((tx) => tx.select().from(dreamMarks))).map((m) => [m.memoryId, m.version]),
+      )
+
+    it('默认整理；关掉之后这两层不发给模型、整理标记不前进，别的成员与共享的照常；再打开后接着整理关掉期间新增与改动的', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+      await remember({ uri: 'preferences://alice', content: 'alice 喜欢简洁', layer: 'owner' })
+      await remember({ uri: 'home://alice', content: 'alice 的私事' })
+      const habit = await remember(
+        { uri: 'preferences://bob', content: 'bob 喜欢详细', layer: 'owner' },
+        bob.cookie,
+      )
+      const diary = await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const { model, calls } = fakeChatModel(
+        reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }]),
+      )
+
+      // 没改过设置：每个成员的画像层与私人层都整理
+      await dream(model)
+      expect(calls.map(fresh).sort()).toEqual(
+        [
+          ['共享的规则'],
+          ['alice 喜欢简洁'],
+          ['alice 的私事'],
+          ['bob 喜欢详细'],
+          ['bob 的私事'],
+        ].sort(),
+      )
+
+      // bob 关掉之后改的、新记的都不发给模型，也不记整理标记；alice 与共享的照常
+      await setting(false, bob.cookie)
+      await edit({ uri: 'home://bob', content: 'bob 的私事，后来改了' }, bob.cookie)
+      await remember(
+        { uri: 'preferences://bob-more', content: 'bob 后来的习惯', layer: 'owner' },
+        bob.cookie,
+      )
+      const later = await remember(
+        { uri: 'home://bob-later', content: 'bob 关掉之后记的' },
+        bob.cookie,
+      )
+      await remember({ uri: 'home://alice-later', content: 'alice 后来记的' })
+      await remember({ uri: 'core://rule-later', content: '后来加的共享规则', layer: 'base' })
+      let seen = calls.length
+      expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+      expect(calls.slice(seen).map(fresh).sort()).toEqual(
+        [['后来加的共享规则'], ['alice 后来记的']].sort(),
+      )
+      expect(JSON.stringify(calls.slice(seen))).not.toContain('bob')
+      expect((await marks()).get(diary.id)).toBe(1)
+      expect((await marks()).has(later.id)).toBe(false)
+      // 只剩 bob 的没整理：算没有要整理的，不请求模型
+      seen = calls.length
+      expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+      expect(calls).toHaveLength(seen)
+
+      // 关掉之前生成的建议留着，bob 自己照样看得到、能处理
+      const listed = await send('GET', '/dream/suggestions', undefined, bob.cookie)
+      const items = ((await listed.json()) as DreamSuggestionList).items
+      const kept = items.find((i) => i.memories[0]!.id === habit.id)!
+      expect(kept).toMatchObject({ kind: 'stale', scope: { kind: 'owner' }, actionable: true })
+      expect(
+        (await send('POST', `/dream/suggestions/${kept.id}/reject`, undefined, bob.cookie)).status,
+      ).toBe(204)
+
+      // 再打开：接着整理，关掉期间新增与改动的都看得到
+      await setting(true, bob.cookie)
+      seen = calls.length
+      await dream(model)
+      expect(calls.slice(seen).map(fresh).sort()).toEqual(
+        [['bob 后来的习惯'], ['bob 关掉之后记的', 'bob 的私事，后来改了'].sort()].sort(),
+      )
+      expect((await marks()).get(diary.id)).toBe(2)
+      expect((await marks()).get(later.id)).toBe(1)
+      expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+    })
+
+    it('整理到一半时关掉：还没请求的那几次不再发这个成员的画像层与私人层', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+      await remember(
+        { uri: 'preferences://bob', content: 'bob 喜欢详细', layer: 'owner' },
+        bob.cookie,
+      )
+      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      // 范围按名字排，都没整理过时基础层最先：模型收到这一次请求时，bob 关掉了
+      const { model, calls } = fakeChatModel(async (messages) => {
+        if (titleOf(messages).includes('基础层')) await setting(false, bob.cookie)
+        return reply([])
+      })
+      expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+      expect(calls.map(fresh)).toEqual([['共享的规则']])
+      expect(JSON.stringify(calls)).not.toContain('bob')
+      expect((await marks()).size).toBe(1)
+    })
+  })
+
   it('对象与情节按来源作用域分：群里记下的和私聊里记下的不在同一次请求里', async () => {
     const group = await subject('group', '读书会')
     const xm = await subject('person', '小明')
