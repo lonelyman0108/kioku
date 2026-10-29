@@ -1,5 +1,6 @@
 import { randomBytes } from 'node:crypto'
 
+import type { EmbeddingSettingsView } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -53,9 +54,9 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     const skipped: string[][] = []
     await withSpace(database.db, ws.spaceId, async (tx) => {
       await tx.execute(sql`select id from memories where id = ${id} for update`)
-      const written = await embedMemory(database.db, embedder, ws.spaceId, id, (ids) =>
-        skipped.push(ids),
-      )
+      const written = await embedMemory(database.db, embedder, ws.spaceId, id, {
+        onSkipped: (ids) => skipped.push(ids),
+      })
       expect(written).toBe(0)
     })
     expect(skipped).toEqual([[id]])
@@ -108,7 +109,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     const jobs = await startJobs({
       connectionString: testDatabaseUrl!,
       db: database.db,
-      embedder: async () => embedder,
+      embedder: staticEmbedderSource(embedder),
       masterKey,
     })
     const withJobs = createApp({
@@ -138,16 +139,19 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       '/v1/settings/embedding',
       jsonRequest(
         'PUT',
-        { baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-very-secret' },
+        {
+          model: 'm',
+          channels: [{ baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-very-secret' }],
+        },
         { cookie: ws.cookie },
       ),
     )
     expect(put.status).toBe(200)
-    expect(await put.json()).toMatchObject({
-      configured: true,
-      model: 'm',
-      hasApiKey: true,
+    const saved = (await put.json()) as EmbeddingSettingsView
+    expect(saved).toMatchObject({
       dimensions: 1024,
+      active: { model: 'm', channels: [{ model: 'm', hasApiKey: true }] },
+      next: null,
     })
     const stored = await database.db.select().from(settings)
     expect(JSON.stringify(stored)).not.toContain('sk-very-secret')
@@ -157,14 +161,21 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       '/v1/settings/embedding',
       jsonRequest(
         'PUT',
-        { baseUrl: 'https://e.example.com/v2', model: 'm' },
+        {
+          model: 'm',
+          channels: [
+            { id: saved.active!.channels[0]!.id, baseUrl: 'https://e.example.com/v2', model: 'm' },
+          ],
+        },
         { cookie: ws.cookie },
       ),
     )
     const view = await (
       await app.request('/v1/settings/embedding', { headers: { cookie: ws.cookie } })
     ).json()
-    expect(view).toMatchObject({ baseUrl: 'https://e.example.com/v2', hasApiKey: true })
+    expect(view).toMatchObject({
+      active: { channels: [{ baseUrl: 'https://e.example.com/v2', hasApiKey: true }] },
+    })
 
     expect((await app.request('/v1/settings/embedding')).status).toBe(401)
   })

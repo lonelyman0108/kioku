@@ -79,7 +79,10 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       '/v1/settings/embedding',
       jsonRequest(
         'PUT',
-        { baseUrl: 'https://embed.example.com/v1', model: 'fake-embedding' },
+        {
+          model: 'fake-embedding',
+          channels: [{ baseUrl: 'https://embed.example.com/v1', model: 'fake-embedding' }],
+        },
         { cookie: ws.cookie },
       ),
     )
@@ -420,10 +423,10 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     expect((await rebuild(editor.cookie)).status).toBe(403)
     // 整个实例的口径：所有成员的、没删除、不是 secret 的记忆
     expect(await (await status(ws.cookie)).json()).toEqual({
-      configured: false,
-      model: null,
       eligible: 5,
-      embedded: 0,
+      active: null,
+      next: null,
+      lastError: null,
     })
     expect((await rebuild(ws.cookie)).status).toBe(400)
 
@@ -443,6 +446,8 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
         jobs: {
           enqueueEmbed() {},
           enqueueBackfill: async () => queued,
+          enqueueSwitch: async () => true,
+          enqueuePrune: async () => true,
           enqueueExtraction: async () => {},
         },
       })

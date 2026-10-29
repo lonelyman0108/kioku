@@ -37,6 +37,8 @@ describe.skipIf(!testDatabaseUrl)('抽取预算', () => {
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
+    enqueueSwitch: async () => true,
+    enqueuePrune: async () => true,
     enqueueExtraction: async () => {},
   }
 

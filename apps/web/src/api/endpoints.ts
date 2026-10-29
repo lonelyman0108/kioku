@@ -12,9 +12,9 @@ import {
   CreatedKey,
   DeletedMemoryList,
   DomainLayers,
-  EmbeddingCoverage,
   EmbeddingRebuildResult,
   EmbeddingSettingsView,
+  EmbeddingStatus,
   EmbeddingTestResult,
   ExtractionSettingsView,
   ExtractionUsage,
@@ -281,9 +281,15 @@ export const api = {
   embeddingSettings: () => request('GET', '/settings/embedding', { schema: EmbeddingSettingsView }),
   saveEmbeddingSettings: (body: UpdateEmbeddingSettings) =>
     request('PUT', '/settings/embedding', { body, schema: EmbeddingSettingsView }),
+  saveNextEmbedding: (body: UpdateEmbeddingSettings) =>
+    request('PUT', '/settings/embedding/next', { body, schema: EmbeddingSettingsView }),
+  abortNextEmbedding: () => request('DELETE', '/settings/embedding/next'),
+  retryNextEmbedding: () =>
+    request('POST', '/settings/embedding/next/retry', { schema: EmbeddingRebuildResult }),
+  switchEmbedding: () =>
+    request('POST', '/settings/embedding/switch', { schema: EmbeddingSettingsView }),
   testEmbedding: () => request('POST', '/settings/embedding/test', { schema: EmbeddingTestResult }),
-  embeddingStatus: () =>
-    request('GET', '/settings/embedding/status', { schema: EmbeddingCoverage }),
+  embeddingStatus: () => request('GET', '/settings/embedding/status', { schema: EmbeddingStatus }),
   rebuildEmbeddings: () =>
     request('POST', '/settings/embedding/rebuild', { schema: EmbeddingRebuildResult }),
 
