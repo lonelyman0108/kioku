@@ -240,12 +240,18 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
   })
 
   it('合并策展记忆：保留的那条换成（可以先改的）正文，来源记为执行的成员，其余几条删掉，都记事件', async () => {
-    const a = await remember({
-      uri: 'core://lang',
-      content: '回答用中文',
-      layer: 'base',
-      glossary: ['中文'],
-    })
+    // 通过 Key 写下的，来源是 agent
+    const key = await ws.issueKey((await ws.createApp('agent')).id)
+    const created = await app.request(
+      '/v1/memories',
+      jsonRequest(
+        'POST',
+        { uri: 'core://lang', content: '回答用中文', layer: 'base', glossary: ['中文'] },
+        bearer(key),
+      ),
+    )
+    const a = await ok<MemoryView>(created, 201)
+    expect(a.provenance).toBe('agent')
     const b = await remember({ uri: 'core://lang-more', content: '用中文回答', layer: 'base' })
     await dream((_, h) => [
       {
@@ -549,6 +555,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     await ws.createApp('qq-bot')
     await remember({ uri: 'app://qq-bot/rule', content: '群里不聊政治' })
     await remember({ uri: 'app://qq-bot/rule-more', content: '群里不讨论政治话题' })
+    const old = await remember({ uri: 'app://qq-bot/event', content: '周五晚上群里办读书会' })
     await dream((_, h) => [
       {
         kind: 'merge',
@@ -556,16 +563,26 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
         content: '群里不聊政治话题',
         reason: '重复',
       },
+      { kind: 'stale', memories: [h('周五晚上群里办读书会')], reason: '已经办完了' },
     ])
-    const [mine] = (await list()).items
+    const { items } = await list()
+    const mine = items.find((i) => i.kind === 'merge')
+    const stale = items.find((i) => i.kind === 'stale')!
     expect(mine).toMatchObject({ actionable: true, scope: { kind: 'app', name: 'qq-bot' } })
-    expect((await list(viewer.cookie)).items).toMatchObject([{ id: mine!.id, actionable: false }])
-    expect((await list(bob.cookie)).items).toMatchObject([{ id: mine!.id, actionable: false }])
+    expect((await list(viewer.cookie)).items.map((i) => [i.id, i.actionable]).sort()).toEqual(
+      [
+        [mine!.id, false],
+        [stale.id, false],
+      ].sort(),
+    )
+    expect((await list(bob.cookie)).items.every((i) => !i.actionable)).toBe(true)
     expect((await apply(mine!.id, {}, viewer.cookie)).status).toBe(403)
     expect((await reject(mine!.id, viewer.cookie)).status).toBe(403)
     expect(await errorOf(await apply(mine!.id, {}, bob.cookie), 403)).toContain('没有权限')
+    expect(await errorOf(await apply(stale.id, {}, bob.cookie), 403)).toContain('没有权限')
     expect((await reject(mine!.id, bob.cookie)).status).toBe(403)
     expect((await suggestionRow(mine!.id)).status).toBe('pending')
+    expect(await rowOf(old.id)).toMatchObject({ validTo: null, version: 1 })
     expect((await apply(randomUUID())).status).toBe(404)
     expect((await reject(randomUUID())).status).toBe(404)
     // 写得了的成员能拒绝

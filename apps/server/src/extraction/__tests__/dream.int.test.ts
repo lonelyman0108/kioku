@@ -501,6 +501,20 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect((await send('POST', `/dream/suggestions/${bobs.id}/reject`)).status).toBe(404)
   })
 
+  it('对象与情节按来源作用域分：群里记下的和私聊里记下的不在同一次请求里', async () => {
+    const group = await subject('group', '读书会')
+    const xm = await subject('person', '小明')
+    await fact(xm, '在群里说在学日语', `group:${group}`)
+    await fact(xm, '在群里说喜欢村上春树', `group:${group}`)
+    await fact(xm, '私聊里说想换工作', `direct:${xm}`)
+    const { model, calls } = fakeChatModel(reply([]))
+    await dream(model)
+    expect(calls.map((c) => [titleOf(c), contentsOf(c).sort()])).toEqual([
+      ['和「小明」的私聊里记下的事实与会话摘要', ['私聊里说想换工作']],
+      ['群「读书会」的聊天里记下的事实与会话摘要', ['在群里说喜欢村上春树', '在群里说在学日语']],
+    ])
+  })
+
   it('增量：只看上次以来新增或改动的，没有就不请求模型；改过的那条连同近邻再看一遍', async () => {
     const a = await remember({ uri: 'core://lang', content: '回答问题用中文', layer: 'base' })
     await remember({ uri: 'core://lang-more', content: '用中文回答问题，先给结论', layer: 'base' })
