@@ -81,11 +81,13 @@ async function importSpace() {
         :help="`不超过 ${formatBytes(SPACE_EXPORT_MAX_BYTES)}`"
         :error="tooLarge ? `文件超过 ${formatBytes(SPACE_EXPORT_MAX_BYTES)} 的上限` : undefined"
       >
+        <!-- 不预览文件内容：导出文件是加密的，预览要给它建 blob: 地址当图片加载，会被内容安全策略拦下 -->
         <UFileUpload
           v-model="file"
           label="选择或拖进导出文件"
           description=".kioku-space"
           layout="list"
+          :file-image="false"
           class="w-full"
           :disabled="importing"
         />
