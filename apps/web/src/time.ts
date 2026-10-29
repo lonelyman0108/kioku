@@ -31,9 +31,19 @@ export function toLocalInput(iso: string): string {
   return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}T${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
-// 有效到最早能选的时间：服务端要求比现在晚至少一分钟，输入框只到分钟（秒被截掉），所以从两分钟之后算
+// 服务端要求有效到比现在晚至少这么久
+const MIN_VALIDITY_MS = 60_000
+
+// 有效到最早能选的时间：输入框只到分钟（秒被截掉），所以再多留一分钟。表单开着的时候时间在走，
+// 用到之前（聚焦选择器、提交）重新算
 export function earliestValidTo(now: Date = new Date()): string {
-  return toLocalInput(new Date(now.getTime() + 120_000).toISOString())
+  return toLocalInput(new Date(now.getTime() + MIN_VALIDITY_MS + 60_000).toISOString())
+}
+
+// 输入框里的有效到离现在不到一分钟，服务端会拒绝；没填完整的不算
+export function validToTooSoon(value: string, now: Date = new Date()): boolean {
+  const at = fromLocalInput(value)
+  return at !== null && new Date(at).getTime() < now.getTime() + MIN_VALIDITY_MS
 }
 
 // 输入框里的本地时间换成带时区的 ISO 时间（接口要带时区的写法）；没填完整时为 null

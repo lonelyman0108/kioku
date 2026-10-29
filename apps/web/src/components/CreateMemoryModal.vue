@@ -7,7 +7,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { creatableLayers, layerLabels, sensitivityLabels } from '../labels'
-import { earliestValidTo, fromLocalInput } from '../time'
+import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 
 const props = defineProps<{ spaceId: string; initialUri: string }>()
 const open = defineModel<boolean>('open', { required: true })
@@ -25,7 +25,7 @@ const form = reactive({
 })
 const error = ref<string | null>(null)
 const saving = ref(false)
-// 有效到最早能选的时间（见 earliestValidTo），打开时算一次
+// 有效到最早能选的时间（见 earliestValidTo）：打开、聚焦选择器与提交之前重新算
 const minValidTo = ref('')
 
 // 手动选过层之后，就不再按 domain 默认层改它
@@ -83,6 +83,12 @@ async function submit() {
   const validTo = form.validTo ? fromLocalInput(form.validTo) : null
   if (form.validTo && !validTo) {
     error.value = '有效到的日期和时间没填完整'
+    return
+  }
+  // 表单开得久了，当时能选的最早时间现在可能已经太近
+  if (validTo && validToTooSoon(form.validTo)) {
+    minValidTo.value = earliestValidTo()
+    error.value = '有效到要比现在晚至少一分钟'
     return
   }
   saving.value = true
@@ -150,6 +156,7 @@ async function submit() {
             :min="minValidTo"
             aria-label="有效到"
             class="w-full sm:w-64"
+            @focus="minValidTo = earliestValidTo()"
           />
         </UFormField>
         <UAlert v-if="error" color="error" variant="subtle" :title="error" />

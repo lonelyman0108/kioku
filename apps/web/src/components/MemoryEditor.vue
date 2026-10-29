@@ -23,6 +23,7 @@ import {
   fromLocalInput,
   isExpired,
   toLocalInput,
+  validToTooSoon,
 } from '../time'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
@@ -149,7 +150,7 @@ const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.va
 // 默认是阅读状态，点「编辑」才改原文
 const mode = ref<'read' | 'edit'>('read')
 const preview = ref(false)
-// 有效到最早能选的时间（见 earliestValidTo），开始编辑时算一次
+// 有效到最早能选的时间（见 earliestValidTo）：开始编辑、聚焦选择器与保存之前重新算
 const minValidTo = ref('')
 function startEditing() {
   const m = latest()
@@ -356,6 +357,12 @@ async function save(allowPlaintext = false) {
   const validTo = sent.validTo ? fromLocalInput(sent.validTo) : null
   if (validToChanged && sent.validTo && !validTo) {
     toast.add({ title: '有效到的日期和时间没填完整', color: 'error' })
+    return
+  }
+  // 编辑得久了，开始编辑时能选的最早时间现在可能已经太近；没改的有效到原样不发，不用查
+  if (validToChanged && validTo && validToTooSoon(sent.validTo)) {
+    minValidTo.value = earliestValidTo()
+    toast.add({ title: '有效到要比现在晚至少一分钟', color: 'error' })
     return
   }
   saving.value = true
@@ -654,6 +661,7 @@ async function remove() {
             :min="minValidTo"
             aria-label="有效到"
             class="w-full sm:w-64"
+            @focus="minValidTo = earliestValidTo()"
           />
           <UButton
             v-if="form.validTo"

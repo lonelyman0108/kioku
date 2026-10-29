@@ -7,6 +7,7 @@ import {
   fromLocalInput,
   isExpired,
   toLocalInput,
+  validToTooSoon,
 } from '../time'
 
 describe('相对时间', () => {
@@ -55,6 +56,17 @@ describe('有效到', () => {
     expect(new Date(fromLocalInput(earliest)!).getTime() - now.getTime()).toBeGreaterThanOrEqual(
       60_000,
     )
+  })
+
+  it('离现在不到一分钟的有效到算太近，服务端会拒绝；没填完整的不算', () => {
+    const now = new Date('2026-10-31T10:05:30Z')
+    // 当时选的最早时间：过了半分钟、一分钟之后再提交
+    const earliest = earliestValidTo(now)
+    expect(validToTooSoon(earliest, now)).toBe(false)
+    expect(validToTooSoon(earliest, new Date(now.getTime() + 30_000))).toBe(false)
+    expect(validToTooSoon(earliest, new Date(now.getTime() + 60_000))).toBe(true)
+    expect(validToTooSoon('2026-10-31T18:06', now)).toBe(true)
+    expect(validToTooSoon('', now)).toBe(false)
   })
 
   it('没填完整、不是日期时间的不换', () => {
