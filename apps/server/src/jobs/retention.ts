@@ -34,6 +34,7 @@ import {
   memoryEvents,
   settings,
   spaces,
+  subjectBindings,
 } from '../db/schema'
 import { monthStart } from '../extraction/budget'
 
@@ -241,6 +242,11 @@ export function retentionRules(now: Date, days: number) {
       lt(credentialProviders.deletedAt, cutoff),
       sql`not exists (select 1 from ${credentials} where ${credentials.providerId} = ${credentialProviders.id})`,
     )!,
+    // 处理完的绑定记录：合并、确认、拒绝或作废的按处理的时间，过了确认期限没处理的按期限。还在等确认的不删
+    subjectBindings: lt(
+      sql`coalesce(${subjectBindings.decidedAt}, ${subjectBindings.expiresAt})`,
+      cutoff,
+    ),
   }
 }
 
@@ -422,6 +428,12 @@ const STEPS: Step[] = [
       tableBatch(tx, credentialProviders, credentialProviders.id, r.deletedProviders),
     ),
   },
+  {
+    label: '处理完的绑定记录',
+    batch: single('subjectBindings', (tx, r) =>
+      tableBatch(tx, subjectBindings, subjectBindings.id, r.subjectBindings),
+    ),
+  },
 ]
 
 const emptyCounts = (): RetentionCounts => ({
@@ -434,6 +446,7 @@ const emptyCounts = (): RetentionCounts => ({
   credentialEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,
+  subjectBindings: 0,
 })
 
 function addCounts(into: RetentionCounts, more: Partial<RetentionCounts>): RetentionCounts {

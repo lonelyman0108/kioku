@@ -26,8 +26,16 @@ import {
 } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
+import { confirmBinding, rejectBinding, subjectBindingHistory } from '../access/binding'
+import {
+  enqueueMerged,
+  isLockBusy,
+  linkedToOthers,
+  lockSubjects,
+  mergeSubjects,
+} from '../access/subjects'
 import { isInstanceAdmin } from '../auth/middleware'
-import { pgErrorCode, withSpace, type Tx } from '../db/client'
+import { withSpace, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
   encodeTimeCursor,
@@ -39,16 +47,13 @@ import {
 } from '../db/paging'
 import {
   accounts,
-  appGroupPersonas,
   apps,
-  conversationTurns,
   extractionRuns,
   memories,
   memoryEvents,
   subjectIdentities,
   subjects,
 } from '../db/schema'
-import { extractionDelay, trimBatch } from '../extraction/buffer'
 import { BATCH_MOVED, BUDGET_NO_SUMMARY, NO_USABLE_KEY } from '../extraction/extract'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -70,6 +75,9 @@ const DETAIL_FACTS = 200
 const DETAIL_SUPERSEDED = 50
 const DETAIL_SUMMARIES = 20
 const DETAIL_RUNS = 20
+const DETAIL_BINDINGS = 20
+// 合并时对象正被抽取或别的写入占着
+const SUBJECTS_BUSY = '这两个对象正在被别的操作使用（例如正在抽取），请稍后再试'
 
 const list = createRoute({
   method: 'get',
@@ -121,6 +129,37 @@ const merge = createRoute({
     403: jsonResponse('没有权限，或对象标记成了别的成员', ErrorResponse),
     404: notFound,
     409: jsonResponse('两个对象正在被别的操作使用', ErrorResponse),
+  },
+})
+
+const BindingParams = SpaceParams.extend({ bindingId: z.uuid() })
+
+const confirmBindingRoute = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/subject-bindings/{bindingId}/confirm',
+  tags: ['subjects'],
+  summary:
+    '确认一次绑定：把收码的对象并进发码的对象，规则同合并对象。只有发码的对象标记成的成员本人能确认',
+  request: { params: BindingParams },
+  responses: {
+    200: jsonResponse('合并后的对象', SubjectInfo),
+    403: jsonResponse('不是被标记的成员本人，或者是 viewer', ErrorResponse),
+    404: notFound,
+    409: jsonResponse('已经处理过、过了期限，或者期间情况变了（已作废）', ErrorResponse),
+  },
+})
+
+const rejectBindingRoute = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/subject-bindings/{bindingId}/reject',
+  tags: ['subjects'],
+  summary: '拒绝一次绑定，两边不合并。只有发码的对象标记成的成员本人能拒绝',
+  request: { params: BindingParams },
+  responses: {
+    204: { description: '已拒绝' },
+    403: jsonResponse('不是被标记的成员本人', ErrorResponse),
+    404: notFound,
+    409: jsonResponse('已经处理过或过了期限', ErrorResponse),
   },
 })
 
@@ -276,74 +315,6 @@ async function subjectInfos(
   }))
 }
 
-type SubjectRow = typeof subjects.$inferSelect
-
-// 把 from 合并进 into（同种类，两行都已锁住）。from 的私聊（或群）这个来源作用域里记下的内容换成 into 的：
-// 仍只在和这个人的私聊（这个群）里可见，合并后用哪个平台账号聊都读得到；别的群里记下的不动。
-// 只改归属与作用域，不算改记忆的内容，不记进每条记忆的历史。返回缓冲里有对话被移过来的应用
-async function mergeInto(
-  tx: Tx,
-  from: SubjectRow,
-  into: SubjectRow,
-): Promise<{ scope: string; apps: string[] }> {
-  const oldScope = subjectScope(from.kind, from.id)
-  const newScope = subjectScope(into.kind, into.id)
-  await tx
-    .update(subjectIdentities)
-    .set({ subjectId: into.id })
-    .where(eq(subjectIdentities.subjectId, from.id))
-  await tx.update(memories).set({ subjectId: into.id }).where(eq(memories.subjectId, from.id))
-  await tx.update(memories).set({ originScope: newScope }).where(eq(memories.originScope, oldScope))
-  // 还没抽取的对话缓冲：发言人、群与批次一起换过来，不然删掉对象时会连带删掉它们
-  await tx
-    .update(conversationTurns)
-    .set({ senderSubjectId: into.id })
-    .where(eq(conversationTurns.senderSubjectId, from.id))
-  await tx
-    .update(conversationTurns)
-    .set({ groupSubjectId: into.id })
-    .where(eq(conversationTurns.groupSubjectId, from.id))
-  const moved = await tx
-    .update(conversationTurns)
-    .set({ scope: newScope })
-    .where(eq(conversationTurns.scope, oldScope))
-    .returning({ appId: conversationTurns.appId })
-  await tx
-    .update(extractionRuns)
-    .set({
-      // 两个都在同一批里说过话时，换完会出现两个一样的 id，去重
-      subjectIds: sql`array(select distinct unnest(array_replace(${extractionRuns.subjectIds}, ${from.id}::uuid, ${into.id}::uuid)))`,
-    })
-    .where(arrayContains(extractionRuns.subjectIds, [from.id]))
-  await tx.update(extractionRuns).set({ scope: newScope }).where(eq(extractionRuns.scope, oldScope))
-  // 按群换人格：两边在同一个应用都有规则时留 into 的，其余的移过来
-  await tx
-    .delete(appGroupPersonas)
-    .where(
-      and(
-        eq(appGroupPersonas.subjectId, from.id),
-        inArray(
-          appGroupPersonas.appId,
-          tx
-            .select({ appId: appGroupPersonas.appId })
-            .from(appGroupPersonas)
-            .where(eq(appGroupPersonas.subjectId, into.id)),
-        ),
-      ),
-    )
-  await tx
-    .update(appGroupPersonas)
-    .set({ subjectId: into.id })
-    .where(eq(appGroupPersonas.subjectId, from.id))
-  // 只有被合并的那个标记了成员时，标记跟过来；名字与改名锁留 into 的
-  await tx
-    .update(subjects)
-    .set({ accountId: into.accountId ?? from.accountId, updatedAt: new Date() })
-    .where(eq(subjects.id, into.id))
-  await tx.delete(subjects).where(eq(subjects.id, from.id))
-  return { scope: newScope, apps: [...new Set(moved.map((m) => m.appId))] }
-}
-
 export function subjectRoutes(deps: Deps) {
   return router()
     .openapi(list, async (c) => {
@@ -391,7 +362,7 @@ export function subjectRoutes(deps: Deps) {
     .openapi(detail, async (c) => {
       const { spaceId, subjectId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      const { service } = await consoleMemberFor(deps, spaceId, accountId)
+      const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
       const access = service.access
       const admin = await isInstanceAdmin(deps.db, accountId)
       // 模型接口或数据库报的原文可能带着内部的地址与响应，抽取模型由实例管理员配，原文只给他看
@@ -404,7 +375,7 @@ export function subjectRoutes(deps: Deps) {
         if (!found) return null
         // 会话摘要按来源作用域找：群里的，或和这个人的私聊里的
         const scope = subjectScope(found.info.kind, subjectId)
-        const [facts, superseded, summaries, runs] = await Promise.all([
+        const [facts, superseded, summaries, runs, bindings] = await Promise.all([
           tx
             .select()
             .from(memories)
@@ -437,6 +408,7 @@ export function subjectRoutes(deps: Deps) {
             .where(arrayContains(extractionRuns.subjectIds, [subjectId]))
             .orderBy(desc(extractionRuns.createdAt), desc(extractionRuns.id))
             .limit(DETAIL_RUNS),
+          subjectBindingHistory(tx, subjectId, { accountId, role }, DETAIL_BINDINGS),
         ])
         const [named, superseding] = await Promise.all([
           scopeNames(tx, [
@@ -489,6 +461,7 @@ export function subjectRoutes(deps: Deps) {
             summaryOnly: run.summaryOnly,
             error: errorOf(run.error),
           })),
+          bindings,
         }
       })
       if (!result) return c.json({ error: '对象不存在' }, 404)
@@ -555,53 +528,59 @@ export function subjectRoutes(deps: Deps) {
       if (role === 'viewer') return c.json({ error: '需要 owner 或 editor 角色' }, 403)
       if (from === subjectId) return c.json({ error: '不能把对象合并进它自己' }, 400)
       const merged = withSpace(deps.db, spaceId, async (tx) => {
-        // 抽取或别的写入正占着这些行时不久等，返回让用户稍后再试
-        await tx.execute(sql`set local lock_timeout = '5s'`)
-        // 按 id 的顺序锁住两边：同时有两次合并涉及同一对对象时不会互相等成死锁
-        const rows = await tx
-          .select()
-          .from(subjects)
-          .where(inArray(subjects.id, [subjectId, from]))
-          .orderBy(asc(subjects.id))
-          .for('update')
+        const rows = await lockSubjects(tx, [subjectId, from])
         const into = rows.find((r) => r.id === subjectId)
         const gone = rows.find((r) => r.id === from)
         if (!into || !gone) return { status: 404 as const, error: '对象不存在' }
         if (into.kind !== gone.kind) return { status: 400 as const, error: '人和群不能合并' }
-        // 合并会把一边的平台账号挂到另一边的标记下：和「只能标记成自己」一样，
-        // 两边都只能是没标记的或标记成自己的，否则别人的私聊就能被当作那个成员的主人私聊
-        if ([into.accountId, gone.accountId].some((a) => a !== null && a !== me)) {
+        if (linkedToOthers(rows, me)) {
           return {
             status: 403 as const,
             error: '标记成了别的成员的对象不能合并，要先请那位成员取消标记',
           }
         }
-        const { scope, apps } = await mergeInto(tx, gone, into)
-        // 移过来的缓冲和原有的并成一批：超出上限的删最早的，满一批就马上抽取
-        const batches = []
-        for (const appId of apps) batches.push({ appId, turns: await trimBatch(tx, appId, scope) })
+        const outcome = await mergeSubjects(tx, gone, into)
         const [found] = await subjectInfos(tx, service.access, eq(subjects.id, subjectId))
-        return { status: 200 as const, info: found!.info, scope, batches }
+        return { status: 200 as const, info: found!.info, outcome }
       })
       let result: Awaited<typeof merged>
       try {
         result = await merged
       } catch (err) {
-        // 等锁超时（55P03）或和别的写入互相等成死锁（40P01）：都没改动，稍后再试就行
-        const code = pgErrorCode(err)
-        if (code === '55P03' || code === '40P01') {
-          return c.json({ error: '这两个对象正在被别的操作使用（例如正在抽取），请稍后再试' }, 409)
-        }
+        if (isLockBusy(err)) return c.json({ error: SUBJECTS_BUSY }, 409)
         throw err
       }
       if (result.status !== 200) return c.json({ error: result.error }, result.status)
-      for (const { appId, turns } of result.batches) {
-        await deps.jobs?.enqueueExtraction(
-          { spaceId, appId, scope: result.scope },
-          extractionDelay(turns),
-        )
-      }
+      await enqueueMerged(deps, spaceId, result.outcome)
       return c.json(result.info, 200)
+    })
+    .openapi(confirmBindingRoute, async (c) => {
+      const { spaceId, bindingId } = c.req.valid('param')
+      const me = c.get('console').accountId
+      const { role, service } = await consoleMemberFor(deps, spaceId, me)
+      const confirmed = await confirmBinding(deps.db, spaceId, bindingId, me, role).catch(
+        (err: unknown) => {
+          if (isLockBusy(err))
+            return { ok: false as const, status: 409 as const, error: SUBJECTS_BUSY }
+          throw err
+        },
+      )
+      if (!confirmed.ok) return c.json({ error: confirmed.error }, confirmed.status)
+      if (confirmed.outcome) await enqueueMerged(deps, spaceId, confirmed.outcome)
+      const [found] = await withSpace(deps.db, spaceId, (tx) =>
+        subjectInfos(tx, service.access, eq(subjects.id, confirmed.subjectId)),
+      )
+      if (!found) return c.json({ error: '对象不存在' }, 404)
+      return c.json(found.info, 200)
+    })
+    .openapi(rejectBindingRoute, async (c) => {
+      const { spaceId, bindingId } = c.req.valid('param')
+      const me = c.get('console').accountId
+      // 先确认是成员；拒绝什么角色都可以
+      await consoleMemberFor(deps, spaceId, me)
+      const rejected = await rejectBinding(deps.db, spaceId, bindingId, me)
+      if (!rejected.ok) return c.json({ error: rejected.error }, rejected.status)
+      return c.body(null, 204)
     })
     .openapi(deleteFact, async (c) => {
       const { spaceId, subjectId, factId } = c.req.valid('param')

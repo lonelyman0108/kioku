@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { Provenance, SubjectKind } from './memory'
+import { SessionContextInput } from './recall'
 
 // 管理界面的对象页：bot 遇到的人与群、各自的平台账号、从对话里记下的事实与抽取记录
 
@@ -99,6 +100,93 @@ export const ExtractionRunInfo = z.object({
 })
 export type ExtractionRunInfo = z.infer<typeof ExtractionRunInfo>
 
+// ---- 验证码自助绑定 ----
+
+// 一次绑定的状态：等成员确认（pending）、发码的对象没标记成员而直接合并（merged）、成员确认后合并（confirmed）、
+// 成员拒绝（rejected）、等确认期间对象被合并或标记变了而作废（cancelled）、过了确认期限（expired）
+export const BINDING_STATUSES = [
+  'pending',
+  'merged',
+  'confirmed',
+  'rejected',
+  'cancelled',
+  'expired',
+] as const
+export const BindingStatus = z.enum(BINDING_STATUSES)
+export type BindingStatus = z.infer<typeof BindingStatus>
+
+const MemberRef = z.object({ id: z.uuid(), displayName: z.string() })
+
+// 一次绑定：在一个平台的私聊里申请绑定码（发码的对象），到另一个平台的私聊里带上码（收码的平台账号），
+// 收码的对象并进发码的对象。发码的对象标记了成员时，要那个成员本人在管理界面确认后才合并
+export const SubjectBinding = z.object({
+  id: z.uuid(),
+  status: BindingStatus,
+  // 发码的对象：并到这里
+  subject: z.object({ id: z.uuid(), displayName: z.string() }),
+  // 收码的对象现在的名字与全部平台账号，确认之后它们都归到 subject。只在等确认时有
+  incoming: z
+    .object({ id: z.uuid(), displayName: z.string(), identities: z.array(SubjectIdentity) })
+    .nullable(),
+  // 收码时用的平台账号：记下的，之后的合并不改它
+  redeemedBy: SubjectIdentity,
+  // 申请绑定码的平台账号与时间
+  issuedBy: z.object({ platform: z.string(), externalId: z.string() }),
+  issuedAt: z.iso.datetime(),
+  // 经由哪个应用：发码与收码是同一个应用
+  app: z.object({ id: z.uuid(), name: z.string() }),
+  // 要谁确认：收码时发码的对象标记成的成员。直接合并的为 null
+  confirmer: MemberRef.nullable(),
+  // 谁确认或拒绝的
+  decidedBy: MemberRef.nullable(),
+  createdAt: z.iso.datetime(),
+  // 等确认的期限，过了就作废；直接合并的为 null
+  expiresAt: z.iso.datetime().nullable(),
+  // 合并、确认、拒绝或作废的时间；过期的是期限
+  decidedAt: z.iso.datetime().nullable(),
+  // 作废的原因
+  note: z.string().nullable(),
+  // 查看的成员现在能不能确认、拒绝：只有被标记的成员本人能，确认还要 owner 或 editor 角色
+  canConfirm: z.boolean(),
+  canReject: z.boolean(),
+})
+export type SubjectBinding = z.infer<typeof SubjectBinding>
+
+// 申请绑定码：只在私聊里，会话上下文要带平台与发言人
+export const BindCodeRequest = z
+  .object({ context: SessionContextInput })
+  .meta({ id: 'BindCodeRequest' })
+export type BindCodeRequest = z.infer<typeof BindCodeRequest>
+
+export const BindCode = z
+  .object({
+    // 8 位字母和数字，只在这里出现一次，库里只存哈希
+    code: z.string(),
+    expiresAt: z.iso.datetime(),
+    // 还有多少秒失效：插件按它说几分钟内有效，不受两边时钟偏差影响
+    expiresInSeconds: z.number().int(),
+  })
+  .meta({ id: 'BindCode' })
+export type BindCode = z.infer<typeof BindCode>
+
+// 使用绑定码：在另一个平台的私聊里带上码。不分大小写，中间的空格与连字符不算
+export const BindRequest = z
+  .object({
+    code: z.string().max(64),
+    context: SessionContextInput,
+  })
+  .meta({ id: 'BindRequest' })
+export type BindRequest = z.infer<typeof BindRequest>
+
+// merged：已经合并；pending：发码的对象标记了成员，等那个成员在管理界面确认，expiresAt 之前有效
+export const BindResult = z
+  .object({
+    status: z.enum(['merged', 'pending']),
+    expiresAt: z.iso.datetime().nullable(),
+  })
+  .meta({ id: 'BindResult' })
+export type BindResult = z.infer<typeof BindResult>
+
 // 对象详情：事实是挂在这个对象上的；会话摘要是群里（或和这个人的私聊里）的；抽取记录是涉及它的最近几批
 export const SubjectDetail = SubjectInfo.extend({
   facts: z.array(SubjectFact),
@@ -106,6 +194,8 @@ export const SubjectDetail = SubjectInfo.extend({
   supersededFacts: z.array(SupersededFact),
   summaries: z.array(ConversationSummary),
   runs: z.array(ExtractionRunInfo),
+  // 最近的绑定记录：绑到这个对象的，以及这个对象申请绑到别处的，新的在前
+  bindings: z.array(SubjectBinding),
 })
 export type SubjectDetail = z.infer<typeof SubjectDetail>
 

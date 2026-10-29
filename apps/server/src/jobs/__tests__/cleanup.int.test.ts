@@ -3,10 +3,17 @@ import { randomBytes } from 'node:crypto'
 import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { pruneBindingData } from '../../access/binding'
 import { createApp } from '../../app'
 import { pruneAttempts } from '../../auth/rateLimit'
-import type { Database } from '../../db/client'
-import { loginAttempts, sessions } from '../../db/schema'
+import { withSpace, type Database } from '../../db/client'
+import {
+  loginAttempts,
+  sessions,
+  subjectBindAttempts,
+  subjectBindCodes,
+  subjects,
+} from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bootstrap, type Workspace } from '../../testing/fixtures'
@@ -51,6 +58,8 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
       attempts: 1,
       recallEvents: 0,
       turns: 0,
+      bindCodes: 0,
+      bindAttempts: 0,
     })
     // 初始化时登录的那个会话和 live 都还在
     const left = await database.db.select({ hash: sessions.tokenHash }).from(sessions)
@@ -75,5 +84,48 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
       .where(eq(loginAttempts.username, '["busy"]'))
     expect(busy?.count).toBe(3)
     expect(await pruneAttempts(database.db)).toBe(1)
+  })
+  it('只清掉过期的绑定码（用过的到期也删）与过了窗口的输错绑定码计数', async () => {
+    const { id: appId } = await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      const [subject] = await tx
+        .insert(subjects)
+        .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })
+        .returning()
+      const code = (codeHash: string, expiresAt: Date, usedAt: Date | null = null) => ({
+        spaceId: ws.spaceId,
+        appId,
+        keyId: appId,
+        subjectId: subject!.id,
+        platform: 'qq',
+        externalId: '1001',
+        codeHash,
+        expiresAt,
+        usedAt,
+      })
+      await tx
+        .insert(subjectBindCodes)
+        .values([code('old', past()), code('used', past(), past()), code('live', future())])
+      await tx.insert(subjectBindAttempts).values([
+        { spaceId: ws.spaceId, appId, key: '["old"]', count: 5, resetAt: past() },
+        { spaceId: ws.spaceId, appId, key: '["live"]', count: 5, resetAt: future() },
+      ])
+    })
+    expect(await cleanupExpired(database.db)).toMatchObject({ bindCodes: 2, bindAttempts: 1 })
+    const left = await withSpace(database.db, ws.spaceId, async (tx) => ({
+      codes: await tx.select({ hash: subjectBindCodes.codeHash }).from(subjectBindCodes),
+      attempts: await tx.select({ key: subjectBindAttempts.key }).from(subjectBindAttempts),
+    }))
+    expect(left).toEqual({ codes: [{ hash: 'live' }], attempts: [{ key: '["live"]' }] })
+    // 正被用码的请求锁着的计数这次跳过，不等锁
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(subjectBindAttempts).set({ resetAt: past() }),
+    )
+    await database.db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('app.space_id', ${ws.spaceId}, true)`)
+      await tx.execute(sql`select 1 from subject_bind_attempts for update`)
+      expect(await pruneBindingData(database.db)).toEqual({ codes: 0, attempts: 0 })
+    })
+    expect(await pruneBindingData(database.db)).toEqual({ codes: 0, attempts: 1 })
   })
 })

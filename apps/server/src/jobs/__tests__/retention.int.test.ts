@@ -30,6 +30,7 @@ import {
   recallEvents,
   settings,
   spaces,
+  subjectBindings,
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -51,6 +52,7 @@ const ZERO: RetentionCounts = {
   credentialEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,
+  subjectBindings: 0,
 }
 
 describe.skipIf(!testDatabaseUrl)('保留期', () => {
@@ -590,6 +592,69 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(ids(left.events)).toEqual([router.id, nas.id, newHosted.id].sort())
     const view = await ok<ConsoleCredential>(await send('GET', `/credentials/${router.id}`))
     expect(view.provider).toMatchObject({ id: revived.id, deleted: true })
+  })
+
+  it('处理完的绑定记录过了保留期删掉：合并、确认、拒绝、作废的按处理的时间，过期没处理的按期限；还在等确认的留着', async () => {
+    const { id: appId } = await ws.createApp('qq-bot', { runtimeFamily: 'astrbot' })
+    const [a, b] = await inSpace((tx) =>
+      tx
+        .insert(subjects)
+        .values([
+          { spaceId: ws.spaceId, kind: 'person' as const, displayName: '小明' },
+          { spaceId: ws.spaceId, kind: 'person' as const, displayName: '明' },
+        ])
+        .returning(),
+    )
+    // 收码的平台账号当作标签，看留下了哪几条
+    const record = (
+      label: string,
+      extra: { status: 'pending' | 'merged' | 'confirmed' | 'rejected' | 'cancelled' } & (
+        { decidedAt: Date } | { expiresAt: Date }
+      ),
+    ) => ({
+      spaceId: ws.spaceId,
+      appId,
+      keyId: appId,
+      subjectId: a!.id,
+      fromSubjectId: b!.id,
+      platform: 'tg',
+      externalId: label,
+      issuedPlatform: 'qq',
+      issuedExternalId: '1001',
+      issuedAt: ago(45),
+      ...extra,
+    })
+    await inSpace((tx) =>
+      tx
+        .insert(subjectBindings)
+        .values([
+          record('merged-old', { status: 'merged', decidedAt: ago(31) }),
+          record('confirmed-old', { status: 'confirmed', decidedAt: ago(40) }),
+          record('cancelled-old', { status: 'cancelled', decidedAt: ago(31) }),
+          record('rejected-recent', { status: 'rejected', decidedAt: ago(29) }),
+          record('expired-old', { status: 'pending', expiresAt: ago(31) }),
+          record('expired-recent', { status: 'pending', expiresAt: ago(29) }),
+          record('waiting', { status: 'pending', expiresAt: ago(-6) }),
+        ]),
+    )
+    const { counts, errors } = await purge()
+    expect(errors).toEqual([])
+    expect(counts).toEqual({ ...ZERO, subjectBindings: 4 })
+    const left = await inSpace((tx) =>
+      tx.select({ label: subjectBindings.externalId }).from(subjectBindings),
+    )
+    expect(left.map((r) => r.label).sort()).toEqual(
+      ['expired-recent', 'rejected-recent', 'waiting'].sort(),
+    )
+    // 等确认的期限设得再久，也不会因为保留天数短被删
+    expect((await purge(1)).counts).toEqual({ ...ZERO, subjectBindings: 2 })
+    expect(
+      (
+        await inSpace((tx) =>
+          tx.select({ label: subjectBindings.externalId }).from(subjectBindings),
+        )
+      ).map((r) => r.label),
+    ).toEqual(['waiting'])
   })
 
   it('正被别的事务锁着的记忆（例如正在撤销删除）这次跳过、不等锁，下一次再删', async () => {

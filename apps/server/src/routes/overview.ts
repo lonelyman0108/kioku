@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi'
 import { ErrorResponse, SpaceOverview } from '@kioku/contracts'
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 
+import { pendingBindingsFor } from '../access/binding'
 import { isInstanceAdmin } from '../auth/middleware'
 import { backupSettingsView } from '../backup/settings'
 import { withSpace, type Db } from '../db/client'
@@ -15,13 +16,15 @@ import { loadRecallWindow } from '../recall/retention'
 
 // 概览里列出的最近改动数
 const RECENT_LIMIT = 8
+// 概览里最多列出这么多条等查看者确认的绑定
+const PENDING_BINDINGS_LIMIT = 20
 
 const overview = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/overview',
   tags: ['console'],
   summary:
-    '空间概览：记忆的分布、向量覆盖率、本月抽取的用量、各应用 Key 的使用情况，实例管理员还看得到备份的情况',
+    '空间概览：记忆的分布、向量覆盖率、本月抽取的用量、各应用 Key 的使用情况、等你确认的绑定，实例管理员还看得到备份的情况',
   request: { params: z.object({ spaceId: z.uuid() }) },
   responses: {
     200: jsonResponse('概览', SpaceOverview),
@@ -46,17 +49,21 @@ export function overviewRoutes(deps: Deps) {
     const accountId = c.get('console').accountId
     // 先确认是成员，不是成员就不去查别的空间的数据
     const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
-    const [settings, recall, appRows, members, extraction, backup] = await Promise.all([
-      embeddingSettingsView(deps.db),
-      loadRecallWindow(deps.db),
-      withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
-      deps.db
-        .select({ accountId: spaceMembers.accountId, since: spaceMembers.createdAt })
-        .from(spaceMembers)
-        .where(eq(spaceMembers.spaceId, spaceId)),
-      extractionUsage(deps.db, spaceId),
-      backupSummary(deps.db, accountId),
-    ])
+    const [settings, recall, appRows, members, extraction, backup, pendingBindings] =
+      await Promise.all([
+        embeddingSettingsView(deps.db),
+        loadRecallWindow(deps.db),
+        withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
+        deps.db
+          .select({ accountId: spaceMembers.accountId, since: spaceMembers.createdAt })
+          .from(spaceMembers)
+          .where(eq(spaceMembers.spaceId, spaceId)),
+        extractionUsage(deps.db, spaceId),
+        backupSummary(deps.db, accountId),
+        withSpace(deps.db, spaceId, (tx) =>
+          pendingBindingsFor(tx, { accountId, role }, PENDING_BINDINGS_LIMIT),
+        ),
+      ])
     const [stats, recent] = await Promise.all([
       service.stats(settings.active?.model ?? null, {
         retentionDays: recall.settings.retentionDays,
@@ -128,6 +135,7 @@ export function overviewRoutes(deps: Deps) {
         }),
         recent: recent.items,
         backup,
+        pendingBindings,
       },
       200,
     )
