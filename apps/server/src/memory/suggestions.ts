@@ -96,8 +96,10 @@ export async function listSuggestions(
     )
     const last = page.at(-1)
     return {
-      items: page.map(({ suggestion: s }) => {
-        const involved = s.memoryIds.map((id) => byId.get(id)!)
+      items: page.flatMap(({ suggestion: s }) => {
+        const involved = s.memoryIds.flatMap((id) => byId.get(id) ?? [])
+        // 两次查询之间记忆被清掉了（保留期的清理）：这条建议已经作废，这一页不列
+        if (involved.length < s.memoryIds.length) return []
         return {
           id: s.id,
           kind: s.kind as DreamSuggestionKind,
