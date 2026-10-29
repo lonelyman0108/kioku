@@ -919,6 +919,126 @@
           "user",
           "reply"
         ]
+      },
+      "BindCode": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string"
+          },
+          "expiresAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "expiresInSeconds": {
+            "type": "integer"
+          }
+        },
+        "required": [
+          "code",
+          "expiresAt",
+          "expiresInSeconds"
+        ]
+      },
+      "BindCodeRequest": {
+        "type": "object",
+        "properties": {
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          }
+        },
+        "required": [
+          "context"
+        ]
+      },
+      "BindResult": {
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "preview",
+              "merged",
+              "pending"
+            ]
+          },
+          "target": {
+            "$ref": "#/components/schemas/BindTarget"
+          },
+          "needsApproval": {
+            "type": "boolean"
+          },
+          "expiresAt": {
+            "type": [
+              "string",
+              "null"
+            ],
+            "format": "date-time"
+          }
+        },
+        "required": [
+          "status",
+          "needsApproval",
+          "expiresAt"
+        ]
+      },
+      "BindTarget": {
+        "type": "object",
+        "properties": {
+          "platform": {
+            "type": "string"
+          },
+          "displayName": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
+          "accountHint": {
+            "type": "string"
+          }
+        },
+        "required": [
+          "platform",
+          "displayName",
+          "accountHint"
+        ]
+      },
+      "BindRequest": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          },
+          "confirm": {
+            "type": "boolean",
+            "default": false
+          }
+        },
+        "required": [
+          "code",
+          "context"
+        ]
+      },
+      "VoidBindCodeRequest": {
+        "type": "object",
+        "properties": {
+          "code": {
+            "type": "string",
+            "maxLength": 64
+          },
+          "context": {
+            "$ref": "#/components/schemas/SessionContext"
+          }
+        },
+        "required": [
+          "code",
+          "context"
+        ]
       }
     },
     "parameters": {}
@@ -1719,6 +1839,234 @@
           },
           "401": {
             "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bind/code": {
+      "post": {
+        "tags": [
+          "binding"
+        ],
+        "summary": "在私聊里申请绑定码：8 位、10 分钟有效、只能用一次，同一个人再申请时旧码作废。到另一个平台的私聊里用它，把那边的账号并进这个人",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindCodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "绑定码",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BindCode"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "不是私聊",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key 写不了对象层",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "正忙，稍后再试",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bind": {
+      "post": {
+        "tags": [
+          "binding"
+        ],
+        "summary": "在另一个平台的私聊里使用绑定码：先预览要并到谁那里，同一个账号预览过之后带上 confirm 再发才把这个平台账号的对象并进申请绑定码的对象。申请的对象标记了成员（这边没标记成同一个成员）时，还要那个成员在管理界面确认",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/BindRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "200": {
+            "description": "预览、已合并，或在等确认",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/BindResult"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "不是私聊、码的格式不对，或者码不对、已失效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key 写不了对象层，或者这个账号标记成了别的成员",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "已经是同一个人，或者正忙",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "输错的次数太多",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/v1/bind/void": {
+      "post": {
+        "tags": [
+          "binding"
+        ],
+        "summary": "群里有人发了绑定码：把它作废，不合并。码存不存在、是否已经失效，结果都一样；不占输错的次数，只按发言人限制请求的次数",
+        "security": [
+          {
+            "bearer": []
+          }
+        ],
+        "requestBody": {
+          "required": true,
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/VoidBindCodeRequest"
+              }
+            }
+          }
+        },
+        "responses": {
+          "204": {
+            "description": "这个码（如果有的话）已经作废"
+          },
+          "400": {
+            "description": "不是群聊，或者没带发言人",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "401": {
+            "description": "Key 无效",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "403": {
+            "description": "Key 写不了对象层",
+            "content": {
+              "application/json": {
+                "schema": {
+                  "$ref": "#/components/schemas/ErrorResponse"
+                }
+              }
+            }
+          },
+          "429": {
+            "description": "请求太多",
             "content": {
               "application/json": {
                 "schema": {

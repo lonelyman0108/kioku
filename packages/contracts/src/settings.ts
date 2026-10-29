@@ -128,8 +128,8 @@ export const RecallSettings = z.object({
 export type RecallSettings = z.infer<typeof RecallSettings>
 
 // 保留期：删掉的记忆（连同历史、向量、关键词、凭据引用与召回统计）、被推翻的抽取事实、过期的会话摘要，
-// 以及抽取记录、Dream 的运行记录与处理过的建议、凭据事件、已删除的凭据与凭据源，过了这么多天由每天一次的清理硬删除。
-// 和召回事件明细的保留天数是两回事
+// 以及抽取记录、凭据事件、已删除的凭据与凭据源、Dream 的运行记录与处理过的建议、处理完的绑定记录，
+// 过了这么多天由每天一次的清理硬删除。和召回事件明细的保留天数是两回事
 export const DEFAULT_RETENTION_DAYS = 30
 export const RetentionSettings = z.object({
   days: z.number().int().min(1).max(3650),
@@ -146,13 +146,15 @@ export const RetentionCounts = z.object({
   // 事件留着、快照里的正文抹掉了的：已删账号的画像层与私人层快照，记忆已经不在的导入事件
   scrubbedSnapshots: z.number().int(),
   extractionRuns: z.number().int(),
-  // 后来加的两类带默认值：升级之前存下的清理结果里没有它们，照样读得出
-  dreamRuns: z.number().int().default(0),
-  // Dream 的建议：处理过的（执行或拒绝的）、没处理但已经作废的，涉及的记忆改过、删掉或过期之后清掉
-  dreamSuggestions: z.number().int().default(0),
   credentialEvents: z.number().int(),
   deletedCredentials: z.number().int(),
   deletedProviders: z.number().int(),
+  // 以下几类是后来加的，带默认值：之前记下的清理结果里没有它们，读出来当作 0
+  dreamRuns: z.number().int().default(0),
+  // Dream 的建议：处理过的（执行或拒绝的）、没处理但已经作废的，涉及的记忆改过、删掉或过期之后清掉
+  dreamSuggestions: z.number().int().default(0),
+  // 处理完的绑定记录（合并了、确认、拒绝、作废或过期的）
+  subjectBindings: z.number().int().default(0),
 })
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 

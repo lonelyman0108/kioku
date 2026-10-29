@@ -1,4 +1,4 @@
-"""从服务端的完整 OpenAPI 文档里挑出接入方用的接口：Key 鉴权的生命周期、召回、记忆与 whoami，
+"""从服务端的完整 OpenAPI 文档里挑出接入方用的接口：Key 鉴权的生命周期、召回、记忆、绑定码与 whoami，
 组件只留这些接口用得到的。
 
 管理界面（Cookie 会话）的接口不收；凭据接口也不收，群聊 bot 用不到，少生成一些代码。
@@ -8,7 +8,7 @@
 import json
 import sys
 
-KEEP_TAGS = {"lifecycle", "recall", "memories", "auth"}
+KEEP_TAGS = {"lifecycle", "recall", "memories", "auth", "binding"}
 
 
 def keyed(operation: dict) -> bool:

@@ -6,7 +6,7 @@ import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
 import type { CredentialValues, MemoryView } from '@kioku/contracts'
-import { eq, sql } from 'drizzle-orm'
+import { and, eq, ne, sql } from 'drizzle-orm'
 import { readMigrationFiles } from 'drizzle-orm/migrator'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -22,6 +22,7 @@ import {
   memoryRecallStats,
   settings,
   spaces,
+  subjectBindings,
   subjects,
 } from '../../db/schema'
 import { backfillJob } from '../../embedding/jobs'
@@ -104,7 +105,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
 
   // 每张进备份的表都写上数据：成员、继承的人格、两个应用与 Key、各种记忆（secret、带关键词与凭据引用、
   // 改过的、删掉的）、凭据源与托管的凭据、召回记录与命中、群聊里认出的对象、按群换人格、召回统计、
-  // 抽取记录、嵌入接口与抽取模型的设置，以及（不进备份的）向量
+  // 抽取记录、等确认的绑定、嵌入接口与抽取模型的设置，以及（不进备份的）向量
   async function seed() {
     const cookie = { cookie: ws.cookie }
     await addMember(database.db, ws.spaceId, 'bob', 'editor')
@@ -189,7 +190,45 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         )
       ).status,
     ).toBe(200)
+    const [person] = await inSpace((tx) =>
+      tx.select().from(subjects).where(eq(subjects.kind, 'person')),
+    )
+    expect(
+      (
+        await send(
+          'POST',
+          '/v1/recall',
+          {
+            query: '你好',
+            context: { chatType: 'direct', platform: 'tg', sender: { id: 'u1', name: '明' } },
+          },
+          bearer(botKey),
+        )
+      ).status,
+    ).toBe(200)
+    const [other] = await inSpace((tx) =>
+      tx
+        .select()
+        .from(subjects)
+        .where(and(eq(subjects.kind, 'person'), ne(subjects.id, person!.id))),
+    )
     await inSpace(async (tx) => {
+      await tx.insert(subjectBindings).values({
+        spaceId: ws.spaceId,
+        appId: bot.id,
+        keyId: bot.id,
+        subjectId: person!.id,
+        fromSubjectId: other!.id,
+        platform: 'tg',
+        externalId: 'u1',
+        displayName: '明',
+        issuedPlatform: 'qq',
+        issuedExternalId: '1001',
+        issuedAt: new Date(),
+        status: 'pending',
+        accountId: ws.accountId,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      })
       await tx
         .insert(memoryRecallStats)
         .values({ memoryId: nas.id, spaceId: ws.spaceId, count: 3, lastRecalledAt: new Date() })

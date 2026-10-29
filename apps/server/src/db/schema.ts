@@ -753,6 +753,139 @@ export const extractionRuns = pgTable(
   ],
 )
 
+// 绑定码：在私聊里用 Key 申请，到另一个平台的私聊里带上它，把那边的对象并进申请的对象（见 access/binding.ts）。
+// 库里只存哈希。同一个对象再申请时旧的删掉，在群里发出来的也删掉；过期的（用过的也是 10 分钟就过期）由每小时的清理删掉。
+// 发码的对象被合并掉时跟着删。只活几分钟，不进备份
+export const subjectBindCodes = pgTable(
+  'subject_bind_codes',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    // 只能在同一个应用里使用
+    appId: uuid().notNull(),
+    // 申请时用的 Key，只做记录
+    keyId: uuid().notNull(),
+    // 发码的对象，以及申请时用的平台账号
+    subjectId: uuid().notNull(),
+    platform: text().notNull(),
+    externalId: text().notNull(),
+    codeHash: text().notNull(),
+    // 预览过这个码的收码对象（只留最近几个）：预览过的才能接着确认合并，没预览过就确认的先给预览，
+    // 收码的人总会先看到要并到谁那里
+    previewedBy: uuid()
+      .array()
+      .notNull()
+      .default(sql`'{}'`),
+    createdAt: createdAt(),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    usedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [
+    // 同一个应用里的码不重复，用码时按应用找
+    uniqueIndex().on(t.appId, t.codeHash),
+    index().on(t.subjectId),
+    index().on(t.expiresAt),
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
+    foreignKey({
+      name: 'subject_bind_codes_subject_fk',
+      columns: [t.spaceId, t.subjectId],
+      foreignColumns: [subjects.spaceId, subjects.id],
+    }).onDelete('cascade'),
+  ],
+)
+
+// 绑定记录：每用成一次绑定码记一条。发码的对象没有标记成员时马上把收码的对象并进来（merged）；
+// 标记了成员时等那个成员本人在管理界面确认（pending，有期限），确认后合并，也可能被拒绝、过期，
+// 或者等确认期间两边的对象被合并而作废（cancelled）。合并对象时指向被合并掉的对象的记录改指向保留的，
+// 对象页按对象找得到。处理完的过了保留期由清理删掉
+export const subjectBindings = pgTable(
+  'subject_bindings',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid().notNull(),
+    // 收码时用的 Key，只做记录
+    keyId: uuid().notNull(),
+    // 发码的对象：并到这里
+    subjectId: uuid().notNull(),
+    // 收码的对象：并进 subjectId
+    fromSubjectId: uuid().notNull(),
+    // 收码时用的平台账号与平台上的名字
+    platform: text().notNull(),
+    externalId: text().notNull(),
+    displayName: text(),
+    // 申请绑定码的平台账号与时间
+    issuedPlatform: text().notNull(),
+    issuedExternalId: text().notNull(),
+    issuedAt: timestamp({ withTimezone: true }).notNull(),
+    // pending | merged | confirmed | rejected | cancelled；过了期限还没处理的是 pending，按 expires_at 判断过期
+    status: text().$type<'pending' | 'merged' | 'confirmed' | 'rejected' | 'cancelled'>().notNull(),
+    // 要谁确认：收码时发码的对象标记成的成员
+    accountId: uuid().references(() => accounts.id, { onDelete: 'set null' }),
+    decidedBy: uuid().references(() => accounts.id, { onDelete: 'set null' }),
+    // 作废的原因
+    note: text(),
+    createdAt: createdAt(),
+    expiresAt: timestamp({ withTimezone: true }),
+    decidedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [
+    index().on(t.subjectId),
+    index().on(t.fromSubjectId),
+    // 概览里列出等某个成员确认的
+    index()
+      .on(t.accountId)
+      .where(sql`${t.status} = 'pending'`),
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
+    foreignKey({
+      name: 'subject_bindings_subject_fk',
+      columns: [t.spaceId, t.subjectId],
+      foreignColumns: [subjects.spaceId, subjects.id],
+    }).onDelete('cascade'),
+    foreignKey({
+      name: 'subject_bindings_from_subject_fk',
+      columns: [t.spaceId, t.fromSubjectId],
+      foreignColumns: [subjects.spaceId, subjects.id],
+    }).onDelete('cascade'),
+    check(
+      'subject_bindings_status',
+      sql`${t.status} in ('pending', 'merged', 'confirmed', 'rejected', 'cancelled')
+        and (${t.status} = 'pending') = (${t.decidedAt} is null)
+        and (${t.status} <> 'pending' or ${t.expiresAt} is not null)`,
+    ),
+  ],
+)
+
+// 输错绑定码的计数：一个计数键一行（收码的平台账号，或整个应用，见 access/binding.ts），一小时一个窗口。
+// 和登录失败计数一样放在数据库里原子递增；每小时的清理删掉过了窗口的。不进备份
+export const subjectBindAttempts = pgTable(
+  'subject_bind_attempts',
+  {
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid().notNull(),
+    key: text().notNull(),
+    count: integer().notNull(),
+    resetAt: timestamp({ withTimezone: true }).notNull(),
+  },
+  (t) => [
+    primaryKey({ columns: [t.appId, t.key] }),
+    index().on(t.resetAt),
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
+  ],
+)
+
 // Dream 的运行记录：一次整理（每天一次或手动）逐个范围记一条，整次没走到范围时（没配模型、预算用完、没有新内容）
 // 记一条范围为空的；同一次整理的几条 run_id 相同。用量计入抽取的同一份月度预算（见 extraction/budget.ts），
 // 保留期的清理和抽取记录一样留着本月的。范围是某个成员的画像层或私人层时记下这个成员，只给他看
@@ -876,6 +1009,9 @@ export const RLS_TABLES = [
   'memory_recall_stats',
   'conversation_turns',
   'extraction_runs',
+  'subject_bind_codes',
+  'subject_bindings',
+  'subject_bind_attempts',
   'dream_runs',
   'dream_suggestions',
   'dream_cursors',

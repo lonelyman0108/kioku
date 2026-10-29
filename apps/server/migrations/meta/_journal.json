@@ -173,8 +173,15 @@
     {
       "idx": 24,
       "version": "7",
-      "when": 1793276698501,
-      "tag": "0024_dream",
+      "when": 1793275455104,
+      "tag": "0024_subject_bindings",
+      "breakpoints": true
+    },
+    {
+      "idx": 25,
+      "version": "7",
+      "when": 1793278838051,
+      "tag": "0025_dream",
       "breakpoints": true
     }
   ]

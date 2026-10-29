@@ -3,6 +3,12 @@
 from .app_config import AppConfig
 from .app_config_elevate_owner_direct import AppConfigElevateOwnerDirect
 from .app_info import AppInfo
+from .bind_code import BindCode
+from .bind_code_request import BindCodeRequest
+from .bind_request import BindRequest
+from .bind_result import BindResult
+from .bind_result_status import BindResultStatus
+from .bind_target import BindTarget
 from .boot_entry import BootEntry
 from .boot_entry_layer import BootEntryLayer
 from .boot_response import BootResponse
@@ -49,6 +55,7 @@ from .turn_end_event_event import TurnEndEventEvent
 from .update_memory_request import UpdateMemoryRequest
 from .update_memory_request_layer import UpdateMemoryRequestLayer
 from .update_memory_request_sensitivity import UpdateMemoryRequestSensitivity
+from .void_bind_code_request import VoidBindCodeRequest
 from .who_am_i import WhoAmI
 from .who_am_i_scopes import WhoAmIScopes
 from .who_am_i_scopes_max_sensitivity import WhoAmIScopesMaxSensitivity
@@ -59,6 +66,12 @@ __all__ = (
     "AppConfig",
     "AppConfigElevateOwnerDirect",
     "AppInfo",
+    "BindCode",
+    "BindCodeRequest",
+    "BindRequest",
+    "BindResult",
+    "BindResultStatus",
+    "BindTarget",
     "BootEntry",
     "BootEntryLayer",
     "BootResponse",
@@ -105,6 +118,7 @@ __all__ = (
     "UpdateMemoryRequest",
     "UpdateMemoryRequestLayer",
     "UpdateMemoryRequestSensitivity",
+    "VoidBindCodeRequest",
     "WhoAmI",
     "WhoAmIScopes",
     "WhoAmIScopesMaxSensitivity",

@@ -3,6 +3,8 @@
 - 调用模型之前：会话开始的人格与基础规则追加到系统提示（很少变，不破坏提示缓存）；
   这一轮相关的记忆与关于对方的事实作为临时的额外用户内容附上（每轮都变，不进对话历史）。
 - 模型回复之后：把这一轮交给 Kioku，攒批之后抽取成记忆。不等它完成，不拖慢回复。
+- /bind：在私聊里申请绑定码，到另一个平台的私聊里发 /bind <码> 看清要绑到谁，再发 /bind <码> 确认，
+  把两个平台的账号绑成同一个人。
 """
 
 from __future__ import annotations
@@ -15,7 +17,7 @@ from astrbot.api.provider import LLMResponse, ProviderRequest
 from astrbot.api.star import Context, Star, register
 from astrbot.core.agent.message import TextPart
 
-from .bridge import KiokuBridge, Turn
+from .bridge import KiokuBridge, Turn, command_args
 
 
 def turn_of(event: AstrMessageEvent) -> Turn:
@@ -62,6 +64,15 @@ class KiokuPlugin(Star):
             req.system_prompt = f"{req.system_prompt or ''}\n\n{boot}".strip()
         if recall:
             req.extra_user_content_parts.append(TextPart(text=recall).mark_as_temp())
+
+    @filter.command("bind")
+    async def bind(self, event: AstrMessageEvent):
+        """绑定另一个平台的账号：私聊里发 /bind 拿绑定码，到另一个平台私聊我发 /bind <码>，看清之后发 /bind <码> 确认。"""
+        # 码里可能带空格（例如分成两段抄），命令后面的整段文字都交给转接去认，不按 AstrBot 的参数拆分
+        args = command_args(event.message_str or "")
+        yield event.plain_result(await self.bridge.bind(turn_of(event), args))
+        # 绑定码不交给模型，也就不进对话缓冲、不会被整理成记忆
+        event.stop_event()
 
     @filter.on_llm_response()
     async def remember(self, event: AstrMessageEvent, resp: LLMResponse) -> None:

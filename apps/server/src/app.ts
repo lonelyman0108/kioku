@@ -7,6 +7,7 @@ import { router } from './http/openapi'
 import { mountWeb } from './http/web'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
+import { bindingRoutes } from './routes/binding'
 import { credentialRoutes } from './routes/credentials'
 import { dreamRoutes } from './routes/dream'
 import { health } from './routes/health'
@@ -67,6 +68,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', reviewRoutes(deps))
   app.route('/v1', dreamRoutes(deps))
   app.route('/v1', recallRoutes(deps))
+  app.route('/v1', bindingRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
   // 业务规则错误带着自己的状态码；其余错误不把内部信息透给调用方
