@@ -19,9 +19,10 @@ const CLEANUP_CRON = '17 * * * *'
 const RETRY_AFTER_SECONDS = 10
 // 换模型时补了一遍还有缺的（期间新写入的、被锁着跳过的），隔这么久再补一遍
 const SWITCH_AGAIN_SECONDS = 30
-// 换模型补了一遍一条都没补上、或者出了错，隔这么久再试：接口恢复了能自己补完，不在出错时一直请求
-const SWITCH_RETRY_SECONDS = 600
-// 切换或放弃之后等一会儿再清向量：正在跑的任务可能还拿着旧的设置写最后几条
+// 换模型补了一遍一条都没补上、或者出了错时不自己再排，由定时任务每十分钟再试一遍：接口恢复了能自己补完，
+// 出错时也不会一直请求；没在换模型时这个任务读一下设置就结束
+const SWITCH_CRON = '*/10 * * * *'
+// 切换或放弃之后等一会儿再清向量：写向量时会锁住设置、按当时的设置决定写不写，这里只是多留一点余量
 const PRUNE_AFTER_SECONDS = 30
 
 export interface Jobs {
@@ -52,8 +53,9 @@ export async function startJobs(options: {
   await boss.start()
   await boss.createQueue(EMBED)
   await boss.createQueue(BACKFILL, { policy: 'singleton' })
-  // stately：排着的与正在跑的各最多一个，换模型的任务自己隔一会儿再排，不会越排越多
-  await boss.createQueue(SWITCH, { policy: 'stately' })
+  // singleton：同时只跑一个，排着的可以有几个（定时的、补到一半隔一会儿再排的、管理员重试的），每一遍都可以重复做。
+  // 不能用只留一个排队位的策略：先排上的延迟任务会把管理员的重试挤掉
+  await boss.createQueue(SWITCH, { policy: 'singleton' })
   await boss.createQueue(PRUNE, { policy: 'singleton' })
   await boss.createQueue(CLEANUP, { policy: 'singleton' })
   // stately：每个会话（singletonKey）排队的与正在跑的各最多一个
@@ -87,15 +89,15 @@ export async function startJobs(options: {
     const total = await backfillJob(options.db, options.embedder, retry)
     if (total !== null) console.log(`向量补齐完成：更新 ${total} 条`)
   })
-  // 出错时不交给 pg-boss 重试（错误已经记下给管理员看），按自己的节奏隔一会儿再试，只要还在换模型
+  // 出错时不交给 pg-boss 重试（错误已经记下给管理员看），由定时任务再试
   await boss.work(SWITCH, async () => {
     const outcome = await switchJob(options.db, options.embedder, retry).catch((err: unknown) => {
       console.error('换模型时补向量出错', err)
       return 'stuck' as const
     })
     if (outcome === 'switched' || outcome === 'cancelled') void send(PRUNE, {}, PRUNE_AFTER_SECONDS)
+    if (outcome === 'changed') void send(SWITCH, {})
     if (outcome === 'again') void send(SWITCH, {}, SWITCH_AGAIN_SECONDS)
-    if (outcome === 'stuck') void send(SWITCH, {}, SWITCH_RETRY_SECONDS)
   })
   await boss.work(PRUNE, async () => {
     const removed = await pruneJob(options.db)
@@ -108,6 +110,7 @@ export async function startJobs(options: {
     for (const { data } of jobs) await processSession(options.db, options.masterKey, data)
   })
   await boss.schedule(CLEANUP, CLEANUP_CRON)
+  await boss.schedule(SWITCH, SWITCH_CRON)
 
   return {
     enqueueEmbed: (spaceId, memoryId) => void send(EMBED, { spaceId, memoryId }),

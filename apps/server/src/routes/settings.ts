@@ -90,6 +90,19 @@ const clearNext = createRoute({
   },
 })
 
+const retryNext = createRoute({
+  method: 'post',
+  path: '/settings/embedding/next/retry',
+  tags: ['settings'],
+  summary: '马上再补一遍新模型的向量（例如修好了渠道之后），不用等定时任务',
+  responses: {
+    202: jsonResponse('已排队', EmbeddingRebuildResult),
+    400: jsonResponse('没有正在换的模型', ErrorResponse),
+    503: jsonResponse('没有排进队列（服务没有启动后台任务，或入队失败）', ErrorResponse),
+    403: forbidden,
+  },
+})
+
 const switchNow = createRoute({
   method: 'post',
   path: '/settings/embedding/switch',
@@ -242,6 +255,15 @@ export function settingsRoutes(deps: Deps) {
       deps.embedder.invalidate()
       void deps.jobs?.enqueuePrune()
       return c.body(null, 204)
+    })
+    .openapi(retryNext, async (c) => {
+      if (!(await loadEmbeddingModels(deps.db)).next) {
+        return c.json({ error: '没有正在换的模型' }, 400)
+      }
+      const queued = deps.jobs ? await deps.jobs.enqueueSwitch() : false
+      return queued
+        ? c.json({ queued }, 202)
+        : c.json({ error: '没有排进队列：服务没有启动后台任务，或入队失败，请稍后重试' }, 503)
     })
     .openapi(switchNow, async (c) => {
       const { next } = await loadEmbeddingModels(deps.db)

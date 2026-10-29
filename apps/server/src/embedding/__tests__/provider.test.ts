@@ -55,8 +55,12 @@ describe('OpenAI 兼容嵌入客户端', () => {
 })
 
 describe('一组渠道按顺序回退', () => {
-  // 按地址的主机名决定这个渠道怎么回答
-  const behaviors: Record<string, () => Response | Promise<Response>> = {
+  // 按地址的主机名决定这个渠道怎么回答；hang 一直不回，直到请求被取消
+  const behaviors: Record<string, (init: RequestInit) => Response | Promise<Response>> = {
+    hang: (init) =>
+      new Promise((_resolve, reject) =>
+        init.signal!.addEventListener('abort', () => reject(new Error('请求超时'))),
+      ),
     ok: () => Response.json({ data: [{ index: 0, embedding: vector() }] }),
     auth: () => new Response('bad key', { status: 401 }),
     busy: () => new Response('slow down', { status: 429 }),
@@ -66,10 +70,10 @@ describe('一组渠道按顺序回退', () => {
   }
   const run = async (hosts: string[]) => {
     const asked: string[] = []
-    const fetchImpl = (async (url: string) => {
+    const fetchImpl = (async (url: string, init: RequestInit) => {
       const host = new URL(url).hostname
       asked.push(host)
-      return behaviors[host]!()
+      return behaviors[host]!(init)
     }) as unknown as typeof fetch
     const embedder = channelEmbedder(
       'logical',
@@ -90,8 +94,17 @@ describe('一组渠道按顺序回退', () => {
     const { embedder, asked } = await run(['auth', 'ok'])
     const deadline = new AbortController()
     deadline.abort()
-    await expect(embedder.embed(['a'], deadline.signal)).rejects.toThrow('等待时间用完了')
+    await expect(embedder.embed(['a'], { signal: deadline.signal })).rejects.toThrow(
+      '等待时间用完了',
+    )
     expect(asked).toEqual([])
+  })
+
+  it('每个渠道有自己的超时：第一个卡住时，总时限内还来得及换第二个', async () => {
+    const { embedder, asked } = await run(['hang', 'ok'])
+    const out = await embedder.embed(['a'], { signal: AbortSignal.timeout(5_000), timeoutMs: 50 })
+    expect(out).toHaveLength(1)
+    expect(asked).toEqual(['hang', 'ok'])
   })
 
   it('都失败时把各个渠道的错误一起报出来', async () => {

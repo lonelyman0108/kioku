@@ -73,6 +73,13 @@ async function loadStored(db: Db | Tx): Promise<StoredEmbedding> {
 // 只读模型标识与渠道，不解密 Key
 export const loadEmbeddingModels = loadStored
 
+// 同上，并给这一行加共享锁到事务结束：写向量时用，保存设置（排他锁）要等这次写完，
+// 写下的向量不会属于刚被放弃或切走的模型
+export async function lockEmbeddingModels(tx: Tx): Promise<StoredEmbedding> {
+  const [row] = await tx.select().from(settings).where(eq(settings.key, KEY)).for('share')
+  return normalize(row?.value)
+}
+
 const setupView = (setup: StoredSetup | null) =>
   setup && {
     model: setup.model,

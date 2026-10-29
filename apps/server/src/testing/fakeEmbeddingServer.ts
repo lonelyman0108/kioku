@@ -14,6 +14,8 @@ export interface FakeEmbeddingServer {
   fail(channel: string, status: number | null | undefined): void
   // 让这个渠道返回这个维度的向量
   dimensions(channel: string, n: number): void
+  // 输入里有含这段文字的就整个请求返回 413（模拟正文超过模型的长度上限）；null 恢复正常
+  rejectText(marker: string | null): void
   requests: { channel: string; model: string; inputs: string[] }[]
   close(): Promise<void>
 }
@@ -24,6 +26,7 @@ const shiftOf = (model: string) =>
 export async function startFakeEmbeddingServer(): Promise<FakeEmbeddingServer> {
   const failures = new Map<string, number | null>()
   const sizes = new Map<string, number>()
+  let rejected: string | null = null
   const requests: FakeEmbeddingServer['requests'] = []
   const vectors = fakeEmbedder()
   const server = createServer((req, res) => {
@@ -38,6 +41,10 @@ export async function startFakeEmbeddingServer(): Promise<FakeEmbeddingServer> {
           const status = failures.get(channel)
           if (status === null) return req.socket.destroy()
           res.writeHead(status!, { 'content-type': 'text/plain' }).end('故意出错')
+          return
+        }
+        if (rejected && input.some((t) => t.includes(rejected!))) {
+          res.writeHead(413, { 'content-type': 'text/plain' }).end('input too long')
           return
         }
         const shift = shiftOf(model)
@@ -62,6 +69,9 @@ export async function startFakeEmbeddingServer(): Promise<FakeEmbeddingServer> {
     fail: (channel, status) =>
       status === undefined ? failures.delete(channel) : failures.set(channel, status),
     dimensions: (channel, n) => sizes.set(channel, n),
+    rejectText: (marker) => {
+      rejected = marker
+    },
     requests,
     close: () => new Promise((resolve) => server.close(() => resolve())),
   }

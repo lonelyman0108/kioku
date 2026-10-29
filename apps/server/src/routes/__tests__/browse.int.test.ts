@@ -333,7 +333,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       ws.cookie,
       `/memories?uri=${encodeURIComponent('projects://alpha')}`,
     )
-    await embedMemory(database.db, fakeEmbedder(), ws.spaceId, alpha.id, ['fake-embedding'])
+    await embedMemory(database.db, fakeEmbedder(), ws.spaceId, alpha.id)
     const o = await get<SpaceOverview>(ws.cookie, '/overview')
     expect(o.total).toBe(5)
     expect(o.counts).toEqual([

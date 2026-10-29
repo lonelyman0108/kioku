@@ -121,9 +121,13 @@ watch(
   next,
   (value, previous) => {
     if (JSON.stringify(value) === syncedNext) return
+    const discarded = previous ? draftsChanged(nextDrafts.value, previous.channels) : false
     syncNext(value)
     if (!value && previous && active.value?.model === previous.model) {
       toast.add({ title: `已换成 ${previous.model}，旧模型的向量会在后台删掉`, color: 'success' })
+    }
+    if (discarded) {
+      toast.add({ title: '换模型的设置在后台变了，没保存的渠道改动已经丢掉', color: 'warning' })
     }
   },
   { immediate: true },
@@ -159,6 +163,20 @@ async function saveNext() {
   } finally {
     savingNext.value = false
     confirmStart.value = false
+  }
+}
+
+// 马上再补一遍新模型的向量（例如修好了渠道之后），不用等定时任务
+const retrying = ref(false)
+async function retryNext() {
+  retrying.value = true
+  try {
+    await api.retryNextEmbedding()
+    toast.add({ title: '已排进队列，后台会接着补新模型的向量', color: 'success' })
+  } catch (err) {
+    failed(err, '排队失败')
+  } finally {
+    retrying.value = false
   }
 }
 
@@ -340,9 +358,9 @@ async function rebuild() {
             :icon="icons.refresh"
             color="neutral"
             variant="subtle"
-            :loading="rebuilding"
+            :loading="retrying"
             :disabled="nextDirty"
-            @click="rebuild"
+            @click="retryNext"
           >
             重试
           </UButton>

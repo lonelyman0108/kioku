@@ -71,8 +71,10 @@ export function anyTermQuery(terms: string[]): string {
   return terms.map((t) => `'${t.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`).join(' | ')
 }
 
-// 召回时算查询向量最多等这么久：几个渠道依次超时也不会让召回等上几倍的时间
+// 召回时算查询向量最多等这么久，每个渠道最多等一部分：一个渠道卡住时还来得及换下一个，
+// 几个渠道依次超时也不会让召回等上几倍的时间
 const QUERY_EMBED_TIMEOUT_MS = 30_000
+const QUERY_EMBED_CHANNEL_TIMEOUT_MS = 10_000
 
 // 查询向量在数据库事务之外算好，避免事务等待外部接口时一直占着连接。
 // 嵌入服务不可用时返回 null，召回退化为全文与关键词，不让整个召回失败
@@ -82,10 +84,10 @@ export async function embedQuery(
 ): Promise<QueryVector | null> {
   if (!embedder) return null
   try {
-    const [vector] = await embedder.embed(
-      [normalizeQuery(query)],
-      AbortSignal.timeout(QUERY_EMBED_TIMEOUT_MS),
-    )
+    const [vector] = await embedder.embed([normalizeQuery(query)], {
+      signal: AbortSignal.timeout(QUERY_EMBED_TIMEOUT_MS),
+      timeoutMs: QUERY_EMBED_CHANNEL_TIMEOUT_MS,
+    })
     return { model: embedder.model, vector: vector! }
   } catch (err) {
     console.warn('召回时嵌入请求失败，跳过向量召回', err)

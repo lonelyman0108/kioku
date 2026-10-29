@@ -284,6 +284,8 @@ export const api = {
   saveNextEmbedding: (body: UpdateEmbeddingSettings) =>
     request('PUT', '/settings/embedding/next', { body, schema: EmbeddingSettingsView }),
   abortNextEmbedding: () => request('DELETE', '/settings/embedding/next'),
+  retryNextEmbedding: () =>
+    request('POST', '/settings/embedding/next/retry', { schema: EmbeddingRebuildResult }),
   switchEmbedding: () =>
     request('POST', '/settings/embedding/switch', { schema: EmbeddingSettingsView }),
   testEmbedding: () => request('POST', '/settings/embedding/test', { schema: EmbeddingTestResult }),

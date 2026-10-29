@@ -1,10 +1,15 @@
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
 import type { EndpointConfig } from '../settings/endpoint'
 
+// signal 是调用方的总时限（例如召回不能等太久）；timeoutMs 是每个接口最多等多久，不填时 30 秒
+export interface EmbedOptions {
+  signal?: AbortSignal
+  timeoutMs?: number
+}
+
 export interface Embedder {
   model: string
-  // signal 是调用方的总时限（例如召回不能等太久）；每个接口另有自己的超时
-  embed(texts: string[], signal?: AbortSignal): Promise<number[][]>
+  embed(texts: string[], options?: EmbedOptions): Promise<number[][]>
 }
 
 export type EmbeddingConfig = EndpointConfig
@@ -17,9 +22,9 @@ export function openAiEmbedder(config: EmbeddingConfig, fetchImpl: typeof fetch 
   const url = `${config.baseUrl.replace(/\/+$/, '')}/embeddings`
   return {
     model: config.model,
-    async embed(texts, signal) {
+    async embed(texts, { signal, timeoutMs = TIMEOUT_MS } = {}) {
       if (!texts.length) return []
-      const timeout = AbortSignal.timeout(TIMEOUT_MS)
+      const timeout = AbortSignal.timeout(timeoutMs)
       const res = await fetchImpl(url, {
         method: 'POST',
         headers: {
@@ -65,12 +70,13 @@ export function channelEmbedder(
   const embedders = channels.map((c) => openAiEmbedder(c, fetchImpl))
   return {
     model,
-    async embed(texts, signal) {
+    async embed(texts, options = {}) {
+      const { signal } = options
       const errors: string[] = []
       for (const [i, embedder] of embedders.entries()) {
         if (signal?.aborted) break
         try {
-          return await embedder.embed(texts, signal)
+          return await embedder.embed(texts, options)
         } catch (err) {
           errors.push(`渠道 ${i + 1}：${(err as Error).message}`)
         }

@@ -20,7 +20,8 @@ import {
 } from '../../testing/fakeEmbeddingServer'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { backfillJob, embedJob, pruneJob, switchJob } from '../jobs'
-import { settingsEmbedderSource, type EmbedderSource } from '../source'
+import { fakeEmbedder } from '../../testing/fakeEmbedder'
+import { settingsEmbedderSource, staticEmbedderSource, type EmbedderSource } from '../source'
 
 describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
   let database: Database
@@ -58,6 +59,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     queued.length = 0
     server.requests.length = 0
     for (const name of ['a', 'b', 'c', 'd', 'down', 'broken']) server.fail(name, undefined)
+    server.rejectText(null)
     ws = await bootstrap(app)
     key = await ws.issueKey((await ws.createApp('agent')).id)
   })
@@ -224,23 +226,25 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
         const next = (await source.next())!
         return {
           model: next.model,
-          async embed(texts, signal) {
+          async embed(texts, options) {
             if (!abandoned) {
               abandoned = true
               expect((await call('DELETE', '/next')).status).toBe(204)
             }
-            return next.embed(texts, signal)
+            return next.embed(texts, options)
           },
         }
       },
       invalidate: () => source.invalidate(),
     }
     expect(await switchJob(database.db, abandoning, noRetry)).toBe('cancelled')
-    const written = (await modelsOf()).filter((m) => m === 'm2').length
-    expect(written).toBeGreaterThan(0)
-    expect(written).toBeLessThan(130)
-    expect(await pruneJob(database.db)).toBe(written)
+    // 写回时核对设置：放弃之后，这一页算出来的向量也不写下
     expect(await modelsOf()).not.toContain('m2')
+    expect(await pruneJob(database.db)).toBe(0)
+    // 第二页没有再请求新模型的接口
+    const sent = new Set(server.requests.filter((r) => r.model === 'm2').flatMap((r) => r.inputs))
+    expect(sent.size).toBeGreaterThan(0)
+    expect(sent.size).toBeLessThan(130)
   })
 
   it('补的时候有被锁着跳过、已经排了重试的，不算补不上', async () => {
@@ -257,6 +261,78 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     })
     expect(retried).toEqual([[locked]])
     expect((await status()).lastError).toBeNull()
+  })
+
+  it('一条坏记忆不拦住别的：整批失败时逐条再试，跳过它并记下原因；接口不可用时只多试几条就停', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    await create('第一条')
+    await create('正文超长的一条')
+    await create('第三条')
+    server.rejectText('超长')
+    expect(await backfillJob(database.db, source, noRetry)).toBe(2)
+    expect((await modelsOf()).length).toBe(2)
+    expect((await status()).lastError).toMatchObject({
+      model: 'm1',
+      message: expect.stringContaining('有 1 条记忆生成不了向量'),
+    })
+
+    // 整个接口都出错时：一批失败之后逐条最多再试三条，然后报错，不一条条把整批请求完
+    server.rejectText(null)
+    for (let i = 0; i < 5; i++) await create(`另外第 ${i} 条`)
+    server.fail('a', 503)
+    server.requests.length = 0
+    await expect(backfillJob(database.db, source, noRetry)).rejects.toThrow('HTTP 503')
+    expect(server.requests).toHaveLength(4)
+  })
+
+  it('写向量时这个模型已经不用了就不写：放弃之后拿着旧设置的任务不会写下新模型的向量', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    await put('/next', { model: 'm2', channels: [channel('a', 'm2')] })
+    const stale = staticEmbedderSource(fakeEmbedder('m1'), fakeEmbedder('m2'))
+    expect((await call('DELETE', '/next')).status).toBe(204)
+    const id = await create('第一条')
+    await embedJob(database.db, stale, ws.spaceId, id, noRetry)
+    expect(await modelsOf(id)).toEqual(['m1'])
+  })
+
+  it('补的时候只是渠道改了：停下来交给新排的任务，不清向量', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    await create('第一条')
+    await backfillJob(database.db, source, noRetry)
+    await put('/next', { model: 'm2', channels: [channel('a', 'm2')] })
+    let edited = false
+    const editing: EmbedderSource = {
+      get: () => source.get(),
+      next: async () => {
+        const next = (await source.next())!
+        return {
+          model: next.model,
+          async embed(texts, options) {
+            if (!edited) {
+              edited = true
+              await put('/next', {
+                model: 'm2',
+                channels: [channel('a', 'm2'), channel('b', 'm2')],
+              })
+            }
+            return next.embed(texts, options)
+          },
+        }
+      },
+      invalidate: () => source.invalidate(),
+    }
+    expect(await switchJob(database.db, editing, noRetry)).toBe('changed')
+    expect(await modelsOf()).toEqual(['m1', 'm2'])
+  })
+
+  it('马上重试只排换模型的任务；没在换模型时 400', async () => {
+    expect((await call('POST', '/next/retry', {})).status).toBe(400)
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    await put('/next', { model: 'm2', channels: [channel('a', 'm2')] })
+    queued.length = 0
+    const res = await call('POST', '/next/retry', {})
+    expect(res.status).toBe(202)
+    expect(queued).toEqual(['switch'])
   })
 
   it('新模型补不上时记下原因，管理员可以现在就切换', async () => {
