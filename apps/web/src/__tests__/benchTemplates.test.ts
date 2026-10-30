@@ -1193,7 +1193,7 @@ describe('模型对话的页面', () => {
       '清空的确认框',
     )
     expect(textOf(modal)).toContain('可能已经写库')
-    expect(textOf(modal)).toContain('运行标记')
+    expect(textOf(modal)).toContain('运行标记是活动里对应这些写入的唯一线索')
     expect(textOf(modal)).toContain('不会撤回')
     const nodes = walk(modal)
     expect(handler(buttonOf(nodes, '清空'), 'click')).toBe('clear')
