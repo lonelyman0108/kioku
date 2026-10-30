@@ -616,6 +616,37 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(replay.replayDiverged!.text).toContain('记忆页')
     })
 
+    it.each(['rollback', 'real'] as const)(
+      '占位文字写回被拒（%s）：模型照抄读到的结果，什么都不写',
+      async (mode) => {
+        await realTool('kioku_create', {
+          uri: 'notes://sealed',
+          content: SECRET_BODY,
+          sensitivity: 'secret',
+        })
+        const seen = await step(tool('kioku_get', { uri: 'notes://sealed' }), mode)
+        const result = await run({
+          mode,
+          steps: [
+            tool(
+              'kioku_create',
+              { uri: 'notes://copied', content: seen.text },
+              { expect: { error: true, contains: ['占位文字'] } },
+            ),
+            tool(
+              'kioku_credential_save',
+              { identifier: 'copied', name: '抄的', values: { password: seen.text } },
+              { expect: { error: true, contains: ['占位文字'] } },
+            ),
+          ],
+        })
+        expect(result.ok).toBe(true)
+        expect(result.steps.flatMap((s) => (s.replay ? [s.replay] : []))).toEqual([])
+        expect((await realTool('kioku_get', { uri: 'notes://copied' })).isError).toBe(true)
+        expect((await realTool('kioku_credential', { identifier: 'copied' })).isError).toBe(true)
+      },
+    )
+
     it('同一组调用和走真实 /v1/mcp 的输出相同（工具不带会话上下文）', async () => {
       await realTool('kioku_create', {
         uri: 'core://agent',

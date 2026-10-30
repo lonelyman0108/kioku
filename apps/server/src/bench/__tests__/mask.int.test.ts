@@ -19,6 +19,7 @@ import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps, KeyPrincipal } from '../../http/env'
 import { handleMcpRequest } from '../../mcp/server'
 import { memoryServiceForKey, recallScopeForKey } from '../../memory/context'
+import { MASKED_BINDING, MASKED_HOSTED_PREFIX, MASKED_SECRET_CONTENT } from '../../memory/masked'
 import { sealMemoryContent } from '../../memory/service'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -212,6 +213,51 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect(await realBody()).toContain(SECRET_BODY)
     })
 
+    it('正文里有占位文字时拒绝：模型照抄读到的结果，新建与改普通记忆都一样', async () => {
+      await seedSecret()
+      const copied = (await masked('kioku_get', { uri: 'notes://safe' })).text
+      const created = await masked('kioku_create', { uri: 'notes://copy', content: copied })
+      expect(created.isError).toBe(true)
+      expect(created.text).toContain('占位文字')
+      expect((await real('kioku_get', { uri: 'notes://copy' })).isError).toBe(true)
+      const sealed = await masked('kioku_create', {
+        uri: 'notes://copy',
+        content: copied,
+        sensitivity: 'secret',
+      })
+      expect(sealed.isError).toBe(true)
+      expect((await real('kioku_get', { uri: 'notes://copy' })).isError).toBe(true)
+
+      await real('kioku_create', { uri: 'notes://plain', content: '普通正文' })
+      for (const placeholder of [MASKED_SECRET_CONTENT, MASKED_BINDING, MASKED_HOSTED_PREFIX]) {
+        const updated = await masked('kioku_update', {
+          uri: 'notes://plain',
+          content: `前面的话 ${placeholder} 后面的话`,
+        })
+        expect(updated.isError, placeholder).toBe(true)
+        expect(updated.text, placeholder).toContain('占位文字')
+      }
+      const after = await realBody('notes://plain')
+      expect(after).toContain('普通正文')
+      expect(after).toContain('版本: 1')
+      // 只改别的字段不受影响
+      const raised = await masked('kioku_update', { uri: 'notes://plain', priority: 7 })
+      expect(raised.isError).toBe(false)
+    })
+
+    it('真实接口不受影响：正文里可以写到占位文字', async () => {
+      const created = await real('kioku_create', {
+        uri: 'notes://about-mask',
+        content: `测试台读 secret 时显示 ${MASKED_SECRET_CONTENT}`,
+      })
+      expect(created.isError).toBe(false)
+      const updated = await real('kioku_update', {
+        uri: 'notes://about-mask',
+        content: MASKED_HOSTED_PREFIX,
+      })
+      expect(updated.isError).toBe(false)
+    })
+
     it('真实接口不受影响：照常能改 secret 的正文与敏感级', async () => {
       await seedSecret()
       const rewritten = await real('kioku_update', { uri: 'notes://safe', content: '新正文' })
@@ -343,6 +389,77 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect(access.via).toBe('kioku_credential')
       // 新建这条凭据的是管理界面，不带标记
       expect(listed.items.find((e) => e.type === 'create')!.bench).toBeNull()
+    })
+
+    it.each(['hosted', 'all'] as const)(
+      '值里有占位文字时拒绝（%s）：新建与修改都不写入，真实的值不变',
+      async (mask) => {
+        await seedHosted()
+        const copied = (await masked('kioku_credential', { identifier: 'nas' }, mask)).text
+        expect(copied).toContain(MASKED_HOSTED_PREFIX)
+        const updated = await masked(
+          'kioku_credential_save',
+          { identifier: 'nas', expected_version: 1, values: { password: copied } },
+          mask,
+        )
+        expect(updated.isError).toBe(true)
+        expect(updated.text).toContain('占位文字')
+        const created = await masked(
+          'kioku_credential_save',
+          { identifier: 'copied', name: '抄的', values: { password: MASKED_SECRET_CONTENT } },
+          mask,
+        )
+        expect(created.isError).toBe(true)
+        expect(created.text).toContain('占位文字')
+
+        const after = await real('kioku_credential', { identifier: 'nas' })
+        expect(after.text).toContain(HOSTED_VALUE)
+        expect(after.text).toContain('版本 1')
+        expect((await real('kioku_credential', { identifier: 'copied' })).isError).toBe(true)
+        // 改别的字段不受影响
+        const renamed = await masked(
+          'kioku_credential_save',
+          { identifier: 'nas', expected_version: 1, name: '新名字' },
+          mask,
+        )
+        expect(renamed.isError).toBe(false)
+      },
+    )
+
+    it.each(['hosted', 'all'] as const)(
+      '条目位置与来源字段里有占位文字时拒绝（%s）：真实的绑定不变',
+      async (mask) => {
+        const credential = await seedExternal()
+        const binding = { identifier: 'router', provider_id: credential.provider!.id }
+        const fields = [{ name: 'password', source_field: 'password' }]
+        for (const args of [
+          { location: `条目 ${MASKED_BINDING}`, fields },
+          { location: LOCATION, fields: [{ name: 'password', source_field: MASKED_BINDING }] },
+        ]) {
+          const saved = await masked(
+            'kioku_credential_save',
+            { ...binding, expected_version: 1, ...args },
+            mask,
+          )
+          expect(saved.isError).toBe(true)
+          expect(saved.text).toContain('占位文字')
+        }
+        const after = await real('kioku_credential', { identifier: 'router' })
+        expect(after.text).toContain(`条目：${JSON.stringify(LOCATION)}`)
+        expect(after.text).toContain('版本 1')
+      },
+    )
+
+    it('真实接口不受影响：值里可以写到占位文字', async () => {
+      const saved = await real('kioku_credential_save', {
+        identifier: 'odd',
+        name: '奇怪的值',
+        values: { note: MASKED_HOSTED_PREFIX },
+      })
+      expect(saved.isError).toBe(false)
+      expect((await real('kioku_credential', { identifier: 'odd' })).text).toContain(
+        MASKED_HOSTED_PREFIX,
+      )
     })
 
     it.each([

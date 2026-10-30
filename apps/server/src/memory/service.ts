@@ -121,6 +121,7 @@ import {
   STILL_VALID,
   type MemoryColumns,
 } from './filter'
+import { hasMaskedText } from './masked'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
   DEFAULT_SENSITIVITY,
@@ -157,7 +158,8 @@ export interface MemoryContext {
   listSecret?: boolean
   // 测试台：结果里不给 secret 的正文（内容在 toView 里给 null，内部改写照常用 contentOf 取原文）。
   // 也不接受把 secret 改成别的敏感级、改它的正文：读不到原文就不可能正确改写，
-  // 模型读到占位文字再写回，新正文就是占位文字，而 secret 的历史不存正文，找不回来
+  // 模型读到占位文字再写回，新正文就是占位文字，而 secret 的历史不存正文，找不回来。
+  // 新写入的正文里有占位文字时同样拒绝（见 memory/masked.ts）
   maskSecret?: boolean
   // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
   eventContext?: Record<string, unknown>
@@ -207,9 +209,10 @@ const PLACEHOLDER_SCOPE =
   '含凭据占位符的记忆只能在私人层、敏感级至少 private；改层、降级或移出私人层之前，先去掉正文里的 {{cred:…}} 引用'
 const PLAINTEXT_DOWNGRADE =
   '正文像有明文密码或 Token，从 secret 降级之后会进历史、全文检索和向量，再也收不回来；先把值换成凭据占位符再降级'
-// 打码时拒绝的两种写入（见 MemoryContext.maskSecret）
+// 打码时拒绝的写入（见 MemoryContext.maskSecret）
 const MASKED_DOWNGRADE = '测试台不能把 secret 改成别的敏感级：要改去记忆页'
 const MASKED_CONTENT = '测试台读不到 secret 的原文，不能改它的正文：要改去记忆页'
+const MASKED_TEXT_WRITTEN = '正文里有测试台的占位文字，不是真实的内容：要写这句话去记忆页'
 
 // 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
 interface RefBaseline {
@@ -868,6 +871,13 @@ export class MemoryService {
     return this.write((tx, _personaIds, released) => this.insertCurated(tx, input, meta, released))
   }
 
+  // 打码时读到的是占位文字，照抄进正文的话写下的就不是真实内容（见 MemoryContext.maskSecret）
+  private rejectMaskedText(content: string | undefined): void {
+    if (this.ctx.maskSecret && content !== undefined && hasMaskedText(content)) {
+      throw new MemoryError(400, MASKED_TEXT_WRITTEN)
+    }
+  }
+
   // 新建一条策展记忆，在调用方的事务里：检查权限与凭据占位符、让出挡着 URI 的过期记录、记一条事件
   private async insertCurated(
     tx: Tx,
@@ -887,6 +897,7 @@ export class MemoryService {
     if (meta.requireAppOwner && ownership.appId) {
       await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
     }
+    this.rejectMaskedText(input.content)
     checkOutsideContent(input.disclosure, input.glossary)
     await this.checkCredentialRefs(tx, { ...ownership, sensitivity, content: input.content }, null)
     await this.claimUri(tx, parsed, ownership, released)
@@ -1092,6 +1103,7 @@ export class MemoryService {
       if (sensitivity !== 'secret') throw new MemoryError(403, MASKED_DOWNGRADE)
       if (input.content !== undefined) throw new MemoryError(403, MASKED_CONTENT)
     }
+    this.rejectMaskedText(input.content)
     // 有效期：不给就不动，null 清掉（一直有效），给了就要比现在晚至少一分钟（见 checkValidTo）。
     // 和现在存的一样时不算改动、也不检查：读到整条记忆再原样送回来（MCP 与 SDK 常这样做）时，
     // 不能在它的最后一分钟里因为「至少晚一分钟」被拒。只在要改时写这一列：URI 互斥的触发器在有效期变化时也检查

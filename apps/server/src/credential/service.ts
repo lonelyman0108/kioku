@@ -46,6 +46,7 @@ import {
 } from '../db/schema'
 import { providerRetentionFrom } from '../jobs/retention'
 import { STILL_VALID } from '../memory/filter'
+import { hasMaskedText, MASKED_BINDING, MASKED_HOSTED_PREFIX } from '../memory/masked'
 import { benchMarkReader, MemoryError } from '../memory/service'
 import { formatUri } from '../memory/uri'
 import { CREDENTIAL_NOTICE, externalMethod } from './methods'
@@ -65,11 +66,11 @@ export interface CredentialContext {
   eventContext?: Record<string, unknown>
 }
 
-// 回滚模式下换掉的外部绑定
-const MASKED_BINDING = '（测试台的回滚模式不显示，要看去凭据页）'
 // 打码时托管的值这样说明：只列字段名
 const maskedHosted = (fields: readonly CredentialField[]) =>
-  `值由 Kioku 托管，测试台不解密。字段：${fields.map((f) => f.name).join('、') || '无'}。要看值去凭据页。`
+  `${MASKED_HOSTED_PREFIX}字段：${fields.map((f) => f.name).join('、') || '无'}。要看值去凭据页。`
+// 打码时拒绝写回占位文字（见 rejectMaskedText）
+const MASKED_TEXT_WRITTEN = '值或条目位置里有测试台的占位文字，不是真实的内容：要改去凭据页'
 
 // 取用经由哪里，记在访问事件里
 export type CredentialVia = 'kioku_credential' | 'rest' | 'kioku_get'
@@ -356,6 +357,18 @@ export class CredentialService {
     return row
   }
 
+  // 打码时读到的是占位文字，照抄回来就成了新的值，而事件不留旧值，找不回来。两档打码都拒绝
+  private rejectMaskedText(source: CredentialSourceInput | CredentialSourceUpdate): void {
+    if (!this.ctx.mask) return
+    const written =
+      source.kind === 'external'
+        ? [source.location, ...source.fields.map((f) => f.sourceField)]
+        : Object.values(source.values)
+    if (written.some((text) => text !== null && hasMaskedText(text))) {
+      throw new MemoryError(400, MASKED_TEXT_WRITTEN)
+    }
+  }
+
   // 按请求算出来源相关的几列。托管的值与现有的合并：给了 null 的字段删掉，没给的不变；
   // 从外部来源改成托管时，现有的值为空，给出的就是全部字段
   private async sourceColumns(
@@ -364,6 +377,7 @@ export class CredentialService {
     source: CredentialSourceInput | CredentialSourceUpdate,
     before: CredentialRow | null,
   ) {
+    this.rejectMaskedText(source)
     if (source.kind === 'external') {
       const provider = await this.liveProvider(tx, source.providerId)
       return {
