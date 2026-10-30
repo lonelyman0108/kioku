@@ -12,6 +12,7 @@ import {
   fieldsOf,
   formFromJson,
   initialState,
+  jsonContextDiffers,
   jsonFromForm,
   newDraft,
   stateOfBody,
@@ -373,6 +374,81 @@ describe('发出去的步骤', () => {
   it('JSON 文本框写错的字段发不出去', () => {
     const built = build('kioku_create', { uri: 'a://b', content: 'x', glossary: '[oops' })
     expect(built).toEqual({ ok: false, error: 'glossary 不是合法的 JSON' })
+  })
+})
+
+describe('JSON 模式与页面上的会话上下文', () => {
+  const DIRECT = contextOf({ ...contextDefaults(), chatType: 'direct' })
+  const differs = (id: string, text: string, context: SessionContextInput | undefined) =>
+    jsonContextDiffers(targetOf(id), { ...newDraft(targetOf(id)), json: true, text }, context)
+  const PROMPT = { event: 'prompt.submit', prompt: '你好' }
+
+  it('JSON 没写 context、页面上选了群聊：发出去的确实不带，要提醒', () => {
+    const text = JSON.stringify(PROMPT)
+    const target = targetOf('prompt.submit')
+    const built = buildStep(target, { ...newDraft(target), json: true, text }, GROUP)
+    expect(built).toEqual({ ok: true, step: { kind: 'lifecycle', body: PROMPT } })
+    expect(differs('prompt.submit', text, GROUP)).toBe(true)
+    expect(differs('/recall', JSON.stringify({ query: '查' }), GROUP)).toBe(true)
+  })
+
+  it('JSON 写了 context、页面上不带或者选了别的：要提醒', () => {
+    const text = JSON.stringify({ ...PROMPT, context: GROUP })
+    expect(differs('prompt.submit', text, undefined)).toBe(true)
+    expect(differs('prompt.submit', text, DIRECT)).toBe(true)
+    expect(differs('prompt.submit', JSON.stringify({ context: null }), undefined)).toBe(true)
+  })
+
+  it('两边相同时不提醒，键的顺序不算不同', () => {
+    expect(differs('prompt.submit', JSON.stringify(PROMPT), undefined)).toBe(false)
+    expect(differs('prompt.submit', JSON.stringify({ ...PROMPT, context: GROUP }), GROUP)).toBe(
+      false,
+    )
+    const { chatType, platform, group, sender } = GROUP as {
+      chatType: string
+      platform: string
+      group: { id: string; name: string }
+      sender: { id: string; name: string }
+    }
+    const reordered = {
+      context: {
+        sender: { name: sender.name, id: sender.id },
+        group: { name: group.name, id: group.id },
+        platform,
+        chatType,
+      },
+    }
+    expect(differs('prompt.submit', JSON.stringify(reordered), GROUP)).toBe(false)
+  })
+
+  it('从表单切过来时相同，切完再改页面上的就不同了', () => {
+    const target = targetOf('turn.end')
+    const made = jsonFromForm(target, newDraft(target), GROUP)
+    if (!made.ok) throw new Error(made.error)
+    expect(differs('turn.end', made.text, GROUP)).toBe(false)
+    expect(differs('turn.end', made.text, DIRECT)).toBe(true)
+    expect(differs('turn.end', made.text, undefined)).toBe(true)
+  })
+
+  it('不是对象的请求体没有 context：页面上选了才算不同', () => {
+    expect(differs('turn.end', '"不是对象"', GROUP)).toBe(true)
+    expect(differs('turn.end', '[1]', GROUP)).toBe(true)
+    expect(differs('turn.end', '"不是对象"', undefined)).toBe(false)
+  })
+
+  it('语法错的发不出去，不用提醒', () => {
+    expect(differs('prompt.submit', '{oops', GROUP)).toBe(false)
+  })
+
+  it('表单模式带的就是页面上的，不用提醒', () => {
+    const target = targetOf('prompt.submit')
+    const text = JSON.stringify(PROMPT)
+    expect(jsonContextDiffers(target, { ...newDraft(target), text }, GROUP)).toBe(false)
+  })
+
+  it('工具与不带上下文的 REST 不看页面上的，不用提醒', () => {
+    expect(differs('kioku_get', '{"uri":"core://agent"}', GROUP)).toBe(false)
+    expect(differs('/boot', '{}', GROUP)).toBe(false)
   })
 })
 

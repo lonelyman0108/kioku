@@ -8,6 +8,7 @@ import {
   buildStep,
   callTargets,
   formFromJson,
+  jsonContextDiffers,
   jsonFromForm,
   newDraft,
   targetGroups,
@@ -94,6 +95,9 @@ function showForm() {
   draft.value.json = false
   formError.value = null
 }
+const contextDiffers = computed(() =>
+  jsonContextDiffers(target.value, draft.value, sessionContext.value),
+)
 
 const failure = ref<string | null>(null)
 // 显示时间线上的哪一条；没选时显示最新的
@@ -207,9 +211,12 @@ function onRunClick() {
                 读得到的一切。这里只是测工具本身。
               </p>
             </template>
-            <p v-else-if="target.usesContext" class="text-xs text-muted">
-              这个调用带上面的会话上下文。
-            </p>
+            <template v-else-if="target.usesContext">
+              <p v-if="draft.json" class="text-xs text-muted">
+                JSON 模式只发这段 JSON 里的 context，上面的会话上下文不起作用。
+              </p>
+              <p v-else class="text-xs text-muted">这个调用带上面的会话上下文。</p>
+            </template>
           </div>
 
           <template v-if="target.hasBody">
@@ -239,6 +246,12 @@ function onRunClick() {
             </p>
           </template>
 
+          <UAlert
+            v-if="contextDiffers"
+            color="warning"
+            variant="subtle"
+            title="这段 JSON 里的 context 和上面的会话上下文不同：这次按 JSON 里的执行，没写就是不带。"
+          />
           <UAlert v-if="formError" color="warning" variant="subtle" :title="formError" />
           <UAlert v-if="failure" color="error" variant="subtle" :title="failure" />
 

@@ -541,3 +541,18 @@ export function buildStep(
   const body = bodyOf(target, draft.state, context)
   return body.ok ? { ok: true, step: target.toStep(body.body) } : body
 }
+
+// JSON 模式发的是这段 JSON，页面上的会话上下文不起作用。两边不同时要说出来：页面上选了群聊、摘要也显示群聊，
+// 请求却按 JSON 里的执行（没写 context 就是不带，读得到私人层），会得出错误的权限结论
+export function jsonContextDiffers(
+  target: CallTarget,
+  draft: Draft,
+  context: SessionContextInput | undefined,
+): boolean {
+  if (!target.usesContext || !draft.json) return false
+  const parsed = parseJson(draft.text)
+  // 语法错的发不出去，运行时会说
+  if (!parsed.ok) return false
+  const sent = isRecord(parsed.value) ? parsed.value.context : undefined
+  return !sameJson(sent, context)
+}
