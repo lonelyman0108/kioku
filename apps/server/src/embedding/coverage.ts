@@ -48,18 +48,46 @@ export async function countEmbeddable(
   }
 }
 
+// 统计实例的覆盖率时最多同时数几个空间：每个空间一个事务、各占一条连接，连接池里留出给别的请求用的
+export const COVERAGE_PARALLEL_SPACES = 4
+
 // 整个实例的向量覆盖率，给实例设置页看补齐进度、给换模型判断补没补齐。
-// 逐个空间统计，每个空间一条查询：换模型时页面会一直刷新进度
+// 内容表开了 RLS，一条查询只看得到一个空间：每个空间在自己的事务里一条查询，几个空间同时数，
+// 不逐个排队（换模型时页面会一直刷新进度）
 export async function embeddingCoverage(
   db: Db,
   models: string[],
 ): Promise<{ eligible: number; embedded: Map<string, number> }> {
   let eligible = 0
   const embedded = new Map(models.map((m) => [m, 0]))
-  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    const counts = await withSpace(db, spaceId, (tx) => countEmbeddable(tx, models))
+  const all = await db.select({ id: spaces.id }).from(spaces)
+  await eachConcurrently(all, COVERAGE_PARALLEL_SPACES, async ({ id }) => {
+    const counts = await withSpace(db, id, (tx) => countEmbeddable(tx, models))
     eligible += counts.eligible
     models.forEach((m, i) => embedded.set(m, embedded.get(m)! + counts.embedded[i]!))
-  }
+  })
   return { eligible, embedded }
+}
+
+// 对每一项调用 fn，最多同时 limit 个。有一项出错时不再开始新的，等已经开始的都结束再抛出第一个错误：
+// 返回或抛出之后不会还有 fn 在跑（这里是不会还有空间的事务没结束）
+async function eachConcurrently<T>(
+  items: readonly T[],
+  limit: number,
+  fn: (item: T) => Promise<void>,
+): Promise<void> {
+  let next = 0
+  const errors: unknown[] = []
+  const worker = async () => {
+    while (!errors.length && next < items.length) {
+      const item = items[next++]!
+      try {
+        await fn(item)
+      } catch (err) {
+        errors.push(err)
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limit, items.length) }, worker))
+  if (errors.length) throw errors[0]
 }
