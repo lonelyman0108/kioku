@@ -34,7 +34,15 @@ import { fakeChatModel, dreamLines, handleOf } from '../../testing/fakeChatModel
 import { startFakeChatServer } from '../../testing/fakeChatServer'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
-import { DREAM_CHANGED_PER_CALL, DREAM_MAX_CALLS, dreamsDue, dreamSpace } from '../dream'
+import {
+  DREAM_CHANGED_PER_CALL,
+  DREAM_MAX_CALLS,
+  DREAM_MAX_TOKENS,
+  DREAM_PERSONAL_CALLS,
+  DREAM_PERSONAL_TOKENS,
+  dreamsDue,
+  dreamSpace,
+} from '../dream'
 import type { ChatMessage, ChatModel } from '../provider'
 import { clearExtractionConfig, saveExtractionConfig } from '../settings'
 
@@ -807,18 +815,60 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       ])
     })
 
-    it('每次整理的请求次数先给共享的范围用：用完了，画像层与私人层这次不整理，下次接着', async () => {
+    // 共享的那一段每次最多请求几次；积压的共享内容比一次整理能请求的还多
+    const SHARED_CALLS = DREAM_MAX_CALLS - DREAM_PERSONAL_CALLS
+    const BACKLOG = DREAM_CHANGED_PER_CALL * DREAM_MAX_CALLS + 1
+    // 别的成员看得到的那部分记录（共享的范围与汇总），积压时是这个样子
+    const sharedRuns = async () =>
+      (await runs())
+        .filter((r) => r.ownerAccountId === null)
+        .map((r) => [r.scope, r.changed, r.more])
+    const BACKLOGGED = [
+      ...Array.from({ length: SHARED_CALLS }, () => ['base', DREAM_CHANGED_PER_CALL, true]),
+      [null, 0, true],
+    ]
+
+    it('共享的内容积压很多时，画像层与私人层照样整理：共享的那一段最多用到上限减去留量，没用完的留量也不还给它', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      await notes(DREAM_CHANGED_PER_CALL * DREAM_MAX_CALLS + 1)
+      await notes(BACKLOG)
       await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
       const { model, calls } = fakeChatModel(reply([]))
+      expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+      expect(calls.map(titleOf)).toEqual([...Array(SHARED_CALLS).fill(BASE), PRIVATE])
+      expect(await sharedRuns()).toEqual(BACKLOGGED)
+      expect((await scopeRuns()).at(-1)).toMatchObject({
+        scope: `private:${bob.accountId}`,
+        changed: 1,
+      })
+      // 下一次：共享的接着整理剩下的
       await dream(model)
-      expect(calls.map(titleOf)).toEqual(Array(DREAM_MAX_CALLS).fill(BASE))
-      expect(await runs()).toHaveLength(DREAM_MAX_CALLS + 1)
-      expect((await summaries()).at(-1)).toMatchObject({ skipped: null, error: null, more: true })
-      // 下一次：共享的剩下一批，接着整理 bob 的私人层
+      expect(new Set(calls.slice(SHARED_CALLS + 1).map(titleOf))).toEqual(new Set([BASE]))
+      expect((await summaries()).at(-1)).toMatchObject({ more: false })
+    })
+
+    it('没有画像层与私人层要整理时，共享的那一段也只用到同样的上限：别的成员看到的不随有没有私人内容变', async () => {
+      await notes(BACKLOG)
+      const { model, calls } = fakeChatModel(reply([]))
       await dream(model)
-      expect(calls.slice(DREAM_MAX_CALLS).map(titleOf)).toEqual([BASE, PRIVATE])
+      expect(calls.map(titleOf)).toEqual(Array(SHARED_CALLS).fill(BASE))
+      expect(await sharedRuns()).toEqual(BACKLOGGED)
+      expect(await runs()).toHaveLength(SHARED_CALLS + 1)
+    })
+
+    it.each([
+      ['共享的那一段用到上限减去留量就停', DREAM_MAX_TOKENS - DREAM_PERSONAL_TOKENS],
+      ['共享的那一段一次就用超了上限，超出的部分不占留量', DREAM_MAX_TOKENS],
+    ])('用量也给画像层与私人层留一部分：%s', async (_, perCall) => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await notes(DREAM_CHANGED_PER_CALL * 2)
+      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const { model, calls } = fakeChatModel(reply([]), {
+        promptTokens: perCall,
+        completionTokens: 0,
+      })
+      await dream(model)
+      expect(calls.map(titleOf)).toEqual([BASE, PRIVATE])
+      expect((await summaries()).at(-1)).toMatchObject({ more: true })
     })
 
     it('一个成员的画像层或私人层请求出错，不耽误别的成员的：接着整理下一个，结果照样存下', async () => {

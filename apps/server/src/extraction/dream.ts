@@ -61,9 +61,13 @@ import { loadExtractionConfig } from './settings'
 // 每个范围（见 memory/scopes.ts）单独请求模型，只看上次以来新增或改动的记忆，再带上它们的近邻作对照
 
 // 每次整理最多请求模型这么多次、用掉这么多 token（到了就不再开始新的一次），剩下的下次接着整理。
-// 共享的范围先用，画像层与私人层用剩下的（见 dreamOnce）
+// 共享的范围先用，但最多用到上限减去固定留给画像层与私人层的（DREAM_PERSONAL_*）；画像层与私人层用剩下的、至少是留量，
+// 没用完的也不还给共享的那一段（见 dreamOnce）。共享的内容积压很多时（例如刚导入一大批），画像层与私人层不用等积压清完。
+// 留量是常量，不看有没有画像层与私人层要整理：共享的那一段整理到哪里所有成员都看得到，跟着变就泄露了有没有私人内容
 export const DREAM_MAX_CALLS = 8
-const MAX_TOKENS = 60_000
+export const DREAM_MAX_TOKENS = 60_000
+export const DREAM_PERSONAL_CALLS = 2
+export const DREAM_PERSONAL_TOKENS = 15_000
 // 一次给模型看的：上次以来新增或改动的最多这么多条，近邻最多这么多条，正文合计最多这么多字
 export const DREAM_CHANGED_PER_CALL = 20
 const NEIGHBORS_PER_CALL = 20
@@ -217,11 +221,12 @@ function messageOf(err: unknown): string {
 
 // 别的成员看到的列表与状态只按共享部分的汇总与他自己的画像层、私人层算（见 dreamRunOutcome），
 // 所以分两段整理，共享的那一段不受任何人的画像层与私人层影响：
-// 1. 先把共享的范围整理完，没看完的接着看，都在画像层与私人层之前；每次整理的请求次数与用量上限先给这一段用。
+// 1. 先把共享的范围整理完，没看完的接着看，都在画像层与私人层之前；这一段最多用到每次整理的请求次数与用量上限
+//    减去留给画像层与私人层的（见 DREAM_PERSONAL_CALLS），上限是常量，不看后面有没有要整理的。
 //    出错就停下：多半是接口或库的问题，别的范围也会一样；
 // 2. 接着记一条共享部分的汇总（范围为空）：出错了、整理过了（还有没看完的）、没有要整理的。
 //    整次没走到范围时（没配模型、预算用完、什么都没有要整理的）记的那一条也是汇总；
-// 3. 再整理画像层与私人层，用剩下的请求次数与用量。结果、出错与用量只记在各自的范围上，
+// 3. 再整理画像层与私人层，用剩下的请求次数与用量，至少是留量。结果、出错与用量只记在各自的范围上，
 //    一个范围出错不耽误别人的范围，接着整理下一个
 async function dreamOnce(
   db: Db,
@@ -252,19 +257,25 @@ async function dreamOnce(
   const queue = await pendingScopes(db, spaceId)
   if (!queue.length) return skip('idle')
   const activeModel = (await loadEmbeddingModels(db)).active?.model ?? null
-  const spent = { calls: 0, tokens: 0 }
+  // 这次整理一共请求了几次模型
+  let requested = 0
 
-  // 整理一段：没看完的排到这一段的后面接着看。请求次数或用量到了上限、本月预算用完就停，
-  // 预算用完记在没整理的那个范围上。返回这一段请求了几次、有没有出错、还有没有没看完的
-  const runSegment = async (scopes: PendingScope[], stopOnFailure: boolean) => {
+  // 整理一段：没看完的排到这一段的后面接着看。这一段的请求次数或用量到了 limit、本月预算用完就停，
+  // 预算用完记在没整理的那个范围上。返回这一段请求了几次、用了多少 token、有没有出错、还有没有没看完的
+  const runSegment = async (
+    scopes: PendingScope[],
+    limit: { calls: number; tokens: number },
+    stopOnFailure: boolean,
+  ) => {
     const pending = [...scopes]
     let calls = 0
+    let tokens = 0
     let failed = false
-    while (pending.length && spent.calls < DREAM_MAX_CALLS && spent.tokens < MAX_TOKENS) {
+    while (pending.length && calls < limit.calls && tokens < limit.tokens) {
       const scope = pending[0]!
       progress.scope = scope
       // 第一次请求之前已经看过；之后每次都再看一眼，抽取与别的整理可能同时在花
-      if (spent.calls > 0 && (await overBudget())) {
+      if (requested > 0 && (await overBudget())) {
         await record({ scope: scope.key, ownerAccountId: scope.owner, skipped: 'budget' })
         break
       }
@@ -273,8 +284,8 @@ async function dreamOnce(
       progress.scope = null
       if (!result) continue
       calls++
-      spent.calls++
-      spent.tokens += result.tokens
+      requested++
+      tokens += result.tokens
       if (result.failed) {
         failed = true
         if (stopOnFailure) break
@@ -283,12 +294,19 @@ async function dreamOnce(
       if (result.more) pending.push(scope)
     }
     progress.scope = null
-    return { calls, failed, more: pending.length > 0 }
+    return { calls, tokens, failed, more: pending.length > 0 }
   }
 
   // 范围已经按 pendingScopes 排好，共享的在前：开头没有主人的那些是第一段，从第一个画像层或私人层的范围起是第二段
   const cut = queue.findIndex((s) => s.owner !== null)
-  const shared = await runSegment(cut < 0 ? queue : queue.slice(0, cut), true)
+  const shared = await runSegment(
+    cut < 0 ? queue : queue.slice(0, cut),
+    {
+      calls: DREAM_MAX_CALLS - DREAM_PERSONAL_CALLS,
+      tokens: DREAM_MAX_TOKENS - DREAM_PERSONAL_TOKENS,
+    },
+    true,
+  )
   // 共享的范围要看的记忆在这期间都被删掉了也算没有要整理的。一次都没请求时也有这一条，每天的检查据此知道今天整理过
   await summarize(
     shared.failed
@@ -298,7 +316,15 @@ async function dreamOnce(
         : { skipped: 'idle' },
   )
   if (shared.failed) return { outcome: 'failed', reason: null }
-  const personal = await runSegment(cut < 0 ? [] : queue.slice(cut), false)
+  // 用剩下的，至少是留量：共享的那一段最后一次请求用超了它的上限时，超出的部分不占留量
+  const personal = await runSegment(
+    cut < 0 ? [] : queue.slice(cut),
+    {
+      calls: DREAM_MAX_CALLS - shared.calls,
+      tokens: Math.max(DREAM_MAX_TOKENS - shared.tokens, DREAM_PERSONAL_TOKENS),
+    },
+    false,
+  )
   if (personal.failed) return { outcome: 'failed', reason: null }
   if (!shared.calls && !personal.calls) return { outcome: 'skipped', reason: 'idle' }
   return { outcome: 'done', reason: null }
