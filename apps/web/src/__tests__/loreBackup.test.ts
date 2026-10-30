@@ -187,11 +187,12 @@ describe('勾选', () => {
       planNode('renamed', { uri: 'infra://new_name' }),
       planNode('both'),
       planNode('old', { targets: [imported] }),
+      planNode('kept', { targets: [imported] }),
     ])
     expect(
       selectionOf(
         plan,
-        new Set(['a', 'renamed', 'both', 'old', 'gone']),
+        new Set(['a', 'renamed', 'both', 'old', 'kept', 'gone']),
         new Set(['both', 'old', 'also_gone']),
       ),
     ).toEqual({
