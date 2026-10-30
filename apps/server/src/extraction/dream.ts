@@ -598,12 +598,36 @@ async function dreamScope(
   const counts = { changed: batch.changed.length, considered: picked.length }
   const record = (tx: Tx, fields: RunFields) =>
     recordRun(tx, options, { scope: pending.key, ownerAccountId: owner, ...counts, ...fields })
-  // 这一批整理过了：记下每条当时的版本，之后没改过的不再给模型看。近邻只是对照，不记
-  const mark = (tx: Tx) =>
-    tx
+  // 这一批整理过了：记下每条当时的版本，之后没改过的不再给模型看。近邻只是对照，不记。
+  // 合并对象只改记忆的对象与来源作用域、不加版本：读这一批之后被合并移走的（这两项和读到的不一样了）不记，
+  // 下次整理它们照样是候选，近邻会把保留对象那边的一起带上。先锁住这些行再核对（FOR SHARE）：合并改它们要等
+  // 这个事务提交，改完才删标记（见 access/subjects.ts），删得到这里刚写下的。正被别的写入锁着的跳过、也不记，下次再看
+  const mark = async (tx: Tx) => {
+    const now = await tx
+      .select({ id: memories.id, subjectId: memories.subjectId, originScope: memories.originScope })
+      .from(memories)
+      .where(
+        inArray(
+          memories.id,
+          batch.changed.map((c) => c.row.id),
+        ),
+      )
+      .for('share', { skipLocked: true })
+    const current = new Map(now.map((r) => [r.id, r]))
+    const stayed = batch.changed.filter(({ row }) => {
+      const found = current.get(row.id)
+      return (
+        found !== undefined &&
+        found.subjectId === row.subjectId &&
+        found.originScope === row.originScope
+      )
+    })
+    if (!stayed.length) return
+    await tx
       .insert(dreamMarks)
-      .values(batch.changed.map((c) => ({ spaceId, memoryId: c.row.id, version: c.row.version })))
+      .values(stayed.map((c) => ({ spaceId, memoryId: c.row.id, version: c.row.version })))
       .onConflictDoUpdate({ target: dreamMarks.memoryId, set: { version: sql`excluded.version` } })
+  }
 
   let completion
   try {

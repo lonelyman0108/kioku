@@ -1,4 +1,4 @@
-import { and, arrayContains, asc, eq, gt, inArray, or, sql } from 'drizzle-orm'
+import { and, arrayContains, asc, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
 
 import { pgErrorCode, type Tx } from '../db/client'
 import {
@@ -13,7 +13,7 @@ import {
 } from '../db/schema'
 import { extractionDelay, trimBatch } from '../extraction/buffer'
 import type { Deps } from '../http/env'
-import { subjectScope } from '../memory/scopes'
+import { subjectScope, TALK_LAYERS } from '../memory/scopes'
 
 // 合并对象：管理界面里成员手动合并，与用绑定码合并（见 binding.ts）共用这里的规则与步骤
 
@@ -62,32 +62,44 @@ async function mergeInto(
     .set({ subjectId: into.id })
     .where(eq(subjectIdentities.subjectId, from.id))
   // Dream 按记忆记下整理过的版本（dream_marks），这里不加版本，标记留着的话合并之后放到一起的记忆不会被再看，
-  // 合并带来的重复也就一直留着。所以先按合并前的样子删掉要放在一起看的记忆的标记：两边自己作用域里的
-  // （合并之后都在 into 的作用域里），以及 from 有记忆的作用域里关于这两个对象的（合并之后是同一个对象的）。
-  // into 在别处的记忆没有和它放到一起的，不用再看
-  const fromScopes = tx
-    .selectDistinct({ scope: memories.originScope })
+  // 合并带来的重复也就一直留着。要再看的只有对象层与情节层：别的层的 Dream 范围和对象、来源作用域无关，合并不改变
+  // 谁和谁一起看。按合并前的样子找出要放在一起看的：from 自己作用域里的（并进 into 的作用域）与关于 from 的（换成 into），
+  // 以及它们要并进去的那边原有的——from 自己的作用域里有记忆时 into 自己作用域里的，关于 from 的记忆所在的作用域里
+  // 关于 into 的。from 什么都带不过来时一条也不用再看
+  const talk = inArray(memories.layer, [...TALK_LAYERS])
+  const inFromScope = and(talk, eq(memories.originScope, oldScope))!
+  const aboutFrom = and(talk, eq(memories.subjectId, from.id))!
+  const together = await tx
+    .select({ id: memories.id })
     .from(memories)
-    .where(eq(memories.subjectId, from.id))
-  await tx.delete(dreamMarks).where(
-    inArray(
-      dreamMarks.memoryId,
-      tx
-        .select({ id: memories.id })
-        .from(memories)
-        .where(
-          or(
-            inArray(memories.originScope, [oldScope, newScope]),
-            and(
-              inArray(memories.subjectId, [from.id, into.id]),
-              inArray(memories.originScope, fromScopes),
-            ),
+    .where(
+      or(
+        inFromScope,
+        aboutFrom,
+        and(
+          talk,
+          eq(memories.originScope, newScope),
+          exists(tx.select({ id: memories.id }).from(memories).where(inFromScope)),
+        ),
+        and(
+          talk,
+          eq(memories.subjectId, into.id),
+          inArray(
+            memories.originScope,
+            tx.selectDistinct({ scope: memories.originScope }).from(memories).where(aboutFrom),
           ),
         ),
-    ),
-  )
+      ),
+    )
   await tx.update(memories).set({ subjectId: into.id }).where(eq(memories.subjectId, from.id))
   await tx.update(memories).set({ originScope: newScope }).where(eq(memories.originScope, oldScope))
+  // 改完归属再删标记：Dream 写标记的事务先锁住那一批记忆（FOR SHARE）再核对对象与来源作用域（见 dream.ts），
+  // 上面两步要等它提交，这里删得到它刚写下的；先删的话删不到它还没提交的，合并到一起的记忆就又算看过了
+  if (together.length) {
+    await tx
+      .delete(dreamMarks)
+      .where(sql`${dreamMarks.memoryId} = any(${sql.param(together.map((m) => m.id))}::uuid[])`)
+  }
   // 还没抽取的对话缓冲：发言人、群与批次一起换过来，不然删掉对象时会连带删掉它们
   await tx
     .update(conversationTurns)

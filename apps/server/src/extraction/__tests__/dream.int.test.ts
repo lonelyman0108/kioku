@@ -913,54 +913,179 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     ])
   })
 
-  it('合并对象之后，放到一起的记忆下一次整理会再看：两边私聊里的、同一个群里关于这两个对象的；别的不再看', async () => {
-    const xm = await subject('person', '小明')
-    const alt = await subject('person', '小明的小号')
-    const zs = await subject('person', '张三')
-    const club = await subject('group', '读书会')
-    const hikers = await subject('group', '登山群')
-    await fact(xm, '在学日语', `group:${club}`)
-    await fact(alt, '正在学日语', `group:${club}`)
-    await fact(zs, '喜欢爬山', `group:${club}`)
-    await fact(xm, '养了一只猫', `group:${hikers}`)
-    await fact(xm, '在找新工作', `direct:${xm}`)
-    await fact(alt, '想换工作', `direct:${alt}`)
-    const { model, calls } = fakeChatModel(reply([]))
-    await dream(model)
-    expect(calls).toHaveLength(4)
-    expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
-
-    // 合并只改对象与来源作用域、不加版本
-    const res = await send('POST', `/subjects/${xm}/merge`, { from: alt })
-    expect(res.status, await res.clone().text()).toBe(200)
-    const seen = calls.length
-    expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
-    const fresh = calls.slice(seen).map((c) => {
-      const lines = dreamLines(c)
-      return {
-        title: titleOf(c),
-        fresh: lines
-          .filter((l) => l.new)
+  describe('合并对象之后', () => {
+    const merge = async (into: string, from: string) => {
+      const res = await send('POST', `/subjects/${into}/merge`, { from })
+      expect(res.status, await res.clone().text()).toBe(200)
+    }
+    const marked = async () =>
+      new Set(
+        (await inSpace((tx) => tx.select({ id: dreamMarks.memoryId }).from(dreamMarks))).map(
+          (m) => m.id,
+        ),
+      )
+    // 每次请求的范围、新增或改动的（不算近邻）与近邻
+    const summary = (messages: ChatMessage[]) => {
+      const lines = dreamLines(messages)
+      const contents = (fresh: boolean) =>
+        lines
+          .filter((l) => l.new === fresh)
           .map((l) => l.content)
-          .sort(),
-        subjects: [...new Set(lines.map((l) => l.subject))],
-      }
+          .sort()
+      return { title: titleOf(messages), fresh: contents(true), neighbors: contents(false) }
+    }
+    const byTitle = <T extends { title: string }>(items: T[]) =>
+      items.sort((a, b) => a.title.localeCompare(b.title))
+    const CLUB = '群「读书会」的聊天里记下的事实与会话摘要'
+
+    it('放到一起的对象层与情节层记忆下一次整理会再看：两边私聊里的、同一个群里关于这两个对象的；别的不再看', async () => {
+      const xm = await subject('person', '小明')
+      const alt = await subject('person', '小明的小号')
+      const zs = await subject('person', '张三')
+      const club = await subject('group', '读书会')
+      const hikers = await subject('group', '登山群')
+      await fact(xm, '在学日语', `group:${club}`)
+      await fact(alt, '正在学日语', `group:${club}`)
+      await fact(zs, '喜欢爬山', `group:${club}`)
+      await fact(xm, '养了一只猫', `group:${hikers}`)
+      await fact(xm, '在找新工作', `direct:${xm}`)
+      await fact(alt, '想换工作', `direct:${alt}`)
+      // 私人层的记忆来源作用域也是这个私聊，但它的范围和对象、来源作用域无关，合并之后不用再看
+      await inSpace((tx) =>
+        tx.insert(memories).values({
+          spaceId: ws.spaceId,
+          form: 'curated',
+          layer: 'private',
+          sensitivity: 'private',
+          provenance: 'owner',
+          ownerAccountId: ws.accountId,
+          originScope: `direct:${alt}`,
+          domain: 'home',
+          path: 'alt-chat',
+          content: '小号私聊里记下的待办',
+        }),
+      )
+      const { model, calls } = fakeChatModel(reply([]))
+      await dream(model)
+      expect(calls).toHaveLength(5)
+      expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+
+      // 合并只改对象与来源作用域、不加版本
+      await merge(xm, alt)
+      const seen = calls.length
+      expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+      const subjectsSeen = calls
+        .slice(seen)
+        .map((c) => [...new Set(dreamLines(c).map((l) => l.subject))])
+      expect(subjectsSeen).toEqual([['小明'], ['小明']])
+      expect(byTitle(calls.slice(seen).map(summary))).toEqual(
+        byTitle([
+          {
+            title: '和「小明」的私聊里记下的事实与会话摘要',
+            fresh: ['在找新工作', '想换工作'].sort(),
+            neighbors: [],
+          },
+          { title: CLUB, fresh: ['在学日语', '正在学日语'].sort(), neighbors: [] },
+        ]),
+      )
+      expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
     })
-    expect(fresh.sort((a, b) => a.title.localeCompare(b.title))).toEqual(
-      [
-        {
-          title: '和「小明」的私聊里记下的事实与会话摘要',
-          fresh: ['在找新工作', '想换工作'].sort(),
-          subjects: ['小明'],
+
+    it('被合并的对象什么记忆都没有（只是又一个平台账号）：不用再看任何记忆', async () => {
+      const xm = await subject('person', '小明')
+      const ghost = await subject('person', '小明的新号')
+      const club = await subject('group', '读书会')
+      await fact(xm, '在学日语', `group:${club}`)
+      await fact(xm, '在找新工作', `direct:${xm}`)
+      const { model, calls } = fakeChatModel(reply([]))
+      await dream(model)
+      expect(calls).toHaveLength(2)
+      await merge(xm, ghost)
+      expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+      expect(calls).toHaveLength(2)
+    })
+
+    it('读完这一批、请求模型期间合并了：移走的那条不记整理标记，下一次整理连同保留那边的一起看', async () => {
+      const xm = await subject('person', '小明')
+      const alt = await subject('person', '小明的小号')
+      const club = await subject('group', '读书会')
+      const moved = await fact(alt, '正在学日语', `group:${club}`)
+      const kept = await fact(xm, '在学日语', `group:${club}`)
+      const { model, calls } = fakeChatModel(reply([]))
+      let merged = false
+      await dreamSpace(database.db, masterKey, {
+        spaceId: ws.spaceId,
+        runId: randomUUID(),
+        trigger: 'manual',
+        modelFor: () => model,
+        afterBatch: async () => {
+          if (merged) return
+          merged = true
+          await merge(xm, alt)
         },
-        {
-          title: '群「读书会」的聊天里记下的事实与会话摘要',
-          fresh: ['在学日语', '正在学日语'].sort(),
-          subjects: ['小明'],
-        },
-      ].sort((a, b) => a.title.localeCompare(b.title)),
-    )
-    expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+      })
+      expect(calls).toHaveLength(1)
+      const marks = await marked()
+      expect(marks.has(moved.id)).toBe(false)
+      expect(marks.has(kept.id)).toBe(true)
+      await dream(model)
+      expect(calls.slice(1).map(summary)).toEqual([
+        { title: CLUB, fresh: ['正在学日语'], neighbors: ['在学日语'] },
+      ])
+    })
+
+    it('写整理标记的事务和合并同时进行：合并等它提交才删标记，刚写下的标记也删得到', async () => {
+      const xm = await subject('person', '小明')
+      const alt = await subject('person', '小明的小号')
+      const club = await subject('group', '读书会')
+      const moved = await fact(alt, '正在学日语', `group:${club}`)
+      const kept = await fact(xm, '在学日语', `group:${club}`)
+      const { model, calls } = fakeChatModel(reply([]))
+      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      // 等到有连接等在 holder 的锁上，返回它的 pid；gaveUp 返回真时不再等，返回 null
+      const waitingOn = async (holder: number, gaveUp = () => false): Promise<number | null> => {
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ pid: number }[]>`
+            select pid from pg_stat_activity where ${holder}::int = any(pg_blocking_pids(pid)) limit 1`
+          if (row) return row.pid
+          if (gaveUp()) return null
+          if (i >= 200) throw new Error('没有等在这把锁上')
+          await new Promise((resolve) => setTimeout(resolve, 25))
+        }
+      }
+      let dreaming: Promise<unknown> | undefined
+      let merging: Promise<void> | undefined
+      let mergeDone = false
+      try {
+        await side.begin(async (tx) => {
+          // 拦住写运行记录：Dream 写结果的事务停在写下整理标记之后、提交之前
+          await tx`lock table dream_runs in exclusive mode`
+          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
+            { pid: number },
+          ]
+          dreaming = dream(model)
+          const dreamer = await waitingOn(pid)
+          merging = merge(xm, alt).finally(() => {
+            mergeDone = true
+          })
+          // 合并要改的记忆被 Dream 写标记的事务锁着，等它提交
+          await waitingOn(dreamer!, () => mergeDone)
+        })
+        await dreaming
+        await merging
+      } finally {
+        await Promise.allSettled([dreaming, merging])
+        await side.end()
+      }
+      expect(calls).toHaveLength(1)
+      const marks = await marked()
+      expect(marks.has(moved.id)).toBe(false)
+      expect(marks.has(kept.id)).toBe(false)
+      await dream(model)
+      expect(calls.slice(1).map(summary)).toEqual([
+        { title: CLUB, fresh: ['在学日语', '正在学日语'].sort(), neighbors: [] },
+      ])
+    })
   })
 
   it('增量：只看上次以来新增或改动的，没有就不请求模型；改过的那条连同近邻再看一遍', async () => {
