@@ -1247,7 +1247,8 @@ describe('模型对话的页面', () => {
   })
 
   it('重放分叉：第几步与原因都显示，能接受或清空；再发还是同样报错时禁止发送', () => {
-    expect(view.script).toContain('divergenceNotice(agent.value.session)')
+    // 内部错误的分叉不说再运行一次：这条消息可能已经留在历史
+    expect(view.script).toContain("divergenceNotice(agent.value.session, '可以接着发下一条')")
     const alert = alertWith('diverged')
     expect(bound(alert, 'title')).toBe('diverged.title')
     expect(bound(alert, 'description')).toBe('diverged.description')

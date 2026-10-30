@@ -1768,9 +1768,12 @@ describe('重放分叉', () => {
     return h.send('第二条', await withWrite())
   }
 
-  it('内部错误的分叉多半是暂时的：说可以再发一次，也不拦，再发就是重试', async () => {
+  it('内部错误的分叉多半是暂时的：不拦，这一轮的消息留在历史，说接着说下一句，不说再发一次：重打一遍模型看到的是重复的请求', async () => {
     const conversation = await afterDivergence(true)
+    expect(last(conversation).inHistory).toBe(true)
     expect(last(conversation).notice).toContain('可能是暂时的')
+    expect(last(conversation).notice).toContain('可以接着说下一句')
+    expect(last(conversation).notice).not.toContain('可以再发一次')
     expect(blockingDivergence(conversation.session)).toBeNull()
 
     const h = harness({
@@ -1892,6 +1895,39 @@ describe('重放分叉', () => {
       const conversation = emptyConversation()
       expect(acceptAgentDivergence(conversation)).toBe(conversation)
     })
+  })
+
+  it('prompt.submit 那里的内部错误分叉：这条消息不进历史、文字放回输入框，说可以再发一次', async () => {
+    const conversation = await withWrite('hook')
+    const h = harness({ turns: [reply('不该到这里')], run: diverged(true) })
+    const done = await h.send('第二条', conversation)
+    expect(last(done).inHistory).toBe(false)
+    expect(last(done).notice).toContain('可以再发一次')
+    expect(last(done).notice).not.toContain('接着说下一句')
+  })
+
+  it('turn.end 时的内部错误分叉：回复已经留在历史，说接着说下一句', async () => {
+    let calls = 0
+    const h = harness({
+      loop: 'chat',
+      context: GROUP,
+      turns: [reply('好')],
+      run: (steps) =>
+        ++calls === 2
+          ? diverged(true)(steps)
+          : { kind: 'done', result: runResult('rollback', steps.map(defaultStep)) },
+    })
+    const done = await h.send(USER_TEXT)
+    expect(last(done).inHistory).toBe(true)
+    expect(last(done).turnEndNote).toContain('可以接着说下一句')
+    expect(last(done).turnEndNote).not.toContain('可以再发一次')
+  })
+
+  it('数据对不上的分叉：不说接着来，要清空或接受', async () => {
+    const conversation = await afterDivergence()
+    expect(last(conversation).notice).not.toContain('可以再发一次')
+    expect(last(conversation).notice).not.toContain('接着说下一句')
+    expect(last(conversation).notice).toContain('可以清空对话，或者接受')
   })
 
   it('prompt.submit 那里就分叉：不请求模型，这条消息不进历史', async () => {

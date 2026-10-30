@@ -280,9 +280,10 @@ export function replayStepLabel(step: BenchReplayStep): string {
 }
 
 // 重放分叉的说明：第几步（从 1 算）、它的错误、怎么办。现在的数据和这次会话做这一步时不一样了才会报错，
-// 回滚模式本来就是对着当前数据演练，不算出错，由用户决定
+// 回滚模式本来就是对着当前数据演练，不算出错，由用户决定。retry 说内部错误时接着怎么来
 export function divergenceNotice(
   session: BenchSession,
+  retry = '可以再运行一次',
 ): { title: string; description: string } | null {
   const { diverged, replay } = session
   if (!diverged) return null
@@ -291,7 +292,7 @@ export function divergenceNotice(
   return {
     title: `重放的${which}报错，这次的调用没有执行`,
     description: diverged.internalError
-      ? `${diverged.text}。可能是暂时的，可以再运行一次；还是不行就清空，或者接受：去掉这一步，留下别的接着用。`
+      ? `${diverged.text}。可能是暂时的，${retry}；还是不行就清空，或者接受：去掉这一步，留下别的接着用。`
       : `${diverged.text}。现在的数据和这次会话做这一步时不一样了。可以清空，或者接受：去掉这一步，留下别的接着用，后面依赖它的步骤可能接着报错。`,
   }
 }

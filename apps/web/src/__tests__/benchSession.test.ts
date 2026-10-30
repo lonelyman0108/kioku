@@ -494,6 +494,10 @@ describe('重放分叉', () => {
   })
 
   it('内部错误可能是暂时的（例如等锁超时），可以再试一次', () => {
+    // 模型对话那边不说再运行一次
+    expect(
+      divergenceNotice(recordRun(log(), divergedAt(0, true)), '可以接着发下一条')?.description,
+    ).toContain('可能是暂时的，可以接着发下一条；')
     const notice = divergenceNotice(recordRun(log(), divergedAt(0, true)))!
     expect(notice.description).toContain('再运行一次')
   })

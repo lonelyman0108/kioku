@@ -112,7 +112,8 @@ const consentActions = computed(() => [
 ])
 
 const blocker = computed(() => runBlocker(agent.value.session, mode.value))
-const diverged = computed(() => divergenceNotice(agent.value.session))
+// 不说再运行一次：这条消息可能已经留在历史里，用户重打一遍的话模型看到的就是重复的请求
+const diverged = computed(() => divergenceNotice(agent.value.session, '可以接着发下一条'))
 // 运行期间不能接受或清空：结果回来时，第几步与这次的写入都是按发出请求时的日志算的
 const divergedActions = computed(() => [
   {

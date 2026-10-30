@@ -368,15 +368,17 @@ function stepTraces(session: BenchSession, result: BenchRunResult): AgentStepTra
 const injected = (step: BenchStepResult | undefined): string | null =>
   !step || step.isError || step.internalError || step.raw === null ? null : step.text
 
-// 重放分叉：现在的数据和对话做这一步时不一样了才会报错。可以清空对话或者接受；内部错误多半是暂时的，可以再发一次
+// 重放分叉：现在的数据和对话做这一步时不一样了才会报错。可以清空对话或者接受；内部错误多半是暂时的，可以接着来。
+// retry 说接着怎么来，按这条消息留没留在历史：留着的话文字没有放回输入框，说再发一次的话用户重打一遍，模型看到的就是重复的请求
 function divergedNotice(
   session: BenchSession,
   { index, text, internalError }: NonNullable<BenchRunResult['replayDiverged']>,
+  retry: string,
 ): string {
   const step = session.replay[index]
   const which = `第 ${index + 1} 步${step ? `（${replayStepLabel(step)}）` : ''}`
   return internalError
-    ? `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。可能是暂时的，可以再发一次；还是不行就清空对话，或者接受：去掉这一步。`
+    ? `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。可能是暂时的，${retry}还是不行就清空对话，或者接受：去掉这一步。`
     : `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。现在的数据和对话做这一步时不一样了，可以清空对话，或者接受：去掉这一步。`
 }
 
@@ -512,6 +514,7 @@ export async function sendAgentMessage(
   const plainUser: BenchAgentMessage = { role: 'user', content: text }
   // 留在历史里的用户消息
   let keptUser = plainUser
+  const afterReply = () => (working.length ? KEPT_IN_HISTORY : RETRY)
   const finish = (end: AgentEnd, notice: string | null) => {
     const inHistory = working.length > 0
     updateExchange({ phase: null, end, notice, inHistory })
@@ -533,7 +536,7 @@ export async function sendAgentMessage(
   const blocked = runBlocker(state.session, mode)
   if (blocked) return finish('blocked', blocked)
   const stuck = blockingDivergence(state.session)
-  if (stuck) return finish('diverged', divergedNotice(state.session, stuck))
+  if (stuck) return finish('diverged', divergedNotice(state.session, stuck, afterReply()))
 
   let attached = ''
   if (loop !== 'tools') {
@@ -567,7 +570,7 @@ export async function sendAgentMessage(
     }
     updateExchange({ lifecycle: outcome.traces })
     const diverged = outcome.result.replayDiverged
-    if (diverged) return finish('diverged', divergedNotice(state.session, diverged))
+    if (diverged) return finish('diverged', divergedNotice(state.session, diverged, afterReply()))
     if (starting) {
       const sessionText = injected(outcome.result.steps[0])
       update({ sessionText, sessionContext: sessionText === null ? null : contextKey })
@@ -581,7 +584,6 @@ export async function sendAgentMessage(
   if (loop !== 'chat') keptUser = sentUser
   const head = systemMessage(system, state.sessionText)
   const before = [...(head ? [head] : []), ...state.messages, sentUser]
-  const afterReply = () => (working.length ? KEPT_IN_HISTORY : RETRY)
 
   let reply: string
   // 回复是空的时的说明
@@ -695,7 +697,7 @@ export async function sendAgentMessage(
     const diverged = outcome.result.replayDiverged
     if (diverged) {
       answerFailed('测试台重放之前的写入时报错，这次没有执行')
-      return finish('diverged', divergedNotice(state.session, diverged))
+      return finish('diverged', divergedNotice(state.session, diverged, afterReply()))
     }
     const traceByCall = new Map(sendable.map(({ index }, step) => [index, outcome.traces[step]]))
     answer(
@@ -725,7 +727,7 @@ export async function sendAgentMessage(
         updateExchange({ turnEndNote: `turn.end 请求失败：${outcome.message}` })
       } else if (outcome.result.replayDiverged) {
         updateExchange({
-          turnEndNote: divergedNotice(state.session, outcome.result.replayDiverged),
+          turnEndNote: divergedNotice(state.session, outcome.result.replayDiverged, afterReply()),
         })
       } else {
         updateExchange({ turnEnd: outcome.traces[0] ?? null })
