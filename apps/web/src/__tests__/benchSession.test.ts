@@ -14,6 +14,7 @@ import { describe, expect, it } from 'vitest'
 
 import { ApiError } from '../api/client'
 import {
+  abandonedRun,
   acceptDivergence,
   APP_REPLACED_NOTICE,
   BENCH_TIMELINE_MAX,
@@ -189,6 +190,38 @@ describe('运行失败的说明', () => {
   it('真实模式：4xx 是写入之前就拒绝了，不能说可能写了', () => {
     for (const status of [400, 403, 404, 413, 429]) {
       expect(runFailureMessage(new ApiError(status, '拒绝'), 'real')).toBe('拒绝')
+    }
+  })
+})
+
+describe('真实模式的运行中途作废', () => {
+  const RUN = { id: 7, label: '存凭据', view: 'judged' as const, app: '应用', key: '主 Key' }
+
+  it('有结果：说可能已经写入、到活动里确认，结果留着', () => {
+    const made = result([step()], { run: 'abcd1234', mode: 'real' })
+    const notice = abandonedRun(RUN, { result: made })!
+    expect(notice.id).toBe(7)
+    expect(notice.title).toContain('中途作废')
+    expect(notice.title).toContain('可能已经写入')
+    expect(notice.title).toContain('到活动里确认')
+    expect(notice.description).toContain('「存凭据」按「应用」的 Key「主 Key」真实执行')
+    expect(notice.result).toBe(made)
+    expect(notice.view).toBe('judged')
+  })
+
+  it('5xx 与网络错误：不知道执行到了哪一步，一样警告，带上原因', () => {
+    const failed = abandonedRun(RUN, { error: new ApiError(502, '网关出错') })!
+    expect(failed.title).toContain('可能已经写入')
+    expect(failed.description).toContain('网关出错')
+    expect(failed.result).toBeNull()
+    const network = abandonedRun(RUN, { error: new TypeError('fetch') })!
+    expect(network.title).toContain('可能已经写入')
+    expect(network.description).toContain('网络出错了')
+  })
+
+  it('4xx 是写入之前就拒绝了：没有要说的', () => {
+    for (const status of [400, 401, 403, 404, 413, 429]) {
+      expect(abandonedRun(RUN, { error: new ApiError(status, '拒绝') })).toBeNull()
     }
   })
 })

@@ -1,8 +1,9 @@
-import type { AppInfo, KeyInfo, KeyScopes } from '@kioku/contracts'
+import type { AppInfo, BenchRunResult, KeyInfo, KeyScopes, WhoAmI } from '@kioku/contracts'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { createApp, effectScope, nextTick, reactive, ref, type EffectScope } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { ApiError } from '../../api/client'
 import { APP_REPLACED_NOTICE, KEY_REPLACED_NOTICE } from '../../benchSession'
 import { createBench } from '../useBench'
 
@@ -316,5 +317,152 @@ describe('选择失效的提示', () => {
     await refetchKeys()
     expect(bench.generation.value).toBeGreaterThan(generation)
     expect(bench.selectionNotice.value).toBe(KEY_REPLACED_NOTICE)
+  })
+})
+
+describe('运行中途作废', () => {
+  const STEPS = [{ kind: 'whoami' as const }]
+  const WHAT = { label: '我的场景', view: 'judged' as const }
+  const RESULT = {
+    run: 'abcd1234',
+    mode: 'real',
+    ok: true,
+    whoami: {} as WhoAmI,
+    counts: { passed: 1, failed: 0, skipped: 0, notRun: 0 },
+    steps: [],
+    replayDiverged: null,
+  } as BenchRunResult
+
+  function deferred<T>() {
+    let resolve!: (value: T) => void
+    let reject!: (err: unknown) => void
+    const promise = new Promise<T>((res, rej) => {
+      resolve = res
+      reject = rej
+    })
+    return { promise, resolve, reject }
+  }
+
+  // 开始一次运行，运行期间 Key 被吊销（窗口聚焦重新读取）：这次运行作废，回到回滚
+  async function abandonRun(mode: 'real' | 'rollback') {
+    const bench = start()
+    await settle()
+    if (mode === 'real') bench.confirmReal()
+    await settle()
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValue(run.promise)
+    const outcome = bench.execute(STEPS, WHAT)
+    await settle()
+    expect(bench.running.value).toBe(true)
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    expect(bench.running.value).toBe(false)
+    expect(bench.real.value).toBe(false)
+    return { bench, run, outcome }
+  }
+
+  it('真实模式：结果回来时警告可能已经写入，结果留着显示', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    run.resolve(RESULT)
+    expect(await outcome).toEqual({ kind: 'stale' })
+    const [record] = bench.abandoned.value
+    expect(record?.title).toContain('可能已经写入')
+    expect(record?.title).toContain('到活动里确认')
+    expect(record?.description).toContain('「我的场景」')
+    expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
+    expect(record?.result).toBe(RESULT)
+    expect(record?.view).toBe('judged')
+  })
+
+  it('真实模式：请求出错（5xx、网络）也要警告，说明原因', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    run.reject(new ApiError(502, '网关出错'))
+    expect(await outcome).toEqual({ kind: 'stale' })
+    expect(bench.abandoned.value[0]?.title).toContain('可能已经写入')
+    expect(bench.abandoned.value[0]?.description).toContain('网关出错')
+    expect(bench.abandoned.value[0]?.result).toBeNull()
+  })
+
+  it('真实模式：写入之前就被拒绝（4xx）：什么都没发生，没有要说的', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    run.reject(new ApiError(404, '没有这把 Key'))
+    expect(await outcome).toEqual({ kind: 'stale' })
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('回滚模式：什么都没留下，照旧丢弃', async () => {
+    const { bench, run, outcome } = await abandonRun('rollback')
+    run.resolve({ ...RESULT, mode: 'rollback' })
+    expect(await outcome).toEqual({ kind: 'stale' })
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('回滚模式：请求出错也丢弃', async () => {
+    const { bench, run, outcome } = await abandonRun('rollback')
+    run.reject(new ApiError(500, '服务内部错误'))
+    expect(await outcome).toEqual({ kind: 'stale' })
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('没有作废：照常返回结果，不警告', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    expect(await bench.execute(STEPS, WHAT)).toEqual({ kind: 'done', result: RESULT })
+    expect(bench.abandoned.value).toEqual([])
+    expect(bench.abandonedInFlight.value).toBe(false)
+  })
+
+  it('请求没回来的这段时间也说一声；进行中的那次不算', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValue(run.promise)
+    const outcome = bench.execute(STEPS, WHAT)
+    await settle()
+    expect(bench.abandonedInFlight.value).toBe(false)
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    expect(bench.abandonedInFlight.value).toBe(true)
+    run.resolve(RESULT)
+    await outcome
+    await settle()
+    expect(bench.abandonedInFlight.value).toBe(false)
+  })
+
+  it('警告不随之后的切换清掉，用户自己关；时间线里没有它', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    run.resolve(RESULT)
+    await outcome
+    const generation = bench.generation.value
+    bench.confirmReal()
+    await settle()
+    expect(bench.generation.value).toBeGreaterThan(generation)
+    expect(bench.abandoned.value).toHaveLength(1)
+    expect(bench.session.value.timeline).toEqual([])
+    bench.dismissAbandoned(bench.abandoned.value[0]!.id)
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('调用台的连续调用走同一条路：作废的结果不进新的时间线，同样警告', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValue(run.promise)
+    const outcome = bench.call(STEPS, 'kioku_create')
+    await settle()
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    run.resolve(RESULT)
+    expect(await outcome).toEqual({ kind: 'stale' })
+    expect(bench.session.value.timeline).toEqual([])
+    expect(bench.abandoned.value[0]?.description).toContain('「kioku_create」')
+    expect(bench.abandoned.value[0]?.view).toBe('call')
   })
 })

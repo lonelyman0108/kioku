@@ -158,7 +158,10 @@ async function runScenario(scenario: BenchScenario) {
   // 上一次的结果不留着：这次失败时不能让人以为下面的还是这次的
   outcome.value = null
   // 不带调用台这次会话的重放，结果也不进它的时间线。回滚模式下单独一个事务，真实模式下步骤各自真实执行
-  const done = await execute(scenario.steps)
+  const done = await execute(scenario.steps, {
+    label: scenario.title,
+    view: scenarioView(scenario),
+  })
   if (done.kind === 'done') {
     outcome.value = { title: scenario.title, probe: scenario.probe === true, result: done.result }
   } else if (done.kind === 'failed') {

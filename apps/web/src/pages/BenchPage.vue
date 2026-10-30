@@ -2,6 +2,7 @@
 import { computed, ref, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
+import BenchAbandoned from '../components/BenchAbandoned.vue'
 import BenchCalls from '../components/BenchCalls.vue'
 import BenchScenarios from '../components/BenchScenarios.vue'
 import BenchToolbar from '../components/BenchToolbar.vue'
@@ -48,6 +49,7 @@ watchEffect(() => {
     <template #body>
       <div class="max-w-6xl space-y-4">
         <BenchToolbar />
+        <BenchAbandoned />
         <div v-if="mounted" v-show="ready" class="space-y-4">
           <UTabs v-model="tab" :items="tabs" :content="false" class="w-full" />
           <BenchCalls v-show="tab === 'calls'" />

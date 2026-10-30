@@ -13,6 +13,7 @@ import {
 
 import { ApiError } from './api/client'
 import { formatBytes } from './backup'
+import type { StepView } from './benchResult'
 
 // 测试台的共享逻辑：谁能用、真实模式的后果、运行失败的说明、连续调用（重放日志与时间线）
 
@@ -64,12 +65,46 @@ export const REAL_MODE_CONSEQUENCES = [
   '写下的事件带「测试台」标记与你的账号，在活动和凭据的访问记录里看得到。',
 ] as const
 
-// 运行请求失败的说明。4xx 是写入之前就拒绝了（429 同时运行的回滚太多、413 请求体太大、403、404）；
-// 5xx 与网络错误不知道执行到了哪一步：回滚模式下都回滚了，真实模式下可能已经写了一部分
+const NOT_API_FAILURE = '网络出错了，或者响应对不上'
+
+// 4xx 是写入之前就拒绝了（429 同时运行的回滚太多、413 请求体太大、403、404）
+const refusedBeforeWrite = (err: unknown) => err instanceof ApiError && err.status < 500
+
+// 运行请求失败的说明。5xx 与网络错误不知道执行到了哪一步：回滚模式下都回滚了，真实模式下可能已经写了一部分
 export function runFailureMessage(err: unknown, mode: BenchMode): string {
-  const message = err instanceof ApiError ? err.message : '运行失败：网络出错了，或者响应对不上'
-  const refused = err instanceof ApiError && err.status < 500
-  return mode === 'real' && !refused ? `${message}。可能已经执行了一部分，到活动里确认` : message
+  const message = err instanceof ApiError ? err.message : `运行失败：${NOT_API_FAILURE}`
+  return mode === 'real' && !refusedBeforeWrite(err)
+    ? `${message}。可能已经执行了一部分，到活动里确认`
+    : message
+}
+
+// 真实模式的一次运行中途作废了：运行期间应用、Key 或模式变了（例如 Key 被吊销）。
+// 它的结果不属于现在的选择，进不了时间线，但写入可能已经落库，不能不说
+export interface AbandonedRun {
+  id: number
+  title: string
+  description: string
+  view: StepView
+  // 请求出错时没有结果
+  result: BenchRunResult | null
+}
+
+// 作废的那次运行回来了怎么说。写入之前就被拒绝的什么都没发生，没有要说的（回滚模式同理，不用到这里来）
+export function abandonedRun(
+  run: { id: number; label: string; view: StepView; app: string; key: string },
+  settled: { result: BenchRunResult } | { error: unknown },
+): AbandonedRun | null {
+  if ('error' in settled && refusedBeforeWrite(settled.error)) return null
+  const { id, view } = run
+  const title =
+    '这次真实运行中途作废了（运行期间应用、Key 或模式变了），但可能已经写入：到活动里确认。'
+  const what = `「${run.label}」按「${run.app}」的 Key「${run.key}」真实执行`
+  if ('result' in settled) {
+    return { id, title, description: `${what}，下面是它的结果。`, view, result: settled.result }
+  }
+  const reason = settled.error instanceof ApiError ? settled.error.message : NOT_API_FAILURE
+  const description = `${what}，请求出错了，没有拿到结果：${reason}`
+  return { id, title, description, view, result: null }
 }
 
 // 时间线只留最近这么多条，全在内存里：结果可能很长，也可能有明文，不进浏览器存储

@@ -8,6 +8,7 @@ import benchScenarios from '../benchScenarios?raw'
 import benchSession from '../benchSession?raw'
 import activityEntry from '../components/ActivityEntry.vue?raw'
 import appSimulator from '../components/AppSimulator.vue?raw'
+import benchAbandoned from '../components/BenchAbandoned.vue?raw'
 import benchCalls from '../components/BenchCalls.vue?raw'
 import benchContextForm from '../components/BenchContextForm.vue?raw'
 import benchField from '../components/BenchField.vue?raw'
@@ -117,6 +118,7 @@ const SOURCES = {
   benchSession,
   useBench,
   benchPage,
+  benchAbandoned,
   benchCalls,
   benchContextForm,
   benchField,
@@ -457,7 +459,7 @@ describe('场景的运行与导出', () => {
     expect(valid).toContain('if (parsed.ok) return parsed.scenario')
     expect(valid).not.toContain('JSON.parse')
     expect(bodyOf(scenarios.script, 'startRun')).toContain('const scenario = validScenario()')
-    expect(bodyOf(scenarios.script, 'runScenario')).toContain('execute(scenario.steps)')
+    expect(bodyOf(scenarios.script, 'runScenario')).toContain('execute(scenario.steps, {')
   })
 
   it('导出前检测明文：有明文时先问，确认了才保存', () => {
@@ -766,6 +768,49 @@ describe('页面的结构', () => {
     expect(bodyOf(scenarios.script, 'edit')).toContain('presetId.value = undefined')
     const area = withTag(scenarios.elements, 'UTextarea')
     expect(handler(area, 'update:model-value')).toBe('(v) => edit(String(v))')
+  })
+})
+
+describe('真实模式中途作废的运行', () => {
+  const abandoned = sfc(benchAbandoned)
+
+  it('调用台与场景都走 execute，说明这次运行是什么', () => {
+    expect(bodyOf(sfc(benchCalls).script, 'run')).toContain('call([built.step], target.value.id)')
+    const scenario = bodyOf(sfc(benchScenariosView).script, 'runScenario')
+    expect(scenario).toContain('label: scenario.title')
+    expect(scenario).toContain('view: scenarioView(scenario)')
+    expect(bodyOf(useBench, 'call')).toContain("{ label, view: 'call' }")
+  })
+
+  it('警告放在分页外面：这把 Key 没了、分页隐藏时也看得到', () => {
+    const page = sfc(benchPage)
+    const warning = withTag(page.elements, 'BenchAbandoned')
+    const tabs = must(
+      page.elements.find((el) => el.children?.includes(withTag(page.elements, 'UTabs'))),
+      '分页的上一层',
+    )
+    expect(walk(tabs)).not.toContain(warning)
+    expect(page.elements.find((el) => el.children?.includes(tabs))?.children).toContain(warning)
+  })
+
+  it('每一条有说明，能关掉；有结果就列出每一步，按真实模式说', () => {
+    const run = withFor(abandoned.elements, 'run in abandoned')
+    const alert = withTag(walk(run), 'UAlert')
+    expect(bound(alert, 'title')).toBe('run.title')
+    expect(bound(alert, 'description')).toBe('run.description')
+    expect(alert.props?.some((p) => p.name === 'close')).toBe(true)
+    expect(handler(alert, 'update:open')).toBe('(v) => !v && dismissAbandoned(run.id)')
+    const steps = withFor(walk(run), 'step in run.result.steps')
+    expect(steps.tag).toBe('BenchStepView')
+    expect(steps.props?.find((p) => p.name === 'mode')?.value?.content).toBe('real')
+    expect(bound(steps, 'view')).toBe('run.view')
+    expect(shownIn(withIf(walk(run), 'run.result'))).toContain('run.result.run')
+  })
+
+  it('请求还没回来的时候也说一声', () => {
+    const alert = withIf(abandoned.elements, 'abandonedInFlight')
+    expect(alert.tag).toBe('UAlert')
+    expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain('可能正在写入')
   })
 })
 

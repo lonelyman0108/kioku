@@ -149,7 +149,7 @@ async function run() {
     return
   }
   formError.value = null
-  const outcome = await call([built.step])
+  const outcome = await call([built.step], target.value.id)
   if (outcome.kind === 'done') shownId.value = null
   else if (outcome.kind === 'failed') failure.value = outcome.message
 }

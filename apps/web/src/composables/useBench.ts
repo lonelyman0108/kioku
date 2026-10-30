@@ -17,7 +17,9 @@ import { useRoute, useRouter, type RouteLocationNormalizedLoaded } from 'vue-rou
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { contextDefaults, contextOf } from '../benchForm'
+import type { StepView } from '../benchResult'
 import {
+  abandonedRun,
   acceptDivergence,
   emptySession,
   ownedApps,
@@ -27,6 +29,7 @@ import {
   runFailureMessage,
   selectionFix,
   usableKeys,
+  type AbandonedRun,
 } from '../benchSession'
 import { useSession } from './useSession'
 
@@ -39,7 +42,8 @@ const selectionOf = (route: RouteLocationNormalizedLoaded) => ({
   key: param(route.query.key),
 })
 
-// 一次运行的结果。stale：运行期间换了应用、Key 或模式，结果作废；或者上一次还没结束，这次没有发出去
+// 一次运行的结果。stale：运行期间换了应用、Key 或模式，结果作废（真实模式下记进 abandoned）；
+// 或者上一次还没结束，这次没有发出去
 export type RunOutcome =
   { kind: 'done'; result: BenchRunResult } | { kind: 'failed'; message: string } | { kind: 'stale' }
 
@@ -155,38 +159,76 @@ export function createBench() {
     generation.value++
   })
 
-  async function execute(steps: BenchStep[], replay: BenchReplayStep[] = []): Promise<RunOutcome> {
+  // 真实模式的请求有几个还没回来，包括中途作废的
+  const realInFlight = ref(0)
+  // 中途作废、还没回来的：现在可能正在写入
+  const abandonedInFlight = computed(
+    () => realInFlight.value > (real.value && running.value ? 1 : 0),
+  )
+  // 中途作废的真实运行。不随换应用、Key 或模式清掉：作废就是因为这些变了，用户看过之后自己关
+  const abandoned = shallowRef<AbandonedRun[]>([])
+  function dismissAbandoned(id: number) {
+    abandoned.value = abandoned.value.filter((run) => run.id !== id)
+  }
+
+  // what：这次运行是什么、结果按什么看法显示，中途作废时靠它说明
+  async function execute(
+    steps: BenchStep[],
+    what: { label: string; view: StepView },
+    replay: BenchReplayStep[] = [],
+  ): Promise<RunOutcome> {
     const forSpace = spaceId.value
-    const forApp = appId.value
-    const forKey = keyId.value
+    const forApp = app.value
+    const forKey = key.value
     const forMode = mode.value
     if (running.value || !forApp || !forKey) return { kind: 'stale' }
     const id = ++counter
     current.value = id
+    if (forMode === 'real') realInFlight.value++
+    // 回滚模式作废了就丢掉：什么都没留下。真实模式下写入可能已经落库，要说出来，有结果就显示
+    const staleOutcome = (settled: { result: BenchRunResult } | { error: unknown }): RunOutcome => {
+      const run =
+        forMode === 'real'
+          ? abandonedRun({ id, ...what, app: forApp.name, key: forKey.name }, settled)
+          : null
+      if (run) abandoned.value = [...abandoned.value, run]
+      return { kind: 'stale' }
+    }
     try {
-      const result = await api.benchRun(forSpace, forApp, forKey, { mode: forMode, steps, replay })
-      return current.value === id ? { kind: 'done', result } : { kind: 'stale' }
+      const result = await api.benchRun(forSpace, forApp.id, forKey.id, {
+        mode: forMode,
+        steps,
+        replay,
+      })
+      return current.value === id ? { kind: 'done', result } : staleOutcome({ result })
     } catch (err) {
       // 应用转给了别人、Key 刚被吊销：重新读一遍，选择跟着变
       if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
         void queryClient.invalidateQueries({ queryKey: ['apps', forSpace] })
-        void queryClient.invalidateQueries({ queryKey: ['keys', forSpace, forApp] })
+        void queryClient.invalidateQueries({ queryKey: ['keys', forSpace, forApp.id] })
       }
       return current.value === id
         ? { kind: 'failed', message: runFailureMessage(err, forMode) }
-        : { kind: 'stale' }
+        : staleOutcome({ error: err })
     } finally {
       if (current.value === id) current.value = null
-      // 真实模式写了数据（出错也可能写了一部分）：记忆、活动、对象、凭据的缓存都不算数了
-      if (forMode === 'real') void queryClient.invalidateQueries()
+      if (forMode === 'real') {
+        realInFlight.value--
+        // 真实模式写了数据（出错也可能写了一部分）：记忆、活动、对象、凭据的缓存都不算数了
+        void queryClient.invalidateQueries()
+      }
     }
   }
 
   // 连续调用：带上这次会话已经做过的写步骤，结果记进时间线与重放日志
-  async function call(steps: BenchStep[]): Promise<RunOutcome> {
+  async function call(steps: BenchStep[], label: string): Promise<RunOutcome> {
     const blocked = runBlocker(session.value, mode.value)
     if (blocked) return { kind: 'failed', message: blocked }
-    const outcome = await execute(steps, replayFor(session.value, mode.value))
+    const outcome = await execute(
+      steps,
+      { label, view: 'call' },
+      replayFor(session.value, mode.value),
+    )
     if (outcome.kind === 'done') session.value = recordRun(session.value, outcome.result)
     return outcome
   }
@@ -224,6 +266,9 @@ export function createBench() {
     running,
     generation,
     execute,
+    abandoned,
+    abandonedInFlight,
+    dismissAbandoned,
     session,
     call,
     clearSession,
