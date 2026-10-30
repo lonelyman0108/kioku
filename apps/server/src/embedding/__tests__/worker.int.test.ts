@@ -568,6 +568,42 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     expect(embedder.calls).toEqual([[expect.stringContaining('一条')]])
   })
 
+  it('写入之后的向量任务一批里也只按 EMBEDDABLE 生成：过期的不请求、留下的向量删掉，抽取的记忆不生成', async () => {
+    const embedder = fakeEmbedder()
+    const live = await insertCurated(ws.spaceId, 'live', '有效的一条')
+    const lapsed = await insertCurated(ws.spaceId, 'lapsed', '过期的一条')
+    // 过期之前生成过向量；之后到期，没有写入
+    expect(await embedMemories(database.db, embedder, ws.spaceId, [lapsed])).toBe(1)
+    const [episode] = await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 60_000) })
+        .where(eq(memories.id, lapsed))
+      return tx
+        .insert(memories)
+        .values({
+          spaceId: ws.spaceId,
+          form: 'extracted',
+          layer: 'episode',
+          sensitivity: 'private',
+          provenance: 'owner',
+          content: '一段会话摘要',
+          expiresAt: new Date(Date.now() + 86_400_000),
+        })
+        .returning({ id: memories.id })
+    })
+    embedder.calls.length = 0
+    const targets = [live, lapsed, episode!.id].map((memoryId) => ({
+      spaceId: ws.spaceId,
+      memoryId,
+    }))
+    expect(
+      (await embedJobs(database.db, staticEmbedderSource(embedder), targets, noRetry)).size,
+    ).toBe(0)
+    expect(embedder.calls).toEqual([[expect.stringContaining('有效的一条')]])
+    expect(await embeddedIds()).toEqual([live])
+  })
+
   // 每次请求要等 state.ms 毫秒才回；signal 断开时马上放弃。aborted 数被取消的请求
   const slowEmbedder = (ms: number) => {
     const vectors = fakeEmbedder()

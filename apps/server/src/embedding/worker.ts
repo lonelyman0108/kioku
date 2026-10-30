@@ -157,7 +157,8 @@ async function syncRows(
   // 不碰它们的向量行，免得两边在向量行的锁上互相等待；留下的等下一次处理或换模型之后的清理
   const otherModels = (locked: string[], keep: string[]) =>
     and(inArray(memoryEmbeddings.memoryId, locked), notInArray(memoryEmbeddings.model, keep))
-  // 没有要写的也没有要删的：只剩换模型后的旧向量清理。只锁真有别的模型的向量的那几条，大多数时候一条都没有
+  // 没有要写的也没有要删的：只剩换模型后的旧向量清理。只锁真有别的模型的向量的那几条，大多数时候一条都没有。
+  // 和写回时一样只删向量、不改记忆这一行，锁用 FOR NO KEY UPDATE（见下面写回的那一段）
   if (!pending.length && !stale.length) {
     await withSpace(db, spaceId, async (tx) => {
       const keep = await keptModels(tx, embedder)
@@ -170,7 +171,7 @@ async function syncRows(
             sql`exists (select 1 from ${memoryEmbeddings} where ${memoryEmbeddings.memoryId} = ${memories.id} and ${notInArray(memoryEmbeddings.model, keep)})`,
           ),
         )
-        .for('update', { skipLocked: true })
+        .for('no key update', { skipLocked: true })
       if (locked.length) {
         await tx.delete(memoryEmbeddings).where(
           otherModels(
