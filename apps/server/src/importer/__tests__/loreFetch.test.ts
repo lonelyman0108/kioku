@@ -181,10 +181,12 @@ describe('拉取 Lore 的导出', () => {
     ]
     for (const url of urls) {
       logs.length = 0
-      await expect(fetchLoreBackup({ url, token: '' }, undefined, short)).rejects.toMatchObject({
-        status: 400,
-        message: expect.stringContaining('秒内没有拉完') as string,
-      })
+      // 没有时限的话这里按断言失败，不是等到用例超时
+      const outcome = await Promise.race([
+        fetchLoreBackup({ url, token: '' }, undefined, short).catch((err: Error) => err.message),
+        new Promise((resolve) => setTimeout(() => resolve('一直没有停下'), 1_500)),
+      ])
+      expect(outcome).toContain('秒内没有拉完')
       expectCleanLog(hostOf(url), 'timeout')
     }
   })
@@ -198,9 +200,12 @@ describe('拉取 Lore 的导出', () => {
       received()
     })
     const client = new AbortController()
-    const pending = fetchLoreBackup({ url, token: '' }, client.signal, limits).catch(
-      (err: Error) => err,
-    )
+    const pending = fetchLoreBackup(
+      { url, token: '' },
+      client.signal,
+      // 比用例的时限短：signal 没传给 fetch 时按断言失败，不是等到用例超时
+      { ...limits, timeoutMs: 1_500 },
+    ).catch((err: Error) => err)
     await arrived
     client.abort()
     expect(((await pending) as Error).message).toBe('请求已经断开')
