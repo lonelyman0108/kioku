@@ -6,7 +6,9 @@ import {
   type LorePlanNode,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
+import { parse } from 'vue/compiler-sfc'
 
+import loreImportSource from '../components/LoreImport.vue?raw'
 import {
   excludeLabel,
   importProblems,
@@ -208,6 +210,63 @@ describe('勾选', () => {
     expect(secretSelectable(mixed)).toBe(true)
     expect(excludeLabel(mixed)).toBe('不导入')
     expect(excludeLabel(planNode('n'))).toBe('不导入')
+  })
+})
+
+describe('写入只来自点确认导入', () => {
+  // 模板解析出来的节点：看标签、属性与事件，不依赖排版。没有组件测试的环境，所以看模板本身
+  interface TemplateNode {
+    type: number
+    tag?: string
+    content?: string
+    children?: TemplateNode[]
+    props?: {
+      name: string
+      value?: { content: string }
+      arg?: { content: string }
+      exp?: { content: string }
+    }[]
+  }
+  const ELEMENT = 1
+  const TEXT = 2
+  const walk = (node: TemplateNode): TemplateNode[] => [
+    node,
+    ...(node.children ?? []).flatMap(walk),
+  ]
+  const { descriptor } = parse(loreImportSource)
+  const root = descriptor.template!.ast as unknown as TemplateNode
+  const elements = walk(root).filter((n) => n.type === ELEMENT)
+  const handler = (el: TemplateNode, event: string) =>
+    el.props?.find((p) => p.name === 'on' && p.arg?.content === event)?.exp?.content
+  const staticType = (el: TemplateNode) => el.props?.find((p) => p.name === 'type')?.value?.content
+  const buttonOf = (label: string) =>
+    elements.find(
+      (el) =>
+        el.tag === 'UButton' &&
+        walk(el).some((n) => n.type === TEXT && n.content?.trim() === label),
+    )!
+
+  it('确认导入不是提交按钮：不然回车的隐式提交会点它', () => {
+    const confirm = buttonOf('确认导入')
+    expect(handler(confirm, 'click')).toBe('applyPlan')
+    expect(staticType(confirm)).not.toBe('submit')
+    // 计划显示时表单里没有提交按钮，只有看计划这一个
+    expect(elements.filter((el) => staticType(el) === 'submit')).toEqual([buttonOf('看计划')])
+  })
+
+  it('表单的提交不执行，模板里只有确认导入一处执行', () => {
+    const form = elements.find((el) => el.tag === 'form')!
+    expect(handler(form, 'submit')).toBe('onSubmit')
+    const applying = elements.filter((el) =>
+      el.props?.some((p) => p.exp?.content.includes('applyPlan')),
+    )
+    expect(applying).toEqual([buttonOf('确认导入')])
+    // 提交的处理函数只看计划，脚本里也没有别的地方调用执行
+    const script = descriptor.scriptSetup!.content
+    const onSubmit = /function onSubmit\(\) \{[^}]*\}/.exec(script)![0]
+    expect(onSubmit).toContain('replan')
+    expect(onSubmit).not.toContain('applyPlan')
+    expect(script.match(/applyPlan/g)).toEqual(['applyPlan'])
   })
 })
 

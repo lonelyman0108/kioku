@@ -160,6 +160,12 @@ function failureNotice(err: unknown): string {
   return `${message}。${partly}已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`
 }
 
+// 表单的提交（包括在输入框里按回车的隐式提交）只用来看计划。计划显示之后什么都不做：写入只来自点「确认导入」，
+// 不然没看完、没勾 secret 的节点就按明文写进去了
+function onSubmit() {
+  if (!plan.value) void replan()
+}
+
 async function applyPlan() {
   const seen = plan.value
   if (!seen || !ready.value || (seen.staleSince && !confirmStale.value)) return
@@ -397,7 +403,7 @@ const disclosureCut = computed(
       </div>
     </div>
 
-    <form v-else class="space-y-4" @submit.prevent="plan ? applyPlan() : showPlan()">
+    <form v-else class="space-y-4" @submit.prevent="onSubmit">
       <UTabs
         v-if="isAdmin"
         v-model="sourceKind"
@@ -683,10 +689,10 @@ const disclosureCut = computed(
             重看计划
           </UButton>
           <UButton
-            type="submit"
             :icon="icons.importSpace"
             :loading="busy"
             :disabled="!ready || (Boolean(plan.staleSince) && !confirmStale)"
+            @click="applyPlan"
           >
             确认导入
           </UButton>
