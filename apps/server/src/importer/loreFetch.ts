@@ -6,7 +6,7 @@ import { MemoryError } from '../memory/service'
 // 这是服务端向任意地址发请求，只给实例管理员（路由里查）
 
 // 完整导出的上限，和上传的（裁剪之后的）分开：这里读的是全量，读完解析之后立刻丢弃
-export const LORE_FETCH_MAX_BYTES = 128 * 1024 * 1024
+const LORE_FETCH_MAX_BYTES = 128 * 1024 * 1024
 const LORE_FETCH_TIMEOUT_MS = 120_000
 
 export interface LoreFetchLimits {

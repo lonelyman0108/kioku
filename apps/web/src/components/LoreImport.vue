@@ -99,7 +99,7 @@ watch(
 )
 
 const tooLarge = computed(() => (file.value ? file.value.size > LORE_FILE_MAX_BYTES : false))
-const clearToken = computed(() => sourceKind.value === 'url' && tokenInClear(url.value))
+const tokenExposed = computed(() => sourceKind.value === 'url' && tokenInClear(url.value))
 const personaProblem = computed(() =>
   Slug.safeParse(personaSlug.value).success ? null : '只用小写字母、数字和连字符',
 )
@@ -403,6 +403,9 @@ const disclosureCut = computed(
         size="sm"
         class="w-full"
       />
+      <p v-else class="text-xs text-muted">
+        从地址拉取要实例管理员：服务端要向那个地址发请求。这里只能上传导出文件。
+      </p>
       <UFormField
         v-if="sourceKind === 'file'"
         label="Lore 的导出文件"
@@ -444,7 +447,7 @@ const disclosureCut = computed(
           />
         </UFormField>
         <UAlert
-          v-if="clearToken"
+          v-if="tokenExposed"
           color="warning"
           variant="subtle"
           title="这个地址是 http，又不是内网：Token 会明文传输，而它能清空整个 Lore。尽量换成 https"
@@ -625,7 +628,7 @@ const disclosureCut = computed(
         <details v-if="plan.skipped.length" class="text-sm">
           <summary class="cursor-pointer font-medium">不导入（{{ plan.skipped.length }}）</summary>
           <ul class="mt-1 space-y-1 text-xs break-all text-muted">
-            <li v-for="s in plan.skipped" :key="`${s.source}-${s.reason}`">
+            <li v-for="(s, i) in plan.skipped" :key="i">
               <code>{{ s.source }}</code
               >：{{ s.reason }}
             </li>
@@ -636,7 +639,7 @@ const disclosureCut = computed(
             丢弃的关键词（{{ plan.droppedKeywords.length }}）
           </summary>
           <ul class="mt-1 space-y-1 text-xs break-all text-muted">
-            <li v-for="k in plan.droppedKeywords" :key="`${k.source}-${k.keyword}`">
+            <li v-for="(k, i) in plan.droppedKeywords" :key="i">
               <code>{{ k.source }}</code
               >「{{ k.keyword }}」：{{ k.reason }}
             </li>
@@ -652,7 +655,7 @@ const disclosureCut = computed(
           <details v-for="group in sync.groups" :key="group.state" :open="group.state === 'update'">
             <summary class="cursor-pointer">{{ group.title }}（{{ group.lines.length }}）</summary>
             <ul class="mt-1 space-y-1 text-xs break-all text-muted">
-              <li v-for="line in group.lines" :key="line">{{ line }}</li>
+              <li v-for="(line, i) in group.lines" :key="i">{{ line }}</li>
             </ul>
           </details>
         </section>
