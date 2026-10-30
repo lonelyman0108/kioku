@@ -4,6 +4,7 @@ import type { SpaceImportCounts, SpaceImportPreview, SpaceImportResult } from '@
 import { sql } from 'drizzle-orm'
 import type { z } from 'zod'
 
+import { lapsed } from '../access/access'
 import { placeholderIdentifiers } from '../credential/placeholders'
 import { sealCredentialValues } from '../credential/service'
 import type { MasterKey } from '../crypto/keyring'
@@ -174,8 +175,8 @@ function distinct<T extends { line: number }>(
 const PER_MEMBER_LAYERS = new Set(['owner', 'private'])
 
 // 文件里的互相指认要对得上，URI 不能冲突，层与归属要一致：写库之前查一遍，出错时说清是哪一行，
-// 不等写到一半被数据库的约束拦下
-export function checkSpaceExport(x: ParsedSpaceExport): void {
+// 不等写到一半被数据库的约束拦下。now 是数据库的时间（见 databaseNow），判断记忆过期没有和触发器用同一个钟
+export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
   const personaById = byId(x.personas, '人格')
   distinct(x.personas, (p) => p.slug, '人格的标识')
   for (const p of x.personas) {
@@ -229,11 +230,10 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
   byId(x.memories, '记忆')
   // URI 的规则和数据库一样：同一归属里不重复，已过期的也算（唯一索引）；共享的与个人的（导入后都是导入人的）
   // 不共存，只看现在还有效的（URI 互斥的触发器：已失效或过期的记录不挡别人）。导出带着已过期的记忆，
-  // 共享节点过期之后同一个 URI 上又有了个人节点，这样的两条一起导出、一起导入
-  const now = Date.now()
+  // 共享节点过期之后同一个 URI 上又有了个人节点，这样的两条一起导出、一起导入。
+  // 写库的事务比这里晚开始，那时过期的只会更多，这里通过了触发器也不会拦
   const live = (m: MemoryRecord) =>
-    (m.validTo === null || Date.parse(m.validTo) > now) &&
-    (m.expiresAt === null || Date.parse(m.expiresAt) > now)
+    !lapsed({ validTo: optionalTime(m.validTo), expiresAt: optionalTime(m.expiresAt) }, now)
   const shared = new Set<string>()
   const mine = new Set<string>()
   const liveShared = new Set<string>()
@@ -321,7 +321,14 @@ export interface InspectSpaceOptions {
 }
 
 // 解开文件、按导入时的规则核对一遍，不写库：返回解开的内容
+// 数据库的现在。URI 互斥的触发器按数据库的 now() 判断记录过期没有，导入前核对时用同一个钟，不用应用的时间
+async function databaseNow(db: Db): Promise<Date> {
+  const [row] = await db.execute<{ now: Date | string }>(sql`select now() as now`)
+  return new Date(row!.now)
+}
+
 async function openAndCheck(
+  db: Db,
   masterKey: MasterKey | null,
   options: InspectSpaceOptions,
 ): Promise<ParsedSpaceExport> {
@@ -330,7 +337,7 @@ async function openAndCheck(
     maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
   })
   const x = parseSpaceExport(plain)
-  checkSpaceExport(x)
+  checkSpaceExport(x, await databaseNow(db))
   requireMasterKey(x, masterKey)
   return x
 }
@@ -338,10 +345,11 @@ async function openAndCheck(
 // 导入之前先看：文件是谁导出的、从哪个空间、有多少，导入后哪些归你。导入会遇到的问题（口令不对、文件被改过、
 // 内容对不上、没配主密钥）这一步就报出来
 export async function inspectSpaceImport(
+  db: Db,
   masterKey: MasterKey | null,
   options: InspectSpaceOptions,
 ): Promise<SpaceImportPreview> {
-  const x = await openAndCheck(masterKey, options)
+  const x = await openAndCheck(db, masterKey, options)
   return {
     exporter: x.header.exporter,
     spaceName: x.header.space.name,
@@ -362,7 +370,7 @@ export async function importSpace(
   masterKey: MasterKey | null,
   options: ImportSpaceOptions,
 ): Promise<SpaceImportResult> {
-  const x = await openAndCheck(masterKey, options)
+  const x = await openAndCheck(db, masterKey, options)
   const name = options.name?.trim() || x.header.space.name
   // 新空间的 id 先定下来：整个导入在 withSpace 里，内容表按这个空间过滤
   const spaceId = randomUUID()

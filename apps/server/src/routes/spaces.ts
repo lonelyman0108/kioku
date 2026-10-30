@@ -1,3 +1,4 @@
+import type { HttpBindings } from '@hono/node-server'
 import { createRoute, z } from '@hono/zod-openapi'
 import {
   DomainLayers,
@@ -160,29 +161,36 @@ function importRoute(deps: Deps) {
   })
 }
 
-// 导出的文件做好之后最多等这么久发完。客户端不断开、却一直不读响应时，node 与 @hono/node-server 都没有发送的时限，
-// 名额会一直占到连接关闭，别的导出导入只能排着；到了时限就中止响应、放掉名额。文件最大 32 MiB，
-// 十分钟发完只要每秒 55 KB 左右，管理界面拿到响应就整个读出来，正常的下载用不了这么久
-const EXPORT_SEND_TIMEOUT_MS = 10 * 60_000
+// 导出的文件发送的时限。客户端不断开、却一直不读响应时，node 与 @hono/node-server 都没有发送的时限，
+// 名额会一直占到连接关闭，别的导出导入只能排着：
+// - 空闲：这么久没有进度（客户端没有读走下一块）就断开、放掉名额。慢网络上正常在读的下载每读一块重新计时，不会被掐断；
+// - 总时限：一直在读、但慢到这么久还没发完的也断开（文件最大 32 MiB，一小时发不完是每秒不到 10 KB），宽一些
+const EXPORT_SEND_IDLE_MS = 2 * 60_000
+const EXPORT_SEND_TOTAL_MS = 60 * 60_000
 
 // 整个导出占一个名额：文件攒在内存里，要等发给浏览器之后才释放。名额只在 settle 里放、只放一次，放的时候移除断开的监听
 // 与发送时限；哪种情况先到都走它：导出出错或停下、文件发完、发送途中响应流被取消、文件做好之后客户端断开、
-// 到了发送时限（先中止响应）。导出期间不靠断开的监听放：客户端断开时 exportSpace 在下一个检查点自己停下，停下之后才放，
+// 到了发送时限（先断开连接）。导出期间不靠断开的监听放：客户端断开时 exportSpace 在下一个检查点自己停下，停下之后才放，
 // 名额不会在它还在派生、读库时就让给别人。文件做好之后、开始发之前就断开的，node 的服务端既不读这个响应流、
-// 也不取消它，只能在断开时放
+// 也不取消它，只能在断开时放。
+// 到了时限直接断开这个请求的连接（disconnect），客户端只看到连接断了：不让响应流出错，否则 @hono/node-server 会往
+// 发了一半的文件后面写一段错误文本、再打一段调用栈。拿不到底层连接时（进程内调用 app.request）才让响应流出错
 async function exportHoldingSlot(
   accountId: string,
   signal: AbortSignal,
-  sendTimeoutMs: number,
+  limits: { idleMs: number; totalMs: number },
+  disconnect: () => boolean,
   run: () => Promise<SpaceExport>,
 ): Promise<{ exported: SpaceExport; body: ReadableStream<Uint8Array> }> {
   const release = await acquireTransferSlot(accountId, signal)
   let settled = false
-  let deadline: NodeJS.Timeout | undefined
+  let idle: NodeJS.Timeout | undefined
+  let total: NodeJS.Timeout | undefined
   const settle = () => {
     if (settled) return
     settled = true
-    clearTimeout(deadline)
+    clearTimeout(idle)
+    clearTimeout(total)
     signal.removeEventListener('abort', settle)
     release()
   }
@@ -193,17 +201,25 @@ async function exportHoldingSlot(
     settle()
     throw err
   }
-  const body = fileBody(exported.file, settle)
+  const body = fileBody(exported.file, settle, () => progressed())
+  // 每读走一块重新计空闲时限。两个时限都只是兜底，unref 不让进程为它们留着
+  function progressed() {
+    if (settled) return
+    clearTimeout(idle)
+    idle = setTimeout(() => stop('发送时太久没有进度'), limits.idleMs).unref()
+  }
+  function stop(why: string) {
+    if (settled) return
+    console.warn(`导出的文件${why}，断开连接、放掉名额`)
+    if (!disconnect()) body.abort(new Error(`导出的文件${why}，中止发送`))
+    settle()
+  }
   if (signal.aborted) {
     settle()
   } else {
     signal.addEventListener('abort', settle, { once: true })
-    deadline = setTimeout(
-      () => body.abort(new Error('导出的文件过了发送时限还没发完，中止发送')),
-      sendTimeoutMs,
-    )
-    // 只是个时限，不让进程为它留着
-    deadline.unref()
+    progressed()
+    total = setTimeout(() => stop('过了发送的总时限还没发完'), limits.totalMs).unref()
   }
   return { exported, body: body.stream }
 }
@@ -213,10 +229,11 @@ const CHUNK = 64 * 1024
 
 // 响应流：文件分块交出去，读一块才给下一块（不预先排一块），读完或者被取消时调 done，所以文件真的发出去了才算发完。
 // 一次交出整个文件的话，node 的服务端拿到就整个收进连接的写缓冲，马上算发完、放掉名额，客户端不读时文件却一直在内存里。
-// abort 让响应流出错（@hono/node-server 随之断开这个连接），也调 done
+// 每次被读（pull）调 progressed；abort 让响应流出错，也调 done
 function fileBody(
   file: Uint8Array,
   done: () => void,
+  progressed: () => void,
 ): { stream: ReadableStream<Uint8Array>; abort: (reason: Error) => void } {
   let at = 0
   let controller!: ReadableStreamDefaultController<Uint8Array>
@@ -226,6 +243,7 @@ function fileBody(
         controller = c
       },
       pull(c) {
+        progressed()
         if (at < file.length) {
           c.enqueue(file.subarray(at, at + CHUNK))
           at += CHUNK
@@ -268,14 +286,29 @@ export function spaceRoutes(deps: Deps) {
       // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
       if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
       const signal = c.req.raw.signal
-      const sendTimeoutMs = deps.exportSendTimeoutMs ?? EXPORT_SEND_TIMEOUT_MS
-      const { exported, body } = await exportHoldingSlot(accountId, signal, sendTimeoutMs, () =>
-        exportSpace(deps.db, deps.masterKey, {
-          spaceId,
-          accountId,
-          passphrase: c.req.valid('json').passphrase,
-          signal,
-        }),
+      const limits = deps.exportSendLimits ?? {
+        idleMs: EXPORT_SEND_IDLE_MS,
+        totalMs: EXPORT_SEND_TOTAL_MS,
+      }
+      // @hono/node-server 把底层的请求与响应放在 env 里，断开连接要用；进程内调用 app.request 时没有
+      const outgoing = (c.env as Partial<HttpBindings> | undefined)?.outgoing
+      const disconnect = () => {
+        if (!outgoing) return false
+        outgoing.destroy()
+        return true
+      }
+      const { exported, body } = await exportHoldingSlot(
+        accountId,
+        signal,
+        limits,
+        disconnect,
+        () =>
+          exportSpace(deps.db, deps.masterKey, {
+            spaceId,
+            accountId,
+            passphrase: c.req.valid('json').passphrase,
+            signal,
+          }),
       )
       return c.body(body, 200, {
         'content-type': 'application/octet-stream',
@@ -291,7 +324,7 @@ export function spaceRoutes(deps: Deps) {
         c.get('console').accountId,
         c.req.raw.signal,
         async () =>
-          inspectSpaceImport(deps.masterKey, {
+          inspectSpaceImport(deps.db, deps.masterKey, {
             file: Buffer.from(await form.file.arrayBuffer()),
             passphrase: form.passphrase,
           }),

@@ -37,6 +37,7 @@ import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, FULL_SCOPES, jsonRequest } from '../../testing/fixtures'
+import { exportableMemories } from '../spaceExport'
 import { deriveExportKey, openSpaceExport, sealSpaceExport, type KdfParams } from '../spaceFormat'
 import { parseSpaceExport, type ParsedSpaceExport } from '../spaceImport'
 import { acquireTransferSlot, queuedTransfers } from '../transferGate'
@@ -1266,6 +1267,98 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(await spaceCount()).toBe(before)
   })
 
+  it('导入前核对 URI 的互斥按数据库的时间：应用的时钟走快了，也不把还有效的共享节点当成过期的', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const before = await spaceCount()
+    // 共享节点一小时后才过期，同一个 URI 上又有个人节点：现在两条都有效，不能一起导入
+    const inAnHour = new Date(Date.now() + 3_600_000).toISOString()
+    const file = await craft([
+      curated('core://clock', { layer: 'base', sensitivity: 'public', validTo: inAnHour }),
+      curated('core://clock'),
+    ])
+    // 应用的时钟快了两小时，数据库的没变：按应用的时间核对，会以为共享节点已经过期
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2 * 3_600_000 })
+    try {
+      for (const request of [inspectRequest, importRequest]) {
+        const res = await request(source, alice.cookie, file)
+        expect(res.status, await res.clone().text()).toBe(400)
+        expect(((await res.json()) as { error: string }).error).toContain(
+          '既有有效的共享记忆，又有有效的个人记忆',
+        )
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(await spaceCount()).toBe(before)
+  })
+
+  it('导出挑记忆的条件：管理读取之外，去掉已删除的（含过期后让出 URI 的）与到期的会话摘要', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
+    const spaceId = alice.spaceId
+    const persona = await alice.createPersona('helper')
+    const past = new Date(Date.now() - 3_600_000)
+    const future = new Date(Date.now() + 3_600_000)
+    const labels = new Map<string, string>()
+    const insert = async (label: string, values: Partial<typeof memories.$inferInsert>) => {
+      const [row] = await withSpace(database.db, spaceId, (tx) =>
+        tx
+          .insert(memories)
+          .values({
+            spaceId,
+            form: 'curated',
+            layer: 'private',
+            sensitivity: 'private',
+            provenance: 'owner',
+            ownerAccountId: alice.accountId,
+            domain: 'home',
+            path: label,
+            content: label,
+            ...values,
+          })
+          .returning({ id: memories.id }),
+      )
+      labels.set(row!.id, label)
+    }
+    const episode = { form: 'extracted' as const, layer: 'episode' as const, ownerAccountId: null }
+    const noUri = { domain: null, path: null }
+    await insert('live', {})
+    await insert('expired', { validTo: past })
+    await insert('deleted', { deletedAt: past })
+    await insert('released', { validTo: past, deletedAt: new Date() })
+    await insert('shared', { layer: 'base', ownerAccountId: null })
+    await insert('persona', {
+      layer: 'persona',
+      ownerAccountId: null,
+      personaId: persona.id,
+      domain: 'persona',
+      path: 'helper/soul',
+    })
+    await insert('secret', {
+      sensitivity: 'secret',
+      content: null,
+      ciphertext: randomBytes(32),
+      wrappedKey: randomBytes(32),
+    })
+    await insert('bob', { ownerAccountId: bob.accountId })
+    await insert('bob-expired', { ownerAccountId: bob.accountId, validTo: past })
+    await insert('summary', { ...episode, ...noUri, content: '没到期的摘要', expiresAt: future })
+    await insert('summary-stale', {
+      ...episode,
+      ...noUri,
+      content: '被标成过时、还没到期的摘要',
+      expiresAt: future,
+      validTo: past,
+    })
+    await insert('summary-lapsed', { ...episode, ...noUri, content: '到期的摘要', expiresAt: past })
+    const picked = await withSpace(database.db, spaceId, (tx) =>
+      tx.select({ id: memories.id }).from(memories).where(exportableMemories(alice.accountId)),
+    )
+    expect(picked.map((r) => labels.get(r.id)).sort()).toEqual(
+      ['live', 'expired', 'shared', 'persona', 'secret', 'summary', 'summary-stale'].sort(),
+    )
+  })
+
   it('写文件里来的值时数据库拒绝（值超出范围、违反约束）算文件的问题，说清是哪几行；派生的出错照常 500，都记日志', async () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()
@@ -1852,28 +1945,34 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     await slotFree()
   })
 
-  it('文件做好之后一直不读、也不断开：到了发送时限中止响应、放掉名额，下一个导出照常', async () => {
+  it('文件做好之后一直不读、也不断开：空闲到了时限中止响应、放掉名额，记一行日志，下一个导出照常', async () => {
     const quick = createApp({
       db: database.db,
       cookieSecure: false,
       masterKey: sourceKey,
       embedder: staticEmbedderSource(null),
       jobs,
-      exportSendTimeoutMs: 300,
+      exportSendLimits: { idleMs: 300, totalMs: 60_000 },
     })
-    const alice = await bootstrap(quick, 'alice')
-    const stalled = await exportRequest(quick, alice.spaceId, alice.cookie)
-    expect(stalled.status).toBe(200)
-    // 响应没人读：名额占着，别人来要排队
-    const probe = acquireTransferSlot('probe')
-    expect(queuedTransfers()).toBe(1)
-    // 到了时限：名额交给排着的那个；这个响应被中止，再也读不出来
-    ;(await within(probe))()
-    await expect(stalled.arrayBuffer()).rejects.toThrow('过了发送时限')
-    // 下一个导出照常进来；读得及时，时限碍不着它
-    const file = await exportSpace(quick, alice.spaceId, alice.cookie)
-    expect((await contents(file)).header.exporter.displayName).toBe('alice')
-    await slotFree()
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const alice = await bootstrap(quick, 'alice')
+      const stalled = await exportRequest(quick, alice.spaceId, alice.cookie)
+      expect(stalled.status).toBe(200)
+      // 响应没人读：名额占着，别人来要排队
+      const probe = acquireTransferSlot('probe')
+      expect(queuedTransfers()).toBe(1)
+      // 到了时限：名额交给排着的那个；没有底层连接可断，让这个响应出错，再也读不出来
+      ;(await within(probe))()
+      await expect(stalled.arrayBuffer()).rejects.toThrow('太久没有进度')
+      expect(warned).toHaveBeenCalledTimes(1)
+      // 下一个导出照常进来；读得及时，时限碍不着它
+      const file = await exportSpace(quick, alice.spaceId, alice.cookie)
+      expect((await contents(file)).header.exporter.displayName).toBe('alice')
+      await slotFree()
+    } finally {
+      warned.mockRestore()
+    }
   })
 
   it(
