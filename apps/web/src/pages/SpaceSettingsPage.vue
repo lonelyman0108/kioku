@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import ExtractionBudget from '../components/ExtractionBudget.vue'
+import LoreImport from '../components/LoreImport.vue'
 import MyDreamSettings from '../components/MyDreamSettings.vue'
 import SpaceExport from '../components/SpaceExport.vue'
 import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
@@ -18,7 +19,7 @@ import { layerLabels } from '../labels'
 const route = useRoute()
 const toast = useToast()
 const queryClient = useQueryClient()
-const { space } = useSession()
+const { me, space } = useSession()
 const spaceId = computed(() => String(route.params.spaceId))
 const isOwner = computed(() => space.value?.role === 'owner')
 
@@ -206,6 +207,12 @@ async function save() {
       <MyDreamSettings :space-id="spaceId" />
 
       <SpaceExport :space-id="spaceId" :space-name="space?.name ?? ''" :editable="isOwner" />
+
+      <LoreImport
+        :space-id="spaceId"
+        :editable="isOwner"
+        :is-admin="me.data.value?.isAdmin ?? false"
+      />
     </template>
   </UDashboardPanel>
 </template>

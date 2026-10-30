@@ -1,6 +1,16 @@
 import { describe, expect, it } from 'vitest'
 
-import { planImport, type LoreNode, type LoreSnapshot } from '../lore'
+import {
+  assertExecutable,
+  credentialHints,
+  planFingerprint,
+  planImport,
+  type ImportPlan,
+  type ImportPreview,
+  type LoreNode,
+  type LoreSnapshot,
+  type SyncPlan,
+} from '../lore'
 
 const at = new Date('2026-01-01T00:00:00Z')
 const node = (uri: string, extra: Partial<LoreNode> = {}): LoreNode => ({
@@ -144,9 +154,9 @@ describe('Lore 导入计划', () => {
       { ...options, secretUris: new Set(['infra://keystore']) },
     )
     expect(plan.warnings).toEqual([
-      'core://notes/router 看起来是凭据，没有用 --secret 标记',
-      'infra://nas 的正文里像有密码或 Token，没有用 --secret 标记',
-      'infra://keystore 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文',
+      { uri: 'core://notes/router', kind: 'credentialPath' },
+      { uri: 'infra://nas', kind: 'credentialExtras' },
+      { uri: 'infra://keystore', kind: 'secretExtras' },
     ])
   })
 
@@ -176,10 +186,10 @@ describe('Lore 导入计划', () => {
       undefined,
       undefined,
     ])
-    expect(plan.errors).toEqual(['--secret 指定的 infra://nope 在 Lore 里不存在'])
+    expect(plan.errors).toEqual([{ kind: 'secretNotFound', uri: 'infra://nope' }])
     expect(plan.warnings).toEqual([
-      'infra://keystore/token 看起来是凭据，没有用 --secret 标记',
-      'infra://hypervisor 的正文里像有密码或 Token，没有用 --secret 标记',
+      { uri: 'infra://keystore/token', kind: 'credentialPath' },
+      { uri: 'infra://hypervisor', kind: 'credentialContent' },
     ])
   })
 
@@ -240,9 +250,23 @@ describe('Lore 导入计划', () => {
     expect(plan.skipped).toEqual([
       {
         source: 'projects://notes',
-        reason: expect.stringContaining('格式不对的凭据占位符 {{cred:<标识>#<字段>}}'),
+        reason: '正文里有格式不对的凭据占位符：写到这种写法的说明文字要去掉花括号',
       },
       { source: 'infra://hint', reason: expect.stringContaining('占位符只能写在正文里') },
+    ])
+  })
+
+  it('跳过的原因默认不引用正文；命令行才引用那段格式不对的占位符', () => {
+    const snap = snapshot(
+      node('infra://hint', { content: '说明 {{cred:nas 密码是 hunter2 不要外传' }),
+    )
+    expect(JSON.stringify(planImport(snap, [], options))).not.toContain('hunter2')
+    expect(planImport(snap, [], { ...options, quoteMalformed: true }).skipped).toEqual([
+      {
+        source: 'infra://hint',
+        reason:
+          '正文里有格式不对的凭据占位符 {{cred:nas 密码是 hunter2 不要外传：写到这种写法的说明文字要去掉花括号',
+      },
     ])
   })
 
@@ -281,6 +305,402 @@ describe('Lore 导入计划', () => {
         reason: expect.stringContaining('preferences://router 是 owner 层'),
       },
     ])
+  })
+
+  it('disclosure 超长时截断并提醒；像凭据的路径、正文、disclosure 或关键词分开给出', () => {
+    const plan = planImport(
+      snapshot(node('infra://long', { disclosure: '长'.repeat(501) })),
+      [],
+      options,
+    )
+    expect(plan.warnings).toEqual([{ uri: 'infra://long', kind: 'disclosureTruncated' }])
+    expect(plan.memories[0]!.request.disclosure).toHaveLength(500)
+
+    expect(credentialHints(node('infra://plain'))).toEqual({
+      path: false,
+      content: false,
+      extras: false,
+    })
+    expect(
+      credentialHints(
+        node('infra://notes', { aliases: ['infra://old/token'], keywords: ['token: abcdef'] }),
+      ),
+    ).toEqual({ path: true, content: false, extras: true })
+    expect(credentialHints(node('infra://hv', { content: '密码：hunter2' }))).toEqual({
+      path: false,
+      content: true,
+      extras: false,
+    })
+  })
+
+  it('disclosure 截断时不切开代理对：落单的代理项存下来是乱码，之后每次同步都算要更新', () => {
+    const disclosureOf = (disclosure: string) => {
+      const plan = planImport(snapshot(node('infra://pair', { disclosure })), [], options)
+      expect(plan.warnings).toContainEqual({ uri: 'infra://pair', kind: 'disclosureTruncated' })
+      expect(plan.skipped).toEqual([])
+      return plan.memories[0]!.request.disclosure
+    }
+    // 第 500 个单元是表情的前半个
+    expect(disclosureOf(`${'长'.repeat(499)}😀尾`)).toBe('长'.repeat(499))
+    // 表情正好在界内，不动
+    expect(disclosureOf(`${'长'.repeat(498)}😀尾`)).toBe(`${'长'.repeat(498)}😀`)
+    // 第 500 个单元是表情的后半个之后的字，也不动
+    expect(disclosureOf(`${'长'.repeat(497)}😀长尾`)).toBe(`${'长'.repeat(497)}😀长`)
+  })
+
+  describe('要新建的应用只有被写入目标用到才留下', () => {
+    const runtimes = (plan: ImportPlan) => plan.apps.map((m) => m.runtime)
+
+    it('节点走到应用映射之后才被跳过：不建空应用，已有的应用保留', () => {
+      for (const extra of [
+        { disclosure: '要用 {{cred:router}} 时' },
+        { content: '登录用 {{cred:router#password}}' },
+        { content: 'x'.repeat(20_001) },
+      ]) {
+        const snap = snapshot(node('core://agent/zcode', extra), node('core://agent/claudecode'))
+        const plan = planImport(snap, [], options)
+        expect(plan.skipped.map((s) => s.source)).toEqual(['core://agent/zcode'])
+        expect(plan.memories.map((m) => m.source)).toEqual(['core://agent/claudecode'])
+        expect(runtimes(plan)).toEqual(['claudecode'])
+
+        const mine = { slug: 'zcode', runtimeFamily: 'other', ownerAccountId: ME }
+        expect(planImport(snap, [mine], options).apps[0]).toEqual({
+          runtime: 'zcode',
+          apps: [{ slug: 'zcode', create: false, runtimeFamily: 'other' }],
+        })
+      }
+    })
+
+    it('撞 URI：勾掉占着的节点之后，映射到同一个 URI 的节点不让应用留下', () => {
+      const snap = snapshot(node('core://agent/claude_code'), node('core://agent/claude-code'))
+      const plan = planImport(snap, [], {
+        ...options,
+        excludeUris: new Set(['core://agent/claude_code']),
+      })
+      expect(plan.memories).toEqual([])
+      expect(plan.skipped.map((s) => s.source)).toEqual([
+        'core://agent/claude_code',
+        'core://agent/claude-code',
+      ])
+      expect(plan.apps).toEqual([])
+    })
+
+    it('两个运行时映射到同一个应用：写入目标是谁的，谁的映射才留下', () => {
+      const plan = planImport(
+        snapshot(node('core://agent/claude_code'), node('core://agent/claude-code')),
+        [],
+        options,
+      )
+      expect(runtimes(plan)).toEqual(['claude_code'])
+    })
+
+    it('勾掉运行时下有写入目标的节点：已有的应用不再动，还有走到映射才跳过的节点也一样', () => {
+      const mine = { slug: 'zcode', runtimeFamily: 'other', ownerAccountId: ME }
+      const snap = snapshot(
+        node('core://agent/zcode'),
+        node('core://agent/zcode/refs', { disclosure: '要用 {{cred:router}} 时' }),
+        node('infra://other'),
+      )
+      expect(runtimes(planImport(snap, [mine], options))).toEqual(['zcode'])
+      const plan = planImport(snap, [mine], {
+        ...options,
+        excludeUris: new Set(['core://agent/zcode']),
+      })
+      expect(plan.memories.map((m) => m.source)).toEqual(['infra://other'])
+      expect(runtimes(plan)).toEqual([])
+    })
+
+    it('节点都跳过了的已有应用不随别的勾选变；全部勾掉、什么都不写时也不动', () => {
+      const mine = { slug: 'zcode', runtimeFamily: 'other', ownerAccountId: ME }
+      const snap = snapshot(
+        node('core://agent/zcode', { disclosure: '要用 {{cred:router}} 时' }),
+        node('infra://a'),
+        node('infra://b'),
+      )
+      const ticking = (...uris: string[]) =>
+        runtimes(planImport(snap, [mine], { ...options, excludeUris: new Set(uris) }))
+      expect(ticking()).toEqual(['zcode'])
+      expect(ticking('infra://a')).toEqual(['zcode'])
+      expect(ticking('infra://a', 'infra://b')).toEqual([])
+      // 没有勾选时计划本来就什么都不写：已有的应用照样保留，和命令行原来的规则一致
+      const alone = snapshot(node('core://agent/zcode', { disclosure: '要用 {{cred:router}} 时' }))
+      expect(runtimes(planImport(alone, [mine], options))).toEqual(['zcode'])
+    })
+
+    it('同一个运行时下还有写入目标时应用留下，跳过的只是那个节点', () => {
+      const plan = planImport(
+        snapshot(
+          node('core://agent/zcode/refs', { disclosure: '要用 {{cred:router}} 时' }),
+          node('core://agent/zcode'),
+        ),
+        [],
+        options,
+      )
+      expect(runtimes(plan)).toEqual(['zcode'])
+      expect(plan.memories.map((m) => m.request.uri)).toEqual(['app://zcode/agent'])
+    })
+  })
+
+  describe('这次不导入的节点', () => {
+    const zcodeApps = [
+      { slug: 'claude-code', runtimeFamily: 'claudecode', ownerAccountId: ME },
+      { slug: 'zcode', runtimeFamily: 'claudecode', ownerAccountId: ME },
+    ]
+
+    it('在循环里按节点跳过：别的节点的应用映射不变，别名和主路径都指得到它', () => {
+      const snap = snapshot(
+        node('core://agent/claudecode'),
+        node('core://agent/zcode', { aliases: ['core://agent/zc'] }),
+      )
+      const all = planImport(snap, zcodeApps, options)
+      for (const uri of ['core://agent/zcode', 'core://agent/zc']) {
+        const plan = planImport(snap, zcodeApps, { ...options, excludeUris: new Set([uri]) })
+        expect(plan.errors).toEqual([])
+        // 跳过 zcode 之后，core://agent/claudecode 不能因为少了一个运行时就写进 zcode 这个应用
+        expect(plan.memories.map((m) => m.request.uri)).toEqual(['app://claude-code/agent'])
+        expect(plan.memories[0]!.importKey).toBe(all.memories[0]!.importKey)
+        expect(plan.skipped).toContainEqual({
+          source: 'core://agent/zcode',
+          reason: '这次选择不导入',
+        })
+        expect(plan.apps.map((m) => m.runtime)).toEqual(['claudecode'])
+      }
+    })
+
+    it('勾掉的节点写到的 URI 还占着：映射到同一个 URI 的下一个节点不顶上来', () => {
+      const snap = snapshot(
+        node('core://agent/claude_code'),
+        node('core://agent/claude-code'),
+        node('infra://other'),
+      )
+      const all = planImport(snap, [], options)
+      expect(all.memories.map((m) => [m.source, m.request.uri])).toEqual([
+        ['core://agent/claude_code', 'app://claude-code/agent'],
+        ['infra://other', 'infra://other'],
+      ])
+      const clash = {
+        source: 'core://agent/claude-code',
+        reason: '和 core://agent/claude_code 映射到同一个 app://claude-code/agent',
+      }
+      expect(all.skipped).toEqual([clash])
+
+      const plan = planImport(snap, [], {
+        ...options,
+        excludeUris: new Set(['core://agent/claude_code']),
+      })
+      // 第二个节点在计划里没有写入目标，看不到也勾不了，不能在勾掉第一个之后写进去
+      expect(plan.memories.map((m) => m.source)).toEqual(['infra://other'])
+      expect(plan.skipped).toEqual([
+        { source: 'core://agent/claude_code', reason: '这次选择不导入' },
+        clash,
+      ])
+      expect(plan.errors).toEqual([])
+    })
+
+    it('不管勾掉哪些节点，写入的都是不勾时减去勾掉的', () => {
+      const mine = [
+        { slug: 'claude-a', runtimeFamily: 'claudecode', ownerAccountId: ME },
+        { slug: 'claude-b', runtimeFamily: 'claudecode', ownerAccountId: ME },
+      ]
+      const snap = snapshot(
+        node('core://soul'),
+        // 写到两个应用
+        node('core://agent/claudecode'),
+        // 三个节点映射到同一个 URI，子路径上也有一对
+        node('core://agent/open_claw_x'),
+        node('core://agent/open-claw_x'),
+        node('core://agent/open_claw-x'),
+        node('core://agent/open_claw_x/tools'),
+        node('core://agent/open-claw-x/tools'),
+        node('infra://other', { aliases: ['infra://old'] }),
+        node('infra://empty', { content: null }),
+      )
+      const writes = (plan: ImportPlan) =>
+        plan.memories.map((m) => ({ source: m.source, uri: m.request.uri, key: m.importKey }))
+      const base = planImport(snap, mine, options)
+      expect(base.memories).toHaveLength(6)
+      const baseApps = base.apps.flatMap((m) => m.apps.map((a) => a.slug))
+      const uris = snap.nodes.map((n) => n.uri)
+      for (let mask = 0; mask < 1 << uris.length; mask++) {
+        const excluded = uris.filter((_, i) => mask & (1 << i))
+        const plan = planImport(snap, mine, { ...options, excludeUris: new Set(excluded) })
+        expect(plan.errors).toEqual([])
+        expect(writes(plan)).toEqual(writes(base).filter((w) => !excluded.includes(w.source)))
+        expect(baseApps).toEqual(
+          expect.arrayContaining(plan.apps.flatMap((m) => m.apps.map((a) => a.slug))),
+        )
+        // 要新建的应用都有写入目标
+        const used = plan.memories.map((m) => m.context.targetApp)
+        for (const app of plan.apps.flatMap((m) => m.apps).filter((a) => a.create)) {
+          expect(used).toContain(app.slug)
+        }
+      }
+      // 全部勾掉就什么都不写，应用也不建
+      const none = planImport(snap, mine, { ...options, excludeUris: new Set(uris) })
+      expect(none.memories).toEqual([])
+      expect(none.apps).toEqual([])
+    })
+
+    it('对不上任何节点时是错误；同时标了 secret 时以不导入为准', () => {
+      const plan = planImport(snapshot(node('infra://a')), [], {
+        ...options,
+        secretUris: new Set(['infra://a']),
+        excludeUris: new Set(['infra://a', 'infra://nope']),
+      })
+      expect(plan.errors).toEqual([{ kind: 'excludeNotFound', uri: 'infra://nope' }])
+      expect(plan.memories).toEqual([])
+      expect(plan.skipped.map((s) => s.source)).toEqual(['infra://a'])
+    })
+  })
+
+  describe('写入之前共用的检查', () => {
+    const key = Buffer.alloc(32)
+    it('计划有错误时拒绝，文字不提命令行的参数', () => {
+      const plan = planImport(snapshot(node('infra://a')), [], {
+        ...options,
+        secretUris: new Set(['infra://nope']),
+        excludeUris: new Set(['infra://gone']),
+      })
+      expect(() => assertExecutable(plan, key)).toThrow(/infra:\/\/nope.*infra:\/\/gone/)
+      expect(() => assertExecutable(plan, key)).not.toThrow(/--secret/)
+    })
+    it('要 secret 又没有主密钥时拒绝，不要 secret 时不需要主密钥', () => {
+      const secret = planImport(snapshot(node('infra://a')), [], {
+        ...options,
+        secretUris: new Set(['infra://a']),
+      })
+      expect(() => assertExecutable(secret, null)).toThrow('没有配置主密钥')
+      expect(() => assertExecutable(secret, key)).not.toThrow()
+      const plain = planImport(snapshot(node('infra://a')), [], options)
+      expect(() => assertExecutable(plain, null)).not.toThrow()
+    })
+  })
+
+  it('有导出时间时记进事件的 context，读库（命令行）时没有这一项；去重键不变', () => {
+    const snap = snapshot(node('infra://a'))
+    const fromLive = planImport(snap, [], options)
+    const fromFile = planImport(snap, [], { ...options, exportedAt: '2026-01-02T00:00:00.000Z' })
+    expect(fromLive.memories[0]!.context).not.toHaveProperty('loreExportedAt')
+    expect(fromFile.memories[0]!.context.loreExportedAt).toBe('2026-01-02T00:00:00.000Z')
+    expect(fromFile.memories[0]!.importKey).toBe(fromLive.memories[0]!.importKey)
+  })
+
+  describe('计划的指纹', () => {
+    const base = (): { plan: ImportPlan; preview: ImportPreview; sync: SyncPlan } => {
+      const plan = planImport(
+        snapshot(
+          node('core://agent/claudecode', { keywords: ['甲乙', '丙丁'], disclosure: '什么时候' }),
+          node('infra://token', { aliases: ['infra://old_token'] }),
+          node('infra://empty', { content: null }),
+        ),
+        [
+          { slug: 'claude-a', runtimeFamily: 'claudecode', ownerAccountId: ME },
+          { slug: 'claude-b', runtimeFamily: 'claudecode', ownerAccountId: ME },
+        ],
+        options,
+      )
+      return {
+        plan,
+        preview: {
+          targets: plan.memories.map((item) => ({ item, state: 'new', current: [] })),
+          personaExists: false,
+          createsPersona: false,
+          importedPersonas: [],
+          appsGivenPersona: ['claude-a', 'claude-b'],
+          appsOtherPersona: ['claude-c', 'claude-d'],
+          newAppsWithPersona: ['zcode-a', 'zcode-b'],
+        },
+        sync: {
+          items: [
+            {
+              source: 'infra://x',
+              uri: 'infra://x',
+              state: 'update',
+              changes: ['content', 'priority'],
+              request: { uri: 'infra://x', expectedVersion: 3, expectedId: 'a' },
+            },
+            { source: 'infra://y', uri: 'infra://y', state: 'current', changes: [] },
+          ],
+          goneFromLore: ['infra://b', 'infra://a'],
+        },
+      }
+    }
+    const fingerprint = (input: ReturnType<typeof base>) =>
+      planFingerprint(input.plan, input.preview, input.sync)
+    const same = fingerprint(base())
+
+    it('顺序、版本号、时间与不写入的同步项都不影响', () => {
+      const shuffled = base()
+      shuffled.plan.apps[0]!.apps.reverse()
+      shuffled.plan.skipped.reverse()
+      shuffled.plan.warnings.reverse()
+      shuffled.preview.targets.reverse()
+      shuffled.preview.targets[0]!.item.request.glossary.reverse()
+      shuffled.preview.appsGivenPersona.reverse()
+      shuffled.preview.appsOtherPersona.reverse()
+      shuffled.preview.newAppsWithPersona.reverse()
+      shuffled.sync.goneFromLore.reverse()
+      shuffled.sync.items[0]!.changes.reverse()
+      expect(fingerprint(shuffled)).toBe(same)
+
+      const times = base()
+      for (const { item } of times.preview.targets) {
+        item.createdAt = new Date('2000-01-01T00:00:00Z')
+        item.updatedAt = new Date('2000-01-01T00:00:00Z')
+        item.context.previousVersions = 99
+      }
+      times.sync.items[0]!.request = { uri: 'infra://x', expectedVersion: 4, expectedId: 'b' }
+      times.sync.items[1]!.state = 'edited'
+      times.plan.droppedKeywords.push({ source: 'infra://token', keyword: '词', reason: '不要' })
+      times.preview.importedPersonas.push('old')
+      expect(fingerprint(times)).toBe(same)
+    })
+
+    it('人格本身在不在不影响：要不要新建它、要不要设到应用上才影响', () => {
+      const exists = base()
+      exists.preview.personaExists = true
+      expect(fingerprint(exists)).toBe(same)
+    })
+
+    it('真要写的东西变了就变', () => {
+      const changes: ((input: ReturnType<typeof base>) => void)[] = [
+        (i) => (i.plan.persona = { slug: 'work', name: '默认人格' }),
+        (i) => (i.preview.createsPersona = true),
+        (i) => i.preview.newAppsWithPersona.pop(),
+        (i) => i.preview.newAppsWithPersona.push('zcode-c'),
+        (i) => i.preview.appsGivenPersona.pop(),
+        (i) => i.preview.appsGivenPersona.push('claude-e'),
+        (i) => i.preview.appsOtherPersona.pop(),
+        (i) => i.preview.appsOtherPersona.push('claude-e'),
+        // 个数不变，从设默认人格换成在用别的人格
+        (i) => {
+          i.preview.appsGivenPersona = ['claude-a', 'claude-c']
+          i.preview.appsOtherPersona = ['claude-b', 'claude-d']
+        },
+        (i) => (i.plan.apps[0]!.apps[0]!.create = true),
+        (i) => i.plan.apps[0]!.apps.pop(),
+        (i) => (i.preview.targets[0]!.item.source = 'core://agent/other'),
+        (i) => (i.preview.targets[0]!.item.request.uri = 'app://claude-c/agent'),
+        (i) => (i.preview.targets[0]!.item.request.layer = 'base'),
+        (i) => (i.preview.targets[0]!.item.request.priority = 9),
+        (i) => (i.preview.targets[0]!.item.request.disclosure = '别的时候'),
+        (i) => i.preview.targets[0]!.item.request.glossary.push('新词'),
+        (i) => (i.preview.targets[0]!.item.request.content = '别的正文'),
+        (i) => (i.preview.targets[0]!.state = 'imported'),
+        (i) => i.preview.targets.pop(),
+        (i) => i.plan.skipped.pop(),
+        (i) => i.plan.warnings.pop(),
+        (i) => (i.sync.items[0]!.uri = 'infra://z'),
+        (i) => i.sync.items[0]!.changes.pop(),
+        (i) => (i.sync.items[0]!.state = 'edited'),
+        (i) => i.sync.goneFromLore.pop(),
+      ]
+      for (const [at, change] of changes.entries()) {
+        const input = base()
+        change(input)
+        expect(fingerprint(input), `第 ${at} 项`).not.toBe(same)
+      }
+    })
   })
 
   it('保留 Lore 的 priority、disclosure 与时间，事件上下文记下出处', () => {
