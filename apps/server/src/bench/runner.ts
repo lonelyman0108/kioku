@@ -19,6 +19,10 @@ import type { BenchExecutor, ResolvedStep, StepOutcome } from './executor'
 // 跑一串步骤：requires、展开变量、执行、断言、capture、重放日志。执行方式由 executor 决定，这里不碰数据库。
 // 断言与 capture 都是字符串的线性操作，不执行场景给的模式（场景可以从别处导入，见 BenchExpect）
 
+// ${expires} 比这次运行开始时晚这么久：写记忆的步骤拿它当 valid_to，真实模式或命令行中途断开时，
+// 残留的记忆到时候自己过期，不会一直被真实会话召回。重放存的是展开之后的时间，这么久之内都能接着重放
+export const BENCH_EXPIRES_AFTER_MS = 6 * 60 * 60_000
+
 const VARIABLE = /\$\{([A-Za-z_][A-Za-z0-9_]*)\}/g
 const WHOLE_VARIABLE = /^\$\{([A-Za-z_][A-Za-z0-9_]*)\}$/
 const INTEGER = /^-?\d{1,15}$/
@@ -203,7 +207,10 @@ export async function runSteps(
 ): Promise<BenchRunResult> {
   const whoami = await executor.whoami()
   const results: BenchStepResult[] = []
-  const vars = new Map([['run', run]])
+  const vars = new Map([
+    ['run', run],
+    ['expires', new Date(Date.now() + BENCH_EXPIRES_AFTER_MS).toISOString()],
+  ])
   // 前面的步骤声明了、却没有取到的变量：步骤被跳过的，依赖它的也跳过；没取到的，依赖它的算失败
   const unavailable = new Map<string, 'skipped' | 'failed'>()
 

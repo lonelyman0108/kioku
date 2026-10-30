@@ -1,6 +1,6 @@
 import type { BenchScenarioInput } from '@kioku/contracts'
 
-import { runUri, SECRET_WRITE } from './shared'
+import { EXPIRES, runUri, SECRET_WRITE } from './shared'
 
 const IDENTIFIER = 'bench-${run}'
 const LOGIN = runUri('login')
@@ -50,6 +50,7 @@ export const credentialFlow: BenchScenarioInput = {
         content: `测试台的登录说明，密码 {{cred:${IDENTIFIER}#password}}。`,
         layer: 'private',
         priority: 2,
+        valid_to: EXPIRES,
       },
       requires: SECRET_WRITE,
       expect: { error: false },

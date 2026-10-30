@@ -16,8 +16,8 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { keyToSimulate } from '../../access/simulate'
-import type { Database } from '../../db/client'
-import { settings } from '../../db/schema'
+import { withSpace, type Database } from '../../db/client'
+import { memories, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Deps, KeyPrincipal } from '../../http/env'
@@ -25,7 +25,7 @@ import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/
 import { bootstrap, type Workspace } from '../../testing/fixtures'
 import { httpExecutor } from '../httpExecutor'
 import { runBench } from '../inProcess'
-import { runSteps } from '../runner'
+import { BENCH_EXPIRES_AFTER_MS, runSteps } from '../runner'
 import { BENCH_SCENARIOS, scenariosForRuntime } from '../scenarios'
 
 const SHARED: KeyScopes['readLayers'] = ['base', 'persona', 'app', 'subject', 'episode']
@@ -95,12 +95,13 @@ describe('内置场景的约定', () => {
     ),
   )
 
-  it('只写私人层、不用 priority 0，URI 带 ${run}', () => {
+  it('只写私人层、不用 priority 0，URI 带 ${run}，都带有效期', () => {
     expect(writes.length).toBeGreaterThan(0)
     for (const [id, step] of writes) {
       expect(step.arguments.layer, id).toBe('private')
       expect(step.arguments.priority ?? 2, id).toBeGreaterThan(0)
       expect(step.arguments.uri, id).toContain('${run}')
+      expect(step.arguments.valid_to, id).toBe('${expires}')
     }
   })
 
@@ -277,6 +278,25 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
         }
       }
     }, 20_000)
+  })
+
+  it('真实模式中途断开：残留的记忆带着几小时后的有效期，到时候自己过期', async () => {
+    const scenario = BENCH_SCENARIOS.find((s) => s.id === 'memory-crud')!
+    const { principal } = await keyFor(KEYS.agent!, scenario)
+    const before = Date.now()
+    // 只跑到新建：后面删掉它的步骤没有机会执行
+    const result = await runBench(deps, principal, ws.accountId, {
+      mode: 'real',
+      steps: scenario.steps.slice(0, 2),
+      replay: [],
+    })
+    expect(failures(result)).toEqual([])
+    expect(result.steps[1]!.text).toContain('有效到: ')
+    const rows = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memories))
+    expect(rows).toHaveLength(1)
+    expect(rows[0]!.deletedAt).toBeNull()
+    expect(rows[0]!.validTo!.getTime()).toBeGreaterThanOrEqual(before + BENCH_EXPIRES_AFTER_MS)
+    expect(rows[0]!.validTo!.getTime()).toBeLessThanOrEqual(Date.now() + BENCH_EXPIRES_AFTER_MS)
   })
 
   it('重放能接上内置场景：第一次的写步骤放进下一次，结果和一次跑完相同', async () => {

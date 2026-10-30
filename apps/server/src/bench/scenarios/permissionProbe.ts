@@ -1,7 +1,7 @@
 import type { BenchScenarioInput, BenchStep } from '@kioku/contracts'
 import type { z } from 'zod'
 
-import { BENCH_GROUP_CONTEXT, runUri } from './shared'
+import { BENCH_GROUP_CONTEXT, EXPIRES, runUri } from './shared'
 
 const PROBE = runUri('probe')
 const PROBE_SECRET = runUri('probe-secret')
@@ -50,12 +50,14 @@ export const permissionProbe: BenchScenarioInput = {
       content: '测试台的权限探测写下的，运行标记 ${run}。',
       layer: 'private',
       priority: 2,
+      valid_to: EXPIRES,
     }),
     tool('写 secret 级', 'kioku_create', {
       uri: PROBE_SECRET,
       content: '测试台的权限探测写下的 secret 正文，不是真的内容。',
       layer: 'private',
       sensitivity: 'secret',
+      valid_to: EXPIRES,
     }),
     tool('删掉写私人层的那条', 'kioku_delete', { uri: PROBE }),
     tool('删掉写 secret 级的那条', 'kioku_delete', { uri: PROBE_SECRET }),

@@ -2,6 +2,7 @@ import type { BenchRequires } from '@kioku/contracts'
 
 // 内置预设的约定：
 // - 只写私人层、不用 priority 0：真实模式下断开时残留的记忆不会进别的应用与启动上下文；
+// - 写记忆都带 valid_to（${expires}）：残留的记忆几小时后自己过期，不会一直被主人的真实会话召回；
 // - URI 与凭据标识带 ${run}，免得真实模式下撞上上一次；
 // - 平台账号用固定值：对象没有删除接口，带 ${run} 的话每跑一次多两个永久的假对象；
 // - 对 secret 与凭据只断言报错与否和元数据，不断言值：进程内打码，命令行不打码，同一份场景要在两边都过。
@@ -29,3 +30,6 @@ export const BENCH_GROUP_CONTEXT = {
 
 // 本次运行写下的记忆的路径
 export const runUri = (name: string) => `projects://bench/\${run}/${name}`
+
+// 写记忆的步骤的 valid_to
+export const EXPIRES = '${expires}'

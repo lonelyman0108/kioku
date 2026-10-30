@@ -43,8 +43,11 @@ describe('步骤的契约', () => {
     expect(BenchStep.safeParse({ kind: 'recall', body: 'not an object' }).success).toBe(true)
   })
 
-  it('capture 的变量名不能叫 run，断言没有正则这种写法', () => {
+  it('capture 的变量名不能叫 run 或 expires，断言没有正则这种写法', () => {
     expect(BenchStep.safeParse({ kind: 'whoami', capture: { run: '版本: ' } }).success).toBe(false)
+    expect(BenchStep.safeParse({ kind: 'whoami', capture: { expires: '版本: ' } }).success).toBe(
+      false,
+    )
     expect(BenchStep.safeParse({ kind: 'whoami', capture: { version: '版本: ' } }).success).toBe(
       true,
     )

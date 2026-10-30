@@ -2,6 +2,7 @@ import {
   BENCH_TOOLS,
   BenchStep,
   LAYERS,
+  ValidTo,
   type BenchReplayStep,
   type KeyScopes,
   type WhoAmI,
@@ -19,7 +20,7 @@ import {
   type StepOutcome,
 } from '../executor'
 import { handshakeProblem } from '../httpExecutor'
-import { captureAfter, expand, runSteps, unmetRequirement } from '../runner'
+import { BENCH_EXPIRES_AFTER_MS, captureAfter, expand, runSteps, unmetRequirement } from '../runner'
 
 const FULL: KeyScopes = {
   readLayers: [...LAYERS],
@@ -222,6 +223,24 @@ describe('变量与 capture', () => {
     expect(seen[1]).toMatchObject({ arguments: { uri: 'a://b', expected_version: 7 } })
     expect(result.steps[0]!.captured).toEqual({ version: '7', uri: 'a://b' })
     expect(result.run).toBe('abc123')
+  })
+
+  it('${expires} 是几小时后的时间，一次运行里相同，合法的 valid_to', async () => {
+    const before = Date.now()
+    const { executor, seen } = fakeExecutor()
+    await run(
+      executor,
+      steps(
+        { kind: 'tool', tool: 'kioku_create', arguments: { valid_to: '${expires}' } },
+        { kind: 'tool', tool: 'kioku_create', arguments: { valid_to: '${expires}' } },
+      ),
+    )
+    const [first, second] = seen.map((s) => (s.kind === 'tool' ? s.arguments.valid_to : null))
+    expect(first).toBe(second)
+    const validTo = ValidTo.parse(first)
+    const at = new Date(validTo).getTime()
+    expect(at).toBeGreaterThanOrEqual(before + BENCH_EXPIRES_AFTER_MS)
+    expect(at).toBeLessThanOrEqual(Date.now() + BENCH_EXPIRES_AFTER_MS)
   })
 
   it('取不到算这一步失败；依赖它的步骤不执行，也算失败', async () => {

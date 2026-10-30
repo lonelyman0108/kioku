@@ -46,12 +46,13 @@ export const BenchExpect = z.strictObject({
 })
 export type BenchExpect = z.infer<typeof BenchExpect>
 
-// capture：从结果文本里按固定前缀取到行尾，给后面的步骤用，例如 { version: '版本: ' }。run 是保留的名字
+// capture：从结果文本里按固定前缀取到行尾，给后面的步骤用，例如 { version: '版本: ' }。
+// run 与 expires 是保留的名字：${run} 是这次运行的标记，${expires} 是几小时后的时间，写记忆时给 valid_to 用
 export const CaptureName = z
   .string()
   .regex(
-    /^(?!run$)[A-Za-z_][A-Za-z0-9_]{0,63}$/,
-    '变量名只用字母、数字和下划线，不能以数字开头，不能叫 run',
+    /^(?!(?:run|expires)$)[A-Za-z_][A-Za-z0-9_]{0,63}$/,
+    '变量名只用字母、数字和下划线，不能以数字开头，不能叫 run 或 expires',
   )
 export const BenchCapture = z.record(CaptureName, z.string().min(1).max(200))
 export type BenchCapture = z.infer<typeof BenchCapture>

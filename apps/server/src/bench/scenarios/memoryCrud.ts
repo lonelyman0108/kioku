@@ -1,6 +1,6 @@
 import type { BenchScenarioInput } from '@kioku/contracts'
 
-import { GUIDANCE_START, PRIVATE_WRITE, runUri, SECRET_WRITE } from './shared'
+import { EXPIRES, GUIDANCE_START, PRIVATE_WRITE, runUri, SECRET_WRITE } from './shared'
 
 const NOTE = runUri('note')
 const MOVED = runUri('moved')
@@ -31,6 +31,7 @@ export const memoryCrud: BenchScenarioInput = {
         priority: 2,
         disclosure: '测试台的增删改查场景',
         glossary: [KEYWORD],
+        valid_to: EXPIRES,
       },
       requires: PRIVATE_WRITE,
       expect: { error: false, contains: [`URI: ${NOTE}`, '敏感级: private', '版本: 1'] },
@@ -114,6 +115,7 @@ export const memoryCrud: BenchScenarioInput = {
         content: '测试台写下的 secret 正文，不是真的内容。',
         layer: 'private',
         sensitivity: 'secret',
+        valid_to: EXPIRES,
       },
       requires: SECRET_WRITE,
       expect: { error: false, contains: ['敏感级: secret'] },

@@ -1,6 +1,6 @@
 import type { BenchScenarioInput } from '@kioku/contracts'
 
-import { GUIDANCE_START, PRIVATE_WRITE, runUri } from './shared'
+import { EXPIRES, GUIDANCE_START, PRIVATE_WRITE, runUri } from './shared'
 
 const NOTE = runUri('note')
 const KEYWORD = 'bench${run}'
@@ -40,6 +40,7 @@ export const claudeCodeSession: BenchScenarioInput = {
         priority: 2,
         disclosure: '测试台的 Claude Code 会话场景',
         glossary: [KEYWORD],
+        valid_to: EXPIRES,
       },
       requires: PRIVATE_WRITE,
       expect: { error: false, contains: [`URI: ${NOTE}`, '版本: 1'] },
