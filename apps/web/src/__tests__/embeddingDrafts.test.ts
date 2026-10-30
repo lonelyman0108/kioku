@@ -5,7 +5,6 @@ import {
   draftsChanged,
   followEmbedding,
   inputOf,
-  needsNewKey,
   switchEnded,
   switchTracker,
 } from '../embeddingDrafts'
@@ -29,35 +28,6 @@ describe('嵌入渠道的草稿', () => {
     expect(draftsChanged([{ ...drafts[0]!, model: 'm2' }, drafts[1]!], [saved, other])).toBe(true)
     expect(draftsChanged([{ ...drafts[0]!, apiKey: 'x' }, drafts[1]!], [saved, other])).toBe(true)
     expect(draftsChanged([drafts[0]!], [saved, other])).toBe(true)
-  })
-})
-
-describe('换了接口主机时 Key 要先说怎么处理', () => {
-  // 换模型时照抄现在的渠道：请求用的模型名留空，Key 留空表示沿用
-  const copied = () => ({ ...draftOf(saved), model: '' })
-
-  it('主机变了、Key 留空、也没勾清除：提交之前就拦下', () => {
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://other.example.net/v1' })).toBe(true)
-    // 端口、协议不同也是别的主机，和服务端沿用 Key 的规则一样
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://e.example.com:8443/v1' })).toBe(true)
-    expect(needsNewKey({ ...copied(), baseUrl: 'http://e.example.com/v1' })).toBe(true)
-  })
-
-  it('填了新的 Key 或勾了清除就行；同一个主机只改路径时沿用已保存的', () => {
-    const moved = { ...copied(), baseUrl: 'https://other.example.net/v1' }
-    expect(needsNewKey({ ...moved, apiKey: 'sk-new' })).toBe(false)
-    expect(needsNewKey({ ...moved, clearKey: true })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://e.example.com/v2' })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://E.example.com/v1/' })).toBe(false)
-    expect(needsNewKey(copied())).toBe(false)
-  })
-
-  it('没有保存 Key 的、新加的渠道不用管；地址还没填成 http 或 https 时先不提示', () => {
-    const noKey = { ...draftOf({ ...saved, hasApiKey: false }), baseUrl: 'https://x.example.net' }
-    expect(needsNewKey(noKey)).toBe(false)
-    expect(needsNewKey({ ...draftOf(), baseUrl: 'https://x.example.net' })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'https://' })).toBe(false)
-    expect(needsNewKey({ ...copied(), baseUrl: 'ftp://other.example.net/v1' })).toBe(false)
   })
 })
 

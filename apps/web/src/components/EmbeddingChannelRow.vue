@@ -1,7 +1,8 @@
 <script setup lang="ts">
 import { computed } from 'vue'
 
-import { needsNewKey, type ChannelDraft } from '../embeddingDrafts'
+import type { ChannelDraft } from '../embeddingDrafts'
+import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
 
 // 一个嵌入渠道的编辑：接口地址、请求用的模型名与 Key，以及挪位置、删掉
@@ -10,11 +11,7 @@ defineProps<{ index: number; first: boolean; last: boolean; only: boolean }>()
 const emit = defineEmits<{ up: []; down: []; remove: [] }>()
 
 // 换了接口主机又没说 Key 怎么处理：在 Key 旁边说清楚，保存按钮由外面禁用
-const keyError = computed(() =>
-  needsNewKey(draft.value)
-    ? '接口主机变了，已保存的 Key 不会发给新的主机：请重新填写；新接口不需要 Key 时，勾选下面的「清除已保存的 Key」'
-    : undefined,
-)
+const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', true) : undefined))
 </script>
 
 <template>

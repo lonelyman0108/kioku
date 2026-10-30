@@ -15,10 +15,10 @@ import {
   draftsChanged,
   followEmbedding,
   inputOf,
-  needsNewKey,
   switchTracker,
   type ChannelDraft,
 } from '../embeddingDrafts'
+import { needsNewKey } from '../endpointKey'
 import { icons } from '../icons'
 import EmbeddingChannels from './EmbeddingChannels.vue'
 

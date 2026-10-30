@@ -16,7 +16,7 @@ export interface ChannelDraft {
   apiKey: string
   clearKey: boolean
   hasApiKey: boolean
-  // 草稿照抄的那个已保存渠道的接口地址，新加的渠道为 null：换了主机就不能沿用它保存的 Key
+  // 草稿照抄的那个已保存渠道的接口地址，新加的渠道为 null：换了主机就不能沿用它保存的 Key（见 needsNewKey）
   savedBaseUrl: string | null
 }
 
@@ -33,27 +33,6 @@ export function draftOf(channel?: EmbeddingChannelView): ChannelDraft {
     hasApiKey: channel?.hasApiKey ?? false,
     savedBaseUrl: channel?.baseUrl ?? null,
   }
-}
-
-// 接口地址的主机（协议、主机名与端口）；不是 http 或 https 的地址、还没填完整的为 null
-function hostOf(url: string): string | null {
-  try {
-    const parsed = new URL(url)
-    return parsed.protocol === 'http:' || parsed.protocol === 'https:' ? parsed.origin : null
-  } catch {
-    return null
-  }
-}
-
-// 换了接口的主机、Key 留空、也没勾清除：服务端只在同一个主机上沿用已保存的 Key（不会把它发给新主机），
-// 这样提交会被拒。提交之前就在这个渠道的 Key 旁边说明，按钮不可点。地址还没填成 http 或 https 的不算，
-// 那时提交先报地址不对
-export function needsNewKey(draft: ChannelDraft): boolean {
-  if (!draft.hasApiKey || draft.savedBaseUrl === null || draft.clearKey || draft.apiKey !== '') {
-    return false
-  }
-  const host = hostOf(draft.baseUrl)
-  return host !== null && host !== hostOf(draft.savedBaseUrl)
 }
 
 export function inputOf(draft: ChannelDraft): EmbeddingChannelInput {
