@@ -1,11 +1,12 @@
-import type { BenchMode } from '@kioku/contracts'
-import { useQuery } from '@tanstack/vue-query'
+import type { BenchMode, BenchReplayStep, BenchRunResult, BenchStep } from '@kioku/contracts'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, inject, provide, reactive, ref, watch, type InjectionKey } from 'vue'
 import { useRoute, useRouter, type RouteLocationNormalizedLoaded } from 'vue-router'
 
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { contextDefaults, contextOf } from '../benchForm'
-import { ownedApps, usableKeys } from '../benchSession'
+import { ownedApps, runFailureMessage, usableKeys } from '../benchSession'
 import { useSession } from './useSession'
 
 const param = (value: unknown) => (typeof value === 'string' && value ? value : undefined)
@@ -17,10 +18,15 @@ const selectionOf = (route: RouteLocationNormalizedLoaded) => ({
   key: param(route.query.key),
 })
 
+// 一次运行的结果。stale：运行期间换了应用、Key 或模式，结果作废；或者上一次还没结束，这次没有发出去
+export type RunOutcome =
+  { kind: 'done'; result: BenchRunResult } | { kind: 'failed'; message: string } | { kind: 'stale' }
+
 // 测试台各分页共享的状态：应用、Key、模式、会话上下文。页面建一份，分页组件用 useBench 取同一份
 function createBench() {
   const route = useRoute()
   const router = useRouter()
+  const queryClient = useQueryClient()
   const { me } = useSession()
 
   const selection = reactive(selectionOf(route))
@@ -94,6 +100,44 @@ function createBench() {
   const contextForm = reactive(contextDefaults())
   const sessionContext = computed(() => contextOf(contextForm))
 
+  // 每次运行一个序号，current 是进行中的那次：结果、报错与 loading 都只认它。
+  // 换了应用、Key 或模式时清掉，进行中的那次就作废了；generation 让各分页清掉自己的结果
+  let counter = 0
+  const current = ref<number | null>(null)
+  const running = computed(() => current.value !== null)
+  const generation = ref(0)
+  watch([spaceId, appId, keyId, mode], () => {
+    current.value = null
+    generation.value++
+  })
+
+  async function execute(steps: BenchStep[], replay: BenchReplayStep[] = []): Promise<RunOutcome> {
+    const forSpace = spaceId.value
+    const forApp = appId.value
+    const forKey = keyId.value
+    const forMode = mode.value
+    if (running.value || !forApp || !forKey) return { kind: 'stale' }
+    const id = ++counter
+    current.value = id
+    try {
+      const result = await api.benchRun(forSpace, forApp, forKey, { mode: forMode, steps, replay })
+      return current.value === id ? { kind: 'done', result } : { kind: 'stale' }
+    } catch (err) {
+      // 应用转给了别人、Key 刚被吊销：重新读一遍，选择跟着变
+      if (err instanceof ApiError && (err.status === 403 || err.status === 404)) {
+        void queryClient.invalidateQueries({ queryKey: ['apps', forSpace] })
+        void queryClient.invalidateQueries({ queryKey: ['keys', forSpace, forApp] })
+      }
+      return current.value === id
+        ? { kind: 'failed', message: runFailureMessage(err, forMode) }
+        : { kind: 'stale' }
+    } finally {
+      if (current.value === id) current.value = null
+      // 真实模式写了数据（出错也可能写了一部分）：记忆、活动、对象、凭据的缓存都不算数了
+      if (forMode === 'real') void queryClient.invalidateQueries()
+    }
+  }
+
   return {
     spaceId,
     apps,
@@ -115,6 +159,9 @@ function createBench() {
     confirmReal,
     contextForm,
     sessionContext,
+    running,
+    generation,
+    execute,
   }
 }
 

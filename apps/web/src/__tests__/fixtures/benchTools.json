@@ -1,0 +1,405 @@
+[
+  {
+    "name": "kioku_boot",
+    "description": "读取启动基线：使用指引与 priority 0 的核心记忆。没有启动钩子的客户端在会话开始时调用一次。",
+    "inputSchema": {
+      "type": "object",
+      "properties": {}
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_search",
+    "description": "按语义、全文和关键词搜索记忆，返回候选 URI 与线索；需要正文时再用 kioku_get。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "query": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 4000,
+          "description": "要找的内容，用自然语言描述"
+        },
+        "limit": {
+          "description": "最多返回几条，默认 10",
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 30
+        }
+      },
+      "required": ["query"]
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_get",
+    "description": "按 URI 读取一条记忆的完整正文。召回结果只是候选，引用之前先用它读正文。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$",
+          "description": "记忆 URI，例如 core://agent"
+        }
+      },
+      "required": ["uri"]
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_list",
+    "description": "浏览记忆树：不带参数列出所有 domain；给 domain 名或 URI 时列出它下面的直接子节点。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "of": {
+          "description": "domain 名（如 core）或节点 URI",
+          "type": "string"
+        }
+      }
+    },
+    "annotations": {
+      "readOnlyHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_create",
+    "description": "新建一条长期记忆。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。persona://<人格>/ 与 app://<应用>/ 下的记忆分别属于人格层和应用层，只能写本应用当前的人格与本应用；其余 domain 不指定 layer 时按私人层保存。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$",
+          "description": "新记忆的 URI"
+        },
+        "content": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000,
+          "description": "正文"
+        },
+        "disclosure": {
+          "description": "什么场景下需要想起这条记忆",
+          "type": "string",
+          "maxLength": 500
+        },
+        "priority": {
+          "default": 2,
+          "description": "0 最重要，默认 2",
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        },
+        "glossary": {
+          "default": [],
+          "description": "关键词，用于召回",
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 64
+          }
+        },
+        "layer": {
+          "description": "层：base / owner / private 等",
+          "type": "string",
+          "enum": ["base", "persona", "app", "owner", "private", "subject", "episode"]
+        },
+        "sensitivity": {
+          "description": "敏感级：public / internal / private / secret",
+          "type": "string",
+          "enum": ["public", "internal", "private", "secret"]
+        },
+        "valid_to": {
+          "description": "有效到：ISO 8601，要带时区（例如 2026-12-31T23:59:00+08:00），要比现在晚至少一分钟。只在一段时间内成立的事（临时安排、截止日期）才填，到期后不再召回、不进 boot，不填就一直有效",
+          "type": "string",
+          "format": "date-time",
+          "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
+        }
+      },
+      "required": ["uri", "content"]
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_update",
+    "description": "修改已有记忆。改之前先用 kioku_get 读正文；带上 expected_version 防止覆盖别人的修改。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+        },
+        "content": {
+          "description": "新的完整正文",
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 20000
+        },
+        "disclosure": {
+          "anyOf": [
+            {
+              "type": "string",
+              "maxLength": 500
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "priority": {
+          "type": "integer",
+          "minimum": 0,
+          "maximum": 99
+        },
+        "sensitivity": {
+          "type": "string",
+          "enum": ["public", "internal", "private", "secret"]
+        },
+        "layer": {
+          "description": "新的层。只能在 owner 与 private 之间改；与 base 互转会改变谁看得到它，要在管理界面里改",
+          "type": "string",
+          "enum": ["base", "owner", "private"]
+        },
+        "glossary_add": {
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 2,
+            "maxLength": 64
+          }
+        },
+        "glossary_remove": {
+          "maxItems": 32,
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 64
+          }
+        },
+        "valid_to": {
+          "description": "有效到：ISO 8601，要带时区（例如 2026-12-31T23:59:00+08:00），要比现在晚至少一分钟。只在一段时间内成立的事（临时安排、截止日期）才填，到期后不再召回、不进 boot，不填就一直有效；填 null 清掉，一直有效",
+          "anyOf": [
+            {
+              "type": "string",
+              "format": "date-time",
+              "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$",
+              "description": "ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟"
+            },
+            {
+              "type": "null"
+            }
+          ]
+        },
+        "expected_version": {
+          "description": "读取时看到的版本号",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["uri"]
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_delete",
+    "description": "删除一条记忆。历史事件会保留，必要时可以恢复。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "uri": {
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+        }
+      },
+      "required": ["uri"]
+    },
+    "annotations": {
+      "destructiveHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_move",
+    "description": "修改记忆的 URI（改名或移到别的父节点下）。移到 persona:// 或 app:// 下时层跟着 URI 变；从那里移出时要用 layer 指定新的层（base、owner 或 private）。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "from": {
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+        },
+        "to": {
+          "type": "string",
+          "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+        },
+        "layer": {
+          "description": "移出 persona:// 或 app:// 时的新层",
+          "type": "string",
+          "enum": ["base", "owner", "private"]
+        }
+      },
+      "required": ["from", "to"]
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_credential",
+    "description": "取用凭据。记忆正文里的 {{cred:<标识>}} 与 {{cred:<标识>#<字段>}} 是凭据占位符：给标识时，Kioku 托管的返回值，外部凭据源的返回凭据源、条目位置和取法，取到时记一条访问事件；不给标识时列出看得到的凭据与凭据源。用到时才取，不要把值写回记忆，也不要显示在回复里。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "description": "凭据的标识，即占位符里 cred: 后面的那一段",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "field": {
+          "description": "只取一个字段，例如 password；不填取全部字段",
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        }
+      }
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_credential_save",
+    "description": "新建或修改凭据（要能读写私人层的 secret 级 Key）。不给 expected_version 就是新建，新建的凭据只给这个应用用；修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。值由 Kioku 托管时给 values；值在外部密码管理器里时给 provider_id、location 与 fields，Kioku 只记条目位置、不存值。说明里不要写值。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$",
+          "description": "凭据的标识，创建后不能改；记忆里用 {{cred:<标识>#<字段>}} 引用"
+        },
+        "name": {
+          "description": "名称；新建时必填",
+          "type": "string"
+        },
+        "description": {
+          "description": "说明：用途、在哪里用",
+          "type": ["string", "null"]
+        },
+        "values": {
+          "description": "Kioku 托管的值，字段名 → 值；修改时只给要改的字段，值为 null 表示删掉这个字段",
+          "type": "object",
+          "propertyNames": {
+            "type": "string",
+            "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+          },
+          "additionalProperties": {
+            "type": ["string", "null"]
+          }
+        },
+        "provider_id": {
+          "description": "外部凭据源的 id，用不带参数的 kioku_credential 列出",
+          "type": "string"
+        },
+        "location": {
+          "description": "外部条目的位置：条目名、id 或路径",
+          "type": "string"
+        },
+        "fields": {
+          "description": "外部来源的字段对应：占位符里的字段名 → 条目里的字段",
+          "type": "array",
+          "items": {
+            "type": "object",
+            "properties": {
+              "name": {
+                "type": "string",
+                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+              },
+              "source_field": {
+                "type": "string"
+              }
+            },
+            "required": ["name", "source_field"]
+          }
+        },
+        "expected_version": {
+          "description": "修改时必填：读取时看到的版本号",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["identifier"]
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  },
+  {
+    "name": "kioku_credential_delete",
+    "description": "删除凭据（软删除，主人可以在管理界面恢复）。",
+    "inputSchema": {
+      "$schema": "http://json-schema.org/draft-07/schema#",
+      "type": "object",
+      "properties": {
+        "identifier": {
+          "type": "string",
+          "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "expected_version": {
+          "description": "读取时看到的版本号",
+          "type": "integer",
+          "minimum": -9007199254740991,
+          "maximum": 9007199254740991
+        }
+      },
+      "required": ["identifier"]
+    },
+    "annotations": {
+      "destructiveHint": true
+    },
+    "execution": {
+      "taskSupport": "forbidden"
+    }
+  }
+]
