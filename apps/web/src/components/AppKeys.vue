@@ -14,7 +14,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useCopy } from '../composables/useCopy'
 import { icons } from '../icons'
-import { ADMIN_SCOPE_LABEL, layerLabels, sensitivityLabels } from '../labels'
+import { ADMIN_SCOPE_LABEL, layerLabels, scopesSummary, sensitivityLabels } from '../labels'
 import KeyMatrix from './KeyMatrix.vue'
 import { keyPresets, sameScopes } from './keyPresets'
 
@@ -116,15 +116,12 @@ async function revoke() {
   }
 }
 
-const summary = (s: KeyScopes) =>
-  `读 ${s.readLayers.length} 层 · 写 ${s.writeLayers.length} 层 · 最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? ` · ${ADMIN_SCOPE_LABEL}` : ''}`
-
 // 当前有效上限与签发上限不同时（主人被降级），或 Key 已经作废（主人离开了空间）时要说明
 function effectiveNote(key: KeyInfo): string | null {
   if (key.revokedAt) return null
   if (!key.effectiveScopes) return '已作废：应用主人已不在空间里'
   if (sameScopes(key.scopes, key.effectiveScopes)) return null
-  return `当前有效：${summary(key.effectiveScopes)}（按主人现在的角色收紧）`
+  return `当前有效：${scopesSummary(key.effectiveScopes)}（按主人现在的角色收紧）`
 }
 
 const inspecting = ref<KeyInfo | null>(null)
@@ -151,7 +148,7 @@ const inspecting = ref<KeyInfo | null>(null)
         <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
           <code>{{ key.prefix }}</code>
           <span>{{ key.name }}</span>
-          <span class="text-muted">签发：{{ summary(key.scopes) }}</span>
+          <span class="text-muted">签发：{{ scopesSummary(key.scopes) }}</span>
           <UBadge v-if="key.revokedAt" color="neutral" variant="subtle">已吊销</UBadge>
           <!-- 右侧这组一起换行，窄屏上按钮不会和使用时间分开 -->
           <div v-else class="ml-auto flex items-center gap-1">

@@ -11,6 +11,7 @@ import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
   actorLabel,
+  benchAccountLabel,
   credentialChangeLabels,
   credentialEventLabels,
   credentialSourceLabels,
@@ -285,6 +286,12 @@ async function reveal() {
             />
             <span class="font-medium">{{ credentialEventLabels[e.type]?.label ?? e.type }}</span>
             <span class="text-muted">{{ actorLabel(e.actor).name }}</span>
+            <template v-if="e.bench">
+              <UBadge size="sm" color="info" variant="subtle" :title="`运行标记 ${e.bench.run}`">
+                测试台
+              </UBadge>
+              <span class="text-xs text-muted">操作账号：{{ benchAccountLabel(e.bench) }}</span>
+            </template>
             <time
               :datetime="e.createdAt"
               :title="formatTime(e.createdAt)"

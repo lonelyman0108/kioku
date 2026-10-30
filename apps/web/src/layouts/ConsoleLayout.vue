@@ -1,11 +1,13 @@
 <script setup lang="ts">
 import type { CommandPaletteItem, DropdownMenuItem, NavigationMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
+import { useQuery } from '@tanstack/vue-query'
 import { computed, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { ownedApps } from '../benchSession'
 import { useConsoleSearch } from '../composables/useConsoleSearch'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { ME_KEY, useSession } from '../composables/useSession'
@@ -36,6 +38,14 @@ function switchSpace(id: string) {
   void router.push({ name: 'overview', params: { spaceId: id } })
 }
 
+// 测试台只给应用主人（会读到主人的私人层）：这个空间里没有自己的应用时不显示入口，后端同样拒绝
+const apps = useQuery({
+  queryKey: computed(() => ['apps', space.value?.id] as const),
+  queryFn: ({ queryKey: [, id] }) => api.apps(id!),
+  enabled: computed(() => Boolean(space.value)),
+})
+const ownsApp = computed(() => ownedApps(apps.data.value ?? [], me.data.value?.id).length > 0)
+
 const nav = computed<NavigationMenuItem[]>(() => {
   const id = space.value?.id
   if (!id) return []
@@ -50,6 +60,9 @@ const nav = computed<NavigationMenuItem[]>(() => {
     { label: '待审', icon: icons.review, to: { name: 'review', params } },
     { label: '应用与 Key', icon: icons.apps, to: { name: 'apps', params } },
     { label: '召回分析', icon: icons.recall, to: { name: 'recall', params } },
+    ...(ownsApp.value
+      ? [{ label: '测试台', icon: icons.bench, to: { name: 'bench', params } }]
+      : []),
     { label: '空间设置', icon: icons.spaceSettings, to: { name: 'space-settings', params } },
   ]
 })

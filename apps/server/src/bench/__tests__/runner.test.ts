@@ -314,7 +314,8 @@ describe('变量与 capture', () => {
       ),
     )
     expect(result.steps.map((s) => s.status)).toEqual(['failed', 'failed', 'passed'])
-    expect(result.steps[0]!.assertions[0]!.message).toContain('capture version')
+    // 界面（benchResult.ts）靠这个开头认出 capture 没取到，改了要一起改
+    expect(result.steps[0]!.assertions[0]!.message).toMatch(/^capture version：/)
     expect(result.steps[1]!.assertions).toEqual([
       { message: '变量 ${version} 没有取到', ok: false },
     ])

@@ -3,7 +3,7 @@ import type { ActivityItem } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { icons } from '../icons'
-import { actorLabel, changeLabels, eventLabel } from '../labels'
+import { actorLabel, benchAccountLabel, changeLabels, eventLabel } from '../labels'
 import { formatRelative, formatTime } from '../time'
 
 const props = defineProps<{ item: ActivityItem; spaceId: string }>()
@@ -45,6 +45,12 @@ const linkable = computed(() => !props.item.left && !props.item.deleted && !prop
         <UBadge v-if="item.expired && !item.deleted" size="sm" color="warning" variant="outline">
           现在已过期
         </UBadge>
+        <template v-if="item.bench">
+          <UBadge size="sm" color="info" variant="subtle" :title="`运行标记 ${item.bench.run}`">
+            测试台
+          </UBadge>
+          <span class="text-xs text-muted">操作账号：{{ benchAccountLabel(item.bench) }}</span>
+        </template>
       </div>
       <p v-if="item.left" class="text-xs text-muted">
         这次改动之后，它离开了你的可见范围（例如被改进了别人的私人层，或改成了 secret）。

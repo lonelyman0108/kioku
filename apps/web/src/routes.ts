@@ -70,6 +70,11 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/RecallPage.vue'),
       },
       {
+        path: 'spaces/:spaceId/bench',
+        name: 'bench',
+        component: () => import('./pages/BenchPage.vue'),
+      },
+      {
         path: 'spaces/:spaceId/settings',
         name: 'space-settings',
         component: () => import('./pages/SpaceSettingsPage.vue'),

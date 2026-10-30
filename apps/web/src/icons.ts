@@ -66,4 +66,16 @@ export const icons = {
   distill: 'i-lucide-flask-conical',
   stale: 'i-lucide-calendar-x',
   apply: 'i-lucide-check',
+  // 测试台：分页、步骤的四种状态、表单与 JSON 切换
+  bench: 'i-lucide-test-tube-diagonal',
+  benchCalls: 'i-lucide-terminal',
+  benchScenarios: 'i-lucide-list-checks',
+  passed: 'i-lucide-circle-check',
+  failed: 'i-lucide-circle-x',
+  skipped: 'i-lucide-skip-forward',
+  notRun: 'i-lucide-circle-dashed',
+  warning: 'i-lucide-triangle-alert',
+  json: 'i-lucide-braces',
+  form: 'i-lucide-text-cursor-input',
+  clear: 'i-lucide-eraser',
 } as const

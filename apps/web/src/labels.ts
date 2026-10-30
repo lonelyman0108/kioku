@@ -1,10 +1,12 @@
 import type {
   AccessContext,
   AppInfo,
+  BenchMark,
   CredentialProviderKind,
   CredentialSource,
   EventActor,
   KeyAccessMatrix,
+  KeyScopes,
   Layer,
   OriginScope,
   Provenance,
@@ -45,6 +47,10 @@ export const sensitivityLabels: Record<Sensitivity, string> = {
 
 // Key 的 admin 在界面上不叫 admin，免得被当成空间管理员
 export const ADMIN_SCOPE_LABEL = '跨人格 / 应用写入'
+
+// 一把 Key 的权限，一句话说完
+export const scopesSummary = (s: KeyScopes) =>
+  `读 ${s.readLayers.length} 层 · 写 ${s.writeLayers.length} 层 · 最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? ` · ${ADMIN_SCOPE_LABEL}` : ''}`
 
 export const accessContextLabels: Record<AccessContext, string> = {
   none: '无上下文（本机 agent）',
@@ -139,6 +145,9 @@ export function actorLabel(actor: EventActor): { name: string; viaApp: boolean }
   }
   return { name: '未知', viaApp: false }
 }
+
+// 测试台真实模式写下的事件：操作的账号，账号已经删掉时没有名字
+export const benchAccountLabel = (mark: BenchMark) => mark.accountName ?? '已删除的账号'
 
 // 活动里「改了哪些字段」
 export const changeLabels: Record<string, string> = {
