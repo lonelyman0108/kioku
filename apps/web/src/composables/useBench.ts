@@ -276,7 +276,6 @@ export function createBench() {
     what: { label: string; view: StepView },
     replay: BenchReplayStep[],
   ): Promise<RunOutcome> {
-    if (current.value !== id) return { kind: 'stale' }
     const { space: forSpace, app: forApp, key: forKey, mode: forMode } = target
     if (forMode === 'real') realInFlight.value++
     // 回滚模式作废了就丢掉：什么都没留下。真实模式下写入可能已经落库，要说出来，有结果就显示

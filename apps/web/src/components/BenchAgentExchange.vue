@@ -112,6 +112,7 @@ const PRE_CLASS =
       v-if="exchange.notice"
       :color="noticeColor(exchange.end)"
       variant="subtle"
+      class="wrap-anywhere"
       :title="exchange.notice"
     />
   </article>

@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
 import { ApiError, attachmentName, download, request } from '../client'
+import { api } from '../endpoints'
 
 afterEach(() => vi.unstubAllGlobals())
 
@@ -38,6 +39,49 @@ describe('API 客户端', () => {
     // 不传时也不影响
     await request('GET', '/x')
     expect(fetchMock.mock.calls.at(-1)![1].signal).toBeUndefined()
+  })
+
+  it('请求模型：取消信号一路传到 fetch，响应按契约校验', async () => {
+    const turn = {
+      message: { role: 'assistant', content: '好' },
+      toolCalls: [],
+      finishReason: 'stop',
+      usage: { promptTokens: 1, completionTokens: 2 },
+      ms: 3,
+      model: 'm',
+    }
+    const fetchMock = vi.fn(async () => Response.json(turn))
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    const body = { model: 'm', messages: [{ role: 'user', content: '你好' }] }
+    expect(await api.benchAgentTurn('s', 'a', 'k', body, controller.signal)).toEqual(turn)
+    const [url, init] = fetchMock.mock.calls[0] as unknown as [string, RequestInit]
+    expect(url).toBe('/v1/spaces/s/apps/a/keys/k/bench/agent/turn')
+    expect(init.method).toBe('POST')
+    expect(init.signal).toBe(controller.signal)
+    expect(JSON.parse(init.body as string)).toEqual(body)
+
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ message: { content: '少了 role' } })),
+    )
+    await expect(api.benchAgentTurn('s', 'a', 'k', body, controller.signal)).rejects.toThrow()
+  })
+
+  it('模型代理的情况', async () => {
+    const info = {
+      available: false,
+      reason: 'noModel',
+      defaultModel: null,
+      loop: 'hook',
+      tools: true,
+    }
+    const fetchMock = vi.fn(async () => Response.json(info))
+    vi.stubGlobal('fetch', fetchMock)
+    expect(await api.benchAgent('s', 'a', 'k')).toEqual(info)
+    expect((fetchMock.mock.calls[0] as unknown as [string])[0]).toBe(
+      '/v1/spaces/s/apps/a/keys/k/bench/agent',
+    )
   })
 
   it('错误响应转成带状态码和提示的 ApiError', async () => {
