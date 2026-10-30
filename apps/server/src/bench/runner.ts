@@ -208,11 +208,13 @@ export interface RunInput {
   replay: readonly BenchReplayStep[]
   // 这次运行的标记，${run} 换成它
   run: string
+  // 执行前按展开之后的步骤再判一次，给出原因时这一步不执行、算失败
+  refuse?: (step: BenchStep) => string | null
 }
 
 export async function runSteps(
   executor: BenchExecutor,
-  { mode, steps, replay, run }: RunInput,
+  { mode, steps, replay, run, refuse }: RunInput,
 ): Promise<BenchRunResult> {
   const whoami = await executor.whoami()
   const results: BenchStepResult[] = []
@@ -238,6 +240,17 @@ export async function runSteps(
   })
   const markCaptures = (step: BenchStep, state: 'skipped' | 'failed') => {
     for (const name of Object.keys(step.capture ?? {})) invalidate(name, state)
+  }
+  // 这一步没有执行，算失败
+  const failedBefore = (step: BenchStep, head: ReturnType<typeof base>, message: string) => {
+    markCaptures(step, 'failed')
+    results.push({
+      ...NOT_RUN,
+      ...head,
+      status: 'failed',
+      reason: null,
+      assertions: [{ message, ok: false }],
+    })
   }
 
   // 重放：有步骤报错就停下，当前步骤都不执行，由界面让用户清空或接受
@@ -290,19 +303,17 @@ export async function runSteps(
           reason: `依赖的步骤被跳过（\${${missing}}）`,
         })
       } else {
-        markCaptures(step, 'failed')
-        results.push({
-          ...NOT_RUN,
-          ...head,
-          status: 'failed',
-          reason: null,
-          assertions: [{ message: `变量 \${${missing}} 没有取到`, ok: false }],
-        })
+        failedBefore(step, head, `变量 \${${missing}} 没有取到`)
       }
       continue
     }
 
     const resolved = resolve(step, vars)
+    const refused = refuse?.(resolved)
+    if (refused) {
+      failedBefore(step, head, refused)
+      continue
+    }
     const started = performance.now()
     let outcome = await executor.execute(resolved)
     const ms = Math.round(performance.now() - started)

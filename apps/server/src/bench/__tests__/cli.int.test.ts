@@ -428,6 +428,109 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
       PROCESS_TIMEOUT,
     )
 
+    describe('运行前判不出来的：event、chatType 写成变量', () => {
+      // 只读的一步取到变量；group 的上下文第一次见到时新建对象，能看出真的写了
+      const scenario = async (step: unknown) => {
+        await realCreate({ uri: 'notes://vars', content: '事件: turn.end\n会话: group' })
+        return scenarioFile([
+          {
+            kind: 'tool',
+            label: '取变量',
+            tool: 'kioku_get',
+            arguments: { uri: 'notes://vars' },
+            capture: { e: '事件: ', c: '会话: ' },
+          },
+          step,
+          { kind: 'whoami', label: '后面照常跑' },
+        ])
+      }
+      const GROUP = {
+        platform: 'bench',
+        group: { id: 'bench-group' },
+        sender: { id: 'bench-user' },
+      }
+
+      it.each([
+        [
+          "event: '${e}'",
+          {
+            kind: 'lifecycle',
+            label: '要写的一步',
+            body: { event: '${e}', sessionId: 's', user: '你好', reply: '你好呀' },
+          },
+          '/v1/lifecycle/event',
+        ],
+        [
+          "chatType: '${c}'（/recall）",
+          {
+            kind: 'recall',
+            label: '要写的一步',
+            body: { query: '随便', context: { chatType: '${c}', ...GROUP } },
+          },
+          '/v1/recall',
+        ],
+        [
+          "chatType: '${c}'（生命周期事件）",
+          {
+            kind: 'lifecycle',
+            label: '要写的一步',
+            body: {
+              event: 'prompt.submit',
+              prompt: '随便',
+              context: { chatType: '${c}', ...GROUP },
+            },
+          },
+          '/v1/lifecycle/event',
+        ],
+      ])(
+        '%s：不加 --allow-writes 时这一步不发请求，算失败，说明原因',
+        async (_, step, path) => {
+          const file = await scenario(step)
+          const { code, stdout } = await bench(['--file', file])
+          expect(code).toBe(1)
+          expect(stdout).toContain('通过  取变量')
+          expect(stdout).toContain('失败  要写的一步')
+          expect(stdout).toContain('--allow-writes')
+          expect(stdout).toContain('通过  后面照常跑')
+          expect(stdout).toContain('通过 2，失败 1')
+          expect(requests.map((r) => r.path)).not.toContain(path)
+          expect(await count(subjects)).toBe(0)
+
+          // 加了就发
+          requests = []
+          await bench(['--file', file, '--allow-writes'])
+          expect(requests.map((r) => r.path)).toContain(path)
+        },
+        PROCESS_TIMEOUT,
+      )
+
+      it(
+        '展开之后不写的照常执行：cron 上下文',
+        async () => {
+          await realCreate({ uri: 'notes://vars', content: '会话: cron' })
+          const file = await scenarioFile([
+            {
+              kind: 'tool',
+              tool: 'kioku_get',
+              arguments: { uri: 'notes://vars' },
+              capture: { c: '会话: ' },
+            },
+            {
+              kind: 'recall',
+              label: '定时任务',
+              body: { query: '随便', context: { chatType: '${c}' } },
+              expect: { error: false },
+            },
+          ])
+          const { code, stdout } = await bench(['--file', file])
+          expect(stdout).toContain('通过  定时任务')
+          expect(code).toBe(0)
+          expect(requests.map((r) => r.path)).toContain('/v1/recall')
+        },
+        PROCESS_TIMEOUT,
+      )
+    })
+
     it(
       '加了就真实执行：内置预设全部通过或跳过，退出码 0，这是真实写入与真实的召回事件',
       async () => {

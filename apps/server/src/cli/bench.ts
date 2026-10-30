@@ -6,6 +6,7 @@ import {
   BenchScenario,
   mayWrite,
   type BenchRunResult,
+  type BenchStep,
   type BenchStepResult,
 } from '@kioku/contracts'
 
@@ -27,7 +28,8 @@ const HELP = `用真实 HTTP 与真实 Key 跑测试台的场景，覆盖鉴权�
   --allow-writes      允许写操作。这里没有回滚：写工具真的写入；kioku_credential 取值记访问事件；
                       turn.end 进对话缓冲、会排抽取；带私聊、群聊、频道上下文的生命周期事件与 /recall，
                       第一次见到的平台账号会新建对象，对象没有删除接口，只能合并。
-                      kioku_get 读到引用外部凭据的记忆时也记访问事件，不算写操作
+                      kioku_get 读到引用外部凭据的记忆时也记访问事件，不算写操作。
+                      event、chatType 写成变量时运行前判不出来：展开之后才看出要写的步骤不发请求，算失败
   --show-output       打印每一步收到的原文。可能含明文：这里没有打码，取值是一次真实调用
   -h, --help          显示帮助
 
@@ -39,7 +41,7 @@ const HELP = `用真实 HTTP 与真实 Key 跑测试台的场景，覆盖鉴权�
   KIOKU_BENCH_KEY     API Key，不走命令行参数（参数会进 shell 历史与进程列表）
   KIOKU_BENCH_URL     服务地址
 
-退出码：0 没有失败的步骤；1 有失败或没有执行的步骤，或连不上服务；2 用法错误、要写却没有 --allow-writes`
+退出码：0 没有失败的步骤；1 有失败或没有执行的步骤，或连不上服务；2 用法错误、运行前看得出要写却没有 --allow-writes`
 
 const STATUS: Record<BenchStepResult['status'], string> = {
   passed: '通过',
@@ -162,12 +164,19 @@ async function main(): Promise<void> {
     console.log(`握手：${server.name} ${server.version}，${server.tools.length} 个工具`)
     console.log(`应用：${whoami.app.name}（${whoami.app.runtimeFamily}）`)
 
+    // 上面看的是展开之前的步骤：event、chatType 写成变量时看不出来，执行时按展开后的再判一次
+    const refuse = (step: BenchStep) =>
+      !values['allow-writes'] && mayWrite(step)
+        ? '这一步展开变量之后可能写库，这里没有回滚，没有发请求；要加 --allow-writes'
+        : null
+
     for (const scenario of scenarios) {
       const result = await runSteps(executor, {
         mode: 'real',
         steps: scenario.steps,
         replay: [],
         run: randomBytes(4).toString('hex'),
+        refuse,
       })
       printResult(scenario, result, values['show-output'])
       ok &&= result.ok

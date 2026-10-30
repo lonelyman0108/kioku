@@ -419,6 +419,41 @@ describe('变量与 capture', () => {
       expect(seen[3]).toMatchObject({ arguments: { uri: 'a://3' } })
     })
   })
+
+  describe('执行前再判一次（refuse）', () => {
+    const refuse = (step: BenchStep) =>
+      step.kind === 'recall' && (step.body as { query?: unknown }).query === '不让发'
+        ? '不让发的原因'
+        : null
+
+    it('按展开之后的步骤判：这一步不执行、算失败，文字说明原因，它声明的变量算没取到', async () => {
+      const { executor, seen } = fakeExecutor((_, i) =>
+        textOutcome(i === 0 ? '查询: 不让发' : '好'),
+      )
+      const result = await runSteps(executor, {
+        mode: 'real',
+        run: 'abc123',
+        replay: [],
+        refuse,
+        steps: steps(
+          { kind: 'whoami', capture: { query: '查询: ' } },
+          { kind: 'recall', label: '发', body: { query: '${query}' }, capture: { x: '好' } },
+          { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${x}' } },
+          { kind: 'whoami', label: '后面照常跑' },
+        ),
+      })
+      expect(result.steps[1]).toMatchObject({
+        status: 'failed',
+        isError: false,
+        internalError: false,
+        text: '',
+        assertions: [{ message: '不让发的原因', ok: false }],
+      })
+      expect(result.steps.map((s) => s.status)).toEqual(['passed', 'failed', 'failed', 'passed'])
+      expect(seen.map((s) => s.kind)).toEqual(['whoami', 'whoami'])
+      expect(result.ok).toBe(false)
+    })
+  })
 })
 
 describe('跳过与没有执行', () => {
