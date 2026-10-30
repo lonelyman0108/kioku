@@ -1,11 +1,12 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, shallowReactive, watch, watchEffect } from 'vue'
 
 import { api } from '../api/endpoints'
 import {
   buildStep,
   callTargets,
+  draftEdited,
   formFromJson,
   jsonContextDiffers,
   jsonFromForm,
@@ -41,6 +42,7 @@ const {
   clearSession,
   acceptDiverged,
   callFailure: failure,
+  unsaved,
 } = useBench()
 
 const tools = useQuery({
@@ -90,7 +92,8 @@ const retryTools = computed(() => [
 ])
 
 // 每个调用一份草稿：切到别的调用再切回来时还在。只在内存里，可能有明文，不进浏览器存储
-const drafts = new Map<string, Draft>()
+const drafts = shallowReactive(new Map<string, Draft>())
+watchEffect(() => (unsaved.drafts = [...drafts.values()].some(draftEdited)))
 const draft = computed(() => {
   const found = drafts.get(target.value.id)
   if (found) return found
@@ -117,6 +120,7 @@ function showJson() {
     return
   }
   draft.value.text = made.text
+  draft.value.base = made.text
   draft.value.json = true
   formError.value = null
 }

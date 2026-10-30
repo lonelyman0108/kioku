@@ -17,6 +17,7 @@ const fakes = vi.hoisted(() => ({
     keys: vi.fn(),
     benchRun: vi.fn(),
   },
+  guard: vi.fn(),
 }))
 
 vi.mock('vue-router', () => ({
@@ -25,6 +26,7 @@ vi.mock('vue-router', () => ({
 }))
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
 vi.mock('../useSession', () => ({ useSession: () => ({ me: { data: ref({ id: 'me' }) } }) }))
+vi.mock('../unsavedChanges', () => ({ useUnsavedChangesGuard: fakes.guard }))
 
 const SCOPES: KeyScopes = {
   readLayers: ['private'],
@@ -123,6 +125,7 @@ beforeEach(() => {
   fakes.api.apps.mockReset().mockResolvedValue([app('a1'), app('a2')])
   fakes.api.keys.mockReset().mockResolvedValue([liveKey('k1'), liveKey('k2')])
   fakes.api.benchRun.mockReset()
+  fakes.guard.mockReset()
 })
 afterEach(() => {
   scope.stop()
@@ -587,5 +590,92 @@ describe('切换模式', () => {
     expect(bench.confirmingRollback.value).toBe(false)
     expect(bench.confirmingReal.value).toBe(false)
     expect(bench.real.value).toBe(false)
+  })
+})
+
+describe('离开页面前提醒', () => {
+  const dirty = () => (fakes.guard.mock.calls[0]![0] as { value: boolean }).value
+  const leavesOn = (to: object, from: object) =>
+    (
+      fakes.guard.mock.calls[0]![1] as {
+        leavesOn: (to: object, from: object) => boolean
+      }
+    ).leavesOn(to, from)
+
+  it('一开始没有要提醒的', async () => {
+    start()
+    await settle()
+    expect(fakes.guard).toHaveBeenCalledTimes(1)
+    expect(dirty()).toBe(false)
+  })
+
+  it.each(['scenario', 'drafts'] as const)('%s 改过要提醒，改回去就不用了', async (field) => {
+    const bench = start()
+    await settle()
+    bench.unsaved[field] = true
+    expect(dirty()).toBe(true)
+    bench.unsaved[field] = false
+    expect(dirty()).toBe(false)
+  })
+
+  it('真实模式的运行还没回来要提醒，回来了就不用了', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    let finish!: (result: BenchRunResult) => void
+    fakes.api.benchRun.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+    const outcome = bench.execute([{ kind: 'whoami' }], { label: '场景', view: 'judged' })
+    await settle()
+    expect(dirty()).toBe(true)
+    finish(RESULT)
+    await outcome
+    expect(dirty()).toBe(false)
+  })
+
+  it('真实模式的运行出错了也不再提醒', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    fakes.api.benchRun.mockRejectedValue(new ApiError(502, '网关出错'))
+    await bench.execute([{ kind: 'whoami' }], { label: '场景', view: 'judged' })
+    expect(dirty()).toBe(false)
+  })
+
+  it('中途作废的真实运行没回来也要提醒：它可能还在写入', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    let finish!: (result: BenchRunResult) => void
+    fakes.api.benchRun.mockReturnValue(new Promise((resolve) => (finish = resolve)))
+    const outcome = bench.execute([{ kind: 'whoami' }], { label: '场景', view: 'judged' })
+    await settle()
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    expect(bench.running.value).toBe(false)
+    expect(dirty()).toBe(true)
+    finish(RESULT)
+    await outcome
+    expect(dirty()).toBe(false)
+  })
+
+  it('回滚模式的运行不用提醒：什么都不会留下', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchRun.mockReturnValue(new Promise(() => {}))
+    void bench.execute([{ kind: 'whoami' }], { label: '场景', view: 'judged' })
+    await settle()
+    expect(bench.running.value).toBe(true)
+    expect(dirty()).toBe(false)
+  })
+
+  it('换应用、Key、分页只改查询参数，不算离开；写回地址也是；换空间才算', () => {
+    start()
+    const from = { params: { spaceId: 's1' }, query: {} }
+    expect(leavesOn({ params: { spaceId: 's1' }, query: { key: 'k2' } }, from)).toBe(false)
+    expect(leavesOn({ params: { spaceId: 's1' }, query: { tab: 'scenarios' } }, from)).toBe(false)
+    expect(leavesOn({ params: { spaceId: 's2' }, query: {} }, from)).toBe(true)
   })
 })

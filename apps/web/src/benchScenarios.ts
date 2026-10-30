@@ -43,6 +43,10 @@ export function parseScenario(text: string): ParsedScenario {
 
 export const formatScenario = (scenario: BenchScenario) => JSON.stringify(scenario, null, 2)
 
+// 文本框里的场景改过：和上次载入的不同。空的没有什么可丢的。只在内存里，换掉或离开页面之前要先问一声
+export const scenarioEdited = (text: string, loaded: string) =>
+  Boolean(text.trim()) && text !== loaded
+
 // 这个场景不适用于这个运行时的原因；适用时为 null。不给 runtimes 的所有运行时都适用
 export function runtimeMismatch(scenario: BenchScenario, runtime: string): string | null {
   const { runtimes } = scenario

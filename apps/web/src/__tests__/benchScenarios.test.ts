@@ -15,6 +15,7 @@ import {
   plaintextIn,
   runSummary,
   runtimeMismatch,
+  scenarioEdited,
   scenarioView,
   stepOpen,
   writingSteps,
@@ -129,6 +130,20 @@ describe('校验场景', () => {
     const parsed = parseScenario(JSON.stringify({ id: 'mine', title: '标题', steps }))
     expect(!parsed.ok && parsed.errors).toHaveLength(21)
     expect(!parsed.ok && parsed.errors.at(-1)).toContain('还有 10 处')
+  })
+})
+
+describe('文本框里的场景改过没有', () => {
+  it('和上次载入的不同才算', () => {
+    expect(scenarioEdited('', '')).toBe(false)
+    expect(scenarioEdited('{"a":1}', '{"a":1}')).toBe(false)
+    expect(scenarioEdited('{"a":2}', '{"a":1}')).toBe(true)
+    expect(scenarioEdited('{"a":1}', '')).toBe(true)
+  })
+
+  it('全删掉了不算：没有什么可丢的', () => {
+    expect(scenarioEdited('', '{"a":1}')).toBe(false)
+    expect(scenarioEdited('  \n', '{"a":1}')).toBe(false)
   })
 })
 

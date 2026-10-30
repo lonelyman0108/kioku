@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { BENCH_MAX_REQUEST_BYTES, type BenchScenario } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
-import { computed, ref, shallowRef, useTemplateRef, watch } from 'vue'
+import { computed, ref, shallowRef, useTemplateRef, watch, watchEffect } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -12,6 +12,7 @@ import {
   plaintextIn,
   runSummary,
   runtimeMismatch,
+  scenarioEdited,
   scenarioView,
   stepOpen,
   writingSteps,
@@ -36,6 +37,7 @@ const {
   execute,
   scenarioFailure: failure,
   scenarioOutcome: outcome,
+  unsaved,
 } = useBench()
 
 const presets = useQuery({
@@ -63,6 +65,8 @@ const preset = computed(
 const text = ref('')
 // 上次载入的内容：改过之后再载入别的要先问一声
 const loaded = ref('')
+const edited = computed(() => scenarioEdited(text.value, loaded.value))
+watchEffect(() => (unsaved.scenario = edited.value))
 const errors = ref<string[]>([])
 function setText(next: string) {
   text.value = next
@@ -75,9 +79,7 @@ function edit(next: string) {
 }
 
 function replaceText(next: string): boolean {
-  if (text.value.trim() && text.value !== loaded.value) {
-    if (!window.confirm('文本框里改过的内容会被换掉，继续吗？')) return false
-  }
+  if (edited.value && !window.confirm('文本框里改过的内容会被换掉，继续吗？')) return false
   setText(next)
   loaded.value = next
   return true
@@ -121,9 +123,9 @@ const mismatch = computed(() => {
 
 function validScenario(): BenchScenario | null {
   const parsed = parseScenario(text.value)
-  if (parsed.ok) return parsed.scenario
-  errors.value = parsed.errors
-  return null
+  // 成功的话清掉之前的错误：文件过大这类报错不来自文本框，文本框一直没动也要清
+  errors.value = parsed.ok ? [] : parsed.errors
+  return parsed.ok ? parsed.scenario : null
 }
 
 // 导出前检测明文，由用户决定是否继续

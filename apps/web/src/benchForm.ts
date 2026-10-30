@@ -463,13 +463,23 @@ export interface Draft {
   json: boolean
   state: FormState
   text: string
+  // 进入 JSON 模式时的内容：和它不同才算改过
+  base: string
 }
 
-export const newDraft = (target: CallTarget): Draft => ({
-  json: target.fields === null,
-  state: initialState(target.fields ?? []),
-  text: target.fields === null ? '{}' : '',
-})
+export function newDraft(target: CallTarget): Draft {
+  const text = target.fields === null ? '{}' : ''
+  return {
+    json: target.fields === null,
+    state: initialState(target.fields ?? []),
+    text,
+    base: text,
+  }
+}
+
+// 这份草稿的 JSON 改过：只在内存里，离开页面就没了，要先问一声
+export const draftEdited = (draft: Pick<Draft, 'json' | 'text' | 'base'>) =>
+  draft.json && draft.text !== draft.base
 
 // 请求的内容：固定的部分、表单的字段、页面上的会话上下文
 export function bodyOf(

@@ -9,6 +9,7 @@ import {
   contextDefaults,
   contextOf,
   contextSummary,
+  draftEdited,
   fieldsOf,
   formFromJson,
   initialState,
@@ -37,6 +38,30 @@ const stateOf = (
 ): FormState => ({ values: { ...initialState(fields).values, ...values }, nulls })
 
 const GROUP = contextOf({ ...contextDefaults(), chatType: 'group' })
+
+describe('JSON 草稿改过没有', () => {
+  it('新的草稿没有改过：工具的 schema 看不懂、一开始就是 JSON 的也一样', () => {
+    expect(draftEdited(newDraft(targetOf('kioku_get')))).toBe(false)
+    const unknown = callTargets([{ name: 'x', inputSchema: 'oops' }]).find((t) => t.id === 'x')!
+    expect(unknown.fields).toBeNull()
+    expect(newDraft(unknown).json).toBe(true)
+    expect(draftEdited(newDraft(unknown))).toBe(false)
+    expect(draftEdited({ ...newDraft(unknown), text: '{"a":1}' })).toBe(true)
+  })
+
+  it('表单转成的 JSON 没动过不算，动过才算', () => {
+    const text = '{"uri":"a://b"}'
+    const entered = { ...newDraft(targetOf('kioku_get')), json: true, text, base: text }
+    expect(draftEdited(entered)).toBe(false)
+    expect(draftEdited({ ...entered, text: '{"uri":"a://c"}' })).toBe(true)
+  })
+
+  it('回到表单之后不算：内容已经放回表单了', () => {
+    const text = '{"uri":"a://b"}'
+    const back = { ...newDraft(targetOf('kioku_get')), json: false, text, base: '{}' }
+    expect(draftEdited(back)).toBe(false)
+  })
+})
 
 describe('选中的调用不在目录里', () => {
   const noTools = callTargets([])

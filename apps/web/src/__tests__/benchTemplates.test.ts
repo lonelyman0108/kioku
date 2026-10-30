@@ -404,6 +404,32 @@ describe('选中的工具不在目录里', () => {
   })
 })
 
+describe('离开页面前提醒', () => {
+  it('页面上只注册一份：提醒的状态是全局的一个，注册两份会互相覆盖', () => {
+    const sources = [benchCalls, benchScenariosView, benchToolbar, benchPage, benchAbandoned]
+    for (const source of sources) expect(source).not.toContain('useUnsavedChangesGuard')
+    expect(useBench.match(/useUnsavedChangesGuard\(/g)).toHaveLength(1)
+    // 只能在页面的 setup 里建
+    expect(benchPage).toContain('provideBench()')
+  })
+
+  it('场景文本框改过算：替换前问的也是同一个判断', () => {
+    const scenarios = sfc(benchScenariosView)
+    expect(scenarios.script).toContain('scenarioEdited(text.value, loaded.value)')
+    expect(scenarios.script).toContain('watchEffect(() => (unsaved.scenario = edited.value))')
+    expect(bodyOf(scenarios.script, 'replaceText')).toContain('if (edited.value && !window.confirm')
+  })
+
+  it('调用台的 JSON 草稿改过算：所有调用的草稿都看，转成 JSON 时记下起点', () => {
+    const calls = sfc(benchCalls)
+    expect(calls.script).toContain('shallowReactive(new Map<string, Draft>())')
+    expect(calls.script).toContain(
+      'watchEffect(() => (unsaved.drafts = [...drafts.values()].some(draftEdited)))',
+    )
+    expect(bodyOf(calls.script, 'showJson')).toContain('draft.value.base = made.text')
+  })
+})
+
 describe('切换调用', () => {
   const calls = sfc(benchCalls)
 
@@ -541,7 +567,7 @@ describe('场景的运行与导出', () => {
   it('运行前校验，发的是校验过的步骤；不带调用台的重放', () => {
     const valid = bodyOf(scenarios.script, 'validScenario')
     expect(valid).toContain('parseScenario(text.value)')
-    expect(valid).toContain('if (parsed.ok) return parsed.scenario')
+    expect(valid).toContain('return parsed.ok ? parsed.scenario : null')
     expect(valid).not.toContain('JSON.parse')
     expect(bodyOf(scenarios.script, 'startRun')).toContain('const scenario = validScenario()')
     expect(bodyOf(scenarios.script, 'runScenario')).toContain('execute(scenario.steps, {')
@@ -600,7 +626,10 @@ describe('场景的运行与导出', () => {
     expect(onFile).toContain("errors.value = ['读不出这个文件']")
     // 有错的内容也放进文本框，就地改
     expect(onFile).toContain('replaceText(parsed.ok ? formatScenario(parsed.scenario) : content)')
-    expect(bodyOf(scenarios.script, 'validScenario')).toContain('errors.value = parsed.errors')
+    // 合法的时候清掉：文件过大这类报错不会因为文本框没动就一直留着
+    expect(bodyOf(scenarios.script, 'validScenario')).toContain(
+      'errors.value = parsed.ok ? [] : parsed.errors',
+    )
     const alert = withIf(scenarios.elements, 'errors.length')
     expect(alert.tag).toBe('UAlert')
     const line = withFor(walk(alert), '(line, i) in errors')
