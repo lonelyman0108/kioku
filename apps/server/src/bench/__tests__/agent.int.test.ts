@@ -521,15 +521,26 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       ])
     })
 
-    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，后面按顺序跟齐对应的 tool 消息。不合规就 400
+    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，type 是 function，function 有非空的名字和字符串的
+    // 参数，后面按顺序跟齐对应的 tool 消息。不合规就 400
     const refusal = (messages: FakeChatMessage[]) => {
       for (const [i, message] of messages.entries()) {
         if (!('tool_calls' in message)) continue
-        const calls = message.tool_calls as { id?: unknown }[]
+        const calls = message.tool_calls as {
+          id?: unknown
+          type?: unknown
+          function?: { name?: unknown; arguments?: unknown } | null
+        }[]
         if (!Array.isArray(calls) || !calls.length) return 'tool_calls 不能是空的'
         const ids = calls.map((call) => call.id)
         if (ids.some((id) => typeof id !== 'string' || !id)) return 'id 不合法'
         if (new Set(ids).size !== ids.length) return 'id 重复'
+        if (calls.some((call) => call.type !== 'function')) return 'type 不合法'
+        const names = calls.map((call) => call.function?.name)
+        if (names.some((name) => typeof name !== 'string' || !name)) return '名字不合法'
+        if (calls.some((call) => typeof call.function?.arguments !== 'string')) {
+          return '参数不是字符串'
+        }
         const answered = messages.slice(i + 1, i + 1 + ids.length).map((m) => m.tool_call_id)
         if (JSON.stringify(answered) !== JSON.stringify(ids)) return 'tool_call_id 对不上'
       }
@@ -569,6 +580,88 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(second.message.content).toBe('调完了')
       // 发给上游的和界面放回历史的一样，id 没有再变
       expect(server.requests[1]).toEqual(history)
+    })
+
+    it('工具调用缺 type、function、名字或参数：消息里补齐、下一轮严格的上游也接受，toolCalls 照旧报工具错误', async () => {
+      const boot = { name: 'kioku_boot', arguments: '{}' }
+      const raw = [
+        { id: 'no-type', function: boot },
+        { id: 'no-args', type: 'function', function: { name: 'kioku_boot' } },
+        { id: 'null-args', type: 'function', function: { name: 'kioku_boot', arguments: null } },
+        {
+          id: 'object-args',
+          type: 'function',
+          function: { name: 'kioku_get', arguments: { uri: 'core://agent' } },
+        },
+        { id: 'no-function', type: 'function' },
+        { id: 'null-function', type: 'function', function: null },
+        { id: 'no-name', type: 'function', function: { arguments: '{"a":1}' } },
+        { id: 'other-type', type: 'custom', custom: { name: 'x' } },
+        { id: 'bare' },
+      ]
+      // 前提：这些调用原样放回去，严格的上游一个都不收
+      for (const call of raw) {
+        expect(
+          refusal([
+            { role: 'assistant', content: null, tool_calls: [call] },
+            toolMessage(call.id, '结果'),
+          ]),
+        ).not.toBeNull()
+      }
+
+      const server = await strictModel(() => ({
+        content: null,
+        reasoning_content: '想一想',
+        tool_calls: raw,
+      }))
+      const first = await turn({ messages: [USER] })
+      const history = [USER, first.message, ...raw.map((call) => toolMessage(call.id, '结果'))]
+      const second = await turn({ messages: history })
+      expect(second.message.content).toBe('调完了')
+      // 发给上游的和界面放回历史的一样，都合规
+      expect(server.requests[1]).toEqual(history)
+      expect(refusal(server.requests[1]!)).toBeNull()
+
+      const placeholder = { name: 'unknown_tool', arguments: '{}' }
+      expect(first.message.reasoning_content).toBe('想一想')
+      expect(first.message.tool_calls).toEqual([
+        { id: 'no-type', type: 'function', function: boot },
+        { id: 'no-args', type: 'function', function: boot },
+        { id: 'null-args', type: 'function', function: boot },
+        {
+          id: 'object-args',
+          type: 'function',
+          function: { name: 'kioku_get', arguments: '{"uri":"core://agent"}' },
+        },
+        { id: 'no-function', type: 'function', function: placeholder },
+        { id: 'null-function', type: 'function', function: placeholder },
+        {
+          id: 'no-name',
+          type: 'function',
+          function: { name: 'unknown_tool', arguments: '{"a":1}' },
+        },
+        { id: 'other-type', type: 'function', custom: { name: 'x' }, function: placeholder },
+        { id: 'bare', type: 'function', function: placeholder },
+      ])
+
+      const noName = { name: '', arguments: null, parseError: '工具调用没有名字' }
+      const booted = { name: 'kioku_boot', arguments: {}, parseError: null }
+      expect(first.toolCalls).toEqual([
+        { id: 'no-type', ...booted },
+        { id: 'no-args', ...booted },
+        { id: 'null-args', ...booted },
+        {
+          id: 'object-args',
+          name: 'kioku_get',
+          arguments: { uri: 'core://agent' },
+          parseError: null,
+        },
+        { id: 'no-function', ...noName },
+        { id: 'null-function', ...noName },
+        { id: 'no-name', ...noName },
+        { id: 'other-type', ...noName },
+        { id: 'bare', ...noName },
+      ])
     })
 
     it.each([

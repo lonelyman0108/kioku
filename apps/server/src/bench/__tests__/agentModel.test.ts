@@ -330,7 +330,7 @@ describe('请求', () => {
         { id: 'same', type: 'function', function: { name: 'x', arguments: '' } },
         { id: 'same', type: 'function', function: { name: 'y', arguments: '{"a":1}' } },
         { type: 'function', function: { name: 'z', arguments: '{bad' }, extra: true },
-        { id: 7, type: 'custom', custom: { name: 'w' } },
+        { id: 7, type: 'function', function: { name: 'w', arguments: '{}' } },
       ],
     }
     const { fetchImpl } = stubFetch(() => new Response(chatBody(message)))
@@ -344,11 +344,137 @@ describe('请求', () => {
       { id: 'same', name: 'x', arguments: {}, parseError: null },
       { id: ids[1], name: 'y', arguments: { a: 1 }, parseError: null },
       { id: ids[2], name: 'z', arguments: null, parseError: '工具参数不是合法的 JSON' },
-      { id: ids[3], name: '', arguments: null, parseError: '工具调用没有名字' },
+      { id: ids[3], name: 'w', arguments: {}, parseError: null },
     ])
     expect(result.message).toEqual({
       ...message,
       tool_calls: message.tool_calls.map((call, i) => ({ ...call, id: ids[i] })),
+    })
+  })
+
+  describe('放回历史的工具调用', () => {
+    // 上游给的一个工具调用，id 是 c：放回历史的消息里那一项与解析的结果
+    const turnWith = async (call: object) => {
+      const message = { role: 'assistant', content: null, tool_calls: [{ id: 'c', ...call }] }
+      const { fetchImpl } = stubFetch(() => new Response(chatBody(message)))
+      const result = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+      return { sent: (result.message.tool_calls as unknown[])[0], parsed: result.toolCalls[0] }
+    }
+    const fn = { name: 'x', arguments: '{"a":1}' }
+    const parsedFn = { id: 'c', name: 'x', arguments: { a: 1 }, parseError: null }
+    const noArguments = { id: 'c', name: 'x', arguments: {}, parseError: null }
+    const noName = { id: 'c', name: '', arguments: null, parseError: '工具调用没有名字' }
+    const notObject = {
+      id: 'c',
+      name: 'x',
+      arguments: null,
+      parseError: '工具参数不是 JSON 对象',
+    }
+    const placeholder = { name: 'unknown_tool', arguments: '{}' }
+
+    it.each([
+      ['type 缺失', { function: fn }, { type: 'function', function: fn }, parsedFn],
+      ['type 是 null', { type: null, function: fn }, { type: 'function', function: fn }, parsedFn],
+      ['type 是空串', { type: '', function: fn }, { type: 'function', function: fn }, parsedFn],
+      [
+        'arguments 缺失',
+        { type: 'function', function: { name: 'x' } },
+        { type: 'function', function: { name: 'x', arguments: '{}' } },
+        noArguments,
+      ],
+      [
+        'arguments 是 null',
+        { type: 'function', function: { name: 'x', arguments: null } },
+        { type: 'function', function: { name: 'x', arguments: '{}' } },
+        noArguments,
+      ],
+      [
+        'arguments 是对象',
+        { type: 'function', function: { name: 'x', arguments: { a: 1 } } },
+        { type: 'function', function: fn },
+        parsedFn,
+      ],
+      [
+        'arguments 是数组',
+        { type: 'function', function: { name: 'x', arguments: [1] } },
+        { type: 'function', function: { name: 'x', arguments: '[1]' } },
+        notObject,
+      ],
+      [
+        'arguments 是数字',
+        { type: 'function', function: { name: 'x', arguments: 3 } },
+        { type: 'function', function: { name: 'x', arguments: '3' } },
+        notObject,
+      ],
+      ['function 缺失', { type: 'function' }, { type: 'function', function: placeholder }, noName],
+      [
+        'function 是 null',
+        { type: 'function', function: null },
+        { type: 'function', function: placeholder },
+        noName,
+      ],
+      [
+        'function 是字符串',
+        { type: 'function', function: 'x' },
+        { type: 'function', function: placeholder },
+        noName,
+      ],
+      [
+        'function 是数组',
+        { type: 'function', function: ['x'] },
+        { type: 'function', function: placeholder },
+        noName,
+      ],
+      [
+        '名字缺失，参数留着',
+        { type: 'function', function: { arguments: '{"a":1}' } },
+        { type: 'function', function: { name: 'unknown_tool', arguments: '{"a":1}' } },
+        noName,
+      ],
+      [
+        '名字是空串',
+        { type: 'function', function: { name: '', arguments: '{}' } },
+        { type: 'function', function: placeholder },
+        noName,
+      ],
+      [
+        '名字不是字符串',
+        { type: 'function', function: { name: 42, arguments: '{}' } },
+        { type: 'function', function: placeholder },
+        noName,
+      ],
+      ['只有 id', {}, { type: 'function', function: placeholder }, noName],
+      [
+        '是别的 type、没有 function：type 也写成 function，别的字段留着',
+        { type: 'custom', custom: { name: 'w' } },
+        { type: 'function', custom: { name: 'w' }, function: placeholder },
+        noName,
+      ],
+    ])('%s：消息里补齐，解析的结果照旧', async (_, call, sent, parsed) => {
+      const result = await turnWith(call)
+      expect(result.sent).toEqual({ id: 'c', ...sent })
+      expect(result.parsed).toEqual(parsed)
+    })
+
+    it.each([
+      ['都齐全', { type: 'function', function: fn }],
+      ['arguments 是空串', { type: 'function', function: { name: 'x', arguments: '' } }],
+      [
+        'arguments 不是合法的 JSON',
+        { type: 'function', function: { name: 'x', arguments: '{bad' } },
+      ],
+      ['有 function 的别的 type', { type: 'builtin_function', function: fn }],
+      [
+        '多余的字段',
+        {
+          type: 'function',
+          index: 0,
+          future_field: { a: [1] },
+          function: { ...fn, future_field: { b: [2] } },
+        },
+      ],
+    ])('%s：原样', async (_, call) => {
+      expect((await turnWith(call)).sent).toEqual({ id: 'c', ...call })
     })
   })
 

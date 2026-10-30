@@ -99,29 +99,46 @@ function parseArguments(raw: unknown): ParsedArguments {
 
 export type NormalizedToolCall = Record<string, unknown> & { id: string }
 
+const isRecord = (value: unknown): value is Record<string, unknown> =>
+  typeof value === 'object' && value !== null && !Array.isArray(value)
+
 // 助手消息里的 tool_calls。这条消息下一轮要放回历史，tool 消息的 tool_call_id 得和这里的 id 一一对上，否则之后每一轮
 // 上游都拒绝，对话就卡死了。所以缺失、不是字符串、空串或重复的 id 换成生成的，重复的第一个留着；生成的照 OpenAI 的写法
 // （call_ 加 24 位），有的接口限制 id 的长度。不是对象的放不下 id，也说不出要调什么，去掉。别的字段原样
 export function normalizeToolCalls(value: unknown): NormalizedToolCall[] {
   if (!Array.isArray(value)) return []
   const seen = new Set<string>()
-  return value
-    .filter(
-      (call: unknown): call is Record<string, unknown> =>
-        typeof call === 'object' && call !== null && !Array.isArray(call),
-    )
-    .map((call) => {
-      const id =
-        typeof call.id === 'string' && call.id && !seen.has(call.id)
-          ? call.id
-          : `call_${randomBytes(12).toString('hex')}`
-      seen.add(id)
-      return { ...call, id }
-    })
+  return value.filter(isRecord).map((call) => {
+    const id =
+      typeof call.id === 'string' && call.id && !seen.has(call.id)
+        ? call.id
+        : `call_${randomBytes(12).toString('hex')}`
+    seen.add(id)
+    return { ...call, id }
+  })
 }
 
-// 解析规范化之后的工具调用，和 message.tool_calls 一一对应、id 相同。不合规的也留着，由调用方作为工具错误回给模型：
-// 带 tool_calls 的消息要跟齐每一个 tool 消息，少一个下一轮上游就拒绝
+// 工具调用放回历史时的写法。严格的上游要求每个调用都有 type、function.name 和字符串的 function.arguments，
+// 缺了下一轮就 400，对话卡死。所以 type 缺失的补 function；arguments 不是字符串的补成字符串（缺失或 null 是 {}，
+// 别的写成 JSON）；没有 function 或名字的用占位名，这种调用模型拿到的是工具错误（见 parseToolCalls）。
+// 没有 function 的 type 也写成 function：custom 这类 type 配上占位的 function 对不上。别的字段原样
+function historyToolCall(call: NormalizedToolCall): NormalizedToolCall {
+  const fn = isRecord(call.function) ? call.function : null
+  const name = fn?.name
+  const args = fn?.arguments
+  return {
+    ...call,
+    type: fn && typeof call.type === 'string' && call.type ? call.type : 'function',
+    function: {
+      ...fn,
+      name: typeof name === 'string' && name ? name : 'unknown_tool',
+      arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}),
+    },
+  }
+}
+
+// 解析 normalizeToolCalls 的结果，和 message.tool_calls 一一对应、id 相同。不合规的也留着，由调用方作为工具错误回给模型：
+// 带 tool_calls 的消息要跟齐每一个 tool 消息，少一个下一轮上游就拒绝。这时还没补占位名，没有名字的才认得出来
 export function parseToolCalls(calls: readonly NormalizedToolCall[]): BenchAgentToolCall[] {
   return calls.map((call) => {
     const fn = call.function as { name?: unknown; arguments?: unknown } | null | undefined
@@ -142,7 +159,7 @@ function assistantMessage(
   message: Record<string, unknown>,
   calls: readonly NormalizedToolCall[],
 ): BenchAgentMessage {
-  const result: Record<string, unknown> = { ...message, tool_calls: calls }
+  const result: Record<string, unknown> = { ...message, tool_calls: calls.map(historyToolCall) }
   if (!calls.length) delete result.tool_calls
   if (typeof message.role !== 'string' || !message.role) result.role = 'assistant'
   return result as BenchAgentMessage
