@@ -31,6 +31,7 @@ import {
   dreamScopeNames,
   dreamScopeOwner,
   parseDreamScope,
+  TALK_LAYERS,
   type ParsedDreamScope,
 } from '../memory/scopes'
 import { STILL_VALID } from '../memory/service'
@@ -100,7 +101,7 @@ const CANDIDATE = and(
   STILL_VALID,
   ne(memories.sensitivity, 'secret'),
   or(
-    and(eq(memories.form, 'curated'), notInArray(memories.layer, ['subject', 'episode'])),
+    and(eq(memories.form, 'curated'), notInArray(memories.layer, [...TALK_LAYERS])),
     and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject')),
     and(eq(memories.provenance, 'untrusted'), inArray(memories.layer, REVIEW_LAYERS)),
   ),
@@ -370,7 +371,7 @@ async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
     return tx.execute<{ scope: string }>(sql`
       with pending as (
         select distinct ${DREAM_SCOPE_KEY} as scope from ${memories}
-        where ${candidate(owners)} and ${UNMARKED}
+        where ${candidate(owners)} and ${UNMARKED} and ${DREAM_SCOPE_KEY} is not null
       ), last as (
         select ${dreamRuns.scope} as scope, max(${dreamRuns.createdAt}) as at from ${dreamRuns}
         where ${dreamRuns.scope} is not null and ${dreamRuns.skipped} is null group by ${dreamRuns.scope}
