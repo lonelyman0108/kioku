@@ -48,8 +48,10 @@ export interface TimelineEntry {
   run: string
   whoami: WhoAmI
   step: BenchStepResult
-  // 这一步的写入进了重放日志，后面的调用读得到
+  // 这一步的写入在重放日志里，后面的调用读得到
   kept: boolean
+  // 这一步的写入进过重放日志，接受重放分叉时去掉了，后面的调用读不到
+  removed: boolean
 }
 
 // 这次会话。回滚模式下每次运行都在新的事务里、结束就回滚，「后面的调用读得到前面的写入」靠重放日志：
@@ -57,6 +59,8 @@ export interface TimelineEntry {
 export interface BenchSession {
   // 已经成功做过的写步骤。参数是服务端返回的展开之后的（${run} 与 capture 不再求值）
   replay: BenchReplayStep[]
+  // 重放日志每一项是时间线上的哪一条，和 replay 一一对应
+  replayEntryIds: number[]
   timeline: TimelineEntry[]
   // 时间线上丢掉的最早的条数
   dropped: number
@@ -69,6 +73,7 @@ export interface BenchSession {
 
 export const emptySession = (): BenchSession => ({
   replay: [],
+  replayEntryIds: [],
   timeline: [],
   dropped: 0,
   overflow: false,
@@ -92,8 +97,9 @@ export function replayEntryOf(step: BenchStepResult): BenchReplayStep | null {
 
 // 记下一次运行：时间线加上这次的步骤，重放日志加上成功的写步骤。真实模式写入已经生效，不重放
 export function recordRun(session: BenchSession, result: BenchRunResult): BenchSession {
-  let { replay, overflow, nextId } = session
+  let { replay, replayEntryIds, overflow, nextId } = session
   const entries = result.steps.map((step): TimelineEntry => {
+    const id = nextId++
     const entry = result.mode === 'rollback' ? replayEntryOf(step) : null
     let kept = false
     // 放不下之后后面的也不记：重放日志要和实际做过的顺序一致，不能跳过一步接着记
@@ -101,17 +107,19 @@ export function recordRun(session: BenchSession, result: BenchRunResult): BenchS
       const next = [...replay, entry]
       if (fitsReplay(next)) {
         replay = next
+        replayEntryIds = [...replayEntryIds, id]
         kept = true
       } else {
         overflow = true
       }
     }
-    return { id: nextId++, run: result.run, whoami: result.whoami, step, kept }
+    return { id, run: result.run, whoami: result.whoami, step, kept, removed: false }
   })
   const timeline = [...session.timeline, ...entries]
   const dropped = Math.max(0, timeline.length - BENCH_TIMELINE_MAX)
   return {
     replay,
+    replayEntryIds,
     timeline: timeline.slice(dropped),
     dropped: session.dropped + dropped,
     overflow,
@@ -130,13 +138,20 @@ export function runBlocker(session: BenchSession, mode: BenchMode): string | nul
   return `这次会话的写入放不进重放日志了（上限 ${BENCH_MAX_REPLAY_STEPS} 步、${formatBytes(BENCH_MAX_REPLAY_BYTES)}）：后面的调用读不到它们，清空之后再接着来`
 }
 
-// 接受重放分叉：去掉报错的那一步，留下别的接着用。再运行时后面依赖它的步骤可能接着报错，到时候再问一次
+// 接受重放分叉：去掉报错的那一步，留下别的接着用。再运行时后面依赖它的步骤可能接着报错，到时候再问一次。
+// 时间线跟着改：去掉的那一条不能还标着已保留（它可能已经滚出了时间线，那就没有要改的）
 export function acceptDivergence(session: BenchSession): BenchSession {
   const { diverged } = session
   if (!diverged) return session
+  const removedId = session.replayEntryIds[diverged.index]
+  const keep = (_: unknown, index: number) => index !== diverged.index
   return {
     ...session,
-    replay: session.replay.filter((_, index) => index !== diverged.index),
+    replay: session.replay.filter(keep),
+    replayEntryIds: session.replayEntryIds.filter(keep),
+    timeline: session.timeline.map((entry) =>
+      entry.id === removedId ? { ...entry, kept: false, removed: true } : entry,
+    ),
     diverged: null,
   }
 }

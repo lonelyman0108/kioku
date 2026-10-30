@@ -201,6 +201,7 @@ describe('真实模式不重放', () => {
       result([step({ replay: write('a://b') })], { mode: 'real' }),
     )
     expect(session.replay).toEqual([])
+    expect(session.replayEntryIds).toEqual([])
     expect(session.timeline).toHaveLength(1)
     expect(session.timeline[0]!.kept).toBe(false)
     expect(replayFor(session, 'real')).toEqual([])
@@ -277,6 +278,7 @@ describe('重放日志的上限', () => {
       result([step({ replay: big }), step({ replay: write('a://small') })]),
     )
     expect(session.replay).toEqual([])
+    expect(session.replayEntryIds).toEqual([])
     expect(session.overflow).toBe(true)
     expect(session.timeline.map((e) => e.kept)).toEqual([false, false])
   })
@@ -328,6 +330,83 @@ describe('重放分叉', () => {
     expect(accepted.replay).toEqual([write('a://1'), write('a://3')])
     expect(accepted.diverged).toBeNull()
     expect(accepted.timeline).toHaveLength(4)
+  })
+
+  const flags = (session: BenchSession) => session.timeline.map((e) => [e.kept, e.removed])
+
+  it('接受：时间线跟着日志，去掉的那一条不再标着已保留', () => {
+    const accepted = acceptDivergence(recordRun(log(), divergedAt(1)))
+    expect(flags(accepted)).toEqual([
+      [true, false],
+      [false, true],
+      [true, false],
+      // 这次没有执行的步骤
+      [false, false],
+    ])
+    expect(accepted.replayEntryIds).toEqual([1, 3])
+  })
+
+  it('没接受之前时间线不变：日志也还没动', () => {
+    const session = recordRun(log(), divergedAt(1))
+    expect(flags(session).slice(0, 3)).toEqual([
+      [true, false],
+      [true, false],
+      [true, false],
+    ])
+  })
+
+  it('一次运行里混着读、报错与写：去掉的是报错的那一步对应的条目，不是同样下标的条目', () => {
+    const session = recordRun(
+      emptySession(),
+      result([
+        step(),
+        step({ replay: write('a://1') }),
+        step({ isError: true, replay: write('a://failed') }),
+        step({ replay: write('a://2') }),
+      ]),
+    )
+    expect(session.replayEntryIds).toEqual([2, 4])
+    const accepted = acceptDivergence(recordRun(session, divergedAt(1)))
+    expect(accepted.replay).toEqual([write('a://1')])
+    expect(accepted.timeline.filter((e) => e.removed).map((e) => e.step.replay)).toEqual([
+      write('a://2'),
+    ])
+    expect(accepted.timeline.filter((e) => e.kept).map((e) => e.step.replay)).toEqual([
+      write('a://1'),
+    ])
+  })
+
+  it('连续接受：第二次对着的是第一次之后的日志', () => {
+    const once = acceptDivergence(recordRun(log(), divergedAt(0)))
+    expect(once.replay).toEqual([write('a://2'), write('a://3')])
+    const twice = acceptDivergence(recordRun(once, divergedAt(0)))
+    expect(twice.replay).toEqual([write('a://3')])
+    expect(twice.replayEntryIds).toEqual([3])
+    expect(twice.timeline.filter((e) => e.kept).map((e) => e.id)).toEqual([3])
+    expect(twice.timeline.filter((e) => e.removed).map((e) => e.id)).toEqual([1, 2])
+  })
+
+  it('接受之后还能接着记：新的写入接在后面，再分叉也对得上', () => {
+    const accepted = acceptDivergence(recordRun(log(), divergedAt(1)))
+    const next = recorded(accepted, write('a://4'))
+    expect(next.replay).toEqual([write('a://1'), write('a://3'), write('a://4')])
+    const again = acceptDivergence(recordRun(next, divergedAt(2)))
+    expect(again.replay).toEqual([write('a://1'), write('a://3')])
+    expect(again.timeline.filter((e) => e.removed).map((e) => e.step.replay)).toEqual([
+      write('a://2'),
+      write('a://4'),
+    ])
+  })
+
+  it('去掉的那一条已经滚出了时间线：日志照样去掉，别的条目不受影响', () => {
+    const first = recorded(emptySession(), write('a://old'))
+    const reads = Array.from({ length: BENCH_TIMELINE_MAX }, () => step())
+    const session = recordRun(recordRun(first, result(reads)), divergedAt(0))
+    expect(session.timeline.some((e) => e.id === session.replayEntryIds[0])).toBe(false)
+    const accepted = acceptDivergence(session)
+    expect(accepted.replay).toEqual([])
+    expect(accepted.replayEntryIds).toEqual([])
+    expect(accepted.timeline.some((e) => e.kept || e.removed)).toBe(false)
   })
 
   it('没有分叉时接受什么都不做', () => {

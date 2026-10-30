@@ -158,8 +158,15 @@ function createBench() {
     if (outcome.kind === 'done') session.value = recordRun(session.value, outcome.result)
     return outcome
   }
-  const clearSession = () => (session.value = emptySession())
-  const acceptDiverged = () => (session.value = acceptDivergence(session.value))
+  // 运行期间不动会话：结果回来时，重放分叉的第几步与这次的写入都是按发出请求时的日志算的
+  function clearSession() {
+    if (running.value) return
+    session.value = emptySession()
+  }
+  function acceptDiverged() {
+    if (running.value) return
+    session.value = acceptDivergence(session.value)
+  }
 
   return {
     spaceId,

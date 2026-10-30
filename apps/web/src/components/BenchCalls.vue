@@ -115,17 +115,26 @@ watch(generation, () => {
 const blocker = computed(() => runBlocker(session.value, mode.value))
 const diverged = computed(() => divergenceNotice(session.value))
 const usage = computed(() => sessionUsage(session.value, mode.value))
-const divergedActions = [
+// 运行期间不能接受或清空：结果回来时，第几步与这次的写入都是按发出请求时的日志算的
+const divergedActions = computed(() => [
   {
     label: '接受：去掉这一步',
     color: 'neutral' as const,
     variant: 'subtle' as const,
+    disabled: running.value,
     onClick: acceptDiverged,
   },
-  { label: '清空这次会话', color: 'error' as const, variant: 'subtle' as const, onClick: clear },
-]
+  {
+    label: '清空这次会话',
+    color: 'error' as const,
+    variant: 'subtle' as const,
+    disabled: running.value,
+    onClick: clear,
+  },
+])
 
 function clear() {
+  if (running.value) return
   clearSession()
   failure.value = null
   shownId.value = null
@@ -337,6 +346,9 @@ function onRunClick() {
                 <span class="min-w-0 flex-1 font-mono break-all">{{ entry.step.label }}</span>
                 <UBadge v-if="entry.kept" size="sm" color="neutral" variant="subtle">
                   写入已保留
+                </UBadge>
+                <UBadge v-else-if="entry.removed" size="sm" color="warning" variant="subtle">
+                  写入已去掉
                 </UBadge>
                 <span v-if="entry.step.raw !== null" class="text-muted">
                   {{ entry.step.ms }} ms
