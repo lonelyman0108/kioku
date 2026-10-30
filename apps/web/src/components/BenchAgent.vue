@@ -46,7 +46,7 @@ const {
   consentTo,
 } = useBench()
 
-// 用不用得了、默认模型、这个运行时走哪种循环
+// 用不用得了、默认模型、接口的主机、这个运行时走哪种循环
 const info = useQuery({
   queryKey: computed(() => ['bench-agent', spaceId.value, appId.value, keyId.value]),
   queryFn: () => api.benchAgent(spaceId.value, appId.value!, keyId.value!),

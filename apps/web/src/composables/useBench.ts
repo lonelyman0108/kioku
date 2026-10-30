@@ -72,6 +72,9 @@ interface RunTarget {
   mode: BenchMode
 }
 
+// 一次运行是哪个分页发起的
+type RunBy = 'calls' | 'scenarios' | 'agent'
+
 // 读到了、又不是还在刷新的旧缓存才算数：不能拿旧列表冤枉地址里的选择
 const settledIds = (
   query: { isSuccess: Readonly<Ref<boolean>>; isFetching: Readonly<Ref<boolean>> },
@@ -178,10 +181,10 @@ export function createBench() {
   const current = ref<number | null>(null)
   const running = computed(() => current.value !== null)
   // 进行中的那次是谁发起的：运行按钮的 loading 只认自己的。模型循环可能持续数分钟，别的分页不能跟着一直转圈
-  const runBy = ref<'calls' | 'scenarios' | 'agent' | null>(null)
+  const runBy = ref<RunBy | null>(null)
   const callRunning = computed(() => running.value && runBy.value === 'calls')
   const scenarioRunning = computed(() => running.value && runBy.value === 'scenarios')
-  const beginRun = (by: 'calls' | 'scenarios' | 'agent') => {
+  const beginRun = (by: RunBy) => {
     const id = ++counter
     current.value = id
     runBy.value = by
@@ -326,7 +329,7 @@ export function createBench() {
     steps: BenchStep[],
     what: { label: string; view: StepView },
     replay: BenchReplayStep[] = [],
-    by: 'calls' | 'scenarios' = 'scenarios',
+    by: RunBy = 'scenarios',
   ): Promise<RunOutcome> {
     const target = runTarget()
     if (running.value || !target) return { kind: 'stale' }
