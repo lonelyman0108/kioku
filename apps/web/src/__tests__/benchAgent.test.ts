@@ -61,14 +61,19 @@ const GROUP: SessionContextInput = {
   sender: { id: 'u1', name: '群友' },
 }
 
-// 历史合法：每个带 tool_calls 的助手消息后面紧跟着它的每一个 tool_call_id，没有落单的 tool 消息。
-// 不合法时上游下一轮就拒绝（有 tool_calls 却没跟 tool 消息时 deepseek 回 400）
+// 历史合法：每个带 tool_calls 的助手消息后面紧跟着它的每一个 tool_call_id，没有落单的 tool 消息；
+// 不带 tool_calls 的助手消息有文字。不合法时上游下一轮就拒绝（有 tool_calls 却没跟 tool 消息时 deepseek 回 400）
 function historyProblem(messages: readonly BenchAgentMessage[]): string | null {
   for (let i = 0; i < messages.length; i++) {
     const message = messages[i]!
     if (message.role === 'tool') return `第 ${i} 条 tool 消息前面没有对应的 tool_calls`
     const calls = message.tool_calls as { id: string }[] | undefined
-    if (!calls) continue
+    if (!calls) {
+      if (message.role === 'assistant' && !contentText(message.content).trim()) {
+        return `第 ${i} 条助手消息没有工具调用，也没有文字`
+      }
+      continue
+    }
     const ids = calls.map((call) => call.id)
     const following = messages.slice(i + 1, i + 1 + ids.length)
     const answered = following.map((m) => (m.role === 'tool' ? m.tool_call_id : null))
@@ -606,10 +611,27 @@ describe('chat 循环', () => {
     expect((h.runs[1]!.steps[0] as { body: { reply: string } }).body.reply).toBe('那算了')
   })
 
-  it('回复是空的也发 turn.end：契约允许，真实的插件也这样', async () => {
+  it('模型什么都没回：这条消息回到发之前，不发 turn.end，不然再发一次这一轮就进两次对话缓冲', async () => {
     const h = harness({ loop: 'chat', context: GROUP, turns: [reply(null)] })
-    await h.send(USER_TEXT)
+    const done = await h.send(USER_TEXT)
+    expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
+    expect(last(done).turnEnd).toBeNull()
+    expect(last(done).turnEndNote).toContain('没有发 turn.end')
+    expect(last(done).inHistory).toBe(false)
+    expect(done.session.replay).toEqual([])
+  })
+
+  it('编了工具调用之后回复是空的：这条消息留在历史，照样发 turn.end，契约允许，真实的插件也这样', async () => {
+    const h = harness({
+      loop: 'chat',
+      context: GROUP,
+      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply(null)],
+    })
+    const done = await h.send(USER_TEXT)
     expect((h.runs[1]!.steps[0] as { body: { reply: string } }).body.reply).toBe('')
+    expect(last(done).turnEnd).not.toBeNull()
+    expect(last(done).end).toBe('empty')
+    expect(last(done).inHistory).toBe(true)
   })
 })
 
@@ -1406,8 +1428,6 @@ describe('消息内容的形状', () => {
   })
 
   it.each([
-    ['null', null, ''],
-    ['空串', '', ''],
     ['分段数组', [{ type: 'text', text: '段' }], '段'],
     ['字符串', '话', '话'],
   ])('轨迹上的文字：%s', async (_name, content, text) => {
@@ -1441,6 +1461,115 @@ describe('消息内容的形状', () => {
     const second = await h.send('二', first)
     const third = await h.send('三', second)
     expect(third.exchanges.map((e) => e.rounds[0]!.reasoning)).toEqual(['想一想', null, null])
+  })
+})
+
+describe('模型没有文字也没有工具调用', () => {
+  // 推理模型把额度都用在思考上：content 是 null，结束原因 length，用量是花了的
+  const reasoningOnly = (over: Partial<BenchAgentTurnResult> = {}): BenchAgentTurnResult => ({
+    ...reply(null, [], { reasoning_content: '想了很久' }),
+    finishReason: 'length',
+    ...over,
+  })
+
+  it.each([
+    ['content 是 null', null],
+    ['空串', ''],
+    ['只有空白', ' \n'],
+    ['空的分段数组', []],
+    ['分段里没有文字', [{ type: 'image_url', image_url: { url: 'x' } }]],
+    ['分段的文字是空白', [{ type: 'text', text: '  ' }]],
+    ['缺 content', undefined],
+  ])('%s：不进历史，回到这条消息之前，下一句接得上', async (_name, content) => {
+    const h = harness({ loop: 'tools', turns: [reply(content)] })
+    const done = await h.send(USER_TEXT)
+    expect(done.messages).toEqual([])
+    expect(last(done).end).toBe('empty')
+    expect(last(done).inHistory).toBe(false)
+    expect(last(done).rounds[0]!.text).toBe('')
+
+    const next = harness({ loop: 'tools', turns: [reply('好')] })
+    const again = await next.send(USER_TEXT, done)
+    expect(next.turnRequests[0]).toEqual([
+      { role: 'system', content: '基础提示' },
+      { role: 'user', content: USER_TEXT },
+    ])
+    expect(contents(again.messages)).toEqual([USER_TEXT, '好'])
+  })
+
+  it('轨迹里看得到模型没有返回文字与结束原因，思考过程与用量都留着，可以再发一次', async () => {
+    const h = harness({ loop: 'tools', turns: [reasoningOnly()] })
+    const done = await h.send(USER_TEXT)
+    const notice = last(done).notice!
+    expect(notice).toContain('模型没有返回文字')
+    expect(notice).toContain('结束原因 length')
+    expect(notice).toContain('思考')
+    expect(notice).toContain('可以再发一次')
+    expect(noticeColor(last(done).end)).toBe('warning')
+    const round = last(done).rounds[0]!
+    expect(round.reasoning).toBe('想了很久')
+    expect(round.finishReason).toBe('length')
+    expect(roundMeta(round)).toContain('结束原因 length')
+    expect(done.usage.rounds).toBe(1)
+    expect(done.usage.completionTokens).toBe(20)
+  })
+
+  it.each([
+    ['stop', '结束原因 stop'],
+    ['content_filter', '结束原因 content_filter'],
+    [null, '上游没有给结束原因'],
+  ])('结束原因是 %s：说出来', async (finishReason, text) => {
+    const h = harness({ loop: 'tools', turns: [reasoningOnly({ finishReason })] })
+    expect(last(await h.send(USER_TEXT)).notice).toContain(text)
+  })
+
+  it('已经调过工具：做过的留着，历史以 tool 消息结束，下一句照常合法；空的那条不在历史里', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [
+        reply(null, [toolCall('c1', 'kioku_create', { uri: 'core://a', content: '甲' })]),
+        reasoningOnly(),
+      ],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(done.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
+    expect(last(done).end).toBe('empty')
+    expect(last(done).inHistory).toBe(true)
+    expect(last(done).notice).toContain('结束原因 length')
+    expect(last(done).notice).toContain('留在历史')
+    expect(last(done).rounds).toHaveLength(2)
+    expect(done.session.replay).toHaveLength(1)
+
+    const next = harness({ loop: 'tools', turns: [reply('接着来')] })
+    const again = await next.send('继续', done)
+    expect(next.turnRequests[0]!.map((m) => m.role)).toEqual([
+      'system',
+      'user',
+      'assistant',
+      'tool',
+      'user',
+    ])
+    expect(last(again).end).toBe('done')
+  })
+
+  it('带工具调用的助手消息没有文字是正常的：照旧进历史', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(done.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool', 'assistant'])
+    expect(last(done).end).toBe('done')
+  })
+
+  it('hook：prompt.submit 已经发过，这条消息同样回到发之前；启动上下文留着，下一条不用再发', async () => {
+    const h = harness({ turns: [reasoningOnly()] })
+    const done = await h.send(USER_TEXT)
+    expect(done.messages).toEqual([])
+    expect(done.sessionText).toBe(SESSION_TEXT)
+    const next = harness({ turns: [reply('好')] })
+    await next.send(USER_TEXT, done)
+    expect(events(next.runs[0]!.steps)).toEqual(['prompt.submit'])
   })
 })
 
@@ -1699,6 +1828,10 @@ describe('校验函数本身', () => {
     ['落单的 tool 消息', [tool('a')]],
     ['多一条', [assistant('a'), tool('a'), tool('b')]],
     ['内容是空的', [assistant('a'), tool('a', '')]],
+    ['助手消息没有工具调用，content 是 null', [{ role: 'assistant', content: null }]],
+    ['助手消息没有工具调用，文字是空串', [{ role: 'assistant', content: '' }]],
+    ['助手消息没有工具调用，文字是空白', [{ role: 'assistant', content: ' \n' }]],
+    ['助手消息没有工具调用，分段里没有文字', [{ role: 'assistant', content: [] }]],
   ] as [string, BenchAgentMessage[]][])('%s：不合法', (_name, messages) => {
     expect(historyProblem(messages)).not.toBeNull()
   })

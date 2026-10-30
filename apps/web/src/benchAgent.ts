@@ -163,11 +163,12 @@ export const agentPhaseLabels: Record<AgentPhase, string> = {
   turnEnd: '发 turn.end…',
 }
 
-// 这条消息怎么结束的。done：模型给了最终回复；stopped：用户停止；limit：到了轮数上限；
+// 这条消息怎么结束的。done：模型给了最终回复；empty：模型没有文字也没有工具调用；stopped：用户停止；limit：到了轮数上限；
 // blocked：写入放不进重放日志；toolFailed：工具的运行请求失败；diverged：重放分叉；
 // modelFailed：请求模型失败；lifecycleFailed：生命周期事件的运行请求失败；abandoned：换了应用、Key 或模式
 export type AgentEnd =
   | 'done'
+  | 'empty'
   | 'stopped'
   | 'limit'
   | 'blocked'
@@ -186,7 +187,7 @@ export interface AgentExchange {
   end: AgentEnd | null
   // 结束时要告诉用户的；正常结束是 null
   notice: string | null
-  // 这条消息进了历史，模型之后看得到它。请求模型之前就失败、模型一次都没有回复时不进
+  // 这条消息进了历史，模型之后看得到它。请求模型之前就失败、模型一次都没有回复（或者回复是空的）时不进
   inHistory: boolean
   // session.start、prompt.submit 的结果
   lifecycle: AgentStepTrace[]
@@ -201,7 +202,7 @@ export interface AgentExchange {
 
 export interface AgentConversation {
   // 发给模型的历史，不含系统提示：系统提示可以改，每次请求时才放到最前面。
-  // 始终合法：每个带 tool_calls 的助手消息后面都跟齐了 tool 消息
+  // 始终合法：每个带 tool_calls 的助手消息后面都跟齐了 tool 消息，别的助手消息都有文字
   messages: BenchAgentMessage[]
   // session.start 的结果，接在系统提示后面。还没拿到时是 null：失败了下一条消息再发
   sessionText: string | null
@@ -355,11 +356,21 @@ const KEPT_IN_HISTORY = '做过的都留在历史里，可以接着说下一句�
 const sentences = (first: string, second: string) =>
   `${first}${first.endsWith('。') ? '' : '。'}${second}`
 
+// 模型没有文字也没有工具调用的说明。length 多半是输出额度都用在了思考上（推理模型常见）
+function emptyReplyText(finishReason: string | null): string {
+  if (finishReason === 'length') {
+    return '模型没有返回文字（结束原因 length：输出额度可能都用在了思考上）'
+  }
+  return `模型没有返回文字（${finishReason ? `结束原因 ${finishReason}` : '上游没有给结束原因'}）`
+}
+
 // 发一条用户消息，走完这条消息的循环。无论怎样结束，历史都是合法的，用户还能接着说下一句：
 // - 没完成的 tool_call 都补一条 tool 消息（停止、到上限、工具请求失败、重放分叉）。
 // - 请求模型失败或被停止时不留半截。模型回复过的话，做过的都留着：这时每个 tool_call 都有了结果，不用再补，
 //   真实模式下工具已经写了，模型要知道。模型一次都没有回复时回到这条消息之前：这时什么都没做，
 //   留着的话下一句就成了连着两条用户消息，有的接口不接受，模型也没看过它；界面把文字放回输入框，可以再发一次。
+// - 模型没有文字也没有工具调用（推理模型把额度都用在思考上时常见）：这条空的助手消息不进历史，严格的上游不接受，
+//   留着的话之后每一轮都 400。没有别的回复时同样回到这条消息之前；调过工具的话历史以 tool 消息结束，下一句照样合法。
 // 停止之后不再发新的请求；已经发出去的运行等它回来，结果照样记下（真实模式下它可能已经写了）
 export async function sendAgentMessage(
   start: AgentConversation,
@@ -467,6 +478,8 @@ export async function sendAgentMessage(
   const afterReply = () => (working.length ? KEPT_IN_HISTORY : RETRY)
 
   let reply: string
+  // 回复是空的、这条消息又留在历史里（之前调过工具）时的说明
+  let emptyNotice: string | null = null
   for (let round = 1; ; round++) {
     if (signal.aborted) return finish('stopped', `已停止。${afterReply()}`)
     updateExchange({ phase: 'model' })
@@ -478,7 +491,9 @@ export async function sendAgentMessage(
       return finish('modelFailed', sentences(turnFailureMessage(err), afterReply()))
     }
 
-    working.push(turn.message)
+    const text = contentText(turn.message.content)
+    const empty = !turn.toolCalls.length && !text.trim()
+    if (!empty) working.push(turn.message)
     const calls = turn.toolCalls.map((call): AgentToolTrace => ({
       id: call.id,
       name: call.name,
@@ -488,7 +503,7 @@ export async function sendAgentMessage(
       trace: null,
     }))
     const answered: AgentRound = {
-      text: contentText(turn.message.content),
+      text: empty ? '' : text,
       reasoning: reasoningOf(turn.message),
       finishReason: turn.finishReason,
       model: turn.model,
@@ -508,6 +523,14 @@ export async function sendAgentMessage(
     })
     if (!calls.length) {
       reply = answered.text
+      if (empty) {
+        emptyNotice = sentences(emptyReplyText(turn.finishReason), afterReply())
+        // 这条消息回到发之前了，文字要放回输入框：发了 turn.end 的话，再发一次这一轮就进两次对话缓冲
+        if (!working.length) {
+          if (loop === 'chat') updateExchange({ turnEndNote: '模型没有回复，没有发 turn.end。' })
+          return finish('empty', emptyNotice)
+        }
+      }
       break
     }
 
@@ -606,14 +629,14 @@ export async function sendAgentMessage(
       }
     }
   }
-  return finish('done', null)
+  return finish(emptyNotice ? 'empty' : 'done', emptyNotice)
 }
 
 // 下面是给界面的：怎么显示
 
-// 结束时的提示用什么颜色：停止是用户自己做的，上限是预期之内的
+// 结束时的提示用什么颜色：停止是用户自己做的，上限和空的回复是预期之内的
 export const noticeColor = (end: AgentEnd | null): 'neutral' | 'warning' | 'error' =>
-  end === 'stopped' ? 'neutral' : end === 'limit' ? 'warning' : 'error'
+  end === 'stopped' ? 'neutral' : end === 'limit' || end === 'empty' ? 'warning' : 'error'
 
 export const attachedNote = (loop: BenchAgentLoop) =>
   loop === 'chat'
