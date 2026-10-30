@@ -215,6 +215,8 @@ export type LoreImportPlan = z.infer<typeof LoreImportPlan>
 const LoreFailure = z.object({ uri: z.string(), reason: z.string() })
 
 export const LoreImportResult = z.object({
+  // 这次用没用上人格：没有写到人格层的目标时不新建人格，也不设应用的默认人格
+  personaUsed: z.boolean(),
   personaCreated: z.boolean(),
   appsCreated: z.array(z.string()),
   appsGivenPersona: z.array(z.string()),

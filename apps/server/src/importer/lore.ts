@@ -172,6 +172,11 @@ export interface ImportPlanError {
   uri: string
 }
 
+// 这份计划（带勾选）有没有写到人格层的目标，新建的、导入过的都算。没有就用不上人格：不新建，新建的应用默认人格为空，
+// 已有的应用不动。勾选只让写入变少；Lore 里没有 core://soul 时命令行也一样，不建空人格。计划预览与真正写入都按这个判断
+export const usesPersona = (plan: ImportPlan) =>
+  plan.memories.some((m) => m.request.layer === 'persona')
+
 export interface ImportKeyParts {
   loreNodeUuid?: unknown
   targetApp?: unknown
@@ -513,6 +518,8 @@ export function existingImportApps(db: Db, spaceId: string): Promise<ExistingApp
 }
 
 export interface ImportResult {
+  // 这次用没用上人格（见 usesPersona）。没用上时 personaCreated 总是 false
+  personaUsed: boolean
   personaCreated: boolean
   appsCreated: string[]
   // 原本没有默认人格、导入时设成了导入的人格
@@ -533,16 +540,17 @@ export interface ImportResult {
   failed: { uri: string; reason: string }[]
 }
 
-// 写入时这个应用的默认人格怎么处理：不属于导入者的不往里写；还没有默认人格的设成导入的人格；
-// 已经在用别的人格的不动。计划预览与真正写入都按这个判断（人格还没建时 personaId 为 null）
+// 写入时这个应用的默认人格怎么处理：不属于导入者的不往里写；这次用不上人格的不动；还没有默认人格的设成导入的人格；
+// 已经在用别的人格的不动。计划预览与真正写入都按这个判断（人格还没建时 id 为 null）
 function personaEffect(
   current: { owner: string; personaId: string | null } | undefined,
   accountId: string,
-  personaId: string | null,
-): 'blocked' | 'given' | 'other' | 'same' {
+  persona: { used: boolean; id: string | null },
+): 'blocked' | 'given' | 'other' | 'none' {
   if (current?.owner !== accountId) return 'blocked'
+  if (!persona.used) return 'none'
   if (current.personaId === null) return 'given'
-  return current.personaId === personaId ? 'same' : 'other'
+  return current.personaId === persona.id ? 'none' : 'other'
 }
 
 // 一个写入目标这次算什么、之前导入的是哪些记忆（新建时是空的）。计划预览与真正写入都按这个判断
@@ -593,6 +601,7 @@ export async function previewImport(
       .from(apps),
   }))
   const appBySlug = new Map(rows.map((r) => [r.slug, r]))
+  const used = usesPersona(plan)
   const preview: ImportPreview = {
     targets: plan.memories.map((item) => {
       const { state, found } = priorImport(item, done, moved)
@@ -614,9 +623,9 @@ export async function previewImport(
   for (const mapping of plan.apps) {
     for (const app of mapping.apps) {
       const current = appBySlug.get(app.slug)
-      // 这次才新建的应用默认人格就是导入的人格
+      // 这次才新建的应用默认人格就是导入的人格（用不上人格时为空），不用设
       if (app.create && !current) continue
-      const effect = personaEffect(current, accountId, persona?.id ?? null)
+      const effect = personaEffect(current, accountId, { used, id: persona?.id ?? null })
       if (effect === 'given') preview.appsGivenPersona.push(app.slug)
       else if (effect === 'other') preview.appsOtherPersona.push(app.slug)
     }
@@ -637,6 +646,7 @@ function dataWriteFailure(err: unknown): string | null {
 export async function applyImport(target: ImportTarget, plan: ImportPlan): Promise<ImportResult> {
   const { db, spaceId, accountId } = target
   const result: ImportResult = {
+    personaUsed: usesPersona(plan),
     personaCreated: false,
     appsCreated: [],
     appsGivenPersona: [],
@@ -653,20 +663,23 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
   const blockedApps = new Set<string>()
 
   await withSpace(db, spaceId, async (tx) => {
-    const [created] = await tx
-      .insert(personas)
-      .values({ spaceId, slug: plan.persona.slug, name: plan.persona.name })
-      .onConflictDoNothing()
-      .returning({ id: personas.id })
-    result.personaCreated = Boolean(created)
-    const personaId =
-      created?.id ??
-      (
-        await tx
-          .select({ id: personas.id })
-          .from(personas)
-          .where(eq(personas.slug, plan.persona.slug))
-      )[0]!.id
+    let personaId: string | null = null
+    if (result.personaUsed) {
+      const [created] = await tx
+        .insert(personas)
+        .values({ spaceId, slug: plan.persona.slug, name: plan.persona.name })
+        .onConflictDoNothing()
+        .returning({ id: personas.id })
+      result.personaCreated = Boolean(created)
+      personaId =
+        created?.id ??
+        (
+          await tx
+            .select({ id: personas.id })
+            .from(personas)
+            .where(eq(personas.slug, plan.persona.slug))
+        )[0]!.id
+    }
 
     // Lore 里所有客户端都读同一个 core://soul，所以对应的应用都用导入的人格；
     // 已有的应用只在还没有默认人格时设置
@@ -695,7 +708,10 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
           .from(apps)
           .where(eq(apps.slug, app.slug))
           .for('update')
-        const effect = personaEffect(current, accountId, personaId)
+        const effect = personaEffect(current, accountId, {
+          used: result.personaUsed,
+          id: personaId,
+        })
         if (effect === 'blocked') {
           blockedApps.add(app.slug)
         } else if (effect === 'given') {

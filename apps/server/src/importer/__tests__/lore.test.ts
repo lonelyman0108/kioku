@@ -5,6 +5,7 @@ import {
   credentialHints,
   planFingerprint,
   planImport,
+  usesPersona,
   type ImportPlan,
   type ImportPreview,
   type LoreNode,
@@ -346,6 +347,26 @@ describe('Lore 导入计划', () => {
     expect(disclosureOf(`${'长'.repeat(498)}😀尾`)).toBe(`${'长'.repeat(498)}😀`)
     // 第 500 个单元是表情的后半个之后的字，也不动
     expect(disclosureOf(`${'长'.repeat(497)}😀长尾`)).toBe(`${'长'.repeat(497)}😀长`)
+  })
+
+  it('没有写到人格层的目标就用不上人格：Lore 里没有 core://soul、没有正文或者勾掉了', () => {
+    const agent = node('core://agent/claudecode')
+    expect(usesPersona(planImport(snapshot(node('core://soul'), agent), [], options))).toBe(true)
+    expect(usesPersona(planImport(snapshot(node('core://soul/style'), agent), [], options))).toBe(
+      true,
+    )
+    expect(usesPersona(planImport(snapshot(agent), [], options))).toBe(false)
+    expect(
+      usesPersona(planImport(snapshot(node('core://soul', { content: null }), agent), [], options)),
+    ).toBe(false)
+    expect(
+      usesPersona(
+        planImport(snapshot(node('core://soul'), agent), [], {
+          ...options,
+          excludeUris: new Set(['core://soul']),
+        }),
+      ),
+    ).toBe(false)
   })
 
   describe('这次不导入的节点', () => {

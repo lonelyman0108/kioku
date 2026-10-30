@@ -322,7 +322,10 @@ const disclosureCut = computed(
       />
       <UAlert v-else color="success" variant="subtle" title="导入完成" />
       <ul class="space-y-1 text-sm">
-        <li>人格 {{ persona.slug }}：{{ result.personaCreated ? '新建' : '已有' }}</li>
+        <li v-if="result.personaUsed">
+          人格 {{ persona.slug }}：{{ result.personaCreated ? '新建' : '已有' }}
+        </li>
+        <li v-else>这次没有要写的 core://soul：没有新建人格，也没有设应用的默认人格</li>
         <li v-if="result.appsCreated.length">
           新建应用：{{ result.appsCreated.join('、') }}。还没有 Key：在「应用与
           Key」里为要接入的应用签发

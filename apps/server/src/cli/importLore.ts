@@ -17,6 +17,7 @@ import {
   planImport,
   planSync,
   readLore,
+  usesPersona,
   verifyMasterKey,
   type ImportPlan,
   type ImportResult,
@@ -190,7 +191,9 @@ const WARNINGS: Record<LoreWarningKind, (uri: string) => string> = {
 
 function printPlan(plan: ImportPlan): void {
   console.log(
-    `\n人格：core://soul 导入为 ${plan.persona.slug}（不存在时新建为「${plan.persona.name}」）`,
+    usesPersona(plan)
+      ? `\n人格：core://soul 导入为 ${plan.persona.slug}（不存在时新建为「${plan.persona.name}」）`
+      : '\n人格：这次没有要导入的 core://soul，不新建人格，也不设应用的默认人格',
   )
   if (plan.apps.length) {
     console.log('\n应用：')
@@ -224,7 +227,11 @@ function printPlan(plan: ImportPlan): void {
 
 function printResult(plan: ImportPlan, result: ImportResult): void {
   console.log('\n导入完成：')
-  console.log(`  人格 ${plan.persona.slug}：${result.personaCreated ? '新建' : '已有'}`)
+  console.log(
+    result.personaUsed
+      ? `  人格 ${plan.persona.slug}：${result.personaCreated ? '新建' : '已有'}`
+      : '  人格：这次没有要导入的 core://soul，没有新建，也没有设应用的默认人格',
+  )
   if (result.appsCreated.length) console.log(`  新建应用：${result.appsCreated.join('、')}`)
   if (result.appsGivenPersona.length) {
     console.log(`  设为默认人格 ${plan.persona.slug}：${result.appsGivenPersona.join('、')}`)

@@ -851,6 +851,141 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       await refused(present)
     })
 
+    describe('计划里没有人格层的目标', () => {
+      const appRow = async (slug: string) => {
+        const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select().from(apps).where(eq(apps.slug, slug)),
+        )
+        return row!
+      }
+      const personaSlugs = async () => {
+        const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select({ slug: personas.slug }).from(personas),
+        )
+        return rows.map((r) => r.slug).sort()
+      }
+
+      it('全部勾掉时什么都不写：人格、应用、记忆与事件的行数都不变', async () => {
+        const source = await fileSource()
+        const plan = await planOf(source)
+        const before = await counts()
+        const result = await applyOf(source, plan, { excludeUris: plan.nodes.map((n) => n.uri) })
+        expect(result).toMatchObject({
+          personaUsed: false,
+          personaCreated: false,
+          appsCreated: [],
+          appsGivenPersona: [],
+          appsOtherPersona: [],
+          created: [],
+          previouslyImported: [],
+          failed: [],
+        })
+        expect(await counts()).toEqual(before)
+      })
+
+      it('只勾掉 core://soul：不新建人格，已有的应用不设默认人格，新建的应用默认人格为空', async () => {
+        const work = await ws.createPersona('work')
+        await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        await ws.createApp('claude-work', {
+          runtimeFamily: 'claudecode',
+          defaultPersonaId: work.id,
+        })
+        await seed('core://agent/zcode', 'zcode 的正文', { priority: 0 })
+        const source = await fileSource()
+        const plan = await planOf(source)
+        // 计划是不带勾选的：core://soul 还在里面
+        expect(plan.appsGivenPersona).toEqual(['claude-code'])
+        expect(plan.appsOtherPersona).toEqual(['claude-work'])
+
+        const result = await applyOf(source, plan, { excludeUris: ['core://soul'] })
+        expect(result).toMatchObject({
+          personaUsed: false,
+          personaCreated: false,
+          appsCreated: ['zcode'],
+          appsGivenPersona: [],
+          appsOtherPersona: [],
+          failed: [],
+        })
+        expect(result.created).toContain('app://claude-code/agent')
+        expect(result.created).toContain('app://zcode/agent')
+        expect(result.created).not.toContain('persona://default/soul')
+        expect(await personaSlugs()).toEqual(['work'])
+        expect((await appRow('claude-code')).defaultPersonaId).toBeNull()
+        expect((await appRow('zcode')).defaultPersonaId).toBeNull()
+        expect((await appRow('claude-work')).defaultPersonaId).toBe(work.id)
+      })
+
+      it('Lore 里没有 core://soul：计划不说会设默认人格，指纹对得上，命令行也不建空人格', async () => {
+        await dropLore('core://soul')
+        await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        const source = await fileSource()
+        const plan = await planOf(source)
+        expect(plan.appsGivenPersona).toEqual([])
+        expect(plan.appsOtherPersona).toEqual([])
+        expect(plan.persona.exists).toBe(false)
+
+        // 指纹算的是这份计划：设上默认人格不算计划变了，这次本来就不动它
+        const work = await ws.createPersona('work')
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(apps).set({ defaultPersonaId: work.id }).where(eq(apps.slug, 'claude-code')),
+        )
+        expect((await planOf(source)).fingerprint).toBe(plan.fingerprint)
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(apps).set({ defaultPersonaId: null }).where(eq(apps.slug, 'claude-code')),
+        )
+
+        const { target, plan: fromCli } = await cli()
+        const result = await applyImport(target, fromCli)
+        expect(result).toMatchObject({
+          personaUsed: false,
+          personaCreated: false,
+          appsGivenPersona: [],
+          failed: [],
+        })
+        expect(await personaSlugs()).toEqual(['work'])
+        expect((await appRow('claude-code')).defaultPersonaId).toBeNull()
+      })
+
+      it('用不上人格时不属于导入者的应用照样不写', async () => {
+        await dropLore('core://soul')
+        const claude = await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        const { target, plan } = await cli()
+        const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(apps).set({ ownerAccountId: bob.accountId }).where(eq(apps.id, claude.id)),
+        )
+        const result = await applyImport(target, plan)
+        expect(result.failed).toEqual([
+          { uri: 'app://claude-code/agent', reason: '应用 claude-code 不属于导入者，没有写入' },
+        ])
+      })
+
+      it('core://soul 导入过也算有目标：之后新建的应用照样用导入的人格', async () => {
+        const source = await fileSource()
+        expect(await importAll(source)).toMatchObject({ personaUsed: true, personaCreated: true })
+        await seed('core://agent/zcode', 'zcode 的正文', { priority: 0 })
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(apps).set({ defaultPersonaId: null }).where(eq(apps.slug, 'claudecode')),
+        )
+        const more = await fileSource()
+        const plan = await planOf(more)
+        expect(stateOf(plan, 'core://soul')).toBe('imported')
+        expect(plan.appsGivenPersona).toEqual(['claudecode'])
+        const result = await applyOf(more, plan)
+        expect(result).toMatchObject({
+          personaUsed: true,
+          personaCreated: false,
+          appsCreated: ['zcode'],
+          appsGivenPersona: ['claudecode'],
+        })
+        const [persona] = await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select().from(personas).where(eq(personas.slug, 'default')),
+        )
+        expect((await appRow('zcode')).defaultPersonaId).toBe(persona!.id)
+        expect((await appRow('claudecode')).defaultPersonaId).toBe(persona!.id)
+      })
+    })
+
     describe('旧文件', () => {
       it('比已写入的数据旧、又有要写的：标出来，默认不写，确认后才写；同一份文件再执行不算旧', async () => {
         const old = await fileSource(EARLIER)
