@@ -1,4 +1,4 @@
-import { and, arrayContains, asc, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
+import { and, arrayContains, asc, count, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
 
 import { pgErrorCode, type Tx } from '../db/client'
 import {
@@ -69,37 +69,44 @@ async function mergeInto(
   const talk = inArray(memories.layer, [...TALK_LAYERS])
   const inFromScope = and(talk, eq(memories.originScope, oldScope))!
   const aboutFrom = and(talk, eq(memories.subjectId, from.id))!
-  const together = await tx
-    .select({ id: memories.id })
-    .from(memories)
-    .where(
-      or(
-        inFromScope,
-        aboutFrom,
-        and(
-          talk,
-          eq(memories.originScope, newScope),
-          exists(tx.select({ id: memories.id }).from(memories).where(inFromScope)),
-        ),
-        and(
-          talk,
-          eq(memories.subjectId, into.id),
-          inArray(
-            memories.originScope,
-            tx.selectDistinct({ scope: memories.originScope }).from(memories).where(aboutFrom),
-          ),
-        ),
+  const together = or(
+    inFromScope,
+    aboutFrom,
+    and(
+      talk,
+      eq(memories.originScope, newScope),
+      exists(tx.select({ id: memories.id }).from(memories).where(inFromScope)),
+    ),
+    and(
+      talk,
+      eq(memories.subjectId, into.id),
+      inArray(
+        memories.originScope,
+        tx.selectDistinct({ scope: memories.originScope }).from(memories).where(aboutFrom),
       ),
+    ),
+  )!
+  // 先按 id 的顺序锁住这些记忆（FOR NO KEY UPDATE）再删标记。Dream 写标记的事务先锁住那一批（FOR SHARE SKIP LOCKED，
+  // 见 dream.ts）：它先锁到的，这里等它提交；之后它遇到这里锁着的就跳过、不记，合并的事务开着时两边的都记不上。
+  // 加锁与删除要分两条：一条语句只看开始时的快照，等锁期间对方提交的新标记，同一条语句里删不到
+  await tx
+    .select({ n: count() })
+    .from(
+      tx
+        .select({ id: memories.id })
+        .from(memories)
+        .where(together)
+        .orderBy(asc(memories.id))
+        .for('no key update')
+        .as('locked'),
+    )
+  await tx
+    .delete(dreamMarks)
+    .where(
+      inArray(dreamMarks.memoryId, tx.select({ id: memories.id }).from(memories).where(together)),
     )
   await tx.update(memories).set({ subjectId: into.id }).where(eq(memories.subjectId, from.id))
   await tx.update(memories).set({ originScope: newScope }).where(eq(memories.originScope, oldScope))
-  // 改完归属再删标记：Dream 写标记的事务先锁住那一批记忆（FOR SHARE）再核对对象与来源作用域（见 dream.ts），
-  // 上面两步要等它提交，这里删得到它刚写下的；先删的话删不到它还没提交的，合并到一起的记忆就又算看过了
-  if (together.length) {
-    await tx
-      .delete(dreamMarks)
-      .where(sql`${dreamMarks.memoryId} = any(${sql.param(together.map((m) => m.id))}::uuid[])`)
-  }
   // 还没抽取的对话缓冲：发言人、群与批次一起换过来，不然删掉对象时会连带删掉它们
   await tx
     .update(conversationTurns)

@@ -815,6 +815,35 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       ])
     })
 
+    it('这一批有没记上标记的（正被别的写入锁着）：这次不再接着整理这个范围，同一批不会在一次整理里再发一遍', async () => {
+      await notes(DREAM_CHANGED_PER_CALL + 5)
+      const { model, calls } = fakeChatModel(reply([]))
+      const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+      try {
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+          // 按 Dream 取一批的顺序，第一批的这些行都被别的写入锁着（例如合并的事务还开着）
+          await tx`select id from memories where layer = 'base'
+            order by updated_at, id limit ${DREAM_CHANGED_PER_CALL} for no key update`
+          expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+        })
+      } finally {
+        await side.end()
+      }
+      expect(calls).toHaveLength(1)
+      // 还有没整理的：没记上的这一批与后面的，下次接着
+      expect((await runs()).map((r) => [r.scope, r.more])).toEqual([
+        ['base', true],
+        [null, true],
+      ])
+      await dream(model)
+      expect(calls.slice(1).map((c) => dreamLines(c).filter((l) => l.new).length)).toEqual([
+        DREAM_CHANGED_PER_CALL,
+        5,
+      ])
+      expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+    })
+
     // 共享的那一段每次最多请求几次；积压的共享内容比一次整理能请求的还多
     const SHARED_CALLS = DREAM_MAX_CALLS - DREAM_PERSONAL_CALLS
     const BACKLOG = DREAM_CHANGED_PER_CALL * DREAM_MAX_CALLS + 1
@@ -937,6 +966,24 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     const byTitle = <T extends { title: string }>(items: T[]) =>
       items.sort((a, b) => a.title.localeCompare(b.title))
     const CLUB = '群「读书会」的聊天里记下的事实与会话摘要'
+    const CHAT = '和「小明」的私聊里记下的事实与会话摘要'
+    // 等到有连接等在 holder 的锁上，返回它的 pid；gaveUp 返回真时不再等，返回 null
+    const waitingOn = async (
+      side: postgres.Sql,
+      holder: number,
+      gaveUp = () => false,
+    ): Promise<number | null> => {
+      for (let i = 0; ; i++) {
+        const [row] = await side<{ pid: number }[]>`
+          select pid from pg_stat_activity where ${holder}::int = any(pg_blocking_pids(pid)) limit 1`
+        if (row) return row.pid
+        if (gaveUp()) return null
+        if (i >= 200) throw new Error('没有等在这把锁上')
+        await new Promise((resolve) => setTimeout(resolve, 25))
+      }
+    }
+    const backendPid = async (tx: postgres.TransactionSql) =>
+      ((await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }])[0].pid
 
     it('放到一起的对象层与情节层记忆下一次整理会再看：两边私聊里的、同一个群里关于这两个对象的；别的不再看', async () => {
       const xm = await subject('person', '小明')
@@ -980,11 +1027,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       expect(subjectsSeen).toEqual([['小明'], ['小明']])
       expect(byTitle(calls.slice(seen).map(summary))).toEqual(
         byTitle([
-          {
-            title: '和「小明」的私聊里记下的事实与会话摘要',
-            fresh: ['在找新工作', '想换工作'].sort(),
-            neighbors: [],
-          },
+          { title: CHAT, fresh: ['在找新工作', '想换工作'].sort(), neighbors: [] },
           { title: CLUB, fresh: ['在学日语', '正在学日语'].sort(), neighbors: [] },
         ]),
       )
@@ -1042,17 +1085,6 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       const kept = await fact(xm, '在学日语', `group:${club}`)
       const { model, calls } = fakeChatModel(reply([]))
       const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
-      // 等到有连接等在 holder 的锁上，返回它的 pid；gaveUp 返回真时不再等，返回 null
-      const waitingOn = async (holder: number, gaveUp = () => false): Promise<number | null> => {
-        for (let i = 0; ; i++) {
-          const [row] = await side<{ pid: number }[]>`
-            select pid from pg_stat_activity where ${holder}::int = any(pg_blocking_pids(pid)) limit 1`
-          if (row) return row.pid
-          if (gaveUp()) return null
-          if (i >= 200) throw new Error('没有等在这把锁上')
-          await new Promise((resolve) => setTimeout(resolve, 25))
-        }
-      }
       let dreaming: Promise<unknown> | undefined
       let merging: Promise<void> | undefined
       let mergeDone = false
@@ -1060,16 +1092,13 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         await side.begin(async (tx) => {
           // 拦住写运行记录：Dream 写结果的事务停在写下整理标记之后、提交之前
           await tx`lock table dream_runs in exclusive mode`
-          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
-            { pid: number },
-          ]
           dreaming = dream(model)
-          const dreamer = await waitingOn(pid)
+          const dreamer = await waitingOn(side, await backendPid(tx))
           merging = merge(xm, alt).finally(() => {
             mergeDone = true
           })
-          // 合并要改的记忆被 Dream 写标记的事务锁着，等它提交
-          await waitingOn(dreamer!, () => mergeDone)
+          // 合并要锁的记忆被 Dream 写标记的事务锁着，等它提交
+          await waitingOn(side, dreamer!, () => mergeDone)
         })
         await dreaming
         await merging
@@ -1084,6 +1113,40 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       await dream(model)
       expect(calls.slice(1).map(summary)).toEqual([
         { title: CLUB, fresh: ['在学日语', '正在学日语'].sort(), neighbors: [] },
+      ])
+    })
+
+    it('合并的事务还开着时 Dream 写标记：合并锁着的记忆跳过、不记，保留那边没改动的也是', async () => {
+      const xm = await subject('person', '小明')
+      const alt = await subject('person', '小明的小号')
+      const moved = await fact(alt, '想换工作', `direct:${alt}`)
+      const kept = await fact(xm, '在找新工作', `direct:${xm}`)
+      const { model, calls } = fakeChatModel(reply([]))
+      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      let merging: Promise<void> | undefined
+      try {
+        await side.begin(async (tx) => {
+          // 拦住合并：锁好要放在一起看的记忆、删完标记、改完归属之后，停在改对话缓冲那一步，事务还开着
+          await tx`lock table conversation_turns in exclusive mode`
+          merging = merge(xm, alt)
+          await waitingOn(side, await backendPid(tx))
+          // 合并还没提交，读到的是合并之前的样子：两个私聊各一次
+          await dream(model)
+        })
+        await merging
+      } finally {
+        await Promise.allSettled([merging])
+        await side.end()
+      }
+      expect(calls.flatMap(contentsOf).sort()).toEqual(['在找新工作', '想换工作'].sort())
+      const marks = await marked()
+      expect(marks.has(moved.id)).toBe(false)
+      expect(marks.has(kept.id)).toBe(false)
+      // 下一次：两条都在保留对象的私聊里，一起看
+      const seen = calls.length
+      await dream(model)
+      expect(calls.slice(seen).map(summary)).toEqual([
+        { title: CHAT, fresh: ['在找新工作', '想换工作'].sort(), neighbors: [] },
       ])
     })
   })

@@ -273,6 +273,8 @@ async function dreamOnce(
     let calls = 0
     let tokens = 0
     let failed = false
+    // 有范围还有没整理的、这次又不接着整理它
+    let left = false
     while (pending.length && calls < limit.calls && tokens < limit.tokens) {
       const scope = pending[0]!
       progress.scope = scope
@@ -293,10 +295,12 @@ async function dreamOnce(
         if (stopOnFailure) break
         continue
       }
-      if (result.more) pending.push(scope)
+      // 有没记上标记的这次不再接着整理（见 ScopeResult），只记下还有没整理的
+      if (result.again) pending.push(scope)
+      else if (result.more) left = true
     }
     progress.scope = null
-    return { calls, tokens, failed, more: pending.length > 0 }
+    return { calls, tokens, failed, more: pending.length > 0 || left }
   }
 
   // 范围已经按 pendingScopes 排好，共享的在前：开头没有主人的那些是第一段，从第一个画像层或私人层的范围起是第二段
@@ -539,7 +543,11 @@ async function scopeTitle(tx: Tx, pending: PendingScope): Promise<DreamPromptSco
 
 interface ScopeResult {
   tokens: number
+  // 这个范围还有没整理的，下次接着看
   more: boolean
+  // 这次整理里接着整理这个范围：还有没看的，这一批也都记上了标记。有没记上的（见 dreamScope 的 mark）就不接着，
+  // 否则下一批又先取到它们，同一批在一次整理里再发给模型，一直发到请求次数用完
+  again: boolean
   failed: boolean
 }
 
@@ -602,9 +610,10 @@ async function dreamScope(
     recordRun(tx, options, { scope: pending.key, ownerAccountId: owner, ...counts, ...fields })
   // 这一批整理过了：记下每条当时的版本，之后没改过的不再给模型看。近邻只是对照，不记。
   // 合并对象只改记忆的对象与来源作用域、不加版本：读这一批之后被合并移走的（这两项和读到的不一样了）不记，
-  // 下次整理它们照样是候选，近邻会把保留对象那边的一起带上。先锁住这些行再核对（FOR SHARE）：合并改它们要等
-  // 这个事务提交，改完才删标记（见 access/subjects.ts），删得到这里刚写下的。正被别的写入锁着的跳过、也不记，下次再看
-  const mark = async (tx: Tx) => {
+  // 下次整理它们照样是候选，近邻会把保留对象那边的一起带上。先锁住这些行再核对（FOR SHARE）：合并锁这些行要等
+  // 这个事务提交，锁到之后才删标记（见 access/subjects.ts），删得到这里刚写下的；合并的事务开着时它锁着的行这里跳过。
+  // 正被别的写入锁着的也跳过、不记，下次再看。返回没记上的条数
+  const mark = async (tx: Tx): Promise<number> => {
     const now = await tx
       .select({ id: memories.id, subjectId: memories.subjectId, originScope: memories.originScope })
       .from(memories)
@@ -624,11 +633,16 @@ async function dreamScope(
         found.originScope === row.originScope
       )
     })
-    if (!stayed.length) return
-    await tx
-      .insert(dreamMarks)
-      .values(stayed.map((c) => ({ spaceId, memoryId: c.row.id, version: c.row.version })))
-      .onConflictDoUpdate({ target: dreamMarks.memoryId, set: { version: sql`excluded.version` } })
+    if (stayed.length) {
+      await tx
+        .insert(dreamMarks)
+        .values(stayed.map((c) => ({ spaceId, memoryId: c.row.id, version: c.row.version })))
+        .onConflictDoUpdate({
+          target: dreamMarks.memoryId,
+          set: { version: sql`excluded.version` },
+        })
+    }
+    return batch.changed.length - stayed.length
   }
 
   let completion
@@ -640,7 +654,7 @@ async function dreamScope(
     await withSpace(db, spaceId, (tx) =>
       record(tx, { model: model.model, error: (err as Error).message }),
     )
-    return { tokens: 0, more: batch.more, failed: true }
+    return { tokens: 0, more: batch.more, again: false, failed: true }
   }
   const usage = {
     model: model.model,
@@ -665,6 +679,8 @@ async function dreamScope(
   }
   const attempted = candidates.length - dropped
   let saved: boolean
+  // 这一批里没记上标记的条数（见 mark）
+  let held = 0
   try {
     saved = await withSpace(db, spaceId, async (tx) => {
       if (owner) {
@@ -678,8 +694,8 @@ async function dreamScope(
         }
       }
       if (unparsed) {
-        await mark(tx)
-        await record(tx, { ...usage, more: batch.more, error: unparsed })
+        held = await mark(tx)
+        await record(tx, { ...usage, more: batch.more || held > 0, error: unparsed })
         return true
       }
       const inserted = proposals.size
@@ -698,13 +714,13 @@ async function dreamScope(
             })
             .returning({ id: dreamSuggestions.id })
         : []
-      await mark(tx)
+      held = await mark(tx)
       await record(tx, {
         ...usage,
         suggested: inserted.length,
         known: attempted - inserted.length,
         dropped,
-        more: batch.more,
+        more: batch.more || held > 0,
       })
       return true
     })
@@ -713,10 +729,15 @@ async function dreamScope(
     await withSpace(db, spaceId, (tx) =>
       record(tx, { ...usage, error: `写入失败：${(err as Error).message}` }),
     )
-    return { tokens, more: batch.more, failed: true }
+    return { tokens, more: batch.more, again: false, failed: true }
   }
-  // 结果没存（主人关掉了、不再是成员）：这个范围这次不再接着整理
-  return { tokens, more: saved && batch.more, failed: false }
+  // 结果没存（主人关掉了、不再是成员）：这个范围这次不再接着整理。有没记上标记的：还有没整理的，但这次也不接着
+  return {
+    tokens,
+    more: saved && (batch.more || held > 0),
+    again: saved && batch.more && held === 0,
+    failed: false,
+  }
 }
 
 // 一条合规的建议，按存进 dream_suggestions 的样子
