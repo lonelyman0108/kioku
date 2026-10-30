@@ -15,7 +15,8 @@ import { ApiError } from './api/client'
 import { formatBytes } from './backup'
 import type { StepView } from './benchResult'
 
-// 测试台的共享逻辑：谁能用、真实模式的后果、运行失败的说明、连续调用（重放日志与时间线）
+// 测试台的共享逻辑：谁能用、选择写回地址、真实模式的后果、运行失败与中途作废的说明、
+// 切换模式会清掉什么、连续调用（重放日志与时间线）
 
 // 只有应用主人能用测试台（会读到主人的私人层，空间 owner 也不行），所以只列自己是主人的应用
 export const ownedApps = (apps: readonly AppInfo[], accountId: string | undefined) =>

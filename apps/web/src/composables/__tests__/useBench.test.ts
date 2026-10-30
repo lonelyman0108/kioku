@@ -75,9 +75,14 @@ const RESULT = {
 } as BenchRunResult
 
 // 地址：query 里 undefined 的项和真的 vue-router 一样去掉。导航和真的一样是异步的
-function fakeRouter(query: Record<string, string>, name = 'bench') {
+function fakeRouter(query: Record<string, string>) {
   const fullPath = (q: Record<string, string>) => `/spaces/s1/bench?${new URLSearchParams(q)}`
-  const route = reactive({ name, params: { spaceId: 's1' }, query, fullPath: fullPath(query) })
+  const route = reactive({
+    name: 'bench',
+    params: { spaceId: 's1' },
+    query,
+    fullPath: fullPath(query),
+  })
   const router = {
     replace: vi.fn(async (to: { query: Record<string, string | undefined> }) => {
       await Promise.resolve()
@@ -97,8 +102,8 @@ let client: QueryClient
 let scope: EffectScope
 let fake: ReturnType<typeof fakeRouter>
 
-function start(query: Record<string, string> = {}, name = 'bench') {
-  fake = fakeRouter(query, name)
+function start(query: Record<string, string> = {}) {
+  fake = fakeRouter(query)
   fakes.route = fake.route
   fakes.router = fake.router
   const vueApp = createApp({})
@@ -207,11 +212,10 @@ describe('选择写回地址', () => {
     const bench = start()
     await settle()
     expect(fake.route.query).toEqual({ app: 'a1', key: 'k1' })
-    const writes: unknown[] = []
     fake.router.replace.mockClear()
     bench.selectApp('a2')
     await settle()
-    for (const [to] of fake.router.replace.mock.calls) writes.push(to.query.key)
+    const writes = fake.router.replace.mock.calls.map(([to]) => to.query.key)
     expect(writes).not.toContain('k1')
     expect(fake.route.query).toEqual({ app: 'a2', key: 'k8' })
     expect(bench.selectionNotice.value).toBeNull()
