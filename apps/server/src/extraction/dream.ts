@@ -13,7 +13,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL 
 
 import { maskPlaintextCredentials, mentionsPlaceholder } from '../credential/placeholders'
 import type { MasterKey } from '../crypto/keyring'
-import { loggableError, withSpace, type Db, type Tx } from '../db/client'
+import { errorText, loggableError, withSpace, type Db, type Tx } from '../db/client'
 import {
   dreamMarks,
   dreamRuns,
@@ -189,7 +189,7 @@ export async function dreamSpace(
   try {
     return await dreamOnce(db, masterKey, options, progress)
   } catch (err) {
-    const error = `整理出错：${messageOf(err)}`
+    const error = `整理出错：${errorText(err)}`
     const at = progress.scope
     // 汇总写下之后、又不在哪个范围里：不再记一条范围为空的（那就成了第二条汇总），只记日志
     if (progress.summarized && !at) {
@@ -213,13 +213,6 @@ export async function dreamSpace(
     }
     return { outcome: 'failed', reason: null }
   }
-}
-
-// 数据库报的错由 drizzle 包在 cause 里，外层的消息是整条 SQL 与参数，记下里面那层
-function messageOf(err: unknown): string {
-  const cause = (err as { cause?: unknown } | null)?.cause
-  if (cause instanceof Error) return cause.message
-  return err instanceof Error ? err.message : String(err)
 }
 
 // 别的成员看到的列表与状态只按共享部分的汇总与他自己的画像层、私人层算（见 dreamRunOutcome），
