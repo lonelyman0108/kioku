@@ -1469,6 +1469,57 @@ describe('模型对话', () => {
     expect(invalidated.includes('keys')).toBe(refetchKeysToo)
   })
 
+  describe('生命周期事件的运行请求失败', () => {
+    const HOOK_LOOP = { ...TOOLS_LOOP, loop: 'hook' as const }
+
+    it.each([
+      [400, '请求不合法'],
+      [403, '没有权限'],
+      [404, '没有这把 Key'],
+    ])('HTTP %i：确定性的拒绝，只显示原因', async (status, message) => {
+      const bench = start()
+      await settle()
+      fakes.api.benchRun.mockRejectedValueOnce(new ApiError(status, message))
+      const finished = await bench.sendToAgent('你好', HOOK_LOOP)
+      expect(finished?.end).toBe('lifecycleFailed')
+      expect(finished?.notice).toBe(message)
+      expect(fakes.api.benchAgentTurn).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['HTTP 500', new ApiError(500, '服务内部错误'), '服务内部错误'],
+      ['HTTP 429', new ApiError(429, '同时运行的回滚太多'), '同时运行的回滚太多'],
+      ['网络错误', new TypeError('Failed to fetch'), '网络出错了'],
+    ] as [string, Error, string][])(
+      '%s：可能是暂时的，说可以再发一次',
+      async (_name, err, text) => {
+        const bench = start()
+        await settle()
+        fakes.api.benchRun.mockRejectedValueOnce(err)
+        const finished = await bench.sendToAgent('你好', HOOK_LOOP)
+        expect(finished?.notice).toContain(text)
+        expect(finished?.notice).toContain('没有请求模型，可以再发一次')
+      },
+    )
+  })
+
+  it('运行的结果带上再发一次有没有用', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchRun.mockRejectedValueOnce(new ApiError(403, '没有权限'))
+    expect(await bench.execute(STEPS, WHAT)).toEqual({
+      kind: 'failed',
+      message: '没有权限',
+      retryable: false,
+    })
+    fakes.api.benchRun.mockRejectedValueOnce(new ApiError(502, '网关出错'))
+    expect(await bench.execute(STEPS, WHAT)).toEqual({
+      kind: 'failed',
+      message: '网关出错',
+      retryable: true,
+    })
+  })
+
   it('请求模型 502：是上游的问题，不重新读', async () => {
     const bench = start()
     await settle()

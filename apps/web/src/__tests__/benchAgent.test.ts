@@ -440,7 +440,7 @@ describe('hook 循环', () => {
   it('生命周期事件的运行请求失败：不请求模型，这条消息不进历史，下一条接得上', async () => {
     const h = harness({
       turns: [reply('好')],
-      run: () => ({ kind: 'failed', message: '同时运行的回滚太多' }),
+      run: () => ({ kind: 'failed', message: '同时运行的回滚太多', retryable: true }),
     })
     const done = await h.send(USER_TEXT)
     expect(h.turnRequests).toEqual([])
@@ -453,6 +453,27 @@ describe('hook 循环', () => {
     const next = harness({ turns: [reply('好')] })
     const again = await next.send(USER_TEXT, done)
     expect(contents(again.messages)).toEqual([`${USER_TEXT}\n\n${RECALL_TEXT}`, '好'])
+  })
+
+  it('生命周期事件的运行请求被确定性地拒绝：只显示原因，不说可以再发', async () => {
+    const h = harness({
+      turns: [reply('不该到这里')],
+      run: () => ({ kind: 'failed', message: '没有这把 Key', retryable: false }),
+    })
+    const done = await h.send(USER_TEXT)
+    expect(h.turnRequests).toEqual([])
+    expect(last(done).end).toBe('lifecycleFailed')
+    expect(last(done).notice).toBe('没有这把 Key')
+    expect(last(done).inHistory).toBe(false)
+    expect(done.messages).toEqual([])
+  })
+
+  it('生命周期事件的运行请求可能是暂时失败：说可以再发一次', async () => {
+    const h = harness({
+      turns: [reply('不该到这里')],
+      run: () => ({ kind: 'failed', message: '服务内部错误', retryable: true }),
+    })
+    expect(last(await h.send(USER_TEXT)).notice).toBe('服务内部错误。没有请求模型，可以再发一次。')
   })
 
   it('系统提示每次请求时才拼：这条消息之前改过的，下一轮就用新的，历史里不留', async () => {
@@ -578,7 +599,7 @@ describe('chat 循环', () => {
       turns: [reply('好')],
       run: (steps) =>
         ++calls === 2
-          ? { kind: 'failed', message: '服务内部错误' }
+          ? { kind: 'failed', message: '服务内部错误', retryable: true }
           : { kind: 'done', result: runResult('rollback', steps.map(defaultStep)) },
     })
     const done = await h.send(USER_TEXT)
@@ -988,7 +1009,7 @@ describe('一轮的工具调用放不进一次运行', () => {
     const h = harness({
       loop: 'tools',
       turns: [reply(null, calls)],
-      run: () => ({ kind: 'failed', message: '服务内部错误' }),
+      run: () => ({ kind: 'failed', message: '服务内部错误', retryable: true }),
     })
     const done = await h.send(USER_TEXT)
     const tools = toolMessages(done.messages)
@@ -1386,7 +1407,7 @@ describe('工具的运行请求失败', () => {
         toolCall('c3', 'kioku_list'),
       ]),
     ],
-    run: (): RunOutcome => ({ kind: 'failed', message }),
+    run: (): RunOutcome => ({ kind: 'failed', message, retryable: true }),
   })
 
   it('循环结束，每个 tool_call 都补一条 tool 消息，历史合法，不再请求模型', async () => {
@@ -2480,7 +2501,10 @@ describe('真实模式下可能写过库', () => {
   })
 
   it.each([
-    ['请求失败', { kind: 'failed', message: '服务内部错误。可能已经执行了一部分' }],
+    [
+      '请求失败',
+      { kind: 'failed', message: '服务内部错误。可能已经执行了一部分', retryable: true },
+    ],
     ['中途作废', { kind: 'stale' }],
   ] as [string, RunOutcome][])('%s：发出去了就算，可能已经写了一部分', async (_name, outcome) => {
     const h = harness({

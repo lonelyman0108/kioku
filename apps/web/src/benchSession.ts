@@ -67,14 +67,21 @@ export const REAL_MODE_CONSEQUENCES = [
 ] as const
 
 // 一次运行的结果。stale：运行期间换了应用、Key 或模式，结果作废（真实模式下记进 abandoned）；
-// 或者上一次还没结束，这次没有发出去
+// 或者上一次还没结束，这次没有发出去。failed 的 retryable：再发一次可能就好了（见 runRetryable）
 export type RunOutcome =
-  { kind: 'done'; result: BenchRunResult } | { kind: 'failed'; message: string } | { kind: 'stale' }
+  | { kind: 'done'; result: BenchRunResult }
+  | { kind: 'failed'; message: string; retryable: boolean }
+  | { kind: 'stale' }
 
 export const NOT_API_FAILURE = '网络出错了，或者响应对不上'
 
 // 4xx 是写入之前就拒绝了（429 同时运行的回滚太多、413 请求体太大、403、404）
 const refusedBeforeWrite = (err: unknown) => err instanceof ApiError && err.status < 500
+
+// 运行请求失败后再发一次有没有用。400、403、404 是确定性的拒绝，再发还是一样；同时运行的回滚太多（429）等一下就好，
+// 5xx 与网络错误也可能是暂时的
+export const runRetryable = (err: unknown) =>
+  !(err instanceof ApiError && err.status < 500 && err.status !== 429)
 
 // 运行请求失败的说明。5xx 与网络错误不知道执行到了哪一步：回滚模式下都回滚了，真实模式下可能已经写了一部分
 export function runFailureMessage(err: unknown, mode: BenchMode): string {

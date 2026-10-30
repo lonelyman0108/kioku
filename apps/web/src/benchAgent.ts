@@ -560,7 +560,10 @@ export async function sendAgentMessage(
     const outcome = await runSteps(steps, '模型对话的生命周期事件')
     if (outcome.kind === 'stale') return finish('abandoned', null)
     if (outcome.kind === 'failed') {
-      return finish('lifecycleFailed', sentences(outcome.message, `没有请求模型，${RETRY}`))
+      return finish(
+        'lifecycleFailed',
+        outcome.retryable ? sentences(outcome.message, `没有请求模型，${RETRY}`) : outcome.message,
+      )
     }
     updateExchange({ lifecycle: outcome.traces })
     const diverged = outcome.result.replayDiverged

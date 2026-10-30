@@ -31,6 +31,7 @@ import {
   replayStepLabel,
   runBlocker,
   runFailureMessage,
+  runRetryable,
   selectionFix,
   sessionUsage,
   usableKeys,
@@ -193,6 +194,21 @@ describe('运行失败的说明', () => {
     for (const status of [400, 403, 404, 413, 429]) {
       expect(runFailureMessage(new ApiError(status, '拒绝'), 'real')).toBe('拒绝')
     }
+  })
+})
+
+describe('运行请求失败后再发一次有没有用', () => {
+  it.each([400, 401, 403, 404, 409, 413, 422])('HTTP %i 是确定性的拒绝：没有用', (status) => {
+    expect(runRetryable(new ApiError(status, '拒绝'))).toBe(false)
+  })
+
+  it.each([429, 500, 502, 503, 504])('HTTP %i 可能是暂时的：有用', (status) => {
+    expect(runRetryable(new ApiError(status, '出错'))).toBe(true)
+  })
+
+  it('网络错误、响应对不上：有用', () => {
+    expect(runRetryable(new TypeError('Failed to fetch'))).toBe(true)
+    expect(runRetryable(new Error('Invalid input'))).toBe(true)
   })
 })
 

@@ -47,6 +47,7 @@ import {
   replayFor,
   runBlocker,
   runFailureMessage,
+  runRetryable,
   selectionFix,
   usableKeys,
   type AbandonedRun,
@@ -314,7 +315,7 @@ export function createBench() {
     } catch (err) {
       refetchIfDenied(err, target)
       return current.value === id
-        ? { kind: 'failed', message: runFailureMessage(err, forMode) }
+        ? { kind: 'failed', message: runFailureMessage(err, forMode), retryable: runRetryable(err) }
         : staleOutcome({ error: err })
     } finally {
       if (forMode === 'real') {
@@ -344,7 +345,7 @@ export function createBench() {
   // 连续调用：带上这次会话已经做过的写步骤，结果记进时间线与重放日志
   async function call(steps: BenchStep[], label: string): Promise<RunOutcome> {
     const blocked = runBlocker(session.value, mode.value)
-    if (blocked) return { kind: 'failed', message: blocked }
+    if (blocked) return { kind: 'failed', message: blocked, retryable: false }
     const outcome = await execute(
       steps,
       { label, view: 'call' },
