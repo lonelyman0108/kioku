@@ -21,6 +21,8 @@ import { formatBytes } from '../backup'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import {
+  applyFailureNotice,
+  applyFailureOf,
   excludeLabel,
   importProblems,
   LoreFileError,
@@ -28,10 +30,13 @@ import {
   NODE_FILTERS,
   readLoreBackup,
   secretSelectable,
+  selectionEffects,
   selectionOf,
+  staleNotice,
   syncGroups,
   targetStateLabels,
   tokenInClear,
+  type ApplyFailure,
   type NodeFilter,
 } from '../loreBackup'
 import { formatTime } from '../time'
@@ -122,8 +127,9 @@ async function currentSource(): Promise<LoreImportSource> {
 const messageOf = (err: unknown, fallback: string) =>
   err instanceof ApiError || err instanceof LoreFileError ? err.message : fallback
 
-async function showPlan() {
-  if (!ready.value) return
+// 返回有没有拿到新的计划
+async function showPlan(): Promise<boolean> {
+  if (!ready.value) return false
   busy.value = true
   error.value = null
   const forSpace = props.spaceId
@@ -132,13 +138,15 @@ async function showPlan() {
       source: await currentSource(),
       persona: persona.value,
     })
-    if (forSpace !== props.spaceId) return
+    if (forSpace !== props.spaceId) return false
     plan.value = next
     confirmStale.value = false
+    return true
   } catch (err) {
-    if (forSpace !== props.spaceId) return
+    if (forSpace !== props.spaceId) return false
     plan.value = null
     error.value = messageOf(err, '看计划失败')
+    return false
   } finally {
     busy.value = false
   }
@@ -150,16 +158,6 @@ async function replan() {
   await showPlan()
 }
 
-// 执行失败之后给人看的说明。计划变了（409）时什么都没写；别的错误都当成可能写了一部分，服务端报 500 时自己说了
-function failureNotice(err: unknown): string {
-  const message = messageOf(err, '网络出错了')
-  if (err instanceof ApiError && err.status === 409) {
-    return `${message}。已经重新算过计划，勾选还在。`
-  }
-  const partly = err instanceof ApiError && err.status === 500 ? '' : '可能已经写入了一部分。'
-  return `${message}。${partly}已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`
-}
-
 // 表单的提交（包括在输入框里按回车的隐式提交）只用来看计划。计划显示之后什么都不做：写入只来自点「确认导入」，
 // 不然没看完、没勾 secret 的节点就按明文写进去了
 function onSubmit() {
@@ -168,12 +166,12 @@ function onSubmit() {
 
 async function applyPlan() {
   const seen = plan.value
-  if (!seen || !ready.value || (seen.staleSince && !confirmStale.value)) return
+  if (!seen || !ready.value || confirmMissing.value) return
   busy.value = true
   error.value = null
   notice.value = null
   const forSpace = props.spaceId
-  let failure: string | null = null
+  let failure: ApplyFailure | null = null
   try {
     const done = await api.loreApply(forSpace, {
       source: await currentSource(),
@@ -195,16 +193,19 @@ async function applyPlan() {
       void queryClient.invalidateQueries()
     }
   } catch (err) {
-    if (forSpace === props.spaceId) failure = failureNotice(err)
+    if (forSpace === props.spaceId) failure = applyFailureOf(err)
   } finally {
     busy.value = false
   }
-  // 不用旧指纹重试：可能已经写了一部分，或者计划确实变了。直接重看计划，勾选还在
-  if (failure) {
-    notice.value = failure
-    plan.value = null
-    await showPlan()
+  if (!failure) return
+  if (failure.kind === 'refused') {
+    error.value = failure.message
+    return
   }
+  // 不用旧指纹重试：可能已经写了一部分，或者计划确实变了。直接重看计划，勾选还在
+  plan.value = null
+  const replanned = await showPlan()
+  if (forSpace === props.spaceId) notice.value = applyFailureNotice(failure, replanned)
 }
 
 function toggle(set: Set<string>, id: string, on: boolean | 'indeterminate'): Set<string> {
@@ -219,46 +220,29 @@ const toggleExcluded = (id: string, on: boolean | 'indeterminate') =>
   (excludedIds.value = toggle(excludedIds.value, id, on))
 
 const nodes = computed(() => plan.value?.nodes ?? [])
-const visibleNodes = computed(() => nodes.value.filter((n) => matchesFilter(n, filter.value)))
+const plannedBoot = computed(() =>
+  plan.value ? selectionEffects(plan.value, new Set(), new Set()).boot : new Set<LorePlanTarget>(),
+)
+const visibleNodes = computed(() =>
+  nodes.value.filter((n) => matchesFilter(n, filter.value, plannedBoot.value)),
+)
 const filterItems = computed(() =>
   NODE_FILTERS.map(({ value, label }) => ({
     value,
-    label: `${label}（${nodes.value.filter((n) => matchesFilter(n, value)).length}）`,
+    label: `${label}（${nodes.value.filter((n) => matchesFilter(n, value, plannedBoot.value)).length}）`,
   })),
 )
 const sync = computed(() => (plan.value ? syncGroups(plan.value) : null))
-const bootCount = computed(
-  () =>
-    nodes.value.filter(
-      (n) => !excludedIds.value.has(n.uuid) && n.targets.some((t) => t.boot && !isSecret(n, t)),
-    ).length,
+// 勾选之后这次到底会动什么
+const effects = computed(
+  () => plan.value && selectionEffects(plan.value, secretIds.value, excludedIds.value),
 )
-const credentialRefs = computed(() => [...new Set(nodes.value.flatMap((n) => n.credentialRefs))])
-// 这次会写的：勾掉的不算
-const willCreate = computed(
-  () =>
-    nodes.value
-      .filter((n) => !excludedIds.value.has(n.uuid))
-      .flatMap((n) => n.targets)
-      .filter((t) => t.state === 'new').length,
-)
-const willUpdate = computed(() => {
-  const skipped = new Set(
-    nodes.value.filter((n) => excludedIds.value.has(n.uuid)).map((n) => n.uri),
-  )
-  return (plan.value?.sync.items ?? []).filter(
-    (i) => i.state === 'update' && !skipped.has(i.source),
-  ).length
-})
+const stale = computed(() => plan.value && effects.value && staleNotice(plan.value, effects.value))
+const confirmMissing = computed(() => stale.value === 'confirm' && !confirmStale.value)
 // 之前的导入写到了别的人格：换了人格时 core://soul 另写一份，之前那份不再同步
 const otherPersonas = computed(() => {
   const imported = plan.value?.persona.imported ?? []
   return imported.includes(plan.value?.persona.slug ?? '') ? [] : imported
-})
-// 文件比已写入的数据旧，但这次没有要写的：不用确认，「Lore 里已经没有」却可能只是文件旧
-const olderWithoutWrites = computed(() => {
-  const p = plan.value
-  return Boolean(p?.dataTime && !p.staleSince && p.exportedAt < p.dataTime)
 })
 
 const STATE_COLORS: Record<LoreTargetState, 'primary' | 'neutral' | 'warning'> = {
@@ -477,7 +461,7 @@ const disclosureCut = computed(
 
       <UAlert v-if="notice" color="warning" variant="subtle" :title="notice" />
 
-      <div v-if="plan" class="space-y-4">
+      <div v-if="plan && effects" class="space-y-4">
         <p class="text-sm">
           这份数据导出于 {{ formatTime(plan.exportedAt) }}：{{ plan.nodeCount }} 个节点，{{
             plan.previousVersions
@@ -488,18 +472,18 @@ const disclosureCut = computed(
           color="warning"
           variant="subtle"
           title="只导入你自己导出的文件或者你自己的 Lore"
-          :description="`内容按受信来源写入。${bootCount} 个节点会进启动上下文，每次会话开始都注入，宿主当成指令读${credentialRefs.length ? `；正文引用了凭据 ${credentialRefs.join('、')}，agent 能取用这些凭据` : ''}。来路不明的内容写进来，就成了你的 agent 的指令。`"
+          :description="`内容按受信来源写入。这次写入的节点里有 ${effects.bootNodes} 个会进启动上下文，每次会话开始都注入，宿主当成指令读${effects.credentialRefs.length ? `；正文引用了凭据 ${effects.credentialRefs.join('、')}，agent 能取用这些凭据` : ''}。来路不明的内容写进来，就成了你的 agent 的指令。`"
         />
-        <div v-if="plan.staleSince" class="space-y-2">
+        <div v-if="stale === 'confirm'" class="space-y-2">
           <UAlert
             color="error"
             variant="subtle"
-            :title="`这个文件比已写入的数据旧：已写入的数据时间是 ${formatTime(plan.staleSince)}`"
+            :title="`这个文件比已写入的数据旧：已写入的数据时间是 ${formatTime(plan.staleSince!)}`"
             description="同步只看内容是否相同，用旧文件写入会把内容改回去，这次还可能新建已经在 Lore 里删掉的节点。一般应该重新导出一份；再传一份新的导出就能同步回来。"
           />
           <UCheckbox v-model="confirmStale" label="我知道这个文件是旧的，仍然要写入" />
         </div>
-        <p v-else-if="olderWithoutWrites" class="text-sm text-muted">
+        <p v-else-if="stale === 'older'" class="text-sm text-muted">
           这个文件比已写入的数据（{{
             formatTime(plan.dataTime!)
           }}）旧。这次没有要写的，下面列出的「Lore 里已经没有」可能只是因为文件旧。
@@ -513,30 +497,31 @@ const disclosureCut = computed(
 
         <section class="space-y-1 text-sm">
           <h3 class="font-medium">人格与应用</h3>
-          <p>
+          <p v-if="effects.usesPersona">
             core://soul 导入为 <code>{{ plan.persona.slug }}</code>
             <template v-if="plan.persona.exists">（已有）</template>
             <template v-else>（不存在，新建为「{{ plan.persona.name }}」）</template>
           </p>
-          <p v-if="otherPersonas.length" class="text-warning">
+          <p v-else>这次没有要写的 core://soul：不新建人格，也不设应用的默认人格。</p>
+          <p v-if="effects.usesPersona && otherPersonas.length" class="text-warning">
             之前的导入写到了人格 {{ otherPersonas.join('、') }}：这次会另写一份
             core://soul，之前那份不再同步。要接着同步就把人格标识改回去。
           </p>
-          <p v-for="mapping in plan.apps" :key="mapping.runtime" class="break-all">
+          <p v-for="mapping in effects.apps" :key="mapping.runtime" class="break-all">
             core://agent/{{ mapping.runtime }} →
             <template v-for="(app, i) in mapping.apps" :key="app.slug"
               ><template v-if="i">、</template><code>{{ app.slug }}</code
               >{{ app.create ? `（新建，类型 ${app.runtimeFamily}）` : '（已有）' }}</template
             >
           </p>
-          <p v-if="plan.appsGivenPersona.length">
+          <p v-if="effects.usesPersona && effects.appsGivenPersona.length">
             这些应用还没有默认人格，会设成 {{ plan.persona.slug }}：{{
-              plan.appsGivenPersona.join('、')
+              effects.appsGivenPersona.join('、')
             }}
           </p>
-          <p v-if="plan.appsOtherPersona.length" class="text-warning">
+          <p v-if="effects.usesPersona && effects.appsOtherPersona.length" class="text-warning">
             这些应用在用别的人格，core://soul 不会进入它们的启动上下文：{{
-              plan.appsOtherPersona.join('、')
+              effects.appsOtherPersona.join('、')
             }}
           </p>
         </section>
@@ -606,12 +591,7 @@ const disclosureCut = computed(
                   {{ sensitivityLabels[sensitivityOf(node, target)] }}
                 </UBadge>
                 <UBadge size="sm" variant="subtle" color="neutral">P{{ target.priority }}</UBadge>
-                <UBadge
-                  v-if="target.boot && !secretNow(node, target)"
-                  size="sm"
-                  variant="subtle"
-                  color="warning"
-                >
+                <UBadge v-if="effects.boot.has(target)" size="sm" variant="subtle" color="warning">
                   进启动上下文
                 </UBadge>
                 <span v-if="currentNote(target)" class="break-all text-muted">
@@ -670,8 +650,8 @@ const disclosureCut = computed(
         </section>
 
         <p class="text-sm">
-          这次会新建 {{ willCreate }} 条、按 Lore 更新
-          {{ willUpdate }} 条。写到一半出错时已写的留着，重看计划就能接着来。
+          这次会新建 {{ effects.create }} 条、按 Lore 更新
+          {{ effects.update }} 条。写到一半出错时已写的留着，重看计划就能接着来。
         </p>
       </div>
 
@@ -691,7 +671,7 @@ const disclosureCut = computed(
           <UButton
             :icon="icons.importSpace"
             :loading="busy"
-            :disabled="!ready || (Boolean(plan.staleSince) && !confirmStale)"
+            :disabled="!ready || confirmMissing"
             @click="applyPlan"
           >
             确认导入

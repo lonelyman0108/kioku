@@ -8,14 +8,20 @@ import {
 import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
+import { ApiError } from '../api/client'
 import loreImportSource from '../components/LoreImport.vue?raw'
 import {
+  applyFailureNotice,
+  applyFailureOf,
   excludeLabel,
   importProblems,
+  LoreFileError,
   matchesFilter,
   readLoreBackup,
   secretSelectable,
+  selectionEffects,
   selectionOf,
+  staleNotice,
   syncGroups,
   tokenInClear,
   trimLoreBackup,
@@ -213,6 +219,353 @@ describe('勾选', () => {
   })
 })
 
+describe('勾选之后这次会动什么', () => {
+  const none = new Set<string>()
+  const updateOf = (node: LorePlanNode, uri = node.targets[0]!.uri) => ({
+    source: node.uri,
+    uri,
+    state: 'update' as const,
+    changes: ['content' as const],
+  })
+  const current = (uri: string | null, secret = false) => ({ uri, secret })
+
+  it('只算会写的：新建且没勾掉，或者有要更新的同步项；数量与徽章看同一份', () => {
+    const fresh = planNode('fresh', { targets: [target({ boot: true })] })
+    const unticked = planNode('unticked', { targets: [target({ boot: true })] })
+    const updated = planNode('updated', {
+      targets: [
+        target({
+          uri: 'infra://updated',
+          boot: true,
+          state: 'imported',
+          current: [current('infra://updated')],
+        }),
+      ],
+    })
+    // 下面三种都不写：导入过没变化的、在 Kioku 里删除了的、Lore 里换了路径的
+    const unchanged = planNode('unchanged', {
+      targets: [
+        target({
+          uri: 'infra://unchanged',
+          boot: true,
+          state: 'imported',
+          current: [current('infra://unchanged')],
+        }),
+      ],
+    })
+    const deleted = planNode('deleted', {
+      targets: [target({ boot: true, state: 'imported', current: [current(null)] })],
+    })
+    const moved = planNode('moved', {
+      targets: [target({ boot: true, state: 'moved', current: [current('infra://old')] })],
+    })
+    const quiet = planNode('quiet', { targets: [target({ boot: false })] })
+    const plan = planOf([fresh, unticked, updated, unchanged, deleted, moved, quiet], {
+      items: [
+        updateOf(updated),
+        { ...updateOf(unchanged), state: 'current' },
+        { ...updateOf(moved, 'infra://old'), state: 'moved', target: moved.targets[0]!.uri },
+      ],
+    })
+    const effects = selectionEffects(plan, none, new Set(['unticked']))
+    expect(effects).toMatchObject({ create: 2, update: 1, bootNodes: 2 })
+    expect([...effects.boot]).toEqual([fresh.targets[0], updated.targets[0]])
+    // 不带勾选时勾掉的那个也算
+    const all = selectionEffects(plan, none, none)
+    expect(all).toMatchObject({ create: 3, update: 1, bootNodes: 3 })
+    expect(all.boot.has(unticked.targets[0]!)).toBe(true)
+    // 全部勾掉就什么都不写
+    const uuids = new Set(plan.nodes.map((n) => n.uuid))
+    expect(selectionEffects(plan, none, uuids)).toMatchObject({
+      create: 0,
+      update: 0,
+      bootNodes: 0,
+    })
+  })
+
+  it('要更新的同步项按来源和 URI 对到目标：同一个节点别的目标不跟着算', () => {
+    const node = planNode('multi', {
+      targets: [
+        target({
+          uri: 'app://a/agent',
+          boot: true,
+          state: 'imported',
+          current: [current('app://a/agent')],
+        }),
+        target({
+          uri: 'app://b/agent',
+          boot: true,
+          state: 'imported',
+          current: [current('app://b/agent')],
+        }),
+      ],
+    })
+    const other = planNode('other')
+    const plan = planOf([node, other], {
+      items: [
+        updateOf(node, 'app://a/agent'),
+        // URI 相同、来源是别的节点：对不上这个节点的目标
+        updateOf(other, 'app://b/agent'),
+      ],
+    })
+    const effects = selectionEffects(plan, none, none)
+    expect(effects.update).toBe(1)
+    expect([...effects.boot]).toEqual([node.targets[0]])
+  })
+
+  it('secret 不进启动上下文：新建的看这次勾没勾，要更新的看这个 URI 上的记忆现在是不是 secret', () => {
+    const fresh = planNode('fresh', { targets: [target({ boot: true })] })
+    const secretNow = planNode('secret_now', {
+      targets: [
+        target({
+          uri: 'infra://secret_now',
+          boot: true,
+          state: 'imported',
+          current: [current('infra://secret_now', true)],
+        }),
+      ],
+    })
+    // 早期导入过两条：移走的那条是 secret，这次要更新的这条是明文
+    const mixed = planNode('mixed', {
+      targets: [
+        target({
+          uri: 'infra://mixed',
+          boot: true,
+          state: 'imported',
+          current: [current('infra://mixed_old', true), current('infra://mixed')],
+        }),
+      ],
+    })
+    const plan = planOf([fresh, secretNow, mixed], {
+      items: [updateOf(secretNow), updateOf(mixed)],
+    })
+    const plain = selectionEffects(plan, none, none)
+    expect([...plain.boot]).toEqual([fresh.targets[0], mixed.targets[0]])
+    expect(plain.bootNodes).toBe(2)
+    const ticked = selectionEffects(plan, new Set(['fresh']), none)
+    expect([...ticked.boot]).toEqual([mixed.targets[0]])
+    expect(ticked).toMatchObject({ bootNodes: 1, create: 1, update: 2 })
+  })
+
+  it('引用的凭据只算这次会写的节点', () => {
+    const fresh = planNode('fresh', { credentialRefs: ['nas', 'ap'] })
+    const unticked = planNode('unticked', { credentialRefs: ['unticked'] })
+    const unchanged = planNode('unchanged', {
+      credentialRefs: ['unchanged'],
+      targets: [target({ state: 'imported', current: [current('infra://a')] })],
+    })
+    const moved = planNode('moved', {
+      credentialRefs: ['moved'],
+      targets: [target({ state: 'moved', current: [current('infra://b')] })],
+    })
+    const updated = planNode('updated', {
+      credentialRefs: ['updated', 'nas'],
+      targets: [
+        target({
+          uri: 'infra://updated',
+          state: 'imported',
+          current: [current('infra://updated')],
+        }),
+      ],
+    })
+    const plan = planOf([fresh, unticked, unchanged, moved, updated], {
+      items: [updateOf(updated)],
+    })
+    expect(selectionEffects(plan, none, new Set(['unticked'])).credentialRefs).toEqual([
+      'ap',
+      'nas',
+      'updated',
+    ])
+  })
+
+  it('人格层的目标都勾掉了就用不上人格，导入过的也算目标', () => {
+    const soul = planNode('soul', {
+      targets: [target({ uri: 'persona://default/soul', layer: 'persona' })],
+    })
+    const other = planNode('other')
+    const plan = planOf([soul, other])
+    expect(selectionEffects(plan, none, none).usesPersona).toBe(true)
+    expect(selectionEffects(plan, none, new Set(['other'])).usesPersona).toBe(true)
+    expect(selectionEffects(plan, none, new Set(['soul'])).usesPersona).toBe(false)
+    expect(selectionEffects(planOf([other]), none, none).usesPersona).toBe(false)
+    const imported = planOf([
+      planNode('soul', {
+        targets: [
+          target({
+            uri: 'persona://default/soul',
+            layer: 'persona',
+            state: 'imported',
+            current: [current('persona://default/soul')],
+          }),
+        ],
+      }),
+    ])
+    expect(selectionEffects(imported, none, none).usesPersona).toBe(true)
+  })
+
+  it('勾掉一个运行时下的全部节点，它的应用不再列出；有跳过的节点时保守地留着', () => {
+    const appTarget = (slug: string) => target({ uri: `app://${slug}/agent`, layer: 'app' })
+    const claude = planNode('claude', {
+      uri: 'core://agent/claude',
+      targets: [appTarget('claude')],
+    })
+    const tools = planNode('tools', {
+      uri: 'core://agent/claude/tools',
+      targets: [target({ uri: 'app://claude/agent/tools', layer: 'app' })],
+    })
+    // 名字有相同前缀的运行时不算在内
+    const longer = planNode('longer', {
+      uri: 'core://agent/claude_web',
+      targets: [appTarget('claude-web')],
+    })
+    const zcode = planNode('zcode', { uri: 'core://agent/zcode', targets: [appTarget('zcode')] })
+    const plan: LoreImportPlan = {
+      ...planOf([claude, tools, longer, zcode]),
+      apps: [
+        { runtime: 'claude', apps: [{ slug: 'claude', create: false, runtimeFamily: 'mcp' }] },
+        {
+          runtime: 'claude_web',
+          apps: [{ slug: 'claude-web', create: true, runtimeFamily: 'other' }],
+        },
+        { runtime: 'zcode', apps: [{ slug: 'zcode', create: false, runtimeFamily: 'other' }] },
+      ],
+      appsGivenPersona: ['claude'],
+      appsOtherPersona: ['zcode'],
+    }
+    const pick = (excluded: string[]) => {
+      const { apps, appsGivenPersona, appsOtherPersona } = selectionEffects(
+        plan,
+        none,
+        new Set(excluded),
+      )
+      return { runtimes: apps.map((m) => m.runtime), appsGivenPersona, appsOtherPersona }
+    }
+    expect(pick([])).toEqual({
+      runtimes: ['claude', 'claude_web', 'zcode'],
+      appsGivenPersona: ['claude'],
+      appsOtherPersona: ['zcode'],
+    })
+    // 还有一个节点留着，这个运行时还在
+    expect(pick(['claude']).runtimes).toEqual(['claude', 'claude_web', 'zcode'])
+    expect(pick(['claude', 'tools'])).toEqual({
+      runtimes: ['claude_web', 'zcode'],
+      appsGivenPersona: [],
+      appsOtherPersona: ['zcode'],
+    })
+    expect(pick(['zcode'])).toEqual({
+      runtimes: ['claude', 'claude_web'],
+      appsGivenPersona: ['claude'],
+      appsOtherPersona: [],
+    })
+    const skipped = selectionEffects(
+      {
+        ...plan,
+        skipped: [{ source: 'core://agent/zcode/refs', reason: 'disclosure 里有凭据占位符' }],
+      },
+      none,
+      new Set(['zcode']),
+    )
+    expect(skipped.apps.map((m) => m.runtime)).toContain('zcode')
+    expect(skipped.appsOtherPersona).toEqual(['zcode'])
+  })
+})
+
+describe('文件比已写入的数据旧', () => {
+  const dataTime = '2026-02-01T00:00:00.000Z'
+  const stale = (extra: Partial<LoreImportPlan>): LoreImportPlan => ({
+    ...planOf([planNode('a')]),
+    dataTime,
+    ...extra,
+  })
+
+  it('勾选之后还有要写的才要确认，没有要写的不要求确认', () => {
+    const plan = stale({ staleSince: dataTime })
+    expect(staleNotice(plan, { create: 1, update: 0 })).toBe('confirm')
+    expect(staleNotice(plan, { create: 0, update: 1 })).toBe('confirm')
+    // 全部勾掉：计划里带着 staleSince，这次却什么都不写
+    expect(staleNotice(plan, { create: 0, update: 0 })).toBe('older')
+    expect(
+      staleNotice(plan, selectionEffects(plan, new Set(), new Set(plan.nodes.map((n) => n.uuid)))),
+    ).toBe('older')
+    expect(staleNotice(plan, selectionEffects(plan, new Set(), new Set()))).toBe('confirm')
+  })
+
+  it('本来就没有要写的只说一声；不比已写入的数据旧时什么都不说', () => {
+    expect(staleNotice(stale({ staleSince: null }), { create: 0, update: 0 })).toBe('older')
+    expect(staleNotice(stale({ exportedAt: dataTime }), { create: 1, update: 0 })).toBeNull()
+    expect(
+      staleNotice(stale({ exportedAt: '2026-03-01T00:00:00.000Z' }), { create: 1, update: 0 }),
+    ).toBeNull()
+    // 还没写入过，或者拉取来源
+    expect(staleNotice(stale({ dataTime: null }), { create: 1, update: 0 })).toBeNull()
+  })
+})
+
+describe('执行失败之后的说明', () => {
+  const PARTLY = '可能已经写入了一部分'
+  const SERVER_PARTLY = '写到一半出错了，可能已写入一部分'
+
+  it('确定什么都没写的：显示服务端的文字，不说写了一部分，不重看计划', () => {
+    for (const status of [400, 401, 403, 404, 413, 429]) {
+      expect(applyFailureOf(new ApiError(status, '服务端的文字'))).toEqual({
+        kind: 'refused',
+        message: '服务端的文字',
+      })
+    }
+    expect(applyFailureOf(new LoreFileError('文件的问题'))).toEqual({
+      kind: 'refused',
+      message: '文件的问题',
+    })
+  })
+
+  it('计划变了（409）：什么都没写，重看计划', () => {
+    const failure = applyFailureOf(new ApiError(409, '计划变了'))
+    expect(failure.kind).toBe('changed')
+    const text = applyFailureNotice(failure, true)
+    expect(text).toBe('计划变了。已经重新算过计划，勾选还在。')
+    expect(text).not.toContain(PARTLY)
+  })
+
+  it('500、网关错误与网络错误才说可能写了一部分并重看计划；服务端自己说了的不重复', () => {
+    const server = applyFailureOf(new ApiError(500, SERVER_PARTLY))
+    expect(server.kind).toBe('partial')
+    expect(applyFailureNotice(server, true)).toBe(
+      `${SERVER_PARTLY}。已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`,
+    )
+    // 全局的错误处理给的文字没有说
+    for (const err of [
+      new ApiError(500, '服务内部错误'),
+      new ApiError(502, '请求失败：HTTP 502'),
+      new ApiError(504, '请求失败：HTTP 504'),
+      new TypeError('Failed to fetch'),
+    ]) {
+      const failure = applyFailureOf(err)
+      expect(failure.kind).toBe('partial')
+      expect(applyFailureNotice(failure, true)).toContain(`${PARTLY}。已经重新算过计划`)
+    }
+    // 网络错误的英文原文不给人看
+    expect(applyFailureOf(new TypeError('Failed to fetch')).message).toBe('网络出错了')
+  })
+
+  it('接着的看计划也失败时，不说已经重新算过', () => {
+    for (const failure of [
+      applyFailureOf(new ApiError(409, '计划变了')),
+      applyFailureOf(new ApiError(500, SERVER_PARTLY)),
+      applyFailureOf(new TypeError('Failed to fetch')),
+    ]) {
+      const text = applyFailureNotice(failure, false)
+      expect(text).not.toContain('已经重新算过')
+      expect(text).toContain('重看计划也失败了')
+      expect(text).toContain('勾选还在')
+      expect(text.startsWith(failure.message)).toBe(true)
+    }
+    expect(applyFailureNotice(applyFailureOf(new TypeError('x')), false)).toContain(PARTLY)
+    expect(applyFailureNotice(applyFailureOf(new ApiError(409, '计划变了')), false)).not.toContain(
+      PARTLY,
+    )
+  })
+})
+
 describe('写入只来自点确认导入', () => {
   // 模板解析出来的节点：看标签、属性与事件，不依赖排版。没有组件测试的环境，所以看模板本身
   interface TemplateNode {
@@ -318,7 +671,7 @@ describe('计划的分组', () => {
     const moved = planNode('moved', { targets: [target({ state: 'moved' })] })
     const nodes = [plain, boot, refs, hint, moved]
     const pick = (filter: Parameters<typeof matchesFilter>[1]) =>
-      nodes.filter((n) => matchesFilter(n, filter)).map((n) => n.uuid)
+      nodes.filter((n) => matchesFilter(n, filter, new Set(boot.targets))).map((n) => n.uuid)
     expect(pick('all')).toHaveLength(5)
     expect(pick('new')).toEqual(['plain', 'refs', 'hint'])
     expect(pick('imported')).toEqual(['boot'])

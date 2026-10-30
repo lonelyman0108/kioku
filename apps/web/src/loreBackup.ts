@@ -5,14 +5,16 @@ import {
   type LoreBackupUpload,
   type LoreImportPlan,
   type LorePlanNode,
+  type LorePlanTarget,
   type LoreSyncChange,
   type LoreSyncState,
   type LoreTargetState,
 } from '@kioku/contracts'
 
+import { ApiError } from './api/client'
 import { formatBytes } from './backup'
 
-// 从 Lore 导入时界面用的纯逻辑：裁剪导出文件、勾选换算成请求、计划的分组
+// 从 Lore 导入时界面用的纯逻辑：裁剪导出文件、勾选换算成请求、勾选之后这次写什么、计划的分组、执行失败的说明
 
 type Row = Record<string, unknown>
 
@@ -116,6 +118,93 @@ export function selectionOf(
   return { secretUris, excludeUris }
 }
 
+// 勾选之后这次到底会动什么。计划是不带勾选的基准计划，服务端执行时按勾选重算，勾选只让写入变少，这里要和它算的一样
+export interface SelectionEffects {
+  // 这次会写的目标：节点没勾掉，而且是新建的，或者有要更新的同步项。导入过没变化的、Lore 里换了路径的、
+  // 在 Kioku 里删除了的都不写
+  create: number
+  update: number
+  // 这次会写、写进去之后会进启动上下文的目标（就是计划里的那些对象）：secret 不进。数量与徽章都看它
+  boot: ReadonlySet<LorePlanTarget>
+  bootNodes: number
+  // 这次会写的节点的正文引用的凭据
+  credentialRefs: string[]
+  // 没勾掉的节点还有没有写到人格层的目标。没有就用不上人格：不新建，也不设应用的默认人格
+  usesPersona: boolean
+  // 还会动到的应用
+  apps: LoreImportPlan['apps']
+  appsGivenPersona: string[]
+  appsOtherPersona: string[]
+}
+
+const underRuntime = (uri: string, runtime: string) =>
+  uri === `core://agent/${runtime}` || uri.startsWith(`core://agent/${runtime}/`)
+
+export function selectionEffects(
+  plan: LoreImportPlan,
+  secret: ReadonlySet<string>,
+  excluded: ReadonlySet<string>,
+): SelectionEffects {
+  const updateKey = (source: string, uri: string) => JSON.stringify([source, uri])
+  const updates = new Set(
+    plan.sync.items.filter((i) => i.state === 'update').map((i) => updateKey(i.source, i.uri)),
+  )
+  const kept = plan.nodes.filter((n) => !excluded.has(n.uuid))
+  const boot = new Set<LorePlanTarget>()
+  const refs = new Set<string>()
+  let create = 0
+  let update = 0
+  let bootNodes = 0
+  for (const node of kept) {
+    const written = node.targets.filter(
+      (t) => t.state === 'new' || updates.has(updateKey(node.uri, t.uri)),
+    )
+    if (!written.length) continue
+    create += written.filter((t) => t.state === 'new').length
+    update += written.filter((t) => t.state !== 'new').length
+    for (const ref of node.credentialRefs) refs.add(ref)
+    // 新建的看这次勾没勾 secret；同步不改敏感级，要更新的看这个 URI 上的记忆现在是不是 secret
+    const entering = written.filter(
+      (t) =>
+        t.boot &&
+        !(t.state === 'new'
+          ? secret.has(node.uuid)
+          : t.current.some((c) => c.uri === t.uri && c.secret)),
+    )
+    for (const target of entering) boot.add(target)
+    if (entering.length) bootNodes++
+  }
+  // 勾掉一个运行时下的全部节点，服务端就不建它的应用，也不设它们的默认人格。这个运行时下有计划里不导入的节点时
+  // 保守地留着：有些跳过的节点（例如 disclosure 里有占位符）同样让服务端建应用
+  const apps = plan.apps.filter(
+    ({ runtime }) =>
+      kept.some((n) => underRuntime(n.uri, runtime)) ||
+      plan.skipped.some((s) => underRuntime(s.source, runtime)),
+  )
+  const slugs = new Set(apps.flatMap((m) => m.apps.map((a) => a.slug)))
+  return {
+    create,
+    update,
+    boot,
+    bootNodes,
+    credentialRefs: [...refs].sort(),
+    usesPersona: kept.some((n) => n.targets.some((t) => t.layer === 'persona')),
+    apps,
+    appsGivenPersona: plan.appsGivenPersona.filter((slug) => slugs.has(slug)),
+    appsOtherPersona: plan.appsOtherPersona.filter((slug) => slugs.has(slug)),
+  }
+}
+
+// 文件比已写入的数据旧时怎么提示。服务端按勾选之后的计划判断要不要确认，这里算的要和它一样：
+// 还有要写的才要确认（confirm）；没有要写的不用确认，只说一声「Lore 里已经没有」可能只是文件旧（older）
+export function staleNotice(
+  plan: LoreImportPlan,
+  effects: Pick<SelectionEffects, 'create' | 'update'>,
+): 'confirm' | 'older' | null {
+  if (!plan.dataTime || plan.exportedAt >= plan.dataTime) return null
+  return plan.staleSince && effects.create + effects.update > 0 ? 'confirm' : 'older'
+}
+
 export const targetStateLabels: Record<LoreTargetState, string> = {
   new: '新建',
   imported: '已导入',
@@ -207,12 +296,17 @@ export type NodeFilter = (typeof NODE_FILTERS)[number]['value']
 export const looksLikeCredential = (node: LorePlanNode) =>
   node.credentialHints.path || node.credentialHints.content || node.credentialHints.extras
 
-export function matchesFilter(node: LorePlanNode, filter: NodeFilter): boolean {
+// boot 是不带勾选时的 selectionEffects 的结果：筛选不随勾选变，勾掉的节点不从列表里消失，还能勾回来
+export function matchesFilter(
+  node: LorePlanNode,
+  filter: NodeFilter,
+  boot: ReadonlySet<LorePlanTarget>,
+): boolean {
   switch (filter) {
     case 'all':
       return true
     case 'boot':
-      return node.targets.some((t) => t.boot)
+      return node.targets.some((t) => boot.has(t))
     case 'refs':
       return node.credentialRefs.length > 0
     case 'credential':
@@ -233,4 +327,34 @@ export function importProblems(result: {
     result.secretAlreadyImported.length > 0 ||
     result.sync.failed.length > 0
   )
+}
+
+// 执行失败之后怎么办。
+// changed：计划变了（409），什么都没写，要重看计划；
+// partial：5xx（网关超时时请求可能已经到了服务端）与网络错误，可能写了一部分，要重看计划，已写入的会显示成已导入；
+// refused：别的（429、400、403、413 这些）都是写入之前就拒绝了，看过的计划还算数，只显示错误的文字
+export interface ApplyFailure {
+  kind: 'changed' | 'partial' | 'refused'
+  message: string
+}
+
+export function applyFailureOf(err: unknown): ApplyFailure {
+  if (err instanceof ApiError) {
+    if (err.status === 409) return { kind: 'changed', message: err.message }
+    return { kind: err.status >= 500 ? 'partial' : 'refused', message: err.message }
+  }
+  if (err instanceof LoreFileError) return { kind: 'refused', message: err.message }
+  return { kind: 'partial', message: '网络出错了' }
+}
+
+// 接着重看计划之后的说明（refused 不重看，用不到）：重看也失败时不能说已经重新算过。服务端报写到一半时自己说了可能写了一部分
+export function applyFailureNotice({ kind, message }: ApplyFailure, replanned: boolean): string {
+  const partly =
+    kind === 'partial' && !message.includes('可能已写入一部分') ? '可能已经写入了一部分。' : ''
+  if (!replanned) {
+    return `${message}。${partly}接着重看计划也失败了：看下面的错误，处理之后点「看计划」，勾选还在。`
+  }
+  return kind === 'partial'
+    ? `${message}。${partly}已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`
+    : `${message}。已经重新算过计划，勾选还在。`
 }
