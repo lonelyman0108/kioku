@@ -127,6 +127,9 @@ export interface ImportOptions {
   // 这份数据的导出时间（ISO 8601），记进事件的 context，用来判断之后的文件新旧。
   // 命令行读的是现在的库，没有这一项
   exportedAt?: string
+  // 跳过的原因里引用正文中那段格式不对的占位符，好到 Lore 里找。这段可能带着后面的明文，只有命令行打开：
+  // 输出在主人自己的终端上。接口不打开，计划视图不含正文
+  quoteMalformed?: boolean
 }
 
 export interface ExistingApp {
@@ -299,9 +302,10 @@ export function planImport(
     // 占位符的写入规则在计划里先查一遍，不用等执行时逐条失败
     const malformed = scanPlaceholders(node.content).malformed[0]
     if (malformed) {
+      const quoted = options.quoteMalformed ? ` ${malformed}` : ''
       plan.skipped.push({
         source: node.uri,
-        reason: `正文里有格式不对的凭据占位符 ${malformed}：写到这种写法的说明文字要去掉花括号`,
+        reason: `正文里有格式不对的凭据占位符${quoted}：写到这种写法的说明文字要去掉花括号`,
       })
       continue
     }

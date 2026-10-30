@@ -94,6 +94,7 @@ async function main(): Promise<void> {
       accountId,
       persona: { slug: values.persona, name: values['persona-name'] },
       secretUris: new Set(values.secret),
+      quoteMalformed: true,
     })
 
     const versions = snapshot.nodes.reduce((n, node) => n + node.previousVersions, 0)

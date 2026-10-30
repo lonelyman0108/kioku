@@ -250,9 +250,23 @@ describe('Lore 导入计划', () => {
     expect(plan.skipped).toEqual([
       {
         source: 'projects://notes',
-        reason: expect.stringContaining('格式不对的凭据占位符 {{cred:<标识>#<字段>}}'),
+        reason: '正文里有格式不对的凭据占位符：写到这种写法的说明文字要去掉花括号',
       },
       { source: 'infra://hint', reason: expect.stringContaining('占位符只能写在正文里') },
+    ])
+  })
+
+  it('跳过的原因默认不引用正文；命令行才引用那段格式不对的占位符', () => {
+    const snap = snapshot(
+      node('infra://hint', { content: '说明 {{cred:nas 密码是 hunter2 不要外传' }),
+    )
+    expect(JSON.stringify(planImport(snap, [], options))).not.toContain('hunter2')
+    expect(planImport(snap, [], { ...options, quoteMalformed: true }).skipped).toEqual([
+      {
+        source: 'infra://hint',
+        reason:
+          '正文里有格式不对的凭据占位符 {{cred:nas 密码是 hunter2 不要外传：写到这种写法的说明文字要去掉花括号',
+      },
     ])
   })
 

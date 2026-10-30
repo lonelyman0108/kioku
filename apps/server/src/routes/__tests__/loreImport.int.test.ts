@@ -187,6 +187,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       accountId: ws.accountId,
       persona: { slug: persona, name: '默认人格' },
       secretUris: new Set(),
+      quoteMalformed: true,
     })
     const sync = await planSync(target, plan, snapshot)
     return { target, snapshot, plan, sync }
@@ -350,6 +351,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           priority: 0,
         },
       )
+      await seed('infra://broken', '说明 {{cred:nas 密码是 hunter3 不要外传')
+      await seed('infra://big', `超长的正文 hunter4 ${'长'.repeat(20_000)}`)
       const before = await counts()
       const source = await fileSource()
       const plan = await planOf(source)
@@ -357,13 +360,27 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
 
       // 看原始的响应：解析时会丢掉契约里没有的字段
       const text = await (await post('plan', { source })).text()
-      for (const body of ['工作流约束的正文', '存储服务器的正文', '旧版本的正文', 'hunter2']) {
+      for (const body of [
+        '工作流约束的正文',
+        '存储服务器的正文',
+        '旧版本的正文',
+        'hunter2',
+        // 坏占位符只说有，不引用那段正文；写入校验的报错也不带
+        'hunter3',
+        '{{cred:',
+        'hunter4',
+      ]) {
         expect(text).not.toContain(body)
       }
+      expect(plan.skipped).toContainEqual({
+        source: 'infra://broken',
+        reason: '正文里有格式不对的凭据占位符：写到这种写法的说明文字要去掉花括号',
+      })
+      expect(plan.skipped.map((s) => s.source)).toContain('infra://big')
       expect(plan).toMatchObject({
         exportedAt: EARLIER,
         staleSince: null,
-        nodeCount: 7,
+        nodeCount: 9,
         previousVersions: 1,
         secretAvailable: true,
         persona: { slug: 'default', name: '默认人格', exists: false, imported: [] },
@@ -537,7 +554,12 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       await editLore('infra://change_in_lore', '再改一次的正文')
 
       const { sync } = await cli()
-      const plan = await planOf(await fileSource())
+      const source = await fileSource()
+      const plan = await planOf(source)
+      // 命令行的原因引用那段坏占位符（打在主人自己的终端上），计划视图不含正文：只差这一处。看原始的响应
+      const quoted = ' {{cred:Bad Name}}'
+      expect(sync.items.find((i) => i.state === 'skipped')!.reason).toContain(quoted)
+      expect(await (await post('plan', { source })).text()).not.toContain('Bad Name')
       const comparable = (items: LoreSyncItem[]) =>
         items
           .map(({ source, uri, state, target, reason, changes }) => ({
@@ -545,7 +567,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
             uri,
             state,
             target,
-            reason,
+            reason: reason?.replace(quoted, ''),
             changes,
           }))
           .sort((a, b) =>
