@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto'
+
 import type {
   BenchAgentMessage,
   BenchAgentToolCall,
@@ -78,41 +80,72 @@ export function parseModelJson(text: string): unknown {
 type ParsedArguments = Pick<BenchAgentToolCall, 'arguments' | 'parseError'>
 
 function parseArguments(raw: unknown): ParsedArguments {
-  // 没有参数的工具，有的模型给空串，有的干脆不给
-  if (raw === undefined || raw === null) return { arguments: {}, parseError: null }
-  if (typeof raw === 'string' && !raw.trim()) return { arguments: {}, parseError: null }
   let parsed = raw
   if (typeof raw === 'string') {
     try {
-      parsed = JSON.parse(raw)
+      // 和响应一样容忍控制字符：多行正文的参数里常有没转义的换行，这里报错的话模型只能白白重试
+      parsed = raw.trim() ? parseModelJson(raw) : null
     } catch {
       return { arguments: null, parseError: '工具参数不是合法的 JSON' }
     }
   }
-  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+  // 没有参数的工具，有的模型不给，有的给空串或 null，有的模型和代理把 null 编码成字符串
+  if (parsed === undefined || parsed === null) return { arguments: {}, parseError: null }
+  if (typeof parsed !== 'object' || Array.isArray(parsed)) {
     return { arguments: null, parseError: '工具参数不是 JSON 对象' }
   }
   return { arguments: parsed as Record<string, unknown>, parseError: null }
 }
 
-// 助手消息里的工具调用。不合规的也留着，由调用方作为工具错误回给模型：
-// 带 tool_calls 的消息要跟齐每一个 tool 消息，少一个下一轮上游就拒绝
-export function parseToolCalls(value: unknown): BenchAgentToolCall[] {
+export type NormalizedToolCall = Record<string, unknown> & { id: string }
+
+// 助手消息里的 tool_calls。这条消息下一轮要放回历史，tool 消息的 tool_call_id 得和这里的 id 一一对上，否则之后每一轮
+// 上游都拒绝，对话就卡死了。所以缺失、不是字符串、空串或重复的 id 换成生成的，重复的第一个留着；生成的照 OpenAI 的写法
+// （call_ 加 24 位），有的接口限制 id 的长度。不是对象的放不下 id，也说不出要调什么，去掉。别的字段原样
+export function normalizeToolCalls(value: unknown): NormalizedToolCall[] {
   if (!Array.isArray(value)) return []
-  return value.map((call: unknown) => {
-    const { id, function: fn } = (call ?? {}) as {
-      id?: unknown
-      function?: { name?: unknown; arguments?: unknown } | null
-    }
+  const seen = new Set<string>()
+  return value
+    .filter(
+      (call: unknown): call is Record<string, unknown> =>
+        typeof call === 'object' && call !== null && !Array.isArray(call),
+    )
+    .map((call) => {
+      const id =
+        typeof call.id === 'string' && call.id && !seen.has(call.id)
+          ? call.id
+          : `call_${randomBytes(12).toString('hex')}`
+      seen.add(id)
+      return { ...call, id }
+    })
+}
+
+// 解析规范化之后的工具调用，和 message.tool_calls 一一对应、id 相同。不合规的也留着，由调用方作为工具错误回给模型：
+// 带 tool_calls 的消息要跟齐每一个 tool 消息，少一个下一轮上游就拒绝
+export function parseToolCalls(calls: readonly NormalizedToolCall[]): BenchAgentToolCall[] {
+  return calls.map((call) => {
+    const fn = call.function as { name?: unknown; arguments?: unknown } | null | undefined
     const name = typeof fn?.name === 'string' ? fn.name : ''
     return {
-      id: typeof id === 'string' ? id : '',
+      id: call.id,
       name,
       ...(name
         ? parseArguments(fn?.arguments)
         : { arguments: null, parseError: '工具调用没有名字' }),
     }
   })
+}
+
+// 下一轮要放回历史的助手消息。tool_calls 换成规范化之后的，没有工具调用时去掉：上游给的空数组或别的类型，严格的接口会拒绝。
+// 没有 role 时补上：历史里每条都要有 role。别的字段原样
+function assistantMessage(
+  message: Record<string, unknown>,
+  calls: readonly NormalizedToolCall[],
+): BenchAgentMessage {
+  const result: Record<string, unknown> = { ...message, tool_calls: calls }
+  if (!calls.length) delete result.tool_calls
+  if (typeof message.role !== 'string' || !message.role) result.role = 'assistant'
+  return result as BenchAgentMessage
 }
 
 // 上游可能把收到的 Key 写进报错。JSON 或网址里的写法可能不同，都换掉
@@ -192,13 +225,10 @@ export async function requestAgentTurn(
   if (typeof message !== 'object' || message === null || Array.isArray(message)) {
     throw new AgentModelError(`模型接口的响应里没有助手消息：${upstreamText(raw)}`)
   }
+  const calls = normalizeToolCalls(message.tool_calls)
   return {
-    // 原样返回。没有 role 时补上：这条消息下一轮要放回历史，历史里每条都要有 role
-    message:
-      typeof message.role === 'string' && message.role
-        ? (message as BenchAgentMessage)
-        : { ...message, role: 'assistant' },
-    toolCalls: parseToolCalls(message.tool_calls),
+    message: assistantMessage(message, calls),
+    toolCalls: parseToolCalls(calls),
     finishReason: typeof choice?.finish_reason === 'string' ? choice.finish_reason : null,
     usage: {
       promptTokens: tokens(usage?.prompt_tokens),

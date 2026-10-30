@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from 'vitest'
 import {
   AgentModelError,
   escapeControlChars,
+  normalizeToolCalls,
   parseModelJson,
   parseToolCalls,
   requestAgentTurn,
@@ -91,15 +92,27 @@ describe('工具调用', () => {
     })
   })
 
-  it.each([[''], ['   '], ['\n\t '], [undefined], [null]])('空的参数按 {}：%j', (args) => {
-    expect(one(args)).toMatchObject({ arguments: {}, parseError: null })
-  })
+  it.each([[''], ['   '], ['\n\t '], [undefined], [null], ['null'], [' null\n']])(
+    '空的参数按 {}：%j',
+    (args) => {
+      expect(one(args)).toEqual({ id: 'c', name: 'kioku_list', arguments: {}, parseError: null })
+    },
+  )
 
   it('接口直接给对象也接受', () => {
     expect(one({ of: 'core' })).toMatchObject({ arguments: { of: 'core' }, parseError: null })
   })
 
-  it.each([['{bad'], ['{"a":1'], ['tool'], ['{"a":"第一行\n第二行"}']])(
+  it('字符串里有没转义的控制字符：和响应一样容忍，多行正文不用重试', () => {
+    expect(one('{"content":"第一行\n第二行\t尾巴","n":\n1}')).toEqual({
+      id: 'c',
+      name: 'kioku_list',
+      arguments: { content: '第一行\n第二行\t尾巴', n: 1 },
+      parseError: null,
+    })
+  })
+
+  it.each([['{bad'], ['{"a":1'], ['tool'], ['{"a":"第一行\n第二行']])(
     '解析失败给 parseError，不抛错：%j',
     (args) => {
       expect(one(args)).toEqual({
@@ -111,31 +124,105 @@ describe('工具调用', () => {
     },
   )
 
-  it.each([['[]'], ['[1]'], ['null'], ['3'], ['"text"'], ['true'], [[1]], [3], [false]])(
-    '不是对象也算解析失败：%j',
-    (args) => {
-      expect(one(args)).toEqual({
-        id: 'c',
-        name: 'kioku_list',
-        arguments: null,
-        parseError: '工具参数不是 JSON 对象',
-      })
-    },
-  )
+  it.each([
+    ['[]'],
+    ['[1]'],
+    ['3'],
+    ['"text"'],
+    ['"第一行\n第二行"'],
+    ['true'],
+    [[1]],
+    [3],
+    [false],
+  ])('不是对象也算解析失败：%j', (args) => {
+    expect(one(args)).toEqual({
+      id: 'c',
+      name: 'kioku_list',
+      arguments: null,
+      parseError: '工具参数不是 JSON 对象',
+    })
+  })
 
-  it('没有工具调用时是空的；顺序不变；不合规的也留着，调用方才能补齐 tool 消息', () => {
-    for (const value of [undefined, null, 'x', {}]) expect(parseToolCalls(value)).toEqual([])
+  it('顺序不变；不合规的也留着，调用方才能补齐 tool 消息', () => {
     const calls = parseToolCalls([
       { id: 'a', function: { name: 'x', arguments: '{}' } },
       { id: 'b', type: 'custom', custom: { name: 'y' } },
-      null,
-      { function: { name: 'z', arguments: '{}' } },
+      { id: 'c', function: null },
+      { id: 'd', function: { name: 'z', arguments: '{}' } },
     ])
     expect(calls).toEqual([
       { id: 'a', name: 'x', arguments: {}, parseError: null },
       { id: 'b', name: '', arguments: null, parseError: '工具调用没有名字' },
-      { id: '', name: '', arguments: null, parseError: '工具调用没有名字' },
-      { id: '', name: 'z', arguments: {}, parseError: null },
+      { id: 'c', name: '', arguments: null, parseError: '工具调用没有名字' },
+      { id: 'd', name: 'z', arguments: {}, parseError: null },
+    ])
+  })
+})
+
+describe('规范化工具调用', () => {
+  const call = { type: 'function', function: { name: 'x', arguments: '{}' } }
+  const GENERATED = /^call_[0-9a-f]{24}$/
+
+  it.each([[undefined], [null], ['x'], [{}], [3], [[]]])('没有工具调用时是空的：%j', (value) => {
+    expect(normalizeToolCalls(value)).toEqual([])
+  })
+
+  it('id 能用的原样，连同别的字段；不合规的也留着', () => {
+    const calls = [
+      { id: 'a', ...call, future_field: { a: [1] } },
+      { id: 'b', type: 'custom', custom: { name: 'y' } },
+      { id: 'c' },
+    ]
+    expect(normalizeToolCalls(calls)).toEqual(calls)
+  })
+
+  it.each([
+    ['缺失', {}],
+    ['是 null', { id: null }],
+    ['是数字', { id: 42 }],
+    ['是对象', { id: { a: 1 } }],
+    ['是空串', { id: '' }],
+  ])('id %s：换成生成的，别的字段不动，不改上游给的对象', (_, extra) => {
+    const original = { ...extra, ...call }
+    const before = structuredClone(original)
+    expect(normalizeToolCalls([original])).toEqual([
+      { ...call, id: expect.stringMatching(GENERATED) },
+    ])
+    expect(original).toEqual(before)
+  })
+
+  it('id 重复：第一个留着，后面的各换一个', () => {
+    const ids = normalizeToolCalls([
+      { id: 'a', ...call },
+      { id: 'a', ...call },
+      { id: 'b', ...call },
+      { id: 'a', ...call },
+    ]).map((c) => c.id)
+    expect(ids[0]).toBe('a')
+    expect(ids[1]).toMatch(GENERATED)
+    expect(ids[2]).toBe('b')
+    expect(ids[3]).toMatch(GENERATED)
+    expect(new Set(ids).size).toBe(4)
+  })
+
+  it.each([
+    [
+      '都是空串',
+      [
+        { id: '', ...call },
+        { id: '', ...call },
+      ],
+    ],
+    ['都缺失', [call, call]],
+  ])('并行的调用 id %s：各生成一个，互不相同', (_, calls) => {
+    const ids = normalizeToolCalls(calls).map((c) => c.id)
+    expect(ids.every((id) => GENERATED.test(id))).toBe(true)
+    expect(new Set(ids).size).toBe(2)
+  })
+
+  it('不是对象的去掉：放不下 id，也说不出要调什么', () => {
+    expect(normalizeToolCalls([null, 'x', 3, ['y'], { id: 'a', ...call }])).toEqual([
+      { id: 'a', ...call },
     ])
   })
 })
@@ -232,6 +319,64 @@ describe('请求', () => {
     expect(result.usage).toEqual({ promptTokens: 12, completionTokens: 3 })
     expect(result.model).toBe('m')
   })
+
+  it('工具调用的 id 不能用：消息与 toolCalls 用同一个生成的 id，别的字段都原样', async () => {
+    const message = {
+      role: 'assistant',
+      content: null,
+      reasoning_content: '想一想',
+      future_field: { a: [1] },
+      tool_calls: [
+        { id: 'same', type: 'function', function: { name: 'x', arguments: '' } },
+        { id: 'same', type: 'function', function: { name: 'y', arguments: '{"a":1}' } },
+        { type: 'function', function: { name: 'z', arguments: '{bad' }, extra: true },
+        { id: 7, type: 'custom', custom: { name: 'w' } },
+      ],
+    }
+    const { fetchImpl } = stubFetch(() => new Response(chatBody(message)))
+    const result = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+
+    const sent = result.message.tool_calls as { id: string }[]
+    const ids = sent.map((call) => call.id)
+    expect(new Set(ids).size).toBe(4)
+    expect(ids[0]).toBe('same')
+    expect(result.toolCalls).toEqual([
+      { id: 'same', name: 'x', arguments: {}, parseError: null },
+      { id: ids[1], name: 'y', arguments: { a: 1 }, parseError: null },
+      { id: ids[2], name: 'z', arguments: null, parseError: '工具参数不是合法的 JSON' },
+      { id: ids[3], name: '', arguments: null, parseError: '工具调用没有名字' },
+    ])
+    expect(result.message).toEqual({
+      ...message,
+      tool_calls: message.tool_calls.map((call, i) => ({ ...call, id: ids[i] })),
+    })
+  })
+
+  it.each([[[]], ['x'], [null], [{}], [3], [[null, 'x']]])(
+    'tool_calls 是 %j：从消息里去掉，别的字段原样',
+    async (toolCalls) => {
+      const { fetchImpl } = stubFetch(
+        () =>
+          new Response(
+            chatBody({
+              role: 'assistant',
+              content: '好',
+              reasoning_content: '想一想',
+              tool_calls: toolCalls,
+            }),
+          ),
+      )
+      const result = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+      expect(result.message).toEqual({
+        role: 'assistant',
+        content: '好',
+        reasoning_content: '想一想',
+      })
+      // toEqual 不分没有与 undefined，这里要的是没有
+      expect('tool_calls' in result.message).toBe(false)
+      expect(result.toolCalls).toEqual([])
+    },
+  )
 
   it('耗时从发请求算到读完正文', async () => {
     const pause = () => new Promise((resolve) => setTimeout(resolve, 30))

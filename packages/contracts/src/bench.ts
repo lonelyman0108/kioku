@@ -356,8 +356,9 @@ export const BenchAgentTurnRequest = z
   })
 export type BenchAgentTurnRequest = z.infer<typeof BenchAgentTurnRequest>
 
-// 模型要调的一个工具。arguments 解析成了对象：空串或空白按 {}；解析失败或不是对象时为 null，原因在 parseError，
-// 由调用方作为工具错误回给模型，不算请求失败
+// 模型要调的一个工具。id 和 message.tool_calls 里的相同，tool 消息的 tool_call_id 用它。
+// arguments 解析成了对象：空串、空白或 null（包括字符串 "null"）按 {}；解析失败或不是对象时为 null，
+// 原因在 parseError，由调用方作为工具错误回给模型，不算请求失败
 export const BenchAgentToolCall = z.object({
   id: z.string(),
   name: z.string(),
@@ -367,7 +368,7 @@ export const BenchAgentToolCall = z.object({
 export type BenchAgentToolCall = z.infer<typeof BenchAgentToolCall>
 
 export const BenchAgentTurnResult = z.object({
-  // 助手消息原样，下一轮把它放回 messages
+  // 助手消息，下一轮把它放回 messages。tool_calls 规范化过（补齐不能用的 id，没有工具调用时去掉），别的字段原样
   message: BenchAgentMessage,
   toolCalls: z.array(BenchAgentToolCall),
   finishReason: z.string().nullable(),

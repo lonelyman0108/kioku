@@ -439,7 +439,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(second.finishReason).toBe('stop')
     })
 
-    it('工具调用的参数：空串与空白按 {}，解析失败与不是对象的给 parseError，请求不失败', async () => {
+    it('工具调用的参数：空串、空白与字符串 null 按 {}，解析失败与不是对象的给 parseError，请求不失败', async () => {
       await startModel(() => ({
         content: null,
         tool_calls: [
@@ -461,7 +461,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         { id: 'good', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
         { id: 'bad', name: 'kioku_get', arguments: null, parseError: notJson },
         { id: 'array', name: 'kioku_get', arguments: null, parseError: notObject },
-        { id: 'null', name: 'kioku_get', arguments: null, parseError: notObject },
+        { id: 'null', name: 'kioku_get', arguments: {}, parseError: null },
         { id: 'text', name: 'kioku_get', arguments: null, parseError: notObject },
       ])
     })
@@ -495,22 +495,95 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(result.usage).toEqual({ promptTokens: 7, completionTokens: 3 })
     })
 
-    it('arguments 字符串里有未转义的换行：响应能解析，参数按还原之后的文字解析', async () => {
+    it('arguments 字符串里有未转义的换行：响应能解析，参数也一样容忍', async () => {
       const call = (id: string, args: string) =>
         `{"id":"${id}","type":"function","function":{"name":"kioku_get","arguments":"${args}"}}`
       await startModel(() => ({
         raw: `{"choices":[{"message":{"role":"assistant","content":null,"tool_calls":[${[
           // 换行在参数的 JSON 结构之间，是合法的空白
           call('space', '{\n\\"uri\\":\\"core://agent\\"}'),
-          // 换行在参数的字符串里，参数本身不是合法的 JSON
+          // 换行在参数的字符串里：还原之后参数本身有没转义的换行
           call('inner', '{\\"uri\\":\\"core\n//agent\\"}'),
+          // 容忍之后还是不合法的，才报错
+          call('broken', '{\\"uri\\":\\"core\n//agent'),
         ].join(',')}]}}]}`,
       }))
       const { toolCalls } = await turn({ messages: [USER] })
       expect(toolCalls).toEqual([
         { id: 'space', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
-        { id: 'inner', name: 'kioku_get', arguments: null, parseError: '工具参数不是合法的 JSON' },
+        { id: 'inner', name: 'kioku_get', arguments: { uri: 'core\n//agent' }, parseError: null },
+        { id: 'broken', name: 'kioku_get', arguments: null, parseError: '工具参数不是合法的 JSON' },
       ])
+    })
+
+    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，后面按顺序跟齐对应的 tool 消息。不合规就 400
+    const refusal = (messages: FakeChatMessage[]) => {
+      for (const [i, message] of messages.entries()) {
+        if (!('tool_calls' in message)) continue
+        const calls = message.tool_calls as { id?: unknown }[]
+        if (!Array.isArray(calls) || !calls.length) return 'tool_calls 不能是空的'
+        const ids = calls.map((call) => call.id)
+        if (ids.some((id) => typeof id !== 'string' || !id)) return 'id 不合法'
+        if (new Set(ids).size !== ids.length) return 'id 重复'
+        const answered = messages.slice(i + 1, i + 1 + ids.length).map((m) => m.tool_call_id)
+        if (JSON.stringify(answered) !== JSON.stringify(ids)) return 'tool_call_id 对不上'
+      }
+      return null
+    }
+    const strictModel = (reply: () => FakeChatReply) =>
+      startModel((messages) => {
+        const reason = refusal(messages)
+        if (reason) return { status: 400, raw: reason }
+        return messages.some((m) => m.role === 'tool') ? '调完了' : reply()
+      })
+
+    it('工具调用的 id 缺失、不是字符串、空串或重复：规范化之后下一轮对得上，严格的上游也接受', async () => {
+      const call = { type: 'function', function: { name: 'kioku_boot', arguments: '' } }
+      const server = await strictModel(() => ({
+        content: null,
+        reasoning_content: '想一想',
+        tool_calls: [
+          { id: 'kept', ...call },
+          call,
+          { id: 42, ...call },
+          { id: '', ...call },
+          { id: '', ...call },
+          { id: 'kept', ...call },
+        ],
+      }))
+      const first = await turn({ messages: [USER] })
+      const ids = first.toolCalls.map((c) => c.id)
+      expect(ids[0]).toBe('kept')
+      expect(new Set(ids).size).toBe(6)
+      expect(first.message.reasoning_content).toBe('想一想')
+      expect((first.message.tool_calls as { id: string }[]).map((c) => c.id)).toEqual(ids)
+      expect(first.toolCalls.every((c) => c.name === 'kioku_boot' && !c.parseError)).toBe(true)
+
+      const history = [USER, first.message, ...ids.map((id) => toolMessage(id, '结果'))]
+      const second = await turn({ messages: history })
+      expect(second.message.content).toBe('调完了')
+      // 发给上游的和界面放回历史的一样，id 没有再变
+      expect(server.requests[1]).toEqual(history)
+    })
+
+    it.each([
+      ['空数组', []],
+      ['不是数组', 'x'],
+      ['全都不是对象', [null, 'x']],
+    ])('tool_calls 是%s：消息里去掉，下一轮严格的上游也接受', async (_, toolCalls) => {
+      const server = await strictModel(() => ({
+        content: '好',
+        tool_calls: toolCalls as unknown[],
+      }))
+      const first = await turn({ messages: [USER] })
+      expect(first.toolCalls).toEqual([])
+      expect(first.message).toEqual({ role: 'assistant', content: '好' })
+      expect('tool_calls' in first.message).toBe(false)
+
+      const history = [USER, first.message, { role: 'user', content: '再说一句' }]
+      const second = await postTurn({ messages: history })
+      expect(second.status).toBe(200)
+      expect(server.requests[1]).toEqual(history)
     })
 
     it('改模型名生效，接口与 Key 不变；用量与耗时都返回', async () => {
