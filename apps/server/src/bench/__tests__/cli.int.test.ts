@@ -66,6 +66,8 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
   let dir: string
   // 经过这个端口的请求
   let requests: { method: string; path: string }[]
+  // 这个路径返回 500：模拟服务内部错误
+  let brokenPath: string | null
   const masterKey = randomBytes(32)
 
   const bench = (args: string[], env: Record<string, string | undefined> = {}) =>
@@ -74,9 +76,9 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
       KIOKU_BENCH_URL: url,
       ...env,
     })
-  const scenarioFile = async (steps: unknown[]) => {
+  const scenarioFile = async (steps: unknown[], extra: Record<string, unknown> = {}) => {
     const path = join(dir, `${randomBytes(4).toString('hex')}.json`)
-    await writeFile(path, JSON.stringify({ id: 'mine', title: '我的场景', steps }))
+    await writeFile(path, JSON.stringify({ id: 'mine', title: '我的场景', steps, ...extra }))
     return path
   }
   const realCreate = async (body: Record<string, unknown>) => {
@@ -101,7 +103,9 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     app = createApp(deps)
     server = serve({
       fetch: (request) => {
-        requests.push({ method: request.method, path: new URL(request.url).pathname })
+        const path = new URL(request.url).pathname
+        requests.push({ method: request.method, path })
+        if (path === brokenPath) return Response.json({ error: '服务内部错误' }, { status: 500 })
         return app.fetch(request)
       },
       port: 0,
@@ -116,6 +120,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
   })
   beforeEach(async () => {
     requests = []
+    brokenPath = null
     await resetDatabase(database)
     await database.db.delete(settings)
     ws = await bootstrap(app)
@@ -147,7 +152,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         expect(plain.stdout).toContain('握手：kioku')
         expect(plain.stdout).toContain('11 个工具')
         expect(plain.stdout).toContain('通过  读那条记忆')
-        expect(plain.stdout).toContain('全部通过')
+        expect(plain.stdout).toContain('没有失败的步骤')
         expect(plain.stdout).not.toContain(BODY)
 
         const shown = await bench(['--file', file, '--show-output'])
@@ -198,6 +203,71 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         const { code, stdout } = await bench(['--file', file], { KIOKU_BENCH_KEY: low.key })
         expect(code).toBe(0)
         expect(stdout).toContain('跳过  要 secret 级：这把 Key 的最高敏感级不到 secret')
+      },
+      PROCESS_TIMEOUT,
+    )
+
+    it(
+      '权限探测只列结果：被拒的步骤显示报错，不显示通过，也不算进通过；退出码 0',
+      async () => {
+        const low = await ws.createKey((await ws.createApp('low')).id, {
+          readLayers: ['base'],
+          writeLayers: [],
+          maxSensitivity: 'public',
+          admin: false,
+        })
+        const { code, stdout } = await bench(['--scenario', 'permission-probe', '--allow-writes'], {
+          KIOKU_BENCH_KEY: low.key,
+        })
+        expect(code).toBe(0)
+        expect(stdout).toContain('成功  Key 的上限')
+        expect(stdout).toContain('报错  写 secret 级')
+        expect(stdout).not.toContain('通过  ')
+        expect(stdout).not.toMatch(/通过 \d/)
+        expect(stdout).toMatch(/成功 \d+，报错 [1-9]\d*，失败 0，跳过 0，没有执行 0/)
+        expect(stdout).toContain('没有失败的步骤')
+        expect(stdout).not.toContain('全部通过')
+
+        // 同一个场景，能写的 Key 这一步就是成功
+        const full = await bench(['--scenario', 'permission-probe', '--allow-writes'])
+        expect(full.code).toBe(0)
+        expect(full.stdout).toContain('成功  写 secret 级')
+        expect(full.stdout).not.toContain('测试台的权限探测写下的')
+      },
+      PROCESS_TIMEOUT,
+    )
+
+    it(
+      '只列结果的场景：REST 的报错带状态码，不带正文；内部错误与不成立的断言仍算失败',
+      async () => {
+        const rejected = await scenarioFile(
+          [{ kind: 'lifecycle', label: '不合法的事件', body: { event: 'nope' } }],
+          { probe: true },
+        )
+        const listed = await bench(['--file', rejected])
+        expect(listed.code).toBe(0)
+        expect(listed.stdout).toContain('报错 400  不合法的事件')
+        expect(listed.stdout).toContain('成功 0，报错 1，失败 0')
+        expect(listed.stdout).not.toContain('event')
+
+        brokenPath = '/v1/boot'
+        const broken = await scenarioFile(
+          [
+            { kind: 'boot', label: '内部错误的一步' },
+            { kind: 'whoami', label: '断言不成立', expect: { contains: ['没有这句话'] } },
+            { kind: 'whoami', label: '后面照常列' },
+          ],
+          { probe: true },
+        )
+        const failed = await bench(['--file', broken])
+        expect(failed.code).toBe(1)
+        expect(failed.stdout).toContain('失败  内部错误的一步')
+        expect(failed.stdout).toContain('服务内部错误')
+        expect(failed.stdout).toContain('失败  断言不成立')
+        expect(failed.stdout).toContain('应包含「没有这句话」')
+        expect(failed.stdout).toContain('成功  后面照常列')
+        expect(failed.stdout).toContain('成功 1，报错 0，失败 2')
+        expect(failed.stdout).toContain('有失败的步骤')
       },
       PROCESS_TIMEOUT,
     )
@@ -318,7 +388,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         expect(stdout).toContain('凭据流程（credential-flow）')
         expect(stdout).not.toContain('bench-not-a-real-value')
         expect(stdout).not.toContain('失败  ')
-        expect(stdout).toContain('全部通过')
+        expect(stdout).toContain('没有失败的步骤')
         // 走的是真实接口：写下的都软删除了，也记了召回事件
         expect(await count(memories)).toBeGreaterThan(0)
         await expect.poll(() => count(recallEvents)).toBeGreaterThan(0)

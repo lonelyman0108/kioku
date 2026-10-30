@@ -32,12 +32,14 @@ const HELP = `用真实 HTTP 与真实 Key 跑测试台的场景，覆盖鉴权�
   -h, --help          显示帮助
 
 默认只输出步骤名、通过与否和失败的断言。不满足 requires 的步骤记「跳过」，不算失败。
+只列结果的场景（权限探测）不判通过与失败：每把 Key 的正确结果都不同，每步显示成功或报错（REST 带状态码），
+不带正文；内部错误仍算失败。
 
 环境变量：
   KIOKU_BENCH_KEY     API Key，不走命令行参数（参数会进 shell 历史与进程列表）
   KIOKU_BENCH_URL     服务地址
 
-退出码：0 全部通过或跳过；1 有失败或没有执行的步骤，或连不上服务；2 用法错误、要写却没有 --allow-writes`
+退出码：0 没有失败的步骤；1 有失败或没有执行的步骤，或连不上服务；2 用法错误、要写却没有 --allow-writes`
 
 const STATUS: Record<BenchStepResult['status'], string> = {
   passed: '通过',
@@ -66,11 +68,18 @@ async function loadScenario(path: string): Promise<BenchScenario> {
   return parsed.data
 }
 
+// 只列结果的场景里没出问题的步骤：只说成功还是报错，不算通过。工具步骤没有状态码
+const probeOutcome = (step: BenchStepResult) =>
+  !step.isError ? '成功' : step.httpStatus === null ? '报错' : `报错 ${step.httpStatus}`
+
 function printResult(scenario: BenchScenario, result: BenchRunResult, showOutput: boolean): void {
   console.log(`\n${scenario.title}（${scenario.id}）`)
+  // 内部错误与不成立的断言仍是失败，只有通过的步骤换成结果
+  const listed = (step: BenchStepResult) => scenario.probe === true && step.status === 'passed'
   for (const step of result.steps) {
+    const shown = listed(step) ? probeOutcome(step) : STATUS[step.status]
     const reason = step.reason ? `：${step.reason}` : ''
-    console.log(`  ${STATUS[step.status]}  ${step.label}${reason}`)
+    console.log(`  ${shown}  ${step.label}${reason}`)
     for (const assertion of step.assertions) {
       if (!assertion.ok) console.log(`        ${assertion.message}`)
     }
@@ -79,7 +88,9 @@ function printResult(scenario: BenchScenario, result: BenchRunResult, showOutput
     }
   }
   const { passed, failed, skipped, notRun } = result.counts
-  console.log(`  通过 ${passed}，失败 ${failed}，跳过 ${skipped}，没有执行 ${notRun}`)
+  const rejected = result.steps.filter((step) => listed(step) && step.isError).length
+  const head = scenario.probe ? `成功 ${passed - rejected}，报错 ${rejected}` : `通过 ${passed}`
+  console.log(`  ${head}，失败 ${failed}，跳过 ${skipped}，没有执行 ${notRun}`)
 }
 
 function parseOptions() {
@@ -164,7 +175,7 @@ async function main(): Promise<void> {
   } finally {
     await executor.close()
   }
-  console.log(ok ? '\n全部通过' : '\n有失败的步骤')
+  console.log(ok ? '\n没有失败的步骤' : '\n有失败的步骤')
   if (!ok) process.exitCode = 1
 }
 
