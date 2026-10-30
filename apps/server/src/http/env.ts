@@ -17,7 +17,7 @@ export interface Deps {
   webDir?: string
   // 没有后台任务时（例如部分测试）写入不触发向量更新
   jobs: Jobs | null
-  // 按空间导出的文件发送的时限（毫秒）：多久没有进度就断开、最多发多久。不设时 2 分钟与 60 分钟（见 routes/spaces.ts）；
+  // 按空间导出的文件发送的时限（毫秒）：多久没有进度就断开、最多发多久。不设时 2 分钟与 30 分钟（见 routes/spaces.ts）；
   // 测试里调小
   exportSendLimits?: { idleMs: number; totalMs: number }
 }
