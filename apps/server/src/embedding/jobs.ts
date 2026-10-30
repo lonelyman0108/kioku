@@ -1,4 +1,4 @@
-import type { Db } from '../db/client'
+import { errorText, type Db } from '../db/client'
 import { embeddingCoverage } from './coverage'
 import { clearEmbeddingError, recordEmbeddingError } from './errors'
 import { loadEmbeddingModels, switchEmbedding } from './settings'
@@ -15,7 +15,7 @@ async function recording<T>(db: Db, model: string, run: () => Promise<T>): Promi
   try {
     return await run()
   } catch (err) {
-    await recordEmbeddingError(db, model, (err as Error).message)
+    await recordEmbeddingError(db, model, errorText(err))
     throw err
   }
 }
@@ -162,7 +162,7 @@ async function embedTargets(
     if (stopping?.aborted) continue
     // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的
     if (broken) {
-      await recordEmbeddingError(db, embedder.model, broken.message)
+      await recordEmbeddingError(db, embedder.model, errorText(broken))
     } else if (failures.count) {
       await recordEmbeddingError(db, embedder.model, failures.message())
     } else if (deferred) {
@@ -276,7 +276,7 @@ export async function switchJob(
     }
     return 'stuck'
   } catch (err) {
-    await recordEmbeddingError(db, target.model, (err as Error).message)
+    await recordEmbeddingError(db, target.model, errorText(err))
     throw err
   }
 }

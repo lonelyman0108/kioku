@@ -52,7 +52,7 @@ export const GUIDANCE = [
 
 // 不能调记忆工具的宿主（群聊 bot）：召回块直接带正文的开头，指引里也不提工具；
 // 只给 URI 的内容（近期记忆、项目召回、未展开的启动节点）它读不了，会话开始时不附
-const CHAT_FAMILIES = new Set(['astrbot'])
+export const CHAT_FAMILIES: ReadonlySet<string> = new Set(['astrbot'])
 
 export const CHAT_GUIDANCE = [
   'Kioku 是你的长期记忆，会话结束后上下文会消失，Kioku 里的不会。',

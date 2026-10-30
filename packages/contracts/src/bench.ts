@@ -300,6 +300,89 @@ export const BenchRunResult = z.object({
 })
 export type BenchRunResult = z.infer<typeof BenchRunResult>
 
+// 模型代理：一次请求只调一次模型，循环由浏览器驱动，模型要调工具时走运行接口。
+// 用实例设置里抽取模型的接口与 Key，对话不存服务端
+
+// 模型循环按运行时分几种，和真实接入一致：
+// hook（claudecode、codex）：系统提示带 session.start 的结果；每条用户消息先发 prompt.submit，召回块附在这条消息上、
+//   留在历史；给工具；回复后不发 turn.end
+// chat（astrbot）：系统提示带 session.start 的结果；每条用户消息先发 prompt.submit，召回块只附在这一轮的请求上、
+//   不留在历史；不给工具；回复后发 turn.end（回滚模式下进重放）
+// tools（mcp）：系统提示不带 session.start，不发 prompt.submit；给工具，kioku_boot 由模型自己调；不发 turn.end
+// approximate（其余运行时）：按 hook 走，界面标明是近似
+export const BENCH_AGENT_LOOPS = ['hook', 'chat', 'tools', 'approximate'] as const
+export const BenchAgentLoop = z.enum(BENCH_AGENT_LOOPS)
+export type BenchAgentLoop = z.infer<typeof BenchAgentLoop>
+
+// 模型代理用不了的原因。notAdmin：不是实例管理员（Key 是实例的，而且不计入抽取预算）；noModel：还没配抽取模型；
+// keyLocked：配了，但保存的 Key 解不开（主密钥没配或对不上）
+export const BENCH_AGENT_UNAVAILABLE = ['notAdmin', 'noModel', 'keyLocked'] as const
+export const BenchAgentUnavailable = z.enum(BENCH_AGENT_UNAVAILABLE)
+export type BenchAgentUnavailable = z.infer<typeof BenchAgentUnavailable>
+
+export const BenchAgentInfo = z.object({
+  available: z.boolean(),
+  // 用不了的原因，能用时为 null
+  reason: BenchAgentUnavailable.nullable(),
+  // 实例设置里的模型名。不是实例管理员时为 null：配没配、配的什么都是实例设置，不给他们看
+  defaultModel: z.string().nullable(),
+  loop: BenchAgentLoop,
+  // 给不给模型工具
+  tools: z.boolean(),
+})
+export type BenchAgentInfo = z.infer<typeof BenchAgentInfo>
+
+// 对话的上限：历史每一轮都整段发给模型，这么长早就超过模型的上下文了
+export const BENCH_AGENT_MAX_MESSAGES = 1000
+export const BENCH_AGENT_MAX_BYTES = 4 * 1024 * 1024
+
+// 一条消息：除了 role 都原样转发。助手消息可能带 tool_calls 与 reasoning_content（有的模型要求原样带回），
+// tool 消息带 tool_call_id
+export const BenchAgentMessage = z.looseObject({ role: z.string().min(1).max(64) })
+export type BenchAgentMessage = z.infer<typeof BenchAgentMessage>
+
+export const BenchAgentTurnRequest = z
+  .strictObject({
+    // 换一个模型名，接口与 Key 不变；不给时用实例设置里的模型
+    model: z.string().trim().min(1).max(128).optional(),
+    messages: z
+      .array(BenchAgentMessage)
+      .min(1)
+      .max(BENCH_AGENT_MAX_MESSAGES, '对话太长，清空之后再试'),
+  })
+  .superRefine((request, ctx) => {
+    if (utf8Bytes(JSON.stringify(request.messages)) > BENCH_AGENT_MAX_BYTES) {
+      ctx.addIssue({ code: 'custom', path: ['messages'], message: '对话太长，清空之后再试' })
+    }
+  })
+export type BenchAgentTurnRequest = z.infer<typeof BenchAgentTurnRequest>
+
+// 模型要调的一个工具。id 和 message.tool_calls 里的相同，tool 消息的 tool_call_id 用它。
+// arguments 解析成了对象：空串、空白或 null（包括字符串 "null"）按 {}；解析失败或不是对象时为 null，
+// 原因在 parseError，由调用方作为工具错误回给模型，不算请求失败。
+// 没有名字时 name 是空串，parseError 说明原因（message.tool_calls 里那一项是占位名）
+export const BenchAgentToolCall = z.object({
+  id: z.string(),
+  name: z.string(),
+  arguments: z.record(z.string(), z.unknown()).nullable(),
+  parseError: z.string().nullable(),
+})
+export type BenchAgentToolCall = z.infer<typeof BenchAgentToolCall>
+
+export const BenchAgentTurnResult = z.object({
+  // 助手消息，下一轮把它放回 messages。tool_calls 规范化过（补齐不能用的 id、缺的 type、名字与参数，没有工具调用时去掉），
+  // 别的字段原样
+  message: BenchAgentMessage,
+  toolCalls: z.array(BenchAgentToolCall),
+  finishReason: z.string().nullable(),
+  // 上游没给用量时是 0
+  usage: z.object({ promptTokens: z.number(), completionTokens: z.number() }),
+  ms: z.number(),
+  // 这次实际用的模型名
+  model: z.string(),
+})
+export type BenchAgentTurnResult = z.infer<typeof BenchAgentTurnResult>
+
 const WRITE_TOOLS: ReadonlySet<string> = new Set(BENCH_WRITE_TOOLS)
 const READ_TOOLS: ReadonlySet<string> = new Set(BENCH_READ_TOOLS)
 // 第一次见到的账号会新建对象：定时任务与子 agent 不带账号，不算

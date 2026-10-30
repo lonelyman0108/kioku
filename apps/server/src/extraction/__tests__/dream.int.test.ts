@@ -29,7 +29,12 @@ import {
 import { backfillJob } from '../../embedding/jobs'
 import { staticEmbedderSource } from '../../embedding/source'
 import { startJobs, type Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  settingsQueryFails,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { fakeChatModel, dreamLines, handleOf } from '../../testing/fakeChatModel'
 import { startFakeChatServer } from '../../testing/fakeChatServer'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
@@ -1472,6 +1477,54 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       },
     ])
     expect(await dreamsDue(database.db)).toEqual([])
+  })
+
+  it('主密钥对不上：运行记录里是给管理员的说明（轮换时旧的那把配在哪里），不是里面那层的报错', async () => {
+    await saveExtractionConfig(database.db, masterKey, {
+      baseUrl: 'https://llm.example.com/v1',
+      model: 'm',
+      apiKey: 'test-api-key',
+    })
+    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+    const { model, calls } = fakeChatModel(reply([]))
+    const failing = () =>
+      dreamSpace(database.db, randomBytes(32), {
+        spaceId: ws.spaceId,
+        runId: randomUUID(),
+        trigger: 'scheduled',
+        modelFor: () => model,
+      })
+    // 记着主密钥的标识：还没解密就知道对不上
+    expect(await failing()).toEqual({ outcome: 'failed', reason: null })
+    // 加上标识之前保存的：解密时才失败，里面那层是解密库的英文报错
+    const [row] = await database.db.select().from(settings).where(eq(settings.key, 'extraction'))
+    const value = row!.value as { apiKey: { keyId?: string } }
+    delete value.apiKey.keyId
+    await database.db.update(settings).set({ value }).where(eq(settings.key, 'extraction'))
+    expect(await failing()).toEqual({ outcome: 'failed', reason: null })
+
+    expect(calls).toEqual([])
+    const errors = (await runs()).map((r) => r.error)
+    expect(errors).toHaveLength(2)
+    for (const error of errors) {
+      expect(error).toMatch(/^整理出错：抽取模型的 Key 解不开/)
+      expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+    }
+  })
+
+  it('读库出错：运行记录里只有数据库的说明，没有 SQL 与参数', async () => {
+    const outcome = await dreamSpace(settingsQueryFails(database.db), masterKey, {
+      spaceId: ws.spaceId,
+      runId: randomUUID(),
+      trigger: 'scheduled',
+      modelFor: () => fakeChatModel(reply([])).model,
+    })
+    expect(outcome).toEqual({ outcome: 'failed', reason: null })
+    const [run] = await runs()
+    expect(run!.error).toMatch(/^整理出错：.*no_such_table/)
+    for (const leaked of ['Failed query', 'params:', 'select']) {
+      expect(run!.error).not.toContain(leaked)
+    }
   })
 
   it('连运行记录都写不进去时，两个错误都记进日志，原来的错误照样抛出去（后台任务记成失败）', async () => {

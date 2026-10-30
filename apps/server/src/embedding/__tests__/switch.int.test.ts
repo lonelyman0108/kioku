@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { inspect } from 'node:util'
 
 import type {
   EmbeddingSettingsView,
@@ -6,14 +7,19 @@ import type {
   EmbeddingTestResult,
   RecallResponse,
 } from '@kioku/contracts'
-import { sql } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { eq, sql } from 'drizzle-orm'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
 import { memories, memoryEmbeddings, settings, spaces } from '../../db/schema'
 import type { Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  settingsQueryFails,
+  testDatabaseUrl,
+} from '../../testing/db'
 import {
   startFakeEmbeddingServer,
   type FakeEmbeddingServer,
@@ -21,6 +27,7 @@ import {
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { backfillJob, embedJobs, pruneJob, switchJob, type Retry } from '../jobs'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
+import { loadEmbeddingSetups, saveActiveEmbedding } from '../settings'
 import { settingsEmbedderSource, staticEmbedderSource, type EmbedderSource } from '../source'
 
 describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
@@ -393,6 +400,46 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(queued).toEqual(['switch'])
   })
 
+  it('写向量时数据库出错：最近的错误里只有数据库的说明，没有 SQL 与参数', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    const id = await create('第一条')
+    // 让写向量时数据库报错，记错误的那一行照常写
+    await database.db.execute(
+      sql.raw(`create or replace function kioku_test_no_vector() returns trigger language plpgsql as $$
+      begin raise exception '写不进向量'; end $$`),
+    )
+    await database.db.execute(
+      sql.raw(
+        'create trigger kioku_test_no_vector before insert on memory_embeddings for each row execute function kioku_test_no_vector()',
+      ),
+    )
+    // 这个任务记下的错误：先清掉之前记下的
+    const recordedBy = async (job: () => Promise<unknown>) => {
+      await database.db.delete(settings).where(eq(settings.key, 'embedding-error'))
+      await expect(job()).rejects.toThrow()
+      return (await status()).lastError
+    }
+    try {
+      const written = { model: 'm1', message: '写不进向量' }
+      expect(
+        await recordedBy(() => embedJob(database.db, source, ws.spaceId, id, noRetry)),
+      ).toMatchObject(written)
+      expect(await recordedBy(() => backfillJob(database.db, source, noRetry))).toMatchObject(
+        written,
+      )
+      await put('/next', { model: 'm2', channels: [channel('b', 'm2')] })
+      expect(await recordedBy(() => switchJob(database.db, source, noRetry))).toMatchObject({
+        ...written,
+        model: 'm2',
+      })
+    } finally {
+      await database.db.execute(
+        sql.raw('drop trigger if exists kioku_test_no_vector on memory_embeddings'),
+      )
+      await database.db.execute(sql.raw('drop function if exists kioku_test_no_vector()'))
+    }
+  })
+
   it('新模型补不上时记下原因，管理员可以现在就切换', async () => {
     await put('', { model: 'm1', channels: [channel('a', 'm1')] })
     await create('第一条')
@@ -508,5 +555,90 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(c!.ok).toBe(true)
     expect(c!.similarity).toBeLessThan(0.99)
     expect(d).toMatchObject({ ok: false, error: expect.stringContaining('维度是 768') })
+  })
+
+  // 换一个依赖建的应用，请求连通性测试
+  const testWith = (deps: { db?: Database['db']; masterKey?: Buffer | null }) =>
+    createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey,
+      embedder: source,
+      jobs,
+      ...deps,
+    }).request('/v1/settings/embedding/test', jsonRequest('POST', {}, { cookie: ws.cookie }))
+
+  it('连通性测试时 Key 解不开：400 并说明，不请求接口', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1', { apiKey: 'sk-chan' })] })
+    server.requests.length = 0
+    const noKey = await testWith({ masterKey: null })
+    expect(noKey.status).toBe(400)
+    expect(((await noKey.json()) as { error: string }).error).toContain(
+      '嵌入接口的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+    )
+    const mismatch = await testWith({ masterKey: randomBytes(32) })
+    expect(mismatch.status).toBe(400)
+    const { error } = (await mismatch.json()) as { error: string }
+    expect(error).toContain('嵌入接口的 Key 解不开')
+    expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+    expect(server.requests).toEqual([])
+  })
+
+  it('连通性测试时读设置出错：500 与固定文字，响应和日志里都没有 SQL 与参数', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1', { apiKey: 'sk-chan' })] })
+    server.requests.length = 0
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await testWith({ db: settingsQueryFails(database.db) })
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: '服务内部错误' })
+      expect(server.requests).toEqual([])
+      // 前提：确实是数据库报的错（表不存在），这条用例测的是这种错误
+      expect(logged).toHaveBeenCalledOnce()
+      expect(logged.mock.calls[0]![1]).toMatchObject({ code: '42P01' })
+      const text = inspect(logged.mock.calls, { depth: null })
+      for (const leaked of ['Failed query', 'params:', 'embedding', 'select']) {
+        expect(text).not.toContain(leaked)
+      }
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
+  it('已经存着的 Key 中间有换行（fetch 把整个请求头写进错误）：连通性测试报连不上，不带 Key', async () => {
+    await saveActiveEmbedding(database.db, masterKey, {
+      model: 'm1',
+      channels: [channel('a', 'm1', { apiKey: 'sk-pasted\nwith-newline' })],
+    })
+    const res = await testWith({})
+    expect(res.status).toBe(200)
+    const { active } = (await res.json()) as EmbeddingTestResult
+    expect(active![0]).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('连不上嵌入接口'),
+    })
+    expect(active![0]!.error).not.toContain('sk-pasted')
+    expect(active![0]!.error).not.toContain('with-newline')
+    expect(server.requests).toEqual([])
+  })
+
+  it('Key 首尾的空白去掉再存；中间有换行的 400，什么都不改', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1', { apiKey: ' sk-chan\n' })] })
+    const stored = async () =>
+      (await loadEmbeddingSetups(database.db, masterKey)).active!.channels[0]!.apiKey
+    expect(await stored()).toBe('sk-chan')
+
+    for (const path of ['', '/next']) {
+      const res = await call('PUT', path, {
+        model: path ? 'm2' : 'm1',
+        channels: [channel('a', 'm1', { apiKey: 'sk-new\nkey' })],
+      })
+      expect(res.status).toBe(400)
+      const { error } = (await res.json()) as { error: string }
+      expect(error).toContain('只能有英文字母、数字和半角符号')
+      expect(error).not.toContain('sk-new')
+    }
+    expect(await stored()).toBe('sk-chan')
+    expect((await view()).next).toBeNull()
   })
 })

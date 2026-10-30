@@ -43,6 +43,10 @@ export interface SealedJson {
 // 管理员填的设置不成立，原因可以直接给管理员看
 export class SettingsInputError extends Error {}
 
+// 保存的 Key 解不开：没配主密钥、主密钥对不上，或者密文坏了。这是实例配置的问题，原因可以直接给管理员看。
+// 单独一种错误，调用方才能和读库出错分开：drizzle 的错误信息带 SQL 与全部参数，不能给调用方
+export class ApiKeyLockedError extends Error {}
+
 interface Stored {
   baseUrl: string
   model: string
@@ -56,15 +60,70 @@ export const unsealJson = (sealed: SealedJson): Sealed => ({
   wrappedKey: Buffer.from(sealed.wrappedKey, 'base64'),
 })
 
-// 解开加密保存的 Key；没配主密钥时说清是哪一项
+// 解开加密保存的 Key；解不开时说清是哪一项，解密库的英文报错留在 cause 里。name 是这个密钥叫什么
 export function openApiKey(
   masterKey: MasterKey | null,
   sealed: SealedJson,
   aad: string,
   label: string,
+  name = 'Key',
 ): string {
-  if (!masterKey) throw new Error(`${label}的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
-  return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
+  if (!masterKey) {
+    throw new ApiKeyLockedError(`${label}的 ${name} 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
+  }
+  try {
+    return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
+  } catch (cause) {
+    throw new ApiKeyLockedError(
+      `${label}的 ${name} 解不开：配置的 KIOKU_MASTER_KEY 和保存时用的不是同一把，或者保存的内容坏了。轮换主密钥期间，旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS，等实例设置里显示换完再去掉`,
+      { cause },
+    )
+  }
+}
+
+// 读设置（既读库又解密）的结果：Key 解不开时给出原因，可以直接给管理员看。
+// 别的错误（例如读库出错）照常抛出交给 onError：drizzle 的错误信息带 SQL 与全部参数，不能给调用方
+export async function unlocked<T>(
+  load: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  try {
+    return { ok: true, value: await load() }
+  } catch (err) {
+    if (err instanceof ApiKeyLockedError) return { ok: false, error: err.message }
+    throw err
+  }
+}
+
+// 上游可能把收到的 Key 写进报错。JSON 或网址里的写法可能不同（有的 JSON 还把 / 转义成 \/），都换掉。
+// fetch 会去掉 Header 值结尾的空白：保存的 Key 带着结尾的换行时请求照样发得出去，上游见到的是去掉之后的，这种写法也换掉。
+// 长的先换：短的是长的一部分，先换短的会在 *** 后面留下尾巴
+export function withoutKey(text: string, apiKey: string | null): string {
+  if (!apiKey) return text
+  const forms = [apiKey, apiKey.trim()].filter(Boolean).flatMap((key) => {
+    const json = JSON.stringify(key).slice(1, -1)
+    return [key, json, json.replaceAll('/', '\\/'), encodeURIComponent(key)]
+  })
+  return [...new Set(forms)]
+    .sort((a, b) => b.length - a.length)
+    .reduce((out, form) => out.replaceAll(form, '***'), text)
+}
+
+// fetch 自己报的错（连不上，或者请求头不合法）。只取错误类别，不用错误自己的文字：Key 里有换行时，它把整个请求头写进错误。
+// 也不把原来的错误放进 cause：cause 会进日志，后台任务的出错原因也可能取它
+export function fetchFailure(what: string, err: unknown): string {
+  const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
+  return `连不上${what}${typeof code === 'string' ? `（${code}）` : ''}：检查实例设置里的接口地址与 Key`
+}
+
+// 读 2xx 响应的 JSON。解析失败时只报固定文字：SyntaxError 的文字带响应的开头，上游可能把 Key 写在那里。
+// 读正文本身出错（连接断了、超时）不是这种情况，照常抛出
+export async function upstreamJson(res: Response, what: string): Promise<unknown> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`${what}的响应不是合法的 JSON`)
+  }
 }
 
 // 同一个主机（协议、主机名与端口都相同）才能沿用已保存的 Key。只认 http 与 https：

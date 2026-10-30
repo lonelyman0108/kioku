@@ -1,4 +1,4 @@
-import type { EndpointConfig } from '../settings/endpoint'
+import { fetchFailure, upstreamJson, withoutKey, type EndpointConfig } from '../settings/endpoint'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -41,12 +41,14 @@ export function openAiChatModel(
         if ((err as Error).name === 'TimeoutError') {
           throw new Error(`抽取模型 ${Math.ceil(timeoutMs / 1000)} 秒内没有返回`)
         }
-        throw err
+        throw new Error(fetchFailure('抽取模型', err))
       })
       if (!res.ok) {
-        throw new Error(`抽取模型返回 HTTP ${res.status}：${(await res.text()).slice(0, 300)}`)
+        // 先去掉 Key 再截断：先截断的话，截在 Key 中间时留下的半截就换不掉了
+        const text = withoutKey(await res.text(), config.apiKey).slice(0, 300)
+        throw new Error(`抽取模型返回 HTTP ${res.status}：${text}`)
       }
-      const body = (await res.json()) as {
+      const body = (await upstreamJson(res, '抽取模型')) as {
         choices?: { message?: { content?: unknown } }[]
         usage?: { prompt_tokens?: number; completion_tokens?: number }
       }

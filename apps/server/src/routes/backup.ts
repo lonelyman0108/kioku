@@ -19,11 +19,11 @@ import {
 import { listBackups, testBackupStorage } from '../backup/storage'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { SettingsInputError } from '../settings/endpoint'
+import { SettingsInputError, unlocked } from '../settings/endpoint'
 
 const NOT_CONFIGURED = '还没有保存备份存储的设置'
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
-const notConfigured = jsonResponse(NOT_CONFIGURED, ErrorResponse)
+const unusable = jsonResponse(`${NOT_CONFIGURED}，或者保存的 Secret 解不开`, ErrorResponse)
 
 const view = createRoute({
   method: 'get',
@@ -61,7 +61,7 @@ const test = createRoute({
   summary: '用已保存的设置往存储桶里放一个小文件、列一遍再删掉，检查连通与权限',
   responses: {
     200: jsonResponse('测试结果', BackupTestResult),
-    400: notConfigured,
+    400: unusable,
     403: forbidden,
   },
 })
@@ -73,7 +73,7 @@ const run = createRoute({
   summary: '立即做一份备份传上去：排进后台任务，返回任务编号，按编号查这一次做得怎么样',
   responses: {
     202: jsonResponse('已排队', BackupQueued),
-    400: notConfigured,
+    400: unusable,
     403: forbidden,
     503: jsonResponse('没有排进队列（服务没有启动后台任务，或入队失败）', ErrorResponse),
   },
@@ -100,16 +100,23 @@ const objects = createRoute({
   summary: '列出存储桶里的备份，新的在前',
   responses: {
     200: jsonResponse('备份', BackupObjectList),
-    400: notConfigured,
+    400: unusable,
     403: forbidden,
     502: jsonResponse('存储出错', ErrorResponse),
   },
 })
 
 // 只给实例管理员：挂在实例设置的路由下面，沿用那里的登录与管理员检查。
-// 存了 Secret 就一定配着主密钥（没配时启动检查拒绝启动），读设置不会因为解不开而失败
+// 启动检查只核对启动那一刻的主密钥，运行时 Secret 还是可能解不开（保存的内容坏了、别的实例用另一把主密钥写过）
 export function backupRoutes(deps: Deps) {
-  const configured = () => loadBackupConfig(deps.db, deps.masterKey)
+  // 用得上的设置：没有保存、Secret 解不开时给出原因，调用方回 400；别的错误（例如读库出错）照常抛出交给 onError
+  const configured = async () => {
+    const loaded = await unlocked(() => loadBackupConfig(deps.db, deps.masterKey))
+    if (!loaded.ok) return loaded
+    return loaded.value
+      ? { ok: true as const, config: loaded.value }
+      : { ok: false as const, error: NOT_CONFIGURED }
+  }
   return router()
     .openapi(view, async (c) => c.json(await backupSettingsView(deps.db), 200))
     .openapi(update, async (c) => {
@@ -126,14 +133,14 @@ export function backupRoutes(deps: Deps) {
       return c.body(null, 204)
     })
     .openapi(test, async (c) => {
-      const config = await configured()
-      if (!config) return c.json({ error: NOT_CONFIGURED }, 400)
-      const error = await testBackupStorage(config)
+      const loaded = await configured()
+      if (!loaded.ok) return c.json({ error: loaded.error }, 400)
+      const error = await testBackupStorage(loaded.config)
       return c.json({ ok: !error, error }, 200)
     })
     .openapi(run, async (c) => {
-      const config = await configured()
-      if (!config) return c.json({ error: NOT_CONFIGURED }, 400)
+      const loaded = await configured()
+      if (!loaded.ok) return c.json({ error: loaded.error }, 400)
       const runId = await deps.jobs?.enqueueBackup()
       if (!runId) return c.json({ error: '没有排进后台任务，稍后再试' }, 503)
       return c.json({ runId }, 202)
@@ -145,10 +152,10 @@ export function backupRoutes(deps: Deps) {
       return c.json(status, 200)
     })
     .openapi(objects, async (c) => {
-      const config = await configured()
-      if (!config) return c.json({ error: NOT_CONFIGURED }, 400)
+      const loaded = await configured()
+      if (!loaded.ok) return c.json({ error: loaded.error }, 400)
       try {
-        const found = await listBackups(s3Client(config), config.prefix)
+        const found = await listBackups(s3Client(loaded.config), loaded.config.prefix)
         return c.json(
           { objects: found.map((o) => ({ object: o.key, bytes: o.bytes, at: o.at })) },
           200,

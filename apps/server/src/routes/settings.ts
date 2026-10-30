@@ -43,7 +43,7 @@ import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { endPause, retentionView, saveRetentionDays } from '../jobs/retention'
 import { loadRecallSettings, saveRecallSettings } from '../recall/retention'
-import { SettingsInputError } from '../settings/endpoint'
+import { SettingsInputError, unlocked } from '../settings/endpoint'
 import { backupRoutes } from './backup'
 
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
@@ -313,15 +313,11 @@ export function settingsRoutes(deps: Deps) {
       return c.json(viewOf(await loadEmbeddingModels(deps.db)), 200)
     })
     .openapi(test, async (c) => {
-      let setups
-      try {
-        setups = await loadEmbeddingSetups(deps.db, deps.masterKey)
-      } catch (err) {
-        return c.json({ error: (err as Error).message }, 400)
-      }
+      const setups = await unlocked(() => loadEmbeddingSetups(deps.db, deps.masterKey))
+      if (!setups.ok) return c.json({ error: setups.error }, 400)
       const [active, next] = await Promise.all([
-        testChannels(setups.active),
-        testChannels(setups.next),
+        testChannels(setups.value.active),
+        testChannels(setups.value.next),
       ])
       return c.json({ active, next }, 200)
     })
@@ -341,11 +337,11 @@ export function settingsRoutes(deps: Deps) {
     })
     .openapi(extractionView, async (c) => c.json(await extractionSettingsView(deps.db), 200))
     .openapi(extractionUpdate, async (c) => {
-      try {
-        return c.json(await saveExtractionConfig(deps.db, deps.masterKey, c.req.valid('json')), 200)
-      } catch (err) {
-        return c.json({ error: (err as Error).message }, 400)
-      }
+      const saved = await saving(() =>
+        saveExtractionConfig(deps.db, deps.masterKey, c.req.valid('json')),
+      )
+      if (!saved.ok) return c.json({ error: saved.error }, 400)
+      return c.json(saved.value, 200)
     })
     .openapi(extractionClear, async (c) => {
       await clearExtractionConfig(deps.db)
@@ -353,18 +349,19 @@ export function settingsRoutes(deps: Deps) {
     })
     .openapi(extractionTest, async (c) => {
       const started = Date.now()
+      const result = (error: string | null) =>
+        c.json({ ok: error === null, latencyMs: Date.now() - started, error }, 200)
+      const config = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
+      if (!config.ok) return result(config.error)
+      if (!config.value) return result('还没有保存抽取模型的设置')
       try {
-        const config = await loadExtractionConfig(deps.db, deps.masterKey)
-        if (!config) throw new Error('还没有保存抽取模型的设置')
-        await openAiChatModel(config).complete([
+        await openAiChatModel(config.value).complete([
           { role: 'user', content: '这是连通性测试，只回复 ok。' },
         ])
-        return c.json({ ok: true, latencyMs: Date.now() - started, error: null }, 200)
+        return result(null)
       } catch (err) {
-        return c.json(
-          { ok: false, latencyMs: Date.now() - started, error: (err as Error).message },
-          200,
-        )
+        // 这里只有请求模型：模型报的错要让管理员看到，它的文字不带 Key
+        return result((err as Error).message)
       }
     })
     .openapi(masterKey, async (c) => c.json(await masterKeyStatus(deps.db, deps.masterKey), 200))
@@ -421,6 +418,7 @@ async function testChannels(setup: EmbeddingSetup | null) {
         const [vector] = await openAiEmbedder(channel).embed([PROBE])
         return { vector: vector!, latencyMs: Date.now() - started, error: null }
       } catch (err) {
+        // 模型报的错要让管理员看到，它的文字不带 Key
         return { vector: null, latencyMs: Date.now() - started, error: (err as Error).message }
       }
     }),
