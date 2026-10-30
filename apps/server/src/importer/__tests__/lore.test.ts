@@ -507,8 +507,8 @@ describe('Lore 导入计划', () => {
           targets: plan.memories.map((item) => ({ item, state: 'new', current: [] })),
           personaExists: false,
           importedPersonas: [],
-          appsGivenPersona: [],
-          appsOtherPersona: [],
+          appsGivenPersona: ['claude-a', 'claude-b'],
+          appsOtherPersona: ['claude-c', 'claude-d'],
         },
         sync: {
           items: [
@@ -536,6 +536,8 @@ describe('Lore 导入计划', () => {
       shuffled.plan.warnings.reverse()
       shuffled.preview.targets.reverse()
       shuffled.preview.targets[0]!.item.request.glossary.reverse()
+      shuffled.preview.appsGivenPersona.reverse()
+      shuffled.preview.appsOtherPersona.reverse()
       shuffled.sync.goneFromLore.reverse()
       shuffled.sync.items[0]!.changes.reverse()
       expect(fingerprint(shuffled)).toBe(same)
@@ -549,12 +551,23 @@ describe('Lore 导入计划', () => {
       times.sync.items[0]!.request = { uri: 'infra://x', expectedVersion: 4, expectedId: 'b' }
       times.sync.items[1]!.state = 'edited'
       times.plan.droppedKeywords.push({ source: 'infra://token', keyword: '词', reason: '不要' })
+      times.preview.importedPersonas.push('old')
       expect(fingerprint(times)).toBe(same)
     })
 
     it('真要写的东西变了就变', () => {
       const changes: ((input: ReturnType<typeof base>) => void)[] = [
         (i) => (i.plan.persona = { slug: 'work', name: '默认人格' }),
+        (i) => (i.preview.personaExists = true),
+        (i) => i.preview.appsGivenPersona.pop(),
+        (i) => i.preview.appsGivenPersona.push('claude-e'),
+        (i) => i.preview.appsOtherPersona.pop(),
+        (i) => i.preview.appsOtherPersona.push('claude-e'),
+        // 个数不变，从设默认人格换成在用别的人格
+        (i) => {
+          i.preview.appsGivenPersona = ['claude-a', 'claude-c']
+          i.preview.appsOtherPersona = ['claude-b', 'claude-d']
+        },
         (i) => (i.plan.apps[0]!.apps[0]!.create = true),
         (i) => i.plan.apps[0]!.apps.pop(),
         (i) => (i.preview.targets[0]!.item.source = 'core://agent/other'),

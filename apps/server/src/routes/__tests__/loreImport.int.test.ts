@@ -806,6 +806,51 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(res.status).toBe(409)
     })
 
+    it('看过计划之后应用的默认人格或人格本身变了，返回 409：执行时真的会写这些', async () => {
+      const setDefault = (id: string, personaId: string | null) =>
+        withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(apps).set({ defaultPersonaId: personaId }).where(eq(apps.id, id)),
+        )
+      const refused = async (plan: LoreImportPlan) => {
+        const before = await counts()
+        const res = await post('apply', { source, fingerprint: plan.fingerprint })
+        expect(res.status).toBe(409)
+        expect(await counts()).toEqual(before)
+      }
+      const work = await ws.createPersona('work')
+      const claude = await ws.createApp('claude-code', {
+        runtimeFamily: 'claudecode',
+        defaultPersonaId: work.id,
+      })
+      const source = await fileSource()
+
+      // 计划说它在用别的人格，这时清空了默认人格：执行会把它设成导入的人格
+      const other = await planOf(source)
+      expect(other.appsOtherPersona).toEqual(['claude-code'])
+      await setDefault(claude.id, null)
+      await refused(other)
+
+      // 反过来：计划说会设默认人格，这时已经设上了别的
+      const given = await planOf(source)
+      expect(given.appsGivenPersona).toEqual(['claude-code'])
+      await setDefault(claude.id, work.id)
+      await refused(given)
+
+      // 人格还不存在时看的计划，这时已经有了：不会用填的名称新建
+      const absent = await planOf(source)
+      expect(absent.persona.exists).toBe(false)
+      await ws.createPersona('default')
+      await refused(absent)
+
+      // 反过来：计划说人格已有，这时删掉了：执行会新建
+      const present = await planOf(source)
+      expect(present.persona.exists).toBe(true)
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.delete(personas).where(eq(personas.slug, 'default')),
+      )
+      await refused(present)
+    })
+
     describe('旧文件', () => {
       it('比已写入的数据旧、又有要写的：标出来，默认不写，确认后才写；同一份文件再执行不算旧', async () => {
         const old = await fileSource(EARLIER)

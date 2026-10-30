@@ -1078,7 +1078,8 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
 }
 
 // 计划的指纹：看计划与执行时都对不带勾选的基准计划算，所以勾选不影响它。
-// 覆盖人格、应用映射、每个写入目标（来源、URI、层、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
+// 覆盖人格与它在不在（不在就新建）、应用映射、哪些应用会被设默认人格或在用别的人格、
+// 每个写入目标（来源、URI、层、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
 // 不导入的、提醒、要更新的同步项与 Lore 里没有了的；都排好序，所以打乱导出的行序不会变。
 // 不覆盖版本号与时间：只有真要写的东西变了才算计划变了
 export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: SyncPlan): string {
@@ -1087,6 +1088,9 @@ export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: 
     .update(
       JSON.stringify({
         persona: plan.persona,
+        personaExists: preview.personaExists,
+        appsGivenPersona: [...preview.appsGivenPersona].sort(),
+        appsOtherPersona: [...preview.appsOtherPersona].sort(),
         apps: canonical(
           plan.apps.map((m) => ({
             runtime: m.runtime,
