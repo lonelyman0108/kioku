@@ -78,7 +78,8 @@ export function sameOrigin(a: string, b: string): boolean {
 
 // 保存时这个接口用哪个 Key：新填的就加密保存，null 是不用 Key，不填是沿用之前的。
 // 换了接口的主机就不能沿用：否则改个地址，服务端就会把 Key 发给新主机。主机变了又没说 Key 怎么处理时报错让管理员重填，
-// 而不是悄悄清掉，否则之后的请求会一直失败。where 是报错时的称呼，例如「第 2 个渠道的」；name 是这个密钥叫什么；
+// 而不是悄悄清掉，否则之后的请求会一直失败。报错的话照管理界面上的说法（重新填写，或者清除已保存的），
+// 不提 null 这类接口细节。where 是报错时的称呼，例如「第 2 个渠道的」；name 是这个密钥叫什么；
 // required 时一定要有密钥（例如对象存储的 Secret），不能清除
 export function resolveApiKey(
   previous: { baseUrl: string; apiKey: SealedJson | null } | undefined,
@@ -92,7 +93,9 @@ export function resolveApiKey(
   const keep = previous ? sameOrigin(previous.baseUrl, input.baseUrl) : false
   if (!keep && previous?.apiKey && input.apiKey === undefined) {
     throw new SettingsInputError(
-      `${where}接口主机变了，请重新填写 ${name}${required ? '' : `；不需要 ${name} 时填 null`}`,
+      `${where}接口主机变了，已保存的 ${name} 不会发给新的主机：请重新填写${
+        required ? '' : `；新接口不需要 ${name} 时，清除已保存的 ${name}`
+      }`,
     )
   }
   let result: SealedJson | null = keep ? (previous?.apiKey ?? null) : null

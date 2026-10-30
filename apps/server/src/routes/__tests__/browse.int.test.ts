@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import type {
   ConsoleSearchResponse,
+  EmbeddingStatus,
   KeyScopes,
   MemoryChildren,
   MemoryList,
@@ -15,7 +16,7 @@ import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
 import { memories, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { embedMemories } from '../../embedding/worker'
+import { backfillEmbeddings, embedMemories } from '../../embedding/worker'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -352,6 +353,34 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     })
   })
 
+  it('有已过期的记忆时，概览与实例设置的向量数一样：都只算现在有效的', async () => {
+    await saveEmbedding()
+    for (const p of ['a', 'b', 'c']) {
+      await create(ws.cookie, { uri: `kb://${p}`, content: p, layer: 'base' })
+    }
+    const lapsed = await create(ws.cookie, { uri: 'kb://lapsed', content: '到期了', layer: 'base' })
+    await create(ws.cookie, { uri: 'home://wifi', content: 'hunter2', sensitivity: 'secret' })
+    // 过期之前已经生成了向量
+    expect(await backfillEmbeddings(database.db, fakeEmbedder())).toBe(4)
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 60_000) })
+        .where(eq(memories.id, lapsed.id)),
+    )
+
+    const overview = (await get<SpaceOverview>(ws.cookie, '/overview')).embedding
+    expect(overview).toMatchObject({ eligible: 3, embedded: 3 })
+    const res = await app.request('/v1/settings/embedding/status', {
+      headers: { cookie: ws.cookie },
+    })
+    const status = (await res.json()) as EmbeddingStatus
+    expect({ eligible: status.eligible, embedded: status.active?.embedded }).toEqual({
+      eligible: overview.eligible,
+      embedded: overview.embedded,
+    })
+  })
+
   it('概览里 Key 的使用情况只给应用主人与空间 owner 看，吊销的不算', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     const ownerApp = await ws.createApp('owner-bot')
@@ -421,7 +450,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       app.request('/v1/settings/embedding/rebuild', jsonRequest('POST', {}, { cookie }))
     expect((await status(editor.cookie)).status).toBe(403)
     expect((await rebuild(editor.cookie)).status).toBe(403)
-    // 整个实例的口径：所有成员的、没删除、不是 secret 的记忆
+    // 整个实例的口径：所有成员的、现在有效、不是 secret 的记忆
     expect(await (await status(ws.cookie)).json()).toEqual({
       eligible: 5,
       active: null,

@@ -18,6 +18,7 @@ import {
   switchTracker,
   type ChannelDraft,
 } from '../embeddingDrafts'
+import { needsNewKey } from '../endpointKey'
 import { icons } from '../icons'
 import EmbeddingChannels from './EmbeddingChannels.vue'
 
@@ -82,8 +83,13 @@ const activeDirty = computed(() =>
     ? draftsChanged(activeDrafts.value, active.value.channels)
     : modelId.value !== '' || activeDrafts.value.some((d) => d.baseUrl || d.model || d.apiKey),
 )
+// 有渠道换了接口主机、又没说 Key 怎么处理（见 needsNewKey）：服务端会拒，提交之前就拦下，
+// 按钮旁边说一句，具体的说明在那个渠道的 Key 旁边
+const KEY_MISSING = '有渠道换了接口主机，先说明它的 Key 怎么处理'
+const activeKeyMissing = computed(() => activeDrafts.value.some(needsNewKey))
 const saving = ref(false)
 async function saveActive() {
+  if (activeKeyMissing.value) return
   const first = !active.value
   saving.value = true
   try {
@@ -162,9 +168,18 @@ const nextDirty = computed(() =>
     ? draftsChanged(nextDrafts.value, next.value.channels)
     : starting.value && nextModel.value !== '',
 )
+// 换模型时照抄现在的渠道，改了接口主机的也要先说 Key 怎么处理，不要等点了确认框里的「开始」才报错
+const nextKeyMissing = computed(() => nextDrafts.value.some(needsNewKey))
 const confirmStart = ref(false)
+function askStart() {
+  if (!nextKeyMissing.value) confirmStart.value = true
+}
 const savingNext = ref(false)
 async function saveNext() {
+  if (nextKeyMissing.value) {
+    confirmStart.value = false
+    return
+  }
   const begin = !next.value
   savingNext.value = true
   try {
@@ -310,7 +325,11 @@ async function rebuild() {
       </UFormField>
       <EmbeddingChannels v-model="activeDrafts" />
       <div class="flex flex-wrap items-center gap-2">
-        <UButton type="submit" :icon="icons.save" :loading="saving" :disabled="!activeDirty"
+        <UButton
+          type="submit"
+          :icon="icons.save"
+          :loading="saving"
+          :disabled="!activeDirty || activeKeyMissing"
           >保存</UButton
         >
         <UButton
@@ -323,7 +342,8 @@ async function rebuild() {
         >
           测试连通
         </UButton>
-        <span v-if="active && (activeDirty || nextDirty)" class="text-sm text-muted"
+        <span v-if="activeKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
+        <span v-else-if="active && (activeDirty || nextDirty)" class="text-sm text-muted"
           >改动保存之后才能测试</span
         >
       </div>
@@ -375,7 +395,11 @@ async function rebuild() {
       <form class="space-y-4" @submit.prevent="saveNext">
         <EmbeddingChannels v-model="nextDrafts" />
         <div class="flex flex-wrap items-center gap-2">
-          <UButton type="submit" :icon="icons.save" :loading="savingNext" :disabled="!nextDirty"
+          <UButton
+            type="submit"
+            :icon="icons.save"
+            :loading="savingNext"
+            :disabled="!nextDirty || nextKeyMissing"
             >保存</UButton
           >
           <UButton
@@ -407,6 +431,7 @@ async function rebuild() {
           >
             放弃
           </UButton>
+          <span v-if="nextKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
         </div>
         <ul v-if="result?.next" class="space-y-1 text-sm">
           <li
@@ -419,14 +444,15 @@ async function rebuild() {
         </ul>
       </form>
     </div>
-    <form v-else-if="starting" class="space-y-4" @submit.prevent="confirmStart = true">
+    <form v-else-if="starting" class="space-y-4" @submit.prevent="askStart">
       <UFormField label="新模型的标识" help="和现在的不同；向量按它存">
         <UInput v-model="nextModel" class="w-full font-mono" required />
       </UFormField>
       <EmbeddingChannels v-model="nextDrafts" />
       <div class="flex flex-wrap items-center gap-2">
-        <UButton type="submit" :icon="icons.moved">开始换模型</UButton>
+        <UButton type="submit" :icon="icons.moved" :disabled="nextKeyMissing">开始换模型</UButton>
         <UButton color="neutral" variant="ghost" @click="starting = false">取消</UButton>
+        <span v-if="nextKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
       </div>
     </form>
     <UButton v-else :icon="icons.moved" color="neutral" variant="subtle" @click="openStart"
@@ -438,8 +464,8 @@ async function rebuild() {
     <template #header>
       <h2 class="font-medium">向量</h2>
       <p class="mt-1 text-sm text-muted">
-        整个实例里应当有向量的记忆（没删除、不是
-        secret、有正文）有多少已经有现在这个模型的向量。新写入的记忆会自动排队；接口出过错之后，可以手动补齐。
+        整个实例里应当有向量的记忆（现在有效、不是
+        secret、有正文）有多少已经有现在这个模型的向量。过期的不再召回，不生成向量，重新生效之后再生成。新写入的记忆会自动排队；接口出过错之后，可以手动补齐。
       </p>
     </template>
     <UAlert

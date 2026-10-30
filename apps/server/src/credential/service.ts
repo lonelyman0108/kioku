@@ -43,8 +43,9 @@ import {
   memories,
   memoryCredentialRefs,
 } from '../db/schema'
+import { STILL_VALID } from '../memory/filter'
+import { MemoryError } from '../memory/service'
 import { formatUri } from '../memory/uri'
-import { MemoryError, STILL_VALID } from '../memory/service'
 import { CREDENTIAL_NOTICE, externalMethod } from './methods'
 
 export interface CredentialContext {

@@ -16,6 +16,8 @@ export interface ChannelDraft {
   apiKey: string
   clearKey: boolean
   hasApiKey: boolean
+  // 草稿照抄的那个已保存渠道的接口地址，新加的渠道为 null：换了主机就不能沿用它保存的 Key（见 needsNewKey）
+  savedBaseUrl: string | null
 }
 
 let nextKey = 0
@@ -29,6 +31,7 @@ export function draftOf(channel?: EmbeddingChannelView): ChannelDraft {
     apiKey: '',
     clearKey: false,
     hasApiKey: channel?.hasApiKey ?? false,
+    savedBaseUrl: channel?.baseUrl ?? null,
   }
 }
 

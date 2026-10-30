@@ -110,11 +110,13 @@ import {
 } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
+import { countEmbeddable } from '../embedding/coverage'
 import {
   BOOT_ELIGIBLE,
   pendingReview,
   readableConditions,
   snapshotColumns,
+  STILL_VALID,
   type MemoryColumns,
 } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
@@ -398,7 +400,9 @@ export class MemoryService {
   // 否则同一归属下谁都看不见它，却会一直撞上唯一索引。让出的记录删除时间不早于过期时间（见 isReleased）。
   // reviving 是让过期的记录重新生效：它自己也是这个 URI 上过期的记录，不能被让出（except）；它在这之前已经锁住了，
   // 再等别的候选行的锁，会和按 id 顺序加锁的另一次写入互相等成死锁，所以被锁着的候选跳过，
-  // 没让出的照样由唯一索引与触发器判断
+  // 没让出的照样由唯一索引与触发器判断。两种都用 FOR NO KEY UPDATE（让出只改 deleted_at 与 updated_at，不改键列）：
+  // 别的表插入指向候选行的记录（事件、关键词、向量）时外键检查加的 KEY SHARE 锁和它不冲突，跳过时不会被当成正在改，
+  // 等锁时也不用等它
   private async claimUri(
     tx: Tx,
     parsed: ParsedUri,
@@ -429,8 +433,8 @@ export class MemoryService {
       )
       .orderBy(asc(memories.id))
     const rows = reviving
-      ? await candidates.for('update', { skipLocked: true })
-      : await candidates.for('update')
+      ? await candidates.for('no key update', { skipLocked: true })
+      : await candidates.for('no key update')
     for (const row of rows) {
       // 能让出的：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
       // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
@@ -1242,7 +1246,8 @@ export class MemoryService {
     const seen = new Map(input.items.map((i) => [i.id, i.version]))
     const done = await this.run(async (tx, personaIds) => {
       // 锁住这几行，但不等锁：别人正在处理、或抽取正在推翻的行直接跳过，
-      // 也就不会和抽取这类按别的顺序加锁的写入互相等成死锁
+      // 也就不会和抽取这类按别的顺序加锁的写入互相等成死锁。处理只改非键列，用 FOR NO KEY UPDATE：
+      // 别的表插入指向这条记忆的行（事件、关键词、向量）时外键检查加的 KEY SHARE 锁和它不冲突，不会被当成正在改而跳过
       const rows = await tx
         .select()
         .from(memories)
@@ -1250,7 +1255,7 @@ export class MemoryService {
           and(inArray(memories.id, [...seen.keys()]), pendingReview(this.ctx.access, personaIds)),
         )
         .orderBy(asc(memories.id))
-        .for('update', { skipLocked: true })
+        .for('no key update', { skipLocked: true })
       const targets = rows.filter((r) => seen.get(r.id) === r.version)
       if (!targets.length) return []
       for (const row of targets) this.assertModifiable(row, `没有权限处理 ${row.layer} 层的记忆`)
@@ -1836,7 +1841,7 @@ export class MemoryService {
     })
   }
 
-  // 概览统计。向量覆盖率只算应当有向量的记忆：读得到、不是 secret、有正文；
+  // 概览统计。向量覆盖率只算应当有向量的记忆（EMBEDDABLE：现在有效、不是 secret、有正文）里成员读得到的；
   // model 为 null（还没配置嵌入模型）时已有向量记为 0
   async stats(model: string | null, recall: RecallWindow): Promise<MemoryStats> {
     return this.run(async (tx, personaIds) => {
@@ -1856,29 +1861,20 @@ export class MemoryService {
         .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
         .groupBy(memories.layer, memories.sensitivity)
         .orderBy(asc(memories.layer), asc(memories.sensitivity))
-      // 每条记忆在一个模型下至多一条向量（主键），左连接计数不会重复；没配置模型时一条也连不上
-      const [coverage] = await tx
-        .select({ eligible: count(), embedded: count(memoryEmbeddings.memoryId) })
-        .from(memories)
-        .leftJoin(
-          memoryEmbeddings,
-          and(eq(memoryEmbeddings.memoryId, memories.id), eq(memoryEmbeddings.model, model ?? '')),
-        )
-        .where(
-          and(
-            readableConditions(this.ctx.access, { personaIds }),
-            eq(memories.form, 'curated'),
-            HAS_CONTENT,
-          ),
-        )
+      // 和实例设置的向量卡片同一个口径（EMBEDDABLE），只数成员读得到的；没配置模型时没有已生成的
+      const coverage = await countEmbeddable(
+        tx,
+        model ? [model] : [],
+        readableConditions(this.ctx.access, { personaIds }),
+      )
       return {
         counts: groups.map(({ layer, sensitivity, count }) => ({ layer, sensitivity, count })),
         total: groups.reduce((sum, g) => sum + g.count, 0),
         missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
         plaintextCredentials: groups.reduce((sum, g) => sum + g.plaintext, 0),
         neverRecalled: never?.n ?? 0,
-        eligible: coverage?.eligible ?? 0,
-        embedded: coverage?.embedded ?? 0,
+        eligible: coverage.eligible,
+        embedded: coverage.embedded[0] ?? 0,
       }
     })
   }
@@ -2188,8 +2184,8 @@ export class MemoryService {
 
   // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性。
   // 只列用户删掉的（删除时还有效），删掉之后才到期的也列出来：撤销删除和过期互不相干，撤销之后它回到过期的状态。
-  // 过期之后被让出 URI 的不在这里，在已过期里重新生效
-  async deleted(query: PageQuery): Promise<DeletedMemoryList> {
+  // 过期之后被让出 URI 的不在这里，在已过期里重新生效。保留期的提示由路由补上
+  async deleted(query: PageQuery): Promise<Omit<DeletedMemoryList, 'retention'>> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
       const rows = await tx
@@ -2505,9 +2501,6 @@ const DELETED_MICROS = microsOf(memories.deletedAt)
 // 事件 id 不超过 JS 能精确表示的整数
 const EVENT_ID = /^\d{1,15}$/
 
-// 还没有失效或过期
-export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
-
 // 事实被推翻了：推翻时设的 valid_to 已经过去；已经到期：expires_at 已经过去。都按数据库的时间（见 lockFact）
 const SUPERSEDED = sql<
   boolean | null
@@ -2659,9 +2652,6 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
   if (before.validTo !== after.validTo) changes.push('validTo')
   return changes
 }
-
-// 有正文：与向量任务的口径一致，空字符串也不生成向量
-const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content} <> '')`
 
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`

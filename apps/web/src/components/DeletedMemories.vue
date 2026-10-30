@@ -8,8 +8,10 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
+import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime, isExpired } from '../time'
 
 const props = defineProps<{ spaceId: string }>()
@@ -30,6 +32,17 @@ const deleted = useInfiniteQuery({
   enabled: useActivated(),
 })
 const items = computed(() => deleted.data.value?.pages.flatMap((page) => page.items) ?? [])
+// 保留期是整个实例的设置，每一页都带着，用第一页的
+const retention = computed(() => deleted.data.value?.pages[0]?.retention ?? null)
+// 还剩几天、警示色与「已过期」都按它算：页面一直开着也每分钟跟着变，切到别的视图时停下
+const now = useNow()
+// 每一条后面的说法与要不要标警示色
+const notes = computed(() => {
+  const r = retention.value
+  return new Map(
+    r ? items.value.map((item) => [item.id, purgeNote(item.deletedAt, r, now.value)]) : [],
+  )
+})
 
 const restoring = ref<string | null>(null)
 async function undelete(item: DeletedMemory) {
@@ -78,6 +91,10 @@ async function undelete(item: DeletedMemory) {
       删除的记忆可以撤销删除，原样回来；同一个 URI
       上已经有别的记忆时不能撤销。撤销删除不动有效期：标着「已过期」的，撤销之后回到「已过期」里，在那里可以让它重新生效。
     </p>
+    <p v-if="retention" class="flex items-start gap-1.5 text-xs text-warning">
+      <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
+      <span>{{ deletionNotice(retention) }}</span>
+    </p>
     <UAlert
       v-if="deleted.isError.value"
       color="error"
@@ -105,7 +122,7 @@ async function undelete(item: DeletedMemory) {
                 {{ sensitivityLabels[item.sensitivity] }}
               </UBadge>
               <UBadge
-                v-if="isExpired(item.validTo)"
+                v-if="isExpired(item.validTo, now)"
                 size="sm"
                 variant="outline"
                 color="warning"
@@ -118,8 +135,17 @@ async function undelete(item: DeletedMemory) {
             <span class="text-xs text-muted">
               删除于
               <time :datetime="item.deletedAt" :title="formatTime(item.deletedAt)">
-                {{ formatRelative(item.deletedAt) }}
+                {{ formatRelative(item.deletedAt, now) }}
               </time>
+              <template v-if="retention && notes.get(item.id)">
+                ·
+                <span
+                  :class="{ 'text-warning': notes.get(item.id)!.soon }"
+                  :title="`最早在 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 之后清除`"
+                >
+                  {{ notes.get(item.id)!.text }}
+                </span>
+              </template>
             </span>
           </div>
           <UButton

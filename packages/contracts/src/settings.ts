@@ -70,7 +70,7 @@ const ModelProgress = z.object({ model: z.string(), embedded: z.number().int() }
 
 // 整个实例的向量进度：应当有向量的记忆里，各模型已经生成了多少
 export const EmbeddingStatus = z.object({
-  // 应当有向量的记忆：没删除、不是 secret、有正文的策展记忆
+  // 应当有向量的记忆：现在有效（没删除、没过期）、不是 secret、有正文的策展记忆，与概览的覆盖率同一个口径
   eligible: z.number().int(),
   active: ModelProgress.nullable(),
   next: ModelProgress.nullable(),

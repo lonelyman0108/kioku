@@ -3,6 +3,7 @@ import { and, asc, eq, gt, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 import { withSpace, type Db, type Tx } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary, spaces } from '../db/schema'
 import { formatUri } from '../memory/uri'
+import { EMBEDDABLE } from './coverage'
 import { EmbedRejected, type Embedder } from './provider'
 import { lockEmbeddingModels } from './settings'
 import { embeddingText, textHash } from './text'
@@ -95,7 +96,8 @@ async function embedBatch(
   return { vectors, broken: null }
 }
 
-// 为一批记忆生成或刷新这个模型的向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
+// 为一批记忆生成或刷新这个模型的向量；不该有向量的（EMBEDDABLE 之外的：已删除、过期、secret、没有正文，
+// 以及抽取的记忆：召回与 Dream 都不用它们的向量）删掉向量。嵌入文本没变就跳过。
 // 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
 // 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 xmin，期间被改过的不写回，
 // 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态（例如刚改成 secret 的记忆又被写上明文向量）。
@@ -112,7 +114,7 @@ async function syncRows(
   const { stale, pending, readAt } = await withSpace(db, spaceId, async (tx) => {
     // 按 id 排：一批里请求的顺序固定，出问题时好重现
     const rows = await tx
-      .select({ row: memories, stamp })
+      .select({ row: memories, stamp, embeddable: sql<boolean>`coalesce(${EMBEDDABLE}, false)` })
       .from(memories)
       .where(inArray(memories.id, ids))
       .orderBy(asc(memories.id))
@@ -129,14 +131,9 @@ async function syncRows(
     const hashes = new Map(existing.map((e) => [e.memoryId, e.contentHash]))
     const stale: string[] = []
     const pending: { id: string; text: string; hash: string }[] = []
-    for (const { row } of rows) {
-      if (
-        row.deletedAt ||
-        row.sensitivity === 'secret' ||
-        !row.content ||
-        !row.domain ||
-        !row.path
-      ) {
+    for (const { row, embeddable } of rows) {
+      // 正文与 URI 在 EMBEDDABLE 里已经保证有，这里再判断一次只是让类型收窄
+      if (!embeddable || !row.content || !row.domain || !row.path) {
         // 只有确实有向量的才需要删，没有的不必为它锁行
         if (hashes.has(row.id)) stale.push(row.id)
         continue
@@ -156,13 +153,33 @@ async function syncRows(
     return { stale, pending, readAt: new Map(rows.map((r) => [r.row.id, r.stamp])) }
   })
 
-  const cleanupOtherModels = (keep: string[]) =>
-    and(inArray(memoryEmbeddings.memoryId, ids), notInArray(memoryEmbeddings.model, keep))
-  // 没有要写的也没有要删的，就不必锁行；只剩换模型后的旧向量清理
+  // 别的模型（不再留着的）的向量：只删自己锁到的记忆的。正被别的事务锁着的记忆（例如每小时的清理正删着它们的向量）
+  // 不碰它们的向量行，免得两边在向量行的锁上互相等待；留下的等下一次处理或换模型之后的清理
+  const otherModels = (locked: string[], keep: string[]) =>
+    and(inArray(memoryEmbeddings.memoryId, locked), notInArray(memoryEmbeddings.model, keep))
+  // 没有要写的也没有要删的：只剩换模型后的旧向量清理。只锁真有别的模型的向量的那几条，大多数时候一条都没有
   if (!pending.length && !stale.length) {
-    await withSpace(db, spaceId, async (tx) =>
-      tx.delete(memoryEmbeddings).where(cleanupOtherModels(await keptModels(tx, embedder))),
-    )
+    await withSpace(db, spaceId, async (tx) => {
+      const keep = await keptModels(tx, embedder)
+      const locked = await tx
+        .select({ id: memories.id })
+        .from(memories)
+        .where(
+          and(
+            inArray(memories.id, ids),
+            sql`exists (select 1 from ${memoryEmbeddings} where ${memoryEmbeddings.memoryId} = ${memories.id} and ${notInArray(memoryEmbeddings.model, keep)})`,
+          ),
+        )
+        .for('update', { skipLocked: true })
+      if (locked.length) {
+        await tx.delete(memoryEmbeddings).where(
+          otherModels(
+            locked.map((r) => r.id),
+            keep,
+          ),
+        )
+      }
+    })
     return 0
   }
 
@@ -233,8 +250,8 @@ async function syncRows(
           },
         })
     }
-    // 换过模型后，旧模型的向量不再参与检索，顺手清掉
-    await tx.delete(memoryEmbeddings).where(cleanupOtherModels(keep))
+    // 换过模型后，旧模型的向量不再参与检索，顺手清掉（只清锁到的这些）
+    if (locked.size) await tx.delete(memoryEmbeddings).where(otherModels([...locked], keep))
     return { written: writes.length, skipped }
   })
   if (skipped.length) hooks.onSkipped?.(skipped)
@@ -317,6 +334,37 @@ export async function pruneEmbeddings(db: Db, keep: string[]): Promise<number> {
         .returning({ id: memoryEmbeddings.memoryId }),
     )
     total += removed.length
+  }
+  return total
+}
+
+// 清理时一批最多删这么多条向量，每批一个短事务
+const DROP_BATCH = 500
+
+// 不该有向量（EMBEDDABLE 之外）却还留着的向量删掉。按时间过期的记忆没有写入，不会触发向量任务，
+// 由每小时的清理来删；删除、改成 secret 时没处理到的也一起清掉。逐个空间分批，每批一个短事务。
+// 从向量表出发联记忆表，只看真有向量的记忆。先锁记忆、在锁到的那一版上判断：正被别的事务改着的（例如正在重新生效）
+// 这次跳过，不会把它刚生成的向量删掉；向量行正被别的事务锁着的（例如换模型之后删旧向量）也跳过。
+// 两样都不等锁，所以不会和向量任务互相等待，跳过的下一个小时再看。返回删了几条向量
+export async function dropIneligibleEmbeddings(db: Db): Promise<number> {
+  let total = 0
+  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
+    for (;;) {
+      const gone = await withSpace(db, spaceId, (tx) =>
+        tx.execute(sql`
+          delete from ${memoryEmbeddings}
+          where (${memoryEmbeddings.memoryId}, ${memoryEmbeddings.model}) in (
+            select ${memoryEmbeddings.memoryId}, ${memoryEmbeddings.model}
+            from ${memoryEmbeddings} join ${memories} on ${memories.id} = ${memoryEmbeddings.memoryId}
+            where not coalesce(${EMBEDDABLE}, false)
+            limit ${DROP_BATCH}
+            for no key update of ${memories} skip locked
+            for update of ${memoryEmbeddings} skip locked
+          ) returning 1`),
+      )
+      total += gone.length
+      if (gone.length < DROP_BATCH) break
+    }
   }
   return total
 }

@@ -24,6 +24,9 @@ import type { Access, MemoryFacts, ReadOptions } from '../access/access'
 import { sensitivityRank } from '../access/access'
 import { memories } from '../db/schema'
 
+// 还没有失效或过期，按数据库的时间
+export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
+
 // 启动上下文只收受信来源的这几个策展层（理由见 recall/boot.ts）
 export const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
 

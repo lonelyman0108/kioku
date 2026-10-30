@@ -6,6 +6,7 @@ import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
 
 const toast = useToast()
@@ -25,19 +26,33 @@ watch(
   { immediate: true },
 )
 
+// 换了接口主机又没说 Key 怎么处理：服务端会拒，提交之前就在 Key 旁边说明，保存按钮不可点
+const keyMissing = computed(() =>
+  needsNewKey({
+    baseUrl: form.baseUrl,
+    savedBaseUrl: settings.data.value?.baseUrl ?? null,
+    hasApiKey: settings.data.value?.hasApiKey ?? false,
+    apiKey: form.apiKey,
+    clearKey: form.clearKey,
+  }),
+)
+
 const saving = ref(false)
 async function save() {
+  if (keyMissing.value) return
   saving.value = true
   try {
-    await api.saveExtractionSettings({
+    const saved = await api.saveExtractionSettings({
       baseUrl: form.baseUrl,
       model: form.model,
       ...(form.clearKey ? { apiKey: null } : form.apiKey ? { apiKey: form.apiKey } : {}),
     })
+    // 先换上保存之后的设置，再清掉填过的 Key：要不要重填 Key 按刚保存的主机与 Key 判断，
+    // 不等重新读取（等的时候、读取失败时会按旧的主机误报要重填）
+    queryClient.setQueryData(queryKey, saved)
     form.apiKey = ''
     form.clearKey = false
     result.value = null
-    await queryClient.invalidateQueries({ queryKey })
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -124,6 +139,7 @@ async function clear() {
             ? '已保存（加密存储）。留空表示不修改；更换了接口主机时必须重新填写'
             : '用实例主密钥加密后存库'
         "
+        :error="keyMissing ? newKeyHint('Key', true) : undefined"
       >
         <UInput
           v-model="form.apiKey"
@@ -139,7 +155,9 @@ async function clear() {
         label="清除已保存的 Key（新接口不需要 Key）"
       />
       <div class="flex flex-wrap items-center gap-2">
-        <UButton type="submit" :icon="icons.save" :loading="saving">保存</UButton>
+        <UButton type="submit" :icon="icons.save" :loading="saving" :disabled="keyMissing"
+          >保存</UButton
+        >
         <UButton
           :icon="icons.test"
           color="neutral"

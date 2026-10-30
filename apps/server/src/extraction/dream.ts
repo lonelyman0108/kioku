@@ -25,15 +25,16 @@ import {
   subjects,
 } from '../db/schema'
 import { loadEmbeddingModels } from '../embedding/settings'
+import { STILL_VALID } from '../memory/filter'
 import {
   DREAM_SCOPE_KEY,
   dreamScopeCondition,
   dreamScopeNames,
   dreamScopeOwner,
   parseDreamScope,
+  TALK_LAYERS,
   type ParsedDreamScope,
 } from '../memory/scopes'
-import { STILL_VALID } from '../memory/service'
 import { formatUri, layerForDomain } from '../memory/uri'
 import { anyTermQuery, clipChars, inlineText, oneLine, searchTerms } from '../recall/recall'
 import type { EndpointConfig } from '../settings/endpoint'
@@ -61,9 +62,15 @@ import { loadExtractionConfig } from './settings'
 // 每个范围（见 memory/scopes.ts）单独请求模型，只看上次以来新增或改动的记忆，再带上它们的近邻作对照
 
 // 每次整理最多请求模型这么多次、用掉这么多 token（到了就不再开始新的一次），剩下的下次接着整理。
-// 共享的范围先用，画像层与私人层用剩下的（见 dreamOnce）
+// 共享的范围先用，但最多用到上限减去固定留给画像层与私人层的（DREAM_PERSONAL_*）；画像层与私人层用剩下的、至少是留量，
+// 没用完的也不还给共享的那一段（见 dreamOnce）。共享的内容积压很多时（例如刚导入一大批），画像层与私人层不用等积压清完。
+// 留量是常量，不看有没有画像层与私人层要整理：共享的那一段整理到哪里所有成员都看得到，跟着变就泄露了有没有私人内容。
+// 请求次数一共不超过 DREAM_MAX_CALLS；token 的上限是开始一次请求之前看的，每一段的最后一次都可能超出，
+// 共享的那一段超出的部分也不占留量，所以一次整理实际用掉的可能比 DREAM_MAX_TOKENS 多出两段各自最后一次请求的用量
 export const DREAM_MAX_CALLS = 8
-const MAX_TOKENS = 60_000
+export const DREAM_MAX_TOKENS = 60_000
+export const DREAM_PERSONAL_CALLS = 2
+export const DREAM_PERSONAL_TOKENS = 15_000
 // 一次给模型看的：上次以来新增或改动的最多这么多条，近邻最多这么多条，正文合计最多这么多字
 export const DREAM_CHANGED_PER_CALL = 20
 const NEIGHBORS_PER_CALL = 20
@@ -94,7 +101,7 @@ const CANDIDATE = and(
   STILL_VALID,
   ne(memories.sensitivity, 'secret'),
   or(
-    and(eq(memories.form, 'curated'), notInArray(memories.layer, ['subject', 'episode'])),
+    and(eq(memories.form, 'curated'), notInArray(memories.layer, [...TALK_LAYERS])),
     and(eq(memories.form, 'extracted'), eq(memories.layer, 'subject')),
     and(eq(memories.provenance, 'untrusted'), inArray(memories.layer, REVIEW_LAYERS)),
   ),
@@ -217,11 +224,12 @@ function messageOf(err: unknown): string {
 
 // 别的成员看到的列表与状态只按共享部分的汇总与他自己的画像层、私人层算（见 dreamRunOutcome），
 // 所以分两段整理，共享的那一段不受任何人的画像层与私人层影响：
-// 1. 先把共享的范围整理完，没看完的接着看，都在画像层与私人层之前；每次整理的请求次数与用量上限先给这一段用。
+// 1. 先把共享的范围整理完，没看完的接着看，都在画像层与私人层之前；这一段最多用到每次整理的请求次数与用量上限
+//    减去留给画像层与私人层的（见 DREAM_PERSONAL_CALLS），上限是常量，不看后面有没有要整理的。
 //    出错就停下：多半是接口或库的问题，别的范围也会一样；
 // 2. 接着记一条共享部分的汇总（范围为空）：出错了、整理过了（还有没看完的）、没有要整理的。
 //    整次没走到范围时（没配模型、预算用完、什么都没有要整理的）记的那一条也是汇总；
-// 3. 再整理画像层与私人层，用剩下的请求次数与用量。结果、出错与用量只记在各自的范围上，
+// 3. 再整理画像层与私人层，用剩下的请求次数与用量，至少是留量。结果、出错与用量只记在各自的范围上，
 //    一个范围出错不耽误别人的范围，接着整理下一个
 async function dreamOnce(
   db: Db,
@@ -252,19 +260,27 @@ async function dreamOnce(
   const queue = await pendingScopes(db, spaceId)
   if (!queue.length) return skip('idle')
   const activeModel = (await loadEmbeddingModels(db)).active?.model ?? null
-  const spent = { calls: 0, tokens: 0 }
+  // 这次整理一共请求了几次模型
+  let requested = 0
 
-  // 整理一段：没看完的排到这一段的后面接着看。请求次数或用量到了上限、本月预算用完就停，
-  // 预算用完记在没整理的那个范围上。返回这一段请求了几次、有没有出错、还有没有没看完的
-  const runSegment = async (scopes: PendingScope[], stopOnFailure: boolean) => {
+  // 整理一段：没看完的排到这一段的后面接着看。这一段的请求次数或用量到了 limit、本月预算用完就停，
+  // 预算用完记在没整理的那个范围上。返回这一段请求了几次、用了多少 token、有没有出错、还有没有没看完的
+  const runSegment = async (
+    scopes: PendingScope[],
+    limit: { calls: number; tokens: number },
+    stopOnFailure: boolean,
+  ) => {
     const pending = [...scopes]
     let calls = 0
+    let tokens = 0
     let failed = false
-    while (pending.length && spent.calls < DREAM_MAX_CALLS && spent.tokens < MAX_TOKENS) {
+    // 有范围还有没整理的、这次又不接着整理它
+    let left = false
+    while (pending.length && calls < limit.calls && tokens < limit.tokens) {
       const scope = pending[0]!
       progress.scope = scope
       // 第一次请求之前已经看过；之后每次都再看一眼，抽取与别的整理可能同时在花
-      if (spent.calls > 0 && (await overBudget())) {
+      if (requested > 0 && (await overBudget())) {
         await record({ scope: scope.key, ownerAccountId: scope.owner, skipped: 'budget' })
         break
       }
@@ -273,22 +289,31 @@ async function dreamOnce(
       progress.scope = null
       if (!result) continue
       calls++
-      spent.calls++
-      spent.tokens += result.tokens
+      requested++
+      tokens += result.tokens
       if (result.failed) {
         failed = true
         if (stopOnFailure) break
         continue
       }
-      if (result.more) pending.push(scope)
+      // 有没记上标记的这次不再接着整理（见 ScopeResult），只记下还有没整理的
+      if (result.again) pending.push(scope)
+      else if (result.more) left = true
     }
     progress.scope = null
-    return { calls, failed, more: pending.length > 0 }
+    return { calls, tokens, failed, more: pending.length > 0 || left }
   }
 
   // 范围已经按 pendingScopes 排好，共享的在前：开头没有主人的那些是第一段，从第一个画像层或私人层的范围起是第二段
   const cut = queue.findIndex((s) => s.owner !== null)
-  const shared = await runSegment(cut < 0 ? queue : queue.slice(0, cut), true)
+  const shared = await runSegment(
+    cut < 0 ? queue : queue.slice(0, cut),
+    {
+      calls: DREAM_MAX_CALLS - DREAM_PERSONAL_CALLS,
+      tokens: DREAM_MAX_TOKENS - DREAM_PERSONAL_TOKENS,
+    },
+    true,
+  )
   // 共享的范围要看的记忆在这期间都被删掉了也算没有要整理的。一次都没请求时也有这一条，每天的检查据此知道今天整理过
   await summarize(
     shared.failed
@@ -298,7 +323,15 @@ async function dreamOnce(
         : { skipped: 'idle' },
   )
   if (shared.failed) return { outcome: 'failed', reason: null }
-  const personal = await runSegment(cut < 0 ? [] : queue.slice(cut), false)
+  // 用剩下的，至少是留量：共享的那一段最后一次请求用超了它的上限时，超出的部分不占留量
+  const personal = await runSegment(
+    cut < 0 ? [] : queue.slice(cut),
+    {
+      calls: DREAM_MAX_CALLS - shared.calls,
+      tokens: Math.max(DREAM_MAX_TOKENS - shared.tokens, DREAM_PERSONAL_TOKENS),
+    },
+    false,
+  )
   if (personal.failed) return { outcome: 'failed', reason: null }
   if (!shared.calls && !personal.calls) return { outcome: 'skipped', reason: 'idle' }
   return { outcome: 'done', reason: null }
@@ -338,7 +371,7 @@ async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
     return tx.execute<{ scope: string }>(sql`
       with pending as (
         select distinct ${DREAM_SCOPE_KEY} as scope from ${memories}
-        where ${candidate(owners)} and ${UNMARKED}
+        where ${candidate(owners)} and ${UNMARKED} and ${DREAM_SCOPE_KEY} is not null
       ), last as (
         select ${dreamRuns.scope} as scope, max(${dreamRuns.createdAt}) as at from ${dreamRuns}
         where ${dreamRuns.scope} is not null and ${dreamRuns.skipped} is null group by ${dreamRuns.scope}
@@ -511,7 +544,11 @@ async function scopeTitle(tx: Tx, pending: PendingScope): Promise<DreamPromptSco
 
 interface ScopeResult {
   tokens: number
+  // 这个范围还有没整理的，下次接着看
   more: boolean
+  // 这次整理里接着整理这个范围：还有没看的，这一批也都记上了标记。有没记上的（见 dreamScope 的 mark）就不接着，
+  // 否则下一批又先取到它们，同一批在一次整理里再发给模型，一直发到请求次数用完
+  again: boolean
   failed: boolean
 }
 
@@ -572,12 +609,42 @@ async function dreamScope(
   const counts = { changed: batch.changed.length, considered: picked.length }
   const record = (tx: Tx, fields: RunFields) =>
     recordRun(tx, options, { scope: pending.key, ownerAccountId: owner, ...counts, ...fields })
-  // 这一批整理过了：记下每条当时的版本，之后没改过的不再给模型看。近邻只是对照，不记
-  const mark = (tx: Tx) =>
-    tx
-      .insert(dreamMarks)
-      .values(batch.changed.map((c) => ({ spaceId, memoryId: c.row.id, version: c.row.version })))
-      .onConflictDoUpdate({ target: dreamMarks.memoryId, set: { version: sql`excluded.version` } })
+  // 这一批整理过了：记下每条当时的版本，之后没改过的不再给模型看。近邻只是对照，不记。
+  // 合并对象只改记忆的对象与来源作用域、不加版本：读这一批之后被合并移走的（这两项和读到的不一样了）不记，
+  // 下次整理它们照样是候选，近邻会把保留对象那边的一起带上。先锁住这些行再核对（FOR SHARE）：合并锁这些行要等
+  // 这个事务提交，锁到之后才删标记（见 access/subjects.ts），删得到这里刚写下的；合并的事务开着时它锁着的行这里跳过。
+  // 正被别的写入锁着的也跳过、不记，下次再看。返回没记上的条数
+  const mark = async (tx: Tx): Promise<number> => {
+    const now = await tx
+      .select({ id: memories.id, subjectId: memories.subjectId, originScope: memories.originScope })
+      .from(memories)
+      .where(
+        inArray(
+          memories.id,
+          batch.changed.map((c) => c.row.id),
+        ),
+      )
+      .for('share', { skipLocked: true })
+    const current = new Map(now.map((r) => [r.id, r]))
+    const stayed = batch.changed.filter(({ row }) => {
+      const found = current.get(row.id)
+      return (
+        found !== undefined &&
+        found.subjectId === row.subjectId &&
+        found.originScope === row.originScope
+      )
+    })
+    if (stayed.length) {
+      await tx
+        .insert(dreamMarks)
+        .values(stayed.map((c) => ({ spaceId, memoryId: c.row.id, version: c.row.version })))
+        .onConflictDoUpdate({
+          target: dreamMarks.memoryId,
+          set: { version: sql`excluded.version` },
+        })
+    }
+    return batch.changed.length - stayed.length
+  }
 
   let completion
   try {
@@ -588,7 +655,7 @@ async function dreamScope(
     await withSpace(db, spaceId, (tx) =>
       record(tx, { model: model.model, error: (err as Error).message }),
     )
-    return { tokens: 0, more: batch.more, failed: true }
+    return { tokens: 0, more: batch.more, again: false, failed: true }
   }
   const usage = {
     model: model.model,
@@ -613,6 +680,8 @@ async function dreamScope(
   }
   const attempted = candidates.length - dropped
   let saved: boolean
+  // 这一批里没记上标记的条数（见 mark）
+  let held = 0
   try {
     saved = await withSpace(db, spaceId, async (tx) => {
       if (owner) {
@@ -626,8 +695,8 @@ async function dreamScope(
         }
       }
       if (unparsed) {
-        await mark(tx)
-        await record(tx, { ...usage, more: batch.more, error: unparsed })
+        held = await mark(tx)
+        await record(tx, { ...usage, more: batch.more || held > 0, error: unparsed })
         return true
       }
       const inserted = proposals.size
@@ -646,13 +715,13 @@ async function dreamScope(
             })
             .returning({ id: dreamSuggestions.id })
         : []
-      await mark(tx)
+      held = await mark(tx)
       await record(tx, {
         ...usage,
         suggested: inserted.length,
         known: attempted - inserted.length,
         dropped,
-        more: batch.more,
+        more: batch.more || held > 0,
       })
       return true
     })
@@ -661,10 +730,15 @@ async function dreamScope(
     await withSpace(db, spaceId, (tx) =>
       record(tx, { ...usage, error: `写入失败：${(err as Error).message}` }),
     )
-    return { tokens, more: batch.more, failed: true }
+    return { tokens, more: batch.more, again: false, failed: true }
   }
-  // 结果没存（主人关掉了、不再是成员）：这个范围这次不再接着整理
-  return { tokens, more: saved && batch.more, failed: false }
+  // 结果没存（主人关掉了、不再是成员）：这个范围这次不再接着整理。有没记上标记的：还有没整理的，但这次也不接着
+  return {
+    tokens,
+    more: saved && (batch.more || held > 0),
+    again: saved && batch.more && held === 0,
+    failed: false,
+  }
 }
 
 // 一条合规的建议，按存进 dream_suggestions 的样子

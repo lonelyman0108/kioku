@@ -1,3 +1,5 @@
+import type { Context } from 'hono'
+import { HTTPException } from 'hono/http-exception'
 import { secureHeaders } from 'hono/secure-headers'
 
 import { sameOriginForCookies } from './auth/csrf'
@@ -26,6 +28,28 @@ import { spaceRoutes } from './routes/spaces'
 import { subjectRoutes } from './routes/subjects'
 import { whoamiRoutes } from './routes/whoami'
 import { VERSION } from './version'
+
+// hono 在读请求时判出的问题：请求体不是合法的 JSON、表单解析不了（400），请求体超过上限（413），
+// Content-Type 和接口收的不一样、或者有请求体却没写 Content-Type（415）
+const REQUEST_ERRORS: Partial<Record<number, string>> = {
+  400: '请求格式错误',
+  413: '请求体太大',
+  415: '请求体的类型（Content-Type）不对',
+}
+// 自带响应里只有这些跟着原来的正文走，换成 { error } 之后不再沿用
+const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding']
+
+// 请求本身的问题（依赖库抛出的 4xx）：状态码与响应头沿用它的（getResponse 给出，例如 Retry-After、
+// WWW-Authenticate），正文换成和别的错误一样的 { error }，按状态码给中文说明。它自带的说明不给调用方：
+// 应用自己不抛带说明的 HTTPException，说明都来自依赖库，是英文的，也可能带着内部细节
+function requestError(c: Context, err: HTTPException): Response {
+  const headers = new Headers(err.getResponse().headers)
+  for (const name of BODY_HEADERS) headers.delete(name)
+  return c.json(
+    { error: REQUEST_ERRORS[err.status] ?? '请求不合法' },
+    { status: err.status, headers },
+  )
+}
 
 // 应用本身与监听端口分开，测试直接调 app.request，不用起服务
 export function createApp(deps: Deps) {
@@ -71,9 +95,11 @@ export function createApp(deps: Deps) {
   app.route('/v1', bindingRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
-  // 业务规则错误带着自己的状态码；其余错误不把内部信息透给调用方
+  // 业务规则错误带着自己的状态码；请求本身的问题（依赖库抛出的 4xx）是调用方的错，不打堆栈（见 requestError）；
+  // 其余错误不把内部信息透给调用方
   app.onError((err, c) => {
     if (err instanceof MemoryError) return c.json({ error: err.message }, err.status)
+    if (err instanceof HTTPException && err.status < 500) return requestError(c, err)
     console.error(err)
     return c.json({ error: '服务内部错误' }, 500)
   })
