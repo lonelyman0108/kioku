@@ -1852,6 +1852,30 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     await slotFree()
   })
 
+  it('文件做好之后一直不读、也不断开：到了发送时限中止响应、放掉名额，下一个导出照常', async () => {
+    const quick = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: sourceKey,
+      embedder: staticEmbedderSource(null),
+      jobs,
+      exportSendTimeoutMs: 300,
+    })
+    const alice = await bootstrap(quick, 'alice')
+    const stalled = await exportRequest(quick, alice.spaceId, alice.cookie)
+    expect(stalled.status).toBe(200)
+    // 响应没人读：名额占着，别人来要排队
+    const probe = acquireTransferSlot('probe')
+    expect(queuedTransfers()).toBe(1)
+    // 到了时限：名额交给排着的那个；这个响应被中止，再也读不出来
+    ;(await within(probe))()
+    await expect(stalled.arrayBuffer()).rejects.toThrow('过了发送时限')
+    // 下一个导出照常进来；读得及时，时限碍不着它
+    const file = await exportSpace(quick, alice.spaceId, alice.cookie)
+    expect((await contents(file)).header.exporter.displayName).toBe('alice')
+    await slotFree()
+  })
+
   it(
     '一次导入两万条带 URI 的记忆：不为每个 URI 加咨询锁，锁表不会被占满',
     { timeout: 120_000 },

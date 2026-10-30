@@ -17,6 +17,8 @@ export interface Deps {
   webDir?: string
   // 没有后台任务时（例如部分测试）写入不触发向量更新
   jobs: Jobs | null
+  // 按空间导出的文件做好之后最多等多久发完（毫秒），不设时用 EXPORT_SEND_TIMEOUT_MS；测试里调小
+  exportSendTimeoutMs?: number
 }
 
 export interface ConsolePrincipal {

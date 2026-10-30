@@ -160,21 +160,29 @@ function importRoute(deps: Deps) {
   })
 }
 
-// 整个导出占一个名额：文件攒在内存里，要等发给浏览器之后才释放。名额只在 settle 里放、只放一次，放的时候移除断开的监听；
-// 哪种情况先到都走它：导出出错或停下、文件发完、发送途中响应流被取消、文件做好之后客户端断开。
-// 导出期间不靠断开的监听放：客户端断开时 exportSpace 在下一个检查点自己停下，停下之后才放，
-// 名额不会在它还在派生、读库时就让给别人。文件做好之后才断开的，node 的服务端既不读这个响应流、也不取消它，
-// 只能在断开时放
+// 导出的文件做好之后最多等这么久发完。客户端不断开、却一直不读响应时，node 与 @hono/node-server 都没有发送的时限，
+// 名额会一直占到连接关闭，别的导出导入只能排着；到了时限就中止响应、放掉名额。文件最大 32 MiB，
+// 十分钟发完只要每秒 55 KB 左右，管理界面拿到响应就整个读出来，正常的下载用不了这么久
+const EXPORT_SEND_TIMEOUT_MS = 10 * 60_000
+
+// 整个导出占一个名额：文件攒在内存里，要等发给浏览器之后才释放。名额只在 settle 里放、只放一次，放的时候移除断开的监听
+// 与发送时限；哪种情况先到都走它：导出出错或停下、文件发完、发送途中响应流被取消、文件做好之后客户端断开、
+// 到了发送时限（先中止响应）。导出期间不靠断开的监听放：客户端断开时 exportSpace 在下一个检查点自己停下，停下之后才放，
+// 名额不会在它还在派生、读库时就让给别人。文件做好之后、开始发之前就断开的，node 的服务端既不读这个响应流、
+// 也不取消它，只能在断开时放
 async function exportHoldingSlot(
   accountId: string,
   signal: AbortSignal,
+  sendTimeoutMs: number,
   run: () => Promise<SpaceExport>,
 ): Promise<{ exported: SpaceExport; body: ReadableStream<Uint8Array> }> {
   const release = await acquireTransferSlot(accountId, signal)
   let settled = false
+  let deadline: NodeJS.Timeout | undefined
   const settle = () => {
     if (settled) return
     settled = true
+    clearTimeout(deadline)
     signal.removeEventListener('abort', settle)
     release()
   }
@@ -185,28 +193,60 @@ async function exportHoldingSlot(
     settle()
     throw err
   }
-  if (signal.aborted) settle()
-  else signal.addEventListener('abort', settle, { once: true })
-  return { exported, body: fileBody(exported.file, settle) }
+  const body = fileBody(exported.file, settle)
+  if (signal.aborted) {
+    settle()
+  } else {
+    signal.addEventListener('abort', settle, { once: true })
+    deadline = setTimeout(
+      () => body.abort(new Error('导出的文件过了发送时限还没发完，中止发送')),
+      sendTimeoutMs,
+    )
+    // 只是个时限，不让进程为它留着
+    deadline.unref()
+  }
+  return { exported, body: body.stream }
 }
 
-// 响应流：整个文件一次交出去，读完或者被取消时调 done
-function fileBody(file: Uint8Array, done: () => void): ReadableStream<Uint8Array> {
-  let sent = false
-  return new ReadableStream({
-    pull(controller) {
-      if (!sent) {
-        sent = true
-        controller.enqueue(file)
-        return
-      }
-      controller.close()
+// 每次交给响应流的字节数
+const CHUNK = 64 * 1024
+
+// 响应流：文件分块交出去，读一块才给下一块（不预先排一块），读完或者被取消时调 done，所以文件真的发出去了才算发完。
+// 一次交出整个文件的话，node 的服务端拿到就整个收进连接的写缓冲，马上算发完、放掉名额，客户端不读时文件却一直在内存里。
+// abort 让响应流出错（@hono/node-server 随之断开这个连接），也调 done
+function fileBody(
+  file: Uint8Array,
+  done: () => void,
+): { stream: ReadableStream<Uint8Array>; abort: (reason: Error) => void } {
+  let at = 0
+  let controller!: ReadableStreamDefaultController<Uint8Array>
+  const stream = new ReadableStream<Uint8Array>(
+    {
+      start(c) {
+        controller = c
+      },
+      pull(c) {
+        if (at < file.length) {
+          c.enqueue(file.subarray(at, at + CHUNK))
+          at += CHUNK
+          return
+        }
+        c.close()
+        done()
+      },
+      cancel() {
+        done()
+      },
+    },
+    { highWaterMark: 0 },
+  )
+  return {
+    stream,
+    abort(reason) {
+      controller.error(reason)
       done()
     },
-    cancel() {
-      done()
-    },
-  })
+  }
 }
 
 // 下载的文件名：空间名加导出时间（UTC）。空间名里放不进文件名的字符换成 _，另给一个只有 ASCII 的备用名
@@ -228,7 +268,8 @@ export function spaceRoutes(deps: Deps) {
       // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
       if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
       const signal = c.req.raw.signal
-      const { exported, body } = await exportHoldingSlot(accountId, signal, () =>
+      const sendTimeoutMs = deps.exportSendTimeoutMs ?? EXPORT_SEND_TIMEOUT_MS
+      const { exported, body } = await exportHoldingSlot(accountId, signal, sendTimeoutMs, () =>
         exportSpace(deps.db, deps.masterKey, {
           spaceId,
           accountId,
