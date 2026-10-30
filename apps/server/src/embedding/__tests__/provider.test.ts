@@ -75,6 +75,16 @@ describe('OpenAI 兼容嵌入客户端', () => {
     expect(cut.message).not.toContain('sk-')
   })
 
+  it('200 但不是 JSON、响应开头就是 Key：报固定文字，错误和 cause 里都没有响应的内容', async () => {
+    const embedder = openAiEmbedder(
+      { baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-secret' },
+      (async () => new Response('sk-secret 无效')) as unknown as typeof fetch,
+    )
+    const err = (await embedder.embed(['a']).catch((e: unknown) => e)) as Error
+    expect(err.message).toBe('嵌入接口的响应不是合法的 JSON')
+    expect(inspect(err, { depth: null })).not.toContain('sk-')
+  })
+
   describe('fetch 报的错', () => {
     const pasted = openAiEmbedder({
       baseUrl: 'http://127.0.0.1:9/v1',

@@ -1,4 +1,4 @@
-import { fetchFailure, withoutKey, type EndpointConfig } from '../settings/endpoint'
+import { fetchFailure, upstreamJson, withoutKey, type EndpointConfig } from '../settings/endpoint'
 
 export interface ChatMessage {
   role: 'system' | 'user' | 'assistant'
@@ -48,7 +48,7 @@ export function openAiChatModel(
         const text = withoutKey(await res.text(), config.apiKey).slice(0, 300)
         throw new Error(`抽取模型返回 HTTP ${res.status}：${text}`)
       }
-      const body = (await res.json()) as {
+      const body = (await upstreamJson(res, '抽取模型')) as {
         choices?: { message?: { content?: unknown } }[]
         usage?: { prompt_tokens?: number; completion_tokens?: number }
       }

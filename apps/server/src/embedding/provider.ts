@@ -1,5 +1,5 @@
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
-import { fetchFailure, withoutKey, type EndpointConfig } from '../settings/endpoint'
+import { fetchFailure, upstreamJson, withoutKey, type EndpointConfig } from '../settings/endpoint'
 
 // signal 是调用方的总时限（例如召回不能等太久）；timeoutMs 是每个接口最多等多久，不填时 30 秒
 export interface EmbedOptions {
@@ -49,7 +49,9 @@ export function openAiEmbedder(config: EmbeddingConfig, fetchImpl: typeof fetch 
         const text = withoutKey(await res.text(), config.apiKey).slice(0, 300)
         throw new Error(`嵌入接口返回 HTTP ${res.status}：${text}`)
       }
-      const body = (await res.json()) as { data?: { index: number; embedding: number[] }[] }
+      const body = (await upstreamJson(res, '嵌入接口')) as {
+        data?: { index: number; embedding: number[] }[]
+      }
       const data = [...(body.data ?? [])].sort((a, b) => a.index - b.index)
       if (data.length !== texts.length) {
         throw new Error(`嵌入接口返回 ${data.length} 条，期望 ${texts.length} 条`)

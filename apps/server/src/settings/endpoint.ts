@@ -115,6 +115,17 @@ export function fetchFailure(what: string, err: unknown): string {
   return `连不上${what}${typeof code === 'string' ? `（${code}）` : ''}：检查实例设置里的接口地址与 Key`
 }
 
+// 读 2xx 响应的 JSON。解析失败时只报固定文字：SyntaxError 的文字带响应的开头，上游可能把 Key 写在那里。
+// 读正文本身出错（连接断了、超时）不是这种情况，照常抛出
+export async function upstreamJson(res: Response, what: string): Promise<unknown> {
+  const text = await res.text()
+  try {
+    return JSON.parse(text)
+  } catch {
+    throw new Error(`${what}的响应不是合法的 JSON`)
+  }
+}
+
 // 同一个主机（协议、主机名与端口都相同）才能沿用已保存的 Key。只认 http 与 https：
 // 别的协议的 origin 都是 "null"，按字符串比较会把不同的主机当成同一个
 export function sameOrigin(a: string, b: string): boolean {
