@@ -371,6 +371,55 @@ describe('调用台的目录与表单', () => {
   })
 })
 
+describe('选中的工具不在目录里', () => {
+  const calls = sfc(benchCalls)
+
+  it('不退回别的调用：表单留着，运行禁用并说明', () => {
+    const target = blockOf(calls.script, 'const target = ')
+    expect(target).toContain('seen.get(targetId.value)!')
+    expect(target).not.toContain('targets.value[0]')
+    expect(blockOf(calls.script, 'const unavailable = ')).toContain(
+      "tools.data.value ? 'ready' : tools.isError.value ? 'failed' : 'pending'",
+    )
+    const button = withHandler(calls.elements, 'click', 'onRunClick')
+    expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker)')
+    const alert = withIf(calls.elements, 'unavailable')
+    expect(alert.tag).toBe('UAlert')
+    expect(bound(alert, 'title')).toBe('unavailable')
+  })
+
+  it('回车也拦：表单提交与按钮走的都是 run', () => {
+    expect(bodyOf(calls.script, 'run')).toContain('if (running.value || unavailable.value) return')
+  })
+
+  it('目录读取失败时显示原因，能重新读取', () => {
+    expect(blockOf(calls.script, 'const toolsError = ')).toContain(
+      'catalogFailure(tools.error.value)',
+    )
+    const alert = withIf(calls.elements, 'toolsError')
+    expect(alert.tag).toBe('UAlert')
+    expect(bound(alert, 'title')).toBe('toolsError')
+    expect(bound(alert, 'actions')).toBe('retryTools')
+    expect(blockOf(calls.script, 'const retryTools = ')).toContain('tools.refetch()')
+  })
+})
+
+describe('切换调用', () => {
+  const calls = sfc(benchCalls)
+
+  it('上一个调用的说明一起清掉：写错的与运行失败的', () => {
+    const body = blockOf(calls.script, 'watch(targetId, ')
+    expect(body).toContain('formError.value = null')
+    expect(body).toContain('failure.value = null')
+  })
+
+  it('运行期间切走了，失败的说明带上是哪一个调用的', () => {
+    const body = bodyOf(calls.script, 'run')
+    expect(body).toContain('const forTarget = target.value.id')
+    expect(body).toContain('`${forTarget}：${outcome.message}`')
+  })
+})
+
 describe('这次会话：分叉、清空、时间线与上限', () => {
   const calls = sfc(benchCalls)
   const divergedActions = () => blockOf(calls.script, 'const divergedActions = ')
@@ -422,8 +471,8 @@ describe('这次会话：分叉、清空、时间线与上限', () => {
     const alert = withIf(calls.elements, 'blocker')
     expect(alert.tag).toBe('UAlert')
     expect(bound(alert, 'title')).toBe('blocker')
-    expect(bound(withHandler(calls.elements, 'click', 'onRunClick'), 'disabled')).toBe(
-      'Boolean(blocker)',
+    expect(bound(withHandler(calls.elements, 'click', 'onRunClick'), 'disabled')).toContain(
+      'blocker',
     )
   })
 
@@ -807,7 +856,7 @@ describe('真实模式中途作废的运行', () => {
   const abandoned = sfc(benchAbandoned)
 
   it('调用台与场景都走 execute，说明这次运行是什么', () => {
-    expect(bodyOf(sfc(benchCalls).script, 'run')).toContain('call([built.step], target.value.id)')
+    expect(bodyOf(sfc(benchCalls).script, 'run')).toContain('call([built.step], forTarget)')
     const scenario = bodyOf(sfc(benchScenariosView).script, 'runScenario')
     expect(scenario).toContain('label: scenario.title')
     expect(scenario).toContain('view: scenarioView(scenario)')

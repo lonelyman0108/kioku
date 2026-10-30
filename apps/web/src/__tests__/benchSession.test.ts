@@ -18,6 +18,7 @@ import {
   acceptDivergence,
   APP_REPLACED_NOTICE,
   BENCH_TIMELINE_MAX,
+  catalogFailure,
   divergenceNotice,
   emptySession,
   KEY_REPLACED_NOTICE,
@@ -192,6 +193,17 @@ describe('运行失败的说明', () => {
     for (const status of [400, 403, 404, 413, 429]) {
       expect(runFailureMessage(new ApiError(status, '拒绝'), 'real')).toBe('拒绝')
     }
+  })
+})
+
+describe('工具目录读取失败的原因', () => {
+  it('服务端说的原因；网络错误与响应对不上也要说', () => {
+    expect(catalogFailure(new ApiError(403, '只有应用主人能用测试台'))).toBe(
+      '读取工具目录失败：只有应用主人能用测试台',
+    )
+    expect(catalogFailure(new TypeError('fetch'))).toBe(
+      '读取工具目录失败：网络出错了，或者响应对不上',
+    )
   })
 })
 

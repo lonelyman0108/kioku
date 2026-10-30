@@ -2,7 +2,6 @@
 import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
   buildStep,
@@ -12,10 +11,12 @@ import {
   jsonFromForm,
   newDraft,
   targetGroups,
+  targetUnavailable,
+  type CallTarget,
   type Draft,
 } from '../benchForm'
 import { stepBadge } from '../benchResult'
-import { divergenceNotice, runBlocker, sessionUsage } from '../benchSession'
+import { catalogFailure, divergenceNotice, runBlocker, sessionUsage } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { icons } from '../icons'
 import { scopesSummary } from '../labels'
@@ -55,9 +56,38 @@ const groups = computed(() =>
   })),
 )
 const targetId = ref(targets.value[0]!.id)
-const target = computed(
-  () => targets.value.find((t) => t.id === targetId.value) ?? targets.value[0]!,
+// 每个调用上一次在目录里的样子。选中的工具不在现在的目录里时（换了 Key，目录在读取、读取失败或者没有它）
+// 表单与草稿都留着，只是不能运行，见 targetUnavailable
+const seen = new Map<string, CallTarget>()
+watch(
+  targets,
+  (list) => {
+    for (const t of list) seen.set(t.id, t)
+  },
+  { immediate: true },
 )
+const target = computed(
+  () => targets.value.find((t) => t.id === targetId.value) ?? seen.get(targetId.value)!,
+)
+const unavailable = computed(() =>
+  targetUnavailable(
+    target.value,
+    targets.value,
+    tools.data.value ? 'ready' : tools.isError.value ? 'failed' : 'pending',
+  ),
+)
+const toolsError = computed(() =>
+  tools.isError.value && !tools.data.value ? catalogFailure(tools.error.value) : null,
+)
+const retryTools = computed(() => [
+  {
+    label: '重新读取',
+    color: 'neutral' as const,
+    variant: 'subtle' as const,
+    loading: tools.isFetching.value,
+    onClick: () => void tools.refetch(),
+  },
+])
 
 // 每个调用一份草稿：切到别的调用再切回来时还在。只在内存里，可能有明文，不进浏览器存储
 const drafts = new Map<string, Draft>()
@@ -75,7 +105,11 @@ function resetDraft() {
 
 // 表单写错了发不出去、JSON 放不回表单时的说明
 const formError = ref<string | null>(null)
-watch(targetId, () => (formError.value = null))
+// 这些说明都是上一个调用的，不能留在另一个调用的表单下面
+watch(targetId, () => {
+  formError.value = null
+  failure.value = null
+})
 function showJson() {
   const made = jsonFromForm(target.value, draft.value, sessionContext.value)
   if (!made.ok) {
@@ -141,7 +175,7 @@ function clear() {
 }
 
 async function run() {
-  if (running.value) return
+  if (running.value || unavailable.value) return
   failure.value = null
   const built = buildStep(target.value, draft.value, sessionContext.value)
   if (!built.ok) {
@@ -149,9 +183,14 @@ async function run() {
     return
   }
   formError.value = null
-  const outcome = await call([built.step], target.value.id)
+  const forTarget = target.value.id
+  const outcome = await call([built.step], forTarget)
   if (outcome.kind === 'done') shownId.value = null
-  else if (outcome.kind === 'failed') failure.value = outcome.message
+  else if (outcome.kind === 'failed') {
+    // 运行期间切到了别的调用：说清楚是哪一个的
+    failure.value =
+      targetId.value === forTarget ? outcome.message : `${forTarget}：${outcome.message}`
+  }
 }
 
 // 回车只在回滚模式下运行：真实模式下填到一半按回车不能真的写进去，只有点按钮才执行
@@ -167,10 +206,11 @@ function onRunClick() {
   <div class="space-y-4">
     <BenchContextForm />
     <UAlert
-      v-if="tools.isError.value && !tools.data.value"
+      v-if="toolsError"
       color="error"
       variant="subtle"
-      :title="tools.error.value instanceof ApiError ? tools.error.value.message : '读取工具失败'"
+      :title="toolsError"
+      :actions="retryTools"
     />
     <div class="grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]">
       <nav class="space-y-3 text-sm" aria-label="调用目录">
@@ -261,6 +301,7 @@ function onRunClick() {
             variant="subtle"
             title="这段 JSON 里的 context 和上面的会话上下文不同：这次按 JSON 里的执行，没写就是不带。"
           />
+          <UAlert v-if="unavailable" color="warning" variant="subtle" :title="unavailable" />
           <UAlert v-if="formError" color="warning" variant="subtle" :title="formError" />
           <UAlert v-if="failure" color="error" variant="subtle" :title="failure" />
 
@@ -270,7 +311,7 @@ function onRunClick() {
               :color="real ? 'error' : 'primary'"
               :icon="icons.preview"
               :loading="running"
-              :disabled="Boolean(blocker)"
+              :disabled="Boolean(unavailable || blocker)"
               @click="onRunClick"
             >
               {{ real ? '真实执行' : '运行' }}

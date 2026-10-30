@@ -16,6 +16,7 @@ import {
   jsonFromForm,
   newDraft,
   stateOfBody,
+  targetUnavailable,
   type FormField,
   type FormState,
 } from '../benchForm'
@@ -36,6 +37,41 @@ const stateOf = (
 ): FormState => ({ values: { ...initialState(fields).values, ...values }, nulls })
 
 const GROUP = contextOf({ ...contextDefaults(), chatType: 'group' })
+
+describe('选中的调用不在目录里', () => {
+  const noTools = callTargets([])
+  const get = targetOf('kioku_get')
+  const start = targetOf('session.start')
+
+  it('目录里有：能运行，不管目录是什么状态（读取失败时手上还有旧的）', () => {
+    expect(targetUnavailable(get, targets, 'ready')).toBeNull()
+    expect(targetUnavailable(get, targets, 'failed')).toBeNull()
+  })
+
+  it('选中的不是工具：目录没读到也能运行', () => {
+    expect(targetUnavailable(start, noTools, 'pending')).toBeNull()
+    expect(targetUnavailable(start, noTools, 'failed')).toBeNull()
+    expect(targetUnavailable(targetOf('/whoami'), noTools, 'pending')).toBeNull()
+  })
+
+  it('目录还在读取：说明，不能运行', () => {
+    expect(targetUnavailable(get, noTools, 'pending')).toBe(
+      '工具目录还在读取，读到之前不能运行 kioku_get。',
+    )
+  })
+
+  it('目录读取失败：说明，不能运行', () => {
+    expect(targetUnavailable(get, noTools, 'failed')).toBe(
+      '工具目录读取失败，读到之前不能运行 kioku_get。',
+    )
+  })
+
+  it('这把 Key 没有这个工具：说明，不能运行', () => {
+    expect(targetUnavailable(get, [start], 'ready')).toBe(
+      '这把 Key 的工具目录里没有 kioku_get，不能运行：换一个调用。',
+    )
+  })
+})
 
 describe('按 inputSchema 生成表单', () => {
   it('工具目录来自 tools/list，带只读与破坏性的提示', () => {

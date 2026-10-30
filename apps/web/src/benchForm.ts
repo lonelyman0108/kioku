@@ -441,6 +441,23 @@ export const callTargets = (tools: readonly BenchTool[]): CallTarget[] => [
   ...REST_TARGETS,
 ]
 
+// 工具目录的状态：还在读取、读取失败、读到了
+export type CatalogState = 'pending' | 'failed' | 'ready'
+
+// 选中的调用现在为什么不能运行，能运行时是 null。工具来自真实的 tools/list：目录还在读取、读取失败，
+// 或者这把 Key 没有这个工具时它不在目录里。不能退回别的调用：发出去的就是另一个请求了，
+// 带群聊上下文时还会新建删不掉的对象
+export function targetUnavailable(
+  target: Pick<CallTarget, 'id'>,
+  targets: readonly Pick<CallTarget, 'id'>[],
+  catalog: CatalogState,
+): string | null {
+  if (targets.some((t) => t.id === target.id)) return null
+  if (catalog === 'pending') return `工具目录还在读取，读到之前不能运行 ${target.id}。`
+  if (catalog === 'failed') return `工具目录读取失败，读到之前不能运行 ${target.id}。`
+  return `这把 Key 的工具目录里没有 ${target.id}，不能运行：换一个调用。`
+}
+
 // 一个调用的草稿。切到别的调用再切回来时还在，只在内存里：可能有明文，不进浏览器存储
 export interface Draft {
   json: boolean

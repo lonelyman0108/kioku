@@ -78,6 +78,9 @@ export function runFailureMessage(err: unknown, mode: BenchMode): string {
     : message
 }
 
+export const catalogFailure = (err: unknown) =>
+  `读取工具目录失败：${err instanceof ApiError ? err.message : NOT_API_FAILURE}`
+
 // 真实模式的一次运行中途作废了：运行期间应用、Key 或模式变了（例如 Key 被吊销）。
 // 它的结果不属于现在的选择，进不了时间线，但写入可能已经落库，不能不说
 export interface AbandonedRun {
