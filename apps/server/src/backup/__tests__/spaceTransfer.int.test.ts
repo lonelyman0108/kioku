@@ -9,6 +9,7 @@ import type {
   CredentialValues,
   DomainLayers,
   DreamMemberSettings,
+  ExpiredMemoryList,
   ExtractionUsage,
   GroupPersonaRuleList,
   Me,
@@ -30,12 +31,13 @@ import { createApp } from '../../app'
 import { decryptSecret } from '../../crypto/envelope'
 import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
-import { credentialEvents, memories, settings, spaces } from '../../db/schema'
+import { credentialEvents, memories, settings, spaces, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, FULL_SCOPES, jsonRequest } from '../../testing/fixtures'
+import { exportableMemories } from '../spaceExport'
 import { deriveExportKey, openSpaceExport, sealSpaceExport, type KdfParams } from '../spaceFormat'
 import { parseSpaceExport, type ParsedSpaceExport } from '../spaceImport'
 import { acquireTransferSlot, queuedTransfers } from '../transferGate'
@@ -518,6 +520,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           'app://agent/rules',
           'app://bob-app/notes',
           'core://agent',
+          'home://expired',
           'home://nas',
           'home://wifi',
           'persona://alpha-child/soul',
@@ -525,10 +528,11 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           'preferences://user',
         ].sort(),
       )
-      // 画像只有 alice 自己的那份；bob 的私人层、删掉的与过期的都不在
+      // 画像只有 alice 自己的那份；bob 的私人层与删掉的不在；过期的带上，有效期原样写出
       expect(parsed.memories.find((m) => m.uri === 'preferences://user')!.content).toBe(
         '回答用中文',
       )
+      expect(parsed.memories.find((m) => m.uri === 'home://expired')!.validTo).not.toBeNull()
       expect(parsed.memories.filter((m) => m.form === 'extracted')).toHaveLength(3)
       expect(parsed.memories.find((m) => m.uri === 'home://wifi')).toMatchObject({
         sensitivity: 'secret',
@@ -598,9 +602,9 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         apps: 3,
         subjects: 3,
         linkedSubjects: 1,
-        memories: 11,
+        memories: 12,
         ownerMemories: 1,
-        privateMemories: 2,
+        privateMemories: 3,
         secrets: 1,
         credentials: 3,
         providers: 2,
@@ -796,6 +800,172 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const recallStats = await get<RecallStats>('/recall/stats')
       expect(new Date(recallStats.recordingSince).getTime()).toBeGreaterThan(Date.now() - 600_000)
       expect(recallStats.top).toEqual([])
+    },
+  )
+
+  it(
+    '已过期的策展记忆与被推翻的事实按管理读取一起导出，导入后有效期不变、能重新生效；删掉的、到期的会话摘要、别的成员的私人层不带',
+    { timeout: 30_000 },
+    async () => {
+      const alice = await bootstrap(source, 'alice')
+      const spaceId = alice.spaceId
+      const cookie = { cookie: alice.cookie }
+      const bob = await addMember(database.db, spaceId, 'bob', 'editor')
+      const memory = (body: object, who = cookie) =>
+        ok<MemoryView>(send(source, 'POST', `/v1/spaces/${spaceId}/memories`, body, who), 201)
+      const past = new Date(Date.now() - 3_600_000)
+      const expire = (id: string) =>
+        withSpace(database.db, spaceId, (tx) =>
+          tx.update(memories).set({ validTo: past }).where(eq(memories.id, id)),
+        )
+
+      const plan = await memory({ uri: 'home://plan', content: '十月的旅行计划' })
+      await expire(plan.id)
+      // 共享节点过期之后，只能写私人层的 Key 在同一个 URI 写了个人节点：它让不出共享节点，两条并存
+      const shared = await memory({ uri: 'core://taken', content: '过期的共享节点', layer: 'base' })
+      await expire(shared.id)
+      const agent = await alice.createApp('agent')
+      const privateOnly = await alice.issueKey(agent.id, {
+        ...FULL_SCOPES,
+        writeLayers: ['private'],
+      })
+      await ok(
+        send(
+          source,
+          'POST',
+          '/v1/memories',
+          { uri: 'core://taken', content: '现在的个人节点', layer: 'private' },
+          bearer(privateOnly),
+        ),
+        201,
+      )
+      await memory({ uri: 'home://gone', content: '删掉的' })
+      await ok(
+        send(
+          source,
+          'DELETE',
+          `/v1/spaces/${spaceId}/memories?uri=home%3A%2F%2Fgone`,
+          undefined,
+          cookie,
+        ),
+        204,
+      )
+      const bobs = await memory(
+        { uri: 'bob://old', content: 'bob 过期的日记' },
+        { cookie: bob.cookie },
+      )
+      await expire(bobs.id)
+      // 对象上被推翻的与现在的事实，到期的与没到期的会话摘要
+      await withSpace(database.db, spaceId, async (tx) => {
+        const [ming] = await tx
+          .insert(subjects)
+          .values({ spaceId, kind: 'person', displayName: '小明' })
+          .returning()
+        const extracted = {
+          spaceId,
+          form: 'extracted' as const,
+          sensitivity: 'public' as const,
+          provenance: 'owner' as const,
+        }
+        await tx.insert(memories).values([
+          { ...extracted, layer: 'subject', subjectId: ming!.id, content: '小明在学法语' },
+          { ...extracted, layer: 'subject', subjectId: ming!.id, content: '小明在学日语' },
+          { ...extracted, layer: 'episode', content: '到期的会话摘要', expiresAt: past },
+          {
+            ...extracted,
+            layer: 'episode',
+            content: '没到期的会话摘要',
+            expiresAt: new Date(Date.now() + 86_400_000),
+          },
+        ])
+        await tx.update(memories).set({ validTo: past }).where(eq(memories.content, '小明在学法语'))
+      })
+
+      const file = await exportSpace(source, spaceId, alice.cookie)
+      const parsed = await contents(file)
+      const byContent = new Map(parsed.memories.map((m) => [m.content, m]))
+      expect([...byContent.keys()].sort()).toEqual(
+        [
+          '十月的旅行计划',
+          '过期的共享节点',
+          '现在的个人节点',
+          '小明在学法语',
+          '小明在学日语',
+          '没到期的会话摘要',
+        ].sort(),
+      )
+      expect(byContent.get('十月的旅行计划')!.validTo).toBe(past.toISOString())
+      expect(byContent.get('小明在学法语')!.validTo).toBe(past.toISOString())
+
+      // 导入成新空间：有效期照原样，过期的与被推翻的照样读不到
+      const imported = await ok<SpaceImportResult>(
+        importRequest(source, alice.cookie, file, PASSPHRASE, '搬过来的'),
+        201,
+      )
+      const space = imported.spaceId
+      const rows = await withSpace(database.db, space, (tx) =>
+        tx
+          .select({
+            content: memories.content,
+            validTo: memories.validTo,
+            expiresAt: memories.expiresAt,
+          })
+          .from(memories),
+      )
+      for (const row of rows) {
+        const record = byContent.get(row.content!)!
+        expect(row.validTo?.toISOString() ?? null).toBe(record.validTo)
+        expect(row.expiresAt?.toISOString() ?? null).toBe(record.expiresAt)
+      }
+      const get = <T>(path: string) =>
+        ok<T>(send(source, 'GET', `/v1/spaces/${space}${path}`, undefined, cookie))
+      const byUri = (uri: string) =>
+        send(
+          source,
+          'GET',
+          `/v1/spaces/${space}/memories?uri=${encodeURIComponent(uri)}`,
+          undefined,
+          cookie,
+        )
+      expect((await byUri('home://plan')).status).toBe(404)
+      expect((await ok<MemoryView>(byUri('core://taken'))).content).toBe('现在的个人节点')
+
+      // 已过期的在「已过期」里，能重新生效；共享节点的 URI 被个人节点占着，和原来的空间一样不能重新生效
+      const expiredList = await get<ExpiredMemoryList>('/memories/expired')
+      const expiredOf = (uri: string) => expiredList.items.find((m) => m.uri === uri)!
+      expect(expiredList.items.map((m) => m.uri).sort()).toEqual(['core://taken', 'home://plan'])
+      const reactivate = (item: ExpiredMemoryList['items'][number]) =>
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${space}/memories/reactivate`,
+          { memoryId: item.id, expectedVersion: item.version },
+          cookie,
+        )
+      await ok(reactivate(expiredOf('home://plan')))
+      expect((await ok<MemoryView>(byUri('home://plan'))).content).toBe('十月的旅行计划')
+      expect((await reactivate(expiredOf('core://taken'))).status).toBe(409)
+
+      // 被推翻的事实在对象页上，能重新生效
+      const people = await get<SubjectList>('/subjects')
+      const ming = people.items.find((s) => s.displayName === '小明')!
+      const detail = await get<SubjectDetail>(`/subjects/${ming.id}`)
+      expect(detail.facts.map((f) => f.content)).toEqual(['小明在学日语'])
+      const [superseded] = detail.supersededFacts
+      expect(superseded).toMatchObject({ content: '小明在学法语', supersededBy: null })
+      await ok(
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${space}/subjects/${ming.id}/facts/${superseded!.id}/reactivate`,
+          { version: superseded!.version },
+          cookie,
+        ),
+        204,
+      )
+      const after = await get<SubjectDetail>(`/subjects/${ming.id}`)
+      expect(after.facts.map((f) => f.content).sort()).toEqual(['小明在学日语', '小明在学法语'])
+      expect(after.supersededFacts).toEqual([])
     },
   )
 
@@ -1076,9 +1246,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     })
     await importing(
       [curated('core://agent', { layer: 'base', sensitivity: 'public' }), curated('core://agent')],
-      '既有共享的记忆，又有个人的记忆',
+      '既有有效的共享记忆，又有有效的个人记忆',
     )
     await importing([curated('home://a'), curated('home://a')], '第 3 行记忆 home://a 的 URI 重复')
+    // 同一归属里过期的也算重复（唯一索引不看有效期）
+    await importing(
+      [curated('home://a', { validTo: '2020-01-01T00:00:00.000Z' }), curated('home://a')],
+      '第 3 行记忆 home://a 的 URI 重复',
+    )
     const [a, b] = [randomUUID(), randomUUID()]
     await importing([persona(a, 'a', b), persona(b, 'b', a)], '继承关系成环')
     await importing(
@@ -1114,6 +1289,98 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       '第 2 行 content：含有存不进数据库的字符（NUL 或落单的代理项）',
     )
     expect(await spaceCount()).toBe(before)
+  })
+
+  it('导入前核对 URI 的互斥按数据库的时间：应用的时钟走快了，也不把还有效的共享节点当成过期的', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const before = await spaceCount()
+    // 共享节点一小时后才过期，同一个 URI 上又有个人节点：现在两条都有效，不能一起导入
+    const inAnHour = new Date(Date.now() + 3_600_000).toISOString()
+    const file = await craft([
+      curated('core://clock', { layer: 'base', sensitivity: 'public', validTo: inAnHour }),
+      curated('core://clock'),
+    ])
+    // 应用的时钟快了两小时，数据库的没变：按应用的时间核对，会以为共享节点已经过期
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2 * 3_600_000 })
+    try {
+      for (const request of [inspectRequest, importRequest]) {
+        const res = await request(source, alice.cookie, file)
+        expect(res.status, await res.clone().text()).toBe(400)
+        expect(((await res.json()) as { error: string }).error).toContain(
+          '既有有效的共享记忆，又有有效的个人记忆',
+        )
+      }
+    } finally {
+      vi.useRealTimers()
+    }
+    expect(await spaceCount()).toBe(before)
+  })
+
+  it('导出挑记忆的条件：管理读取之外，去掉已删除的（含过期后让出 URI 的）与到期的会话摘要', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
+    const spaceId = alice.spaceId
+    const persona = await alice.createPersona('helper')
+    const past = new Date(Date.now() - 3_600_000)
+    const future = new Date(Date.now() + 3_600_000)
+    const labels = new Map<string, string>()
+    const insert = async (label: string, values: Partial<typeof memories.$inferInsert>) => {
+      const [row] = await withSpace(database.db, spaceId, (tx) =>
+        tx
+          .insert(memories)
+          .values({
+            spaceId,
+            form: 'curated',
+            layer: 'private',
+            sensitivity: 'private',
+            provenance: 'owner',
+            ownerAccountId: alice.accountId,
+            domain: 'home',
+            path: label,
+            content: label,
+            ...values,
+          })
+          .returning({ id: memories.id }),
+      )
+      labels.set(row!.id, label)
+    }
+    const episode = { form: 'extracted' as const, layer: 'episode' as const, ownerAccountId: null }
+    const noUri = { domain: null, path: null }
+    await insert('live', {})
+    await insert('expired', { validTo: past })
+    await insert('deleted', { deletedAt: past })
+    await insert('released', { validTo: past, deletedAt: new Date() })
+    await insert('shared', { layer: 'base', ownerAccountId: null })
+    await insert('persona', {
+      layer: 'persona',
+      ownerAccountId: null,
+      personaId: persona.id,
+      domain: 'persona',
+      path: 'helper/soul',
+    })
+    await insert('secret', {
+      sensitivity: 'secret',
+      content: null,
+      ciphertext: randomBytes(32),
+      wrappedKey: randomBytes(32),
+    })
+    await insert('bob', { ownerAccountId: bob.accountId })
+    await insert('bob-expired', { ownerAccountId: bob.accountId, validTo: past })
+    await insert('summary', { ...episode, ...noUri, content: '没到期的摘要', expiresAt: future })
+    await insert('summary-stale', {
+      ...episode,
+      ...noUri,
+      content: '被标成过时、还没到期的摘要',
+      expiresAt: future,
+      validTo: past,
+    })
+    await insert('summary-lapsed', { ...episode, ...noUri, content: '到期的摘要', expiresAt: past })
+    const picked = await withSpace(database.db, spaceId, (tx) =>
+      tx.select({ id: memories.id }).from(memories).where(exportableMemories(alice.accountId)),
+    )
+    expect(picked.map((r) => labels.get(r.id)).sort()).toEqual(
+      ['live', 'expired', 'shared', 'persona', 'secret', 'summary', 'summary-stale'].sort(),
+    )
   })
 
   it('写文件里来的值时数据库拒绝（值超出范围、违反约束）算文件的问题，说清是哪几行；派生的出错照常 500，都记日志', async () => {
@@ -1700,6 +1967,36 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     await res.arrayBuffer()
     expect(listeners()).toBe(before)
     await slotFree()
+  })
+
+  it('文件做好之后一直不读、也不断开：空闲到了时限中止响应、放掉名额，记一行日志，下一个导出照常', async () => {
+    const quick = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: sourceKey,
+      embedder: staticEmbedderSource(null),
+      jobs,
+      exportSendLimits: { idleMs: 300, totalMs: 60_000 },
+    })
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const alice = await bootstrap(quick, 'alice')
+      const stalled = await exportRequest(quick, alice.spaceId, alice.cookie)
+      expect(stalled.status).toBe(200)
+      // 响应没人读：名额占着，别人来要排队
+      const probe = acquireTransferSlot('probe')
+      expect(queuedTransfers()).toBe(1)
+      // 到了时限：名额交给排着的那个；没有底层连接可断，让这个响应出错，再也读不出来
+      ;(await within(probe))()
+      await expect(stalled.arrayBuffer()).rejects.toThrow('太久没有进度')
+      expect(warned).toHaveBeenCalledTimes(1)
+      // 下一个导出照常进来；读得及时，时限碍不着它
+      const file = await exportSpace(quick, alice.spaceId, alice.cookie)
+      expect((await contents(file)).header.exporter.displayName).toBe('alice')
+      await slotFree()
+    } finally {
+      warned.mockRestore()
+    }
   })
 
   it(

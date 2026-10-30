@@ -11,7 +11,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memoryEmbeddings, settings } from '../../db/schema'
+import { memories, memoryEmbeddings, settings, spaces } from '../../db/schema'
 import type { Jobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
@@ -19,7 +19,7 @@ import {
   type FakeEmbeddingServer,
 } from '../../testing/fakeEmbeddingServer'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
-import { backfillJob, embedJob, pruneJob, switchJob } from '../jobs'
+import { backfillJob, embedJobs, pruneJob, switchJob, type Retry } from '../jobs'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { settingsEmbedderSource, staticEmbedderSource, type EmbedderSource } from '../source'
 
@@ -45,7 +45,18 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     enqueueDream: async () => null,
     dreamRun: async () => null,
   }
-  const noRetry = () => {}
+  const noRetry = async () => []
+  // 写入之后的向量任务只处理这一条：失败时抛出原因
+  const embedJob = async (
+    db: Database['db'],
+    from: EmbedderSource,
+    spaceId: string,
+    memoryId: string,
+    retry: Retry,
+  ) => {
+    const error = (await embedJobs(db, from, [{ spaceId, memoryId }], retry)).get(0)
+    if (error) throw error
+  }
 
   beforeAll(async () => {
     database = await openTestDatabase()
@@ -252,7 +263,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(sent.size).toBeLessThan(130)
   })
 
-  it('补的时候有被锁着跳过、已经排了重试的，不算补不上', async () => {
+  it('补的时候有被锁着跳过、另排上了新任务的，不算补不上；没排上的不算有进展', async () => {
     await put('', { model: 'm1', channels: [channel('a', 'm1')] })
     const locked = await create('第一条')
     const other = await create('第二条')
@@ -262,10 +273,19 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     const retried: string[][] = []
     await withSpace(database.db, ws.spaceId, async (tx) => {
       await tx.execute(sql`select id from memories where id = ${locked} for update`)
-      expect(await switchJob(database.db, source, (_space, ids) => retried.push(ids))).toBe('again')
+      expect(
+        await switchJob(database.db, source, async (_space, ids) => (retried.push(ids), [])),
+      ).toBe('again')
     })
     expect(retried).toEqual([[locked]])
     expect((await status()).lastError).toBeNull()
+
+    // 另排的新任务没排进去：这一遍什么进展都没有
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx.execute(sql`select id from memories where id = ${locked} for update`)
+      expect(await switchJob(database.db, source, async (_space, ids) => ids)).toBe('stuck')
+    })
+    expect((await status()).lastError?.message).toContain('补了一遍也没补上')
   })
 
   it('一条坏记忆不拦住别的：整批失败时逐条再试，跳过它并记下原因；接口不可用时只多试几条就停', async () => {
@@ -288,6 +308,39 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     server.requests.length = 0
     await expect(backfillJob(database.db, source, noRetry)).rejects.toThrow('HTTP 503')
     expect(server.requests).toHaveLength(4)
+  })
+
+  it('换模型时先补到的那一页只有一条、又恰好超长：只算这一条失败，照常补完别的', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    await put('/next', { model: 'm2', channels: [channel('a', 'm2')] })
+    server.rejectText('超长')
+    // 先补到的空间里只有这一条超长的；另一个空间里是正常的
+    await create('正文超长的一条')
+    const [other] = await database.db.insert(spaces).values({ name: '另一个' }).returning()
+    await withSpace(database.db, other!.id, (tx) =>
+      tx.insert(memories).values(
+        ['a', 'b'].map((path) => ({
+          spaceId: other!.id,
+          form: 'curated' as const,
+          layer: 'base' as const,
+          sensitivity: 'private' as const,
+          provenance: 'owner' as const,
+          domain: 'core',
+          path,
+          content: `另一个空间的 ${path}`,
+        })),
+      ),
+    )
+    // 没整个停下：别的补上了，还差这一条，过一会儿再补
+    expect(await switchJob(database.db, source, noRetry)).toBe('again')
+    const there = await withSpace(database.db, other!.id, (tx) =>
+      tx.select({ model: memoryEmbeddings.model }).from(memoryEmbeddings),
+    )
+    expect(there.map((r) => r.model)).toEqual(['m2', 'm2'])
+    expect((await status()).lastError).toMatchObject({
+      model: 'm2',
+      message: expect.stringContaining('有 1 条记忆生成不了向量'),
+    })
   })
 
   it('写向量时这个模型已经不用了就不写：放弃之后拿着旧设置的任务不会写下新模型的向量', async () => {
@@ -347,7 +400,8 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     await backfillJob(database.db, source, noRetry)
     await put('/next', { model: 'm2', channels: [channel('broken', 'm2')] })
     server.fail('broken', 503)
-    await expect(switchJob(database.db, source, noRetry)).rejects.toThrow('HTTP 503')
+    // 只有两条：不到三条时只算这几条失败，补了一遍一条都没补上
+    expect(await switchJob(database.db, source, noRetry)).toBe('stuck')
     expect(await status()).toMatchObject({
       next: { model: 'm2', embedded: 0 },
       lastError: { model: 'm2', message: expect.stringContaining('HTTP 503') },

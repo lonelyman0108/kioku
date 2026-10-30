@@ -18,7 +18,7 @@ import {
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { dropIneligibleEmbeddings, embedMemory } from '../../embedding/worker'
+import { dropIneligibleEmbeddings, embedMemories } from '../../embedding/worker'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -147,7 +147,7 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
       )
       expect(res.status).toBe(201)
       const { id } = (await res.json()) as { id: string }
-      expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+      expect(await embedMemories(database.db, embedder, ws.spaceId, [id])).toBe(1)
       return id
     }
     const kept = await create('kb://kept')
@@ -190,6 +190,10 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
     }
     // 记忆正被别的事务改着（例如正在重新生效）：不删它刚生成的向量
     expect(await whileLocked(`select 1 from memories where id = '${lapsed}' for update`)).toBe(0)
+    // 向量任务写回时锁着这一行（FOR NO KEY UPDATE）：同样跳过，两边都不等锁
+    expect(
+      await whileLocked(`select 1 from memories where id = '${lapsed}' for no key update`),
+    ).toBe(0)
     // 向量行正被别的事务锁着（例如换模型之后删旧向量）
     expect(
       await whileLocked(`select 1 from memory_embeddings where memory_id = '${lapsed}' for update`),

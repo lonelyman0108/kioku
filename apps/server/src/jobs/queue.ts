@@ -1,13 +1,14 @@
 import type { BackupRunStatus, DreamRunStatus, DreamTrigger } from '@kioku/contracts'
-import { PgBoss } from 'pg-boss'
+import { PgBoss, type JobResult } from 'pg-boss'
 
 import { backupJob } from '../backup/storage'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
 import { masterKeyStatus, recordMasterKeyError, rotateMasterKey } from '../crypto/rotation'
 import type { Db } from '../db/client'
-import { backfillJob, embedJob, pruneJob, switchJob } from '../embedding/jobs'
+import { backfillJob, embedJobs, pruneJob, switchJob, type EmbedTarget } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
+import { EMBED_BATCH } from '../embedding/worker'
 import type { BufferedSession } from '../extraction/buffer'
 import { dreamsDue, dreamSpace, type DreamOutcome } from '../extraction/dream'
 import { processSession } from '../extraction/worker'
@@ -28,8 +29,15 @@ const DREAM_TICK = 'dream-tick'
 const DREAM_CRON = '41 * * * *'
 // 每小时清一次过期的数据（见 cleanupExpired）；保留期的硬删除跟在后面，一天做一次（见 retentionJob）
 const CLEANUP_CRON = '17 * * * *'
-// 写回向量时记忆正被别的事务锁着，隔这么久再试
+// 写回向量时记忆正被别的事务锁着，隔这么久另排一个新任务再试
 const RETRY_AFTER_SECONDS = 10
+// 写入之后的向量任务一批最多处理这么久：嵌入接口卡住时（每个渠道最多等 30 秒），到点还没生成的不再请求、
+// 正在请求的取消，已经拿到的照常写回，剩下的算失败、按任务的重试次数再试（有退避）。
+// 正常时一批（最多 32 个空间、两个模型）几十秒内做完
+const EMBED_BUDGET_MS = 2 * 60_000
+// 向量任务的过期时间，比一批的处理时间长出一截：一批守着时限做完，pg-boss 不会把它当成卡住、
+// 整批算失败再和还没停的那一批同时做
+const EMBED_EXPIRE_SECONDS = 5 * 60
 // 换模型时补了一遍还有缺的（期间新写入的、被锁着跳过的），隔这么久再补一遍
 const SWITCH_AGAIN_SECONDS = 30
 // 换模型补了一遍一条都没补上、或者出了错时不自己再排，由定时任务每十分钟再试一遍：接口恢复了能自己补完，
@@ -82,11 +90,16 @@ export async function startJobs(options: {
   embedder: EmbedderSource
   // 解密实例设置里抽取模型的 Key
   masterKey: MasterKey | null
+  // 写入之后的向量任务一批最多处理多久，不设时 EMBED_BUDGET_MS；测试里调小
+  embedBudgetMs?: number
 }): Promise<Jobs & { stop: () => Promise<void> }> {
   const boss = new PgBoss({ connectionString: options.connectionString, schema: 'pgboss' })
   boss.on('error', (err) => console.error('后台任务出错', err))
   await boss.start()
-  await boss.createQueue(EMBED)
+  // 队列已经存在时建队列不改选项，所以再更新一遍
+  const embedQueue = { expireInSeconds: EMBED_EXPIRE_SECONDS }
+  await boss.createQueue(EMBED, embedQueue)
+  await boss.updateQueue(EMBED, embedQueue)
   await boss.createQueue(BACKFILL, { policy: 'singleton' })
   // singleton：同时只跑一个，排着的可以有几个（定时的、补到一半隔一会儿再排的、管理员重试的），每一遍都可以重复做。
   // 不能用只留一个排队位的策略：先排上的延迟任务会把管理员的重试挤掉
@@ -135,16 +148,41 @@ export async function startJobs(options: {
         },
       )
   const queued = (id: string | null | undefined) => id !== undefined
-  // 写回时被别的事务锁着而跳过的记忆，稍后逐条重试
-  const retry = (spaceId: string, ids: string[]) => {
-    for (const memoryId of ids) void send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)
+  // 写回时被别的事务锁着的记忆另排新任务，稍后逐条再来。等它们排进去，返回没排进去的
+  const retry = async (spaceId: string, ids: string[]): Promise<string[]> => {
+    const sent = await Promise.all(
+      ids.map((memoryId) => send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)),
+    )
+    return ids.filter((_, i) => sent[i] === undefined)
   }
 
-  await boss.work<{ spaceId: string; memoryId: string }>(EMBED, async (jobs) => {
-    for (const { data } of jobs) {
-      await embedJob(options.db, options.embedder, data.spaceId, data.memoryId, retry)
-    }
-  })
+  // 写入之后的向量：一次取一批，同一个空间的合起来请求嵌入接口；一批取满了说明还有积压，马上接着取，不等轮询间隔。
+  // 逐个任务记成功或失败（按下标对回任务）：失败的各自按任务的重试次数再试（retryLimit 5、退避，见 send），
+  // 不连累同一批的别的任务；被锁着跳过的另排一个新任务、过一会儿再来（RETRY_AFTER_SECONDS），原任务算完成。
+  // pg-boss 给每个任务的中止信号（服务停下、任务过期时断开）和处理时间分开传：信号全都断开才算停机，停机时不记也不清错误
+  const embedBudgetMs = options.embedBudgetMs ?? EMBED_BUDGET_MS
+  await boss.work<EmbedTarget>(
+    EMBED,
+    { batchSize: EMBED_BATCH, burstWhenBatchFull: true, perJobResults: true },
+    async (jobs) => {
+      const failed = await embedJobs(
+        options.db,
+        options.embedder,
+        jobs.map((job) => job.data),
+        retry,
+        {
+          budget: AbortSignal.timeout(embedBudgetMs),
+          jobs: jobs.map((job) => job.signal),
+        },
+      )
+      return jobs.map((job, index): JobResult => {
+        const error = failed.get(index)
+        return error
+          ? { id: job.id, status: 'failed', output: error }
+          : { id: job.id, status: 'completed' }
+      })
+    },
+  )
   await boss.work(BACKFILL, async () => {
     const total = await backfillJob(options.db, options.embedder, retry)
     if (total !== null) console.log(`向量补齐完成：更新 ${total} 条`)

@@ -1240,7 +1240,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     await remember({ uri: 'core://b', content: '回答问题时用中文并且先给结论', layer: 'base' })
     await remember({ uri: 'core://c', content: '周五下午交周报', layer: 'base' })
     await remember({ uri: 'core://e', content: '中文', layer: 'base' })
-    await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), () => {})
+    await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])
     const { model, calls } = fakeChatModel(reply([]))
     await dream(model)
     // 只有 a 改过；e 的向量删掉：按向量找时它不在候选里，按全文找时它会命中「中文」

@@ -260,6 +260,15 @@ export function canRead(access: Access, memory: MemoryFacts, options: ReadOption
   return readDenial(access, memory, options) === null
 }
 
+// 有效期过了没有：失效（valid_to：被推翻、到了有效到）或到期（expires_at：会话摘要）的时刻不晚于 now 就算过了，
+// 和 URI 互斥触发器里的条件一样。readDenial 与导入时核对 URI 的互斥都按它判断
+export function lapsed(memory: Pick<MemoryFacts, 'validTo' | 'expiresAt'>, now: Date): boolean {
+  return (
+    (memory.validTo !== null && memory.validTo <= now) ||
+    (memory.expiresAt !== null && memory.expiresAt <= now)
+  )
+}
+
 // 读不到的第一个原因，读得到时为 null。canRead 就是它，召回调试台用它说明一条记忆为什么被过滤掉
 export function readDenial(
   access: Access,
@@ -269,8 +278,7 @@ export function readDenial(
   const now = options.now ?? new Date()
   if (!options.management) {
     if (memory.deletedAt) return 'deleted'
-    if (memory.validTo && memory.validTo <= now) return 'expired'
-    if (memory.expiresAt && memory.expiresAt <= now) return 'expired'
+    if (lapsed(memory, now)) return 'expired'
   }
   if (!access.readLayers.has(memory.layer)) return 'layer'
 
