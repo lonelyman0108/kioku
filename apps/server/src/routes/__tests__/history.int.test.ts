@@ -10,10 +10,12 @@ import type {
 import { eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
+import { canRead, consoleAccess, type Access } from '../../access/access'
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
 import { memories, memoryEvents } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import { snapshotFacts } from '../../memory/filter'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
@@ -525,5 +527,88 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
       await app.request(`${space()}/overview`, { headers: { cookie: ws.cookie } }),
     )
     expect(overview.recent.map((i) => i.type)).toEqual(['update', 'create'])
+  })
+
+  it('活动与历史里每个事件看不看得到、是不是离开，和按 canRead 逐条算出来的一致', async () => {
+    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    // 记忆现在的样子：共享的、共享的 secret、alice 的私人记忆、eve 的私人记忆
+    const memoriesNow = [
+      await create(ws.cookie, { uri: 'kb://shared', content: '共享', layer: 'base' }),
+      await create(ws.cookie, {
+        uri: 'kb://secret',
+        content: '机密',
+        layer: 'base',
+        sensitivity: 'secret',
+      }),
+      await create(ws.cookie, { uri: 'notes://alice', content: 'alice 的' }),
+      await create(editor.cookie, { uri: 'notes://eve', content: 'eve 的' }),
+    ]
+    // 前后快照的几种样子，两两组合（两边都为空的除外），每条记忆各记一个事件
+    const variants: (Record<string, unknown> | null)[] = [
+      null,
+      { layer: 'base', sensitivity: 'internal', ownerAccountId: null },
+      { layer: 'base', sensitivity: 'secret', ownerAccountId: null, content: null },
+      { layer: 'private', sensitivity: 'private', ownerAccountId: ws.accountId },
+      { layer: 'private', sensitivity: 'private', ownerAccountId: editor.accountId },
+    ]
+    for (const m of memoriesNow) {
+      for (const before of variants) {
+        for (const after of variants) {
+          if (!before && !after) continue
+          await insertEvent(
+            m.id,
+            before && (await snapshotOf(m.id, before)),
+            after && (await snapshotOf(m.id, after)),
+          )
+        }
+      }
+    }
+    const { rows, events } = await withSpace(database.db, ws.spaceId, async (tx) => ({
+      rows: await tx.select().from(memories),
+      events: await tx.select().from(memoryEvents),
+    }))
+    const rowById = new Map(rows.map((r) => [r.id, r]))
+    const management = { personaIds: [], management: true } as const
+    // 规则照设计逐条算：两边快照都看得到（为空的一边不参与），活动里还要记忆现在读得到；
+    // 离开是改前看得到、改后看不到，不看记忆现在的状态
+    const expected = (access: Access, list: typeof events, checkMemory: boolean) =>
+      list
+        .flatMap((e) => {
+          const shown = (snapshot: unknown) => {
+            const facts = snapshot ? snapshotFacts(snapshot as Record<string, unknown>) : null
+            return facts !== null && canRead(access, facts, management)
+          }
+          const left = shown(e.before) && e.after !== null && !shown(e.after)
+          const visible =
+            ((!checkMemory || canRead(access, rowById.get(e.memoryId!)!, management)) &&
+              (e.before === null || shown(e.before)) &&
+              (e.after === null || shown(e.after))) ||
+            left
+          return visible ? [[e.id, left] as const] : []
+        })
+        .sort((a, b) => a[0] - b[0])
+    const byId = (list: { id: number; left: boolean }[]) =>
+      list.map((i) => [i.id, i.left] as const).sort((a, b) => a[0] - b[0])
+
+    for (const [cookie, access] of [
+      [ws.cookie, consoleAccess('owner', ws.accountId)],
+      [editor.cookie, consoleAccess('editor', editor.accountId)],
+    ] as const) {
+      const want = expected(access, events, true)
+      // 三种都有：看得到的、离开的、看不到的
+      expect(want.some(([, left]) => left)).toBe(true)
+      expect(want.some(([, left]) => !left)).toBe(true)
+      expect(want.length).toBeLessThan(events.length)
+      expect(byId((await activity(cookie, 'limit=200')).items)).toEqual(want)
+
+      for (const m of memoriesNow) {
+        if (!canRead(access, rowById.get(m.id)!, management)) {
+          expect((await historyRes(cookie, m.id)).status).toBe(404)
+          continue
+        }
+        const own = events.filter((e) => e.memoryId === m.id)
+        expect(byId((await history(cookie, m.id)).events)).toEqual(expected(access, own, false))
+      }
+    }
   })
 })

@@ -2059,18 +2059,30 @@ export class MemoryService {
     return sql`(${snapshot} is not null and coalesce((${this.manageable(snapshotColumns(snapshot))}), false))`
   }
 
-  // 事件的前后快照各按管理读取判断，有一边看不到就整条不显示；为空的一边（新建事件没有「改前」）不参与
-  private visibleEvent(): SQL {
+  // 一个事件对调用方是什么样，三种结果：
+  // - false，照常看得到：前后快照各按管理读取判断，有一边看不到就不算；为空的一边（新建事件没有「改前」）不参与。
+  //   给了 memory 时还要记忆现在满足它（活动流要求记忆现在读得到；历史已经先查过这条记忆，不给）。
+  // - true，「离开」：改前看得到、改后看不到，例如被别的成员改进了他的私人层，或改成了 secret。
+  //   对改前看得到的人保留这条记录，只给改前的版本、时间与操作者，改后的一概不给，也不能拿来恢复：
+  //   否则共享的记忆被人拿走之后，谁拿走的、什么时候拿走的，连空间 owner 都查不到。不看记忆现在的状态：
+  //   离开之后，原来看得到它的人本来就读不到了。
+  // - null，看不到。
+  // 写成一个分支表达式，每个快照最多判断一次：快照里的字段每取一次都要把整个快照解压一次，
+  // 事件多、看得到的少时这是活动流的主要开销。先看记忆，记忆读不到的只可能是离开，先判断改前
+  private eventVisibility(memory?: SQL): SQL<boolean | null> {
     const { before, after } = memoryEvents
-    return sql`((${before} is null or ${this.snapshotShown(before)}) and (${after} is null or ${this.snapshotShown(after)}))`
+    const beforeShown = this.snapshotShown(before)
+    const beforeOk = sql`(${before} is null or ${beforeShown})`
+    const afterOk = sql`(${after} is null or ${this.snapshotShown(after)})`
+    return sql<boolean | null>`(case
+      when ${memory ?? sql`true`} then (case when ${afterOk} then (case when ${beforeOk} then false end) when ${beforeShown} then true end)
+      when ${beforeShown} and not ${afterOk} then true
+    end)`
   }
 
-  // 「离开」：改前看得到、改后看不到，例如被别的成员改进了他的私人层，或改成了 secret。
-  // 对改前看得到的人保留这条记录，只给改前的版本、时间与操作者，改后的一概不给，也不能拿来恢复：
-  // 否则共享的记忆被人拿走之后，谁拿走的、什么时候拿走的，连空间 owner 都查不到
-  private departureEvent(): SQL {
-    const { before, after } = memoryEvents
-    return sql`(${this.snapshotShown(before)} and ${after} is not null and not ${this.snapshotShown(after)})`
+  // 照常看得到的事件，不含离开的（见 eventVisibility）：只能从这些恢复
+  private visibleEvent(): SQL {
+    return sql`(${this.eventVisibility()} is false)`
   }
 
   // 按 id 找一条管理读取读得到的记忆，已删除的也算；读不到和不存在一样是 404。默认只找策展记忆，
@@ -2101,11 +2113,10 @@ export class MemoryService {
     return found
   }
 
-  // 事件连同操作者一起取出：看得到的事件，加上「离开」的事件（left 为 true，见 departureEvent）；
+  // 事件连同操作者一起取出：看得到的事件，加上「离开」的事件（left 为 true），见 eventVisibility；
   // 记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
   // 只给应用主人与空间 owner（管理界面里 admin 就是空间 owner）看，别人只看到应用名。
   // checkMemory 为 true 时普通事件只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断。
-  // 「离开」的事件不看记忆现在的状态：离开之后，原来看得到它的人本来就读不到了。
   // 只列策展记忆的事件：抽取的记忆没有 URI，活动流与历史都按 URI 展示，它们另在对象页里看
   private eventRows(
     tx: Tx,
@@ -2117,7 +2128,10 @@ export class MemoryService {
     const keyVisible = this.ctx.access.admin
       ? sql`true`
       : sql`${apps.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
-    const departure = this.departureEvent()
+    // 过滤与 left 用同一个表达式：过滤时每一行判断一次，left 只在留下的这一页上再算一次。不放进
+    // 横向子查询里算一次再引用：子查询以快照为参数，PostgreSQL 会估算要不要缓存它的结果，
+    // 规划时间多出几毫秒，比 left 省下的还多
+    const visibility = this.eventVisibility(checkMemory ? this.manageable() : undefined)
     return tx
       .select({
         event: memoryEvents,
@@ -2129,20 +2143,14 @@ export class MemoryService {
         accountName: accounts.displayName,
         keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
         appName: apps.name,
-        left: sql<boolean>`${departure}`,
+        left: sql<boolean>`${visibility}`,
       })
       .from(memoryEvents)
       .innerJoin(memories, eq(memories.id, memoryEvents.memoryId))
       .leftJoin(accounts, eq(accounts.id, memoryEvents.actorAccountId))
       .leftJoin(apiKeys, eq(apiKeys.id, memoryEvents.actorKeyId))
       .leftJoin(apps, eq(apps.id, apiKeys.appId))
-      .where(
-        and(
-          where,
-          eq(memories.form, 'curated'),
-          or(and(checkMemory ? this.manageable() : undefined, this.visibleEvent()), departure),
-        ),
-      )
+      .where(and(where, eq(memories.form, 'curated'), sql`${visibility} is not null`))
       .orderBy(...order)
       .limit(limit)
   }
