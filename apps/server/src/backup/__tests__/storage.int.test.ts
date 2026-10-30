@@ -9,7 +9,7 @@ import type {
   BackupTestResult,
   SpaceOverview,
 } from '@kioku/contracts'
-import { inArray, sql } from 'drizzle-orm'
+import { eq, inArray, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
@@ -524,6 +524,33 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       expect(queued).toEqual([])
     },
   )
+
+  it('已经存着的 Access Key ID 里有换行（aws4fetch 把整个请求头写进错误）：报错里都没有它和签名', async () => {
+    await save()
+    // 现在保存时会拒绝，直接改库
+    const [row] = await database.db.select().from(settings).where(eq(settings.key, 'backup'))
+    const value = { ...(row!.value as object), accessKeyId: 'AKIAPASTED\nwith-newline' }
+    await database.db.update(settings).set({ value }).where(eq(settings.key, 'backup'))
+
+    const tested = (await (await send('POST', '/test')).json()) as BackupTestResult
+    expect(tested.ok).toBe(false)
+    const listed = await send('GET', '/objects')
+    expect(listed.status).toBe(502)
+    expect(await backupJob(database.db, masterKey, true)).toBe('failed')
+
+    const errors = [
+      tested.error,
+      ((await listed.json()) as { error: string }).error,
+      (await loadBackupStatus(database.db)).lastError?.message,
+    ]
+    for (const error of errors) {
+      expect(error).toContain('连不上存储')
+      for (const leaked of ['Credential', 'Signature', 'AKIAPASTED', 'with-newline']) {
+        expect(error).not.toContain(leaked)
+      }
+    }
+    expect(s3.requests).toEqual([])
+  })
 
   it('做备份时数据库出错：最近的错误里只有数据库的说明，没有 SQL 与参数', async () => {
     await save()
