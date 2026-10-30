@@ -69,6 +69,69 @@ describe('markdownToHtml', () => {
     expect(html).not.toContain('&amp;copy;')
   })
 
+  describe('自动识别的网址', () => {
+    const link = (href: string, text = href) => `<a href="${href}">${text}</a>`
+    const paragraph = (html: string) => `<p>${html}</p>\n`
+
+    it('后面紧跟全角标点或中日韩文字时，网址到那里为止', () => {
+      expect(markdownToHtml('https://files.example.com，账号 admin')).toBe(
+        paragraph(`${link('https://files.example.com')}，账号 admin`),
+      )
+      for (const mark of '，。；：！？、）」』】”…') {
+        expect(markdownToHtml(`见 https://files.example.com/a${mark}然后`)).toBe(
+          paragraph(`见 ${link('https://files.example.com/a')}${mark}然后`),
+        )
+      }
+      expect(markdownToHtml('网盘https://files.example.com账号')).toBe(
+        paragraph(`网盘${link('https://files.example.com')}账号`),
+      )
+      expect(markdownToHtml('https://example.com/search?q=kioku&lang=zh，然后')).toBe(
+        paragraph(`${link('https://example.com/search?q=kioku&amp;lang=zh')}，然后`),
+      )
+      expect(markdownToHtml('https://example.com/ページ')).toBe(
+        paragraph(`${link('https://example.com/')}ページ`),
+      )
+      expect(markdownToHtml('（https://example.com）')).toBe(
+        paragraph(`（${link('https://example.com')}）`),
+      )
+      expect(markdownToHtml('www.example.com，账号')).toBe(
+        paragraph(`${link('http://www.example.com', 'www.example.com')}，账号`),
+      )
+    })
+
+    it('显式写的链接照原样，网址里的中文也在', () => {
+      const encoded = 'https://files.example.com%EF%BC%8C%E8%B4%A6%E5%8F%B7'
+      expect(markdownToHtml('[网盘](https://files.example.com，账号)')).toBe(
+        paragraph(link(encoded, '网盘')),
+      )
+      expect(markdownToHtml('<https://files.example.com，账号>')).toBe(
+        paragraph(link(encoded, 'https://files.example.com，账号')),
+      )
+    })
+
+    it('英文网址、带括号的网址与邮箱照常', () => {
+      expect(markdownToHtml('see https://example.com/path?q=1.')).toBe(
+        paragraph(`see ${link('https://example.com/path?q=1')}.`),
+      )
+      expect(
+        markdownToHtml('https://en.wikipedia.org/wiki/Foo_(bar) and (https://example.com)'),
+      ).toBe(
+        paragraph(
+          `${link('https://en.wikipedia.org/wiki/Foo_(bar)')} and (${link('https://example.com')})`,
+        ),
+      )
+      expect(markdownToHtml('https://en.wikipedia.org/wiki/Foo_(bar)，然后')).toBe(
+        paragraph(`${link('https://en.wikipedia.org/wiki/Foo_(bar)')}，然后`),
+      )
+      expect(markdownToHtml('(https://example.com)中文')).toBe(
+        paragraph(`(${link('https://example.com')})中文`),
+      )
+      expect(markdownToHtml('联系 foo@example.com，谢谢')).toBe(
+        paragraph(`联系 ${link('mailto:foo@example.com', 'foo@example.com')}，谢谢`),
+      )
+    })
+  })
+
   it('嵌套太深、marked 渲染出错时退回转义后的原文', () => {
     const source = '>'.repeat(2000) + ' <b>x</b>'
     const html = markdownToHtml(source)

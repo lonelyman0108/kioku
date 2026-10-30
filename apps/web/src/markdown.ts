@@ -1,5 +1,5 @@
 import DOMPurify from 'dompurify'
-import { Marked, type Token, type Tokens } from 'marked'
+import { Marked, Tokenizer, type Token, type Tokens } from 'marked'
 
 import { splitByKeywords, type KeywordIndex } from './keywords'
 import { splitPlaceholders } from './placeholders'
@@ -74,6 +74,20 @@ export function rawHtml(html: string): string {
   return html.replace(PLAIN_TAG, '').includes('<') ? escapeHtml(html) : html
 }
 
+// GFM 自动识别的网址一直延伸到空白或 <，正文里紧跟在网址后面的全角标点与中文会被一起链进去
+// （例如「https://files.example.com，账号」）。网址遇到中日韩文字、全角与中文常用的标点就结束；
+// 网址路径里本来就有中文的，要写成显式的链接（[文字](网址) 或 <网址>），这两种不经过这里
+const URL_END =
+  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff00-\uff65\u2014\u2018-\u201f\u2026]/u
+
+// 先按 marked 原来的规则识别；识别出的网址里有上面那些字符时，截到第一个之前再识别一次，
+// 末尾的英文标点与不成对的括号照原来的规则去掉
+function urlBeforeCjk(this: Tokenizer, src: string): Tokens.Link | undefined {
+  const token = Tokenizer.prototype.url.call(this, src)
+  const end = token ? token.raw.search(URL_END) : -1
+  return end < 0 ? token : Tokenizer.prototype.url.call(this, src.slice(0, end))
+}
+
 // 链接里面的图片（例如带链接的徽章）：只留替代文字，没有替代文字时写图片的地址，免得链接里再套一个链接
 const imagesInLinks = new WeakSet<Token>()
 function markImages(tokens: Token[]) {
@@ -85,6 +99,7 @@ function markImages(tokens: Token[]) {
 
 const marked = new Marked({
   gfm: true,
+  tokenizer: { url: urlBeforeCjk },
   walkTokens(token) {
     // 行内出现 <code>、<pre>、<kbd>、<script> 之后，marked 会把后面的文字标成「已经转义」原样输出，
     // 直到对应的结束标签，没有结束标签就一直到正文末尾。这里一律交给渲染器转义，代码块也一样
