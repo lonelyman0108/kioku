@@ -445,6 +445,35 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await rowOf(mine.id)).deletedAt).toBeNull()
     })
 
+    it('写入让出 URI 时，候选行上只有外键检查加的 KEY SHARE 锁（别的表正往它上面挂记录）：不用等它，照常让出', async () => {
+      const old = await ok<MemoryView>(
+        await keyCreate({ uri: 'notes://keyshare', content: '旧的', validTo: inDays(1) }),
+        201,
+      )
+      await expire(old.id)
+      const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
+      let outcome = 'blocked' as Response | 'blocked'
+      try {
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+          // 插入事件、关键词与向量时，外键检查在记忆行上加的就是这把锁
+          await tx`select id from memories where id = ${old.id} for key share`
+          pending = Promise.resolve(keyCreate({ uri: 'notes://keyshare', content: '新的' }))
+          outcome = await Promise.race([
+            pending,
+            new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 3_000)),
+          ])
+        })
+      } finally {
+        await pending?.catch(() => {})
+        await side.end()
+      }
+      expect(outcome).not.toBe('blocked')
+      expect((outcome as Response).status, await (outcome as Response).clone().text()).toBe(201)
+      expect((await rowOf(old.id)).deletedAt).not.toBeNull()
+    })
+
     it('重新生效时，候选行上只有外键检查加的 KEY SHARE 锁（别的表正往它上面挂记录）不算正在改：照常让出', async () => {
       // 同一个 URI、同一归属先后两条：旧的过期之后被新的让出，新的也过期了。旧的重新生效要先让出新的那条，
       // 不然撞上唯一索引

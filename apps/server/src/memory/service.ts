@@ -398,8 +398,9 @@ export class MemoryService {
   // 否则同一归属下谁都看不见它，却会一直撞上唯一索引。让出的记录删除时间不早于过期时间（见 isReleased）。
   // reviving 是让过期的记录重新生效：它自己也是这个 URI 上过期的记录，不能被让出（except）；它在这之前已经锁住了，
   // 再等别的候选行的锁，会和按 id 顺序加锁的另一次写入互相等成死锁，所以被锁着的候选跳过，
-  // 没让出的照样由唯一索引与触发器判断。跳过时用 FOR NO KEY UPDATE（让出只改非键列）：别的表插入指向候选行的记录
-  // （事件、关键词、向量）时外键检查加的 KEY SHARE 锁和它不冲突，不会被当成正在改而跳过；等锁时用哪种只差在多等一会儿
+  // 没让出的照样由唯一索引与触发器判断。两种都用 FOR NO KEY UPDATE（让出只改 deleted_at 与 updated_at，不改键列）：
+  // 别的表插入指向候选行的记录（事件、关键词、向量）时外键检查加的 KEY SHARE 锁和它不冲突，跳过时不会被当成正在改，
+  // 等锁时也不用等它
   private async claimUri(
     tx: Tx,
     parsed: ParsedUri,
@@ -431,7 +432,7 @@ export class MemoryService {
       .orderBy(asc(memories.id))
     const rows = reviving
       ? await candidates.for('no key update', { skipLocked: true })
-      : await candidates.for('update')
+      : await candidates.for('no key update')
     for (const row of rows) {
       // 能让出的：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
       // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
