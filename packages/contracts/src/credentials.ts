@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { DeletionRetention, EventActor } from './console'
+import { BenchMark, DeletionRetention, EventActor } from './console'
 import { Sensitivity } from './memory'
 
 // 凭据的标识与字段名。记忆正文里用 {{cred:<标识>}} 引用整条凭据，{{cred:<标识>#<字段>}} 引用其中一个字段
@@ -281,6 +281,8 @@ export const CredentialEvent = z.object({
   fields: z.array(z.string()),
   // 修改了哪些部分：name、description、source、location、fields、values、appIds
   changes: z.array(z.string()),
+  // 测试台写下的：真实客户端写的为 null
+  bench: BenchMark.nullable(),
 })
 export type CredentialEvent = z.infer<typeof CredentialEvent>
 

@@ -22,7 +22,7 @@ import {
 } from '../recall/recall'
 import { readableConditions } from './filter'
 import { runInSpace } from './personas'
-import { MemoryError, MemoryService } from './service'
+import { MemoryError, MemoryService, type MemoryContext } from './service'
 
 // 管理界面的搜索等嵌入接口最多这么久，超时就只走全文与关键词，界面不必一直等
 const CONSOLE_SEMANTIC_TIMEOUT_MS = 2_000
@@ -121,10 +121,12 @@ export async function consoleMemberFor(
   return { role, service: await memoryServiceForConsole(deps, spaceId, accountId, role) }
 }
 
+// options 给测试台：打码与事件的标记
 export function memoryServiceForKey(
   deps: Deps,
   key: KeyPrincipal,
   session: KeySession = defaultSession(key),
+  options: Pick<MemoryContext, 'maskSecret' | 'eventContext'> = {},
 ): MemoryService {
   return new MemoryService({
     db: deps.db,
@@ -134,6 +136,7 @@ export function memoryServiceForKey(
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
+    ...options,
   })
 }
 

@@ -4,6 +4,7 @@ import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contra
 import type {
   ActivityItem,
   ActivityList,
+  BenchMark,
   CreateMemoryRequest,
   DeletedMemoryList,
   DomainSummary,
@@ -153,6 +154,12 @@ export interface MemoryContext {
   // 树、列表与快速匹配里是否列出 secret 记忆（只有元数据，正文仍要按 URI 显式读）。
   // 只给管理界面里能显式读 secret 的成员；接入方的 Key 不列：secret 只能按 URI 显式读取
   listSecret?: boolean
+  // 测试台：结果里不给 secret 的正文（内容在 toView 里给 null，内部改写照常用 contentOf 取原文）。
+  // 也不接受把 secret 改成别的敏感级、改它的正文：读不到原文就不可能正确改写，
+  // 模型读到占位文字再写回，新正文就是占位文字，而 secret 的历史不存正文，找不回来
+  maskSecret?: boolean
+  // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
+  eventContext?: Record<string, unknown>
 }
 
 // 概览要的统计：成员读得到的策展记忆按层与敏感级计数，以及向量覆盖率
@@ -194,6 +201,9 @@ const PLACEHOLDER_SCOPE =
   '含凭据占位符的记忆只能在私人层、敏感级至少 private；改层、降级或移出私人层之前，先去掉正文里的 {{cred:…}} 引用'
 const PLAINTEXT_DOWNGRADE =
   '正文像有明文密码或 Token，从 secret 降级之后会进历史、全文检索和向量，再也收不回来；先把值换成凭据占位符再降级'
+// 打码时拒绝的两种写入（见 MemoryContext.maskSecret）
+const MASKED_DOWNGRADE = '测试台不能把 secret 改成别的敏感级：要改去记忆页'
+const MASKED_CONTENT = '测试台读不到 secret 的原文，不能改它的正文：要改去记忆页'
 
 // 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
 interface RefBaseline {
@@ -632,7 +642,7 @@ export class MemoryService {
       sensitivity: row.sensitivity,
       provenance: row.provenance,
       originScope: row.originScope,
-      content: this.contentOf(row),
+      content: this.ctx.maskSecret && row.sensitivity === 'secret' ? null : this.contentOf(row),
       priority: row.priority,
       disclosure: row.disclosure,
       glossary,
@@ -677,7 +687,7 @@ export class MemoryService {
         provenance: this.ctx.access.writeProvenance,
         before: e.before ?? null,
         after: e.after ?? null,
-        context: e.context ?? {},
+        context: { ...this.ctx.eventContext, ...e.context },
       })),
     )
   }
@@ -741,9 +751,12 @@ export class MemoryService {
   ): Promise<void> {
     const { refs, malformed } = scanPlaceholders(final.content)
     if (malformed.length) {
+      // 打码时 secret 的正文不给出，报错也不带原文的片段
+      const fragment =
+        this.ctx.maskSecret && final.sensitivity === 'secret' ? '' : `：${malformed[0]}`
       throw new MemoryError(
         400,
-        `凭据占位符格式不对：${malformed[0]}。写法是 {{cred:<标识>}} 或 {{cred:<标识>#<字段>}}，标识与字段名只用小写字母、数字、_ 和 -；要在正文里写到这种写法时，去掉花括号`,
+        `凭据占位符格式不对${fragment}。写法是 {{cred:<标识>}} 或 {{cred:<标识>#<字段>}}，标识与字段名只用小写字母、数字、_ 和 -；要在正文里写到这种写法时，去掉花括号`,
       )
     }
     if (!refs.length) return
@@ -1069,6 +1082,10 @@ export class MemoryService {
       )
     }
     this.assertModifiable(before, `没有权限改 ${before.layer} 层的记忆`)
+    if (this.ctx.maskSecret && before.sensitivity === 'secret') {
+      if (sensitivity !== 'secret') throw new MemoryError(403, MASKED_DOWNGRADE)
+      if (input.content !== undefined) throw new MemoryError(403, MASKED_CONTENT)
+    }
     // 有效期：不给就不动，null 清掉（一直有效），给了就要比现在晚至少一分钟（见 checkValidTo）。
     // 和现在存的一样时不算改动、也不检查：读到整条记忆再原样送回来（MCP 与 SDK 常这样做）时，
     // 不能在它的最后一分钟里因为「至少晚一分钟」被拒。只在要改时写这一列：URI 互斥的触发器在有效期变化时也检查
@@ -2368,6 +2385,10 @@ export class MemoryService {
         query.limit + 1,
       )
       const page = rows.slice(0, query.limit)
+      const benchMark = await benchMarkReader(
+        tx,
+        page.map((r) => r.event.context),
+      )
       return {
         items: page.map((r): ActivityItem => ({
           id: r.event.id,
@@ -2384,6 +2405,7 @@ export class MemoryService {
           // 离开了可见范围的，不透露它在别人那里现在是什么状态
           deleted: !r.left && r.memoryDeleted,
           expired: !r.left && r.memoryExpired,
+          bench: benchMark(r.event.context),
         })),
         nextCursor:
           rows.length > query.limit && page.length
@@ -2694,6 +2716,35 @@ function actorOf(r: {
   appName: string | null
 }): EventActor {
   return { accountName: r.accountName, keyName: r.keyName, appName: r.appName }
+}
+
+// 事件 context 里测试台的标记：操作的账号 id 与这次运行。存 id、读的时候才换成名字：账号删掉之后不留下名字
+function benchMarkOf(context: unknown): { account: string; run: string } | null {
+  const mark = (context as { bench?: { account?: unknown; run?: unknown } } | null)?.bench
+  return typeof mark?.account === 'string' &&
+    UUID.test(mark.account) &&
+    typeof mark.run === 'string'
+    ? { account: mark.account, run: mark.run }
+    : null
+}
+
+// 给界面看的标记：一批事件的账号一次查出名字（活动与凭据的访问记录共用）
+export async function benchMarkReader(
+  tx: Tx,
+  contexts: readonly unknown[],
+): Promise<(context: unknown) => BenchMark | null> {
+  const ids = [...new Set(contexts.flatMap((c) => benchMarkOf(c)?.account ?? []))]
+  const rows = ids.length
+    ? await tx
+        .select({ id: accounts.id, name: accounts.displayName })
+        .from(accounts)
+        .where(inArray(accounts.id, ids))
+    : []
+  const names = new Map(rows.map((r) => [r.id, r.name]))
+  return (context) => {
+    const mark = benchMarkOf(context)
+    return mark && { accountName: names.get(mark.account) ?? null, run: mark.run }
+  }
 }
 
 function stringList(value: unknown): string[] {
