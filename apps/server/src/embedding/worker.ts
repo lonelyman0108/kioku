@@ -61,8 +61,8 @@ async function embedBatch(
   return vectors
 }
 
-// 为一批记忆生成或刷新这个模型的向量；不该有向量的（EMBEDDABLE 之外的：已删除、过期、secret、没有正文）
-// 删掉向量。嵌入文本没变就跳过。
+// 为一批记忆生成或刷新这个模型的向量；不该有向量的（EMBEDDABLE 之外的：已删除、过期、secret、没有正文，
+// 以及抽取的记忆：召回与 Dream 都不用它们的向量）删掉向量。嵌入文本没变就跳过。
 // 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
 // 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 xmin，期间被改过的不写回，
 // 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态（例如刚改成 secret 的记忆又被写上明文向量）。
@@ -250,6 +250,49 @@ export async function pruneEmbeddings(db: Db, keep: string[]): Promise<number> {
         .returning({ id: memoryEmbeddings.memoryId }),
     )
     total += removed.length
+  }
+  return total
+}
+
+// 清理时一批最多看这么多条记忆，每批一个短事务
+const DROP_BATCH = 500
+
+// 不该有向量（EMBEDDABLE 之外）却还留着向量的记忆，删掉它们的向量。按时间过期的记忆没有写入，不会触发向量任务，
+// 由每小时的清理来删；删除、改成 secret 时没处理到的也一起清掉。逐个空间分批，每批一个短事务。
+// 先锁住这些记忆、在锁到的那一版上判断：正被别的事务改着的（例如正在重新生效）这次跳过，下一个小时再看，
+// 不会把它刚生成的向量删掉。返回删了几条向量
+export async function dropIneligibleEmbeddings(db: Db): Promise<number> {
+  let total = 0
+  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
+    for (;;) {
+      const { picked, removed } = await withSpace(db, spaceId, async (tx) => {
+        const rows = await tx
+          .select({ id: memories.id })
+          .from(memories)
+          .where(
+            and(
+              sql`not coalesce(${EMBEDDABLE}, false)`,
+              sql`exists (select 1 from ${memoryEmbeddings} where ${memoryEmbeddings.memoryId} = ${memories.id})`,
+            ),
+          )
+          .orderBy(asc(memories.id))
+          .limit(DROP_BATCH)
+          .for('no key update', { skipLocked: true })
+        if (!rows.length) return { picked: 0, removed: 0 }
+        const gone = await tx
+          .delete(memoryEmbeddings)
+          .where(
+            inArray(
+              memoryEmbeddings.memoryId,
+              rows.map((r) => r.id),
+            ),
+          )
+          .returning({ id: memoryEmbeddings.memoryId })
+        return { picked: rows.length, removed: gone.length }
+      })
+      total += removed
+      if (picked < DROP_BATCH) break
+    }
   }
   return total
 }

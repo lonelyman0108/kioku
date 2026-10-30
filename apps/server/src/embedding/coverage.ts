@@ -6,9 +6,10 @@ import { memories, memoryEmbeddings, spaces } from '../db/schema'
 import { STILL_VALID } from '../memory/filter'
 
 // 应当有向量的记忆：现在有效（没删除、没过期、没被推翻）、不是 secret、有正文（空字符串不算）的策展记忆。
-// 生成向量的后台任务（写入之后、补齐、换模型）只给这些生成，别的有向量就删掉；实例设置的向量卡片、
-// 换模型补没补齐与概览的覆盖率都按它数，几处的口径一致。过期的不再召回、不进 boot，Dream 也不看，
-// 所以不生成；重新生效、撤销删除之后会重新排队生成
+// 规则只在这里：生成向量的后台任务（写入之后、补齐、换模型）只给这些生成，处理到的别的记忆有向量就删掉；
+// 按时间过期的没有写入、不会触发向量任务，它们的向量由每小时的清理删掉（dropIneligibleEmbeddings）。
+// 实例设置的向量卡片、换模型时判断补没补齐与概览的覆盖率都按它数。过期的不再召回、不进 boot，Dream 也不看，
+// 所以不生成；重新生效、撤销删除之后重新排队生成。抽取的记忆不生成向量（召回与 Dream 都不用）
 export const EMBEDDABLE = and(
   eq(memories.form, 'curated'),
   isNull(memories.deletedAt),
