@@ -5,7 +5,6 @@ import { BENCH_GROUP_CONTEXT, runUri } from './shared'
 
 const PROBE = runUri('probe')
 const PROBE_SECRET = runUri('probe-secret')
-const GROUP_LABEL = '（会话上下文只作用于生命周期事件与 /recall，工具调用不带，真实的 MCP 也不带）'
 
 const tool = (label: string, name: string, args: Record<string, unknown> = {}) =>
   ({ kind: 'tool', label, tool: name, arguments: args }) satisfies z.input<typeof BenchStep>
@@ -16,7 +15,7 @@ export const permissionProbe: BenchScenarioInput = {
   id: 'permission-probe',
   title: '权限探测',
   description:
-    '列出这把 Key 不带上下文、带群聊与定时任务上下文时读写的结果，不判通过与失败。写的那几步只写私人层，最后删掉。',
+    '列出这把 Key 不带上下文、带群聊与定时任务上下文时读写的结果，不判通过与失败。会话上下文只作用于生命周期事件与 /recall，工具调用不带，真实的 MCP 也不带。写的那几步只写私人层，最后删掉。',
   probe: true,
   steps: [
     { kind: 'whoami', label: 'Key 的上限' },
@@ -29,12 +28,12 @@ export const permissionProbe: BenchScenarioInput = {
     { kind: 'recall', label: '不带上下文的召回', body: { query: '测试台的权限探测' } },
     {
       kind: 'recall',
-      label: `群聊上下文的召回${GROUP_LABEL}`,
+      label: '群聊上下文的召回',
       body: { query: '测试台的权限探测', context: BENCH_GROUP_CONTEXT },
     },
     {
       kind: 'lifecycle',
-      label: `群聊上下文的每轮输入${GROUP_LABEL}`,
+      label: '群聊上下文的每轮输入',
       body: {
         event: 'prompt.submit',
         prompt: '测试台的权限探测',
