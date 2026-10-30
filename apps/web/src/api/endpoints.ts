@@ -39,6 +39,8 @@ import {
   HealthResponse,
   KeyAccessMatrix,
   KeyInfo,
+  LoreImportPlan,
+  LoreImportResult,
   Me,
   MemberInfo,
   MemoryChildren,
@@ -72,6 +74,8 @@ import {
   type CreateMemoryRequest,
   type CreatePersonaRequest,
   type GroupPersonaRules,
+  type LoreImportApplyRequest,
+  type LoreImportPlanRequest,
   type MemoryListQuery,
   type MoveMemoryRequest,
   type PlainLayer,
@@ -361,6 +365,10 @@ export const api = {
     if (name.trim()) form.set('name', name.trim())
     return request('POST', '/spaces/import', { body: form, schema: SpaceImportResult })
   },
+  lorePlan: (spaceId: string, body: LoreImportPlanRequest) =>
+    request('POST', `/spaces/${spaceId}/lore-import/plan`, { body, schema: LoreImportPlan }),
+  loreApply: (spaceId: string, body: LoreImportApplyRequest) =>
+    request('POST', `/spaces/${spaceId}/lore-import/apply`, { body, schema: LoreImportResult }),
 
   embeddingSettings: () => request('GET', '/settings/embedding', { schema: EmbeddingSettingsView }),
   saveEmbeddingSettings: (body: UpdateEmbeddingSettings) =>
