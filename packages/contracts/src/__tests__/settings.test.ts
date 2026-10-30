@@ -54,10 +54,20 @@ describe.each([
     ['NUL', 'sk\u0000abc'],
     ['DEL', 'sk\u007fabc'],
     ['0x85 这种不常见的控制字符', 'sk\u0085abc'],
-  ])('中间有控制字符（%s）：拒绝，用中文说明，不带填的内容', (_, value) => {
+    ['零宽空格', 'sk\u200babc'],
+    ['零宽空格在结尾，去掉空白也去不掉', 'sk-abc\u200b'],
+    ['BOM 在中间', 'sk\ufeffabc'],
+    ['不换行空格在中间', 'sk\u00a0abc'],
+    ['全角字母', 'sk-ａｂｃ'],
+    ['汉字', 'sk-密钥'],
+    ['带音标的字母', 'sk-abcé'],
+    ['表情', 'sk-😀'],
+  ])('有可打印 ASCII 之外的字符（%s）：拒绝，用中文说明，不带填的内容', (_, value) => {
     const result = parse(value)
     expect(result.success).toBe(false)
-    expect(result.message).toBe(`${name} 里不能有换行等控制字符，检查粘贴的内容`)
+    expect(result.message).toBe(
+      `${name} 只能有英文字母、数字和半角符号，检查粘贴的内容里有没有换行、零宽字符或全角符号`,
+    )
   })
 
   it.each(['', ' ', ' \n\t'])('只有空白：拒绝，不当成沿用已保存的：%j', (value) => {
@@ -66,6 +76,8 @@ describe.each([
 
   it('别的字符不动：中间的空格、标点', () => {
     expect(parse('sk-a b/c+d="e"')).toEqual({ success: true, value: 'sk-a b/c+d="e"' })
+    // 可打印 ASCII 的两头：空格（去掉首尾的空白之后还在中间）和 ~
+    expect(parse('!x y~')).toEqual({ success: true, value: '!x y~' })
   })
 
   it('不填表示沿用', () => {
@@ -80,7 +92,7 @@ describe('Key 与 Secret 的差别', () => {
     expect(backup(null).success).toBe(false)
   })
 
-  it('Access Key ID 和 Secret 一样：去掉首尾空白，中间有控制字符时拒绝', () => {
+  it('Access Key ID 和 Secret 一样：去掉首尾空白，有可打印 ASCII 之外的字符时拒绝', () => {
     const accessKeyId = (value: string) =>
       outcome(
         UpdateBackupSettings.safeParse({
@@ -94,6 +106,7 @@ describe('Key 与 Secret 的差别', () => {
       )
     expect(accessKeyId('AKIA123\n')).toEqual({ success: true, value: 'AKIA123' })
     expect(accessKeyId('AKIA\n123').success).toBe(false)
+    expect(accessKeyId('AKIA\u200b123').success).toBe(false)
     expect(accessKeyId('   ').success).toBe(false)
   })
 

@@ -239,7 +239,7 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
     const inner = await put('sk-new\nkey')
     expect(inner.status).toBe(400)
     const { error } = (await inner.json()) as { error: string }
-    expect(error).toContain('不能有换行等控制字符')
+    expect(error).toContain('只能有英文字母、数字和半角符号')
     expect(error).not.toContain('sk-new')
     expect(await stored()).toBe('sk-extract')
 

@@ -434,7 +434,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     const res = await send('PUT', '', settingsInput({ secretAccessKey: 'other\nsecret' }))
     expect(res.status).toBe(400)
     const { error } = (await res.json()) as { error: string }
-    expect(error).toContain('Secret Access Key 里不能有换行等控制字符')
+    expect(error).toContain('Secret Access Key 只能有英文字母、数字和半角符号')
     expect(error).not.toContain('other')
     expect(await stored()).toBe('backup-secret')
   })

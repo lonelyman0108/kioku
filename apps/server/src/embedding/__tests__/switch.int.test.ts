@@ -635,7 +635,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       })
       expect(res.status).toBe(400)
       const { error } = (await res.json()) as { error: string }
-      expect(error).toContain('不能有换行等控制字符')
+      expect(error).toContain('只能有英文字母、数字和半角符号')
       expect(error).not.toContain('sk-new')
     }
     expect(await stored()).toBe('sk-chan')
