@@ -351,10 +351,12 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         },
       )
       const before = await counts()
-      const plan = await planOf(await fileSource())
+      const source = await fileSource()
+      const plan = await planOf(source)
       expect(await counts()).toEqual(before)
 
-      const text = JSON.stringify(plan)
+      // 看原始的响应：解析时会丢掉契约里没有的字段
+      const text = await (await post('plan', { source })).text()
       for (const body of ['工作流约束的正文', '存储服务器的正文', '旧版本的正文', 'hunter2']) {
         expect(text).not.toContain(body)
       }
@@ -645,9 +647,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           .map((i) => i.uri)
           .sort(),
       ).toEqual(['infra://nas', 'infra://router/credentials'])
-      // 计划里只有要改什么，新正文不在里面
+      // 计划里只有要改什么，新正文不在里面。看原始的响应：解析时会丢掉契约里没有的字段
+      const raw = await (await post('plan', { source: newer })).text()
       for (const body of ['Lore 里改过的正文', 'hunter3']) {
-        expect(JSON.stringify(plan)).not.toContain(body)
+        expect(raw).not.toContain(body)
       }
       const result = await applyOf(newer, plan)
       expect(result.sync.updated.sort()).toEqual(['infra://nas', 'infra://router/credentials'])
@@ -777,12 +780,15 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect(await contentOf('infra://nas')).toBe('新的正文')
       })
 
-      it('没有要写的就不算旧：旧文件和现在完全相同时不用确认', async () => {
+      it('没有要写的就不算旧：不用确认，数据时间照样给出来', async () => {
         const old = await fileSource(EARLIER)
         await importAll(old)
+        await seed('infra://later', '旧文件之后才有的节点')
         await importAll(await fileSource(LATER))
         const plan = await planOf(old)
+        expect(plan.dataTime).toBe(LATER)
         expect(plan.staleSince).toBeNull()
+        expect(plan.sync.goneFromLore).toEqual(['infra://later'])
         await applyOf(old, plan)
       })
 
