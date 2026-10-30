@@ -67,4 +67,11 @@
 
 ## 对照检查
 
-导入后用应用的 Key 请求 `GET /v1/boot`，Claude Code 应用应当得到与 Lore 启动时相同的四个节点：`core://agent`、`persona://default/soul`、`app://<应用>/agent`、`preferences://user`。没有配置嵌入模型时召回只走全文与关键词两路，在「实例设置」里配好嵌入接口后会补齐向量。
+导入后在管理界面的「测试台」里选 Claude Code 应用的 Key，发一次 `session.start`（默认回滚，不留痕迹）：
+
+- 节点列表里应当有与 Lore 启动时相同的四个节点：`core://agent`、`persona://default/soul`、`app://<应用>/agent`、`preferences://user`。
+- 正文里不应当有「未展开的启动节点」，结果里「没展开的节点」也应当是空的。
+
+不要用 `GET /v1/boot` 看：它的字数预算是 16000 字，而 Claude Code 的钩子只有约 7000 字（宿主上限减去指引与预留）。四个节点加起来超过这个数时，`/boot` 显示齐全，真实会话里排在后面的只剩一行 URI。
+
+再用调用台发几句 `prompt.submit`，试试 `kioku_search`、`kioku_get`，看召回的是不是想要的；配了抽取模型的话，「模型对话」能用真实模型跑一段，看它会不会按指引调工具。没有配置嵌入模型时召回只走全文与关键词两路，在「实例设置」里配好嵌入接口后会补齐向量。

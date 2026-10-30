@@ -49,7 +49,14 @@ docker compose -f docker-compose.example.yml up -d --build
 - MCP：`http://<主机>:18920/v1/mcp`（Streamable HTTP，`Authorization: Bearer <Key>`）
 - 生命周期钩子：`POST /v1/lifecycle/event`；其他接口见 `/v1/openapi.json`
 
-**HTTPS 与反向代理**：对外提供服务时在前面加 HTTPS 反向代理，`KIOKU_COOKIE_SECURE` 保持 `true`，`KIOKU_TRUSTED_PROXIES` 设为代理层数（一层就是 `1`），登录限流才能拿到真实的客户端地址。同时在 `.env` 里设 `KIOKU_BIND=127.0.0.1`，端口只给本机的代理访问：否则别人可以绕过代理直连，自己填 `X-Forwarded-For`。是否发 HSTS 由代理决定，服务本身不发。
+**HTTPS 与反向代理**：对外提供服务时在前面加 HTTPS 反向代理，`KIOKU_COOKIE_SECURE` 保持 `true`，`KIOKU_TRUSTED_PROXIES` 设为代理层数（一层就是 `1`），登录限流才能拿到真实的客户端地址。同时在 `.env` 里设 `KIOKU_BIND=127.0.0.1`，端口只给本机的代理访问：否则别人可以绕过代理直连，自己填 `X-Forwarded-For`。是否发 HSTS 由代理决定，服务本身不发。测试台的模型对话一次请求可能要一两分钟（服务端的时限是 120 秒），代理的读超时要大于它，否则界面上看到的是 504。
+
+**测试台**：管理界面的「测试台」不接任何客户端，按一把 Key 模拟接入方：调工具、发生命周期事件（可选私聊、群聊上下文）、回放场景与断言，配了抽取模型时还能接真实模型跑一段对话，看它会不会按指引调工具。默认放进事务、结束时回滚，并列出真执行会改什么；切到真实执行要确认。只给应用主人，模型对话还要实例管理员。同一份场景也能用真实 HTTP 与真实 Key 跑（这是真实调用，写操作要加 `--allow-writes`，会记召回事件）：
+
+```bash
+docker compose -f docker-compose.example.yml exec -e KIOKU_BENCH_KEY=<Key> kioku \
+  node server/dist/bench.mjs --url http://localhost:18920
+```
 
 **备份**：在「实例设置 → 备份」里配一个 S3 兼容的对象存储（MinIO、Cloudflare R2、Backblaze B2 等），每天定时把整个实例加密备份上去、只留最近几份；没做成时实例设置和概览里都会提示原因。也可以用命令把整个实例导出成一个加密的文件，服务运行时也可以做。文件用主密钥派生的密钥加密，`KIOKU_MASTER_KEY` 另外保存（丢了它，备份和 secret 级记忆都解不开）。备份里没有会话与登录计数、对话缓冲和向量，其余全在。备份文件不要放在仓库目录里，构建镜像时会被带进构建上下文。
 
