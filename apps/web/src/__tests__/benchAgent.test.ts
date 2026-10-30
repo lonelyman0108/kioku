@@ -47,7 +47,7 @@ import {
   type AgentIO,
 } from '../benchAgent'
 import { plaintextIn } from '../benchScenarios'
-import type { RunOutcome } from '../benchSession'
+import { NOT_API_FAILURE, type RunOutcome } from '../benchSession'
 
 const USER_TEXT = '记下我喜欢喝茶'
 const SESSION_TEXT = '<启动上下文>'
@@ -1116,6 +1116,52 @@ describe('请求模型失败', () => {
       'user',
     ])
     expect(next.runs).toEqual([])
+  })
+
+  describe('4xx 是确定性的：只显示服务端的文字，不说可以再发', () => {
+    const TOO_LONG = 'messages：对话太长，清空之后再试'
+
+    it.each([
+      [400, TOO_LONG, TOO_LONG],
+      [400, 'model：模型名太长，最多 128 个字符', 'model：模型名太长，最多 128 个字符'],
+      [400, '还没有配模型', '还没有配模型'],
+      [403, '只有实例管理员能用模型代理', '只有实例管理员能用模型代理'],
+      [404, '没有这把 Key', '没有这把 Key'],
+      [413, '对话太长，清空之后再试', '对话太长，清空之后再试'],
+      // 反向代理拦下的：没有服务端的那句话，也要提示清空
+      [413, '请求失败：HTTP 413', '对话太长，清空之后再试'],
+    ])('HTTP %i「%s」：一轮都没回复时', async (status, message, notice) => {
+      const h = harness({ turns: [new ApiError(status, message)] })
+      const done = await h.send(USER_TEXT)
+      expect(last(done).end).toBe('modelFailed')
+      expect(last(done).notice).toBe(notice)
+      // 文字还是放回输入框：清空之后还要用
+      expect(last(done).inHistory).toBe(false)
+    })
+
+    it('调过工具之后才 4xx：做过的留着，同样只有服务端的文字', async () => {
+      const h = harness({
+        loop: 'tools',
+        turns: [reply(null, [toolCall('c1', 'kioku_list')]), new ApiError(400, TOO_LONG)],
+      })
+      const done = await h.send(USER_TEXT)
+      expect(last(done).notice).toBe(TOO_LONG)
+      expect(last(done).inHistory).toBe(true)
+      expect(done.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
+    })
+  })
+
+  it.each([
+    ['500', new ApiError(500, '服务内部错误'), '服务内部错误。可以再发一次。'],
+    ['502', new ApiError(502, '上游挂了'), '上游挂了。可以再发一次。'],
+    [
+      '网络错误',
+      new TypeError('Failed to fetch'),
+      `请求模型失败：${NOT_API_FAILURE}。可以再发一次。`,
+    ],
+  ] as [string, Error, string][])('%s 可能是暂时的：可以再发一次', async (_name, err, notice) => {
+    const h = harness({ loop: 'tools', turns: [err] })
+    expect(last(await h.send(USER_TEXT)).notice).toBe(notice)
   })
 
   it('错误的说明：502 显示上游原文，504 提示反向代理的读超时要大于 120 秒', () => {

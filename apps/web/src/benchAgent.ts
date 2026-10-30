@@ -340,14 +340,19 @@ export function turnEndRefusal(
 }
 
 // 请求模型失败的说明。502 带的是上游的错误原文（截断过，不带 API Key），只给实例管理员看。
-// 504 是模型的时限之外的超时，多半是前面的反向代理等不及了
+// 504 是模型的时限之外的超时，多半是前面的反向代理等不及了。413 不一定是服务端拦的：反向代理拦下时没有服务端的那句话
 export function turnFailureMessage(err: unknown): string {
   if (!(err instanceof ApiError)) return `请求模型失败：${NOT_API_FAILURE}`
   if (err.status === 504) {
     return '请求模型超时（HTTP 504）：可能是反向代理等不及了。模型一次可能要一两分钟，反向代理的读超时要大于 120 秒。'
   }
+  if (err.status === 413) return '对话太长，清空之后再试'
   return err.message
 }
+
+// 4xx 是确定性的（对话太长、模型名不合法、没有权限）：再发一次还是一样，prompt.submit 还要再跑一遍，
+// 所以只给服务端的文字，不说可以再发。5xx 与网络错误才可能是暂时的
+const turnRetryable = (err: unknown) => !(err instanceof ApiError && err.status < 500)
 
 const RETRY = '可以再发一次。'
 const KEPT_IN_HISTORY = '做过的都留在历史里，可以接着说下一句。'
@@ -488,7 +493,8 @@ export async function sendAgentMessage(
       turn = await io.turn({ model, messages: [...before, ...working] }, signal)
     } catch (err) {
       if (signal.aborted) return finish('stopped', `已停止。${afterReply()}`)
-      return finish('modelFailed', sentences(turnFailureMessage(err), afterReply()))
+      const failure = turnFailureMessage(err)
+      return finish('modelFailed', turnRetryable(err) ? sentences(failure, afterReply()) : failure)
     }
 
     const text = contentText(turn.message.content)

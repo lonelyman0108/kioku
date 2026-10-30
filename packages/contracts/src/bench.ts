@@ -344,7 +344,7 @@ export type BenchAgentMessage = z.infer<typeof BenchAgentMessage>
 export const BenchAgentTurnRequest = z
   .strictObject({
     // 换一个模型名，接口与 Key 不变；不给时用实例设置里的模型
-    model: z.string().trim().min(1).max(128).optional(),
+    model: z.string().trim().min(1).max(128, '模型名太长，最多 128 个字符').optional(),
     messages: z
       .array(BenchAgentMessage)
       .min(1)

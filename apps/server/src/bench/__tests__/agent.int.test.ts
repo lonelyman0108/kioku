@@ -955,6 +955,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       ]) {
         expect((await postTurn(body)).status, JSON.stringify(body)).toBe(400)
       }
+      const longName = await postTurn({ messages: [USER], model: 'x'.repeat(129) })
+      expect(longName.status).toBe(400)
+      expect(await errorOf(longName)).toContain('模型名太长')
       expect(server.requests).toHaveLength(0)
     })
 
