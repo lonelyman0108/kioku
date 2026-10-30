@@ -64,11 +64,22 @@ export function createBench() {
   const queryClient = useQueryClient()
   const { me } = useSession()
 
+  // 选择记在地址里：刷新、分享都还在。模式不记：真实模式每次都要确认
+  const select = (query: { app?: string; key?: string }) =>
+    void router.replace({ query: { ...route.query, ...query } })
+
   const selection = reactive(selectionOf(route))
   watch(
     () => route.fullPath,
     () => {
-      if (route.name === 'bench') Object.assign(selection, selectionOf(route))
+      if (route.name !== 'bench') return
+      const next = selectionOf(route)
+      // 侧栏的入口不带参数，点它不算换选择：不然默认的那把变过的话，这里就悄悄换了
+      if (next.spaceId === selection.spaceId && !next.app && !next.key && selection.app) {
+        select({ app: selection.app, key: selection.key })
+        return
+      }
+      Object.assign(selection, next)
     },
   )
   const spaceId = computed(() => selection.spaceId)
@@ -102,9 +113,6 @@ export function createBench() {
   const selectionNotice = ref<string | null>(null)
   watch(spaceId, () => (selectionNotice.value = null))
 
-  // 选择记在地址里：刷新、分享都还在。模式不记：真实模式每次都要确认
-  const select = (query: { app?: string; key?: string }) =>
-    void router.replace({ query: { ...route.query, ...query } })
   const selectApp = (id: string) => {
     selectionNotice.value = null
     select({ app: id, key: undefined })

@@ -244,6 +244,21 @@ describe('默认选中的一变', () => {
     expect(bench.selectionNotice.value).toBeNull()
   })
 
+  it('点侧栏的入口，地址不带参数了：选择不变，会话不清，写回去', async () => {
+    const bench = start()
+    await settle()
+    const generation = bench.generation.value
+    fakes.api.keys.mockResolvedValue([liveKey('k-new'), liveKey('k1'), liveKey('k2')])
+    await refetchKeys()
+    fake.route.query = {}
+    fake.route.fullPath = '/spaces/s1/bench'
+    await settle()
+    expect(bench.keyId.value).toBe('k1')
+    expect(fake.route.query).toEqual({ app: 'a1', key: 'k1' })
+    expect(bench.generation.value).toBe(generation)
+    expect(bench.selectionNotice.value).toBeNull()
+  })
+
   it('默认的 Key 被吊销：换成别的，地址跟着改，提示一次', async () => {
     const bench = start()
     await settle()
