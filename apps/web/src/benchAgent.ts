@@ -581,7 +581,7 @@ export async function sendAgentMessage(
   const afterReply = () => (working.length ? KEPT_IN_HISTORY : RETRY)
 
   let reply: string
-  // 回复是空的、这条消息又留在历史里（之前调过工具）时的说明
+  // 回复是空的时的说明
   let emptyNotice: string | null = null
   for (let round = 1; ; round++) {
     if (signal.aborted) return finish('stopped', `已停止。${afterReply()}`)
@@ -627,14 +627,7 @@ export async function sendAgentMessage(
     })
     if (!calls.length) {
       reply = answered.text
-      if (empty) {
-        emptyNotice = sentences(emptyReplyText(turn.finishReason), afterReply())
-        // 这条消息回到发之前了，文字要放回输入框：发了 turn.end 的话，再发一次这一轮就进两次对话缓冲
-        if (!working.length) {
-          if (loop === 'chat') updateExchange({ turnEndNote: '模型没有回复，没有发 turn.end。' })
-          return finish('empty', emptyNotice)
-        }
-      }
+      if (empty) emptyNotice = sentences(emptyReplyText(turn.finishReason), afterReply())
       break
     }
 
@@ -713,9 +706,12 @@ export async function sendAgentMessage(
 
   if (loop === 'chat') {
     const body = turnEndBody(context, text, reply)
-    const refusal = signal.aborted
-      ? '已停止，没有发 turn.end。'
-      : (turnEndRefusal(context, body) ?? runBlocker(state.session, mode))
+    // 空回复不发：真实模式下空的一轮会进对话缓冲、可能触发抽取；这条消息回到发之前的话，文字放回输入框，再发一次就进两次
+    const refusal = emptyNotice
+      ? '模型没有回复，没有发 turn.end。'
+      : signal.aborted
+        ? '已停止，没有发 turn.end。'
+        : (turnEndRefusal(context, body) ?? runBlocker(state.session, mode))
     if (refusal) {
       updateExchange({ turnEndNote: refusal })
     } else {

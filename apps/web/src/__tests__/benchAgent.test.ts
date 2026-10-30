@@ -632,17 +632,38 @@ describe('chat 循环', () => {
     expect(done.session.replay).toEqual([])
   })
 
-  it('编了工具调用之后回复是空的：这条消息留在历史，照样发 turn.end，契约允许，真实的插件也这样', async () => {
-    const h = harness({
-      loop: 'chat',
-      context: GROUP,
-      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply(null)],
-    })
+  it.each(['real', 'rollback'] as const)(
+    '%s：编了工具调用、被拒之后回复是空的：不发带空 reply 的 turn.end，不进对话缓冲；轨迹里说明，这条消息留在历史',
+    async (mode) => {
+      const h = harness({
+        mode,
+        loop: 'chat',
+        context: GROUP,
+        turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply(null)],
+      })
+      const done = await h.send(USER_TEXT)
+      expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
+      expect(last(done).turnEnd).toBeNull()
+      expect(last(done).turnEndNote).toBe('模型没有回复，没有发 turn.end。')
+      expect(last(done).end).toBe('empty')
+      expect(last(done).inHistory).toBe(true)
+      expect(done.session.replay).toEqual([])
+      expect(done.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
+    },
+  )
+
+  it('上下文不满足时回复是空的：说的是模型没有回复，不是上下文的问题', async () => {
+    const h = harness({ loop: 'chat', turns: [reply(null)] })
     const done = await h.send(USER_TEXT)
-    expect((h.runs[1]!.steps[0] as { body: { reply: string } }).body.reply).toBe('')
-    expect(last(done).turnEnd).not.toBeNull()
-    expect(last(done).end).toBe('empty')
-    expect(last(done).inHistory).toBe(true)
+    expect(last(done).turnEndNote).toBe('模型没有回复，没有发 turn.end。')
+  })
+
+  it('空回复之后的下一条有文字的回复：turn.end 照发', async () => {
+    const first = harness({ loop: 'chat', context: GROUP, turns: [reply(null)] })
+    const conversation = await first.send(USER_TEXT)
+    const next = harness({ loop: 'chat', context: GROUP, turns: [reply('好')] })
+    await next.send(USER_TEXT, conversation)
+    expect(next.runs.flatMap((r) => events(r.steps))).toContain('turn.end')
   })
 })
 
