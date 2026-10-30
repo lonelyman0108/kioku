@@ -84,7 +84,6 @@ export function createApp(deps: Deps) {
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))
   app.route('/v1', previewRoutes(deps))
-  app.route('/v1', benchRoutes(deps))
   app.route('/v1', recallAnalysisRoutes(deps))
   app.route('/v1', memoryRoutes(deps))
   app.route('/v1', credentialRoutes(deps))
@@ -97,6 +96,9 @@ export function createApp(deps: Deps) {
   app.route('/v1', bindingRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
+  // 放在接入方的路由后面：OpenAPI 的组件按第一次用到的顺序排，Python SDK 的比对对顺序敏感，
+  // 测试台的响应用到了 TurnEndEvent 这些接入方的组件
+  app.route('/v1', benchRoutes(deps))
   // 业务规则错误带着自己的状态码；请求本身的问题（依赖库抛出的 4xx）是调用方的错，不打堆栈（见 requestError）；
   // 其余错误不把内部信息透给调用方
   app.onError((err, c) => {
