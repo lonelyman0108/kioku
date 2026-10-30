@@ -315,7 +315,10 @@ const disclosureCut = computed(
         <li v-if="result.personaUsed">
           人格 {{ persona.slug }}：{{ result.personaCreated ? '新建' : '已有' }}
         </li>
-        <li v-else>这次没有要写的 core://soul：没有新建人格，也没有设应用的默认人格</li>
+        <li v-else>
+          人格 {{ persona.slug }} 不存在，这次也没有要写的
+          core://soul：没有新建，新建的应用默认人格为空
+        </li>
         <li v-if="result.appsCreated.length">
           新建应用：{{ result.appsCreated.join('、') }}。还没有 Key：在「应用与
           Key」里为要接入的应用签发
@@ -454,7 +457,7 @@ const disclosureCut = computed(
         >
           <UInput v-model="personaSlug" class="w-full font-mono" :disabled="busy" />
         </UFormField>
-        <UFormField label="人格名称" help="这个人格还不存在时用它新建">
+        <UFormField label="人格名称" help="要写入新的 core://soul、这个人格又还不存在时用它新建">
           <UInput v-model="personaName" class="w-full" maxlength="64" :disabled="busy" />
         </UFormField>
       </div>
@@ -497,13 +500,20 @@ const disclosureCut = computed(
 
         <section class="space-y-1 text-sm">
           <h3 class="font-medium">人格与应用</h3>
-          <p v-if="effects.usesPersona">
+          <p v-if="effects.writesPersona">
             core://soul 导入为 <code>{{ plan.persona.slug }}</code>
             <template v-if="plan.persona.exists">（已有）</template>
             <template v-else>（不存在，新建为「{{ plan.persona.name }}」）</template>
           </p>
-          <p v-else>这次没有要写的 core://soul：不新建人格，也不设应用的默认人格。</p>
-          <p v-if="effects.usesPersona && otherPersonas.length" class="text-warning">
+          <p v-else-if="plan.persona.exists">
+            这次没有要新写的 core://soul，不新建人格。已有的人格
+            <code>{{ plan.persona.slug }}</code> 照常用：新建的应用和还没有默认人格的应用设成它。
+          </p>
+          <p v-else>
+            这次没有要新写的 core://soul，人格
+            <code>{{ plan.persona.slug }}</code> 也不存在：不新建，新建的应用默认人格为空。
+          </p>
+          <p v-if="effects.writesPersona && otherPersonas.length" class="text-warning">
             之前的导入写到了人格 {{ otherPersonas.join('、') }}：这次会另写一份
             core://soul，之前那份不再同步。要接着同步就把人格标识改回去。
           </p>
@@ -514,12 +524,12 @@ const disclosureCut = computed(
               >{{ app.create ? `（新建，类型 ${app.runtimeFamily}）` : '（已有）' }}</template
             >
           </p>
-          <p v-if="effects.usesPersona && effects.appsGivenPersona.length">
+          <p v-if="effects.appsGivenPersona.length">
             这些应用还没有默认人格，会设成 {{ plan.persona.slug }}：{{
               effects.appsGivenPersona.join('、')
             }}
           </p>
-          <p v-if="effects.usesPersona && effects.appsOtherPersona.length" class="text-warning">
+          <p v-if="effects.appsOtherPersona.length" class="text-warning">
             这些应用在用别的人格，core://soul 不会进入它们的启动上下文：{{
               effects.appsOtherPersona.join('、')
             }}

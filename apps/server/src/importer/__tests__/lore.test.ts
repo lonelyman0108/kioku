@@ -5,7 +5,6 @@ import {
   credentialHints,
   planFingerprint,
   planImport,
-  usesPersona,
   type ImportPlan,
   type ImportPreview,
   type LoreNode,
@@ -349,26 +348,6 @@ describe('Lore 导入计划', () => {
     expect(disclosureOf(`${'长'.repeat(497)}😀长尾`)).toBe(`${'长'.repeat(497)}😀长`)
   })
 
-  it('没有写到人格层的目标就用不上人格：Lore 里没有 core://soul、没有正文或者勾掉了', () => {
-    const agent = node('core://agent/claudecode')
-    expect(usesPersona(planImport(snapshot(node('core://soul'), agent), [], options))).toBe(true)
-    expect(usesPersona(planImport(snapshot(node('core://soul/style'), agent), [], options))).toBe(
-      true,
-    )
-    expect(usesPersona(planImport(snapshot(agent), [], options))).toBe(false)
-    expect(
-      usesPersona(planImport(snapshot(node('core://soul', { content: null }), agent), [], options)),
-    ).toBe(false)
-    expect(
-      usesPersona(
-        planImport(snapshot(node('core://soul'), agent), [], {
-          ...options,
-          excludeUris: new Set(['core://soul']),
-        }),
-      ),
-    ).toBe(false)
-  })
-
   describe('这次不导入的节点', () => {
     const zcodeApps = [
       { slug: 'claude-code', runtimeFamily: 'claudecode', ownerAccountId: ME },
@@ -527,9 +506,11 @@ describe('Lore 导入计划', () => {
         preview: {
           targets: plan.memories.map((item) => ({ item, state: 'new', current: [] })),
           personaExists: false,
+          createsPersona: false,
           importedPersonas: [],
           appsGivenPersona: ['claude-a', 'claude-b'],
           appsOtherPersona: ['claude-c', 'claude-d'],
+          newAppsWithPersona: ['zcode-a', 'zcode-b'],
         },
         sync: {
           items: [
@@ -559,6 +540,7 @@ describe('Lore 导入计划', () => {
       shuffled.preview.targets[0]!.item.request.glossary.reverse()
       shuffled.preview.appsGivenPersona.reverse()
       shuffled.preview.appsOtherPersona.reverse()
+      shuffled.preview.newAppsWithPersona.reverse()
       shuffled.sync.goneFromLore.reverse()
       shuffled.sync.items[0]!.changes.reverse()
       expect(fingerprint(shuffled)).toBe(same)
@@ -576,10 +558,18 @@ describe('Lore 导入计划', () => {
       expect(fingerprint(times)).toBe(same)
     })
 
+    it('人格本身在不在不影响：要不要新建它、要不要设到应用上才影响', () => {
+      const exists = base()
+      exists.preview.personaExists = true
+      expect(fingerprint(exists)).toBe(same)
+    })
+
     it('真要写的东西变了就变', () => {
       const changes: ((input: ReturnType<typeof base>) => void)[] = [
         (i) => (i.plan.persona = { slug: 'work', name: '默认人格' }),
-        (i) => (i.preview.personaExists = true),
+        (i) => (i.preview.createsPersona = true),
+        (i) => i.preview.newAppsWithPersona.pop(),
+        (i) => i.preview.newAppsWithPersona.push('zcode-c'),
         (i) => i.preview.appsGivenPersona.pop(),
         (i) => i.preview.appsGivenPersona.push('claude-e'),
         (i) => i.preview.appsOtherPersona.pop(),

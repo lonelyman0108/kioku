@@ -863,7 +863,58 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       await refused(present)
     })
 
-    describe('计划里没有人格层的目标', () => {
+    describe('计划不写入新的人格层记忆时，别人新建或删掉同名人格', () => {
+      const dropPersona = () =>
+        withSpace(database.db, ws.spaceId, (tx) =>
+          tx.delete(personas).where(eq(personas.slug, 'default')),
+        )
+      beforeEach(() => dropLore('core://soul'))
+
+      it('没有应用受影响：不算计划变了，照常执行', async () => {
+        await dropLore('core://agent/claudecode')
+        const source = await fileSource()
+        const absent = await planOf(source)
+        expect(absent.persona.exists).toBe(false)
+
+        await ws.createPersona('default')
+        const present = await planOf(source)
+        expect(present.persona.exists).toBe(true)
+        expect(present.fingerprint).toBe(absent.fingerprint)
+
+        await dropPersona()
+        expect((await planOf(source)).fingerprint).toBe(absent.fingerprint)
+
+        await ws.createPersona('default')
+        const result = await applyOf(source, absent)
+        expect(result).toMatchObject({ personaUsed: true, personaCreated: false, failed: [] })
+        expect(result.created).toContain('core://agent')
+      })
+
+      it('要新建的应用的默认人格会变：返回 409', async () => {
+        const source = await fileSource()
+        const before = await counts()
+        const absent = await planOf(source)
+        await ws.createPersona('default')
+        expect((await post('apply', { source, fingerprint: absent.fingerprint })).status).toBe(409)
+
+        const present = await planOf(source)
+        await dropPersona()
+        expect((await post('apply', { source, fingerprint: present.fingerprint })).status).toBe(409)
+        expect(await counts()).toEqual(before)
+      })
+
+      it('还没有默认人格的已有应用会被设上：返回 409', async () => {
+        await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        const source = await fileSource()
+        const absent = await planOf(source)
+        expect(absent.appsGivenPersona).toEqual([])
+        await ws.createPersona('default')
+        expect((await post('apply', { source, fingerprint: absent.fingerprint })).status).toBe(409)
+        expect((await planOf(source)).appsGivenPersona).toEqual(['claude-code'])
+      })
+    })
+
+    describe('人格的规则', () => {
       const appRow = async (slug: string) => {
         const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
           tx.select().from(apps).where(eq(apps.slug, slug)),
@@ -895,7 +946,31 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect(await counts()).toEqual(before)
       })
 
-      it('只勾掉 core://soul：不新建人格，已有的应用不设默认人格，新建的应用默认人格为空', async () => {
+      it('全部勾掉时人格已有也不改应用：还没有默认人格的应用保持为空', async () => {
+        await ws.createPersona('default')
+        await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        const source = await fileSource()
+        const plan = await planOf(source)
+        expect(plan.appsGivenPersona).toEqual(['claude-code'])
+        const before = await counts()
+        const result = await applyOf(source, plan, { excludeUris: plan.nodes.map((n) => n.uri) })
+        expect(result).toMatchObject({ appsCreated: [], appsGivenPersona: [], created: [] })
+        expect(await counts()).toEqual(before)
+        expect((await appRow('claude-code')).defaultPersonaId).toBeNull()
+      })
+
+      it('要写入新的 core://soul、人格已有：用已有的，不按填的名称新建', async () => {
+        const existing = await ws.createPersona('default')
+        const source = await fileSource()
+        const plan = await planOf(source)
+        const result = await applyOf(source, plan)
+        expect(result).toMatchObject({ personaUsed: true, personaCreated: false, failed: [] })
+        expect(result.created).toContain('persona://default/soul')
+        expect(await personaSlugs()).toEqual(['default'])
+        expect((await appRow('claudecode')).defaultPersonaId).toBe(existing.id)
+      })
+
+      it('只勾掉 core://soul、人格不存在：不新建人格，已有的应用不设默认人格，新建的应用默认人格为空', async () => {
         const work = await ws.createPersona('work')
         await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
         await ws.createApp('claude-work', {
@@ -927,7 +1002,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect((await appRow('claude-work')).defaultPersonaId).toBe(work.id)
       })
 
-      it('Lore 里没有 core://soul：计划不说会设默认人格，指纹对得上，命令行也不建空人格', async () => {
+      it('Lore 里没有 core://soul、人格不存在：计划不说会设默认人格，指纹对得上，命令行也不建空人格', async () => {
         await dropLore('core://soul')
         await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
         const source = await fileSource()
@@ -958,7 +1033,36 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect((await appRow('claude-code')).defaultPersonaId).toBeNull()
       })
 
-      it('用不上人格时不属于导入者的应用照样不写', async () => {
+      it('Lore 里没有 core://soul、人格已有：照常用它，新建的应用和没有默认人格的应用都设成它', async () => {
+        await dropLore('core://soul')
+        const existing = await ws.createPersona('default')
+        const work = await ws.createPersona('work')
+        await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        await ws.createApp('claude-work', {
+          runtimeFamily: 'claudecode',
+          defaultPersonaId: work.id,
+        })
+        await seed('core://agent/zcode', 'zcode 的正文', { priority: 0 })
+        const source = await fileSource()
+        const plan = await planOf(source)
+        expect(plan.appsGivenPersona).toEqual(['claude-code'])
+        expect(plan.appsOtherPersona).toEqual(['claude-work'])
+        const result = await applyOf(source, plan)
+        expect(result).toMatchObject({
+          personaUsed: true,
+          personaCreated: false,
+          appsCreated: ['zcode'],
+          appsGivenPersona: ['claude-code'],
+          appsOtherPersona: ['claude-work'],
+          failed: [],
+        })
+        expect(await personaSlugs()).toEqual(['default', 'work'])
+        expect((await appRow('claude-code')).defaultPersonaId).toBe(existing.id)
+        expect((await appRow('zcode')).defaultPersonaId).toBe(existing.id)
+        expect((await appRow('claude-work')).defaultPersonaId).toBe(work.id)
+      })
+
+      it('没有人格可用时不属于导入者的应用照样不写', async () => {
         await dropLore('core://soul')
         const claude = await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
         const { target, plan } = await cli()
@@ -972,7 +1076,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         ])
       })
 
-      it('core://soul 导入过也算有目标：之后新建的应用照样用导入的人格', async () => {
+      it('core://soul 导入过、人格还在：之后新建的应用照样用导入的人格', async () => {
         const source = await fileSource()
         expect(await importAll(source)).toMatchObject({ personaUsed: true, personaCreated: true })
         await seed('core://agent/zcode', 'zcode 的正文', { priority: 0 })
@@ -995,6 +1099,74 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         )
         expect((await appRow('zcode')).defaultPersonaId).toBe(persona!.id)
         expect((await appRow('claudecode')).defaultPersonaId).toBe(persona!.id)
+      })
+
+      it('core://soul 导入过、这次勾掉它又有新运行时：跳过同步不改变用哪个人格，新应用用已有的人格', async () => {
+        await importAll(await fileSource())
+        await seed('core://agent/zcode', 'zcode 的正文', { priority: 0 })
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(apps).set({ defaultPersonaId: null }).where(eq(apps.slug, 'claudecode')),
+        )
+        const source = await fileSource()
+        const plan = await planOf(source)
+        expect(stateOf(plan, 'core://soul')).toBe('imported')
+        const result = await applyOf(source, plan, { excludeUris: ['core://soul'] })
+        expect(result).toMatchObject({
+          personaUsed: true,
+          personaCreated: false,
+          appsCreated: ['zcode'],
+          appsGivenPersona: ['claudecode'],
+          failed: [],
+        })
+        const [persona] = await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select().from(personas).where(eq(personas.slug, 'default')),
+        )
+        expect((await appRow('zcode')).defaultPersonaId).toBe(persona!.id)
+        expect((await appRow('claudecode')).defaultPersonaId).toBe(persona!.id)
+      })
+
+      it('core://soul 导入过、人格行已不在：这次不写新的 soul，不重建人格，应用保持为空', async () => {
+        await importAll(await fileSource())
+        await seed('core://agent/zcode', 'zcode 的正文', { priority: 0 })
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.delete(personas).where(eq(personas.slug, 'default')),
+        )
+        const source = await fileSource()
+        const plan = await planOf(source)
+        expect(stateOf(plan, 'core://soul')).toBe('imported')
+        expect(plan.sync.items.find((i) => i.uri === 'persona://default/soul')!.state).toBe(
+          'deleted',
+        )
+        expect(plan.persona.exists).toBe(false)
+        expect(plan.appsGivenPersona).toEqual([])
+        const result = await applyOf(source, plan)
+        expect(result).toMatchObject({
+          personaUsed: false,
+          personaCreated: false,
+          appsCreated: ['zcode'],
+          appsGivenPersona: [],
+          failed: [],
+        })
+        expect(await personaSlugs()).toEqual([])
+        expect((await appRow('zcode')).defaultPersonaId).toBeNull()
+        expect((await appRow('claudecode')).defaultPersonaId).toBeNull()
+      })
+
+      it('Lore 里换了路径才映射到人格层的不算新写入：人格不存在时不新建', async () => {
+        await dropLore('core://soul')
+        await seed('core://agent/later_soul', '之后会换到 core://soul 下的节点')
+        await importAll(await fileSource())
+        await renameLore('core://agent/later_soul', 'soul/later')
+        const source = await fileSource()
+        const plan = await planOf(source)
+        expect(stateOf(plan, 'core://soul/later')).toBe('moved')
+        expect(plan.persona.exists).toBe(false)
+        const result = await applyOf(source, plan)
+        expect(result).toMatchObject({ personaUsed: false, personaCreated: false, failed: [] })
+        expect(result.movedInLore).toEqual([
+          { uri: 'persona://default/soul/later', current: 'app://later-soul/agent' },
+        ])
+        expect(await personaSlugs()).toEqual([])
       })
     })
 

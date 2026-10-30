@@ -129,8 +129,9 @@ export interface SelectionEffects {
   bootNodes: number
   // 这次会写的节点的正文引用的凭据
   credentialRefs: string[]
-  // 没勾掉的节点还有没有写到人格层的目标。没有就用不上人格：不新建，也不设应用的默认人格
-  usesPersona: boolean
+  // 没勾掉的节点里还有没有要新建的人格层目标（已导入的、换了路径的都不算）。有才会在人格不存在时新建；
+  // 没有时已有的人格照常用，不存在就没有人格可用：不设默认人格，新建的应用默认人格为空
+  writesPersona: boolean
   // 还会动到的应用
   apps: LoreImportPlan['apps']
   appsGivenPersona: string[]
@@ -182,16 +183,20 @@ export function selectionEffects(
       plan.skipped.some((s) => underRuntime(s.source, runtime)),
   )
   const slugs = new Set(apps.flatMap((m) => m.apps.map((a) => a.slug)))
+  const writesPersona = kept.some((n) =>
+    n.targets.some((t) => t.layer === 'persona' && t.state === 'new'),
+  )
+  const personaUsed = writesPersona || plan.persona.exists
   return {
     create,
     update,
     boot,
     bootNodes,
     credentialRefs: [...refs].sort(),
-    usesPersona: kept.some((n) => n.targets.some((t) => t.layer === 'persona')),
+    writesPersona,
     apps,
-    appsGivenPersona: plan.appsGivenPersona.filter((slug) => slugs.has(slug)),
-    appsOtherPersona: plan.appsOtherPersona.filter((slug) => slugs.has(slug)),
+    appsGivenPersona: personaUsed ? plan.appsGivenPersona.filter((slug) => slugs.has(slug)) : [],
+    appsOtherPersona: personaUsed ? plan.appsOtherPersona.filter((slug) => slugs.has(slug)) : [],
   }
 }
 

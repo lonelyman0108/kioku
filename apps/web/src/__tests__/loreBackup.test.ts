@@ -378,29 +378,67 @@ describe('勾选之后这次会动什么', () => {
     ])
   })
 
-  it('人格层的目标都勾掉了就用不上人格，导入过的也算目标', () => {
-    const soul = planNode('soul', {
-      targets: [target({ uri: 'persona://default/soul', layer: 'persona' })],
-    })
+  describe('人格', () => {
+    const soulTarget = (extra: Parameters<typeof target>[0] = {}) =>
+      target({ uri: 'persona://default/soul', layer: 'persona', ...extra })
+    const soul = planNode('soul', { targets: [soulTarget()] })
     const other = planNode('other')
-    const plan = planOf([soul, other])
-    expect(selectionEffects(plan, none, none).usesPersona).toBe(true)
-    expect(selectionEffects(plan, none, new Set(['other'])).usesPersona).toBe(true)
-    expect(selectionEffects(plan, none, new Set(['soul'])).usesPersona).toBe(false)
-    expect(selectionEffects(planOf([other]), none, none).usesPersona).toBe(false)
-    const imported = planOf([
-      planNode('soul', {
-        targets: [
-          target({
-            uri: 'persona://default/soul',
-            layer: 'persona',
-            state: 'imported',
-            current: [current('persona://default/soul')],
-          }),
+
+    it('有要新建的人格层目标才算写入新的 soul：勾掉的、已导入的、换了路径的都不算', () => {
+      const plan = planOf([soul, other])
+      expect(selectionEffects(plan, none, none).writesPersona).toBe(true)
+      expect(selectionEffects(plan, none, new Set(['other'])).writesPersona).toBe(true)
+      expect(selectionEffects(plan, none, new Set(['soul'])).writesPersona).toBe(false)
+      expect(selectionEffects(planOf([other]), none, none).writesPersona).toBe(false)
+      const prior = [current('persona://default/soul')]
+      for (const state of ['imported', 'moved'] as const) {
+        const old = planNode('soul', { targets: [soulTarget({ state, current: prior })] })
+        expect(selectionEffects(planOf([old, other]), none, none).writesPersona).toBe(false)
+        // 同一个人格下还有要新建的节点
+        const style = planNode('style', {
+          targets: [soulTarget({ uri: 'persona://default/soul/style' })],
+        })
+        expect(selectionEffects(planOf([old, style]), none, none).writesPersona).toBe(true)
+      }
+    })
+
+    it('人格已有时跳过 soul 不改变应用用哪个人格；不存在时只有写入新的 soul 才设', () => {
+      const claude = planNode('claude', {
+        uri: 'core://agent/claude',
+        targets: [target({ uri: 'app://claude/agent', layer: 'app' })],
+      })
+      const planWith = (exists: boolean): LoreImportPlan => ({
+        ...planOf([soul, claude]),
+        persona: { slug: 'default', name: '默认人格', exists, imported: [] },
+        apps: [
+          {
+            runtime: 'claude',
+            apps: [
+              { slug: 'claude', create: false, runtimeFamily: 'mcp' },
+              { slug: 'claude-work', create: false, runtimeFamily: 'mcp' },
+            ],
+          },
         ],
-      }),
-    ])
-    expect(selectionEffects(imported, none, none).usesPersona).toBe(true)
+        appsGivenPersona: ['claude'],
+        appsOtherPersona: ['claude-work'],
+      })
+      const lists = (plan: LoreImportPlan, excluded: string[]) => {
+        const { appsGivenPersona, appsOtherPersona } = selectionEffects(
+          plan,
+          none,
+          new Set(excluded),
+        )
+        return [appsGivenPersona, appsOtherPersona]
+      }
+      const both = [['claude'], ['claude-work']]
+      const neither = [[], []]
+      expect(lists(planWith(false), [])).toEqual(both)
+      expect(lists(planWith(false), ['soul'])).toEqual(neither)
+      expect(lists(planWith(true), [])).toEqual(both)
+      expect(lists(planWith(true), ['soul'])).toEqual(both)
+      // 全部勾掉就什么都不改
+      expect(lists(planWith(true), ['soul', 'claude'])).toEqual(neither)
+    })
   })
 
   it('勾掉一个运行时下的全部节点，它的应用不再列出；有跳过的节点时保守地留着', () => {

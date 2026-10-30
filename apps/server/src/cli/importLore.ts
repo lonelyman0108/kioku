@@ -16,10 +16,11 @@ import {
   MAX_DISCLOSURE,
   planImport,
   planSync,
+  previewImport,
   readLore,
-  usesPersona,
   verifyMasterKey,
   type ImportPlan,
+  type ImportPreview,
   type ImportResult,
   type SyncPlan,
   type SyncResult,
@@ -41,7 +42,7 @@ const HELP = `从 Lore 导入记忆。
   --account <用户名>     导入到这个账号名下，需要是空间 owner。preferences:// 进它的主人层，
                          core:// 以外的其余 domain 进它的私人层
   --space <空间 id>      账号属于多个空间时指定
-  --persona <标识>       core://soul 导入成这个人格的设定，默认 default，不存在时新建
+  --persona <标识>       core://soul 导入成这个人格的设定，默认 default；要写入新的 core://soul 时不存在就新建
   --persona-name <名称>  新建人格时用的名称，默认「默认人格」
   --secret <Lore URI>    把这条记忆导入为 secret（加密存储），可以重复
   --sync                同步导入过的节点：正文、priority、disclosure 与关键词改成 Lore 里现在的
@@ -103,7 +104,8 @@ async function main(): Promise<void> {
       `Lore：${snapshot.nodes.length} 个节点；${versions} 个旧版本不迁移` +
         (snapshot.recallEvents === null ? '' : `；${snapshot.recallEvents} 条召回事件不迁移`),
     )
-    printPlan(plan)
+    const target = { db: database.db, spaceId, accountId, masterKey: config.masterKey }
+    printPlan(plan, await previewImport(target, plan))
     if (plan.errors.length) {
       // 命令行只有 --secret 会对不上
       const lines = plan.errors.map((e) => `  --secret 指定的 ${e.uri} 在 Lore 里不存在`)
@@ -111,7 +113,6 @@ async function main(): Promise<void> {
       process.exitCode = 2
       return
     }
-    const target = { db: database.db, spaceId, accountId, masterKey: config.masterKey }
     // 同步要读出 secret 记忆来比对：先确认主密钥和服务用的是同一把，免得解密失败时才发现
     if (values.sync && config.masterKey)
       await verifyMasterKey(database.db, spaceId, config.masterKey)
@@ -189,12 +190,18 @@ const WARNINGS: Record<LoreWarningKind, (uri: string) => string> = {
   disclosureTruncated: (uri) => `${uri} 的 disclosure 超过 ${MAX_DISCLOSURE} 字，已截断`,
 }
 
-function printPlan(plan: ImportPlan): void {
-  console.log(
-    usesPersona(plan)
-      ? `\n人格：core://soul 导入为 ${plan.persona.slug}（不存在时新建为「${plan.persona.name}」）`
-      : '\n人格：这次没有要导入的 core://soul，不新建人格，也不设应用的默认人格',
-  )
+function personaLine(plan: ImportPlan, preview: ImportPreview): string {
+  const { slug, name } = plan.persona
+  if (!preview.personaExists && !preview.createsPersona) {
+    return `这次没有要写入的 core://soul，人格 ${slug} 也不存在：不新建，新建的应用默认人格为空`
+  }
+  return plan.memories.some((m) => m.request.layer === 'persona')
+    ? `core://soul 导入为 ${slug}（不存在时新建为「${name}」）`
+    : `这次没有要导入的 core://soul，不新建人格；已有的人格 ${slug} 照常用，新建的应用和还没有默认人格的应用设成它`
+}
+
+function printPlan(plan: ImportPlan, preview: ImportPreview): void {
+  console.log(`\n人格：${personaLine(plan, preview)}`)
   if (plan.apps.length) {
     console.log('\n应用：')
     for (const mapping of plan.apps) {
@@ -230,7 +237,7 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
   console.log(
     result.personaUsed
       ? `  人格 ${plan.persona.slug}：${result.personaCreated ? '新建' : '已有'}`
-      : '  人格：这次没有要导入的 core://soul，没有新建，也没有设应用的默认人格',
+      : `  人格 ${plan.persona.slug} 不存在，这次也没有要写入的 core://soul：没有新建，新建的应用默认人格为空`,
   )
   if (result.appsCreated.length) console.log(`  新建应用：${result.appsCreated.join('、')}`)
   if (result.appsGivenPersona.length) {

@@ -172,11 +172,6 @@ export interface ImportPlanError {
   uri: string
 }
 
-// 这份计划（带勾选）有没有写到人格层的目标，新建的、导入过的都算。没有就用不上人格：不新建，新建的应用默认人格为空，
-// 已有的应用不动。勾选只让写入变少；Lore 里没有 core://soul 时命令行也一样，不建空人格。计划预览与真正写入都按这个判断
-export const usesPersona = (plan: ImportPlan) =>
-  plan.memories.some((m) => m.request.layer === 'persona')
-
 export interface ImportKeyParts {
   loreNodeUuid?: unknown
   targetApp?: unknown
@@ -518,7 +513,7 @@ export function existingImportApps(db: Db, spaceId: string): Promise<ExistingApp
 }
 
 export interface ImportResult {
-  // 这次用没用上人格（见 usesPersona）。没用上时 personaCreated 总是 false
+  // 这次有没有人格可用：已有的，或者这次新建的（见 writesNewPersona）。没有时 personaCreated 总是 false
   personaUsed: boolean
   personaCreated: boolean
   appsCreated: string[]
@@ -540,8 +535,8 @@ export interface ImportResult {
   failed: { uri: string; reason: string }[]
 }
 
-// 写入时这个应用的默认人格怎么处理：不属于导入者的不往里写；这次用不上人格的不动；还没有默认人格的设成导入的人格；
-// 已经在用别的人格的不动。计划预览与真正写入都按这个判断（人格还没建时 id 为 null）
+// 写入时这个应用的默认人格怎么处理：不属于导入者的不往里写；这次没有人格可用的不动；还没有默认人格的设成导入的人格；
+// 已经在用别的人格的不动。计划预览与真正写入都按这个判断（人格这次才新建时，预览里 id 还是 null）
 function personaEffect(
   current: { owner: string; personaId: string | null } | undefined,
   accountId: string,
@@ -565,6 +560,19 @@ function priorImport(
   return found ? { state: 'imported', found } : { state: 'new', found: [] }
 }
 
+// 这次要不要写入新的人格层记忆：人格层目标里有状态是新建的。已导入的、Lore 里换了路径的、在 Kioku 里删除了的都不算，
+// 勾掉的不在计划里。只有这时人格不存在才新建；否则不新建，已有的人格照常用（跳过 soul 的同步不改变应用用哪个人格），
+// 不存在就没有人格可用，新建的应用默认人格为空。计划预览与真正写入都按这个判断
+function writesNewPersona(
+  plan: ImportPlan,
+  done: Map<string, ImportedMemory[]>,
+  moved: Map<string, ImportedMemory[]>,
+): boolean {
+  return plan.memories.some(
+    (m) => m.request.layer === 'persona' && priorImport(m, done, moved).state === 'new',
+  )
+}
+
 export interface TargetPreview {
   item: PlannedMemory
   state: LoreTargetState
@@ -575,10 +583,14 @@ export interface TargetPreview {
 export interface ImportPreview {
   targets: TargetPreview[]
   personaExists: boolean
+  // 这次会不会新建人格
+  createsPersona: boolean
   // 之前的导入写到过的人格
   importedPersonas: string[]
   appsGivenPersona: string[]
   appsOtherPersona: string[]
+  // 这次才新建、默认人格会是导入的人格的应用（没有人格可用时新建的应用默认人格为空）
+  newAppsWithPersona: string[]
 }
 
 // 只读：这份计划真正写入时每个目标会怎样、哪些应用会被设默认人格，判断和 applyImport 是同一段
@@ -601,7 +613,8 @@ export async function previewImport(
       .from(apps),
   }))
   const appBySlug = new Map(rows.map((r) => [r.slug, r]))
-  const used = usesPersona(plan)
+  const writes = writesNewPersona(plan, done, moved)
+  const used = Boolean(persona) || writes
   const preview: ImportPreview = {
     targets: plan.memories.map((item) => {
       const { state, found } = priorImport(item, done, moved)
@@ -612,6 +625,7 @@ export async function previewImport(
       }
     }),
     personaExists: Boolean(persona),
+    createsPersona: writes && !persona,
     importedPersonas: [
       ...new Set(
         [...done.values()].flat().flatMap((m) => (m.targetPersona ? [m.targetPersona] : [])),
@@ -619,12 +633,16 @@ export async function previewImport(
     ].sort(),
     appsGivenPersona: [],
     appsOtherPersona: [],
+    newAppsWithPersona: [],
   }
   for (const mapping of plan.apps) {
     for (const app of mapping.apps) {
       const current = appBySlug.get(app.slug)
-      // 这次才新建的应用默认人格就是导入的人格（用不上人格时为空），不用设
-      if (app.create && !current) continue
+      // 这次才新建的应用建的时候就带上默认人格，不用设
+      if (app.create && !current) {
+        if (used) preview.newAppsWithPersona.push(app.slug)
+        continue
+      }
       const effect = personaEffect(current, accountId, { used, id: persona?.id ?? null })
       if (effect === 'given') preview.appsGivenPersona.push(app.slug)
       else if (effect === 'other') preview.appsOtherPersona.push(app.slug)
@@ -646,7 +664,7 @@ function dataWriteFailure(err: unknown): string | null {
 export async function applyImport(target: ImportTarget, plan: ImportPlan): Promise<ImportResult> {
   const { db, spaceId, accountId } = target
   const result: ImportResult = {
-    personaUsed: usesPersona(plan),
+    personaUsed: false,
     personaCreated: false,
     appsCreated: [],
     appsGivenPersona: [],
@@ -661,28 +679,31 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
   // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写。
   // 写入期间才被转走的，由每次写入时同一个事务里的归属核对拦下（requireAppOwner）
   const blockedApps = new Set<string>()
+  const done = await importedMemories(db, spaceId)
+  const moved = movedInLore(plan, done)
 
   await withSpace(db, spaceId, async (tx) => {
-    let personaId: string | null = null
-    if (result.personaUsed) {
-      const [created] = await tx
-        .insert(personas)
-        .values({ spaceId, slug: plan.persona.slug, name: plan.persona.name })
-        .onConflictDoNothing()
-        .returning({ id: personas.id })
-      result.personaCreated = Boolean(created)
-      personaId =
-        created?.id ??
-        (
-          await tx
-            .select({ id: personas.id })
-            .from(personas)
-            .where(eq(personas.slug, plan.persona.slug))
-        )[0]!.id
-    }
+    const [created] = writesNewPersona(plan, done, moved)
+      ? await tx
+          .insert(personas)
+          .values({ spaceId, slug: plan.persona.slug, name: plan.persona.name })
+          .onConflictDoNothing()
+          .returning({ id: personas.id })
+      : []
+    const personaId =
+      created?.id ??
+      (
+        await tx
+          .select({ id: personas.id })
+          .from(personas)
+          .where(eq(personas.slug, plan.persona.slug))
+      )[0]?.id ??
+      null
+    result.personaCreated = Boolean(created)
+    result.personaUsed = personaId !== null
 
     // Lore 里所有客户端都读同一个 core://soul，所以对应的应用都用导入的人格；
-    // 已有的应用只在还没有默认人格时设置
+    // 已有的应用只在还没有默认人格时设置。没有人格可用时新建的应用默认人格为空
     for (const mapping of plan.apps) {
       for (const app of mapping.apps) {
         if (app.create) {
@@ -727,8 +748,6 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
     }
   })
 
-  const done = await importedMemories(db, spaceId)
-  const moved = movedInLore(plan, done)
   const service = importerService(target)
   for (const item of plan.memories) {
     const app = item.context.targetApp
@@ -1094,19 +1113,20 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
 }
 
 // 计划的指纹：看计划与执行时都对不带勾选的基准计划算，所以勾选不影响它。
-// 覆盖人格与它在不在（不在就新建）、应用映射、哪些应用会被设默认人格或在用别的人格、
+// 覆盖人格与这次会不会新建它、应用映射、哪些应用会被设默认人格（新建的也算）或在用别的人格、
 // 每个写入目标（来源、URI、层、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
 // 不导入的、提醒、要更新的同步项与 Lore 里没有了的；都排好序，所以打乱导出的行序不会变。
-// 不覆盖版本号与时间：只有真要写的东西变了才算计划变了
+// 不覆盖版本号、时间与人格本身在不在：只有真要写的东西变了才算计划变了
 export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: SyncPlan): string {
   const canonical = <T>(items: T[]) => items.map((item) => JSON.stringify(item)).sort()
   return createHash('sha256')
     .update(
       JSON.stringify({
         persona: plan.persona,
-        personaExists: preview.personaExists,
+        createsPersona: preview.createsPersona,
         appsGivenPersona: [...preview.appsGivenPersona].sort(),
         appsOtherPersona: [...preview.appsOtherPersona].sort(),
+        newAppsWithPersona: [...preview.newAppsWithPersona].sort(),
         apps: canonical(
           plan.apps.map((m) => ({
             runtime: m.runtime,
