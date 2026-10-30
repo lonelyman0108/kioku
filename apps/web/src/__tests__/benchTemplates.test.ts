@@ -11,6 +11,7 @@ import activityEntry from '../components/ActivityEntry.vue?raw'
 import appSimulator from '../components/AppSimulator.vue?raw'
 import benchAbandoned from '../components/BenchAbandoned.vue?raw'
 import benchAgentView from '../components/BenchAgent.vue?raw'
+import benchAgentBusy from '../components/BenchAgentBusy.vue?raw'
 import benchAgentExchange from '../components/BenchAgentExchange.vue?raw'
 import benchCalls from '../components/BenchCalls.vue?raw'
 import benchContextForm from '../components/BenchContextForm.vue?raw'
@@ -124,6 +125,7 @@ const SOURCES = {
   benchPage,
   benchAbandoned,
   benchAgentView,
+  benchAgentBusy,
   benchAgentExchange,
   benchCalls,
   benchContextForm,
@@ -266,6 +268,18 @@ describe('真实模式要确认', () => {
 describe('调用台的运行', () => {
   const calls = sfc(benchCalls)
 
+  it('按钮只认自己的运行；别的运行占着时禁用、不转圈', () => {
+    const button = withHandler(calls.elements, 'click', 'onRunClick')
+    expect(bound(button, 'loading')).toBe('callRunning')
+    expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker || running)')
+  })
+
+  it('被模型对话占着时说明一句，能停止：放在运行按钮旁边', () => {
+    const form = withTag(calls.elements, 'form')
+    expect(walk(form).map((n) => n.tag)).toContain('BenchAgentBusy')
+    expect(walk(form)).toContain(withHandler(calls.elements, 'click', 'onRunClick'))
+  })
+
   it('真实模式下回车不执行，只有点按钮才执行', () => {
     const form = withTag(calls.elements, 'form')
     expect(handler(form, 'submit')).toBe('onSubmit')
@@ -389,7 +403,7 @@ describe('选中的工具不在目录里', () => {
       "tools.data.value ? 'ready' : tools.isError.value ? 'failed' : 'pending'",
     )
     const button = withHandler(calls.elements, 'click', 'onRunClick')
-    expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker)')
+    expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker || running)')
     const alert = withIf(calls.elements, 'unavailable')
     expect(alert.tag).toBe('UAlert')
     expect(bound(alert, 'title')).toBe('unavailable')
@@ -574,6 +588,22 @@ describe('场景的运行与导出', () => {
       scenarios.elements.find((el) => el.tag === 'UModal' && bound(el, 'open') === open),
       `:open="${open}" 的确认框`,
     )
+
+  it('按钮只认自己的运行；别的运行占着时禁用、不转圈', () => {
+    const button = withHandler(scenarios.elements, 'click', 'startRun')
+    expect(bound(button, 'loading')).toBe('scenarioRunning')
+    expect(bound(button, 'disabled')).toBe('!text.trim() || running')
+  })
+
+  it('被模型对话占着时说明一句，能停止：放在运行按钮旁边', () => {
+    const parent = must(
+      scenarios.elements.find((el) =>
+        el.children?.includes(withHandler(scenarios.elements, 'click', 'startRun')),
+      ),
+      '运行按钮的上一层',
+    )
+    expect(parent.children?.map((n) => n.tag)).toContain('BenchAgentBusy')
+  })
 
   it('真实模式下运行要确认：运行按钮只走 startRun', () => {
     const script = scenarios.script
@@ -961,6 +991,23 @@ describe('真实模式中途作废的运行', () => {
     const alert = withIf(abandoned.elements, 'abandonedInFlight')
     expect(alert.tag).toBe('UAlert')
     expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain('可能正在写入')
+  })
+})
+
+describe('被模型对话占着时的说明', () => {
+  const busy = sfc(benchAgentBusy)
+
+  it('只在模型对话进行时显示，说清楚为什么，能停止', () => {
+    const alert = withIf(busy.elements, 'agentSending')
+    expect(alert.tag).toBe('UAlert')
+    expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain(
+      '模型对话正在进行',
+    )
+    expect(bound(alert, 'actions')).toBe('actions')
+    const actions = blockOf(busy.script, 'const actions = ')
+    expect(actions).toContain('onClick: stopAgent')
+    // 点过之后不能再点：已经发出去的运行取消不了，要等它回来
+    expect(actions).toContain('disabled: agentStopping.value')
   })
 })
 

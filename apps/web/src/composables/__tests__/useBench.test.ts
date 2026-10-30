@@ -957,6 +957,76 @@ describe('模型对话', () => {
     await outcome
   })
 
+  it('谁在运行：模型循环占着时调用台与场景都不算自己在跑，按钮不转圈；能从那边停止', async () => {
+    const bench = start()
+    await settle()
+    const model = hangingModel()
+    fakes.api.benchAgentTurn.mockImplementationOnce(model.turn)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(bench.running.value).toBe(true)
+    expect(bench.agentSending.value).toBe(true)
+    expect(bench.callRunning.value).toBe(false)
+    expect(bench.scenarioRunning.value).toBe(false)
+    bench.stopAgent()
+    expect(model.signal?.aborted).toBe(true)
+    await sent
+    expect(bench.running.value).toBe(false)
+    expect(bench.agentSending.value).toBe(false)
+  })
+
+  it('谁在运行：调用台的只算调用台，场景的只算场景，都不算模型对话', async () => {
+    const bench = start()
+    await settle()
+    const calling = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValueOnce(calling.promise)
+    const called = bench.call(STEPS, 'kioku_list')
+    await settle()
+    expect(bench.callRunning.value).toBe(true)
+    expect(bench.scenarioRunning.value).toBe(false)
+    expect(bench.agentSending.value).toBe(false)
+    calling.resolve({ ...RESULT, mode: 'rollback' })
+    await called
+    expect(bench.callRunning.value).toBe(false)
+
+    const scenario = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValueOnce(scenario.promise)
+    const ran = bench.execute(STEPS, WHAT)
+    await settle()
+    expect(bench.scenarioRunning.value).toBe(true)
+    expect(bench.callRunning.value).toBe(false)
+    expect(bench.agentSending.value).toBe(false)
+    scenario.resolve({ ...RESULT, mode: 'rollback' })
+    await ran
+    expect(bench.scenarioRunning.value).toBe(false)
+  })
+
+  it('谁在运行：上一次是调用台，这次是模型循环，不留着上一次的；中途作废就不算在跑了', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchRun.mockResolvedValueOnce({ ...RESULT, mode: 'rollback' })
+    await bench.call(STEPS, 'kioku_list')
+    const model = hangingModel()
+    fakes.api.benchAgentTurn.mockImplementationOnce(model.turn)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(bench.callRunning.value).toBe(false)
+    bench.stopAgent()
+    await sent
+
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValueOnce(run.promise)
+    const called = bench.call(STEPS, 'kioku_list')
+    await settle()
+    expect(bench.callRunning.value).toBe(true)
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    // 作废了：请求还没回来，按钮不能还转着
+    expect(bench.callRunning.value).toBe(false)
+    run.resolve({ ...RESULT, mode: 'rollback' })
+    await called
+  })
+
   it('工具走运行接口，带这次对话的重放，不带调用台的', async () => {
     const bench = start()
     await settle()

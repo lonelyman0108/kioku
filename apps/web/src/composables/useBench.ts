@@ -177,6 +177,16 @@ export function createBench() {
   let counter = 0
   const current = ref<number | null>(null)
   const running = computed(() => current.value !== null)
+  // 进行中的那次是谁发起的：运行按钮的 loading 只认自己的。模型循环可能持续数分钟，别的分页不能跟着一直转圈
+  const runBy = ref<'calls' | 'scenarios' | 'agent' | null>(null)
+  const callRunning = computed(() => running.value && runBy.value === 'calls')
+  const scenarioRunning = computed(() => running.value && runBy.value === 'scenarios')
+  const beginRun = (by: 'calls' | 'scenarios' | 'agent') => {
+    const id = ++counter
+    current.value = id
+    runBy.value = by
+    return id
+  }
   const generation = ref(0)
   const session = shallowRef(emptySession())
   // 模型对话，和调用台的会话分开。发给模型的内容都是这把 Key 读得到的，对话属于这把 Key，也属于这个模式
@@ -316,11 +326,11 @@ export function createBench() {
     steps: BenchStep[],
     what: { label: string; view: StepView },
     replay: BenchReplayStep[] = [],
+    by: 'calls' | 'scenarios' = 'scenarios',
   ): Promise<RunOutcome> {
     const target = runTarget()
     if (running.value || !target) return { kind: 'stale' }
-    const id = ++counter
-    current.value = id
+    const id = beginRun(by)
     try {
       return await runAs(id, target, steps, what, replay)
     } finally {
@@ -336,6 +346,7 @@ export function createBench() {
       steps,
       { label, view: 'call' },
       replayFor(session.value, mode.value),
+      'calls',
     )
     if (outcome.kind === 'done') session.value = recordRun(session.value, outcome.result)
     return outcome
@@ -373,8 +384,7 @@ export function createBench() {
   ): Promise<AgentExchange | null> {
     const target = runTarget()
     if (running.value || !target) return null
-    const id = ++counter
-    current.value = id
+    const id = beginRun('agent')
     const controller = new AbortController()
     agentController.value = controller
     agentStopping.value = false
@@ -467,6 +477,8 @@ export function createBench() {
     contextForm,
     sessionContext,
     running,
+    callRunning,
+    scenarioRunning,
     generation,
     execute,
     abandoned,
