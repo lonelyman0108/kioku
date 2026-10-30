@@ -300,7 +300,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     ] as const) {
       expect((await send('PUT', path, body, cookie)).status).toBe(200)
     }
-    await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), () => {})
+    await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])
     return { credentialId, base, child, bob }
   }
 
@@ -430,7 +430,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     expect(after!.max).toBe(events!.max + 1)
     // 向量不在备份里，由补齐任务重新生成
     expect(await embeddings()).toBe(0)
-    await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), () => {})
+    await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])
     expect(await embeddings()).toBe(vectors)
 
     // 已经初始化的实例拒绝再恢复

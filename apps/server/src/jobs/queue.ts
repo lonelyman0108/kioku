@@ -29,10 +29,11 @@ const DREAM_TICK = 'dream-tick'
 const DREAM_CRON = '41 * * * *'
 // 每小时清一次过期的数据（见 cleanupExpired）；保留期的硬删除跟在后面，一天做一次（见 retentionJob）
 const CLEANUP_CRON = '17 * * * *'
-// 这次没处理的记忆（写回向量时正被别的事务锁着的、一批的处理时间用完了还没生成的），隔这么久另排一个新任务再试
+// 写回向量时记忆正被别的事务锁着，隔这么久另排一个新任务再试
 const RETRY_AFTER_SECONDS = 10
 // 写入之后的向量任务一批最多处理这么久：嵌入接口卡住时（每个渠道最多等 30 秒），到点还没生成的不再请求、
-// 正在请求的取消，已经拿到的照常写回，剩下的另排新任务。正常时一批（最多 32 个空间、两个模型）几十秒内做完
+// 正在请求的取消，已经拿到的照常写回，剩下的算失败、按任务的重试次数再试（有退避）。
+// 正常时一批（最多 32 个空间、两个模型）几十秒内做完
 const EMBED_BUDGET_MS = 2 * 60_000
 // 向量任务的过期时间，比一批的处理时间长出一截：一批守着时限做完，pg-boss 不会把它当成卡住、
 // 整批算失败再和还没停的那一批同时做
@@ -147,16 +148,18 @@ export async function startJobs(options: {
         },
       )
   const queued = (id: string | null | undefined) => id !== undefined
-  // 这次没处理的记忆另排新任务，稍后逐条再来
-  const retry = (spaceId: string, ids: string[]) => {
-    for (const memoryId of ids) void send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)
+  // 写回时被别的事务锁着的记忆另排新任务，稍后逐条再来。等它们排进去，返回没排进去的
+  const retry = async (spaceId: string, ids: string[]): Promise<string[]> => {
+    const sent = await Promise.all(
+      ids.map((memoryId) => send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)),
+    )
+    return ids.filter((_, i) => sent[i] === undefined)
   }
 
   // 写入之后的向量：一次取一批，同一个空间的合起来请求嵌入接口；一批取满了说明还有积压，马上接着取，不等轮询间隔。
-  // 逐个任务记成功或失败（按下标对回任务）：失败的只是接口拒绝了的那几条、整批出错的那个空间，各自按任务的重试次数
-  // 再试，不连累同一批的别的任务。被锁着跳过的、处理时间用完或服务要停时还没生成的，另排一个新任务、过一会儿再来
-  // （RETRY_AFTER_SECONDS），原任务算完成。pg-boss 给每个任务的中止信号（服务停下、任务过期时断开）和处理时间分开传：
-  // 停机时不记「接口太慢」的错误
+  // 逐个任务记成功或失败（按下标对回任务）：失败的各自按任务的重试次数再试（retryLimit 5、退避，见 send），
+  // 不连累同一批的别的任务；被锁着跳过的另排一个新任务、过一会儿再来（RETRY_AFTER_SECONDS），原任务算完成。
+  // pg-boss 给每个任务的中止信号（服务停下、任务过期时断开）和处理时间分开传：停机时不记「接口太慢」的错误
   const embedBudgetMs = options.embedBudgetMs ?? EMBED_BUDGET_MS
   await boss.work<EmbedTarget>(
     EMBED,
@@ -169,7 +172,7 @@ export async function startJobs(options: {
         retry,
         {
           budget: AbortSignal.timeout(embedBudgetMs),
-          stopping: AbortSignal.any(jobs.map((job) => job.signal)),
+          jobs: jobs.map((job) => job.signal),
         },
       )
       return jobs.map((job, index): JobResult => {
