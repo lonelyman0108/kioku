@@ -1875,6 +1875,43 @@ describe('重放分叉', () => {
       ])
     })
 
+    it('存成场景不带去掉的那一步：用户不要了；都去掉了就存不成', async () => {
+      const write = (id: string, uri: string) =>
+        toolCall(id, 'kioku_create', { uri, content: '甲' })
+      const first = harness({
+        loop: 'tools',
+        turns: [reply(null, [write('c1', 'core://a'), write('c2', 'core://b')]), reply('好')],
+      })
+      const conversation = await first.send(USER_TEXT)
+      const failing = harness({
+        loop: 'tools',
+        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        run: diverged(),
+      })
+      const stuck = await failing.send('第二条', conversation)
+      expect(sentToolCalls(stuck).map((c) => c.id)).toEqual(['c1', 'c2'])
+
+      const accepted = acceptAgentDivergence(stuck)
+      expect(sentToolCalls(accepted).map((c) => c.id)).toEqual(['c2'])
+      const made = agentScenario(accepted, new Date('2026-10-31T01:02:03Z'))!
+      if (!made.parsed.ok) throw new Error(made.parsed.errors.join())
+      expect(made.parsed.scenario.steps).toEqual([
+        { kind: 'tool', tool: 'kioku_create', arguments: { uri: 'core://b', content: '甲' } },
+      ])
+
+      const only = harness({
+        loop: 'tools',
+        turns: [reply(null, [write('c1', 'core://a')]), reply('好')],
+      })
+      const single = await only.send(USER_TEXT)
+      const stuckAgain = await harness({
+        loop: 'tools',
+        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        run: diverged(),
+      }).send('第二条', single)
+      expect(agentScenario(acceptAgentDivergence(stuckAgain), new Date())).toBeNull()
+    })
+
     it('turn.end 也可能是去掉的那一步：轨迹同样改', async () => {
       const h = harness({ loop: 'chat', context: GROUP, turns: [reply('好')] })
       const conversation = await h.send(USER_TEXT)

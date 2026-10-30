@@ -783,11 +783,12 @@ export const usageSummary = ({ promptTokens, completionTokens, ms, rounds }: Age
 
 // 下面是存成场景
 
-// 发出去的工具调用，没有执行的（解析失败、停止、上限、请求失败、服务端没有执行）不算：场景的步骤用发出去的参数
+// 发出去的工具调用，没有执行的（解析失败、停止、上限、请求失败、服务端没有执行）不算，接受重放分叉时去掉的那一步也不算
+//（用户不要了）：场景的步骤用发出去的参数
 export const sentToolCalls = (conversation: AgentConversation) =>
   conversation.exchanges
     .flatMap((exchange) => exchange.rounds.flatMap((round) => round.calls))
-    .filter((call) => call.trace !== null && !didNotRun(call.trace.step))
+    .filter((call) => call.trace !== null && !call.trace.removed && !didNotRun(call.trace.step))
 
 export interface AgentScenarioExport {
   parsed: ParsedScenario
