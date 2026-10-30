@@ -10,13 +10,17 @@ import type {
   SpaceOverview,
 } from '@kioku/contracts'
 import { and, eq, inArray, sql } from 'drizzle-orm'
+import { drizzle } from 'drizzle-orm/postgres-js'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memories, settings, spaceMembers } from '../../db/schema'
+import * as schema from '../../db/schema'
+import { apps, memories, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { backfillEmbeddings, embedMemories } from '../../embedding/worker'
+import { memoryServiceForConsole } from '../../memory/context'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -440,6 +444,58 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       .values({ spaceId: ws.spaceId, accountId: editor.accountId, role: 'editor' })
     expect(keysOf(await get<SpaceOverview>(ws.cookie, '/overview'), 'eve-bot')?.active).toBe(0)
     expect(keysOf(await get<SpaceOverview>(ws.cookie, '/overview'), 'owner-bot')?.active).toBe(2)
+  })
+
+  it('editor 打开概览时应用表只读一次；能写哪些应用的应用层照旧只看自己是不是主人', async () => {
+    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    await ws.createApp('owner-bot')
+    const created = await app.request(
+      `${space()}/apps`,
+      jsonRequest(
+        'POST',
+        { slug: 'eve-bot', name: 'eve-bot', runtimeFamily: 'mcp' },
+        { cookie: editor.cookie },
+      ),
+    )
+    expect(created.status).toBe(201)
+    const eveApp = (await created.json()) as { id: string }
+
+    // 另起一个记下每条查询的连接，看概览查了几次应用表（待确认的绑定连带着读应用名，是别的表上的查询）
+    const queries: string[] = []
+    const client = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    const deps = {
+      db: drizzle(client, {
+        schema,
+        casing: 'snake_case',
+        logger: { logQuery: (query: string) => void queries.push(query) },
+      }),
+      cookieSecure: false,
+      masterKey: null,
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+    }
+    try {
+      const res = await createApp(deps).request(`${space()}/overview`, {
+        headers: { cookie: editor.cookie },
+      })
+      expect(res.status).toBe(200)
+      expect(queries.filter((q) => q.includes('from "apps"'))).toHaveLength(1)
+
+      // 概览从读出的全部应用里挑，和别的管理界面接口自己查出来的一样
+      const all = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(apps))
+      const queried = await memoryServiceForConsole(deps, ws.spaceId, editor.accountId, 'editor')
+      const picked = await memoryServiceForConsole(
+        deps,
+        ws.spaceId,
+        editor.accountId,
+        'editor',
+        all,
+      )
+      expect(picked.access.writableAppIds).toEqual(new Set([eveApp.id]))
+      expect(picked.access).toEqual(queried.access)
+    } finally {
+      await client.end()
+    }
   })
 
   it('实例的向量覆盖率与重建只给实例管理员', async () => {
