@@ -108,10 +108,11 @@ function resetDraft() {
 
 // 表单写错了发不出去、JSON 放不回表单时的说明
 const formError = ref<string | null>(null)
-// 这些说明都是上一个调用的，不能留在另一个调用的表单下面
+// 这些说明都是上一个调用的，不能留在另一个调用的表单下面。真实模式的失败说明除外：可能已经执行了一部分，
+// 时间线里又没有记录，清掉就再也看不到了，所以带着调用名留到下一次运行
 watch(targetId, () => {
   formError.value = null
-  failure.value = null
+  if (!real.value) failure.value = null
 })
 function showJson() {
   const made = jsonFromForm(target.value, draft.value, sessionContext.value)
@@ -180,20 +181,23 @@ function clear() {
 
 async function run() {
   if (running.value || unavailable.value) return
-  failure.value = null
   const built = buildStep(target.value, draft.value, sessionContext.value)
   if (!built.ok) {
     formError.value = built.error
     return
   }
   formError.value = null
+  // 真的发出去才清：表单写错了不算下一次运行，真实模式的失败说明还要留着
+  failure.value = null
   const forTarget = target.value.id
   const outcome = await call([built.step], forTarget)
   if (outcome.kind === 'done') shownId.value = null
   else if (outcome.kind === 'failed') {
-    // 运行期间切到了别的调用：说清楚是哪一个的
+    // 说清楚是哪一个调用的：运行期间可能切到了别的调用，真实模式下切走之后这条说明也还留着
     failure.value =
-      targetId.value === forTarget ? outcome.message : `${forTarget}：${outcome.message}`
+      !real.value && targetId.value === forTarget
+        ? outcome.message
+        : `${forTarget}：${outcome.message}`
   }
 }
 

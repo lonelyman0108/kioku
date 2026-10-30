@@ -433,16 +433,25 @@ describe('离开页面前提醒', () => {
 describe('切换调用', () => {
   const calls = sfc(benchCalls)
 
-  it('上一个调用的说明一起清掉：写错的与运行失败的', () => {
+  it('写错的说明总是清掉；运行失败的说明只在回滚模式清掉：真实模式下可能已经执行了一部分', () => {
     const body = blockOf(calls.script, 'watch(targetId, ')
     expect(body).toContain('formError.value = null')
-    expect(body).toContain('failure.value = null')
+    expect(body).toContain('if (!real.value) failure.value = null')
   })
 
-  it('运行期间切走了，失败的说明带上是哪一个调用的', () => {
+  it('失败的说明带上是哪一个调用的：运行期间切走了，或者真实模式下切走之后还留着', () => {
     const body = bodyOf(calls.script, 'run')
     expect(body).toContain('const forTarget = target.value.id')
-    expect(body).toContain('`${forTarget}：${outcome.message}`')
+    expect(body).toMatch(
+      /!real\.value && targetId\.value === forTarget\s+\? outcome\.message\s+: `\$\{forTarget\}：\$\{outcome\.message\}`/,
+    )
+  })
+
+  it('失败的说明留到真的发出下一次运行：表单写错了没有发出去，不算', () => {
+    const body = bodyOf(calls.script, 'run')
+    const clears = body.indexOf('failure.value = null')
+    expect(clears).toBeGreaterThan(body.indexOf('if (!built.ok)'))
+    expect(clears).toBeLessThan(body.indexOf('await call('))
   })
 })
 
