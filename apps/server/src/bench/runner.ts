@@ -257,7 +257,7 @@ export async function runSteps(
   let replayDiverged: BenchRunResult['replayDiverged'] = null
   for (const [index, step] of replay.entries()) {
     const stop = await executor.stopReason()
-    const outcome = stop ? null : await executor.execute(step)
+    const outcome = stop ? null : await executor.execute(step, { replaying: true })
     if (!outcome || outcome.isError) {
       replayDiverged = {
         index,
@@ -269,6 +269,7 @@ export async function runSteps(
   }
 
   let stop = replayDiverged ? null : await executor.stopReason()
+  if (replay.length && !replayDiverged && !stop) await executor.replayDone()
   for (const [index, step] of steps.entries()) {
     const head = base(index, step)
     if (replayDiverged) {

@@ -35,7 +35,10 @@ export interface StepOutcome {
 
 export interface BenchExecutor {
   whoami(): Promise<WhoAmI>
-  execute(step: ResolvedStep): Promise<StepOutcome>
+  // replaying：这一步是重放的，结果不返回，不用列改动
+  execute(step: ResolvedStep, options?: { replaying: boolean }): Promise<StepOutcome>
+  // 重放全部成功之后调一次：第一个真实步骤的改动不含重放的写入。只有回滚模式有重放
+  replayDone(): Promise<void>
   // 后面的步骤还能不能执行：aborted 是根事务已中止，timeout 是超过了总时长。只有回滚模式会停
   stopReason(): Promise<'aborted' | 'timeout' | null>
 }

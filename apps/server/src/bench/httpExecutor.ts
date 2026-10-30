@@ -124,6 +124,8 @@ export function httpExecutor(target: { url: string; key: string }): HttpExecutor
           return rest('whoami', 'GET', '/whoami')
       }
     },
+    // 命令行没有重放
+    replayDone: async () => {},
     stopReason: async () => null,
     close: () => client.close(),
   }

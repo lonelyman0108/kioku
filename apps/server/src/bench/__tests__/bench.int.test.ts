@@ -30,6 +30,7 @@ import { saveExtractionConfig } from '../../extraction/settings'
 import type { Deps } from '../../http/env'
 import type { Jobs } from '../../jobs/queue'
 import { memoryServiceForKey } from '../../memory/context'
+import { MemoryService } from '../../memory/service'
 import { keyToSimulate } from '../../access/simulate'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
@@ -1214,6 +1215,80 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         'bench-group',
       ]) {
         expect(allChanges).not.toContain(content)
+      }
+    })
+
+    it('重放不列改动，全部重放完推进一次水位：第一个真实步骤的改动不含重放的写入', async () => {
+      await saveExtractionConfig(database.db, masterKey, {
+        baseUrl: 'http://127.0.0.1:1/v1',
+        model: 'fake',
+        apiKey: 'x',
+      })
+      const eventChanges = vi.spyOn(MemoryService.prototype, 'eventChanges')
+      try {
+        const result = await run({
+          replay: [
+            {
+              kind: 'tool',
+              tool: 'kioku_create',
+              arguments: { uri: 'notes://replayed', content: '重放写的' },
+            },
+            {
+              kind: 'tool',
+              tool: 'kioku_update',
+              arguments: { uri: 'notes://replayed', priority: 4 },
+            },
+            {
+              kind: 'tool',
+              tool: 'kioku_credential_save',
+              arguments: { identifier: 'nas', name: 'NAS', values: { password: 'hunter2-value' } },
+            },
+            { kind: 'lifecycle', body: TURN_END },
+          ],
+          steps: [
+            tool('kioku_get', { uri: 'notes://replayed' }, { expect: { contains: ['重放写的'] } }),
+            tool('kioku_create', { uri: 'notes://mine', content: '这一步写的' }),
+            lifecycle({ ...TURN_END, user: '这一步说的' }),
+          ],
+        })
+        expect(result.ok).toBe(true)
+        expect(result.replayDiverged).toBeNull()
+        const [read, created, turn] = result.steps.map(changesOf)
+        expect(read!).toEqual({
+          memories: [],
+          hiddenReleased: 0,
+          hiddenOther: 0,
+          credentials: [],
+          subjects: 0,
+          identities: [],
+          turns: 0,
+          turn: null,
+        })
+        expect(created!.memories).toEqual([
+          { type: 'create', uri: 'notes://mine', fields: [], left: false, becameSecret: false },
+        ])
+        expect(turn!).toMatchObject({ subjects: 0, identities: [], turns: 1 })
+        expect(turn!.turn!.user).toBe('这一步说的')
+        // 四步重放只推进一次水位，加上三个真实步骤
+        expect(eventChanges).toHaveBeenCalledTimes(4)
+      } finally {
+        eventChanges.mockRestore()
+      }
+    })
+
+    it('重放分叉时不列改动，也不推进水位', async () => {
+      const eventChanges = vi.spyOn(MemoryService.prototype, 'eventChanges')
+      try {
+        const entry = {
+          kind: 'tool',
+          tool: 'kioku_create',
+          arguments: { uri: 'notes://twice', content: '写两次' },
+        }
+        const result = await run({ replay: [entry, entry], steps: [{ kind: 'whoami' }] })
+        expect(result.replayDiverged).toMatchObject({ index: 1 })
+        expect(eventChanges).not.toHaveBeenCalled()
+      } finally {
+        eventChanges.mockRestore()
       }
     })
 

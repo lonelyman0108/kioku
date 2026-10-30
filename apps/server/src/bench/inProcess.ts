@@ -148,9 +148,10 @@ export function inProcessExecutor(
 
   return {
     whoami: async () => whoamiOf(key),
-    async execute(step) {
+    async execute(step, options) {
       const outcome = await call(step)
-      const changes = await tracker.collect(step)
+      // 重放的结果不返回：列改动是白跑查询，还拉长持锁的时间
+      const changes = options?.replaying ? null : await tracker.collect(step)
       // 这一步记下的都取走（包括列改动时记下的）：被吞掉的错误（例如对象直连读取失败）不能算到下一步头上
       const detail = rollback?.takeDetail() ?? null
       return {
@@ -159,6 +160,11 @@ export function inProcessExecutor(
         vectorSkipped: rollback?.takeVectorMissed() ?? false,
         changes,
       }
+    },
+    // 列一次改动、结果不要，水位就推到了现在。步骤 whoami 只是占位：只有 turn.end 才看这一步的内容
+    async replayDone() {
+      await tracker.collect({ kind: 'whoami' })
+      rollback?.takeDetail()
     },
     stopReason: async () => (rollback ? rollback.stopReason() : null),
   }

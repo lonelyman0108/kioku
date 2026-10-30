@@ -47,17 +47,22 @@ function fakeExecutor(
   options: { scopes?: KeyScopes; stops?: ('aborted' | 'timeout' | null)[] } = {},
 ) {
   const seen: ResolvedStep[] = []
+  const calls: string[] = []
   let stopAt = 0
   const executor: BenchExecutor = {
     whoami: async () =>
       ({ spaceId: 's', app: {}, scopes: options.scopes ?? FULL }) as unknown as WhoAmI,
-    execute: async (step) => {
+    execute: async (step, execution) => {
       seen.push(step)
+      calls.push(execution?.replaying ? '重放' : '步骤')
       return answer(step, seen.length - 1)
+    },
+    replayDone: async () => {
+      calls.push('重放结束')
     },
     stopReason: async () => options.stops?.[stopAt++] ?? null,
   }
-  return { executor, seen }
+  return { executor, seen, calls }
 }
 
 const steps = (...input: z.input<typeof BenchStep>[]) => input.map((s) => BenchStep.parse(s))
@@ -617,6 +622,26 @@ describe('重放', () => {
       tool: 'kioku_create',
       arguments: { uri: 'a://b' },
     })
+  })
+
+  it('告诉执行方式哪些是重放的；全部重放完调一次 replayDone，在第一个真实步骤之前', async () => {
+    const { executor, calls } = fakeExecutor()
+    await run(executor, steps({ kind: 'whoami' }, { kind: 'boot' }), [entry, entry])
+    expect(calls).toEqual(['重放', '重放', '重放结束', '步骤', '步骤'])
+  })
+
+  it('没有重放、重放分叉或者重放之后已经停了时，不调 replayDone', async () => {
+    const none = fakeExecutor()
+    await run(none.executor, steps({ kind: 'whoami' }))
+    expect(none.calls).toEqual(['步骤'])
+
+    const diverged = fakeExecutor(() => errorOutcome('URI 已被占用'))
+    await run(diverged.executor, steps({ kind: 'whoami' }), [entry])
+    expect(diverged.calls).toEqual(['重放'])
+
+    const stopped = fakeExecutor(() => textOutcome('好'), { stops: [null, 'aborted'] })
+    await run(stopped.executor, steps({ kind: 'whoami' }), [entry])
+    expect(stopped.calls).toEqual(['重放'])
   })
 })
 
