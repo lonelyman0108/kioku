@@ -1,3 +1,4 @@
+import { HTTPException } from 'hono/http-exception'
 import { secureHeaders } from 'hono/secure-headers'
 
 import { sameOriginForCookies } from './auth/csrf'
@@ -26,6 +27,14 @@ import { spaceRoutes } from './routes/spaces'
 import { subjectRoutes } from './routes/subjects'
 import { whoamiRoutes } from './routes/whoami'
 import { VERSION } from './version'
+
+// hono 在读请求时判出的问题：请求体不是合法的 JSON、表单解析不了（400），请求体超过上限（413），
+// Content-Type 和接口收的不一样、或者有请求体却没写 Content-Type（415）。它给的提示是英文，按状态码换成中文
+const REQUEST_ERRORS: Partial<Record<number, string>> = {
+  400: '请求格式错误',
+  413: '请求体太大',
+  415: '请求体的类型（Content-Type）不对',
+}
 
 // 应用本身与监听端口分开，测试直接调 app.request，不用起服务
 export function createApp(deps: Deps) {
@@ -71,9 +80,13 @@ export function createApp(deps: Deps) {
   app.route('/v1', bindingRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
-  // 业务规则错误带着自己的状态码；其余错误不把内部信息透给调用方
+  // 业务规则错误带着自己的状态码；请求本身的问题（hono 抛出的 4xx）按它的状态码返回，是调用方的错，不打堆栈；
+  // 其余错误不把内部信息透给调用方
   app.onError((err, c) => {
     if (err instanceof MemoryError) return c.json({ error: err.message }, err.status)
+    if (err instanceof HTTPException && err.status < 500) {
+      return c.json({ error: REQUEST_ERRORS[err.status] ?? '请求不合法' }, err.status)
+    }
     console.error(err)
     return c.json({ error: '服务内部错误' }, 500)
   })

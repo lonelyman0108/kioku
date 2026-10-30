@@ -1018,6 +1018,30 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(((await res.json()) as { error: string }).error).toBe('文件超过 32 MB 的上限')
   })
 
+  it('表单解析不了时返回 400，传的不是表单时返回 415：和别的错误同样的格式，不打堆栈', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const post = (contentType: string, body: string) =>
+      source.request('/v1/spaces/import/inspect', {
+        method: 'POST',
+        headers: { ...sameSite, cookie: alice.cookie, 'content-type': contentType },
+        body,
+      })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      for (const type of ['multipart/form-data; boundary=kioku-boundary', 'multipart/form-data']) {
+        const res = await post(type, 'not a form at all')
+        expect(res.status).toBe(400)
+        expect(await res.json()).toEqual({ error: '请求格式错误' })
+      }
+      const json = await post('application/json', JSON.stringify({ passphrase: PASSPHRASE }))
+      expect(json.status).toBe(415)
+      expect(await json.json()).toEqual({ error: '请求体的类型（Content-Type）不对' })
+      expect(logged).not.toHaveBeenCalled()
+    } finally {
+      logged.mockRestore()
+    }
+  })
+
   it('超大的上传马上 413：先看大小、读完表单才拿名额，不排队也不占名额', async () => {
     const alice = await bootstrap(source, 'alice')
     // 正在做的与排队的名额都满了：先拿名额的话就是 429
