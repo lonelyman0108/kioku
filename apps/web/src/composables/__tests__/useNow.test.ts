@@ -1,7 +1,7 @@
-import { effectScope } from 'vue'
+import { effectScope, ref } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 
-import { purgeNote } from '../../retention'
+import { isExpired } from '../../time'
 import { useNow } from '../useNow'
 
 describe('每分钟走一次的现在', () => {
@@ -13,28 +13,48 @@ describe('每分钟走一次的现在', () => {
     vi.useRealTimers()
   })
 
-  it('每过一分钟换成新的时间，组件卸载（作用域停下）之后不再走', () => {
+  // 组件的启用状态由调用方给：这里不在组件里，直接用一个开关
+  const start = (intervalMs = 60_000, active = ref(true)) => {
     const scope = effectScope()
-    const now = scope.run(() => useNow())!
-    expect(now.value.toISOString()).toBe('2026-10-30T12:00:00.000Z')
+    const now = scope.run(() => useNow(intervalMs, active))!
+    return { scope, now, active }
+  }
+  const at = (now: { value: Date }) => now.value.toISOString()
+
+  it('每过一分钟换成新的时间，组件卸载（作用域停下）之后不再走', () => {
+    const { scope, now } = start()
+    expect(at(now)).toBe('2026-10-30T12:00:00.000Z')
     vi.advanceTimersByTime(59_000)
-    expect(now.value.toISOString()).toBe('2026-10-30T12:00:00.000Z')
+    expect(at(now)).toBe('2026-10-30T12:00:00.000Z')
     vi.advanceTimersByTime(1_000)
-    expect(now.value.toISOString()).toBe('2026-10-30T12:01:00.000Z')
+    expect(at(now)).toBe('2026-10-30T12:01:00.000Z')
     scope.stop()
     vi.advanceTimersByTime(10 * 60_000)
-    expect(now.value.toISOString()).toBe('2026-10-30T12:01:00.000Z')
+    expect(at(now)).toBe('2026-10-30T12:01:00.000Z')
   })
 
-  it('页面开着过夜，按它算的倒计时跟着变', () => {
-    const scope = effectScope()
-    const now = scope.run(() => useNow())!
-    const retention = { days: 30, pausedUntil: null }
-    // 29 天又 12 小时前删的：还剩半天
-    const deletedAt = new Date(Date.now() - 29.5 * 86_400_000).toISOString()
-    expect(purgeNote(deletedAt, retention, now.value)).toBe('约 1 天后永久清除')
-    vi.advanceTimersByTime(13 * 3_600_000)
-    expect(purgeNote(deletedAt, retention, now.value)).toBe('即将永久清除')
+  it('在 KeepAlive 里被切走时停下，切回来马上换成现在再接着走', () => {
+    const { scope, now, active } = start(30_000)
+    vi.advanceTimersByTime(30_000)
+    expect(at(now)).toBe('2026-10-30T12:00:30.000Z')
+    active.value = false
+    vi.advanceTimersByTime(10 * 60_000)
+    expect(at(now)).toBe('2026-10-30T12:00:30.000Z')
+    active.value = true
+    expect(at(now)).toBe('2026-10-30T12:10:30.000Z')
+    vi.advanceTimersByTime(30_000)
+    expect(at(now)).toBe('2026-10-30T12:11:00.000Z')
+    scope.stop()
+  })
+
+  it('页面一直开着，按它算的「已过期」到点就变', () => {
+    const { scope, now } = start(30_000)
+    const validTo = new Date(Date.now() + 45_000).toISOString()
+    expect(isExpired(validTo, now.value)).toBe(false)
+    vi.advanceTimersByTime(30_000)
+    expect(isExpired(validTo, now.value)).toBe(false)
+    vi.advanceTimersByTime(30_000)
+    expect(isExpired(validTo, now.value)).toBe(true)
     scope.stop()
   })
 })
