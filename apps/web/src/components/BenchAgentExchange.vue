@@ -53,6 +53,9 @@ const PRE_CLASS =
         <pre :class="PRE_CLASS">{{ round.reasoning }}</pre>
       </details>
       <p v-if="round.text" class="wrap-anywhere whitespace-pre-wrap">{{ round.text }}</p>
+      <p v-else-if="round.refusal" class="wrap-anywhere whitespace-pre-wrap text-warning">
+        模型拒绝了：{{ round.refusal }}
+      </p>
       <p v-else-if="!round.calls.length" class="text-muted">（模型没有返回文字）</p>
 
       <div

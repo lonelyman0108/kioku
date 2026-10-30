@@ -118,6 +118,10 @@ const reasoningOf = (message: BenchAgentMessage): string | null => {
   return typeof reasoning === 'string' && reasoning ? reasoning : null
 }
 
+// OpenAI 的 refusal 字段：模型拒绝回答时 content 是 null，原因写在这里
+const refusalOf = ({ refusal }: BenchAgentMessage): string | null =>
+  typeof refusal === 'string' && refusal.trim() ? refusal : null
+
 // 按 UTF-16 码元截断，和契约的 max 同一个数法。不切开代理对：落单的代理项不是合法的文字
 export function clipText(text: string, limit: number): string {
   if (text.length <= limit) return text
@@ -162,6 +166,8 @@ export interface AgentToolTrace {
 
 export interface AgentRound {
   text: string
+  // 模型拒绝回答的原因：只有没有文字也没有工具调用时才有
+  refusal: string | null
   reasoning: string | null
   finishReason: string | null
   model: string
@@ -180,7 +186,7 @@ export const agentPhaseLabels: Record<AgentPhase, string> = {
   turnEnd: '发 turn.end…',
 }
 
-// 这条消息怎么结束的。done：模型给了最终回复；empty：模型没有文字也没有工具调用；stopped：用户停止；limit：到了轮数上限；
+// 这条消息怎么结束的。done：模型给了最终回复；empty：模型没有文字也没有工具调用（包括拒绝回答）；stopped：用户停止；limit：到了轮数上限；
 // blocked：写入放不进重放日志；toolFailed：工具的运行请求失败；diverged：重放分叉；
 // modelFailed：请求模型失败；lifecycleFailed：生命周期事件的运行请求失败；abandoned：换了应用、Key 或模式
 export type AgentEnd =
@@ -470,8 +476,8 @@ function emptyReplyText(finishReason: string | null): string {
 // - 请求模型失败或被停止时不留半截。模型回复过的话，做过的都留着：这时每个 tool_call 都有了结果，不用再补，
 //   真实模式下工具已经写了，模型要知道。模型一次都没有回复时回到这条消息之前：这时什么都没做，
 //   留着的话下一句就成了连着两条用户消息，有的接口不接受，模型也没看过它；界面把文字放回输入框，可以再发一次。
-// - 模型没有文字也没有工具调用（推理模型把额度都用在思考上时常见）：这条空的助手消息不进历史，严格的上游不接受，
-//   留着的话之后每一轮都 400。没有别的回复时同样回到这条消息之前；调过工具的话历史以 tool 消息结束，下一句照样合法。
+// - 模型没有文字也没有工具调用（推理模型把额度都用在思考上时常见，拒绝回答时也是）：这条空的助手消息不进历史，严格的上游
+//   不接受，留着的话之后每一轮都 400。没有别的回复时同样回到这条消息之前；调过工具的话历史以 tool 消息结束，下一句照样合法。
 // 停止之后不再发新的请求；已经发出去的运行等它回来，结果照样记下（真实模式下它可能已经写了）
 export async function sendAgentMessage(
   start: AgentConversation,
@@ -613,6 +619,7 @@ export async function sendAgentMessage(
     }))
     const answered: AgentRound = {
       text: empty ? '' : replyText,
+      refusal: empty ? refusalOf(turn.message) : null,
       reasoning: reasoningOf(turn.message),
       finishReason: turn.finishReason,
       model: turn.model,
@@ -632,7 +639,12 @@ export async function sendAgentMessage(
     })
     if (!calls.length) {
       reply = answered.text
-      if (empty) emptyNotice = sentences(emptyReplyText(turn.finishReason), afterReply())
+      if (empty) {
+        // 拒绝了：原因在轨迹上，再发一次多半还是一样，不邀请重发
+        emptyNotice = answered.refusal
+          ? sentences('模型拒绝了，原因见上面', working.length ? KEPT_IN_HISTORY : '')
+          : sentences(emptyReplyText(turn.finishReason), afterReply())
+      }
       break
     }
 

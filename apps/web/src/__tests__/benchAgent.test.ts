@@ -2201,6 +2201,95 @@ describe('模型没有文字也没有工具调用', () => {
   })
 })
 
+describe('模型拒绝回答：content 是空的，refusal 有文字', () => {
+  const refused = (content: unknown = null, refusal: unknown = '这个不能帮你') =>
+    reply(content, [], { refusal })
+
+  it('轨迹里显示拒绝的原因，提示说模型拒绝了，不说没有返回文字，也不邀请重发；不进历史', async () => {
+    const h = harness({ loop: 'tools', turns: [refused()] })
+    const done = await h.send(USER_TEXT)
+    expect(last(done).rounds[0]!.refusal).toBe('这个不能帮你')
+    expect(last(done).rounds[0]!.text).toBe('')
+    expect(last(done).notice).toBe('模型拒绝了，原因见上面。')
+    expect(last(done).end).toBe('empty')
+    expect(noticeColor(last(done).end)).toBe('warning')
+    expect(last(done).inHistory).toBe(false)
+    expect(done.messages).toEqual([])
+  })
+
+  it.each([
+    ['content 是空串', ''],
+    ['content 只有空白', ' \n'],
+    ['content 是空的分段数组', []],
+  ])('%s：一样算拒绝', async (_name, content) => {
+    const h = harness({ loop: 'tools', turns: [refused(content)] })
+    expect(last(await h.send(USER_TEXT)).rounds[0]!.refusal).toBe('这个不能帮你')
+  })
+
+  it('下一句接得上：模型没有看到被拒绝的那条', async () => {
+    const h = harness({ loop: 'tools', turns: [refused(), reply('好')] })
+    const first = await h.send(USER_TEXT)
+    const done = await h.send('换个问法', first)
+    expect(h.turnRequests[1]!.filter((m) => m.role === 'user')).toEqual([
+      { role: 'user', content: '换个问法' },
+    ])
+    expect(contents(done.messages)).toEqual(['换个问法', '好'])
+  })
+
+  it('已经调过工具才拒绝：做过的留着，说可以接着说下一句，拒绝的那条不在历史里', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [toolCall('c1', 'kioku_list')]), refused()],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(last(done).notice).toBe('模型拒绝了，原因见上面。做过的都留在历史里，可以接着说下一句。')
+    expect(last(done).inHistory).toBe(true)
+    expect(done.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
+    expect(last(done).rounds.map((r) => r.refusal)).toEqual([null, '这个不能帮你'])
+  })
+
+  it('chat：拒绝了不发 turn.end，轨迹里说明', async () => {
+    const h = harness({ loop: 'chat', context: GROUP, turns: [refused()] })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
+    expect(last(done).turnEndNote).toContain('没有发 turn.end')
+  })
+
+  it('有文字的回复带着 refusal 字段：正常的回复，进历史，不算拒绝', async () => {
+    const h = harness({ loop: 'tools', turns: [refused('这是回答')] })
+    const done = await h.send(USER_TEXT)
+    expect(last(done).end).toBe('done')
+    expect(last(done).notice).toBeNull()
+    expect(last(done).rounds[0]!.refusal).toBeNull()
+    expect(last(done).rounds[0]!.text).toBe('这是回答')
+    expect(last(done).inHistory).toBe(true)
+  })
+
+  it('带工具调用时也不算拒绝：工具照常执行', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [toolCall('c1', 'kioku_list')], { refusal: '不该看它' }), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs).toHaveLength(1)
+    expect(last(done).rounds[0]!.refusal).toBeNull()
+    expect(last(done).end).toBe('done')
+  })
+
+  it.each([
+    ['null', null],
+    ['空串', ''],
+    ['只有空白', '  '],
+    ['不是字符串', { reason: 'x' }],
+  ])('refusal 是%s：还是模型没有返回文字', async (_name, refusal) => {
+    const h = harness({ loop: 'tools', turns: [reply(null, [], { refusal })] })
+    const done = await h.send(USER_TEXT)
+    expect(last(done).rounds[0]!.refusal).toBeNull()
+    expect(last(done).notice).toContain('模型没有返回文字')
+    expect(last(done).notice).toContain('可以再发一次')
+  })
+})
+
 describe('用量', () => {
   it('累计 prompt、completion token 与耗时，跨轮跨消息', async () => {
     const h = harness({
@@ -2220,6 +2309,7 @@ describe('用量', () => {
   it('一轮的显示：模型、用量、耗时；上游没给用量时不说成用了 0 个；被截断时说出来', () => {
     const round = {
       text: '',
+      refusal: null,
       reasoning: null,
       finishReason: 'stop',
       model: MODEL,

@@ -1301,6 +1301,15 @@ describe('模型对话的页面', () => {
     expect(textOf(withDirective(nodes, 'else-if', '!round.calls.length'))).toContain(
       '模型没有返回文字',
     )
+    // 拒绝回答时显示原因，不说没有返回文字
+    const refusal = withDirective(nodes, 'else-if', 'round.refusal')
+    expect(textOf(refusal)).toContain('模型拒绝了')
+    expect(shownIn(refusal)).toEqual(['round.refusal'])
+    const siblings = round.children!.filter((n) => n.type === ELEMENT)
+    expect(siblings.indexOf(refusal)).toBeGreaterThan(siblings.indexOf(withIf(nodes, 'round.text')))
+    expect(siblings.indexOf(refusal)).toBeLessThan(
+      siblings.indexOf(withDirective(nodes, 'else-if', '!round.calls.length')),
+    )
     expect(shownIn(round)).toContain('roundMeta(round)')
   })
 
