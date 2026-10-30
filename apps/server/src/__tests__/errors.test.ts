@@ -1,4 +1,7 @@
+import { inspect } from 'node:util'
+
 import { ErrorResponse } from '@kioku/contracts'
+import { DrizzleQueryError } from 'drizzle-orm'
 import { HTTPException } from 'hono/http-exception'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
@@ -37,6 +40,19 @@ app.get('/v1/test/explained', () => {
 })
 app.get('/v1/test/unavailable', () => {
   throw new HTTPException(503, { message: 'upstream down' })
+})
+// drizzle 的错误：message 与字段带着 SQL 与全部参数，数据库报的错在 cause 里
+const SQL_TEXT = 'insert into "memories" ("content") values ($1)'
+const PARAM = '不该进日志的记忆正文'
+app.post('/v1/test/write', () => {
+  throw new DrizzleQueryError(
+    SQL_TEXT,
+    [PARAM],
+    Object.assign(new Error('new row violates check constraint "memories_priority_check"'), {
+      code: '23514',
+      constraint_name: 'memories_priority_check',
+    }),
+  )
 })
 
 const post = (
@@ -116,6 +132,10 @@ describe('请求本身有问题时的回复', () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(await errorOf(await app.request('/v1/test/unavailable'), 500)).toBe('服务内部错误')
     expect(logged).toHaveBeenCalledOnce()
+    expect(logged.mock.calls[0]![1]).toMatchObject({
+      message: 'upstream down',
+      stack: expect.stringContaining('errors.test.ts'),
+    })
   })
 
   it('请求体合规时照常往下走；服务端自己出的错照旧是 500「服务内部错误」，记下堆栈', async () => {
@@ -127,5 +147,21 @@ describe('请求本身有问题时的回复', () => {
     )
     expect(await errorOf(res, 500)).toBe('服务内部错误')
     expect(logged).toHaveBeenCalledOnce()
+    expect(logged.mock.calls[0]![1]).toMatchObject({ stack: expect.stringContaining('TypeError') })
+  })
+
+  it('写库出错：500，日志只有 SQLSTATE、约束名与说明，没有 SQL 与参数，也不打堆栈', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(await errorOf(await post('/v1/test/write', ''), 500)).toBe('服务内部错误')
+    expect(logged).toHaveBeenCalledOnce()
+    const text = inspect(logged.mock.calls, { depth: null })
+    for (const leaked of [PARAM, SQL_TEXT, 'Failed query', 'stack']) {
+      expect(text).not.toContain(leaked)
+    }
+    expect(logged.mock.calls[0]![1]).toEqual({
+      code: '23514',
+      constraint: 'memories_priority_check',
+      message: 'new row violates check constraint "memories_priority_check"',
+    })
   })
 })

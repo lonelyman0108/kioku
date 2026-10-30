@@ -4,6 +4,7 @@ import { secureHeaders } from 'hono/secure-headers'
 
 import { sameOriginForCookies } from './auth/csrf'
 import { requireConsole } from './auth/middleware'
+import { logInternalError } from './db/client'
 import type { Deps } from './http/env'
 import { router } from './http/openapi'
 import { isApiPath, mountWeb } from './http/web'
@@ -100,11 +101,11 @@ export function createApp(deps: Deps) {
   // 测试台的响应用到了 TurnEndEvent 这些接入方的组件
   app.route('/v1', benchRoutes(deps))
   // 业务规则错误带着自己的状态码；请求本身的问题（依赖库抛出的 4xx）是调用方的错，不打堆栈（见 requestError）；
-  // 其余错误不把内部信息透给调用方
+  // 其余错误不把内部信息透给调用方，日志也不带 SQL 与参数（参数可能就是记忆正文，见 logInternalError）
   app.onError((err, c) => {
     if (err instanceof MemoryError) return c.json({ error: err.message }, err.status)
     if (err instanceof HTTPException && err.status < 500) return requestError(c, err)
-    console.error(err)
+    logInternalError('接口内部错误', err)
     return c.json({ error: '服务内部错误' }, 500)
   })
   // /v1 下没有匹配的路由（路径不存在，或者路径对、方法不对）时和别的错误一样回 { error }；
