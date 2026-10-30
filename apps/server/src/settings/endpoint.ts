@@ -80,6 +80,27 @@ export function openApiKey(
   }
 }
 
+// 上游可能把收到的 Key 写进报错。JSON 或网址里的写法可能不同（有的 JSON 还把 / 转义成 \/），都换掉。
+// fetch 会去掉 Header 值结尾的空白：保存的 Key 带着结尾的换行时请求照样发得出去，上游见到的是去掉之后的，这种写法也换掉。
+// 长的先换：短的是长的一部分，先换短的会在 *** 后面留下尾巴
+export function withoutKey(text: string, apiKey: string | null): string {
+  if (!apiKey) return text
+  const forms = [apiKey, apiKey.trim()].filter(Boolean).flatMap((key) => {
+    const json = JSON.stringify(key).slice(1, -1)
+    return [key, json, json.replaceAll('/', '\\/'), encodeURIComponent(key)]
+  })
+  return [...new Set(forms)]
+    .sort((a, b) => b.length - a.length)
+    .reduce((out, form) => out.replaceAll(form, '***'), text)
+}
+
+// fetch 自己报的错（连不上，或者请求头不合法）。只取错误类别，不用错误自己的文字：Key 里有换行时，它把整个请求头写进错误。
+// 也不把原来的错误放进 cause：cause 会进日志，后台任务的出错原因也可能取它
+export function fetchFailure(what: string, err: unknown): string {
+  const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
+  return `连不上${what}${typeof code === 'string' ? `（${code}）` : ''}：检查实例设置里的接口地址与 Key`
+}
+
 // 同一个主机（协议、主机名与端口都相同）才能沿用已保存的 Key。只认 http 与 https：
 // 别的协议的 origin 都是 "null"，按字符串比较会把不同的主机当成同一个
 export function sameOrigin(a: string, b: string): boolean {

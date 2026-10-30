@@ -1,3 +1,5 @@
+import { inspect } from 'node:util'
+
 import { describe, expect, it } from 'vitest'
 
 import { EMBEDDING_DIMENSIONS } from '../../db/schema'
@@ -51,6 +53,80 @@ describe('OpenAI 兼容嵌入客户端', () => {
       fetchImpl,
     )
     await expect(embedder.embed(['a'])).rejects.toThrow('HTTP 429')
+  })
+
+  it('上游把 Key 写进报错时换掉，先换再截断，Key 跨在截断处也不留半截', async () => {
+    const embed = (text: string, apiKey = 'sk-secret') =>
+      openAiEmbedder(
+        { baseUrl: 'https://e.example.com/v1', model: 'm', apiKey },
+        (async () => new Response(text, { status: 401 })) as unknown as typeof fetch,
+      ).embed(['a'])
+    await expect(embed('无效的 Key：sk-secret！')).rejects.toThrow(
+      '嵌入接口返回 HTTP 401：无效的 Key：***！',
+    )
+    // 保存的带着结尾的换行，上游见到的是 fetch 去掉之后的
+    await expect(embed('无效的 Key：sk-secret！', 'sk-secret\n')).rejects.toThrow(
+      '嵌入接口返回 HTTP 401：无效的 Key：***！',
+    )
+    const cut = (await embed(`${'x'.repeat(295)}sk-secret${'y'.repeat(100)}`).catch(
+      (e: unknown) => e,
+    )) as Error
+    expect(cut.message).toContain('x'.repeat(295))
+    expect(cut.message).not.toContain('sk-')
+  })
+
+  describe('fetch 报的错', () => {
+    const pasted = openAiEmbedder({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+      apiKey: 'sk-pasted\nwith-newline',
+    })
+    const expectNoKey = (err: unknown) => {
+      const text = inspect(err, { depth: null })
+      expect(text).not.toContain('sk-pasted')
+      expect(text).not.toContain('with-newline')
+    }
+
+    it('Key 中间有换行：真实的 fetch 把整个请求头写进错误，这里报连不上，错误和 cause 里都没有 Key', async () => {
+      const err = (await pasted.embed(['a']).catch((e: unknown) => e)) as Error
+      expect(err.message).toContain('连不上嵌入接口')
+      expectNoKey(err)
+    })
+
+    it('请求已经取消时，真实的 fetch 还是先报请求头不合法：同样不带 Key', async () => {
+      const deadline = new AbortController()
+      deadline.abort()
+      const err = await pasted.embed(['a'], { signal: deadline.signal }).catch((e: unknown) => e)
+      expect((err as Error).message).toBe('调用方的总时限到了，或者服务要停了')
+      expectNoKey(err)
+    })
+
+    it('连不上时带错误类别，不带错误原文', async () => {
+      const embedder = openAiEmbedder(
+        { baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: 'sk-secret' },
+        (async () => {
+          throw Object.assign(new TypeError('fetch failed sk-secret'), {
+            cause: Object.assign(new Error('connect sk-secret'), { code: 'ECONNREFUSED' }),
+          })
+        }) as unknown as typeof fetch,
+      )
+      await expect(embedder.embed(['a'])).rejects.toThrow(
+        '连不上嵌入接口（ECONNREFUSED）：检查实例设置里的接口地址与 Key',
+      )
+    })
+
+    it('到了这个接口的时限：说清等了多久', async () => {
+      const embedder = openAiEmbedder(
+        { baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: null },
+        (async (_url: string, init: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init.signal!.addEventListener('abort', () => reject(init.signal!.reason as Error))
+          })) as unknown as typeof fetch,
+      )
+      await expect(embedder.embed(['a'], { timeoutMs: 20 })).rejects.toThrow(
+        '嵌入接口 1 秒内没有返回',
+      )
+    })
   })
 })
 
@@ -110,7 +186,7 @@ describe('一组渠道按顺序回退', () => {
   it('都失败时把各个渠道的错误一起报出来', async () => {
     const { embedder } = await run(['auth', 'offline'])
     await expect(embedder.embed(['a'])).rejects.toThrow(
-      /所有渠道都失败了。渠道 1：嵌入接口返回 HTTP 401.*；渠道 2：fetch failed/,
+      /所有渠道都失败了。渠道 1：嵌入接口返回 HTTP 401.*；渠道 2：连不上嵌入接口/,
     )
   })
 })

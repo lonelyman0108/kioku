@@ -1,5 +1,5 @@
 import { EMBEDDING_DIMENSIONS } from '../db/schema'
-import type { EndpointConfig } from '../settings/endpoint'
+import { fetchFailure, withoutKey, type EndpointConfig } from '../settings/endpoint'
 
 // signal 是调用方的总时限（例如召回不能等太久）；timeoutMs 是每个接口最多等多久，不填时 30 秒
 export interface EmbedOptions {
@@ -38,9 +38,16 @@ export function openAiEmbedder(config: EmbeddingConfig, fetchImpl: typeof fetch 
           encoding_format: 'float',
         }),
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
+      }).catch((err: unknown) => {
+        // 取消了也不照原样抛：请求头不合法的错误比取消先报出来，文字里带着 Key（见 fetchFailure）
+        if (timeout.aborted) throw new Error(`嵌入接口 ${Math.ceil(timeoutMs / 1000)} 秒内没有返回`)
+        if (signal?.aborted) throw new Error('调用方的总时限到了，或者服务要停了')
+        throw new Error(fetchFailure('嵌入接口', err))
       })
       if (!res.ok) {
-        throw new Error(`嵌入接口返回 HTTP ${res.status}：${(await res.text()).slice(0, 300)}`)
+        // 先去掉 Key 再截断：先截断的话，截在 Key 中间时留下的半截就换不掉了
+        const text = withoutKey(await res.text(), config.apiKey).slice(0, 300)
+        throw new Error(`嵌入接口返回 HTTP ${res.status}：${text}`)
       }
       const body = (await res.json()) as { data?: { index: number; embedding: number[] }[] }
       const data = [...(body.data ?? [])].sort((a, b) => a.index - b.index)

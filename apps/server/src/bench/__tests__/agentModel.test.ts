@@ -470,6 +470,33 @@ describe('报错', () => {
     expect(message).toBe('模型接口返回 HTTP 401：无效的 Key：***！')
   })
 
+  it.each([
+    ['结尾的换行被 fetch 去掉了', 'sk-abc\n', 'sk-abc'],
+    ['结尾的回车换行被 fetch 去掉了', 'sk-abc\r\n', 'sk-abc'],
+    ['开头与结尾都有空白', ' sk-abc\t', 'sk-abc'],
+    ['带着结尾换行的 JSON 写法', 'sk-abc\n', 'sk-abc\\n'],
+    ['带着结尾换行的网址写法', 'sk-abc\n', 'sk-abc%0A'],
+    ['去掉空白之后的 JSON 写法', 'sk"abc\n', 'sk\\"abc'],
+    ['去掉空白之后的网址写法', 'sk+abc\n', 'sk%2Babc'],
+    ['JSON 写法比原样长、又包含原样', 'sk\\', 'sk\\\\'],
+    ['JSON 把 / 转义', 'sk/abc', 'sk\\/abc'],
+    ['去掉空白之后 JSON 把 / 转义', 'sk/abc\n', 'sk\\/abc'],
+  ])('保存的 Key 和上游写的不一样（%s）时也换掉', async (_, apiKey, form) => {
+    const message = await failure(() => new Response(`无效的 Key：${form}！`, { status: 401 }), {
+      ...CONFIG,
+      apiKey,
+    })
+    expect(message).toBe('模型接口返回 HTTP 401：无效的 Key：***！')
+  })
+
+  it('Key 只有空白：去掉空白之后是空串，不当成一种写法', async () => {
+    const message = await failure(() => new Response('上游不高兴', { status: 401 }), {
+      ...CONFIG,
+      apiKey: ' ',
+    })
+    expect(message).toBe('模型接口返回 HTTP 401：上游不高兴')
+  })
+
   it('先去掉 Key 再截断：Key 正好跨在截断处时不留下半截', async () => {
     const message = await failure(
       () => new Response(`${'x'.repeat(495)}${API_KEY}${'y'.repeat(1000)}`, { status: 500 }),

@@ -21,6 +21,7 @@ import {
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { backfillJob, embedJobs, pruneJob, switchJob, type Retry } from '../jobs'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
+import { saveActiveEmbedding } from '../settings'
 import { settingsEmbedderSource, staticEmbedderSource, type EmbedderSource } from '../source'
 
 describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
@@ -508,5 +509,33 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(c!.ok).toBe(true)
     expect(c!.similarity).toBeLessThan(0.99)
     expect(d).toMatchObject({ ok: false, error: expect.stringContaining('维度是 768') })
+  })
+
+  // 换一个依赖建的应用，请求连通性测试
+  const testWith = (deps: { db?: Database['db']; masterKey?: Buffer | null }) =>
+    createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey,
+      embedder: source,
+      jobs,
+      ...deps,
+    }).request('/v1/settings/embedding/test', jsonRequest('POST', {}, { cookie: ws.cookie }))
+
+  it('已经存着的 Key 中间有换行（fetch 把整个请求头写进错误）：连通性测试报连不上，不带 Key', async () => {
+    await saveActiveEmbedding(database.db, masterKey, {
+      model: 'm1',
+      channels: [channel('a', 'm1', { apiKey: 'sk-pasted\nwith-newline' })],
+    })
+    const res = await testWith({})
+    expect(res.status).toBe(200)
+    const { active } = (await res.json()) as EmbeddingTestResult
+    expect(active![0]).toMatchObject({
+      ok: false,
+      error: expect.stringContaining('连不上嵌入接口'),
+    })
+    expect(active![0]!.error).not.toContain('sk-pasted')
+    expect(active![0]!.error).not.toContain('with-newline')
+    expect(server.requests).toEqual([])
   })
 })

@@ -10,6 +10,7 @@ import { createApp } from '../../app'
 import type { Database } from '../../db/client'
 import { settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import { saveExtractionConfig } from '../../extraction/settings'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
@@ -17,6 +18,17 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
   let database: Database
   let app: ReturnType<typeof createApp>
   let ws: Workspace
+  const masterKey = randomBytes(32)
+  // 换一个依赖建的应用：主密钥不同、数据库出错这些情况
+  const appWith = (deps: { db?: Database['db']; masterKey?: Buffer | null }) =>
+    createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey,
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+      ...deps,
+    })
   // 本机的假接口：记下收到的 Key，按路径返回成功或失败
   let server: Server
   let baseUrl: string
@@ -24,17 +36,17 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
 
   beforeAll(async () => {
     database = await openTestDatabase()
-    app = createApp({
-      db: database.db,
-      cookieSecure: false,
-      masterKey: randomBytes(32),
-      embedder: staticEmbedderSource(null),
-      jobs: null,
-    })
+    app = appWith({})
     server = createServer((req, res) => {
       seen.push({ path: req.url ?? '', authorization: req.headers.authorization })
       if (req.url?.startsWith('/broken/')) {
         res.writeHead(502).end('upstream down')
+        return
+      }
+      // 把收到的 Key 写进报错
+      if (req.url?.startsWith('/echo/')) {
+        const key = (req.headers.authorization ?? '').replace('Bearer ', '')
+        res.writeHead(401).end(`Incorrect API key provided: ${key}`)
         return
       }
       res.writeHead(200, { 'content-type': 'application/json' }).end(
@@ -128,6 +140,27 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
     expect(failed.error).toContain('HTTP 502')
   })
 
+  it('连通性测试时上游把 Key 写进报错：模型报的错看得到，Key 换掉', async () => {
+    await call('PUT', '', { baseUrl: `${baseUrl}/echo/v1`, model: 'm', apiKey: 'sk-extract' })
+    const failed = await test()
+    expect(failed.ok).toBe(false)
+    expect(failed.error).toBe('抽取模型返回 HTTP 401：Incorrect API key provided: ***')
+  })
+
+  it('已经存着的 Key 中间有换行（fetch 把整个请求头写进错误）：连通性测试报连不上，不带 Key', async () => {
+    await saveExtractionConfig(database.db, masterKey, {
+      baseUrl: `${baseUrl}/v1`,
+      model: 'm',
+      apiKey: 'sk-pasted\nwith-newline',
+    })
+    const failed = await test()
+    expect(failed.ok).toBe(false)
+    expect(failed.error).toContain('连不上抽取模型')
+    expect(failed.error).not.toContain('sk-pasted')
+    expect(failed.error).not.toContain('with-newline')
+    expect(seen).toEqual([])
+  })
+
   it('接口地址只收 http 与 https：别的协议的 origin 都是 "null"，会被当成同一个主机', async () => {
     const res = await call('PUT', '', {
       baseUrl: 'ftp://a.example.com/v1',
@@ -139,13 +172,7 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
   })
 
   it('保存 Key 需要主密钥', async () => {
-    const bare = createApp({
-      db: database.db,
-      cookieSecure: false,
-      masterKey: null,
-      embedder: staticEmbedderSource(null),
-      jobs: null,
-    })
+    const bare = appWith({ masterKey: null })
     const res = await bare.request(
       '/v1/settings/extraction',
       jsonRequest(

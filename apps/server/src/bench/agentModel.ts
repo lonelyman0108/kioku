@@ -7,7 +7,7 @@ import type {
   BenchTool,
 } from '@kioku/contracts'
 
-import type { EndpointConfig } from '../settings/endpoint'
+import { fetchFailure, withoutKey, type EndpointConfig } from '../settings/endpoint'
 
 // 模型代理的一次请求：OpenAI 兼容接口、带工具。和抽取用的 ChatModel 分开：这里消息要原样转发（tool_calls、tool 消息、
 // reasoning_content 这些字段都不能丢），模型给的工具参数不合法也不算请求失败。和 ChatModel 一样不传 temperature、
@@ -148,15 +148,6 @@ function assistantMessage(
   return result as BenchAgentMessage
 }
 
-// 上游可能把收到的 Key 写进报错。JSON 或网址里的写法可能不同，都换掉
-function withoutKey(text: string, apiKey: string | null): string {
-  if (!apiKey) return text
-  return [apiKey, JSON.stringify(apiKey).slice(1, -1), encodeURIComponent(apiKey)].reduce(
-    (out, form) => out.replaceAll(form, '***'),
-    text,
-  )
-}
-
 // 切开代理对时连前半个一起去掉，落单的代理项不是合法的文字
 function excerpt(text: string): string {
   if (text.length <= UPSTREAM_TEXT_CHARS) return text
@@ -196,15 +187,11 @@ export async function requestAgentTurn(
     })
     raw = await res.text()
   } catch (err) {
-    // 不用错误自己的文字：Key 里有换行时，fetch 把整个请求头写进错误
     if (timeout.aborted) {
       throw new AgentModelError(`模型 ${Math.ceil(timeoutMs / 1000)} 秒内没有返回`)
     }
     if (signal?.aborted) throw new AgentModelError('请求已经断开')
-    const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
-    throw new AgentModelError(
-      `连不上模型接口${typeof code === 'string' ? `（${code}）` : ''}：检查实例设置里的接口地址与 Key`,
-    )
+    throw new AgentModelError(fetchFailure('模型接口', err))
   }
   if (!res.ok) {
     throw new AgentModelError(`模型接口返回 HTTP ${res.status}：${upstreamText(raw)}`)

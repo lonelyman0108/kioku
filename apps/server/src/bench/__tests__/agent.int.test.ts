@@ -657,6 +657,20 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(await errorOf(res)).toBe(`${reason}：${body(`***${tail}`).slice(0, 500)}…`)
     })
 
+    it('保存的 Key 结尾有换行（fetch 去掉之后请求照样发出去）：上游写进报错的 Key 换掉', async () => {
+      const server = await startModel(
+        () => ({ status: 401, raw: '{"error":"Incorrect API key provided: sk-pasted"}' }),
+        'sk-pasted\n',
+      )
+      const res = await postTurn({ messages: [USER] })
+      // 前提：上游见到的就是去掉换行之后的，和保存的写法对不上
+      expect(server.authorizations[0]).toBe('Bearer sk-pasted')
+      expect(res.status).toBe(502)
+      const error = await errorOf(res)
+      expect(error).toContain('Incorrect API key provided: ***')
+      expect(error).not.toContain('sk-pasted')
+    })
+
     it('Key 里有换行（fetch 把整个请求头写进错误）：502，报错里没有 Key', async () => {
       const server = await startModel(() => '不该请求到这里', 'sk-pasted\nwith-newline')
       const res = await postTurn({ messages: [USER] })
