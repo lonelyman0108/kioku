@@ -28,6 +28,7 @@ import type { Context } from 'hono'
 import { requireKey } from '../auth/middleware'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { deletionRetention } from '../jobs/retention'
 import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
 import type { MemoryService } from '../memory/service'
 
@@ -266,7 +267,12 @@ function consoleOnlyRoutes(deps: Deps) {
     })
     .openapi(deleted, async (c) => {
       const { service } = await consoleMember(deps, c)
-      return c.json(await service.deleted(c.req.valid('query')), 200)
+      // 保留期是整个实例的设置：列表按成员读得到的算，过多久永久清除对谁都一样
+      const [page, retention] = await Promise.all([
+        service.deleted(c.req.valid('query')),
+        deletionRetention(deps.db),
+      ])
+      return c.json({ ...page, retention }, 200)
     })
     .openapi(restore, async (c) => {
       const { service } = await consoleMember(deps, c)

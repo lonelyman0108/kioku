@@ -1,11 +1,50 @@
 import {
   RETENTION_DAILY_TRIES,
+  type DeletionRetention,
   type RetentionCounts,
   type RetentionStatus,
   type RetentionView,
 } from '@kioku/contracts'
 
 import { formatTime } from './time'
+
+const DAY = 86_400_000
+
+// 一条已删除的记录最早什么时候被永久清除：删除时间加上保留天数；清理暂停期间不早于暂停结束的时间。
+// 清理每天做一次，实际在这之后的那一次里删
+export function purgeAt(deletedAt: string, retention: DeletionRetention): Date {
+  const due = new Date(deletedAt).getTime() + retention.days * DAY
+  const paused = retention.pausedUntil === null ? 0 : new Date(retention.pausedUntil).getTime()
+  return new Date(Math.max(due, paused))
+}
+
+// 大约还剩几天被永久清除：不足一天按一天算；已经到了、等着下一次清理的为 0
+export function daysUntilPurge(
+  deletedAt: string,
+  retention: DeletionRetention,
+  now: Date = new Date(),
+): number {
+  const left = purgeAt(deletedAt, retention).getTime() - now.getTime()
+  return Math.max(0, Math.ceil(left / DAY))
+}
+
+// 已删除列表里每一条后面的说法
+export function purgeNote(
+  deletedAt: string,
+  retention: DeletionRetention,
+  now: Date = new Date(),
+): string {
+  const days = daysUntilPurge(deletedAt, retention, now)
+  return days > 0 ? `约 ${days} 天后永久清除` : '即将永久清除'
+}
+
+// 已删除列表上方的说明：多少天之后永久清除；暂停中的说到什么时候之前一条都不删
+export function deletionNotice(retention: DeletionRetention): string {
+  const head = `删除超过 ${retention.days} 天会被永久清除，之后只能从备份找回。`
+  if (retention.pausedUntil === null) return head
+  const until = formatTime(retention.pausedUntil)
+  return `${head}清理暂停到 ${until}（从备份恢复或保留期刚开始生效时，先留一个完整的保留期），这之前一条都不会清除。`
+}
 
 // 一次清理每一类删了多少：卡片上按这个顺序列
 export const retentionLabels: Record<keyof RetentionCounts, string> = {

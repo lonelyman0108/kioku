@@ -2188,8 +2188,8 @@ export class MemoryService {
 
   // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性。
   // 只列用户删掉的（删除时还有效），删掉之后才到期的也列出来：撤销删除和过期互不相干，撤销之后它回到过期的状态。
-  // 过期之后被让出 URI 的不在这里，在已过期里重新生效
-  async deleted(query: PageQuery): Promise<DeletedMemoryList> {
+  // 过期之后被让出 URI 的不在这里，在已过期里重新生效。保留期的提示由路由补上
+  async deleted(query: PageQuery): Promise<Omit<DeletedMemoryList, 'retention'>> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
       const rows = await tx

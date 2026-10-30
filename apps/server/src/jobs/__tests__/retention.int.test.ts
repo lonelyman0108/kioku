@@ -3,6 +3,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import type {
   ConsoleCredential,
   CredentialProvider,
+  DeletedMemoryList,
   MemoryHistory,
   MemoryView,
   RetentionCounts,
@@ -1139,6 +1140,41 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     const old = await plantDeleted('notes://old', 65)
     expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(old)
+  })
+
+  it('已删除的列表带上保留天数与暂停结束的时间，不是实例管理员的成员也看得到', async () => {
+    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const retention = async (cookie = editor.cookie) =>
+      (await ok<DeletedMemoryList>(await send('GET', '/memories/deleted', undefined, cookie)))
+        .retention
+    // 保留期还没生效过：第一次清理会从那时起先暂停一个保留期，按从现在起算
+    const before = Date.now()
+    const fresh = await retention()
+    expect(fresh.days).toBe(30)
+    const until = new Date(fresh.pausedUntil ?? 0).getTime()
+    expect(until).toBeGreaterThanOrEqual(before + 30 * DAY)
+    expect(until).toBeLessThanOrEqual(Date.now() + 30 * DAY)
+
+    // 生效过、没有暂停，或者暂停已经自然结束：只有天数
+    await active()
+    expect(await retention()).toEqual({ days: 30, pausedUntil: null })
+    await database.db.transaction((tx) => markRestored(tx, ago(40)))
+    expect(await retention()).toEqual({ days: 30, pausedUntil: null })
+
+    // 从备份恢复：暂停到恢复的时间加天数，调天数时跟着变；提前开始之后没有暂停
+    const restoredAt = ago(3)
+    await database.db.transaction((tx) => markRestored(tx, restoredAt))
+    expect(await retention()).toEqual({
+      days: 30,
+      pausedUntil: after(restoredAt, 30).toISOString(),
+    })
+    await ok(await put({ days: 60 }))
+    expect(await retention()).toEqual({
+      days: 60,
+      pausedUntil: after(restoredAt, 60).toISOString(),
+    })
+    await endPause(database.db)
+    expect(await retention(ws.cookie)).toEqual({ days: 60, pausedUntil: null })
   })
 
   it('保留天数只有实例管理员能看、能改；第一次保存时保留期从现在起生效、先暂停，提前开始之后按新的天数删', async () => {

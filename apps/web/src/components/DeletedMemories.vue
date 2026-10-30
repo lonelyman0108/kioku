@@ -10,6 +10,7 @@ import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
+import { daysUntilPurge, deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime, isExpired } from '../time'
 
 const props = defineProps<{ spaceId: string }>()
@@ -30,6 +31,10 @@ const deleted = useInfiniteQuery({
   enabled: useActivated(),
 })
 const items = computed(() => deleted.data.value?.pages.flatMap((page) => page.items) ?? [])
+// 保留期是整个实例的设置，每一页都带着，用第一页的
+const retention = computed(() => deleted.data.value?.pages[0]?.retention ?? null)
+// 还剩这么几天就要永久清除的标出来
+const SOON_DAYS = 3
 
 const restoring = ref<string | null>(null)
 async function undelete(item: DeletedMemory) {
@@ -78,6 +83,10 @@ async function undelete(item: DeletedMemory) {
       删除的记忆可以撤销删除，原样回来；同一个 URI
       上已经有别的记忆时不能撤销。撤销删除不动有效期：标着「已过期」的，撤销之后回到「已过期」里，在那里可以让它重新生效。
     </p>
+    <p v-if="retention" class="flex items-start gap-1.5 text-xs text-warning">
+      <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
+      <span>{{ deletionNotice(retention) }}</span>
+    </p>
     <UAlert
       v-if="deleted.isError.value"
       color="error"
@@ -120,6 +129,17 @@ async function undelete(item: DeletedMemory) {
               <time :datetime="item.deletedAt" :title="formatTime(item.deletedAt)">
                 {{ formatRelative(item.deletedAt) }}
               </time>
+              <template v-if="retention">
+                ·
+                <span
+                  :class="{
+                    'text-warning': daysUntilPurge(item.deletedAt, retention) <= SOON_DAYS,
+                  }"
+                  :title="`最早在 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 之后清除`"
+                >
+                  {{ purgeNote(item.deletedAt, retention) }}
+                </span>
+              </template>
             </span>
           </div>
           <UButton

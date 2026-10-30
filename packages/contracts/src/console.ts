@@ -201,9 +201,19 @@ export const DeletedMemory = z.object({
 })
 export type DeletedMemory = z.infer<typeof DeletedMemory>
 
+// 已删除的记忆过了保留期由每天一次的清理永久删除，之后只能从备份找回。days 是保留天数；pausedUntil 是从备份恢复
+// 或保留期第一次生效之后，按天数的清理暂停到什么时候（在这之前一条都不删），没有暂停时为 null。
+// 一条已删除的记忆最早在「删除时间加保留天数」与暂停结束的时间里晚的那个之后清除
+export const DeletionRetention = z.object({
+  days: z.number().int(),
+  pausedUntil: z.string().nullable(),
+})
+export type DeletionRetention = z.infer<typeof DeletionRetention>
+
 export const DeletedMemoryList = z.object({
   items: z.array(DeletedMemory),
   nextCursor: z.string().nullable(),
+  retention: DeletionRetention,
 })
 export type DeletedMemoryList = z.infer<typeof DeletedMemoryList>
 

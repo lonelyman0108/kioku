@@ -4,6 +4,7 @@ import {
   RetentionPauseReason,
   RetentionSettings,
   RetentionStatus,
+  type DeletionRetention,
   type RetentionCounts,
   type RetentionView,
 } from '@kioku/contracts'
@@ -147,6 +148,15 @@ function storedValue(days: number | null, pause: RetentionPause | null): StoredS
 // 之前删掉的（到这个版本为止都还能撤销）有一个完整的保留期可以撤销删除。不是第一次时为 null
 function firstPause(state: RetentionState, now: Date): RetentionPause | null {
   return state.fresh ? { reason: 'started', since: now } : null
+}
+
+// 已删除列表上的提示：保留天数，以及按天数的清理暂停到什么时候。成员都看得到（设置只给实例管理员看），
+// 删掉的还能撤销多久不该只有管理员知道。暂停按 activePause 算；保留期还没生效过时，第一次清理会从那时起
+// 先暂停一个保留期（firstPause），这里按从现在起算，不会比实际早
+export async function deletionRetention(db: Db, now = new Date()): Promise<DeletionRetention> {
+  const state = await loadRetention(db)
+  const pause = activePause({ days: state.days, pause: state.pause ?? firstPause(state, now) }, now)
+  return { days: state.days, pausedUntil: pause?.until.toISOString() ?? null }
 }
 
 // 改天数与暂停：在事务里拿住锁，按 parseRetention 读出现在的状态，算出新的值整个写回（change 返回 null 时不改）。
