@@ -500,6 +500,29 @@ describe('运行中途作废', () => {
     expect(bench.abandonedInFlight.value).toBe(false)
   })
 
+  it('又开始了别的运行：作废的那次还在写入就照样说，当前的不算', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    expect(bench.abandonedInFlight.value).toBe(true)
+    bench.confirmReal()
+    await settle()
+    expect(bench.real.value).toBe(true)
+    const next = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValueOnce(next.promise)
+    const nextOutcome = bench.execute(STEPS, WHAT)
+    await settle()
+    expect(bench.running.value).toBe(true)
+    expect(bench.abandonedInFlight.value).toBe(true)
+
+    run.resolve(RESULT)
+    await outcome
+    await settle()
+    // 只剩当前这次
+    expect(bench.abandonedInFlight.value).toBe(false)
+    next.resolve(RESULT)
+    await nextOutcome
+    expect(bench.abandonedInFlight.value).toBe(false)
+  })
+
   it('警告不随之后的切换清掉，用户自己关；时间线里没有它', async () => {
     const { bench, run, outcome } = await abandonRun('real')
     run.resolve(RESULT)
@@ -1159,6 +1182,44 @@ describe('模型对话', () => {
     // 不再请求模型：对话已经作废
     expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
     expect(bench.agent.value.exchanges).toEqual([])
+  })
+
+  it('作废的运行还在写入时又发一条消息：等模型时没有运行在途，不能把它抵消掉；工具运行在途时也不算当前这次', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    expect(bench.abandonedInFlight.value).toBe(true)
+    bench.confirmReal()
+    await settle()
+    expect(bench.real.value).toBe(true)
+
+    const model = deferred<BenchAgentTurnResult>()
+    const tool = deferred<BenchRunResult>()
+    fakes.api.benchAgentTurn
+      .mockReturnValueOnce(model.promise)
+      .mockResolvedValueOnce(modelReply('好'))
+    fakes.api.benchRun.mockReturnValueOnce(tool.promise)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    // 等模型：运行占着，作废的那次还在写入
+    expect(bench.running.value).toBe(true)
+    expect(bench.real.value).toBe(true)
+    expect(bench.abandonedInFlight.value).toBe(true)
+
+    // 工具运行也在途：两个请求，有一个是作废的
+    model.resolve(modelReply('', [WRITE_CALL]))
+    await settle()
+    expect(fakes.api.benchRun).toHaveBeenCalledTimes(2)
+    expect(bench.abandonedInFlight.value).toBe(true)
+
+    // 作废的回来了，只剩这条消息自己的运行
+    run.resolve(RESULT)
+    await outcome
+    await settle()
+    expect(bench.running.value).toBe(true)
+    expect(bench.abandonedInFlight.value).toBe(false)
+
+    tool.resolve(RESULT)
+    await sent
+    expect(bench.abandonedInFlight.value).toBe(false)
   })
 
   it('真实模式下工具已经跑完、等模型时作废：对话清掉了，写入还是要说，运行标记留着', async () => {

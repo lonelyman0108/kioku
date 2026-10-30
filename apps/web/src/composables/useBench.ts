@@ -230,12 +230,10 @@ export function createBench() {
     mode.value = 'rollback'
   }
 
-  // 真实模式的请求有几个还没回来，包括中途作废的
-  const realInFlight = ref(0)
-  // 中途作废、还没回来的：现在可能正在写入
-  const abandonedInFlight = computed(
-    () => realInFlight.value > (real.value && running.value ? 1 : 0),
-  )
+  // 真实模式还没回来的请求各属于哪次运行（序号），包括中途作废的
+  const realInFlight = ref<number[]>([])
+  // 中途作废、还没回来的：现在可能正在写入。按属于谁算，不能按个数减：模型对话等模型时占着运行，却没有请求在途
+  const abandonedInFlight = computed(() => realInFlight.value.some((id) => id !== current.value))
   // 中途作废的真实运行。不随换应用、Key 或模式清掉：作废就是因为这些变了，用户看过之后自己关
   const abandoned = shallowRef<AbandonedRun[]>([])
   function dismissAbandoned(id: number) {
@@ -254,7 +252,7 @@ export function createBench() {
         unsaved.scenario ||
         unsaved.drafts ||
         agent.value.exchanges.length > 0 ||
-        realInFlight.value > 0 ||
+        realInFlight.value.length > 0 ||
         (real.value && modeLoss.value !== null) ||
         abandoned.value.length > 0,
     ),
@@ -283,7 +281,7 @@ export function createBench() {
     replay: BenchReplayStep[],
   ): Promise<RunOutcome> {
     const { space: forSpace, app: forApp, key: forKey, mode: forMode } = target
-    if (forMode === 'real') realInFlight.value++
+    if (forMode === 'real') realInFlight.value = [...realInFlight.value, id]
     // 回滚模式作废了就丢掉：什么都没留下。真实模式下写入可能已经落库，要说出来，有结果就显示
     const staleOutcome = (settled: { result: BenchRunResult } | { error: unknown }): RunOutcome => {
       const run =
@@ -307,7 +305,7 @@ export function createBench() {
         : staleOutcome({ error: err })
     } finally {
       if (forMode === 'real') {
-        realInFlight.value--
+        realInFlight.value = realInFlight.value.filter((run) => run !== id)
         // 真实模式写了数据（出错也可能写了一部分）：记忆、活动、对象、凭据的缓存都不算数了
         void queryClient.invalidateQueries()
       }
