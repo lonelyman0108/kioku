@@ -1,12 +1,21 @@
 import type { BenchMode, BenchReplayStep, BenchRunResult, BenchStep } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, inject, provide, reactive, ref, watch, type InjectionKey } from 'vue'
+import { computed, inject, provide, reactive, ref, shallowRef, watch, type InjectionKey } from 'vue'
 import { useRoute, useRouter, type RouteLocationNormalizedLoaded } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { contextDefaults, contextOf } from '../benchForm'
-import { ownedApps, runFailureMessage, usableKeys } from '../benchSession'
+import {
+  acceptDivergence,
+  emptySession,
+  ownedApps,
+  recordRun,
+  replayFor,
+  runBlocker,
+  runFailureMessage,
+  usableKeys,
+} from '../benchSession'
 import { useSession } from './useSession'
 
 const param = (value: unknown) => (typeof value === 'string' && value ? value : undefined)
@@ -22,7 +31,8 @@ const selectionOf = (route: RouteLocationNormalizedLoaded) => ({
 export type RunOutcome =
   { kind: 'done'; result: BenchRunResult } | { kind: 'failed'; message: string } | { kind: 'stale' }
 
-// 测试台各分页共享的状态：应用、Key、模式、会话上下文。页面建一份，分页组件用 useBench 取同一份
+// 测试台各分页共享的状态：应用、Key、模式、会话上下文、这次会话。页面建一份，分页组件用 useBench 取同一份。
+// 都只在内存里：调用内容可能有明文，不进浏览器存储
 function createBench() {
   const route = useRoute()
   const router = useRouter()
@@ -101,13 +111,15 @@ function createBench() {
   const sessionContext = computed(() => contextOf(contextForm))
 
   // 每次运行一个序号，current 是进行中的那次：结果、报错与 loading 都只认它。
-  // 换了应用、Key 或模式时清掉，进行中的那次就作废了；generation 让各分页清掉自己的结果
+  // 换了应用、Key 或模式时清掉，进行中的那次就作废了，会话换一份新的；generation 让各分页清掉自己的结果
   let counter = 0
   const current = ref<number | null>(null)
   const running = computed(() => current.value !== null)
   const generation = ref(0)
+  const session = shallowRef(emptySession())
   watch([spaceId, appId, keyId, mode], () => {
     current.value = null
+    session.value = emptySession()
     generation.value++
   })
 
@@ -138,6 +150,17 @@ function createBench() {
     }
   }
 
+  // 连续调用：带上这次会话已经做过的写步骤，结果记进时间线与重放日志
+  async function call(steps: BenchStep[]): Promise<RunOutcome> {
+    const blocked = runBlocker(session.value, mode.value)
+    if (blocked) return { kind: 'failed', message: blocked }
+    const outcome = await execute(steps, replayFor(session.value, mode.value))
+    if (outcome.kind === 'done') session.value = recordRun(session.value, outcome.result)
+    return outcome
+  }
+  const clearSession = () => (session.value = emptySession())
+  const acceptDiverged = () => (session.value = acceptDivergence(session.value))
+
   return {
     spaceId,
     apps,
@@ -162,6 +185,10 @@ function createBench() {
     running,
     generation,
     execute,
+    session,
+    call,
+    clearSession,
+    acceptDiverged,
   }
 }
 

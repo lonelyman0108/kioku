@@ -24,6 +24,7 @@ const {
   confirmingReal,
   requestMode,
   confirmReal,
+  running,
 } = useBench()
 
 const appItems = computed(() =>
@@ -64,6 +65,7 @@ const errorOf = (err: unknown, fallback: string) =>
           <USelect
             :model-value="appId"
             :items="appItems"
+            :disabled="running"
             aria-label="应用"
             class="w-full"
             @update:model-value="(v) => selectApp(String(v))"
@@ -73,7 +75,7 @@ const errorOf = (err: unknown, fallback: string) =>
           <USelect
             :model-value="keyId"
             :items="keyItems"
-            :disabled="!keyItems.length"
+            :disabled="running || !keyItems.length"
             placeholder="没有有效的 Key"
             aria-label="Key"
             class="w-full"
@@ -85,7 +87,7 @@ const errorOf = (err: unknown, fallback: string) =>
           label="真实执行"
           description="默认回滚：做完不留痕迹"
           color="error"
-          :disabled="!key"
+          :disabled="running || !key"
           class="pb-1"
           @update:model-value="requestMode"
         />

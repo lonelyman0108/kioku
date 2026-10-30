@@ -1,7 +1,6 @@
 <script setup lang="ts">
-import type { BenchRunResult } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
-import { computed, reactive, ref, shallowRef, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -14,6 +13,8 @@ import {
   targetGroups,
   type Draft,
 } from '../benchForm'
+import { stepBadge } from '../benchResult'
+import { divergenceNotice, runBlocker, sessionUsage } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { icons } from '../icons'
 import { scopesSummary } from '../labels'
@@ -21,9 +22,22 @@ import BenchContextForm from './BenchContextForm.vue'
 import BenchField from './BenchField.vue'
 import BenchStepView from './BenchStepView.vue'
 
-// 调用台：调一个工具或发一个生命周期事件，看宿主收到什么。工具目录来自真实的 tools/list
-const { spaceId, appId, keyId, real, mode, running, generation, sessionContext, execute } =
-  useBench()
+// 调用台：调一个工具或发一个生命周期事件，看宿主收到什么。工具目录来自真实的 tools/list。
+// 连续调用：回滚模式下这次会话的写入靠重放带到后面的调用，时间线列出这次会话的调用
+const {
+  spaceId,
+  appId,
+  keyId,
+  real,
+  mode,
+  running,
+  generation,
+  sessionContext,
+  session,
+  call,
+  clearSession,
+  acceptDiverged,
+} = useBench()
 
 const tools = useQuery({
   queryKey: computed(() => ['bench-tools', spaceId.value, appId.value, keyId.value]),
@@ -82,12 +96,36 @@ function showForm() {
 }
 
 const failure = ref<string | null>(null)
-const result = shallowRef<BenchRunResult | null>(null)
-// 换了应用、Key 或模式时清掉结果：它们属于别的 Key 或别的模式
+// 显示时间线上的哪一条；没选时显示最新的
+const shownId = ref<number | null>(null)
+const timeline = computed(() => [...session.value.timeline].reverse())
+const shown = computed(
+  () => timeline.value.find((entry) => entry.id === shownId.value) ?? timeline.value[0] ?? null,
+)
+// 换了应用、Key 或模式时会话已经换了一份新的，这里清掉报错：它们属于别的 Key 或别的模式
 watch(generation, () => {
-  result.value = null
   failure.value = null
+  shownId.value = null
 })
+
+const blocker = computed(() => runBlocker(session.value, mode.value))
+const diverged = computed(() => divergenceNotice(session.value))
+const usage = computed(() => sessionUsage(session.value, mode.value))
+const divergedActions = [
+  {
+    label: '接受：去掉这一步',
+    color: 'neutral' as const,
+    variant: 'subtle' as const,
+    onClick: acceptDiverged,
+  },
+  { label: '清空这次会话', color: 'error' as const, variant: 'subtle' as const, onClick: clear },
+]
+
+function clear() {
+  clearSession()
+  failure.value = null
+  shownId.value = null
+}
 
 async function run() {
   if (running.value) return
@@ -98,8 +136,8 @@ async function run() {
     return
   }
   formError.value = null
-  const outcome = await execute([built.step])
-  if (outcome.kind === 'done') result.value = outcome.result
+  const outcome = await call([built.step])
+  if (outcome.kind === 'done') shownId.value = null
   else if (outcome.kind === 'failed') failure.value = outcome.message
 }
 
@@ -203,6 +241,7 @@ function onRunClick() {
               :color="real ? 'error' : 'primary'"
               :icon="icons.preview"
               :loading="running"
+              :disabled="Boolean(blocker)"
               @click="onRunClick"
             >
               {{ real ? '真实执行' : '运行' }}
@@ -233,18 +272,69 @@ function onRunClick() {
           </div>
         </form>
 
-        <div v-if="result" class="space-y-2">
-          <p class="text-xs text-muted">
-            运行标记 <code>{{ result.run }}</code> · {{ result.whoami.app.name }} ·
-            {{ scopesSummary(result.whoami.scopes) }}
-          </p>
-          <BenchStepView
-            v-for="step in result.steps"
-            :key="`${result.run}-${step.index}`"
-            :step="step"
-            :mode="mode"
-            view="call"
+        <section class="space-y-2">
+          <div class="flex flex-wrap items-center gap-2">
+            <h3 class="text-sm font-medium">这次会话</h3>
+            <UButton
+              class="ml-auto"
+              size="xs"
+              color="neutral"
+              variant="subtle"
+              :icon="icons.clear"
+              :disabled="running || !timeline.length"
+              @click="clear"
+            >
+              清空
+            </UButton>
+          </div>
+          <p class="text-xs text-muted">{{ usage }}</p>
+          <UAlert
+            v-if="diverged"
+            color="warning"
+            variant="subtle"
+            :title="diverged.title"
+            :description="diverged.description"
+            :actions="divergedActions"
           />
+          <UAlert v-if="blocker" color="warning" variant="subtle" :title="blocker" />
+          <ol v-if="timeline.length" class="max-h-64 divide-y divide-default overflow-y-auto">
+            <li v-for="entry in timeline" :key="entry.id">
+              <button
+                type="button"
+                class="flex w-full flex-wrap items-center gap-2 px-1 py-1.5 text-left text-xs hover:bg-elevated"
+                :class="{ 'bg-elevated': entry.id === shown?.id }"
+                :aria-current="entry.id === shown?.id ? 'true' : undefined"
+                @click="shownId = entry.id"
+              >
+                <UBadge
+                  size="sm"
+                  variant="subtle"
+                  :color="stepBadge(entry.step, 'call').color"
+                  :icon="stepBadge(entry.step, 'call').icon"
+                >
+                  {{ stepBadge(entry.step, 'call').label }}
+                </UBadge>
+                <span class="min-w-0 flex-1 font-mono break-all">{{ entry.step.label }}</span>
+                <UBadge v-if="entry.kept" size="sm" color="neutral" variant="subtle">
+                  写入已保留
+                </UBadge>
+                <span v-if="entry.step.raw !== null" class="text-muted">
+                  {{ entry.step.ms }} ms
+                </span>
+              </button>
+            </li>
+          </ol>
+          <p v-if="session.dropped" class="text-xs text-muted">
+            更早的 {{ session.dropped }} 条不再显示，保留的写入不受影响。
+          </p>
+        </section>
+
+        <div v-if="shown" class="space-y-2">
+          <p class="text-xs text-muted">
+            运行标记 <code>{{ shown.run }}</code> · {{ shown.whoami.app.name }} ·
+            {{ scopesSummary(shown.whoami.scopes) }}
+          </p>
+          <BenchStepView :key="shown.id" :step="shown.step" :mode="mode" view="call" />
         </div>
       </div>
     </div>
