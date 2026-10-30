@@ -863,6 +863,56 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     ])
   })
 
+  it('合并对象之后，放到一起的记忆下一次整理会再看：两边私聊里的、同一个群里关于这两个对象的；别的不再看', async () => {
+    const xm = await subject('person', '小明')
+    const alt = await subject('person', '小明的小号')
+    const zs = await subject('person', '张三')
+    const club = await subject('group', '读书会')
+    const hikers = await subject('group', '登山群')
+    await fact(xm, '在学日语', `group:${club}`)
+    await fact(alt, '正在学日语', `group:${club}`)
+    await fact(zs, '喜欢爬山', `group:${club}`)
+    await fact(xm, '养了一只猫', `group:${hikers}`)
+    await fact(xm, '在找新工作', `direct:${xm}`)
+    await fact(alt, '想换工作', `direct:${alt}`)
+    const { model, calls } = fakeChatModel(reply([]))
+    await dream(model)
+    expect(calls).toHaveLength(4)
+    expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+
+    // 合并只改对象与来源作用域、不加版本
+    const res = await send('POST', `/subjects/${xm}/merge`, { from: alt })
+    expect(res.status, await res.clone().text()).toBe(200)
+    const seen = calls.length
+    expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+    const fresh = calls.slice(seen).map((c) => {
+      const lines = dreamLines(c)
+      return {
+        title: titleOf(c),
+        fresh: lines
+          .filter((l) => l.new)
+          .map((l) => l.content)
+          .sort(),
+        subjects: [...new Set(lines.map((l) => l.subject))],
+      }
+    })
+    expect(fresh.sort((a, b) => a.title.localeCompare(b.title))).toEqual(
+      [
+        {
+          title: '和「小明」的私聊里记下的事实与会话摘要',
+          fresh: ['在找新工作', '想换工作'].sort(),
+          subjects: ['小明'],
+        },
+        {
+          title: '群「读书会」的聊天里记下的事实与会话摘要',
+          fresh: ['在学日语', '正在学日语'].sort(),
+          subjects: ['小明'],
+        },
+      ].sort((a, b) => a.title.localeCompare(b.title)),
+    )
+    expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
+  })
+
   it('增量：只看上次以来新增或改动的，没有就不请求模型；改过的那条连同近邻再看一遍', async () => {
     const a = await remember({ uri: 'core://lang', content: '回答问题用中文', layer: 'base' })
     await remember({ uri: 'core://lang-more', content: '用中文回答问题，先给结论', layer: 'base' })

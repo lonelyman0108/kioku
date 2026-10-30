@@ -4,6 +4,7 @@ import { pgErrorCode, type Tx } from '../db/client'
 import {
   appGroupPersonas,
   conversationTurns,
+  dreamMarks,
   extractionRuns,
   memories,
   subjectBindings,
@@ -60,6 +61,31 @@ async function mergeInto(
     .update(subjectIdentities)
     .set({ subjectId: into.id })
     .where(eq(subjectIdentities.subjectId, from.id))
+  // Dream 按记忆记下整理过的版本（dream_marks），这里不加版本，标记留着的话合并之后放到一起的记忆不会被再看，
+  // 合并带来的重复也就一直留着。所以先按合并前的样子删掉要放在一起看的记忆的标记：两边自己作用域里的
+  // （合并之后都在 into 的作用域里），以及 from 有记忆的作用域里关于这两个对象的（合并之后是同一个对象的）。
+  // into 在别处的记忆没有和它放到一起的，不用再看
+  const fromScopes = tx
+    .selectDistinct({ scope: memories.originScope })
+    .from(memories)
+    .where(eq(memories.subjectId, from.id))
+  await tx.delete(dreamMarks).where(
+    inArray(
+      dreamMarks.memoryId,
+      tx
+        .select({ id: memories.id })
+        .from(memories)
+        .where(
+          or(
+            inArray(memories.originScope, [oldScope, newScope]),
+            and(
+              inArray(memories.subjectId, [from.id, into.id]),
+              inArray(memories.originScope, fromScopes),
+            ),
+          ),
+        ),
+    ),
+  )
   await tx.update(memories).set({ subjectId: into.id }).where(eq(memories.subjectId, from.id))
   await tx.update(memories).set({ originScope: newScope }).where(eq(memories.originScope, oldScope))
   // 还没抽取的对话缓冲：发言人、群与批次一起换过来，不然删掉对象时会连带删掉它们
