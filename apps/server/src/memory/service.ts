@@ -758,11 +758,12 @@ export class MemoryService {
     },
     baseline: RefBaseline | null,
   ): Promise<void> {
+    // 打码时 secret 的正文不给出，报错也不带从里面读到的片段、标识与字段名：
+    // 没改正文的写入（例如改层）查的是解密出来的原文
+    const hideContent = this.ctx.maskSecret && final.sensitivity === 'secret'
     const { refs, malformed } = scanPlaceholders(final.content)
     if (malformed.length) {
-      // 打码时 secret 的正文不给出，报错也不带原文的片段
-      const fragment =
-        this.ctx.maskSecret && final.sensitivity === 'secret' ? '' : `：${malformed[0]}`
+      const fragment = hideContent ? '' : `：${malformed[0]}`
       throw new MemoryError(
         400,
         `凭据占位符格式不对${fragment}。写法是 {{cred:<标识>}} 或 {{cred:<标识>#<字段>}}，标识与字段名只用小写字母、数字、_ 和 -；要在正文里写到这种写法时，去掉花括号`,
@@ -798,12 +799,18 @@ export class MemoryService {
     for (const identifier of identifiers) {
       const row = rows.find((r) => r.identifier === identifier)
       if (!row || !canReadCredential(this.ctx.access, row)) {
-        throw new MemoryError(400, `凭据不存在或不可用：${identifier}`)
+        throw new MemoryError(
+          400,
+          hideContent ? '正文引用的凭据不存在或不可用' : `凭据不存在或不可用：${identifier}`,
+        )
       }
       for (const ref of added) {
         if (ref.identifier !== identifier || ref.field === null) continue
         if (!row.fields.some((f) => f.name === ref.field)) {
-          throw new MemoryError(400, `凭据 ${identifier} 没有字段 ${ref.field}`)
+          throw new MemoryError(
+            400,
+            hideContent ? '正文引用的凭据没有这个字段' : `凭据 ${identifier} 没有字段 ${ref.field}`,
+          )
         }
       }
     }

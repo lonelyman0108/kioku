@@ -292,6 +292,58 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
         '坏的片段',
       )
     })
+
+    // owner 层的 secret 正文写着占位符（旧数据）：改到私人层时引用都算新增，要重新检查
+    const seedLegacyRefs = async (body: string) => {
+      await seedSecret('notes://legacy')
+      expect((await real('kioku_update', { uri: 'notes://legacy', layer: 'owner' })).isError).toBe(
+        false,
+      )
+      const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.select().from(memories).where(eq(memories.path, 'legacy')),
+      )
+      const legacy = sealMemoryContent(masterKey, row!.id, body)
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.update(memories).set(legacy).where(eq(memories.id, row!.id)),
+      )
+    }
+
+    it('引用不存在的凭据的旧数据：解密后的标识不进报错', async () => {
+      await seedLegacyRefs('旧数据 {{cred:missing-cred}}')
+      const updated = await masked('kioku_update', { uri: 'notes://legacy', layer: 'private' })
+      expect(updated.isError).toBe(true)
+      expect(updated.text).toContain('不存在或不可用')
+      expect(updated.text).not.toContain('missing-cred')
+      const direct = await real('kioku_update', { uri: 'notes://legacy', layer: 'private' })
+      expect(direct.text).toContain('missing-cred')
+    })
+
+    it('引用没有的字段的旧数据：解密后的标识与字段名不进报错', async () => {
+      const saved = await real('kioku_credential_save', {
+        identifier: 'nas',
+        name: 'NAS',
+        values: { password: HOSTED_VALUE },
+      })
+      expect(saved.isError).toBe(false)
+      await seedLegacyRefs('旧数据 {{cred:nas#missing-field}}')
+      const updated = await masked('kioku_update', { uri: 'notes://legacy', layer: 'private' })
+      expect(updated.isError).toBe(true)
+      expect(updated.text).toContain('没有这个字段')
+      expect(updated.text).not.toContain('nas')
+      expect(updated.text).not.toContain('missing-field')
+      const direct = await real('kioku_update', { uri: 'notes://legacy', layer: 'private' })
+      expect(direct.text).toContain('nas')
+      expect(direct.text).toContain('missing-field')
+    })
+
+    it('不是 secret 的记忆照常报出标识：正文本来就读得到', async () => {
+      const created = await masked('kioku_create', {
+        uri: 'notes://refs',
+        content: '{{cred:missing-cred}}',
+      })
+      expect(created.isError).toBe(true)
+      expect(created.text).toContain('missing-cred')
+    })
   })
 
   describe('凭据', () => {
