@@ -14,23 +14,33 @@ export interface EmbeddingErrorRecord {
   at: string
 }
 
+// 记下与清掉错误都只是给管理员看的：它们自己出错时（例如数据库抖了一下）只记日志、不抛出，
+// 不让已经写好的向量、还没处理的模型与要重排的记忆跟着算失败，也不让补齐整个重跑
 export async function recordEmbeddingError(db: Db, model: string, message: string): Promise<void> {
   const value: EmbeddingErrorRecord = {
     model,
     message: message.slice(0, MAX_MESSAGE),
     at: new Date().toISOString(),
   }
-  await db
-    .insert(settings)
-    .values({ key: KEY, value })
-    .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+  try {
+    await db
+      .insert(settings)
+      .values({ key: KEY, value })
+      .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
+  } catch (err) {
+    console.error('记下向量的错误时出错', err)
+  }
 }
 
 // 这个模型又成功生成过向量，之前记下的它的错误就清掉；别的模型的错误留着
 export async function clearEmbeddingError(db: Db, model: string): Promise<void> {
-  await db
-    .delete(settings)
-    .where(and(eq(settings.key, KEY), sql`${settings.value}->>'model' = ${model}`))
+  try {
+    await db
+      .delete(settings)
+      .where(and(eq(settings.key, KEY), sql`${settings.value}->>'model' = ${model}`))
+  } catch (err) {
+    console.error('清掉向量的错误时出错', err)
+  }
 }
 
 export async function loadEmbeddingError(db: Db): Promise<EmbeddingErrorRecord | null> {

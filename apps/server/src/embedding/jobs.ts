@@ -3,19 +3,19 @@ import { embeddingCoverage } from './coverage'
 import { clearEmbeddingError, recordEmbeddingError } from './errors'
 import { loadEmbeddingModels, switchEmbedding } from './settings'
 import type { EmbedderSource } from './source'
-import { backfillEmbeddings, embedMemories, pruneEmbeddings } from './worker'
+import { backfillEmbeddings, embedMemories, pruneEmbeddings, type EmbedRun } from './worker'
 
-// 向量相关的后台任务本身，由任务队列调用。出错时记下来给实例设置页看，再交给队列处理：
-// 写入之后的向量任务逐项返回失败的，别的直接抛出
+// 向量相关的后台任务本身，由任务队列调用。出错时记下来给实例设置页看（记下与清掉本身出错只记日志，见 errors.ts），
+// 再交给队列处理：写入之后的向量任务逐项返回失败的，别的直接抛出
 
-// 写回时正被别的事务锁着而跳过的记忆，稍后逐条重试
+// 这次没处理、要另排一个新任务的记忆（写回时被别的事务锁着的，处理时间用完了还没生成的），稍后逐条再来
 export type Retry = (spaceId: string, ids: string[]) => void
 
 async function recording<T>(db: Db, model: string, run: () => Promise<T>): Promise<T> {
   try {
     return await run()
   } catch (err) {
-    await recordEmbeddingError(db, model, (err as Error).message).catch(() => {})
+    await recordEmbeddingError(db, model, (err as Error).message)
     throw err
   }
 }
@@ -42,23 +42,26 @@ export interface EmbedTarget {
   memoryId: string
 }
 
-// 记下或清掉给管理员看的错误本身出错（例如数据库抖了一下）：只记日志，不让已经写好的向量、
-// 还没处理的模型与要重排的记忆跟着算失败
-const noting = (what: string, done: Promise<void>) =>
-  done.catch((err: unknown) => console.error(`${what}出错`, err))
+export interface EmbedJobsSignals {
+  // 这一批的处理时间
+  budget?: AbortSignal | undefined
+  // 服务要停了（pg-boss 给任务的中止信号，任务过期时也会断开）
+  stopping?: AbortSignal | undefined
+}
 
 // 记忆写入之后生成向量，一次处理一批：同一个空间的一起读、合起来请求嵌入接口（每次最多 EMBED_BATCH 条）、一起写回。
 // 换模型期间两个模型都生成，不然新模型永远补不齐；一个模型出错不挡另一个。
 // 返回生成失败的是第几项（targets 的下标）与原因，调用方逐项交给队列重试：接口拒绝了其中几条时（例如正文超过模型的
-// 长度上限）只算那几条，别的照常写；一个空间整批出错时（接口不可用、写库出错）算这个空间的全部；
-// signal 断开时（这一批的处理时间用完了、服务要停）还没生成的不再请求，也算失败、交给重试，已经拿到的照常写回。
-// 写回时正被别的事务锁着的不算失败，按记忆去重后交给 retry 稍后再排
+// 长度上限）只算那几条，别的照常写；一个空间整批出错时（接口不可用、写库出错）算这个空间的全部。
+// 处理时间用完了、服务要停时，还没生成的不再请求，已经拿到的照常写回。没生成的与写回时被别的事务锁着的一样：
+// 按记忆去重后交给 retry 另排一个新任务，原任务算完成，不耗它的重试次数（不然接口一直慢时，重试用完就再也没有向量）。
+// 服务要停时不记错误：那不是接口的问题
 export async function embedJobs(
   db: Db,
   source: EmbedderSource,
   targets: EmbedTarget[],
   retry: Retry,
-  signal?: AbortSignal,
+  { budget, stopping }: EmbedJobsSignals = {},
 ): Promise<Map<number, Error>> {
   // 空间 → 记忆 → 要它的是哪几项（同一条记忆连着改了几次，会有几项）
   const groups = new Map<string, Map<string, number[]>>()
@@ -73,12 +76,21 @@ export async function embedJobs(
       for (const index of groups.get(spaceId)?.get(memoryId) ?? []) failed.set(index, error)
     }
   }
-  const outOfTime = new Error('这一批的处理时间用完了，还没生成向量，交给重试')
-  const skipped = new Map<string, Set<string>>()
+  // 要另排一个新任务的记忆，按空间
+  const later = new Map<string, Set<string>>()
+  const postpone = (spaceId: string, memoryIds: Iterable<string>) => {
+    const set = later.get(spaceId) ?? new Set<string>()
+    for (const id of memoryIds) set.add(id)
+    later.set(spaceId, set)
+  }
+  const signals = [budget, stopping].filter((s): s is AbortSignal => s !== undefined)
+  const signal = signals.length ? AbortSignal.any(signals) : undefined
 
   const [active, next] = await Promise.all([source.get(), source.next()])
   for (const embedder of [active, next]) {
     if (!embedder) continue
+    // 这一批里这个模型的接口有没有接受过文本，几个空间共用
+    const run: EmbedRun = { accepted: false }
     const failures = failureLog()
     let broken: Error | null = null
     let deferred = 0
@@ -86,24 +98,21 @@ export async function embedJobs(
     for (const [spaceId, items] of groups) {
       if (signal?.aborted) {
         deferred += items.size
-        fail(spaceId, items.keys(), outOfTime)
+        postpone(spaceId, items.keys())
         continue
       }
       try {
         written += await embedMemories(db, embedder, spaceId, [...items.keys()], {
           signal,
-          onSkipped: (ids) => {
-            const set = skipped.get(spaceId) ?? new Set<string>()
-            for (const id of ids) set.add(id)
-            skipped.set(spaceId, set)
-          },
+          run,
+          onSkipped: (ids) => postpone(spaceId, ids),
           onFailed: (memoryId, message) => {
             failures.onFailed(memoryId, message)
             fail(spaceId, [memoryId], new Error(message))
           },
           onDeferred: (ids) => {
             deferred += ids.length
-            fail(spaceId, ids, outOfTime)
+            postpone(spaceId, ids)
           },
         })
       } catch (err) {
@@ -111,19 +120,27 @@ export async function embedJobs(
         fail(spaceId, items.keys(), broken)
       }
     }
-    // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的
+    // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的。服务要停而没做完的不记也不清
     if (broken) {
-      await noting('记下向量的错误', recordEmbeddingError(db, embedder.model, broken.message))
+      await recordEmbeddingError(db, embedder.model, broken.message)
     } else if (failures.count) {
-      await noting('记下向量的错误', recordEmbeddingError(db, embedder.model, failures.message()))
+      await recordEmbeddingError(db, embedder.model, failures.message())
     } else if (deferred) {
-      const message = `这一批的处理时间用完了，有 ${deferred} 条还没生成向量，已交给重试；嵌入接口可能太慢`
-      await noting('记下向量的错误', recordEmbeddingError(db, embedder.model, message))
+      if (!stopping?.aborted) {
+        const message = `这一批的处理时间用完了，有 ${deferred} 条还没生成向量，已另排；嵌入接口可能太慢`
+        await recordEmbeddingError(db, embedder.model, message)
+      }
     } else if (written) {
-      await noting('清掉向量的错误', clearEmbeddingError(db, embedder.model))
+      await clearEmbeddingError(db, embedder.model)
     }
   }
-  for (const [spaceId, ids] of skipped) retry(spaceId, [...ids])
+  // 另排了新任务的，原任务算完成
+  for (const [spaceId, ids] of later) {
+    for (const memoryId of ids) {
+      for (const index of groups.get(spaceId)?.get(memoryId) ?? []) failed.delete(index)
+    }
+    retry(spaceId, [...ids])
+  }
   return failed
 }
 
@@ -205,7 +222,7 @@ export async function switchJob(
     }
     return 'stuck'
   } catch (err) {
-    await recordEmbeddingError(db, target.model, (err as Error).message).catch(() => {})
+    await recordEmbeddingError(db, target.model, (err as Error).message)
     throw err
   }
 }

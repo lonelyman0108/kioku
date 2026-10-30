@@ -10,22 +10,30 @@ import { embeddingText, textHash } from './text'
 // 一次请求嵌入接口最多带这么多条文本
 export const EMBED_BATCH = 32
 const PAGE = EMBED_BATCH * 4
-// 整批失败后逐条再试时，开头连着这么多条（批次更小时是整批）都因为接口不可用失败、一条都没成功，
-// 就当作接口不可用，不再一条条请求。接口拒绝的（EmbedRejected）是那一条文本的问题，不算在里面
+// 整批失败后逐条再试时，连着这么多条（批次更小时是整批）都失败，就当作接口不可用，不再一条条请求（见 embedBatch）
 const GIVE_UP_AFTER = 3
 
 // 判断记忆有没有被改过用 PostgreSQL 的 xmin（最后一次修改这一行的事务号）：每次 UPDATE 都会变，
 // 不像 updated_at 依赖应用写入的时间戳（只有毫秒精度，同一毫秒内的两次修改分不出来）
 const stamp = sql<string>`memories.xmin::text`
 
+// 一次处理（一批写入之后的任务、一次补齐）里这个模型的接口有没有接受过文本。接受过之后，接口拒绝的（EmbedRejected）
+// 才算是那一条文本的问题；还没接受过时什么错都可能是接口本身不对（例如渠道的模型名写错了，每个请求都回 400）
+export interface EmbedRun {
+  accepted: boolean
+}
+
 export interface SyncHooks {
   // 写回时正被别的事务锁着、这次没处理的记忆，交给调用方稍后重试
   onSkipped?: ((ids: string[]) => void) | undefined
   // 接口拒绝了这一条，或者逐条再试时这一条请求失败：跳过它，别的照常写
   onFailed?: ((memoryId: string, message: string) => void) | undefined
-  // 处理时间用完了（signal）：还没请求的不再请求，正在请求的取消；写回已经拿到的向量，没生成的交给调用方另排
+  // 处理时间用完了、服务要停（signal）：还没请求的不再请求，正在请求的取消；写回已经拿到的向量，
+  // 没生成的（不含被锁着、已经交给 onSkipped 的）交给调用方另排
   signal?: AbortSignal | undefined
   onDeferred?: ((ids: string[]) => void) | undefined
+  // 同一次处理里的几次调用共用一个，记着接口接受过文本没有；不给时只算这一次调用
+  run?: EmbedRun | undefined
 }
 
 // 还要留着向量的模型：写回时按设置里正在用的与正在换过去的算（锁住设置到写完），不用任务开始时的：
@@ -37,51 +45,54 @@ async function keptModels(tx: Tx, embedder: Embedder): Promise<string[]> {
   return kept.length ? kept : [embedder.model]
 }
 
-// 一批文本的向量。整批失败时逐条再试：接口拒绝的那几条（EmbedRejected，例如正文超长）告诉调用方、跳过，
-// 不拦住别的；开头几条都因为接口不可用（连不上、超时、5xx）失败、一条都没成功，就当作接口不可用，照常报错。
-// 处理时间用完了就停下：没拿到的不在结果里，也不报失败
+// 一批文本的向量。整批失败时逐条再试，先试短的：接口拒绝单条文本多半是因为太长，先试短的能尽早确认接口是好的。
+// 这一次处理里接口还没接受过任何文本时，连着几条都失败（不管什么错）就当作接口不可用，停下来报给调用方（broken），
+// 不再一条条请求；接受过之后，被拒的（EmbedRejected，例如正文超长）只算这一条、跳过，连着几条都是别的错
+// （连不上、超时、5xx）照样当作接口不可用。处理时间用完了也停下：没拿到的不在结果里、也不报失败。
+// 已经拿到的向量不论怎样都交回去
 async function embedBatch(
   embedder: Embedder,
   batch: { id: string; text: string }[],
   hooks: SyncHooks,
-): Promise<Map<string, number[]>> {
+  run: EmbedRun,
+): Promise<{ vectors: Map<string, number[]>; broken: Error | null }> {
   const { signal, onFailed } = hooks
   const options = signal ? { signal } : {}
   const vectors = new Map<string, number[]>()
+  // 这一条是被拒、只算它自己的吗
+  const rejectedAlone = (err: unknown) => run.accepted && err instanceof EmbedRejected
   try {
     const out = await embedder.embed(
       batch.map((p) => p.text),
       options,
     )
     batch.forEach((p, j) => vectors.set(p.id, out[j]!))
-    return vectors
+    run.accepted = true
+    return { vectors, broken: null }
   } catch (err) {
-    if (signal?.aborted) return vectors
+    if (signal?.aborted) return { vectors, broken: null }
     if (batch.length === 1) {
-      if (!(err instanceof EmbedRejected)) throw err
-      onFailed?.(batch[0]!.id, err.message)
-      return vectors
+      if (!rejectedAlone(err)) return { vectors, broken: err as Error }
+      onFailed?.(batch[0]!.id, (err as Error).message)
+      return { vectors, broken: null }
     }
   }
-  let unavailable = 0
-  for (const item of batch) {
+  const limit = Math.min(GIVE_UP_AFTER, batch.length)
+  let failures = 0
+  for (const item of [...batch].sort((a, b) => a.text.length - b.text.length)) {
     if (signal?.aborted) break
     try {
       const [vector] = await embedder.embed([item.text], options)
       vectors.set(item.id, vector!)
+      run.accepted = true
+      failures = 0
     } catch (err) {
       if (signal?.aborted) break
-      if (
-        !(err instanceof EmbedRejected) &&
-        !vectors.size &&
-        ++unavailable >= Math.min(GIVE_UP_AFTER, batch.length)
-      ) {
-        throw err
-      }
+      if (!rejectedAlone(err) && ++failures >= limit) return { vectors, broken: err as Error }
       onFailed?.(item.id, (err as Error).message)
     }
   }
-  return vectors
+  return { vectors, broken: null }
 }
 
 // 为一批记忆生成或刷新这个模型的向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
@@ -155,6 +166,7 @@ async function syncRows(
     return 0
   }
 
+  const run = hooks.run ?? { accepted: false }
   const vectors = new Map<string, number[]>()
   const failed = new Set<string>()
   const batchHooks: SyncHooks = {
@@ -164,13 +176,14 @@ async function syncRows(
       hooks.onFailed?.(memoryId, message)
     },
   }
-  for (let i = 0; i < pending.length; i += EMBED_BATCH) {
+  // 接口不可用时停下，不再请求后面的；已经拿到的向量照样写回，下次只请求剩下的
+  let broken: Error | null = null
+  for (let i = 0; i < pending.length && !broken; i += EMBED_BATCH) {
     if (hooks.signal?.aborted) break
-    const out = await embedBatch(embedder, pending.slice(i, i + EMBED_BATCH), batchHooks)
-    for (const [id, vector] of out) vectors.set(id, vector)
+    const out = await embedBatch(embedder, pending.slice(i, i + EMBED_BATCH), batchHooks, run)
+    for (const [id, vector] of out.vectors) vectors.set(id, vector)
+    broken = out.broken
   }
-  // 处理时间用完了，没生成、也没失败的：拿到的照常写回，这些交给调用方另排
-  const deferred = pending.map((p) => p.id).filter((id) => !vectors.has(id) && !failed.has(id))
 
   const { written, skipped } = await withSpace(db, spaceId, async (tx) => {
     // 这个模型已经不用了（换模型被放弃、已经切走）就不写它的向量，只做清理
@@ -225,11 +238,18 @@ async function syncRows(
     return { written: writes.length, skipped }
   })
   if (skipped.length) hooks.onSkipped?.(skipped)
+  if (broken) throw broken
+  // 处理时间用完了、服务要停，没生成、也没失败的：交给调用方另排。被锁着的已经交给 onSkipped 另排了，不重复算
+  const later = new Set(skipped)
+  const deferred = pending
+    .map((p) => p.id)
+    .filter((id) => !vectors.has(id) && !failed.has(id) && !later.has(id))
   if (deferred.length) hooks.onDeferred?.(deferred)
   return written
 }
 
-// 同一个空间的几条记忆（id 不重复）一起处理：一起读、合起来请求嵌入接口、一起写回。返回写下了几条向量
+// 同一个空间的几条记忆一起处理：一起读、合起来请求嵌入接口、一起写回。返回写下了几条向量。
+// id 先去重：调用方可能把同一条记忆传了几次（同一条连着改了几次会排几个任务），每条只处理一次
 export async function embedMemories(
   db: Db,
   embedder: Embedder,
@@ -237,7 +257,7 @@ export async function embedMemories(
   memoryIds: string[],
   hooks: SyncHooks = {},
 ): Promise<number> {
-  return syncRows(db, embedder, spaceId, memoryIds, hooks)
+  return syncRows(db, embedder, spaceId, [...new Set(memoryIds)], hooks)
 }
 
 export interface BackfillOptions {
@@ -254,6 +274,8 @@ export async function backfillEmbeddings(
   options: BackfillOptions = {},
 ): Promise<number> {
   const { onSkipped, onFailed, shouldContinue } = options
+  // 整次补齐算一次处理：前面的页里接口接受过文本，后面页里被拒的就只算那一条
+  const run: EmbedRun = { accepted: false }
   let total = 0
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
     let after: string | null = null
@@ -274,7 +296,7 @@ export async function backfillEmbeddings(
         embedder,
         spaceId,
         page.map((r) => r.id),
-        { onSkipped: onSkipped && ((ids) => onSkipped(spaceId, ids)), onFailed },
+        { onSkipped: onSkipped && ((ids) => onSkipped(spaceId, ids)), onFailed, run },
       )
       after = page[page.length - 1]!.id
     }
