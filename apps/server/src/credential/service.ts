@@ -772,7 +772,8 @@ export class CredentialService {
       const rows = await tx
         .select({
           row: credentialProviders,
-          retentionFrom: PROVIDER_RETENTION_FROM.mapWith(credentialProviders.deletedAt),
+          // 包一层再 mapWith：mapWith 改的是这个 SQL 对象本身，不能改到共用的常量上
+          retentionFrom: sql`${PROVIDER_RETENTION_FROM}`.mapWith(credentialProviders.deletedAt),
         })
         .from(credentialProviders)
         .where(

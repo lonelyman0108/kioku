@@ -469,7 +469,8 @@ export class MemoryService {
   // 撤销删除这几条会不会撞上 URI 冲突，返回会撞上的那些的 id。照撤销删除的几步判断：先由 claimUri
   // 让出调用方能让出的过期记录，剩下的交给数据库——唯一索引 memories_uri_live_idx 看同一归属里没删除的，
   // 已过期的也算；互斥触发器 memories_uri_exclusive 只看两边都还有效的，有一边是共享节点、或者两边属于
-  // 同一个成员就冲突（被撤销的这一条自己已经过期时不检查）。是否过期都按数据库的时间。
+  // 同一个成员就冲突（被撤销的这一条自己已经过期时不检查）。是否过期照各自的时钟：claimUri 按应用的时间让出，
+  // 触发器按数据库的时间（STILL_VALID）。
   // 只看调用方撤销得了的（canModify，撤销不了的是 403，不替他去看这个 URI 上有没有别人的记录）；
   // 占着 URI 的那条只用来判断，调用方读不到它时也只知道被占用，拿不到它的内容
   private async undeleteConflicts(
@@ -489,6 +490,8 @@ export class MemoryService {
         personaId: memories.personaId,
         appId: memories.appId,
         provenance: memories.provenance,
+        validTo: memories.validTo,
+        expiresAt: memories.expiresAt,
         ended: sql<boolean>`(not ${STILL_VALID})`,
       })
       .from(memories)
@@ -501,12 +504,15 @@ export class MemoryService {
           )})`,
         ),
       )
+    const now = new Date()
     const taken = new Set<string>()
     for (const { row, ended } of targets) {
       const blocked = occupants.some((m) => {
         if (m.id === row.id || m.domain !== row.domain || m.path !== row.path) return false
         // 同一归属：唯一索引挡着，除非它已经过期、撤销时让得出（两边都有效时触发器也挡，结论一样）
-        if (m.ownerAccountId === row.ownerAccountId) return !(m.ended && this.canRelease(m))
+        if (m.ownerAccountId === row.ownerAccountId) {
+          return !(!isValidAt(m, now) && this.canRelease(m))
+        }
         // 归属不同：两边都还有效、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
         return !ended && !m.ended && (row.ownerAccountId === null || m.ownerAccountId === null)
       })

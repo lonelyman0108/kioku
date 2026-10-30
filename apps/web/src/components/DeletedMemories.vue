@@ -88,8 +88,10 @@ async function undelete(item: DeletedMemory) {
   }
 }
 
-// URI 被别的记忆占着时撤销删除会冲突：说清楚为什么点不了、该怎么办
-const TAKEN_HINT = '这个 URI 现在被另一条记忆占用，撤销删除会冲突：先把那条移走或删掉，再撤销删除'
+// URI 被别的记忆占着时撤销删除会冲突：说清楚为什么、该怎么办。按钮照样能点：标记是列表读出时的，
+// 占着的那条可能已经过期、被移走或删掉，点了还冲突时会重新读列表
+const TAKEN_HINT =
+  '这个 URI 被另一条记忆占着，撤销删除会冲突：先把那条移走或删掉，再撤销删除（标记按列表读出时算，可以直接再试）'
 </script>
 
 <template>
@@ -172,7 +174,6 @@ const TAKEN_HINT = '这个 URI 现在被另一条记忆占用，撤销删除会�
               color="neutral"
               variant="subtle"
               :loading="restoring === item.id"
-              :disabled="item.uriTaken"
               @click="undelete(item)"
             >
               撤销删除
