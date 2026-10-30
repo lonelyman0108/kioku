@@ -9,18 +9,24 @@ import { pruneAttempts } from '../../auth/rateLimit'
 import { withSpace, type Database } from '../../db/client'
 import {
   loginAttempts,
+  memories,
+  memoryEmbeddings,
   sessions,
+  settings,
   subjectBindAttempts,
   subjectBindCodes,
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import { dropIneligibleEmbeddings, embedMemory } from '../../embedding/worker'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { bootstrap, type Workspace } from '../../testing/fixtures'
+import { fakeEmbedder } from '../../testing/fakeEmbedder'
+import { bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { cleanupExpired } from '../cleanup'
 
 describe.skipIf(!testDatabaseUrl)('定时清理', () => {
   let database: Database
+  let app: ReturnType<typeof createApp>
   let ws: Workspace
 
   beforeAll(async () => {
@@ -31,7 +37,7 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
   })
   beforeEach(async () => {
     await resetDatabase(database)
-    const app = createApp({
+    app = createApp({
       db: database.db,
       cookieSecure: false,
       masterKey: randomBytes(32),
@@ -60,6 +66,7 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
       turns: 0,
       bindCodes: 0,
       bindAttempts: 0,
+      embeddings: 0,
     })
     // 初始化时登录的那个会话和 live 都还在
     const left = await database.db.select({ hash: sessions.tokenHash }).from(sessions)
@@ -127,5 +134,69 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
       expect(await pruneBindingData(database.db)).toEqual({ codes: 0, attempts: 0 })
     })
     expect(await pruneBindingData(database.db)).toEqual({ codes: 0, attempts: 1 })
+  })
+
+  it('记忆到期之后，它留下的向量由清理删掉；正被别的事务锁着的这次跳过，下一次再删', async () => {
+    // 别的测试留下的嵌入设置会让向量任务不写这个模型的向量
+    await database.db.delete(settings).where(eq(settings.key, 'embedding'))
+    const embedder = fakeEmbedder()
+    const create = async (uri: string) => {
+      const res = await app.request(
+        `/v1/spaces/${ws.spaceId}/memories`,
+        jsonRequest('POST', { uri, content: uri, layer: 'base' }, { cookie: ws.cookie }),
+      )
+      expect(res.status).toBe(201)
+      const { id } = (await res.json()) as { id: string }
+      expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+      return id
+    }
+    const kept = await create('kb://kept')
+    const lapsed = await create('kb://lapsed')
+    // 到期是时间到了，没有写入，也就没有向量任务来删它的向量
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.update(memories).set({ validTo: past() }).where(eq(memories.id, lapsed)),
+    )
+    const vectors = async () =>
+      (
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select({ id: memoryEmbeddings.memoryId }).from(memoryEmbeddings),
+        )
+      ).map((r) => r.id)
+
+    // 别的事务锁着这一行时清理跳过它，不等锁：等的话这几秒里做不完
+    const whileLocked = async (lock: string) => {
+      let locked!: () => void
+      let release!: () => void
+      const ready = new Promise<void>((resolve) => (locked = resolve))
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const holder = database.db.transaction(async (tx) => {
+        await tx.execute(sql`select set_config('app.space_id', ${ws.spaceId}, true)`)
+        await tx.execute(sql.raw(lock))
+        locked()
+        await held
+      })
+      await ready
+      const run = dropIneligibleEmbeddings(database.db)
+      try {
+        return await Promise.race([
+          run,
+          new Promise((resolve) => setTimeout(() => resolve('等锁'), 3_000)),
+        ])
+      } finally {
+        release()
+        await holder
+        await Promise.allSettled([run])
+      }
+    }
+    // 记忆正被别的事务改着（例如正在重新生效）：不删它刚生成的向量
+    expect(await whileLocked(`select 1 from memories where id = '${lapsed}' for update`)).toBe(0)
+    // 向量行正被别的事务锁着（例如换模型之后删旧向量）
+    expect(
+      await whileLocked(`select 1 from memory_embeddings where memory_id = '${lapsed}' for update`),
+    ).toBe(0)
+    expect(await vectors()).toHaveLength(2)
+    expect(await cleanupExpired(database.db)).toMatchObject({ embeddings: 1 })
+    expect(await vectors()).toEqual([kept])
+    expect(await cleanupExpired(database.db)).toMatchObject({ embeddings: 0 })
   })
 })

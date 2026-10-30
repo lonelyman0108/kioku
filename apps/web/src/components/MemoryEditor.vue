@@ -3,12 +3,13 @@ import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { PLAINTEXT_CREDENTIAL, type MemoryView, type Sensitivity } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { useNow } from '../composables/useNow'
 import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { icons } from '../icons'
 import { buildKeywordIndex } from '../keywords'
@@ -89,12 +90,8 @@ const dirty = computed(() => {
 })
 
 // 现在的时间，每半分钟更新一次：开着的这条到了有效到时显示已过期
-const now = ref(Date.now())
-const ticking = setInterval(() => (now.value = Date.now()), 30_000)
-onBeforeUnmount(() => clearInterval(ticking))
-const expiredNow = computed(
-  () => !!base.value && isExpired(base.value.validTo, new Date(now.value)),
-)
+const now = useNow(30_000)
+const expiredNow = computed(() => !!base.value && isExpired(base.value.validTo, now.value))
 
 // 有未保存的改动时保留它们，提示在别处被改过，保存时由 id 与版本号检查冲突。
 // 没有改动时跟上服务器：换成了另一条（删除后在同一个 URI 重建），或者有了更新的版本；

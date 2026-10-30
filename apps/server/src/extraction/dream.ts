@@ -25,6 +25,7 @@ import {
   subjects,
 } from '../db/schema'
 import { loadEmbeddingModels } from '../embedding/settings'
+import { STILL_VALID } from '../memory/filter'
 import {
   DREAM_SCOPE_KEY,
   dreamScopeCondition,
@@ -34,7 +35,6 @@ import {
   TALK_LAYERS,
   type ParsedDreamScope,
 } from '../memory/scopes'
-import { STILL_VALID } from '../memory/service'
 import { formatUri, layerForDomain } from '../memory/uri'
 import { anyTermQuery, clipChars, inlineText, oneLine, searchTerms } from '../recall/recall'
 import type { EndpointConfig } from '../settings/endpoint'

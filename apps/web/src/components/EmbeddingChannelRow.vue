@@ -1,11 +1,17 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
 import type { ChannelDraft } from '../embeddingDrafts'
+import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
 
 // 一个嵌入渠道的编辑：接口地址、请求用的模型名与 Key，以及挪位置、删掉
 const draft = defineModel<ChannelDraft>({ required: true })
 defineProps<{ index: number; first: boolean; last: boolean; only: boolean }>()
 const emit = defineEmits<{ up: []; down: []; remove: [] }>()
+
+// 换了接口主机又没说 Key 怎么处理：在 Key 旁边说清楚，保存按钮由外面禁用
+const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', true) : undefined))
 </script>
 
 <template>
@@ -54,6 +60,7 @@ const emit = defineEmits<{ up: []; down: []; remove: [] }>()
           ? '已保存（加密存储）。留空表示不修改；改了接口主机时必须重新填写'
           : '用实例主密钥加密后存库；接口不需要 Key 时留空'
       "
+      :error="keyError"
     >
       <UInput
         v-model="draft.apiKey"

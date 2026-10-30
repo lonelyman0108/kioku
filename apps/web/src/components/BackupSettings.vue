@@ -7,6 +7,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { classifyError, defaultHour, formatBytes, hourLabel } from '../backup'
+import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
 
@@ -77,8 +78,20 @@ const dirty = computed(() => {
   )
 })
 
+// 换了接口主机又没填 Secret：服务端会拒（Secret 不能清除），提交之前就在 Secret 旁边说明，保存按钮不可点
+const secretMissing = computed(() =>
+  needsNewKey({
+    baseUrl: form.endpoint,
+    savedBaseUrl: view.value?.endpoint ?? null,
+    hasApiKey: view.value?.hasSecret ?? false,
+    apiKey: form.secretAccessKey,
+    clearKey: false,
+  }),
+)
+
 const saving = ref(false)
 async function save() {
+  if (secretMissing.value) return
   saving.value = true
   try {
     const saved = await api.saveBackupSettings({
@@ -257,6 +270,7 @@ async function clear() {
               ? '已保存（加密存储）。留空表示不修改；更换了接口主机时必须重新填写'
               : '用实例主密钥加密后存库'
           "
+          :error="secretMissing ? newKeyHint('Secret Access Key', false) : undefined"
         >
           <UInput
             v-model="form.secretAccessKey"
@@ -282,7 +296,9 @@ async function clear() {
           </UFormField>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <UButton type="submit" :icon="icons.save" :loading="saving">保存</UButton>
+          <UButton type="submit" :icon="icons.save" :loading="saving" :disabled="secretMissing"
+            >保存</UButton
+          >
           <UButton
             :icon="icons.test"
             color="neutral"

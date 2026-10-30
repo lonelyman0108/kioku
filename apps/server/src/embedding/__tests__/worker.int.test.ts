@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type { EmbeddingSettingsView } from '@kioku/contracts'
-import { sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -11,6 +11,7 @@ import { startJobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { embeddingCoverage } from '../coverage'
 import { staticEmbedderSource } from '../source'
 import { backfillEmbeddings, embedMemory } from '../worker'
 
@@ -93,6 +94,83 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     await app.request('/v1/memories?uri=core%3A%2F%2Fx', { method: 'DELETE', headers: bearer(key) })
     await embedMemory(database.db, embedder, ws.spaceId, id)
     expect(await embeddings()).toHaveLength(0)
+  })
+
+  it('过期的记忆不生成向量，过期之前生成的在下次处理时删掉，补齐的范围与覆盖率的口径一致；重新生效之后再生成', async () => {
+    const embedder = fakeEmbedder()
+    const id = await create({ uri: 'core://soon', content: '很快过期', layer: 'base' })
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+    const validTo = (at: Date | null) =>
+      withSpace(database.db, ws.spaceId, (tx) =>
+        tx.update(memories).set({ validTo: at }).where(eq(memories.id, id)),
+      )
+    const coverage = async () => {
+      const { eligible, embedded } = await embeddingCoverage(database.db, [embedder.model])
+      return { eligible, embedded: embedded.get(embedder.model) }
+    }
+    expect(await coverage()).toEqual({ eligible: 1, embedded: 1 })
+
+    await validTo(new Date(Date.now() - 60_000))
+    expect(await coverage()).toEqual({ eligible: 0, embedded: 0 })
+    // 补齐时不为它请求接口，留下的向量删掉
+    expect(await backfillEmbeddings(database.db, embedder)).toBe(0)
+    expect(embedder.calls).toHaveLength(1)
+    expect(await embeddings()).toHaveLength(0)
+
+    await validTo(null)
+    expect(await coverage()).toEqual({ eligible: 1, embedded: 0 })
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+    expect(await coverage()).toEqual({ eligible: 1, embedded: 1 })
+  })
+
+  it('每小时的清理锁着一条记忆、正删它的向量时，向量任务照常做完别的，不在向量行上等锁', async () => {
+    const embedder = fakeEmbedder()
+    const a = await create({ uri: 'core://a', content: '照常生成', layer: 'base' })
+    const b = await create({ uri: 'core://b', content: '已经过期', layer: 'base' })
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 60_000) })
+        .where(eq(memories.id, b))
+      // b 还留着一个已经不用的模型的向量：向量任务会顺手清掉别的模型的向量
+      await tx.insert(memoryEmbeddings).values({
+        spaceId: ws.spaceId,
+        memoryId: b,
+        model: 'old-model',
+        contentHash: 'old',
+        embedding: new Array<number>(1024).fill(0.01),
+      })
+    })
+    // 像清理任务那样锁住 b、删着它的向量，先不提交
+    let locked!: () => void
+    let release!: () => void
+    const ready = new Promise<void>((resolve) => (locked = resolve))
+    const held = new Promise<void>((resolve) => (release = resolve))
+    const cleanup = database.db.transaction(async (tx) => {
+      await tx.execute(sql`select set_config('app.space_id', ${ws.spaceId}, true)`)
+      await tx.execute(sql`select 1 from memories where id = ${b} for no key update`)
+      await tx.execute(sql`delete from memory_embeddings where memory_id = ${b}`)
+      locked()
+      await held
+    })
+    await ready
+    // 等锁的话这几秒里做不完；出了死锁会直接报错
+    const runs: Promise<unknown>[] = []
+    const within = <T>(run: Promise<T>) => {
+      runs.push(run)
+      return Promise.race([run, new Promise((resolve) => setTimeout(() => resolve('等锁'), 3_000))])
+    }
+    try {
+      // 补齐：a 照常写上，b 被锁着就不碰它的向量
+      expect(await within(backfillEmbeddings(database.db, embedder))).toBe(1)
+      // 只处理 b：没有要写的，只剩别的模型的向量要清，b 被锁着，同样不等
+      expect(await within(embedMemory(database.db, embedder, ws.spaceId, b))).toBe(0)
+    } finally {
+      release()
+      await cleanup
+      await Promise.allSettled(runs)
+    }
+    expect((await embeddings()).map((e) => e.memoryId)).toEqual([a])
   })
 
   it('全量补齐覆盖所有记忆；换模型后旧向量被替换', async () => {

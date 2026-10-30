@@ -94,7 +94,7 @@ export type LayerCount = z.infer<typeof LayerCount>
 export const EmbeddingCoverage = z.object({
   configured: z.boolean(),
   model: z.string().nullable(),
-  // 应当有向量的记忆：没删除、不是 secret、有正文的策展记忆
+  // 应当有向量的记忆：现在有效（没删除、没过期）、不是 secret、有正文、成员读得到的策展记忆
   eligible: z.number().int(),
   // 其中已经有当前模型向量的
   embedded: z.number().int(),
@@ -201,9 +201,22 @@ export const DeletedMemory = z.object({
 })
 export type DeletedMemory = z.infer<typeof DeletedMemory>
 
+// 已删除的记忆过了保留期由每天一次的清理永久删除，之后只能从备份找回。days 是保留天数，所有成员都有；
+// paused 是按天数的清理正暂停着（从备份恢复或保留期第一次生效之后，这期间一条都不删），所有成员都有，不带时间；
+// pausedUntil 是暂停到什么时候，和实例设置里的保留期一样只给实例管理员（减去天数就是恢复的时间），
+// 别人与没有暂停时为 null。一条已删除的记忆最早在「删除时间加保留天数」与暂停结束的时间里晚的那个之后清除；
+// 暂停中又不知道到什么时候的，只能说至少还要多久
+export const DeletionRetention = z.object({
+  days: z.number().int(),
+  paused: z.boolean(),
+  pausedUntil: z.string().nullable(),
+})
+export type DeletionRetention = z.infer<typeof DeletionRetention>
+
 export const DeletedMemoryList = z.object({
   items: z.array(DeletedMemory),
   nextCursor: z.string().nullable(),
+  retention: DeletionRetention,
 })
 export type DeletedMemoryList = z.infer<typeof DeletedMemoryList>
 
