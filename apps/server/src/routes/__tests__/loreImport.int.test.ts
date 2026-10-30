@@ -648,12 +648,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       const newer = await fileSource(LATER)
       const next = await planOf(newer)
       expect(next.sync.items.find((i) => i.uri === 'infra://nas')!.state).toBe('update')
-      // 这次不同步，也不算 Lore 里没有了
+      // 这次不同步。不算 Lore 里没有了由 planSync 的用例保证：结果里不带同步状态，这里看不出来
       const synced = await applyOf(newer, next, { excludeUris: ['infra://nas', 'core://agent'] })
       expect(synced.sync.updated).toEqual([])
       expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
       expect(synced.created).toEqual(['preferences://user'])
-      expect((await planOf(newer)).sync.goneFromLore).toEqual([])
+      // 勾选只管这一次：再看计划它还是要更新
+      const after = await planOf(newer)
+      expect(after.sync.items.find((i) => i.uri === 'infra://nas')!.state).toBe('update')
     })
 
     it('勾掉一个节点时，映射到同一个 URI、计划里不导入的节点不会写进去', async () => {

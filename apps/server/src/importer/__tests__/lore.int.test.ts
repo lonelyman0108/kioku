@@ -82,6 +82,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
   const plan = async (
     persona = 'default',
     secretUris = ['infra://office_network/credentials'],
+    excludeUris: string[] = [],
   ): Promise<ImportPlan> => {
     const existing = await withSpace(database.db, ws.spaceId, (tx) =>
       tx
@@ -96,6 +97,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       accountId: ws.accountId,
       persona: { slug: persona, name: persona },
       secretUris: new Set(secretUris),
+      excludeUris: new Set(excludeUris),
     })
   }
   const run = async (persona?: string, secretUris?: string[]) =>
@@ -892,6 +894,38 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
             reason: expect.stringContaining('格式不对的凭据占位符'),
           }),
         ])
+      } finally {
+        await undo()
+      }
+    })
+
+    it('这次勾掉的节点列为 skipped 并说明：不算 Lore 里没有了，也不同步', async () => {
+      await run()
+      const undo = await editLore('infra://office_network', { content: 'Lore 里又改了' })
+      try {
+        const snapshot = await readLore(lore)
+        const unticked = await syncPlan()
+        expect(unticked.items.find((i) => i.uri === 'infra://office_network')!.state).toBe('update')
+
+        // 计划带勾选，snapshot 不过滤：过滤了的话这个节点会查不到，错报成 Lore 里没有了
+        const ticked = await plan('default', undefined, ['infra://office_network'])
+        const sync = await planSync(target(), ticked, snapshot)
+        expect(sync.items.find((i) => i.uri === 'infra://office_network')).toEqual({
+          source: 'infra://office_network',
+          uri: 'infra://office_network',
+          state: 'skipped',
+          reason: '这次选择不导入',
+          changes: [],
+        })
+        expect(sync.goneFromLore).toEqual([])
+        // 别的节点不受影响
+        expect(sync.items.filter((i) => i.state === 'skipped')).toHaveLength(1)
+        expect(sync.items.filter((i) => i.state === 'current')).toHaveLength(
+          unticked.items.filter((i) => i.state === 'current').length,
+        )
+
+        expect((await applySync(target(), sync)).updated).toEqual([])
+        expect((await importService().get('infra://office_network')).content).toBe('办公室的网络')
       } finally {
         await undo()
       }
