@@ -333,6 +333,21 @@ describe('Lore 导入计划', () => {
     })
   })
 
+  it('disclosure 截断时不切开代理对：落单的代理项存下来是乱码，之后每次同步都算要更新', () => {
+    const disclosureOf = (disclosure: string) => {
+      const plan = planImport(snapshot(node('infra://pair', { disclosure })), [], options)
+      expect(plan.warnings).toContainEqual({ uri: 'infra://pair', kind: 'disclosureTruncated' })
+      expect(plan.skipped).toEqual([])
+      return plan.memories[0]!.request.disclosure
+    }
+    // 第 500 个单元是表情的前半个
+    expect(disclosureOf(`${'长'.repeat(499)}😀尾`)).toBe('长'.repeat(499))
+    // 表情正好在界内，不动
+    expect(disclosureOf(`${'长'.repeat(498)}😀尾`)).toBe(`${'长'.repeat(498)}😀`)
+    // 第 500 个单元是表情的后半个之后的字，也不动
+    expect(disclosureOf(`${'长'.repeat(497)}😀长尾`)).toBe(`${'长'.repeat(497)}😀长`)
+  })
+
   describe('这次不导入的节点', () => {
     const zcodeApps = [
       { slug: 'claude-code', runtimeFamily: 'claudecode', ownerAccountId: ME },

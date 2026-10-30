@@ -681,6 +681,21 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(rows).toEqual([])
     })
 
+    it('disclosure 截断时切开代理对：存下来没有乱码，再看计划是最新的，不是每次都要更新', async () => {
+      await seed('infra://emoji', '带表情的 disclosure', {
+        disclosure: `${'长'.repeat(499)}😀后面的字`,
+      })
+      const source = await fileSource()
+      const plan = await planOf(source)
+      expect(plan.warnings).toContainEqual({ uri: 'infra://emoji', kind: 'disclosureTruncated' })
+      const result = await applyOf(source, plan)
+      expect(result.failed).toEqual([])
+      expect(result.created).toContain('infra://emoji')
+      expect((await service().get('infra://emoji')).disclosure).toBe('长'.repeat(499))
+      const again = await planOf(source)
+      expect(again.sync.items.find((i) => i.uri === 'infra://emoji')!.state).toBe('current')
+    })
+
     it('同步写下 sync 事件，context 记下导出时间；secret 节点的 context 里没有正文', async () => {
       const source = await fileSource()
       await applyOf(source, await planOf(source), { secretUris: ['infra://router/credentials'] })

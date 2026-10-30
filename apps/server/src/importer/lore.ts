@@ -194,6 +194,14 @@ const CREDENTIAL_PATH = /credential|password|passwd|secret|token|密码|凭据/i
 
 const extrasOf = (node: LoreNode) => [node.disclosure ?? '', ...node.keywords].join('\n')
 
+// 按 UTF-16 单元截断可能切开代理对。落单的代理项写进 text 时被换成 U+FFFD：存下来末尾多一个乱码，又和这里算出的
+// 对不上，这个节点之后每次同步都算要更新。所以切开时连前半个一起去掉
+function truncateDisclosure(text: string): string {
+  const cut = text.slice(0, MAX_DISCLOSURE)
+  const last = cut.charCodeAt(cut.length - 1)
+  return last >= 0xd800 && last <= 0xdbff ? cut.slice(0, -1) : cut
+}
+
 // 一个节点像不像含凭据，路径（主路径与别名）、正文、disclosure 或关键词分开看
 export function credentialHints(node: LoreNode): {
   path: boolean
@@ -374,7 +382,7 @@ export function planImport(
     let disclosure = node.disclosure ?? undefined
     if (disclosure && disclosure.length > MAX_DISCLOSURE) {
       plan.warnings.push({ uri: node.uri, kind: 'disclosureTruncated' })
-      disclosure = disclosure.slice(0, MAX_DISCLOSURE)
+      disclosure = truncateDisclosure(disclosure)
     }
     // 按真正会写进去的 disclosure 判断（截断之后）；关键词里的占位符在 keywordsOf 里单独丢掉
     if (disclosure && mentionsPlaceholder(disclosure)) {
