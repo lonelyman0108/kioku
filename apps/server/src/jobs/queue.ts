@@ -5,7 +5,7 @@ import { backupJob } from '../backup/storage'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
 import { masterKeyStatus, recordMasterKeyError, rotateMasterKey } from '../crypto/rotation'
-import { loggableError, type Db } from '../db/client'
+import { errorText, loggableError, type Db } from '../db/client'
 import { backfillJob, embedJobs, pruneJob, switchJob, type EmbedTarget } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
 import { EMBED_BATCH } from '../embedding/worker'
@@ -214,7 +214,7 @@ export async function startJobs(options: {
       if (remaining) void send(ROTATE, {}, ROTATE_AGAIN_SECONDS)
     } catch (err) {
       console.error('主密钥轮换出错，定时任务会再试', loggableError(err))
-      await recordMasterKeyError(options.db, (err as Error).message).catch(() => {})
+      await recordMasterKeyError(options.db, errorText(err)).catch(() => {})
     }
   })
   if (masterKey && keyringOf(masterKey).previous) void send(ROTATE, {})

@@ -721,7 +721,7 @@ async function dreamScope(
   } catch (err) {
     // 整个事务已经回滚：单独记下原因，这一批没记成整理过，下次重来
     await withSpace(db, spaceId, (tx) =>
-      record(tx, { ...usage, error: `写入失败：${(err as Error).message}` }),
+      record(tx, { ...usage, error: `写入失败：${errorText(err)}` }),
     )
     return { tokens, more: batch.more, again: false, failed: true }
   }

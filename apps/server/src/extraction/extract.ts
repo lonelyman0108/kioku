@@ -9,7 +9,7 @@ import {
   mentionsPlaceholder,
 } from '../credential/placeholders'
 import type { MasterKey } from '../crypto/keyring'
-import { withSpace, type Db, type Tx } from '../db/client'
+import { errorText, withSpace, type Db, type Tx } from '../db/client'
 import {
   conversationTurns,
   extractionRuns,
@@ -373,7 +373,7 @@ export async function extractBatch(
     }
     // 整批已经回滚：单独记下原因再抛出，交给后台任务重试，缓冲留着
     await withSpace(db, target.spaceId, (tx) =>
-      record(tx, { ...usage, error: `写入失败：${(err as Error).message}` }),
+      record(tx, { ...usage, error: `写入失败：${errorText(err)}` }),
     )
     throw err
   }
