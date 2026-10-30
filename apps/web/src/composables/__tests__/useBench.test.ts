@@ -560,6 +560,32 @@ describe('切换模式', () => {
     expect(bench.session.value.timeline).toEqual([])
   })
 
+  it('确认框的正文是打开时存的：确认之后记录清掉了，关闭动画期间还在', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.call(STEPS, 'kioku_create')
+    bench.requestMode(false)
+    const text = bench.modeLoss.value
+    expect(text).toContain('时间线（1 条）')
+    expect(bench.rollbackLoss.value).toBe(text)
+
+    bench.confirmRollback()
+    await settle()
+    expect(bench.modeLoss.value).toBeNull()
+    expect(bench.rollbackLoss.value).toBe(text)
+  })
+
+  it('取消之后再打开：正文按现在的记录说', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.call(STEPS, 'kioku_create')
+    bench.requestMode(false)
+    bench.confirmingRollback.value = false
+    await bench.call(STEPS, 'kioku_create')
+    bench.requestMode(false)
+    expect(bench.rollbackLoss.value).toContain('时间线（2 条）')
+  })
+
   it('真实模式下有场景结果：一样要确认', async () => {
     const bench = await inRealMode()
     bench.scenarioOutcome.value = { title: '场景', probe: false, result: RESULT }

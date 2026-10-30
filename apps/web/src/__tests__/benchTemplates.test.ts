@@ -163,7 +163,7 @@ describe('真实模式要确认', () => {
 
   it('切回回滚会清掉记录时要确认，确认框说清楚清掉什么；取消不动', () => {
     const request = bodyOf(useBench, 'requestMode')
-    expect(request).toContain('else if (modeLoss.value) confirmingRollback.value = true')
+    expect(request).toMatch(/else if \(modeLoss\.value\) \{[^}]*confirmingRollback\.value = true/)
     expect(request).toContain("else mode.value = 'rollback'")
     const modal = must(
       toolbar.elements.find(
@@ -171,7 +171,8 @@ describe('真实模式要确认', () => {
       ),
       '切回回滚的确认框',
     )
-    expect(shownIn(modal)).toEqual(['modeLoss'])
+    // 显示打开时存的那一份：确认之后 modeLoss 马上没了，对话框还在关闭
+    expect(shownIn(modal)).toEqual(['rollbackLoss'])
     const nodes = walk(modal)
     expect(handler(buttonOf(nodes, '切回回滚'), 'click')).toBe('confirmRollback')
     expect(handler(buttonOf(nodes, '取消'), 'click')).toBe('confirmingRollback = false')

@@ -24,6 +24,7 @@ const {
   confirmingReal,
   confirmingRollback,
   modeLoss,
+  rollbackLoss,
   requestMode,
   confirmReal,
   confirmRollback,
@@ -153,7 +154,7 @@ const errorOf = (err: unknown, fallback: string) =>
       @update:open="(v) => !v && (confirmingRollback = false)"
     >
       <template #body>
-        <p class="text-sm">{{ modeLoss }}</p>
+        <p class="text-sm">{{ rollbackLoss }}</p>
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">

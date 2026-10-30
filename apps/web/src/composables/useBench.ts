@@ -175,11 +175,15 @@ export function createBench() {
       failed: Boolean(callFailure.value || scenarioFailure.value),
     }),
   )
+  // 切回回滚的确认框的正文，打开时存一份：确认之后记录马上清掉，modeLoss 就没了，关闭动画期间不能只剩标题
+  const rollbackLoss = ref('')
   // 切到真实每次都要确认；切回回滚只在会清掉记录时确认，没有东西可清时不多问
   function requestMode(wantReal: boolean) {
     if (wantReal) confirmingReal.value = true
-    else if (modeLoss.value) confirmingRollback.value = true
-    else mode.value = 'rollback'
+    else if (modeLoss.value) {
+      rollbackLoss.value = modeLoss.value
+      confirmingRollback.value = true
+    } else mode.value = 'rollback'
   }
   function confirmReal() {
     confirmingReal.value = false
@@ -309,6 +313,7 @@ export function createBench() {
     confirmingReal,
     confirmingRollback,
     modeLoss,
+    rollbackLoss,
     requestMode,
     confirmReal,
     confirmRollback,
