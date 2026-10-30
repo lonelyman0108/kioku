@@ -6,7 +6,7 @@ import { sameOriginForCookies } from './auth/csrf'
 import { requireConsole } from './auth/middleware'
 import type { Deps } from './http/env'
 import { router } from './http/openapi'
-import { mountWeb } from './http/web'
+import { isApiPath, mountWeb } from './http/web'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
 import { bindingRoutes } from './routes/binding'
@@ -103,11 +103,16 @@ export function createApp(deps: Deps) {
     console.error(err)
     return c.json({ error: '服务内部错误' }, 500)
   })
+  // /v1 下没有匹配的路由（路径不存在，或者路径对、方法不对）时和别的错误一样回 { error }；
+  // 别的路径照旧是纯文本的 404，管理界面的页面路由由 mountWeb 回 index.html，走不到这里
+  app.notFound((c) =>
+    isApiPath(c.req.path) ? c.json({ error: '接口不存在' }, 404) : c.text('404 Not Found', 404),
+  )
   app.openAPIRegistry.registerComponent('securitySchemes', 'bearer', {
     type: 'http',
     scheme: 'bearer',
   })
-  // 管理界面放在 API 之后挂载，未知的 /v1 路径仍返回 404 而不是界面
+  // 管理界面放在 API 之后挂载，未知的 /v1 路径仍是上面 JSON 的 404 而不是界面
   if (deps.webDir && !mountWeb(app, deps.webDir)) {
     console.warn(`没有找到管理界面的构建产物：${deps.webDir}，只提供 API`)
   }
