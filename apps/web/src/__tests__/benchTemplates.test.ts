@@ -183,6 +183,14 @@ describe('真实模式要确认', () => {
     expect(handler(select('Key'), 'update:model-value')).toBe('(v) => selectKey(String(v))')
   })
 
+  it('选择失效的提示能关掉', () => {
+    const alert = withIf(toolbar.elements, 'selectionNotice')
+    expect(alert.tag).toBe('UAlert')
+    expect(bound(alert, 'title')).toBe('selectionNotice')
+    expect(alert.props?.some((p) => p.name === 'close')).toBe(true)
+    expect(handler(alert, 'update:open')).toBe('(v) => !v && (selectionNotice = null)')
+  })
+
   it('换了应用或 Key 回到回滚，会话换一份新的', () => {
     expect(useBench).toMatch(
       /watch\(\[spaceId, appId, keyId\], \(\) => \{\s+mode\.value = 'rollback'/,

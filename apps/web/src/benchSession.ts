@@ -23,6 +23,39 @@ export const ownedApps = (apps: readonly AppInfo[], accountId: string | undefine
 // 只能用还有效的 Key：吊销的、主人离开过空间而作废的都不列
 export const usableKeys = (keys: readonly KeyInfo[]) => keys.filter((key) => key.effectiveScopes)
 
+export const APP_REPLACED_NOTICE =
+  '选中的应用不是你的，或者已经转走、删掉了：只有应用主人能用测试台。这里换成了你自己的另一个应用。'
+export const KEY_REPLACED_NOTICE =
+  '选中的 Key 已经失效或不属于这个应用：这里换成了它别的有效 Key，权限可能不同。'
+
+export interface SelectionFix {
+  // 要写回地址的参数，undefined 表示去掉
+  query: { app?: string; key?: string }
+  // 换掉了地址里原来的选择时才有；只是把默认选中的写上去时是 null
+  notice: string | null
+}
+
+// 地址里的选择和读到的列表对一对，解析出的写回地址。默认选中的也要固定下来：不然默认的一变（新签发的 Key 排到前面、
+// 默认的 Key 被吊销），界面就悄悄换成另一把权限可能完全不同的 Key，地址里又没有东西可比，给不出提示。
+// apps、keys 是自己的应用、这个应用有效的 Key 的 id，没读到时是 null，这时不判断。
+// 一个都没有时也不动：没有可换的，不能说换了（页面上另有「还没有」的说明）
+export function selectionFix(
+  selected: { app?: string | undefined; key?: string | undefined },
+  apps: readonly string[] | null,
+  keys: readonly string[] | null,
+): SelectionFix | null {
+  const firstApp = apps?.[0]
+  if (!firstApp) return null
+  if (!selected.app) return { query: { app: firstApp }, notice: null }
+  // 地址里的 Key 是原来那个应用的，留着只会再提示一次
+  if (!apps.includes(selected.app)) {
+    return { query: { app: firstApp, key: undefined }, notice: APP_REPLACED_NOTICE }
+  }
+  const firstKey = keys?.[0]
+  if (!firstKey || (selected.key && keys.includes(selected.key))) return null
+  return { query: { key: firstKey }, notice: selected.key ? KEY_REPLACED_NOTICE : null }
+}
+
 // 切到真实模式、在真实模式下运行场景之前都列出这些后果，由用户确认
 export const REAL_MODE_CONSEQUENCES = [
   '写入是真的：步骤和这把 Key 的真实调用一样落库，不回滚，排向量与抽取任务。',

@@ -1,6 +1,17 @@
 import type { BenchMode, BenchReplayStep, BenchRunResult, BenchStep } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, inject, provide, reactive, ref, shallowRef, watch, type InjectionKey } from 'vue'
+import {
+  computed,
+  inject,
+  provide,
+  reactive,
+  ref,
+  shallowRef,
+  watch,
+  watchPostEffect,
+  type InjectionKey,
+  type Ref,
+} from 'vue'
 import { useRoute, useRouter, type RouteLocationNormalizedLoaded } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -14,6 +25,7 @@ import {
   replayFor,
   runBlocker,
   runFailureMessage,
+  selectionFix,
   usableKeys,
 } from '../benchSession'
 import { useSession } from './useSession'
@@ -31,9 +43,15 @@ const selectionOf = (route: RouteLocationNormalizedLoaded) => ({
 export type RunOutcome =
   { kind: 'done'; result: BenchRunResult } | { kind: 'failed'; message: string } | { kind: 'stale' }
 
+// 读到了、又不是还在刷新的旧缓存才算数：不能拿旧列表冤枉地址里的选择
+const settledIds = (
+  query: { isSuccess: Readonly<Ref<boolean>>; isFetching: Readonly<Ref<boolean>> },
+  list: readonly { id: string }[],
+) => (query.isSuccess.value && !query.isFetching.value ? list.map((item) => item.id) : null)
+
 // 测试台各分页共享的状态：应用、Key、模式、会话上下文、这次会话。页面建一份，分页组件用 useBench 取同一份。
 // 都只在内存里：调用内容可能有明文，不进浏览器存储
-function createBench() {
+export function createBench() {
   const route = useRoute()
   const router = useRouter()
   const queryClient = useQueryClient()
@@ -72,21 +90,35 @@ function createBench() {
   const key = computed(() => usable.value.find((k) => k.id === keyId.value) ?? null)
   const ready = computed(() => Boolean(app.value && key.value))
 
+  // 地址里的应用或 Key 用不了（链接是别人的、Key 刚被吊销）时说一声，不悄悄换。
+  // 地址同时改成实际的选择，所以只说一次：用户关掉或者重新选过之后不再提示，刷新之后也不会
+  const selectionNotice = ref<string | null>(null)
+  watch(spaceId, () => (selectionNotice.value = null))
+
   // 选择记在地址里：刷新、分享都还在。模式不记：真实模式每次都要确认
   const select = (query: { app?: string; key?: string }) =>
     void router.replace({ query: { ...route.query, ...query } })
-  const selectApp = (id: string) => select({ app: id, key: undefined })
-  const selectKey = (id: string) => select({ key: id })
+  const selectApp = (id: string) => {
+    selectionNotice.value = null
+    select({ app: id, key: undefined })
+  }
+  const selectKey = (id: string) => {
+    selectionNotice.value = null
+    select({ key: id })
+  }
 
-  // 地址里的应用或 Key 用不了（链接是别人的、Key 刚被吊销）时说一声，不悄悄换
-  const selectionNotice = computed(() => {
-    if (apps.data.value && selection.app && app.value?.id !== selection.app) {
-      return '链接里的应用不是你的，或者已经删掉了：只有应用主人能用测试台。这里换成了你自己的应用。'
-    }
-    if (keys.data.value && selection.key && key.value?.id !== selection.key) {
-      return '选中的 Key 已经失效或不属于这个应用：这里换成了它别的有效 Key。'
-    }
-    return null
+  // 等 useQuery 跟上新的应用之后再判断（post）：它的选项在 pre 阶段才更新，那之前 keys.data 还是上一个应用的
+  watchPostEffect(() => {
+    // 离开时路由先变、组件后卸载，这段时间不能写到别的页面的地址上
+    if (route.name !== 'bench') return
+    const fix = selectionFix(
+      selection,
+      settledIds(apps, owned.value),
+      settledIds(keys, usable.value),
+    )
+    if (!fix) return
+    if (fix.notice) selectionNotice.value = fix.notice
+    select(fix.query)
   })
 
   const mode = ref<BenchMode>('rollback')

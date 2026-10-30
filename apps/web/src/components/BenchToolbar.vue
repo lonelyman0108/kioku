@@ -96,7 +96,14 @@ const errorOf = (err: unknown, fallback: string) =>
       <p v-if="key?.effectiveScopes" class="text-xs text-muted">
         这把 Key 现在的上限：{{ scopesSummary(key.effectiveScopes) }}
       </p>
-      <UAlert v-if="selectionNotice" color="warning" variant="subtle" :title="selectionNotice" />
+      <UAlert
+        v-if="selectionNotice"
+        color="warning"
+        variant="subtle"
+        :title="selectionNotice"
+        close
+        @update:open="(v) => !v && (selectionNotice = null)"
+      />
       <UAlert
         v-if="keys.isError.value && !keys.data.value"
         color="error"

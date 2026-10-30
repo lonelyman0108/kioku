@@ -15,9 +15,11 @@ import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import {
   acceptDivergence,
+  APP_REPLACED_NOTICE,
   BENCH_TIMELINE_MAX,
   divergenceNotice,
   emptySession,
+  KEY_REPLACED_NOTICE,
   ownedApps,
   REAL_MODE_CONSEQUENCES,
   recordRun,
@@ -26,6 +28,7 @@ import {
   replayStepLabel,
   runBlocker,
   runFailureMessage,
+  selectionFix,
   sessionUsage,
   usableKeys,
   type BenchSession,
@@ -106,6 +109,56 @@ describe('谁能用测试台', () => {
       ({ id, effectiveScopes }) as KeyInfo
     const keys = [key('live', scopes), key('revoked', null), key('live2', scopes)]
     expect(usableKeys(keys).map((k) => k.id)).toEqual(['live', 'live2'])
+  })
+})
+
+describe('选择写回地址', () => {
+  const APPS = ['a1', 'a2']
+  const KEYS = ['k1', 'k2']
+
+  it('没读到时不判断', () => {
+    expect(selectionFix({ app: 'gone', key: 'gone' }, null, null)).toBeNull()
+    expect(selectionFix({ app: 'a1', key: 'gone' }, APPS, null)).toBeNull()
+    expect(selectionFix({}, null, KEYS)).toBeNull()
+  })
+
+  it('地址里没有的：写上默认的，不提示', () => {
+    expect(selectionFix({}, APPS, null)).toEqual({ query: { app: 'a1' }, notice: null })
+    expect(selectionFix({ app: 'a2' }, APPS, KEYS)).toEqual({ query: { key: 'k1' }, notice: null })
+  })
+
+  it('地址里只有 Key：先写应用，Key 留着等读到那个应用的列表再判断', () => {
+    expect(selectionFix({ key: 'k2' }, APPS, null)).toEqual({ query: { app: 'a1' }, notice: null })
+  })
+
+  it('都用得上：不动', () => {
+    expect(selectionFix({ app: 'a2', key: 'k2' }, APPS, KEYS)).toBeNull()
+  })
+
+  it('应用用不了、有别的可换：换了，Key 一起去掉，提示', () => {
+    expect(selectionFix({ app: 'gone', key: 'k-gone' }, APPS, null)).toEqual({
+      query: { app: 'a1', key: undefined },
+      notice: APP_REPLACED_NOTICE,
+    })
+  })
+
+  it('Key 用不了、有别的可换：换了，提示', () => {
+    expect(selectionFix({ app: 'a1', key: 'gone' }, APPS, KEYS)).toEqual({
+      query: { key: 'k1' },
+      notice: KEY_REPLACED_NOTICE,
+    })
+  })
+
+  it('没有可换的：不动，不说换了', () => {
+    expect(selectionFix({ app: 'gone', key: 'gone' }, [], null)).toBeNull()
+    expect(selectionFix({ app: 'a1', key: 'gone' }, APPS, [])).toBeNull()
+    expect(selectionFix({ app: 'a1' }, APPS, [])).toBeNull()
+  })
+
+  it('说的是换了之后的情况', () => {
+    expect(KEY_REPLACED_NOTICE).toContain('换成了')
+    expect(KEY_REPLACED_NOTICE).toContain('权限可能不同')
+    expect(APP_REPLACED_NOTICE).toContain('换成了')
   })
 })
 
