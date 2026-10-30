@@ -4,6 +4,7 @@ import {
   LORE_UPLOAD_MAX_BYTES,
   type LoreBackupUpload,
   type LoreImportPlan,
+  type LoreImportSource,
   type LorePlanNode,
   type LorePlanTarget,
   type LoreSyncChange,
@@ -14,7 +15,7 @@ import {
 import { ApiError } from './api/client'
 import { formatBytes } from './backup'
 
-// 从 Lore 导入时界面用的纯逻辑：裁剪导出文件、勾选换算成请求、勾选之后这次写什么、计划的分组、执行失败的说明
+// 从 Lore 导入时界面用的纯逻辑：裁剪导出文件、表单能不能看计划、勾选换算成请求、勾选之后这次写什么、计划的分组、执行失败的说明
 
 type Row = Record<string, unknown>
 
@@ -92,6 +93,32 @@ export function tokenInClear(address: string): boolean {
   } catch {
     return false
   }
+}
+
+// 来源的分页。请求期间不能切：切换来源会清掉计划与说明，返回的计划也对不上新的来源
+export const sourceTabs = (busy: boolean) => [
+  { label: '上传导出文件', value: 'file', disabled: busy },
+  { label: '从地址拉取', value: 'url', disabled: busy },
+]
+
+export interface PlanForm {
+  busy: boolean
+  sourceKind: LoreImportSource['kind']
+  hasFile: boolean
+  tooLarge: boolean
+  url: string
+  personaProblem: string | null
+  personaName: string
+}
+
+// 现在为什么不能看计划，能看时是 null。按钮按它禁用；执行失败接着重看计划时要说得出原因
+export function planBlocker(form: PlanForm): string | null {
+  if (form.busy) return '上一个请求还没结束'
+  if (form.personaProblem) return `人格标识${form.personaProblem}`
+  if (!form.personaName) return '要填人格名称'
+  if (form.sourceKind === 'url') return form.url ? null : '要填 Lore 地址'
+  if (!form.hasFile) return '要选 Lore 的导出文件'
+  return form.tooLarge ? '导出文件超过上限' : null
 }
 
 const hasNewTarget = (node: LorePlanNode) => node.targets.some((t) => t.state === 'new')
@@ -338,7 +365,8 @@ export function importProblems(result: {
 
 // 执行失败之后怎么办。
 // changed：计划变了（409），什么都没写，要重看计划；
-// partial：5xx（网关超时时请求可能已经到了服务端）与网络错误，可能写了一部分，要重看计划，已写入的会显示成已导入；
+// partial：5xx（网关超时时请求可能已经到了服务端）与网络错误，可能写了一部分，要重看计划，已写入的会显示成已导入。
+// 文字是界面自己的，不看服务端说了什么；
 // refused：别的（429、400、403、413 这些）都是写入之前就拒绝了，看过的计划还算数，只显示错误的文字
 export interface ApplyFailure {
   kind: 'changed' | 'partial' | 'refused'
@@ -348,20 +376,34 @@ export interface ApplyFailure {
 export function applyFailureOf(err: unknown): ApplyFailure {
   if (err instanceof ApiError) {
     if (err.status === 409) return { kind: 'changed', message: err.message }
-    return { kind: err.status >= 500 ? 'partial' : 'refused', message: err.message }
+    if (err.status >= 500) return { kind: 'partial', message: `服务端出错了（HTTP ${err.status}）` }
+    return { kind: 'refused', message: err.message }
   }
   if (err instanceof LoreFileError) return { kind: 'refused', message: err.message }
   return { kind: 'partial', message: '网络出错了' }
 }
 
-// 接着重看计划之后的说明（refused 不重看，用不到）：重看也失败时不能说已经重新算过。服务端报写到一半时自己说了可能写了一部分
-export function applyFailureNotice({ kind, message }: ApplyFailure, replanned: boolean): string {
-  const partly =
-    kind === 'partial' && !message.includes('可能已写入一部分') ? '可能已经写入了一部分。' : ''
-  if (!replanned) {
+// 接着重看计划时的说明（refused 不重看，用不到）：正在重算、算好了、重看也失败了。重看失败时不能说已经重新算过
+export function applyFailureNotice(
+  { kind, message }: ApplyFailure,
+  stage: 'replanning' | 'replanned' | 'failed',
+): string {
+  const partly = kind === 'partial' ? '可能已经写入了一部分。' : ''
+  if (stage === 'replanning') return `${message}。${partly}正在重新算计划，勾选还在。`
+  if (stage === 'failed') {
     return `${message}。${partly}接着重看计划也失败了：看下面的错误，处理之后点「看计划」，勾选还在。`
   }
   return kind === 'partial'
     ? `${message}。${partly}已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`
     : `${message}。已经重新算过计划，勾选还在。`
+}
+
+// 执行失败之后重看计划。说明在重算之前就给出：地址拉取可能很慢，这段时间不能是一片空白、没有解释；重算之后再更新
+export async function replanAfterFailure(
+  failure: ApplyFailure,
+  replan: () => Promise<boolean>,
+  show: (notice: string) => void,
+): Promise<void> {
+  show(applyFailureNotice(failure, 'replanning'))
+  show(applyFailureNotice(failure, (await replan()) ? 'replanned' : 'failed'))
 }

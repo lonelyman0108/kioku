@@ -5,7 +5,7 @@ import {
   type LoreImportPlan,
   type LorePlanNode,
 } from '@kioku/contracts'
-import { describe, expect, it } from 'vitest'
+import { describe, expect, it, vi } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
 import { ApiError } from '../api/client'
@@ -17,10 +17,13 @@ import {
   importProblems,
   LoreFileError,
   matchesFilter,
+  planBlocker,
   readLoreBackup,
+  replanAfterFailure,
   secretSelectable,
   selectionEffects,
   selectionOf,
+  sourceTabs,
   staleNotice,
   syncGroups,
   tokenInClear,
@@ -543,7 +546,6 @@ describe('文件比已写入的数据旧', () => {
 
 describe('执行失败之后的说明', () => {
   const PARTLY = '可能已经写入了一部分'
-  const SERVER_PARTLY = '写到一半出错了，可能已写入一部分'
 
   it('确定什么都没写的：显示服务端的文字，不说写了一部分，不重看计划', () => {
     for (const status of [400, 401, 403, 404, 413, 429]) {
@@ -561,74 +563,105 @@ describe('执行失败之后的说明', () => {
   it('计划变了（409）：什么都没写，重看计划', () => {
     const failure = applyFailureOf(new ApiError(409, '计划变了'))
     expect(failure.kind).toBe('changed')
-    const text = applyFailureNotice(failure, true)
+    const text = applyFailureNotice(failure, 'replanned')
     expect(text).toBe('计划变了。已经重新算过计划，勾选还在。')
     expect(text).not.toContain(PARTLY)
   })
 
-  it('500、网关错误与网络错误才说可能写了一部分并重看计划；服务端自己说了的不重复', () => {
-    const server = applyFailureOf(new ApiError(500, SERVER_PARTLY))
-    expect(server.kind).toBe('partial')
-    expect(applyFailureNotice(server, true)).toBe(
-      `${SERVER_PARTLY}。已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`,
-    )
-    // 全局的错误处理给的文字没有说
-    for (const err of [
-      new ApiError(500, '服务内部错误'),
-      new ApiError(502, '请求失败：HTTP 502'),
-      new ApiError(504, '请求失败：HTTP 504'),
-      new TypeError('Failed to fetch'),
-    ]) {
+  it('5xx 与网络错误才说可能写了一部分并重看计划：文字是界面自己的，不看服务端说了什么', () => {
+    for (const [err, message] of [
+      // 服务端写到一半时自己也说了一遍，不能重复，也不能因为它改了文字就不说
+      [new ApiError(500, '写到一半出错了，可能已写入一部分'), '服务端出错了（HTTP 500）'],
+      [new ApiError(500, '服务内部错误'), '服务端出错了（HTTP 500）'],
+      [new ApiError(502, '请求失败：HTTP 502'), '服务端出错了（HTTP 502）'],
+      [new ApiError(504, '请求失败：HTTP 504'), '服务端出错了（HTTP 504）'],
+      // 网络错误的英文原文不给人看
+      [new TypeError('Failed to fetch'), '网络出错了'],
+    ] as const) {
       const failure = applyFailureOf(err)
-      expect(failure.kind).toBe('partial')
-      expect(applyFailureNotice(failure, true)).toContain(`${PARTLY}。已经重新算过计划`)
+      expect(failure).toEqual({ kind: 'partial', message })
+      expect(applyFailureNotice(failure, 'replanned')).toBe(
+        `${message}。${PARTLY}。已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`,
+      )
     }
-    // 网络错误的英文原文不给人看
-    expect(applyFailureOf(new TypeError('Failed to fetch')).message).toBe('网络出错了')
   })
 
   it('接着的看计划也失败时，不说已经重新算过', () => {
     for (const failure of [
       applyFailureOf(new ApiError(409, '计划变了')),
-      applyFailureOf(new ApiError(500, SERVER_PARTLY)),
+      applyFailureOf(new ApiError(500, '写到一半出错了')),
       applyFailureOf(new TypeError('Failed to fetch')),
     ]) {
-      const text = applyFailureNotice(failure, false)
+      const text = applyFailureNotice(failure, 'failed')
       expect(text).not.toContain('已经重新算过')
       expect(text).toContain('重看计划也失败了')
       expect(text).toContain('勾选还在')
       expect(text.startsWith(failure.message)).toBe(true)
     }
-    expect(applyFailureNotice(applyFailureOf(new TypeError('x')), false)).toContain(PARTLY)
-    expect(applyFailureNotice(applyFailureOf(new ApiError(409, '计划变了')), false)).not.toContain(
-      PARTLY,
+    expect(applyFailureNotice(applyFailureOf(new TypeError('x')), 'failed')).toContain(PARTLY)
+    expect(
+      applyFailureNotice(applyFailureOf(new ApiError(409, '计划变了')), 'failed'),
+    ).not.toContain(PARTLY)
+  })
+
+  it('重看计划之前就有说明，算完再更新：慢的地址拉取期间不能是一片空白', async () => {
+    const failure = applyFailureOf(new ApiError(500, '写到一半出错了'))
+    const shown: string[] = []
+    let finish!: (replanned: boolean) => void
+    const replan = vi.fn(() => new Promise<boolean>((resolve) => (finish = resolve)))
+    const done = replanAfterFailure(failure, replan, (text) => shown.push(text))
+
+    // 还在重算：已经说清楚发生了什么，不说算好了
+    expect(replan).toHaveBeenCalledTimes(1)
+    expect(shown).toEqual([applyFailureNotice(failure, 'replanning')])
+    expect(shown[0]).toContain(failure.message)
+    expect(shown[0]).toContain(PARTLY)
+    expect(shown[0]).toContain('正在重新算计划')
+    expect(shown[0]).not.toContain('已经重新算过')
+
+    finish(true)
+    await done
+    expect(shown).toEqual([
+      applyFailureNotice(failure, 'replanning'),
+      applyFailureNotice(failure, 'replanned'),
+    ])
+
+    const failed: string[] = []
+    await replanAfterFailure(
+      failure,
+      () => Promise.resolve(false),
+      (text) => failed.push(text),
     )
+    expect(failed.at(-1)).toBe(applyFailureNotice(failure, 'failed'))
+  })
+
+  it('计划变了（409）在重算期间不说写了一部分', () => {
+    const text = applyFailureNotice(applyFailureOf(new ApiError(409, '计划变了')), 'replanning')
+    expect(text).toBe('计划变了。正在重新算计划，勾选还在。')
   })
 })
 
+// 模板解析出来的节点：看标签、属性与事件，不依赖排版。没有组件测试的环境，所以看模板本身
+interface TemplateNode {
+  type: number
+  tag?: string
+  content?: string
+  children?: TemplateNode[]
+  props?: {
+    name: string
+    value?: { content: string }
+    arg?: { content: string }
+    exp?: { content: string }
+  }[]
+}
+const ELEMENT = 1
+const TEXT = 2
+const walk = (node: TemplateNode): TemplateNode[] => [node, ...(node.children ?? []).flatMap(walk)]
+const { descriptor } = parse(loreImportSource)
+const root = descriptor.template!.ast as unknown as TemplateNode
+const elements = walk(root).filter((n) => n.type === ELEMENT)
+
 describe('写入只来自点确认导入', () => {
-  // 模板解析出来的节点：看标签、属性与事件，不依赖排版。没有组件测试的环境，所以看模板本身
-  interface TemplateNode {
-    type: number
-    tag?: string
-    content?: string
-    children?: TemplateNode[]
-    props?: {
-      name: string
-      value?: { content: string }
-      arg?: { content: string }
-      exp?: { content: string }
-    }[]
-  }
-  const ELEMENT = 1
-  const TEXT = 2
-  const walk = (node: TemplateNode): TemplateNode[] => [
-    node,
-    ...(node.children ?? []).flatMap(walk),
-  ]
-  const { descriptor } = parse(loreImportSource)
-  const root = descriptor.template!.ast as unknown as TemplateNode
-  const elements = walk(root).filter((n) => n.type === ELEMENT)
   const handler = (el: TemplateNode, event: string) =>
     el.props?.find((p) => p.name === 'on' && p.arg?.content === event)?.exp?.content
   const staticType = (el: TemplateNode) => el.props?.find((p) => p.name === 'type')?.value?.content
@@ -660,6 +693,58 @@ describe('写入只来自点确认导入', () => {
     expect(onSubmit).toContain('replan')
     expect(onSubmit).not.toContain('applyPlan')
     expect(script.match(/applyPlan/g)).toEqual(['applyPlan'])
+  })
+})
+
+describe('请求期间与不能看计划时', () => {
+  const script = descriptor.scriptSetup!.content
+
+  it('来源的分页在请求期间禁用：切换来源会清掉计划与说明', () => {
+    const tabs = elements.find((el) => el.tag === 'UTabs')!
+    const items = tabs.props?.find((p) => p.name === 'bind' && p.arg?.content === 'items')
+    expect(items?.exp?.content).toBe('sourceTabs(busy)')
+    expect(sourceTabs(true).map((t) => [t.value, t.disabled])).toEqual([
+      ['file', true],
+      ['url', true],
+    ])
+    expect(sourceTabs(false).map((t) => [t.value, t.disabled])).toEqual([
+      ['file', false],
+      ['url', false],
+    ])
+  })
+
+  it('不能看计划时总说得出原因；能看时没有', () => {
+    const form = {
+      busy: false,
+      sourceKind: 'file' as const,
+      hasFile: true,
+      tooLarge: false,
+      url: '',
+      personaProblem: null,
+      personaName: '默认人格',
+    }
+    expect(planBlocker(form)).toBeNull()
+    expect(planBlocker({ ...form, sourceKind: 'url', hasFile: false, url: 'https://x' })).toBeNull()
+    expect(planBlocker({ ...form, busy: true })).toBe('上一个请求还没结束')
+    expect(planBlocker({ ...form, personaProblem: '只用小写字母' })).toBe('人格标识只用小写字母')
+    expect(planBlocker({ ...form, personaName: '' })).toBe('要填人格名称')
+    expect(planBlocker({ ...form, hasFile: false })).toBe('要选 Lore 的导出文件')
+    expect(planBlocker({ ...form, tooLarge: true })).toBe('导出文件超过上限')
+    expect(planBlocker({ ...form, sourceKind: 'url' })).toBe('要填 Lore 地址')
+  })
+
+  it('按钮看的和看计划看的是同一个原因；不能看时写进错误：失败说明会让人看下面的错误', () => {
+    expect(script).toContain('const ready = computed(() => !blocker.value)')
+    const showPlan = /async function showPlan\(\)[^]*?\n\}/.exec(script)![0]
+    expect(showPlan).toMatch(
+      /if \(!ready\.value\) \{\s*error\.value = blocker\.value\s*return false/,
+    )
+  })
+
+  it('执行失败之后经 replanAfterFailure 重看计划：说明在重算之前就给出', () => {
+    const applyPlan = /async function applyPlan\(\)[^]*?\n\}/.exec(script)![0]
+    expect(applyPlan).toContain('await replanAfterFailure(failure, showPlan,')
+    expect(applyPlan).not.toContain('await showPlan()')
   })
 })
 

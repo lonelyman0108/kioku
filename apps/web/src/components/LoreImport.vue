@@ -21,17 +21,19 @@ import { formatBytes } from '../backup'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import {
-  applyFailureNotice,
   applyFailureOf,
   excludeLabel,
   importProblems,
   LoreFileError,
   matchesFilter,
   NODE_FILTERS,
+  planBlocker,
   readLoreBackup,
+  replanAfterFailure,
   secretSelectable,
   selectionEffects,
   selectionOf,
+  sourceTabs,
   staleNotice,
   syncGroups,
   targetStateLabels,
@@ -46,10 +48,6 @@ const props = defineProps<{ spaceId: string; editable: boolean; isAdmin: boolean
 const queryClient = useQueryClient()
 
 type SourceKind = LoreImportSource['kind']
-const sourceTabs = [
-  { label: '上传导出文件', value: 'file' },
-  { label: '从地址拉取', value: 'url' },
-]
 const sourceKind = ref<SourceKind>('file')
 const file = ref<File | null>(null)
 // 裁剪过的导出：执行时要重新发一次。只在内存里，换了文件、换了空间或导入成功就丢掉
@@ -109,12 +107,18 @@ const personaProblem = computed(() =>
   Slug.safeParse(personaSlug.value).success ? null : '只用小写字母、数字和连字符',
 )
 const persona = computed(() => ({ slug: personaSlug.value, name: personaName.value.trim() }))
-const ready = computed(() => {
-  if (busy.value || personaProblem.value || !persona.value.name) return false
-  return sourceKind.value === 'file'
-    ? Boolean(file.value) && !tooLarge.value
-    : Boolean(url.value.trim())
-})
+const blocker = computed(() =>
+  planBlocker({
+    busy: busy.value,
+    sourceKind: sourceKind.value,
+    hasFile: Boolean(file.value),
+    tooLarge: tooLarge.value,
+    url: url.value.trim(),
+    personaProblem: personaProblem.value,
+    personaName: persona.value.name,
+  }),
+)
+const ready = computed(() => !blocker.value)
 
 async function currentSource(): Promise<LoreImportSource> {
   if (sourceKind.value === 'url') {
@@ -127,9 +131,12 @@ async function currentSource(): Promise<LoreImportSource> {
 const messageOf = (err: unknown, fallback: string) =>
   err instanceof ApiError || err instanceof LoreFileError ? err.message : fallback
 
-// 返回有没有拿到新的计划
+// 返回有没有拿到新的计划。没拿到时错误里有原因：执行失败之后的说明会让人看下面的错误
 async function showPlan(): Promise<boolean> {
-  if (!ready.value) return false
+  if (!ready.value) {
+    error.value = blocker.value
+    return false
+  }
   busy.value = true
   error.value = null
   const forSpace = props.spaceId
@@ -204,8 +211,9 @@ async function applyPlan() {
   }
   // 不用旧指纹重试：可能已经写了一部分，或者计划确实变了。直接重看计划，勾选还在
   plan.value = null
-  const replanned = await showPlan()
-  if (forSpace === props.spaceId) notice.value = applyFailureNotice(failure, replanned)
+  await replanAfterFailure(failure, showPlan, (text) => {
+    if (forSpace === props.spaceId) notice.value = text
+  })
 }
 
 function toggle(set: Set<string>, id: string, on: boolean | 'indeterminate'): Set<string> {
@@ -394,7 +402,7 @@ const disclosureCut = computed(
       <UTabs
         v-if="isAdmin"
         v-model="sourceKind"
-        :items="sourceTabs"
+        :items="sourceTabs(busy)"
         :content="false"
         size="sm"
         class="w-full"
