@@ -23,6 +23,7 @@ import { extractionSettingsView, loadExtractionConfig } from '../extraction/sett
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleRoleFor } from '../memory/context'
+import { ApiKeyLockedError } from '../settings/endpoint'
 
 const KeyParams = z.object({ spaceId: z.uuid(), appId: z.uuid(), keyId: z.uuid() })
 const errors = {
@@ -98,7 +99,7 @@ const agentTurnRoute = createRoute({
   request: { params: KeyParams, body: jsonBody(BenchAgentTurnRequest) },
   responses: {
     200: jsonResponse('助手消息与解析好的工具调用', BenchAgentTurnResult),
-    400: jsonResponse('请求不合法，或者还没有配抽取模型', ErrorResponse),
+    400: jsonResponse('请求不合法、还没有配抽取模型，或者保存的 Key 解不开', ErrorResponse),
     413: jsonResponse('请求体太大', ErrorResponse),
     502: jsonResponse('请求模型失败，带截断后的上游原文', ErrorResponse),
     ...errors,
@@ -161,7 +162,9 @@ export function benchRoutes(deps: Deps) {
       try {
         config = await loadExtractionConfig(deps.db, deps.masterKey)
       } catch (err) {
-        return c.json({ error: (err as Error).message }, 400)
+        // 只有 Key 解不开说得清原因。别的（例如读库出错）交给 onError，错误信息带 SQL 与全部参数
+        if (err instanceof ApiKeyLockedError) return c.json({ error: err.message }, 400)
+        throw err
       }
       if (!config) {
         return c.json({ error: '还没有配模型：去实例设置配好抽取模型之后才能用模型代理' }, 400)

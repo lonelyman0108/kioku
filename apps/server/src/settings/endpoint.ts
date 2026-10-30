@@ -43,6 +43,10 @@ export interface SealedJson {
 // 管理员填的设置不成立，原因可以直接给管理员看
 export class SettingsInputError extends Error {}
 
+// 保存的 Key 解不开：没配主密钥、主密钥对不上，或者密文坏了。这是实例配置的问题，原因可以直接给管理员看。
+// 单独一种错误，调用方才能和读库出错分开：drizzle 的错误信息带 SQL 与全部参数，不能给调用方
+export class ApiKeyLockedError extends Error {}
+
 interface Stored {
   baseUrl: string
   model: string
@@ -56,15 +60,24 @@ export const unsealJson = (sealed: SealedJson): Sealed => ({
   wrappedKey: Buffer.from(sealed.wrappedKey, 'base64'),
 })
 
-// 解开加密保存的 Key；没配主密钥时说清是哪一项
+// 解开加密保存的 Key；解不开时说清是哪一项，解密库的英文报错留在 cause 里
 export function openApiKey(
   masterKey: MasterKey | null,
   sealed: SealedJson,
   aad: string,
   label: string,
 ): string {
-  if (!masterKey) throw new Error(`${label}的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
-  return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
+  if (!masterKey) {
+    throw new ApiKeyLockedError(`${label}的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
+  }
+  try {
+    return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
+  } catch (cause) {
+    throw new ApiKeyLockedError(
+      `${label}的 Key 解不开：配置的 KIOKU_MASTER_KEY 和保存时用的不是同一把，或者保存的内容坏了`,
+      { cause },
+    )
+  }
 }
 
 // 同一个主机（协议、主机名与端口都相同）才能沿用已保存的 Key。只认 http 与 https：

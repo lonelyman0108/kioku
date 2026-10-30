@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { once } from 'node:events'
 import { request as httpRequest, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { inspect } from 'node:util'
 
 import { serve } from '@hono/node-server'
 import {
@@ -15,10 +16,11 @@ import {
   type BenchToolList,
 } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
+import { pgTable, text, type PgTable } from 'drizzle-orm/pg-core'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
+import { withSpace, type Database, type Db } from '../../db/client'
 import { accounts, memories, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
@@ -44,6 +46,22 @@ const MEMBER_SCOPES = {
   maxSensitivity: 'private',
   admin: false,
 }
+
+// 读实例设置时数据库真的报错（改查一张不存在的表），别的查询照常。drizzle 的错误信息带 SQL 与全部参数
+const NO_SUCH_TABLE = pgTable('no_such_table', { key: text() })
+const settingsQueryFails = (db: Db) =>
+  new Proxy(db, {
+    get(target, prop) {
+      if (prop !== 'select') return Reflect.get(target, prop)
+      return (...args: []) =>
+        new Proxy(target.select(...args), {
+          get(builder, method) {
+            if (method !== 'from') return Reflect.get(builder, method)
+            return (table: PgTable) => builder.from(table === settings ? NO_SUCH_TABLE : table)
+          },
+        })
+    },
+  })
 
 const toolCall = (id: string, name: string, args: unknown = {}) => ({
   id,
@@ -83,8 +101,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     `/v1/spaces/${ws.spaceId}/apps/${appId_}/keys/${keyId_}/bench`
   const postTurn = (body: unknown, cookie = ws.cookie, path = benchPath(), target = app) =>
     target.request(`${path}/agent/turn`, jsonRequest('POST', body, { cookie }))
-  const getInfo = (cookie = ws.cookie, path = benchPath()) =>
-    app.request(`${path}/agent`, { headers: { cookie } })
+  const getInfo = (cookie = ws.cookie, path = benchPath(), target = app) =>
+    target.request(`${path}/agent`, { headers: { cookie } })
   const errorOf = async (res: Response) => ((await res.json()) as { error: string }).error
   const turn = async (body: unknown) => {
     const res = await postTurn(body)
@@ -254,8 +272,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     })
   })
 
-  describe('没配模型', () => {
-    it('请求模型 400，说明去实例设置配抽取模型；查情况给原因；配好之后可用', async () => {
+  describe('设置', () => {
+    it('没配模型：请求模型 400，说明去实例设置配抽取模型；查情况给原因；配好之后可用', async () => {
       const res = await postTurn({ messages: [USER] })
       expect(res.status).toBe(400)
       const error = await errorOf(res)
@@ -286,6 +304,52 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(res.status).toBe(400)
       expect(await errorOf(res)).toContain('KIOKU_MASTER_KEY')
       expect(server.requests).toHaveLength(0)
+    })
+
+    it('Key 解不开（主密钥对不上）：400 并说明，不是解密库的英文报错，不请求模型', async () => {
+      const server = await startModel(() => '不该请求到这里')
+      const otherKey = createApp({ ...deps, masterKey: randomBytes(32) })
+      const expectLocked = async () => {
+        const res = await postTurn({ messages: [USER] }, ws.cookie, benchPath(), otherKey)
+        expect(res.status).toBe(400)
+        const error = await errorOf(res)
+        expect(error).toContain('抽取模型的 Key 解不开')
+        expect(error).toContain('KIOKU_MASTER_KEY')
+      }
+      // 记着主密钥的标识：还没解密就知道对不上
+      await expectLocked()
+      // 加上标识之前保存的：解密时才失败
+      const [row] = await database.db.select().from(settings).where(eq(settings.key, 'extraction'))
+      const value = row!.value as { apiKey: { keyId?: string } }
+      delete value.apiKey.keyId
+      await database.db.update(settings).set({ value }).where(eq(settings.key, 'extraction'))
+      await expectLocked()
+      expect(server.requests).toHaveLength(0)
+    })
+
+    it('读设置时数据库出错：500 与固定文字，响应和日志里都没有 SQL 与参数，不请求模型', async () => {
+      const server = await startModel(() => '不该请求到这里')
+      const broken = createApp({ ...deps, db: settingsQueryFails(database.db) })
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const res = await postTurn({ messages: [USER] }, ws.cookie, benchPath(), broken)
+        expect(res.status).toBe(500)
+        expect(await res.json()).toEqual({ error: '服务内部错误' })
+        expect(server.requests).toHaveLength(0)
+        // 查情况的接口也读同一份设置，两边一致
+        const info = await getInfo(ws.cookie, benchPath(), broken)
+        expect(info.status).toBe(500)
+        expect(await info.json()).toEqual({ error: '服务内部错误' })
+        // 前提：确实是数据库报的错（表不存在），这条用例测的是这种错误
+        expect(logged).toHaveBeenCalledTimes(2)
+        expect(logged.mock.calls[0]![1]).toMatchObject({ code: '42P01' })
+        const text = inspect(logged.mock.calls, { depth: null })
+        for (const leaked of ['Failed query', 'params:', 'extraction']) {
+          expect(text).not.toContain(leaked)
+        }
+      } finally {
+        logged.mockRestore()
+      }
     })
   })
 
