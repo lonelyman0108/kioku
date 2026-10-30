@@ -2,14 +2,23 @@ import { sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { connect, pgErrorCode, withSpace, type Database } from '../../db/client'
+import {
+  connect,
+  pgErrorCode,
+  SPACE_SCAN_PARALLEL,
+  withSpace,
+  type Database,
+  type Db,
+} from '../../db/client'
 import { EMBEDDING_DIMENSIONS, memories, memoryEmbeddings, spaces } from '../../db/schema'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { COVERAGE_PARALLEL_SPACES, countEmbeddable, embeddingCoverage } from '../coverage'
+import { countEmbeddable, embeddingCoverage } from '../coverage'
 
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms))
 const vector = new Array<number>(EMBEDDING_DIMENSIONS).fill(0.01)
 const MODELS = ['m1', 'm2']
+// 数覆盖率用的连接带上这个名字，等锁、取消查询都只看它们，不碰连着同一个库的别的连接
+const APP_NAME = 'kioku-coverage-test'
 
 describe.skipIf(!testDatabaseUrl)('实例的向量覆盖率', () => {
   let database: Database
@@ -124,36 +133,39 @@ describe.skipIf(!testDatabaseUrl)('实例的向量覆盖率', () => {
     })
   })
 
-  // 另一条连接锁住向量表时数：每个空间的计数都要读它，开始数就等在这把锁上。用的连接池比上限大，
+  // 另一条连接锁住向量表时调用 run 数：每个空间的计数都要读它，开始数就等在这把锁上。用的连接池比上限大得多，
   // 同时数几个只由上限决定。等在锁上的数到上限之后，在锁还没放开时调用 check
-  async function countWhileLocked(
+  async function countWhileLocked<T>(
+    run: (db: Db) => Promise<T>,
     check: (lock: {
       waiting: () => Promise<number>
       holder: number
       settled: () => boolean
     }) => Promise<unknown>,
-  ) {
-    const wide = connect(testDatabaseUrl!, { max: COVERAGE_PARALLEL_SPACES + 4 })
+  ): Promise<T> {
+    const url = new URL(testDatabaseUrl!)
+    url.searchParams.set('application_name', APP_NAME)
+    const wide = connect(url.toString(), { max: SPACE_SCAN_PARALLEL * 3 })
     const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
-    let pending: ReturnType<typeof coverage> | undefined
+    let pending: Promise<T> | undefined
     try {
       await side.begin(async (tx) => {
         await tx`lock table memory_embeddings in access exclusive mode`
         const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
-        // 有几条连接等在这把锁上
+        // 数覆盖率的连接有几条等在这把锁上
         const waiting = async () => {
           const [row] = await side<{ n: number }[]>`
             select count(*)::int as n from pg_stat_activity
-            where ${pid}::int = any(pg_blocking_pids(pid))`
+            where application_name = ${APP_NAME} and ${pid}::int = any(pg_blocking_pids(pid))`
           return row!.n
         }
         let settled = false
-        pending = coverage(wide.db)
+        pending = run(wide.db)
         pending.then(
           () => (settled = true),
           () => (settled = true),
         )
-        for (let i = 0; (await waiting()) < COVERAGE_PARALLEL_SPACES; i++) {
+        for (let i = 0; (await waiting()) < SPACE_SCAN_PARALLEL; i++) {
           if (i >= 80) throw new Error('没有同时数到上限那么多个空间')
           await sleep(25)
         }
@@ -168,29 +180,43 @@ describe.skipIf(!testDatabaseUrl)('实例的向量覆盖率', () => {
   }
 
   it('几个空间同时数，最多同时数上限那么多个', async () => {
-    const expected = await seed(COVERAGE_PARALLEL_SPACES + 2)
+    const expected = await seed(SPACE_SCAN_PARALLEL + 2)
     expect(
-      await countWhileLocked(async ({ waiting }) => {
+      await countWhileLocked(coverage, async ({ waiting }) => {
         // 再等一会儿：剩下的空间要等前面的数完才开始，等在锁上的不会更多
         await sleep(200)
-        expect(await waiting()).toBe(COVERAGE_PARALLEL_SPACES)
+        expect(await waiting()).toBe(SPACE_SCAN_PARALLEL)
       }),
     ).toEqual(expected)
   })
 
+  it('几处同时数（例如开着几个设置页）也合起来算上限，各自的数照旧对', async () => {
+    const expected = await seed(SPACE_SCAN_PARALLEL + 2)
+    expect(
+      await countWhileLocked(
+        (db) => Promise.all([coverage(db), coverage(db), coverage(db)]),
+        async ({ waiting }) => {
+          await sleep(200)
+          expect(await waiting()).toBe(SPACE_SCAN_PARALLEL)
+        },
+      ),
+    ).toEqual([expected, expected, expected])
+  })
+
   it('数到一半出错：不再开始别的空间，等已经开始的数完再报出这个错误', async () => {
-    await seed(COVERAGE_PARALLEL_SPACES + 2)
-    const failed = countWhileLocked(async ({ waiting, holder, settled }) => {
+    await seed(SPACE_SCAN_PARALLEL + 2)
+    const failed = countWhileLocked(coverage, async ({ waiting, holder, settled }) => {
       // 取消其中一个空间正等着锁的查询
       await database.db.execute(sql`
         select pg_cancel_backend(pid) from pg_stat_activity
-        where ${holder}::int = any(pg_blocking_pids(pid)) limit 1`)
-      for (let i = 0; (await waiting()) !== COVERAGE_PARALLEL_SPACES - 1; i++) {
+        where application_name = ${APP_NAME} and ${holder}::int = any(pg_blocking_pids(pid))
+        limit 1`)
+      for (let i = 0; (await waiting()) !== SPACE_SCAN_PARALLEL - 1; i++) {
         if (i >= 80) throw new Error('出错的那一路又开始数别的空间了')
         await sleep(25)
       }
       await sleep(200)
-      expect(await waiting()).toBe(COVERAGE_PARALLEL_SPACES - 1)
+      expect(await waiting()).toBe(SPACE_SCAN_PARALLEL - 1)
       // 别的空间还在数，先不报错
       expect(settled()).toBe(false)
     })

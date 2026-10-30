@@ -34,6 +34,37 @@ export function withSpace<T>(
   }, config)
 }
 
+// 跨空间统计（实例的向量覆盖率、主密钥卡片的计数）整个进程里最多同时开几个空间的事务：每个事务占一条连接，
+// 几处统计、几个页面同时数也合起来算，连接池里留出给别的请求用的
+export const SPACE_SCAN_PARALLEL = 4
+let scanning = 0
+const scanQueue: (() => void)[] = []
+
+// 对每个空间在它自己的事务里调用 fn（内容表开了 RLS，一个事务只看得到一个空间），几个空间同时数，不逐个排队。
+// 有一个空间出错就不再开始别的，等已经开始的都结束再抛出这个错误：返回或抛出之后不会还有空间的事务没结束。
+// fn 里不要再调 eachSpace：外层占着名额等里层，名额会被占满、互相等住
+export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<void> {
+  const all = await db.select({ id: schema.spaces.id }).from(schema.spaces)
+  let failure: { error: unknown } | undefined
+  await Promise.all(
+    all.map(async ({ id }) => {
+      if (scanning < SPACE_SCAN_PARALLEL) scanning++
+      else await new Promise<void>((resolve) => scanQueue.push(resolve))
+      try {
+        if (!failure) await withSpace(db, id, fn)
+      } catch (error) {
+        failure ??= { error }
+      } finally {
+        // 名额直接交给排着队的下一个
+        const next = scanQueue.shift()
+        if (next) next()
+        else scanning--
+      }
+    }),
+  )
+  if (failure) throw failure.error
+}
+
 // 数据库报的错：drizzle 把驱动的错误包在 cause 里
 function pgError(err: unknown): { code?: string; constraint_name?: string; message?: string } {
   return ((err as { cause?: unknown })?.cause ?? err) as { code?: string }

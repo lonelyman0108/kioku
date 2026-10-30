@@ -57,7 +57,7 @@ import {
 import { BATCH_MOVED, BUDGET_NO_SUMMARY, NO_USABLE_KEY } from '../extraction/extract'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { consoleMemberFor } from '../memory/context'
+import { consoleMemberFor, consoleRoleFor } from '../memory/context'
 import { readableConditions } from '../memory/filter'
 import { scopeNames, subjectScope } from '../memory/scopes'
 
@@ -577,7 +577,7 @@ export function subjectRoutes(deps: Deps) {
       const { spaceId, bindingId } = c.req.valid('param')
       const me = c.get('console').accountId
       // 先确认是成员；拒绝什么角色都可以
-      await consoleMemberFor(deps, spaceId, me)
+      await consoleRoleFor(deps, spaceId, me)
       const rejected = await rejectBinding(deps.db, spaceId, bindingId, me)
       if (!rejected.ok) return c.json({ error: rejected.error }, rejected.status)
       return c.body(null, 204)
