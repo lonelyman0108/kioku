@@ -125,12 +125,53 @@ const refetchKeys = async () => {
   await settle()
 }
 
+async function inRealMode() {
+  const bench = start()
+  await settle()
+  bench.confirmReal()
+  await settle()
+  expect(bench.real.value).toBe(true)
+  return bench
+}
+
+const STEPS = [{ kind: 'whoami' as const }]
+const WHAT = { label: '我的场景', view: 'judged' as const }
+
+function deferred<T>() {
+  let resolve!: (value: T) => void
+  let reject!: (err: unknown) => void
+  const promise = new Promise<T>((res, rej) => {
+    resolve = res
+    reject = rej
+  })
+  return { promise, resolve, reject }
+}
+
+// 开始一次运行，运行期间 Key 被吊销（窗口聚焦重新读取）：这次运行作废，回到回滚
+async function abandonRun(mode: 'real' | 'rollback') {
+  const bench = start()
+  await settle()
+  if (mode === 'real') bench.confirmReal()
+  await settle()
+  const run = deferred<BenchRunResult>()
+  fakes.api.benchRun.mockReturnValue(run.promise)
+  const outcome = bench.execute(STEPS, WHAT)
+  await settle()
+  expect(bench.running.value).toBe(true)
+  fakes.api.keys.mockResolvedValue([liveKey('k2')])
+  await refetchKeys()
+  expect(bench.running.value).toBe(false)
+  expect(bench.real.value).toBe(false)
+  return { bench, run, outcome }
+}
+
 beforeEach(() => {
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   fakes.api.apps.mockReset().mockResolvedValue([app('a1'), app('a2')])
   fakes.api.keys.mockReset().mockResolvedValue([liveKey('k1'), liveKey('k2')])
   fakes.api.benchRun.mockReset()
-  fakes.guard.mockReset()
+  // 和真的一样，注册时就读一次：用到的状态都要在注册之前建好
+  fakes.guard.mockReset().mockImplementation((dirty: { value: boolean }) => dirty.value)
 })
 afterEach(() => {
   scope.stop()
@@ -376,37 +417,6 @@ describe('选择失效的提示', () => {
 })
 
 describe('运行中途作废', () => {
-  const STEPS = [{ kind: 'whoami' as const }]
-  const WHAT = { label: '我的场景', view: 'judged' as const }
-
-  function deferred<T>() {
-    let resolve!: (value: T) => void
-    let reject!: (err: unknown) => void
-    const promise = new Promise<T>((res, rej) => {
-      resolve = res
-      reject = rej
-    })
-    return { promise, resolve, reject }
-  }
-
-  // 开始一次运行，运行期间 Key 被吊销（窗口聚焦重新读取）：这次运行作废，回到回滚
-  async function abandonRun(mode: 'real' | 'rollback') {
-    const bench = start()
-    await settle()
-    if (mode === 'real') bench.confirmReal()
-    await settle()
-    const run = deferred<BenchRunResult>()
-    fakes.api.benchRun.mockReturnValue(run.promise)
-    const outcome = bench.execute(STEPS, WHAT)
-    await settle()
-    expect(bench.running.value).toBe(true)
-    fakes.api.keys.mockResolvedValue([liveKey('k2')])
-    await refetchKeys()
-    expect(bench.running.value).toBe(false)
-    expect(bench.real.value).toBe(false)
-    return { bench, run, outcome }
-  }
-
   it('真实模式：结果回来时警告可能已经写入，结果留着显示', async () => {
     const { bench, run, outcome } = await abandonRun('real')
     run.resolve(RESULT)
@@ -514,15 +524,6 @@ describe('运行中途作废', () => {
 })
 
 describe('切换模式', () => {
-  async function inRealMode() {
-    const bench = start()
-    await settle()
-    bench.confirmReal()
-    await settle()
-    expect(bench.real.value).toBe(true)
-    return bench
-  }
-
   it('切到真实每次都要确认，确认之前模式不变', async () => {
     const bench = start()
     await settle()
@@ -637,7 +638,7 @@ describe('离开页面前提醒', () => {
     expect(dirty()).toBe(false)
   })
 
-  it('真实模式的运行还没回来要提醒，回来了就不用了', async () => {
+  it('真实模式的运行还没回来要提醒，回来了没留下记录就不用了', async () => {
     const bench = start()
     await settle()
     bench.confirmReal()
@@ -652,7 +653,7 @@ describe('离开页面前提醒', () => {
     expect(dirty()).toBe(false)
   })
 
-  it('真实模式的运行出错了也不再提醒', async () => {
+  it('真实模式的运行出错了就不算还没回来', async () => {
     const bench = start()
     await settle()
     bench.confirmReal()
@@ -662,21 +663,84 @@ describe('离开页面前提醒', () => {
     expect(dirty()).toBe(false)
   })
 
-  it('中途作废的真实运行没回来也要提醒：它可能还在写入', async () => {
+  it('真实模式下时间线有记录要提醒，清空了就不用了', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.call(STEPS, 'kioku_create')
+    expect(dirty()).toBe(true)
+    bench.clearSession()
+    expect(dirty()).toBe(false)
+  })
+
+  it('真实模式下有场景结果要提醒，没有了就不用了', async () => {
+    const bench = await inRealMode()
+    bench.scenarioOutcome.value = { title: '场景', probe: false, result: RESULT }
+    expect(dirty()).toBe(true)
+    bench.scenarioOutcome.value = null
+    expect(dirty()).toBe(false)
+  })
+
+  it.each(['callFailure', 'scenarioFailure'] as const)(
+    '真实模式下有失败的说明（%s）要提醒，没有了就不用了',
+    async (field) => {
+      const bench = await inRealMode()
+      bench[field].value = '服务内部错误。可能已经执行了一部分，到活动里确认'
+      expect(dirty()).toBe(true)
+      bench[field].value = null
+      expect(dirty()).toBe(false)
+    },
+  )
+
+  it('真实模式切回回滚：确认之前都要提醒，确认之后记录清掉了就不用了', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.call(STEPS, 'kioku_create')
+    bench.requestMode(false)
+    expect(dirty()).toBe(true)
+    bench.confirmRollback()
+    await settle()
+    expect(dirty()).toBe(false)
+  })
+
+  it('中途作废的真实运行：没回来要提醒，回来了也要，用户关掉才不用，已经不在真实模式也一样', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    expect(dirty()).toBe(true)
+    run.resolve(RESULT)
+    await outcome
+    expect(bench.abandoned.value).toHaveLength(1)
+    expect(dirty()).toBe(true)
+    bench.dismissAbandoned(bench.abandoned.value[0]!.id)
+    expect(dirty()).toBe(false)
+  })
+
+  it('中途作废的真实运行请求出错（5xx）：没有结果也要提醒，可能已经写入', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    run.reject(new ApiError(502, '网关出错'))
+    await outcome
+    expect(bench.abandoned.value).toHaveLength(1)
+    expect(dirty()).toBe(true)
+  })
+
+  it('中途作废的真实运行写入之前就被拒绝（4xx）：什么都没留下，回来了就不用了', async () => {
+    const { bench, run, outcome } = await abandonRun('real')
+    run.reject(new ApiError(404, '没有这把 Key'))
+    await outcome
+    expect(bench.abandoned.value).toEqual([])
+    expect(dirty()).toBe(false)
+  })
+
+  it('回滚模式的结果不提醒：什么都没留下', async () => {
     const bench = start()
     await settle()
-    bench.confirmReal()
-    await settle()
-    let finish!: (result: BenchRunResult) => void
-    fakes.api.benchRun.mockReturnValue(new Promise((resolve) => (finish = resolve)))
-    const outcome = bench.execute([{ kind: 'whoami' }], { label: '场景', view: 'judged' })
-    await settle()
-    fakes.api.keys.mockResolvedValue([liveKey('k2')])
-    await refetchKeys()
-    expect(bench.running.value).toBe(false)
-    expect(dirty()).toBe(true)
-    finish(RESULT)
-    await outcome
+    fakes.api.benchRun.mockResolvedValue({ ...RESULT, mode: 'rollback' })
+    await bench.call(STEPS, 'kioku_create')
+    bench.scenarioOutcome.value = { title: '场景', probe: false, result: RESULT }
+    bench.callFailure.value = '服务内部错误'
+    bench.scenarioFailure.value = '服务内部错误'
+    // 切换模式时这些都要说，离开时不用
+    expect(bench.modeLoss.value).toContain('时间线（1 条）')
+    expect(bench.modeLoss.value).toContain('场景结果')
+    expect(bench.modeLoss.value).toContain('运行失败的说明')
     expect(dirty()).toBe(false)
   })
 

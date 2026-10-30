@@ -196,19 +196,28 @@ export function createBench() {
   const abandonedInFlight = computed(
     () => realInFlight.value > (real.value && running.value ? 1 : 0),
   )
-  // 离开页面会丢的：分页报上来的（场景文本框、调用台的 JSON 草稿，都只在内存里），和还没回来的真实运行
-  // （离开就看不到它写了什么）。换应用、Key、分页只改查询参数，页面还在，这些也都还在，不算离开
-  const unsaved = reactive({ scenario: false, drafts: false })
-  useUnsavedChangesGuard(
-    computed(() => unsaved.scenario || unsaved.drafts || realInFlight.value > 0),
-    { leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId },
-  )
-
   // 中途作废的真实运行。不随换应用、Key 或模式清掉：作废就是因为这些变了，用户看过之后自己关
   const abandoned = shallowRef<AbandonedRun[]>([])
   function dismissAbandoned(id: number) {
     abandoned.value = abandoned.value.filter((run) => run.id !== id)
   }
+
+  // 离开页面会丢的：分页报上来的（场景文本框、调用台的 JSON 草稿，都只在内存里）、还没回来的真实运行
+  // （离开就看不到它写了什么）、真实模式留下的记录（时间线、场景结果、失败的说明、作废的运行：写入可能已经
+  // 落库，结果里的运行标记是活动里对应它们的线索）。回滚模式的结果不算：什么都没留下。
+  // 换应用、Key、分页只改查询参数，页面还在，不算离开
+  const unsaved = reactive({ scenario: false, drafts: false })
+  useUnsavedChangesGuard(
+    computed(
+      () =>
+        unsaved.scenario ||
+        unsaved.drafts ||
+        realInFlight.value > 0 ||
+        (real.value && modeLoss.value !== null) ||
+        abandoned.value.length > 0,
+    ),
+    { leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId },
+  )
 
   // what：这次运行是什么、结果按什么看法显示，中途作废时靠它说明
   async function execute(
