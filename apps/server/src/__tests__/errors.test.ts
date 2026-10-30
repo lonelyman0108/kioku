@@ -14,7 +14,7 @@ const app = createApp({
   embedder: staticEmbedderSource(null),
   jobs: null,
 })
-// 模拟中间件抛出的几种：带自己的响应（响应头）、带自己的说明、两样都带，以及 5xx。路由要在第一个请求之前加上
+// 模拟依赖库抛出的几种：带自己的响应（响应头）、带自己的说明、两样都带，以及 5xx。路由要在第一个请求之前加上
 app.get('/v1/test/throttled', () => {
   throw new HTTPException(429, {
     res: new Response('slow down', {
@@ -25,7 +25,7 @@ app.get('/v1/test/throttled', () => {
 })
 app.get('/v1/test/challenge', () => {
   throw new HTTPException(401, {
-    message: '这个接口要用 Bearer Key',
+    message: 'token verification failure: signature mismatch',
     res: new Response(null, {
       status: 401,
       headers: { 'www-authenticate': 'Bearer realm="kioku"' },
@@ -33,7 +33,7 @@ app.get('/v1/test/challenge', () => {
   })
 })
 app.get('/v1/test/explained', () => {
-  throw new HTTPException(409, { message: '这一批正在处理' })
+  throw new HTTPException(400, { message: 'Invalid Connection header value: x-internal' })
 })
 app.get('/v1/test/unavailable', () => {
   throw new HTTPException(503, { message: 'upstream down' })
@@ -94,21 +94,21 @@ describe('请求本身有问题时的回复', () => {
     expect(logged).not.toHaveBeenCalled()
   })
 
-  it('中间件带了自己的响应：沿用它的状态码与响应头，正文换成 { error }', async () => {
+  it('依赖库带了自己的响应：沿用它的状态码与响应头，正文换成 { error }', async () => {
     const res = await app.request('/v1/test/throttled')
-    expect(await errorOf(res, 429)).toBe('请求太频繁，请稍后再试')
+    expect(await errorOf(res, 429)).toBe('请求不合法')
     expect(res.headers.get('retry-after')).toBe('30')
     // 跟着原来正文的响应头不沿用
     expect(res.headers.get('content-type')).toMatch(/^application\/json/)
     expect(res.headers.get('content-length')).not.toBe('9')
   })
 
-  it('抛出的地方写了自己的说明就用它；同时带了响应时响应头照样沿用', async () => {
+  it('依赖库自带的说明不给调用方，一律按状态码给中文说明；同时带了响应时响应头照样沿用', async () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     const challenge = await app.request('/v1/test/challenge')
-    expect(await errorOf(challenge, 401)).toBe('这个接口要用 Bearer Key')
+    expect(await errorOf(challenge, 401)).toBe('请求不合法')
     expect(challenge.headers.get('www-authenticate')).toBe('Bearer realm="kioku"')
-    expect(await errorOf(await app.request('/v1/test/explained'), 409)).toBe('这一批正在处理')
+    expect(await errorOf(await app.request('/v1/test/explained'), 400)).toBe('请求格式错误')
     expect(logged).not.toHaveBeenCalled()
   })
 
