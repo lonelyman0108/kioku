@@ -235,10 +235,9 @@ export function planImport(
   // 写进去会进入他们每次会话的启动上下文。标识相同的优先，其次是同一运行时类型的；
   // 按类型匹配时跳过标识恰好是另一个运行时名的应用，它按标识归那个运行时。都没有就新建
   const slugOf = (runtime: string) => runtime.replace(/_/g, '-')
+  const runtimeOf = (uri: string) => /^core:\/\/agent\/([^/]+)/.exec(uri)?.[1]
   const runtimes = new Set(
-    snapshot.nodes
-      .map((n) => /^core:\/\/agent\/([^/]+)/.exec(n.uri)?.[1])
-      .filter((r): r is string => !!r),
+    snapshot.nodes.map((n) => runtimeOf(n.uri)).filter((r): r is string => !!r),
   )
   const own = existingApps.filter((a) => a.ownerAccountId === options.accountId)
   const appsByRuntime = new Map<string, AppMapping['apps'] | string>()
@@ -446,6 +445,19 @@ export function planImport(
       })
     }
   }
+  // 走到应用映射的节点之后还可能被跳过（撞 URI、disclosure 里有占位符等），所以循环结束才知道要动哪些应用：
+  // 运行时下有写入目标的留下；要新建的应用没有写入目标就不建，不留空应用；已有的应用保留，按人格的规则照常设默认人格，
+  // 除非这个运行时下的节点被勾掉了，或者全部勾掉、什么都不写。界面的 selectionEffects 算的要和这里一样
+  const written = new Set(plan.memories.map((m) => runtimeOf(m.source)))
+  const ticked = new Set(
+    snapshot.nodes.filter((n) => excludedNodes.has(n.uuid)).map((n) => runtimeOf(n.uri)),
+  )
+  const nothingLeft = excludedNodes.size > 0 && !plan.memories.length
+  plan.apps = plan.apps.filter(
+    (m) =>
+      written.has(m.runtime) ||
+      (!nothingLeft && !ticked.has(m.runtime) && m.apps.every((a) => !a.create)),
+  )
   return plan
 }
 

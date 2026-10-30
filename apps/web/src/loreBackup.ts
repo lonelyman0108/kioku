@@ -175,13 +175,15 @@ export function selectionEffects(
     for (const target of entering) boot.add(target)
     if (entering.length) bootNodes++
   }
-  // 勾掉一个运行时下的全部节点，服务端就不建它的应用，也不设它们的默认人格。这个运行时下有计划里不导入的节点时
-  // 保守地留着：有些跳过的节点（例如 disclosure 里有占位符）同样让服务端建应用
-  const apps = plan.apps.filter(
-    ({ runtime }) =>
-      kept.some((n) => underRuntime(n.uri, runtime)) ||
-      plan.skipped.some((s) => underRuntime(s.source, runtime)),
-  )
+  // 和服务端 planImport 循环结束后的过滤同一个规则：勾掉一个运行时下的全部节点，就不建它的应用，也不设它们的默认人格；
+  // 计划里有映射却没有节点可勾的（已有的应用，节点都在映射之后被跳过了）不随勾选变；全部勾掉就什么都不动
+  const apps =
+    plan.nodes.length && !kept.length
+      ? []
+      : plan.apps.filter(({ runtime }) => {
+          const nodes = plan.nodes.filter((n) => underRuntime(n.uri, runtime))
+          return !nodes.length || nodes.some((n) => !excluded.has(n.uuid))
+        })
   const slugs = new Set(apps.flatMap((m) => m.apps.map((a) => a.slug)))
   const writesPersona = kept.some((n) =>
     n.targets.some((t) => t.layer === 'persona' && t.state === 'new'),

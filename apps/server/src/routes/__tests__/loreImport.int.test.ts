@@ -212,6 +212,12 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
   }
   const memoryWhere = (domain: string, path: string) =>
     and(eq(memories.domain, domain), eq(memories.path, path))
+  const appSlugs = async () => {
+    const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select({ slug: apps.slug }).from(apps),
+    )
+    return rows.map((r) => r.slug).sort()
+  }
 
   // 一个假的 Lore：校验 Token，返回完整的导出（带接口 Key 这些不该进来的表）
   const servers: Server[] = []
@@ -565,9 +571,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       await dropLore('infra://gone_from_lore')
       await editLore('infra://change_in_lore', '再改一次的正文')
 
-      const { sync } = await cli()
+      const { sync, plan: fromCli } = await cli()
       const source = await fileSource()
       const plan = await planOf(source)
+      expect(plan.apps).toEqual(fromCli.apps)
       // 命令行的原因引用那段坏占位符（打在主人自己的终端上），计划视图不含正文：只差这一处。看原始的响应
       const quoted = ' {{cred:Bad Name}}'
       expect(sync.items.find((i) => i.state === 'skipped')!.reason).toContain(quoted)
@@ -691,6 +698,32 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         tx.select().from(memories).where(memoryWhere('app', 'open-claw/agent')),
       )
       expect(rows).toEqual([])
+      // 这个应用没有写入目标了，不建成空的
+      expect(result.appsCreated).toEqual(['claudecode'])
+      expect(await appSlugs()).toEqual(['claudecode'])
+    })
+
+    it('节点走到应用映射之后才跳过：不建空应用，已有的应用照常设默认人格', async () => {
+      await seed('core://agent/zcode', 'zcode 的正文', { disclosure: '要用 {{cred:router}} 时' })
+      await seed('core://agent/mine', 'mine 的正文', { disclosure: '要用 {{cred:router}} 时' })
+      await ws.createApp('mine', { runtimeFamily: 'other' })
+      const source = await fileSource()
+      const plan = await planOf(source)
+      expect(plan.skipped.map((s) => s.source)).toEqual(
+        expect.arrayContaining(['core://agent/zcode', 'core://agent/mine']),
+      )
+      expect(plan.apps).toEqual([
+        {
+          runtime: 'claudecode',
+          apps: [{ slug: 'claudecode', create: true, runtimeFamily: 'claudecode' }],
+        },
+        { runtime: 'mine', apps: [{ slug: 'mine', create: false, runtimeFamily: 'other' }] },
+      ])
+      expect(plan.appsGivenPersona).toEqual(['mine'])
+      const result = await applyOf(source, plan)
+      expect(result.appsCreated).toEqual(['claudecode'])
+      expect(result.appsGivenPersona).toEqual(['mine'])
+      expect(await appSlugs()).toEqual(['claudecode', 'mine'])
     })
 
     it('disclosure 截断时切开代理对：存下来没有乱码，再看计划是最新的，不是每次都要更新', async () => {
@@ -946,17 +979,20 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect(await counts()).toEqual(before)
       })
 
-      it('全部勾掉时人格已有也不改应用：还没有默认人格的应用保持为空', async () => {
+      it('全部勾掉时人格已有也不改应用：还没有默认人格的应用保持为空，节点都跳过了的也一样', async () => {
         await ws.createPersona('default')
         await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        await ws.createApp('mine', { runtimeFamily: 'other' })
+        await seed('core://agent/mine', 'mine 的正文', { disclosure: '要用 {{cred:router}} 时' })
         const source = await fileSource()
         const plan = await planOf(source)
-        expect(plan.appsGivenPersona).toEqual(['claude-code'])
+        expect(plan.appsGivenPersona.sort()).toEqual(['claude-code', 'mine'])
         const before = await counts()
         const result = await applyOf(source, plan, { excludeUris: plan.nodes.map((n) => n.uri) })
         expect(result).toMatchObject({ appsCreated: [], appsGivenPersona: [], created: [] })
         expect(await counts()).toEqual(before)
         expect((await appRow('claude-code')).defaultPersonaId).toBeNull()
+        expect((await appRow('mine')).defaultPersonaId).toBeNull()
       })
 
       it('要写入新的 core://soul、人格已有：用已有的，不按填的名称新建', async () => {

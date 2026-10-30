@@ -441,7 +441,7 @@ describe('勾选之后这次会动什么', () => {
     })
   })
 
-  it('勾掉一个运行时下的全部节点，它的应用不再列出；有跳过的节点时保守地留着', () => {
+  it('勾掉一个运行时下的全部节点，它的应用不再列出；没有节点可勾的已有应用不随勾选变；全部勾掉什么都不动', () => {
     const appTarget = (slug: string) => target({ uri: `app://${slug}/agent`, layer: 'app' })
     const claude = planNode('claude', {
       uri: 'core://agent/claude',
@@ -466,8 +466,10 @@ describe('勾选之后这次会动什么', () => {
           apps: [{ slug: 'claude-web', create: true, runtimeFamily: 'other' }],
         },
         { runtime: 'zcode', apps: [{ slug: 'zcode', create: false, runtimeFamily: 'other' }] },
+        // 这个运行时的节点都在映射之后被跳过了，服务端照常设默认人格，界面上没有节点可勾
+        { runtime: 'hidden', apps: [{ slug: 'hidden', create: false, runtimeFamily: 'other' }] },
       ],
-      appsGivenPersona: ['claude'],
+      appsGivenPersona: ['claude', 'hidden'],
       appsOtherPersona: ['zcode'],
     }
     const pick = (excluded: string[]) => {
@@ -479,32 +481,32 @@ describe('勾选之后这次会动什么', () => {
       return { runtimes: apps.map((m) => m.runtime), appsGivenPersona, appsOtherPersona }
     }
     expect(pick([])).toEqual({
-      runtimes: ['claude', 'claude_web', 'zcode'],
-      appsGivenPersona: ['claude'],
+      runtimes: ['claude', 'claude_web', 'zcode', 'hidden'],
+      appsGivenPersona: ['claude', 'hidden'],
       appsOtherPersona: ['zcode'],
     })
     // 还有一个节点留着，这个运行时还在
-    expect(pick(['claude']).runtimes).toEqual(['claude', 'claude_web', 'zcode'])
+    expect(pick(['claude']).runtimes).toEqual(['claude', 'claude_web', 'zcode', 'hidden'])
     expect(pick(['claude', 'tools'])).toEqual({
-      runtimes: ['claude_web', 'zcode'],
-      appsGivenPersona: [],
+      runtimes: ['claude_web', 'zcode', 'hidden'],
+      appsGivenPersona: ['hidden'],
       appsOtherPersona: ['zcode'],
     })
     expect(pick(['zcode'])).toEqual({
-      runtimes: ['claude', 'claude_web'],
-      appsGivenPersona: ['claude'],
+      runtimes: ['claude', 'claude_web', 'hidden'],
+      appsGivenPersona: ['claude', 'hidden'],
       appsOtherPersona: [],
     })
-    const skipped = selectionEffects(
-      {
-        ...plan,
-        skipped: [{ source: 'core://agent/zcode/refs', reason: 'disclosure 里有凭据占位符' }],
-      },
-      none,
-      new Set(['zcode']),
-    )
-    expect(skipped.apps.map((m) => m.runtime)).toContain('zcode')
-    expect(skipped.appsOtherPersona).toEqual(['zcode'])
+    expect(pick(['longer']).runtimes).toEqual(['claude', 'zcode', 'hidden'])
+    // 全部勾掉就什么都不动，没有节点可勾的也一样
+    expect(pick(['claude', 'tools', 'longer', 'zcode'])).toEqual({
+      runtimes: [],
+      appsGivenPersona: [],
+      appsOtherPersona: [],
+    })
+    // 计划里本来就没有节点时没有勾选可言，服务端照常设
+    const onlyHidden = { ...plan, nodes: [] }
+    expect(selectionEffects(onlyHidden, none, none).apps.map((m) => m.runtime)).toContain('hidden')
   })
 })
 

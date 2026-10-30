@@ -348,6 +348,99 @@ describe('Lore 导入计划', () => {
     expect(disclosureOf(`${'长'.repeat(497)}😀长尾`)).toBe(`${'长'.repeat(497)}😀长`)
   })
 
+  describe('要新建的应用只有被写入目标用到才留下', () => {
+    const runtimes = (plan: ImportPlan) => plan.apps.map((m) => m.runtime)
+
+    it('节点走到应用映射之后才被跳过：不建空应用，已有的应用保留', () => {
+      for (const extra of [
+        { disclosure: '要用 {{cred:router}} 时' },
+        { content: '登录用 {{cred:router#password}}' },
+        { content: 'x'.repeat(20_001) },
+      ]) {
+        const snap = snapshot(node('core://agent/zcode', extra), node('core://agent/claudecode'))
+        const plan = planImport(snap, [], options)
+        expect(plan.skipped.map((s) => s.source)).toEqual(['core://agent/zcode'])
+        expect(plan.memories.map((m) => m.source)).toEqual(['core://agent/claudecode'])
+        expect(runtimes(plan)).toEqual(['claudecode'])
+
+        const mine = { slug: 'zcode', runtimeFamily: 'other', ownerAccountId: ME }
+        expect(planImport(snap, [mine], options).apps[0]).toEqual({
+          runtime: 'zcode',
+          apps: [{ slug: 'zcode', create: false, runtimeFamily: 'other' }],
+        })
+      }
+    })
+
+    it('撞 URI：勾掉占着的节点之后，映射到同一个 URI 的节点不让应用留下', () => {
+      const snap = snapshot(node('core://agent/claude_code'), node('core://agent/claude-code'))
+      const plan = planImport(snap, [], {
+        ...options,
+        excludeUris: new Set(['core://agent/claude_code']),
+      })
+      expect(plan.memories).toEqual([])
+      expect(plan.skipped.map((s) => s.source)).toEqual([
+        'core://agent/claude_code',
+        'core://agent/claude-code',
+      ])
+      expect(plan.apps).toEqual([])
+    })
+
+    it('两个运行时映射到同一个应用：写入目标是谁的，谁的映射才留下', () => {
+      const plan = planImport(
+        snapshot(node('core://agent/claude_code'), node('core://agent/claude-code')),
+        [],
+        options,
+      )
+      expect(runtimes(plan)).toEqual(['claude_code'])
+    })
+
+    it('勾掉运行时下有写入目标的节点：已有的应用不再动，还有走到映射才跳过的节点也一样', () => {
+      const mine = { slug: 'zcode', runtimeFamily: 'other', ownerAccountId: ME }
+      const snap = snapshot(
+        node('core://agent/zcode'),
+        node('core://agent/zcode/refs', { disclosure: '要用 {{cred:router}} 时' }),
+        node('infra://other'),
+      )
+      expect(runtimes(planImport(snap, [mine], options))).toEqual(['zcode'])
+      const plan = planImport(snap, [mine], {
+        ...options,
+        excludeUris: new Set(['core://agent/zcode']),
+      })
+      expect(plan.memories.map((m) => m.source)).toEqual(['infra://other'])
+      expect(runtimes(plan)).toEqual([])
+    })
+
+    it('节点都跳过了的已有应用不随别的勾选变；全部勾掉、什么都不写时也不动', () => {
+      const mine = { slug: 'zcode', runtimeFamily: 'other', ownerAccountId: ME }
+      const snap = snapshot(
+        node('core://agent/zcode', { disclosure: '要用 {{cred:router}} 时' }),
+        node('infra://a'),
+        node('infra://b'),
+      )
+      const ticking = (...uris: string[]) =>
+        runtimes(planImport(snap, [mine], { ...options, excludeUris: new Set(uris) }))
+      expect(ticking()).toEqual(['zcode'])
+      expect(ticking('infra://a')).toEqual(['zcode'])
+      expect(ticking('infra://a', 'infra://b')).toEqual([])
+      // 没有勾选时计划本来就什么都不写：已有的应用照样保留，和命令行原来的规则一致
+      const alone = snapshot(node('core://agent/zcode', { disclosure: '要用 {{cred:router}} 时' }))
+      expect(runtimes(planImport(alone, [mine], options))).toEqual(['zcode'])
+    })
+
+    it('同一个运行时下还有写入目标时应用留下，跳过的只是那个节点', () => {
+      const plan = planImport(
+        snapshot(
+          node('core://agent/zcode/refs', { disclosure: '要用 {{cred:router}} 时' }),
+          node('core://agent/zcode'),
+        ),
+        [],
+        options,
+      )
+      expect(runtimes(plan)).toEqual(['zcode'])
+      expect(plan.memories.map((m) => m.request.uri)).toEqual(['app://zcode/agent'])
+    })
+  })
+
   describe('这次不导入的节点', () => {
     const zcodeApps = [
       { slug: 'claude-code', runtimeFamily: 'claudecode', ownerAccountId: ME },
@@ -436,6 +529,11 @@ describe('Lore 导入计划', () => {
         expect(baseApps).toEqual(
           expect.arrayContaining(plan.apps.flatMap((m) => m.apps.map((a) => a.slug))),
         )
+        // 要新建的应用都有写入目标
+        const used = plan.memories.map((m) => m.context.targetApp)
+        for (const app of plan.apps.flatMap((m) => m.apps).filter((a) => a.create)) {
+          expect(used).toContain(app.slug)
+        }
       }
       // 全部勾掉就什么都不写，应用也不建
       const none = planImport(snap, mine, { ...options, excludeUris: new Set(uris) })
