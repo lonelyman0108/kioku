@@ -445,6 +445,44 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await rowOf(mine.id)).deletedAt).toBeNull()
     })
 
+    it('重新生效时，候选行上只有外键检查加的 KEY SHARE 锁（别的表正往它上面挂记录）不算正在改：照常让出', async () => {
+      // 同一个 URI、同一归属先后两条：旧的过期之后被新的让出，新的也过期了。旧的重新生效要先让出新的那条，
+      // 不然撞上唯一索引
+      const old = await ok<MemoryView>(
+        await create({ uri: 'kb://handover', content: '旧的', layer: 'base', validTo: inDays(1) }),
+        201,
+      )
+      await expire(old.id)
+      const next = await ok<MemoryView>(
+        await create({ uri: 'kb://handover', content: '新的', layer: 'base', validTo: inDays(1) }),
+        201,
+      )
+      await expire(next.id)
+      expect((await rowOf(old.id)).deletedAt).not.toBeNull()
+      const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
+      let outcome = 'blocked' as Response | 'blocked'
+      try {
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+          // 插入事件、关键词与向量时，外键检查在记忆行上加的就是这把锁
+          await tx`select id from memories where id = ${next.id} for key share`
+          pending = Promise.resolve(reactivate(old.id, old.version))
+          outcome = await Promise.race([
+            pending,
+            new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 3_000)),
+          ])
+        })
+      } finally {
+        await pending?.catch(() => {})
+        await side.end()
+      }
+      expect(outcome).not.toBe('blocked')
+      expect((outcome as Response).status, await (outcome as Response).clone().text()).toBe(200)
+      expect(await rowOf(old.id)).toMatchObject({ validTo: null, deletedAt: null })
+      expect((await rowOf(next.id)).deletedAt).not.toBeNull()
+    })
+
     it('删除时刚好到期：和读不到一样返回 404，删除标记不写，免得被当成过期之后让出的', async () => {
       // 删对象页上的事实时先锁住那一行再删：锁住时它还有效，等锁的这段时间里到期。
       // 按 URI 删的路径在删之前紧挨着又按当时的时间判断一次能不能读，中间没有能等住的地方
