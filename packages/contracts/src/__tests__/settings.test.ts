@@ -80,6 +80,21 @@ describe('Key 与 Secret 的差别', () => {
     expect(backup(null).success).toBe(false)
   })
 
+  it('Access Key ID 和 Secret 一样：去掉首尾空白，中间有控制字符时拒绝', () => {
+    const accessKeyId = (value: string) =>
+      outcome(
+        UpdateBackupSettings.safeParse({
+          endpoint: 'https://example.com',
+          bucket: 'kioku-test',
+          accessKeyId: value,
+        }),
+        (data) => data.accessKeyId,
+      )
+    expect(accessKeyId('AKIA123\n')).toEqual({ success: true, value: 'AKIA123' })
+    expect(accessKeyId('AKIA\n123').success).toBe(false)
+    expect(accessKeyId('   ').success).toBe(false)
+  })
+
   it('Secret 的长度上限按去掉空白之后算', () => {
     expect(backup(`${'x'.repeat(256)}\n`)).toEqual({ success: true, value: 'x'.repeat(256) })
     expect(backup('x'.repeat(257)).success).toBe(false)

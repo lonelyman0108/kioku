@@ -272,7 +272,7 @@ export const UpdateBackupSettings = z.object({
   region: z.string().min(1).max(64).default('us-east-1'),
   bucket: BucketName,
   prefix: ObjectPrefix.default(''),
-  accessKeyId: z.string().min(1).max(256),
+  accessKeyId: pastedSecret('Access Key ID').max(256),
   // 不填表示沿用已保存的（接口主机没变时）
   secretAccessKey: pastedSecret('Secret Access Key').max(256).optional(),
   // 每天几点（UTC）做备份
