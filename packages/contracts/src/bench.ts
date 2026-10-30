@@ -326,6 +326,8 @@ export const BenchAgentInfo = z.object({
   reason: BenchAgentUnavailable.nullable(),
   // 实例设置里的模型名。不是实例管理员时为 null：配没配、配的什么都是实例设置，不给他们看
   defaultModel: z.string().nullable(),
+  // 抽取模型接口的地址（协议、主机与路径）：内容发给它，开始之前要写明。不带账号密码、查询与片段；不是实例管理员或没配时为 null
+  endpoint: z.string().nullable(),
   loop: BenchAgentLoop,
   // 给不给模型工具
   tools: z.boolean(),
@@ -344,7 +346,7 @@ export type BenchAgentMessage = z.infer<typeof BenchAgentMessage>
 export const BenchAgentTurnRequest = z
   .strictObject({
     // 换一个模型名，接口与 Key 不变；不给时用实例设置里的模型
-    model: z.string().trim().min(1).max(128).optional(),
+    model: z.string().trim().min(1).max(128, '模型名太长，最多 128 个字符').optional(),
     messages: z
       .array(BenchAgentMessage)
       .min(1)
@@ -360,18 +362,20 @@ export type BenchAgentTurnRequest = z.infer<typeof BenchAgentTurnRequest>
 // 模型要调的一个工具。id 和 message.tool_calls 里的相同，tool 消息的 tool_call_id 用它。
 // arguments 解析成了对象：空串、空白或 null（包括字符串 "null"）按 {}；解析失败或不是对象时为 null，
 // 原因在 parseError，由调用方作为工具错误回给模型，不算请求失败。
-// 没有名字时 name 是空串，parseError 说明原因（message.tool_calls 里那一项是占位名）
+// 没有名字时 name 是空串，parseError 说明原因。message.tool_calls 里没有名字或名字不合规的那一项是占位名，这里还是原来的名字。
+// 有 parseError 时 rawArguments 是模型写的参数原文，只用来显示：message.tool_calls 里放回历史的已经换成合法的 JSON 了
 export const BenchAgentToolCall = z.object({
   id: z.string(),
   name: z.string(),
   arguments: z.record(z.string(), z.unknown()).nullable(),
   parseError: z.string().nullable(),
+  rawArguments: z.string().optional(),
 })
 export type BenchAgentToolCall = z.infer<typeof BenchAgentToolCall>
 
 export const BenchAgentTurnResult = z.object({
-  // 助手消息，下一轮把它放回 messages。tool_calls 规范化过（补齐不能用的 id、缺的 type、名字与参数，没有工具调用时去掉），
-  // 别的字段原样
+  // 助手消息，下一轮把它放回 messages。tool_calls 规范化过（补齐不能用的 id、缺的 type、名字与参数，参数换成合法的 JSON，
+  // 没有工具调用时去掉），别的字段原样
   message: BenchAgentMessage,
   toolCalls: z.array(BenchAgentToolCall),
   finishReason: z.string().nullable(),

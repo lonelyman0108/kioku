@@ -17,6 +17,8 @@ interface RequestOptions<T> {
   body?: unknown
   // 有 schema 时按它校验响应，契约与后端不一致会立刻暴露
   schema?: z.ZodType<T>
+  // 取消请求：等得久的请求（请求模型）可以中途停下，这时 fetch 抛 AbortError，不是 ApiError
+  signal?: AbortSignal
 }
 
 // 会话失效（过期、在别的标签页退出）时的处理，由入口注册；登录与查询当前账号本身返回 401 是正常结果，不触发
@@ -46,6 +48,7 @@ async function send(method: string, path: string, options: RequestOptions<unknow
         : form
           ? (options.body as FormData)
           : JSON.stringify(options.body),
+    signal: options.signal,
   })
   if (!res.ok) {
     if (res.status === 401 && !SESSION_PATHS.includes(path)) onUnauthorized?.()

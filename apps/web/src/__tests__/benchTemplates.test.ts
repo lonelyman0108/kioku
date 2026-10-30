@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
 import webPackage from '../../package.json'
+import benchAgent from '../benchAgent?raw'
 import benchForm from '../benchForm?raw'
 import benchResult from '../benchResult?raw'
 import benchScenarios from '../benchScenarios?raw'
@@ -9,6 +10,9 @@ import benchSession from '../benchSession?raw'
 import activityEntry from '../components/ActivityEntry.vue?raw'
 import appSimulator from '../components/AppSimulator.vue?raw'
 import benchAbandoned from '../components/BenchAbandoned.vue?raw'
+import benchAgentView from '../components/BenchAgent.vue?raw'
+import benchAgentBusy from '../components/BenchAgentBusy.vue?raw'
+import benchAgentExchange from '../components/BenchAgentExchange.vue?raw'
 import benchCalls from '../components/BenchCalls.vue?raw'
 import benchContextForm from '../components/BenchContextForm.vue?raw'
 import benchField from '../components/BenchField.vue?raw'
@@ -112,6 +116,7 @@ const bodyOf = (script: string, name: string) => {
 }
 
 const SOURCES = {
+  benchAgent,
   benchForm,
   benchResult,
   benchScenarios,
@@ -119,6 +124,9 @@ const SOURCES = {
   useBench,
   benchPage,
   benchAbandoned,
+  benchAgentView,
+  benchAgentBusy,
+  benchAgentExchange,
   benchCalls,
   benchContextForm,
   benchField,
@@ -260,6 +268,18 @@ describe('真实模式要确认', () => {
 describe('调用台的运行', () => {
   const calls = sfc(benchCalls)
 
+  it('按钮只认自己的运行；别的运行占着时禁用、不转圈', () => {
+    const button = withHandler(calls.elements, 'click', 'onRunClick')
+    expect(bound(button, 'loading')).toBe('callRunning')
+    expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker || running)')
+  })
+
+  it('被模型对话占着时说明一句，能停止：放在运行按钮旁边', () => {
+    const form = withTag(calls.elements, 'form')
+    expect(walk(form).map((n) => n.tag)).toContain('BenchAgentBusy')
+    expect(walk(form)).toContain(withHandler(calls.elements, 'click', 'onRunClick'))
+  })
+
   it('真实模式下回车不执行，只有点按钮才执行', () => {
     const form = withTag(calls.elements, 'form')
     expect(handler(form, 'submit')).toBe('onSubmit')
@@ -383,7 +403,7 @@ describe('选中的工具不在目录里', () => {
       "tools.data.value ? 'ready' : tools.isError.value ? 'failed' : 'pending'",
     )
     const button = withHandler(calls.elements, 'click', 'onRunClick')
-    expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker)')
+    expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker || running)')
     const alert = withIf(calls.elements, 'unavailable')
     expect(alert.tag).toBe('UAlert')
     expect(bound(alert, 'title')).toBe('unavailable')
@@ -407,7 +427,14 @@ describe('选中的工具不在目录里', () => {
 
 describe('离开页面前提醒', () => {
   it('页面上只注册一份：提醒的状态是全局的一个，注册两份会互相覆盖', () => {
-    const sources = [benchCalls, benchScenariosView, benchToolbar, benchPage, benchAbandoned]
+    const sources = [
+      benchCalls,
+      benchScenariosView,
+      benchAgentView,
+      benchToolbar,
+      benchPage,
+      benchAbandoned,
+    ]
     for (const source of sources) expect(source).not.toContain('useUnsavedChangesGuard')
     expect(useBench.match(/useUnsavedChangesGuard\(/g)).toHaveLength(1)
     // 只能在页面的 setup 里建
@@ -561,6 +588,22 @@ describe('场景的运行与导出', () => {
       scenarios.elements.find((el) => el.tag === 'UModal' && bound(el, 'open') === open),
       `:open="${open}" 的确认框`,
     )
+
+  it('按钮只认自己的运行；别的运行占着时禁用、不转圈', () => {
+    const button = withHandler(scenarios.elements, 'click', 'startRun')
+    expect(bound(button, 'loading')).toBe('scenarioRunning')
+    expect(bound(button, 'disabled')).toBe('!text.trim() || running')
+  })
+
+  it('被模型对话占着时说明一句，能停止：放在运行按钮旁边', () => {
+    const parent = must(
+      scenarios.elements.find((el) =>
+        el.children?.includes(withHandler(scenarios.elements, 'click', 'startRun')),
+      ),
+      '运行按钮的上一层',
+    )
+    expect(parent.children?.map((n) => n.tag)).toContain('BenchAgentBusy')
+  })
 
   it('真实模式下运行要确认：运行按钮只走 startRun', () => {
     const script = scenarios.script
@@ -872,8 +915,15 @@ describe('页面的结构', () => {
     expect(page.script).toContain('provideBench()')
     expect(page.script).not.toMatch(/api\.|from '\.\.\/api/)
     expect(page.elements.map((el) => el.tag)).toEqual(
-      expect.arrayContaining(['BenchToolbar', 'UTabs', 'BenchCalls', 'BenchScenarios']),
+      expect.arrayContaining([
+        'BenchToolbar',
+        'UTabs',
+        'BenchCalls',
+        'BenchScenarios',
+        'BenchAgent',
+      ]),
     )
+    expect(page.script).toContain("{ label: '模型对话', value: 'agent', icon: icons.bot }")
   })
 
   it('换应用读 Key 的时候分页组件不卸载：卸载会丢掉草稿与文本框里的场景', () => {
@@ -885,9 +935,12 @@ describe('页面的结构', () => {
     const dir = (name: string) => wrapper.props?.find((p) => p.name === name)?.exp?.content
     expect(dir('if')).toBe('mounted')
     expect(dir('show')).toBe('ready')
-    for (const tag of ['BenchCalls', 'BenchScenarios']) {
-      expect(withTag(page.elements, tag).props?.some((p) => p.name === 'show')).toBe(true)
+    for (const tag of ['BenchCalls', 'BenchScenarios', 'BenchAgent']) {
+      const tabContent = withTag(page.elements, tag)
+      expect(tabContent.props?.some((p) => p.name === 'show')).toBe(true)
+      expect(wrapper.children).toContain(tabContent)
     }
+    expect(directive(withTag(page.elements, 'BenchAgent'), 'show')).toBe("tab === 'agent'")
   })
 
   it('改过文本框就不再是那个预设了：再选它能换回原样', () => {
@@ -938,6 +991,387 @@ describe('真实模式中途作废的运行', () => {
     const alert = withIf(abandoned.elements, 'abandonedInFlight')
     expect(alert.tag).toBe('UAlert')
     expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain('可能正在写入')
+  })
+})
+
+describe('被模型对话占着时的说明', () => {
+  const busy = sfc(benchAgentBusy)
+
+  it('只在模型对话进行时显示，说清楚为什么，能停止', () => {
+    const alert = withIf(busy.elements, 'agentSending')
+    expect(alert.tag).toBe('UAlert')
+    expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain(
+      '模型对话正在进行',
+    )
+    expect(bound(alert, 'actions')).toBe('actions')
+    const actions = blockOf(busy.script, 'const actions = ')
+    expect(actions).toContain('onClick: stopAgent')
+    // 点过之后不能再点：已经发出去的运行取消不了，要等它回来
+    expect(actions).toContain('disabled: agentStopping.value')
+  })
+})
+
+describe('模型对话的页面', () => {
+  const view = sfc(benchAgentView)
+  const exchange = sfc(benchAgentExchange)
+  const alertWith = (expression: string) => {
+    const alert = must(
+      view.elements.find((el) => el.tag === 'UAlert' && directive(el, 'if') === expression),
+      `v-if="${expression}" 的提示`,
+    )
+    return alert
+  }
+
+  it('用不用得了由 GET bench/agent 决定：用不了时显示原因，不显示输入区', () => {
+    expect(view.script).toContain('api.benchAgent(spaceId.value, appId.value!, keyId.value!)')
+    expect(view.script).toContain('AGENT_UNAVAILABLE_NOTES[reason]')
+    const alert = withDirective(view.elements, 'else-if', 'unavailable')
+    expect(alert.tag).toBe('UAlert')
+    expect(bound(alert, 'title')).toBe('unavailable.title')
+    expect(bound(alert, 'description')).toBe('unavailable.description')
+    expect(bound(alert, 'actions')).toBe('unavailableActions')
+    // 只有 notAdmin 进不了实例设置
+    expect(blockOf(view.script, 'const unavailableActions = ')).toContain(
+      "info.data.value?.reason === 'notAdmin'",
+    )
+    expect(blockOf(view.script, 'const unavailableActions = ')).toContain(
+      "to: { name: 'settings' }",
+    )
+    // 模型名、系统提示与输入区都只在用得了时才有
+    const guarded = view.elements.filter((el) => directive(el, 'if') === 'available && loop')
+    expect(guarded).toHaveLength(2)
+    for (const label of ['模型', '要对模型说的话']) {
+      const inside = guarded
+        .flatMap(walk)
+        .filter((el) =>
+          el.props?.some((p) => p.name === 'aria-label' && p.value?.content === label),
+        )
+      expect(inside, `${label} 的输入框`).toHaveLength(1)
+    }
+    expect(guarded.flatMap(walk).some((el) => handler(el, 'click') === 'send')).toBe(true)
+  })
+
+  it('读取失败时能重新读', () => {
+    const alert = withDirective(view.elements, 'else-if', 'infoError')
+    expect(bound(alert, 'title')).toBe('infoError')
+    expect(bound(alert, 'actions')).toBe('retryInfo')
+    expect(blockOf(view.script, 'const retryInfo = ')).toContain('info.refetch()')
+  })
+
+  it('循环的说明：按运行时，近似的那种用提醒的颜色说清楚', () => {
+    const note = must(
+      view.elements.find((el) => shownIn(el).includes('AGENT_LOOP_NOTES[loop]') && el.tag === 'p'),
+      '循环的说明',
+    )
+    expect(bound(note, 'class')).toBe("loop === 'approximate' ? 'text-warning' : 'text-muted'")
+    expect(benchAgent).toMatch(/approximate:\s+'[^']*近似/)
+  })
+
+  it('会话上下文：mcp 不发生命周期事件，不显示', () => {
+    expect(directive(withTag(view.elements, 'BenchContextForm'), 'if')).toBe("loop !== 'tools'")
+  })
+
+  it('开始前要点一下：提示写明接口地址、模型名与内容，点了才放开发送；任何一个变了再问', () => {
+    const alert = alertWith('consent && needsConsent && !agentSending')
+    expect(bound(alert, 'description')).toBe('consentText(consent, mode)')
+    expect(bound(alert, 'actions')).toBe('consentActions')
+    const actions = blockOf(view.script, 'const consentActions = ')
+    expect(actions).toContain('`发给 ${model.value}，开始对话`')
+    expect(actions).toContain('onClick: () => consent.value && consentTo(consent.value)')
+    // 同意的键：服务端给的接口地址、这里的模型名、服务端给的循环
+    const target = blockOf(view.script, 'const consent = ')
+    expect(target).toContain('endpoint: info.data.value?.endpoint ?? null')
+    expect(target).toContain('model: model.value')
+    expect(target).toContain('loop: loop.value')
+    expect(view.script).toContain('consentNeeded(agent.value, consent.value)')
+    expect(blockOf(view.script, 'const canSend = ')).toContain('!needsConsent.value')
+    expect(bodyOf(view.script, 'send')).toContain('if (!canSend.value || !loop.value) return')
+  })
+
+  it('运行期间模型名、系统提示都不能改', () => {
+    const fields = view.elements.filter((el) =>
+      el.props?.some(
+        (p) => p.name === 'aria-label' && ['模型', '系统提示'].includes(p.value?.content ?? ''),
+      ),
+    )
+    expect(fields).toHaveLength(2)
+    for (const field of fields) expect(bound(field, 'disabled')).toBe('running')
+    expect(bodyOf(useBench, 'clearAgent')).toContain('if (running.value) return')
+    expect(bodyOf(useBench, 'consentTo')).toContain('if (agentSending.value) return')
+    expect(blockOf(view.script, 'const canSend = ')).toContain('!running.value')
+    expect(bodyOf(useBench, 'sendToAgent')).toContain('if (running.value || !target) return null')
+  })
+
+  it('模型名清空时退回默认：发出去的总是一个模型名', () => {
+    expect(view.script).toContain('modelText.value.trim() || defaultModel.value')
+    const input = must(
+      view.elements.find((el) => bound(el, 'model-value') === 'modelText'),
+      '模型名的输入框',
+    )
+    expect(handler(input, 'update:model-value')).toBe('(v) => (modelEdit = String(v))')
+    expect(bodyOf(view.script, 'send')).toContain('model: model.value')
+  })
+
+  it('发送：真实模式下只有点按钮才发，回车不发', () => {
+    expect(handler(withHandler(view.elements, 'click', 'send'), 'click')).toBe('send')
+    expect(bound(withHandler(view.elements, 'click', 'send'), 'disabled')).toBe('!canSend')
+    const keydown = bodyOf(view.script, 'onKeydown')
+    expect(keydown).toContain('real.value')
+    expect(keydown).toContain('event.metaKey || event.ctrlKey')
+    // 没有表单：回车的隐式提交点不到按钮
+    expect(view.elements.some((el) => el.tag === 'form')).toBe(false)
+  })
+
+  it('这条消息没有进历史时文字放回输入框，可以再发一次；已经又写了别的就不动', () => {
+    expect(bodyOf(view.script, 'send')).toContain(
+      'if (!finished?.inHistory && !input.value) input.value = text',
+    )
+  })
+
+  it('停止：只有发消息时才有，点了之后不能再点', () => {
+    const button = withHandler(view.elements, 'click', 'stopAgent')
+    expect(directive(button, 'if')).toBe('agentSending')
+    expect(bound(button, 'disabled')).toBe('agentStopping')
+    expect(bodyOf(useBench, 'stopAgent')).toContain('agentController.value.abort()')
+  })
+
+  it('取消传给模型请求：api 把 signal 带给 fetch', () => {
+    expect(bodyOf(useBench, 'agentTurn')).toContain(
+      'api.benchAgentTurn(target.space, target.app.id, target.key.id, body, signal)',
+    )
+    expect(bodyOf(useBench, 'sendToAgent')).toContain('signal: controller.signal')
+  })
+
+  it('换了应用、Key 或模式：对话清掉，进行中的取消', () => {
+    const watcher = blockOf(
+      useBench.replaceAll('\n  ', '\n'),
+      'watch([spaceId, appId, keyId, mode]',
+    )
+    expect(watcher).toContain('agentController.value?.abort()')
+    expect(watcher).toContain('agent.value = emptyConversation()')
+    expect(useBench).toContain('onScopeDispose(() => agentController.value?.abort())')
+    const onGeneration = blockOf(view.script, 'watch(generation, ')
+    expect(onGeneration).toContain('exporting.value = null')
+    expect(onGeneration).toContain('exportNote.value = null')
+  })
+
+  it('工具走 execute 的同一段：真实模式中途作废的规则相同，label 与 view 都传', () => {
+    const send = bodyOf(useBench, 'sendToAgent')
+    expect(send).toContain('runAs(id, target, steps, what(label), replay)')
+    expect(send).toContain("const what = (label: string) => ({ label, view: 'call' as const })")
+    // 只认这一次的状态：作废之后旧的循环写不回来
+    expect(send).toContain('if (current.value === id) agent.value = next')
+    expect(bodyOf(useBench, 'execute')).toContain('runAs(id, target, steps, what, replay)')
+    expect(bodyOf(useBench, 'runAs')).toContain('abandonedRun(')
+  })
+
+  it('离开提醒与切换确认都算上对话', () => {
+    const records = blockOf(useBench.replaceAll('\n  ', '\n'), 'const modeLoss = ')
+    expect(records).toContain('agentMessages: agent.value.exchanges.length')
+    expect(records).toContain('agent.value.session.replay.length')
+    expect(useBench).toMatch(
+      /useUnsavedChangesGuard\(\s+computed\([^]*agent\.value\.exchanges\.length > 0/,
+    )
+  })
+
+  it('清空：运行期间不能，连提示一起清掉', () => {
+    const button = buttonOf(view.elements, '清空对话')
+    expect(handler(button, 'click')).toBe('requestClear')
+    expect(bound(button, 'disabled')).toBe('running || !agent.exchanges.length')
+    const clear = bodyOf(view.script, 'clear')
+    expect(clear).toContain('if (running.value) return')
+    expect(clear).toContain('clearAgent()')
+    expect(bodyOf(useBench, 'clearAgent')).toContain('agent.value = emptyConversation()')
+  })
+
+  it('真实模式下可能写过库时清空先确认，说清楚运行标记也没了；回滚模式不问', () => {
+    const request = bodyOf(view.script, 'requestClear')
+    expect(request).toContain('if (agent.value.mayHaveWritten) confirmingClear.value = true')
+    expect(request).toContain('else clear()')
+    const modal = must(
+      view.elements.find((el) => el.tag === 'UModal' && bound(el, 'open') === 'confirmingClear'),
+      '清空的确认框',
+    )
+    expect(textOf(modal)).toContain('可能已经写库')
+    expect(textOf(modal)).toContain('运行标记是活动里对应这些写入的唯一线索')
+    expect(textOf(modal)).toContain('不会撤回')
+    const nodes = walk(modal)
+    expect(handler(buttonOf(nodes, '清空'), 'click')).toBe('clear')
+    expect(handler(buttonOf(nodes, '取消'), 'click')).toBe('confirmingClear = false')
+    // 分叉提示里的清空走同一条路
+    expect(blockOf(view.script, 'const divergedActions = ')).toContain('onClick: requestClear')
+    // 换了应用、Key 或模式时对话已经清掉了，确认框不留着
+    expect(blockOf(view.script, 'watch(generation, ')).toContain('confirmingClear.value = false')
+  })
+
+  it('存成场景：先检测明文，有就问，确认了才保存', () => {
+    const button = buttonOf(view.elements, '存成场景')
+    expect(handler(button, 'click')).toBe('startExport')
+    expect(bound(button, 'disabled')).toBe('running || !hasCalls')
+    const body = bodyOf(view.script, 'startExport')
+    expect(body).toContain('agentScenario(agent.value, new Date())')
+    expect(body).toContain('plaintextIn(scenario)')
+    expect(body).toContain(
+      'if (findings.length) exporting.value = { scenario, findings, dropped: made.dropped }',
+    )
+    expect(handler(buttonOf(view.elements, '仍然导出'), 'click')).toBe(
+      'exporting && saveScenario(exporting.scenario, exporting.dropped)',
+    )
+    expect(view.script.match(/saveFile\(/g)).toHaveLength(1)
+    const modal = must(
+      view.elements.find((el) => el.tag === 'UModal' && bound(el, 'open') === 'exporting !== null'),
+      '明文的确认框',
+    )
+    const finding = withFor(walk(modal), 'finding in exporting?.findings ?? []')
+    expect(shownIn(finding)).toEqual(['finding.step', 'finding.label', 'finding.what'])
+  })
+
+  it('超过场景的步数上限时说明少了几个，能关掉；真的存了才说，取消的话什么都没存', () => {
+    const body = bodyOf(view.script, 'startExport')
+    expect(body).toContain('made.dropped')
+    expect(body).not.toContain('droppedNote')
+    // 这里的写入只有存不成的那一句
+    expect(body.match(/exportNote\.value =/g)).toHaveLength(1)
+    expect(body).toContain('exportNote.value = `存不成场景')
+    const save = bodyOf(view.script, 'saveScenario')
+    expect(save.indexOf('exportNote.value = droppedNote(dropped)')).toBeGreaterThan(
+      save.indexOf('saveFile('),
+    )
+    const alert = alertWith('exportNote')
+    expect(bound(alert, 'title')).toBe('exportNote')
+    expect(handler(alert, 'update:open')).toBe('(v) => !v && (exportNote = null)')
+  })
+
+  it('用不用得了每次都重新读：从实例设置配好模型回来时不能还显示没配', () => {
+    expect(blockOf(view.script, 'const info = ')).toContain('staleTime: 0')
+  })
+
+  it('重放分叉：第几步与原因都显示，能接受或清空；再发还是同样报错时禁止发送', () => {
+    // 内部错误的分叉不说再运行一次：这条消息可能已经留在历史
+    expect(view.script).toContain("divergenceNotice(agent.value.session, '可以接着发下一条')")
+    const alert = alertWith('diverged')
+    expect(bound(alert, 'title')).toBe('diverged.title')
+    expect(bound(alert, 'description')).toBe('diverged.description')
+    expect(bound(alert, 'actions')).toBe('divergedActions')
+    const actions = blockOf(view.script, 'const divergedActions = ')
+    expect(actions).toContain('onClick: acceptAgentDiverged')
+    expect(actions).toContain('onClick: requestClear')
+    // 运行期间不能动：第几步是按发出请求时的日志算的
+    expect(actions.match(/disabled: running\.value/g)).toHaveLength(2)
+    expect(blockOf(view.script, 'const canSend = ')).toContain(
+      '!blockingDivergence(agent.value.session)',
+    )
+    // 接受走调用台的同一条规则，运行期间不动
+    expect(benchAgent).toContain('session: acceptDivergence(session)')
+    expect(bodyOf(useBench, 'acceptAgentDiverged')).toContain('if (running.value) return')
+    expect(bodyOf(useBench, 'acceptAgentDiverged')).toContain('acceptAgentDivergence(agent.value)')
+    // 轨迹上去掉的那一步有标记
+    const call = withFor(exchange.elements, 'call in round.calls')
+    expect(textOf(withDirective(walk(call), 'else-if', 'call.trace?.removed'))).toContain(
+      '写入已去掉',
+    )
+  })
+
+  it('运行中做不了会动对话的事：写入放不进重放日志时提示并禁用', () => {
+    expect(view.script).toContain('runBlocker(agent.value.session, mode.value)')
+    expect(bound(alertWith('blocker'), 'title')).toBe('blocker')
+    expect(blockOf(view.script, 'const canSend = ')).toContain('!blocker.value')
+  })
+
+  it('用量与重放的情况都显示', () => {
+    expect(view.script).toContain('usageSummary(agent.value.usage)')
+    expect(view.script).toContain('sessionUsage(agent.value.session, mode.value)')
+    const shown = view.elements.filter((el) => el.tag === 'p').flatMap(shownIn)
+    expect(shown).toEqual(expect.arrayContaining(['usage', 'replayUsage']))
+  })
+
+  it('轨迹：每一轮有助手文字、折叠的思考过程、工具调用与用量', () => {
+    const list = must(
+      view.elements.find((el) => el.tag === 'BenchAgentExchange'),
+      '轨迹',
+    )
+    expect(directive(list, 'for')).toBe('exchange in agent.exchanges')
+    const round = withFor(exchange.elements, '(round, index) in exchange.rounds')
+    const nodes = walk(round)
+    const reasoning = withIf(nodes, 'round.reasoning')
+    expect(reasoning.tag).toBe('details')
+    // 折叠：不带 open
+    expect(reasoning.props?.some((p) => p.name === 'open')).toBe(false)
+    expect(shownIn(withIf(nodes, 'round.text'))).toEqual(['round.text'])
+    expect(textOf(withDirective(nodes, 'else-if', '!round.calls.length'))).toContain(
+      '模型没有返回文字',
+    )
+    // 拒绝回答时显示原因，不说没有返回文字
+    const refusal = withDirective(nodes, 'else-if', 'round.refusal')
+    expect(textOf(refusal)).toContain('模型拒绝了')
+    expect(shownIn(refusal)).toEqual(['round.refusal'])
+    const siblings = round.children!.filter((n) => n.type === ELEMENT)
+    expect(siblings.indexOf(refusal)).toBeGreaterThan(siblings.indexOf(withIf(nodes, 'round.text')))
+    expect(siblings.indexOf(refusal)).toBeLessThan(
+      siblings.indexOf(withDirective(nodes, 'else-if', '!round.calls.length')),
+    )
+    expect(shownIn(round)).toContain('roundMeta(round)')
+  })
+
+  it('工具调用：名字、参数与结果，结果用 BenchStepView 的显示规则', () => {
+    const call = withFor(exchange.elements, 'call in round.calls')
+    const nodes = walk(call)
+    expect(shownIn(call).join()).toContain('call.name')
+    expect(shownIn(call)).toContain('argumentsText(call)')
+    const step = withIf(nodes, 'call.trace')
+    expect(step.tag).toBe('BenchStepView')
+    expect(bound(step, 'step')).toBe('call.trace.step')
+    expect(bound(step, 'mode')).toBe('mode')
+    expect(step.props?.find((p) => p.name === 'view')?.value?.content).toBe('call')
+    expect(bound(step, 'open')).toBe('callOpen(call.trace.step)')
+    // 没有执行：说明原因；还在执行：说在执行
+    expect(shownIn(withDirective(nodes, 'else-if', 'call.reply'))).toEqual(['call.reply'])
+    expect(textOf(nodes.find((n) => n.props?.some((p) => p.name === 'else'))!)).toContain('执行中')
+  })
+
+  it('生命周期事件与 turn.end 也是同样的显示规则；turn.end 没发的原因写在轨迹上', () => {
+    const lifecycle = withFor(exchange.elements, 'trace in exchange.lifecycle')
+    expect(lifecycle.tag).toBe('BenchStepView')
+    expect(bound(lifecycle, 'step')).toBe('trace.step')
+    const turnEnd = withIf(exchange.elements, 'exchange.turnEnd')
+    expect(bound(withTag(walk(turnEnd), 'BenchStepView'), 'step')).toBe('exchange.turnEnd.step')
+    expect(shownIn(withIf(exchange.elements, 'exchange.turnEndNote'))).toEqual([
+      'exchange.turnEndNote',
+    ])
+  })
+
+  it('运行标记：真实模式下显示在轨迹上，到活动里对得上', () => {
+    const marks = exchange.elements.flatMap(shownIn).join()
+    expect(marks).toContain('exchange.lifecycle[0]?.run')
+    expect(marks).toContain('roundRun(round)')
+    expect(marks).toContain('exchange.turnEnd.run')
+    expect(benchAgentExchange.match(/mode === 'real'/g)).toHaveLength(3)
+  })
+
+  it('结束时的提示与没进历史的说明', () => {
+    const alert = withIf(exchange.elements, 'exchange.notice')
+    expect(alert.tag).toBe('UAlert')
+    expect(bound(alert, 'title')).toBe('exchange.notice')
+    expect(bound(alert, 'color')).toBe('noticeColor(exchange.end)')
+    expect(textOf(withIf(exchange.elements, 'exchange.end && !exchange.inHistory'))).toContain(
+      '没有进历史',
+    )
+    expect(shownIn(withIf(exchange.elements, 'exchange.phase'))).toEqual([
+      'agentPhaseLabels[exchange.phase]',
+    ])
+  })
+
+  it('召回块留不留在历史写清楚；这条消息没进历史时不说留在历史', () => {
+    const note = withDirective(exchange.elements, 'else-if', 'exchange.attached')
+    expect(shownIn(note)).toEqual(['attachedNote(loop)'])
+    const parent = must(
+      exchange.elements.find((el) => el.children?.includes(note)),
+      '说明的上一层',
+    )
+    const siblings = parent.children!.filter((n) => n.type === ELEMENT)
+    expect(directive(siblings[siblings.indexOf(note) - 1]!, 'if')).toBe(
+      'exchange.end && !exchange.inHistory',
+    )
   })
 })
 

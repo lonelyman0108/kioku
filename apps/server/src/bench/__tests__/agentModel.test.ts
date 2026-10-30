@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   AgentModelError,
+  endpointAddress,
   escapeControlChars,
   normalizeToolCalls,
   parseModelJson,
@@ -120,6 +121,7 @@ describe('工具调用', () => {
         name: 'kioku_list',
         arguments: null,
         parseError: '工具参数不是合法的 JSON',
+        rawArguments: args,
       })
     },
   )
@@ -140,6 +142,7 @@ describe('工具调用', () => {
       name: 'kioku_list',
       arguments: null,
       parseError: '工具参数不是 JSON 对象',
+      rawArguments: typeof args === 'string' ? args : JSON.stringify(args),
     })
   })
 
@@ -227,6 +230,34 @@ describe('规范化工具调用', () => {
   })
 })
 
+describe('接口的地址', () => {
+  it.each([
+    ['https://api.example.com/v1', 'https://api.example.com/v1'],
+    ['http://127.0.0.1:18920/v1', 'http://127.0.0.1:18920/v1'],
+    ['http://[::1]:8080/v1', 'http://[::1]:8080/v1'],
+    ['https://gateway.example.com/openai/v1', 'https://gateway.example.com/openai/v1'],
+    // 不带账号密码、查询与片段
+    [
+      'https://user:hunter2@model.example.com:8443/openai/v1?token=abc#x',
+      'https://model.example.com:8443/openai/v1',
+    ],
+    // 结尾的斜杠不算：请求时也去掉，不是另一个接口
+    ['https://api.example.com/v1/', 'https://api.example.com/v1'],
+    ['https://api.example.com/', 'https://api.example.com'],
+    ['https://api.example.com', 'https://api.example.com'],
+    // 默认端口 URL 不留，也不是另一个接口
+    ['https://api.example.com:443/v1', 'https://api.example.com/v1'],
+  ])('%s：%s', (baseUrl, address) => {
+    expect(endpointAddress(baseUrl)).toBe(address)
+  })
+
+  it('协议或路径变了就是另一个地址：内容可能明文发，或者发给另一家', () => {
+    const address = endpointAddress('https://gateway.example.com/openai/v1')
+    expect(endpointAddress('http://gateway.example.com/openai/v1')).not.toBe(address)
+    expect(endpointAddress('https://gateway.example.com/anthropic/v1')).not.toBe(address)
+  })
+})
+
 describe('工具定义', () => {
   it('只去掉顶层的 $schema，别的字段不动，没有说明的工具不带 description', () => {
     const inputSchema = {
@@ -301,7 +332,7 @@ describe('请求', () => {
       content: null,
       reasoning_content: '想一想',
       future_field: { a: [1] },
-      tool_calls: [{ id: 'c', type: 'function', function: { name: 'x', arguments: '' } }],
+      tool_calls: [{ id: 'c', type: 'function', function: { name: 'x', arguments: '{}' } }],
     }
     const { fetchImpl } = stubFetch(
       () =>
@@ -327,9 +358,9 @@ describe('请求', () => {
       reasoning_content: '想一想',
       future_field: { a: [1] },
       tool_calls: [
-        { id: 'same', type: 'function', function: { name: 'x', arguments: '' } },
+        { id: 'same', type: 'function', function: { name: 'x', arguments: '{}' } },
         { id: 'same', type: 'function', function: { name: 'y', arguments: '{"a":1}' } },
-        { type: 'function', function: { name: 'z', arguments: '{bad' }, extra: true },
+        { type: 'function', function: { name: 'z', arguments: '{"b":2}' }, extra: true },
         { id: 7, type: 'function', function: { name: 'w', arguments: '{}' } },
       ],
     }
@@ -343,7 +374,7 @@ describe('请求', () => {
     expect(result.toolCalls).toEqual([
       { id: 'same', name: 'x', arguments: {}, parseError: null },
       { id: ids[1], name: 'y', arguments: { a: 1 }, parseError: null },
-      { id: ids[2], name: 'z', arguments: null, parseError: '工具参数不是合法的 JSON' },
+      { id: ids[2], name: 'z', arguments: { b: 2 }, parseError: null },
       { id: ids[3], name: 'w', arguments: {}, parseError: null },
     ])
     expect(result.message).toEqual({
@@ -364,12 +395,13 @@ describe('请求', () => {
     const parsedFn = { id: 'c', name: 'x', arguments: { a: 1 }, parseError: null }
     const noArguments = { id: 'c', name: 'x', arguments: {}, parseError: null }
     const noName = { id: 'c', name: '', arguments: null, parseError: '工具调用没有名字' }
-    const notObject = {
+    const notObject = (rawArguments: string) => ({
       id: 'c',
       name: 'x',
       arguments: null,
       parseError: '工具参数不是 JSON 对象',
-    }
+      rawArguments,
+    })
     const placeholder = { name: 'unknown_tool', arguments: '{}' }
 
     it.each([
@@ -397,14 +429,14 @@ describe('请求', () => {
       [
         'arguments 是数组',
         { type: 'function', function: { name: 'x', arguments: [1] } },
-        { type: 'function', function: { name: 'x', arguments: '[1]' } },
-        notObject,
+        { type: 'function', function: { name: 'x', arguments: '{}' } },
+        notObject('[1]'),
       ],
       [
         'arguments 是数字',
         { type: 'function', function: { name: 'x', arguments: 3 } },
-        { type: 'function', function: { name: 'x', arguments: '3' } },
-        notObject,
+        { type: 'function', function: { name: 'x', arguments: '{}' } },
+        notObject('3'),
       ],
       ['function 缺失', { type: 'function' }, { type: 'function', function: placeholder }, noName],
       [
@@ -429,19 +461,19 @@ describe('请求', () => {
         '名字缺失，参数留着',
         { type: 'function', function: { arguments: '{"a":1}' } },
         { type: 'function', function: { name: 'unknown_tool', arguments: '{"a":1}' } },
-        noName,
+        { ...noName, rawArguments: '{"a":1}' },
       ],
       [
         '名字是空串',
         { type: 'function', function: { name: '', arguments: '{}' } },
         { type: 'function', function: placeholder },
-        noName,
+        { ...noName, rawArguments: '{}' },
       ],
       [
         '名字不是字符串',
         { type: 'function', function: { name: 42, arguments: '{}' } },
         { type: 'function', function: placeholder },
-        noName,
+        { ...noName, rawArguments: '{}' },
       ],
       ['只有 id', {}, { type: 'function', function: placeholder }, noName],
       [
@@ -457,13 +489,34 @@ describe('请求', () => {
     })
 
     it.each([
+      ['太长', 'x'.repeat(65)],
+      ['有空格', 'my tool'],
+      ['有点', 'my.tool'],
+      ['是中文', '读记忆'],
+      ['结尾有换行', 'kioku_get\n'],
+    ])('名字%s：放回历史的是占位名，解析的结果还是原来的名字', async (_, name) => {
+      const result = await turnWith({
+        type: 'function',
+        function: { name, arguments: '{"a":1}' },
+      })
+      expect(result.sent).toEqual({
+        id: 'c',
+        type: 'function',
+        function: { name: 'unknown_tool', arguments: '{"a":1}' },
+      })
+      expect(result.parsed).toEqual({ id: 'c', name, arguments: { a: 1 }, parseError: null })
+    })
+
+    it.each([
       ['都齐全', { type: 'function', function: fn }],
-      ['arguments 是空串', { type: 'function', function: { name: 'x', arguments: '' } }],
-      [
-        'arguments 不是合法的 JSON',
-        { type: 'function', function: { name: 'x', arguments: '{bad' } },
-      ],
       ['有 function 的别的 type', { type: 'builtin_function', function: fn }],
+      [
+        '名字正好 64 个字符，有大小写、数字、下划线和连字符',
+        {
+          type: 'function',
+          function: { name: `Ab-_9${'x'.repeat(59)}`, arguments: '{}' },
+        },
+      ],
       [
         '多余的字段',
         {
@@ -475,6 +528,42 @@ describe('请求', () => {
       ],
     ])('%s：原样', async (_, call) => {
       expect((await turnWith(call)).sent).toEqual({ id: 'c', ...call })
+    })
+
+    // 放回去的 arguments 不合法时，校验 JSON 的上游之后每一轮都拒绝
+    const notJson = (rawArguments: string) => ({
+      id: 'c',
+      name: 'x',
+      arguments: null,
+      parseError: '工具参数不是合法的 JSON',
+      rawArguments,
+    })
+    it.each([
+      ['严格解析得过：写法也不动', ' { "a" : 1 }\n', ' { "a" : 1 }\n', parsedFn],
+      ['严格解析得过的非对象：换成 {}，解析的结果照旧报错', '[1]', '{}', notObject('[1]')],
+      ['字符串也不是对象：换成 {}', '"x"', '{}', notObject('"x"')],
+      ['字符串 null：换成 {}', 'null', '{}', noArguments],
+      [
+        '字符串里的换行要靠容忍才解析得过：写成规范的 JSON',
+        '{"a":"第一行\n第二行\t尾"}',
+        '{"a":"第一行\\n第二行\\t尾"}',
+        { id: 'c', name: 'x', arguments: { a: '第一行\n第二行\t尾' }, parseError: null },
+      ],
+      ['解析不了：换成 {}，原文只留给界面显示', '{bad', '{}', notJson('{bad')],
+      ['缺了结尾：换成 {}', '{"a":1', '{}', notJson('{"a":1')],
+      ['空串：解析不了，换成 {}', '', '{}', noArguments],
+      ['只有空白：解析不了，换成 {}', ' \n\t', '{}', noArguments],
+    ])('arguments：%s', async (_, raw, sent, parsed) => {
+      const result = await turnWith({ type: 'function', function: { name: 'x', arguments: raw } })
+      expect(result.sent).toEqual({
+        id: 'c',
+        type: 'function',
+        function: { name: 'x', arguments: sent },
+      })
+      expect(result.parsed).toEqual(parsed)
+      expect(() =>
+        JSON.parse((result.sent as { function: { arguments: string } }).function.arguments),
+      ).not.toThrow()
     })
   })
 

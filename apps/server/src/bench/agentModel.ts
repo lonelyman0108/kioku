@@ -35,6 +35,13 @@ export interface AgentTurnInput {
   timeoutMs?: number
 }
 
+// 内容发给哪个接口，开始之前的提示要写明。协议与路径都算：https 换成 http 是明文发，同一个网关换一段路径可能是另一家上游。
+// 不带账号密码、查询与片段，那里可能有凭据。结尾的斜杠不算，请求时也去掉
+export function endpointAddress(baseUrl: string): string {
+  const { origin, pathname } = new URL(baseUrl)
+  return `${origin}${pathname}`.replace(/\/+$/, '')
+}
+
 // 工具定义原样转发，只去掉没有语义的 $schema。别的字段等上游真的拒绝时才在这里转换，调用台与 MCP 不动
 export function toolDefinitions(tools: readonly BenchTool[]): AgentToolDefinition[] {
   return tools.map(({ name, description, inputSchema }) => {
@@ -77,7 +84,10 @@ export function parseModelJson(text: string): unknown {
   }
 }
 
-type ParsedArguments = Pick<BenchAgentToolCall, 'arguments' | 'parseError'>
+type ParsedArguments = Pick<BenchAgentToolCall, 'arguments' | 'parseError' | 'rawArguments'>
+
+// 解析不了时给界面显示的原文：放回历史的已经换掉了。缺失时没有原文可显示
+const rawText = (raw: unknown) => (typeof raw === 'string' ? raw : JSON.stringify(raw))
 
 function parseArguments(raw: unknown): ParsedArguments {
   let parsed = raw
@@ -86,13 +96,13 @@ function parseArguments(raw: unknown): ParsedArguments {
       // 和响应一样容忍控制字符：多行正文的参数里常有没转义的换行，这里报错的话模型只能白白重试
       parsed = raw.trim() ? parseModelJson(raw) : null
     } catch {
-      return { arguments: null, parseError: '工具参数不是合法的 JSON' }
+      return { arguments: null, parseError: '工具参数不是合法的 JSON', rawArguments: raw }
     }
   }
   // 没有参数的工具，有的模型不给，有的给空串或 null，有的模型和代理把 null 编码成字符串
   if (parsed === undefined || parsed === null) return { arguments: {}, parseError: null }
   if (typeof parsed !== 'object' || Array.isArray(parsed)) {
-    return { arguments: null, parseError: '工具参数不是 JSON 对象' }
+    return { arguments: null, parseError: '工具参数不是 JSON 对象', rawArguments: rawText(raw) }
   }
   return { arguments: parsed as Record<string, unknown>, parseError: null }
 }
@@ -118,21 +128,41 @@ export function normalizeToolCalls(value: unknown): NormalizedToolCall[] {
   })
 }
 
-// 工具调用放回历史时的写法。严格的上游要求每个调用都有 type、function.name 和字符串的 function.arguments，
-// 缺了下一轮就 400，对话卡死。所以 type 缺失的补 function；arguments 不是字符串的补成字符串（缺失或 null 是 {}，
-// 别的写成 JSON）；没有 function 或名字的用占位名，这种调用模型拿到的是工具错误（见 parseToolCalls）。
+// 放回历史的 arguments。校验 JSON 的上游见到不合法的就拒绝，这条消息之后每一轮都要重发，对话就卡死了：解析失败回给模型重试
+// 反而再也请求不了。所以严格解析得过的对象原样；靠容忍控制字符才解析得过的对象写成规范的 JSON；解析不了的（包括空串）与
+// 不是对象的（[1]、"x"、null：要求参数是对象的上游一样拒绝）换成 {}，模型从工具错误里知道它的参数坏了（见 parseArguments），
+// 原文不再重发。不是字符串的按同样的规则写成 JSON
+function historyArguments(args: unknown): string {
+  if (typeof args !== 'string') return isRecord(args) ? JSON.stringify(args) : '{}'
+  try {
+    return isRecord(JSON.parse(args)) ? args : '{}'
+  } catch {
+    try {
+      const tolerated: unknown = parseModelJson(args)
+      return isRecord(tolerated) ? JSON.stringify(tolerated) : '{}'
+    } catch {
+      return '{}'
+    }
+  }
+}
+
+// OpenAI 对工具名的要求，严格的上游照它校验
+const TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/
+
+// 工具调用放回历史时的写法。严格的上游要求每个调用都有 type、合规的 function.name 和字符串的 function.arguments，
+// 不合规的下一轮就 400，对话卡死。所以 type 缺失的补 function；arguments 写成合法的 JSON（见 historyArguments）；
+// 没有 function、没有名字或名字不合规（太长、有空格或点）的用占位名，这种调用模型拿到的是工具错误，toolCalls 里还是原来的名字。
 // 没有 function 的 type 也写成 function：custom 这类 type 配上占位的 function 对不上。别的字段原样
 function historyToolCall(call: NormalizedToolCall): NormalizedToolCall {
   const fn = isRecord(call.function) ? call.function : null
   const name = fn?.name
-  const args = fn?.arguments
   return {
     ...call,
     type: fn && typeof call.type === 'string' && call.type ? call.type : 'function',
     function: {
       ...fn,
-      name: typeof name === 'string' && name ? name : 'unknown_tool',
-      arguments: typeof args === 'string' ? args : JSON.stringify(args ?? {}),
+      name: typeof name === 'string' && TOOL_NAME.test(name) ? name : 'unknown_tool',
+      arguments: historyArguments(fn?.arguments),
     },
   }
 }
@@ -148,7 +178,11 @@ export function parseToolCalls(calls: readonly NormalizedToolCall[]): BenchAgent
       name,
       ...(name
         ? parseArguments(fn?.arguments)
-        : { arguments: null, parseError: '工具调用没有名字' }),
+        : {
+            arguments: null,
+            parseError: '工具调用没有名字',
+            rawArguments: rawText(fn?.arguments),
+          }),
     }
   })
 }

@@ -21,6 +21,7 @@ import { catalogFailure, divergenceNotice, runBlocker, sessionUsage } from '../b
 import { useBench } from '../composables/useBench'
 import { icons } from '../icons'
 import { scopesSummary } from '../labels'
+import BenchAgentBusy from './BenchAgentBusy.vue'
 import BenchContextForm from './BenchContextForm.vue'
 import BenchField from './BenchField.vue'
 import BenchStepView from './BenchStepView.vue'
@@ -35,6 +36,7 @@ const {
   real,
   mode,
   running,
+  callRunning,
   generation,
   sessionContext,
   session,
@@ -312,14 +314,15 @@ function onRunClick() {
           <UAlert v-if="unavailable" color="warning" variant="subtle" :title="unavailable" />
           <UAlert v-if="formError" color="warning" variant="subtle" :title="formError" />
           <UAlert v-if="failure" color="error" variant="subtle" :title="failure" />
+          <BenchAgentBusy />
 
           <div class="flex flex-wrap items-center gap-2">
             <UButton
               :type="real ? 'button' : 'submit'"
               :color="real ? 'error' : 'primary'"
               :icon="icons.preview"
-              :loading="running"
-              :disabled="Boolean(unavailable || blocker)"
+              :loading="callRunning"
+              :disabled="Boolean(unavailable || blocker || running)"
               @click="onRunClick"
             >
               {{ real ? '真实执行' : '运行' }}

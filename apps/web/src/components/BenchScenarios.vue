@@ -23,6 +23,7 @@ import { useBench } from '../composables/useBench'
 import { saveFile } from '../download'
 import { icons } from '../icons'
 import { scopesSummary } from '../labels'
+import BenchAgentBusy from './BenchAgentBusy.vue'
 import BenchStepView from './BenchStepView.vue'
 
 // 场景：一串步骤。选预设或导入 JSON，在文本框里编辑，运行，看断言结果。不存库，只在内存里：
@@ -33,6 +34,7 @@ const {
   real,
   mode,
   running,
+  scenarioRunning,
   generation,
   execute,
   scenarioFailure: failure,
@@ -276,11 +278,12 @@ function startRun() {
       </template>
     </UAlert>
     <UAlert v-if="failure" color="error" variant="subtle" :title="failure" />
+    <BenchAgentBusy />
     <UButton
       :icon="icons.preview"
       :color="real ? 'error' : 'primary'"
-      :loading="running"
-      :disabled="!text.trim()"
+      :loading="scenarioRunning"
+      :disabled="!text.trim() || running"
       @click="startRun"
     >
       {{ real ? '真实执行这个场景' : '运行' }}

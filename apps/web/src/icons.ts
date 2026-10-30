@@ -78,4 +78,7 @@ export const icons = {
   json: 'i-lucide-braces',
   form: 'i-lucide-text-cursor-input',
   clear: 'i-lucide-eraser',
+  // 模型对话：发送与停止
+  send: 'i-lucide-send',
+  stop: 'i-lucide-circle-stop',
 } as const

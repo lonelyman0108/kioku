@@ -16,7 +16,12 @@ import { bodyLimit } from 'hono/body-limit'
 import { keyToSimulate } from '../access/simulate'
 import { isInstanceAdmin } from '../auth/middleware'
 import { agentGetsTools, agentLoopFor } from '../bench/agentLoop'
-import { AgentModelError, requestAgentTurn, toolDefinitions } from '../bench/agentModel'
+import {
+  AgentModelError,
+  endpointAddress,
+  requestAgentTurn,
+  toolDefinitions,
+} from '../bench/agentModel'
 import { benchTools, runBench } from '../bench/inProcess'
 import { BENCH_SCENARIOS } from '../bench/scenarios'
 import { extractionSettingsView, loadExtractionConfig } from '../extraction/settings'
@@ -78,7 +83,7 @@ const agentInfoRoute = createRoute({
   path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent',
   tags: ['bench'],
   summary:
-    '测试台：模型代理用不用得了（不是实例管理员也返回原因）、默认模型、这个运行时的循环与给不给工具（只给应用主人）',
+    '测试台：模型代理用不用得了（不是实例管理员也返回原因）、默认模型、接口的地址、这个运行时的循环与给不给工具（只给应用主人）',
   request: { params: KeyParams },
   responses: { 200: jsonResponse('模型代理的情况', BenchAgentInfo), ...errors },
 })
@@ -133,16 +138,28 @@ export function benchRoutes(deps: Deps) {
       // 先判身份、不查设置：模型配没配、配的什么都是实例设置，不给实例管理员之外的人看
       if (!(await isInstanceAdmin(deps.db, accountId))) {
         return c.json(
-          { available: false, reason: 'notAdmin' as const, defaultModel: null, ...runtime },
+          {
+            available: false,
+            reason: 'notAdmin' as const,
+            defaultModel: null,
+            endpoint: null,
+            ...runtime,
+          },
           200,
         )
       }
       // 真的解一次，不只看设置在不在：Key 解不开时说能用，界面放开了之后每次请求都是 400
       const config = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
       if (!config.ok) {
-        const { model } = await extractionSettingsView(deps.db)
+        const { model, baseUrl } = await extractionSettingsView(deps.db)
         return c.json(
-          { available: false, reason: 'keyLocked' as const, defaultModel: model, ...runtime },
+          {
+            available: false,
+            reason: 'keyLocked' as const,
+            defaultModel: model,
+            endpoint: baseUrl && endpointAddress(baseUrl),
+            ...runtime,
+          },
           200,
         )
       }
@@ -151,6 +168,7 @@ export function benchRoutes(deps: Deps) {
           available: config.value !== null,
           reason: config.value ? null : ('noModel' as const),
           defaultModel: config.value?.model ?? null,
+          endpoint: config.value && endpointAddress(config.value.baseUrl),
           ...runtime,
         },
         200,

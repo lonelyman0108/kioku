@@ -66,10 +66,22 @@ export const REAL_MODE_CONSEQUENCES = [
   '写下的事件带「测试台」标记与你的账号，在活动和凭据的访问记录里看得到。',
 ] as const
 
-const NOT_API_FAILURE = '网络出错了，或者响应对不上'
+// 一次运行的结果。stale：运行期间换了应用、Key 或模式，结果作废（真实模式下记进 abandoned）；
+// 或者上一次还没结束，这次没有发出去。failed 的 retryable：再发一次可能就好了（见 runRetryable）
+export type RunOutcome =
+  | { kind: 'done'; result: BenchRunResult }
+  | { kind: 'failed'; message: string; retryable: boolean }
+  | { kind: 'stale' }
+
+export const NOT_API_FAILURE = '网络出错了，或者响应对不上'
 
 // 4xx 是写入之前就拒绝了（429 同时运行的回滚太多、413 请求体太大、403、404）
 const refusedBeforeWrite = (err: unknown) => err instanceof ApiError && err.status < 500
+
+// 运行请求失败后再发一次有没有用。400、403、404 是确定性的拒绝，再发还是一样；同时运行的回滚太多（429）等一下就好，
+// 5xx 与网络错误也可能是暂时的
+export const runRetryable = (err: unknown) =>
+  !(err instanceof ApiError && err.status < 500 && err.status !== 429)
 
 // 运行请求失败的说明。5xx 与网络错误不知道执行到了哪一步：回滚模式下都回滚了，真实模式下可能已经写了一部分
 export function runFailureMessage(err: unknown, mode: BenchMode): string {
@@ -115,27 +127,31 @@ export function abandonedRun(
 export interface ModeRecords {
   // 调用台时间线的条数
   timeline: number
-  // 回滚模式下保留的写入的步数
+  // 回滚模式下保留的写入的步数：调用台与模型对话各有一份，加起来算
   replay: number
   scenarioResult: boolean
   // 调用台或场景有运行失败的说明
   failed: boolean
+  // 模型对话的用户消息条数
+  agentMessages: number
 }
 
 // 从这个模式切走会清掉什么。什么都不会清时是 null，切回回滚就不用多问。
 // 真实模式下要说得更清楚：结果里的运行标记是活动里对应这些写入的线索，失败的说明可能写着已经执行了一部分
 export function modeSwitchLoss(from: BenchMode, records: ModeRecords): string | null {
-  const { timeline, replay, scenarioResult, failed } = records
+  const { timeline, replay, scenarioResult, failed, agentMessages } = records
   const items = [
     ...(timeline ? [`调用台的时间线（${timeline} 条）`] : []),
     ...(scenarioResult ? ['场景结果'] : []),
+    ...(agentMessages ? [`模型对话（${agentMessages} 条消息）`] : []),
     ...(failed ? ['运行失败的说明'] : []),
   ].join('、')
   if (!items) return null
   if (from === 'rollback') {
     return `这些记录会清掉：${items}。${replay ? '回滚模式下保留的写入不会带过去。' : ''}`
   }
-  const markers = timeline || scenarioResult ? '，以及运行标记（活动里靠它对应这些写入）' : ''
+  const markers =
+    timeline || scenarioResult || agentMessages ? '，以及运行标记（活动里靠它对应这些写入）' : ''
   return `这些记录会清掉：${items}${markers}。已经写下的不会撤回。`
 }
 
@@ -264,9 +280,10 @@ export function replayStepLabel(step: BenchReplayStep): string {
 }
 
 // 重放分叉的说明：第几步（从 1 算）、它的错误、怎么办。现在的数据和这次会话做这一步时不一样了才会报错，
-// 回滚模式本来就是对着当前数据演练，不算出错，由用户决定
+// 回滚模式本来就是对着当前数据演练，不算出错，由用户决定。retry 说内部错误时接着怎么来
 export function divergenceNotice(
   session: BenchSession,
+  retry = '可以再运行一次',
 ): { title: string; description: string } | null {
   const { diverged, replay } = session
   if (!diverged) return null
@@ -275,7 +292,7 @@ export function divergenceNotice(
   return {
     title: `重放的${which}报错，这次的调用没有执行`,
     description: diverged.internalError
-      ? `${diverged.text}。可能是暂时的，可以再运行一次；还是不行就清空，或者接受：去掉这一步，留下别的接着用。`
+      ? `${diverged.text}。可能是暂时的，${retry}；还是不行就清空，或者接受：去掉这一步，留下别的接着用。`
       : `${diverged.text}。现在的数据和这次会话做这一步时不一样了。可以清空，或者接受：去掉这一步，留下别的接着用，后面依赖它的步骤可能接着报错。`,
   }
 }

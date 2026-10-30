@@ -183,6 +183,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: false,
         reason: 'notAdmin',
         defaultModel: null,
+        endpoint: null,
         loop: 'hook',
         tools: true,
       }
@@ -272,28 +273,58 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: false,
         reason: 'noModel',
         defaultModel: null,
+        endpoint: null,
         loop: 'hook',
         tools: true,
       })
 
-      await startModel(() => '好')
+      const server = await startModel(() => '好')
       expect(BenchAgentInfo.parse(await (await getInfo()).json())).toEqual({
         available: true,
         reason: null,
         defaultModel: 'fake-model',
+        endpoint: server.url,
         loop: 'hook',
         tools: true,
       })
     })
 
+    it('接口的地址：协议、主机、端口与路径都在，不带账号密码、查询与片段；哪样变了都跟着变', async () => {
+      const save = (baseUrl: string) =>
+        saveExtractionConfig(database.db, masterKey, {
+          baseUrl,
+          model: 'fake-model',
+          apiKey: API_KEY,
+        })
+      const endpoint = async () => BenchAgentInfo.parse(await (await getInfo()).json()).endpoint
+
+      await save('https://user:hunter2@model.example.com:8443/openai/v1?token=abc#frag')
+      const res = await getInfo()
+      const text = await res.clone().text()
+      expect(BenchAgentInfo.parse(await res.json()).endpoint).toBe(
+        'https://model.example.com:8443/openai/v1',
+      )
+      for (const leaked of ['user', 'hunter2', 'token', 'abc', 'frag']) {
+        expect(text).not.toContain(leaked)
+      }
+
+      await save('http://model.example.com:8443/openai/v1')
+      expect(await endpoint()).toBe('http://model.example.com:8443/openai/v1')
+      await save('https://model.example.com:8443/anthropic/v1')
+      expect(await endpoint()).toBe('https://model.example.com:8443/anthropic/v1')
+      await save('https://other.example.com/v1')
+      expect(await endpoint()).toBe('https://other.example.com/v1')
+    })
+
     // Key 解不开时查情况如实报不可用：界面才不会放开之后每次请求都是 400
-    const keyLocked = {
+    const keyLocked = (server: FakeChatServer) => ({
       available: false,
       reason: 'keyLocked',
       defaultModel: 'fake-model',
+      endpoint: server.url,
       loop: 'hook',
       tools: true,
-    }
+    })
 
     it('Key 解不开（没配主密钥）：400 并说明，不请求模型；查情况给原因', async () => {
       const server = await startModel(() => '不该请求到这里')
@@ -303,7 +334,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(await errorOf(res)).toContain('KIOKU_MASTER_KEY')
       const info = await getInfo(ws.cookie, benchPath(), noKey)
       expect(info.status).toBe(200)
-      expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked)
+      expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked(server))
       expect(server.requests).toHaveLength(0)
     })
 
@@ -319,7 +350,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
         const info = await getInfo(ws.cookie, benchPath(), otherKey)
         expect(info.status).toBe(200)
-        expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked)
+        expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked(server))
       }
       // 记着主密钥的标识：还没解密就知道对不上
       await expectLocked()
@@ -413,6 +444,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: true,
         reason: null,
         defaultModel: 'fake-model',
+        endpoint: server.url,
         loop,
         tools,
       })
@@ -464,10 +496,28 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         { id: 'empty', name: 'kioku_boot', arguments: {}, parseError: null },
         { id: 'blank', name: 'kioku_boot', arguments: {}, parseError: null },
         { id: 'good', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
-        { id: 'bad', name: 'kioku_get', arguments: null, parseError: notJson },
-        { id: 'array', name: 'kioku_get', arguments: null, parseError: notObject },
+        {
+          id: 'bad',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: notJson,
+          rawArguments: '{"uri":',
+        },
+        {
+          id: 'array',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: notObject,
+          rawArguments: '[1]',
+        },
         { id: 'null', name: 'kioku_get', arguments: {}, parseError: null },
-        { id: 'text', name: 'kioku_get', arguments: null, parseError: notObject },
+        {
+          id: 'text',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: notObject,
+          rawArguments: '"core://agent"',
+        },
       ])
     })
 
@@ -517,12 +567,26 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(toolCalls).toEqual([
         { id: 'space', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
         { id: 'inner', name: 'kioku_get', arguments: { uri: 'core\n//agent' }, parseError: null },
-        { id: 'broken', name: 'kioku_get', arguments: null, parseError: '工具参数不是合法的 JSON' },
+        {
+          id: 'broken',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: '工具参数不是合法的 JSON',
+          rawArguments: '{"uri":"core\n//agent',
+        },
       ])
     })
 
-    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，type 是 function，function 有非空的名字和字符串的
-    // 参数，后面按顺序跟齐对应的 tool 消息。不合规就 400
+    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，type 是 function，function 的名字合 OpenAI 的要求，
+    // 参数是字符串、内容是合法的 JSON，后面按顺序跟齐对应的 tool 消息。不合规就 400
+    const isJson = (text: unknown) => {
+      try {
+        JSON.parse(text as string)
+        return true
+      } catch {
+        return false
+      }
+    }
     const refusal = (messages: FakeChatMessage[]) => {
       for (const [i, message] of messages.entries()) {
         if (!('tool_calls' in message)) continue
@@ -537,10 +601,13 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         if (new Set(ids).size !== ids.length) return 'id 重复'
         if (calls.some((call) => call.type !== 'function')) return 'type 不合法'
         const names = calls.map((call) => call.function?.name)
-        if (names.some((name) => typeof name !== 'string' || !name)) return '名字不合法'
+        if (names.some((name) => typeof name !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(name))) {
+          return '名字不合法'
+        }
         if (calls.some((call) => typeof call.function?.arguments !== 'string')) {
           return '参数不是字符串'
         }
+        if (calls.some((call) => !isJson(call.function?.arguments))) return '参数不是合法的 JSON'
         const answered = messages.slice(i + 1, i + 1 + ids.length).map((m) => m.tool_call_id)
         if (JSON.stringify(answered) !== JSON.stringify(ids)) return 'tool_call_id 对不上'
       }
@@ -658,9 +725,88 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         },
         { id: 'no-function', ...noName },
         { id: 'null-function', ...noName },
-        { id: 'no-name', ...noName },
+        { id: 'no-name', ...noName, rawArguments: '{"a":1}' },
         { id: 'other-type', ...noName },
         { id: 'bare', ...noName },
+      ])
+    })
+
+    it('工具名不合规（太长、有空格或点）：放回历史的是占位名，下一轮严格的上游也接受，toolCalls 还是原来的名字', async () => {
+      const long = 'x'.repeat(65)
+      const calls = [
+        toolCall('long', long),
+        toolCall('space', 'my tool'),
+        toolCall('dot', 'my.tool'),
+        toolCall('good', 'kioku_boot'),
+      ]
+      // 前提：这些名字原样放回去，严格的上游不收
+      for (const call of calls.slice(0, 3)) {
+        expect(
+          refusal([
+            { role: 'assistant', content: null, tool_calls: [call] },
+            toolMessage(call.id, '结果'),
+          ]),
+        ).toBe('名字不合法')
+      }
+
+      const server = await strictModel(() => ({ content: null, tool_calls: calls }))
+      const first = await turn({ messages: [USER] })
+      expect(first.toolCalls.map((c) => c.name)).toEqual([long, 'my tool', 'my.tool', 'kioku_boot'])
+
+      const history = [USER, first.message, ...calls.map((c) => toolMessage(c.id, '结果'))]
+      const second = await turn({ messages: history })
+      expect(second.message.content).toBe('调完了')
+      const sent = server.requests[1]![1]!.tool_calls as { function: { name: string } }[]
+      expect(sent.map((c) => c.function.name)).toEqual([
+        'unknown_tool',
+        'unknown_tool',
+        'unknown_tool',
+        'kioku_boot',
+      ])
+    })
+
+    it('工具参数解析失败或靠容忍才解析得过：原文不再重发，下一轮校验 JSON 的上游也接受', async () => {
+      const raw = [
+        ['broken', '{"uri":'],
+        ['tolerated', '{"uri":"core\n//agent"}'],
+        ['empty', ''],
+        ['blank', ' \n'],
+        ['strict', ' {"uri": "core://agent"} '],
+      ] as const
+      const calls = raw.map(([id, args]) => toolCall(id, 'kioku_get', args))
+      // 前提：这些参数原样放回去，校验 JSON 的上游不收（严格解析得过的那个除外）
+      for (const call of calls.filter((c) => c.id !== 'strict')) {
+        expect(
+          refusal([
+            { role: 'assistant', content: null, tool_calls: [call] },
+            toolMessage(call.id, '结果'),
+          ]),
+        ).toBe('参数不是合法的 JSON')
+      }
+
+      const server = await strictModel(() => ({ content: null, tool_calls: calls }))
+      const first = await turn({ messages: [USER] })
+      expect(first.toolCalls.map((c) => [c.id, c.arguments, c.parseError])).toEqual([
+        ['broken', null, '工具参数不是合法的 JSON'],
+        ['tolerated', { uri: 'core\n//agent' }, null],
+        ['empty', {}, null],
+        ['blank', {}, null],
+        ['strict', { uri: 'core://agent' }, null],
+      ])
+      // 界面还看得到模型写了什么
+      expect(first.toolCalls[0]!.rawArguments).toBe('{"uri":')
+
+      const history = [USER, first.message, ...raw.map(([id]) => toolMessage(id, '结果'))]
+      const second = await turn({ messages: history })
+      expect(second.message.content).toBe('调完了')
+      expect(server.requests[1]).toEqual(history)
+      const sent = server.requests[1]![1]!.tool_calls as { function: { arguments: string } }[]
+      expect(sent.map((call) => call.function.arguments)).toEqual([
+        '{}',
+        '{"uri":"core\\n//agent"}',
+        '{}',
+        '{}',
+        ' {"uri": "core://agent"} ',
       ])
     })
 
@@ -877,6 +1023,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       ]) {
         expect((await postTurn(body)).status, JSON.stringify(body)).toBe(400)
       }
+      const longName = await postTurn({ messages: [USER], model: 'x'.repeat(129) })
+      expect(longName.status).toBe(400)
+      expect(await errorOf(longName)).toContain('模型名太长')
       expect(server.requests).toHaveLength(0)
     })
 
