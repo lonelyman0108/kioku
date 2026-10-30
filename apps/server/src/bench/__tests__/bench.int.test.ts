@@ -32,7 +32,7 @@ import type { Jobs } from '../../jobs/queue'
 import { memoryServiceForKey } from '../../memory/context'
 import { MemoryService } from '../../memory/service'
 import { keyToSimulate } from '../../access/simulate'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { openTestDatabase, resetDatabase, tableDigests, testDatabaseUrl } from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { changeTracker } from '../changes'
@@ -147,24 +147,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     plainKey = created.key
   })
 
-  // 所有表的内容：回滚之后要和之前逐行相同
-  async function fingerprint(): Promise<Record<string, string>> {
-    const tables = await database.db.execute<{ name: string }>(sql`
-      select table_name as name from information_schema.tables
-      where table_schema = 'public' and table_type = 'BASE TABLE' order by 1`)
-    return withSpace(database.db, ws.spaceId, async (tx) => {
-      const out: Record<string, string> = {}
-      for (const { name } of tables) {
-        const [row] = await tx.execute<{ n: number; digest: string }>(
-          sql.raw(`select count(*)::int as n,
-            md5(coalesce(string_agg(t::text, '|' order by t::text), '')) as digest
-            from "${name}" t`),
-        )
-        out[name] = `${row!.n}:${row!.digest}`
-      }
-      return out
-    })
-  }
+  const fingerprint = () => tableDigests(database, ws.spaceId)
   const lastUsedAt = async () => {
     const [row] = await database.db
       .select({ at: apiKeys.lastUsedAt })

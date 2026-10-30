@@ -2,7 +2,7 @@ import { fileURLToPath } from 'node:url'
 
 import { sql } from 'drizzle-orm'
 
-import { connect, type Database } from '../db/client'
+import { connect, withSpace, type Database } from '../db/client'
 import { runMigrations } from '../db/migrate'
 import { settleRecallEvents } from '../recall/events'
 
@@ -23,4 +23,26 @@ export async function openTestDatabase(): Promise<Database> {
 export async function resetDatabase(database: Database): Promise<void> {
   await settleRecallEvents()
   await database.db.execute(sql`truncate spaces, accounts, login_attempts cascade`)
+}
+
+// 所有表的内容：回滚之后、不该写库的操作之后，要和之前逐行相同
+export async function tableDigests(
+  database: Database,
+  spaceId: string,
+): Promise<Record<string, string>> {
+  const tables = await database.db.execute<{ name: string }>(sql`
+    select table_name as name from information_schema.tables
+    where table_schema = 'public' and table_type = 'BASE TABLE' order by 1`)
+  return withSpace(database.db, spaceId, async (tx) => {
+    const out: Record<string, string> = {}
+    for (const { name } of tables) {
+      const [row] = await tx.execute<{ n: number; digest: string }>(
+        sql.raw(`select count(*)::int as n,
+          md5(coalesce(string_agg(t::text, '|' order by t::text), '')) as digest
+          from "${name}" t`),
+      )
+      out[name] = `${row!.n}:${row!.digest}`
+    }
+    return out
+  })
 }
