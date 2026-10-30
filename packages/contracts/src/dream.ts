@@ -102,12 +102,15 @@ export const DREAM_TRIGGERS = ['scheduled', 'manual'] as const
 export const DreamTrigger = z.enum(DREAM_TRIGGERS)
 export type DreamTrigger = z.infer<typeof DreamTrigger>
 
-// 没整理的原因：没配抽取模型、本月的抽取预算用完了、上次以来没有新增或改动的内容
-export const DREAM_SKIP_REASONS = ['no-model', 'budget', 'idle'] as const
+// 没整理的原因：没配抽取模型、本月的抽取预算用完了、上次以来没有新增或改动的内容；
+// opted-out：请求模型期间这一组的主人关掉了 Dream 整理画像层与私人层，这一次的结果没有存（只有本人看得到）
+export const DREAM_SKIP_REASONS = ['no-model', 'budget', 'idle', 'opted-out'] as const
 export const DreamSkipReason = z.enum(DREAM_SKIP_REASONS)
 export type DreamSkipReason = z.infer<typeof DreamSkipReason>
 
-// 一次整理里的一项：整理了一个范围，或者整次没走到范围（scope 为 null，带上没整理的原因）
+// 一次整理里的一项：整理了一个范围（预算用完、主人关掉了时带上没整理的原因）；scope 为 null 的是共享部分的汇总，
+// 每次一条：整理过了（more 表示还有没看完的）、没整理（带上原因，整次没走到范围时也是这一条）或者出错了。
+// 共享的范围先整理、汇总在它们之后写下，各人的画像层与私人层在汇总之后
 export const DreamRunEntry = z.object({
   scope: DreamScope.nullable(),
   model: z.string().nullable(),
@@ -139,12 +142,20 @@ export type DreamRunInfo = z.infer<typeof DreamRunInfo>
 export const DreamRunList = z.object({ runs: z.array(DreamRunInfo) })
 export type DreamRunList = z.infer<typeof DreamRunList>
 
+// 成员自己在一个空间里的 Dream 设置，只有本人能看、能改。includePrivate：让不让 Dream 整理自己的画像层与私人层
+// （secret 本来就不读），默认整理。开着时这两层会发给实例配置的抽取模型；关掉之后只整理共享的内容，
+// 已经生成的建议留着，再打开时接着整理关掉期间新增与改动的
+export const DreamMemberSettings = z.object({ includePrivate: z.boolean() })
+export type DreamMemberSettings = z.infer<typeof DreamMemberSettings>
+
 // 「现在整理一次」排进后台任务后的编号：管理界面按它查这一次做得怎么样。
 // 这个空间已经有一次排着的整理时，给的是那一次的编号
 export const DreamQueued = z.object({ runId: z.uuid() })
 export type DreamQueued = z.infer<typeof DreamQueued>
 
-// 一次整理的状态：排着、正在整理、做完了。做完了的结果：整理过了、没整理（原因见 reason）、出错了
+// 一次整理的状态：排着、正在整理、做完了。做完了的结果：整理过了、没整理（原因见 reason）、出错了。
+// 共享部分的汇总写下就算做完，结果按汇总与查看者自己的画像层、私人层算：别的成员的整理了没有、出没出错、
+// 花了多久都不影响。查看者自己的画像层与私人层在汇总之后整理，结果可能晚一点才出现在运行记录里
 export const DreamRunStatus = z.object({
   state: z.enum(['queued', 'running', 'finished']),
   outcome: z.enum(['done', 'skipped', 'failed']).nullable(),

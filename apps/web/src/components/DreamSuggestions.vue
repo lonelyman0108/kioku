@@ -15,7 +15,9 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
   dreamScopeText,
+  dreamSettingsKey,
   runEntrySummary,
+  sharedSummaryText,
   runOutcome,
   suggestionKinds,
   triggerLabels,
@@ -43,6 +45,11 @@ const runsKey = computed(() => ['dream-runs', props.spaceId] as const)
 const runs = useQuery({
   queryKey: runsKey,
   queryFn: ({ queryKey: [, spaceId] }) => api.dreamRuns(spaceId),
+})
+// 自己的画像层与私人层整理不整理：在空间设置里改，这里说一声
+const mine = useQuery({
+  queryKey: computed(() => dreamSettingsKey(props.spaceId)),
+  queryFn: ({ queryKey: [, spaceId] }) => api.dreamSettings(spaceId),
 })
 
 // 正在改的合并正文与提炼草稿，按建议记下；没改的按建议原样执行。层为 default 时用默认的（自己的私人层）
@@ -222,10 +229,23 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
 <template>
   <div class="space-y-4">
     <div class="flex flex-wrap items-start gap-3">
-      <p class="min-w-0 flex-1 text-sm text-muted">
-        Dream
-        每天整理一次记忆，只提建议：合并重复的、把几条事实提炼成一个节点、指出可能过时的、对不可信的内容建议确认或删除。你执行之后才会改，写入的来源记为你；拒绝的同样的建议不再提。
-      </p>
+      <div class="min-w-0 flex-1 space-y-1 text-sm text-muted">
+        <p>
+          Dream
+          每天整理一次记忆，只提建议：合并重复的、把几条事实提炼成一个节点、指出可能过时的、对不可信的内容建议确认或删除。你执行之后才会改，写入的来源记为你；拒绝的同样的建议不再提。
+        </p>
+        <p v-if="mine.data.value">
+          {{
+            mine.data.value.includePrivate
+              ? '你的画像层与私人层（secret 除外）也会发给实例配置的抽取模型整理，'
+              : '你关掉了整理你的画像层与私人层，现在只整理共享的内容，'
+          }}<RouterLink
+            :to="{ name: 'space-settings', params: { spaceId } }"
+            class="text-primary hover:underline"
+            >在空间设置里{{ mine.data.value.includePrivate ? '可以关掉' : '可以打开' }}</RouterLink
+          >。
+        </p>
+      </div>
       <UButton
         v-if="canAct"
         :icon="icons.dream"
@@ -461,6 +481,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
         <h3 class="text-sm font-medium">最近的整理</h3>
         <p class="mt-1 text-xs text-muted">
           每次整理用抽取模型，用量计入空间的抽取预算；只看上次以来新增或改动的记忆，别的成员的画像与私人层不在这里列出。
+          共享的内容先整理、记一条汇总，各人的画像层与私人层在那之后，所以自己的那部分结果可能比整理的状态晚一点出现在这里。
         </p>
       </template>
       <UAlert
@@ -481,8 +502,9 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </p>
           <ul class="space-y-0.5">
             <li v-for="(part, i) in entry.entries" :key="i" class="text-xs text-muted">
-              <span v-if="part.scope" class="text-default">{{ dreamScopeText(part.scope) }}：</span>
-              {{ runEntrySummary(part) }}
+              <span class="text-default"
+                >{{ part.scope ? dreamScopeText(part.scope) : '共享的内容' }}：</span
+              >{{ part.scope ? runEntrySummary(part) : sharedSummaryText(part) }}
               <span v-if="part.error" class="block text-error">{{ part.error }}</span>
             </li>
           </ul>

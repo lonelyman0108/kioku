@@ -2,6 +2,7 @@ import { createRoute, z } from '@hono/zod-openapi'
 import {
   ApplyDreamSuggestion,
   DreamApplied,
+  DreamMemberSettings,
   DreamQueued,
   DreamRunList,
   DreamRunStatus,
@@ -9,9 +10,11 @@ import {
   DreamSuggestionQuery,
   ErrorResponse,
 } from '@kioku/contracts'
+import { and, eq } from 'drizzle-orm'
 
 import { isInstanceAdmin, memberRole } from '../auth/middleware'
-import { dreamRunList } from '../extraction/dream'
+import { spaceMembers } from '../db/schema'
+import { dreamRunList, dreamRunOutcome } from '../extraction/dream'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor } from '../memory/context'
@@ -90,7 +93,8 @@ const status = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/dream/runs/{runId}',
   tags: ['review'],
-  summary: '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）',
+  summary:
+    '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）；共享的内容整理完就算做完，结果按共享部分的汇总与自己的画像层、私人层算，别的成员的不影响',
   request: { params: SpaceParams.extend({ runId: z.uuid() }) },
   responses: {
     200: jsonResponse('状态', DreamRunStatus),
@@ -100,9 +104,36 @@ const status = createRoute({
   },
 })
 
-// 成员都能看，处理建议与手动整理要 owner 或 editor
+const mySettings = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}/me/dream',
+  tags: ['review'],
+  summary: '自己在这个空间里的 Dream 设置：让不让 Dream 整理自己的画像层与私人层',
+  request: { params: SpaceParams },
+  responses: { 200: jsonResponse('设置', DreamMemberSettings), 403: forbidden },
+})
+
+const saveMySettings = createRoute({
+  method: 'put',
+  path: '/spaces/{spaceId}/me/dream',
+  tags: ['review'],
+  summary:
+    '改自己的 Dream 设置（只改得了自己的）：关掉之后自己的画像层与私人层不再发给抽取模型，已经生成的建议留着',
+  request: { params: SpaceParams, body: jsonBody(DreamMemberSettings) },
+  responses: {
+    200: jsonResponse('已保存', DreamMemberSettings),
+    400: jsonResponse('请求不合法', ErrorResponse),
+    403: forbidden,
+  },
+})
+
+// 成员都能看，处理建议与手动整理要 owner 或 editor。自己的 Dream 设置每个成员（viewer 也算）都能看、能改，
+// 只改得了自己的：成员那一行按会话里的账号找，请求里指定不了别的成员，空间 owner 也改不了别人的；
+// /spaces/* 只认管理界面的会话，Key 改不了
 export function dreamRoutes(deps: Deps) {
   const member = (spaceId: string, accountId: string) => memberRole(deps, spaceId, accountId)
+  const mine = (spaceId: string, accountId: string) =>
+    and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId))
   return router()
     .openapi(list, async (c) => {
       const { spaceId } = c.req.valid('param')
@@ -148,12 +179,43 @@ export function dreamRoutes(deps: Deps) {
     })
     .openapi(status, async (c) => {
       const { spaceId, runId } = c.req.valid('param')
-      if (!(await member(spaceId, c.get('console').accountId))) {
+      const accountId = c.get('console').accountId
+      if (!(await member(spaceId, accountId))) {
         return c.json({ error: '不是该空间成员' }, 403)
       }
       if (!deps.jobs) return c.json({ error: '服务没有启动后台任务' }, 503)
       const found = await deps.jobs.dreamRun(spaceId, runId)
       if (!found) return c.json({ error: '没有这次整理' }, 404)
-      return c.json(found, 200)
+      if (found.state === 'queued') return c.json(found, 200)
+      // 共享部分的汇总写下之后就算做完了，结果按汇总与查看者自己的画像层、私人层算（见 dreamRunOutcome）。
+      // 还没写下时：任务还在跑就是共享的那一段还在整理；任务已经停了（停在共享的那一段或者更早）按出错算，
+      // 不用任务自己的结果，那里面算上了画像层与私人层
+      const seen = await dreamRunOutcome(deps.db, spaceId, runId, accountId)
+      if (seen) return c.json({ state: 'finished' as const, ...seen }, 200)
+      return c.json(
+        found.state === 'running'
+          ? { state: 'running' as const, outcome: null, reason: null }
+          : { state: 'finished' as const, outcome: 'failed' as const, reason: null },
+        200,
+      )
+    })
+    .openapi(mySettings, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const [row] = await deps.db
+        .select({ includePrivate: spaceMembers.dreamPrivate })
+        .from(spaceMembers)
+        .where(mine(spaceId, c.get('console').accountId))
+      if (!row) return c.json({ error: '不是该空间成员' }, 403)
+      return c.json(row, 200)
+    })
+    .openapi(saveMySettings, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const [row] = await deps.db
+        .update(spaceMembers)
+        .set({ dreamPrivate: c.req.valid('json').includePrivate })
+        .where(mine(spaceId, c.get('console').accountId))
+        .returning({ includePrivate: spaceMembers.dreamPrivate })
+      if (!row) return c.json({ error: '不是该空间成员' }, 403)
+      return c.json(row, 200)
     })
 }

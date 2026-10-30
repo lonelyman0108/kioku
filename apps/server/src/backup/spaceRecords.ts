@@ -24,7 +24,9 @@ import { z } from 'zod'
 // 记忆按导出时的样子写出（secret 是明文，整个文件另用口令加密），不含历史、向量与召回统计。
 // 导出时每条记录先按这里的定义检查一遍，写得出来的就一定导入得了
 export const SPACE_EXPORT_FORMAT = 'kioku-space-export'
-export const SPACE_EXPORT_VERSION = 1
+// 文件格式的版本，导出时写这个。2 起文件头的导出人带上 dreamPrivate；导入时也认 1（见 SpaceExportHeaderV1），
+// 认不得的更新的版本拒收：旧版本遇到 2 同样拒收，不会悄悄丢掉它不认识的内容
+export const SPACE_EXPORT_VERSION = 2
 
 // 压缩前的正文最多这么大：导出时超出就拒绝，导入时解压超出就停下（挡住压缩炸弹）
 export const SPACE_EXPORT_MAX_PLAIN_BYTES = 128 * 1024 * 1024
@@ -64,14 +66,17 @@ export function describeIssue(error: z.ZodError): string {
   return `${where}${issue?.message ?? '格式不对'}`
 }
 
+// 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据
+const Exporter = z.object({ displayName: Text.max(200) })
+
 export const SpaceExportHeader = z.object({
   format: z.literal(SPACE_EXPORT_FORMAT),
   version: z.literal(SPACE_EXPORT_VERSION),
   createdAt: Time,
   // 做导出的 Kioku 版本，导入出错时提示用
   kioku: Text,
-  // 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据
-  exporter: z.object({ displayName: Text.max(200) }),
+  // dreamPrivate：导出人让不让 Dream 整理他的画像层与私人层，导入后照样用在导入人身上（这两层归了导入人）
+  exporter: Exporter.extend({ dreamPrivate: z.boolean() }),
   // 空间级的设置：名字（导入时没填名字就用它）、domain 默认层与抽取预算
   space: z.object({
     name: Text.min(1).max(64),
@@ -81,6 +86,16 @@ export const SpaceExportHeader = z.object({
   }),
 })
 export type SpaceExportHeader = z.infer<typeof SpaceExportHeader>
+
+// 版本 1 的文件头：导出人没有 dreamPrivate（那时还关不掉），读进来换成这个版本的样子，按开着
+export const SpaceExportHeaderV1 = SpaceExportHeader.extend({
+  version: z.literal(1),
+  exporter: Exporter,
+}).transform((header): SpaceExportHeader => ({
+  ...header,
+  version: SPACE_EXPORT_VERSION,
+  exporter: { ...header.exporter, dreamPrivate: true },
+}))
 
 export const PersonaRecord = z.object({
   type: z.literal('persona'),

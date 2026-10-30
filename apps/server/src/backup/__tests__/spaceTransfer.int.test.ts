@@ -8,6 +8,7 @@ import type {
   CredentialEventList,
   CredentialValues,
   DomainLayers,
+  DreamMemberSettings,
   ExtractionUsage,
   GroupPersonaRuleList,
   Me,
@@ -175,10 +176,11 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     version: SPACE_EXPORT_VERSION,
     createdAt: new Date().toISOString(),
     kioku: 'test',
-    exporter: { displayName: '拼文件的人' },
+    exporter: { displayName: '拼文件的人', dreamPrivate: true },
     space: { name, domainLayers: {}, extractionMonthlyTokens: 1000, extractionDailyWrites: 5 },
   })
-  async function craft(records: SpaceExportRecord[], head = header()): Promise<Buffer> {
+  // 文件头按原样写出，测别的格式版本、缺字段时传别的样子
+  async function craft(records: SpaceExportRecord[], head: object = header()): Promise<Buffer> {
     async function* lines() {
       yield `${JSON.stringify(head)}\n`
       for (const r of records) yield `${JSON.stringify(r)}\n`
@@ -542,7 +544,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         fields: [{ name: 'password', sourceField: 'password' }],
       })
       // 文件里记着导出人是谁
-      expect(parsed.header.exporter).toEqual({ displayName: 'alice' })
+      expect(parsed.header.exporter).toEqual({ displayName: 'alice', dreamPrivate: true })
       // 没有凭据绑着的已删除凭据源（旧的密码本）与 bob 的凭据源都不在
       expect(parsed.providers.map((p) => [p.name, p.deletedAt !== null])).toEqual([
         ['Vaultwarden', false],
@@ -606,7 +608,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const spacesBefore = await spaceCount()
       const preview = await ok<SpaceImportPreview>(inspectRequest(target, carol.cookie, file))
       expect(preview).toEqual({
-        exporter: { displayName: 'alice' },
+        exporter: { displayName: 'alice', dreamPrivate: true },
         spaceName: '家',
         exportedAt: parsed.header.createdAt,
         counts,
@@ -616,7 +618,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(result).toEqual({
         spaceId: expect.any(String),
         name: '家',
-        exporter: { displayName: 'alice' },
+        exporter: { displayName: 'alice', dreamPrivate: true },
         counts,
       })
       expect(backfills).toBe(1)
@@ -851,6 +853,87 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         providers: 0,
       },
     })
+  })
+
+  it('导出人关掉的 Dream 整理画像层与私人层跟着文件走：导入人在新空间里也关着；文件格式升到 2，格式 1 的旧文件按开着，更新的格式拒收', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
+    const cookie = { cookie: alice.cookie }
+    const mine = (spaceId: string, who = cookie) =>
+      ok<DreamMemberSettings>(send(source, 'GET', `/v1/spaces/${spaceId}/me/dream`, undefined, who))
+    await ok(
+      send(
+        source,
+        'PUT',
+        `/v1/spaces/${alice.spaceId}/me/dream`,
+        { includePrivate: false },
+        cookie,
+      ),
+    )
+    // 别的成员的设置不进文件，也不影响导出人那一项
+    await ok(
+      send(
+        source,
+        'PUT',
+        `/v1/spaces/${alice.spaceId}/me/dream`,
+        { includePrivate: true },
+        { cookie: bob.cookie },
+      ),
+    )
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    expect((await contents(file)).header.exporter).toEqual({
+      displayName: 'alice',
+      dreamPrivate: false,
+    })
+    expect(
+      (await ok<SpaceImportPreview>(inspectRequest(source, alice.cookie, file))).exporter,
+    ).toEqual({ displayName: 'alice', dreamPrivate: false })
+    const imported = await ok<SpaceImportResult>(importRequest(source, alice.cookie, file), 201)
+    expect(await mine(imported.spaceId)).toEqual({ includePrivate: false })
+
+    // 打开之后再导出：文件里是开着的
+    await ok(
+      send(source, 'PUT', `/v1/spaces/${alice.spaceId}/me/dream`, { includePrivate: true }, cookie),
+    )
+    const reopened = await exportSpace(source, alice.spaceId, alice.cookie)
+    expect((await contents(reopened)).header.exporter.dreamPrivate).toBe(true)
+    const again = await ok<SpaceImportResult>(importRequest(source, alice.cookie, reopened), 201)
+    expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
+
+    // 带上这一项之后文件格式是 2，2 的文件里必须有它
+    expect((await contents(file)).header.version).toBe(2)
+    const missing = await importRequest(
+      source,
+      alice.cookie,
+      await craft([], { ...header(), exporter: { displayName: '漏了的人' } }),
+    )
+    expect(missing.status).toBe(400)
+    expect(((await missing.json()) as { error: string }).error).toContain(
+      '第 1 行 exporter.dreamPrivate',
+    )
+
+    // 格式 1 的文件（有这一项之前导出的）照样认：那时还关不掉，按开着
+    const older = await ok<SpaceImportResult>(
+      importRequest(
+        source,
+        alice.cookie,
+        await craft([], { ...header(), version: 1, exporter: { displayName: '旧版本导出的人' } }),
+      ),
+      201,
+    )
+    expect(older.exporter).toEqual({ displayName: '旧版本导出的人', dreamPrivate: true })
+    expect(await mine(older.spaceId)).toEqual({ includePrivate: true })
+
+    // 认不得的更新的格式拒收，不悄悄丢掉不认识的内容（只认 1 的旧版本遇到 2 也是这样）
+    const newer = await inspectRequest(
+      source,
+      alice.cookie,
+      await craft([], { ...header(), version: 3 }),
+    )
+    expect(newer.status).toBe(400)
+    expect(((await newer.json()) as { error: string }).error).toBe(
+      '导出文件的格式版本是 3，这个版本的 Kioku 认 1 到 2：升级到导出它的版本（或更新的）再导入',
+    )
   })
 
   it('只有空间 owner 能导出，只有实例管理员能导入', async () => {

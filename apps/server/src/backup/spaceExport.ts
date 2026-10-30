@@ -16,6 +16,7 @@ import {
   memories,
   memoryGlossary,
   personas,
+  spaceMembers,
   spaces,
   subjectIdentities,
   subjects,
@@ -38,7 +39,7 @@ import {
 
 // 按空间导出：只导出导出人读得到的。导出人是空间 owner（路由检查），按他在管理界面里的权限读：
 // 共享的层（基础、人格、应用、对象与情节层）、人格、应用、对象与按群换人格，加上他自己的画像层与私人层、
-// 他自己的凭据与凭据源；别的成员的画像、私人层与凭据都不导出。
+// 他自己的凭据与凭据源，以及他让不让 Dream 整理这两层；别的成员的画像、私人层、凭据与设置都不导出。
 // 不导出：Key、会话、召回事件与召回统计、对话缓冲、抽取记录、记忆与凭据的历史、向量；
 // 已删除、已过期与被推翻的记忆（只导出现在有效的，和读权限的规则一致）
 
@@ -85,9 +86,10 @@ export async function exportSpace(
       async (tx) => {
         const [space] = await tx.select().from(spaces).where(eq(spaces.id, options.spaceId))
         const [exporter] = await tx
-          .select({ displayName: accounts.displayName })
+          .select({ displayName: accounts.displayName, dreamPrivate: spaceMembers.dreamPrivate })
           .from(accounts)
-          .where(eq(accounts.id, options.accountId))
+          .innerJoin(spaceMembers, eq(spaceMembers.accountId, accounts.id))
+          .where(and(eq(accounts.id, options.accountId), eq(spaceMembers.spaceId, options.spaceId)))
         if (!space || !exporter) throw new MemoryError(404, '空间不存在')
         spaceName = space.name
         const header = checked(SpaceExportHeader, '空间的设置或导出人的名字', {
@@ -95,7 +97,7 @@ export async function exportSpace(
           version: SPACE_EXPORT_VERSION,
           createdAt,
           kioku: VERSION,
-          exporter: { displayName: exporter.displayName },
+          exporter: { displayName: exporter.displayName, dreamPrivate: exporter.dreamPrivate },
           space: {
             name: space.name,
             domainLayers: space.domainLayers,
