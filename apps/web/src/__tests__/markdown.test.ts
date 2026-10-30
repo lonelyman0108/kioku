@@ -90,6 +90,22 @@ describe('markdownToHtml', () => {
       expect(markdownToHtml('https://files.example.com，账号/密码 见下')).toBe(
         paragraph(`${link('https://files.example.com')}，账号/密码 见下`),
       )
+      // 拉丁补充里的中间点、全角的字母与数字也结束网址；拉丁字母（é）留在路径里
+      expect(markdownToHtml('https://example.com·说明')).toBe(
+        paragraph(`${link('https://example.com')}·说明`),
+      )
+      expect(markdownToHtml('https://example.com/a·b')).toBe(
+        paragraph(`${link('https://example.com/a')}·b`),
+      )
+      expect(markdownToHtml('https://example.com１２３号')).toBe(
+        paragraph(`${link('https://example.com')}１２３号`),
+      )
+      expect(markdownToHtml('https://example.com/fileＡＢ')).toBe(
+        paragraph(`${link('https://example.com/file')}ＡＢ`),
+      )
+      expect(markdownToHtml('https://example.com/café')).toBe(
+        paragraph(wide('https://example.com/café')),
+      )
       expect(markdownToHtml('https://example.com/search?q=kioku&lang=zh，然后')).toBe(
         paragraph(`${link('https://example.com/search?q=kioku&amp;lang=zh')}，然后`),
       )

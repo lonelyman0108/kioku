@@ -78,11 +78,15 @@ export function rawHtml(html: string): string {
 // （例如「https://files.example.com，账号」）。识别之前先找出网址在哪里结束（urlEnd），只把这一段交给
 // marked 原来的规则，末尾的英文标点与不成对的括号照原来的规则去掉。显式写的链接（[文字](网址) 与 <网址>）不经过这里
 const URL_START = /^(?:(?:https?|ftp):\/\/|www\.)/i
-// 全角与中文常用的标点：通用标点、CJK 标点、竖排与小写变体、全角与半角形式这几块里的标点、符号与空格。
-// 这几块里的字母不算（々、〆、〇 等），日文与中文的网址路径里会有它们
+// 让网址结束的字符（endsUrl）：拉丁补充（·、«、» 等）、通用标点、CJK 标点、竖排与小写变体、全角与半角形式
+// 这几块里的标点、符号与空格；全角的英文字母、数字与标点（U+FF01–FF5E）都算，网址里不会有它们。
+// 这几块里别的字母不算（é、々、〆、〇 等），网址路径里会有它们
 const WIDE_BLOCKS =
-  /[\u{2010}-\u{205e}\u{3000}-\u{303f}\u{fe10}-\u{fe1f}\u{fe30}-\u{fe6f}\u{ff00}-\u{ff65}]/u
+  /[\u{00a0}-\u{00ff}\u{2010}-\u{205e}\u{3000}-\u{303f}\u{fe10}-\u{fe1f}\u{fe30}-\u{fe6f}\u{ff00}-\u{ff65}]/u
+const FULLWIDTH_ASCII = /[\u{ff01}-\u{ff5e}]/u
 const PUNCTUATION = /[\p{P}\p{S}\p{Zs}]/u
+const endsUrl = (ch: string) =>
+  FULLWIDTH_ASCII.test(ch) || (WIDE_BLOCKS.test(ch) && PUNCTUATION.test(ch))
 const CJK_LETTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
 const SPACE = /\s/u
 
@@ -96,7 +100,7 @@ const inHostLabel = (previous: string) =>
   CJK_LETTER.test(previous)
 
 // 网址在 src 里到哪里为止（不含），from 是协议之后、域名开始的位置。
-// 遇到全角或中文的标点就结束，在域名里、路径里都是（网址里不会有）；中日韩文字只在还没到路径
+// 遇到 endsUrl 的字符（全角与中文常用的标点、全角字母与数字）就结束，在域名里、路径里都是；中日韩文字只在还没到路径
 // （第一个 / ? # 之前）、又不是域名的一部分时结束，路径与查询里的中文留着（https://ja.wikipedia.org/wiki/東京）。
 // 第一个空白或 < 本来就是网址的尽头，扫到那里为止：每个网址只扫它自己这一段，不扫后面的整段正文
 function urlEnd(src: string, from: number): number {
@@ -105,7 +109,7 @@ function urlEnd(src: string, from: number): number {
   for (let i = from; i < src.length;) {
     const ch = String.fromCodePoint(src.codePointAt(i)!)
     if (ch === '<' || SPACE.test(ch)) return i
-    if (WIDE_BLOCKS.test(ch) && PUNCTUATION.test(ch)) return i
+    if (endsUrl(ch)) return i
     if (ch === '/' || ch === '?' || ch === '#') host = false
     else if (host && CJK_LETTER.test(ch) && !inHostLabel(previous)) return i
     previous = ch
