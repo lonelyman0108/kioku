@@ -150,10 +150,12 @@ export function inProcessExecutor(
     whoami: async () => whoamiOf(key),
     async execute(step, options) {
       const outcome = await call(step)
+      // 这一步记下的都取走：被吞掉的错误（例如对象直连读取失败）不能算到下一步头上
+      const detail = rollback?.takeDetail() ?? null
       // 重放的结果不返回：列改动是白跑查询，还拉长持锁的时间
       const changes = options?.replaying ? null : await tracker.collect(step)
-      // 这一步记下的都取走（包括列改动时记下的）：被吞掉的错误（例如对象直连读取失败）不能算到下一步头上
-      const detail = rollback?.takeDetail() ?? null
+      // 列改动时记下的（等锁超时、到了总时长）不是这一步的原因，也不留到下一步
+      rollback?.takeDetail()
       return {
         ...outcome,
         internalDetail: outcome.internalError ? detail : null,

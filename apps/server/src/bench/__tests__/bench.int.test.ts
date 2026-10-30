@@ -1020,6 +1020,46 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       }
     })
 
+    it('这一步自己的内部错误不算到列改动的超时头上', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+      if ('error' in found) throw new Error(found.error)
+      const release = await holdLock('memory_events')
+      try {
+        await inRollback(
+          { ...deps, benchLimits: { lockTimeoutMs: 100 } },
+          { model: null, vectors: new Map() },
+          async (scoped, rollback) => {
+            const executor = inProcessExecutor(scoped, found.key, {
+              run: 'r',
+              account: ws.accountId,
+              rollback,
+            })
+            // 正文带 NUL：写库报 22021，不是超时；接着列改动时才等锁超时
+            const outcome = await executor.execute({
+              kind: 'tool',
+              tool: 'kioku_create',
+              arguments: {
+                uri: 'projects://bench/nul',
+                content: 'a\u0000b',
+                priority: 2,
+                glossary: [],
+              },
+            })
+            expect(outcome).toMatchObject({
+              internalError: true,
+              internalDetail: null,
+              changes: null,
+            })
+            expect(rollback.takeDetail()).toBeNull()
+          },
+        )
+      } finally {
+        await release()
+        error.mockRestore()
+      }
+    })
+
     it('闸门：同时运行数到了上限时第三个请求 429（连接池要比闸门大，否则鉴权就拿不到连接）', async () => {
       const big = connect(testDatabaseUrl!, { max: 6 })
       try {

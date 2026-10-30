@@ -44,6 +44,10 @@ export function expand(value: unknown, vars: ReadonlyMap<string, string>): unkno
   return value
 }
 
+// 断言里比较的是文字，不按数字代入：00123 不能变成 123
+const expandText = (template: string, vars: ReadonlyMap<string, string>): string =>
+  template.replace(VARIABLE, (all, ref: string) => vars.get(ref) ?? all)
+
 // 值里引用了哪些变量
 export function referencedVars(value: unknown): string[] {
   if (typeof value === 'string') return [...value.matchAll(VARIABLE)].map((m) => m[1]!)
@@ -131,7 +135,7 @@ function check(
   if (!expected) return []
   const list = (templates: string[] | undefined) =>
     (templates ?? []).map((template) => ({
-      value: String(expand(template, vars)),
+      value: expandText(template, vars),
       text: shown(template),
     }))
   const onUris = (message: string, ok: (uris: string[]) => boolean): BenchAssertion =>

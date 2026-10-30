@@ -343,6 +343,21 @@ describe('变量与 capture', () => {
     expect(result.counts).toEqual({ passed: 0, failed: 0, skipped: 2, notRun: 0 })
   })
 
+  it('断言比较的是文字：整个模板就是一个 capture 变量时也不按数字代入', async () => {
+    const { executor } = fakeExecutor((_, i) =>
+      textOutcome(i === 0 ? '版本: 00123' : '正文里只有 123'),
+    )
+    const result = await run(
+      executor,
+      steps(
+        { kind: 'whoami', capture: { pin: '版本: ' } },
+        { kind: 'whoami', expect: { contains: ['${pin}'] } },
+        { kind: 'whoami', expect: { notContains: ['${pin}'] } },
+      ),
+    )
+    expect(result.steps.map((step) => step.status)).toEqual(['passed', 'failed', 'passed'])
+  })
+
   describe('之前取到过的变量', () => {
     const uses = { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${version}' } } as const
 
