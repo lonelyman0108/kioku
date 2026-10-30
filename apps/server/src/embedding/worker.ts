@@ -141,12 +141,15 @@ async function syncRows(
     const keep = await keptModels(tx, embedder)
     // 正被别的事务锁着的行跳过，不等它：移动记忆、让出 URI 会按自己的顺序锁多行，
     // 在这里等锁可能和它们互相等待成死锁。那些行如果被改了，修改本身会再触发向量任务；
-    // 没改的由调用方稍后重试
+    // 没改的由调用方稍后重试。
+    // 这里只写向量表，不改记忆这一行（更不改它的键列），所以锁用 FOR NO KEY UPDATE：别的事务往事件、关键词、
+    // 向量表写指向它的外键时只在这一行上加 KEY SHARE，和它不冲突，不会被当成锁住而跳过；
+    // 改这一行本身（UPDATE、DELETE）的事务照样和它冲突，读到之后到写完之间它不会被改
     const current = await tx
       .select({ id: memories.id, stamp })
       .from(memories)
       .where(inArray(memories.id, ids))
-      .for('update', { skipLocked: true })
+      .for('no key update', { skipLocked: true })
     const locked = new Set(current.map((c) => c.id))
     const skipped = [...stale, ...pending.map((p) => p.id)].filter((id) => !locked.has(id))
     const unchanged = new Set(current.filter((c) => c.stamp === readAt.get(c.id)).map((c) => c.id))

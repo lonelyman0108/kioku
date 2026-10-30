@@ -1,12 +1,12 @@
 import { randomBytes } from 'node:crypto'
 
 import type { EmbeddingSettingsView } from '@kioku/contracts'
-import { sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { memories, memoryEmbeddings, settings, spaces } from '../../db/schema'
+import { withSpace, type Database, type Tx } from '../../db/client'
+import { memories, memoryEmbeddings, memoryGlossary, settings, spaces } from '../../db/schema'
 import { startJobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
@@ -123,6 +123,63 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     expect(skipped).toEqual([[id]])
     expect(await embeddings()).toHaveLength(0)
     expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+  })
+
+  it('别的事务只是往记忆上写外键（行上加 KEY SHARE）时照常写向量；正在改这一行时才跳过、之后重试', async () => {
+    const embedder = fakeEmbedder()
+    const skipped: string[][] = []
+    const onSkipped = (ids: string[]) => skipped.push(ids)
+    // 每种情况一条还没有向量的记忆：已经有最新的向量时不用锁行，测不出来
+    const fresh = (path: string) =>
+      create({ uri: `core://${path}`, content: `${path} 的正文`, layer: 'base' })
+    // 另一个事务拿着这一行上的某种锁（还没提交）时生成向量
+    const whileHolding = (hold: (tx: Tx) => Promise<unknown>, id: string) =>
+      withSpace(database.db, ws.spaceId, async (tx) => {
+        await hold(tx)
+        return embedMemory(database.db, embedder, ws.spaceId, id, { onSkipped })
+      })
+
+    const keyShared = await fresh('key-share')
+    expect(
+      await whileHolding(
+        (tx) => tx.execute(sql`select id from memories where id = ${keyShared} for key share`),
+        keyShared,
+      ),
+    ).toBe(1)
+    // 往关键词表写一条指向它的外键，还没提交
+    const referenced = await fresh('referenced')
+    expect(
+      await whileHolding(
+        (tx) =>
+          tx
+            .insert(memoryGlossary)
+            .values({ spaceId: ws.spaceId, memoryId: referenced, keyword: '外键' }),
+        referenced,
+      ),
+    ).toBe(1)
+    expect(skipped).toEqual([])
+
+    // 正在改这一行（UPDATE 还没提交）或者锁住了要改：跳过，交给调用方重试
+    const updating = await fresh('updating')
+    expect(
+      await whileHolding(
+        (tx) => tx.update(memories).set({ priority: 3 }).where(eq(memories.id, updating)),
+        updating,
+      ),
+    ).toBe(0)
+    const lockedForUpdate = await fresh('for-update')
+    expect(
+      await whileHolding(
+        (tx) => tx.execute(sql`select id from memories where id = ${lockedForUpdate} for update`),
+        lockedForUpdate,
+      ),
+    ).toBe(0)
+    expect(skipped).toEqual([[updating], [lockedForUpdate]])
+    // 锁放开之后重试：写上
+    for (const id of [updating, lockedForUpdate]) {
+      expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+    }
+    expect(await embeddedIds()).toEqual([keyShared, referenced, updating, lockedForUpdate].sort())
   })
 
   it('生成向量；正文不变时不重复请求，改了才重新生成', async () => {
