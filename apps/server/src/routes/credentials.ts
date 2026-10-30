@@ -11,6 +11,8 @@ import {
   CredentialReferenceList,
   CredentialSummary,
   CredentialValues,
+  DeletedCredentialList,
+  DeletedCredentialProviderList,
   ErrorResponse,
   KeyCreateCredentialRequest,
   KeyCredentialList,
@@ -22,10 +24,11 @@ import {
 } from '@kioku/contracts'
 import type { Context } from 'hono'
 
-import { requireKey } from '../auth/middleware'
+import { isInstanceAdmin, requireKey } from '../auth/middleware'
 import { credentialServiceForConsole, credentialServiceForKey } from '../credential/context'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { withDeletionRetention } from '../jobs/retention'
 
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
@@ -66,9 +69,9 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'get',
     path: `${base}/deleted`,
-    summary: '列出自己已删除的凭据，最近删除的在前',
+    summary: '列出自己已删除的凭据，最近删除的在前，带上保留期（多久之后永久清除）',
     request: { params: SpaceParams },
-    responses: { 200: jsonResponse('已删除的凭据', ConsoleCredentialList), ...errors },
+    responses: { 200: jsonResponse('已删除的凭据', DeletedCredentialList), ...errors },
   })
   const create = createRoute({
     ...common,
@@ -142,6 +145,17 @@ function consoleCredentialRoutes(deps: Deps) {
     request: { params: SpaceParams },
     responses: { 200: jsonResponse('凭据源', z.array(CredentialProvider)), ...errors },
   })
+  const deletedProviders = createRoute({
+    ...common,
+    method: 'get',
+    path: '/spaces/{spaceId}/credential-providers/deleted',
+    summary: '列出自己已删除的凭据源（不能恢复），最近删除的在前，带上什么时候永久清除',
+    request: { params: SpaceParams },
+    responses: {
+      200: jsonResponse('已删除的凭据源', DeletedCredentialProviderList),
+      ...errors,
+    },
+  })
   const createProvider = createRoute({
     ...common,
     method: 'post',
@@ -169,11 +183,16 @@ function consoleCredentialRoutes(deps: Deps) {
 
   const service = (c: Context<AppEnv>) =>
     credentialServiceForConsole(deps, c.req.param('spaceId')!, c.get('console').accountId)
+  // 已删除的列表带上保留期：保留天数与是否暂停对谁都一样，暂停到什么时候只给实例管理员
+  const withRetention = <T extends object>(c: Context<AppEnv>, list: Promise<T>) =>
+    withDeletionRetention(deps.db, list, isInstanceAdmin(deps.db, c.get('console').accountId))
 
   // 固定路径（deleted）先于带 id 的路径注册
   return router()
     .openapi(list, async (c) => c.json(await (await service(c)).list(), 200))
-    .openapi(deleted, async (c) => c.json(await (await service(c)).listDeleted(), 200))
+    .openapi(deleted, async (c) =>
+      c.json(await withRetention(c, (await service(c)).listDeleted()), 200),
+    )
     .openapi(create, async (c) => c.json(await (await service(c)).create(c.req.valid('json')), 201))
     .openapi(get, async (c) =>
       c.json(await (await service(c)).get(c.req.valid('param').credentialId), 200),
@@ -207,6 +226,9 @@ function consoleCredentialRoutes(deps: Deps) {
       c.json(await (await service(c)).references(c.req.valid('param').credentialId), 200),
     )
     .openapi(providers, async (c) => c.json(await (await service(c)).providers(), 200))
+    .openapi(deletedProviders, async (c) =>
+      c.json(await withRetention(c, (await service(c)).deletedProviders()), 200),
+    )
     .openapi(createProvider, async (c) =>
       c.json(await (await service(c)).createProvider(c.req.valid('json')), 201),
     )

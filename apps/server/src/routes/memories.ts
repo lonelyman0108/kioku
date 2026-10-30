@@ -28,7 +28,7 @@ import type { Context } from 'hono'
 import { isInstanceAdmin, requireKey } from '../auth/middleware'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { deletionRetention, retentionView } from '../jobs/retention'
+import { withDeletionRetention } from '../jobs/retention'
 import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
 import type { MemoryService } from '../memory/service'
 
@@ -268,12 +268,14 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(deleted, async (c) => {
       const { service } = await consoleMember(deps, c)
       // 保留期是整个实例的设置：列表按成员读得到的算，保留天数与是否暂停对谁都一样，暂停到什么时候只给实例管理员
-      const [page, admin, view] = await Promise.all([
-        service.deleted(c.req.valid('query')),
-        isInstanceAdmin(deps.db, c.get('console').accountId),
-        retentionView(deps.db),
-      ])
-      return c.json({ ...page, retention: deletionRetention(view, admin) }, 200)
+      return c.json(
+        await withDeletionRetention(
+          deps.db,
+          service.deleted(c.req.valid('query')),
+          isInstanceAdmin(deps.db, c.get('console').accountId),
+        ),
+        200,
+      )
     })
     .openapi(restore, async (c) => {
       const { service } = await consoleMember(deps, c)
@@ -285,7 +287,15 @@ function consoleOnlyRoutes(deps: Deps) {
     })
     .openapi(expired, async (c) => {
       const { service } = await consoleMember(deps, c)
-      return c.json(await service.expired(c.req.valid('query')), 200)
+      // 让出了 URI 的和已删除的一样按保留期清除，带上同样的提示
+      return c.json(
+        await withDeletionRetention(
+          deps.db,
+          service.expired(c.req.valid('query')),
+          isInstanceAdmin(deps.db, c.get('console').accountId),
+        ),
+        200,
+      )
     })
     .openapi(reactivate, async (c) => {
       const { service } = await consoleMember(deps, c)

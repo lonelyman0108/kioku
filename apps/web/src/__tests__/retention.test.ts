@@ -6,8 +6,10 @@ import {
   daysUntilPurge,
   deletionNotice,
   pauseText,
+  providerPurgeNote,
   purgeAt,
   purgeNote,
+  releasedNotice,
   retentionSummary,
   retentionTotal,
 } from '../retention'
@@ -143,6 +145,50 @@ describe('已删除的记忆什么时候永久清除', () => {
       text: '至少 20 天后永久清除',
       soon: false,
     })
+  })
+
+  it('已删除的凭据源：还有没删除的凭据指着时不说几天；否则从保留期的起点算，规则和别的已删除记录一样', () => {
+    expect(providerPurgeNote({ retentionFrom: null }, normal, now)).toEqual({
+      text: '还有凭据指着，不会清除',
+      soon: false,
+    })
+    expect(providerPurgeNote({ retentionFrom: null }, pausedUntil(later(12)), now)).toEqual({
+      text: '还有凭据指着，不会清除',
+      soon: false,
+    })
+    // 起点是指着它的已删除凭据里最晚的删除时间时，照样按它算
+    expect(providerPurgeNote({ retentionFrom: ago(10) }, normal, now)).toEqual({
+      text: '约 20 天后永久清除',
+      soon: false,
+    })
+    expect(providerPurgeNote({ retentionFrom: ago(28) }, normal, now)).toEqual({
+      text: '约 2 天后永久清除',
+      soon: true,
+    })
+    expect(providerPurgeNote({ retentionFrom: ago(45) }, normal, now)).toEqual({
+      text: '即将永久清除',
+      soon: true,
+    })
+    expect(providerPurgeNote({ retentionFrom: ago(45) }, pausedUntil(later(12)), now)).toEqual({
+      text: '约 12 天后永久清除',
+      soon: false,
+    })
+    expect(providerPurgeNote({ retentionFrom: ago(45) }, pausedOnly, now)).toEqual({
+      text: '暂停结束后才会清除',
+      soon: false,
+    })
+  })
+
+  it('已过期列表给「已让出」的说明：按让出的时间算，没让出的一直留着；暂停的说法和已删除的一样', () => {
+    expect(releasedNotice({ days: 7, paused: false, pausedUntil: null })).toBe(
+      '标着「已让出」的，让出超过 7 天会被永久清除，之后只能从备份找回；没让出的一直留着。',
+    )
+    expect(releasedNotice(pausedOnly)).toBe(
+      '标着「已让出」的，让出超过 30 天会被永久清除，之后只能从备份找回；没让出的一直留着。清理暂停中，暂时不会永久清除。',
+    )
+    const paused = releasedNotice(pausedUntil(later(12)))
+    expect(paused).toMatch(/没让出的一直留着。清理暂停到 .+/)
+    expect(paused).toContain('这之前一条都不会清除')
   })
 
   it('列表上方说明多少天之后永久清除；暂停中的说暂时不会清除，知道到什么时候的再说出时间', () => {

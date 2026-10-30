@@ -2302,8 +2302,9 @@ export class MemoryService {
   }
 
   // 已过期的记忆，最近过期的在前：有效期已过、按管理读取看得到的策展记忆，包括过期之后让出了 URI 的
-  // （isReleased）。这些都能重新生效（reactivate）。用户删掉的（删除时还有效）不在这里，在已删除里走撤销删除
-  async expired(query: PageQuery): Promise<ExpiredMemoryList> {
+  // （isReleased）。这些都能重新生效（reactivate）。用户删掉的（删除时还有效）不在这里，在已删除里走撤销删除。
+  // 让出的带着删除时间，过了保留期按它永久清除；保留期的提示由路由补上
+  async expired(query: PageQuery): Promise<Omit<ExpiredMemoryList, 'retention'>> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
       const rows = await tx
@@ -2335,6 +2336,8 @@ export class MemoryService {
           version: row.version,
           expiredAt: endOf(row)!.toISOString(),
           released: isReleased(row),
+          // 列表里没让出的都没删除（见上面的条件）
+          deletedAt: row.deletedAt?.toISOString() ?? null,
         })),
         nextCursor:
           rows.length > query.limit && last

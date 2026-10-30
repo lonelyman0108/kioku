@@ -237,12 +237,17 @@ export const ExpiredMemory = z.object({
   // 过期之后让出了 URI：同一个 URI 上写了新的记忆，它被软删除。重新生效时一并撤销删除；
   // URI 还被那条新的占着时不行，要先把那条移走或删掉
   released: z.boolean(),
+  // 让出时软删除的时间，没让出的为 null。让出的和已删除的记忆一样过了保留期永久清除，按这个时间算；
+  // 没让出的过期记忆一直留着，由人决定要不要重新生效
+  deletedAt: z.string().nullable(),
 })
 export type ExpiredMemory = z.infer<typeof ExpiredMemory>
 
 export const ExpiredMemoryList = z.object({
   items: z.array(ExpiredMemory),
   nextCursor: z.string().nullable(),
+  // 让出了 URI 的什么时候永久清除，见 DeletionRetention
+  retention: DeletionRetention,
 })
 export type ExpiredMemoryList = z.infer<typeof ExpiredMemoryList>
 

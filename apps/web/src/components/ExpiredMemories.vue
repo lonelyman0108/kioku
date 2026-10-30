@@ -8,8 +8,10 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
+import { purgeAt, purgeNote, releasedNotice } from '../retention'
 import { formatRelative, formatTime } from '../time'
 import MemoryHistory from './MemoryHistory.vue'
 
@@ -30,6 +32,22 @@ const expired = useInfiniteQuery({
   enabled: useActivated(),
 })
 const items = computed(() => expired.data.value?.pages.flatMap((page) => page.items) ?? [])
+// 让出了 URI 的和已删除的一样按保留期永久清除：保留期每一页都带着，用第一页的
+const retention = computed(() => expired.data.value?.pages[0]?.retention ?? null)
+const anyReleased = computed(() => items.value.some((item) => item.deletedAt !== null))
+// 还剩几天按它算：页面一直开着也每分钟跟着变，切到别的视图时停下
+const now = useNow()
+// 让出的那几条后面的说法与要不要标警示色；没让出的不清除，没有
+const notes = computed(() => {
+  const r = retention.value
+  return new Map(
+    r
+      ? items.value.flatMap((item) =>
+          item.deletedAt ? [[item.id, purgeNote(item.deletedAt, r, now.value)] as const] : [],
+        )
+      : [],
+  )
+})
 
 // 正在看历史的那一条
 const viewing = ref<ExpiredMemory | null>(null)
@@ -72,6 +90,10 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
       boot。重新生效之后一直有效，需要的话再设新的有效期。标着「已让出」的，过期之后同一个 URI
       上写了新的记忆，那条还在时要先把它移走或删掉。
     </p>
+    <p v-if="retention && anyReleased" class="flex items-start gap-1.5 text-xs text-warning">
+      <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
+      <span>{{ releasedNotice(retention) }}</span>
+    </p>
     <UAlert
       v-if="expired.isError.value"
       color="error"
@@ -112,8 +134,17 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
             <span class="text-xs text-muted">
               过期于
               <time :datetime="item.expiredAt" :title="formatTime(item.expiredAt)">
-                {{ formatRelative(item.expiredAt) }}
+                {{ formatRelative(item.expiredAt, now) }}
               </time>
+              <template v-if="retention && item.deletedAt && notes.get(item.id)">
+                ·
+                <span
+                  :class="{ 'text-warning': notes.get(item.id)!.soon }"
+                  :title="`让出于 ${formatTime(item.deletedAt)}，最早在 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 之后清除`"
+                >
+                  {{ notes.get(item.id)!.text }}
+                </span>
+              </template>
             </span>
           </div>
           <UButton

@@ -1,6 +1,10 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ConsoleCredential, CredentialProvider } from '@kioku/contracts'
+import type {
+  ConsoleCredential,
+  CredentialProvider,
+  DeletedCredentialProvider,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -10,9 +14,11 @@ import { api } from '../api/endpoints'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
 import ProviderFormModal from '../components/ProviderFormModal.vue'
+import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { credentialSourceLabels, providerKindLabels, restrictedAppsLabel } from '../labels'
+import { deletionNotice, providerPurgeNote, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -36,11 +42,42 @@ const credentials = useQuery({
   queryKey: computed(() => ['credentials', spaceId.value] as const),
   queryFn: ({ queryKey: [, id] }) => api.credentials(id),
 })
+const showingDeleted = computed(() => tab.value === 'deleted')
 const deleted = useQuery({
   queryKey: computed(() => ['credentials-deleted', spaceId.value] as const),
   queryFn: ({ queryKey: [, id] }) => api.deletedCredentials(id),
-  enabled: computed(() => tab.value === 'deleted'),
+  enabled: showingDeleted,
 })
+const deletedProviders = useQuery({
+  queryKey: computed(() => ['credential-providers-deleted', spaceId.value] as const),
+  queryFn: ({ queryKey: [, id] }) => api.deletedCredentialProviders(id),
+  enabled: showingDeleted,
+})
+// 已删除的凭据与凭据源过了保留期永久清除：保留期两个列表都带着，是同一个
+const retention = computed(() => deleted.data.value?.retention ?? null)
+// 还剩几天按它算：停在「已删除」上时每分钟跟着变，切到别的标签时停下
+const now = useNow(60_000, showingDeleted)
+const credentialNotes = computed(() => {
+  const r = retention.value
+  const items = deleted.data.value?.items ?? []
+  return new Map(r ? items.map((c) => [c.id, purgeNote(c.deletedAt!, r, now.value)]) : [])
+})
+const providerNotes = computed(() => {
+  const r = deletedProviders.data.value?.retention
+  const items = deletedProviders.data.value?.items ?? []
+  return new Map(r ? items.map((p) => [p.id, providerPurgeNote(p, r, now.value)]) : [])
+})
+// 凭据源的说明为什么是这个时间：还有凭据指着时说怎样才会清除，等已删除的凭据时说明要等它们
+function providerPurgeTitle(p: DeletedCredentialProvider): string {
+  const r = deletedProviders.data.value?.retention
+  if (p.retentionFrom === null) {
+    return '有凭据恢复之后还绑着它：改绑或删掉这些凭据之后，才按保留期清除'
+  }
+  const at = r ? formatTime(purgeAt(p.retentionFrom, r).toISOString()) : ''
+  return new Date(p.retentionFrom).getTime() > new Date(p.deletedAt).getTime()
+    ? `指着它的已删除凭据清除时一起清除，最早在 ${at} 之后`
+    : `最早在 ${at} 之后清除`
+}
 const providers = useQuery({
   queryKey: computed(() => ['credential-providers', spaceId.value] as const),
   queryFn: ({ queryKey: [, id] }) => api.credentialProviders(id),
@@ -72,6 +109,7 @@ const deletedColumns = [
   { accessorKey: 'name', header: '名称' },
   { accessorKey: 'identifier', header: '标识' },
   { accessorKey: 'deletedAt', header: '删除于' },
+  { id: 'purge', header: '永久清除' },
   { id: 'actions', header: '' },
 ]
 
@@ -113,6 +151,7 @@ async function refreshLists(sid: string) {
     queryClient.invalidateQueries({ queryKey: ['credentials', sid] }),
     queryClient.invalidateQueries({ queryKey: ['credentials-deleted', sid] }),
     queryClient.invalidateQueries({ queryKey: ['credential-providers', sid] }),
+    queryClient.invalidateQueries({ queryKey: ['credential-providers-deleted', sid] }),
   ])
 }
 
@@ -340,6 +379,10 @@ async function removeProvider() {
         <p class="mb-3 text-sm text-muted">
           删除的凭据可以撤销删除；同一个标识已经有一条有效的凭据时不能撤销。
         </p>
+        <p v-if="retention" class="mb-3 flex items-start gap-1.5 text-xs text-warning">
+          <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
+          <span>{{ deletionNotice(retention) }}</span>
+        </p>
         <UTable
           :data="deleted.data.value?.items ?? []"
           :columns="deletedColumns"
@@ -361,8 +404,18 @@ async function removeProvider() {
           </template>
           <template #deletedAt-cell="{ row }">
             <time :datetime="row.original.deletedAt!" :title="formatTime(row.original.deletedAt!)">
-              {{ formatRelative(row.original.deletedAt!) }}
+              {{ formatRelative(row.original.deletedAt!, now) }}
             </time>
+          </template>
+          <template #purge-cell="{ row }">
+            <span
+              v-if="retention && credentialNotes.get(row.original.id)"
+              class="text-xs"
+              :class="credentialNotes.get(row.original.id)!.soon ? 'text-warning' : 'text-muted'"
+              :title="`最早在 ${formatTime(purgeAt(row.original.deletedAt!, retention).toISOString())} 之后清除`"
+            >
+              {{ credentialNotes.get(row.original.id)!.text }}
+            </span>
           </template>
           <template #actions-cell="{ row }">
             <UButton
@@ -377,6 +430,41 @@ async function removeProvider() {
             </UButton>
           </template>
         </UTable>
+
+        <template v-if="deletedProviders.data.value?.items.length">
+          <h3 class="mt-6 mb-1 text-sm font-medium">已删除的凭据源</h3>
+          <p class="mb-2 text-sm text-muted">
+            凭据源删除之后不能撤销。还有凭据指着它时（包括已删除、还能撤销的），等这些凭据清除之后才清除。
+          </p>
+          <ul class="divide-y divide-default">
+            <li
+              v-for="p in deletedProviders.data.value.items"
+              :key="p.id"
+              class="flex flex-wrap items-center gap-2 py-2"
+            >
+              <span class="text-sm">{{ p.name }}</span>
+              <UBadge size="sm" variant="subtle">{{ providerKindLabels[p.kind] }}</UBadge>
+              <span class="text-xs text-muted">
+                删除于
+                <time :datetime="p.deletedAt" :title="formatTime(p.deletedAt)">
+                  {{ formatRelative(p.deletedAt, now) }}
+                </time>
+                <template v-if="providerNotes.get(p.id)">
+                  ·
+                  <span
+                    :class="{ 'text-warning': providerNotes.get(p.id)!.soon }"
+                    :title="providerPurgeTitle(p)"
+                  >
+                    {{ providerNotes.get(p.id)!.text }}
+                  </span>
+                </template>
+              </span>
+            </li>
+          </ul>
+          <p v-if="deletedProviders.data.value.truncated" class="mt-2 text-xs text-muted">
+            只列出了前 1000 个。
+          </p>
+        </template>
       </template>
     </template>
   </UDashboardPanel>

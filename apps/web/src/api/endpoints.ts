@@ -15,6 +15,8 @@ import {
   CredentialReferenceList,
   CredentialValues,
   CreatedKey,
+  DeletedCredentialList,
+  DeletedCredentialProviderList,
   DeletedMemoryList,
   DomainLayers,
   DreamApplied,
@@ -221,7 +223,7 @@ export const api = {
   credentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
   deletedCredentials: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/credentials/deleted`, { schema: ConsoleCredentialList }),
+    request('GET', `/spaces/${spaceId}/credentials/deleted`, { schema: DeletedCredentialList }),
   credential: (spaceId: string, id: string) =>
     request('GET', `/spaces/${spaceId}/credentials/${id}`, { schema: ConsoleCredential }),
   createCredential: (spaceId: string, body: CreateCredentialRequest) =>
@@ -248,6 +250,10 @@ export const api = {
   credentialProviders: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credential-providers`, {
       schema: z.array(CredentialProvider),
+    }),
+  deletedCredentialProviders: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/credential-providers/deleted`, {
+      schema: DeletedCredentialProviderList,
     }),
   createCredentialProvider: (spaceId: string, body: CreateCredentialProviderRequest) =>
     request('POST', `/spaces/${spaceId}/credential-providers`, {

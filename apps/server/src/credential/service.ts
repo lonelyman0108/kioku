@@ -17,6 +17,7 @@ import {
   type CredentialSourceUpdate,
   type CredentialSummary,
   type CredentialValues,
+  type DeletedCredentialProviderList,
   type KeyCredentialList,
   type PageQuery,
   type UpdateCredentialProviderRequest,
@@ -43,6 +44,7 @@ import {
   memories,
   memoryCredentialRefs,
 } from '../db/schema'
+import { PROVIDER_RETENTION_FROM } from '../jobs/retention'
 import { STILL_VALID } from '../memory/filter'
 import { MemoryError } from '../memory/service'
 import { formatUri } from '../memory/uri'
@@ -759,6 +761,38 @@ export class CredentialService {
         .groupBy(credentials.providerId)
       const bound = new Map(counts.map((c) => [c.providerId, c.n]))
       return rows.map((r) => providerView(r, bound.get(r.id) ?? 0))
+    })
+  }
+
+  // 已删除的凭据源，最近删除的在前。不能恢复，列出来是让主人知道它什么时候永久清除：
+  // 保留期从什么时候算起和清理的规则一致（PROVIDER_RETENTION_FROM），保留期的提示由路由补上
+  async deletedProviders(): Promise<Omit<DeletedCredentialProviderList, 'retention'>> {
+    this.requireRead()
+    return this.run(async (tx) => {
+      const rows = await tx
+        .select({
+          row: credentialProviders,
+          retentionFrom: PROVIDER_RETENTION_FROM.mapWith(credentialProviders.deletedAt),
+        })
+        .from(credentialProviders)
+        .where(
+          and(
+            eq(credentialProviders.ownerAccountId, this.owner),
+            isNotNull(credentialProviders.deletedAt),
+          ),
+        )
+        .orderBy(desc(credentialProviders.deletedAt), asc(credentialProviders.id))
+        .limit(LIST_LIMIT + 1)
+      return {
+        items: rows.slice(0, LIST_LIMIT).map(({ row, retentionFrom }) => ({
+          id: row.id,
+          kind: row.kind,
+          name: row.name,
+          deletedAt: row.deletedAt!.toISOString(),
+          retentionFrom: retentionFrom?.toISOString() ?? null,
+        })),
+        truncated: rows.length > LIST_LIMIT,
+      }
     })
   }
 

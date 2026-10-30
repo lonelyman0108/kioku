@@ -3,7 +3,10 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import type {
   ConsoleCredential,
   CredentialProvider,
-  DeletedMemoryList,
+  DeletedCredentialList,
+  DeletedCredentialProviderList,
+  DeletionRetention,
+  ExpiredMemoryList,
   MemoryHistory,
   MemoryView,
   RetentionCounts,
@@ -300,6 +303,18 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         })),
       ),
     )
+    // 已过期列表里，让出了 URI 的带着让出时的删除时间，管理界面按它算几天后清除；没让出的没有，一直留着
+    const expiredUris = async () =>
+      (await ok<ExpiredMemoryList>(await send('GET', '/memories/expired'))).items.map((i) => [
+        i.uri,
+        i.released,
+        i.deletedAt,
+      ])
+    const released = rows.find((r) => r.path === 'released')!
+    expect(await expiredUris()).toEqual([
+      ['notes://expired', false, null],
+      ['notes://released', true, released.deletedAt!.toISOString()],
+    ])
 
     const { counts } = await purge()
     expect(counts).toEqual({
@@ -308,6 +323,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       supersededFacts: 2,
       expiredSummaries: 1,
     })
+    expect(await expiredUris()).toEqual([['notes://expired', false, null]])
     const left = await inSpace((tx) =>
       tx.select({ content: memories.content }).from(memories).orderBy(asc(memories.content)),
     )
@@ -702,6 +718,42 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       await setCredential(newHosted.id, 29)
     })
 
+    // 已删除的列表给出保留期从什么时候算起，和清理的规则一致：凭据按删除时间；凭据源按自己与指着它的
+    // 已删除凭据里晚的那个，还有没删除的凭据指着时为 null（不会清除）
+    const deletedCredentials = await ok<DeletedCredentialList>(
+      await send('GET', '/credentials/deleted'),
+    )
+    const deletedProviders = await ok<DeletedCredentialProviderList>(
+      await send('GET', '/credential-providers/deleted'),
+    )
+    const stored = await inSpace(async (tx) => [
+      ...(await tx.select().from(credentials)),
+      ...(await tx.select().from(credentialProviders)),
+    ])
+    const deletedAt = (id: string) => stored.find((r) => r.id === id)!.deletedAt!.toISOString()
+    expect(
+      Object.fromEntries(deletedProviders.items.map((p) => [p.id, [p.deletedAt, p.retentionFrom]])),
+    ).toEqual({
+      [lonely.id]: [deletedAt(lonely.id), deletedAt(lonely.id)],
+      // 凭据恢复了、没改绑：不会清除
+      [revived.id]: [deletedAt(revived.id), null],
+      // 指着它的凭据删得比它晚：等那条凭据到期
+      [pending.id]: [deletedAt(pending.id), deletedAt(nas.id)],
+      [gone.id]: [deletedAt(gone.id), [deletedAt(gone.id), deletedAt(wifi.id)].sort().at(-1)],
+    })
+    // 按 30 天推算哪些到期，和下面真去清理的结果一样
+    const due = (from: string | null) => from !== null && new Date(from) < ago(30)
+    const kept = {
+      credentials: [
+        router.id,
+        ...deletedCredentials.items.filter((c) => !due(c.deletedAt)).map((c) => c.id),
+      ].sort(),
+      providers: deletedProviders.items
+        .filter((p) => !due(p.retentionFrom))
+        .map((p) => p.id)
+        .sort(),
+    }
+
     const { counts, errors } = await purge()
     expect(errors).toEqual([])
     expect(counts).toEqual({ ...ZERO, deletedCredentials: 2, deletedProviders: 2 })
@@ -714,6 +766,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort()
     expect(ids(left.credentials)).toEqual([router.id, nas.id, newHosted.id].sort())
     expect(ids(left.providers)).toEqual([revived.id, pending.id].sort())
+    expect({ credentials: ids(left.credentials), providers: ids(left.providers) }).toEqual(kept)
     expect(ids(left.events)).toEqual([router.id, nas.id, newHosted.id].sort())
     const view = await ok<ConsoleCredential>(await send('GET', `/credentials/${router.id}`))
     expect(view.provider).toMatchObject({ id: revived.id, deleted: true })
@@ -1144,9 +1197,21 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
 
   it('已删除的列表带上保留天数与是否在暂停；暂停到什么时候只给实例管理员，和实例设置里的是同一个', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    const retention = async (cookie: string) =>
-      (await ok<DeletedMemoryList>(await send('GET', '/memories/deleted', undefined, cookie)))
-        .retention
+    // 会被永久清除的几个列表（已删除的记忆、凭据、凭据源，已过期里让出了 URI 的）带的都是同一个
+    const retention = async (cookie: string) => {
+      const lists = await Promise.all(
+        [
+          '/memories/deleted',
+          '/memories/expired',
+          '/credentials/deleted',
+          '/credential-providers/deleted',
+        ].map(async (path) =>
+          ok<{ retention: DeletionRetention }>(await send('GET', path, undefined, cookie)),
+        ),
+      )
+      for (const list of lists) expect(list.retention).toEqual(lists[0]!.retention)
+      return lists[0]!.retention
+    }
     // 实例管理员在列表上看到的天数与暂停，和实例设置里的保留期一样
     const asAdmin = async () => {
       const [list, settings] = await Promise.all([retention(ws.cookie), view()])
