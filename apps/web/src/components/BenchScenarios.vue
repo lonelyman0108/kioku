@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BENCH_MAX_REQUEST_BYTES, type BenchRunResult, type BenchScenario } from '@kioku/contracts'
+import { BENCH_MAX_REQUEST_BYTES, type BenchScenario } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, ref, shallowRef, useTemplateRef, watch } from 'vue'
 
@@ -26,7 +26,17 @@ import BenchStepView from './BenchStepView.vue'
 
 // 场景：一串步骤。选预设或导入 JSON，在文本框里编辑，运行，看断言结果。不存库，只在内存里：
 // 里面可能有明文，不进浏览器存储
-const { spaceId, app, real, mode, running, generation, execute } = useBench()
+const {
+  spaceId,
+  app,
+  real,
+  mode,
+  running,
+  generation,
+  execute,
+  scenarioFailure: failure,
+  scenarioOutcome: outcome,
+} = useBench()
 
 const presets = useQuery({
   queryKey: computed(() => ['bench-scenarios', spaceId.value]),
@@ -131,8 +141,6 @@ function startExport() {
   else save(scenario)
 }
 
-const failure = ref<string | null>(null)
-const outcome = shallowRef<{ title: string; probe: boolean; result: BenchRunResult } | null>(null)
 const view = computed(() => scenarioView({ probe: outcome.value?.probe ?? false }))
 const summary = computed(() =>
   outcome.value ? runSummary(outcome.value.result, view.value) : null,

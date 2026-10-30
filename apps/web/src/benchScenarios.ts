@@ -133,6 +133,13 @@ export function plaintextIn(scenario: BenchScenario): PlaintextFinding[] {
 // 真实模式下运行之前，说清楚有几步可能写库（判定和命令行的 --allow-writes 是同一个）
 export const writingSteps = (scenario: BenchScenario) => scenario.steps.filter(mayWrite).length
 
+// 场景这一页显示的那次运行
+export interface ScenarioOutcome {
+  title: string
+  probe: boolean
+  result: BenchRunResult
+}
+
 export const scenarioView = (scenario: Pick<BenchScenario, 'probe'>): StepView =>
   scenario.probe ? 'probe' : 'judged'
 

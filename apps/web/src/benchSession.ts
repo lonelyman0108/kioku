@@ -107,6 +107,34 @@ export function abandonedRun(
   return { id, title, description, view, result: null }
 }
 
+// 切换模式时一起清掉的记录
+export interface ModeRecords {
+  // 调用台时间线的条数
+  timeline: number
+  // 回滚模式下保留的写入的步数
+  replay: number
+  scenarioResult: boolean
+  // 调用台或场景有运行失败的说明
+  failed: boolean
+}
+
+// 从这个模式切走会清掉什么。什么都不会清时是 null，切回回滚就不用多问。
+// 真实模式下要说得更清楚：结果里的运行标记是活动里对应这些写入的线索，失败的说明可能写着已经执行了一部分
+export function modeSwitchLoss(from: BenchMode, records: ModeRecords): string | null {
+  const { timeline, replay, scenarioResult, failed } = records
+  const items = [
+    ...(timeline ? [`调用台的时间线（${timeline} 条）`] : []),
+    ...(scenarioResult ? ['场景结果'] : []),
+    ...(failed ? ['运行失败的说明'] : []),
+  ].join('、')
+  if (!items) return null
+  if (from === 'rollback') {
+    return `这些记录会清掉：${items}。${replay ? '回滚模式下保留的写入不会带过去。' : ''}`
+  }
+  const markers = timeline || scenarioResult ? '，以及运行标记（活动里靠它对应这些写入）' : ''
+  return `这些记录会清掉：${items}${markers}。已经写下的不会撤回。`
+}
+
 // 时间线只留最近这么多条，全在内存里：结果可能很长，也可能有明文，不进浏览器存储
 export const BENCH_TIMELINE_MAX = 200
 

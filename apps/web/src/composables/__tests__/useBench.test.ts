@@ -39,6 +39,39 @@ const liveKey = (id: string) =>
 const revokedKey = (id: string) =>
   ({ id, name: `Key${id}`, prefix: id, effectiveScopes: null }) as KeyInfo
 
+// 真实模式跑了一步的结果
+const RESULT = {
+  run: 'abcd1234',
+  mode: 'real',
+  ok: true,
+  whoami: {} as WhoAmI,
+  counts: { passed: 1, failed: 0, skipped: 0, notRun: 0 },
+  steps: [
+    {
+      index: 0,
+      label: 'kioku_create',
+      kind: 'tool',
+      status: 'passed',
+      reason: null,
+      isError: false,
+      internalError: false,
+      internalDetail: null,
+      httpStatus: null,
+      text: '',
+      raw: {},
+      ms: 1,
+      uris: [],
+      session: null,
+      vectorSkipped: false,
+      assertions: [],
+      captured: {},
+      changes: null,
+      replay: null,
+    },
+  ],
+  replayDiverged: null,
+} as BenchRunResult
+
 // 地址：query 里 undefined 的项和真的 vue-router 一样去掉。导航和真的一样是异步的
 function fakeRouter(query: Record<string, string>, name = 'bench') {
   const fullPath = (q: Record<string, string>) => `/spaces/s1/bench?${new URLSearchParams(q)}`
@@ -323,15 +356,6 @@ describe('选择失效的提示', () => {
 describe('运行中途作废', () => {
   const STEPS = [{ kind: 'whoami' as const }]
   const WHAT = { label: '我的场景', view: 'judged' as const }
-  const RESULT = {
-    run: 'abcd1234',
-    mode: 'real',
-    ok: true,
-    whoami: {} as WhoAmI,
-    counts: { passed: 1, failed: 0, skipped: 0, notRun: 0 },
-    steps: [],
-    replayDiverged: null,
-  } as BenchRunResult
 
   function deferred<T>() {
     let resolve!: (value: T) => void
@@ -464,5 +488,104 @@ describe('运行中途作废', () => {
     expect(bench.session.value.timeline).toEqual([])
     expect(bench.abandoned.value[0]?.description).toContain('「kioku_create」')
     expect(bench.abandoned.value[0]?.view).toBe('call')
+  })
+})
+
+describe('切换模式', () => {
+  async function inRealMode() {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    expect(bench.real.value).toBe(true)
+    return bench
+  }
+
+  it('切到真实每次都要确认，确认之前模式不变', async () => {
+    const bench = start()
+    await settle()
+    bench.requestMode(true)
+    expect(bench.confirmingReal.value).toBe(true)
+    expect(bench.real.value).toBe(false)
+    expect(bench.modeLoss.value).toBeNull()
+  })
+
+  it('真实模式下什么记录都没有：切回回滚不多问', async () => {
+    const bench = await inRealMode()
+    bench.requestMode(false)
+    expect(bench.confirmingRollback.value).toBe(false)
+    expect(bench.real.value).toBe(false)
+  })
+
+  it('真实模式下时间线有记录：切回回滚先确认，确认之前什么都不动', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.call([{ kind: 'whoami' }], 'kioku_create')
+    expect(bench.session.value.timeline).toHaveLength(1)
+    bench.requestMode(false)
+    expect(bench.confirmingRollback.value).toBe(true)
+    expect(bench.real.value).toBe(true)
+    await settle()
+    expect(bench.session.value.timeline).toHaveLength(1)
+    expect(bench.modeLoss.value).toContain('时间线（1 条）')
+    expect(bench.modeLoss.value).toContain('运行标记')
+
+    bench.confirmRollback()
+    await settle()
+    expect(bench.confirmingRollback.value).toBe(false)
+    expect(bench.real.value).toBe(false)
+    expect(bench.session.value.timeline).toEqual([])
+  })
+
+  it('真实模式下有场景结果：一样要确认', async () => {
+    const bench = await inRealMode()
+    bench.scenarioOutcome.value = { title: '场景', probe: false, result: RESULT }
+    bench.requestMode(false)
+    expect(bench.confirmingRollback.value).toBe(true)
+    expect(bench.modeLoss.value).toContain('场景结果')
+  })
+
+  it.each(['callFailure', 'scenarioFailure'] as const)(
+    '真实模式下有失败的说明（%s）：一样要确认',
+    async (field) => {
+      const bench = await inRealMode()
+      bench[field].value = '服务内部错误。可能已经执行了一部分，到活动里确认'
+      bench.requestMode(false)
+      expect(bench.confirmingRollback.value).toBe(true)
+      expect(bench.real.value).toBe(true)
+      expect(bench.modeLoss.value).toContain('运行失败的说明')
+    },
+  )
+
+  it('取消：模式与记录都不动', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.call([{ kind: 'whoami' }], 'kioku_create')
+    bench.requestMode(false)
+    bench.confirmingRollback.value = false
+    await settle()
+    expect(bench.real.value).toBe(true)
+    expect(bench.session.value.timeline).toHaveLength(1)
+  })
+
+  it('切到真实的确认框也说场景结果：不只看时间线', async () => {
+    const bench = start()
+    await settle()
+    bench.scenarioOutcome.value = { title: '场景', probe: false, result: RESULT }
+    bench.requestMode(true)
+    expect(bench.modeLoss.value).toContain('场景结果')
+  })
+
+  it('确认的时候 Key 没了：两个确认框都关掉', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.call([{ kind: 'whoami' }], 'kioku_create')
+    bench.requestMode(false)
+    bench.confirmingReal.value = true
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    expect(bench.confirmingRollback.value).toBe(false)
+    expect(bench.confirmingReal.value).toBe(false)
+    expect(bench.real.value).toBe(false)
   })
 })

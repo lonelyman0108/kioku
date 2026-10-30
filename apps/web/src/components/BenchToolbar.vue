@@ -22,10 +22,12 @@ const {
   selectionNotice,
   real,
   confirmingReal,
+  confirmingRollback,
+  modeLoss,
   requestMode,
   confirmReal,
+  confirmRollback,
   running,
-  session,
 } = useBench()
 
 const appItems = computed(() =>
@@ -134,15 +136,31 @@ const errorOf = (err: unknown, fallback: string) =>
           <ul class="list-disc space-y-1 pl-5">
             <li v-for="line in REAL_MODE_CONSEQUENCES" :key="line">{{ line }}</li>
           </ul>
-          <p v-if="session.timeline.length" class="text-muted">
-            这次会话的记录会清掉，回滚模式下保留的写入不会带过去。
-          </p>
+          <p v-if="modeLoss" class="text-muted">{{ modeLoss }}</p>
         </div>
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
           <UButton color="neutral" variant="ghost" @click="confirmingReal = false">取消</UButton>
           <UButton color="error" @click="confirmReal">切到真实模式</UButton>
+        </div>
+      </template>
+    </UModal>
+
+    <UModal
+      :open="confirmingRollback"
+      title="切回回滚？"
+      @update:open="(v) => !v && (confirmingRollback = false)"
+    >
+      <template #body>
+        <p class="text-sm">{{ modeLoss }}</p>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton color="neutral" variant="ghost" @click="confirmingRollback = false">
+            取消
+          </UButton>
+          <UButton color="warning" @click="confirmRollback">切回回滚</UButton>
         </div>
       </template>
     </UModal>

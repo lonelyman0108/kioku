@@ -161,6 +161,42 @@ describe('真实模式要确认', () => {
     expect(handler(buttonOf(toolbar.elements, '切到真实模式'), 'click')).toBe('confirmReal')
   })
 
+  it('切回回滚会清掉记录时要确认，确认框说清楚清掉什么；取消不动', () => {
+    const request = bodyOf(useBench, 'requestMode')
+    expect(request).toContain('else if (modeLoss.value) confirmingRollback.value = true')
+    expect(request).toContain("else mode.value = 'rollback'")
+    const modal = must(
+      toolbar.elements.find(
+        (el) => el.tag === 'UModal' && bound(el, 'open') === 'confirmingRollback',
+      ),
+      '切回回滚的确认框',
+    )
+    expect(shownIn(modal)).toEqual(['modeLoss'])
+    const nodes = walk(modal)
+    expect(handler(buttonOf(nodes, '切回回滚'), 'click')).toBe('confirmRollback')
+    expect(handler(buttonOf(nodes, '取消'), 'click')).toBe('confirmingRollback = false')
+    expect(bodyOf(useBench, 'confirmRollback')).toContain("mode.value = 'rollback'")
+  })
+
+  it('切到真实的确认框也说清掉什么，不只看时间线', () => {
+    const modal = must(
+      toolbar.elements.find((el) => el.tag === 'UModal' && bound(el, 'open') === 'confirmingReal'),
+      '切到真实的确认框',
+    )
+    expect(shownIn(withIf(walk(modal), 'modeLoss'))).toEqual(['modeLoss'])
+  })
+
+  it('会清掉的记录按共享的结果与报错算：分页用的就是这一份', () => {
+    const records = blockOf(useBench.replaceAll('\n  ', '\n'), 'const modeLoss = ')
+    expect(records).toContain('session.value.timeline.length')
+    expect(records).toContain('scenarioOutcome.value')
+    expect(records).toContain('callFailure.value || scenarioFailure.value')
+    expect(sfc(benchCalls).script).toMatch(/\bcallFailure: failure,[^}]*\} = useBench\(\)/)
+    const scenarios = sfc(benchScenariosView).script
+    expect(scenarios).toMatch(/\bscenarioFailure: failure,[^}]*\} = useBench\(\)/)
+    expect(scenarios).toMatch(/\bscenarioOutcome: outcome,[^}]*\} = useBench\(\)/)
+  })
+
   it('确认文字列出后果', () => {
     const line = withFor(toolbar.elements, 'line in REAL_MODE_CONSEQUENCES')
     expect(line.tag).toBe('li')

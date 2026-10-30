@@ -18,10 +18,12 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { contextDefaults, contextOf } from '../benchForm'
 import type { StepView } from '../benchResult'
+import type { ScenarioOutcome } from '../benchScenarios'
 import {
   abandonedRun,
   acceptDivergence,
   emptySession,
+  modeSwitchLoss,
   ownedApps,
   recordRun,
   replayFor,
@@ -128,19 +130,12 @@ export function createBench() {
   const mode = ref<BenchMode>('rollback')
   const real = computed(() => mode.value === 'real')
   const confirmingReal = ref(false)
-  // 切到真实要确认，切回回滚不用
-  function requestMode(wantReal: boolean) {
-    if (wantReal) confirmingReal.value = true
-    else mode.value = 'rollback'
-  }
-  function confirmReal() {
-    confirmingReal.value = false
-    mode.value = 'real'
-  }
+  const confirmingRollback = ref(false)
   // 换了应用或 Key 就回到回滚：真实模式是对着这把 Key 确认的
   watch([spaceId, appId, keyId], () => {
     mode.value = 'rollback'
     confirmingReal.value = false
+    confirmingRollback.value = false
   })
 
   const contextForm = reactive(contextDefaults())
@@ -158,6 +153,33 @@ export function createBench() {
     session.value = emptySession()
     generation.value++
   })
+
+  // 分页手上的结果与报错放在这里：切模式时它们跟着 generation 清掉，切之前要说清楚清掉什么
+  const callFailure = ref<string | null>(null)
+  const scenarioFailure = ref<string | null>(null)
+  const scenarioOutcome = shallowRef<ScenarioOutcome | null>(null)
+  const modeLoss = computed(() =>
+    modeSwitchLoss(mode.value, {
+      timeline: session.value.timeline.length,
+      replay: session.value.replay.length,
+      scenarioResult: Boolean(scenarioOutcome.value),
+      failed: Boolean(callFailure.value || scenarioFailure.value),
+    }),
+  )
+  // 切到真实每次都要确认；切回回滚只在会清掉记录时确认，没有东西可清时不多问
+  function requestMode(wantReal: boolean) {
+    if (wantReal) confirmingReal.value = true
+    else if (modeLoss.value) confirmingRollback.value = true
+    else mode.value = 'rollback'
+  }
+  function confirmReal() {
+    confirmingReal.value = false
+    mode.value = 'real'
+  }
+  function confirmRollback() {
+    confirmingRollback.value = false
+    mode.value = 'rollback'
+  }
 
   // 真实模式的请求有几个还没回来，包括中途作废的
   const realInFlight = ref(0)
@@ -259,8 +281,14 @@ export function createBench() {
     mode,
     real,
     confirmingReal,
+    confirmingRollback,
+    modeLoss,
     requestMode,
     confirmReal,
+    confirmRollback,
+    callFailure,
+    scenarioFailure,
+    scenarioOutcome,
     contextForm,
     sessionContext,
     running,

@@ -39,6 +39,7 @@ const {
   call,
   clearSession,
   acceptDiverged,
+  callFailure: failure,
 } = useBench()
 
 const tools = useQuery({
@@ -99,7 +100,6 @@ const contextDiffers = computed(() =>
   jsonContextDiffers(target.value, draft.value, sessionContext.value),
 )
 
-const failure = ref<string | null>(null)
 // 显示时间线上的哪一条；没选时显示最新的
 const shownId = ref<number | null>(null)
 const timeline = computed(() => [...session.value.timeline].reverse())

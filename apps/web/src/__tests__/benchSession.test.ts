@@ -21,6 +21,7 @@ import {
   divergenceNotice,
   emptySession,
   KEY_REPLACED_NOTICE,
+  modeSwitchLoss,
   ownedApps,
   REAL_MODE_CONSEQUENCES,
   recordRun,
@@ -223,6 +224,54 @@ describe('真实模式的运行中途作废', () => {
     for (const status of [400, 401, 403, 404, 413, 429]) {
       expect(abandonedRun(RUN, { error: new ApiError(status, '拒绝') })).toBeNull()
     }
+  })
+})
+
+describe('切换模式会清掉的记录', () => {
+  const NONE = { timeline: 0, replay: 0, scenarioResult: false, failed: false }
+
+  it('什么都没有：不用多问', () => {
+    expect(modeSwitchLoss('real', NONE)).toBeNull()
+    expect(modeSwitchLoss('rollback', NONE)).toBeNull()
+  })
+
+  it('真实模式：说清楚清掉时间线、场景结果、运行标记与失败的说明，写入不会撤回', () => {
+    const text = modeSwitchLoss('real', {
+      timeline: 3,
+      replay: 0,
+      scenarioResult: true,
+      failed: true,
+    })!
+    expect(text).toContain('调用台的时间线（3 条）')
+    expect(text).toContain('场景结果')
+    expect(text).toContain('运行失败的说明')
+    expect(text).toContain('运行标记')
+    expect(text).toContain('已经写下的不会撤回')
+  })
+
+  it.each([
+    ['只有时间线', { timeline: 1 }, ['时间线', '运行标记'], ['场景结果', '运行失败的说明']],
+    ['只有场景结果', { scenarioResult: true }, ['场景结果', '运行标记'], ['时间线']],
+    ['只有失败的说明', { failed: true }, ['运行失败的说明'], ['时间线', '场景结果', '运行标记']],
+  ])('真实模式，%s：只说有的那些', (_name, over, has, hasNot) => {
+    const text = modeSwitchLoss('real', { ...NONE, ...over })!
+    for (const part of has) expect(text).toContain(part)
+    for (const part of hasNot) expect(text).not.toContain(part)
+  })
+
+  it('回滚模式：场景结果也要说，运行标记不用说：没有写入可对应', () => {
+    const text = modeSwitchLoss('rollback', { ...NONE, scenarioResult: true })!
+    expect(text).toContain('场景结果')
+    expect(text).not.toContain('时间线')
+    expect(text).not.toContain('运行标记')
+    expect(text).not.toContain('保留的写入')
+  })
+
+  it('回滚模式：有保留的写入时说不会带过去', () => {
+    const text = modeSwitchLoss('rollback', { ...NONE, timeline: 2, replay: 1 })!
+    expect(text).toContain('调用台的时间线（2 条）')
+    expect(text).toContain('保留的写入不会带过去')
+    expect(modeSwitchLoss('rollback', { ...NONE, timeline: 2 })).not.toContain('保留的写入')
   })
 })
 
