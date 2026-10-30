@@ -8,6 +8,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { daysUntilPurge, deletionNotice, purgeAt, purgeNote } from '../retention'
@@ -35,6 +36,8 @@ const items = computed(() => deleted.data.value?.pages.flatMap((page) => page.it
 const retention = computed(() => deleted.data.value?.pages[0]?.retention ?? null)
 // 还剩这么几天就要永久清除的标出来
 const SOON_DAYS = 3
+// 还剩几天、警示色与「已过期」都按它算：页面一直开着也每分钟跟着变
+const now = useNow()
 
 const restoring = ref<string | null>(null)
 async function undelete(item: DeletedMemory) {
@@ -114,7 +117,7 @@ async function undelete(item: DeletedMemory) {
                 {{ sensitivityLabels[item.sensitivity] }}
               </UBadge>
               <UBadge
-                v-if="isExpired(item.validTo)"
+                v-if="isExpired(item.validTo, now)"
                 size="sm"
                 variant="outline"
                 color="warning"
@@ -127,17 +130,17 @@ async function undelete(item: DeletedMemory) {
             <span class="text-xs text-muted">
               删除于
               <time :datetime="item.deletedAt" :title="formatTime(item.deletedAt)">
-                {{ formatRelative(item.deletedAt) }}
+                {{ formatRelative(item.deletedAt, now) }}
               </time>
               <template v-if="retention">
                 ·
                 <span
                   :class="{
-                    'text-warning': daysUntilPurge(item.deletedAt, retention) <= SOON_DAYS,
+                    'text-warning': daysUntilPurge(item.deletedAt, retention, now) <= SOON_DAYS,
                   }"
                   :title="`最早在 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 之后清除`"
                 >
-                  {{ purgeNote(item.deletedAt, retention) }}
+                  {{ purgeNote(item.deletedAt, retention, now) }}
                 </span>
               </template>
             </span>
