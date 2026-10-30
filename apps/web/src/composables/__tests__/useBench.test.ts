@@ -850,7 +850,11 @@ const WRITE_CALL: BenchAgentToolCall = {
   parseError: null,
 }
 const TOOLS_LOOP = { loop: 'tools' as const, system: '基础', model: 'fake-model' }
-const CONSENT = { endpoint: 'model.example.com', model: 'fake-model', loop: 'tools' as const }
+const CONSENT = {
+  endpoint: 'https://model.example.com/v1',
+  model: 'fake-model',
+  loop: 'tools' as const,
+}
 
 // 模型一直不回，被取消时和真的 fetch 一样抛 AbortError。信号记下来：用例先断言它被取消了再等循环结束，
 // 这样取消的逻辑坏了时是断言失败，不是等到超时

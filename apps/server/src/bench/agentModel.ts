@@ -35,8 +35,12 @@ export interface AgentTurnInput {
   timeoutMs?: number
 }
 
-// 内容发给哪台主机，开始之前的提示要写明。只取主机名：地址里可能带账号密码，路径也用不着
-export const endpointHost = (baseUrl: string) => new URL(baseUrl).host
+// 内容发给哪个接口，开始之前的提示要写明。协议与路径都算：https 换成 http 是明文发，同一个网关换一段路径可能是另一家上游。
+// 不带账号密码、查询与片段，那里可能有凭据。结尾的斜杠不算，请求时也去掉
+export function endpointAddress(baseUrl: string): string {
+  const { origin, pathname } = new URL(baseUrl)
+  return `${origin}${pathname}`.replace(/\/+$/, '')
+}
 
 // 工具定义原样转发，只去掉没有语义的 $schema。别的字段等上游真的拒绝时才在这里转换，调用台与 MCP 不动
 export function toolDefinitions(tools: readonly BenchTool[]): AgentToolDefinition[] {

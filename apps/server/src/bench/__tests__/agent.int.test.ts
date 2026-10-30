@@ -283,13 +283,13 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: true,
         reason: null,
         defaultModel: 'fake-model',
-        endpoint: new URL(server.url).host,
+        endpoint: server.url,
         loop: 'hook',
         tools: true,
       })
     })
 
-    it('接口的主机名：不带账号密码与路径，端口留着；地址换了就跟着变', async () => {
+    it('接口的地址：协议、主机、端口与路径都在，不带账号密码、查询与片段；哪样变了都跟着变', async () => {
       const save = (baseUrl: string) =>
         saveExtractionConfig(database.db, masterKey, {
           baseUrl,
@@ -298,16 +298,22 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         })
       const endpoint = async () => BenchAgentInfo.parse(await (await getInfo()).json()).endpoint
 
-      await save('https://user:hunter2@model.example.com:8443/openai/v1?token=abc')
+      await save('https://user:hunter2@model.example.com:8443/openai/v1?token=abc#frag')
       const res = await getInfo()
       const text = await res.clone().text()
-      expect(BenchAgentInfo.parse(await res.json()).endpoint).toBe('model.example.com:8443')
-      for (const leaked of ['user', 'hunter2', 'openai', 'token', 'abc']) {
+      expect(BenchAgentInfo.parse(await res.json()).endpoint).toBe(
+        'https://model.example.com:8443/openai/v1',
+      )
+      for (const leaked of ['user', 'hunter2', 'token', 'abc', 'frag']) {
         expect(text).not.toContain(leaked)
       }
 
+      await save('http://model.example.com:8443/openai/v1')
+      expect(await endpoint()).toBe('http://model.example.com:8443/openai/v1')
+      await save('https://model.example.com:8443/anthropic/v1')
+      expect(await endpoint()).toBe('https://model.example.com:8443/anthropic/v1')
       await save('https://other.example.com/v1')
-      expect(await endpoint()).toBe('other.example.com')
+      expect(await endpoint()).toBe('https://other.example.com/v1')
     })
 
     // Key 解不开时查情况如实报不可用：界面才不会放开之后每次请求都是 400
@@ -315,7 +321,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       available: false,
       reason: 'keyLocked',
       defaultModel: 'fake-model',
-      endpoint: new URL(server.url).host,
+      endpoint: server.url,
       loop: 'hook',
       tools: true,
     })
@@ -438,7 +444,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: true,
         reason: null,
         defaultModel: 'fake-model',
-        endpoint: new URL(server.url).host,
+        endpoint: server.url,
         loop,
         tools,
       })

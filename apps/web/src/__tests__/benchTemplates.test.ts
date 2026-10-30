@@ -1071,14 +1071,14 @@ describe('模型对话的页面', () => {
     expect(directive(withTag(view.elements, 'BenchContextForm'), 'if')).toBe("loop !== 'tools'")
   })
 
-  it('开始前要点一下：提示写明主机、模型名与内容，点了才放开发送；任何一个变了再问', () => {
+  it('开始前要点一下：提示写明接口地址、模型名与内容，点了才放开发送；任何一个变了再问', () => {
     const alert = alertWith('consent && needsConsent && !agentSending')
     expect(bound(alert, 'description')).toBe('consentText(consent, mode)')
     expect(bound(alert, 'actions')).toBe('consentActions')
     const actions = blockOf(view.script, 'const consentActions = ')
     expect(actions).toContain('`发给 ${model.value}，开始对话`')
     expect(actions).toContain('onClick: () => consent.value && consentTo(consent.value)')
-    // 同意的键：服务端给的主机、这里的模型名、服务端给的循环
+    // 同意的键：服务端给的接口地址、这里的模型名、服务端给的循环
     const target = blockOf(view.script, 'const consent = ')
     expect(target).toContain('endpoint: info.data.value?.endpoint ?? null')
     expect(target).toContain('model: model.value')

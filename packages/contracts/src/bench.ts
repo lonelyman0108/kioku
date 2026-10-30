@@ -326,7 +326,7 @@ export const BenchAgentInfo = z.object({
   reason: BenchAgentUnavailable.nullable(),
   // 实例设置里的模型名。不是实例管理员时为 null：配没配、配的什么都是实例设置，不给他们看
   defaultModel: z.string().nullable(),
-  // 抽取模型接口的主机名：内容发给它，开始之前要写明。不带路径与账号密码；不是实例管理员或没配时为 null
+  // 抽取模型接口的地址（协议、主机与路径）：内容发给它，开始之前要写明。不带账号密码、查询与片段；不是实例管理员或没配时为 null
   endpoint: z.string().nullable(),
   loop: BenchAgentLoop,
   // 给不给模型工具

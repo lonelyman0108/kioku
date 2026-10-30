@@ -58,7 +58,7 @@ const USER_TEXT = '记下我喜欢喝茶'
 const SESSION_TEXT = '<启动上下文>'
 const RECALL_TEXT = '<recall>线索</recall>'
 const MODEL = 'fake-model'
-const HOST = 'model.example.com'
+const ENDPOINT = 'https://model.example.com/v1'
 
 const GROUP: SessionContextInput = {
   chatType: 'group',
@@ -2255,7 +2255,7 @@ describe('状态的更新', () => {
 
   it('history 之外的状态不丢：同意过的留着，序号递增', async () => {
     const h = harness({ loop: 'tools', turns: [reply('好'), reply('好')] })
-    const consented = { endpoint: HOST, model: MODEL, loop: 'tools' as const }
+    const consented = { endpoint: ENDPOINT, model: MODEL, loop: 'tools' as const }
     const start = { ...emptyConversation(), consented }
     const first = await h.send(USER_TEXT, start)
     const second = await h.send(USER_TEXT, first)
@@ -2266,7 +2266,7 @@ describe('状态的更新', () => {
 
 describe('开始之前的提示', () => {
   const target = (over: Partial<AgentConsent> = {}): AgentConsent => ({
-    endpoint: HOST,
+    endpoint: ENDPOINT,
     model: 'm',
     loop: 'hook',
     ...over,
@@ -2283,7 +2283,9 @@ describe('开始之前的提示', () => {
   })
 
   it.each([
-    ['接口换了：内容发给另一家', { endpoint: 'other.example.com' }],
+    ['接口换了：内容发给另一家', { endpoint: 'https://other.example.com/v1' }],
+    ['协议换了：内容明文发', { endpoint: 'http://model.example.com/v1' }],
+    ['路径换了：同一个网关换一家上游', { endpoint: 'https://model.example.com/other/v1' }],
     ['接口没有了', { endpoint: null }],
     ['模型名换了', { model: 'n' }],
     ['循环换了：从只发工具结果变成也发启动上下文', { loop: 'tools' }],
@@ -2298,16 +2300,16 @@ describe('开始之前的提示', () => {
     expect(consentNeeded(agreed, target({ loop: 'hook' }))).toBe(true)
   })
 
-  it('说清楚发给哪台主机的哪个模型', () => {
+  it('说清楚发给哪个接口的哪个模型', () => {
     const shown = consentText(
-      target({ endpoint: 'model.example.com:8443', model: 'deep-x' }),
+      target({ endpoint: 'https://model.example.com:8443/openai/v1', model: 'deep-x' }),
       'rollback',
     )
-    expect(shown).toContain('主机 model.example.com:8443 上的模型「deep-x」')
-    // 服务端没有给主机名时不写半句
+    expect(shown).toContain('会发给 https://model.example.com:8443/openai/v1 上的模型「deep-x」')
+    // 服务端没有给地址时不写半句
     const none = consentText(target({ endpoint: null, model: 'deep-x' }), 'rollback')
-    expect(none).toContain('模型「deep-x」')
-    expect(none).not.toContain('主机')
+    expect(none).toContain('会发给模型「deep-x」')
+    expect(none).not.toContain('上的模型')
   })
 
   it('说清楚发什么内容：按循环', () => {

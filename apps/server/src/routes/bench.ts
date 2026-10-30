@@ -18,7 +18,7 @@ import { isInstanceAdmin } from '../auth/middleware'
 import { agentGetsTools, agentLoopFor } from '../bench/agentLoop'
 import {
   AgentModelError,
-  endpointHost,
+  endpointAddress,
   requestAgentTurn,
   toolDefinitions,
 } from '../bench/agentModel'
@@ -83,7 +83,7 @@ const agentInfoRoute = createRoute({
   path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent',
   tags: ['bench'],
   summary:
-    '测试台：模型代理用不用得了（不是实例管理员也返回原因）、默认模型、接口的主机名、这个运行时的循环与给不给工具（只给应用主人）',
+    '测试台：模型代理用不用得了（不是实例管理员也返回原因）、默认模型、接口的地址、这个运行时的循环与给不给工具（只给应用主人）',
   request: { params: KeyParams },
   responses: { 200: jsonResponse('模型代理的情况', BenchAgentInfo), ...errors },
 })
@@ -157,7 +157,7 @@ export function benchRoutes(deps: Deps) {
             available: false,
             reason: 'keyLocked' as const,
             defaultModel: model,
-            endpoint: baseUrl && endpointHost(baseUrl),
+            endpoint: baseUrl && endpointAddress(baseUrl),
             ...runtime,
           },
           200,
@@ -168,7 +168,7 @@ export function benchRoutes(deps: Deps) {
           available: config.value !== null,
           reason: config.value ? null : ('noModel' as const),
           defaultModel: config.value?.model ?? null,
-          endpoint: config.value && endpointHost(config.value.baseUrl),
+          endpoint: config.value && endpointAddress(config.value.baseUrl),
           ...runtime,
         },
         200,

@@ -46,7 +46,7 @@ const {
   consentTo,
 } = useBench()
 
-// 用不用得了、默认模型、接口的主机、这个运行时走哪种循环
+// 用不用得了、默认模型、接口的地址、这个运行时走哪种循环
 const info = useQuery({
   queryKey: computed(() => ['bench-agent', spaceId.value, appId.value, keyId.value]),
   queryFn: () => api.benchAgent(spaceId.value, appId.value!, keyId.value!),
@@ -95,7 +95,7 @@ const modelText = computed(() => modelEdit.value ?? defaultModel.value)
 const model = computed(() => modelText.value.trim() || defaultModel.value)
 const system = ref(DEFAULT_SYSTEM_PROMPT)
 
-// 开始之前要点一下：内容会发给哪台主机的哪个模型，发什么内容。同一次对话不再问，主机、模型名、循环变了再问一次
+// 开始之前要点一下：内容会发给哪个接口的哪个模型，发什么内容。同一次对话不再问，接口地址、模型名、循环变了再问一次
 const consent = computed<AgentConsent | null>(() =>
   loop.value
     ? { endpoint: info.data.value?.endpoint ?? null, model: model.value, loop: loop.value }
@@ -292,6 +292,7 @@ watch(generation, () => {
         v-if="consent && needsConsent && !agentSending"
         color="warning"
         variant="subtle"
+        class="wrap-anywhere"
         title="开始之前"
         :description="consentText(consent, mode)"
         :actions="consentActions"
