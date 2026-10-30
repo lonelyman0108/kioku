@@ -223,8 +223,13 @@ export async function runSteps(
   const vars = new Map(builtin)
   // label 与断言的说明只展开这两个：capture 取到的可能是凭据的值，而命令行默认就打印它们
   const shown = (template: string) => String(expand(template, builtin))
-  // 前面的步骤声明了、却没有取到的变量：步骤被跳过的，依赖它的也跳过；没取到的，依赖它的算失败
+  // 前面的步骤声明了、却没有取到的变量：步骤被跳过的，依赖它的也跳过；没取到的，依赖它的算失败。
+  // 之前取到过的值也作废，依赖它的步骤不能静默用旧值
   const unavailable = new Map<string, 'skipped' | 'failed'>()
+  const invalidate = (name: string, state: 'skipped' | 'failed') => {
+    vars.delete(name)
+    unavailable.set(name, state)
+  }
 
   const base = (index: number, step: BenchStep) => ({
     index,
@@ -232,7 +237,7 @@ export async function runSteps(
     label: step.label ? shown(step.label) : defaultLabel(step),
   })
   const markCaptures = (step: BenchStep, state: 'skipped' | 'failed') => {
-    for (const name of Object.keys(step.capture ?? {})) unavailable.set(name, state)
+    for (const name of Object.keys(step.capture ?? {})) invalidate(name, state)
   }
 
   // 重放：有步骤报错就停下，当前步骤都不执行，由界面让用户清空或接受
@@ -273,7 +278,7 @@ export async function runSteps(
       continue
     }
     const missing = referencedVars([requestOf(step), step.expect])
-      .filter((name) => !vars.has(name) && unavailable.has(name))
+      .filter((name) => unavailable.has(name))
       .sort((a, b) => stateRank(unavailable.get(a)!) - stateRank(unavailable.get(b)!))[0]
     if (missing !== undefined) {
       if (unavailable.get(missing) === 'skipped') {
@@ -309,9 +314,12 @@ export async function runSteps(
 
     const assertions = check(step.expect, outcome, vars, shown)
     const { values, missing: uncaptured } = capturedValues(step.capture, outcome.text)
-    for (const [name, value] of Object.entries(values)) vars.set(name, value)
+    for (const [name, value] of Object.entries(values)) {
+      vars.set(name, value)
+      unavailable.delete(name)
+    }
     for (const [name, prefix] of uncaptured) {
-      unavailable.set(name, 'failed')
+      invalidate(name, 'failed')
       assertions.push({ message: `capture ${name}：结果里没有「${prefix}」`, ok: false })
     }
     const failed = outcome.internalError || assertions.some((a) => !a.ok)

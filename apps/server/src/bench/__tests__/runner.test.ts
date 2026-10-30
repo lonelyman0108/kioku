@@ -337,6 +337,88 @@ describe('变量与 capture', () => {
     expect(result.ok).toBe(true)
     expect(result.counts).toEqual({ passed: 0, failed: 0, skipped: 2, notRun: 0 })
   })
+
+  describe('之前取到过的变量', () => {
+    const uses = { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${version}' } } as const
+
+    it('后一步没取到：旧值作废，依赖它的步骤不执行、算失败', async () => {
+      const { executor, seen } = fakeExecutor((_, i) =>
+        textOutcome(i === 0 ? '版本: 1' : '什么都没有'),
+      )
+      const result = await run(
+        executor,
+        steps(
+          { kind: 'whoami', capture: { version: '版本: ' } },
+          { kind: 'whoami', capture: { version: '版本: ' } },
+          uses,
+        ),
+      )
+      expect(result.steps.map((s) => s.status)).toEqual(['passed', 'failed', 'failed'])
+      expect(result.steps[2]!.assertions).toEqual([
+        { message: '变量 ${version} 没有取到', ok: false },
+      ])
+      expect(seen).toHaveLength(2)
+    })
+
+    it('后一步被跳过：旧值作废，依赖它的也跳过', async () => {
+      const { executor, seen } = fakeExecutor(() => textOutcome('版本: 1'), { scopes: READONLY })
+      const result = await run(
+        executor,
+        steps(
+          { kind: 'whoami', capture: { version: '版本: ' } },
+          {
+            kind: 'tool',
+            tool: 'kioku_update',
+            requires: { writeLayers: ['private'] },
+            capture: { version: '版本: ' },
+          },
+          uses,
+        ),
+      )
+      expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'skipped'])
+      expect(result.steps[2]!.reason).toContain('${version}')
+      expect(seen).toHaveLength(1)
+    })
+
+    it('后一步因为依赖没取到而没执行：它声明的变量的旧值也作废', async () => {
+      const { executor, seen } = fakeExecutor((_, i) =>
+        textOutcome(i === 0 ? '版本: 1\n别的: 2' : '什么都没有'),
+      )
+      const result = await run(
+        executor,
+        steps(
+          { kind: 'whoami', capture: { version: '版本: ', other: '别的: ' } },
+          { kind: 'whoami', capture: { other: '别的: ' } },
+          {
+            kind: 'tool',
+            tool: 'kioku_get',
+            arguments: { uri: 'a://${other}' },
+            capture: { version: '版本: ' },
+          },
+          uses,
+        ),
+      )
+      expect(result.steps.map((s) => s.status)).toEqual(['passed', 'failed', 'failed', 'failed'])
+      expect(seen).toHaveLength(2)
+    })
+
+    it('作废之后又取到时恢复可用，用新值', async () => {
+      const { executor, seen } = fakeExecutor((_, i) =>
+        textOutcome(i === 0 ? '版本: 1' : i === 1 ? '什么都没有' : '版本: 3'),
+      )
+      const result = await run(
+        executor,
+        steps(
+          { kind: 'whoami', capture: { version: '版本: ' } },
+          { kind: 'whoami', capture: { version: '版本: ' } },
+          { kind: 'whoami', capture: { version: '版本: ' } },
+          uses,
+        ),
+      )
+      expect(result.steps.map((s) => s.status)).toEqual(['passed', 'failed', 'passed', 'passed'])
+      expect(seen[3]).toMatchObject({ arguments: { uri: 'a://3' } })
+    })
+  })
 })
 
 describe('跳过与没有执行', () => {
