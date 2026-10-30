@@ -42,15 +42,17 @@ async function save() {
   if (keyMissing.value) return
   saving.value = true
   try {
-    await api.saveExtractionSettings({
+    const saved = await api.saveExtractionSettings({
       baseUrl: form.baseUrl,
       model: form.model,
       ...(form.clearKey ? { apiKey: null } : form.apiKey ? { apiKey: form.apiKey } : {}),
     })
+    // 先换上保存之后的设置，再清掉填过的 Key：要不要重填 Key 按刚保存的主机与 Key 判断，
+    // 不等重新读取（等的时候、读取失败时会按旧的主机误报要重填）
+    queryClient.setQueryData(queryKey, saved)
     form.apiKey = ''
     form.clearKey = false
     result.value = null
-    await queryClient.invalidateQueries({ queryKey })
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
