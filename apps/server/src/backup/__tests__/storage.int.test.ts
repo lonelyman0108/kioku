@@ -420,6 +420,19 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect(result.error).toContain('存储返回 403')
   })
 
+  it('Secret 首尾的空白去掉再存；中间有换行的 400，原来存的不变', async () => {
+    await save({ secretAccessKey: ' backup-secret\n' })
+    const stored = async () => (await loadBackupConfig(database.db, masterKey))?.secretAccessKey
+    expect(await stored()).toBe('backup-secret')
+
+    const res = await send('PUT', '', settingsInput({ secretAccessKey: 'other\nsecret' }))
+    expect(res.status).toBe(400)
+    const { error } = (await res.json()) as { error: string }
+    expect(error).toContain('Secret Access Key 里不能有换行等控制字符')
+    expect(error).not.toContain('other')
+    expect(await stored()).toBe('backup-secret')
+  })
+
   it('Secret 解不开：报错按它的名字说，不叫 Key；提示轮换期间旧的那把配在哪里', async () => {
     await save()
     await expect(loadBackupConfig(database.db, null)).rejects.toThrow(

@@ -11,7 +11,7 @@ import { createApp } from '../../app'
 import type { Database } from '../../db/client'
 import { settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { saveExtractionConfig } from '../../extraction/settings'
+import { loadExtractionConfig, saveExtractionConfig } from '../../extraction/settings'
 import {
   openTestDatabase,
   resetDatabase,
@@ -224,6 +224,27 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
     } finally {
       logged.mockRestore()
     }
+  })
+
+  it('Key 首尾的空白去掉再存；中间有换行的 400，原来存的不变；只有空白的 400', async () => {
+    const put = (apiKey: string) =>
+      call('PUT', '', { baseUrl: `${baseUrl}/v1`, model: 'm', apiKey })
+    const stored = async () => (await loadExtractionConfig(database.db, masterKey))?.apiKey
+
+    expect((await put(' sk-extract\n')).status).toBe(200)
+    expect(await stored()).toBe('sk-extract')
+    await test()
+    expect(seen[0]?.authorization).toBe('Bearer sk-extract')
+
+    const inner = await put('sk-new\nkey')
+    expect(inner.status).toBe(400)
+    const { error } = (await inner.json()) as { error: string }
+    expect(error).toContain('不能有换行等控制字符')
+    expect(error).not.toContain('sk-new')
+    expect(await stored()).toBe('sk-extract')
+
+    expect((await put(' \n')).status).toBe(400)
+    expect(await stored()).toBe('sk-extract')
   })
 
   it('接口地址只收 http 与 https：别的协议的 origin 都是 "null"，会被当成同一个主机', async () => {

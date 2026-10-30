@@ -2,6 +2,16 @@ import { z } from 'zod'
 
 const BaseUrl = z.url({ protocol: /^https?$/, error: '接口地址要以 http:// 或 https:// 开头' })
 
+// 粘贴来的密钥：去掉首尾的空白（多带一个换行很常见），中间有控制字符就拒绝。放过去的话，它进请求头时 fetch 直接报错，
+// 进签名时算出来的签名对不上，都看不出是密钥的问题。name 是这个密钥叫什么
+const pastedSecret = (name: string) =>
+  z
+    .string()
+    .trim()
+    .min(1, `${name} 不能只有空白`)
+    .refine((value) => !/\p{Cc}/u.test(value), `${name} 里不能有换行等控制字符，检查粘贴的内容`)
+const ApiKey = pastedSecret('Key')
+
 // 嵌入渠道：同一个模型的一个接口。按顺序请求，前一个出错时换下一个；不同模型的向量不能混着比，所以一组渠道只能是同一个模型
 export const EmbeddingChannelView = z.object({
   id: z.string(),
@@ -36,7 +46,7 @@ export const EmbeddingChannelInput = z.object({
   baseUrl: BaseUrl,
   model: z.string().min(1).max(128),
   // 不填表示沿用已保存的 Key；填 null 表示这个渠道不用 Key
-  apiKey: z.string().min(1).nullable().optional(),
+  apiKey: ApiKey.nullable().optional(),
 })
 export type EmbeddingChannelInput = z.infer<typeof EmbeddingChannelInput>
 
@@ -93,7 +103,7 @@ export const UpdateExtractionSettings = z.object({
   baseUrl: BaseUrl,
   model: z.string().min(1).max(128),
   // 不填表示沿用已保存的 Key；填 null 表示清除
-  apiKey: z.string().min(1).nullable().optional(),
+  apiKey: ApiKey.nullable().optional(),
 })
 export type UpdateExtractionSettings = z.infer<typeof UpdateExtractionSettings>
 
@@ -264,7 +274,7 @@ export const UpdateBackupSettings = z.object({
   prefix: ObjectPrefix.default(''),
   accessKeyId: z.string().min(1).max(256),
   // 不填表示沿用已保存的（接口主机没变时）
-  secretAccessKey: z.string().min(1).max(256).optional(),
+  secretAccessKey: pastedSecret('Secret Access Key').max(256).optional(),
   // 每天几点（UTC）做备份
   hour: z.number().int().min(0).max(23),
   // 存储桶里留几份，更早的删掉

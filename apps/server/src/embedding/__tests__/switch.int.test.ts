@@ -27,7 +27,7 @@ import {
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { backfillJob, embedJobs, pruneJob, switchJob, type Retry } from '../jobs'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
-import { saveActiveEmbedding } from '../settings'
+import { loadEmbeddingSetups, saveActiveEmbedding } from '../settings'
 import { settingsEmbedderSource, staticEmbedderSource, type EmbedderSource } from '../source'
 
 describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
@@ -580,5 +580,25 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(active![0]!.error).not.toContain('sk-pasted')
     expect(active![0]!.error).not.toContain('with-newline')
     expect(server.requests).toEqual([])
+  })
+
+  it('Key 首尾的空白去掉再存；中间有换行的 400，什么都不改', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1', { apiKey: ' sk-chan\n' })] })
+    const stored = async () =>
+      (await loadEmbeddingSetups(database.db, masterKey)).active!.channels[0]!.apiKey
+    expect(await stored()).toBe('sk-chan')
+
+    for (const path of ['', '/next']) {
+      const res = await call('PUT', path, {
+        model: path ? 'm2' : 'm1',
+        channels: [channel('a', 'm1', { apiKey: 'sk-new\nkey' })],
+      })
+      expect(res.status).toBe(400)
+      const { error } = (await res.json()) as { error: string }
+      expect(error).toContain('不能有换行等控制字符')
+      expect(error).not.toContain('sk-new')
+    }
+    expect(await stored()).toBe('sk-chan')
+    expect((await view()).next).toBeNull()
   })
 })
