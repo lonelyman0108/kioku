@@ -37,7 +37,7 @@ const Id = z.guid()
 // 写进 jsonb（导入事件的快照）时报错，两个只差在代理项上的关键词还会变成同一个
 const storable = (s: string) => !s.includes('\0') && !/\p{Cs}/u.test(s)
 const UNSTORABLE = '含有存不进数据库的字符（NUL 或落单的代理项）'
-const Text = z.string().refine(storable, UNSTORABLE)
+export const Text = z.string().refine(storable, UNSTORABLE)
 
 // 用接口的定义检查的部分（外部凭据的来源）不管上面这一条：其中的字符串（包括键）逐个查
 function allStorable(value: unknown, ctx: z.RefinementCtx, path: (string | number)[] = []): void {
@@ -53,7 +53,7 @@ function allStorable(value: unknown, ctx: z.RefinementCtx, path: (string | numbe
   }
 }
 // 时间：格式对、确实是个日期，年份在 PostgreSQL 存得下的范围里（没有公元 0 年）
-const Time = z.iso.datetime({ offset: true }).refine((value) => {
+export const Time = z.iso.datetime({ offset: true }).refine((value) => {
   const at = new Date(value)
   return !Number.isNaN(at.getTime()) && at.getUTCFullYear() >= 1
 }, '不是有效的时间')

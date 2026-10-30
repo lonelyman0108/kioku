@@ -13,6 +13,7 @@ import { bindingRoutes } from './routes/binding'
 import { credentialRoutes } from './routes/credentials'
 import { dreamRoutes } from './routes/dream'
 import { health } from './routes/health'
+import { loreImportRoutes } from './routes/loreImport'
 import { mcpRoutes } from './routes/mcp'
 import { memoryRoutes } from './routes/memories'
 import { overviewRoutes } from './routes/overview'
@@ -88,6 +89,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', credentialRoutes(deps))
   app.route('/v1', overviewRoutes(deps))
   app.route('/v1', spaceRoutes(deps))
+  app.route('/v1', loreImportRoutes(deps))
   app.route('/v1', subjectRoutes(deps))
   app.route('/v1', reviewRoutes(deps))
   app.route('/v1', dreamRoutes(deps))

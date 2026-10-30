@@ -10,8 +10,8 @@
 
 | 期 | 进度 | 状态 | 结束标志 |
 |---|---|---|---|
-| 0 · 计划与设计 | 0/2 | 进行中 | 计划与设计合并 |
-| 1 · Lore 界面导入 | 0/6 | 未开始 | 同一时刻命令行 `--sync`（不加 `--apply`）与界面的计划逐项相同；在空间设置里用文件和地址各完成一次导入与同步 |
+| 0 · 计划与设计 | 2/2 | 已完成（#84） | 计划与设计合并 |
+| 1 · Lore 界面导入 | 6/6 | 审查中 | 同一时刻命令行 `--sync`（不加 `--apply`）与界面的计划逐项相同；在空间设置里用文件和地址各完成一次导入与同步 |
 | 2 · 测试台服务端 | 0/9 | 未开始 | 内置场景按三种执行方式、四种 Key 跑都是通过或跳过；回滚后所有表与 Key 的最后使用时间不变；命令行能对着真实服务跑 |
 | 3 · 测试台界面 | 0/5 | 未开始 | 不接任何客户端，在界面上走完 Claude Code 一次会话与 AstrBot 群聊一轮 |
 | 4 · 模型代理 | 0/6 | 未开始 | 界面上和真实模型对话，模型调工具读写记忆，回滚模式下不留痕迹，`secret` 与凭据值发不到模型 |
@@ -71,17 +71,17 @@
 
 ### 第 0 期 · 计划与设计
 
-- [ ] 本计划
-- [ ] `docs/design.md`：6.5 节「测试台」，4.3、10、11、13 节相应更新
+- [x] 本计划
+- [x] `docs/design.md`：6.5 节「测试台」，4.3、10、11、13 节相应更新
 
 ### 第 1 期 · Lore 界面导入
 
-- [ ] `packages/contracts`：`LORE_BACKUP_FORMAT`（字面量那一行加 `lint-comments: allow`，别处都引用常量）、请求（`tables` 只收五张表，严格）、计划视图（不含正文）、结果
-- [ ] `importer/loreBackup.ts`：`parseLoreBackup` 转成 `LoreSnapshot`，取舍规则与 `readLore` 相同。五张表都必填；zod 只声明用到的列；id 统一转字符串再连接；废弃行的 `content` 可缺；逐字段校验（照 `spaceRecords.ts` 的 Id、Text、Time），重复的路径或边、未来的时间、NUL 都拒绝。一致性测试：输入用 Lore `backup.ts` 的列在 `lore_fixture` 上查询、经 JSON 往返得到（不手写），夹具加不同毫秒的别名、只删了路径的节点、废弃行去掉正文的情况，按 uuid 比较
-- [ ] `importer/loreFetch.ts`：拉取。地址校验（只允许 http、https，拒绝账号密码、查询与片段）、不跟随重定向、时限、按流累计大小、把请求的 `signal` 传给 `fetch`；所有异常换成固定文字，日志只记主机与错误类别
-- [ ] `importer/lore.ts`：`ImportOptions` 加 `excludeUris`（在循环里、别名处理之后按 `node.uuid` 跳过，`runtimes` 仍取全部节点，`planSync` 的 snapshot 不过滤；对不上进 `plan.errors`；同时勾 secret 和不导入时以不导入为准）；`previewImport`（和 `applyImport` 同一段判断，给出每个目标的状态与会被设默认人格的应用）；`warnings` 改成结构化的 `{uri, kind}`，文字由命令行与界面各自拼；`assertExecutable(plan, masterKey)`（命令行与路由共用）；写库的 22、23 类错误算这一条失败，日志只记 SQLSTATE；指纹
-- [ ] 路由 `POST /spaces/{spaceId}/lore-import/plan`、`/apply`：`bodyLimit`（裁剪后的上限，413 带中文说明），角色在处理函数里查；`persona` 默认和命令行相同；`/apply` 只在「算基准计划、比指纹、写入」这段占导出导入的名额，`/plan` 与拉取不占，同步更新 `transferGate.ts` 顶部的说明；进入写入阶段后用 `try/finally` 排向量补齐。集成测试：权限（editor、非实例管理员拉取）；`masterKey` 为 null 又勾 secret 返回 400 且人格、应用、记忆的行数不变；打乱行序指纹不变；看过计划后改正文返回 409；旧文件默认不写、确认后才写，同一份文件再执行不算旧；第 N 条写入注入错误后重看计划能接着来（同一份文件不要求确认）；Token 与带账号密码的地址不进库与日志；**回归：命令行导入并同步过的数据，走 `/plan` 时 soul 是 current，八种状态与 `--sync` 逐项相同**
-- [ ] 界面 `components/LoreImport.vue`（空间设置，空间 owner）与纯模块 `loreBackup.ts`：选来源 → 看计划（映射、每个节点的状态、会进启动上下文的、引用的凭据、不导入的、像凭据的、同步差异）→ 勾选 → 确认 → 看结果。`failed` 或 `secretAlreadyImported` 非空时不显示成功；非 2xx 或网络错误时提示可能已部分写入、直接重看计划，不用旧指纹重试；409 后保留勾选；文件上限与「不要带召回事件」的提示；地址是 http 且不是内网时提示 Token 会明文传输；关掉上传控件的图片预览。vitest 测裁剪（输出只有五张表与 `format`、`created_at`，废弃行没有正文）。无头 Chrome 走查（CSP、暗色、窄屏）
+- [x] `packages/contracts`：`LORE_BACKUP_FORMAT`（字面量那一行加 `lint-comments: allow`，别处都引用常量）、请求（`tables` 只收五张表，严格）、计划视图（不含正文）、结果
+- [x] `importer/loreBackup.ts`：`parseLoreBackup` 转成 `LoreSnapshot`，取舍规则与 `readLore` 相同。五张表都必填；zod 只声明用到的列；id 统一转字符串再连接；废弃行的 `content` 可缺；逐字段校验（照 `spaceRecords.ts` 的 Id、Text、Time），重复的路径或边、超过一天的未来时间、NUL 都拒绝（请求体 32 MiB，单表 20 万行）。一致性测试：输入用 Lore `backup.ts` 的列在 `lore_fixture` 上查询、经 JSON 往返得到（不手写），夹具加不同毫秒的别名、只删了路径的节点、废弃行去掉正文的情况，按 uuid 比较
+- [x] `importer/loreFetch.ts`：拉取。地址校验（只允许 http、https，拒绝账号密码、查询与片段）、不跟随重定向、时限、按流累计大小、把请求的 `signal` 传给 `fetch`；128 MiB、120 秒；所有异常换成固定文字，日志只记主机与错误类别
+- [x] `importer/lore.ts`：`ImportOptions` 加 `excludeUris`（在循环里、别名处理之后按 `node.uuid` 跳过，`runtimes` 仍取全部节点，`planSync` 的 snapshot 不过滤；对不上进 `plan.errors`；同时勾 secret 和不导入时以不导入为准）；`previewImport`（和 `applyImport` 同一段判断，给出每个目标的状态与会被设默认人格的应用）；`warnings` 改成结构化的 `{uri, kind}`，文字由命令行与界面各自拼；`assertExecutable(plan, masterKey)`（命令行与路由共用）；写库的 22、23 类错误算这一条失败，日志只记 SQLSTATE；指纹
+- [x] 路由 `POST /spaces/{spaceId}/lore-import/plan`、`/apply`：`bodyLimit`（裁剪后的上限，413 带中文说明），角色在处理函数里查；`persona` 默认和命令行相同；`/apply` 只在「算基准计划、比指纹、写入」这段占导出导入的名额，`/plan` 与拉取不占，同步更新 `transferGate.ts` 顶部的说明；进入写入阶段后用 `try/finally` 排向量补齐。集成测试：权限（editor、非实例管理员拉取）；`masterKey` 为 null 又勾 secret 返回 400 且人格、应用、记忆的行数不变；打乱行序指纹不变；看过计划后改正文返回 409；旧文件默认不写、确认后才写，同一份文件再执行不算旧；第 N 条写入注入错误后重看计划能接着来（同一份文件不要求确认）；Token 与带账号密码的地址不进库与日志；**回归：命令行导入并同步过的数据，走 `/plan` 时 soul 是 current，八种状态与 `--sync` 逐项相同**
+- [x] 界面 `components/LoreImport.vue`（空间设置，空间 owner）与纯模块 `loreBackup.ts`：选来源 → 看计划（映射、每个节点的状态、会进启动上下文的、引用的凭据、不导入的、像凭据的、同步差异）→ 勾选 → 确认 → 看结果。`failed` 或 `secretAlreadyImported` 非空时不显示成功；非 2xx 或网络错误时提示可能已部分写入、直接重看计划，不用旧指纹重试；409 后保留勾选；文件上限与「不要带召回事件」的提示；地址是 http 且不是内网时提示 Token 会明文传输；关掉上传控件的图片预览。vitest 测裁剪（输出只有五张表与 `format`、`created_at`，废弃行没有正文）。无头 Chrome 走查（CSP、暗色、窄屏）
 
 ### 第 2 期 · 测试台服务端
 
@@ -126,6 +126,10 @@
 | 2026-10-30 | Lore 导出的大小 | 只读事务按导出的列算 `octet_length(to_jsonb(...))` | 72 个节点；默认导出约 10 MB（多数是 dream 日记与事件），导入要的五张表 1.3 MB；`recall_events` 70 万行、1.8 GB，默认不导出；`app_settings` 里有 2 个像密钥的键 |
 | 2026-10-30 | 回滚模式走得通 | scratchpad 脚本，连单独的库，把 `Deps.db` 换成事务代理，走真实的 `handleMcpRequest`、`handleLifecycle`、`resolveKeySession`、`bufferTurn` | 全部走通：带群聊上下文新建对象、并行的会话开始与召回、`tools/list`、新建后读得到、重复新建 409 后事务还能继续、改、移动、搜索、凭据、删除、`turn.end` 进缓冲。回滚后 memories、memory_events、subjects、subject_identities、conversation_turns、recall_events、credentials、credential_events 的行数和 Key 的最后使用时间都回到原样。证实 `kioku_credential` 会原样返回明文，要打码 |
 | 2026-10-30 | 主路径风险 | 只读事务查 Lore 的 `paths` | 线上没有多路径节点，也就没有同一毫秒的别名（决策 23）；2 个节点有正文但没有路径，`readLore` 本来就按路径走，不导入 |
+| 2026-10-30 | 第 1 期真实数据回归 | 同一时刻的 `pg_dump` 与 `GET` 导出，用真实 Lore 只读。命令行导入 72 条后，逐项比较命令行 `--sync`（不加 `--apply`）与 `/plan` | 全部一致：current 72，其余 0；文件与地址拉取的指纹相同。在副本上做出八种状态都非零的一组（update、current、edited、moved、deleted、skipped、unmapped、unreadable，加 goneFromLore），同样全部一致；界面写下的 sync 事件命令行也认。命令行的 stdout、stderr 与退出码新旧两版完全相同 |
+| 2026-10-30 | 第 1 期审查 | `/code-review high` | 10 条：修 8 条（计划显示后按回车就写入、指纹不覆盖默认人格、勾掉 soul 后留下空人格、disclosure 切开代理对、旧文件确认与服务端不一致、把确定没写的错误说成可能部分写入、启动上下文的数量算进不写的目标、没有勾选时算两遍）；1 条不成立（没有主密钥时启动检查就拒绝）；1 条（日志带正文的根源在 `app.onError`）放到第 2 期统一修。修复后真实数据回归再跑一遍，全部一致 |
+| 2026-10-30 | 第 1 期复审 | `/code-review medium`，只看修复提交 | 7 条，没有高危：修 5 条（跳过 soul 的同步让新应用没有默认人格、没写入新 soul 也重建人格、指纹带了无关的人格状态、失败说明的时机与来源分页、按中文文字判断部分写入），并顺手去掉了空应用；1 条（浏览器重算勾选结果）是已接受的取舍；设计的一句措辞改准。变异 44 项全部按断言失败；服务端与浏览器的应用映射对照 2 万份随机计划、5 万种勾法全部相同 |
+| 2026-10-30 | 第 1 期走查 | 无头 Chrome，真实导出 | CSP 违规 0；10 MB 的文件裁到约 275 KB，只有五张表，244 条废弃行不带正文；409 后自动重算、勾选还在；注入写库错误后提示可能部分写入，重看后接着做不重复；旧文件提醒；暗色与 360 宽。变异检查 52 项，除一项等价变异外都按断言失败 |
 | 2026-10-30 | 设计的对抗审查 | 安全、回滚保真度、Lore 导入、需求与可行性四个方向各一名审查者，发现再由独立核查者读代码反驳 | 51 条：成立 26、部分成立 22、驳回 3；核查后 1 条高危（打码写回覆盖 `secret`，决策 9）、16 条中危、31 条低危。已并入设计与本计划；留下的见「以后再做」 |
 
 ## 阻塞项
@@ -139,6 +143,8 @@
 - 上传的并发：`/plan` 只靠请求体上限，没有限制每个账号同时上传的个数。现在账号只有一个；成员管理上线时一起加。
 - 成员管理上线时：导入的去重键加上导入者；`importedMemories` 按 `canRead` 过滤，读不到的只算导入过、不给 URI、版本与状态（现在只有一个账号，走不到）。
 - 第一版的表单不追求覆盖全部 JSON Schema，复杂字段用 JSON。
+- 人格名称里含 NUL 时 `/plan` 能过、`/apply` 写人格时 500（只记 SQLSTATE，什么都没写）。`CreatePersonaRequest` 本身也没校验，要改就两处一起改。
+- `core://agent/<运行时>` 导入过、应用后来被删，再导入时应用仍会新建成空的，没有新记忆。`planImport` 不读库，要改得动预览、写入和界面。
 - 模拟「宿主实际拿到的文字」（例如 `mcp`、`other` 类型的应用拿到 `return_value`，钩子什么都不注入）与诊断类断言，第一版不做，启动预览和原始响应里看得到。
 
 ## 变更记录
