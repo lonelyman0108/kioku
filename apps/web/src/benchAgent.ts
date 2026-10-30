@@ -283,14 +283,6 @@ const toolStep = (call: BenchAgentToolCall): BenchStep => ({
   arguments: call.arguments ?? {},
 })
 
-// message.tool_calls 和 toolCalls 一一对应，解析失败时显示的参数原文从这里取
-function rawArgumentsOf(message: BenchAgentMessage, index: number): string {
-  const calls = message.tool_calls
-  const fn = Array.isArray(calls) ? (calls[index] as { function?: unknown } | null)?.function : null
-  const raw = (fn as { arguments?: unknown } | null | undefined)?.arguments
-  return typeof raw === 'string' ? raw : ''
-}
-
 const withContext = (context: SessionContextInput | undefined) => (context ? { context } : {})
 
 // 工具调用都是一次运行里的步骤，结果和请求一一对应；时间线的最后几条就是这次运行的
@@ -487,11 +479,11 @@ export async function sendAgentMessage(
     }
 
     working.push(turn.message)
-    const calls = turn.toolCalls.map((call, index): AgentToolTrace => ({
+    const calls = turn.toolCalls.map((call): AgentToolTrace => ({
       id: call.id,
       name: call.name,
       arguments: call.arguments,
-      rawArguments: rawArgumentsOf(turn.message, index),
+      rawArguments: call.rawArguments ?? '',
       reply: null,
       trace: null,
     }))

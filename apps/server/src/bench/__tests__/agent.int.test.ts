@@ -464,10 +464,28 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         { id: 'empty', name: 'kioku_boot', arguments: {}, parseError: null },
         { id: 'blank', name: 'kioku_boot', arguments: {}, parseError: null },
         { id: 'good', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
-        { id: 'bad', name: 'kioku_get', arguments: null, parseError: notJson },
-        { id: 'array', name: 'kioku_get', arguments: null, parseError: notObject },
+        {
+          id: 'bad',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: notJson,
+          rawArguments: '{"uri":',
+        },
+        {
+          id: 'array',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: notObject,
+          rawArguments: '[1]',
+        },
         { id: 'null', name: 'kioku_get', arguments: {}, parseError: null },
-        { id: 'text', name: 'kioku_get', arguments: null, parseError: notObject },
+        {
+          id: 'text',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: notObject,
+          rawArguments: '"core://agent"',
+        },
       ])
     })
 
@@ -517,12 +535,26 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(toolCalls).toEqual([
         { id: 'space', name: 'kioku_get', arguments: { uri: 'core://agent' }, parseError: null },
         { id: 'inner', name: 'kioku_get', arguments: { uri: 'core\n//agent' }, parseError: null },
-        { id: 'broken', name: 'kioku_get', arguments: null, parseError: '工具参数不是合法的 JSON' },
+        {
+          id: 'broken',
+          name: 'kioku_get',
+          arguments: null,
+          parseError: '工具参数不是合法的 JSON',
+          rawArguments: '{"uri":"core\n//agent',
+        },
       ])
     })
 
-    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，type 是 function，function 有非空的名字和字符串的
-    // 参数，后面按顺序跟齐对应的 tool 消息。不合规就 400
+    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，type 是 function，function 有非空的名字，参数是
+    // 字符串、内容是合法的 JSON，后面按顺序跟齐对应的 tool 消息。不合规就 400
+    const isJson = (text: unknown) => {
+      try {
+        JSON.parse(text as string)
+        return true
+      } catch {
+        return false
+      }
+    }
     const refusal = (messages: FakeChatMessage[]) => {
       for (const [i, message] of messages.entries()) {
         if (!('tool_calls' in message)) continue
@@ -541,6 +573,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         if (calls.some((call) => typeof call.function?.arguments !== 'string')) {
           return '参数不是字符串'
         }
+        if (calls.some((call) => !isJson(call.function?.arguments))) return '参数不是合法的 JSON'
         const answered = messages.slice(i + 1, i + 1 + ids.length).map((m) => m.tool_call_id)
         if (JSON.stringify(answered) !== JSON.stringify(ids)) return 'tool_call_id 对不上'
       }
@@ -658,9 +691,54 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         },
         { id: 'no-function', ...noName },
         { id: 'null-function', ...noName },
-        { id: 'no-name', ...noName },
+        { id: 'no-name', ...noName, rawArguments: '{"a":1}' },
         { id: 'other-type', ...noName },
         { id: 'bare', ...noName },
+      ])
+    })
+
+    it('工具参数解析失败或靠容忍才解析得过：原文不再重发，下一轮校验 JSON 的上游也接受', async () => {
+      const raw = [
+        ['broken', '{"uri":'],
+        ['tolerated', '{"uri":"core\n//agent"}'],
+        ['empty', ''],
+        ['blank', ' \n'],
+        ['strict', ' {"uri": "core://agent"} '],
+      ] as const
+      const calls = raw.map(([id, args]) => toolCall(id, 'kioku_get', args))
+      // 前提：这些参数原样放回去，校验 JSON 的上游不收（严格解析得过的那个除外）
+      for (const call of calls.filter((c) => c.id !== 'strict')) {
+        expect(
+          refusal([
+            { role: 'assistant', content: null, tool_calls: [call] },
+            toolMessage(call.id, '结果'),
+          ]),
+        ).toBe('参数不是合法的 JSON')
+      }
+
+      const server = await strictModel(() => ({ content: null, tool_calls: calls }))
+      const first = await turn({ messages: [USER] })
+      expect(first.toolCalls.map((c) => [c.id, c.arguments, c.parseError])).toEqual([
+        ['broken', null, '工具参数不是合法的 JSON'],
+        ['tolerated', { uri: 'core\n//agent' }, null],
+        ['empty', {}, null],
+        ['blank', {}, null],
+        ['strict', { uri: 'core://agent' }, null],
+      ])
+      // 界面还看得到模型写了什么
+      expect(first.toolCalls[0]!.rawArguments).toBe('{"uri":')
+
+      const history = [USER, first.message, ...raw.map(([id]) => toolMessage(id, '结果'))]
+      const second = await turn({ messages: history })
+      expect(second.message.content).toBe('调完了')
+      expect(server.requests[1]).toEqual(history)
+      const sent = server.requests[1]![1]!.tool_calls as { function: { arguments: string } }[]
+      expect(sent.map((call) => call.function.arguments)).toEqual([
+        '{}',
+        '{"uri":"core\\n//agent"}',
+        '{}',
+        '{}',
+        ' {"uri": "core://agent"} ',
       ])
     })
 

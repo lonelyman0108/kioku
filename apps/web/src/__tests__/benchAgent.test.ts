@@ -88,7 +88,14 @@ const toolCall = (
   name: string,
   args: Record<string, unknown> | null = {},
   parseError: string | null = null,
-): BenchAgentToolCall => ({ id, name, arguments: args, parseError })
+): BenchAgentToolCall => ({
+  id,
+  name,
+  arguments: args,
+  parseError,
+  // 和服务端一样：解析失败时才有原文
+  ...(args ? {} : { rawArguments: '{坏的' }),
+})
 
 // 模型的一次回复。message 和 toolCalls 一一对应，和服务端给的一样
 function reply(
@@ -107,7 +114,8 @@ function reply(
               type: 'function',
               function: {
                 name: call.name || 'unknown_tool',
-                arguments: call.arguments ? JSON.stringify(call.arguments) : '{坏的',
+                // 和服务端一样：放回历史的只有合法的 JSON，解析失败的换成 {}
+                arguments: call.arguments ? JSON.stringify(call.arguments) : '{}',
               },
             })),
           }
@@ -700,9 +708,12 @@ describe('工具调用', () => {
     ])
     const traced = last(done).rounds[0]!.calls
     expect(traced.map((c) => c.trace !== null)).toEqual([true, false, true, false])
+    // 显示的是模型写的原文，放回历史的已经换掉了
     expect(traced[1]!.rawArguments).toBe('{坏的')
     expect(argumentsText(traced[1]!)).toBe('{坏的')
     expect(argumentsText(traced[2]!)).toBe('{}')
+    expect(JSON.stringify(done.messages)).not.toContain('{坏的')
+    expect(argumentsText({ ...traced[1]!, rawArguments: '' })).toBe('（没有参数）')
   })
 
   it('全部解析失败：不发运行请求，把错误回给模型，它可以重试', async () => {
