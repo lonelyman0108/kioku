@@ -1387,6 +1387,54 @@ describe('模型对话', () => {
     expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
   })
 
+  it('真实模式：一轮里新建被拒，删除没有发到运行接口，中间的读操作照发', async () => {
+    const bench = await inRealMode()
+    const broken = { id: 'new', name: 'kioku_create', arguments: null, parseError: '坏了' }
+    const read = {
+      id: 'get',
+      name: 'kioku_get',
+      arguments: { uri: 'core://old' },
+      parseError: null,
+    }
+    const remove = {
+      id: 'del',
+      name: 'kioku_delete',
+      arguments: { uri: 'core://old' },
+      parseError: null,
+    }
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [broken, read, remove]))
+      .mockResolvedValueOnce(modelReply('好'))
+    fakes.api.benchRun.mockResolvedValueOnce(RESULT)
+    const finished = await bench.sendToAgent('换一条', TOOLS_LOOP)
+    expect(finished?.end).toBe('done')
+    expect(fakes.api.benchRun).toHaveBeenCalledTimes(1)
+    const [, , , request] = fakes.api.benchRun.mock.calls[0]!
+    expect(request.mode).toBe('real')
+    expect(request.steps).toEqual([
+      { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'core://old' } },
+    ])
+    // 只读的运行：清空对话不用确认
+    expect(bench.agent.value.mayHaveWritten).toBe(false)
+  })
+
+  it('真实模式：一轮里只有被拒的新建和删除：运行接口一次都没有请求', async () => {
+    const bench = await inRealMode()
+    const broken = { id: 'new', name: 'kioku_create', arguments: null, parseError: '坏了' }
+    const remove = {
+      id: 'del',
+      name: 'kioku_delete',
+      arguments: { uri: 'core://old' },
+      parseError: null,
+    }
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [broken, remove]))
+      .mockResolvedValueOnce(modelReply('好'))
+    await bench.sendToAgent('换一条', TOOLS_LOOP)
+    expect(fakes.api.benchRun).not.toHaveBeenCalled()
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(2)
+  })
+
   it('真实模式下工具写了数据：缓存重新读，运行标记记在轨迹上', async () => {
     const bench = start()
     await settle()

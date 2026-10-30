@@ -976,6 +976,168 @@ describe('一轮的工具调用放不进一次运行', () => {
   })
 })
 
+describe('一轮里有调用没有执行之后，后面的写操作不接着做', () => {
+  const NOT_CONTINUED = '没有执行：这一轮前面有调用没有执行，这个写操作不接着做，看清前面的结果再调'
+  const BROKEN = '没有执行：工具参数不是合法的 JSON'
+  const broken = toolCall('new', 'kioku_create', null, '工具参数不是合法的 JSON')
+  const remove = toolCall('del', 'kioku_delete', { uri: 'core://old' })
+  const get = toolCall('get', 'kioku_get', { uri: 'core://old' })
+  const list = toolCall('list', 'kioku_list')
+  const sentTools = (h: ReturnType<typeof harness>) =>
+    h.runs.flatMap((r) => r.steps.map((s) => (s as { tool: string }).tool))
+
+  it.each(['real', 'rollback'] as const)(
+    '%s：新建的参数坏了，删除也不发：旧的不能没了新的又没写；模型看得到两个都没有执行',
+    async (mode) => {
+      const h = harness({
+        mode,
+        loop: 'tools',
+        turns: [reply(null, [broken, remove]), reply('好')],
+      })
+      const done = await h.send(USER_TEXT)
+      expect(h.runs).toEqual([])
+      expect(toolMessages(done.messages).map((m) => [m.tool_call_id, m.content])).toEqual([
+        ['new', BROKEN],
+        ['del', NOT_CONTINUED],
+      ])
+      expect(h.turnRequests).toHaveLength(2)
+      expect(last(done).end).toBe('done')
+      expect(done.mayHaveWritten).toBe(false)
+      expect(done.session.replay).toEqual([])
+      expect(last(done).rounds[0]!.calls.map((c) => c.reply)).toEqual([BROKEN, NOT_CONTINUED])
+      expect(sentToolCalls(done)).toEqual([])
+    },
+  )
+
+  it.each(['real', 'rollback'] as const)('%s：新建太大被拒，删除一样不发', async (mode) => {
+    const huge = toolCall('new', 'kioku_create', {
+      uri: 'core://new',
+      content: 'x'.repeat(BENCH_MAX_REQUEST_BYTES),
+    })
+    const h = harness({ mode, loop: 'tools', turns: [reply(null, [huge, remove]), reply('好')] })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs).toEqual([])
+    const [first, second] = toolMessages(done.messages).map((m) => m.content as string)
+    expect(first).toContain('请求体上限')
+    expect(second).toBe(NOT_CONTINUED)
+  })
+
+  it('超过一轮的步数：第 51 个被拒，再后面的写操作说的是不接着做', async () => {
+    const lists = Array.from({ length: 51 }, (_, i) => toolCall(`c${i}`, 'kioku_list'))
+    const h = harness({
+      mode: 'real',
+      loop: 'tools',
+      turns: [reply(null, [...lists, remove]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(sentTools(h)).toEqual(Array.from({ length: 50 }, () => 'kioku_list'))
+    const tools = toolMessages(done.messages)
+    expect(tools.at(-2)!.content).toContain('一轮最多执行 50 个')
+    expect(tools.at(-1)!.content).toBe(NOT_CONTINUED)
+  })
+
+  it('读操作照常执行，顺序不变；tool 消息按原来的顺序', async () => {
+    const h = harness({
+      mode: 'real',
+      loop: 'tools',
+      turns: [reply(null, [broken, get, remove, list]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(sentTools(h)).toEqual(['kioku_get', 'kioku_list'])
+    expect(toolMessages(done.messages).map((m) => [m.tool_call_id, m.content])).toEqual([
+      ['new', BROKEN],
+      ['get', 'kioku_get 的结果'],
+      ['del', NOT_CONTINUED],
+      ['list', 'kioku_list 的结果'],
+    ])
+    expect(done.mayHaveWritten).toBe(false)
+  })
+
+  it('被拒的调用前面的写操作照做：模型写的顺序里它没有依赖后面的', async () => {
+    const create = toolCall('w', 'kioku_create', { uri: 'core://a', content: '甲' })
+    const h = harness({
+      mode: 'real',
+      loop: 'tools',
+      turns: [reply(null, [create, broken, remove]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(sentTools(h)).toEqual(['kioku_create'])
+    expect(toolMessages(done.messages).map((m) => m.content)).toEqual([
+      'kioku_create 的结果',
+      BROKEN,
+      NOT_CONTINUED,
+    ])
+    expect(done.mayHaveWritten).toBe(true)
+  })
+
+  it.each([
+    ['kioku_create', { uri: 'core://a', content: '甲' }],
+    ['kioku_update', { uri: 'core://a', content: '乙' }],
+    ['kioku_delete', { uri: 'core://a' }],
+    ['kioku_move', { from: 'core://a', to: 'core://b' }],
+    ['kioku_credential_save', { identifier: 'x' }],
+    ['kioku_credential_delete', { identifier: 'x' }],
+    // 取值记访问事件，契约算写
+    ['kioku_credential', { identifier: 'x' }],
+    // 不认识的工具按写算
+    ['some_other_tool', {}],
+  ] as [string, Record<string, unknown>][])('%s 算写操作：不接着做', async (name, args) => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [broken, toolCall('w', name, args)]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs).toEqual([])
+    expect(toolMessages(done.messages)[1]!.content).toBe(NOT_CONTINUED)
+  })
+
+  it.each([
+    ['kioku_boot', {}],
+    ['kioku_search', { query: '茶' }],
+    ['kioku_get', { uri: 'core://a' }],
+    ['kioku_list', {}],
+    // 不带 identifier 只是列出，契约不算写
+    ['kioku_credential', {}],
+  ] as [string, Record<string, unknown>][])('%s 算读操作：照常执行', async (name, args) => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [broken, toolCall('r', name, args)]), reply('好')],
+    })
+    await h.send(USER_TEXT)
+    expect(sentTools(h)).toEqual([name])
+  })
+
+  it('名字不合法被拒也一样：后面的写操作不接着做', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [toolCall('long', 'x'.repeat(65)), remove]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs).toEqual([])
+    expect(toolMessages(done.messages)[1]!.content).toBe(NOT_CONTINUED)
+  })
+
+  it('没有调用被拒：写操作都发，顺序不变', async () => {
+    const create = toolCall('w', 'kioku_create', { uri: 'core://a', content: '甲' })
+    const h = harness({
+      mode: 'real',
+      loop: 'tools',
+      turns: [reply(null, [create, remove]), reply('好')],
+    })
+    await h.send(USER_TEXT)
+    expect(sentTools(h)).toEqual(['kioku_create', 'kioku_delete'])
+  })
+
+  it('只管同一轮：上一轮有调用被拒，这一轮的写操作照常', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [broken]), reply(null, [remove]), reply('好')],
+    })
+    await h.send(USER_TEXT)
+    expect(sentTools(h)).toEqual(['kioku_delete'])
+  })
+})
+
 describe('toolReply：回给模型的文字不能是空的', () => {
   it('正常结果用步骤的 text', () => {
     expect(toolReply(baseStep({ text: '正文' }))).toBe('正文')

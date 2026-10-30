@@ -314,7 +314,8 @@ const textBytes = (text: string) => new TextEncoder().encode(text).length
 
 // 这一轮每个工具调用发不出去的原因，能发的是 null。步数或请求体超过运行接口的上限时运行请求会被整个拒绝，同一轮别的调用
 // 也跟着失败，所以按顺序放，放不下的作为工具错误回给模型，它可以下一轮再调；后面小的放得下就接着放。
-// 请求体按真的发出去的算：重放也在里面，步骤之间有逗号
+// 有调用发不出去之后，后面的写操作也不发：它可能依赖前面那个（先建新的再删旧的，新建被拒、删除照做的话，旧的没了新的没写），
+// 让模型看清结果再来。读操作照常。请求体按真的发出去的算：重放也在里面，步骤之间有逗号
 function callRefusals(
   calls: readonly BenchAgentToolCall[],
   loop: BenchAgentLoop,
@@ -323,19 +324,29 @@ function callRefusals(
 ): (string | null)[] {
   let steps = 0
   let bytes = textBytes(JSON.stringify({ mode, steps: [], replay }))
-  return calls.map((call) => {
-    const refusal = callRefusal(call, loop)
-    if (refusal) return refusal
+  let refused = false
+  const refusalOf = (call: BenchAgentToolCall): string | null => {
+    const invalid = callRefusal(call, loop)
+    if (invalid) return invalid
+    const step = toolStep(call)
+    if (refused && mayWrite(step)) {
+      return '没有执行：这一轮前面有调用没有执行，这个写操作不接着做，看清前面的结果再调'
+    }
     if (steps === BENCH_MAX_STEPS) {
       return `没有执行：一轮最多执行 ${BENCH_MAX_STEPS} 个工具调用，这个超出了，可以下一轮再调`
     }
-    const size = textBytes(JSON.stringify(toolStep(call))) + (steps ? 1 : 0)
+    const size = textBytes(JSON.stringify(step)) + (steps ? 1 : 0)
     if (bytes + size > BENCH_MAX_REQUEST_BYTES) {
       return `没有执行：运行请求放不下这个调用（请求体上限 ${formatBytes(BENCH_MAX_REQUEST_BYTES)}），可以把参数改小，或者下一轮再调`
     }
     steps += 1
     bytes += size
     return null
+  }
+  return calls.map((call) => {
+    const refusal = refusalOf(call)
+    if (refusal) refused = true
+    return refusal
   })
 }
 
