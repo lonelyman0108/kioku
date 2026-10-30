@@ -26,4 +26,15 @@ describe('GET /v1/health', () => {
     const doc = (await res.json()) as { paths: Record<string, unknown> }
     expect(Object.keys(doc.paths)).toContain('/v1/health')
   })
+
+  it('测试台的接口都归在 bench 下：不进 Python SDK，也不和管理界面的别的接口混在一起', async () => {
+    const res = await app.request('/v1/openapi.json')
+    const doc = (await res.json()) as {
+      paths: Record<string, Record<string, { tags?: string[] }>>
+    }
+    const bench = Object.entries(doc.paths).filter(([path]) => path.includes('/bench/'))
+    const tags = bench.flatMap(([, operations]) => Object.values(operations).map((o) => o.tags))
+    expect(tags).toHaveLength(5)
+    for (const tag of tags) expect(tag).toEqual(['bench'])
+  })
 })

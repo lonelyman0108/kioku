@@ -1,5 +1,7 @@
 import { AwsClient } from 'aws4fetch'
 
+import { fetchFailure } from '../settings/endpoint'
+
 // 兼容S3的对象存储的最小客户端：放、取、删一个对象，列出一个前缀下的对象。用路径式的地址
 // （<接口>/<存储桶>/<对象名>），MinIO、Cloudflare、Backblaze 等的对象存储都支持；签名（SigV4）交给 aws4fetch
 export interface S3Location {
@@ -64,16 +66,19 @@ export function s3Client(location: S3Location) {
     url: string,
     options: { body?: Uint8Array; timeoutMs?: number } = {},
   ): Promise<Response> {
+    const timeoutMs = options.timeoutMs ?? TIMEOUT_MS
+    const timeout = AbortSignal.timeout(timeoutMs)
     let res: Response
     try {
       res = await aws.fetch(url, {
         method,
         ...(options.body ? { body: options.body } : {}),
-        signal: AbortSignal.timeout(options.timeoutMs ?? TIMEOUT_MS),
+        signal: timeout,
       })
     } catch (err) {
-      const cause = (err as { cause?: { message?: string } }).cause?.message
-      throw new S3Error(`连不上存储：${cause ?? (err as Error).message}`)
+      if (timeout.aborted) throw new S3Error(`存储 ${Math.ceil(timeoutMs / 1000)} 秒内没有返回`)
+      // 不用错误自己的文字：访问密钥或会话令牌里有换行时，它把整个请求头（Credential 与 Signature）写进错误
+      throw new S3Error(fetchFailure('存储', err))
     }
     if (!res.ok) throw new S3Error(await describe(res))
     return res

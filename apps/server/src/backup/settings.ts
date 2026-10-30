@@ -15,6 +15,7 @@ const KEY = 'backup'
 const STATUS_KEY = 'backup-status'
 const AAD = `settings:${KEY}`
 export const BACKUP_LABEL = '备份存储'
+const SECRET_NAME = 'Secret Access Key'
 
 interface Stored {
   endpoint: string
@@ -135,7 +136,7 @@ export async function saveBackupSettings(
       masterKey,
       AAD,
       BACKUP_LABEL,
-      { name: 'Secret Access Key', required: true },
+      { name: SECRET_NAME, required: true },
     )!
     const value: Stored = {
       // 去掉末尾的 /：同一个地址写法不同，不该算成换了位置
@@ -186,7 +187,7 @@ export async function loadBackupConfig(
     bucket: stored.bucket,
     prefix: stored.prefix,
     accessKeyId: stored.accessKeyId,
-    secretAccessKey: openApiKey(masterKey, stored.secretAccessKey, AAD, BACKUP_LABEL),
+    secretAccessKey: openApiKey(masterKey, stored.secretAccessKey, AAD, BACKUP_LABEL, SECRET_NAME),
     hour: stored.hour,
     keep: stored.keep,
   }

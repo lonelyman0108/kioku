@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { Writable } from 'node:stream'
 
 import type { MasterKey } from '../crypto/keyring'
-import type { Db } from '../db/client'
+import { errorText, type Db } from '../db/client'
 import { createBackup } from './export'
 import { s3Client, type S3Client, type S3Location, type S3Object } from './s3'
 import {
@@ -93,7 +93,7 @@ export async function backupJob(
     await recordBackupSuccess(db, config, run, warning)
     return 'done'
   } catch (err) {
-    await recordBackupError(db, target, (err as Error).message, startedAt)
+    await recordBackupError(db, target, errorText(err), startedAt)
     return 'failed'
   }
 }

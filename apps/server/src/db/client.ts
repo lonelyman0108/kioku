@@ -105,6 +105,13 @@ export function logInternalError(where: string, err: unknown): void {
   console.error(where, loggableError(err))
 }
 
+// 能记进「最近的错误」、给人看的文字：drizzle 错误的 message 带着 SQL 与全部参数（正文、密文都可能在里面），
+// 只给数据库报的说明，没有说明时也不退回 message。别的错误给它自己的 message
+export function errorText(err: unknown): string {
+  if (err instanceof DrizzleQueryError) return err.cause?.message ?? '数据库出错'
+  return err instanceof Error ? err.message : String(err)
+}
+
 // 违反了指定的唯一约束
 export function isUniqueViolation(err: unknown, constraint: string): boolean {
   const pg = pgError(err)

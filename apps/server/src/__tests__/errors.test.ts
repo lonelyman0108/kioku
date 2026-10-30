@@ -6,7 +6,7 @@ import { HTTPException } from 'hono/http-exception'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../app'
-import { loggableError, type Db } from '../db/client'
+import { errorText, loggableError, type Db } from '../db/client'
 import { staticEmbedderSource } from '../embedding/source'
 
 // 初始化与登录在读数据库之前先校验请求体，用一个碰不得的数据库就够了：校验没拦下的请求一读库就出错
@@ -171,5 +171,23 @@ describe('请求本身有问题时的回复', () => {
       constraint: 'memories_priority_check',
       message: 'new row violates check constraint "memories_priority_check"',
     })
+  })
+})
+
+describe('记进最近的错误的文字', () => {
+  it('drizzle 的错误只留数据库报的说明，没有 SQL 与参数', () => {
+    const cause = new Error('new row violates check constraint "memories_priority_check"')
+    expect(errorText(new DrizzleQueryError(SQL_TEXT, [PARAM], cause))).toBe(cause.message)
+  })
+
+  it('drizzle 的错误没有说明时给固定文字，不退回带 SQL 的 message', () => {
+    expect(errorText(new DrizzleQueryError(SQL_TEXT, [PARAM]))).toBe('数据库出错')
+  })
+
+  it('别的错误不变：有 cause 也给它自己的 message', () => {
+    expect(errorText(new Error('存储返回 403'))).toBe('存储返回 403')
+    const wrapped = new Error('Key 解不开，看看主密钥', { cause: new Error('bad decrypt') })
+    expect(errorText(wrapped)).toBe('Key 解不开，看看主密钥')
+    expect(errorText('不是错误对象')).toBe('不是错误对象')
   })
 })

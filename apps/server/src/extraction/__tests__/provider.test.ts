@@ -1,3 +1,5 @@
+import { inspect } from 'node:util'
+
 import { describe, expect, it } from 'vitest'
 
 import { openAiChatModel } from '../provider'
@@ -95,5 +97,81 @@ describe('OpenAI 兼容的抽取模型客户端', () => {
       (async () => Response.json({ choices: [] })) as unknown as typeof fetch,
     )
     await expect(empty.complete([{ role: 'user', content: 'x' }])).rejects.toThrow('choices')
+  })
+
+  it('上游把 Key 写进报错时换掉，先换再截断，Key 跨在截断处也不留半截', async () => {
+    const complete = (text: string, apiKey = 'sk-secret') =>
+      openAiChatModel(
+        { baseUrl: 'https://llm.example.com/v1', model: 'm', apiKey },
+        (async () => new Response(text, { status: 401 })) as unknown as typeof fetch,
+      ).complete([{ role: 'user', content: 'x' }])
+    await expect(complete('无效的 Key：sk-secret！')).rejects.toThrow(
+      '抽取模型返回 HTTP 401：无效的 Key：***！',
+    )
+    // 保存的带着结尾的换行，上游见到的是 fetch 去掉之后的
+    await expect(complete('无效的 Key：sk-secret！', 'sk-secret\n')).rejects.toThrow(
+      '抽取模型返回 HTTP 401：无效的 Key：***！',
+    )
+    const cut = (await complete(`${'x'.repeat(295)}sk-secret${'y'.repeat(100)}`).catch(
+      (e: unknown) => e,
+    )) as Error
+    expect(cut.message).toContain('x'.repeat(295))
+    expect(cut.message).not.toContain('sk-')
+  })
+
+  it('200 但不是 JSON、响应开头就是 Key：报固定文字，错误和 cause 里都没有响应的内容', async () => {
+    const model = openAiChatModel(
+      { baseUrl: 'https://llm.example.com/v1', model: 'm', apiKey: 'sk-secret' },
+      (async () => new Response('sk-secret 无效')) as unknown as typeof fetch,
+    )
+    const err = (await model
+      .complete([{ role: 'user', content: 'x' }])
+      .catch((e: unknown) => e)) as Error
+    expect(err.message).toBe('抽取模型的响应不是合法的 JSON')
+    expect(inspect(err, { depth: null })).not.toContain('sk-')
+  })
+
+  it('读正文时连接断了：不当成响应不是 JSON', async () => {
+    const model = openAiChatModel(
+      { baseUrl: 'https://llm.example.com/v1', model: 'm', apiKey: null },
+      (async () =>
+        new Response(
+          new ReadableStream({
+            start(controller) {
+              controller.error(new Error('连接断了'))
+            },
+          }),
+        )) as unknown as typeof fetch,
+    )
+    await expect(model.complete([{ role: 'user', content: 'x' }])).rejects.toThrow('连接断了')
+  })
+
+  it('Key 中间有换行：真实的 fetch 把整个请求头写进错误，这里报连不上，错误和 cause 里都没有 Key', async () => {
+    const model = openAiChatModel({
+      baseUrl: 'http://127.0.0.1:9/v1',
+      model: 'm',
+      apiKey: 'sk-pasted\nwith-newline',
+    })
+    const err = (await model
+      .complete([{ role: 'user', content: 'x' }])
+      .catch((e: unknown) => e)) as Error
+    expect(err.message).toContain('连不上抽取模型')
+    const text = inspect(err, { depth: null })
+    expect(text).not.toContain('sk-pasted')
+    expect(text).not.toContain('with-newline')
+  })
+
+  it('连不上时带错误类别，不带错误原文', async () => {
+    const model = openAiChatModel(
+      { baseUrl: 'https://llm.example.com/v1', model: 'm', apiKey: 'sk-secret' },
+      (async () => {
+        throw Object.assign(new TypeError('fetch failed sk-secret'), {
+          cause: Object.assign(new Error('connect sk-secret'), { code: 'ECONNREFUSED' }),
+        })
+      }) as unknown as typeof fetch,
+    )
+    await expect(model.complete([{ role: 'user', content: 'x' }])).rejects.toThrow(
+      '连不上抽取模型（ECONNREFUSED）：检查实例设置里的接口地址与 Key',
+    )
   })
 })
