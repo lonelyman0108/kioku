@@ -6,6 +6,7 @@ import type {
   BenchScenarioList,
   BenchStepResult,
   BenchToolList,
+  CredentialEventList,
 } from '@kioku/contracts'
 import { desc, eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -454,6 +455,61 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         replay: [entry],
       }).catch((err: Error) => err.message)
       expect(replayed).toContain('HTTP 400')
+    })
+
+    it('外部绑定：回滚模式换成占位文字、不记访问；真实模式照常返回，访问记录带标记，也列在 changes 里', async () => {
+      const asOwner = async <T>(path: string, body: unknown) => {
+        const res = await app.request(
+          `/v1/spaces/${ws.spaceId}${path}`,
+          jsonRequest('POST', body, { cookie: ws.cookie }),
+        )
+        if (!res.ok) throw new Error(await res.text())
+        return (await res.json()) as T
+      }
+      const provider = await asOwner<{ id: string }>('/credential-providers', {
+        kind: 'bitwarden',
+        name: '密码库',
+        instructions: '在工作站上解锁',
+      })
+      const credential = await asOwner<{ id: string }>('/credentials', {
+        identifier: 'router',
+        name: '路由器',
+        source: {
+          kind: 'external',
+          providerId: provider.id,
+          location: 'router admin login',
+          fields: [{ name: 'password', sourceField: 'password' }],
+        },
+      })
+      const accessEvents = async () => {
+        const res = await app.request(
+          `/v1/spaces/${ws.spaceId}/credentials/${credential.id}/events`,
+          { headers: { cookie: ws.cookie } },
+        )
+        return ((await res.json()) as CredentialEventList).items.filter((e) => e.type === 'access')
+      }
+      const take = tool('kioku_credential', { identifier: 'router' })
+
+      const rolled = await step(take)
+      expect(rolled.text).toContain('密码库')
+      for (const hidden of ['router admin login', '在工作站上解锁', 'bw get item']) {
+        expect(JSON.stringify(rolled)).not.toContain(hidden)
+      }
+      expect(rolled.changes!.credentials).toEqual([])
+      expect(await accessEvents()).toEqual([])
+
+      const real = await run({ mode: 'real', steps: [take] })
+      const taken = real.steps[0]!
+      for (const shown of ['router admin login', '在工作站上解锁', 'bw get item']) {
+        expect(taken.text).toContain(shown)
+      }
+      expect(taken.changes!.credentials).toEqual([
+        { type: 'access', identifier: 'router', fields: ['password'], changes: [] },
+      ])
+      const events = await accessEvents()
+      expect(events).toHaveLength(1)
+      expect(events[0]!.via).toBe('kioku_credential')
+      expect(events[0]!.bench).toEqual({ accountName: 'alice', run: real.run })
     })
 
     it('打码：secret 正文与托管的值不出现在结果里，降级与改正文被拒，重放也一样', async () => {

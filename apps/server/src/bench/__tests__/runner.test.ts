@@ -28,9 +28,9 @@ const FULL: KeyScopes = {
 const READONLY: KeyScopes = { ...FULL, writeLayers: [], maxSensitivity: 'private' }
 
 const textOutcome = (text: string): StepOutcome =>
-  toolOutcome({ content: [{ type: 'text', text }] })
+  toolOutcome('kioku_get', { content: [{ type: 'text', text }] })
 const errorOutcome = (text: string): StepOutcome =>
-  toolOutcome({ content: [{ type: 'text', text }], isError: true })
+  toolOutcome('kioku_get', { content: [{ type: 'text', text }], isError: true })
 
 // 假的执行方式：按调用顺序给结果，记下收到的步骤
 function fakeExecutor(
@@ -402,6 +402,29 @@ const TURN_END = {
 const LIFECYCLE_OK = { hostOutput: { mode: 'none', value: null }, nodeUris: [] }
 
 describe('结果的文字', () => {
+  it('kioku_boot 的 URI 列表只算展开的节点，没展开的不算', () => {
+    const text = [
+      '指引',
+      '<kioku-boot>',
+      '## core://agent',
+      '',
+      '正文',
+      '',
+      '## 未展开的启动节点',
+      '',
+      '- core://long',
+      '</kioku-boot>',
+    ].join('\n')
+    const outcome = toolOutcome('kioku_boot', { content: [{ type: 'text', text }] })
+    expect(outcome.uris).toEqual(['core://agent'])
+  })
+
+  it('工具内部错误按固定文字认，只有报错时才算', () => {
+    const content = [{ type: 'text', text: TOOL_INTERNAL_ERROR }]
+    expect(toolOutcome('kioku_get', { content, isError: true }).internalError).toBe(true)
+    expect(toolOutcome('kioku_get', { content }).internalError).toBe(false)
+  })
+
   it('生命周期事件是交给宿主的文字，规则和插件一样', () => {
     const textOf = (hostOutput: unknown) =>
       restSuccess('lifecycle', { hostOutput, nodeUris: ['a://b'] })

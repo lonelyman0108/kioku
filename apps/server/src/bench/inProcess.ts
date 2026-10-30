@@ -27,6 +27,7 @@ import {
   type BenchExecutor,
   type ResolvedStep,
   type StepOutcome,
+  type ToolResult,
 } from './executor'
 import {
   benchLimits,
@@ -102,12 +103,9 @@ export function inProcessExecutor(
       credentials,
       mcpRequest('tools/call', { name: tool, arguments: args }),
     )
-    const body = (await res.json()) as {
-      result?: { content?: unknown; isError?: unknown }
-      error?: { message?: string }
-    }
+    const body = (await res.json()) as { result?: ToolResult; error?: { message?: string } }
     return body.result
-      ? toolOutcome(body.result)
+      ? toolOutcome(tool, body.result)
       : restFailure(res.status >= 400 ? res.status : 500, body.error?.message ?? '')
   }
 

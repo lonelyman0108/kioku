@@ -46,12 +46,19 @@ const OUTCOME_DEFAULTS = {
   changes: null,
 } as const
 
-// 工具结果里的 URI：kioku_get 等的「URI: …」、kioku_list 的「- …（」、kioku_search 的「0.59 | …」。
-// 这个正则是写死的，不接受场景给的模式
+// 工具结果里的 URI：kioku_get 等的「URI: …」、kioku_list 的「- …（」、kioku_search 的「0.59 | …」；
+// kioku_boot 只算展开的节点（「## …」），「- …」是没展开的。这两个正则是写死的，不接受场景给的模式
 const TOOL_URI = /^(?:URI: |- |\d+\.\d+ \| )([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)/gm
+const BOOT_URI = /^## ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)$/gm
 
-// 工具的结果：result 是 tools/call 响应里的 result。内部错误按固定文字认，进程内和 HTTP 都能用
-export function toolOutcome(result: { content?: unknown; isError?: unknown }): StepOutcome {
+// tools/call 响应里的 result
+export interface ToolResult {
+  content?: unknown
+  isError?: unknown
+}
+
+// 工具的结果。内部错误按固定文字认，进程内和 HTTP 都能用
+export function toolOutcome(tool: string, result: ToolResult): StepOutcome {
   const content = Array.isArray(result.content)
     ? (result.content as { type?: string; text?: string }[])
     : []
@@ -64,7 +71,7 @@ export function toolOutcome(result: { content?: unknown; isError?: unknown }): S
     httpStatus: null,
     text,
     raw: result,
-    uris: [...text.matchAll(TOOL_URI)].map((m) => m[1]!),
+    uris: [...text.matchAll(tool === 'kioku_boot' ? BOOT_URI : TOOL_URI)].map((m) => m[1]!),
   }
 }
 
