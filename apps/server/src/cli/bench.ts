@@ -3,14 +3,13 @@ import { readFile } from 'node:fs/promises'
 import { parseArgs } from 'node:util'
 
 import {
-  BENCH_TOOLS,
   BenchScenario,
   mayWrite,
   type BenchRunResult,
   type BenchStepResult,
 } from '@kioku/contracts'
 
-import { httpExecutor } from '../bench/httpExecutor'
+import { handshakeProblem, httpExecutor } from '../bench/httpExecutor'
 import { runSteps } from '../bench/runner'
 import { BENCH_SCENARIOS, scenariosForRuntime } from '../bench/scenarios'
 import { runCli, UsageError } from './common'
@@ -147,15 +146,8 @@ async function main(): Promise<void> {
     }
 
     const server = await executor.handshake()
-    const expected = [...BENCH_TOOLS].sort()
-    const actual = [...server.tools].sort()
-    if (server.name !== 'kioku' || expected.join() !== actual.join()) {
-      const missing = expected.filter((t) => !actual.includes(t))
-      const extra = actual.filter((t) => !(expected as string[]).includes(t))
-      throw new Error(
-        `握手不符：服务端是 ${server.name}，少了工具 [${missing.join('、')}]，多了工具 [${extra.join('、')}]`,
-      )
-    }
+    const problem = handshakeProblem(server)
+    if (problem) throw new Error(problem)
     console.log(`握手：${server.name} ${server.version}，${server.tools.length} 个工具`)
     console.log(`应用：${whoami.app.name}（${whoami.app.runtimeFamily}）`)
 

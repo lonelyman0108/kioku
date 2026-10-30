@@ -1,4 +1,4 @@
-import { WhoAmI } from '@kioku/contracts'
+import { BENCH_TOOLS, WhoAmI } from '@kioku/contracts'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { StreamableHTTPClientTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js'
 
@@ -22,6 +22,15 @@ export interface HttpExecutor extends BenchExecutor {
   // 真实握手之后的服务端信息与工具名单
   handshake(): Promise<{ name: string; version: string; tools: string[] }>
   close(): Promise<void>
+}
+
+// 握手的结果对不对：服务端是 Kioku，工具名单和这个版本的一样。不对时说明哪里不对
+export function handshakeProblem(server: { name: string; tools: string[] }): string | null {
+  const expected: readonly string[] = BENCH_TOOLS
+  const missing = expected.filter((tool) => !server.tools.includes(tool))
+  const extra = server.tools.filter((tool) => !expected.includes(tool))
+  if (server.name === 'kioku' && !missing.length && !extra.length) return null
+  return `握手不符：服务端是「${server.name}」，少了工具 [${missing.join('、')}]，多了工具 [${extra.join('、')}]`
 }
 
 // 连不上之类的错误：不是接口给的结果，没有状态码
@@ -75,7 +84,9 @@ export function httpExecutor(target: { url: string; key: string }): HttpExecutor
 
   return {
     async whoami() {
-      const { res, raw } = await request('GET', '/whoami')
+      const { res, raw } = await request('GET', '/whoami').catch((err: Error) => {
+        throw new Error(`连不上 ${base}：${err.message}`)
+      })
       if (!res.ok) throw new Error(`读 /whoami 失败：HTTP ${res.status}，确认服务地址与 Key`)
       const parsed = WhoAmI.safeParse(raw)
       if (!parsed.success) throw new Error('/whoami 的响应对不上，确认服务地址指向 Kioku')

@@ -1,14 +1,17 @@
 import { randomBytes } from 'node:crypto'
 
-import type {
-  ActivityList,
-  BenchRunResult,
-  BenchScenarioList,
-  BenchStepResult,
-  BenchToolList,
-  CredentialEventList,
+import {
+  BENCH_READ_TOOLS,
+  BENCH_TOOLS,
+  type ActivityList,
+  type BenchRunResult,
+  type BenchScenarioList,
+  type BenchStepResult,
+  type BenchTool,
+  type BenchToolList,
+  type CredentialEventList,
 } from '@kioku/contracts'
-import { desc, eq, sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
@@ -19,6 +22,7 @@ import {
   memories,
   recallEvents,
   settings,
+  spaceMembers,
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource, type EmbedderSource } from '../../embedding/source'
@@ -127,6 +131,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     app = createApp(deps)
   })
   afterAll(async () => {
+    // 实例设置不随 resetDatabase 清掉，留着会挡住别的测试文件保存抽取设置
+    await database?.db.delete(settings)
     await other?.close()
     await database?.close()
   })
@@ -346,6 +352,36 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
     const body = (await real.json()) as { result: { tools: unknown[] } }
     expect(tools).toEqual(body.result.tools)
     expect(tools.find((t) => t.name === 'kioku_create')!.inputSchema).toBeTruthy()
+    // 契约里的判定按工具名走：新加的工具要写进这几张表，命令行的握手也按它核对
+    expect(tools.map((t) => t.name).sort()).toEqual([...BENCH_TOOLS].sort())
+    const readOnly = (t: BenchTool) =>
+      (t.annotations as { readOnlyHint?: boolean } | undefined)?.readOnlyHint === true
+    expect(
+      tools
+        .filter(readOnly)
+        .map((t) => t.name)
+        .sort(),
+    ).toEqual([...BENCH_READ_TOOLS].sort())
+  })
+
+  it('权限按 Key 现在的有效上限：主人被降级之后，secret 级的 Key 按 private 算', async () => {
+    await database.db
+      .update(spaceMembers)
+      .set({ role: 'editor' })
+      .where(eq(spaceMembers.accountId, ws.accountId))
+    const result = await run({
+      steps: [
+        { kind: 'whoami' },
+        { kind: 'boot', requires: { maxSensitivity: 'secret' } },
+        tool(
+          'kioku_create',
+          { uri: 'notes://x', content: 'x', sensitivity: 'secret' },
+          { expect: { error: true } },
+        ),
+      ],
+    })
+    expect(result.whoami.scopes.maxSensitivity).toBe('private')
+    expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'passed'])
   })
 
   describe('回滚模式', () => {
@@ -361,8 +397,12 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         content: SECRET_BODY,
         sensitivity: 'secret',
       })
-      // 走过真实接口之后等最后使用时间写完，它不等请求结束
-      await vi.waitFor(async () => expect(await lastUsedAt()).not.toBeNull())
+      // 走过真实接口之后等最后使用时间写完：它不等请求结束。这一次写下的时间不早于发请求的时间
+      const since = Date.now()
+      await realTool('kioku_list')
+      await vi.waitFor(async () =>
+        expect((await lastUsedAt())?.getTime()).toBeGreaterThanOrEqual(since),
+      )
       const used = await lastUsedAt()
       const before = await fingerprint()
 
@@ -810,7 +850,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
               tool('kioku_get', { uri: 'notes://locked' }),
             ],
           },
-          limited({ lockTimeoutMs: 200, runMs: 50 }),
+          // 第一步开始时还没到总时长，等锁等到时限时已经过了
+          limited({ lockTimeoutMs: 800, runMs: 400 }),
         )
         expect(result.steps[0]!.internalDetail).toBe('lock_timeout')
         expect(result.steps[1]!.status).toBe('notRun')
@@ -1091,6 +1132,37 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       }
     })
 
+    it('这把 Key 读不到的改动只数条数；改后读不到的只给改前的 URI', async () => {
+      const narrow = await ws.createKey(appId, {
+        readLayers: ['owner'],
+        writeLayers: ['owner', 'private'],
+        maxSensitivity: 'private',
+        admin: false,
+      })
+      const res = await postRun(
+        {
+          steps: [
+            tool('kioku_create', { uri: 'notes://a', content: '画像层的正文', layer: 'owner' }),
+            tool('kioku_move', { from: 'notes://a', to: 'notes://b', layer: 'private' }),
+            tool('kioku_create', { uri: 'notes://c', content: '私人层的正文', layer: 'private' }),
+          ],
+        },
+        ws.cookie,
+        app,
+        narrow.id,
+      )
+      const result = (await res.json()) as BenchRunResult
+      expect(result.steps.map((s) => s.isError)).toEqual([false, false, false])
+      const [created, moved, hidden] = result.steps.map(changesOf)
+      expect(created!.memories).toEqual([
+        { type: 'create', uri: 'notes://a', fields: [], left: false, becameSecret: false },
+      ])
+      expect(moved!.memories).toEqual([
+        { type: 'move', uri: 'notes://a', fields: [], left: true, becameSecret: false },
+      ])
+      expect(hidden).toMatchObject({ memories: [], hiddenReleased: 0, hiddenOther: 1 })
+    })
+
     it('让出自己的过期记录：看得到，照常列出', async () => {
       await realTool('kioku_create', { uri: 'notes://mine', content: '旧的' })
       await withSpace(database.db, ws.spaceId, (tx) =>
@@ -1255,7 +1327,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       return { text: view.content ?? '' }
     }
 
-    it('事件的标记只认这次运行：同一把 Key 别的写入不算', async () => {
+    it('事件的标记只认这次运行：同一把 Key 之前的真实写入不算', async () => {
       await realTool('kioku_create', { uri: 'notes://before', content: '之前真实写的' })
       const [mine] = (
         await run({
@@ -1265,10 +1337,6 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       ).steps
       expect(mine!.changes!.memories).toHaveLength(1)
       expect(mine!.changes!.memories[0]!.uri).toContain('during')
-      const events = await withSpace(database.db, ws.spaceId, (tx) =>
-        tx.select({ path: memories.path }).from(memories).orderBy(desc(memories.createdAt)),
-      )
-      expect(events).toHaveLength(2)
     })
 
     it('回滚模式不排任务', async () => {

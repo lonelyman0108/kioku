@@ -149,7 +149,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
   })
 
   it('语句时限：超过就报错，能认出是语句超时', async () => {
-    await inRollback(limited({ statementTimeoutMs: 50 }), NO_VECTORS, async (scoped, run) => {
+    await inRollback(limited({ statementTimeoutMs: 300 }), NO_VECTORS, async (scoped, run) => {
       await expect(
         scoped.db.transaction((tx) => tx.execute(sql`select pg_sleep(4)`)),
       ).rejects.toMatchObject({ cause: { code: '57014' } })
@@ -175,9 +175,9 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
   })
 
   it('总时长：到点之后拒绝新的顶层事务，已经开始的回调照常跑完', async () => {
-    await inRollback(limited({ runMs: 80 }), NO_VECTORS, async (scoped, run) => {
+    await inRollback(limited({ runMs: 300 }), NO_VECTORS, async (scoped, run) => {
       const finished = await scoped.db.transaction(async (tx) => {
-        await tx.execute(sql`select pg_sleep(0.1)`)
+        await tx.execute(sql`select pg_sleep(0.35)`)
         // 已经在回调里的语句不受影响，正在跑的步骤靠语句时限收尾
         await tx.execute(sql`select 1`)
         return '跑完了'

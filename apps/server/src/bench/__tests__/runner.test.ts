@@ -1,4 +1,5 @@
 import {
+  BENCH_TOOLS,
   BenchStep,
   LAYERS,
   type BenchReplayStep,
@@ -17,6 +18,7 @@ import {
   type ResolvedStep,
   type StepOutcome,
 } from '../executor'
+import { handshakeProblem } from '../httpExecutor'
 import { captureAfter, expand, runSteps, unmetRequirement } from '../runner'
 
 const FULL: KeyScopes = {
@@ -400,6 +402,23 @@ const TURN_END = {
   reply: '你好呀',
 }
 const LIFECYCLE_OK = { hostOutput: { mode: 'none', value: null }, nodeUris: [] }
+
+describe('握手', () => {
+  const tools = [...BENCH_TOOLS]
+
+  it('服务端是 Kioku、工具名单和这个版本的一样才算对，先后不算', () => {
+    expect(handshakeProblem({ name: 'kioku', tools })).toBeNull()
+    expect(handshakeProblem({ name: 'kioku', tools: [...tools].reverse() })).toBeNull()
+  })
+
+  it('不是 Kioku，或者少了、多了工具，都说明哪里不对', () => {
+    expect(handshakeProblem({ name: 'other', tools })).toContain('「other」')
+    const missing = handshakeProblem({ name: 'kioku', tools: tools.slice(1) })
+    expect(missing).toContain(`少了工具 [${tools[0]}]`)
+    const extra = handshakeProblem({ name: 'kioku', tools: [...tools, 'kioku_new'] })
+    expect(extra).toContain('多了工具 [kioku_new]')
+  })
+})
 
 describe('结果的文字', () => {
   it('kioku_boot 的 URI 列表只算展开的节点，没展开的不算', () => {

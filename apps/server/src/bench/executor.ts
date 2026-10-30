@@ -14,7 +14,7 @@ import type {
 import { TOOL_INTERNAL_ERROR } from '../mcp/format'
 
 // 步骤的执行方式：进程内（见 inProcess.ts）与真实 HTTP（见 httpExecutor.ts）共用这个接口，
-// 同一份场景在两边跑。这里的文件不碰数据库：命令行只用得到 HTTP 这一边
+// 同一份场景在两边跑。这个文件不碰数据库：命令行只用得到 HTTP 这一边，不用加载服务端的那些代码
 
 // ${run} 与 capture 都展开之后的步骤
 export type ResolvedStep = BenchStep | BenchReplayStep

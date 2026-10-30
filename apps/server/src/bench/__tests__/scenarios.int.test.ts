@@ -175,6 +175,8 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
   })
   afterAll(async () => {
     await new Promise((resolve) => server.close(resolve))
+    // 实例设置不随 resetDatabase 清掉，留着会挡住别的测试文件保存抽取设置
+    await database?.db.delete(settings)
     await database?.close()
   })
   beforeEach(async () => {
@@ -292,8 +294,8 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
       'kioku_update',
     ])
     // 重放不再求值：第二次运行的 ${run} 不同，读的是第一次写下的 URI
-    const first0 = replay[0]!
-    const uri = first0.kind === 'tool' ? first0.arguments.uri : null
+    const created = replay[0]!
+    const uri = created.kind === 'tool' ? created.arguments.uri : null
     const second = await runBench(deps, principal, ws.accountId, {
       mode: 'rollback',
       steps: [

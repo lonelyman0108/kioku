@@ -32,7 +32,7 @@ export interface BenchLimits {
   embedBudgetMs: number
 }
 
-export const BENCH_LIMITS: BenchLimits = {
+const BENCH_LIMITS: BenchLimits = {
   parallel: 2,
   statementTimeoutMs: 5_000,
   lockTimeoutMs: 3_000,
@@ -42,12 +42,10 @@ export const BENCH_LIMITS: BenchLimits = {
 
 export const benchLimits = (deps: Deps): BenchLimits => ({ ...BENCH_LIMITS, ...deps.benchLimits })
 
-export const BENCH_BUSY = '测试台同时运行的回滚太多，稍后再试'
-
 let running = 0
 
 function enterGate(limit: number): () => void {
-  if (running >= limit) throw new MemoryError(429, BENCH_BUSY)
+  if (running >= limit) throw new MemoryError(429, '测试台同时运行的回滚太多，稍后再试')
   running++
   return () => {
     running--
