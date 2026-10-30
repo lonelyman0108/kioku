@@ -656,6 +656,29 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect((await planOf(newer)).sync.goneFromLore).toEqual([])
     })
 
+    it('勾掉一个节点时，映射到同一个 URI、计划里不导入的节点不会写进去', async () => {
+      // 按时间再按路径排，两个路径的先后不随时间精度变：先写的 open-claw 占着
+      await seed('core://agent/open-claw', '第一个节点的正文')
+      await seed('core://agent/open_claw', '第二个节点的正文')
+      const source = await fileSource()
+      const plan = await planOf(source)
+      expect(nodeOf(plan, 'core://agent/open-claw').targets[0]!.uri).toBe('app://open-claw/agent')
+      // 第二个节点没有写入目标，界面上勾不了
+      expect(nodeOf(plan, 'core://agent/open_claw')).toBeUndefined()
+      expect(plan.skipped).toContainEqual({
+        source: 'core://agent/open_claw',
+        reason: '和 core://agent/open-claw 映射到同一个 app://open-claw/agent',
+      })
+
+      const result = await applyOf(source, plan, { excludeUris: ['core://agent/open-claw'] })
+      expect(result.created).not.toContain('app://open-claw/agent')
+      expect(result.failed).toEqual([])
+      const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.select().from(memories).where(memoryWhere('app', 'open-claw/agent')),
+      )
+      expect(rows).toEqual([])
+    })
+
     it('同步写下 sync 事件，context 记下导出时间；secret 节点的 context 里没有正文', async () => {
       const source = await fileSource()
       await applyOf(source, await planOf(source), { secretUris: ['infra://router/credentials'] })

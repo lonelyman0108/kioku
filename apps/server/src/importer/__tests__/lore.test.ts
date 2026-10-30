@@ -359,6 +359,75 @@ describe('Lore 导入计划', () => {
       }
     })
 
+    it('勾掉的节点写到的 URI 还占着：映射到同一个 URI 的下一个节点不顶上来', () => {
+      const snap = snapshot(
+        node('core://agent/claude_code'),
+        node('core://agent/claude-code'),
+        node('infra://other'),
+      )
+      const all = planImport(snap, [], options)
+      expect(all.memories.map((m) => [m.source, m.request.uri])).toEqual([
+        ['core://agent/claude_code', 'app://claude-code/agent'],
+        ['infra://other', 'infra://other'],
+      ])
+      const clash = {
+        source: 'core://agent/claude-code',
+        reason: '和 core://agent/claude_code 映射到同一个 app://claude-code/agent',
+      }
+      expect(all.skipped).toEqual([clash])
+
+      const plan = planImport(snap, [], {
+        ...options,
+        excludeUris: new Set(['core://agent/claude_code']),
+      })
+      // 第二个节点在计划里没有写入目标，看不到也勾不了，不能在勾掉第一个之后写进去
+      expect(plan.memories.map((m) => m.source)).toEqual(['infra://other'])
+      expect(plan.skipped).toEqual([
+        { source: 'core://agent/claude_code', reason: '这次选择不导入' },
+        clash,
+      ])
+      expect(plan.errors).toEqual([])
+    })
+
+    it('不管勾掉哪些节点，写入的都是不勾时减去勾掉的', () => {
+      const mine = [
+        { slug: 'claude-a', runtimeFamily: 'claudecode', ownerAccountId: ME },
+        { slug: 'claude-b', runtimeFamily: 'claudecode', ownerAccountId: ME },
+      ]
+      const snap = snapshot(
+        node('core://soul'),
+        // 写到两个应用
+        node('core://agent/claudecode'),
+        // 三个节点映射到同一个 URI，子路径上也有一对
+        node('core://agent/open_claw_x'),
+        node('core://agent/open-claw_x'),
+        node('core://agent/open_claw-x'),
+        node('core://agent/open_claw_x/tools'),
+        node('core://agent/open-claw-x/tools'),
+        node('infra://other', { aliases: ['infra://old'] }),
+        node('infra://empty', { content: null }),
+      )
+      const writes = (plan: ImportPlan) =>
+        plan.memories.map((m) => ({ source: m.source, uri: m.request.uri, key: m.importKey }))
+      const base = planImport(snap, mine, options)
+      expect(base.memories).toHaveLength(6)
+      const baseApps = base.apps.flatMap((m) => m.apps.map((a) => a.slug))
+      const uris = snap.nodes.map((n) => n.uri)
+      for (let mask = 0; mask < 1 << uris.length; mask++) {
+        const excluded = uris.filter((_, i) => mask & (1 << i))
+        const plan = planImport(snap, mine, { ...options, excludeUris: new Set(excluded) })
+        expect(plan.errors).toEqual([])
+        expect(writes(plan)).toEqual(writes(base).filter((w) => !excluded.includes(w.source)))
+        expect(baseApps).toEqual(
+          expect.arrayContaining(plan.apps.flatMap((m) => m.apps.map((a) => a.slug))),
+        )
+      }
+      // 全部勾掉就什么都不写，应用也不建
+      const none = planImport(snap, mine, { ...options, excludeUris: new Set(uris) })
+      expect(none.memories).toEqual([])
+      expect(none.apps).toEqual([])
+    })
+
     it('对不上任何节点时是错误；同时标了 secret 时以不导入为准', () => {
       const plan = planImport(snapshot(node('infra://a')), [], {
         ...options,

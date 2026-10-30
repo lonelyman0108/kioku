@@ -286,6 +286,16 @@ export function planImport(
   const excludedNodes = nodesOf(options.excludeUris ?? [], 'excludeNotFound')
   // 两个节点映射到同一个 URI 时只导入第一个
   const plannedUris = new Map<string, string>()
+  // 勾掉的节点写到的 URI 还占着：写入的只能是看过的计划减去勾掉的。映射到同一个 URI 的下一个节点
+  // 在计划里没有写入目标，看不到也勾不了，不能让它顶上来。哪个节点占着要走完下面整段判断才知道，所以先算一次不勾的
+  if (excludedNodes.size) {
+    const unticked = planImport(snapshot, existingApps, { ...options, excludeUris: new Set() })
+    for (const m of unticked.memories) {
+      if (excludedNodes.has(String(m.context.loreNodeUuid))) {
+        plannedUris.set(m.request.uri, m.source)
+      }
+    }
+  }
 
   for (const node of snapshot.nodes) {
     for (const alias of node.aliases) {
