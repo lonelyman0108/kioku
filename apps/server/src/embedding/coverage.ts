@@ -1,8 +1,8 @@
 import { and, count, eq, isNull, ne, sql, type SQL } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 
-import { withSpace, type Db, type Tx } from '../db/client'
-import { memories, memoryEmbeddings, spaces } from '../db/schema'
+import { eachSpace, type Db, type Tx } from '../db/client'
+import { memories, memoryEmbeddings } from '../db/schema'
 import { STILL_VALID } from '../memory/filter'
 
 // 应当有向量的记忆：现在有效（没删除、没过期、没被推翻）、不是 secret、有正文（空字符串不算）的策展记忆。
@@ -49,17 +49,17 @@ export async function countEmbeddable(
 }
 
 // 整个实例的向量覆盖率，给实例设置页看补齐进度、给换模型判断补没补齐。
-// 逐个空间统计，每个空间一条查询：换模型时页面会一直刷新进度
+// 每个空间一条查询，几个空间同时数（eachSpace），不逐个排队：换模型时页面会一直刷新进度
 export async function embeddingCoverage(
   db: Db,
   models: string[],
 ): Promise<{ eligible: number; embedded: Map<string, number> }> {
   let eligible = 0
   const embedded = new Map(models.map((m) => [m, 0]))
-  for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    const counts = await withSpace(db, spaceId, (tx) => countEmbeddable(tx, models))
+  await eachSpace(db, async (tx) => {
+    const counts = await countEmbeddable(tx, models)
     eligible += counts.eligible
     models.forEach((m, i) => embedded.set(m, embedded.get(m)! + counts.embedded[i]!))
-  }
+  })
   return { eligible, embedded }
 }

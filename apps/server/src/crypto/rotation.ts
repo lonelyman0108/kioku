@@ -3,7 +3,7 @@ import { and, asc, count, eq, gt, isNotNull, isNull, notInArray, sql } from 'dri
 
 import { BACKUP_LABEL, mapBackupKey, sealedBackupKey } from '../backup/settings'
 import { credentialAad } from '../credential/service'
-import { withSpace, type Db } from '../db/client'
+import { eachSpace, withSpace, type Db } from '../db/client'
 import { credentials, memories, settings, spaces } from '../db/schema'
 import { mapEmbeddingKeys, sealedEmbeddingKeys } from '../embedding/settings'
 import { EXTRACTION_ENDPOINT, sealedExtractionKey } from '../extraction/settings'
@@ -212,6 +212,9 @@ export async function rotateMasterKey(
       for (;;) {
         const cursor: string | null = after
         const rows: { id: string }[] = await withSpace(db, spaceId, async (tx) => {
+          // 只改包装与标识，都不是键列，锁用 FOR NO KEY UPDATE：别的表插入指向这一行的记录（记忆的事件、关键词、
+          // 向量，凭据的事件）时外键检查加的 KEY SHARE 锁和它不冲突，不会被当成正在改而跳过；
+          // 正在改这一行或锁住了要改的事务（UPDATE、DELETE、FOR UPDATE 等）照样和它冲突，这次跳过、之后再换
           const batch = await tx
             .select({ id: table.id, wrappedKey: table.wrappedKey })
             .from(table)
@@ -224,7 +227,7 @@ export async function rotateMasterKey(
             )
             .orderBy(asc(table.id))
             .limit(BATCH)
-            .for('update', { skipLocked: true })
+            .for('no key update', { skipLocked: true })
           for (const row of batch) {
             let wrappedKey: Buffer
             try {
@@ -274,17 +277,16 @@ export async function masterKeyStatus(
   const remaining = { memories: 0, credentials: 0, settings: 0 }
   let lastError: MasterKeyStatus['lastError'] = null
   if (previousId) {
-    for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-      await withSpace(db, spaceId, async (tx) => {
-        for (const { field, table } of TABLES) {
-          const [row] = await tx
-            .select({ n: count() })
-            .from(table)
-            .where(and(isNotNull(table.wrappedKey), eq(table.keyId, previousId)))
-          remaining[field] += row?.n ?? 0
-        }
-      })
-    }
+    // 几个空间同时数，和实例的向量覆盖率一样（eachSpace）：轮换时卡片会一直刷新进度
+    await eachSpace(db, async (tx) => {
+      for (const { field, table } of TABLES) {
+        const [row] = await tx
+          .select({ n: count() })
+          .from(table)
+          .where(and(isNotNull(table.wrappedKey), eq(table.keyId, previousId)))
+        remaining[field] += row?.n ?? 0
+      }
+    })
     remaining.settings = (await sealedSettingsKeys(db)).filter((k) => k.keyId === previousId).length
     const [row] = await db.select().from(settings).where(eq(settings.key, ERROR_KEY)).limit(1)
     lastError = (row?.value as MasterKeyStatus['lastError'] | undefined) ?? null

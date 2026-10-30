@@ -11,7 +11,7 @@ import { embeddingSettingsView } from '../embedding/settings'
 import { extractionUsage } from '../extraction/budget'
 import type { Deps } from '../http/env'
 import { jsonResponse, router } from '../http/openapi'
-import { consoleMemberFor } from '../memory/context'
+import { consoleRoleFor, memoryServiceForConsole } from '../memory/context'
 import { loadRecallWindow } from '../recall/retention'
 
 // 概览里列出的最近改动数
@@ -48,7 +48,7 @@ export function overviewRoutes(deps: Deps) {
     const { spaceId } = c.req.valid('param')
     const accountId = c.get('console').accountId
     // 先确认是成员，不是成员就不去查别的空间的数据
-    const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
+    const role = await consoleRoleFor(deps, spaceId, accountId)
     const [settings, recall, appRows, members, extraction, backup, pendingBindings] =
       await Promise.all([
         embeddingSettingsView(deps.db),
@@ -64,6 +64,8 @@ export function overviewRoutes(deps: Deps) {
           pendingBindingsFor(tx, { accountId, role }, PENDING_BINDINGS_LIMIT),
         ),
       ])
+    // 应用表只读上面这一次：editor 能写哪些应用的应用层也从这里挑
+    const service = await memoryServiceForConsole(deps, spaceId, accountId, role, appRows)
     const [stats, recent] = await Promise.all([
       service.stats(settings.active?.model ?? null, {
         retentionDays: recall.settings.retentionDays,

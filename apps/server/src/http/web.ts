@@ -6,6 +6,9 @@ import type { OpenAPIHono } from '@hono/zod-openapi'
 
 import type { AppEnv } from './env'
 
+// API 都在 /v1 下；别的路径归管理界面
+export const isApiPath = (path: string) => path === '/v1' || path.startsWith('/v1/')
+
 // 托管管理界面的构建产物：单个容器同时提供 API 与界面，同源访问，登录用 Cookie 会话。
 // 带哈希的资源文件长期缓存；找不到的文件返回 404；其他非 /v1 的 GET 请求返回 index.html，交给前端路由
 export function mountWeb(app: OpenAPIHono<AppEnv>, webDir: string): boolean {
@@ -25,7 +28,7 @@ export function mountWeb(app: OpenAPIHono<AppEnv>, webDir: string): boolean {
     return c.text('Not Found', 404)
   })
   app.get('*', async (c, next) => {
-    if (c.req.path === '/v1' || c.req.path.startsWith('/v1/')) return next()
+    if (isApiPath(c.req.path)) return next()
     // 根目录下的其他静态文件（例如图标）原样返回
     const asset = c.req.path.slice(1)
     if (asset && !asset.includes('..') && isFile(join(webDir, asset))) {

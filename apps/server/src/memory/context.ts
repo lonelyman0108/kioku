@@ -43,19 +43,26 @@ export function accessForKey(key: KeyPrincipal, session: KeySession = defaultSes
   )
 }
 
-// 管理界面里成员本人的权限；editor 只能写自己是主人的应用的应用层，要先查出这些应用
+// 空间里的应用，只要知道主人是谁
+type AppOwner = { id: string; ownerAccountId: string }
+
+// 管理界面里成员本人的权限；editor 只能写自己是主人的应用的应用层，要先查出这些应用。
+// 调用方已经读出了空间里的全部应用时传进来（spaceApps），从里面挑，不再查一次
 async function accessForConsole(
   deps: Deps,
   spaceId: string,
   accountId: string,
   role: ConsoleRole,
+  spaceApps?: readonly AppOwner[],
 ): Promise<Access> {
   const owned =
-    role === 'editor'
-      ? await withSpace(deps.db, spaceId, (tx) =>
-          tx.select({ id: apps.id }).from(apps).where(eq(apps.ownerAccountId, accountId)),
-        )
-      : []
+    role !== 'editor'
+      ? []
+      : spaceApps
+        ? spaceApps.filter((a) => a.ownerAccountId === accountId)
+        : await withSpace(deps.db, spaceId, (tx) =>
+            tx.select({ id: apps.id }).from(apps).where(eq(apps.ownerAccountId, accountId)),
+          )
   return consoleAccess(
     role,
     accountId,
@@ -92,14 +99,25 @@ export async function semanticFor(
   }
 }
 
-// 管理界面的请求：先确认是空间成员（不是就 403），再按他的角色建记忆服务。各个管理界面接口都经过这里
+// 管理界面的请求先确认是空间成员，不是就 403；返回他的角色。各个管理界面接口都经过这里
+export async function consoleRoleFor(
+  deps: Deps,
+  spaceId: string,
+  accountId: string,
+): Promise<MemberRole> {
+  const role = await memberRole(deps, spaceId, accountId)
+  if (!role) throw new MemoryError(403, '不是该空间成员')
+  return role
+}
+
+// 管理界面的请求：先确认是空间成员（不是就 403），再按他的角色建记忆服务。
+// 概览本来就要读全部应用，分成 consoleRoleFor 与 memoryServiceForConsole 两步做，应用表只读一次
 export async function consoleMemberFor(
   deps: Deps,
   spaceId: string,
   accountId: string,
 ): Promise<{ role: MemberRole; service: MemoryService }> {
-  const role = await memberRole(deps, spaceId, accountId)
-  if (!role) throw new MemoryError(403, '不是该空间成员')
+  const role = await consoleRoleFor(deps, spaceId, accountId)
   return { role, service: await memoryServiceForConsole(deps, spaceId, accountId, role) }
 }
 
@@ -120,14 +138,16 @@ export function memoryServiceForKey(
 }
 
 // 管理界面：按成员角色给权限，能看到空间里全部人格与应用的记忆，私人层只看得到自己的；
-// editor 只能写自己是主人的应用的应用层。能显式读 secret 的成员在树与列表里也看得到 secret 记忆
+// editor 只能写自己是主人的应用的应用层。能显式读 secret 的成员在树与列表里也看得到 secret 记忆。
+// 调用方已经读出了空间里的全部应用时传进 spaceApps，不再为 editor 查一次
 export async function memoryServiceForConsole(
   deps: Deps,
   spaceId: string,
   accountId: string,
   role: ConsoleRole,
+  spaceApps?: readonly AppOwner[],
 ): Promise<MemoryService> {
-  const access = await accessForConsole(deps, spaceId, accountId, role)
+  const access = await accessForConsole(deps, spaceId, accountId, role, spaceApps)
   return new MemoryService({
     db: deps.db,
     spaceId,

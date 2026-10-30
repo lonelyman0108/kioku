@@ -205,14 +205,66 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     expect(deleted[0]?.keyId).toBe(keyIdOf(newKey))
   })
 
-  it('正被别的事务锁着的行这次跳过，之后再换', async () => {
-    await secret(appWith(oldKey), 'home://wifi', '无线密码')
-    await withSpace(database.db, ws.spaceId, async (tx) => {
-      await tx.execute(sql`select id from memories where path = 'wifi' for update`)
-      expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 0, remaining: 1 })
-    })
-    expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 1, remaining: 0 })
-    expect(await read(appWith(newKey), 'home://wifi')).toBe('无线密码')
+  it('别的事务只是往这一行上挂记录（外键检查加的 KEY SHARE）时照常换；锁着要改的行这次跳过，之后再换', async () => {
+    const app = appWith(oldKey)
+    await secret(app, 'home://wifi', '无线密码')
+    await secret(app, 'home://door', '门锁密码')
+    const hosted = async (identifier: string) => {
+      const res = await send(
+        app,
+        'POST',
+        `/v1/spaces/${ws.spaceId}/credentials`,
+        { identifier, name: identifier, source: { kind: 'hosted', values: { password: 'p' } } },
+        { cookie: ws.cookie },
+      )
+      expect(res.status).toBe(201)
+      return ((await res.json()) as { id: string }).id
+    }
+    const nas = await hosted('nas')
+    const router = await hosted('router')
+
+    const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        // 插入事件、关键词与向量时，外键检查在记忆行上加的就是这把锁
+        await tx`select id from memories where path = 'wifi' for key share`
+        // 取用凭据时写下一条事件，还没提交：外键检查在凭据行上加 KEY SHARE
+        await tx`insert into credential_events (space_id, credential_id, event_type)
+          values (${ws.spaceId}, ${nas}, 'access')`
+        // 正要改的行
+        await tx`select id from memories where path = 'door' for update`
+        await tx`select id from credentials where id = ${router} for update`
+        expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 2, remaining: 2 })
+        const rows = (await tx`
+          select path as name, key_id from memories where path in ('wifi', 'door')
+          union all
+          select identifier, key_id from credentials where id in (${nas}, ${router})
+          order by name`) as unknown as { name: string; key_id: string }[]
+        expect(rows.map((r) => [r.name, r.key_id])).toEqual([
+          ['door', keyIdOf(oldKey)],
+          ['nas', keyIdOf(newKey)],
+          ['router', keyIdOf(oldKey)],
+          ['wifi', keyIdOf(newKey)],
+        ])
+      })
+    } finally {
+      await side.end()
+    }
+    expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 2, remaining: 0 })
+    const after = appWith(newKey)
+    expect(await read(after, 'home://wifi')).toBe('无线密码')
+    expect(await read(after, 'home://door')).toBe('门锁密码')
+    for (const id of [nas, router]) {
+      const revealed = await send(
+        after,
+        'POST',
+        `/v1/spaces/${ws.spaceId}/credentials/${id}/reveal`,
+        undefined,
+        { cookie: ws.cookie },
+      )
+      expect(((await revealed.json()) as CredentialValues).values).toEqual({ password: 'p' })
+    }
   })
 
   it('有一行用旧主密钥也解不开：跳过它、记下原因，不拦住别的', async () => {
