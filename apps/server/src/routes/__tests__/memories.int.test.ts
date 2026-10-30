@@ -1,9 +1,10 @@
 import { randomBytes } from 'node:crypto'
+import { inspect } from 'node:util'
 
 import type { MemoryChildren, MemoryView } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -65,6 +66,25 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
       glossary: ['kioku', '记忆'],
       version: 1,
     })
+  })
+
+  it('写库真的出错时 500，日志里没有 SQL 与参数：参数就是记忆正文', async () => {
+    const BODY = '不该进日志的记忆正文'
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      // 数据库的文本里存不了 NUL，请求校验不拦它，写库时才报错
+      const res = await create({ uri: 'notes://nul', content: `${BODY}\u0000` })
+      expect(res.status).toBe(500)
+      expect(await res.json()).toEqual({ error: '服务内部错误' })
+      expect(logged).toHaveBeenCalledOnce()
+      const text = inspect(logged.mock.calls, { depth: null })
+      for (const leaked of [BODY, 'Failed query', 'insert into']) {
+        expect(text).not.toContain(leaked)
+      }
+      expect(logged.mock.calls[0]![1]).toMatchObject({ code: '22021' })
+    } finally {
+      logged.mockRestore()
+    }
   })
 
   it('重复创建返回 409，不存在返回 404', async () => {

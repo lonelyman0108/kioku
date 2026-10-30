@@ -188,6 +188,12 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
   })
   const ALL = '规则 内网 简洁 团队'
 
+  it('生命周期端点的响应只有 LifecycleResponse 的字段，多带的那几项不发给接入方', async () => {
+    const { status, body } = await event({ event: 'session.start' })
+    expect(status).toBe(200)
+    expect(Object.keys(body).sort()).toEqual(['hostOutput', 'nodeUris'])
+  })
+
   it('上下文格式不对返回 400；不带上下文照旧，也不建对象', async () => {
     for (const context of [
       { chatType: 'group', platform: 'qq' },

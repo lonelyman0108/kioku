@@ -1,7 +1,7 @@
 import type { RecallSource } from '@kioku/contracts'
 
 import { maskPlaintextCredentials } from '../credential/placeholders'
-import { withSpace } from '../db/client'
+import { loggableError, withSpace } from '../db/client'
 import { recallEventHits, recallEvents } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
 import { CANDIDATE_ID, normalizeQuery, type RecordableCandidate } from './recall'
@@ -60,7 +60,7 @@ export function recordRecall(
       })),
     )
   })
-    .catch((err: unknown) => console.warn('记录召回事件失败', err))
+    .catch((err: unknown) => console.warn('记录召回事件失败', loggableError(err)))
     .finally(() => pending.delete(write))
   pending.add(write)
   return write

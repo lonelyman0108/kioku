@@ -37,6 +37,8 @@ export interface Workspace {
   createApp: (slug: string, extra?: Record<string, unknown>) => Promise<{ id: string }>
   createPersona: (slug: string, extendsId?: string) => Promise<{ id: string }>
   issueKey: (appId: string, scopes?: KeyScopes) => Promise<string>
+  // 要 Key 的 id 时用它（测试台按 id 模拟）；key 是明文
+  createKey: (appId: string, scopes?: KeyScopes) => Promise<CreatedKey>
 }
 
 // 初始化一个账号和空间，返回在其中建应用、人格、签发 Key 的快捷方法
@@ -54,6 +56,13 @@ export async function bootstrap(app: App, username = 'alice'): Promise<Workspace
   const me = await expectOk<Me>(res)
   const spaceId = me.spaces[0]!.id
   const withCookie = { cookie }
+  const createKey = async (appId: string, scopes: KeyScopes = FULL_SCOPES) =>
+    expectOk<CreatedKey>(
+      await app.request(
+        `/v1/spaces/${spaceId}/apps/${appId}/keys`,
+        jsonRequest('POST', { name: 'test', scopes }, withCookie),
+      ),
+    )
   return {
     cookie,
     spaceId,
@@ -72,15 +81,8 @@ export async function bootstrap(app: App, username = 'alice'): Promise<Workspace
           jsonRequest('POST', { slug, name: slug, extendsId: extendsId ?? null }, withCookie),
         ),
       ),
-    issueKey: async (appId, scopes = FULL_SCOPES) =>
-      (
-        await expectOk<CreatedKey>(
-          await app.request(
-            `/v1/spaces/${spaceId}/apps/${appId}/keys`,
-            jsonRequest('POST', { name: 'test', scopes }, withCookie),
-          ),
-        )
-      ).key,
+    issueKey: async (appId, scopes = FULL_SCOPES) => (await createKey(appId, scopes)).key,
+    createKey,
   }
 }
 

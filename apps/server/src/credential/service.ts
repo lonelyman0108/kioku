@@ -46,7 +46,8 @@ import {
 } from '../db/schema'
 import { providerRetentionFrom } from '../jobs/retention'
 import { STILL_VALID } from '../memory/filter'
-import { MemoryError } from '../memory/service'
+import { hasMaskedText, MASKED_BINDING, MASKED_HOSTED_PREFIX } from '../memory/masked'
+import { benchMarkReader, MemoryError } from '../memory/service'
 import { formatUri } from '../memory/uri'
 import { CREDENTIAL_NOTICE, externalMethod } from './methods'
 
@@ -57,7 +58,19 @@ export interface CredentialContext {
   access: Access
   masterKey: MasterKey | null
   actor: { keyId?: string; accountId?: string }
+  // 测试台不把值发出去。'hosted'（真实模式）：托管的不解密、不记访问，只列字段名；外部的照常返回，访问记录带着标记。
+  // 'all'（回滚模式）：外部的条目位置、取法与使用说明也换成占位文字，也不记访问：
+  // 访问记录会被回滚，发给模型的内容却查不到
+  mask?: 'hosted' | 'all'
+  // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
+  eventContext?: Record<string, unknown>
 }
+
+// 打码时托管的值这样说明：只列字段名
+const maskedHosted = (fields: readonly CredentialField[]) =>
+  `${MASKED_HOSTED_PREFIX}字段：${fields.map((f) => f.name).join('、') || '无'}。要看值去凭据页。`
+// 打码时拒绝写回占位文字（见 rejectMaskedText）
+const MASKED_TEXT_WRITTEN = '值或条目位置里有测试台的占位文字，不是真实的内容：要改去凭据页'
 
 // 取用经由哪里，记在访问事件里
 export type CredentialVia = 'kioku_credential' | 'rest' | 'kioku_get'
@@ -207,7 +220,7 @@ export class CredentialService {
       eventType,
       actorKeyId: this.ctx.actor.keyId ?? null,
       actorAccountId: this.ctx.actor.accountId ?? null,
-      context,
+      context: { ...this.ctx.eventContext, ...context },
     })
   }
 
@@ -344,6 +357,18 @@ export class CredentialService {
     return row
   }
 
+  // 打码时读到的是占位文字，照抄回来就成了新的值，而事件不留旧值，找不回来。两档打码都拒绝
+  private rejectMaskedText(source: CredentialSourceInput | CredentialSourceUpdate): void {
+    if (!this.ctx.mask) return
+    const written =
+      source.kind === 'external'
+        ? [source.location, ...source.fields.map((f) => f.sourceField)]
+        : Object.values(source.values)
+    if (written.some((text) => text !== null && hasMaskedText(text))) {
+      throw new MemoryError(400, MASKED_TEXT_WRITTEN)
+    }
+  }
+
   // 按请求算出来源相关的几列。托管的值与现有的合并：给了 null 的字段删掉，没给的不变；
   // 从外部来源改成托管时，现有的值为空，给出的就是全部字段
   private async sourceColumns(
@@ -352,6 +377,7 @@ export class CredentialService {
     source: CredentialSourceInput | CredentialSourceUpdate,
     before: CredentialRow | null,
   ) {
+    this.rejectMaskedText(source)
     if (source.kind === 'external') {
       const provider = await this.liveProvider(tx, source.providerId)
       return {
@@ -710,6 +736,10 @@ export class CredentialService {
       const items = rows.slice(0, page.limit)
       const list = (value: unknown) =>
         Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+      const benchMark = await benchMarkReader(
+        tx,
+        items.map((r) => r.event.context),
+      )
       return {
         items: items.map((r) => ({
           id: r.event.id,
@@ -719,6 +749,7 @@ export class CredentialService {
           via: typeof r.event.context.via === 'string' ? r.event.context.via : null,
           fields: list(r.event.context.fields),
           changes: list(r.event.context.changes),
+          bench: benchMark(r.event.context),
         })),
         nextCursor:
           rows.length > page.limit && items.length ? String(items.at(-1)!.event.id) : null,
@@ -906,6 +937,9 @@ export class CredentialService {
           revealable: false,
         }
       }
+      if (inline && this.ctx.mask) {
+        return { provider: null, method: maskedHosted(fields), revealable: false }
+      }
       return {
         provider: null,
         method: inline
@@ -922,11 +956,23 @@ export class CredentialService {
         revealable: false,
       }
     }
+    if (this.masksBinding) {
+      return {
+        provider: { kind: provider.kind, name: provider.name, instructions: MASKED_BINDING },
+        method: MASKED_BINDING,
+        revealable: false,
+      }
+    }
     return {
       provider: { kind: provider.kind, name: provider.name, instructions: provider.instructions },
       method: externalMethod(provider.kind, row.location!, fields),
       revealable: false,
     }
+  }
+
+  // 回滚模式：外部绑定换成占位文字，也不记访问（见 CredentialContext.mask）
+  private get masksBinding(): boolean {
+    return this.ctx.mask === 'all'
   }
 
   // 取用一条凭据：托管的给值（要 secret 级），外部的给凭据源、条目位置与取法。取到值或绑定时记一条访问事件
@@ -945,11 +991,19 @@ export class CredentialService {
         const all = this.open(row)
         values = Object.fromEntries(names.flatMap((n) => (n in all ? [[n, all[n]!]] : [])))
       }
-      if (revealable || row.source === 'external') {
+      if (revealable || (row.source === 'external' && !this.masksBinding)) {
         await this.event(tx, row.id, 'access', { via, fields: names })
       }
+      const info = this.info(row, providers)
       return {
-        credential: this.info(row, providers),
+        credential:
+          row.source === 'external' && this.masksBinding
+            ? {
+                ...info,
+                location: MASKED_BINDING,
+                fields: info.fields.map((f) => ({ ...f, sourceField: null })),
+              }
+            : info,
         values,
         provider,
         method,
@@ -989,7 +1043,7 @@ export class CredentialService {
           result.push({ identifier, available: false })
           continue
         }
-        if (row.source === 'external') {
+        if (row.source === 'external' && !this.masksBinding) {
           await this.event(tx, row.id, 'access', {
             via: 'kioku_get' satisfies CredentialVia,
             fields: row.fields.map((f) => f.name),
@@ -1002,7 +1056,8 @@ export class CredentialService {
           available: true,
           name: row.name,
           source: row.source,
-          location: row.source === 'external' ? row.location : null,
+          location:
+            row.source !== 'external' ? null : this.masksBinding ? MASKED_BINDING : row.location,
           provider,
           method,
         })

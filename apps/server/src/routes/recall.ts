@@ -8,12 +8,10 @@ import {
   RecallResponse,
 } from '@kioku/contracts'
 
-import { resolveKeySession } from '../access/session'
 import { requireKey } from '../auth/middleware'
-import { bufferTurn, canBufferTurns } from '../extraction/buffer'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { handleLifecycle } from '../lifecycle/lifecycle'
+import { lifecycleEvent, recallRequest } from '../lifecycle/handlers'
 import { recallScopeForKey } from '../memory/context'
 
 const security = [{ bearer: [] }]
@@ -58,30 +56,24 @@ export function recallRoutes(deps: Deps) {
   for (const path of ['/recall', '/boot', '/lifecycle/event']) app.use(path, requireKey(deps))
   return app
     .openapi(recallRoute, async (c) => {
-      const { query, limit, context } = c.req.valid('json')
       const key = c.get('key')
-      const scope = recallScopeForKey(deps, key, await resolveKeySession(deps, key, context))
-      const [candidates, subjects] = await Promise.all([
-        scope.recall(query, { limit }),
-        scope.subjects(),
-      ])
-      scope.record('rest.recall', query, candidates)
-      return c.json({ candidates, subjects }, 200)
+      const result = await recallRequest(deps, key, c.req.valid('json'), (session) =>
+        recallScopeForKey(deps, key, session),
+      )
+      return c.json(result, 200)
     })
     .openapi(bootRoute, async (c) =>
       c.json(await recallScopeForKey(deps, c.get('key')).boot(), 200),
     )
     .openapi(lifecycleRoute, async (c) => {
       const key = c.get('key')
-      const input = c.req.valid('json')
-      if (input.event === 'turn.end') {
-        if (canBufferTurns(key)) {
-          await bufferTurn(deps, key, await resolveKeySession(deps, key, input.context), input)
-        }
-        return c.json({ hostOutput: { mode: 'none' as const, value: null }, nodeUris: [] }, 200)
-      }
-      const session = await resolveKeySession(deps, key, input.context)
-      const scope = recallScopeForKey(deps, key, session)
-      return c.json(await handleLifecycle(scope, key.app.runtimeFamily, input), 200)
+      // 响应只有 LifecycleResponse 的字段，多带的那几项不发给接入方
+      const { hostOutput, nodeUris } = await lifecycleEvent(
+        deps,
+        key,
+        c.req.valid('json'),
+        (session) => recallScopeForKey(deps, key, session),
+      )
+      return c.json({ hostOutput, nodeUris }, 200)
     })
 }

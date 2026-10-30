@@ -1,6 +1,6 @@
 import { and, arrayContains, asc, count, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
 
-import { pgErrorCode, type Tx } from '../db/client'
+import { loggableError, pgErrorCode, type Tx } from '../db/client'
 import {
   appGroupPersonas,
   conversationTurns,
@@ -214,7 +214,7 @@ export async function enqueueMerged(
         extractionDelay(turns),
       )
     } catch (err) {
-      console.error('合并之后排抽取失败，这一批等下一轮对话时再排', err)
+      console.error('合并之后排抽取失败，这一批等下一轮对话时再排', loggableError(err))
     }
   }
 }

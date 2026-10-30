@@ -4,7 +4,7 @@ import { and, eq, inArray } from 'drizzle-orm'
 import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
 import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
-import { withSpace, type Tx } from '../db/client'
+import { loggableError, withSpace, type Tx } from '../db/client'
 import { apps, memories } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import type { Deps, KeyPrincipal } from '../http/env'
@@ -22,7 +22,7 @@ import {
 } from '../recall/recall'
 import { readableConditions } from './filter'
 import { runInSpace } from './personas'
-import { MemoryError, MemoryService } from './service'
+import { MemoryError, MemoryService, type MemoryContext } from './service'
 
 // 管理界面的搜索等嵌入接口最多这么久，超时就只走全文与关键词，界面不必一直等
 const CONSOLE_SEMANTIC_TIMEOUT_MS = 2_000
@@ -79,7 +79,7 @@ export async function semanticFor(
 ): Promise<QueryVector | null> {
   const compute = async () => {
     const embedder: Embedder | null = await deps.embedder.get().catch((err: unknown) => {
-      console.warn('读取嵌入设置失败，本次召回不使用向量', err)
+      console.warn('读取嵌入设置失败，本次召回不使用向量', loggableError(err))
       return null
     })
     return embedQuery(embedder, query)
@@ -121,10 +121,12 @@ export async function consoleMemberFor(
   return { role, service: await memoryServiceForConsole(deps, spaceId, accountId, role) }
 }
 
+// options 给测试台：打码与事件的标记
 export function memoryServiceForKey(
   deps: Deps,
   key: KeyPrincipal,
   session: KeySession = defaultSession(key),
+  options: Pick<MemoryContext, 'maskSecret' | 'eventContext'> = {},
 ): MemoryService {
   return new MemoryService({
     db: deps.db,
@@ -134,6 +136,7 @@ export function memoryServiceForKey(
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
+    ...options,
   })
 }
 
@@ -209,7 +212,7 @@ export function recallScopeForKey(
           subjectFacts(tx, access, session.subjects),
         )
       } catch (err) {
-        console.warn('读取对象直连的事实失败', err)
+        console.warn('读取对象直连的事实失败', loggableError(err))
         return []
       }
     },

@@ -1,6 +1,6 @@
 import { AsyncLocalStorage } from 'node:async_hooks'
 
-import { sql } from 'drizzle-orm'
+import { DrizzleQueryError, sql } from 'drizzle-orm'
 import type { PgTransactionConfig } from 'drizzle-orm/pg-core'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
 import postgres from 'postgres'
@@ -91,6 +91,18 @@ export function pgErrorCode(err: unknown): string | undefined {
 // 违反的是哪一条约束（唯一、外键、检查约束），数据库没给出时为 undefined
 export function pgConstraint(err: unknown): string | undefined {
   return pgError(err).constraint_name
+}
+
+// 能写进日志的错误：drizzle 错误的 message 带着 SQL 与全部参数（正文、提示语、密文都可能在里面），不能整个打出来，
+// 只留 SQLSTATE、约束名与说明。别的错误原样，堆栈和 cause 都还在，否则查不出是哪里
+export function loggableError(err: unknown): unknown {
+  if (!(err instanceof DrizzleQueryError)) return err
+  const pg = err.cause as { code?: string; constraint_name?: string; message?: string } | undefined
+  return { code: pg?.code, constraint: pg?.constraint_name, message: pg?.message }
+}
+
+export function logInternalError(where: string, err: unknown): void {
+  console.error(where, loggableError(err))
 }
 
 // 违反了指定的唯一约束

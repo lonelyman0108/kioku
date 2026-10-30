@@ -1,4 +1,5 @@
 import type {
+  BenchSessionStart,
   BootResponse,
   HostOutput,
   LifecycleEvent,
@@ -8,6 +9,7 @@ import type {
   TurnEndEvent,
 } from '@kioku/contracts'
 
+import { loggableError } from '../db/client'
 import { BOOT_LAYERS } from '../memory/filter'
 import { formatBootBlock, formatRecentBlock } from '../recall/boot'
 import { CANDIDATE_ID, formatRecallBlock, type RecordableCandidate } from '../recall/recall'
@@ -128,7 +130,9 @@ export async function sessionStart(
       : Promise.resolve([]),
   ])
   for (const r of [recent, related]) {
-    if (r.status === 'rejected') console.warn('会话开始时附加的记忆读取失败', r.reason)
+    if (r.status === 'rejected') {
+      console.warn('会话开始时附加的记忆读取失败', loggableError(r.reason))
+    }
   }
   const recentList = (recent.status === 'fulfilled' ? recent.value : [])
     .filter((m) => !booted.has(m.uri))
@@ -164,12 +168,16 @@ export async function sessionStart(
   }
 }
 
+// 生命周期事件的结果。session.start 多带字数上限、没展开的节点与放不下的附加块：
+// 路由照旧只回 LifecycleResponse 的字段，这几项给测试台
+export type LifecycleResult = LifecycleResponse & { session?: BenchSessionStart }
+
 // 召回类的事件：会话开始与每轮输入。turn.end 不召回，由生命周期端点放进会话缓冲
 export async function handleLifecycle(
   scope: RecallScope,
   runtimeFamily: string,
   input: Exclude<LifecycleEvent, TurnEndEvent>,
-): Promise<LifecycleResponse> {
+): Promise<LifecycleResult> {
   if (input.event === 'session.start') {
     const start = await sessionStart(scope, runtimeFamily, input)
     // 只有做了项目召回才记：没有项目时会话开始不召回
@@ -177,6 +185,7 @@ export async function handleLifecycle(
     return {
       hostOutput: hostOutput(runtimeFamily, input.event, start.context),
       nodeUris: [...start.boot.entries.map((e) => e.uri), ...start.related.map((c) => c.uri)],
+      session: { limit: start.limit, omitted: start.boot.omitted, dropped: start.dropped },
     }
   }
 
@@ -217,7 +226,7 @@ export async function recallBlock(
     const contents = new Map(candidates.map((c) => [c.uri, byId.get(c[CANDIDATE_ID]) ?? '']))
     return formatRecallBlock(candidates, sessionId, contents)
   } catch (err) {
-    console.warn('读取召回候选的正文失败，只给线索', err)
+    console.warn('读取召回候选的正文失败，只给线索', loggableError(err))
     return formatRecallBlock(candidates, sessionId)
   }
 }

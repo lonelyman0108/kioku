@@ -141,6 +141,10 @@ export const EventActor = z.object({
 })
 export type EventActor = z.infer<typeof EventActor>
 
+// 这个事件是测试台真实模式写下的：操作的账号（账号已经删掉时为 null）与那次运行的标记
+export const BenchMark = z.object({ accountName: z.string().nullable(), run: z.string() })
+export type BenchMark = z.infer<typeof BenchMark>
+
 // 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete、
 // reactivate（让过期的记忆重新生效）
 export const HistoryEvent = z.object({
@@ -267,6 +271,8 @@ export const ActivityItem = z.object({
   deleted: z.boolean(),
   // 记忆现在已经过期：按 URI 读不到它，那个 URI 上可能是别的成员的记忆。离开了可见范围的一律为 false
   expired: z.boolean(),
+  // 测试台写下的：真实客户端写的为 null
+  bench: BenchMark.nullable(),
 })
 export type ActivityItem = z.infer<typeof ActivityItem>
 

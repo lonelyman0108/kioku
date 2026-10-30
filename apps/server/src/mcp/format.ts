@@ -9,6 +9,10 @@ import type {
 
 import { CREDENTIAL_NOTICE } from '../credential/methods'
 import type { PlaceholderCredential } from '../credential/service'
+import { MASKED_SECRET_CONTENT } from '../memory/masked'
+
+// 工具里的非业务错误只回这句，和 REST 一致。测试台也按它认内部错误
+export const TOOL_INTERNAL_ERROR = '服务内部错误'
 
 // MCP 工具结果给模型读，用紧凑的文本而不是 JSON
 export function formatMemory(m: MemoryView): string {
@@ -19,7 +23,7 @@ export function formatMemory(m: MemoryView): string {
   if (m.validTo) lines.push(`有效到: ${m.validTo}（到期后不再召回）`)
   if (m.disclosure) lines.push(`Disclosure: ${m.disclosure}`)
   if (m.glossary.length) lines.push(`Glossary: ${m.glossary.join(', ')}`)
-  lines.push('', m.content ?? '（secret 正文需要显式读取权限）')
+  lines.push('', m.content ?? MASKED_SECRET_CONTENT)
   return lines.join('\n')
 }
 

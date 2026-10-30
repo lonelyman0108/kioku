@@ -11,8 +11,8 @@
 | 期 | 进度 | 状态 | 结束标志 |
 |---|---|---|---|
 | 0 · 计划与设计 | 2/2 | 已完成（#84） | 计划与设计合并 |
-| 1 · Lore 界面导入 | 6/6 | 审查中 | 同一时刻命令行 `--sync`（不加 `--apply`）与界面的计划逐项相同；在空间设置里用文件和地址各完成一次导入与同步 |
-| 2 · 测试台服务端 | 0/9 | 未开始 | 内置场景按三种执行方式、四种 Key 跑都是通过或跳过；回滚后所有表与 Key 的最后使用时间不变；命令行能对着真实服务跑 |
+| 1 · Lore 界面导入 | 6/6 | 已完成（#85） | 同一时刻命令行 `--sync`（不加 `--apply`）与界面的计划逐项相同；在空间设置里用文件和地址各完成一次导入与同步 |
+| 2 · 测试台服务端 | 9/9 | 审查中 | 内置场景按三种执行方式、四种 Key 跑都是通过或跳过；回滚后所有表与 Key 的最后使用时间不变；命令行能对着真实服务跑 |
 | 3 · 测试台界面 | 0/5 | 未开始 | 不接任何客户端，在界面上走完 Claude Code 一次会话与 AstrBot 群聊一轮 |
 | 4 · 模型代理 | 0/6 | 未开始 | 界面上和真实模型对话，模型调工具读写记忆，回滚模式下不留痕迹，`secret` 与凭据值发不到模型 |
 | 5 · 收尾 | 0/4 | 未开始 | 文档更新、部署问过维护者、计划归档 |
@@ -85,15 +85,15 @@
 
 ### 第 2 期 · 测试台服务端
 
-- [ ] `packages/contracts/src/bench.ts`：调用（工具步骤没有 `context` 字段；生命周期、`/recall` 的请求体按步骤校验）、运行请求与结果（`internalError`；`skipped` 是不满足前提，不算失败；`notRun` 是根事务出错后没有执行，算失败；`replayDiverged`）、断言（报错与否、包含、不包含、URI 列表）、`capture`、`requires`、场景；步骤是否写库的判定（`isReplayStep`、`mayWrite`）与单元测试
-- [ ] 把 `routes/recall.ts`、`routes/whoami.ts` 里的处理抽成函数，路由和测试台共用（`scope` 由调用方传入，不在函数里新建）；`session.start` 的结果多带 `limit`、`omitted`、`dropped`，不加进 `LifecycleResponse`；`keyToSimulate` 挪到能共用的地方
-- [ ] `MemoryContext`、`CredentialContext` 加打码选项与默认事件 context（`bench`）：`toView` 与取用的打码、拒绝降级与改 `secret` 正文、外部凭据源回滚时打码、事件合并。`ActivityItem`、`CredentialEvent` 加 `bench` 字段。集成测试逐个工具断言：`kioku_get`、`kioku_list` 的父节点、`kioku_move`、只改 priority 的 `kioku_update`、`secret` 级的 `kioku_create`、降级被拒、改正文被拒、取托管值、外部绑定两种模式
-- [ ] `mcp/server.ts`：`tool()` 的非业务错误只回固定文字，日志只记 SQLSTATE、约束名与说明；`routes/mcp.ts`：`GET` 返回 405（现在返回一个马上结束的事件流，SDK 的客户端会每秒重连一次）。真实接口的修复，配用例
-- [ ] `bench/rollback.ts`：回滚事务与串行化的 `Db` 代理、语句与锁的时限、合作式的总时长（代理在超时或已结束时拒绝新事务，外层事务 reject 时先置状态）、同时运行数的闸门（小于连接池）；运行前算好查询向量，事务里只查这张表。集成测试覆盖：并行的事务不交错、出错只回滚那个事务、根事务上的语句出错后面的步骤记为没有执行、闸门 429（要另开大一点的连接池）
-- [ ] `bench/executor.ts`：进程内执行（真实 MCP 服务端，`record` 不记，工具步骤用 `defaultSession`）与 HTTP 执行（SDK `Client` 真实握手，生命周期等走 `fetch`）共用一个接口；`bench/changes.ts`：回滚按 `created_at = now()` 加 id 水位，真实按事件 context 的标记；快照套 `eventVisibility`，只给字段名
-- [ ] `bench/runner.ts` 与 `bench/scenarios/`：步骤、断言、`capture`、`${run}`、`requires`、重放（只记成功的写步骤，条数与字节上限，报错就停）；五个内置预设
-- [ ] 路由 `GET .../bench/tools`、`POST .../bench/run`（`bodyLimit`）、`GET /spaces/{spaceId}/bench/scenarios`。集成测试：回滚后所有表与 Key 的最后使用时间不变；同一组调用和走真实 `/v1/mcp` 的输出相同；非应用主人 403、作废的 Key 404；同一把 Key、群聊上下文下 `prompt.submit` 召回不到私人层而 `kioku_get` 读得到；另一成员的过期私人记录与运行期间另一条连接提交的事件、缓冲都不进 `changes`；真实模式的事件带标记、活动接口返回它；内置场景三种执行方式、四种 Key
-- [ ] `cli/bench.ts`（`dist/bench.mjs`，`tsdown.config.ts` 加入口）：环境变量的 Key、`--allow-writes`、`--show-output`、退出码；集成测试起真实端口，顺手用真实 Key 跑一次 `plugins/claude-code/hooks/forward.mjs` 核对 `additionalContext`。`AGENTS.md` 加回滚代理的约束（接入方路径要经过 `deps`，语句放进事务，不在事务里发外部请求；不要写 `lore-backup-v1` 字面量）。PR 里说明新增目录
+- [x] `packages/contracts/src/bench.ts`：调用（工具步骤没有 `context` 字段；生命周期、`/recall` 的请求体按步骤校验）、运行请求与结果（`internalError`；`skipped` 是不满足前提，不算失败；`notRun` 是根事务出错后没有执行，算失败；`replayDiverged`）、断言（报错与否、包含、不包含、URI 列表）、`capture`、`requires`、场景；步骤是否写库的判定（`isReplayStep`、`mayWrite`）与单元测试
+- [x] 把 `routes/recall.ts`、`routes/whoami.ts` 里的处理抽成函数，路由和测试台共用（`scope` 由调用方传入，不在函数里新建）；`session.start` 的结果多带 `limit`、`omitted`、`dropped`，不加进 `LifecycleResponse`；`keyToSimulate` 挪到能共用的地方
+- [x] `MemoryContext`、`CredentialContext` 加打码选项与默认事件 context（`bench`）：`toView` 与取用的打码、拒绝降级与改 `secret` 正文、外部凭据源回滚时打码、事件合并。`ActivityItem`、`CredentialEvent` 加 `bench` 字段。集成测试逐个工具断言：`kioku_get`、`kioku_list` 的父节点、`kioku_move`、只改 priority 的 `kioku_update`、`secret` 级的 `kioku_create`、降级被拒、改正文被拒、取托管值、外部绑定两种模式
+- [x] `mcp/server.ts`：`tool()` 的非业务错误只回固定文字，日志只记 SQLSTATE、约束名与说明；`routes/mcp.ts`：`GET` 返回 405（现在返回一个马上结束的事件流，SDK 的客户端会每秒重连一次）。真实接口的修复，配用例
+- [x] `bench/rollback.ts`：回滚事务与串行化的 `Db` 代理、语句与锁的时限、合作式的总时长（代理在超时或已结束时拒绝新事务，外层事务 reject 时先置状态）、同时运行数的闸门（小于连接池）；运行前算好查询向量，事务里只查这张表。集成测试覆盖：并行的事务不交错、出错只回滚那个事务、根事务上的语句出错后面的步骤记为没有执行、闸门 429（要另开大一点的连接池）
+- [x] `bench/executor.ts`：进程内执行（真实 MCP 服务端，`record` 不记，工具步骤用 `defaultSession`）与 HTTP 执行（SDK `Client` 真实握手，生命周期等走 `fetch`）共用一个接口；`bench/changes.ts`：回滚按 `created_at = now()` 加 id 水位，真实按事件 context 的标记；快照套 `eventVisibility`，只给字段名
+- [x] `bench/runner.ts` 与 `bench/scenarios/`：步骤、断言、`capture`、`${run}`、`requires`、重放（只记成功的写步骤，条数与字节上限，报错就停）；五个内置预设
+- [x] 路由 `GET .../bench/tools`、`POST .../bench/run`（`bodyLimit`）、`GET /spaces/{spaceId}/bench/scenarios`。集成测试：回滚后所有表与 Key 的最后使用时间不变；同一组调用和走真实 `/v1/mcp` 的输出相同；非应用主人 403、作废的 Key 404；同一把 Key、群聊上下文下 `prompt.submit` 召回不到私人层而 `kioku_get` 读得到；另一成员的过期私人记录与运行期间另一条连接提交的事件、缓冲都不进 `changes`；真实模式的事件带标记、活动接口返回它；内置场景三种执行方式、四种 Key
+- [x] `cli/bench.ts`（`dist/bench.mjs`，`tsdown.config.ts` 加入口）：环境变量的 Key、`--allow-writes`、`--show-output`、退出码；集成测试起真实端口，顺手用真实 Key 跑一次 `plugins/claude-code/hooks/forward.mjs` 核对 `additionalContext`。`AGENTS.md` 加回滚代理的约束（接入方路径要经过 `deps`，语句放进事务，不在事务里发外部请求；不要写 `lore-backup-v1` 字面量）。PR 里说明新增目录
 
 ### 第 3 期 · 测试台界面
 
@@ -130,6 +130,9 @@
 | 2026-10-30 | 第 1 期审查 | `/code-review high` | 10 条：修 8 条（计划显示后按回车就写入、指纹不覆盖默认人格、勾掉 soul 后留下空人格、disclosure 切开代理对、旧文件确认与服务端不一致、把确定没写的错误说成可能部分写入、启动上下文的数量算进不写的目标、没有勾选时算两遍）；1 条不成立（没有主密钥时启动检查就拒绝）；1 条（日志带正文的根源在 `app.onError`）放到第 2 期统一修。修复后真实数据回归再跑一遍，全部一致 |
 | 2026-10-30 | 第 1 期复审 | `/code-review medium`，只看修复提交 | 7 条，没有高危：修 5 条（跳过 soul 的同步让新应用没有默认人格、没写入新 soul 也重建人格、指纹带了无关的人格状态、失败说明的时机与来源分页、按中文文字判断部分写入），并顺手去掉了空应用；1 条（浏览器重算勾选结果）是已接受的取舍；设计的一句措辞改准。变异 44 项全部按断言失败；服务端与浏览器的应用映射对照 2 万份随机计划、5 万种勾法全部相同 |
 | 2026-10-30 | 第 1 期走查 | 无头 Chrome，真实导出 | CSP 违规 0；10 MB 的文件裁到约 275 KB，只有五张表，244 条废弃行不带正文；409 后自动重算、勾选还在；注入写库错误后提示可能部分写入，重看后接着做不重复；旧文件提醒；暗色与 360 宽。变异检查 52 项，除一项等价变异外都按断言失败 |
+| 2026-10-30 | 第 2 期 | `scripts/check.sh`（带集成测试库）；命令行对着真实端口跑；内置场景三种执行方式、四种 Key | 服务端 963 个测试通过；矩阵全部通过或跳过；关键条件做了变异检查。独立核对找出 13 个缺口，已补（文档类由主 agent 写）。留下：没配主密钥的实例上 secret 级 Key 跑内置场景会有步骤报错，写进了设计的限制 |
+| 2026-10-30 | 第 2 期审查 | `/code-review high` | 10 条：修 9 条（回滚之后内层事务句柄还能发语句、capture 的值进命令行默认输出、变量绕过 `--allow-writes`、URI 列表扫正文、错误原因留到下一步、旧的 capture 值、失败的写步骤进重放、根事务上留着 `app.space_id`、重放白跑改动查询），1 条只写文档（命令行会记召回事件）；savepoint 累积写进设计的限制。另修 `app.onError` 的日志带 SQL 与参数 |
+| 2026-10-30 | 第 2 期复审 | `/code-review medium`，只看修复提交 | 7 条，没有高危：修 5 条（`logInternalError` 丢了别的错误的堆栈、别的日志点还打整个 `err`（召回事件失败时会带上用户的提示语）、错误原因算到这一步头上、断言按数字代入、AGENTS 的说明不准），2 条记进「以后再做」 |
 | 2026-10-30 | 设计的对抗审查 | 安全、回滚保真度、Lore 导入、需求与可行性四个方向各一名审查者，发现再由独立核查者读代码反驳 | 51 条：成立 26、部分成立 22、驳回 3；核查后 1 条高危（打码写回覆盖 `secret`，决策 9）、16 条中危、31 条低危。已并入设计与本计划；留下的见「以后再做」 |
 
 ## 阻塞项
@@ -145,6 +148,10 @@
 - 第一版的表单不追求覆盖全部 JSON Schema，复杂字段用 JSON。
 - 人格名称里含 NUL 时 `/plan` 能过、`/apply` 写人格时 500（只记 SQLSTATE，什么都没写）。`CreatePersonaRequest` 本身也没校验，要改就两处一起改。
 - `core://agent/<运行时>` 导入过、应用后来被删，再导入时应用仍会新建成空的，没有新记忆。`planImport` 不读库，要改得动预览、写入和界面。
+- 重放结束那次推进水位失败（等锁超时）时错误被吞掉，第一个真实步骤的 `changes` 会带上重放的写入，只影响显示；可以换成只读最大 id 的专用方法。
+- `kioku_list` 子节点的 disclosure 可以多行，正好写成列表行时 URI 列表分不出来，只影响断言；要改就让 `formatChildren` 把 disclosure 压成一行，但这改的是真实工具的输出。
+- 记忆正文带 NUL 时 `/v1/memories` 回 500（校验不拦，写库报 22021）。`memories.int.test.ts` 的新用例靠它触发真实的写库错误，以后在校验里拦 NUL 时要换触发办法。
+- 连接断开时 postgres.js 的 `scope` 自己发 `rollback to`，不经过句柄，`guard` 拦不住；所有事务都这样，和进程退出的问题一起看。
 - 模拟「宿主实际拿到的文字」（例如 `mcp`、`other` 类型的应用拿到 `return_value`，钩子什么都不注入）与诊断类断言，第一版不做，启动预览和原始响应里看得到。
 
 ## 变更记录

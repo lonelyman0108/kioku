@@ -5,7 +5,7 @@ import { backupJob } from '../backup/storage'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
 import { masterKeyStatus, recordMasterKeyError, rotateMasterKey } from '../crypto/rotation'
-import type { Db } from '../db/client'
+import { loggableError, type Db } from '../db/client'
 import { backfillJob, embedJobs, pruneJob, switchJob, type EmbedTarget } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
 import { EMBED_BATCH } from '../embedding/worker'
@@ -190,7 +190,7 @@ export async function startJobs(options: {
   // 出错时不交给 pg-boss 重试（错误已经记下给管理员看），由定时任务再试
   await boss.work(SWITCH, async () => {
     const outcome = await switchJob(options.db, options.embedder, retry).catch((err: unknown) => {
-      console.error('换模型时补向量出错', err)
+      console.error('换模型时补向量出错', loggableError(err))
       return 'stuck' as const
     })
     if (outcome === 'switched' || outcome === 'cancelled') void send(PRUNE, {}, PRUNE_AFTER_SECONDS)
@@ -213,7 +213,7 @@ export async function startJobs(options: {
       console.log(`主密钥轮换：这次换了 ${rewrapped} 条，还剩 ${remaining} 条`)
       if (remaining) void send(ROTATE, {}, ROTATE_AGAIN_SECONDS)
     } catch (err) {
-      console.error('主密钥轮换出错，定时任务会再试', err)
+      console.error('主密钥轮换出错，定时任务会再试', loggableError(err))
       await recordMasterKeyError(options.db, (err as Error).message).catch(() => {})
     }
   })
