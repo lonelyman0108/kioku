@@ -150,13 +150,14 @@ export function inProcessExecutor(
     whoami: async () => whoamiOf(key),
     async execute(step) {
       const outcome = await call(step)
-      // 这一步记下的都取走：被吞掉的错误（例如对象直连读取失败）不能算到下一步头上
+      const changes = await tracker.collect(step)
+      // 这一步记下的都取走（包括列改动时记下的）：被吞掉的错误（例如对象直连读取失败）不能算到下一步头上
       const detail = rollback?.takeDetail() ?? null
       return {
         ...outcome,
         internalDetail: outcome.internalError ? detail : null,
         vectorSkipped: rollback?.takeVectorMissed() ?? false,
-        changes: await tracker.collect(step),
+        changes,
       }
     },
     stopReason: async () => (rollback ? rollback.stopReason() : null),

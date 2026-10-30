@@ -35,7 +35,7 @@ import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { changeTracker } from '../changes'
-import { runBench } from '../inProcess'
+import { inProcessExecutor, runBench } from '../inProcess'
 import { inRollback, type BenchLimits } from '../rollback'
 
 const SECRET_BODY = '保险柜的位置在书房第三层'
@@ -953,6 +953,38 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         expect(result.steps[0]!.internalDetail).toBe('lock_timeout')
         expect(result.steps[1]!.status).toBe('notRun')
         expect(result.steps[1]!.reason).toContain('总时长')
+      } finally {
+        await release()
+        error.mockRestore()
+      }
+    })
+
+    it('列改动时记下的错误原因当场取走，不留到下一步', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+      if ('error' in found) throw new Error(found.error)
+      const release = await holdLock('memory_events')
+      try {
+        await inRollback(
+          { ...deps, benchLimits: { lockTimeoutMs: 100 } },
+          { model: null, vectors: new Map() },
+          async (scoped, rollback) => {
+            const executor = inProcessExecutor(scoped, found.key, {
+              run: 'r',
+              account: ws.accountId,
+              rollback,
+            })
+            const outcome = await executor.execute({ kind: 'whoami' })
+            // 这一步本身没事，只是列不出改动
+            expect(outcome).toMatchObject({
+              isError: false,
+              internalError: false,
+              internalDetail: null,
+              changes: null,
+            })
+            expect(rollback.takeDetail()).toBeNull()
+          },
+        )
       } finally {
         await release()
         error.mockRestore()
