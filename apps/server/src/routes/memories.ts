@@ -25,7 +25,7 @@ import {
 } from '@kioku/contracts'
 import type { Context } from 'hono'
 
-import { requireKey } from '../auth/middleware'
+import { isInstanceAdmin, requireKey } from '../auth/middleware'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { deletionRetention } from '../jobs/retention'
@@ -267,10 +267,11 @@ function consoleOnlyRoutes(deps: Deps) {
     })
     .openapi(deleted, async (c) => {
       const { service } = await consoleMember(deps, c)
-      // 保留期是整个实例的设置：列表按成员读得到的算，过多久永久清除对谁都一样
+      // 保留期是整个实例的设置：列表按成员读得到的算，保留天数对谁都一样，暂停只给实例管理员
+      const admin = await isInstanceAdmin(deps.db, c.get('console').accountId)
       const [page, retention] = await Promise.all([
         service.deleted(c.req.valid('query')),
-        deletionRetention(deps.db),
+        deletionRetention(deps.db, admin),
       ])
       return c.json({ ...page, retention }, 200)
     })
