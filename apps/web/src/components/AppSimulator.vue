@@ -122,6 +122,15 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
         aria-label="模拟用的 Key"
         class="ml-auto min-w-56"
       />
+      <UButton
+        :to="{ name: 'bench', params: { spaceId }, query: { app: appId, key: keyId } }"
+        :icon="icons.bench"
+        size="sm"
+        color="neutral"
+        variant="subtle"
+      >
+        在测试台打开
+      </UButton>
     </div>
     <UAlert
       v-if="keys.isError.value && !keys.data.value"
