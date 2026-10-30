@@ -199,11 +199,10 @@ export const BenchChanges = z.object({
       changes: z.array(z.string()),
     }),
   ),
-  // 新建的对象与它的平台账号。真实模式下这几张表没有标记，不列，为 null
+  // 新建的对象的个数，与它们的平台账号：一个账号一项，只给种类与平台，不给账号本身。
+  // 真实模式下这几张表没有标记，不列，为 null
   subjects: z.number().int().nullable(),
-  identities: z
-    .array(z.object({ kind: SubjectKind, platform: z.string(), externalId: z.string() }))
-    .nullable(),
+  identities: z.array(z.object({ kind: SubjectKind, platform: z.string() })).nullable(),
   // 写进对话缓冲的轮数，真实模式不列，为 null
   turns: z.number().int().nullable(),
   // 这一步传入的这一轮：只回显步骤本身，不从表里读（缓冲里有群里别人的话，没有读取的接口）

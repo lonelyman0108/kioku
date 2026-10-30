@@ -1093,8 +1093,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(turn!).toMatchObject({
         subjects: 2,
         identities: [
-          { kind: 'person', platform: 'bench', externalId: 'bench-user' },
-          { kind: 'group', platform: 'bench', externalId: 'bench-group' },
+          { kind: 'person', platform: 'bench' },
+          { kind: 'group', platform: 'bench' },
         ],
         turns: 1,
         turn: { sessionId: 'bench-session', user: '群友说的话', reply: '回复的话' },
@@ -1106,7 +1106,15 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(removed!.memories[0]).toMatchObject({ type: 'delete', uri: 'notes://b' })
 
       const allChanges = JSON.stringify(result.steps.map(changesOf))
-      for (const content of ['正文一', '正文二', '想起一', 'hunter2-value', 'changed-value']) {
+      for (const content of [
+        '正文一',
+        '正文二',
+        '想起一',
+        'hunter2-value',
+        'changed-value',
+        'bench-user',
+        'bench-group',
+      ]) {
         expect(allChanges).not.toContain(content)
       }
     })

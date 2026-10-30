@@ -98,7 +98,6 @@ export function changeTracker(
             id: subjectIdentities.id,
             kind: subjectIdentities.kind,
             platform: subjectIdentities.platform,
-            externalId: subjectIdentities.externalId,
           })
           .from(subjectIdentities)
           .where(eq(subjectIdentities.createdAt, NOW))
@@ -120,11 +119,7 @@ export function changeTracker(
       return {
         ...changes,
         subjects: newSubjects.length,
-        identities: newIdentities.map(({ kind, platform, externalId }) => ({
-          kind,
-          platform,
-          externalId,
-        })),
+        identities: newIdentities.map(({ kind, platform }) => ({ kind, platform })),
         turns: turns.length,
         turn: turns.length ? echoedTurn(step) : null,
       }
