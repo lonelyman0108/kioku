@@ -355,7 +355,7 @@ export function turnFailureMessage(err: unknown): string {
   return err.message
 }
 
-const NOT_IN_HISTORY_RETRY = '这条消息没有进历史，可以再发一次。'
+const RETRY = '可以再发一次。'
 const KEPT_IN_HISTORY = '做过的都留在历史里，可以接着说下一句。'
 
 // 报错原文可能已经带句号，也可能没有
@@ -453,10 +453,7 @@ export async function sendAgentMessage(
     const outcome = await runSteps(steps, '模型对话的生命周期事件')
     if (outcome.kind === 'stale') return finish('abandoned', null)
     if (outcome.kind === 'failed') {
-      return finish(
-        'lifecycleFailed',
-        sentences(outcome.message, `没有请求模型，${NOT_IN_HISTORY_RETRY}`),
-      )
+      return finish('lifecycleFailed', sentences(outcome.message, `没有请求模型，${RETRY}`))
     }
     updateExchange({ lifecycle: outcome.traces })
     const diverged = outcome.result.replayDiverged
@@ -474,7 +471,7 @@ export async function sendAgentMessage(
   if (loop !== 'chat') keptUser = sentUser
   const head = systemMessage(system, state.sessionText)
   const before = [...(head ? [head] : []), ...state.messages, sentUser]
-  const afterReply = () => (working.length ? KEPT_IN_HISTORY : NOT_IN_HISTORY_RETRY)
+  const afterReply = () => (working.length ? KEPT_IN_HISTORY : RETRY)
 
   let reply: string
   for (let round = 1; ; round++) {

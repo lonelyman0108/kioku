@@ -865,7 +865,7 @@ describe('停止', () => {
     const done = await h.send(USER_TEXT)
     expect(last(done).end).toBe('stopped')
     expect(last(done).inHistory).toBe(false)
-    expect(last(done).notice).toContain('没有进历史')
+    expect(last(done).notice).toContain('可以再发一次')
     expect(noticeColor(last(done).end)).toBe('neutral')
     expect(done.messages).toEqual([])
 
@@ -1037,7 +1037,7 @@ describe('请求模型失败', () => {
     expect(last(done).end).toBe('modelFailed')
     expect(last(done).inHistory).toBe(false)
     expect(last(done).notice).toContain('上游的错误原文')
-    expect(last(done).notice).toContain('没有进历史')
+    expect(last(done).notice).toContain('可以再发一次')
     expect(noticeColor(last(done).end)).toBe('error')
     // 启动上下文拿到了，下一条不用再发
     expect(done.sessionText).toBe(SESSION_TEXT)
@@ -1103,7 +1103,7 @@ describe('请求模型失败', () => {
     const done = await h.send(USER_TEXT)
     expect(last(done).notice).not.toContain('。。')
     const plain = harness({ loop: 'tools', turns: [new ApiError(502, '上游挂了')] })
-    expect(last(await plain.send(USER_TEXT)).notice).toContain('上游挂了。这条消息')
+    expect(last(await plain.send(USER_TEXT)).notice).toContain('上游挂了。可以再发一次')
   })
 })
 
