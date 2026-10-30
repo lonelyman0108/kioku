@@ -1,0 +1,439 @@
+import {
+  BenchStep,
+  LAYERS,
+  type BenchReplayStep,
+  type KeyScopes,
+  type WhoAmI,
+} from '@kioku/contracts'
+import { describe, expect, it } from 'vitest'
+import type { z } from 'zod'
+
+import { TOOL_INTERNAL_ERROR } from '../../mcp/format'
+import {
+  restFailure,
+  restSuccess,
+  toolOutcome,
+  type BenchExecutor,
+  type ResolvedStep,
+  type StepOutcome,
+} from '../executor'
+import { captureAfter, expand, runSteps, unmetRequirement } from '../runner'
+
+const FULL: KeyScopes = {
+  readLayers: [...LAYERS],
+  writeLayers: [...LAYERS],
+  maxSensitivity: 'secret',
+  admin: false,
+}
+const READONLY: KeyScopes = { ...FULL, writeLayers: [], maxSensitivity: 'private' }
+
+const textOutcome = (text: string): StepOutcome =>
+  toolOutcome({ content: [{ type: 'text', text }] })
+const errorOutcome = (text: string): StepOutcome =>
+  toolOutcome({ content: [{ type: 'text', text }], isError: true })
+
+// 假的执行方式：按调用顺序给结果，记下收到的步骤
+function fakeExecutor(
+  answer: (step: ResolvedStep, index: number) => StepOutcome = () => textOutcome('好'),
+  options: { scopes?: KeyScopes; stops?: ('aborted' | 'timeout' | null)[] } = {},
+) {
+  const seen: ResolvedStep[] = []
+  let stopAt = 0
+  const executor: BenchExecutor = {
+    whoami: async () =>
+      ({ spaceId: 's', app: {}, scopes: options.scopes ?? FULL }) as unknown as WhoAmI,
+    execute: async (step) => {
+      seen.push(step)
+      return answer(step, seen.length - 1)
+    },
+    stopReason: async () => options.stops?.[stopAt++] ?? null,
+  }
+  return { executor, seen }
+}
+
+const steps = (...input: z.input<typeof BenchStep>[]) => input.map((s) => BenchStep.parse(s))
+const run = (
+  executor: BenchExecutor,
+  input: BenchStep[],
+  replay: BenchReplayStep[] = [],
+  mode: 'rollback' | 'real' = 'rollback',
+) => runSteps(executor, { mode, steps: input, replay, run: 'abc123' })
+
+describe('expand', () => {
+  const vars = new Map([
+    ['run', '12345678'],
+    ['version', '3'],
+    ['name', 'x'],
+  ])
+
+  it('把字符串里的变量换掉，对象与数组里的也换，别的值不动', () => {
+    expect(
+      expand(
+        { uri: 'a://${run}/b', list: ['${name}', 1, null], nested: { deep: '${name}!' } },
+        vars,
+      ),
+    ).toEqual({ uri: 'a://12345678/b', list: ['x', 1, null], nested: { deep: 'x!' } })
+  })
+
+  it('没有这个变量的原样留着', () => {
+    expect(expand('正文里写着 ${other}', vars)).toBe('正文里写着 ${other}')
+    expect(expand('${other}', vars)).toBe('${other}')
+  })
+
+  it('整个字符串就是一个取到整数的变量时按数字代入，${run} 总是字符串', () => {
+    expect(expand('${version}', vars)).toBe(3)
+    expect(expand('v-${version}', vars)).toBe('v-3')
+    expect(expand('${run}', vars)).toBe('12345678')
+    expect(expand('${name}', vars)).toBe('x')
+  })
+})
+
+describe('capture', () => {
+  it('按固定前缀取到行尾，去掉两头的空白；有好几处时取第一处', () => {
+    expect(captureAfter('层: private，版本: 3\n\n正文 版本: 9', '版本: ')).toBe('3')
+    expect(captureAfter('URI: a://b  \n', 'URI: ')).toBe('a://b')
+    expect(captureAfter('已新建凭据，版本 1', '版本 ')).toBe('1')
+  })
+
+  it('找不到时是 null，空值也算取到', () => {
+    expect(captureAfter('没有', '版本: ')).toBeNull()
+    expect(captureAfter('版本: \n', '版本: ')).toBe('')
+  })
+
+  it('在恶意构造的结果上也是线性的：不执行模式，长文本照样很快', () => {
+    const started = performance.now()
+    expect(captureAfter(`${'a'.repeat(1_000_000)}b`, '(a+)+$')).toBeNull()
+    expect(performance.now() - started).toBeLessThan(200)
+  })
+})
+
+describe('requires', () => {
+  it('层与最高敏感级都满足才算满足', () => {
+    expect(unmetRequirement({ readLayers: ['private'] }, READONLY)).toBeNull()
+    expect(unmetRequirement({ writeLayers: ['private'] }, READONLY)).toContain('写不了 private')
+    expect(
+      unmetRequirement(
+        { readLayers: ['private'] },
+        { ...READONLY, readLayers: ['base', 'persona'] },
+      ),
+    ).toContain('读不了 private')
+    expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain('不到 secret')
+    expect(unmetRequirement({ maxSensitivity: 'private' }, READONLY)).toBeNull()
+    expect(unmetRequirement({ maxSensitivity: 'public' }, READONLY)).toBeNull()
+    expect(unmetRequirement({}, READONLY)).toBeNull()
+  })
+})
+
+describe('断言', () => {
+  it('没带断言的步骤只要不是内部错误就算通过，业务错误也算', async () => {
+    const { executor } = fakeExecutor(() => errorOutcome('记忆不存在'))
+    const result = await run(executor, steps({ kind: 'whoami' }))
+    expect(result.steps[0]).toMatchObject({ status: 'passed', isError: true, assertions: [] })
+    expect(result.ok).toBe(true)
+  })
+
+  it('内部错误一律算失败，「应当报错」也不算通过，也不再看别的断言', async () => {
+    const { executor } = fakeExecutor(() => errorOutcome(TOOL_INTERNAL_ERROR))
+    const result = await run(
+      executor,
+      steps({ kind: 'tool', tool: 'kioku_get', expect: { error: true, contains: ['内部'] } }),
+    )
+    expect(result.steps[0]).toMatchObject({
+      status: 'failed',
+      internalError: true,
+      assertions: [{ message: '服务内部错误', ok: false }],
+    })
+    expect(result.ok).toBe(false)
+  })
+
+  it('REST 的 500 算内部错误，别的状态码是业务错误', () => {
+    expect(restFailure(500, '服务内部错误').internalError).toBe(true)
+    expect(restFailure(404, '不存在').internalError).toBe(false)
+    expect(restFailure(404, '不存在')).toMatchObject({ isError: true, httpStatus: 404 })
+  })
+
+  it('报错与否、包含、不包含、URI 列表，都展开变量；失败的说明不带实际结果', async () => {
+    const { executor } = fakeExecutor(() =>
+      textOutcome(
+        'URI: a://abc123\n秘密的实际内容\n- b://c（private，priority 2）\n0.59 | d://e | x',
+      ),
+    )
+    const result = await run(
+      executor,
+      steps({
+        kind: 'tool',
+        tool: 'kioku_get',
+        expect: {
+          error: false,
+          contains: ['a://${run}', '没有这句'],
+          notContains: ['秘密的实际内容', '也没有这句'],
+          uris: ['a://${run}', 'b://c', 'd://e', 'x://y'],
+          notUris: ['b://c', 'z://z'],
+        },
+      }),
+    )
+    const step = result.steps[0]!
+    expect(step.status).toBe('failed')
+    expect(step.uris).toEqual(['a://abc123', 'b://c', 'd://e'])
+    expect(step.assertions.filter((a) => !a.ok).map((a) => a.message)).toEqual([
+      '应包含「没有这句」',
+      '不应包含「秘密的实际内容」',
+      'URI 列表应有 x://y',
+      'URI 列表不应有 b://c',
+    ])
+    expect(step.assertions.filter((a) => a.ok)).toHaveLength(7)
+  })
+
+  it('报错与否对不上时失败', async () => {
+    const ok = fakeExecutor(() => textOutcome('好'))
+    const wanted = await run(ok.executor, steps({ kind: 'whoami', expect: { error: true } }))
+    expect(wanted.steps[0]!.assertions).toEqual([{ message: '应当报错', ok: false }])
+    const bad = fakeExecutor(() => errorOutcome('坏了'))
+    const unwanted = await run(bad.executor, steps({ kind: 'whoami', expect: { error: false } }))
+    expect(unwanted.steps[0]!.assertions).toEqual([{ message: '不应报错', ok: false }])
+  })
+})
+
+describe('变量与 capture', () => {
+  it('${run} 与前面取到的变量展开之后才执行', async () => {
+    const { executor, seen } = fakeExecutor((_, i) =>
+      i === 0 ? textOutcome('URI: a://b\n层: private，版本: 7\n\n正文') : textOutcome('好'),
+    )
+    const result = await run(
+      executor,
+      steps(
+        {
+          kind: 'tool',
+          tool: 'kioku_create',
+          arguments: { uri: 'a://${run}' },
+          capture: { version: '版本: ', uri: 'URI: ' },
+        },
+        {
+          kind: 'tool',
+          tool: 'kioku_update',
+          arguments: { uri: '${uri}', expected_version: '${version}' },
+          expect: { contains: ['好'] },
+        },
+      ),
+    )
+    expect(seen[0]).toMatchObject({ arguments: { uri: 'a://abc123' } })
+    expect(seen[1]).toMatchObject({ arguments: { uri: 'a://b', expected_version: 7 } })
+    expect(result.steps[0]!.captured).toEqual({ version: '7', uri: 'a://b' })
+    expect(result.run).toBe('abc123')
+  })
+
+  it('取不到算这一步失败；依赖它的步骤不执行，也算失败', async () => {
+    const { executor, seen } = fakeExecutor(() => textOutcome('什么都没有'))
+    const result = await run(
+      executor,
+      steps(
+        { kind: 'whoami', capture: { version: '版本: ' } },
+        { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${version}' } },
+        { kind: 'whoami' },
+      ),
+    )
+    expect(result.steps.map((s) => s.status)).toEqual(['failed', 'failed', 'passed'])
+    expect(result.steps[0]!.assertions[0]!.message).toContain('capture version')
+    expect(result.steps[1]!.assertions).toEqual([
+      { message: '变量 ${version} 没有取到', ok: false },
+    ])
+    expect(seen).toHaveLength(2)
+  })
+
+  it('取变量的步骤被跳过时，依赖它的步骤也跳过，不算失败', async () => {
+    const { executor, seen } = fakeExecutor(() => textOutcome('版本: 1'), { scopes: READONLY })
+    const result = await run(
+      executor,
+      steps(
+        {
+          kind: 'tool',
+          tool: 'kioku_create',
+          requires: { writeLayers: ['private'] },
+          capture: { version: '版本: ' },
+        },
+        { kind: 'tool', tool: 'kioku_update', arguments: { expected_version: '${version}' } },
+      ),
+    )
+    expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'skipped'])
+    expect(result.steps[0]!.reason).toContain('写不了 private')
+    expect(result.steps[1]!.reason).toContain('${version}')
+    expect(seen).toHaveLength(0)
+    expect(result.ok).toBe(true)
+    expect(result.counts).toEqual({ passed: 0, failed: 0, skipped: 2, notRun: 0 })
+  })
+})
+
+describe('跳过与没有执行', () => {
+  it('不满足 requires 的步骤记跳过，不执行，不算失败', async () => {
+    const { executor, seen } = fakeExecutor(() => textOutcome('好'), { scopes: READONLY })
+    const result = await run(
+      executor,
+      steps(
+        { kind: 'whoami' },
+        { kind: 'tool', tool: 'kioku_create', requires: { writeLayers: ['private'] } },
+        { kind: 'boot', requires: { maxSensitivity: 'secret' } },
+      ),
+    )
+    expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped', 'skipped'])
+    expect(seen).toHaveLength(1)
+    expect(result.ok).toBe(true)
+  })
+
+  it('根事务中止：这一步算失败（错误被吞掉时也是），后面的记为没有执行，整次运行不算通过', async () => {
+    const { executor, seen } = fakeExecutor(() => textOutcome('看起来成功了'), {
+      stops: [null, 'aborted'],
+    })
+    const result = await run(
+      executor,
+      steps(
+        { kind: 'whoami' },
+        { kind: 'boot', requires: { maxSensitivity: 'secret' } },
+        { kind: 'boot' },
+      ),
+    )
+    expect(seen).toHaveLength(1)
+    expect(result.steps[0]).toMatchObject({
+      status: 'failed',
+      internalError: true,
+      internalDetail: 'aborted',
+    })
+    expect(result.steps[0]!.assertions[0]!.message).toContain('根事务已中止')
+    expect(result.steps.slice(1).map((s) => s.status)).toEqual(['notRun', 'notRun'])
+    expect(result.steps[1]!.reason).toContain('根事务出错')
+    expect(result.ok).toBe(false)
+    expect(result.counts).toEqual({ passed: 0, failed: 1, skipped: 0, notRun: 2 })
+  })
+
+  it('超过总时长：这一步的结果保留，后面的记为没有执行', async () => {
+    const { executor, seen } = fakeExecutor(() => textOutcome('好'), {
+      stops: [null, 'timeout'],
+    })
+    const result = await run(executor, steps({ kind: 'whoami' }, { kind: 'boot' }))
+    expect(seen).toHaveLength(1)
+    expect(result.steps.map((s) => s.status)).toEqual(['passed', 'notRun'])
+    expect(result.steps[1]!.reason).toContain('总时长')
+    expect(result.ok).toBe(false)
+  })
+
+  it('一开始就已经停了时一步也不执行', async () => {
+    const { executor, seen } = fakeExecutor(() => textOutcome('好'), { stops: ['aborted'] })
+    const result = await run(executor, steps({ kind: 'whoami' }))
+    expect(seen).toHaveLength(0)
+    expect(result.steps[0]!.status).toBe('notRun')
+  })
+})
+
+describe('重放', () => {
+  const entry: BenchReplayStep = {
+    kind: 'tool',
+    tool: 'kioku_create',
+    arguments: { uri: 'a://${run}' },
+  }
+
+  it('先执行，结果不返回；参数不再展开', async () => {
+    const { executor, seen } = fakeExecutor()
+    const result = await run(executor, steps({ kind: 'whoami' }), [entry, entry])
+    expect(seen.map((s) => s.kind)).toEqual(['tool', 'tool', 'whoami'])
+    expect(seen[0]).toMatchObject({ arguments: { uri: 'a://${run}' } })
+    expect(result.steps).toHaveLength(1)
+    expect(result.replayDiverged).toBeNull()
+    expect(result.ok).toBe(true)
+  })
+
+  it('有步骤报错就停下：后面的重放与当前步骤都不执行，返回第几步', async () => {
+    const { executor, seen } = fakeExecutor((_, i) =>
+      i === 1 ? errorOutcome('URI 已被占用') : textOutcome('好'),
+    )
+    const result = await run(executor, steps({ kind: 'whoami' }, { kind: 'boot' }), [
+      entry,
+      entry,
+      entry,
+    ])
+    expect(seen).toHaveLength(2)
+    expect(result.replayDiverged).toEqual({ index: 1, text: 'URI 已被占用', internalError: false })
+    expect(result.steps.map((s) => s.status)).toEqual(['notRun', 'notRun'])
+    expect(result.steps[0]!.reason).toContain('第 2 步')
+    expect(result.ok).toBe(false)
+  })
+
+  it('重放时根事务中止或超时也算分叉', async () => {
+    const { executor } = fakeExecutor(() => textOutcome('好'), { stops: [null, 'timeout'] })
+    const result = await run(executor, steps({ kind: 'whoami' }), [entry, entry])
+    expect(result.replayDiverged).toMatchObject({ index: 1, internalError: true })
+    expect(result.replayDiverged!.text).toContain('总时长')
+  })
+
+  it('只记成功的写步骤，存展开之后的参数；读步骤、报错的步骤与真实模式都不记', async () => {
+    const answers: Record<string, StepOutcome> = {
+      kioku_create: textOutcome('好'),
+      kioku_update: errorOutcome('记忆不存在'),
+      kioku_get: textOutcome('好'),
+    }
+    const { executor } = fakeExecutor((step) =>
+      step.kind === 'tool' ? answers[step.tool]! : restSuccess('lifecycle', LIFECYCLE_OK),
+    )
+    const input = steps(
+      { kind: 'tool', tool: 'kioku_create', arguments: { uri: 'a://${run}' } },
+      { kind: 'tool', tool: 'kioku_update', arguments: { uri: 'a://${run}' } },
+      { kind: 'tool', tool: 'kioku_get', arguments: { uri: 'a://${run}' } },
+      { kind: 'lifecycle', body: TURN_END },
+      { kind: 'lifecycle', body: { event: 'prompt.submit', prompt: '你好' } },
+    )
+    const result = await run(executor, input)
+    expect(result.steps.map((s) => s.replay)).toEqual([
+      { kind: 'tool', tool: 'kioku_create', arguments: { uri: 'a://abc123' } },
+      null,
+      null,
+      { kind: 'lifecycle', body: TURN_END },
+      null,
+    ])
+    const real = await run(executor, input, [], 'real')
+    expect(real.steps.every((s) => s.replay === null)).toBe(true)
+  })
+})
+
+const TURN_END = {
+  event: 'turn.end',
+  sessionId: 's',
+  context: { chatType: 'group', platform: 'bench', group: { id: 'g' }, sender: { id: 'u' } },
+  user: '你好',
+  reply: '你好呀',
+}
+const LIFECYCLE_OK = { hostOutput: { mode: 'none', value: null }, nodeUris: [] }
+
+describe('结果的文字', () => {
+  it('生命周期事件是交给宿主的文字，规则和插件一样', () => {
+    const textOf = (hostOutput: unknown) =>
+      restSuccess('lifecycle', { hostOutput, nodeUris: ['a://b'] })
+    expect(
+      textOf({
+        mode: 'stdout_json',
+        value: { hookSpecificOutput: { additionalContext: '上下文' } },
+      }).text,
+    ).toBe('上下文')
+    expect(textOf({ mode: 'stdout_text', value: '纯文本' }).text).toBe('纯文本')
+    expect(textOf({ mode: 'return_value', value: { context: '给宿主' } }).text).toBe('给宿主')
+    expect(textOf({ mode: 'none', value: null }).text).toBe('')
+    expect(textOf({ mode: 'none', value: null }).uris).toEqual(['a://b'])
+  })
+
+  it('session.start 多带的那几项单独放，原始响应和真实接口的相同', () => {
+    const outcome = restSuccess('lifecycle', {
+      ...LIFECYCLE_OK,
+      session: { limit: 100, omitted: ['a://b'], dropped: ['recent'] },
+    })
+    expect(outcome.session).toEqual({ limit: 100, omitted: ['a://b'], dropped: ['recent'] })
+    expect(outcome.raw).toEqual(LIFECYCLE_OK)
+  })
+
+  it('REST 的 URI 列表：召回的候选、启动节点', () => {
+    expect(
+      restSuccess('recall', { candidates: [{ uri: 'a://b' }, { uri: 'c://d' }], subjects: [] })
+        .uris,
+    ).toEqual(['a://b', 'c://d'])
+    expect(restSuccess('boot', { entries: [{ uri: 'a://b' }], omitted: ['c://d'] }).uris).toEqual([
+      'a://b',
+    ])
+    expect(JSON.parse(restSuccess('whoami', { spaceId: 's' }).text)).toEqual({ spaceId: 's' })
+  })
+})

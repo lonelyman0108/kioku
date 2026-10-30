@@ -154,6 +154,8 @@ export const BenchScenario = z.strictObject({
   steps: z.array(BenchStep).min(1).max(BENCH_MAX_STEPS),
 })
 export type BenchScenario = z.infer<typeof BenchScenario>
+// 写场景时的形状：可以省略有默认值的字段
+export type BenchScenarioInput = z.input<typeof BenchScenario>
 
 export const BenchScenarioList = z.object({ scenarios: z.array(BenchScenario) })
 export type BenchScenarioList = z.infer<typeof BenchScenarioList>
