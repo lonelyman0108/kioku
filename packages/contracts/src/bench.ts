@@ -362,7 +362,7 @@ export type BenchAgentTurnRequest = z.infer<typeof BenchAgentTurnRequest>
 // 模型要调的一个工具。id 和 message.tool_calls 里的相同，tool 消息的 tool_call_id 用它。
 // arguments 解析成了对象：空串、空白或 null（包括字符串 "null"）按 {}；解析失败或不是对象时为 null，
 // 原因在 parseError，由调用方作为工具错误回给模型，不算请求失败。
-// 没有名字时 name 是空串，parseError 说明原因（message.tool_calls 里那一项是占位名）。
+// 没有名字时 name 是空串，parseError 说明原因。message.tool_calls 里没有名字或名字不合规的那一项是占位名，这里还是原来的名字。
 // 有 parseError 时 rawArguments 是模型写的参数原文，只用来显示：message.tool_calls 里放回历史的已经换成合法的 JSON 了
 export const BenchAgentToolCall = z.object({
   id: z.string(),

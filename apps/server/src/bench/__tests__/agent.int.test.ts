@@ -571,8 +571,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       ])
     })
 
-    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，type 是 function，function 有非空的名字，参数是
-    // 字符串、内容是合法的 JSON，后面按顺序跟齐对应的 tool 消息。不合规就 400
+    // 严格的上游：tool_calls 要是非空数组，id 都是不重复的非空字符串，type 是 function，function 的名字合 OpenAI 的要求，
+    // 参数是字符串、内容是合法的 JSON，后面按顺序跟齐对应的 tool 消息。不合规就 400
     const isJson = (text: unknown) => {
       try {
         JSON.parse(text as string)
@@ -595,7 +595,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         if (new Set(ids).size !== ids.length) return 'id 重复'
         if (calls.some((call) => call.type !== 'function')) return 'type 不合法'
         const names = calls.map((call) => call.function?.name)
-        if (names.some((name) => typeof name !== 'string' || !name)) return '名字不合法'
+        if (names.some((name) => typeof name !== 'string' || !/^[a-zA-Z0-9_-]{1,64}$/.test(name))) {
+          return '名字不合法'
+        }
         if (calls.some((call) => typeof call.function?.arguments !== 'string')) {
           return '参数不是字符串'
         }
@@ -720,6 +722,40 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         { id: 'no-name', ...noName, rawArguments: '{"a":1}' },
         { id: 'other-type', ...noName },
         { id: 'bare', ...noName },
+      ])
+    })
+
+    it('工具名不合规（太长、有空格或点）：放回历史的是占位名，下一轮严格的上游也接受，toolCalls 还是原来的名字', async () => {
+      const long = 'x'.repeat(65)
+      const calls = [
+        toolCall('long', long),
+        toolCall('space', 'my tool'),
+        toolCall('dot', 'my.tool'),
+        toolCall('good', 'kioku_boot'),
+      ]
+      // 前提：这些名字原样放回去，严格的上游不收
+      for (const call of calls.slice(0, 3)) {
+        expect(
+          refusal([
+            { role: 'assistant', content: null, tool_calls: [call] },
+            toolMessage(call.id, '结果'),
+          ]),
+        ).toBe('名字不合法')
+      }
+
+      const server = await strictModel(() => ({ content: null, tool_calls: calls }))
+      const first = await turn({ messages: [USER] })
+      expect(first.toolCalls.map((c) => c.name)).toEqual([long, 'my tool', 'my.tool', 'kioku_boot'])
+
+      const history = [USER, first.message, ...calls.map((c) => toolMessage(c.id, '结果'))]
+      const second = await turn({ messages: history })
+      expect(second.message.content).toBe('调完了')
+      const sent = server.requests[1]![1]!.tool_calls as { function: { name: string } }[]
+      expect(sent.map((c) => c.function.name)).toEqual([
+        'unknown_tool',
+        'unknown_tool',
+        'unknown_tool',
+        'kioku_boot',
       ])
     })
 

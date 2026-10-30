@@ -142,9 +142,12 @@ function historyArguments(args: unknown): string {
   }
 }
 
-// 工具调用放回历史时的写法。严格的上游要求每个调用都有 type、function.name 和字符串的 function.arguments，
-// 缺了下一轮就 400，对话卡死。所以 type 缺失的补 function；arguments 写成合法的 JSON（见 historyArguments）；
-// 没有 function 或名字的用占位名，这种调用模型拿到的是工具错误（见 parseToolCalls）。
+// OpenAI 对工具名的要求，严格的上游照它校验
+const TOOL_NAME = /^[a-zA-Z0-9_-]{1,64}$/
+
+// 工具调用放回历史时的写法。严格的上游要求每个调用都有 type、合规的 function.name 和字符串的 function.arguments，
+// 不合规的下一轮就 400，对话卡死。所以 type 缺失的补 function；arguments 写成合法的 JSON（见 historyArguments）；
+// 没有 function、没有名字或名字不合规（太长、有空格或点）的用占位名，这种调用模型拿到的是工具错误，toolCalls 里还是原来的名字。
 // 没有 function 的 type 也写成 function：custom 这类 type 配上占位的 function 对不上。别的字段原样
 function historyToolCall(call: NormalizedToolCall): NormalizedToolCall {
   const fn = isRecord(call.function) ? call.function : null
@@ -154,7 +157,7 @@ function historyToolCall(call: NormalizedToolCall): NormalizedToolCall {
     type: fn && typeof call.type === 'string' && call.type ? call.type : 'function',
     function: {
       ...fn,
-      name: typeof name === 'string' && name ? name : 'unknown_tool',
+      name: typeof name === 'string' && TOOL_NAME.test(name) ? name : 'unknown_tool',
       arguments: historyArguments(fn?.arguments),
     },
   }

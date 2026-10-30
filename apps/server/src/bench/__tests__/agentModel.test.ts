@@ -474,8 +474,34 @@ describe('请求', () => {
     })
 
     it.each([
+      ['太长', 'x'.repeat(65)],
+      ['有空格', 'my tool'],
+      ['有点', 'my.tool'],
+      ['是中文', '读记忆'],
+      ['结尾有换行', 'kioku_get\n'],
+    ])('名字%s：放回历史的是占位名，解析的结果还是原来的名字', async (_, name) => {
+      const result = await turnWith({
+        type: 'function',
+        function: { name, arguments: '{"a":1}' },
+      })
+      expect(result.sent).toEqual({
+        id: 'c',
+        type: 'function',
+        function: { name: 'unknown_tool', arguments: '{"a":1}' },
+      })
+      expect(result.parsed).toEqual({ id: 'c', name, arguments: { a: 1 }, parseError: null })
+    })
+
+    it.each([
       ['都齐全', { type: 'function', function: fn }],
       ['有 function 的别的 type', { type: 'builtin_function', function: fn }],
+      [
+        '名字正好 64 个字符，有大小写、数字、下划线和连字符',
+        {
+          type: 'function',
+          function: { name: `Ab-_9${'x'.repeat(59)}`, arguments: '{}' },
+        },
+      ],
       [
         '多余的字段',
         {
