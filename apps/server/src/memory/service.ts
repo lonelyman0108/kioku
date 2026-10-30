@@ -4,6 +4,7 @@ import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contra
 import type {
   ActivityItem,
   ActivityList,
+  BenchChanges,
   BenchMark,
   CreateMemoryRequest,
   DeletedMemoryList,
@@ -160,6 +161,11 @@ export interface MemoryContext {
   maskSecret?: boolean
   // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
   eventContext?: Record<string, unknown>
+}
+
+// 一批事件改了什么（见 eventChanges）；lastId 是这批里最后一条事件的 id，没有事件时为 0
+export type EventChanges = Pick<BenchChanges, 'memories' | 'hiddenReleased' | 'hiddenOther'> & {
+  lastId: number
 }
 
 // 概览要的统计：成员读得到的策展记忆按层与敏感级计数，以及向量覆盖率
@@ -2412,6 +2418,51 @@ export class MemoryService {
             ? encodeTimeCursor(page.at(-1)!.createdMicros, String(page.at(-1)!.event.id))
             : null,
       }
+    })
+  }
+
+  // 测试台：一批事件改了什么，只给字段名，不带内容。可见性和历史同一套规则（eventVisibility）：
+  // 看不到的只数条数，例如让出别的成员的过期记录时写下的事件，快照里有对方的 disclosure 与关键词
+  async eventChanges(where: SQL): Promise<EventChanges> {
+    return this.run(async (tx) => {
+      const rows = await tx
+        .select({
+          id: memoryEvents.id,
+          type: memoryEvents.eventType,
+          before: memoryEvents.before,
+          after: memoryEvents.after,
+          left: sql<boolean | null>`${this.eventVisibility()}`,
+        })
+        .from(memoryEvents)
+        .where(where)
+        .orderBy(asc(memoryEvents.id))
+      const result: EventChanges = {
+        memories: [],
+        hiddenReleased: 0,
+        hiddenOther: 0,
+        lastId: rows.at(-1)?.id ?? 0,
+      }
+      for (const row of rows) {
+        if (row.left === null) {
+          if (row.type === 'expire') result.hiddenReleased++
+          else result.hiddenOther++
+          continue
+        }
+        const before = toSnapshot(row.before)
+        const after = toSnapshot(row.after)
+        result.memories.push({
+          type: row.type,
+          uri: (row.left ? before : (after ?? before))!.uri,
+          fields: row.left ? [] : changedFields(before, after),
+          left: row.left,
+          becameSecret:
+            !row.left &&
+            before !== null &&
+            before.sensitivity !== 'secret' &&
+            after?.sensitivity === 'secret',
+        })
+      }
+      return result
     })
   }
 

@@ -201,7 +201,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
   it('外层事务先失败（连接断开时就这样）、回调还在跑：先置状态，回调不能再发语句', async () => {
     const disconnected = deferred()
     const callback = deferred()
-    const after = deferred<unknown>()
+    const after = deferred<{ reason: unknown; error: unknown }>()
     // postgres.js 的 begin 把回调和连接关闭放在 Promise.race 里：连接断开时外层立刻 reject，回调不会停
     const flaky = new Proxy(database.db, {
       get(target, prop) {
@@ -217,13 +217,16 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     })
     const running = inRollback({ ...deps, db: flaky }, NO_VECTORS, async (scoped, run) => {
       await callback.promise
-      expect(await run.stopReason()).toBe('aborted')
-      after.resolve(await addSubject(scoped.db, '不该写').catch((err: unknown) => err))
+      const reason = await run.stopReason()
+      const error = await addSubject(scoped.db, '不该写').catch((err: unknown) => err)
+      after.resolve({ reason, error })
     })
     disconnected.resolve()
     await expect(running).rejects.toThrow('连接断开了')
     callback.resolve()
-    expect(((await after.promise) as Error).message).toContain('已经结束')
+    const { reason, error } = await after.promise
+    expect(reason).toBe('aborted')
+    expect(String(error)).toContain('已经结束')
     // 回调抛出 Rolled，底下的事务真的回滚，连接也还回去了
     await new Promise((resolve) => setTimeout(resolve, 20))
     expect(await subjectNames(database.db)).toEqual([])
