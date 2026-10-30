@@ -53,13 +53,17 @@ export async function scopeNames(
 // （owner:<成员>、private:<成员>），关于它们的建议只有本人看得到；对象层与情节层按来源作用域分
 // （talk:<来源作用域>，同一个群、同一个人的私聊里记下的），合并不会把私聊里的事带进群里
 
-// 一条记忆所在的范围；dreamScopeCondition 是反过来按范围取记忆的条件，两边要对得上
+// 按来源作用域分范围的层（对象层与情节层），范围是 talk:<来源作用域>；别的层的范围和来源作用域无关
+export const TALK_LAYERS = ['subject', 'episode'] as const
+
+// 一条记忆所在的范围；dreamScopeCondition 是反过来按范围取记忆的条件，两边要对得上。每一层都写明，
+// 没列出的层（以后新加的）没有范围（为空），Dream 不整理它们，不会悄悄并进哪个范围
 export const DREAM_SCOPE_KEY = sql<string>`(case
   when ${memories.layer} = 'base' then 'base'
   when ${memories.layer} = 'persona' then 'persona:' || ${memories.personaId}::text
   when ${memories.layer} = 'app' then 'app:' || ${memories.appId}::text
   when ${memories.layer} in ('owner', 'private') then ${memories.layer}::text || ':' || ${memories.ownerAccountId}::text
-  else 'talk:' || ${memories.originScope} end)`
+  when ${inArray(memories.layer, [...TALK_LAYERS])} then 'talk:' || ${memories.originScope} end)`
 
 export type DreamScopeKind = DreamScope['kind']
 
@@ -105,7 +109,7 @@ export function dreamScopeCondition(scope: ParsedDreamScope): SQL {
       return and(eq(memories.layer, scope.kind), eq(memories.ownerAccountId, scope.id!))!
     case 'talk':
       return and(
-        inArray(memories.layer, ['subject', 'episode']),
+        inArray(memories.layer, [...TALK_LAYERS]),
         eq(memories.originScope, scope.origin!),
       )!
   }

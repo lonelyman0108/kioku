@@ -254,6 +254,30 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     expect((await queue('?layer=subject')).items.map((i) => i.id)).toEqual([first!.id])
   })
 
+  it('别的表正往这条记忆上挂记录（外键检查加的 KEY SHARE 锁）时不算正在改：照常处理，不跳过', async () => {
+    await chatInGroup()
+    const [first, second] = (await queue('?layer=subject')).items
+    const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        // 插入事件、关键词与向量时，外键检查在记忆行上加的就是这把锁
+        await tx`select id from memories where id = ${first!.id} for key share`
+        expect(await act('confirm', [first!, second!])).toEqual({
+          status: 200,
+          body: { done: 2, skipped: 0 },
+        })
+      })
+    } finally {
+      await side.end()
+    }
+    expect((await queue('?layer=subject')).total).toBe(0)
+    expect((await rowsOf([first!.id, second!.id])).map((r) => r.provenance)).toEqual([
+      'owner',
+      'owner',
+    ])
+  })
+
   it('viewer 只能看；别的空间的记忆碰不到', async () => {
     await chatInGroup()
     const carol = await addMember(database.db, ws.spaceId, 'carol', 'viewer')

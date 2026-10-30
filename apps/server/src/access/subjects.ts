@@ -1,9 +1,10 @@
-import { and, arrayContains, asc, eq, gt, inArray, or, sql } from 'drizzle-orm'
+import { and, arrayContains, asc, count, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
 
 import { pgErrorCode, type Tx } from '../db/client'
 import {
   appGroupPersonas,
   conversationTurns,
+  dreamMarks,
   extractionRuns,
   memories,
   subjectBindings,
@@ -12,7 +13,7 @@ import {
 } from '../db/schema'
 import { extractionDelay, trimBatch } from '../extraction/buffer'
 import type { Deps } from '../http/env'
-import { subjectScope } from '../memory/scopes'
+import { subjectScope, TALK_LAYERS } from '../memory/scopes'
 
 // 合并对象：管理界面里成员手动合并，与用绑定码合并（见 binding.ts）共用这里的规则与步骤
 
@@ -60,6 +61,50 @@ async function mergeInto(
     .update(subjectIdentities)
     .set({ subjectId: into.id })
     .where(eq(subjectIdentities.subjectId, from.id))
+  // Dream 按记忆记下整理过的版本（dream_marks），这里不加版本，标记留着的话合并之后放到一起的记忆不会被再看，
+  // 合并带来的重复也就一直留着。要再看的只有对象层与情节层：别的层的 Dream 范围和对象、来源作用域无关，合并不改变
+  // 谁和谁一起看。按合并前的样子找出要放在一起看的：from 自己作用域里的（并进 into 的作用域）与关于 from 的（换成 into），
+  // 以及它们要并进去的那边原有的——from 自己的作用域里有记忆时 into 自己作用域里的，关于 from 的记忆所在的作用域里
+  // 关于 into 的。from 什么都带不过来时一条也不用再看
+  const talk = inArray(memories.layer, [...TALK_LAYERS])
+  const inFromScope = and(talk, eq(memories.originScope, oldScope))!
+  const aboutFrom = and(talk, eq(memories.subjectId, from.id))!
+  const together = or(
+    inFromScope,
+    aboutFrom,
+    and(
+      talk,
+      eq(memories.originScope, newScope),
+      exists(tx.select({ id: memories.id }).from(memories).where(inFromScope)),
+    ),
+    and(
+      talk,
+      eq(memories.subjectId, into.id),
+      inArray(
+        memories.originScope,
+        tx.selectDistinct({ scope: memories.originScope }).from(memories).where(aboutFrom),
+      ),
+    ),
+  )!
+  // 先按 id 的顺序锁住这些记忆（FOR NO KEY UPDATE）再删标记。Dream 写标记的事务先锁住那一批（FOR SHARE SKIP LOCKED，
+  // 见 dream.ts）：它先锁到的，这里等它提交；之后它遇到这里锁着的就跳过、不记，合并的事务开着时两边的都记不上。
+  // 加锁与删除要分两条：一条语句只看开始时的快照，等锁期间对方提交的新标记，同一条语句里删不到
+  await tx
+    .select({ n: count() })
+    .from(
+      tx
+        .select({ id: memories.id })
+        .from(memories)
+        .where(together)
+        .orderBy(asc(memories.id))
+        .for('no key update')
+        .as('locked'),
+    )
+  await tx
+    .delete(dreamMarks)
+    .where(
+      inArray(dreamMarks.memoryId, tx.select({ id: memories.id }).from(memories).where(together)),
+    )
   await tx.update(memories).set({ subjectId: into.id }).where(eq(memories.subjectId, from.id))
   await tx.update(memories).set({ originScope: newScope }).where(eq(memories.originScope, oldScope))
   // 还没抽取的对话缓冲：发言人、群与批次一起换过来，不然删掉对象时会连带删掉它们
