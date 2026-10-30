@@ -529,6 +529,14 @@ export class MemoryService {
     if (!canModify(this.ctx.access, row)) throw new MemoryError(403, UNTRUSTED_MODIFY)
   }
 
+  // 改层与移动共用（原因见 KEY_CROSS_OWNERSHIP）：通过 Key 不能在共享的层与个人的层之间转换，
+  // 个人的层之间、共享的层之间照常；管理界面里由人来改不受这个限制
+  private assertKeyTransition(from: Layer, to: Layer): void {
+    if (this.viaKey && perMember(from) !== perMember(to)) {
+      throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
+    }
+  }
+
   private async glossaryOf(tx: Tx, ids: string[]): Promise<Map<string, string[]>> {
     const map = new Map<string, string[]>()
     if (!ids.length) return map
@@ -1025,9 +1033,7 @@ export class MemoryService {
           `${before.layer} 层的记忆不能直接改层；人格层与应用层要移动到别的命名空间`,
         )
       }
-      if (this.viaKey && perMember(layer) !== perMember(before.layer)) {
-        throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
-      }
+      this.assertKeyTransition(before.layer, layer)
       if (!canWrite(this.ctx.access, { layer, sensitivity, appId: null, personaId: null })) {
         throw new MemoryError(403, `没有权限把记忆改到 ${layer} 层的 ${sensitivity} 级`)
       }
@@ -1572,9 +1578,7 @@ export class MemoryService {
           to,
           forced ? undefined : (input.layer ?? before.layer),
         )
-        if (this.viaKey && perMember(ownership.layer) !== perMember(before.layer)) {
-          throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
-        }
+        this.assertKeyTransition(before.layer, ownership.layer)
         this.assertWritable(
           { ...ownership, sensitivity: before.sensitivity },
           `没有权限把记忆移到 ${ownership.layer} 层`,
