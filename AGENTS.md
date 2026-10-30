@@ -91,7 +91,7 @@
 - `BOOT_ELIGIBLE` 有一份 JS 版（`memory/filter.ts` 的 `bootEligible`），导入计划标「进启动上下文」用它。改一边必须改另一边，`loreImport.int.test.ts` 拿写进去的行比对。
 - 测试台的回滚模式靠换掉 `Deps.db` 实现（`bench/rollback.ts`），所以接入方路径（工具、生命周期事件、`/recall`）有几条约束。数据库访问都经过传入的 `deps` 或基于它建的服务：绕开 `deps` 的写入不会回滚。语句放进 `withSpace`：直接写在 `deps.db` 上的语句落在根事务上，出错（包括等锁超时）会中止整个运行，后面的步骤记为没有执行；现在只有 `bufferTurn` 读抽取设置这一句是例外。不在事务回调里发外部请求（嵌入、模型）：事务开着时前面步骤的行锁和 URI 咨询锁都没放；接入方路径新增要查向量的步骤时加进 `bench/inProcess.ts` 的 `literalQueries`，否则这一步只走全文与关键词。事务回调里不要并行开子事务：代理只让顶层事务排队，同一条连接上并行的 savepoint 会交错。
 - `set_config(..., true)` 与 `set local` 不随 savepoint 成功结束复原，只有 `rollback to` 才复原。`RollbackRun.clearSpace` 只清 `app.space_id`：`recall.ts` 的 `hnsw.*` 也留到回滚为止，它每次向量查询之前都设，所以没有影响；接入方路径上新的向量查询或别的事务级设置不能依赖默认值，否则回滚模式和真实不一样。
-- 日志不要整个打可能是数据库错误的 `err`：`DrizzleQueryError` 带 SQL 与全部参数（也就是记忆正文、提示语），用 `logInternalError` 或 `loggableError(err)`。
+- 日志不要整个打可能是数据库错误的 `err`，记进运行记录、最近错误的文字也不要直接用 `err.message`：`DrizzleQueryError` 带 SQL 与全部参数（也就是记忆正文、提示语）。日志用 `logInternalError` 或 `loggableError(err)`，文字用 `errorText(err)`。
 - 测试：不要用 `pg_terminate_backend` 杀事务中的连接，postgres.js 3.4.9 断连时会抛未捕获的 TypeError，进程退出；模拟外层 reject。测闸门要另开大一点的连接池：测试池 max 2，鉴权会卡在拿连接上，到不了闸门。
 - 测试台按 `created_at = now()` 认这个事务写下的行，所以 `memory_events`、`credential_events`、`subjects`、`subject_identities`、`conversation_turns` 在接入方路径上要用数据库默认值，写 JS 时间会漏报。
 - 测试台的打码只在 `toView` 和凭据的取用处判断，`contentOf` 不能打码（`applyUpdate` 靠它取原文再封存）。新增返回 `MemoryView` 的路径要经过 `toView`；新增把解密内容放进错误信息的地方要看 `maskSecret`。占位文字集中在 `memory/masked.ts`，新增的要加进 `MASKED_TEXTS`，写入检查才认得；这个文件不能依赖别的模块（`mcp/format.ts` 引用它，又打进不带 postgres 的 `dist/bench.mjs`）。
@@ -100,7 +100,7 @@
 - 新加 MCP 工具要写进 contracts 的 `BENCH_READ_TOOLS` 或 `BENCH_WRITE_TOOLS`：命令行握手按这份名单严格核对，`mayWrite` 对不认识的工具按写算。内置场景的 `capture` 与断言依赖工具结果的文字（「版本: 」「URI: 」等），`bench/executor.ts` 也按这些行与 `formatRecallBlock` 解析 URI 列表，改 `mcp/format.ts` 的文字要同步改，门禁里的矩阵会报。测试台步骤的说明与断言文字只展开 `${run}`、`${expires}`，新增命令行默认打印的文字时也不能展开 `capture` 的变量：它可能取到凭据的值。内置预设写记忆要带 `valid_to: EXPIRES`；`${run}`、`${expires}` 是保留的变量名。
 - contracts 里的 `isReplayStep`、`mayWrite` 是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定。
 - 读实例设置的函数（`loadExtractionConfig` 这类）既读库又解密，不要 catch 全部再回 `err.message`：读库出错也会被接住，drizzle 的错误信息带 SQL 与全部参数。用 `settings/endpoint.ts` 的 `unlocked`：只认 `ApiKeyLockedError`，其余重新抛给 `onError`。测读设置出错用 `testing/db.ts` 的 `settingsQueryFails`。
-- 带 Key 的 `fetch` 不要把 `err.message` 给调用方或写进日志，也不要放进 `cause`（Dream 的 `messageOf` 取 `cause`，日志也打印）：Key 中间有换行时，undici 的 Headers 报错会带上整个 Authorization 值，`signal` 已经取消时也先报这个，用 `fetchFailure` 只取错误类别。上游写进报错的 Key 用 `withoutKey`，先换再截断：`fetch` 会去掉结尾的空白，上游见到的 Key 和保存的写法可能不同。保存时已经 `trim` 并拒绝控制字符，但存量 Key 不迁移，这两处不能当多余的删掉。
+- 带 Key 的 `fetch` 不要把 `err.message` 给调用方或写进日志，也不要放进 `cause`（日志也打印）：Key 中间有换行时，undici 的 Headers 报错会带上整个 Authorization 值，`signal` 已经取消时也先报这个，用 `fetchFailure` 只取错误类别；响应解析失败的文字可能带响应开头（可能回显 Key），用 `upstreamJson`。上游写进报错的 Key 用 `withoutKey`，先换再截断：`fetch` 会去掉结尾的空白，上游见到的 Key 和保存的写法可能不同。保存时已经 `trim` 并拒绝控制字符，但存量 Key 不迁移，这两处不能当多余的删掉。
 - 模型代理返回的 `message.tool_calls` 不是严格原样：id 可能是生成的，不是对象的项会被去掉。`tool` 消息的 `tool_call_id` 要用 `toolCalls[i].id`，两者一一对应。
 - 测试模型代理：测时限不能靠到点 abort 来结束用例，`requestAgentTurn` 的 catch 先看 `timeout.aborted`，这个信号不管有没有传给 `fetch` 都会按时到期，时限失效时用例照样通过，要和哨兵定时器 `Promise.race`。客户端断开的信号来自 Node 适配器（reason 是字符串，不是 AbortError，要看 `signal.aborted`），`app.request` 走不到，要测断开必须起真实端口。「请求模型期间不占连接」的用例依赖测试连接池只有 2 条。
 - 硬删除记忆时 Lore 的导入事件（出处 `source` 为 `lore`）要留下（`memory_id` 置空、快照只留 domain 与 path），别的事件一起删，包括按空间导入的导入事件。原因：Lore 导入工具按导入事件去重，记忆整行不在时也认作「导入过、后来删掉了」；删掉这些事件，下次同步会把删过的节点写回。保留期的删除条件都在 `jobs/retention.ts` 的 `retentionRules`，改了要对照 `retention.int.test.ts`。
