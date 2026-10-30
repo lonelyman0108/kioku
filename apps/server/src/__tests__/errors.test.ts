@@ -1,4 +1,5 @@
 import { ErrorResponse } from '@kioku/contracts'
+import { HTTPException } from 'hono/http-exception'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../app'
@@ -12,6 +13,30 @@ const app = createApp({
   masterKey: null,
   embedder: staticEmbedderSource(null),
   jobs: null,
+})
+// 模拟中间件抛出的几种：带自己的响应（响应头）、带自己的说明、两样都带，以及 5xx。路由要在第一个请求之前加上
+app.get('/v1/test/throttled', () => {
+  throw new HTTPException(429, {
+    res: new Response('slow down', {
+      status: 429,
+      headers: { 'retry-after': '30', 'content-type': 'text/plain', 'content-length': '9' },
+    }),
+  })
+})
+app.get('/v1/test/challenge', () => {
+  throw new HTTPException(401, {
+    message: '这个接口要用 Bearer Key',
+    res: new Response(null, {
+      status: 401,
+      headers: { 'www-authenticate': 'Bearer realm="kioku"' },
+    }),
+  })
+})
+app.get('/v1/test/explained', () => {
+  throw new HTTPException(409, { message: '这一批正在处理' })
+})
+app.get('/v1/test/unavailable', () => {
+  throw new HTTPException(503, { message: 'upstream down' })
 })
 
 const post = (
@@ -67,6 +92,30 @@ describe('请求本身有问题时的回复', () => {
       '请求体的类型（Content-Type）不对',
     )
     expect(logged).not.toHaveBeenCalled()
+  })
+
+  it('中间件带了自己的响应：沿用它的状态码与响应头，正文换成 { error }', async () => {
+    const res = await app.request('/v1/test/throttled')
+    expect(await errorOf(res, 429)).toBe('请求太频繁，请稍后再试')
+    expect(res.headers.get('retry-after')).toBe('30')
+    // 跟着原来正文的响应头不沿用
+    expect(res.headers.get('content-type')).toMatch(/^application\/json/)
+    expect(res.headers.get('content-length')).not.toBe('9')
+  })
+
+  it('抛出的地方写了自己的说明就用它；同时带了响应时响应头照样沿用', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const challenge = await app.request('/v1/test/challenge')
+    expect(await errorOf(challenge, 401)).toBe('这个接口要用 Bearer Key')
+    expect(challenge.headers.get('www-authenticate')).toBe('Bearer realm="kioku"')
+    expect(await errorOf(await app.request('/v1/test/explained'), 409)).toBe('这一批正在处理')
+    expect(logged).not.toHaveBeenCalled()
+  })
+
+  it('5xx 的不算请求的问题：照旧是 500「服务内部错误」，记下堆栈', async () => {
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    expect(await errorOf(await app.request('/v1/test/unavailable'), 500)).toBe('服务内部错误')
+    expect(logged).toHaveBeenCalledOnce()
   })
 
   it('请求体合规时照常往下走；服务端自己出的错照旧是 500「服务内部错误」，记下堆栈', async () => {
