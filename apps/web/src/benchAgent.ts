@@ -584,8 +584,8 @@ export async function sendAgentMessage(
       return finish('modelFailed', turnRetryable(err) ? sentences(failure, afterReply()) : failure)
     }
 
-    const text = contentText(turn.message.content)
-    const empty = !turn.toolCalls.length && !text.trim()
+    const replyText = contentText(turn.message.content)
+    const empty = !turn.toolCalls.length && !replyText.trim()
     if (!empty) working.push(turn.message)
     const calls = turn.toolCalls.map((call): AgentToolTrace => ({
       id: call.id,
@@ -596,7 +596,7 @@ export async function sendAgentMessage(
       trace: null,
     }))
     const answered: AgentRound = {
-      text: empty ? '' : text,
+      text: empty ? '' : replyText,
       reasoning: reasoningOf(turn.message),
       finishReason: turn.finishReason,
       model: turn.model,
