@@ -1,5 +1,6 @@
 import {
   BENCH_MAX_REPLAY_BYTES,
+  BENCH_MAX_REQUEST_BYTES,
   BENCH_MAX_STEPS,
   BenchAgentTurnRequest,
   BenchReplayStep,
@@ -198,6 +199,9 @@ const runResult = (
   replayDiverged: null,
 })
 
+// 请求体的字节数，和 api.benchRun 发的一样
+const bodyBytes = (body: unknown) => new TextEncoder().encode(JSON.stringify(body)).length
+
 type TurnScript =
   | BenchAgentTurnResult
   | Error
@@ -236,6 +240,8 @@ function harness(options: HarnessOptions = {}) {
     },
     async run(steps, replay, label) {
       const parsed = BenchRunRequest.parse({ mode, steps, replay })
+      // 超过上限时服务端直接 413，整个运行都没有了
+      expect(bodyBytes({ mode, steps, replay })).toBeLessThanOrEqual(BENCH_MAX_REQUEST_BYTES)
       runs.push({ steps: parsed.steps, replay: parsed.replay, label })
       if (run) return run(parsed.steps, parsed.replay)
       return { kind: 'done', result: runResult(mode, parsed.steps.map(defaultStep)) }
@@ -796,6 +802,175 @@ describe('工具调用', () => {
     expect(during.phase).toBe('tools')
     expect(during.rounds[0]!.calls[0]!.reply).toBeNull()
     expect(during.rounds[0]!.calls[0]!.trace).toBeNull()
+  })
+})
+
+describe('一轮的工具调用放不进一次运行', () => {
+  const OVER_STEPS = `没有执行：一轮最多执行 ${BENCH_MAX_STEPS} 个工具调用，这个超出了，可以下一轮再调`
+  const list = (id: string) => toolCall(id, 'kioku_list')
+  const create = (id: string, content: string) =>
+    toolCall(id, 'kioku_create', { uri: `core://${id}`, content })
+  const stepTools = (steps: readonly BenchStep[]) => steps.map((s) => (s as { tool: string }).tool)
+
+  it('60 个调用：前 50 个放进同一次运行，后面的作为工具错误回给模型，顺序不变，循环接着走', async () => {
+    const calls = Array.from({ length: 60 }, (_, i) => list(`c${i}`))
+    const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('调完了')] })
+    const done = await h.send(USER_TEXT)
+    expect(BENCH_MAX_STEPS).toBe(50)
+    expect(h.runs).toHaveLength(1)
+    expect(h.runs[0]!.steps).toHaveLength(50)
+    expect(h.turnRequests).toHaveLength(2)
+    expect(last(done).end).toBe('done')
+    const tools = toolMessages(done.messages)
+    expect(tools.map((m) => m.tool_call_id)).toEqual(calls.map((c) => c.id))
+    expect(tools.slice(0, 50).every((m) => m.content === 'kioku_list 的结果')).toBe(true)
+    expect(tools.slice(50).every((m) => m.content === OVER_STEPS)).toBe(true)
+    const traced = last(done).rounds[0]!.calls
+    expect(traced.slice(0, 50).every((c) => c.trace !== null)).toBe(true)
+    expect(traced.slice(50).every((c) => c.trace === null && c.reply === OVER_STEPS)).toBe(true)
+    expect(sentToolCalls(done)).toHaveLength(50)
+  })
+
+  it('正好 50 个：都执行', async () => {
+    const calls = Array.from({ length: 50 }, (_, i) => list(`c${i}`))
+    const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs[0]!.steps).toHaveLength(50)
+    expect(toolMessages(done.messages).every((m) => m.content === 'kioku_list 的结果')).toBe(true)
+  })
+
+  it('解析失败的不占名额：放得下的还是 50 个', async () => {
+    const calls = [
+      toolCall('bad', 'kioku_get', null, '工具参数不是合法的 JSON'),
+      ...Array.from({ length: 51 }, (_, i) => list(`c${i}`)),
+    ]
+    const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs[0]!.steps).toHaveLength(50)
+    const tools = toolMessages(done.messages)
+    expect(tools[0]!.content).toBe('没有执行：工具参数不是合法的 JSON')
+    expect(tools.at(-1)!.content).toBe(OVER_STEPS)
+    expect(tools.filter((m) => m.content === 'kioku_list 的结果')).toHaveLength(50)
+  })
+
+  it('单个参数把请求体撑过上限：只这一个不发，前后的照样执行，说明上限', async () => {
+    const huge = 'x'.repeat(BENCH_MAX_REQUEST_BYTES)
+    const calls = [list('a'), create('huge', huge), list('b')]
+    const h = harness({ loop: 'tools', turns: [reply(null, calls), reply('好')] })
+    const done = await h.send(USER_TEXT)
+    expect(stepTools(h.runs[0]!.steps)).toEqual(['kioku_list', 'kioku_list'])
+    expect(last(done).end).toBe('done')
+    const tools = toolMessages(done.messages)
+    expect(tools.map((m) => m.tool_call_id)).toEqual(['a', 'huge', 'b'])
+    expect(tools[0]!.content).toBe('kioku_list 的结果')
+    expect(tools[1]!.content).toContain('没有执行')
+    expect(tools[1]!.content).toContain('请求体上限 2.0 MB')
+    expect(tools[2]!.content).toBe('kioku_list 的结果')
+    expect(last(done).rounds[0]!.calls.map((c) => c.trace !== null)).toEqual([true, false, true])
+  })
+
+  it('一个都放不下：不发运行请求，错误回给模型，它可以改小再调', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [create('huge', 'x'.repeat(BENCH_MAX_REQUEST_BYTES))]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs).toEqual([])
+    expect(h.turnRequests).toHaveLength(2)
+    expect(toolMessages(done.messages)[0]!.content).toContain('没有执行')
+    expect(last(done).end).toBe('done')
+  })
+
+  it('按字节算，不按字数：中文一个字三个字节', async () => {
+    const chars = Math.ceil(BENCH_MAX_REQUEST_BYTES / 3) + 1
+    // 前提：按字数算放得下
+    expect(chars).toBeLessThan(BENCH_MAX_REQUEST_BYTES)
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [create('huge', '字'.repeat(chars))]), reply('好')],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs).toEqual([])
+    expect(toolMessages(done.messages)[0]!.content).toContain('请求体上限')
+  })
+
+  // 让请求体的字节数正好是给定的值：只有一步时
+  const sizedCall = (bytes: number, replay: unknown[] = []) => {
+    const empty = create('s', '')
+    const base = bodyBytes({
+      mode: 'rollback',
+      steps: [{ kind: 'tool', tool: empty.name, arguments: empty.arguments }],
+      replay,
+    })
+    return create('s', 'x'.repeat(bytes - base))
+  }
+
+  it('请求体正好到上限：放得下；多一个字节：放不下', async () => {
+    const fits = harness({
+      loop: 'tools',
+      turns: [reply(null, [sizedCall(BENCH_MAX_REQUEST_BYTES)]), reply('好')],
+    })
+    await fits.send(USER_TEXT)
+    expect(bodyBytes({ mode: 'rollback', steps: fits.runs[0]!.steps, replay: [] })).toBe(
+      BENCH_MAX_REQUEST_BYTES,
+    )
+
+    const over = harness({
+      loop: 'tools',
+      turns: [reply(null, [sizedCall(BENCH_MAX_REQUEST_BYTES + 1)]), reply('好')],
+    })
+    await over.send(USER_TEXT)
+    expect(over.runs).toEqual([])
+  })
+
+  it('多个步骤时算上它们之间的逗号', async () => {
+    const small = list('a')
+    const smallBytes = bodyBytes({ kind: 'tool', tool: small.name, arguments: small.arguments })
+    const exact = sizedCall(BENCH_MAX_REQUEST_BYTES - smallBytes - 1)
+    const fits = harness({ loop: 'tools', turns: [reply(null, [exact, small]), reply('好')] })
+    await fits.send(USER_TEXT)
+    expect(fits.runs[0]!.steps).toHaveLength(2)
+
+    const longer = sizedCall(BENCH_MAX_REQUEST_BYTES - smallBytes)
+    const over = harness({ loop: 'tools', turns: [reply(null, [longer, small]), reply('好')] })
+    await over.send(USER_TEXT)
+    expect(over.runs[0]!.steps).toHaveLength(1)
+  })
+
+  it('请求体算上重放：单独放得下的，带上重放就放不下', async () => {
+    const seed = harness({
+      loop: 'tools',
+      turns: [reply(null, [create('seed', 'x'.repeat(100_000))]), reply('好')],
+    })
+    const conversation = await seed.send(USER_TEXT)
+    expect(conversation.session.replay).toHaveLength(1)
+    // 不带重放时正好放得下
+    const call = sizedCall(BENCH_MAX_REQUEST_BYTES)
+    const h = harness({ loop: 'tools', turns: [reply(null, [call]), reply('好')] })
+    const done = await h.send('第二条', conversation)
+    expect(h.runs).toEqual([])
+    expect(toolMessages(done.messages).at(-1)!.content).toContain('请求体上限')
+  })
+
+  it('真实模式没有重放，一样按上限放', async () => {
+    const calls = Array.from({ length: 51 }, (_, i) => list(`c${i}`))
+    const h = harness({ mode: 'real', loop: 'tools', turns: [reply(null, calls), reply('好')] })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs[0]!.steps).toHaveLength(50)
+    expect(toolMessages(done.messages).at(-1)!.content).toBe(OVER_STEPS)
+  })
+
+  it('运行请求失败时，放不下的还说自己的原因', async () => {
+    const calls = Array.from({ length: 51 }, (_, i) => list(`c${i}`))
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, calls)],
+      run: () => ({ kind: 'failed', message: '服务内部错误' }),
+    })
+    const done = await h.send(USER_TEXT)
+    const tools = toolMessages(done.messages)
+    expect(tools[0]!.content).toContain('工具请求失败')
+    expect(tools.at(-1)!.content).toBe(OVER_STEPS)
   })
 })
 

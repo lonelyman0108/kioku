@@ -1,4 +1,5 @@
 import {
+  BENCH_MAX_REQUEST_BYTES,
   BENCH_MAX_STEPS,
   BenchStep,
   TurnEndEvent,
@@ -16,6 +17,7 @@ import {
 } from '@kioku/contracts'
 
 import { ApiError } from './api/client'
+import { formatBytes } from './backup'
 import { internalErrorText, notExecuted } from './benchResult'
 import { parseScenario, type ParsedScenario } from './benchScenarios'
 import {
@@ -289,6 +291,35 @@ const toolStep = (call: BenchAgentToolCall): BenchStep => ({
   tool: call.name,
   arguments: call.arguments ?? {},
 })
+
+const textBytes = (text: string) => new TextEncoder().encode(text).length
+
+// 这一轮每个工具调用发不出去的原因，能发的是 null。步数或请求体超过运行接口的上限时运行请求会被整个拒绝，同一轮别的调用
+// 也跟着失败，所以按顺序放，放不下的作为工具错误回给模型，它可以下一轮再调；后面小的放得下就接着放。
+// 请求体按真的发出去的算：重放也在里面，步骤之间有逗号
+function callRefusals(
+  calls: readonly BenchAgentToolCall[],
+  loop: BenchAgentLoop,
+  mode: BenchMode,
+  replay: readonly BenchReplayStep[],
+): (string | null)[] {
+  let steps = 0
+  let bytes = textBytes(JSON.stringify({ mode, steps: [], replay }))
+  return calls.map((call) => {
+    const refusal = callRefusal(call, loop)
+    if (refusal) return refusal
+    if (steps === BENCH_MAX_STEPS) {
+      return `没有执行：一轮最多执行 ${BENCH_MAX_STEPS} 个工具调用，这个超出了，可以下一轮再调`
+    }
+    const size = textBytes(JSON.stringify(toolStep(call))) + (steps ? 1 : 0)
+    if (bytes + size > BENCH_MAX_REQUEST_BYTES) {
+      return `没有执行：运行请求放不下这个调用（请求体上限 ${formatBytes(BENCH_MAX_REQUEST_BYTES)}），可以把参数改小，或者下一轮再调`
+    }
+    steps += 1
+    bytes += size
+    return null
+  })
+}
 
 const withContext = (context: SessionContextInput | undefined) => (context ? { context } : {})
 
@@ -611,7 +642,7 @@ export async function sendAgentMessage(
       return finish('blocked', overflowed)
     }
 
-    const refusals = turn.toolCalls.map((call) => callRefusal(call, loop))
+    const refusals = callRefusals(turn.toolCalls, loop, mode, replayFor(state.session, mode))
     const sendable = turn.toolCalls.flatMap((call, index) =>
       refusals[index] ? [] : [{ index, call }],
     )
