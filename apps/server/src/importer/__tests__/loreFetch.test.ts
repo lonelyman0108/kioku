@@ -48,6 +48,12 @@ describe('拉取 Lore 的导出', () => {
       'https://user@lore.example.com',
       'https://lore.example.com/?token=hunter2',
       'https://lore.example.com/#hunter2',
+      // 查询与片段是空的也不行：拼地址时路径会被丢掉，Token 发到同一主机的另一个路径
+      'https://lore.example.com/lore?',
+      'https://lore.example.com/lore#',
+      'https://lore.example.com/?',
+      'https://lore.example.com/#',
+      'https://lore.example.com/lore?#',
       '不是网址 hunter2',
     ]) {
       expect(() => loreExportUrl(address)).toThrow(/Lore 地址/)

@@ -28,7 +28,8 @@ export function loreExportUrl(address: string): URL {
   if (base.username || base.password) {
     throw new MemoryError(400, 'Lore 地址里不能带账号密码，Token 单独填')
   }
-  if (base.search || base.hash) {
+  // 看 href：只写一个 ? 或 # 时 search 与 hash 都是空串，下面拼地址时路径会被丢掉，Token 发到同一主机的另一个路径
+  if (/[?#]/.test(base.href)) {
     throw new MemoryError(400, 'Lore 地址里不能带查询或片段，填到服务的根路径就好')
   }
   const root = base.href.endsWith('/') ? base.href : `${base.href}/`
