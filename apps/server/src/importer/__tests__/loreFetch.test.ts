@@ -60,11 +60,11 @@ describe('拉取 Lore 的导出', () => {
     expect(loreExportUrl('https://lore.example.com').href).toBe(
       'https://lore.example.com/api/backup?action=export',
     )
-    expect(loreExportUrl(' http://127.0.0.1:18901/lore/ ').href).toBe(
-      'http://127.0.0.1:18901/lore/api/backup?action=export',
+    expect(loreExportUrl(' http://127.0.0.1:3000/lore/ ').href).toBe(
+      'http://127.0.0.1:3000/lore/api/backup?action=export',
     )
-    expect(loreExportUrl('http://127.0.0.1:18901/lore').href).toBe(
-      'http://127.0.0.1:18901/lore/api/backup?action=export',
+    expect(loreExportUrl('http://127.0.0.1:3000/lore').href).toBe(
+      'http://127.0.0.1:3000/lore/api/backup?action=export',
     )
   })
 

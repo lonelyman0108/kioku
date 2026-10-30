@@ -110,24 +110,20 @@ describe('裁剪 Lore 的导出', () => {
 
 describe('Token 会不会明文传输', () => {
   it('http 且不是内网才算', () => {
-    for (const address of [
-      'http://lore.example.com',
-      'http://8.8.8.8:18901',
-      'http://172.32.0.1',
-    ]) {
+    for (const address of ['http://lore.example.com', 'http://8.8.8.8:3000', 'http://172.32.0.1']) {
       expect(tokenInClear(address)).toBe(true)
     }
     for (const address of [
       'https://lore.example.com',
-      'http://localhost:18901',
-      'http://127.0.0.1:18901',
-      'http://[::1]:18901',
+      'http://localhost:3000',
+      'http://127.0.0.1:3000',
+      'http://[::1]:3000',
       'http://[fd00::1]/',
       'http://10.0.0.8',
       'http://172.16.0.8',
       'http://192.168.1.2:3000',
       'http://100.100.1.2',
-      'http://lore:18901',
+      'http://lore:3000',
       'http://lore.local',
       '不是网址',
       '',
