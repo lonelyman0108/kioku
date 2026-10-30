@@ -27,7 +27,12 @@ import { useRoute, useRouter, type RouteLocationNormalizedLoaded } from 'vue-rou
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { emptyConversation, sendAgentMessage, type AgentExchange } from '../benchAgent'
+import {
+  acceptAgentDivergence,
+  emptyConversation,
+  sendAgentMessage,
+  type AgentExchange,
+} from '../benchAgent'
 import { contextDefaults, contextOf } from '../benchForm'
 import type { StepView } from '../benchResult'
 import type { ScenarioOutcome } from '../benchScenarios'
@@ -423,6 +428,11 @@ export function createBench() {
     if (running.value) return
     agent.value = emptyConversation()
   }
+  // 运行期间不动对话：和调用台的接受一样，第几步是按发出请求时的日志算的
+  function acceptAgentDiverged() {
+    if (running.value) return
+    agent.value = acceptAgentDivergence(agent.value)
+  }
   // 开始之前的提示点过了：这次对话里同一个模型不再问。循环进行时状态归它管，别的调用在跑时不相干
   function consentToModel(model: string) {
     if (agentSending.value) return
@@ -474,6 +484,7 @@ export function createBench() {
     sendToAgent,
     stopAgent,
     clearAgent,
+    acceptAgentDiverged,
     consentToModel,
   }
 }

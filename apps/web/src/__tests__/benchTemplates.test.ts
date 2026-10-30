@@ -1176,6 +1176,31 @@ describe('模型对话的页面', () => {
     expect(blockOf(view.script, 'const info = ')).toContain('staleTime: 0')
   })
 
+  it('重放分叉：第几步与原因都显示，能接受或清空；再发还是同样报错时禁止发送', () => {
+    expect(view.script).toContain('divergenceNotice(agent.value.session)')
+    const alert = alertWith('diverged')
+    expect(bound(alert, 'title')).toBe('diverged.title')
+    expect(bound(alert, 'description')).toBe('diverged.description')
+    expect(bound(alert, 'actions')).toBe('divergedActions')
+    const actions = blockOf(view.script, 'const divergedActions = ')
+    expect(actions).toContain('onClick: acceptAgentDiverged')
+    expect(actions).toContain('onClick: clear')
+    // 运行期间不能动：第几步是按发出请求时的日志算的
+    expect(actions.match(/disabled: running\.value/g)).toHaveLength(2)
+    expect(blockOf(view.script, 'const canSend = ')).toContain(
+      '!blockingDivergence(agent.value.session)',
+    )
+    // 接受走调用台的同一条规则，运行期间不动
+    expect(benchAgent).toContain('session: acceptDivergence(session)')
+    expect(bodyOf(useBench, 'acceptAgentDiverged')).toContain('if (running.value) return')
+    expect(bodyOf(useBench, 'acceptAgentDiverged')).toContain('acceptAgentDivergence(agent.value)')
+    // 轨迹上去掉的那一步有标记
+    const call = withFor(exchange.elements, 'call in round.calls')
+    expect(textOf(withDirective(walk(call), 'else-if', 'call.trace?.removed'))).toContain(
+      '写入已去掉',
+    )
+  })
+
   it('运行中做不了会动对话的事：写入放不进重放日志时提示并禁用', () => {
     expect(view.script).toContain('runBlocker(agent.value.session, mode.value)')
     expect(bound(alertWith('blocker'), 'title')).toBe('blocker')

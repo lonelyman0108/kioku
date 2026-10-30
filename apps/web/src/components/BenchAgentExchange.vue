@@ -66,6 +66,9 @@ const PRE_CLASS =
           <UBadge v-if="call.trace?.kept" size="sm" color="neutral" variant="subtle">
             写入已保留
           </UBadge>
+          <UBadge v-else-if="call.trace?.removed" size="sm" color="warning" variant="subtle">
+            写入已去掉
+          </UBadge>
         </p>
         <details class="text-xs">
           <summary class="cursor-pointer text-muted">参数</summary>

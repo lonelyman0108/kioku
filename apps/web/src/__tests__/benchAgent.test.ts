@@ -21,10 +21,12 @@ import { describe, expect, it } from 'vitest'
 
 import { ApiError } from '../api/client'
 import {
+  acceptAgentDivergence,
   AGENT_LOOP_NOTES,
   AGENT_MAX_ROUNDS,
   agentScenario,
   argumentsText,
+  blockingDivergence,
   callOpen,
   clipText,
   consentNeeded,
@@ -1375,15 +1377,140 @@ describe('重放分叉', () => {
     expect(done.session.replay).toHaveLength(1)
   })
 
-  it('内部错误的分叉：说可能是暂时的，可以再发一次', async () => {
-    const conversation = await withWrite()
+  // 工具那一轮分叉之后的对话
+  const afterDivergence = async (internalError = false) => {
     const h = harness({
       loop: 'tools',
       turns: [reply(null, [toolCall('c2', 'kioku_list')])],
-      run: diverged(true),
+      run: diverged(internalError),
     })
-    const done = await h.send('第二条', conversation)
-    expect(last(done).notice).toContain('可能是暂时的')
+    return h.send('第二条', await withWrite())
+  }
+
+  it('内部错误的分叉多半是暂时的：说可以再发一次，也不拦，再发就是重试', async () => {
+    const conversation = await afterDivergence(true)
+    expect(last(conversation).notice).toContain('可能是暂时的')
+    expect(blockingDivergence(conversation.session)).toBeNull()
+
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [toolCall('c3', 'kioku_list')]), reply('好')],
+    })
+    const done = await h.send('再试一次', conversation)
+    expect(h.turnRequests).toHaveLength(2)
+    expect(last(done).end).toBe('done')
+    // 这次重放过去了，分叉就清掉了
+    expect(done.session.diverged).toBeNull()
+    expect(h.runs[0]!.replay).toEqual(conversation.session.replay)
+  })
+
+  it('分叉之后再发（数据对不上）：不请求模型、不运行，白花的 token 省下，这条消息不进历史', async () => {
+    const conversation = await afterDivergence()
+    expect(blockingDivergence(conversation.session)).toEqual(conversation.session.diverged)
+    const h = harness({ loop: 'tools', turns: [reply('不该到这里')] })
+    const done = await h.send('第三条', conversation)
+    expect(h.turnRequests).toEqual([])
+    expect(h.runs).toEqual([])
+    expect(last(done).end).toBe('diverged')
+    expect(last(done).inHistory).toBe(false)
+    expect(last(done).notice).toContain('第 1 步（kioku_create core://a）')
+    expect(done.messages).toEqual(conversation.messages)
+  })
+
+  describe('接受分叉', () => {
+    it('只去掉报错的那一步，别的留着；分叉清掉之后能接着发，重放不再带它', async () => {
+      const write = (id: string, uri: string) =>
+        toolCall(id, 'kioku_create', { uri, content: '甲' })
+      const first = harness({
+        loop: 'tools',
+        turns: [reply(null, [write('c1', 'core://a'), write('c2', 'core://b')]), reply('好')],
+      })
+      const conversation = await first.send(USER_TEXT)
+      expect(conversation.session.replay).toHaveLength(2)
+
+      const failing = harness({
+        loop: 'tools',
+        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        run: (steps) => ({
+          kind: 'done',
+          result: {
+            ...(diverged()(steps) as { result: BenchRunResult }).result,
+            replayDiverged: { index: 1, text: 'URI 已存在', internalError: false },
+          },
+        }),
+      })
+      const stuck = await failing.send('第二条', conversation)
+      expect(blockingDivergence(stuck.session)).not.toBeNull()
+
+      const accepted = acceptAgentDivergence(stuck)
+      expect(accepted.session.diverged).toBeNull()
+      expect(blockingDivergence(accepted.session)).toBeNull()
+      expect(accepted.session.replay).toEqual([
+        {
+          kind: 'tool',
+          tool: 'kioku_create',
+          arguments: { uri: 'core://a', content: '甲' },
+        },
+      ])
+      // 历史不动：模型看到的还是原来的
+      expect(accepted.messages).toEqual(stuck.messages)
+
+      const next = harness({
+        loop: 'tools',
+        turns: [reply(null, [toolCall('c4', 'kioku_list')]), reply('好')],
+      })
+      const done = await next.send('第三条', accepted)
+      expect(next.runs[0]!.replay).toEqual(accepted.session.replay)
+      expect(last(done).end).toBe('done')
+    })
+
+    it('轨迹跟着改：去掉的那一步不再标已保留，别的不动，也不改旧的状态', async () => {
+      const write = (id: string, uri: string) =>
+        toolCall(id, 'kioku_create', { uri, content: '甲' })
+      const first = harness({
+        loop: 'tools',
+        turns: [reply(null, [write('c1', 'core://a'), write('c2', 'core://b')]), reply('好')],
+      })
+      const conversation = await first.send(USER_TEXT)
+      const failing = harness({
+        loop: 'tools',
+        turns: [reply(null, [toolCall('c3', 'kioku_list')])],
+        run: diverged(),
+      })
+      const stuck = await failing.send('第二条', conversation)
+      const accepted = acceptAgentDivergence(stuck)
+      const flags = (state: AgentConversation) =>
+        state.exchanges[0]!.rounds[0]!.calls.map((c) => [c.trace?.kept, c.trace?.removed])
+      expect(flags(stuck)).toEqual([
+        [true, false],
+        [true, false],
+      ])
+      expect(flags(accepted)).toEqual([
+        [false, true],
+        [true, false],
+      ])
+    })
+
+    it('turn.end 也可能是去掉的那一步：轨迹同样改', async () => {
+      const h = harness({ loop: 'chat', context: GROUP, turns: [reply('好')] })
+      const conversation = await h.send(USER_TEXT)
+      expect(last(conversation).turnEnd?.kept).toBe(true)
+      const stuck: AgentConversation = {
+        ...conversation,
+        session: {
+          ...conversation.session,
+          diverged: { index: 0, text: '不一样了', internalError: false },
+        },
+      }
+      const accepted = acceptAgentDivergence(stuck)
+      expect(last(accepted).turnEnd).toMatchObject({ kept: false, removed: true })
+      expect(accepted.session.replay).toEqual([])
+    })
+
+    it('没有分叉：什么都不动', () => {
+      const conversation = emptyConversation()
+      expect(acceptAgentDivergence(conversation)).toBe(conversation)
+    })
   })
 
   it('prompt.submit 那里就分叉：不请求模型，这条消息不进历史', async () => {

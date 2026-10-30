@@ -19,6 +19,7 @@ import { ApiError } from './api/client'
 import { internalErrorText, notExecuted } from './benchResult'
 import { parseScenario, type ParsedScenario } from './benchScenarios'
 import {
+  acceptDivergence,
   emptySession,
   NOT_API_FAILURE,
   recordRun,
@@ -126,8 +127,12 @@ export interface AgentStepTrace {
   step: BenchStepResult
   // 这次运行的标记：真实模式下事件带着它，到活动里靠它对应
   run: string
+  // 这一步在这次对话的时间线上是哪一条，接受重放分叉时靠它找到去掉的那一步
+  entry: number | null
   // 这一步的写入在这次对话的重放日志里，后面的调用读得到
   kept: boolean
+  // 这一步的写入进过重放日志，接受重放分叉时去掉了，后面的调用读不到
+  removed: boolean
 }
 
 export interface AgentToolTrace {
@@ -293,7 +298,9 @@ function stepTraces(session: BenchSession, result: BenchRunResult): AgentStepTra
   return result.steps.map((step, index) => ({
     step,
     run: result.run,
+    entry: entries[index]?.id ?? null,
     kept: entries[index]?.kept ?? false,
+    removed: false,
   }))
 }
 
@@ -301,7 +308,7 @@ function stepTraces(session: BenchSession, result: BenchRunResult): AgentStepTra
 const injected = (step: BenchStepResult | undefined): string | null =>
   !step || step.isError || step.internalError || step.raw === null ? null : step.text
 
-// 重放分叉：现在的数据和对话做这一步时不一样了才会报错。可以清空对话；内部错误多半是暂时的，可以再发一次
+// 重放分叉：现在的数据和对话做这一步时不一样了才会报错。可以清空对话或者接受；内部错误多半是暂时的，可以再发一次
 function divergedNotice(
   session: BenchSession,
   { index, text, internalError }: NonNullable<BenchRunResult['replayDiverged']>,
@@ -309,8 +316,34 @@ function divergedNotice(
   const step = session.replay[index]
   const which = `第 ${index + 1} 步${step ? `（${replayStepLabel(step)}）` : ''}`
   return internalError
-    ? `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。可能是暂时的，可以再发一次；还是不行就清空对话。`
-    : `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。现在的数据和对话做这一步时不一样了，可以清空对话再来。`
+    ? `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。可能是暂时的，可以再发一次；还是不行就清空对话，或者接受：去掉这一步。`
+    : `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。现在的数据和对话做这一步时不一样了，可以清空对话，或者接受：去掉这一步。`
+}
+
+// 拦着下一条消息的重放分叉，没有时是 null。再发还是同样报错，只是白花模型的 token（mcp 的循环先请求模型才运行），
+// 要由用户清空或接受。内部错误不拦：多半是暂时的，再发一次就是重试；拦下的话只能丢掉一步好好的写入
+export const blockingDivergence = ({ diverged }: BenchSession) =>
+  diverged && !diverged.internalError ? diverged : null
+
+// 接受重放分叉：去掉报错的那一步，留下别的接着用，规则和调用台相同。轨迹跟着改：去掉的那一步不能还标着已保留
+export function acceptAgentDivergence(conversation: AgentConversation): AgentConversation {
+  const { session } = conversation
+  if (!session.diverged) return conversation
+  const removedEntry = session.replayEntryIds[session.diverged.index]
+  const marked = (trace: AgentStepTrace | null) =>
+    trace && trace.entry === removedEntry ? { ...trace, kept: false, removed: true } : trace
+  return {
+    ...conversation,
+    session: acceptDivergence(session),
+    exchanges: conversation.exchanges.map((exchange) => ({
+      ...exchange,
+      rounds: exchange.rounds.map((round) => ({
+        ...round,
+        calls: round.calls.map((call) => ({ ...call, trace: marked(call.trace) })),
+      })),
+      turnEnd: marked(exchange.turnEnd),
+    })),
+  }
 }
 
 // turn.end 的请求体。契约要求带私聊、群聊或频道的上下文，群里要有发言人
@@ -437,6 +470,8 @@ export async function sendAgentMessage(
 
   const blocked = runBlocker(state.session, mode)
   if (blocked) return finish('blocked', blocked)
+  const stuck = blockingDivergence(state.session)
+  if (stuck) return finish('diverged', divergedNotice(state.session, stuck))
 
   let attached = ''
   if (loop !== 'tools') {

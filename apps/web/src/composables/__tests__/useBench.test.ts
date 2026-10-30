@@ -1064,6 +1064,59 @@ describe('模型对话', () => {
     expect(bench.agent.value.exchanges).toEqual([])
   })
 
+  it('接受重放分叉：对话的日志去掉那一步，分叉清掉；调用台的会话不动；运行期间不能接受', async () => {
+    const bench = start()
+    await settle()
+    const replay = { kind: 'tool', tool: 'kioku_create', arguments: WRITE_CALL.arguments }
+    fakes.api.benchRun.mockResolvedValueOnce({
+      ...RESULT,
+      mode: 'rollback',
+      steps: [{ ...RESULT.steps[0]!, replay }],
+    })
+    await bench.call(STEPS, 'kioku_create')
+    fakes.api.benchRun
+      .mockResolvedValueOnce({
+        ...RESULT,
+        mode: 'rollback',
+        steps: [{ ...RESULT.steps[0]!, replay }],
+      })
+      .mockResolvedValueOnce({
+        ...RESULT,
+        mode: 'rollback',
+        ok: false,
+        replayDiverged: { index: 0, text: 'URI 已存在', internalError: false },
+      })
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+      .mockResolvedValueOnce(modelReply('', [{ ...WRITE_CALL, id: 'c2', name: 'kioku_list' }]))
+    await bench.sendToAgent('你好', TOOLS_LOOP)
+    expect(bench.agent.value.session.diverged?.index).toBe(0)
+    expect(bench.agent.value.session.replay).toHaveLength(1)
+
+    bench.acceptAgentDiverged()
+    expect(bench.agent.value.session.diverged).toBeNull()
+    expect(bench.agent.value.session.replay).toEqual([])
+    expect(bench.session.value.replay).toHaveLength(1)
+
+    // 运行期间不动：结果回来时第几步是按发出请求时的日志算的
+    bench.agent.value = {
+      ...bench.agent.value,
+      session: {
+        ...bench.agent.value.session,
+        diverged: { index: 0, text: '又报错', internalError: false },
+      },
+    }
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValueOnce(run.promise)
+    const outcome = bench.execute(STEPS, WHAT)
+    await settle()
+    expect(bench.running.value).toBe(true)
+    bench.acceptAgentDiverged()
+    expect(bench.agent.value.session.diverged).not.toBeNull()
+    run.resolve({ ...RESULT, mode: 'rollback' })
+    await outcome
+  })
+
   it('同意过的模型随对话清掉：换一段对话要重新问', async () => {
     const bench = start()
     await settle()

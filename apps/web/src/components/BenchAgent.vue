@@ -9,6 +9,7 @@ import {
   AGENT_LOOP_NOTES,
   AGENT_UNAVAILABLE_NOTES,
   agentScenario,
+  blockingDivergence,
   consentNeeded,
   consentText,
   DEFAULT_SYSTEM_PROMPT,
@@ -17,7 +18,7 @@ import {
   usageSummary,
 } from '../benchAgent'
 import { formatScenario, plaintextIn, type PlaintextFinding } from '../benchScenarios'
-import { NOT_API_FAILURE, runBlocker, sessionUsage } from '../benchSession'
+import { divergenceNotice, NOT_API_FAILURE, runBlocker, sessionUsage } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { saveFile } from '../download'
 import { icons } from '../icons'
@@ -40,6 +41,7 @@ const {
   sendToAgent,
   stopAgent,
   clearAgent,
+  acceptAgentDiverged,
   consentToModel,
 } = useBench()
 
@@ -104,6 +106,24 @@ const consentActions = computed(() => [
 ])
 
 const blocker = computed(() => runBlocker(agent.value.session, mode.value))
+const diverged = computed(() => divergenceNotice(agent.value.session))
+// 运行期间不能接受或清空：结果回来时，第几步与这次的写入都是按发出请求时的日志算的
+const divergedActions = computed(() => [
+  {
+    label: '接受：去掉这一步',
+    color: 'neutral' as const,
+    variant: 'subtle' as const,
+    disabled: running.value,
+    onClick: acceptAgentDiverged,
+  },
+  {
+    label: '清空对话',
+    color: 'error' as const,
+    variant: 'subtle' as const,
+    disabled: running.value,
+    onClick: clear,
+  },
+])
 const usage = computed(() => usageSummary(agent.value.usage))
 const replayUsage = computed(() => sessionUsage(agent.value.session, mode.value))
 
@@ -115,6 +135,7 @@ const canSend = computed(
     Boolean(input.value.trim()) &&
     !needsConsent.value &&
     !blocker.value &&
+    !blockingDivergence(agent.value.session) &&
     !running.value,
 )
 async function send() {
@@ -261,6 +282,15 @@ watch(generation, () => {
         :actions="consentActions"
       />
       <UAlert v-if="blocker" color="warning" variant="subtle" :title="blocker" />
+      <UAlert
+        v-if="diverged"
+        color="warning"
+        variant="subtle"
+        class="wrap-anywhere"
+        :title="diverged.title"
+        :description="diverged.description"
+        :actions="divergedActions"
+      />
       <UAlert
         v-if="exportNote"
         color="warning"
