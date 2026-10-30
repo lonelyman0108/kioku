@@ -32,7 +32,7 @@ export interface FakeChatServer {
 }
 
 export async function startFakeChatServer(
-  reply: (messages: FakeChatMessage[]) => FakeChatReply,
+  reply: (messages: FakeChatMessage[]) => FakeChatReply | Promise<FakeChatReply>,
 ): Promise<FakeChatServer> {
   const requests: FakeChatMessage[][] = []
   const tools: (unknown[] | undefined)[] = []
@@ -42,7 +42,7 @@ export async function startFakeChatServer(
   const server = createServer((req, res) => {
     let body = ''
     req.on('data', (chunk: Buffer) => (body += chunk.toString()))
-    req.on('end', () => {
+    req.on('end', async () => {
       const parsed = JSON.parse(body || '{}') as Record<string, unknown>
       const index = requests.length
       requests.push(parsed.messages as FakeChatMessage[])
@@ -52,7 +52,7 @@ export async function startFakeChatServer(
       res.on('close', () => {
         if (!res.writableFinished) cancelled.push(index)
       })
-      const answer = reply(parsed.messages as FakeChatMessage[])
+      const answer = await reply(parsed.messages as FakeChatMessage[])
       if (typeof answer === 'object' && 'hang' in answer) return
       if (typeof answer === 'object' && 'raw' in answer) {
         const { raw, status = 200 } = answer as { raw: string; status?: number }

@@ -85,7 +85,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
 
   // 起一个假模型，配成实例的抽取模型
   const startModel = async (
-    reply: (messages: FakeChatMessage[]) => FakeChatReply,
+    reply: (messages: FakeChatMessage[]) => FakeChatReply | Promise<FakeChatReply>,
     apiKey: string | null = API_KEY,
   ) => {
     const server = await startFakeChatServer(reply)
@@ -514,12 +514,16 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     })
 
     it('改模型名生效，接口与 Key 不变；用量与耗时都返回', async () => {
-      const server = await startModel(() => '好')
+      const server = await startModel(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 30))
+        return '好'
+      })
       const byDefault = await turn({ messages: [USER] })
       expect(byDefault.model).toBe('fake-model')
       expect(server.bodies[0]!.model).toBe('fake-model')
       expect(byDefault.usage).toEqual({ promptTokens: 100, completionTokens: 20 })
-      expect(byDefault.ms).toBeGreaterThanOrEqual(0)
+      // 假模型等了 30 毫秒。定时器可能早到一点，留出余量
+      expect(byDefault.ms).toBeGreaterThanOrEqual(25)
 
       const other = await turn({ model: '  other-model ', messages: [USER] })
       expect(other.model).toBe('other-model')
@@ -540,8 +544,8 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(error).toContain('上游说不行')
     })
 
-    it('上游原文截断到 500 字', async () => {
-      await startModel(() => ({ status: 500, raw: 'x'.repeat(2000) }))
+    it.each([400, 500])('HTTP %i 的上游原文截断到 500 字', async (status) => {
+      await startModel(() => ({ status, raw: 'x'.repeat(2000) }))
       const res = await postTurn({ messages: [USER] })
       expect(res.status).toBe(502)
       const error = await errorOf(res)
@@ -565,13 +569,19 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(cut).not.toContain(API_KEY.slice(0, 5))
     })
 
-    it('2xx 但不是 JSON：502，带截断后的原文，没有 API Key', async () => {
-      await startModel(() => ({ raw: `<html>网关出错了 ${API_KEY}</html>` }))
+    it.each([
+      ['不是 JSON', '模型接口的响应不是合法的 JSON', (text: string) => `<html>${text}</html>`],
+      [
+        '没有助手消息',
+        '模型接口的响应里没有助手消息',
+        (text: string) => JSON.stringify({ error: text }),
+      ],
+    ])('2xx 但%s：502，带截断到 500 字的原文，没有 API Key', async (_, reason, body) => {
+      const tail = 'x'.repeat(2000)
+      await startModel(() => ({ raw: body(`${API_KEY}${tail}`) }))
       const res = await postTurn({ messages: [USER] })
       expect(res.status).toBe(502)
-      const error = await errorOf(res)
-      expect(error).toContain('网关出错了')
-      expect(error).not.toContain(API_KEY)
+      expect(await errorOf(res)).toBe(`${reason}：${body(`***${tail}`).slice(0, 500)}…`)
     })
 
     it('Key 里有换行（fetch 把整个请求头写进错误）：502，报错里没有 Key', async () => {

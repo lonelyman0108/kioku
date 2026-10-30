@@ -208,7 +208,7 @@ describe('请求', () => {
     expect(calls[0]!.init.headers).not.toHaveProperty('authorization')
   })
 
-  it('助手消息原样返回，用量、结束原因、模型名与耗时都给', async () => {
+  it('助手消息原样返回，用量、结束原因与模型名都给', async () => {
     const message = {
       role: 'assistant',
       content: null,
@@ -231,7 +231,25 @@ describe('请求', () => {
     expect(result.finishReason).toBe('tool_calls')
     expect(result.usage).toEqual({ promptTokens: 12, completionTokens: 3 })
     expect(result.model).toBe('m')
-    expect(result.ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('耗时从发请求算到读完正文', async () => {
+    const pause = () => new Promise((resolve) => setTimeout(resolve, 30))
+    const { fetchImpl } = stubFetch(async () => {
+      await pause()
+      return {
+        ok: true,
+        status: 200,
+        text: async () => {
+          await pause()
+          return chatBody({ role: 'assistant' })
+        },
+      } as Response
+    })
+    const { ms } = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+    // 两段各等 30 毫秒。定时器可能早到一点，留出余量
+    expect(ms).toBeGreaterThanOrEqual(50)
+    expect(ms).toBeLessThan(60_000)
   })
 
   it('没给用量或用量不是数字时是 0；没有结束原因时是 null；没有 role 时补上', async () => {
@@ -280,16 +298,16 @@ describe('请求', () => {
 })
 
 describe('报错', () => {
-  it('非 2xx 带状态码与上游原文，截断到 500 字', async () => {
-    expect(await failure(() => new Response('上游不高兴', { status: 400 }))).toBe(
-      '模型接口返回 HTTP 400：上游不高兴',
+  it.each([400, 500])('HTTP %i 带状态码与上游原文，截断到 500 字', async (status) => {
+    expect(await failure(() => new Response('上游不高兴', { status }))).toBe(
+      `模型接口返回 HTTP ${status}：上游不高兴`,
     )
     const exact = 'x'.repeat(500)
-    expect(await failure(() => new Response(exact, { status: 500 }))).toBe(
-      `模型接口返回 HTTP 500：${exact}`,
+    expect(await failure(() => new Response(exact, { status }))).toBe(
+      `模型接口返回 HTTP ${status}：${exact}`,
     )
-    expect(await failure(() => new Response('x'.repeat(2000), { status: 500 }))).toBe(
-      `模型接口返回 HTTP 500：${exact}…`,
+    expect(await failure(() => new Response('x'.repeat(2000), { status }))).toBe(
+      `模型接口返回 HTTP ${status}：${exact}…`,
     )
   })
 
@@ -331,6 +349,19 @@ describe('报错', () => {
     expect(message).not.toContain(encodeURIComponent(API_KEY))
   })
 
+  it.each([
+    ['不是 JSON', '模型接口的响应不是合法的 JSON', (text: string) => `<html>${text}`],
+    [
+      '没有助手消息',
+      '模型接口的响应里没有助手消息',
+      (text: string) => JSON.stringify({ error: text }),
+    ],
+  ])('2xx 但响应不对（%s）又很长：Key 换掉，截断到 500 字', async (_, reason, body) => {
+    const tail = 'x'.repeat(2000)
+    const message = await failure(() => new Response(body(`${API_KEY}${tail}`)))
+    expect(message).toBe(`${reason}：${body(`***${tail}`).slice(0, 500)}…`)
+  })
+
   it('连不上时带错误类别，不带错误原文', async () => {
     const fetchImpl = (() =>
       Promise.reject(
@@ -370,6 +401,31 @@ describe('报错', () => {
     expect(err.message).toBe('模型 1 秒内没有返回')
   })
 
+  // 响应头到了，正文一直不来，等 signal 取消
+  const hangingBody = ((_: string, init: RequestInit) =>
+    Promise.resolve({
+      ok: true,
+      status: 200,
+      text: () => hanging('', init),
+    } as unknown as Response)) as typeof fetch
+
+  // 路由总是带着请求的 signal，走的是两个信号合起来的那条路
+  it.each([
+    ['等响应', hanging],
+    ['读正文', hangingBody],
+  ])('带着请求的 signal，%s时到了时限：说清等了多久，不算客户端断开', async (_, fetchImpl) => {
+    const signal = new AbortController().signal
+    const outcome = await Promise.race([
+      requestAgentTurn(CONFIG, { ...INPUT, signal, timeoutMs: 20 }, fetchImpl).catch(
+        (e: unknown) => e,
+      ),
+      // 时限没生效时这里先到：按断言失败，不是等到用例超时
+      new Promise((resolve) => setTimeout(() => resolve('时限没有生效'), 1_500)),
+    ])
+    expect(outcome).toBeInstanceOf(AgentModelError)
+    expect((outcome as Error).message).toBe('模型 1 秒内没有返回')
+  })
+
   it('请求的 signal 传给上游：客户端断开就取消', async () => {
     const client = new AbortController()
     const pending = requestAgentTurn(
@@ -382,7 +438,7 @@ describe('报错', () => {
     expect(((await pending) as Error).message).toBe('请求已经断开')
   })
 
-  it('读响应正文时断开或到时限也一样', async () => {
+  it('读响应正文时断开也一样', async () => {
     const client = new AbortController()
     const pending = requestAgentTurn(
       CONFIG,
