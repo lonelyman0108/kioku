@@ -340,7 +340,10 @@ export async function runSteps(
       assertions,
       captured: values,
       changes: outcome.changes,
-      replay: mode === 'rollback' && !outcome.isError ? replayEntry(resolved) : null,
+      replay:
+        mode === 'rollback' && !outcome.isError && !outcome.internalError
+          ? replayEntry(resolved)
+          : null,
     })
   }
 
@@ -366,7 +369,7 @@ export async function runSteps(
 // 依赖没取到的（失败）优先于依赖被跳过的
 const stateRank = (state: 'skipped' | 'failed') => (state === 'failed' ? 0 : 1)
 
-// 这一步要记进重放日志的样子：只记成功的写步骤，参数已经展开
+// 这一步要记进重放日志的样子：只记成功的写步骤（报错的与标成内部错误的不算），参数已经展开
 function replayEntry(step: ResolvedStep): BenchReplayStep | null {
   if (!isReplayStep(step)) return null
   const entry =

@@ -548,6 +548,41 @@ describe('重放', () => {
     const real = await run(executor, input, [], 'real')
     expect(real.steps.every((s) => s.replay === null)).toBe(true)
   })
+
+  it('标成内部错误的写步骤不记：根事务中止时错误可能被吞掉，结果看起来是成功的', async () => {
+    const { executor } = fakeExecutor(() => textOutcome('看起来写成了'), {
+      stops: [null, 'aborted'],
+    })
+    const result = await run(
+      executor,
+      steps({ kind: 'tool', tool: 'kioku_create', arguments: { uri: 'a://b' } }),
+    )
+    expect(result.steps[0]).toMatchObject({
+      status: 'failed',
+      isError: false,
+      internalError: true,
+      replay: null,
+    })
+  })
+
+  it('断言不成立但确实写成了的步骤照样记：写入是真的，后面的步骤要读得到', async () => {
+    const { executor } = fakeExecutor(() => textOutcome('好'))
+    const result = await run(
+      executor,
+      steps({
+        kind: 'tool',
+        tool: 'kioku_create',
+        arguments: { uri: 'a://b' },
+        expect: { contains: ['没有这句'] },
+      }),
+    )
+    expect(result.steps[0]).toMatchObject({ status: 'failed', internalError: false })
+    expect(result.steps[0]!.replay).toEqual({
+      kind: 'tool',
+      tool: 'kioku_create',
+      arguments: { uri: 'a://b' },
+    })
+  })
 })
 
 const TURN_END = {
