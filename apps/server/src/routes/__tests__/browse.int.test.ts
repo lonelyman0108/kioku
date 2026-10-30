@@ -15,7 +15,7 @@ import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
 import { memories, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { embedMemory } from '../../embedding/worker'
+import { embedMemories } from '../../embedding/worker'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -333,7 +333,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       ws.cookie,
       `/memories?uri=${encodeURIComponent('projects://alpha')}`,
     )
-    await embedMemory(database.db, fakeEmbedder(), ws.spaceId, alpha.id)
+    await embedMemories(database.db, fakeEmbedder(), ws.spaceId, [alpha.id])
     const o = await get<SpaceOverview>(ws.cookie, '/overview')
     expect(o.total).toBe(5)
     expect(o.counts).toEqual([

@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { EMBEDDING_DIMENSIONS } from '../../db/schema'
-import { channelEmbedder, openAiEmbedder } from '../provider'
+import { channelEmbedder, EmbedRejected, openAiEmbedder } from '../provider'
 
 const vector = (n = EMBEDDING_DIMENSIONS) => new Array(n).fill(0.1)
 
@@ -112,5 +112,40 @@ describe('一组渠道按顺序回退', () => {
     await expect(embedder.embed(['a'])).rejects.toThrow(
       /所有渠道都失败了。渠道 1：嵌入接口返回 HTTP 401.*；渠道 2：fetch failed/,
     )
+  })
+
+  it('每个渠道都拒绝了这些文本才算被拒；有一个是连不上、限流这类的就算接口不可用', async () => {
+    const rejected = async (hosts: string[]) => {
+      const { embedder } = await run(hosts)
+      return embedder.embed(['a']).then(
+        () => null,
+        (err: unknown) => err instanceof EmbedRejected,
+      )
+    }
+    expect(await rejected(['toolarge'])).toBe(true)
+    expect(await rejected(['toolarge', 'toolarge'])).toBe(true)
+    expect(await rejected(['toolarge', 'offline'])).toBe(false)
+    expect(await rejected(['busy', 'toolarge'])).toBe(false)
+    expect(await rejected(['narrow'])).toBe(false)
+  })
+})
+
+describe('请求被拒与接口不可用', () => {
+  const statusOf = (status: number) =>
+    openAiEmbedder(
+      { baseUrl: 'https://e.example.com/v1', model: 'm', apiKey: null },
+      (async () => new Response('x', { status })) as unknown as typeof fetch,
+    )
+      .embed(['a'])
+      .then(
+        () => 'ok',
+        (err: unknown) => (err instanceof EmbedRejected ? 'rejected' : 'unavailable'),
+      )
+
+  it('400、413、422 这类是文本被拒；鉴权、地址不对、超时、限流与 5xx 算接口不可用', async () => {
+    for (const status of [400, 413, 422]) expect(await statusOf(status)).toBe('rejected')
+    for (const status of [401, 403, 404, 408, 429, 500, 502, 503]) {
+      expect(await statusOf(status)).toBe('unavailable')
+    }
   })
 })

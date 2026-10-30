@@ -42,28 +42,38 @@ export interface EmbedTarget {
   memoryId: string
 }
 
+// 记下或清掉给管理员看的错误本身出错（例如数据库抖了一下）：只记日志，不让已经写好的向量、
+// 还没处理的模型与要重排的记忆跟着算失败
+const noting = (what: string, done: Promise<void>) =>
+  done.catch((err: unknown) => console.error(`${what}出错`, err))
+
 // 记忆写入之后生成向量，一次处理一批：同一个空间的一起读、合起来请求嵌入接口（每次最多 EMBED_BATCH 条）、一起写回。
 // 换模型期间两个模型都生成，不然新模型永远补不齐；一个模型出错不挡另一个。
-// 返回生成失败的那几项与原因，调用方逐项交给队列重试：接口只拒绝了其中几条时（例如正文超过模型的长度上限）只算那几条，
-// 别的照常写；一个空间整批出错时（接口不可用、写库出错）算这个空间的全部。
+// 返回生成失败的是第几项（targets 的下标）与原因，调用方逐项交给队列重试：接口拒绝了其中几条时（例如正文超过模型的
+// 长度上限）只算那几条，别的照常写；一个空间整批出错时（接口不可用、写库出错）算这个空间的全部；
+// signal 断开时（这一批的处理时间用完了、服务要停）还没生成的不再请求，也算失败、交给重试，已经拿到的照常写回。
 // 写回时正被别的事务锁着的不算失败，按记忆去重后交给 retry 稍后再排
-export async function embedJobs<T extends EmbedTarget>(
+export async function embedJobs(
   db: Db,
   source: EmbedderSource,
-  targets: T[],
+  targets: EmbedTarget[],
   retry: Retry,
-): Promise<Map<T, Error>> {
-  // 空间 → 记忆 → 要它的那几项（同一条记忆连着改了几次，会有几项）
-  const groups = new Map<string, Map<string, T[]>>()
-  for (const target of targets) {
-    const items = groups.get(target.spaceId) ?? new Map<string, T[]>()
-    items.set(target.memoryId, [...(items.get(target.memoryId) ?? []), target])
+  signal?: AbortSignal,
+): Promise<Map<number, Error>> {
+  // 空间 → 记忆 → 要它的是哪几项（同一条记忆连着改了几次，会有几项）
+  const groups = new Map<string, Map<string, number[]>>()
+  targets.forEach((target, index) => {
+    const items = groups.get(target.spaceId) ?? new Map<string, number[]>()
+    items.set(target.memoryId, [...(items.get(target.memoryId) ?? []), index])
     groups.set(target.spaceId, items)
+  })
+  const failed = new Map<number, Error>()
+  const fail = (spaceId: string, memoryIds: Iterable<string>, error: Error) => {
+    for (const memoryId of memoryIds) {
+      for (const index of groups.get(spaceId)?.get(memoryId) ?? []) failed.set(index, error)
+    }
   }
-  const failed = new Map<T, Error>()
-  const fail = (spaceId: string, memoryId: string, error: Error) => {
-    for (const target of groups.get(spaceId)?.get(memoryId) ?? []) failed.set(target, error)
-  }
+  const outOfTime = new Error('这一批的处理时间用完了，还没生成向量，交给重试')
   const skipped = new Map<string, Set<string>>()
 
   const [active, next] = await Promise.all([source.get(), source.next()])
@@ -71,10 +81,17 @@ export async function embedJobs<T extends EmbedTarget>(
     if (!embedder) continue
     const failures = failureLog()
     let broken: Error | null = null
+    let deferred = 0
     let written = 0
     for (const [spaceId, items] of groups) {
+      if (signal?.aborted) {
+        deferred += items.size
+        fail(spaceId, items.keys(), outOfTime)
+        continue
+      }
       try {
         written += await embedMemories(db, embedder, spaceId, [...items.keys()], {
+          signal,
           onSkipped: (ids) => {
             const set = skipped.get(spaceId) ?? new Set<string>()
             for (const id of ids) set.add(id)
@@ -82,21 +99,28 @@ export async function embedJobs<T extends EmbedTarget>(
           },
           onFailed: (memoryId, message) => {
             failures.onFailed(memoryId, message)
-            fail(spaceId, memoryId, new Error(message))
+            fail(spaceId, [memoryId], new Error(message))
+          },
+          onDeferred: (ids) => {
+            deferred += ids.length
+            fail(spaceId, ids, outOfTime)
           },
         })
       } catch (err) {
         broken = err as Error
-        for (const memoryId of items.keys()) fail(spaceId, memoryId, broken)
+        fail(spaceId, items.keys(), broken)
       }
     }
     // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的
     if (broken) {
-      await recordEmbeddingError(db, embedder.model, broken.message).catch(() => {})
+      await noting('记下向量的错误', recordEmbeddingError(db, embedder.model, broken.message))
     } else if (failures.count) {
-      await recordEmbeddingError(db, embedder.model, failures.message()).catch(() => {})
+      await noting('记下向量的错误', recordEmbeddingError(db, embedder.model, failures.message()))
+    } else if (deferred) {
+      const message = `这一批的处理时间用完了，有 ${deferred} 条还没生成向量，已交给重试；嵌入接口可能太慢`
+      await noting('记下向量的错误', recordEmbeddingError(db, embedder.model, message))
     } else if (written) {
-      await clearEmbeddingError(db, embedder.model)
+      await noting('清掉向量的错误', clearEmbeddingError(db, embedder.model))
     }
   }
   for (const [spaceId, ids] of skipped) retry(spaceId, [...ids])

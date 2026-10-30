@@ -31,6 +31,12 @@ const DREAM_CRON = '41 * * * *'
 const CLEANUP_CRON = '17 * * * *'
 // 写回向量时记忆正被别的事务锁着，隔这么久再试
 const RETRY_AFTER_SECONDS = 10
+// 写入之后的向量任务一批最多处理这么久：嵌入接口卡住时（每个渠道最多等 30 秒），到点还没生成的不再请求、
+// 正在请求的取消，已经拿到的照常写回，剩下的算失败交给重试。正常时一批（最多 32 个空间、两个模型）几十秒内做完
+const EMBED_BUDGET_MS = 2 * 60_000
+// 向量任务的过期时间，比一批的处理时间长出一截：一批守着时限做完，pg-boss 不会把它当成卡住、
+// 整批算失败再和还没停的那一批同时做
+const EMBED_EXPIRE_SECONDS = 5 * 60
 // 换模型时补了一遍还有缺的（期间新写入的、被锁着跳过的），隔这么久再补一遍
 const SWITCH_AGAIN_SECONDS = 30
 // 换模型补了一遍一条都没补上、或者出了错时不自己再排，由定时任务每十分钟再试一遍：接口恢复了能自己补完，
@@ -83,11 +89,16 @@ export async function startJobs(options: {
   embedder: EmbedderSource
   // 解密实例设置里抽取模型的 Key
   masterKey: MasterKey | null
+  // 写入之后的向量任务一批最多处理多久，不设时 EMBED_BUDGET_MS；测试里调小
+  embedBudgetMs?: number
 }): Promise<Jobs & { stop: () => Promise<void> }> {
   const boss = new PgBoss({ connectionString: options.connectionString, schema: 'pgboss' })
   boss.on('error', (err) => console.error('后台任务出错', err))
   await boss.start()
-  await boss.createQueue(EMBED)
+  // 队列已经存在时建队列不改选项，所以再更新一遍
+  const embedQueue = { expireInSeconds: EMBED_EXPIRE_SECONDS }
+  await boss.createQueue(EMBED, embedQueue)
+  await boss.updateQueue(EMBED, embedQueue)
   await boss.createQueue(BACKFILL, { policy: 'singleton' })
   // singleton：同时只跑一个，排着的可以有几个（定时的、补到一半隔一会儿再排的、管理员重试的），每一遍都可以重复做。
   // 不能用只留一个排队位的策略：先排上的延迟任务会把管理员的重试挤掉
@@ -142,20 +153,27 @@ export async function startJobs(options: {
   }
 
   // 写入之后的向量：一次取一批，同一个空间的合起来请求嵌入接口；一批取满了说明还有积压，马上接着取，不等轮询间隔。
-  // 逐个任务记成功或失败：失败的只是接口拒绝了的那几条（或者整批出错的那个空间），各自按任务的重试次数再试，
-  // 不连累同一批的别的任务；被锁着跳过的照旧另排一个，过一会儿再试（RETRY_AFTER_SECONDS）
+  // 逐个任务记成功或失败（按下标对回任务）：失败的只是接口拒绝了的那几条、整批出错的那个空间，或者处理时间用完时
+  // 还没生成的，各自按任务的重试次数再试，不连累同一批的别的任务；被锁着跳过的照旧另排一个，过一会儿再试
+  // （RETRY_AFTER_SECONDS）。处理时间之外，pg-boss 给每个任务的中止信号（任务过期、服务停下时断开）也接上
+  const embedBudgetMs = options.embedBudgetMs ?? EMBED_BUDGET_MS
   await boss.work<EmbedTarget>(
     EMBED,
     { batchSize: EMBED_BATCH, burstWhenBatchFull: true, perJobResults: true },
     async (jobs) => {
+      const signal = AbortSignal.any([
+        AbortSignal.timeout(embedBudgetMs),
+        ...jobs.map((job) => job.signal),
+      ])
       const failed = await embedJobs(
         options.db,
         options.embedder,
         jobs.map((job) => job.data),
         retry,
+        signal,
       )
-      return jobs.map((job): JobResult => {
-        const error = failed.get(job.data)
+      return jobs.map((job, index): JobResult => {
+        const error = failed.get(index)
         return error
           ? { id: job.id, status: 'failed', output: error }
           : { id: job.id, status: 'completed' }

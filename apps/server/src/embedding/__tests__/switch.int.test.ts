@@ -54,8 +54,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     memoryId: string,
     retry: Retry,
   ) => {
-    const target = { spaceId, memoryId }
-    const error = (await embedJobs(db, from, [target], retry)).get(target)
+    const error = (await embedJobs(db, from, [{ spaceId, memoryId }], retry)).get(0)
     if (error) throw error
   }
 

@@ -19,7 +19,7 @@ import {
   spaceMembers,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { embedMemory } from '../../embedding/worker'
+import { embedMemories } from '../../embedding/worker'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
@@ -270,7 +270,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
         return inner.embed(texts)
       },
     }
-    await embedMemory(database.db, racing, ws.spaceId, id)
+    await embedMemories(database.db, racing, ws.spaceId, [id])
     const rows = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select().from(memoryEmbeddings),
     )
@@ -635,7 +635,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
     const res = await create(key, { uri: 'home://router', content: '管理密码 hunter2' })
     const id = ((await res.json()) as { id: string }).id
-    await embedMemory(database.db, fakeEmbedder(), ws.spaceId, id)
+    await embedMemories(database.db, fakeEmbedder(), ws.spaceId, [id])
     expect(
       await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings)),
     ).toHaveLength(1)
