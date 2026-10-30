@@ -149,7 +149,10 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       settingsInput({ endpoint: 'https://s3.example.com', secretAccessKey: undefined }),
     )
     expect(moved.status).toBe(400)
-    expect(await moved.text()).toContain('接口主机变了')
+    // Secret 不能清除，只说重新填写
+    expect(await moved.json()).toEqual({
+      error: '接口主机变了，已保存的 Secret Access Key 不会发给新的主机：请重新填写',
+    })
 
     expect((await send('PUT', '', settingsInput({ prefix: '/kioku/' }))).status).toBe(400)
     // 接口地址带查询串或片段：拼出的对象地址会错，不让保存
