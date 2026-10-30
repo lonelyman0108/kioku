@@ -1142,7 +1142,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(await memoryIds()).not.toContain(old)
   })
 
-  it('已删除的列表带上保留天数；暂停到什么时候只给实例管理员，和实例设置里的是同一个', async () => {
+  it('已删除的列表带上保留天数与是否在暂停；暂停到什么时候只给实例管理员，和实例设置里的是同一个', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     const retention = async (cookie: string) =>
       (await ok<DeletedMemoryList>(await send('GET', '/memories/deleted', undefined, cookie)))
@@ -1150,29 +1150,42 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     // 实例管理员在列表上看到的天数与暂停，和实例设置里的保留期一样
     const asAdmin = async () => {
       const [list, settings] = await Promise.all([retention(ws.cookie), view()])
-      expect(list).toEqual({ days: settings.days, pausedUntil: settings.pause?.until ?? null })
+      expect(list).toEqual({
+        days: settings.days,
+        paused: settings.pause !== null,
+        pausedUntil: settings.pause?.until ?? null,
+      })
       return list
     }
 
     // 保留期还没生效过：和实例设置一样没有暂停，不另外算一段从现在起的
-    expect(await asAdmin()).toEqual({ days: 30, pausedUntil: null })
-    expect(await retention(editor.cookie)).toEqual({ days: 30, pausedUntil: null })
+    expect(await asAdmin()).toEqual({ days: 30, paused: false, pausedUntil: null })
+    expect(await retention(editor.cookie)).toEqual({ days: 30, paused: false, pausedUntil: null })
 
-    // 从备份恢复：实例管理员看到暂停到恢复的时间加天数，调天数时跟着变；别的成员只有天数，
-    // 减去天数就是恢复的时间，不给他们看
+    // 从备份恢复：实例管理员看到暂停到恢复的时间加天数，调天数时跟着变；别的成员只知道在暂停，
+    // 不知道到什么时候（减去天数就是恢复的时间）
     const restoredAt = ago(3)
     await database.db.transaction((tx) => markRestored(tx, restoredAt))
-    expect(await asAdmin()).toEqual({ days: 30, pausedUntil: after(restoredAt, 30).toISOString() })
-    expect(await retention(editor.cookie)).toEqual({ days: 30, pausedUntil: null })
+    expect(await asAdmin()).toEqual({
+      days: 30,
+      paused: true,
+      pausedUntil: after(restoredAt, 30).toISOString(),
+    })
+    expect(await retention(editor.cookie)).toEqual({ days: 30, paused: true, pausedUntil: null })
     await ok(await put({ days: 60 }))
-    expect(await asAdmin()).toEqual({ days: 60, pausedUntil: after(restoredAt, 60).toISOString() })
-    expect(await retention(editor.cookie)).toEqual({ days: 60, pausedUntil: null })
+    expect(await asAdmin()).toEqual({
+      days: 60,
+      paused: true,
+      pausedUntil: after(restoredAt, 60).toISOString(),
+    })
+    expect(await retention(editor.cookie)).toEqual({ days: 60, paused: true, pausedUntil: null })
 
     // 提前开始、暂停自然结束之后都没有暂停
     await endPause(database.db)
-    expect(await asAdmin()).toEqual({ days: 60, pausedUntil: null })
+    expect(await asAdmin()).toEqual({ days: 60, paused: false, pausedUntil: null })
+    expect(await retention(editor.cookie)).toEqual({ days: 60, paused: false, pausedUntil: null })
     await database.db.transaction((tx) => markRestored(tx, ago(70)))
-    expect(await asAdmin()).toEqual({ days: 60, pausedUntil: null })
+    expect(await asAdmin()).toEqual({ days: 60, paused: false, pausedUntil: null })
   })
 
   it('保留天数只有实例管理员能看、能改；第一次保存时保留期从现在起生效、先暂停，提前开始之后按新的天数删', async () => {

@@ -202,11 +202,13 @@ export const DeletedMemory = z.object({
 export type DeletedMemory = z.infer<typeof DeletedMemory>
 
 // 已删除的记忆过了保留期由每天一次的清理永久删除，之后只能从备份找回。days 是保留天数，所有成员都有；
-// pausedUntil 是从备份恢复或保留期第一次生效之后，按天数的清理暂停到什么时候（在这之前一条都不删），
-// 和实例设置里的保留期一样只给实例管理员（减去天数就是恢复的时间），别人与没有暂停时为 null。
-// 一条已删除的记忆最早在「删除时间加保留天数」与暂停结束的时间里晚的那个之后清除；看不到暂停的按前者算，只会偏早
+// paused 是按天数的清理正暂停着（从备份恢复或保留期第一次生效之后，这期间一条都不删），所有成员都有，不带时间；
+// pausedUntil 是暂停到什么时候，和实例设置里的保留期一样只给实例管理员（减去天数就是恢复的时间），
+// 别人与没有暂停时为 null。一条已删除的记忆最早在「删除时间加保留天数」与暂停结束的时间里晚的那个之后清除；
+// 暂停中又不知道到什么时候的，只能说至少还要多久
 export const DeletionRetention = z.object({
   days: z.number().int(),
+  paused: z.boolean(),
   pausedUntil: z.string().nullable(),
 })
 export type DeletionRetention = z.infer<typeof DeletionRetention>

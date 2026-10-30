@@ -11,7 +11,7 @@ import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
-import { daysUntilPurge, deletionNotice, purgeAt, purgeNote } from '../retention'
+import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime, isExpired } from '../time'
 
 const props = defineProps<{ spaceId: string }>()
@@ -34,10 +34,15 @@ const deleted = useInfiniteQuery({
 const items = computed(() => deleted.data.value?.pages.flatMap((page) => page.items) ?? [])
 // 保留期是整个实例的设置，每一页都带着，用第一页的
 const retention = computed(() => deleted.data.value?.pages[0]?.retention ?? null)
-// 还剩这么几天就要永久清除的标出来
-const SOON_DAYS = 3
-// 还剩几天、警示色与「已过期」都按它算：页面一直开着也每分钟跟着变
+// 还剩几天、警示色与「已过期」都按它算：页面一直开着也每分钟跟着变，切到别的视图时停下
 const now = useNow()
+// 每一条后面的说法与要不要标警示色
+const notes = computed(() => {
+  const r = retention.value
+  return new Map(
+    r ? items.value.map((item) => [item.id, purgeNote(item.deletedAt, r, now.value)]) : [],
+  )
+})
 
 const restoring = ref<string | null>(null)
 async function undelete(item: DeletedMemory) {
@@ -132,15 +137,13 @@ async function undelete(item: DeletedMemory) {
               <time :datetime="item.deletedAt" :title="formatTime(item.deletedAt)">
                 {{ formatRelative(item.deletedAt, now) }}
               </time>
-              <template v-if="retention">
+              <template v-if="retention && notes.get(item.id)">
                 ·
                 <span
-                  :class="{
-                    'text-warning': daysUntilPurge(item.deletedAt, retention, now) <= SOON_DAYS,
-                  }"
+                  :class="{ 'text-warning': notes.get(item.id)!.soon }"
                   :title="`最早在 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 之后清除`"
                 >
-                  {{ purgeNote(item.deletedAt, retention, now) }}
+                  {{ notes.get(item.id)!.text }}
                 </span>
               </template>
             </span>

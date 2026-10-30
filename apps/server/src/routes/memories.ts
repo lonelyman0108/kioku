@@ -28,7 +28,7 @@ import type { Context } from 'hono'
 import { isInstanceAdmin, requireKey } from '../auth/middleware'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { deletionRetention } from '../jobs/retention'
+import { deletionRetention, retentionView } from '../jobs/retention'
 import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
 import type { MemoryService } from '../memory/service'
 
@@ -267,13 +267,13 @@ function consoleOnlyRoutes(deps: Deps) {
     })
     .openapi(deleted, async (c) => {
       const { service } = await consoleMember(deps, c)
-      // 保留期是整个实例的设置：列表按成员读得到的算，保留天数对谁都一样，暂停只给实例管理员
-      const admin = await isInstanceAdmin(deps.db, c.get('console').accountId)
-      const [page, retention] = await Promise.all([
+      // 保留期是整个实例的设置：列表按成员读得到的算，保留天数与是否暂停对谁都一样，暂停到什么时候只给实例管理员
+      const [page, admin, view] = await Promise.all([
         service.deleted(c.req.valid('query')),
-        deletionRetention(deps.db, admin),
+        isInstanceAdmin(deps.db, c.get('console').accountId),
+        retentionView(deps.db),
       ])
-      return c.json({ ...page, retention }, 200)
+      return c.json({ ...page, retention: deletionRetention(view, admin) }, 200)
     })
     .openapi(restore, async (c) => {
       const { service } = await consoleMember(deps, c)

@@ -97,38 +97,62 @@ describe('已删除的记忆什么时候永久清除', () => {
   const now = new Date('2026-10-30T12:00:00Z')
   const ago = (days: number) => new Date(now.getTime() - days * DAY).toISOString()
   const later = (days: number) => new Date(now.getTime() + days * DAY).toISOString()
-  const normal = { days: 30, pausedUntil: null }
+  const normal = { days: 30, paused: false, pausedUntil: null }
+  // 实例管理员看得到暂停到什么时候
+  const pausedUntil = (iso: string) => ({ days: 30, paused: true, pausedUntil: iso })
+  // 别的成员只知道在暂停
+  const pausedOnly = { days: 30, paused: true, pausedUntil: null }
 
   it('删除时间加上保留天数；刚删的还剩整整一个保留期', () => {
     expect(purgeAt(ago(10), normal).toISOString()).toBe(later(20))
     expect(daysUntilPurge(ago(10), normal, now)).toBe(20)
     expect(daysUntilPurge(now.toISOString(), normal, now)).toBe(30)
-    expect(purgeNote(ago(10), normal, now)).toBe('约 20 天后永久清除')
+    expect(purgeNote(ago(10), normal, now)).toEqual({ text: '约 20 天后永久清除', soon: false })
   })
 
-  it('不足一天按一天算；到了时间、等着每天一次的清理时说即将清除', () => {
+  it('不足一天按一天算，剩三天以内标警示色；到了时间、等着每天一次的清理时说即将清除', () => {
     expect(daysUntilPurge(ago(29.8), normal, now)).toBe(1)
     expect(daysUntilPurge(ago(25.5), normal, now)).toBe(5)
     expect(daysUntilPurge(ago(30), normal, now)).toBe(0)
     expect(daysUntilPurge(ago(45), normal, now)).toBe(0)
-    expect(purgeNote(ago(45), normal, now)).toBe('即将永久清除')
+    expect(purgeNote(ago(26.5), normal, now)).toEqual({ text: '约 4 天后永久清除', soon: false })
+    expect(purgeNote(ago(27.5), normal, now)).toEqual({ text: '约 3 天后永久清除', soon: true })
+    expect(purgeNote(ago(45), normal, now)).toEqual({ text: '即将永久清除', soon: true })
   })
 
-  it('暂停期间按暂停结束的时间算：早就到期的也要等暂停结束，暂停之后才到期的照常按删除时间算', () => {
-    const paused = { days: 30, pausedUntil: later(12) }
+  it('知道暂停到什么时候的按暂停结束算：早就到期的也要等暂停结束，暂停之后才到期的照常按删除时间算', () => {
+    const paused = pausedUntil(later(12))
     expect(purgeAt(ago(400), paused).toISOString()).toBe(later(12))
     expect(daysUntilPurge(ago(400), paused, now)).toBe(12)
-    expect(purgeNote(ago(40), paused, now)).toBe('约 12 天后永久清除')
+    expect(purgeNote(ago(40), paused, now)).toEqual({ text: '约 12 天后永久清除', soon: false })
     expect(daysUntilPurge(ago(5), paused, now)).toBe(25)
     // 暂停已经过去（列表还没重新读到）时不再推迟
-    expect(daysUntilPurge(ago(45), { days: 30, pausedUntil: ago(1) }, now)).toBe(0)
+    expect(daysUntilPurge(ago(45), pausedUntil(ago(1)), now)).toBe(0)
   })
 
-  it('列表上方说明多少天之后永久清除，暂停中的还说到什么时候之前一条都不删', () => {
-    expect(deletionNotice({ days: 7, pausedUntil: null })).toBe(
+  it('只知道在暂停时不催：到期的说暂停结束后才清除，没到期的说至少还要多久，都不标警示色', () => {
+    expect(purgeNote(ago(45), pausedOnly, now)).toEqual({
+      text: '暂停结束后才会清除',
+      soon: false,
+    })
+    expect(purgeNote(ago(28), pausedOnly, now)).toEqual({
+      text: '至少 2 天后永久清除',
+      soon: false,
+    })
+    expect(purgeNote(ago(10), pausedOnly, now)).toEqual({
+      text: '至少 20 天后永久清除',
+      soon: false,
+    })
+  })
+
+  it('列表上方说明多少天之后永久清除；暂停中的说暂时不会清除，知道到什么时候的再说出时间', () => {
+    expect(deletionNotice({ days: 7, paused: false, pausedUntil: null })).toBe(
       '删除超过 7 天会被永久清除，之后只能从备份找回。',
     )
-    const paused = deletionNotice({ days: 30, pausedUntil: later(12) })
+    expect(deletionNotice(pausedOnly)).toBe(
+      '删除超过 30 天会被永久清除，之后只能从备份找回。清理暂停中，暂时不会永久清除。',
+    )
+    const paused = deletionNotice(pausedUntil(later(12)))
     expect(paused).toMatch(/^删除超过 30 天会被永久清除，之后只能从备份找回。清理暂停到 .+/)
     expect(paused).toContain('这之前一条都不会清除')
   })
