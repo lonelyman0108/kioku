@@ -2262,6 +2262,74 @@ describe('存成场景', () => {
   })
 })
 
+describe('真实模式下可能写过库', () => {
+  const readCall = toolCall('r', 'kioku_get', { uri: 'core://a' })
+  const writeCall = toolCall('w', 'kioku_create', { uri: 'core://a', content: '甲' })
+
+  it('一开始没有', () => {
+    expect(emptyConversation().mayHaveWritten).toBe(false)
+  })
+
+  it('写工具：算，留到下一条消息', async () => {
+    const h = harness({
+      mode: 'real',
+      loop: 'tools',
+      turns: [reply(null, [writeCall]), reply('好'), reply('好')],
+    })
+    const first = await h.send(USER_TEXT)
+    expect(first.mayHaveWritten).toBe(true)
+    expect((await h.send('第二条', first)).mayHaveWritten).toBe(true)
+  })
+
+  it('只读工具、不带上下文的生命周期事件：不算', async () => {
+    const h = harness({ mode: 'real', turns: [reply(null, [readCall]), reply('好')] })
+    expect((await h.send(USER_TEXT)).mayHaveWritten).toBe(false)
+  })
+
+  it('带聊天上下文的生命周期事件：第一次见到的账号会新建对象，算', async () => {
+    const h = harness({ mode: 'real', context: GROUP, turns: [reply('好')] })
+    expect((await h.send(USER_TEXT)).mayHaveWritten).toBe(true)
+  })
+
+  it('turn.end：算', async () => {
+    const h = harness({ mode: 'real', loop: 'chat', context: GROUP, turns: [reply('好')] })
+    expect((await h.send(USER_TEXT)).mayHaveWritten).toBe(true)
+  })
+
+  it.each([
+    ['请求失败', { kind: 'failed', message: '服务内部错误。可能已经执行了一部分' }],
+    ['中途作废', { kind: 'stale' }],
+  ] as [string, RunOutcome][])('%s：发出去了就算，可能已经写了一部分', async (_name, outcome) => {
+    const h = harness({
+      mode: 'real',
+      loop: 'tools',
+      turns: [reply(null, [writeCall])],
+      run: () => outcome,
+    })
+    expect((await h.send(USER_TEXT)).mayHaveWritten).toBe(true)
+  })
+
+  it('没有发出去的不算：解析失败、停止', async () => {
+    const parsed = harness({
+      mode: 'real',
+      loop: 'tools',
+      turns: [
+        reply(null, [toolCall('w', 'kioku_create', null, '工具参数不是合法的 JSON')]),
+        reply('好'),
+      ],
+    })
+    expect((await parsed.send(USER_TEXT)).mayHaveWritten).toBe(false)
+    const stopped = harness({ mode: 'real', loop: 'tools', turns: [reply('不该到这里')] })
+    stopped.controller.abort()
+    expect((await stopped.send(USER_TEXT)).mayHaveWritten).toBe(false)
+  })
+
+  it('回滚模式：什么都不算，写了也都回滚', async () => {
+    const h = harness({ context: GROUP, turns: [reply(null, [writeCall]), reply('好')] })
+    expect((await h.send(USER_TEXT)).mayHaveWritten).toBe(false)
+  })
+})
+
 describe('校验函数本身', () => {
   const assistant = (...ids: string[]): BenchAgentMessage => ({
     role: 'assistant',

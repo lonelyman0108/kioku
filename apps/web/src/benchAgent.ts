@@ -2,6 +2,7 @@ import {
   BENCH_MAX_REQUEST_BYTES,
   BENCH_MAX_STEPS,
   BenchStep,
+  mayWrite,
   TurnEndEvent,
   type BenchAgentLoop,
   type BenchAgentMessage,
@@ -230,6 +231,8 @@ export interface AgentConversation {
   usage: AgentUsage
   // 点过一下、同意了什么。主机、模型名、循环变了要再问，换一段对话也要再问
   consented: AgentConsent | null
+  // 真实模式下发过可能写库的运行：清空时要先确认，轨迹上的运行标记是活动里对应这些写入的线索
+  mayHaveWritten: boolean
   nextId: number
 }
 
@@ -241,6 +244,7 @@ export const emptyConversation = (): AgentConversation => ({
   exchanges: [],
   usage: { promptTokens: 0, completionTokens: 0, ms: 0, rounds: 0 },
   consented: null,
+  mayHaveWritten: false,
   nextId: 1,
 })
 
@@ -506,6 +510,8 @@ export async function sendAgentMessage(
 
   // 发一次运行，带上这次对话的重放，结果记进重放日志
   const runSteps = async (steps: BenchStep[], label: string) => {
+    // 发出去就算：请求失败时也可能已经写了一部分
+    if (mode === 'real' && steps.some(mayWrite)) update({ mayHaveWritten: true })
     const outcome = await io.run(steps, replayFor(state.session, mode), label)
     if (outcome.kind !== 'done') return outcome
     const session = recordRun(state.session, outcome.result)

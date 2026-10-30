@@ -127,7 +127,7 @@ const divergedActions = computed(() => [
     color: 'error' as const,
     variant: 'subtle' as const,
     disabled: running.value,
-    onClick: clear,
+    onClick: requestClear,
   },
 ])
 const usage = computed(() => usageSummary(agent.value.usage))
@@ -196,15 +196,23 @@ function startExport() {
   else saveScenario(scenario, made.dropped)
 }
 
+const confirmingClear = ref(false)
 function clear() {
   if (running.value) return
+  confirmingClear.value = false
   clearAgent()
   exportNote.value = null
+}
+// 真实模式下对话里有过可能写库的运行时先确认：运行标记是活动里对应这些写入的唯一线索，清掉就没了。回滚模式什么都没留下
+function requestClear() {
+  if (agent.value.mayHaveWritten) confirmingClear.value = true
+  else clear()
 }
 // 换了应用、Key 或模式时对话已经清掉了（useBench），这里的提示也不算数了。输入框里没发的留着
 watch(generation, () => {
   exporting.value = null
   exportNote.value = null
+  confirmingClear.value = false
 })
 </script>
 
@@ -352,7 +360,7 @@ watch(generation, () => {
           color="neutral"
           variant="subtle"
           :disabled="running || !agent.exchanges.length"
-          @click="clear"
+          @click="requestClear"
         >
           清空对话
         </UButton>
@@ -360,6 +368,24 @@ watch(generation, () => {
       <p v-if="agent.usage.rounds" class="text-xs text-muted">{{ usage }}</p>
       <p class="text-xs text-muted">{{ replayUsage }}</p>
     </div>
+
+    <UModal
+      :open="confirmingClear"
+      title="清空这段对话？"
+      @update:open="(v) => !v && (confirmingClear = false)"
+    >
+      <template #body>
+        <p class="text-sm">
+          这段对话在真实模式下可能已经写库，已经写下的不会撤回。清空之后工具结果和运行标记都看不到了：运行标记是活动里对应这些写入的唯一线索，要留的话先记下来。
+        </p>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton color="neutral" variant="ghost" @click="confirmingClear = false">取消</UButton>
+          <UButton color="error" @click="clear">清空</UButton>
+        </div>
+      </template>
+    </UModal>
 
     <UModal
       :open="exporting !== null"

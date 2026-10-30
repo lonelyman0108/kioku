@@ -1129,12 +1129,32 @@ describe('模型对话的页面', () => {
 
   it('清空：运行期间不能，连提示一起清掉', () => {
     const button = buttonOf(view.elements, '清空对话')
-    expect(handler(button, 'click')).toBe('clear')
+    expect(handler(button, 'click')).toBe('requestClear')
     expect(bound(button, 'disabled')).toBe('running || !agent.exchanges.length')
     const clear = bodyOf(view.script, 'clear')
     expect(clear).toContain('if (running.value) return')
     expect(clear).toContain('clearAgent()')
     expect(bodyOf(useBench, 'clearAgent')).toContain('agent.value = emptyConversation()')
+  })
+
+  it('真实模式下可能写过库时清空先确认，说清楚运行标记也没了；回滚模式不问', () => {
+    const request = bodyOf(view.script, 'requestClear')
+    expect(request).toContain('if (agent.value.mayHaveWritten) confirmingClear.value = true')
+    expect(request).toContain('else clear()')
+    const modal = must(
+      view.elements.find((el) => el.tag === 'UModal' && bound(el, 'open') === 'confirmingClear'),
+      '清空的确认框',
+    )
+    expect(textOf(modal)).toContain('可能已经写库')
+    expect(textOf(modal)).toContain('运行标记')
+    expect(textOf(modal)).toContain('不会撤回')
+    const nodes = walk(modal)
+    expect(handler(buttonOf(nodes, '清空'), 'click')).toBe('clear')
+    expect(handler(buttonOf(nodes, '取消'), 'click')).toBe('confirmingClear = false')
+    // 分叉提示里的清空走同一条路
+    expect(blockOf(view.script, 'const divergedActions = ')).toContain('onClick: requestClear')
+    // 换了应用、Key 或模式时对话已经清掉了，确认框不留着
+    expect(blockOf(view.script, 'watch(generation, ')).toContain('confirmingClear.value = false')
   })
 
   it('存成场景：先检测明文，有就问，确认了才保存', () => {
@@ -1187,7 +1207,7 @@ describe('模型对话的页面', () => {
     expect(bound(alert, 'actions')).toBe('divergedActions')
     const actions = blockOf(view.script, 'const divergedActions = ')
     expect(actions).toContain('onClick: acceptAgentDiverged')
-    expect(actions).toContain('onClick: clear')
+    expect(actions).toContain('onClick: requestClear')
     // 运行期间不能动：第几步是按发出请求时的日志算的
     expect(actions.match(/disabled: running\.value/g)).toHaveLength(2)
     expect(blockOf(view.script, 'const canSend = ')).toContain(
