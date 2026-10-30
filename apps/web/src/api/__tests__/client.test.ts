@@ -73,6 +73,7 @@ describe('API 客户端', () => {
       available: false,
       reason: 'noModel',
       defaultModel: null,
+      endpoint: null,
       loop: 'hook',
       tools: true,
     }
