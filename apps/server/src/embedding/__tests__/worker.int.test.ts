@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import type { EmbeddingSettingsView } from '@kioku/contracts'
-import { sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -11,6 +11,7 @@ import { startJobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { embeddingCoverage } from '../coverage'
 import { staticEmbedderSource } from '../source'
 import { backfillEmbeddings, embedMemory } from '../worker'
 
@@ -93,6 +94,33 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     await app.request('/v1/memories?uri=core%3A%2F%2Fx', { method: 'DELETE', headers: bearer(key) })
     await embedMemory(database.db, embedder, ws.spaceId, id)
     expect(await embeddings()).toHaveLength(0)
+  })
+
+  it('过期的记忆不生成向量，过期之前生成的在下次处理时删掉，补齐的范围与覆盖率的口径一致；重新生效之后再生成', async () => {
+    const embedder = fakeEmbedder()
+    const id = await create({ uri: 'core://soon', content: '很快过期', layer: 'base' })
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+    const validTo = (at: Date | null) =>
+      withSpace(database.db, ws.spaceId, (tx) =>
+        tx.update(memories).set({ validTo: at }).where(eq(memories.id, id)),
+      )
+    const coverage = async () => {
+      const { eligible, embedded } = await embeddingCoverage(database.db, [embedder.model])
+      return { eligible, embedded: embedded.get(embedder.model) }
+    }
+    expect(await coverage()).toEqual({ eligible: 1, embedded: 1 })
+
+    await validTo(new Date(Date.now() - 60_000))
+    expect(await coverage()).toEqual({ eligible: 0, embedded: 0 })
+    // 补齐时不为它请求接口，留下的向量删掉
+    expect(await backfillEmbeddings(database.db, embedder)).toBe(0)
+    expect(embedder.calls).toHaveLength(1)
+    expect(await embeddings()).toHaveLength(0)
+
+    await validTo(null)
+    expect(await coverage()).toEqual({ eligible: 1, embedded: 0 })
+    expect(await embedMemory(database.db, embedder, ws.spaceId, id)).toBe(1)
+    expect(await coverage()).toEqual({ eligible: 1, embedded: 1 })
   })
 
   it('全量补齐覆盖所有记忆；换模型后旧向量被替换', async () => {

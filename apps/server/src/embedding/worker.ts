@@ -3,6 +3,7 @@ import { and, asc, eq, gt, inArray, isNull, notInArray, sql } from 'drizzle-orm'
 import { withSpace, type Db, type Tx } from '../db/client'
 import { memories, memoryEmbeddings, memoryGlossary, spaces } from '../db/schema'
 import { formatUri } from '../memory/uri'
+import { EMBEDDABLE } from './coverage'
 import type { Embedder } from './provider'
 import { lockEmbeddingModels } from './settings'
 import { embeddingText, textHash } from './text'
@@ -60,7 +61,8 @@ async function embedBatch(
   return vectors
 }
 
-// 为一批记忆生成或刷新这个模型的向量；已删除、secret、没有正文的记忆删掉向量。嵌入文本没变就跳过。
+// 为一批记忆生成或刷新这个模型的向量；不该有向量的（EMBEDDABLE 之外的：已删除、过期、secret、没有正文）
+// 删掉向量。嵌入文本没变就跳过。
 // 分三步：短事务读出要处理的内容 → 事务外请求嵌入接口 → 短事务写回。
 // 请求外部接口时不占着数据库连接和事务；写回前锁住这些行并核对 xmin，期间被改过的不写回，
 // 交给那次修改触发的任务处理，避免旧内容的向量覆盖新状态（例如刚改成 secret 的记忆又被写上明文向量）。
@@ -76,7 +78,7 @@ async function syncRows(
 
   const { stale, pending, readAt } = await withSpace(db, spaceId, async (tx) => {
     const rows = await tx
-      .select({ row: memories, stamp })
+      .select({ row: memories, stamp, embeddable: sql<boolean>`coalesce(${EMBEDDABLE}, false)` })
       .from(memories)
       .where(inArray(memories.id, ids))
     const glossaryRows = await tx
@@ -92,14 +94,9 @@ async function syncRows(
     const hashes = new Map(existing.map((e) => [e.memoryId, e.contentHash]))
     const stale: string[] = []
     const pending: { id: string; text: string; hash: string }[] = []
-    for (const { row } of rows) {
-      if (
-        row.deletedAt ||
-        row.sensitivity === 'secret' ||
-        !row.content ||
-        !row.domain ||
-        !row.path
-      ) {
+    for (const { row, embeddable } of rows) {
+      // 正文与 URI 在 EMBEDDABLE 里已经保证有，这里再判断一次只是让类型收窄
+      if (!embeddable || !row.content || !row.domain || !row.path) {
         // 只有确实有向量的才需要删，没有的不必为它锁行
         if (hashes.has(row.id)) stale.push(row.id)
         continue

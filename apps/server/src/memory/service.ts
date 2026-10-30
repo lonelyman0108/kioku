@@ -110,11 +110,13 @@ import {
 } from '../db/schema'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
+import { countEmbeddable } from '../embedding/coverage'
 import {
   BOOT_ELIGIBLE,
   pendingReview,
   readableConditions,
   snapshotColumns,
+  STILL_VALID,
   type MemoryColumns,
 } from './filter'
 import { personaIdsBySlug, runInSpace } from './personas'
@@ -1836,7 +1838,7 @@ export class MemoryService {
     })
   }
 
-  // 概览统计。向量覆盖率只算应当有向量的记忆：读得到、不是 secret、有正文；
+  // 概览统计。向量覆盖率只算应当有向量的记忆（EMBEDDABLE：现在有效、不是 secret、有正文）里成员读得到的；
   // model 为 null（还没配置嵌入模型）时已有向量记为 0
   async stats(model: string | null, recall: RecallWindow): Promise<MemoryStats> {
     return this.run(async (tx, personaIds) => {
@@ -1856,29 +1858,20 @@ export class MemoryService {
         .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
         .groupBy(memories.layer, memories.sensitivity)
         .orderBy(asc(memories.layer), asc(memories.sensitivity))
-      // 每条记忆在一个模型下至多一条向量（主键），左连接计数不会重复；没配置模型时一条也连不上
-      const [coverage] = await tx
-        .select({ eligible: count(), embedded: count(memoryEmbeddings.memoryId) })
-        .from(memories)
-        .leftJoin(
-          memoryEmbeddings,
-          and(eq(memoryEmbeddings.memoryId, memories.id), eq(memoryEmbeddings.model, model ?? '')),
-        )
-        .where(
-          and(
-            readableConditions(this.ctx.access, { personaIds }),
-            eq(memories.form, 'curated'),
-            HAS_CONTENT,
-          ),
-        )
+      // 和实例设置的向量卡片同一个口径（EMBEDDABLE），只数成员读得到的；没配置模型时没有已生成的
+      const coverage = await countEmbeddable(
+        tx,
+        model ? [model] : [],
+        readableConditions(this.ctx.access, { personaIds }),
+      )
       return {
         counts: groups.map(({ layer, sensitivity, count }) => ({ layer, sensitivity, count })),
         total: groups.reduce((sum, g) => sum + g.count, 0),
         missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
         plaintextCredentials: groups.reduce((sum, g) => sum + g.plaintext, 0),
         neverRecalled: never?.n ?? 0,
-        eligible: coverage?.eligible ?? 0,
-        embedded: coverage?.embedded ?? 0,
+        eligible: coverage.eligible,
+        embedded: coverage.embedded[0] ?? 0,
       }
     })
   }
@@ -2505,9 +2498,6 @@ const DELETED_MICROS = microsOf(memories.deletedAt)
 // 事件 id 不超过 JS 能精确表示的整数
 const EVENT_ID = /^\d{1,15}$/
 
-// 还没有失效或过期
-export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
-
 // 事实被推翻了：推翻时设的 valid_to 已经过去；已经到期：expires_at 已经过去。都按数据库的时间（见 lockFact）
 const SUPERSEDED = sql<
   boolean | null
@@ -2659,9 +2649,6 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
   if (before.validTo !== after.validTo) changes.push('validTo')
   return changes
 }
-
-// 有正文：与向量任务的口径一致，空字符串也不生成向量
-const HAS_CONTENT = sql`(${memories.content} is not null and ${memories.content} <> '')`
 
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`

@@ -94,7 +94,7 @@ export type LayerCount = z.infer<typeof LayerCount>
 export const EmbeddingCoverage = z.object({
   configured: z.boolean(),
   model: z.string().nullable(),
-  // 应当有向量的记忆：没删除、不是 secret、有正文的策展记忆
+  // 应当有向量的记忆：现在有效（没删除、没过期）、不是 secret、有正文、成员读得到的策展记忆
   eligible: z.number().int(),
   // 其中已经有当前模型向量的
   embedded: z.number().int(),

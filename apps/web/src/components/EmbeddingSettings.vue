@@ -464,8 +464,8 @@ async function rebuild() {
     <template #header>
       <h2 class="font-medium">向量</h2>
       <p class="mt-1 text-sm text-muted">
-        整个实例里应当有向量的记忆（没删除、不是
-        secret、有正文）有多少已经有现在这个模型的向量。新写入的记忆会自动排队；接口出过错之后，可以手动补齐。
+        整个实例里应当有向量的记忆（现在有效、不是
+        secret、有正文）有多少已经有现在这个模型的向量。过期的不再召回，不生成向量，重新生效之后再生成。新写入的记忆会自动排队；接口出过错之后，可以手动补齐。
       </p>
     </template>
     <UAlert

@@ -1,48 +1,64 @@
-import { and, count, eq, isNull, ne, sql } from 'drizzle-orm'
+import { and, count, eq, isNull, ne, sql, type SQL } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 
-import { withSpace, type Db } from '../db/client'
+import { withSpace, type Db, type Tx } from '../db/client'
 import { memories, memoryEmbeddings, spaces } from '../db/schema'
+import { STILL_VALID } from '../memory/filter'
 
-// 整个实例的向量覆盖率，给实例设置页看补齐进度：应当有向量的记忆，以及其中各模型已经生成了多少。
-// 应当有向量的记忆与后台任务的口径一致：没删除、不是 secret、有正文（空字符串不算）的策展记忆。
-// 逐个空间统计（内容表只能在空间事务里读），每个空间一条查询：换模型时页面会一直刷新进度
+// 应当有向量的记忆：现在有效（没删除、没过期、没被推翻）、不是 secret、有正文（空字符串不算）的策展记忆。
+// 生成向量的后台任务（写入之后、补齐、换模型）只给这些生成，别的有向量就删掉；实例设置的向量卡片、
+// 换模型补没补齐与概览的覆盖率都按它数，几处的口径一致。过期的不再召回、不进 boot，Dream 也不看，
+// 所以不生成；重新生效、撤销删除之后会重新排队生成
+export const EMBEDDABLE = and(
+  eq(memories.form, 'curated'),
+  isNull(memories.deletedAt),
+  STILL_VALID,
+  ne(memories.sensitivity, 'secret'),
+  sql`(${memories.content} is not null and ${memories.content} <> '')`,
+)!
+
+// 一个空间里应当有向量的记忆有多少，以及其中各模型已经生成了多少（与 models 按下标对应）。
+// where 是调用方另加的条件，例如概览只数成员读得到的。内容表只能在空间的事务里读
+export async function countEmbeddable(
+  tx: Tx,
+  models: string[],
+  where?: SQL,
+): Promise<{ eligible: number; embedded: number[] }> {
+  // 每个模型左连接一次：每条记忆在一个模型下至多一条向量（主键），计数不会重复
+  const joined = models.map((model, i) => ({ model, table: alias(memoryEmbeddings, `e${i}`) }))
+  let query = tx
+    .select({
+      total: count(),
+      ...Object.fromEntries(joined.map((j, i) => [`m${i}`, count(j.table.memoryId)])),
+    })
+    .from(memories)
+    .$dynamic()
+  for (const j of joined) {
+    query = query.leftJoin(
+      j.table,
+      and(eq(j.table.memoryId, memories.id), eq(j.table.model, j.model)),
+    )
+  }
+  const [row] = await query.where(and(EMBEDDABLE, where))
+  const counts = row as Record<string, number> | undefined
+  return {
+    eligible: counts?.total ?? 0,
+    embedded: joined.map((_, i) => counts?.[`m${i}`] ?? 0),
+  }
+}
+
+// 整个实例的向量覆盖率，给实例设置页看补齐进度、给换模型判断补没补齐。
+// 逐个空间统计，每个空间一条查询：换模型时页面会一直刷新进度
 export async function embeddingCoverage(
   db: Db,
   models: string[],
 ): Promise<{ eligible: number; embedded: Map<string, number> }> {
   let eligible = 0
   const embedded = new Map(models.map((m) => [m, 0]))
-  const embeddable = and(
-    isNull(memories.deletedAt),
-    ne(memories.sensitivity, 'secret'),
-    eq(memories.form, 'curated'),
-    sql`(${memories.content} is not null and ${memories.content} <> '')`,
-  )
-  // 每个模型左连接一次：每条记忆在一个模型下至多一条向量（主键），计数不会重复
-  const joined = models.map((model, i) => ({ model, table: alias(memoryEmbeddings, `e${i}`) }))
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
-    const [row] = await withSpace(db, spaceId, (tx) => {
-      let query = tx
-        .select({
-          total: count(),
-          ...Object.fromEntries(joined.map((j, i) => [`m${i}`, count(j.table.memoryId)])),
-        })
-        .from(memories)
-        .$dynamic()
-      for (const j of joined) {
-        query = query.leftJoin(
-          j.table,
-          and(eq(j.table.memoryId, memories.id), eq(j.table.model, j.model)),
-        )
-      }
-      return query.where(embeddable)
-    })
-    const counts = row as Record<string, number> | undefined
-    eligible += counts?.total ?? 0
-    joined.forEach((j, i) =>
-      embedded.set(j.model, embedded.get(j.model)! + (counts?.[`m${i}`] ?? 0)),
-    )
+    const counts = await withSpace(db, spaceId, (tx) => countEmbeddable(tx, models))
+    eligible += counts.eligible
+    models.forEach((m, i) => embedded.set(m, embedded.get(m)! + counts.embedded[i]!))
   }
   return { eligible, embedded }
 }
