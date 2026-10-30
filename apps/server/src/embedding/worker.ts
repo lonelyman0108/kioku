@@ -116,13 +116,33 @@ async function syncRows(
     return { stale, pending, readAt: new Map(rows.map((r) => [r.row.id, r.stamp])) }
   })
 
-  const cleanupOtherModels = (keep: string[]) =>
-    and(inArray(memoryEmbeddings.memoryId, ids), notInArray(memoryEmbeddings.model, keep))
-  // 没有要写的也没有要删的，就不必锁行；只剩换模型后的旧向量清理
+  // 别的模型（不再留着的）的向量：只删自己锁到的记忆的。正被别的事务锁着的记忆（例如每小时的清理正删着它们的向量）
+  // 不碰它们的向量行，免得两边在向量行的锁上互相等待；留下的等下一次处理或换模型之后的清理
+  const otherModels = (locked: string[], keep: string[]) =>
+    and(inArray(memoryEmbeddings.memoryId, locked), notInArray(memoryEmbeddings.model, keep))
+  // 没有要写的也没有要删的：只剩换模型后的旧向量清理。只锁真有别的模型的向量的那几条，大多数时候一条都没有
   if (!pending.length && !stale.length) {
-    await withSpace(db, spaceId, async (tx) =>
-      tx.delete(memoryEmbeddings).where(cleanupOtherModels(await keptModels(tx, embedder))),
-    )
+    await withSpace(db, spaceId, async (tx) => {
+      const keep = await keptModels(tx, embedder)
+      const locked = await tx
+        .select({ id: memories.id })
+        .from(memories)
+        .where(
+          and(
+            inArray(memories.id, ids),
+            sql`exists (select 1 from ${memoryEmbeddings} where ${memoryEmbeddings.memoryId} = ${memories.id} and ${notInArray(memoryEmbeddings.model, keep)})`,
+          ),
+        )
+        .for('update', { skipLocked: true })
+      if (locked.length) {
+        await tx.delete(memoryEmbeddings).where(
+          otherModels(
+            locked.map((r) => r.id),
+            keep,
+          ),
+        )
+      }
+    })
     return 0
   }
 
@@ -177,8 +197,8 @@ async function syncRows(
           },
         })
     }
-    // 换过模型后，旧模型的向量不再参与检索，顺手清掉
-    await tx.delete(memoryEmbeddings).where(cleanupOtherModels(keep))
+    // 换过模型后，旧模型的向量不再参与检索，顺手清掉（只清锁到的这些）
+    if (locked.size) await tx.delete(memoryEmbeddings).where(otherModels([...locked], keep))
     return { written: writes.length, skipped }
   })
   if (skipped.length) hooks.onSkipped?.(skipped)
@@ -254,44 +274,32 @@ export async function pruneEmbeddings(db: Db, keep: string[]): Promise<number> {
   return total
 }
 
-// 清理时一批最多看这么多条记忆，每批一个短事务
+// 清理时一批最多删这么多条向量，每批一个短事务
 const DROP_BATCH = 500
 
-// 不该有向量（EMBEDDABLE 之外）却还留着向量的记忆，删掉它们的向量。按时间过期的记忆没有写入，不会触发向量任务，
+// 不该有向量（EMBEDDABLE 之外）却还留着的向量删掉。按时间过期的记忆没有写入，不会触发向量任务，
 // 由每小时的清理来删；删除、改成 secret 时没处理到的也一起清掉。逐个空间分批，每批一个短事务。
-// 先锁住这些记忆、在锁到的那一版上判断：正被别的事务改着的（例如正在重新生效）这次跳过，下一个小时再看，
-// 不会把它刚生成的向量删掉。返回删了几条向量
+// 从向量表出发联记忆表，只看真有向量的记忆。先锁记忆、在锁到的那一版上判断：正被别的事务改着的（例如正在重新生效）
+// 这次跳过，不会把它刚生成的向量删掉；向量行正被别的事务锁着的（例如换模型之后删旧向量）也跳过。
+// 两样都不等锁，所以不会和向量任务互相等待，跳过的下一个小时再看。返回删了几条向量
 export async function dropIneligibleEmbeddings(db: Db): Promise<number> {
   let total = 0
   for (const { id: spaceId } of await db.select({ id: spaces.id }).from(spaces)) {
     for (;;) {
-      const { picked, removed } = await withSpace(db, spaceId, async (tx) => {
-        const rows = await tx
-          .select({ id: memories.id })
-          .from(memories)
-          .where(
-            and(
-              sql`not coalesce(${EMBEDDABLE}, false)`,
-              sql`exists (select 1 from ${memoryEmbeddings} where ${memoryEmbeddings.memoryId} = ${memories.id})`,
-            ),
-          )
-          .orderBy(asc(memories.id))
-          .limit(DROP_BATCH)
-          .for('no key update', { skipLocked: true })
-        if (!rows.length) return { picked: 0, removed: 0 }
-        const gone = await tx
-          .delete(memoryEmbeddings)
-          .where(
-            inArray(
-              memoryEmbeddings.memoryId,
-              rows.map((r) => r.id),
-            ),
-          )
-          .returning({ id: memoryEmbeddings.memoryId })
-        return { picked: rows.length, removed: gone.length }
-      })
-      total += removed
-      if (picked < DROP_BATCH) break
+      const gone = await withSpace(db, spaceId, (tx) =>
+        tx.execute(sql`
+          delete from ${memoryEmbeddings}
+          where (${memoryEmbeddings.memoryId}, ${memoryEmbeddings.model}) in (
+            select ${memoryEmbeddings.memoryId}, ${memoryEmbeddings.model}
+            from ${memoryEmbeddings} join ${memories} on ${memories.id} = ${memoryEmbeddings.memoryId}
+            where not coalesce(${EMBEDDABLE}, false)
+            limit ${DROP_BATCH}
+            for no key update of ${memories} skip locked
+            for update of ${memoryEmbeddings} skip locked
+          ) returning 1`),
+      )
+      total += gone.length
+      if (gone.length < DROP_BATCH) break
     }
   }
   return total

@@ -163,12 +163,37 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
         )
       ).map((r) => r.id)
 
-    // 正被别的事务改着（例如正在重新生效）：这次跳过，不删它刚生成的向量
-    await database.db.transaction(async (tx) => {
-      await tx.execute(sql`select set_config('app.space_id', ${ws.spaceId}, true)`)
-      await tx.execute(sql`select 1 from memories where id = ${lapsed} for update`)
-      expect(await dropIneligibleEmbeddings(database.db)).toBe(0)
-    })
+    // 别的事务锁着这一行时清理跳过它，不等锁：等的话这几秒里做不完
+    const whileLocked = async (lock: string) => {
+      let locked!: () => void
+      let release!: () => void
+      const ready = new Promise<void>((resolve) => (locked = resolve))
+      const held = new Promise<void>((resolve) => (release = resolve))
+      const holder = database.db.transaction(async (tx) => {
+        await tx.execute(sql`select set_config('app.space_id', ${ws.spaceId}, true)`)
+        await tx.execute(sql.raw(lock))
+        locked()
+        await held
+      })
+      await ready
+      const run = dropIneligibleEmbeddings(database.db)
+      try {
+        return await Promise.race([
+          run,
+          new Promise((resolve) => setTimeout(() => resolve('等锁'), 3_000)),
+        ])
+      } finally {
+        release()
+        await holder
+        await Promise.allSettled([run])
+      }
+    }
+    // 记忆正被别的事务改着（例如正在重新生效）：不删它刚生成的向量
+    expect(await whileLocked(`select 1 from memories where id = '${lapsed}' for update`)).toBe(0)
+    // 向量行正被别的事务锁着（例如换模型之后删旧向量）
+    expect(
+      await whileLocked(`select 1 from memory_embeddings where memory_id = '${lapsed}' for update`),
+    ).toBe(0)
     expect(await vectors()).toHaveLength(2)
     expect(await cleanupExpired(database.db)).toMatchObject({ embeddings: 1 })
     expect(await vectors()).toEqual([kept])
