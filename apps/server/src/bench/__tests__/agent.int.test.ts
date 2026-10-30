@@ -183,6 +183,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: false,
         reason: 'notAdmin',
         defaultModel: null,
+        endpoint: null,
         loop: 'hook',
         tools: true,
       }
@@ -272,28 +273,52 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: false,
         reason: 'noModel',
         defaultModel: null,
+        endpoint: null,
         loop: 'hook',
         tools: true,
       })
 
-      await startModel(() => '好')
+      const server = await startModel(() => '好')
       expect(BenchAgentInfo.parse(await (await getInfo()).json())).toEqual({
         available: true,
         reason: null,
         defaultModel: 'fake-model',
+        endpoint: new URL(server.url).host,
         loop: 'hook',
         tools: true,
       })
     })
 
+    it('接口的主机名：不带账号密码与路径，端口留着；地址换了就跟着变', async () => {
+      const save = (baseUrl: string) =>
+        saveExtractionConfig(database.db, masterKey, {
+          baseUrl,
+          model: 'fake-model',
+          apiKey: API_KEY,
+        })
+      const endpoint = async () => BenchAgentInfo.parse(await (await getInfo()).json()).endpoint
+
+      await save('https://user:hunter2@model.example.com:8443/openai/v1?token=abc')
+      const res = await getInfo()
+      const text = await res.clone().text()
+      expect(BenchAgentInfo.parse(await res.json()).endpoint).toBe('model.example.com:8443')
+      for (const leaked of ['user', 'hunter2', 'openai', 'token', 'abc']) {
+        expect(text).not.toContain(leaked)
+      }
+
+      await save('https://other.example.com/v1')
+      expect(await endpoint()).toBe('other.example.com')
+    })
+
     // Key 解不开时查情况如实报不可用：界面才不会放开之后每次请求都是 400
-    const keyLocked = {
+    const keyLocked = (server: FakeChatServer) => ({
       available: false,
       reason: 'keyLocked',
       defaultModel: 'fake-model',
+      endpoint: new URL(server.url).host,
       loop: 'hook',
       tools: true,
-    }
+    })
 
     it('Key 解不开（没配主密钥）：400 并说明，不请求模型；查情况给原因', async () => {
       const server = await startModel(() => '不该请求到这里')
@@ -303,7 +328,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       expect(await errorOf(res)).toContain('KIOKU_MASTER_KEY')
       const info = await getInfo(ws.cookie, benchPath(), noKey)
       expect(info.status).toBe(200)
-      expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked)
+      expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked(server))
       expect(server.requests).toHaveLength(0)
     })
 
@@ -319,7 +344,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
         const info = await getInfo(ws.cookie, benchPath(), otherKey)
         expect(info.status).toBe(200)
-        expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked)
+        expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked(server))
       }
       // 记着主密钥的标识：还没解密就知道对不上
       await expectLocked()
@@ -413,6 +438,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         available: true,
         reason: null,
         defaultModel: 'fake-model',
+        endpoint: new URL(server.url).host,
         loop,
         tools,
       })

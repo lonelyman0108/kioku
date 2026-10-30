@@ -47,6 +47,7 @@ import {
   turnEndRefusal,
   turnFailureMessage,
   usageSummary,
+  type AgentConsent,
   type AgentConversation,
   type AgentIO,
 } from '../benchAgent'
@@ -57,6 +58,7 @@ const USER_TEXT = '记下我喜欢喝茶'
 const SESSION_TEXT = '<启动上下文>'
 const RECALL_TEXT = '<recall>线索</recall>'
 const MODEL = 'fake-model'
+const HOST = 'model.example.com'
 
 const GROUP: SessionContextInput = {
   chatType: 'group',
@@ -1974,44 +1976,79 @@ describe('状态的更新', () => {
     expect(new Set(h.changes).size).toBe(h.changes.length)
   })
 
-  it('history 之外的状态不丢：同意过的模型留着，序号递增', async () => {
+  it('history 之外的状态不丢：同意过的留着，序号递增', async () => {
     const h = harness({ loop: 'tools', turns: [reply('好'), reply('好')] })
-    const start = { ...emptyConversation(), consentedModel: MODEL }
+    const consented = { endpoint: HOST, model: MODEL, loop: 'tools' as const }
+    const start = { ...emptyConversation(), consented }
     const first = await h.send(USER_TEXT, start)
     const second = await h.send(USER_TEXT, first)
-    expect(second.consentedModel).toBe(MODEL)
+    expect(second.consented).toEqual(consented)
     expect(second.exchanges.map((e) => e.id)).toEqual([1, 2])
   })
 })
 
 describe('开始之前的提示', () => {
-  it('没同意过要问；同一个模型不再问；换了模型名再问', () => {
-    const conversation = emptyConversation()
-    expect(consentNeeded(conversation, 'a')).toBe(true)
-    const agreed = { ...conversation, consentedModel: 'a' }
-    expect(consentNeeded(agreed, 'a')).toBe(false)
-    expect(consentNeeded(agreed, 'b')).toBe(true)
+  const target = (over: Partial<AgentConsent> = {}): AgentConsent => ({
+    endpoint: HOST,
+    model: 'm',
+    loop: 'hook',
+    ...over,
+  })
+  const text = (loop: BenchAgentLoop, mode: BenchMode = 'rollback') =>
+    consentText(target({ loop }), mode)
+
+  it('没同意过要问；三样都一样不再问', () => {
+    expect(consentNeeded(emptyConversation(), target())).toBe(true)
+    const agreed = { ...emptyConversation(), consented: target() }
+    expect(consentNeeded(agreed, target())).toBe(false)
     // 新的一段对话要重新问
-    expect(consentNeeded(emptyConversation(), 'a')).toBe(true)
+    expect(consentNeeded(emptyConversation(), target())).toBe(true)
   })
 
-  it('说清楚什么内容发给哪个模型', () => {
-    expect(consentText('hook', 'deep-x', 'rollback')).toContain('启动上下文、召回块与工具结果')
-    expect(consentText('hook', 'deep-x', 'rollback')).toContain('deep-x')
-    expect(consentText('approximate', 'm', 'rollback')).toContain('工具结果')
-    expect(consentText('chat', 'm', 'rollback')).toContain('启动上下文与召回块')
-    expect(consentText('chat', 'm', 'rollback')).not.toContain('工具结果')
-    expect(consentText('tools', 'm', 'rollback')).toContain('工具结果')
-    expect(consentText('tools', 'm', 'rollback')).not.toContain('启动上下文')
+  it.each([
+    ['接口换了：内容发给另一家', { endpoint: 'other.example.com' }],
+    ['接口没有了', { endpoint: null }],
+    ['模型名换了', { model: 'n' }],
+    ['循环换了：从只发工具结果变成也发启动上下文', { loop: 'tools' }],
+    ['循环换了：有工具变成没工具', { loop: 'chat' }],
+  ] as [string, Partial<AgentConsent>][])('%s：再问', (_name, over) => {
+    const agreed = { ...emptyConversation(), consented: target() }
+    expect(consentNeeded(agreed, target(over))).toBe(true)
+  })
+
+  it('反过来也一样：从同意过的循环换到只发工具结果也再问', () => {
+    const agreed = { ...emptyConversation(), consented: target({ loop: 'tools' }) }
+    expect(consentNeeded(agreed, target({ loop: 'hook' }))).toBe(true)
+  })
+
+  it('说清楚发给哪台主机的哪个模型', () => {
+    const shown = consentText(
+      target({ endpoint: 'model.example.com:8443', model: 'deep-x' }),
+      'rollback',
+    )
+    expect(shown).toContain('主机 model.example.com:8443 上的模型「deep-x」')
+    // 服务端没有给主机名时不写半句
+    const none = consentText(target({ endpoint: null, model: 'deep-x' }), 'rollback')
+    expect(none).toContain('模型「deep-x」')
+    expect(none).not.toContain('主机')
+  })
+
+  it('说清楚发什么内容：按循环', () => {
+    expect(text('hook')).toContain('启动上下文、召回块与工具结果')
+    expect(text('approximate')).toContain('启动上下文、召回块与工具结果')
+    expect(text('chat')).toContain('启动上下文与召回块')
+    expect(text('chat')).not.toContain('工具结果')
+    expect(text('tools')).toContain('工具结果')
+    expect(text('tools')).not.toContain('启动上下文')
   })
 
   it('打码：回滚模式都打码；真实模式下外部凭据源照常返回，要说', () => {
-    expect(consentText('hook', 'm', 'rollback')).toContain('打码')
-    expect(consentText('hook', 'm', 'rollback')).not.toContain('外部凭据源')
-    expect(consentText('hook', 'm', 'real')).toContain('外部凭据源')
-    expect(consentText('tools', 'm', 'real')).toContain('外部凭据源')
+    expect(text('hook')).toContain('打码')
+    expect(text('hook')).not.toContain('外部凭据源')
+    expect(text('hook', 'real')).toContain('外部凭据源')
+    expect(text('tools', 'real')).toContain('外部凭据源')
     // 不给工具，取不到凭据
-    expect(consentText('chat', 'm', 'real')).not.toContain('外部凭据源')
+    expect(text('chat', 'real')).not.toContain('外部凭据源')
   })
 })
 

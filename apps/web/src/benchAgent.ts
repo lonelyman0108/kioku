@@ -77,9 +77,17 @@ export const AGENT_UNAVAILABLE_NOTES: Record<
   },
 }
 
-// 开始之前的提示：哪些内容会发给哪个模型。发出去的是操作者自己这把 Key 读得到的内容，打码同样生效；
+// 开始之前同意的是什么：内容发给哪台主机的哪个模型，发什么内容（看循环）。任何一个变了，内容的去向或范围就变了，要再问
+export interface AgentConsent {
+  // 接口的主机名；服务端没有给时是 null
+  endpoint: string | null
+  model: string
+  loop: BenchAgentLoop
+}
+
+// 开始之前的提示：哪些内容会发给哪台主机的哪个模型。发出去的是操作者自己这把 Key 读得到的内容，打码同样生效；
 // 外部凭据源只有回滚模式打码，真实模式照常返回（设计里的规则），所以要说
-export function consentText(loop: BenchAgentLoop, model: string, mode: BenchMode): string {
+export function consentText({ endpoint, model, loop }: AgentConsent, mode: BenchMode): string {
   const what: Record<BenchAgentLoop, string> = {
     hook: '启动上下文、召回块与工具结果',
     approximate: '启动上下文、召回块与工具结果',
@@ -90,7 +98,8 @@ export function consentText(loop: BenchAgentLoop, model: string, mode: BenchMode
     mode === 'real' && loop !== 'chat'
       ? 'secret 的正文与托管凭据的值都打码；真实模式下外部凭据源的条目位置与取法照常返回，也会发过去。'
       : 'secret 的正文与凭据的值都打码。'
-  return `${what[loop]}会发给模型「${model}」（实例设置里抽取模型的接口）。发出去的都是这把 Key 读得到的内容；${masked}用量不计入抽取预算。`
+  const where = endpoint ? `主机 ${endpoint} 上的模型「${model}」` : `模型「${model}」`
+  return `${what[loop]}会发给${where}（实例设置里抽取模型的接口）。发出去的都是这把 Key 读得到的内容；${masked}用量不计入抽取预算。`
 }
 
 // 消息的文字。content 可能是 null（只调工具时常见）、空串或分段数组（[{ type: 'text', text }]）
@@ -219,8 +228,8 @@ export interface AgentConversation {
   session: BenchSession
   exchanges: AgentExchange[]
   usage: AgentUsage
-  // 点过一下、同意发给哪个模型。换了模型名要再问，换一段对话也要再问
-  consentedModel: string | null
+  // 点过一下、同意了什么。主机、模型名、循环变了要再问，换一段对话也要再问
+  consented: AgentConsent | null
   nextId: number
 }
 
@@ -231,12 +240,17 @@ export const emptyConversation = (): AgentConversation => ({
   session: emptySession(),
   exchanges: [],
   usage: { promptTokens: 0, completionTokens: 0, ms: 0, rounds: 0 },
-  consentedModel: null,
+  consented: null,
   nextId: 1,
 })
 
-export const consentNeeded = (conversation: AgentConversation, model: string) =>
-  conversation.consentedModel !== model
+export function consentNeeded({ consented }: AgentConversation, target: AgentConsent): boolean {
+  return (
+    consented?.endpoint !== target.endpoint ||
+    consented.model !== target.model ||
+    consented.loop !== target.loop
+  )
+}
 
 export interface AgentIO {
   // 请求一次模型。失败时 reject，停止时按 signal 取消

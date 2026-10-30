@@ -31,6 +31,7 @@ import {
   acceptAgentDivergence,
   emptyConversation,
   sendAgentMessage,
+  type AgentConsent,
   type AgentExchange,
 } from '../benchAgent'
 import { contextDefaults, contextOf } from '../benchForm'
@@ -433,10 +434,10 @@ export function createBench() {
     if (running.value) return
     agent.value = acceptAgentDivergence(agent.value)
   }
-  // 开始之前的提示点过了：这次对话里同一个模型不再问。循环进行时状态归它管，别的调用在跑时不相干
-  function consentToModel(model: string) {
+  // 开始之前的提示点过了：这次对话里发给同一个地方、发同样的内容不再问。循环进行时状态归它管，别的调用在跑时不相干
+  function consentTo(consented: AgentConsent) {
     if (agentSending.value) return
-    agent.value = { ...agent.value, consentedModel: model }
+    agent.value = { ...agent.value, consented }
   }
 
   return {
@@ -485,7 +486,7 @@ export function createBench() {
     stopAgent,
     clearAgent,
     acceptAgentDiverged,
-    consentToModel,
+    consentTo,
   }
 }
 

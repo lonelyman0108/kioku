@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import {
   AgentModelError,
+  endpointHost,
   escapeControlChars,
   normalizeToolCalls,
   parseModelJson,
@@ -226,6 +227,19 @@ describe('规范化工具调用', () => {
     expect(normalizeToolCalls([null, 'x', 3, ['y'], { id: 'a', ...call }])).toEqual([
       { id: 'a', ...call },
     ])
+  })
+})
+
+describe('接口的主机名', () => {
+  it.each([
+    ['https://api.example.com/v1', 'api.example.com'],
+    ['http://127.0.0.1:18920/v1/', '127.0.0.1:18920'],
+    ['https://user:hunter2@model.example.com:8443/openai/v1?token=abc#x', 'model.example.com:8443'],
+    ['http://[::1]:8080/v1', '[::1]:8080'],
+    // 默认端口 URL 不留，也不是另一台主机
+    ['https://api.example.com:443/v1', 'api.example.com'],
+  ])('%s：%s', (baseUrl, host) => {
+    expect(endpointHost(baseUrl)).toBe(host)
   })
 })
 

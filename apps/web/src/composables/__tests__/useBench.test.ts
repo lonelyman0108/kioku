@@ -827,6 +827,7 @@ const WRITE_CALL: BenchAgentToolCall = {
   parseError: null,
 }
 const TOOLS_LOOP = { loop: 'tools' as const, system: '基础', model: 'fake-model' }
+const CONSENT = { endpoint: 'model.example.com', model: 'fake-model', loop: 'tools' as const }
 
 // 模型一直不回，被取消时和真的 fetch 一样抛 AbortError。信号记下来：用例先断言它被取消了再等循环结束，
 // 这样取消的逻辑坏了时是断言失败，不是等到超时
@@ -910,9 +911,9 @@ describe('模型对话', () => {
     expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
     // 运行期间不能改对话
     bench.clearAgent()
-    bench.consentToModel('别的模型')
+    bench.consentTo(CONSENT)
     expect(bench.agent.value.exchanges).toHaveLength(1)
-    expect(bench.agent.value.consentedModel).toBeNull()
+    expect(bench.agent.value.consented).toBeNull()
     turn.resolve(modelReply('好'))
     await sent
     expect(bench.running.value).toBe(false)
@@ -927,8 +928,8 @@ describe('模型对话', () => {
     await settle()
     expect(await bench.sendToAgent('你好', TOOLS_LOOP)).toBeNull()
     expect(fakes.api.benchAgentTurn).not.toHaveBeenCalled()
-    bench.consentToModel('fake-model')
-    expect(bench.agent.value.consentedModel).toBe('fake-model')
+    bench.consentTo(CONSENT)
+    expect(bench.agent.value.consented).toEqual(CONSENT)
     run.resolve({ ...RESULT, mode: 'rollback' })
     await outcome
   })
@@ -1117,17 +1118,17 @@ describe('模型对话', () => {
     await outcome
   })
 
-  it('同意过的模型随对话清掉：换一段对话要重新问', async () => {
+  it('同意过的随对话清掉：换一段对话要重新问', async () => {
     const bench = start()
     await settle()
-    bench.consentToModel('fake-model')
-    expect(bench.agent.value.consentedModel).toBe('fake-model')
+    bench.consentTo(CONSENT)
+    expect(bench.agent.value.consented).toEqual(CONSENT)
     bench.selectKey('k2')
     await settle()
-    expect(bench.agent.value.consentedModel).toBeNull()
-    bench.consentToModel('fake-model')
+    expect(bench.agent.value.consented).toBeNull()
+    bench.consentTo(CONSENT)
     bench.clearAgent()
-    expect(bench.agent.value.consentedModel).toBeNull()
+    expect(bench.agent.value.consented).toBeNull()
   })
 
   it('真实模式的工具运行中途作废：警告可能已经写入，带上这次运行是什么，结果按调用的看法显示', async () => {
@@ -1313,7 +1314,7 @@ describe('模型对话', () => {
     it('只点过同意、还没说话：没有要丢的', async () => {
       const bench = start()
       await settle()
-      bench.consentToModel('fake-model')
+      bench.consentTo(CONSENT)
       expect(dirty()).toBe(false)
     })
 

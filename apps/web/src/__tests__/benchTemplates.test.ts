@@ -1024,18 +1024,21 @@ describe('模型对话的页面', () => {
     expect(directive(withTag(view.elements, 'BenchContextForm'), 'if')).toBe("loop !== 'tools'")
   })
 
-  it('开始前要点一下：提示给出模型名，点了才放开发送；换模型名再问', () => {
-    const alert = alertWith('needsConsent && !agentSending')
-    expect(bound(alert, 'description')).toBe('consentText(loop, model, mode)')
+  it('开始前要点一下：提示写明主机、模型名与内容，点了才放开发送；任何一个变了再问', () => {
+    const alert = alertWith('consent && needsConsent && !agentSending')
+    expect(bound(alert, 'description')).toBe('consentText(consent, mode)')
     expect(bound(alert, 'actions')).toBe('consentActions')
     const actions = blockOf(view.script, 'const consentActions = ')
     expect(actions).toContain('`发给 ${model.value}，开始对话`')
-    expect(actions).toContain('onClick: () => consentToModel(model.value)')
-    expect(view.script).toContain('consentNeeded(agent.value, model.value)')
+    expect(actions).toContain('onClick: () => consent.value && consentTo(consent.value)')
+    // 同意的键：服务端给的主机、这里的模型名、服务端给的循环
+    const target = blockOf(view.script, 'const consent = ')
+    expect(target).toContain('endpoint: info.data.value?.endpoint ?? null')
+    expect(target).toContain('model: model.value')
+    expect(target).toContain('loop: loop.value')
+    expect(view.script).toContain('consentNeeded(agent.value, consent.value)')
     expect(blockOf(view.script, 'const canSend = ')).toContain('!needsConsent.value')
     expect(bodyOf(view.script, 'send')).toContain('if (!canSend.value || !loop.value) return')
-    // 同一次对话不再问：同意过的模型记在对话里，随对话清掉
-    expect(benchAgent).toMatch(/conversation\.consentedModel !== model/)
   })
 
   it('运行期间模型名、系统提示都不能改', () => {
@@ -1047,7 +1050,7 @@ describe('模型对话的页面', () => {
     expect(fields).toHaveLength(2)
     for (const field of fields) expect(bound(field, 'disabled')).toBe('running')
     expect(bodyOf(useBench, 'clearAgent')).toContain('if (running.value) return')
-    expect(bodyOf(useBench, 'consentToModel')).toContain('if (agentSending.value) return')
+    expect(bodyOf(useBench, 'consentTo')).toContain('if (agentSending.value) return')
     expect(blockOf(view.script, 'const canSend = ')).toContain('!running.value')
     expect(bodyOf(useBench, 'sendToAgent')).toContain('if (running.value || !target) return null')
   })

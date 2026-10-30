@@ -16,6 +16,7 @@ import {
   droppedNote,
   sentToolCalls,
   usageSummary,
+  type AgentConsent,
 } from '../benchAgent'
 import { formatScenario, plaintextIn, type PlaintextFinding } from '../benchScenarios'
 import { divergenceNotice, NOT_API_FAILURE, runBlocker, sessionUsage } from '../benchSession'
@@ -42,7 +43,7 @@ const {
   stopAgent,
   clearAgent,
   acceptAgentDiverged,
-  consentToModel,
+  consentTo,
 } = useBench()
 
 // 用不用得了、默认模型、这个运行时走哪种循环
@@ -94,14 +95,19 @@ const modelText = computed(() => modelEdit.value ?? defaultModel.value)
 const model = computed(() => modelText.value.trim() || defaultModel.value)
 const system = ref(DEFAULT_SYSTEM_PROMPT)
 
-// 开始之前要点一下：内容会发给这个模型。同一次对话不再问，换了模型名再问一次
-const needsConsent = computed(() => consentNeeded(agent.value, model.value))
+// 开始之前要点一下：内容会发给哪台主机的哪个模型，发什么内容。同一次对话不再问，主机、模型名、循环变了再问一次
+const consent = computed<AgentConsent | null>(() =>
+  loop.value
+    ? { endpoint: info.data.value?.endpoint ?? null, model: model.value, loop: loop.value }
+    : null,
+)
+const needsConsent = computed(() => !consent.value || consentNeeded(agent.value, consent.value))
 const consentActions = computed(() => [
   {
     label: `发给 ${model.value}，开始对话`,
     color: 'warning' as const,
     variant: 'subtle' as const,
-    onClick: () => consentToModel(model.value),
+    onClick: () => consent.value && consentTo(consent.value),
   },
 ])
 
@@ -274,11 +280,11 @@ watch(generation, () => {
       class="sticky bottom-0 z-10 space-y-2 border-t border-default bg-default pt-3"
     >
       <UAlert
-        v-if="needsConsent && !agentSending"
+        v-if="consent && needsConsent && !agentSending"
         color="warning"
         variant="subtle"
         title="开始之前"
-        :description="consentText(loop, model, mode)"
+        :description="consentText(consent, mode)"
         :actions="consentActions"
       />
       <UAlert v-if="blocker" color="warning" variant="subtle" :title="blocker" />
