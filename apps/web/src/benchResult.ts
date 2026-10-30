@@ -62,8 +62,31 @@ export const internalDetailLabels: Record<BenchInternalDetail, string> = {
 export const internalErrorText = (step: Pick<BenchStepResult, 'internalDetail'>) =>
   step.internalDetail ? internalDetailLabels[step.internalDetail] : '原因写进了服务端的日志'
 
+// 这一步报了错（不算内部错误）时怎么说。按断言看的场景里，通过的步骤报错是预期之中或者没带断言，不用红字
+export function errorNote(
+  step: BenchStepResult,
+  view: StepView,
+): { text: string; alarming: boolean } | null {
+  if (!step.isError || step.internalError) return null
+  const text = '这一步报错了，原因见下面收到的原文。'
+  if (view === 'call') return { text, alarming: true }
+  if (view === 'probe') return { text, alarming: false }
+  if (step.status !== 'passed') return { text, alarming: true }
+  return {
+    text: step.assertions.length
+      ? '这一步报错了，符合断言。'
+      : '这一步报错了：没带断言的步骤只要不是内部错误就算通过。',
+    alarming: false,
+  }
+}
+
+// turn.end 成功了却没有写进缓冲：这种情况不报错（宿主不用管），看不到原因的话会以为抽取的链路通了。
+// 真实模式下 turns 是 null，不列
+export const turnNotBuffered = (step: BenchStepResult) =>
+  step.replay?.kind === 'lifecycle' && step.changes?.turns === 0
+
 export const VECTOR_SKIPPED_NOTE =
-  '这一步只走了全文与关键词：查询向量在开事务之前算好，这个查询没有算到（依赖前面步骤的结果，或者嵌入接口超时）。'
+  '这一步只走了全文与关键词：查询向量在开事务之前算好，这个查询没有算到（依赖前面步骤的结果，或者嵌入接口出错、超时）。'
 
 const DROPPED_LABELS: Record<BenchSessionStart['dropped'][number], string> = {
   recent: '近期更新的记忆',

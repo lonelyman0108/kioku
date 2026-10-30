@@ -25,6 +25,7 @@ const {
   requestMode,
   confirmReal,
   running,
+  session,
 } = useBench()
 
 const appItems = computed(() =>
@@ -57,8 +58,8 @@ const errorOf = (err: unknown, fallback: string) =>
     <template v-else>
       <p class="text-xs text-muted">
         不接真实客户端，按一把 Key 模拟接入方调用 Kioku：工具走真实的 MCP 服务端，权限按这把 Key
-        现在的有效上限。不记召回事件，不更新 Key 的最后使用时间；
-        <code>secret</code> 的正文与凭据的值一律打码，要看值去记忆页、凭据页。
+        现在的有效上限。不记召回事件，不更新 Key 的最后使用时间。secret
+        的正文与凭据的值一律打码，要看值去记忆页、凭据页。
       </p>
       <div class="flex flex-wrap items-end gap-3">
         <UFormField label="应用" class="w-full sm:w-64">
@@ -85,7 +86,7 @@ const errorOf = (err: unknown, fallback: string) =>
         <USwitch
           :model-value="real"
           label="真实执行"
-          description="默认回滚：做完不留痕迹"
+          :description="real ? '写入是真的，不会回滚' : '默认回滚：做完不留痕迹'"
           color="error"
           :disabled="running || !key"
           class="pb-1"
@@ -126,6 +127,9 @@ const errorOf = (err: unknown, fallback: string) =>
           <ul class="list-disc space-y-1 pl-5">
             <li v-for="line in REAL_MODE_CONSEQUENCES" :key="line">{{ line }}</li>
           </ul>
+          <p v-if="session.timeline.length" class="text-muted">
+            这次会话的记录会清掉，回滚模式下保留的写入不会带过去。
+          </p>
         </div>
       </template>
       <template #footer>

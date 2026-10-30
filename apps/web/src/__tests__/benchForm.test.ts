@@ -18,7 +18,7 @@ import {
   type FormField,
   type FormState,
 } from '../benchForm'
-import toolList from './fixtures/benchTools.json'
+import toolList from './benchTools.fixture.json'
 
 // 真实的 tools/list 的快照：可空的 anyOf、type 数组、record、对象数组都在里面
 const { tools } = BenchToolList.parse({ tools: toolList })

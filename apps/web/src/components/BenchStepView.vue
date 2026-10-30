@@ -5,10 +5,12 @@ import { computed } from 'vue'
 import {
   changeItems,
   changesNotListed,
+  errorNote,
   internalErrorText,
   sessionNotes,
   stepBadge,
   stepKindLabels,
+  turnNotBuffered,
   VECTOR_SKIPPED_NOTE,
   type StepView,
 } from '../benchResult'
@@ -23,6 +25,16 @@ const props = withDefaults(
 const badge = computed(() => stepBadge(props.step, props.view))
 // 没有响应的步骤（跳过、没有执行、还没发出去就失败）没有原文可看
 const responded = computed(() => props.step.raw !== null)
+// 折叠时也看得到的：种类（步骤名就是种类时不重复）、状态码、耗时
+const meta = computed(() => {
+  const { kind, label, httpStatus, ms } = props.step
+  return [
+    ...(stepKindLabels[kind] === label ? [] : [stepKindLabels[kind]]),
+    ...(httpStatus === null ? [] : [`HTTP ${httpStatus}`]),
+    ...(responded.value ? [`${ms} ms`] : []),
+  ].join(' · ')
+})
+const error = computed(() => errorNote(props.step, props.view))
 const session = computed(() =>
   props.step.session ? sessionNotes(props.step.session, props.step.text) : null,
 )
@@ -38,18 +50,17 @@ const PRE_CLASS =
 
 <template>
   <details :open="open" class="rounded-lg border border-default px-3 py-2 text-sm">
-    <summary class="cursor-pointer">
-      <span class="inline-flex flex-wrap items-center gap-x-2 gap-y-1 align-middle">
-        <UBadge :color="badge.color" :icon="badge.icon" variant="subtle" size="sm">
-          {{ badge.label }}
-        </UBadge>
-        <span class="font-medium break-all">{{ step.label }}</span>
-        <span class="text-xs text-muted">{{ stepKindLabels[step.kind] }}</span>
-        <span v-if="step.httpStatus !== null" class="text-xs text-muted">
-          HTTP {{ step.httpStatus }}
-        </span>
-        <span v-if="responded" class="text-xs text-muted">{{ step.ms }} ms</span>
-      </span>
+    <!-- 里面都是行内元素：换成弹性布局的话，窄屏上折叠的三角会单独占一行 -->
+    <summary class="cursor-pointer leading-6 *:mr-2 *:align-middle">
+      <UBadge :color="badge.color" :icon="badge.icon" variant="subtle" size="sm">
+        {{ badge.label }}
+      </UBadge>
+      <span class="font-medium break-all">{{ step.label }}</span>
+      <!-- 按断言通过的步骤也可能报了错（预期之中，或者没带断言）：折叠时也看得出来 -->
+      <UBadge v-if="error && view === 'judged'" color="neutral" variant="subtle" size="sm">
+        报错
+      </UBadge>
+      <span class="inline-block text-xs text-muted">{{ meta }}</span>
     </summary>
 
     <div class="mt-3 space-y-3">
@@ -62,9 +73,12 @@ const PRE_CLASS =
         title="服务内部错误"
         :description="internalErrorText(step)"
       />
-      <p v-else-if="step.isError" class="text-error">这一步报错了，原因见下面收到的原文。</p>
+      <p v-else-if="error" :class="error.alarming ? 'text-error' : 'text-muted'">
+        {{ error.text }}
+      </p>
 
-      <ul v-if="step.assertions.length && view !== 'probe'" class="space-y-1">
+      <!-- 权限探测不判通过与失败，只有还没发出去就失败的步骤要靠它说明原因 -->
+      <ul v-if="step.assertions.length && (view !== 'probe' || !responded)" class="space-y-1">
         <li v-for="(a, i) in step.assertions" :key="i" class="flex items-start gap-1.5 text-xs">
           <UIcon
             :name="a.ok ? icons.passed : icons.failed"
@@ -109,10 +123,15 @@ const PRE_CLASS =
         <h4 class="font-medium">{{ mode === 'rollback' ? '真执行会改什么' : '这一步改了什么' }}</h4>
         <p v-if="!step.changes" class="text-xs text-muted">这一步的改动列不出来。</p>
         <template v-else>
+          <p v-if="turnNotBuffered(step)" class="text-xs text-muted">
+            这一轮没有写进对话缓冲：没配抽取模型，或者这把 Key 写不了对象层与情节层。
+          </p>
           <p v-if="!changes.length && !step.changes.turn" class="text-xs text-muted">
-            没有改动<template v-if="changesNotListed(step.changes)">
-              （对象与对话缓冲这个模式不列）</template
-            >。
+            {{
+              changesNotListed(step.changes)
+                ? '没有带标记的改动。对象与对话缓冲没有标记，这个模式不列。'
+                : '没有改动。'
+            }}
           </p>
           <ul v-else class="space-y-1.5">
             <li v-for="(item, i) in changes" :key="i" class="space-y-0.5">

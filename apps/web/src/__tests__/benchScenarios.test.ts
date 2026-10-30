@@ -293,8 +293,12 @@ describe('运行结果怎么说', () => {
     expect(stepOpen(step({ status: 'failed' }), 'judged')).toBe(true)
     expect(stepOpen(step({ status: 'notRun' }), 'judged')).toBe(true)
     expect(stepOpen(step(), 'judged')).toBe(false)
-    expect(stepOpen(step({ status: 'skipped' }), 'judged')).toBe(false)
+    // 跳过的原因要看得到，不用再点开
+    expect(stepOpen(step({ status: 'skipped' }), 'judged')).toBe(true)
+    expect(stepOpen(step({ status: 'skipped' }), 'probe')).toBe(true)
+    expect(stepOpen(step({ status: 'notRun' }), 'probe')).toBe(true)
     expect(stepOpen(step({ status: 'failed', internalError: true }), 'probe')).toBe(true)
     expect(stepOpen(step({ status: 'failed' }), 'probe')).toBe(false)
+    expect(stepOpen(step(), 'probe')).toBe(false)
   })
 })

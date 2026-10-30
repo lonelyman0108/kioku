@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, ref, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import BenchCalls from '../components/BenchCalls.vue'
@@ -23,6 +23,12 @@ const tab = computed<string>({
   set: (value) =>
     void router.replace({ query: { ...route.query, tab: value === 'calls' ? undefined : value } }),
 })
+
+// 换应用时 Key 要重新读，这段时间不算就绪。第一次就绪之后分页组件就不再卸载：卸载会丢掉草稿与文本框里的场景
+const mounted = ref(false)
+watchEffect(() => {
+  if (ready.value) mounted.value = true
+})
 </script>
 
 <template>
@@ -42,11 +48,11 @@ const tab = computed<string>({
     <template #body>
       <div class="max-w-6xl space-y-4">
         <BenchToolbar />
-        <template v-if="ready">
+        <div v-if="mounted" v-show="ready" class="space-y-4">
           <UTabs v-model="tab" :items="tabs" :content="false" class="w-full" />
           <BenchCalls v-show="tab === 'calls'" />
           <BenchScenarios v-show="tab === 'scenarios'" />
-        </template>
+        </div>
       </div>
     </template>
   </UDashboardPanel>

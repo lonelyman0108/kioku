@@ -158,11 +158,13 @@ describe('重放日志只记成功的写步骤', () => {
         step(),
         step({ isError: true, replay: write('a://b') }),
         step({ internalError: true, isError: true, replay: write('a://c') }),
+        // 根事务中止时错误可能被吞掉：看起来没报错，也标成内部错误
+        step({ internalError: true, replay: write('a://d') }),
       ]),
     )
     expect(session.replay).toEqual([])
-    expect(session.timeline.map((e) => e.kept)).toEqual([false, false, false])
-    expect(session.timeline).toHaveLength(3)
+    expect(session.timeline.map((e) => e.kept)).toEqual([false, false, false, false])
+    expect(session.timeline).toHaveLength(4)
   })
 
   it('不是写步骤的 replay 不进（按契约的判定再确认一次）', () => {

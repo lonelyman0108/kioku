@@ -96,10 +96,10 @@ export const writingSteps = (scenario: BenchScenario) => scenario.steps.filter(m
 export const scenarioView = (scenario: Pick<BenchScenario, 'probe'>): StepView =>
   scenario.probe ? 'probe' : 'judged'
 
-// 打开哪些步骤：要看的是出了问题的那几步
+// 打开哪些步骤：要看的是出了问题的那几步。跳过与没有执行的只有一行原因，打开也不占地方
 export function stepOpen(step: BenchStepResult, view: StepView): boolean {
-  if (view === 'probe') return step.internalError
-  return step.status === 'failed' || step.status === 'notRun'
+  if (step.status === 'skipped' || step.status === 'notRun') return true
+  return view === 'probe' ? step.internalError : step.status === 'failed'
 }
 
 export interface RunSummary {

@@ -4,9 +4,11 @@ import { describe, expect, it } from 'vitest'
 import {
   changeItems,
   changesNotListed,
+  errorNote,
   internalErrorText,
   sessionNotes,
   stepBadge,
+  turnNotBuffered,
 } from '../benchResult'
 
 const step = (over: Partial<BenchStepResult> = {}): BenchStepResult => ({
@@ -99,6 +101,40 @@ describe('一步的状态', () => {
     expect(internalErrorText(step({ internalDetail: 'run_timeout' }))).toContain('总时长')
     expect(internalErrorText(step({ internalDetail: 'aborted' }))).toContain('根事务')
     expect(internalErrorText(step())).toContain('日志')
+  })
+
+  it('报错的说法：没报错、内部错误都不说；调用台用红字，权限探测不用', () => {
+    expect(errorNote(step(), 'call')).toBeNull()
+    expect(errorNote(step({ isError: true, internalError: true }), 'call')).toBeNull()
+    expect(errorNote(step({ isError: true }), 'call')?.alarming).toBe(true)
+    expect(errorNote(step({ isError: true }), 'probe')?.alarming).toBe(false)
+  })
+
+  it('报错的说法：场景里通过的步骤是预期之中或者没带断言，不用红字', () => {
+    const asserted = errorNote(
+      step({ isError: true, assertions: [{ message: '应当报错', ok: true }] }),
+      'judged',
+    )
+    expect(asserted).toEqual({ text: '这一步报错了，符合断言。', alarming: false })
+    const unasserted = errorNote(step({ isError: true }), 'judged')
+    expect(unasserted?.text).toContain('没带断言')
+    expect(unasserted?.alarming).toBe(false)
+    expect(errorNote(step({ isError: true, status: 'failed' }), 'judged')?.alarming).toBe(true)
+  })
+
+  it('turn.end 没写进缓冲时要说：它不报错，看不到原因', () => {
+    const turn = {
+      kind: 'lifecycle',
+      body: { event: 'turn.end' },
+    } as unknown as BenchStepResult['replay']
+    expect(turnNotBuffered(step({ replay: turn, changes: noChanges }))).toBe(true)
+    expect(turnNotBuffered(step({ replay: turn, changes: { ...noChanges, turns: 1 } }))).toBe(false)
+    // 真实模式下不列，不能说成没写进去
+    expect(turnNotBuffered(step({ replay: turn, changes: { ...noChanges, turns: null } }))).toBe(
+      false,
+    )
+    expect(turnNotBuffered(step({ changes: noChanges }))).toBe(false)
+    expect(turnNotBuffered(step({ replay: turn, changes: null }))).toBe(false)
   })
 })
 

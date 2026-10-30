@@ -27,6 +27,7 @@ import BenchStepView from './BenchStepView.vue'
 const {
   spaceId,
   appId,
+  app,
   keyId,
   real,
   mode,
@@ -69,7 +70,6 @@ function resetDraft() {
   Object.assign(draft.value, newDraft(target.value))
   formError.value = null
 }
-watch(spaceId, () => drafts.clear())
 
 // 表单写错了发不出去、JSON 放不回表单时的说明
 const formError = ref<string | null>(null)
@@ -160,15 +160,16 @@ function onRunClick() {
       :title="tools.error.value instanceof ApiError ? tools.error.value.message : '读取工具失败'"
     />
     <div class="grid gap-4 lg:grid-cols-[15rem_minmax(0,1fr)]">
-      <nav class="max-h-72 space-y-3 overflow-y-auto text-sm lg:max-h-none" aria-label="调用目录">
+      <nav class="space-y-3 text-sm" aria-label="调用目录">
         <section v-for="group in groups" :key="group.value" class="space-y-1">
           <h3 class="text-xs font-medium text-muted">{{ group.label }}</h3>
           <USkeleton v-if="group.value === 'tool' && tools.isPending.value" class="h-24 w-full" />
-          <ul v-else>
+          <!-- 窄屏上一行放几个，不把表单挤到很下面 -->
+          <ul v-else class="flex flex-wrap gap-x-1 lg:block">
             <li v-for="t in group.targets" :key="t.id">
               <button
                 type="button"
-                class="flex w-full flex-wrap items-center gap-1 rounded px-2 py-1 text-left hover:bg-elevated"
+                class="flex flex-wrap items-center gap-1 rounded px-2 py-1 text-left hover:bg-elevated lg:w-full"
                 :class="{ 'bg-elevated font-medium': t.id === target.id }"
                 :aria-current="t.id === target.id ? 'true' : undefined"
                 @click="targetId = t.id"
@@ -197,9 +198,15 @@ function onRunClick() {
               </UBadge>
             </h3>
             <p v-if="target.description" class="text-xs text-muted">{{ target.description }}</p>
-            <p v-if="target.group === 'tool'" class="text-xs text-muted">
-              工具调用不带会话上下文，真实的 MCP 也不带：按这把 Key 的全部权限读写。
-            </p>
+            <template v-if="target.group === 'tool'">
+              <p class="text-xs text-muted">
+                工具调用不带会话上下文，真实的 MCP 也不带：按这把 Key 的全部权限读写。
+              </p>
+              <p v-if="app?.runtimeFamily === 'astrbot'" class="text-xs text-warning">
+                不要给群聊 bot 接 MCP：群里的人能借工具读到这把 Key
+                读得到的一切。这里只是测工具本身。
+              </p>
+            </template>
             <p v-else-if="target.usesContext" class="text-xs text-muted">
               这个调用带上面的会话上下文。
             </p>
@@ -226,7 +233,7 @@ function onRunClick() {
               />
             </template>
             <p v-else class="text-sm text-muted">这个工具没有参数。</p>
-            <p class="text-xs text-muted">
+            <p v-if="draft.json || target.fields?.length" class="text-xs text-muted">
               字符串里可以写 <code>${run}</code>（每次运行不同的标记）与 <code>${expires}</code>（6
               小时后，给 valid_to 用）。校验由服务端做，不合法的请求也会发出去。
             </p>

@@ -54,16 +54,21 @@ const text = ref('')
 // 上次载入的内容：改过之后再载入别的要先问一声
 const loaded = ref('')
 const errors = ref<string[]>([])
-function edit(next: string) {
+function setText(next: string) {
   text.value = next
   errors.value = []
+}
+// 改过就不再是那个预设了：再选一次它就能换回原样
+function edit(next: string) {
+  setText(next)
+  presetId.value = undefined
 }
 
 function replaceText(next: string): boolean {
   if (text.value.trim() && text.value !== loaded.value) {
     if (!window.confirm('文本框里改过的内容会被换掉，继续吗？')) return false
   }
-  edit(next)
+  setText(next)
   loaded.value = next
   return true
 }
@@ -150,6 +155,8 @@ watch(runtime, () => {
 async function runScenario(scenario: BenchScenario) {
   confirming.value = null
   failure.value = null
+  // 上一次的结果不留着：这次失败时不能让人以为下面的还是这次的
+  outcome.value = null
   // 单独一个事务：不带调用台这次会话的写入，结果也不进它的时间线
   const done = await execute(scenario.steps)
   if (done.kind === 'done') {
