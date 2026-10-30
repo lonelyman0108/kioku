@@ -708,21 +708,25 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
         expect(await embeddings()).toHaveLength(0)
         state.ms = 0
         await until(async () => (await embeddedIds()).length === ids.length, 30_000)
-        // 每条都另排过新任务；所有任务都做完了，没有一个是靠重试做完的
+        // 每条都另排过新任务；等这些任务都做完（另排的可能比向量晚，接口好了之后原来排着的也会先写上），
+        // 没有一个是靠重试做完的
         const listed = sql.join(
           ids.map((id) => sql`${id}`),
           sql`, `,
         )
-        const rows = await database.db.execute<{ id: string; state: string; retries: number }>(
-          sql`select data->>'memoryId' as id, state::text as state, retry_count as retries
-            from pgboss.job where name = 'embed-memory' and data->>'memoryId' in (${listed})`,
-        )
+        const jobRows = () =>
+          database.db.execute<{ id: string; state: string; retries: number }>(
+            sql`select data->>'memoryId' as id, state::text as state, retry_count as retries
+              from pgboss.job where name = 'embed-memory' and data->>'memoryId' in (${listed})`,
+          )
+        await until(async () => (await jobRows()).every((r) => r.state === 'completed'), 30_000)
+        const rows = await jobRows()
         expect(rows.length).toBeGreaterThan(ids.length)
-        expect(rows.every((r) => r.state === 'completed' && r.retries === 0)).toBe(true)
+        expect(rows.every((r) => r.retries === 0)).toBe(true)
       },
       300,
     )
-  }, 60_000)
+  }, 90_000)
 
   it('清掉记下的错误时出错只记日志：已经写好的不算失败，被锁着的照样另排', async () => {
     const embedder = fakeEmbedder()
