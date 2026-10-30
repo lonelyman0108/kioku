@@ -336,6 +336,17 @@ describe('hook 循环', () => {
     expect(h.runs[1]!.steps[0]).toEqual({ kind: 'tool', tool: 'kioku_list', arguments: {} })
   })
 
+  it.each(['hook', 'approximate', 'tools'] as const)(
+    '%s 不发 turn.end：上下文满足时也不发，也不说没发的原因',
+    async (loop) => {
+      const h = harness({ loop, context: GROUP, turns: [reply('好')] })
+      const done = await h.send(USER_TEXT)
+      expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
+      expect(last(done).turnEnd).toBeNull()
+      expect(last(done).turnEndNote).toBeNull()
+    },
+  )
+
   it('不带上下文时事件里没有 context 字段', async () => {
     const h = harness({ turns: [reply('好')] })
     await h.send(USER_TEXT)
@@ -389,7 +400,8 @@ describe('hook 循环', () => {
       run: (steps) => ({
         kind: 'done',
         result: runResult('rollback', [
-          baseStep({ ...defaultStep(steps[0]!, 0), internalError: true, isError: true }),
+          // 根事务中止时工具本身没报错，只标了内部错误：只看 isError 的话它的文字会被注入
+          baseStep({ ...defaultStep(steps[0]!, 0), internalError: true }),
           baseStep({ ...defaultStep(steps[1]!, 1), status: 'notRun', raw: null, text: '不该用' }),
         ]),
       }),

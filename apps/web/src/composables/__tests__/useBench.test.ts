@@ -828,13 +828,22 @@ const WRITE_CALL: BenchAgentToolCall = {
 }
 const TOOLS_LOOP = { loop: 'tools' as const, system: '基础', model: 'fake-model' }
 
-// 被取消时和真的 fetch 一样抛 AbortError
-const hangUntilAborted = (signal: AbortSignal) =>
-  new Promise<BenchAgentTurnResult>((_resolve, reject) => {
-    signal.addEventListener('abort', () =>
-      reject(new DOMException('The operation was aborted.', 'AbortError')),
-    )
-  })
+// 模型一直不回，被取消时和真的 fetch 一样抛 AbortError。信号记下来：用例先断言它被取消了再等循环结束，
+// 这样取消的逻辑坏了时是断言失败，不是等到超时
+function hangingModel() {
+  const model = {
+    signal: undefined as AbortSignal | undefined,
+    turn: (_s: string, _a: string, _k: string, _b: unknown, signal: AbortSignal) => {
+      model.signal = signal
+      return new Promise<BenchAgentTurnResult>((_resolve, reject) => {
+        signal.addEventListener('abort', () =>
+          reject(new DOMException('The operation was aborted.', 'AbortError')),
+        )
+      })
+    },
+  }
+  return model
+}
 
 describe('模型对话', () => {
   const dirty = () => (fakes.guard.mock.calls[0]![0] as { value: boolean }).value
@@ -968,15 +977,17 @@ describe('模型对话', () => {
   it('停止：正在等的模型请求被取消，不再发新的请求', async () => {
     const bench = start()
     await settle()
+    const model = hangingModel()
     fakes.api.benchAgentTurn
       .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
-      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => hangUntilAborted(signal))
+      .mockImplementationOnce(model.turn)
     fakes.api.benchRun.mockResolvedValue({ ...RESULT, mode: 'rollback' })
     const sent = bench.sendToAgent('你好', TOOLS_LOOP)
     await settle()
     expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(2)
     bench.stopAgent()
     expect(bench.agentStopping.value).toBe(true)
+    expect(model.signal?.aborted).toBe(true)
     const finished = await sent
     expect(finished?.end).toBe('stopped')
     expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(2)
@@ -995,16 +1006,13 @@ describe('模型对话', () => {
   it('离开页面：模型请求一起取消，不继续花 token', async () => {
     const bench = start()
     await settle()
-    let aborted: AbortSignal | undefined
-    fakes.api.benchAgentTurn.mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => {
-      aborted = signal
-      return hangUntilAborted(signal)
-    })
+    const model = hangingModel()
+    fakes.api.benchAgentTurn.mockImplementationOnce(model.turn)
     const sent = bench.sendToAgent('你好', TOOLS_LOOP)
     await settle()
-    expect(aborted?.aborted).toBe(false)
+    expect(model.signal?.aborted).toBe(false)
     scope.stop()
-    expect(aborted?.aborted).toBe(true)
+    expect(model.signal?.aborted).toBe(true)
     await sent
   })
 
@@ -1012,11 +1020,8 @@ describe('模型对话', () => {
     const bench = start()
     await settle()
     const generation = bench.generation.value
-    let aborted: AbortSignal | undefined
-    fakes.api.benchAgentTurn.mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => {
-      aborted = signal
-      return hangUntilAborted(signal)
-    })
+    const model = hangingModel()
+    fakes.api.benchAgentTurn.mockImplementationOnce(model.turn)
     const sent = bench.sendToAgent('你好', TOOLS_LOOP)
     await settle()
     expect(bench.agent.value.exchanges).toHaveLength(1)
@@ -1024,7 +1029,7 @@ describe('模型对话', () => {
     fakes.api.keys.mockResolvedValue([liveKey('k2')])
     await refetchKeys()
     expect(bench.generation.value).toBeGreaterThan(generation)
-    expect(aborted?.aborted).toBe(true)
+    expect(model.signal?.aborted).toBe(true)
     expect(bench.running.value).toBe(false)
     expect(await sent).toBeNull()
     expect(bench.agent.value.exchanges).toEqual([])
@@ -1107,13 +1112,10 @@ describe('模型对话', () => {
     await settle()
     bench.confirmReal()
     await settle()
-    let aborted: AbortSignal | undefined
+    const model = hangingModel()
     fakes.api.benchAgentTurn
       .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
-      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => {
-        aborted = signal
-        return hangUntilAborted(signal)
-      })
+      .mockImplementationOnce(model.turn)
     fakes.api.benchRun.mockResolvedValueOnce(RESULT)
     const sent = bench.sendToAgent('你好', TOOLS_LOOP)
     await settle()
@@ -1121,7 +1123,7 @@ describe('模型对话', () => {
     expect(bench.abandoned.value).toEqual([])
     fakes.api.keys.mockResolvedValue([liveKey('k2')])
     await refetchKeys()
-    expect(aborted?.aborted).toBe(true)
+    expect(model.signal?.aborted).toBe(true)
     expect(await sent).toBeNull()
     expect(bench.agent.value.exchanges).toEqual([])
     const [record] = bench.abandoned.value
@@ -1142,14 +1144,16 @@ describe('模型对话', () => {
     bench.confirmReal()
     await settle()
     const read = { ...WRITE_CALL, name: 'kioku_list', arguments: {} }
+    const model = hangingModel()
     fakes.api.benchAgentTurn
       .mockResolvedValueOnce(modelReply('', [read]))
-      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => hangUntilAborted(signal))
+      .mockImplementationOnce(model.turn)
     fakes.api.benchRun.mockResolvedValueOnce(RESULT)
     const sent = bench.sendToAgent('你好', TOOLS_LOOP)
     await settle()
     fakes.api.keys.mockResolvedValue([liveKey('k2')])
     await refetchKeys()
+    expect(model.signal?.aborted).toBe(true)
     await sent
     expect(bench.abandoned.value).toEqual([])
   })
@@ -1168,14 +1172,16 @@ describe('模型对话', () => {
   it('回滚模式下工具跑完、等模型时作废：什么都没留下，不警告', async () => {
     const bench = start()
     await settle()
+    const model = hangingModel()
     fakes.api.benchAgentTurn
       .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
-      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => hangUntilAborted(signal))
+      .mockImplementationOnce(model.turn)
     fakes.api.benchRun.mockResolvedValueOnce({ ...RESULT, mode: 'rollback' })
     const sent = bench.sendToAgent('你好', TOOLS_LOOP)
     await settle()
     fakes.api.keys.mockResolvedValue([liveKey('k2')])
     await refetchKeys()
+    expect(model.signal?.aborted).toBe(true)
     await sent
     expect(bench.abandoned.value).toEqual([])
   })
@@ -1270,13 +1276,13 @@ describe('模型对话', () => {
     it('发出去还没回来时就算有内容', async () => {
       const bench = start()
       await settle()
-      fakes.api.benchAgentTurn.mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) =>
-        hangUntilAborted(signal),
-      )
+      const model = hangingModel()
+      fakes.api.benchAgentTurn.mockImplementationOnce(model.turn)
       const sent = bench.sendToAgent('你好', TOOLS_LOOP)
       await settle()
       expect(dirty()).toBe(true)
       bench.stopAgent()
+      expect(model.signal?.aborted).toBe(true)
       await sent
     })
   })
