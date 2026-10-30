@@ -75,17 +75,50 @@ export function rawHtml(html: string): string {
 }
 
 // GFM 自动识别的网址一直延伸到空白或 <，正文里紧跟在网址后面的全角标点与中文会被一起链进去
-// （例如「https://files.example.com，账号」）。网址遇到中日韩文字、全角与中文常用的标点就结束；
-// 网址路径里本来就有中文的，要写成显式的链接（[文字](网址) 或 <网址>），这两种不经过这里
-const URL_END =
-  /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}\u3000-\u303f\uff00-\uff65\u2014\u2018-\u201f\u2026]/u
+// （例如「https://files.example.com，账号」）。识别之前先找出网址在哪里结束（urlEnd），只把这一段交给
+// marked 原来的规则，末尾的英文标点与不成对的括号照原来的规则去掉。显式写的链接（[文字](网址) 与 <网址>）不经过这里
+const URL_START = /^(?:(?:https?|ftp):\/\/|www\.)/i
+// 全角与中文常用的标点：通用标点、CJK 标点、竖排与小写变体、全角与半角形式这几块里的标点、符号与空格。
+// 这几块里的字母不算（々、〆、〇 等），日文与中文的网址路径里会有它们
+const WIDE_BLOCKS =
+  /[\u{2010}-\u{205e}\u{3000}-\u{303f}\u{fe10}-\u{fe1f}\u{fe30}-\u{fe6f}\u{ff00}-\u{ff65}]/u
+const PUNCTUATION = /[\p{P}\p{S}\p{Zs}]/u
+const CJK_LETTER = /[\p{Script=Han}\p{Script=Hiragana}\p{Script=Katakana}\p{Script=Hangul}]/u
+const SPACE = /\s/u
 
-// 先按 marked 原来的规则识别；识别出的网址里有上面那些字符时，截到第一个之前再识别一次，
-// 末尾的英文标点与不成对的括号照原来的规则去掉
-function urlBeforeCjk(this: Tokenizer, src: string): Tokens.Link | undefined {
-  const token = Tokenizer.prototype.url.call(this, src)
-  const end = token ? token.raw.search(URL_END) : -1
-  return end < 0 ? token : Tokenizer.prototype.url.call(this, src.slice(0, end))
+// 域名里的中日韩文字要接在域名开头、点、连字符、@ 或别的中日韩文字后面（example.中国）。
+// 紧贴在英文字母、数字或括号后面的（example.com账号）是域名之后的正文
+const inHostLabel = (previous: string) =>
+  previous === '' ||
+  previous === '.' ||
+  previous === '-' ||
+  previous === '@' ||
+  CJK_LETTER.test(previous)
+
+// 网址在 src 里到哪里为止（不含），from 是协议之后、域名开始的位置。
+// 遇到全角或中文的标点就结束，在域名里、路径里都是（网址里不会有）；中日韩文字只在还没到路径
+// （第一个 / ? # 之前）、又不是域名的一部分时结束，路径与查询里的中文留着（https://ja.wikipedia.org/wiki/東京）。
+// 第一个空白或 < 本来就是网址的尽头，扫到那里为止：每个网址只扫它自己这一段，不扫后面的整段正文
+function urlEnd(src: string, from: number): number {
+  let host = true
+  let previous = ''
+  for (let i = from; i < src.length;) {
+    const ch = String.fromCodePoint(src.codePointAt(i)!)
+    if (ch === '<' || SPACE.test(ch)) return i
+    if (WIDE_BLOCKS.test(ch) && PUNCTUATION.test(ch)) return i
+    if (ch === '/' || ch === '?' || ch === '#') host = false
+    else if (host && CJK_LETTER.test(ch) && !inHostLabel(previous)) return i
+    previous = ch
+    i += ch.length
+  }
+  return src.length
+}
+
+// 只处理以协议或 www. 开头的网址；邮箱、mailto: 这些交给原来的规则（返回 false）
+function urlBeforeWideText(this: Tokenizer, src: string): Tokens.Link | undefined | false {
+  const start = URL_START.exec(src)
+  if (!start) return false
+  return Tokenizer.prototype.url.call(this, src.slice(0, urlEnd(src, start[0].length)))
 }
 
 // 链接里面的图片（例如带链接的徽章）：只留替代文字，没有替代文字时写图片的地址，免得链接里再套一个链接
@@ -99,7 +132,7 @@ function markImages(tokens: Token[]) {
 
 const marked = new Marked({
   gfm: true,
-  tokenizer: { url: urlBeforeCjk },
+  tokenizer: { url: urlBeforeWideText },
   walkTokens(token) {
     // 行内出现 <code>、<pre>、<kbd>、<script> 之后，marked 会把后面的文字标成「已经转义」原样输出，
     // 直到对应的结束标签，没有结束标签就一直到正文末尾。这里一律交给渲染器转义，代码块也一样

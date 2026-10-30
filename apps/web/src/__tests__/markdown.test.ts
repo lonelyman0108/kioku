@@ -1,4 +1,5 @@
-import { describe, expect, it } from 'vitest'
+import { Tokenizer } from 'marked'
+import { describe, expect, it, vi } from 'vitest'
 
 import { markdownToHtml, rawHtml } from '../markdown'
 
@@ -73,7 +74,10 @@ describe('markdownToHtml', () => {
     const link = (href: string, text = href) => `<a href="${href}">${text}</a>`
     const paragraph = (html: string) => `<p>${html}</p>\n`
 
-    it('后面紧跟全角标点或中日韩文字时，网址到那里为止', () => {
+    // 路径里有中文的网址：链接的地址按 marked 的规则编码，显示的文字照原样
+    const wide = (url: string) => link(encodeURI(url), url)
+
+    it('遇到全角或中文的标点就结束，在域名之后、路径里都是', () => {
       expect(markdownToHtml('https://files.example.com，账号 admin')).toBe(
         paragraph(`${link('https://files.example.com')}，账号 admin`),
       )
@@ -82,14 +86,12 @@ describe('markdownToHtml', () => {
           paragraph(`见 ${link('https://files.example.com/a')}${mark}然后`),
         )
       }
-      expect(markdownToHtml('网盘https://files.example.com账号')).toBe(
-        paragraph(`网盘${link('https://files.example.com')}账号`),
+      // 标点不会是域名的一部分：后面的正文里有 / 也在标点处结束
+      expect(markdownToHtml('https://files.example.com，账号/密码 见下')).toBe(
+        paragraph(`${link('https://files.example.com')}，账号/密码 见下`),
       )
       expect(markdownToHtml('https://example.com/search?q=kioku&lang=zh，然后')).toBe(
         paragraph(`${link('https://example.com/search?q=kioku&amp;lang=zh')}，然后`),
-      )
-      expect(markdownToHtml('https://example.com/ページ')).toBe(
-        paragraph(`${link('https://example.com/')}ページ`),
       )
       expect(markdownToHtml('（https://example.com）')).toBe(
         paragraph(`（${link('https://example.com')}）`),
@@ -97,6 +99,49 @@ describe('markdownToHtml', () => {
       expect(markdownToHtml('www.example.com，账号')).toBe(
         paragraph(`${link('http://www.example.com', 'www.example.com')}，账号`),
       )
+    })
+
+    it('中日韩文字只在紧跟着域名、还没到路径时结束；域名里用点隔开的与路径、查询里的留着', () => {
+      expect(markdownToHtml('网盘https://files.example.com账号')).toBe(
+        paragraph(`网盘${link('https://files.example.com')}账号`),
+      )
+      expect(markdownToHtml('https://example.com:8080账号/密码')).toBe(
+        paragraph(`${link('https://example.com:8080')}账号/密码`),
+      )
+      expect(markdownToHtml('https://example.中国/path 见下')).toBe(
+        paragraph(`${wide('https://example.中国/path')} 见下`),
+      )
+      expect(markdownToHtml('https://example.中国，然后')).toBe(
+        paragraph(`${wide('https://example.中国')}，然后`),
+      )
+      expect(markdownToHtml('https://ja.wikipedia.org/wiki/東京')).toBe(
+        paragraph(wide('https://ja.wikipedia.org/wiki/東京')),
+      )
+      // 々 是字母不是标点，留在路径里
+      expect(markdownToHtml('https://ja.wikipedia.org/wiki/佐々木，然后')).toBe(
+        paragraph(`${wide('https://ja.wikipedia.org/wiki/佐々木')}，然后`),
+      )
+      expect(markdownToHtml('https://example.com/ページ?q=東京#見出し')).toBe(
+        paragraph(wide('https://example.com/ページ?q=東京#見出し')),
+      )
+    })
+
+    it('很多网址挤在一大段没有空白的中文里时，每个网址只扫它自己这一段', () => {
+      const url = vi.spyOn(Tokenizer.prototype, 'url')
+      try {
+        const source = '见https://example.com/a，然后'.repeat(4000)
+        const started = performance.now()
+        const html = markdownToHtml(source)
+        const elapsed = performance.now() - started
+        expect(html.match(/<a /g)).toHaveLength(4000)
+        // 交给 marked 原来规则的只有截好的网址，加起来不到正文的长度；每次都扫到段尾的话是正文长度的上千倍
+        const scanned = url.mock.calls.reduce((sum, [src]) => sum + src.length, 0)
+        expect(scanned).toBeLessThan(source.length)
+        // 自己找结尾的那一步也不能每次扫到段尾：线性时几十毫秒，那样要好几秒
+        expect(elapsed).toBeLessThan(1500)
+      } finally {
+        url.mockRestore()
+      }
     })
 
     it('显式写的链接照原样，网址里的中文也在', () => {
