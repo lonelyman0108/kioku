@@ -79,8 +79,8 @@ async function undelete(item: DeletedMemory) {
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '撤销删除失败', color: 'error' })
-    // URI 刚被别的记忆占上、或者这条已经被别人撤销了：重新读列表，标记跟着变
-    if (err instanceof ApiError && err.status === 409 && props.spaceId === spaceId) {
+    // URI 刚被别的记忆占上、这条已经被别人撤销或永久清除、权限变了：列表已经过时，重新读，标记跟着变
+    if (err instanceof ApiError && props.spaceId === spaceId) {
       void deleted.refetch()
     }
   } finally {
@@ -97,7 +97,7 @@ const TAKEN_HINT =
 <template>
   <div class="space-y-3">
     <p class="text-xs text-muted">
-      删除的记忆可以撤销删除，原样回来；同一个 URI 上已经有别的记忆时不能撤销（标着「URI
+      删除的记忆可以撤销删除，原样回来；同一个 URI 上已经有别的记忆时撤销会冲突（标着「URI
       已被占用」，先把那条移走或删掉）。撤销删除不动有效期：标着「已过期」的，撤销之后回到「已过期」里，在那里可以让它重新生效。
     </p>
     <p v-if="retention" class="flex items-start gap-1.5 text-xs text-warning">

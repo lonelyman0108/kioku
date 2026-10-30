@@ -292,8 +292,8 @@ type Rules = ReturnType<typeof retentionRules>
 // 已删除的凭据源从什么时候起算保留期，照 retentionRules 的两条：每次清理先删到期的凭据（STEPS 里凭据在凭据源之前），
 // 再删没有凭据指着的凭据源。所以只有已删除的凭据指着它时，等其中最晚删除的那条到期之后一起清除，取它和自己的删除时间里晚的；
 // 还有没删除的凭据指着它时（凭据恢复之后没改绑）为 null，改绑或删掉那些凭据之前不会清除。凭据页的已删除列表按它算还剩几天，
-// 是 timestamptz，取出来时按凭据源的 deletedAt 列转换
-export const PROVIDER_RETENTION_FROM = sql`(case
+// 是 timestamptz，取出来时按凭据源的 deletedAt 列转换。每次给一个新的 SQL 对象：mapWith 改的是对象本身
+export const providerRetentionFrom = () => sql`(case
   when exists (select 1 ${PROVIDER_CREDENTIALS} and ${credentials.deletedAt} is null) then null
   else greatest(${credentialProviders.deletedAt}, (select max(${credentials.deletedAt}) ${PROVIDER_CREDENTIALS}))
 end)`

@@ -14,7 +14,7 @@ import type {
 } from '@kioku/contracts'
 import { and, asc, eq } from 'drizzle-orm'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { isUniqueViolation, withSpace, type Database } from '../../db/client'
@@ -1004,6 +1004,33 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       await deletedThenExpired(slot.id)
       await shared('kb://slot')
       expect(await matchesUndelete(slot.id)).toBe(true)
+    })
+
+    it('应用的时钟比数据库快：撤销时 claimUri 按应用的时间先让出占着的那条，标记照着判断', async () => {
+      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+      // 占着的两条都在一分半之后到期（有效到至少要晚一分钟）：按数据库的时间还有效，
+      // 按快了两分半的应用时间已经过期，alice 都让得出
+      const soon = new Date(Date.now() + 90_000).toISOString()
+      const same = await shared('kb://skew')
+      await remove(same)
+      await shared('kb://skew', { validTo: soon })
+      const other = await shared('kb://skew-shared')
+      await remove(other)
+      ok<MemoryView>(
+        await create(
+          { uri: 'kb://skew-shared', content: 'eve 的私人笔记', validTo: soon },
+          editor.cookie,
+        ),
+        201,
+      )
+      vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 150_000 })
+      try {
+        // 同一归属的唯一索引、共享与成员节点的互斥触发器都碰不上：claimUri 先让出了占着的那条
+        expect(await matchesUndelete(same.id)).toBe(false)
+        expect(await matchesUndelete(other.id)).toBe(false)
+      } finally {
+        vi.useRealTimers()
+      }
     })
 
     it('没有权限撤销的不标：viewer 看不出 URI 被别人占着', async () => {

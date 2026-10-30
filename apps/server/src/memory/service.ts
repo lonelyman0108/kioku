@@ -509,11 +509,12 @@ export class MemoryService {
     for (const { row, ended } of targets) {
       const blocked = occupants.some((m) => {
         if (m.id === row.id || m.domain !== row.domain || m.path !== row.path) return false
-        // 同一归属：唯一索引挡着，除非它已经过期、撤销时让得出（两边都有效时触发器也挡，结论一样）
-        if (m.ownerAccountId === row.ownerAccountId) {
-          return !(!isValidAt(m, now) && this.canRelease(m))
-        }
-        // 归属不同：两边都还有效、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
+        // 撤销时 claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出。可能挡着的（同一归属，
+        // 或者有一边是共享节点）都在 claimUri 的候选里；两个成员各自的节点本来就不冲突
+        if (!isValidAt(m, now) && this.canRelease(m)) return false
+        // 同一归属：唯一索引挡着，已过期的也算（两边都有效时触发器也挡，结论一样）
+        if (m.ownerAccountId === row.ownerAccountId) return true
+        // 归属不同：两边都还有效（按数据库的时间）、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
         return !ended && !m.ended && (row.ownerAccountId === null || m.ownerAccountId === null)
       })
       if (blocked) taken.add(row.id)
