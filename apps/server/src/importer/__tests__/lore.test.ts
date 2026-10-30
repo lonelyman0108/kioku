@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { planImport, type LoreNode, type LoreSnapshot } from '../lore'
+import {
+  assertExecutable,
+  credentialHints,
+  planImport,
+  type LoreNode,
+  type LoreSnapshot,
+} from '../lore'
 
 const at = new Date('2026-01-01T00:00:00Z')
 const node = (uri: string, extra: Partial<LoreNode> = {}): LoreNode => ({
@@ -144,9 +150,9 @@ describe('Lore 导入计划', () => {
       { ...options, secretUris: new Set(['infra://keystore']) },
     )
     expect(plan.warnings).toEqual([
-      'core://notes/router 看起来是凭据，没有用 --secret 标记',
-      'infra://nas 的正文里像有密码或 Token，没有用 --secret 标记',
-      'infra://keystore 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文',
+      { uri: 'core://notes/router', kind: 'credentialPath' },
+      { uri: 'infra://nas', kind: 'credentialExtras' },
+      { uri: 'infra://keystore', kind: 'secretExtras' },
     ])
   })
 
@@ -176,10 +182,10 @@ describe('Lore 导入计划', () => {
       undefined,
       undefined,
     ])
-    expect(plan.errors).toEqual(['--secret 指定的 infra://nope 在 Lore 里不存在'])
+    expect(plan.errors).toEqual([{ kind: 'secretNotFound', uri: 'infra://nope' }])
     expect(plan.warnings).toEqual([
-      'infra://keystore/token 看起来是凭据，没有用 --secret 标记',
-      'infra://hypervisor 的正文里像有密码或 Token，没有用 --secret 标记',
+      { uri: 'infra://keystore/token', kind: 'credentialPath' },
+      { uri: 'infra://hypervisor', kind: 'credentialContent' },
     ])
   })
 
@@ -281,6 +287,102 @@ describe('Lore 导入计划', () => {
         reason: expect.stringContaining('preferences://router 是 owner 层'),
       },
     ])
+  })
+
+  it('disclosure 超长时截断并提醒；像凭据的路径、正文、disclosure 或关键词分开给出', () => {
+    const plan = planImport(
+      snapshot(node('infra://long', { disclosure: '长'.repeat(501) })),
+      [],
+      options,
+    )
+    expect(plan.warnings).toEqual([{ uri: 'infra://long', kind: 'disclosureTruncated' }])
+    expect(plan.memories[0]!.request.disclosure).toHaveLength(500)
+
+    expect(credentialHints(node('infra://plain'))).toEqual({
+      path: false,
+      content: false,
+      extras: false,
+    })
+    expect(
+      credentialHints(
+        node('infra://notes', { aliases: ['infra://old/token'], keywords: ['token: abcdef'] }),
+      ),
+    ).toEqual({ path: true, content: false, extras: true })
+    expect(credentialHints(node('infra://hv', { content: '密码：hunter2' }))).toEqual({
+      path: false,
+      content: true,
+      extras: false,
+    })
+  })
+
+  describe('这次不导入的节点', () => {
+    const zcodeApps = [
+      { slug: 'claude-code', runtimeFamily: 'claudecode', ownerAccountId: ME },
+      { slug: 'zcode', runtimeFamily: 'claudecode', ownerAccountId: ME },
+    ]
+
+    it('在循环里按节点跳过：别的节点的应用映射不变，别名和主路径都指得到它', () => {
+      const snap = snapshot(
+        node('core://agent/claudecode'),
+        node('core://agent/zcode', { aliases: ['core://agent/zc'] }),
+      )
+      const all = planImport(snap, zcodeApps, options)
+      for (const uri of ['core://agent/zcode', 'core://agent/zc']) {
+        const plan = planImport(snap, zcodeApps, { ...options, excludeUris: new Set([uri]) })
+        expect(plan.errors).toEqual([])
+        // 跳过 zcode 之后，core://agent/claudecode 不能因为少了一个运行时就写进 zcode 这个应用
+        expect(plan.memories.map((m) => m.request.uri)).toEqual(['app://claude-code/agent'])
+        expect(plan.memories[0]!.importKey).toBe(all.memories[0]!.importKey)
+        expect(plan.skipped).toContainEqual({
+          source: 'core://agent/zcode',
+          reason: '这次选择不导入',
+        })
+        expect(plan.apps.map((m) => m.runtime)).toEqual(['claudecode'])
+      }
+    })
+
+    it('对不上任何节点时是错误；同时标了 secret 时以不导入为准', () => {
+      const plan = planImport(snapshot(node('infra://a')), [], {
+        ...options,
+        secretUris: new Set(['infra://a']),
+        excludeUris: new Set(['infra://a', 'infra://nope']),
+      })
+      expect(plan.errors).toEqual([{ kind: 'excludeNotFound', uri: 'infra://nope' }])
+      expect(plan.memories).toEqual([])
+      expect(plan.skipped.map((s) => s.source)).toEqual(['infra://a'])
+    })
+  })
+
+  describe('写入之前共用的检查', () => {
+    const key = Buffer.alloc(32)
+    it('计划有错误时拒绝，文字不提命令行的参数', () => {
+      const plan = planImport(snapshot(node('infra://a')), [], {
+        ...options,
+        secretUris: new Set(['infra://nope']),
+        excludeUris: new Set(['infra://gone']),
+      })
+      expect(() => assertExecutable(plan, key)).toThrow(/infra:\/\/nope.*infra:\/\/gone/)
+      expect(() => assertExecutable(plan, key)).not.toThrow(/--secret/)
+    })
+    it('要 secret 又没有主密钥时拒绝，不要 secret 时不需要主密钥', () => {
+      const secret = planImport(snapshot(node('infra://a')), [], {
+        ...options,
+        secretUris: new Set(['infra://a']),
+      })
+      expect(() => assertExecutable(secret, null)).toThrow('没有配置主密钥')
+      expect(() => assertExecutable(secret, key)).not.toThrow()
+      const plain = planImport(snapshot(node('infra://a')), [], options)
+      expect(() => assertExecutable(plain, null)).not.toThrow()
+    })
+  })
+
+  it('有导出时间时记进事件的 context，读库（命令行）时没有这一项；去重键不变', () => {
+    const snap = snapshot(node('infra://a'))
+    const fromLive = planImport(snap, [], options)
+    const fromFile = planImport(snap, [], { ...options, exportedAt: '2026-01-02T00:00:00.000Z' })
+    expect(fromLive.memories[0]!.context).not.toHaveProperty('loreExportedAt')
+    expect(fromFile.memories[0]!.context.loreExportedAt).toBe('2026-01-02T00:00:00.000Z')
+    expect(fromFile.memories[0]!.importKey).toBe(fromLive.memories[0]!.importKey)
   })
 
   it('保留 Lore 的 priority、disclosure 与时间，事件上下文记下出处', () => {

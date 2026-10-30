@@ -1,12 +1,16 @@
+import { createHash } from 'node:crypto'
+
 import {
   CreateMemoryRequest,
   RUNTIME_FAMILIES,
   Slug,
   type Layer,
+  type LoreTargetState,
+  type LoreWarningKind,
   type RuntimeFamily,
   type UpdateMemoryRequest,
 } from '@kioku/contracts'
-import { and, eq, inArray, isNotNull, sql } from 'drizzle-orm'
+import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import type postgres from 'postgres'
 
 import { consoleAccess } from '../access/access'
@@ -19,7 +23,7 @@ import {
 import { decryptSecret } from '../crypto/envelope'
 import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { sealedSettingsKeys } from '../crypto/rotation'
-import { withSpace, type Db } from '../db/client'
+import { pgErrorCode, withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
 import { MemoryError, MemoryService } from '../memory/service'
 import { APP_DOMAIN, DEFAULT_SENSITIVITY, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
@@ -118,6 +122,11 @@ export interface ImportOptions {
   persona: { slug: string; name: string }
   // 这些 Lore URI（含别名）导入为 secret（加密存储）
   secretUris: ReadonlySet<string>
+  // 这些 Lore URI（含别名）这次不导入，导入过的就是这次不同步。同时标了 secret 时以这里为准
+  excludeUris?: ReadonlySet<string>
+  // 这份数据的导出时间（ISO 8601），记进事件的 context，用来判断之后的文件新旧。
+  // 命令行读的是现在的库，没有这一项
+  exportedAt?: string
 }
 
 export interface ExistingApp {
@@ -148,9 +157,16 @@ export interface ImportPlan {
   memories: PlannedMemory[]
   skipped: { source: string; reason: string }[]
   droppedKeywords: { source: string; keyword: string; reason: string }[]
-  warnings: string[]
-  // 有这些问题时拒绝执行，例如 --secret 对不上任何节点：照常导入会把凭据写成明文
-  errors: string[]
+  // 文字由命令行与界面各自拼
+  warnings: { uri: string; kind: LoreWarningKind }[]
+  // 有这些问题时拒绝执行，例如要标 secret 的 URI 对不上任何节点：照常导入会把凭据写成明文
+  errors: ImportPlanError[]
+}
+
+// 指定的 URI 对不上任何节点
+export interface ImportPlanError {
+  kind: 'secretNotFound' | 'excludeNotFound'
+  uri: string
 }
 
 export interface ImportKeyParts {
@@ -168,10 +184,25 @@ export function importKeyOf(context: ImportKeyParts): string {
 }
 
 const MAX_KEYWORDS = 32
-const MAX_DISCLOSURE = 500
+export const MAX_DISCLOSURE = 500
 // 路径里带这些词、或正文像有明文凭据（规则见 contracts 的 PLAINTEXT_CREDENTIAL）的多半含凭据，没有标成 secret 时提醒。
 // 只提醒不自动标记：secret 不进召回和 boot，整条记忆都只能显式读取，要由人来权衡
 const CREDENTIAL_PATH = /credential|password|passwd|secret|token|密码|凭据/i
+
+const extrasOf = (node: LoreNode) => [node.disclosure ?? '', ...node.keywords].join('\n')
+
+// 一个节点像不像含凭据，路径（主路径与别名）、正文、disclosure 或关键词分开看
+export function credentialHints(node: LoreNode): {
+  path: boolean
+  content: boolean
+  extras: boolean
+} {
+  return {
+    path: [node.uri, ...node.aliases].some((u) => CREDENTIAL_PATH.test(u)),
+    content: looksLikePlaintextCredential(node.content ?? ''),
+    extras: looksLikePlaintextCredential(extrasOf(node)),
+  }
+}
 
 // 计划只依赖读出来的数据和已有应用，不写库：先打印给人确认，再执行
 export function planImport(
@@ -230,24 +261,36 @@ export function planImport(
     return result
   }
 
-  // --secret 也可以写别名；对不上任何节点时拒绝执行，免得拼错一个字就把凭据导成明文
+  // 要标 secret 的也可以写别名；对不上任何节点时拒绝执行，免得拼错一个字就把凭据导成明文。
+  // 不导入的同样：对不上时照常导入，就把明确不要的节点写进去了
   const nodeByUri = new Map<string, LoreNode>()
   for (const node of snapshot.nodes) {
     nodeByUri.set(node.uri, node)
     for (const alias of node.aliases) nodeByUri.set(alias, node)
   }
-  const secretNodes = new Set<string>()
-  for (const uri of options.secretUris) {
-    const node = nodeByUri.get(uri)
-    if (node) secretNodes.add(node.uuid)
-    else plan.errors.push(`--secret 指定的 ${uri} 在 Lore 里不存在`)
+  const nodesOf = (uris: Iterable<string>, kind: ImportPlanError['kind']) => {
+    const found = new Set<string>()
+    for (const uri of uris) {
+      const node = nodeByUri.get(uri)
+      if (node) found.add(node.uuid)
+      else plan.errors.push({ kind, uri })
+    }
+    return found
   }
+  const secretNodes = nodesOf(options.secretUris, 'secretNotFound')
+  // 按节点判断、在循环里跳过，不从 snapshot 里过滤：runtimes 决定哪些应用按类型匹配，
+  // 少算一个运行时，别的节点就会写错应用
+  const excludedNodes = nodesOf(options.excludeUris ?? [], 'excludeNotFound')
   // 两个节点映射到同一个 URI 时只导入第一个
   const plannedUris = new Map<string, string>()
 
   for (const node of snapshot.nodes) {
     for (const alias of node.aliases) {
       plan.skipped.push({ source: alias, reason: `是 ${node.uri} 的别名，Kioku 没有别名` })
+    }
+    if (excludedNodes.has(node.uuid)) {
+      plan.skipped.push({ source: node.uri, reason: '这次选择不导入' })
+      continue
     }
     if (!node.content) {
       plan.skipped.push({ source: node.uri, reason: '没有正文' })
@@ -303,19 +346,20 @@ export function planImport(
 
     // 路径看主路径和别名；正文之外 disclosure 与关键词也看：secret 只加密正文，这两项始终是明文
     const secret = secretNodes.has(node.uuid)
-    const extras = [node.disclosure ?? '', ...node.keywords].join('\n')
+    const extras = extrasOf(node)
     if (!secret && [node.uri, ...node.aliases].some((u) => CREDENTIAL_PATH.test(u))) {
-      plan.warnings.push(`${node.uri} 看起来是凭据，没有用 --secret 标记`)
+      plan.warnings.push({ uri: node.uri, kind: 'credentialPath' })
     } else if (!secret && looksLikePlaintextCredential(`${node.content}\n${extras}`)) {
-      plan.warnings.push(`${node.uri} 的正文里像有密码或 Token，没有用 --secret 标记`)
+      plan.warnings.push({
+        uri: node.uri,
+        kind: looksLikePlaintextCredential(node.content) ? 'credentialContent' : 'credentialExtras',
+      })
     } else if (secret && looksLikePlaintextCredential(extras)) {
-      plan.warnings.push(
-        `${node.uri} 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文`,
-      )
+      plan.warnings.push({ uri: node.uri, kind: 'secretExtras' })
     }
     let disclosure = node.disclosure ?? undefined
     if (disclosure && disclosure.length > MAX_DISCLOSURE) {
-      plan.warnings.push(`${node.uri} 的 disclosure 超过 ${MAX_DISCLOSURE} 字，已截断`)
+      plan.warnings.push({ uri: node.uri, kind: 'disclosureTruncated' })
       disclosure = disclosure.slice(0, MAX_DISCLOSURE)
     }
     // 按真正会写进去的 disclosure 判断（截断之后）；关键词里的占位符在 keywordsOf 里单独丢掉
@@ -368,6 +412,7 @@ export function planImport(
         targetApp: target.app ?? null,
         targetPersona: target.persona ?? null,
         previousVersions: node.previousVersions,
+        ...(options.exportedAt ? { loreExportedAt: options.exportedAt } : {}),
       }
       plan.memories.push({
         source: node.uri,
@@ -384,7 +429,7 @@ export function planImport(
 
 // 关键词与接口写入的规则一致：至少两个字、最长 64 字、每条最多 32 个；超出时保留较长、较具体的
 function keywordsOf(node: LoreNode, plan: ImportPlan): string[] {
-  const kept: string[] = []
+  const unique = new Set<string>()
   for (const raw of node.keywords) {
     const keyword = raw.trim()
     if (mentionsPlaceholder(keyword)) {
@@ -397,15 +442,31 @@ function keywordsOf(node: LoreNode, plan: ImportPlan): string[] {
       plan.droppedKeywords.push({ source: node.uri, keyword, reason: '不足两个字' })
     } else if (keyword.length > 64) {
       plan.droppedKeywords.push({ source: node.uri, keyword, reason: '超过 64 个字' })
-    } else if (!kept.includes(keyword)) {
-      kept.push(keyword)
+    } else {
+      unique.add(keyword)
     }
   }
-  kept.sort((a, b) => b.length - a.length || a.localeCompare(b))
+  const kept = [...unique].sort((a, b) => b.length - a.length || a.localeCompare(b))
   for (const keyword of kept.splice(MAX_KEYWORDS)) {
     plan.droppedKeywords.push({ source: node.uri, keyword, reason: `超过每条 ${MAX_KEYWORDS} 个` })
   }
   return kept.sort()
+}
+
+// 写入之前共用的检查（命令行与路由）：计划有错误，或者要 secret 又没有主密钥时，什么都不写。
+// 文字不提命令行的参数，命令行自己说
+export function assertExecutable(plan: ImportPlan, masterKey: MasterKey | null): void {
+  if (plan.errors.length) {
+    const lines = plan.errors.map((e) =>
+      e.kind === 'secretNotFound'
+        ? `要标成 secret 的 ${e.uri} 在 Lore 里不存在`
+        : `要跳过的 ${e.uri} 在 Lore 里不存在`,
+    )
+    throw new MemoryError(400, `计划有错误，不能执行：${lines.join('；')}`)
+  }
+  if (!masterKey && plan.memories.some((m) => m.request.sensitivity === 'secret')) {
+    throw new MemoryError(400, '这个实例没有配置主密钥，不能导入 secret')
+  }
 }
 
 export interface ImportTarget {
@@ -413,6 +474,20 @@ export interface ImportTarget {
   spaceId: string
   accountId: string
   masterKey: MasterKey | null
+}
+
+// 空间里已有的应用：计划按它们映射 core://agent/<runtime>。按标识排序，映射的顺序不随行的物理位置变
+export function existingImportApps(db: Db, spaceId: string): Promise<ExistingApp[]> {
+  return withSpace(db, spaceId, (tx) =>
+    tx
+      .select({
+        slug: apps.slug,
+        runtimeFamily: apps.runtimeFamily,
+        ownerAccountId: apps.ownerAccountId,
+      })
+      .from(apps)
+      .orderBy(asc(apps.slug)),
+  )
 }
 
 export interface ImportResult {
@@ -434,6 +509,106 @@ export interface ImportResult {
   // （在 Kioku 里删除了的为 null）
   movedInLore: { uri: string; current: string | null }[]
   failed: { uri: string; reason: string }[]
+}
+
+// 写入时这个应用的默认人格怎么处理：不属于导入者的不往里写；还没有默认人格的设成导入的人格；
+// 已经在用别的人格的不动。计划预览与真正写入都按这个判断（人格还没建时 personaId 为 null）
+function personaEffect(
+  current: { owner: string; personaId: string | null } | undefined,
+  accountId: string,
+  personaId: string | null,
+): 'blocked' | 'given' | 'other' | 'same' {
+  if (current?.owner !== accountId) return 'blocked'
+  if (current.personaId === null) return 'given'
+  return current.personaId === personaId ? 'same' : 'other'
+}
+
+// 一个写入目标这次算什么、之前导入的是哪些记忆（新建时是空的）。计划预览与真正写入都按这个判断
+function priorImport(
+  item: PlannedMemory,
+  done: Map<string, ImportedMemory[]>,
+  moved: Map<string, ImportedMemory[]>,
+): { state: LoreTargetState; found: ImportedMemory[] } {
+  const earlier = moved.get(item.importKey)
+  if (earlier) return { state: 'moved', found: earlier }
+  const found = done.get(item.importKey)
+  return found ? { state: 'imported', found } : { state: 'new', found: [] }
+}
+
+export interface TargetPreview {
+  item: PlannedMemory
+  state: LoreTargetState
+  // 之前导入的那些记忆现在的样子，新建时是空的。在 Kioku 里删除了的 uri 为 null
+  current: { uri: string | null; secret: boolean }[]
+}
+
+export interface ImportPreview {
+  targets: TargetPreview[]
+  personaExists: boolean
+  // 之前的导入写到过的人格
+  importedPersonas: string[]
+  appsGivenPersona: string[]
+  appsOtherPersona: string[]
+}
+
+// 只读：这份计划真正写入时每个目标会怎样、哪些应用会被设默认人格，判断和 applyImport 是同一段
+export async function previewImport(
+  target: ImportTarget,
+  plan: ImportPlan,
+): Promise<ImportPreview> {
+  const { db, spaceId, accountId } = target
+  const done = await importedMemories(db, spaceId)
+  const moved = movedInLore(plan, done)
+  const { persona, rows } = await withSpace(db, spaceId, async (tx) => ({
+    persona: (
+      await tx
+        .select({ id: personas.id })
+        .from(personas)
+        .where(eq(personas.slug, plan.persona.slug))
+    )[0],
+    rows: await tx
+      .select({ slug: apps.slug, owner: apps.ownerAccountId, personaId: apps.defaultPersonaId })
+      .from(apps),
+  }))
+  const appBySlug = new Map(rows.map((r) => [r.slug, r]))
+  const preview: ImportPreview = {
+    targets: plan.memories.map((item) => {
+      const { state, found } = priorImport(item, done, moved)
+      return {
+        item,
+        state,
+        current: found.map((m) => ({ uri: m.uri, secret: m.state === 'secret' })),
+      }
+    }),
+    personaExists: Boolean(persona),
+    importedPersonas: [
+      ...new Set(
+        [...done.values()].flat().flatMap((m) => (m.targetPersona ? [m.targetPersona] : [])),
+      ),
+    ].sort(),
+    appsGivenPersona: [],
+    appsOtherPersona: [],
+  }
+  for (const mapping of plan.apps) {
+    for (const app of mapping.apps) {
+      const current = appBySlug.get(app.slug)
+      // 这次才新建的应用默认人格就是导入的人格
+      if (app.create && !current) continue
+      const effect = personaEffect(current, accountId, persona?.id ?? null)
+      if (effect === 'given') preview.appsGivenPersona.push(app.slug)
+      else if (effect === 'other') preview.appsOtherPersona.push(app.slug)
+    }
+  }
+  return preview
+}
+
+// 写库时数据本身的问题（22 类：值不对；23 类：违反约束）只算这一条失败，返回给人看的原因；别的错误返回 null。
+// 日志只记 SQLSTATE：驱动的错误里带着 SQL 与参数，也就是节点的正文
+function dataWriteFailure(err: unknown): string | null {
+  const code = pgErrorCode(err)
+  if (!code?.startsWith('22') && !code?.startsWith('23')) return null
+  console.error('写入 Lore 的节点时数据库报错', { code })
+  return `写不进数据库（${code}）`
 }
 
 // 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用
@@ -498,15 +673,16 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
           .from(apps)
           .where(eq(apps.slug, app.slug))
           .for('update')
-        if (current?.owner !== accountId) {
+        const effect = personaEffect(current, accountId, personaId)
+        if (effect === 'blocked') {
           blockedApps.add(app.slug)
-        } else if (current.personaId === null) {
+        } else if (effect === 'given') {
           await tx
             .update(apps)
             .set({ defaultPersonaId: personaId, updatedAt: new Date() })
             .where(eq(apps.slug, app.slug))
           result.appsGivenPersona.push(app.slug)
-        } else if (current.personaId !== personaId) {
+        } else if (effect === 'other') {
           result.appsOtherPersona.push(app.slug)
         }
       }
@@ -522,11 +698,11 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
       result.failed.push({ uri: item.request.uri, reason: `应用 ${app} 不属于导入者，没有写入` })
       continue
     }
-    const earlier = moved.get(item.importKey)
-    for (const m of earlier ?? [])
-      result.movedInLore.push({ uri: item.request.uri, current: m.uri })
-    const found = done.get(item.importKey) ?? earlier
-    if (found) {
+    const { state, found } = priorImport(item, done, moved)
+    if (state === 'moved') {
+      for (const m of found) result.movedInLore.push({ uri: item.request.uri, current: m.uri })
+    }
+    if (state !== 'new') {
       result.previouslyImported.push(item.request.uri)
       // 这次要求 secret、对应的记忆现在却是明文的才提醒；已经是 secret 或已经删除的照常跳过。
       // 一个键对应多条时每条明文都提醒，不看先后；导入后移动过的，旧 URI 上可能已经是别的记忆，提醒里要给出它现在的位置
@@ -551,9 +727,14 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
       })
       result.created.push(item.request.uri)
     } catch (err) {
-      if (!(err instanceof MemoryError)) throw err
-      if (err.status === 409) result.occupied.push(item.request.uri)
-      else result.failed.push({ uri: item.request.uri, reason: err.message })
+      if (err instanceof MemoryError) {
+        if (err.status === 409) result.occupied.push(item.request.uri)
+        else result.failed.push({ uri: item.request.uri, reason: err.message })
+        continue
+      }
+      const reason = dataWriteFailure(err)
+      if (reason === null) throw err
+      result.failed.push({ uri: item.request.uri, reason })
     }
   }
   return result
@@ -866,11 +1047,87 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
       })
       result.updated.push(item.uri)
     } catch (err) {
-      if (!(err instanceof MemoryError)) throw err
-      result.failed.push({ uri: item.uri, reason: err.message })
+      const reason = err instanceof MemoryError ? err.message : dataWriteFailure(err)
+      if (reason === null) throw err
+      result.failed.push({ uri: item.uri, reason })
     }
   }
   return result
+}
+
+// 计划的指纹：看计划与执行时都对不带勾选的基准计划算，所以勾选不影响它。
+// 覆盖人格、应用映射、每个写入目标（来源、URI、层、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
+// 不导入的、提醒、要更新的同步项与 Lore 里没有了的；都排好序，所以打乱导出的行序不会变。
+// 不覆盖版本号与时间：只有真要写的东西变了才算计划变了
+export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: SyncPlan): string {
+  const canonical = <T>(items: T[]) => items.map((item) => JSON.stringify(item)).sort()
+  return createHash('sha256')
+    .update(
+      JSON.stringify({
+        persona: plan.persona,
+        apps: canonical(
+          plan.apps.map((m) => ({
+            runtime: m.runtime,
+            apps: canonical(m.apps.map((a) => [a.slug, a.create, a.runtimeFamily])),
+          })),
+        ),
+        targets: canonical(
+          preview.targets.map(({ item, state }) => ({
+            source: item.source,
+            uri: item.request.uri,
+            layer: item.request.layer ?? null,
+            priority: item.request.priority,
+            disclosure: item.request.disclosure ?? null,
+            glossary: [...item.request.glossary].sort(),
+            content: createHash('sha256').update(item.request.content).digest('hex'),
+            state,
+          })),
+        ),
+        skipped: canonical(plan.skipped.map((s) => [s.source, s.reason])),
+        warnings: canonical(plan.warnings.map((w) => [w.uri, w.kind])),
+        updates: canonical(
+          sync.items
+            .filter((i) => i.state === 'update')
+            .map((i) => ({ uri: i.uri, changes: [...i.changes].sort() })),
+        ),
+        goneFromLore: [...sync.goneFromLore].sort(),
+      }),
+    )
+    .digest('hex')
+}
+
+// 这个空间里已写入的 Lore 数据的时间：各导入与同步事件记下的导出时间，没有的是命令行写的（读的是当时的库），取事件时间
+export async function loreDataTime(db: Db, spaceId: string): Promise<Date | null> {
+  const [row] = await withSpace(db, spaceId, (tx) =>
+    tx
+      .select({
+        at: sql<Date | null>`max(coalesce((${memoryEvents.context}->>'loreExportedAt')::timestamptz, ${memoryEvents.createdAt}))`.mapWith(
+          memoryEvents.createdAt,
+        ),
+      })
+      .from(memoryEvents)
+      .where(
+        and(
+          inArray(memoryEvents.eventType, ['import', 'sync']),
+          sql`${memoryEvents.context}->>'source' = 'lore'`,
+        ),
+      ),
+  )
+  return row?.at ?? null
+}
+
+// 文件比已写入的数据旧、这次又有要写入的内容时，返回那个数据时间。同步只看是否相等，旧文件会把正文改回去，
+// 指纹拦不住：两次算的是同一份旧文件。同一份文件续做时导出时间相等，不算旧
+export function staleAgainst(
+  exportedAt: string,
+  dataTime: Date | null,
+  preview: ImportPreview,
+  sync: SyncPlan,
+): Date | null {
+  if (!dataTime || new Date(exportedAt) >= dataTime) return null
+  const writes =
+    preview.targets.some((t) => t.state === 'new') || sync.items.some((i) => i.state === 'update')
+  return writes ? dataTime : null
 }
 
 // 导入 secret 之前确认主密钥和服务用的是同一把：库里已有加密数据时试着解密一条。

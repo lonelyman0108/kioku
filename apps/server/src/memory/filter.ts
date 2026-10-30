@@ -43,6 +43,13 @@ export const BOOT_ELIGIBLE = and(
   ),
 )!
 
+// 同一条件的 JS 版，给还没写进库的策展记忆用（导入计划标出会进启动上下文的节点）：受信来源是调用方的前提。
+// 改了 BOOT_ELIGIBLE 要同步改这里，loreImport.int.test.ts 会拿写进去的行比对
+export function bootEligible(layer: Layer, priority: number): boolean {
+  if (!BOOT_LAYERS.includes(layer)) return false
+  return priority === 0 || ((layer === 'persona' || layer === 'app') && priority <= 1)
+}
+
 // 读权限要看的那几个字段从哪里取。记忆表上就是这些列；事件的前后快照（jsonb）里有同名字段，
 // 用 snapshotColumns 取出来，这样历史也用同一套条件判断，不另写一份规则
 export interface MemoryColumns {

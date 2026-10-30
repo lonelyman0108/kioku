@@ -1,16 +1,19 @@
 import { parseArgs } from 'node:util'
 
-import { Slug } from '@kioku/contracts'
+import { LORE_DEFAULT_PERSONA, Slug, type LoreWarningKind } from '@kioku/contracts'
 import { and, eq } from 'drizzle-orm'
 import postgres from 'postgres'
 
 import { loadConfig } from '../config'
-import { assertRuntimeRole, connect, withSpace, type Db } from '../db/client'
+import { assertRuntimeRole, connect, type Db } from '../db/client'
 import { pendingMigrations } from '../db/migrate'
-import { accounts, apps, spaceMembers } from '../db/schema'
+import { accounts, spaceMembers } from '../db/schema'
 import {
   applyImport,
   applySync,
+  assertExecutable,
+  existingImportApps,
+  MAX_DISCLOSURE,
   planImport,
   planSync,
   readLore,
@@ -21,6 +24,7 @@ import {
   type SyncResult,
 } from '../importer/lore'
 import { requestBackfill } from '../jobs/queue'
+import { MemoryError } from '../memory/service'
 import { DEFAULT_SENSITIVITY } from '../memory/uri'
 import { runCli, UsageError } from './common'
 
@@ -52,8 +56,8 @@ async function main(): Promise<void> {
     options: {
       account: { type: 'string' },
       space: { type: 'string' },
-      persona: { type: 'string', default: 'default' },
-      'persona-name': { type: 'string', default: '默认人格' },
+      persona: { type: 'string', default: LORE_DEFAULT_PERSONA.slug },
+      'persona-name': { type: 'string', default: LORE_DEFAULT_PERSONA.name },
       secret: { type: 'string', multiple: true, default: [] },
       sync: { type: 'boolean', default: false },
       apply: { type: 'boolean', default: false },
@@ -86,16 +90,7 @@ async function main(): Promise<void> {
 
     const lore = postgres(loreUrl, { max: 1, onnotice: () => {} })
     const snapshot = await readLore(lore).finally(() => lore.end())
-    const existingApps = await withSpace(database.db, spaceId, (tx) =>
-      tx
-        .select({
-          slug: apps.slug,
-          runtimeFamily: apps.runtimeFamily,
-          ownerAccountId: apps.ownerAccountId,
-        })
-        .from(apps),
-    )
-    const plan = planImport(snapshot, existingApps, {
+    const plan = planImport(snapshot, await existingImportApps(database.db, spaceId), {
       accountId,
       persona: { slug: values.persona, name: values['persona-name'] },
       secretUris: new Set(values.secret),
@@ -108,7 +103,9 @@ async function main(): Promise<void> {
     )
     printPlan(plan)
     if (plan.errors.length) {
-      console.error(`\n计划有错误，不能执行：\n${plan.errors.map((e) => `  ${e}`).join('\n')}`)
+      // 命令行只有 --secret 会对不上
+      const lines = plan.errors.map((e) => `  --secret 指定的 ${e.uri} 在 Lore 里不存在`)
+      console.error(`\n计划有错误，不能执行：\n${lines.join('\n')}`)
       process.exitCode = 2
       return
     }
@@ -122,10 +119,15 @@ async function main(): Promise<void> {
       console.log('\n以上是导入计划，没有写入任何数据。确认无误后加 --apply 执行。')
       return
     }
-    // 有 secret 时，写入任何东西之前先确认主密钥可用、且和服务用的是同一把
-    if (plan.memories.some((m) => m.request.sensitivity === 'secret')) {
-      if (!config.masterKey)
-        throw new UsageError('要导入 secret，需要设置与服务相同的 KIOKU_MASTER_KEY')
+    // 有 secret 时，写入任何东西之前先确认主密钥可用、且和服务用的是同一把。
+    // 计划的错误上面已经报过，这里只会是缺主密钥
+    try {
+      assertExecutable(plan, config.masterKey)
+    } catch (err) {
+      if (!(err instanceof MemoryError)) throw err
+      throw new UsageError('要导入 secret，需要设置与服务相同的 KIOKU_MASTER_KEY')
+    }
+    if (config.masterKey && plan.memories.some((m) => m.request.sensitivity === 'secret')) {
       if (!(await verifyMasterKey(database.db, spaceId, config.masterKey))) {
         console.warn('库里还没有加密过的数据，无法确认 KIOKU_MASTER_KEY 与服务一致，请自行核对')
       }
@@ -176,6 +178,15 @@ async function resolveTarget(
   return { spaceId: membership.spaceId, accountId: account.id }
 }
 
+const WARNINGS: Record<LoreWarningKind, (uri: string) => string> = {
+  credentialPath: (uri) => `${uri} 看起来是凭据，没有用 --secret 标记`,
+  credentialContent: (uri) => `${uri} 的正文里像有密码或 Token，没有用 --secret 标记`,
+  credentialExtras: (uri) => `${uri} 的正文里像有密码或 Token，没有用 --secret 标记`,
+  secretExtras: (uri) =>
+    `${uri} 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文`,
+  disclosureTruncated: (uri) => `${uri} 的 disclosure 超过 ${MAX_DISCLOSURE} 字，已截断`,
+}
+
 function printPlan(plan: ImportPlan): void {
   console.log(
     `\n人格：core://soul 导入为 ${plan.persona.slug}（不存在时新建为「${plan.persona.name}」）`,
@@ -206,7 +217,7 @@ function printPlan(plan: ImportPlan): void {
   }
   if (plan.warnings.length) {
     console.log('\n提醒：')
-    for (const w of plan.warnings) console.log(`  ${w}`)
+    for (const w of plan.warnings) console.log(`  ${WARNINGS[w.kind](w.uri)}`)
   }
 }
 
