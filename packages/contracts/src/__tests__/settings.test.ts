@@ -86,6 +86,8 @@ describe('Key 与 Secret 的差别', () => {
         UpdateBackupSettings.safeParse({
           endpoint: 'https://example.com',
           bucket: 'kioku-test',
+          hour: 3,
+          keep: 2,
           accessKeyId: value,
         }),
         (data) => data.accessKeyId,
