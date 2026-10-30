@@ -913,6 +913,112 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
     })
   })
 
+  describe('已删除列表标出撤销删除会撞上 URI 的', () => {
+    const shared = async (uri: string, extra: Record<string, unknown> = {}, cookie = ws.cookie) =>
+      ok<MemoryView>(
+        await create({ uri, content: `${uri} 的正文`, layer: 'base', ...extra }, cookie),
+        201,
+      )
+    const personal = async (uri: string, cookie = ws.cookie) =>
+      ok<MemoryView>(await create({ uri, content: `${uri} 的私人笔记` }, cookie), 201)
+    // 标记和真去撤销删除的结果一致：标着的返回 409、什么都不改，没标的撤销成功。返回标记
+    const matchesUndelete = async (id: string, cookie = ws.cookie) => {
+      const item = (await deleted(cookie)).items.find((i) => i.id === id)!
+      const res = await undelete(id, cookie)
+      expect(res.status).toBe(item.uriTaken ? 409 : 200)
+      expect((await rowOf(id)).deletedAt === null).toBe(!item.uriTaken)
+      return item.uriTaken
+    }
+
+    it('同一归属被占（唯一索引）：共享的与个人的都标出来', async () => {
+      const old = await shared('kb://faq')
+      await remove(old)
+      await shared('kb://faq')
+      expect(await matchesUndelete(old.id)).toBe(true)
+
+      const mine = await personal('notes://todo')
+      await remove(mine)
+      await personal('notes://todo')
+      expect(await matchesUndelete(mine.id)).toBe(true)
+    })
+
+    it('共享节点与成员节点互斥（触发器）：两边都有效时标出来；两个成员各自的私人节点不冲突', async () => {
+      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+      // 共享的删掉之后，eve 在同一个 URI 上写了私人笔记：alice 看不到那条，只知道被占用
+      const door = await shared('kb://door')
+      await remove(door)
+      const note = await personal('kb://door', editor.cookie)
+      const list = await deleted()
+      expect(list.items.find((i) => i.id === door.id)?.uriTaken).toBe(true)
+      expect(JSON.stringify(list)).not.toContain(note.id)
+      expect(JSON.stringify(list)).not.toContain('私人笔记')
+      expect(await matchesUndelete(door.id)).toBe(true)
+
+      // alice 的私人记忆删掉之后，同一个 URI 上有了共享的
+      const plan = await personal('notes://plan')
+      await remove(plan)
+      await shared('notes://plan')
+      expect(await matchesUndelete(plan.id)).toBe(true)
+
+      // eve 也有一条同 URI 的私人记忆：和 alice 的互不相干
+      const diary = await personal('notes://diary')
+      await remove(diary)
+      await personal('notes://diary', editor.cookie)
+      expect(await matchesUndelete(diary.id)).toBe(false)
+    })
+
+    it('占着的那条已过期：同一归属的唯一索引照样算，撤销时让得出的先让出；共享与成员节点不再互斥', async () => {
+      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+      // 同一归属、alice 让得出：撤销时先让出这条过期的，不标
+      const first = await shared('kb://a')
+      await remove(first)
+      const lapsed = await shared('kb://a')
+      await expire(lapsed.id)
+      expect(await matchesUndelete(first.id)).toBe(false)
+      expect((await rowOf(lapsed.id)).deletedAt).not.toBeNull()
+
+      // 同一归属、eve 让不出（她写不了 secret）：唯一索引挡着，对 eve 标出来；alice 撤销时能让出，不标
+      const wifi = await shared('kb://wifi')
+      await remove(wifi)
+      const secret = await shared('kb://wifi', { sensitivity: 'secret' })
+      await expire(secret.id)
+      expect(JSON.stringify(await deleted(editor.cookie))).not.toContain(secret.id)
+      expect(await matchesUndelete(wifi.id, editor.cookie)).toBe(true)
+      expect(await matchesUndelete(wifi.id)).toBe(false)
+
+      // 共享的与成员的：占着的那条过期了，触发器不看它
+      const gate = await shared('kb://gate')
+      await remove(gate)
+      const note = await personal('kb://gate', editor.cookie)
+      await expire(note.id)
+      expect(await matchesUndelete(gate.id)).toBe(false)
+
+      // 被撤销的这一条自己已经过期：成员节点还有效也不互斥；同一归属的照样挡着
+      const room = await shared('kb://room', { validTo: inDays(1) })
+      await remove(room)
+      await deletedThenExpired(room.id)
+      await personal('kb://room', editor.cookie)
+      expect(await matchesUndelete(room.id)).toBe(false)
+      const slot = await shared('kb://slot', { validTo: inDays(1) })
+      await remove(slot)
+      await deletedThenExpired(slot.id)
+      await shared('kb://slot')
+      expect(await matchesUndelete(slot.id)).toBe(true)
+    })
+
+    it('没有权限撤销的不标：viewer 看不出 URI 被别人占着', async () => {
+      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+      const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
+      const door = await shared('kb://door')
+      await remove(door)
+      await personal('kb://door', editor.cookie)
+      const seen = (await deleted(viewer.cookie)).items.find((i) => i.id === door.id)
+      expect(seen?.uriTaken).toBe(false)
+      expect((await undelete(door.id, viewer.cookie)).status).toBe(403)
+      expect((await deleted()).items.find((i) => i.id === door.id)?.uriTaken).toBe(true)
+    })
+  })
+
   describe('被推翻的事实', () => {
     let botKey: string
     const group = {

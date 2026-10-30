@@ -436,12 +436,8 @@ export class MemoryService {
       ? await candidates.for('no key update', { skipLocked: true })
       : await candidates.for('no key update')
     for (const row of rows) {
-      // 能让出的：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
-      // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
-      // 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
-      const foreignPrivate =
-        row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
-      if (!foreignPrivate && !canModify(this.ctx.access, row)) continue
+      if (!this.canRelease(row)) continue
+      const foreignPrivate = this.foreignPrivate(row)
       // 只让出这一刻仍然过期的，删除时间就是这一刻（不早于过期时间，见 isReleased）。行已经锁住，这里只是复查
       const [gone] = await tx
         .update(memories)
@@ -456,6 +452,67 @@ export class MemoryService {
       await this.event(tx, row.id, 'expire', keep(row), keep(gone))
       released.push(row.id)
     }
+  }
+
+  // 别的成员的画像层、私人层记录：调用方看不到
+  private foreignPrivate(row: Pick<MemoryRow, 'ownerAccountId'>): boolean {
+    return row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
+  }
+
+  // claimUri 能让出的过期记录：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
+  // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
+  // 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
+  private canRelease(row: WriteIntent & Pick<MemoryRow, 'ownerAccountId' | 'provenance'>): boolean {
+    return this.foreignPrivate(row) || canModify(this.ctx.access, row)
+  }
+
+  // 撤销删除这几条会不会撞上 URI 冲突，返回会撞上的那些的 id。照撤销删除的几步判断：先由 claimUri
+  // 让出调用方能让出的过期记录，剩下的交给数据库——唯一索引 memories_uri_live_idx 看同一归属里没删除的，
+  // 已过期的也算；互斥触发器 memories_uri_exclusive 只看两边都还有效的，有一边是共享节点、或者两边属于
+  // 同一个成员就冲突（被撤销的这一条自己已经过期时不检查）。是否过期都按数据库的时间。
+  // 只看调用方撤销得了的（canModify，撤销不了的是 403，不替他去看这个 URI 上有没有别人的记录）；
+  // 占着 URI 的那条只用来判断，调用方读不到它时也只知道被占用，拿不到它的内容
+  private async undeleteConflicts(
+    tx: Tx,
+    rows: { row: MemoryRow; ended: boolean }[],
+  ): Promise<Set<string>> {
+    const targets = rows.filter(({ row }) => canModify(this.ctx.access, row))
+    if (!targets.length) return new Set()
+    const occupants = await tx
+      .select({
+        id: memories.id,
+        domain: memories.domain,
+        path: memories.path,
+        ownerAccountId: memories.ownerAccountId,
+        layer: memories.layer,
+        sensitivity: memories.sensitivity,
+        personaId: memories.personaId,
+        appId: memories.appId,
+        provenance: memories.provenance,
+        ended: sql<boolean>`(not ${STILL_VALID})`,
+      })
+      .from(memories)
+      .where(
+        and(
+          isNull(memories.deletedAt),
+          sql`(${memories.domain}, ${memories.path}) in (${sql.join(
+            targets.map(({ row }) => sql`(${row.domain}, ${row.path})`),
+            sql`, `,
+          )})`,
+        ),
+      )
+    const taken = new Set<string>()
+    for (const { row, ended } of targets) {
+      const blocked = occupants.some((m) => {
+        if (m.id === row.id || m.domain !== row.domain || m.path !== row.path) return false
+        // 同一归属：唯一索引挡着，除非它已经过期、撤销时让得出（两边都有效时触发器也挡，结论一样）
+        if (m.ownerAccountId === row.ownerAccountId) return !(m.ended && this.canRelease(m))
+        // 归属不同：两边都还有效、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
+        return !ended && !m.ended && (row.ownerAccountId === null || m.ownerAccountId === null)
+      })
+      if (blocked) taken.add(row.id)
+    }
+    return taken
   }
 
   private async findReadableOrNull(
@@ -2196,7 +2253,8 @@ export class MemoryService {
 
   // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性。
   // 只列用户删掉的（删除时还有效），删掉之后才到期的也列出来：撤销删除和过期互不相干，撤销之后它回到过期的状态。
-  // 过期之后被让出 URI 的不在这里，在已过期里重新生效。保留期的提示由路由补上
+  // 过期之后被让出 URI 的不在这里，在已过期里重新生效。每条标出撤销删除会不会撞上 URI 冲突（undeleteConflicts）。
+  // 保留期的提示由路由补上
   async deleted(query: PageQuery): Promise<Omit<DeletedMemoryList, 'retention'>> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
@@ -2204,6 +2262,7 @@ export class MemoryService {
         .select({
           row: memories,
           deletedMicros: sql<string>`${DELETED_MICROS}::text`,
+          ended: sql<boolean>`(not ${STILL_VALID})`,
         })
         .from(memories)
         .where(
@@ -2220,6 +2279,7 @@ export class MemoryService {
         .limit(query.limit + 1)
       const page = rows.slice(0, query.limit)
       const last = page.at(-1)
+      const taken = await this.undeleteConflicts(tx, page)
       return {
         items: page.map(({ row }) => ({
           id: row.id,
@@ -2231,6 +2291,7 @@ export class MemoryService {
           version: row.version,
           deletedAt: row.deletedAt!.toISOString(),
           validTo: endOf(row)?.toISOString() ?? null,
+          uriTaken: taken.has(row.id),
         })),
         nextCursor:
           rows.length > query.limit && last

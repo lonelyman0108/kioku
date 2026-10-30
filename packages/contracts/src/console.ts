@@ -198,6 +198,9 @@ export const DeletedMemory = z.object({
   deletedAt: z.string(),
   // 有效到；null 表示一直有效，已经过去时这条删掉之后又过期了
   validTo: z.string().nullable(),
+  // 撤销删除会撞上 URI 冲突（返回 409）：这个 URI 现在被别的记忆占着，要先把那条移走或删掉。
+  // 规则和撤销删除时一样，只说被占用、不说是哪条；调用方没有权限撤销的一律为 false
+  uriTaken: z.boolean(),
 })
 export type DeletedMemory = z.infer<typeof DeletedMemory>
 
