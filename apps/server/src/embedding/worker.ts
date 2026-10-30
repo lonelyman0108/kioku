@@ -29,8 +29,8 @@ export class EmbedUnavailable extends Error {
 }
 
 export interface SyncHooks {
-  // 写回时正被别的事务锁着、这次没处理的记忆，交给调用方稍后重试
-  onSkipped?: ((ids: string[]) => void) | undefined
+  // 写回时正被别的事务锁着、这次没处理的记忆，交给调用方稍后重试；返回 Promise 时等它做完再往下
+  onSkipped?: ((ids: string[]) => void | Promise<void>) | undefined
   // 逐条再试时这一条失败（例如正文超过模型的长度上限）：跳过它，别的照常写
   onFailed?: ((memoryId: string, message: string) => void) | undefined
   // 处理时间用完了、服务要停（signal）：还没请求的不再请求，正在请求的取消；写回已经拿到的向量，
@@ -52,7 +52,8 @@ async function keptModels(tx: Tx, embedder: Embedder): Promise<string[]> {
 // 最短的 GIVE_UP_AFTER 条都失败，本身就说明接口或渠道有问题（例如渠道的模型名写错了，每个请求都回 400）：
 // 停下来报给调用方（broken），不再一条条请求，这几条也不另算各自的失败，整组按一次接口失败处理。
 // 其中有一条成功了，失败的就只算那几条。不到 GIVE_UP_AFTER 条时一律只算这几条失败。
-// 处理时间用完了也停下：没拿到的不在结果里、也不报失败。已经拿到的向量不论怎样都交回去
+// 处理时间用完了、服务要停时也停下：没拿到的不在结果里、也不报失败，还在试最短的几条时已经失败的也一样
+// （试到一半说明不了是这几条的问题还是接口的问题）。已经拿到的向量不论怎样都交回去
 async function embedBatch(
   embedder: Embedder,
   batch: { id: string; text: string }[],
@@ -99,8 +100,6 @@ async function embedBatch(
       if (held.length >= GIVE_UP_AFTER) return { vectors, broken: err as Error }
     }
   }
-  // 还在试最短的几条时处理时间用完了：试过、失败了的照样算失败
-  if (probing) for (const f of held) onFailed?.(f.id, f.message)
   return { vectors, broken: null }
 }
 
@@ -262,7 +261,7 @@ async function syncRows(
     if (locked.size) await tx.delete(memoryEmbeddings).where(otherModels([...locked], keep))
     return { written: writes.length, skipped }
   })
-  if (skipped.length) hooks.onSkipped?.(skipped)
+  if (skipped.length) await hooks.onSkipped?.(skipped)
   // 没生成向量、也没算失败、也没因为被锁着交给 onSkipped 的：接口不可用时随错误交给调用方（写好的不在里面），
   // 处理时间用完了、服务要停时交给 onDeferred
   const later = new Set(skipped)
@@ -287,7 +286,8 @@ export async function embedMemories(
 }
 
 export interface BackfillOptions {
-  onSkipped?: (spaceId: string, ids: string[]) => void
+  // 见 SyncHooks 的 onSkipped
+  onSkipped?: (spaceId: string, ids: string[]) => void | Promise<void>
   onFailed?: SyncHooks['onFailed']
   // 每补一页之前问一次，返回 false 就停下（例如换模型被放弃了，不再请求它的接口）
   shouldContinue?: () => Promise<boolean>

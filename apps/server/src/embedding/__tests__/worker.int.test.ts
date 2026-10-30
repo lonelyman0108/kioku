@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto'
+import { getEventListeners } from 'node:events'
 
 import type { EmbeddingSettingsView } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
@@ -120,7 +121,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     await withSpace(database.db, ws.spaceId, async (tx) => {
       await tx.execute(sql`select id from memories where id = ${id} for update`)
       const written = await embedMemories(database.db, embedder, ws.spaceId, [id], {
-        onSkipped: (ids) => skipped.push(ids),
+        onSkipped: (ids) => void skipped.push(ids),
       })
       expect(written).toBe(0)
     })
@@ -132,7 +133,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   it('别的事务只是往记忆上写外键（行上加 KEY SHARE）时照常写向量；正在改这一行时才跳过、之后重试', async () => {
     const embedder = fakeEmbedder()
     const skipped: string[][] = []
-    const onSkipped = (ids: string[]) => skipped.push(ids)
+    const onSkipped = (ids: string[]) => void skipped.push(ids)
     // 每种情况一条还没有向量的记忆：已经有最新的向量时不用锁行，测不出来
     const fresh = (path: string) =>
       create({ uri: `core://${path}`, content: `${path} 的正文`, layer: 'base' })
@@ -613,7 +614,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       await tx.execute(sql`select id from memories where id = ${locked} for update`)
       await embedMemories(database.db, embedder, ws.spaceId, [locked, other], {
         signal: AbortSignal.timeout(100),
-        onSkipped: (ids) => skipped.push(ids),
+        onSkipped: (ids) => void skipped.push(ids),
         onDeferred: (ids) => deferred.push(ids),
       })
     })
@@ -765,17 +766,56 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     expect(await loadEmbeddingError(database.db)).toBeNull()
   })
 
-  it('只有一个任务的信号断开时整批照常做完', async () => {
+  it('只有一个任务的信号断开时整批照常做完；做完之后不在任务的信号上留下监听', async () => {
     const { embedder } = slowEmbedder(100)
     const targets = await threeSpaces()
     const gone = new AbortController()
     gone.abort()
+    const alive = new AbortController()
     const failed = await embedJobs(database.db, staticEmbedderSource(embedder), targets, noRetry, {
       budget: AbortSignal.timeout(60_000),
-      jobs: [gone.signal, new AbortController().signal],
+      jobs: [gone.signal, alive.signal],
     })
     expect(failed.size).toBe(0)
     expect(embedder.calls).toHaveLength(3)
+    expect(getEventListeners(alive.signal, 'abort')).toHaveLength(0)
+  })
+
+  it('服务要停时，逐条再试到一半已经失败的不算各自的失败；已经确定的失败也不记错误', async () => {
+    // 整批请求与带「坏的」的单条立刻被拒；别的单条一直等到被取消
+    const calls: string[][] = []
+    const embedder: Embedder = {
+      model: fakeEmbedder().model,
+      embed(texts, options) {
+        calls.push(texts)
+        if (texts.length > 1 || texts[0]!.includes('坏的')) {
+          return Promise.reject(new Error('嵌入接口返回 HTTP 400：bad'))
+        }
+        return new Promise<number[][]>((_, reject) => {
+          options?.signal?.addEventListener('abort', () => reject(new Error('请求被取消')), {
+            once: true,
+          })
+        })
+      },
+    }
+    // 第一个空间只有一条坏的：算它自己的失败。第二个空间三条，最短的是坏的：试完它、试下一条时服务要停了
+    const other = await newSpace('二')
+    const targets = [
+      { spaceId: ws.spaceId, memoryId: await insertCurated(ws.spaceId, 'bad', '坏的') },
+      { spaceId: other, memoryId: await insertCurated(other, 'a', '坏的') },
+      { spaceId: other, memoryId: await insertCurated(other, 'b', '正常的一条') },
+      { spaceId: other, memoryId: await insertCurated(other, 'c', '正常的另一条') },
+    ]
+    const job = new AbortController()
+    setTimeout(() => job.abort(), 300)
+    const failed = await embedJobs(database.db, staticEmbedderSource(embedder), targets, noRetry, {
+      budget: AbortSignal.timeout(60_000),
+      jobs: [job.signal],
+    })
+    expect(calls.map((c) => c.length)).toEqual([1, 3, 1, 1])
+    expect(failed.get(0)!.message).toContain('HTTP 400')
+    for (const index of [1, 2, 3]) expect(failed.get(index)!.message).toContain('服务要停')
+    expect(await loadEmbeddingError(database.db)).toBeNull()
   })
 
   it('写回时被锁着的另排新任务；另排没排进去的这一条算失败，交给重试', async () => {
@@ -792,6 +832,64 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     expect([...failed.keys()]).toEqual([1])
     expect(failed.get(1)!.message).toContain('没排进去')
     expect(await embeddedIds()).toEqual([id])
+  })
+
+  it('被锁着、另排上了新任务的原任务算完成：这一批里别的模型记下的失败（接口拒绝、时间用完）也去掉', async () => {
+    const id = await insertCurated(ws.spaceId, 'locked', '锁着的一条')
+    const targets = [{ spaceId: ws.spaceId, memoryId: id }]
+    const whileLocked = (run: () => Promise<Map<number, Error>>) =>
+      withSpace(database.db, ws.spaceId, async (tx) => {
+        await tx.execute(sql`select id from memories where id = ${id} for update`)
+        return run()
+      })
+    // 换模型期间两个模型都生成：新模型的接口拒绝这一条
+    const rejecting: Embedder = {
+      model: 'm2',
+      embed: () => Promise.reject(new Error('嵌入接口返回 HTTP 413：input too long')),
+    }
+    const first = recordingRetry()
+    const rejected = await whileLocked(() =>
+      embedJobs(
+        database.db,
+        staticEmbedderSource(fakeEmbedder('m1'), rejecting),
+        targets,
+        first.retry,
+      ),
+    )
+    expect(rejected.size).toBe(0)
+    expect(first.requeued).toEqual([[ws.spaceId, [id]]])
+
+    // 正在用的模型处理完这个空间、另排了这一条，轮到新模型时处理时间已经用完
+    const { embedder: slow } = slowEmbedder(500)
+    const second = recordingRetry()
+    const deferred = await whileLocked(() =>
+      embedJobs(
+        database.db,
+        staticEmbedderSource(slow, fakeEmbedder('m2')),
+        targets,
+        second.retry,
+        { budget: AbortSignal.timeout(100) },
+      ),
+    )
+    expect(deferred.size).toBe(0)
+    expect(second.requeued).toEqual([[ws.spaceId, [id]]])
+  })
+
+  it('补齐时被锁着的另排新任务也等它排进去；没排上的记下来', async () => {
+    const id = await insertCurated(ws.spaceId, 'locked', '锁着的一条')
+    // 过一会儿才排完，而且都没排上
+    const done: string[][] = []
+    const retry = async (_spaceId: string, ids: string[]) => {
+      await new Promise((resolve) => setTimeout(resolve, 100))
+      done.push(ids)
+      return ids
+    }
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx.execute(sql`select id from memories where id = ${id} for update`)
+      expect(await backfillJob(database.db, staticEmbedderSource(fakeEmbedder()), retry)).toBe(0)
+      expect(done).toEqual([[id]])
+    })
+    expect((await loadEmbeddingError(database.db))?.message).toContain('另排的新任务没排进去')
   })
 
   // 这几条记忆的向量任务在 pg-boss 里的样子

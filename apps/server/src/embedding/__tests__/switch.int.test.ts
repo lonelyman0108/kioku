@@ -263,7 +263,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(sent.size).toBeLessThan(130)
   })
 
-  it('补的时候有被锁着跳过、已经排了重试的，不算补不上', async () => {
+  it('补的时候有被锁着跳过、另排上了新任务的，不算补不上；没排上的不算有进展', async () => {
     await put('', { model: 'm1', channels: [channel('a', 'm1')] })
     const locked = await create('第一条')
     const other = await create('第二条')
@@ -279,6 +279,13 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     })
     expect(retried).toEqual([[locked]])
     expect((await status()).lastError).toBeNull()
+
+    // 另排的新任务没排进去：这一遍什么进展都没有
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      await tx.execute(sql`select id from memories where id = ${locked} for update`)
+      expect(await switchJob(database.db, source, async (_space, ids) => ids)).toBe('stuck')
+    })
+    expect((await status()).lastError?.message).toContain('补了一遍也没补上')
   })
 
   it('一条坏记忆不拦住别的：整批失败时逐条再试，跳过它并记下原因；接口不可用时只多试几条就停', async () => {

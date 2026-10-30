@@ -159,7 +159,7 @@ export async function startJobs(options: {
   // 写入之后的向量：一次取一批，同一个空间的合起来请求嵌入接口；一批取满了说明还有积压，马上接着取，不等轮询间隔。
   // 逐个任务记成功或失败（按下标对回任务）：失败的各自按任务的重试次数再试（retryLimit 5、退避，见 send），
   // 不连累同一批的别的任务；被锁着跳过的另排一个新任务、过一会儿再来（RETRY_AFTER_SECONDS），原任务算完成。
-  // pg-boss 给每个任务的中止信号（服务停下、任务过期时断开）和处理时间分开传：停机时不记「接口太慢」的错误
+  // pg-boss 给每个任务的中止信号（服务停下、任务过期时断开）和处理时间分开传：信号全都断开才算停机，停机时不记也不清错误
   const embedBudgetMs = options.embedBudgetMs ?? EMBED_BUDGET_MS
   await boss.work<EmbedTarget>(
     EMBED,

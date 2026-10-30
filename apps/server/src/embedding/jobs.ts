@@ -49,8 +49,8 @@ export interface EmbedJobsSignals {
   jobs?: AbortSignal[] | undefined
 }
 
-// 这些信号全都断开时才断开
-function allAborted(signals: AbortSignal[]): AbortSignal {
+// 这些信号全都断开时才断开。用完调用 release，拿掉加在各个信号上的监听
+function allAborted(signals: AbortSignal[]): { signal: AbortSignal; release: () => void } {
   const controller = new AbortController()
   let left = signals.length
   const one = () => {
@@ -60,7 +60,12 @@ function allAborted(signals: AbortSignal[]): AbortSignal {
     if (s.aborted) one()
     else s.addEventListener('abort', one, { once: true })
   }
-  return controller.signal
+  return {
+    signal: controller.signal,
+    release: () => {
+      for (const s of signals) s.removeEventListener('abort', one)
+    },
+  }
 }
 
 // 记忆写入之后生成向量，一次处理一批：同一个空间的一起读、合起来请求嵌入接口（每次最多 EMBED_BATCH 条）、一起写回。
@@ -68,14 +73,32 @@ function allAborted(signals: AbortSignal[]): AbortSignal {
 // 返回生成失败的是第几项（targets 的下标）与原因，调用方逐项交给队列按任务的重试次数（有退避）再试：
 // 逐条再试时失败的只算那几条，别的照常写；一个空间接口不可用时（最短的几条都失败）算这个空间里还没写好的，
 // 写库出错算这个空间的全部。处理时间用完了，还没生成的不再请求、算失败，已经拿到的照常写回，并记下这一批没做完。
-// 服务要停时（pg-boss 在中止信号之前已经把这些任务记成失败、会重试）同样停下，但不记错误、不另排新任务。
-// 写回时正被别的事务锁着的，按记忆去重后交给 retry 另排一个新任务、原任务算完成；没排进去的算失败
+// 服务要停时（pg-boss 在中止信号之前已经把这些任务记成失败、会重试）同样停下，但不记也不清错误、不另排新任务。
+// 写回时正被别的事务锁着的，按记忆去重后交给 retry 另排一个新任务、原任务算完成（这一批里别的模型记下的失败也去掉）；
+// 没排进去的算失败
 export async function embedJobs(
   db: Db,
   source: EmbedderSource,
   targets: EmbedTarget[],
   retry: Retry,
   { budget, jobs }: EmbedJobsSignals = {},
+): Promise<Map<number, Error>> {
+  const stopping = jobs?.length ? allAborted(jobs) : undefined
+  try {
+    return await embedTargets(db, source, targets, retry, budget, stopping?.signal)
+  } finally {
+    // 这一批做完就拿掉加在各个任务信号上的监听，不留下闭包
+    stopping?.release()
+  }
+}
+
+async function embedTargets(
+  db: Db,
+  source: EmbedderSource,
+  targets: EmbedTarget[],
+  retry: Retry,
+  budget: AbortSignal | undefined,
+  stopping: AbortSignal | undefined,
 ): Promise<Map<number, Error>> {
   // 空间 → 记忆 → 要它的是哪几项（同一条记忆连着改了几次，会有几项）
   const groups = new Map<string, Map<string, number[]>>()
@@ -85,10 +108,10 @@ export async function embedJobs(
     groups.set(target.spaceId, items)
   })
   const failed = new Map<number, Error>()
+  const indexes = (spaceId: string, memoryIds: Iterable<string>) =>
+    [...memoryIds].flatMap((memoryId) => groups.get(spaceId)?.get(memoryId) ?? [])
   const fail = (spaceId: string, memoryIds: Iterable<string>, error: Error) => {
-    for (const memoryId of memoryIds) {
-      for (const index of groups.get(spaceId)?.get(memoryId) ?? []) failed.set(index, error)
-    }
+    for (const index of indexes(spaceId, memoryIds)) failed.set(index, error)
   }
   // 写回时被锁着、要另排一个新任务的记忆，按空间
   const later = new Map<string, Set<string>>()
@@ -97,7 +120,6 @@ export async function embedJobs(
     for (const id of memoryIds) set.add(id)
     later.set(spaceId, set)
   }
-  const stopping = jobs?.length ? allAborted(jobs) : undefined
   const signals = [budget, stopping].filter((s): s is AbortSignal => s !== undefined)
   const signal = signals.length ? AbortSignal.any(signals) : undefined
   // 没做完的记成哪种失败
@@ -136,27 +158,31 @@ export async function embedJobs(
         fail(spaceId, err instanceof EmbedUnavailable ? err.unfinished : items.keys(), broken)
       }
     }
-    // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的。服务要停而没做完的不记也不清
+    // 服务要停时一律不记也不清：没做完的任务 pg-boss 已经记成失败、会重试，到时再记
+    if (stopping?.aborted) continue
+    // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的
     if (broken) {
       await recordEmbeddingError(db, embedder.model, broken.message)
     } else if (failures.count) {
       await recordEmbeddingError(db, embedder.model, failures.message())
     } else if (deferred) {
-      if (!stopping?.aborted) {
-        const message = `这一批没在时间内做完：有 ${deferred} 条还没生成向量，交给重试；嵌入接口可能太慢`
-        await recordEmbeddingError(db, embedder.model, message)
-      }
+      const message = `这一批没在时间内做完：有 ${deferred} 条还没生成向量，交给重试；嵌入接口可能太慢`
+      await recordEmbeddingError(db, embedder.model, message)
     } else if (written) {
       await clearEmbeddingError(db, embedder.model)
     }
   }
-  // 被锁着的另排新任务，等它排进去；排不进去的这一条算失败。服务要停时不另排：这些任务 pg-boss 已经记成失败、会重试
+  // 被锁着的另排新任务，等它排进去。排上了的原任务算完成：新任务两个模型都会再做一遍，这一批里别的模型记下的失败
+  // （接口拒绝、时间用完）也去掉，不然既另排又重试；没排上的算失败。
+  // 服务要停时不另排：这些任务 pg-boss 已经记成失败、会重试
   for (const [spaceId, ids] of later) {
     if (stopping?.aborted) {
       fail(spaceId, ids, unfinished())
       continue
     }
-    const lost = await retry(spaceId, [...ids])
+    const lost = new Set(await retry(spaceId, [...ids]))
+    const queued = [...ids].filter((id) => !lost.has(id))
+    for (const index of indexes(spaceId, queued)) failed.delete(index)
     fail(spaceId, lost, new Error('写回时被锁着，另排的新任务没排进去，交给重试'))
   }
   return failed
@@ -171,14 +197,20 @@ export async function backfillJob(
   const active = await source.get()
   if (!active) return null
   const failures = failureLog()
-  // 补齐时被锁着的另排新任务就好，排不进去的等下一次补齐
+  let lost = 0
   const total = await recording(db, active.model, () =>
     backfillEmbeddings(db, active, {
-      onSkipped: (spaceId, ids) => void retry(spaceId, ids),
+      // 被锁着的另排新任务，等它排进去；没排上的记下来，等下一次补齐
+      onSkipped: async (spaceId, ids) => {
+        lost += (await retry(spaceId, ids)).length
+      },
       onFailed: failures.onFailed,
     }),
   )
-  if (failures.count) await recordEmbeddingError(db, active.model, failures.message())
+  const problems: string[] = []
+  if (failures.count) problems.push(failures.message())
+  if (lost) problems.push(`有 ${lost} 条记忆写回时被锁着，另排的新任务没排进去，等下一次补齐`)
+  if (problems.length) await recordEmbeddingError(db, active.model, problems.join('；'))
   else await clearEmbeddingError(db, active.model)
   return total
 }
@@ -186,7 +218,7 @@ export async function backfillJob(
 // idle：没在换模型；switched：补齐了、已经切过去（旧模型的向量该清了）；
 // cancelled：补的时候被放弃或换成了别的模型，停下了（这期间写下的向量该清了）；
 // changed：还是这个模型，但渠道改了，停下来让新排的任务用新的渠道接着补；
-// again：还有缺的，但这一遍有进展（补上了一些，或者有被锁着跳过、已经排了重试的），过一会儿再补；
+// again：还有缺的，但这一遍有进展（补上了一些，或者有被锁着跳过、另排的新任务已经排上的），过一会儿再补；
 // stuck：补了一遍一条都没补上，也没有在等的，隔久一点再试
 export type SwitchOutcome = 'idle' | 'switched' | 'cancelled' | 'changed' | 'again' | 'stuck'
 
@@ -204,13 +236,12 @@ export async function switchJob(
     if (next?.model !== target.model) return 'changed'
     // 每补一页之前看一眼设置：被放弃、换成了别的模型或者渠道改了，就停下，不再用拿到手的渠道请求
     const unchanged = async () => JSON.stringify((await loadEmbeddingModels(db)).next) === snapshot
-    let skipped = 0
+    let requeued = 0
     const failures = failureLog()
     const written = await backfillEmbeddings(db, next, {
-      // 被锁着的另排新任务就好，排不进去的等下一遍补
-      onSkipped: (spaceId, ids) => {
-        skipped += ids.length
-        void retry(spaceId, ids)
+      // 被锁着的另排新任务，等它排进去；排上了才算有进展，没排上的等下一遍补
+      onSkipped: async (spaceId, ids) => {
+        requeued += ids.length - (await retry(spaceId, ids)).length
       },
       onFailed: failures.onFailed,
       shouldContinue: unchanged,
@@ -235,7 +266,7 @@ export async function switchJob(
     } else if (written) {
       await clearEmbeddingError(db, target.model)
     }
-    if (written || skipped) return 'again'
+    if (written || requeued) return 'again'
     if (!failures.count) {
       await recordEmbeddingError(
         db,
