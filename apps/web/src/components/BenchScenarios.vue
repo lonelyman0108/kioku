@@ -134,6 +134,8 @@ function save(scenario: BenchScenario) {
   exporting.value = null
   const blob = new Blob([formatScenario(scenario)], { type: 'application/json' })
   saveFile(blob, `${scenario.id}.json`)
+  // 存进文件了：离开页面、载入别的场景都不用再问
+  loaded.value = text.value
 }
 function startExport() {
   const scenario = validScenario()

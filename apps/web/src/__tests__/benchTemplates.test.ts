@@ -595,6 +595,13 @@ describe('场景的运行与导出', () => {
     expect(bodyOf(script, 'save')).toContain('saveFile(')
   })
 
+  it('导出之后不再算改过：两条导出的路都走 save，存完才记下', () => {
+    const body = bodyOf(scenarios.script, 'save')
+    expect(body.indexOf('loaded.value = text.value')).toBeGreaterThan(body.indexOf('saveFile('))
+    // 改过的判断比的就是这两个，离开页面与载入别的场景都看它
+    expect(scenarios.script).toContain('scenarioEdited(text.value, loaded.value)')
+  })
+
   it('权限探测按只列结果的看法显示', () => {
     expect(scenarios.script).toContain('scenarioView({ probe: outcome.value?.probe ?? false })')
     const stepView = withTag(scenarios.elements, 'BenchStepView')
