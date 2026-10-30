@@ -99,6 +99,9 @@
 - 新路由如果引用接入方的命名组件（`TurnEndEvent`、`SessionContext` 等），要挂在接入方路由后面（测试台路由挂在最后）。原因：OpenAPI 的组件按第一次用到的顺序排，挂早了 `sdks/python/generate.sh --check` 会失败，哪怕接口没变。
 - 新加 MCP 工具要写进 contracts 的 `BENCH_READ_TOOLS` 或 `BENCH_WRITE_TOOLS`：命令行握手按这份名单严格核对，`mayWrite` 对不认识的工具按写算。内置场景的 `capture` 与断言依赖工具结果的文字（「版本: 」「URI: 」等），`bench/executor.ts` 也按这些行与 `formatRecallBlock` 解析 URI 列表，改 `mcp/format.ts` 的文字要同步改，门禁里的矩阵会报。测试台步骤的说明与断言文字只展开 `${run}`、`${expires}`，新增命令行默认打印的文字时也不能展开 `capture` 的变量：它可能取到凭据的值。内置预设写记忆要带 `valid_to: EXPIRES`；`${run}`、`${expires}` 是保留的变量名。
 - contracts 里的 `isReplayStep`、`mayWrite` 是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定。
+- 读实例设置的函数（`loadExtractionConfig` 这类）既读库又解密，不要 catch 全部再回 `err.message`：读库出错也会被接住，drizzle 的错误信息带 SQL 与全部参数。要把 Key 解不开的原因告诉管理员，只认 `ApiKeyLockedError`，其余重新抛给 `onError`。
+- 带 Key 的 `fetch` 不要把 `err.message` 给调用方或写进日志：Key 中间有换行时，undici 的 Headers 报错会带上整个 Authorization 值（结尾的换行会被规范化，只测结尾发现不了）。
+- 测试模型代理：测时限不能靠到点 abort 来结束用例，`requestAgentTurn` 的 catch 先看 `timeout.aborted`，这个信号不管有没有传给 `fetch` 都会按时到期，时限失效时用例照样通过，要和哨兵定时器 `Promise.race`。客户端断开的信号来自 Node 适配器（reason 是字符串，不是 AbortError，要看 `signal.aborted`），`app.request` 走不到，要测断开必须起真实端口。「请求模型期间不占连接」的用例依赖测试连接池只有 2 条。
 - 硬删除记忆时 Lore 的导入事件（出处 `source` 为 `lore`）要留下（`memory_id` 置空、快照只留 domain 与 path），别的事件一起删，包括按空间导入的导入事件。原因：Lore 导入工具按导入事件去重，记忆整行不在时也认作「导入过、后来删掉了」；删掉这些事件，下次同步会把删过的节点写回。保留期的删除条件都在 `jobs/retention.ts` 的 `retentionRules`，改了要对照 `retention.int.test.ts`。
 - 「用户删掉」与「过期后被让出 URI」不加标记列，按删除时间与过期时间的先后区分（已删除列表、已过期列表、撤销删除与重新生效都靠它）。所以写 `deleted_at` 时要守住：用户删除只删在同一时刻仍有效的行、删除时间写这一刻；`claimUri` 只让出同一时刻已过期的行。新增删除路径时照这个写。
 - `memories_uri_exclusive()` 前后好几个迁移都用 CREATE OR REPLACE 改过，后一个会整个覆盖前一个：再改时以最新那个迁移里的函数为准，把前面加的条件一起带上（0023 里有：被写的行自己过期就不检查、导入自己刚建的空间时不加咨询锁）。`app.importing_space` 只给按空间导入的事务设，别的写入设了会跳过这把锁。
