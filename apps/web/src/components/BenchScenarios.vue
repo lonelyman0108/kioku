@@ -157,7 +157,7 @@ async function runScenario(scenario: BenchScenario) {
   failure.value = null
   // 上一次的结果不留着：这次失败时不能让人以为下面的还是这次的
   outcome.value = null
-  // 单独一个事务：不带调用台这次会话的写入，结果也不进它的时间线
+  // 不带调用台这次会话的重放，结果也不进它的时间线。回滚模式下单独一个事务，真实模式下步骤各自真实执行
   const done = await execute(scenario.steps)
   if (done.kind === 'done') {
     outcome.value = { title: scenario.title, probe: scenario.probe === true, result: done.result }
@@ -177,7 +177,10 @@ function startRun() {
 
 <template>
   <div class="space-y-4 text-sm">
-    <p class="text-xs text-muted">
+    <p v-if="real" class="text-xs text-muted">
+      场景是一串步骤，步骤自己带会话上下文，页面上的不起作用。步骤各自真实执行，读得到已经落库的写入，结果不进调用台的时间线。
+    </p>
+    <p v-else class="text-xs text-muted">
       场景是一串步骤，步骤自己带会话上下文，页面上的不起作用。它单独一个事务：不带调用台这次会话的写入，结果也不进那里的时间线。
     </p>
     <UAlert
