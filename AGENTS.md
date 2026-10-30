@@ -82,8 +82,8 @@
 - 新加的表自动进全实例备份（`backup/tables.ts` 从表定义里取；会话这类恢复后用不上的、能重新生成的，加进它的排除清单）。`backup.int.test.ts` 要求每张进备份的表都有数据，新表要在它的种子里写上一行。原因：恢复按表逐行比对，空表测不出写回的问题。
 - 恢复备份时表上的触发器不执行：写回的是已经通过检查的数据，触发器写下的派生数据也在备份里。所以触发器的派生数据要写进进备份的表，不要写进排除清单里的表。
 - 测试台的回滚模式靠换掉 `Deps.db` 实现（`bench/rollback.ts`），所以接入方路径（工具、生命周期事件、`/recall`）有几条约束。数据库访问都经过传入的 `deps` 或基于它建的服务：绕开 `deps` 的写入不会回滚。语句放进 `withSpace`：直接写在 `deps.db` 上的语句落在根事务上，出错（包括等锁超时）会中止整个运行，后面的步骤记为没有执行；现在只有 `bufferTurn` 读抽取设置这一句是例外。不在事务回调里发外部请求（嵌入、模型）：事务开着时前面步骤的行锁和 URI 咨询锁都没放；接入方路径新增要查向量的步骤时加进 `bench/inProcess.ts` 的 `literalQueries`，否则这一步只走全文与关键词。事务回调里不要并行开子事务：代理只让顶层事务排队，同一条连接上并行的 savepoint 会交错。
-- `set_config(..., true)` 不随 savepoint 成功结束复原，只有 `rollback to` 才复原：`RollbackRun.clearSpace` 现在只清 `app.space_id`，接入方路径以后在事务里新增别的事务级设置时要一起清，否则回滚模式和真实不一样。
-- 日志不要 `console.error` 整个打可能是数据库错误的 `err`：`DrizzleQueryError` 带 SQL 与全部参数（也就是记忆正文），用 `logInternalError`。
+- `set_config(..., true)` 与 `set local` 不随 savepoint 成功结束复原，只有 `rollback to` 才复原。`RollbackRun.clearSpace` 只清 `app.space_id`：`recall.ts` 的 `hnsw.*` 也留到回滚为止，它每次向量查询之前都设，所以没有影响；接入方路径上新的向量查询或别的事务级设置不能依赖默认值，否则回滚模式和真实不一样。
+- 日志不要整个打可能是数据库错误的 `err`：`DrizzleQueryError` 带 SQL 与全部参数（也就是记忆正文、提示语），用 `logInternalError` 或 `loggableError(err)`。
 - 测试：不要用 `pg_terminate_backend` 杀事务中的连接，postgres.js 3.4.9 断连时会抛未捕获的 TypeError，进程退出；模拟外层 reject。测闸门要另开大一点的连接池：测试池 max 2，鉴权会卡在拿连接上，到不了闸门。
 - 测试台按 `created_at = now()` 认这个事务写下的行，所以 `memory_events`、`credential_events`、`subjects`、`subject_identities`、`conversation_turns` 在接入方路径上要用数据库默认值，写 JS 时间会漏报。
 - 测试台的打码只在 `toView` 和凭据的取用处判断，`contentOf` 不能打码（`applyUpdate` 靠它取原文再封存）。新增返回 `MemoryView` 的路径要经过 `toView`；新增把解密内容放进错误信息的地方要看 `maskSecret`。占位文字集中在 `memory/masked.ts`，新增的要加进 `MASKED_TEXTS`，写入检查才认得；这个文件不能依赖别的模块（`mcp/format.ts` 引用它，又打进不带 postgres 的 `dist/bench.mjs`）。
