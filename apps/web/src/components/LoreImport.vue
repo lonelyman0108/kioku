@@ -290,8 +290,12 @@ function secretHint(node: LorePlanNode): string | undefined {
   if (excludedIds.value.has(node.uuid)) return '这次不导入'
   return undefined
 }
-const hasDisclosureCut = (node: LorePlanNode) =>
-  plan.value?.warnings.some((w) => w.uri === node.uri && w.kind === 'disclosureTruncated') ?? false
+const disclosureCut = computed(
+  () =>
+    new Set(
+      plan.value?.warnings.filter((w) => w.kind === 'disclosureTruncated').map((w) => w.uri) ?? [],
+    ),
+)
 </script>
 
 <template>
@@ -611,7 +615,7 @@ const hasDisclosureCut = (node: LorePlanNode) =>
               <p v-if="node.credentialHints.extras" class="text-xs text-warning">
                 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文
               </p>
-              <p v-if="hasDisclosureCut(node)" class="text-xs text-muted">
+              <p v-if="disclosureCut.has(node.uri)" class="text-xs text-muted">
                 disclosure 太长，写入时截断
               </p>
             </li>

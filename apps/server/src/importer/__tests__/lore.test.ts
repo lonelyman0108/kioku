@@ -3,9 +3,13 @@ import { describe, expect, it } from 'vitest'
 import {
   assertExecutable,
   credentialHints,
+  planFingerprint,
   planImport,
+  type ImportPlan,
+  type ImportPreview,
   type LoreNode,
   type LoreSnapshot,
+  type SyncPlan,
 } from '../lore'
 
 const at = new Date('2026-01-01T00:00:00Z')
@@ -383,6 +387,100 @@ describe('Lore 导入计划', () => {
     expect(fromLive.memories[0]!.context).not.toHaveProperty('loreExportedAt')
     expect(fromFile.memories[0]!.context.loreExportedAt).toBe('2026-01-02T00:00:00.000Z')
     expect(fromFile.memories[0]!.importKey).toBe(fromLive.memories[0]!.importKey)
+  })
+
+  describe('计划的指纹', () => {
+    const base = (): { plan: ImportPlan; preview: ImportPreview; sync: SyncPlan } => {
+      const plan = planImport(
+        snapshot(
+          node('core://agent/claudecode', { keywords: ['甲乙', '丙丁'], disclosure: '什么时候' }),
+          node('infra://token', { aliases: ['infra://old_token'] }),
+          node('infra://empty', { content: null }),
+        ),
+        [
+          { slug: 'claude-a', runtimeFamily: 'claudecode', ownerAccountId: ME },
+          { slug: 'claude-b', runtimeFamily: 'claudecode', ownerAccountId: ME },
+        ],
+        options,
+      )
+      return {
+        plan,
+        preview: {
+          targets: plan.memories.map((item) => ({ item, state: 'new', current: [] })),
+          personaExists: false,
+          importedPersonas: [],
+          appsGivenPersona: [],
+          appsOtherPersona: [],
+        },
+        sync: {
+          items: [
+            {
+              source: 'infra://x',
+              uri: 'infra://x',
+              state: 'update',
+              changes: ['content', 'priority'],
+              request: { uri: 'infra://x', expectedVersion: 3, expectedId: 'a' },
+            },
+            { source: 'infra://y', uri: 'infra://y', state: 'current', changes: [] },
+          ],
+          goneFromLore: ['infra://b', 'infra://a'],
+        },
+      }
+    }
+    const fingerprint = (input: ReturnType<typeof base>) =>
+      planFingerprint(input.plan, input.preview, input.sync)
+    const same = fingerprint(base())
+
+    it('顺序、版本号、时间与不写入的同步项都不影响', () => {
+      const shuffled = base()
+      shuffled.plan.apps[0]!.apps.reverse()
+      shuffled.plan.skipped.reverse()
+      shuffled.plan.warnings.reverse()
+      shuffled.preview.targets.reverse()
+      shuffled.preview.targets[0]!.item.request.glossary.reverse()
+      shuffled.sync.goneFromLore.reverse()
+      shuffled.sync.items[0]!.changes.reverse()
+      expect(fingerprint(shuffled)).toBe(same)
+
+      const times = base()
+      for (const { item } of times.preview.targets) {
+        item.createdAt = new Date('2000-01-01T00:00:00Z')
+        item.updatedAt = new Date('2000-01-01T00:00:00Z')
+        item.context.previousVersions = 99
+      }
+      times.sync.items[0]!.request = { uri: 'infra://x', expectedVersion: 4, expectedId: 'b' }
+      times.sync.items[1]!.state = 'edited'
+      times.plan.droppedKeywords.push({ source: 'infra://token', keyword: '词', reason: '不要' })
+      expect(fingerprint(times)).toBe(same)
+    })
+
+    it('真要写的东西变了就变', () => {
+      const changes: ((input: ReturnType<typeof base>) => void)[] = [
+        (i) => (i.plan.persona = { slug: 'work', name: '默认人格' }),
+        (i) => (i.plan.apps[0]!.apps[0]!.create = true),
+        (i) => i.plan.apps[0]!.apps.pop(),
+        (i) => (i.preview.targets[0]!.item.source = 'core://agent/other'),
+        (i) => (i.preview.targets[0]!.item.request.uri = 'app://claude-c/agent'),
+        (i) => (i.preview.targets[0]!.item.request.layer = 'base'),
+        (i) => (i.preview.targets[0]!.item.request.priority = 9),
+        (i) => (i.preview.targets[0]!.item.request.disclosure = '别的时候'),
+        (i) => i.preview.targets[0]!.item.request.glossary.push('新词'),
+        (i) => (i.preview.targets[0]!.item.request.content = '别的正文'),
+        (i) => (i.preview.targets[0]!.state = 'imported'),
+        (i) => i.preview.targets.pop(),
+        (i) => i.plan.skipped.pop(),
+        (i) => i.plan.warnings.pop(),
+        (i) => (i.sync.items[0]!.uri = 'infra://z'),
+        (i) => i.sync.items[0]!.changes.pop(),
+        (i) => (i.sync.items[0]!.state = 'edited'),
+        (i) => i.sync.goneFromLore.pop(),
+      ]
+      for (const [at, change] of changes.entries()) {
+        const input = base()
+        change(input)
+        expect(fingerprint(input), `第 ${at} 项`).not.toBe(same)
+      }
+    })
   })
 
   it('保留 Lore 的 priority、disclosure 与时间，事件上下文记下出处', () => {

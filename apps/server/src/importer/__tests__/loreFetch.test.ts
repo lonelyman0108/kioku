@@ -141,7 +141,7 @@ describe('拉取 Lore 的导出', () => {
   })
 
   it('超过大小上限就停下：声明的长度、没声明长度的流、解压之后才超过的都算', async () => {
-    const small = { maxBytes: 1000, timeoutMs: 5_000 }
+    const small = { maxBytes: 1000, timeoutMs: 2_000 }
     let closed = false
     const urls = [
       await serve((_req, res) => {

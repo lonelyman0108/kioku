@@ -13,7 +13,7 @@ import postgres from 'postgres'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import { acquireTransferSlot, TRANSFER_BUSY } from '../../backup/transferGate'
+import { acquireTransferSlot, queuedTransfers, TRANSFER_BUSY } from '../../backup/transferGate'
 import { withSpace, type Database } from '../../db/client'
 import { apps, memories, memoryEvents, personas, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -645,6 +645,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           .map((i) => i.uri)
           .sort(),
       ).toEqual(['infra://nas', 'infra://router/credentials'])
+      // 计划里只有要改什么，新正文不在里面
+      for (const body of ['Lore 里改过的正文', 'hunter3']) {
+        expect(JSON.stringify(plan)).not.toContain(body)
+      }
       const result = await applyOf(newer, plan)
       expect(result.sync.updated.sort()).toEqual(['infra://nas', 'infra://router/credentials'])
       expect(await contentOf('infra://nas')).toBe('Lore 里改过的正文')
@@ -943,17 +947,54 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(await counts()).toMatchObject({ memories: 0 })
     })
 
-    it('占名额时才比指纹与写入：名额放掉之后的第二次执行看得到第一次写下的', async () => {
+    it('两次执行不交错：第一次写入时第二次排队，轮到时看得到写下的，计划变了返回 409', async () => {
       const source = await fileSource()
       const plan = await planOf(source)
-      const [first, second] = await Promise.all([
-        post('apply', { source, fingerprint: plan.fingerprint }),
-        post('apply', { source, fingerprint: plan.fingerprint }),
-      ])
-      const statuses = [first.status, second.status].sort()
-      // 同一个账号同时只占一个名额：另一个要么 429，要么等第一个做完之后发现计划变了
-      expect(statuses[0]).toBe(200)
-      expect([409, 429]).toContain(statuses[1])
+      const second = await addMember(database.db, ws.spaceId, 'second', 'owner')
+      const secondPlan = LoreImportPlan.parse(
+        await (await post('plan', { source }, { cookie: second.cookie })).json(),
+      )
+      // 另开连接挡住写人格：第一次执行占着名额停在写入阶段
+      const blocker = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      let unlock!: () => void
+      const held = new Promise<void>((resolve) => (unlock = resolve))
+      let locked!: () => void
+      const lockTaken = new Promise<void>((resolve) => (locked = resolve))
+      const holding = blocker.begin(async (tx) => {
+        await tx`lock table personas in share mode`
+        locked()
+        await held
+      })
+      try {
+        await lockTaken
+        const first = post('apply', { source, fingerprint: plan.fingerprint })
+        await vi.waitFor(
+          async () => {
+            const [row] = await blocker<{ n: number }[]>`
+              select count(*)::int as n from pg_stat_activity
+              where datname = current_database() and cardinality(pg_blocking_pids(pid)) > 0`
+            expect(row!.n).toBe(1)
+          },
+          { timeout: 3_000, interval: 20 },
+        )
+        const next = post(
+          'apply',
+          { source, fingerprint: secondPlan.fingerprint },
+          { cookie: second.cookie },
+        )
+        await vi.waitFor(() => expect(queuedTransfers()).toBe(1), { timeout: 3_000, interval: 20 })
+        // 同一个账号再来一次不排队，直接 429
+        const again = await post('apply', { source, fingerprint: plan.fingerprint })
+        expect(again.status).toBe(429)
+        expect(await counts()).toMatchObject({ memories: 0 })
+        unlock()
+        expect((await first).status).toBe(200)
+        expect((await next).status).toBe(409)
+      } finally {
+        unlock()
+        await holding
+        await blocker.end()
+      }
       expect(await counts()).toMatchObject({ memories: 6, events: 6 })
     })
   })
