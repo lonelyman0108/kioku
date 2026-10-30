@@ -125,16 +125,17 @@ export function normalizeToolCalls(value: unknown): NormalizedToolCall[] {
 }
 
 // 放回历史的 arguments。校验 JSON 的上游见到不合法的就拒绝，这条消息之后每一轮都要重发，对话就卡死了：解析失败回给模型重试
-// 反而再也请求不了。所以严格解析得过的原样；靠容忍控制字符才解析得过的写成规范的 JSON；解析不了的（包括空串）换成 {}，
-// 模型从工具错误里知道它的参数坏了（见 parseArguments），原文不再重发。不是字符串的写成 JSON（缺失或 null 是 {}）
+// 反而再也请求不了。所以严格解析得过的对象原样；靠容忍控制字符才解析得过的对象写成规范的 JSON；解析不了的（包括空串）与
+// 不是对象的（[1]、"x"、null：要求参数是对象的上游一样拒绝）换成 {}，模型从工具错误里知道它的参数坏了（见 parseArguments），
+// 原文不再重发。不是字符串的按同样的规则写成 JSON
 function historyArguments(args: unknown): string {
-  if (typeof args !== 'string') return JSON.stringify(args ?? {})
+  if (typeof args !== 'string') return isRecord(args) ? JSON.stringify(args) : '{}'
   try {
-    JSON.parse(args)
-    return args
+    return isRecord(JSON.parse(args)) ? args : '{}'
   } catch {
     try {
-      return JSON.stringify(parseModelJson(args))
+      const tolerated: unknown = parseModelJson(args)
+      return isRecord(tolerated) ? JSON.stringify(tolerated) : '{}'
     } catch {
       return '{}'
     }

@@ -414,13 +414,13 @@ describe('请求', () => {
       [
         'arguments 是数组',
         { type: 'function', function: { name: 'x', arguments: [1] } },
-        { type: 'function', function: { name: 'x', arguments: '[1]' } },
+        { type: 'function', function: { name: 'x', arguments: '{}' } },
         notObject('[1]'),
       ],
       [
         'arguments 是数字',
         { type: 'function', function: { name: 'x', arguments: 3 } },
-        { type: 'function', function: { name: 'x', arguments: '3' } },
+        { type: 'function', function: { name: 'x', arguments: '{}' } },
         notObject('3'),
       ],
       ['function 缺失', { type: 'function' }, { type: 'function', function: placeholder }, noName],
@@ -499,8 +499,9 @@ describe('请求', () => {
     })
     it.each([
       ['严格解析得过：写法也不动', ' { "a" : 1 }\n', ' { "a" : 1 }\n', parsedFn],
-      ['严格解析得过的非对象：原样，解析的结果照旧报错', '[1]', '[1]', notObject('[1]')],
-      ['字符串 null：原样', 'null', 'null', noArguments],
+      ['严格解析得过的非对象：换成 {}，解析的结果照旧报错', '[1]', '{}', notObject('[1]')],
+      ['字符串也不是对象：换成 {}', '"x"', '{}', notObject('"x"')],
+      ['字符串 null：换成 {}', 'null', '{}', noArguments],
       [
         '字符串里的换行要靠容忍才解析得过：写成规范的 JSON',
         '{"a":"第一行\n第二行\t尾"}',
