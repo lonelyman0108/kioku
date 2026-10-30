@@ -198,6 +198,9 @@ export const DeletedMemory = z.object({
   deletedAt: z.string(),
   // 有效到；null 表示一直有效，已经过去时这条删掉之后又过期了
   validTo: z.string().nullable(),
+  // 撤销删除会撞上 URI 冲突（返回 409）：这个 URI 现在被别的记忆占着，要先把那条移走或删掉。
+  // 规则和撤销删除时一样，只说被占用、不说是哪条；调用方没有权限撤销的一律为 false
+  uriTaken: z.boolean(),
 })
 export type DeletedMemory = z.infer<typeof DeletedMemory>
 
@@ -234,12 +237,17 @@ export const ExpiredMemory = z.object({
   // 过期之后让出了 URI：同一个 URI 上写了新的记忆，它被软删除。重新生效时一并撤销删除；
   // URI 还被那条新的占着时不行，要先把那条移走或删掉
   released: z.boolean(),
+  // 让出时软删除的时间，没让出的为 null。让出的和已删除的记忆一样过了保留期永久清除，按这个时间算；
+  // 没让出的过期记忆一直留着，由人决定要不要重新生效
+  deletedAt: z.string().nullable(),
 })
 export type ExpiredMemory = z.infer<typeof ExpiredMemory>
 
 export const ExpiredMemoryList = z.object({
   items: z.array(ExpiredMemory),
   nextCursor: z.string().nullable(),
+  // 让出了 URI 的什么时候永久清除，见 DeletionRetention
+  retention: DeletionRetention,
 })
 export type ExpiredMemoryList = z.infer<typeof ExpiredMemoryList>
 

@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { EventActor } from './console'
+import { DeletionRetention, EventActor } from './console'
 import { Sensitivity } from './memory'
 
 // 凭据的标识与字段名。记忆正文里用 {{cred:<标识>}} 引用整条凭据，{{cred:<标识>#<字段>}} 引用其中一个字段
@@ -107,6 +107,10 @@ export const ConsoleCredentialList = z.object({
   truncated: z.boolean(),
 })
 export type ConsoleCredentialList = z.infer<typeof ConsoleCredentialList>
+
+// 已删除的凭据：过了保留期按删除时间永久清除，见 DeletionRetention
+export const DeletedCredentialList = ConsoleCredentialList.extend({ retention: DeletionRetention })
+export type DeletedCredentialList = z.infer<typeof DeletedCredentialList>
 
 const CredentialName = z.string().trim().min(1, '名称不能为空').max(100, '名称最多 100 个字')
 const CredentialDescription = z.string().max(2000, '说明最多 2000 个字').nullable()
@@ -298,6 +302,26 @@ export const CredentialProvider = z.object({
   updatedAt: z.string(),
 })
 export type CredentialProvider = z.infer<typeof CredentialProvider>
+
+// 已删除的凭据源：不能恢复，绑定过它的凭据恢复之后要改绑。过了保留期、也没有凭据（含已删除的）指着它时永久清除
+export const DeletedCredentialProvider = z.object({
+  id: z.uuid(),
+  kind: CredentialProviderKind,
+  name: z.string(),
+  deletedAt: z.string(),
+  // 保留期从什么时候算起：清理先删到期的凭据、再删没有凭据指着的凭据源，所以是自己的删除时间与
+  // 指着它的已删除凭据里最晚的删除时间，取晚的。还有没删除的凭据指着它时为 null，改绑或删掉那些凭据之前不会清除
+  retentionFrom: z.string().nullable(),
+})
+export type DeletedCredentialProvider = z.infer<typeof DeletedCredentialProvider>
+
+export const DeletedCredentialProviderList = z.object({
+  items: z.array(DeletedCredentialProvider),
+  // 太多时只给前面的一部分
+  truncated: z.boolean(),
+  retention: DeletionRetention,
+})
+export type DeletedCredentialProviderList = z.infer<typeof DeletedCredentialProviderList>
 
 const ProviderInstructions = z.string().max(4000, '使用说明最多 4000 个字')
 

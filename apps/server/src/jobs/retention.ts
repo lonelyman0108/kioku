@@ -161,6 +161,17 @@ export function deletionRetention(view: RetentionView, admin: boolean): Deletion
   }
 }
 
+// 会被永久清除的列表（已删除的记忆、凭据与凭据源，已过期里让出了 URI 的记忆）带上 deletionRetention，
+// 和列表本身、「是不是实例管理员」一起读出
+export async function withDeletionRetention<T extends object>(
+  db: Db,
+  list: Promise<T>,
+  admin: Promise<boolean>,
+): Promise<T & { retention: DeletionRetention }> {
+  const [page, isAdmin, view] = await Promise.all([list, admin, retentionView(db)])
+  return { ...page, retention: deletionRetention(view, isAdmin) }
+}
+
 // 改天数与暂停：在事务里拿住锁，按 parseRetention 读出现在的状态，算出新的值整个写回（change 返回 null 时不改）。
 // 返回改完之后的状态
 async function changeSettings(
@@ -233,6 +244,9 @@ const at = (d: Date) => sql`${d.toISOString()}::timestamptz`
 
 // ---- 删什么 ----
 
+// 指着这个凭据源的凭据，已删除的也算
+const PROVIDER_CREDENTIALS = sql`from ${credentials} where ${credentials.providerId} = ${credentialProviders.id}`
+
 // 到了保留期、要硬删除的都按这里判断，cutoff 是现在往前推保留天数。改这里要对照 retention.int.test.ts：
 // 每一条都有到期的删掉、没到期的留着，以及不该删的那些
 export function retentionRules(now: Date, days: number) {
@@ -263,7 +277,7 @@ export function retentionRules(now: Date, days: number) {
     // （恢复之后要显示「凭据源已删除」，外键也不让删）
     deletedProviders: and(
       lt(credentialProviders.deletedAt, cutoff),
-      sql`not exists (select 1 from ${credentials} where ${credentials.providerId} = ${credentialProviders.id})`,
+      sql`not exists (select 1 ${PROVIDER_CREDENTIALS})`,
     )!,
     // 处理完的绑定记录：合并、确认、拒绝或作废的按处理的时间，过了确认期限没处理的按期限。还在等确认的不删
     subjectBindings: lt(
@@ -274,6 +288,15 @@ export function retentionRules(now: Date, days: number) {
 }
 
 type Rules = ReturnType<typeof retentionRules>
+
+// 已删除的凭据源从什么时候起算保留期，照 retentionRules 的两条：每次清理先删到期的凭据（STEPS 里凭据在凭据源之前），
+// 再删没有凭据指着的凭据源。所以只有已删除的凭据指着它时，等其中最晚删除的那条到期之后一起清除，取它和自己的删除时间里晚的；
+// 还有没删除的凭据指着它时（凭据恢复之后没改绑）为 null，改绑或删掉那些凭据之前不会清除。凭据页的已删除列表按它算还剩几天，
+// 是 timestamptz，取出来时按凭据源的 deletedAt 列转换。每次给一个新的 SQL 对象：mapWith 改的是对象本身
+export const providerRetentionFrom = () => sql`(case
+  when exists (select 1 ${PROVIDER_CREDENTIALS} and ${credentials.deletedAt} is null) then null
+  else greatest(${credentialProviders.deletedAt}, (select max(${credentials.deletedAt}) ${PROVIDER_CREDENTIALS}))
+end)`
 
 // Lore 导入工具写下的导入事件（context 里的出处 source 是 lore）：它按这些事件去重（见 importer/lore.ts），
 // 记忆硬删除之后也要留下。别的导入事件没人拿来去重（例如按空间导入的，出处是 space-export），

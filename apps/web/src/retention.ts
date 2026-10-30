@@ -1,5 +1,6 @@
 import {
   RETENTION_DAILY_TRIES,
+  type DeletedCredentialProvider,
   type DeletionRetention,
   type RetentionCounts,
   type RetentionStatus,
@@ -44,13 +45,33 @@ export function purgeNote(
   return { text: days > 0 ? `约 ${days} 天后永久清除` : '即将永久清除', soon: days <= SOON_DAYS }
 }
 
-// 已删除列表上方的说明：多少天之后永久清除；暂停中的说暂时不会清除，知道到什么时候的再说出时间
-export function deletionNotice(retention: DeletionRetention): string {
-  const head = `删除超过 ${retention.days} 天会被永久清除，之后只能从备份找回。`
-  if (!retention.paused) return head
-  if (retention.pausedUntil === null) return `${head}清理暂停中，暂时不会永久清除。`
+// 已删除的凭据源什么时候永久清除。retentionFrom 为 null 时还有没删除的凭据指着它，清理不删它，不说几天；
+// 否则和别的已删除记录一样，只是从 retentionFrom 算起（指着它的已删除凭据清除之后才轮到它）
+export function providerPurgeNote(
+  provider: Pick<DeletedCredentialProvider, 'retentionFrom'>,
+  retention: DeletionRetention,
+  now: Date = new Date(),
+): { text: string; soon: boolean } {
+  if (provider.retentionFrom === null) return { text: '还有凭据指着，不会清除', soon: false }
+  return purgeNote(provider.retentionFrom, retention, now)
+}
+
+// 列表上方说明的后半句：清理暂停中的说暂时不会清除，知道到什么时候的再说出时间
+function pauseNotice(retention: DeletionRetention): string {
+  if (!retention.paused) return ''
+  if (retention.pausedUntil === null) return '清理暂停中，暂时不会永久清除。'
   const until = formatTime(retention.pausedUntil)
-  return `${head}清理暂停到 ${until}（从备份恢复或保留期刚开始生效时，先留一个完整的保留期），这之前一条都不会清除。`
+  return `清理暂停到 ${until}（从备份恢复或保留期刚开始生效时，先留一个完整的保留期），这之前一条都不会清除。`
+}
+
+// 已删除列表上方的说明：多少天之后永久清除，再加上暂停的情况
+export function deletionNotice(retention: DeletionRetention): string {
+  return `删除超过 ${retention.days} 天会被永久清除，之后只能从备份找回。${pauseNotice(retention)}`
+}
+
+// 已过期列表上方给「已让出」的说明：让出 URI 时算作删除，按让出的时间清除；没让出的过期记忆不清除
+export function releasedNotice(retention: DeletionRetention): string {
+  return `标着「已让出」的，让出超过 ${retention.days} 天会被永久清除，之后只能从备份找回；没让出的一直留着。${pauseNotice(retention)}`
 }
 
 // 一次清理每一类删了多少：卡片上按这个顺序列

@@ -79,17 +79,26 @@ async function undelete(item: DeletedMemory) {
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '撤销删除失败', color: 'error' })
+    // URI 刚被别的记忆占上、这条已经被别人撤销或永久清除、权限变了：列表已经过时，重新读，标记跟着变
+    if (err instanceof ApiError && props.spaceId === spaceId) {
+      void deleted.refetch()
+    }
   } finally {
     restoring.value = null
   }
 }
+
+// URI 被别的记忆占着时撤销删除会冲突：说清楚为什么、该怎么办。按钮照样能点：标记是列表读出时的，
+// 占着的那条可能已经过期、被移走或删掉，点了还冲突时会重新读列表
+const TAKEN_HINT =
+  '这个 URI 被另一条记忆占着，撤销删除会冲突：先把那条移走或删掉，再撤销删除（标记按列表读出时算，可以直接再试）'
 </script>
 
 <template>
   <div class="space-y-3">
     <p class="text-xs text-muted">
-      删除的记忆可以撤销删除，原样回来；同一个 URI
-      上已经有别的记忆时不能撤销。撤销删除不动有效期：标着「已过期」的，撤销之后回到「已过期」里，在那里可以让它重新生效。
+      删除的记忆可以撤销删除，原样回来；同一个 URI 上已经有别的记忆时撤销会冲突（标着「URI
+      已被占用」，先把那条移走或删掉）。撤销删除不动有效期：标着「已过期」的，撤销之后回到「已过期」里，在那里可以让它重新生效。
     </p>
     <p v-if="retention" class="flex items-start gap-1.5 text-xs text-warning">
       <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
@@ -131,6 +140,16 @@ async function undelete(item: DeletedMemory) {
               >
                 已过期
               </UBadge>
+              <UBadge
+                v-if="item.uriTaken"
+                size="sm"
+                variant="outline"
+                color="error"
+                class="shrink-0"
+                :title="TAKEN_HINT"
+              >
+                URI 已被占用
+              </UBadge>
             </span>
             <span class="text-xs text-muted">
               删除于
@@ -148,17 +167,18 @@ async function undelete(item: DeletedMemory) {
               </template>
             </span>
           </div>
-          <UButton
-            v-if="canWriteUri(item.uri)"
-            :icon="icons.undelete"
-            size="xs"
-            color="neutral"
-            variant="subtle"
-            :loading="restoring === item.id"
-            @click="undelete(item)"
-          >
-            撤销删除
-          </UButton>
+          <UTooltip v-if="canWriteUri(item.uri)" :text="TAKEN_HINT" :disabled="!item.uriTaken">
+            <UButton
+              :icon="icons.undelete"
+              size="xs"
+              color="neutral"
+              variant="subtle"
+              :loading="restoring === item.id"
+              @click="undelete(item)"
+            >
+              撤销删除
+            </UButton>
+          </UTooltip>
         </li>
       </ul>
       <p v-if="!items.length" class="text-sm text-muted">没有删除的记忆。</p>

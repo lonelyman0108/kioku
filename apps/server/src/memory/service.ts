@@ -436,12 +436,8 @@ export class MemoryService {
       ? await candidates.for('no key update', { skipLocked: true })
       : await candidates.for('no key update')
     for (const row of rows) {
-      // 能让出的：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
-      // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
-      // 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
-      const foreignPrivate =
-        row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
-      if (!foreignPrivate && !canModify(this.ctx.access, row)) continue
+      if (!this.canRelease(row)) continue
+      const foreignPrivate = this.foreignPrivate(row)
       // 只让出这一刻仍然过期的，删除时间就是这一刻（不早于过期时间，见 isReleased）。行已经锁住，这里只是复查
       const [gone] = await tx
         .update(memories)
@@ -456,6 +452,74 @@ export class MemoryService {
       await this.event(tx, row.id, 'expire', keep(row), keep(gone))
       released.push(row.id)
     }
+  }
+
+  // 别的成员的画像层、私人层记录：调用方看不到
+  private foreignPrivate(row: Pick<MemoryRow, 'ownerAccountId'>): boolean {
+    return row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
+  }
+
+  // claimUri 能让出的过期记录：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
+  // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
+  // 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
+  private canRelease(row: WriteIntent & Pick<MemoryRow, 'ownerAccountId' | 'provenance'>): boolean {
+    return this.foreignPrivate(row) || canModify(this.ctx.access, row)
+  }
+
+  // 撤销删除这几条会不会撞上 URI 冲突，返回会撞上的那些的 id。照撤销删除的几步判断：先由 claimUri
+  // 让出调用方能让出的过期记录，剩下的交给数据库——唯一索引 memories_uri_live_idx 看同一归属里没删除的，
+  // 已过期的也算；互斥触发器 memories_uri_exclusive 只看两边都还有效的，有一边是共享节点、或者两边属于
+  // 同一个成员就冲突（被撤销的这一条自己已经过期时不检查）。是否过期照各自的时钟：claimUri 按应用的时间让出，
+  // 触发器按数据库的时间（STILL_VALID）。
+  // 只看调用方撤销得了的（canModify，撤销不了的是 403，不替他去看这个 URI 上有没有别人的记录）；
+  // 占着 URI 的那条只用来判断，调用方读不到它时也只知道被占用，拿不到它的内容
+  private async undeleteConflicts(
+    tx: Tx,
+    rows: { row: MemoryRow; ended: boolean }[],
+  ): Promise<Set<string>> {
+    const targets = rows.filter(({ row }) => canModify(this.ctx.access, row))
+    if (!targets.length) return new Set()
+    const occupants = await tx
+      .select({
+        id: memories.id,
+        domain: memories.domain,
+        path: memories.path,
+        ownerAccountId: memories.ownerAccountId,
+        layer: memories.layer,
+        sensitivity: memories.sensitivity,
+        personaId: memories.personaId,
+        appId: memories.appId,
+        provenance: memories.provenance,
+        validTo: memories.validTo,
+        expiresAt: memories.expiresAt,
+        ended: sql<boolean>`(not ${STILL_VALID})`,
+      })
+      .from(memories)
+      .where(
+        and(
+          isNull(memories.deletedAt),
+          sql`(${memories.domain}, ${memories.path}) in (${sql.join(
+            targets.map(({ row }) => sql`(${row.domain}, ${row.path})`),
+            sql`, `,
+          )})`,
+        ),
+      )
+    const now = new Date()
+    const taken = new Set<string>()
+    for (const { row, ended } of targets) {
+      const blocked = occupants.some((m) => {
+        if (m.id === row.id || m.domain !== row.domain || m.path !== row.path) return false
+        // 撤销时 claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出。可能挡着的（同一归属，
+        // 或者有一边是共享节点）都在 claimUri 的候选里；两个成员各自的节点本来就不冲突
+        if (!isValidAt(m, now) && this.canRelease(m)) return false
+        // 同一归属：唯一索引挡着，已过期的也算（两边都有效时触发器也挡，结论一样）
+        if (m.ownerAccountId === row.ownerAccountId) return true
+        // 归属不同：两边都还有效（按数据库的时间）、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
+        return !ended && !m.ended && (row.ownerAccountId === null || m.ownerAccountId === null)
+      })
+      if (blocked) taken.add(row.id)
+    }
+    return taken
   }
 
   private async findReadableOrNull(
@@ -2059,18 +2123,30 @@ export class MemoryService {
     return sql`(${snapshot} is not null and coalesce((${this.manageable(snapshotColumns(snapshot))}), false))`
   }
 
-  // 事件的前后快照各按管理读取判断，有一边看不到就整条不显示；为空的一边（新建事件没有「改前」）不参与
-  private visibleEvent(): SQL {
+  // 一个事件对调用方是什么样，三种结果：
+  // - false，照常看得到：前后快照各按管理读取判断，有一边看不到就不算；为空的一边（新建事件没有「改前」）不参与。
+  //   给了 memory 时还要记忆现在满足它（活动流要求记忆现在读得到；历史已经先查过这条记忆，不给）。
+  // - true，「离开」：改前看得到、改后看不到，例如被别的成员改进了他的私人层，或改成了 secret。
+  //   对改前看得到的人保留这条记录，只给改前的版本、时间与操作者，改后的一概不给，也不能拿来恢复：
+  //   否则共享的记忆被人拿走之后，谁拿走的、什么时候拿走的，连空间 owner 都查不到。不看记忆现在的状态：
+  //   离开之后，原来看得到它的人本来就读不到了。
+  // - null，看不到。
+  // 写成一个分支表达式，每个快照最多判断一次：快照里的字段每取一次都要把整个快照解压一次，
+  // 事件多、看得到的少时这是活动流的主要开销。先看记忆，记忆读不到的只可能是离开，先判断改前
+  private eventVisibility(memory?: SQL): SQL<boolean | null> {
     const { before, after } = memoryEvents
-    return sql`((${before} is null or ${this.snapshotShown(before)}) and (${after} is null or ${this.snapshotShown(after)}))`
+    const beforeShown = this.snapshotShown(before)
+    const beforeOk = sql`(${before} is null or ${beforeShown})`
+    const afterOk = sql`(${after} is null or ${this.snapshotShown(after)})`
+    return sql<boolean | null>`(case
+      when ${memory ?? sql`true`} then (case when ${afterOk} then (case when ${beforeOk} then false end) when ${beforeShown} then true end)
+      when ${beforeShown} and not ${afterOk} then true
+    end)`
   }
 
-  // 「离开」：改前看得到、改后看不到，例如被别的成员改进了他的私人层，或改成了 secret。
-  // 对改前看得到的人保留这条记录，只给改前的版本、时间与操作者，改后的一概不给，也不能拿来恢复：
-  // 否则共享的记忆被人拿走之后，谁拿走的、什么时候拿走的，连空间 owner 都查不到
-  private departureEvent(): SQL {
-    const { before, after } = memoryEvents
-    return sql`(${this.snapshotShown(before)} and ${after} is not null and not ${this.snapshotShown(after)})`
+  // 照常看得到的事件，不含离开的（见 eventVisibility）：只能从这些恢复
+  private visibleEvent(): SQL {
+    return sql`(${this.eventVisibility()} is false)`
   }
 
   // 按 id 找一条管理读取读得到的记忆，已删除的也算；读不到和不存在一样是 404。默认只找策展记忆，
@@ -2101,11 +2177,10 @@ export class MemoryService {
     return found
   }
 
-  // 事件连同操作者一起取出：看得到的事件，加上「离开」的事件（left 为 true，见 departureEvent）；
+  // 事件连同操作者一起取出：看得到的事件，加上「离开」的事件（left 为 true），见 eventVisibility；
   // 记忆整行已经不在的事件不列出。Key 的名字和 Key 列表一样，
   // 只给应用主人与空间 owner（管理界面里 admin 就是空间 owner）看，别人只看到应用名。
   // checkMemory 为 true 时普通事件只列记忆现在读得到的（活动流）；历史已经先查过这条记忆，不必每行再判断。
-  // 「离开」的事件不看记忆现在的状态：离开之后，原来看得到它的人本来就读不到了。
   // 只列策展记忆的事件：抽取的记忆没有 URI，活动流与历史都按 URI 展示，它们另在对象页里看
   private eventRows(
     tx: Tx,
@@ -2117,7 +2192,10 @@ export class MemoryService {
     const keyVisible = this.ctx.access.admin
       ? sql`true`
       : sql`${apps.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
-    const departure = this.departureEvent()
+    // 过滤与 left 用同一个表达式：过滤时每一行判断一次，left 只在留下的这一页上再算一次。不放进
+    // 横向子查询里算一次再引用：子查询以快照为参数，PostgreSQL 会估算要不要缓存它的结果，
+    // 规划时间多出几毫秒，比 left 省下的还多
+    const visibility = this.eventVisibility(checkMemory ? this.manageable() : undefined)
     return tx
       .select({
         event: memoryEvents,
@@ -2129,20 +2207,14 @@ export class MemoryService {
         accountName: accounts.displayName,
         keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`,
         appName: apps.name,
-        left: sql<boolean>`${departure}`,
+        left: sql<boolean>`${visibility}`,
       })
       .from(memoryEvents)
       .innerJoin(memories, eq(memories.id, memoryEvents.memoryId))
       .leftJoin(accounts, eq(accounts.id, memoryEvents.actorAccountId))
       .leftJoin(apiKeys, eq(apiKeys.id, memoryEvents.actorKeyId))
       .leftJoin(apps, eq(apps.id, apiKeys.appId))
-      .where(
-        and(
-          where,
-          eq(memories.form, 'curated'),
-          or(and(checkMemory ? this.manageable() : undefined, this.visibleEvent()), departure),
-        ),
-      )
+      .where(and(where, eq(memories.form, 'curated'), sql`${visibility} is not null`))
       .orderBy(...order)
       .limit(limit)
   }
@@ -2188,7 +2260,8 @@ export class MemoryService {
 
   // 已删除的记忆，最近删除的在前。按删除前的最后一版（就是这一行本身）判断可见性。
   // 只列用户删掉的（删除时还有效），删掉之后才到期的也列出来：撤销删除和过期互不相干，撤销之后它回到过期的状态。
-  // 过期之后被让出 URI 的不在这里，在已过期里重新生效。保留期的提示由路由补上
+  // 过期之后被让出 URI 的不在这里，在已过期里重新生效。每条标出撤销删除会不会撞上 URI 冲突（undeleteConflicts）。
+  // 保留期的提示由路由补上
   async deleted(query: PageQuery): Promise<Omit<DeletedMemoryList, 'retention'>> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
@@ -2196,6 +2269,7 @@ export class MemoryService {
         .select({
           row: memories,
           deletedMicros: sql<string>`${DELETED_MICROS}::text`,
+          ended: sql<boolean>`(not ${STILL_VALID})`,
         })
         .from(memories)
         .where(
@@ -2212,6 +2286,7 @@ export class MemoryService {
         .limit(query.limit + 1)
       const page = rows.slice(0, query.limit)
       const last = page.at(-1)
+      const taken = await this.undeleteConflicts(tx, page)
       return {
         items: page.map(({ row }) => ({
           id: row.id,
@@ -2223,6 +2298,7 @@ export class MemoryService {
           version: row.version,
           deletedAt: row.deletedAt!.toISOString(),
           validTo: endOf(row)?.toISOString() ?? null,
+          uriTaken: taken.has(row.id),
         })),
         nextCursor:
           rows.length > query.limit && last
@@ -2233,8 +2309,9 @@ export class MemoryService {
   }
 
   // 已过期的记忆，最近过期的在前：有效期已过、按管理读取看得到的策展记忆，包括过期之后让出了 URI 的
-  // （isReleased）。这些都能重新生效（reactivate）。用户删掉的（删除时还有效）不在这里，在已删除里走撤销删除
-  async expired(query: PageQuery): Promise<ExpiredMemoryList> {
+  // （isReleased）。这些都能重新生效（reactivate）。用户删掉的（删除时还有效）不在这里，在已删除里走撤销删除。
+  // 让出的带着删除时间，过了保留期按它永久清除；保留期的提示由路由补上
+  async expired(query: PageQuery): Promise<Omit<ExpiredMemoryList, 'retention'>> {
     const after = timeCursor(query.cursor, UUID)
     return this.run(async (tx) => {
       const rows = await tx
@@ -2266,6 +2343,8 @@ export class MemoryService {
           version: row.version,
           expiredAt: endOf(row)!.toISOString(),
           released: isReleased(row),
+          // 列表里没让出的都没删除（见上面的条件）
+          deletedAt: row.deletedAt?.toISOString() ?? null,
         })),
         nextCursor:
           rows.length > query.limit && last
