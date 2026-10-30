@@ -8,7 +8,7 @@ import type {
   BackupTestResult,
   SpaceOverview,
 } from '@kioku/contracts'
-import { inArray } from 'drizzle-orm'
+import { inArray, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -445,6 +445,29 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect(err.message).toContain('备份存储的 Secret Access Key 解不开')
     expect(err.message).not.toContain('的 Key')
     expect(err.message).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+  })
+
+  it('做备份时数据库出错：最近的错误里只有数据库的说明，没有 SQL 与参数', async () => {
+    await save()
+    // 传上去之后记结果时数据库报错，记错误的那一次照常写
+    await database.db.execute(sql`
+      create or replace function kioku_test_no_success() returns trigger language plpgsql as $$
+      begin
+        if new.key = 'backup-status' and new.value->'lastSuccess' <> 'null'::jsonb then
+          raise exception '写不进结果';
+        end if;
+        return new;
+      end $$`)
+    await database.db.execute(sql`
+      create trigger kioku_test_no_success before insert on settings
+      for each row execute function kioku_test_no_success()`)
+    try {
+      expect(await backupJob(database.db, masterKey, true)).toBe('failed')
+    } finally {
+      await database.db.execute(sql`drop trigger if exists kioku_test_no_success on settings`)
+      await database.db.execute(sql`drop function if exists kioku_test_no_success()`)
+    }
+    expect((await loadBackupStatus(database.db)).lastError?.message).toBe('写不进结果')
   })
 
   it('Secret 也在主密钥管的数据里：启动检查认得它，轮换时换成新密钥的包装', async () => {

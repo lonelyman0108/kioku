@@ -7,7 +7,7 @@ import type {
   EmbeddingTestResult,
   RecallResponse,
 } from '@kioku/contracts'
-import { sql } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
@@ -398,6 +398,46 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     const res = await call('POST', '/next/retry', {})
     expect(res.status).toBe(202)
     expect(queued).toEqual(['switch'])
+  })
+
+  it('写向量时数据库出错：最近的错误里只有数据库的说明，没有 SQL 与参数', async () => {
+    await put('', { model: 'm1', channels: [channel('a', 'm1')] })
+    const id = await create('第一条')
+    // 让写向量时数据库报错，记错误的那一行照常写
+    await database.db.execute(
+      sql.raw(`create or replace function kioku_test_no_vector() returns trigger language plpgsql as $$
+      begin raise exception '写不进向量'; end $$`),
+    )
+    await database.db.execute(
+      sql.raw(
+        'create trigger kioku_test_no_vector before insert on memory_embeddings for each row execute function kioku_test_no_vector()',
+      ),
+    )
+    // 这个任务记下的错误：先清掉之前记下的
+    const recordedBy = async (job: () => Promise<unknown>) => {
+      await database.db.delete(settings).where(eq(settings.key, 'embedding-error'))
+      await expect(job()).rejects.toThrow()
+      return (await status()).lastError
+    }
+    try {
+      const written = { model: 'm1', message: '写不进向量' }
+      expect(
+        await recordedBy(() => embedJob(database.db, source, ws.spaceId, id, noRetry)),
+      ).toMatchObject(written)
+      expect(await recordedBy(() => backfillJob(database.db, source, noRetry))).toMatchObject(
+        written,
+      )
+      await put('/next', { model: 'm2', channels: [channel('b', 'm2')] })
+      expect(await recordedBy(() => switchJob(database.db, source, noRetry))).toMatchObject({
+        ...written,
+        model: 'm2',
+      })
+    } finally {
+      await database.db.execute(
+        sql.raw('drop trigger if exists kioku_test_no_vector on memory_embeddings'),
+      )
+      await database.db.execute(sql.raw('drop function if exists kioku_test_no_vector()'))
+    }
   })
 
   it('新模型补不上时记下原因，管理员可以现在就切换', async () => {
