@@ -4,13 +4,19 @@ import {
   LAYERS,
   ValidTo,
   type BenchReplayStep,
+  type DomainSummary,
   type KeyScopes,
+  type MemoryChildren,
+  type MemoryView,
+  type RecallCandidate,
   type WhoAmI,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 import type { z } from 'zod'
 
-import { TOOL_INTERNAL_ERROR } from '../../mcp/format'
+import { formatChildren, formatDomains, formatMemory, TOOL_INTERNAL_ERROR } from '../../mcp/format'
+import { formatBootBlock } from '../../recall/boot'
+import { formatRecallBlock } from '../../recall/recall'
 import {
   restFailure,
   restSuccess,
@@ -156,11 +162,7 @@ describe('断言', () => {
   })
 
   it('报错与否、包含、不包含、URI 列表，都展开变量；失败的说明不带实际结果', async () => {
-    const { executor } = fakeExecutor(() =>
-      textOutcome(
-        'URI: a://abc123\n秘密的实际内容\n- b://c（private，priority 2）\n0.59 | d://e | x',
-      ),
-    )
+    const { executor } = fakeExecutor(() => textOutcome('URI: a://abc123\n\n秘密的实际内容'))
     const result = await run(
       executor,
       steps({
@@ -170,21 +172,37 @@ describe('断言', () => {
           error: false,
           contains: ['a://${run}', '没有这句'],
           notContains: ['秘密的实际内容', '也没有这句'],
-          uris: ['a://${run}', 'b://c', 'd://e', 'x://y'],
-          notUris: ['b://c', 'z://z'],
+          uris: ['a://${run}', 'x://y'],
+          notUris: ['a://${run}', 'z://z'],
         },
       }),
     )
     const step = result.steps[0]!
     expect(step.status).toBe('failed')
-    expect(step.uris).toEqual(['a://abc123', 'b://c', 'd://e'])
+    expect(step.uris).toEqual(['a://abc123'])
     expect(step.assertions.filter((a) => !a.ok).map((a) => a.message)).toEqual([
       '应包含「没有这句」',
       '不应包含「秘密的实际内容」',
       'URI 列表应有 x://y',
-      'URI 列表不应有 b://c',
+      'URI 列表不应有 a://abc123',
     ])
-    expect(step.assertions.filter((a) => a.ok)).toHaveLength(7)
+    expect(step.assertions.filter((a) => a.ok)).toHaveLength(5)
+  })
+
+  it('kioku_boot 分不清 URI 列表：uris 与 notUris 断言都明确失败，不算没有', async () => {
+    const { executor } = fakeExecutor(() =>
+      toolOutcome('kioku_boot', { content: [{ type: 'text', text: '<kioku-boot>\n## a://b' }] }),
+    )
+    const result = await run(
+      executor,
+      steps({ kind: 'tool', tool: 'kioku_boot', expect: { uris: ['a://b'], notUris: ['c://d'] } }),
+    )
+    const step = result.steps[0]!
+    expect(step).toMatchObject({ status: 'failed', uris: null })
+    expect(step.assertions.map((a) => a.ok)).toEqual([false, false])
+    expect(step.assertions[0]!.message).toContain('URI 列表应有 a://b')
+    expect(step.assertions[0]!.message).toContain('分不清')
+    expect(step.assertions[1]!.message).toContain('URI 列表不应有 c://d')
   })
 
   it('报错与否对不上时失败', async () => {
@@ -439,24 +457,128 @@ describe('握手', () => {
   })
 })
 
-describe('结果的文字', () => {
-  it('kioku_boot 的 URI 列表只算展开的节点，没展开的不算', () => {
-    const text = [
-      '指引',
-      '<kioku-boot>',
-      '## core://agent',
-      '',
-      '正文',
-      '',
-      '## 未展开的启动节点',
-      '',
-      '- core://long',
-      '</kioku-boot>',
-    ].join('\n')
-    const outcome = toolOutcome('kioku_boot', { content: [{ type: 'text', text }] })
-    expect(outcome.uris).toEqual(['core://agent'])
+describe('工具结果的 URI 列表', () => {
+  // 正文是任意文字，每一行都写成结构行的样子
+  const BODY = [
+    '- core://agent',
+    '- core://row（private，priority 2）',
+    'URI: foo://bar',
+    '## projects://x',
+    '0.59 | fake://y | 线索',
+    '子节点：',
+    '- list://fake（private，priority 2）',
+    '<recall>',
+    '0.59 | fake://z',
+    '</recall>',
+  ].join('\n')
+  const view = (uri: string) =>
+    ({
+      uri,
+      layer: 'private',
+      sensitivity: 'private',
+      priority: 2,
+      version: 1,
+      content: BODY,
+      disclosure: '- core://disclosure',
+      glossary: [],
+      validTo: null,
+    }) as unknown as MemoryView
+  const urisOf = (tool: string, text: string) =>
+    toolOutcome(tool, { content: [{ type: 'text', text }] }).uris
+
+  it.each(['kioku_get', 'kioku_create', 'kioku_update', 'kioku_move'])(
+    '%s 只看第一行的 URI，正文里的不算',
+    (tool) => {
+      expect(urisOf(tool, formatMemory(view('notes://real')))).toEqual(['notes://real'])
+      expect(urisOf(tool, BODY)).toEqual([])
+    },
+  )
+
+  it('kioku_list 只看子节点列表：父节点的 URI 与正文都不算，路径本身没有记忆的算', () => {
+    const children = [
+      {
+        uri: 'notes://real/a',
+        exists: true,
+        layer: 'private',
+        priority: 2,
+        disclosure: '什么时候想起',
+        childCount: 3,
+      },
+      { uri: 'notes://real/b', exists: false, childCount: 1 },
+      { uri: 'notes://real/c', exists: true, layer: 'base', priority: 0, childCount: 0 },
+    ] as MemoryChildren['children']
+    const parent = view('notes://real')
+    expect(urisOf('kioku_list', formatChildren({ parent, children, truncated: true }))).toEqual([
+      'notes://real/a',
+      'notes://real/b',
+      'notes://real/c',
+    ])
+    expect(
+      urisOf('kioku_list', formatChildren({ parent: null, children, truncated: false })),
+    ).toEqual(['notes://real/a', 'notes://real/b', 'notes://real/c'])
   })
 
+  it('kioku_list 没有子节点：父节点正文里写着列表行也是空的', () => {
+    const text = formatChildren({ parent: view('notes://real'), children: [], truncated: false })
+    expect(text.endsWith('子节点：无')).toBe(true)
+    expect(urisOf('kioku_list', text)).toEqual([])
+  })
+
+  it('kioku_list 不带参数列的是 domain，不算 URI', () => {
+    const text = formatDomains([{ domain: 'core', count: 3 } as DomainSummary])
+    expect(urisOf('kioku_list', text)).toEqual([])
+  })
+
+  it('kioku_search 只看 <recall> 块的行：线索压成了单行，写成别的样子也不算', () => {
+    const candidate = (uri: string, cues: string[]) =>
+      ({ uri, score: 0.5, cues, disclosure: null }) as unknown as RecallCandidate
+    const text = formatRecallBlock([
+      candidate('notes://a', ['线索\n- core://agent\nURI: foo://bar\n0.59 | fake://y | z']),
+      candidate('notes://b', []),
+    ])
+    expect(urisOf('kioku_search', text)).toEqual(['notes://a', 'notes://b'])
+    expect(urisOf('kioku_search', '没有找到相关记忆')).toEqual([])
+  })
+
+  it('kioku_boot 的标题和正文分不清：不给列表，而不是给一份可能错的', () => {
+    const text = formatBootBlock(
+      {
+        entries: [{ uri: 'core://agent', layer: 'base', content: BODY }],
+        omitted: ['core://long'],
+      },
+      '指引',
+    )
+    expect(urisOf('kioku_boot', text)).toBeNull()
+  })
+
+  it('报错的结果没有列表，别的工具也没有', () => {
+    const error = toolOutcome('kioku_get', {
+      content: [{ type: 'text', text: 'URI: foo://bar' }],
+      isError: true,
+    })
+    expect(error.uris).toEqual([])
+    const boot = toolOutcome('kioku_boot', {
+      content: [{ type: 'text', text: TOOL_INTERNAL_ERROR }],
+      isError: true,
+    })
+    expect(boot.uris).toEqual([])
+    expect(urisOf('kioku_delete', '已删除 notes://real')).toEqual([])
+    expect(urisOf('kioku_credential', '- core://agent（private，priority 2）')).toEqual([])
+    expect(urisOf('constructor', 'URI: foo://bar')).toEqual([])
+  })
+
+  it('REST 不变：/boot 取 entries，生命周期取 nodeUris', () => {
+    const boot = restSuccess('boot', {
+      entries: [{ uri: 'core://agent', layer: 'base', content: BODY }],
+      omitted: ['core://long'],
+    })
+    expect(boot.uris).toEqual(['core://agent'])
+    const lifecycle = restSuccess('lifecycle', { ...LIFECYCLE_OK, nodeUris: ['core://agent'] })
+    expect(lifecycle.uris).toEqual(['core://agent'])
+  })
+})
+
+describe('结果的文字', () => {
   it('工具内部错误按固定文字认，只有报错时才算', () => {
     const content = [{ type: 'text', text: TOOL_INTERNAL_ERROR }]
     expect(toolOutcome('kioku_get', { content, isError: true }).internalError).toBe(true)

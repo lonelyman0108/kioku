@@ -745,6 +745,72 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(prompt.session).toBeNull()
     })
 
+    it('工具结果的 URI 列表只看结构行：正文里写成结构行样子的不算，kioku_boot 的断言明确失败', async () => {
+      const lookalikes = ['core://agent', 'foo://bar', 'projects://x', 'fake://y', 'list://fake']
+      const body = [
+        '- core://agent',
+        'URI: foo://bar',
+        '## projects://x',
+        '0.59 | fake://y | 线索',
+        '子节点：',
+        '- list://fake（private，priority 2）',
+      ].join('\n')
+      const expected = (uris: string[]) => ({ expect: { uris, notUris: lookalikes } })
+      const result = await run({
+        steps: [
+          tool(
+            'kioku_create',
+            { uri: 'notes://real', content: body, glossary: ['结构行的关键词'] },
+            expected(['notes://real']),
+          ),
+          tool('kioku_get', { uri: 'notes://real' }, expected(['notes://real'])),
+          tool('kioku_update', { uri: 'notes://real', priority: 3 }, expected(['notes://real'])),
+          tool(
+            'kioku_create',
+            { uri: 'notes://real/child', content: body },
+            expected(['notes://real/child']),
+          ),
+          tool('kioku_list', { of: 'notes://real' }, expected(['notes://real/child'])),
+          tool('kioku_search', { query: '结构行的关键词' }, expected(['notes://real'])),
+          tool(
+            'kioku_move',
+            { from: 'notes://real/child', to: 'notes://moved' },
+            expected(['notes://moved']),
+          ),
+          // 子节点移走之后没有子节点了：父节点正文里那几行也不算
+          tool('kioku_list', { of: 'notes://real' }, { expect: { notUris: lookalikes } }),
+        ],
+      })
+      expect(result.steps.flatMap((s) => s.assertions.filter((a) => !a.ok))).toEqual([])
+      expect(result.steps.map((s) => s.status)).toEqual(result.steps.map(() => 'passed'))
+      expect(result.steps[7]!.uris).toEqual([])
+      expect(result.steps[7]!.text).toContain('list://fake')
+
+      // 启动节点的正文里写着标题的样子：工具分不清，/boot 有结构化的 entries
+      await realTool('kioku_create', {
+        uri: 'core://boot-node',
+        content: body,
+        layer: 'base',
+        sensitivity: 'public',
+        priority: 0,
+      })
+      const boot = await run({
+        steps: [
+          tool('kioku_boot', {}, { expect: { uris: ['core://boot-node'] } }),
+          tool('kioku_boot', {}, { expect: { notUris: ['projects://x'] } }),
+          { kind: 'boot', expect: { uris: ['core://boot-node'], notUris: ['projects://x'] } },
+          lifecycle(
+            { event: 'session.start' },
+            { expect: { uris: ['core://boot-node'], notUris: ['projects://x'] } },
+          ),
+        ],
+      })
+      expect(boot.steps.map((s) => s.status)).toEqual(['failed', 'failed', 'passed', 'passed'])
+      expect(boot.steps[0]!.uris).toBeNull()
+      expect(boot.steps[0]!.assertions[0]!.message).toContain('分不清')
+      expect(boot.steps[1]!.assertions[0]!.message).toContain('分不清')
+    })
+
     it('只读与不满足 requires 的步骤记跳过，不算失败', async () => {
       const readonly = await ws.createKey(appId, {
         readLayers: ['base'],

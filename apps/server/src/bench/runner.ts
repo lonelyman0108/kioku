@@ -129,6 +129,10 @@ function check(
   if (!expected) return []
   const list = (values: string[] | undefined) =>
     (expand(values ?? [], vars) as unknown[]).map(String)
+  const onUris = (message: string, ok: (uris: string[]) => boolean): BenchAssertion =>
+    outcome.uris
+      ? { message, ok: ok(outcome.uris) }
+      : { message: `${message}：这种结果分不清 URI 列表，要看启动节点用 boot 步骤`, ok: false }
   const assertions: BenchAssertion[] = []
   if (expected.error !== undefined) {
     assertions.push({
@@ -143,10 +147,10 @@ function check(
     assertions.push({ message: `不应包含「${text}」`, ok: !outcome.text.includes(text) })
   }
   for (const uri of list(expected.uris)) {
-    assertions.push({ message: `URI 列表应有 ${uri}`, ok: outcome.uris.includes(uri) })
+    assertions.push(onUris(`URI 列表应有 ${uri}`, (uris) => uris.includes(uri)))
   }
   for (const uri of list(expected.notUris)) {
-    assertions.push({ message: `URI 列表不应有 ${uri}`, ok: !outcome.uris.includes(uri) })
+    assertions.push(onUris(`URI 列表不应有 ${uri}`, (uris) => !uris.includes(uri)))
   }
   return assertions
 }

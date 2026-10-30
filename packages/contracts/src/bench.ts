@@ -40,7 +40,7 @@ export const BenchExpect = z.strictObject({
   error: z.boolean().optional(),
   contains: z.array(AssertedText).max(20).optional(),
   notContains: z.array(AssertedText).max(20).optional(),
-  // 结果的 URI 列表里要有这些
+  // 结果的 URI 列表里要有这些。kioku_boot 的结果分不清标题和正文，没有这个列表，这两种断言直接算失败
   uris: z.array(AssertedText).max(50).optional(),
   notUris: z.array(AssertedText).max(50).optional(),
 })
@@ -264,8 +264,8 @@ export const BenchStepResult = z.object({
   // 原始响应，和接入方收到的相同
   raw: z.unknown(),
   ms: z.number(),
-  // 结果里的 URI 列表
-  uris: z.array(z.string()),
+  // 结果里的 URI 列表。null 表示这种结果分不清（kioku_boot 的标题和正文写法相同），uris 与 notUris 断言直接算失败
+  uris: z.array(z.string()).nullable(),
   session: BenchSessionStart.nullable(),
   // 回滚模式下这一步的查询没有算好向量，只走了全文与关键词
   vectorSkipped: z.boolean(),

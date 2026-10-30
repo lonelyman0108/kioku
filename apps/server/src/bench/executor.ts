@@ -26,7 +26,8 @@ export interface StepOutcome {
   httpStatus: number | null
   text: string
   raw: unknown
-  uris: string[]
+  // 结果里的 URI 列表。null 表示这种结果分不清，uris 与 notUris 断言直接算失败，不能当成「没有」
+  uris: string[] | null
   session: BenchSessionStart | null
   vectorSkipped: boolean
   changes: BenchChanges | null
@@ -46,10 +47,44 @@ const OUTCOME_DEFAULTS = {
   changes: null,
 } as const
 
-// 工具结果里的 URI：kioku_get 等的「URI: …」、kioku_list 的「- …（」、kioku_search 的「0.59 | …」；
-// kioku_boot 只算展开的节点（「## …」），「- …」是没展开的。这两个正则是写死的，不接受场景给的模式
-const TOOL_URI = /^(?:URI: |- |\d+\.\d+ \| )([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)/gm
-const BOOT_URI = /^## ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)$/gm
+// 工具结果里的结构行（见 mcp/format.ts 与 formatRecallBlock）。正则是写死的，不接受场景给的模式
+const MEMORY_URI_LINE = /^URI: ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)$/
+const CHILD_ROW =
+  /^- ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)（(?:路径本身没有记忆|[a-z]+，priority -?\d+)(?:，\d+ 个子节点)?）/
+const RECALL_ROW = /^\d+\.\d+ \| ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)(?: \| |$)/
+
+const urisIn = (lines: readonly string[], row: RegExp) =>
+  lines.flatMap((line) => {
+    const uri = row.exec(line)?.[1]
+    return uri === undefined ? [] : [uri]
+  })
+
+// 结果里的 URI，按工具只看结构行：正文是任意文字，可能写着和结构行一样的内容，扫全文会把它们也算进去
+function toolUris(tool: string, text: string): string[] | null {
+  const lines = text.split('\n')
+  switch (tool) {
+    // 记忆视图：元数据在正文前面，第一行就是 URI
+    case 'kioku_get':
+    case 'kioku_create':
+    case 'kioku_update':
+    case 'kioku_move':
+      return urisIn(lines.slice(0, 1), MEMORY_URI_LINE)
+    // 父节点的视图在列表前面，正文里也可能写着「子节点：」，所以从最后一个算起。
+    // 子节点的 disclosure 可以多行，里面写成这些行的样子时分不出来
+    case 'kioku_list': {
+      const head = lines.findLastIndex((line) => line === '子节点：' || line === '子节点：无')
+      return head < 0 ? [] : urisIn(lines.slice(head + 1), CHILD_ROW)
+    }
+    // 整个结果就是 <recall> 块，线索都压成了单行
+    case 'kioku_search':
+      return urisIn(lines, RECALL_ROW)
+    // 标题（「## …」）和正文写法相同，分不清哪些是节点。要看启动节点用 /boot 步骤，它有结构化的 entries
+    case 'kioku_boot':
+      return null
+    default:
+      return []
+  }
+}
 
 // tools/call 响应里的 result
 export interface ToolResult {
@@ -71,7 +106,7 @@ export function toolOutcome(tool: string, result: ToolResult): StepOutcome {
     httpStatus: null,
     text,
     raw: result,
-    uris: [...text.matchAll(tool === 'kioku_boot' ? BOOT_URI : TOOL_URI)].map((m) => m[1]!),
+    uris: isError ? [] : toolUris(tool, text),
   }
 }
 
