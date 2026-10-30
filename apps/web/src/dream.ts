@@ -72,6 +72,14 @@ export const skipReasonLabels: Record<DreamSkipReason, string> = {
 // 自己在这个空间里的 Dream 设置的查询键：空间设置里的开关与待审页的说明共用一份缓存
 export const dreamSettingsKey = (spaceId: string) => ['dream-settings', spaceId] as const
 
+// 共享部分的汇总（运行记录里范围为空的那一条，每次一条）：各个范围的条目说了用量与建议，这里只说共享的内容整体怎样
+export function sharedSummaryText(entry: DreamRunEntry): string {
+  if (entry.skipped === 'idle') return '上次以来没有新增或改动'
+  if (entry.skipped) return skipReasonLabels[entry.skipped]
+  if (entry.error) return '出错了，这次停下'
+  return entry.more ? '整理过了，还有没看完的，下次接着整理' : '整理过了'
+}
+
 // 运行记录里一个范围的情况：用了多少 token、看了几条、提了几条建议
 export function runEntrySummary(entry: DreamRunEntry): string {
   if (entry.skipped) return skipReasonLabels[entry.skipped]

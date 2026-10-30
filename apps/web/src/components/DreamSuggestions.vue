@@ -17,6 +17,7 @@ import {
   dreamScopeText,
   dreamSettingsKey,
   runEntrySummary,
+  sharedSummaryText,
   runOutcome,
   suggestionKinds,
   triggerLabels,
@@ -480,6 +481,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
         <h3 class="text-sm font-medium">最近的整理</h3>
         <p class="mt-1 text-xs text-muted">
           每次整理用抽取模型，用量计入空间的抽取预算；只看上次以来新增或改动的记忆，别的成员的画像与私人层不在这里列出。
+          共享的内容先整理、记一条汇总，各人的画像层与私人层在那之后，所以自己的那部分结果可能比整理的状态晚一点出现在这里。
         </p>
       </template>
       <UAlert
@@ -500,8 +502,9 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </p>
           <ul class="space-y-0.5">
             <li v-for="(part, i) in entry.entries" :key="i" class="text-xs text-muted">
-              <span v-if="part.scope" class="text-default">{{ dreamScopeText(part.scope) }}：</span>
-              {{ runEntrySummary(part) }}
+              <span class="text-default"
+                >{{ part.scope ? dreamScopeText(part.scope) : '共享的内容' }}：</span
+              >{{ part.scope ? runEntrySummary(part) : sharedSummaryText(part) }}
               <span v-if="part.error" class="block text-error">{{ part.error }}</span>
             </li>
           </ul>

@@ -9,7 +9,7 @@ import {
   type DreamSuggestionKind,
   type DreamTrigger,
 } from '@kioku/contracts'
-import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql } from 'drizzle-orm'
+import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL } from 'drizzle-orm'
 
 import { maskPlaintextCredentials, mentionsPlaceholder } from '../credential/placeholders'
 import type { MasterKey } from '../crypto/keyring'
@@ -60,8 +60,9 @@ import { loadExtractionConfig } from './settings'
 // 这里只读记忆、请求模型、存建议，不写记忆。用抽取模型，用量计入同一份月度预算，用完就不整理。
 // 每个范围（见 memory/scopes.ts）单独请求模型，只看上次以来新增或改动的记忆，再带上它们的近邻作对照
 
-// 每次整理最多请求模型这么多次、用掉这么多 token（到了就不再开始新的一次），剩下的下次接着整理
-const MAX_CALLS = 8
+// 每次整理最多请求模型这么多次、用掉这么多 token（到了就不再开始新的一次），剩下的下次接着整理。
+// 共享的范围先用，画像层与私人层用剩下的（见 dreamOnce）
+export const DREAM_MAX_CALLS = 8
 const MAX_TOKENS = 60_000
 // 一次给模型看的：上次以来新增或改动的最多这么多条，近邻最多这么多条，正文合计最多这么多字
 export const DREAM_CHANGED_PER_CALL = 20
@@ -77,8 +78,10 @@ const FACT_NEIGHBORS_EACH = 6
 const MAX_SUGGESTIONS = 20
 const REASON_CHARS = 200
 
+// 共享部分的汇总里的出错：共享的范围请求模型或写入出错，这一次就停下了
+const SHARED_FAILED = '共享的范围出错，这次停下了（原因见出错的那个范围）'
 // 服务端自己判断出的出错原因，不带模型接口或数据库的原文，所有成员都看得到
-const PLAIN_ERRORS = new Set([DREAM_PARSE_ERROR])
+const PLAIN_ERRORS = new Set([DREAM_PARSE_ERROR, SHARED_FAILED])
 const HIDDEN_ERROR = '整理出错（原因只有实例管理员看得到）'
 
 type MemoryRow = typeof memories.$inferSelect
@@ -99,25 +102,30 @@ const CANDIDATE = and(
 
 // 让 Dream 整理自己的画像层与私人层的成员：现在还是成员，开关（space_members.dream_private，默认开）开着。
 // 离开了空间的成员看不到建议，整理了也白花 token；关掉了的不发给模型，也就不记整理标记，再打开时接着看。
-// 选范围时读一次，每次请求模型之前再读一次（见 dreamScope），不在每条记忆上去查成员表。
-// 只问一个成员时给 owner；lock 时锁住那一行（FOR SHARE）：同时改开关的请求要等这个事务提交，
-// 存下的结果不会和关掉交错——关掉在前就不存，存在前就算关掉之前整理的
-async function allowedOwners(
-  db: Db | Tx,
-  spaceId: string,
-  options: { owner?: string; lock?: boolean } = {},
-): Promise<string[]> {
-  const query = db
+// 选范围时读一次，每次请求模型之前再读一次（见 dreamScope），不在每条记忆上去查成员表；只问一个成员时给 owner
+async function allowedOwners(db: Db | Tx, spaceId: string, owner?: string): Promise<string[]> {
+  const rows = await db
     .select({ id: spaceMembers.accountId })
     .from(spaceMembers)
     .where(
       and(
         eq(spaceMembers.spaceId, spaceId),
         eq(spaceMembers.dreamPrivate, true),
-        options.owner ? eq(spaceMembers.accountId, options.owner) : undefined,
+        owner ? eq(spaceMembers.accountId, owner) : undefined,
       ),
     )
-  return (await (options.lock ? query.for('share') : query)).map((m) => m.id)
+  return rows.map((m) => m.id)
+}
+
+// 写结果之前锁住这一组的主人在成员表里的那一行（FOR SHARE），看他现在的开关；不再是成员时为 null。
+// 同时改开关的请求要等写结果的事务提交，存下的结果不会和关掉交错：关掉在前就不存，存在前就算关掉之前整理的
+async function lockedSwitch(tx: Tx, spaceId: string, owner: string): Promise<boolean | null> {
+  const [row] = await tx
+    .select({ on: spaceMembers.dreamPrivate })
+    .from(spaceMembers)
+    .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, owner)))
+    .for('share')
+  return row ? row.on : null
 }
 
 // 能提建议的记忆里，画像层与私人层的只收名单里的主人的（名单见 allowedOwners）
@@ -153,28 +161,43 @@ type RunFields = Omit<
   'id' | 'spaceId' | 'runId' | 'trigger' | 'createdAt'
 >
 
+// 整理到哪儿了：共享部分的汇总写下了没有，正在整理哪个范围
+interface Progress {
+  summarized: boolean
+  scope: PendingScope | null
+}
+
 // 整理一个空间：没配抽取模型、本月的预算用完了、上次以来没有新增或改动的内容时不整理，记下原因。
-// 否则按范围逐个请求模型，同一个范围没看完的排到后面再来，请求次数或用量到了上限就停，剩下的下次接着整理。
+// 否则分两段：先把共享的范围整理完，记一条共享部分的汇总，再整理各人的画像层与私人层（见 dreamOnce）。
 // 中途出了没料到的错（例如抽取模型的 Key 解不开、读库出错）也记一条运行记录写明原因：当天就算整理过，
-// 每小时的检查不会接着一遍遍再排；正在整理某个范围时出的错记在那个范围上，画像层与私人层的只给本人看。
-// 连这一条都写不进去时，两个错误都记进日志，原来的错误照样抛出去，由后台任务记下这次失败；
+// 每小时的检查不会接着一遍遍再排。汇总还没写下时出的错，这一条就是汇总；之后出的错记在当时那个画像层或私人层的
+// 范围上，只给本人看。连这一条都写不进去时，两个错误都记进日志，原来的错误照样抛出去，由后台任务记下这次失败；
 // 没有运行记录，下一个小时会再排
 export async function dreamSpace(
   db: Db,
   masterKey: MasterKey | null,
   options: DreamOptions,
 ): Promise<DreamOutcome> {
-  const current: { scope: PendingScope | null } = { scope: null }
+  const progress: Progress = { summarized: false, scope: null }
   try {
-    return await dreamOnce(db, masterKey, options, current)
+    return await dreamOnce(db, masterKey, options, progress)
   } catch (err) {
+    const error = `整理出错：${messageOf(err)}`
+    const at = progress.scope
+    // 汇总写下之后、又不在哪个范围里：不再记一条范围为空的（那就成了第二条汇总），只记日志
+    if (progress.summarized && !at) {
+      console.error('Dream 整理出错', err)
+      return { outcome: 'failed', reason: null }
+    }
     try {
       await withSpace(db, options.spaceId, (tx) =>
-        recordRun(tx, options, {
-          scope: current.scope?.key ?? null,
-          ownerAccountId: current.scope?.owner ?? null,
-          error: `整理出错：${messageOf(err)}`,
-        }),
+        recordRun(
+          tx,
+          options,
+          progress.summarized && at
+            ? { scope: at.key, ownerAccountId: at.owner, error }
+            : { error },
+        ),
       )
     } catch (recordErr) {
       console.error('Dream 整理出错', err)
@@ -192,22 +215,30 @@ function messageOf(err: unknown): string {
   return err instanceof Error ? err.message : String(err)
 }
 
-// 别的成员看到的整理结果只按共享的范围算（运行记录与状态都按查看者看得到的记录算，见 dreamRunList、dreamRunOutcome），
-// 所以这里让画像层与私人层影响不到共享的那部分记录：共享的范围排在前面，先于任何人的画像层与私人层请求模型，
-// 请求次数、用量上限与中途出错都轮不到它们头上；没有共享的内容要整理时，一开始就记下「没有要整理的」；
-// 预算用完、出错记在当时那个范围上。于是某个成员开着还是关着、整理了什么，别的成员看到的列表与状态都一样
+// 别的成员看到的列表与状态只按共享部分的汇总与他自己的画像层、私人层算（见 dreamRunOutcome），
+// 所以分两段整理，共享的那一段不受任何人的画像层与私人层影响：
+// 1. 先把共享的范围整理完，没看完的接着看，都在画像层与私人层之前；每次整理的请求次数与用量上限先给这一段用。
+//    出错就停下：多半是接口或库的问题，别的范围也会一样；
+// 2. 接着记一条共享部分的汇总（范围为空）：出错了、整理过了（还有没看完的）、没有要整理的。
+//    整次没走到范围时（没配模型、预算用完、什么都没有要整理的）记的那一条也是汇总；
+// 3. 再整理画像层与私人层，用剩下的请求次数与用量。结果、出错与用量只记在各自的范围上，
+//    一个范围出错不耽误别人的范围，接着整理下一个
 async function dreamOnce(
   db: Db,
   masterKey: MasterKey | null,
   options: DreamOptions,
-  current: { scope: PendingScope | null },
+  progress: Progress,
 ): Promise<DreamOutcome> {
   const { spaceId } = options
   const now = options.now ?? new Date()
   const record = (fields: RunFields) =>
     withSpace(db, spaceId, (tx) => recordRun(tx, options, fields))
+  const summarize = async (fields: RunFields) => {
+    await record(fields)
+    progress.summarized = true
+  }
   const skip = async (reason: DreamSkipReason): Promise<DreamOutcome> => {
-    await record({ skipped: reason })
+    await summarize({ skipped: reason })
     return { outcome: 'skipped', reason }
   }
   const config = await loadExtractionConfig(db, masterKey)
@@ -220,40 +251,56 @@ async function dreamOnce(
   if (await overBudget()) return skip('budget')
   const queue = await pendingScopes(db, spaceId)
   if (!queue.length) return skip('idle')
-  const shared = queue.some((s) => !s.owner)
-  // 没有共享的内容要整理：先记下「没有要整理的」，别的成员看到的就是这一条
-  if (!shared) await record({ skipped: 'idle' })
   const activeModel = (await loadEmbeddingModels(db)).active?.model ?? null
-  let calls = 0
-  let sharedCalls = 0
-  let tokens = 0
-  let failed = false
-  while (queue.length && calls < MAX_CALLS && tokens < MAX_TOKENS) {
-    const scope = queue.shift()!
-    // 第一次请求之前已经看过；之后每次都再看一眼，抽取与别的整理可能同时在花
-    if (calls > 0 && (await overBudget())) {
-      await record({ scope: scope.key, ownerAccountId: scope.owner, skipped: 'budget' })
-      break
+  const spent = { calls: 0, tokens: 0 }
+
+  // 整理一段：没看完的排到这一段的后面接着看。请求次数或用量到了上限、本月预算用完就停，
+  // 预算用完记在没整理的那个范围上。返回这一段请求了几次、有没有出错、还有没有没看完的
+  const runSegment = async (scopes: PendingScope[], stopOnFailure: boolean) => {
+    const pending = [...scopes]
+    let calls = 0
+    let failed = false
+    while (pending.length && spent.calls < DREAM_MAX_CALLS && spent.tokens < MAX_TOKENS) {
+      const scope = pending[0]!
+      progress.scope = scope
+      // 第一次请求之前已经看过；之后每次都再看一眼，抽取与别的整理可能同时在花
+      if (spent.calls > 0 && (await overBudget())) {
+        await record({ scope: scope.key, ownerAccountId: scope.owner, skipped: 'budget' })
+        break
+      }
+      pending.shift()
+      const result = await dreamScope(db, model, options, scope, { activeModel, now })
+      progress.scope = null
+      if (!result) continue
+      calls++
+      spent.calls++
+      spent.tokens += result.tokens
+      if (result.failed) {
+        failed = true
+        if (stopOnFailure) break
+        continue
+      }
+      if (result.more) pending.push(scope)
     }
-    current.scope = scope
-    const result = await dreamScope(db, model, options, scope, { activeModel, now })
-    current.scope = null
-    if (!result) continue
-    calls++
-    if (!scope.owner) sharedCalls++
-    tokens += result.tokens
-    // 请求模型或写入出错：多半是接口或库的问题，别的范围也会一样，这次就停下
-    if (result.failed) {
-      failed = true
-      break
-    }
-    if (result.more) queue.push(scope)
+    progress.scope = null
+    return { calls, failed, more: pending.length > 0 }
   }
-  // 共享的范围要看的记忆在这期间都被删掉了：同样记一条「没有要整理的」（一开始没记过的话）。
-  // 一次都没请求时也有这一条，每天的检查据此知道今天整理过
-  if (shared && !sharedCalls) await record({ skipped: 'idle' })
-  if (failed) return { outcome: 'failed', reason: null }
-  if (!calls) return { outcome: 'skipped', reason: 'idle' }
+
+  // 范围已经按 pendingScopes 排好，共享的在前：开头没有主人的那些是第一段，从第一个画像层或私人层的范围起是第二段
+  const cut = queue.findIndex((s) => s.owner !== null)
+  const shared = await runSegment(cut < 0 ? queue : queue.slice(0, cut), true)
+  // 共享的范围要看的记忆在这期间都被删掉了也算没有要整理的。一次都没请求时也有这一条，每天的检查据此知道今天整理过
+  await summarize(
+    shared.failed
+      ? { error: SHARED_FAILED }
+      : shared.calls
+        ? { more: shared.more }
+        : { skipped: 'idle' },
+  )
+  if (shared.failed) return { outcome: 'failed', reason: null }
+  const personal = await runSegment(cut < 0 ? [] : queue.slice(cut), false)
+  if (personal.failed) return { outcome: 'failed', reason: null }
+  if (!shared.calls && !personal.calls) return { outcome: 'skipped', reason: 'idle' }
   return { outcome: 'done', reason: null }
 }
 
@@ -279,8 +326,11 @@ const UNMARKED = sql`not exists (
   select 1 from ${dreamMarks}
   where ${dreamMarks.memoryId} = ${memories.id} and ${dreamMarks.version} = ${memories.version})`
 
-// 有要看的记忆的范围：共享的在前，画像层与私人层的在后（见 dreamOnce）；各自按上次整理的时间，
-// 整理得早的（从没整理过、记录已经清掉的最先）排在前面；没整理成的（预算用完、主人关掉了）不算整理过。
+// 范围是某个成员的画像层或私人层（owner:<成员>、private:<成员>，见 memory/scopes.ts 的 DREAM_SCOPE_KEY）
+const personalScope = (scope: SQL) => sql`(${scope} like 'owner:%' or ${scope} like 'private:%')`
+
+// 有要看的记忆的范围，顺序只在这里定：共享的在前、画像层与私人层的在后（见 dreamOnce）；再按上次整理的时间，
+// 整理得早的（从没整理过、记录已经清掉的最先）排在前面，没整理成的（预算用完、主人关掉了）不算整理过。
 // 画像层与私人层的范围只有主人允许时才有（见 allowedOwners）
 async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
   const rows = await withSpace(db, spaceId, async (tx) => {
@@ -295,13 +345,12 @@ async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
       )
       select pending.scope from pending
       left join last on last.scope = pending.scope
-      order by last.at nulls first, pending.scope`)
+      order by ${personalScope(sql`pending.scope`)}, last.at nulls first, pending.scope`)
   })
-  const scopes = rows.flatMap(({ scope: key }) => {
+  return rows.flatMap(({ scope: key }) => {
     const scope = parseDreamScope(key)
     return scope ? [{ key, scope, owner: dreamScopeOwner(key) }] : []
   })
-  return [...scopes.filter((s) => !s.owner), ...scopes.filter((s) => s.owner)]
 }
 
 // 给模型看的一条记忆
@@ -470,8 +519,8 @@ interface ScopeResult {
 // 请求模型失败时只记原因、不记整理过（下次重来）；输出解析不了时记下原因与用量、记下整理过：
 // 同样的输入多半还是解析不了，重试只会白花 token。没有要看的记忆时（期间被删掉了，或者主人关掉了整理）返回 null。
 // 画像层与私人层的范围看三次主人的开关：读这一批时按允许的名单取；读完之后、请求模型之前再看一眼，这之间关掉的不发；
-// 写结果的事务里锁住成员那一行再看一眼，请求模型期间关掉的，这一次的建议与整理标记都不存，只记下用掉的 token。
-// 已经发给模型的那一次收不回来
+// 写结果的事务里锁住成员那一行再看一眼，请求模型期间关掉的，这一次的建议与整理标记都不存，只记下用掉的 token；
+// 请求期间不再是成员的，什么都不存也不记。已经发给模型的那一次收不回来
 async function dreamScope(
   db: Db,
   model: ChatModel,
@@ -502,7 +551,7 @@ async function dreamScope(
   if (!batch.changed.length) return null
   await options.afterBatch?.(pending.key)
   // 读这一批的事务已经提交：请求模型之前再看一眼，这之间关掉的不发
-  if (owner && !(await allowedOwners(db, spaceId, { owner })).length) return null
+  if (owner && !(await allowedOwners(db, spaceId, owner)).length) return null
   const subjectName = new Map(names.map((n) => [n.id, n.name]))
   const picked = [...batch.changed, ...batch.neighbors]
   const byHandle = new Map(picked.map((p, i) => [`M${i + 1}`, p]))
@@ -563,18 +612,23 @@ async function dreamScope(
     else if (!proposals.has(proposal.fingerprint)) proposals.set(proposal.fingerprint, proposal)
   }
   const attempted = candidates.length - dropped
-  let withheld: boolean
+  let saved: boolean
   try {
-    withheld = await withSpace(db, spaceId, async (tx) => {
-      // 锁住成员那一行再看一眼：请求模型期间关掉的不存结果
-      if (owner && !(await allowedOwners(tx, spaceId, { owner, lock: true })).length) {
-        await record(tx, { ...usage, skipped: 'opted-out' })
-        return true
+    saved = await withSpace(db, spaceId, async (tx) => {
+      if (owner) {
+        const on = await lockedSwitch(tx, spaceId, owner)
+        // 请求模型期间不再是成员了：结果不存，也不给他记（他看不到了，也说不上是他关掉的）
+        if (on === null) return false
+        // 请求模型期间关掉了：建议与整理标记都不存，只记下用掉的 token
+        if (!on) {
+          await record(tx, { ...usage, skipped: 'opted-out' })
+          return false
+        }
       }
       if (unparsed) {
         await mark(tx)
         await record(tx, { ...usage, more: batch.more, error: unparsed })
-        return false
+        return true
       }
       const inserted = proposals.size
         ? await tx
@@ -600,7 +654,7 @@ async function dreamScope(
         dropped,
         more: batch.more,
       })
-      return false
+      return true
     })
   } catch (err) {
     // 整个事务已经回滚：单独记下原因，这一批没记成整理过，下次重来
@@ -609,8 +663,8 @@ async function dreamScope(
     )
     return { tokens, more: batch.more, failed: true }
   }
-  // 主人关掉了：这个范围这次不再接着整理
-  return { tokens, more: !withheld && batch.more, failed: false }
+  // 结果没存（主人关掉了、不再是成员）：这个范围这次不再接着整理
+  return { tokens, more: saved && batch.more, failed: false }
 }
 
 // 一条合规的建议，按存进 dream_suggestions 的样子
@@ -763,18 +817,16 @@ export async function dreamsDue(db: Db, now = new Date()): Promise<string[]> {
   return due
 }
 
-// 运行记录里的一条给谁看：整次没走到范围的、共享范围的给所有成员，画像层与私人层的只给本人
+// 运行记录里的一条给谁看：共享部分的汇总（范围为空）与共享范围的给所有成员，画像层与私人层的只给本人。
+// 共享范围的记录都在汇总之前写下（见 dreamOnce），内容与时间都和任何人的画像层、私人层无关
 const visibleRun = (accountId: string) =>
-  sql`(${dreamRuns.scope} is null or (${dreamRuns.scope} not like 'owner:%' and ${dreamRuns.scope} not like 'private:%')
+  sql`(${dreamRuns.scope} is null or not ${personalScope(sql`${dreamRuns.scope}`)}
     or ${dreamRuns.ownerAccountId} = ${accountId})`
 
-// 整次的「没有要整理的」：没有共享的内容要整理时记的（见 dreamOnce），自己的画像层或私人层在这一次整理过时不列
-const sharedIdle = (entry: DreamRunEntry) => entry.scope === null && entry.skipped === 'idle'
-
-// 一次整理在一个成员看来的结果，和运行记录一样只按他看得到的记录算（整次的、共享范围的与他自己的画像层、私人层），
-// 别的成员的画像层与私人层整理了没有、出没出错都不影响：有出错的就是出错，有整理过的范围就是整理过，
-// 否则是没整理，原因先取「没有要整理的」以外的。模型的输出解析不了的那一批记了整理过（见 dreamScope），
-// 和整次的结果一样不算出错。还没有他看得到的记录时为 null
+// 一次整理在一个成员看来的结果：只看共享部分的汇总（范围为空的那一条）与他自己的画像层、私人层的记录，
+// 别的成员的画像层与私人层整理了没有、出没出错、花了多久都不影响。有出错的就是出错，有整理过的（汇总说整理过了，
+// 或者自己的范围整理过）就是整理过，否则是没整理，原因先取「没有要整理的」以外的；模型的输出解析不了的那一批
+// 记了整理过（见 dreamScope），不算出错。汇总还没写下时为 null：共享的那一段还在整理，或者没写下汇总就停了
 export async function dreamRunOutcome(
   db: Db,
   spaceId: string,
@@ -785,18 +837,23 @@ export async function dreamRunOutcome(
     tx
       .select({ scope: dreamRuns.scope, skipped: dreamRuns.skipped, error: dreamRuns.error })
       .from(dreamRuns)
-      .where(and(eq(dreamRuns.runId, runId), visibleRun(accountId))),
+      .where(
+        and(
+          eq(dreamRuns.runId, runId),
+          or(isNull(dreamRuns.scope), eq(dreamRuns.ownerAccountId, accountId)),
+        ),
+      ),
   )
-  if (!rows.length) return null
+  if (!rows.some((r) => r.scope === null)) return null
   if (rows.some((r) => r.error && r.error !== DREAM_PARSE_ERROR)) {
     return { outcome: 'failed', reason: null }
   }
-  if (rows.some((r) => r.scope && !r.skipped)) return { outcome: 'done', reason: null }
-  const reasons = rows.flatMap((r) => (r.skipped ? [r.skipped as DreamSkipReason] : []))
+  if (rows.some((r) => !r.skipped)) return { outcome: 'done', reason: null }
+  const reasons = rows.map((r) => r.skipped as DreamSkipReason)
   return { outcome: 'skipped', reason: reasons.find((r) => r !== 'idle') ?? 'idle' }
 }
 
-// 最近几次整理，新的在前。模型接口或数据库报的原文只给实例管理员看
+// 最近几次整理，新的在前，每次列出查看者看得到的记录（见 visibleRun）。模型接口或数据库报的原文只给实例管理员看
 export async function dreamRunList(
   db: Db,
   spaceId: string,
@@ -830,11 +887,6 @@ export async function dreamRunList(
       // 一次整理的几条按时间先后列
       run.entries.unshift(entryOf(row, named, viewer.admin))
       run.at = row.createdAt.toISOString() < run.at ? row.createdAt.toISOString() : run.at
-    }
-    for (const run of runs.values()) {
-      if (run.entries.some((e) => !sharedIdle(e))) {
-        run.entries = run.entries.filter((e) => !sharedIdle(e))
-      }
     }
     return { runs: [...runs.values()] }
   })

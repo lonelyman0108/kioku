@@ -34,7 +34,7 @@ import { fakeChatModel, dreamLines, handleOf } from '../../testing/fakeChatModel
 import { startFakeChatServer } from '../../testing/fakeChatServer'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
-import { DREAM_CHANGED_PER_CALL, dreamsDue, dreamSpace } from '../dream'
+import { DREAM_CHANGED_PER_CALL, DREAM_MAX_CALLS, dreamsDue, dreamSpace } from '../dream'
 import type { ChatMessage, ChatModel } from '../provider'
 import { clearExtractionConfig, saveExtractionConfig } from '../settings'
 
@@ -181,6 +181,9 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     )
   const runs = (spaceId = ws.spaceId) =>
     inSpace((tx) => tx.select().from(dreamRuns).orderBy(asc(dreamRuns.id)), spaceId)
+  // 各个范围的运行记录，与每次整理一条的共享部分的汇总（范围为空）
+  const scopeRuns = async () => (await runs()).filter((r) => r.scope !== null)
+  const summaries = async () => (await runs()).filter((r) => r.scope === null)
   const forget = () => inSpace((tx) => tx.delete(dreamMarks))
 
   it('提出四种建议：策展记忆的合并与过时，事实的合并、提炼与过时，不可信内容的审核；每个范围请求一次', async () => {
@@ -296,10 +299,25 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect(rows).toHaveLength(7)
 
     expect(
-      (await runs()).map((r) => [r.scope, r.changed, r.considered, r.suggested, r.dropped, r.more]),
+      (await scopeRuns()).map((r) => [
+        r.scope,
+        r.changed,
+        r.considered,
+        r.suggested,
+        r.dropped,
+        r.more,
+      ]),
     ).toEqual([
       ['base', 3, 3, 2, 0, false],
       [`talk:${scope}`, 4, 4, 5, 0, false],
+    ])
+    // 共享的范围都整理完之后记一条汇总：整理过了，没有没看完的
+    expect(
+      (await runs()).map((r) => [r.scope, r.skipped, r.error, r.more, r.promptTokens]),
+    ).toEqual([
+      ['base', null, null, false, 120],
+      [`talk:${scope}`, null, null, false, 120],
+      [null, null, null, false, 0],
     ])
     expect((await runs())[0]).toMatchObject({
       trigger: 'manual',
@@ -391,7 +409,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         ['stale', '合规的一条'],
       ].sort(),
     )
-    expect((await runs()).map((r) => [r.suggested, r.dropped])).toEqual([
+    expect((await scopeRuns()).map((r) => [r.suggested, r.dropped])).toEqual([
       [1, 2],
       [1, 8],
     ])
@@ -683,6 +701,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         ((await (await send('GET', '/dream/runs', undefined, cookie)).json()) as DreamRunList)
           .runs[0]!.entries
       expect(await latest(bob.cookie)).toMatchObject([
+        { scope: null, skipped: 'idle' },
         { scope: { kind: 'private' }, skipped: 'opted-out', tokens: 150 },
       ])
       expect(await latest(ws.cookie)).toMatchObject([{ scope: null, skipped: 'idle' }])
@@ -738,6 +757,96 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         })
       },
     )
+
+    it('请求模型期间不再是成员：建议与整理标记都不存，也不给他记「你关掉了」', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      const diary = await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const { model, calls } = fakeChatModel(async () => {
+        await database.db.delete(spaceMembers).where(eq(spaceMembers.accountId, bob.accountId))
+        return reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }])
+      })
+      expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+      expect(calls).toHaveLength(1)
+      expect((await marks()).has(diary.id)).toBe(false)
+      expect(await stored()).toEqual([])
+      expect((await runs()).map((r) => [r.scope, r.skipped])).toEqual([[null, 'idle']])
+    })
+  })
+
+  describe('先整理共享的范围，再整理各人的画像层与私人层', () => {
+    const notes = (count: number) =>
+      inSpace((tx) =>
+        tx.insert(memories).values(
+          Array.from({ length: count }, (_, i) => ({
+            spaceId: ws.spaceId,
+            form: 'curated' as const,
+            layer: 'base' as const,
+            sensitivity: 'public' as const,
+            provenance: 'owner' as const,
+            domain: 'core',
+            path: `note-${String(i).padStart(3, '0')}`,
+            content: `第 ${i} 条笔记`,
+          })),
+        ),
+      )
+    const BASE = '全空间共用的基础规则与知识（基础层）'
+    const PRIVATE = '一位成员的私人事务（私人层）'
+
+    it('共享的范围分几批时，都在画像层与私人层之前整理完，汇总记在它们之间', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await notes(DREAM_CHANGED_PER_CALL + 5)
+      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const { model, calls } = fakeChatModel(reply([]))
+      expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
+      expect(calls.map(titleOf)).toEqual([BASE, BASE, PRIVATE])
+      expect((await runs()).map((r) => [r.scope, r.more])).toEqual([
+        ['base', true],
+        ['base', false],
+        [null, false],
+        [`private:${bob.accountId}`, false],
+      ])
+    })
+
+    it('每次整理的请求次数先给共享的范围用：用完了，画像层与私人层这次不整理，下次接着', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await notes(DREAM_CHANGED_PER_CALL * DREAM_MAX_CALLS + 1)
+      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const { model, calls } = fakeChatModel(reply([]))
+      await dream(model)
+      expect(calls.map(titleOf)).toEqual(Array(DREAM_MAX_CALLS).fill(BASE))
+      expect(await runs()).toHaveLength(DREAM_MAX_CALLS + 1)
+      expect((await summaries()).at(-1)).toMatchObject({ skipped: null, error: null, more: true })
+      // 下一次：共享的剩下一批，接着整理 bob 的私人层
+      await dream(model)
+      expect(calls.slice(DREAM_MAX_CALLS).map(titleOf)).toEqual([BASE, PRIVATE])
+    })
+
+    it('一个成员的画像层或私人层请求出错，不耽误别的成员的：接着整理下一个，结果照样存下', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      const carol = await addMember(database.db, ws.spaceId, 'carol', 'editor')
+      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      await remember({ uri: 'home://carol', content: 'carol 的私事' }, carol.cookie)
+      // 第一个请求的私人层出错，第二个照常回一条建议
+      const seen: string[][] = []
+      const model: ChatModel = {
+        model: 'fake-model',
+        async complete(messages) {
+          seen.push(contentsOf(messages))
+          if (seen.length === 1) throw new Error('抽取模型返回 HTTP 502：bad gateway')
+          return {
+            content: reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }]),
+            usage: { promptTokens: 120, completionTokens: 30 },
+          }
+        },
+      }
+      expect(await dream(model)).toEqual({ outcome: 'failed', reason: null })
+      expect(seen.flat().sort()).toEqual(['bob 的私事', 'carol 的私事'])
+      expect((await scopeRuns()).map((r) => [r.error !== null, r.suggested])).toEqual([
+        [true, 0],
+        [false, 1],
+      ])
+      expect(await stored()).toHaveLength(1)
+    })
   })
 
   it('对象与情节按来源作用域分：群里记下的和私聊里记下的不在同一次请求里', async () => {
@@ -791,7 +900,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     ])
     const [merge] = await stored()
     expect(merge).toMatchObject({ kind: 'merge', keepId: a.id, versions: [2, 1] })
-    expect((await runs()).at(-1)).toMatchObject({ changed: 1, considered: 2, dropped: 1 })
+    expect((await scopeRuns()).at(-1)).toMatchObject({ changed: 1, considered: 2, dropped: 1 })
   })
 
   it('一次最多看这么多条新增或改动的，剩下的同一次接着请求；看过的都记下，下次不再看', async () => {
@@ -821,9 +930,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         .map((l) => l.content),
     )
     expect(new Set(seen).size).toBe(DREAM_CHANGED_PER_CALL + 5)
-    expect((await runs()).map((r) => [r.changed, r.more])).toEqual([
-      [DREAM_CHANGED_PER_CALL, true],
-      [5, false],
+    expect((await runs()).map((r) => [r.scope, r.changed, r.more])).toEqual([
+      ['base', DREAM_CHANGED_PER_CALL, true],
+      ['base', 5, false],
+      [null, 0, false],
     ])
     expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
   })
@@ -905,8 +1015,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
     expect(calls).toHaveLength(1)
     expect(await usage()).toBe(1_150)
-    expect((await runs()).slice(-2).map((r) => [r.scope, r.ownerAccountId, r.skipped])).toEqual([
+    // 共享的汇总写在画像层与私人层之前，私人层没整理的原因只记在它自己的范围上
+    expect((await runs()).slice(-3).map((r) => [r.scope, r.ownerAccountId, r.skipped])).toEqual([
       ['base', null, null],
+      [null, null, null],
       [`private:${ws.accountId}`, ws.accountId, 'budget'],
     ])
   })
@@ -938,7 +1050,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     await forget()
     await dream(model)
     expect(await stored()).toHaveLength(2)
-    expect((await runs()).at(-1)).toMatchObject({ suggested: 0, known: 2 })
+    expect((await scopeRuns()).at(-1)).toMatchObject({ suggested: 0, known: 2 })
 
     // 改过之后版本变了，可以再提
     const [row] = await inSpace((tx) =>
@@ -966,18 +1078,26 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       },
     }
     expect(await dream(failing)).toEqual({ outcome: 'failed', reason: null })
+    // 共享的范围出错就停下，汇总记出错，画像层与私人层这次不整理
     expect(await runs()).toMatchObject([
       { scope: 'base', error: '抽取模型返回 HTTP 502：bad gateway', promptTokens: 0 },
+      { scope: null, error: '共享的范围出错，这次停下了（原因见出错的那个范围）' },
     ])
     expect(await inSpace((tx) => tx.select().from(dreamMarks))).toEqual([])
 
     const { model, calls } = fakeChatModel('今天没什么好整理的')
     expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
     expect(calls).toHaveLength(2)
-    expect((await runs()).slice(1)).toMatchObject([
-      { error: '模型的输出里没有约定格式的 JSON 对象', promptTokens: 120 },
-      { error: '模型的输出里没有约定格式的 JSON 对象', promptTokens: 120 },
+    expect((await scopeRuns()).slice(1)).toMatchObject([
+      { scope: 'base', error: '模型的输出里没有约定格式的 JSON 对象', promptTokens: 120 },
+      {
+        scope: `private:${ws.accountId}`,
+        error: '模型的输出里没有约定格式的 JSON 对象',
+        promptTokens: 120,
+      },
     ])
+    // 解析不了的那一批记了整理过，汇总照样是整理过了
+    expect((await summaries()).at(-1)).toMatchObject({ skipped: null, error: null })
     expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
   })
 
@@ -1165,7 +1285,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       expect(await finished(runId)).toEqual({ state: 'finished', outcome: 'done', reason: null })
       expect(server.requests).toHaveLength(1)
       expect(await stored()).toMatchObject([{ kind: 'stale', status: 'pending' }])
-      expect(await runs()).toMatchObject([{ runId, trigger: 'manual', suggested: 1 }])
+      expect(await runs()).toMatchObject([
+        { runId, trigger: 'manual', scope: 'base', suggested: 1 },
+        { runId, scope: null, skipped: null, error: null },
+      ])
 
       // 没有新内容：做完了，结果是没整理
       const again = (await (await call('POST', '/dream/runs')).json()) as DreamQueued

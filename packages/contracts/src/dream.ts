@@ -108,8 +108,9 @@ export const DREAM_SKIP_REASONS = ['no-model', 'budget', 'idle', 'opted-out'] as
 export const DreamSkipReason = z.enum(DREAM_SKIP_REASONS)
 export type DreamSkipReason = z.infer<typeof DreamSkipReason>
 
-// 一次整理里的一项：整理了一个范围（预算用完、主人关掉了时带上没整理的原因），
-// 或者整次没走到范围（scope 为 null，带上没整理的原因）
+// 一次整理里的一项：整理了一个范围（预算用完、主人关掉了时带上没整理的原因）；scope 为 null 的是共享部分的汇总，
+// 每次一条：整理过了（more 表示还有没看完的）、没整理（带上原因，整次没走到范围时也是这一条）或者出错了。
+// 共享的范围先整理、汇总在它们之后写下，各人的画像层与私人层在汇总之后
 export const DreamRunEntry = z.object({
   scope: DreamScope.nullable(),
   model: z.string().nullable(),
@@ -153,7 +154,8 @@ export const DreamQueued = z.object({ runId: z.uuid() })
 export type DreamQueued = z.infer<typeof DreamQueued>
 
 // 一次整理的状态：排着、正在整理、做完了。做完了的结果：整理过了、没整理（原因见 reason）、出错了。
-// 结果和运行记录一样按查看者看得到的那部分算：别的成员的画像层与私人层整理了没有、出没出错都不影响
+// 共享部分的汇总写下就算做完，结果按汇总与查看者自己的画像层、私人层算：别的成员的整理了没有、出没出错、
+// 花了多久都不影响。查看者自己的画像层与私人层在汇总之后整理，结果可能晚一点才出现在运行记录里
 export const DreamRunStatus = z.object({
   state: z.enum(['queued', 'running', 'finished']),
   outcome: z.enum(['done', 'skipped', 'failed']).nullable(),

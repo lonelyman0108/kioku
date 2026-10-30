@@ -1,7 +1,7 @@
 import type { DreamRunEntry } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { dreamScopeText, runEntrySummary, runOutcome } from '../dream'
+import { dreamScopeText, runEntrySummary, runOutcome, sharedSummaryText } from '../dream'
 
 const entry: DreamRunEntry = {
   scope: null,
@@ -48,6 +48,19 @@ describe('运行记录', () => {
     expect(runEntrySummary({ ...entry, tokens: 0, skipped: 'budget' })).toBe(
       '没整理：本月的抽取预算用完了',
     )
+  })
+
+  it('共享部分的汇总只说共享的内容整体怎样，用量与建议看各个范围的条目', () => {
+    const summary = { ...entry, tokens: 0, changed: 0, considered: 0, suggested: 0, known: 0 }
+    expect(sharedSummaryText(summary)).toBe('整理过了')
+    expect(sharedSummaryText({ ...summary, more: true })).toBe(
+      '整理过了，还有没看完的，下次接着整理',
+    )
+    expect(sharedSummaryText({ ...summary, skipped: 'idle' })).toBe('上次以来没有新增或改动')
+    expect(sharedSummaryText({ ...summary, skipped: 'no-model' })).toBe(
+      '没整理：还没配抽取模型（实例设置里配）',
+    )
+    expect(sharedSummaryText({ ...summary, error: '共享的范围出错' })).toBe('出错了，这次停下')
   })
 
   it('「现在整理一次」做完之后按结果给提示，还没做完时不提示', () => {

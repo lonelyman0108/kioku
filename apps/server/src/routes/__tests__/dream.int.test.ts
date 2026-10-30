@@ -21,6 +21,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import {
+  dreamMarks,
   dreamRuns,
   dreamSuggestions,
   memories,
@@ -31,7 +32,7 @@ import {
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { dreamSpace, type DreamOutcome } from '../../extraction/dream'
+import { dreamSpace } from '../../extraction/dream'
 import type { ChatMessage, ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Jobs } from '../../jobs/queue'
@@ -46,8 +47,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
   let app: ReturnType<typeof createApp>
   let ws: Workspace
   const masterKey = randomBytes(32)
-  // 测试里跑完的整理（见 run）：按编号查状态时当作做完了的任务
-  const finished = new Map<string, DreamOutcome>()
+  // 按编号查到的任务：测试里跑完的整理当作做完了的任务（见 run），也能直接设成排着、正在整理
+  const jobStates = new Map<string, DreamRunStatus>()
   const jobs: Jobs = {
     enqueueEmbed() {},
     enqueueBackfill: async () => true,
@@ -58,10 +59,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     enqueueExtraction: async () => {},
     enqueueCleanup: async () => true,
     enqueueDream: async () => null,
-    dreamRun: async (_spaceId, id) => {
-      const outcome = finished.get(id)
-      return outcome ? { state: 'finished', ...outcome } : null
-    },
+    dreamRun: async (_spaceId, id) => jobStates.get(id) ?? null,
   }
 
   beforeAll(async () => {
@@ -137,15 +135,17 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     )
     return run(model)
   }
+  let lastRunId = ''
   const run = async (model: ChatModel) => {
     const runId = randomUUID()
+    lastRunId = runId
     const outcome = await dreamSpace(database.db, masterKey, {
       spaceId: ws.spaceId,
       runId,
       trigger: 'manual',
       modelFor: () => model,
     })
-    finished.set(runId, outcome)
+    jobStates.set(runId, { state: 'finished', ...outcome })
     return outcome
   }
   // 这个成员看到的最近一次整理：运行记录里的这一次（不带时间与编号）和按编号查到的状态
@@ -775,7 +775,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
       ok<DreamRunList>(await send('GET', '/dream/runs', undefined, cookie))
     const mine = await runs(ws.cookie)
     expect(mine.runs).toHaveLength(1)
-    expect(mine.runs[0]!.entries.map((e) => e.scope?.kind)).toEqual(['base', 'private'])
+    // 共享的范围、共享部分的汇总（范围为空），然后是自己的私人层
+    expect(mine.runs[0]!.entries.map((e) => e.scope?.kind ?? null)).toEqual([
+      'base',
+      null,
+      'private',
+    ])
     expect(mine.runs[0]).toMatchObject({ trigger: 'manual' })
     expect(mine.runs[0]!.entries[0]).toMatchObject({
       model: 'fake-model',
@@ -787,7 +792,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
       skipped: null,
       error: null,
     })
-    expect((await runs(bob.cookie)).runs[0]!.entries.map((e) => e.scope?.kind)).toEqual(['base'])
+    expect((await runs(bob.cookie)).runs[0]!.entries.map((e) => e.scope?.kind ?? null)).toEqual([
+      'base',
+      null,
+    ])
 
     await edit({ uri: 'core://rule', content: '共享的规则，改过' })
     const failing: ChatModel = {
@@ -812,7 +820,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect((await runs(bob.cookie)).runs[0]!.entries).toMatchObject([
       { scope: null, skipped: 'idle' },
     ])
-    expect(await inSpace((tx) => tx.select().from(dreamRuns))).toHaveLength(5)
+    // 四次整理各一条共享部分的汇总，加上基础层的三条与 alice 私人层的一条
+    expect(await inSpace((tx) => tx.select().from(dreamRuns))).toHaveLength(8)
   })
 
   it('现在整理一次：viewer 不能；排不进后台任务时 503；查不到的编号 404', async () => {
@@ -942,6 +951,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect(off.alice).toEqual(idle)
     // bob 自己看得到他的那部分
     expect(on.bob.entries).toMatchObject([
+      { scope: null, skipped: 'idle' },
       { scope: { kind: 'private' }, changed: 1, skipped: null },
     ])
     expect(on.bob.status).toEqual({ state: 'finished', outcome: 'done', reason: null })
@@ -966,7 +976,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     }
     expect(await run(flaky)).toEqual({ outcome: 'failed', reason: null })
     const alice = await latest(ws.cookie)
-    expect(alice.entries).toMatchObject([{ scope: { kind: 'base' }, error: null }])
+    expect(alice.entries).toMatchObject([
+      { scope: { kind: 'base' }, error: null },
+      { scope: null, skipped: null, error: null },
+    ])
     expect(alice.status).toEqual({ state: 'finished', outcome: 'done', reason: null })
     expect((await latest(bob.cookie)).status).toEqual({
       state: 'finished',
@@ -974,14 +987,17 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
       reason: null,
     })
 
-    // 输出解析不了的那一批记了整理过，和整次的结果一样不算出错
+    // 输出解析不了的那一批记了整理过，和整次的结果一样不算出错：bob 上次出错的私人层这次解析不了，他看到的是整理过
     await edit({ uri: 'core://rule', content: '共享的规则，又改过' })
     expect(await run(fakeChatModel('没有 JSON').model)).toEqual({ outcome: 'done', reason: null })
-    expect((await latest(ws.cookie)).status).toEqual({
-      state: 'finished',
-      outcome: 'done',
-      reason: null,
+    const done = { state: 'finished', outcome: 'done', reason: null }
+    expect((await latest(ws.cookie)).status).toEqual(done)
+    const bobs = await latest(bob.cookie)
+    expect(bobs.entries.at(-1)).toMatchObject({
+      scope: { kind: 'private' },
+      error: '模型的输出里没有约定格式的 JSON 对象',
     })
+    expect(bobs.status).toEqual(done)
   })
 
   it('整理某个成员的私人层时出了没料到的错：记在那个范围上，只有他看得到，别的成员看到的状态不受影响', async () => {
@@ -997,7 +1013,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
         throw new Error('测试里故意出的错')
       },
     })
-    finished.set(runId, outcome)
+    jobStates.set(runId, { state: 'finished', ...outcome })
     expect(outcome).toEqual({ outcome: 'failed', reason: null })
     const rows = await inSpace((tx) => tx.select().from(dreamRuns).orderBy(asc(dreamRuns.id)))
     expect(rows.map((r) => [r.scope, r.ownerAccountId, r.skipped, r.error])).toEqual([
@@ -1009,8 +1025,114 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
       status: { state: 'finished', outcome: 'skipped', reason: 'idle' },
     })
     expect(await latest(bob.cookie)).toMatchObject({
-      entries: [{ scope: { kind: 'private' }, error: '整理出错（原因只有实例管理员看得到）' }],
+      entries: [
+        { scope: null, skipped: 'idle', error: null },
+        { scope: { kind: 'private' }, error: '整理出错（原因只有实例管理员看得到）' },
+      ],
       status: { state: 'finished', outcome: 'failed', reason: null },
     })
+  })
+
+  it(
+    '别的成员看到的只按共享部分的汇总算：bob 没有私人内容、私人层整理得慢、出错、关掉时，alice 看到的列表与状态都一样，她看得到的记录都在私人层请求之前写下',
+    { timeout: 20_000 },
+    async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+      // 每一次都让基础层重新整理一遍，alice 看到的共享部分每次一样；bob 的私人层按各种情况来。
+      // 记下 bob 的私人层请求模型的时刻（数据库的时钟，和运行记录的时间比）
+      const once = async (onPrivate: () => Promise<string>) => {
+        await inSpace((tx) => tx.delete(dreamMarks))
+        let privateAt: Date | null = null
+        const model: ChatModel = {
+          model: 'fake-model',
+          async complete(messages) {
+            const personal = messages.some((m) => m.content.includes('bob 的'))
+            if (personal && !privateAt) {
+              const [row] = await database.db.execute<{ at: string }>(
+                sql`select clock_timestamp()::text as at`,
+              )
+              privateAt = new Date(row!.at)
+            }
+            const content = personal ? await onPrivate() : reply([])
+            return { content, usage: { promptTokens: 120, completionTokens: 30 } }
+          },
+        }
+        await run(model)
+        const rows = await inSpace((tx) =>
+          tx.select().from(dreamRuns).where(eq(dreamRuns.runId, lastRunId)),
+        )
+        const shared = rows.filter((r) => r.scope === null || !/^(owner|private):/.test(r.scope))
+        if (privateAt) {
+          const last = Math.max(...shared.map((r) => r.createdAt.getTime()))
+          expect(last).toBeLessThanOrEqual((privateAt as Date).getTime())
+        }
+        return { alice: await latest(ws.cookie), bob: await latest(bob.cookie), privateAt }
+      }
+
+      // bob 没有私人内容
+      const none = await once(async () => reply([]))
+      expect(none.privateAt).toBeNull()
+      expect(none.alice.entries.map((e) => e.scope?.kind ?? null)).toEqual(['base', null])
+      expect(none.alice.status).toEqual({ state: 'finished', outcome: 'done', reason: null })
+      // bob 的私人层整理得慢
+      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const slow = await once(async () => {
+        await new Promise((resolve) => setTimeout(resolve, 300))
+        return reply([])
+      })
+      expect(slow.privateAt).not.toBeNull()
+      expect(slow.bob.entries.map((e) => e.scope?.kind ?? null)).toEqual(['base', null, 'private'])
+      // bob 的私人层请求出错
+      const failing = await once(async () => {
+        throw new Error('抽取模型返回 HTTP 502：bad gateway')
+      })
+      expect(failing.bob.status).toEqual({ state: 'finished', outcome: 'failed', reason: null })
+      // bob 关掉了：他的私人层不发
+      await ok(await send('PUT', '/me/dream', { includePrivate: false }, bob.cookie))
+      const off = await once(async () => reply([]))
+      expect(off.privateAt).toBeNull()
+
+      expect([slow.alice, failing.alice, off.alice]).toEqual([none.alice, none.alice, none.alice])
+    },
+  )
+
+  it('按编号查状态：共享部分的汇总写下之前是正在整理，写下之后就算做完、不等画像层与私人层；没写下汇总就停了按出错算', async () => {
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+    const runId = randomUUID()
+    const status = async (id: string, cookie = ws.cookie) =>
+      ok<DreamRunStatus>(await send('GET', `/dream/runs/${id}`, undefined, cookie))
+
+    jobStates.set(runId, { state: 'running', outcome: null, reason: null })
+    expect(await status(runId)).toEqual({ state: 'running', outcome: null, reason: null })
+    // 整理到 bob 的私人层时汇总已经写下：alice 看到的已经做完了；bob 自己的那部分还在整理，先按汇总给
+    const during: DreamRunStatus[] = []
+    const outcome = await dreamSpace(database.db, masterKey, {
+      spaceId: ws.spaceId,
+      runId,
+      trigger: 'manual',
+      modelFor: () => fakeChatModel(reply([])).model,
+      afterBatch: async () => {
+        during.push(await status(runId), await status(runId, bob.cookie))
+      },
+    })
+    const idle = { state: 'finished', outcome: 'skipped', reason: 'idle' }
+    expect(during).toEqual([idle, idle])
+    jobStates.set(runId, { state: 'finished', ...outcome })
+    expect(await status(runId)).toEqual(idle)
+    expect(await status(runId, bob.cookie)).toEqual({
+      state: 'finished',
+      outcome: 'done',
+      reason: null,
+    })
+
+    // 任务停了却没写下汇总（停在共享的那一段或者更早）：按出错算，不用任务自己的结果
+    const stopped = randomUUID()
+    jobStates.set(stopped, { state: 'finished', outcome: 'done', reason: null })
+    expect(await status(stopped)).toEqual({ state: 'finished', outcome: 'failed', reason: null })
+    const queued = randomUUID()
+    jobStates.set(queued, { state: 'queued', outcome: null, reason: null })
+    expect(await status(queued)).toEqual({ state: 'queued', outcome: null, reason: null })
   })
 })

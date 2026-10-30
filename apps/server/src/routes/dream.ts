@@ -94,7 +94,7 @@ const status = createRoute({
   path: '/spaces/{spaceId}/dream/runs/{runId}',
   tags: ['review'],
   summary:
-    '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）；结果按查看者看得到的运行记录算，别的成员的画像层与私人层不影响',
+    '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）；共享的内容整理完就算做完，结果按共享部分的汇总与自己的画像层、私人层算，别的成员的不影响',
   request: { params: SpaceParams.extend({ runId: z.uuid() }) },
   responses: {
     200: jsonResponse('状态', DreamRunStatus),
@@ -186,10 +186,18 @@ export function dreamRoutes(deps: Deps) {
       if (!deps.jobs) return c.json({ error: '服务没有启动后台任务' }, 503)
       const found = await deps.jobs.dreamRun(spaceId, runId)
       if (!found) return c.json({ error: '没有这次整理' }, 404)
-      if (found.state !== 'finished') return c.json(found, 200)
-      // 做完了：结果按查看者看得到的运行记录算。一条记录都没写下（连记录都写不进去，任务失败）时用任务自己的结果
+      if (found.state === 'queued') return c.json(found, 200)
+      // 共享部分的汇总写下之后就算做完了，结果按汇总与查看者自己的画像层、私人层算（见 dreamRunOutcome）。
+      // 还没写下时：任务还在跑就是共享的那一段还在整理；任务已经停了（停在共享的那一段或者更早）按出错算，
+      // 不用任务自己的结果，那里面算上了画像层与私人层
       const seen = await dreamRunOutcome(deps.db, spaceId, runId, accountId)
-      return c.json(seen ? { state: 'finished' as const, ...seen } : found, 200)
+      if (seen) return c.json({ state: 'finished' as const, ...seen }, 200)
+      return c.json(
+        found.state === 'running'
+          ? { state: 'running' as const, outcome: null, reason: null }
+          : { state: 'finished' as const, outcome: 'failed' as const, reason: null },
+        200,
+      )
     })
     .openapi(mySettings, async (c) => {
       const { spaceId } = c.req.valid('param')
