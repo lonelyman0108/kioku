@@ -188,6 +188,15 @@ describe('mayWrite：命令行要不要 --allow-writes', () => {
     expect(mayWrite(recall({ query: 'x', context }))).toBe(false)
   })
 
+  it('只看传入的步骤：event、chatType 写成变量时判不出来，展开之后才判得出来', () => {
+    expect(mayWrite(lifecycle({ ...turnEnd, event: '${e}' }))).toBe(true)
+    const noChat = { sessionId: 's', user: '你好', reply: '你好呀' }
+    expect(mayWrite(lifecycle({ ...noChat, event: '${e}' }))).toBe(false)
+    expect(mayWrite(lifecycle({ ...noChat, event: 'turn.end' }))).toBe(true)
+    expect(mayWrite(recall({ query: 'x', context: { ...group, chatType: '${c}' } }))).toBe(false)
+    expect(mayWrite(recall({ query: 'x', context: { ...group, chatType: 'group' } }))).toBe(true)
+  })
+
   it('不带上下文的读不算，不合法的请求体也不会抛错', () => {
     expect(mayWrite(lifecycle({ event: 'session.start' }))).toBe(false)
     expect(mayWrite(recall({ query: 'x' }))).toBe(false)

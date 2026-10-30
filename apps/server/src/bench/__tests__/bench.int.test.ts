@@ -3,8 +3,8 @@ import { randomBytes } from 'node:crypto'
 import {
   BENCH_READ_TOOLS,
   BENCH_TOOLS,
+  BenchRunResult,
   type ActivityList,
-  type BenchRunResult,
   type BenchScenarioList,
   type BenchStepResult,
   type BenchTool,
@@ -810,6 +810,34 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       expect(boot.steps[0]!.uris).toBeNull()
       expect(boot.steps[0]!.assertions[0]!.message).toContain('分不清')
       expect(boot.steps[1]!.assertions[0]!.message).toContain('分不清')
+      // 界面按契约校验响应：没有列表（null）也要过
+      expect(BenchRunResult.safeParse(boot).success).toBe(true)
+    })
+
+    it('跑过一步之后，根事务上不经 withSpace 查内容表返回空，和真实一样', async () => {
+      const found = await keyToSimulate(deps, { spaceId: ws.spaceId, appId, keyId }, ws.accountId)
+      if ('error' in found) throw new Error(found.error)
+      await inRollback(deps, { model: null, vectors: new Map() }, async (scoped, rollback) => {
+        const executor = inProcessExecutor(scoped, found.key, {
+          run: 'r',
+          account: ws.accountId,
+          rollback,
+        })
+        const created = await executor.execute({
+          kind: 'tool',
+          tool: 'kioku_create',
+          arguments: { uri: 'notes://written', content: '这一步写的' },
+        })
+        expect(created.isError).toBe(false)
+        await expect(scoped.db.select().from(memories)).resolves.toEqual([])
+        // 下一步照常读得到
+        const read = await executor.execute({
+          kind: 'tool',
+          tool: 'kioku_get',
+          arguments: { uri: 'notes://written' },
+        })
+        expect(read.text).toContain('这一步写的')
+      })
     })
 
     it('只读与不满足 requires 的步骤记跳过，不算失败', async () => {
