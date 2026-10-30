@@ -194,6 +194,15 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect(got.text).toContain('敏感级: secret')
       expect(got.text).not.toContain(SECRET_BODY)
       expect(await realBody()).toContain('敏感级: secret')
+      // 搜也搜不到；同一个查询在真的降级之后（记忆页做得到）就搜得到，说明这里不是查询没有命中
+      const searched = await masked('kioku_search', { query: '保险柜' })
+      expect(searched.isError).toBe(false)
+      expect(searched.text).not.toContain(SECRET_BODY)
+      expect(searched.text).not.toContain('notes://safe')
+      expect(
+        (await real('kioku_update', { uri: 'notes://safe', sensitivity: 'private' })).isError,
+      ).toBe(false)
+      expect((await masked('kioku_search', { query: '保险柜' })).text).toContain('notes://safe')
     })
 
     it('改 secret 的正文被拒绝：读不到原文，写回占位文字会永久覆盖', async () => {
