@@ -10,6 +10,9 @@ import type {
 import { CREDENTIAL_NOTICE } from '../credential/methods'
 import type { PlaceholderCredential } from '../credential/service'
 
+// 工具里的非业务错误只回这句，和 REST 一致。测试台也按它认内部错误
+export const TOOL_INTERNAL_ERROR = '服务内部错误'
+
 // MCP 工具结果给模型读，用紧凑的文本而不是 JSON
 export function formatMemory(m: MemoryView): string {
   const lines = [

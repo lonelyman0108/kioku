@@ -1,10 +1,19 @@
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { randomUUID } from 'node:crypto'
+
+import { sql } from 'drizzle-orm'
+import { DrizzleQueryError } from 'drizzle-orm/errors'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
+import { credentialServiceForKey } from '../../credential/context'
 import { staticEmbedderSource } from '../../embedding/source'
-import type { Database } from '../../db/client'
+import type { Database, Db, Tx } from '../../db/client'
+import type { Deps, KeyPrincipal } from '../../http/env'
+import { memoryServiceForKey, recallScopeForKey } from '../../memory/context'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
-import { bearer, bootstrap } from '../../testing/fixtures'
+import { bearer, bootstrap, FULL_SCOPES } from '../../testing/fixtures'
+import { TOOL_INTERNAL_ERROR } from '../format'
+import { handleMcpRequest } from '../server'
 
 describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
   let database: Database
@@ -148,5 +157,122 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
     const missing = await callTool('kioku_get', { uri: 'core://nope' })
     expect(missing.isError).toBe(true)
     expect(missing.content[0]!.text).toContain('不存在')
+  })
+
+  describe('非业务错误', () => {
+    // 数据库真的报错：事务一开始就语句超时。drizzle 的错误信息带 SQL 与全部参数
+    const OVER_TIME = 60_000
+    const statementFails = (db: Db) =>
+      new Proxy(db, {
+        get(target, prop) {
+          if (prop !== 'transaction') return Reflect.get(target, prop)
+          return (fn: (tx: Tx) => Promise<unknown>) =>
+            target.transaction(async (tx) => {
+              await tx.execute(sql`set local statement_timeout = 1`)
+              await tx.execute(sql`select pg_sleep(${OVER_TIME})`)
+              return fn(tx)
+            })
+        },
+      })
+    const callWith = async (db: Db, args: Record<string, unknown>) => {
+      const deps = { db, masterKey: null, jobs: null } as unknown as Deps
+      const principal: KeyPrincipal = {
+        kind: 'key',
+        keyId: randomUUID(),
+        spaceId: randomUUID(),
+        scopes: FULL_SCOPES,
+        app: {
+          id: randomUUID(),
+          slug: 'a',
+          name: 'a',
+          runtimeFamily: 'mcp',
+          ownerAccountId: randomUUID(),
+          defaultPersonaId: null,
+          config: {},
+        },
+      }
+      const res = await handleMcpRequest(
+        memoryServiceForKey(deps, principal),
+        recallScopeForKey(deps, principal),
+        credentialServiceForKey(deps, principal),
+        new Request('http://test.invalid/v1/mcp', {
+          method: 'POST',
+          headers: {
+            'content-type': 'application/json',
+            accept: 'application/json, text/event-stream',
+          },
+          body: JSON.stringify({
+            jsonrpc: '2.0',
+            id: 1,
+            method: 'tools/call',
+            params: { name: 'kioku_create', arguments: args },
+          }),
+        }),
+      )
+      return ((await res.json()) as { result: { content: { text: string }[]; isError?: boolean } })
+        .result
+    }
+
+    it('数据库报错：工具结果只有固定文字，日志只记 SQLSTATE 与说明，不带 SQL 与参数', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const result = await callWith(statementFails(database.db), {
+          uri: 'notes://x',
+          content: '不该出现在结果与日志里的正文',
+        })
+        expect(result.isError).toBe(true)
+        expect(result.content[0]!.text).toBe(TOOL_INTERNAL_ERROR)
+        expect(error).toHaveBeenCalledTimes(1)
+        const logged = error.mock.calls[0]!
+        expect(logged[1]).toMatchObject({ code: '57014' })
+        expect(JSON.stringify(logged)).not.toContain('pg_sleep')
+        expect(JSON.stringify(logged)).not.toContain(String(OVER_TIME))
+      } finally {
+        error.mockRestore()
+      }
+    })
+
+    it('带着参数的错误信息也不进工具结果与日志（drizzle 把 SQL 与参数拼进 message）', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const cause = Object.assign(new Error('deadlock detected'), { code: '40P01' })
+        const failing = new DrizzleQueryError('insert into memories', ['明文的参数'], cause)
+        const db = { transaction: () => Promise.reject(failing) } as unknown as Db
+        const result = await callWith(db, { uri: 'notes://x', content: '正文' })
+        expect(result.content[0]!.text).toBe(TOOL_INTERNAL_ERROR)
+        const logged = JSON.stringify(error.mock.calls[0])
+        expect(logged).toContain('40P01')
+        expect(logged).toContain('deadlock detected')
+        expect(logged).not.toContain('明文的参数')
+        expect(logged).not.toContain('insert into memories')
+      } finally {
+        error.mockRestore()
+      }
+    })
+
+    it('不是数据库的错误：同样只回固定文字，日志带它自己的堆栈', async () => {
+      const error = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const db = { transaction: () => Promise.reject(new TypeError('坏了')) } as unknown as Db
+        const result = await callWith(db, { uri: 'notes://x', content: '正文' })
+        expect(result.content[0]!.text).toBe(TOOL_INTERNAL_ERROR)
+        expect((error.mock.calls[0]![1] as { stack: string }).stack).toContain('坏了')
+      } finally {
+        error.mockRestore()
+      }
+    })
+  })
+
+  describe('GET', () => {
+    it('带 Key 的 GET 返回 405，说明只收 POST；没有 Key 仍是 401', async () => {
+      const res = await app.request('/v1/mcp', {
+        headers: { ...bearer(key), accept: 'text/event-stream' },
+      })
+      expect(res.status).toBe(405)
+      expect(res.headers.get('allow')).toBe('POST')
+      expect(res.headers.get('content-type')).toContain('application/json')
+      expect(((await res.json()) as { error: string }).error).toContain('GET')
+      expect((await app.request('/v1/mcp')).status).toBe(401)
+    })
   })
 })

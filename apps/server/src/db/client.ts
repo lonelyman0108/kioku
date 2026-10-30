@@ -93,6 +93,18 @@ export function pgConstraint(err: unknown): string | undefined {
   return pgError(err).constraint_name
 }
 
+// 内部错误写日志：drizzle 错误的 message 带着 SQL 与全部参数（正文、密文都可能在里面），不能整个打出来。
+// 数据库报的错只记 SQLSTATE、约束名与说明；别的错误（没有 SQLSTATE）再带上它自己的堆栈，否则查不出是哪里
+export function logInternalError(where: string, err: unknown): void {
+  const code = pgErrorCode(err)
+  console.error(where, {
+    code,
+    constraint: pgConstraint(err),
+    message: pgMessage(err),
+    ...(code ? {} : { stack: (pgError(err) as { stack?: string }).stack }),
+  })
+}
+
 // 违反了指定的唯一约束
 export function isUniqueViolation(err: unknown, constraint: string): boolean {
   const pg = pgError(err)

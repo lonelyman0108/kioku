@@ -18,6 +18,7 @@ import { z } from 'zod'
 
 import { looksLikePlaintextCredential, placeholderIdentifiers } from '../credential/placeholders'
 import type { CredentialService } from '../credential/service'
+import { logInternalError } from '../db/client'
 import type { RecallScope } from '../lifecycle/scope'
 import { GUIDANCE } from '../lifecycle/lifecycle'
 import { MemoryError, type MemoryService } from '../memory/service'
@@ -33,18 +34,21 @@ import {
   formatMemory,
   formatPlaceholderCredentials,
   PLAINTEXT_REMINDER,
+  TOOL_INTERNAL_ERROR,
 } from './format'
 
 type ToolResult = { content: { type: 'text'; text: string }[]; isError?: boolean }
 
-// 业务错误作为工具错误返回给模型，让它能据此调整；其余错误照常抛出
+// 业务错误作为工具错误返回给模型，让它能据此调整。其余错误只回固定文字、详情进日志：
+// 抛出去的话 SDK 会把 message 变成工具结果，而 drizzle 的错误信息带着 SQL 与全部参数
 async function tool(fn: () => Promise<string>): Promise<ToolResult> {
   try {
     return { content: [{ type: 'text', text: await fn() }] }
   } catch (err) {
     if (err instanceof MemoryError)
       return { content: [{ type: 'text', text: err.message }], isError: true }
-    throw err
+    logInternalError('MCP 工具内部错误', err)
+    return { content: [{ type: 'text', text: TOOL_INTERNAL_ERROR }], isError: true }
   }
 }
 
