@@ -9,6 +9,7 @@ import { router } from './http/openapi'
 import { isApiPath, mountWeb } from './http/web'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
+import { benchRoutes } from './routes/bench'
 import { bindingRoutes } from './routes/binding'
 import { credentialRoutes } from './routes/credentials'
 import { dreamRoutes } from './routes/dream'
@@ -83,6 +84,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', whoamiRoutes(deps))
   app.route('/v1', personaRoutes(deps))
   app.route('/v1', previewRoutes(deps))
+  app.route('/v1', benchRoutes(deps))
   app.route('/v1', recallAnalysisRoutes(deps))
   app.route('/v1', memoryRoutes(deps))
   app.route('/v1', credentialRoutes(deps))
