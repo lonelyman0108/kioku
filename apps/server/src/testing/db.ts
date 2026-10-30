@@ -1,9 +1,11 @@
 import { fileURLToPath } from 'node:url'
 
 import { sql } from 'drizzle-orm'
+import { pgTable, text, type PgTable } from 'drizzle-orm/pg-core'
 
-import { connect, withSpace, type Database } from '../db/client'
+import { connect, withSpace, type Database, type Db } from '../db/client'
 import { runMigrations } from '../db/migrate'
+import { settings } from '../db/schema'
 import { settleRecallEvents } from '../recall/events'
 
 // 集成测试共用：需要真实 PostgreSQL。本地用 docker-compose.dev.yml 起库后设置 KIOKU_TEST_DATABASE_URL；
@@ -24,6 +26,26 @@ export async function resetDatabase(database: Database): Promise<void> {
   await settleRecallEvents()
   await database.db.execute(sql`truncate spaces, accounts, login_attempts cascade`)
 }
+
+// 读实例设置时数据库真的报错（改查一张不存在的表），别的查询照常，事务里也一样。drizzle 的错误信息带 SQL 与全部参数
+const NO_SUCH_TABLE = pgTable('no_such_table', { key: text() })
+export const settingsQueryFails = (db: Db): Db =>
+  new Proxy(db, {
+    get(target, prop) {
+      if (prop === 'transaction') {
+        return (run: (tx: Db) => Promise<unknown>) =>
+          target.transaction((tx) => run(settingsQueryFails(tx as unknown as Db)))
+      }
+      if (prop !== 'select') return Reflect.get(target, prop)
+      return (...args: []) =>
+        new Proxy(target.select(...args), {
+          get(builder, method) {
+            if (method !== 'from') return Reflect.get(builder, method)
+            return (table: PgTable) => builder.from(table === settings ? NO_SUCH_TABLE : table)
+          },
+        })
+    },
+  })
 
 // 所有表的内容：回滚之后、不该写库的操作之后，要和之前逐行相同
 export async function tableDigests(

@@ -16,16 +16,21 @@ import {
   type BenchToolList,
 } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
-import { pgTable, text, type PgTable } from 'drizzle-orm/pg-core'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import { withSpace, type Database, type Db } from '../../db/client'
+import { withSpace, type Database } from '../../db/client'
 import { accounts, memories, settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Deps } from '../../http/env'
-import { openTestDatabase, resetDatabase, tableDigests, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  settingsQueryFails,
+  tableDigests,
+  testDatabaseUrl,
+} from '../../testing/db'
 import {
   startFakeChatServer,
   type FakeChatReply,
@@ -46,22 +51,6 @@ const MEMBER_SCOPES = {
   maxSensitivity: 'private',
   admin: false,
 }
-
-// 读实例设置时数据库真的报错（改查一张不存在的表），别的查询照常。drizzle 的错误信息带 SQL 与全部参数
-const NO_SUCH_TABLE = pgTable('no_such_table', { key: text() })
-const settingsQueryFails = (db: Db) =>
-  new Proxy(db, {
-    get(target, prop) {
-      if (prop !== 'select') return Reflect.get(target, prop)
-      return (...args: []) =>
-        new Proxy(target.select(...args), {
-          get(builder, method) {
-            if (method !== 'from') return Reflect.get(builder, method)
-            return (table: PgTable) => builder.from(table === settings ? NO_SUCH_TABLE : table)
-          },
-        })
-    },
-  })
 
 const toolCall = (id: string, name: string, args: unknown = {}) => ({
   id,
@@ -315,6 +304,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         const error = await errorOf(res)
         expect(error).toContain('抽取模型的 Key 解不开')
         expect(error).toContain('KIOKU_MASTER_KEY')
+        expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
       }
       // 记着主密钥的标识：还没解密就知道对不上
       await expectLocked()

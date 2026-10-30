@@ -23,7 +23,7 @@ import { extractionSettingsView, loadExtractionConfig } from '../extraction/sett
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleRoleFor } from '../memory/context'
-import { ApiKeyLockedError } from '../settings/endpoint'
+import { unlocked } from '../settings/endpoint'
 
 const KeyParams = z.object({ spaceId: z.uuid(), appId: z.uuid(), keyId: z.uuid() })
 const errors = {
@@ -158,14 +158,9 @@ export function benchRoutes(deps: Deps) {
           403,
         )
       }
-      let config
-      try {
-        config = await loadExtractionConfig(deps.db, deps.masterKey)
-      } catch (err) {
-        // 只有 Key 解不开说得清原因。别的（例如读库出错）交给 onError，错误信息带 SQL 与全部参数
-        if (err instanceof ApiKeyLockedError) return c.json({ error: err.message }, 400)
-        throw err
-      }
+      const loaded = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
+      if (!loaded.ok) return c.json({ error: loaded.error }, 400)
+      const config = loaded.value
       if (!config) {
         return c.json({ error: '还没有配模型：去实例设置配好抽取模型之后才能用模型代理' }, 400)
       }

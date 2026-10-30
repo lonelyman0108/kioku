@@ -1,17 +1,23 @@
 import { randomBytes } from 'node:crypto'
 import { createServer, type Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
+import { inspect } from 'node:util'
 
 import type { ExtractionSettingsView, ExtractionTestResult } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import type { Database } from '../../db/client'
 import { settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  settingsQueryFails,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
@@ -159,6 +165,65 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
     expect(failed.error).not.toContain('sk-pasted')
     expect(failed.error).not.toContain('with-newline')
     expect(seen).toEqual([])
+  })
+
+  it('Key 解不开：连通性测试说明原因，不请求模型', async () => {
+    await call('PUT', '', { baseUrl: `${baseUrl}/v1`, model: 'm', apiKey: 'sk-extract' })
+    const probe = async (locked: ReturnType<typeof createApp>) => {
+      const res = await locked.request(
+        '/v1/settings/extraction/test',
+        jsonRequest('POST', undefined, { cookie: ws.cookie }),
+      )
+      expect(res.status).toBe(200)
+      const { ok, error } = (await res.json()) as ExtractionTestResult
+      expect(ok).toBe(false)
+      return error
+    }
+    expect(await probe(appWith({ masterKey: null }))).toContain(
+      '抽取模型的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+    )
+    const mismatch = await probe(appWith({ masterKey: randomBytes(32) }))
+    expect(mismatch).toContain('抽取模型的 Key 解不开')
+    // 轮换主密钥时最容易碰到：提示旧的那把配在哪里
+    expect(mismatch).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+    expect(seen).toEqual([])
+  })
+
+  it('读设置时数据库出错：连通性测试与保存都是 500 与固定文字，响应和日志里都没有 SQL 与参数', async () => {
+    await call('PUT', '', { baseUrl: `${baseUrl}/v1`, model: 'm', apiKey: 'sk-extract' })
+    const broken = appWith({ db: settingsQueryFails(database.db) })
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const responses = [
+        await broken.request(
+          '/v1/settings/extraction/test',
+          jsonRequest('POST', undefined, { cookie: ws.cookie }),
+        ),
+        await broken.request(
+          '/v1/settings/extraction',
+          jsonRequest(
+            'PUT',
+            { baseUrl: `${baseUrl}/v1`, model: 'm', apiKey: 'sk-new' },
+            { cookie: ws.cookie },
+          ),
+        ),
+      ]
+      for (const res of responses) {
+        expect(res.status).toBe(500)
+        expect(await res.json()).toEqual({ error: '服务内部错误' })
+      }
+      expect(seen).toEqual([])
+      // 前提：确实是数据库报的错（表不存在），这条用例测的是这种错误
+      expect(logged).toHaveBeenCalledTimes(2)
+      expect(logged.mock.calls[0]![1]).toMatchObject({ code: '42P01' })
+      expect(logged.mock.calls[1]![1]).toMatchObject({ code: '42P01' })
+      const text = inspect(logged.mock.calls, { depth: null })
+      for (const leaked of ['Failed query', 'params:', 'extraction', 'select']) {
+        expect(text).not.toContain(leaked)
+      }
+    } finally {
+      logged.mockRestore()
+    }
   })
 
   it('接口地址只收 http 与 https：别的协议的 origin 都是 "null"，会被当成同一个主机', async () => {

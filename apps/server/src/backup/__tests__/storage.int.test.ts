@@ -17,6 +17,7 @@ import type { Database } from '../../db/client'
 import { settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { startJobs, type Jobs } from '../../jobs/queue'
+import { ApiKeyLockedError } from '../../settings/endpoint'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { startFakeS3Server, type FakeS3Server } from '../../testing/fakeS3Server'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -417,6 +418,20 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     result = (await (await send('POST', '/test')).json()) as BackupTestResult
     expect(result.ok).toBe(false)
     expect(result.error).toContain('存储返回 403')
+  })
+
+  it('Secret 解不开：报错按它的名字说，不叫 Key；提示轮换期间旧的那把配在哪里', async () => {
+    await save()
+    await expect(loadBackupConfig(database.db, null)).rejects.toThrow(
+      '备份存储的 Secret Access Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+    )
+    const err = (await loadBackupConfig(database.db, randomBytes(32)).catch(
+      (e: unknown) => e,
+    )) as Error
+    expect(err).toBeInstanceOf(ApiKeyLockedError)
+    expect(err.message).toContain('备份存储的 Secret Access Key 解不开')
+    expect(err.message).not.toContain('的 Key')
+    expect(err.message).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
   })
 
   it('Secret 也在主密钥管的数据里：启动检查认得它，轮换时换成新密钥的包装', async () => {

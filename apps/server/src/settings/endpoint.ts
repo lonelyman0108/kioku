@@ -60,23 +60,37 @@ export const unsealJson = (sealed: SealedJson): Sealed => ({
   wrappedKey: Buffer.from(sealed.wrappedKey, 'base64'),
 })
 
-// 解开加密保存的 Key；解不开时说清是哪一项，解密库的英文报错留在 cause 里
+// 解开加密保存的 Key；解不开时说清是哪一项，解密库的英文报错留在 cause 里。name 是这个密钥叫什么
 export function openApiKey(
   masterKey: MasterKey | null,
   sealed: SealedJson,
   aad: string,
   label: string,
+  name = 'Key',
 ): string {
   if (!masterKey) {
-    throw new ApiKeyLockedError(`${label}的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
+    throw new ApiKeyLockedError(`${label}的 ${name} 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
   }
   try {
     return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
   } catch (cause) {
     throw new ApiKeyLockedError(
-      `${label}的 Key 解不开：配置的 KIOKU_MASTER_KEY 和保存时用的不是同一把，或者保存的内容坏了`,
+      `${label}的 ${name} 解不开：配置的 KIOKU_MASTER_KEY 和保存时用的不是同一把，或者保存的内容坏了。轮换主密钥期间，旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS，等实例设置里显示换完再去掉`,
       { cause },
     )
+  }
+}
+
+// 读设置（既读库又解密）的结果：Key 解不开时给出原因，可以直接给管理员看。
+// 别的错误（例如读库出错）照常抛出交给 onError：drizzle 的错误信息带 SQL 与全部参数，不能给调用方
+export async function unlocked<T>(
+  load: () => Promise<T>,
+): Promise<{ ok: true; value: T } | { ok: false; error: string }> {
+  try {
+    return { ok: true, value: await load() }
+  } catch (err) {
+    if (err instanceof ApiKeyLockedError) return { ok: false, error: err.message }
+    throw err
   }
 }
 
