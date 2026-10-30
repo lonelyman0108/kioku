@@ -23,6 +23,7 @@ import {
   existingImportApps,
   planImport,
   planSync,
+  previewImport,
   readLore,
 } from '../../importer/lore'
 import type { Jobs } from '../../jobs/queue'
@@ -39,6 +40,17 @@ import {
   type LoreExport,
   type LoreSeed,
 } from '../../testing/loreFixture'
+
+// 数 /apply 算了几遍计划，实现不变
+vi.mock('../../importer/lore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../importer/lore')>()
+  return {
+    ...actual,
+    planImport: vi.fn(actual.planImport),
+    previewImport: vi.fn(actual.previewImport),
+    planSync: vi.fn(actual.planSync),
+  }
+})
 
 const EARLIER = '2026-01-01T00:00:00.000Z'
 const LATER = '2026-02-01T00:00:00.000Z'
@@ -1193,6 +1205,41 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         release()
       }
       expect(await counts()).toMatchObject({ memories: 0 })
+    })
+
+    it('没有勾选时直接用基准结果，不再算一遍；有勾选时才重算', async () => {
+      const during = async (run: () => Promise<unknown>) => {
+        const counted = [planImport, previewImport, planSync].map((fn) => vi.mocked(fn))
+        for (const fn of counted) fn.mockClear()
+        await run()
+        return counted.map((fn) => fn.mock.calls.length)
+      }
+      const source = await fileSource()
+      const plan = await planOf(source)
+      const once = await during(() => applyOf(source, plan))
+      expect(once).toEqual([1, 1, 1])
+      expect(await counts()).toMatchObject({ memories: 6 })
+
+      await seed('infra://more', '又多了一个节点')
+      await seed('infra://another', '又多了一个节点')
+      const newer = await fileSource()
+      const next = await planOf(newer)
+      const twice = await during(() => applyOf(newer, next, { excludeUris: ['infra://more'] }))
+      expect(twice).toEqual([2, 2, 2])
+      expect(await counts()).toMatchObject({ memories: 7 })
+
+      const third = await planOf(newer)
+      const secret = await during(() => applyOf(newer, third, { secretUris: ['infra://more'] }))
+      expect(secret).toEqual([2, 2, 2])
+      const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.select().from(memories).where(memoryWhere('infra', 'more')),
+      )
+      expect(row).toMatchObject({ sensitivity: 'secret', content: null })
+
+      // 确认过旧文件就不用判断新旧，没有勾选时也不多算
+      const fresh = await planOf(newer)
+      const confirmed = await during(() => applyOf(newer, fresh, { confirmStale: true }))
+      expect(confirmed).toEqual([1, 1, 1])
     })
 
     it('两次执行不交错：第一次写入时第二次排队，轮到时看得到写下的，计划变了返回 409', async () => {

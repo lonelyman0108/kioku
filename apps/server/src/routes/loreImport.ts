@@ -234,15 +234,19 @@ export function loreImportRoutes(deps: Deps) {
         if (base.fingerprint !== body.fingerprint) {
           throw new MemoryError(409, '看过计划之后来源或这个空间有变化：要重新看计划')
         }
-        const plan = planImport(snapshot, existing, {
-          ...options,
-          secretUris: new Set(body.secretUris),
-          excludeUris: new Set(body.excludeUris),
-        })
+        // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍
+        const ticked = body.secretUris.length > 0 || body.excludeUris.length > 0
+        const plan = ticked
+          ? planImport(snapshot, existing, {
+              ...options,
+              secretUris: new Set(body.secretUris),
+              excludeUris: new Set(body.excludeUris),
+            })
+          : base.plan
         assertExecutable(plan, deps.masterKey)
-        const sync = await planSync(target, plan, snapshot)
+        const sync = ticked ? await planSync(target, plan, snapshot) : base.sync
         if (source.kind === 'file' && !body.confirmStale) {
-          const preview = await previewImport(target, plan)
+          const preview = ticked ? await previewImport(target, plan) : base.preview
           const stale = staleAgainst(
             exportedAt,
             await loreDataTime(deps.db, spaceId),
