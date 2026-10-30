@@ -6,6 +6,9 @@ import {
   BackupRunStatus,
   BackupSettingsView,
   BackupTestResult,
+  BenchRunResult,
+  BenchScenarioList,
+  BenchToolList,
   BootPreview,
   ConsoleCredential,
   ConsoleCredentialList,
@@ -66,6 +69,7 @@ import {
   SubjectInfo,
   SubjectList,
   type ApplyDreamSuggestion,
+  type BenchRunRequest,
   type BootPreviewRequest,
   type CreateAppRequest,
   type CreateCredentialProviderRequest,
@@ -168,6 +172,17 @@ export const api = {
     request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/matrix`, {
       schema: KeyAccessMatrix,
     }),
+  benchTools: (spaceId: string, appId: string, keyId: string) =>
+    request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/tools`, {
+      schema: BenchToolList,
+    }),
+  benchRun: (spaceId: string, appId: string, keyId: string, body: BenchRunRequest) =>
+    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/run`, {
+      body,
+      schema: BenchRunResult,
+    }),
+  benchScenarios: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/bench/scenarios`, { schema: BenchScenarioList }),
 
   memory: (spaceId: string, uri: string) =>
     request('GET', `/spaces/${spaceId}/memories`, { query: { uri }, schema: MemoryView }),
