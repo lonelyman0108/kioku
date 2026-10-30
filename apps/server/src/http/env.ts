@@ -1,5 +1,6 @@
 import type { AppConfig, KeyScopes } from '@kioku/contracts'
 
+import type { BenchLimits } from '../bench/rollback'
 import type { MasterKey } from '../crypto/keyring'
 import type { Db } from '../db/client'
 import type { EmbedderSource } from '../embedding/source'
@@ -20,6 +21,8 @@ export interface Deps {
   // 按空间导出的文件发送的时限（毫秒）：多久没有进度就断开、最多发多久。不设时 2 分钟与 30 分钟（见 routes/spaces.ts）；
   // 测试里调小
   exportSendLimits?: { idleMs: number; totalMs: number }
+  // 测试台回滚模式的时限与同时运行数，不设时见 bench/rollback.ts；测试里调小
+  benchLimits?: Partial<BenchLimits>
 }
 
 export interface ConsolePrincipal {
