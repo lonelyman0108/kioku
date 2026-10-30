@@ -20,6 +20,7 @@ import { internalErrorText, notExecuted } from './benchResult'
 import { parseScenario, type ParsedScenario } from './benchScenarios'
 import {
   emptySession,
+  NOT_API_FAILURE,
   recordRun,
   replayFor,
   replayStepLabel,
@@ -46,7 +47,7 @@ const LIFECYCLE_TEXT_MAX = 20_000
 export const AGENT_LOOP_NOTES: Record<BenchAgentLoop, string> = {
   hook: '这个运行时有钩子：session.start 的结果进系统提示；每条消息先发 prompt.submit，召回块附在这条消息上、留在历史；给工具；回复后不发 turn.end。',
   approximate:
-    '这个运行时没有专门的接入方式，这里按有钩子的运行时走（session.start 进系统提示，每条消息先发 prompt.submit，给工具，不发 turn.end），只是近似，和它真实的行为可能不同。',
+    '这个运行时这里没有单独模拟，按有钩子的运行时走（session.start 进系统提示，每条消息先发 prompt.submit，给工具，不发 turn.end）：只是近似，和它真实的行为可能不同。',
   chat: '这个运行时是群聊 bot：session.start 的结果进系统提示；每条消息先发 prompt.submit，召回块只附在这一轮的请求上、不留在历史；不给工具；回复后发 turn.end（它要带私聊、群聊或频道的会话上下文，不满足时不发）。',
   tools:
     '这个运行时只接 MCP：不发 session.start 与 prompt.submit，只给工具，kioku_boot 由模型自己调。',
@@ -348,7 +349,7 @@ export function turnEndRefusal(
 // 请求模型失败的说明。502 带的是上游的错误原文（截断过，不带 API Key），只给实例管理员看。
 // 504 是模型的时限之外的超时，多半是前面的反向代理等不及了
 export function turnFailureMessage(err: unknown): string {
-  if (!(err instanceof ApiError)) return '请求模型失败：网络出错了，或者响应对不上'
+  if (!(err instanceof ApiError)) return `请求模型失败：${NOT_API_FAILURE}`
   if (err.status === 504) {
     return '请求模型超时（HTTP 504）：可能是反向代理等不及了。模型一次可能要一两分钟，反向代理的读超时要大于 120 秒。'
   }

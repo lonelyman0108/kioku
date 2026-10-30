@@ -71,7 +71,7 @@ export const REAL_MODE_CONSEQUENCES = [
 export type RunOutcome =
   { kind: 'done'; result: BenchRunResult } | { kind: 'failed'; message: string } | { kind: 'stale' }
 
-const NOT_API_FAILURE = '网络出错了，或者响应对不上'
+export const NOT_API_FAILURE = '网络出错了，或者响应对不上'
 
 // 4xx 是写入之前就拒绝了（429 同时运行的回滚太多、413 请求体太大、403、404）
 const refusedBeforeWrite = (err: unknown) => err instanceof ApiError && err.status < 500

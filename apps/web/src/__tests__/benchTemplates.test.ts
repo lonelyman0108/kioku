@@ -1011,15 +1011,12 @@ describe('模型对话的页面', () => {
     expect(blockOf(view.script, 'const retryInfo = ')).toContain('info.refetch()')
   })
 
-  it('循环的说明：按运行时，近似的那种说清楚', () => {
-    expect(
-      shownIn(
-        must(
-          view.elements.find((el) => shownIn(el).includes('AGENT_LOOP_NOTES[loop]')),
-          '循环的说明',
-        ),
-      ),
-    ).toContain('AGENT_LOOP_NOTES[loop]')
+  it('循环的说明：按运行时，近似的那种用提醒的颜色说清楚', () => {
+    const note = must(
+      view.elements.find((el) => shownIn(el).includes('AGENT_LOOP_NOTES[loop]') && el.tag === 'p'),
+      '循环的说明',
+    )
+    expect(bound(note, 'class')).toBe("loop === 'approximate' ? 'text-warning' : 'text-muted'")
     expect(benchAgent).toMatch(/approximate:\s+'[^']*近似/)
   })
 

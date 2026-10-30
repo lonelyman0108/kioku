@@ -16,7 +16,7 @@ import {
   usageSummary,
 } from '../benchAgent'
 import { formatScenario, plaintextIn, type PlaintextFinding } from '../benchScenarios'
-import { runBlocker, sessionUsage } from '../benchSession'
+import { NOT_API_FAILURE, runBlocker, sessionUsage } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { saveFile } from '../download'
 import { icons } from '../icons'
@@ -53,7 +53,7 @@ const info = useQuery({
 const infoError = computed(() => {
   if (!info.isError.value || info.data.value) return null
   const err = info.error.value
-  return `读取模型代理的情况失败：${err instanceof ApiError ? err.message : '网络出错了，或者响应对不上'}`
+  return `读取模型代理的情况失败：${err instanceof ApiError ? err.message : NOT_API_FAILURE}`
 })
 const retryInfo = computed(() => [
   {
@@ -197,7 +197,9 @@ watch(generation, () => {
     />
 
     <template v-if="available && loop">
-      <p class="text-xs text-muted">{{ AGENT_LOOP_NOTES[loop] }}</p>
+      <p class="text-xs" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
+        {{ AGENT_LOOP_NOTES[loop] }}
+      </p>
       <p v-if="real" class="text-xs text-error">
         真实模式：模型调的写工具是真的写入，不会回滚。每一轮的下面有运行标记，到活动里对得上。
       </p>
