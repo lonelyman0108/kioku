@@ -15,8 +15,10 @@ import { normalizeQuery } from '../recall/recall'
 // 做法是把 Deps.db 换成这个事务的代理、jobs 置空，接入方的路径不用改：
 // - 同一条连接上不能并行开 savepoint，所以顶层的嵌套事务互相排队，已经在事务回调里的直接嵌套；
 // - 每个 withSpace 是一层 savepoint，和真实的事务边界一一对应：出错只回滚出错的那个事务，同一步里已经结束的保留；
+// - app.space_id 留在根事务里（savepoint 结束时不复原），每个顶层事务结束后清掉，和真实一样随事务失效；
 // - 直接写在 deps.db 上的语句落在根事务上，出错会中止整个运行，后面的步骤记为没有执行；
-// - 事务开着时不发外部请求（前面步骤的行锁和 URI 咨询锁都没放）：查询向量事先算好，事务里只查这张表。
+// - 事务开着时不发外部请求（前面步骤的行锁和 URI 咨询锁都没放）：查询向量事先算好，事务里只查这张表；
+// - postgres.js 的 savepoint 成功时不 release，一次运行的 savepoint 累积到回滚为止，靠步骤数与总时长的上限兜着。
 // 时限只做合作式：步骤之间检查，正在跑的步骤靠语句时限收尾，等它结束才回滚。不用 Promise.race 提前结束事务，
 // 也不用 idle_in_transaction_session_timeout：事务句柄绑死连接对象，事务结束后还在跑的语句会落到已归还的连接上，
 // 可能串进别的请求的事务
@@ -89,9 +91,13 @@ export class RollbackRun {
       if (this.closed) return Promise.reject(new RunStopped('aborted'))
       if (holding.getStore()) return root.transaction(fn)
       const turn = tail
-        .then(() => {
+        .then(async () => {
           this.assertRunning()
-          return holding.run(true, () => root.transaction(fn))
+          try {
+            return await holding.run(true, () => root.transaction(fn))
+          } finally {
+            await this.clearSpace()
+          }
         })
         .catch((err: unknown) => {
           this.note(err)
@@ -119,6 +125,17 @@ export class RollbackRun {
         return typeof value === 'function' ? value.bind(target) : value
       },
     })
+  }
+
+  // 根事务上不经 withSpace 的语句和真实一样读不到内容表：RLS 策略用 nullif，空串等于没设置。
+  // 只在事务还活着时发，失败不影响这个事务的结果：根事务上的语句出错就是根事务中止了，后面的步骤由 stopReason 停下
+  private async clearSpace(): Promise<void> {
+    if (this.aborted) return
+    try {
+      await this.root?.execute(sql`select set_config('app.space_id', '', true)`)
+    } catch {
+      this.aborted = true
+    }
   }
 
   private assertRunning(): void {

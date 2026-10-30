@@ -14,7 +14,13 @@ import { MemoryError } from '../../memory/service'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { bootstrap, type Workspace } from '../../testing/fixtures'
-import { inRollback, prepareQueryVectors, type BenchLimits, type QueryVectors } from '../rollback'
+import {
+  inRollback,
+  prepareQueryVectors,
+  RollbackRun,
+  type BenchLimits,
+  type QueryVectors,
+} from '../rollback'
 
 const NO_VECTORS: QueryVectors = { model: null, vectors: new Map() }
 
@@ -146,6 +152,80 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       await expect(addSubject(scoped.db, '写不进去')).rejects.toMatchObject({ code: '25P02' })
     })
     expect(await subjectNames(database.db)).toEqual([])
+  })
+
+  describe('app.space_id', () => {
+    it('每个顶层事务结束后清掉：根事务上不经 withSpace 查内容表返回空，和真实一样', async () => {
+      await addSubject(database.db, '已有的')
+      // 真实路径：withSpace 结束之后设置就失效了
+      await expect(database.db.select().from(subjects)).resolves.toEqual([])
+      await inRollback(deps, NO_VECTORS, async (scoped) => {
+        await addSubject(scoped.db, '这次写的')
+        await expect(scoped.db.select().from(subjects)).resolves.toEqual([])
+        // withSpace 里照常读得到
+        expect(await subjectNames(scoped.db)).toEqual(['已有的', '这次写的'].sort())
+        await expect(scoped.db.select().from(subjects)).resolves.toEqual([])
+      })
+    })
+
+    it('出错回滚的顶层事务之后也是空的，事务还能接着用', async () => {
+      await addSubject(database.db, '已有的')
+      await inRollback(deps, NO_VECTORS, async (scoped, run) => {
+        await expect(
+          withSpace(scoped.db, ws.spaceId, async () => {
+            throw new Error('这个事务出错了')
+          }),
+        ).rejects.toThrow('这个事务出错了')
+        await expect(scoped.db.select().from(subjects)).resolves.toEqual([])
+        expect(await run.stopReason()).toBeNull()
+        expect(await subjectNames(scoped.db)).toEqual(['已有的'])
+      })
+    })
+
+    it('嵌套的事务结束时不清：外层的 withSpace 还在里面', async () => {
+      await addSubject(database.db, '已有的')
+      await inRollback(deps, NO_VECTORS, async (scoped) => {
+        const seen = await withSpace(scoped.db, ws.spaceId, async (tx) => {
+          await scoped.db.transaction(async () => {})
+          return (await tx.select({ name: subjects.displayName }).from(subjects)).map((r) => r.name)
+        })
+        expect(seen).toEqual(['已有的'])
+      })
+    })
+
+    it('清不掉（根事务已经中止）不影响这个事务的结果', async () => {
+      await inRollback(deps, NO_VECTORS, async (scoped, run) => {
+        const result = await scoped.db.transaction(async () => {
+          await expect(scoped.db.execute(sql`select 1 / 0`)).rejects.toMatchObject({
+            cause: { code: '22012' },
+          })
+          return '这个事务的结果'
+        })
+        expect(result).toBe('这个事务的结果')
+        expect(run.takeDetail()).toBeNull()
+        expect(await run.stopReason()).toBe('aborted')
+      })
+    })
+
+    it('运行关闭之后不发这一句：连接可能已经被别的请求占用', async () => {
+      const sent: unknown[] = []
+      const fake = {
+        transaction: (fn: (tx: unknown) => Promise<unknown>) => fn(fake),
+        execute: async (query: unknown) => void sent.push(query),
+      }
+      const run = new RollbackRun({
+        parallel: 1,
+        statementTimeoutMs: 1,
+        lockTimeoutMs: 1,
+        runMs: 60_000,
+        embedBudgetMs: 1,
+      })
+      const db = run.attach(fake as unknown as Tx)
+      await db.transaction(async () => {})
+      expect(sent).toHaveLength(1)
+      await db.transaction(async () => run.close())
+      expect(sent).toHaveLength(1)
+    })
   })
 
   it('语句时限：超过就报错，能认出是语句超时', async () => {
