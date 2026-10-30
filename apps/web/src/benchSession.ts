@@ -66,6 +66,11 @@ export const REAL_MODE_CONSEQUENCES = [
   '写下的事件带「测试台」标记与你的账号，在活动和凭据的访问记录里看得到。',
 ] as const
 
+// 一次运行的结果。stale：运行期间换了应用、Key 或模式，结果作废（真实模式下记进 abandoned）；
+// 或者上一次还没结束，这次没有发出去
+export type RunOutcome =
+  { kind: 'done'; result: BenchRunResult } | { kind: 'failed'; message: string } | { kind: 'stale' }
+
 const NOT_API_FAILURE = '网络出错了，或者响应对不上'
 
 // 4xx 是写入之前就拒绝了（429 同时运行的回滚太多、413 请求体太大、403、404）
@@ -115,27 +120,31 @@ export function abandonedRun(
 export interface ModeRecords {
   // 调用台时间线的条数
   timeline: number
-  // 回滚模式下保留的写入的步数
+  // 回滚模式下保留的写入的步数：调用台与模型对话各有一份，加起来算
   replay: number
   scenarioResult: boolean
   // 调用台或场景有运行失败的说明
   failed: boolean
+  // 模型对话的用户消息条数
+  agentMessages: number
 }
 
 // 从这个模式切走会清掉什么。什么都不会清时是 null，切回回滚就不用多问。
 // 真实模式下要说得更清楚：结果里的运行标记是活动里对应这些写入的线索，失败的说明可能写着已经执行了一部分
 export function modeSwitchLoss(from: BenchMode, records: ModeRecords): string | null {
-  const { timeline, replay, scenarioResult, failed } = records
+  const { timeline, replay, scenarioResult, failed, agentMessages } = records
   const items = [
     ...(timeline ? [`调用台的时间线（${timeline} 条）`] : []),
     ...(scenarioResult ? ['场景结果'] : []),
+    ...(agentMessages ? [`模型对话（${agentMessages} 条消息）`] : []),
     ...(failed ? ['运行失败的说明'] : []),
   ].join('、')
   if (!items) return null
   if (from === 'rollback') {
     return `这些记录会清掉：${items}。${replay ? '回滚模式下保留的写入不会带过去。' : ''}`
   }
-  const markers = timeline || scenarioResult ? '，以及运行标记（活动里靠它对应这些写入）' : ''
+  const markers =
+    timeline || scenarioResult || agentMessages ? '，以及运行标记（活动里靠它对应这些写入）' : ''
   return `这些记录会清掉：${items}${markers}。已经写下的不会撤回。`
 }
 

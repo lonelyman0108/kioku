@@ -240,7 +240,7 @@ describe('真实模式的运行中途作废', () => {
 })
 
 describe('切换模式会清掉的记录', () => {
-  const NONE = { timeline: 0, replay: 0, scenarioResult: false, failed: false }
+  const NONE = { timeline: 0, replay: 0, scenarioResult: false, failed: false, agentMessages: 0 }
 
   it('什么都没有：不用多问', () => {
     expect(modeSwitchLoss('real', NONE)).toBeNull()
@@ -253,9 +253,11 @@ describe('切换模式会清掉的记录', () => {
       replay: 0,
       scenarioResult: true,
       failed: true,
+      agentMessages: 2,
     })!
     expect(text).toContain('调用台的时间线（3 条）')
     expect(text).toContain('场景结果')
+    expect(text).toContain('模型对话（2 条消息）')
     expect(text).toContain('运行失败的说明')
     expect(text).toContain('运行标记')
     expect(text).toContain('已经写下的不会撤回')
@@ -265,6 +267,7 @@ describe('切换模式会清掉的记录', () => {
     ['只有时间线', { timeline: 1 }, ['时间线', '运行标记'], ['场景结果', '运行失败的说明']],
     ['只有场景结果', { scenarioResult: true }, ['场景结果', '运行标记'], ['时间线']],
     ['只有失败的说明', { failed: true }, ['运行失败的说明'], ['时间线', '场景结果', '运行标记']],
+    ['只有模型对话', { agentMessages: 1 }, ['模型对话', '运行标记'], ['时间线', '场景结果']],
   ])('真实模式，%s：只说有的那些', (_name, over, has, hasNot) => {
     const text = modeSwitchLoss('real', { ...NONE, ...over })!
     for (const part of has) expect(text).toContain(part)
@@ -284,6 +287,13 @@ describe('切换模式会清掉的记录', () => {
     expect(text).toContain('调用台的时间线（2 条）')
     expect(text).toContain('保留的写入不会带过去')
     expect(modeSwitchLoss('rollback', { ...NONE, timeline: 2 })).not.toContain('保留的写入')
+  })
+
+  it('回滚模式：只有模型对话也要说，它保留的写入一样不会带过去', () => {
+    const text = modeSwitchLoss('rollback', { ...NONE, agentMessages: 3, replay: 1 })!
+    expect(text).toContain('模型对话（3 条消息）')
+    expect(text).toContain('保留的写入不会带过去')
+    expect(text).not.toContain('运行标记')
   })
 })
 

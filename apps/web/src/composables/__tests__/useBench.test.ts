@@ -1,4 +1,12 @@
-import type { AppInfo, BenchRunResult, KeyInfo, KeyScopes, WhoAmI } from '@kioku/contracts'
+import type {
+  AppInfo,
+  BenchAgentToolCall,
+  BenchAgentTurnResult,
+  BenchRunResult,
+  KeyInfo,
+  KeyScopes,
+  WhoAmI,
+} from '@kioku/contracts'
 import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { createApp, effectScope, nextTick, reactive, ref, type EffectScope } from 'vue'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
@@ -16,6 +24,7 @@ const fakes = vi.hoisted(() => ({
     apps: vi.fn(),
     keys: vi.fn(),
     benchRun: vi.fn(),
+    benchAgentTurn: vi.fn(),
   },
   guard: vi.fn(),
 }))
@@ -170,6 +179,7 @@ beforeEach(() => {
   fakes.api.apps.mockReset().mockResolvedValue([app('a1'), app('a2')])
   fakes.api.keys.mockReset().mockResolvedValue([liveKey('k1'), liveKey('k2')])
   fakes.api.benchRun.mockReset()
+  fakes.api.benchAgentTurn.mockReset()
   // 和真的一样，注册时就读一次：用到的状态都要在注册之前建好
   fakes.guard.mockReset().mockImplementation((dirty: { value: boolean }) => dirty.value)
 })
@@ -786,5 +796,542 @@ describe('离开页面前提醒', () => {
     expect(leavesOn({ params: { spaceId: 's1' }, query: { key: 'k2' } }, from)).toBe(false)
     expect(leavesOn({ params: { spaceId: 's1' }, query: { tab: 'scenarios' } }, from)).toBe(false)
     expect(leavesOn({ params: { spaceId: 's2' }, query: {} }, from)).toBe(true)
+  })
+})
+
+// 模型的一次回复
+const modelReply = (content: string, calls: BenchAgentToolCall[] = []): BenchAgentTurnResult => ({
+  message: {
+    role: 'assistant',
+    content,
+    ...(calls.length
+      ? {
+          tool_calls: calls.map(({ id, name }) => ({
+            id,
+            type: 'function',
+            function: { name, arguments: '{}' },
+          })),
+        }
+      : {}),
+  },
+  toolCalls: calls,
+  finishReason: calls.length ? 'tool_calls' : 'stop',
+  usage: { promptTokens: 10, completionTokens: 2 },
+  ms: 5,
+  model: 'fake-model',
+})
+const WRITE_CALL: BenchAgentToolCall = {
+  id: 'c1',
+  name: 'kioku_create',
+  arguments: { uri: 'core://a', content: '甲' },
+  parseError: null,
+}
+const TOOLS_LOOP = { loop: 'tools' as const, system: '基础', model: 'fake-model' }
+
+// 被取消时和真的 fetch 一样抛 AbortError
+const hangUntilAborted = (signal: AbortSignal) =>
+  new Promise<BenchAgentTurnResult>((_resolve, reject) => {
+    signal.addEventListener('abort', () =>
+      reject(new DOMException('The operation was aborted.', 'AbortError')),
+    )
+  })
+
+describe('模型对话', () => {
+  const dirty = () => (fakes.guard.mock.calls[0]![0] as { value: boolean }).value
+
+  // 走完一条消息：模型直接回复
+  async function withConversation(bench: ReturnType<typeof start>) {
+    fakes.api.benchAgentTurn.mockResolvedValueOnce(modelReply('好'))
+    await bench.sendToAgent('你好', TOOLS_LOOP)
+    expect(bench.agent.value.exchanges).toHaveLength(1)
+  }
+
+  it('一条消息走完：对着选中的 Key 请求模型，状态记在对话里', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchAgentTurn.mockResolvedValueOnce(modelReply('好'))
+    const finished = await bench.sendToAgent('你好', TOOLS_LOOP)
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
+    const [space, appId, keyId, body, signal] = fakes.api.benchAgentTurn.mock.calls[0]!
+    expect([space, appId, keyId]).toEqual(['s1', 'a1', 'k1'])
+    expect(body).toMatchObject({ model: 'fake-model' })
+    expect(signal).toBeInstanceOf(AbortSignal)
+    expect(finished?.end).toBe('done')
+    expect(bench.agent.value.messages.map((m) => m.role)).toEqual(['user', 'assistant'])
+    expect(bench.running.value).toBe(false)
+    expect(bench.agentSending.value).toBe(false)
+  })
+
+  it('页面上的会话上下文带给生命周期事件', async () => {
+    const bench = start()
+    await settle()
+    bench.contextForm.chatType = 'group'
+    fakes.api.benchRun.mockImplementation(async (_s, _a, _k, request) => ({
+      ...RESULT,
+      mode: 'rollback',
+      steps: request.steps.map((_step: unknown, index: number) => ({
+        ...RESULT.steps[0]!,
+        index,
+        text: '',
+      })),
+    }))
+    fakes.api.benchAgentTurn.mockResolvedValueOnce(modelReply('好'))
+    await bench.sendToAgent('你好', { ...TOOLS_LOOP, loop: 'hook' })
+    const [, , , request] = fakes.api.benchRun.mock.calls[0]!
+    expect(request.steps[0].body.context).toMatchObject({
+      chatType: 'group',
+      group: { id: 'bench-group' },
+    })
+  })
+
+  it('整个循环占着运行状态：模型请求之间也不能切换，别的调用发不出去', async () => {
+    const bench = start()
+    await settle()
+    const turn = deferred<BenchAgentTurnResult>()
+    fakes.api.benchAgentTurn.mockReturnValueOnce(turn.promise)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(bench.running.value).toBe(true)
+    expect(bench.agentSending.value).toBe(true)
+    // 调用台与场景都走 execute
+    expect(await bench.execute(STEPS, WHAT)).toEqual({ kind: 'stale' })
+    expect(fakes.api.benchRun).not.toHaveBeenCalled()
+    // 同时只能有一条消息
+    expect(await bench.sendToAgent('又一句', TOOLS_LOOP)).toBeNull()
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
+    // 运行期间不能改对话
+    bench.clearAgent()
+    bench.consentToModel('别的模型')
+    expect(bench.agent.value.exchanges).toHaveLength(1)
+    expect(bench.agent.value.consentedModel).toBeNull()
+    turn.resolve(modelReply('好'))
+    await sent
+    expect(bench.running.value).toBe(false)
+  })
+
+  it('调用台在运行时发不了消息，但同意的提示点得了：两边不相干', async () => {
+    const bench = start()
+    await settle()
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchRun.mockReturnValueOnce(run.promise)
+    const outcome = bench.execute(STEPS, WHAT)
+    await settle()
+    expect(await bench.sendToAgent('你好', TOOLS_LOOP)).toBeNull()
+    expect(fakes.api.benchAgentTurn).not.toHaveBeenCalled()
+    bench.consentToModel('fake-model')
+    expect(bench.agent.value.consentedModel).toBe('fake-model')
+    run.resolve({ ...RESULT, mode: 'rollback' })
+    await outcome
+  })
+
+  it('工具走运行接口，带这次对话的重放，不带调用台的', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchRun.mockResolvedValueOnce({
+      ...RESULT,
+      mode: 'rollback',
+      steps: [
+        {
+          ...RESULT.steps[0]!,
+          replay: { kind: 'tool', tool: 'kioku_create', arguments: { uri: 'core://call' } },
+        },
+      ],
+    })
+    await bench.call(STEPS, 'kioku_create')
+    expect(bench.session.value.replay).toHaveLength(1)
+
+    fakes.api.benchRun.mockResolvedValue({
+      ...RESULT,
+      mode: 'rollback',
+      steps: [
+        {
+          ...RESULT.steps[0]!,
+          replay: { kind: 'tool', tool: 'kioku_create', arguments: WRITE_CALL.arguments },
+        },
+      ],
+    })
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+      .mockResolvedValueOnce(modelReply('', [{ ...WRITE_CALL, id: 'c2' }]))
+      .mockResolvedValueOnce(modelReply('好'))
+    await bench.sendToAgent('你好', TOOLS_LOOP)
+    const replays = fakes.api.benchRun.mock.calls.map(([, , , request]) => request.replay)
+    expect(replays[1]).toEqual([])
+    expect(replays[2]).toEqual([
+      { kind: 'tool', tool: 'kioku_create', arguments: WRITE_CALL.arguments },
+    ])
+    // 两边的日志互不相干
+    expect(bench.session.value.replay).toHaveLength(1)
+    expect(bench.agent.value.session.replay).toHaveLength(2)
+  })
+
+  it('停止：正在等的模型请求被取消，不再发新的请求', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => hangUntilAborted(signal))
+    fakes.api.benchRun.mockResolvedValue({ ...RESULT, mode: 'rollback' })
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(2)
+    bench.stopAgent()
+    expect(bench.agentStopping.value).toBe(true)
+    const finished = await sent
+    expect(finished?.end).toBe('stopped')
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(2)
+    expect(bench.running.value).toBe(false)
+    expect(bench.agentStopping.value).toBe(false)
+    expect(bench.agent.value.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
+  })
+
+  it('没有在发消息时停止：什么都不做', async () => {
+    const bench = start()
+    await settle()
+    bench.stopAgent()
+    expect(bench.agentStopping.value).toBe(false)
+  })
+
+  it('离开页面：模型请求一起取消，不继续花 token', async () => {
+    const bench = start()
+    await settle()
+    let aborted: AbortSignal | undefined
+    fakes.api.benchAgentTurn.mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => {
+      aborted = signal
+      return hangUntilAborted(signal)
+    })
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(aborted?.aborted).toBe(false)
+    scope.stop()
+    expect(aborted?.aborted).toBe(true)
+    await sent
+  })
+
+  it('运行中 Key 没了：对话清掉，请求取消，回到回滚；旧的循环写不回新的对话，也不再发请求', async () => {
+    const bench = start()
+    await settle()
+    const generation = bench.generation.value
+    let aborted: AbortSignal | undefined
+    fakes.api.benchAgentTurn.mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => {
+      aborted = signal
+      return hangUntilAborted(signal)
+    })
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(bench.agent.value.exchanges).toHaveLength(1)
+
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    expect(bench.generation.value).toBeGreaterThan(generation)
+    expect(aborted?.aborted).toBe(true)
+    expect(bench.running.value).toBe(false)
+    expect(await sent).toBeNull()
+    expect(bench.agent.value.exchanges).toEqual([])
+    expect(bench.agent.value.messages).toEqual([])
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it('换 Key 之后接着发：是新的一段对话，对着新的 Key', async () => {
+    const bench = start()
+    await settle()
+    await withConversation(bench)
+    bench.selectKey('k2')
+    await settle()
+    expect(bench.agent.value.exchanges).toEqual([])
+    fakes.api.benchAgentTurn.mockResolvedValueOnce(modelReply('好'))
+    await bench.sendToAgent('新的', TOOLS_LOOP)
+    const [, , keyId, body] = fakes.api.benchAgentTurn.mock.calls.at(-1)!
+    expect(keyId).toBe('k2')
+    expect(body.messages.filter((m: { role: string }) => m.role === 'user')).toHaveLength(1)
+  })
+
+  it('换应用、换模式都清掉对话', async () => {
+    const bench = start()
+    await settle()
+    await withConversation(bench)
+    bench.selectApp('a2')
+    await settle()
+    expect(bench.agent.value.exchanges).toEqual([])
+    await withConversation(bench)
+    bench.confirmReal()
+    await settle()
+    expect(bench.agent.value.exchanges).toEqual([])
+  })
+
+  it('同意过的模型随对话清掉：换一段对话要重新问', async () => {
+    const bench = start()
+    await settle()
+    bench.consentToModel('fake-model')
+    expect(bench.agent.value.consentedModel).toBe('fake-model')
+    bench.selectKey('k2')
+    await settle()
+    expect(bench.agent.value.consentedModel).toBeNull()
+    bench.consentToModel('fake-model')
+    bench.clearAgent()
+    expect(bench.agent.value.consentedModel).toBeNull()
+  })
+
+  it('真实模式的工具运行中途作废：警告可能已经写入，带上这次运行是什么，结果按调用的看法显示', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchAgentTurn.mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+    fakes.api.benchRun.mockReturnValueOnce(run.promise)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(bench.abandonedInFlight.value).toBe(false)
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    expect(bench.real.value).toBe(false)
+    expect(bench.abandonedInFlight.value).toBe(true)
+    run.resolve(RESULT)
+    expect(await sent).toBeNull()
+    await settle()
+    expect(bench.abandonedInFlight.value).toBe(false)
+    const [record] = bench.abandoned.value
+    expect(record?.title).toContain('可能已经写入')
+    expect(record?.description).toContain('kioku_create')
+    expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
+    expect(record?.view).toBe('call')
+    expect(record?.result).toBe(RESULT)
+    // 不再请求模型：对话已经作废
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
+    expect(bench.agent.value.exchanges).toEqual([])
+  })
+
+  it('真实模式下工具已经跑完、等模型时作废：对话清掉了，写入还是要说，运行标记留着', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    let aborted: AbortSignal | undefined
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => {
+        aborted = signal
+        return hangUntilAborted(signal)
+      })
+    fakes.api.benchRun.mockResolvedValueOnce(RESULT)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(2)
+    expect(bench.abandoned.value).toEqual([])
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    expect(aborted?.aborted).toBe(true)
+    expect(await sent).toBeNull()
+    expect(bench.agent.value.exchanges).toEqual([])
+    const [record] = bench.abandoned.value
+    expect(bench.abandoned.value).toHaveLength(1)
+    expect(record?.title).toContain('可能已经写入')
+    expect(record?.description).toContain('kioku_create')
+    expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
+    expect(record?.view).toBe('call')
+    expect(record?.result?.run).toBe(RESULT.run)
+    // 能一条一条关
+    bench.dismissAbandoned(record!.id)
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('真实模式下读工具跑完才作废：没有写，不说', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    const read = { ...WRITE_CALL, name: 'kioku_list', arguments: {} }
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [read]))
+      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => hangUntilAborted(signal))
+    fakes.api.benchRun.mockResolvedValueOnce(RESULT)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    await sent
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('没有作废的循环：写过也不警告', async () => {
+    const bench = await inRealMode()
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+      .mockResolvedValueOnce(modelReply('好'))
+    fakes.api.benchRun.mockResolvedValueOnce(RESULT)
+    const finished = await bench.sendToAgent('你好', TOOLS_LOOP)
+    expect(finished?.end).toBe('done')
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('回滚模式下工具跑完、等模型时作废：什么都没留下，不警告', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+      .mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) => hangUntilAborted(signal))
+    fakes.api.benchRun.mockResolvedValueOnce({ ...RESULT, mode: 'rollback' })
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    await sent
+    expect(bench.abandoned.value).toEqual([])
+  })
+
+  it('回滚模式的运行中途作废：什么都没留下，不警告', async () => {
+    const bench = start()
+    await settle()
+    const run = deferred<BenchRunResult>()
+    fakes.api.benchAgentTurn.mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+    fakes.api.benchRun.mockReturnValueOnce(run.promise)
+    const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+    await settle()
+    fakes.api.keys.mockResolvedValue([liveKey('k2')])
+    await refetchKeys()
+    run.resolve({ ...RESULT, mode: 'rollback' })
+    expect(await sent).toBeNull()
+    expect(bench.abandoned.value).toEqual([])
+    expect(fakes.api.benchAgentTurn).toHaveBeenCalledTimes(1)
+  })
+
+  it('真实模式下工具写了数据：缓存重新读，运行标记记在轨迹上', async () => {
+    const bench = start()
+    await settle()
+    bench.confirmReal()
+    await settle()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    fakes.api.benchAgentTurn
+      .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+      .mockResolvedValueOnce(modelReply('好'))
+    fakes.api.benchRun.mockResolvedValue(RESULT)
+    await bench.sendToAgent('你好', TOOLS_LOOP)
+    expect(invalidate).toHaveBeenCalledWith()
+    expect(bench.agent.value.exchanges[0]?.rounds[0]?.calls[0]?.trace?.run).toBe(RESULT.run)
+  })
+
+  it.each([
+    [403, true],
+    [404, true],
+    [400, false],
+  ])('请求模型 %i：Key 被吊销时选择跟上，模型的情况重新读', async (status, refetchKeysToo) => {
+    const bench = start()
+    await settle()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    fakes.api.benchAgentTurn.mockRejectedValueOnce(new ApiError(status, '拒绝'))
+    const finished = await bench.sendToAgent('你好', TOOLS_LOOP)
+    expect(finished?.end).toBe('modelFailed')
+    expect(finished?.notice).toContain('拒绝')
+    const invalidated = invalidate.mock.calls.map(
+      ([filters]) => (filters as { queryKey?: unknown[] } | undefined)?.queryKey?.[0],
+    )
+    expect(invalidated).toContain('bench-agent')
+    expect(invalidated.includes('keys')).toBe(refetchKeysToo)
+  })
+
+  it('请求模型 502：是上游的问题，不重新读', async () => {
+    const bench = start()
+    await settle()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    fakes.api.benchAgentTurn.mockRejectedValueOnce(new ApiError(502, '上游挂了'))
+    await bench.sendToAgent('你好', TOOLS_LOOP)
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  describe('离开提醒', () => {
+    it('对话有内容时要提醒，回滚模式也算；清空就不用了', async () => {
+      const bench = start()
+      await settle()
+      expect(dirty()).toBe(false)
+      await withConversation(bench)
+      expect(bench.real.value).toBe(false)
+      expect(dirty()).toBe(true)
+      bench.clearAgent()
+      expect(dirty()).toBe(false)
+    })
+
+    it('只点过同意、还没说话：没有要丢的', async () => {
+      const bench = start()
+      await settle()
+      bench.consentToModel('fake-model')
+      expect(dirty()).toBe(false)
+    })
+
+    it('换了 Key 对话清掉了，就不用提醒', async () => {
+      const bench = start()
+      await settle()
+      await withConversation(bench)
+      bench.selectKey('k2')
+      await settle()
+      expect(dirty()).toBe(false)
+    })
+
+    it('发出去还没回来时就算有内容', async () => {
+      const bench = start()
+      await settle()
+      fakes.api.benchAgentTurn.mockImplementationOnce((_s, _a, _k, _b, signal: AbortSignal) =>
+        hangUntilAborted(signal),
+      )
+      const sent = bench.sendToAgent('你好', TOOLS_LOOP)
+      await settle()
+      expect(dirty()).toBe(true)
+      bench.stopAgent()
+      await sent
+    })
+  })
+
+  describe('切换模式', () => {
+    it('真实模式下有对话：切回回滚先确认，说对话会清掉；确认之前什么都不动', async () => {
+      const bench = await inRealMode()
+      await withConversation(bench)
+      bench.requestMode(false)
+      expect(bench.confirmingRollback.value).toBe(true)
+      expect(bench.real.value).toBe(true)
+      expect(bench.rollbackLoss.value).toContain('模型对话（1 条消息）')
+      expect(bench.rollbackLoss.value).toContain('运行标记')
+      await settle()
+      expect(bench.agent.value.exchanges).toHaveLength(1)
+
+      bench.confirmRollback()
+      await settle()
+      expect(bench.real.value).toBe(false)
+      expect(bench.agent.value.exchanges).toEqual([])
+      expect(bench.modeLoss.value).toBeNull()
+      // 正文是打开时存的：关闭动画期间还在
+      expect(bench.rollbackLoss.value).toContain('模型对话')
+    })
+
+    it('回滚模式下有对话：切到真实的确认框也说对话会清掉，保留的写入不带过去', async () => {
+      const bench = start()
+      await settle()
+      fakes.api.benchRun.mockResolvedValue({
+        ...RESULT,
+        mode: 'rollback',
+        steps: [
+          {
+            ...RESULT.steps[0]!,
+            replay: { kind: 'tool', tool: 'kioku_create', arguments: WRITE_CALL.arguments },
+          },
+        ],
+      })
+      fakes.api.benchAgentTurn
+        .mockResolvedValueOnce(modelReply('', [WRITE_CALL]))
+        .mockResolvedValueOnce(modelReply('好'))
+      await bench.sendToAgent('你好', TOOLS_LOOP)
+      bench.requestMode(true)
+      expect(bench.confirmingReal.value).toBe(true)
+      expect(bench.modeLoss.value).toContain('模型对话（1 条消息）')
+      expect(bench.modeLoss.value).toContain('保留的写入不会带过去')
+    })
+
+    it('真实模式下对话清空了：切回回滚不多问', async () => {
+      const bench = await inRealMode()
+      await withConversation(bench)
+      bench.clearAgent()
+      bench.requestMode(false)
+      expect(bench.confirmingRollback.value).toBe(false)
+      expect(bench.real.value).toBe(false)
+    })
   })
 })
