@@ -14,7 +14,7 @@ import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { memories, recallEvents, settings, subjects } from '../../db/schema'
+import { apiKeys, memories, recallEvents, settings, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -235,6 +235,38 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
 
         const shown = await bench(['--file', file, '--allow-writes', '--show-output'])
         expect(shown.stdout).toContain(VALUE)
+      },
+      PROCESS_TIMEOUT,
+    )
+
+    it(
+      '帮助写明这是真实调用：不算写操作，却会记召回事件、更新 Key 的最后使用时间',
+      async () => {
+        const help = await bench(['--help'], { KIOKU_BENCH_KEY: '', KIOKU_BENCH_URL: '' })
+        expect(help.code).toBe(0)
+        for (const text of [
+          '真实调用',
+          '最后使用时间',
+          'kioku_search',
+          '/recall',
+          'prompt.submit',
+          '带 project 的 session.start',
+          '召回事件',
+        ]) {
+          expect(help.stdout).toContain(text)
+        }
+
+        // 说的就是这样：不用 --allow-writes，真的记了
+        const file = await scenarioFile([
+          { kind: 'tool', tool: 'kioku_search', arguments: { query: '随便' } },
+          { kind: 'recall', body: { query: '随便' } },
+          { kind: 'lifecycle', body: { event: 'prompt.submit', prompt: '随便' } },
+          { kind: 'lifecycle', body: { event: 'session.start', project: { dirName: 'kioku' } } },
+        ])
+        expect((await bench(['--file', file])).code).toBe(0)
+        await expect.poll(() => count(recallEvents), { timeout: 10_000 }).toBe(4)
+        const lastUsed = await database.db.select({ at: apiKeys.lastUsedAt }).from(apiKeys)
+        expect(lastUsed.some((row) => row.at !== null)).toBe(true)
       },
       PROCESS_TIMEOUT,
     )
