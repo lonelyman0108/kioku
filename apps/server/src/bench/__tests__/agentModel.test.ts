@@ -1,0 +1,397 @@
+import type { BenchTool } from '@kioku/contracts'
+import { describe, expect, it, vi } from 'vitest'
+
+import {
+  AgentModelError,
+  escapeControlChars,
+  parseModelJson,
+  parseToolCalls,
+  requestAgentTurn,
+  toolDefinitions,
+} from '../agentModel'
+
+const API_KEY = 'sk-secret/key+with=marks"and\\slash'
+const CONFIG = { baseUrl: 'http://model.example.com/v1', model: 'm', apiKey: API_KEY }
+const INPUT = { messages: [{ role: 'user', content: '你好' }], tools: [] }
+
+const chatBody = (message: unknown, extra: object = {}) =>
+  JSON.stringify({ choices: [{ message, finish_reason: 'stop' }], ...extra })
+
+// 假的 fetch：记下请求，返回给定的响应
+function stubFetch(response: () => Response | Promise<Response>) {
+  const calls: { url: string; init: RequestInit }[] = []
+  const fetchImpl = ((url: string, init: RequestInit) => {
+    calls.push({ url, init })
+    return Promise.resolve(response())
+  }) as typeof fetch
+  return { calls, fetchImpl }
+}
+
+const failure = async (
+  response: () => Response | Promise<Response>,
+  config: typeof CONFIG = CONFIG,
+) => {
+  const err = await requestAgentTurn(config, INPUT, stubFetch(response).fetchImpl).catch(
+    (e: unknown) => e,
+  )
+  expect(err).toBeInstanceOf(AgentModelError)
+  return (err as AgentModelError).message
+}
+
+describe('响应 JSON 里没转义的控制字符', () => {
+  it('合法的 JSON 不用动，字符串外的换行和缩进留着', () => {
+    const pretty = '{\n\t"a": 1,\r\n  "b": ["x"]\n}\n'
+    expect(escapeControlChars(pretty)).toBe(pretty)
+    expect(parseModelJson(pretty)).toEqual({ a: 1, b: ['x'] })
+  })
+
+  it('字符串里的换行、制表符与别的控制字符转义之后原样解析出来', () => {
+    expect(parseModelJson('{\n  "a": "第一行\n第二行\t\r",\n  "b": "x"\n}')).toEqual({
+      a: '第一行\n第二行\t\r',
+      b: 'x',
+    })
+    const all = Array.from({ length: 0x20 }, (_, code) => String.fromCharCode(code)).join('')
+    expect(parseModelJson(`["${all}"]`)).toEqual([all])
+  })
+
+  it('字符串里的转义引号不算字符串结束', () => {
+    expect(parseModelJson('{"a":"前\\"后\n还在字符串里"}')).toEqual({ a: '前"后\n还在字符串里' })
+  })
+
+  it('结尾的转义反斜杠不吃掉结束的引号：后面的换行在字符串外，后一个字符串照样处理', () => {
+    const text = '{"a":"x\\\\"\n,\n"b":"第一行\n第二行"}'
+    expect(escapeControlChars(text)).toBe('{"a":"x\\\\"\n,\n"b":"第一行\\u000a第二行"}')
+    expect(parseModelJson(text)).toEqual({ a: 'x\\', b: '第一行\n第二行' })
+  })
+
+  it('已有的转义、中文、表情、DEL 与 U+2028 都不动', () => {
+    const text = '{"a":"\\n\\t\\u0041 中文 😀 \u007f  "}'
+    expect(escapeControlChars(text)).toBe(text)
+  })
+
+  it('还是不合法就报错：反斜杠后面直接跟控制字符、结构本身是坏的', () => {
+    expect(() => parseModelJson('{"a":"x\\\ny"}')).toThrow(SyntaxError)
+    expect(() => parseModelJson('{"a":')).toThrow(SyntaxError)
+    expect(() => parseModelJson('<html>\n</html>')).toThrow(SyntaxError)
+  })
+})
+
+describe('工具调用', () => {
+  const one = (args: unknown) =>
+    parseToolCalls([
+      { id: 'c', type: 'function', function: { name: 'kioku_list', arguments: args } },
+    ])[0]!
+
+  it('解析成对象', () => {
+    expect(one('{"of":"core","n":{"m":[1]}}')).toEqual({
+      id: 'c',
+      name: 'kioku_list',
+      arguments: { of: 'core', n: { m: [1] } },
+      parseError: null,
+    })
+  })
+
+  it.each([[''], ['   '], ['\n\t '], [undefined], [null]])('空的参数按 {}：%j', (args) => {
+    expect(one(args)).toMatchObject({ arguments: {}, parseError: null })
+  })
+
+  it('接口直接给对象也接受', () => {
+    expect(one({ of: 'core' })).toMatchObject({ arguments: { of: 'core' }, parseError: null })
+  })
+
+  it.each([['{bad'], ['{"a":1'], ['tool'], ['{"a":"第一行\n第二行"}']])(
+    '解析失败给 parseError，不抛错：%j',
+    (args) => {
+      expect(one(args)).toEqual({
+        id: 'c',
+        name: 'kioku_list',
+        arguments: null,
+        parseError: '工具参数不是合法的 JSON',
+      })
+    },
+  )
+
+  it.each([['[]'], ['[1]'], ['null'], ['3'], ['"text"'], ['true'], [[1]], [3], [false]])(
+    '不是对象也算解析失败：%j',
+    (args) => {
+      expect(one(args)).toEqual({
+        id: 'c',
+        name: 'kioku_list',
+        arguments: null,
+        parseError: '工具参数不是 JSON 对象',
+      })
+    },
+  )
+
+  it('没有工具调用时是空的；顺序不变；不合规的也留着，调用方才能补齐 tool 消息', () => {
+    for (const value of [undefined, null, 'x', {}]) expect(parseToolCalls(value)).toEqual([])
+    const calls = parseToolCalls([
+      { id: 'a', function: { name: 'x', arguments: '{}' } },
+      { id: 'b', type: 'custom', custom: { name: 'y' } },
+      null,
+      { function: { name: 'z', arguments: '{}' } },
+    ])
+    expect(calls).toEqual([
+      { id: 'a', name: 'x', arguments: {}, parseError: null },
+      { id: 'b', name: '', arguments: null, parseError: '工具调用没有名字' },
+      { id: '', name: '', arguments: null, parseError: '工具调用没有名字' },
+      { id: '', name: 'z', arguments: {}, parseError: null },
+    ])
+  })
+})
+
+describe('工具定义', () => {
+  it('只去掉顶层的 $schema，别的字段不动，没有说明的工具不带 description', () => {
+    const inputSchema = {
+      $schema: 'https://json-schema.org/draft/2020-12/schema',
+      type: 'object',
+      properties: {
+        $schema: { type: 'string', pattern: '^x$' },
+        when: { anyOf: [{ type: 'string' }, { type: 'null' }], format: 'date-time' },
+      },
+      required: ['when'],
+      additionalProperties: false,
+    }
+    const tools: BenchTool[] = [
+      { name: 'a', description: '说明', inputSchema, annotations: { readOnlyHint: true } },
+      { name: 'b', inputSchema: { type: 'object', properties: {} } },
+    ]
+    expect(toolDefinitions(tools)).toEqual([
+      {
+        type: 'function',
+        function: {
+          name: 'a',
+          description: '说明',
+          parameters: {
+            type: 'object',
+            properties: inputSchema.properties,
+            required: ['when'],
+            additionalProperties: false,
+          },
+        },
+      },
+      { type: 'function', function: { name: 'b', parameters: { type: 'object', properties: {} } } },
+    ])
+    expect('description' in toolDefinitions(tools)[1]!.function).toBe(false)
+    // 原来的定义不被改动：调用台和 MCP 用的是它
+    expect(inputSchema.$schema).toBeDefined()
+  })
+})
+
+describe('请求', () => {
+  it('请求体只有 model、messages 与 tools，地址结尾的斜杠不重复', async () => {
+    const { calls, fetchImpl } = stubFetch(() => new Response(chatBody({ role: 'assistant' })))
+    const tools = toolDefinitions([{ name: 'a', inputSchema: { type: 'object' } }])
+    await requestAgentTurn(
+      { ...CONFIG, baseUrl: 'http://model.example.com/v1//' },
+      { ...INPUT, tools },
+      fetchImpl,
+    )
+    expect(calls[0]!.url).toBe('http://model.example.com/v1/chat/completions')
+    expect(JSON.parse(calls[0]!.init.body as string)).toEqual({
+      model: 'm',
+      messages: INPUT.messages,
+      tools,
+    })
+    expect((calls[0]!.init.headers as Record<string, string>).authorization).toBe(
+      `Bearer ${API_KEY}`,
+    )
+  })
+
+  it('没有工具时不带 tools；没有 Key 时不带 Authorization', async () => {
+    const { calls, fetchImpl } = stubFetch(() => new Response(chatBody({ role: 'assistant' })))
+    await requestAgentTurn({ ...CONFIG, apiKey: null }, INPUT, fetchImpl)
+    expect(Object.keys(JSON.parse(calls[0]!.init.body as string)).sort()).toEqual([
+      'messages',
+      'model',
+    ])
+    expect(calls[0]!.init.headers).not.toHaveProperty('authorization')
+  })
+
+  it('助手消息原样返回，用量、结束原因、模型名与耗时都给', async () => {
+    const message = {
+      role: 'assistant',
+      content: null,
+      reasoning_content: '想一想',
+      future_field: { a: [1] },
+      tool_calls: [{ id: 'c', type: 'function', function: { name: 'x', arguments: '' } }],
+    }
+    const { fetchImpl } = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message, finish_reason: 'tool_calls' }],
+            usage: { prompt_tokens: 12, completion_tokens: 3 },
+          }),
+        ),
+    )
+    const result = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+    expect(result.message).toEqual(message)
+    expect(result.toolCalls).toEqual([{ id: 'c', name: 'x', arguments: {}, parseError: null }])
+    expect(result.finishReason).toBe('tool_calls')
+    expect(result.usage).toEqual({ promptTokens: 12, completionTokens: 3 })
+    expect(result.model).toBe('m')
+    expect(result.ms).toBeGreaterThanOrEqual(0)
+  })
+
+  it('没给用量或用量不是数字时是 0；没有结束原因时是 null；没有 role 时补上', async () => {
+    const { fetchImpl } = stubFetch(
+      () =>
+        new Response(
+          JSON.stringify({
+            choices: [{ message: { content: '好' } }],
+            usage: { prompt_tokens: '12', completion_tokens: null },
+          }),
+        ),
+    )
+    const result = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+    expect(result.usage).toEqual({ promptTokens: 0, completionTokens: 0 })
+    expect(result.finishReason).toBeNull()
+    expect(result.message).toEqual({ role: 'assistant', content: '好' })
+  })
+
+  it('role 是空串时也补上', async () => {
+    const { fetchImpl } = stubFetch(() => new Response(chatBody({ role: '', content: '好' })))
+    const result = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+    expect(result.message).toEqual({ role: 'assistant', content: '好' })
+  })
+
+  it('时限 120 秒', async () => {
+    const timeout = vi.spyOn(AbortSignal, 'timeout')
+    try {
+      const { fetchImpl } = stubFetch(() => new Response(chatBody({ role: 'assistant' })))
+      await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+      expect(timeout).toHaveBeenCalledWith(120_000)
+    } finally {
+      timeout.mockRestore()
+    }
+  })
+
+  it('响应的字符串里有控制字符时容忍', async () => {
+    const { fetchImpl } = stubFetch(
+      () =>
+        new Response(
+          '{\n  "choices": [{"message": {"role": "assistant", "content": "第一行\n第二行"}}]\n}\n',
+        ),
+    )
+    const result = await requestAgentTurn(CONFIG, INPUT, fetchImpl)
+    expect(result.message.content).toBe('第一行\n第二行')
+  })
+})
+
+describe('报错', () => {
+  it('非 2xx 带状态码与上游原文，截断到 500 字', async () => {
+    expect(await failure(() => new Response('上游不高兴', { status: 400 }))).toBe(
+      '模型接口返回 HTTP 400：上游不高兴',
+    )
+    const exact = 'x'.repeat(500)
+    expect(await failure(() => new Response(exact, { status: 500 }))).toBe(
+      `模型接口返回 HTTP 500：${exact}`,
+    )
+    expect(await failure(() => new Response('x'.repeat(2000), { status: 500 }))).toBe(
+      `模型接口返回 HTTP 500：${exact}…`,
+    )
+  })
+
+  it('截断不切开代理对', async () => {
+    const message = await failure(() => new Response(`${'x'.repeat(499)}😀尾巴`, { status: 500 }))
+    expect(message).toBe(`模型接口返回 HTTP 500：${'x'.repeat(499)}…`)
+  })
+
+  it.each([
+    ['原样', API_KEY],
+    ['JSON 里的写法', JSON.stringify(API_KEY).slice(1, -1)],
+    ['网址里的写法', encodeURIComponent(API_KEY)],
+  ])('上游把 Key 写进报错（%s）时换掉', async (_, form) => {
+    const message = await failure(() => new Response(`无效的 Key：${form}！`, { status: 401 }))
+    expect(message).toBe('模型接口返回 HTTP 401：无效的 Key：***！')
+  })
+
+  it('先去掉 Key 再截断：Key 正好跨在截断处时不留下半截', async () => {
+    const message = await failure(
+      () => new Response(`${'x'.repeat(495)}${API_KEY}${'y'.repeat(1000)}`, { status: 500 }),
+    )
+    expect(message).not.toContain(API_KEY.slice(0, 5))
+    expect(message).toContain('x'.repeat(495))
+  })
+
+  it.each([
+    ['不是 JSON', '<html>网关出错了</html>'],
+    ['没有 choices', '{"error":{"message":"配额用完"}}'],
+    ['choices 是空的', '{"choices":[]}'],
+    ['消息不是对象', '{"choices":[{"message":"好"}]}'],
+    ['消息是数组', '{"choices":[{"message":[]}]}'],
+    ['顶层不是对象', 'null'],
+  ])('2xx 但响应不对（%s）：报错带原文', async (_, body) => {
+    expect(await failure(() => new Response(body))).toContain(body)
+  })
+
+  it('2xx 的响应不对时，原文里的 Key 同样换掉', async () => {
+    const message = await failure(() => new Response(`{"echo":"${encodeURIComponent(API_KEY)}"}`))
+    expect(message).not.toContain(encodeURIComponent(API_KEY))
+  })
+
+  it('连不上时带错误类别，不带错误原文', async () => {
+    const fetchImpl = (() =>
+      Promise.reject(
+        Object.assign(new TypeError('fetch failed'), {
+          cause: Object.assign(new Error(`connect ${API_KEY}`), { code: 'ECONNREFUSED' }),
+        }),
+      )) as typeof fetch
+    const err = (await requestAgentTurn(CONFIG, INPUT, fetchImpl).catch((e: unknown) => e)) as Error
+    expect(err).toBeInstanceOf(AgentModelError)
+    expect(err.message).toContain('ECONNREFUSED')
+    expect(err.message).not.toContain(API_KEY)
+  })
+
+  it('fetch 的错误文字带着 Key（Key 里有换行时会把请求头写进去）：不用它', async () => {
+    const fetchImpl = (() =>
+      Promise.reject(
+        new TypeError(`Headers.append: "Bearer ${API_KEY}" is an invalid header value.`),
+      )) as typeof fetch
+    const err = (await requestAgentTurn(CONFIG, INPUT, fetchImpl).catch((e: unknown) => e)) as Error
+    expect(err).toBeInstanceOf(AgentModelError)
+    expect(err.message).not.toContain(API_KEY)
+    expect(err.message).toContain('连不上模型接口')
+  })
+
+  // 一直不响应，等 signal 取消
+  const hanging = ((_: string, init: RequestInit) =>
+    new Promise((_resolve, reject) => {
+      const { signal } = init
+      signal!.addEventListener('abort', () => reject(signal!.reason as Error))
+    })) as typeof fetch
+
+  it('到了时限：说清等了多久', async () => {
+    const err = (await requestAgentTurn(CONFIG, { ...INPUT, timeoutMs: 20 }, hanging).catch(
+      (e: unknown) => e,
+    )) as Error
+    expect(err).toBeInstanceOf(AgentModelError)
+    expect(err.message).toBe('模型 1 秒内没有返回')
+  })
+
+  it('请求的 signal 传给上游：客户端断开就取消', async () => {
+    const client = new AbortController()
+    const pending = requestAgentTurn(
+      CONFIG,
+      // 比用例的时限短：signal 没传给上游时按断言失败，不是等到用例超时
+      { ...INPUT, signal: client.signal, timeoutMs: 1_500 },
+      hanging,
+    ).catch((e: unknown) => e)
+    client.abort('Client connection prematurely closed.')
+    expect(((await pending) as Error).message).toBe('请求已经断开')
+  })
+
+  it('读响应正文时断开或到时限也一样', async () => {
+    const client = new AbortController()
+    const pending = requestAgentTurn(
+      CONFIG,
+      { ...INPUT, signal: client.signal },
+      stubFetch(() => {
+        client.abort('断开')
+        return { ok: true, status: 200, text: () => Promise.reject(new Error('body')) } as Response
+      }).fetchImpl,
+    ).catch((e: unknown) => e)
+    expect(((await pending) as Error).message).toBe('请求已经断开')
+  })
+})

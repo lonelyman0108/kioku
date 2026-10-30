@@ -1,9 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
 import {
+  BENCH_AGENT_MAX_BYTES,
+  BENCH_AGENT_MAX_MESSAGES,
   BENCH_MAX_REPLAY_BYTES,
   BENCH_MAX_REPLAY_STEPS,
   BENCH_MAX_STEPS,
+  BenchAgentTurnRequest,
   BenchRunRequest,
   BenchScenario,
   BenchStep,
@@ -104,6 +107,55 @@ describe('运行请求', () => {
       replay: [{ kind: 'tool', tool: 'kioku_create', arguments: big }],
     })
     expect(tooBig.error?.issues[0]?.message).toContain('清空')
+  })
+})
+
+describe('模型代理的请求', () => {
+  const user = { role: 'user', content: '你好' }
+
+  it('消息要有 role，别的字段原样留着', () => {
+    const assistant = {
+      role: 'assistant',
+      content: null,
+      reasoning_content: '想一想',
+      tool_calls: [{ id: 'c', type: 'function', function: { name: 'x', arguments: '' } }],
+      future_field: { a: [1] },
+    }
+    const tool = { role: 'tool', tool_call_id: 'c', content: '结果' }
+    const messages = [user, assistant, tool]
+    expect(BenchAgentTurnRequest.parse({ messages }).messages).toEqual(messages)
+    for (const bad of [{ content: '没有 role' }, { role: '' }, { role: 3 }, 'text', null]) {
+      expect(BenchAgentTurnRequest.safeParse({ messages: [bad] }).success).toBe(false)
+    }
+  })
+
+  it('至少一条，条数有上限；只收 model 与 messages', () => {
+    expect(BenchAgentTurnRequest.safeParse({ messages: [] }).success).toBe(false)
+    const atLimit = Array.from({ length: BENCH_AGENT_MAX_MESSAGES }, () => user)
+    expect(BenchAgentTurnRequest.safeParse({ messages: atLimit }).success).toBe(true)
+    const tooMany = BenchAgentTurnRequest.safeParse({ messages: [...atLimit, user] })
+    expect(tooMany.error?.issues[0]?.message).toContain('清空')
+    expect(BenchAgentTurnRequest.safeParse({ messages: [user], temperature: 0 }).success).toBe(
+      false,
+    )
+  })
+
+  it('总大小有上限，按 UTF-8 算', () => {
+    const ofSize = (content: string) => ({ messages: [{ role: 'user', content }] })
+    expect(BenchAgentTurnRequest.safeParse(ofSize('x'.repeat(1024))).success).toBe(true)
+    const tooBig = BenchAgentTurnRequest.safeParse(ofSize('字'.repeat(BENCH_AGENT_MAX_BYTES / 3)))
+    expect(tooBig.error?.issues[0]?.message).toContain('清空')
+    // 同样的字符数，只有一个字节的不超
+    expect(
+      BenchAgentTurnRequest.safeParse(ofSize('x'.repeat(BENCH_AGENT_MAX_BYTES / 3))).success,
+    ).toBe(true)
+  })
+
+  it('模型名去掉两边的空白，全是空白的不行', () => {
+    const parsed = BenchAgentTurnRequest.parse({ model: ' m ', messages: [user] })
+    expect(parsed.model).toBe('m')
+    expect(BenchAgentTurnRequest.safeParse({ model: '  ', messages: [user] }).success).toBe(false)
+    expect(BenchAgentTurnRequest.parse({ messages: [user] }).model).toBeUndefined()
   })
 })
 
