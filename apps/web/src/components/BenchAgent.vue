@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { BENCH_MAX_STEPS, type BenchScenario } from '@kioku/contracts'
+import type { BenchScenario } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, nextTick, ref, shallowRef, useTemplateRef, watch } from 'vue'
 
@@ -12,6 +12,7 @@ import {
   consentNeeded,
   consentText,
   DEFAULT_SYSTEM_PROMPT,
+  droppedNote,
   sentToolCalls,
   usageSummary,
 } from '../benchAgent'
@@ -143,12 +144,17 @@ watch(agent, () => {
 
 // 存成场景：导出前检测明文，由用户决定是否继续
 const hasCalls = computed(() => sentToolCalls(agent.value).length > 0)
-const exporting = shallowRef<{ scenario: BenchScenario; findings: PlaintextFinding[] } | null>(null)
+const exporting = shallowRef<{
+  scenario: BenchScenario
+  findings: PlaintextFinding[]
+  dropped: number
+} | null>(null)
 const exportNote = ref<string | null>(null)
-function saveScenario(scenario: BenchScenario) {
+function saveScenario(scenario: BenchScenario, dropped: number) {
   exporting.value = null
   const blob = new Blob([formatScenario(scenario)], { type: 'application/json' })
   saveFile(blob, `${scenario.id}.json`)
+  exportNote.value = droppedNote(dropped)
 }
 function startExport() {
   const made = agentScenario(agent.value, new Date())
@@ -157,12 +163,10 @@ function startExport() {
     exportNote.value = `存不成场景：${made.parsed.errors.join('；')}`
     return
   }
-  exportNote.value = made.dropped
-    ? `场景最多 ${BENCH_MAX_STEPS} 步：只存了前面的 ${BENCH_MAX_STEPS} 个工具调用，后面 ${made.dropped} 个没有存。`
-    : null
-  const findings = plaintextIn(made.parsed.scenario)
-  if (findings.length) exporting.value = { scenario: made.parsed.scenario, findings }
-  else saveScenario(made.parsed.scenario)
+  const { scenario } = made.parsed
+  const findings = plaintextIn(scenario)
+  if (findings.length) exporting.value = { scenario, findings, dropped: made.dropped }
+  else saveScenario(scenario, made.dropped)
 }
 
 function clear() {
@@ -340,7 +344,10 @@ watch(generation, () => {
       <template #footer>
         <div class="flex w-full justify-end gap-2">
           <UButton color="neutral" variant="ghost" @click="exporting = null">取消</UButton>
-          <UButton color="warning" @click="exporting && saveScenario(exporting.scenario)">
+          <UButton
+            color="warning"
+            @click="exporting && saveScenario(exporting.scenario, exporting.dropped)"
+          >
             仍然导出
           </UButton>
         </div>

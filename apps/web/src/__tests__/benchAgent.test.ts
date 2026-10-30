@@ -31,6 +31,7 @@ import {
   consentText,
   contentText,
   DEFAULT_SYSTEM_PROMPT,
+  droppedNote,
   emptyConversation,
   noticeColor,
   roundMeta,
@@ -1793,6 +1794,73 @@ describe('存成场景', () => {
       ],
     })
     expect(sentToolCalls(await h.send(USER_TEXT))).toEqual([])
+  })
+
+  it('服务端没有执行的步骤不算：根事务出错之后的 notRun、被跳过的', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [
+        reply(null, [
+          toolCall('c1', 'kioku_create', { uri: 'core://a', content: '甲' }),
+          toolCall('c2', 'kioku_get', { uri: 'core://a' }),
+          toolCall('c3', 'kioku_list'),
+          toolCall('c4', 'kioku_boot'),
+        ]),
+        reply('好'),
+      ],
+      run: (steps) => ({
+        kind: 'done',
+        result: runResult('rollback', [
+          defaultStep(steps[0]!, 0),
+          // 内部错误是执行过的：场景里留着，重跑时才看得到
+          baseStep({ ...defaultStep(steps[1]!, 1), internalError: true, isError: true }),
+          baseStep({
+            ...defaultStep(steps[2]!, 2),
+            status: 'notRun',
+            raw: null,
+            reason: '根事务出错',
+          }),
+          baseStep({
+            ...defaultStep(steps[3]!, 3),
+            status: 'skipped',
+            raw: null,
+            reason: '不满足',
+          }),
+        ]),
+      }),
+    })
+    const done = await h.send(USER_TEXT)
+    expect(sentToolCalls(done).map((c) => c.name)).toEqual(['kioku_create', 'kioku_get'])
+    const made = agentScenario(done, NOW)!
+    if (!made.parsed.ok) throw new Error(made.parsed.errors.join())
+    expect(made.parsed.scenario.steps.map((s) => (s as { tool: string }).tool)).toEqual([
+      'kioku_create',
+      'kioku_get',
+    ])
+    // 轨迹上还看得到它们，只是不进场景
+    expect(last(done).rounds[0]!.calls.every((c) => c.trace !== null)).toBe(true)
+  })
+
+  it('都没有执行：存不成', async () => {
+    const h = harness({
+      loop: 'tools',
+      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好')],
+      run: (steps) => ({
+        kind: 'done',
+        result: runResult('rollback', [
+          baseStep({ ...defaultStep(steps[0]!, 0), status: 'notRun', raw: null }),
+        ]),
+      }),
+    })
+    const done = await h.send(USER_TEXT)
+    expect(sentToolCalls(done)).toEqual([])
+    expect(agentScenario(done, NOW)).toBeNull()
+  })
+
+  it('少了几个的说明：有才说', () => {
+    expect(droppedNote(0)).toBeNull()
+    expect(droppedNote(2)).toContain(`场景最多 ${BENCH_MAX_STEPS} 步`)
+    expect(droppedNote(2)).toContain('后面 2 个没有存')
   })
 
   it('跨消息的都算；超过场景的步数上限时留前面的，说明少了几个', async () => {

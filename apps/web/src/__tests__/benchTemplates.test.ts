@@ -1140,12 +1140,12 @@ describe('模型对话的页面', () => {
     expect(bound(button, 'disabled')).toBe('running || !hasCalls')
     const body = bodyOf(view.script, 'startExport')
     expect(body).toContain('agentScenario(agent.value, new Date())')
-    expect(body).toContain('plaintextIn(made.parsed.scenario)')
+    expect(body).toContain('plaintextIn(scenario)')
     expect(body).toContain(
-      'if (findings.length) exporting.value = { scenario: made.parsed.scenario, findings }',
+      'if (findings.length) exporting.value = { scenario, findings, dropped: made.dropped }',
     )
     expect(handler(buttonOf(view.elements, '仍然导出'), 'click')).toBe(
-      'exporting && saveScenario(exporting.scenario)',
+      'exporting && saveScenario(exporting.scenario, exporting.dropped)',
     )
     expect(view.script.match(/saveFile\(/g)).toHaveLength(1)
     const modal = must(
@@ -1156,8 +1156,17 @@ describe('模型对话的页面', () => {
     expect(shownIn(finding)).toEqual(['finding.step', 'finding.label', 'finding.what'])
   })
 
-  it('超过场景的步数上限时说明少了几个，能关掉', () => {
-    expect(bodyOf(view.script, 'startExport')).toContain('made.dropped')
+  it('超过场景的步数上限时说明少了几个，能关掉；真的存了才说，取消的话什么都没存', () => {
+    const body = bodyOf(view.script, 'startExport')
+    expect(body).toContain('made.dropped')
+    expect(body).not.toContain('droppedNote')
+    // 这里的写入只有存不成的那一句
+    expect(body.match(/exportNote\.value =/g)).toHaveLength(1)
+    expect(body).toContain('exportNote.value = `存不成场景')
+    const save = bodyOf(view.script, 'saveScenario')
+    expect(save.indexOf('exportNote.value = droppedNote(dropped)')).toBeGreaterThan(
+      save.indexOf('saveFile('),
+    )
     const alert = alertWith('exportNote')
     expect(bound(alert, 'title')).toBe('exportNote')
     expect(handler(alert, 'update:open')).toBe('(v) => !v && (exportNote = null)')

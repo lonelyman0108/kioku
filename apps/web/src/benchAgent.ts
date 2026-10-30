@@ -258,12 +258,13 @@ export function systemMessage(base: string, sessionText: string | null): BenchAg
   return content ? { role: 'system', content } : null
 }
 
+// 这一步服务端没有执行：没有发出去，或者不满足前提
+const didNotRun = (step: BenchStepResult) => step.status === 'skipped' || notExecuted(step)
+
 // 工具结果回给模型的文字。不能是空的：内部错误、没有执行、跳过都要说明，模型才知道发生了什么。
 // 看 isError 与 internalError，不看 status：没带断言的步骤工具报错也是 passed
 export function toolReply(step: BenchStepResult): string {
-  if (step.status === 'skipped' || notExecuted(step)) {
-    return step.reason ? `没有执行：${step.reason}` : '没有执行'
-  }
+  if (didNotRun(step)) return step.reason ? `没有执行：${step.reason}` : '没有执行'
   if (step.internalError) return `服务内部错误：${internalErrorText(step)}`
   return step.text || (step.isError ? '工具报错了，没有说明' : '（工具没有返回内容）')
 }
@@ -651,7 +652,7 @@ export const attachedNote = (loop: BenchAgentLoop) =>
 
 // 这一步要不要展开：要看的是出了问题的那几步
 export const callOpen = (step: BenchStepResult) =>
-  step.isError || step.internalError || step.status === 'skipped' || notExecuted(step)
+  step.isError || step.internalError || didNotRun(step)
 
 // 显示用的参数：解析不出来时给模型写的原文
 export const argumentsText = (call: AgentToolTrace) =>
@@ -684,17 +685,23 @@ export const usageSummary = ({ promptTokens, completionTokens, ms, rounds }: Age
 
 // 下面是存成场景
 
-// 发出去的工具调用，没有执行的（解析失败、停止、上限、请求失败）不算：场景的步骤用发出去的参数
+// 发出去的工具调用，没有执行的（解析失败、停止、上限、请求失败、服务端没有执行）不算：场景的步骤用发出去的参数
 export const sentToolCalls = (conversation: AgentConversation) =>
   conversation.exchanges
     .flatMap((exchange) => exchange.rounds.flatMap((round) => round.calls))
-    .filter((call) => call.trace !== null)
+    .filter((call) => call.trace !== null && !didNotRun(call.trace.step))
 
 export interface AgentScenarioExport {
   parsed: ParsedScenario
   // 超过场景的步数上限、没有存进去的个数。按顺序留前面的：后面的步骤依赖前面的写入
   dropped: number
 }
+
+// 真的存了之后才说少了几个：有明文要确认时，取消了就什么都没存
+export const droppedNote = (dropped: number) =>
+  dropped
+    ? `场景最多 ${BENCH_MAX_STEPS} 步：只存了前面的 ${BENCH_MAX_STEPS} 个工具调用，后面 ${dropped} 个没有存。`
+    : null
 
 // 这次对话的工具调用存成场景，按契约校验。没有发出去过工具调用时是 null
 export function agentScenario(
