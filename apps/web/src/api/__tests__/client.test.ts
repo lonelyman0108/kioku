@@ -20,6 +20,26 @@ describe('API 客户端', () => {
     expect(init.body).toBe('{"a":1}')
   })
 
+  it('signal 传给 fetch：取消时抛的是 AbortError，不是 ApiError', async () => {
+    const fetchMock = vi.fn(async (_url: string, init: RequestInit) => {
+      init.signal?.throwIfAborted()
+      return Response.json({})
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    const controller = new AbortController()
+    await request('POST', '/x', { body: {}, signal: controller.signal })
+    expect(fetchMock.mock.calls[0]![1].signal).toBe(controller.signal)
+    controller.abort()
+    const err = await request('POST', '/x', { body: {}, signal: controller.signal }).catch(
+      (e: unknown) => e,
+    )
+    expect(err).not.toBeInstanceOf(ApiError)
+    expect((err as DOMException).name).toBe('AbortError')
+    // 不传时也不影响
+    await request('GET', '/x')
+    expect(fetchMock.mock.calls.at(-1)![1].signal).toBeUndefined()
+  })
+
   it('错误响应转成带状态码和提示的 ApiError', async () => {
     vi.stubGlobal(
       'fetch',

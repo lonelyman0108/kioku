@@ -6,6 +6,8 @@ import {
   BackupRunStatus,
   BackupSettingsView,
   BackupTestResult,
+  BenchAgentInfo,
+  BenchAgentTurnResult,
   BenchRunResult,
   BenchScenarioList,
   BenchToolList,
@@ -69,6 +71,7 @@ import {
   SubjectInfo,
   SubjectList,
   type ApplyDreamSuggestion,
+  type BenchAgentTurnRequest,
   type BenchRunRequest,
   type BootPreviewRequest,
   type CreateAppRequest,
@@ -183,6 +186,22 @@ export const api = {
     }),
   benchScenarios: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/bench/scenarios`, { schema: BenchScenarioList }),
+  benchAgent: (spaceId: string, appId: string, keyId: string) =>
+    request('GET', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/agent`, {
+      schema: BenchAgentInfo,
+    }),
+  benchAgentTurn: (
+    spaceId: string,
+    appId: string,
+    keyId: string,
+    body: BenchAgentTurnRequest,
+    signal: AbortSignal,
+  ) =>
+    request('POST', `/spaces/${spaceId}/apps/${appId}/keys/${keyId}/bench/agent/turn`, {
+      body,
+      schema: BenchAgentTurnResult,
+      signal,
+    }),
 
   memory: (spaceId: string, uri: string) =>
     request('GET', `/spaces/${spaceId}/memories`, { query: { uri }, schema: MemoryView }),
