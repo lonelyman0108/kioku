@@ -58,9 +58,48 @@ export interface PlaintextFinding {
   what: string
 }
 
-const hasVariable = (value: string) => value.includes('${')
+const writesMemory = (tool: string) => tool === 'kioku_create' || tool === 'kioku_update'
 
-function plaintextOf(step: BenchStep): string | null {
+// 敏感级写成变量时展开之前判不出来，按 secret 算：多提示一次没有坏处
+const secretLevel = (sensitivity: unknown) =>
+  sensitivity === 'secret' || (typeof sensitivity === 'string' && sensitivity.includes('${'))
+
+// ${run} 与 ${expires} 一次运行里不变，写法相同就是同一个 URI；capture 的变量展开之前判不出是哪一条
+const hasCapture = (uri: string) => /\$\{(?!(?:run|expires)\})/.test(uri)
+
+// 这个场景里哪些 URI 变成过 secret。只看写法、不看执行结果，宁可多提示：移动可能失败，
+// 删掉之后可能又建了一条，这里都不区分。kioku_move 的两头算同一条记忆，先移动再改成 secret 也算
+function secretUriCheck(steps: readonly BenchStep[]): (uri: string) => boolean {
+  const secret = new Set<string>()
+  const moves: [string, string][] = []
+  for (const step of steps) {
+    if (step.kind !== 'tool') continue
+    const { uri, sensitivity, from, to } = step.arguments
+    if (writesMemory(step.tool) && secretLevel(sensitivity) && typeof uri === 'string') {
+      secret.add(uri)
+    }
+    if (step.tool === 'kioku_move' && typeof from === 'string' && typeof to === 'string') {
+      moves.push([from, to])
+    }
+  }
+  const isSecret = (uri: string) =>
+    secret.has(uri) || (hasCapture(uri) && secret.size > 0) || [...secret].some(hasCapture)
+  // 连续移动时一遍传不完，传到不再变为止
+  let grew = true
+  while (grew) {
+    grew = false
+    for (const [from, to] of moves) {
+      if (isSecret(from) !== isSecret(to)) {
+        secret.add(from)
+        secret.add(to)
+        grew = true
+      }
+    }
+  }
+  return isSecret
+}
+
+function plaintextOf(step: BenchStep, isSecret: (uri: string) => boolean): string | null {
   if (step.kind !== 'tool') return null
   const args = step.arguments
   if (step.tool === 'kioku_credential_save') {
@@ -72,18 +111,19 @@ function plaintextOf(step: BenchStep): string | null {
       .map(([name]) => name)
     return names.length ? `凭据的值（字段 ${names.join('、')}）` : null
   }
-  if (step.tool !== 'kioku_create' && step.tool !== 'kioku_update') return null
-  const { sensitivity, content } = args
-  // 敏感级写成变量时展开之前判不出来，按 secret 算：多提示一次没有坏处
-  const secret =
-    sensitivity === 'secret' || (typeof sensitivity === 'string' && hasVariable(sensitivity))
-  return secret && content !== undefined ? 'secret 级的正文' : null
+  if (!writesMemory(step.tool) || args.content === undefined) return null
+  if (secretLevel(args.sensitivity)) return 'secret 级的正文'
+  return typeof args.uri === 'string' && isSecret(args.uri)
+    ? 'secret 级的正文（这条记忆在别的步骤里是 secret）'
+    : null
 }
 
-// 导出前检测：kioku_credential_save 的 values 与 secret 级写入的 content
+// 导出前检测：kioku_credential_save 的 values 与 secret 级写入的 content。
+// 一条记忆变成过 secret，写它的正文都算，不管写在变成 secret 之前还是之后：文件里留着的是每一步的参数
 export function plaintextIn(scenario: BenchScenario): PlaintextFinding[] {
+  const isSecret = secretUriCheck(scenario.steps)
   return scenario.steps.flatMap((step, index) => {
-    const what = plaintextOf(step)
+    const what = plaintextOf(step, isSecret)
     if (!what) return []
     const label = step.label ?? (step.kind === 'tool' ? step.tool : step.kind)
     return [{ step: index + 1, label, what }]

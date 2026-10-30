@@ -194,16 +194,188 @@ describe('导出前检测明文', () => {
     expect(
       plaintextIn(
         scenario([
-          tool('kioku_create', { uri: 'a://b', content: '普通的' }),
-          tool('kioku_create', { uri: 'a://b', content: '私密', sensitivity: 'private' }),
-          tool('kioku_update', { uri: 'a://b', sensitivity: 'secret' }),
-          tool('kioku_update', { uri: 'a://b', content: '没带敏感级' }),
-          tool('kioku_get', { uri: 'a://b', content: 'x', sensitivity: 'secret' }),
+          tool('kioku_create', { uri: 'a://plain', content: '普通的' }),
+          tool('kioku_create', { uri: 'a://private', content: '私密', sensitivity: 'private' }),
+          tool('kioku_update', { uri: 'a://meta', sensitivity: 'secret' }),
+          tool('kioku_update', { uri: 'a://other', content: '没带敏感级' }),
+          tool('kioku_get', { uri: 'a://got', content: 'x', sensitivity: 'secret' }),
           { kind: 'lifecycle', body: { event: 'prompt.submit', prompt: 'x' } },
           { kind: 'boot' },
         ]),
       ),
     ).toEqual([])
+  })
+
+  describe('按整个场景看：写的时候没带 sensitivity 也可能是 secret', () => {
+    const INFERRED = 'secret 级的正文（这条记忆在别的步骤里是 secret）'
+    const stepsIn = (...steps: BenchScenario['steps']) =>
+      plaintextIn(scenario(steps)).map((finding) => finding.step)
+
+    it('先建成 secret，再改正文：两步都算，只带正文的那步说明原因', () => {
+      expect(
+        plaintextIn(
+          scenario([
+            tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
+            tool('kioku_update', { uri: 'a://b', content: '新的机密' }),
+          ]),
+        ),
+      ).toEqual([
+        { step: 1, label: 'kioku_create', what: 'secret 级的正文' },
+        { step: 2, label: 'kioku_update', what: INFERRED },
+      ])
+    })
+
+    it('先写普通级的正文，后面才改成 secret：前面的也算，文件里留着它', () => {
+      expect(
+        plaintextIn(
+          scenario([
+            tool('kioku_create', { uri: 'a://b', content: '之后才变成机密' }),
+            tool('kioku_update', { uri: 'a://b', sensitivity: 'secret' }),
+          ]),
+        ),
+      ).toEqual([{ step: 1, label: 'kioku_create', what: INFERRED }])
+    })
+
+    it('改成 secret 的同时带正文：前后的写入都算', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://b', content: '之前' }),
+          tool('kioku_update', { uri: 'a://b', content: '同时', sensitivity: 'secret' }),
+          tool('kioku_update', { uri: 'a://b', content: '之后' }),
+        ),
+      ).toEqual([1, 2, 3])
+    })
+
+    it('敏感级写成变量的步骤也算改成了 secret', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://b', content: '正文' }),
+          tool('kioku_update', { uri: 'a://b', sensitivity: '${level}' }),
+        ),
+      ).toEqual([1])
+    })
+
+    it('别的 URI 不受影响；带正文但不写记忆的工具不算把它改成 secret', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://secret', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_update', { uri: 'a://other', content: '普通的' }),
+          tool('kioku_get', { uri: 'a://got', sensitivity: 'secret' }),
+          tool('kioku_create', { uri: 'a://got', content: '普通的' }),
+        ),
+      ).toEqual([1])
+    })
+
+    it('移动跟着走：移过去之后写新 URI 的正文也算', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_move', { from: 'a://b', to: 'a://c' }),
+          tool('kioku_update', { uri: 'a://c', content: '新的机密' }),
+        ),
+      ).toEqual([1, 3])
+    })
+
+    it('移动之后才改成 secret：移动之前写的正文也算', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://b', content: '之后才变成机密' }),
+          tool('kioku_move', { from: 'a://b', to: 'a://c' }),
+          tool('kioku_update', { uri: 'a://c', sensitivity: 'secret' }),
+        ),
+      ).toEqual([1])
+    })
+
+    it('连续移动：不管先后都顺着找得到', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://one', content: '之后才变成机密' }),
+          tool('kioku_move', { from: 'a://one', to: 'a://two' }),
+          tool('kioku_move', { from: 'a://two', to: 'a://three' }),
+          tool('kioku_update', { uri: 'a://three', sensitivity: 'secret' }),
+        ),
+      ).toEqual([1])
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://one', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_move', { from: 'a://one', to: 'a://two' }),
+          tool('kioku_move', { from: 'a://two', to: 'a://three' }),
+          tool('kioku_update', { uri: 'a://three', content: '新的机密' }),
+        ),
+      ).toEqual([1, 4])
+    })
+
+    it('移动的两头都不是 secret 时不算', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://secret', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_create', { uri: 'a://b', content: '普通的' }),
+          tool('kioku_move', { from: 'a://b', to: 'a://c' }),
+          tool('kioku_update', { uri: 'a://c', content: '普通的' }),
+        ),
+      ).toEqual([1])
+    })
+
+    it('${run} 写法相同就是同一条，写法不同就不是', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', {
+            uri: 'a://${run}/b',
+            content: '机密',
+            sensitivity: 'secret',
+          }),
+          tool('kioku_update', { uri: 'a://${run}/b', content: '新的机密' }),
+          tool('kioku_update', { uri: 'a://${run}/c', content: '普通的' }),
+          tool('kioku_update', { uri: 'a://${expires}/c', content: '普通的' }),
+        ),
+      ).toEqual([1, 2])
+    })
+
+    it('URI 带 capture 的变量时判不出是哪一条：有 secret 就按可能是算', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_update', { uri: '${target}', content: '可能是它' }),
+        ),
+      ).toEqual([1, 2])
+      expect(
+        stepsIn(
+          tool('kioku_update', { uri: 'a://${name}/b', sensitivity: 'secret' }),
+          tool('kioku_create', { uri: 'a://c', content: '可能是它' }),
+        ),
+      ).toEqual([2])
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_move', { from: '${target}', to: 'a://c' }),
+          tool('kioku_update', { uri: 'a://c', content: '可能是它' }),
+        ),
+      ).toEqual([1, 3])
+    })
+
+    it('没有 secret 时带变量的 URI 也不算', () => {
+      expect(stepsIn(tool('kioku_update', { uri: '${target}', content: '普通的' }))).toEqual([])
+    })
+
+    it('只看写法、不看执行结果：删掉之后再写同一个 URI 也算，宁可多提示', () => {
+      expect(
+        stepsIn(
+          tool('kioku_create', { uri: 'a://b', content: '机密', sensitivity: 'secret' }),
+          tool('kioku_delete', { uri: 'a://b' }),
+          tool('kioku_create', { uri: 'a://b', content: '普通的' }),
+        ),
+      ).toEqual([1, 3])
+    })
+
+    it('照提示改掉这些步骤之后不再有明文', () => {
+      const before = scenario([
+        tool('kioku_create', { uri: 'a://b', content: '之后才变成机密' }),
+        tool('kioku_update', { uri: 'a://b', sensitivity: 'secret' }),
+        tool('kioku_update', { uri: 'a://b', content: '新的机密' }),
+      ])
+      expect(plaintextIn(before).map((finding) => finding.step)).toEqual([1, 3])
+      expect(plaintextIn(scenario([before.steps[1]!]))).toEqual([])
+    })
   })
 })
 
