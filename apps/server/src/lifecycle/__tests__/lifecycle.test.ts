@@ -124,6 +124,46 @@ describe('每轮输入的召回', () => {
     warn.mockRestore()
   })
 
+  it('session.start 多带字数上限、没展开的节点与放不下的附加块，别的事件不带', async () => {
+    const res = await handleLifecycle(
+      {
+        ...scopeWith(async () => []),
+        boot: async () => ({
+          entries: [{ uri: 'core://agent', layer: 'base', content: '正'.repeat(9_400) }],
+          omitted: ['core://long'],
+        }),
+        recent: async () => [
+          {
+            uri: 'core://recent',
+            priority: 2,
+            disclosure: null,
+            updatedAt: '2026-10-26T08:00:00Z',
+          },
+        ],
+      },
+      'claudecode',
+      { event: 'session.start', project: { dirName: 'kioku' } },
+    )
+    expect(res.session).toEqual({
+      limit: 9_500,
+      omitted: ['core://long'],
+      dropped: ['recent', 'related'],
+    })
+
+    const other = await handleLifecycle(
+      scopeWith(async () => []),
+      'other',
+      { event: 'session.start' },
+    )
+    expect(other.session).toEqual({ limit: null, omitted: [], dropped: [] })
+    const prompt = await handleLifecycle(
+      scopeWith(async () => []),
+      'claudecode',
+      { event: 'prompt.submit', prompt: '规则' },
+    )
+    expect(prompt).not.toHaveProperty('session')
+  })
+
   it('astrbot 会话开始只给指引与展开的启动节点：不提记忆工具，也不附只有 URI 的内容', async () => {
     const recent = vi.fn<RecallScope['recent']>(async () => [
       { uri: 'core://recent', priority: 2, disclosure: null, updatedAt: '2026-10-26T08:00:00Z' },

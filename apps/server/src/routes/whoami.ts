@@ -4,6 +4,7 @@ import { ErrorResponse, WhoAmI } from '@kioku/contracts'
 import { requireKey } from '../auth/middleware'
 import type { Deps } from '../http/env'
 import { jsonResponse, router } from '../http/openapi'
+import { whoamiOf } from '../lifecycle/handlers'
 
 const whoami = createRoute({
   method: 'get',
@@ -20,8 +21,5 @@ const whoami = createRoute({
 export function whoamiRoutes(deps: Deps) {
   const app = router()
   app.use('/whoami', requireKey(deps))
-  return app.openapi(whoami, (c) => {
-    const key = c.get('key')
-    return c.json({ spaceId: key.spaceId, app: key.app, scopes: key.scopes }, 200)
-  })
+  return app.openapi(whoami, (c) => c.json(whoamiOf(c.get('key')), 200))
 }
