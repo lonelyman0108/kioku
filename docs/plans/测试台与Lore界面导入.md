@@ -126,6 +126,7 @@
 | 2026-10-30 | Lore 导出的大小 | 只读事务按导出的列算 `octet_length(to_jsonb(...))` | 72 个节点；默认导出约 10 MB（多数是 dream 日记与事件），导入要的五张表 1.3 MB；`recall_events` 70 万行、1.8 GB，默认不导出；`app_settings` 里有 2 个像密钥的键 |
 | 2026-10-30 | 回滚模式走得通 | scratchpad 脚本，连单独的库，把 `Deps.db` 换成事务代理，走真实的 `handleMcpRequest`、`handleLifecycle`、`resolveKeySession`、`bufferTurn` | 全部走通：带群聊上下文新建对象、并行的会话开始与召回、`tools/list`、新建后读得到、重复新建 409 后事务还能继续、改、移动、搜索、凭据、删除、`turn.end` 进缓冲。回滚后 memories、memory_events、subjects、subject_identities、conversation_turns、recall_events、credentials、credential_events 的行数和 Key 的最后使用时间都回到原样。证实 `kioku_credential` 会原样返回明文，要打码 |
 | 2026-10-30 | 主路径风险 | 只读事务查 Lore 的 `paths` | 线上没有多路径节点，也就没有同一毫秒的别名（决策 23）；2 个节点有正文但没有路径，`readLore` 本来就按路径走，不导入 |
+| 2026-10-30 | 第 2 期审查 | `/code-review high` | 10 条：修 9 条（回滚之后内层事务句柄还能发语句、capture 的值进命令行默认输出、变量绕过 `--allow-writes`、URI 列表扫正文、错误原因留到下一步、旧的 capture 值、失败的写步骤进重放、根事务上留着 `app.space_id`、重放白跑改动查询），1 条只写文档（命令行会记召回事件）；savepoint 累积写进设计的限制。另修 `app.onError` 的日志带 SQL 与参数 |
 | 2026-10-30 | 第 2 期 | `scripts/check.sh`（带集成测试库）；命令行对着真实端口跑；内置场景三种执行方式、四种 Key | 服务端 963 个测试通过；矩阵全部通过或跳过；关键条件做了变异检查。独立核对找出 13 个缺口，已补（文档类由主 agent 写）。留下：没配主密钥的实例上 secret 级 Key 跑内置场景会有步骤报错，写进了设计的限制 |
 | 2026-10-30 | 设计的对抗审查 | 安全、回滚保真度、Lore 导入、需求与可行性四个方向各一名审查者，发现再由独立核查者读代码反驳 | 51 条：成立 26、部分成立 22、驳回 3；核查后 1 条高危（打码写回覆盖 `secret`，决策 9）、16 条中危、31 条低危。已并入设计与本计划；留下的见「以后再做」 |
 
@@ -140,6 +141,9 @@
 - 上传的并发：`/plan` 只靠请求体上限，没有限制每个账号同时上传的个数。现在账号只有一个；成员管理上线时一起加。
 - 成员管理上线时：导入的去重键加上导入者；`importedMemories` 按 `canRead` 过滤，读不到的只算导入过、不给 URI、版本与状态（现在只有一个账号，走不到）。
 - 第一版的表单不追求覆盖全部 JSON Schema，复杂字段用 JSON。
+- `access/subjects.ts`、`embedding/errors.ts`、`extraction/dream.ts`、`jobs/queue.ts`、`routes/binding.ts` 还有 `console.error('…', err)`，`DrizzleQueryError` 会带 SQL 与参数，改成 `logInternalError`。
+- 记忆正文带 NUL 时 `/v1/memories` 回 500（校验不拦，写库报 22021）。`memories.int.test.ts` 的新用例靠它触发真实的写库错误，以后在校验里拦 NUL 时要换触发办法。
+- 连接断开时 postgres.js 的 `scope` 自己发 `rollback to`，不经过句柄，`guard` 拦不住；所有事务都这样，和进程退出的问题一起看。
 - 模拟「宿主实际拿到的文字」（例如 `mcp`、`other` 类型的应用拿到 `return_value`，钩子什么都不注入）与诊断类断言，第一版不做，启动预览和原始响应里看得到。
 
 ## 变更记录
