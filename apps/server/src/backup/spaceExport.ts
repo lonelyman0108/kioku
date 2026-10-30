@@ -1,5 +1,5 @@
 import { AppConfig, SPACE_EXPORT_MAX_BYTES, type RuntimeFamily } from '@kioku/contracts'
-import { and, asc, eq, gt, inArray, isNull, or } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNull, or, sql } from 'drizzle-orm'
 import type { z } from 'zod'
 
 import { consoleAccess } from '../access/access'
@@ -40,8 +40,10 @@ import {
 // 按空间导出：只导出导出人读得到的。导出人是空间 owner（路由检查），按他在管理界面里的权限读：
 // 共享的层（基础、人格、应用、对象与情节层）、人格、应用、对象与按群换人格，加上他自己的画像层与私人层、
 // 他自己的凭据与凭据源，以及他让不让 Dream 整理这两层；别的成员的画像、私人层、凭据与设置都不导出。
+// 记忆按管理读取挑（和历史、已过期列表同一套规则）：已过期的策展记忆与被推翻的事实也带上，有效期原样写出，
+// 导入后照样在「已过期」与对象页的「被推翻的事实」里，能重新生效。
 // 不导出：Key、会话、召回事件与召回统计、对话缓冲、抽取记录、记忆与凭据的历史、向量；
-// 已删除、已过期与被推翻的记忆（只导出现在有效的，和读权限的规则一致）
+// 已删除的记忆（包括过期之后让出了 URI 的），以及到期的会话摘要（按设计到期，不能重新生效）
 
 export interface SpaceExport {
   file: Buffer<ArrayBuffer>
@@ -321,12 +323,14 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     })
     .join('')
 
-  // 记忆按导出人在管理界面里的读权限挑：和列表、历史用的是同一套条件（readableConditions），
-  // 不另写一份规则。人格层的看得到全部人格；secret 按显式读取算，导出人是空间 owner，读得到
-  const readable = readableConditions(consoleAccess('owner', accountId), {
-    personaIds: personaRows.map((p) => p.id),
-    explicit: true,
-  })
+  // 记忆按导出人在管理界面里的管理读取挑：和历史、已过期列表用的是同一套条件（readableConditions），
+  // 不另写一份规则。不看有效期，人格层的看得到全部人格；secret 导出人是空间 owner，读得到。
+  // 在这之外去掉已删除的与到期的会话摘要（只有会话摘要有 expires_at）
+  const readable = and(
+    readableConditions(consoleAccess('owner', accountId), { personaIds: [], management: true }),
+    isNull(memories.deletedAt),
+    or(isNull(memories.expiresAt), gt(memories.expiresAt, sql`now()`)),
+  )
   let after: string | null = null
   for (;;) {
     next()

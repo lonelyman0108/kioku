@@ -227,9 +227,17 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
   }
 
   byId(x.memories, '记忆')
-  // URI 要么是共享的，要么是个人的（导入后都是导入人的），二者不共存，同一归属里不重复
+  // URI 的规则和数据库一样：同一归属里不重复，已过期的也算（唯一索引）；共享的与个人的（导入后都是导入人的）
+  // 不共存，只看现在还有效的（URI 互斥的触发器：已失效或过期的记录不挡别人）。导出带着已过期的记忆，
+  // 共享节点过期之后同一个 URI 上又有了个人节点，这样的两条一起导出、一起导入
+  const now = Date.now()
+  const live = (m: MemoryRecord) =>
+    (m.validTo === null || Date.parse(m.validTo) > now) &&
+    (m.expiresAt === null || Date.parse(m.expiresAt) > now)
   const shared = new Set<string>()
   const mine = new Set<string>()
+  const liveShared = new Set<string>()
+  const liveMine = new Set<string>()
   for (const m of x.memories) {
     const label = `第 ${m.line} 行${m.uri ? `记忆 ${m.uri}` : '抽取的记忆'}`
     if ((m.form === 'curated') !== (m.uri !== null)) throw invalid(`${label} 的形态与 URI 对不上`)
@@ -263,12 +271,14 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
       throw invalid(`${label} 的对象不在文件里`)
     }
     if (!m.uri) continue
-    const bucket = PER_MEMBER_LAYERS.has(m.layer) ? mine : shared
+    const personal = PER_MEMBER_LAYERS.has(m.layer)
+    const bucket = personal ? mine : shared
     if (bucket.has(m.uri)) throw invalid(`${label} 的 URI 重复`)
     bucket.add(m.uri)
+    if (live(m)) (personal ? liveMine : liveShared).add(m.uri)
   }
-  for (const uri of mine) {
-    if (shared.has(uri)) throw invalid(`URI ${uri} 既有共享的记忆，又有个人的记忆`)
+  for (const uri of liveMine) {
+    if (liveShared.has(uri)) throw invalid(`URI ${uri} 既有有效的共享记忆，又有有效的个人记忆`)
   }
 }
 
