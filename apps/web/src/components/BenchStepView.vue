@@ -17,7 +17,7 @@ import {
 } from '../benchResult'
 import { icons } from '../icons'
 
-// 一步的结果：调用台、场景共用。原文一律放在 <pre> 里原样显示，不渲染、不去空白
+// 一步的结果：调用台、场景、模型对话共用。原文一律放在 <pre> 里原样显示，不渲染、不去空白
 const props = withDefaults(
   defineProps<{ step: BenchStepResult; mode: BenchMode; view: StepView; open?: boolean }>(),
   { open: true },

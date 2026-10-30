@@ -3,6 +3,7 @@ import { computed, ref, watchEffect } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import BenchAbandoned from '../components/BenchAbandoned.vue'
+import BenchAgent from '../components/BenchAgent.vue'
 import BenchCalls from '../components/BenchCalls.vue'
 import BenchScenarios from '../components/BenchScenarios.vue'
 import BenchToolbar from '../components/BenchToolbar.vue'
@@ -18,6 +19,7 @@ const router = useRouter()
 const tabs = [
   { label: '调用台', value: 'calls', icon: icons.benchCalls },
   { label: '场景', value: 'scenarios', icon: icons.benchScenarios },
+  { label: '模型对话', value: 'agent', icon: icons.bot },
 ]
 const tab = computed<string>({
   get: () => (tabs.some((t) => t.value === route.query.tab) ? String(route.query.tab) : 'calls'),
@@ -54,6 +56,7 @@ watchEffect(() => {
           <UTabs v-model="tab" :items="tabs" :content="false" class="w-full" />
           <BenchCalls v-show="tab === 'calls'" />
           <BenchScenarios v-show="tab === 'scenarios'" />
+          <BenchAgent v-show="tab === 'agent'" />
         </div>
       </div>
     </template>
