@@ -1,6 +1,7 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
+import { inspect } from 'node:util'
 
 import type {
   BackupObjectList,
@@ -9,7 +10,7 @@ import type {
   SpaceOverview,
 } from '@kioku/contracts'
 import { inArray, sql } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { checkMasterKey, rotateMasterKey } from '../../crypto/rotation'
@@ -18,7 +19,12 @@ import { settings } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { startJobs, type Jobs } from '../../jobs/queue'
 import { ApiKeyLockedError } from '../../settings/endpoint'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  settingsQueryFails,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { startFakeS3Server, type FakeS3Server } from '../../testing/fakeS3Server'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { createBackup } from '../export'
@@ -446,6 +452,78 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect(err.message).not.toContain('的 Key')
     expect(err.message).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
   })
+
+  // 同一个库，换一个主密钥或数据库建的应用，请求一个备份的路由
+  const sendWith = (
+    deps: { db?: Database['db']; masterKey?: Buffer | null },
+    method: string,
+    path: string,
+  ) =>
+    createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey,
+      embedder: staticEmbedderSource(null),
+      jobs,
+      ...deps,
+    }).request(`/v1/settings/backup${path}`, {
+      method,
+      headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' },
+    })
+  const READS_CONFIG = [
+    ['测试连通', 'POST', '/test'],
+    ['立即备份', 'POST', '/run'],
+    ['列出备份', 'GET', '/objects'],
+  ] as const
+
+  it.each(READS_CONFIG)('%s时还没有保存设置：400 并说明', async (_, method, path) => {
+    const res = await send(method, path)
+    expect(res.status).toBe(400)
+    expect(await res.json()).toEqual({ error: '还没有保存备份存储的设置' })
+  })
+
+  it.each(READS_CONFIG)(
+    '%s时 Secret 解不开：400 并说明，不请求存储、不排任务',
+    async (_, method, path) => {
+      await save()
+      const noKey = await sendWith({ masterKey: null }, method, path)
+      expect(noKey.status).toBe(400)
+      expect(await noKey.json()).toEqual({
+        error: '备份存储的 Secret Access Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+      })
+      const mismatch = await sendWith({ masterKey: randomBytes(32) }, method, path)
+      expect(mismatch.status).toBe(400)
+      const { error } = (await mismatch.json()) as { error: string }
+      expect(error).toContain('备份存储的 Secret Access Key 解不开')
+      expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+      expect(s3.requests).toEqual([])
+      expect(queued).toEqual([])
+    },
+  )
+
+  it.each(READS_CONFIG)(
+    '%s时读设置出错：500 与固定文字，响应和日志里都没有 SQL 与参数',
+    async (_, method, path) => {
+      await save()
+      const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+      try {
+        const res = await sendWith({ db: settingsQueryFails(database.db) }, method, path)
+        expect(res.status).toBe(500)
+        expect(await res.json()).toEqual({ error: '服务内部错误' })
+        // 前提：确实是数据库报的错（表不存在），这条用例测的是这种错误
+        expect(logged).toHaveBeenCalledOnce()
+        expect(logged.mock.calls[0]![1]).toMatchObject({ code: '42P01' })
+        const text = inspect(logged.mock.calls, { depth: null })
+        for (const leaked of ['Failed query', 'params:', 'backup']) {
+          expect(text).not.toContain(leaked)
+        }
+      } finally {
+        logged.mockRestore()
+      }
+      expect(s3.requests).toEqual([])
+      expect(queued).toEqual([])
+    },
+  )
 
   it('做备份时数据库出错：最近的错误里只有数据库的说明，没有 SQL 与参数', async () => {
     await save()
