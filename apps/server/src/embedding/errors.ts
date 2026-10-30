@@ -1,6 +1,6 @@
 import { and, eq, sql } from 'drizzle-orm'
 
-import type { Db } from '../db/client'
+import { loggableError, type Db } from '../db/client'
 import { settings } from '../db/schema'
 
 // 最近一次生成向量出错，给实例设置页看（只有实例管理员看得到，可以带接口返回的原文）。
@@ -28,7 +28,7 @@ export async function recordEmbeddingError(db: Db, model: string, message: strin
       .values({ key: KEY, value })
       .onConflictDoUpdate({ target: settings.key, set: { value, updatedAt: new Date() } })
   } catch (err) {
-    console.error('记下向量的错误时出错', err)
+    console.error('记下向量的错误时出错', loggableError(err))
   }
 }
 
@@ -39,7 +39,7 @@ export async function clearEmbeddingError(db: Db, model: string): Promise<void> 
       .delete(settings)
       .where(and(eq(settings.key, KEY), sql`${settings.value}->>'model' = ${model}`))
   } catch (err) {
-    console.error('清掉向量的错误时出错', err)
+    console.error('清掉向量的错误时出错', loggableError(err))
   }
 }
 

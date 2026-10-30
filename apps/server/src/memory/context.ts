@@ -4,7 +4,7 @@ import { and, eq, inArray } from 'drizzle-orm'
 import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
 import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
-import { withSpace, type Tx } from '../db/client'
+import { loggableError, withSpace, type Tx } from '../db/client'
 import { apps, memories } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import type { Deps, KeyPrincipal } from '../http/env'
@@ -79,7 +79,7 @@ export async function semanticFor(
 ): Promise<QueryVector | null> {
   const compute = async () => {
     const embedder: Embedder | null = await deps.embedder.get().catch((err: unknown) => {
-      console.warn('读取嵌入设置失败，本次召回不使用向量', err)
+      console.warn('读取嵌入设置失败，本次召回不使用向量', loggableError(err))
       return null
     })
     return embedQuery(embedder, query)
@@ -212,7 +212,7 @@ export function recallScopeForKey(
           subjectFacts(tx, access, session.subjects),
         )
       } catch (err) {
-        console.warn('读取对象直连的事实失败', err)
+        console.warn('读取对象直连的事实失败', loggableError(err))
         return []
       }
     },

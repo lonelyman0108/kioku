@@ -24,6 +24,7 @@ import {
 import { resolveKeySession } from '../access/session'
 import { enqueueMerged, isLockBusy } from '../access/subjects'
 import { requireKey } from '../auth/middleware'
+import { loggableError } from '../db/client'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 
@@ -178,7 +179,7 @@ export function bindingRoutes(deps: Deps) {
       } finally {
         if (!wrong) {
           await refundAttempt(deps.db, key, platform, sender.id).catch((err: unknown) => {
-            console.error('退回绑定码的输错名额失败', err)
+            console.error('退回绑定码的输错名额失败', loggableError(err))
           })
         }
       }

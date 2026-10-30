@@ -3,7 +3,7 @@ import { AsyncLocalStorage } from 'node:async_hooks'
 import type { BenchInternalDetail } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 
-import { pgErrorCode, type Db, type Tx } from '../db/client'
+import { loggableError, pgErrorCode, type Db, type Tx } from '../db/client'
 import type { Embedder } from '../embedding/provider'
 import type { EmbedderSource } from '../embedding/source'
 import type { Deps } from '../http/env'
@@ -241,7 +241,7 @@ export async function prepareQueryVectors(
 ): Promise<QueryVectors> {
   // 顺带预热：嵌入设置的缓存为空时要读库，事务开着时这要第二条连接
   const embedder = await deps.embedder.get().catch((err: unknown) => {
-    console.warn('读取嵌入设置失败，这次运行不使用向量', err)
+    console.warn('读取嵌入设置失败，这次运行不使用向量', loggableError(err))
     return null
   })
   const vectors = new Map<string, number[]>()

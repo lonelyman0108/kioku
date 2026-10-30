@@ -6,7 +6,7 @@ import { HTTPException } from 'hono/http-exception'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../app'
-import type { Db } from '../db/client'
+import { loggableError, type Db } from '../db/client'
 import { staticEmbedderSource } from '../embedding/source'
 
 // 初始化与登录在读数据库之前先校验请求体，用一个碰不得的数据库就够了：校验没拦下的请求一读库就出错
@@ -132,10 +132,10 @@ describe('请求本身有问题时的回复', () => {
     const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
     expect(await errorOf(await app.request('/v1/test/unavailable'), 500)).toBe('服务内部错误')
     expect(logged).toHaveBeenCalledOnce()
-    expect(logged.mock.calls[0]![1]).toMatchObject({
-      message: 'upstream down',
-      stack: expect.stringContaining('errors.test.ts'),
-    })
+    // 不是数据库的错误原样记下，堆栈还在
+    const err = logged.mock.calls[0]![1] as Error
+    expect(err.message).toBe('upstream down')
+    expect(err.stack).toContain('errors.test.ts')
   })
 
   it('请求体合规时照常往下走；服务端自己出的错照旧是 500「服务内部错误」，记下堆栈', async () => {
@@ -147,7 +147,15 @@ describe('请求本身有问题时的回复', () => {
     )
     expect(await errorOf(res, 500)).toBe('服务内部错误')
     expect(logged).toHaveBeenCalledOnce()
-    expect(logged.mock.calls[0]![1]).toMatchObject({ stack: expect.stringContaining('TypeError') })
+    expect((logged.mock.calls[0]![1] as Error).stack).toContain('TypeError')
+  })
+
+  it('别的错误的 cause 与 code 都留着，不当成数据库的错误', () => {
+    const cause = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+    const err = new TypeError('fetch failed', { cause })
+    expect(loggableError(err)).toBe(err)
+    const noded = Object.assign(new Error('no such file'), { code: 'ENOENT' })
+    expect(loggableError(noded)).toBe(noded)
   })
 
   it('写库出错：500，日志只有 SQLSTATE、约束名与说明，没有 SQL 与参数，也不打堆栈', async () => {

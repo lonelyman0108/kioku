@@ -9,6 +9,7 @@ import type {
   TurnEndEvent,
 } from '@kioku/contracts'
 
+import { loggableError } from '../db/client'
 import { BOOT_LAYERS } from '../memory/filter'
 import { formatBootBlock, formatRecentBlock } from '../recall/boot'
 import { CANDIDATE_ID, formatRecallBlock, type RecordableCandidate } from '../recall/recall'
@@ -129,7 +130,9 @@ export async function sessionStart(
       : Promise.resolve([]),
   ])
   for (const r of [recent, related]) {
-    if (r.status === 'rejected') console.warn('会话开始时附加的记忆读取失败', r.reason)
+    if (r.status === 'rejected') {
+      console.warn('会话开始时附加的记忆读取失败', loggableError(r.reason))
+    }
   }
   const recentList = (recent.status === 'fulfilled' ? recent.value : [])
     .filter((m) => !booted.has(m.uri))
@@ -223,7 +226,7 @@ export async function recallBlock(
     const contents = new Map(candidates.map((c) => [c.uri, byId.get(c[CANDIDATE_ID]) ?? '']))
     return formatRecallBlock(candidates, sessionId, contents)
   } catch (err) {
-    console.warn('读取召回候选的正文失败，只给线索', err)
+    console.warn('读取召回候选的正文失败，只给线索', loggableError(err))
     return formatRecallBlock(candidates, sessionId)
   }
 }

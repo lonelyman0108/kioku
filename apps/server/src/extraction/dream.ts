@@ -13,7 +13,7 @@ import { and, asc, desc, eq, inArray, isNull, ne, notInArray, or, sql, type SQL 
 
 import { maskPlaintextCredentials, mentionsPlaceholder } from '../credential/placeholders'
 import type { MasterKey } from '../crypto/keyring'
-import { withSpace, type Db, type Tx } from '../db/client'
+import { loggableError, withSpace, type Db, type Tx } from '../db/client'
 import {
   dreamMarks,
   dreamRuns,
@@ -193,7 +193,7 @@ export async function dreamSpace(
     const at = progress.scope
     // 汇总写下之后、又不在哪个范围里：不再记一条范围为空的（那就成了第二条汇总），只记日志
     if (progress.summarized && !at) {
-      console.error('Dream 整理出错', err)
+      console.error('Dream 整理出错', loggableError(err))
       return { outcome: 'failed', reason: null }
     }
     try {
@@ -207,7 +207,7 @@ export async function dreamSpace(
         ),
       )
     } catch (recordErr) {
-      console.error('Dream 整理出错', err)
+      console.error('Dream 整理出错', loggableError(err))
       console.error('Dream 的运行记录也写不进去', recordErr)
       throw err
     }
