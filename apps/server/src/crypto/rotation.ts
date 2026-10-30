@@ -212,6 +212,9 @@ export async function rotateMasterKey(
       for (;;) {
         const cursor: string | null = after
         const rows: { id: string }[] = await withSpace(db, spaceId, async (tx) => {
+          // 只改包装与标识，都不是键列，锁用 FOR NO KEY UPDATE：别的表插入指向这一行的记录（记忆的事件、关键词、
+          // 向量，凭据的事件）时外键检查加的 KEY SHARE 锁和它不冲突，不会被当成正在改而跳过；
+          // 正在改这一行或锁住了要改的事务（UPDATE、DELETE、FOR UPDATE 等）照样和它冲突，这次跳过、之后再换
           const batch = await tx
             .select({ id: table.id, wrappedKey: table.wrappedKey })
             .from(table)
@@ -224,7 +227,7 @@ export async function rotateMasterKey(
             )
             .orderBy(asc(table.id))
             .limit(BATCH)
-            .for('update', { skipLocked: true })
+            .for('no key update', { skipLocked: true })
           for (const row of batch) {
             let wrappedKey: Buffer
             try {
