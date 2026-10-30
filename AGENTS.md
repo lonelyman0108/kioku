@@ -86,7 +86,7 @@
 - Lore 导入写入的 = 基准计划 − 勾掉的：`planImport` 带 `excludeUris` 时先算一次不勾的计划，勾掉的节点写到的 URI 还占着。只在循环里 continue 的话，映射到同一 URI 的下一个节点会顶上来，而它在看过的计划里没有写入目标，看不到也勾不了。
 - Lore 导入的路径上不能让驱动的错误走到 `app.onError`：`DrizzleQueryError` 带 SQL 与参数，也就是节点正文，会进日志。22、23 类在 `importer/lore.ts` 里算单条失败，别的在路由里 catch，日志只记 SQLSTATE。
 - Lore 文件旧不旧的基准是导入、同步事件里 `loreExportedAt` 的最大值（没有的是命令行写的，取事件时间）；确认写入旧文件不会降低这个时间。什么都没写的导入不产生事件，也不推进它。原因：同步只看是否相等，文件比已写入的数据旧时会把正文改回去，指纹拦不住。
-- Lore 导入的界面：计划显示后表单里不能有 `type=submit` 的按钮，回车的隐式提交会点默认按钮，没看完、没勾 secret 的节点就以明文写进去；`loreBackup.test.ts` 解析模板核对。界面按勾选算的写入（`loreBackup.ts` 的 `selectionEffects`、`staleNotice`）要和服务端按勾选重算的计划一致，它靠同步项的 `source` 等于节点主 URI、`uri` 等于目标 URI 对到目标，改这两项要同步改它。
+- Lore 导入的界面：计划显示后表单里不能有 `type=submit` 的按钮，回车的隐式提交会点默认按钮，没看完、没勾 secret 的节点就以明文写进去；`loreBackup.test.ts` 解析模板核对。界面按勾选算的写入（`loreBackup.ts` 的 `selectionEffects`、`staleNotice`）要和服务端按勾选重算的计划一致，它靠同步项的 `source` 等于节点主 URI、`uri` 等于目标 URI 对到目标，应用映射也和 `planImport` 结尾的过滤同一个规则，改这些要同步改它。
 - 按长度截断文字要防切开代理对：落单的代理项写进 text 不报错，被悄悄换成 U+FFFD，之后和原文比永远不等（同步每次都算要更新）；写进 jsonb 才报错。
 - `BOOT_ELIGIBLE` 有一份 JS 版（`memory/filter.ts` 的 `bootEligible`），导入计划标「进启动上下文」用它。改一边必须改另一边，`loreImport.int.test.ts` 拿写进去的行比对。
 - 硬删除记忆时 Lore 的导入事件（出处 `source` 为 `lore`）要留下（`memory_id` 置空、快照只留 domain 与 path），别的事件一起删，包括按空间导入的导入事件。原因：Lore 导入工具按导入事件去重，记忆整行不在时也认作「导入过、后来删掉了」；删掉这些事件，下次同步会把删过的节点写回。保留期的删除条件都在 `jobs/retention.ts` 的 `retentionRules`，改了要对照 `retention.int.test.ts`。
