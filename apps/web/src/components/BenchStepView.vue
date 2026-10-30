@@ -8,6 +8,7 @@ import {
   errorNote,
   internalErrorText,
   sessionNotes,
+  shownAssertions,
   stepBadge,
   stepKindLabels,
   turnNotBuffered,
@@ -35,6 +36,7 @@ const meta = computed(() => {
   ].join(' · ')
 })
 const error = computed(() => errorNote(props.step, props.view))
+const assertions = computed(() => shownAssertions(props.step, props.view))
 const session = computed(() =>
   props.step.session ? sessionNotes(props.step.session, props.step.text) : null,
 )
@@ -77,9 +79,8 @@ const PRE_CLASS =
         {{ error.text }}
       </p>
 
-      <!-- 权限探测不判通过与失败，只有还没发出去就失败的步骤要靠它说明原因 -->
-      <ul v-if="step.assertions.length && (view !== 'probe' || !responded)" class="space-y-1">
-        <li v-for="(a, i) in step.assertions" :key="i" class="flex items-start gap-1.5 text-xs">
+      <ul v-if="assertions.length" class="space-y-1">
+        <li v-for="(a, i) in assertions" :key="i" class="flex items-start gap-1.5 text-xs">
           <UIcon
             :name="a.ok ? icons.passed : icons.failed"
             class="mt-0.5 size-3.5 shrink-0"

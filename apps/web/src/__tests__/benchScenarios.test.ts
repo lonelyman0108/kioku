@@ -8,6 +8,7 @@ import {
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
+import { notExecuted, shownAssertions, stepBadge } from '../benchResult'
 import {
   formatScenario,
   parseScenario,
@@ -396,6 +397,45 @@ describe('真实模式确认里的写步骤个数', () => {
       ),
     ).toBe(4)
   })
+
+  it('event、chatType 写成变量时展开之前判不出来，算可能写库', () => {
+    const count = (...steps: BenchScenario['steps']) => writingSteps(scenario(steps))
+    expect(count({ kind: 'lifecycle', body: { event: '${event}' } })).toBe(1)
+    expect(count({ kind: 'lifecycle', body: { event: 'turn.${what}' } })).toBe(1)
+    expect(
+      count({
+        kind: 'lifecycle',
+        body: { event: 'prompt.submit', prompt: 'x', context: { chatType: '${chat}' } },
+      }),
+    ).toBe(1)
+    expect(count({ kind: 'recall', body: { query: 'x', context: { chatType: '${chat}' } } })).toBe(
+      1,
+    )
+  })
+
+  it('别的地方的变量不算：写库与否只看 event 与 chatType', () => {
+    const count = (...steps: BenchScenario['steps']) => writingSteps(scenario(steps))
+    expect(
+      count(
+        { kind: 'lifecycle', body: { event: 'prompt.submit', prompt: '${run}' } },
+        { kind: 'lifecycle', body: { event: 'session.start', sessionId: '${run}' } },
+        { kind: 'recall', body: { query: '${run}' } },
+        // /recall 没有 event：写成变量也不会变成 turn.end
+        { kind: 'recall', body: { query: 'x', event: '${event}' } },
+        { kind: 'recall', body: { query: 'x', context: { chatType: 'cron' } } },
+        tool('kioku_get', { uri: '${uri}' }),
+        { kind: 'lifecycle', body: '${body}' },
+        { kind: 'lifecycle', body: null },
+      ),
+    ).toBe(0)
+  })
+
+  it('字面值的判定不变：和命令行是同一个', () => {
+    const count = (...steps: BenchScenario['steps']) => writingSteps(scenario(steps))
+    expect(count({ kind: 'lifecycle', body: { event: 'turn.end' } })).toBe(1)
+    expect(count(tool('kioku_credential', { identifier: '${name}' }))).toBe(1)
+    expect(count(tool('kioku_credential'))).toBe(0)
+  })
 })
 
 describe('运行结果怎么说', () => {
@@ -443,6 +483,129 @@ describe('运行结果怎么说', () => {
     expect(summary.color).toBe('warning')
     expect(summary.title).toContain('没有执行 1 步')
     expect(summary.title).toContain('内部错误 1 步')
+  })
+
+  describe('权限探测里没发出去、capture 没取到的步骤', () => {
+    // 服务端的 runner 给这种步骤的样子：没有响应，失败，原因在断言里
+    const unsent = step({
+      status: 'failed',
+      raw: null,
+      assertions: [{ message: '变量 ${version} 没有取到', ok: false }],
+    })
+    // 工具没报错，结果里却没有 capture 要的内容
+    const uncaptured = step({
+      status: 'failed',
+      assertions: [{ message: 'capture version：结果里没有「版本: 」', ok: false }],
+    })
+    // 工具报错（被拒绝）：capture 本来就取不到，这是探测的结果
+    const refused = step({
+      status: 'failed',
+      isError: true,
+      assertions: [{ message: 'capture version：结果里没有「版本: 」', ok: false }],
+    })
+    const titleOf = (...steps: BenchStepResult[]) =>
+      runSummary(result({ failed: steps.length }, { steps }), 'probe')
+
+    it('依赖的变量没有取到：计入「没有执行」，和徽章说的一样', () => {
+      const summary = titleOf(unsent)
+      expect(summary.color).toBe('warning')
+      expect(summary.title).toContain('没有执行 1 步')
+      expect(stepBadge(unsent, 'probe').label).toBe('没有执行')
+      expect(notExecuted(unsent)).toBe(true)
+    })
+
+    it('和服务端记成 notRun 的加在一起算', () => {
+      const summary = runSummary(
+        result(
+          { failed: 1, notRun: 1 },
+          { steps: [unsent, step({ status: 'notRun', raw: null })] },
+        ),
+        'probe',
+      )
+      expect(summary.title).toContain('没有执行 2 步')
+    })
+
+    it('工具没报错、capture 没取到：说出来', () => {
+      const summary = titleOf(uncaptured)
+      expect(summary.color).toBe('warning')
+      expect(summary.title).toContain('capture 没取到 1 步')
+      expect(summary.title).not.toContain('没有执行')
+    })
+
+    it('工具报错（被拒绝）是正常的结果：不算', () => {
+      const summary = titleOf(refused, step({ status: 'failed', isError: true }))
+      expect(summary.color).toBe('neutral')
+      expect(summary.title).toMatch(/共 2 步$/)
+    })
+
+    it('expect 不成立不算：权限探测不判通过与失败', () => {
+      const summary = titleOf(
+        step({ status: 'failed', assertions: [{ message: '应包含「x」', ok: false }] }),
+      )
+      expect(summary.color).toBe('neutral')
+      expect(summary.title).toMatch(/共 1 步$/)
+    })
+
+    it('内部错误不重复算成没有执行', () => {
+      const summary = titleOf(step({ status: 'failed', internalError: true, raw: null }))
+      expect(summary.title).toContain('内部错误 1 步')
+      expect(summary.title).not.toContain('没有执行')
+    })
+
+    it('默认打开，看得到原因', () => {
+      expect(stepOpen(unsent, 'probe')).toBe(true)
+      expect(shownAssertions(unsent, 'probe')).toEqual(unsent.assertions)
+      expect(stepOpen(uncaptured, 'probe')).toBe(true)
+      expect(shownAssertions(uncaptured, 'probe')).toEqual(uncaptured.assertions)
+    })
+
+    it('正常的探测结果照旧不打开，也不列断言', () => {
+      expect(stepOpen(refused, 'probe')).toBe(false)
+      expect(shownAssertions(refused, 'probe')).toEqual([])
+      const expected = step({
+        status: 'failed',
+        assertions: [
+          { message: '应包含「x」', ok: false },
+          { message: '不应报错', ok: true },
+        ],
+      })
+      expect(stepOpen(expected, 'probe')).toBe(false)
+      expect(shownAssertions(expected, 'probe')).toEqual([])
+    })
+
+    it('capture 没取到的步骤只列这一条：别的断言照旧不判', () => {
+      const mixed = step({
+        status: 'failed',
+        assertions: [
+          { message: '应包含「x」', ok: false },
+          { message: 'capture version：结果里没有「版本: 」', ok: false },
+        ],
+      })
+      expect(shownAssertions(mixed, 'probe')).toEqual([
+        { message: 'capture version：结果里没有「版本: 」', ok: false },
+      ])
+    })
+
+    it('按断言看的场景不受影响：全部列出', () => {
+      expect(shownAssertions(uncaptured, 'judged')).toEqual(uncaptured.assertions)
+      expect(shownAssertions(refused, 'judged')).toEqual(refused.assertions)
+      expect(shownAssertions(refused, 'call')).toEqual(refused.assertions)
+    })
+
+    it('摘要里的「没有执行」和徽章对得上', () => {
+      const steps = [
+        unsent,
+        uncaptured,
+        refused,
+        step(),
+        step({ status: 'notRun', raw: null }),
+        step({ status: 'skipped', raw: null }),
+        step({ status: 'failed', internalError: true, raw: null }),
+      ]
+      for (const s of steps) {
+        expect(notExecuted(s)).toBe(stepBadge(s, 'probe').label === '没有执行')
+      }
+    })
   })
 
   it('重放分叉', () => {

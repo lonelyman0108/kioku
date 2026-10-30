@@ -6,7 +6,7 @@ import {
   type BenchStepResult,
 } from '@kioku/contracts'
 
-import type { StepView } from './benchResult'
+import { captureMissed, notExecuted, type StepView } from './benchResult'
 
 // 测试台的场景：JSON 的校验与导出、预设按运行时筛、导出前检测明文、运行结果怎么说
 
@@ -60,9 +60,10 @@ export interface PlaintextFinding {
 
 const writesMemory = (tool: string) => tool === 'kioku_create' || tool === 'kioku_update'
 
+const hasVariable = (value: unknown) => typeof value === 'string' && value.includes('${')
+
 // 敏感级写成变量时展开之前判不出来，按 secret 算：多提示一次没有坏处
-const secretLevel = (sensitivity: unknown) =>
-  sensitivity === 'secret' || (typeof sensitivity === 'string' && sensitivity.includes('${'))
+const secretLevel = (sensitivity: unknown) => sensitivity === 'secret' || hasVariable(sensitivity)
 
 // ${run} 与 ${expires} 一次运行里不变，写法相同就是同一个 URI；capture 的变量展开之前判不出是哪一条
 const hasCapture = (uri: string) => /\$\{(?!(?:run|expires)\})/.test(uri)
@@ -130,8 +131,20 @@ export function plaintextIn(scenario: BenchScenario): PlaintextFinding[] {
   })
 }
 
-// 真实模式下运行之前，说清楚有几步可能写库（判定和命令行的 --allow-writes 是同一个）
-export const writingSteps = (scenario: BenchScenario) => scenario.steps.filter(mayWrite).length
+// mayWrite 只看字面值：event、chatType 写成变量时展开之前判不出来。命令行执行时按展开后的步骤再判一次，
+// 这个确认框是界面上唯一的一次，从严算（event 可能是 turn.end，chatType 可能是私聊、群聊、频道）
+function mayWriteOnceExpanded(step: BenchStep): boolean {
+  if (mayWrite(step)) return true
+  if (step.kind !== 'lifecycle' && step.kind !== 'recall') return false
+  const body = step.body as { event?: unknown; context?: { chatType?: unknown } } | null | undefined
+  return (
+    (step.kind === 'lifecycle' && hasVariable(body?.event)) || hasVariable(body?.context?.chatType)
+  )
+}
+
+// 真实模式下运行之前，说清楚有几步可能写库
+export const writingSteps = (scenario: BenchScenario) =>
+  scenario.steps.filter(mayWriteOnceExpanded).length
 
 // 场景这一页显示的那次运行
 export interface ScenarioOutcome {
@@ -143,10 +156,11 @@ export interface ScenarioOutcome {
 export const scenarioView = (scenario: Pick<BenchScenario, 'probe'>): StepView =>
   scenario.probe ? 'probe' : 'judged'
 
-// 打开哪些步骤：要看的是出了问题的那几步。跳过与没有执行的只有一行原因，打开也不占地方
+// 打开哪些步骤：要看的是出了问题的那几步。跳过与没有执行的只有一行原因，打开也不占地方。
+// 权限探测不判通过与失败，工具报错（被拒绝）是正常的结果，不用打开
 export function stepOpen(step: BenchStepResult, view: StepView): boolean {
-  if (step.status === 'skipped' || step.status === 'notRun') return true
-  return view === 'probe' ? step.internalError : step.status === 'failed'
+  if (step.status === 'skipped' || notExecuted(step)) return true
+  return view === 'probe' ? step.internalError || captureMissed(step) : step.status === 'failed'
 }
 
 export interface RunSummary {
@@ -164,15 +178,20 @@ export function runSummary(result: BenchRunResult, view: StepView): RunSummary {
     }
   }
   if (view === 'probe') {
-    const internal = result.steps.filter((s) => s.internalError).length
+    const count = (matches: (step: BenchStepResult) => boolean) =>
+      result.steps.filter(matches).length
+    const internal = count((s) => s.internalError)
+    const unsent = count(notExecuted)
+    const uncaptured = count(captureMissed)
     const notes = [
       `共 ${result.steps.length} 步`,
       ...(skipped ? [`跳过 ${skipped} 步`] : []),
-      ...(notRun ? [`没有执行 ${notRun} 步`] : []),
+      ...(unsent ? [`没有执行 ${unsent} 步`] : []),
+      ...(uncaptured ? [`capture 没取到 ${uncaptured} 步`] : []),
       ...(internal ? [`内部错误 ${internal} 步`] : []),
     ]
     return {
-      color: notRun || internal ? 'warning' : 'neutral',
+      color: unsent || uncaptured || internal ? 'warning' : 'neutral',
       title: `只列结果，不判通过与失败：每把 Key 的正确结果都不同。${notes.join('，')}`,
     }
   }

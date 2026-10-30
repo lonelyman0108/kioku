@@ -650,13 +650,9 @@ describe('一步的结果', () => {
     expect(list).toBeDefined()
   })
 
-  it('权限探测不列断言的对错，只有还没发出去就失败的步骤靠它说明原因', () => {
-    const list = view.elements.find((el) =>
-      el.props?.some((p) => p.name === 'if' && p.exp?.content.includes('step.assertions.length')),
-    )
-    expect(list?.props?.find((p) => p.name === 'if')?.exp?.content).toBe(
-      "step.assertions.length && (view !== 'probe' || !responded)",
-    )
+  it('列哪些断言按看法算：权限探测只说明没发出去、capture 没取到的原因', () => {
+    expect(view.script).toContain('shownAssertions(props.step, props.view)')
+    expect(withIf(view.elements, 'assertions.length').tag).toBe('ul')
   })
 
   it('折叠时也看得到状态、步骤名、耗时与状态码', () => {
@@ -683,7 +679,7 @@ describe('一步的结果', () => {
   })
 
   it('断言：每一条的说法与对错', () => {
-    const assertion = withFor(view.elements, '(a, i) in step.assertions')
+    const assertion = withFor(view.elements, '(a, i) in assertions')
     expect(shownIn(assertion)).toEqual(['a.message'])
     const icon = withTag(walk(assertion), 'UIcon')
     expect(bound(icon, 'name')).toBe('a.ok ? icons.passed : icons.failed')

@@ -1,4 +1,5 @@
 import type {
+  BenchAssertion,
   BenchChanges,
   BenchInternalDetail,
   BenchSessionStart,
@@ -42,6 +43,25 @@ export function stepBadge(step: BenchStepResult, view: StepView): StepBadge {
   return step.isError
     ? { label: '报错', color: quiet ? 'neutral' : 'error', icon: icons.error }
     : { label: quiet ? '有结果' : '成功', color: quiet ? 'neutral' : 'success', icon: icons.passed }
+}
+
+// 这一步没有发出去，徽章显示「没有执行」：服务端记成 notRun 的，以及还没发出去就算失败的（依赖的变量没有取到）
+export const notExecuted = (step: BenchStepResult) =>
+  step.status === 'notRun' ||
+  (step.status !== 'skipped' && !step.internalError && step.raw === null)
+
+// capture 取不到的说明是服务端的 runner 写的，以 capture 开头；expect 的断言都不是这样开头
+const missedCapture = (assertion: BenchAssertion) =>
+  !assertion.ok && assertion.message.startsWith('capture ')
+
+// 工具没报错、结果里却取不到 capture 要的内容。工具报错（被拒绝）时本来就取不到，那是探测的结果
+export const captureMissed = (step: BenchStepResult) =>
+  step.raw !== null && !step.isError && !step.internalError && step.assertions.some(missedCapture)
+
+// 这一步列出哪些断言。权限探测不列断言的对错，只说明步骤为什么没有发出去、capture 为什么没取到
+export function shownAssertions(step: BenchStepResult, view: StepView): BenchAssertion[] {
+  if (view !== 'probe' || step.raw === null) return step.assertions
+  return captureMissed(step) ? step.assertions.filter(missedCapture) : []
 }
 
 export const stepKindLabels: Record<BenchStepResult['kind'], string> = {
