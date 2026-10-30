@@ -4,7 +4,7 @@ import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import { connect, withSpace, type Database, type Db } from '../../db/client'
+import { connect, withSpace, type Database, type Db, type Tx } from '../../db/client'
 import { subjects } from '../../db/schema'
 import type { Embedder } from '../../embedding/provider'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -198,23 +198,95 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     await expect(leaked.db.transaction(async () => {})).rejects.toThrow('已经结束')
   })
 
-  it('外层事务先失败（连接断开时就这样）、回调还在跑：先置状态，回调不能再发语句', async () => {
-    const disconnected = deferred()
-    const callback = deferred()
-    const after = deferred<{ reason: unknown; error: unknown }>()
-    // postgres.js 的 begin 把回调和连接关闭放在 Promise.race 里：连接断开时外层立刻 reject，回调不会停
-    const flaky = new Proxy(database.db, {
+  // 试着用一下句柄，返回拒绝的原因；发出去了就返回固定文字
+  const attempt = async (use: () => unknown) => {
+    try {
+      await use()
+      return '发出去了'
+    } catch (err) {
+      return String(err)
+    }
+  }
+  const SOMEONE = { kind: 'person', displayName: '不该写' } as const
+
+  it('运行关闭之后内层的事务句柄也不能再用：任何属性访问都拒绝，里面再开的事务也一样', async () => {
+    const outcomes = await inRollback(deps, NO_VECTORS, async (scoped, run) =>
+      withSpace(scoped.db, ws.spaceId, (tx) =>
+        tx.transaction((inner) =>
+          inner.transaction(async (deep) => {
+            // 关闭之前都照常能用，隔着几层也一样
+            await tx.execute(sql`select 1`)
+            await deep.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })
+            await expect(deep.select().from(subjects)).resolves.toHaveLength(1)
+
+            run.close()
+            const handles: Tx[] = [tx, inner, deep]
+            return Promise.all(
+              handles.flatMap((handle) => [
+                attempt(() => handle.execute(sql`select 1`)),
+                attempt(() => handle.select().from(subjects)),
+                attempt(() => handle.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })),
+                attempt(() => handle.transaction(async () => {})),
+                attempt(() => withSpace(handle as unknown as Db, ws.spaceId, async () => {})),
+              ]),
+            )
+          }),
+        ),
+      ),
+    )
+    expect(outcomes).toHaveLength(15)
+    for (const outcome of outcomes) expect(outcome).toContain('已经结束')
+    expect(await subjectNames(database.db)).toEqual([])
+  })
+
+  // postgres.js 的 begin 把回调和连接关闭放在 Promise.race 里：连接断开时外层立刻 reject，回调不会停
+  const flakyDb = (disconnected: Promise<void>) =>
+    new Proxy(database.db, {
       get(target, prop) {
         if (prop !== 'transaction') return Reflect.get(target, prop)
         return (fn: Parameters<Db['transaction']>[0]) =>
           Promise.race([
             target.transaction(fn),
-            disconnected.promise.then(() => {
+            disconnected.then(() => {
               throw new Error('连接断开了')
             }),
           ])
       },
     })
+
+  it('外层事务先失败时回调已经在事务里：内层的 tx 也不能再发语句', async () => {
+    const disconnected = deferred()
+    const entered = deferred()
+    const callback = deferred()
+    const after = deferred<string[]>()
+    const running = inRollback(
+      { ...deps, db: flakyDb(disconnected.promise) },
+      NO_VECTORS,
+      (scoped) =>
+        withSpace(scoped.db, ws.spaceId, async (tx) => {
+          entered.resolve()
+          await callback.promise
+          after.resolve([
+            await attempt(() => tx.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })),
+            await attempt(() => tx.transaction(async () => {})),
+          ])
+        }),
+    )
+    await entered.promise
+    disconnected.resolve()
+    await expect(running).rejects.toThrow('连接断开了')
+    callback.resolve()
+    for (const outcome of await after.promise) expect(outcome).toContain('已经结束')
+    // 回调抛出 Rolled，底下的事务真的回滚，连接也还回去了
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    expect(await subjectNames(database.db)).toEqual([])
+  })
+
+  it('外层事务先失败（连接断开时就这样）、回调还在跑：先置状态，回调不能再发语句', async () => {
+    const disconnected = deferred()
+    const callback = deferred()
+    const after = deferred<{ reason: unknown; error: unknown }>()
+    const flaky = flakyDb(disconnected.promise)
     const running = inRollback({ ...deps, db: flaky }, NO_VECTORS, async (scoped, run) => {
       await callback.promise
       const reason = await run.stopReason()

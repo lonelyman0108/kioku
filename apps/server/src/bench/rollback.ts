@@ -58,7 +58,7 @@ const TIMEOUT_CODES: Record<string, BenchInternalDetail> = {
   '57014': 'statement_timeout',
 }
 
-// 运行已经结束，或者超过了总时长：代理不再开始新的事务
+// 运行已经结束，或者超过了总时长：代理不再开始新的事务；运行结束之后事务句柄也不能再用
 class RunStopped extends Error {
   constructor(readonly detail: BenchInternalDetail) {
     super(detail === 'run_timeout' ? '测试台的运行超过了总时长' : '测试台的运行已经结束')
@@ -80,17 +80,18 @@ export class RollbackRun {
 
   // 把根事务包成 Db：顶层的 transaction 排队，回调里的直接嵌套（否则自己等自己）；别的方法落在根事务上
   attach(tx: Tx): Db {
-    this.root = tx
+    const root = this.guard(tx)
+    this.root = root
     this.deadline = Date.now() + this.limits.runMs
     const holding = new AsyncLocalStorage<true>()
     let tail: Promise<unknown> = Promise.resolve()
     const transaction = (fn: (inner: Tx) => Promise<unknown>) => {
       if (this.closed) return Promise.reject(new RunStopped('aborted'))
-      if (holding.getStore()) return tx.transaction(fn)
+      if (holding.getStore()) return root.transaction(fn)
       const turn = tail
         .then(() => {
           this.assertRunning()
-          return holding.run(true, () => tx.transaction(fn))
+          return holding.run(true, () => root.transaction(fn))
         })
         .catch((err: unknown) => {
           this.note(err)
@@ -99,14 +100,25 @@ export class RollbackRun {
       tail = turn.catch(() => {})
       return turn
     }
+    return new Proxy(root, {
+      get: (target, prop) => (prop === 'transaction' ? transaction : Reflect.get(target, prop)),
+    }) as unknown as Db
+  }
+
+  // 事务句柄：运行结束之后任何属性访问都抛错，里面再开的事务也一样包上。连接断开时外层事务先 reject、
+  // 回调还在跑，而句柄绑死连接对象，它重连之后可能已经被别的请求占用，这时发出去的语句会落进别人的事务
+  private guard(tx: Tx): Tx {
     return new Proxy(tx, {
       get: (target, prop) => {
-        if (prop === 'transaction') return transaction
         if (this.closed) throw new RunStopped('aborted')
+        if (prop === 'transaction') {
+          return (fn: (inner: Tx) => Promise<unknown>) =>
+            target.transaction((inner) => fn(this.guard(inner)))
+        }
         const value = Reflect.get(target, prop) as unknown
         return typeof value === 'function' ? value.bind(target) : value
       },
-    }) as unknown as Db
+    })
   }
 
   private assertRunning(): void {
