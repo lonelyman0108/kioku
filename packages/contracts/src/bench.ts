@@ -231,7 +231,8 @@ export const BenchStepStatus = z.enum(BENCH_STEP_STATUSES)
 export type BenchStepStatus = z.infer<typeof BenchStepStatus>
 
 export const BenchAssertion = z.object({
-  // 这条断言说的是什么，例如「应包含 x」；不带这一步的实际结果，命令行默认只打印它
+  // 这条断言说的是什么，例如「应包含 x」；不带这一步的实际结果，capture 的变量也不展开（保留 ${x} 字样），
+  // 命令行默认只打印它
   message: z.string(),
   ok: z.boolean(),
 })
@@ -248,6 +249,7 @@ export type BenchSessionStart = z.infer<typeof BenchSessionStart>
 
 export const BenchStepResult = z.object({
   index: z.number().int(),
+  // capture 的变量不展开，命令行默认打印它
   label: z.string(),
   kind: z.enum(['tool', 'lifecycle', 'recall', 'boot', 'whoami']),
   status: BenchStepStatus,

@@ -189,6 +189,43 @@ describe('断言', () => {
     expect(step.assertions.filter((a) => a.ok)).toHaveLength(5)
   })
 
+  it('说明与 label 用展开之前的模板：capture 取到的值不进这两处，比较时照常展开', async () => {
+    const VALUE = 'hunter2-value'
+    const { executor, seen } = fakeExecutor((_, i) =>
+      textOutcome(i === 0 ? `值：${VALUE}` : `URI: a://b\n\n回显 ${VALUE}`),
+    )
+    const result = await run(
+      executor,
+      steps(
+        { kind: 'tool', tool: 'kioku_credential', capture: { pw: '值：' } },
+        {
+          kind: 'tool',
+          tool: 'kioku_get',
+          label: '用 ${pw} 登录 ${run}',
+          arguments: { uri: 'a://${pw}' },
+          expect: {
+            contains: ['没有 ${pw}', '回显 ${pw}'],
+            notContains: ['${pw}', '${run}'],
+            uris: ['${pw}://x'],
+            notUris: ['${pw}://x'],
+          },
+        },
+      ),
+    )
+    const step = result.steps[1]!
+    expect(seen[1]).toMatchObject({ arguments: { uri: `a://${VALUE}` } })
+    expect(step.label).toBe('用 ${pw} 登录 abc123')
+    expect(step.assertions).toEqual([
+      { message: '应包含「没有 ${pw}」', ok: false },
+      { message: '应包含「回显 ${pw}」', ok: true },
+      { message: '不应包含「${pw}」', ok: false },
+      { message: '不应包含「abc123」', ok: true },
+      { message: 'URI 列表应有 ${pw}://x', ok: false },
+      { message: 'URI 列表不应有 ${pw}://x', ok: true },
+    ])
+    expect(JSON.stringify([step.label, step.assertions, step.reason])).not.toContain(VALUE)
+  })
+
   it('kioku_boot 分不清 URI 列表：uris 与 notUris 断言都明确失败，不算没有', async () => {
     const { executor } = fakeExecutor(() =>
       toolOutcome('kioku_boot', { content: [{ type: 'text', text: '<kioku-boot>\n## a://b' }] }),

@@ -113,11 +113,13 @@ const INTERNAL_MESSAGES: Record<BenchInternalDetail, string> = {
   aborted: '服务内部错误：根事务已中止',
 }
 
-// 断言只写它说的是什么，不带实际结果：命令行默认只打印这些，实际结果可能有明文
+// 断言只写它说的是什么，不带实际结果：命令行默认只打印这些，实际结果可能有明文。
+// 比较用展开之后的值，说明文字经过 shown，capture 的变量不展开：它可能取到凭据的值
 function check(
   expected: BenchExpect | undefined,
   outcome: StepOutcome,
   vars: ReadonlyMap<string, string>,
+  shown: (template: string) => string,
 ): BenchAssertion[] {
   // 内部错误一律算失败，不算「按预期报错」
   if (outcome.internalError) {
@@ -127,8 +129,11 @@ function check(
     return [{ message, ok: false }]
   }
   if (!expected) return []
-  const list = (values: string[] | undefined) =>
-    (expand(values ?? [], vars) as unknown[]).map(String)
+  const list = (templates: string[] | undefined) =>
+    (templates ?? []).map((template) => ({
+      value: String(expand(template, vars)),
+      text: shown(template),
+    }))
   const onUris = (message: string, ok: (uris: string[]) => boolean): BenchAssertion =>
     outcome.uris
       ? { message, ok: ok(outcome.uris) }
@@ -140,17 +145,17 @@ function check(
       ok: outcome.isError === expected.error,
     })
   }
-  for (const text of list(expected.contains)) {
-    assertions.push({ message: `应包含「${text}」`, ok: outcome.text.includes(text) })
+  for (const { value, text } of list(expected.contains)) {
+    assertions.push({ message: `应包含「${text}」`, ok: outcome.text.includes(value) })
   }
-  for (const text of list(expected.notContains)) {
-    assertions.push({ message: `不应包含「${text}」`, ok: !outcome.text.includes(text) })
+  for (const { value, text } of list(expected.notContains)) {
+    assertions.push({ message: `不应包含「${text}」`, ok: !outcome.text.includes(value) })
   }
-  for (const uri of list(expected.uris)) {
-    assertions.push(onUris(`URI 列表应有 ${uri}`, (uris) => uris.includes(uri)))
+  for (const { value, text } of list(expected.uris)) {
+    assertions.push(onUris(`URI 列表应有 ${text}`, (uris) => uris.includes(value)))
   }
-  for (const uri of list(expected.notUris)) {
-    assertions.push(onUris(`URI 列表不应有 ${uri}`, (uris) => !uris.includes(uri)))
+  for (const { value, text } of list(expected.notUris)) {
+    assertions.push(onUris(`URI 列表不应有 ${text}`, (uris) => !uris.includes(value)))
   }
   return assertions
 }
@@ -211,17 +216,20 @@ export async function runSteps(
 ): Promise<BenchRunResult> {
   const whoami = await executor.whoami()
   const results: BenchStepResult[] = []
-  const vars = new Map([
+  const builtin = new Map([
     ['run', run],
     ['expires', new Date(Date.now() + BENCH_EXPIRES_AFTER_MS).toISOString()],
   ])
+  const vars = new Map(builtin)
+  // label 与断言的说明只展开这两个：capture 取到的可能是凭据的值，而命令行默认就打印它们
+  const shown = (template: string) => String(expand(template, builtin))
   // 前面的步骤声明了、却没有取到的变量：步骤被跳过的，依赖它的也跳过；没取到的，依赖它的算失败
   const unavailable = new Map<string, 'skipped' | 'failed'>()
 
   const base = (index: number, step: BenchStep) => ({
     index,
     kind: step.kind,
-    label: step.label ? String(expand(step.label, vars)) : defaultLabel(step),
+    label: step.label ? shown(step.label) : defaultLabel(step),
   })
   const markCaptures = (step: BenchStep, state: 'skipped' | 'failed') => {
     for (const name of Object.keys(step.capture ?? {})) unavailable.set(name, state)
@@ -299,7 +307,7 @@ export async function runSteps(
       outcome = { ...outcome, internalError: true, internalDetail: 'aborted' }
     }
 
-    const assertions = check(step.expect, outcome, vars)
+    const assertions = check(step.expect, outcome, vars, shown)
     const { values, missing: uncaptured } = capturedValues(step.capture, outcome.text)
     for (const [name, value] of Object.entries(values)) vars.set(name, value)
     for (const [name, prefix] of uncaptured) {

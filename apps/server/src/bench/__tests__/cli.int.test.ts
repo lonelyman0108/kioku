@@ -188,6 +188,58 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     )
 
     it(
+      'capture 取到的值不进默认输出：断言的说明与 label 保留变量的写法，--show-output 才打印',
+      async () => {
+        const VALUE = 'hunter2-value'
+        const file = await scenarioFile([
+          {
+            kind: 'tool',
+            label: '存一个凭据',
+            tool: 'kioku_credential_save',
+            arguments: { identifier: 'nas', name: 'NAS', values: { password: VALUE } },
+          },
+          {
+            kind: 'tool',
+            label: '取值',
+            tool: 'kioku_credential',
+            arguments: { identifier: 'nas', field: 'password' },
+            capture: { pw: '值：' },
+          },
+          {
+            kind: 'tool',
+            label: '拿 ${pw} 当查询',
+            tool: 'kioku_search',
+            arguments: { query: '${pw}' },
+            expect: {
+              contains: ['没有这句 ${pw}'],
+              uris: ['fake://x/${pw}'],
+            },
+          },
+          {
+            kind: 'tool',
+            label: '回显的不能有 ${pw}',
+            tool: 'kioku_credential',
+            arguments: { identifier: 'nas', field: 'password' },
+            expect: { notContains: ['${pw}'] },
+          },
+        ])
+        const { code, stdout, stderr } = await bench(['--file', file, '--allow-writes'])
+        expect(stderr).toBe('')
+        expect(code).toBe(1)
+        expect(stdout).toContain('失败  拿 ${pw} 当查询')
+        expect(stdout).toContain('应包含「没有这句 ${pw}」')
+        expect(stdout).toContain('URI 列表应有 fake://x/${pw}')
+        expect(stdout).toContain('失败  回显的不能有 ${pw}')
+        expect(stdout).toContain('不应包含「${pw}」')
+        expect(stdout).not.toContain(VALUE)
+
+        const shown = await bench(['--file', file, '--allow-writes', '--show-output'])
+        expect(shown.stdout).toContain(VALUE)
+      },
+      PROCESS_TIMEOUT,
+    )
+
+    it(
       '跳过不算失败',
       async () => {
         const low = await ws.createKey((await ws.createApp('low')).id, {
