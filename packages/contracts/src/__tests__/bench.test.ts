@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   BENCH_MAX_REPLAY_BYTES,
+  BENCH_MAX_REPLAY_STEPS,
   BENCH_MAX_STEPS,
   BenchRunRequest,
   BenchScenario,
@@ -81,6 +82,25 @@ describe('运行请求', () => {
     expect(replayOf({ kind: 'lifecycle', body: turnEnd }).success).toBe(true)
     const big = { uri: 'a://b', content: '字'.repeat(BENCH_MAX_REPLAY_BYTES / 3) }
     expect(replayOf({ kind: 'tool', tool: 'kioku_create', arguments: big }).success).toBe(false)
+  })
+
+  it('重放超过条数或字节上限时都提示清空', () => {
+    const entry = { kind: 'tool', tool: 'kioku_delete', arguments: { uri: 'a://b' } }
+    const replayOf = (length: number) => Array.from({ length }, () => entry)
+    expect(
+      BenchRunRequest.safeParse({ steps, replay: replayOf(BENCH_MAX_REPLAY_STEPS) }).success,
+    ).toBe(true)
+    const tooMany = BenchRunRequest.safeParse({
+      steps,
+      replay: replayOf(BENCH_MAX_REPLAY_STEPS + 1),
+    })
+    expect(tooMany.error?.issues[0]?.message).toContain('清空')
+    const big = { uri: 'a://b', content: '字'.repeat(BENCH_MAX_REPLAY_BYTES / 3) }
+    const tooBig = BenchRunRequest.safeParse({
+      steps,
+      replay: [{ kind: 'tool', tool: 'kioku_create', arguments: big }],
+    })
+    expect(tooBig.error?.issues[0]?.message).toContain('清空')
   })
 })
 

@@ -130,7 +130,10 @@ export const BenchRunRequest = z
   .strictObject({
     mode: BenchMode.default('rollback'),
     steps: z.array(BenchStep).min(1).max(BENCH_MAX_STEPS),
-    replay: z.array(BenchReplayStep).max(BENCH_MAX_REPLAY_STEPS).default([]),
+    replay: z
+      .array(BenchReplayStep)
+      .max(BENCH_MAX_REPLAY_STEPS, '重放的步骤太多，清空之后再试')
+      .default([]),
   })
   .superRefine((request, ctx) => {
     if (request.mode === 'real' && request.replay.length) {
