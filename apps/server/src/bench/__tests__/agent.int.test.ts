@@ -286,16 +286,28 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       })
     })
 
-    it('Key 解不开（没配主密钥）：400 并说明，不请求模型', async () => {
+    // Key 解不开时查情况如实报不可用：界面才不会放开之后每次请求都是 400
+    const keyLocked = {
+      available: false,
+      reason: 'keyLocked',
+      defaultModel: 'fake-model',
+      loop: 'hook',
+      tools: true,
+    }
+
+    it('Key 解不开（没配主密钥）：400 并说明，不请求模型；查情况给原因', async () => {
       const server = await startModel(() => '不该请求到这里')
       const noKey = createApp({ ...deps, masterKey: null })
       const res = await postTurn({ messages: [USER] }, ws.cookie, benchPath(), noKey)
       expect(res.status).toBe(400)
       expect(await errorOf(res)).toContain('KIOKU_MASTER_KEY')
+      const info = await getInfo(ws.cookie, benchPath(), noKey)
+      expect(info.status).toBe(200)
+      expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked)
       expect(server.requests).toHaveLength(0)
     })
 
-    it('Key 解不开（主密钥对不上）：400 并说明，不是解密库的英文报错，不请求模型', async () => {
+    it('Key 解不开（主密钥对不上）：400 并说明，不是解密库的英文报错，不请求模型；查情况给原因', async () => {
       const server = await startModel(() => '不该请求到这里')
       const otherKey = createApp({ ...deps, masterKey: randomBytes(32) })
       const expectLocked = async () => {
@@ -305,6 +317,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         expect(error).toContain('抽取模型的 Key 解不开')
         expect(error).toContain('KIOKU_MASTER_KEY')
         expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+        const info = await getInfo(ws.cookie, benchPath(), otherKey)
+        expect(info.status).toBe(200)
+        expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked)
       }
       // 记着主密钥的标识：还没解密就知道对不上
       await expectLocked()

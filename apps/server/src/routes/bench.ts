@@ -76,7 +76,7 @@ const scenariosRoute = createRoute({
 const agentInfoRoute = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent',
-  tags: ['console'],
+  tags: ['bench'],
   summary:
     '测试台：模型代理用不用得了（不是实例管理员也返回原因）、默认模型、这个运行时的循环与给不给工具（只给应用主人）',
   request: { params: KeyParams },
@@ -86,7 +86,7 @@ const agentInfoRoute = createRoute({
 const agentTurnRoute = createRoute({
   method: 'post',
   path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/bench/agent/turn',
-  tags: ['console'],
+  tags: ['bench'],
   summary:
     '测试台：请求一次模型，用抽取模型的接口与 Key，工具来自真实的 tools/list；不计入抽取预算、不写库（只给实例管理员且是应用主人）',
   middleware: [
@@ -137,12 +137,20 @@ export function benchRoutes(deps: Deps) {
           200,
         )
       }
-      const { configured, model } = await extractionSettingsView(deps.db)
+      // 真的解一次，不只看设置在不在：Key 解不开时说能用，界面放开了之后每次请求都是 400
+      const config = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
+      if (!config.ok) {
+        const { model } = await extractionSettingsView(deps.db)
+        return c.json(
+          { available: false, reason: 'keyLocked' as const, defaultModel: model, ...runtime },
+          200,
+        )
+      }
       return c.json(
         {
-          available: configured,
-          reason: configured ? null : ('noModel' as const),
-          defaultModel: model,
+          available: config.value !== null,
+          reason: config.value ? null : ('noModel' as const),
+          defaultModel: config.value?.model ?? null,
           ...runtime,
         },
         200,

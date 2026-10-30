@@ -314,8 +314,9 @@ export const BENCH_AGENT_LOOPS = ['hook', 'chat', 'tools', 'approximate'] as con
 export const BenchAgentLoop = z.enum(BENCH_AGENT_LOOPS)
 export type BenchAgentLoop = z.infer<typeof BenchAgentLoop>
 
-// 模型代理用不了的原因。notAdmin：不是实例管理员（Key 是实例的，而且不计入抽取预算）；noModel：还没配抽取模型
-export const BENCH_AGENT_UNAVAILABLE = ['notAdmin', 'noModel'] as const
+// 模型代理用不了的原因。notAdmin：不是实例管理员（Key 是实例的，而且不计入抽取预算）；noModel：还没配抽取模型；
+// keyLocked：配了，但保存的 Key 解不开（主密钥没配或对不上）
+export const BENCH_AGENT_UNAVAILABLE = ['notAdmin', 'noModel', 'keyLocked'] as const
 export const BenchAgentUnavailable = z.enum(BENCH_AGENT_UNAVAILABLE)
 export type BenchAgentUnavailable = z.infer<typeof BenchAgentUnavailable>
 
