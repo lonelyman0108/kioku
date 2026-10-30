@@ -111,7 +111,7 @@ async function basePlan(
 function planView(
   { snapshot, exportedAt }: ParsedLoreBackup,
   { plan, preview, sync, fingerprint }: Awaited<ReturnType<typeof basePlan>>,
-  staleSince: Date | null,
+  dataTime: Date | null,
   secretAvailable: boolean,
 ): LoreImportPlan {
   const targetsOf = new Map<string, ImportPreview['targets']>()
@@ -120,7 +120,8 @@ function planView(
   }
   return {
     exportedAt,
-    staleSince: staleSince?.toISOString() ?? null,
+    dataTime: dataTime?.toISOString() ?? null,
+    staleSince: staleAgainst(exportedAt, dataTime, preview, sync)?.toISOString() ?? null,
     nodeCount: snapshot.nodes.length,
     previousVersions: snapshot.nodes.reduce((n, node) => n + node.previousVersions, 0),
     fingerprint,
@@ -212,16 +213,8 @@ export function loreImportRoutes(deps: Deps) {
         exportedAt: parsed.exportedAt,
       })
       // 拉取读的是现在的 Lore，不用判断新旧
-      const stale =
-        source.kind === 'file'
-          ? staleAgainst(
-              parsed.exportedAt,
-              await loreDataTime(deps.db, spaceId),
-              base.preview,
-              base.sync,
-            )
-          : null
-      return c.json(planView(parsed, base, stale, deps.masterKey !== null), 200)
+      const dataTime = source.kind === 'file' ? await loreDataTime(deps.db, spaceId) : null
+      return c.json(planView(parsed, base, dataTime, deps.masterKey !== null), 200)
     })
     .openapi(applyRoute, async (c) => {
       const { spaceId } = c.req.valid('param')
@@ -273,7 +266,7 @@ export function loreImportRoutes(deps: Deps) {
           console.error('从 Lore 导入时出错', {
             code: pgErrorCode(err) ?? (err instanceof Error ? err.name : 'unknown'),
           })
-          return c.json({ error: '写到一半出错了，可能已写入一部分：重新看计划可以接着做' }, 500)
+          return c.json({ error: '写到一半出错了，可能已写入一部分' }, 500)
         } finally {
           // 向量只靠补齐：写了一半也要排，不看这次新建了多少（重试时前面的都按事件去重了）
           void deps.jobs?.enqueueBackfill()

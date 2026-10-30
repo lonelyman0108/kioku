@@ -169,8 +169,10 @@ export type LoreSyncItem = z.infer<typeof LoreSyncItem>
 export const LoreImportPlan = z.object({
   // 这份数据的导出时间
   exportedAt: z.string(),
-  // 文件比这个空间已写入的数据旧、又有要写入的内容时，是那个数据时间：/apply 要带 confirmStale 才执行。
-  // 拉取来源读的是现在的 Lore，总是 null
+  // 这个空间已写入的 Lore 数据的时间（各事件记下的导出时间，命令行写的取事件时间），还没写入过时为 null。
+  // 拉取来源读的是现在的 Lore，不用比，总是 null
+  dataTime: z.string().nullable(),
+  // 文件比 dataTime 旧、又有要写入的内容时是 dataTime：/apply 要带 confirmStale 才执行
   staleSince: z.string().nullable(),
   nodeCount: z.number().int(),
   // 旧版本不迁移，只报个数
