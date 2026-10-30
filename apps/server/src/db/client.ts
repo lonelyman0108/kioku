@@ -1,3 +1,5 @@
+import { AsyncLocalStorage } from 'node:async_hooks'
+
 import { sql } from 'drizzle-orm'
 import type { PgTransactionConfig } from 'drizzle-orm/pg-core'
 import { drizzle, type PostgresJsDatabase } from 'drizzle-orm/postgres-js'
@@ -34,34 +36,40 @@ export function withSpace<T>(
   }, config)
 }
 
-// 跨空间统计（实例的向量覆盖率、主密钥卡片的计数）整个进程里最多同时开几个空间的事务：每个事务占一条连接，
-// 几处统计、几个页面同时数也合起来算，连接池里留出给别的请求用的
+// 跨空间统计（实例的向量覆盖率、主密钥卡片的计数）整个进程里最多同时开几个空间的事务（服务只有一个连接池）：
+// 每个事务占一条连接，几处统计、几个页面同时数也合起来算。某个空间等锁卡住时最多卡住这几条，别的请求照常有连接用
 export const SPACE_SCAN_PARALLEL = 4
-let scanning = 0
-const scanQueue: (() => void)[] = []
+const scanSlots = { free: SPACE_SCAN_PARALLEL, waiting: [] as (() => void)[] }
+// 正在 eachSpace 的 fn 里
+const scanning = new AsyncLocalStorage<true>()
 
 // 对每个空间在它自己的事务里调用 fn（内容表开了 RLS，一个事务只看得到一个空间），几个空间同时数，不逐个排队。
+// 每数一个空间取一次名额、数完还回去，几处同时数时轮流用，谁也不用等别人整个数完。
 // 有一个空间出错就不再开始别的，等已经开始的都结束再抛出这个错误：返回或抛出之后不会还有空间的事务没结束。
-// fn 里不要再调 eachSpace：外层占着名额等里层，名额会被占满、互相等住
+// fn 里再调 eachSpace 直接报错：外层占着名额等里层，名额会被占满、互相等住
 export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<void> {
+  if (scanning.getStore()) throw new Error('eachSpace 不能嵌套调用')
   const all = await db.select({ id: schema.spaces.id }).from(schema.spaces)
+  let next = 0
   let failure: { error: unknown } | undefined
-  await Promise.all(
-    all.map(async ({ id }) => {
-      if (scanning < SPACE_SCAN_PARALLEL) scanning++
-      else await new Promise<void>((resolve) => scanQueue.push(resolve))
+  const worker = async () => {
+    while (!failure && next < all.length) {
+      const { id } = all[next++]!
+      if (scanSlots.free) scanSlots.free--
+      else await new Promise<void>((resolve) => scanSlots.waiting.push(resolve))
       try {
-        if (!failure) await withSpace(db, id, fn)
+        if (!failure) await scanning.run(true, () => withSpace(db, id, fn))
       } catch (error) {
         failure ??= { error }
       } finally {
         // 名额直接交给排着队的下一个
-        const next = scanQueue.shift()
-        if (next) next()
-        else scanning--
+        const waiter = scanSlots.waiting.shift()
+        if (waiter) waiter()
+        else scanSlots.free++
       }
-    }),
-  )
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(SPACE_SCAN_PARALLEL, all.length) }, worker))
   if (failure) throw failure.error
 }
 

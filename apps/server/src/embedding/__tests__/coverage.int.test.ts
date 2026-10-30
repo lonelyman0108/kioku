@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import {
   connect,
+  eachSpace,
   pgErrorCode,
   SPACE_SCAN_PARALLEL,
   withSpace,
@@ -201,6 +202,66 @@ describe.skipIf(!testDatabaseUrl)('实例的向量覆盖率', () => {
         },
       ),
     ).toEqual([expected, expected, expected])
+  })
+
+  it('几处同时数时其中一处出错：这一处排着队的不再开始，别的照常数完，名额都还回来', async () => {
+    await seed(SPACE_SCAN_PARALLEL + 2)
+    const wide = connect(testDatabaseUrl!, { max: SPACE_SCAN_PARALLEL * 3 })
+    // 每个空间都停在 fn 里，等测试放行：谁占着名额、什么时候还回去都由测试决定
+    const gates: (() => void)[] = []
+    const held = () => eachSpace(wide.db, () => new Promise<void>((open) => gates.push(open)))
+    const until = async (ok: () => boolean) => {
+      for (let i = 0; !ok(); i++) {
+        if (i >= 80) throw new Error('等不到停着的空间')
+        await sleep(25)
+      }
+    }
+    // 一直放行，直到这一处数完
+    const finish = async (scan: Promise<void>) => {
+      let done = false
+      scan.then(
+        () => (done = true),
+        () => (done = true),
+      )
+      while (!done) {
+        gates.splice(0).forEach((open) => open())
+        await sleep(10)
+      }
+      await scan
+    }
+    try {
+      const first = held()
+      await until(() => gates.length === SPACE_SCAN_PARALLEL)
+      // 第二处排在后面，轮到的空间都出错
+      let started = 0
+      const failed = eachSpace(wide.db, async () => {
+        started++
+        throw new Error('数不了')
+      })
+      await sleep(100)
+      expect(started).toBe(0)
+      // 先开始的那一处数完一个空间，空出的名额轮到第二处；它出错之后排着队的几路拿到名额也不再开始
+      gates.shift()!()
+      await expect(failed).rejects.toThrow('数不了')
+      expect(started).toBe(1)
+      await finish(first)
+      // 名额都还回来了：再数一次，同时停着的照样到上限
+      const again = held()
+      await until(() => gates.length === SPACE_SCAN_PARALLEL)
+      await sleep(100)
+      expect(gates).toHaveLength(SPACE_SCAN_PARALLEL)
+      await finish(again)
+    } finally {
+      await wide.close()
+    }
+  })
+
+  it('eachSpace 里再调 eachSpace 直接报错，不会占着名额互相等住', async () => {
+    const expected = await seed(SPACE_SCAN_PARALLEL)
+    await expect(
+      eachSpace(database.db, () => eachSpace(database.db, async () => {})),
+    ).rejects.toThrow('eachSpace 不能嵌套调用')
+    expect(await coverage()).toEqual(expected)
   })
 
   it('数到一半出错：不再开始别的空间，等已经开始的数完再报出这个错误', async () => {
