@@ -3,9 +3,10 @@ import { embeddingCoverage } from './coverage'
 import { clearEmbeddingError, recordEmbeddingError } from './errors'
 import { loadEmbeddingModels, switchEmbedding } from './settings'
 import type { EmbedderSource } from './source'
-import { backfillEmbeddings, embedMemory, pruneEmbeddings } from './worker'
+import { backfillEmbeddings, embedMemories, pruneEmbeddings } from './worker'
 
-// 向量相关的后台任务本身，由任务队列调用。出错时记下来给实例设置页看，再抛出交给队列处理
+// 向量相关的后台任务本身，由任务队列调用。出错时记下来给实例设置页看，再交给队列处理：
+// 写入之后的向量任务逐项返回失败的，别的直接抛出
 
 // 写回时正被别的事务锁着而跳过的记忆，稍后逐条重试
 export type Retry = (spaceId: string, ids: string[]) => void
@@ -35,22 +36,71 @@ function failureLog() {
   }
 }
 
-// 一条记忆写入之后生成向量。换模型期间两个模型都生成，不然新模型永远补不齐
-export async function embedJob(
+// 一条写入之后要生成向量的记忆
+export interface EmbedTarget {
+  spaceId: string
+  memoryId: string
+}
+
+// 记忆写入之后生成向量，一次处理一批：同一个空间的一起读、合起来请求嵌入接口（每次最多 EMBED_BATCH 条）、一起写回。
+// 换模型期间两个模型都生成，不然新模型永远补不齐；一个模型出错不挡另一个。
+// 返回生成失败的那几项与原因，调用方逐项交给队列重试：接口只拒绝了其中几条时（例如正文超过模型的长度上限）只算那几条，
+// 别的照常写；一个空间整批出错时（接口不可用、写库出错）算这个空间的全部。
+// 写回时正被别的事务锁着的不算失败，按记忆去重后交给 retry 稍后再排
+export async function embedJobs<T extends EmbedTarget>(
   db: Db,
   source: EmbedderSource,
-  spaceId: string,
-  memoryId: string,
+  targets: T[],
   retry: Retry,
-): Promise<void> {
+): Promise<Map<T, Error>> {
+  // 空间 → 记忆 → 要它的那几项（同一条记忆连着改了几次，会有几项）
+  const groups = new Map<string, Map<string, T[]>>()
+  for (const target of targets) {
+    const items = groups.get(target.spaceId) ?? new Map<string, T[]>()
+    items.set(target.memoryId, [...(items.get(target.memoryId) ?? []), target])
+    groups.set(target.spaceId, items)
+  }
+  const failed = new Map<T, Error>()
+  const fail = (spaceId: string, memoryId: string, error: Error) => {
+    for (const target of groups.get(spaceId)?.get(memoryId) ?? []) failed.set(target, error)
+  }
+  const skipped = new Map<string, Set<string>>()
+
   const [active, next] = await Promise.all([source.get(), source.next()])
   for (const embedder of [active, next]) {
     if (!embedder) continue
-    const written = await recording(db, embedder.model, () =>
-      embedMemory(db, embedder, spaceId, memoryId, { onSkipped: (ids) => retry(spaceId, ids) }),
-    )
-    if (written) await clearEmbeddingError(db, embedder.model)
+    const failures = failureLog()
+    let broken: Error | null = null
+    let written = 0
+    for (const [spaceId, items] of groups) {
+      try {
+        written += await embedMemories(db, embedder, spaceId, [...items.keys()], {
+          onSkipped: (ids) => {
+            const set = skipped.get(spaceId) ?? new Set<string>()
+            for (const id of ids) set.add(id)
+            skipped.set(spaceId, set)
+          },
+          onFailed: (memoryId, message) => {
+            failures.onFailed(memoryId, message)
+            fail(spaceId, memoryId, new Error(message))
+          },
+        })
+      } catch (err) {
+        broken = err as Error
+        for (const memoryId of items.keys()) fail(spaceId, memoryId, broken)
+      }
+    }
+    // 记下这个模型这一批出的错给管理员看；都成功、写下了向量时清掉之前记下的
+    if (broken) {
+      await recordEmbeddingError(db, embedder.model, broken.message).catch(() => {})
+    } else if (failures.count) {
+      await recordEmbeddingError(db, embedder.model, failures.message()).catch(() => {})
+    } else if (written) {
+      await clearEmbeddingError(db, embedder.model)
+    }
   }
+  for (const [spaceId, ids] of skipped) retry(spaceId, [...ids])
+  return failed
 }
 
 // 补齐正在用的模型的向量；没配置时返回 null

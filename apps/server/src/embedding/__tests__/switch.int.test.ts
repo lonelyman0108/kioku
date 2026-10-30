@@ -19,7 +19,7 @@ import {
   type FakeEmbeddingServer,
 } from '../../testing/fakeEmbeddingServer'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
-import { backfillJob, embedJob, pruneJob, switchJob } from '../jobs'
+import { backfillJob, embedJobs, pruneJob, switchJob, type Retry } from '../jobs'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { settingsEmbedderSource, staticEmbedderSource, type EmbedderSource } from '../source'
 
@@ -46,6 +46,18 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     dreamRun: async () => null,
   }
   const noRetry = () => {}
+  // 写入之后的向量任务只处理这一条：失败时抛出原因
+  const embedJob = async (
+    db: Database['db'],
+    from: EmbedderSource,
+    spaceId: string,
+    memoryId: string,
+    retry: Retry,
+  ) => {
+    const target = { spaceId, memoryId }
+    const error = (await embedJobs(db, from, [target], retry)).get(target)
+    if (error) throw error
+  }
 
   beforeAll(async () => {
     database = await openTestDatabase()

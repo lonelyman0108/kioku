@@ -1,13 +1,14 @@
 import type { BackupRunStatus, DreamRunStatus, DreamTrigger } from '@kioku/contracts'
-import { PgBoss } from 'pg-boss'
+import { PgBoss, type JobResult } from 'pg-boss'
 
 import { backupJob } from '../backup/storage'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
 import { masterKeyStatus, recordMasterKeyError, rotateMasterKey } from '../crypto/rotation'
 import type { Db } from '../db/client'
-import { backfillJob, embedJob, pruneJob, switchJob } from '../embedding/jobs'
+import { backfillJob, embedJobs, pruneJob, switchJob, type EmbedTarget } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
+import { EMBED_BATCH } from '../embedding/worker'
 import type { BufferedSession } from '../extraction/buffer'
 import { dreamsDue, dreamSpace, type DreamOutcome } from '../extraction/dream'
 import { processSession } from '../extraction/worker'
@@ -140,11 +141,27 @@ export async function startJobs(options: {
     for (const memoryId of ids) void send(EMBED, { spaceId, memoryId }, RETRY_AFTER_SECONDS)
   }
 
-  await boss.work<{ spaceId: string; memoryId: string }>(EMBED, async (jobs) => {
-    for (const { data } of jobs) {
-      await embedJob(options.db, options.embedder, data.spaceId, data.memoryId, retry)
-    }
-  })
+  // 写入之后的向量：一次取一批，同一个空间的合起来请求嵌入接口；一批取满了说明还有积压，马上接着取，不等轮询间隔。
+  // 逐个任务记成功或失败：失败的只是接口拒绝了的那几条（或者整批出错的那个空间），各自按任务的重试次数再试，
+  // 不连累同一批的别的任务；被锁着跳过的照旧另排一个，过一会儿再试（RETRY_AFTER_SECONDS）
+  await boss.work<EmbedTarget>(
+    EMBED,
+    { batchSize: EMBED_BATCH, burstWhenBatchFull: true, perJobResults: true },
+    async (jobs) => {
+      const failed = await embedJobs(
+        options.db,
+        options.embedder,
+        jobs.map((job) => job.data),
+        retry,
+      )
+      return jobs.map((job): JobResult => {
+        const error = failed.get(job.data)
+        return error
+          ? { id: job.id, status: 'failed', output: error }
+          : { id: job.id, status: 'completed' }
+      })
+    },
+  )
   await boss.work(BACKFILL, async () => {
     const total = await backfillJob(options.db, options.embedder, retry)
     if (total !== null) console.log(`向量补齐完成：更新 ${total} 条`)

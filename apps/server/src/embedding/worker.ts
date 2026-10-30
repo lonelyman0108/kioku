@@ -7,8 +7,9 @@ import type { Embedder } from './provider'
 import { lockEmbeddingModels } from './settings'
 import { embeddingText, textHash } from './text'
 
-const BATCH = 32
-const PAGE = BATCH * 4
+// 一次请求嵌入接口最多带这么多条文本
+export const EMBED_BATCH = 32
+const PAGE = EMBED_BATCH * 4
 // 整批失败后逐条再试时，开头连着这么多条（批次更小时是整批）都失败、一条都没成功，就当作接口不可用，不再一条条请求
 const GIVE_UP_AFTER = 3
 
@@ -130,8 +131,8 @@ async function syncRows(
   }
 
   const vectors = new Map<string, number[]>()
-  for (let i = 0; i < pending.length; i += BATCH) {
-    const out = await embedBatch(embedder, pending.slice(i, i + BATCH), hooks.onFailed)
+  for (let i = 0; i < pending.length; i += EMBED_BATCH) {
+    const out = await embedBatch(embedder, pending.slice(i, i + EMBED_BATCH), hooks.onFailed)
     for (const [id, vector] of out) vectors.set(id, vector)
   }
 
@@ -196,6 +197,17 @@ export async function embedMemory(
   hooks: SyncHooks = {},
 ): Promise<number> {
   return syncRows(db, embedder, spaceId, [memoryId], hooks)
+}
+
+// 同一个空间的几条记忆一起处理：一起读、合起来请求嵌入接口、一起写回。返回写下了几条向量
+export async function embedMemories(
+  db: Db,
+  embedder: Embedder,
+  spaceId: string,
+  memoryIds: string[],
+  hooks: SyncHooks = {},
+): Promise<number> {
+  return syncRows(db, embedder, spaceId, [...new Set(memoryIds)], hooks)
 }
 
 export interface BackfillOptions {
