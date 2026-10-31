@@ -135,10 +135,10 @@ describe('带的高度', () => {
     expect(stackBands(extreme(), 5, 12, 24).map((b) => b.h)).toEqual([0, 0, 0, 0, 0, 0, 0])
   })
 
-  it('量出来的高度带小数时也是整数像素', () => {
-    const bands = stackBands(sample(), 520.5, 12, 34)
+  it('量出来的高度带小数时也是整数像素，合起来不超出', () => {
+    const bands = stackBands(sample(), 520.25, 12, 34)
     expect(bands.every((b) => Number.isInteger(b.h))).toBe(true)
-    expect(bands.reduce((a, b) => a + b.h, 0)).toBe(509)
+    expect(bands.reduce((a, b) => a + b.h, 0)).toBe(508)
   })
 
   it('空的层也占一条，不会消失', () => {
