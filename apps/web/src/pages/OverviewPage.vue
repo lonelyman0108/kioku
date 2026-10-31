@@ -58,12 +58,6 @@ const budgetWarning = computed(() => {
 })
 // 备份只给实例管理员提醒（别人拿到的是 null）
 const backup = computed(() => backupNotice(data.value?.backup ?? null))
-// 总量只算手写的记忆，联系人层与情节层来自对话，单独说
-const fromConversation = computed(() =>
-  (data.value?.counts ?? [])
-    .filter((c) => c.layer === 'subject' || c.layer === 'episode')
-    .reduce((n, c) => n + c.count, 0),
-)
 const activeKeys = computed(() =>
   (data.value?.apps ?? []).reduce((n, app) => n + (app.keys?.active ?? 0), 0),
 )
@@ -123,9 +117,6 @@ const activeKeys = computed(() =>
               <Hint>统计范围为当前账号有权查看的内容，不含从对话中记下的事实与会话摘要。</Hint>
             </p>
             <p class="mt-1 text-2xl font-semibold tabular-nums">{{ data.total }} 条记忆</p>
-            <p v-if="fromConversation" class="mt-1 text-xs text-muted">
-              另有 {{ fromConversation }} 条来自对话
-            </p>
           </div>
           <div class="rounded-lg border border-default p-4">
             <p class="text-sm text-muted">未设触发场景</p>

@@ -349,9 +349,10 @@ function runCounts(run: ExtractionRunInfo): string {
             <Hint>
               被合并方的平台账号、事实、{{
                 data.kind === 'group' ? '群内' : '私聊中'
-              }}记下的内容都转到「{{
-                data.displayName
-              }}」名下，按群切换人格的规则也随之转移，被合并方随即删除。
+              }}记下的内容都转到「{{ data.displayName }}」名下，被合并方随即删除。<template
+                v-if="data.kind === 'group'"
+                >按群切换人格的规则也随之转移，两边都有规则时保留当前这边的。</template
+              >
             </Hint>
           </p>
           <div class="flex flex-wrap items-center gap-2">
@@ -519,18 +520,21 @@ function runCounts(run: ExtractionRunInfo): string {
       >
         <template #body>
           <p class="text-sm">
-            将「{{ mergePicked?.label }}」合并到「{{
+            将「{{ mergePicked?.label }}」合并到「{{ data?.displayName }}」：平台账号与事实转到「{{
               data?.displayName
-            }}」：平台账号、事实与按群切换人格的规则转到「{{ data?.displayName }}」，「{{
-              mergePicked?.label
-            }}」随即删除，相关的待确认绑定作废。此操作不可撤销。
+            }}」，「{{ mergePicked?.label }}」随即删除，相关的待确认绑定作废。此操作不可撤销。
           </p>
-          <p class="mt-2 text-sm text-muted">
-            「{{ mergePicked?.label }}」自身的私聊或群里记下的内容也归到「{{
+          <p v-if="data?.kind === 'group'" class="mt-2 text-sm text-muted">
+            「{{ mergePicked?.label }}」群内记下的内容归到「{{
               data?.displayName
-            }}」；在其他群记下的内容不动，仍只在那个群可见。两边在同一应用都有按群切换人格的规则时，保留「{{
+            }}」，此后在这个群的任一平台都能读取。按群切换人格的规则一并转移；两边在同一应用都有规则时，保留「{{
               data?.displayName
             }}」的规则。
+          </p>
+          <p v-else class="mt-2 text-sm text-muted">
+            合并后这些平台账号算同一个人：私聊中记下的内容，用哪个账号私聊都能读取；任一方标记过成员时，这些账号的私聊都视为该成员本人对话。在群里记下的事实归到「{{
+              data?.displayName
+            }}」，可见范围不变，仍只在那个群可见。
           </p>
         </template>
         <template #footer>
