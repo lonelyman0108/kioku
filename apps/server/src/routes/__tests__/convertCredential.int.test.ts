@@ -400,6 +400,23 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect((layered.after as { content: string }).content).toBe('密码：{{cred:wifi#password}}')
   })
 
+  it('改名之前的 URI 里有这个值：历史里也换掉，现在的 URI 里有才拒绝', async () => {
+    const value = 'hunter2box'
+    const m = await remember({ uri: `${value}://notes/${value}/a`, content: `密码：${value}` })
+    const moved = await ok<MemoryView>(
+      await send('POST', '/memories/move', { from: m.uri, to: 'notes://wifi' }),
+    )
+    await converted(moved, { value })
+
+    const events = await eventsOf(m.id)
+    expect(JSON.stringify(events)).not.toContain(value)
+    expect(events[0]!.after).toMatchObject({ domain: '***', path: 'notes/***/a' })
+    const history = await ok<MemoryHistory>(await send('GET', `/memories/history?id=${m.id}`))
+    expect(history.events[0]!.after!.uri).toBe('***://notes/***/a')
+    expect(history.events[1]!.before!.uri).toBe('***://notes/***/a')
+    expect(history.events[1]!.after!.uri).toBe('notes://wifi')
+  })
+
   it('Dream 的建议里抄下的这个值也换掉', async () => {
     const m = await seedNote()
     const other = await remember({ uri: 'notes://other', content: `也写着 ${VALUE}` })
@@ -413,7 +430,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
           memoryIds: [m.id],
           versions: [m.version],
           content: `提炼：Wi-Fi 是 ${VALUE}`,
-          uri: 'notes://distilled',
+          uri: `notes://${VALUE}`,
           disclosure: `提到 ${VALUE} 时`,
           reason: `都写着 ${VALUE}`,
           fingerprint: 'a',
@@ -437,6 +454,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     )
     expect(rows[0]).toMatchObject({
       content: '提炼：Wi-Fi 是 ***',
+      uri: 'notes://***',
       disclosure: '提到 *** 时',
       reason: '都写着 ***',
     })

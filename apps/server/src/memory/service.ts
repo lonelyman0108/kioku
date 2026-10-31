@@ -1463,6 +1463,7 @@ export class MemoryService {
         .update(dreamSuggestions)
         .set({
           content: scrub(dreamSuggestions.content),
+          uri: scrub(dreamSuggestions.uri),
           disclosure: scrub(dreamSuggestions.disclosure),
           reason: scrub(dreamSuggestions.reason),
         })
@@ -3125,8 +3126,8 @@ function viaOf(context: unknown): string | null {
   return typeof via === 'string' ? via : null
 }
 
-// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure 与关键词里的也不留（那里放不了占位符）；
-// 旧快照里可能有全文检索向量，一起去掉
+// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure、关键词与 URI 里的也不留（那里放不了占位符）；
+// 旧快照里可能有全文检索向量，一起去掉。快照的 URI 只用来显示：恢复不改 URI，可见性不看它
 function scrubSnapshot(
   raw: unknown,
   value: string,
@@ -3151,6 +3152,11 @@ function scrubSnapshot(
     version.glossary = version.glossary.filter(
       (keyword) => typeof keyword !== 'string' || !keyword.includes(value),
     )
+  }
+  for (const key of ['domain', 'path']) {
+    if (typeof version[key] === 'string') {
+      version[key] = version[key].split(value).join(PLAINTEXT_MASK)
+    }
   }
   return version
 }
