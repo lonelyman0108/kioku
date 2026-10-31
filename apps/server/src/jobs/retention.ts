@@ -24,7 +24,7 @@ import {
 } from 'drizzle-orm'
 import type { PgColumn, PgTable } from 'drizzle-orm/pg-core'
 
-import { withSpace, type Db, type Tx } from '../db/client'
+import { errorText, withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
   credentialEvents,
@@ -545,18 +545,11 @@ export async function purgeExpired(
           if (done.picked < RETENTION_BATCH) break
         }
       } catch (err) {
-        errors.push(`${step.label}：${messageOf(err)}`)
+        errors.push(`${step.label}：${errorText(err)}`)
       }
     }
   }
   return { counts, errors, complete: errors.length === 0 }
-}
-
-// 数据库报的错由 drizzle 包在 cause 里，外层的消息是整条 SQL 与参数，记下里面那层
-function messageOf(err: unknown): string {
-  const cause = (err as { cause?: unknown } | null)?.cause
-  if (cause instanceof Error) return cause.message
-  return err instanceof Error ? err.message : String(err)
 }
 
 const errorRecord = (messages: string[]) => ({
@@ -608,7 +601,7 @@ export async function retentionJob(
     })
   } catch (err) {
     // 整次都没做成（例如读不出空间）：和有一类出错一样算一次没做完的尝试
-    result = { counts: emptyCounts(), errors: [messageOf(err)], complete: false }
+    result = { counts: emptyCounts(), errors: [errorText(err)], complete: false }
   }
   const startedAt = now.toISOString()
   await saveStatus(db, {

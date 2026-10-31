@@ -1,17 +1,24 @@
 import { randomBytes } from 'node:crypto'
 
 import { eq, sql } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { connect, withSpace, type Database, type Db, type Tx } from '../../db/client'
-import { subjects } from '../../db/schema'
+import { settings, subjects } from '../../db/schema'
 import type { Embedder } from '../../embedding/provider'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
 import { semanticFor } from '../../memory/context'
 import { MemoryError } from '../../memory/service'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  backendOf,
+  killDuring,
+  openTestDatabase,
+  resetDatabase,
+  testDatabaseUrl,
+} from '../../testing/db'
+import { deferred } from '../../testing/deferred'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { bootstrap, type Workspace } from '../../testing/fixtures'
 import {
@@ -23,14 +30,6 @@ import {
 } from '../rollback'
 
 const NO_VECTORS: QueryVectors = { model: null, vectors: new Map() }
-
-function deferred<T = void>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((r) => {
-    resolve = r
-  })
-  return { promise, resolve }
-}
 
 describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
   let database: Database
@@ -207,7 +206,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       })
     })
 
-    it('运行关闭之后不发这一句：连接可能已经被别的请求占用', async () => {
+    it('运行关闭之后不发这一句：根事务已经结束或者正在回滚', async () => {
       const sent: unknown[] = []
       const fake = {
         transaction: (fn: (tx: unknown) => Promise<unknown>) => fn(fake),
@@ -269,7 +268,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     })
   })
 
-  it('运行结束之后代理不再可用，还在跑的代码不会把语句发到归还的连接上', async () => {
+  it('运行结束之后代理不再可用，还在跑的代码发不出语句', async () => {
     let leaked!: Deps
     await inRollback(deps, NO_VECTORS, async (scoped) => {
       leaked = scoped
@@ -319,69 +318,84 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     expect(await subjectNames(database.db)).toEqual([])
   })
 
-  // postgres.js 的 begin 把回调和连接关闭放在 Promise.race 里：连接断开时外层立刻 reject，回调不会停
-  const flakyDb = (disconnected: Promise<void>) =>
-    new Proxy(database.db, {
-      get(target, prop) {
-        if (prop !== 'transaction') return Reflect.get(target, prop)
-        return (fn: Parameters<Db['transaction']>[0]) =>
-          Promise.race([
-            target.transaction(fn),
-            disconnected.then(() => {
-              throw new Error('连接断开了')
-            }),
-          ])
-      },
+  // 回调结束到 ROLLBACK 做完、连接归还之前，驱动还放行句柄上的语句：排在 ROLLBACK 后面，落在事务外，直接提交。
+  // setImmediate 在 ROLLBACK 发出之后、它的响应读回来之前执行，正好落在这一小段
+  describe('回滚做完之前发出的写入', () => {
+    const STRAY = 'bench-stray-write'
+    const strayRows = () => database.db.select().from(settings).where(eq(settings.key, STRAY))
+    afterEach(() => database.db.delete(settings).where(eq(settings.key, STRAY)))
+
+    const strayWrite = (db: Db) =>
+      new Promise<string>((resolve) => {
+        setImmediate(() => {
+          void attempt(() => db.insert(settings).values({ key: STRAY, value: {} })).then(resolve)
+        })
+      })
+
+    it('代理挡得住：运行结束时先置状态，写不进去', async () => {
+      let outcome!: Promise<string>
+      await inRollback(deps, NO_VECTORS, async (scoped) => {
+        await scoped.db.execute(sql`select 1`)
+        outcome = strayWrite(scoped.db)
+      })
+      expect(await outcome).toContain('已经结束')
+      await expect(strayRows()).resolves.toEqual([])
     })
 
-  it('外层事务先失败时回调已经在事务里：内层的 tx 也不能再发语句', async () => {
-    const disconnected = deferred()
-    const entered = deferred()
-    const callback = deferred()
-    const after = deferred<string[]>()
-    const running = inRollback(
-      { ...deps, db: flakyDb(disconnected.promise) },
-      NO_VECTORS,
-      (scoped) =>
-        withSpace(scoped.db, ws.spaceId, async (tx) => {
-          entered.resolve()
-          await callback.promise
-          after.resolve([
-            await attempt(() => tx.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })),
-            await attempt(() => tx.transaction(async () => {})),
-          ])
+    it('运行抛错时也一样：先置状态再回滚，写不进去', async () => {
+      let outcome!: Promise<string>
+      await expect(
+        inRollback(deps, NO_VECTORS, async (scoped) => {
+          await scoped.db.execute(sql`select 1`)
+          outcome = strayWrite(scoped.db)
+          throw new Error('运行出错')
         }),
-    )
-    await entered.promise
-    disconnected.resolve()
-    await expect(running).rejects.toThrow('连接断开了')
-    callback.resolve()
-    for (const outcome of await after.promise) expect(outcome).toContain('已经结束')
-    // 回调抛出 Rolled，底下的事务真的回滚，连接也还回去了
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(await subjectNames(database.db)).toEqual([])
+      ).rejects.toThrow('运行出错')
+      expect(await outcome).toContain('已经结束')
+      await expect(strayRows()).resolves.toEqual([])
+    })
   })
 
-  it('外层事务先失败（连接断开时就这样）、回调还在跑：先置状态，回调不能再发语句', async () => {
-    const disconnected = deferred()
+  // postgres.js 的 begin 把回调和连接关闭放在 Promise.race 里：连接断开时外层立刻 reject，回调不会停
+  it('连接断开时回调已经在事务里：外层马上 reject，内层的 tx 也不能再发语句', async () => {
+    const entered = deferred<number>()
+    const callback = deferred()
+    const after = deferred<string[]>()
+    const running = inRollback(deps, NO_VECTORS, (scoped) =>
+      withSpace(scoped.db, ws.spaceId, async (tx) => {
+        entered.resolve(await backendOf(tx))
+        await callback.promise
+        after.resolve([
+          await attempt(() => tx.insert(subjects).values({ spaceId: ws.spaceId, ...SOMEONE })),
+          await attempt(() => tx.transaction(async () => {})),
+        ])
+      }),
+    )
+    expect(await killDuring(other.db, await entered.promise, running)).toMatchObject({
+      code: 'CONNECTION_CLOSED',
+    })
+    callback.resolve()
+    for (const outcome of await after.promise) expect(outcome).toContain('已经结束')
+  })
+
+  it('连接断开、回调还在跑：先置状态，回调不能再发语句', async () => {
+    const entered = deferred<number>()
     const callback = deferred()
     const after = deferred<{ reason: unknown; error: unknown }>()
-    const flaky = flakyDb(disconnected.promise)
-    const running = inRollback({ ...deps, db: flaky }, NO_VECTORS, async (scoped, run) => {
+    const running = inRollback(deps, NO_VECTORS, async (scoped, run) => {
+      entered.resolve(await backendOf(scoped.db))
       await callback.promise
       const reason = await run.stopReason()
       const error = await addSubject(scoped.db, '不该写').catch((err: unknown) => err)
       after.resolve({ reason, error })
     })
-    disconnected.resolve()
-    await expect(running).rejects.toThrow('连接断开了')
+    expect(await killDuring(other.db, await entered.promise, running)).toMatchObject({
+      code: 'CONNECTION_CLOSED',
+    })
     callback.resolve()
     const { reason, error } = await after.promise
     expect(reason).toBe('aborted')
     expect(String(error)).toContain('已经结束')
-    // 回调抛出 Rolled，底下的事务真的回滚，连接也还回去了
-    await new Promise((resolve) => setTimeout(resolve, 20))
-    expect(await subjectNames(database.db)).toEqual([])
   })
 
   it('闸门：同时运行数到了上限直接 429，结束之后放开', async () => {

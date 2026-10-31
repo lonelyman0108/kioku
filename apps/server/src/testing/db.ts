@@ -3,7 +3,7 @@ import { fileURLToPath } from 'node:url'
 import { sql } from 'drizzle-orm'
 import { pgTable, text, type PgTable } from 'drizzle-orm/pg-core'
 
-import { connect, withSpace, type Database, type Db } from '../db/client'
+import { connect, withSpace, type Database, type Db, type Tx } from '../db/client'
 import { runMigrations } from '../db/migrate'
 import { settings } from '../db/schema'
 import { settleRecallEvents } from '../recall/events'
@@ -25,6 +25,29 @@ export async function openTestDatabase(): Promise<Database> {
 export async function resetDatabase(database: Database): Promise<void> {
   await settleRecallEvents()
   await database.db.execute(sql`truncate spaces, accounts, login_attempts cascade`)
+}
+
+// 这条连接（事务句柄就是事务所在的连接）的后端进程号，杀连接时用
+export async function backendOf(db: Db | Tx): Promise<number> {
+  const [row] = await db.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`)
+  return row!.pid
+}
+
+// 杀掉这个后端，返回事务 reject 的错误；事务没有 reject 时抛错。先接住事务的 promise 再杀：
+// kill 的响应回来之前事务可能已经 reject 了，那时还没人接就算未处理的 rejection
+export async function killDuring(
+  via: Db,
+  pid: number,
+  transaction: Promise<unknown>,
+): Promise<unknown> {
+  const rejection = transaction.then(
+    () => {
+      throw new Error('连接被杀了，事务却没有 reject')
+    },
+    (err: unknown) => err,
+  )
+  await via.execute(sql`select pg_terminate_backend(${pid})`)
+  return rejection
 }
 
 // 读实例设置时数据库真的报错（改查一张不存在的表），别的查询照常，事务里也一样。drizzle 的错误信息带 SQL 与全部参数

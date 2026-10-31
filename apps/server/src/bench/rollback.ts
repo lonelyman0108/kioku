@@ -19,9 +19,9 @@ import { normalizeQuery } from '../recall/recall'
 // - 直接写在 deps.db 上的语句落在根事务上，出错会中止整个运行，后面的步骤记为没有执行；
 // - 事务开着时不发外部请求（前面步骤的行锁和 URI 咨询锁都没放）：查询向量事先算好，事务里只查这张表；
 // - postgres.js 的 savepoint 成功时不 release，一次运行的 savepoint 累积到回滚为止，靠步骤数与总时长的上限兜着。
-// 时限只做合作式：步骤之间检查，正在跑的步骤靠语句时限收尾，等它结束才回滚。不用 Promise.race 提前结束事务，
-// 也不用 idle_in_transaction_session_timeout：事务句柄绑死连接对象，事务结束后还在跑的语句会落到已归还的连接上，
-// 可能串进别的请求的事务
+// 时限只做合作式：步骤之间检查，正在跑的步骤靠语句时限收尾，等它结束才回滚。不用 Promise.race 提前结束事务：
+// 驱动要等回调结束才发 ROLLBACK，放弃等待只是让事务和回调在后台继续开着。也不用 idle_in_transaction_session_timeout：
+// 它靠断开连接结束事务，等于把每次超时都变成一次连接断开，回调照样还在跑
 
 export interface BenchLimits {
   // 同时运行数：运行占一条连接，要小于连接池（生产 10 条）
@@ -111,8 +111,10 @@ export class RollbackRun {
     }) as unknown as Db
   }
 
-  // 事务句柄：运行结束之后任何属性访问都抛错，里面再开的事务也一样包上。连接断开时外层事务先 reject、
-  // 回调还在跑，而句柄绑死连接对象，它重连之后可能已经被别的请求占用，这时发出去的语句会落进别人的事务
+  // 事务句柄：运行结束之后任何属性访问都抛错，里面再开的事务也一样包上。
+  // 连接归还之后、连接断开之后驱动自己会拒绝句柄上的语句（UNSAFE_TRANSACTION、CONNECTION_CLOSED），不会落到别的连接上；
+  // 但回调结束到 ROLLBACK 做完、连接归还之前这一小段驱动还放行：语句排在 ROLLBACK 后面，落在事务外，写入直接提交，
+  // 逃出了回滚，只有这里挡得住。连接断开时外层事务先 reject、回调还在跑，也靠它让后面的步骤马上停下，不必逐条失败
   private guard(tx: Tx): Tx {
     return new Proxy(tx, {
       get: (target, prop) => {
@@ -205,16 +207,20 @@ export async function inRollback<T>(
         jobs: null,
         embedder: vectorTableSource(vectors, run),
       }
-      result.value = await fn(scoped, run)
-      run.close()
+      try {
+        result.value = await fn(scoped, run)
+      } finally {
+        // 先关再回滚，fn 抛错时也一样：回滚做完之前发出的语句会落在事务外（见 guard）
+        run.close()
+      }
       throw new Rolled()
     })
   } catch (err) {
-    // 连接断开时外层先 reject、回调还在跑：先置状态让它停下，
-    // 否则连接重连之后，后面的语句可能串进别的请求的事务
+    // 连接断开时外层先 reject、回调还在跑：先置状态让它停下，后面的步骤不再逐条发语句
     run.close()
     if (!(err instanceof Rolled)) throw err
   } finally {
+    // 连接断开时放开闸门的时候回调可能还没跑完：运行已经关了，它的下一条语句会报错，很快就停
     leave()
   }
   return result.value as T

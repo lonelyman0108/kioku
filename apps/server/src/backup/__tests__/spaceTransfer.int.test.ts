@@ -1480,6 +1480,54 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     }
   })
 
+  it('写文件里来的值时连接断开：不算文件的问题，照常 500，日志记 CONNECTION_CLOSED，不留下新空间', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const before = await spaceCount()
+    await database.db.execute(
+      sql.raw(`create or replace function kioku_test_kill() returns trigger language plpgsql as $$
+      begin
+        perform pg_terminate_backend(pg_backend_pid());
+        return new;
+      end $$`),
+    )
+    await database.db.execute(
+      sql.raw(`create trigger kioku_test_kill before insert on subjects
+        for each row execute function kioku_test_kill()`),
+    )
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await importRequest(
+        source,
+        alice.cookie,
+        await craft([
+          curated('home://a'),
+          {
+            type: 'subject',
+            id: randomUUID(),
+            kind: 'person',
+            displayName: '写到这里断开',
+            nameLocked: false,
+            linkedToExporter: false,
+            createdAt: now,
+            updatedAt: now,
+          },
+        ]),
+      )
+      expect(res.status).toBe(500)
+      expect(((await res.json()) as { error: string }).error).toBe('服务内部错误')
+      const detail = logged.mock.calls.find(([message]) =>
+        String(message).includes('导入空间时数据库报错'),
+      )?.[1] as { code?: string; constraint?: string } | undefined
+      expect(detail?.code).toBe('CONNECTION_CLOSED')
+      expect(detail?.constraint).toBeUndefined()
+      expect(await spaceCount()).toBe(before)
+    } finally {
+      logged.mockRestore()
+      await database.db.execute(sql.raw('drop trigger if exists kioku_test_kill on subjects'))
+      await database.db.execute(sql.raw('drop function if exists kioku_test_kill()'))
+    }
+  })
+
   it('文件里的文字有存不进数据库的字符（落单的代理项、NUL）：返回 400，指出是哪一行、哪个字段', async () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()

@@ -33,6 +33,7 @@ import { memoryServiceForKey } from '../../memory/context'
 import { MemoryService } from '../../memory/service'
 import { keyToSimulate } from '../../access/simulate'
 import { openTestDatabase, resetDatabase, tableDigests, testDatabaseUrl } from '../../testing/db'
+import { deferred } from '../../testing/deferred'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { changeTracker } from '../changes'
@@ -61,14 +62,6 @@ const tool = (name: string, args: Record<string, unknown> = {}, extra: object = 
   ...extra,
 })
 const lifecycle = (body: unknown, extra: object = {}) => ({ kind: 'lifecycle', body, ...extra })
-
-function deferred() {
-  let resolve!: () => void
-  const promise = new Promise<void>((r) => {
-    resolve = r
-  })
-  return { promise, resolve }
-}
 
 describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
   let database: Database

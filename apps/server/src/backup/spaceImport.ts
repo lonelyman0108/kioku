@@ -8,7 +8,15 @@ import { lapsed } from '../access/access'
 import { placeholderIdentifiers } from '../credential/placeholders'
 import { sealCredentialValues } from '../credential/service'
 import type { MasterKey } from '../crypto/keyring'
-import { pgConstraint, pgErrorCode, pgMessage, withSpace, type Db, type Tx } from '../db/client'
+import {
+  pgCauseCode,
+  pgConstraint,
+  pgErrorCode,
+  pgMessage,
+  withSpace,
+  type Db,
+  type Tx,
+} from '../db/client'
 import {
   appGroupPersonas,
   apps,
@@ -385,6 +393,7 @@ export async function importSpace(
       // 数据库报的错都把 SQLSTATE、约束名与说明记进日志，不管最后算谁的问题
       console.error(`导入空间时数据库报错：${progress.step}`, {
         code,
+        cause: pgCauseCode(err),
         constraint: pgConstraint(err),
         message: pgMessage(err),
       })
