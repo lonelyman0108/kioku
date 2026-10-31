@@ -8,6 +8,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useDebounced } from '../composables/useDebounced'
 import { icons } from '../icons'
+import Hint from './Hint.vue'
 
 // 按群换人格的规则：应用在这些群里用规则里的人格。整组替换，改一条就把整组发回去；只有应用主人能改
 const props = defineProps<{
@@ -132,9 +133,12 @@ function remove(subjectId: string) {
 <template>
   <div class="space-y-3">
     <div>
-      <h2 class="text-sm font-medium">按群换人格</h2>
+      <h2 class="text-sm font-medium">按群切换人格</h2>
       <p class="text-xs text-muted">
-        在这些群（或频道）里用指定的人格，boot、召回与写入都按它；其余的群、私聊和不带会话上下文的请求用默认人格。
+        在指定的群（或频道）中使用对应人格。
+        <Hint
+          >启动加载、召回与写入都按此人格。其余群、私聊和不带会话上下文的请求使用默认人格。</Hint
+        >
       </p>
     </div>
     <USkeleton v-if="rules.isPending.value" class="h-10 w-full" />
@@ -161,7 +165,7 @@ function remove(subjectId: string) {
             :model-value="rule.personaId"
             :items="personaItems"
             class="w-40"
-            :aria-label="`「${rule.groupName}」用的人格`"
+            :aria-label="`「${rule.groupName}」使用的人格`"
             :disabled="saving"
             @update:model-value="(v) => change(rule.subjectId, v as string)"
           />
@@ -178,7 +182,7 @@ function remove(subjectId: string) {
           />
         </li>
       </ul>
-      <p v-else class="text-sm text-muted">还没有规则：所有群都用默认人格。</p>
+      <p v-else class="text-sm text-muted">暂无规则，所有群使用默认人格</p>
       <div v-if="canManage" class="flex flex-wrap items-center gap-2">
         <USelectMenu
           v-model="newGroup"

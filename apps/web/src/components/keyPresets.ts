@@ -13,8 +13,8 @@ const shared: Layer[] = ['base', 'persona', 'app', 'subject', 'episode']
 export const keyPresets: KeyPreset[] = [
   {
     id: 'agent',
-    label: '本机编码 agent',
-    help: '读写全部层，最高到私密级。适合 Claude Code、Codex 这类只有主人在用的 agent',
+    label: '本机编码 Agent',
+    help: '读写全部层，最高至私密级。适用于 Claude Code、Codex 等仅本人使用的 Agent',
     scopes: {
       readLayers: [...LAYERS],
       writeLayers: [...LAYERS],
@@ -25,7 +25,7 @@ export const keyPresets: KeyPreset[] = [
   {
     id: 'bot',
     label: '群聊机器人',
-    help: '只读共享层（基础、人格、应用、对象、情节），只写对象与情节层，最高公开级。读不到主人的私人信息',
+    help: '仅读取共享层（基础、人格、应用、联系人、情节），仅写入联系人层与情节层，最高至公开级。无法读取所有者的私人信息',
     scopes: {
       readLayers: shared,
       writeLayers: ['subject', 'episode'],
@@ -36,7 +36,7 @@ export const keyPresets: KeyPreset[] = [
   {
     id: 'readonly',
     label: '只读',
-    help: '读全部层，最高到私密级，不能写入',
+    help: '读取全部层，最高至私密级，不可写入',
     scopes: { readLayers: [...LAYERS], writeLayers: [], maxSensitivity: 'private', admin: false },
   },
 ]
