@@ -432,8 +432,8 @@ describe('运行中途作废', () => {
     run.resolve(RESULT)
     expect(await outcome).toEqual({ kind: 'stale' })
     const [record] = bench.abandoned.value
-    expect(record?.title).toContain('可能已经写入')
-    expect(record?.title).toContain('到活动里确认')
+    expect(record?.title).toContain('可能已写入')
+    expect(record?.title).toContain('请到变更记录确认')
     expect(record?.description).toContain('「我的场景」')
     expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
     expect(record?.result).toBe(RESULT)
@@ -444,7 +444,7 @@ describe('运行中途作废', () => {
     const { bench, run, outcome } = await abandonRun('real')
     run.reject(new ApiError(502, '网关出错'))
     expect(await outcome).toEqual({ kind: 'stale' })
-    expect(bench.abandoned.value[0]?.title).toContain('可能已经写入')
+    expect(bench.abandoned.value[0]?.title).toContain('可能已写入')
     expect(bench.abandoned.value[0]?.description).toContain('网关出错')
     expect(bench.abandoned.value[0]?.result).toBeNull()
   })
@@ -631,7 +631,7 @@ describe('切换模式', () => {
     '真实模式下有失败的说明（%s）：一样要确认',
     async (field) => {
       const bench = await inRealMode()
-      bench[field].value = '服务内部错误。可能已经执行了一部分，到活动里确认'
+      bench[field].value = '服务内部错误。可能已执行一部分，请到变更记录确认'
       bench.requestMode(false)
       expect(bench.confirmingRollback.value).toBe(true)
       expect(bench.real.value).toBe(true)
@@ -743,7 +743,7 @@ describe('离开页面前提醒', () => {
     '真实模式下有失败的说明（%s）要提醒，没有了就不用了',
     async (field) => {
       const bench = await inRealMode()
-      bench[field].value = '服务内部错误。可能已经执行了一部分，到活动里确认'
+      bench[field].value = '服务内部错误。可能已执行一部分，请到变更记录确认'
       expect(dirty()).toBe(true)
       bench[field].value = null
       expect(dirty()).toBe(false)
@@ -1248,7 +1248,7 @@ describe('模型对话', () => {
     await settle()
     expect(bench.abandonedInFlight.value).toBe(false)
     const [record] = bench.abandoned.value
-    expect(record?.title).toContain('可能已经写入')
+    expect(record?.title).toContain('可能已写入')
     expect(record?.description).toContain('kioku_create')
     expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
     expect(record?.view).toBe('call')
@@ -1317,7 +1317,7 @@ describe('模型对话', () => {
     expect(bench.agent.value.exchanges).toEqual([])
     const [record] = bench.abandoned.value
     expect(bench.abandoned.value).toHaveLength(1)
-    expect(record?.title).toContain('可能已经写入')
+    expect(record?.title).toContain('可能已写入')
     expect(record?.description).toContain('kioku_create')
     expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
     expect(record?.view).toBe('call')
@@ -1493,7 +1493,7 @@ describe('模型对话', () => {
     it.each([
       ['HTTP 500', new ApiError(500, '服务内部错误'), '服务内部错误'],
       ['HTTP 429', new ApiError(429, '同时运行的回滚太多'), '同时运行的回滚太多'],
-      ['网络错误', new TypeError('Failed to fetch'), '网络出错了'],
+      ['网络错误', new TypeError('Failed to fetch'), '网络错误'],
     ] as [string, Error, string][])(
       '%s：可能是暂时的，说可以再发一次',
       async (_name, err, text) => {
@@ -1502,7 +1502,7 @@ describe('模型对话', () => {
         fakes.api.benchRun.mockRejectedValueOnce(err)
         const finished = await bench.sendToAgent('你好', HOOK_LOOP)
         expect(finished?.notice).toContain(text)
-        expect(finished?.notice).toContain('没有请求模型，可以再发一次')
+        expect(finished?.notice).toContain('未请求模型，可再次发送')
       },
     )
   })
@@ -1616,7 +1616,7 @@ describe('模型对话', () => {
       bench.requestMode(true)
       expect(bench.confirmingReal.value).toBe(true)
       expect(bench.modeLoss.value).toContain('模型对话（1 条消息）')
-      expect(bench.modeLoss.value).toContain('保留的写入不会带过去')
+      expect(bench.modeLoss.value).toContain('保留的写入不会带到真实模式')
     })
 
     it('真实模式下对话清空了：切回回滚不多问', async () => {

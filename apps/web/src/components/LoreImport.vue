@@ -42,6 +42,7 @@ import {
   type NodeFilter,
 } from '../loreBackup'
 import { formatTime } from '../time'
+import Hint from './Hint.vue'
 
 const props = defineProps<{ spaceId: string; editable: boolean; isAdmin: boolean }>()
 
@@ -104,7 +105,7 @@ watch(
 const tooLarge = computed(() => (file.value ? file.value.size > LORE_FILE_MAX_BYTES : false))
 const tokenExposed = computed(() => sourceKind.value === 'url' && tokenInClear(url.value))
 const personaProblem = computed(() =>
-  Slug.safeParse(personaSlug.value).success ? null : '只用小写字母、数字和连字符',
+  Slug.safeParse(personaSlug.value).success ? null : '只能使用小写字母、数字和连字符',
 )
 const persona = computed(() => ({ slug: personaSlug.value, name: personaName.value.trim() }))
 const blocker = computed(() =>
@@ -152,7 +153,7 @@ async function showPlan(): Promise<boolean> {
   } catch (err) {
     if (forSpace !== props.spaceId) return false
     plan.value = null
-    error.value = messageOf(err, '看计划失败')
+    error.value = messageOf(err, '生成计划失败')
     return false
   } finally {
     busy.value = false
@@ -268,8 +269,8 @@ const sensitivityOf = (node: LorePlanNode, target: LorePlanTarget) =>
 // 之前导入的那条现在的样子：移动过、删除了都说一声
 function currentNote(target: LorePlanTarget): string | null {
   const notes = target.current.flatMap((c) => {
-    if (c.uri === null) return ['在 Kioku 里删除了']
-    return c.uri === target.uri ? [] : [`现在在 ${c.uri}`]
+    if (c.uri === null) return ['已在 Kioku 中删除']
+    return c.uri === target.uri ? [] : [`当前位于 ${c.uri}`]
   })
   return notes.length ? notes.join('；') : null
 }
@@ -279,13 +280,13 @@ function credentialNote(node: LorePlanNode): string | null {
   if ((!path && !content) || node.targets.every((t) => secretNow(node, t))) return null
   const where = path ? '路径' : '正文'
   return secretSelectable(node)
-    ? `${where}看起来有凭据：考虑标 secret，或者把值换成凭据占位符`
-    : `${where}看起来有凭据：到记忆详情里改成 secret（会清除历史里的明文），或者把值换成凭据占位符`
+    ? `${where}疑似包含明文凭据：建议标记机密，或将值替换为凭据占位符`
+    : `${where}疑似包含明文凭据：请到记忆详情改为机密（同时清除历史中的明文），或将值替换为凭据占位符`
 }
 function secretHint(node: LorePlanNode): string | undefined {
-  if (!plan.value?.secretAvailable) return '这个实例没有配置主密钥，不能标 secret'
-  if (!secretSelectable(node)) return '已导入：这里不起作用，要改成 secret 到记忆详情里改'
-  if (excludedIds.value.has(node.uuid)) return '这次不导入'
+  if (!plan.value?.secretAvailable) return '当前实例未配置主密钥，无法标记机密'
+  if (!secretSelectable(node)) return '已导入，此处不生效；如需改为机密，请到记忆详情修改'
+  if (excludedIds.value.has(node.uuid)) return '本次不导入'
   return undefined
 }
 const disclosureCut = computed(
@@ -301,14 +302,17 @@ const disclosureCut = computed(
     <template #header>
       <h2 class="font-medium">从 Lore 导入</h2>
       <p class="mt-1 text-sm text-muted">
-        把 Lore 的节点导入这个空间，映射规则和命令行相同：core://agent 进基础层，core://soul
-        进人格，core://agent/&lt;运行时&gt; 进你自己的对应应用，preferences://
-        进你的画像层，其余进你的私人层。 可以重复执行：导入过的不重复写，Lore 里改过的按 Lore
-        同步；在 Kioku 里改过、移动过、删除了的都不动。先看计划，确认之后才写入。
+        将 Lore 的节点导入当前空间，确认计划后才写入。
+        <Hint>
+          映射规则与命令行相同：core://agent 进入基础层，core://soul
+          进入人格层，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
+          进入当前账号的个人画像层，其余进入当前账号的私人层。可重复执行：已导入的不重复写入，Lore
+          中修改过的按 Lore 同步；在 Kioku 中修改、移动或删除过的不变。
+        </Hint>
       </p>
     </template>
 
-    <p v-if="!editable" class="text-sm text-muted">只有空间 owner 能导入。</p>
+    <p v-if="!editable" class="text-sm text-muted">仅空间所有者可导入</p>
 
     <!-- 结果：有没做成的就不显示成成功 -->
     <div v-else-if="result" class="space-y-3">
@@ -316,7 +320,7 @@ const disclosureCut = computed(
         v-if="importProblems(result)"
         color="warning"
         variant="subtle"
-        title="有没做成的：看下面的说明，处理之后重看计划就能接着来"
+        title="部分内容未完成：请查看下方说明，处理后重新生成计划以继续"
       />
       <UAlert v-else color="success" variant="subtle" title="导入完成" />
       <ul class="space-y-1 text-sm">
@@ -324,24 +328,23 @@ const disclosureCut = computed(
           人格 {{ persona.slug }}：{{ result.personaCreated ? '新建' : '已有' }}
         </li>
         <li v-else>
-          人格 {{ persona.slug }} 不存在，这次也没有要写的
-          core://soul：没有新建，新建的应用默认人格为空
+          人格 {{ persona.slug }} 不存在，本次也没有要写入的
+          core://soul：未新建人格，新建应用的默认人格为空
         </li>
         <li v-if="result.appsCreated.length">
-          新建应用：{{ result.appsCreated.join('、') }}。还没有 Key：在「应用与
-          Key」里为要接入的应用签发
+          新建应用：{{ result.appsCreated.join('、') }}。暂无 Key，请在「应用」中为要接入的应用签发
         </li>
         <li v-if="result.appsGivenPersona.length">
           设为默认人格 {{ persona.slug }}：{{ result.appsGivenPersona.join('、') }}
         </li>
         <li v-if="result.appsOtherPersona.length">
-          这些应用在用别的人格，core://soul 不会进入它们的启动上下文：{{
+          以下应用使用其他人格，core://soul 不会进入其启动加载：{{
             result.appsOtherPersona.join('、')
           }}
         </li>
         <li>
-          新建记忆 {{ result.created.length }} 条；之前导入过、跳过
-          {{ result.previouslyImported.length }} 条（包括导入后在 Kioku 里删除或移动了的）
+          新建记忆 {{ result.created.length }} 条；跳过已导入的
+          {{ result.previouslyImported.length }} 条（含导入后在 Kioku 中删除或移动的）
         </li>
         <li>按 Lore 同步 {{ result.sync.updated.length }} 条</li>
         <li>向量在后台生成</li>
@@ -358,22 +361,22 @@ const disclosureCut = computed(
       >
         <li v-for="uri in result.occupied" :key="`occupied-${uri}`">
           跳过 <code>{{ uri }}</code
-          >：URI 已被别的记忆占用
+          >：URI 已被其他记忆占用
         </li>
         <li v-for="m in result.movedInLore" :key="`moved-${m.uri}-${m.current}`">
           跳过 <code>{{ m.uri }}</code
-          >：Lore 里换了路径，<template v-if="m.current">
-            之前导入的那条还在 <code>{{ m.current }}</code
-            >，要跟着移动就手动移</template
-          ><template v-else>之前导入的那条在 Kioku 里删除了</template>，没有在新位置再建一条
+          >：Lore 中路径已变更，<template v-if="m.current">
+            此前导入的记忆仍在 <code>{{ m.current }}</code
+            >，如需跟随请手动移动</template
+          ><template v-else>此前导入的记忆已在 Kioku 中删除</template>，未在新位置新建
         </li>
         <li
           v-for="s in result.secretAlreadyImported"
           :key="`secret-${s.uri}-${s.current}`"
           class="text-warning"
         >
-          <code>{{ s.uri }}</code> 之前导入过，现在还是明文，这次的 secret 没有生效：到记忆详情里把
-          <code>{{ s.current }}</code> 改成 secret（会同时清除历史里的明文）
+          <code>{{ s.uri }}</code> 此前已导入，当前仍为明文，本次标记的机密未生效。请到记忆详情将
+          <code>{{ s.current }}</code> 改为机密（同时清除历史中的明文）
         </li>
         <li v-for="f in result.failed" :key="`failed-${f.uri}`" class="text-error">
           失败 <code>{{ f.uri }}</code
@@ -392,9 +395,9 @@ const disclosureCut = computed(
           :disabled="!ready"
           @click="replan"
         >
-          重看计划
+          重新生成计划
         </UButton>
-        <UButton v-else color="neutral" variant="subtle" @click="result = null">再导入一次</UButton>
+        <UButton v-else color="neutral" variant="subtle" @click="result = null">再次导入</UButton>
       </div>
     </div>
 
@@ -408,18 +411,26 @@ const disclosureCut = computed(
         class="w-full"
       />
       <p v-else class="text-xs text-muted">
-        从地址拉取要实例管理员：服务端要向那个地址发请求。这里只能上传导出文件。
+        仅可上传导出文件。
+        <Hint>从地址拉取需要实例管理员权限：服务端要向该地址发送请求。</Hint>
       </p>
       <UFormField
         v-if="sourceKind === 'file'"
         label="Lore 的导出文件"
-        :help="`在 Lore 的设置页导出的 JSON，不超过 ${formatBytes(LORE_FILE_MAX_BYTES)}。不要带召回事件：用不上，还会很大。文件先在浏览器里裁剪再上传：只传要用的五张表（不超过 ${formatBytes(LORE_UPLOAD_MAX_BYTES)}），Lore 的接口 Key、事件、日记与旧版本的正文都不离开浏览器`"
         :error="tooLarge ? `文件超过 ${formatBytes(LORE_FILE_MAX_BYTES)} 的上限` : undefined"
       >
+        <template #help>
+          在 Lore 设置页导出的 JSON，不超过 {{ formatBytes(LORE_FILE_MAX_BYTES) }}。
+          <Hint>
+            导出时不要包含召回事件：导入不使用，且文件会很大。文件先在浏览器中裁剪再上传，只上传所需的五张表（不超过
+            {{ formatBytes(LORE_UPLOAD_MAX_BYTES) }}），Lore 的接口
+            Key、事件、日记与旧版本正文不会离开浏览器。
+          </Hint>
+        </template>
         <!-- 不预览文件内容：预览要给它建 blob: 地址当图片加载，会被内容安全策略拦下 -->
         <UFileUpload
           v-model="file"
-          label="选择或拖进导出文件"
+          label="选择或拖入导出文件"
           description=".json"
           accept=".json,application/json"
           layout="list"
@@ -429,10 +440,11 @@ const disclosureCut = computed(
         />
       </UFormField>
       <template v-else>
-        <UFormField
-          label="Lore 地址"
-          help="填到服务的根路径。只支持 http 与 https，不能带账号密码、查询与片段；不跟随重定向"
-        >
+        <UFormField label="Lore 地址">
+          <template #help>
+            填写服务根路径，仅支持 http 与 https。
+            <Hint>不能包含账号密码、查询参数与片段；不跟随重定向。</Hint>
+          </template>
           <UInput
             v-model="url"
             placeholder="https://lore.example.com"
@@ -441,7 +453,7 @@ const disclosureCut = computed(
             :disabled="busy"
           />
         </UFormField>
-        <UFormField label="API Token" help="Lore 的 API_TOKEN，只用这一次，不保存">
+        <UFormField label="API Token" help="Lore 的 API_TOKEN，仅本次使用，不保存">
           <UInput
             v-model="token"
             type="password"
@@ -454,18 +466,18 @@ const disclosureCut = computed(
           v-if="tokenExposed"
           color="warning"
           variant="subtle"
-          title="这个地址是 http，又不是内网：Token 会明文传输，而它能清空整个 Lore。尽量换成 https"
+          title="此地址为 http 且不在内网：Token 将明文传输，而此 Token 可清空整个 Lore。请尽量改用 https。"
         />
       </template>
       <div class="grid gap-4 sm:grid-cols-2">
         <UFormField
           label="人格标识"
-          help="core://soul 导入成这个人格的设定，默认和命令行相同"
+          help="core://soul 导入为此人格的设定，默认与命令行相同"
           :error="personaProblem ?? undefined"
         >
           <UInput v-model="personaSlug" class="w-full font-mono" :disabled="busy" />
         </UFormField>
-        <UFormField label="人格名称" help="要写入新的 core://soul、这个人格又还不存在时用它新建">
+        <UFormField label="人格名称" help="写入新的 core://soul 且此人格不存在时，以此名称新建">
           <UInput v-model="personaName" class="w-full" maxlength="64" :disabled="busy" />
         </UFormField>
       </div>
@@ -474,7 +486,7 @@ const disclosureCut = computed(
 
       <div v-if="plan && effects" class="space-y-4">
         <p class="text-sm">
-          这份数据导出于 {{ formatTime(plan.exportedAt) }}：{{ plan.nodeCount }} 个节点，{{
+          数据导出于 {{ formatTime(plan.exportedAt) }}：{{ plan.nodeCount }} 个节点，{{
             plan.previousVersions
           }}
           个旧版本不迁移。
@@ -482,28 +494,28 @@ const disclosureCut = computed(
         <UAlert
           color="warning"
           variant="subtle"
-          title="只导入你自己导出的文件或者你自己的 Lore"
-          :description="`内容按受信来源写入。这次写入的节点里有 ${effects.bootNodes} 个会进启动上下文，每次会话开始都注入，宿主当成指令读${effects.credentialRefs.length ? `；正文引用了凭据 ${effects.credentialRefs.join('、')}，agent 能取用这些凭据` : ''}。来路不明的内容写进来，就成了你的 agent 的指令。`"
+          title="只导入本人导出的文件或本人的 Lore"
+          :description="`内容按受信来源写入。本次写入的节点中有 ${effects.bootNodes} 个进入启动加载，每次会话开始时注入，客户端将其作为指令读取${effects.credentialRefs.length ? `；正文引用了凭据 ${effects.credentialRefs.join('、')}，Agent 可取用这些凭据` : ''}。来源不明的内容写入后，会成为当前账号 Agent 的指令。`"
         />
         <div v-if="stale === 'confirm'" class="space-y-2">
           <UAlert
             color="error"
             variant="subtle"
-            :title="`这个文件比已写入的数据旧：已写入的数据时间是 ${formatTime(plan.staleSince!)}`"
-            description="同步只看内容是否相同，用旧文件写入会把内容改回去，这次还可能新建已经在 Lore 里删掉的节点。一般应该重新导出一份；再传一份新的导出就能同步回来。"
+            :title="`此文件早于已写入的数据（数据时间 ${formatTime(plan.staleSince!)}）`"
+            description="同步只比较内容是否相同，用旧文件写入会把内容改回旧版，还可能新建已在 Lore 中删除的节点。建议重新导出；之后上传新的导出文件可同步回来。"
           />
-          <UCheckbox v-model="confirmStale" label="我知道这个文件是旧的，仍然要写入" />
+          <UCheckbox v-model="confirmStale" label="确认此文件较旧，仍要写入" />
         </div>
         <p v-else-if="stale === 'older'" class="text-sm text-muted">
-          这个文件比已写入的数据（{{
+          此文件早于已写入的数据（{{
             formatTime(plan.dataTime!)
-          }}）旧。这次没有要写的，下面列出的「Lore 里已经没有」可能只是因为文件旧。
+          }}）。本次没有要写入的内容，下方列出的「Lore 中已不存在」可能只是因为文件较旧。
         </p>
         <UAlert
           v-if="!plan.secretAvailable"
           color="warning"
           variant="subtle"
-          title="这个实例没有配置主密钥：不能标 secret。配好 KIOKU_MASTER_KEY 再导入有 secret 的节点"
+          title="当前实例未配置主密钥，无法标记机密。请配置 KIOKU_MASTER_KEY 后再导入机密节点。"
         />
 
         <section class="space-y-1 text-sm">
@@ -514,16 +526,17 @@ const disclosureCut = computed(
             <template v-else>（不存在，新建为「{{ plan.persona.name }}」）</template>
           </p>
           <p v-else-if="plan.persona.exists">
-            这次没有要新写的 core://soul，不新建人格。已有的人格
-            <code>{{ plan.persona.slug }}</code> 照常用：新建的应用和还没有默认人格的应用设成它。
+            本次没有要新写入的 core://soul，不新建人格。已有人格
+            <code>{{ plan.persona.slug }}</code>
+            照常使用：新建应用和暂无默认人格的应用将设为此人格。
           </p>
           <p v-else>
-            这次没有要新写的 core://soul，人格
-            <code>{{ plan.persona.slug }}</code> 也不存在：不新建，新建的应用默认人格为空。
+            本次没有要新写入的 core://soul，人格
+            <code>{{ plan.persona.slug }}</code> 也不存在：不新建，新建应用的默认人格为空。
           </p>
           <p v-if="effects.writesPersona && otherPersonas.length" class="text-warning">
-            之前的导入写到了人格 {{ otherPersonas.join('、') }}：这次会另写一份
-            core://soul，之前那份不再同步。要接着同步就把人格标识改回去。
+            此前的导入写入了人格 {{ otherPersonas.join('、') }}：本次将另写一份
+            core://soul，此前那份不再同步。如需继续同步，请改回原人格标识。
           </p>
           <p v-for="mapping in effects.apps" :key="mapping.runtime" class="break-all">
             core://agent/{{ mapping.runtime }} →
@@ -533,12 +546,12 @@ const disclosureCut = computed(
             >
           </p>
           <p v-if="effects.appsGivenPersona.length">
-            这些应用还没有默认人格，会设成 {{ plan.persona.slug }}：{{
+            以下应用暂无默认人格，将设为 {{ plan.persona.slug }}：{{
               effects.appsGivenPersona.join('、')
             }}
           </p>
           <p v-if="effects.appsOtherPersona.length" class="text-warning">
-            这些应用在用别的人格，core://soul 不会进入它们的启动上下文：{{
+            以下应用使用其他人格，core://soul 不会进入其启动加载：{{
               effects.appsOtherPersona.join('、')
             }}
           </p>
@@ -555,7 +568,7 @@ const disclosureCut = computed(
               aria-label="筛选节点"
             />
           </div>
-          <p v-if="!visibleNodes.length" class="text-sm text-muted">没有这样的节点。</p>
+          <p v-if="!visibleNodes.length" class="text-sm text-muted">没有匹配的节点</p>
           <ul v-else class="max-h-[32rem] divide-y divide-default overflow-y-auto">
             <li
               v-for="node in visibleNodes"
@@ -574,7 +587,7 @@ const disclosureCut = computed(
                   <UTooltip :text="secretHint(node)" :disabled="!secretHint(node)">
                     <UCheckbox
                       size="xs"
-                      label="标 secret"
+                      label="标记机密"
                       :model-value="secretIds.has(node.uuid) && secretSelectable(node)"
                       :disabled="Boolean(secretHint(node))"
                       @update:model-value="toggleSecret(node.uuid, $event)"
@@ -610,7 +623,7 @@ const disclosureCut = computed(
                 </UBadge>
                 <UBadge size="sm" variant="subtle" color="neutral">P{{ target.priority }}</UBadge>
                 <UBadge v-if="effects.boot.has(target)" size="sm" variant="subtle" color="warning">
-                  进启动上下文
+                  进入启动加载
                 </UBadge>
                 <span v-if="currentNote(target)" class="break-all text-muted">
                   {{ currentNote(target) }}
@@ -623,10 +636,10 @@ const disclosureCut = computed(
                 {{ credentialNote(node) }}
               </p>
               <p v-if="node.credentialHints.extras" class="text-xs text-warning">
-                disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文
+                触发场景或关键词疑似包含明文凭据：机密只加密正文，这两项仍为明文
               </p>
               <p v-if="disclosureCut.has(node.uri)" class="text-xs text-muted">
-                disclosure 太长，写入时截断
+                触发场景过长，写入时截断
               </p>
             </li>
           </ul>
@@ -654,11 +667,11 @@ const disclosureCut = computed(
         </details>
 
         <section v-if="sync" class="space-y-2 text-sm">
-          <h3 class="font-medium">同步导入过的节点</h3>
+          <h3 class="font-medium">同步已导入的节点</h3>
           <p v-if="sync.current || sync.groups.length">
-            已是最新 {{ sync.current }} 条。不想同步某个节点，就在上面勾「这次不同步」。
+            已是最新 {{ sync.current }} 条。如不需要同步某节点，请在上方勾选「本次不同步」。
           </p>
-          <p v-else class="text-muted">还没有导入过的节点。</p>
+          <p v-else class="text-muted">暂无已导入的节点</p>
           <details v-for="group in sync.groups" :key="group.state" :open="group.state === 'update'">
             <summary class="cursor-pointer">{{ group.title }}（{{ group.lines.length }}）</summary>
             <ul class="mt-1 space-y-1 text-xs break-all text-muted">
@@ -668,8 +681,8 @@ const disclosureCut = computed(
         </section>
 
         <p class="text-sm">
-          这次会新建 {{ effects.create }} 条、按 Lore 更新
-          {{ effects.update }} 条。写到一半出错时已写的留着，重看计划就能接着来。
+          本次将新建 {{ effects.create }} 条、按 Lore 更新
+          {{ effects.update }} 条。写入中途出错时，已写入的内容保留，重新生成计划后可继续。
         </p>
       </div>
 
@@ -684,7 +697,7 @@ const disclosureCut = computed(
             :disabled="!ready"
             @click="replan"
           >
-            重看计划
+            重新生成计划
           </UButton>
           <UButton
             :icon="icons.importSpace"
@@ -696,7 +709,7 @@ const disclosureCut = computed(
           </UButton>
         </template>
         <UButton v-else type="submit" :icon="icons.search" :loading="busy" :disabled="!ready">
-          看计划
+          查看计划
         </UButton>
       </div>
     </form>

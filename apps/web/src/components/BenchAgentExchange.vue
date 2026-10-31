@@ -28,7 +28,7 @@ const PRE_CLASS =
         {{ exchange.user }}
       </p>
       <p v-if="exchange.end && !exchange.inHistory" class="text-xs text-warning">
-        这条消息没有进历史，模型之后看不到它。
+        此消息未进入历史，模型后续不可见。
       </p>
       <p v-else-if="exchange.attached" class="text-xs text-muted">{{ attachedNote(loop) }}</p>
     </div>
@@ -54,9 +54,9 @@ const PRE_CLASS =
       </details>
       <p v-if="round.text" class="wrap-anywhere whitespace-pre-wrap">{{ round.text }}</p>
       <p v-else-if="round.refusal" class="wrap-anywhere whitespace-pre-wrap text-warning">
-        模型拒绝了：{{ round.refusal }}
+        模型拒绝回答：{{ round.refusal }}
       </p>
-      <p v-else-if="!round.calls.length" class="text-muted">（模型没有返回文字）</p>
+      <p v-else-if="!round.calls.length" class="text-muted">（模型未返回文字）</p>
 
       <div
         v-for="call in round.calls"
@@ -64,13 +64,13 @@ const PRE_CLASS =
         class="space-y-2 rounded-lg border border-default px-3 py-2"
       >
         <p class="flex flex-wrap items-center gap-2 text-xs">
-          <span class="text-muted">模型要调</span>
-          <code class="font-medium break-all">{{ call.name || '（没有名字）' }}</code>
+          <span class="text-muted">模型请求调用</span>
+          <code class="font-medium break-all">{{ call.name || '（无名称）' }}</code>
           <UBadge v-if="call.trace?.kept" size="sm" color="neutral" variant="subtle">
             写入已保留
           </UBadge>
           <UBadge v-else-if="call.trace?.removed" size="sm" color="warning" variant="subtle">
-            写入已去掉
+            写入已移除
           </UBadge>
         </p>
         <details class="text-xs">

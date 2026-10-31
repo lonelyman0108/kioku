@@ -14,7 +14,7 @@ const { abandoned, abandonedInFlight, dismissAbandoned } = useBench()
       v-if="abandonedInFlight"
       color="warning"
       variant="subtle"
-      title="有一次真实运行中途作废了，请求还没回来：可能正在写入，结果回来后显示在这里。"
+      title="一次真实运行已中途作废，请求尚未返回，可能正在写入。结果返回后显示在此处。"
     />
     <section v-for="run in abandoned" :key="run.id" class="space-y-2">
       <UAlert

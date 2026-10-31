@@ -44,7 +44,7 @@ const changes = computed(() => (props.step.changes ? changeItems(props.step.chan
 const captured = computed(() => Object.entries(props.step.captured))
 const raw = computed(() => JSON.stringify(props.step.raw, null, 2))
 const emptyText = computed(() =>
-  props.step.kind === 'lifecycle' ? '（这一步没有交给宿主的文字）' : '（空）',
+  props.step.kind === 'lifecycle' ? '（此步没有交给客户端的文字）' : '（空）',
 )
 const PRE_CLASS =
   'mt-2 max-h-96 overflow-auto rounded bg-elevated p-3 font-mono text-xs wrap-anywhere whitespace-pre-wrap'
@@ -96,7 +96,7 @@ const PRE_CLASS =
       </details>
 
       <section v-if="step.uris?.length" class="space-y-1">
-        <h4 class="font-medium">结果里的 URI（{{ step.uris.length }}）</h4>
+        <h4 class="font-medium">结果中的 URI（{{ step.uris.length }}）</h4>
         <ul class="font-mono text-xs break-all">
           <li v-for="uri in step.uris" :key="uri">{{ uri }}</li>
         </ul>
@@ -105,13 +105,13 @@ const PRE_CLASS =
       <section v-if="session" class="space-y-1">
         <h4 class="font-medium">会话开始</h4>
         <p class="text-xs" :class="session.overLimit ? 'text-warning' : 'text-muted'">
-          {{ session.size }}<template v-if="session.overLimit">：超出的部分宿主可能截断</template>
+          {{ session.size }}<template v-if="session.overLimit">：超出部分客户端可能截断</template>
         </p>
         <p v-if="session.omitted.length" class="text-xs break-all text-muted">
-          超出预算、没有展开的节点：{{ session.omitted.join('、') }}
+          超出预算、未展开的节点：{{ session.omitted.join('、') }}
         </p>
         <p v-if="session.dropped.length" class="text-xs text-warning">
-          放不下，没有附上：{{ session.dropped.join('、') }}
+          超出上限，未附上：{{ session.dropped.join('、') }}
         </p>
       </section>
 
@@ -121,17 +121,17 @@ const PRE_CLASS =
       </p>
 
       <section v-if="responded" class="space-y-1">
-        <h4 class="font-medium">{{ mode === 'rollback' ? '真执行会改什么' : '这一步改了什么' }}</h4>
-        <p v-if="!step.changes" class="text-xs text-muted">这一步的改动列不出来。</p>
+        <h4 class="font-medium">{{ mode === 'rollback' ? '真实执行时的改动' : '此步的改动' }}</h4>
+        <p v-if="!step.changes" class="text-xs text-muted">无法列出此步的改动</p>
         <template v-else>
           <p v-if="turnNotBuffered(step)" class="text-xs text-muted">
-            这一轮没有写进对话缓冲：没配抽取模型，或者这把 Key 写不了对象层与情节层。
+            本轮未写入对话缓冲：未配置抽取模型，或当前 Key 无权写入联系人层与情节层。
           </p>
           <p v-if="!changes.length && !step.changes.turn" class="text-xs text-muted">
             {{
               changesNotListed(step.changes)
-                ? '没有带标记的改动。对象与对话缓冲没有标记，这个模式不列。'
-                : '没有改动。'
+                ? '无带标记的改动。联系人与对话缓冲不带标记，此模式下不列出。'
+                : '无改动'
             }}
           </p>
           <ul v-else class="space-y-1.5">
@@ -155,11 +155,11 @@ const PRE_CLASS =
               <p v-for="text in item.notes" :key="text" class="text-xs text-muted">{{ text }}</p>
             </li>
             <li v-if="changesNotListed(step.changes)" class="text-xs text-muted">
-              对象与对话缓冲没有标记，这个模式不列。
+              联系人与对话缓冲不带标记，此模式下不列出。
             </li>
           </ul>
           <div v-if="step.changes.turn" class="text-xs">
-            <p class="text-muted">这一轮（会话 {{ step.changes.turn.sessionId }}）：</p>
+            <p class="text-muted">本轮（会话 {{ step.changes.turn.sessionId }}）：</p>
             <pre :class="PRE_CLASS">{{
               `${step.changes.turn.user}\n---\n${step.changes.turn.reply}`
             }}</pre>
@@ -168,7 +168,7 @@ const PRE_CLASS =
       </section>
 
       <section v-if="captured.length" class="space-y-1">
-        <h4 class="font-medium">capture 取到的</h4>
+        <h4 class="font-medium">capture 取到的值</h4>
         <ul class="font-mono text-xs break-all">
           <li v-for="[name, value] in captured" :key="name">{{ name }} = {{ value }}</li>
         </ul>

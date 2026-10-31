@@ -160,19 +160,19 @@ describe('选择写回地址', () => {
   })
 
   it('说的是换了之后的情况', () => {
-    expect(KEY_REPLACED_NOTICE).toContain('换成了')
+    expect(KEY_REPLACED_NOTICE).toContain('已切换到')
     expect(KEY_REPLACED_NOTICE).toContain('权限可能不同')
-    expect(APP_REPLACED_NOTICE).toContain('换成了')
+    expect(APP_REPLACED_NOTICE).toContain('已切换到')
   })
 })
 
 describe('真实模式的确认文字', () => {
   it('列出写入是真的、对象删不掉、turn.end 排抽取', () => {
     const text = REAL_MODE_CONSEQUENCES.join('\n')
-    expect(text).toContain('写入是真的')
-    expect(text).toContain('新建的对象没有删除接口，只能合并')
+    expect(text).toContain('写入立即生效')
+    expect(text).toContain('新建的联系人没有删除接口，只能合并')
     expect(text).toContain('turn.end')
-    expect(text).toContain('排抽取')
+    expect(text).toContain('排入抽取')
   })
 })
 
@@ -182,12 +182,12 @@ describe('运行失败的说明', () => {
       '同时运行的回滚太多',
     )
     expect(runFailureMessage(new ApiError(500, '服务内部错误'), 'rollback')).toBe('服务内部错误')
-    expect(runFailureMessage(new TypeError('fetch'), 'rollback')).toContain('网络出错了')
+    expect(runFailureMessage(new TypeError('fetch'), 'rollback')).toContain('网络错误')
   })
 
   it('真实模式：5xx 与网络错误可能已经写了一部分，要说出来', () => {
-    expect(runFailureMessage(new ApiError(502, '网关'), 'real')).toContain('可能已经执行了一部分')
-    expect(runFailureMessage(new TypeError('fetch'), 'real')).toContain('可能已经执行了一部分')
+    expect(runFailureMessage(new ApiError(502, '网关'), 'real')).toContain('可能已执行一部分')
+    expect(runFailureMessage(new TypeError('fetch'), 'real')).toContain('可能已执行一部分')
   })
 
   it('真实模式：4xx 是写入之前就拒绝了，不能说可能写了', () => {
@@ -217,9 +217,7 @@ describe('工具目录读取失败的原因', () => {
     expect(catalogFailure(new ApiError(403, '只有应用主人能用测试台'))).toBe(
       '读取工具目录失败：只有应用主人能用测试台',
     )
-    expect(catalogFailure(new TypeError('fetch'))).toBe(
-      '读取工具目录失败：网络出错了，或者响应对不上',
-    )
+    expect(catalogFailure(new TypeError('fetch'))).toBe('读取工具目录失败：网络错误或响应格式不符')
   })
 })
 
@@ -231,8 +229,8 @@ describe('真实模式的运行中途作废', () => {
     const notice = abandonedRun(RUN, { result: made })!
     expect(notice.id).toBe(7)
     expect(notice.title).toContain('中途作废')
-    expect(notice.title).toContain('可能已经写入')
-    expect(notice.title).toContain('到活动里确认')
+    expect(notice.title).toContain('可能已写入')
+    expect(notice.title).toContain('请到变更记录确认')
     expect(notice.description).toContain('「存凭据」按「应用」的 Key「主 Key」真实执行')
     expect(notice.result).toBe(made)
     expect(notice.view).toBe('judged')
@@ -240,12 +238,12 @@ describe('真实模式的运行中途作废', () => {
 
   it('5xx 与网络错误：不知道执行到了哪一步，一样警告，带上原因', () => {
     const failed = abandonedRun(RUN, { error: new ApiError(502, '网关出错') })!
-    expect(failed.title).toContain('可能已经写入')
+    expect(failed.title).toContain('可能已写入')
     expect(failed.description).toContain('网关出错')
     expect(failed.result).toBeNull()
     const network = abandonedRun(RUN, { error: new TypeError('fetch') })!
-    expect(network.title).toContain('可能已经写入')
-    expect(network.description).toContain('网络出错了')
+    expect(network.title).toContain('可能已写入')
+    expect(network.description).toContain('网络错误')
   })
 
   it('4xx 是写入之前就拒绝了：没有要说的', () => {
@@ -276,7 +274,7 @@ describe('切换模式会清掉的记录', () => {
     expect(text).toContain('模型对话（2 条消息）')
     expect(text).toContain('运行失败的说明')
     expect(text).toContain('运行标记')
-    expect(text).toContain('已经写下的不会撤回')
+    expect(text).toContain('已写入的内容不会撤回')
   })
 
   it.each([
@@ -301,14 +299,14 @@ describe('切换模式会清掉的记录', () => {
   it('回滚模式：有保留的写入时说不会带过去', () => {
     const text = modeSwitchLoss('rollback', { ...NONE, timeline: 2, replay: 1 })!
     expect(text).toContain('调用台的时间线（2 条）')
-    expect(text).toContain('保留的写入不会带过去')
+    expect(text).toContain('保留的写入不会带到真实模式')
     expect(modeSwitchLoss('rollback', { ...NONE, timeline: 2 })).not.toContain('保留的写入')
   })
 
   it('回滚模式：只有模型对话也要说，它保留的写入一样不会带过去', () => {
     const text = modeSwitchLoss('rollback', { ...NONE, agentMessages: 3, replay: 1 })!
     expect(text).toContain('模型对话（3 条消息）')
-    expect(text).toContain('保留的写入不会带过去')
+    expect(text).toContain('保留的写入不会带到真实模式')
     expect(text).not.toContain('运行标记')
   })
 })
@@ -486,7 +484,7 @@ describe('重放分叉', () => {
   it('提示第几步（从 1 算）、哪一步和错误', () => {
     const notice = divergenceNotice(recordRun(log(), divergedAt(1)))!
     expect(notice.title).toContain('第 2 步（kioku_create a://2）')
-    expect(notice.title).toContain('没有执行')
+    expect(notice.title).toContain('未执行')
     expect(notice.description).toContain('版本已变化')
     expect(notice.description).toContain('清空')
     expect(notice.description).toContain('接受')
@@ -496,8 +494,8 @@ describe('重放分叉', () => {
   it('内部错误可能是暂时的（例如等锁超时），可以再试一次', () => {
     // 模型对话那边不说再运行一次
     expect(
-      divergenceNotice(recordRun(log(), divergedAt(0, true)), '可以接着发下一条')?.description,
-    ).toContain('可能是暂时的，可以接着发下一条；')
+      divergenceNotice(recordRun(log(), divergedAt(0, true)), '可继续发送下一条')?.description,
+    ).toContain('可能是暂时性错误，可继续发送下一条；')
     const notice = divergenceNotice(recordRun(log(), divergedAt(0, true)))!
     expect(notice.description).toContain('再运行一次')
   })
@@ -619,9 +617,9 @@ describe('时间线', () => {
 
 describe('这次会话的说明', () => {
   it('回滚模式：有没有保留的写入', () => {
-    expect(sessionUsage(emptySession(), 'rollback')).toContain('还没有保留的写入')
+    expect(sessionUsage(emptySession(), 'rollback')).toContain('暂无保留的写入')
     const text = sessionUsage(recorded(emptySession(), write('a://1')), 'rollback')
-    expect(text).toContain('保留了 1 步写入')
+    expect(text).toContain('已保留 1 步写入')
     expect(text).toContain(`上限 ${BENCH_MAX_REPLAY_STEPS} 步`)
     expect(text).toContain('不会落库')
   })

@@ -25,6 +25,7 @@ import BenchAgentBusy from './BenchAgentBusy.vue'
 import BenchContextForm from './BenchContextForm.vue'
 import BenchField from './BenchField.vue'
 import BenchStepView from './BenchStepView.vue'
+import Hint from './Hint.vue'
 
 // 调用台：调一个工具或发一个生命周期事件，看宿主收到什么。工具目录来自真实的 tools/list。
 // 连续调用：回滚模式下这次会话的写入靠重放带到后面的调用，时间线列出这次会话的调用
@@ -159,14 +160,14 @@ const usage = computed(() => sessionUsage(session.value, mode.value))
 // 运行期间不能接受或清空：结果回来时，第几步与这次的写入都是按发出请求时的日志算的
 const divergedActions = computed(() => [
   {
-    label: '接受：去掉这一步',
+    label: '接受并移除此步',
     color: 'neutral' as const,
     variant: 'subtle' as const,
     disabled: running.value,
     onClick: acceptDiverged,
   },
   {
-    label: '清空这次会话',
+    label: '清空当前会话',
     color: 'error' as const,
     variant: 'subtle' as const,
     disabled: running.value,
@@ -263,18 +264,18 @@ function onRunClick() {
             <p v-if="target.description" class="text-xs text-muted">{{ target.description }}</p>
             <template v-if="target.group === 'tool'">
               <p class="text-xs text-muted">
-                工具调用不带会话上下文，真实的 MCP 也不带：按这把 Key 的全部权限读写。
+                工具调用不带会话上下文，与真实 MCP 一致，按当前 Key 的全部权限读写。
               </p>
               <p v-if="app?.runtimeFamily === 'astrbot'" class="text-xs text-warning">
-                不要给群聊 bot 接 MCP：群里的人能借工具读到这把 Key
-                读得到的一切。这里只是测工具本身。
+                请勿为群聊 Bot 接入 MCP：群成员可借工具读取当前 Key
+                能读取的全部内容。此处仅测试工具本身。
               </p>
             </template>
             <template v-else-if="target.usesContext">
               <p v-if="draft.json" class="text-xs text-muted">
-                JSON 模式只发这段 JSON 里的 context，上面的会话上下文不起作用。
+                JSON 模式仅发送此 JSON 中的 context，上方的会话上下文不生效。
               </p>
-              <p v-else class="text-xs text-muted">这个调用带上面的会话上下文。</p>
+              <p v-else class="text-xs text-muted">此调用带上方的会话上下文。</p>
             </template>
           </div>
 
@@ -298,10 +299,13 @@ function onRunClick() {
                 @update:is-null="(v) => (draft.state.nulls[field.name] = v)"
               />
             </template>
-            <p v-else class="text-sm text-muted">这个工具没有参数。</p>
+            <p v-else class="text-sm text-muted">此工具无参数</p>
             <p v-if="draft.json || target.fields?.length" class="text-xs text-muted">
-              字符串里可以写 <code>${run}</code>（每次运行不同的标记）与 <code>${expires}</code>（6
-              小时后，给 valid_to 用）。校验由服务端做，不合法的请求也会发出去。
+              字符串中可使用 <code>${run}</code> 与 <code>${expires}</code>，校验由服务端完成。
+              <Hint>
+                <code>${run}</code> 是每次运行不同的标记。<code>${expires}</code> 是 6
+                小时后的时间，用于 valid_to。不合法的请求也会发出。
+              </Hint>
             </p>
           </template>
 
@@ -309,7 +313,7 @@ function onRunClick() {
             v-if="contextDiffers"
             color="warning"
             variant="subtle"
-            title="这段 JSON 里的 context 和上面的会话上下文不同：这次按 JSON 里的执行，没写就是不带。"
+            title="此 JSON 中的 context 与上方的会话上下文不同：本次按 JSON 执行，未写 context 即不带。"
           />
           <UAlert v-if="unavailable" color="warning" variant="subtle" :title="unavailable" />
           <UAlert v-if="formError" color="warning" variant="subtle" :title="formError" />
@@ -335,10 +339,10 @@ function onRunClick() {
                 variant="subtle"
                 @click="showForm"
               >
-                用表单
+                使用表单
               </UButton>
               <UButton v-else :icon="icons.json" color="neutral" variant="subtle" @click="showJson">
-                写 JSON
+                使用 JSON
               </UButton>
             </template>
             <UButton
@@ -355,7 +359,7 @@ function onRunClick() {
 
         <section class="space-y-2">
           <div class="flex flex-wrap items-center gap-2">
-            <h3 class="text-sm font-medium">这次会话</h3>
+            <h3 class="text-sm font-medium">当前会话</h3>
             <UButton
               class="ml-auto"
               size="xs"
@@ -400,7 +404,7 @@ function onRunClick() {
                   写入已保留
                 </UBadge>
                 <UBadge v-else-if="entry.removed" size="sm" color="warning" variant="subtle">
-                  写入已去掉
+                  写入已移除
                 </UBadge>
                 <span v-if="entry.step.raw !== null" class="text-muted">
                   {{ entry.step.ms }} ms
@@ -409,7 +413,7 @@ function onRunClick() {
             </li>
           </ol>
           <p v-if="session.dropped" class="text-xs text-muted">
-            更早的 {{ session.dropped }} 条不再显示，保留的写入不受影响。
+            更早的 {{ session.dropped }} 条不再显示，已保留的写入不受影响。
           </p>
         </section>
 
