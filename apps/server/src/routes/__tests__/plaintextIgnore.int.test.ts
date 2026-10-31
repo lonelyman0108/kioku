@@ -301,6 +301,21 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     expect(await hashOf(m.id)).toBeNull()
   })
 
+  it('判断只看比较：哈希和现在的正文对不上就不算忽略，别的路径没清掉哈希也不会判错', async () => {
+    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    await ok(await ignore(m))
+    // 不经过服务改正文，哈希留着：回滚到旧版本之后的写入就是这样
+    await inSpace((tx) =>
+      tx.update(memories).set({ content: '访客网络密码：guest-9999' }).where(eq(memories.id, m.id)),
+    )
+    expect((await suspects()).list).toEqual([m.uri])
+    expect(await listed('ignored')).toEqual([])
+    const read = ConsoleMemoryView.parse(
+      await ok(await send('GET', '/memories?uri=notes%3A%2F%2Fwifi')),
+    )
+    expect(read.plaintextIgnored).toBe(false)
+  })
+
   it('改成 secret 时清掉哈希（密文的哈希不留在明文列里），之后不算；降级回来提示也回来', async () => {
     const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
     await ok(await ignore(m))
