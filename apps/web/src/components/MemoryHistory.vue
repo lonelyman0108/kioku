@@ -8,7 +8,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import { icons } from '../icons'
-import { actorLabel, eventLabel, layerLabels, sensitivityLabels } from '../labels'
+import { actorLabel, eventLabel, layerLabels, memoryViaLabels, sensitivityLabels } from '../labels'
 import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
 
@@ -199,7 +199,9 @@ async function restore() {
         恢复此版本只改正文、触发场景、优先级与关键词。<Hint>
           URI、层、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。层或归属与当前不同、敏感级高于当前的版本无法恢复。
         </Hint>
-        <template v-if="history.data.value?.truncated">仅列出最近 500 次改动。</template>
+        <template v-if="history.data.value?.truncated">
+          仅列出最近 500 次改动与 100 次查看。
+        </template>
       </p>
       <ol class="space-y-3">
         <li
@@ -214,6 +216,9 @@ async function restore() {
             />
             <span class="font-medium">{{ eventLabel(event.type).label }}</span>
             <span class="text-muted">{{ actorLabel(event.actor).name }}</span>
+            <span v-if="event.via" class="text-xs text-muted">
+              {{ memoryViaLabels[event.via] ?? event.via }}
+            </span>
             <UBadge v-if="isCurrent(event)" size="sm" variant="subtle">当前版本</UBadge>
             <time
               :datetime="event.createdAt"

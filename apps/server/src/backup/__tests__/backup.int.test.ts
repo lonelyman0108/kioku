@@ -5,7 +5,7 @@ import { join } from 'node:path'
 import { Writable } from 'node:stream'
 import { fileURLToPath } from 'node:url'
 
-import type { CredentialValues, MemoryView } from '@kioku/contracts'
+import type { CredentialValues, MemoryList, MemoryView } from '@kioku/contracts'
 import { and, eq, ne, sql } from 'drizzle-orm'
 import { readMigrationFiles } from 'drizzle-orm/migrator'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -170,6 +170,21 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       glossary: ['书房存储'],
     })
     await write('POST', { uri: 'home://notes', content: '第一行\n第二行 "引号" \\ 反斜杠 😀' })
+    // 忽略过明文提示的：哈希在记忆表上，要跟着恢复
+    const dismissed = await write('POST', {
+      uri: 'home://dismissed',
+      content: 'token = 分词器的说明',
+    })
+    expect(
+      (
+        await send(
+          'POST',
+          `/v1/spaces/${ws.spaceId}/memories/ignore-plaintext`,
+          { memoryId: dismissed.id, expectedVersion: dismissed.version },
+          cookie,
+        )
+      ).status,
+    ).toBe(200)
     await write('PATCH', { uri: 'home://notes', content: '改过的笔记\t带制表符' })
     await write('POST', { uri: 'home://old', content: '要删掉的' })
     expect(
@@ -422,12 +437,22 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       { cookie },
     )
     expect(((await revealed.json()) as CredentialValues).values).toEqual({ password: 'nas-pass' })
-    // 序列推到了写回的最大值：之后写下的历史接着编号
+    // 明文提示的忽略跟着恢复，还对得上正文
+    const dismissed = await send(
+      'GET',
+      `/v1/spaces/${ws.spaceId}/memories/list?plaintext=ignored`,
+      undefined,
+      { cookie },
+    )
+    expect(((await dismissed.json()) as MemoryList).items.map((m) => m.uri)).toEqual([
+      'home://dismissed',
+    ])
+    // 序列推到了写回的最大值：之后写下的历史接着编号。上面 Key 读 secret 记了一条访问事件，这次修改是下一条
     await write('PATCH', { uri: 'home://nas', content: '恢复之后改的' })
     const [after] = await inSpace((tx) =>
       tx.execute<{ max: number }>(sql`select max(id)::int as max from memory_events`),
     )
-    expect(after!.max).toBe(events!.max + 1)
+    expect(after!.max).toBe(events!.max + 2)
     // 向量不在备份里，由补齐任务重新生成
     expect(await embeddings()).toBe(0)
     await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])

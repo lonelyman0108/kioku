@@ -2,8 +2,10 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { getEventListeners } from 'node:events'
 
 import type {
+  ActivityList,
   AppInfo,
   ConsoleCredentialList,
+  ConsoleMemoryView,
   CredentialAccess,
   CredentialEventList,
   CredentialValues,
@@ -14,6 +16,7 @@ import type {
   GroupPersonaRuleList,
   Me,
   MemoryHistory,
+  MemoryList,
   MemoryView,
   PersonaInfo,
   RecallStats,
@@ -25,13 +28,21 @@ import type {
   SubjectList,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { decryptSecret } from '../../crypto/envelope'
 import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
-import { credentialEvents, memories, settings, spaces, subjects } from '../../db/schema'
+import {
+  credentialEvents,
+  memories,
+  memoryEvents,
+  settings,
+  spaces,
+  subjects,
+} from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
@@ -691,7 +702,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         layer: 'persona',
         glossary: ['口吻'],
       })
-      expect((await read('home://wifi')).content).toBe('无线密码 hunter2-secret')
+      // 管理界面默认不给机密正文；用目标实例的主密钥解得开，见下面
+      expect((await read('home://wifi')).content).toBeNull()
       const [wifi] = await withSpace(database.db, newSpace, (tx) =>
         tx.select().from(memories).where(eq(memories.path, 'wifi')),
       )
@@ -1023,6 +1035,133 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         providers: 0,
       },
     })
+  })
+
+  it('导出带走的 secret 记忆留访问事件：经由 export，只进这条记忆的历史；没导出的不记', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'owner')
+    const cookie = { cookie: alice.cookie }
+    const space = `/v1/spaces/${alice.spaceId}`
+    const remember = (body: object, who = cookie) =>
+      ok<MemoryView>(send(source, 'POST', `${space}/memories`, body, who), 201)
+    const shared = await remember({
+      uri: 'kb://door',
+      content: '机房门禁 8842',
+      layer: 'base',
+      sensitivity: 'secret',
+    })
+    const mine = await remember({
+      uri: 'notes://vault',
+      content: '保险柜 1234',
+      sensitivity: 'secret',
+    })
+    await remember({ uri: 'notes://plain', content: '普通的正文' })
+    // 别的成员私人层的、已删除的不在文件里
+    await remember(
+      { uri: 'notes://hers', content: 'bob 的', sensitivity: 'secret' },
+      { cookie: bob.cookie },
+    )
+    const gone = await remember({ uri: 'notes://gone', content: '删了', sensitivity: 'secret' })
+    await ok(
+      send(
+        source,
+        'DELETE',
+        `${space}/memories?uri=${encodeURIComponent(gone.uri)}`,
+        undefined,
+        cookie,
+      ),
+      204,
+    )
+
+    await exportSpace(source, alice.spaceId, alice.cookie)
+    const events = await withSpace(database.db, alice.spaceId, (tx) =>
+      tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
+    )
+    expect(events.map((e) => e.memoryId).sort()).toEqual([shared.id, mine.id].sort())
+    for (const event of events) {
+      expect(event).toMatchObject({
+        actorAccountId: alice.accountId,
+        actorKeyId: null,
+        context: { via: 'export' },
+        after: null,
+        before: { sensitivity: 'secret', content: null },
+      })
+    }
+    expect(JSON.stringify(events)).not.toContain('8842')
+
+    const history = await ok<MemoryHistory>(
+      send(source, 'GET', `${space}/memories/history?id=${shared.id}`, undefined, cookie),
+    )
+    expect(history.events.at(-1)).toMatchObject({
+      type: 'access',
+      via: 'export',
+      actor: { accountName: 'alice' },
+    })
+    const activity = await ok<ActivityList>(
+      send(source, 'GET', `${space}/activity`, undefined, cookie),
+    )
+    expect(activity.items.map((i) => i.type)).not.toContain('access')
+  })
+
+  it('明文提示的忽略不随文件走：历史不带过去，到了那边查不到是谁忽略的，提示要回来；访问记录也不带', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const cookie = { cookie: alice.cookie }
+    const space = `/v1/spaces/${alice.spaceId}`
+    const note = await ok<ConsoleMemoryView>(
+      send(
+        source,
+        'POST',
+        `${space}/memories`,
+        { uri: 'notes://api', content: 'token = abc' },
+        cookie,
+      ),
+      201,
+    )
+    await ok(
+      send(
+        source,
+        'POST',
+        `${space}/memories/ignore-plaintext`,
+        { memoryId: note.id, expectedVersion: note.version },
+        cookie,
+      ),
+    )
+    const vault = await ok<ConsoleMemoryView>(
+      send(
+        source,
+        'POST',
+        `${space}/memories`,
+        { uri: 'notes://vault', content: '门禁 8842', sensitivity: 'secret' },
+        cookie,
+      ),
+      201,
+    )
+    await ok(send(source, 'POST', `${space}/memories/reveal`, { memoryId: vault.id }, cookie))
+
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    const parsed = await contents(file)
+    const exported = parsed.memories.find((m) => m.uri === note.uri)!
+    expect(Object.keys(exported).filter((k) => k.toLowerCase().includes('ignored'))).toEqual([])
+    // 不只是解析时丢掉了：文件的原文里也没有这一列
+    expect((await plainOf(file)).toString('utf8')).not.toContain('Ignored')
+
+    const imported = await ok<SpaceImportResult>(importRequest(source, alice.cookie, file), 201)
+    const list = (plaintext: string) =>
+      ok<MemoryList>(
+        send(
+          source,
+          'GET',
+          `/v1/spaces/${imported.spaceId}/memories/list?plaintext=${plaintext}`,
+          undefined,
+          cookie,
+        ),
+      )
+    expect((await list('true')).items.map((m) => m.uri)).toEqual([note.uri])
+    expect((await list('ignored')).items).toEqual([])
+    const events = await withSpace(database.db, imported.spaceId, (tx) =>
+      tx.select({ type: memoryEvents.eventType }).from(memoryEvents),
+    )
+    expect(new Set(events.map((e) => e.type))).toEqual(new Set(['import']))
   })
 
   it('导出人关掉的 Dream 整理画像层与私人层跟着文件走：导入人在新空间里也关着；文件格式升到 2，格式 1 的旧文件按开着，更新的格式拒收', async () => {
@@ -1972,7 +2111,143 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     })
   })
 
-  it('读完最后一批时客户端已经断开：文件交不出去，不记凭据的访问事件', async () => {
+  describe('导出写访问事件时，读完之后记忆又变了', () => {
+    // 另一条连接锁住这一行，发出导出，等它确实卡在这把锁上（读文件不用行锁，卡住的只能是写事件那一步），
+    // 做完 between 再提交、放开锁
+    const whileRowLocked = async (
+      spaceId: string,
+      memoryId: string,
+      leaving: () => Response | Promise<Response>,
+      between: (tx: postgres.TransactionSql) => Promise<unknown>,
+    ): Promise<Response> => {
+      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
+      try {
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${spaceId}, true)`
+          await tx`select 1 from memories where id = ${memoryId} for update`
+          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
+            { pid: number },
+          ]
+          pending = Promise.resolve(leaving())
+          for (let i = 0; ; i++) {
+            const [row] = await side<{ n: number }[]>`
+              select count(*)::int as n from pg_stat_activity
+              where ${pid}::int = any(pg_blocking_pids(pid))`
+            if (row!.n > 0) break
+            if (i >= 400) throw new Error('导出没有等在这把锁上')
+            await new Promise((r) => setTimeout(r, 25))
+          }
+          await between(tx)
+        })
+        return await pending!
+      } finally {
+        await pending?.catch(() => {})
+        await side.end()
+      }
+    }
+    const seedTwo = async () => {
+      const alice = await bootstrap(source, 'alice')
+      const remember = (uri: string) =>
+        ok<MemoryView>(
+          send(
+            source,
+            'POST',
+            `/v1/spaces/${alice.spaceId}/memories`,
+            { uri, content: `${uri} 的正文`, sensitivity: 'secret', disclosure: '读文件时的' },
+            { cookie: alice.cookie },
+          ),
+          201,
+        )
+      return {
+        alice,
+        first: await remember('notes://first'),
+        second: await remember('notes://second'),
+      }
+    }
+    const accessEvents = (spaceId: string) =>
+      withSpace(database.db, spaceId, (tx) =>
+        tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
+      )
+
+    it('期间被硬删除：跳过这一条，不影响导出，别的照记', async () => {
+      const { alice, first, second } = await seedTwo()
+      const res = await whileRowLocked(
+        alice.spaceId,
+        first.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) => tx`delete from memories where id = ${first.id}`,
+      )
+      expect(res.status, await res.clone().text()).toBe(200)
+      const parsed = await contents(Buffer.from(await res.arrayBuffer()))
+      expect(parsed.memories.map((m) => m.uri).sort()).toEqual(['notes://first', 'notes://second'])
+      expect((await accessEvents(alice.spaceId)).map((e) => e.memoryId)).toEqual([second.id])
+    })
+
+    it('这一批全都被硬删除：什么都不写，也不影响导出', async () => {
+      const alice = await bootstrap(source, 'alice')
+      const only = await ok<MemoryView>(
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${alice.spaceId}/memories`,
+          { uri: 'notes://only', content: '只有一条', sensitivity: 'secret' },
+          { cookie: alice.cookie },
+        ),
+        201,
+      )
+      const res = await whileRowLocked(
+        alice.spaceId,
+        only.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) => tx`delete from memories where id = ${only.id}`,
+      )
+      expect(res.status, await res.clone().text()).toBe(200)
+      await res.arrayBuffer()
+      expect(await accessEvents(alice.spaceId)).toEqual([])
+    })
+
+    it('期间被改过：事件用现在的快照，不把读文件时的旧内容写回历史', async () => {
+      const { alice, first } = await seedTwo()
+      const res = await whileRowLocked(
+        alice.spaceId,
+        first.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) =>
+          tx`update memories set disclosure = '转存之后的', version = version + 1 where id = ${first.id}`,
+      )
+      expect(res.status).toBe(200)
+      // 文件读完才放掉导出的名额
+      await res.arrayBuffer()
+      const event = (await accessEvents(alice.spaceId)).find((e) => e.memoryId === first.id)!
+      expect(event.before).toMatchObject({
+        disclosure: '转存之后的',
+        version: first.version + 1,
+        content: null,
+      })
+      expect(JSON.stringify(event)).not.toContain('读文件时的')
+    })
+
+    it('期间被降级：事件的快照也不带正文', async () => {
+      const { alice, first } = await seedTwo()
+      const res = await whileRowLocked(
+        alice.spaceId,
+        first.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) =>
+          tx`update memories set sensitivity = 'private', content = '降级之后的明文',
+            ciphertext = null, wrapped_key = null, key_id = null where id = ${first.id}`,
+      )
+      expect(res.status).toBe(200)
+      // 文件读完才放掉导出的名额
+      await res.arrayBuffer()
+      const event = (await accessEvents(alice.spaceId)).find((e) => e.memoryId === first.id)!
+      expect(event.before).toMatchObject({ sensitivity: 'private', content: null })
+      expect(JSON.stringify(event)).not.toContain('降级之后的明文')
+    })
+  })
+
+  it('读完最后一批时客户端已经断开：文件交不出去，不记凭据与 secret 记忆的访问事件', async () => {
     const alice = await bootstrap(source, 'alice')
     await ok(
       send(
@@ -1980,6 +2255,16 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         'POST',
         `/v1/spaces/${alice.spaceId}/credentials`,
         { identifier: 'nas', name: 'NAS', source: { kind: 'hosted', values: { password: 'pw' } } },
+        { cookie: alice.cookie },
+      ),
+      201,
+    )
+    await ok(
+      send(
+        source,
+        'POST',
+        `/v1/spaces/${alice.spaceId}/memories`,
+        { uri: 'notes://vault', content: '保险柜 1234', sensitivity: 'secret' },
         { cookie: alice.cookie },
       ),
       201,
@@ -1997,6 +2282,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       tx.select().from(credentialEvents).where(eq(credentialEvents.eventType, 'access')),
     )
     expect(accessed).toEqual([])
+    const read = await withSpace(database.db, alice.spaceId, (tx) =>
+      tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
+    )
+    expect(read).toEqual([])
     await slotFree()
   })
 

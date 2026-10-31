@@ -4,6 +4,7 @@ import {
   looksLikePlaintextCredential,
   maskPlaintextCredentials,
   placeholderIdentifiers,
+  replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../placeholders'
 
@@ -82,7 +83,65 @@ describe('明文凭据提醒', () => {
   })
 })
 
+describe('把值换掉', () => {
+  const swap = (text: string, value: string) => replaceOutsidePlaceholders(text, value, '<新>')
+
+  it('出现几处换几处，数得对', () => {
+    expect(swap('abcd 和 abcd', 'abcd')).toEqual({ text: '<新> 和 <新>', replaced: 2 })
+    expect(swap('没有', 'abcd')).toEqual({ text: '没有', replaced: 0 })
+  })
+
+  it('占位符不动：值是 cred、标识或字段名时都不改坏', () => {
+    expect(swap('{{cred:foo}} 的 cred', 'cred')).toEqual({
+      text: '{{cred:foo}} 的 <新>',
+      replaced: 1,
+    })
+    expect(swap('{{cred:prod-db#password}} 在 prod-db', 'prod-db')).toEqual({
+      text: '{{cred:prod-db#password}} 在 <新>',
+      replaced: 1,
+    })
+    expect(swap('{{cred:a#password}}password{{cred:b}}', 'password')).toEqual({
+      text: '{{cred:a#password}}<新>{{cred:b}}',
+      replaced: 1,
+    })
+    expect(swap('只在 {{cred:prod-db}} 里', 'prod-db').replaced).toBe(0)
+  })
+
+  it('跨过占位符边界的不算；格式不对的不算占位符，里面的值照样换', () => {
+    expect(swap('x{{cred:a}}y', 'x{{cred')).toEqual({ text: 'x{{cred:a}}y', replaced: 0 })
+    expect(swap('{{cred:BAD hunter2}}', 'hunter2')).toEqual({
+      text: '{{cred:BAD <新>}}',
+      replaced: 1,
+    })
+  })
+
+  it('替换用的文字里的 $ 不当特殊符号', () => {
+    expect(replaceOutsidePlaceholders('abcd', 'abcd', "$&$'")).toEqual({
+      text: "$&$'",
+      replaced: 1,
+    })
+  })
+})
+
 describe('提示语打码', () => {
+  it('盖过之后规则不再算明文', () => {
+    for (const text of [
+      '路由器密码：hunter2 怎么改',
+      'token=abc,password: hunter2',
+      '密码：a1\n口令：b2',
+    ]) {
+      expect(looksLikePlaintextCredential(text), text).toBe(true)
+      expect(looksLikePlaintextCredential(maskPlaintextCredentials(text)), text).toBe(false)
+    }
+  })
+
+  it('遮盖符开头的真密码照样盖掉', () => {
+    expect(maskPlaintextCredentials('密码：***hunter2***')).toBe('密码：***')
+    expect(maskPlaintextCredentials('token=***x\n下一行')).toBe('token=***\n下一行')
+    // 已经盖过的不用再盖
+    expect(maskPlaintextCredentials('密码：***')).toBe('密码：***')
+  })
+
   it('从值开始盖到行尾，下一行照常', () => {
     expect(maskPlaintextCredentials('路由器密码：hunter2 怎么改')).toBe('路由器密码：***')
     expect(maskPlaintextCredentials('token=abc.def\n下一行')).toBe('token=***\n下一行')

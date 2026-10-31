@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
-import { PLAINTEXT_CREDENTIAL, type MemoryView, type Sensitivity } from '@kioku/contracts'
+import { PLAINTEXT_CREDENTIAL, type ConsoleMemoryView, type Sensitivity } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
@@ -16,6 +16,12 @@ import { buildKeywordIndex } from '../keywords'
 import { layerLabels, provenanceLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import type { CredentialLinks } from '../markdown'
 import { placeholderOf } from '../placeholders'
+import {
+  revealedAfterWrite,
+  stillRevealed,
+  withRevealed,
+  type RevealedContent,
+} from '../secretContent'
 import {
   earliestValidTo,
   formatRelative,
@@ -35,9 +41,9 @@ const props = defineProps<{ spaceId: string; uri: string }>()
 const emit = defineEmits<{
   deleted: [uri: string]
   createChild: [parentUri: string]
-  moved: [memory: MemoryView, from: string]
+  moved: [memory: ConsoleMemoryView, from: string]
   // 保存或恢复了旧版本：层、敏感级、priority、disclosure 可能变了
-  changed: [memory: MemoryView]
+  changed: [memory: ConsoleMemoryView]
   open: [uri: string]
 }>()
 const toast = useToast()
@@ -62,12 +68,19 @@ const form = reactive({
 
 // 表单是从哪一版载入的：改动与保存时的版本号都以它为准，而不是缓存里最新的那份。
 // 否则后台重新拉取到别人改过的新版本，会悄悄覆盖还没保存的修改，或者让保存绕过冲突检查
-const base = ref<MemoryView | null>(null)
+const base = ref<ConsoleMemoryView | null>(null)
+
+// 显式查看拿到的机密正文，只放在这里，不写进查询的缓存（见 secretContent.ts）。这个组件按 URI 重建，切走就丢
+const revealed = ref<RevealedContent | null>(null)
+const revealing = ref(false)
 
 // 有效到在输入框里的样子：只到分钟，没改过时和载入的那一版比较也按分钟
-const validToInput = (m: MemoryView) => (m.validTo ? toLocalInput(m.validTo) : '')
+const validToInput = (m: ConsoleMemoryView) => (m.validTo ? toLocalInput(m.validTo) : '')
 
-function load(m: MemoryView) {
+function load(next: ConsoleMemoryView) {
+  // 换了一条或有了新版本，查看过的就不算了，要再查看一次
+  if (!stillRevealed(next, revealed.value)) revealed.value = null
+  const m = withRevealed(next, revealed.value)
   base.value = m
   form.content = m.content ?? ''
   form.disclosure = m.disclosure ?? ''
@@ -109,7 +122,7 @@ watch(
 )
 
 // 载入服务器上的一版；比表单那一版新时通知页面，树上的标记与列表跟着变（别处改过、或从历史里恢复了）
-function adopt(m: MemoryView) {
+function adopt(m: ConsoleMemoryView) {
   const b = base.value
   const newer = !!b && (m.id !== b.id || m.version > b.version)
   load(m)
@@ -117,7 +130,7 @@ function adopt(m: MemoryView) {
 }
 
 // 服务器上最新的那一版。表单有改动时上面的监听会跳过新版本，开始或取消编辑时要从它载入
-function latest(): MemoryView | null {
+function latest(): ConsoleMemoryView | null {
   const [m, b] = [memory.data.value, base.value]
   if (!m || !b) return m ?? b
   return m.id !== b.id || m.version >= b.version ? m : b
@@ -148,11 +161,39 @@ const readOnly = computed(() => (base.value ? permissions.readOnlyReason(base.va
 // 默认是阅读状态，点「编辑」才改原文
 const mode = ref<'read' | 'edit'>('read')
 const preview = ref(false)
+// 编辑时载入了新版本，查看过的正文不算了：回到阅读状态，再查看一次才能编辑
+watch(
+  () => base.value?.contentHidden,
+  (hidden) => {
+    if (hidden) mode.value = 'read'
+  },
+)
+
+// 查看机密的正文：服务端记一次访问。结果只放在这个组件里
+async function revealContent() {
+  const m = base.value
+  if (!m || revealing.value) return
+  revealing.value = true
+  try {
+    const view = await api.revealMemory(props.spaceId, m.id)
+    // 等结果的时候这条又有了更新的版本，这份已经旧了：再点一次
+    const now = base.value
+    if (!now || view.id !== now.id || view.version < now.version) return
+    revealed.value = { id: view.id, version: view.version, content: view.content ?? '' }
+    adopt(view)
+  } catch (err) {
+    failed(err, '查看失败')
+  } finally {
+    revealing.value = false
+  }
+}
 // 有效到最早能选的时间（见 earliestValidTo）：开始编辑、聚焦选择器与保存之前重新算
 const minValidTo = ref('')
 function startEditing() {
   const m = latest()
   if (m) adopt(m)
+  // 表单靠读到的正文来编辑：机密要先查看（可能刚发现有了新版本，查看过的不算了）
+  if (base.value?.contentHidden) return
   minValidTo.value = earliestValidTo()
   mode.value = 'edit'
 }
@@ -272,8 +313,10 @@ function restoreCaret() {
 const historyOpen = ref(false)
 const moveOpen = ref(false)
 // 移动或改层之后把结果写进缓存：只改层时编辑器跟上新的层，移动后打开新 URI 时不用再读一次
-async function onMoved(next: MemoryView, from: string) {
+async function onMoved(next: ConsoleMemoryView, from: string) {
   const key = ['memory', props.spaceId, next.uri]
+  // 移动不改正文，查看过的接着算
+  if (revealed.value?.id === next.id) revealed.value = { ...revealed.value, version: next.version }
   // 先取消进行中的重新拉取，免得晚到的旧数据盖掉移动的结果
   await queryClient.cancelQueries({ queryKey: key, exact: true })
   queryClient.setQueryData(key, next)
@@ -313,7 +356,7 @@ const sensitivityItems = computed(() =>
 )
 const saving = ref(false)
 // 要删除的那一版，在打开确认框时记下：确认期间编辑器可能载入了删除后重建的另一条，不能把它一起删掉
-const deleting = ref<MemoryView | null>(null)
+const deleting = ref<ConsoleMemoryView | null>(null)
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -386,8 +429,10 @@ async function save(allowPlaintext = false) {
     // 正在进行的重新拉取可能带回保存之前的版本，先取消，再把保存结果写进缓存
     await queryClient.cancelQueries({ queryKey: queryKey.value })
     queryClient.setQueryData(queryKey.value, next)
-    base.value = next
-    if (form.content === sent.content) form.content = next.content ?? ''
+    revealed.value = revealedAfterWrite(next, sent.content)
+    const saved = withRevealed(next, revealed.value)
+    base.value = saved
+    if (form.content === sent.content) form.content = saved.content ?? ''
     if (form.disclosure === sent.disclosure) form.disclosure = next.disclosure ?? ''
     if (form.priority === sent.priority) form.priority = next.priority
     if (form.sensitivity === sent.sensitivity) form.sensitivity = next.sensitivity
@@ -478,9 +523,20 @@ async function remove() {
       </UBadge>
       <div class="ml-auto flex items-center gap-1">
         <template v-if="mode === 'read'">
-          <UButton v-if="!readOnly" :icon="icons.edit" size="sm" @click="startEditing">
-            编辑
-          </UButton>
+          <UTooltip
+            v-if="!readOnly"
+            :text="base.contentHidden ? '先查看正文' : undefined"
+            :disabled="!base.contentHidden"
+          >
+            <UButton
+              :icon="icons.edit"
+              size="sm"
+              :disabled="base.contentHidden"
+              @click="startEditing"
+            >
+              编辑
+            </UButton>
+          </UTooltip>
           <UButton
             :icon="icons.activity"
             size="sm"
@@ -552,16 +608,32 @@ async function remove() {
         未设触发场景：补全后召回更准确。
       </p>
       <div class="rounded-lg border border-default p-4">
+        <div v-if="base.contentHidden" class="space-y-2">
+          <p class="flex items-center gap-1.5 text-sm text-muted">
+            <UIcon :name="icons.secret" class="size-4" />
+            机密内容已加密存储
+          </p>
+          <UButton
+            :icon="icons.reveal"
+            size="sm"
+            color="neutral"
+            variant="subtle"
+            :loading="revealing"
+            @click="revealContent"
+          >
+            查看正文
+          </UButton>
+          <p class="text-xs text-muted">查看会记录一次访问。</p>
+        </div>
         <MemoryContent
-          v-if="base.content !== null"
-          :content="base.content"
+          v-else
+          :content="base.content ?? ''"
           :keywords="keywordIndex"
           :self="base.uri"
           :credentials="credentialLinks"
           @open="(uri) => emit('open', uri)"
           @credential="openCredential"
         />
-        <p v-else class="text-sm text-muted">机密内容已加密存储，当前账号无权查看正文。</p>
       </div>
       <p class="text-xs text-muted">
         版本 {{ base.version }} · 来源 {{ provenanceLabels[base.provenance] }}

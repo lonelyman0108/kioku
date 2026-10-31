@@ -14,7 +14,10 @@ import {
   BootPreview,
   ConsoleCredential,
   ConsoleCredentialList,
+  ConsoleMemoryChildren,
+  ConsoleMemoryView,
   ConsoleSearchResponse,
+  ConvertedToCredential,
   CredentialEventList,
   CredentialProvider,
   CredentialReferenceList,
@@ -42,17 +45,16 @@ import {
   GlossaryIndex,
   GroupPersonaRuleList,
   HealthResponse,
+  InboxCounts,
   KeyAccessMatrix,
   KeyInfo,
   LoreImportPlan,
   LoreImportResult,
   Me,
   MemberInfo,
-  MemoryChildren,
   MemoryHistory,
   MemoryList,
   MemoryRecallStat,
-  MemoryView,
   PersonaDetail,
   PersonaInfo,
   RecallDebug,
@@ -74,6 +76,7 @@ import {
   type BenchAgentTurnRequest,
   type BenchRunRequest,
   type BootPreviewRequest,
+  type ConvertToCredentialRequest,
   type CreateAppRequest,
   type CreateCredentialProviderRequest,
   type CreateCredentialRequest,
@@ -86,6 +89,7 @@ import {
   type MemoryListQuery,
   type MoveMemoryRequest,
   type PlainLayer,
+  type PlaintextIgnoreRequest,
   type ReactivateRequest,
   type RestoreRequest,
   type ReviewQuery,
@@ -204,11 +208,17 @@ export const api = {
     }),
 
   memory: (spaceId: string, uri: string) =>
-    request('GET', `/spaces/${spaceId}/memories`, { query: { uri }, schema: MemoryView }),
+    request('GET', `/spaces/${spaceId}/memories`, { query: { uri }, schema: ConsoleMemoryView }),
+  // 显式查看机密的正文（记一次访问）。结果不要放进 useQuery 的缓存，见 secretContent.ts
+  revealMemory: (spaceId: string, memoryId: string) =>
+    request('POST', `/spaces/${spaceId}/memories/reveal`, {
+      body: { memoryId },
+      schema: ConsoleMemoryView,
+    }),
   memoryChildren: (spaceId: string, of: string) =>
     request('GET', `/spaces/${spaceId}/memories/children`, {
       query: { of },
-      schema: MemoryChildren,
+      schema: ConsoleMemoryChildren,
     }),
   memoryDomains: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/memories/domains`, {
@@ -217,15 +227,15 @@ export const api = {
   createMemory: (
     spaceId: string,
     body: Partial<CreateMemoryRequest> & Pick<CreateMemoryRequest, 'uri' | 'content'>,
-  ) => request('POST', `/spaces/${spaceId}/memories`, { body, schema: MemoryView }),
+  ) => request('POST', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
   updateMemory: (spaceId: string, body: UpdateMemoryRequest) =>
-    request('PATCH', `/spaces/${spaceId}/memories`, { body, schema: MemoryView }),
+    request('PATCH', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
   deleteMemory: (spaceId: string, uri: string, expected: { id: string; version: number }) =>
     request('DELETE', `/spaces/${spaceId}/memories`, {
       query: { uri, expectedId: expected.id, expectedVersion: expected.version },
     }),
   moveMemory: (spaceId: string, body: MoveMemoryRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/move`, { body, schema: MemoryView }),
+    request('POST', `/spaces/${spaceId}/memories/move`, { body, schema: ConsoleMemoryView }),
   // 列表的筛选都是可选的；查询参数原样是字符串
   memoryList: (spaceId: string, query: Partial<Record<keyof MemoryListQuery, string | number>>) =>
     request('GET', `/spaces/${spaceId}/memories/list`, { query, schema: MemoryList }),
@@ -244,11 +254,11 @@ export const api = {
       schema: DeletedMemoryList,
     }),
   restoreMemory: (spaceId: string, body: RestoreRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/restore`, { body, schema: MemoryView }),
+    request('POST', `/spaces/${spaceId}/memories/restore`, { body, schema: ConsoleMemoryView }),
   undeleteMemory: (spaceId: string, memoryId: string) =>
     request('POST', `/spaces/${spaceId}/memories/undelete`, {
       body: { memoryId },
-      schema: MemoryView,
+      schema: ConsoleMemoryView,
     }),
   expiredMemories: (spaceId: string, cursor?: string) =>
     request('GET', `/spaces/${spaceId}/memories/expired`, {
@@ -256,7 +266,22 @@ export const api = {
       schema: ExpiredMemoryList,
     }),
   reactivateMemory: (spaceId: string, body: ReactivateRequest) =>
-    request('POST', `/spaces/${spaceId}/memories/reactivate`, { body, schema: MemoryView }),
+    request('POST', `/spaces/${spaceId}/memories/reactivate`, { body, schema: ConsoleMemoryView }),
+  ignorePlaintext: (spaceId: string, body: PlaintextIgnoreRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/ignore-plaintext`, {
+      body,
+      schema: ConsoleMemoryView,
+    }),
+  unignorePlaintext: (spaceId: string, body: PlaintextIgnoreRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/unignore-plaintext`, {
+      body,
+      schema: ConsoleMemoryView,
+    }),
+  convertToCredential: (spaceId: string, body: ConvertToCredentialRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/convert-to-credential`, {
+      body,
+      schema: ConvertedToCredential,
+    }),
 
   credentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
@@ -308,6 +333,8 @@ export const api = {
 
   overview: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),
+  inboxCounts: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/inbox/counts`, { schema: InboxCounts }),
   subjects: (spaceId: string, query: SubjectListQuery) =>
     request('GET', `/spaces/${spaceId}/subjects`, { query, schema: SubjectList }),
   subject: (spaceId: string, id: string) =>

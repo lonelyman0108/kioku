@@ -155,9 +155,14 @@ describe.skipIf(!testDatabaseUrl)('管理界面的记忆接口', () => {
       (await consoleCreate(ws.cookie, { uri: 'kb://faq', content: '常见问题', layer: 'base' }))
         .status,
     ).toBe(201)
-    expect(((await (await consoleGet(ws.cookie, 'kb://wifi')).json()) as MemoryView).content).toBe(
-      'hunter2',
+    // owner 也要显式查看才拿得到正文，见 secretAccess.int.test.ts
+    const wifi = (await (await consoleGet(ws.cookie, 'kb://wifi')).json()) as MemoryView
+    expect(wifi.content).toBeNull()
+    const revealed = await app.request(
+      `${base()}/reveal`,
+      jsonRequest('POST', { memoryId: wifi.id }, { cookie: ws.cookie }),
     )
+    expect(((await revealed.json()) as MemoryView).content).toBe('hunter2')
     expect((await consoleGet(editor.cookie, 'kb://wifi')).status).toBe(404)
     expect((await consoleGet(viewer.cookie, 'kb://faq')).status).toBe(200)
     expect(

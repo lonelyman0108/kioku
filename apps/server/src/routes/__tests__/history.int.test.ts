@@ -68,6 +68,13 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     )
   const patch = async (cookie: string, body: Record<string, unknown>) =>
     ok<MemoryView>(await app.request(`${space()}/memories`, jsonRequest('PATCH', body, { cookie })))
+  const reveal = async (cookie: string, memoryId: string) =>
+    ok<MemoryView>(
+      await app.request(
+        `${space()}/memories/reveal`,
+        jsonRequest('POST', { memoryId }, { cookie }),
+      ),
+    )
   const remove = async (cookie: string, m: MemoryView) => {
     const query = `uri=${encodeURIComponent(m.uri)}&expectedId=${m.id}&expectedVersion=${m.version}`
     const res = await app.request(`${space()}/memories?${query}`, {
@@ -331,7 +338,8 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
         expectedVersion: edited.version,
       }),
     )
-    expect(restored).toMatchObject({ content: '明文', disclosure: '一', sensitivity: 'secret' })
+    expect(restored).toMatchObject({ content: null, disclosure: '一', sensitivity: 'secret' })
+    expect((await reveal(ws.cookie, m.id)).content).toBe('明文')
 
     await remove(ws.cookie, restored)
     await ok<MemoryView>(await undeleteRes(ws.cookie, m.id))
@@ -357,13 +365,15 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
     queued.length = 0
 
     const back = await ok<MemoryView>(await undeleteRes(ws.cookie, m.id))
-    expect(back).toMatchObject({ id: m.id, content: 'hunter2', version: 2 })
+    expect(back).toMatchObject({ id: m.id, content: null, version: 2 })
+    expect((await reveal(ws.cookie, m.id)).content).toBe('hunter2')
     expect(queued).toContain(m.id)
     expect((await deleted(ws.cookie)).items).toEqual([])
     expect((await history(ws.cookie, m.id)).events.map((e) => e.type)).toEqual([
       'create',
       'delete',
       'undelete',
+      'access',
     ])
     expect((await undeleteRes(ws.cookie, m.id)).status).toBe(409)
 

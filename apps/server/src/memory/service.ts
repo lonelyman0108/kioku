@@ -1,11 +1,21 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
-import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contracts'
+import {
+  CREDENTIAL_PLACEHOLDER,
+  CREDENTIAL_PLACEHOLDER_START,
+  PLAIN_LAYERS,
+  PLAINTEXT_CREDENTIAL,
+  PLAINTEXT_MASK,
+  SENSITIVITIES,
+  UpdateMemoryRequest,
+} from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
   BenchChanges,
   BenchMark,
+  ConsoleMemoryView,
+  ConvertToCredentialRequest,
   CreateMemoryRequest,
   DeletedMemoryList,
   DomainSummary,
@@ -28,6 +38,7 @@ import type {
   NeverRecalledMemory,
   PageQuery,
   PlainLayer,
+  PlaintextIgnoreRequest,
   Provenance,
   RecalledMemory,
   RecallEventList,
@@ -40,7 +51,6 @@ import type {
   ReviewResult,
   Sensitivity,
   UndeleteRequest,
-  UpdateMemoryRequest,
 } from '@kioku/contracts'
 import {
   and,
@@ -82,6 +92,7 @@ import {
   mentionsPlaceholder,
   placeholderAllowed,
   placeholderIdentifiers,
+  replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
 import { isUniqueViolation, type Db, type Tx } from '../db/client'
@@ -101,6 +112,7 @@ import {
   apiKeys,
   apps,
   credentials,
+  dreamSuggestions,
   memories,
   memoryCredentialRefs,
   memoryEmbeddings,
@@ -161,9 +173,17 @@ export interface MemoryContext {
   // 模型读到占位文字再写回，新正文就是占位文字，而 secret 的历史不存正文，找不回来。
   // 新写入的正文里有占位文字时同样拒绝（见 memory/masked.ts）
   maskSecret?: boolean
+  // 响应里 secret 的正文怎么给。explicit（管理界面）：不给，要调 reveal，查看记一条访问事件；响应带上
+  // ConsoleMemoryView 多的两个字段。audited（Key）：照常给，接入方的契约不变，解密出来给了调用方就记访问事件。
+  // 不设时是内部路径（导入工具比对正文）：照常解密，不记。内部改写都用 contentOf，不受这一项影响
+  secretRead?: 'explicit' | 'audited'
   // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
   eventContext?: Record<string, unknown>
 }
+
+// 读到 secret 的正文经由哪里，记在访问事件的 context 里
+export type SecretVia =
+  'console' | 'export' | 'rest' | 'kioku_get' | 'kioku_list' | 'kioku_update' | 'kioku_move'
 
 // 一批事件改了什么（见 eventChanges）；lastId 是这批里最后一条事件的 id，没有事件时为 0
 export type EventChanges = Pick<BenchChanges, 'memories' | 'hiddenReleased' | 'hiddenOther'> & {
@@ -174,6 +194,8 @@ export type EventChanges = Pick<BenchChanges, 'memories' | 'hiddenReleased' | 'h
 export interface MemoryStats {
   counts: LayerCount[]
   total: number
+  // 来自对话的记忆，不算在 counts 与 total 里
+  extractedCounts: LayerCount[]
   missingDisclosure: number
   plaintextCredentials: number
   neverRecalled: number
@@ -213,6 +235,13 @@ const PLAINTEXT_DOWNGRADE =
 const MASKED_DOWNGRADE = '测试台不能把 secret 改成别的敏感级：要改去记忆页'
 const MASKED_CONTENT = '测试台读不到 secret 的原文，不能改它的正文：要改去记忆页'
 const MASKED_TEXT_WRITTEN = '正文里有测试台的占位文字，不是真实的内容：要写这句话去记忆页'
+const CONVERT_SECRET = '机密记忆的正文已经加密，不在历史、全文检索和向量里，不用转存为凭据'
+const CONVERT_SCOPE =
+  '凭据占位符只能放在私人层、敏感级至少私密的记忆里：先把这条记忆改到私人层、敏感级调到私密，再转存'
+const CONVERT_NOT_FOUND = '正文里没有这段值，请重新读取后再转存'
+const CONVERT_ELSEWHERE =
+  'URI、触发场景或关键词里也有这段值，这些字段是明文，也不能放占位符：先从这些字段去掉，再转存'
+const CONVERT_TOO_LONG = '换成占位符之后正文超过了长度上限，先删掉一些内容再转存'
 
 // 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
 interface RefBaseline {
@@ -297,6 +326,7 @@ export interface UpdateMeta {
   eventType?: 'update' | 'sync'
   eventContext?: Record<string, unknown>
   requireAppOwner?: string
+  via?: SecretVia
 }
 
 function parse(uri: string): ParsedUri {
@@ -323,8 +353,8 @@ export function openMemoryContent(
   )
 }
 
-// 事件快照里不放的列：密文、数据密钥与它的主密钥标识、全文检索向量（向量里有正文分词）
-const UNSNAPSHOTTED = ['ciphertext', 'wrappedKey', 'keyId', 'fts'] as const
+// 事件快照里不放的列：密文、数据密钥与它的主密钥标识、全文检索向量（向量里有正文分词）、忽略明文提示用的正文哈希
+const UNSNAPSHOTTED = ['ciphertext', 'wrappedKey', 'keyId', 'fts', 'plaintextIgnoredHash'] as const
 export type SnapshotRow = Omit<MemoryRow, (typeof UNSNAPSHOTTED)[number]>
 
 // 写快照用得到的列：批量写入时只取回这些，不把密文与全文检索向量也取回来
@@ -643,15 +673,27 @@ export class MemoryService {
     })
   }
 
-  private toView(row: MemoryRow, glossary: string[]): MemoryView {
-    return {
+  // 响应里的记忆都从这里出去：生成视图，解密出来的 secret 正文放进了响应就记一条访问事件。规则只在这里：
+  // via 必填，新的路径要想清楚响应里的正文是不是从库里解出来的，不是（调用方刚写的、本来就是明文）才传 null。
+  // reveal 只给管理界面的显式查看：secretRead 为 explicit 时默认不解密。内部路径（不设 secretRead）不记。
+  // 访问事件不改记忆，只有改前的快照：快照的敏感级决定只有读得到 secret 的人看得到它（之后降级了，这些记录也不给 editor 看）
+  private async toView(
+    tx: Tx,
+    row: MemoryRow,
+    glossary: string[],
+    via: SecretVia | null,
+    reveal = false,
+  ): Promise<MemoryView> {
+    const secret = row.sensitivity === 'secret'
+    const hidden = secret && this.ctx.secretRead === 'explicit' && !reveal
+    const view: MemoryView = {
       id: row.id,
       uri: formatUri(row.domain!, row.path!),
       layer: row.layer,
       sensitivity: row.sensitivity,
       provenance: row.provenance,
       originScope: row.originScope,
-      content: this.ctx.maskSecret && row.sensitivity === 'secret' ? null : this.contentOf(row),
+      content: hidden || (secret && this.ctx.maskSecret) ? null : this.contentOf(row),
       priority: row.priority,
       disclosure: row.disclosure,
       glossary,
@@ -661,6 +703,15 @@ export class MemoryService {
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     }
+    if (secret && view.content !== null && via !== null && this.ctx.secretRead) {
+      await this.event(tx, row.id, ACCESS_EVENT, snapshot(row, glossary), null, { via })
+    }
+    if (this.ctx.secretRead !== 'explicit') return view
+    const extra: Omit<ConsoleMemoryView, keyof MemoryView> = {
+      contentHidden: hidden,
+      plaintextIgnored: plaintextIgnored(row),
+    }
+    return { ...view, ...extra }
   }
 
   private async event(
@@ -757,13 +808,13 @@ export class MemoryService {
       content: string
     },
     baseline: RefBaseline | null,
+    // 查的是从库里解出来的原文（没带正文的写入，例如改层、移动），不是调用方这次写的。
+    // 报错就不带片段、标识与字段名：调用方没有显式查看，这里也不留访问记录
+    decrypted = false,
   ): Promise<void> {
-    // 打码时 secret 的正文不给出，报错也不带从里面读到的片段、标识与字段名：
-    // 没改正文的写入（例如改层）查的是解密出来的原文
-    const hideContent = this.ctx.maskSecret && final.sensitivity === 'secret'
     const { refs, malformed } = scanPlaceholders(final.content)
     if (malformed.length) {
-      const fragment = hideContent ? '' : `：${malformed[0]}`
+      const fragment = decrypted ? '' : `：${malformed[0]}`
       throw new MemoryError(
         400,
         `凭据占位符格式不对${fragment}。写法是 {{cred:<标识>}} 或 {{cred:<标识>#<字段>}}，标识与字段名只用小写字母、数字、_ 和 -；要在正文里写到这种写法时，去掉花括号`,
@@ -801,7 +852,7 @@ export class MemoryService {
       if (!row || !canReadCredential(this.ctx.access, row)) {
         throw new MemoryError(
           400,
-          hideContent ? '正文引用的凭据不存在或不可用' : `凭据不存在或不可用：${identifier}`,
+          decrypted ? '正文引用的凭据不存在或不可用' : `凭据不存在或不可用：${identifier}`,
         )
       }
       for (const ref of added) {
@@ -809,7 +860,7 @@ export class MemoryService {
         if (!row.fields.some((f) => f.name === ref.field)) {
           throw new MemoryError(
             400,
-            hideContent ? '正文引用的凭据没有这个字段' : `凭据 ${identifier} 没有字段 ${ref.field}`,
+            decrypted ? '正文引用的凭据没有这个字段' : `凭据 ${identifier} 没有字段 ${ref.field}`,
           )
         }
       }
@@ -845,6 +896,7 @@ export class MemoryService {
       tx,
       { ...final, sensitivity: row.sensitivity, content },
       { layer: row.layer, ownerAccountId: row.ownerAccountId, content: () => content },
+      row.sensitivity === 'secret',
     )
   }
 
@@ -866,11 +918,44 @@ export class MemoryService {
       )
   }
 
-  async get(uri: string): Promise<MemoryView> {
+  async get(uri: string, via: SecretVia = 'rest'): Promise<MemoryView> {
     const parsed = parse(uri)
     return this.run(async (tx, personaIds) => {
       const row = await this.findReadable(tx, parsed, personaIds)
-      return this.toView(row, (await this.glossaryOf(tx, [row.id])).get(row.id) ?? [])
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      return this.toView(tx, row, glossary, via)
+    })
+  }
+
+  // 这个 id 上调用方现在读得到的策展记忆，按显式读取算；读不到和不存在一样是 404。lock 时锁住这一行
+  // （FOR NO KEY UPDATE：别的表写外键时加的 KEY SHARE 锁和它不冲突），等到锁时已经被改的按改后的一版判断
+  private async readableById(
+    tx: Tx,
+    memoryId: string,
+    personaIds: string[],
+    lock = false,
+  ): Promise<MemoryRow> {
+    const query = tx
+      .select()
+      .from(memories)
+      .where(
+        and(
+          eq(memories.id, memoryId),
+          eq(memories.form, 'curated'),
+          readableConditions(this.ctx.access, { personaIds, explicit: true }),
+        ),
+      )
+    const [row] = lock ? await query.for('no key update') : await query
+    if (!row) throw new MemoryError(404, '记忆不存在')
+    return row
+  }
+
+  // 管理界面显式查看 secret 的正文，记一条访问事件。别的敏感级的正文本来就给，也不记
+  async reveal(memoryId: string): Promise<MemoryView> {
+    return this.run(async (tx, personaIds) => {
+      const row = await this.readableById(tx, memoryId, personaIds)
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      return this.toView(tx, row, glossary, 'console', true)
     })
   }
 
@@ -949,7 +1034,8 @@ export class MemoryService {
       snapshot(row!, glossary),
       meta.eventContext,
     )
-    return this.toView(row!, glossary)
+    // 正文是调用方刚写的
+    return this.toView(tx, row!, glossary, null)
   }
 
   // 写下一批抽取的结果（对象层的事实与情节层的会话摘要，没有 URI、不建向量），连同调用方的收尾
@@ -1070,6 +1156,7 @@ export class MemoryService {
         released,
         ...(meta.eventType ? { eventType: meta.eventType } : {}),
         ...(meta.eventContext ? { eventContext: meta.eventContext } : {}),
+        ...(meta.via ? { via: meta.via } : {}),
       })
     })
   }
@@ -1089,6 +1176,8 @@ export class MemoryService {
       existingRefs?: boolean
       // 来源改成这个：按 Dream 的建议合并时记为主人，正文是成员确认过的（见 applySuggestion）
       provenance?: Provenance
+      // 响应带着解密出来的正文时经由哪里，记在访问事件里（见 toView）
+      via?: SecretVia
     } = {},
   ): Promise<MemoryView> {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
@@ -1165,6 +1254,7 @@ export class MemoryService {
         content: () =>
           meta.existingRefs || input.content === undefined ? plaintext : this.contentOf(before),
       },
+      before.sensitivity === 'secret' && input.content === undefined,
     )
     // 降级之后正文会进历史快照、全文检索和向量，带着明文降级就收不回来了
     if (
@@ -1177,7 +1267,7 @@ export class MemoryService {
     }
     const body =
       sensitivity === 'secret'
-        ? { content: null, ...this.seal(plaintext, before.id) }
+        ? { content: null, plaintextIgnoredHash: null, ...this.seal(plaintext, before.id) }
         : { content: plaintext, ciphertext: null, wrappedKey: null, keyId: null }
 
     const beforeGlossary =
@@ -1187,6 +1277,8 @@ export class MemoryService {
       .update(memories)
       .set({
         ...body,
+        // 正文变了，忽略时记下的哈希就没用了；留着的话，它是含旧值的正文的 SHA-256，能离线猜解
+        ...(plaintext !== before.content ? { plaintextIgnoredHash: null } : {}),
         layer,
         ownerAccountId,
         sensitivity,
@@ -1247,7 +1339,9 @@ export class MemoryService {
       // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
       await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
     }
-    return this.toView(row, glossary)
+    // 没带正文的修改，响应里的正文是解密出来的原文，也算读到；带了正文的是调用方自己刚写的
+    const read = before.sensitivity === 'secret' && input.content === undefined
+    return this.toView(tx, row, glossary, read ? (meta.via ?? 'rest') : null)
   }
 
   private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
@@ -1258,6 +1352,232 @@ export class MemoryService {
         after: sql`case when ${memoryEvents.after} is null then null else ${memoryEvents.after} - 'content' - 'fts' end`,
       })
       .where(eq(memoryEvents.memoryId, memoryId))
+  }
+
+  // 忽略明文提示：记下这段正文的哈希，正文改了（不管经哪条写入路径）就不再算（见 PLAINTEXT）。要写得了这条记忆，
+  // 不加版本号、不改更新时间，留一条事件。先锁住这一行再核对版本：期间正文被改过就不能替新的正文做决定。
+  // 已经是想要的状态时什么都不写，连点两次只留一条事件
+  async ignorePlaintext(input: PlaintextIgnoreRequest): Promise<MemoryView> {
+    return this.setPlaintextIgnored(input, true)
+  }
+
+  async unignorePlaintext(input: PlaintextIgnoreRequest): Promise<MemoryView> {
+    return this.setPlaintextIgnored(input, false)
+  }
+
+  private async setPlaintextIgnored(
+    input: PlaintextIgnoreRequest,
+    ignored: boolean,
+  ): Promise<MemoryView> {
+    return this.write(async (tx, personaIds) => {
+      const row = await this.readableById(tx, input.memoryId, personaIds, true)
+      if (row.version !== input.expectedVersion) {
+        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+      }
+      this.assertModifiable(row, `没有权限改 ${row.layer} 层的记忆`)
+      if (row.content === null) {
+        throw new MemoryError(400, '机密记忆的正文已经加密，没有明文提示')
+      }
+      if (ignored && !looksLikePlaintextCredential(row.content)) {
+        throw new MemoryError(400, '这条记忆的正文没有疑似明文，不用忽略')
+      }
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      // 明文提示只有不是 secret 的记忆才有，上面已经挡了：这里的正文本来就是明文
+      if (plaintextIgnored(row) === ignored) return this.toView(tx, row, glossary, null)
+      const [after] = await tx
+        .update(memories)
+        .set({ plaintextIgnoredHash: ignored ? contentHash(row.content) : null })
+        .where(eq(memories.id, row.id))
+        .returning()
+      // 事件不改正文，快照里不再存一份：历史里的明文越少越好
+      await this.event(
+        tx,
+        row.id,
+        ignored ? 'ignore_plaintext' : 'unignore_plaintext',
+        { ...snapshot(row, glossary), content: null },
+        null,
+      )
+      return this.toView(tx, after!, glossary, null)
+    })
+  }
+
+  // 把正文里的一段明文转存成凭据，全部在一个事务里：credential.create 建好凭据（标识冲突、权限不够时抛错，
+  // 什么都不留下），正文里这段值换成占位符（照常过写入检查、版本加一、记一条事件），再把这个值从历史里拿掉。
+  // 全文检索是生成列，跟着新正文变；向量由旧正文生成，在同一个事务里删掉，提交后重新排队生成。
+  // credential.view 也在事务里读给响应用的凭据：引用已经写进索引，数得对；读失败时整个回滚，调用方重试不会撞上 409。
+  // 提交之后不再做会失败的事：否则报错了数据却已经改了
+  async convertToCredential<T>(
+    input: Pick<
+      ConvertToCredentialRequest,
+      'memoryId' | 'expectedVersion' | 'value' | 'identifier' | 'field'
+    >,
+    credential: { create: (tx: Tx) => Promise<string>; view: (tx: Tx, id: string) => Promise<T> },
+  ): Promise<{
+    memory: MemoryView
+    credential: T
+    replaced: number
+    scrubbedEvents: number
+    plaintextVersions: number
+    otherMemories: number
+  }> {
+    const released: string[] = []
+    const result = await this.run(async (tx, personaIds) => {
+      // 要扫一遍这个空间的记忆，放在拿锁之前，别的写入不用等它；只是提示用的数字，差一点不要紧
+      const otherMemories = await this.othersWithValue(tx, input.memoryId, input.value)
+      const row = await this.readableById(tx, input.memoryId, personaIds, true)
+      if (row.version !== input.expectedVersion) {
+        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+      }
+      this.assertModifiable(row, `没有权限改 ${row.layer} 层的记忆`)
+      if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)
+      if (!placeholderAllowed(row.layer, row.sensitivity)) {
+        throw new MemoryError(400, CONVERT_SCOPE)
+      }
+      const placeholder = `{{cred:${input.identifier}#${input.field}}}`
+      const { text: content, replaced } = replaceOutsidePlaceholders(
+        row.content,
+        input.value,
+        placeholder,
+      )
+      if (!replaced) throw new MemoryError(400, CONVERT_NOT_FOUND)
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      const elsewhere = [formatUri(row.domain!, row.path!), row.disclosure ?? '', ...glossary]
+      if (elsewhere.some((text) => text.includes(input.value))) {
+        throw new MemoryError(400, CONVERT_ELSEWHERE)
+      }
+      if (!UpdateMemoryRequest.shape.content.safeParse(content).success) {
+        throw new MemoryError(400, CONVERT_TOO_LONG)
+      }
+      const credentialId = await credential.create(tx)
+      const memory = await this.applyUpdate(
+        tx,
+        row,
+        { content, expectedVersion: row.version },
+        {
+          eventType: 'convert_credential',
+          eventContext: { credential: input.identifier, field: input.field },
+          glossary,
+          released,
+        },
+      )
+      const history = await this.scrubValue(tx, row, input.value, placeholder, content)
+      await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, row.id))
+      await this.scrubSuggestions(tx, row.id, input.value)
+      return {
+        memory,
+        credential: await credential.view(tx, credentialId),
+        replaced,
+        ...history,
+        otherMemories,
+      }
+    })
+    this.changed([result.memory.id, ...released])
+    return result
+  }
+
+  // 把一个值从这条记忆的历史快照里拿掉，这次转存自己的事件也在内。和这条记忆的主人同在私人层的版本换成占位符，
+  // 这样恢复到旧版本也不会把明文带回来；别的版本（改层、移动之前的）换成星号，别的成员可能看得到它们，不给标识。
+  // 调用方锁着记忆这一行，写事件的路径都先改或锁这一行，不会有带着旧正文的事件在这之后才写进来。
+  // 只处理这一个值：快照里别的疑似明文（例如换过的旧密码）不动，规则会误判，盖掉会把旧版本改坏，只数出来告诉调用方
+  private async scrubValue(
+    tx: Tx,
+    row: MemoryRow,
+    value: string,
+    placeholder: string,
+    currentContent: string,
+  ): Promise<{ scrubbedEvents: number; plaintextVersions: number }> {
+    const events = await tx
+      .select({
+        id: memoryEvents.id,
+        type: memoryEvents.eventType,
+        context: memoryEvents.context,
+        before: memoryEvents.before,
+        after: memoryEvents.after,
+      })
+      .from(memoryEvents)
+      .where(eq(memoryEvents.memoryId, row.id))
+    let scrubbedEvents = 0
+    const leftovers = new Set<string>()
+    for (const event of events) {
+      const keepUri = isLoreImport(event)
+      const before = scrubSnapshot(event.before, value, placeholder, row.ownerAccountId, keepUri)
+      const after = scrubSnapshot(event.after, value, placeholder, row.ownerAccountId, keepUri)
+      for (const version of [before, after]) {
+        const text = (version as { content?: unknown } | null)?.content
+        if (
+          typeof text === 'string' &&
+          text !== currentContent &&
+          looksLikePlaintextCredential(text)
+        ) {
+          leftovers.add(text)
+        }
+      }
+      if (
+        JSON.stringify(before) === JSON.stringify(event.before) &&
+        JSON.stringify(after) === JSON.stringify(event.after)
+      ) {
+        continue
+      }
+      await tx.update(memoryEvents).set({ before, after }).where(eq(memoryEvents.id, event.id))
+      scrubbedEvents++
+    }
+    return { scrubbedEvents, plaintextVersions: leftovers.size }
+  }
+
+  // Dream 的建议里可能抄了这个值（规则认不出的写法）：还作不作数看版本，这次改了版本，它们不会再列出，只是留到保留期。
+  // 按行换，规则和历史快照一样，跳过占位符
+  private async scrubSuggestions(tx: Tx, memoryId: string, value: string): Promise<void> {
+    const swap = (text: string) => replaceOutsidePlaceholders(text, value, PLAINTEXT_MASK).text
+    const optional = (text: string | null) => (text === null ? null : swap(text))
+    const suggestions = await tx
+      .select({
+        id: dreamSuggestions.id,
+        content: dreamSuggestions.content,
+        uri: dreamSuggestions.uri,
+        disclosure: dreamSuggestions.disclosure,
+        reason: dreamSuggestions.reason,
+      })
+      .from(dreamSuggestions)
+      .where(sql`${memoryId}::uuid = any(${dreamSuggestions.memoryIds})`)
+    for (const { id, ...before } of suggestions) {
+      const after = {
+        content: optional(before.content),
+        uri: optional(before.uri),
+        disclosure: optional(before.disclosure),
+        reason: swap(before.reason),
+      }
+      if (JSON.stringify(after) === JSON.stringify(before)) continue
+      await tx.update(dreamSuggestions).set(after).where(eq(dreamSuggestions.id, id))
+    }
+  }
+
+  // 别的记忆里还有几条含这个值：转存不动它们，要告诉调用方。按管理读取数，已删除、过期的也算：撤销删除就回来了。
+  // 正文、触发场景、URI 与关键词都算。secret 的正文是密文，数不到；占位符里的不算，和替换时跳过的一样：
+  // 占位符换成 {{cred:，值里不会有它（见 ConvertToCredentialRequest），两边的文字拼不成这个值。
+  // 要扫一遍这个空间的记忆，调用方放在拿锁之前
+  private async othersWithValue(tx: Tx, memoryId: string, value: string): Promise<number> {
+    const outsidePlaceholders = sql`regexp_replace(${memories.content}, ${CREDENTIAL_PLACEHOLDER.source}::text, ${CREDENTIAL_PLACEHOLDER_START}::text, 'g')`
+    const has = (column: SQLWrapper) => sql`strpos(${column}, ${value}::text) > 0`
+    const keyword = tx
+      .select({ one: sql`1` })
+      .from(memoryGlossary)
+      .where(and(eq(memoryGlossary.memoryId, memories.id), has(memoryGlossary.keyword)))
+    const [row] = await tx
+      .select({ n: count() })
+      .from(memories)
+      .where(
+        and(
+          ne(memories.id, memoryId),
+          this.manageable(),
+          or(
+            and(has(memories.content), has(outsidePlaceholders)),
+            has(memories.disclosure),
+            has(sql`${memories.domain} || '://' || ${memories.path}`),
+            exists(keyword),
+          ),
+        ),
+      )
+    return row?.n ?? 0
   }
 
   async delete(
@@ -1629,7 +1949,13 @@ export class MemoryService {
   ): Promise<void> {
     const [after] = await tx
       .update(memories)
-      .set({ ...fields, version: sql`${memories.version} + 1`, updatedAt: now })
+      .set({
+        ...fields,
+        // 和 applyUpdate 一样：正文变了，忽略时记下的哈希不留着
+        ...(fields.content !== undefined ? { plaintextIgnoredHash: null } : {}),
+        version: sql`${memories.version} + 1`,
+        updatedAt: now,
+      })
       .where(
         and(eq(memories.id, row.id), eq(memories.version, row.version), isNull(memories.deletedAt)),
       )
@@ -1649,7 +1975,7 @@ export class MemoryService {
   // 改 URI。移进、移出 persona:// 与 app://，或在不同的人格、应用之间移动时，层与归属跟着目标 URI 变：
   // 移到那里时层由 URI 决定，移出时要用 layer 指定新的层；普通 domain 之间给了 layer 就顺便改层。
   // 原来与目标两边都要有写权限
-  async move(input: MoveMemoryRequest): Promise<MemoryView> {
+  async move(input: MoveMemoryRequest, via: SecretVia = 'rest'): Promise<MemoryView> {
     const from = parse(input.from)
     const to = parse(input.to)
     return this.write(async (tx, personaIds, released) => {
@@ -1712,14 +2038,14 @@ export class MemoryService {
       if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
       const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
       await this.event(tx, before.id, 'move', snapshot(before, glossary), snapshot(row, glossary))
-      return this.toView(row, glossary)
+      return this.toView(tx, row, glossary, via)
     })
   }
 
   // 列出直接子节点；target 是 domain 名时列 domain 根下的第一层。
   // 子节点由调用方读得到的后代推出：某一级路径本身没有记忆时显示为虚拟节点，所以不要求父节点存在，
   // 删除或移走父节点也不会让子节点变得走不到；读不到的记忆既不出现，也不会产生虚拟节点
-  async children(target: string): Promise<MemoryChildren> {
+  async children(target: string, via: SecretVia = 'rest'): Promise<MemoryChildren> {
     const parsed = target.includes('://') ? parse(target) : null
     const domain = parsed?.domain ?? target
     if (!/^[a-z][a-z0-9_]{0,31}$/.test(domain))
@@ -1774,9 +2100,11 @@ export class MemoryService {
         disclosure: level.own?.disclosure ?? null,
         childCount: Number(level.below),
       }))
-      const parentView = parent
-        ? this.toView(parent, (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? [])
-        : null
+      let parentView: MemoryView | null = null
+      if (parent) {
+        const glossary = (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? []
+        parentView = await this.toView(tx, parent, glossary, via)
+      }
       // 指定了路径、它本身没有可读的记忆、下面也没有可读的内容：和不存在一样返回 404，
       // 拼错路径时不会看起来像一个空目录
       if (parsed && !parent && !children.length) {
@@ -1848,6 +2176,7 @@ export class MemoryService {
             query.missingDisclosure === 'false' ? sql`not ${MISSING_DISCLOSURE}` : undefined,
             query.plaintext === 'true' ? PLAINTEXT : undefined,
             query.plaintext === 'false' ? sql`not coalesce(${PLAINTEXT}, false)` : undefined,
+            query.plaintext === 'ignored' ? PLAINTEXT_IGNORED : undefined,
             // 时间原样交给数据库换算：经过 JS 的 Date 会丢掉微秒
             query.updatedAfter
               ? sql`${memories.updatedAt} >= ${query.updatedAfter}::timestamptz`
@@ -1971,6 +2300,13 @@ export class MemoryService {
         .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
         .groupBy(memories.layer, memories.sensitivity)
         .orderBy(asc(memories.layer), asc(memories.sensitivity))
+      // 来自对话的单独分组。只看元数据列，不碰正文，十万条也只要十几毫秒
+      const extracted = await tx
+        .select({ layer: memories.layer, sensitivity: memories.sensitivity, count: count() })
+        .from(memories)
+        .where(and(this.listable(personaIds), eq(memories.form, 'extracted')))
+        .groupBy(memories.layer, memories.sensitivity)
+        .orderBy(asc(memories.layer), asc(memories.sensitivity))
       // 和实例设置的向量卡片同一个口径（EMBEDDABLE），只数成员读得到的；没配置模型时没有已生成的
       const coverage = await countEmbeddable(
         tx,
@@ -1980,6 +2316,7 @@ export class MemoryService {
       return {
         counts: groups.map(({ layer, sensitivity, count }) => ({ layer, sensitivity, count })),
         total: groups.reduce((sum, g) => sum + g.count, 0),
+        extractedCounts: extracted,
         missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
         plaintextCredentials: groups.reduce((sum, g) => sum + g.plaintext, 0),
         neverRecalled: never?.n ?? 0,
@@ -1988,6 +2325,18 @@ export class MemoryService {
       }
     })
   }
+
+  // 疑似明文的记忆有多少条，和列表的 plaintext 筛选同一个条件（待处理总数用）
+  async plaintextCount(): Promise<number> {
+    return this.run(async (tx, personaIds) => {
+      const [row] = await tx
+        .select({ n: count() })
+        .from(memories)
+        .where(and(this.listable(personaIds), eq(memories.form, 'curated'), PLAINTEXT))
+      return row?.n ?? 0
+    })
+  }
+
   // ---- 召回统计（管理界面）----
   // 记忆按成员在管理界面里看得到的算，累计次数跟着记忆的可见性走。
   // 次数 = 还留着的明细里的命中次数 + 清理明细时并入的累计
@@ -2265,15 +2614,26 @@ export class MemoryService {
   async history(memoryId: string): Promise<MemoryHistory> {
     return this.run(async (tx) => {
       const { row } = await this.findManageable(tx, memoryId)
-      // 太多时保留最近的：最新的几版才是最常要看、要恢复的
+      // 太多时保留最近的：最新的几版才是最常要看、要恢复的。访问事件另算上限：
+      // agent 每次会话都读的机密攒下的访问记录不能把改动挤出去
       const latest = await this.eventRows(
         tx,
-        eq(memoryEvents.memoryId, memoryId),
+        and(eq(memoryEvents.memoryId, memoryId), ne(memoryEvents.eventType, ACCESS_EVENT)),
         [desc(memoryEvents.id)],
         HISTORY_LIMIT + 1,
         false,
       )
-      const rows = latest.slice(0, HISTORY_LIMIT).reverse()
+      const reads = await this.eventRows(
+        tx,
+        and(eq(memoryEvents.memoryId, memoryId), eq(memoryEvents.eventType, ACCESS_EVENT)),
+        [desc(memoryEvents.id)],
+        ACCESS_HISTORY_LIMIT + 1,
+        false,
+      )
+      const rows = [
+        ...latest.slice(0, HISTORY_LIMIT),
+        ...reads.slice(0, ACCESS_HISTORY_LIMIT),
+      ].sort((a, b) => a.event.id - b.event.id)
       return {
         memory: {
           id: row.id,
@@ -2291,11 +2651,12 @@ export class MemoryService {
           provenance: r.event.provenance,
           createdAt: r.event.createdAt.toISOString(),
           actor: actorOf(r),
+          via: viaOf(r.event.context),
           before: toSnapshot(r.event.before),
           after: r.left ? null : toSnapshot(r.event.after),
           left: r.left,
         })),
-        truncated: latest.length > HISTORY_LIMIT,
+        truncated: latest.length > HISTORY_LIMIT || reads.length > ACCESS_HISTORY_LIMIT,
       }
     })
   }
@@ -2397,15 +2758,19 @@ export class MemoryService {
   }
 
   // 空间的活动流，最新的在前。按时间排序走 (space_id, created_at) 索引，不必扫别的空间的事件；
-  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id
+  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id。
+  // 访问事件不进活动：和凭据的访问记录一样，只有读得到这条 secret 的人在它的历史里看得到
   async activity(query: PageQuery): Promise<ActivityList> {
     const after = timeCursor(query.cursor, EVENT_ID)
     return this.run(async (tx) => {
       const rows = await this.eventRows(
         tx,
-        after
-          ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
-          : undefined,
+        and(
+          ne(memoryEvents.eventType, ACCESS_EVENT),
+          after
+            ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
+            : undefined,
+        ),
         [desc(memoryEvents.createdAt), desc(memoryEvents.id)],
         query.limit + 1,
       )
@@ -2586,7 +2951,7 @@ export class MemoryService {
         snapshot(row, glossary),
         snapshot(restored, glossary),
       )
-      return this.toView(restored, glossary)
+      return this.toView(tx, restored, glossary, 'console')
     }, UNDELETE_CONFLICT)
   }
 
@@ -2648,13 +3013,17 @@ export class MemoryService {
         snapshot(row, glossary),
         snapshot(revived, glossary),
       )
-      return this.toView(revived, glossary)
+      return this.toView(tx, revived, glossary, 'console')
     }, REACTIVATE_CONFLICT)
   }
 }
 
 // 一条记忆的历史最多列这么多个事件
 const HISTORY_LIMIT = 500
+// 访问事件另算，最多列这么多个
+const ACCESS_HISTORY_LIMIT = 100
+// 读到 secret 正文的事件：只进这条记忆的历史，不进活动
+export const ACCESS_EVENT = 'access'
 
 // 调用方带着读到的 id 与版本号时核对。删除后在同一个 URI 重建的记忆版本号从 1 重新开始，只看版本号分不出来
 function checkExpected(
@@ -2821,6 +3190,56 @@ function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
 }
 
+// 访问事件经由哪里
+function viaOf(context: unknown): string | null {
+  const via = (context as { via?: unknown } | null)?.via
+  return typeof via === 'string' ? via : null
+}
+
+// Lore 导入工具写下的导入事件：它按这些事件快照里的 domain、path 补人格、认出导入过的节点（见 importer/lore.ts），
+// 换掉的话节点会被当成新节点写回。这种事件的 URI 和 context 里的 loreUri 一样留着，值恰好出现在那里是接受的限制
+function isLoreImport(event: { type: string; context: unknown }): boolean {
+  return (
+    event.type === 'import' && (event.context as { source?: unknown } | null)?.source === 'lore'
+  )
+}
+
+// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure、关键词与 URI 里的也不留（那里放不了占位符）；
+// 旧快照里可能有全文检索向量，一起去掉。快照的 URI 只用来显示（恢复不改 URI，可见性不看它），除了 keepUri 的（见 isLoreImport）
+function scrubSnapshot(
+  raw: unknown,
+  value: string,
+  placeholder: string,
+  owner: string | null,
+  keepUri: boolean,
+): unknown {
+  if (!raw || typeof raw !== 'object') return raw ?? null
+  const version: Record<string, unknown> = { ...raw }
+  delete version.fts
+  const inPlace = version.layer === 'private' && version.ownerAccountId === owner
+  if (typeof version.content === 'string') {
+    version.content = replaceOutsidePlaceholders(
+      version.content,
+      value,
+      inPlace ? placeholder : PLAINTEXT_MASK,
+    ).text
+  }
+  if (typeof version.disclosure === 'string') {
+    version.disclosure = replaceOutsidePlaceholders(version.disclosure, value, PLAINTEXT_MASK).text
+  }
+  if (Array.isArray(version.glossary)) {
+    version.glossary = version.glossary.filter(
+      (keyword) => typeof keyword !== 'string' || !keyword.includes(value),
+    )
+  }
+  for (const key of keepUri ? [] : ['domain', 'path']) {
+    if (typeof version[key] === 'string') {
+      version[key] = version[key].split(value).join(PLAINTEXT_MASK)
+    }
+  }
+  return version
+}
+
 // 快照里界面要用的部分；快照是写入事件时记下的整行（不含密文），secret 的没有正文
 function toSnapshot(raw: unknown): MemorySnapshot | null {
   if (!raw || typeof raw !== 'object') return null
@@ -2881,7 +3300,26 @@ function neverRecalled(recall: RecallWindow): SQL {
 
 // 正文像有明文密码或 Token：与界面、导入工具同一条规则（PLAINTEXT_CREDENTIAL），PostgreSQL 的正则照原样能用，
 // ~* 不区分大小写，对应它的 i 标记。secret 的正文是密文（content 为空），结果为 NULL，不算
-const PLAINTEXT = sql`(${memories.content} ~* ${PLAINTEXT_CREDENTIAL.source})`
+const PLAINTEXT_MATCH = sql`(${memories.content} ~* ${PLAINTEXT_CREDENTIAL.source})`
+// 提示被忽略了：存着的哈希和现在的正文对得上。判断只看这个比较，applyUpdate 在正文变化时清掉哈希只是不留着它。
+// 没有哈希的行不算哈希（case 里不会执行），开销只落在忽略过的那几条上
+const IGNORED_NOW = sql`(case when ${memories.plaintextIgnoredHash} is null then false
+  else ${memories.plaintextIgnoredHash} = encode(sha256(convert_to(${memories.content}, 'UTF8')), 'hex') end)`
+const PLAINTEXT = sql`(${PLAINTEXT_MATCH} and not ${IGNORED_NOW})`
+const PLAINTEXT_IGNORED = sql`(${PLAINTEXT_MATCH} and ${IGNORED_NOW})`
+
+// 和上面 SQL 里的哈希相同的算法，忽略时写进去、读的时候比对
+const contentHash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex')
+
+// PLAINTEXT_IGNORED 的 JS 版本，给读到的那一行用
+function plaintextIgnored(row: Pick<MemoryRow, 'content' | 'plaintextIgnoredHash'>): boolean {
+  return (
+    row.plaintextIgnoredHash !== null &&
+    row.content !== null &&
+    looksLikePlaintextCredential(row.content) &&
+    row.plaintextIgnoredHash === contentHash(row.content)
+  )
+}
 
 const UPDATED_MICROS = microsOf(memories.updatedAt)
 

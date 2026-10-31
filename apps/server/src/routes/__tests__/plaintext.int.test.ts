@@ -22,6 +22,32 @@ const SAMPLES = [
   '密码：{{cred:file-server#password}}',
   'token = {{cred:api#token}}',
   '密码：\n见下一行',
+  // 占位符写在引号、反引号或粗体里也不算
+  '密码："{{cred:x}}"',
+  "密码：'{{cred:x}}'",
+  '密码：`{{cred:x#password}}`',
+  '密码：**{{cred:x}}**',
+  '密码：“{{cred:x}}”',
+  '密码：「{{cred:x}}」',
+  '密码："abc{{cred:x}}"',
+  // 整段是遮盖符的不算，写在引号里、后面跟着空白或标点的也一样
+  '密码：***',
+  '密码：*** 后面',
+  '密码：***\n下一行',
+  '密码：***，别告诉别人',
+  'password: ***, then',
+  'password: "***"',
+  "password: '***'",
+  'password: `***`',
+  '密码：“***”',
+  '密码：「***」',
+  // 遮盖符开头的真密码、粗体的值照常算
+  '密码：***hunter2***',
+  '密码：***x',
+  '密码：***-old',
+  'password: ***,abc',
+  'password: "***x"',
+  '密码：**hunter2**',
   'tokenizer: 分词器',
   'sk-short',
   '普通的一段话',
@@ -79,6 +105,20 @@ describe.skipIf(!testDatabaseUrl)('明文凭据提醒', () => {
     expect(rows.map((r) => [r.s, r.hit])).toEqual(
       SAMPLES.map((s) => [s, PLAINTEXT_CREDENTIAL.test(s)]),
     )
+  })
+
+  it('遮盖符开头的真密码挡得住降级；整段是遮盖符的不挡', async () => {
+    const lower = async (uri: string, content: string) => {
+      await create({ uri, content, sensitivity: 'secret' })
+      return app.request(
+        `${space()}/memories`,
+        jsonRequest('PATCH', { uri, sensitivity: 'private' }, { cookie: ws.cookie }),
+      )
+    }
+    expect((await lower('notes://real', '密码：***hunter2***')).status).toBe(400)
+    expect((await lower('notes://prefix', '密码：***x')).status).toBe(400)
+    expect((await lower('notes://masked', '密码：***')).status).toBe(200)
+    expect((await lower('notes://quoted', 'password: "***"')).status).toBe(200)
   })
 
   it('概览数出像有明文凭据的记忆，列表能按它筛选；secret 的正文是密文，不算', async () => {

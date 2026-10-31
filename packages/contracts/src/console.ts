@@ -25,8 +25,9 @@ export const MemoryListQuery = z.object({
   q: z.string().trim().min(1).max(200).optional(),
   // true 只列没写 disclosure 的，false 只列写了的；查询参数按字符串 'true' / 'false' 传
   missingDisclosure: z.enum(['true', 'false']).optional(),
-  // true 只列正文像有明文密码或 Token 的（规则见 PLAINTEXT_CREDENTIAL；secret 的正文是密文，不算）
-  plaintext: z.enum(['true', 'false']).optional(),
+  // true 只列正文像有明文密码或 Token、提示没被忽略的（规则见 PLAINTEXT_CREDENTIAL；secret 的正文是密文，不算），
+  // false 列别的那些，ignored 只列提示被忽略了的
+  plaintext: z.enum(['true', 'false', 'ignored']).optional(),
   // 更新时间在这个范围里：不早于 updatedAfter，早于 updatedBefore
   updatedAfter: z.iso.datetime({ offset: true }).optional(),
   updatedBefore: z.iso.datetime({ offset: true }).optional(),
@@ -146,13 +147,16 @@ export const BenchMark = z.object({ accountName: z.string().nullable(), run: z.s
 export type BenchMark = z.infer<typeof BenchMark>
 
 // 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete、
-// reactivate（让过期的记忆重新生效）
+// reactivate（让过期的记忆重新生效）、convert_credential（转存为凭据）、ignore_plaintext、unignore_plaintext、
+// access（读到 secret 的正文，只在历史里，不进活动）。access 与忽略明文提示不改记忆，after 为 null
 export const HistoryEvent = z.object({
   id: z.number().int(),
   type: z.string(),
   provenance: Provenance,
   createdAt: z.string(),
   actor: EventActor,
+  // access 经由哪里：console、export、rest、kioku_get 等；其他事件为 null
+  via: z.string().nullable(),
   before: MemorySnapshot.nullable(),
   after: MemorySnapshot.nullable(),
   // 这次改动之后，这条记忆离开了你的可见范围（例如被改进了别的成员的私人层，或改成了 secret）：
@@ -336,12 +340,28 @@ export const OverviewBackup = z.object({
 })
 export type OverviewBackup = z.infer<typeof OverviewBackup>
 
+// 待处理的四类各有多少条：导航角标与概览共用。每一类和对应的列表同一个条件，调用方看不到的不算
+export const InboxCounts = z.object({
+  // 等查看者本人确认的账号绑定
+  bindings: z.number().int(),
+  // 待确认内容：不可信来源写进对象层与情节层的记忆（待审队列）
+  review: z.number().int(),
+  // Dream 的建议：还没处理、还作数的
+  dreamSuggestions: z.number().int(),
+  // 正文疑似明文、提示没被忽略的记忆
+  plaintext: z.number().int(),
+  total: z.number().int(),
+})
+export type InboxCounts = z.infer<typeof InboxCounts>
+
 export const SpaceOverview = z.object({
   // 成员读得到的策展记忆，按层与敏感级分组
   counts: z.array(LayerCount),
   total: z.number().int(),
+  // 成员读得到、现在有效的来自对话的记忆（对象层的事实、情节层的会话摘要），同样分组；不算在 counts 与 total 里
+  extractedCounts: z.array(LayerCount),
   missingDisclosure: z.number().int(),
-  // 正文像有明文密码或 Token、该换成凭据占位符的记忆数
+  // 正文像有明文密码或 Token、该换成凭据占位符的记忆数，提示被忽略的不算
   plaintextCredentials: z.number().int(),
   // 从没被召回过的记忆数，和召回分析页同一个口径（见 RecallStats 的 never）
   neverRecalled: z.number().int(),
@@ -355,6 +375,7 @@ export const SpaceOverview = z.object({
   backup: OverviewBackup.nullable(),
   // 等查看者本人确认的绑定：别的平台账号想并进标记成他的对象
   pendingBindings: z.array(SubjectBinding),
+  inbox: InboxCounts,
 })
 export type SpaceOverview = z.infer<typeof SpaceOverview>
 

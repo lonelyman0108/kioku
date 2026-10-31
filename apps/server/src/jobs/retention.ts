@@ -40,7 +40,7 @@ import {
   subjectBindings,
 } from '../db/schema'
 import { monthStart } from '../extraction/budget'
-import { suggestionCurrent } from '../memory/service'
+import { ACCESS_EVENT, suggestionCurrent } from '../memory/service'
 
 // 保留期：删掉的、被推翻的、过期的内容与它们的历史，过了保留天数由每天一次的清理硬删除，删了就找不回来。
 // 天数与暂停存在实例设置的一项里；最近一次清理的结果单独存一项，清理任务记结果不会和管理员保存设置互相覆盖
@@ -272,6 +272,11 @@ export function retentionRules(now: Date, days: number) {
       not(suggestionCurrent(dreamSuggestions.memoryIds, dreamSuggestions.versions, { at: now })),
     )!,
     credentialEvents: lt(credentialEvents.createdAt, cutoff),
+    // 读到 secret 正文的访问事件：和凭据的访问事件一样，只留保留期内的。别的事件是版本，跟着记忆走
+    accessEvents: and(
+      eq(memoryEvents.eventType, ACCESS_EVENT),
+      lt(memoryEvents.createdAt, cutoff),
+    )!,
     deletedCredentials: lt(credentials.deletedAt, cutoff),
     // 已删除的凭据源：还有凭据指着它的留着，已删除、还在保留期里的凭据也算
     // （恢复之后要显示「凭据源已删除」，外键也不让删）
@@ -472,6 +477,12 @@ const STEPS: Step[] = [
     ),
   },
   {
+    label: '记忆的访问记录',
+    batch: single('accessEvents', (tx, r) =>
+      tableBatch(tx, memoryEvents, memoryEvents.id, r.accessEvents),
+    ),
+  },
+  {
     label: '已删除的凭据',
     // 凭据的事件随凭据级联删除
     batch: single('deletedCredentials', (tx, r) =>
@@ -505,6 +516,7 @@ const emptyCounts = (): RetentionCounts => ({
   deletedCredentials: 0,
   deletedProviders: 0,
   subjectBindings: 0,
+  accessEvents: 0,
 })
 
 function addCounts(into: RetentionCounts, more: Partial<RetentionCounts>): RetentionCounts {

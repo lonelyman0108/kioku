@@ -85,6 +85,7 @@ export const retentionLabels: Record<keyof RetentionCounts, string> = {
   dreamRuns: 'Dream 的运行记录',
   dreamSuggestions: '已处理或已失效的 Dream 建议',
   credentialEvents: '凭据事件',
+  accessEvents: '记忆的访问记录',
   deletedCredentials: '已删除的凭据',
   deletedProviders: '已删除的凭据源',
   subjectBindings: '已处理的绑定记录',
