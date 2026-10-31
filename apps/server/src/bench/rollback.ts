@@ -207,9 +207,12 @@ export async function inRollback<T>(
         jobs: null,
         embedder: vectorTableSource(vectors, run),
       }
-      result.value = await fn(scoped, run)
-      // 先关再回滚：回滚做完之前发出的语句会落在事务外（见 guard）
-      run.close()
+      try {
+        result.value = await fn(scoped, run)
+      } finally {
+        // 先关再回滚，fn 抛错时也一样：回滚做完之前发出的语句会落在事务外（见 guard）
+        run.close()
+      }
       throw new Rolled()
     })
   } catch (err) {
@@ -217,6 +220,7 @@ export async function inRollback<T>(
     run.close()
     if (!(err instanceof Rolled)) throw err
   } finally {
+    // 连接断开时放开闸门的时候回调可能还没跑完：运行已经关了，它的下一条语句会报错，很快就停
     leave()
   }
   return result.value as T

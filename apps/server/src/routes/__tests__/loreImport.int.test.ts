@@ -1292,12 +1292,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
     })
 
     describe('写到一半失败', () => {
-      const reject = async (path: string, errcode: string) => {
+      // 写到这个路径时执行 action
+      const onPath = async (path: string, action: string) => {
         await database.db.execute(
           sql.raw(`create or replace function kioku_test_reject() returns trigger language plpgsql as $$
             begin
               if new.path = '${path}' then
-                raise exception 'kioku test' using errcode = '${errcode}';
+                ${action};
               end if;
               return new;
             end $$`),
@@ -1307,6 +1308,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
             for each row execute function kioku_test_reject()`),
         )
       }
+      const reject = (path: string, errcode: string) =>
+        onPath(path, `raise exception 'kioku test' using errcode = '${errcode}'`)
       const unreject = () =>
         database.db.execute(sql.raw('drop trigger if exists kioku_test_reject on memories'))
       afterEach(unreject)
@@ -1390,6 +1393,28 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           expect(result.created).toContain('infra://nas')
           expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
           expect(await eventsPerMemory()).toEqual(new Array(6).fill(1))
+        } finally {
+          logged.mockRestore()
+        }
+      })
+
+      it('写到一半连接断开：和别的错误一样中止，日志记 CONNECTION_CLOSED；重看计划能接着做', async () => {
+        const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+        try {
+          await onPath('nas', 'perform pg_terminate_backend(pg_backend_pid())')
+          const source = await fileSource()
+          const plan = await planOf(source)
+          const res = await post('apply', { source, fingerprint: plan.fingerprint })
+          expect(res.status).toBe(500)
+          expect(((await res.json()) as { error: string }).error).toContain('可能已写入一部分')
+          expect(logged.mock.calls).toEqual([['从 Lore 导入时出错', { code: 'CONNECTION_CLOSED' }]])
+          await unreject()
+
+          const again = await planOf(source)
+          expect(stateOf(again, 'core://agent')).toBe('imported')
+          expect(stateOf(again, 'infra://nas')).toBe('new')
+          expect((await applyOf(source, again)).failed).toEqual([])
+          expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
         } finally {
           logged.mockRestore()
         }

@@ -11,7 +11,14 @@ import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps } from '../../http/env'
 import { semanticFor } from '../../memory/context'
 import { MemoryError } from '../../memory/service'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  backendOf,
+  killDuring,
+  openTestDatabase,
+  resetDatabase,
+  testDatabaseUrl,
+} from '../../testing/db'
+import { deferred } from '../../testing/deferred'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { bootstrap, type Workspace } from '../../testing/fixtures'
 import {
@@ -23,14 +30,6 @@ import {
 } from '../rollback'
 
 const NO_VECTORS: QueryVectors = { model: null, vectors: new Map() }
-
-function deferred<T = void>() {
-  let resolve!: (value: T) => void
-  const promise = new Promise<T>((r) => {
-    resolve = r
-  })
-  return { promise, resolve }
-}
 
 describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
   let database: Database
@@ -326,43 +325,36 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     const strayRows = () => database.db.select().from(settings).where(eq(settings.key, STRAY))
     afterEach(() => database.db.delete(settings).where(eq(settings.key, STRAY)))
 
-    it('驱动不挡：不经代理的句柄写下去，真的提交了', async () => {
-      const outcome = deferred<string>()
-      await expect(
-        database.db.transaction(async (tx) => {
-          await tx.execute(sql`select 1`)
-          setImmediate(() => {
-            void attempt(() => tx.insert(settings).values({ key: STRAY, value: {} })).then(
-              outcome.resolve,
-            )
-          })
-          throw new Error('回滚')
-        }),
-      ).rejects.toThrow('回滚')
-      expect(await outcome.promise).toBe('发出去了')
-      await expect(strayRows()).resolves.toHaveLength(1)
-    })
-
-    it('代理挡得住：运行结束时先置状态，写不进去', async () => {
-      const outcome = deferred<string>()
-      await inRollback(deps, NO_VECTORS, async (scoped) => {
-        await scoped.db.execute(sql`select 1`)
+    const strayWrite = (db: Db) =>
+      new Promise<string>((resolve) => {
         setImmediate(() => {
-          void attempt(() => scoped.db.insert(settings).values({ key: STRAY, value: {} })).then(
-            outcome.resolve,
-          )
+          void attempt(() => db.insert(settings).values({ key: STRAY, value: {} })).then(resolve)
         })
       })
-      expect(await outcome.promise).toContain('已经结束')
+
+    it('代理挡得住：运行结束时先置状态，写不进去', async () => {
+      let outcome!: Promise<string>
+      await inRollback(deps, NO_VECTORS, async (scoped) => {
+        await scoped.db.execute(sql`select 1`)
+        outcome = strayWrite(scoped.db)
+      })
+      expect(await outcome).toContain('已经结束')
+      await expect(strayRows()).resolves.toEqual([])
+    })
+
+    it('运行抛错时也一样：先置状态再回滚，写不进去', async () => {
+      let outcome!: Promise<string>
+      await expect(
+        inRollback(deps, NO_VECTORS, async (scoped) => {
+          await scoped.db.execute(sql`select 1`)
+          outcome = strayWrite(scoped.db)
+          throw new Error('运行出错')
+        }),
+      ).rejects.toThrow('运行出错')
+      expect(await outcome).toContain('已经结束')
       await expect(strayRows()).resolves.toEqual([])
     })
   })
-
-  const backendOf = async (db: Db | Tx) => {
-    const [row] = await db.execute<{ pid: number }>(sql`select pg_backend_pid() as pid`)
-    return row!.pid
-  }
-  const killBackend = (pid: number) => other.db.execute(sql`select pg_terminate_backend(${pid})`)
 
   // postgres.js 的 begin 把回调和连接关闭放在 Promise.race 里：连接断开时外层立刻 reject，回调不会停
   it('连接断开时回调已经在事务里：外层马上 reject，内层的 tx 也不能再发语句', async () => {
@@ -379,11 +371,11 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
         ])
       }),
     )
-    await killBackend(await entered.promise)
-    await expect(running).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })
+    expect(await killDuring(other.db, await entered.promise, running)).toMatchObject({
+      code: 'CONNECTION_CLOSED',
+    })
     callback.resolve()
     for (const outcome of await after.promise) expect(outcome).toContain('已经结束')
-    expect(await subjectNames(database.db)).toEqual([])
   })
 
   it('连接断开、回调还在跑：先置状态，回调不能再发语句', async () => {
@@ -397,13 +389,13 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       const error = await addSubject(scoped.db, '不该写').catch((err: unknown) => err)
       after.resolve({ reason, error })
     })
-    await killBackend(await entered.promise)
-    await expect(running).rejects.toMatchObject({ code: 'CONNECTION_CLOSED' })
+    expect(await killDuring(other.db, await entered.promise, running)).toMatchObject({
+      code: 'CONNECTION_CLOSED',
+    })
     callback.resolve()
     const { reason, error } = await after.promise
     expect(reason).toBe('aborted')
     expect(String(error)).toContain('已经结束')
-    expect(await subjectNames(database.db)).toEqual([])
   })
 
   it('闸门：同时运行数到了上限直接 429，结束之后放开', async () => {

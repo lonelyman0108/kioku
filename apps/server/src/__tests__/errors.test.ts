@@ -3,10 +3,21 @@ import { inspect } from 'node:util'
 import { ErrorResponse } from '@kioku/contracts'
 import { DrizzleQueryError } from 'drizzle-orm'
 import { HTTPException } from 'hono/http-exception'
+import { PostgresError } from 'postgres'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
+import { isLockBusy } from '../access/subjects'
 import { createApp } from '../app'
-import { errorText, loggableError, type Db } from '../db/client'
+import { RollbackRun } from '../bench/rollback'
+import {
+  errorText,
+  isUniqueViolation,
+  loggableError,
+  pgConstraint,
+  pgErrorCode,
+  pgMessage,
+  type Db,
+} from '../db/client'
 import { staticEmbedderSource } from '../embedding/source'
 
 // 初始化与登录在读数据库之前先校验请求体，用一个碰不得的数据库就够了：校验没拦下的请求一读库就出错
@@ -189,5 +200,123 @@ describe('记进最近的错误的文字', () => {
     const wrapped = new Error('Key 解不开，看看主密钥', { cause: new Error('bad decrypt') })
     expect(errorText(wrapped)).toBe('Key 解不开，看看主密钥')
     expect(errorText('不是错误对象')).toBe('不是错误对象')
+  })
+})
+
+describe('数据库错误的字段', () => {
+  const postgresError = (code: string, message: string, constraint?: string) =>
+    new PostgresError({
+      code,
+      message,
+      ...(constraint ? { constraint_name: constraint } : {}),
+    })
+  const wrap = (cause: unknown) => new DrizzleQueryError(SQL_TEXT, [PARAM], cause as Error)
+  // 和驱动给的一样：连接错误自带 cause，被杀时是数据库说的原因，网络断开时是 socket 的错误
+  const CLOSED_MESSAGE = 'write CONNECTION_CLOSED localhost:5432'
+  const connectionLost = (cause?: unknown) =>
+    Object.assign(new Error(CLOSED_MESSAGE), { code: 'CONNECTION_CLOSED', cause })
+  const terminated = postgresError('57P01', 'terminating connection due to administrator command')
+  const reset = Object.assign(new Error('read ECONNRESET'), { code: 'ECONNRESET' })
+  const newRun = () =>
+    new RollbackRun({
+      parallel: 1,
+      statementTimeoutMs: 1,
+      lockTimeoutMs: 1,
+      runMs: 1,
+      embedBudgetMs: 1,
+    })
+
+  describe('数据库报的错：包不包在 drizzle 的错误里，字段都一样', () => {
+    const unique = postgresError('23505', 'duplicate key value', 'memories_uri_live_idx')
+
+    it.each([
+      ['未包装', unique],
+      ['包在 drizzle 的错误里', wrap(unique)],
+    ])('%s', (_, err) => {
+      expect(pgErrorCode(err)).toBe('23505')
+      expect(pgConstraint(err)).toBe('memories_uri_live_idx')
+      expect(pgMessage(err)).toBe('duplicate key value')
+      expect(isUniqueViolation(err, 'memories_uri_live_idx')).toBe(true)
+      expect(isUniqueViolation(err, 'another_idx')).toBe(false)
+      expect(errorText(err)).toBe('duplicate key value')
+    })
+
+    it('日志：未包装的原样留着，它的 SQL 与参数不可枚举；包在 drizzle 里的只留三个字段', () => {
+      expect(loggableError(unique)).toBe(unique)
+      expect(loggableError(wrap(unique))).toEqual({
+        code: '23505',
+        constraint: 'memories_uri_live_idx',
+        message: 'duplicate key value',
+      })
+    })
+
+    it.each([
+      ['未包装', (code: string) => postgresError(code, '等不到')],
+      ['包在 drizzle 的错误里', (code: string) => wrap(postgresError(code, '等不到'))],
+    ])('等锁与语句超时认得出来：%s', (_, make) => {
+      expect(isLockBusy(make('55P03'))).toBe(true)
+      expect(isLockBusy(make('40P01'))).toBe(true)
+      expect(isLockBusy(make('57014'))).toBe(false)
+      const run = newRun()
+      run.note(make('57014'))
+      expect(run.takeDetail()).toBe('statement_timeout')
+      run.note(make('55P03'))
+      expect(run.takeDetail()).toBe('lock_timeout')
+    })
+  })
+
+  describe('连接错误：不解开它自带的 cause，同一次断连记成同一个 code', () => {
+    it.each([
+      ['后端被杀', connectionLost(terminated)],
+      ['网络断开', connectionLost(reset)],
+      ['没有 cause', connectionLost()],
+      ['后端被杀，包在 drizzle 的错误里', wrap(connectionLost(terminated))],
+      ['网络断开，包在 drizzle 的错误里', wrap(connectionLost(reset))],
+    ])('%s', (_, err) => {
+      expect(pgErrorCode(err)).toBe('CONNECTION_CLOSED')
+      expect(pgMessage(err)).toBe(CLOSED_MESSAGE)
+      expect(pgConstraint(err)).toBeUndefined()
+      expect(errorText(err)).toBe(CLOSED_MESSAGE)
+      expect(isLockBusy(err)).toBe(false)
+      const run = newRun()
+      run.note(err)
+      expect(run.takeDetail()).toBeNull()
+    })
+
+    it('cause 里的 SQLSTATE 不算这个错误的：不会被当成唯一约束冲突或等锁超时', () => {
+      const unique = postgresError('23505', '重复', 'memories_uri_live_idx')
+      expect(isUniqueViolation(connectionLost(unique), 'memories_uri_live_idx')).toBe(false)
+      expect(isLockBusy(connectionLost(postgresError('55P03', '等锁')))).toBe(false)
+    })
+
+    it('日志：未包装的原样留着，cause 也在；包在 drizzle 里的只留三个字段', () => {
+      const raw = connectionLost(terminated)
+      expect(loggableError(raw)).toBe(raw)
+      expect(loggableError(wrap(raw))).toEqual({
+        code: 'CONNECTION_CLOSED',
+        constraint: undefined,
+        message: CLOSED_MESSAGE,
+      })
+    })
+  })
+
+  it('别的错误的 cause 不解开：fetch 的错误不算数据库的错误', () => {
+    const err = new TypeError('fetch failed', { cause: reset })
+    expect(pgErrorCode(err)).toBeUndefined()
+    expect(pgConstraint(err)).toBeUndefined()
+    expect(pgMessage(err)).toBe('fetch failed')
+  })
+
+  it('drizzle 的错误没有 cause 时什么也不给，不退回带 SQL 与参数的 message', () => {
+    const err = new DrizzleQueryError(SQL_TEXT, [PARAM])
+    expect(pgErrorCode(err)).toBeUndefined()
+    expect(pgMessage(err)).toBeUndefined()
+  })
+
+  it('抛出来的不是错误对象时不再报错', () => {
+    for (const err of [null, undefined, '不是错误对象', 1]) {
+      expect(pgErrorCode(err)).toBeUndefined()
+      expect(isUniqueViolation(err, 'memories_uri_live_idx')).toBe(false)
+    }
   })
 })

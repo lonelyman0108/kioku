@@ -46,6 +46,8 @@ const scanning = new AsyncLocalStorage<true>()
 // 对每个空间在它自己的事务里调用 fn（内容表开了 RLS，一个事务只看得到一个空间），几个空间同时数，不逐个排队。
 // 每数一个空间取一次名额、数完还回去，几处同时数时轮流用，谁也不用等别人整个数完。
 // 有一个空间出错就不再开始别的，等已经开始的都结束再抛出这个错误：返回或抛出之后不会还有空间的事务没结束。
+// 连接断开是例外：withSpace 立刻 reject，那个事务已经没了，fn 还在跑，到它的下一条语句报错才停（时间很短），
+// 所以这时返回或抛出之后 fn 可能还没跑完。
 // fn 里再调 eachSpace 直接报错：外层占着名额等里层，名额会被占满、互相等住
 export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<void> {
   if (scanning.getStore()) throw new Error('eachSpace 不能嵌套调用')
@@ -73,9 +75,12 @@ export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<
   if (failure) throw failure.error
 }
 
-// 数据库报的错：drizzle 把驱动的错误包在 cause 里
+// 数据库报的错：drizzle 把驱动的错误包在 cause 里，只解开这一种。驱动直接抛的错误不解开：
+// 连接错误（CONNECTION_CLOSED）自带 cause（57P01、ECONNRESET 这些），解开就成了另一个错误，同一次断连会记成不同的 code。
+// drizzle 的错误没有 cause 时什么也不给：它的 message 带着 SQL 与全部参数
 function pgError(err: unknown): { code?: string; constraint_name?: string; message?: string } {
-  return ((err as { cause?: unknown })?.cause ?? err) as { code?: string }
+  const pg = err instanceof DrizzleQueryError ? err.cause : err
+  return (pg ?? {}) as { code?: string }
 }
 
 // 数据库给的错误说明（例如哪个值超出了范围），没有时为 undefined
