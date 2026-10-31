@@ -1,11 +1,16 @@
 import { describe, expect, it } from 'vitest'
+import { createSSRApp, defineComponent, h } from 'vue'
 import { parse } from 'vue/compiler-sfc'
+import { renderToString } from 'vue/server-renderer'
 
+import createMemoryModal from '../components/CreateMemoryModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
 import expiredMemories from '../components/ExpiredMemories.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
 import memoryHistory from '../components/MemoryHistory.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
+import moveMemoryModal from '../components/MoveMemoryModal.vue?raw'
+import OverviewRow from '../components/OverviewRow.vue'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
 
@@ -15,7 +20,12 @@ interface TemplateNode {
   type: number
   tag?: string
   children?: TemplateNode[]
-  props?: { name: string }[]
+  props?: {
+    name: string
+    arg?: { content: string }
+    value?: { content: string }
+    exp?: { content: string }
+  }[]
 }
 
 const ELEMENT = 1
@@ -34,6 +44,20 @@ const conditional = (node: TemplateNode) =>
 
 const template = (source: string) =>
   parse(source).descriptor.template!.ast as unknown as TemplateNode
+const elementsOf = (node: TemplateNode): TemplateNode[] => [
+  ...(node.type === ELEMENT ? [node] : []),
+  ...(node.children ?? []).flatMap(elementsOf),
+]
+const attr = (el: TemplateNode, name: string) =>
+  el.props?.find((p) => p.name === name)?.value?.content
+const handler = (el: TemplateNode, event: string) =>
+  el.props?.find((p) => p.name === 'on' && p.arg?.content === event)?.exp?.content
+const textOf = (el: TemplateNode): string =>
+  (el.children ?? [])
+    .map((c) => (c as unknown as { content?: unknown }).content)
+    .filter((c) => typeof c === 'string')
+    .join('')
+    .trim()
 
 describe('彩色徽章', () => {
   it('记忆和概览不再用彩色徽章表示敏感级', () => {
@@ -69,7 +93,130 @@ describe('记忆页', () => {
   })
 })
 
+describe('目录的键盘和无障碍', () => {
+  const tree = elementsOf(template(memoriesPage)).find((el) => el.tag === 'UTree')!
+
+  it('目录有名字', () => {
+    expect(attr(tree, 'aria-label')).toBe('记忆目录')
+  })
+
+  it('左键抢在组件库之前处理：它只在渲染出来的行里找上一级', () => {
+    const capture = tree.props?.find(
+      (p) =>
+        p.name === 'on' && p.arg?.content === 'keydown' && JSON.stringify(p).includes('capture'),
+    )
+    expect(capture?.exp?.content).toBe('onTreeLeftKey')
+    expect(memoriesPage).toMatch(/parentRow\(places\.value, expanded\.value, uri\)/)
+  })
+
+  it('打字跳转留给页面，组件库的那份给空文字关掉', () => {
+    expect(handler(tree, 'keydown')).toBeDefined()
+    expect(memoriesPage).toContain("textContent: () => ''")
+  })
+
+  it('窄屏切换后焦点不掉到 body：标题能接住焦点，返回时放回那一行', () => {
+    const title = elementsOf(template(memoryEditor)).find((el) => el.tag === 'h1')!
+    expect(attr(title, 'tabindex')).toBe('-1')
+    expect(memoryEditor).toContain('defineExpose({ focusTitle')
+    expect(memoriesPage).toContain('focusAfterSelect(narrow.value, uri, previous)')
+    expect(memoriesPage).toContain('focusIndexRow(target.uri)')
+  })
+
+  it('触屏上箭头的热区放大，行高和样式跟着粗指针走', () => {
+    expect(memoriesPage).toContain('@media (pointer: coarse)')
+    expect(memoriesPage).toContain("matchMedia('(pointer: coarse)')")
+  })
+})
+
+describe('记忆页取统计', () => {
+  it('窄柱的统计不跟着每次写入重取：只标记过期，统计变了才取一次', () => {
+    expect(memoriesPage).toContain('staleTime: 60_000')
+    expect(memoriesPage).toContain("refetchType: 'none'")
+    expect(memoriesPage).toContain('statsChanged(before, memory)')
+  })
+
+  it('invalidateLists 不再让概览跟着失效重取', () => {
+    const body = /function invalidateLists\(\) \{[\s\S]*?\n\}/.exec(memoriesPage)![0]
+    const list = /for \(const key of \[([\s\S]*?)\]\)/.exec(body)![1]!
+    expect(list).not.toContain('overview')
+    expect(body).not.toContain('overview.refetch')
+  })
+
+  it('domain 列表只有一个请求：树和条数共用查询', () => {
+    expect(memoriesPage.match(/api\.memoryDomains\(/g)).toHaveLength(2)
+    expect(memoriesPage).toContain('queryClient.fetchQuery')
+    expect(memoriesPage.match(/\['memory-domains', /g)).toHaveLength(2)
+  })
+})
+
+// 回车的隐式提交会点默认按钮：单选在表单里时，方向键选完再按回车，提示还没看就提交了
+describe.each([
+  ['移动或改层', moveMemoryModal, '确定'],
+  ['新建记忆', createMemoryModal, '创建'],
+])('%s的弹窗', (_name, source, label) => {
+  const elements = elementsOf(template(source))
+
+  it('没有表单，也没有提交按钮', () => {
+    expect(elements.filter((el) => el.tag === 'form')).toEqual([])
+    expect(elements.filter((el) => attr(el, 'type') === 'submit')).toEqual([])
+    expect(source).not.toContain('@submit')
+  })
+
+  it('只有点按钮才提交', () => {
+    const button = elements.find((el) => el.tag === 'UButton' && textOf(el) === label)!
+    expect(handler(button, 'click')).toBe('submit')
+  })
+})
+
+describe('概览的一行', () => {
+  // 没有路由，RouterLink 换成一个普通的 a，属性照样落上去
+  const render = (props: Record<string, unknown>) => {
+    const app = createSSRApp(OverviewRow, props)
+    app.component(
+      'RouterLink',
+      defineComponent({
+        setup:
+          (_, { slots }) =>
+          () =>
+            h('a', slots.default?.()),
+      }),
+    )
+    return renderToString(app)
+  }
+
+  it('操作都叫「查看」时，读屏能分清是哪一行', async () => {
+    const link = await render({ title: '整理建议', value: 2, action: '查看', to: '/review' })
+    expect(link).toContain('aria-label="整理建议：查看"')
+    const button = await render({
+      title: '账号绑定申请',
+      value: 1,
+      action: '查看',
+      expanded: false,
+    })
+    expect(button).toContain('aria-label="账号绑定申请：查看"')
+    expect(button).toContain('aria-expanded="false"')
+  })
+
+  it('没有要做的事时没有操作', async () => {
+    const html = await render({ title: '整理建议', value: 0, action: null, zero: true })
+    expect(html).not.toContain('row-action')
+  })
+})
+
 describe('记忆详情', () => {
+  it('启动加载的提示写清只是够格，不再说一定加载', () => {
+    expect(memoryEditor).toContain('<Hint>{{ BOOT_HINT }}</Hint>')
+    expect(memoryEditor).toContain(':title="BOOT_HINT"')
+    expect(memoryEditor).not.toContain('每次会话开始时加载')
+  })
+
+  it('没写触发场景的提示按 missingDisclosureTone 走，列表和详情一个规则', () => {
+    expect(memoryEditor).toContain('missingDisclosureTone(base.value, now.value)')
+    expect(memoryEditor).toMatch(/<NoteLine\s+v-if="disclosureTone"/)
+    expect(memoryListView).toContain('v-if="missingDisclosureTone(item)"')
+    expect(memoryListView).not.toContain('启动加载')
+  })
+
   it('编辑和历史都就地切换，不弹窗', () => {
     expect(memoryEditor).not.toContain('USlideover')
     expect(memoryEditor).toContain('v-else-if="historyOpen"')

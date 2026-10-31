@@ -160,3 +160,28 @@ export function typeaheadMatch(
   }
   return null
 }
+
+// 左键要跳到的上一级。展开着的行是收起（组件库做），domain 根没有上一级。
+// 虚拟滚动下上一级可能没渲染，组件库找不到它，所以按路径算
+export function parentRow(
+  places: ReadonlyMap<string, TreeRowPlace>,
+  expanded: readonly string[],
+  uri: string,
+): string | null {
+  const place = places.get(uri)
+  if (!place || place.depth === 0 || expanded.includes(uri)) return null
+  const parent = parentOf(uri)
+  return places.has(parent) ? parent : null
+}
+
+// 窄屏上目录和详情只显示一个，切换之后原来有焦点的元素藏起来了，焦点会掉到 body。
+// 打开一条时放到详情的标题，返回时放回原来那一行。宽屏两边都在，不用动
+export function focusAfterSelect(
+  narrow: boolean,
+  uri: string | null,
+  previous: string | null,
+): { to: 'title' } | { to: 'row'; uri: string } | null {
+  if (!narrow) return null
+  if (uri) return { to: 'title' }
+  return previous ? { to: 'row', uri: previous } : null
+}

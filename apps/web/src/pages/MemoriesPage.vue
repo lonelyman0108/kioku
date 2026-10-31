@@ -4,8 +4,8 @@ import { useToast } from '@nuxt/ui/composables'
 import {
   LAYERS,
   SENSITIVITIES,
+  type ConsoleMemoryView,
   type Layer,
-  type MemoryView,
   type Sensitivity,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
@@ -23,9 +23,11 @@ import MemoryListView from '../components/MemoryListView.vue'
 import {
   ancestorsOf,
   depthOf,
+  focusAfterSelect,
   guideLines,
   lastSegment,
   parentOf,
+  parentRow,
   toTreeItems,
   treeRowPlaces,
   typeaheadMatch,
@@ -39,6 +41,7 @@ import { tallyCounts } from '../components/strata/strata'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
+import { statsChanged } from '../memoryDetail'
 
 const route = useRoute()
 const router = useRouter()
@@ -74,11 +77,16 @@ function setView(value: string | number) {
   void router.replace(withQuery({ view: value === 'tree' ? null : String(value) }))
 }
 
-// 窄柱的条数和列表上方的总数都来自概览的统计，和概览页共用一份缓存
+// 窄柱的条数和列表上方的总数都来自概览的统计，和概览页共用一份缓存。这个接口要把整个概览算一遍，
+// 不跟着每次写入重取：写入时只标记过期（invalidateLists），别的页面进来时才取；这里在统计可能变了时取一次
 const overview = useQuery({
   queryKey: computed(() => ['overview', spaceId.value]),
   queryFn: () => api.overview(spaceId.value),
+  staleTime: 60_000,
 })
+function refreshCounts() {
+  void overview.refetch()
+}
 // 窄柱上有来自对话的两层，所以算上它们；列表只列记忆，它的总数不算（见 MemoryListView）
 const stackCounts = computed(() => {
   const data = overview.data.value
@@ -127,12 +135,15 @@ const rootsFailed = ref(false)
 const createOpen = ref(false)
 const createUri = ref('')
 
+// 刚删掉的那条：目录和列表马上就要去掉它，窄屏返回时焦点不放回那一行
+let deletedUri: string | null = null
+
 function failed(err: unknown) {
   toast.add({ title: err instanceof ApiError ? err.message : '读取失败', color: 'error' })
 }
 
 // 列表、已删除、已过期、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
-// 概览的统计也在这里：窄柱和列表上方的总数都用它
+// 概览只标记过期，见 refreshCounts
 function invalidateLists() {
   for (const key of [
     'memory-list',
@@ -140,10 +151,13 @@ function invalidateLists() {
     'memory-expired',
     'memory-domains',
     'memory-glossary',
-    'overview',
   ]) {
     void queryClient.invalidateQueries({ queryKey: [key, spaceId.value] })
   }
+  void queryClient.invalidateQueries({
+    queryKey: ['overview', spaceId.value],
+    refetchType: 'none',
+  })
 }
 
 async function loadRoots() {
@@ -151,7 +165,12 @@ async function loadRoots() {
   // 切换空间时上一次请求可能后到，结果属于别的空间就丢掉
   const forSpace = spaceId.value
   try {
-    const domains = await api.memoryDomains(forSpace)
+    // 和下面 domain 根条数的查询共用一个请求
+    const domains = await queryClient.fetchQuery({
+      queryKey: ['memory-domains', forSpace],
+      queryFn: () => api.memoryDomains(forSpace),
+      staleTime: 0,
+    })
     if (forSpace !== spaceId.value) return
     rootsFailed.value = false
     roots.value = domains.map((d) => ({
@@ -261,6 +280,7 @@ function resetMemory(uri: string) {
 
 function refresh() {
   invalidateLists()
+  refreshCounts()
   void serially(loadRoots)
 }
 
@@ -299,21 +319,24 @@ async function onCreated(uri: string) {
   // 这个 URI 上可能还留着之前删掉的那条的缓存
   resetMemory(uri)
   invalidateLists()
+  refreshCounts()
   void serially(() => refreshAround(uri)).catch(failed)
   await select(uri)
 }
 
 async function onDeleted(uri: string) {
+  deletedUri = uri
   await select(null)
   // 等编辑器卸载之后再清缓存，免得它重新读取一次、闪出「不存在」
   await nextTick()
   resetMemory(uri)
   invalidateLists()
+  refreshCounts()
   await serially(() => refreshAround(uri)).catch(failed)
 }
 
-// 保存、恢复或只改了层之后，树上这一项的标记跟着变
-function onChanged(memory: MemoryView) {
+// 保存、恢复或只改了层之后，树上这一项的标记跟着变。不知道改之前什么样时按变了算
+function onChanged(memory: ConsoleMemoryView, before?: ConsoleMemoryView) {
   const item = find(roots.value, memory.uri)
   if (item) {
     Object.assign(item, {
@@ -323,11 +346,13 @@ function onChanged(memory: MemoryView) {
     })
   }
   invalidateLists()
+  if (!before || statsChanged(before, memory)) refreshCounts()
 }
 
-async function onMoved(memory: MemoryView, from: string) {
+async function onMoved(memory: ConsoleMemoryView, from: string) {
   if (memory.uri === from) return onChanged(memory)
   invalidateLists()
+  refreshCounts()
   void serially(async () => {
     await refreshAround(from).catch(failed)
     await refreshAround(memory.uri).catch(failed)
@@ -343,6 +368,7 @@ async function onMoved(memory: MemoryView, from: string) {
 // 撤销删除或重新生效之后，这条记忆回到了树上：刷新那一级并选中它
 async function onRevived(uri: string) {
   invalidateLists()
+  refreshCounts()
   void serially(() => refreshAround(uri)).catch(failed)
   await select(uri)
 }
@@ -374,20 +400,48 @@ const selectedItem = computed(() =>
   selectedUri.value ? find(roots.value, selectedUri.value) : undefined,
 )
 
-// 目录一行多高：窄屏要点得准，高一些。虚拟滚动按这个高度算位置，要和样式一致
+// 目录一行多高：窄屏和触屏要点得准，高一些。虚拟滚动按这个高度算位置，要和样式一致
 const viewport = useViewport()
-const rowHeight = computed(() => (viewport.value.width < 1024 ? 36 : 28))
+const narrow = computed(() => viewport.value.width < 1024)
+const coarsePointer = window.matchMedia('(pointer: coarse)').matches
+const rowHeight = computed(() => (narrow.value || coarsePointer ? 36 : 28))
 // 展开着的每一行在哪里：引线和滚动到选中的那一行都要用
 const places = computed(() => treeRowPlaces(roots.value, expanded.value))
 const treeRef = ref<{ $el: HTMLElement } | null>(null)
 function scrollToRow(uri: string) {
   const el = treeRef.value?.$el
+  if (!el) return
   const place = places.value.get(uri)
-  if (!el || !place) return
-  const top = place.index * rowHeight.value
-  if (top < el.scrollTop || top + rowHeight.value > el.scrollTop + el.clientHeight) {
-    el.scrollTop = top - el.clientHeight / 2
+  if (place) {
+    const top = place.index * rowHeight.value
+    if (top < el.scrollTop || top + rowHeight.value > el.scrollTop + el.clientHeight) {
+      el.scrollTop = top - el.clientHeight / 2
+    }
   }
+  // 窄屏的目录刚从隐藏变成显示时，位置变了也不发 scroll 事件，虚拟滚动不知道，替它发一个
+  el.dispatchEvent(new Event('scroll'))
+}
+// 滚到这一行并把焦点给它。行是虚拟滚动渲染的，滚动之后要等几帧才出来；一直没出来时调用 missing
+function focusTreeRow(uri: string, missing?: () => void) {
+  scrollToRow(uri)
+  const attempt = (left: number) =>
+    requestAnimationFrame(() => {
+      const row = treeRef.value?.$el.querySelector<HTMLElement>(`[data-uri="${CSS.escape(uri)}"]`)
+      if (row) row.focus()
+      else if (left > 0) attempt(left - 1)
+      else missing?.()
+    })
+  attempt(10)
+}
+// 左键跳到上一级：组件库只在渲染出来的行里找，虚拟滚动下上一级可能不在。在它之前接过来，一律自己跳
+function onTreeLeftKey(event: KeyboardEvent) {
+  if (event.key !== 'ArrowLeft') return
+  const uri = (event.target as HTMLElement).dataset.uri
+  const parent = uri ? parentRow(places.value, expanded.value, uri) : null
+  if (!parent) return
+  event.preventDefault()
+  event.stopPropagation()
+  focusTreeRow(parent)
 }
 // 打字跳到名字以这些字开头的那一行。组件库自带的跳转在虚拟滚动下把焦点给了外层的 li，
 // 焦点就丢了，所以自己做，给它的文字留空（treeVirtualize）
@@ -400,14 +454,7 @@ function onTreeKeydown(event: KeyboardEvent) {
   typedAt = event.timeStamp
   const current = (document.activeElement as HTMLElement | null)?.dataset.uri ?? null
   const uri = typeaheadMatch(places.value, typed, current)
-  if (!uri) return
-  scrollToRow(uri)
-  // 滚动之后要等那一行渲染出来
-  requestAnimationFrame(() =>
-    requestAnimationFrame(() =>
-      treeRef.value?.$el.querySelector<HTMLElement>(`[data-uri="${CSS.escape(uri)}"]`)?.focus(),
-    ),
-  )
+  if (uri) focusTreeRow(uri)
 }
 // textContent 不在组件库声明的选项里，但会一路传给虚拟滚动
 const treeVirtualize = computed(() => ({
@@ -420,6 +467,28 @@ watch(view, async (next) => {
   if (next !== 'tree' || !selectedUri.value) return
   await nextTick()
   scrollToRow(selectedUri.value)
+})
+// 窄屏切换之后的焦点（见 focusAfterSelect）。原来那一行不在了（筛选换了、刚删掉）时放到当前的标签上
+const editorRef = ref<InstanceType<typeof MemoryEditor> | null>(null)
+const indexColumn = ref<HTMLElement | null>(null)
+function focusIndexRow(uri: string) {
+  const fallback = () =>
+    indexColumn.value?.querySelector<HTMLElement>('[role="tab"][aria-selected="true"]')?.focus()
+  if (uri === deletedUri) return fallback()
+  if (view.value === 'tree') return focusTreeRow(uri, fallback)
+  const row = listScroller.value?.querySelector<HTMLElement>(
+    `button[data-uri="${CSS.escape(uri)}"]`,
+  )
+  if (!row) return fallback()
+  row.scrollIntoView({ block: 'center' })
+  row.focus({ preventScroll: true })
+}
+watch(selectedUri, async (uri, previous) => {
+  const target = focusAfterSelect(narrow.value, uri, previous)
+  if (!target) return
+  await nextTick()
+  if (target.to === 'title') editorRef.value?.focusTitle()
+  else focusIndexRow(target.uri)
 })
 // 三个列表共用一个滚动区：各记各的位置，切回来还在原处
 const listScroller = ref<HTMLElement | null>(null)
@@ -479,6 +548,7 @@ const crumbs = computed(() => {
     </aside>
 
     <section
+      ref="indexColumn"
       class="index-column"
       aria-label="记忆"
       @mouseover="onIndexHover"
@@ -547,6 +617,7 @@ const crumbs = computed(() => {
           :key="rowHeight"
           v-model:expanded="expanded"
           class="memory-tree"
+          aria-label="记忆目录"
           :model-value="selectedItem"
           :items="roots"
           :get-key="(item) => item.uri"
@@ -554,6 +625,7 @@ const crumbs = computed(() => {
           @toggle="onToggle"
           @select="onSelect"
           @keydown="onTreeKeydown"
+          @keydown.capture="onTreeLeftKey"
         >
           <template #item-wrapper="{ item, expanded: open, selected }">
             <div
@@ -642,6 +714,7 @@ const crumbs = computed(() => {
       <MemoryEditor
         v-if="selectedUri"
         :key="`${spaceId}|${selectedUri}`"
+        ref="editorRef"
         :space-id="spaceId"
         :uri="selectedUri"
         @deleted="onDeleted"
@@ -838,6 +911,14 @@ const crumbs = computed(() => {
 }
 .chevron svg {
   transition: transform 0.1s linear;
+}
+/* 触屏上箭头的热区放大到 32px，长相不变。行高这时是 36px */
+@media (pointer: coarse) {
+  .chevron::before {
+    content: '';
+    position: absolute;
+    inset: 0 -9px 0 -5px;
+  }
 }
 .chevron.open svg {
   transform: rotate(90deg);

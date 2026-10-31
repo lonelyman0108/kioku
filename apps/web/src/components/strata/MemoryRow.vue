@@ -6,7 +6,7 @@ import StrataSwatch from './StrataSwatch.vue'
 import UriPath from './UriPath.vue'
 
 // 列表、已过期、已删除共用的一行：色块、URI、标记，第二行的内容和右下的操作由使用方给。
-// data-layer 给记忆页：悬停一行时窄柱上对应的层跟着亮
+// data-layer、data-uri 给记忆页：悬停一行时窄柱上对应的层跟着亮，窄屏返回时焦点放回这一行
 withDefaults(
   defineProps<{
     uri: string
@@ -21,7 +21,7 @@ withDefaults(
 </script>
 
 <template>
-  <component :is="as" class="memory-row" :class="{ selected }" :data-layer="layer">
+  <component :is="as" class="memory-row" :class="{ selected }" :data-layer="layer" :data-uri="uri">
     <StrataSwatch class="row-swatch" :layer="layer" :sensitivity="sensitivity" />
     <UriPath class="row-uri" :uri="uri" />
     <MemoryFlags :layer="layer" :sensitivity="sensitivity" :priority="priority" />

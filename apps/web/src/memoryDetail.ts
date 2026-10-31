@@ -1,4 +1,5 @@
 import {
+  CONVERT_VALUE_MIN_LENGTH,
   PLAINTEXT_CREDENTIAL,
   bootEligible,
   findPlaintextCredentials,
@@ -24,16 +25,33 @@ export function expiryState(validTo: string | null, now: Date = new Date()): Exp
   return new Date(validTo).getTime() - now.getTime() <= SOON_DAYS * DAY ? 'soon' : 'later'
 }
 
-// 每次会话开始时加载的节点：还有权限、继承覆盖和字数预算要过，这里只说它够格。过期了就不算
+// 启动加载的标记说的是够不够格，不是一定加载
+export const BOOT_HINT = '符合启动加载条件；实际是否加载取决于 Key 的权限、继承覆盖和字数上限'
+
+// 够格进启动加载的节点。和服务端的 BOOT_ELIGIBLE 同一条规则，再加上启动加载用的读权限：机密永远不进。过期了也不算
 export function isBootNode(
-  memory: Pick<MemoryView, 'layer' | 'priority' | 'provenance' | 'validTo'>,
+  memory: Pick<MemoryView, 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'>,
   now: Date = new Date(),
 ): boolean {
   return (
     memory.provenance !== 'untrusted' &&
+    memory.sensitivity !== 'secret' &&
     bootEligible(memory.layer, memory.priority) &&
     !isExpired(memory.validTo, now)
   )
+}
+
+// 没写触发场景时怎么提示，写了的是 null。概览的「未设触发场景」把启动加载的节点也算在内，这里要对得上，
+// 不然点「去补全」过来看不出要补什么；它们不靠触发场景被想起，语气弱一点
+export function missingDisclosureTone(
+  memory: Pick<
+    MemoryView,
+    'disclosure' | 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'
+  >,
+  now: Date = new Date(),
+): 'warning' | 'muted' | null {
+  if (memory.disclosure?.trim()) return null
+  return isBootNode(memory, now) ? 'muted' : 'warning'
 }
 
 type PlaintextFields = Pick<ConsoleMemoryView, 'content' | 'sensitivity' | 'plaintextIgnored'>
@@ -46,11 +64,27 @@ export const looksPlaintext = (memory: PlaintextFields) =>
   !memory.plaintextIgnored &&
   PLAINTEXT_CREDENTIAL.test(memory.content)
 
-// 正文里疑似明文的那几段，要标出来
+// 正文里疑似明文的那几段，要标出来。渲染之后的正文和原文对不上位置，只能按字面找，
+// 所以太短的不标（下限和转存一样）：「密码：1」不能把全文的 1 都标红
 export function plaintextValues(memory: PlaintextFields): string[] {
   if (!looksPlaintext(memory)) return []
   const text = memory.content!
-  return findPlaintextCredentials(text).map((m) => text.slice(m.start, m.end))
+  return findPlaintextCredentials(text)
+    .map((m) => text.slice(m.start, m.end))
+    .filter((value) => value.length >= CONVERT_VALUE_MIN_LENGTH)
+}
+
+// 这次改动动没动统计里的数：层、敏感级、有效与否、有没有写触发场景、是不是疑似明文。
+// 窄柱和列表上方的总数靠概览接口算，它要把整个概览算一遍，别的改动不用为它重取
+export function statsChanged(before: ConsoleMemoryView, after: ConsoleMemoryView): boolean {
+  return (
+    before.id !== after.id ||
+    before.layer !== after.layer ||
+    before.sensitivity !== after.sensitivity ||
+    isExpired(before.validTo) !== isExpired(after.validTo) ||
+    !before.disclosure?.trim() !== !after.disclosure?.trim() ||
+    looksPlaintext(before) !== looksPlaintext(after)
+  )
 }
 
 // 这个人格的节点覆盖了祖先的哪个节点。接口按祖先的节点记 overriddenBy，所以从 inherited 里反查
@@ -77,7 +111,7 @@ export function originScopeLabel(scope: string, appName: (id: string) => string 
   return scope
 }
 
-// 召回的那一行。机密不进召回；启动加载的节点每次会话开始都注入，不记成召回，没有次数时不说「尚未召回」
+// 召回的那一行。机密不进召回；启动加载不记成召回，够格的节点没有次数时不说「尚未召回」，但也不断言它一定加载了
 export function recallText(
   stat: MemoryRecallStat | undefined,
   memory: { secret: boolean; boot: boolean },
@@ -90,6 +124,6 @@ export function recallText(
       ? `${counted}，最近 ${formatRelative(stat.lastRecalledAt, now)}`
       : counted
   }
-  if (memory.boot) return '启动加载，不经过召回'
+  if (memory.boot) return '符合启动加载条件'
   return stat ? '尚未召回' : '–'
 }

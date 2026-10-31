@@ -15,7 +15,7 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { icons } from '../icons'
 import { sensitivityLabels } from '../labels'
-import { isBootNode } from '../memoryDetail'
+import { missingDisclosureTone } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
 import MemoryRow from './strata/MemoryRow.vue'
@@ -271,11 +271,16 @@ const total = computed(() => {
           >
             <span class="flex items-baseline gap-2">
               <span class="min-w-0 flex-1 truncate">
-                <template v-if="item.disclosure?.trim()">{{ item.disclosure }}</template>
-                <template v-else-if="isBootNode(item)">启动加载</template>
-                <span v-else :class="{ 'text-warning': item.uri !== selectedUri }"
-                  >未设触发场景</span
+                <span
+                  v-if="missingDisclosureTone(item)"
+                  :class="{
+                    'text-warning':
+                      missingDisclosureTone(item) === 'warning' && item.uri !== selectedUri,
+                  }"
                 >
+                  未设触发场景
+                </span>
+                <template v-else>{{ item.disclosure }}</template>
               </span>
               <!-- 列表只列有效的；载入之后才到期的在这里显示已过期 -->
               <span

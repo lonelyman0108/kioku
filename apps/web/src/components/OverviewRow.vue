@@ -2,7 +2,8 @@
 import type { RouteLocationRaw } from 'vue-router'
 
 // 概览中间一栏的一行：名字、右上的数字、说明，右下的操作撑满整行可点。
-// 说明里放提示层时，提示层的按钮压在整行的点击区上面
+// 说明里放提示层时，提示层的按钮压在整行的点击区上面。
+// 好几行的操作都叫「查看」，读屏时要带上这一行的名字
 defineProps<{
   title: string
   value: string | number
@@ -26,11 +27,14 @@ const emit = defineEmits<{ action: [] }>()
     <span class="row-note">
       <slot name="note">{{ note }}</slot>
     </span>
-    <RouterLink v-if="action && to" :to="to" class="row-action">{{ action }}</RouterLink>
+    <RouterLink v-if="action && to" :to="to" class="row-action" :aria-label="`${title}：${action}`">
+      {{ action }}
+    </RouterLink>
     <button
       v-else-if="action"
       type="button"
       class="row-action"
+      :aria-label="`${title}：${action}`"
       :aria-expanded="expanded"
       @click="emit('action')"
     >

@@ -1,14 +1,17 @@
-import type { PersonaDetail } from '@kioku/contracts'
+import type { ConsoleMemoryView, PersonaDetail } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
+  BOOT_HINT,
   expiryState,
   isBootNode,
   looksPlaintext,
+  missingDisclosureTone,
   originScopeLabel,
   overriddenNode,
   plaintextValues,
   recallText,
+  statsChanged,
 } from '../memoryDetail'
 
 const now = new Date('2026-10-31T12:00:00.000Z')
@@ -30,6 +33,7 @@ describe('启动加载', () => {
     layer: 'private' as const,
     priority: 0,
     provenance: 'owner' as const,
+    sensitivity: 'internal' as const,
     validTo: null,
     ...extra,
   })
@@ -49,6 +53,46 @@ describe('启动加载', () => {
     expect(isBootNode(memory({ validTo: later(-1) }), now)).toBe(false)
     expect(isBootNode(memory({ validTo: later(1) }), now)).toBe(true)
   })
+
+  it('机密永远不进启动加载，哪怕优先级够', () => {
+    expect(isBootNode(memory({ sensitivity: 'secret' }), now)).toBe(false)
+    expect(isBootNode(memory({ sensitivity: 'secret', layer: 'persona' }), now)).toBe(false)
+    expect(isBootNode(memory({ sensitivity: 'private' }), now)).toBe(true)
+  })
+
+  it('提示层说的是够格，不是一定加载', () => {
+    expect(BOOT_HINT).toContain('符合启动加载条件')
+    expect(BOOT_HINT).toContain('Key 的权限、继承覆盖和字数上限')
+  })
+})
+
+describe('没写触发场景时的提示', () => {
+  const memory = (extra: object) => ({
+    disclosure: null,
+    layer: 'private' as const,
+    priority: 2,
+    provenance: 'owner' as const,
+    sensitivity: 'internal' as const,
+    validTo: null,
+    ...extra,
+  })
+
+  it('写了就不提示，只有空白的算没写', () => {
+    expect(missingDisclosureTone(memory({ disclosure: '讨论发布时' }), now)).toBeNull()
+    expect(missingDisclosureTone(memory({ disclosure: '  ' }), now)).toBe('warning')
+    expect(missingDisclosureTone(memory({}), now)).toBe('warning')
+  })
+
+  it('启动加载的节点也提示，和概览的数字对得上，只是语气弱一点', () => {
+    expect(missingDisclosureTone(memory({ priority: 0 }), now)).toBe('muted')
+    expect(missingDisclosureTone(memory({ layer: 'persona', priority: 1 }), now)).toBe('muted')
+  })
+
+  it('机密够不上启动加载，照常警告', () => {
+    expect(missingDisclosureTone(memory({ priority: 0, sensitivity: 'secret' }), now)).toBe(
+      'warning',
+    )
+  })
 })
 
 describe('疑似明文', () => {
@@ -62,6 +106,14 @@ describe('疑似明文', () => {
   it('取出值，要在正文里标出来', () => {
     expect(plaintextValues(memory({}))).toEqual(['hunter2-not-real'])
     expect(looksPlaintext(memory({}))).toBe(true)
+  })
+
+  it('值太短时提示还在，但不按字面标：不能把全文的 1 都标红', () => {
+    const short = memory({ content: '密码：1\n\n第 1 步，第 11 条。' })
+    expect(looksPlaintext(short)).toBe(true)
+    expect(plaintextValues(short)).toEqual([])
+    expect(plaintextValues(memory({ content: '密码：abc' }))).toEqual([])
+    expect(plaintextValues(memory({ content: '密码：abcd' }))).toEqual(['abcd'])
   })
 
   it('机密、提示被忽略、没有正文、只有占位符的都不提示', () => {
@@ -132,14 +184,71 @@ describe('召回的说法', () => {
     expect(recallText(stat, { secret: true, boot: false }, now)).toBe('机密内容不参与召回')
   })
 
-  it('启动加载的节点没有次数时不说「尚未召回」，有次数时照写', () => {
+  it('启动加载的节点没有次数时只说够格，有次数时照写', () => {
     const none = { total: 0, recent: 0, lastRecalledAt: null }
-    expect(recallText(none, { secret: false, boot: true }, now)).toBe('启动加载，不经过召回')
+    expect(recallText(none, { secret: false, boot: true }, now)).toBe('符合启动加载条件')
     expect(recallText(stat, { secret: false, boot: true }, now)).toContain('37 次')
     expect(recallText(none, plain, now)).toBe('尚未召回')
   })
 
   it('还没读到时不下结论', () => {
     expect(recallText(undefined, plain, now)).toBe('–')
+  })
+})
+
+describe('这次改动动没动统计', () => {
+  const view = (extra: Partial<ConsoleMemoryView> = {}): ConsoleMemoryView => ({
+    id: 'm1',
+    uri: 'notes://a',
+    layer: 'private',
+    sensitivity: 'internal',
+    provenance: 'owner',
+    originScope: 'global',
+    content: '正文',
+    priority: 2,
+    disclosure: '讨论时',
+    glossary: [],
+    validFrom: later(-9),
+    validTo: null,
+    version: 1,
+    createdAt: later(-9),
+    updatedAt: later(-9),
+    contentHidden: false,
+    plaintextIgnored: false,
+    ...extra,
+  })
+
+  it('只改正文、优先级、关键词、触发场景的文字时不动', () => {
+    const before = view()
+    for (const after of [
+      view({ content: '别的正文', version: 2 }),
+      view({ priority: 0, version: 2 }),
+      view({ glossary: ['关键词'], version: 2 }),
+      view({ disclosure: '换一种说法', version: 2 }),
+      view({ validTo: later(3), version: 2 }),
+    ]) {
+      expect(statsChanged(before, after)).toBe(false)
+    }
+  })
+
+  it('层、敏感级、有没有写触发场景、是不是疑似明文变了就动', () => {
+    const before = view()
+    for (const after of [
+      view({ layer: 'owner' }),
+      view({ sensitivity: 'private' }),
+      view({ disclosure: null }),
+      view({ disclosure: '  ' }),
+      view({ content: '密码：not-a-real-secret' }),
+      view({ id: 'm2' }),
+      view({ validTo: later(-1) }),
+    ]) {
+      expect(statsChanged(before, after)).toBe(true)
+    }
+    expect(statsChanged(view({ disclosure: null }), view())).toBe(true)
+  })
+
+  it('忽略了明文提示也算', () => {
+    const plain = view({ content: '密码：not-a-real-secret' })
+    expect(statsChanged(plain, { ...plain, plaintextIgnored: true })).toBe(true)
   })
 })

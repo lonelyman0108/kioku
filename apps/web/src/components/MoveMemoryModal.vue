@@ -109,7 +109,8 @@ async function submit() {
   <!-- 请求期间不能关掉，否则失败的提示没地方显示 -->
   <UModal v-model:open="open" title="移动或改层" :dismissible="!saving" :close="!saving">
     <template #body>
-      <form id="move-memory" class="space-y-4" @submit.prevent="submit">
+      <!-- 不用 form：单选在表单里时回车会隐式提交，还没看见「可见范围将改变」就移动了。只有点确定才提交 -->
+      <div class="space-y-4">
         <UFormField label="URI" help="修改 URI 即移动；不修改则只改层">
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
         </UFormField>
@@ -145,19 +146,14 @@ async function submit() {
           <template #detail>请关闭后重新打开，确认新版本后再操作。</template>
         </NoteLine>
         <NoteLine v-else-if="error" tone="error">{{ error }}</NoteLine>
-      </form>
+      </div>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
         <UButton color="neutral" variant="ghost" :disabled="saving" @click="open = false">
           取消
         </UButton>
-        <UButton
-          type="submit"
-          form="move-memory"
-          :loading="saving"
-          :disabled="!uriValid || !changed || stale"
-        >
+        <UButton :loading="saving" :disabled="!uriValid || !changed || stale" @click="submit">
           确定
         </UButton>
       </div>

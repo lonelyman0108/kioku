@@ -144,7 +144,8 @@ async function submit() {
 <template>
   <UModal v-model:open="open" title="新建记忆">
     <template #body>
-      <form id="create-memory" class="space-y-4" @submit.prevent="submit">
+      <!-- 不用 form：单选在表单里时回车会隐式提交，层和敏感级还没看完就建好了。只有点创建才提交 -->
+      <div class="space-y-4">
         <UFormField label="URI" help="domain://path，例如 core://agent、projects://kioku">
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
         </UFormField>
@@ -189,17 +190,12 @@ async function submit() {
           />
         </UFormField>
         <NoteLine v-if="error" tone="error">{{ error }}</NoteLine>
-      </form>
+      </div>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
-        <UButton
-          type="submit"
-          form="create-memory"
-          :loading="saving"
-          :disabled="!uriValid || !form.content.trim()"
-        >
+        <UButton :loading="saving" :disabled="!uriValid || !form.content.trim()" @click="submit">
           创建
         </UButton>
       </div>

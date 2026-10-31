@@ -21,9 +21,11 @@ import { buildKeywordIndex } from '../keywords'
 import { provenanceLabels, sensitivityLabels } from '../labels'
 import type { CredentialLinks } from '../markdown'
 import {
+  BOOT_HINT,
   expiryState,
   isBootNode,
   looksPlaintext,
+  missingDisclosureTone,
   originScopeLabel,
   overriddenNode,
   plaintextValues,
@@ -64,8 +66,8 @@ const emit = defineEmits<{
   deleted: [uri: string]
   createChild: [parentUri: string]
   moved: [memory: ConsoleMemoryView, from: string]
-  // 保存或恢复了旧版本：层、敏感级、priority、disclosure 可能变了
-  changed: [memory: ConsoleMemoryView]
+  // 保存或恢复了旧版本：层、敏感级、priority、disclosure 可能变了。before 是改之前的那一版
+  changed: [memory: ConsoleMemoryView, before: ConsoleMemoryView]
   open: [uri: string]
   // 读到了这条记忆在哪一层：页面在窄柱上标出来
   layer: [layer: Layer]
@@ -150,7 +152,7 @@ function adopt(m: ConsoleMemoryView) {
   const b = base.value
   const newer = !!b && (m.id !== b.id || m.version > b.version)
   load(m)
-  if (newer) emit('changed', m)
+  if (newer) emit('changed', m, b)
 }
 
 // 服务器上最新的那一版。表单有改动时上面的监听会跳过新版本，开始或取消编辑时要从它载入
@@ -462,7 +464,7 @@ async function save(allowPlaintext = false) {
     // 保存期间没有再改，就回到阅读状态
     if (!dirty.value) mode.value = 'read'
     void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
-    emit('changed', next)
+    emit('changed', next, m)
   } catch (err) {
     failed(err, '保存失败')
     // 版本冲突时立刻重新拉取，好显示「载入新版本」
@@ -496,6 +498,10 @@ async function remove() {
 
 const copy = useCopy()
 
+// 窄屏上打开一条之后，页面把焦点放到这里
+const titleEl = ref<HTMLElement | null>(null)
+defineExpose({ focusTitle: () => titleEl.value?.focus() })
+
 // 标签和条带跟着表单走：改敏感级时就能看到改了之后的样子
 const shownSensitivity = computed(() =>
   mode.value === 'edit' ? form.sensitivity : (base.value?.sensitivity ?? 'private'),
@@ -506,7 +512,9 @@ const shownPriority = computed(() =>
 
 const expiry = computed(() => expiryState(base.value?.validTo ?? null, now.value))
 const bootNode = computed(() => !!base.value && isBootNode(base.value, now.value))
-const hasDisclosure = computed(() => !!base.value?.disclosure?.trim())
+const disclosureTone = computed(() =>
+  base.value ? missingDisclosureTone(base.value, now.value) : null,
+)
 const plaintext = computed(() => {
   const m = base.value
   return m && looksPlaintext(m) ? plaintextValues(m) : null
@@ -579,7 +587,7 @@ const properties = computed<Property[][]>(() => {
     <header class="detail-head">
       <div class="detail-nav"><slot name="nav" /></div>
       <div class="detail-uri">
-        <h1>{{ base?.uri ?? uri }}</h1>
+        <h1 ref="titleEl" tabindex="-1">{{ base?.uri ?? uri }}</h1>
         <UButton
           :icon="icons.copy"
           size="xs"
@@ -593,9 +601,10 @@ const properties = computed<Property[][]>(() => {
         <div class="detail-tag">
           <StrataTag :layer="base.layer" :sensitivity="shownSensitivity" />
           <span class="tag-priority">P{{ shownPriority }}</span>
-          <UTooltip v-if="bootNode" text="每次会话开始时加载，不经过召回">
-            <span class="boot-flag" tabindex="0">启动加载</span>
-          </UTooltip>
+          <span v-if="bootNode" class="inline-flex items-center gap-1.5">
+            <span class="boot-flag">启动加载</span>
+            <Hint>{{ BOOT_HINT }}</Hint>
+          </span>
           <span
             v-if="base.validTo"
             :class="{ 'text-warning': expiry === 'soon' || expiry === 'expired' }"
@@ -776,7 +785,10 @@ const properties = computed<Property[][]>(() => {
               </UButton>
             </template>
           </NoteLine>
-          <NoteLine v-if="!hasDisclosure && !bootNode" tone="warning">
+          <NoteLine
+            v-if="disclosureTone"
+            :tone="disclosureTone === 'warning' ? 'warning' : 'neutral'"
+          >
             未设触发场景<Hint>补全后召回更准确。</Hint>
             <template v-if="!readOnly && !base.contentHidden" #actions>
               <UButton size="sm" color="primary" variant="outline" @click="fillDisclosure">
@@ -913,13 +925,13 @@ const properties = computed<Property[][]>(() => {
           </template>
           <template #priority>
             <span class="me-1.5 font-mono">P{{ base.priority }}</span>
-            <span v-if="bootNode" class="boot-flag" title="每次会话开始时加载，不经过召回">
-              启动加载
-            </span>
+            <span v-if="bootNode" class="boot-flag" :title="BOOT_HINT"> 启动加载 </span>
           </template>
           <template #disclosure>
-            <template v-if="hasDisclosure">{{ base.disclosure }}</template>
-            <span v-else :class="bootNode ? 'text-muted' : 'text-warning'">未设触发场景</span>
+            <template v-if="!disclosureTone">{{ base.disclosure }}</template>
+            <span v-else :class="disclosureTone === 'warning' ? 'text-warning' : 'text-muted'">
+              未设触发场景
+            </span>
           </template>
           <template #glossary>
             <span v-if="base.glossary.length" class="keywords">

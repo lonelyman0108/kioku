@@ -293,6 +293,9 @@ export const UpdateCredentialRequest = z.object({
 })
 export type UpdateCredentialRequest = z.infer<typeof UpdateCredentialRequest>
 
+// 转存时值的下限，界面按字面标出疑似明文的值也用它
+export const CONVERT_VALUE_MIN_LENGTH = 4
+
 // 把记忆正文里的一段明文转存成一条 Kioku 托管的凭据：只给管理界面。expectedVersion 是看到这段值时的版本，
 // 期间被改过就返回 409。正文里这段值出现几处换几处，历史快照里的也一起换掉，所以太短的不收：
 // 只有几个字符时换掉的多半是别的内容
@@ -300,7 +303,10 @@ export const ConvertToCredentialRequest = z
   .object({
     memoryId: z.uuid(),
     expectedVersion: z.number().int(),
-    value: CredentialValue.min(4, '要转存的值至少 4 个字符；更短的请手动新建凭据')
+    value: CredentialValue.min(
+      CONVERT_VALUE_MIN_LENGTH,
+      `要转存的值至少 ${CONVERT_VALUE_MIN_LENGTH} 个字符；更短的请手动新建凭据`,
+    )
       .refine((v) => v === v.trim(), '要转存的值前后不能有空白')
       .refine((v) => !/\p{Cs}/u.test(v), '要转存的值里有不完整的字符')
       .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值里不能有凭据占位符'),

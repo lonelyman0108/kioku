@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest'
 import {
   ancestorsOf,
   depthOf,
+  focusAfterSelect,
   guideLines,
   lastSegment,
   parentOf,
+  parentRow,
   splitUri,
   toTreeItems,
   treeRowPlaces,
@@ -165,6 +167,17 @@ describe('目录的引线', () => {
     expect(guideLines(places.get('a://y/1')!)).toEqual([{ left: 30, end: true, tick: true }])
   })
 
+  it('左键跳到上一级：展开着的行留给组件库收起，domain 根没有上一级', () => {
+    const expanded = ['a', 'a://x']
+    const places = treeRowPlaces(items, expanded)
+    expect(parentRow(places, expanded, 'a://x/2')).toBe('a://x')
+    expect(parentRow(places, expanded, 'a://y')).toBe('a')
+    expect(parentRow(places, expanded, 'a://x')).toBeNull()
+    expect(parentRow(places, expanded, 'a')).toBeNull()
+    expect(parentRow(places, expanded, 'b')).toBeNull()
+    expect(parentRow(places, expanded, 'not-there')).toBeNull()
+  })
+
   it('展开列表里的节点没有子节点时也不出错', () => {
     expect([...treeRowPlaces([node('a')], ['a']).keys()]).toEqual(['a'])
   })
@@ -205,5 +218,22 @@ describe('打字跳转', () => {
       [],
     )
     expect(typeaheadMatch(list, '加', null)).toBeNull()
+  })
+})
+
+describe('窄屏切换之后的焦点', () => {
+  it('打开一条放到标题，换一条也是', () => {
+    expect(focusAfterSelect(true, 'a://x', null)).toEqual({ to: 'title' })
+    expect(focusAfterSelect(true, 'a://y', 'a://x')).toEqual({ to: 'title' })
+  })
+
+  it('返回时放回原来那一行', () => {
+    expect(focusAfterSelect(true, null, 'a://x')).toEqual({ to: 'row', uri: 'a://x' })
+  })
+
+  it('宽屏两边都在，不动焦点', () => {
+    expect(focusAfterSelect(false, 'a://x', null)).toBeNull()
+    expect(focusAfterSelect(false, null, 'a://x')).toBeNull()
+    expect(focusAfterSelect(true, null, null)).toBeNull()
   })
 })
