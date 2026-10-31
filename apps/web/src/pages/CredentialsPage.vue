@@ -264,7 +264,7 @@ async function removeProvider() {
         </div>
 
         <div v-if="tab === 'credentials'" class="column-body">
-          <div v-if="credentials.isError.value" class="pt-3.5">
+          <div v-if="credentials.isError.value && !credentials.data.value" class="pt-3.5">
             <NoteLine tone="error">
               {{
                 credentials.error.value instanceof ApiError
@@ -300,9 +300,11 @@ async function removeProvider() {
                     :class="{ zero: !c.referenceCount }"
                     data-label="引用"
                   >
-                    {{ c.referenceCount }}
+                    {{ c.referenceCount }}<span class="sr-only"> 条引用</span>
                   </span>
-                  <span class="row-muted row-apps" data-label="限定应用">{{ appsOf(c) }}</span>
+                  <span class="row-muted row-apps" data-label="限定应用">
+                    <span class="sr-only">限定应用：</span>{{ appsOf(c) }}
+                  </span>
                   <time
                     class="num row-muted row-time"
                     :datetime="c.updatedAt"
@@ -323,7 +325,7 @@ async function removeProvider() {
             已删除的凭据在保留期内可以恢复。<Hint>同一标识已有有效凭据时无法恢复。</Hint>
           </p>
           <p v-if="retention" class="deleted-note text-warning">{{ deletionNotice(retention) }}</p>
-          <div v-if="deleted.isError.value" class="pt-3.5">
+          <div v-if="deleted.isError.value && !deleted.data.value" class="pt-3.5">
             <NoteLine tone="error">
               {{
                 deleted.error.value instanceof ApiError ? deleted.error.value.message : '读取失败'

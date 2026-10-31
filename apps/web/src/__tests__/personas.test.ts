@@ -41,6 +41,12 @@ const persona = (id: string, extendsId: string | null = null): PersonaInfo => ({
 describe('人格列表的继承树', () => {
   const ids = (personas: PersonaInfo[]) => personaRows(personas).map((r) => r.persona.id)
 
+  it('继承的人格不在列表里时，排在前面的子人格也不会被拆出去', () => {
+    const personas = [persona('c', 'b'), persona('b', 'gone'), persona('x')]
+    expect(ids(personas)).toEqual(['x', 'b', 'c'])
+    expect(personaRows(personas).map((r) => r.depth)).toEqual([0, 0, 1])
+  })
+
   it('子人格排在被继承的人格下面，同一级保持接口的顺序', () => {
     // 接口按创建时间排，子人格可能比后来才设的父人格更早
     const personas = [

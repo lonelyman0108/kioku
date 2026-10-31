@@ -13,6 +13,7 @@ import PageHead from '../components/strata/PageHead.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
+import { localDate } from '../time'
 
 const route = useRoute()
 const spaceId = computed(() => String(route.params.spaceId))
@@ -27,7 +28,11 @@ const activity = useInfiniteQuery({
 const items = computed(() => activity.data.value?.pages.flatMap((page) => page.items) ?? [])
 // 页面开过零点时「今天」「昨天」跟着变
 const now = useNow()
-const days = computed(() => groupByDay(items.value, now.value))
+const today = computed(() => localDate(now.value))
+const days = computed(() => groupByDay(items.value, new Date(`${today.value}T00:00`)))
+const failure = computed(() =>
+  activity.error.value instanceof ApiError ? activity.error.value.message : '读取失败',
+)
 </script>
 
 <template>
@@ -48,8 +53,9 @@ const days = computed(() => groupByDay(items.value, now.value))
       </template>
     </PageHead>
     <div class="activity-body">
-      <NoteLine v-if="activity.isError.value" tone="error">
-        {{ activity.error.value instanceof ApiError ? activity.error.value.message : '读取失败' }}
+      <!-- 翻页、后台刷新失败时已经读到的行留着，错误放在「加载更多」上面 -->
+      <NoteLine v-if="activity.isError.value && !activity.data.value" tone="error">
+        {{ failure }}
       </NoteLine>
       <div v-else-if="activity.isPending.value" class="space-y-3">
         <USkeleton v-for="n in 6" :key="n" class="h-8 w-full" />
@@ -67,6 +73,9 @@ const days = computed(() => groupByDay(items.value, now.value))
           </ul>
         </section>
         <p v-if="!items.length" class="empty">暂无变更记录</p>
+        <div v-if="activity.isError.value" class="pt-4">
+          <NoteLine tone="error">{{ failure }}</NoteLine>
+        </div>
         <div v-if="activity.hasNextPage.value" class="flex justify-center py-4">
           <UButton
             color="neutral"

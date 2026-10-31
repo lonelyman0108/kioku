@@ -36,7 +36,11 @@ function listOf(kind: SubjectKind) {
     getNextPageParam: (last) => last.nextCursor ?? undefined,
   })
   const items = computed(() => query.data.value?.pages.flatMap((page) => page.items) ?? [])
-  return { query, items }
+  // 还有下一页时读到的不是全部，写成「20+」
+  const count = computed(() =>
+    query.data.value ? `${items.value.length}${query.hasNextPage.value ? '+' : ''}` : null,
+  )
+  return { query, items, count }
 }
 const sections = [
   { kind: 'person' as const, title: '人', ...listOf('person') },
@@ -55,6 +59,10 @@ const nothing = computed(() =>
 
 // 窄屏放不下两栏，人又可能很多：一次只显示一边，两边的查询和翻页都留着
 const shown = ref<SubjectKind>('person')
+
+function failure(error: unknown) {
+  return error instanceof ApiError ? error.message : '读取失败'
+}
 
 function accounts(subject: SubjectInfo) {
   return subject.identities.map((i) => `${i.platform} ${i.externalId}`).join('、')
@@ -103,6 +111,9 @@ function accounts(subject: SubjectInfo) {
           @click="shown = section.kind"
         >
           {{ section.title }}
+          <span v-if="section.count.value !== null" class="kind-count">
+            {{ section.count.value }}
+          </span>
         </button>
       </div>
       <div class="columns">
@@ -118,14 +129,9 @@ function accounts(subject: SubjectInfo) {
               <span class="head-time">首次遇到</span>
             </template>
           </SectionHeading>
-          <div v-if="section.query.isError.value" class="pt-3">
-            <NoteLine tone="error">
-              {{
-                section.query.error.value instanceof ApiError
-                  ? section.query.error.value.message
-                  : '读取失败'
-              }}
-            </NoteLine>
+          <!-- 翻页、后台刷新失败时已经读到的行留着，错误放在「加载更多」上面 -->
+          <div v-if="section.query.isError.value && !section.query.data.value" class="pt-3">
+            <NoteLine tone="error">{{ failure(section.query.error.value) }}</NoteLine>
           </div>
           <div v-else-if="section.query.isPending.value" class="space-y-2 pt-3">
             <USkeleton v-for="n in 6" :key="n" class="h-11 w-full" />
@@ -168,6 +174,9 @@ function accounts(subject: SubjectInfo) {
               </li>
             </ul>
             <p v-else class="empty">{{ q ? '没有匹配的结果' : '暂无' }}</p>
+            <div v-if="section.query.isError.value" class="pt-3">
+              <NoteLine tone="error">{{ failure(section.query.error.value) }}</NoteLine>
+            </div>
             <div v-if="section.query.hasNextPage.value" class="flex justify-center py-4">
               <UButton
                 color="neutral"
@@ -316,6 +325,10 @@ function accounts(subject: SubjectInfo) {
   }
   .kind-switch button + button {
     border-left: 1px solid var(--ui-border-accented);
+  }
+  .kind-count {
+    margin-left: 2px;
+    font-size: 13px;
   }
   .kind-switch button:focus-visible {
     outline-offset: -2px;

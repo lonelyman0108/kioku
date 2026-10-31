@@ -218,7 +218,7 @@ async function remove() {
         </Hint>
       </p>
       <div class="list-scroll">
-        <div v-if="personas.isError.value" class="list-failed">
+        <div v-if="personas.isError.value && !personas.data.value" class="list-failed">
           <NoteLine tone="error">
             {{
               personas.error.value instanceof ApiError ? personas.error.value.message : '读取失败'

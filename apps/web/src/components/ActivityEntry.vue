@@ -9,6 +9,7 @@ import {
   changeLabels,
   eventLabel,
 } from '../labels'
+import { icons } from '../icons'
 import { memoryRoute } from '../routes'
 import { formatClock, formatTime } from '../time'
 import Hint from './Hint.vue'
@@ -24,7 +25,12 @@ const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c
 
 <template>
   <li class="activity-entry">
-    <span class="entry-actor" :title="actor.name">{{ actor.name }}</span>
+    <span class="entry-actor" :title="actor.name">
+      <template v-if="actor.viaApp">
+        <UIcon :name="icons.bot" class="entry-app" /><span class="sr-only">应用：</span>
+      </template>
+      {{ actor.name }}
+    </span>
     <span class="entry-action">{{ eventLabel(item.type).label }}</span>
     <RouterLink
       v-if="activityLinkable(item)"
@@ -70,6 +76,11 @@ const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
+}
+.entry-app {
+  margin-right: 4px;
+  vertical-align: -2px;
+  color: var(--ui-text-muted);
 }
 .entry-action {
   color: var(--ui-text-muted);

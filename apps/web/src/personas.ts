@@ -19,7 +19,8 @@ export interface PersonaRow {
 }
 
 // 人格排成继承树：被继承的在上，子人格缩进在它下面，同一级保持接口的顺序。
-// 每个人格只出现一次：从根走不到的（继承的人格不在列表里，列表还没刷新；万一成环）接在后面各算一棵树
+// 每个人格只出现一次：从根走不到的（继承的人格不在列表里，列表还没刷新；万一成环）接在后面各算一棵树，
+// 继承的人格不在列表里的先走，它们的子人格才不会因为排在前面被拆出去
 export function personaRows(personas: readonly PersonaInfo[]): PersonaRow[] {
   const children = new Map<string, PersonaInfo[]>()
   const roots: PersonaInfo[] = []
@@ -40,7 +41,9 @@ export function personaRows(personas: readonly PersonaInfo[]): PersonaRow[] {
     })
   }
   walk(roots, 0, [])
-  for (const persona of personas) walk([persona], 0, [])
+  const ids = new Set(personas.map((p) => p.id))
+  const orphans = personas.filter((p) => p.extendsId && !ids.has(p.extendsId))
+  for (const persona of [...orphans, ...personas]) walk([persona], 0, [])
   return rows
 }
 

@@ -33,6 +33,9 @@ const deleted = useInfiniteQuery({
   enabled: useActivated(),
 })
 const items = computed(() => deleted.data.value?.pages.flatMap((page) => page.items) ?? [])
+const failure = computed(() =>
+  deleted.error.value instanceof ApiError ? deleted.error.value.message : '读取失败',
+)
 // 保留期是整个实例的设置，每一页都带着，用第一页的
 const retention = computed(() => deleted.data.value?.pages[0]?.retention ?? null)
 // 还剩几天、警示色与「已过期」都按它算：页面一直开着也每分钟跟着变，切到别的视图时停下
@@ -106,10 +109,8 @@ const TAKEN_HINT =
       </p>
       <p v-if="retention" class="text-warning">{{ deletionNotice(retention) }}</p>
     </div>
-    <div v-if="deleted.isError.value" class="list-note">
-      <NoteLine tone="error">
-        {{ deleted.error.value instanceof ApiError ? deleted.error.value.message : '读取失败' }}
-      </NoteLine>
+    <div v-if="deleted.isError.value && !deleted.data.value" class="list-note">
+      <NoteLine tone="error">{{ failure }}</NoteLine>
     </div>
     <div v-else-if="deleted.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />
@@ -165,6 +166,9 @@ const TAKEN_HINT =
         </li>
       </ul>
       <p v-if="!items.length" class="list-empty">暂无已删除的记忆</p>
+      <div v-if="deleted.isError.value" class="list-note">
+        <NoteLine tone="error">{{ failure }}</NoteLine>
+      </div>
       <div v-if="deleted.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"

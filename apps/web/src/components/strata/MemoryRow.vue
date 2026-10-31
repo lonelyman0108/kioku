@@ -8,7 +8,7 @@ import UriPath from './UriPath.vue'
 
 // 列表、已过期、已删除共用的一行：色块、URI、标记，第二行的内容和右下的操作由使用方给。
 // data-layer、data-uri 给记忆页：悬停一行时窄柱上对应的层跟着亮，窄屏返回时焦点放回这一行。
-// 给了 to 时 URI 是链接，点击区撑满整行，第二行里的链接和按钮压在点击区上面。
+// 给了 to 时 URI 是链接，点击区撑满整行，第二行里的链接和按钮、右下的操作压在点击区上面。
 // 这一页的标记和默认的不一样时用 flags 插槽换掉；flush 让行贴着区块标题的左右边，不留边距
 withDefaults(
   defineProps<{
@@ -82,6 +82,7 @@ withDefaults(
 .row-link:focus-visible {
   outline-offset: -2px;
 }
+.memory-row.linked .row-actions,
 .memory-row.linked .row-sub :deep(a),
 .memory-row.linked .row-sub :deep(button) {
   position: relative;

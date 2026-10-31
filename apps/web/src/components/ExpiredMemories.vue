@@ -33,6 +33,9 @@ const expired = useInfiniteQuery({
   enabled: useActivated(),
 })
 const items = computed(() => expired.data.value?.pages.flatMap((page) => page.items) ?? [])
+const failure = computed(() =>
+  expired.error.value instanceof ApiError ? expired.error.value.message : '读取失败',
+)
 // 让出了 URI 的和已删除的一样按保留期永久清除：保留期每一页都带着，用第一页的
 const retention = computed(() => expired.data.value?.pages[0]?.retention ?? null)
 const anyReleased = computed(() => items.value.some((item) => item.deletedAt !== null))
@@ -95,10 +98,8 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
       </p>
       <p v-if="retention && anyReleased" class="text-warning">{{ releasedNotice(retention) }}</p>
     </div>
-    <div v-if="expired.isError.value" class="list-note">
-      <NoteLine tone="error">
-        {{ expired.error.value instanceof ApiError ? expired.error.value.message : '读取失败' }}
-      </NoteLine>
+    <div v-if="expired.isError.value && !expired.data.value" class="list-note">
+      <NoteLine tone="error">{{ failure }}</NoteLine>
     </div>
     <div v-else-if="expired.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />
@@ -159,6 +160,9 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
         </li>
       </ul>
       <p v-if="!items.length" class="list-empty">暂无已过期的记忆</p>
+      <div v-if="expired.isError.value" class="list-note">
+        <NoteLine tone="error">{{ failure }}</NoteLine>
+      </div>
       <div v-if="expired.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"

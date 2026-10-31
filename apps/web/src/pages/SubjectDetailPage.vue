@@ -322,7 +322,9 @@ function runCounts(run: ExtractionRunInfo): string {
                   v-for="identity in data.identities"
                   :key="`${identity.platform}:${identity.externalId}`"
                 >
-                  <span class="account-platform">{{ identity.platform }}</span>
+                  <span class="account-platform" :title="identity.platform">
+                    {{ identity.platform }}
+                  </span>
                   <span class="account-id">{{ identity.externalId }}</span>
                   <span
                     v-if="identity.displayName"

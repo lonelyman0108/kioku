@@ -119,6 +119,9 @@ const list = useInfiniteQuery({
   enabled: active,
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
+const failure = computed(() =>
+  list.error.value instanceof ApiError ? list.error.value.message : '读取失败',
+)
 
 // 再点一次取消这个敏感级
 function toggleSensitivity(value: string) {
@@ -249,10 +252,8 @@ const total = computed(() => {
       </NoteLine>
     </div>
 
-    <div v-if="list.isError.value" class="list-note">
-      <NoteLine tone="error">
-        {{ list.error.value instanceof ApiError ? list.error.value.message : '读取失败' }}
-      </NoteLine>
+    <div v-if="list.isError.value && !list.data.value" class="list-note">
+      <NoteLine tone="error">{{ failure }}</NoteLine>
     </div>
     <div v-else-if="list.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 5" :key="n" class="h-12 w-full" />
@@ -305,6 +306,9 @@ const total = computed(() => {
         </li>
       </ul>
       <p v-if="!items.length && !conversationLayer" class="list-empty">没有符合条件的记忆</p>
+      <div v-if="list.isError.value" class="list-note">
+        <NoteLine tone="error">{{ failure }}</NoteLine>
+      </div>
       <div v-if="list.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"
