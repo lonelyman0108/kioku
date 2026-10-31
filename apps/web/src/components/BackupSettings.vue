@@ -10,6 +10,7 @@ import { classifyError, defaultHour, formatBytes, hourLabel } from '../backup'
 import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
+import Hint from './Hint.vue'
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -167,7 +168,7 @@ async function runNow() {
     runId.value = queued.runId
     giveUp = setTimeout(stopWaiting, 10 * 60_000)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '没能开始备份', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '无法开始备份', color: 'error' })
   } finally {
     starting.value = false
   }
@@ -176,9 +177,9 @@ const OUTCOMES: Record<
   NonNullable<BackupRunStatus['outcome']>,
   { title: string; color: 'success' | 'error' | 'warning' }
 > = {
-  done: { title: '备份做好了', color: 'success' },
-  failed: { title: '备份没做成，原因见下面', color: 'error' },
-  skipped: { title: '没有做：开始时备份设置已经清掉了', color: 'warning' },
+  done: { title: '备份完成', color: 'success' },
+  failed: { title: '备份失败', color: 'error' },
+  skipped: { title: '未执行备份：开始时备份设置已被清除', color: 'warning' },
 }
 // 这一次做完了（或者查不到了）：停下，刷新最近的结果与存储桶里的列表
 watch([() => run.data.value, () => run.isError.value], async ([status, failed]) => {
@@ -216,7 +217,7 @@ async function clear() {
       status: { lastSuccess: null, lastError: null },
     })
     await queryClient.invalidateQueries({ queryKey, exact: true })
-    toast.add({ title: '已清除，定时备份停止', color: 'success' })
+    toast.add({ title: '已清除，定时备份已停止', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '清除失败', color: 'error' })
   } finally {
@@ -230,9 +231,12 @@ async function clear() {
     <template #header>
       <h2 class="font-medium">备份</h2>
       <p class="mt-1 text-sm text-muted">
-        每天定时把整个实例加密备份到兼容S3的对象存储（MinIO、Cloudflare、Backblaze
-        等），存储桶里只留最近几份。备份用主密钥派生的密钥加密，恢复时要配同一把主密钥；恢复的步骤见
-        README。
+        每天把整个实例加密备份到兼容S3的对象存储。
+        <Hint>
+          支持 MinIO、Cloudflare、Backblaze
+          等，存储桶中只保留最近几份。备份使用主密钥派生的密钥加密，恢复时需配置同一主密钥；恢复步骤见
+          README。
+        </Hint>
       </p>
     </template>
     <UAlert
@@ -253,11 +257,11 @@ async function clear() {
           <UFormField label="存储桶">
             <UInput v-model="form.bucket" class="w-full font-mono" required />
           </UFormField>
-          <UFormField label="区域" help="不清楚就用 us-east-1">
+          <UFormField label="区域" help="不确定时使用 us-east-1">
             <UInput v-model="form.region" class="w-full font-mono" required />
           </UFormField>
         </div>
-        <UFormField label="目录" help="备份放在存储桶的这个目录下，例如 kioku；可以不填">
+        <UFormField label="目录" help="存储桶中的备份目录，例如 kioku；可留空">
           <UInput v-model="form.prefix" class="w-full font-mono" />
         </UFormField>
         <UFormField label="Access Key ID">
@@ -267,8 +271,8 @@ async function clear() {
           label="Secret Access Key"
           :help="
             view?.hasSecret
-              ? '已保存（加密存储）。留空表示不修改；更换了接口主机时必须重新填写'
-              : '用实例主密钥加密后存库'
+              ? '已加密保存；留空表示不修改，更换接口主机时必须重新填写。'
+              : '使用实例主密钥加密保存。'
           "
           :error="secretMissing ? newKeyHint('Secret Access Key', false) : undefined"
         >
@@ -281,10 +285,10 @@ async function clear() {
           />
         </UFormField>
         <div class="grid gap-4 sm:grid-cols-2">
-          <UFormField label="每天几点备份">
+          <UFormField label="每日备份时间">
             <USelect v-model="form.hour" :items="hours" class="w-full" />
           </UFormField>
-          <UFormField label="留几份" help="更早的自动删掉">
+          <UFormField label="保留份数" help="更早的备份自动删除">
             <UInput
               v-model.number="form.keep"
               type="number"
@@ -307,7 +311,7 @@ async function clear() {
             :disabled="!configured || dirty"
             @click="test"
           >
-            测试连通
+            测试连接
           </UButton>
           <UButton
             :icon="icons.backup"
@@ -323,10 +327,10 @@ async function clear() {
             清除设置
           </UButton>
           <span v-if="dirty && configured" class="text-sm text-muted"
-            >改动保存之后才能测试和备份</span
+            >保存改动后才能测试和备份</span
           >
           <span v-if="result" class="text-sm" :class="result.ok ? 'text-success' : 'text-error'">
-            {{ result.ok ? '正常：放、列、删都可以' : result.error }}
+            {{ result.ok ? '连接正常' : result.error }}
           </span>
         </div>
       </form>
@@ -342,14 +346,14 @@ async function clear() {
             :description="`${formatTime(problem.error.at)}（${formatRelative(problem.error.at)}）`"
           />
           <p v-if="view.status.lastSuccess">
-            最近一份：{{ formatTime(view.status.lastSuccess.at) }}（{{
+            最近备份：{{ formatTime(view.status.lastSuccess.at) }}（{{
               formatRelative(view.status.lastSuccess.at)
             }}），{{ formatBytes(view.status.lastSuccess.bytes) }}
           </p>
-          <p v-else class="text-muted">还没做过备份：保存之后一个小时内会做第一份。</p>
+          <p v-else class="text-muted">尚未备份。保存后一小时内生成第一份。</p>
           <div>
             <div class="mb-1 flex items-center justify-between">
-              <span class="font-medium">存储桶里的备份</span>
+              <span class="font-medium">存储桶中的备份</span>
               <UButton
                 :icon="icons.refresh"
                 size="xs"
@@ -363,14 +367,16 @@ async function clear() {
             </div>
             <p v-if="objects.isError.value" class="text-error">
               {{
-                objects.error.value instanceof ApiError ? objects.error.value.message : '列不出来'
+                objects.error.value instanceof ApiError
+                  ? objects.error.value.message
+                  : '无法列出备份'
               }}
             </p>
             <p
               v-else-if="objects.data.value && !objects.data.value.objects.length"
               class="text-muted"
             >
-              还没有
+              暂无备份
             </p>
             <ul v-else-if="objects.data.value" class="divide-y divide-default">
               <li
@@ -392,12 +398,12 @@ async function clear() {
 
   <UModal
     :open="confirmingClear"
-    title="清除备份存储的设置？"
+    title="清除备份存储设置？"
     :dismissible="!clearing"
     @update:open="(v) => !v && !clearing && (confirmingClear = false)"
   >
     <template #body>
-      <p class="text-sm">清除之后不再定时备份。存储桶里已有的备份不动，恢复时照样用得上。</p>
+      <p class="text-sm">清除后不再定时备份。存储桶中已有的备份不受影响，恢复时仍可使用。</p>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">

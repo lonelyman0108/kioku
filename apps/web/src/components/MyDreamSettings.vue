@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { dreamSettingsKey } from '../dream'
+import Hint from './Hint.vue'
 
 // 自己在这个空间里的 Dream 设置：每个成员都能改自己的，别人看不到也改不了
 const props = defineProps<{ spaceId: string }>()
@@ -31,8 +32,8 @@ async function save(includePrivate: boolean) {
     queryClient.setQueryData(dreamSettingsKey(spaceId), saved)
     toast.add({
       title: saved.includePrivate
-        ? '已打开：Dream 会整理你的画像层与私人层'
-        : '已关掉：Dream 只整理共享的内容',
+        ? '已开启：Dream 将整理当前账号的个人画像层与私人层'
+        : '已关闭：Dream 仅整理共享内容',
       color: 'success',
     })
   } catch (err) {
@@ -46,10 +47,16 @@ async function save(includePrivate: boolean) {
 <template>
   <UCard class="max-w-2xl shrink-0">
     <template #header>
-      <h2 class="font-medium">Dream 与我的私人内容</h2>
+      <h2 class="font-medium">Dream 与私人内容</h2>
       <p class="mt-1 text-sm text-muted">
-        Dream 每天整理一次记忆，只提建议，你执行之后才会改。开着时，你的画像层与私人层（secret
-        除外）会发给实例配置的抽取模型做整理，关于它们的建议只有你看得到。关掉之后只整理共享的内容：已经生成的建议留着由你处理，再打开时接着整理关掉期间新增与改动的；正在整理时关掉，已经发给模型的那一次收不回来，但结果不存。这个设置只管你自己，每个空间分开设。
+        开启后，当前账号的个人画像层与私人层（机密除外）将发送给抽取模型整理。
+        <Hint>
+          <p>Dream 每天整理一次记忆，只提建议，执行后才会修改。相关建议仅当前账号可见。</p>
+          <p class="mt-1">
+            关闭后仅整理共享内容：已生成的建议保留待处理；再次开启时，继续整理关闭期间新增与修改的内容。正在整理时关闭，已发送给模型的内容无法撤回，但结果不保存。
+          </p>
+          <p class="mt-1">此设置仅对当前账号生效，每个空间单独设置。</p>
+        </Hint>
       </p>
     </template>
     <UAlert
@@ -64,7 +71,7 @@ async function save(includePrivate: boolean) {
       :model-value="settings.data.value.includePrivate"
       :loading="saving"
       :disabled="saving"
-      label="让 Dream 整理我的画像层与私人层"
+      label="允许 Dream 整理个人画像层与私人层"
       @update:model-value="save"
     />
   </UCard>

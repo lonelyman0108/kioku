@@ -24,7 +24,7 @@ const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', tr
         color="neutral"
         variant="ghost"
         size="xs"
-        :aria-label="`把渠道 ${index + 1} 往前挪`"
+        :aria-label="`上移渠道 ${index + 1}`"
         :disabled="first"
         @click="emit('up')"
       />
@@ -33,7 +33,7 @@ const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', tr
         color="neutral"
         variant="ghost"
         size="xs"
-        :aria-label="`把渠道 ${index + 1} 往后挪`"
+        :aria-label="`下移渠道 ${index + 1}`"
         :disabled="last"
         @click="emit('down')"
       />
@@ -42,7 +42,7 @@ const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', tr
         color="neutral"
         variant="ghost"
         size="xs"
-        :aria-label="`删掉渠道 ${index + 1}`"
+        :aria-label="`删除渠道 ${index + 1}`"
         :disabled="only"
         @click="emit('remove')"
       />
@@ -50,15 +50,15 @@ const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', tr
     <UFormField label="接口地址" help="例如 https://api.example.com/v1">
       <UInput v-model="draft.baseUrl" class="w-full font-mono" required />
     </UFormField>
-    <UFormField label="请求用的模型名" help="服务商给模型改了名，只改这里，不用重新生成向量">
+    <UFormField label="请求模型名" help="服务商改名时只需修改此处，无需重新生成向量。">
       <UInput v-model="draft.model" class="w-full font-mono" required />
     </UFormField>
     <UFormField
       label="API Key"
       :help="
         draft.hasApiKey
-          ? '已保存（加密存储）。留空表示不修改；改了接口主机时必须重新填写'
-          : '用实例主密钥加密后存库；接口不需要 Key 时留空'
+          ? '已加密保存；留空表示不修改，更换接口主机时必须重新填写。'
+          : '使用实例主密钥加密保存；接口不需要 Key 时留空。'
       "
       :error="keyError"
     >
