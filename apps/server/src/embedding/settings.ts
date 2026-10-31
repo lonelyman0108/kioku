@@ -139,7 +139,7 @@ function buildChannels(
   masterKey: MasterKey | null,
 ): StoredChannel[] {
   const ids = inputs.flatMap((c) => (c.id ? [c.id] : []))
-  if (new Set(ids).size !== ids.length) throw new SettingsInputError('同一个渠道填了两次')
+  if (new Set(ids).size !== ids.length) throw new SettingsInputError('同一渠道重复填写')
   return inputs.map((input, i) => {
     const mine = input.id ? own.find((c) => c.id === input.id) : undefined
     const previous = mine ?? (input.id ? others.find((c) => c.id === input.id) : undefined)
@@ -201,7 +201,7 @@ export async function saveActiveEmbedding(
 ): Promise<StoredEmbedding> {
   return mutate(db, (stored) => {
     if (stored.active && stored.active.model !== input.model) {
-      throw new SettingsInputError('要换模型请用「换模型」：新模型的向量补齐之后才切过去')
+      throw new SettingsInputError('如需更换模型，请使用「更换模型」：新模型的向量补齐后才切换')
     }
     const channels = buildChannels(
       input.channels,
@@ -221,10 +221,10 @@ export async function saveNextEmbedding(
   input: UpdateEmbeddingSettings,
 ): Promise<{ stored: StoredEmbedding; replaced: string | null }> {
   return mutate(db, (stored) => {
-    if (!stored.active) throw new SettingsInputError('还没有配置嵌入模型，先配好要用的模型')
+    if (!stored.active) throw new SettingsInputError('尚未配置嵌入模型，请先配置要使用的模型')
     if (stored.active.model === input.model) {
       throw new SettingsInputError(
-        '新模型的标识和现在的一样；只是换接口或改请求用的模型名，改现在的渠道就行',
+        '新模型的标识与当前相同。如只需更换接口或请求用的模型名，修改当前渠道即可。',
       )
     }
     // 换成另一个新模型时照样认得原来新模型的渠道：沿用它们保存的 Key，换了主机又没填 Key 时报错，不悄悄清掉

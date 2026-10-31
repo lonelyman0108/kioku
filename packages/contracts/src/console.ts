@@ -14,7 +14,7 @@ export type MemoryListSort = z.infer<typeof MemoryListSort>
 export const MemoryListQuery = z.object({
   domain: z
     .string()
-    .regex(/^[a-z][a-z0-9_]{0,31}$/, 'domain 格式不对')
+    .regex(/^[a-z][a-z0-9_]{0,31}$/, 'domain 格式错误')
     .optional(),
   layer: Layer.optional(),
   sensitivity: Sensitivity.optional(),
@@ -382,8 +382,8 @@ export type SpaceOverview = z.infer<typeof SpaceOverview>
 // 空间的 domain 默认层：管理界面新建记忆时按 domain 带出层。只是默认值，通过 Key 写入不受影响
 export const DomainLayers = z.object({
   defaults: z
-    .record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'domain 格式不对'), PlainLayer)
+    .record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, 'domain 格式错误'), PlainLayer)
     .refine((r) => Object.keys(r).length <= 64, '最多配置 64 个 domain')
-    .refine((r) => !('persona' in r) && !('app' in r), 'persona 与 app 的层由 URI 决定，不用配置'),
+    .refine((r) => !('persona' in r) && !('app' in r), 'persona 与 app 的层由 URI 决定，无需配置'),
 })
 export type DomainLayers = z.infer<typeof DomainLayers>

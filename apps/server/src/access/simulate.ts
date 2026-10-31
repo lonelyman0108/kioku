@@ -17,7 +17,7 @@ export async function keyToSimulate(
   accountId: string,
 ): Promise<SimulatedKey> {
   if (!(await memberRole(deps, spaceId, accountId))) {
-    return { error: '不是该空间成员', status: 403 }
+    return { error: '无权访问此空间', status: 403 }
   }
   const found = await withSpace(deps.db, spaceId, async (tx) => {
     const [app] = await tx.select().from(apps).where(eq(apps.id, appId))
@@ -30,7 +30,7 @@ export async function keyToSimulate(
     return key ? { app, key } : ('no-key' as const)
   })
   if (found === 'no-app') return { error: '应用不存在', status: 404 }
-  if (found === 'forbidden') return { error: '只有应用的主人能模拟它的 Key', status: 403 }
+  if (found === 'forbidden') return { error: '仅应用所有者可模拟此应用的 Key', status: 403 }
   if (found === 'no-key') return { error: 'Key 不存在', status: 404 }
   const { app, key } = found
   const [owner] = await deps.db

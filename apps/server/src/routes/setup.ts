@@ -58,7 +58,7 @@ export function setupRoutes(deps: Deps) {
           .values({ spaceId: space!.id, accountId: account!.id, role: 'owner' })
         return { account: account!, space: space! }
       })
-      if (!result) return c.json({ error: '已经初始化过' }, 409)
+      if (!result) return c.json({ error: '已完成初始化' }, 409)
 
       const token = await createSession(deps.db, result.account.id)
       setCookie(c, SESSION_COOKIE, token, {

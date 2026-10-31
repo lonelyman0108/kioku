@@ -125,7 +125,7 @@ export function reviewRoutes(deps: Deps) {
     .openapi(act, async (c) => {
       const { spaceId } = c.req.valid('param')
       const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
-      if (role === 'viewer') return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      if (role === 'viewer') return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       return c.json(await service.review(c.req.valid('json')), 200)
     })
 }

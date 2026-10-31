@@ -39,7 +39,7 @@ export function openAiChatModel(
         signal: AbortSignal.timeout(timeoutMs),
       }).catch((err: unknown) => {
         if ((err as Error).name === 'TimeoutError') {
-          throw new Error(`抽取模型 ${Math.ceil(timeoutMs / 1000)} 秒内没有返回`)
+          throw new Error(`抽取模型 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
         }
         throw new Error(fetchFailure('抽取模型', err))
       })

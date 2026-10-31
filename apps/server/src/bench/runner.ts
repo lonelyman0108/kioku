@@ -14,6 +14,7 @@ import {
   type KeyScopes,
 } from '@kioku/contracts'
 
+import { layerWithValue, sensitivityWithValue } from '../memory/names'
 import type { BenchExecutor, ResolvedStep, StepOutcome } from './executor'
 
 // 跑一串步骤：requires、展开变量、执行、断言、capture、重放日志。执行方式由 executor 决定，这里不碰数据库。
@@ -100,12 +101,12 @@ function defaultLabel(step: BenchStep): string {
 // 不满足 requires 的原因；满足时为 null
 export function unmetRequirement(requires: BenchRequires, scopes: KeyScopes): string | null {
   const unreadable = requires.readLayers?.filter((l) => !scopes.readLayers.includes(l)) ?? []
-  if (unreadable.length) return `这把 Key 读不了 ${unreadable.join('、')} 层`
+  if (unreadable.length) return `当前 Key 无权读取${unreadable.map(layerWithValue).join('、')}`
   const unwritable = requires.writeLayers?.filter((l) => !scopes.writeLayers.includes(l)) ?? []
-  if (unwritable.length) return `这把 Key 写不了 ${unwritable.join('、')} 层`
+  if (unwritable.length) return `当前 Key 无权写入${unwritable.map(layerWithValue).join('、')}`
   const needed = requires.maxSensitivity
   if (needed && SENSITIVITIES.indexOf(scopes.maxSensitivity) < SENSITIVITIES.indexOf(needed)) {
-    return `这把 Key 的最高敏感级不到 ${needed}`
+    return `当前 Key 的敏感级上限低于${sensitivityWithValue(needed)}`
   }
   return null
 }
@@ -113,7 +114,7 @@ export function unmetRequirement(requires: BenchRequires, scopes: KeyScopes): st
 const INTERNAL_MESSAGES: Record<BenchInternalDetail, string> = {
   lock_timeout: '服务内部错误：等锁超时',
   statement_timeout: '服务内部错误：语句超时',
-  run_timeout: '服务内部错误：运行超过了总时长',
+  run_timeout: '服务内部错误：运行超过总时长',
   aborted: '服务内部错误：根事务已中止',
 }
 
@@ -141,7 +142,7 @@ function check(
   const onUris = (message: string, ok: (uris: string[]) => boolean): BenchAssertion =>
     outcome.uris
       ? { message, ok: ok(outcome.uris) }
-      : { message: `${message}：这种结果分不清 URI 列表，要看启动节点用 boot 步骤`, ok: false }
+      : { message: `${message}：此类结果无法区分 URI 列表，查看启动加载请用 boot 步骤`, ok: false }
   const assertions: BenchAssertion[] = []
   if (expected.error !== undefined) {
     assertions.push({
@@ -202,8 +203,8 @@ const NOT_RUN = {
 } satisfies Partial<BenchStepResult>
 
 const STOP_REASONS = {
-  aborted: '根事务出错，这一步没有执行',
-  timeout: '运行超过了总时长，这一步没有执行',
+  aborted: '根事务出错，此步未执行',
+  timeout: '运行超过总时长，此步未执行',
 } as const
 
 export interface RunInput {
@@ -281,7 +282,7 @@ export async function runSteps(
         ...NOT_RUN,
         ...head,
         status: 'notRun',
-        reason: `重放的第 ${replayDiverged.index + 1} 步报错，这一步没有执行`,
+        reason: `重放的第 ${replayDiverged.index + 1} 步报错，此步未执行`,
       })
       continue
     }
@@ -308,7 +309,7 @@ export async function runSteps(
           reason: `依赖的步骤被跳过（\${${missing}}）`,
         })
       } else {
-        failedBefore(step, head, `变量 \${${missing}} 没有取到`)
+        failedBefore(step, head, `变量 \${${missing}} 未取到`)
       }
       continue
     }

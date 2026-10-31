@@ -109,7 +109,7 @@ describe('Lore 导入计划', () => {
       {
         source: 'core://agent/codex',
         reason:
-          '应用标识 codex 已被别的成员占用：先在管理界面建一个自己的、运行时类型为 codex 的应用，再重新导入',
+          '应用标识 codex 已被其他成员占用。请先在管理界面新建一个属于当前账号、运行时类型为 codex 的应用，再重新导入。',
       },
     ])
   })
@@ -250,9 +250,9 @@ describe('Lore 导入计划', () => {
     expect(plan.skipped).toEqual([
       {
         source: 'projects://notes',
-        reason: '正文里有格式不对的凭据占位符：写到这种写法的说明文字要去掉花括号',
+        reason: '正文含格式错误的凭据占位符。说明文字提到这种写法时，请去掉花括号。',
       },
-      { source: 'infra://hint', reason: expect.stringContaining('占位符只能写在正文里') },
+      { source: 'infra://hint', reason: expect.stringContaining('占位符只能写在正文中') },
     ])
   })
 
@@ -265,7 +265,7 @@ describe('Lore 导入计划', () => {
       {
         source: 'infra://hint',
         reason:
-          '正文里有格式不对的凭据占位符 {{cred:nas 密码是 hunter2 不要外传：写到这种写法的说明文字要去掉花括号',
+          '正文含格式错误的凭据占位符 {{cred:nas 密码是 hunter2 不要外传。说明文字提到这种写法时，请去掉花括号。',
       },
     ])
   })
@@ -281,7 +281,7 @@ describe('Lore 导入计划', () => {
       {
         source: 'infra://tagged',
         keyword: '{{cred:router}}',
-        reason: expect.stringContaining('占位符只能写在正文里'),
+        reason: expect.stringContaining('占位符只能写在正文中'),
       },
     ])
   })
@@ -299,10 +299,10 @@ describe('Lore 导入计划', () => {
     )
     expect(plan.memories.map((m) => m.source)).toEqual(['projects://router'])
     expect(plan.skipped).toEqual([
-      { source: 'core://router', reason: expect.stringContaining('core://router 是 base 层') },
+      { source: 'core://router', reason: expect.stringContaining('core://router 属于基础层') },
       {
         source: 'preferences://router',
-        reason: expect.stringContaining('preferences://router 是 owner 层'),
+        reason: expect.stringContaining('preferences://router 属于个人画像层'),
       },
     ])
   })
@@ -461,7 +461,7 @@ describe('Lore 导入计划', () => {
         expect(plan.memories[0]!.importKey).toBe(all.memories[0]!.importKey)
         expect(plan.skipped).toContainEqual({
           source: 'core://agent/zcode',
-          reason: '这次选择不导入',
+          reason: '本次选择不导入',
         })
         expect(plan.apps.map((m) => m.runtime)).toEqual(['claudecode'])
       }
@@ -491,7 +491,7 @@ describe('Lore 导入计划', () => {
       // 第二个节点在计划里没有写入目标，看不到也勾不了，不能在勾掉第一个之后写进去
       expect(plan.memories.map((m) => m.source)).toEqual(['infra://other'])
       expect(plan.skipped).toEqual([
-        { source: 'core://agent/claude_code', reason: '这次选择不导入' },
+        { source: 'core://agent/claude_code', reason: '本次选择不导入' },
         clash,
       ])
       expect(plan.errors).toEqual([])
@@ -569,7 +569,7 @@ describe('Lore 导入计划', () => {
         ...options,
         secretUris: new Set(['infra://a']),
       })
-      expect(() => assertExecutable(secret, null)).toThrow('没有配置主密钥')
+      expect(() => assertExecutable(secret, null)).toThrow('未配置主密钥')
       expect(() => assertExecutable(secret, key)).not.toThrow()
       const plain = planImport(snapshot(node('infra://a')), [], options)
       expect(() => assertExecutable(plain, null)).not.toThrow()

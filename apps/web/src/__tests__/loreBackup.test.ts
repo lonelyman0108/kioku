@@ -572,7 +572,7 @@ describe('执行失败之后的说明', () => {
   it('5xx 与网络错误才说可能写了一部分并重看计划：文字是界面自己的，不看服务端说了什么', () => {
     for (const [err, message] of [
       // 服务端写到一半时自己也说了一遍，不能重复，也不能因为它改了文字就不说
-      [new ApiError(500, '写到一半出错了，可能已写入一部分'), '服务端错误（HTTP 500）'],
+      [new ApiError(500, '写入中途出错，可能已写入一部分'), '服务端错误（HTTP 500）'],
       [new ApiError(500, '服务内部错误'), '服务端错误（HTTP 500）'],
       [new ApiError(502, '请求失败：HTTP 502'), '服务端错误（HTTP 502）'],
       [new ApiError(504, '请求失败：HTTP 504'), '服务端错误（HTTP 504）'],
@@ -590,7 +590,7 @@ describe('执行失败之后的说明', () => {
   it('接着的看计划也失败时，不说已经重新算过', () => {
     for (const failure of [
       applyFailureOf(new ApiError(409, '计划变了')),
-      applyFailureOf(new ApiError(500, '写到一半出错了')),
+      applyFailureOf(new ApiError(500, '写入中途出错')),
       applyFailureOf(new TypeError('Failed to fetch')),
     ]) {
       const text = applyFailureNotice(failure, 'failed')
@@ -606,7 +606,7 @@ describe('执行失败之后的说明', () => {
   })
 
   it('重看计划之前就有说明，算完再更新：慢的地址拉取期间不能是一片空白', async () => {
-    const failure = applyFailureOf(new ApiError(500, '写到一半出错了'))
+    const failure = applyFailureOf(new ApiError(500, '写入中途出错'))
     const shown: string[] = []
     let finish!: (replanned: boolean) => void
     const replan = vi.fn(() => new Promise<boolean>((resolve) => (finish = resolve)))
@@ -734,7 +734,9 @@ describe('请求期间与不能看计划时', () => {
     expect(planBlocker(form)).toBeNull()
     expect(planBlocker({ ...form, sourceKind: 'url', hasFile: false, url: 'https://x' })).toBeNull()
     expect(planBlocker({ ...form, busy: true })).toBe('上一个请求尚未结束')
-    expect(planBlocker({ ...form, personaProblem: '只用小写字母' })).toBe('人格标识只用小写字母')
+    expect(planBlocker({ ...form, personaProblem: '只能包含小写字母' })).toBe(
+      '人格标识只能包含小写字母',
+    )
     expect(planBlocker({ ...form, personaName: '' })).toBe('请填写人格名称')
     expect(planBlocker({ ...form, hasFile: false })).toBe('请选择 Lore 的导出文件')
     expect(planBlocker({ ...form, tooLarge: true })).toBe('导出文件超过上限')
@@ -773,7 +775,7 @@ describe('计划的分组', () => {
           item('edited', 'a://4'),
           { ...item('moved', 'a://5'), target: 'a://6' },
           item('deleted', 'a://7'),
-          { ...item('skipped', 'a://8'), reason: '没有正文' },
+          { ...item('skipped', 'a://8'), reason: '正文为空' },
           item('unmapped', 'a://9'),
           { ...item('unreadable', 'a://10'), reason: '记忆不存在' },
         ],
@@ -786,7 +788,7 @@ describe('计划的分组', () => {
       ['edited', ['a://4']],
       ['moved', ['a://5 → a://6']],
       ['deleted', ['a://7']],
-      ['skipped', ['a://8：没有正文']],
+      ['skipped', ['a://8：正文为空']],
       ['unmapped', ['a://9']],
       ['unreadable', ['a://10：记忆不存在']],
       ['gone', ['a://11']],

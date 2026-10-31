@@ -12,7 +12,7 @@ import type { LoreNode, LoreSnapshot } from './lore'
 // 这份数据没有数据库的保证，所以逐字段校验（只看用到的列，Lore 不同版本的其余列不管），
 // 主键重复、未来的时间、存不进数据库的字符都拒绝整个文件。报错只说第几行、哪个字段，不带内容
 
-const invalid = (detail: string) => new MemoryError(400, `Lore 导出的内容不对：${detail}`)
+const invalid = (detail: string) => new MemoryError(400, `Lore 导出的内容有误：${detail}`)
 
 // 一张表最多这么多行：请求体已经有上限，这里挡住那个上限之内的空行
 const MAX_ROWS = 200_000

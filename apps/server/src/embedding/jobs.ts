@@ -32,7 +32,7 @@ function failureLog() {
     get count() {
       return count
     },
-    message: () => `有 ${count} 条记忆生成不了向量，最近一条的原因：${last}`,
+    message: () => `${count} 条记忆无法生成向量，最近一条的原因：${last}`,
   }
 }
 
@@ -124,7 +124,7 @@ async function embedTargets(
   const signal = signals.length ? AbortSignal.any(signals) : undefined
   // 没做完的记成哪种失败
   const unfinished = () =>
-    new Error(stopping?.aborted ? '服务要停了，这一批没做完' : '这一批没在时间内做完，交给重试')
+    new Error(stopping?.aborted ? '服务正在停止，这一批未完成' : '这一批未在时限内完成，将重试')
 
   const [active, next] = await Promise.all([source.get(), source.next()])
   for (const embedder of [active, next]) {
@@ -166,7 +166,7 @@ async function embedTargets(
     } else if (failures.count) {
       await recordEmbeddingError(db, embedder.model, failures.message())
     } else if (deferred) {
-      const message = `这一批没在时间内做完：有 ${deferred} 条还没生成向量，交给重试；嵌入接口可能太慢`
+      const message = `这一批未在时限内完成：${deferred} 条尚未生成向量，将重试；嵌入接口可能过慢`
       await recordEmbeddingError(db, embedder.model, message)
     } else if (written) {
       await clearEmbeddingError(db, embedder.model)
@@ -183,7 +183,7 @@ async function embedTargets(
     const lost = new Set(await retry(spaceId, [...ids]))
     const queued = [...ids].filter((id) => !lost.has(id))
     for (const index of indexes(spaceId, queued)) failed.delete(index)
-    fail(spaceId, lost, new Error('写回时被锁着，另排的新任务没排进去，交给重试'))
+    fail(spaceId, lost, new Error('写回时遇到锁，新任务未能入队，将重试'))
   }
   return failed
 }
@@ -209,7 +209,7 @@ export async function backfillJob(
   )
   const problems: string[] = []
   if (failures.count) problems.push(failures.message())
-  if (lost) problems.push(`有 ${lost} 条记忆写回时被锁着，另排的新任务没排进去，等下一次补齐`)
+  if (lost) problems.push(`${lost} 条记忆写回时遇到锁，新任务未能入队，将在下次补齐`)
   if (problems.length) await recordEmbeddingError(db, active.model, problems.join('；'))
   else await clearEmbeddingError(db, active.model)
   return total
@@ -271,7 +271,7 @@ export async function switchJob(
       await recordEmbeddingError(
         db,
         target.model,
-        `还有 ${eligible - done} 条记忆没有新模型的向量，补了一遍也没补上；过一会儿会再试，也可以现在就切换`,
+        `仍有 ${eligible - done} 条记忆缺少新模型的向量，补齐未成功；稍后将重试，也可以立即切换`,
       )
     }
     return 'stuck'

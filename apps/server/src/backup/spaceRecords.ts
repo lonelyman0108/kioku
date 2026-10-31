@@ -36,7 +36,7 @@ const Id = z.guid()
 // 都存不了 NUL；落单的 UTF-16 代理项（JSON 里 "\ud800" 这样的转义解出来的）写进 text 时被悄悄换成 U+FFFD，
 // 写进 jsonb（导入事件的快照）时报错，两个只差在代理项上的关键词还会变成同一个
 const storable = (s: string) => !s.includes('\0') && !/\p{Cs}/u.test(s)
-const UNSTORABLE = '含有存不进数据库的字符（NUL 或落单的代理项）'
+const UNSTORABLE = '含无法存入数据库的字符（NUL 或落单的代理项）'
 export const Text = z.string().refine(storable, UNSTORABLE)
 
 // 用接口的定义检查的部分（外部凭据的来源）不管上面这一条：其中的字符串（包括键）逐个查
@@ -63,7 +63,7 @@ const UUID_TEXT = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
 export function describeIssue(error: z.ZodError): string {
   const issue = error.issues[0]
   const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
-  return `${where}${issue?.message ?? '格式不对'}`
+  return `${where}${issue?.message ?? '格式错误'}`
 }
 
 // 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据

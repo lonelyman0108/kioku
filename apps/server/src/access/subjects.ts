@@ -20,7 +20,7 @@ import { subjectScope, TALK_LAYERS } from '../memory/scopes'
 export type SubjectRow = typeof subjects.$inferSelect
 
 // 等确认的绑定因为两边的对象被合并而作废时记下的原因
-export const MERGED_WHILE_PENDING = '等确认期间对象被合并了'
+export const MERGED_WHILE_PENDING = '待确认期间联系人已被合并'
 
 // 按 id 的顺序锁住几个对象：同时有几次合并涉及同一批对象时不会互相等成死锁。
 // 抽取或别的写入正占着这些行时不久等，等锁超过 5 秒就报错（见 isLockBusy），让用户稍后再试

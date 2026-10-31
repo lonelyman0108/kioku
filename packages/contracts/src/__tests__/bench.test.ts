@@ -75,7 +75,7 @@ describe('运行请求', () => {
     expect(BenchRunRequest.safeParse({ steps: many }).success).toBe(false)
   })
 
-  it('真实模式没有重放', () => {
+  it('真实模式不支持重放', () => {
     const replay = [{ kind: 'tool', tool: 'kioku_delete', arguments: { uri: 'a://b' } }]
     expect(BenchRunRequest.safeParse({ mode: 'real', steps, replay }).success).toBe(false)
     expect(BenchRunRequest.safeParse({ mode: 'rollback', steps, replay }).success).toBe(true)

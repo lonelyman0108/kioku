@@ -105,7 +105,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     expect((await referencesOf(fileServer.id)).items.map((r) => r.uri)).toEqual(['notes://server'])
     expect(await countOf(fileServer.id)).toBe(1)
     expect(await errorOf(await asMember('DELETE', `/credentials/${fileServer.id}`), 409)).toContain(
-      '还有 1 条记忆引用这条凭据',
+      '仍有 1 条记忆引用此凭据',
     )
 
     // 已删除的记忆不挡删除
@@ -120,7 +120,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
         await createMemory({ uri: 'notes://bad', content: '密码 {{cred:File-Server}}' }),
         400,
       ),
-    ).toContain('凭据占位符格式不对：{{cred:File-Server}}')
+    ).toContain('凭据占位符格式错误：{{cred:File-Server}}')
     const inCode = '```\ncurl -u {{cred:file-server#username}}\n```'
     for (const body of [
       { uri: 'core://code', content: inCode, layer: 'base' },
@@ -128,7 +128,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       { uri: 'notes://open', content: WITH_REFS, sensitivity: 'internal' },
     ]) {
       expect(await errorOf(await createMemory(body), 400), JSON.stringify(body)).toContain(
-        '只能在私人层、敏感级至少 private',
+        '只能放在私人层（private），敏感级不低于私密（private）',
       )
     }
     // 去掉花括号的写法不算引用
@@ -185,7 +185,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
 
   it('改层、降级、移出私人层之后违反的同样被拒，在私人层里移动照常', async () => {
     await ok(await createMemory({ uri: 'notes://server', content: WITH_REFS }), 201)
-    const scope = '只能在私人层、敏感级至少 private'
+    const scope = '只能放在私人层（private），敏感级不低于私密（private）'
     expect(
       await errorOf(await patchMemory({ uri: 'notes://server', layer: 'base' }), 400),
     ).toContain(scope)
@@ -299,7 +299,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     )
     expect(
       await errorOf(await patchMemory({ uri: 'notes://old', sensitivity: 'private' }), 400),
-    ).toContain('正文像有明文密码或 Token')
+    ).toContain('正文疑似含明文密码或 Token')
     // 值写在下一行的也算
     await ok(
       await createMemory({
@@ -311,7 +311,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     )
     expect(
       await errorOf(await patchMemory({ uri: 'notes://multiline', sensitivity: 'private' }), 400),
-    ).toContain('正文像有明文密码或 Token')
+    ).toContain('正文疑似含明文密码或 Token')
     const key = await ws.issueKey((await ws.createApp('agent')).id, FULL_SCOPES)
     expect(
       await errorOf(
@@ -322,7 +322,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
         }),
         403,
       ),
-    ).toContain('不能强制降级')
+    ).toContain('无法强制降级')
     // 迁移的做法：换成占位符与降级一次完成
     const migrated = await ok<MemoryView>(
       await asKey('PATCH', '/memories', key, {
@@ -401,7 +401,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
         }),
         400,
       ),
-    ).toContain('disclosure 与关键词里不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
     expect(
       await errorOf(
         await createMemory({
@@ -411,14 +411,14 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
         }),
         400,
       ),
-    ).toContain('disclosure 与关键词里不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
     await ok(await createMemory({ uri: 'notes://plain', content: '正文' }), 201)
     expect(
       await errorOf(
         await patchMemory({ uri: 'notes://plain', disclosure: '{{cred:file-server}} 在哪' }),
         400,
       ),
-    ).toContain('disclosure 与关键词里不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
   })
 
   it('规则之前写进 disclosure 的占位符不挡移动与撤销删除，只在写 disclosure 的时候检查', async () => {
@@ -444,7 +444,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     // 改 disclosure 时照常检查
     expect(
       await errorOf(await patchMemory({ uri: 'core://cue', disclosure: '还是 {{cred:x}}' }), 400),
-    ).toContain('disclosure 与关键词里不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
   })
 
   it('导入工具（来源记为 system）能新增引用，别的后台写入不能', async () => {
@@ -535,7 +535,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
           values (${ws.spaceId}, ${memory!.id}, 'file-server')`
       },
     )
-    expect(await errorOf(removed, 409)).toContain('还有 1 条记忆引用这条凭据')
+    expect(await errorOf(removed, 409)).toContain('仍有 1 条记忆引用此凭据')
   })
 
   describe('kioku_get', () => {

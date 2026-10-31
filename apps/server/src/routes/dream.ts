@@ -26,7 +26,7 @@ const SuggestionParams = SpaceParams.extend({ suggestionId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在，或者涉及的记忆有读不到的', ErrorResponse)
 const noJobs = jsonResponse('服务没有启动后台任务，或入队失败', ErrorResponse)
-const EDITORS = '需要 owner 或 editor 角色'
+const EDITORS = '需要空间所有者或编辑者角色'
 
 const list = createRoute({
   method: 'get',
@@ -164,16 +164,16 @@ export function dreamRoutes(deps: Deps) {
     .openapi(start, async (c) => {
       const { spaceId } = c.req.valid('param')
       const role = await member(spaceId, c.get('console').accountId)
-      if (!role) return c.json({ error: '不是该空间成员' }, 403)
+      if (!role) return c.json({ error: '无权访问此空间' }, 403)
       if (role === 'viewer') return c.json({ error: EDITORS }, 403)
       const runId = await deps.jobs?.enqueueDream(spaceId)
-      if (!runId) return c.json({ error: '没有排进后台任务，稍后再试' }, 503)
+      if (!runId) return c.json({ error: '未能加入后台任务，请稍后重试' }, 503)
       return c.json({ runId }, 202)
     })
     .openapi(runs, async (c) => {
       const { spaceId } = c.req.valid('param')
       const accountId = c.get('console').accountId
-      if (!(await member(spaceId, accountId))) return c.json({ error: '不是该空间成员' }, 403)
+      if (!(await member(spaceId, accountId))) return c.json({ error: '无权访问此空间' }, 403)
       const admin = await isInstanceAdmin(deps.db, accountId)
       return c.json(await dreamRunList(deps.db, spaceId, { accountId, admin }), 200)
     })
@@ -181,11 +181,11 @@ export function dreamRoutes(deps: Deps) {
       const { spaceId, runId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       if (!(await member(spaceId, accountId))) {
-        return c.json({ error: '不是该空间成员' }, 403)
+        return c.json({ error: '无权访问此空间' }, 403)
       }
-      if (!deps.jobs) return c.json({ error: '服务没有启动后台任务' }, 503)
+      if (!deps.jobs) return c.json({ error: '服务未启动后台任务' }, 503)
       const found = await deps.jobs.dreamRun(spaceId, runId)
-      if (!found) return c.json({ error: '没有这次整理' }, 404)
+      if (!found) return c.json({ error: '此次整理不存在' }, 404)
       if (found.state === 'queued') return c.json(found, 200)
       // 共享部分的汇总写下之后就算做完了，结果按汇总与查看者自己的画像层、私人层算（见 dreamRunOutcome）。
       // 还没写下时：任务还在跑就是共享的那一段还在整理；任务已经停了（停在共享的那一段或者更早）按出错算，
@@ -205,7 +205,7 @@ export function dreamRoutes(deps: Deps) {
         .select({ includePrivate: spaceMembers.dreamPrivate })
         .from(spaceMembers)
         .where(mine(spaceId, c.get('console').accountId))
-      if (!row) return c.json({ error: '不是该空间成员' }, 403)
+      if (!row) return c.json({ error: '无权访问此空间' }, 403)
       return c.json(row, 200)
     })
     .openapi(saveMySettings, async (c) => {
@@ -215,7 +215,7 @@ export function dreamRoutes(deps: Deps) {
         .set({ dreamPrivate: c.req.valid('json').includePrivate })
         .where(mine(spaceId, c.get('console').accountId))
         .returning({ includePrivate: spaceMembers.dreamPrivate })
-      if (!row) return c.json({ error: '不是该空间成员' }, 403)
+      if (!row) return c.json({ error: '无权访问此空间' }, 403)
       return c.json(row, 200)
     })
 }

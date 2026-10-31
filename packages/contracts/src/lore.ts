@@ -32,7 +32,7 @@ const Rows = z.array(z.record(z.string(), z.unknown()))
 // 上传的导出：多带别的表或别的顶层字段的直接拒绝
 const onlyTrimmed = {
   error: (issue: { code?: string }) =>
-    issue.code === 'unrecognized_keys' ? '导出里多带了别的内容：只收裁剪过的五张表' : undefined,
+    issue.code === 'unrecognized_keys' ? '导出文件含多余内容：只接受裁剪后的五张表' : undefined,
 }
 export const LoreBackupUpload = z.strictObject(
   {
@@ -59,16 +59,16 @@ export const LoreImportSource = z.discriminatedUnion('kind', [
   z.object({ kind: z.literal('file'), backup: LoreBackupUpload }),
   z.object({
     kind: z.literal('url'),
-    url: z.string().min(1, '要填 Lore 的地址').max(2048, 'Lore 的地址太长'),
+    url: z.string().min(1, '请填写 Lore 地址').max(2048, 'Lore 地址过长'),
     // Lore 没有设置 API_TOKEN 时可以留空
-    token: z.string().max(4096, 'Token 太长'),
+    token: z.string().max(4096, 'Token 过长'),
   }),
 ])
 export type LoreImportSource = z.infer<typeof LoreImportSource>
 
 const LoreImportPersona = z.object({
   slug: Slug,
-  name: z.string().trim().min(1, '要填人格的名称').max(64, '人格的名称最多 64 个字'),
+  name: z.string().trim().min(1, '请填写人格名称').max(64, '人格名称最多 64 个字'),
 })
 
 export const LoreImportPlanRequest = z.object({

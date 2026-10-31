@@ -412,8 +412,8 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     }
     // 模型接口的原文只给实例管理员（alice 是初始化时建的管理员），空间里的 editor、viewer 都看不到
     expect(await runError(ws.cookie)).toBe('抽取模型返回 HTTP 401：令牌无效')
-    expect(await runError(bob.cookie)).toBe('抽取失败（原因只有实例管理员看得到）')
-    expect(await runError(carol.cookie)).toBe('抽取失败（原因只有实例管理员看得到）')
+    expect(await runError(bob.cookie)).toBe('抽取失败（原因仅实例管理员可见）')
+    expect(await runError(carol.cookie)).toBe('抽取失败（原因仅实例管理员可见）')
     // 服务端自己判断出的原因不带外部原文，谁都看得到
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx.update(extractionRuns).set({ error: NO_USABLE_KEY }),

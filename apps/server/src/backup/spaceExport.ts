@@ -64,7 +64,7 @@ const PAGE = 500
 
 // 请求断开了（客户端超时、关掉页面）：文件交不出去，不再接着做。响应没人收，状态码只是给日志看的
 function stopIfGone(signal: AbortSignal | undefined): void {
-  if (signal?.aborted) throw new MemoryError(400, '请求已经断开，导出停下')
+  if (signal?.aborted) throw new MemoryError(400, '请求已断开，导出已停止')
 }
 
 export async function exportSpace(
@@ -140,7 +140,7 @@ export async function exportSpace(
     if (err instanceof ExportTooLarge) {
       throw new MemoryError(
         400,
-        `这个空间导出后超过导入的上限（加密后 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB、解压后 ${SPACE_EXPORT_MAX_PLAIN_BYTES / 1024 / 1024} MB），导出了也导入不了`,
+        `此空间导出后超过导入上限（加密后 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB、解压后 ${SPACE_EXPORT_MAX_PLAIN_BYTES / 1024 / 1024} MB），导出后也无法导入`,
       )
     }
     throw err
@@ -218,7 +218,7 @@ function checked<T>(schema: z.ZodType<T>, label: string, value: unknown): T {
   if (parsed.success) return parsed.data
   throw new MemoryError(
     409,
-    `${label}导出后导入不了（${describeIssue(parsed.error)}），在管理界面改掉再导出`,
+    `${label}导出后无法导入（${describeIssue(parsed.error)}）。请在管理界面修改后再导出。`,
   )
 }
 
@@ -288,7 +288,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     .orderBy(asc(subjects.createdAt), asc(subjects.id))
   yield subjectRows
     .map((s) =>
-      record(`对象「${s.displayName}」`, {
+      record(`联系人「${s.displayName}」`, {
         type: 'subject',
         id: s.id,
         kind: s.kind,
@@ -460,7 +460,7 @@ const memoryLabel = (row: typeof memories.$inferSelect) =>
 const unreadable = (what: string) =>
   new MemoryError(
     409,
-    `${what}解不开（密文缺失、被改过或主密钥对不上），导出不了：先在管理界面重新填它的内容，或者删掉它`,
+    `${what}无法解密（密文缺失、已被修改或主密钥不匹配），无法导出。请先在管理界面重新填写内容，或删除它。`,
   )
 
 function credentialRecord(
@@ -470,7 +470,7 @@ function credentialRecord(
   let source: CredentialRecord['source']
   if (row.source === 'hosted') {
     if (!masterKey) {
-      throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，解不开托管的凭据，不能导出')
+      throw new MemoryError(400, '服务端未配置 KIOKU_MASTER_KEY，托管的凭据无法解密，也无法导出')
     }
     if (!row.ciphertext || !row.wrappedKey) throw unreadable(`托管的凭据 ${row.identifier} `)
     try {
@@ -515,9 +515,9 @@ function memoryRecord(
   let content = row.content
   if (row.sensitivity === 'secret') {
     if (!masterKey) {
-      throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，解不开 secret 记忆，不能导出')
+      throw new MemoryError(400, '服务端未配置 KIOKU_MASTER_KEY，机密记忆无法解密，也无法导出')
     }
-    if (!row.ciphertext || !row.wrappedKey) throw unreadable(`secret 记忆 ${memoryLabel(row)} `)
+    if (!row.ciphertext || !row.wrappedKey) throw unreadable(`机密记忆 ${memoryLabel(row)} `)
     try {
       content = openMemoryContent(masterKey, {
         ...row,
@@ -525,7 +525,7 @@ function memoryRecord(
         wrappedKey: row.wrappedKey,
       })
     } catch {
-      throw unreadable(`secret 记忆 ${memoryLabel(row)} `)
+      throw unreadable(`机密记忆 ${memoryLabel(row)} `)
     }
   }
   return {

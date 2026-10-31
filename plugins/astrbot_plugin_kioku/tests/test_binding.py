@@ -236,7 +236,7 @@ def test_a_code_sent_in_a_group_is_voided():
 
     for handler in (
         down,
-        lambda _r: httpx.Response(429, json={"error": "输错的次数太多了，37 分钟后再试"}),
+        lambda _r: httpx.Response(429, json={"error": "输错次数过多，请 37 分钟后重试"}),
     ):
         plugin, _ = plugin_answering(handler)
         assert replies(plugin, AstrMessageEvent(**GROUP, text="/bind ABCD2345")) == [GROUP_PUBLIC]
@@ -253,9 +253,9 @@ def test_group_bind_without_a_code_only_points_to_private_chat():
 def test_kioku_errors_are_relayed_and_failures_degrade():
     # Kioku 的说明原样转达：码不对、输错太多、Key 写不了对象层……
     for status, error in (
-        (400, "绑定码不对或已经失效，请重新申请"),
-        (429, "输错的次数太多了，37 分钟后再试"),
-        (403, "这个 bot 的 Key 写不了对象层，不能绑定账号"),
+        (400, "绑定码错误或已失效，请重新申请"),
+        (429, "输错次数过多，请 37 分钟后重试"),
+        (403, "当前 bot 的 Key 无权写入联系人层，无法绑定账号"),
     ):
         plugin, _ = plugin_answering(
             lambda _r, status=status, error=error: httpx.Response(status, json={"error": error})
@@ -279,10 +279,10 @@ def test_kioku_errors_are_relayed_and_failures_degrade():
 
 def test_too_long_codes_are_clipped_to_what_kioku_accepts():
     plugin, sent = plugin_answering(
-        lambda _r: httpx.Response(400, json={"error": "绑定码是 8 位字母和数字"})
+        lambda _r: httpx.Response(400, json={"error": "绑定码由 8 位字母和数字组成"})
     )
     event = AstrMessageEvent(**PRIVATE_TG, text="/bind " + "A" * 200)
-    assert replies(plugin, event) == ["绑定码是 8 位字母和数字"]
+    assert replies(plugin, event) == ["绑定码由 8 位字母和数字组成"]
     assert sent[0][1]["code"] == "A" * 64
 
 

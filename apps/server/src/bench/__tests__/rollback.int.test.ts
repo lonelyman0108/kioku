@@ -263,7 +263,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       })
       expect(finished).toBe('跑完了')
       expect(await run.stopReason()).toBe('timeout')
-      await expect(addSubject(scoped.db, '太晚了')).rejects.toThrow('超过了总时长')
+      await expect(addSubject(scoped.db, '太晚了')).rejects.toThrow('超过总时长')
       expect(run.takeDetail()).toBe('run_timeout')
     })
   })
@@ -273,8 +273,8 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     await inRollback(deps, NO_VECTORS, async (scoped) => {
       leaked = scoped
     })
-    expect(() => leaked.db.select()).toThrow('已经结束')
-    await expect(leaked.db.transaction(async () => {})).rejects.toThrow('已经结束')
+    expect(() => leaked.db.select()).toThrow('已结束')
+    await expect(leaked.db.transaction(async () => {})).rejects.toThrow('已结束')
   })
 
   // 试着用一下句柄，返回拒绝的原因；发出去了就返回固定文字
@@ -314,7 +314,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       ),
     )
     expect(outcomes).toHaveLength(15)
-    for (const outcome of outcomes) expect(outcome).toContain('已经结束')
+    for (const outcome of outcomes) expect(outcome).toContain('已结束')
     expect(await subjectNames(database.db)).toEqual([])
   })
 
@@ -338,7 +338,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
         await scoped.db.execute(sql`select 1`)
         outcome = strayWrite(scoped.db)
       })
-      expect(await outcome).toContain('已经结束')
+      expect(await outcome).toContain('已结束')
       await expect(strayRows()).resolves.toEqual([])
     })
 
@@ -351,7 +351,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
           throw new Error('运行出错')
         }),
       ).rejects.toThrow('运行出错')
-      expect(await outcome).toContain('已经结束')
+      expect(await outcome).toContain('已结束')
       await expect(strayRows()).resolves.toEqual([])
     })
   })
@@ -375,7 +375,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
       code: 'CONNECTION_CLOSED',
     })
     callback.resolve()
-    for (const outcome of await after.promise) expect(outcome).toContain('已经结束')
+    for (const outcome of await after.promise) expect(outcome).toContain('已结束')
   })
 
   it('连接断开、回调还在跑：先置状态，回调不能再发语句', async () => {
@@ -395,7 +395,7 @@ describe.skipIf(!testDatabaseUrl)('回滚事务与串行化的代理', () => {
     callback.resolve()
     const { reason, error } = await after.promise
     expect(reason).toBe('aborted')
-    expect(String(error)).toContain('已经结束')
+    expect(String(error)).toContain('已结束')
   })
 
   it('闸门：同时运行数到了上限直接 429，结束之后放开', async () => {

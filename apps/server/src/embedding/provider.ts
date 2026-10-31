@@ -40,8 +40,8 @@ export function openAiEmbedder(config: EmbeddingConfig, fetchImpl: typeof fetch 
         signal: signal ? AbortSignal.any([signal, timeout]) : timeout,
       }).catch((err: unknown) => {
         // 取消了也不照原样抛：请求头不合法的错误比取消先报出来，文字里带着 Key（见 fetchFailure）
-        if (timeout.aborted) throw new Error(`嵌入接口 ${Math.ceil(timeoutMs / 1000)} 秒内没有返回`)
-        if (signal?.aborted) throw new Error('调用方的总时限到了，或者服务要停了')
+        if (timeout.aborted) throw new Error(`嵌入接口 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
+        if (signal?.aborted) throw new Error('已达调用方的总时限，或服务正在停止')
         throw new Error(fetchFailure('嵌入接口', err))
       })
       if (!res.ok) {
@@ -91,9 +91,9 @@ export function channelEmbedder(
         }
       }
       if (signal?.aborted && errors.length < embedders.length) {
-        errors.push('等待时间用完了，后面的渠道没有再试')
+        errors.push('等待时间已用完，后续渠道未尝试')
       }
-      throw new Error(errors.length === 1 ? errors[0] : `所有渠道都失败了。${errors.join('；')}`)
+      throw new Error(errors.length === 1 ? errors[0] : `所有渠道均失败。${errors.join('；')}`)
     },
   }
 }

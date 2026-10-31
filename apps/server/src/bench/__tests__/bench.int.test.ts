@@ -306,7 +306,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         steps: [tool('kioku_create', { content: 'x'.repeat(3 * 1024 * 1024) })],
       })
       expect(res.status).toBe(413)
-      expect(((await res.json()) as { error: string }).error).toContain('太大')
+      expect(((await res.json()) as { error: string }).error).toContain('过大')
     })
   })
 
@@ -784,8 +784,8 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       })
       expect(boot.steps.map((s) => s.status)).toEqual(['failed', 'failed', 'passed', 'passed'])
       expect(boot.steps[0]!.uris).toBeNull()
-      expect(boot.steps[0]!.assertions[0]!.message).toContain('分不清')
-      expect(boot.steps[1]!.assertions[0]!.message).toContain('分不清')
+      expect(boot.steps[0]!.assertions[0]!.message).toContain('无法区分')
+      expect(boot.steps[1]!.assertions[0]!.message).toContain('无法区分')
       // 界面按契约校验响应：没有列表（null）也要过
       expect(BenchRunResult.safeParse(boot).success).toBe(true)
     })
@@ -842,7 +842,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       )
       const result = (await res.json()) as BenchRunResult
       expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped'])
-      expect(result.steps[1]!.reason).toContain('写不了 private')
+      expect(result.steps[1]!.reason).toContain('无权写入私人层（private）')
       expect(result.whoami.scopes.writeLayers).toEqual([])
       expect(result.ok).toBe(true)
     })
@@ -1063,7 +1063,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
         expect(waiting).toBe(2)
         const third = await postRun({ steps: [{ kind: 'whoami' }] }, ws.cookie, target)
         expect(third.status).toBe(429)
-        expect(((await third.json()) as { error: string }).error).toContain('稍后再试')
+        expect(((await third.json()) as { error: string }).error).toContain('稍后重试')
         // 真实模式不占闸门：它不占着事务
         const real = await postRun({ mode: 'real', steps: [{ kind: 'whoami' }] }, ws.cookie, target)
         expect(real.status).toBe(200)

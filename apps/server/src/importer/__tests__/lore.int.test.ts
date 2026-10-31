@@ -726,7 +726,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         )
         expect(await applySync(target(), sync)).toEqual({
           updated: [],
-          failed: [{ uri: 'app://claude-code/agent', reason: '这个应用已经不属于导入者' }],
+          failed: [{ uri: 'app://claude-code/agent', reason: '此应用已不属于导入者' }],
         })
       } finally {
         await undo()
@@ -891,7 +891,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
           expect.objectContaining({
             source: 'infra://office_network',
             uri: 'infra://office_network',
-            reason: expect.stringContaining('格式不对的凭据占位符'),
+            reason: expect.stringContaining('格式错误的凭据占位符'),
           }),
         ])
       } finally {
@@ -914,7 +914,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
           source: 'infra://office_network',
           uri: 'infra://office_network',
           state: 'skipped',
-          reason: '这次选择不导入',
+          reason: '本次选择不导入',
           changes: [],
         })
         expect(sync.goneFromLore).toEqual([])

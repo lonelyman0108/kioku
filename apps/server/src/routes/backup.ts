@@ -21,9 +21,9 @@ import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { SettingsInputError, unlocked } from '../settings/endpoint'
 
-const NOT_CONFIGURED = '还没有保存备份存储的设置'
+const NOT_CONFIGURED = '尚未保存备份存储设置'
 const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
-const unusable = jsonResponse(`${NOT_CONFIGURED}，或者保存的 Secret 解不开`, ErrorResponse)
+const unusable = jsonResponse('还没有保存备份存储的设置，或者保存的 Secret 解不开', ErrorResponse)
 
 const view = createRoute({
   method: 'get',
@@ -142,13 +142,13 @@ export function backupRoutes(deps: Deps) {
       const loaded = await configured()
       if (!loaded.ok) return c.json({ error: loaded.error }, 400)
       const runId = await deps.jobs?.enqueueBackup()
-      if (!runId) return c.json({ error: '没有排进后台任务，稍后再试' }, 503)
+      if (!runId) return c.json({ error: '未能加入后台任务，请稍后重试' }, 503)
       return c.json({ runId }, 202)
     })
     .openapi(runStatus, async (c) => {
-      if (!deps.jobs) return c.json({ error: '服务没有启动后台任务' }, 503)
+      if (!deps.jobs) return c.json({ error: '服务未启动后台任务' }, 503)
       const status = await deps.jobs.backupRun(c.req.valid('param').runId)
-      if (!status) return c.json({ error: '没有这次备份' }, 404)
+      if (!status) return c.json({ error: '此次备份不存在' }, 404)
       return c.json(status, 200)
     })
     .openapi(objects, async (c) => {

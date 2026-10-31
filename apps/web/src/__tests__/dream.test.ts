@@ -60,7 +60,7 @@ describe('运行记录', () => {
     expect(sharedSummaryText({ ...summary, skipped: 'no-model' })).toBe(
       '未整理：尚未配置抽取模型（可在实例设置中配置）',
     )
-    expect(sharedSummaryText({ ...summary, error: '共享的范围出错' })).toBe('出错，本次已停止')
+    expect(sharedSummaryText({ ...summary, error: '共享范围出错' })).toBe('出错，本次已停止')
   })
 
   it('「立即整理」做完之后按结果给提示，还没做完时不提示', () => {

@@ -86,10 +86,10 @@ const MAX_SUGGESTIONS = 20
 const REASON_CHARS = 200
 
 // 共享部分的汇总里的出错：共享的范围请求模型或写入出错，这一次就停下了
-const SHARED_FAILED = '共享的范围出错，这次停下了（原因见出错的那个范围）'
+const SHARED_FAILED = '共享范围出错，本次已停止（原因见出错的范围）'
 // 服务端自己判断出的出错原因，不带模型接口或数据库的原文，所有成员都看得到
 const PLAIN_ERRORS = new Set([DREAM_PARSE_ERROR, SHARED_FAILED])
-const HIDDEN_ERROR = '整理出错（原因只有实例管理员看得到）'
+const HIDDEN_ERROR = '整理出错（原因仅实例管理员可见）'
 
 type MemoryRow = typeof memories.$inferSelect
 

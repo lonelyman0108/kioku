@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-const BaseUrl = z.url({ protocol: /^https?$/, error: '接口地址要以 http:// 或 https:// 开头' })
+const BaseUrl = z.url({ protocol: /^https?$/, error: '接口地址须以 http:// 或 https:// 开头' })
 
 // 粘贴来的密钥：去掉首尾的空白（多带一个换行很常见），别的只收可打印的 ASCII（空格到 ~）。换行、零宽字符、全角符号放过去的话，
 // 它进请求头时 fetch 直接报错，进签名时算出来的签名对不上，都看不出是密钥的问题。name 是这个密钥叫什么
@@ -11,7 +11,7 @@ const pastedSecret = (name: string) =>
     .min(1, `${name} 不能只有空白`)
     .regex(
       /^[\x20-\x7e]+$/,
-      `${name} 只能有英文字母、数字和半角符号，检查粘贴的内容里有没有换行、零宽字符或全角符号`,
+      `${name} 只能包含英文字母、数字和半角符号，请检查粘贴的内容是否含换行、零宽字符或全角符号`,
     )
 const ApiKey = pastedSecret('Key')
 
@@ -256,20 +256,20 @@ const BucketName = z
   .string()
   .regex(
     /^[a-z0-9][a-z0-9.-]{1,61}[a-z0-9]$/,
-    '存储桶名只用小写字母、数字、点和连字符，3 到 63 个字',
+    '存储桶名只能包含小写字母、数字、点和连字符，长度 3 到 63 个字符',
   )
 const ObjectPrefix = z
   .string()
   .max(200)
   .regex(
     /^([A-Za-z0-9._-]+(\/[A-Za-z0-9._-]+)*)?$/,
-    '前缀是存储桶里的目录，例如 kioku 或 backups/kioku：只用字母、数字和 . _ - /，首尾不带 /',
+    '前缀是存储桶中的目录，例如 kioku 或 backups/kioku：只能包含字母、数字和 . _ - /，首尾不带 /',
   )
 
 // 对象地址是在接口地址后面接上存储桶与对象名拼出来的，接口地址不能带查询串与片段
 const StorageEndpoint = BaseUrl.refine(
   (value) => !/[?#]/.test(value),
-  '接口地址不要带 ? 和 # 后面的部分',
+  '接口地址不能包含 ? 和 # 及其后面的部分',
 )
 
 export const UpdateBackupSettings = z.object({

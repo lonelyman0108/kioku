@@ -239,9 +239,9 @@ export async function requestAgentTurn(
     raw = await res.text()
   } catch (err) {
     if (timeout.aborted) {
-      throw new AgentModelError(`模型 ${Math.ceil(timeoutMs / 1000)} 秒内没有返回`)
+      throw new AgentModelError(`模型 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
     }
-    if (signal?.aborted) throw new AgentModelError('请求已经断开')
+    if (signal?.aborted) throw new AgentModelError('请求已断开')
     throw new AgentModelError(fetchFailure('模型接口', err))
   }
   if (!res.ok) {

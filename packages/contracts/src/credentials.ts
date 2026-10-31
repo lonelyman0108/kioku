@@ -10,13 +10,13 @@ export const CredentialIdentifier = z
   .string()
   .regex(
     CREDENTIAL_NAME_PATTERN,
-    '标识只用小写字母、数字、_ 和 -，以字母或数字开头，最长 64 个字符',
+    '标识只能包含小写字母、数字、_ 和 -，须以字母或数字开头，最长 64 个字符',
   )
 export const CredentialFieldName = z
   .string()
   .regex(
     CREDENTIAL_NAME_PATTERN,
-    '字段名只用小写字母、数字、_ 和 -，以字母或数字开头，最长 64 个字符',
+    '字段名只能包含小写字母、数字、_ 和 -，须以字母或数字开头，最长 64 个字符',
   )
 
 // 一条凭据最多这么多个字段
@@ -210,7 +210,7 @@ const BINDING_UNSAFE =
   /[;|&<>`$\\"'%\u2018-\u201f]|[\p{Cc}\p{Cf}\p{Zl}\p{Zp}\p{Default_Ignorable_Code_Point}]/u
 const shellSafe = (v: string) => !BINDING_UNSAFE.test(v) && !v.startsWith('-')
 const SHELL_SAFE_MESSAGE =
-  '不能含有引号、; | & < > ` $ \\ % 与换行等看不见的字符，也不能以 - 开头；条目名里有这些字符时，改用条目的 id'
+  '不能包含引号、; | & < > ` $ \\ % 与换行等不可见字符，也不能以 - 开头；条目名含这些字符时，请改用条目 id'
 const Location = z
   .string()
   .trim()
@@ -238,7 +238,7 @@ export const ExternalCredentialSource = z.object({
   location: Location,
   fields: z
     .array(z.object({ name: CredentialFieldName, sourceField: SourceField }))
-    .min(1, '至少要有一个字段')
+    .min(1, '至少需要一个字段')
     .max(MAX_CREDENTIAL_FIELDS, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`)
     .refine(distinctNames, '字段名不能重复'),
 })
@@ -248,7 +248,7 @@ export const HostedCredentialSource = z.object({
   kind: z.literal('hosted'),
   values: z
     .record(CredentialFieldName, CredentialValue)
-    .refine((v) => Object.keys(v).length > 0, '至少要有一个字段')
+    .refine((v) => Object.keys(v).length > 0, '至少需要一个字段')
     .refine(fieldCount, `最多 ${MAX_CREDENTIAL_FIELDS} 个字段`),
 })
 
@@ -305,11 +305,11 @@ export const ConvertToCredentialRequest = z
     expectedVersion: z.number().int(),
     value: CredentialValue.min(
       CONVERT_VALUE_MIN_LENGTH,
-      `要转存的值至少 ${CONVERT_VALUE_MIN_LENGTH} 个字符；更短的请手动新建凭据`,
+      `要转存的值至少 ${CONVERT_VALUE_MIN_LENGTH} 个字符，更短的值请手动新建凭据`,
     )
       .refine((v) => v === v.trim(), '要转存的值前后不能有空白')
-      .refine((v) => !/\p{Cs}/u.test(v), '要转存的值里有不完整的字符')
-      .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值里不能有凭据占位符'),
+      .refine((v) => !/\p{Cs}/u.test(v), '要转存的值含不完整的字符')
+      .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值不能含凭据占位符'),
     identifier: CredentialIdentifier,
     name: CredentialName,
     description: CredentialDescription.optional(),
@@ -318,7 +318,7 @@ export const ConvertToCredentialRequest = z
   // 标识、名称、说明与字段名都是明文，占位符里还带着标识和字段名：写进去就白转存了
   .refine(
     (r) => ![r.identifier, r.name, r.description ?? '', r.field].some((t) => t.includes(r.value)),
-    { path: ['value'], message: '标识、名称、说明与字段名里不能有要转存的值' },
+    { path: ['value'], message: '标识、名称、说明与字段名不能包含要转存的值' },
   )
 export type ConvertToCredentialRequest = z.infer<typeof ConvertToCredentialRequest>
 

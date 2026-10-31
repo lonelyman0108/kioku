@@ -147,7 +147,7 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
       valid_to: new Date(Date.now() - 60_000).toISOString(),
     })
     expect(past.isError).toBe(true)
-    expect(past.content[0]!.text).toContain('晚至少一分钟')
+    expect(past.content[0]!.text).toContain('晚于当前时间至少一分钟')
     const cleared = await callTool('kioku_update', { uri: 'trip://plan', valid_to: null })
     expect(cleared.isError).toBeFalsy()
     expect(cleared.content[0]!.text).not.toContain('有效到')

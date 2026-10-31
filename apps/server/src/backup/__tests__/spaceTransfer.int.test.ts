@@ -1241,7 +1241,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
     expect(newer.status).toBe(400)
     expect(((await newer.json()) as { error: string }).error).toBe(
-      '导出文件的格式版本是 3，这个版本的 Kioku 认 1 到 2：升级到导出它的版本（或更新的）再导入',
+      '导出文件的格式版本是 3，当前 Kioku 支持 1 到 2。请升级到导出它的版本或更新的版本后再导入。',
     )
   })
 
@@ -1261,7 +1261,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const before = await spaceCount()
     const denied = await importRequest(source, stranger.cookie, file)
     expect(denied.status).toBe(403)
-    expect(((await denied.json()) as { error: string }).error).toBe('只有实例管理员能导入空间')
+    expect(((await denied.json()) as { error: string }).error).toBe('仅实例管理员可导入空间')
     expect((await importRequest(source, bob.cookie, file)).status).toBe(403)
     expect((await inspectRequest(source, stranger.cookie, file)).status).toBe(403)
     expect(await spaceCount()).toBe(before)
@@ -1275,14 +1275,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(res.status).toBe(400)
       expect(((await res.json()) as { error: string }).error).toContain(message)
     }
-    await rejected(await importRequest(source, alice.cookie, file, 'wrong passphrase'), '口令不对')
-    await rejected(await inspectRequest(source, alice.cookie, file, 'wrong passphrase'), '口令不对')
+    await rejected(await importRequest(source, alice.cookie, file, 'wrong passphrase'), '口令错误')
+    await rejected(await inspectRequest(source, alice.cookie, file, 'wrong passphrase'), '口令错误')
     const tampered = Buffer.from(file)
     tampered[tampered.length - 100]! ^= 1
-    await rejected(await importRequest(source, alice.cookie, tampered), '文件不完整或被改过')
+    await rejected(await importRequest(source, alice.cookie, tampered), '文件不完整或已被修改')
     await rejected(
       await importRequest(source, alice.cookie, file.subarray(0, file.length - 10)),
-      '文件不完整或被改过',
+      '文件不完整或已被修改',
     )
     await rejected(
       await importRequest(source, alice.cookie, Buffer.from('not a kioku file at all, really')),
@@ -1307,7 +1307,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const res = await importRequest(appWith(null), alice.cookie, file)
       expect(res.status).toBe(400)
       expect(((await res.json()) as { error: string }).error).toBe(
-        '文件里有 1 条 secret 记忆和 1 条托管的凭据，要用主密钥加密保存，这个实例没有配置 KIOKU_MASTER_KEY：配好主密钥、重启服务之后再导入',
+        '文件中有 1 条机密记忆和 1 条托管的凭据，需要用主密钥加密保存，当前实例未配置 KIOKU_MASTER_KEY。请配置主密钥并重启服务后再导入。',
       )
       expect(await spaceCount()).toBe(before)
       // 没有要加密的内容时照样能导入
@@ -1344,7 +1344,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       }
       const json = await post('application/json', JSON.stringify({ passphrase: PASSPHRASE }))
       expect(json.status).toBe(415)
-      expect(await json.json()).toEqual({ error: '请求体的类型（Content-Type）不对' })
+      expect(await json.json()).toEqual({ error: '请求体类型（Content-Type）错误' })
       expect(logged).not.toHaveBeenCalled()
     } finally {
       logged.mockRestore()
@@ -1397,12 +1397,12 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     await importing([persona(a, 'a', b), persona(b, 'b', a)], '继承关系成环')
     await importing(
       [persona(a, 'a', null), curated('persona://b/soul', { layer: 'persona', personaId: a })],
-      '不在它的人格 a 下面',
+      '不在所属人格 a 下',
     )
-    await importing([curated('persona://a/soul', { layer: 'base' })], '却是 base 层')
+    await importing([curated('persona://a/soul', { layer: 'base' })], '却属于基础层')
     await importing(
       [curated('home://x', { layer: 'base', provenance: 'untrusted' })],
-      '来自不可信来源，只能在对象层或情节层',
+      '来自未确认来源，只能在联系人层或情节层',
     )
     await importing(
       [
@@ -1416,7 +1416,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           createdAt: now,
         },
       ],
-      '挂的对象不在文件里',
+      '关联的联系人不在文件中',
     )
     // 数据库存不下的值在检查文件时就挡下，说清是第几行：公元 0 年的时间、NUL 字符
     await importing(
@@ -1425,7 +1425,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
     await importing(
       [curated('home://nul', { content: '前\u0000后' })],
-      '第 2 行 content：含有存不进数据库的字符（NUL 或落单的代理项）',
+      '第 2 行 content：含无法存入数据库的字符（NUL 或落单的代理项）',
     )
     expect(await spaceCount()).toBe(before)
   })
@@ -1522,10 +1522,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
   })
 
-  it('写文件里来的值时数据库拒绝（值超出范围、违反约束）算文件的问题，说清是哪几行；派生的出错照常 500，都记日志', async () => {
+  it('写文件里来的值时数据库拒绝（值超出范围、违反约束）算文件的问题，说清是哪几行，只给错误码；派生的出错照常 500，都记日志', async () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()
-    // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束；
+    // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束，说明里都带着文件里的值；
     // 关键词是「坏关键词」时也报违反约束（关键词是文件里的值，算文件的问题）；
     // 正文是「事件出错」的记忆，写它的导入事件时报违反约束（导入事件是服务端派生的，不算文件的问题）
     await database.db.execute(
@@ -1534,10 +1534,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         -- 按表分开判断：PL/pgSQL 不短路，别的表的行上没有这些字段
         if tg_table_name = 'subjects' then
           if new.display_name = '坏的' then
-            raise exception '时间超出范围' using errcode = 'datetime_field_overflow';
+            raise exception '时间超出范围：%', new.display_name using errcode = 'datetime_field_overflow';
           end if;
           if new.display_name = '冲突的' then
-            raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
+            raise exception '冲突：%', new.display_name using errcode = 'check_violation', constraint = 'kioku_test_check';
           end if;
         elsif tg_table_name = 'memory_glossary' then
           if new.keyword = '坏关键词' then
@@ -1582,13 +1582,11 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         expect(res.status, await res.clone().text()).toBe(400)
         expect(((await res.json()) as { error: string }).error).toBe(message)
       }
-      await rejected('坏的', '导出文件的内容不对：第 3–4 行的对象写不进数据库（时间超出范围）')
-      expect(wasLogged('第 3–4 行的对象', '22008')).toBe(true)
-      await rejected(
-        '冲突的',
-        '导出文件的内容不对：第 3–4 行的对象写不进数据库（违反了约束 kioku_test_check）',
-      )
-      expect(wasLogged('第 3–4 行的对象', '23514', 'kioku_test_check')).toBe(true)
+      // 只给错误码：数据库的说明带着文件里的值，只进日志
+      await rejected('坏的', '导出文件的内容有误：第 3–4 行的联系人写入数据库失败（22008）')
+      expect(wasLogged('第 3–4 行的联系人', '22008')).toBe(true)
+      await rejected('冲突的', '导出文件的内容有误：第 3–4 行的联系人写入数据库失败（23514）')
+      expect(wasLogged('第 3–4 行的联系人', '23514', 'kioku_test_check')).toBe(true)
       // 关键词是文件里的值：写不进去算文件的问题
       const keyword = await importRequest(
         source,
@@ -1597,7 +1595,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       )
       expect(keyword.status, await keyword.clone().text()).toBe(400)
       expect(((await keyword.json()) as { error: string }).error).toBe(
-        '导出文件的内容不对：第 2 行的记忆的关键词写不进数据库（违反了约束 kioku_test_check）',
+        '导出文件的内容有误：第 2 行的记忆的关键词写入数据库失败（23514）',
       )
       expect(wasLogged('第 2 行的记忆的关键词', '23514', 'kioku_test_check')).toBe(true)
       // 导入事件是服务端派生的：出错是服务端的缺陷，不说成文件的问题
@@ -1674,7 +1672,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const res = await importRequest(source, alice.cookie, await craft(records))
       expect(res.status, await res.clone().text()).toBe(400)
       expect(((await res.json()) as { error: string }).error).toBe(
-        `导出文件的内容不对：${where}：含有存不进数据库的字符（NUL 或落单的代理项）`,
+        `导出文件的内容有误：${where}：含无法存入数据库的字符（NUL 或落单的代理项）`,
       )
     }
     // JSON 里的 "\ud800" 解出来是落单的代理项：写进 text 会被换成 U+FFFD，写进 jsonb（导入事件）会报错
@@ -1750,7 +1748,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     ]
     const before = await spaceCount()
     for (const [fields, message] of [
-      [[], '第 3 行 source.fields：至少要有一个字段'],
+      [[], '第 3 行 source.fields：至少需要一个字段'],
       [
         [
           { name: 'password', sourceField: 'a' },
@@ -1795,10 +1793,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       201,
     )
     for (const [fields, message] of [
-      ['[]', '凭据 mail 导出后导入不了（source.fields：至少要有一个字段）'],
+      ['[]', '凭据 mail 导出后无法导入（source.fields：至少需要一个字段）'],
       [
         '[{"name":"password","sourceField":"a"},{"name":"password","sourceField":"b"}]',
-        '凭据 mail 导出后导入不了（source.fields：字段名不能重复）',
+        '凭据 mail 导出后无法导入（source.fields：字段名不能重复）',
       ],
     ] as const) {
       await withSpace(database.db, space, (tx) =>
@@ -1835,7 +1833,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         201,
       )
       await inSpace(sql`update credentials set ciphertext = ${randomBytes(48)}`)
-      await failing('托管的凭据 nas 解不开')
+      await failing('托管的凭据 nas 无法解密')
       await inSpace(sql`update credentials set deleted_at = now()`)
 
       await ok(
@@ -1849,7 +1847,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         201,
       )
       await inSpace(sql`update memories set wrapped_key = ${randomBytes(60)}`)
-      await failing('secret 记忆 home://wifi 解不开')
+      await failing('机密记忆 home://wifi 无法解密')
       await inSpace(sql`update memories set deleted_at = now()`)
 
       // 规则收紧之前存下的条目位置（带分号）：导出了也导入不了，导出时就点名
@@ -1883,7 +1881,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         201,
       )
       await inSpace(sql`update credentials set location = 'mail;item' where identifier = 'mail'`)
-      await failing('凭据 mail 导出后导入不了（source.location：')
+      await failing('凭据 mail 导出后无法导入（source.location：')
       // 导出没做成：不记导出的访问事件
       const [row] = await inSpace(
         sql`select count(*)::int as n from credential_events where event_type = 'access'`,
@@ -1901,7 +1899,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
   }
   const busy = async (res: Response) => {
     expect(res.status, await res.clone().text()).toBe(429)
-    expect(((await res.json()) as { error: string }).error).toBe('导出导入正忙，稍后再试')
+    expect(((await res.json()) as { error: string }).error).toBe('导出导入正忙，请稍后重试')
   }
   // 带着断开信号导出：测客户端断开
   const exportWithSignal = (spaceId: string, cookie: string, signal: AbortSignal) =>

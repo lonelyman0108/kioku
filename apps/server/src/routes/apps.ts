@@ -238,7 +238,7 @@ export function appRoutes(deps: Deps) {
     .openapi(listApps, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await roleOf(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '不是该空间成员' }, 403)
+        return c.json({ error: '无权访问此空间' }, 403)
       }
       const rows = await withSpace(deps.db, spaceId, (tx) =>
         tx.select().from(apps).orderBy(apps.createdAt),
@@ -250,7 +250,7 @@ export function appRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const accountId = c.get('console').accountId
       if (!canManageApps(await roleOf(spaceId, accountId))) {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       const rows = await withSpace(deps.db, spaceId, async (tx) => {
         if (!(await personaVisible(tx, body.defaultPersonaId))) return null
@@ -269,10 +269,10 @@ export function appRoutes(deps: Deps) {
       const { ownerAccountId, ...changes } = c.req.valid('json')
       const accountId = c.get('console').accountId
       const role = await roleOf(spaceId, accountId)
-      if (!canManageApps(role)) return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      if (!canManageApps(role)) return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       // 转移所有权只有空间 owner 能做，新主人必须是空间成员；转移请求不能夹带别的修改
       if (ownerAccountId !== undefined) {
-        if (role !== 'owner') return c.json({ error: '只有空间 owner 能转移应用' }, 403)
+        if (role !== 'owner') return c.json({ error: '仅空间所有者可转移应用' }, 403)
         if (Object.keys(changes).length)
           return c.json({ error: '转移所有权时不能同时修改其他字段' }, 400)
       }
@@ -311,9 +311,8 @@ export function appRoutes(deps: Deps) {
           .where(eq(apps.id, appId))
           .returning()
       })
-      if (rows === 'bad-owner')
-        return c.json({ error: '新主人必须是空间里的 owner 或 editor' }, 400)
-      if (!rows) return c.json({ error: '只有应用的主人能修改它' }, 403)
+      if (rows === 'bad-owner') return c.json({ error: '新所有者须为此空间的所有者或编辑者' }, 400)
+      if (!rows) return c.json({ error: '仅应用所有者可修改此应用' }, 403)
       if (!rows[0]) return c.json({ error: '应用或默认人格不存在' }, 404)
       return c.json(toAppInfo(rows[0]), 200)
     })
@@ -321,7 +320,7 @@ export function appRoutes(deps: Deps) {
       const { spaceId, appId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       const role = await roleOf(spaceId, accountId)
-      if (!canManageApps(role)) return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      if (!canManageApps(role)) return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         // 锁住应用这一行：写应用层记忆时的外键检查要等这把锁，检查之后不会再冒出一条被连带删掉的记忆
         const owner = await appOwnerOf(tx, appId, true)
@@ -338,12 +337,12 @@ export function appRoutes(deps: Deps) {
       })
       if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
       if (result === 'forbidden')
-        return c.json({ error: '只有应用的主人或空间 owner 能删除应用' }, 403)
+        return c.json({ error: '仅应用所有者或空间所有者可删除应用' }, 403)
       // 不给条数：空间 owner 写进来的 secret 记忆，应用主人可能读不到
       if (result === 'stored') {
         return c.json(
           {
-            error: '还有应用层记忆（含已删除、还能撤销删除的），移到别的命名空间之后才能删除应用',
+            error: '仍有应用层记忆（含已删除但可恢复的）。移到其他命名空间后才能删除应用。',
           },
           409,
         )
@@ -353,7 +352,7 @@ export function appRoutes(deps: Deps) {
     .openapi(listGroupPersonas, async (c) => {
       const { spaceId, appId } = c.req.valid('param')
       if (!(await roleOf(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '不是该空间成员' }, 403)
+        return c.json({ error: '无权访问此空间' }, 403)
       }
       const rules = await withSpace(deps.db, spaceId, async (tx) => {
         if (!(await appOwnerOf(tx, appId))) return null
@@ -367,7 +366,7 @@ export function appRoutes(deps: Deps) {
       const { rules } = c.req.valid('json')
       const accountId = c.get('console').accountId
       if (!canManageApps(await roleOf(spaceId, accountId))) {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       const subjectIds = [...new Set(rules.map((r) => r.subjectId))]
       if (subjectIds.length !== rules.length) {
@@ -419,9 +418,9 @@ export function appRoutes(deps: Deps) {
         return groupPersonaRules(tx, appId)
       })
       if (result === 'no-app') return c.json({ error: '应用不存在' }, 404)
-      if (result === 'forbidden') return c.json({ error: '只有应用的主人能修改它' }, 403)
+      if (result === 'forbidden') return c.json({ error: '仅应用所有者可修改此应用' }, 403)
       if (result === 'no-group') return c.json({ error: '群不存在' }, 404)
-      if (result === 'not-group') return c.json({ error: '规则只能按群（或频道）配' }, 400)
+      if (result === 'not-group') return c.json({ error: '规则只能按群或频道配置' }, 400)
       if (result === 'no-persona') return c.json({ error: '人格不存在' }, 404)
       return c.json({ rules: result }, 200)
     })
@@ -429,12 +428,12 @@ export function appRoutes(deps: Deps) {
       const { spaceId, appId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       const role = await roleOf(spaceId, accountId)
-      if (!role) return c.json({ error: '不是该空间成员' }, 403)
+      if (!role) return c.json({ error: '无权访问此空间' }, 403)
       const owner = await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId))
       if (!owner) return c.json({ error: '应用不存在' }, 404)
       // 列表只有元数据、不含明文；空间 owner 要能看到 Key 编号才能吊销泄露的 Key
       if (owner !== accountId && role !== 'owner') {
-        return c.json({ error: '只有应用的主人或空间 owner 能查看 Key' }, 403)
+        return c.json({ error: '仅应用所有者或空间所有者可查看 Key' }, 403)
       }
       const rows = await deps.db
         .select()
@@ -454,12 +453,12 @@ export function appRoutes(deps: Deps) {
       const role = await roleOf(spaceId, accountId)
       // viewer 不能签发 Key；admin Key 能越过人格与应用命名空间的写入限制，只有空间 owner 能签发
       if (role !== 'owner' && role !== 'editor') {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       // Key 的上限不能超过签发人的角色：admin 与 secret 级只有空间 owner 能给。
       // editor 签发的 Key 仍能读写应用主人（也就是 editor 自己）的私人层，以及 secret 以下的共享内容
       if (role !== 'owner' && (body.scopes.admin || body.scopes.maxSensitivity === 'secret')) {
-        return c.json({ error: '只有空间 owner 能签发 admin 或 secret 级的 Key' }, 403)
+        return c.json({ error: '仅空间所有者可签发「跨人格 / 应用写入」或机密级的 Key' }, 403)
       }
       const generated = generateApiKey()
       const result = await withSpace(deps.db, spaceId, async (tx) => {
@@ -480,7 +479,7 @@ export function appRoutes(deps: Deps) {
         return row!
       })
       if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
-      if (result === 'not-owner') return c.json({ error: '只有应用的主人能签发它的 Key' }, 403)
+      if (result === 'not-owner') return c.json({ error: '仅应用所有者可签发此应用的 Key' }, 403)
       const membership = await ownerMembership(deps, spaceId, accountId)
       return c.json({ ...toKeyInfo(result, membership), key: generated.plaintext }, 201)
     })
@@ -488,7 +487,7 @@ export function appRoutes(deps: Deps) {
       const { spaceId, appId, keyId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       const role = await roleOf(spaceId, accountId)
-      if (!role) return c.json({ error: '不是该空间成员' }, 403)
+      if (!role) return c.json({ error: '无权访问此空间' }, 403)
       const found = await withSpace(deps.db, spaceId, async (tx) => {
         const [app] = await tx.select().from(apps).where(eq(apps.id, appId))
         // 和 Key 列表一样，只给应用主人与空间 owner 看；先查权限再找 Key，别人探不出 Key 在不在
@@ -503,7 +502,7 @@ export function appRoutes(deps: Deps) {
       if (found === 'no-app') return c.json({ error: '应用不存在' }, 404)
       if (found === 'missing') return c.json({ error: 'Key 不存在' }, 404)
       if (found === 'forbidden') {
-        return c.json({ error: '只有应用的主人或空间 owner 能查看 Key' }, 403)
+        return c.json({ error: '仅应用所有者或空间所有者可查看 Key' }, 403)
       }
       const { app, key } = found
       const scopes = keyEffectiveScopes(
@@ -528,7 +527,7 @@ export function appRoutes(deps: Deps) {
       const role = await roleOf(spaceId, accountId)
       const owner = role ? await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId)) : null
       if (role !== 'owner' && owner !== accountId) {
-        return c.json({ error: '只有应用的主人或空间 owner 能吊销 Key' }, 403)
+        return c.json({ error: '仅应用所有者或空间所有者可吊销 Key' }, 403)
       }
       const rows = await deps.db
         .update(apiKeys)

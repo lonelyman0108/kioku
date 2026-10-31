@@ -77,7 +77,7 @@ const DETAIL_SUMMARIES = 20
 const DETAIL_RUNS = 20
 const DETAIL_BINDINGS = 20
 // 合并时对象正被抽取或别的写入占着
-const SUBJECTS_BUSY = '这两个对象正在被别的操作使用（例如正在抽取），请稍后再试'
+const SUBJECTS_BUSY = '这两个联系人正在被其他操作使用（例如抽取），请稍后重试'
 
 const list = createRoute({
   method: 'get',
@@ -367,9 +367,7 @@ export function subjectRoutes(deps: Deps) {
       const admin = await isInstanceAdmin(deps.db, accountId)
       // 模型接口或数据库报的原文可能带着内部的地址与响应，抽取模型由实例管理员配，原文只给他看
       const errorOf = (error: string | null) =>
-        !error || admin || PLAIN_RUN_ERRORS.has(error)
-          ? error
-          : '抽取失败（原因只有实例管理员看得到）'
+        !error || admin || PLAIN_RUN_ERRORS.has(error) ? error : '抽取失败（原因仅实例管理员可见）'
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         const [found] = await subjectInfos(tx, access, eq(subjects.id, subjectId))
         if (!found) return null
@@ -464,7 +462,7 @@ export function subjectRoutes(deps: Deps) {
           bindings,
         }
       })
-      if (!result) return c.json({ error: '对象不存在' }, 404)
+      if (!result) return c.json({ error: '联系人不存在' }, 404)
       return c.json(result, 200)
     })
     .openapi(update, async (c) => {
@@ -475,7 +473,7 @@ export function subjectRoutes(deps: Deps) {
       // 取消自己的标记谁都可以：被降为 viewer 之后也撤得掉；别的改动要 owner 或 editor
       const unlinkOnly = body.displayName === undefined && body.linkedToMe === false
       if (role === 'viewer' && !unlinkOnly) {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         // 锁住这一行：两个成员同时标记同一个人时只有一个成功
@@ -484,23 +482,23 @@ export function subjectRoutes(deps: Deps) {
           .from(subjects)
           .where(eq(subjects.id, subjectId))
           .for('update')
-        if (!row) return { status: 404 as const, error: '对象不存在' }
+        if (!row) return { status: 404 as const, error: '联系人不存在' }
         if (role === 'viewer' && row.accountId !== me) {
-          return { status: 403 as const, error: '只能取消标记为自己的' }
+          return { status: 403 as const, error: '只能取消标记为当前账号的联系人' }
         }
         let accountId = row.accountId
         if (body.linkedToMe !== undefined) {
           if (row.kind !== 'person') {
-            return { status: 400 as const, error: '只有人能标记为成员本人，群不行' }
+            return { status: 400 as const, error: '群不能标记为成员本人' }
           }
           if (body.linkedToMe) {
             if (row.accountId && row.accountId !== me) {
-              return { status: 409 as const, error: '这个人已经标记为别的成员' }
+              return { status: 409 as const, error: '此人已标记为其他成员' }
             }
             accountId = me
           } else if (row.accountId && row.accountId !== me && role !== 'owner') {
             // 空间 owner 可以取消任何人的标记（例如标错了），别人只能取消自己的
-            return { status: 403 as const, error: '只能取消标记为自己的' }
+            return { status: 403 as const, error: '只能取消标记为当前账号的联系人' }
           } else {
             accountId = null
           }
@@ -525,18 +523,18 @@ export function subjectRoutes(deps: Deps) {
       const { from } = c.req.valid('json')
       const me = c.get('console').accountId
       const { role, service } = await consoleMemberFor(deps, spaceId, me)
-      if (role === 'viewer') return c.json({ error: '需要 owner 或 editor 角色' }, 403)
-      if (from === subjectId) return c.json({ error: '不能把对象合并进它自己' }, 400)
+      if (role === 'viewer') return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
+      if (from === subjectId) return c.json({ error: '不能将联系人合并到自身' }, 400)
       const merged = withSpace(deps.db, spaceId, async (tx) => {
         const rows = await lockSubjects(tx, [subjectId, from])
         const into = rows.find((r) => r.id === subjectId)
         const gone = rows.find((r) => r.id === from)
-        if (!into || !gone) return { status: 404 as const, error: '对象不存在' }
+        if (!into || !gone) return { status: 404 as const, error: '联系人不存在' }
         if (into.kind !== gone.kind) return { status: 400 as const, error: '人和群不能合并' }
         if (linkedToOthers(rows, me)) {
           return {
             status: 403 as const,
-            error: '标记成了别的成员的对象不能合并，要先请那位成员取消标记',
+            error: '已标记为其他成员的联系人无法合并。请先让该成员取消标记。',
           }
         }
         const outcome = await mergeSubjects(tx, gone, into)
@@ -570,7 +568,7 @@ export function subjectRoutes(deps: Deps) {
       const [found] = await withSpace(deps.db, spaceId, (tx) =>
         subjectInfos(tx, service.access, eq(subjects.id, confirmed.subjectId)),
       )
-      if (!found) return c.json({ error: '对象不存在' }, 404)
+      if (!found) return c.json({ error: '联系人不存在' }, 404)
       return c.json(found.info, 200)
     })
     .openapi(rejectBindingRoute, async (c) => {
@@ -586,7 +584,7 @@ export function subjectRoutes(deps: Deps) {
       const { spaceId, subjectId, factId } = c.req.valid('param')
       const { version } = c.req.valid('query')
       const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
-      if (role === 'viewer') return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      if (role === 'viewer') return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       await service.deleteFact(subjectId, factId, version)
       return c.body(null, 204)
     })
@@ -594,7 +592,7 @@ export function subjectRoutes(deps: Deps) {
       const { spaceId, subjectId, factId } = c.req.valid('param')
       const { version } = c.req.valid('json')
       const { role, service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
-      if (role === 'viewer') return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+      if (role === 'viewer') return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       await service.reactivateFact(subjectId, factId, version)
       return c.body(null, 204)
     })

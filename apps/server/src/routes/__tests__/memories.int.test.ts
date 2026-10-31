@@ -277,7 +277,12 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
       maxSensitivity: 'public',
     })
     expect((await get('home://router', limited)).status).toBe(404)
-    expect((await create({ uri: 'home://x', content: 'x' }, limited)).status).toBe(403)
+    const denied = await create({ uri: 'home://x', content: 'x' }, limited)
+    expect(denied.status).toBe(403)
+    // 和 MCP 共用的错误带取值，调用方对得上参数
+    expect(await denied.json()).toEqual({
+      error: '无权写入私人层（private）的私密级（private）记忆',
+    })
   })
 
   it('secret 在库里只有密文，授权 Key 能读回明文', async () => {

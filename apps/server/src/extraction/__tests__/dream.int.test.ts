@@ -1374,7 +1374,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     // 共享的范围出错就停下，汇总记出错，画像层与私人层这次不整理
     expect(await runs()).toMatchObject([
       { scope: 'base', error: '抽取模型返回 HTTP 502：bad gateway', promptTokens: 0 },
-      { scope: null, error: '共享的范围出错，这次停下了（原因见出错的那个范围）' },
+      { scope: null, error: '共享范围出错，本次已停止（原因见出错的范围）' },
     ])
     expect(await inSpace((tx) => tx.select().from(dreamMarks))).toEqual([])
 
@@ -1473,7 +1473,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       {
         trigger: 'scheduled',
         scope: null,
-        error: '整理出错：抽取模型的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+        error: '整理出错：抽取模型的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
       },
     ])
     expect(await dreamsDue(database.db)).toEqual([])
@@ -1507,8 +1507,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     const errors = (await runs()).map((r) => r.error)
     expect(errors).toHaveLength(2)
     for (const error of errors) {
-      expect(error).toMatch(/^整理出错：抽取模型的 Key 解不开/)
-      expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+      expect(error).toMatch(/^整理出错：抽取模型的 Key 无法解密/)
+      expect(error).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
     }
   })
 
@@ -1548,14 +1548,14 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
           trigger: 'scheduled',
           modelFor: () => fakeChatModel(reply([])).model,
         }),
-      ).rejects.toThrow('服务端没有配置 KIOKU_MASTER_KEY')
+      ).rejects.toThrow('服务端未配置 KIOKU_MASTER_KEY')
       // 数据库报的错由 drizzle 包在 cause 里
       const messageOf = (err: unknown) => {
         const e = err as Error & { cause?: Error }
         return e.cause?.message ?? e.message
       }
       expect(logged.mock.calls.map(([label, err]) => [label, messageOf(err)])).toEqual([
-        ['Dream 整理出错', '抽取模型的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY'],
+        ['Dream 整理出错', '抽取模型的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY'],
         ['Dream 的运行记录也写不进去', '测试里故意出的错'],
       ])
     } finally {

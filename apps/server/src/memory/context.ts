@@ -106,7 +106,7 @@ export async function consoleRoleFor(
   accountId: string,
 ): Promise<MemberRole> {
   const role = await memberRole(deps, spaceId, accountId)
-  if (!role) throw new MemoryError(403, '不是该空间成员')
+  if (!role) throw new MemoryError(403, '无权访问此空间')
   return role
 }
 
