@@ -8,6 +8,29 @@ const { descriptor } = parse(consoleLayout)
 const script = descriptor.scriptSetup?.content ?? ''
 const template = descriptor.template?.content ?? ''
 
+interface TemplateNode {
+  type: number
+  tag?: string
+  children?: TemplateNode[]
+  props?: {
+    name: string
+    arg?: { content: string }
+    value?: { content: string }
+    exp?: { content: string }
+  }[]
+}
+const ELEMENT = 1
+const walk = (node: TemplateNode): TemplateNode[] => [node, ...(node.children ?? []).flatMap(walk)]
+const elements = walk(descriptor.template!.ast as unknown as TemplateNode).filter(
+  (n) => n.type === ELEMENT,
+)
+const attr = (el: TemplateNode, name: string) =>
+  el.props?.find((p) => p.name === name)?.value?.content
+const bound = (el: TemplateNode, name: string) =>
+  el.props?.find((p) => p.name === 'bind' && p.arg?.content === name)?.exp?.content
+const labelled = (label: string) => elements.find((el) => attr(el, 'aria-label') === label)!
+const classes = (el: TemplateNode) => (attr(el, 'class') ?? '').split(/\s+/)
+
 describe('顶部导航', () => {
   it('按用途分组，入口的名字按术语表', () => {
     const labels = [...script.matchAll(/\{ label: '([^']+)', \.\.\.link\(/g)].map((m) => m[1])
@@ -43,10 +66,68 @@ describe('顶部导航', () => {
   })
 
   it('窄屏把导航收进抽屉，宽屏和窄屏的分界一致', () => {
+    const names = elements.find((el) => el.children?.some((c) => c.tag === 'UDropdownMenu'))!
     expect(template).toContain('<USlideover')
-    expect(template).toContain('max-[901px]:hidden')
-    expect(template).toContain('min-[901px]:hidden')
-    expect(template).not.toContain('max-[900px]')
+    expect(classes(labelled('主导航'))).toContain('max-[1024px]:hidden')
+    expect(classes(names)).toContain('max-[1024px]:hidden')
+    expect(classes(labelled('打开导航'))).toContain('min-[1024px]:hidden')
+    expect(bound(labelled('搜索'), 'ui')).toContain('min-[1024px]:flex')
+    expect(template).not.toContain('901px')
+  })
+})
+
+describe('顶栏放不下时', () => {
+  it('导航和搜索不缩，由名字那一段让出位置，账号菜单一直在屏幕里', () => {
+    expect(classes(labelled('主导航'))).toContain('shrink-0')
+    expect(classes(labelled('搜索'))).toContain('shrink-0')
+    const right = elements.find((el) =>
+      el.children?.some((c) => c.tag === 'UDashboardSearchButton'),
+    )!
+    expect(classes(right)).toEqual(expect.arrayContaining(['min-w-0', 'flex-1', 'justify-end']))
+  })
+
+  it('空间名、显示名能截断，悬停看全名', () => {
+    for (const [label, name] of [
+      ['切换空间', 'space?.name'],
+      ['账号菜单', 'displayName'],
+    ] as const) {
+      const button = labelled(label)
+      expect(classes(button), label).toEqual(expect.arrayContaining(['min-w-0', 'max-w-48']))
+      expect(bound(button, 'title'), label).toBe(name)
+    }
+    const single = elements.find((el) => el.tag === 'span' && bound(el, 'title') === 'space.name')!
+    expect(classes(single)).toEqual(expect.arrayContaining(['min-w-0', 'truncate']))
+  })
+
+  it('菜单和抽屉里的长名字也不撑破', () => {
+    const menus = elements.filter((el) => el.tag === 'UDropdownMenu')
+    expect(menus).toHaveLength(2)
+    for (const menu of menus) expect(bound(menu, 'ui')).toContain('max-w-80')
+    const inDrawer = walk(elements.find((el) => el.tag === 'USlideover')!)
+    for (const name of ['s.name', 'displayName']) {
+      const el = inDrawer.find((n) => bound(n, 'title') === name)!
+      expect(classes(el), name).toContain('truncate')
+    }
+  })
+})
+
+describe('抽屉', () => {
+  const slideover = elements.find((el) => el.tag === 'USlideover')!
+
+  it('菜单按钮是默认插槽里的 trigger：这样才有 aria-expanded，关上后焦点回到它', () => {
+    const trigger = slideover.children?.find((c) => c.tag !== 'template')
+    expect(trigger?.tag).toBe('UButton')
+    expect(attr(trigger!, 'aria-label')).toBe('打开导航')
+    expect(trigger!.props?.some((p) => p.name === 'on')).toBe(false)
+    expect(template).not.toMatch(/navOpen = true/)
+    expect(script).not.toMatch(/navOpen\.value = true/)
+  })
+
+  it('切换空间时关上抽屉，点当前空间地址不变也要关', () => {
+    const body = /function switchSpace\(id: string\) \{[^}]*\}/.exec(script)![0]
+    expect(body).toContain('navOpen.value = false')
+    const spaceButton = walk(slideover).find((n) => bound(n, 'title') === 's.name')!
+    expect(spaceButton.props?.find((p) => p.name === 'on')?.exp?.content).toBe('switchSpace(s.id)')
   })
 })
 

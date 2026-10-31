@@ -35,7 +35,18 @@ watch(
 
 const spaces = computed(() => me.data.value?.spaces ?? [])
 
+// 窄屏的导航收进抽屉，换页就关上
+const navOpen = ref(false)
+watch(
+  () => route.fullPath,
+  () => {
+    navOpen.value = false
+  },
+)
+
 function switchSpace(id: string) {
+  // 已经在这个空间的概览时地址不变，上面的 watch 不会触发，抽屉要在这里关
+  navOpen.value = false
   void router.push({ name: 'overview', params: { spaceId: id } })
 }
 
@@ -151,15 +162,6 @@ const spaceMenu = computed<DropdownMenuItem[][]>(() => [
   })),
 ])
 
-// 窄屏的导航收进抽屉，换页就关上
-const navOpen = ref(false)
-watch(
-  () => route.fullPath,
-  () => {
-    navOpen.value = false
-  },
-)
-
 async function logout() {
   // 先确认未保存的修改，取消就什么都不做；确认之后再去服务端退出
   const hadUnsaved = hasUnsavedChanges.value
@@ -201,7 +203,7 @@ async function logout() {
         <KiokuMark />
       </RouterLink>
 
-      <nav class="flex items-stretch max-[901px]:hidden" aria-label="主导航">
+      <nav class="flex shrink-0 items-stretch max-[1024px]:hidden" aria-label="主导航">
         <div
           v-for="(group, index) in navGroups"
           :key="index"
@@ -226,129 +228,147 @@ async function logout() {
         </div>
       </nav>
 
-      <div class="ml-auto flex items-center gap-1.5">
+      <!-- 导航和搜索不缩，宽度不够时由这一段的名字让出来，账号菜单一直在屏幕里 -->
+      <div class="flex min-w-0 flex-1 items-center justify-end gap-1.5">
         <UDashboardSearchButton
           label="搜索"
           aria-label="搜索"
           color="neutral"
+          class="shrink-0"
           :ui="{
             label: 'max-[1320px]:hidden',
-            trailing: 'hidden min-[901px]:flex items-center gap-0.5 ms-1',
+            trailing: 'hidden min-[1024px]:flex items-center gap-0.5 ms-1',
           }"
         />
-        <div class="flex items-center gap-1.5 max-[901px]:hidden">
+        <div class="flex min-w-0 items-center gap-1.5 max-[1024px]:hidden">
           <UDropdownMenu
             v-if="spaces.length > 1"
             :items="spaceMenu"
             :content="{ align: 'end' }"
+            :ui="{ content: 'max-w-80' }"
             size="sm"
           >
             <UButton
               :label="space?.name ?? '选择空间'"
+              :title="space?.name"
               :trailing-icon="icons.chevronDown"
               color="neutral"
               variant="ghost"
+              class="max-w-48 min-w-0"
               aria-label="切换空间"
             />
           </UDropdownMenu>
-          <span v-else-if="space" class="px-2.5 text-[13px] whitespace-nowrap text-muted">
+          <span
+            v-else-if="space"
+            class="max-w-48 min-w-0 truncate px-2.5 text-[13px] text-muted"
+            :title="space.name"
+          >
             {{ space.name }}
           </span>
-          <UDropdownMenu :items="userMenu" :content="{ align: 'end' }">
+          <UDropdownMenu
+            :items="userMenu"
+            :content="{ align: 'end' }"
+            :ui="{ content: 'max-w-80' }"
+          >
             <UButton
               :label="displayName"
+              :title="displayName"
               :trailing-icon="icons.chevronDown"
               color="neutral"
               variant="ghost"
+              class="max-w-48 min-w-0"
               aria-label="账号菜单"
             />
           </UDropdownMenu>
         </div>
-        <UButton
-          :icon="icons.menu"
-          color="neutral"
-          variant="ghost"
-          class="min-[901px]:hidden"
-          aria-label="打开导航"
-          @click="navOpen = true"
-        />
+        <USlideover
+          v-model:open="navOpen"
+          side="left"
+          title="导航"
+          :ui="{ content: 'max-w-72', body: 'p-0 sm:p-0' }"
+        >
+          <UButton
+            :icon="icons.menu"
+            color="neutral"
+            variant="ghost"
+            class="shrink-0 min-[1024px]:hidden"
+            aria-label="打开导航"
+          />
+          <template #body>
+            <nav aria-label="主导航">
+              <div
+                v-for="(group, index) in navGroups"
+                :key="index"
+                class="border-b border-default px-5 py-2"
+              >
+                <p v-if="group.title" class="pt-1 text-xs text-muted">{{ group.title }}</p>
+                <RouterLink
+                  v-for="item in group.items"
+                  :key="item.label"
+                  :to="item.to"
+                  :aria-current="isCurrent(item) ? 'page' : undefined"
+                  class="block py-2 text-[15px]/6 aria-[current=page]:font-semibold"
+                  @click="navOpen = false"
+                >
+                  {{ item.label }}
+                </RouterLink>
+              </div>
+            </nav>
+            <div class="space-y-3 px-5 py-4">
+              <div v-if="spaces.length > 1">
+                <p class="pb-1 text-xs text-muted">空间</p>
+                <button
+                  v-for="s in spaces"
+                  :key="s.id"
+                  type="button"
+                  class="block w-full truncate py-1.5 text-left text-sm/6"
+                  :class="s.id === space?.id ? 'font-semibold' : ''"
+                  :title="s.name"
+                  :aria-current="s.id === space?.id ? 'true' : undefined"
+                  @click="switchSpace(s.id)"
+                >
+                  {{ s.name }}
+                </button>
+              </div>
+              <div>
+                <p class="pb-1 text-xs text-muted">主题</p>
+                <div class="flex gap-1">
+                  <UButton
+                    v-for="option in COLOR_PREFERENCES"
+                    :key="option.value"
+                    :label="option.label"
+                    :variant="colorPreference.current() === option.value ? 'solid' : 'subtle'"
+                    :color="colorPreference.current() === option.value ? 'primary' : 'neutral'"
+                    size="sm"
+                    :aria-pressed="colorPreference.current() === option.value"
+                    @click="colorPreference.set(option.value)"
+                  />
+                </div>
+              </div>
+              <div class="border-t border-default pt-3">
+                <p class="truncate pb-1 text-sm" :title="displayName">{{ displayName }}</p>
+                <RouterLink
+                  v-for="item in instanceNav"
+                  :key="item.label"
+                  :to="item.to"
+                  class="block py-1.5 text-sm/6"
+                  @click="navOpen = false"
+                >
+                  {{ item.label }}
+                </RouterLink>
+                <button
+                  type="button"
+                  class="block w-full py-1.5 text-left text-sm/6"
+                  @click="logout"
+                >
+                  退出登录
+                </button>
+              </div>
+            </div>
+          </template>
+        </USlideover>
       </div>
     </header>
-
-    <USlideover
-      v-model:open="navOpen"
-      side="left"
-      title="导航"
-      :ui="{ content: 'max-w-72', body: 'p-0 sm:p-0' }"
-    >
-      <template #body>
-        <nav aria-label="主导航">
-          <div
-            v-for="(group, index) in navGroups"
-            :key="index"
-            class="border-b border-default px-5 py-2"
-          >
-            <p v-if="group.title" class="pt-1 text-xs text-muted">{{ group.title }}</p>
-            <RouterLink
-              v-for="item in group.items"
-              :key="item.label"
-              :to="item.to"
-              :aria-current="isCurrent(item) ? 'page' : undefined"
-              class="block py-2 text-[15px]/6 aria-[current=page]:font-semibold"
-              @click="navOpen = false"
-            >
-              {{ item.label }}
-            </RouterLink>
-          </div>
-        </nav>
-        <div class="space-y-3 px-5 py-4">
-          <div v-if="spaces.length > 1">
-            <p class="pb-1 text-xs text-muted">空间</p>
-            <button
-              v-for="s in spaces"
-              :key="s.id"
-              type="button"
-              class="block w-full py-1.5 text-left text-sm/6"
-              :class="s.id === space?.id ? 'font-semibold' : ''"
-              :aria-current="s.id === space?.id ? 'true' : undefined"
-              @click="switchSpace(s.id)"
-            >
-              {{ s.name }}
-            </button>
-          </div>
-          <div>
-            <p class="pb-1 text-xs text-muted">主题</p>
-            <div class="flex gap-1">
-              <UButton
-                v-for="option in COLOR_PREFERENCES"
-                :key="option.value"
-                :label="option.label"
-                :variant="colorPreference.current() === option.value ? 'solid' : 'subtle'"
-                :color="colorPreference.current() === option.value ? 'primary' : 'neutral'"
-                size="sm"
-                :aria-pressed="colorPreference.current() === option.value"
-                @click="colorPreference.set(option.value)"
-              />
-            </div>
-          </div>
-          <div class="border-t border-default pt-3">
-            <p class="pb-1 text-sm">{{ displayName }}</p>
-            <RouterLink
-              v-for="item in instanceNav"
-              :key="item.label"
-              :to="item.to"
-              class="block py-1.5 text-sm/6"
-              @click="navOpen = false"
-            >
-              {{ item.label }}
-            </RouterLink>
-            <button type="button" class="block w-full py-1.5 text-left text-sm/6" @click="logout">
-              退出登录
-            </button>
-          </div>
-        </div>
-      </template>
-    </USlideover>
 
     <UDashboardSearch
       v-model:search-term="searchTerm"
