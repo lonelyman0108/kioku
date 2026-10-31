@@ -358,6 +358,8 @@ export const SpaceOverview = z.object({
   // 成员读得到的策展记忆，按层与敏感级分组
   counts: z.array(LayerCount),
   total: z.number().int(),
+  // 成员读得到、现在有效的来自对话的记忆（对象层的事实、情节层的会话摘要），同样分组；不算在 counts 与 total 里
+  extractedCounts: z.array(LayerCount),
   missingDisclosure: z.number().int(),
   // 正文像有明文密码或 Token、该换成凭据占位符的记忆数，提示被忽略的不算
   plaintextCredentials: z.number().int(),

@@ -200,10 +200,60 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     }
   })
 
+  it('概览单独给出来自对话的条数：按层与敏感级分组，读权限和别处一样；counts 与 total 只算策展记忆', async () => {
+    await remember({ uri: 'kb://faq', content: '常见问题', layer: 'base', sensitivity: 'public' })
+    const past = new Date(Date.now() - 1000)
+    await inSpace(async (tx) => {
+      const [person] = await tx
+        .insert(subjects)
+        .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })
+        .returning()
+      const fact = (extra: Partial<typeof memories.$inferInsert> = {}) =>
+        untrusted({ layer: 'subject', subjectId: person!.id, expiresAt: null, ...extra })
+      await tx.insert(memories).values([
+        fact({ content: '在学日语' }),
+        fact({ content: '住在上海', sensitivity: 'internal', provenance: 'owner' }),
+        untrusted(),
+        untrusted({ content: '又聊了一次' }),
+        // 读不到的不算：被推翻的、到期的、删掉的
+        fact({ content: '以前的说法', validTo: past }),
+        untrusted({ expiresAt: past }),
+        untrusted({ deletedAt: new Date() }),
+        // 只有读得到 secret 的成员算
+        untrusted({
+          sensitivity: 'secret',
+          content: null,
+          ciphertext: Buffer.from('c'),
+          wrappedKey: Buffer.from('k'),
+        }),
+      ])
+    })
+
+    const shared = [
+      { layer: 'subject', sensitivity: 'public', count: 1 },
+      { layer: 'subject', sensitivity: 'internal', count: 1 },
+      { layer: 'episode', sensitivity: 'public', count: 2 },
+    ]
+    const owner = await get<SpaceOverview>('/overview')
+    expect(owner.extractedCounts).toEqual([
+      ...shared,
+      { layer: 'episode', sensitivity: 'secret', count: 1 },
+    ])
+    expect(owner.counts).toEqual([{ layer: 'base', sensitivity: 'public', count: 1 }])
+    expect(owner.total).toBe(1)
+    for (const cookie of [editor.cookie, viewer.cookie]) {
+      const o = await get<SpaceOverview>('/overview', cookie)
+      expect(o.extractedCounts).toEqual(shared)
+      expect(o.total).toBe(1)
+    }
+  })
+
   it('空空间全是 0，只有条数，不带内容', async () => {
     const empty = await counts()
     expect(empty).toEqual({ bindings: 0, review: 0, dreamSuggestions: 0, plaintext: 0, total: 0 })
     expect(InboxCounts.strict().safeParse(empty).success).toBe(true)
+    const overview = await get<SpaceOverview>('/overview')
+    expect(overview.extractedCounts).toEqual([])
   })
 
   it('不是成员返回 403，没登录返回 401', async () => {

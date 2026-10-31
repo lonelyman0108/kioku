@@ -190,6 +190,8 @@ export type EventChanges = Pick<BenchChanges, 'memories' | 'hiddenReleased' | 'h
 export interface MemoryStats {
   counts: LayerCount[]
   total: number
+  // 来自对话的记忆，不算在 counts 与 total 里
+  extractedCounts: LayerCount[]
   missingDisclosure: number
   plaintextCredentials: number
   neverRecalled: number
@@ -2239,6 +2241,13 @@ export class MemoryService {
         .where(and(this.listable(personaIds), eq(memories.form, 'curated')))
         .groupBy(memories.layer, memories.sensitivity)
         .orderBy(asc(memories.layer), asc(memories.sensitivity))
+      // 来自对话的单独分组。只看元数据列，不碰正文，十万条也只要十几毫秒
+      const extracted = await tx
+        .select({ layer: memories.layer, sensitivity: memories.sensitivity, count: count() })
+        .from(memories)
+        .where(and(this.listable(personaIds), eq(memories.form, 'extracted')))
+        .groupBy(memories.layer, memories.sensitivity)
+        .orderBy(asc(memories.layer), asc(memories.sensitivity))
       // 和实例设置的向量卡片同一个口径（EMBEDDABLE），只数成员读得到的；没配置模型时没有已生成的
       const coverage = await countEmbeddable(
         tx,
@@ -2248,6 +2257,7 @@ export class MemoryService {
       return {
         counts: groups.map(({ layer, sensitivity, count }) => ({ layer, sensitivity, count })),
         total: groups.reduce((sum, g) => sum + g.count, 0),
+        extractedCounts: extracted,
         missingDisclosure: groups.reduce((sum, g) => sum + g.missing, 0),
         plaintextCredentials: groups.reduce((sum, g) => sum + g.plaintext, 0),
         neverRecalled: never?.n ?? 0,

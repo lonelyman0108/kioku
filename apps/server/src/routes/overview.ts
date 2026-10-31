@@ -139,6 +139,7 @@ export function overviewRoutes(deps: Deps) {
       {
         counts: stats.counts,
         total: stats.total,
+        extractedCounts: stats.extractedCounts,
         missingDisclosure: stats.missingDisclosure,
         plaintextCredentials: stats.plaintextCredentials,
         neverRecalled: stats.neverRecalled,
