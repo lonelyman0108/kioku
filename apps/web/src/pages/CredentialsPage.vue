@@ -13,6 +13,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
+import Hint from '../components/Hint.vue'
 import ProviderFormModal from '../components/ProviderFormModal.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
@@ -71,11 +72,11 @@ const providerNotes = computed(() => {
 function providerPurgeTitle(p: DeletedCredentialProvider): string {
   const r = deletedProviders.data.value?.retention
   if (p.retentionFrom === null) {
-    return '有凭据恢复之后还绑着它：改绑或删掉这些凭据之后，才按保留期清除'
+    return '已恢复的凭据仍绑定此凭据源。改绑或删除这些凭据后，才按保留期清除。'
   }
   const at = r ? formatTime(purgeAt(p.retentionFrom, r).toISOString()) : ''
   return new Date(p.retentionFrom).getTime() > new Date(p.deletedAt).getTime()
-    ? `指着它的已删除凭据清除时一起清除，最早在 ${at} 之后`
+    ? `随绑定它的已删除凭据一起清除，最早在 ${at} 之后`
     : `最早在 ${at} 之后清除`
 }
 const providers = useQuery({
@@ -205,10 +206,10 @@ async function undelete(c: ConsoleCredential) {
   try {
     const restored = await api.undeleteCredential(sid, c.id)
     queryClient.setQueryData(['credential', sid, restored.id], restored)
-    toast.add({ title: `已撤销删除 ${restored.identifier}`, color: 'success' })
+    toast.add({ title: `已恢复 ${restored.identifier}`, color: 'success' })
     await refreshLists(sid)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '撤销删除失败', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
   } finally {
     busy.value = false
   }
@@ -271,12 +272,15 @@ async function removeProvider() {
 
     <template #body>
       <p class="mb-4 text-sm text-muted">
-        密码、Token 不写进记忆：正文里只放占位符，例如
+        密码与 Token 存为凭据，记忆正文只放占位符，例如
         <code v-pre>{{cred:file-server#password}}</code
-        >，agent 用到时才取值。值由 Kioku 加密保存，或者留在你的密码管理器里（凭据源），由 agent
-        在本机取。每个成员只看得到自己的凭据。<template v-if="!canManage"
-          >管理凭据与查看托管的值要空间 owner 才行。</template
-        >
+        >。
+        <Hint>
+          Agent 用到时才取值。值由 Kioku 加密保存，或保留在密码管理器（凭据源）中，由 Agent
+          在本机获取。凭据仅所有者可见。<template v-if="!canManage"
+            >管理凭据与查看托管的值需要空间所有者权限。</template
+          >
+        </Hint>
       </p>
 
       <template v-if="tab === 'credentials'">
@@ -295,7 +299,7 @@ async function removeProvider() {
           :data="credentials.data.value?.items ?? []"
           :columns="columns"
           :loading="credentials.isPending.value"
-          empty="还没有凭据"
+          empty="暂无凭据"
         >
           <template #name-cell="{ row }">
             <UButton
@@ -322,21 +326,21 @@ async function removeProvider() {
           </template>
         </UTable>
         <p v-if="credentials.data.value?.truncated" class="mt-2 text-xs text-muted">
-          只列出了前 1000 条。
+          仅显示前 1000 条
         </p>
       </template>
 
       <template v-else-if="tab === 'providers'">
         <p class="mb-3 text-sm text-muted">
-          凭据源是你用的密码管理器（或别的取值方式）。Kioku 不保存它的访问凭据，外部来源的值一律由
-          agent 在本机取；使用说明会原样给 agent 看。
+          凭据源是密码管理器或其他取值方式，值由 Agent 在本机获取。
+          <Hint>Kioku 不保存凭据源的访问凭据。使用说明会原样发送给 Agent。</Hint>
         </p>
         <div class="space-y-3">
           <UCard v-for="p in providers.data.value ?? []" :key="p.id">
             <div class="flex flex-wrap items-center gap-2">
               <span class="font-medium">{{ p.name }}</span>
               <UBadge variant="subtle">{{ providerKindLabels[p.kind] }}</UBadge>
-              <span class="text-xs text-muted">{{ p.credentialCount }} 条凭据绑定它</span>
+              <span class="text-xs text-muted">已绑定 {{ p.credentialCount }} 条凭据</span>
               <div v-if="canManage" class="ml-auto flex gap-1">
                 <UButton
                   size="xs"
@@ -348,7 +352,11 @@ async function removeProvider() {
                   修改
                 </UButton>
                 <UTooltip
-                  :text="p.credentialCount ? '还有凭据绑定它，先改绑或删除这些凭据' : undefined"
+                  :text="
+                    p.credentialCount
+                      ? '无法删除：仍有凭据绑定。请先改绑或删除这些凭据。'
+                      : undefined
+                  "
                   :disabled="!p.credentialCount"
                 >
                   <UButton
@@ -367,17 +375,18 @@ async function removeProvider() {
             <p v-if="p.instructions" class="mt-2 text-sm whitespace-pre-wrap">
               {{ p.instructions }}
             </p>
-            <p v-else class="mt-2 text-sm text-muted">没有写使用说明。</p>
+            <p v-else class="mt-2 text-sm text-muted">暂无使用说明</p>
           </UCard>
           <p v-if="providers.data.value && !providers.data.value.length" class="text-sm text-muted">
-            还没有凭据源。都由 Kioku 托管的话，可以不加。
+            暂无凭据源。全部由 Kioku 托管时无需添加。
           </p>
         </div>
       </template>
 
       <template v-else>
         <p class="mb-3 text-sm text-muted">
-          删除的凭据可以撤销删除；同一个标识已经有一条有效的凭据时不能撤销。
+          已删除的凭据在保留期内可以恢复。
+          <Hint>同一标识已有有效凭据时无法恢复。</Hint>
         </p>
         <p v-if="retention" class="mb-3 flex items-start gap-1.5 text-xs text-warning">
           <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
@@ -387,7 +396,7 @@ async function removeProvider() {
           :data="deleted.data.value?.items ?? []"
           :columns="deletedColumns"
           :loading="deleted.isPending.value"
-          empty="没有删除的凭据"
+          empty="暂无已删除的凭据"
         >
           <template #name-cell="{ row }">
             <UButton
@@ -426,7 +435,7 @@ async function removeProvider() {
               :loading="busy"
               @click="undelete(row.original)"
             >
-              撤销删除
+              恢复
             </UButton>
           </template>
         </UTable>
@@ -434,7 +443,8 @@ async function removeProvider() {
         <template v-if="deletedProviders.data.value?.items.length">
           <h3 class="mt-6 mb-1 text-sm font-medium">已删除的凭据源</h3>
           <p class="mb-2 text-sm text-muted">
-            凭据源删除之后不能撤销。还有凭据指着它时（包括已删除、还能撤销的），等这些凭据清除之后才清除。
+            已删除的凭据源无法恢复。
+            <Hint>仍有凭据绑定时（包括可恢复的已删除凭据），等这些凭据清除后才清除。</Hint>
           </p>
           <ul class="divide-y divide-default">
             <li
@@ -462,7 +472,7 @@ async function removeProvider() {
             </li>
           </ul>
           <p v-if="deletedProviders.data.value.truncated" class="mt-2 text-xs text-muted">
-            只列出了前 1000 个。
+            仅显示前 1000 个
           </p>
         </template>
       </template>
@@ -521,7 +531,7 @@ async function removeProvider() {
   >
     <template #body>
       <p class="text-sm">
-        删除之后，引用它的占位符取不到值；可以在「已删除」里撤销。还有记忆引用它时删不掉。
+        删除后，引用它的占位符将无法取值。可在「已删除」中恢复。仍有记忆引用时无法删除。
       </p>
     </template>
     <template #footer>
@@ -537,7 +547,7 @@ async function removeProvider() {
     @update:open="(v) => !v && (removingProvider = null)"
   >
     <template #body>
-      <p class="text-sm">已删除的凭据如果绑定过它，撤销删除之后要重新绑定。</p>
+      <p class="text-sm">删除后无法恢复。曾绑定它的已删除凭据恢复后需重新绑定。</p>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">

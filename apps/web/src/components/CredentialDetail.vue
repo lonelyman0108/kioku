@@ -21,6 +21,7 @@ import {
   sensitivityLabels,
 } from '../labels'
 import { formatRelative, formatTime } from '../time'
+import Hint from './Hint.vue'
 
 const props = defineProps<{
   spaceId: string
@@ -57,7 +58,7 @@ function describe(e: CredentialEvent): string {
   const parts: string[] = []
   if (e.via) parts.push(credentialViaLabels[e.via] ?? e.via)
   if (e.changes.length) {
-    parts.push(`改了${e.changes.map((x) => credentialChangeLabels[x] ?? x).join('、')}`)
+    parts.push(`修改了${e.changes.map((x) => credentialChangeLabels[x] ?? x).join('、')}`)
   }
   if (e.fields.length) parts.push(`字段 ${e.fields.join('、')}`)
   return parts.join('；')
@@ -110,7 +111,7 @@ async function reveal() {
           variant="subtle"
           @click="copy(placeholder())"
         >
-          复制整条的占位符
+          复制凭据占位符
         </UButton>
         <template v-if="canManage">
           <UButton
@@ -125,7 +126,9 @@ async function reveal() {
           <UTooltip
             v-if="!c.deletedAt"
             :text="
-              c.referenceCount ? `还有 ${c.referenceCount} 条记忆引用它，先改掉这些引用` : undefined
+              c.referenceCount
+                ? `无法删除：仍有 ${c.referenceCount} 条记忆引用。请先修改这些引用。`
+                : undefined
             "
             :disabled="!c.referenceCount"
           >
@@ -147,7 +150,7 @@ async function reveal() {
             variant="subtle"
             @click="emit('undelete')"
           >
-            撤销删除
+            恢复
           </UButton>
         </template>
       </div>
@@ -161,7 +164,7 @@ async function reveal() {
           <template v-if="c.provider">
             {{ c.provider.name }}（{{ providerKindLabels[c.provider.kind] }}）
             <UBadge v-if="c.provider.deleted" color="warning" variant="subtle" size="sm">
-              已删除，要重新绑定
+              已删除，需重新绑定
             </UBadge>
           </template>
         </dd>
@@ -169,7 +172,7 @@ async function reveal() {
         <dd class="break-all">{{ c.location }}</dd>
       </dl>
       <p v-else class="text-sm text-muted">
-        值由 Kioku 用主密钥加密保存，只有显式查看或 agent 显式取用时才解密。
+        值由 Kioku 使用主密钥加密保存，仅在显式查看或 Agent 显式取用时解密。
       </p>
     </section>
 
@@ -203,7 +206,7 @@ async function reveal() {
         <li v-for="field in c.fields" :key="field.name" class="flex items-center gap-2 px-3 py-2">
           <code class="text-xs">{{ field.name }}</code>
           <span v-if="field.sourceField" class="text-xs text-muted">
-            → 条目里的 {{ field.sourceField }}
+            → 条目字段 {{ field.sourceField }}
           </span>
           <template v-if="c.source === 'hosted'">
             <code
@@ -230,7 +233,7 @@ async function reveal() {
             :aria-label="`复制 ${field.name} 的占位符`"
             @click="copy(placeholder(field.name))"
           >
-            占位符
+            复制占位符
           </UButton>
         </li>
       </ul>
@@ -242,9 +245,10 @@ async function reveal() {
     </section>
 
     <section class="space-y-2">
-      <h3 class="text-sm font-medium">引用它的记忆</h3>
+      <h3 class="text-sm font-medium">引用此凭据的记忆</h3>
       <p class="text-xs text-muted">
-        只算你私人层里没删除、不是 secret、仍有效的记忆；还有引用时凭据删不掉。
+        仍有引用时无法删除凭据。
+        <Hint>仅统计当前账号私人层中未删除、非机密、仍有效的记忆。</Hint>
       </p>
       <USkeleton v-if="references.isPending.value" class="h-8 w-full" />
       <ul v-else-if="references.data.value?.items.length" class="space-y-1 text-sm">
@@ -264,17 +268,16 @@ async function reveal() {
             {{ formatRelative(m.updatedAt) }}
           </time>
         </li>
-        <li v-if="references.data.value.truncated" class="text-xs text-muted">
-          只列出了最近的 200 条
-        </li>
+        <li v-if="references.data.value.truncated" class="text-xs text-muted">仅显示最近 200 条</li>
       </ul>
-      <p v-else class="text-sm text-muted">没有记忆引用它。</p>
+      <p v-else class="text-sm text-muted">暂无引用</p>
     </section>
 
     <section class="space-y-2">
       <h3 class="text-sm font-medium">记录</h3>
       <p class="text-xs text-muted">
-        新建、修改、删除与每次取用；只有你自己看得到，不进空间的活动。
+        记录新建、修改、删除与每次取用。
+        <Hint>仅凭据所有者可见，不进入空间的变更记录。</Hint>
       </p>
       <USkeleton v-if="events.isPending.value" class="h-8 w-full" />
       <ol v-else class="space-y-2 text-sm">
@@ -311,15 +314,13 @@ async function reveal() {
         :loading="events.isFetchingNextPage.value"
         @click="events.fetchNextPage()"
       >
-        更早的记录
+        加载更早的记录
       </UButton>
     </section>
 
     <UModal v-model:open="confirmingReveal" title="查看托管的值？">
       <template #body>
-        <p class="text-sm">
-          值会显示在这个页面上，并记一条访问记录。看完点「隐藏」，或关掉这个面板。
-        </p>
+        <p class="text-sm">值将显示在此页面上，并记录一次访问。查看后请点击「隐藏」或关闭面板。</p>
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
