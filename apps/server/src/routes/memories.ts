@@ -20,6 +20,7 @@ import {
   MemoryView,
   MoveMemoryRequest,
   PageQuery,
+  PlaintextIgnoreRequest,
   ReactivateRequest,
   RestoreRequest,
   RevealMemoryRequest,
@@ -53,7 +54,7 @@ const errors = {
   409: jsonResponse('冲突', ErrorResponse),
 }
 
-// 管理界面的响应多一个字段（ConsoleMemoryView），由服务按 MemoryContext.secretRead 给出。
+// 管理界面的响应多两个字段（ConsoleMemoryView），由服务按 MemoryContext.secretRead 给出。
 // 路由这边按 MemoryView 写类型，两套路由和各处的返回值共用一份
 const ConsoleView: z.ZodType<MemoryView> = ConsoleMemoryView
 const ConsoleChildren: z.ZodType<MemoryChildren> = ConsoleMemoryChildren
@@ -268,6 +269,22 @@ function consoleOnlyRoutes(deps: Deps) {
     request: { params, body: jsonBody(RevealMemoryRequest) },
     responses: { 200: jsonResponse('带正文的记忆', ConsoleView), ...errors },
   })
+  const ignorePlaintext = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/ignore-plaintext',
+    tags: ['console'],
+    summary: '忽略明文提示（规则误判时用）：正文改了提示会回来；不加版本号，留一条事件',
+    request: { params, body: jsonBody(PlaintextIgnoreRequest) },
+    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
+  })
+  const unignorePlaintext = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/unignore-plaintext',
+    tags: ['console'],
+    summary: '撤销忽略明文提示，留一条事件',
+    request: { params, body: jsonBody(PlaintextIgnoreRequest) },
+    responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
+  })
   const glossary = createRoute({
     method: 'get',
     path: '/spaces/{spaceId}/memories/glossary',
@@ -331,6 +348,14 @@ function consoleOnlyRoutes(deps: Deps) {
       // 带着明文的响应不让浏览器和代理缓存
       c.header('Cache-Control', 'no-store')
       return c.json(memory, 200)
+    })
+    .openapi(ignorePlaintext, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.ignorePlaintext(c.req.valid('json')), 200)
+    })
+    .openapi(unignorePlaintext, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.unignorePlaintext(c.req.valid('json')), 200)
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)

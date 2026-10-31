@@ -114,6 +114,8 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
   expire: { label: '过期后让出 URI', icon: icons.expired },
   reactivate: { label: '重新生效', icon: icons.reactivate },
   confirm: { label: '确认来源', icon: icons.confirmed },
+  ignore_plaintext: { label: '忽略明文提示', icon: icons.left },
+  unignore_plaintext: { label: '撤销忽略', icon: icons.undelete },
   access: { label: '查看正文', icon: icons.reveal },
 }
 

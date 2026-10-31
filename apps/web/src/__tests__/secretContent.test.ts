@@ -20,6 +20,7 @@ const view = (extra: Partial<ConsoleMemoryView> = {}): ConsoleMemoryView => ({
   createdAt: '2026-10-31T00:00:00.000Z',
   updatedAt: '2026-10-31T00:00:00.000Z',
   contentHidden: true,
+  plaintextIgnored: false,
   ...extra,
 })
 

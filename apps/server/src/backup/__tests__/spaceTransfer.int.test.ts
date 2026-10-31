@@ -4,6 +4,7 @@ import { getEventListeners } from 'node:events'
 import type {
   AppInfo,
   ConsoleCredentialList,
+  ConsoleMemoryView,
   CredentialAccess,
   CredentialEventList,
   CredentialValues,
@@ -14,6 +15,7 @@ import type {
   GroupPersonaRuleList,
   Me,
   MemoryHistory,
+  MemoryList,
   MemoryView,
   PersonaInfo,
   RecallStats,
@@ -31,7 +33,14 @@ import { createApp } from '../../app'
 import { decryptSecret } from '../../crypto/envelope'
 import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
-import { credentialEvents, memories, settings, spaces, subjects } from '../../db/schema'
+import {
+  credentialEvents,
+  memories,
+  memoryEvents,
+  settings,
+  spaces,
+  subjects,
+} from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
@@ -1024,6 +1033,67 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         providers: 0,
       },
     })
+  })
+
+  it('明文提示的忽略不随文件走：历史不带过去，到了那边查不到是谁忽略的，提示要回来；访问记录也不带', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const cookie = { cookie: alice.cookie }
+    const space = `/v1/spaces/${alice.spaceId}`
+    const note = await ok<ConsoleMemoryView>(
+      send(
+        source,
+        'POST',
+        `${space}/memories`,
+        { uri: 'notes://api', content: 'token = abc' },
+        cookie,
+      ),
+      201,
+    )
+    await ok(
+      send(
+        source,
+        'POST',
+        `${space}/memories/ignore-plaintext`,
+        { memoryId: note.id, expectedVersion: note.version },
+        cookie,
+      ),
+    )
+    const vault = await ok<ConsoleMemoryView>(
+      send(
+        source,
+        'POST',
+        `${space}/memories`,
+        { uri: 'notes://vault', content: '门禁 8842', sensitivity: 'secret' },
+        cookie,
+      ),
+      201,
+    )
+    await ok(send(source, 'POST', `${space}/memories/reveal`, { memoryId: vault.id }, cookie))
+
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    const parsed = await contents(file)
+    const exported = parsed.memories.find((m) => m.uri === note.uri)!
+    expect(Object.keys(exported).filter((k) => k.toLowerCase().includes('ignored'))).toEqual([])
+    // 不只是解析时丢掉了：文件的原文里也没有这一列
+    expect((await plainOf(file)).toString('utf8')).not.toContain('Ignored')
+
+    const imported = await ok<SpaceImportResult>(importRequest(source, alice.cookie, file), 201)
+    const list = (plaintext: string) =>
+      ok<MemoryList>(
+        send(
+          source,
+          'GET',
+          `/v1/spaces/${imported.spaceId}/memories/list?plaintext=${plaintext}`,
+          undefined,
+          cookie,
+        ),
+      )
+    expect((await list('true')).items.map((m) => m.uri)).toEqual([note.uri])
+    expect((await list('ignored')).items).toEqual([])
+    const events = await withSpace(database.db, imported.spaceId, (tx) =>
+      tx.select({ type: memoryEvents.eventType }).from(memoryEvents),
+    )
+    expect(new Set(events.map((e) => e.type))).toEqual(new Set(['import']))
   })
 
   it('导出人关掉的 Dream 整理画像层与私人层跟着文件走：导入人在新空间里也关着；文件格式升到 2，格式 1 的旧文件按开着，更新的格式拒收', async () => {

@@ -46,16 +46,25 @@ export const MemoryView = z
   .meta({ id: 'MemoryView' })
 export type MemoryView = z.infer<typeof MemoryView>
 
-// 管理界面读到的记忆。接入方的 MemoryView 不变，多的字段只给管理界面
+// 管理界面读到的记忆。接入方的 MemoryView 不变，下面两个字段只给管理界面
 export const ConsoleMemoryView = MemoryView.extend({
   // secret 有正文、这次没给（content 为 null），要显式查看（reveal），查看记一次访问
   contentHidden: z.boolean(),
+  // 现在的正文疑似明文，而且这段正文的提示被忽略了；正文改了就不再算
+  plaintextIgnored: z.boolean(),
 })
 export type ConsoleMemoryView = z.infer<typeof ConsoleMemoryView>
 
 // 显式查看 secret 的正文，记一条访问事件
 export const RevealMemoryRequest = z.object({ memoryId: z.uuid() })
 export type RevealMemoryRequest = z.infer<typeof RevealMemoryRequest>
+
+// 忽略或撤销忽略明文提示。expectedVersion 是看到提示时的版本：期间正文被改过，就不能替新的正文做决定，返回 409
+export const PlaintextIgnoreRequest = z.object({
+  memoryId: z.uuid(),
+  expectedVersion: z.number().int(),
+})
+export type PlaintextIgnoreRequest = z.infer<typeof PlaintextIgnoreRequest>
 
 // 树浏览的一个子节点。exists 为 false 表示这一级路径本身没有记忆，只是下面有调用方读得到的后代，
 // 像文件系统里的目录一样显示出来；此时 id、layer 等字段为 null

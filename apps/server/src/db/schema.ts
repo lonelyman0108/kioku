@@ -315,6 +315,9 @@ export const memories = pgTable(
     wrappedKey: bytea(),
     // 包装数据密钥用的主密钥的标识（crypto/keyring.ts）：轮换时按它找出还是旧密钥包装的记录
     keyId: text(),
+    // 忽略明文提示时正文的 SHA-256（十六进制）：和现在的正文对得上才算忽略，正文一改提示自动回来，不用每条写入路径都管。
+    // 不进事件快照，也不随空间导出（历史不跟着走，到了那边查不到是谁忽略的）；改成 secret 时清掉，密文的哈希不留在明文列里
+    plaintextIgnoredHash: text(),
     priority: integer().notNull().default(2),
     disclosure: text(),
     validFrom: timestamp({ withTimezone: true }).notNull().defaultNow(),

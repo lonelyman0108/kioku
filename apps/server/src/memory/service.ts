@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 
 import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contracts'
 import type {
@@ -29,6 +29,7 @@ import type {
   NeverRecalledMemory,
   PageQuery,
   PlainLayer,
+  PlaintextIgnoreRequest,
   Provenance,
   RecalledMemory,
   RecallEventList,
@@ -333,8 +334,8 @@ export function openMemoryContent(
   )
 }
 
-// 事件快照里不放的列：密文、数据密钥与它的主密钥标识、全文检索向量（向量里有正文分词）
-const UNSNAPSHOTTED = ['ciphertext', 'wrappedKey', 'keyId', 'fts'] as const
+// 事件快照里不放的列：密文、数据密钥与它的主密钥标识、全文检索向量（向量里有正文分词）、忽略明文提示用的正文哈希
+const UNSNAPSHOTTED = ['ciphertext', 'wrappedKey', 'keyId', 'fts', 'plaintextIgnoredHash'] as const
 export type SnapshotRow = Omit<MemoryRow, (typeof UNSNAPSHOTTED)[number]>
 
 // 写快照用得到的列：批量写入时只取回这些，不把密文与全文检索向量也取回来
@@ -677,6 +678,7 @@ export class MemoryService {
     if (this.ctx.secretRead !== 'explicit') return view
     const extra: Omit<ConsoleMemoryView, keyof MemoryView> = {
       contentHidden: hidden,
+      plaintextIgnored: plaintextIgnored(row),
     }
     return { ...view, ...extra }
   }
@@ -1258,7 +1260,7 @@ export class MemoryService {
     }
     const body =
       sensitivity === 'secret'
-        ? { content: null, ...this.seal(plaintext, before.id) }
+        ? { content: null, plaintextIgnoredHash: null, ...this.seal(plaintext, before.id) }
         : { content: plaintext, ciphertext: null, wrappedKey: null, keyId: null }
 
     const beforeGlossary =
@@ -1344,6 +1346,52 @@ export class MemoryService {
         after: sql`case when ${memoryEvents.after} is null then null else ${memoryEvents.after} - 'content' - 'fts' end`,
       })
       .where(eq(memoryEvents.memoryId, memoryId))
+  }
+
+  // 忽略明文提示：记下这段正文的哈希，正文改了（不管经哪条写入路径）就不再算（见 PLAINTEXT）。要写得了这条记忆，
+  // 不加版本号、不改更新时间，留一条事件。先锁住这一行再核对版本：期间正文被改过就不能替新的正文做决定。
+  // 已经是想要的状态时什么都不写，连点两次只留一条事件
+  async ignorePlaintext(input: PlaintextIgnoreRequest): Promise<MemoryView> {
+    return this.setPlaintextIgnored(input, true)
+  }
+
+  async unignorePlaintext(input: PlaintextIgnoreRequest): Promise<MemoryView> {
+    return this.setPlaintextIgnored(input, false)
+  }
+
+  private async setPlaintextIgnored(
+    input: PlaintextIgnoreRequest,
+    ignored: boolean,
+  ): Promise<MemoryView> {
+    return this.write(async (tx, personaIds) => {
+      const row = await this.readableById(tx, input.memoryId, personaIds, true)
+      if (row.version !== input.expectedVersion) {
+        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+      }
+      this.assertModifiable(row, `没有权限改 ${row.layer} 层的记忆`)
+      if (row.content === null) {
+        throw new MemoryError(400, '机密记忆的正文已经加密，没有明文提示')
+      }
+      if (ignored && !looksLikePlaintextCredential(row.content)) {
+        throw new MemoryError(400, '这条记忆的正文没有疑似明文，不用忽略')
+      }
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      if (plaintextIgnored(row) === ignored) return this.toView(row, glossary)
+      const [after] = await tx
+        .update(memories)
+        .set({ plaintextIgnoredHash: ignored ? contentHash(row.content) : null })
+        .where(eq(memories.id, row.id))
+        .returning()
+      // 事件不改正文，快照里不再存一份：历史里的明文越少越好
+      await this.event(
+        tx,
+        row.id,
+        ignored ? 'ignore_plaintext' : 'unignore_plaintext',
+        { ...snapshot(row, glossary), content: null },
+        null,
+      )
+      return this.toView(after!, glossary)
+    })
   }
 
   async delete(
@@ -1939,6 +1987,7 @@ export class MemoryService {
             query.missingDisclosure === 'false' ? sql`not ${MISSING_DISCLOSURE}` : undefined,
             query.plaintext === 'true' ? PLAINTEXT : undefined,
             query.plaintext === 'false' ? sql`not coalesce(${PLAINTEXT}, false)` : undefined,
+            query.plaintext === 'ignored' ? PLAINTEXT_IGNORED : undefined,
             // 时间原样交给数据库换算：经过 JS 的 Date 会丢掉微秒
             query.updatedAfter
               ? sql`${memories.updatedAt} >= ${query.updatedAfter}::timestamptz`
@@ -3010,7 +3059,26 @@ function neverRecalled(recall: RecallWindow): SQL {
 
 // 正文像有明文密码或 Token：与界面、导入工具同一条规则（PLAINTEXT_CREDENTIAL），PostgreSQL 的正则照原样能用，
 // ~* 不区分大小写，对应它的 i 标记。secret 的正文是密文（content 为空），结果为 NULL，不算
-const PLAINTEXT = sql`(${memories.content} ~* ${PLAINTEXT_CREDENTIAL.source})`
+const PLAINTEXT_MATCH = sql`(${memories.content} ~* ${PLAINTEXT_CREDENTIAL.source})`
+// 提示被忽略了：存着的哈希和现在的正文对得上。写入路径都不用管这一列，正文一改就对不上了。
+// 没有哈希的行不算哈希（case 里不会执行），开销只落在忽略过的那几条上
+const IGNORED_NOW = sql`(case when ${memories.plaintextIgnoredHash} is null then false
+  else ${memories.plaintextIgnoredHash} = encode(sha256(convert_to(${memories.content}, 'UTF8')), 'hex') end)`
+const PLAINTEXT = sql`(${PLAINTEXT_MATCH} and not ${IGNORED_NOW})`
+const PLAINTEXT_IGNORED = sql`(${PLAINTEXT_MATCH} and ${IGNORED_NOW})`
+
+// 和上面 SQL 里的哈希相同的算法，忽略时写进去、读的时候比对
+const contentHash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex')
+
+// PLAINTEXT_IGNORED 的 JS 版本，给读到的那一行用
+function plaintextIgnored(row: Pick<MemoryRow, 'content' | 'plaintextIgnoredHash'>): boolean {
+  return (
+    row.plaintextIgnoredHash !== null &&
+    row.content !== null &&
+    looksLikePlaintextCredential(row.content) &&
+    row.plaintextIgnoredHash === contentHash(row.content)
+  )
+}
 
 const UPDATED_MICROS = microsOf(memories.updatedAt)
 

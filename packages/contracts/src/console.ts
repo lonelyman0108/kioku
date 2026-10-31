@@ -25,8 +25,9 @@ export const MemoryListQuery = z.object({
   q: z.string().trim().min(1).max(200).optional(),
   // true 只列没写 disclosure 的，false 只列写了的；查询参数按字符串 'true' / 'false' 传
   missingDisclosure: z.enum(['true', 'false']).optional(),
-  // true 只列正文像有明文密码或 Token 的（规则见 PLAINTEXT_CREDENTIAL；secret 的正文是密文，不算）
-  plaintext: z.enum(['true', 'false']).optional(),
+  // true 只列正文像有明文密码或 Token、提示没被忽略的（规则见 PLAINTEXT_CREDENTIAL；secret 的正文是密文，不算），
+  // false 列别的那些，ignored 只列提示被忽略了的
+  plaintext: z.enum(['true', 'false', 'ignored']).optional(),
   // 更新时间在这个范围里：不早于 updatedAfter，早于 updatedBefore
   updatedAfter: z.iso.datetime({ offset: true }).optional(),
   updatedBefore: z.iso.datetime({ offset: true }).optional(),
@@ -146,7 +147,8 @@ export const BenchMark = z.object({ accountName: z.string().nullable(), run: z.s
 export type BenchMark = z.infer<typeof BenchMark>
 
 // 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete、
-// reactivate（让过期的记忆重新生效）、access（读到 secret 的正文，只在历史里，不进活动，不改记忆，after 为 null）
+// reactivate（让过期的记忆重新生效）、ignore_plaintext、unignore_plaintext、
+// access（读到 secret 的正文，只在历史里，不进活动）。access 与忽略明文提示不改记忆，after 为 null
 export const HistoryEvent = z.object({
   id: z.number().int(),
   type: z.string(),
@@ -346,7 +348,7 @@ export const InboxCounts = z.object({
   review: z.number().int(),
   // Dream 的建议：还没处理、还作数的
   dreamSuggestions: z.number().int(),
-  // 正文疑似明文的记忆
+  // 正文疑似明文、提示没被忽略的记忆
   plaintext: z.number().int(),
   total: z.number().int(),
 })
@@ -357,7 +359,7 @@ export const SpaceOverview = z.object({
   counts: z.array(LayerCount),
   total: z.number().int(),
   missingDisclosure: z.number().int(),
-  // 正文像有明文密码或 Token、该换成凭据占位符的记忆数
+  // 正文像有明文密码或 Token、该换成凭据占位符的记忆数，提示被忽略的不算
   plaintextCredentials: z.number().int(),
   // 从没被召回过的记忆数，和召回分析页同一个口径（见 RecallStats 的 never）
   neverRecalled: z.number().int(),

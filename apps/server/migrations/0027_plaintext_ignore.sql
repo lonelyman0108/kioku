@@ -1,0 +1,1 @@
+ALTER TABLE "memories" ADD COLUMN "plaintext_ignored_hash" text;

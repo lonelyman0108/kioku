@@ -87,6 +87,7 @@ import {
   type MemoryListQuery,
   type MoveMemoryRequest,
   type PlainLayer,
+  type PlaintextIgnoreRequest,
   type ReactivateRequest,
   type RestoreRequest,
   type ReviewQuery,
@@ -264,6 +265,16 @@ export const api = {
     }),
   reactivateMemory: (spaceId: string, body: ReactivateRequest) =>
     request('POST', `/spaces/${spaceId}/memories/reactivate`, { body, schema: ConsoleMemoryView }),
+  ignorePlaintext: (spaceId: string, body: PlaintextIgnoreRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/ignore-plaintext`, {
+      body,
+      schema: ConsoleMemoryView,
+    }),
+  unignorePlaintext: (spaceId: string, body: PlaintextIgnoreRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/unignore-plaintext`, {
+      body,
+      schema: ConsoleMemoryView,
+    }),
 
   credentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
