@@ -179,7 +179,7 @@ export interface MemoryContext {
 
 // 读到 secret 的正文经由哪里，记在访问事件的 context 里
 export type SecretVia =
-  'console' | 'rest' | 'kioku_get' | 'kioku_list' | 'kioku_update' | 'kioku_move'
+  'console' | 'export' | 'rest' | 'kioku_get' | 'kioku_list' | 'kioku_update' | 'kioku_move'
 
 // 一批事件改了什么（见 eventChanges）；lastId 是这批里最后一条事件的 id，没有事件时为 0
 export type EventChanges = Pick<BenchChanges, 'memories' | 'hiddenReleased' | 'hiddenOther'> & {

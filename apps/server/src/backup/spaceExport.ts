@@ -14,6 +14,7 @@ import {
   credentialProviders,
   credentials,
   memories,
+  memoryEvents,
   memoryGlossary,
   personas,
   spaceMembers,
@@ -22,7 +23,13 @@ import {
   subjects,
 } from '../db/schema'
 import { readableConditions } from '../memory/filter'
-import { MemoryError, openMemoryContent } from '../memory/service'
+import {
+  ACCESS_EVENT,
+  MemoryError,
+  openMemoryContent,
+  snapshot,
+  type SecretVia,
+} from '../memory/service'
 import { formatUri } from '../memory/uri'
 import { VERSION } from '../version'
 import { deriveExportKey, ExportTooLarge, sealSpaceExport, type KdfParams } from './spaceFormat'
@@ -51,7 +58,7 @@ export interface SpaceExport {
   createdAt: string
 }
 
-// 每次读多少条记忆
+// 每次读多少条记忆，也是一次写多少条访问事件
 const PAGE = 500
 
 // 请求断开了（客户端超时、关掉页面）：文件交不出去，不再接着做。响应没人收，状态码只是给日志看的
@@ -76,8 +83,9 @@ export async function exportSpace(
   const exportKey = await deriveExportKey(options.passphrase, options.kdf)
   stopIfGone(signal)
   const createdAt = new Date().toISOString()
-  // 导出了哪些凭据、各带了哪些字段：读完之后记访问事件
+  // 导出了哪些凭据、各带了哪些字段，解密了哪些 secret 记忆：读完之后记访问事件
   const exported = new Map<string, string[]>()
+  const secrets: SecretExported[] = []
   let spaceName = ''
   let file: Buffer<ArrayBuffer>
   try {
@@ -112,6 +120,7 @@ export async function exportSpace(
           accountId: options.accountId,
           masterKey,
           exported,
+          secrets,
           signal,
         })
         try {
@@ -137,19 +146,35 @@ export async function exportSpace(
   }
   // 文件做好时客户端已经断开：文件交不出去，也就不记访问事件
   stopIfGone(signal)
-  // 托管的值与外部的绑定都随文件带走了，和取用一样给凭据的主人记一条访问事件，事后查得到
-  if (exported.size) {
-    await withSpace(db, options.spaceId, (tx) =>
-      tx.insert(credentialEvents).values(
-        [...exported].map(([credentialId, fields]) => ({
-          spaceId: options.spaceId,
-          credentialId,
-          eventType: 'access',
-          actorAccountId: options.accountId,
-          context: { via: 'export', fields },
-        })),
-      ),
-    )
+  // 托管的值与外部的绑定都随文件带走了，和取用一样给凭据的主人记一条访问事件，事后查得到。
+  // secret 记忆的正文同样解密带走了，给这条记忆记一条访问事件（规则见 MemoryService 的 toView）
+  if (exported.size || secrets.length) {
+    await withSpace(db, options.spaceId, async (tx) => {
+      if (exported.size) {
+        await tx.insert(credentialEvents).values(
+          [...exported].map(([credentialId, fields]) => ({
+            spaceId: options.spaceId,
+            credentialId,
+            eventType: 'access',
+            actorAccountId: options.accountId,
+            context: { via: 'export', fields },
+          })),
+        )
+      }
+      for (let at = 0; at < secrets.length; at += PAGE) {
+        await tx.insert(memoryEvents).values(
+          secrets.slice(at, at + PAGE).map(({ memoryId, before }) => ({
+            spaceId: options.spaceId,
+            memoryId,
+            eventType: ACCESS_EVENT,
+            actorAccountId: options.accountId,
+            provenance: 'owner' as const,
+            before,
+            context: { via: 'export' satisfies SecretVia },
+          })),
+        )
+      }
+    })
   }
   return { file, spaceName, createdAt }
 }
@@ -165,11 +190,18 @@ function checked<T>(schema: z.ZodType<T>, label: string, value: unknown): T {
   )
 }
 
+// 导出时解密的一条 secret 记忆：访问事件要记的快照
+interface SecretExported {
+  memoryId: string
+  before: unknown
+}
+
 interface LinesContext {
   header: SpaceExportHeader
   accountId: string
   masterKey: MasterKey | null
   exported: Map<string, string[]>
+  secrets: SecretExported[]
   signal: AbortSignal | undefined
 }
 
@@ -348,12 +380,14 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
       glossary.set(g.memoryId, [...(glossary.get(g.memoryId) ?? []), g.keyword])
     }
     yield rows
-      .map((row) =>
-        record(
-          `记忆 ${memoryLabel(row)} `,
-          memoryRecord(row, glossary.get(row.id) ?? [], ctx.masterKey),
-        ),
-      )
+      .map((row) => {
+        const keywords = glossary.get(row.id) ?? []
+        const text = record(`记忆 ${memoryLabel(row)} `, memoryRecord(row, keywords, ctx.masterKey))
+        if (row.sensitivity === 'secret') {
+          ctx.secrets.push({ memoryId: row.id, before: snapshot(row, keywords) })
+        }
+        return text
+      })
       .join('')
     after = rows[rows.length - 1]!.id
     if (rows.length < PAGE) break

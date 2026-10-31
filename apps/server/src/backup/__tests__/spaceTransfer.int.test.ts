@@ -2,6 +2,7 @@ import { randomBytes, randomUUID } from 'node:crypto'
 import { getEventListeners } from 'node:events'
 
 import type {
+  ActivityList,
   AppInfo,
   ConsoleCredentialList,
   ConsoleMemoryView,
@@ -1035,6 +1036,72 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     })
   })
 
+  it('导出带走的 secret 记忆留访问事件：经由 export，只进这条记忆的历史；没导出的不记', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const bob = await addMember(database.db, alice.spaceId, 'bob', 'owner')
+    const cookie = { cookie: alice.cookie }
+    const space = `/v1/spaces/${alice.spaceId}`
+    const remember = (body: object, who = cookie) =>
+      ok<MemoryView>(send(source, 'POST', `${space}/memories`, body, who), 201)
+    const shared = await remember({
+      uri: 'kb://door',
+      content: '机房门禁 8842',
+      layer: 'base',
+      sensitivity: 'secret',
+    })
+    const mine = await remember({
+      uri: 'notes://vault',
+      content: '保险柜 1234',
+      sensitivity: 'secret',
+    })
+    await remember({ uri: 'notes://plain', content: '普通的正文' })
+    // 别的成员私人层的、已删除的不在文件里
+    await remember(
+      { uri: 'notes://hers', content: 'bob 的', sensitivity: 'secret' },
+      { cookie: bob.cookie },
+    )
+    const gone = await remember({ uri: 'notes://gone', content: '删了', sensitivity: 'secret' })
+    await ok(
+      send(
+        source,
+        'DELETE',
+        `${space}/memories?uri=${encodeURIComponent(gone.uri)}`,
+        undefined,
+        cookie,
+      ),
+      204,
+    )
+
+    await exportSpace(source, alice.spaceId, alice.cookie)
+    const events = await withSpace(database.db, alice.spaceId, (tx) =>
+      tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
+    )
+    expect(events.map((e) => e.memoryId).sort()).toEqual([shared.id, mine.id].sort())
+    for (const event of events) {
+      expect(event).toMatchObject({
+        actorAccountId: alice.accountId,
+        actorKeyId: null,
+        context: { via: 'export' },
+        after: null,
+        before: { sensitivity: 'secret', content: null },
+      })
+    }
+    expect(JSON.stringify(events)).not.toContain('8842')
+
+    const history = await ok<MemoryHistory>(
+      send(source, 'GET', `${space}/memories/history?id=${shared.id}`, undefined, cookie),
+    )
+    expect(history.events.at(-1)).toMatchObject({
+      type: 'access',
+      via: 'export',
+      actor: { accountName: 'alice' },
+    })
+    const activity = await ok<ActivityList>(
+      send(source, 'GET', `${space}/activity`, undefined, cookie),
+    )
+    expect(activity.items.map((i) => i.type)).not.toContain('access')
+  })
+
   it('明文提示的忽略不随文件走：历史不带过去，到了那边查不到是谁忽略的，提示要回来；访问记录也不带', async () => {
     const alice = await bootstrap(source, 'alice')
     const cookie = { cookie: alice.cookie }
@@ -2043,7 +2110,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     })
   })
 
-  it('读完最后一批时客户端已经断开：文件交不出去，不记凭据的访问事件', async () => {
+  it('读完最后一批时客户端已经断开：文件交不出去，不记凭据与 secret 记忆的访问事件', async () => {
     const alice = await bootstrap(source, 'alice')
     await ok(
       send(
@@ -2051,6 +2118,16 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         'POST',
         `/v1/spaces/${alice.spaceId}/credentials`,
         { identifier: 'nas', name: 'NAS', source: { kind: 'hosted', values: { password: 'pw' } } },
+        { cookie: alice.cookie },
+      ),
+      201,
+    )
+    await ok(
+      send(
+        source,
+        'POST',
+        `/v1/spaces/${alice.spaceId}/memories`,
+        { uri: 'notes://vault', content: '保险柜 1234', sensitivity: 'secret' },
         { cookie: alice.cookie },
       ),
       201,
@@ -2068,6 +2145,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       tx.select().from(credentialEvents).where(eq(credentialEvents.eventType, 'access')),
     )
     expect(accessed).toEqual([])
+    const read = await withSpace(database.db, alice.spaceId, (tx) =>
+      tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
+    )
+    expect(read).toEqual([])
     await slotFree()
   })
 

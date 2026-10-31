@@ -60,7 +60,15 @@ describe('记忆事件', () => {
   })
 
   it('访问经由哪里都有说法', () => {
-    const vias = ['console', 'rest', 'kioku_get', 'kioku_list', 'kioku_update', 'kioku_move']
+    const vias = [
+      'console',
+      'export',
+      'rest',
+      'kioku_get',
+      'kioku_list',
+      'kioku_update',
+      'kioku_move',
+    ]
     expect(Object.keys(memoryViaLabels).sort()).toEqual([...vias].sort())
   })
 })

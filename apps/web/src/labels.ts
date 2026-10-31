@@ -123,6 +123,7 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
 // 机密记忆的访问事件经由哪里
 export const memoryViaLabels: Record<string, string> = {
   console: '在管理界面查看',
+  export: '随空间导出',
   rest: '通过 REST 接口',
   kioku_get: '通过 kioku_get',
   kioku_list: '通过 kioku_list',

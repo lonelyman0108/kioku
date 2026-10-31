@@ -155,7 +155,7 @@ export const HistoryEvent = z.object({
   provenance: Provenance,
   createdAt: z.string(),
   actor: EventActor,
-  // access 经由哪里：console、rest、kioku_get 等；其他事件为 null
+  // access 经由哪里：console、export、rest、kioku_get 等；其他事件为 null
   via: z.string().nullable(),
   before: MemorySnapshot.nullable(),
   after: MemorySnapshot.nullable(),
