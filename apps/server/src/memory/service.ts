@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 import {
+  CREDENTIAL_PLACEHOLDER,
   PLAIN_LAYERS,
   PLAINTEXT_CREDENTIAL,
   PLAINTEXT_MASK,
@@ -1417,6 +1418,7 @@ export class MemoryService {
     replaced: number
     scrubbedEvents: number
     plaintextVersions: number
+    otherMemories: number
   }> {
     const released: string[] = []
     const result = await this.run(async (tx, personaIds) => {
@@ -1470,7 +1472,13 @@ export class MemoryService {
           reason: scrub(dreamSuggestions.reason),
         })
         .where(sql`${row.id}::uuid = any(${dreamSuggestions.memoryIds})`)
-      return { memory, credential: await credential.view(tx, credentialId), replaced, ...history }
+      return {
+        memory,
+        credential: await credential.view(tx, credentialId),
+        replaced,
+        ...history,
+        otherMemories: await this.othersWithValue(tx, row.id, input.value),
+      }
     })
     this.changed([result.memory.id, ...released])
     return result
@@ -1516,6 +1524,26 @@ export class MemoryService {
       scrubbedEvents++
     }
     return { scrubbedEvents, plaintextVersions: leftovers.size }
+  }
+
+  // 别的记忆里还有几条含这个值：转存不动它们，要告诉调用方。按管理读取数，已删除、过期的也算：撤销删除就回来了。
+  // secret 的正文是密文，数不到；占位符里的不算，和替换时跳过的一样
+  private async othersWithValue(tx: Tx, memoryId: string, value: string): Promise<number> {
+    const outsidePlaceholders = sql`regexp_replace(${memories.content}, ${CREDENTIAL_PLACEHOLDER.source}::text, '', 'g')`
+    const [row] = await tx
+      .select({ n: count() })
+      .from(memories)
+      .where(
+        and(
+          ne(memories.id, memoryId),
+          this.manageable(),
+          or(
+            sql`(strpos(${memories.content}, ${value}::text) > 0 and strpos(${outsidePlaceholders}, ${value}::text) > 0)`,
+            sql`strpos(${memories.disclosure}, ${value}::text) > 0`,
+          ),
+        ),
+      )
+    return row?.n ?? 0
   }
 
   async delete(

@@ -320,6 +320,9 @@ export const ConvertedToCredential = z.object({
   scrubbedEvents: z.number().int(),
   // 历史里还有几个版本的正文疑似有别的明文（不含现在这一版）：只换掉了这一个值，换过的旧密码这类还留着
   plaintextVersions: z.number().int(),
+  // 调用方有权看到的别的记忆（已删除、过期的也算）里还有几条含这个值：这次不动它们，要提示。
+  // 比如 Dream 合并的来源被软删除了，撤销删除就回来。secret 的正文是密文，不数；占位符里的不算
+  otherMemories: z.number().int(),
 })
 export type ConvertedToCredential = z.infer<typeof ConvertedToCredential>
 

@@ -353,6 +353,58 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect(second.plaintextVersions).toBe(0)
   })
 
+  it('别的记忆里还有这个值时数出来：调用方有权看到的，已删除、过期的也算；这次不动它们', async () => {
+    const value = 'hunter2-copied'
+    const m = await remember({ uri: 'notes://wifi', content: `密码：${value}` })
+    // 数得到的：有效的、共享层的、触发场景里的、已删除的、过期的、来自对话的
+    const copy = await remember({ uri: 'notes://copy', content: `也写着 ${value}` })
+    await remember({ uri: 'kb://copy', content: `共享的 ${value}`, layer: 'base' })
+    await remember({ uri: 'notes://hint', content: '正文没有', disclosure: `提到 ${value} 时` })
+    const gone = await remember({ uri: 'notes://gone', content: `合并之前的 ${value}` })
+    expect((await send('DELETE', `/memories?uri=${encodeURIComponent(gone.uri)}`)).status).toBe(204)
+    const lapsed = await remember({ uri: 'notes://lapsed', content: `过期的 ${value}` })
+    await inSpace(async (tx) => {
+      await tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 1000) })
+        .where(eq(memories.id, lapsed.id))
+      await tx.insert(memories).values({
+        spaceId: ws.spaceId,
+        form: 'extracted',
+        layer: 'episode',
+        sensitivity: 'public',
+        provenance: 'untrusted',
+        content: `群里说的 ${value}`,
+        expiresAt: new Date(Date.now() + 86_400_000),
+      })
+    })
+    // 数不到的：别的成员的私人层、secret 的密文、只在占位符里的
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    await remember({ uri: 'notes://bobs', content: `bob 的 ${value}` }, bob.cookie)
+    await remember({ uri: 'notes://vault', content: value, sensitivity: 'secret' })
+    expect(
+      (
+        await send('POST', '/credentials', {
+          identifier: value,
+          name: '同名的',
+          source: { kind: 'hosted', values: { password: 'other' } },
+        })
+      ).status,
+    ).toBe(201)
+    await remember({ uri: 'notes://ref', content: `{{cred:${value}}}` })
+
+    const result = await converted(m, { value })
+    expect(result.otherMemories).toBe(6)
+    expect((await rowOf(copy.id)).content).toContain(value)
+    expect(JSON.stringify(result)).not.toContain(value)
+  })
+
+  it('别的记忆里没有这个值时是 0', async () => {
+    const m = await seedNote()
+    await remember({ uri: 'notes://other', content: '没写' })
+    expect((await converted(m)).otherMemories).toBe(0)
+  })
+
   it('旧快照里残留的全文检索向量一起去掉', async () => {
     const m = await seedNote()
     await inSpace((tx) =>
