@@ -75,10 +75,10 @@ describe('换了接口主机时密钥要先说怎么处理：抽取模型与备�
 
   it('说明对着界面上的说法：能清除的提清除那个勾选框，不能清除的只说重填', () => {
     expect(newKeyHint('Key', true)).toBe(
-      '接口主机变了，已保存的 Key 不会发给新的主机：请重新填写；新接口不需要 Key 时，勾选下面的「清除已保存的 Key」',
+      '接口主机已更改，已保存的 Key 不会发送到新主机。请重新填写；新接口不需要 Key 时，请勾选下方的「清除已保存的 Key」。',
     )
     expect(newKeyHint('Secret Access Key', false)).toBe(
-      '接口主机变了，已保存的 Secret Access Key 不会发给新的主机：请重新填写',
+      '接口主机已更改，已保存的 Secret Access Key 不会发送到新主机。请重新填写。',
     )
   })
 })

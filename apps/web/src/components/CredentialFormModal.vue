@@ -18,6 +18,7 @@ import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { providerKindLabels } from '../labels'
+import Hint from './Hint.vue'
 
 // 新建与修改共用。修改时打开的那一刻记下这一版：提交用它的版本号，期间别处改过就返回冲突
 const props = defineProps<{
@@ -125,17 +126,18 @@ const appItems = computed(() =>
   props.apps
     .filter((a) => a.ownerAccountId === me.data.value?.id || form.appIds.includes(a.id))
     .map((a) => ({
-      label: a.ownerAccountId === me.data.value?.id ? a.name : `${a.name}（不是你的应用，用不了）`,
+      label:
+        a.ownerAccountId === me.data.value?.id ? a.name : `${a.name}（非当前账号的应用，不可用）`,
       value: a.id,
     })),
 )
 const sourceItems = computed(() => [
-  { label: 'Kioku 托管', description: '值由 Kioku 用主密钥加密保存', value: 'hosted' },
+  { label: 'Kioku 托管', description: '值由 Kioku 使用主密钥加密保存', value: 'hosted' },
   {
     label: '外部凭据源',
     description: props.providers.length
-      ? '值留在你的密码管理器里，Kioku 只记条目位置，agent 在本机取'
-      : '先在「凭据源」里添加你用的密码管理器',
+      ? '值保留在密码管理器中，Kioku 仅记录条目位置，由 Agent 在本机获取'
+      : '请先在「凭据源」中添加密码管理器',
     value: 'external',
     disabled: !props.providers.length,
   },
@@ -146,31 +148,31 @@ const liveHosted = computed(() => hostedRows.value.filter((r) => !r.removed))
 // 提交前在界面上能看出来的问题；服务端照样会检查
 const problem = computed<string | null>(() => {
   if (!editing.value && !validName(form.identifier)) {
-    return '标识只用小写字母、数字、_ 和 -，以字母或数字开头'
+    return '标识只能包含小写字母、数字、_ 和 -，且以字母或数字开头'
   }
   if (!form.name.trim()) return '名称不能为空'
   const rows = form.kind === 'hosted' ? liveHosted.value : externalRows.value
-  if (!rows.length) return '至少要有一个字段'
+  if (!rows.length) return '至少需要一个字段'
   // 修改托管的只发改了的字段，合并之后的总数要在这里看
   if (rows.length > MAX_CREDENTIAL_FIELDS) return `一条凭据最多 ${MAX_CREDENTIAL_FIELDS} 个字段`
   const names = rows.map((r) => r.name)
-  if (names.some((n) => !validName(n))) return '字段名只用小写字母、数字、_ 和 -'
+  if (names.some((n) => !validName(n)))
+    return '字段名只能包含小写字母、数字、_ 和 -，且以字母或数字开头'
   if (new Set(names).size !== names.length) return '字段名不能重复'
   if (form.kind === 'hosted') {
     const needsValue = liveHosted.value.filter((r) => !r.existing || switchingToHosted.value)
-    if (needsValue.some((r) => !r.value)) return '新的字段要填值'
+    if (needsValue.some((r) => !r.value)) return '请填写新字段的值'
   } else {
-    if (!form.providerId) return '选一个凭据源'
-    if (!form.location.trim()) return '填上条目位置'
-    if (externalRows.value.some((r) => !r.sourceField.trim()))
-      return '填上每个字段在条目里对应的字段'
+    if (!form.providerId) return '请选择凭据源'
+    if (!form.location.trim()) return '请填写条目位置'
+    if (externalRows.value.some((r) => !r.sourceField.trim())) return '请填写每个字段对应的条目字段'
   }
-  if (form.restrict && !form.appIds.length) return '限定应用时至少选一个'
+  if (form.restrict && !form.appIds.length) return '限定应用时至少选择一个'
   // 其余规则（长度、条目位置里不能有的字符等）直接用接口的定义检查，提示与服务端一致
   const result = editing.value
     ? UpdateCredentialRequest.safeParse(updateBody())
     : CreateCredentialRequest.safeParse(createBody())
-  return result.success ? null : (result.error.issues[0]?.message ?? '填写的内容不对')
+  return result.success ? null : (result.error.issues[0]?.message ?? '填写内容有误')
 })
 
 // 已有的字段标记删除（再点一次取消），新加的直接去掉
@@ -281,14 +283,14 @@ watch(open, (isOpen) => {
         <UFormField
           v-if="!editing"
           label="标识"
-          help="创建后不能改。记忆里用 {{cred:<标识>#<字段>}} 引用它"
+          help="创建后不可修改；记忆正文用 {{cred:<标识>#<字段>}} 引用。"
         >
           <UInput v-model="form.identifier" class="w-full font-mono" placeholder="file-server" />
         </UFormField>
         <UFormField label="名称">
           <UInput v-model="form.name" class="w-full" placeholder="文件服务器的管理账号" />
         </UFormField>
-        <UFormField label="说明" help="用途、在哪里用；会给 agent 看，不要把值写在这里">
+        <UFormField label="说明" help="填写用途与使用场景；内容会发送给 Agent，请勿写入凭据的值。">
           <UTextarea v-model="form.description" :rows="2" autoresize class="w-full" />
         </UFormField>
         <UFormField label="来源">
@@ -300,8 +302,8 @@ watch(open, (isOpen) => {
             label="字段"
             :help="
               editing && !switchingToHosted
-                ? '已有字段的值留空就是不改；值只在提交时发给服务端，界面上不再显示'
-                : '值只在提交时发给服务端，界面上不再显示'
+                ? '已有字段的值留空表示不修改；值仅在提交时发送到服务端，此处不再显示。'
+                : '值仅在提交时发送到服务端，此处不再显示。'
             "
           >
             <div class="space-y-2">
@@ -324,14 +326,14 @@ watch(open, (isOpen) => {
                   autocomplete="new-password"
                   :disabled="row.removed"
                   class="min-w-0 flex-1"
-                  :placeholder="row.existing && !switchingToHosted ? '留空不改' : '值'"
+                  :placeholder="row.existing && !switchingToHosted ? '留空表示不修改' : '值'"
                   :aria-label="`${row.name || '新字段'}的值`"
                 />
                 <UButton
                   :icon="row.removed ? icons.undelete : icons.remove"
                   color="neutral"
                   variant="ghost"
-                  :aria-label="row.removed ? '不删这个字段' : '删掉这个字段'"
+                  :aria-label="row.removed ? '保留此字段' : '删除此字段'"
                   @click="removeHostedRow(row)"
                 />
               </div>
@@ -342,7 +344,7 @@ watch(open, (isOpen) => {
                 variant="subtle"
                 @click="hostedRows.push(hostedRow())"
               >
-                加一个字段
+                添加字段
               </UButton>
             </div>
           </UFormField>
@@ -354,11 +356,11 @@ watch(open, (isOpen) => {
           </UFormField>
           <UFormField
             label="条目位置"
-            help="密码管理器里的条目名、id 或路径，例如 file-server admin"
+            help="密码管理器中的条目名、ID 或路径，例如 file-server admin"
           >
             <UInput v-model="form.location" class="w-full" />
           </UFormField>
-          <UFormField label="字段对应" help="左边是占位符里用的字段名，右边是条目里对应的字段">
+          <UFormField label="字段对应" help="左侧为占位符中的字段名，右侧为条目中对应的字段">
             <div class="space-y-2">
               <div v-for="row in externalRows" :key="row.key" class="flex items-center gap-2">
                 <UInput
@@ -370,14 +372,14 @@ watch(open, (isOpen) => {
                 <UInput
                   v-model="row.sourceField"
                   class="min-w-0 flex-1"
-                  placeholder="条目里的字段，例如 password"
-                  :aria-label="`${row.name || '新字段'}在条目里对应的字段`"
+                  placeholder="条目字段，例如 password"
+                  :aria-label="`${row.name || '新字段'}对应的条目字段`"
                 />
                 <UButton
                   :icon="icons.remove"
                   color="neutral"
                   variant="ghost"
-                  aria-label="删掉这个字段"
+                  aria-label="删除此字段"
                   @click="externalRows.splice(externalRows.indexOf(row), 1)"
                 />
               </div>
@@ -388,18 +390,21 @@ watch(open, (isOpen) => {
                 variant="subtle"
                 @click="externalRows.push(externalRow())"
               >
-                加一个字段
+                添加字段
               </UButton>
             </div>
           </UFormField>
         </template>
 
-        <UFormField
-          label="限定应用"
-          help="只给选中的应用的 Key 用（只列出你是主人的应用）。通过 Key 新建的凭据默认只给那个应用；只有这里能改"
-        >
+        <UFormField label="限定应用">
+          <template #help>
+            仅选中应用的 Key 可以取用。
+            <Hint>
+              列表仅含当前账号所有的应用。通过 Key 新建的凭据默认限定给该应用，只能在此处修改。
+            </Hint>
+          </template>
           <div class="space-y-2">
-            <USwitch v-model="form.restrict" label="只给部分应用用" />
+            <USwitch v-model="form.restrict" label="仅限部分应用" />
             <USelect
               v-if="form.restrict"
               v-model="form.appIds"
