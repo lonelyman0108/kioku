@@ -21,6 +21,7 @@ const label = computed(() => actorLabel(props.actor))
 
 <style scoped>
 .actor-app {
+  display: inline-block;
   margin-right: 4px;
   vertical-align: -2px;
   color: var(--ui-text-muted);
