@@ -1,2 +1,268 @@
 @import 'tailwindcss';
 @import '@nuxt/ui';
+
+@theme static {
+  /* 只用系统字体栈：不打包字体，不向第三方请求 */
+  --font-sans:
+    -apple-system, BlinkMacSystemFont, 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC',
+    sans-serif;
+  --font-mono: 'SF Mono', Menlo, Consolas, 'Noto Sans Mono CJK SC', monospace;
+
+  /* 中文行距要比 Tailwind 的默认值松 */
+  --text-xs--line-height: 1.5;
+  --text-sm--line-height: 1.6;
+
+  /* 不用阴影做层次，用线：整组去掉，组件和老页面写的 shadow-* 都不再生效 */
+  --shadow-*: initial;
+
+  /*
+   * Nuxt UI 的语义色从这些色阶里取（theme.ts 的 colors）。浅色主题取 500，深色主题取 400，
+   * 所以这两档直接定成两套主题里当文字用的颜色，都要在各自的底色上过 4.5:1
+   */
+
+  /* 墨：primary。浅色主题要 900，深色主题要 100，在下面单独映射 */
+  --color-ink-50: #f3f3ef;
+  --color-ink-100: #e3e4dd;
+  --color-ink-200: #cacbc3;
+  --color-ink-300: #a9aaa1;
+  --color-ink-400: #86877c;
+  --color-ink-500: #66675c;
+  --color-ink-600: #4f5046;
+  --color-ink-700: #3f4038;
+  --color-ink-800: #33342d;
+  --color-ink-900: #2a2b26;
+  --color-ink-950: #1b1c18;
+
+  /* 纸：neutral */
+  --color-paper-50: #f8f7f0;
+  --color-paper-100: #f1efe4;
+  --color-paper-200: #e6e3d4;
+  --color-paper-300: #d6d3c2;
+  --color-paper-400: #b9b6a4;
+  --color-paper-500: #8f8e7e;
+  --color-paper-600: #6b6c60;
+  --color-paper-700: #5b5c51;
+  --color-paper-800: #44453c;
+  --color-paper-900: #2a2b26;
+  --color-paper-950: #1a1b17;
+
+  /* 砖红：error，也是全站唯一的强调色 */
+  --color-brick-50: #fbf1ed;
+  --color-brick-100: #f6ddd3;
+  --color-brick-200: #efc2b0;
+  --color-brick-300: #eba58e;
+  --color-brick-400: #e88b6e;
+  --color-brick-500: #a5442c;
+  --color-brick-600: #8c3823;
+  --color-brick-700: #722d1c;
+  --color-brick-800: #5a2416;
+  --color-brick-900: #451c11;
+  --color-brick-950: #2a100a;
+
+  /* 赭：warning，和个人画像层同一族 */
+  --color-ochre-50: #faf5e6;
+  --color-ochre-100: #f3e8c8;
+  --color-ochre-200: #e8d59c;
+  --color-ochre-300: #dfc382;
+  --color-ochre-400: #d8b56b;
+  --color-ochre-500: #7f5e14;
+  --color-ochre-600: #6a4e10;
+  --color-ochre-700: #563f0d;
+  --color-ochre-800: #43310a;
+  --color-ochre-900: #332507;
+  --color-ochre-950: #1f1704;
+
+  /* 苔：success，和人格层同一族 */
+  --color-moss-50: #eff6f1;
+  --color-moss-100: #dcebe1;
+  --color-moss-200: #bfdac8;
+  --color-moss-300: #a3cbb2;
+  --color-moss-400: #8fc2a1;
+  --color-moss-500: #3f6b4f;
+  --color-moss-600: #345a42;
+  --color-moss-700: #2a4835;
+  --color-moss-800: #213829;
+  --color-moss-900: #192b20;
+  --color-moss-950: #0f1a13;
+
+  /* 湖：info，和基础层同一族 */
+  --color-lake-50: #eef4f7;
+  --color-lake-100: #dae7ee;
+  --color-lake-200: #bdd3df;
+  --color-lake-300: #a5c4d4;
+  --color-lake-400: #94bacd;
+  --color-lake-500: #3a6478;
+  --color-lake-600: #2f5364;
+  --color-lake-700: #264351;
+  --color-lake-800: #1e3540;
+  --color-lake-900: #172932;
+  --color-lake-950: #0e191f;
+}
+
+/* 地层的编码也做成工具类：bg-layer-private、border-rule 这样写，主题切换时跟着变 */
+@theme inline {
+  --color-layer-base: var(--layer-base);
+  --color-layer-persona: var(--layer-persona);
+  --color-layer-app: var(--layer-app);
+  --color-layer-owner: var(--layer-owner);
+  --color-layer-private: var(--layer-private);
+  --color-layer-subject: var(--layer-subject);
+  --color-layer-episode: var(--layer-episode);
+  --color-rule: var(--strata-rule);
+  --color-solid: var(--strata-solid);
+  --color-on-solid: var(--strata-on-solid);
+  --color-on-layer: var(--strata-on-layer);
+  --color-scrim: var(--strata-scrim);
+  --color-selected: var(--strata-selected);
+  --color-on-selected: var(--strata-on-selected);
+  --color-on-selected-muted: var(--strata-on-selected-muted);
+}
+
+:root,
+.light {
+  /* 7 个层色：颜色表示层 */
+  --layer-base: #94aebb;
+  --layer-persona: #8fb29a;
+  --layer-app: #b3c183;
+  --layer-owner: #e0c37f;
+  --layer-private: #d39a80;
+  --layer-subject: #afa3bd;
+  --layer-episode: #c8bfd0;
+
+  /* 结构线用墨；压在层色上的线和文字；机密的实心深色 */
+  --strata-rule: #2a2b26;
+  --strata-band-line: #2a2b26;
+  --strata-frame: #2a2b26;
+  --strata-on-layer: #2a2b26;
+  --strata-solid: #2e2a26;
+  --strata-on-solid: #f1efe4;
+  /* 纹理：内部圆点、私密斜线的颜色。公开无纹理，机密是实心 */
+  --strata-texture: rgba(42, 43, 38, 0.5);
+  /* 不带层的图例底色；只读格子是层色和纸按这个比例混出来的淡色 */
+  --strata-neutral: #dedbca;
+  --strata-tint: 52%;
+  /* 选中行反白 */
+  --strata-selected: #2a2b26;
+  --strata-on-selected: #f1efe4;
+  --strata-on-selected-muted: #c9c7ba;
+  --strata-selected-frame: #f1efe4;
+  --strata-scrim: rgba(18, 20, 18, 0.45);
+
+  /* 映射到 Nuxt UI */
+  --ui-radius: 0rem;
+  --ui-header-height: 2.75rem;
+  --ui-primary: var(--ui-color-primary-900);
+  --ui-bg: #f1efe4;
+  --ui-bg-muted: #ebe9dc;
+  --ui-bg-elevated: #e6e3d4;
+  --ui-bg-accented: #dedbca;
+  --ui-bg-inverted: #2a2b26;
+  --ui-text-dimmed: #66675c;
+  --ui-text-muted: #5b5c51;
+  --ui-text-toned: #44453c;
+  --ui-text: #2a2b26;
+  --ui-text-highlighted: #2a2b26;
+  --ui-text-inverted: #f1efe4;
+  --ui-border: #d6d3c2;
+  --ui-border-muted: #e0ddcd;
+  --ui-border-accented: #b9b6a4;
+  --ui-border-inverted: #2a2b26;
+}
+
+/* 夜间地图：层色整体提亮并降饱和，墨线变浅灰。选中不用反白，晚上太刺眼 */
+.dark {
+  --layer-base: #9fb5c1;
+  --layer-persona: #9cbba8;
+  --layer-app: #bac794;
+  --layer-owner: #d8c48f;
+  --layer-private: #d3a690;
+  --layer-subject: #b4a9c5;
+  --layer-episode: #cac3d5;
+
+  --strata-rule: #7e8483;
+  --strata-band-line: #14181b;
+  --strata-frame: #7e8483;
+  --strata-on-layer: #14181b;
+  /* 真正的深色和页面底色分不开，机密用比底色亮的石板灰 */
+  --strata-solid: #3f464a;
+  --strata-on-solid: #e3e4dd;
+  --strata-texture: rgba(20, 24, 27, 0.55);
+  --strata-neutral: #aeb3b0;
+  --strata-tint: 40%;
+  --strata-selected: #333b40;
+  --strata-on-selected: #f0f1eb;
+  --strata-on-selected-muted: #bcc0bc;
+  --strata-selected-frame: #0e1113;
+  --strata-scrim: rgba(5, 7, 8, 0.62);
+
+  --ui-primary: var(--ui-color-primary-100);
+  --ui-bg: #14181b;
+  --ui-bg-muted: #191e21;
+  --ui-bg-elevated: #20262a;
+  --ui-bg-accented: #2b3135;
+  --ui-bg-inverted: #e3e4dd;
+  --ui-text-dimmed: #8f9491;
+  --ui-text-muted: #a2a6a3;
+  --ui-text-toned: #c5c8c3;
+  --ui-text: #e3e4dd;
+  --ui-text-highlighted: #f0f1eb;
+  --ui-text-inverted: #14181b;
+  --ui-border: #2b3135;
+  --ui-border-muted: #252b2e;
+  --ui-border-accented: #4a5054;
+  --ui-border-inverted: #e3e4dd;
+}
+
+@layer base {
+  html {
+    font-synthesis: none;
+    line-break: strict;
+    font-variant-numeric: tabular-nums;
+  }
+
+  body {
+    font-size: var(--text-sm);
+    line-height: 1.7;
+  }
+
+  p {
+    text-wrap: pretty;
+  }
+
+  /* 中文不用斜体：系统字体没有真正的斜体，靠合成也关掉了 */
+  i,
+  em {
+    font-style: normal;
+  }
+
+  ::selection {
+    background: var(--layer-owner);
+    color: #2a2b26;
+  }
+
+  * {
+    scrollbar-width: thin;
+    scrollbar-color: var(--ui-border-accented) transparent;
+  }
+}
+
+/*
+ * 下面两条不进 layer，压过组件的工具类：
+ * 焦点框全站一个样子，组件默认的半透明外发光不要；老页面零散写的 rounded 也归零
+ */
+:where(
+  a,
+  button,
+  summary,
+  [tabindex],
+  [role='button'],
+  [role='tab'],
+  [role='menuitem']
+):focus-visible {
+  outline: 2px solid var(--ui-text-highlighted);
+  outline-offset: 2px;
+}
+
+.rounded {
+  border-radius: 0;
+}

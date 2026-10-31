@@ -8,5 +8,5 @@
       "#build/ui": ["./node_modules/.nuxt-ui/ui"]
     }
   },
-  "include": ["vite.config.ts", "src/icons.ts"]
+  "include": ["vite.config.ts", "src/icons.ts", "src/theme.ts"]
 }
