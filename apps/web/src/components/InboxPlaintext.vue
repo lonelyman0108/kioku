@@ -1,13 +1,14 @@
 <script setup lang="ts">
-import type { MemoryListItem } from '@kioku/contracts'
+import { placeholderAllowed, type MemoryListItem } from '@kioku/contracts'
 import { useInfiniteQuery } from '@tanstack/vue-query'
 import { computed, ref, toRef, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { usePlaintextActions } from '../composables/usePlaintextActions'
+import { CONVERT_SCOPE_TEXT } from '../plaintext'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import ConvertCredentialModal from './ConvertCredentialModal.vue'
@@ -50,6 +51,8 @@ function openConvert(item: MemoryListItem) {
   converting.value = item.uri
   convertOpen.value = true
 }
+// 占位符放不进这条记忆时，转存一定失败：这一行的操作换成去调整它
+const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, item.sensitivity)
 </script>
 
 <template>
@@ -65,13 +68,17 @@ function openConvert(item: MemoryListItem) {
     <div class="plain-bar">
       <UTabs v-model="filter" :items="filters" :content="false" size="sm" class="w-auto" />
     </div>
-    <NoteLine v-if="list.isError.value && !list.data.value" class="plain-note" tone="error">
-      {{ list.error.value instanceof ApiError ? list.error.value.message : '读取失败' }}
+    <NoteLine
+      v-if="list.isError.value && !list.isFetchNextPageError.value"
+      class="plain-note"
+      tone="error"
+    >
+      {{ readFailure(list.error.value) }}
     </NoteLine>
-    <div v-else-if="list.isPending.value" class="mt-3 space-y-3">
+    <div v-if="list.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 3" :key="n" class="h-12 w-full" />
     </div>
-    <template v-else>
+    <template v-else-if="list.data.value">
       <p v-if="!items.length" class="plain-empty">
         {{ filter === 'true' ? '暂无疑似明文凭据' : '暂无已忽略的提示' }}
       </p>
@@ -89,12 +96,33 @@ function openConvert(item: MemoryListItem) {
             <time :datetime="item.updatedAt" :title="formatTime(item.updatedAt)">
               更新于 {{ formatRelative(item.updatedAt) }}
             </time>
+            <span
+              v-if="filter === 'true' && !permissions.readOnlyReason(item) && !convertible(item)"
+              class="plain-blocked"
+            >
+              需先调整才能转存<Hint>{{ CONVERT_SCOPE_TEXT }}</Hint>
+            </span>
           </p>
           <div v-if="!permissions.readOnlyReason(item)" class="plain-actions">
             <template v-if="filter === 'true'">
-              <UButton @click="openConvert(item)">转存为凭据</UButton>
               <UButton
-                color="primary"
+                v-if="convertible(item)"
+                color="neutral"
+                variant="outline"
+                @click="openConvert(item)"
+              >
+                转存为凭据
+              </UButton>
+              <UButton
+                v-else
+                color="neutral"
+                variant="outline"
+                :to="memoryRoute(spaceId, item.uri)"
+              >
+                查看记忆
+              </UButton>
+              <UButton
+                color="neutral"
                 variant="outline"
                 :loading="actions.busy.value === item.id"
                 :disabled="actions.busy.value !== null"
@@ -105,7 +133,7 @@ function openConvert(item: MemoryListItem) {
             </template>
             <UButton
               v-else
-              color="primary"
+              color="neutral"
               variant="outline"
               :loading="actions.busy.value === item.id"
               :disabled="actions.busy.value !== null"
@@ -116,6 +144,9 @@ function openConvert(item: MemoryListItem) {
           </div>
         </li>
       </ul>
+      <div v-if="list.isFetchNextPageError.value" class="mt-3">
+        <NoteLine tone="error">{{ readFailure(list.error.value) }}</NoteLine>
+      </div>
       <div v-if="list.hasNextPage.value" class="mt-4 flex justify-center">
         <UButton
           color="neutral"
@@ -150,7 +181,8 @@ function openConvert(item: MemoryListItem) {
 }
 .plain-row {
   display: grid;
-  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) auto;
+  /* 操作列留够最宽的一组按钮，各行的中间一列才对得齐 */
+  grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(140px, auto);
   align-items: center;
   gap: 8px 24px;
   min-height: 60px;
@@ -180,8 +212,14 @@ function openConvert(item: MemoryListItem) {
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
 }
+.plain-blocked {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+}
 .plain-actions {
   display: flex;
+  justify-content: flex-end;
   gap: 6px;
 }
 @media (max-width: 1023.98px) {

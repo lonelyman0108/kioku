@@ -1,7 +1,8 @@
-import type { AppRecallVolume, DebugCandidate } from '@kioku/contracts'
+import type { AppInfo, AppRecallVolume, DebugCandidate, KeyInfo } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { recallTotal, scoreAxis, scoreParts, volumeBars } from '../recall'
+import { ApiError } from '../api/client'
+import { debugKeyChoices, recallTotal, scoreAxis, scoreParts, volumeBars } from '../recall'
 
 const volume = (total: number, sources: [string, number][] = []): AppRecallVolume =>
   ({
@@ -10,6 +11,51 @@ const volume = (total: number, sources: [string, number][] = []): AppRecallVolum
     total,
     sources: sources.map(([source, count]) => ({ source, count })),
   }) as AppRecallVolume
+
+describe('调试能选的 Key', () => {
+  const app = (id: string) => ({ id, name: id }) as AppInfo
+  const key = (id: string, effective = true) =>
+    ({ id, effectiveScopes: effective ? { readLayers: [] } : null }) as KeyInfo
+  const loaded = (...keys: KeyInfo[]) => ({ data: keys, isError: false, error: null })
+  const failed = (data?: KeyInfo[]) => ({
+    data,
+    isError: true,
+    error: new ApiError(404, '应用不存在'),
+  })
+
+  it('只要有效的 Key', () => {
+    const { options, failures } = debugKeyChoices(
+      [app('a')],
+      [loaded(key('live'), key('voided', false))],
+    )
+    expect(options.map((o) => o.key.id)).toEqual(['live'])
+    expect(failures).toEqual([])
+  })
+
+  it('一个应用读取失败不挡别的应用，失败的单独说', () => {
+    const { options, failures } = debugKeyChoices(
+      [app('gone'), app('ok')],
+      [failed(), loaded(key('k1'))],
+    )
+    expect(options.map((o) => [o.app.id, o.key.id])).toEqual([['ok', 'k1']])
+    expect(failures.map((f) => [f.app.id, f.text])).toEqual([['gone', '应用不存在']])
+  })
+
+  it('读到过又刷新失败：手里的 Key 照样能选，错误也要说', () => {
+    const { options, failures } = debugKeyChoices([app('a')], [failed([key('k1')])])
+    expect(options.map((o) => o.key.id)).toEqual(['k1'])
+    expect(failures).toHaveLength(1)
+  })
+
+  it('还在读的不算失败，也没有选项', () => {
+    const { options, failures } = debugKeyChoices(
+      [app('a')],
+      [{ data: undefined, isError: false, error: null }],
+    )
+    expect(options).toEqual([])
+    expect(failures).toEqual([])
+  })
+})
 
 describe('各应用的调用量', () => {
   it('最长的一条占满，别的按平方根：小应用也看得清', () => {

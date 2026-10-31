@@ -3,8 +3,9 @@ import { ACCESS_CONTEXTS, type AccessContext, type KeyInfo } from '@kioku/contra
 import { useQuery } from '@tanstack/vue-query'
 import { computed, useId } from 'vue'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
+import { KEY_MATRIX_STALE_TIME, keyMatrixKey } from '../appQueries'
 import { isNarrowed } from '../apps'
 import { accessContextLabels, accessContextShortLabels, originScopeLabels } from '../labels'
 import Hint from './Hint.vue'
@@ -18,8 +19,9 @@ const props = defineProps<{ spaceId: string; appId: string; keyInfo: KeyInfo }>(
 const context = defineModel<AccessContext>('context', { required: true })
 
 const matrix = useQuery({
-  queryKey: computed(() => ['key-matrix', props.spaceId, props.appId, props.keyInfo.id]),
-  queryFn: () => api.keyMatrix(props.spaceId, props.appId, props.keyInfo.id),
+  queryKey: computed(() => keyMatrixKey(props.spaceId, props.appId, props.keyInfo)),
+  queryFn: ({ queryKey: [, sid, aid, kid] }) => api.keyMatrix(sid, aid, kid),
+  staleTime: KEY_MATRIX_STALE_TIME,
 })
 const rowsOf = (c: AccessContext) =>
   matrix.data.value?.contexts.find((entry) => entry.context === c)?.rows ?? null
@@ -49,11 +51,11 @@ const groupName = useId()
       当前有效范围小于签发范围，已按所有者当前角色收紧
     </NoteLine>
 
-    <NoteLine v-if="matrix.isError.value && !matrix.data.value" class="key-note" tone="error">
-      {{ matrix.error.value instanceof ApiError ? matrix.error.value.message : '读取失败' }}
+    <NoteLine v-if="matrix.isError.value" class="key-note" tone="error">
+      {{ readFailure(matrix.error.value) }}
     </NoteLine>
-    <USkeleton v-else-if="!current" class="mt-3 h-72 w-full" />
-    <template v-else>
+    <USkeleton v-if="matrix.isPending.value" class="mt-3 h-72 w-full" />
+    <template v-else-if="current">
       <div class="ctxs" role="radiogroup" aria-label="会话上下文">
         <label
           v-for="c in ACCESS_CONTEXTS"

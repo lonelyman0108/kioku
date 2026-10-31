@@ -1,8 +1,33 @@
-import type { AppRecallVolume, DebugCandidate, RecallSource } from '@kioku/contracts'
+import type {
+  AppInfo,
+  AppRecallVolume,
+  DebugCandidate,
+  KeyInfo,
+  RecallSource,
+} from '@kioku/contracts'
 
+import { readFailure } from './api/client'
+import { usableKeys } from './benchSession'
 import { recallSourceLabels } from './labels'
 
 // 召回页的计算：各应用的调用量、分数轴
+
+// 调试能选的 Key：只来自传进来的应用（当前账号是所有者的），只要有效的。一个应用的 Key 读取失败不影响别的应用，
+// 失败的单独列出来；读到过又刷新失败的，手里的 Key 照样能选。results 和 apps 一一对应
+export function debugKeyChoices(
+  apps: readonly AppInfo[],
+  results: readonly { data?: KeyInfo[] | undefined; isError: boolean; error: unknown }[],
+) {
+  return {
+    options: apps.flatMap((app, i) =>
+      usableKeys(results[i]?.data ?? []).map((key) => ({ app, key })),
+    ),
+    failures: apps.flatMap((app, i) => {
+      const result = results[i]
+      return result?.isError ? [{ app, text: readFailure(result.error) }] : []
+    }),
+  }
+}
 
 // 一个应用的调用量条里的一段：按来路分，占这个应用总量的比例
 export interface VolumeSegment {

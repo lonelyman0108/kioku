@@ -6,6 +6,10 @@ import {
 
 // 转存为凭据的对话框：猜出来的值、建议的标识、值在正文里的位置和次数
 
+// 占位符放不进这条记忆时的说明：列表、详情和对话框共用
+export const CONVERT_SCOPE_TEXT =
+  '凭据占位符只能放在私人层、敏感级不低于私密的记忆中。请先调整这条记忆的层与敏感级，再转存。'
+
 // 疑似明文的一处。值的结尾是规则猜的，要让人看过再提交
 export interface PlaintextCandidate {
   value: string

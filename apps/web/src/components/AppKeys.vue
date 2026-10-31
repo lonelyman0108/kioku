@@ -10,7 +10,7 @@ import {
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, toRef, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { effectiveNote } from '../apps'
 import { useCopy } from '../composables/useCopy'
@@ -47,12 +47,10 @@ const keys = useQuery({
 const live = computed(() => (keys.data.value ?? []).filter((key) => !key.revokedAt))
 const revoked = computed(() => (keys.data.value ?? []).filter((key) => key.revokedAt))
 // 每个还有效的 Key 一根岩芯，画的是无上下文时的实际范围
-const { rowsOf } = useKeyMatrices(
+const { rowsOf, failureOf } = useKeyMatrices(
   toRef(props, 'spaceId'),
   computed(() =>
-    live.value
-      .filter((key) => key.effectiveScopes)
-      .map((key) => ({ appId: props.appId, keyId: key.id })),
+    live.value.filter((key) => key.effectiveScopes).map((key) => ({ appId: props.appId, key })),
   ),
 )
 
@@ -149,11 +147,11 @@ async function revoke() {
     </SectionHeading>
     <p v-if="!isAppOwner && !isSpaceOwner" class="keys-empty">仅应用所有者可查看和签发 Key</p>
     <template v-else>
-      <NoteLine v-if="keys.isError.value && !keys.data.value" class="keys-failed" tone="error">
-        {{ keys.error.value instanceof ApiError ? keys.error.value.message : '读取失败' }}
+      <NoteLine v-if="keys.isError.value" class="keys-failed" tone="error">
+        {{ readFailure(keys.error.value) }}
       </NoteLine>
-      <USkeleton v-else-if="keys.isPending.value" class="mt-3 h-24 w-full" />
-      <p v-else-if="!keys.data.value?.length" class="keys-empty">暂无 Key</p>
+      <USkeleton v-if="keys.isPending.value" class="mt-3 h-24 w-full" />
+      <p v-else-if="keys.data.value && !keys.data.value.length" class="keys-empty">暂无 Key</p>
       <ul>
         <li v-for="key in live" :key="key.id" class="key-row" :class="{ on: key.id === selected }">
           <!-- 已作废的 Key 没有权限范围可看，只能吊销 -->
@@ -179,6 +177,9 @@ async function revoke() {
               </span>
               <span v-else>尚未使用</span>
               <span v-if="effectiveNote(key)" class="key-note">{{ effectiveNote(key) }}</span>
+              <span v-if="failureOf(key.id)" class="key-note">
+                权限范围：{{ failureOf(key.id) }}
+              </span>
             </span>
           </component>
           <UButton

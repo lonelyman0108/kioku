@@ -10,6 +10,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { createSSRApp, defineComponent, h } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
+import { keyMatrixKey } from '../../appQueries'
 import {
   accessContextLabels,
   layerLabels,
@@ -64,7 +65,7 @@ const expected = ['读写', '仅按 URI 读取', '读写', '仅按 URI 读取', 
 
 function render(context: (typeof ACCESS_CONTEXTS)[number], key = keyInfo()) {
   const queryClient = new QueryClient()
-  queryClient.setQueryData(['key-matrix', 's1', 'a1', key.id], matrix)
+  queryClient.setQueryData(keyMatrixKey('s1', 'a1', key), matrix)
   const app = createSSRApp(KeyMatrix, {
     spaceId: 's1',
     appId: 'a1',

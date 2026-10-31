@@ -1,10 +1,11 @@
 <script setup lang="ts">
 import type { BootPreview } from '@kioku/contracts'
+import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { bootUsage } from '../apps'
+import { bootUsage, simulatorState } from '../apps'
 import { layerShortLabels } from '../labels'
 import { memoryRoute } from '../routes'
 import Hint from './Hint.vue'
@@ -22,6 +23,19 @@ const props = defineProps<{
   keyId: string | undefined
   settings: string
 }>()
+
+// 和左边的 Key 列表同一份缓存：没有选中的 Key 时，靠它分清是还在读、读取失败，还是真的没有有效 Key。
+// 这里只说读不到的情况：读到过又刷新失败时，左边的列表已经说了
+const keys = useQuery({
+  queryKey: computed(() => ['keys', props.spaceId, props.appId] as const),
+  queryFn: ({ queryKey: [, sid, aid] }) => api.keys(sid, aid),
+})
+const state = computed(() =>
+  simulatorState(
+    { isPending: keys.isPending.value, hasData: Boolean(keys.data.value) },
+    props.keyId,
+  ),
+)
 
 const failure = ref<string | null>(null)
 // 每次模拟一个序号，current 是进行中的那次：结果、报错与 loading 都只认它；
@@ -106,7 +120,11 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
       </template>
     </SectionHeading>
 
-    <p v-if="!keyId" class="boot-empty">暂无有效 Key。签发后可模拟。</p>
+    <USkeleton v-if="state === 'loading'" class="mt-3 h-40 w-full" />
+    <NoteLine v-else-if="state === 'failed'" class="boot-note" tone="error">
+      {{ readFailure(keys.error.value) }}
+    </NoteLine>
+    <p v-else-if="state === 'none'" class="boot-empty">暂无有效 Key。签发后可模拟。</p>
     <template v-else>
       <NoteLine v-if="failure" class="boot-note" tone="error">{{ failure }}</NoteLine>
       <USkeleton v-if="running && !preview" class="mt-3 h-40 w-full" />
@@ -147,49 +165,50 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
         <p v-if="preview.omitted.length" class="boot-omitted">
           超出预算、未展开：<span class="font-mono">{{ preview.omitted.join('、') }}</span>
         </p>
-
-        <div class="boot-subs">
-          <div>
-            <SectionHeading title="近期更新" :level="3" class="boot-sub-head" />
-            <ul v-if="preview.recent.length" class="boot-list">
-              <li v-for="memory in preview.recent" :key="memory.uri">
-                <RouterLink :to="memoryLink(memory.uri)" class="boot-uri">
-                  <UriPath :uri="memory.uri" />
-                </RouterLink>
-              </li>
-            </ul>
-            <p v-else class="boot-empty">暂无</p>
-          </div>
-          <div>
-            <SectionHeading title="与当前项目相关" :level="3" class="boot-sub-head">
-              <template #hint>
-                <Hint>目录名与仓库名用于召回与当前项目相关的记忆，可留空。</Hint>
-              </template>
-            </SectionHeading>
-            <form class="boot-project" @submit.prevent="runPreview">
-              <UInput v-model="project.dirName" placeholder="目录名" aria-label="目录名" />
-              <UInput v-model="project.repoName" placeholder="仓库名" aria-label="仓库名" />
-              <UButton type="submit" color="primary" variant="outline" :loading="running">
-                预览
-              </UButton>
-            </form>
-            <ul v-if="preview.related.length" class="boot-list">
-              <li v-for="candidate in preview.related" :key="candidate.uri">
-                <StrataSwatch :layer="candidate.layer" plain />
-                <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri">
-                  <UriPath :uri="candidate.uri" />
-                </RouterLink>
-                <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>
-              </li>
-            </ul>
-          </div>
-        </div>
-
-        <details class="boot-raw">
-          <summary>客户端收到的原文</summary>
-          <pre>{{ preview.context }}</pre>
-        </details>
       </template>
+
+      <div class="boot-subs">
+        <div v-if="preview">
+          <SectionHeading title="近期更新" :level="3" class="boot-sub-head" />
+          <ul v-if="preview.recent.length" class="boot-list">
+            <li v-for="memory in preview.recent" :key="memory.uri">
+              <RouterLink :to="memoryLink(memory.uri)" class="boot-uri">
+                <UriPath :uri="memory.uri" />
+              </RouterLink>
+            </li>
+          </ul>
+          <p v-else class="boot-empty">暂无</p>
+        </div>
+        <div>
+          <SectionHeading title="与当前项目相关" :level="3" class="boot-sub-head">
+            <template #hint>
+              <Hint>目录名与仓库名用于召回与当前项目相关的记忆，可留空。</Hint>
+            </template>
+          </SectionHeading>
+          <!-- 表单一直在：第一次预览失败时，这里也是重试的地方 -->
+          <form class="boot-project" @submit.prevent="runPreview">
+            <UInput v-model="project.dirName" placeholder="目录名" aria-label="目录名" />
+            <UInput v-model="project.repoName" placeholder="仓库名" aria-label="仓库名" />
+            <UButton type="submit" color="primary" variant="outline" :loading="running">
+              预览
+            </UButton>
+          </form>
+          <ul v-if="preview?.related.length" class="boot-list">
+            <li v-for="candidate in preview.related" :key="candidate.uri">
+              <StrataSwatch :layer="candidate.layer" plain />
+              <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri">
+                <UriPath :uri="candidate.uri" />
+              </RouterLink>
+              <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>
+            </li>
+          </ul>
+        </div>
+      </div>
+
+      <details v-if="preview" class="boot-raw">
+        <summary>客户端收到的原文</summary>
+        <pre>{{ preview.context }}</pre>
+      </details>
     </template>
 
     <div class="boot-links">

@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
+import { QueryClient } from '@tanstack/vue-query'
+
 import apps from '../apps?raw'
+import { KEY_MATRIX_STALE_TIME, forgetApp, keyMatrixKey, refreshAppCaches } from '../appQueries'
+import appGroupPersonas from '../components/AppGroupPersonas.vue?raw'
 import appKeys from '../components/AppKeys.vue?raw'
+import appRecallEvents from '../components/AppRecallEvents.vue?raw'
 import appSimulator from '../components/AppSimulator.vue?raw'
 import convertModal from '../components/ConvertCredentialModal.vue?raw'
 import dreamSuggestions from '../components/DreamSuggestions.vue?raw'
@@ -12,8 +17,11 @@ import inboxReview from '../components/InboxReview.vue?raw'
 import keyMatrix from '../components/KeyMatrix.vue?raw'
 import memoryEditor from '../components/MemoryEditor.vue?raw'
 import recallDebugPanel from '../components/RecallDebugPanel.vue?raw'
+import recentChange from '../components/RecentChange.vue?raw'
 import subjectBindings from '../components/SubjectBindings.vue?raw'
+import useConvertCredential from '../composables/useConvertCredential?raw'
 import useInboxCounts from '../composables/useInboxCounts?raw'
+import useKeyMatrices from '../composables/useKeyMatrices?raw'
 import usePlaintextActions from '../composables/usePlaintextActions?raw'
 import dream from '../dream?raw'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
@@ -108,8 +116,9 @@ describe('路由和入口', () => {
   })
 
   it('导航指向待处理，角标用共享的条数', () => {
+    expect(consoleLayout).toContain("link('inbox', icons.review), count: inboxBadge.value")
     expect(consoleLayout).toContain(
-      "link('inbox', icons.review), count: inboxCounts.data.value?.total",
+      'actionableInboxCount(inboxCounts.data.value, space.value.role)',
     )
     expect(consoleLayout).toContain('useInboxCounts(')
   })
@@ -156,7 +165,7 @@ describe('处理完待办之后条数失效', () => {
     )![0]
     expect(refresh).toContain("'inbox-counts'")
     expect(usePlaintextActions).toContain('refreshAfterPlaintext(queryClient, sid, memory)')
-    expect(convertModal).toContain('refreshAfterPlaintext(queryClient, sid, done.memory)')
+    expect(useConvertCredential).toContain('refreshAfterPlaintext(queryClient, sid, done.memory)')
   })
 })
 
@@ -258,7 +267,6 @@ describe('转存对话框', () => {
     expect(input.tag).toBe('UInput')
     expect(input.props?.find((p) => p.name === 'model')?.exp?.content).toBe('form.value')
     expect(attr(input, 'autocomplete')).toBe('new-password')
-    expect(convertModal).toContain('const shown = ref(false)')
     expect(
       handler(
         elements.find((el) => bound(el, 'aria-pressed') === 'shown')!,
@@ -267,48 +275,50 @@ describe('转存对话框', () => {
     ).toBe('shown = !shown')
   })
 
-  it('显示过当前的值才能提交；隐藏之后改过要再显示一次', () => {
-    expect(convertModal).toContain(
-      "if (checkedValue.value !== form.value) return '请先显示并核对值'",
-    )
-    expect(convertModal).toMatch(
-      /watch\(\[shown, \(\) => form\.value\], \(\) => \{\s+if \(shown\.value\) checkedValue\.value = form\.value/,
-    )
-    expect(convertModal).toContain('if (submitting.value || problem.value || !memory.value) return')
-    expect(bound(buttonOf(convertModal, '转存为凭据'), 'disabled')).toBe(
-      '!memory || Boolean(problem)',
-    )
+  it('能不能提交由 canSubmit 定，规则都在 useConvertCredential 里（有行为用例）', () => {
+    expect(bound(buttonOf(convertModal, '转存为凭据'), 'disabled')).toBe('!canSubmit')
+    expect(handler(buttonOf(convertModal, '转存为凭据'), 'click')).toBe('submit')
   })
 
-  it('前后文只在显示时给：遮盖时不露出值的后半段', () => {
-    expect(convertModal).toContain(
-      'const context = computed(() => (shown.value ? valueContext(content.value, form.value) : null))',
-    )
+  it('占位符放不进这条记忆时：不渲染值，没有提交按钮，有查看记忆的入口', () => {
+    const elementsOfBlock = elementsOf(convertModal)
+    const block = elementsOfBlock.find(
+      (el) => el.props?.find((p) => p.name === 'else-if')?.exp?.content === 'memory && blocked',
+    )!
+    const inside = (node: TemplateNode): TemplateNode[] => [
+      node,
+      ...(node.children ?? []).flatMap(inside),
+    ]
+    const tags = inside(block)
+    expect(tags.some((el) => el.tag === 'UInput')).toBe(false)
+    const link = tags.find((el) => el.tag === 'UButton')!
+    expect(bound(link, 'to')).toBe('memoryRoute(spaceId, memory.uri)')
+    expect(textOf(link)).toBe('查看记忆')
+    expect(
+      buttonOf(convertModal, '转存为凭据').props?.find((p) => p.name === 'if')?.exp?.content,
+    ).toBe('!blocked')
   })
 
-  it('规则用接口的定义，提示和服务端一致；错误按服务端的文字显示', () => {
-    expect(convertModal).toContain('ConvertToCredentialRequest.safeParse(body.value)')
-    expect(convertModal).toContain(
-      "failure.value = err instanceof ApiError ? err.message : '转存失败'",
-    )
+  it('读取失败时能再试', () => {
+    const failed = elements.find(
+      (el) => el.props?.find((p) => p.name === 'else-if')?.exp?.content === 'loadFailure',
+    )!
+    expect(JSON.stringify(failed)).toContain('重新读取')
   })
 
-  it('提交带着打开时读到的版本', () => {
-    expect(convertModal).toContain('expectedVersion: memory.value?.version ?? 0')
-    expect(convertModal).toContain('staleTime: 0')
+  it('重新读取的入口只在 canReload 时给', () => {
+    expect(convertModal).toContain('<template v-if="canReload" #actions>')
+    expect(useConvertCredential).toContain('latest.version !== seen.version')
+    expect(useConvertCredential).not.toContain('err.status === 400')
   })
 
-  it('值不留在组件里：提交成功和关上时都清掉', () => {
-    const submit = /async function submit\(\) \{[\s\S]*?\n\}/.exec(convertModal)![0]
-    expect(submit).toContain("form.value = ''")
-    const reset = /function reset\(\) \{[\s\S]*?\n\}/.exec(convertModal)![0]
-    expect(reset).toContain("value: ''")
-    expect(convertModal).toMatch(/watch\(open, \(isOpen\) => \{\s+reset\(\)/)
+  it('规则用接口的定义，提示和服务端一致', () => {
+    expect(useConvertCredential).toContain('ConvertToCredentialRequest.safeParse(body.value)')
   })
 
   it('结果里写出遗留：历史里的版本和别的记忆', () => {
-    expect(convertModal).toContain('convertLeftovers(result.value)')
     expect(convertModal).toContain('v-for="item in leftovers"')
+    expect(useConvertCredential).toContain('convertLeftovers(result.value)')
   })
 
   it('提交期间不能关', () => {
@@ -367,7 +377,8 @@ describe('应用', () => {
   })
 
   it('权限范围的数据都来自接口：矩阵和五根小岩芯用同一个查询的结果', () => {
-    expect(keyMatrix).toContain('api.keyMatrix(props.spaceId, props.appId, props.keyInfo.id)')
+    expect(keyMatrix).toContain('keyMatrixKey(props.spaceId, props.appId, props.keyInfo)')
+    expect(keyMatrix).toContain('api.keyMatrix(sid, aid, kid)')
     expect(keyMatrix).toContain('<AccessMatrix :rows="current.rows" />')
     expect(keyMatrix).toContain(':rows="rowsOf(c)"')
     expect(keyMatrix).not.toContain('issuedScopeRows')
@@ -413,7 +424,7 @@ describe('应用', () => {
 describe('召回调试', () => {
   it('只列当前账号是所有者的应用的有效 Key，和服务端一个规则', () => {
     expect(recallDebugPanel).toContain('ownedApps(apps.data.value ?? [], me.data.value?.id)')
-    expect(recallDebugPanel).toContain('usableKeys(keyResults.value[i]?.data ?? [])')
+    expect(recallDebugPanel).toContain('debugKeyChoices(owned.value, keyResults.value)')
   })
 
   it('没有自己的应用、没有有效 Key 时给出说明', () => {
@@ -448,5 +459,224 @@ describe('召回调试', () => {
     expect(recallPage).toContain('更早的事件只保留每条记忆的累计次数')
     expect(recallPage).toContain('不含机密内容（不参与召回）和启动加载的节点')
     expect(recallPage).toContain('仅显示最早的 {{ data.never.length }} 条')
+  })
+})
+
+describe('占位符的规则只有一份', () => {
+  it('转存、列表、详情都用 contracts 的 placeholderAllowed', () => {
+    expect(memoryEditor).toContain('placeholderAllowed(base.value.layer, form.sensitivity)')
+    expect(memoryEditor).toContain('placeholderAllowed(base.value.layer, base.value.sensitivity)')
+    expect(inboxPlaintext).toContain('placeholderAllowed(item.layer, item.sensitivity)')
+    expect(useConvertCredential).toContain('placeholderAllowed(view.layer, view.sensitivity)')
+    expect(memoryEditor).not.toContain("form.sensitivity === 'private'")
+  })
+
+  it('列表这一行放不进时不给转存，给查看记忆', () => {
+    const elements = elementsOf(inboxPlaintext)
+    const convert = buttonOf(inboxPlaintext, '转存为凭据')
+    expect(convert.props?.find((p) => p.name === 'if')?.exp?.content).toBe('convertible(item)')
+    const view = buttonOf(inboxPlaintext, '查看记忆')
+    expect(view.props?.some((p) => p.name === 'else')).toBe(true)
+    expect(bound(view, 'to')).toBe('memoryRoute(spaceId, item.uri)')
+    expect(elements.some((el) => attr(el, 'class') === 'plain-blocked')).toBe(true)
+  })
+
+  it('详情的提示放不进时不给转存，写明要先调整', () => {
+    const convert = buttonOf(memoryEditor, '转存为凭据')
+    expect(convert.props?.find((p) => p.name === 'if')?.exp?.content).toBe('convertible')
+    expect(memoryEditor).toContain(
+      '<template v-if="!readOnly && !convertible" #detail>{{ CONVERT_SCOPE_TEXT }}</template>',
+    )
+  })
+})
+
+describe('查询', () => {
+  it('参数从键里取：切换筛选或空间时，旧键下的后续页不会用新参数去取', () => {
+    expect(inboxReview).toMatch(/queryFn: \(\{ pageParam, queryKey: \[, sid, filter\] \}\)/)
+    expect(inboxReview).toContain('api.reviewQueue(sid, {')
+    expect(inboxReview).toContain("layer: filter === 'all' ? undefined : filter")
+    expect(inboxReview).not.toContain('api.reviewQueue(props.spaceId')
+    expect(inboxBindings).toContain('queryFn: ({ queryKey: [, spaceId] }) => api.overview(spaceId)')
+    expect(inboxPlaintext).toContain('queryKey: [, sid, f]')
+  })
+
+  it('权限范围的查询 60 秒内不重发', () => {
+    expect(KEY_MATRIX_STALE_TIME).toBe(60_000)
+    expect(useKeyMatrices).toContain('staleTime: KEY_MATRIX_STALE_TIME')
+    expect(keyMatrix).toContain('staleTime: KEY_MATRIX_STALE_TIME')
+  })
+
+  describe('权限范围什么时候失效', () => {
+    const scopes = {
+      readLayers: ['base' as const],
+      writeLayers: [],
+      maxSensitivity: 'internal' as const,
+      admin: false,
+    }
+    const key = { id: 'k1', effectiveScopes: scopes }
+    const seeded = () => {
+      const client = new QueryClient()
+      client.setQueryData(keyMatrixKey('s1', 'a1', key), { contexts: [] })
+      client.setQueryData(keyMatrixKey('s1', 'a2', { ...key, id: 'k2' }), { contexts: [] })
+      return client
+    }
+    const stale = (client: QueryClient, queryKey: readonly unknown[]) =>
+      client.getQueryState(queryKey)?.isInvalidated
+
+    it('应用的配置、默认人格、所有者改了：这个应用的 Key 都失效，别的应用不动', async () => {
+      const client = seeded()
+      await refreshAppCaches(client, 's1', 'a1')
+      expect(stale(client, keyMatrixKey('s1', 'a1', key))).toBe(true)
+      expect(stale(client, keyMatrixKey('s1', 'a2', { ...key, id: 'k2' }))).toBe(false)
+    })
+
+    it('删掉的应用：缓存去掉', async () => {
+      const client = seeded()
+      await forgetApp(client, 's1', 'a1')
+      expect(client.getQueryData(keyMatrixKey('s1', 'a1', key))).toBeUndefined()
+    })
+
+    it('所有者的角色变了：当前有效上限在键里，换了就是另一个查询', () => {
+      const narrowed = { ...key, effectiveScopes: { ...scopes, maxSensitivity: 'public' as const } }
+      expect(keyMatrixKey('s1', 'a1', narrowed)).not.toEqual(keyMatrixKey('s1', 'a1', key))
+    })
+
+    it('按前缀失效的写法都对得上', () => {
+      expect(keyMatrixKey('s1', 'a1', key).slice(0, 3)).toEqual(['key-matrix', 's1', 'a1'])
+    })
+  })
+})
+
+describe('读取失败', () => {
+  // 翻页的：翻页失败的错误放在「加载更多」上面，其余放在最上面；内容跟着 data 走，不跟着 isSuccess
+  it.each([
+    ['待确认内容', inboxReview, 'queue'],
+    ['疑似明文', inboxPlaintext, 'list'],
+    ['整理建议', dreamSuggestions, 'suggestions'],
+    ['召回记录', appRecallEvents, 'events'],
+  ])('%s：读到的不被错误盖掉，错误也不消失', (_name, source, query) => {
+    expect(source).toContain(
+      `v-if="${query}.isError.value && !${query}.isFetchNextPageError.value"`,
+    )
+    expect(source).toContain(`v-if="${query}.isFetchNextPageError.value"`)
+    expect(source).toContain(`${query}.data.value`)
+    expect(source).toContain(`readFailure(${query}.error.value)`)
+    expect(source).not.toContain(`${query}.isError.value && !${query}.data.value`)
+  })
+
+  // 不翻页的：错误放在上面，读到过的内容照常显示
+  it.each([
+    ['账号绑定', inboxBindings, 'overview'],
+    ['Key 列表', appKeys, 'keys'],
+    ['权限范围', keyMatrix, 'matrix'],
+    ['召回统计', recallPage, 'stats'],
+    ['调试的应用', recallDebugPanel, 'apps'],
+    ['最近整理', dreamSuggestions, 'runs'],
+    ['按群切换人格', appGroupPersonas, 'rules'],
+  ])('%s：后台刷新失败时有提示，读到的内容还在', (_name, source, query) => {
+    expect(source).toContain(`<NoteLine v-if="${query}.isError.value"`)
+    expect(source).toContain(`readFailure(${query}.error.value)`)
+    expect(source).not.toContain(`${query}.isError.value && !${query}.data.value`)
+    expect(source).not.toContain(`v-else-if="${query}.isError.value"`)
+  })
+
+  it('应用列表和详情：几个查询的错误都说出来，内容跟着 data 走', () => {
+    for (const source of [appsPage, appDetailPage]) {
+      expect(source).toContain('[apps, personas, members].filter((q) => q.isError.value)')
+      expect(source).not.toContain('apps.isError.value && !apps.data.value')
+    }
+    expect(appsPage).toContain('<template v-else-if="apps.data.value">')
+    expect(appDetailPage).toContain('<template v-else-if="app">')
+    expect(appDetailPage).toContain('v-else-if="apps.data.value && !app"')
+  })
+
+  it('「暂无」只在真的读到空时显示', () => {
+    expect(appKeys).toContain('v-else-if="keys.data.value && !keys.data.value.length"')
+    expect(inboxBindings).toContain('v-else-if="overview.data.value && !items.length"')
+    expect(appsPage).toContain('v-else-if="apps.data.value && !apps.data.value.length"')
+    expect(appRecallEvents).toContain('v-else-if="events.data.value && !items.length"')
+  })
+
+  it('文字统一：不再各写各的', () => {
+    for (const source of [
+      inboxBindings,
+      inboxReview,
+      inboxPlaintext,
+      dreamSuggestions,
+      appRecallEvents,
+      appKeys,
+      keyMatrix,
+      appsPage,
+      appDetailPage,
+      recallPage,
+      recallDebugPanel,
+      appGroupPersonas,
+      appSimulator,
+    ]) {
+      expect(source).not.toContain("'读取失败'")
+      expect(source).not.toContain("'读取 Key 失败'")
+    }
+  })
+
+  it('一个应用的 Key 读取失败不挡别的应用：错误就地说，选项照样显示', () => {
+    expect(recallDebugPanel).toContain('v-for="failed in choices.failures"')
+    expect(recallDebugPanel).toContain('v-else-if="options.length" class="debug-body"')
+    expect(recallDebugPanel).not.toContain('keysFailed')
+  })
+
+  it('岩芯读取失败时也说', () => {
+    for (const source of [appKeys, appsPage, recallDebugPanel]) {
+      expect(source).toContain('failureOf(')
+    }
+  })
+})
+
+describe('启动加载', () => {
+  it('表单不放在预览结果里：第一次预览失败时也能重试', () => {
+    const root = parse(appSimulator).descriptor.template!.ast as unknown as TemplateNode
+    const ancestors = (node: TemplateNode, path: TemplateNode[] = []): TemplateNode[] | null => {
+      if (node.tag === 'form') return path
+      for (const child of node.children ?? []) {
+        const found = ancestors(child, [...path, node])
+        if (found) return found
+      }
+      return null
+    }
+    const path = ancestors(root)!
+    const conditions = path.flatMap((el) =>
+      (el.props ?? []).filter((p) => ['if', 'else-if'].includes(p.name)).map((p) => p.exp?.content),
+    )
+    expect(conditions.join(' ')).not.toContain('preview')
+    expect(textOf(buttonOf(appSimulator, '预览'))).toBe('预览')
+  })
+
+  it('没有有效 Key 的说明只在读到了列表时显示', () => {
+    expect(appSimulator).toContain(`<p v-else-if="state === 'none'" class="boot-empty">`)
+    expect(appSimulator).toContain(`v-else-if="state === 'failed'"`)
+    expect(appSimulator).toContain(`v-if="state === 'loading'"`)
+  })
+})
+
+describe('操作方', () => {
+  it('显示操作方用 ActorName：应用可以和成员同名，要带应用标记', () => {
+    expect(recentChange).toContain('<ActorName :actor="item.actor" />')
+  })
+})
+
+describe('一页一个实心按钮', () => {
+  const style = (source: string, label: string) => {
+    const button = buttonOf(source, label)
+    return [attr(button, 'color'), attr(button, 'variant')]
+  }
+
+  it('疑似明文每一行和待确认内容的批量操作都是描边', () => {
+    expect(style(inboxPlaintext, '转存为凭据')).toEqual(['neutral', 'outline'])
+    expect(style(inboxPlaintext, '忽略')).toEqual(['neutral', 'outline'])
+    expect(style(inboxReview, '确认所选')).toEqual(['neutral', 'outline'])
+    expect(style(memoryEditor, '转存为凭据')).toEqual(['primary', 'outline'])
+  })
+
+  it('对话框里的提交按钮保持实心', () => {
+    expect(style(convertModal, '转存为凭据')).toEqual([undefined, undefined])
   })
 })

@@ -285,7 +285,7 @@ describe('记忆详情', () => {
 
 describe('概览', () => {
   it('待处理的数量来自接口的 inbox', () => {
-    expect(overviewPage).toContain('data.inbox.total')
+    expect(overviewPage).toContain('actionableInboxCount(data.value.inbox, role.value)')
     expect(overviewPage).toContain('data.inbox.bindings')
   })
 

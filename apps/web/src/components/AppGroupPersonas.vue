@@ -4,7 +4,7 @@ import type { GroupPersonaRule } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useDebounced } from '../composables/useDebounced'
 import { icons } from '../icons'
@@ -139,11 +139,11 @@ function remove(subjectId: string) {
         在指定的群（或频道）中使用对应人格。启动加载、召回与写入都按此人格。其余群、私聊和不带会话上下文的请求使用默认人格。
       </Hint>
     </p>
-    <USkeleton v-if="rules.isPending.value" class="h-10 w-full" />
-    <NoteLine v-else-if="rules.isError.value" tone="error">
-      {{ rules.error.value instanceof ApiError ? rules.error.value.message : '读取失败' }}
+    <NoteLine v-if="rules.isError.value" tone="error">
+      {{ readFailure(rules.error.value) }}
     </NoteLine>
-    <template v-else>
+    <USkeleton v-if="rules.isPending.value" class="h-10 w-full" />
+    <template v-else-if="rules.data.value">
       <ul v-if="rules.data.value?.rules.length" class="group-rules">
         <li v-for="rule in rules.data.value.rules" :key="rule.subjectId">
           <RouterLink
@@ -204,6 +204,9 @@ function remove(subjectId: string) {
           >添加</UButton
         >
       </div>
+      <p v-if="canManage && groups.isError.value" class="group-failed">
+        {{ readFailure(groups.error.value) }}
+      </p>
     </template>
   </div>
 </template>
@@ -245,6 +248,11 @@ function remove(subjectId: string) {
   margin-bottom: 7px;
   font-size: 14px;
   color: var(--ui-text-muted);
+}
+.group-failed {
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--ui-error);
 }
 .group-add {
   display: grid;

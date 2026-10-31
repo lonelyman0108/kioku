@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
@@ -67,6 +67,12 @@ const keys = useQuery({
   enabled: canSeeKeys,
 })
 const usable = computed(() => usableKeys(keys.data.value ?? []))
+// 默认人格和所有者只显示名字，人格的选项也靠它：读不到时要说出来，不然分不清是没有还是没读到
+const readFailures = computed(() => [
+  ...new Set(
+    [apps, personas, members].filter((q) => q.isError.value).map((q) => readFailure(q.error.value)),
+  ),
+])
 const lastUsed = computed(() => lastUsedAt(keys.data.value ?? []))
 
 // 看的是哪个 Key、哪种会话上下文：记在地址里。地址里的 Key 失效了就看第一个有效的
@@ -204,13 +210,11 @@ watch([spaceId, appId], () => {
 
 <template>
   <div class="app-page">
-    <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
-    <div v-else-if="apps.isError.value && !apps.data.value" class="app-state">
-      <NoteLine tone="error">
-        {{ apps.error.value instanceof ApiError ? apps.error.value.message : '读取失败' }}
-      </NoteLine>
+    <div v-if="readFailures.length" class="app-failed">
+      <NoteLine v-for="message in readFailures" :key="message" tone="error">{{ message }}</NoteLine>
     </div>
-    <div v-else-if="!app" class="app-state">
+    <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
+    <div v-else-if="apps.data.value && !app" class="app-state">
       <NoteLine>应用不存在或已删除</NoteLine>
       <UButton
         :to="{ name: 'apps', params: { spaceId } }"
@@ -221,7 +225,7 @@ watch([spaceId, appId], () => {
         返回应用列表
       </UButton>
     </div>
-    <template v-else>
+    <template v-else-if="app">
       <header class="app-head">
         <div class="app-title">
           <nav class="crumbs" aria-label="路径">
@@ -243,7 +247,7 @@ watch([spaceId, appId], () => {
           </div>
           <div>
             <dt>有效 Key</dt>
-            <dd class="font-mono">{{ canSeeKeys ? usable.length : '–' }}</dd>
+            <dd class="font-mono">{{ keys.data.value ? usable.length : '–' }}</dd>
           </div>
           <div>
             <dt>最近使用</dt>
@@ -251,7 +255,7 @@ watch([spaceId, appId], () => {
               <time v-if="lastUsed" :datetime="lastUsed" :title="formatTime(lastUsed)">
                 {{ formatRelative(lastUsed) }}
               </time>
-              <template v-else>{{ canSeeKeys && usable.length ? '尚未使用' : '–' }}</template>
+              <template v-else>{{ usable.length ? '尚未使用' : '–' }}</template>
             </dd>
           </div>
           <div>
@@ -463,6 +467,10 @@ watch([spaceId, appId], () => {
   min-width: 0;
   overflow-y: auto;
   padding: 16px 32px 56px;
+}
+.app-failed {
+  max-width: 640px;
+  padding-top: 8px;
 }
 .app-state {
   display: flex;

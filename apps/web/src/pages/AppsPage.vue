@@ -5,7 +5,7 @@ import { useQueries, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { refreshAppCaches } from '../appQueries'
 import { lastUsedAt } from '../apps'
@@ -71,24 +71,32 @@ const keyResults = useQueries({
 const rows = computed(() =>
   (apps.data.value ?? []).map((app) => {
     const index = visibleApps.value.findIndex((a) => a.id === app.id)
-    const keys = (index < 0 ? undefined : keyResults.value[index]?.data) ?? null
+    const result = index < 0 ? undefined : keyResults.value[index]
+    const keys = result?.data ?? null
     return {
       app,
       canSeeKeys: index >= 0,
       keys,
+      keysFailure: result?.isError ? readFailure(result.error) : null,
       usable: usableKeys(keys ?? []),
       lastUsed: lastUsedAt(keys ?? []),
     }
   }),
 )
 const liveKeys = computed(() =>
-  rows.value.flatMap((row) => row.usable.map((key) => ({ appId: row.app.id, keyId: key.id }))),
+  rows.value.flatMap((row) => row.usable.map((key) => ({ appId: row.app.id, key }))),
 )
 // 每个有效的 Key 一根岩芯，画的是无上下文时的实际范围
-const { rowsOf } = useKeyMatrices(spaceId, liveKeys)
+const { rowsOf, failureOf } = useKeyMatrices(spaceId, liveKeys)
 const legendKinds = computed(() =>
-  presentKinds(liveKeys.value.flatMap((key): readonly AccessRow[] => rowsOf(key.keyId) ?? [])),
+  presentKinds(liveKeys.value.flatMap(({ key }): readonly AccessRow[] => rowsOf(key.id) ?? [])),
 )
+// 默认人格和所有者只显示名字，读不到时是「–」：要说出来，不然分不清是没有还是没读到
+const readFailures = computed(() => [
+  ...new Set(
+    [apps, personas, members].filter((q) => q.isError.value).map((q) => readFailure(q.error.value)),
+  ),
+])
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -146,12 +154,10 @@ async function create() {
       </UButton>
     </header>
 
-    <NoteLine v-if="apps.isError.value && !apps.data.value" tone="error">
-      {{ apps.error.value instanceof ApiError ? apps.error.value.message : '读取失败' }}
-    </NoteLine>
-    <USkeleton v-else-if="apps.isPending.value" class="h-40 w-full" />
-    <p v-else-if="!apps.data.value?.length" class="apps-empty">暂无应用</p>
-    <template v-else>
+    <NoteLine v-for="message in readFailures" :key="message" tone="error">{{ message }}</NoteLine>
+    <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
+    <p v-else-if="apps.data.value && !apps.data.value.length" class="apps-empty">暂无应用</p>
+    <template v-else-if="apps.data.value">
       <div class="apps-table">
         <table>
           <thead>
@@ -165,7 +171,10 @@ async function create() {
             </tr>
           </thead>
           <tbody>
-            <tr v-for="{ app, canSeeKeys, keys, usable, lastUsed } in rows" :key="app.id">
+            <tr
+              v-for="{ app, canSeeKeys, keys, keysFailure, usable, lastUsed } in rows"
+              :key="app.id"
+            >
               <td class="cell-name">
                 <RouterLink :to="{ name: 'app', params: { spaceId, appId: app.id } }">
                   <b>{{ app.name }}</b>
@@ -200,12 +209,16 @@ async function create() {
                             {{ formatRelative(key.lastUsedAt) }}
                           </span>
                           <span v-else>尚未使用</span>
+                          <span v-if="failureOf(key.id)" class="key-failed">
+                            权限范围：{{ failureOf(key.id) }}
+                          </span>
                         </span>
                       </RouterLink>
                     </li>
                   </ul>
                 </div>
                 <span v-else class="key-hidden">仅应用所有者可查看 Key</span>
+                <p v-if="keysFailure" class="key-failed">{{ keysFailure }}</p>
               </td>
               <td class="cell-used">
                 <time v-if="lastUsed" :datetime="lastUsed" :title="formatTime(lastUsed)">
@@ -352,6 +365,9 @@ td {
 }
 .key-hidden {
   color: var(--ui-text-muted);
+}
+.key-failed {
+  color: var(--ui-error);
 }
 .tray {
   display: flex;

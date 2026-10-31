@@ -11,7 +11,7 @@ import {
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import {
@@ -259,6 +259,9 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       </template>
     </SectionHeading>
 
+    <NoteLine v-if="mine.isError.value" class="dream-note" tone="error">
+      {{ readFailure(mine.error.value) }}
+    </NoteLine>
     <div class="dream-intro">
       <p v-if="mine.data.value">
         {{
@@ -280,15 +283,17 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       </UButton>
     </div>
 
-    <NoteLine v-if="suggestions.isError.value" class="dream-note" tone="error">
-      {{
-        suggestions.error.value instanceof ApiError ? suggestions.error.value.message : '读取失败'
-      }}
+    <NoteLine
+      v-if="suggestions.isError.value && !suggestions.isFetchNextPageError.value"
+      class="dream-note"
+      tone="error"
+    >
+      {{ readFailure(suggestions.error.value) }}
     </NoteLine>
-    <div v-else-if="suggestions.isPending.value" class="mt-3 space-y-3">
+    <div v-if="suggestions.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 3" :key="n" class="h-32 w-full" />
     </div>
-    <template v-else>
+    <template v-else-if="suggestions.data.value">
       <p v-if="!items.length" class="dream-empty">暂无整理建议</p>
       <article v-for="item in items" :key="item.id" class="suggestion">
         <div class="suggestion-main">
@@ -444,6 +449,9 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </UButton>
         </div>
       </article>
+      <div v-if="suggestions.isFetchNextPageError.value" class="mt-3">
+        <NoteLine tone="error">{{ readFailure(suggestions.error.value) }}</NoteLine>
+      </div>
       <div v-if="suggestions.hasNextPage.value" class="mt-4 flex justify-center">
         <UButton
           color="neutral"
@@ -465,11 +473,13 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
         </template>
       </SectionHeading>
       <NoteLine v-if="runs.isError.value" class="dream-note" tone="error">
-        {{ runs.error.value instanceof ApiError ? runs.error.value.message : '读取失败' }}
+        {{ readFailure(runs.error.value) }}
       </NoteLine>
-      <USkeleton v-else-if="runs.isPending.value" class="mt-3 h-16 w-full" />
-      <p v-else-if="!runs.data.value?.runs.length" class="dream-empty">暂无整理记录</p>
-      <ul v-else>
+      <USkeleton v-if="runs.isPending.value" class="mt-3 h-16 w-full" />
+      <p v-else-if="runs.data.value && !runs.data.value.runs.length" class="dream-empty">
+        暂无整理记录
+      </p>
+      <ul v-else-if="runs.data.value">
         <li v-for="entry in runs.data.value.runs" :key="entry.runId" class="run">
           <p class="run-head">
             <span>{{ formatTime(entry.at) }}</span>

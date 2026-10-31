@@ -4,7 +4,7 @@ import type { ReviewLayer } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { originScopeText } from '../labels'
@@ -30,10 +30,11 @@ const kindLabels: Record<ReviewLayer, string> = { subject: '事实', episode: '�
 
 const active = useActivated()
 const queue = useInfiniteQuery({
-  queryKey: computed(() => ['review', props.spaceId, layer.value]),
-  queryFn: ({ pageParam }) =>
-    api.reviewQueue(props.spaceId, {
-      layer: layer.value === 'all' ? undefined : layer.value,
+  queryKey: computed(() => ['review', props.spaceId, layer.value] as const),
+  // 参数从键里取：换了筛选或空间之后，旧键剩下的页还在重新拉取时，不会用上新的参数
+  queryFn: ({ pageParam, queryKey: [, sid, filter] }) =>
+    api.reviewQueue(sid, {
+      layer: filter === 'all' ? undefined : filter,
       cursor: pageParam,
     }),
   initialPageParam: undefined as string | undefined,
@@ -134,10 +135,16 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
         @update:model-value="(v) => toggleAll(v === true)"
       />
       <span v-if="canAct && selected.size" class="review-count">已选 {{ selected.size }} 条</span>
-      <span v-else-if="queue.isSuccess.value" class="review-count">{{ total }} 条待确认</span>
+      <span v-else-if="queue.data.value" class="review-count">{{ total }} 条待确认</span>
       <UTabs v-model="layer" :items="tabs" :content="false" size="sm" class="w-auto" />
       <div v-if="canAct && items.length" class="review-bulk">
-        <UButton :disabled="!selected.size" :loading="busy" @click="act('confirm', chosen())">
+        <UButton
+          color="neutral"
+          variant="outline"
+          :disabled="!selected.size"
+          :loading="busy"
+          @click="act('confirm', chosen())"
+        >
           确认所选
         </UButton>
         <UButton
@@ -150,13 +157,17 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
         </UButton>
       </div>
     </div>
-    <NoteLine v-if="queue.isError.value" class="review-note" tone="error">
-      {{ queue.error.value instanceof ApiError ? queue.error.value.message : '读取失败' }}
+    <NoteLine
+      v-if="queue.isError.value && !queue.isFetchNextPageError.value"
+      class="review-note"
+      tone="error"
+    >
+      {{ readFailure(queue.error.value) }}
     </NoteLine>
-    <div v-else-if="queue.isPending.value" class="mt-3 space-y-3">
+    <div v-if="queue.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 6" :key="n" class="h-12 w-full" />
     </div>
-    <template v-else>
+    <template v-else-if="queue.data.value">
       <p v-if="!items.length" class="review-empty">暂无待确认内容</p>
       <ul v-else>
         <li
@@ -213,6 +224,9 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
           </span>
         </li>
       </ul>
+      <div v-if="queue.isFetchNextPageError.value" class="mt-3">
+        <NoteLine tone="error">{{ readFailure(queue.error.value) }}</NoteLine>
+      </div>
       <div v-if="queue.hasNextPage.value" class="mt-4 flex justify-center">
         <UButton
           color="neutral"

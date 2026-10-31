@@ -2,6 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   PLAINTEXT_CREDENTIAL,
+  placeholderAllowed,
   type ConsoleMemoryView,
   type Layer,
   type Sensitivity,
@@ -34,6 +35,7 @@ import {
   recallText,
 } from '../memoryDetail'
 import { placeholderOf } from '../placeholders'
+import { CONVERT_SCOPE_TEXT } from '../plaintext'
 import {
   hiddenAgain,
   revealedAfterWrite,
@@ -288,7 +290,7 @@ function openCredential(id: string) {
 
 // 插入凭据引用：服务端只收私人层、敏感级至少 private 的记忆里的占位符
 const canReference = computed(
-  () => ownsCredentials.value && (form.sensitivity === 'private' || form.sensitivity === 'secret'),
+  () => !!base.value && placeholderAllowed(base.value.layer, form.sensitivity),
 )
 const contentInput = ref<{ textareaRef: HTMLTextAreaElement | null } | null>(null)
 const picking = ref(false)
@@ -526,6 +528,10 @@ const plaintext = computed(() => {
 // 疑似明文的提示：转存为凭据、忽略、撤销忽略。结果写进缓存并载入，不用再读一次；
 // 版本变了的（转存）由 adopt 通知页面，版本没变的（忽略）条数和列表在 usePlaintextActions 里刷新
 const convertOpen = ref(false)
+// 占位符放不进这条记忆时转存一定失败，先调整
+const convertible = computed(
+  () => !!base.value && placeholderAllowed(base.value.layer, base.value.sensitivity),
+)
 const plaintextActions = usePlaintextActions(computed(() => props.spaceId))
 async function setPlaintextIgnored(ignored: boolean) {
   const m = base.value
@@ -791,8 +797,17 @@ const properties = computed<Property[][]>(() => {
         <template v-else>
           <NoteLine v-if="plaintext" tone="error">
             正文疑似包含明文凭据<Hint>建议转存为凭据，正文改用占位符。</Hint>
+            <template v-if="!readOnly && !convertible" #detail>{{ CONVERT_SCOPE_TEXT }}</template>
             <template v-if="!readOnly" #actions>
-              <UButton size="sm" @click="convertOpen = true">转存为凭据</UButton>
+              <UButton
+                v-if="convertible"
+                size="sm"
+                color="primary"
+                variant="outline"
+                @click="convertOpen = true"
+              >
+                转存为凭据
+              </UButton>
               <UButton
                 size="sm"
                 color="primary"

@@ -3,7 +3,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import RecallDebugPanel from '../components/RecallDebugPanel.vue'
@@ -31,13 +31,13 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
 
 <template>
   <div class="recall-page">
-    <NoteLine v-if="stats.isError.value && !data" tone="error">
-      {{ stats.error.value instanceof ApiError ? stats.error.value.message : '读取失败' }}
+    <NoteLine v-if="stats.isError.value" tone="error">
+      {{ readFailure(stats.error.value) }}
     </NoteLine>
-    <div v-else-if="!data" class="stats">
+    <div v-if="stats.isPending.value" class="stats">
       <USkeleton v-for="n in 4" :key="n" class="h-48 w-full" />
     </div>
-    <section v-else class="stats">
+    <section v-else-if="data" class="stats">
       <div class="stat-total">
         <h1>召回</h1>
         <div class="total-number">{{ total.toLocaleString() }}</div>

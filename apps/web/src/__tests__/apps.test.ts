@@ -1,7 +1,7 @@
 import type { BootPreview, KeyInfo, KeyScopes } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { bootUsage, effectiveNote, isNarrowed, lastUsedAt } from '../apps'
+import { bootUsage, effectiveNote, isNarrowed, lastUsedAt, simulatorState } from '../apps'
 
 const scopes = (over: Partial<KeyScopes> = {}): KeyScopes => ({
   readLayers: ['base'],
@@ -60,6 +60,22 @@ describe('签发上限和当前有效上限', () => {
     const revoked = key({ effectiveScopes: null, revokedAt: '2026-10-10T00:00:00Z' })
     expect(isNarrowed(revoked)).toBe(false)
     expect(effectiveNote(revoked)).toBeNull()
+  })
+})
+
+describe('启动加载这一块的情况', () => {
+  it('有选中的 Key 就能模拟，哪怕列表刷新失败了', () => {
+    expect(simulatorState({ isPending: false, hasData: true }, 'k1')).toBe('ready')
+    expect(simulatorState({ isPending: false, hasData: false }, 'k1')).toBe('ready')
+  })
+
+  it('读到了列表又没有选中的，才是没有有效 Key', () => {
+    expect(simulatorState({ isPending: false, hasData: true }, undefined)).toBe('none')
+  })
+
+  it('还在读、读取失败时不能说没有有效 Key，不然可能多签一个', () => {
+    expect(simulatorState({ isPending: true, hasData: false }, undefined)).toBe('loading')
+    expect(simulatorState({ isPending: false, hasData: false }, undefined)).toBe('failed')
   })
 })
 

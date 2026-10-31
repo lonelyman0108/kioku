@@ -16,6 +16,7 @@ import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
+import { actionableInboxCount } from '../inbox'
 import { queryClient } from '../query'
 
 const router = useRouter()
@@ -87,6 +88,11 @@ interface NavItem {
 
 // 待处理的条数：角标和待处理页共用缓存，处理完待办之后失效，不跟着每个页面重取
 const inboxCounts = useInboxCounts(computed(() => space.value?.id ?? null))
+const inboxBadge = computed(() =>
+  inboxCounts.data.value && space.value
+    ? actionableInboxCount(inboxCounts.data.value, space.value.role)
+    : undefined,
+)
 
 // 顶部导航按用途分组。路由名和路径不变，入口的名字按术语表
 const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
@@ -103,7 +109,7 @@ const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
       items: [
         { label: '概览', ...link('overview', icons.overview) },
         { label: '记忆', ...link('memories', icons.memories) },
-        { label: '待处理', ...link('inbox', icons.review), count: inboxCounts.data.value?.total },
+        { label: '待处理', ...link('inbox', icons.review), count: inboxBadge.value },
       ],
     },
     {

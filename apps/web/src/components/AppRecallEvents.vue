@@ -2,7 +2,7 @@
 import { useInfiniteQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { recallSourceLabels } from '../labels'
 import { memoryRoute } from '../routes'
@@ -34,12 +34,16 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         </Hint>
       </template>
     </SectionHeading>
-    <NoteLine v-if="events.isError.value && !events.data.value" class="events-note" tone="error">
-      {{ events.error.value instanceof ApiError ? events.error.value.message : '读取失败' }}
+    <NoteLine
+      v-if="events.isError.value && !events.isFetchNextPageError.value"
+      class="events-note"
+      tone="error"
+    >
+      {{ readFailure(events.error.value) }}
     </NoteLine>
-    <USkeleton v-else-if="events.isPending.value" class="mt-3 h-24 w-full" />
-    <p v-else-if="!items.length" class="events-empty">暂无召回记录</p>
-    <ol v-else>
+    <USkeleton v-if="events.isPending.value" class="mt-3 h-24 w-full" />
+    <p v-else-if="events.data.value && !items.length" class="events-empty">暂无召回记录</p>
+    <ol v-else-if="events.data.value">
       <li v-for="event in items" :key="event.id" class="event">
         <p class="event-head">
           <b>{{ recallSourceLabels[event.source] }}</b>
@@ -61,6 +65,9 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         </ul>
       </li>
     </ol>
+    <NoteLine v-if="events.isFetchNextPageError.value" class="events-note" tone="error">
+      {{ readFailure(events.error.value) }}
+    </NoteLine>
     <UButton
       v-if="events.hasNextPage.value"
       class="mt-3"

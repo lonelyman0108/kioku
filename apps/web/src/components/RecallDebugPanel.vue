@@ -4,13 +4,13 @@ import { useQueries, useQuery } from '@tanstack/vue-query'
 import { computed, ref, toRef, useId, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { ownedApps, usableKeys } from '../benchSession'
+import { ownedApps } from '../benchSession'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { useSession } from '../composables/useSession'
 import { readDenialLabels } from '../labels'
-import { scoreAxis, scoreParts } from '../recall'
+import { debugKeyChoices, scoreAxis, scoreParts } from '../recall'
 import { memoryRoute } from '../routes'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -40,13 +40,9 @@ const keyResults = useQueries({
     })),
   ),
 })
-const options = computed(() =>
-  owned.value.flatMap((app, i) =>
-    usableKeys(keyResults.value[i]?.data ?? []).map((key) => ({ app, key })),
-  ),
-)
+const choices = computed(() => debugKeyChoices(owned.value, keyResults.value))
+const options = computed(() => choices.value.options)
 const keysPending = computed(() => keyResults.value.some((result) => result.isPending))
-const keysFailed = computed(() => keyResults.value.find((result) => result.isError && !result.data))
 // 地址里的 Key 不在列表里（失效了、不是自己的）就用第一个
 const selected = computed(
   () =>
@@ -55,9 +51,9 @@ const selected = computed(
 function select(keyId: string) {
   void router.replace({ query: { ...route.query, key: keyId } })
 }
-const { rowsOf } = useKeyMatrices(
+const { rowsOf, failureOf } = useKeyMatrices(
   toRef(props, 'spaceId'),
-  computed(() => options.value.map(({ app, key }) => ({ appId: app.id, keyId: key.id }))),
+  computed(() => options.value.map(({ app, key }) => ({ appId: app.id, key }))),
 )
 
 const query = ref('')
@@ -127,11 +123,23 @@ const groupName = useId()
       </template>
     </SectionHeading>
 
-    <USkeleton v-if="apps.isPending.value || keysPending" class="mt-3 h-40 w-full" />
-    <NoteLine v-else-if="apps.isError.value && !apps.data.value" class="debug-note" tone="error">
-      {{ apps.error.value instanceof ApiError ? apps.error.value.message : '读取失败' }}
+    <NoteLine v-if="apps.isError.value" class="debug-note" tone="error">
+      {{ readFailure(apps.error.value) }}
     </NoteLine>
-    <NoteLine v-else-if="!owned.length" class="debug-note">
+    <!-- 一个应用的 Key 读取失败不挡别的应用 -->
+    <NoteLine
+      v-for="failed in choices.failures"
+      :key="failed.app.id"
+      class="debug-note"
+      tone="error"
+    >
+      应用「{{ failed.app.name }}」的 Key：{{ failed.text }}
+    </NoteLine>
+    <USkeleton
+      v-if="apps.isPending.value || (keysPending && !options.length)"
+      class="mt-3 h-40 w-full"
+    />
+    <NoteLine v-else-if="apps.data.value && !owned.length" class="debug-note">
       当前账号暂无应用，无法调试
       <template #detail>召回调试只能使用当前账号是所有者的应用的 Key。</template>
       <template #actions>
@@ -145,10 +153,10 @@ const groupName = useId()
         </UButton>
       </template>
     </NoteLine>
-    <NoteLine v-else-if="keysFailed" class="debug-note" tone="error">
-      {{ keysFailed.error instanceof ApiError ? keysFailed.error.message : '读取 Key 失败' }}
-    </NoteLine>
-    <NoteLine v-else-if="!options.length" class="debug-note">
+    <NoteLine
+      v-else-if="owned.length && !options.length && !choices.failures.length"
+      class="debug-note"
+    >
       暂无有效 Key。签发后可调试。
       <template #actions>
         <UButton
@@ -161,7 +169,7 @@ const groupName = useId()
         </UButton>
       </template>
     </NoteLine>
-    <div v-else class="debug-body">
+    <div v-else-if="options.length" class="debug-body">
       <form class="debug-form" @submit.prevent="run">
         <fieldset>
           <legend>Key</legend>
@@ -187,6 +195,9 @@ const groupName = useId()
             <span class="debug-key-text">
               <b>{{ option.key.name }}</b>
               <span>{{ option.app.name }}</span>
+              <span v-if="failureOf(option.key.id)">
+                权限范围：{{ failureOf(option.key.id) }}
+              </span>
             </span>
           </label>
         </fieldset>

@@ -2,7 +2,7 @@
 import { useQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import Hint from './Hint.vue'
@@ -14,8 +14,8 @@ import SectionHeading from './strata/SectionHeading.vue'
 const props = defineProps<{ spaceId: string }>()
 const active = useActivated()
 const overview = useQuery({
-  queryKey: computed(() => ['overview', props.spaceId]),
-  queryFn: () => api.overview(props.spaceId),
+  queryKey: computed(() => ['overview', props.spaceId] as const),
+  queryFn: ({ queryKey: [, spaceId] }) => api.overview(spaceId),
   enabled: active,
   staleTime: 60_000,
 })
@@ -30,12 +30,12 @@ const total = computed(() => overview.data.value?.inbox.bindings ?? 0)
         <Hint>对方在 Bot 私聊中使用绑定码发起申请，确认后账号并入标记为本人的联系人。</Hint>
       </template>
     </SectionHeading>
-    <NoteLine v-if="overview.isError.value && !overview.data.value" class="panel-note" tone="error">
-      {{ overview.error.value instanceof ApiError ? overview.error.value.message : '读取失败' }}
+    <NoteLine v-if="overview.isError.value" class="panel-note" tone="error">
+      {{ readFailure(overview.error.value) }}
     </NoteLine>
-    <USkeleton v-else-if="overview.isPending.value" class="mt-3 h-24 w-full" />
-    <p v-else-if="!items.length" class="panel-empty">暂无账号绑定申请</p>
-    <template v-else>
+    <USkeleton v-if="overview.isPending.value" class="mt-3 h-24 w-full" />
+    <p v-else-if="overview.data.value && !items.length" class="panel-empty">暂无账号绑定申请</p>
+    <template v-else-if="overview.data.value">
       <p class="panel-lead">
         确认后，该账号的私聊视为本人对话，此操作不可撤销。如无法辨认，请拒绝。
       </p>

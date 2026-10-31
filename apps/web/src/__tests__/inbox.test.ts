@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest'
 
 import {
   INBOX_TABS,
+  actionableInboxCount,
   inboxCountsKey,
   inboxTabCount,
   inboxTabLabels,
@@ -39,6 +40,20 @@ describe('看的是哪一类', () => {
   it('条数还没读到时先不决定，不闪一下别的分类；读取失败时不再等', () => {
     expect(resolveInboxTab(undefined, undefined, false)).toBeNull()
     expect(resolveInboxTab(undefined, undefined, true)).toBe('review')
+  })
+})
+
+describe('角标的数字', () => {
+  const all = counts({ bindings: 1, review: 2, dreamSuggestions: 3, plaintext: 4, total: 10 })
+
+  it('所有者和编辑者是总数', () => {
+    expect(actionableInboxCount(all, 'owner')).toBe(10)
+    expect(actionableInboxCount(all, 'editor')).toBe(10)
+  })
+
+  it('查看者只算账号绑定：这一类他能拒绝，别的几类动不了，算进去永远消不掉', () => {
+    expect(actionableInboxCount(all, 'viewer')).toBe(1)
+    expect(actionableInboxCount(counts({ review: 5, total: 5 }), 'viewer')).toBe(0)
   })
 })
 

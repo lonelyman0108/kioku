@@ -27,6 +27,18 @@ export function effectiveNote(key: KeyInfo): string | null {
   return `当前有效范围：${scopesSummary(key.effectiveScopes)}（已按所有者当前角色收紧）`
 }
 
+// 启动加载这一块现在是什么情况。没有选中的 Key 不等于没有有效 Key：还在读或者读取失败时也没有，
+// 这时说「暂无有效 Key」可能让人多签一个
+export type SimulatorState = 'ready' | 'none' | 'loading' | 'failed'
+export function simulatorState(
+  keys: { isPending: boolean; hasData: boolean },
+  keyId: string | undefined,
+): SimulatorState {
+  if (keyId) return 'ready'
+  if (keys.hasData) return 'none'
+  return keys.isPending ? 'loading' : 'failed'
+}
+
 export interface BootSegment {
   uri: string
   layer: Layer

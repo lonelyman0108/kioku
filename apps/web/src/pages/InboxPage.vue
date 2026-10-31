@@ -8,9 +8,10 @@ import InboxBindings from '../components/InboxBindings.vue'
 import InboxPlaintext from '../components/InboxPlaintext.vue'
 import InboxReview from '../components/InboxReview.vue'
 import { useInboxCounts } from '../composables/useInboxCounts'
+import { useInboxTab } from '../composables/useInboxTab'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { INBOX_TABS, inboxTabCount, inboxTabLabels, refreshInbox, resolveInboxTab } from '../inbox'
+import { INBOX_TABS, inboxTabCount, inboxTabLabels, refreshInbox } from '../inbox'
 
 const route = useRoute()
 const queryClient = useQueryClient()
@@ -19,10 +20,7 @@ const spaceId = computed(() => String(route.params.spaceId))
 const canAct = computed(() => space.value?.role === 'owner' || space.value?.role === 'editor')
 
 const counts = useInboxCounts(spaceId)
-// 看的是哪一类记在地址里，刷新、分享都还在
-const tab = computed(() =>
-  resolveInboxTab(route.query.tab, counts.data.value, counts.isError.value),
-)
+const tab = useInboxTab(counts)
 const refreshing = computed(() => counts.isFetching.value)
 // 换分类时回到顶上：各类共用一个滚动区
 const scroller = ref<HTMLElement | null>(null)
