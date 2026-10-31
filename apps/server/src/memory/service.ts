@@ -672,8 +672,17 @@ export class MemoryService {
     })
   }
 
-  // reveal 只给管理界面的显式查看：secretRead 为 explicit 时默认不解密
-  private toView(row: MemoryRow, glossary: string[], reveal = false): MemoryView {
+  // 响应里的记忆都从这里出去：生成视图，解密出来的 secret 正文放进了响应就记一条访问事件。规则只在这里：
+  // via 必填，新的路径要想清楚响应里的正文是不是从库里解出来的，不是（调用方刚写的、本来就是明文）才传 null。
+  // reveal 只给管理界面的显式查看：secretRead 为 explicit 时默认不解密。内部路径（不设 secretRead）不记。
+  // 访问事件不改记忆，只有改前的快照：快照的敏感级决定只有读得到 secret 的人看得到它（之后降级了，这些记录也不给 editor 看）
+  private async toView(
+    tx: Tx,
+    row: MemoryRow,
+    glossary: string[],
+    via: SecretVia | null,
+    reveal = false,
+  ): Promise<MemoryView> {
     const secret = row.sensitivity === 'secret'
     const hidden = secret && this.ctx.secretRead === 'explicit' && !reveal
     const view: MemoryView = {
@@ -693,31 +702,15 @@ export class MemoryService {
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     }
+    if (secret && view.content !== null && via !== null && this.ctx.secretRead) {
+      await this.event(tx, row.id, ACCESS_EVENT, snapshot(row, glossary), null, { via })
+    }
     if (this.ctx.secretRead !== 'explicit') return view
     const extra: Omit<ConsoleMemoryView, keyof MemoryView> = {
       contentHidden: hidden,
       plaintextIgnored: plaintextIgnored(row),
     }
     return { ...view, ...extra }
-  }
-
-  // Key 读到 secret 的正文（解密出来放进了响应）时记一条访问事件。不改记忆，只有改前的快照：
-  // 快照的敏感级决定只有读得到 secret 的人看得到它（之后降级了，这些记录也不给 editor 看）
-  private async recordRead(
-    tx: Tx,
-    row: MemoryRow,
-    glossary: string[],
-    view: MemoryView,
-    via: SecretVia,
-  ): Promise<void> {
-    if (
-      this.ctx.secretRead !== 'audited' ||
-      row.sensitivity !== 'secret' ||
-      view.content === null
-    ) {
-      return
-    }
-    await this.event(tx, row.id, ACCESS_EVENT, snapshot(row, glossary), null, { via })
   }
 
   private async event(
@@ -928,9 +921,7 @@ export class MemoryService {
     return this.run(async (tx, personaIds) => {
       const row = await this.findReadable(tx, parsed, personaIds)
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-      const view = this.toView(row, glossary)
-      await this.recordRead(tx, row, glossary, view, via)
-      return view
+      return this.toView(tx, row, glossary, via)
     })
   }
 
@@ -962,13 +953,7 @@ export class MemoryService {
     return this.run(async (tx, personaIds) => {
       const row = await this.readableById(tx, memoryId, personaIds)
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-      const view = this.toView(row, glossary, true)
-      if (row.sensitivity === 'secret') {
-        await this.event(tx, row.id, ACCESS_EVENT, snapshot(row, glossary), null, {
-          via: 'console' satisfies SecretVia,
-        })
-      }
-      return view
+      return this.toView(tx, row, glossary, 'console', true)
     })
   }
 
@@ -1047,7 +1032,8 @@ export class MemoryService {
       snapshot(row!, glossary),
       meta.eventContext,
     )
-    return this.toView(row!, glossary)
+    // 正文是调用方刚写的
+    return this.toView(tx, row!, glossary, null)
   }
 
   // 写下一批抽取的结果（对象层的事实与情节层的会话摘要，没有 URI、不建向量），连同调用方的收尾
@@ -1188,7 +1174,7 @@ export class MemoryService {
       existingRefs?: boolean
       // 来源改成这个：按 Dream 的建议合并时记为主人，正文是成员确认过的（见 applySuggestion）
       provenance?: Provenance
-      // 响应带着解密出来的正文时经由哪里，记在访问事件里（见 recordRead）
+      // 响应带着解密出来的正文时经由哪里，记在访问事件里（见 toView）
       via?: SecretVia
     } = {},
   ): Promise<MemoryView> {
@@ -1348,12 +1334,9 @@ export class MemoryService {
       // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
       await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
     }
-    const view = this.toView(row, glossary)
     // 没带正文的修改，响应里的正文是解密出来的原文，也算读到；带了正文的是调用方自己刚写的
-    if (before.sensitivity === 'secret' && input.content === undefined) {
-      await this.recordRead(tx, row, glossary, view, meta.via ?? 'rest')
-    }
-    return view
+    const read = before.sensitivity === 'secret' && input.content === undefined
+    return this.toView(tx, row, glossary, read ? (meta.via ?? 'rest') : null)
   }
 
   private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
@@ -1394,7 +1377,8 @@ export class MemoryService {
         throw new MemoryError(400, '这条记忆的正文没有疑似明文，不用忽略')
       }
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-      if (plaintextIgnored(row) === ignored) return this.toView(row, glossary)
+      // 明文提示只有不是 secret 的记忆才有，上面已经挡了：这里的正文本来就是明文
+      if (plaintextIgnored(row) === ignored) return this.toView(tx, row, glossary, null)
       const [after] = await tx
         .update(memories)
         .set({ plaintextIgnoredHash: ignored ? contentHash(row.content) : null })
@@ -1408,7 +1392,7 @@ export class MemoryService {
         { ...snapshot(row, glossary), content: null },
         null,
       )
-      return this.toView(after!, glossary)
+      return this.toView(tx, after!, glossary, null)
     })
   }
 
@@ -1976,9 +1960,7 @@ export class MemoryService {
       if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
       const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
       await this.event(tx, before.id, 'move', snapshot(before, glossary), snapshot(row, glossary))
-      const view = this.toView(row, glossary)
-      await this.recordRead(tx, row, glossary, view, via)
-      return view
+      return this.toView(tx, row, glossary, via)
     })
   }
 
@@ -2043,8 +2025,7 @@ export class MemoryService {
       let parentView: MemoryView | null = null
       if (parent) {
         const glossary = (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? []
-        parentView = this.toView(parent, glossary)
-        await this.recordRead(tx, parent, glossary, parentView, via)
+        parentView = await this.toView(tx, parent, glossary, via)
       }
       // 指定了路径、它本身没有可读的记忆、下面也没有可读的内容：和不存在一样返回 404，
       // 拼错路径时不会看起来像一个空目录
@@ -2892,7 +2873,7 @@ export class MemoryService {
         snapshot(row, glossary),
         snapshot(restored, glossary),
       )
-      return this.toView(restored, glossary)
+      return this.toView(tx, restored, glossary, 'console')
     }, UNDELETE_CONFLICT)
   }
 
@@ -2954,7 +2935,7 @@ export class MemoryService {
         snapshot(row, glossary),
         snapshot(revived, glossary),
       )
-      return this.toView(revived, glossary)
+      return this.toView(tx, revived, glossary, 'console')
     }, REACTIVATE_CONFLICT)
   }
 }
