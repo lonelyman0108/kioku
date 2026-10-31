@@ -1914,7 +1914,13 @@ export class MemoryService {
   ): Promise<void> {
     const [after] = await tx
       .update(memories)
-      .set({ ...fields, version: sql`${memories.version} + 1`, updatedAt: now })
+      .set({
+        ...fields,
+        // 和 applyUpdate 一样：正文变了，忽略时记下的哈希不留着
+        ...(fields.content !== undefined ? { plaintextIgnoredHash: null } : {}),
+        version: sql`${memories.version} + 1`,
+        updatedAt: now,
+      })
       .where(
         and(eq(memories.id, row.id), eq(memories.version, row.version), isNull(memories.deletedAt)),
       )

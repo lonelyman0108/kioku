@@ -8,13 +8,13 @@ import {
   type MemoryList,
   type SpaceOverview,
 } from '@kioku/contracts'
-import { eq, sql } from 'drizzle-orm'
+import { eq, inArray, sql } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
-import { memories, memoryEvents } from '../../db/schema'
+import { dreamSuggestions, memories, memoryEvents, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { applySync } from '../../importer/lore'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
@@ -299,6 +299,76 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
 
     await edit({ uri: m.uri, content: '访客网络密码：guest-5678' })
     expect(await hashOf(m.id)).toBeNull()
+  })
+
+  it('Dream 合并事实改了正文也清掉哈希；只设为过时的不动', async () => {
+    const [person] = await inSpace((tx) =>
+      tx
+        .insert(subjects)
+        .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })
+        .returning(),
+    )
+    const fact = (content: string) => ({
+      spaceId: ws.spaceId,
+      form: 'extracted' as const,
+      layer: 'subject' as const,
+      sensitivity: 'public' as const,
+      provenance: 'owner' as const,
+      subjectId: person!.id,
+      content,
+      plaintextIgnoredHash: 'a'.repeat(64),
+    })
+    const [keep, other, staled] = await inSpace((tx) =>
+      tx
+        .insert(memories)
+        .values([fact('喜欢喝茶'), fact('爱喝茶'), fact('住在上海')])
+        .returning(),
+    )
+    const suggestion = (
+      fingerprint: string,
+      extra: Partial<typeof dreamSuggestions.$inferInsert>,
+    ) => ({
+      spaceId: ws.spaceId,
+      scope: `talk:direct:${person!.id}`,
+      reason: '整理',
+      fingerprint,
+      kind: 'stale',
+      memoryIds: [] as string[],
+      versions: [] as number[],
+      ...extra,
+    })
+    const [merge, stale] = await inSpace((tx) =>
+      tx
+        .insert(dreamSuggestions)
+        .values([
+          suggestion('merge', {
+            kind: 'merge',
+            memoryIds: [keep!.id, other!.id],
+            versions: [1, 1],
+            keepId: keep!.id,
+            content: '喜欢喝茶，尤其是绿茶',
+          }),
+          suggestion('stale', { memoryIds: [staled!.id], versions: [1] }),
+        ])
+        .returning(),
+    )
+    await ok(await send('POST', `/dream/suggestions/${merge!.id}/apply`, {}))
+    await ok(await send('POST', `/dream/suggestions/${stale!.id}/apply`, {}))
+    const rows = await inSpace((tx) =>
+      tx
+        .select({
+          id: memories.id,
+          content: memories.content,
+          hash: memories.plaintextIgnoredHash,
+        })
+        .from(memories)
+        .where(inArray(memories.id, [keep!.id, staled!.id])),
+    )
+    expect(rows.find((r) => r.id === keep!.id)).toMatchObject({
+      content: '喜欢喝茶，尤其是绿茶',
+      hash: null,
+    })
+    expect(rows.find((r) => r.id === staled!.id)!.hash).toBe('a'.repeat(64))
   })
 
   it('判断只看比较：哈希和现在的正文对不上就不算忽略，别的路径没清掉哈希也不会判错', async () => {
