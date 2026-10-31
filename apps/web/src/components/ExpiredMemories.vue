@@ -4,7 +4,7 @@ import type { ExpiredMemory } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
@@ -95,15 +95,14 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
       </p>
       <p v-if="retention && anyReleased" class="text-warning">{{ releasedNotice(retention) }}</p>
     </div>
-    <div v-if="expired.isError.value" class="list-note">
-      <NoteLine tone="error">
-        {{ expired.error.value instanceof ApiError ? expired.error.value.message : '读取失败' }}
-      </NoteLine>
+    <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
+    <div v-if="expired.isError.value && !expired.isFetchNextPageError.value" class="list-note">
+      <NoteLine tone="error">{{ readFailure(expired.error.value) }}</NoteLine>
     </div>
-    <div v-else-if="expired.isPending.value" class="space-y-2 p-3.5">
+    <div v-if="expired.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />
     </div>
-    <template v-else>
+    <template v-else-if="expired.data.value">
       <ul>
         <li v-for="item in items" :key="item.id">
           <MemoryRow
@@ -159,6 +158,9 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
         </li>
       </ul>
       <p v-if="!items.length" class="list-empty">暂无已过期的记忆</p>
+      <div v-if="expired.isFetchNextPageError.value" class="list-note">
+        <NoteLine tone="error">{{ readFailure(expired.error.value) }}</NoteLine>
+      </div>
       <div v-if="expired.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"

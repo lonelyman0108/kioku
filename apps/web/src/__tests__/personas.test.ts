@@ -1,8 +1,9 @@
-import type { PersonaNode } from '@kioku/contracts'
+import type { PersonaInfo, PersonaNode } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import { sameScopes } from '../components/keyPresets'
-import { lostFromBoot } from '../personas'
+import { guideLines } from '../components/memoryTree'
+import { inheritedGroups, lostFromBoot, personaRows } from '../personas'
 
 const node = (uri: string, priority: number, overriddenBy: string | null = null): PersonaNode => ({
   uri,
@@ -26,6 +27,108 @@ describe('被覆盖之后会不会从启动上下文里消失', () => {
     const low = node('persona://child/tone', 3)
     expect(lostFromBoot(node('persona://parent/tone', 2, low.uri), [low])).toBeNull()
     expect(lostFromBoot(node('persona://parent/habit', 0), [])).toBeNull()
+  })
+})
+
+const persona = (id: string, extendsId: string | null = null): PersonaInfo => ({
+  id,
+  slug: id,
+  name: id,
+  extendsId,
+  description: null,
+})
+
+describe('人格列表的继承树', () => {
+  const ids = (personas: PersonaInfo[]) => personaRows(personas).map((r) => r.persona.id)
+
+  it('继承的人格不在列表里时，排在前面的子人格也不会被拆出去', () => {
+    const personas = [persona('c', 'b'), persona('b', 'gone'), persona('x')]
+    expect(ids(personas)).toEqual(['x', 'b', 'c'])
+    expect(personaRows(personas).map((r) => r.depth)).toEqual([0, 0, 1])
+  })
+
+  it('成环时环外的子人格也不会被拆出去，每个人格只出现一次', () => {
+    const personas = [persona('c', 'a'), persona('a', 'b'), persona('b', 'a')]
+    const rows = personaRows(personas)
+    expect(rows.map((r) => r.persona.id).sort()).toEqual(['a', 'b', 'c'])
+    expect(rows.find((r) => r.persona.id === 'c')?.depth).toBeGreaterThan(0)
+  })
+
+  it('子人格排在被继承的人格下面，同一级保持接口的顺序', () => {
+    // 接口按创建时间排，子人格可能比后来才设的父人格更早
+    const personas = [
+      persona('child', 'root'),
+      persona('root'),
+      persona('other'),
+      persona('leaf', 'child'),
+      persona('sibling', 'root'),
+    ]
+    expect(ids(personas)).toEqual(['root', 'child', 'leaf', 'sibling', 'other'])
+    expect(personaRows(personas).map((r) => r.depth)).toEqual([0, 1, 2, 1, 0])
+  })
+
+  it('引线：还有后面的兄弟时竖线穿过去，最后一个画到一半', () => {
+    const rows = personaRows([
+      persona('root'),
+      persona('a', 'root'),
+      persona('a1', 'a'),
+      persona('b', 'root'),
+      persona('b1', 'b'),
+    ])
+    const lines = (id: string) => guideLines(rows.find((r) => r.persona.id === id)!)
+    expect(lines('root')).toEqual([])
+    expect(lines('a')).toEqual([{ left: 14, end: false, tick: true }])
+    // a 后面还有 b：a1 这一行要有 a 那一级穿过去的竖线
+    expect(lines('a1')).toEqual([
+      { left: 14, end: false, tick: false },
+      { left: 30, end: true, tick: true },
+    ])
+    expect(lines('b')).toEqual([{ left: 14, end: true, tick: true }])
+    // b 是最后一个：b1 这一行没有穿过去的竖线
+    expect(lines('b1')).toEqual([{ left: 30, end: true, tick: true }])
+  })
+
+  it('继承的人格不在列表里时算作一棵新树，不丢', () => {
+    expect(personaRows([persona('orphan', 'gone')]).map((r) => [r.persona.id, r.depth])).toEqual([
+      ['orphan', 0],
+    ])
+  })
+
+  it('万一成环也不丢、不重复、不死循环', () => {
+    const rows = personaRows([persona('a', 'b'), persona('b', 'a'), persona('root')])
+    expect(rows.map((r) => r.persona.id).sort()).toEqual(['a', 'b', 'root'])
+  })
+
+  it('没有人格时为空', () => {
+    expect(personaRows([])).toEqual([])
+  })
+})
+
+describe('继承来的节点按祖先分组', () => {
+  const at = (uri: string, personaId: string): PersonaNode => ({
+    ...node(uri, 2),
+    personaId,
+  })
+
+  it('由近到远，和节点的先后无关；没有节点的祖先不列', () => {
+    const groups = inheritedGroups({
+      ancestors: [persona('near'), persona('empty'), persona('far')],
+      inherited: [
+        at('persona://far/a', 'far'),
+        at('persona://near/b', 'near'),
+        at('persona://far/c', 'far'),
+      ],
+    })
+    expect(groups.map((g) => g.name)).toEqual(['near', 'far'])
+    expect(groups[1]!.nodes.map((n) => n.uri)).toEqual(['persona://far/a', 'persona://far/c'])
+  })
+
+  it('节点对不上祖先时也不丢', () => {
+    const groups = inheritedGroups({
+      ancestors: [persona('near')],
+      inherited: [at('persona://x/a', 'unknown'), at('persona://near/b', 'near')],
+    })
+    expect(groups.map((g) => g.name)).toEqual(['near', '祖先人格'])
   })
 })
 

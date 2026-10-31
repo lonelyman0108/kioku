@@ -9,15 +9,17 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
 import Hint from '../components/Hint.vue'
 import ProviderFormModal from '../components/ProviderFormModal.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
+import PageHead from '../components/strata/PageHead.vue'
+import SectionHeading from '../components/strata/SectionHeading.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
-import { icons } from '../icons'
 import { credentialSourceLabels, providerKindLabels, restrictedAppsLabel } from '../labels'
 import { deletionNotice, providerPurgeNote, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime } from '../time'
@@ -31,12 +33,12 @@ const spaceId = computed(() => String(route.params.spaceId))
 // 管理凭据要 secret 级，和签发 Key 的规则一样只有空间 owner 有；别的成员只能看自己凭据的说明
 const canManage = computed(() => space.value?.role === 'owner')
 
-type Tab = 'credentials' | 'providers' | 'deleted'
+// 凭据源是单独一块，一直显示；左边在有效的凭据和已删除之间切换
+type Tab = 'credentials' | 'deleted'
 const tab = ref<Tab>('credentials')
 const tabItems = [
-  { label: '凭据', value: 'credentials', icon: icons.credentials },
-  { label: '凭据源', value: 'providers', icon: icons.provider },
-  { label: '已删除', value: 'deleted', icon: icons.remove },
+  { label: '有效', value: 'credentials' },
+  { label: '已删除', value: 'deleted' },
 ]
 
 const credentials = useQuery({
@@ -96,23 +98,6 @@ const sourceOf = (c: ConsoleCredential) =>
       : credentialSourceLabels.external
 const appsOf = (c: ConsoleCredential) =>
   restrictedAppsLabel(c.appIds, apps.data.value, me.data.value?.id)
-
-const columns = [
-  { accessorKey: 'name', header: '名称' },
-  { accessorKey: 'identifier', header: '标识' },
-  { id: 'source', header: '来源' },
-  { id: 'fields', header: '字段' },
-  { accessorKey: 'referenceCount', header: '引用' },
-  { id: 'apps', header: '限定应用' },
-  { accessorKey: 'updatedAt', header: '更新' },
-]
-const deletedColumns = [
-  { accessorKey: 'name', header: '名称' },
-  { accessorKey: 'identifier', header: '标识' },
-  { accessorKey: 'deletedAt', header: '删除于' },
-  { id: 'purge', header: '永久清除' },
-  { id: 'actions', header: '' },
-]
 
 // 详情：每次打开都按 id 重新读，删除、修改之后拿到的是最新的一版。打开的是哪一条记在地址里，
 // 从记忆正文里的凭据徽章点过来时直接打开它
@@ -241,114 +226,202 @@ async function removeProvider() {
 </script>
 
 <template>
-  <UDashboardPanel id="credentials">
-    <template #header>
-      <UDashboardNavbar title="凭据">
-        <template #right>
-          <UButton
-            v-if="canManage && tab === 'providers'"
-            :icon="icons.add"
-            size="sm"
-            @click="openProvider(null)"
-          >
-            添加凭据源
-          </UButton>
-          <UButton v-else-if="canManage" :icon="icons.add" size="sm" @click="openCreate">
-            新建凭据
-          </UButton>
-        </template>
-      </UDashboardNavbar>
-      <UDashboardToolbar>
-        <UTabs
-          v-model="tab"
-          :items="tabItems"
-          :content="false"
-          variant="link"
-          size="sm"
-          class="w-full"
-        />
-      </UDashboardToolbar>
-    </template>
-
-    <template #body>
-      <p class="mb-4 text-sm text-muted">
+  <div class="credentials">
+    <PageHead title="凭据">
+      <template #note>
         密码与 Token 存为凭据，记忆正文只放占位符，例如
-        <code v-pre>{{cred:file-server#password}}</code
-        >。
-        <Hint>
+        <code v-pre class="font-mono text-[13px]">{{cred:file-server#password}}</code
+        >。<Hint>
           Agent 用到时才取值。值由 Kioku 加密保存，或保留在密码管理器（凭据源）中，由 Agent
           在本机获取。凭据仅所有者可见。<template v-if="!canManage"
             >管理凭据与查看托管的值需要空间所有者权限。</template
           >
         </Hint>
-      </p>
-
-      <template v-if="tab === 'credentials'">
-        <UAlert
-          v-if="credentials.isError.value"
-          color="error"
-          variant="subtle"
-          :title="
-            credentials.error.value instanceof ApiError
-              ? credentials.error.value.message
-              : '读取失败'
-          "
-        />
-        <UTable
-          v-else
-          :data="credentials.data.value?.items ?? []"
-          :columns="columns"
-          :loading="credentials.isPending.value"
-          empty="暂无凭据"
-        >
-          <template #name-cell="{ row }">
-            <UButton
-              variant="link"
-              color="neutral"
-              class="p-0"
-              @click="selectedId = row.original.id"
-            >
-              {{ row.original.name }}
-            </UButton>
-          </template>
-          <template #identifier-cell="{ row }">
-            <code class="text-xs">{{ row.original.identifier }}</code>
-          </template>
-          <template #source-cell="{ row }">{{ sourceOf(row.original) }}</template>
-          <template #fields-cell="{ row }">
-            <span class="text-xs">{{ row.original.fields.map((f) => f.name).join('、') }}</span>
-          </template>
-          <template #apps-cell="{ row }">{{ appsOf(row.original) }}</template>
-          <template #updatedAt-cell="{ row }">
-            <time :datetime="row.original.updatedAt" :title="formatTime(row.original.updatedAt)">
-              {{ formatRelative(row.original.updatedAt) }}
-            </time>
-          </template>
-        </UTable>
-        <p v-if="credentials.data.value?.truncated" class="mt-2 text-xs text-muted">
-          仅显示前 1000 条
-        </p>
       </template>
+    </PageHead>
 
-      <template v-else-if="tab === 'providers'">
-        <p class="mb-3 text-sm text-muted">
-          凭据源是密码管理器或其他取值方式，值由 Agent 在本机获取。
-          <Hint>Kioku 不保存凭据源的访问凭据。使用说明会原样发送给 Agent。</Hint>
-        </p>
-        <div class="space-y-3">
-          <UCard v-for="p in providers.data.value ?? []" :key="p.id">
-            <div class="flex flex-wrap items-center gap-2">
-              <span class="font-medium">{{ p.name }}</span>
-              <UBadge variant="subtle">{{ providerKindLabels[p.kind] }}</UBadge>
-              <span class="text-xs text-muted">已绑定 {{ p.credentialCount }} 条凭据</span>
-              <div v-if="canManage" class="ml-auto flex gap-1">
+    <div class="columns">
+      <section class="main-column" aria-label="凭据列表">
+        <div class="column-head">
+          <UTabs
+            v-model="tab"
+            :items="tabItems"
+            :content="false"
+            variant="link"
+            size="md"
+            :ui="{ root: 'min-w-0', list: 'border-0', trigger: 'px-2 py-0 h-11 text-sm/5' }"
+          />
+          <UButton
+            v-if="canManage"
+            class="shrink-0 self-center"
+            size="sm"
+            color="primary"
+            variant="outline"
+            @click="openCreate"
+          >
+            新建凭据
+          </UButton>
+        </div>
+
+        <div v-if="tab === 'credentials'" class="column-body">
+          <!-- 后台刷新失败时读到过的列表留着，错误放在上面 -->
+          <div v-if="credentials.isError.value" class="pt-3.5">
+            <NoteLine tone="error">{{ readFailure(credentials.error.value) }}</NoteLine>
+          </div>
+          <div v-if="credentials.isPending.value" class="space-y-2 pt-3.5">
+            <USkeleton v-for="n in 5" :key="n" class="h-10 w-full" />
+          </div>
+          <template v-else-if="credentials.data.value?.items.length">
+            <div class="ledger-head credential-grid" aria-hidden="true">
+              <span>名称</span>
+              <span>标识</span>
+              <span>来源</span>
+              <span>字段</span>
+              <span class="num">引用</span>
+              <span>限定应用</span>
+              <span class="num">更新</span>
+            </div>
+            <ul>
+              <li v-for="c in credentials.data.value.items" :key="c.id">
+                <button type="button" class="ledger-row credential-grid" @click="selectedId = c.id">
+                  <span class="row-name">{{ c.name }}</span>
+                  <span class="row-code">{{ c.identifier }}</span>
+                  <span :class="{ 'text-warning': c.provider?.deleted }">{{ sourceOf(c) }}</span>
+                  <span class="row-fields" data-label="字段">
+                    {{ c.fields.map((f) => f.name).join('、') }}
+                  </span>
+                  <span
+                    class="num row-count"
+                    :class="{ zero: !c.referenceCount }"
+                    data-label="引用"
+                  >
+                    {{ c.referenceCount }}
+                  </span>
+                  <span class="row-muted row-apps" data-label="限定应用">{{ appsOf(c) }}</span>
+                  <time
+                    class="num row-muted row-time"
+                    :datetime="c.updatedAt"
+                    :title="formatTime(c.updatedAt)"
+                  >
+                    {{ formatRelative(c.updatedAt) }}
+                  </time>
+                </button>
+              </li>
+            </ul>
+          </template>
+          <p v-else-if="credentials.data.value" class="empty">暂无凭据</p>
+          <p v-if="credentials.data.value?.truncated" class="ledger-note">仅显示前 1000 条</p>
+        </div>
+
+        <div v-else class="column-body">
+          <p class="deleted-note">
+            已删除的凭据在保留期内可以恢复。<Hint>同一标识已有有效凭据时无法恢复。</Hint>
+          </p>
+          <p v-if="retention" class="deleted-note text-warning">{{ deletionNotice(retention) }}</p>
+          <div v-if="deleted.isError.value" class="pt-3.5">
+            <NoteLine tone="error">{{ readFailure(deleted.error.value) }}</NoteLine>
+          </div>
+          <div v-if="deleted.isPending.value" class="space-y-2 pt-3.5">
+            <USkeleton v-for="n in 3" :key="n" class="h-10 w-full" />
+          </div>
+          <template v-else-if="deleted.data.value?.items.length">
+            <div class="ledger-head deleted-grid" aria-hidden="true">
+              <span>名称</span>
+              <span>标识</span>
+              <span>删除于</span>
+              <span>永久清除</span>
+              <span />
+            </div>
+            <ul>
+              <li v-for="c in deleted.data.value.items" :key="c.id" class="ledger-row deleted-grid">
+                <button type="button" class="row-name" @click="selectedId = c.id">
+                  {{ c.name }}
+                </button>
+                <span class="row-code">{{ c.identifier }}</span>
+                <time
+                  class="row-muted row-deleted"
+                  :datetime="c.deletedAt!"
+                  :title="formatTime(c.deletedAt!)"
+                  data-label="删除于"
+                >
+                  {{ formatRelative(c.deletedAt!, now) }}
+                </time>
+                <span
+                  v-if="retention && credentialNotes.get(c.id)"
+                  class="row-purge"
+                  :class="credentialNotes.get(c.id)!.soon ? 'text-warning' : 'row-muted'"
+                  :title="`最早在 ${formatTime(purgeAt(c.deletedAt!, retention).toISOString())} 之后清除`"
+                >
+                  {{ credentialNotes.get(c.id)!.text }}
+                </span>
+                <span v-else class="row-purge" />
                 <UButton
+                  v-if="canManage"
+                  class="row-action"
                   size="xs"
                   color="neutral"
-                  variant="ghost"
-                  :icon="icons.edit"
-                  @click="openProvider(p)"
+                  variant="outline"
+                  :loading="busy"
+                  @click="undelete(c)"
                 >
+                  恢复
+                </UButton>
+              </li>
+            </ul>
+          </template>
+          <p v-else-if="deleted.data.value" class="empty">暂无已删除的凭据</p>
+
+          <template v-if="deletedProviders.data.value?.items.length">
+            <SectionHeading class="mt-7" title="已删除的凭据源" />
+            <p class="deleted-note">
+              已删除的凭据源无法恢复。<Hint>
+                仍有凭据绑定时（包括可恢复的已删除凭据），等这些凭据清除后才清除。
+              </Hint>
+            </p>
+            <ul>
+              <li v-for="p in deletedProviders.data.value.items" :key="p.id" class="provider-gone">
+                <span class="font-medium">{{ p.name }}</span>
+                <span class="row-muted">{{ providerKindLabels[p.kind] }}</span>
+                <span class="row-muted">
+                  删除于
+                  <time :datetime="p.deletedAt" :title="formatTime(p.deletedAt)">
+                    {{ formatRelative(p.deletedAt, now) }}
+                  </time>
+                </span>
+                <span
+                  v-if="providerNotes.get(p.id)"
+                  :class="providerNotes.get(p.id)!.soon ? 'text-warning' : 'row-muted'"
+                  :title="providerPurgeTitle(p)"
+                >
+                  {{ providerNotes.get(p.id)!.text }}
+                </span>
+              </li>
+            </ul>
+            <p v-if="deletedProviders.data.value.truncated" class="ledger-note">仅显示前 1000 个</p>
+          </template>
+        </div>
+      </section>
+
+      <section class="side-column">
+        <SectionHeading title="凭据源">
+          <template #hint>
+            <Hint>
+              凭据源是密码管理器或其他取值方式，值由 Agent 在本机获取。Kioku
+              不保存凭据源的访问凭据。使用说明会原样发送给 Agent。
+            </Hint>
+          </template>
+          <template v-if="canManage" #actions>
+            <UButton size="xs" color="primary" variant="outline" @click="openProvider(null)">
+              添加凭据源
+            </UButton>
+          </template>
+        </SectionHeading>
+        <ul v-if="providers.data.value?.length">
+          <li v-for="p in providers.data.value" :key="p.id" class="provider-row">
+            <div class="provider-head">
+              <span class="provider-name">{{ p.name }}</span>
+              <div v-if="canManage" class="flex shrink-0 gap-1">
+                <UButton size="xs" color="neutral" variant="ghost" @click="openProvider(p)">
                   修改
                 </UButton>
                 <UTooltip
@@ -363,7 +436,6 @@ async function removeProvider() {
                     size="xs"
                     color="error"
                     variant="ghost"
-                    :icon="icons.remove"
                     :disabled="p.credentialCount > 0"
                     @click="removingProvider = p"
                   >
@@ -372,112 +444,25 @@ async function removeProvider() {
                 </UTooltip>
               </div>
             </div>
-            <p v-if="p.instructions" class="mt-2 text-sm whitespace-pre-wrap">
-              {{ p.instructions }}
+            <p class="row-muted">
+              {{ providerKindLabels[p.kind] }} · 已绑定
+              <b class="font-mono font-medium">{{ p.credentialCount }}</b> 条凭据
             </p>
-            <p v-else class="mt-2 text-sm text-muted">暂无使用说明</p>
-          </UCard>
-          <p v-if="providers.data.value && !providers.data.value.length" class="text-sm text-muted">
-            暂无凭据源。全部由 Kioku 托管时无需添加。
-          </p>
-        </div>
-      </template>
-
-      <template v-else>
-        <p class="mb-3 text-sm text-muted">
-          已删除的凭据在保留期内可以恢复。
-          <Hint>同一标识已有有效凭据时无法恢复。</Hint>
+            <p v-if="p.instructions" class="provider-instructions">{{ p.instructions }}</p>
+            <p v-else class="row-muted">暂无使用说明</p>
+          </li>
+        </ul>
+        <p v-else-if="providers.isError.value" class="empty text-error">
+          {{
+            providers.error.value instanceof ApiError ? providers.error.value.message : '读取失败'
+          }}
         </p>
-        <p v-if="retention" class="mb-3 flex items-start gap-1.5 text-xs text-warning">
-          <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
-          <span>{{ deletionNotice(retention) }}</span>
+        <p v-else-if="providers.data.value" class="empty">
+          暂无凭据源。全部由 Kioku 托管时无需添加。
         </p>
-        <UTable
-          :data="deleted.data.value?.items ?? []"
-          :columns="deletedColumns"
-          :loading="deleted.isPending.value"
-          empty="暂无已删除的凭据"
-        >
-          <template #name-cell="{ row }">
-            <UButton
-              variant="link"
-              color="neutral"
-              class="p-0"
-              @click="selectedId = row.original.id"
-            >
-              {{ row.original.name }}
-            </UButton>
-          </template>
-          <template #identifier-cell="{ row }">
-            <code class="text-xs">{{ row.original.identifier }}</code>
-          </template>
-          <template #deletedAt-cell="{ row }">
-            <time :datetime="row.original.deletedAt!" :title="formatTime(row.original.deletedAt!)">
-              {{ formatRelative(row.original.deletedAt!, now) }}
-            </time>
-          </template>
-          <template #purge-cell="{ row }">
-            <span
-              v-if="retention && credentialNotes.get(row.original.id)"
-              class="text-xs"
-              :class="credentialNotes.get(row.original.id)!.soon ? 'text-warning' : 'text-muted'"
-              :title="`最早在 ${formatTime(purgeAt(row.original.deletedAt!, retention).toISOString())} 之后清除`"
-            >
-              {{ credentialNotes.get(row.original.id)!.text }}
-            </span>
-          </template>
-          <template #actions-cell="{ row }">
-            <UButton
-              v-if="canManage"
-              size="xs"
-              variant="subtle"
-              :icon="icons.undelete"
-              :loading="busy"
-              @click="undelete(row.original)"
-            >
-              恢复
-            </UButton>
-          </template>
-        </UTable>
-
-        <template v-if="deletedProviders.data.value?.items.length">
-          <h3 class="mt-6 mb-1 text-sm font-medium">已删除的凭据源</h3>
-          <p class="mb-2 text-sm text-muted">
-            已删除的凭据源无法恢复。
-            <Hint>仍有凭据绑定时（包括可恢复的已删除凭据），等这些凭据清除后才清除。</Hint>
-          </p>
-          <ul class="divide-y divide-default">
-            <li
-              v-for="p in deletedProviders.data.value.items"
-              :key="p.id"
-              class="flex flex-wrap items-center gap-2 py-2"
-            >
-              <span class="text-sm">{{ p.name }}</span>
-              <UBadge size="sm" variant="subtle">{{ providerKindLabels[p.kind] }}</UBadge>
-              <span class="text-xs text-muted">
-                删除于
-                <time :datetime="p.deletedAt" :title="formatTime(p.deletedAt)">
-                  {{ formatRelative(p.deletedAt, now) }}
-                </time>
-                <template v-if="providerNotes.get(p.id)">
-                  ·
-                  <span
-                    :class="{ 'text-warning': providerNotes.get(p.id)!.soon }"
-                    :title="providerPurgeTitle(p)"
-                  >
-                    {{ providerNotes.get(p.id)!.text }}
-                  </span>
-                </template>
-              </span>
-            </li>
-          </ul>
-          <p v-if="deletedProviders.data.value.truncated" class="mt-2 text-xs text-muted">
-            仅显示前 1000 个
-          </p>
-        </template>
-      </template>
-    </template>
-  </UDashboardPanel>
+      </section>
+    </div>
+  </div>
 
   <USlideover
     :open="selectedId !== null"
@@ -486,14 +471,9 @@ async function removeProvider() {
     @update:open="(v) => !v && (selectedId = null)"
   >
     <template #body>
-      <UAlert
-        v-if="selected.isError.value"
-        color="error"
-        variant="subtle"
-        :title="
-          selected.error.value instanceof ApiError ? selected.error.value.message : '读取失败'
-        "
-      />
+      <NoteLine v-if="selected.isError.value" tone="error">
+        {{ selected.error.value instanceof ApiError ? selected.error.value.message : '读取失败' }}
+      </NoteLine>
       <CredentialDetail
         v-else-if="detail"
         :space-id="spaceId"
@@ -557,3 +537,249 @@ async function removeProvider() {
     </template>
   </UModal>
 </template>
+
+<style scoped>
+.credentials {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  overflow-y: auto;
+}
+.columns {
+  flex: 1 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 360px;
+  align-items: stretch;
+  border-top: 1px solid var(--strata-rule);
+}
+.main-column {
+  min-width: 0;
+  border-right: 1px solid var(--strata-rule);
+}
+.column-head {
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 8px;
+  height: 44px;
+  padding: 0 32px 0 24px;
+  border-bottom: 1px solid var(--ui-border-accented);
+}
+.column-body {
+  padding: 0 32px 40px;
+}
+.side-column {
+  min-width: 0;
+  padding: 12px 32px 40px 24px;
+}
+.credential-grid {
+  display: grid;
+  grid-template-columns:
+    minmax(9rem, 1.3fr) minmax(7rem, 1fr) minmax(5.5rem, 0.8fr) minmax(6rem, 1fr)
+    2.5rem minmax(5rem, 0.8fr) 4.75rem;
+  column-gap: 14px;
+}
+.deleted-grid {
+  display: grid;
+  grid-template-columns: minmax(9rem, 1.2fr) minmax(7rem, 1fr) 6rem minmax(8rem, 1fr) 4rem;
+  column-gap: 14px;
+}
+.ledger-head {
+  padding: 10px 0 6px;
+  border-bottom: 1px solid var(--strata-rule);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+}
+.num {
+  text-align: right;
+}
+.ledger-row {
+  position: relative;
+  width: 100%;
+  align-items: baseline;
+  padding: 9px 0 8px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.5;
+  text-align: left;
+  overflow-wrap: anywhere;
+}
+.ledger-row:hover {
+  background: var(--ui-bg-muted);
+}
+.ledger-row:focus-visible,
+.row-name:focus-visible {
+  outline-offset: -2px;
+}
+.row-name {
+  min-width: 0;
+  font-weight: 500;
+  text-align: left;
+}
+/* 已删除的一行里还有恢复按钮，不能整行是按钮：点击区撑满整行，按钮和要看说明的两格压在上面 */
+button.row-name::after {
+  content: '';
+  position: absolute;
+  inset: 0;
+}
+.row-deleted,
+.row-purge {
+  position: relative;
+  z-index: 1;
+}
+.row-code {
+  font-family: var(--font-mono);
+  font-size: 13px;
+}
+.row-fields {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ui-text-toned);
+}
+.row-count {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+.row-count.zero {
+  font-weight: 400;
+  color: var(--ui-text-muted);
+}
+.row-muted {
+  color: var(--ui-text-muted);
+}
+.row-time {
+  font-size: 13px;
+  white-space: nowrap;
+}
+.row-action {
+  position: relative;
+  z-index: 1;
+  justify-self: end;
+}
+.ledger-note {
+  padding-top: 8px;
+  color: var(--ui-text-muted);
+}
+.empty {
+  padding: 12px 0;
+  color: var(--ui-text-muted);
+}
+.deleted-note {
+  padding-top: 10px;
+  line-height: 1.6;
+}
+.deleted-note:not(.text-warning) {
+  color: var(--ui-text-muted);
+}
+.provider-gone {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 12px;
+  padding: 8px 0 7px;
+  border-bottom: 1px solid var(--ui-border);
+  line-height: 1.5;
+}
+.provider-row {
+  padding: 8px 0 10px;
+  border-bottom: 1px solid var(--ui-border);
+  line-height: 1.55;
+}
+.provider-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 8px;
+}
+.provider-name {
+  min-width: 0;
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.provider-instructions {
+  margin-top: 4px;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+/* 表格放不下时，凭据源放到下面 */
+/* 宽屏的表头只给眼睛看，读屏靠这个知道一列是什么；窄屏没有表头，它显示出来 */
+[data-label]::before {
+  content: attr(data-label) ' ';
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+@media (max-width: 1240px) {
+  .columns {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .main-column {
+    border-right: 0;
+  }
+  .side-column {
+    padding: 14px 32px 40px;
+    border-top: 1px solid var(--strata-rule);
+  }
+}
+/* 窄屏：一行拆成几行，字段和限定应用带上名字 */
+@media (max-width: 1023.98px) {
+  .column-head {
+    padding: 0 16px 0 7px;
+  }
+  .column-body {
+    padding: 0 16px 24px;
+  }
+  .side-column {
+    padding: 14px 16px 32px;
+  }
+  .ledger-head {
+    display: none;
+  }
+  .credential-grid,
+  .deleted-grid {
+    grid-template-columns: auto minmax(0, 1fr) auto;
+    gap: 1px 12px;
+  }
+  .credential-grid > *,
+  .deleted-grid > * {
+    grid-column: 1 / -1;
+  }
+  .ledger-row .row-name {
+    grid-row: 1;
+    grid-column: 1 / 3;
+  }
+  .ledger-row .row-time,
+  .ledger-row .row-action {
+    grid-row: 1;
+    grid-column: 3;
+  }
+  .ledger-row .row-count,
+  .ledger-row .row-deleted {
+    grid-column: 1;
+    text-align: left;
+  }
+  .ledger-row .row-apps,
+  .ledger-row .row-purge {
+    grid-column: 2 / -1;
+  }
+  [data-label]::before {
+    position: static;
+    width: auto;
+    height: auto;
+    margin-right: 6px;
+    overflow: visible;
+    clip-path: none;
+    font-family: var(--font-sans);
+    font-size: 13px;
+    font-weight: 400;
+    color: var(--ui-text-muted);
+  }
+}
+</style>

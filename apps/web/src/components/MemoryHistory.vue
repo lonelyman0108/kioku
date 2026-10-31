@@ -8,7 +8,6 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import {
-  actorLabel,
   eventLabel,
   layerLabels,
   memoryViaLabels,
@@ -17,6 +16,7 @@ import {
 } from '../labels'
 import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
+import ActorName from './strata/ActorName.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
@@ -219,7 +219,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
               <span v-if="isCurrent(event)" class="history-current">当前版本</span>
             </p>
             <p class="history-meta">
-              {{ actorLabel(event.actor).name }}
+              <ActorName :actor="event.actor" />
               <span class="ms-3">来源 {{ provenanceLabels[event.provenance] }}</span>
               <span v-if="event.via" class="ms-3">
                 {{ memoryViaLabels[event.via] ?? event.via }}
