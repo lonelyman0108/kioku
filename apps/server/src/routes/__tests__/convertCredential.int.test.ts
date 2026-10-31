@@ -337,7 +337,9 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     })
     await edit({ uri: m.uri, disclosure: '连 Wi-Fi 时', glossaryRemove: [`词-${VALUE}`] })
     const moved = await edit({ uri: m.uri, layer: 'private' })
-    await converted(moved)
+    const result = await converted(moved)
+    // 盖过的版本（密码：***）不算还有明文
+    expect(result.plaintextVersions).toBe(0)
 
     const events = await eventsOf(m.id)
     expect(JSON.stringify(events)).not.toContain(VALUE)

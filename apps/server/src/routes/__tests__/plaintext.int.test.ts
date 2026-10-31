@@ -30,6 +30,10 @@ const SAMPLES = [
   '密码：“{{cred:x}}”',
   '密码：「{{cred:x}}」',
   '密码："abc{{cred:x}}"',
+  // 盖过的不算，粗体的值照常算
+  '密码：***',
+  '密码：***-old',
+  '密码：**hunter2**',
   'tokenizer: 分词器',
   'sk-short',
   '普通的一段话',

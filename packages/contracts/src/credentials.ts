@@ -36,12 +36,14 @@ const SPACE =
 const PLAINTEXT_LABELS = 'password|passwd|密码|口令|token|api[_ -]?key|secret'
 // 值外面常见的引号、反引号与粗体：占位符写在里面也算占位符
 const PLAINTEXT_QUOTES = '"\'`“‘「『*'
+// 盖掉明文之后留下的遮盖符（转存时的历史快照、会话摘要的打码）：盖过的不再算明文
+export const PLAINTEXT_MASK = '***'
 
-// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符的不算，
+// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符或遮盖符的不算，
 // 占位符写在引号里也不算），或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
 // （管理界面里由空间 owner 确认后可以强制）
 export const PLAINTEXT_CREDENTIAL = new RegExp(
-  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*(?![${PLAINTEXT_QUOTES}]*\\{\\{cred:)[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
+  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*(?![${PLAINTEXT_QUOTES}]*\\{\\{cred:|\\*\\*\\*)[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
   'i',
 )
 

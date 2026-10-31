@@ -2,6 +2,7 @@ import {
   CREDENTIAL_PLACEHOLDER,
   CREDENTIAL_PLACEHOLDER_START,
   PLAINTEXT_CREDENTIAL,
+  PLAINTEXT_MASK,
   type Layer,
   type Sensitivity,
 } from '@kioku/contracts'
@@ -67,7 +68,7 @@ export function maskPlaintextCredentials(text: string): string {
     while (end < text.length && !/[\n\r\u2028\u2029]/.test(text[end]!)) end++
     if (end <= last) continue
     // 紧接着上一段的不再另起一段星号
-    out += valueAt === last && last > 0 ? '' : `${text.slice(last, valueAt)}***`
+    out += valueAt === last && last > 0 ? '' : `${text.slice(last, valueAt)}${PLAINTEXT_MASK}`
     last = end
   }
   return out + text.slice(last)

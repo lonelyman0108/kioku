@@ -83,6 +83,17 @@ describe('明文凭据提醒', () => {
 })
 
 describe('提示语打码', () => {
+  it('盖过之后规则不再算明文', () => {
+    for (const text of [
+      '路由器密码：hunter2 怎么改',
+      'token=abc,password: hunter2',
+      '密码：a1\n口令：b2',
+    ]) {
+      expect(looksLikePlaintextCredential(text), text).toBe(true)
+      expect(looksLikePlaintextCredential(maskPlaintextCredentials(text)), text).toBe(false)
+    }
+  })
+
   it('从值开始盖到行尾，下一行照常', () => {
     expect(maskPlaintextCredentials('路由器密码：hunter2 怎么改')).toBe('路由器密码：***')
     expect(maskPlaintextCredentials('token=abc.def\n下一行')).toBe('token=***\n下一行')

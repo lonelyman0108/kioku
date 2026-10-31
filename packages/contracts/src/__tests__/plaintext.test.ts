@@ -95,6 +95,15 @@ describe('正文里疑似明文的位置', () => {
     }
   })
 
+  it('盖过的不算：遮盖符后面可以跟着别的；粗体的值照常算', () => {
+    for (const text of ['密码：***', '密码：***，别告诉别人', 'token = ***-old']) {
+      expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(false)
+      expect(findPlaintextCredentials(text), text).toEqual([])
+    }
+    expect(values('密码：**hunter2**')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(PLAINTEXT_CREDENTIAL.test('密码：*hunter2')).toBe(true)
+  })
+
   it('占位符写在引号、反引号或粗体里也不算：转存之后正文就是这样', () => {
     for (const text of [
       '密码："{{cred:x}}"',

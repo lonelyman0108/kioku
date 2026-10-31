@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   PLAIN_LAYERS,
   PLAINTEXT_CREDENTIAL,
+  PLAINTEXT_MASK,
   SENSITIVITIES,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
@@ -238,9 +239,6 @@ const CONVERT_NOT_FOUND = '正文里没有这段值，请重新读取后再转�
 const CONVERT_ELSEWHERE =
   'URI、触发场景或关键词里也有这段值，这些字段是明文，也不能放占位符：先从这些字段去掉，再转存'
 const CONVERT_TOO_LONG = '换成占位符之后正文超过了长度上限，先删掉一些内容再转存'
-// 历史里不在这个主人私人层的版本别的成员可能看得到，把值换成它，不写占位符（标识也不给他们看）；
-// disclosure 与关键词里同样不放占位符
-const SCRUBBED_VALUE = '***'
 
 // 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
 interface RefBaseline {
@@ -1456,7 +1454,7 @@ export class MemoryService {
       await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, row.id))
       // Dream 的建议里可能抄了这个值（规则认不出的写法）：还作不作数看版本，这次改了版本，它们不会再列出，只是留到保留期
       const scrub = (column: SQLWrapper) =>
-        sql`replace(${column}, ${input.value}::text, ${SCRUBBED_VALUE}::text)`
+        sql`replace(${column}, ${input.value}::text, ${PLAINTEXT_MASK}::text)`
       await tx
         .update(dreamSuggestions)
         .set({
@@ -3123,7 +3121,8 @@ function viaOf(context: unknown): string | null {
   return typeof via === 'string' ? via : null
 }
 
-// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure 与关键词里的也不留；旧快照里可能有全文检索向量，一起去掉
+// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure 与关键词里的也不留（那里放不了占位符）；
+// 旧快照里可能有全文检索向量，一起去掉
 function scrubSnapshot(
   raw: unknown,
   value: string,
@@ -3135,10 +3134,10 @@ function scrubSnapshot(
   delete version.fts
   const inPlace = version.layer === 'private' && version.ownerAccountId === owner
   if (typeof version.content === 'string') {
-    version.content = version.content.split(value).join(inPlace ? placeholder : SCRUBBED_VALUE)
+    version.content = version.content.split(value).join(inPlace ? placeholder : PLAINTEXT_MASK)
   }
   if (typeof version.disclosure === 'string') {
-    version.disclosure = version.disclosure.split(value).join(SCRUBBED_VALUE)
+    version.disclosure = version.disclosure.split(value).join(PLAINTEXT_MASK)
   }
   if (Array.isArray(version.glossary)) {
     version.glossary = version.glossary.filter(
