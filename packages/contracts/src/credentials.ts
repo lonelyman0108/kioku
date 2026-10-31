@@ -36,14 +36,19 @@ const SPACE =
 const PLAINTEXT_LABELS = 'password|passwd|密码|口令|token|api[_ -]?key|secret'
 // 值外面常见的引号、反引号与粗体：占位符写在里面也算占位符
 const PLAINTEXT_QUOTES = '"\'`“‘「『*'
+// 值到这里结束：中文标点与收尾的引号。英文标点常出现在密码里，不算
+const VALUE_STOPS = '，。；、！？）】」』》”’'
 // 盖掉明文之后留下的遮盖符（转存时的历史快照、会话摘要的打码）：盖过的不再算明文
 export const PLAINTEXT_MASK = '***'
+// 遮盖符要整段就是它：后面是空白、行尾、收尾的引号或中文标点；英文的逗号、句号这些算句子的标点，后面还要是空白或行尾。
+// 所以 ***hunter2***、***x 照样算明文：真密码可能这样开头，不能借遮盖符躲过提醒和降级拦截
+const WHOLE_MASK = `\\*\\*\\*(?:[,.;:]*(?:[${SPACE}]|$)|["'\`${VALUE_STOPS}])`
 
-// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符或遮盖符的不算，
-// 占位符写在引号里也不算），或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
+// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符或整段遮盖符的不算，
+// 这两样写在引号里也不算），或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
 // （管理界面里由空间 owner 确认后可以强制）
 export const PLAINTEXT_CREDENTIAL = new RegExp(
-  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*(?![${PLAINTEXT_QUOTES}]*\\{\\{cred:|\\*\\*\\*)[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
+  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*(?![${PLAINTEXT_QUOTES}]*(?:\\{\\{cred:|${WHOLE_MASK}))[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
   'i',
 )
 
@@ -59,6 +64,7 @@ const PLAINTEXT_ALL = new RegExp(PLAINTEXT_CREDENTIAL.source, 'gi')
 const PLAINTEXT_LABEL = new RegExp(`^(?:${PLAINTEXT_LABELS})`, 'i')
 // 值写在这些符号里时取里面的部分
 const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
+  ['***', '***'],
   ['**', '**'],
   ['`', '`'],
   ['"', '"'],
@@ -68,8 +74,8 @@ const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
   ['「', '」'],
   ['『', '』'],
 ]
-// 值到这里结束：空白、中文标点、占位符。英文标点常出现在密码里，不算
-const VALUE_END = new RegExp(`[${SPACE}，。；、！？）】」』》”’]|\\{\\{cred:`)
+// 值到这里结束：空白、中文标点、占位符
+const VALUE_END = new RegExp(`[${SPACE}${VALUE_STOPS}]|\\{\\{cred:`)
 
 function plaintextField(label: string): string {
   const word = label.toLowerCase()

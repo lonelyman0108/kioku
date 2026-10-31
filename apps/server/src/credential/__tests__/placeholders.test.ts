@@ -135,6 +135,13 @@ describe('提示语打码', () => {
     }
   })
 
+  it('遮盖符开头的真密码照样盖掉', () => {
+    expect(maskPlaintextCredentials('密码：***hunter2***')).toBe('密码：***')
+    expect(maskPlaintextCredentials('token=***x\n下一行')).toBe('token=***\n下一行')
+    // 已经盖过的不用再盖
+    expect(maskPlaintextCredentials('密码：***')).toBe('密码：***')
+  })
+
   it('从值开始盖到行尾，下一行照常', () => {
     expect(maskPlaintextCredentials('路由器密码：hunter2 怎么改')).toBe('路由器密码：***')
     expect(maskPlaintextCredentials('token=abc.def\n下一行')).toBe('token=***\n下一行')

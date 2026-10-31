@@ -438,6 +438,20 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     // 盖过的版本（密码：***）不算还有明文
     expect(result.plaintextVersions).toBe(0)
 
+    // 写在引号里的值，盖过之后也不算
+    const quoted = await remember({
+      uri: 'kb://quoted',
+      content: `password: "${VALUE}"`,
+      layer: 'base',
+      sensitivity: 'private',
+    })
+    const quotedAway = await edit({ uri: quoted.uri, layer: 'private' })
+    const second = await converted(quotedAway, { identifier: 'quoted' })
+    expect(second.plaintextVersions).toBe(0)
+    expect(((await eventsOf(quoted.id))[0]!.after as { content: string }).content).toBe(
+      'password: "***"',
+    )
+
     const events = await eventsOf(m.id)
     expect(JSON.stringify(events)).not.toContain(VALUE)
     const created = events[0]!.after as { content: string; disclosure: string; glossary: string[] }

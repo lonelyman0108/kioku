@@ -95,11 +95,43 @@ describe('正文里疑似明文的位置', () => {
     }
   })
 
-  it('盖过的不算：遮盖符后面可以跟着别的；粗体的值照常算', () => {
-    for (const text of ['密码：***', '密码：***，别告诉别人', 'token = ***-old']) {
+  it('盖过的不算：整段就是遮盖符，后面是空白、行尾、收尾的引号或中文标点，写在引号里也一样', () => {
+    for (const text of [
+      '密码：***',
+      '密码：*** 后面还有字',
+      '密码：***\n下一行',
+      '密码：***，别告诉别人',
+      '密码：***。',
+      'password: ***, then login',
+      'password: ***.',
+      'password: "***"',
+      "password: '***'",
+      'password: `***`',
+      'password: "***", token: "***"',
+      '密码：“***”',
+      '密码：‘***’',
+      '密码：「***」',
+    ]) {
       expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(false)
       expect(findPlaintextCredentials(text), text).toEqual([])
     }
+  })
+
+  it('遮盖符开头的真密码照常算：盖掉一部分的、后面还跟着字的', () => {
+    for (const text of [
+      '密码：***hunter2***',
+      '密码：***x',
+      '密码：****x',
+      'token = ***-old',
+      'password: ***,abc',
+      'password: "***x"',
+      "password: '***hunter2***'",
+    ]) {
+      expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(true)
+      expect(findPlaintextCredentials(text).length, text).toBeGreaterThan(0)
+    }
+    expect(values('密码：***hunter2***')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('密码：***x')).toEqual([{ value: '***x', field: 'password' }])
     expect(values('密码：**hunter2**')).toEqual([{ value: 'hunter2', field: 'password' }])
     expect(PLAINTEXT_CREDENTIAL.test('密码：*hunter2')).toBe(true)
   })
