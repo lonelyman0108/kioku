@@ -7,6 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import Hint from '../components/Hint.vue'
 import PersonaDetail from '../components/PersonaDetail.vue'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
@@ -175,10 +176,12 @@ async function remove() {
     </template>
     <template #body>
       <p class="mb-4 text-sm text-muted">
-        人格的设定写在
+        人格设定写在
         <code>persona://&lt;标识&gt;/</code>
-        下的记忆里；子人格读得到它继承的人格的记忆，同一相对路径上用最近的那条。应用在「应用与
-        Key」里选择默认人格。
+        下的记忆中。
+        <Hint>
+          子人格可读取所继承人格的记忆，相同相对路径取继承链上最近的一条。应用的默认人格在「应用」页中选择。
+        </Hint>
       </p>
       <UTable
         :data="personas.data.value ?? []"
@@ -189,7 +192,7 @@ async function remove() {
           { id: 'extends', header: '继承', cell: ({ row }) => nameOf(row.original.extendsId) },
           { accessorKey: 'description', header: '说明' },
         ]"
-        empty="还没有人格"
+        empty="暂无人格"
       >
         <template #name-cell="{ row }">
           <UButton variant="link" class="px-0" @click="selectedId = row.original.id">{{
@@ -242,8 +245,8 @@ async function remove() {
           label="标识"
           :help="
             editing
-              ? '标识写在人格层记忆的 URI 里，不能改'
-              : '小写字母、数字和连字符；记忆 URI 里用它，例如 persona://doubao/soul'
+              ? '标识是人格层记忆 URI 的一部分，不可修改'
+              : '小写字母、数字和连字符；用于记忆 URI，例如 persona://doubao/soul'
           "
         >
           <UInput
@@ -256,7 +259,7 @@ async function remove() {
         <UFormField label="名称">
           <UInput v-model="form.name" class="w-full" required />
         </UFormField>
-        <UFormField label="继承" help="例如群聊版继承主人格，只覆盖需要收敛的部分">
+        <UFormField label="继承" help="例如群聊版继承通用版，仅覆盖需要收敛的部分">
           <USelect v-model="form.extendsId" :items="parentItems" class="w-full" />
         </UFormField>
         <UFormField label="说明">
@@ -284,7 +287,7 @@ async function remove() {
   >
     <template #body>
       <p class="text-sm">
-        删除「{{ removing?.name }}」之后，标识 <code>{{ removing?.slug }}</code> 可以给新人格用。
+        删除「{{ removing?.name }}」后，标识 <code>{{ removing?.slug }}</code> 可用于新人格。
       </p>
     </template>
     <template #footer>

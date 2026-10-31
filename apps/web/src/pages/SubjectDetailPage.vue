@@ -12,6 +12,7 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import Hint from '../components/Hint.vue'
 import SubjectBindings from '../components/SubjectBindings.vue'
 import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
@@ -85,7 +86,7 @@ async function removeFact() {
   removing.value = true
   try {
     await api.deleteFact(sid, subjectId.value, fact.id, fact.version)
-    toast.add({ title: '已删除这条事实', color: 'success' })
+    toast.add({ title: '已删除事实', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '删除失败', color: 'error' })
   } finally {
@@ -104,11 +105,11 @@ async function reactivateFact(fact: SupersededFact) {
   try {
     await api.reactivateFact(sid, subjectId.value, fact.id, fact.version)
     toast.add({
-      title: fact.supersededBy ? '已重新生效，推翻它的那条也还有效' : '已重新生效',
+      title: fact.supersededBy ? '已恢复生效，取代它的事实仍然有效' : '已恢复生效',
       color: 'success',
     })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '重新生效失败', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '恢复生效失败', color: 'error' })
   } finally {
     reactivating.value = null
     void refreshSubjectCaches(sid)
@@ -158,7 +159,7 @@ async function merge() {
   merging.value = true
   try {
     await api.mergeSubject(sid, subjectId.value, from)
-    toast.add({ title: `已把「${mergePicked.value?.label ?? '对象'}」合并进来`, color: 'success' })
+    toast.add({ title: `已合并「${mergePicked.value?.label ?? '联系人'}」`, color: 'success' })
     mergeFrom.value = undefined
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '合并失败', color: 'error' })
@@ -175,8 +176,8 @@ function runCounts(run: ExtractionRunInfo): string {
   if (run.added) parts.push(`新增 ${run.added}`)
   if (run.updated) parts.push(`更新 ${run.updated}`)
   if (run.unchanged) parts.push(`已有 ${run.unchanged}`)
-  if (run.dropped) parts.push(`丢掉 ${run.dropped}`)
-  if (run.limited) parts.push(`超出每天的条数 ${run.limited}`)
+  if (run.dropped) parts.push(`丢弃 ${run.dropped}`)
+  if (run.limited) parts.push(`超出每日上限 ${run.limited}`)
   if (run.skippedTurns) parts.push(`${run.skippedTurns} 轮的 Key 已失效`)
   return parts.join(' · ')
 }
@@ -185,14 +186,14 @@ function runCounts(run: ExtractionRunInfo): string {
 <template>
   <UDashboardPanel id="subject">
     <template #header>
-      <UDashboardNavbar :title="data?.displayName ?? '对象'">
+      <UDashboardNavbar :title="data?.displayName ?? '联系人'">
         <template #leading>
           <UButton
             :icon="icons.back"
             color="neutral"
             variant="ghost"
             size="sm"
-            aria-label="返回对象列表"
+            aria-label="返回联系人列表"
             :to="{ name: 'subjects', params: { spaceId } }"
           />
         </template>
@@ -213,7 +214,7 @@ function runCounts(run: ExtractionRunInfo): string {
               <UIcon :name="data.kind === 'group' ? icons.group : icons.user" class="size-4" />
               <h2 class="text-sm font-medium">{{ data.kind === 'group' ? '群' : '人' }}</h2>
               <span class="ml-auto text-xs text-muted"
-                >第一次遇到：{{ formatTime(data.createdAt) }}</span
+                >首次遇到：{{ formatTime(data.createdAt) }}</span
               >
             </div>
           </template>
@@ -222,8 +223,8 @@ function runCounts(run: ExtractionRunInfo): string {
               label="名字"
               :help="
                 data.nameLocked
-                  ? '改过名字了，平台上的显示名再变也不跟着改'
-                  : '改过之后，平台上的显示名再变也不跟着改'
+                  ? '已手动改名，不再跟随平台上的显示名'
+                  : '修改后，不再跟随平台上的显示名'
               "
             >
               <div class="flex gap-2">
@@ -250,18 +251,18 @@ function runCounts(run: ExtractionRunInfo): string {
               <p class="font-medium">这是我</p>
               <div class="flex flex-wrap items-center gap-2">
                 <template v-if="!data.account">
-                  <span class="text-muted">还没标记为任何成员。</span>
+                  <span class="text-muted">未标记为任何成员</span>
                   <UButton
                     v-if="canEdit"
                     size="sm"
                     variant="subtle"
                     :loading="saving"
-                    @click="update({ linkedToMe: true }, '已标记为你')"
+                    @click="update({ linkedToMe: true }, '已标记为当前账号')"
                     >这是我</UButton
                   >
                 </template>
                 <template v-else-if="linkedToMe">
-                  <UBadge color="primary" variant="subtle">这是你</UBadge>
+                  <UBadge color="primary" variant="subtle">当前账号</UBadge>
                   <!-- 取消自己的标记 viewer 也可以 -->
                   <UButton
                     size="sm"
@@ -269,7 +270,7 @@ function runCounts(run: ExtractionRunInfo): string {
                     variant="subtle"
                     :loading="saving"
                     @click="update({ linkedToMe: false }, '已取消标记')"
-                    >取消</UButton
+                    >取消标记</UButton
                   >
                 </template>
                 <template v-else>
@@ -286,7 +287,10 @@ function runCounts(run: ExtractionRunInfo): string {
                 </template>
               </div>
               <p class="text-xs text-muted">
-                标记为你之后，你的应用把这个人的私聊当作主人私聊（应用开了「主人私聊提升」时能读到你的画像）。只能标记成自己。
+                标记后，当前账号的应用会将此人的私聊视为本人对话。
+                <Hint>
+                  开启「本人私聊时读取画像」的应用还可读取当前账号的个人画像。只能标记为当前账号。
+                </Hint>
               </p>
             </div>
 
@@ -314,15 +318,18 @@ function runCounts(run: ExtractionRunInfo): string {
         <UCard v-if="data.kind === 'person'">
           <template #header>
             <div class="flex items-center gap-2">
-              <h2 class="text-sm font-medium">绑定</h2>
+              <h2 class="text-sm font-medium">账号绑定</h2>
               <UBadge v-if="waitingForMe" color="warning" variant="subtle" size="sm"
-                >{{ waitingForMe }} 个等你处理</UBadge
+                >{{ waitingForMe }} 个待处理</UBadge
               >
             </div>
           </template>
           <p class="mb-2 text-xs text-muted">
-            在 bot 的私聊里发 /bind 拿绑定码，到另一个平台私聊同一个 bot 发 /bind
-            加上绑定码，看清要绑到谁之后再发一次确认，那个平台的账号就并进申请的这个人。申请的人标记了成员、另一边没标记成同一个成员时，还要那个成员本人在这里或概览里确认后才合并。
+            在 Bot 私聊中发送 /bind 获取绑定码，可将其他平台的账号合并到此联系人。
+            <Hint>
+              到另一平台私聊同一 Bot，发送 /bind
+              加绑定码，核对绑定目标后再发送一次确认，该平台账号即合并到申请绑定码的联系人。申请方已标记为成员、另一方未标记为同一成员时，还需该成员本人在此处或概览中确认后才会合并。
+            </Hint>
           </p>
           <SubjectBindings
             v-if="data.bindings.length"
@@ -330,19 +337,22 @@ function runCounts(run: ExtractionRunInfo): string {
             :items="data.bindings"
             :subject-id="subjectId"
           />
-          <p v-else class="text-sm text-muted">还没有绑定记录。</p>
+          <p v-else class="text-sm text-muted">暂无绑定记录</p>
         </UCard>
 
         <UCard v-if="canEdit">
           <template #header><h2 class="text-sm font-medium">合并</h2></template>
           <p class="mb-3 text-xs text-muted">
-            同一个{{
-              data.kind === 'group' ? '群' : '人'
-            }}在别的平台的账号可以合并进来：它的平台账号、记下的事实，以及{{
-              data.kind === 'group' ? '它的群里' : '和它的私聊里'
-            }}记下的内容都归到「{{
+            同一{{ data.kind === 'group' ? '群' : '人' }}在其他平台的账号可合并到「{{
               data.displayName
-            }}」名下，按群换人格的规则也跟过来，然后它被删掉。不能撤销。
+            }}」，合并后不可撤销。
+            <Hint>
+              被合并方的平台账号、事实、{{
+                data.kind === 'group' ? '群内' : '私聊中'
+              }}记下的内容都转到「{{
+                data.displayName
+              }}」名下，按群切换人格的规则也随之转移，被合并方随即删除。
+            </Hint>
           </p>
           <div class="flex flex-wrap items-center gap-2">
             <USelectMenu
@@ -357,8 +367,8 @@ function runCounts(run: ExtractionRunInfo): string {
                 placeholder: '名字或平台账号',
                 loading: candidates.isFetching.value,
               }"
-              :placeholder="data.kind === 'group' ? '选择要合并进来的群' : '选择要合并进来的人'"
-              aria-label="选择要合并进来的对象"
+              :placeholder="data.kind === 'group' ? '选择要合并的群' : '选择要合并的人'"
+              aria-label="选择要合并的联系人"
               class="w-full sm:w-64"
             />
             <UButton variant="subtle" :disabled="!mergeFrom" @click="confirmMerge = true"
@@ -372,9 +382,9 @@ function runCounts(run: ExtractionRunInfo): string {
             <h2 class="text-sm font-medium">记下的事实（{{ data.factCount }}）</h2>
           </template>
           <p v-if="data.factCount > data.facts.length" class="mb-2 text-xs text-muted">
-            只列出最近更新的 {{ data.facts.length }} 条。
+            仅显示最近更新的 {{ data.facts.length }} 条
           </p>
-          <p v-if="!data.facts.length" class="text-sm text-muted">还没有记下关于它的事。</p>
+          <p v-if="!data.facts.length" class="text-sm text-muted">暂无事实</p>
           <ul v-else class="divide-y divide-default">
             <li v-for="fact in data.facts" :key="fact.id" class="flex gap-2 py-2">
               <div class="min-w-0 flex-1 space-y-1">
@@ -400,23 +410,26 @@ function runCounts(run: ExtractionRunInfo): string {
 
         <UCard v-if="data.supersededFacts.length">
           <template #header>
-            <h2 class="text-sm font-medium">被推翻的事实（{{ data.supersededFacts.length }}）</h2>
+            <h2 class="text-sm font-medium">已被取代的事实（{{ data.supersededFacts.length }}）</h2>
           </template>
           <p class="mb-2 text-xs text-muted">
-            后来的说法推翻了这些事实，它们不再注入对话。重新生效之后和推翻它的那条同时有效，不要的那条可以删掉；过了保留期会被清理掉。
+            这些事实已被后来的内容取代，不再注入对话。
+            <Hint>
+              恢复生效后，与取代它的事实同时有效，可删除不需要的一条。超过保留期后将被清理。
+            </Hint>
           </p>
           <ul class="divide-y divide-default">
             <li v-for="fact in data.supersededFacts" :key="fact.id" class="flex gap-2 py-2">
               <div class="min-w-0 flex-1 space-y-1">
                 <p class="text-sm whitespace-pre-wrap text-muted">{{ fact.content }}</p>
                 <p v-if="fact.supersededBy" class="text-xs text-muted">
-                  被「{{ fact.supersededBy }}」推翻
+                  已被「{{ fact.supersededBy }}」取代
                 </p>
                 <p class="flex flex-wrap gap-2 text-xs text-muted">
                   <span>{{ originScopeText(fact.scope) }}</span>
                   <span>{{ provenanceLabels[fact.provenance] }}</span>
                   <span>
-                    被推翻于
+                    被取代于
                     <time :datetime="fact.supersededAt" :title="formatTime(fact.supersededAt)">
                       {{ formatRelative(fact.supersededAt) }}
                     </time>
@@ -433,7 +446,7 @@ function runCounts(run: ExtractionRunInfo): string {
                 :loading="reactivating === fact.id"
                 @click="reactivateFact(fact)"
               >
-                重新生效
+                恢复生效
               </UButton>
             </li>
           </ul>
@@ -442,7 +455,7 @@ function runCounts(run: ExtractionRunInfo): string {
         <UCard v-if="data.summaries.length">
           <template #header>
             <h2 class="text-sm font-medium">
-              {{ data.kind === 'group' ? '群里的会话摘要' : '私聊的会话摘要' }}
+              {{ data.kind === 'group' ? '群聊的会话摘要' : '私聊的会话摘要' }}
             </h2>
           </template>
           <ul class="divide-y divide-default">
@@ -460,9 +473,9 @@ function runCounts(run: ExtractionRunInfo): string {
 
         <UCard>
           <template #header>
-            <h2 class="text-sm font-medium">最近的抽取</h2>
+            <h2 class="text-sm font-medium">最近抽取</h2>
           </template>
-          <p v-if="!data.runs.length" class="text-sm text-muted">还没有涉及它的抽取。</p>
+          <p v-if="!data.runs.length" class="text-sm text-muted">暂无相关抽取</p>
           <ul v-else class="divide-y divide-default">
             <li v-for="run in data.runs" :key="run.id" class="space-y-1 py-2 text-sm">
               <div class="flex flex-wrap items-center gap-2">
@@ -470,10 +483,10 @@ function runCounts(run: ExtractionRunInfo): string {
                 <span class="text-muted">{{ run.app?.name ?? '已删除的应用' }}</span>
                 <span class="text-muted">{{ originScopeText(run.scope) }}</span>
                 <UBadge v-if="run.summaryOnly" color="warning" variant="subtle" size="sm"
-                  >预算用完，只写了摘要</UBadge
+                  >预算已用完，仅写入摘要</UBadge
                 >
                 <UBadge v-else-if="run.summarized" color="neutral" variant="subtle" size="sm"
-                  >写了摘要</UBadge
+                  >已写入摘要</UBadge
                 >
               </div>
               <p class="text-xs text-muted">{{ runCounts(run) }}</p>
@@ -488,7 +501,9 @@ function runCounts(run: ExtractionRunInfo): string {
         @update:open="(v) => !v && (deletingFact = null)"
       >
         <template #body>
-          <p class="text-sm">「{{ deletingFact?.content }}」删掉之后不再注入对话。</p>
+          <p class="text-sm">
+            删除后，「{{ deletingFact?.content }}」不再注入对话，也无法在管理界面恢复。
+          </p>
         </template>
         <template #footer>
           <div class="flex w-full justify-end gap-2">
@@ -499,16 +514,18 @@ function runCounts(run: ExtractionRunInfo): string {
       </UModal>
       <UModal
         :open="confirmMerge"
-        title="合并对象？"
+        title="合并联系人？"
         @update:open="(v) => !v && (confirmMerge = false)"
       >
         <template #body>
           <p class="text-sm">
-            把「{{ mergePicked?.label }}」合并进「{{
+            将「{{ mergePicked?.label }}」合并到「{{ data?.displayName }}」：「{{
+              mergePicked?.label
+            }}」的平台账号、事实、对话中记下的内容和按群切换人格的规则全部转到「{{
               data?.displayName
-            }}」：它的平台账号与记下的内容都归到「{{
-              data?.displayName
-            }}」，然后它被删掉。不能撤销。
+            }}」，合并后两边的对话都能读取这些内容。相关的待确认绑定作废，「{{
+              mergePicked?.label
+            }}」随即删除。此操作不可撤销。
           </p>
         </template>
         <template #footer>

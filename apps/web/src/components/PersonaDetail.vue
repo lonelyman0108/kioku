@@ -6,6 +6,7 @@ import { icons } from '../icons'
 import { sensitivityLabels } from '../labels'
 import { lostFromBoot } from '../personas'
 import { memoryRoute } from '../routes'
+import Hint from './Hint.vue'
 
 const props = defineProps<{
   spaceId: string
@@ -23,10 +24,10 @@ const lost = (node: PersonaNode) => lostFromBoot(node, nodes.value)
 // 删除人格会把它的人格层记忆连带硬删除，有引用时服务端会拒绝，界面先把原因列出来
 const blockers = computed(() =>
   [
-    props.persona.apps.length ? `${props.persona.apps.length} 个应用以它为默认人格` : '',
-    props.persona.children.length ? `${props.persona.children.length} 个人格继承它` : '',
+    props.persona.apps.length ? `${props.persona.apps.length} 个应用将其设为默认人格` : '',
+    props.persona.children.length ? `${props.persona.children.length} 个人格继承此人格` : '',
     props.persona.storedMemories
-      ? `还有 ${props.persona.storedMemories} 条人格层记忆（含已删除的）`
+      ? `仍有 ${props.persona.storedMemories} 条人格层记忆（含已删除）`
       : '',
   ].filter(Boolean),
 )
@@ -55,7 +56,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
       </div>
       <p v-if="persona.description">{{ persona.description }}</p>
       <p v-if="canEdit && blockers.length" class="text-xs text-muted">
-        删不掉：{{ blockers.join('；') }}。
+        无法删除：{{ blockers.join('；') }}
       </p>
     </div>
 
@@ -70,9 +71,9 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
           </UButton>
         </template>
       </div>
-      <p v-else class="text-muted">不继承别的人格。</p>
+      <p v-else class="text-muted">未继承其他人格</p>
       <p v-if="persona.children.length" class="text-muted">
-        继承它的人格：
+        子人格：
         <template v-for="(child, i) in persona.children" :key="child.id">
           <span v-if="i">、</span>
           <UButton size="xs" variant="link" class="px-0" @click="$emit('open', child.id)">
@@ -83,7 +84,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
     </section>
 
     <section class="space-y-2">
-      <h3 class="font-medium">用它的应用</h3>
+      <h3 class="font-medium">使用此人格的应用</h3>
       <ul v-if="persona.apps.length" class="space-y-1">
         <li v-for="app in persona.apps" :key="app.id">
           <RouterLink
@@ -94,11 +95,11 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
           <code class="ml-2 text-xs text-muted">app://{{ app.slug }}</code>
         </li>
       </ul>
-      <p v-else class="text-muted">还没有应用以它为默认人格。</p>
+      <p v-else class="text-muted">暂无应用将其设为默认人格</p>
     </section>
 
     <section class="space-y-2">
-      <h3 class="font-medium">自己的节点</h3>
+      <h3 class="font-medium">自身节点</h3>
       <ul v-if="persona.own.length" class="divide-y divide-default">
         <li v-for="node in persona.own" :key="node.uri" class="space-y-1 py-2">
           <div class="flex flex-wrap items-center gap-2">
@@ -114,15 +115,15 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         </li>
       </ul>
       <p v-else class="text-muted">
-        还没有。设定写在 <code>persona://{{ persona.slug }}/</code> 下的记忆里。
+        暂无节点。设定写在 <code>persona://{{ persona.slug }}/</code> 下的记忆中。
       </p>
     </section>
 
     <section v-if="persona.ancestors.length" class="space-y-2">
-      <h3 class="font-medium">继承来的节点</h3>
+      <h3 class="font-medium">继承的节点</h3>
       <p class="text-xs text-muted">
-        同一相对路径上，继承链里更近的人格的节点覆盖祖先的：被覆盖的不进启动上下文与召回，按 URI
-        仍然读得到。
+        相同相对路径上，继承链中更近的人格节点覆盖祖先节点。
+        <Hint>被覆盖的节点不进入启动加载与召回，仍可按 URI 读取。</Hint>
       </p>
       <ul v-if="persona.inherited.length" class="divide-y divide-default">
         <li v-for="node in persona.inherited" :key="node.uri" class="space-y-1 py-2">
@@ -136,16 +137,17 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
             <UBadge size="sm" variant="subtle" color="neutral">P{{ node.priority }}</UBadge>
             <span class="text-xs text-muted">来自 {{ nameOf(node.personaId) }}</span>
             <span v-if="node.overriddenBy" class="text-xs text-muted">
-              被 <code>{{ node.overriddenBy }}</code> 覆盖
+              已被 <code>{{ node.overriddenBy }}</code> 覆盖
             </span>
           </div>
           <p v-if="lost(node)" class="text-xs text-warning">
-            它会进启动上下文，但覆盖它的那条 priority 是
-            {{ lost(node) }}，进不了：会话开始时这个路径就没有了。
+            此节点本应进入启动加载，但覆盖它的节点优先级为 P{{
+              lost(node)
+            }}，无法进入启动加载，会话开始时此路径将缺失。
           </p>
         </li>
       </ul>
-      <p v-else class="text-muted">祖先人格还没有节点。</p>
+      <p v-else class="text-muted">祖先人格暂无节点</p>
     </section>
   </div>
 </template>
