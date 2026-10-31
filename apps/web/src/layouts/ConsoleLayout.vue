@@ -2,7 +2,7 @@
 import type { CommandPaletteItem, DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -43,6 +43,22 @@ watch(
     navOpen.value = false
   },
 )
+
+// 窗口变宽或转屏到放得下顶部导航时关上，不然抽屉盖着桌面布局。分界和模板里的 1024px 一致
+const wideScreen = window.matchMedia('(min-width: 1024px)')
+function closeNavOnWideScreen(event: MediaQueryListEvent) {
+  if (event.matches) navOpen.value = false
+}
+onMounted(() => wideScreen.addEventListener('change', closeNavOnWideScreen))
+onBeforeUnmount(() => wideScreen.removeEventListener('change', closeNavOnWideScreen))
+
+// 这时菜单按钮已经隐藏，焦点还不回去，放到账号菜单上
+const accountButton = ref<{ $el: HTMLElement } | null>(null)
+function focusAfterNavClosed(event: Event) {
+  if (!wideScreen.matches) return
+  event.preventDefault()
+  accountButton.value?.$el.focus()
+}
 
 function switchSpace(id: string) {
   // 已经在这个空间的概览时地址不变，上面的 watch 不会触发，抽屉要在这里关
@@ -271,6 +287,7 @@ async function logout() {
             :ui="{ content: 'max-w-80' }"
           >
             <UButton
+              ref="accountButton"
               :label="displayName"
               :title="displayName"
               :trailing-icon="icons.chevronDown"
@@ -285,6 +302,7 @@ async function logout() {
           v-model:open="navOpen"
           side="left"
           title="导航"
+          :content="{ onCloseAutoFocus: focusAfterNavClosed }"
           :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0' }"
         >
           <UButton

@@ -123,6 +123,18 @@ describe('抽屉', () => {
     expect(script).not.toMatch(/navOpen\.value = true/)
   })
 
+  it('窗口变宽跨过分界就关上，分界和模板一致，焦点放到还看得见的账号菜单上', () => {
+    expect(script).toContain("window.matchMedia('(min-width: 1024px)')")
+    expect(script).toContain('if (event.matches) navOpen.value = false')
+    expect(script).toContain("wideScreen.addEventListener('change', closeNavOnWideScreen)")
+    expect(script).toContain("wideScreen.removeEventListener('change', closeNavOnWideScreen)")
+    expect(bound(slideover, 'content')).toContain('onCloseAutoFocus: focusAfterNavClosed')
+    expect(attr(labelled('账号菜单'), 'ref')).toBe('accountButton')
+    const focus = /function focusAfterNavClosed\(event: Event\) \{[^}]*\}/.exec(script)![0]
+    expect(focus).toContain('if (!wideScreen.matches) return')
+    expect(focus).toContain('accountButton.value?.$el.focus()')
+  })
+
   it('切换空间时关上抽屉，点当前空间地址不变也要关', () => {
     const body = /function switchSpace\(id: string\) \{[^}]*\}/.exec(script)![0]
     expect(body).toContain('navOpen.value = false')
