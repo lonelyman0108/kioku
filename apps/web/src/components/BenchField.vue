@@ -20,6 +20,7 @@ const placeholder = computed(() => props.field.placeholder ?? undefined)
     :label="field.label"
     :required="field.required"
     :help="field.description ?? undefined"
+    :ui="{ label: 'font-mono font-normal' }"
   >
     <div class="flex items-start gap-2">
       <USelect

@@ -26,6 +26,7 @@ import { saveFile } from '../download'
 import { icons } from '../icons'
 import BenchAgentExchange from './BenchAgentExchange.vue'
 import BenchContextForm from './BenchContextForm.vue'
+import BenchNotice from './BenchNotice.vue'
 import Hint from './Hint.vue'
 
 // 模型对话：用实例设置里抽取模型的接口与 Key，让模型自己决定调哪个工具。循环由浏览器驱动（benchAgent.ts），
@@ -57,7 +58,7 @@ const info = useQuery({
   staleTime: 0,
 })
 const infoError = computed(() => {
-  if (!info.isError.value || info.data.value) return null
+  if (!info.isError.value) return null
   const err = info.error.value
   return `读取模型代理状态失败：${err instanceof ApiError ? err.message : NOT_API_FAILURE}`
 })
@@ -65,7 +66,6 @@ const retryInfo = computed(() => [
   {
     label: '重新读取',
     color: 'neutral' as const,
-    variant: 'subtle' as const,
     loading: info.isFetching.value,
     onClick: () => void info.refetch(),
   },
@@ -84,7 +84,6 @@ const unavailableActions = computed(() =>
         {
           label: '去实例设置',
           color: 'neutral' as const,
-          variant: 'subtle' as const,
           to: { name: 'settings' },
         },
       ],
@@ -108,7 +107,6 @@ const consentActions = computed(() => [
   {
     label: `发送至 ${model.value}，开始对话`,
     color: 'warning' as const,
-    variant: 'subtle' as const,
     onClick: () => consent.value && consentTo(consent.value),
   },
 ])
@@ -121,14 +119,12 @@ const divergedActions = computed(() => [
   {
     label: '接受并移除此步',
     color: 'neutral' as const,
-    variant: 'subtle' as const,
     disabled: running.value,
     onClick: acceptAgentDiverged,
   },
   {
     label: '清空对话',
     color: 'error' as const,
-    variant: 'subtle' as const,
     disabled: running.value,
     onClick: requestClear,
   },
@@ -220,35 +216,129 @@ watch(generation, () => {
 </script>
 
 <template>
-  <div class="space-y-4 text-sm">
-    <USkeleton v-if="info.isPending.value" class="h-24 w-full" />
-    <UAlert
-      v-else-if="infoError"
-      color="error"
-      variant="subtle"
-      :title="infoError"
-      :actions="retryInfo"
-    />
-    <UAlert
-      v-else-if="unavailable"
-      color="warning"
-      variant="subtle"
-      :title="unavailable.title"
-      :description="unavailable.description"
-      :actions="unavailableActions"
-    />
+  <div class="agent">
+    <div v-if="info.isPending.value || infoError || unavailable" class="agent-state">
+      <!-- 后台刷新失败时读到过的内容留着，错误放在上面 -->
+      <BenchNotice v-if="infoError" color="error" :title="infoError" :actions="retryInfo" />
+      <USkeleton v-if="info.isPending.value" class="h-24 w-full" />
+      <BenchNotice
+        v-else-if="unavailable"
+        color="warning"
+        :title="unavailable.title"
+        :description="unavailable.description"
+        :actions="unavailableActions"
+      />
+    </div>
 
-    <template v-if="available && loop">
-      <p class="text-xs" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
-        {{ AGENT_LOOP_NOTES[loop] }}
-        <Hint>{{ AGENT_LOOP_DETAILS[loop] }}</Hint>
-      </p>
-      <p v-if="real" class="text-xs text-error">
-        真实模式：模型调用写工具会真实写入，不会回滚。
-        <Hint>每一轮下方显示运行标记，可在变更记录中对应这些写入。</Hint>
-      </p>
-      <BenchContextForm v-if="loop !== 'tools'" />
-      <div class="grid gap-3 sm:grid-cols-3">
+    <div class="agent-columns">
+      <div class="agent-main">
+        <section v-if="loop && agent.exchanges.length" class="thread" aria-label="对话">
+          <BenchAgentExchange
+            v-for="exchange in agent.exchanges"
+            :key="exchange.id"
+            :exchange="exchange"
+            :mode="mode"
+            :loop="loop"
+          />
+          <div ref="end" class="thread-end" />
+        </section>
+        <p v-else-if="available && loop" class="thread empty">暂无消息</p>
+
+        <div v-if="available && loop" class="composer">
+          <div class="end-notes" tabindex="0" role="region" aria-label="发送提示">
+            <BenchNotice
+              v-if="consent && needsConsent && !agentSending"
+              flush
+              color="warning"
+              title="发送前确认"
+              :description="consentText(consent, mode)"
+              :actions="consentActions"
+            />
+            <BenchNotice v-if="blocker" flush color="warning" :title="blocker" />
+            <BenchNotice
+              v-if="diverged"
+              flush
+              color="warning"
+              :title="diverged.title"
+              :description="diverged.description"
+              :actions="divergedActions"
+            />
+            <BenchNotice
+              v-if="exportNote"
+              flush
+              color="warning"
+              :title="exportNote"
+              close
+              @update:open="(v) => !v && (exportNote = null)"
+            />
+          </div>
+          <UTextarea
+            v-model="input"
+            :rows="2"
+            autoresize
+            :maxrows="8"
+            :placeholder="
+              real ? '发给模型的消息（仅点击按钮发送）' : '发给模型的消息（⌘ 或 Ctrl + 回车发送）'
+            "
+            aria-label="发给模型的消息"
+            class="message-input w-full"
+            @keydown="onKeydown"
+          />
+          <div class="composer-actions">
+            <UButton
+              :icon="icons.send"
+              :color="real ? 'error' : 'primary'"
+              :loading="agentSending"
+              :disabled="!canSend"
+              @click="send"
+            >
+              {{ real ? '发送（真实执行）' : '发送' }}
+            </UButton>
+            <UButton
+              v-if="agentSending"
+              :icon="icons.stop"
+              color="neutral"
+              variant="outline"
+              :disabled="agentStopping"
+              @click="stopAgent"
+            >
+              {{ agentStopping ? '正在停止' : '停止' }}
+            </UButton>
+            <UButton
+              class="ml-auto"
+              :icon="icons.exportSpace"
+              color="neutral"
+              variant="outline"
+              :disabled="running || !hasCalls"
+              @click="startExport"
+            >
+              存为场景
+            </UButton>
+            <UButton
+              :icon="icons.clear"
+              color="neutral"
+              variant="outline"
+              :disabled="running || !agent.exchanges.length"
+              @click="requestClear"
+            >
+              清空对话
+            </UButton>
+          </div>
+          <p v-if="agent.usage.rounds" class="usage">{{ usage }}</p>
+          <p class="usage">{{ replayUsage }}</p>
+        </div>
+      </div>
+
+      <aside v-if="available && loop" class="agent-side">
+        <p class="side-note" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
+          {{ AGENT_LOOP_NOTES[loop] }}
+          <Hint>{{ AGENT_LOOP_DETAILS[loop] }}</Hint>
+        </p>
+        <p v-if="real" class="side-note text-error">
+          真实模式：模型调用写工具会真实写入，不会回滚。
+          <Hint>每一轮下方显示运行标记，可在变更记录中对应这些写入。</Hint>
+        </p>
+        <BenchContextForm v-if="loop !== 'tools'" />
         <UFormField label="模型" help="接口与 Key 沿用实例设置的抽取模型，此处仅改模型名">
           <UInput
             :model-value="modelText"
@@ -260,7 +350,6 @@ watch(generation, () => {
           />
         </UFormField>
         <UFormField
-          class="sm:col-span-2"
           label="系统提示"
           :help="
             loop === 'tools'
@@ -270,111 +359,13 @@ watch(generation, () => {
         >
           <UTextarea
             v-model="system"
-            :rows="2"
+            :rows="4"
             :disabled="running"
             aria-label="系统提示"
             class="w-full"
           />
         </UFormField>
-      </div>
-    </template>
-
-    <section v-if="loop && agent.exchanges.length" class="space-y-6" aria-label="对话">
-      <BenchAgentExchange
-        v-for="exchange in agent.exchanges"
-        :key="exchange.id"
-        :exchange="exchange"
-        :mode="mode"
-        :loop="loop"
-      />
-      <div ref="end" class="scroll-mb-56" />
-    </section>
-
-    <div
-      v-if="available && loop"
-      class="sticky bottom-0 z-10 space-y-2 border-t border-default bg-default pt-3"
-    >
-      <UAlert
-        v-if="consent && needsConsent && !agentSending"
-        color="warning"
-        variant="subtle"
-        class="wrap-anywhere"
-        title="发送前确认"
-        :description="consentText(consent, mode)"
-        :actions="consentActions"
-      />
-      <UAlert v-if="blocker" color="warning" variant="subtle" :title="blocker" />
-      <UAlert
-        v-if="diverged"
-        color="warning"
-        variant="subtle"
-        class="wrap-anywhere"
-        :title="diverged.title"
-        :description="diverged.description"
-        :actions="divergedActions"
-      />
-      <UAlert
-        v-if="exportNote"
-        color="warning"
-        variant="subtle"
-        :title="exportNote"
-        close
-        @update:open="(v) => !v && (exportNote = null)"
-      />
-      <UTextarea
-        v-model="input"
-        :rows="2"
-        autoresize
-        :maxrows="8"
-        :placeholder="
-          real ? '发给模型的消息（仅点击按钮发送）' : '发给模型的消息（⌘ 或 Ctrl + 回车发送）'
-        "
-        aria-label="发给模型的消息"
-        class="w-full"
-        @keydown="onKeydown"
-      />
-      <div class="flex flex-wrap items-center gap-2">
-        <UButton
-          :icon="icons.send"
-          :color="real ? 'error' : 'primary'"
-          :loading="agentSending"
-          :disabled="!canSend"
-          @click="send"
-        >
-          {{ real ? '发送（真实执行）' : '发送' }}
-        </UButton>
-        <UButton
-          v-if="agentSending"
-          :icon="icons.stop"
-          color="neutral"
-          variant="subtle"
-          :disabled="agentStopping"
-          @click="stopAgent"
-        >
-          {{ agentStopping ? '正在停止' : '停止' }}
-        </UButton>
-        <UButton
-          class="ml-auto"
-          :icon="icons.exportSpace"
-          color="neutral"
-          variant="subtle"
-          :disabled="running || !hasCalls"
-          @click="startExport"
-        >
-          存为场景
-        </UButton>
-        <UButton
-          :icon="icons.clear"
-          color="neutral"
-          variant="subtle"
-          :disabled="running || !agent.exchanges.length"
-          @click="requestClear"
-        >
-          清空对话
-        </UButton>
-      </div>
-      <p v-if="agent.usage.rounds" class="text-xs text-muted">{{ usage }}</p>
-      <p class="text-xs text-muted">{{ replayUsage }}</p>
+      </aside>
     </div>
 
     <UModal
@@ -425,3 +416,142 @@ watch(generation, () => {
     </UModal>
   </div>
 </template>
+
+<style scoped>
+.agent {
+  flex: 1 1 0;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+}
+.agent-state {
+  flex: none;
+  padding: 12px 32px 0;
+}
+.agent-columns {
+  flex: 1 1 0;
+  display: flex;
+  min-width: 0;
+  min-height: 0;
+}
+/* 左边是一列消息自己滚动，输入区在底部不动；模型和系统提示放在右边一栏 */
+.agent-main {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  padding: 0 24px 0 32px;
+}
+.agent-side {
+  flex: none;
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  width: 22rem;
+  padding: 12px 32px 24px 24px;
+  overflow-y: auto;
+  border-left: 1px solid var(--ui-border);
+}
+.side-note {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.thread {
+  flex: 1 1 0;
+  min-height: 8rem;
+  padding-top: 12px;
+  overflow-y: auto;
+}
+.thread.empty {
+  color: var(--ui-text-muted);
+}
+/* 放不下时只有提示缩小、自己滚动：文本框和发送、停止一直在 */
+.composer {
+  flex: 0 1 auto;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  max-height: 65%;
+  padding: 4px 0 12px;
+  background: var(--ui-bg);
+  border-top: 1px solid var(--strata-rule);
+}
+/* 矮窗口里按窗口高度算，高窗口里不超过十来行。没有提示时不占地方，也不留一个空的 Tab 停靠点 */
+.end-notes {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(30dvh, 14rem);
+  overflow-y: auto;
+}
+.end-notes:empty {
+  display: none;
+}
+.end-notes:focus-visible {
+  outline-offset: -2px;
+}
+.message-input {
+  flex: none;
+  margin-top: 6px;
+}
+.composer-actions {
+  flex: none;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 8px;
+  padding-top: 8px;
+}
+.usage {
+  flex: none;
+  padding-top: 4px;
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+/* 高度不够各自滚：整页滚动，输入区贴在底部 */
+@media (max-width: 1240px) {
+  .agent,
+  .agent-columns {
+    flex: 1 0 auto;
+    min-height: 0;
+  }
+  .thread {
+    flex: 1 0 auto;
+    min-height: 0;
+    overflow-y: visible;
+  }
+  .composer {
+    position: sticky;
+    bottom: 0;
+    z-index: 10;
+    max-height: 70dvh;
+  }
+  /* 输入区盖在消息上，跟到最后时要留出它的高度 */
+  .thread-end {
+    scroll-margin-bottom: 14rem;
+  }
+  .agent-side {
+    overflow-y: visible;
+  }
+}
+@media (max-width: 1023.98px) {
+  .agent-state {
+    padding: 12px 16px 0;
+  }
+  .agent-columns {
+    flex-direction: column;
+  }
+  .agent-main {
+    padding: 0 16px;
+  }
+  /* 窄屏先看模型和系统提示，再看消息 */
+  .agent-side {
+    order: -1;
+    width: auto;
+    padding: 10px 16px 14px;
+    border-bottom: 1px solid var(--ui-border);
+    border-left: 0;
+  }
+}
+</style>
