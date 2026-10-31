@@ -1,5 +1,9 @@
 const pad = (n: number) => String(n).padStart(2, '0')
 
+// 本地日期，例如 2026-10-31
+export const localDate = (d: Date) =>
+  `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`
+
 // 界面里显示的相对时间：一周之内说「几分钟前」「几天前」，更早的给日期
 export function formatRelative(iso: string, now: Date = new Date()): string {
   const then = new Date(iso)
@@ -11,7 +15,7 @@ export function formatRelative(iso: string, now: Date = new Date()): string {
   if (hours < 24) return `${hours} 小时前`
   const days = Math.floor(hours / 24)
   if (days < 7) return `${days} 天前`
-  return `${then.getFullYear()}-${pad(then.getMonth() + 1)}-${pad(then.getDate())}`
+  return localDate(then)
 }
 
 export function formatTime(iso: string): string {
@@ -23,6 +27,12 @@ export function formatShort(iso: string, now: Date = new Date()): string {
   const d = new Date(iso)
   const day = `${pad(d.getMonth() + 1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`
   return d.getFullYear() === now.getFullYear() ? day : `${d.getFullYear()}-${day}`
+}
+
+// 按天分组的列表里一行的时间：本地时间的时和分
+export function formatClock(iso: string): string {
+  const d = new Date(iso)
+  return `${pad(d.getHours())}:${pad(d.getMinutes())}`
 }
 
 // datetime-local 输入框的值：本地时间，精确到分钟，没有时区（YYYY-MM-DDTHH:mm）

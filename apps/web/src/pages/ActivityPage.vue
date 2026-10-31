@@ -3,11 +3,17 @@ import { useInfiniteQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { groupByDay } from '../activity'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import ActivityEntry from '../components/ActivityEntry.vue'
 import Hint from '../components/Hint.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
+import PageHead from '../components/strata/PageHead.vue'
+import SectionHeading from '../components/strata/SectionHeading.vue'
+import { useNow } from '../composables/useNow'
 import { icons } from '../icons'
+import { localDate } from '../time'
 
 const route = useRoute()
 const spaceId = computed(() => String(route.params.spaceId))
@@ -20,48 +26,59 @@ const activity = useInfiniteQuery({
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
 const items = computed(() => activity.data.value?.pages.flatMap((page) => page.items) ?? [])
+// 页面开过零点时「今天」「昨天」跟着变
+const now = useNow()
+// 分组只看今天是哪天，换算一道，每分钟走时不用把读到的行全部重排一次
+const today = computed(() => localDate(now.value))
+const days = computed(() => groupByDay(items.value, new Date(`${today.value}T00:00`)))
 </script>
 
 <template>
-  <UDashboardPanel id="activity">
-    <template #header>
-      <UDashboardNavbar title="变更记录">
-        <template #trailing>
-          <Hint>通过 Key 写入的改动，操作方显示为应用。</Hint>
-        </template>
-        <template #right>
-          <UButton
-            :icon="icons.refresh"
-            color="neutral"
-            variant="ghost"
-            aria-label="刷新"
-            :loading="activity.isRefetching.value"
-            @click="activity.refetch()"
-          />
-        </template>
-      </UDashboardNavbar>
-    </template>
-    <template #body>
-      <UAlert
-        v-if="activity.isError.value"
-        color="error"
-        variant="subtle"
-        :title="
-          activity.error.value instanceof ApiError ? activity.error.value.message : '读取失败'
-        "
-      />
-      <div v-else-if="activity.isPending.value" class="space-y-3">
+  <div class="activity">
+    <PageHead title="变更记录">
+      <template #hint>
+        <Hint>通过 Key 写入的改动，操作方显示为应用。</Hint>
+      </template>
+      <template #actions>
+        <UButton
+          :icon="icons.refresh"
+          color="neutral"
+          variant="ghost"
+          aria-label="刷新"
+          :loading="activity.isRefetching.value"
+          @click="activity.refetch()"
+        />
+      </template>
+    </PageHead>
+    <div class="activity-body">
+      <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
+      <NoteLine v-if="activity.isError.value && !activity.isFetchNextPageError.value" tone="error">
+        {{ readFailure(activity.error.value) }}
+      </NoteLine>
+      <div v-if="activity.isPending.value" class="space-y-3">
         <USkeleton v-for="n in 6" :key="n" class="h-8 w-full" />
       </div>
-      <template v-else>
-        <div class="divide-y divide-default">
-          <ActivityEntry v-for="item in items" :key="item.id" :item="item" :space-id="spaceId" />
+      <template v-else-if="activity.data.value">
+        <section v-for="day in days" :key="day.key" class="activity-day">
+          <SectionHeading :title="day.label" />
+          <ul>
+            <ActivityEntry
+              v-for="item in day.items"
+              :key="item.id"
+              :item="item"
+              :space-id="spaceId"
+            />
+          </ul>
+        </section>
+        <p v-if="!items.length" class="empty">暂无变更记录</p>
+        <div v-if="activity.isFetchNextPageError.value" class="pt-4">
+          <NoteLine tone="error">{{ readFailure(activity.error.value) }}</NoteLine>
         </div>
-        <p v-if="!items.length" class="text-sm text-muted">暂无变更记录</p>
-        <div v-if="activity.hasNextPage.value" class="mt-4 flex justify-center">
+        <div v-if="activity.hasNextPage.value" class="flex justify-center py-4">
           <UButton
             color="neutral"
-            variant="subtle"
+            variant="outline"
+            size="sm"
             :loading="activity.isFetchingNextPage.value"
             @click="activity.fetchNextPage()"
           >
@@ -69,6 +86,29 @@ const items = computed(() => activity.data.value?.pages.flatMap((page) => page.i
           </UButton>
         </div>
       </template>
-    </template>
-  </UDashboardPanel>
+    </div>
+  </div>
 </template>
+
+<style scoped>
+.activity {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+}
+.activity-body {
+  padding: 0 32px 40px;
+}
+.activity-day + .activity-day {
+  margin-top: 22px;
+}
+.empty {
+  padding: 4px 0;
+  color: var(--ui-text-muted);
+}
+@media (max-width: 1023.98px) {
+  .activity-body {
+    padding: 0 16px 28px;
+  }
+}
+</style>

@@ -4,7 +4,7 @@ import type { DeletedMemory } from '@kioku/contracts'
 import { useInfiniteQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
@@ -106,15 +106,14 @@ const TAKEN_HINT =
       </p>
       <p v-if="retention" class="text-warning">{{ deletionNotice(retention) }}</p>
     </div>
-    <div v-if="deleted.isError.value" class="list-note">
-      <NoteLine tone="error">
-        {{ deleted.error.value instanceof ApiError ? deleted.error.value.message : '读取失败' }}
-      </NoteLine>
+    <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
+    <div v-if="deleted.isError.value && !deleted.isFetchNextPageError.value" class="list-note">
+      <NoteLine tone="error">{{ readFailure(deleted.error.value) }}</NoteLine>
     </div>
-    <div v-else-if="deleted.isPending.value" class="space-y-2 p-3.5">
+    <div v-if="deleted.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />
     </div>
-    <template v-else>
+    <template v-else-if="deleted.data.value">
       <ul>
         <li v-for="item in items" :key="item.id">
           <MemoryRow
@@ -165,6 +164,9 @@ const TAKEN_HINT =
         </li>
       </ul>
       <p v-if="!items.length" class="list-empty">暂无已删除的记忆</p>
+      <div v-if="deleted.isFetchNextPageError.value" class="list-note">
+        <NoteLine tone="error">{{ readFailure(deleted.error.value) }}</NoteLine>
+      </div>
       <div v-if="deleted.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"
