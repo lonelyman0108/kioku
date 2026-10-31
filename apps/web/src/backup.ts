@@ -58,9 +58,9 @@ export function backupNotice(
   if (!backup.configured) {
     return {
       color: 'info',
-      title: '还没配备份',
+      title: '尚未配置备份',
       description:
-        '数据只在这台服务器的数据库里。在实例设置里配一个兼容S3的对象存储，每天自动加密备份。',
+        '数据仅保存在当前服务器的数据库中。在实例设置中配置兼容S3的对象存储后，每天自动加密备份。',
     }
   }
   const { lastSuccessAt } = backup
@@ -68,28 +68,28 @@ export function backupNotice(
   if (problem?.kind === 'error') {
     return {
       color: 'error',
-      title: '备份没做成',
-      description: `${problem.error.message}。下一个小时会再试，详情见实例设置。`,
+      title: '备份失败',
+      description: `${problem.error.message}。下一小时将重试，详情见实例设置。`,
     }
   }
   if (!lastSuccessAt) {
     return {
       color: 'info',
-      title: '还没做过备份',
-      description: '保存设置之后一个小时内会做第一份，也可以在实例设置里立即备份。',
+      title: '尚未生成备份',
+      description: '保存设置后一小时内生成第一份，也可在实例设置中立即备份。',
     }
   }
   const age = now.getTime() - new Date(lastSuccessAt).getTime()
   if (age > STALE_MS) {
     return {
       color: 'warning',
-      title: '好几天没有新的备份',
-      description: `最近一份做于 ${Math.floor(age / (24 * 3600_000))} 天前，备份按天做，去实例设置里看看最近的结果。`,
+      title: '近期没有新备份',
+      description: `最近一份生成于 ${Math.floor(age / (24 * 3600_000))} 天前，备份每天生成一份，请在实例设置中查看最近的结果。`,
     }
   }
   // 做成之后的提醒（例如删旧备份出错）：好几天没有新的一份时先说那个
   if (problem?.kind === 'warning') {
-    return { color: 'warning', title: '备份做成了，但有提醒', description: problem.error.message }
+    return { color: 'warning', title: '备份完成，但有警告', description: problem.error.message }
   }
   return null
 }

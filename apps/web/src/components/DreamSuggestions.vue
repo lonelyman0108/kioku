@@ -26,6 +26,7 @@ import { icons } from '../icons'
 import { layerLabels } from '../labels'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
+import Hint from './Hint.vue'
 
 const props = defineProps<{ spaceId: string; canAct: boolean }>()
 const toast = useToast()
@@ -74,7 +75,7 @@ function startEdit(item: DreamSuggestion) {
   })
 }
 const layerItems = [
-  { label: '默认：我的私人层', value: 'default' },
+  { label: '默认：当前账号的私人层', value: 'default' },
   ...PLAIN_LAYERS.map((l) => ({ label: layerLabels[l], value: l })),
 ]
 // persona:// 与 app:// 下的层由 URI 决定
@@ -87,7 +88,7 @@ function draftProblem(item: DreamSuggestion): string | null {
   if (!draft) return null
   if (!draft.content.trim()) return '正文不能为空'
   if (item.kind === 'distill' && !URI_PATTERN.test(draft.uri.trim())) {
-    return 'URI 的格式是 domain://path，例如 people://xiaoming'
+    return 'URI 格式为 domain://path，例如 people://xiaoming'
   }
   return null
 }
@@ -108,7 +109,7 @@ function bodyOf(item: DreamSuggestion): ApplyDreamSuggestion {
 // 执行按钮上的说法
 function actionLabel(item: DreamSuggestion): string {
   if (item.kind === 'merge') return '合并'
-  if (item.kind === 'distill') return '新建这条记忆'
+  if (item.kind === 'distill') return '新建记忆'
   if (item.kind === 'stale') return '设为过时'
   return item.verdict === 'delete' ? '删除' : '确认'
 }
@@ -169,7 +170,7 @@ async function reject(item: DreamSuggestion) {
   try {
     await api.rejectDreamSuggestion(spaceId, item.id)
     drafts.delete(item.id)
-    toast.add({ title: '已拒绝，同样的建议不再提', color: 'success' })
+    toast.add({ title: '已拒绝，不再提出相同建议', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '拒绝失败', color: 'error' })
   } finally {
@@ -178,7 +179,7 @@ async function reject(item: DreamSuggestion) {
   }
 }
 
-// 「现在整理一次」：排进后台任务之后按编号每隔几秒查一次，做完了就停（最多等十五分钟）
+// 「立即整理」：排进后台任务之后按编号每隔几秒查一次，做完了就停（最多等十五分钟）
 const runId = ref<string | null>(null)
 const starting = ref(false)
 const run = useQuery({
@@ -211,7 +212,7 @@ async function runNow() {
     runId.value = queued.runId
     giveUp = setTimeout(stopWaiting, 15 * 60_000)
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '没能开始整理', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '启动整理失败', color: 'error' })
   } finally {
     starting.value = false
   }
@@ -220,7 +221,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
   if (!runId.value || (!failed && status?.state !== 'finished')) return
   stopWaiting()
   const outcome = status && !failed ? runOutcome(status) : null
-  toast.add(outcome ?? { title: '查不到这次整理的状态，稍后刷新看看', color: 'warning' })
+  toast.add(outcome ?? { title: '无法获取本次整理的状态，请稍后刷新查看', color: 'warning' })
   void queryClient.invalidateQueries({ queryKey: listKey.value })
   void queryClient.invalidateQueries({ queryKey: runsKey.value })
 })
@@ -231,18 +232,20 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
     <div class="flex flex-wrap items-start gap-3">
       <div class="min-w-0 flex-1 space-y-1 text-sm text-muted">
         <p>
-          Dream
-          每天整理一次记忆，只提建议：合并重复的、把几条事实提炼成一个节点、指出可能过时的、对不可信的内容建议确认或删除。你执行之后才会改，写入的来源记为你；拒绝的同样的建议不再提。
+          Dream 每天整理一次，只提建议，执行后才会修改记忆。
+          <Hint>
+            建议分四类：合并重复内容、将多条事实提炼为一个节点、标记可能过时的内容、对未确认来源的内容建议确认或删除。执行后写入的来源记为本人；已拒绝的相同建议不再提出。
+          </Hint>
         </p>
         <p v-if="mine.data.value">
           {{
             mine.data.value.includePrivate
-              ? '你的画像层与私人层（secret 除外）也会发给实例配置的抽取模型整理，'
-              : '你关掉了整理你的画像层与私人层，现在只整理共享的内容，'
+              ? '当前账号的个人画像层与私人层（机密除外）也会发送给实例配置的抽取模型整理，'
+              : '当前账号已关闭个人画像层与私人层的整理，目前仅整理共享内容，'
           }}<RouterLink
             :to="{ name: 'space-settings', params: { spaceId } }"
             class="text-primary hover:underline"
-            >在空间设置里{{ mine.data.value.includePrivate ? '可以关掉' : '可以打开' }}</RouterLink
+            >可在空间设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
           >。
         </p>
       </div>
@@ -252,7 +255,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
         :loading="starting || Boolean(runId)"
         @click="runNow"
       >
-        {{ runId ? '正在整理…' : '现在整理一次' }}
+        {{ runId ? '正在整理…' : '立即整理' }}
       </UButton>
     </div>
 
@@ -268,7 +271,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <USkeleton v-for="n in 3" :key="n" class="h-32 w-full" />
     </div>
     <template v-else>
-      <p v-if="!items.length" class="text-sm text-muted">没有待处理的建议。</p>
+      <p v-if="!items.length" class="text-sm text-muted">暂无整理建议</p>
       <ul class="space-y-3">
         <li v-for="item in items" :key="item.id">
           <UCard>
@@ -332,7 +335,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                       color="warning"
                       variant="outline"
                     >
-                      不可信来源
+                      未确认来源
                     </UBadge>
                   </p>
                   <p class="mt-1 max-h-48 overflow-y-auto text-sm break-words whitespace-pre-wrap">
@@ -378,7 +381,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                       />
                     </UFormField>
                   </div>
-                  <UFormField label="Disclosure" help="什么场景下应该想起这条记忆">
+                  <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
                     <UInput v-model="drafts.get(item.id)!.disclosure" class="w-full" />
                   </UFormField>
                   <UFormField label="正文">
@@ -393,10 +396,10 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                 <div v-else class="space-y-1 rounded-md bg-elevated p-2 text-sm">
                   <p class="flex flex-wrap items-center gap-2">
                     <code>{{ item.uri }}</code>
-                    <span class="text-xs text-muted">默认放在我的私人层</span>
+                    <span class="text-xs text-muted">默认放在当前账号的私人层</span>
                   </p>
                   <p v-if="item.disclosure" class="text-xs text-muted">
-                    何时想起：{{ item.disclosure }}
+                    触发场景：{{ item.disclosure }}
                   </p>
                   <p class="break-words whitespace-pre-wrap">{{ item.content }}</p>
                 </div>
@@ -405,8 +408,8 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                 v-if="drafts.has(item.id) && looksPlaintext(drafts.get(item.id)!.content)"
                 color="warning"
                 variant="subtle"
-                title="正文里像有密码或 Token"
-                description="建议把值存成凭据（「凭据」页），正文里换成占位符。"
+                title="正文疑似包含明文凭据"
+                description="建议转存为凭据（「凭据」页），正文改用占位符。"
               />
               <p class="text-xs text-muted">{{ suggestionKinds[item.kind].effect }}</p>
 
@@ -432,7 +435,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   :disabled="Boolean(busy)"
                   @click="startEdit(item)"
                 >
-                  先改一下
+                  修改
                 </UButton>
                 <UButton
                   v-else-if="drafts.has(item.id)"
@@ -441,7 +444,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   size="sm"
                   @click="drafts.delete(item.id)"
                 >
-                  不改了
+                  取消修改
                 </UButton>
                 <UButton
                   :icon="icons.cancel"
@@ -458,7 +461,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                 </span>
               </div>
               <p v-else-if="canAct" class="text-xs text-muted">
-                其中有你写不了的记忆（例如别人的应用的应用层），这条建议由能写的成员处理。
+                包含当前账号无权写入的记忆（如其他成员应用的应用层），需由有权限的成员处理。
               </p>
             </div>
           </UCard>
@@ -478,10 +481,12 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
 
     <UCard>
       <template #header>
-        <h3 class="text-sm font-medium">最近的整理</h3>
+        <h3 class="text-sm font-medium">最近整理</h3>
         <p class="mt-1 text-xs text-muted">
-          每次整理用抽取模型，用量计入空间的抽取预算；只看上次以来新增或改动的记忆，别的成员的画像与私人层不在这里列出。
-          共享的内容先整理、记一条汇总，各人的画像层与私人层在那之后，所以自己的那部分结果可能比整理的状态晚一点出现在这里。
+          整理使用抽取模型，用量计入空间的抽取预算。
+          <Hint>
+            只处理上次以来新增或修改的记忆，其他成员的个人画像层与私人层不在此列出。共享内容先整理并记录一条汇总，之后才整理各成员的个人画像层与私人层，因此当前账号的结果可能稍晚于整理状态出现。
+          </Hint>
         </p>
       </template>
       <UAlert
@@ -491,7 +496,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
         :title="runs.error.value instanceof ApiError ? runs.error.value.message : '读取失败'"
       />
       <USkeleton v-else-if="runs.isPending.value" class="h-16 w-full" />
-      <p v-else-if="!runs.data.value?.runs.length" class="text-sm text-muted">还没有整理过。</p>
+      <p v-else-if="!runs.data.value?.runs.length" class="text-sm text-muted">暂无整理记录</p>
       <ul v-else class="divide-y divide-default">
         <li v-for="entry in runs.data.value.runs" :key="entry.runId" class="space-y-1 py-2 text-sm">
           <p class="flex flex-wrap items-center gap-2">
@@ -503,7 +508,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           <ul class="space-y-0.5">
             <li v-for="(part, i) in entry.entries" :key="i" class="text-xs text-muted">
               <span class="text-default"
-                >{{ part.scope ? dreamScopeText(part.scope) : '共享的内容' }}：</span
+                >{{ part.scope ? dreamScopeText(part.scope) : '共享内容' }}：</span
               >{{ part.scope ? runEntrySummary(part) : sharedSummaryText(part) }}
               <span v-if="part.error" class="block text-error">{{ part.error }}</span>
             </li>

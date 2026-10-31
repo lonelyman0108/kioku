@@ -34,7 +34,7 @@ async function submit() {
     <UCard class="w-full max-w-md">
       <template #header>
         <h1 class="text-lg font-semibold">初始化 Kioku</h1>
-        <p class="mt-1 text-sm text-muted">创建第一个账号和它的空间，这个账号是实例管理员。</p>
+        <p class="mt-1 text-sm text-muted">创建首个账号及其空间，该账号为实例管理员。</p>
       </template>
       <UForm :schema="SetupRequest" :state="state" class="space-y-4" @submit="submit">
         <UFormField label="用户名" name="username" help="小写字母、数字和 _.-">

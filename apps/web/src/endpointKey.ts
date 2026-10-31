@@ -37,6 +37,6 @@ export function needsNewKey(draft: KeyDraft): boolean {
 
 // 密钥旁边的说明：name 是这个密钥叫什么，能清除的再说怎么清（对着界面上「清除已保存的 …」那个勾选框）
 export function newKeyHint(name: string, clearable: boolean): string {
-  const clear = clearable ? `；新接口不需要 ${name} 时，勾选下面的「清除已保存的 ${name}」` : ''
-  return `接口主机变了，已保存的 ${name} 不会发给新的主机：请重新填写${clear}`
+  const clear = clearable ? `；新接口不需要 ${name} 时，请勾选下方的「清除已保存的 ${name}」` : ''
+  return `接口主机已更改，已保存的 ${name} 不会发送到新主机。请重新填写${clear}。`
 }

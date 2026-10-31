@@ -55,7 +55,7 @@ describe('一步的状态', () => {
       ['通过', 'success'],
       ['失败', 'error'],
       ['跳过', 'neutral'],
-      ['没有执行', 'warning'],
+      ['未执行', 'warning'],
     ])
   })
 
@@ -90,8 +90,8 @@ describe('一步的状态', () => {
   it('跳过、没有执行、还没发出去就失败的，在哪种看法下都不算有结果', () => {
     for (const view of ['call', 'probe'] as const) {
       expect(stepBadge(step({ status: 'skipped', raw: null }), view).label).toBe('跳过')
-      expect(stepBadge(step({ status: 'notRun', raw: null }), view).label).toBe('没有执行')
-      expect(stepBadge(step({ status: 'failed', raw: null }), view).label).toBe('没有执行')
+      expect(stepBadge(step({ status: 'notRun', raw: null }), view).label).toBe('未执行')
+      expect(stepBadge(step({ status: 'failed', raw: null }), view).label).toBe('未执行')
     }
   })
 
@@ -115,9 +115,9 @@ describe('一步的状态', () => {
       step({ isError: true, assertions: [{ message: '应当报错', ok: true }] }),
       'judged',
     )
-    expect(asserted).toEqual({ text: '这一步报错了，符合断言。', alarming: false })
+    expect(asserted).toEqual({ text: '此步报错，符合断言。', alarming: false })
     const unasserted = errorNote(step({ isError: true }), 'judged')
-    expect(unasserted?.text).toContain('没带断言')
+    expect(unasserted?.text).toContain('未带断言')
     expect(unasserted?.alarming).toBe(false)
     expect(errorNote(step({ isError: true, status: 'failed' }), 'judged')?.alarming).toBe(true)
   })
@@ -145,7 +145,7 @@ describe('session.start 多带的三项', () => {
       '一二三',
     )
     expect(notes).toEqual({
-      size: '共 3 字，宿主能完整接收 10 字',
+      size: '共 3 字，客户端可完整接收 10 字',
       overLimit: false,
       omitted: ['core://a'],
       dropped: ['近期更新的记忆', '与当前项目相关的记忆'],
@@ -153,7 +153,7 @@ describe('session.start 多带的三项', () => {
   })
 
   it('没有上限的宿主，与超出上限的情况', () => {
-    expect(sessionNotes({ limit: null, omitted: [], dropped: [] }, 'x').size).toContain('没有字数')
+    expect(sessionNotes({ limit: null, omitted: [], dropped: [] }, 'x').size).toContain('无字数')
     expect(sessionNotes({ limit: null, omitted: [], dropped: [] }, 'x').overLimit).toBe(false)
     expect(sessionNotes({ limit: 1, omitted: [], dropped: [] }, 'xy').overLimit).toBe(true)
   })
@@ -192,8 +192,8 @@ describe('这一步改了什么', () => {
       ...noChanges,
       memories: [{ type: 'update', uri: 'core://a', fields: [], left: false, becameSecret: true }],
     })
-    expect(item!.warnings.join('')).toContain('历史里的正文会被抹掉')
-    expect(item!.warnings.join('')).toContain('向量会删')
+    expect(item!.warnings.join('')).toContain('历史中的正文将被抹除')
+    expect(item!.warnings.join('')).toContain('向量将被删除')
   })
 
   it('改后看不到了：说明 URI 是改前的', () => {
@@ -201,14 +201,14 @@ describe('这一步改了什么', () => {
       ...noChanges,
       memories: [{ type: 'update', uri: 'core://a', fields: [], left: true, becameSecret: false }],
     })
-    expect(item!.notes.join('')).toContain('改前的 URI')
+    expect(item!.notes.join('')).toContain('修改前的 URI')
   })
 
   it('看不到的改动只给个数', () => {
     const items = changeItems({ ...noChanges, hiddenReleased: 2, hiddenOther: 3 })
     expect(items.map((i) => i.action)).toEqual([
-      '让出了 2 条看不到的过期记录（别的成员的）',
-      '另外有 3 处改动看不到（这把 Key 能写却读不到的层）',
+      '已释放 2 条不可见过期记录的 URI（属于其他成员）',
+      '另有 3 处不可见的改动（当前 Key 可写但不可读的层）',
     ])
   })
 
@@ -239,13 +239,13 @@ describe('这一步改了什么', () => {
       turns: 1,
     })
     expect(items.map((i) => i.action)).toEqual([
-      '新建了 2 个对象',
+      '新建 2 个联系人',
       '新的平台账号：群 · bench',
       '新的平台账号：人 · qq',
-      '写进对话缓冲 1 轮',
+      '写入对话缓冲 1 轮',
     ])
     expect(items[0]!.warnings.join('')).toContain('只能合并')
-    expect(items[3]!.notes.join('')).toContain('排抽取')
+    expect(items[3]!.notes.join('')).toContain('排入抽取')
   })
 
   it('真实模式下这几项是 null：不列，也不能说成没有改', () => {

@@ -26,9 +26,9 @@ function oneOf<T extends string>(key: string, values: readonly T[]): T | null {
   return value && (values as readonly string[]).includes(value) ? (value as T) : null
 }
 const sortLabels: Record<MemoryListSort, string> = {
-  updated: '最近更新',
-  priority: 'priority',
-  uri: 'URI',
+  updated: '按最近更新',
+  priority: '按优先级',
+  uri: '按 URI',
 }
 const filters = computed(() => ({
   domain: text('domain'),
@@ -80,7 +80,7 @@ const sensitivityItems = [
   { label: '全部敏感级', value: null },
   ...SENSITIVITIES.map((s) => ({ label: sensitivityLabels[s], value: s })),
 ]
-const sortItems = MEMORY_LIST_SORTS.map((s) => ({ label: `按${sortLabels[s]}`, value: s }))
+const sortItems = MEMORY_LIST_SORTS.map((s) => ({ label: sortLabels[s], value: s }))
 
 const list = useInfiniteQuery({
   queryKey: computed(() => ['memory-list', props.spaceId, filters.value] as const),
@@ -109,7 +109,7 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
     <UInput
       v-model="keyword"
       name="q"
-      placeholder="在 URI 与 disclosure 里找"
+      placeholder="搜索 URI 与触发场景"
       aria-label="关键字"
       class="w-full"
     />
@@ -142,12 +142,12 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
     <div class="flex flex-wrap gap-x-4 gap-y-1">
       <UCheckbox
         :model-value="filters.missingDisclosure"
-        label="只看没写 disclosure 的"
+        label="未设触发场景"
         @update:model-value="(v) => setFilter('missingDisclosure', v ? 'true' : null)"
       />
       <UCheckbox
         :model-value="filters.plaintext"
-        label="只看像有明文凭据的"
+        label="疑似明文凭据"
         @update:model-value="(v) => setFilter('plaintext', v ? 'true' : null)"
       />
     </div>
@@ -188,14 +188,14 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
             </span>
             <span class="mt-0.5 flex items-center gap-2 text-xs text-muted">
               <span class="min-w-0 flex-1 truncate">
-                {{ item.disclosure?.trim() || '没写 disclosure' }}
+                {{ item.disclosure?.trim() || '未设触发场景' }}
               </span>
               <!-- 列表只列有效的；载入之后才到期的在这里显示已过期 -->
               <span
                 v-if="item.validTo"
                 class="flex shrink-0 items-center gap-0.5"
                 :class="isExpired(item.validTo) ? 'text-error' : ''"
-                :title="`有效到 ${formatTime(item.validTo)}`"
+                :title="`有效期至 ${formatTime(item.validTo)}`"
               >
                 <UIcon :name="icons.validity" class="size-3" />
                 {{ isExpired(item.validTo) ? '已过期' : formatShort(item.validTo) }}
@@ -207,7 +207,7 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
           </button>
         </li>
       </ul>
-      <p v-if="!items.length" class="text-sm text-muted">没有符合条件的记忆。</p>
+      <p v-if="!items.length" class="text-sm text-muted">没有符合条件的记忆</p>
       <div v-if="list.hasNextPage.value" class="flex justify-center">
         <UButton
           color="neutral"

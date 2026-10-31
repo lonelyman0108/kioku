@@ -59,10 +59,10 @@ describe('概览里的备份提醒', () => {
   it('没配备份、还没做过一份时提示', () => {
     expect(
       backupNotice({ configured: false, lastSuccessAt: null, lastError: null }, now),
-    ).toMatchObject({ color: 'info', title: '还没配备份' })
+    ).toMatchObject({ color: 'info', title: '尚未配置备份' })
     expect(backupNotice(configured({ lastSuccessAt: null }), now)).toMatchObject({
       color: 'info',
-      title: '还没做过备份',
+      title: '尚未生成备份',
     })
   })
 
@@ -70,7 +70,7 @@ describe('概览里的备份提醒', () => {
     const failed = { message: '存储返回 403（AccessDenied）', at: hoursAgo(1) }
     expect(backupNotice(configured({ lastError: failed }), now)).toMatchObject({
       color: 'error',
-      title: '备份没做成',
+      title: '备份失败',
     })
     const warned = { message: '备份已经传上去，但删旧备份时出错', at: hoursAgo(6) }
     expect(backupNotice(configured({ lastError: warned }), now)).toMatchObject({
@@ -83,11 +83,11 @@ describe('概览里的备份提醒', () => {
     expect(backupNotice(configured({ lastSuccessAt: hoursAgo(47) }), now)).toBeNull()
     expect(backupNotice(configured({ lastSuccessAt: hoursAgo(73) }), now)).toMatchObject({
       color: 'warning',
-      title: '好几天没有新的备份',
+      title: '近期没有新备份',
     })
     const warned = { message: '删旧备份时出错', at: hoursAgo(120) }
     expect(
       backupNotice(configured({ lastSuccessAt: hoursAgo(120), lastError: warned }), now),
-    ).toMatchObject({ title: '好几天没有新的备份' })
+    ).toMatchObject({ title: '近期没有新备份' })
   })
 })

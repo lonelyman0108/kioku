@@ -6,6 +6,7 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import Hint from '../components/Hint.vue'
 import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
@@ -46,7 +47,7 @@ function accounts(subject: SubjectInfo) {
 <template>
   <UDashboardPanel id="subjects">
     <template #header>
-      <UDashboardNavbar title="对象">
+      <UDashboardNavbar title="联系人">
         <template #right>
           <UButton
             :icon="icons.refresh"
@@ -61,8 +62,10 @@ function accounts(subject: SubjectInfo) {
     </template>
     <template #body>
       <p class="mb-4 text-sm text-muted">
-        bot
-        在群聊与私聊里遇到的人和群（新遇到的在前），以及从对话里记下的关于他们的事。把你自己在各个平台的账号标记为「这是我」，你的应用就会把这些私聊当作主人私聊。
+        对话中遇到的人和群，以及记下的事实。
+        <Hint>
+          新遇到的排在前面。将本人在各平台的账号标记为「这是我」后，当前账号的应用会将这些私聊视为本人对话。
+        </Hint>
       </p>
       <div class="mb-4 flex flex-wrap items-center gap-3">
         <UTabs v-model="kind" :items="tabs" :content="false" size="sm" class="w-auto" />
@@ -71,7 +74,7 @@ function accounts(subject: SubjectInfo) {
           name="q"
           :icon="icons.search"
           placeholder="名字或平台账号"
-          aria-label="查找对象"
+          aria-label="查找联系人"
           class="w-full sm:w-64"
         />
       </div>
@@ -110,18 +113,18 @@ function accounts(subject: SubjectInfo) {
                   }}</UBadge
                 >
               </div>
-              <p class="truncate text-xs text-muted">{{ accounts(subject) || '没有平台账号' }}</p>
+              <p class="truncate text-xs text-muted">{{ accounts(subject) || '无平台账号' }}</p>
             </div>
             <span class="shrink-0 text-xs text-muted">{{ subject.factCount }} 条事实</span>
             <span
               class="hidden w-24 shrink-0 text-right text-xs text-muted sm:inline"
-              title="第一次遇到"
+              title="首次遇到"
               >{{ formatRelative(subject.createdAt) }}</span
             >
           </li>
         </ul>
         <p v-if="!items.length" class="text-sm text-muted">
-          {{ q ? '没有找到。' : '还没有遇到过谁：接入群聊 bot 之后，聊过天的人和群会出现在这里。' }}
+          {{ q ? '没有匹配的结果' : '暂无联系人。接入群聊 Bot 后，对话过的人和群将显示在这里。' }}
         </p>
         <div v-if="subjects.hasNextPage.value" class="mt-4 flex justify-center">
           <UButton

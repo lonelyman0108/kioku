@@ -166,7 +166,7 @@ describe('真实模式要确认', () => {
     const request = bodyOf(useBench, 'requestMode')
     expect(request).toContain('if (wantReal) confirmingReal.value = true')
     expect(request).not.toContain("'real'")
-    expect(handler(buttonOf(toolbar.elements, '切到真实模式'), 'click')).toBe('confirmReal')
+    expect(handler(buttonOf(toolbar.elements, '切换到真实模式'), 'click')).toBe('confirmReal')
   })
 
   it('切回回滚会清掉记录时要确认，确认框说清楚清掉什么；取消不动', () => {
@@ -182,7 +182,7 @@ describe('真实模式要确认', () => {
     // 显示打开时存的那一份：确认之后 modeLoss 马上没了，对话框还在关闭
     expect(shownIn(modal)).toEqual(['rollbackLoss'])
     const nodes = walk(modal)
-    expect(handler(buttonOf(nodes, '切回回滚'), 'click')).toBe('confirmRollback')
+    expect(handler(buttonOf(nodes, '切回回滚模式'), 'click')).toBe('confirmRollback')
     expect(handler(buttonOf(nodes, '取消'), 'click')).toBe('confirmingRollback = false')
     expect(bodyOf(useBench, 'confirmRollback')).toContain("mode.value = 'rollback'")
   })
@@ -304,9 +304,10 @@ describe('调用台的运行', () => {
 
   it('页面上写明工具调用不带会话上下文', () => {
     // 看模板里的文字：脚本的注释里也有这句
-    expect(textOf(calls.elements[0]!)).toContain('工具调用不带会话上下文，真实的 MCP 也不带')
+    expect(textOf(calls.elements[0]!)).toContain('工具调用不带会话上下文，与真实 MCP 一致')
     const form = sfc(benchContextForm)
-    expect(textOf(form.elements[0]!)).toContain('工具调用不带：真实的 MCP 也不带')
+    expect(textOf(form.elements[0]!)).toContain('工具调用不带')
+    expect(textOf(form.elements[0]!)).toContain('与真实 MCP 一致')
   })
 
   it('会话上下文的表单接到共享的状态，折叠时也看得到选了什么', () => {
@@ -352,8 +353,8 @@ describe('调用台的目录与表单', () => {
   })
 
   it('表单与 JSON 来回切换，放不回去时说明原因', () => {
-    expect(handler(buttonOf(calls.elements, '写 JSON'), 'click')).toBe('showJson')
-    expect(handler(buttonOf(calls.elements, '用表单'), 'click')).toBe('showForm')
+    expect(handler(buttonOf(calls.elements, '使用 JSON'), 'click')).toBe('showJson')
+    expect(handler(buttonOf(calls.elements, '使用表单'), 'click')).toBe('showForm')
     expect(handler(buttonOf(calls.elements, '重置'), 'click')).toBe('resetDraft')
     expect(bodyOf(calls.script, 'showJson')).toContain(
       'jsonFromForm(target.value, draft.value, sessionContext.value)',
@@ -371,12 +372,12 @@ describe('调用台的目录与表单', () => {
     const scope = withDirective(calls.elements, 'else-if', 'target.usesContext')
     const [json, form] = scope.children!.filter((n) => n.type === ELEMENT)
     expect(directive(json!, 'if')).toBe('draft.json')
-    expect(textOf(json!)).toContain('只发这段 JSON 里的 context')
-    expect(textOf(json!)).toContain('上面的会话上下文不起作用')
+    expect(textOf(json!)).toContain('仅发送此 JSON 中的 context')
+    expect(textOf(json!)).toContain('上方的会话上下文不生效')
     expect(form!.props?.some((p) => p.name === 'else')).toBe(true)
-    expect(textOf(form!)).toContain('这个调用带上面的会话上下文')
+    expect(textOf(form!)).toContain('此调用带上方的会话上下文')
     // 这句只在表单模式下出现
-    expect(benchCalls.match(/这个调用带上面的会话上下文/g)).toHaveLength(1)
+    expect(benchCalls.match(/此调用带上方的会话上下文/g)).toHaveLength(1)
   })
 
   it('JSON 里的 context 和页面上的不同时警告', () => {
@@ -384,8 +385,8 @@ describe('调用台的目录与表单', () => {
     expect(alert.tag).toBe('UAlert')
     expect(alert.props?.find((p) => p.name === 'color')?.value?.content).toBe('warning')
     const title = alert.props?.find((p) => p.name === 'title')?.value?.content
-    expect(title).toContain('和上面的会话上下文不同')
-    expect(title).toContain('按 JSON 里的执行')
+    expect(title).toContain('与上方的会话上下文不同')
+    expect(title).toContain('按 JSON 执行')
     expect(calls.script).toContain(
       'jsonContextDiffers(target.value, draft.value, sessionContext.value)',
     )
@@ -503,7 +504,7 @@ describe('这次会话：分叉、清空、时间线与上限', () => {
     expect(bound(alert, 'description')).toBe('diverged.description')
     expect(bound(alert, 'actions')).toBe('divergedActions')
     expect(divergedActions()).toMatch(/label: '接受[^}]*onClick: acceptDiverged,/)
-    expect(divergedActions()).toMatch(/label: '清空这次会话'[^}]*onClick: clear,/)
+    expect(divergedActions()).toMatch(/label: '清空当前会话'[^}]*onClick: clear,/)
     expect(calls.script).toMatch(/\bacceptDiverged,[^}]*\} = useBench\(\)/)
     expect(bodyOf(useBench, 'acceptDiverged')).toContain('acceptDivergence(session.value)')
     expect(bodyOf(useBench, 'clearSession')).toContain('session.value = emptySession()')
@@ -568,7 +569,7 @@ describe('这次会话：分叉、清空、时间线与上限', () => {
     const kept = withIf(walk(list), 'entry.kept')
     expect(textOf(kept)).toContain('写入已保留')
     const removed = withDirective(walk(list), 'else-if', 'entry.removed')
-    expect(textOf(removed)).toContain('写入已去掉')
+    expect(textOf(removed)).toContain('写入已移除')
   })
 
   it('下面显示选中的那一条的结果', () => {
@@ -683,7 +684,7 @@ describe('场景的运行与导出', () => {
     const onFile = bodyOf(scenarios.script, 'onFile')
     expect(onFile).toContain('if (!parsed.ok) errors.value = parsed.errors')
     expect(onFile).toContain('errors.value = [`文件超过')
-    expect(onFile).toContain("errors.value = ['读不出这个文件']")
+    expect(onFile).toContain("errors.value = ['无法读取此文件']")
     // 有错的内容也放进文本框，就地改
     expect(onFile).toContain('replaceText(parsed.ok ? formatScenario(parsed.scenario) : content)')
     // 合法的时候清掉：文件过大这类报错不会因为文本框没动就一直留着
@@ -733,7 +734,7 @@ describe('场景的运行与导出', () => {
       expect.arrayContaining(['confirming?.title', 'confirming?.steps.length']),
     )
     expect(shownIn(modal).join()).toContain('writingSteps(confirming)')
-    expect(textOf(modal)).toContain('已经写下的不会撤回')
+    expect(textOf(modal)).toContain('已写入的内容不会撤回')
     expect(handler(buttonOf(nodes, '取消'), 'click')).toBe('confirming = null')
   })
 
@@ -748,14 +749,15 @@ describe('场景的运行与导出', () => {
     const realNote = withIf(scenarios.elements, 'real')
     expect(realNote.tag).toBe('p')
     expect(textOf(realNote)).toContain('步骤各自真实执行')
-    expect(textOf(realNote)).toContain('读得到已经落库的写入')
-    expect(textOf(realNote)).toContain('结果不进调用台的时间线')
+    expect(textOf(realNote)).toContain('可读取已落库的写入')
+    expect(textOf(realNote)).toContain('结果不进入调用台的时间线')
     expect(textOf(realNote)).not.toContain('事务')
     const rollbackNote = must(
       scenarios.elements.find((el) => el.tag === 'p' && el.props?.some((p) => p.name === 'else')),
       'v-else 的那一句说明',
     )
-    expect(textOf(rollbackNote)).toContain('它单独一个事务：不带调用台这次会话的写入')
+    expect(textOf(rollbackNote)).toContain('在单独的事务中运行')
+    expect(textOf(rollbackNote)).toContain('不带调用台当前会话的写入')
     expect(textOf(rollbackNote)).not.toContain('真实执行')
     // 两句紧挨着：v-else 接的是这个 v-if
     const parent = must(
@@ -858,7 +860,7 @@ describe('一步的结果', () => {
     const section = withIf(view.elements, 'session')
     const nodes = walk(section)
     expect(shownIn(section)).toContain('session.size')
-    expect(textOf(withIf(nodes, 'session.overLimit'))).toContain('超出的部分宿主可能截断')
+    expect(textOf(withIf(nodes, 'session.overLimit'))).toContain('超出部分客户端可能截断')
     expect(shownIn(withIf(nodes, 'session.omitted.length'))).toEqual(["session.omitted.join('、')"])
     expect(shownIn(withIf(nodes, 'session.dropped.length'))).toEqual(["session.dropped.join('、')"])
   })
@@ -873,13 +875,13 @@ describe('一步的结果', () => {
       '这一步改了什么的区块',
     )
     const nodes = walk(section)
-    expect(shownIn(section)).toContain("mode === 'rollback' ? '真执行会改什么' : '这一步改了什么'")
-    expect(textOf(withIf(nodes, '!step.changes'))).toContain('改动列不出来')
+    expect(shownIn(section)).toContain("mode === 'rollback' ? '真实执行时的改动' : '此步的改动'")
+    expect(textOf(withIf(nodes, '!step.changes'))).toContain('无法列出此步的改动')
     expect(withIf(nodes, 'turnNotBuffered(step)')).toBeDefined()
     expect(shownIn(withIf(nodes, '!changes.length && !step.changes.turn')).join()).toContain(
       'changesNotListed(step.changes)',
     )
-    expect(textOf(withIf(nodes, 'changesNotListed(step.changes)'))).toContain('这个模式不列')
+    expect(textOf(withIf(nodes, 'changesNotListed(step.changes)'))).toContain('此模式下不列出')
   })
 
   it('这一步改了什么：每一类的动作、对象、字段、提醒与说明', () => {
@@ -1000,9 +1002,7 @@ describe('被模型对话占着时的说明', () => {
   it('只在模型对话进行时显示，说清楚为什么，能停止', () => {
     const alert = withIf(busy.elements, 'agentSending')
     expect(alert.tag).toBe('UAlert')
-    expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain(
-      '模型对话正在进行',
-    )
+    expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain('模型对话进行中')
     expect(bound(alert, 'actions')).toBe('actions')
     const actions = blockOf(busy.script, 'const actions = ')
     expect(actions).toContain('onClick: stopAgent')
@@ -1040,7 +1040,7 @@ describe('模型对话的页面', () => {
     // 模型名、系统提示与输入区都只在用得了时才有
     const guarded = view.elements.filter((el) => directive(el, 'if') === 'available && loop')
     expect(guarded).toHaveLength(2)
-    for (const label of ['模型', '要对模型说的话']) {
+    for (const label of ['模型', '发给模型的消息']) {
       const inside = guarded
         .flatMap(walk)
         .filter((el) =>
@@ -1064,6 +1064,8 @@ describe('模型对话的页面', () => {
       '循环的说明',
     )
     expect(bound(note, 'class')).toBe("loop === 'approximate' ? 'text-warning' : 'text-muted'")
+    // 完整的循环在提示层里
+    expect(shownIn(note)).toContain('AGENT_LOOP_DETAILS[loop]')
     expect(benchAgent).toMatch(/approximate:\s+'[^']*近似/)
   })
 
@@ -1076,7 +1078,7 @@ describe('模型对话的页面', () => {
     expect(bound(alert, 'description')).toBe('consentText(consent, mode)')
     expect(bound(alert, 'actions')).toBe('consentActions')
     const actions = blockOf(view.script, 'const consentActions = ')
-    expect(actions).toContain('`发给 ${model.value}，开始对话`')
+    expect(actions).toContain('`发送至 ${model.value}，开始对话`')
     expect(actions).toContain('onClick: () => consent.value && consentTo(consent.value)')
     // 同意的键：服务端给的接口地址、这里的模型名、服务端给的循环
     const target = blockOf(view.script, 'const consent = ')
@@ -1192,8 +1194,8 @@ describe('模型对话的页面', () => {
       view.elements.find((el) => el.tag === 'UModal' && bound(el, 'open') === 'confirmingClear'),
       '清空的确认框',
     )
-    expect(textOf(modal)).toContain('可能已经写库')
-    expect(textOf(modal)).toContain('运行标记是活动里对应这些写入的唯一线索')
+    expect(textOf(modal)).toContain('可能已写入数据库')
+    expect(textOf(modal)).toContain('运行标记是在变更记录中对应这些写入的唯一线索')
     expect(textOf(modal)).toContain('不会撤回')
     const nodes = walk(modal)
     expect(handler(buttonOf(nodes, '清空'), 'click')).toBe('clear')
@@ -1205,7 +1207,7 @@ describe('模型对话的页面', () => {
   })
 
   it('存成场景：先检测明文，有就问，确认了才保存', () => {
-    const button = buttonOf(view.elements, '存成场景')
+    const button = buttonOf(view.elements, '存为场景')
     expect(handler(button, 'click')).toBe('startExport')
     expect(bound(button, 'disabled')).toBe('running || !hasCalls')
     const body = bodyOf(view.script, 'startExport')
@@ -1232,7 +1234,7 @@ describe('模型对话的页面', () => {
     expect(body).not.toContain('droppedNote')
     // 这里的写入只有存不成的那一句
     expect(body.match(/exportNote\.value =/g)).toHaveLength(1)
-    expect(body).toContain('exportNote.value = `存不成场景')
+    expect(body).toContain('exportNote.value = `无法存为场景')
     const save = bodyOf(view.script, 'saveScenario')
     expect(save.indexOf('exportNote.value = droppedNote(dropped)')).toBeGreaterThan(
       save.indexOf('saveFile('),
@@ -1248,7 +1250,7 @@ describe('模型对话的页面', () => {
 
   it('重放分叉：第几步与原因都显示，能接受或清空；再发还是同样报错时禁止发送', () => {
     // 内部错误的分叉不说再运行一次：这条消息可能已经留在历史
-    expect(view.script).toContain("divergenceNotice(agent.value.session, '可以接着发下一条')")
+    expect(view.script).toContain("divergenceNotice(agent.value.session, '可继续发送下一条')")
     const alert = alertWith('diverged')
     expect(bound(alert, 'title')).toBe('diverged.title')
     expect(bound(alert, 'description')).toBe('diverged.description')
@@ -1268,7 +1270,7 @@ describe('模型对话的页面', () => {
     // 轨迹上去掉的那一步有标记
     const call = withFor(exchange.elements, 'call in round.calls')
     expect(textOf(withDirective(walk(call), 'else-if', 'call.trace?.removed'))).toContain(
-      '写入已去掉',
+      '写入已移除',
     )
   })
 
@@ -1299,11 +1301,11 @@ describe('模型对话的页面', () => {
     expect(reasoning.props?.some((p) => p.name === 'open')).toBe(false)
     expect(shownIn(withIf(nodes, 'round.text'))).toEqual(['round.text'])
     expect(textOf(withDirective(nodes, 'else-if', '!round.calls.length'))).toContain(
-      '模型没有返回文字',
+      '模型未返回文字',
     )
     // 拒绝回答时显示原因，不说没有返回文字
     const refusal = withDirective(nodes, 'else-if', 'round.refusal')
-    expect(textOf(refusal)).toContain('模型拒绝了')
+    expect(textOf(refusal)).toContain('模型拒绝回答')
     expect(shownIn(refusal)).toEqual(['round.refusal'])
     const siblings = round.children!.filter((n) => n.type === ELEMENT)
     expect(siblings.indexOf(refusal)).toBeGreaterThan(siblings.indexOf(withIf(nodes, 'round.text')))
@@ -1354,7 +1356,7 @@ describe('模型对话的页面', () => {
     expect(bound(alert, 'title')).toBe('exchange.notice')
     expect(bound(alert, 'color')).toBe('noticeColor(exchange.end)')
     expect(textOf(withIf(exchange.elements, 'exchange.end && !exchange.inHistory'))).toContain(
-      '没有进历史',
+      '未进入历史',
     )
     expect(shownIn(withIf(exchange.elements, 'exchange.phase'))).toEqual([
       'agentPhaseLabels[exchange.phase]',

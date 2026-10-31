@@ -8,6 +8,7 @@ import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { creatableLayers, layerLabels, sensitivityLabels } from '../labels'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
+import Hint from './Hint.vue'
 
 const props = defineProps<{ spaceId: string; initialUri: string }>()
 const open = defineModel<boolean>('open', { required: true })
@@ -65,7 +66,7 @@ watch(
 )
 const layerHelp = computed(() => {
   if (layerFixed.value) return '由 URI 决定'
-  if (suggestedLayer.value && !layerTouched.value) return '按空间设置的 domain 默认层带出'
+  if (suggestedLayer.value && !layerTouched.value) return '来自空间设置的 domain 默认层'
   return undefined
 })
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
@@ -82,13 +83,13 @@ const sensitivityItems = computed(() => [
 async function submit() {
   const validTo = form.validTo ? fromLocalInput(form.validTo) : null
   if (form.validTo && !validTo) {
-    error.value = '有效到的日期和时间没填完整'
+    error.value = '有效期的日期和时间不完整'
     return
   }
   // 表单开得久了，当时能选的最早时间现在可能已经太近
   if (validTo && validToTooSoon(form.validTo)) {
     minValidTo.value = earliestValidTo()
-    error.value = '有效到要比现在晚至少一分钟'
+    error.value = '有效期须晚于当前时间至少一分钟'
     return
   }
   saving.value = true
@@ -140,21 +141,23 @@ async function submit() {
           v-if="looksPlaintext"
           color="warning"
           variant="subtle"
-          title="正文里像有密码或 Token"
-          description="建议把值存成凭据（「凭据」页），正文里换成占位符；创建之后在编辑器里可以插入引用。"
+          title="正文疑似包含明文凭据"
+          description="建议转存为凭据（「凭据」页），正文改用占位符；创建后可在编辑器中插入引用。"
         />
-        <UFormField label="Disclosure" help="什么场景下应该想起这条记忆">
+        <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
           <UInput v-model="form.disclosure" class="w-full" />
         </UFormField>
-        <UFormField
-          label="有效到"
-          help="只在一段时间内成立的事才设，到期后不再召回、不进 boot；留空表示一直有效"
-        >
+        <UFormField label="有效期">
+          <template #help>
+            仅对阶段性内容设置；到期后不再召回。<Hint>
+              到期后也不进启动加载。留空表示长期有效。
+            </Hint>
+          </template>
           <UInput
             v-model="form.validTo"
             type="datetime-local"
             :min="minValidTo"
-            aria-label="有效到"
+            aria-label="有效期"
             class="w-full sm:w-64"
             @focus="minValidTo = earliestValidTo()"
           />

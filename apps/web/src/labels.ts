@@ -21,20 +21,20 @@ export const layerLabels: Record<Layer, string> = {
   base: '基础',
   persona: '人格',
   app: '应用',
-  owner: '主人画像',
+  owner: '个人画像',
   private: '私人',
-  subject: '对象',
+  subject: '联系人',
   episode: '情节',
 }
 
-// 树上与列表里放不下全名时用的简称
+// 目录与列表里放不下全名时用的简称
 export const layerShortLabels: Record<Layer, string> = {
   base: '基础',
   persona: '人格',
   app: '应用',
   owner: '画像',
   private: '私人',
-  subject: '对象',
+  subject: '联系人',
   episode: '情节',
 }
 
@@ -48,56 +48,56 @@ export const sensitivityLabels: Record<Sensitivity, string> = {
 // Key 的 admin 在界面上不叫 admin，免得被当成空间管理员
 export const ADMIN_SCOPE_LABEL = '跨人格 / 应用写入'
 
-// 一把 Key 的权限，一句话说完
+// 一个 Key 的权限，一句话说完
 export const scopesSummary = (s: KeyScopes) =>
-  `读 ${s.readLayers.length} 层 · 写 ${s.writeLayers.length} 层 · 最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? ` · ${ADMIN_SCOPE_LABEL}` : ''}`
+  `可读 ${s.readLayers.length} 层，可写 ${s.writeLayers.length} 层，最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? `，${ADMIN_SCOPE_LABEL}` : ''}`
 
 export const accessContextLabels: Record<AccessContext, string> = {
-  none: '无上下文（本机 agent）',
+  none: '无上下文（本机 Agent）',
   direct: '陌生人私聊',
-  owner_direct: '主人私聊',
+  owner_direct: '本人私聊',
   group: '群聊',
-  cron: '定时任务 / 子 agent',
+  cron: '定时任务 / 子 Agent',
 }
 
-// 权限矩阵里「读得到哪些来源作用域写下的记忆」
+// 权限范围里「读得到哪些来源作用域写下的记忆」
 export const originScopeLabels: Record<KeyAccessMatrix['contexts'][number]['originScope'], string> =
   {
-    any: '不限来源',
-    app: '只含全局与本应用写下的',
-    group: '只含全局、本应用与本群里写下的',
-    direct: '只含全局、本应用与和此人的对话里写下的',
+    any: '来源不限',
+    app: '来源仅限全局与本应用',
+    group: '来源仅限全局、本应用与本群',
+    direct: '来源仅限全局、本应用与此人的对话',
   }
 
 // 召回事件的来路
 export const recallSourceLabels: Record<RecallSource, string> = {
-  'session.start': '会话开始的项目召回',
+  'session.start': '会话开始',
   'prompt.submit': '每轮输入',
   'mcp.search': 'MCP 搜索',
   'rest.recall': 'REST 召回',
 }
 
-// 召回调试台里一条记忆被这把 Key 过滤掉的原因
+// 召回调试里一条记忆被当前 Key 过滤掉的原因
 export const readDenialLabels: Record<ReadDenial, string> = {
   deleted: '已删除',
   expired: '已失效或过期',
-  layer: '这把 Key 读不到这一层',
-  sensitivity: '敏感级超出这把 Key 的上限',
-  secret: 'secret 只能按 URI 读取，不进召回',
-  origin: '来源作用域不在范围内',
-  owner: '别的成员的画像或私人层',
-  persona: '人格不在这个应用的继承链上',
-  app: '别的应用的应用层',
-  override: '被继承链上更近的人格的同一路径覆盖',
+  layer: '超出 Key 的可读层',
+  sensitivity: '超出 Key 的敏感级上限',
+  secret: '机密内容仅可按 URI 读取，不参与召回',
+  origin: '来源范围不匹配',
+  owner: '属于其他成员',
+  persona: '不在当前人格的继承链上',
+  app: '属于其他应用',
+  override: '已被更近的人格节点覆盖',
 }
 
-// 按 URI 直接新建时可选的层：persona:// 与 app:// 由 URI 决定，对象与情节层由对话抽取写入
+// 按 URI 直接新建时可选的层：persona:// 与 app:// 由 URI 决定，联系人层与情节层由对话抽取写入
 export const creatableLayers: Layer[] = ['base', 'owner', 'private']
 
 export const provenanceLabels: Record<Provenance, string> = {
-  owner: '主人',
-  agent: 'agent',
-  untrusted: '不可信来源',
+  owner: '本人',
+  agent: 'Agent',
+  untrusted: '未确认来源',
   system: '系统',
 }
 
@@ -109,10 +109,10 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
   update: { label: '修改', icon: icons.edit },
   move: { label: '移动', icon: icons.moved },
   delete: { label: '删除', icon: icons.remove },
-  restore: { label: '恢复到旧版本', icon: icons.restore },
-  undelete: { label: '撤销删除', icon: icons.undelete },
-  expire: { label: '过期后让出 URI', icon: icons.expired },
-  reactivate: { label: '重新生效', icon: icons.reactivate },
+  restore: { label: '恢复旧版本', icon: icons.restore },
+  undelete: { label: '恢复', icon: icons.undelete },
+  expire: { label: '过期并释放 URI', icon: icons.expired },
+  reactivate: { label: '恢复生效', icon: icons.reactivate },
   confirm: { label: '确认来源', icon: icons.confirmed },
 }
 
@@ -120,13 +120,13 @@ export function eventLabel(type: string): { label: string; icon: string } {
   return eventLabels[type] ?? { label: type, icon: icons.edit }
 }
 
-// 记忆从哪里来：哪个群、和谁的私聊、哪个应用；名字为空说明那个群、对象或应用已经删掉了
+// 记忆从哪里来：哪个群、和谁的私聊、哪个应用；名字为空说明那个群、联系人或应用已经删掉了
 export function originScopeText(scope: OriginScope): string {
   switch (scope.kind) {
     case 'group':
       return scope.name ? `群「${scope.name}」` : '已删除的群'
     case 'direct':
-      return scope.name ? `和「${scope.name}」的私聊` : '已删除的私聊对象'
+      return scope.name ? `与「${scope.name}」的私聊` : '已删除的联系人'
     case 'app':
       return scope.name ? `应用「${scope.name}」` : '已删除的应用'
     default:
@@ -149,11 +149,11 @@ export function actorLabel(actor: EventActor): { name: string; viaApp: boolean }
 // 测试台真实模式写下的事件：操作的账号，账号已经删掉时没有名字
 export const benchAccountLabel = (mark: BenchMark) => mark.accountName ?? '已删除的账号'
 
-// 活动里「改了哪些字段」
+// 变更记录里「改了哪些字段」
 export const changeLabels: Record<string, string> = {
   content: '正文',
-  disclosure: 'disclosure',
-  priority: 'priority',
+  disclosure: '触发场景',
+  priority: '优先级',
   sensitivity: '敏感级',
   layer: '层',
   uri: 'URI',
@@ -186,7 +186,7 @@ export const credentialEventLabels: Record<string, { label: string; icon: string
   import: { label: '从导出文件导入', icon: icons.imported },
   update: { label: '修改', icon: icons.edit },
   delete: { label: '删除', icon: icons.remove },
-  undelete: { label: '撤销删除', icon: icons.undelete },
+  undelete: { label: '恢复', icon: icons.undelete },
   access: { label: '取用', icon: icons.reveal },
 }
 
@@ -195,7 +195,7 @@ export const credentialViaLabels: Record<string, string> = {
   console: '在管理界面查看',
   export: '随空间导出',
   kioku_credential: '通过 kioku_credential',
-  kioku_get: '读记忆时列出（kioku_get）',
+  kioku_get: '读取记忆时列出（kioku_get）',
   rest: '通过 REST 接口',
 }
 
@@ -218,13 +218,13 @@ export function restrictedAppsLabel(
   me: string | undefined,
 ): string {
   if (appIds === null) return '不限定'
-  if (!appIds.length) return '不给任何应用'
+  if (!appIds.length) return '不开放给任何应用'
   if (!apps) return '…'
   return appIds
     .map((id) => {
       const app = apps.find((a) => a.id === id)
       if (!app) return '已删除的应用'
-      return app.ownerAccountId === me ? app.name : `${app.name}（不是你的应用，用不了）`
+      return app.ownerAccountId === me ? app.name : `${app.name}（非当前账号的应用，不可用）`
     })
     .join('、')
 }

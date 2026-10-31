@@ -101,7 +101,7 @@ describe('记忆树', () => {
     )
     expect(items.map((i) => [i.label, i.disabled ?? false])).toEqual([
       ['a', false],
-      ['这一级太多，只显示了前 1 个', true],
+      ['此级条目过多，仅显示前 1 个', true],
     ])
   })
 })

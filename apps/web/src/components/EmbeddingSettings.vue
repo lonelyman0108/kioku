@@ -21,6 +21,7 @@ import {
 import { needsNewKey } from '../endpointKey'
 import { icons } from '../icons'
 import EmbeddingChannels from './EmbeddingChannels.vue'
+import Hint from './Hint.vue'
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -73,7 +74,7 @@ watch(
     const discarded = previous ? draftsChanged(activeDrafts.value, previous.channels) : false
     syncActive(value)
     if (discarded) {
-      toast.add({ title: '嵌入设置在后台变了，没保存的渠道改动已经丢掉', color: 'warning' })
+      toast.add({ title: '嵌入设置已在后台更新，未保存的渠道改动已丢弃', color: 'warning' })
     }
   },
   { immediate: true },
@@ -85,7 +86,7 @@ const activeDirty = computed(() =>
 )
 // 有渠道换了接口主机、又没说 Key 怎么处理（见 needsNewKey）：服务端会拒，提交之前就拦下，
 // 按钮旁边说一句，具体的说明在那个渠道的 Key 旁边
-const KEY_MISSING = '有渠道换了接口主机，先说明它的 Key 怎么处理'
+const KEY_MISSING = '有渠道更换了接口主机，请重新填写或清除其 Key'
 const activeKeyMissing = computed(() => activeDrafts.value.some(needsNewKey))
 const saving = ref(false)
 async function saveActive() {
@@ -100,7 +101,7 @@ async function saveActive() {
     syncActive(saved.active)
     await refresh()
     toast.add({
-      title: first ? '已保存，后台会为全部记忆生成向量' : '已保存',
+      title: first ? '已保存，后台将为全部记忆生成向量' : '已保存',
       color: 'success',
     })
   } catch (err) {
@@ -129,14 +130,14 @@ watch(
     const discarded = previous ? draftsChanged(nextDrafts.value, previous.channels) : false
     syncNext(value)
     if (discarded) {
-      toast.add({ title: '换模型的设置在后台变了，没保存的渠道改动已经丢掉', color: 'warning' })
+      toast.add({ title: '更换模型的设置已在后台更新，未保存的渠道改动已丢弃', color: 'warning' })
     }
   },
   { immediate: true },
 )
 
 // 换模型结束（补齐后自动切过去、现在切换或放弃）的提示，只给这个页面开着时读到的变化（见 switchTracker）。
-// ending 是这个页面自己点的「现在切换」「放弃」：放弃由点的地方提示，进度也已经跟着设置一起重新读了
+// ending 是这个页面自己点的「立即切换」「放弃」：放弃由点的地方提示，进度也已经跟着设置一起重新读了
 const sawSwitch = switchTracker()
 let ending: 'switch' | 'abort' | null = null
 watch(
@@ -150,11 +151,11 @@ watch(
     if (!own) void status.refetch({ cancelRefetch: false })
     if (ended === 'switched') {
       toast.add({
-        title: `已换成 ${active.value?.model}，旧模型的向量会在后台删掉`,
+        title: `已切换到 ${active.value?.model}，旧模型的向量将在后台删除`,
         color: 'success',
       })
     } else if (!own) {
-      toast.add({ title: '换模型已被放弃（可能是别人操作的）', color: 'warning' })
+      toast.add({ title: '已放弃更换模型（可能由其他管理员操作）', color: 'warning' })
     }
   },
 )
@@ -190,7 +191,7 @@ async function saveNext() {
     syncNext(saved.next)
     await refresh()
     toast.add({
-      title: begin ? '开始换模型：后台为全部记忆生成新模型的向量' : '已保存',
+      title: begin ? '已开始更换模型，后台将为全部记忆生成新模型的向量' : '已保存',
       color: 'success',
     })
   } catch (err) {
@@ -207,9 +208,9 @@ async function retryNext() {
   retrying.value = true
   try {
     await api.retryNextEmbedding()
-    toast.add({ title: '已排进队列，后台会接着补新模型的向量', color: 'success' })
+    toast.add({ title: '已加入队列，后台将继续补齐新模型的向量', color: 'success' })
   } catch (err) {
-    failed(err, '排队失败')
+    failed(err, '加入队列失败')
   } finally {
     retrying.value = false
   }
@@ -239,7 +240,7 @@ async function abort() {
   try {
     await api.abortNextEmbedding()
     await refresh()
-    toast.add({ title: '已放弃换模型，新模型生成的向量会在后台删掉', color: 'success' })
+    toast.add({ title: '已放弃更换模型，新模型的向量将在后台删除', color: 'success' })
   } catch (err) {
     ending = null
     failed(err, '放弃失败')
@@ -253,7 +254,7 @@ const remaining = computed(() => {
   return s?.next ? Math.max(0, s.eligible - s.next.embedded) : 0
 })
 
-// 「测试连通」测的是已保存的设置：有没保存的改动时先保存再测，改动之后旧的测试结果也不再显示
+// 「测试连接」测的是已保存的设置：有没保存的改动时先保存再测，改动之后旧的测试结果也不再显示
 const testing = ref(false)
 const result = ref<EmbeddingTestResult | null>(null)
 watch([activeDirty, nextDirty], ([a, n]) => {
@@ -271,10 +272,10 @@ async function test() {
 }
 function describe(test: EmbeddingChannelTest): string {
   if (!test.ok) return test.error ?? '失败'
-  const parts = [`正常，耗时 ${test.latencyMs} ms`]
+  const parts = [`连接正常，耗时 ${test.latencyMs} ms`]
   if (test.similarity !== null) {
-    parts.push(`和第一个通了的渠道相似度 ${test.similarity}`)
-    if (test.similarity < 0.99) parts.push('可能不是同一个模型')
+    parts.push(`与首个可用渠道的相似度 ${test.similarity}`)
+    if (test.similarity < 0.99) parts.push('可能不是同一模型')
   }
   return parts.join('，')
 }
@@ -284,11 +285,11 @@ async function rebuild() {
   rebuilding.value = true
   try {
     await api.rebuildEmbeddings()
-    toast.add({ title: '已排进队列，后台会检查全部记忆、补齐缺少或过时的向量', color: 'success' })
+    toast.add({ title: '已加入队列，后台将检查全部记忆，补齐缺失或过时的向量', color: 'success' })
     // 重新读一次进度：缺向量的话就接着刷到补齐
     void status.refetch({ cancelRefetch: false })
   } catch (err) {
-    failed(err, '排队失败')
+    failed(err, '加入队列失败')
   } finally {
     rebuilding.value = false
   }
@@ -308,17 +309,20 @@ async function rebuild() {
     <template #header>
       <h2 class="font-medium">嵌入模型</h2>
       <p class="mt-1 text-sm text-muted">
-        OpenAI 兼容的 /embeddings 接口，需要支持 dimensions 参数，向量维度固定为
-        {{
-          settings.data.value?.dimensions ?? 1024
-        }}。整个实例共用一个模型；可以配几个渠道（同一个模型的不同接口），按顺序请求，前一个出错时换下一个。
+        OpenAI 兼容的 /embeddings 接口，须支持 dimensions 参数，向量维度固定为
+        {{ settings.data.value?.dimensions ?? 1024 }}。
+        <Hint>
+          整个实例共用一个模型。可配置多个渠道（同一模型的不同接口），按顺序请求，前一个出错时切换到下一个。
+        </Hint>
       </p>
     </template>
     <form class="space-y-4" @submit.prevent="saveActive">
       <UFormField
         label="模型标识"
         :help="
-          active ? '向量按它存；要换成别的模型，用下面的「换模型」' : '向量按它存，例如模型的名字'
+          active
+            ? '向量按此标识存储；更换模型请使用下方的「更换模型」。'
+            : '向量按此标识存储，例如模型名称。'
         "
       >
         <UInput v-model="modelId" class="w-full font-mono" :disabled="!!active" required />
@@ -340,11 +344,11 @@ async function rebuild() {
           :disabled="!active || activeDirty || nextDirty"
           @click="test"
         >
-          测试连通
+          测试连接
         </UButton>
         <span v-if="activeKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
         <span v-else-if="active && (activeDirty || nextDirty)" class="text-sm text-muted"
-          >改动保存之后才能测试</span
+          >保存改动后才能测试</span
         >
       </div>
       <ul v-if="result?.active" class="space-y-1 text-sm">
@@ -361,16 +365,16 @@ async function rebuild() {
 
   <UCard v-if="active">
     <template #header>
-      <h2 class="font-medium">换模型</h2>
+      <h2 class="font-medium">更换模型</h2>
       <p class="mt-1 text-sm text-muted">
-        换成另一个模型：后台为全部记忆生成新模型的向量，召回在补齐之前一直用
-        {{ active.model }}，补齐后自动切过去、删掉旧模型的向量。
+        后台为全部记忆生成新模型的向量，补齐后自动切换。
+        <Hint>补齐前召回继续使用 {{ active.model }}；切换后删除旧模型的向量。</Hint>
       </p>
     </template>
     <div v-if="next" class="space-y-4">
       <div class="space-y-2">
         <div class="flex items-baseline gap-2">
-          <span class="text-sm">正在换成</span>
+          <span class="text-sm">正在更换为</span>
           <span class="font-mono font-medium">{{ next.model }}</span>
         </div>
         <template v-if="status.data.value?.next">
@@ -420,7 +424,7 @@ async function rebuild() {
             :disabled="nextDirty"
             @click="confirmSwitch = true"
           >
-            现在切换
+            立即切换
           </UButton>
           <UButton
             :icon="icons.cancel"
@@ -445,18 +449,18 @@ async function rebuild() {
       </form>
     </div>
     <form v-else-if="starting" class="space-y-4" @submit.prevent="askStart">
-      <UFormField label="新模型的标识" help="和现在的不同；向量按它存">
+      <UFormField label="新模型的标识" help="须与当前标识不同；向量按此标识存储。">
         <UInput v-model="nextModel" class="w-full font-mono" required />
       </UFormField>
       <EmbeddingChannels v-model="nextDrafts" />
       <div class="flex flex-wrap items-center gap-2">
-        <UButton type="submit" :icon="icons.moved" :disabled="nextKeyMissing">开始换模型</UButton>
+        <UButton type="submit" :icon="icons.moved" :disabled="nextKeyMissing">开始更换模型</UButton>
         <UButton color="neutral" variant="ghost" @click="starting = false">取消</UButton>
         <span v-if="nextKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
       </div>
     </form>
     <UButton v-else :icon="icons.moved" color="neutral" variant="subtle" @click="openStart"
-      >换模型…</UButton
+      >更换模型…</UButton
     >
   </UCard>
 
@@ -464,8 +468,10 @@ async function rebuild() {
     <template #header>
       <h2 class="font-medium">向量</h2>
       <p class="mt-1 text-sm text-muted">
-        整个实例里应当有向量的记忆（现在有效、不是
-        secret、有正文）有多少已经有现在这个模型的向量。过期的不再召回，不生成向量，重新生效之后再生成。新写入的记忆会自动排队；接口出过错之后，可以手动补齐。
+        显示已生成当前模型向量的记忆数量。
+        <Hint>
+          统计范围为全实例当前有效、非机密、有正文的记忆。已过期的记忆不再召回，也不生成向量，恢复生效后再生成。新写入的记忆自动排队；接口出错后可以手动补齐。
+        </Hint>
       </p>
     </template>
     <UAlert
@@ -481,9 +487,7 @@ async function rebuild() {
         </span>
         <span class="text-sm text-muted">
           {{
-            status.data.value.active
-              ? `模型 ${status.data.value.active.model}`
-              : '还没有配置嵌入模型'
+            status.data.value.active ? `模型 ${status.data.value.active.model}` : '尚未配置嵌入模型'
           }}
         </span>
       </div>
@@ -515,16 +519,16 @@ async function rebuild() {
         >
           刷新
         </UButton>
-        <span v-if="following" class="text-sm text-muted">正在跟进进度……</span>
+        <span v-if="following" class="text-sm text-muted">正在刷新进度…</span>
       </div>
     </div>
   </UCard>
 
-  <UModal :open="confirmStart" title="开始换模型？" @update:open="(v) => (confirmStart = v)">
+  <UModal :open="confirmStart" title="开始更换模型？" @update:open="(v) => (confirmStart = v)">
     <template #body>
       <p class="text-sm">
-        后台会为全部记忆生成 {{ nextModel }} 的向量，会请求很多次新的接口。补齐之前召回一直用
-        {{ active?.model }}，补齐后自动切过去。
+        后台将为全部记忆生成 {{ nextModel }} 的向量，产生大量接口请求。补齐前召回继续使用
+        {{ active?.model }}，补齐后自动切换并删除旧模型的向量。
       </p>
     </template>
     <template #footer>
@@ -534,15 +538,15 @@ async function rebuild() {
       </div>
     </template>
   </UModal>
-  <UModal :open="confirmSwitch" title="现在就切换？" @update:open="(v) => (confirmSwitch = v)">
+  <UModal :open="confirmSwitch" title="立即切换？" @update:open="(v) => (confirmSwitch = v)">
     <template #body>
       <p class="text-sm">
         <template v-if="remaining">
           还有 {{ remaining }} 条记忆没有
-          {{ next?.model }} 的向量，切过去之后它们暂时只能靠全文与关键词召回，后台会接着补。
+          {{ next?.model }} 的向量，切换后这些记忆暂时只能通过全文与关键词召回，后台会继续补齐。
         </template>
-        <template v-else>切到 {{ next?.model }}。</template>
-        {{ active?.model }} 的向量会被删掉。
+        <template v-else>切换到 {{ next?.model }}。</template>
+        {{ active?.model }} 的向量将被删除。
       </p>
     </template>
     <template #footer>
@@ -552,9 +556,11 @@ async function rebuild() {
       </div>
     </template>
   </UModal>
-  <UModal :open="confirmAbort" title="放弃换模型？" @update:open="(v) => (confirmAbort = v)">
+  <UModal :open="confirmAbort" title="放弃更换模型？" @update:open="(v) => (confirmAbort = v)">
     <template #body>
-      <p class="text-sm">删掉 {{ next?.model }} 已经生成的向量，召回继续用 {{ active?.model }}。</p>
+      <p class="text-sm">
+        {{ next?.model }} 已生成的向量将被删除，召回继续使用 {{ active?.model }}。
+      </p>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">

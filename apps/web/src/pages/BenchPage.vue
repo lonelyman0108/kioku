@@ -45,7 +45,7 @@ watchEffect(() => {
         class="flex items-center gap-2 bg-error px-4 py-2 text-sm font-medium text-inverted sm:px-6"
       >
         <UIcon :name="icons.warning" class="size-4 shrink-0" />
-        真实模式：写入是真的，不会回滚
+        真实模式：写入立即生效，不会回滚
       </div>
     </template>
     <template #body>

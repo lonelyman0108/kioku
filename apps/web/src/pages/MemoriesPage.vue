@@ -11,6 +11,7 @@ import { api } from '../api/endpoints'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import DeletedMemories from '../components/DeletedMemories.vue'
 import ExpiredMemories from '../components/ExpiredMemories.vue'
+import Hint from '../components/Hint.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
 import MemoryListView from '../components/MemoryListView.vue'
 import {
@@ -49,7 +50,7 @@ function select(uri: string | null) {
 type View = 'tree' | 'list' | 'deleted' | 'expired'
 const views: View[] = ['tree', 'list', 'deleted', 'expired']
 const viewItems: TabsItem[] = [
-  { label: '树', value: 'tree', icon: icons.tree },
+  { label: '目录', value: 'tree', icon: icons.tree },
   { label: '列表', value: 'list', icon: icons.list },
   { label: '已删除', value: 'deleted', icon: icons.remove },
   { label: '已过期', value: 'expired', icon: icons.expired },
@@ -358,7 +359,7 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
     <template #body>
       <template v-if="view === 'tree'">
         <p v-if="!loadingRoots && !roots.length" class="text-sm text-muted">
-          还没有记忆。{{ canWrite ? '点「新建」写下第一条。' : '' }}
+          暂无记忆{{ canWrite ? '。点击「新建」添加第一条。' : '' }}
         </p>
         <UTree
           v-model:expanded="expanded"
@@ -456,7 +457,7 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
         @open="openLinked"
       />
       <p v-else class="text-sm text-muted">
-        在左侧选择一条记忆查看和编辑。树上的虚拟节点（没有正文的路径）只能展开。
+        在左侧选择一条记忆，查看或编辑。<Hint>目录中没有正文的路径是虚拟节点，只能展开。</Hint>
       </p>
     </template>
   </UDashboardPanel>

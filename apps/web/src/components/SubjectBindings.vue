@@ -35,14 +35,14 @@ async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
   try {
     if (action === 'confirm') {
       const kept = await api.confirmBinding(spaceId, binding.id)
-      toast.add({ title: `已并进「${kept.displayName}」`, color: 'success' })
+      toast.add({ title: `已合并到「${kept.displayName}」`, color: 'success' })
       // 在收码那个对象的页面上确认的：它已经并进别的对象、不在了，换到保留的那个对象
       if (props.subjectId && props.subjectId !== kept.id && props.spaceId === spaceId) {
         await router.replace({ name: 'subject', params: { spaceId, subjectId: kept.id } })
       }
     } else {
       await api.rejectBinding(spaceId, binding.id)
-      toast.add({ title: '已拒绝，没有合并', color: 'success' })
+      toast.add({ title: '已拒绝，未合并', color: 'success' })
     }
   } catch (err) {
     // 期间被别人合并、取消了标记、过了期限：服务端说明原因，刷新之后这一条显示作废或过期
@@ -68,7 +68,7 @@ const incomingText = (binding: SubjectBinding) =>
           </UBadge>
           <span class="font-medium">{{ accountText(binding.redeemedBy) }}</span>
           <template v-if="binding.subject.id !== subjectId">
-            <span class="text-muted">绑到</span>
+            <span class="text-muted">绑定到</span>
             <RouterLink
               :to="{ name: 'subject', params: { spaceId, subjectId: binding.subject.id } }"
               class="hover:underline"
@@ -83,7 +83,7 @@ const incomingText = (binding: SubjectBinding) =>
           >
         </div>
         <p v-if="binding.incoming" class="text-xs">
-          确认之后并进「{{ binding.subject.displayName }}」的平台账号：{{ incomingText(binding) }}
+          确认后合并到「{{ binding.subject.displayName }}」的平台账号：{{ incomingText(binding) }}
         </p>
         <p class="text-xs text-muted">{{ bindingSource(binding) }}</p>
         <p class="text-xs text-muted">{{ bindingOutcome(binding) }}</p>
@@ -116,11 +116,15 @@ const incomingText = (binding: SubjectBinding) =>
       <template #body>
         <div v-if="confirming" class="space-y-2 text-sm">
           <p>
-            把 {{ incomingText(confirming) }} 并进「{{
+            将 {{ incomingText(confirming) }} 合并到「{{
               confirming.subject.displayName
-            }}」：它们记下的事实、私聊里的内容都归过去，之后这些账号的私聊也算你的主人私聊。不能撤销。
+            }}」：这些账号的事实与私聊内容转到「{{
+              confirming.subject.displayName
+            }}」，原联系人随即删除。此后这些账号的私聊视为本人对话，用哪个账号私聊都能读取私聊内容。此操作不可撤销。
           </p>
-          <p class="text-muted">不认识这些账号，或者绑定码不是你自己申请的，请拒绝。</p>
+          <p class="text-muted">
+            在群里记下的事实也归到这里，但可见范围不变，仍只在那个群可见。如无法辨认这些账号，或绑定码并非本人申请，请拒绝。
+          </p>
         </div>
       </template>
       <template #footer>

@@ -36,9 +36,9 @@ const dreamCount = useQuery({
   queryFn: async () => (await api.dreamSuggestions(spaceId.value)).total ?? 0,
 })
 const sections = computed(() => [
-  { label: '待审的内容', value: 'pending' },
+  { label: '待确认内容', value: 'pending' },
   {
-    label: 'Dream 的建议',
+    label: '整理建议',
     value: 'dream',
     ...(dreamCount.data.value ? { badge: dreamCount.data.value } : {}),
   },
@@ -53,7 +53,7 @@ function refreshAll() {
 const layer = ref<'all' | ReviewLayer>('all')
 const tabs = [
   { label: '全部', value: 'all' },
-  { label: '关于人与群的事实', value: 'subject' },
+  { label: '联系人事实', value: 'subject' },
   { label: '会话摘要', value: 'episode' },
 ]
 
@@ -110,16 +110,14 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       submitted.push(...batch.map((b) => b.id))
     }
     toast.add({
-      title: skipped
-        ? `${verb}了 ${done} 条，${skipped} 条已经被处理或改动过`
-        : `${verb}了 ${done} 条`,
+      title: skipped ? `已${verb} ${done} 条，${skipped} 条已被处理或修改` : `已${verb} ${done} 条`,
       color: 'success',
     })
   } catch (err) {
     const message = err instanceof ApiError ? err.message : '处理失败'
     // 分批时前面几批已经提交了，告诉用户；没提交的留在选择里，可以再试
     toast.add({
-      title: submitted.length ? `${message}（前面已经${verb}了 ${done} 条）` : message,
+      title: submitted.length ? `${message}（此前已${verb} ${done} 条）` : message,
       color: 'error',
     })
   } finally {
@@ -148,7 +146,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
 <template>
   <UDashboardPanel id="review">
     <template #header>
-      <UDashboardNavbar title="待审">
+      <UDashboardNavbar title="待处理">
         <template #right>
           <UButton
             :icon="icons.refresh"
@@ -170,11 +168,11 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       </div>
       <div v-else>
         <p class="mb-4 text-sm text-muted">
-          群聊与陌生人私聊里记下的事、会话摘要来自不可信的来源。确认之后来源记为主人；不对的就删掉。
+          这些内容来自群聊与陌生人私聊，来源未确认。确认后记为本人来源，有误的内容可删除。
         </p>
         <div class="mb-4 flex flex-wrap items-center gap-3">
           <UTabs v-model="layer" :items="tabs" :content="false" size="sm" class="w-auto" />
-          <span v-if="queue.isSuccess.value" class="text-sm text-muted">{{ total }} 条待审</span>
+          <span v-if="queue.isSuccess.value" class="text-sm text-muted">{{ total }} 条待确认</span>
         </div>
         <UAlert
           v-if="queue.isError.value"
@@ -192,7 +190,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
           >
             <UCheckbox
               :model-value="allSelected"
-              label="全选已加载的"
+              label="全选已加载项"
               @update:model-value="(v) => toggleAll(v === true)"
             />
             <span class="text-xs text-muted">已选 {{ selected.size }} 条</span>
@@ -243,7 +241,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
               </div>
             </li>
           </ul>
-          <p v-if="!items.length" class="text-sm text-muted">没有待审的内容。</p>
+          <p v-if="!items.length" class="text-sm text-muted">暂无待确认内容</p>
           <div v-if="queue.hasNextPage.value" class="mt-4 flex justify-center">
             <UButton
               color="neutral"
@@ -264,9 +262,9 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       >
         <template #body>
           <p class="text-sm">
-            删除
+            将删除
             {{ deleting?.length ?? 0 }}
-            条。删掉的不再注入对话；从对话里抽取的内容删掉之后，管理界面里不能恢复。
+            条内容，删除后不再注入对话。从对话中抽取的内容删除后，无法在管理界面恢复。
           </p>
         </template>
         <template #footer>

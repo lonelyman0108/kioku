@@ -7,6 +7,7 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import Hint from '../components/Hint.vue'
 import { useSession } from '../composables/useSession'
 import { refreshAppCaches } from '../appQueries'
 import { icons } from '../icons'
@@ -76,7 +77,7 @@ async function create() {
 <template>
   <UDashboardPanel id="apps">
     <template #header>
-      <UDashboardNavbar title="应用与 Key">
+      <UDashboardNavbar title="应用">
         <template #right>
           <UButton v-if="canCreate" :icon="icons.add" size="sm" @click="open = true"
             >新建应用</UButton
@@ -86,8 +87,11 @@ async function create() {
     </template>
     <template #body>
       <p class="mb-4 text-sm text-muted">
-        每个接入方（Claude Code、AstrBot 等）是一个应用。应用读写的私人层属于它的主人；Key
-        的权限在签发时决定，且不会超过主人当前的角色。点名称进入应用的设置、Key 与权限矩阵。
+        每个接入的客户端（如 Claude Code、AstrBot）对应一个应用。
+        <Hint>
+          应用读写的私人层属于应用所有者。Key
+          的权限在签发时确定，且不超过所有者当前的角色。点击名称可进入应用的设置、Key 与权限范围。
+        </Hint>
       </p>
       <UTable
         :data="apps.data.value ?? []"
@@ -103,11 +107,11 @@ async function create() {
           },
           {
             id: 'owner',
-            header: '主人',
+            header: '所有者',
             cell: ({ row }) => ownerName(row.original.ownerAccountId),
           },
         ]"
-        empty="还没有应用"
+        empty="暂无应用"
       >
         <template #name-cell="{ row }">
           <RouterLink
@@ -134,7 +138,7 @@ async function create() {
   <UModal v-model:open="open" title="新建应用">
     <template #body>
       <form id="create-app" class="space-y-4" @submit.prevent="create">
-        <UFormField label="标识" help="小写字母、数字和连字符；应用层记忆放在 app://<标识>/ 下">
+        <UFormField label="标识" help="小写字母、数字和连字符；应用层记忆位于 app://<标识>/ 下">
           <UInput v-model="form.slug" class="w-full font-mono" required />
         </UFormField>
         <UFormField label="名称">

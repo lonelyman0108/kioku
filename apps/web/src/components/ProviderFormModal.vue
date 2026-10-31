@@ -20,10 +20,10 @@ const emit = defineEmits<{ saved: [spaceId: string] }>()
 const toast = useToast()
 
 const kindHelp: Record<CredentialProviderKind, string> = {
-  bitwarden: '官方服务或兼容的自建服务端都选这个',
-  '1password': '1Password 与它的 CLI（op）',
-  env: '值放在运行 agent 的机器的环境变量里',
-  other: '别的密码管理器或取值方式，取法写在使用说明里',
+  bitwarden: '官方服务或兼容的自建服务端',
+  '1password': '1Password 及其 CLI（op）',
+  env: '值保存在运行 Agent 的机器的环境变量中',
+  other: '其他密码管理器或取值方式，取法写在使用说明中',
 }
 const kindItems = CREDENTIAL_PROVIDER_KINDS.map((k) => ({
   label: providerKindLabels[k],
@@ -51,7 +51,7 @@ const problem = computed<string | null>(() => {
   const result = editingId.value
     ? UpdateCredentialProviderRequest.safeParse(body())
     : CreateCredentialProviderRequest.safeParse(body())
-  return result.success ? null : (result.error.issues[0]?.message ?? '填写的内容不对')
+  return result.success ? null : (result.error.issues[0]?.message ?? '填写内容有误')
 })
 async function submit() {
   if (saving.value || problem.value) return
@@ -78,19 +78,19 @@ async function submit() {
         <UFormField label="类型">
           <URadioGroup v-model="form.kind" :items="kindItems" />
         </UFormField>
-        <UFormField label="名称" help="在凭据的来源里显示，例如「家里的密码库」">
+        <UFormField label="名称" help="显示在凭据的来源中，例如「家里的密码库」">
           <UInput v-model="form.name" class="w-full" />
         </UFormField>
         <UFormField
           label="使用说明"
-          help="会原样给 agent 看：写清在哪台机器上、用什么工具取值、怎么解锁。不要写主密码、会话令牌这类东西本身"
+          help="内容原样发送给 Agent：写清所在机器、取值工具与解锁方式，不要填写主密码或会话令牌本身。"
         >
           <UTextarea
             v-model="form.instructions"
             :rows="4"
             autoresize
             class="w-full"
-            placeholder="例如：在工作站上用 bw CLI；会话令牌在环境变量 BW_SESSION 里，过期了让主人重新解锁"
+            placeholder="例如：在工作站上使用 bw CLI，会话令牌在环境变量 BW_SESSION 中；失效时请用户执行 bw unlock 重新解锁"
           />
         </UFormField>
       </form>

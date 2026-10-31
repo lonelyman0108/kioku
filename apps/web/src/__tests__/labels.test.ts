@@ -16,15 +16,15 @@ const app = (id: string, name: string, owner: string): AppInfo => ({
 describe('凭据限定的应用', () => {
   const apps = [app('a', '编码 agent', 'me'), app('b', '别人的机器人', 'other')]
 
-  it('不限定、不给任何应用、应用还没读出来时不下结论', () => {
+  it('不限定、不开放给任何应用、应用还没读出来时不下结论', () => {
     expect(restrictedAppsLabel(null, apps, 'me')).toBe('不限定')
-    expect(restrictedAppsLabel([], apps, 'me')).toBe('不给任何应用')
+    expect(restrictedAppsLabel([], apps, 'me')).toBe('不开放给任何应用')
     expect(restrictedAppsLabel(['a'], undefined, 'me')).toBe('…')
   })
 
   it('不是自己的应用标出来，找不到的算已删除', () => {
     expect(restrictedAppsLabel(['a', 'b', 'gone'], apps, 'me')).toBe(
-      '编码 agent、别人的机器人（不是你的应用，用不了）、已删除的应用',
+      '编码 agent、别人的机器人（非当前账号的应用，不可用）、已删除的应用',
     )
   })
 })
@@ -38,9 +38,9 @@ describe('Key 的权限', () => {
   }
 
   it('一句话说完，跨人格写入才提', () => {
-    expect(scopesSummary(scopes)).toBe('读 2 层 · 写 1 层 · 最高私密')
+    expect(scopesSummary(scopes)).toBe('可读 2 层，可写 1 层，最高私密')
     expect(scopesSummary({ ...scopes, admin: true })).toBe(
-      '读 2 层 · 写 1 层 · 最高私密 · 跨人格 / 应用写入',
+      '可读 2 层，可写 1 层，最高私密，跨人格 / 应用写入',
     )
   })
 })

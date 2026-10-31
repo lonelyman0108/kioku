@@ -26,9 +26,9 @@ export const ownedApps = (apps: readonly AppInfo[], accountId: string | undefine
 export const usableKeys = (keys: readonly KeyInfo[]) => keys.filter((key) => key.effectiveScopes)
 
 export const APP_REPLACED_NOTICE =
-  '选中的应用不是你的，或者已经转走、删掉了：只有应用主人能用测试台。这里换成了你自己的另一个应用。'
+  '所选应用不属于当前账号，或已转移、删除。测试台仅限应用所有者使用，已切换到当前账号的另一个应用。'
 export const KEY_REPLACED_NOTICE =
-  '选中的 Key 已经失效或不属于这个应用：这里换成了它别的有效 Key，权限可能不同。'
+  '所选 Key 已失效或不属于当前应用，已切换到该应用的其他有效 Key，权限可能不同。'
 
 export interface SelectionFix {
   // 要写回地址的参数，undefined 表示去掉
@@ -40,7 +40,7 @@ export interface SelectionFix {
 // 地址里的选择和读到的列表对一对，解析出的写回地址。默认选中的也要固定下来：不然默认的一变（新签发的 Key 排到前面、
 // 默认的 Key 被吊销），界面就悄悄换成另一把权限可能完全不同的 Key，地址里又没有东西可比，给不出提示。
 // apps、keys 是自己的应用、这个应用有效的 Key 的 id，没读到时是 null，这时不判断。
-// 一个都没有时也不动：没有可换的，不能说换了（页面上另有「还没有」的说明）
+// 一个都没有时也不动：没有可换的，不能说换了（页面上另有「暂无」的说明）
 export function selectionFix(
   selected: { app?: string | undefined; key?: string | undefined },
   apps: readonly string[] | null,
@@ -60,10 +60,10 @@ export function selectionFix(
 
 // 切到真实模式、在真实模式下运行场景之前都列出这些后果，由用户确认
 export const REAL_MODE_CONSEQUENCES = [
-  '写入是真的：步骤和这把 Key 的真实调用一样落库，不回滚，排向量与抽取任务。',
-  '新建的对象没有删除接口，只能合并：带私聊、群聊或频道上下文的步骤，第一次见到的平台账号会新建对象。',
-  'turn.end 会把这一轮放进对话缓冲，攒批之后排抽取（要花模型的 token，抽取的事实写进对象层）。',
-  '写下的事件带「测试台」标记与你的账号，在活动和凭据的访问记录里看得到。',
+  '写入立即生效：步骤与当前 Key 的真实调用一样落库，不回滚，并排入向量与抽取任务。',
+  '新建的联系人没有删除接口，只能合并：带私聊、群聊或频道上下文的步骤，遇到首次出现的平台账号时会新建联系人。',
+  'turn.end 将本轮写入对话缓冲，累积成批后排入抽取（消耗模型 token，抽取的事实写入联系人层）。',
+  '写入的事件带「测试台」标记与当前账号，可在变更记录和凭据访问记录中查看。',
 ] as const
 
 // 一次运行的结果。stale：运行期间换了应用、Key 或模式，结果作废（真实模式下记进 abandoned）；
@@ -73,7 +73,7 @@ export type RunOutcome =
   | { kind: 'failed'; message: string; retryable: boolean }
   | { kind: 'stale' }
 
-export const NOT_API_FAILURE = '网络出错了，或者响应对不上'
+export const NOT_API_FAILURE = '网络错误或响应格式不符'
 
 // 4xx 是写入之前就拒绝了（429 同时运行的回滚太多、413 请求体太大、403、404）
 const refusedBeforeWrite = (err: unknown) => err instanceof ApiError && err.status < 500
@@ -87,7 +87,7 @@ export const runRetryable = (err: unknown) =>
 export function runFailureMessage(err: unknown, mode: BenchMode): string {
   const message = err instanceof ApiError ? err.message : `运行失败：${NOT_API_FAILURE}`
   return mode === 'real' && !refusedBeforeWrite(err)
-    ? `${message}。可能已经执行了一部分，到活动里确认`
+    ? `${message}。可能已执行一部分，请到变更记录确认`
     : message
 }
 
@@ -113,13 +113,13 @@ export function abandonedRun(
   if ('error' in settled && refusedBeforeWrite(settled.error)) return null
   const { id, view } = run
   const title =
-    '这次真实运行中途作废了（运行期间应用、Key 或模式变了），但可能已经写入：到活动里确认。'
+    '本次真实运行已中途作废（运行期间应用、Key 或模式发生变化），但可能已写入，请到变更记录确认。'
   const what = `「${run.label}」按「${run.app}」的 Key「${run.key}」真实执行`
   if ('result' in settled) {
-    return { id, title, description: `${what}，下面是它的结果。`, view, result: settled.result }
+    return { id, title, description: `${what}，结果如下。`, view, result: settled.result }
   }
   const reason = settled.error instanceof ApiError ? settled.error.message : NOT_API_FAILURE
-  const description = `${what}，请求出错了，没有拿到结果：${reason}`
+  const description = `${what}，请求出错，未获取到结果：${reason}`
   return { id, title, description, view, result: null }
 }
 
@@ -148,11 +148,13 @@ export function modeSwitchLoss(from: BenchMode, records: ModeRecords): string | 
   ].join('、')
   if (!items) return null
   if (from === 'rollback') {
-    return `这些记录会清掉：${items}。${replay ? '回滚模式下保留的写入不会带过去。' : ''}`
+    return `以下记录将被清除：${items}。${replay ? '回滚模式下保留的写入不会带到真实模式。' : ''}`
   }
   const markers =
-    timeline || scenarioResult || agentMessages ? '，以及运行标记（活动里靠它对应这些写入）' : ''
-  return `这些记录会清掉：${items}${markers}。已经写下的不会撤回。`
+    timeline || scenarioResult || agentMessages
+      ? '，以及运行标记（在变更记录中靠它对应这些写入）'
+      : ''
+  return `以下记录将被清除：${items}${markers}。已写入的内容不会撤回。`
 }
 
 // 时间线只留最近这么多条，全在内存里：结果可能很长，也可能有明文，不进浏览器存储
@@ -251,7 +253,7 @@ export const replayFor = (session: BenchSession, mode: BenchMode): BenchReplaySt
 // 现在为什么不能接着运行，能运行时是 null
 export function runBlocker(session: BenchSession, mode: BenchMode): string | null {
   if (mode !== 'rollback' || !session.overflow) return null
-  return `这次会话的写入放不进重放日志了（上限 ${BENCH_MAX_REPLAY_STEPS} 步、${formatBytes(BENCH_MAX_REPLAY_BYTES)}）：后面的调用读不到它们，清空之后再接着来`
+  return `当前会话的写入超出重放日志上限（${BENCH_MAX_REPLAY_STEPS} 步、${formatBytes(BENCH_MAX_REPLAY_BYTES)}）：后续调用无法读取这些写入。请清空后继续。`
 }
 
 // 接受重放分叉：去掉报错的那一步，留下别的接着用。再运行时后面依赖它的步骤可能接着报错，到时候再问一次。
@@ -283,24 +285,24 @@ export function replayStepLabel(step: BenchReplayStep): string {
 // 回滚模式本来就是对着当前数据演练，不算出错，由用户决定。retry 说内部错误时接着怎么来
 export function divergenceNotice(
   session: BenchSession,
-  retry = '可以再运行一次',
+  retry = '可再运行一次',
 ): { title: string; description: string } | null {
   const { diverged, replay } = session
   if (!diverged) return null
   const step = replay[diverged.index]
   const which = `第 ${diverged.index + 1} 步${step ? `（${replayStepLabel(step)}）` : ''}`
   return {
-    title: `重放的${which}报错，这次的调用没有执行`,
+    title: `重放的${which}报错，本次调用未执行`,
     description: diverged.internalError
-      ? `${diverged.text}。可能是暂时的，${retry}；还是不行就清空，或者接受：去掉这一步，留下别的接着用。`
-      : `${diverged.text}。现在的数据和这次会话做这一步时不一样了。可以清空，或者接受：去掉这一步，留下别的接着用，后面依赖它的步骤可能接着报错。`,
+      ? `${diverged.text}。可能是暂时性错误，${retry}；如仍失败，可清空，或接受并移除此步，保留其余写入继续。`
+      : `${diverged.text}。当前数据与本次会话执行此步时已不一致。可清空，或接受并移除此步，保留其余写入继续，依赖此步的后续步骤可能继续报错。`,
   }
 }
 
 // 这次会话留下了什么，一句话说完
 export function sessionUsage(session: BenchSession, mode: BenchMode): string {
-  if (mode === 'real') return '真实模式不重放：每一步都已经真实执行。'
+  if (mode === 'real') return '真实模式不重放：每一步都已真实执行。'
   const { length } = session.replay
-  if (!length) return '还没有保留的写入。回滚模式下成功的写步骤留在这里，后面的调用读得到它们。'
-  return `保留了 ${length} 步写入（${formatBytes(replayBytes(session.replay))}，上限 ${BENCH_MAX_REPLAY_STEPS} 步、${formatBytes(BENCH_MAX_REPLAY_BYTES)}）。都不会落库，后面的调用靠重放读得到它们。`
+  if (!length) return '暂无保留的写入。回滚模式下，成功的写步骤保留在此，后续调用可读取。'
+  return `已保留 ${length} 步写入（${formatBytes(replayBytes(session.replay))}，上限 ${BENCH_MAX_REPLAY_STEPS} 步、${formatBytes(BENCH_MAX_REPLAY_BYTES)}）。均不会落库，后续调用通过重放读取。`
 }

@@ -26,6 +26,7 @@ import {
   toLocalInput,
   validToTooSoon,
 } from '../time'
+import Hint from './Hint.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
@@ -156,7 +157,7 @@ function startEditing() {
   mode.value = 'edit'
 }
 function cancelEditing() {
-  if (dirty.value && !window.confirm('放弃没保存的修改？')) return
+  if (dirty.value && !window.confirm('放弃未保存的改动？')) return
   const m = latest()
   if (m) adopt(m)
   mode.value = 'read'
@@ -323,9 +324,9 @@ function failed(err: unknown, fallback: string) {
 const plaintextWarning = ref<{ downgrade: boolean } | null>(null)
 // 写成一整句：模板里中文换行会多出一个空格
 const PLAINTEXT_DOWNGRADE_TEXT =
-  '从 secret 降级之后，正文会进历史、全文检索和向量，再也收不回来。先把值存成凭据、正文里换成占位符；确认正文里没有密码或 Token（这条规则会误判），才降级。'
+  '降级后，正文将写入历史、全文索引和向量，无法撤回。请先将凭据转存，并确认正文不含密码或 Token。'
 const PLAINTEXT_TEXT =
-  '正文里像有密码或 Token（例如「密码：…」）。建议把值存成凭据，正文里换成占位符，记忆就不带明文。'
+  '正文疑似包含密码或 Token（例如「密码：…」）。建议转存为凭据，正文改用占位符。'
 function requestSave() {
   const m = base.value
   if (!m || saving.value) return
@@ -353,13 +354,13 @@ async function save(allowPlaintext = false) {
   const validToChanged = sent.validTo !== validToInput(m)
   const validTo = sent.validTo ? fromLocalInput(sent.validTo) : null
   if (validToChanged && sent.validTo && !validTo) {
-    toast.add({ title: '有效到的日期和时间没填完整', color: 'error' })
+    toast.add({ title: '有效期的日期和时间不完整', color: 'error' })
     return
   }
   // 编辑得久了，开始编辑时能选的最早时间现在可能已经太近；没改的有效到原样不发，不用查
   if (validToChanged && validTo && validToTooSoon(sent.validTo)) {
     minValidTo.value = earliestValidTo()
-    toast.add({ title: '有效到要比现在晚至少一分钟', color: 'error' })
+    toast.add({ title: '有效期须晚于当前时间至少一分钟', color: 'error' })
     return
   }
   saving.value = true
@@ -452,7 +453,7 @@ async function remove() {
       v-else-if="changedElsewhere && dirty"
       color="warning"
       variant="subtle"
-      title="这条记忆在别处被改过，或被删除后重新创建了。保存会提示冲突，可以先复制你的修改，再载入新版本。"
+      title="这条记忆已在别处修改，或已删除并重新创建。保存将提示冲突，可先复制当前改动，再载入新版本。"
       :actions="[
         { label: '载入新版本', onClick: () => memory.data.value && adopt(memory.data.value) },
       ]"
@@ -465,15 +466,15 @@ async function remove() {
       <UBadge :color="sensitivityColors[base.sensitivity]" variant="subtle">
         {{ sensitivityLabels[base.sensitivity] }}
       </UBadge>
-      <UBadge variant="outline" color="neutral">priority {{ base.priority }}</UBadge>
+      <UBadge variant="outline" color="neutral">P{{ base.priority }}</UBadge>
       <UBadge
         v-if="base.validTo"
         variant="outline"
         :color="expiredNow ? 'error' : 'neutral'"
         :icon="icons.validity"
-        :title="`有效到 ${formatTime(base.validTo)}`"
+        :title="`有效期至 ${formatTime(base.validTo)}`"
       >
-        {{ expiredNow ? '已过期' : `有效到 ${formatShort(base.validTo)}` }}
+        {{ expiredNow ? '已过期' : `${formatShort(base.validTo)} 到期` }}
       </UBadge>
       <div class="ml-auto flex items-center gap-1">
         <template v-if="mode === 'read'">
@@ -522,7 +523,7 @@ async function remove() {
       color="warning"
       variant="subtle"
       :icon="icons.expired"
-      title="这条记忆已经过期，不再召回、不进 boot。在「已过期」里可以让它重新生效。"
+      title="这条记忆已过期，不再召回，也不进启动加载。可在「已过期」中恢复生效。"
     />
 
     <!-- 阅读：disclosure、关键词、渲染后的正文与来历 -->
@@ -532,7 +533,7 @@ async function remove() {
           v-if="base.disclosure?.trim()"
           class="border-l-2 border-accented pl-3 text-sm text-muted"
         >
-          <span class="text-xs text-dimmed">什么时候想起：</span>{{ base.disclosure }}
+          <span class="text-xs text-dimmed">触发场景：</span>{{ base.disclosure }}
         </blockquote>
         <div v-if="base.glossary.length" class="flex flex-wrap items-center gap-1.5">
           <span class="text-xs text-dimmed">关键词</span>
@@ -548,7 +549,7 @@ async function remove() {
         </div>
       </div>
       <p v-if="!base.disclosure?.trim()" class="text-xs text-warning">
-        没写 disclosure：写清什么场景下该想起它，召回时多一条线索。
+        未设触发场景：补全后召回更准确。
       </p>
       <div class="rounded-lg border border-default p-4">
         <MemoryContent
@@ -560,7 +561,7 @@ async function remove() {
           @open="(uri) => emit('open', uri)"
           @credential="openCredential"
         />
-        <p v-else class="text-sm text-muted">secret 的正文只有能读 secret 的成员看得到。</p>
+        <p v-else class="text-sm text-muted">机密内容已加密存储，当前账号无权查看正文。</p>
       </div>
       <p class="text-xs text-muted">
         版本 {{ base.version }} · 来源 {{ provenanceLabels[base.provenance] }}
@@ -573,13 +574,13 @@ async function remove() {
         <time :datetime="base.updatedAt" :title="formatTime(base.updatedAt)">
           {{ formatRelative(base.updatedAt) }}
         </time>
-        <template v-if="base.validTo"> · 有效到 {{ formatTime(base.validTo) }}</template>
+        <template v-if="base.validTo"> · 有效期至 {{ formatTime(base.validTo) }}</template>
         <!-- 改成 secret 之后不再显示：查询停了，缓存里还留着之前的次数 -->
         <template v-if="recallable && recallStat.data.value">
           ·
           <template v-if="recallStat.data.value.total">
-            被召回 {{ recallStat.data.value.total }} 次（保留期内
-            {{ recallStat.data.value.recent }} 次），最后一次
+            召回 {{ recallStat.data.value.total }} 次（保留期内
+            {{ recallStat.data.value.recent }} 次），最近一次
             <time
               v-if="recallStat.data.value.lastRecalledAt"
               :datetime="recallStat.data.value.lastRecalledAt"
@@ -587,20 +588,20 @@ async function remove() {
               >{{ formatRelative(recallStat.data.value.lastRecalledAt) }}</time
             >
           </template>
-          <template v-else>还没被召回过</template>
+          <template v-else>尚未召回</template>
         </template>
       </p>
     </template>
 
     <!-- 编辑：改原文，可以并排预览 -->
     <template v-else>
-      <UFormField
-        label="正文"
-        help="写清背景、为什么、在什么条件下适用；Markdown。密码、Token 存成凭据，正文里只放占位符"
-      >
+      <UFormField label="正文">
+        <template #help>
+          Markdown。密码与 Token 存为凭据，正文只放占位符。<Hint>写清背景、原因和适用条件。</Hint>
+        </template>
         <template #hint>
           <UTooltip
-            :text="canReference ? undefined : '只有私人层、敏感级至少私密的记忆能引用凭据'"
+            :text="canReference ? undefined : '仅私人层中敏感级不低于私密的记忆可引用凭据'"
             :disabled="canReference"
           >
             <UButton
@@ -633,11 +634,11 @@ async function remove() {
           </div>
         </div>
       </UFormField>
-      <UFormField label="Disclosure" help="什么场景下应该想起这条记忆">
+      <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
         <UInput v-model="form.disclosure" class="w-full" />
       </UFormField>
       <div class="grid gap-4 sm:grid-cols-2">
-        <UFormField label="Priority" help="0 最重要">
+        <UFormField label="优先级" help="0 最重要">
           <UInputNumber v-model="form.priority" :min="0" :max="99" />
         </UFormField>
         <UFormField label="敏感级">
@@ -647,16 +648,18 @@ async function remove() {
       <UFormField label="关键词" help="召回时按关键词命中，至少两个字">
         <UInputTags v-model="form.glossary" class="w-full" />
       </UFormField>
-      <UFormField
-        label="有效到"
-        help="只在一段时间内成立的事才设。到了这个时间就不再召回、不进 boot，历史里照样看得到，之后可以在「已过期」里让它重新生效；留空表示一直有效"
-      >
+      <UFormField label="有效期">
+        <template #help>
+          仅对阶段性内容设置；到期后不再召回。<Hint>
+            到期后也不进启动加载，历史中仍可查看，之后可在「已过期」中恢复生效。留空表示长期有效。
+          </Hint>
+        </template>
         <div class="flex flex-wrap items-center gap-2">
           <UInput
             v-model="form.validTo"
             type="datetime-local"
             :min="minValidTo"
-            aria-label="有效到"
+            aria-label="有效期"
             class="w-full sm:w-64"
             @focus="minValidTo = earliestValidTo()"
           />
@@ -667,7 +670,7 @@ async function remove() {
             variant="ghost"
             @click="form.validTo = ''"
           >
-            改成一直有效
+            改为长期有效
           </UButton>
         </div>
       </UFormField>
@@ -690,17 +693,17 @@ async function remove() {
       <template #body>
         <div class="space-y-4">
           <p v-if="!pickItems.length" class="text-sm text-muted">
-            还没有凭据。先在「凭据」页新建，再回来引用。
+            暂无凭据。请先在「凭据」页新建。
           </p>
           <template v-else>
             <UFormField label="凭据">
               <USelect v-model="pick.credentialId" :items="pickItems" class="w-full" />
             </UFormField>
-            <UFormField label="字段" help="引用整条时，agent 取到的是全部字段">
+            <UFormField label="字段" help="引用整条时，Agent 获取全部字段">
               <USelect v-model="pick.field" :items="fieldItems" class="w-full" />
             </UFormField>
             <p v-if="pickedPlaceholder" class="text-sm">
-              会插入 <code>{{ pickedPlaceholder }}</code>
+              将插入 <code>{{ pickedPlaceholder }}</code>
             </p>
           </template>
         </div>
@@ -715,12 +718,19 @@ async function remove() {
 
     <UModal
       :open="plaintextWarning !== null"
-      :title="plaintextWarning?.downgrade ? '正文像有明文凭据，仍要降级？' : '正文像有明文凭据'"
+      :title="
+        plaintextWarning?.downgrade
+          ? '正文疑似包含明文凭据，仍要降级？'
+          : '正文疑似包含明文凭据，仍要保存？'
+      "
       @update:open="(v) => !v && (plaintextWarning = null)"
     >
       <template #body>
         <p class="text-sm">
-          {{ plaintextWarning?.downgrade ? PLAINTEXT_DOWNGRADE_TEXT : PLAINTEXT_TEXT }}
+          {{ plaintextWarning?.downgrade ? PLAINTEXT_DOWNGRADE_TEXT : PLAINTEXT_TEXT
+          }}<Hint v-if="plaintextWarning?.downgrade">
+            检测规则可能误判。确认正文不含明文后，可继续降级。
+          </Hint>
         </p>
       </template>
       <template #footer>
@@ -732,7 +742,7 @@ async function remove() {
             :color="plaintextWarning?.downgrade ? 'error' : 'primary'"
             @click="confirmPlaintext"
           >
-            {{ plaintextWarning?.downgrade ? '确认没有，降级' : '仍然保存' }}
+            {{ plaintextWarning?.downgrade ? '确认不含明文并降级' : '仍然保存' }}
           </UButton>
         </div>
       </template>
@@ -746,7 +756,7 @@ async function remove() {
       <template #body>
         <p class="text-sm">
           删除 <code>{{ props.uri }}</code
-          >。历史事件会保留，之后可以在「已删除」里撤销删除；它下面的子节点不受影响。
+          >。历史事件将保留，可在「已删除」中恢复；子节点不受影响。
         </p>
       </template>
       <template #footer>
