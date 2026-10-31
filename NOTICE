@@ -57,3 +57,12 @@ AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
 LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
 OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN
 THE SOFTWARE.
+
+----
+
+The logo glyphs in the admin interface are taken from Shippori Mincho
+(https://github.com/fontdasu/ShipporiMincho). Only the outlines are used;
+the font itself is not bundled.
+
+Copyright 2021 The Shippori Mincho Project Authors
+Licensed under the SIL Open Font License, Version 1.1

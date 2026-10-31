@@ -5,6 +5,7 @@ import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import KiokuMark from '../components/KiokuMark.vue'
 import { ME_KEY } from '../composables/useSession'
 import { queryClient } from '../query'
 
@@ -33,7 +34,8 @@ async function submit() {
   <div class="flex min-h-screen items-center justify-center p-4">
     <UCard class="w-full max-w-md">
       <template #header>
-        <h1 class="text-lg font-semibold">初始化 Kioku</h1>
+        <KiokuMark :height="64" class="mb-3" />
+        <h1 class="text-lg font-semibold">初始化</h1>
         <p class="mt-1 text-sm text-muted">创建第一个账号和它的空间，这个账号是实例管理员。</p>
       </template>
       <UForm :schema="SetupRequest" :state="state" class="space-y-4" @submit="submit">

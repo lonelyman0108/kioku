@@ -73,6 +73,11 @@ describe('保留的逻辑', () => {
     expect(template).toContain('<UDashboardSearchButton')
   })
 
+  it('品牌区只有 KiokuMark，外壳不写死品牌字样', () => {
+    expect(template).toContain('<KiokuMark')
+    expect(template.replaceAll('KiokuMark', '')).not.toContain('Kioku')
+  })
+
   it('全站的纹理定义在外壳里挂一次', () => {
     expect(template.match(/<StrataPatterns/g)).toHaveLength(1)
   })

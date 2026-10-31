@@ -197,13 +197,8 @@ async function logout() {
     <header
       class="flex h-13 shrink-0 items-stretch gap-4 border-b border-rule px-4 min-[1121px]:gap-6 min-[1121px]:px-8"
     >
-      <RouterLink
-        :to="{ name: 'home' }"
-        class="flex items-center gap-2 text-base font-semibold"
-        aria-label="Kioku"
-      >
-        <KiokuMark :size="16" />
-        <span>Kioku</span>
+      <RouterLink :to="{ name: 'home' }" class="flex shrink-0 items-center">
+        <KiokuMark />
       </RouterLink>
 
       <nav class="flex items-stretch max-[901px]:hidden" aria-label="主导航">
