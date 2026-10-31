@@ -336,6 +336,20 @@ export const OverviewBackup = z.object({
 })
 export type OverviewBackup = z.infer<typeof OverviewBackup>
 
+// 待处理的四类各有多少条：导航角标与概览共用。每一类和对应的列表同一个条件，调用方看不到的不算
+export const InboxCounts = z.object({
+  // 等查看者本人确认的账号绑定
+  bindings: z.number().int(),
+  // 待确认内容：不可信来源写进对象层与情节层的记忆（待审队列）
+  review: z.number().int(),
+  // Dream 的建议：还没处理、还作数的
+  dreamSuggestions: z.number().int(),
+  // 正文疑似明文的记忆
+  plaintext: z.number().int(),
+  total: z.number().int(),
+})
+export type InboxCounts = z.infer<typeof InboxCounts>
+
 export const SpaceOverview = z.object({
   // 成员读得到的策展记忆，按层与敏感级分组
   counts: z.array(LayerCount),
@@ -355,6 +369,7 @@ export const SpaceOverview = z.object({
   backup: OverviewBackup.nullable(),
   // 等查看者本人确认的绑定：别的平台账号想并进标记成他的对象
   pendingBindings: z.array(SubjectBinding),
+  inbox: InboxCounts,
 })
 export type SpaceOverview = z.infer<typeof SpaceOverview>
 

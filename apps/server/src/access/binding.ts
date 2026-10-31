@@ -1,7 +1,7 @@
 import { createHash, createHmac, hkdfSync, randomInt, timingSafeEqual } from 'node:crypto'
 
 import type { BindingStatus, MemberRole, SubjectBinding } from '@kioku/contracts'
-import { and, asc, desc, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm'
+import { and, asc, count, desc, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm'
 import { alias } from 'drizzle-orm/pg-core'
 
 import { keyringOf, type MasterKey } from '../crypto/keyring'
@@ -681,21 +681,29 @@ export function subjectBindingHistory(
   )
 }
 
-// 概览里等查看者本人确认的：还没到期限、发码的对象现在仍标记成他
+// 等查看者本人确认的：还没到期限、发码的对象现在仍标记成他
+const pendingFor = (viewer: BindingViewer) =>
+  and(
+    eq(subjectBindings.accountId, viewer.accountId),
+    eq(subjectBindings.status, 'pending'),
+    gt(subjectBindings.expiresAt, sql`now()`),
+    eq(target.accountId, viewer.accountId),
+  )!
+
 export function pendingBindingsFor(
   tx: Tx,
   viewer: BindingViewer,
   limit: number,
 ): Promise<SubjectBinding[]> {
-  return bindingViews(
-    tx,
-    and(
-      eq(subjectBindings.accountId, viewer.accountId),
-      eq(subjectBindings.status, 'pending'),
-      gt(subjectBindings.expiresAt, sql`now()`),
-      eq(target.accountId, viewer.accountId),
-    )!,
-    viewer,
-    limit,
-  )
+  return bindingViews(tx, pendingFor(viewer), viewer, limit)
+}
+
+// 上面那个列表一共多少条（待处理总数用）
+export async function pendingBindingCount(tx: Tx, viewer: BindingViewer): Promise<number> {
+  const [row] = await tx
+    .select({ n: count() })
+    .from(subjectBindings)
+    .innerJoin(target, eq(target.id, subjectBindings.subjectId))
+    .where(pendingFor(viewer))
+  return row?.n ?? 0
 }

@@ -1988,6 +1988,18 @@ export class MemoryService {
       }
     })
   }
+
+  // 疑似明文的记忆有多少条，和列表的 plaintext 筛选同一个条件（待处理总数用）
+  async plaintextCount(): Promise<number> {
+    return this.run(async (tx, personaIds) => {
+      const [row] = await tx
+        .select({ n: count() })
+        .from(memories)
+        .where(and(this.listable(personaIds), eq(memories.form, 'curated'), PLAINTEXT))
+      return row?.n ?? 0
+    })
+  }
+
   // ---- 召回统计（管理界面）----
   // 记忆按成员在管理界面里看得到的算，累计次数跟着记忆的可见性走。
   // 次数 = 还留着的明细里的命中次数 + 清理明细时并入的累计

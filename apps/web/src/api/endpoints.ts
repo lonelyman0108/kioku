@@ -42,6 +42,7 @@ import {
   GlossaryIndex,
   GroupPersonaRuleList,
   HealthResponse,
+  InboxCounts,
   KeyAccessMatrix,
   KeyInfo,
   LoreImportPlan,
@@ -308,6 +309,8 @@ export const api = {
 
   overview: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),
+  inboxCounts: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/inbox/counts`, { schema: InboxCounts }),
   subjects: (spaceId: string, query: SubjectListQuery) =>
     request('GET', `/spaces/${spaceId}/subjects`, { query, schema: SubjectList }),
   subject: (spaceId: string, id: string) =>

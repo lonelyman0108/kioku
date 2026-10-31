@@ -7,9 +7,9 @@ import type {
   DreamVerdict,
   MemberRole,
 } from '@kioku/contracts'
-import { and, desc, eq, sql } from 'drizzle-orm'
+import { and, count, desc, eq, sql } from 'drizzle-orm'
 
-import { canModify } from '../access/access'
+import { canModify, type Access } from '../access/access'
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
@@ -54,6 +54,25 @@ interface Involved {
   subjectKind: (typeof subjects.$inferSelect)['kind'] | null
 }
 
+// 查看者看得到、还没处理、还作数的建议：列表与总数都按它
+function openSuggestions(access: Access) {
+  return and(
+    eq(dreamSuggestions.status, 'pending'),
+    suggestionCurrent(dreamSuggestions.memoryIds, dreamSuggestions.versions, {
+      extra: readableConditions(access, { personaIds: [], management: true }),
+    }),
+  )
+}
+
+// 上面那个列表一共多少条（待处理总数用）
+export async function openSuggestionCount(tx: Tx, access: Access): Promise<number> {
+  const [row] = await tx
+    .select({ n: count() })
+    .from(dreamSuggestions)
+    .where(openSuggestions(access))
+  return row?.n ?? 0
+}
+
 export async function listSuggestions(
   db: Db,
   spaceId: string,
@@ -64,12 +83,7 @@ export async function listSuggestions(
   const after = decodeTimeCursor(query.cursor, UUID)
   if (after === 'invalid') throw new MemoryError(400, INVALID_CURSOR)
   const access = service.access
-  const open = and(
-    eq(dreamSuggestions.status, 'pending'),
-    suggestionCurrent(dreamSuggestions.memoryIds, dreamSuggestions.versions, {
-      extra: readableConditions(access, { personaIds: [], management: true }),
-    }),
-  )
+  const open = openSuggestions(access)
   return withSpace(db, spaceId, async (tx) => {
     // 这一页的建议、它们涉及的记忆与总数在同一条查询里取：哪些建议还作数、列出来的记忆是哪一版、总数，
     // 都按同一个快照与同一个时钟（数据库的）判断，列出的与总数对得上，取到的记忆也就是判断时的那一版
