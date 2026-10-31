@@ -25,7 +25,6 @@ export const icons = {
   settings: 'i-lucide-settings',
   logout: 'i-lucide-log-out',
   add: 'i-lucide-plus',
-  save: 'i-lucide-save',
   remove: 'i-lucide-trash-2',
   copy: 'i-lucide-copy',
   refresh: 'i-lucide-refresh-cw',
@@ -36,8 +35,6 @@ export const icons = {
   cancel: 'i-lucide-x',
   file: 'i-lucide-file-text',
   secret: 'i-lucide-lock',
-  test: 'i-lucide-plug-zap',
-  backup: 'i-lucide-cloud-upload',
   // 按空间导出与导入
   exportSpace: 'i-lucide-file-down',
   importSpace: 'i-lucide-file-up',
