@@ -9,7 +9,6 @@ export interface NoticeAction {
   label: string
   icon?: string
   color?: 'neutral' | 'warning' | 'error'
-  variant?: 'subtle' | 'outline'
   disabled?: boolean
   loading?: boolean
   to?: RouteLocationRaw
@@ -23,6 +22,7 @@ const props = defineProps<{
   description?: string | null
   actions?: readonly NoticeAction[]
   close?: boolean
+  flush?: boolean
 }>()
 const emit = defineEmits<{ 'update:open': [open: boolean] }>()
 const tone = computed(() =>
@@ -31,13 +31,19 @@ const tone = computed(() =>
 </script>
 
 <template>
-  <NoteLine :tone="tone" class="wrap-anywhere">
+  <NoteLine :tone="tone" :flush="flush" class="wrap-anywhere">
     {{ title }}
     <template v-if="description || $slots.description" #detail>
       <slot name="description">{{ description }}</slot>
     </template>
     <template v-if="actions?.length || close" #actions>
-      <UButton v-for="action in actions" :key="action.label" size="sm" v-bind="action" />
+      <UButton
+        v-for="action in actions"
+        :key="action.label"
+        size="sm"
+        variant="outline"
+        v-bind="action"
+      />
       <UButton
         v-if="close"
         :icon="icons.cancel"

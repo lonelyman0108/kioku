@@ -72,7 +72,7 @@ const errorOf = (err: unknown, fallback: string) =>
               :model-value="keyId"
               :items="keyItems"
               :disabled="running || !keyItems.length"
-              :placeholder="keys.data.value ? '暂无有效 Key' : ''"
+              :placeholder="keys.data.value && !keys.isError.value ? '暂无有效 Key' : ''"
               aria-label="Key"
               class="w-full"
               @update:model-value="(v) => selectKey(String(v))"
@@ -104,14 +104,15 @@ const errorOf = (err: unknown, fallback: string) =>
     </PageHead>
 
     <div class="toolbar-notes">
-      <!-- 后台刷新失败时读到过的内容留着，错误放在上面；「暂无」只在真的读到空时说 -->
+      <!-- 后台刷新失败时读到过的内容留着，错误放在上面。「暂无」只在读到空、这次也读成功时说：
+           缓存是空的又刷新失败时，不知道到底有没有，不能把人引去再建一个 -->
       <BenchNotice
         v-if="apps.isError.value"
         color="error"
         :title="errorOf(apps.error.value, '读取应用失败')"
       />
       <USkeleton v-if="apps.isPending.value" class="h-16 w-full" />
-      <div v-else-if="apps.data.value && !owned.length" class="no-apps">
+      <div v-else-if="apps.data.value && !owned.length && !apps.isError.value" class="no-apps">
         <p class="text-muted">
           当前账号在此空间暂无应用。
           <Hint>测试台仅限应用所有者使用：调用会读取所有者的私人层。</Hint>
@@ -133,7 +134,7 @@ const errorOf = (err: unknown, fallback: string) =>
           color="error"
           :title="errorOf(keys.error.value, '读取 Key 失败')"
         />
-        <p v-if="keys.data.value && !usable.length" class="text-muted">
+        <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">
           当前应用暂无有效 Key，
           <RouterLink
             :to="{ name: 'app', params: { spaceId, appId } }"

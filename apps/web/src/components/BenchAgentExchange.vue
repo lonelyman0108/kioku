@@ -12,15 +12,13 @@ import {
   type AgentExchange,
 } from '../benchAgent'
 import BenchNotice from './BenchNotice.vue'
+import BenchRawText from './BenchRawText.vue'
 import BenchStepView from './BenchStepView.vue'
 import BenchTag from './BenchTag.vue'
 
 // 一条用户消息的经过：生命周期事件、每一轮的助手文字与工具调用、turn.end。
 // 文字一律原样显示，不渲染：模型的输出与记忆里的内容都不可信
 defineProps<{ exchange: AgentExchange; mode: BenchMode; loop: BenchAgentLoop }>()
-
-const PRE_CLASS =
-  'mt-1 max-h-96 overflow-auto bg-elevated px-3 py-2 font-mono text-[13px]/5 wrap-anywhere whitespace-pre-wrap'
 </script>
 
 <template>
@@ -51,10 +49,7 @@ const PRE_CLASS =
 
     <section v-for="(round, index) in exchange.rounds" :key="index" class="turn">
       <span class="role">模型</span>
-      <details v-if="round.reasoning" class="fold">
-        <summary>模型的思考过程</summary>
-        <pre :class="PRE_CLASS">{{ round.reasoning }}</pre>
-      </details>
+      <BenchRawText v-if="round.reasoning" title="模型的思考过程" :text="round.reasoning" quiet />
       <p v-if="round.text" class="message">{{ round.text }}</p>
       <p v-else-if="round.refusal" class="message text-warning">
         模型拒绝回答：{{ round.refusal }}
@@ -68,10 +63,7 @@ const PRE_CLASS =
           <BenchTag v-if="call.trace?.kept">写入已保留</BenchTag>
           <BenchTag v-else-if="call.trace?.removed" tone="warning">写入已移除</BenchTag>
         </p>
-        <details class="fold">
-          <summary>参数</summary>
-          <pre :class="PRE_CLASS">{{ argumentsText(call) }}</pre>
-        </details>
+        <BenchRawText title="参数" :text="argumentsText(call)" quiet />
         <BenchStepView
           v-if="call.trace"
           :step="call.trace.step"
@@ -163,17 +155,6 @@ const PRE_CLASS =
 .end-note {
   margin-left: calc(var(--role-width) + 8px);
   padding-bottom: 8px;
-}
-.fold {
-  font-size: 13px;
-  line-height: 1.6;
-}
-.fold > summary {
-  cursor: pointer;
-  color: var(--ui-text-muted);
-}
-.fold > summary::marker {
-  font-size: 0.8em;
 }
 /* 工具调用退后一级，靠一条竖线归到这一轮下面 */
 .call {

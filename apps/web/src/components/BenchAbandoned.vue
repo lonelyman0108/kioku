@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import { stepOpen } from '../benchScenarios'
 import { useBench } from '../composables/useBench'
-import { scopesSummary } from '../labels'
 import BenchNotice from './BenchNotice.vue'
+import BenchRunLine from './BenchRunLine.vue'
 import BenchStepView from './BenchStepView.vue'
 
 // 真实模式中途作废的运行。放在分页外面：这把 Key 没了、分页隐藏的时候，切到另一个分页的时候都看得到
@@ -25,10 +25,7 @@ const { abandoned, abandonedInFlight, dismissAbandoned } = useBench()
         @update:open="(v) => !v && dismissAbandoned(run.id)"
       />
       <template v-if="run.result">
-        <p class="run-line">
-          运行标记 <code>{{ run.result.run }}</code> · {{ run.result.whoami.app.name }} ·
-          {{ scopesSummary(run.result.whoami.scopes) }}
-        </p>
+        <BenchRunLine :result="run.result" />
         <BenchStepView
           v-for="step in run.result.steps"
           :key="`${run.result.run}-${step.index}`"
@@ -52,14 +49,6 @@ const { abandoned, abandonedInFlight, dismissAbandoned } = useBench()
 }
 .abandoned-run + .abandoned-run {
   margin-top: 16px;
-}
-.run-line {
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--ui-border);
-  font-size: 13px;
-  line-height: 1.6;
-  color: var(--ui-text-muted);
-  overflow-wrap: anywhere;
 }
 @media (max-width: 1240px) {
   .abandoned {

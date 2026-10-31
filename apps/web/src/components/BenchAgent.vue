@@ -66,7 +66,6 @@ const retryInfo = computed(() => [
   {
     label: '重新读取',
     color: 'neutral' as const,
-    variant: 'subtle' as const,
     loading: info.isFetching.value,
     onClick: () => void info.refetch(),
   },
@@ -85,7 +84,6 @@ const unavailableActions = computed(() =>
         {
           label: '去实例设置',
           color: 'neutral' as const,
-          variant: 'subtle' as const,
           to: { name: 'settings' },
         },
       ],
@@ -109,7 +107,6 @@ const consentActions = computed(() => [
   {
     label: `发送至 ${model.value}，开始对话`,
     color: 'warning' as const,
-    variant: 'subtle' as const,
     onClick: () => consent.value && consentTo(consent.value),
   },
 ])
@@ -122,14 +119,12 @@ const divergedActions = computed(() => [
   {
     label: '接受并移除此步',
     color: 'neutral' as const,
-    variant: 'subtle' as const,
     disabled: running.value,
     onClick: acceptAgentDiverged,
   },
   {
     label: '清空对话',
     color: 'error' as const,
-    variant: 'subtle' as const,
     disabled: running.value,
     onClick: requestClear,
   },
@@ -236,44 +231,6 @@ watch(generation, () => {
     </div>
 
     <div class="agent-columns">
-      <aside v-if="available && loop" class="agent-side">
-        <p class="side-note" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
-          {{ AGENT_LOOP_NOTES[loop] }}
-          <Hint>{{ AGENT_LOOP_DETAILS[loop] }}</Hint>
-        </p>
-        <p v-if="real" class="side-note text-error">
-          真实模式：模型调用写工具会真实写入，不会回滚。
-          <Hint>每一轮下方显示运行标记，可在变更记录中对应这些写入。</Hint>
-        </p>
-        <BenchContextForm v-if="loop !== 'tools'" />
-        <UFormField label="模型" help="接口与 Key 沿用实例设置的抽取模型，此处仅改模型名">
-          <UInput
-            :model-value="modelText"
-            :placeholder="defaultModel"
-            :disabled="running"
-            aria-label="模型"
-            class="w-full font-mono"
-            @update:model-value="(v) => (modelEdit = String(v))"
-          />
-        </UFormField>
-        <UFormField
-          label="系统提示"
-          :help="
-            loop === 'tools'
-              ? '此运行时没有 session.start'
-              : 'session.start 的结果追加在后面一并发送'
-          "
-        >
-          <UTextarea
-            v-model="system"
-            :rows="4"
-            :disabled="running"
-            aria-label="系统提示"
-            class="w-full"
-          />
-        </UFormField>
-      </aside>
-
       <div class="agent-main">
         <section v-if="loop && agent.exchanges.length" class="thread" aria-label="对话">
           <BenchAgentExchange
@@ -283,21 +240,23 @@ watch(generation, () => {
             :mode="mode"
             :loop="loop"
           />
-          <div ref="end" class="scroll-mb-56" />
+          <div ref="end" class="thread-end" />
         </section>
         <p v-else-if="available && loop" class="thread empty">暂无消息</p>
 
         <div v-if="available && loop" class="composer">
           <BenchNotice
             v-if="consent && needsConsent && !agentSending"
+            flush
             color="warning"
             title="发送前确认"
             :description="consentText(consent, mode)"
             :actions="consentActions"
           />
-          <BenchNotice v-if="blocker" color="warning" :title="blocker" />
+          <BenchNotice v-if="blocker" flush color="warning" :title="blocker" />
           <BenchNotice
             v-if="diverged"
+            flush
             color="warning"
             :title="diverged.title"
             :description="diverged.description"
@@ -305,6 +264,7 @@ watch(generation, () => {
           />
           <BenchNotice
             v-if="exportNote"
+            flush
             color="warning"
             :title="exportNote"
             close
@@ -366,6 +326,44 @@ watch(generation, () => {
           <p class="usage">{{ replayUsage }}</p>
         </div>
       </div>
+
+      <aside v-if="available && loop" class="agent-side">
+        <p class="side-note" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
+          {{ AGENT_LOOP_NOTES[loop] }}
+          <Hint>{{ AGENT_LOOP_DETAILS[loop] }}</Hint>
+        </p>
+        <p v-if="real" class="side-note text-error">
+          真实模式：模型调用写工具会真实写入，不会回滚。
+          <Hint>每一轮下方显示运行标记，可在变更记录中对应这些写入。</Hint>
+        </p>
+        <BenchContextForm v-if="loop !== 'tools'" />
+        <UFormField label="模型" help="接口与 Key 沿用实例设置的抽取模型，此处仅改模型名">
+          <UInput
+            :model-value="modelText"
+            :placeholder="defaultModel"
+            :disabled="running"
+            aria-label="模型"
+            class="w-full font-mono"
+            @update:model-value="(v) => (modelEdit = String(v))"
+          />
+        </UFormField>
+        <UFormField
+          label="系统提示"
+          :help="
+            loop === 'tools'
+              ? '此运行时没有 session.start'
+              : 'session.start 的结果追加在后面一并发送'
+          "
+        >
+          <UTextarea
+            v-model="system"
+            :rows="4"
+            :disabled="running"
+            aria-label="系统提示"
+            class="w-full"
+          />
+        </UFormField>
+      </aside>
     </div>
 
     <UModal
@@ -435,9 +433,8 @@ watch(generation, () => {
   min-width: 0;
   min-height: 0;
 }
-/* 模型和系统提示放在右边一栏；左边是一列消息自己滚动，输入区在底部不动 */
+/* 左边是一列消息自己滚动，输入区在底部不动；模型和系统提示放在右边一栏 */
 .agent-main {
-  order: 1;
   flex: 1;
   display: flex;
   flex-direction: column;
@@ -445,7 +442,6 @@ watch(generation, () => {
   padding: 0 24px 0 32px;
 }
 .agent-side {
-  order: 2;
   flex: none;
   display: flex;
   flex-direction: column;
@@ -478,12 +474,6 @@ watch(generation, () => {
   background: var(--ui-bg);
   border-top: 1px solid var(--strata-rule);
 }
-/* 输入区顶上已经有一条墨线，第一条提示不用再画 */
-.composer :deep(.note-line:first-child) {
-  min-height: 0;
-  padding-top: 0;
-  border-top: 0;
-}
 .composer-actions {
   display: flex;
   flex-wrap: wrap;
@@ -513,8 +503,11 @@ watch(generation, () => {
     position: sticky;
     bottom: 0;
     z-index: 10;
-    max-height: none;
-    overflow-y: visible;
+    max-height: 70dvh;
+  }
+  /* 输入区盖在消息上，跟到最后时要留出它的高度 */
+  .thread-end {
+    scroll-margin-bottom: 14rem;
   }
   .agent-side {
     overflow-y: visible;
@@ -528,11 +521,11 @@ watch(generation, () => {
     flex-direction: column;
   }
   .agent-main {
-    order: 2;
     padding: 0 16px;
   }
+  /* 窄屏先看模型和系统提示，再看消息 */
   .agent-side {
-    order: 1;
+    order: -1;
     width: auto;
     padding: 10px 16px 14px;
     border-bottom: 1px solid var(--ui-border);

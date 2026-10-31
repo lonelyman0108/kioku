@@ -17,11 +17,12 @@ import {
 } from '../benchResult'
 import { icons } from '../icons'
 import BenchNotice from './BenchNotice.vue'
+import BenchRawText from './BenchRawText.vue'
 import BenchStatus from './BenchStatus.vue'
 import BenchTag from './BenchTag.vue'
 import UriPath from './strata/UriPath.vue'
 
-// 一步的结果：调用台、场景、模型对话共用。原文一律放在 <pre> 里原样显示，不渲染、不去空白。
+// 一步的结果：调用台、场景、模型对话共用。原文一律经 BenchRawText 原样显示。
 // number 是一串步骤里的第几步，和明文提示、重放分叉说的第几步对得上
 const props = withDefaults(
   defineProps<{
@@ -57,8 +58,6 @@ const raw = computed(() => JSON.stringify(props.step.raw, null, 2))
 const emptyText = computed(() =>
   props.step.kind === 'lifecycle' ? '（此步没有交给客户端的文字）' : '（空）',
 )
-const PRE_CLASS =
-  'mt-1.5 max-h-96 overflow-auto bg-elevated px-3 py-2 font-mono text-[13px]/5 wrap-anywhere whitespace-pre-wrap'
 </script>
 
 <template>
@@ -96,10 +95,7 @@ const PRE_CLASS =
         </li>
       </ul>
 
-      <details v-if="responded" open class="fold">
-        <summary>收到的原文</summary>
-        <pre :class="PRE_CLASS">{{ step.text || emptyText }}</pre>
-      </details>
+      <BenchRawText v-if="responded" title="收到的原文" :text="step.text || emptyText" open />
 
       <section v-if="step.uris?.length">
         <h4>结果中的 URI（{{ step.uris.length }}）</h4>
@@ -158,9 +154,7 @@ const PRE_CLASS =
           </ul>
           <div v-if="step.changes.turn" class="turn">
             <p class="note text-muted">本轮（会话 {{ step.changes.turn.sessionId }}）：</p>
-            <pre :class="PRE_CLASS">{{
-              `${step.changes.turn.user}\n---\n${step.changes.turn.reply}`
-            }}</pre>
+            <BenchRawText :text="`${step.changes.turn.user}\n---\n${step.changes.turn.reply}`" />
           </div>
         </template>
       </section>
@@ -172,10 +166,7 @@ const PRE_CLASS =
         </ul>
       </section>
 
-      <details v-if="responded" class="fold quiet">
-        <summary>原始响应</summary>
-        <pre :class="PRE_CLASS">{{ raw }}</pre>
-      </details>
+      <BenchRawText v-if="responded" title="原始响应" :text="raw" quiet />
     </div>
   </details>
 </template>
@@ -250,22 +241,10 @@ const PRE_CLASS =
   font-size: 14px;
   line-height: 1.6;
 }
-h4,
-.fold > summary {
+h4 {
   font-size: 13px;
   font-weight: 500;
   line-height: 1.6;
-}
-.fold > summary {
-  cursor: pointer;
-}
-.fold > summary::marker {
-  font-size: 0.8em;
-  color: var(--ui-text-muted);
-}
-.fold.quiet > summary {
-  font-weight: 400;
-  color: var(--ui-text-muted);
 }
 .note {
   font-size: 13px;

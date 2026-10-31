@@ -20,11 +20,11 @@ import { stepBadge } from '../benchResult'
 import { catalogFailure, divergenceNotice, runBlocker, sessionUsage } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { icons } from '../icons'
-import { scopesSummary } from '../labels'
 import BenchAgentBusy from './BenchAgentBusy.vue'
 import BenchContextForm from './BenchContextForm.vue'
 import BenchField from './BenchField.vue'
 import BenchNotice from './BenchNotice.vue'
+import BenchRunLine from './BenchRunLine.vue'
 import BenchStatus from './BenchStatus.vue'
 import BenchStepView from './BenchStepView.vue'
 import BenchTag from './BenchTag.vue'
@@ -90,7 +90,6 @@ const retryTools = computed(() => [
   {
     label: '重新读取',
     color: 'neutral' as const,
-    variant: 'subtle' as const,
     loading: tools.isFetching.value,
     onClick: () => void tools.refetch(),
   },
@@ -164,14 +163,12 @@ const divergedActions = computed(() => [
   {
     label: '接受并移除此步',
     color: 'neutral' as const,
-    variant: 'subtle' as const,
     disabled: running.value,
     onClick: acceptDiverged,
   },
   {
     label: '清空当前会话',
     color: 'error' as const,
-    variant: 'subtle' as const,
     disabled: running.value,
     onClick: clear,
   },
@@ -305,15 +302,18 @@ function onRunClick() {
           </template>
 
           <div class="call-end">
-            <BenchNotice
-              v-if="contextDiffers"
-              color="warning"
-              title="此 JSON 中的 context 与上方的会话上下文不同：本次按 JSON 执行，未写 context 即不带。"
-            />
-            <BenchNotice v-if="unavailable" color="warning" :title="unavailable" />
-            <BenchNotice v-if="formError" color="warning" :title="formError" />
-            <BenchNotice v-if="failure" color="error" :title="failure" />
-            <BenchAgentBusy />
+            <div class="end-notes">
+              <BenchNotice
+                v-if="contextDiffers"
+                flush
+                color="warning"
+                title="此 JSON 中的 context 与上方的会话上下文不同：本次按 JSON 执行，未写 context 即不带。"
+              />
+              <BenchNotice v-if="unavailable" flush color="warning" :title="unavailable" />
+              <BenchNotice v-if="formError" flush color="warning" :title="formError" />
+              <BenchNotice v-if="failure" flush color="error" :title="failure" />
+            </div>
+            <BenchAgentBusy flush />
 
             <div class="call-actions">
               <UButton
@@ -385,6 +385,7 @@ function onRunClick() {
             :actions="divergedActions"
           />
           <BenchNotice v-if="blocker" color="warning" :title="blocker" />
+          <p v-if="callRunning" role="status" class="empty">运行中…</p>
           <ol v-if="timeline.length" class="timeline">
             <li v-for="entry in timeline" :key="entry.id">
               <button
@@ -404,17 +405,14 @@ function onRunClick() {
               </button>
             </li>
           </ol>
-          <p v-else class="empty">暂无调用</p>
+          <p v-else-if="!callRunning" class="empty">暂无调用</p>
           <p v-if="session.dropped" class="usage">
             更早的 {{ session.dropped }} 条不再显示，已保留的写入不受影响。
           </p>
         </section>
 
         <div v-if="shown" class="shown">
-          <p class="run-line">
-            运行标记 <code>{{ shown.run }}</code> · {{ shown.whoami.app.name }} ·
-            {{ scopesSummary(shown.whoami.scopes) }}
-          </p>
+          <BenchRunLine :result="shown" />
           <BenchStepView :key="shown.id" :step="shown.step" :mode="mode" view="call" />
         </div>
       </div>
@@ -535,7 +533,7 @@ function onRunClick() {
   font-size: 13px;
   line-height: 1.6;
 }
-/* 运行按钮贴在这一栏底部：参数再多也够得着 */
+/* 运行按钮贴在这一栏底部：参数再多也够得着。提示可能很长，自己滚动，不盖住表单、不把按钮挤走 */
 .call-end {
   position: sticky;
   bottom: 0;
@@ -544,10 +542,9 @@ function onRunClick() {
   background: var(--ui-bg);
   border-top: 1px solid var(--ui-border);
 }
-.call-end :deep(.note-line:first-child) {
-  min-height: 0;
-  padding-top: 0;
-  border-top: 0;
+.end-notes {
+  max-height: 40dvh;
+  overflow-y: auto;
 }
 .call-actions {
   display: flex;
@@ -557,15 +554,12 @@ function onRunClick() {
   padding-bottom: 12px;
 }
 
-.usage,
-.run-line {
+.usage {
+  padding: 6px 0;
   font-size: 13px;
   line-height: 1.6;
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
-}
-.usage {
-  padding: 6px 0;
 }
 .timeline {
   max-height: 16rem;
@@ -607,10 +601,6 @@ function onRunClick() {
 }
 .shown {
   margin-top: 20px;
-}
-.run-line {
-  padding-bottom: 6px;
-  border-bottom: 1px solid var(--ui-border);
 }
 
 /* 三栏放不下时目录放到上面，一行排几个；整页滚动，各栏不再自己滚 */

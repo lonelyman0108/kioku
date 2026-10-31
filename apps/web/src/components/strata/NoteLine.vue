@@ -1,10 +1,13 @@
 <script setup lang="ts">
-// 贴在正文上方的一行状态：一条墨线，左边说什么情况，右边是操作。不铺色块，只有文字带语气
-withDefaults(defineProps<{ tone?: 'neutral' | 'warning' | 'error' }>(), { tone: 'neutral' })
+// 贴在正文上方的一行状态：一条墨线，左边说什么情况，右边是操作。不铺色块，只有文字带语气。
+// flush：上面已经有一条线了，不再画墨线
+withDefaults(defineProps<{ tone?: 'neutral' | 'warning' | 'error'; flush?: boolean }>(), {
+  tone: 'neutral',
+})
 </script>
 
 <template>
-  <div class="note-line">
+  <div class="note-line" :class="{ flush }">
     <div class="note-text">
       <p class="note-title" :class="tone">
         <slot />
@@ -32,6 +35,13 @@ withDefaults(defineProps<{ tone?: 'neutral' | 'warning' | 'error' }>(), { tone: 
   margin-top: -16px;
   border-top: 0;
 }
+.note-line.flush {
+  min-height: 0;
+  border-top: 0;
+}
+.note-line.flush:first-child {
+  padding-top: 0;
+}
 .note-text {
   flex: 1 1 14em;
   min-width: 0;
@@ -55,10 +65,18 @@ withDefaults(defineProps<{ tone?: 'neutral' | 'warning' | 'error' }>(), { tone: 
   line-height: 1.55;
   color: var(--ui-text-muted);
 }
+/* 放不下时按钮换行；一个按钮比一行还长时，按钮里的文字截断，不把外层撑出横向滚动条 */
 .note-actions {
   flex: none;
   display: inline-flex;
+  flex-wrap: wrap;
   align-items: center;
   gap: 8px;
+  min-width: 0;
+  max-width: 100%;
+}
+.note-actions :slotted(*) {
+  min-width: 0;
+  max-width: 100%;
 }
 </style>
