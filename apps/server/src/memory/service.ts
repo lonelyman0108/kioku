@@ -90,6 +90,7 @@ import {
   mentionsPlaceholder,
   placeholderAllowed,
   placeholderIdentifiers,
+  replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
 import { isUniqueViolation, type Db, type Tx } from '../db/client'
@@ -1426,15 +1427,18 @@ export class MemoryService {
       if (!placeholderAllowed(row.layer, row.sensitivity)) {
         throw new MemoryError(400, CONVERT_SCOPE)
       }
-      const parts = row.content.split(input.value)
-      if (parts.length < 2) throw new MemoryError(400, CONVERT_NOT_FOUND)
+      const placeholder = `{{cred:${input.identifier}#${input.field}}}`
+      const { text: content, replaced } = replaceOutsidePlaceholders(
+        row.content,
+        input.value,
+        placeholder,
+      )
+      if (!replaced) throw new MemoryError(400, CONVERT_NOT_FOUND)
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       const elsewhere = [formatUri(row.domain!, row.path!), row.disclosure ?? '', ...glossary]
       if (elsewhere.some((text) => text.includes(input.value))) {
         throw new MemoryError(400, CONVERT_ELSEWHERE)
       }
-      const placeholder = `{{cred:${input.identifier}#${input.field}}}`
-      const content = parts.join(placeholder)
       if (!UpdateMemoryRequest.shape.content.safeParse(content).success) {
         throw new MemoryError(400, CONVERT_TOO_LONG)
       }
@@ -1463,7 +1467,7 @@ export class MemoryService {
           reason: scrub(dreamSuggestions.reason),
         })
         .where(sql`${row.id}::uuid = any(${dreamSuggestions.memoryIds})`)
-      return { memory, credential, replaced: parts.length - 1, ...history }
+      return { memory, credential, replaced, ...history }
     })
     this.changed([result.memory.id, ...released])
     return result
@@ -3134,10 +3138,14 @@ function scrubSnapshot(
   delete version.fts
   const inPlace = version.layer === 'private' && version.ownerAccountId === owner
   if (typeof version.content === 'string') {
-    version.content = version.content.split(value).join(inPlace ? placeholder : PLAINTEXT_MASK)
+    version.content = replaceOutsidePlaceholders(
+      version.content,
+      value,
+      inPlace ? placeholder : PLAINTEXT_MASK,
+    ).text
   }
   if (typeof version.disclosure === 'string') {
-    version.disclosure = version.disclosure.split(value).join(PLAINTEXT_MASK)
+    version.disclosure = replaceOutsidePlaceholders(version.disclosure, value, PLAINTEXT_MASK).text
   }
   if (Array.isArray(version.glossary)) {
     version.glossary = version.glossary.filter(

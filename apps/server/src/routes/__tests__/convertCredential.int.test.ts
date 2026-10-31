@@ -293,6 +293,50 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect(list.items).toEqual([])
   })
 
+  it('已有的占位符不改坏：值就是占位符里的标识、或者是 cred，正文和历史都一样；只在占位符里出现算没有这段值', async () => {
+    const credentialNamed = async (identifier: string) =>
+      expect(
+        (
+          await send('POST', '/credentials', {
+            identifier,
+            name: identifier,
+            source: { kind: 'hosted', values: { password: 'other' } },
+          })
+        ).status,
+      ).toBe(201)
+    await credentialNamed('prod-db')
+    const m = await remember({
+      uri: 'notes://db',
+      content: '{{cred:prod-db#password}} 的主机是 prod-db',
+    })
+    const edited = await edit({
+      uri: m.uri,
+      content: '{{cred:prod-db#password}} 的主机是 prod-db，备机也是 prod-db',
+    })
+    const result = await converted(edited, { value: 'prod-db', identifier: 'host', field: 'name' })
+    expect(result.replaced).toBe(2)
+    const kept =
+      '{{cred:prod-db#password}} 的主机是 {{cred:host#name}}，备机也是 {{cred:host#name}}'
+    expect(result.memory.content).toBe(kept)
+    const events = await eventsOf(m.id)
+    expect((events[0]!.after as { content: string }).content).toBe(
+      '{{cred:prod-db#password}} 的主机是 {{cred:host#name}}',
+    )
+    expect((events[1]!.after as { content: string }).content).toBe(kept)
+
+    // 值是 cred：占位符的写法不受影响，别处的换掉
+    await credentialNamed('foo')
+    const other = await remember({ uri: 'notes://two', content: '{{cred:foo}} 是 cred 的例子' })
+    const second = await converted(other, { value: 'cred', identifier: 'word', field: 'text' })
+    expect(second.memory.content).toBe('{{cred:foo}} 是 {{cred:word#text}} 的例子')
+
+    // 只在占位符里出现：正文里没有这段值
+    const only = await remember({ uri: 'notes://three', content: '只有 {{cred:foo}}' })
+    const res = await convert(only, { value: 'foo', identifier: 'bar', field: 'text' })
+    expect(res.status).toBe(400)
+    expect((await rowOf(only.id)).content).toBe(only.content)
+  })
+
   it('换过的旧密码不是这个值，留在历史里：数出来告诉调用方；现在正文里别的明文不算历史', async () => {
     const m = await remember({ uri: 'notes://wifi', content: '密码：old-password-1' })
     const rotated = await edit({ uri: m.uri, content: `密码：${VALUE}` })

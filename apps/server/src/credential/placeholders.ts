@@ -50,6 +50,28 @@ export function placeholderIdentifiers(text: string): Set<string> {
   return new Set(scanPlaceholders(text).refs.map((r) => r.identifier))
 }
 
+// 把文字里的一个值换掉，跳过格式正确的占位符：值可能恰好是 cred，或者就是占位符里的标识，换了就把引用改坏了。
+// 格式不对的不算占位符，里面的值照样换。返回换完的文字与换了几处
+export function replaceOutsidePlaceholders(
+  text: string,
+  value: string,
+  replacement: string,
+): { text: string; replaced: number } {
+  let replaced = 0
+  const swap = (part: string) => {
+    const pieces = part.split(value)
+    replaced += pieces.length - 1
+    return pieces.join(replacement)
+  }
+  let out = ''
+  let last = 0
+  for (const m of text.matchAll(new RegExp(CREDENTIAL_PLACEHOLDER.source, 'g'))) {
+    out += swap(text.slice(last, m.index)) + m[0]
+    last = m.index + m[0].length
+  }
+  return { text: out + swap(text.slice(last)), replaced }
+}
+
 export function looksLikePlaintextCredential(text: string): boolean {
   return PLAINTEXT_CREDENTIAL.test(text)
 }
