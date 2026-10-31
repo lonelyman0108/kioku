@@ -229,6 +229,21 @@
     text-wrap: pretty;
   }
 
+  /*
+   * 主色和正文同色，只靠颜色认不出链接：写了 text-primary 的文字链接默认带下划线，和 UButton 的 link 变体一个样子。
+   * 组件库的元素带 data-slot，比如主色的按钮，不算
+   */
+  :is(a, button).text-primary:not([data-slot]) {
+    text-decoration-line: underline;
+    text-decoration-thickness: 1px;
+    text-decoration-color: var(--ui-border-accented);
+    text-underline-offset: 3px;
+  }
+
+  :is(a, button).text-primary:not([data-slot]):hover {
+    text-decoration-color: currentColor;
+  }
+
   /* 中文不用斜体：系统字体没有真正的斜体，靠合成也关掉了 */
   i,
   em {
