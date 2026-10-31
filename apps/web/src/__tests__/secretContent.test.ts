@@ -1,7 +1,7 @@
 import type { ConsoleMemoryView } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { revealedAfterWrite, stillRevealed, withRevealed } from '../secretContent'
+import { hiddenAgain, revealedAfterWrite, stillRevealed, withRevealed } from '../secretContent'
 
 const view = (extra: Partial<ConsoleMemoryView> = {}): ConsoleMemoryView => ({
   id: 'm1',
@@ -63,5 +63,13 @@ describe('查看过的机密正文', () => {
         '新的',
       ),
     ).toBeNull()
+  })
+
+  it('收起之后正文不在了，这一版不变，要再查看一次', () => {
+    const shown = withRevealed(view(), { id: 'm1', version: 3, content: '正文' })
+    expect(shown).toMatchObject({ content: '正文', contentHidden: false })
+    const hidden = hiddenAgain(shown)
+    expect(hidden).toMatchObject({ id: 'm1', version: 3, content: null, contentHidden: true })
+    expect(withRevealed(hidden, null)).toEqual(hidden)
   })
 })

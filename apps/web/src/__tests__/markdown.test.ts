@@ -1,7 +1,7 @@
 import { Tokenizer } from 'marked'
 import { describe, expect, it, vi } from 'vitest'
 
-import { markdownToHtml, rawHtml } from '../markdown'
+import { markdownToHtml, rawHtml, splitByValues } from '../markdown'
 
 describe('rawHtml', () => {
   it('不带属性的排版标签照常渲染', () => {
@@ -198,5 +198,30 @@ describe('markdownToHtml', () => {
     const html = markdownToHtml(source)
     expect(html.startsWith('<pre>')).toBe(true)
     expect(html).toContain('&gt;&gt;&gt; &lt;b&gt;x&lt;/b&gt;</pre>')
+  })
+})
+
+describe('疑似明文的值', () => {
+  const hits = (text: string, values: string[]) =>
+    splitByValues(text, values)
+      .filter((s) => s.hit)
+      .map((s) => s.text)
+
+  it('切开之后拼起来还是原文，值的那一段标出来', () => {
+    const segments = splitByValues('密码：hunter2，别外传', ['hunter2'])
+    expect(segments).toEqual([
+      { text: '密码：', hit: false },
+      { text: 'hunter2', hit: true },
+      { text: '，别外传', hit: false },
+    ])
+  })
+
+  it('出现几处标几处，一个值是另一个的一部分时长的优先', () => {
+    expect(hits('abc abcd abc', ['abc', 'abcd'])).toEqual(['abc', 'abcd', 'abc'])
+  })
+
+  it('找不到时整段不标，空的值不算', () => {
+    expect(splitByValues('没有', ['hunter2', ''])).toEqual([{ text: '没有', hit: false }])
+    expect(splitByValues('', ['hunter2'])).toEqual([])
   })
 })

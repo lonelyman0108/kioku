@@ -9,6 +9,8 @@ import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { creatableLayers, layerLabels, sensitivityLabels } from '../labels'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SwatchOptions from './strata/SwatchOptions.vue'
 
 const props = defineProps<{ spaceId: string; initialUri: string }>()
 const open = defineModel<boolean>('open', { required: true })
@@ -65,19 +67,45 @@ watch(
   { immediate: true },
 )
 const layerHelp = computed(() => {
-  if (layerFixed.value) return '由 URI 决定'
+  if (layerFixed.value) return undefined
   if (suggestedLayer.value && !layerTouched.value) return '来自空间设置的 domain 默认层'
   return undefined
 })
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
 // 正文像有明文密码或 Token 时提醒换成凭据占位符；只是提醒，照样能创建
 const looksPlaintext = computed(() => PLAINTEXT_CREDENTIAL.test(form.content))
-const layerItems = creatableLayers.map((l) => ({ label: layerLabels[l], value: l }))
+// 色块跟着另一个选项走：选了什么就看到什么样子。敏感级按层默认时，层的色块不带纹理
+const layerOptions = computed(() =>
+  creatableLayers.map((value) => ({
+    value,
+    label: layerLabels[value],
+    layer: value,
+    sensitivity: form.sensitivity,
+    plain: !form.sensitivity,
+  })),
+)
 // editor 签不了 secret，选项里也不给
 const { sensitivities } = useMemoryPermissions(computed(() => props.spaceId))
-const sensitivityItems = computed(() => [
-  { label: '按层默认', value: null },
-  ...sensitivities.value.map((s) => ({ label: sensitivityLabels[s], value: s })),
+// persona:// 与 app:// 下选不了层，色块按 URI 决定的层画
+const shownLayer = computed<Layer>(() =>
+  layerFixed.value ? (domain.value === 'persona' ? 'persona' : 'app') : form.layer,
+)
+const sensitivityOptions = computed<
+  {
+    value: Sensitivity | null
+    label: string
+    layer?: Layer
+    sensitivity?: Sensitivity
+    bare?: boolean
+  }[]
+>(() => [
+  { value: null, label: '按层默认', bare: true },
+  ...sensitivities.value.map((value) => ({
+    value,
+    label: sensitivityLabels[value],
+    layer: shownLayer.value,
+    sensitivity: value,
+  })),
 ])
 
 async function submit() {
@@ -120,30 +148,28 @@ async function submit() {
         <UFormField label="URI" help="domain://path，例如 core://agent、projects://kioku">
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
         </UFormField>
-        <div class="grid gap-4 sm:grid-cols-2">
-          <UFormField label="层" :help="layerHelp">
-            <USelect
-              v-model="form.layer"
-              :items="layerItems"
-              :disabled="layerFixed"
-              class="w-full"
-              @update:model-value="layerTouched = true"
-            />
-          </UFormField>
-          <UFormField label="敏感级">
-            <USelect v-model="form.sensitivity" :items="sensitivityItems" class="w-full" />
-          </UFormField>
-        </div>
+        <UFormField label="层" :help="layerHelp">
+          <p v-if="layerFixed" class="text-sm text-muted">由 URI 决定</p>
+          <SwatchOptions
+            v-else
+            v-model="form.layer"
+            label="层"
+            :options="layerOptions"
+            @update:model-value="layerTouched = true"
+          />
+        </UFormField>
+        <UFormField label="敏感级">
+          <SwatchOptions v-model="form.sensitivity" label="敏感级" :options="sensitivityOptions" />
+        </UFormField>
         <UFormField label="正文">
           <UTextarea v-model="form.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
-        <UAlert
-          v-if="looksPlaintext"
-          color="warning"
-          variant="subtle"
-          title="正文疑似包含明文凭据"
-          description="建议转存为凭据（「凭据」页），正文改用占位符；创建后可在编辑器中插入引用。"
-        />
+        <NoteLine v-if="looksPlaintext" tone="error">
+          正文疑似包含明文凭据
+          <template #detail>
+            建议转存为凭据（「凭据」页），正文改用占位符；创建后可在编辑器中插入引用。
+          </template>
+        </NoteLine>
         <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
           <UInput v-model="form.disclosure" class="w-full" />
         </UFormField>
@@ -162,7 +188,7 @@ async function submit() {
             @focus="minValidTo = earliestValidTo()"
           />
         </UFormField>
-        <UAlert v-if="error" color="error" variant="subtle" :title="error" />
+        <NoteLine v-if="error" tone="error">{{ error }}</NoteLine>
       </form>
     </template>
     <template #footer>

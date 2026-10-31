@@ -85,7 +85,27 @@ export const conversationTotal = (counts: StrataCounts) =>
 export const sensitivityTotal = (counts: StrataCounts, sensitivity: Sensitivity) =>
   sum(STACK.filter((l) => !isConversationLayer(l)).map((l) => counts[l][sensitivity]))
 
+// 按层、敏感级筛选之后一共多少条，两个都可以不限。counts 里有什么层就数什么层
+export const filteredTotal = (
+  counts: StrataCounts,
+  layer: Layer | null,
+  sensitivity: Sensitivity | null,
+) =>
+  sum(
+    (layer ? [layer] : STACK).flatMap((l) =>
+      (sensitivity ? [sensitivity] : SENSITIVITIES).map((s) => counts[l][s]),
+    ),
+  )
+
 /* ———— 几何 ———— */
+
+// 概览里地层柱的尺寸：一屏放下，高度跟着视口。放不下数字的窄屏换紧凑版。
+// 288 是导航、状态句、区块标题和表头表尾占掉的高度
+export function columnSize(viewport: { width: number; height: number }) {
+  if (viewport.width < 640) return { width: 92, height: 470, compact: true }
+  const height = viewport.width < 1024 ? 470 : Math.max(440, Math.min(680, viewport.height - 288))
+  return { width: 216, height, compact: false }
+}
 
 export interface Band {
   layer: Layer

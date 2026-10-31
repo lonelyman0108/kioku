@@ -102,7 +102,8 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
   enter({ layer, sensitivity })
   const rect = body.value?.getBoundingClientRect()
   note.value = {
-    x: event.clientX - (rect?.left ?? 0),
+    // 贴着左边时不伸出柱子外面：提示层以这个位置居中，大约 180px 宽
+    x: Math.max(90, event.clientX - (rect?.left ?? 0)),
     y: event.clientY - (rect?.top ?? 0),
     lines: [
       `${layerLabels[layer]} ${sensitivityLabels[sensitivity]} ${count} 条`,
@@ -215,12 +216,21 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
         >
           {{ names[band.layer] }}
         </button>
-        <span
+        <button
+          v-if="layerTotal(counts, band.layer)"
+          type="button"
           class="fig-total"
           :class="{ on: highlight?.layer === band.layer && !highlight.sensitivity }"
+          :aria-label="`${layerLabels[band.layer]} ${layerTotal(counts, band.layer)} 条`"
+          @mouseenter="enter({ layer: band.layer, sensitivity: null })"
+          @mouseleave="leave"
+          @focus="enter({ layer: band.layer, sensitivity: null })"
+          @blur="leave"
+          @click="emit('select', { layer: band.layer, sensitivity: null })"
         >
           {{ layerTotal(counts, band.layer) }}
-        </span>
+        </button>
+        <span v-else class="fig-total" aria-label="0">0</span>
         <template v-for="s in SENSITIVITIES" :key="s">
           <button
             v-if="counts[band.layer][s]"
@@ -368,11 +378,12 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
 .fig-z {
   color: var(--ui-text-muted);
 }
+/* 机密靠位置和字重，不用红：红色只留给告警 */
 .fig-n.sec {
-  color: var(--ui-error);
-  font-weight: 500;
+  font-weight: 600;
 }
 .fig-n:hover,
+button.fig-total:hover,
 .fig-n.on,
 .fig-total.on {
   background: var(--strata-selected);

@@ -10,19 +10,28 @@ import { createSSRApp, type Component } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
 import AccessMatrix from '../AccessMatrix.vue'
+import MemoryFlags from '../MemoryFlags.vue'
+import NoteLine from '../NoteLine.vue'
 import StrataColumn from '../StrataColumn.vue'
 import StrataCore from '../StrataCore.vue'
 import StrataPatterns from '../StrataPatterns.vue'
 import StrataRibbon from '../StrataRibbon.vue'
+import StrataStrip from '../StrataStrip.vue'
+import StrataSwatch from '../StrataSwatch.vue'
+import StrataTag from '../StrataTag.vue'
+import SwatchOptions from '../SwatchOptions.vue'
+import UriPath from '../UriPath.vue'
 import {
   STACK,
   TEXTURES,
   accessKind,
   accessKindLabels,
+  columnSize,
   conversationTotal,
   coreCells,
   curatedTotal,
   deepestColumn,
+  filteredTotal,
   issuedScopeRows,
   layerTotal,
   orderRows,
@@ -82,6 +91,47 @@ describe('条数', () => {
     expect(conversationTotal(counts)).toBe(44)
     expect(layerTotal(counts, 'private')).toBe(123)
     expect(sensitivityTotal(counts, 'private')).toBe(82)
+  })
+})
+
+describe('按层和敏感级筛选之后的总数', () => {
+  it('两个都可以不限；不限层时数 counts 里有的所有层', () => {
+    const counts = sample()
+    expect(filteredTotal(counts, 'private', 'private')).toBe(72)
+    expect(filteredTotal(counts, 'private', null)).toBe(123)
+    expect(filteredTotal(counts, null, 'secret')).toBe(9)
+    expect(filteredTotal(counts, null, null)).toBe(204 + 44)
+  })
+
+  it('列表只给记忆的条数时，来自对话的两层不算', () => {
+    const counts = tallyCounts([{ layer: 'base', sensitivity: 'public', count: 3 }])
+    expect(filteredTotal(counts, null, null)).toBe(3)
+    expect(filteredTotal(counts, 'subject', null)).toBe(0)
+  })
+})
+
+describe('概览里地层柱的尺寸', () => {
+  it('宽屏跟着视口高度，一屏放下，再矮也不小于 440，再高也不超过 680', () => {
+    expect(columnSize({ width: 1440, height: 900 })).toEqual({
+      width: 216,
+      height: 612,
+      compact: false,
+    })
+    expect(columnSize({ width: 1440, height: 500 }).height).toBe(440)
+    expect(columnSize({ width: 1440, height: 2000 }).height).toBe(680)
+  })
+
+  it('单栏时高度固定，放不下数字的窄屏换紧凑版', () => {
+    expect(columnSize({ width: 800, height: 2000 })).toEqual({
+      width: 216,
+      height: 470,
+      compact: false,
+    })
+    expect(columnSize({ width: 390, height: 844 })).toEqual({
+      width: 92,
+      height: 470,
+      compact: true,
+    })
   })
 })
 
@@ -491,6 +541,150 @@ describe('岩芯', () => {
     expect(await render(StrataCore, { scopes, revoked: true, label: '旧笔记本' })).toContain(
       'aria-label="旧笔记本，已吊销，没有权限"',
     )
+  })
+})
+
+describe('地层柱', () => {
+  it('机密的条数不用红色，红色只留给告警', async () => {
+    const css = (await import('../StrataColumn.vue?raw')).default as string
+    const rule = /\.fig-n\.sec \{([^}]*)\}/.exec(css)![1]!
+    expect(rule).not.toContain('error')
+  })
+
+  it('一层的合计能点，这一层没有记忆时不能点', async () => {
+    const counts = sample()
+    counts.episode = { public: 0, internal: 0, private: 0, secret: 0 }
+    const html = await render(StrataColumn, { counts })
+    expect(html).toContain('aria-label="私人 123 条"')
+    expect(html).not.toMatch(/<button[^>]*aria-label="情节 0 条"/)
+  })
+})
+
+describe('窄柱', () => {
+  it('条数读到之前带等高、不写数字，筛选照样能点', async () => {
+    const html = await render(StrataRibbon, { counts: null, length: 400 })
+    expect(html.match(/<button[^>]*class="rb-band/g)).toHaveLength(7)
+    expect(html).toContain('aria-label="私人"')
+    expect(html).not.toContain('条')
+    expect(html).not.toContain('<b>')
+  })
+
+  it('选中的层、当前记忆所在的层都标出来', async () => {
+    const html = await render(StrataRibbon, {
+      counts: sample(),
+      length: 600,
+      selected: 'private',
+      current: 'base',
+    })
+    const band = (label: string) =>
+      html.split('<button').find((chunk) => chunk.includes(`aria-label="${label}"`))!
+    expect(band('私人 123 条')).toContain('class="on rb-band"')
+    expect(band('私人 123 条')).toContain('aria-pressed="true"')
+    expect(band('基础 18 条')).toContain('aria-pressed="false"')
+    expect(band('基础 18 条')).toContain('rb-here')
+    expect(band('私人 123 条')).not.toContain('rb-here')
+  })
+})
+
+describe('记忆的标记', () => {
+  const priority = (n: number) => `P${n}`
+
+  it('优先级只标最高的两档，机密带文字', async () => {
+    expect(await render(MemoryFlags, { priority: 0 })).toContain(priority(0))
+    expect(await render(MemoryFlags, { priority: 1 })).toContain(priority(1))
+    expect(await render(MemoryFlags, { priority: 2 })).not.toContain(priority(2))
+    expect(await render(MemoryFlags, { sensitivity: 'secret' })).toContain('机密')
+    expect(await render(MemoryFlags, { sensitivity: 'private' })).not.toContain('flag-secret')
+  })
+
+  it('层写简称，色块不单独说明是哪一层', async () => {
+    expect(await render(MemoryFlags, { layer: 'owner' })).toContain('画像')
+  })
+
+  it('机密的标记和标签都不用红', async () => {
+    for (const file of ['../MemoryFlags.vue?raw', '../StrataTag.vue?raw']) {
+      const css = (await import(/* @vite-ignore */ file)).default as string
+      expect(css, file).not.toContain('--ui-error')
+    }
+  })
+})
+
+describe('URI', () => {
+  it('上一级路径和名字分开，悬停看得到全部', async () => {
+    const html = await render(UriPath, { uri: 'projects://atlas/release' })
+    expect(html).toContain('<span class="uri-parent"')
+    expect(html).toContain('projects://atlas/</span>')
+    expect(html).toContain('release</span>')
+    expect(html).toContain('title="projects://atlas/release"')
+  })
+})
+
+describe('详情的标签和条带', () => {
+  it('标签写全层和敏感级的名字，纹理跟着敏感级', async () => {
+    const html = await render(StrataTag, { layer: 'private', sensitivity: 'private' })
+    expect(html).toContain('私人')
+    expect(html).toContain('私密')
+    expect(html).toContain('--layer-private')
+    expect(html).toContain(`url(#${TEXTURES.lines.lg})`)
+  })
+
+  it('机密的条带和标签是实心，看不出层色的地方靠文字', async () => {
+    expect(await render(StrataStrip, { layer: 'private', sensitivity: 'secret' })).toContain(
+      '--strata-solid',
+    )
+    const html = await render(StrataTag, { layer: 'private', sensitivity: 'secret' })
+    expect(html).toContain('私人')
+    expect(html).toContain('机密')
+    expect(html).toContain('--strata-solid')
+  })
+
+  it('条带不读屏，文字在标签里', async () => {
+    expect(await render(StrataStrip, { layer: 'base', sensitivity: 'public' })).toContain(
+      'aria-hidden="true"',
+    )
+  })
+})
+
+describe('带色块的单选', () => {
+  const options = [
+    { value: null, label: '按层默认', bare: true },
+    { value: 'public', label: '公开', layer: 'private', sensitivity: 'public' },
+    { value: 'secret', label: '机密', layer: 'private', sensitivity: 'secret' },
+  ]
+
+  it('当前的选中，每一项都有文字，色块不读屏', async () => {
+    const html = await render(SwatchOptions, { label: '敏感级', options, modelValue: 'public' })
+    expect(html).toContain('role="radiogroup"')
+    expect(html).toContain('aria-label="敏感级"')
+    expect(html.match(/type="radio"/g)).toHaveLength(3)
+    expect(html.match(/checked/g)).toHaveLength(1)
+    for (const option of options) expect(html).toContain(option.label)
+    expect(html).not.toContain('role="img"')
+  })
+
+  it('没有色块的那一项不画，没有选中的值也能显示', async () => {
+    const html = await render(SwatchOptions, { label: '敏感级', options, modelValue: null })
+    expect(html.match(/<svg/g)).toHaveLength(2)
+  })
+
+  it('色块标成配图时不读屏也不弹说明', async () => {
+    const html = await render(StrataSwatch, {
+      layer: 'base',
+      sensitivity: 'public',
+      decorative: true,
+    })
+    expect(html).toContain('aria-hidden="true"')
+    expect(html).not.toContain('title=')
+    expect(await render(StrataSwatch, { layer: 'base', sensitivity: 'public' })).toContain(
+      'aria-label="基础 公开"',
+    )
+  })
+})
+
+describe('状态行', () => {
+  it('语气只在文字上', async () => {
+    const html = await render(NoteLine, { tone: 'warning' })
+    expect(html).toContain('class="warning note-title"')
   })
 })
 

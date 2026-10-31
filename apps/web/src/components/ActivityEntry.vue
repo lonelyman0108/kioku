@@ -3,16 +3,20 @@ import type { ActivityItem } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { icons } from '../icons'
-import { actorLabel, benchAccountLabel, changeLabels, eventLabel } from '../labels'
+import {
+  activityLinkable,
+  actorLabel,
+  benchAccountLabel,
+  changeLabels,
+  eventLabel,
+} from '../labels'
 import { formatRelative, formatTime } from '../time'
 
 const props = defineProps<{ item: ActivityItem; spaceId: string }>()
 
 const kind = computed(() => eventLabel(props.item.type))
 const actor = computed(() => actorLabel(props.item.actor))
-// 记忆已经删除（包括过期后让出 URI 的）或过期了，按 URI 打开的是那里别的记忆、或者读不到；
-// 离开了可见范围的 URI 是改动之前的。这几种不给链接，同一条记忆更早的改动也一样
-const linkable = computed(() => !props.item.left && !props.item.deleted && !props.item.expired)
+const linkable = computed(() => activityLinkable(props.item))
 </script>
 
 <template>

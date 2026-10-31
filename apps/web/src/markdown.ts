@@ -185,9 +185,37 @@ export interface CredentialLinks {
   href: (id: string) => string
 }
 
+// 正文里疑似明文的值按字面切出来，长的优先；值被 Markdown 拆开时找不到，不标
+export function splitByValues(
+  text: string,
+  values: readonly string[],
+): { text: string; hit: boolean }[] {
+  const longest = [...new Set(values)].filter(Boolean).sort((a, b) => b.length - a.length)
+  const segments: { text: string; hit: boolean }[] = []
+  let from = 0
+  while (from < text.length) {
+    let at = -1
+    let value = ''
+    for (const candidate of longest) {
+      const index = text.indexOf(candidate, from)
+      if (index >= 0 && (at < 0 || index < at)) [at, value] = [index, candidate]
+    }
+    if (at < 0) break
+    if (at > from) segments.push({ text: text.slice(from, at), hit: false })
+    segments.push({ text: value, hit: true })
+    from = at + value.length
+  }
+  if (from < text.length) segments.push({ text: text.slice(from), hit: false })
+  return segments
+}
+
 export function renderMarkdown(
   source: string,
-  options: { keywords?: KeywordLinks | null; credentials?: CredentialLinks | null } = {},
+  options: {
+    keywords?: KeywordLinks | null
+    credentials?: CredentialLinks | null
+    plaintext?: readonly string[] | null
+  } = {},
 ): string {
   const fragment = DOMPurify.sanitize(markdownToHtml(source), {
     ...PURIFY,
@@ -200,6 +228,8 @@ export function renderMarkdown(
   }
   // 先画凭据的徽章，再标关键词：关键词可能出现在占位符里，先标关键词会把占位符拆开
   if (options.credentials) markCredentials(fragment, options.credentials)
+  // 明文也在关键词之前：关键词可能出现在值里，先标关键词会把值拆开
+  if (options.plaintext?.length) markPlaintext(fragment, options.plaintext)
   if (options.keywords) markKeywords(fragment, options.keywords)
   const box = document.createElement('div')
   box.append(fragment)
@@ -211,10 +241,36 @@ function textNodes(root: DocumentFragment): Text[] {
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
   const texts: Text[] = []
   for (let node = walker.nextNode(); node; node = walker.nextNode()) {
-    if (node.parentElement?.closest('a, code, pre, summary, .kioku-cred')) continue
+    if (node.parentElement?.closest('a, code, pre, summary, .kioku-cred, .kioku-plain')) continue
     texts.push(node as Text)
   }
   return texts
+}
+
+// 疑似明文的值标出来：值写在代码、链接里也要标，所以不用上面那份文字节点
+function markPlaintext(root: DocumentFragment, values: readonly string[]) {
+  const walker = document.createTreeWalker(root, NodeFilter.SHOW_TEXT)
+  const texts: Text[] = []
+  for (let node = walker.nextNode(); node; node = walker.nextNode()) {
+    if (!node.parentElement?.closest('.kioku-cred')) texts.push(node as Text)
+  }
+  for (const text of texts) {
+    const segments = splitByValues(text.data, values)
+    if (!segments.some((s) => s.hit)) continue
+    const replacement = document.createDocumentFragment()
+    for (const segment of segments) {
+      if (!segment.hit) {
+        replacement.append(segment.text)
+        continue
+      }
+      const mark = document.createElement('mark')
+      mark.className = 'kioku-plain'
+      mark.title = '疑似明文凭据'
+      mark.textContent = segment.text
+      replacement.append(mark)
+    }
+    text.replaceWith(replacement)
+  }
 }
 
 // 把占位符画成徽章：解析得到的是链接（data-credential 是凭据 id，点了去凭据页），

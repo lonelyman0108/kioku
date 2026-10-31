@@ -27,14 +27,9 @@ export const icons = {
   add: 'i-lucide-plus',
   save: 'i-lucide-save',
   remove: 'i-lucide-trash-2',
-  move: 'i-lucide-folder-input',
   copy: 'i-lucide-copy',
-  more: 'i-lucide-ellipsis',
   refresh: 'i-lucide-refresh-cw',
   search: 'i-lucide-search',
-  folder: 'i-lucide-folder',
-  tree: 'i-lucide-folder-tree',
-  list: 'i-lucide-list',
   back: 'i-lucide-arrow-left',
   up: 'i-lucide-arrow-up',
   down: 'i-lucide-arrow-down',
@@ -57,8 +52,6 @@ export const icons = {
   imported: 'i-lucide-download',
   expired: 'i-lucide-clock',
   reactivate: 'i-lucide-clock-arrow-up',
-  // 有效到
-  validity: 'i-lucide-calendar-clock',
   left: 'i-lucide-eye-off',
   error: 'i-lucide-circle-alert',
   // Dream 的整理与四种建议

@@ -60,6 +60,9 @@
 - tsdown 产物是 `dist/index.mjs`，不是 `.js`。
 - 管理界面用到新图标时必须加进 `apps/web/src/icons.ts`：构建时只打包这份清单里的图标，没列进来的会在运行时向公共 Iconify 接口请求。原因：自托管服务不应向第三方发请求。
 - 管理界面的 tsconfig 关掉了 `exactOptionalPropertyTypes`（组件库的 props 类型不兼容），服务端保持开启。
+- 页面和组件的 scoped 样式不在 layer 里，压过 Tailwind 的工具类（工具类都在 layer 里）：元素上 scoped 写了 `display` 时，`max-lg:hidden` 这类类名不生效，窄屏的显隐写在 scoped 的媒体查询里。
+- 记忆目录用 `UTree` 的虚拟滚动，只渲染看得见的行：行高固定，`MemoriesPage` 的 `rowHeight` 同时给样式和 `estimateSize`，改一边要改另一边。组件库把 `data-index` 放在外层的 `li` 上，又把 `textContent` 多解了一层，它自带的打字跳转会报错、也拿不到焦点，所以给它空文字关掉，打字跳转在页面里自己做（`typeaheadMatch`）。升级 Nuxt UI 时复查。
+- 记忆列表、目录只有 URI 树上的记忆（`form = curated`）。概览和窄柱的条数含来自对话的两层（`extractedCounts`），列表筛这两层是空的，它们的内容在联系人页；算列表总数时只用 `counts`。
 - `useToast` 等 Nuxt UI 组合式函数显式从 `@nuxt/ui/composables` 导入，不依赖自动导入。
 - 内容表（带 `space_id`、在 `RLS_TABLES` 里的表）只能在 `withSpace()` 里访问，否则 RLS 让查询返回空、写入失败。新增内容表时同时加进 `RLS_TABLES` 和迁移里的策略，`rls.int.test.ts` 会核对两者一致。
 - 集成测试需要 `KIOKU_TEST_DATABASE_URL`：本地 `docker compose -f docker-compose.dev.yml up -d --build` 后设为 `postgres://kioku:kioku@localhost:55432/kioku`；没设置时跳过，CI 里没设置直接失败。

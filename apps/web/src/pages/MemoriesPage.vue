@@ -1,8 +1,14 @@
 <script setup lang="ts">
-import type { BreadcrumbItem, TabsItem } from '@nuxt/ui'
+import type { TabsItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
-import type { MemoryView, Sensitivity } from '@kioku/contracts'
-import { useQueryClient } from '@tanstack/vue-query'
+import {
+  LAYERS,
+  SENSITIVITIES,
+  type Layer,
+  type MemoryView,
+  type Sensitivity,
+} from '@kioku/contracts'
+import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, onMounted, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
@@ -17,14 +23,22 @@ import MemoryListView from '../components/MemoryListView.vue'
 import {
   ancestorsOf,
   depthOf,
+  guideLines,
   lastSegment,
   parentOf,
   toTreeItems,
+  treeRowPlaces,
+  typeaheadMatch,
   type MemoryTreeItem,
 } from '../components/memoryTree'
+import MemoryFlags from '../components/strata/MemoryFlags.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
+import StrataRibbon from '../components/strata/StrataRibbon.vue'
+import StrataSwatch from '../components/strata/StrataSwatch.vue'
+import { tallyCounts } from '../components/strata/strata'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
-import { layerShortLabels, sensitivityLabels } from '../labels'
 
 const route = useRoute()
 const router = useRouter()
@@ -50,35 +64,75 @@ function select(uri: string | null) {
 type View = 'tree' | 'list' | 'deleted' | 'expired'
 const views: View[] = ['tree', 'list', 'deleted', 'expired']
 const viewItems: TabsItem[] = [
-  { label: '目录', value: 'tree', icon: icons.tree },
-  { label: '列表', value: 'list', icon: icons.list },
-  { label: '已删除', value: 'deleted', icon: icons.remove },
-  { label: '已过期', value: 'expired', icon: icons.expired },
+  { label: '目录', value: 'tree' },
+  { label: '列表', value: 'list' },
+  { label: '已过期', value: 'expired' },
+  { label: '已删除', value: 'deleted' },
 ]
 const view = computed<View>(() => views.find((v) => v === route.query.view) ?? 'tree')
 function setView(value: string | number) {
   void router.replace(withQuery({ view: value === 'tree' ? null : String(value) }))
 }
 
+// 窄柱的条数和列表上方的总数都来自概览的统计，和概览页共用一份缓存
+const overview = useQuery({
+  queryKey: computed(() => ['overview', spaceId.value]),
+  queryFn: () => api.overview(spaceId.value),
+})
+// 窄柱上有来自对话的两层，所以算上它们；列表只列记忆，它的总数不算（见 MemoryListView）
+const stackCounts = computed(() => {
+  const data = overview.data.value
+  return data ? tallyCounts([...data.counts, ...data.extractedCounts]) : null
+})
+
+// 窄柱按层筛选：目录是懒加载的，筛不了，所以筛选都落在列表上。切到别的视图时列表的条件留在地址里，窄柱不亮
+const filterLayer = computed(() => {
+  const layer = route.query.layer as Layer
+  return view.value === 'list' && LAYERS.includes(layer) ? layer : null
+})
+const filterSensitivity = computed(() => {
+  const sensitivity = route.query.sensitivity as Sensitivity
+  return view.value === 'list' && SENSITIVITIES.includes(sensitivity) ? sensitivity : null
+})
+// 再点同一层取消；换一层时敏感级的筛选不带过去，那一层可能一条都没有
+function selectLayer(layer: Layer) {
+  const same = filterLayer.value === layer
+  void router.replace(
+    withQuery({
+      view: 'list',
+      layer: same ? null : layer,
+      sensitivity: same ? filterSensitivity.value : null,
+    }),
+  )
+}
+function clearStrataFilter() {
+  void router.replace(withQuery({ layer: null, sensitivity: null }))
+}
+// 当前记忆在哪一层，窄柱上标出来。层读完才知道，由编辑器告诉这里
+const currentLayer = ref<Layer | null>(null)
+watch(selectedUri, () => (currentLayer.value = null))
+// 悬停的那一行属于哪一层，窄柱上跟着亮。列表和目录一个委托够了，行再多也只有这一个监听
+const nearLayer = ref<Layer | null>(null)
+function onIndexHover(event: MouseEvent) {
+  const row = (event.target as Element).closest?.('[data-layer]')
+  nearLayer.value = (row?.getAttribute('data-layer') as Layer | undefined) ?? null
+}
+
 const roots = ref<MemoryTreeItem[]>([])
 // 展开的节点由这里管理：重新载入某一级之后，要据此把展开着的子节点也重新加载
 const expanded = ref<string[]>([])
 const loadingRoots = ref(false)
+// 整棵树没读出来：和「暂无记忆」分开说，免得以为记忆没了
+const rootsFailed = ref(false)
 const createOpen = ref(false)
 const createUri = ref('')
-
-const folderIcons = { folder: icons.folder, file: icons.file }
-// 树上的敏感级：公开不标，机密画锁，其余画一个点
-const sensitivityDots: Partial<Record<Sensitivity, string>> = {
-  internal: 'bg-info',
-  private: 'bg-warning',
-}
 
 function failed(err: unknown) {
   toast.add({ title: err instanceof ApiError ? err.message : '读取失败', color: 'error' })
 }
 
-// 列表、已删除、已过期、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新
+// 列表、已删除、已过期、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
+// 概览的统计也在这里：窄柱和列表上方的总数都用它
 function invalidateLists() {
   for (const key of [
     'memory-list',
@@ -86,6 +140,7 @@ function invalidateLists() {
     'memory-expired',
     'memory-domains',
     'memory-glossary',
+    'overview',
   ]) {
     void queryClient.invalidateQueries({ queryKey: [key, spaceId.value] })
   }
@@ -98,13 +153,14 @@ async function loadRoots() {
   try {
     const domains = await api.memoryDomains(forSpace)
     if (forSpace !== spaceId.value) return
+    rootsFailed.value = false
     roots.value = domains.map((d) => ({
       label: `${d.domain}://`,
       // domain 根用 domain 名作为键，与 children 接口的参数一致
       uri: d.domain,
       exists: false,
       loaded: false,
-      icon: icons.folder,
+      count: d.count,
       children: [
         {
           label: '加载中……',
@@ -117,6 +173,7 @@ async function loadRoots() {
     }))
     await restoreExpanded()
   } catch (err) {
+    if (forSpace === spaceId.value) rootsFailed.value = true
     failed(err)
   } finally {
     loadingRoots.value = false
@@ -125,7 +182,7 @@ async function loadRoots() {
 
 async function loadChildren(item: MemoryTreeItem) {
   const result = await api.memoryChildren(spaceId.value, item.uri)
-  const children = toTreeItems(result, folderIcons)
+  const children = toTreeItems(result)
   item.children = children.length ? children : undefined
   item.loaded = true
 }
@@ -165,6 +222,8 @@ async function restoreExpanded() {
 async function reveal(uri: string) {
   expanded.value = [...new Set([...expanded.value, ...ancestorsOf(uri)])]
   await restoreExpanded()
+  await nextTick()
+  scrollToRow(uri)
 }
 
 // 新建、删除或移动之后刷新受影响的那一级；父级不在树里（例如新的 domain）就整棵重载。
@@ -205,7 +264,18 @@ function refresh() {
   void serially(loadRoots)
 }
 
-async function onToggle(_event: unknown, item: MemoryTreeItem) {
+// 这次点在箭头上。树的点击同时算选中和展开：点箭头只展开收起，点名字只打开
+function clickedChevron(event: Event) {
+  const original = (event as CustomEvent<{ originalEvent: Event }>).detail.originalEvent
+  return !!(original.target as Element | null)?.closest?.('[data-chevron]')
+}
+
+async function onToggle(event: Event, item: MemoryTreeItem) {
+  const original = (event as CustomEvent<{ originalEvent: Event }>).detail.originalEvent
+  if (original.type === 'click' && item.exists && !clickedChevron(event)) {
+    event.preventDefault()
+    return
+  }
   if (item.loaded) return
   try {
     await loadChildren(item)
@@ -217,7 +287,7 @@ async function onToggle(_event: unknown, item: MemoryTreeItem) {
 // 不让树自己记选中状态，选中只跟着地址走：切换被取消时高亮留在原处，点虚拟目录也不会高亮
 function onSelect(event: Event, item: MemoryTreeItem) {
   event.preventDefault()
-  if (item.exists) void select(item.uri)
+  if (item.exists && !clickedChevron(event)) void select(item.uri)
 }
 
 function openCreate(prefix: string) {
@@ -304,8 +374,82 @@ const selectedItem = computed(() =>
   selectedUri.value ? find(roots.value, selectedUri.value) : undefined,
 )
 
+// 目录一行多高：窄屏要点得准，高一些。虚拟滚动按这个高度算位置，要和样式一致
+const viewport = useViewport()
+const rowHeight = computed(() => (viewport.value.width < 1024 ? 36 : 28))
+// 展开着的每一行在哪里：引线和滚动到选中的那一行都要用
+const places = computed(() => treeRowPlaces(roots.value, expanded.value))
+const treeRef = ref<{ $el: HTMLElement } | null>(null)
+function scrollToRow(uri: string) {
+  const el = treeRef.value?.$el
+  const place = places.value.get(uri)
+  if (!el || !place) return
+  const top = place.index * rowHeight.value
+  if (top < el.scrollTop || top + rowHeight.value > el.scrollTop + el.clientHeight) {
+    el.scrollTop = top - el.clientHeight / 2
+  }
+}
+// 打字跳到名字以这些字开头的那一行。组件库自带的跳转在虚拟滚动下把焦点给了外层的 li，
+// 焦点就丢了，所以自己做，给它的文字留空（treeVirtualize）
+let typed = ''
+let typedAt = 0
+function onTreeKeydown(event: KeyboardEvent) {
+  if (event.key.length !== 1 || event.key === ' ') return
+  if (event.metaKey || event.ctrlKey || event.altKey) return
+  typed = event.timeStamp - typedAt < 1000 ? typed + event.key : event.key
+  typedAt = event.timeStamp
+  const current = (document.activeElement as HTMLElement | null)?.dataset.uri ?? null
+  const uri = typeaheadMatch(places.value, typed, current)
+  if (!uri) return
+  scrollToRow(uri)
+  // 滚动之后要等那一行渲染出来
+  requestAnimationFrame(() =>
+    requestAnimationFrame(() =>
+      treeRef.value?.$el.querySelector<HTMLElement>(`[data-uri="${CSS.escape(uri)}"]`)?.focus(),
+    ),
+  )
+}
+// textContent 不在组件库声明的选项里，但会一路传给虚拟滚动
+const treeVirtualize = computed(() => ({
+  estimateSize: rowHeight.value,
+  overscan: 16,
+  textContent: () => '',
+}))
+// 切回目录时树是新建的，滚动位置从头开始
+watch(view, async (next) => {
+  if (next !== 'tree' || !selectedUri.value) return
+  await nextTick()
+  scrollToRow(selectedUri.value)
+})
+// 三个列表共用一个滚动区：各记各的位置，切回来还在原处
+const listScroller = ref<HTMLElement | null>(null)
+const listScrollTops = new Map<View, number>()
+watch(
+  view,
+  async (next, previous) => {
+    if (listScroller.value) listScrollTops.set(previous, listScroller.value.scrollTop)
+    await nextTick()
+    if (listScroller.value) listScroller.value.scrollTop = listScrollTops.get(next) ?? 0
+  },
+  { flush: 'pre' },
+)
+
+// domain 根的条数：树只在整棵重载时读 domain 列表，新建、删除之后靠这个查询跟上
+const domains = useQuery({
+  queryKey: computed(() => ['memory-domains', spaceId.value]),
+  queryFn: () => api.memoryDomains(spaceId.value),
+})
+function rowCount(item: MemoryTreeItem, open: boolean) {
+  if (!item.children) return null
+  const place = places.value.get(item.uri)
+  if (place?.depth === 0) {
+    return domains.data.value?.find((d) => d.domain === item.uri)?.count ?? item.count ?? null
+  }
+  return open ? null : (item.count ?? null)
+}
+
 // 详情上方的路径；上一级本身是记忆、并且树里已经载入时可以点过去
-const crumbs = computed<BreadcrumbItem[]>(() => {
+const crumbs = computed(() => {
   const uri = selectedUri.value
   if (!uri) return []
   const ancestors = ancestorsOf(uri)
@@ -320,131 +464,181 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
 </script>
 
 <template>
-  <!-- 窄屏放不下两栏：选中记忆时只显示详情，返回后再显示树 -->
-  <UDashboardPanel
-    id="memory-tree"
-    :default-size="30"
-    :min-size="20"
-    :max-size="45"
-    resizable
-    :class="selectedUri ? 'max-lg:hidden' : ''"
-  >
-    <template #header>
-      <UDashboardNavbar title="记忆">
-        <template #right>
-          <UButton
-            :icon="icons.refresh"
-            color="neutral"
-            variant="ghost"
-            aria-label="刷新"
-            @click="refresh"
-          />
-          <UButton v-if="canWrite" :icon="icons.add" size="sm" @click="openCreate('')">
-            新建
-          </UButton>
-        </template>
-      </UDashboardNavbar>
-      <UDashboardToolbar>
+  <!-- 窄屏放不下多栏：选中记忆时只显示详情，返回后再显示目录 -->
+  <div class="memories" :class="{ 'has-selection': selectedUri }">
+    <aside class="ribbon-column">
+      <StrataRibbon
+        :counts="stackCounts"
+        :selected="filterLayer"
+        :sensitivity="filterSensitivity"
+        :current="currentLayer"
+        :near="nearLayer"
+        @select="selectLayer"
+        @clear="clearStrataFilter"
+      />
+    </aside>
+
+    <section
+      class="index-column"
+      aria-label="记忆"
+      @mouseover="onIndexHover"
+      @mouseleave="nearLayer = null"
+    >
+      <div class="index-head">
         <UTabs
           :model-value="view"
           :items="viewItems"
           :content="false"
           variant="link"
-          size="sm"
-          class="w-full"
+          size="md"
+          :ui="{ root: 'min-w-0', list: 'border-0', trigger: 'px-2 py-0 h-11 text-sm/5' }"
           @update:model-value="setView"
         />
-      </UDashboardToolbar>
-    </template>
-    <template #body>
+        <div class="flex shrink-0 items-center gap-1">
+          <UButton
+            :icon="icons.refresh"
+            size="sm"
+            color="neutral"
+            variant="ghost"
+            aria-label="刷新"
+            @click="refresh"
+          />
+          <UButton
+            v-if="canWrite"
+            size="sm"
+            color="primary"
+            variant="outline"
+            @click="openCreate('')"
+          >
+            新建
+          </UButton>
+        </div>
+      </div>
+      <div class="ribbon-flat">
+        <StrataRibbon
+          orientation="horizontal"
+          :counts="stackCounts"
+          :selected="filterLayer"
+          :sensitivity="filterSensitivity"
+          @select="selectLayer"
+          @clear="clearStrataFilter"
+        />
+      </div>
+
       <template v-if="view === 'tree'">
-        <p v-if="!loadingRoots && !roots.length" class="text-sm text-muted">
+        <p v-if="overview.data.value" class="index-count">
+          <b>{{ overview.data.value.total }}</b> 条
+        </p>
+        <div v-if="rootsFailed" class="index-note">
+          <NoteLine tone="error">
+            读取失败
+            <template #actions>
+              <UButton size="sm" color="primary" variant="outline" @click="refresh">重试</UButton>
+            </template>
+          </NoteLine>
+        </div>
+        <p v-else-if="!loadingRoots && !roots.length" class="index-empty">
           暂无记忆{{ canWrite ? '。点击「新建」添加第一条。' : '' }}
         </p>
+        <!-- 一级最多五百行，展开几级就是几千行：只渲染看得见的那些。行高固定，虚拟滚动不用量 -->
         <UTree
+          v-else
+          ref="treeRef"
+          :key="rowHeight"
           v-model:expanded="expanded"
+          class="memory-tree"
           :model-value="selectedItem"
           :items="roots"
           :get-key="(item) => item.uri"
+          :virtualize="treeVirtualize"
           @toggle="onToggle"
           @select="onSelect"
+          @keydown="onTreeKeydown"
         >
-          <template #item-label="{ item }">
-            <span class="flex min-w-0 items-center gap-1.5">
-              <span class="truncate">{{ item.label }}</span>
-              <template v-if="item.exists && item.layer && item.sensitivity">
-                <span class="shrink-0 text-xs text-dimmed">{{ layerShortLabels[item.layer] }}</span>
-                <UIcon
-                  v-if="item.sensitivity === 'secret'"
-                  :name="icons.secret"
-                  class="size-3 shrink-0 text-error"
-                  role="img"
-                  :aria-label="sensitivityLabels.secret"
-                />
-                <span
-                  v-else-if="sensitivityDots[item.sensitivity]"
-                  class="size-1.5 shrink-0 rounded-full"
-                  :class="sensitivityDots[item.sensitivity]"
-                  role="img"
-                  :aria-label="sensitivityLabels[item.sensitivity]"
-                  :title="sensitivityLabels[item.sensitivity]"
-                />
-                <span
-                  v-if="item.priority !== null && item.priority !== undefined && item.priority <= 1"
-                  class="shrink-0 px-1 font-mono text-xs/4 font-medium ring ring-rule ring-inset"
-                >
-                  P{{ item.priority }}
-                </span>
+          <template #item-wrapper="{ item, expanded: open, selected }">
+            <div
+              class="tree-row"
+              :class="{
+                selected,
+                virtual: !item.exists,
+                root: places.get(item.uri)?.depth === 0,
+                note: item.disabled,
+              }"
+              :style="{
+                height: `${rowHeight}px`,
+                paddingLeft: `${5 + (places.get(item.uri)?.depth ?? 0) * 16}px`,
+              }"
+              :data-layer="item.layer ?? undefined"
+              :data-uri="item.uri"
+              :title="item.exists || item.disabled ? undefined : '此路径没有记忆，只能展开'"
+            >
+              <template v-if="places.get(item.uri)">
+                <template v-for="line in guideLines(places.get(item.uri)!)" :key="line.left">
+                  <i class="guide" :class="{ end: line.end }" :style="{ left: `${line.left}px` }" />
+                  <i v-if="line.tick" class="tick" :style="{ left: `${line.left}px` }" />
+                </template>
               </template>
-            </span>
+              <span
+                v-if="item.children"
+                class="chevron"
+                :class="{ open }"
+                data-chevron
+                aria-hidden="true"
+              >
+                <svg width="8" height="8" viewBox="0 0 8 8">
+                  <path d="M2 1l4 3-4 3z" fill="currentColor" />
+                </svg>
+              </span>
+              <span v-else class="chevron" />
+              <StrataSwatch
+                v-if="item.exists && item.layer && item.sensitivity"
+                class="me-[7px] shrink-0"
+                :layer="item.layer"
+                :sensitivity="item.sensitivity"
+              />
+              <span class="tree-label">{{ item.label }}</span>
+              <span class="tree-trail">
+                <MemoryFlags
+                  v-if="item.exists"
+                  :layer="item.layer"
+                  :sensitivity="item.sensitivity"
+                  :priority="item.priority"
+                />
+                <span v-if="rowCount(item, open) !== null" class="tree-count">
+                  {{ rowCount(item, open) }}
+                </span>
+              </span>
+            </div>
           </template>
         </UTree>
       </template>
-      <!-- 列表、已删除与已过期切走时不卸载：保留筛选与位置，切走之前发出的撤销删除、重新生效完成后也还能通知到这里 -->
-      <KeepAlive>
-        <MemoryListView
-          v-if="view === 'list'"
-          :space-id="spaceId"
-          :selected-uri="selectedUri"
-          @select="select"
-        />
-        <DeletedMemories
-          v-else-if="view === 'deleted'"
-          :space-id="spaceId"
-          @restored="onRevived"
-          @show-expired="setView('expired')"
-        />
-        <ExpiredMemories
-          v-else-if="view === 'expired'"
-          :space-id="spaceId"
-          @reactivated="onRevived"
-        />
-      </KeepAlive>
-    </template>
-  </UDashboardPanel>
-
-  <UDashboardPanel id="memory-detail" :class="selectedUri ? '' : 'max-lg:hidden'">
-    <template #header>
-      <!-- 标题里放的是面包屑导航，不用默认的 h1 -->
-      <UDashboardNavbar :as="{ title: 'div' }">
-        <template #leading>
-          <UButton
-            v-if="selectedUri"
-            :icon="icons.back"
-            color="neutral"
-            variant="ghost"
-            class="lg:hidden"
-            aria-label="返回"
-            @click="select(null)"
+      <!-- 列表、已删除与已过期切走时不卸载：保留筛选与位置，切走之前发出的撤销删除、重新生效完成后也还能通知到这里。
+           所以外面这一层切到目录时也只是藏起来 -->
+      <div v-show="view !== 'tree'" ref="listScroller" class="index-scroll">
+        <KeepAlive>
+          <MemoryListView
+            v-if="view === 'list'"
+            :space-id="spaceId"
+            :selected-uri="selectedUri"
+            :overview="overview.data.value"
+            @select="select"
           />
-        </template>
-        <template #title>
-          <UBreadcrumb v-if="crumbs.length" :items="crumbs" class="min-w-0" />
-          <span v-else>选择一条记忆</span>
-        </template>
-      </UDashboardNavbar>
-    </template>
-    <template #body>
+          <DeletedMemories
+            v-else-if="view === 'deleted'"
+            :space-id="spaceId"
+            @restored="onRevived"
+            @show-expired="setView('expired')"
+          />
+          <ExpiredMemories
+            v-else-if="view === 'expired'"
+            :space-id="spaceId"
+            @reactivated="onRevived"
+          />
+        </KeepAlive>
+      </div>
+    </section>
+
+    <section class="detail-column" aria-label="详情">
       <MemoryEditor
         v-if="selectedUri"
         :key="`${spaceId}|${selectedUri}`"
@@ -455,17 +649,301 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
         @changed="onChanged"
         @moved="onMoved"
         @open="openLinked"
-      />
-      <p v-else class="text-sm text-muted">
-        在左侧选择一条记忆，查看或编辑。<Hint>目录中没有正文的路径是虚拟节点，只能展开。</Hint>
+        @layer="currentLayer = $event"
+      >
+        <template #nav>
+          <button type="button" class="back" @click="select(null)">
+            <UIcon :name="icons.back" class="size-4" />
+            返回
+          </button>
+          <nav class="crumbs" aria-label="路径">
+            <template v-for="(crumb, index) in crumbs" :key="index">
+              <i v-if="index > 0" class="crumb-sep" aria-hidden="true">›</i>
+              <RouterLink v-if="crumb.to" :to="crumb.to" class="crumb-link">
+                {{ crumb.label }}
+              </RouterLink>
+              <span v-else :class="{ 'crumb-current': index === crumbs.length - 1 }">
+                {{ crumb.label }}
+              </span>
+            </template>
+          </nav>
+        </template>
+      </MemoryEditor>
+      <p v-else class="detail-empty">
+        选择一条记忆<Hint>目录中没有正文的路径是虚拟节点，只能展开。</Hint>
       </p>
-    </template>
-  </UDashboardPanel>
+    </section>
 
-  <CreateMemoryModal
-    v-model:open="createOpen"
-    :space-id="spaceId"
-    :initial-uri="createUri"
-    @created="onCreated"
-  />
+    <CreateMemoryModal
+      v-model:open="createOpen"
+      :space-id="spaceId"
+      :initial-uri="createUri"
+      @created="onCreated"
+    />
+  </div>
 </template>
+
+<style scoped>
+.memories {
+  flex: 1;
+  min-width: 0;
+  display: grid;
+  grid-template-columns: 80px 344px minmax(0, 1fr);
+  grid-template-rows: minmax(0, 1fr);
+}
+.ribbon-column {
+  min-height: 0;
+  padding-bottom: 14px;
+  border-right: 1px solid var(--strata-rule);
+  overflow: hidden;
+}
+.index-column {
+  display: flex;
+  flex-direction: column;
+  min-width: 0;
+  min-height: 0;
+  border-right: 1px solid var(--strata-rule);
+}
+.index-head {
+  flex: none;
+  display: flex;
+  align-items: stretch;
+  justify-content: space-between;
+  gap: 4px;
+  height: 44px;
+  padding: 0 10px 0 6px;
+  border-bottom: 1px solid var(--strata-rule);
+}
+.index-head > div:last-child {
+  align-self: center;
+}
+/* 横排的窄柱只在窄屏出现，竖排的在窄屏藏起来 */
+.ribbon-flat {
+  display: none;
+  flex: none;
+  padding: 10px 16px 0;
+}
+.index-count {
+  flex: none;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.index-count b {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.index-note {
+  padding: 14px 14px 0;
+}
+.index-empty {
+  padding: 18px 14px;
+  color: var(--ui-text-muted);
+}
+.index-scroll {
+  flex: 1;
+  min-height: 0;
+  overflow-y: auto;
+  /* 切回来时位置由上面的监听恢复，浏览器的滚动锚定会再挪一点 */
+  overflow-anchor: none;
+}
+/* 根元素在组件库里面，要穿透 */
+.index-column :deep(.memory-tree) {
+  flex: 1;
+  min-height: 0;
+  padding: 5px 0 16px;
+  /* 路径最深十六级，缩进加上标记可能比这一栏宽 */
+  overflow-x: hidden;
+}
+.tree-row {
+  position: relative;
+  display: flex;
+  align-items: center;
+  padding-right: 12px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.4;
+  white-space: nowrap;
+  cursor: pointer;
+  user-select: none;
+}
+.tree-row.note {
+  cursor: default;
+}
+.tree-row:not(.note):hover {
+  background: var(--ui-bg-elevated);
+}
+.tree-row:focus-visible {
+  outline-offset: -2px;
+}
+.tree-row.selected,
+.tree-row.selected:hover {
+  --strata-frame: var(--strata-selected-frame);
+  --flag-muted: var(--strata-on-selected-muted);
+  --flag-solid: var(--strata-on-selected);
+  --flag-on-solid: var(--strata-selected);
+  background: var(--strata-selected);
+  color: var(--strata-on-selected);
+}
+.tree-row.virtual {
+  color: var(--ui-text-muted);
+}
+.tree-row.virtual:hover {
+  color: var(--ui-text-highlighted);
+}
+.tree-row.root {
+  color: var(--ui-text);
+  font-weight: 500;
+}
+.tree-row.note {
+  font-family: var(--font-sans);
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.guide {
+  position: absolute;
+  top: 0;
+  bottom: 0;
+  width: 1px;
+  background: var(--ui-border-accented);
+}
+.guide.end {
+  bottom: 50%;
+}
+.tick {
+  position: absolute;
+  top: 50%;
+  width: 9px;
+  height: 1px;
+  background: var(--ui-border-accented);
+}
+.tree-row.selected .guide,
+.tree-row.selected .tick {
+  background: var(--strata-on-selected-muted);
+}
+.chevron {
+  position: relative;
+  flex: none;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 18px;
+  align-self: stretch;
+  margin-right: 3px;
+  color: var(--ui-text-muted);
+}
+.chevron:hover {
+  color: var(--ui-text-highlighted);
+}
+.chevron svg {
+  transition: transform 0.1s linear;
+}
+.chevron.open svg {
+  transform: rotate(90deg);
+}
+.tree-row.selected .chevron {
+  color: var(--strata-on-selected);
+}
+.tree-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+.tree-trail {
+  flex: none;
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  margin-left: auto;
+  padding-left: 8px;
+  font-family: var(--font-sans);
+}
+.tree-count {
+  font-family: var(--font-mono);
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.tree-row.selected .tree-count {
+  color: var(--strata-on-selected-muted);
+}
+.detail-column {
+  min-width: 0;
+  min-height: 0;
+  display: flex;
+  flex-direction: column;
+}
+.detail-empty {
+  padding: 32px;
+  color: var(--ui-text-muted);
+}
+/* 返回只在窄屏有：宽屏上目录一直在旁边 */
+.back {
+  display: none;
+  align-items: center;
+  gap: 3px;
+  height: 32px;
+  margin: -4px 0 4px -3px;
+  font-size: 14px;
+  color: var(--ui-text-muted);
+}
+.crumbs {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 6px;
+  font-family: var(--font-mono);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+}
+.crumb-sep {
+  font-family: var(--font-sans);
+}
+.crumb-link:hover {
+  color: var(--ui-text-highlighted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.crumb-current {
+  color: var(--ui-text);
+}
+
+@media (max-width: 1240px) {
+  .memories {
+    grid-template-columns: 80px 324px minmax(0, 1fr);
+  }
+}
+@media (max-width: 1023.98px) {
+  .memories {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .ribbon-column {
+    display: none;
+  }
+  .ribbon-flat {
+    display: block;
+  }
+  .back {
+    display: inline-flex;
+  }
+  .index-column {
+    border-right: 0;
+  }
+  .has-selection .index-column,
+  .memories:not(.has-selection) .detail-column {
+    display: none;
+  }
+  .index-head {
+    padding: 0 16px 0 7px;
+  }
+  .index-count,
+  .index-empty {
+    padding-left: 16px;
+    padding-right: 16px;
+  }
+  .detail-empty {
+    padding: 16px;
+  }
+}
+</style>

@@ -1,5 +1,11 @@
 <script setup lang="ts">
-import { LAYERS, MEMORY_LIST_SORTS, SENSITIVITIES, type MemoryListSort } from '@kioku/contracts'
+import {
+  LAYERS,
+  MEMORY_LIST_SORTS,
+  SENSITIVITIES,
+  type MemoryListSort,
+  type SpaceOverview,
+} from '@kioku/contracts'
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
@@ -8,10 +14,27 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { icons } from '../icons'
-import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
+import { sensitivityLabels } from '../labels'
+import { isBootNode } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
+import Hint from './Hint.vue'
+import MemoryRow from './strata/MemoryRow.vue'
+import NoteLine from './strata/NoteLine.vue'
+import StrataSwatch from './strata/StrataSwatch.vue'
+import {
+  filteredTotal,
+  isConversationLayer,
+  sensitivityHints,
+  swatchText,
+  tallyCounts,
+} from './strata/strata'
 
-const props = defineProps<{ spaceId: string; selectedUri: string | null }>()
+const props = defineProps<{
+  spaceId: string
+  selectedUri: string | null
+  // 概览的统计：能算出总数时写在列表上方
+  overview?: SpaceOverview | undefined
+}>()
 const emit = defineEmits<{ select: [uri: string] }>()
 const route = useRoute()
 const router = useRouter()
@@ -72,14 +95,6 @@ const domainItems = computed(() => [
   { label: '全部 domain', value: null },
   ...(domains.data.value ?? []).map((d) => ({ label: `${d.domain}://`, value: d.domain })),
 ])
-const layerItems = [
-  { label: '全部层', value: null },
-  ...LAYERS.map((l) => ({ label: layerLabels[l], value: l })),
-]
-const sensitivityItems = [
-  { label: '全部敏感级', value: null },
-  ...SENSITIVITIES.map((s) => ({ label: sensitivityLabels[s], value: s })),
-]
 const sortItems = MEMORY_LIST_SORTS.map((s) => ({ label: sortLabels[s], value: s }))
 
 const list = useInfiniteQuery({
@@ -102,116 +117,191 @@ const list = useInfiniteQuery({
   enabled: active,
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
+
+// 再点一次取消这个敏感级
+function toggleSensitivity(value: string) {
+  setFilter('sensitivity', filters.value.sensitivity === value ? null : value)
+}
+// 窄柱上的层和这里的敏感级一起清掉
+function clearStrata() {
+  const query = { ...route.query }
+  delete query.layer
+  delete query.sensitivity
+  void router.replace({ query })
+}
+// 列表只列 URI 树上的记忆，来自对话的两层筛出来是空的：说清楚去哪里看
+const conversationLayer = computed(
+  () => !!filters.value.layer && isConversationLayer(filters.value.layer),
+)
+const strataTag = computed(() =>
+  filters.value.layer || filters.value.sensitivity
+    ? swatchText(filters.value.layer, filters.value.sensitivity)
+    : null,
+)
+
+// 列表上方的总数：统计里有的才说。列表只列记忆，来自对话的两层不算，所以不用合并的条数。
+// 关键字、domain 或两个开关合用时算不出来，说已经载入了多少
+const total = computed(() => {
+  const data = props.overview
+  const f = filters.value
+  if (!data || f.q || f.domain) return null
+  const strata = f.layer || f.sensitivity
+  if (f.missingDisclosure && f.plaintext) return null
+  if (f.missingDisclosure) return strata ? null : data.missingDisclosure
+  if (f.plaintext) return strata ? null : data.plaintextCredentials
+  return filteredTotal(tallyCounts(data.counts), f.layer, f.sensitivity)
+})
 </script>
 
 <template>
-  <div class="space-y-3">
-    <UInput
-      v-model="keyword"
-      name="q"
-      placeholder="搜索 URI 与触发场景"
-      aria-label="关键字"
-      class="w-full"
-    />
-    <div class="grid grid-cols-2 gap-2">
-      <USelect
-        :model-value="filters.domain"
-        :items="domainItems"
-        aria-label="domain"
-        @update:model-value="(v) => setFilter('domain', (v as string | null) ?? null)"
+  <div>
+    <div class="list-filters">
+      <UInput
+        v-model="keyword"
+        name="q"
+        placeholder="搜索 URI 与触发场景"
+        aria-label="关键字"
+        class="w-full"
       />
-      <USelect
-        :model-value="filters.layer"
-        :items="layerItems"
-        aria-label="层"
-        @update:model-value="(v) => setFilter('layer', (v as string | null) ?? null)"
-      />
-      <USelect
-        :model-value="filters.sensitivity"
-        :items="sensitivityItems"
-        aria-label="敏感级"
-        @update:model-value="(v) => setFilter('sensitivity', (v as string | null) ?? null)"
-      />
-      <USelect
-        :model-value="filters.sort"
-        :items="sortItems"
-        aria-label="排序"
-        @update:model-value="(v) => setFilter('sort', v === 'updated' ? null : (v as string))"
-      />
-    </div>
-    <div class="flex flex-wrap gap-x-4 gap-y-1">
-      <UCheckbox
-        :model-value="filters.missingDisclosure"
-        label="未设触发场景"
-        @update:model-value="(v) => setFilter('missingDisclosure', v ? 'true' : null)"
-      />
-      <UCheckbox
-        :model-value="filters.plaintext"
-        label="疑似明文凭据"
-        @update:model-value="(v) => setFilter('plaintext', v ? 'true' : null)"
-      />
+      <div class="grid grid-cols-2 gap-2">
+        <USelect
+          :model-value="filters.domain"
+          :items="domainItems"
+          aria-label="domain"
+          @update:model-value="(v) => setFilter('domain', (v as string | null) ?? null)"
+        />
+        <USelect
+          :model-value="filters.sort"
+          :items="sortItems"
+          aria-label="排序"
+          @update:model-value="(v) => setFilter('sort', v === 'updated' ? null : (v as string))"
+        />
+      </div>
+      <div class="sensitivity-filter" role="group" aria-label="敏感级">
+        <button
+          v-for="s in SENSITIVITIES"
+          :key="s"
+          type="button"
+          :class="{ on: filters.sensitivity === s }"
+          :aria-pressed="filters.sensitivity === s"
+          :title="sensitivityHints[s]"
+          @click="toggleSensitivity(s)"
+        >
+          <StrataSwatch
+            :layer="filters.layer"
+            :sensitivity="s"
+            :width="16"
+            :height="11"
+            decorative
+          />
+          <span>{{ sensitivityLabels[s] }}</span>
+        </button>
+      </div>
+      <div class="flex flex-wrap gap-x-4 gap-y-1">
+        <USwitch
+          :model-value="filters.missingDisclosure"
+          size="sm"
+          label="未设触发场景"
+          @update:model-value="(v) => setFilter('missingDisclosure', v ? 'true' : null)"
+        />
+        <USwitch
+          :model-value="filters.plaintext"
+          size="sm"
+          label="疑似明文凭据"
+          @update:model-value="(v) => setFilter('plaintext', v ? 'true' : null)"
+        />
+      </div>
     </div>
 
-    <UAlert
-      v-if="list.isError.value"
-      color="error"
-      variant="subtle"
-      :title="list.error.value instanceof ApiError ? list.error.value.message : '读取失败'"
-    />
-    <div v-else-if="list.isPending.value" class="space-y-2">
+    <p class="list-count">
+      <span v-if="strataTag" class="list-tag">
+        <StrataSwatch :layer="filters.layer" :sensitivity="filters.sensitivity" decorative />
+        {{ strataTag }}
+        <button type="button" aria-label="清除筛选" @click="clearStrata">
+          <UIcon :name="icons.cancel" class="size-3.5" />
+        </button>
+      </span>
+      <span v-if="total !== null"
+        ><b>{{ total }}</b> 条</span
+      >
+      <span v-else-if="items.length">
+        已载入 <b>{{ items.length }}</b> 条
+      </span>
+    </p>
+
+    <div v-if="conversationLayer" class="list-note">
+      <NoteLine>
+        来自对话的内容不在记忆列表中<Hint>
+          联系人层的事实和情节层的会话摘要在联系人详情中查看。
+        </Hint>
+        <template #actions>
+          <UButton
+            size="sm"
+            color="primary"
+            variant="outline"
+            :to="{ name: 'subjects', params: { spaceId } }"
+          >
+            查看联系人
+          </UButton>
+        </template>
+      </NoteLine>
+    </div>
+
+    <div v-if="list.isError.value" class="list-note">
+      <NoteLine tone="error">
+        {{ list.error.value instanceof ApiError ? list.error.value.message : '读取失败' }}
+      </NoteLine>
+    </div>
+    <div v-else-if="list.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 5" :key="n" class="h-12 w-full" />
     </div>
     <template v-else>
-      <ul class="space-y-1">
+      <ul>
         <li v-for="item in items" :key="item.id">
-          <button
+          <MemoryRow
+            as="button"
             type="button"
-            class="w-full rounded-md px-2 py-1.5 text-left hover:bg-elevated/60"
-            :class="item.uri === selectedUri ? 'bg-elevated' : ''"
+            :uri="item.uri"
+            :layer="item.layer"
+            :sensitivity="item.sensitivity"
+            :priority="item.priority"
+            :selected="item.uri === selectedUri"
             :aria-current="item.uri === selectedUri ? 'true' : undefined"
             @click="emit('select', item.uri)"
           >
-            <span class="flex items-center gap-1.5">
-              <code class="min-w-0 truncate text-xs">{{ item.uri }}</code>
-              <UBadge size="sm" variant="subtle" color="neutral" class="shrink-0">
-                {{ layerLabels[item.layer] }}
-              </UBadge>
-              <UBadge
-                size="sm"
-                variant="subtle"
-                :color="sensitivityColors[item.sensitivity]"
-                class="shrink-0"
-              >
-                {{ sensitivityLabels[item.sensitivity] }}
-              </UBadge>
-              <span class="ml-auto shrink-0 text-xs text-muted">P{{ item.priority }}</span>
-            </span>
-            <span class="mt-0.5 flex items-center gap-2 text-xs text-muted">
+            <span class="flex items-baseline gap-2">
               <span class="min-w-0 flex-1 truncate">
-                {{ item.disclosure?.trim() || '未设触发场景' }}
+                <template v-if="item.disclosure?.trim()">{{ item.disclosure }}</template>
+                <template v-else-if="isBootNode(item)">启动加载</template>
+                <span v-else :class="{ 'text-warning': item.uri !== selectedUri }"
+                  >未设触发场景</span
+                >
               </span>
               <!-- 列表只列有效的；载入之后才到期的在这里显示已过期 -->
               <span
                 v-if="item.validTo"
-                class="flex shrink-0 items-center gap-0.5"
-                :class="isExpired(item.validTo) ? 'text-error' : ''"
+                class="shrink-0 text-xs"
+                :class="{ 'text-warning': isExpired(item.validTo) && item.uri !== selectedUri }"
                 :title="`有效期至 ${formatTime(item.validTo)}`"
               >
-                <UIcon :name="icons.validity" class="size-3" />
-                {{ isExpired(item.validTo) ? '已过期' : formatShort(item.validTo) }}
+                {{ isExpired(item.validTo) ? '已过期' : `${formatShort(item.validTo)} 到期` }}
               </span>
-              <time :datetime="item.updatedAt" :title="formatTime(item.updatedAt)" class="shrink-0">
+              <time
+                :datetime="item.updatedAt"
+                :title="formatTime(item.updatedAt)"
+                class="shrink-0 text-xs"
+              >
                 {{ formatRelative(item.updatedAt) }}
               </time>
             </span>
-          </button>
+          </MemoryRow>
         </li>
       </ul>
-      <p v-if="!items.length" class="text-sm text-muted">没有符合条件的记忆</p>
-      <div v-if="list.hasNextPage.value" class="flex justify-center">
+      <p v-if="!items.length && !conversationLayer" class="list-empty">没有符合条件的记忆</p>
+      <div v-if="list.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"
-          variant="subtle"
+          variant="outline"
           size="sm"
           :loading="list.isFetchingNextPage.value"
           @click="list.fetchNextPage()"
@@ -222,3 +312,84 @@ const items = computed(() => list.data.value?.pages.flatMap((page) => page.items
     </template>
   </div>
 </template>
+
+<style scoped>
+.list-filters {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 10px 14px 11px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.sensitivity-filter {
+  display: flex;
+  border: 1px solid var(--ui-border-accented);
+}
+.sensitivity-filter button {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 5px;
+  height: 28px;
+  font-size: 13px;
+  line-height: 1;
+  color: var(--ui-text-muted);
+}
+.sensitivity-filter button + button {
+  border-left: 1px solid var(--ui-border-accented);
+}
+.sensitivity-filter button:hover {
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-highlighted);
+}
+.sensitivity-filter button:focus-visible {
+  outline-offset: -2px;
+}
+.sensitivity-filter button.on {
+  --strata-frame: var(--strata-selected-frame);
+  background: var(--strata-selected);
+  color: var(--strata-on-selected);
+}
+.list-count {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  min-height: 37px;
+  padding: 7px 14px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.55;
+}
+.list-count:empty {
+  display: none;
+}
+.list-count b {
+  font-family: var(--font-mono);
+  font-weight: 600;
+}
+.list-tag {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  font-weight: 600;
+}
+.list-tag button {
+  display: inline-flex;
+  padding: 2px;
+  margin-left: -2px;
+  color: var(--ui-text-muted);
+}
+.list-tag button:hover {
+  background: var(--ui-bg-elevated);
+  color: var(--ui-text-highlighted);
+}
+.list-note {
+  padding: 14px 14px 0;
+}
+.list-empty {
+  padding: 18px 14px;
+  color: var(--ui-text-muted);
+}
+</style>

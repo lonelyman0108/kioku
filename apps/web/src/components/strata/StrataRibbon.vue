@@ -19,7 +19,8 @@ import {
 // 高度或宽度不传时撑满父元素
 const props = withDefaults(
   defineProps<{
-    counts: StrataCounts
+    // 条数还没读到或读取失败时为 null：带等高、不写数字，筛选照样能点
+    counts: StrataCounts | null
     orientation?: 'vertical' | 'horizontal'
     // 竖排的总高，横排的总宽
     length?: number
@@ -86,14 +87,16 @@ const lit = computed(() => Boolean(props.selected))
 // 竖排时带的高度是 h、宽度固定；横排反过来。段都沿宽度方向切
 const bandSize = (band: Band) =>
   vertical.value ? { w: THICKNESS, h: band.h } : { w: band.h, h: FLAT_THICKNESS }
-const parts = (band: Band) => segments(props.counts[band.layer], bandSize(band).w, 1)
+const parts = (band: Band) =>
+  props.counts ? segments(props.counts[band.layer], bandSize(band).w, 1) : []
+const countText = (layer: Layer) =>
+  props.counts ? `${layerLabels[layer]} ${layerTotal(props.counts, layer)} 条` : layerLabels[layer]
 const dividers = (band: Band) =>
   parts(band)
     .filter((p) => p.x > 0)
     .map((p) => `M${p.x + 0.5} 0V${bandSize(band).h}`)
     .join('')
-const hint = (band: Band) =>
-  `${layerLabels[band.layer]} ${layerTotal(props.counts, band.layer)} 条\n${layerHints[band.layer]}`
+const hint = (band: Band) => `${countText(band.layer)}\n${layerHints[band.layer]}`
 const faded = (band: Band, sensitivity: Sensitivity) =>
   Boolean(props.sensitivity) &&
   sensitivity !== props.sensitivity &&
@@ -117,7 +120,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
       @click="emit('clear')"
     >
       <span>全部</span>
-      <b>{{ curatedTotal(counts) }}</b>
+      <b v-if="counts">{{ curatedTotal(counts) }}</b>
     </button>
     <div class="rb-stack">
       <button
@@ -132,7 +135,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
             : { left: `${band.y}px`, width: `${band.h}px` }
         "
         :aria-pressed="selected === band.layer"
-        :aria-label="`${layerLabels[band.layer]} ${layerTotal(counts, band.layer)} 条`"
+        :aria-label="countText(band.layer)"
         :title="hint(band)"
         @click="emit('select', band.layer)"
         @mouseenter="emit('hover', band.layer)"
@@ -178,7 +181,8 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
         </svg>
         <i v-if="vertical" class="rb-tick" />
         <span class="rb-label">
-          {{ layerShortLabels[band.layer] }}<b>{{ layerTotal(counts, band.layer) }}</b>
+          {{ layerShortLabels[band.layer]
+          }}<b v-if="counts">{{ layerTotal(counts, band.layer) }}</b>
         </span>
       </button>
     </div>

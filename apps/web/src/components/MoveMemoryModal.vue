@@ -11,6 +11,8 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { layerLabels } from '../labels'
+import NoteLine from './strata/NoteLine.vue'
+import SwatchOptions from './strata/SwatchOptions.vue'
 
 const props = defineProps<{ spaceId: string; memory: ConsoleMemoryView }>()
 const open = defineModel<boolean>('open', { required: true })
@@ -48,7 +50,14 @@ const fromConversation = computed(
 )
 const canPickLayer = computed(() => !namespaced.value && !fromConversation.value)
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
-const layerItems = PLAIN_LAYERS.map((l) => ({ label: layerLabels[l], value: l }))
+const layerOptions = computed(() =>
+  PLAIN_LAYERS.map((value) => ({
+    value,
+    label: layerLabels[value],
+    layer: value,
+    sensitivity: origin.value.sensitivity,
+  })),
+)
 // 只在真的换层时才带上 layer：从人格或应用的命名空间移出时必须给，普通 domain 之间没改就不带
 const newLayer = computed(() =>
   canPickLayer.value && form.layer !== origin.value.layer ? form.layer : null,
@@ -113,7 +122,7 @@ async function submit() {
               : undefined
           "
         >
-          <USelect v-model="form.layer" :items="layerItems" class="w-full" />
+          <SwatchOptions v-model="form.layer" label="层" :options="layerOptions" />
         </UFormField>
         <p v-else-if="namespaced" class="text-sm text-muted">
           移到 {{ domain }}:// 下，层由 URI 决定：{{ domain === 'persona' ? '人格层' : '应用层' }}。
@@ -121,25 +130,21 @@ async function submit() {
         <p v-else class="text-sm text-muted">
           {{ layerLabels[origin.layer] }}层的记忆来自对话，只能改 URI，不能改层。
         </p>
-        <UAlert
-          v-if="crossing"
-          color="warning"
-          variant="subtle"
-          title="可见范围将改变"
-          :description="
-            personal(origin.layer)
-              ? '改为共享层后，空间内其他成员与有权限的应用均可读取。'
-              : '改为个人层后，这条记忆仅属于当前账号，其他成员及其应用将无法读取。'
-          "
-        />
-        <UAlert
-          v-if="stale"
-          color="warning"
-          variant="subtle"
-          title="这条记忆已更新"
-          description="请关闭后重新打开，确认新版本后再操作。"
-        />
-        <UAlert v-else-if="error" color="error" variant="subtle" :title="error" />
+        <NoteLine v-if="crossing" tone="warning">
+          可见范围将改变
+          <template #detail>
+            {{
+              personal(origin.layer)
+                ? '改为共享层后，空间内其他成员与有权限的应用均可读取。'
+                : '改为个人层后，这条记忆仅属于当前账号，其他成员及其应用将无法读取。'
+            }}
+          </template>
+        </NoteLine>
+        <NoteLine v-if="stale" tone="warning">
+          这条记忆已更新
+          <template #detail>请关闭后重新打开，确认新版本后再操作。</template>
+        </NoteLine>
+        <NoteLine v-else-if="error" tone="error">{{ error }}</NoteLine>
       </form>
     </template>
     <template #footer>

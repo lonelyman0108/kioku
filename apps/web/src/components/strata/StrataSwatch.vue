@@ -15,8 +15,18 @@ const props = withDefaults(
     height?: number
     // 只标层。不传时没有敏感级画虚线框，表示敏感级不确定
     plain?: boolean
+    // 旁边的文字已经说全了：只是配图，不读屏、不弹说明
+    decorative?: boolean
   }>(),
-  { layer: null, sensitivity: null, label: 'none', width: 18, height: 12, plain: false },
+  {
+    layer: null,
+    sensitivity: null,
+    label: 'none',
+    width: 18,
+    height: 12,
+    plain: false,
+    decorative: false,
+  },
 )
 
 const rects = computed(() => paintSwatch(props.layer, props.sensitivity, props.width, props.height))
@@ -43,9 +53,10 @@ const uncertain = computed(() => !props.plain && !props.sensitivity)
 <template>
   <span
     class="inline-flex items-center gap-1.5 align-middle"
-    :title="title"
-    :aria-label="name"
-    role="img"
+    :title="decorative ? undefined : title"
+    :aria-label="decorative ? undefined : name"
+    :aria-hidden="decorative ? true : undefined"
+    :role="decorative ? undefined : 'img'"
   >
     <svg
       :width="width"

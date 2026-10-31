@@ -7,10 +7,18 @@ import { computed, ref } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
-import { icons } from '../icons'
-import { actorLabel, eventLabel, layerLabels, memoryViaLabels, sensitivityLabels } from '../labels'
+import {
+  actorLabel,
+  eventLabel,
+  layerLabels,
+  memoryViaLabels,
+  provenanceLabels,
+  sensitivityLabels,
+} from '../labels'
 import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SectionHeading from './strata/SectionHeading.vue'
 
 const props = defineProps<{
   spaceId: string
@@ -155,10 +163,13 @@ async function restore() {
     restoring.value = false
   }
 }
+
+// 版本号写在最左边：改动之后的那一版；离开可见范围的只有改前的那一版
+const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?.version ?? null
 </script>
 
 <template>
-  <div class="space-y-4">
+  <div class="memory-history">
     <UAlert
       v-if="history.isError.value"
       color="error"
@@ -169,112 +180,103 @@ async function restore() {
       <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />
     </div>
     <template v-else>
-      <UAlert
-        v-if="expiredNow && current?.validTo"
-        color="warning"
-        variant="subtle"
-        :icon="icons.expired"
-        :title="`这条记忆已于 ${formatTime(current.validTo)} 过期，不再召回，也不进启动加载`"
-        :description="
-          current.released
-            ? '过期后同一 URI 上已写入新记忆，URI 已释放。那条记忆仍在时，需先移走或删除才能恢复生效。'
-            : undefined
-        "
-        :actions="
-          canReactivate
-            ? [
-                {
-                  label: '恢复生效',
-                  icon: icons.reactivate,
-                  color: 'neutral',
-                  variant: 'subtle',
-                  loading: reactivating,
-                  onClick: () => current && emit('reactivate', current.version),
-                },
-              ]
-            : []
-        "
-      />
-      <p class="text-xs text-muted">
-        恢复此版本只改正文、触发场景、优先级与关键词。<Hint>
-          URI、层、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。层或归属与当前不同、敏感级高于当前的版本无法恢复。
-        </Hint>
-        <template v-if="history.data.value?.truncated">
-          仅列出最近 500 次改动与 100 次查看。
+      <NoteLine v-if="expiredNow && current?.validTo" tone="warning">
+        这条记忆已于 {{ formatTime(current.validTo) }} 过期，不再召回，也不进启动加载
+        <template v-if="current.released" #detail>
+          过期后同一 URI 上已写入新记忆，URI 已释放。那条记忆仍在时，需先移走或删除才能恢复生效。
         </template>
-      </p>
-      <ol class="space-y-3">
-        <li
-          v-for="event in events"
-          :key="event.id"
-          class="rounded-lg border border-default p-3 text-sm"
-        >
-          <div class="flex flex-wrap items-center gap-2">
-            <UIcon
-              :name="event.left ? icons.left : eventLabel(event.type).icon"
-              class="size-4 text-muted"
-            />
-            <span class="font-medium">{{ eventLabel(event.type).label }}</span>
-            <span class="text-muted">{{ actorLabel(event.actor).name }}</span>
-            <span v-if="event.via" class="text-xs text-muted">
-              {{ memoryViaLabels[event.via] ?? event.via }}
-            </span>
-            <UBadge v-if="isCurrent(event)" size="sm" variant="subtle">当前版本</UBadge>
-            <time
-              :datetime="event.createdAt"
-              :title="formatTime(event.createdAt)"
-              class="ml-auto text-xs text-muted"
-            >
+        <template v-if="canReactivate" #actions>
+          <UButton
+            size="sm"
+            color="primary"
+            variant="outline"
+            :loading="reactivating"
+            @click="current && emit('reactivate', current.version)"
+          >
+            恢复生效
+          </UButton>
+        </template>
+      </NoteLine>
+      <SectionHeading title="历史">
+        <template #hint>
+          <Hint>
+            恢复此版本只改正文、触发场景、优先级与关键词。URI、层、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。层或归属与当前不同、敏感级高于当前的版本无法恢复。
+          </Hint>
+        </template>
+        <template v-if="history.data.value?.truncated" #actions>
+          仅列出最近 500 次改动与 100 次查看
+        </template>
+      </SectionHeading>
+      <ol>
+        <li v-for="event in events" :key="event.id" class="history-row">
+          <span class="history-version" :class="{ current: isCurrent(event) }">
+            <template v-if="versionOf(event) !== null">v{{ versionOf(event) }}</template>
+          </span>
+          <div class="min-w-0">
+            <p class="history-title">
+              <b>{{ eventLabel(event.type).label }}</b>
+              <span v-if="event.before && contentChange(event) === 'changed'"> 正文</span>
+              <span v-if="isCurrent(event)" class="history-current">当前版本</span>
+            </p>
+            <p class="history-meta">
+              {{ actorLabel(event.actor).name }}
+              <span class="ms-3">来源 {{ provenanceLabels[event.provenance] }}</span>
+              <span v-if="event.via" class="ms-3">
+                {{ memoryViaLabels[event.via] ?? event.via }}
+              </span>
+            </p>
+            <p v-if="event.left" class="history-meta">
+              此次改动后，这条记忆超出当前账号的可见范围，无法查看改后内容，也无法恢复此版本。
+            </p>
+            <ul v-else class="history-meta">
+              <li v-for="change in changes(event.before, event.after)" :key="change">
+                {{ change }}
+              </li>
+            </ul>
+            <p v-if="!event.left && contentChange(event) === 'secret'" class="history-meta">
+              机密内容的历史不含正文
+            </p>
+            <pre
+              v-if="open === event.id && contentChange(event) === 'changed'"
+              class="history-diff"
+            ><template v-for="(row, index) in openRows" :key="index"><span
+              v-if="row.kind === 'skip'"
+              class="diff-skip"
+            >… 省略未改动的 {{ row.count }} 行</span><span
+              v-else
+              class="diff-line"
+              :class="row.kind"
+            >{{ row.text }}</span></template></pre>
+          </div>
+          <div class="history-side">
+            <time :datetime="event.createdAt" :title="formatTime(event.createdAt)">
               {{ formatRelative(event.createdAt) }}
             </time>
+            <div v-if="!event.left" class="history-actions">
+              <UButton
+                v-if="contentChange(event) === 'changed'"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :aria-expanded="open === event.id"
+                @click="open = open === event.id ? null : event.id"
+              >
+                {{ open === event.id ? '收起改动' : '查看改动' }}
+              </UButton>
+              <UButton
+                v-if="restorable(event)"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                @click="askRestore(event)"
+              >
+                恢复此版本
+              </UButton>
+            </div>
           </div>
-          <p v-if="event.left" class="mt-1 text-xs text-muted">
-            此次改动后，这条记忆超出当前账号的可见范围，无法查看改后内容，也无法恢复此版本。
-          </p>
-          <ul v-else class="mt-1 space-y-0.5 text-xs text-muted">
-            <li v-for="change in changes(event.before, event.after)" :key="change">
-              {{ change }}
-            </li>
-          </ul>
-          <div v-if="!event.left" class="mt-2 flex flex-wrap gap-2">
-            <UButton
-              v-if="contentChange(event) === 'changed'"
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              @click="open = open === event.id ? null : event.id"
-            >
-              {{ open === event.id ? '收起改动' : '查看改动' }}
-            </UButton>
-            <span v-else-if="contentChange(event) === 'secret'" class="text-xs text-muted">
-              机密内容的历史不含正文
-            </span>
-            <UButton
-              v-if="restorable(event)"
-              :icon="icons.restore"
-              size="xs"
-              color="neutral"
-              variant="subtle"
-              class="ml-auto"
-              @click="askRestore(event)"
-            >
-              恢复此版本
-            </UButton>
-          </div>
-          <pre
-            v-if="open === event.id && contentChange(event) === 'changed'"
-            class="mt-2 max-h-96 overflow-auto rounded bg-elevated p-2 font-mono text-xs leading-relaxed"
-          ><template v-for="(row, index) in openRows" :key="index"><span
-            v-if="row.kind === 'skip'"
-            class="block text-dimmed"
-          >… 省略未改动的 {{ row.count }} 行</span><span
-            v-else
-            class="block whitespace-pre-wrap"
-            :class="row.kind === 'add' ? 'bg-success/15 text-success' : row.kind === 'remove' ? 'bg-error/15 text-error line-through' : ''"
-          >{{ row.kind === 'add' ? '+ ' : row.kind === 'remove' ? '- ' : '  ' }}{{ row.text }}</span></template></pre>
         </li>
       </ol>
-      <p v-if="!events.length" class="text-sm text-muted">暂无可查看的变更记录</p>
+      <p v-if="!events.length" class="py-3 text-sm text-muted">暂无可查看的变更记录</p>
     </template>
 
     <UModal
@@ -296,3 +298,113 @@ async function restore() {
     </UModal>
   </div>
 </template>
+
+<style scoped>
+.history-row {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto;
+  column-gap: 10px;
+  padding: 11px 0 12px;
+  border-bottom: 1px solid var(--ui-border);
+}
+.history-version {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.7;
+  color: var(--ui-text-muted);
+}
+.history-version.current {
+  font-weight: 700;
+  color: var(--ui-text-highlighted);
+}
+.history-title {
+  font-size: 14px;
+  line-height: 1.7;
+}
+.history-title b {
+  font-weight: 600;
+}
+.history-current {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  margin-left: 6px;
+  padding: 0 6px;
+  border: 1px solid var(--strata-rule);
+  font-size: 12px;
+  line-height: 1;
+  vertical-align: 1px;
+}
+.history-meta {
+  font-size: 14px;
+  line-height: 1.65;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+.history-side {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 6px;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ui-text-muted);
+}
+.history-actions {
+  display: flex;
+  gap: 5px;
+}
+.history-diff {
+  max-height: 24rem;
+  margin-top: 7px;
+  overflow: auto;
+  font-family: var(--font-sans);
+  font-size: 14px;
+  line-height: 1.8;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.diff-skip {
+  display: block;
+  padding-left: 18px;
+  color: var(--ui-text-muted);
+}
+.diff-line {
+  position: relative;
+  display: block;
+  min-height: 1.8em;
+  padding-left: 18px;
+}
+.diff-line::before {
+  content: '';
+  position: absolute;
+  left: 3px;
+}
+.diff-line.add {
+  font-weight: 600;
+}
+.diff-line.add::before {
+  content: '+';
+}
+.diff-line.remove {
+  color: var(--ui-error);
+  text-decoration: line-through;
+}
+.diff-line.remove::before {
+  content: '−';
+}
+@media (max-width: 1023.98px) {
+  .history-row {
+    grid-template-columns: 34px minmax(0, 1fr);
+  }
+  .history-side {
+    grid-column: 2;
+    flex-direction: row;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    margin-top: 4px;
+  }
+}
+</style>

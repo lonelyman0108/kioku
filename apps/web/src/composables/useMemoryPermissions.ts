@@ -46,5 +46,5 @@ export function useMemoryPermissions(spaceId: Ref<string>) {
     return null
   }
 
-  return { role, canWrite, sensitivities, canWriteUri, readOnlyReason }
+  return { apps, role, canWrite, sensitivities, canWriteUri, readOnlyReason }
 }
