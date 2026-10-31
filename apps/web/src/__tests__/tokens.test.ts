@@ -36,11 +36,20 @@ const contrast = (a: string | undefined, b: string | undefined) => {
   return (Math.max(x, y) + 0.05) / (Math.min(x, y) + 0.05)
 }
 
+// fg 按 share 的比例盖在 bg 上之后看到的颜色
+const over = (fg: string | undefined, share: number, bg: string | undefined) => {
+  const under = hex(bg)
+  const mixed = hex(fg).map((v, i) => Math.round(v * share + under[i]! * (1 - share)))
+  return `#${mixed.map((v) => v.toString(16).padStart(2, '0')).join('')}`
+}
+
 const light = block(':root,\n.light')
 const dark = block('.dark')
 const themes = { 浅色: light, 深色: dark }
 const scale = (name: string, shade: number) =>
   new RegExp(`--color-${name}-${shade}:\\s*(#[0-9a-f]{6})`, 'i').exec(css)?.[1]
+const linkLine =
+  Number(/color-mix\(in srgb, currentColor (\d+)%, transparent\)/.exec(css)?.[1]) / 100
 
 describe('Nuxt UI 的语义色', () => {
   it('theme.colors 里的每个名字在 main.css 里都有整套色阶', () => {
@@ -54,6 +63,15 @@ describe('Nuxt UI 的语义色', () => {
   it('中性色写的是自定义色阶：插件运行时还要按名字拼变量，否则断言成 stone 的那一处就不成立了', () => {
     expect(theme.colors.neutral).toBe('paper')
     expect(colorsPlugin).toMatch(/color-\$\{[^}]*value[^}]*\}-\$\{shade\}/)
+  })
+})
+
+describe('文字链接', () => {
+  it('两种写法的下划线同一个透明度：text-primary 的规则和 UButton 的 link 变体', () => {
+    expect(linkLine).toBeGreaterThan(0)
+    expect(JSON.stringify(theme.button.compoundVariants)).toContain(
+      `decoration-current/${linkLine * 100}`,
+    )
   })
 })
 
@@ -110,17 +128,27 @@ describe('两套主题的令牌', () => {
       })
 
       it('只读的淡色和只能按 URI 读取的实心块分得开，上面的文字过线', () => {
-        const bg = hex(t['--ui-bg'])
         const share = parseInt(t['--strata-tint']!) / 100
         for (const layer of STACK) {
-          const tint = hex(t[`--layer-${layer}`]).map((v, i) =>
-            Math.round(v * share + bg[i]! * (1 - share)),
-          )
-          const color = `#${tint.map((v) => v.toString(16).padStart(2, '0')).join('')}`
-          expect(contrast(color, t['--strata-solid']), layer).toBeGreaterThanOrEqual(1.7)
-          expect(contrast(t['--ui-text-highlighted'], color), layer).toBeGreaterThanOrEqual(4.5)
+          const tint = over(t[`--layer-${layer}`], share, t['--ui-bg'])
+          expect(contrast(tint, t['--strata-explicit']), layer).toBeGreaterThanOrEqual(1.7)
+          expect(contrast(t['--ui-text-highlighted'], tint), layer).toBeGreaterThanOrEqual(4.5)
         }
-        expect(contrast(t['--strata-solid'], t['--ui-bg'])).toBeGreaterThanOrEqual(1.5)
+        expect(contrast(t['--strata-on-solid'], t['--strata-explicit'])).toBeGreaterThanOrEqual(4.5)
+        expect(contrast(t['--strata-explicit'], t['--ui-bg'])).toBeGreaterThanOrEqual(1.5)
+      })
+
+      it('机密的实心块在页面底色上看得见', () => {
+        expect(contrast(t['--strata-solid'], t['--ui-bg'])).toBeGreaterThanOrEqual(1.85)
+      })
+
+      it('文字链接的下划线不低于 3:1：它是认出链接的唯一线索', () => {
+        for (const text of [t['--ui-text'], t['--ui-text-muted']]) {
+          const line = over(text, linkLine, t['--ui-bg'])
+          expect(contrast(line, t['--ui-bg']), text).toBeGreaterThanOrEqual(3)
+        }
+        const hovered = over(t['--ui-text'], linkLine, t['--ui-bg-elevated'])
+        expect(contrast(hovered, t['--ui-bg-elevated'])).toBeGreaterThanOrEqual(3)
       })
 
       it('反色按钮的文字过线', () => {

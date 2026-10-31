@@ -125,7 +125,7 @@ function allot(weights: readonly number[], total: number, min: number): number[]
 // 来自对话的两层在上，和下面五层之间留 gap
 export function stackBands(counts: StrataCounts | null, height: number, gap = 0, min = 1): Band[] {
   const weights = STACK.map((l) => (counts ? Math.sqrt(Math.max(layerTotal(counts, l), 1)) : 1))
-  const heights = allot(weights, Math.max(0, Math.round(height - gap)), min)
+  const heights = allot(weights, Math.max(0, Math.floor(height - gap)), min)
   let start = 0
   return STACK.map((layer, i) => {
     const band = { layer, y: start + (isConversationLayer(layer) ? 0 : gap), h: heights[i]! }
@@ -232,30 +232,44 @@ export function swatchText(layer: Layer | null, sensitivity: Sensitivity | null)
 
 /* ———— 权限范围 ———— */
 
-// 一格的权限，按读（召回、按 URI、读不到）和写的组合分。
-// 对象层与情节层的写指对话抽取能写进去，不能按 URI 直接写，所以读不到又能写时单独一种
+// 一格的权限：怎么读（召回、按 URI、读不到）和怎么写的组合。
+// 对象层与情节层的写指对话抽取能写进去，不能按 URI 直接写，和普通的写是两回事，每种读法都单独一种
 export type AccessKind =
-  'read-write' | 'read' | 'explicit' | 'explicit-write' | 'extract' | 'write' | 'none'
+  | 'read-write'
+  | 'read-extract'
+  | 'read'
+  | 'explicit-write'
+  | 'explicit-extract'
+  | 'explicit'
+  | 'write'
+  | 'extract'
+  | 'none'
 
 export const accessKindLabels: Record<AccessKind, string> = {
   'read-write': '读写',
+  'read-extract': '读取且抽取写入',
   read: '只读',
-  explicit: '仅按 URI 读取',
   'explicit-write': '按 URI 读取且可写',
-  extract: '仅抽取写入',
+  'explicit-extract': '按 URI 读取且抽取写入',
+  explicit: '仅按 URI 读取',
   write: '仅写入',
+  extract: '仅抽取写入',
   none: '无权限',
 }
 
+const ACCESS_KINDS: Record<AccessCell['read'], Record<'write' | 'extract' | 'none', AccessKind>> = {
+  recall: { write: 'read-write', extract: 'read-extract', none: 'read' },
+  explicit: { write: 'explicit-write', extract: 'explicit-extract', none: 'explicit' },
+  none: { write: 'write', extract: 'extract', none: 'none' },
+}
+
 export function accessKind(layer: Layer, cell: AccessCell): AccessKind {
-  if (cell.read === 'recall') return cell.write ? 'read-write' : 'read'
-  if (cell.read === 'explicit') return cell.write ? 'explicit-write' : 'explicit'
-  if (!cell.write) return 'none'
-  return isConversationLayer(layer) ? 'extract' : 'write'
+  const writing = !cell.write ? 'none' : isConversationLayer(layer) ? 'extract' : 'write'
+  return ACCESS_KINDS[cell.read][writing]
 }
 
 // 同一套编码表示权限，岩芯上没有文字，每种都要一眼能分开。
-// 底色说怎么读：满色能读能写，淡色只读，实心只能按 URI 读取，空白读不到。
+// 底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按 URI 读取，空白读不到。
 // 下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入。读写已经是满色，不再加条
 export function paintAccess(
   layer: Layer,
@@ -266,22 +280,37 @@ export function paintAccess(
   scale: TextureScale = 'lg',
 ): PaintRect[] {
   const full = layerFill(layer)
-  const solid = { ...box, fill: 'var(--strata-solid)' }
+  const solid = { ...box, fill: 'var(--strata-explicit)' }
   const writeBar = { ...box, ...bar, fill: full }
-  if (kind === 'none') return []
-  if (kind === 'explicit') return [solid]
-  if (kind === 'explicit-write') return [solid, writeBar]
-  if (kind === 'write') return [writeBar]
-  if (kind === 'extract') {
-    return [writeBar, { ...box, ...bar, fill: `url(#${TEXTURES.gaps[scale]})` }]
+  const extractBar = [writeBar, { ...box, ...bar, fill: `url(#${TEXTURES.gaps[scale]})` }]
+  const recall = (strong: boolean) => {
+    const tint = `color-mix(in srgb, ${full} var(--strata-tint), var(--ui-bg))`
+    const rects: PaintRect[] = [{ ...box, fill: strong ? full : tint }]
+    const texture = textureId(sensitivity, scale)
+    if (texture)
+      rects.push({ ...box, fill: `url(#${texture})`, ...(strong ? {} : { opacity: 0.55 }) })
+    return rects
   }
-  const tint = `color-mix(in srgb, ${full} var(--strata-tint), var(--ui-bg))`
-  const strong = kind === 'read-write'
-  const rects: PaintRect[] = [{ ...box, fill: strong ? full : tint }]
-  const texture = textureId(sensitivity, scale)
-  if (texture)
-    rects.push({ ...box, fill: `url(#${texture})`, ...(strong ? {} : { opacity: 0.55 }) })
-  return rects
+  switch (kind) {
+    case 'read-write':
+      return recall(true)
+    case 'read-extract':
+      return [...recall(false), ...extractBar]
+    case 'read':
+      return recall(false)
+    case 'explicit-write':
+      return [solid, writeBar]
+    case 'explicit-extract':
+      return [solid, ...extractBar]
+    case 'explicit':
+      return [solid]
+    case 'write':
+      return [writeBar]
+    case 'extract':
+      return extractBar
+    case 'none':
+      return []
+  }
 }
 
 // Key 的签发范围换算成格子，只看层和敏感级；机密只能按 URI 读取，要上限到机密。

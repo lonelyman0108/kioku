@@ -36,11 +36,13 @@ const BAR = { y: '84%', height: '16%' }
 // 图例只列这份矩阵里出现的
 const LEGEND_ORDER: AccessKind[] = [
   'read-write',
+  'read-extract',
   'read',
-  'explicit',
   'explicit-write',
-  'extract',
+  'explicit-extract',
+  'explicit',
   'write',
+  'extract',
   'none',
 ]
 const legendKinds = computed(() => {
@@ -223,7 +225,8 @@ const legendKinds = computed(() => {
   font-weight: 500;
 }
 .c.explicit .c-label,
-.c.explicit-write .c-label {
+.c.explicit-write .c-label,
+.c.explicit-extract .c-label {
   background: none;
   color: var(--strata-on-solid);
 }

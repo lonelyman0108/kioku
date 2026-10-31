@@ -135,10 +135,15 @@ describe('带的高度', () => {
     expect(stackBands(extreme(), 5, 12, 24).map((b) => b.h)).toEqual([0, 0, 0, 0, 0, 0, 0])
   })
 
-  it('量出来的高度带小数时也是整数像素，合起来不超出', () => {
-    const bands = stackBands(sample(), 520.25, 12, 34)
-    expect(bands.every((b) => Number.isInteger(b.h))).toBe(true)
-    expect(bands.reduce((a, b) => a + b.h, 0)).toBe(508)
+  it('量出来的高度带小数时也是整数像素，合起来不超出可用高度', () => {
+    for (const [height, total] of [
+      [520.25, 508],
+      [520.75, 508],
+    ] as const) {
+      const bands = stackBands(sample(), height, 12, 34)
+      expect(bands.every((b) => Number.isInteger(b.h))).toBe(true)
+      expect(bands.reduce((a, b) => a + b.h, 0)).toBe(total)
+    }
   })
 
   it('空的层也占一条，不会消失', () => {
@@ -233,11 +238,11 @@ describe('权限格子', () => {
     expect(accessKind('private', cell('none', false))).toBe('none')
   })
 
-  it('来自对话的两层同样看读权限，读不到又能写时才是抽取写入', () => {
+  it('来自对话的两层能写只是抽取写入，不能说成普通的写，读权限照样看', () => {
     for (const layer of ['subject', 'episode'] as const) {
-      expect(accessKind(layer, cell('recall', true))).toBe('read-write')
+      expect(accessKind(layer, cell('recall', true))).toBe('read-extract')
       expect(accessKind(layer, cell('recall', false))).toBe('read')
-      expect(accessKind(layer, cell('explicit', true))).toBe('explicit-write')
+      expect(accessKind(layer, cell('explicit', true))).toBe('explicit-extract')
       expect(accessKind(layer, cell('explicit', false))).toBe('explicit')
       expect(accessKind(layer, cell('none', true))).toBe('extract')
       expect(accessKind(layer, cell('none', false))).toBe('none')
@@ -247,11 +252,13 @@ describe('权限格子', () => {
   it('文字说清每一种', () => {
     expect(accessKindLabels).toEqual({
       'read-write': '读写',
+      'read-extract': '读取且抽取写入',
       read: '只读',
-      explicit: '仅按 URI 读取',
       'explicit-write': '按 URI 读取且可写',
-      extract: '仅抽取写入',
+      'explicit-extract': '按 URI 读取且抽取写入',
+      explicit: '仅按 URI 读取',
       write: '仅写入',
+      extract: '仅抽取写入',
       none: '无权限',
     })
     expect(new Set(Object.values(accessKindLabels)).size).toBe(KINDS.length)
@@ -270,12 +277,17 @@ describe('权限格子', () => {
     }
   })
 
-  it('底色说怎么读：满色能读能写，淡色只读，实心只能按 URI 读取，读不到的没有底色', () => {
+  it('底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按 URI 读取，读不到的没有底色', () => {
     const paint = (kind: AccessKind) => paintAccess('app', 'public', kind, box, bar)
+    const solid = { ...box, fill: 'var(--strata-explicit)' }
     expect(paint('read-write').map((r) => r.fill)).toEqual(['var(--layer-app)'])
-    expect(paint('read')[0]!.fill).toContain('color-mix')
-    expect(paint('explicit').map((r) => r.fill)).toEqual(['var(--strata-solid)'])
-    expect(paint('explicit-write')[0]).toMatchObject({ ...box, fill: 'var(--strata-solid)' })
+    for (const kind of ['read', 'read-extract'] as const) {
+      expect(paint(kind)[0]).toMatchObject(box)
+      expect(paint(kind)[0]!.fill).toContain('color-mix')
+    }
+    for (const kind of ['explicit', 'explicit-write', 'explicit-extract'] as const) {
+      expect(paint(kind)[0]).toEqual(solid)
+    }
     expect(paint('none')).toEqual([])
     for (const kind of ['write', 'extract'] as const) {
       for (const rect of paint(kind)) expect(rect).toMatchObject(bar)
@@ -285,16 +297,32 @@ describe('权限格子', () => {
   it('下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入', () => {
     const paint = (kind: AccessKind) =>
       paintAccess('app', 'public', kind, box, bar, 'sm').filter((r) => r.y === bar.y)
-    const full = { ...bar, fill: 'var(--layer-app)' }
-    expect(paint('write')).toEqual([{ ...box, ...full }])
-    expect(paint('explicit-write')).toEqual([{ ...box, ...full }])
-    expect(paint('extract')).toEqual([
-      { ...box, ...full },
-      { ...box, ...bar, fill: `url(#${TEXTURES.gaps.sm})` },
+    const full = { ...box, ...bar, fill: 'var(--layer-app)' }
+    const gaps = { ...box, ...bar, fill: `url(#${TEXTURES.gaps.sm})` }
+    for (const kind of ['write', 'explicit-write'] as const) expect(paint(kind)).toEqual([full])
+    for (const kind of ['extract', 'read-extract', 'explicit-extract'] as const) {
+      expect(paint(kind)).toEqual([full, gaps])
+    }
+    for (const kind of ['read-write', 'read', 'explicit', 'none'] as const) {
+      expect(paint(kind)).toEqual([])
+    }
+  })
+
+  it('读得到的格子上，条画在敏感级的纹理上面', () => {
+    const rects = paintAccess('app', 'private', 'read-extract', box, bar, 'sm')
+    expect(rects.map((r) => r.fill)).toEqual([
+      expect.stringContaining('color-mix'),
+      `url(#${textureId('private', 'sm')})`,
+      'var(--layer-app)',
+      `url(#${TEXTURES.gaps.sm})`,
     ])
-    expect(paint('read-write')).toEqual([])
-    expect(paint('read')).toEqual([])
-    expect(paint('explicit')).toEqual([])
+  })
+
+  it('权限的实心块和机密的实心块是两个令牌：调权限格子不能带着全站的机密一起变', () => {
+    expect(paintAccess('app', 'secret', 'explicit', box, bar)[0]!.fill).toBe(
+      'var(--strata-explicit)',
+    )
+    expect(paintCell('app', 'secret', box)[0]!.fill).toBe('var(--strata-solid)')
   })
 
   it('用到的纹理都有定义', async () => {
@@ -331,9 +359,9 @@ describe('权限格子', () => {
           cell('none', false),
         ]),
         row('subject', [
+          cell('recall', true),
+          cell('explicit', true),
           cell('none', true),
-          cell('none', false),
-          cell('none', false),
           cell('none', false),
         ]),
       ],

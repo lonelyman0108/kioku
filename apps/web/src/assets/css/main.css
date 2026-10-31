@@ -136,6 +136,8 @@
   --strata-on-layer: #2a2b26;
   --strata-solid: #2e2a26;
   --strata-on-solid: #f1efe4;
+  /* 权限格子里只能按 URI 读取的实心块，和机密的实心块不是一回事 */
+  --strata-explicit: #2e2a26;
   /* 纹理：内部圆点、私密斜线的颜色。公开无纹理，机密是实心 */
   --strata-texture: rgba(42, 43, 38, 0.5);
   /* 不带层的图例底色；只读格子是层色和纸按这个比例混出来的淡色 */
@@ -183,9 +185,11 @@
   --strata-band-line: #14181b;
   --strata-frame: #7e8483;
   --strata-on-layer: #14181b;
-  /* 真正的深色和页面底色分不开，机密用比底色亮的石板灰；又不能亮到和只读的淡色混在一起 */
-  --strata-solid: #343a3e;
+  /* 真正的深色和页面底色分不开，机密用比底色亮的石板灰 */
+  --strata-solid: #3f464a;
   --strata-on-solid: #e3e4dd;
+  /* 比机密暗一点，不然和只读的淡色混在一起 */
+  --strata-explicit: #343a3e;
   --strata-texture: rgba(20, 24, 27, 0.55);
   --strata-neutral: #aeb3b0;
   --strata-tint: 46%;
@@ -230,13 +234,13 @@
   }
 
   /*
-   * 主色和正文同色，只靠颜色认不出链接：写了 text-primary 的文字链接默认带下划线，和 UButton 的 link 变体一个样子。
-   * 组件库的元素带 data-slot，比如主色的按钮，不算
+   * 主色和正文同色，下划线是认出链接的唯一线索：写了 text-primary 的文字链接默认带下划线，和 UButton 的 link 变体一个样子。
+   * 颜色取文字色加一点透明，在底色上不低于 3:1。组件库的元素带 data-slot，比如主色的按钮，不算
    */
   :is(a, button).text-primary:not([data-slot]) {
     text-decoration-line: underline;
     text-decoration-thickness: 1px;
-    text-decoration-color: var(--ui-border-accented);
+    text-decoration-color: color-mix(in srgb, currentColor 70%, transparent);
     text-underline-offset: 3px;
   }
 

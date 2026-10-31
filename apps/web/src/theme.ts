@@ -196,11 +196,11 @@ export const theme = {
         variant: ['subtle', 'outline'] as ('subtle' | 'outline')[],
         class: `bg-transparent ring ring-inset disabled:bg-transparent aria-disabled:bg-transparent ${classes}`,
       })),
-      // link 是文字链接：下划线退后一级，悬停时跟文字同色
+      // link 是文字链接：下划线退后一级，但它是认出链接的唯一线索，不低于 3:1；悬停时跟文字同色
       {
         variant: 'link' as const,
         class:
-          'underline underline-offset-3 decoration-1 decoration-accented hover:decoration-current',
+          'underline underline-offset-3 decoration-1 decoration-current/70 hover:decoration-current',
       },
       { size: 'xs' as const, square: true, class: 'p-[5px]' },
       { size: 'sm' as const, square: true, class: 'p-[5px]' },
