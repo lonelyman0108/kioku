@@ -102,10 +102,11 @@
 - 管理界面的响应是 `ConsoleMemoryView`，比接入方的 `MemoryView` 多 `contentHidden`、`plaintextIgnored`。这两个字段不能加进 `MemoryView`，加了要重新生成 SDK；`toView` 只在 `secretRead` 为 `explicit` 时带上，Key 的响应才不多字段（`c.json` 不会按 schema 剥）。
 - 不改记忆的事件（`access`、`ignore_plaintext`、`unignore_plaintext`）只写 `before`，`after` 为 null。原因：界面按 `after.version` 标「现在的版本」，恢复也读 `after`，带上 `after` 就成了能恢复的版本。可见性靠 `before` 的敏感级，所以访问事件要写快照，不能两边都 null：否则降级之后 editor 也看得到之前的访问记录。`access` 不进活动（`activity` 里过滤），历史里另算上限，按保留期清（`retentionRules` 的 `accessEvents`）。
 - 忽略明文提示靠 `memories.plaintext_ignored_hash` 和现在的正文比，写入路径都不用管它：SQL（`IGNORED_NOW`）和 JS（`contentHash`）的算法要一致，`plaintextIgnore.int.test.ts` 核对。这一列不进事件快照（`UNSNAPSHOTTED`），不随空间导出，改成 secret 时清掉。
+- 转存为凭据靠 `scrubValue` 把值从 `memory_events` 里拿掉，只改 `scrubSnapshot` 认得的字段（正文、disclosure、关键词）。给快照加新的文字字段时要同步改它。写事件的路径都要先改或锁记忆那一行：否则带着旧正文的事件可能在转存提交之后才写进来，值又回到历史里。
 - 路由和测试台共用的处理函数（`lifecycle/handlers.ts`）不在里面新建 scope，由调用方传入，否则测试台关不掉 `record`。路由要显式只取 `LifecycleResponse` 的字段：`c.json` 不会按 schema 剥掉多余字段，`session` 不能加进 `LifecycleResponse`，加了要重新生成 SDK。
 - 新路由如果引用接入方的命名组件（`TurnEndEvent`、`SessionContext` 等），要挂在接入方路由后面（测试台路由挂在最后）。原因：OpenAPI 的组件按第一次用到的顺序排，挂早了 `sdks/python/generate.sh --check` 会失败，哪怕接口没变。
 - 新加 MCP 工具要写进 contracts 的 `BENCH_READ_TOOLS` 或 `BENCH_WRITE_TOOLS`：命令行握手按这份名单严格核对，`mayWrite` 对不认识的工具按写算。内置场景的 `capture` 与断言依赖工具结果的文字（「版本: 」「URI: 」等），`bench/executor.ts` 也按这些行与 `formatRecallBlock` 解析 URI 列表，改 `mcp/format.ts` 的文字要同步改，门禁里的矩阵会报。测试台步骤的说明与断言文字只展开 `${run}`、`${expires}`，新增命令行默认打印的文字时也不能展开 `capture` 的变量：它可能取到凭据的值。内置预设写记忆要带 `valid_to: EXPIRES`；`${run}`、`${expires}` 是保留的变量名。
-- contracts 里的 `isReplayStep`、`mayWrite` 是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定。
+- contracts 里的 `isReplayStep`、`mayWrite`、`findPlaintextCredentials` 是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定。
 - 读实例设置的函数（`loadExtractionConfig` 这类）既读库又解密，不要 catch 全部再回 `err.message`：读库出错也会被接住，drizzle 的错误信息带 SQL 与全部参数。用 `settings/endpoint.ts` 的 `unlocked`：只认 `ApiKeyLockedError`，其余重新抛给 `onError`。测读设置出错用 `testing/db.ts` 的 `settingsQueryFails`。
 - 带 Key 的 `fetch` 不要把 `err.message` 给调用方或写进日志，也不要放进 `cause`（日志也打印）：Key 中间有换行时，undici 的 Headers 报错会带上整个 Authorization 值，`signal` 已经取消时也先报这个，用 `fetchFailure` 只取错误类别；响应解析失败的文字可能带响应开头（可能回显 Key），用 `upstreamJson`。上游写进报错的 Key 用 `withoutKey`，先换再截断：`fetch` 会去掉结尾的空白，上游见到的 Key 和保存的写法可能不同。保存时已经 `trim` 并拒绝控制字符，但存量 Key 不迁移，这两处不能当多余的删掉。
 - 模型代理返回的 `message.tool_calls` 不是严格原样：id 可能是生成的，不是对象的项会被去掉，`arguments` 只放合法的 JSON 对象（原文在 `rawArguments`，只给界面显示）。`tool` 消息的 `tool_call_id` 要用 `toolCalls[i].id`，两者一一对应。

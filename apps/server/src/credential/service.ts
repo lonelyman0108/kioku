@@ -609,6 +609,26 @@ export class CredentialService {
     }, `标识已被占用或不可用：${input.identifier}`)
   }
 
+  // 在调用方的事务里新建一条托管的凭据，返回 id（转存为凭据：和改记忆放在一个事务里）。
+  // 标识冲突在这里转成 409：调用方的事务随这个错误整个回滚
+  async createHostedIn(
+    tx: Tx,
+    input: Pick<CreateCredentialRequest, 'identifier' | 'name' | 'description'> & {
+      values: Record<string, string>
+    },
+  ): Promise<string> {
+    const { values, ...rest } = input
+    try {
+      const { row } = await this.insert(tx, { ...rest, source: { kind: 'hosted', values } }, null)
+      return row.id
+    } catch (err) {
+      if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
+        throw new MemoryError(409, `标识已被占用或不可用：${input.identifier}`)
+      }
+      throw err
+    }
+  }
+
   async update(id: string, input: UpdateCredentialRequest): Promise<ConsoleCredential> {
     return this.run(async (tx) =>
       this.consoleViewOf(tx, await this.modify(tx, await this.ownById(tx, id), input)),

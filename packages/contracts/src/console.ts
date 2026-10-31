@@ -147,7 +147,7 @@ export const BenchMark = z.object({ accountName: z.string().nullable(), run: z.s
 export type BenchMark = z.infer<typeof BenchMark>
 
 // 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete、
-// reactivate（让过期的记忆重新生效）、ignore_plaintext、unignore_plaintext、
+// reactivate（让过期的记忆重新生效）、convert_credential（转存为凭据）、ignore_plaintext、unignore_plaintext、
 // access（读到 secret 的正文，只在历史里，不进活动）。access 与忽略明文提示不改记忆，after 为 null
 export const HistoryEvent = z.object({
   id: z.number().int(),

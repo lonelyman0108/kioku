@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { BenchMark, DeletionRetention, EventActor } from './console'
+import { ConsoleMemoryView } from './memories'
 import { Sensitivity } from './memory'
 
 // 凭据的标识与字段名。记忆正文里用 {{cred:<标识>}} 引用整条凭据，{{cred:<标识>#<字段>}} 引用其中一个字段
@@ -32,13 +33,90 @@ export const CREDENTIAL_PLACEHOLDER =
 const SPACE =
   ' \\t\\n\\v\\f\\r\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'
 
-// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符的不算），
-// 或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
+const PLAINTEXT_LABELS = 'password|passwd|密码|口令|token|api[_ -]?key|secret'
+// 值外面常见的引号、反引号与粗体：占位符写在里面也算占位符
+const PLAINTEXT_QUOTES = '"\'`“‘「『*'
+
+// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符的不算，
+// 占位符写在引号里也不算），或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
 // （管理界面里由空间 owner 确认后可以强制）
 export const PLAINTEXT_CREDENTIAL = new RegExp(
-  `(?:password|passwd|密码|口令|token|api[_ -]?key|secret)[${SPACE}]*[:：=][${SPACE}]*(?!\\{\\{cred:)[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
+  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*(?![${PLAINTEXT_QUOTES}]*\\{\\{cred:)[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
   'i',
 )
+
+// 正文里疑似明文的一处：值在 [start, end) 这一段（JS 字符串的下标），field 是建议用的字段名。
+// 规则只认得出值从哪里开始，到哪里结束是猜的，要让人看过再转存
+export interface PlaintextCredentialMatch {
+  start: number
+  end: number
+  field: string
+}
+
+const PLAINTEXT_ALL = new RegExp(PLAINTEXT_CREDENTIAL.source, 'gi')
+const PLAINTEXT_LABEL = new RegExp(`^(?:${PLAINTEXT_LABELS})`, 'i')
+// 值写在这些符号里时取里面的部分
+const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
+  ['**', '**'],
+  ['`', '`'],
+  ['"', '"'],
+  ["'", "'"],
+  ['“', '”'],
+  ['‘', '’'],
+  ['「', '」'],
+  ['『', '』'],
+]
+// 值到这里结束：空白、中文标点、占位符。英文标点常出现在密码里，不算
+const VALUE_END = new RegExp(`[${SPACE}，。；、！？）】」』》”’]|\\{\\{cred:`)
+
+function plaintextField(label: string): string {
+  const word = label.toLowerCase()
+  if (word === 'token' || word === 'secret') return word
+  return word.startsWith('api') ? 'api_key' : 'password'
+}
+
+// 紧接在规则认出的第一个字之后，值到哪里结束
+function plaintextValue(text: string, first: number): { start: number; end: number } {
+  for (const [open, close] of VALUE_WRAPPERS) {
+    if (!text.startsWith(open, first)) continue
+    const start = first + open.length
+    const end = text.indexOf(close, start)
+    const body = end > start ? text.slice(start, end) : ''
+    if (body && !/[\n\r\u2028\u2029]/.test(body)) return { start, end }
+  }
+  const stop = text.slice(first).search(VALUE_END)
+  let end = stop === -1 ? text.length : first + stop
+  // 结尾的逗号、句号是句子的标点；感叹号、问号常是密码的一部分，留着
+  while (end > first + 1 && ',.;:'.includes(text[end - 1]!)) end--
+  return { start: first, end: Math.max(end, first + 1) }
+}
+
+// 和 PLAINTEXT_CREDENTIAL 同一条规则，找出每一处的位置与字段名
+export function findPlaintextCredentials(text: string): PlaintextCredentialMatch[] {
+  const found: PlaintextCredentialMatch[] = []
+  let last = 0
+  for (const m of text.matchAll(PLAINTEXT_ALL)) {
+    const label = PLAINTEXT_LABEL.exec(m[0])?.[0]
+    let span: { start: number; end: number }
+    if (label) {
+      span = plaintextValue(text, m.index + m[0].length - 1)
+    } else {
+      // sk- 串可能带着连字符或下划线接着往后写，整串都是值
+      const tail = /^[A-Za-z0-9_-]*/.exec(text.slice(m.index + m[0].length))![0]
+      span = { start: m.index, end: m.index + m[0].length + tail.length }
+    }
+    // 上一处的值里又像一处（例如 a=1&token=2）：不重复算
+    if (
+      span.start < last ||
+      text.slice(span.start, span.end).includes(CREDENTIAL_PLACEHOLDER_START)
+    ) {
+      continue
+    }
+    found.push({ ...span, field: label ? plaintextField(label) : 'api_key' })
+    last = span.end
+  }
+  return found
+}
 
 // 凭据源的类型。Bitwarden 兼容的自建服务端也选 bitwarden
 export const CREDENTIAL_PROVIDER_KINDS = ['bitwarden', '1password', 'env', 'other'] as const
@@ -206,6 +284,42 @@ export const UpdateCredentialRequest = z.object({
   appIds: AppIds.optional(),
 })
 export type UpdateCredentialRequest = z.infer<typeof UpdateCredentialRequest>
+
+// 把记忆正文里的一段明文转存成一条 Kioku 托管的凭据：只给管理界面。expectedVersion 是看到这段值时的版本，
+// 期间被改过就返回 409。正文里这段值出现几处换几处，历史快照里的也一起换掉，所以太短的不收：
+// 只有几个字符时换掉的多半是别的内容
+export const ConvertToCredentialRequest = z
+  .object({
+    memoryId: z.uuid(),
+    expectedVersion: z.number().int(),
+    value: CredentialValue.min(4, '要转存的值至少 4 个字符；更短的请手动新建凭据')
+      .refine((v) => v === v.trim(), '要转存的值前后不能有空白')
+      .refine((v) => !/\p{Cs}/u.test(v), '要转存的值里有不完整的字符')
+      .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值里不能有凭据占位符'),
+    identifier: CredentialIdentifier,
+    name: CredentialName,
+    description: CredentialDescription.optional(),
+    field: CredentialFieldName,
+  })
+  // 标识、名称、说明与字段名都是明文，占位符里还带着标识和字段名：写进去就白转存了
+  .refine(
+    (r) => ![r.identifier, r.name, r.description ?? '', r.field].some((t) => t.includes(r.value)),
+    { path: ['value'], message: '标识、名称、说明与字段名里不能有要转存的值' },
+  )
+export type ConvertToCredentialRequest = z.infer<typeof ConvertToCredentialRequest>
+
+// 转存的结果，不含值
+export const ConvertedToCredential = z.object({
+  memory: ConsoleMemoryView,
+  credential: ConsoleCredential,
+  // 正文里换掉了几处
+  replaced: z.number().int(),
+  // 历史里改写了几个事件的快照
+  scrubbedEvents: z.number().int(),
+  // 历史里还有几个版本的正文疑似有别的明文（不含现在这一版）：只换掉了这一个值，换过的旧密码这类还留着
+  plaintextVersions: z.number().int(),
+})
+export type ConvertedToCredential = z.infer<typeof ConvertedToCredential>
 
 // 通过 Key 新建、修改：按标识找凭据，不能设限定的应用
 export const KeyCreateCredentialRequest = CreateCredentialRequest.omit({ appIds: true })

@@ -1,12 +1,18 @@
 import { createHash, randomUUID } from 'node:crypto'
 
-import { PLAIN_LAYERS, PLAINTEXT_CREDENTIAL, SENSITIVITIES } from '@kioku/contracts'
+import {
+  PLAIN_LAYERS,
+  PLAINTEXT_CREDENTIAL,
+  SENSITIVITIES,
+  UpdateMemoryRequest,
+} from '@kioku/contracts'
 import type {
   ActivityItem,
   ActivityList,
   BenchChanges,
   BenchMark,
   ConsoleMemoryView,
+  ConvertToCredentialRequest,
   CreateMemoryRequest,
   DeletedMemoryList,
   DomainSummary,
@@ -42,7 +48,6 @@ import type {
   ReviewResult,
   Sensitivity,
   UndeleteRequest,
-  UpdateMemoryRequest,
 } from '@kioku/contracts'
 import {
   and,
@@ -103,6 +108,7 @@ import {
   apiKeys,
   apps,
   credentials,
+  dreamSuggestions,
   memories,
   memoryCredentialRefs,
   memoryEmbeddings,
@@ -223,6 +229,16 @@ const PLAINTEXT_DOWNGRADE =
 const MASKED_DOWNGRADE = '测试台不能把 secret 改成别的敏感级：要改去记忆页'
 const MASKED_CONTENT = '测试台读不到 secret 的原文，不能改它的正文：要改去记忆页'
 const MASKED_TEXT_WRITTEN = '正文里有测试台的占位文字，不是真实的内容：要写这句话去记忆页'
+const CONVERT_SECRET = '机密记忆的正文已经加密，不在历史、全文检索和向量里，不用转存为凭据'
+const CONVERT_SCOPE =
+  '凭据占位符只能放在私人层、敏感级至少私密的记忆里：先把这条记忆改到私人层、敏感级调到私密，再转存'
+const CONVERT_NOT_FOUND = '正文里没有这段值，请重新读取后再转存'
+const CONVERT_ELSEWHERE =
+  'URI、触发场景或关键词里也有这段值，这些字段是明文，也不能放占位符：先从这些字段去掉，再转存'
+const CONVERT_TOO_LONG = '换成占位符之后正文超过了长度上限，先删掉一些内容再转存'
+// 历史里不在这个主人私人层的版本别的成员可能看得到，把值换成它，不写占位符（标识也不给他们看）；
+// disclosure 与关键词里同样不放占位符
+const SCRUBBED_VALUE = '***'
 
 // 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
 interface RefBaseline {
@@ -1392,6 +1408,118 @@ export class MemoryService {
       )
       return this.toView(after!, glossary)
     })
+  }
+
+  // 把正文里的一段明文转存成凭据，全部在一个事务里：createCredential 在这个事务里建好凭据（标识冲突、权限不够时抛错，
+  // 什么都不留下），正文里这段值换成占位符（照常过写入检查、版本加一、记一条事件），再把这个值从历史里拿掉。
+  // 全文检索是生成列，跟着新正文变；向量由旧正文生成，在同一个事务里删掉，提交后重新排队生成
+  async convertToCredential<T>(
+    input: Pick<
+      ConvertToCredentialRequest,
+      'memoryId' | 'expectedVersion' | 'value' | 'identifier' | 'field'
+    >,
+    createCredential: (tx: Tx) => Promise<T>,
+  ): Promise<{
+    memory: MemoryView
+    credential: T
+    replaced: number
+    scrubbedEvents: number
+    plaintextVersions: number
+  }> {
+    const released: string[] = []
+    const result = await this.run(async (tx, personaIds) => {
+      const row = await this.readableById(tx, input.memoryId, personaIds, true)
+      if (row.version !== input.expectedVersion) {
+        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+      }
+      this.assertModifiable(row, `没有权限改 ${row.layer} 层的记忆`)
+      if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)
+      if (!placeholderAllowed(row.layer, row.sensitivity)) {
+        throw new MemoryError(400, CONVERT_SCOPE)
+      }
+      const parts = row.content.split(input.value)
+      if (parts.length < 2) throw new MemoryError(400, CONVERT_NOT_FOUND)
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      const elsewhere = [formatUri(row.domain!, row.path!), row.disclosure ?? '', ...glossary]
+      if (elsewhere.some((text) => text.includes(input.value))) {
+        throw new MemoryError(400, CONVERT_ELSEWHERE)
+      }
+      const placeholder = `{{cred:${input.identifier}#${input.field}}}`
+      const content = parts.join(placeholder)
+      if (!UpdateMemoryRequest.shape.content.safeParse(content).success) {
+        throw new MemoryError(400, CONVERT_TOO_LONG)
+      }
+      const credential = await createCredential(tx)
+      const memory = await this.applyUpdate(
+        tx,
+        row,
+        { content, expectedVersion: row.version },
+        {
+          eventType: 'convert_credential',
+          eventContext: { credential: input.identifier, field: input.field },
+          glossary,
+          released,
+        },
+      )
+      const history = await this.scrubValue(tx, row, input.value, placeholder, content)
+      await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, row.id))
+      // Dream 的建议里可能抄了这个值（规则认不出的写法）：还作不作数看版本，这次改了版本，它们不会再列出，只是留到保留期
+      const scrub = (column: SQLWrapper) =>
+        sql`replace(${column}, ${input.value}::text, ${SCRUBBED_VALUE}::text)`
+      await tx
+        .update(dreamSuggestions)
+        .set({
+          content: scrub(dreamSuggestions.content),
+          disclosure: scrub(dreamSuggestions.disclosure),
+          reason: scrub(dreamSuggestions.reason),
+        })
+        .where(sql`${row.id}::uuid = any(${dreamSuggestions.memoryIds})`)
+      return { memory, credential, replaced: parts.length - 1, ...history }
+    })
+    this.changed([result.memory.id, ...released])
+    return result
+  }
+
+  // 把一个值从这条记忆的历史快照里拿掉，这次转存自己的事件也在内。和这条记忆的主人同在私人层的版本换成占位符，
+  // 这样恢复到旧版本也不会把明文带回来；别的版本（改层、移动之前的）换成星号，别的成员可能看得到它们，不给标识。
+  // 调用方锁着记忆这一行，写事件的路径都先改或锁这一行，不会有带着旧正文的事件在这之后才写进来。
+  // 只处理这一个值：快照里别的疑似明文（例如换过的旧密码）不动，规则会误判，盖掉会把旧版本改坏，只数出来告诉调用方
+  private async scrubValue(
+    tx: Tx,
+    row: MemoryRow,
+    value: string,
+    placeholder: string,
+    currentContent: string,
+  ): Promise<{ scrubbedEvents: number; plaintextVersions: number }> {
+    const events = await tx
+      .select({ id: memoryEvents.id, before: memoryEvents.before, after: memoryEvents.after })
+      .from(memoryEvents)
+      .where(eq(memoryEvents.memoryId, row.id))
+    let scrubbedEvents = 0
+    const leftovers = new Set<string>()
+    for (const event of events) {
+      const before = scrubSnapshot(event.before, value, placeholder, row.ownerAccountId)
+      const after = scrubSnapshot(event.after, value, placeholder, row.ownerAccountId)
+      for (const version of [before, after]) {
+        const text = (version as { content?: unknown } | null)?.content
+        if (
+          typeof text === 'string' &&
+          text !== currentContent &&
+          looksLikePlaintextCredential(text)
+        ) {
+          leftovers.add(text)
+        }
+      }
+      if (
+        JSON.stringify(before) === JSON.stringify(event.before) &&
+        JSON.stringify(after) === JSON.stringify(event.after)
+      ) {
+        continue
+      }
+      await tx.update(memoryEvents).set({ before, after }).where(eq(memoryEvents.id, event.id))
+      scrubbedEvents++
+    }
+    return { scrubbedEvents, plaintextVersions: leftovers.size }
   }
 
   async delete(
@@ -2997,6 +3125,31 @@ function stringList(value: unknown): string[] {
 function viaOf(context: unknown): string | null {
   const via = (context as { via?: unknown } | null)?.via
   return typeof via === 'string' ? via : null
+}
+
+// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure 与关键词里的也不留；旧快照里可能有全文检索向量，一起去掉
+function scrubSnapshot(
+  raw: unknown,
+  value: string,
+  placeholder: string,
+  owner: string | null,
+): unknown {
+  if (!raw || typeof raw !== 'object') return raw ?? null
+  const version: Record<string, unknown> = { ...raw }
+  delete version.fts
+  const inPlace = version.layer === 'private' && version.ownerAccountId === owner
+  if (typeof version.content === 'string') {
+    version.content = version.content.split(value).join(inPlace ? placeholder : SCRUBBED_VALUE)
+  }
+  if (typeof version.disclosure === 'string') {
+    version.disclosure = version.disclosure.split(value).join(SCRUBBED_VALUE)
+  }
+  if (Array.isArray(version.glossary)) {
+    version.glossary = version.glossary.filter(
+      (keyword) => typeof keyword !== 'string' || !keyword.includes(value),
+    )
+  }
+  return version
 }
 
 // 快照里界面要用的部分；快照是写入事件时记下的整行（不含密文），secret 的没有正文

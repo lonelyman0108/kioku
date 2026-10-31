@@ -5,6 +5,8 @@ import {
   ConsoleMemoryView,
   ConsoleSearchRequest,
   ConsoleSearchResponse,
+  ConvertedToCredential,
+  ConvertToCredentialRequest,
   CreateMemoryRequest,
   DeletedMemoryList,
   DomainSummary,
@@ -30,6 +32,7 @@ import {
 import type { Context } from 'hono'
 
 import { isInstanceAdmin, requireKey } from '../auth/middleware'
+import { credentialServiceForConsole } from '../credential/context'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { withDeletionRetention } from '../jobs/retention'
@@ -285,6 +288,15 @@ function consoleOnlyRoutes(deps: Deps) {
     request: { params, body: jsonBody(PlaintextIgnoreRequest) },
     responses: { 200: jsonResponse('记忆', ConsoleView), ...errors },
   })
+  const convertToCredential = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/convert-to-credential',
+    tags: ['console'],
+    summary:
+      '把正文里的一段明文转存成托管的凭据：一个事务里建凭据、把值换成占位符、从历史快照里拿掉这个值、删掉旧向量。响应不带值',
+    request: { params, body: jsonBody(ConvertToCredentialRequest) },
+    responses: { 200: jsonResponse('转存的结果', ConvertedToCredential), ...errors },
+  })
   const glossary = createRoute({
     method: 'get',
     path: '/spaces/{spaceId}/memories/glossary',
@@ -356,6 +368,34 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(unignorePlaintext, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.unignorePlaintext(c.req.valid('json')), 200)
+    })
+    .openapi(convertToCredential, async (c) => {
+      const { spaceId, service } = await consoleMember(deps, c)
+      const credentials = await credentialServiceForConsole(
+        deps,
+        spaceId,
+        c.get('console').accountId,
+      )
+      const { identifier, name, description, field, value } = c.req.valid('json')
+      const { memory, credential, ...outcome } = await service.convertToCredential(
+        c.req.valid('json'),
+        (tx) =>
+          credentials.createHostedIn(tx, {
+            identifier,
+            name,
+            ...(description !== undefined ? { description } : {}),
+            values: { [field]: value },
+          }),
+      )
+      // 这一条记忆的引用已经写进索引，提交之后读才数得对
+      return c.json(
+        {
+          memory: ConsoleMemoryView.parse(memory),
+          credential: await credentials.get(credential),
+          ...outcome,
+        },
+        200,
+      )
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)

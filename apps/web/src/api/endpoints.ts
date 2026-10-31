@@ -17,6 +17,7 @@ import {
   ConsoleMemoryChildren,
   ConsoleMemoryView,
   ConsoleSearchResponse,
+  ConvertedToCredential,
   CredentialEventList,
   CredentialProvider,
   CredentialReferenceList,
@@ -75,6 +76,7 @@ import {
   type BenchAgentTurnRequest,
   type BenchRunRequest,
   type BootPreviewRequest,
+  type ConvertToCredentialRequest,
   type CreateAppRequest,
   type CreateCredentialProviderRequest,
   type CreateCredentialRequest,
@@ -274,6 +276,11 @@ export const api = {
     request('POST', `/spaces/${spaceId}/memories/unignore-plaintext`, {
       body,
       schema: ConsoleMemoryView,
+    }),
+  convertToCredential: (spaceId: string, body: ConvertToCredentialRequest) =>
+    request('POST', `/spaces/${spaceId}/memories/convert-to-credential`, {
+      body,
+      schema: ConvertedToCredential,
     }),
 
   credentials: (spaceId: string) =>
