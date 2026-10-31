@@ -2184,6 +2184,29 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect((await accessEvents(alice.spaceId)).map((e) => e.memoryId)).toEqual([second.id])
     })
 
+    it('这一批全都被硬删除：什么都不写，也不影响导出', async () => {
+      const alice = await bootstrap(source, 'alice')
+      const only = await ok<MemoryView>(
+        send(
+          source,
+          'POST',
+          `/v1/spaces/${alice.spaceId}/memories`,
+          { uri: 'notes://only', content: '只有一条', sensitivity: 'secret' },
+          { cookie: alice.cookie },
+        ),
+        201,
+      )
+      const res = await whileRowLocked(
+        alice.spaceId,
+        only.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) => tx`delete from memories where id = ${only.id}`,
+      )
+      expect(res.status, await res.clone().text()).toBe(200)
+      await res.arrayBuffer()
+      expect(await accessEvents(alice.spaceId)).toEqual([])
+    })
+
     it('期间被改过：事件用现在的快照，不把读文件时的旧内容写回历史', async () => {
       const { alice, first } = await seedTwo()
       const res = await whileRowLocked(

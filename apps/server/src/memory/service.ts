@@ -2,6 +2,7 @@ import { createHash, randomUUID } from 'node:crypto'
 
 import {
   CREDENTIAL_PLACEHOLDER,
+  CREDENTIAL_PLACEHOLDER_START,
   PLAIN_LAYERS,
   PLAINTEXT_CREDENTIAL,
   PLAINTEXT_MASK,
@@ -1421,6 +1422,8 @@ export class MemoryService {
   }> {
     const released: string[] = []
     const result = await this.run(async (tx, personaIds) => {
+      // 要扫一遍这个空间的记忆，放在拿锁之前，别的写入不用等它；只是提示用的数字，差一点不要紧
+      const otherMemories = await this.othersWithValue(tx, input.memoryId, input.value)
       const row = await this.readableById(tx, input.memoryId, personaIds, true)
       if (row.version !== input.expectedVersion) {
         throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
@@ -1459,24 +1462,13 @@ export class MemoryService {
       )
       const history = await this.scrubValue(tx, row, input.value, placeholder, content)
       await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, row.id))
-      // Dream 的建议里可能抄了这个值（规则认不出的写法）：还作不作数看版本，这次改了版本，它们不会再列出，只是留到保留期
-      const scrub = (column: SQLWrapper) =>
-        sql`replace(${column}, ${input.value}::text, ${PLAINTEXT_MASK}::text)`
-      await tx
-        .update(dreamSuggestions)
-        .set({
-          content: scrub(dreamSuggestions.content),
-          uri: scrub(dreamSuggestions.uri),
-          disclosure: scrub(dreamSuggestions.disclosure),
-          reason: scrub(dreamSuggestions.reason),
-        })
-        .where(sql`${row.id}::uuid = any(${dreamSuggestions.memoryIds})`)
+      await this.scrubSuggestions(tx, row.id, input.value)
       return {
         memory,
         credential: await credential.view(tx, credentialId),
         replaced,
         ...history,
-        otherMemories: await this.othersWithValue(tx, row.id, input.value),
+        otherMemories,
       }
     })
     this.changed([result.memory.id, ...released])
@@ -1495,14 +1487,21 @@ export class MemoryService {
     currentContent: string,
   ): Promise<{ scrubbedEvents: number; plaintextVersions: number }> {
     const events = await tx
-      .select({ id: memoryEvents.id, before: memoryEvents.before, after: memoryEvents.after })
+      .select({
+        id: memoryEvents.id,
+        type: memoryEvents.eventType,
+        context: memoryEvents.context,
+        before: memoryEvents.before,
+        after: memoryEvents.after,
+      })
       .from(memoryEvents)
       .where(eq(memoryEvents.memoryId, row.id))
     let scrubbedEvents = 0
     const leftovers = new Set<string>()
     for (const event of events) {
-      const before = scrubSnapshot(event.before, value, placeholder, row.ownerAccountId)
-      const after = scrubSnapshot(event.after, value, placeholder, row.ownerAccountId)
+      const keepUri = isLoreImport(event)
+      const before = scrubSnapshot(event.before, value, placeholder, row.ownerAccountId, keepUri)
+      const after = scrubSnapshot(event.after, value, placeholder, row.ownerAccountId, keepUri)
       for (const version of [before, after]) {
         const text = (version as { content?: unknown } | null)?.content
         if (
@@ -1525,10 +1524,44 @@ export class MemoryService {
     return { scrubbedEvents, plaintextVersions: leftovers.size }
   }
 
+  // Dream 的建议里可能抄了这个值（规则认不出的写法）：还作不作数看版本，这次改了版本，它们不会再列出，只是留到保留期。
+  // 按行换，规则和历史快照一样，跳过占位符
+  private async scrubSuggestions(tx: Tx, memoryId: string, value: string): Promise<void> {
+    const swap = (text: string) => replaceOutsidePlaceholders(text, value, PLAINTEXT_MASK).text
+    const optional = (text: string | null) => (text === null ? null : swap(text))
+    const suggestions = await tx
+      .select({
+        id: dreamSuggestions.id,
+        content: dreamSuggestions.content,
+        uri: dreamSuggestions.uri,
+        disclosure: dreamSuggestions.disclosure,
+        reason: dreamSuggestions.reason,
+      })
+      .from(dreamSuggestions)
+      .where(sql`${memoryId}::uuid = any(${dreamSuggestions.memoryIds})`)
+    for (const { id, ...before } of suggestions) {
+      const after = {
+        content: optional(before.content),
+        uri: optional(before.uri),
+        disclosure: optional(before.disclosure),
+        reason: swap(before.reason),
+      }
+      if (JSON.stringify(after) === JSON.stringify(before)) continue
+      await tx.update(dreamSuggestions).set(after).where(eq(dreamSuggestions.id, id))
+    }
+  }
+
   // 别的记忆里还有几条含这个值：转存不动它们，要告诉调用方。按管理读取数，已删除、过期的也算：撤销删除就回来了。
-  // secret 的正文是密文，数不到；占位符里的不算，和替换时跳过的一样
+  // 正文、触发场景、URI 与关键词都算。secret 的正文是密文，数不到；占位符里的不算，和替换时跳过的一样：
+  // 占位符换成 {{cred:，值里不会有它（见 ConvertToCredentialRequest），两边的文字拼不成这个值。
+  // 要扫一遍这个空间的记忆，调用方放在拿锁之前
   private async othersWithValue(tx: Tx, memoryId: string, value: string): Promise<number> {
-    const outsidePlaceholders = sql`regexp_replace(${memories.content}, ${CREDENTIAL_PLACEHOLDER.source}::text, '', 'g')`
+    const outsidePlaceholders = sql`regexp_replace(${memories.content}, ${CREDENTIAL_PLACEHOLDER.source}::text, ${CREDENTIAL_PLACEHOLDER_START}::text, 'g')`
+    const has = (column: SQLWrapper) => sql`strpos(${column}, ${value}::text) > 0`
+    const keyword = tx
+      .select({ one: sql`1` })
+      .from(memoryGlossary)
+      .where(and(eq(memoryGlossary.memoryId, memories.id), has(memoryGlossary.keyword)))
     const [row] = await tx
       .select({ n: count() })
       .from(memories)
@@ -1537,8 +1570,10 @@ export class MemoryService {
           ne(memories.id, memoryId),
           this.manageable(),
           or(
-            sql`(strpos(${memories.content}, ${value}::text) > 0 and strpos(${outsidePlaceholders}, ${value}::text) > 0)`,
-            sql`strpos(${memories.disclosure}, ${value}::text) > 0`,
+            and(has(memories.content), has(outsidePlaceholders)),
+            has(memories.disclosure),
+            has(sql`${memories.domain} || '://' || ${memories.path}`),
+            exists(keyword),
           ),
         ),
       )
@@ -3161,13 +3196,22 @@ function viaOf(context: unknown): string | null {
   return typeof via === 'string' ? via : null
 }
 
+// Lore 导入工具写下的导入事件：它按这些事件快照里的 domain、path 补人格、认出导入过的节点（见 importer/lore.ts），
+// 换掉的话节点会被当成新节点写回。这种事件的 URI 和 context 里的 loreUri 一样留着，值恰好出现在那里是接受的限制
+function isLoreImport(event: { type: string; context: unknown }): boolean {
+  return (
+    event.type === 'import' && (event.context as { source?: unknown } | null)?.source === 'lore'
+  )
+}
+
 // 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure、关键词与 URI 里的也不留（那里放不了占位符）；
-// 旧快照里可能有全文检索向量，一起去掉。快照的 URI 只用来显示：恢复不改 URI，可见性不看它
+// 旧快照里可能有全文检索向量，一起去掉。快照的 URI 只用来显示（恢复不改 URI，可见性不看它），除了 keepUri 的（见 isLoreImport）
 function scrubSnapshot(
   raw: unknown,
   value: string,
   placeholder: string,
   owner: string | null,
+  keepUri: boolean,
 ): unknown {
   if (!raw || typeof raw !== 'object') return raw ?? null
   const version: Record<string, unknown> = { ...raw }
@@ -3188,7 +3232,7 @@ function scrubSnapshot(
       (keyword) => typeof keyword !== 'string' || !keyword.includes(value),
     )
   }
-  for (const key of ['domain', 'path']) {
+  for (const key of keepUri ? [] : ['domain', 'path']) {
     if (typeof version[key] === 'string') {
       version[key] = version[key].split(value).join(PLAINTEXT_MASK)
     }

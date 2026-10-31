@@ -30,6 +30,7 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import { embedMemories } from '../../embedding/worker'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { MemoryService } from '../../memory/service'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
@@ -314,8 +315,33 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       uri: m.uri,
       content: '{{cred:prod-db#password}} 的主机是 prod-db，备机也是 prod-db',
     })
+    await inSpace((tx) =>
+      tx.insert(dreamSuggestions).values({
+        spaceId: ws.spaceId,
+        scope: `private:${ws.accountId}`,
+        ownerAccountId: ws.accountId,
+        kind: 'distill',
+        memoryIds: [m.id],
+        versions: [edited.version],
+        content: '{{cred:prod-db#password}} 的主机是 prod-db',
+        uri: 'notes://distilled',
+        reason: '都写着 prod-db',
+        fingerprint: 'with-placeholder',
+      }),
+    )
     const result = await converted(edited, { value: 'prod-db', identifier: 'host', field: 'name' })
     expect(result.replaced).toBe(2)
+    // Dream 的建议和正文、历史同一套规则
+    const [suggestion] = await inSpace((tx) =>
+      tx
+        .select({ content: dreamSuggestions.content, reason: dreamSuggestions.reason })
+        .from(dreamSuggestions)
+        .where(eq(dreamSuggestions.fingerprint, 'with-placeholder')),
+    )
+    expect(suggestion).toEqual({
+      content: '{{cred:prod-db#password}} 的主机是 ***',
+      reason: '都写着 ***',
+    })
     const kept =
       '{{cred:prod-db#password}} 的主机是 {{cred:host#name}}，备机也是 {{cred:host#name}}'
     expect(result.memory.content).toBe(kept)
@@ -360,6 +386,8 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     const copy = await remember({ uri: 'notes://copy', content: `也写着 ${value}` })
     await remember({ uri: 'kb://copy', content: `共享的 ${value}`, layer: 'base' })
     await remember({ uri: 'notes://hint', content: '正文没有', disclosure: `提到 ${value} 时` })
+    await remember({ uri: `notes://${value}-note`, content: 'URI 里有' })
+    await remember({ uri: 'notes://tagged', content: '关键词里有', glossary: [`词 ${value}`] })
     const gone = await remember({ uri: 'notes://gone', content: `合并之前的 ${value}` })
     expect((await send('DELETE', `/memories?uri=${encodeURIComponent(gone.uri)}`)).status).toBe(204)
     const lapsed = await remember({ uri: 'notes://lapsed', content: `过期的 ${value}` })
@@ -392,11 +420,57 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       ).status,
     ).toBe(201)
     await remember({ uri: 'notes://ref', content: `{{cred:${value}}}` })
+    // 占位符两边的文字拼起来才像这个值的不算：另一个占位符里有这个值，粗算时扫得到这一行
+    expect(
+      (
+        await send('POST', '/credentials', {
+          identifier: 'foo',
+          name: '另一条',
+          source: { kind: 'hosted', values: { password: 'other' } },
+        })
+      ).status,
+    ).toBe(201)
+    await remember({
+      uri: 'notes://spliced',
+      content: `{{cred:${value}}} 和 hunter2{{cred:foo}}-copied`,
+    })
 
     const result = await converted(m, { value })
-    expect(result.otherMemories).toBe(6)
+    expect(result.otherMemories).toBe(8)
     expect((await rowOf(copy.id)).content).toContain(value)
     expect(JSON.stringify(result)).not.toContain(value)
+  })
+
+  it('数别的记忆在拿锁之前：等这一行的锁时已经数完了，别的写入不用等全表扫描', async () => {
+    const m = await seedNote()
+    const counted = vi.spyOn(
+      MemoryService.prototype as unknown as { othersWithValue: () => Promise<number> },
+      'othersWithValue',
+    )
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    let pending: Promise<Response> | undefined
+    try {
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select 1 from memories where id = ${m.id} for update`
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending = Promise.resolve(convert(m))
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where ${pid}::int = any(pg_blocking_pids(pid))`
+          if (row!.n > 0) break
+          if (i >= 200) throw new Error('请求没有等在这把锁上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        expect(counted).toHaveBeenCalledTimes(1)
+      })
+      expect((await pending!).status).toBe(200)
+    } finally {
+      counted.mockRestore()
+      await pending?.catch(() => {})
+      await side.end()
+    }
   })
 
   it('别的记忆里没有这个值时是 0', async () => {
@@ -482,6 +556,56 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect(history.events[0]!.after!.uri).toBe('***://notes/***/a')
     expect(history.events[1]!.before!.uri).toBe('***://notes/***/a')
     expect(history.events[1]!.after!.uri).toBe('notes://wifi')
+  })
+
+  it('Lore 的导入事件留着 URI：导入工具靠它认出导入过的节点，换了会被当成新节点写回；正文照样换', async () => {
+    const value = 'hunter2box'
+    const m = await remember({ uri: 'notes://wifi', content: `密码：${value}` })
+    const version = {
+      domain: value,
+      path: `notes/${value}`,
+      layer: 'private',
+      sensitivity: 'private',
+      ownerAccountId: ws.accountId,
+      originScope: 'global',
+      content: `密码：${value}`,
+      version: 1,
+    }
+    const event = (eventType: string, context: Record<string, unknown>) => ({
+      spaceId: ws.spaceId,
+      memoryId: m.id,
+      eventType,
+      actorAccountId: ws.accountId,
+      provenance: 'system' as const,
+      after: version,
+      context,
+    })
+    await inSpace((tx) =>
+      tx
+        .insert(memoryEvents)
+        .values([
+          event('import', { source: 'lore', loreNodeUuid: 'n1', loreUri: `core://${value}` }),
+          event('import', { source: 'space-export' }),
+          event('sync', { source: 'lore' }),
+        ]),
+    )
+    await converted(m, { value })
+    const seeded = (await eventsOf(m.id)).filter((e) => e.eventType !== 'create')
+    const after = (e: (typeof seeded)[number]) => e.after as Record<string, unknown>
+    const lore = seeded.find((e) => (e.context as { loreNodeUuid?: string }).loreNodeUuid)!
+    expect(after(lore)).toMatchObject({
+      domain: value,
+      path: `notes/${value}`,
+      content: '密码：{{cred:wifi#password}}',
+    })
+    expect((lore.context as { loreUri: string }).loreUri).toBe(`core://${value}`)
+    // 别的事件没人拿 URI 去重，照常换
+    const spaceExport = seeded.find(
+      (e) => (e.context as { source: string }).source === 'space-export',
+    )!
+    expect(after(spaceExport)).toMatchObject({ domain: '***', path: 'notes/***' })
+    const sync = seeded.find((e) => e.eventType === 'sync')!
+    expect(after(sync)).toMatchObject({ domain: '***', path: 'notes/***' })
   })
 
   it('Dream 的建议里抄下的这个值也换掉', async () => {
