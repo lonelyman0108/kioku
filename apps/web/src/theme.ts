@@ -537,9 +537,6 @@ export const theme = {
       indicator: 'rounded-none',
     },
   },
-  tree: {
-    slots: { link: 'before:rounded-none', listWithChildren: 'border-accented' },
-  },
   breadcrumb: {
     slots: { linkLeadingIcon: 'size-4', separatorIcon: 'size-4' },
   },

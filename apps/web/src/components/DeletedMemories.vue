@@ -9,11 +9,11 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
-import { icons } from '../icons'
-import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
+import MemoryRow from './strata/MemoryRow.vue'
+import NoteLine from './strata/NoteLine.vue'
 
 const props = defineProps<{ spaceId: string }>()
 // restored：撤销删除之后回到了树上；showExpired：撤销之后它是过期的，要去「已过期」里看
@@ -96,65 +96,34 @@ const TAKEN_HINT =
 </script>
 
 <template>
-  <div class="space-y-3">
-    <p class="text-xs text-muted">
-      已删除的记忆在保留期内可以恢复。<Hint>
-        恢复后内容不变。同一 URI 已有其他记忆时会冲突（标记为「URI
-        已被占用」），需先移走或删除那条记忆。恢复不改变有效期：标记为「已过期」的记忆恢复后回到「已过期」，可在其中恢复生效。
-      </Hint>
-    </p>
-    <p v-if="retention" class="flex items-start gap-1.5 text-xs text-warning">
-      <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
-      <span>{{ deletionNotice(retention) }}</span>
-    </p>
-    <UAlert
-      v-if="deleted.isError.value"
-      color="error"
-      variant="subtle"
-      :title="deleted.error.value instanceof ApiError ? deleted.error.value.message : '读取失败'"
-    />
-    <div v-else-if="deleted.isPending.value" class="space-y-2">
+  <div>
+    <div class="list-head">
+      <p>
+        已删除的记忆在保留期内可以恢复。<Hint>
+          恢复后内容不变。同一 URI 已有其他记忆时会冲突（标记为「URI
+          已被占用」），需先移走或删除那条记忆。恢复不改变有效期：标记为「已过期」的记忆恢复后回到「已过期」，可在其中恢复生效。
+        </Hint>
+      </p>
+      <p v-if="retention" class="text-warning">{{ deletionNotice(retention) }}</p>
+    </div>
+    <div v-if="deleted.isError.value" class="list-note">
+      <NoteLine tone="error">
+        {{ deleted.error.value instanceof ApiError ? deleted.error.value.message : '读取失败' }}
+      </NoteLine>
+    </div>
+    <div v-else-if="deleted.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />
     </div>
     <template v-else>
-      <ul class="divide-y divide-default">
-        <li v-for="item in items" :key="item.id" class="flex items-center gap-2 py-2">
-          <div class="min-w-0 flex-1">
-            <span class="flex items-center gap-1.5">
-              <code class="truncate text-xs">{{ item.uri }}</code>
-              <UBadge size="sm" variant="subtle" color="neutral" class="shrink-0">
-                {{ layerLabels[item.layer] }}
-              </UBadge>
-              <UBadge
-                size="sm"
-                variant="subtle"
-                :color="sensitivityColors[item.sensitivity]"
-                class="shrink-0"
-              >
-                {{ sensitivityLabels[item.sensitivity] }}
-              </UBadge>
-              <UBadge
-                v-if="isExpired(item.validTo, now)"
-                size="sm"
-                variant="outline"
-                color="warning"
-                class="shrink-0"
-                :title="`删除后已于 ${formatTime(item.validTo!)} 过期，恢复后回到「已过期」`"
-              >
-                已过期
-              </UBadge>
-              <UBadge
-                v-if="item.uriTaken"
-                size="sm"
-                variant="outline"
-                color="error"
-                class="shrink-0"
-                :title="TAKEN_HINT"
-              >
-                URI 已被占用
-              </UBadge>
-            </span>
-            <span class="text-xs text-muted">
+      <ul>
+        <li v-for="item in items" :key="item.id">
+          <MemoryRow
+            :uri="item.uri"
+            :layer="item.layer"
+            :sensitivity="item.sensitivity"
+            :priority="item.priority"
+          >
+            <span>
               删除于
               <time :datetime="item.deletedAt" :title="formatTime(item.deletedAt)">
                 {{ formatRelative(item.deletedAt, now) }}
@@ -169,26 +138,37 @@ const TAKEN_HINT =
                 </span>
               </template>
             </span>
-          </div>
-          <UTooltip v-if="canWriteUri(item.uri)" :text="TAKEN_HINT" :disabled="!item.uriTaken">
-            <UButton
-              :icon="icons.undelete"
-              size="xs"
-              color="neutral"
-              variant="subtle"
-              :loading="restoring === item.id"
-              @click="undelete(item)"
-            >
-              恢复
-            </UButton>
-          </UTooltip>
+            <span v-if="isExpired(item.validTo, now) || item.uriTaken" class="row-marks">
+              <span
+                v-if="isExpired(item.validTo, now)"
+                class="text-warning"
+                :title="`删除后已于 ${formatTime(item.validTo!)} 过期，恢复后回到「已过期」`"
+              >
+                已过期
+              </span>
+              <span v-if="item.uriTaken" class="text-error" :title="TAKEN_HINT">URI 已被占用</span>
+            </span>
+            <template v-if="canWriteUri(item.uri)" #actions>
+              <UTooltip :text="TAKEN_HINT" :disabled="!item.uriTaken">
+                <UButton
+                  size="xs"
+                  color="neutral"
+                  variant="outline"
+                  :loading="restoring === item.id"
+                  @click="undelete(item)"
+                >
+                  恢复
+                </UButton>
+              </UTooltip>
+            </template>
+          </MemoryRow>
         </li>
       </ul>
-      <p v-if="!items.length" class="text-sm text-muted">暂无已删除的记忆</p>
-      <div v-if="deleted.hasNextPage.value" class="flex justify-center">
+      <p v-if="!items.length" class="list-empty">暂无已删除的记忆</p>
+      <div v-if="deleted.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"
-          variant="subtle"
+          variant="outline"
           size="sm"
           :loading="deleted.isFetchingNextPage.value"
           @click="deleted.fetchNextPage()"
@@ -199,3 +179,25 @@ const TAKEN_HINT =
     </template>
   </div>
 </template>
+
+<style scoped>
+.list-head {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ui-text-muted);
+}
+.list-note {
+  padding: 14px 14px 0;
+}
+.list-empty {
+  padding: 18px 14px;
+  color: var(--ui-text-muted);
+}
+.row-marks {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 10px;
+}
+</style>

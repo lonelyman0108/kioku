@@ -60,6 +60,11 @@
 - tsdown 产物是 `dist/index.mjs`，不是 `.js`。
 - 管理界面用到新图标时必须加进 `apps/web/src/icons.ts`：构建时只打包这份清单里的图标，没列进来的会在运行时向公共 Iconify 接口请求。原因：自托管服务不应向第三方发请求。
 - 管理界面的 tsconfig 关掉了 `exactOptionalPropertyTypes`（组件库的 props 类型不兼容），服务端保持开启。
+- 页面和组件的 scoped 样式不在 layer 里，压过 Tailwind 的工具类（工具类都在 layer 里）：元素上 scoped 写了 `display` 时，`max-lg:hidden` 这类类名不生效，窄屏的显隐写在 scoped 的媒体查询里。
+- 记忆目录用 `UTree` 的虚拟滚动，只渲染看得见的行：行高固定，`MemoriesPage` 的 `rowHeight` 同时给样式和 `estimateSize`，改一边要改另一边。组件库把 `data-index` 放在外层的 `li` 上，又把 `textContent` 多解了一层，它自带的打字跳转会报错、也拿不到焦点，左键也只在渲染出来的行里找上一级，所以这两个键在页面里自己做（`typeaheadMatch`、`parentRow`）。目录从隐藏变成显示时设 `scrollTop` 不发 scroll 事件，虚拟滚动不知道位置变了，`scrollToRow` 替它发一个。升级 Nuxt UI 时复查。
+- 记忆页的统计（窄柱、列表上方的总数）来自概览接口，它要把整个概览算一遍：写入时 `refetchType: 'none'` 只标记过期，只在 `statsChanged` 认为动了统计时取一次。统计新用到别的字段时要加进 `statsChanged`。
+- 记忆的新建、移动弹窗不用 `<form>`：单选在表单里时回车会隐式提交，还没看见「可见范围将改变」就移动了。只有点按钮才提交，`memoryPages.test.ts` 核对。
+- 记忆列表、目录只有 URI 树上的记忆（`form = curated`）。概览和窄柱的条数含来自对话的两层（`extractedCounts`），列表筛这两层是空的，它们的内容在联系人页；算列表总数时只用 `counts`。
 - `useToast` 等 Nuxt UI 组合式函数显式从 `@nuxt/ui/composables` 导入，不依赖自动导入。
 - 内容表（带 `space_id`、在 `RLS_TABLES` 里的表）只能在 `withSpace()` 里访问，否则 RLS 让查询返回空、写入失败。新增内容表时同时加进 `RLS_TABLES` 和迁移里的策略，`rls.int.test.ts` 会核对两者一致。
 - 集成测试需要 `KIOKU_TEST_DATABASE_URL`：本地 `docker compose -f docker-compose.dev.yml up -d --build` 后设为 `postgres://kioku:kioku@localhost:55432/kioku`；没设置时跳过，CI 里没设置直接失败。
@@ -88,7 +93,7 @@
 - Lore 文件旧不旧的基准是导入、同步事件里 `loreExportedAt` 的最大值（没有的是命令行写的，取事件时间）；确认写入旧文件不会降低这个时间。什么都没写的导入不产生事件，也不推进它。原因：同步只看是否相等，文件比已写入的数据旧时会把正文改回去，指纹拦不住。
 - Lore 导入的界面：计划显示后表单里不能有 `type=submit` 的按钮，回车的隐式提交会点默认按钮，没看完、没勾 secret 的节点就以明文写进去；`loreBackup.test.ts` 解析模板核对。界面按勾选算的写入（`loreBackup.ts` 的 `selectionEffects`、`staleNotice`）要和服务端按勾选重算的计划一致，它靠同步项的 `source` 等于节点主 URI、`uri` 等于目标 URI 对到目标，应用映射也和 `planImport` 结尾的过滤同一个规则，改这些要同步改它。
 - 按长度截断文字要防切开代理对：落单的代理项写进 text 不报错，被悄悄换成 U+FFFD，之后和原文比永远不等（同步每次都算要更新）；写进 jsonb 才报错。
-- `BOOT_ELIGIBLE` 有一份 JS 版（`memory/filter.ts` 的 `bootEligible`），导入计划标「进启动上下文」用它。改一边必须改另一边，`loreImport.int.test.ts` 拿写进去的行比对。
+- `BOOT_ELIGIBLE` 有一份 JS 版（contracts 的 `bootEligible`），导入计划标「进启动上下文」、管理界面标「启动加载」都用它。改一边必须改另一边，`loreImport.int.test.ts` 拿写进去的行比对。
 - 测试台的回滚模式靠换掉 `Deps.db` 实现（`bench/rollback.ts`），所以接入方路径（工具、生命周期事件、`/recall`）有几条约束。数据库访问都经过传入的 `deps` 或基于它建的服务：绕开 `deps` 的写入不会回滚。语句放进 `withSpace`：直接写在 `deps.db` 上的语句落在根事务上，出错（包括等锁超时）会中止整个运行，后面的步骤记为没有执行；现在只有 `bufferTurn` 读抽取设置这一句是例外。不在事务回调里发外部请求（嵌入、模型）：事务开着时前面步骤的行锁和 URI 咨询锁都没放；接入方路径新增要查向量的步骤时加进 `bench/inProcess.ts` 的 `literalQueries`，否则这一步只走全文与关键词。事务回调里不要并行开子事务：代理只让顶层事务排队，同一条连接上并行的 savepoint 会交错。
 - `set_config(..., true)` 与 `set local` 不随 savepoint 成功结束复原，只有 `rollback to` 才复原。`RollbackRun.clearSpace` 只清 `app.space_id`：`recall.ts` 的 `hnsw.*` 也留到回滚为止，它每次向量查询之前都设，所以没有影响；接入方路径上新的向量查询或别的事务级设置不能依赖默认值，否则回滚模式和真实不一样。
 - 日志不要整个打可能是数据库错误的 `err`，记进运行记录、最近错误的文字也不要直接用 `err.message`：`DrizzleQueryError` 带 SQL 与全部参数（也就是记忆正文、提示语），驱动的 `PostgresError` 的 `detail` 带数据的值，连接错误的 `message` 是数据库的地址。日志用 `logInternalError` 或 `loggableError(err)`，文字用 `errorText(err)`。

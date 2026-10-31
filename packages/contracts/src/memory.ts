@@ -11,6 +11,17 @@ export const PLAIN_LAYERS = ['base', 'owner', 'private'] as const
 export const PlainLayer = z.enum(PLAIN_LAYERS)
 export type PlainLayer = z.infer<typeof PlainLayer>
 
+// 启动加载只收受信来源的这几个策展层（理由见服务端的 recall/boot.ts）
+export const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
+
+// 会进启动加载的节点：这几层里 priority 0 的，加上人格与应用层 priority ≤ 1 的。受信来源是调用方的前提。
+// 服务端的 SQL 版是 memory/filter.ts 的 BOOT_ELIGIBLE，改了要一起改，loreImport.int.test.ts 会拿写进去的行比对。
+// 服务端的导入计划和管理界面的详情都用它
+export function bootEligible(layer: Layer, priority: number): boolean {
+  if (!BOOT_LAYERS.includes(layer)) return false
+  return priority === 0 || ((layer === 'persona' || layer === 'app') && priority <= 1)
+}
+
 // 敏感级：能给谁看，按从宽到严排列，比较大小时用下标
 export const SENSITIVITIES = ['public', 'internal', 'private', 'secret'] as const
 export const Sensitivity = z.enum(SENSITIVITIES)

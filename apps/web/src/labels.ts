@@ -2,6 +2,7 @@ import {
   LAYER_NAMES,
   SENSITIVITY_NAMES,
   type AccessContext,
+  type ActivityItem,
   type AppInfo,
   type BenchMark,
   type CredentialProviderKind,
@@ -137,6 +138,11 @@ export function originScopeText(scope: OriginScope): string {
       return '全局'
   }
 }
+
+// 变更记录里的 URI 能不能点过去。记忆已经删除（包括过期后让出 URI 的）或过期了，按 URI 打开的是那里别的记忆、
+// 或者读不到；离开了可见范围的 URI 是改动之前的。这几种不给链接，同一条记忆更早的改动也一样
+export const activityLinkable = (item: Pick<ActivityItem, 'left' | 'deleted' | 'expired'>) =>
+  !item.left && !item.deleted && !item.expired
 
 // 谁做的：管理界面里是成员；通过 Key 写入时是应用（Key 的名字只给应用主人与空间 owner）
 export function actorLabel(actor: EventActor): { name: string; viaApp: boolean } {

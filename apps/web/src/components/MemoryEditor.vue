@@ -1,22 +1,40 @@
 <script setup lang="ts">
-import type { DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
-import { PLAINTEXT_CREDENTIAL, type ConsoleMemoryView, type Sensitivity } from '@kioku/contracts'
+import {
+  PLAINTEXT_CREDENTIAL,
+  type ConsoleMemoryView,
+  type Layer,
+  type Sensitivity,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { useCopy } from '../composables/useCopy'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
 import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { icons } from '../icons'
 import { buildKeywordIndex } from '../keywords'
-import { layerLabels, provenanceLabels, sensitivityColors, sensitivityLabels } from '../labels'
+import { provenanceLabels, sensitivityLabels } from '../labels'
 import type { CredentialLinks } from '../markdown'
+import {
+  BOOT_HINT,
+  expiryState,
+  isBootNode,
+  looksPlaintext,
+  missingDisclosureHint,
+  missingDisclosureTone,
+  originScopeLabel,
+  overriddenNode,
+  plaintextValues,
+  recallText,
+} from '../memoryDetail'
 import { placeholderOf } from '../placeholders'
 import {
+  hiddenAgain,
   revealedAfterWrite,
   stillRevealed,
   withRevealed,
@@ -36,15 +54,24 @@ import Hint from './Hint.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
+import NoteLine from './strata/NoteLine.vue'
+import PropertyList, { type Property } from './strata/PropertyList.vue'
+import StrataStrip from './strata/StrataStrip.vue'
+import StrataSwatch from './strata/StrataSwatch.vue'
+import StrataTag from './strata/StrataTag.vue'
+import SwatchOptions from './strata/SwatchOptions.vue'
+import UriPath from './strata/UriPath.vue'
 
 const props = defineProps<{ spaceId: string; uri: string }>()
 const emit = defineEmits<{
   deleted: [uri: string]
   createChild: [parentUri: string]
   moved: [memory: ConsoleMemoryView, from: string]
-  // 保存或恢复了旧版本：层、敏感级、priority、disclosure 可能变了
-  changed: [memory: ConsoleMemoryView]
+  // 保存或恢复了旧版本：层、敏感级、priority、disclosure 可能变了。before 是改之前的那一版
+  changed: [memory: ConsoleMemoryView, before: ConsoleMemoryView]
   open: [uri: string]
+  // 读到了这条记忆在哪一层：页面在窄柱上标出来
+  layer: [layer: Layer]
 }>()
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -126,7 +153,7 @@ function adopt(m: ConsoleMemoryView) {
   const b = base.value
   const newer = !!b && (m.id !== b.id || m.version > b.version)
   load(m)
-  if (newer) emit('changed', m)
+  if (newer) emit('changed', m, b)
 }
 
 // 服务器上最新的那一版。表单有改动时上面的监听会跳过新版本，开始或取消编辑时要从它载入
@@ -187,6 +214,13 @@ async function revealContent() {
     revealing.value = false
   }
 }
+// 收起查看过的正文：再看要再查看一次。这一版不变，版本号和表单都还对得上
+function hideContent() {
+  const m = base.value
+  if (!m) return
+  revealed.value = null
+  load(hiddenAgain(m))
+}
 // 有效到最早能选的时间（见 earliestValidTo）：开始编辑、聚焦选择器与保存之前重新算
 const minValidTo = ref('')
 function startEditing() {
@@ -195,7 +229,14 @@ function startEditing() {
   // 表单靠读到的正文来编辑：机密要先查看（可能刚发现有了新版本，查看过的不算了）
   if (base.value?.contentHidden) return
   minValidTo.value = earliestValidTo()
+  historyOpen.value = false
   mode.value = 'edit'
+}
+// 点「去补全」：进入编辑，光标放到触发场景
+const disclosureInput = ref<{ inputRef: HTMLInputElement | null } | null>(null)
+function fillDisclosure() {
+  startEditing()
+  void nextTick(() => disclosureInput.value?.inputRef?.focus())
 }
 function cancelEditing() {
   if (dirty.value && !window.confirm('放弃未保存的改动？')) return
@@ -303,11 +344,12 @@ function restoreCaret() {
   const at = afterPick
   afterPick = null
   if (at === null) return
-  void nextTick(() => {
+  // 组件库在下一个宏任务才把焦点还给按钮，要排在它后面
+  setTimeout(() => {
     const el = contentInput.value?.textareaRef
     el?.focus()
     el?.setSelectionRange(at, at)
-  })
+  }, 50)
 }
 
 const historyOpen = ref(false)
@@ -326,33 +368,14 @@ async function onMoved(next: ConsoleMemoryView, from: string) {
   emit('moved', next, from)
 }
 
-const menu = computed<DropdownMenuItem[][]>(() => {
-  const writable = !readOnly.value
-  const items: DropdownMenuItem[] = []
-  if (writable) {
-    items.push({ label: '移动或改层', icon: icons.move, onSelect: () => (moveOpen.value = true) })
-  }
-  if (permissions.canWriteUri(props.uri)) {
-    items.push({
-      label: '新建子节点',
-      icon: icons.add,
-      onSelect: () => emit('createChild', props.uri),
-    })
-  }
-  const danger: DropdownMenuItem[] = writable
-    ? [
-        {
-          label: '删除',
-          icon: icons.remove,
-          color: 'error',
-          onSelect: () => (deleting.value = base.value),
-        },
-      ]
-    : []
-  return [items, danger].filter((group) => group.length)
-})
-const sensitivityItems = computed(() =>
-  permissions.sensitivities.value.map((s) => ({ label: sensitivityLabels[s], value: s })),
+const canCreateChild = computed(() => permissions.canWriteUri(props.uri))
+const sensitivityOptions = computed(() =>
+  permissions.sensitivities.value.map((value) => ({
+    value,
+    label: sensitivityLabels[value],
+    layer: base.value?.layer ?? null,
+    sensitivity: value,
+  })),
 )
 const saving = ref(false)
 // 要删除的那一版，在打开确认框时记下：确认期间编辑器可能载入了删除后重建的另一条，不能把它一起删掉
@@ -442,7 +465,7 @@ async function save(allowPlaintext = false) {
     // 保存期间没有再改，就回到阅读状态
     if (!dirty.value) mode.value = 'read'
     void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
-    emit('changed', next)
+    emit('changed', next, m)
   } catch (err) {
     failed(err, '保存失败')
     // 版本冲突时立刻重新拉取，好显示「载入新版本」
@@ -473,370 +496,761 @@ async function remove() {
     }
   }
 }
+
+const copy = useCopy()
+
+// 窄屏上打开一条之后，页面把焦点放到这里
+const titleEl = ref<HTMLElement | null>(null)
+defineExpose({ focusTitle: () => titleEl.value?.focus() })
+
+// 标签和条带跟着表单走：改敏感级时就能看到改了之后的样子
+const shownSensitivity = computed(() =>
+  mode.value === 'edit' ? form.sensitivity : (base.value?.sensitivity ?? 'private'),
+)
+const shownPriority = computed(() =>
+  mode.value === 'edit' ? form.priority : (base.value?.priority ?? 0),
+)
+
+const expiry = computed(() => expiryState(base.value?.validTo ?? null, now.value))
+const bootNode = computed(() => !!base.value && isBootNode(base.value, now.value))
+const disclosureTone = computed(() =>
+  base.value ? missingDisclosureTone(base.value, now.value) : null,
+)
+const plaintext = computed(() => {
+  const m = base.value
+  return m && looksPlaintext(m) ? plaintextValues(m) : null
+})
+
+watch(
+  () => base.value?.layer,
+  (layer) => {
+    if (layer) emit('layer', layer)
+  },
+  { immediate: true },
+)
+
+// 人格层的节点要说清覆盖了祖先的哪个节点：按 URI 里的标识找到人格，再读它的继承关系
+const personaSlug = computed(() => /^persona:\/\/([^/]+)\//.exec(props.uri)?.[1] ?? null)
+const personas = useQuery({
+  queryKey: computed(() => ['personas', props.spaceId]),
+  queryFn: () => api.personas(props.spaceId),
+  enabled: computed(() => personaSlug.value !== null),
+})
+const personaId = computed(
+  () => personas.data.value?.find((p) => p.slug === personaSlug.value)?.id ?? null,
+)
+const persona = useQuery({
+  queryKey: computed(() => ['persona', props.spaceId, personaId.value] as const),
+  queryFn: ({ queryKey: [, spaceId, id] }) => api.persona(spaceId, id!),
+  enabled: computed(() => personaId.value !== null),
+})
+const overrides = computed(() => overriddenNode(persona.data.value, props.uri))
+
+const appName = (id: string) => permissions.apps.data.value?.find((a) => a.id === id)?.name
+const properties = computed<Property[][]>(() => {
+  const m = base.value
+  if (!m) return []
+  return [
+    [
+      { key: 'layer', label: '层' },
+      { key: 'sensitivity', label: '敏感级' },
+      { key: 'priority', label: '优先级' },
+    ],
+    [
+      { key: 'disclosure', label: '触发场景', stacked: true },
+      { key: 'glossary', label: '关键词', stacked: true },
+      { key: 'validity', label: '有效期' },
+    ],
+    [
+      { key: 'provenance', label: '来源', value: provenanceLabels[m.provenance] },
+      { key: 'origin', label: '范围', value: originScopeLabel(m.originScope, appName) },
+      { key: 'version', label: '版本', value: m.version },
+      { key: 'created', label: '创建' },
+      { key: 'updated', label: '更新' },
+      {
+        key: 'recall',
+        label: '召回',
+        // 改成机密之后不再显示次数：查询停了，缓存里还留着之前的
+        value: recallText(
+          recallable.value ? recallStat.data.value : undefined,
+          { secret: !recallable.value, boot: bootNode.value },
+          now.value,
+        ),
+      },
+    ],
+  ]
+})
 </script>
 
 <template>
-  <div v-if="memory.isPending.value" class="space-y-3 p-1">
-    <USkeleton class="h-6 w-1/2" />
-    <USkeleton class="h-40 w-full" />
-  </div>
-  <UAlert
-    v-else-if="!base"
-    color="error"
-    variant="subtle"
-    :title="memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败'"
-  />
-  <div v-else class="space-y-4">
-    <!-- 已经载入过时，重新拉取失败（例如别处删除了它）也保留表单，免得丢掉正在编辑的内容 -->
-    <UAlert
-      v-if="memory.isError.value"
-      color="warning"
-      variant="subtle"
-      :title="`刷新失败：${memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败'}`"
-    />
-    <UAlert
-      v-else-if="changedElsewhere && dirty"
-      color="warning"
-      variant="subtle"
-      title="这条记忆已在别处修改，或已删除并重新创建。保存将提示冲突，可先复制当前改动，再载入新版本。"
-      :actions="[
-        { label: '载入新版本', onClick: () => memory.data.value && adopt(memory.data.value) },
-      ]"
-    />
-
-    <!-- 标题行：URI、层、敏感级与操作 -->
-    <div class="flex flex-wrap items-center gap-2">
-      <code class="text-sm font-semibold">{{ base.uri }}</code>
-      <UBadge variant="subtle" color="neutral">{{ layerLabels[base.layer] }}</UBadge>
-      <UBadge :color="sensitivityColors[base.sensitivity]" variant="subtle">
-        {{ sensitivityLabels[base.sensitivity] }}
-      </UBadge>
-      <UBadge variant="outline" color="neutral">P{{ base.priority }}</UBadge>
-      <UBadge
-        v-if="base.validTo"
-        variant="outline"
-        :color="expiredNow ? 'error' : 'neutral'"
-        :icon="icons.validity"
-        :title="`有效期至 ${formatTime(base.validTo)}`"
-      >
-        {{ expiredNow ? '已过期' : `${formatShort(base.validTo)} 到期` }}
-      </UBadge>
-      <div class="ml-auto flex items-center gap-1">
-        <template v-if="mode === 'read'">
-          <UTooltip
-            v-if="!readOnly"
-            :text="base.contentHidden ? '先查看正文' : undefined"
-            :disabled="!base.contentHidden"
-          >
-            <UButton
-              :icon="icons.edit"
-              size="sm"
-              :disabled="base.contentHidden"
-              @click="startEditing"
-            >
-              编辑
-            </UButton>
-          </UTooltip>
-          <UButton
-            :icon="icons.activity"
-            size="sm"
-            color="neutral"
-            variant="ghost"
-            @click="historyOpen = true"
-          >
-            历史
-          </UButton>
-          <UDropdownMenu v-if="menu.length" :items="menu" :content="{ align: 'end' }">
-            <UButton
-              :icon="icons.more"
-              size="sm"
-              color="neutral"
-              variant="ghost"
-              aria-label="更多操作"
-            />
-          </UDropdownMenu>
-        </template>
-        <template v-else>
-          <!-- 不放进表单字段里：表单字段会把自己的标签给里面的第一个控件 -->
-          <USwitch v-model="preview" size="sm" label="预览" class="me-2" />
-          <UButton
-            :icon="icons.save"
-            size="sm"
-            :loading="saving"
-            :disabled="!dirty || !form.content.trim()"
-            @click="requestSave"
-          >
-            保存
-          </UButton>
-          <UButton size="sm" color="neutral" variant="ghost" @click="cancelEditing">取消</UButton>
-        </template>
-      </div>
-    </div>
-
-    <UAlert v-if="readOnly" color="neutral" variant="subtle" :title="readOnly" />
-    <UAlert
-      v-if="expiredNow"
-      color="warning"
-      variant="subtle"
-      :icon="icons.expired"
-      title="这条记忆已过期，不再召回，也不进启动加载。可在「已过期」中恢复生效。"
-    />
-
-    <!-- 阅读：disclosure、关键词、渲染后的正文与来历 -->
-    <template v-if="mode === 'read'">
-      <div v-if="base.disclosure?.trim() || base.glossary.length" class="space-y-2">
-        <blockquote
-          v-if="base.disclosure?.trim()"
-          class="border-l-2 border-accented pl-3 text-sm text-muted"
-        >
-          <span class="text-xs text-dimmed">触发场景：</span>{{ base.disclosure }}
-        </blockquote>
-        <div v-if="base.glossary.length" class="flex flex-wrap items-center gap-1.5">
-          <span class="text-xs text-dimmed">关键词</span>
-          <UBadge
-            v-for="keyword in base.glossary"
-            :key="keyword"
-            size="sm"
-            variant="outline"
-            color="neutral"
-          >
-            {{ keyword }}
-          </UBadge>
-        </div>
-      </div>
-      <p v-if="!base.disclosure?.trim()" class="text-xs text-warning">
-        未设触发场景：补全后召回更准确。
-      </p>
-      <div class="rounded-lg border border-default p-4">
-        <div v-if="base.contentHidden" class="space-y-2">
-          <p class="flex items-center gap-1.5 text-sm text-muted">
-            <UIcon :name="icons.secret" class="size-4" />
-            机密内容已加密存储
-          </p>
-          <UButton
-            :icon="icons.reveal"
-            size="sm"
-            color="neutral"
-            variant="subtle"
-            :loading="revealing"
-            @click="revealContent"
-          >
-            查看正文
-          </UButton>
-          <p class="text-xs text-muted">查看会记录一次访问。</p>
-        </div>
-        <MemoryContent
-          v-else
-          :content="base.content ?? ''"
-          :keywords="keywordIndex"
-          :self="base.uri"
-          :credentials="credentialLinks"
-          @open="(uri) => emit('open', uri)"
-          @credential="openCredential"
+  <article class="memory-detail">
+    <StrataStrip v-if="base" :layer="base.layer" :sensitivity="shownSensitivity" />
+    <header class="detail-head">
+      <div class="detail-nav"><slot name="nav" /></div>
+      <div class="detail-uri">
+        <h1 ref="titleEl" tabindex="-1">{{ base?.uri ?? uri }}</h1>
+        <UButton
+          :icon="icons.copy"
+          size="xs"
+          color="neutral"
+          variant="ghost"
+          aria-label="复制 URI"
+          @click="copy(base?.uri ?? uri)"
         />
       </div>
-      <p class="text-xs text-muted">
-        版本 {{ base.version }} · 来源 {{ provenanceLabels[base.provenance] }}
-        <template v-if="base.originScope !== 'global'"> · 来自 {{ base.originScope }}</template>
-        · 创建于
-        <time :datetime="base.createdAt" :title="formatTime(base.createdAt)">
-          {{ formatRelative(base.createdAt) }}
-        </time>
-        · 更新于
-        <time :datetime="base.updatedAt" :title="formatTime(base.updatedAt)">
-          {{ formatRelative(base.updatedAt) }}
-        </time>
-        <template v-if="base.validTo"> · 有效期至 {{ formatTime(base.validTo) }}</template>
-        <!-- 改成 secret 之后不再显示：查询停了，缓存里还留着之前的次数 -->
-        <template v-if="recallable && recallStat.data.value">
-          ·
-          <template v-if="recallStat.data.value.total">
-            召回 {{ recallStat.data.value.total }} 次（保留期内
-            {{ recallStat.data.value.recent }} 次），最近一次
-            <time
-              v-if="recallStat.data.value.lastRecalledAt"
-              :datetime="recallStat.data.value.lastRecalledAt"
-              :title="formatTime(recallStat.data.value.lastRecalledAt)"
-              >{{ formatRelative(recallStat.data.value.lastRecalledAt) }}</time
-            >
-          </template>
-          <template v-else>尚未召回</template>
-        </template>
-      </p>
-    </template>
-
-    <!-- 编辑：改原文，可以并排预览 -->
-    <template v-else>
-      <UFormField label="正文">
-        <template #help>
-          Markdown。密码与 Token 存为凭据，正文只放占位符。<Hint>写清背景、原因和适用条件。</Hint>
-        </template>
-        <template #hint>
-          <UTooltip
-            :text="canReference ? undefined : '仅私人层中敏感级不低于私密的记忆可引用凭据'"
-            :disabled="canReference"
+      <template v-if="base">
+        <div class="detail-tag">
+          <StrataTag :layer="base.layer" :sensitivity="shownSensitivity" />
+          <span class="tag-priority">P{{ shownPriority }}</span>
+          <span v-if="bootNode" class="inline-flex items-center gap-1.5">
+            <span class="boot-flag">启动加载</span>
+            <Hint>{{ BOOT_HINT }}</Hint>
+          </span>
+          <span
+            v-if="base.validTo"
+            :class="{ 'text-warning': expiry === 'soon' || expiry === 'expired' }"
+            :title="`有效期至 ${formatTime(base.validTo)}`"
           >
+            {{ expiredNow ? '已过期' : `${formatShort(base.validTo)} 到期` }}
+          </span>
+        </div>
+        <div class="detail-actions">
+          <template v-if="mode === 'read'">
+            <UTooltip
+              v-if="!readOnly"
+              :text="base.contentHidden ? '先查看正文' : undefined"
+              :disabled="!base.contentHidden"
+            >
+              <UButton size="sm" :disabled="base.contentHidden" @click="startEditing">编辑</UButton>
+            </UTooltip>
             <UButton
-              :icon="icons.credentials"
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :disabled="!canReference"
-              @click="startPicking"
+              size="sm"
+              color="primary"
+              variant="outline"
+              :class="{ 'bg-elevated': historyOpen }"
+              :aria-pressed="historyOpen"
+              @click="historyOpen = !historyOpen"
             >
-              插入凭据引用
+              历史
             </UButton>
-          </UTooltip>
-        </template>
-        <div class="grid gap-3" :class="preview ? 'lg:grid-cols-2' : ''">
-          <UTextarea
-            ref="contentInput"
-            v-model="form.content"
-            :rows="18"
-            autoresize
-            :maxrows="40"
-            class="w-full font-mono"
-          />
-          <div v-if="preview" class="overflow-auto rounded-lg border border-default p-4">
-            <MemoryContent
-              :content="form.content"
-              :credentials="credentialLinks"
-              @credential="openCredential"
-            />
-          </div>
+            <UButton
+              v-if="!readOnly"
+              size="sm"
+              color="primary"
+              variant="outline"
+              @click="moveOpen = true"
+            >
+              移动或改层
+            </UButton>
+            <UButton
+              v-if="canCreateChild"
+              size="sm"
+              color="primary"
+              variant="outline"
+              @click="emit('createChild', uri)"
+            >
+              新建子节点
+            </UButton>
+            <UButton
+              v-if="!readOnly"
+              size="sm"
+              color="error"
+              variant="outline"
+              @click="deleting = base"
+            >
+              删除
+            </UButton>
+          </template>
+          <template v-else>
+            <span v-if="dirty" class="dirty-flag">未保存</span>
+            <UButton
+              size="sm"
+              :loading="saving"
+              :disabled="!dirty || !form.content.trim()"
+              @click="requestSave"
+            >
+              保存
+            </UButton>
+            <UButton size="sm" color="primary" variant="outline" @click="cancelEditing">
+              取消
+            </UButton>
+          </template>
         </div>
-      </UFormField>
-      <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
-        <UInput v-model="form.disclosure" class="w-full" />
-      </UFormField>
-      <div class="grid gap-4 sm:grid-cols-2">
-        <UFormField label="优先级" help="0 最重要">
-          <UInputNumber v-model="form.priority" :min="0" :max="99" />
-        </UFormField>
-        <UFormField label="敏感级">
-          <USelect v-model="form.sensitivity" :items="sensitivityItems" class="w-full" />
-        </UFormField>
-      </div>
-      <UFormField label="关键词" help="召回时按关键词命中，至少两个字">
-        <UInputTags v-model="form.glossary" class="w-full" />
-      </UFormField>
-      <UFormField label="有效期">
-        <template #help>
-          仅对阶段性内容设置；到期后不再召回。<Hint>
-            到期后也不进启动加载，历史中仍可查看，之后可在「已过期」中恢复生效。留空表示长期有效。
-          </Hint>
-        </template>
-        <div class="flex flex-wrap items-center gap-2">
-          <UInput
-            v-model="form.validTo"
-            type="datetime-local"
-            :min="minValidTo"
-            aria-label="有效期"
-            class="w-full sm:w-64"
-            @focus="minValidTo = earliestValidTo()"
-          />
-          <UButton
-            v-if="form.validTo"
-            size="sm"
-            color="neutral"
-            variant="ghost"
-            @click="form.validTo = ''"
-          >
-            改为长期有效
-          </UButton>
-        </div>
-      </UFormField>
-    </template>
+      </template>
+    </header>
 
-    <USlideover v-model:open="historyOpen" title="历史" :ui="{ content: 'max-w-2xl' }">
-      <template #body>
+    <div v-if="memory.isPending.value" class="detail-read space-y-3">
+      <USkeleton class="h-6 w-1/2" />
+      <USkeleton class="h-40 w-full" />
+    </div>
+    <div v-else-if="!base" class="detail-read">
+      <NoteLine tone="error">
+        {{ memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败' }}
+      </NoteLine>
+    </div>
+    <div v-else class="detail-main">
+      <div class="detail-read">
+        <!-- 已经载入过时，重新拉取失败（例如别处删除了它）也保留表单，免得丢掉正在编辑的内容 -->
+        <NoteLine v-if="memory.isError.value" tone="warning">
+          刷新失败：{{
+            memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败'
+          }}
+        </NoteLine>
+        <NoteLine v-else-if="changedElsewhere && dirty" tone="warning">
+          这条记忆已在别处修改，或已删除并重新创建。保存将提示冲突，可先复制当前改动，再载入新版本。
+          <template #actions>
+            <UButton
+              size="sm"
+              color="primary"
+              variant="outline"
+              @click="memory.data.value && adopt(memory.data.value)"
+            >
+              载入新版本
+            </UButton>
+          </template>
+        </NoteLine>
+        <NoteLine v-if="readOnly">{{ readOnly }}</NoteLine>
+        <NoteLine v-if="expiredNow" tone="warning">
+          这条记忆已过期，不再召回，也不进启动加载。可在「已过期」中恢复生效。
+        </NoteLine>
+        <NoteLine v-else-if="expiry === 'soon' && mode === 'read'" tone="warning">
+          这条记忆将于 {{ formatTime(base.validTo!) }} 到期，到期后不再召回，也不进启动加载。
+        </NoteLine>
+
+        <!-- 编辑：就地改原文，可以并排预览 -->
+        <template v-if="mode === 'edit'">
+          <div class="edit-head">
+            <p class="edit-help">
+              Markdown。密码与 Token 存为凭据，正文只放占位符。<Hint
+                >写清背景、原因和适用条件。</Hint
+              >
+            </p>
+            <div class="edit-tools">
+              <UTooltip
+                :text="canReference ? undefined : '仅私人层中敏感级不低于私密的记忆可引用凭据'"
+                :disabled="canReference"
+              >
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :disabled="!canReference"
+                  @click="startPicking"
+                >
+                  插入凭据引用
+                </UButton>
+              </UTooltip>
+              <!-- 不放进表单字段里：表单字段会把自己的标签给里面的第一个控件 -->
+              <USwitch v-model="preview" size="sm" label="预览" />
+            </div>
+          </div>
+          <div class="grid gap-3" :class="preview ? 'xl:grid-cols-2' : ''">
+            <UTextarea
+              ref="contentInput"
+              v-model="form.content"
+              :rows="18"
+              autoresize
+              :maxrows="40"
+              class="w-full font-mono"
+              aria-label="正文"
+            />
+            <div v-if="preview" class="edit-preview">
+              <MemoryContent
+                :content="form.content"
+                :credentials="credentialLinks"
+                @credential="openCredential"
+              />
+            </div>
+          </div>
+        </template>
+
         <MemoryHistory
-          v-if="historyOpen"
+          v-else-if="historyOpen"
           :space-id="spaceId"
           :memory-id="base.id"
           :can-restore="!readOnly && mode === 'read'"
         />
-      </template>
-    </USlideover>
 
-    <MoveMemoryModal v-model:open="moveOpen" :space-id="spaceId" :memory="base" @done="onMoved" />
-
-    <UModal v-model:open="picking" title="插入凭据引用" @after:leave="restoreCaret">
-      <template #body>
-        <div class="space-y-4">
-          <p v-if="!pickItems.length" class="text-sm text-muted">
-            暂无凭据。请先在「凭据」页新建。
-          </p>
-          <template v-else>
-            <UFormField label="凭据">
-              <USelect v-model="pick.credentialId" :items="pickItems" class="w-full" />
-            </UFormField>
-            <UFormField label="字段" help="引用整条时，Agent 获取全部字段">
-              <USelect v-model="pick.field" :items="fieldItems" class="w-full" />
-            </UFormField>
-            <p v-if="pickedPlaceholder" class="text-sm">
-              将插入 <code>{{ pickedPlaceholder }}</code>
-            </p>
-          </template>
-        </div>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="picking = false">取消</UButton>
-          <UButton :disabled="!pickedPlaceholder" @click="insertPlaceholder">插入</UButton>
-        </div>
-      </template>
-    </UModal>
-
-    <UModal
-      :open="plaintextWarning !== null"
-      :title="
-        plaintextWarning?.downgrade
-          ? '正文疑似包含明文凭据，仍要降级？'
-          : '正文疑似包含明文凭据，仍要保存？'
-      "
-      @update:open="(v) => !v && (plaintextWarning = null)"
-    >
-      <template #body>
-        <p class="text-sm">
-          {{ plaintextWarning?.downgrade ? PLAINTEXT_DOWNGRADE_TEXT : PLAINTEXT_TEXT
-          }}<Hint v-if="plaintextWarning?.downgrade">
-            检测规则可能误判。确认正文不含明文后，可继续降级。
-          </Hint>
-        </p>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="plaintextWarning = null">
-            返回修改
-          </UButton>
-          <UButton
-            :color="plaintextWarning?.downgrade ? 'error' : 'primary'"
-            @click="confirmPlaintext"
+        <!-- 阅读：状态提示和渲染后的正文 -->
+        <template v-else>
+          <NoteLine v-if="plaintext" tone="error">
+            正文疑似包含明文凭据<Hint>建议转存为凭据，正文改用占位符。</Hint>
+            <template v-if="!readOnly" #actions>
+              <UButton
+                size="sm"
+                color="primary"
+                variant="outline"
+                :to="{ name: 'credentials', params: { spaceId } }"
+              >
+                查看凭据
+              </UButton>
+            </template>
+          </NoteLine>
+          <NoteLine
+            v-if="disclosureTone"
+            :tone="disclosureTone === 'warning' ? 'warning' : 'neutral'"
           >
-            {{ plaintextWarning?.downgrade ? '确认不含明文并降级' : '仍然保存' }}
-          </UButton>
-        </div>
-      </template>
-    </UModal>
+            未设触发场景<Hint>{{ missingDisclosureHint(base, now) }}</Hint>
+            <template v-if="!readOnly && !base.contentHidden" #actions>
+              <UButton size="sm" color="primary" variant="outline" @click="fillDisclosure">
+                去补全
+              </UButton>
+            </template>
+          </NoteLine>
+          <NoteLine v-if="overrides">
+            覆盖「{{ overrides.persona }}」的同名节点
+            <template #actions>
+              <button type="button" class="override-link" @click="emit('open', overrides!.uri)">
+                <UriPath :uri="overrides.uri" />
+              </button>
+            </template>
+          </NoteLine>
+          <template v-if="base.contentHidden">
+            <div class="secret-mask" role="img" aria-label="机密内容已加密存储">
+              <i style="width: 94%" />
+              <i style="width: 82%" />
+              <i style="width: 88%" />
+              <i style="width: 46%" />
+            </div>
+            <NoteLine>
+              机密内容已加密存储
+              <template #actions>
+                <UButton
+                  size="sm"
+                  color="primary"
+                  variant="outline"
+                  :loading="revealing"
+                  @click="revealContent"
+                >
+                  查看正文
+                </UButton>
+                <Hint>查看会记录一次访问。</Hint>
+              </template>
+            </NoteLine>
+          </template>
+          <template v-else>
+            <NoteLine v-if="base.sensitivity === 'secret'">
+              查看会记录一次访问。
+              <template #actions>
+                <UButton size="sm" color="primary" variant="outline" @click="hideContent">
+                  隐藏正文
+                </UButton>
+              </template>
+            </NoteLine>
+            <MemoryContent
+              :content="base.content ?? ''"
+              :keywords="keywordIndex"
+              :self="base.uri"
+              :credentials="credentialLinks"
+              :plaintext="plaintext"
+              @open="(uri) => emit('open', uri)"
+              @credential="openCredential"
+            />
+          </template>
+        </template>
+      </div>
 
-    <UModal
-      :open="deleting !== null"
-      title="删除这条记忆？"
-      @update:open="(v) => !v && (deleting = null)"
-    >
-      <template #body>
-        <p class="text-sm">
-          删除 <code>{{ props.uri }}</code
-          >。历史事件将保留，可在「已删除」中恢复；子节点不受影响。
-        </p>
-      </template>
-      <template #footer>
-        <div class="flex w-full justify-end gap-2">
-          <UButton color="neutral" variant="ghost" @click="deleting = null">取消</UButton>
-          <UButton color="error" @click="remove">删除</UButton>
+      <aside class="detail-side">
+        <!-- 编辑时属性栏也可以改 -->
+        <div v-if="mode === 'edit'" class="edit-fields">
+          <div class="edit-layer">
+            <span>层</span>
+            <StrataSwatch :layer="base.layer" plain label="layer" />
+          </div>
+          <UFormField label="优先级" help="0 最重要">
+            <UInputNumber v-model="form.priority" :min="0" :max="99" class="w-full" />
+          </UFormField>
+          <div>
+            <p class="edit-label">敏感级</p>
+            <SwatchOptions
+              v-model="form.sensitivity"
+              label="敏感级"
+              :options="sensitivityOptions"
+            />
+          </div>
+          <UFormField label="触发场景">
+            <template #hint><Hint>什么场景下应该想起这条记忆</Hint></template>
+            <UInput ref="disclosureInput" v-model="form.disclosure" class="w-full" />
+          </UFormField>
+          <UFormField label="关键词">
+            <template #hint><Hint>召回时按关键词命中，至少两个字</Hint></template>
+            <UInputTags v-model="form.glossary" class="w-full" />
+          </UFormField>
+          <UFormField label="有效期">
+            <template #hint>
+              <Hint>
+                仅对阶段性内容设置；到期后不再召回，也不进启动加载，历史中仍可查看，之后可在「已过期」中恢复生效。留空表示长期有效。
+              </Hint>
+            </template>
+            <UInput
+              v-model="form.validTo"
+              type="datetime-local"
+              :min="minValidTo"
+              aria-label="有效期"
+              class="w-full"
+              @focus="minValidTo = earliestValidTo()"
+            />
+            <UButton
+              v-if="form.validTo"
+              class="mt-1"
+              size="sm"
+              color="neutral"
+              variant="ghost"
+              @click="form.validTo = ''"
+            >
+              改为长期有效
+            </UButton>
+          </UFormField>
+          <PropertyList
+            :groups="[
+              [
+                { key: 'version', label: '版本', value: base.version },
+                { key: 'updated', label: '更新' },
+              ],
+            ]"
+          >
+            <template #version
+              ><span class="font-mono">{{ base.version }}</span></template
+            >
+            <template #updated>
+              <time :datetime="base.updatedAt" :title="formatTime(base.updatedAt)">
+                {{ formatRelative(base.updatedAt) }}
+              </time>
+            </template>
+          </PropertyList>
         </div>
-      </template>
-    </UModal>
-  </div>
+        <PropertyList v-else :groups="properties">
+          <template #layer><StrataSwatch :layer="base.layer" plain label="layer" /></template>
+          <template #sensitivity>
+            <StrataSwatch :layer="base.layer" :sensitivity="base.sensitivity" label="sensitivity" />
+          </template>
+          <template #priority>
+            <span class="me-1.5 font-mono">P{{ base.priority }}</span>
+            <span v-if="bootNode" class="boot-flag" :title="BOOT_HINT"> 启动加载 </span>
+          </template>
+          <template #disclosure>
+            <template v-if="!disclosureTone">{{ base.disclosure }}</template>
+            <span v-else :class="disclosureTone === 'warning' ? 'text-warning' : 'text-muted'">
+              未设触发场景
+            </span>
+          </template>
+          <template #glossary>
+            <span v-if="base.glossary.length" class="keywords">
+              <span v-for="keyword in base.glossary" :key="keyword">{{ keyword }}</span>
+            </span>
+            <span v-else class="text-muted">–</span>
+          </template>
+          <template #validity>
+            <span
+              :class="{ 'text-warning': expiry === 'soon' || expiry === 'expired' }"
+              :title="base.validTo ? formatTime(base.validTo) : undefined"
+            >
+              {{ base.validTo ? formatShort(base.validTo) : '长期有效' }}
+            </span>
+          </template>
+          <template #version
+            ><span class="font-mono">{{ base.version }}</span></template
+          >
+          <template #created>
+            <time :datetime="base.createdAt" :title="formatTime(base.createdAt)">
+              {{ formatRelative(base.createdAt) }}
+            </time>
+          </template>
+          <template #updated>
+            <time :datetime="base.updatedAt" :title="formatTime(base.updatedAt)">
+              {{ formatRelative(base.updatedAt) }}
+            </time>
+          </template>
+        </PropertyList>
+      </aside>
+    </div>
+
+    <template v-if="base">
+      <MoveMemoryModal v-model:open="moveOpen" :space-id="spaceId" :memory="base" @done="onMoved" />
+
+      <UModal v-model:open="picking" title="插入凭据引用" @after:leave="restoreCaret">
+        <template #body>
+          <div class="space-y-4">
+            <p v-if="!pickItems.length" class="text-sm text-muted">
+              暂无凭据。请先在「凭据」页新建。
+            </p>
+            <template v-else>
+              <UFormField label="凭据">
+                <USelect v-model="pick.credentialId" :items="pickItems" class="w-full" />
+              </UFormField>
+              <UFormField label="字段" help="引用整条时，Agent 获取全部字段">
+                <USelect v-model="pick.field" :items="fieldItems" class="w-full" />
+              </UFormField>
+              <p v-if="pickedPlaceholder" class="text-sm">
+                将插入 <code>{{ pickedPlaceholder }}</code>
+              </p>
+            </template>
+          </div>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton color="neutral" variant="ghost" @click="picking = false">取消</UButton>
+            <UButton :disabled="!pickedPlaceholder" @click="insertPlaceholder">插入</UButton>
+          </div>
+        </template>
+      </UModal>
+
+      <UModal
+        :open="plaintextWarning !== null"
+        :title="
+          plaintextWarning?.downgrade
+            ? '正文疑似包含明文凭据，仍要降级？'
+            : '正文疑似包含明文凭据，仍要保存？'
+        "
+        @update:open="(v) => !v && (plaintextWarning = null)"
+      >
+        <template #body>
+          <p class="text-sm">
+            {{ plaintextWarning?.downgrade ? PLAINTEXT_DOWNGRADE_TEXT : PLAINTEXT_TEXT
+            }}<Hint v-if="plaintextWarning?.downgrade">
+              检测规则可能误判。确认正文不含明文后，可继续降级。
+            </Hint>
+          </p>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton color="neutral" variant="ghost" @click="plaintextWarning = null">
+              返回修改
+            </UButton>
+            <UButton
+              :color="plaintextWarning?.downgrade ? 'error' : 'primary'"
+              @click="confirmPlaintext"
+            >
+              {{ plaintextWarning?.downgrade ? '确认不含明文并降级' : '仍然保存' }}
+            </UButton>
+          </div>
+        </template>
+      </UModal>
+
+      <UModal
+        :open="deleting !== null"
+        title="删除这条记忆？"
+        @update:open="(v) => !v && (deleting = null)"
+      >
+        <template #body>
+          <p class="text-sm">
+            删除 <code>{{ props.uri }}</code
+            >。历史事件将保留，可在「已删除」中恢复；子节点不受影响。
+          </p>
+        </template>
+        <template #footer>
+          <div class="flex w-full justify-end gap-2">
+            <UButton color="neutral" variant="ghost" @click="deleting = null">取消</UButton>
+            <UButton color="error" @click="remove">删除</UButton>
+          </div>
+        </template>
+      </UModal>
+    </template>
+  </article>
 </template>
+
+<style scoped>
+.memory-detail {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  min-height: 0;
+  overflow-y: auto;
+}
+.memory-detail > * {
+  flex: none;
+}
+.detail-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  column-gap: 24px;
+  padding: 14px 32px 15px;
+  border-bottom: 1px solid var(--ui-border-accented);
+}
+.detail-nav {
+  grid-column: 1;
+  min-width: 0;
+}
+.detail-uri {
+  grid-column: 1;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 1px;
+  min-width: 0;
+}
+.detail-uri h1 {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 21px;
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.detail-tag {
+  grid-column: 1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 4px 14px;
+  margin-top: 9px;
+  font-size: 13px;
+  line-height: 1.5;
+}
+.tag-priority {
+  font-family: var(--font-mono);
+  font-weight: 500;
+}
+.boot-flag {
+  display: inline-flex;
+  align-items: center;
+  height: 20px;
+  padding: 0 6px;
+  border: 1px solid var(--strata-rule);
+  font-size: 12px;
+  font-weight: 500;
+  line-height: 1;
+  white-space: nowrap;
+}
+.detail-actions {
+  grid-column: 2;
+  grid-row: 1 / span 3;
+  align-self: start;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+.dirty-flag {
+  margin-right: 4px;
+  font-size: 13px;
+  color: var(--ui-warning);
+  white-space: nowrap;
+}
+.memory-detail > .detail-main {
+  flex: 1 0 auto;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 290px;
+  align-items: stretch;
+}
+.detail-read {
+  min-width: 0;
+  padding: 20px 40px 56px 32px;
+}
+.detail-side {
+  min-width: 0;
+  padding: 12px 32px 40px 20px;
+  border-left: 1px solid var(--ui-border);
+}
+.keywords {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+}
+.keywords span {
+  padding: 0 6px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 13px;
+  line-height: 1.55;
+}
+.override-link {
+  display: block;
+  max-width: 20em;
+  font-size: 14px;
+}
+.override-link:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.secret-mask {
+  display: flex;
+  flex-direction: column;
+  gap: 13px;
+  padding: 6px 0 26px;
+}
+.secret-mask i {
+  display: block;
+  height: 14px;
+  background: var(--strata-solid);
+}
+.edit-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px 16px;
+  margin-bottom: 7px;
+}
+.edit-help {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.edit-tools {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+}
+.edit-preview {
+  min-width: 0;
+  padding: 12px 16px;
+  border: 1px solid var(--ui-border);
+  overflow: auto;
+}
+.edit-fields {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  padding-top: 8px;
+}
+.edit-layer {
+  display: grid;
+  grid-template-columns: 3.75rem minmax(0, 1fr);
+  column-gap: 10px;
+  align-items: baseline;
+  font-size: 14px;
+}
+.edit-layer > span:first-child {
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.edit-label {
+  margin-bottom: 4px;
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1.25rem;
+}
+
+/* 详情放不下两栏时，属性栏放到正文下面，操作放到标题下面 */
+@media (max-width: 1240px) {
+  .detail-head {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .detail-actions {
+    grid-column: 1;
+    grid-row: auto;
+    flex-wrap: wrap;
+    margin-top: 11px;
+  }
+  .memory-detail > .detail-main {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .detail-side {
+    padding: 6px 32px 40px;
+    border-left: 0;
+    border-top: 1px solid var(--ui-border-accented);
+  }
+}
+@media (max-width: 1023.98px) {
+  .detail-head {
+    padding: 12px 16px 14px;
+  }
+  .detail-uri h1 {
+    font-size: 18px;
+  }
+  .detail-read {
+    padding: 16px 16px 28px;
+  }
+  .detail-side {
+    padding: 6px 16px 32px;
+  }
+}
+</style>

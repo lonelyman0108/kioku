@@ -54,6 +54,9 @@ async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
   }
 }
 
+// 状态只用文字的颜色，不做成彩色徽章
+const statusText = { warning: 'text-warning', success: 'text-success', neutral: 'text-muted' }
+
 const incomingText = (binding: SubjectBinding) =>
   (binding.incoming?.identities ?? [binding.redeemedBy]).map(accountText).join('、')
 </script>
@@ -63,15 +66,15 @@ const incomingText = (binding: SubjectBinding) =>
     <ul class="divide-y divide-default">
       <li v-for="binding in items" :key="binding.id" class="space-y-1 py-2 text-sm">
         <div class="flex flex-wrap items-center gap-2">
-          <UBadge :color="bindingStatusColors[binding.status]" variant="subtle" size="sm">
+          <span class="text-xs" :class="statusText[bindingStatusColors[binding.status]]">
             {{ bindingStatusLabels[binding.status] }}
-          </UBadge>
+          </span>
           <span class="font-medium">{{ accountText(binding.redeemedBy) }}</span>
           <template v-if="binding.subject.id !== subjectId">
             <span class="text-muted">绑定到</span>
             <RouterLink
               :to="{ name: 'subject', params: { spaceId, subjectId: binding.subject.id } }"
-              class="hover:underline"
+              class="text-primary"
               >{{ binding.subject.displayName }}</RouterLink
             >
           </template>
@@ -82,11 +85,11 @@ const incomingText = (binding: SubjectBinding) =>
             >{{ formatRelative(binding.createdAt) }}</time
           >
         </div>
-        <p v-if="binding.incoming" class="text-xs">
+        <p v-if="binding.incoming">
           确认后合并到「{{ binding.subject.displayName }}」的平台账号：{{ incomingText(binding) }}
         </p>
-        <p class="text-xs text-muted">{{ bindingSource(binding) }}</p>
-        <p class="text-xs text-muted">{{ bindingOutcome(binding) }}</p>
+        <p class="text-muted">{{ bindingSource(binding) }}</p>
+        <p class="text-muted">{{ bindingOutcome(binding) }}</p>
         <div v-if="binding.canConfirm || binding.canReject" class="flex gap-2 pt-1">
           <UButton
             v-if="binding.canConfirm"

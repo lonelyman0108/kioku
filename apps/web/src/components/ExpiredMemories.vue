@@ -9,12 +9,12 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useNow } from '../composables/useNow'
-import { icons } from '../icons'
-import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { purgeAt, purgeNote, releasedNotice } from '../retention'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import MemoryHistory from './MemoryHistory.vue'
+import MemoryRow from './strata/MemoryRow.vue'
+import NoteLine from './strata/NoteLine.vue'
 
 const props = defineProps<{ spaceId: string }>()
 const emit = defineEmits<{ reactivated: [uri: string] }>()
@@ -85,55 +85,34 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
 </script>
 
 <template>
-  <div class="space-y-3">
-    <p class="text-xs text-muted">
-      已过期的记忆不再召回，也不进启动加载。<Hint>
-        恢复生效后长期有效，可再设置新的有效期。标记为「URI 已释放」的，过期后同一 URI
-        上已写入新记忆；那条记忆仍在时，需先移走或删除。
-      </Hint>
-    </p>
-    <p v-if="retention && anyReleased" class="flex items-start gap-1.5 text-xs text-warning">
-      <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
-      <span>{{ releasedNotice(retention) }}</span>
-    </p>
-    <UAlert
-      v-if="expired.isError.value"
-      color="error"
-      variant="subtle"
-      :title="expired.error.value instanceof ApiError ? expired.error.value.message : '读取失败'"
-    />
-    <div v-else-if="expired.isPending.value" class="space-y-2">
+  <div>
+    <div class="list-head">
+      <p>
+        已过期的记忆不再召回，也不进启动加载。<Hint>
+          恢复生效后长期有效，可再设置新的有效期。标记为「URI 已释放」的，过期后同一 URI
+          上已写入新记忆；那条记忆仍在时，需先移走或删除。
+        </Hint>
+      </p>
+      <p v-if="retention && anyReleased" class="text-warning">{{ releasedNotice(retention) }}</p>
+    </div>
+    <div v-if="expired.isError.value" class="list-note">
+      <NoteLine tone="error">
+        {{ expired.error.value instanceof ApiError ? expired.error.value.message : '读取失败' }}
+      </NoteLine>
+    </div>
+    <div v-else-if="expired.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />
     </div>
     <template v-else>
-      <ul class="divide-y divide-default">
-        <li v-for="item in items" :key="item.id" class="flex items-center gap-2 py-2">
-          <div class="min-w-0 flex-1">
-            <span class="flex items-center gap-1.5">
-              <code class="truncate text-xs">{{ item.uri }}</code>
-              <UBadge size="sm" variant="subtle" color="neutral" class="shrink-0">
-                {{ layerLabels[item.layer] }}
-              </UBadge>
-              <UBadge
-                size="sm"
-                variant="subtle"
-                :color="sensitivityColors[item.sensitivity]"
-                class="shrink-0"
-              >
-                {{ sensitivityLabels[item.sensitivity] }}
-              </UBadge>
-              <UBadge
-                v-if="item.released"
-                size="sm"
-                variant="outline"
-                color="warning"
-                class="shrink-0"
-                title="过期后同一 URI 上已写入新记忆，URI 已释放"
-              >
-                URI 已释放
-              </UBadge>
-            </span>
-            <span class="text-xs text-muted">
+      <ul>
+        <li v-for="item in items" :key="item.id">
+          <MemoryRow
+            :uri="item.uri"
+            :layer="item.layer"
+            :sensitivity="item.sensitivity"
+            :priority="item.priority"
+          >
+            <span>
               过期于
               <time :datetime="item.expiredAt" :title="formatTime(item.expiredAt)">
                 {{ formatRelative(item.expiredAt, now) }}
@@ -148,33 +127,42 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
                 </span>
               </template>
             </span>
-          </div>
-          <UButton
-            :icon="icons.activity"
-            size="xs"
-            color="neutral"
-            variant="ghost"
-            :aria-label="`${item.uri} 的历史`"
-            @click="viewing = item"
-          />
-          <UButton
-            v-if="canWriteUri(item.uri)"
-            :icon="icons.reactivate"
-            size="xs"
-            color="neutral"
-            variant="subtle"
-            :loading="reactivating === item.id"
-            @click="reactivate(item)"
-          >
-            恢复生效
-          </UButton>
+            <span
+              v-if="item.released"
+              class="block text-warning"
+              title="过期后同一 URI 上已写入新记忆，URI 已释放"
+            >
+              URI 已释放
+            </span>
+            <template #actions>
+              <UButton
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :aria-label="`${item.uri} 的历史`"
+                @click="viewing = item"
+              >
+                历史
+              </UButton>
+              <UButton
+                v-if="canWriteUri(item.uri)"
+                size="xs"
+                color="neutral"
+                variant="outline"
+                :loading="reactivating === item.id"
+                @click="reactivate(item)"
+              >
+                恢复生效
+              </UButton>
+            </template>
+          </MemoryRow>
         </li>
       </ul>
-      <p v-if="!items.length" class="text-sm text-muted">暂无已过期的记忆</p>
-      <div v-if="expired.hasNextPage.value" class="flex justify-center">
+      <p v-if="!items.length" class="list-empty">暂无已过期的记忆</p>
+      <div v-if="expired.hasNextPage.value" class="flex justify-center py-3">
         <UButton
           color="neutral"
-          variant="subtle"
+          variant="outline"
           size="sm"
           :loading="expired.isFetchingNextPage.value"
           @click="expired.fetchNextPage()"
@@ -204,3 +192,20 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
     </USlideover>
   </div>
 </template>
+
+<style scoped>
+.list-head {
+  padding: 8px 14px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.55;
+  color: var(--ui-text-muted);
+}
+.list-note {
+  padding: 14px 14px 0;
+}
+.list-empty {
+  padding: 18px 14px;
+  color: var(--ui-text-muted);
+}
+</style>

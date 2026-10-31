@@ -1,7 +1,9 @@
 import {
+  BOOT_LAYERS,
   LAYERS,
   REVIEW_LAYERS,
   SENSITIVITIES,
+  bootEligible,
   type Layer,
   type Sensitivity,
 } from '@kioku/contracts'
@@ -27,8 +29,8 @@ import { memories } from '../db/schema'
 // 还没有失效或过期，按数据库的时间
 export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
 
-// 启动上下文只收受信来源的这几个策展层（理由见 recall/boot.ts）
-export const BOOT_LAYERS: Layer[] = ['base', 'persona', 'app', 'owner', 'private']
+// 启动上下文只收受信来源的这几个策展层（理由见 recall/boot.ts）。JS 版的判断在 contracts，管理界面也要用
+export { BOOT_LAYERS, bootEligible }
 
 // 会进启动上下文的节点：受信来源的策展层里 priority 0 的，加上人格与应用层 priority ≤ 1 的。
 // boot 按它挑选（再套读权限、继承覆盖与字数预算）；召回分析的「从没被召回」不算它们：
@@ -42,13 +44,6 @@ export const BOOT_ELIGIBLE = and(
     and(inArray(memories.layer, ['persona', 'app']), lte(memories.priority, 1)),
   ),
 )!
-
-// 同一条件的 JS 版，给还没写进库的策展记忆用（导入计划标出会进启动上下文的节点）：受信来源是调用方的前提。
-// 改了 BOOT_ELIGIBLE 要同步改这里，loreImport.int.test.ts 会拿写进去的行比对
-export function bootEligible(layer: Layer, priority: number): boolean {
-  if (!BOOT_LAYERS.includes(layer)) return false
-  return priority === 0 || ((layer === 'persona' || layer === 'app') && priority <= 1)
-}
 
 // 读权限要看的那几个字段从哪里取。记忆表上就是这些列；事件的前后快照（jsonb）里有同名字段，
 // 用 snapshotColumns 取出来，这样历史也用同一套条件判断，不另写一份规则

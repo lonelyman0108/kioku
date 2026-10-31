@@ -31,3 +31,8 @@ export function revealedAfterWrite(
 ): RevealedContent | null {
   return next.contentHidden ? { id: next.id, version: next.version, content } : null
 }
+
+// 查看过的正文收起来：这一版不变，只是正文又不在界面上了，再看要再查看一次（再记一次访问）
+export function hiddenAgain(view: ConsoleMemoryView): ConsoleMemoryView {
+  return { ...view, content: null, contentHidden: true }
+}
