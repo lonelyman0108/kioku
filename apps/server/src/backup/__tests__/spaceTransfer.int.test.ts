@@ -28,6 +28,7 @@ import type {
   SubjectList,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
@@ -2107,6 +2108,119 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         expect((await within(leaving)).status).toBe(400)
         await slotFree()
       })
+    })
+  })
+
+  describe('导出写访问事件时，读完之后记忆又变了', () => {
+    // 另一条连接锁住这一行，发出导出，等它确实卡在这把锁上（读文件不用行锁，卡住的只能是写事件那一步），
+    // 做完 between 再提交、放开锁
+    const whileRowLocked = async (
+      spaceId: string,
+      memoryId: string,
+      leaving: () => Response | Promise<Response>,
+      between: (tx: postgres.TransactionSql) => Promise<unknown>,
+    ): Promise<Response> => {
+      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
+      try {
+        await side.begin(async (tx) => {
+          await tx`select set_config('app.space_id', ${spaceId}, true)`
+          await tx`select 1 from memories where id = ${memoryId} for update`
+          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
+            { pid: number },
+          ]
+          pending = Promise.resolve(leaving())
+          for (let i = 0; ; i++) {
+            const [row] = await side<{ n: number }[]>`
+              select count(*)::int as n from pg_stat_activity
+              where ${pid}::int = any(pg_blocking_pids(pid))`
+            if (row!.n > 0) break
+            if (i >= 400) throw new Error('导出没有等在这把锁上')
+            await new Promise((r) => setTimeout(r, 25))
+          }
+          await between(tx)
+        })
+        return await pending!
+      } finally {
+        await pending?.catch(() => {})
+        await side.end()
+      }
+    }
+    const seedTwo = async () => {
+      const alice = await bootstrap(source, 'alice')
+      const remember = (uri: string) =>
+        ok<MemoryView>(
+          send(
+            source,
+            'POST',
+            `/v1/spaces/${alice.spaceId}/memories`,
+            { uri, content: `${uri} 的正文`, sensitivity: 'secret', disclosure: '读文件时的' },
+            { cookie: alice.cookie },
+          ),
+          201,
+        )
+      return {
+        alice,
+        first: await remember('notes://first'),
+        second: await remember('notes://second'),
+      }
+    }
+    const accessEvents = (spaceId: string) =>
+      withSpace(database.db, spaceId, (tx) =>
+        tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
+      )
+
+    it('期间被硬删除：跳过这一条，不影响导出，别的照记', async () => {
+      const { alice, first, second } = await seedTwo()
+      const res = await whileRowLocked(
+        alice.spaceId,
+        first.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) => tx`delete from memories where id = ${first.id}`,
+      )
+      expect(res.status, await res.clone().text()).toBe(200)
+      const parsed = await contents(Buffer.from(await res.arrayBuffer()))
+      expect(parsed.memories.map((m) => m.uri).sort()).toEqual(['notes://first', 'notes://second'])
+      expect((await accessEvents(alice.spaceId)).map((e) => e.memoryId)).toEqual([second.id])
+    })
+
+    it('期间被改过：事件用现在的快照，不把读文件时的旧内容写回历史', async () => {
+      const { alice, first } = await seedTwo()
+      const res = await whileRowLocked(
+        alice.spaceId,
+        first.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) =>
+          tx`update memories set disclosure = '转存之后的', version = version + 1 where id = ${first.id}`,
+      )
+      expect(res.status).toBe(200)
+      // 文件读完才放掉导出的名额
+      await res.arrayBuffer()
+      const event = (await accessEvents(alice.spaceId)).find((e) => e.memoryId === first.id)!
+      expect(event.before).toMatchObject({
+        disclosure: '转存之后的',
+        version: first.version + 1,
+        content: null,
+      })
+      expect(JSON.stringify(event)).not.toContain('读文件时的')
+    })
+
+    it('期间被降级：事件的快照也不带正文', async () => {
+      const { alice, first } = await seedTwo()
+      const res = await whileRowLocked(
+        alice.spaceId,
+        first.id,
+        () => exportRequest(source, alice.spaceId, alice.cookie),
+        (tx) =>
+          tx`update memories set sensitivity = 'private', content = '降级之后的明文',
+            ciphertext = null, wrapped_key = null, key_id = null where id = ${first.id}`,
+      )
+      expect(res.status).toBe(200)
+      // 文件读完才放掉导出的名额
+      await res.arrayBuffer()
+      const event = (await accessEvents(alice.spaceId)).find((e) => e.memoryId === first.id)!
+      expect(event.before).toMatchObject({ sensitivity: 'private', content: null })
+      expect(JSON.stringify(event)).not.toContain('降级之后的明文')
     })
   })
 

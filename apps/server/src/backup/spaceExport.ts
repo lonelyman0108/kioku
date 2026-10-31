@@ -28,6 +28,7 @@ import {
   MemoryError,
   openMemoryContent,
   snapshot,
+  SNAPSHOT_COLUMNS,
   type SecretVia,
 } from '../memory/service'
 import { formatUri } from '../memory/uri'
@@ -85,7 +86,7 @@ export async function exportSpace(
   const createdAt = new Date().toISOString()
   // 导出了哪些凭据、各带了哪些字段，解密了哪些 secret 记忆：读完之后记访问事件
   const exported = new Map<string, string[]>()
-  const secrets: SecretExported[] = []
+  const secrets: string[] = []
   let spaceName = ''
   let file: Buffer<ArrayBuffer>
   try {
@@ -147,7 +148,7 @@ export async function exportSpace(
   // 文件做好时客户端已经断开：文件交不出去，也就不记访问事件
   stopIfGone(signal)
   // 托管的值与外部的绑定都随文件带走了，和取用一样给凭据的主人记一条访问事件，事后查得到。
-  // secret 记忆的正文同样解密带走了，给这条记忆记一条访问事件（规则见 MemoryService 的 toView）
+  // secret 记忆的正文同样解密带走了，给这条记忆记一条访问事件（见 secretReadEvents）
   if (exported.size || secrets.length) {
     await withSpace(db, options.spaceId, async (tx) => {
       if (exported.size) {
@@ -162,21 +163,52 @@ export async function exportSpace(
         )
       }
       for (let at = 0; at < secrets.length; at += PAGE) {
-        await tx.insert(memoryEvents).values(
-          secrets.slice(at, at + PAGE).map(({ memoryId, before }) => ({
-            spaceId: options.spaceId,
-            memoryId,
-            eventType: ACCESS_EVENT,
-            actorAccountId: options.accountId,
-            provenance: 'owner' as const,
-            before,
-            context: { via: 'export' satisfies SecretVia },
-          })),
-        )
+        await secretReadEvents(tx, options, secrets.slice(at, at + PAGE))
       }
     })
   }
   return { file, spaceName, createdAt }
+}
+
+// 给导出时解密的一批 secret 记忆记访问事件。写事件之前锁住这几行、用现在的快照，读文件时的那一版可能已经旧了：
+// 期间被转存过的话，旧快照会把拿掉的值写回历史（写事件的路径都要先改或锁记忆那一行）。行不在了（期间被硬删除）就跳过：
+// 记忆已经没了，不能因此让导出失败。按 id 排序加锁，和别的批量写入一样。快照不带正文：期间被降级的已经有明文正文了
+async function secretReadEvents(
+  tx: Tx,
+  options: { spaceId: string; accountId: string },
+  ids: string[],
+): Promise<void> {
+  const rows = await tx
+    .select(SNAPSHOT_COLUMNS)
+    .from(memories)
+    .where(inArray(memories.id, ids))
+    .orderBy(asc(memories.id))
+    .for('no key update')
+  if (!rows.length) return
+  const keywords = new Map<string, string[]>()
+  for (const g of await tx
+    .select()
+    .from(memoryGlossary)
+    .where(
+      inArray(
+        memoryGlossary.memoryId,
+        rows.map((r) => r.id),
+      ),
+    )
+    .orderBy(asc(memoryGlossary.keyword))) {
+    keywords.set(g.memoryId, [...(keywords.get(g.memoryId) ?? []), g.keyword])
+  }
+  await tx.insert(memoryEvents).values(
+    rows.map((row) => ({
+      spaceId: options.spaceId,
+      memoryId: row.id,
+      eventType: ACCESS_EVENT,
+      actorAccountId: options.accountId,
+      provenance: 'owner' as const,
+      before: { ...snapshot(row, keywords.get(row.id) ?? []), content: null },
+      context: { via: 'export' satisfies SecretVia },
+    })),
+  )
 }
 
 // 写进文件之前按导入时的定义检查：写得出来的就一定导入得了。通不过的（例如规则收紧之前存下的值）
@@ -190,18 +222,13 @@ function checked<T>(schema: z.ZodType<T>, label: string, value: unknown): T {
   )
 }
 
-// 导出时解密的一条 secret 记忆：访问事件要记的快照
-interface SecretExported {
-  memoryId: string
-  before: unknown
-}
-
 interface LinesContext {
   header: SpaceExportHeader
   accountId: string
   masterKey: MasterKey | null
   exported: Map<string, string[]>
-  secrets: SecretExported[]
+  // 解密带走的 secret 记忆的 id
+  secrets: string[]
   signal: AbortSignal | undefined
 }
 
@@ -381,11 +408,11 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     }
     yield rows
       .map((row) => {
-        const keywords = glossary.get(row.id) ?? []
-        const text = record(`记忆 ${memoryLabel(row)} `, memoryRecord(row, keywords, ctx.masterKey))
-        if (row.sensitivity === 'secret') {
-          ctx.secrets.push({ memoryId: row.id, before: snapshot(row, keywords) })
-        }
+        const text = record(
+          `记忆 ${memoryLabel(row)} `,
+          memoryRecord(row, glossary.get(row.id) ?? [], ctx.masterKey),
+        )
+        if (row.sensitivity === 'secret') ctx.secrets.push(row.id)
         return text
       })
       .join('')
