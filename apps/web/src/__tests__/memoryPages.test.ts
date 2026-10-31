@@ -11,6 +11,7 @@ import memoryHistory from '../components/MemoryHistory.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
 import moveMemoryModal from '../components/MoveMemoryModal.vue?raw'
 import OverviewRow from '../components/OverviewRow.vue'
+import { DOMAINS_QUERY_OPTIONS } from '../components/memoryTree'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
 
@@ -114,6 +115,31 @@ describe('目录的键盘和无障碍', () => {
     expect(memoriesPage).toContain("textContent: () => ''")
   })
 
+  it('带修饰键的按键放行：Alt+← 是后退', () => {
+    const body = (name: string) =>
+      new RegExp(`function ${name}\\(event: KeyboardEvent\\) \\{\\n(.*)\\n`).exec(memoriesPage)![1]!
+    expect(body('onTreeLeftKey')).toContain('hasModifier(event)')
+    expect(body('onTreeKeydown')).toContain('hasModifier(event)')
+    expect(memoriesPage).toContain('event.altKey || event.metaKey || event.ctrlKey')
+  })
+
+  it('新的跳转让还在等的作废，旧的不抢焦点', () => {
+    expect(memoriesPage).toContain('cancelAnimationFrame(focusWait)')
+    expect(memoriesPage).toContain('focusWait = requestAnimationFrame')
+  })
+
+  it('这一栏重新显示时告诉虚拟滚动，转屏后不空白', () => {
+    expect(memoriesPage).toContain('!narrow.value || !selectedUri.value')
+    expect(memoriesPage).toMatch(/watch\(indexVisible,[\s\S]*?scrollToRow\(selectedUri\.value\)/)
+    expect(memoriesPage).toContain("el.dispatchEvent(new Event('scroll'))")
+  })
+
+  it('刚删掉的 URI 用完就清：重建之后返回还回到那一行', () => {
+    expect(memoriesPage).toMatch(
+      /async function onDeleted[\s\S]*?deletedUri = uri[\s\S]*?deletedUri = null\n\}/,
+    )
+  })
+
   it('窄屏切换后焦点不掉到 body：标题能接住焦点，返回时放回那一行', () => {
     const title = elementsOf(template(memoryEditor)).find((el) => el.tag === 'h1')!
     expect(attr(title, 'tabindex')).toBe('-1')
@@ -125,6 +151,18 @@ describe('目录的键盘和无障碍', () => {
   it('触屏上箭头的热区放大，行高和样式跟着粗指针走', () => {
     expect(memoriesPage).toContain('@media (pointer: coarse)')
     expect(memoriesPage).toContain("matchMedia('(pointer: coarse)')")
+  })
+
+  it('热区只往左伸，不盖到色块和名字：点名字要是打开', () => {
+    const coarse = /@media \(pointer: coarse\) \{([\s\S]*?)\n\}/.exec(memoriesPage)![1]!
+    const before = /\.chevron::before \{([\s\S]*?)\}/.exec(coarse)![1]!
+    expect(before).toMatch(/inset: 0 0 0 -\d+px/)
+    // 这一列加宽和往左伸出去的合起来不小于 32px
+    const width = Number(/\.chevron \{[\s\S]*?width: (\d+)px/.exec(coarse)![1])
+    const left = Number(/inset: 0 0 0 -(\d+)px/.exec(before)![1])
+    expect(width + left).toBeGreaterThanOrEqual(32)
+    // 往左不能超过行首的内边距，不然第一层的热区被这一栏裁掉
+    expect(left).toBeLessThanOrEqual(5)
   })
 })
 
@@ -142,10 +180,10 @@ describe('记忆页取统计', () => {
     expect(body).not.toContain('overview.refetch')
   })
 
-  it('domain 列表只有一个请求：树和条数共用查询', () => {
-    expect(memoriesPage.match(/api\.memoryDomains\(/g)).toHaveLength(2)
-    expect(memoriesPage).toContain('queryClient.fetchQuery')
-    expect(memoriesPage.match(/\['memory-domains', /g)).toHaveLength(2)
+  it('读 domain 列表不等重试，离线也不卡住目录的队列：每个用到这个查询的地方都带同样的选项', () => {
+    expect(DOMAINS_QUERY_OPTIONS).toEqual({ retry: false, networkMode: 'always' })
+    expect(memoriesPage.match(/\.\.\.DOMAINS_QUERY_OPTIONS/g)).toHaveLength(2)
+    expect(memoryListView).toContain('...DOMAINS_QUERY_OPTIONS')
   })
 })
 
@@ -208,6 +246,11 @@ describe('记忆详情', () => {
     expect(memoryEditor).toContain('<Hint>{{ BOOT_HINT }}</Hint>')
     expect(memoryEditor).toContain(':title="BOOT_HINT"')
     expect(memoryEditor).not.toContain('每次会话开始时加载')
+  })
+
+  it('补全的说明跟着情况换，不一律说召回', () => {
+    expect(memoryEditor).toContain('{{ missingDisclosureHint(base, now) }}')
+    expect(memoryEditor).not.toContain('<Hint>补全后召回更准确。</Hint>')
   })
 
   it('没写触发场景的提示按 missingDisclosureTone 走，列表和详情一个规则', () => {

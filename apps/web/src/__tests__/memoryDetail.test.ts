@@ -6,6 +6,7 @@ import {
   expiryState,
   isBootNode,
   looksPlaintext,
+  missingDisclosureHint,
   missingDisclosureTone,
   originScopeLabel,
   overriddenNode,
@@ -92,6 +93,17 @@ describe('没写触发场景时的提示', () => {
     expect(missingDisclosureTone(memory({ priority: 0, sensitivity: 'secret' }), now)).toBe(
       'warning',
     )
+  })
+
+  it('说明跟着情况换：只有走召回的才说召回更准', () => {
+    expect(missingDisclosureHint(memory({}), now)).toBe('补全后召回更准确。')
+    const boot = missingDisclosureHint(memory({ priority: 0 }), now)
+    expect(boot).toContain('启动加载不依赖触发场景')
+    const secret = missingDisclosureHint(memory({ sensitivity: 'secret' }), now)
+    expect(secret).toContain('机密内容不参与召回')
+    expect(secret).not.toContain('召回更准确')
+    // 优先级够启动加载的机密也不进启动加载，按机密说
+    expect(missingDisclosureHint(memory({ priority: 0, sensitivity: 'secret' }), now)).toBe(secret)
   })
 })
 

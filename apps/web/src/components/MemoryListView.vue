@@ -18,6 +18,7 @@ import { sensitivityLabels } from '../labels'
 import { missingDisclosureTone } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
+import { DOMAINS_QUERY_OPTIONS } from './memoryTree'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
@@ -90,6 +91,7 @@ const domains = useQuery({
   queryKey: computed(() => ['memory-domains', props.spaceId]),
   queryFn: () => api.memoryDomains(props.spaceId),
   enabled: active,
+  ...DOMAINS_QUERY_OPTIONS,
 })
 const domainItems = computed(() => [
   { label: '全部 domain', value: null },

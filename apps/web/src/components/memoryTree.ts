@@ -1,5 +1,9 @@
 import type { Layer, MemoryChildren, Sensitivity } from '@kioku/contracts'
 
+// 读 domain 列表的查询选项。目录的加载在 serially 的队列里等这个结果，不能等重试，离线时也不能卡住。
+// 查询会合并进行中的请求，先发起的那一处决定重试和网络模式，所以用到这个查询的地方都带上
+export const DOMAINS_QUERY_OPTIONS = { retry: false, networkMode: 'always' } as const
+
 // 记忆树的一个节点。children 为 undefined 表示叶子；为数组时可以展开，loaded 为 false 时展开才去加载
 export interface MemoryTreeItem {
   label: string

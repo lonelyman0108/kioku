@@ -21,6 +21,7 @@ import Hint from '../components/Hint.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
 import MemoryListView from '../components/MemoryListView.vue'
 import {
+  DOMAINS_QUERY_OPTIONS,
   ancestorsOf,
   depthOf,
   focusAfterSelect,
@@ -165,11 +166,11 @@ async function loadRoots() {
   // 切换空间时上一次请求可能后到，结果属于别的空间就丢掉
   const forSpace = spaceId.value
   try {
-    // 和下面 domain 根条数的查询共用一个请求
     const domains = await queryClient.fetchQuery({
       queryKey: ['memory-domains', forSpace],
       queryFn: () => api.memoryDomains(forSpace),
       staleTime: 0,
+      ...DOMAINS_QUERY_OPTIONS,
     })
     if (forSpace !== spaceId.value) return
     rootsFailed.value = false
@@ -333,6 +334,7 @@ async function onDeleted(uri: string) {
   invalidateLists()
   refreshCounts()
   await serially(() => refreshAround(uri)).catch(failed)
+  deletedUri = null
 }
 
 // 保存、恢复或只改了层之后，树上这一项的标记跟着变。不知道改之前什么样时按变了算
@@ -408,34 +410,48 @@ const rowHeight = computed(() => (narrow.value || coarsePointer ? 36 : 28))
 // 展开着的每一行在哪里：引线和滚动到选中的那一行都要用
 const places = computed(() => treeRowPlaces(roots.value, expanded.value))
 const treeRef = ref<{ $el: HTMLElement } | null>(null)
-function scrollToRow(uri: string) {
+function scrollToRow(uri: string | null) {
   const el = treeRef.value?.$el
   if (!el) return
-  const place = places.value.get(uri)
+  const place = uri ? places.value.get(uri) : undefined
   if (place) {
     const top = place.index * rowHeight.value
     if (top < el.scrollTop || top + rowHeight.value > el.scrollTop + el.clientHeight) {
       el.scrollTop = top - el.clientHeight / 2
     }
   }
-  // 窄屏的目录刚从隐藏变成显示时，位置变了也不发 scroll 事件，虚拟滚动不知道，替它发一个
+  // 目录刚从隐藏变成显示时，位置变了也不发 scroll 事件，虚拟滚动不知道，替它发一个
   el.dispatchEvent(new Event('scroll'))
 }
-// 滚到这一行并把焦点给它。行是虚拟滚动渲染的，滚动之后要等几帧才出来；一直没出来时调用 missing
+// 这一栏从隐藏变成显示（窄屏返回、转屏）：虚拟滚动记的位置过期了，不告诉它目录就是一片空白。
+// 粗指针设备转屏时行高不变，树不会重建，只能靠这里
+const indexVisible = computed(() => !narrow.value || !selectedUri.value)
+watch(indexVisible, async (visible) => {
+  if (!visible) return
+  await nextTick()
+  scrollToRow(selectedUri.value)
+})
+// 滚到这一行并把焦点给它。行是虚拟滚动渲染的，滚动之后要等几帧才出来；一直没出来时调用 missing。
+// 新的调用让还在等的作废，不然快速打字时旧的那一行出来后会抢走焦点
+let focusWait = 0
 function focusTreeRow(uri: string, missing?: () => void) {
+  cancelAnimationFrame(focusWait)
   scrollToRow(uri)
-  const attempt = (left: number) =>
-    requestAnimationFrame(() => {
+  const attempt = (left: number) => {
+    focusWait = requestAnimationFrame(() => {
       const row = treeRef.value?.$el.querySelector<HTMLElement>(`[data-uri="${CSS.escape(uri)}"]`)
       if (row) row.focus()
       else if (left > 0) attempt(left - 1)
       else missing?.()
     })
+  }
   attempt(10)
 }
+// 带修饰键的方向键和字母是浏览器和系统的快捷键（Alt+← 后退、Cmd+←），放行
+const hasModifier = (event: KeyboardEvent) => event.altKey || event.metaKey || event.ctrlKey
 // 左键跳到上一级：组件库只在渲染出来的行里找，虚拟滚动下上一级可能不在。在它之前接过来，一律自己跳
 function onTreeLeftKey(event: KeyboardEvent) {
-  if (event.key !== 'ArrowLeft') return
+  if (event.key !== 'ArrowLeft' || hasModifier(event)) return
   const uri = (event.target as HTMLElement).dataset.uri
   const parent = uri ? parentRow(places.value, expanded.value, uri) : null
   if (!parent) return
@@ -448,8 +464,7 @@ function onTreeLeftKey(event: KeyboardEvent) {
 let typed = ''
 let typedAt = 0
 function onTreeKeydown(event: KeyboardEvent) {
-  if (event.key.length !== 1 || event.key === ' ') return
-  if (event.metaKey || event.ctrlKey || event.altKey) return
+  if (event.key.length !== 1 || event.key === ' ' || hasModifier(event)) return
   typed = event.timeStamp - typedAt < 1000 ? typed + event.key : event.key
   typedAt = event.timeStamp
   const current = (document.activeElement as HTMLElement | null)?.dataset.uri ?? null
@@ -507,6 +522,7 @@ watch(
 const domains = useQuery({
   queryKey: computed(() => ['memory-domains', spaceId.value]),
   queryFn: () => api.memoryDomains(spaceId.value),
+  ...DOMAINS_QUERY_OPTIONS,
 })
 function rowCount(item: MemoryTreeItem, open: boolean) {
   if (!item.children) return null
@@ -912,12 +928,17 @@ const crumbs = computed(() => {
 .chevron svg {
   transition: transform 0.1s linear;
 }
-/* 触屏上箭头的热区放大到 32px，长相不变。行高这时是 36px */
+/* 触屏上箭头的热区放大到 32px：这一列加宽，把色块和名字往右推，不盖到它们。箭头的位置不变，还和引线对得上。行高这时是 36px */
 @media (pointer: coarse) {
+  .chevron {
+    justify-content: flex-start;
+    width: 27px;
+    padding-left: 5px;
+  }
   .chevron::before {
     content: '';
     position: absolute;
-    inset: 0 -9px 0 -5px;
+    inset: 0 0 0 -5px;
   }
 }
 .chevron.open svg {

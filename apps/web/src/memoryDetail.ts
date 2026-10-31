@@ -41,17 +41,29 @@ export function isBootNode(
   )
 }
 
+type DisclosureFields = Pick<
+  MemoryView,
+  'disclosure' | 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'
+>
+
 // 没写触发场景时怎么提示，写了的是 null。概览的「未设触发场景」把启动加载的节点也算在内，这里要对得上，
 // 不然点「去补全」过来看不出要补什么；它们不靠触发场景被想起，语气弱一点
 export function missingDisclosureTone(
-  memory: Pick<
-    MemoryView,
-    'disclosure' | 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'
-  >,
+  memory: DisclosureFields,
   now: Date = new Date(),
 ): 'warning' | 'muted' | null {
   if (memory.disclosure?.trim()) return null
   return isBootNode(memory, now) ? 'muted' : 'warning'
+}
+
+// 补全它有什么用：机密不进召回，启动加载不靠它，只有别的记忆才是召回更准
+export function missingDisclosureHint(memory: DisclosureFields, now: Date = new Date()): string {
+  if (memory.sensitivity === 'secret') {
+    return '机密内容不参与召回，只能按 URI 读取。写清在什么场景下需要它，便于判断是否读取。'
+  }
+  return isBootNode(memory, now)
+    ? '启动加载不依赖触发场景。未被加载时（例如超出字数上限），补全后召回更准确。'
+    : '补全后召回更准确。'
 }
 
 type PlaintextFields = Pick<ConsoleMemoryView, 'content' | 'sensitivity' | 'plaintextIgnored'>

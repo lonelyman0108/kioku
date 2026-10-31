@@ -25,6 +25,7 @@ import {
   expiryState,
   isBootNode,
   looksPlaintext,
+  missingDisclosureHint,
   missingDisclosureTone,
   originScopeLabel,
   overriddenNode,
@@ -789,7 +790,7 @@ const properties = computed<Property[][]>(() => {
             v-if="disclosureTone"
             :tone="disclosureTone === 'warning' ? 'warning' : 'neutral'"
           >
-            未设触发场景<Hint>补全后召回更准确。</Hint>
+            未设触发场景<Hint>{{ missingDisclosureHint(base, now) }}</Hint>
             <template v-if="!readOnly && !base.contentHidden" #actions>
               <UButton size="sm" color="primary" variant="outline" @click="fillDisclosure">
                 去补全
