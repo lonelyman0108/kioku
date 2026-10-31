@@ -42,6 +42,7 @@ const tone = computed(() =>
         :key="action.label"
         size="sm"
         variant="outline"
+        :title="action.label"
         v-bind="action"
       />
       <UButton

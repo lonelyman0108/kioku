@@ -157,7 +157,7 @@ const mediaOf = (source: string, condition: string) => {
 }
 const ruleOf = (source: string, selector: string) => {
   const css = styleOf(source)
-  const from = css.search(new RegExp(`^${selector.replace(/[.*()]/g, '\\$&')} \\{`, 'm'))
+  const from = css.search(new RegExp(`^${selector.replace(/[.*+()]/g, '\\$&')} \\{`, 'm'))
   expect(from, `样式里要有 ${selector}`).toBeGreaterThanOrEqual(0)
   return css.slice(from, css.indexOf('\n}', from))
 }
@@ -1514,6 +1514,14 @@ describe('读取失败', () => {
     expect(appsError.tag).toBe('BenchNotice')
     const keysError = withIf(toolbar.elements, 'keys.isError.value')
     expect(keysError.tag).toBe('BenchNotice')
+    // 缓存是空的又刷新失败时只剩这一句：要能重新读
+    expect(bound(appsError, 'actions')).toBe('retryApps')
+    expect(bound(keysError, 'actions')).toBe('retryKeys')
+    expect(toolbar.script).toContain('const retryApps = computed(() => retryOf(apps))')
+    expect(toolbar.script).toContain('const retryKeys = computed(() => retryOf(keys))')
+    const retry = blockOf(toolbar.script, 'const retryOf = ')
+    expect(retry).toContain('query.refetch()')
+    expect(retry).toContain('loading: query.isFetching.value')
     expect(blockOf(sfc(benchCalls).script, 'const toolsError = ')).toContain(
       'tools.isError.value ? catalogFailure(tools.error.value) : null',
     )
@@ -1553,39 +1561,87 @@ describe('贴底的区块', () => {
   const places = [
     ['调用台', benchCalls, 'call-end', ['contextDiffers', 'unavailable', 'formError', 'failure']],
     ['场景', benchScenariosView, 'scenario-end', ['mismatch', 'errors.length', 'failure']],
+    [
+      '模型对话',
+      benchAgentView,
+      'composer',
+      ['consent && needsConsent && !agentSending', 'blocker', 'diverged', 'exportNote'],
+    ],
   ] as const
 
   it.each(places)(
-    '%s：提示自己滚动，不比栏还高，运行按钮不跟着滚',
+    '%s：提示收进封顶的滚动区，键盘进得去，没有提示时不留空的停靠点',
     (_name, source, end, notices) => {
-      const { elements } = sfc(source)
-      const block = withClass(elements, end)
-      expect(ruleOf(source, `.${end}`)).toContain('position: sticky')
-      expect(ruleOf(source, `.${end}`)).toContain('bottom: 0')
+      const block = withClass(sfc(source).elements, end)
       const notes = withClass(walk(block), 'end-notes')
       const rule = ruleOf(source, '.end-notes')
-      expect(rule).toContain('max-height: 40dvh')
+      // 不按窗口高度的比例封顶：矮窗口里栏只有 350 到 400，不能几乎盖满
+      expect(rule).toContain('max-height: min(30dvh, 14rem)')
       expect(rule).toContain('overflow-y: auto')
+      expect(attr(notes, 'tabindex')).toBe('0')
+      expect(attr(notes, 'role')).toBe('region')
+      expect(attr(notes, 'aria-label')).toBeTruthy()
+      expect(ruleOf(source, '.end-notes:empty')).toContain('display: none')
       for (const condition of notices) {
         const notice = withIf(walk(notes), condition)
         expect(notice.tag).toBe('BenchNotice')
+        // 叠在一起，和下面的 BenchAgentBusy 之间不多一条线、一段空白
+        expect(notice.props?.some((p) => p.name === 'flush')).toBe(true)
       }
-      // 按钮和「模型对话进行中」的停止都在滚动区外面，一直够得着
-      const inNotes = walk(notes).map((el) => el.tag)
-      expect(inNotes).not.toContain('UButton')
-      expect(inNotes).not.toContain('BenchAgentBusy')
-      expect(walk(block).map((el) => el.tag)).toContain('BenchAgentBusy')
-      expect(walk(block).some((el) => el.tag === 'UButton')).toBe(true)
+      // 里面只有提示：换了结构也不能把按钮放进去
+      expect(notes.children!.filter((n) => n.type === ELEMENT).map((el) => el.tag)).toEqual(
+        notices.map(() => 'BenchNotice'),
+      )
     },
   )
 
-  it('模型对话的输入区同样不比栏还高：宽屏与整页滚动时都有上限', () => {
+  it.each(places.slice(0, 2))(
+    '%s：运行按钮和停止模型对话都在滚动区外面，一直够得着',
+    (_name, source, end) => {
+      const block = withClass(sfc(source).elements, end)
+      expect(ruleOf(source, `.${end}`)).toContain('position: sticky')
+      expect(ruleOf(source, `.${end}`)).toContain('bottom: 0')
+      const notes = withClass(walk(block), 'end-notes')
+      const busy = withTag(walk(block), 'BenchAgentBusy')
+      expect(walk(notes)).not.toContain(busy)
+      expect(busy.props?.some((p) => p.name === 'flush')).toBe(true)
+      expect(walk(notes).map((el) => el.tag)).not.toContain('UButton')
+      // 紧跟在提示后面：两者之间没有别的东西
+      const kids = block.children!.filter((n) => n.type === ELEMENT)
+      expect(kids.indexOf(busy)).toBe(kids.indexOf(notes) + 1)
+    },
+  )
+
+  it('模型对话：文本框、发送、停止都在滚动区外面，放不下时只有提示缩小', () => {
+    const { elements } = sfc(benchAgentView)
+    const composer = withClass(elements, 'composer')
+    const notes = withClass(walk(composer), 'end-notes')
+    const kids = composer.children!.filter((n) => n.type === ELEMENT)
+    expect(kids.indexOf(notes)).toBe(0)
+    const input = must(
+      elements.find((el) => attr(el, 'aria-label') === '发给模型的消息'),
+      '发给模型的消息',
+    )
+    expect(kids).toContain(input)
+    const actions = withClass(walk(composer), 'composer-actions')
+    expect(kids).toContain(actions)
+    expect(walk(actions)).toContain(withHandler(elements, 'click', 'send'))
+    expect(walk(actions)).toContain(withHandler(elements, 'click', 'stopAgent'))
+    expect(walk(notes).map((el) => el.tag)).not.toContain('UButton')
+    // 输入区不自己滚：滚起来按钮就可能出视野。它能被压缩，压缩时只有提示让出高度
     const rule = ruleOf(benchAgentView, '.composer')
     expect(rule).toContain('max-height: 65%')
-    expect(rule).toContain('overflow-y: auto')
+    expect(rule).toContain('flex: 0 1 auto')
+    expect(rule).toContain('min-height: 0')
+    expect(rule).not.toContain('overflow')
+    const noteRule = ruleOf(benchAgentView, '.end-notes')
+    expect(noteRule).toContain('flex: 0 1 auto')
+    expect(noteRule).toContain('min-height: 0')
+    expect(ruleOf(benchAgentView, '.message-input')).toContain('flex: none')
+    expect(ruleOf(benchAgentView, '.composer-actions')).toContain('flex: none')
     const narrow = mediaOf(benchAgentView, 'max-width: 1240px')
     expect(narrow).toMatch(/\.composer \{[^}]*max-height: 70dvh/)
-    expect(narrow).not.toMatch(/\.composer \{[^}]*overflow-y: visible/)
+    expect(narrow).not.toMatch(/\.composer \{[^}]*overflow/)
   })
 })
 
@@ -1620,63 +1676,102 @@ describe('提示里的操作', () => {
     for (const source of Object.values(SOURCES)) expect(source).not.toContain("variant: 'subtle'")
   })
 
-  it('上面已经有线时用 flush，不从外面改 NoteLine 的样式', () => {
+  it('按钮文字被截断时悬停看得全：title 是完整的文字', () => {
+    const button = must(
+      sfc(benchNotice).elements.find((el) => directive(el, 'for') === 'action in actions'),
+      '操作的按钮',
+    )
+    expect(bound(button, 'title')).toBe('action.label')
+  })
+
+  it('叠在别的线下面时用 flush，不从外面改 NoteLine 的样式', () => {
     for (const source of Object.values(SOURCES)) expect(source).not.toContain('.note-line')
     expect(bound(withTag(sfc(benchNotice).elements, 'NoteLine'), 'flush')).toBe('flush')
     expect(bound(withClass(sfc(noteLine).elements, 'note-line'), 'class')).toBe('{ flush }')
-    expect(ruleOf(noteLine, '.note-line.flush')).toContain('border-top: 0')
-    expect(ruleOf(noteLine, '.note-line.flush:first-child')).toContain('padding-top: 0')
-    const hasFlush = (el: TemplateNode) => el.props?.some((p) => p.name === 'flush')
-    // 调用台的贴底区块和输入区顶上都有线
-    const callEnd = withClass(sfc(benchCalls).elements, 'call-end')
-    const inCallEnd = walk(callEnd).filter((el) => /^Bench(Notice|AgentBusy)$/.test(el.tag ?? ''))
-    expect(inCallEnd.length).toBeGreaterThanOrEqual(5)
-    for (const notice of inCallEnd) expect(hasFlush(notice)).toBe(true)
-    const composer = withClass(sfc(benchAgentView).elements, 'composer')
-    const inComposer = walk(composer).filter((el) => el.tag === 'BenchNotice')
-    expect(inComposer.length).toBe(4)
-    for (const notice of inComposer) expect(hasFlush(notice)).toBe(true)
+    const rule = ruleOf(noteLine, '.note-line.flush')
+    expect(rule).toContain('border-top: 0')
+    // 下边距和 .note-line + .note-line 的负边距是一对：两个都要去掉，隔着一层包裹时才不多空白
+    expect(rule).toContain('margin-bottom: 0')
+    expect(ruleOf(noteLine, '.note-line.flush + .note-line.flush')).toContain('margin-top: 0')
     expect(bound(withTag(sfc(benchAgentBusy).elements, 'BenchNotice'), 'flush')).toBe('flush')
+    // 贴底区块的顶上都有一条线
+    for (const [source, selector] of [
+      [benchCalls, '.call-end'],
+      [benchScenariosView, '.scenario-end'],
+      [benchAgentView, '.composer'],
+    ] as const) {
+      expect(ruleOf(source, selector)).toContain('border-top: 1px solid')
+    }
   })
 })
 
 describe('运行中的状态', () => {
-  it('场景：运行时说运行中，不说暂无结果', () => {
-    const { elements } = sfc(benchScenariosView)
-    const result = withClass(elements, 'scenario-result')
-    const running = withIf(walk(result), 'scenarioRunning')
-    expect(attr(running, 'role')).toBe('status')
-    expect(textOf(running)).toContain('运行中')
-    const none = must(
-      walk(result).find((el) => el.tag === 'p' && el.props?.some((p) => p.name === 'else')),
-      '暂无结果',
+  // 从根走到这个节点经过的元素（不含它自己）
+  const ancestorsOf = (root: TemplateNode, target: TemplateNode): TemplateNode[] | null => {
+    for (const child of root.children ?? []) {
+      if (child === target) return [root]
+      const found = ancestorsOf(child, target)
+      if (found) return [root, ...found]
+    }
+    return null
+  }
+  const conditional = (el: TemplateNode) =>
+    el.props?.some((p) => ['if', 'else-if', 'else'].includes(p.name))
+
+  it.each([
+    ['调用台', benchCalls, 'callRunning'],
+    ['场景', benchScenariosView, 'scenarioRunning'],
+  ])('%s：读屏念得到：role="status" 的元素一直在，只换文字', (_name, source, running) => {
+    const { elements } = sfc(source)
+    const status = must(
+      elements.find((el) => attr(el, 'role') === 'status'),
+      'role="status" 的元素',
     )
-    expect(textOf(none)).toContain('暂无结果')
-    // 紧挨着：v-else 接的是这个 v-if
-    const parent = must(
-      walk(result).find((el) => el.children?.includes(running)),
-      '上一层',
-    )
-    const siblings = parent.children!.filter((n) => n.type === ELEMENT)
-    expect(siblings[siblings.indexOf(running) + 1]).toBe(none)
+    expect(shownIn(status)).toEqual([`${running} ? '运行中…' : ''`])
+    expect(conditional(status)).toBe(false)
+    const ancestors = ancestorsOf(elements[0]!, status)
+    expect(ancestors).not.toBeNull()
+    for (const el of ancestors!) expect(conditional(el)).toBe(false)
+    expect(elements.filter((el) => attr(el, 'role') === 'status')).toHaveLength(1)
+    // 没在运行时不占地方，但不能用 display: none：那样就不是一直在了
+    expect(styleOf(source)).toMatch(/\.run-status:not\(:empty\) \{/)
+    expect(styleOf(source)).not.toMatch(/\.run-status[^{]*\{[^}]*display: none/)
   })
 
-  it('调用台：运行时说运行中，第一次调用时不说暂无调用，已有记录时也说', () => {
+  it('场景：运行时不说暂无结果；结果和暂无结果都排在状态后面', () => {
+    const { elements } = sfc(benchScenariosView)
+    const result = withClass(elements, 'scenario-result')
+    const none = withDirective(walk(result), 'else-if', '!scenarioRunning')
+    expect(none.tag).toBe('p')
+    expect(textOf(none)).toContain('暂无结果')
+    const outcome = withIf(walk(result), 'outcome && summary')
+    const kids = result.children!.filter((n) => n.type === ELEMENT)
+    expect(kids.indexOf(none)).toBe(kids.indexOf(outcome) + 1)
+    const status = must(
+      kids.find((el) => attr(el, 'role') === 'status'),
+      '状态',
+    )
+    expect(kids.indexOf(status)).toBe(kids.indexOf(outcome) - 1)
+    // 标题跟着结果走，运行中和没有结果时是同一个标题
+    const heading = withTag(kids, 'SectionHeading')
+    expect(bound(heading, 'title')).toBe("outcome?.title ?? '运行结果'")
+  })
+
+  it('调用台：第一次调用时不说暂无调用，已有记录时也说运行中', () => {
     const { elements } = sfc(benchCalls)
-    const running = withIf(elements, 'callRunning')
-    expect(running.tag).toBe('p')
-    expect(attr(running, 'role')).toBe('status')
-    expect(textOf(running)).toContain('运行中')
     const none = withDirective(elements, 'else-if', '!callRunning')
     expect(textOf(none)).toContain('暂无调用')
-    // 不在时间线的 v-if 链上：已有记录时也显示
     const list = withIf(elements, 'timeline.length')
     const parent = must(
       elements.find((el) => el.children?.includes(list)),
       '时间线的上一层',
     )
     const siblings = parent.children!.filter((n) => n.type === ELEMENT)
-    expect(siblings.indexOf(running)).toBe(siblings.indexOf(list) - 1)
+    const status = must(
+      siblings.find((el) => attr(el, 'role') === 'status'),
+      '状态',
+    )
+    expect(siblings.indexOf(status)).toBe(siblings.indexOf(list) - 1)
     expect(siblings.indexOf(none)).toBe(siblings.indexOf(list) + 1)
   })
 })

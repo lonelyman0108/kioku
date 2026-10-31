@@ -245,31 +245,33 @@ watch(generation, () => {
         <p v-else-if="available && loop" class="thread empty">暂无消息</p>
 
         <div v-if="available && loop" class="composer">
-          <BenchNotice
-            v-if="consent && needsConsent && !agentSending"
-            flush
-            color="warning"
-            title="发送前确认"
-            :description="consentText(consent, mode)"
-            :actions="consentActions"
-          />
-          <BenchNotice v-if="blocker" flush color="warning" :title="blocker" />
-          <BenchNotice
-            v-if="diverged"
-            flush
-            color="warning"
-            :title="diverged.title"
-            :description="diverged.description"
-            :actions="divergedActions"
-          />
-          <BenchNotice
-            v-if="exportNote"
-            flush
-            color="warning"
-            :title="exportNote"
-            close
-            @update:open="(v) => !v && (exportNote = null)"
-          />
+          <div class="end-notes" tabindex="0" role="region" aria-label="发送提示">
+            <BenchNotice
+              v-if="consent && needsConsent && !agentSending"
+              flush
+              color="warning"
+              title="发送前确认"
+              :description="consentText(consent, mode)"
+              :actions="consentActions"
+            />
+            <BenchNotice v-if="blocker" flush color="warning" :title="blocker" />
+            <BenchNotice
+              v-if="diverged"
+              flush
+              color="warning"
+              :title="diverged.title"
+              :description="diverged.description"
+              :actions="divergedActions"
+            />
+            <BenchNotice
+              v-if="exportNote"
+              flush
+              color="warning"
+              :title="exportNote"
+              close
+              @update:open="(v) => !v && (exportNote = null)"
+            />
+          </div>
           <UTextarea
             v-model="input"
             :rows="2"
@@ -279,7 +281,7 @@ watch(generation, () => {
               real ? '发给模型的消息（仅点击按钮发送）' : '发给模型的消息（⌘ 或 Ctrl + 回车发送）'
             "
             aria-label="发给模型的消息"
-            class="w-full"
+            class="message-input w-full"
             @keydown="onKeydown"
           />
           <div class="composer-actions">
@@ -464,17 +466,36 @@ watch(generation, () => {
 .thread.empty {
   color: var(--ui-text-muted);
 }
+/* 放不下时只有提示缩小、自己滚动：文本框和发送、停止一直在 */
 .composer {
-  flex: none;
+  flex: 0 1 auto;
   display: flex;
   flex-direction: column;
+  min-height: 0;
   max-height: 65%;
-  padding: 10px 0 12px;
-  overflow-y: auto;
+  padding: 4px 0 12px;
   background: var(--ui-bg);
   border-top: 1px solid var(--strata-rule);
 }
+/* 矮窗口里按窗口高度算，高窗口里不超过十来行。没有提示时不占地方，也不留一个空的 Tab 停靠点 */
+.end-notes {
+  flex: 0 1 auto;
+  min-height: 0;
+  max-height: min(30dvh, 14rem);
+  overflow-y: auto;
+}
+.end-notes:empty {
+  display: none;
+}
+.end-notes:focus-visible {
+  outline-offset: -2px;
+}
+.message-input {
+  flex: none;
+  margin-top: 6px;
+}
 .composer-actions {
+  flex: none;
   display: flex;
   flex-wrap: wrap;
   align-items: center;
@@ -482,6 +503,7 @@ watch(generation, () => {
   padding-top: 8px;
 }
 .usage {
+  flex: none;
   padding-top: 4px;
   font-size: 13px;
   line-height: 1.6;

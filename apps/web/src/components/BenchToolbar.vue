@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed } from 'vue'
+import { computed, type Ref } from 'vue'
 
 import { ApiError } from '../api/client'
 import { REAL_MODE_CONSEQUENCES } from '../benchSession'
@@ -43,6 +43,16 @@ const keyItems = computed(() =>
 )
 const errorOf = (err: unknown, fallback: string) =>
   err instanceof ApiError ? err.message : fallback
+const retryOf = (query: { isFetching: Readonly<Ref<boolean>>; refetch: () => unknown }) => [
+  {
+    label: '重新读取',
+    color: 'neutral' as const,
+    loading: query.isFetching.value,
+    onClick: () => void query.refetch(),
+  },
+]
+const retryApps = computed(() => retryOf(apps))
+const retryKeys = computed(() => retryOf(keys))
 </script>
 
 <template>
@@ -110,6 +120,7 @@ const errorOf = (err: unknown, fallback: string) =>
         v-if="apps.isError.value"
         color="error"
         :title="errorOf(apps.error.value, '读取应用失败')"
+        :actions="retryApps"
       />
       <USkeleton v-if="apps.isPending.value" class="h-16 w-full" />
       <div v-else-if="apps.data.value && !owned.length && !apps.isError.value" class="no-apps">
@@ -133,6 +144,7 @@ const errorOf = (err: unknown, fallback: string) =>
           v-if="keys.isError.value"
           color="error"
           :title="errorOf(keys.error.value, '读取 Key 失败')"
+          :actions="retryKeys"
         />
         <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">
           当前应用暂无有效 Key，

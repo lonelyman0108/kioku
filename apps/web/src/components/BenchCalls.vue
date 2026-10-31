@@ -302,7 +302,7 @@ function onRunClick() {
           </template>
 
           <div class="call-end">
-            <div class="end-notes">
+            <div class="end-notes" tabindex="0" role="region" aria-label="运行提示">
               <BenchNotice
                 v-if="contextDiffers"
                 flush
@@ -385,7 +385,7 @@ function onRunClick() {
             :actions="divergedActions"
           />
           <BenchNotice v-if="blocker" color="warning" :title="blocker" />
-          <p v-if="callRunning" role="status" class="empty">运行中…</p>
+          <p role="status" class="run-status">{{ callRunning ? '运行中…' : '' }}</p>
           <ol v-if="timeline.length" class="timeline">
             <li v-for="entry in timeline" :key="entry.id">
               <button
@@ -538,20 +538,27 @@ function onRunClick() {
   position: sticky;
   bottom: 0;
   z-index: 1;
-  padding-top: 10px;
+  padding: 4px 0 12px;
   background: var(--ui-bg);
   border-top: 1px solid var(--ui-border);
 }
+/* 矮窗口里按窗口高度算，高窗口里不超过十来行。没有提示时不占地方，也不留一个空的 Tab 停靠点 */
 .end-notes {
-  max-height: 40dvh;
+  max-height: min(30dvh, 14rem);
   overflow-y: auto;
+}
+.end-notes:empty {
+  display: none;
+}
+.end-notes:focus-visible {
+  outline-offset: -2px;
 }
 .call-actions {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 8px;
-  padding-bottom: 12px;
+  padding-top: 8px;
 }
 
 .usage {
@@ -595,7 +602,9 @@ function onRunClick() {
   white-space: nowrap;
   opacity: 0.8;
 }
-.empty {
+/* 一直在，只换文字：读屏才念得到。没在运行时不占地方 */
+.empty,
+.run-status:not(:empty) {
   padding: 6px 0;
   color: var(--ui-text-muted);
 }

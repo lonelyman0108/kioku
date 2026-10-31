@@ -276,22 +276,23 @@ function startRun() {
       </UFormField>
 
       <div class="scenario-end">
-        <div class="end-notes">
+        <div class="end-notes" tabindex="0" role="region" aria-label="运行提示">
           <BenchNotice
             v-if="mismatch"
+            flush
             color="warning"
             :title="`此场景${mismatch}，结果可能没有参考价值`"
           />
-          <BenchNotice v-if="errors.length" color="error" title="场景不合法">
+          <BenchNotice v-if="errors.length" flush color="error" title="场景不合法">
             <template #description>
               <span v-for="(line, i) in errors" :key="i" class="block wrap-anywhere">
                 {{ line }}
               </span>
             </template>
           </BenchNotice>
-          <BenchNotice v-if="failure" color="error" :title="failure" />
+          <BenchNotice v-if="failure" flush color="error" :title="failure" />
         </div>
-        <BenchAgentBusy />
+        <BenchAgentBusy flush />
         <UButton
           :icon="icons.preview"
           :color="real ? 'error' : 'primary'"
@@ -305,8 +306,9 @@ function startRun() {
     </div>
 
     <div class="scenario-result">
+      <SectionHeading :title="outcome?.title ?? '运行结果'" />
+      <p role="status" class="run-status">{{ scenarioRunning ? '运行中…' : '' }}</p>
       <section v-if="outcome && summary">
-        <SectionHeading :title="outcome.title" />
         <p class="summary" :class="`tone-${summary.color}`">{{ summary.title }}</p>
         <BenchRunLine :result="outcome.result" />
         <BenchStepView
@@ -319,11 +321,7 @@ function startRun() {
           :number="step.index + 1"
         />
       </section>
-      <template v-else>
-        <SectionHeading title="运行结果" />
-        <p v-if="scenarioRunning" role="status" class="empty">运行中…</p>
-        <p v-else class="empty">暂无结果</p>
-      </template>
+      <p v-else-if="!scenarioRunning" class="empty">暂无结果</p>
     </div>
 
     <UModal
@@ -436,15 +434,24 @@ function startRun() {
   display: flex;
   flex-direction: column;
   align-items: stretch;
-  padding: 8px 0 12px;
+  padding: 4px 0 12px;
   background: var(--ui-bg);
+  border-top: 1px solid var(--ui-border);
 }
+/* 矮窗口里按窗口高度算，高窗口里不超过十来行。没有提示时不占地方，也不留一个空的 Tab 停靠点 */
 .end-notes {
-  max-height: 40dvh;
+  max-height: min(30dvh, 14rem);
   overflow-y: auto;
+}
+.end-notes:empty {
+  display: none;
+}
+.end-notes:focus-visible {
+  outline-offset: -2px;
 }
 .scenario-end > button {
   align-self: flex-start;
+  margin-top: 8px;
 }
 .summary {
   padding-top: 8px;
@@ -459,7 +466,9 @@ function startRun() {
 .tone-warning {
   color: var(--ui-warning);
 }
-.empty {
+/* 一直在，只换文字：读屏才念得到。没在运行时不占地方 */
+.empty,
+.run-status:not(:empty) {
   padding: 6px 0;
   color: var(--ui-text-muted);
 }

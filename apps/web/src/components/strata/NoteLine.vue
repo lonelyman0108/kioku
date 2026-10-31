@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 贴在正文上方的一行状态：一条墨线，左边说什么情况，右边是操作。不铺色块，只有文字带语气。
-// flush：上面已经有一条线了，不再画墨线
+// flush：放在别的线下面、和别的提示叠在一起时用：不画墨线，也不带下边距，间距由外层管
 withDefaults(defineProps<{ tone?: 'neutral' | 'warning' | 'error'; flush?: boolean }>(), {
   tone: 'neutral',
 })
@@ -37,10 +37,11 @@ withDefaults(defineProps<{ tone?: 'neutral' | 'warning' | 'error'; flush?: boole
 }
 .note-line.flush {
   min-height: 0;
+  margin-bottom: 0;
   border-top: 0;
 }
-.note-line.flush:first-child {
-  padding-top: 0;
+.note-line.flush + .note-line.flush {
+  margin-top: 0;
 }
 .note-text {
   flex: 1 1 14em;
