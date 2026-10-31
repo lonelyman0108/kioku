@@ -154,8 +154,9 @@ const unsaved = computed(() => [
         <NoteLine v-if="recallSettings.isError.value" tone="error">
           {{ readFailure(recallSettings.error.value) }}
         </NoteLine>
+        <USkeleton v-if="recallSettings.isPending.value" class="h-16 w-full" />
         <form
-          v-if="!recallSettings.isError.value || recallSettings.data.value"
+          v-else-if="recallSettings.data.value"
           class="space-y-3"
           @submit.prevent="saveRetention"
         >

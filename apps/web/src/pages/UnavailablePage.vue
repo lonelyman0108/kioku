@@ -5,26 +5,24 @@ import { useRoute, useRouter } from 'vue-router'
 import EntryFrame from '../components/strata/EntryFrame.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import { formatTime } from '../time'
+import { retryNavigation, retryTarget } from '../unavailable'
 
 const route = useRoute()
 const router = useRouter()
 
 const retrying = ref(false)
-// 上一次重试还是连不上的时间：守卫转回这一页时地址不变，不说一声看起来像没反应
+// 上一次重试没成功的时间：地址不变，不说一声看起来像没反应
 const failedAt = ref<string | null>(null)
+// 没成功是因为页面文件加载不到：接口是通的，再重试也一样，要刷新页面换成新的文件
+const assetsFailed = ref(false)
 
-// 只回到站内路径
 async function retry() {
-  const next = route.query.next
-  const target =
-    typeof next === 'string' && next.startsWith('/') && !next.startsWith('//') ? next : '/'
   retrying.value = true
-  try {
-    await router.replace(target)
-    if (route.name === 'unavailable') failedAt.value = new Date().toISOString()
-  } finally {
-    retrying.value = false
-  }
+  const result = await retryNavigation(router, retryTarget(route.query.next))
+  retrying.value = false
+  if (result === 'recovered') return
+  failedAt.value = new Date().toISOString()
+  assetsFailed.value = result === 'assets'
 }
 </script>
 
@@ -37,7 +35,10 @@ async function retry() {
     </div>
     <UButton class="mt-5" size="lg" block :loading="retrying" @click="retry">重试</UButton>
     <p v-if="failedAt" class="mt-2 text-muted" role="status">
-      仍无法连接（{{ formatTime(failedAt) }}）
+      <template v-if="assetsFailed">
+        页面文件加载失败（{{ formatTime(failedAt) }}）。服务可能已升级，请刷新页面。
+      </template>
+      <template v-else>仍无法连接（{{ formatTime(failedAt) }}）</template>
     </p>
   </EntryFrame>
 </template>

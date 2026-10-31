@@ -2,11 +2,12 @@
 import { useToast } from '@nuxt/ui/composables'
 import type { BackupRunStatus, BackupSettingsView, BackupTestResult } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { classifyError, defaultHour, formatBytes, hourLabel } from '../backup'
+import { classifyError, formatBytes, hourLabel } from '../backup'
+import { useBackupForm } from '../composables/useBackupForm'
 import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
@@ -34,56 +35,7 @@ const objects = useQuery({
 })
 
 const hours = Array.from({ length: 24 }, (_, hour) => ({ label: hourLabel(hour), value: hour }))
-const DEFAULT_HOUR = defaultHour()
-const DEFAULT_KEEP = 7
-
-// secretAccessKey 留空表示沿用已保存的
-const form = reactive({
-  endpoint: '',
-  region: 'us-east-1',
-  bucket: '',
-  prefix: '',
-  accessKeyId: '',
-  secretAccessKey: '',
-  hour: DEFAULT_HOUR,
-  keep: DEFAULT_KEEP,
-})
-const fill = (s: BackupSettingsView) => {
-  form.endpoint = s.endpoint ?? ''
-  form.region = s.region ?? 'us-east-1'
-  form.bucket = s.bucket ?? ''
-  form.prefix = s.prefix ?? ''
-  form.accessKeyId = s.accessKeyId ?? ''
-  form.hour = s.hour ?? DEFAULT_HOUR
-  form.keep = s.keep ?? DEFAULT_KEEP
-}
-// 只在第一次读到、或者自己保存之后同步表单：等结果时的刷新不能冲掉正在填的内容
-let synced = false
-watch(
-  view,
-  (s) => {
-    if (s && !synced) {
-      fill(s)
-      synced = true
-    }
-  },
-  { immediate: true },
-)
-
-const dirty = computed(() => {
-  const s = view.value
-  if (!s) return false
-  return (
-    form.endpoint !== (s.endpoint ?? '') ||
-    form.region !== (s.region ?? 'us-east-1') ||
-    form.bucket !== (s.bucket ?? '') ||
-    form.prefix !== (s.prefix ?? '') ||
-    form.accessKeyId !== (s.accessKeyId ?? '') ||
-    form.secretAccessKey !== '' ||
-    form.hour !== (s.hour ?? DEFAULT_HOUR) ||
-    form.keep !== (s.keep ?? DEFAULT_KEEP)
-  )
-})
+const { form, dirty, fill } = useBackupForm(view)
 
 // 换了接口主机又没填 Secret：服务端会拒（Secret 不能清除），提交之前就在 Secret 旁边说明，保存按钮不可点
 const secretMissing = computed(() =>
@@ -211,11 +163,10 @@ async function clear() {
     result.value = null
     stopWaiting()
     form.secretAccessKey = ''
-    // 清掉之后表单回到空白：先按「没有设置」填好界面（之后的刷新出错也不会停在旧的设置上），再去刷新。
+    // 清掉之后表单回到空白，正在填的内容也不留：先按「没有设置」填好界面（之后的刷新出错也不会停在旧的设置上），再去刷新。
     // 存储桶里的列表直接扔掉，不再去列
-    synced = false
     queryClient.removeQueries({ queryKey: objectsKey })
-    queryClient.setQueryData<BackupSettingsView>(queryKey, {
+    const cleared: BackupSettingsView = {
       configured: false,
       endpoint: null,
       region: null,
@@ -226,7 +177,9 @@ async function clear() {
       hour: null,
       keep: null,
       status: { lastSuccess: null, lastError: null },
-    })
+    }
+    queryClient.setQueryData(queryKey, cleared)
+    fill(cleared)
     await queryClient.invalidateQueries({ queryKey, exact: true })
     toast.add({ title: '已清除，定时备份已停止', color: 'success' })
   } catch (err) {
@@ -238,11 +191,7 @@ async function clear() {
 </script>
 
 <template>
-  <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
-  <NoteLine v-if="settings.isError.value" tone="error">
-    {{ readFailure(settings.error.value) }}
-  </NoteLine>
-  <SettingsColumns v-if="!settings.isError.value || view">
+  <SettingsColumns>
     <SettingsBlock title="备份">
       <template #note>
         每天把整个实例加密备份到兼容S3的对象存储。恢复时需配置同一主密钥。
@@ -251,7 +200,13 @@ async function clear() {
           等，存储桶中只保留最近几份。备份使用主密钥派生的密钥加密；恢复步骤见 README。
         </Hint>
       </template>
-      <form class="space-y-4" @submit.prevent="save">
+      <!-- 标题和后果说明一直在；后台刷新失败时读到过的设置留着，错误放在上面 -->
+      <NoteLine v-if="settings.isError.value" tone="error">
+        {{ readFailure(settings.error.value) }}
+      </NoteLine>
+      <!-- 没读到过设置时不给表单：空表单保存会盖掉读不到的那份。重新读取时错误会被清掉，所以只看有没有数据 -->
+      <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
+      <form v-else-if="view" class="space-y-4" @submit.prevent="save">
         <UFormField
           label="接口地址"
           help="对象存储的接口地址（兼容S3），例如 https://s3.example.com"
@@ -375,13 +330,16 @@ async function clear() {
             刷新
           </UButton>
         </template>
-        <!-- 刷新失败时读到过的列表留着，错误放在上面 -->
+        <!--
+          列的是外部的存储桶，出错时不留读到过的列表：改了接口地址或存储桶之后，
+          错误下面还是旧桶的备份，会让人以为新位置有可恢复的备份
+        -->
         <NoteLine v-if="objects.isError.value" tone="error">
           {{
             objects.error.value instanceof ApiError ? objects.error.value.message : '无法列出备份'
           }}
         </NoteLine>
-        <p v-if="objects.data.value && !objects.data.value.objects.length" class="text-muted">
+        <p v-else-if="objects.data.value && !objects.data.value.objects.length" class="text-muted">
           暂无备份
         </p>
         <ul v-else-if="objects.data.value" class="-mt-2">

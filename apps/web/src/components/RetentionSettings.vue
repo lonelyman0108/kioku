@@ -132,11 +132,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
 </script>
 
 <template>
-  <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
-  <NoteLine v-if="settings.isError.value" tone="error">
-    {{ readFailure(settings.error.value) }}
-  </NoteLine>
-  <SettingsColumns v-if="view">
+  <SettingsColumns>
     <SettingsBlock title="保留期">
       <template #note>
         超过保留期的内容将被永久删除，之后只能从备份恢复。
@@ -149,6 +145,10 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
           </p>
         </Hint>
       </template>
+      <!-- 标题和后果说明一直在；后台刷新失败时读到过的设置留着，错误放在上面 -->
+      <NoteLine v-if="settings.isError.value" tone="error">
+        {{ readFailure(settings.error.value) }}
+      </NoteLine>
       <NoteLine v-if="pause" tone="warning">
         {{ pause.title }}
         <template #detail>
@@ -161,7 +161,8 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
           </UButton>
         </template>
       </NoteLine>
-      <form class="space-y-3" @submit.prevent="save">
+      <USkeleton v-if="settings.isPending.value" class="h-24 w-full" />
+      <form v-else-if="view" class="space-y-3" @submit.prevent="save">
         <UFormField label="保留天数" help="1 到 3650 天，默认 30 天">
           <UInputNumber v-model="days" :min="1" :max="3650" class="w-32" />
         </UFormField>
@@ -180,7 +181,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
       </form>
     </SettingsBlock>
 
-    <template #side>
+    <template v-if="view" #side>
       <SettingsBlock title="最近一次清理">
         <NoteLine v-if="view.status.lastError" tone="error">
           {{ view.status.lastError.message }}

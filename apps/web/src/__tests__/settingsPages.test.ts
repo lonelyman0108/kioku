@@ -1,4 +1,5 @@
 import { SetupRequest } from '@kioku/contracts'
+import { QueryClient } from '@tanstack/vue-query'
 import { describe, expect, it } from 'vitest'
 import { createSSRApp, h, type Component } from 'vue'
 import { parse } from 'vue/compiler-sfc'
@@ -30,6 +31,7 @@ import setupPage from '../pages/SetupPage.vue?raw'
 import spaceSettingsPage from '../pages/SpaceSettingsPage.vue?raw'
 import unavailablePage from '../pages/UnavailablePage.vue?raw'
 import routesSource from '../routes.ts?raw'
+import { retryNavigation, retryTarget } from '../unavailable'
 import {
   currentSection,
   INSTANCE_SECTIONS,
@@ -287,7 +289,8 @@ describe('两个设置页', () => {
       const el = elements.find((e) => e.tag === tag)!
       expect(directive(el, 'model')?.exp?.content, tag).toBe(`dirty.${key}`)
     }
-    expect(embeddingSettings).toContain('(dirtyModel.value = a || n)')
+    expect(scriptOf(embeddingSettings).match(/\[activeDirty, nextDirty\]/g)).toHaveLength(1)
+    expect(embeddingSettings).toContain('dirtyModel.value = a || n')
     expect(extractionSettings).toContain('dirtyModel.value = changed')
     expect(backupSettings).toContain('dirtyModel.value = changed')
     expect(retentionSettings).toContain('(changed) => (dirtyModel.value = changed)')
@@ -343,34 +346,23 @@ describe('两个设置页', () => {
 })
 
 describe('读取失败', () => {
-  // [文件, 查询, 错误之后内容的显示条件：读到过就照常显示。null 表示不看读取结果，一直显示]
-  const reads: [string, string, string, string | null][] = [
+  // [文件, 查询, 错误后面紧跟的内容的显示条件：不和错误二选一]
+  const reads: [string, string, string, string][] = [
     ['SettingsPage', settingsPage, 'masterKey', 'masterKey.data.value'],
-    [
-      'SettingsPage',
-      settingsPage,
-      'recallSettings',
-      '!recallSettings.isError.value || recallSettings.data.value',
-    ],
-    ['EmbeddingSettings', embeddingSettings, 'settings', null],
+    ['SettingsPage', settingsPage, 'recallSettings', 'recallSettings.isPending.value'],
+    ['EmbeddingSettings', embeddingSettings, 'settings', 'settings.isPending.value'],
     ['EmbeddingSettings', embeddingSettings, 'status', 'status.data.value'],
-    [
-      'ExtractionSettings',
-      extractionSettings,
-      'settings',
-      '!settings.isError.value || settings.data.value',
-    ],
-    ['BackupSettings', backupSettings, 'settings', '!settings.isError.value || view'],
-    ['RetentionSettings', retentionSettings, 'settings', 'view'],
-    ['ExtractionBudget', extractionBudget, 'usage', null],
-    ['MyDreamSettings', myDreamSettings, 'settings', null],
+    ['ExtractionSettings', extractionSettings, 'settings', 'settings.isPending.value'],
+    ['BackupSettings', backupSettings, 'settings', 'settings.isPending.value'],
+    ['RetentionSettings', retentionSettings, 'settings', 'pause'],
+    ['ExtractionBudget', extractionBudget, 'usage', 'usage.isPending.value'],
+    ['MyDreamSettings', myDreamSettings, 'settings', 'settings.isPending.value'],
     [
       'SpaceSettingsPage',
       spaceSettingsPage,
       'layers',
       '!layers.isError.value || baseline !== null',
     ],
-    ['BackupSettings', backupSettings, 'objects', null],
   ]
 
   it.each(reads)('%s 的 %s：错误放在上面，读到过的内容留着', (name, source, query, shown) => {
@@ -388,14 +380,83 @@ describe('读取失败', () => {
     const next = elementsAfter[index + 1]
     expect(directive(next!, 'else'), name).toBeUndefined()
     expect(directive(next!, 'else-if'), name).toBeUndefined()
-    if (shown) expect(condition(next!), `${name} ${query}`).toBe(shown)
+    expect(condition(next!), `${name} ${query}`).toBe(shown)
   })
 
-  it('嵌入模型没读到过设置时不给表单：空表单保存会盖掉读不到的那份', () => {
-    const form = elementsOf(template(embeddingSettings)).find(
-      (el) => el.tag === 'form' && handler(el, 'submit') === 'saveActive',
-    )!
-    expect(condition(form)).toBe('!settings.isError.value || settings.data.value')
+  it('没有数据时重新读取（比如切回窗口），错误会被清掉：表单的条件不能看 isError', async () => {
+    const client = new QueryClient()
+    const queryKey = ['settings']
+    const read = () =>
+      client
+        .fetchQuery({ queryKey, queryFn: () => Promise.reject(new Error('读取失败')) })
+        .catch(() => {})
+    await read()
+    expect(client.getQueryState(queryKey)).toMatchObject({ status: 'error', data: undefined })
+    const again = read()
+    expect(client.getQueryState(queryKey)).toMatchObject({
+      status: 'pending',
+      error: null,
+      data: undefined,
+    })
+    await again
+  })
+
+  // [文件, 提交的处理函数, 查询, 有数据的条件]
+  const forms: [string, string, string, string, string][] = [
+    ['EmbeddingSettings', embeddingSettings, 'saveActive', 'settings', 'settings.data.value'],
+    ['ExtractionSettings', extractionSettings, 'save', 'settings', 'settings.data.value'],
+    ['BackupSettings', backupSettings, 'save', 'settings', 'view'],
+    ['RetentionSettings', retentionSettings, 'save', 'settings', 'view'],
+    ['SettingsPage', settingsPage, 'saveRetention', 'recallSettings', 'recallSettings.data.value'],
+  ]
+
+  it.each(forms)(
+    '%s 的表单只在读到数据时给：空表单保存会盖掉读不到的那份，加载中显示骨架',
+    (name, source, submit, query, data) => {
+      const parent = elementsOf(template(source)).find((el) =>
+        (el.children ?? []).some((c) => c.tag === 'form' && handler(c, 'submit') === submit),
+      )!
+      const siblings = parent.children!.filter((n) => n.type === ELEMENT)
+      const index = siblings.findIndex((c) => c.tag === 'form' && handler(c, 'submit') === submit)
+      const form = siblings[index]!
+      expect(directive(form, 'else-if')?.exp?.content, name).toBe(data)
+      expect(condition(form), name).toBeUndefined()
+      const skeleton = siblings[index - 1]!
+      expect(skeleton.tag, name).toBe('USkeleton')
+      expect(condition(skeleton), name).toBe(`${query}.isPending.value`)
+      expect(source, name).not.toContain(`!${query}.isError.value ||`)
+    },
+  )
+
+  it('备份表单的改动状态都来自 useBackupForm：和填入时的版本比，不和最新的设置比', () => {
+    const script = scriptOf(backupSettings)
+    expect(script).toContain('const { form, dirty, fill } = useBackupForm(view)')
+    expect(script).not.toMatch(/const (dirty|form)\b/)
+  })
+
+  it('保留期和备份的右栏也要等读到才有', () => {
+    for (const source of [retentionSettings, backupSettings]) {
+      const side = elementsOf(template(source)).find(
+        (el) => el.tag === 'template' && directive(el, 'slot')?.arg?.content === 'side',
+      )!
+      expect(condition(side)).toMatch(/view$/)
+    }
+  })
+
+  it('存储桶的列表出错时只显示错误：外部的状态，错误下面还是旧桶的备份会有误导', () => {
+    const elements = elementsOf(template(backupSettings))
+    const error = elements.find(
+      (el) => el.tag === 'NoteLine' && condition(el) === 'objects.isError.value',
+    )
+    expect(error).toBeDefined()
+    const empty = elements.find((el) => textOf(el) === '暂无备份')!
+    expect(condition(empty)).toBeUndefined()
+    expect(directive(empty, 'else-if')?.exp?.content).toBe(
+      'objects.data.value && !objects.data.value.objects.length',
+    )
+    const list = elements.find((el) => el.tag === 'ul')!
+    expect(condition(list)).toBeUndefined()
+    expect(directive(list, 'else-if')?.exp?.content).toBe('objects.data.value')
   })
 
   it('错误文字：服务端给了说明就用它', () => {
@@ -404,13 +465,11 @@ describe('读取失败', () => {
       expect(source, name).not.toMatch(/isError\.value && !/)
     }
     expect(backupSettings).toContain("objects.error.value.message : '无法列出备份'")
-    expect(embeddingSettings).toContain("settings.error.value.message : '读取设置失败'")
+    expect(embeddingSettings).toContain('readFailure(settings.error.value)')
+    expect(embeddingSettings).not.toContain('读取设置失败')
   })
 
   it('「暂无」只在真的读到空时显示', () => {
-    expect(
-      condition(elementsOf(template(backupSettings)).find((el) => textOf(el) === '暂无备份')!),
-    ).toBe('objects.data.value && !objects.data.value.objects.length')
     expect(
       condition(
         elementsOf(template(spaceSettingsPage)).find((el) => textOf(el).startsWith('暂无配置'))!,
@@ -438,6 +497,52 @@ describe('读取失败', () => {
     expect(
       condition(elementsOf(template(myDreamSettings)).find((el) => el.tag === 'USkeleton')!),
     ).toBe('settings.isPending.value')
+  })
+})
+
+describe('标题和说明一直在', () => {
+  // 从根走到这个元素，路上经过了哪些元素
+  const ancestors = (
+    node: TemplateNode,
+    target: TemplateNode,
+    path: TemplateNode[] = [],
+  ): TemplateNode[] | null => {
+    if (node === target) return path
+    for (const child of node.children ?? []) {
+      const found = ancestors(child, target, [...path, node])
+      if (found) return found
+    }
+    return null
+  }
+  const blocks: [string, string, string][] = [
+    ['嵌入模型', embeddingSettings, 'OpenAI 兼容的 /embeddings 接口'],
+    ['向量', embeddingSettings, '显示已生成当前模型向量的记忆数量。'],
+    ['抽取模型', extractionSettings, 'OpenAI 兼容的 /chat/completions 接口'],
+    ['主密钥', settingsPage, '用于加密机密记忆、托管的凭据值与接口 Key。'],
+    ['备份', backupSettings, '恢复时需配置同一主密钥。'],
+    ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
+    ['召回记录', settingsPage, '明细到期后删除，仅保留每条记忆的累计召回次数。'],
+    ['domain 默认层', spaceSettingsPage, '新建记忆时按 URI 的 domain 预填层'],
+    ['抽取预算', extractionBudget, '抽取事实与 Dream 整理共用此 token 预算。'],
+    ['Dream 与私人内容', myDreamSettings, '已发送的内容无法撤回。'],
+  ]
+
+  it.each(blocks)('%s：读取失败或加载中也有标题和后果说明', (title, source, sentence) => {
+    const root = template(source)
+    const block = elementsOf(root).find(
+      (el) => el.tag === 'SettingsBlock' && attr(el, 'title') === title,
+    )!
+    const path = ancestors(root, block)!
+    for (const el of [...path, block]) {
+      for (const name of ['if', 'else-if', 'else']) {
+        // 小节的插槽和骨架本身没有条件，一路都不能挂在数据上
+        expect(directive(el, name), `${title} ${el.tag}`).toBeUndefined()
+      }
+    }
+    const note = (block.children ?? []).find(
+      (c) => c.tag === 'template' && directive(c, 'slot')?.arg?.content === 'note',
+    )!
+    expect(flat(textOf(note))).toContain(flat(sentence))
   })
 })
 
@@ -588,6 +693,28 @@ describe('带后果的文字整句留着', () => {
   })
 })
 
+describe('清除设置', () => {
+  const body = (source: string) => /async function clear\(\)[^]*?\n\}/.exec(scriptOf(source))![0]
+
+  it.each([
+    ['抽取模型', extractionSettings],
+    ['备份', backupSettings],
+  ])(
+    '%s：先按「没有设置」写进缓存再去刷新：刷新失败时不能停在旧的设置上，清空的表单一直算有改动',
+    (name, source) => {
+      const clear = body(source)
+      const written = clear.indexOf('queryClient.setQueryData')
+      expect(written, name).toBeGreaterThan(-1)
+      expect(clear.indexOf('invalidateQueries({ queryKey')).toBeGreaterThan(written)
+      expect(clear).toContain('configured: false')
+    },
+  )
+
+  it('备份清除时表单回到空白，填了一半的内容也不留', () => {
+    expect(body(backupSettings)).toContain('fill(cleared)')
+  })
+})
+
 describe('Lore 导入', () => {
   const elements = elementsOf(template(loreImport))
 
@@ -711,46 +838,103 @@ describe('连接失败', () => {
   })
 
   it('只回到站内路径', () => {
-    expect(script).toContain(
-      "typeof next === 'string' && next.startsWith('/') && !next.startsWith('//')",
+    expect(retryTarget('/spaces/s1/memories?uri=core://agent')).toBe(
+      '/spaces/s1/memories?uri=core://agent',
     )
+    for (const next of ['//example.com', 'https://example.com', '', undefined, ['/spaces']]) {
+      expect(retryTarget(next)).toBe('/')
+    }
+    expect(script).toContain('retryTarget(route.query.next)')
   })
 
-  it('重试有反馈：转圈，还是连不上时说一声', () => {
-    expect(script).toContain("if (route.name === 'unavailable') failedAt.value")
+  it('重试有反馈：转圈，没成功时说一声，页面文件加载不到时说要刷新', () => {
     const button = elementsOf(template(unavailablePage)).find((el) => el.tag === 'UButton')!
     expect(bound(button, 'loading')).toBe('retrying')
     expect(handler(button, 'click')).toBe('retry')
     const note = elementsOf(template(unavailablePage)).find((el) => condition(el) === 'failedAt')!
     expect(attr(note, 'role')).toBe('status')
+    expect(flat(unavailablePage)).toContain('仍无法连接（{{formatTime(failedAt)}}）')
+    expect(flat(unavailablePage)).toContain(
+      '页面文件加载失败（{{formatTime(failedAt)}}）。服务可能已升级，请刷新页面。',
+    )
+    expect(script).toContain("if (result === 'recovered') return")
+    expect(script).toContain("assetsFailed.value = result === 'assets'")
+  })
+
+  // 和实际一样：守卫连不上时转回连接失败页；页面文件按需加载
+  const routerFor = async (reachable: boolean) => {
+    const empty = { render: () => null }
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/unavailable', name: 'unavailable', component: empty },
+        { path: '/fine', name: 'fine', component: () => Promise.resolve(empty) },
+        { path: '/broken', name: 'broken', component: () => Promise.reject(new Error('404')) },
+      ],
+    })
+    router.beforeEach((to) =>
+      to.name === 'unavailable' || reachable
+        ? true
+        : { name: 'unavailable', query: { next: to.fullPath } },
+    )
+    // 注册之后 vue-router 不再把错误打到控制台，用例的输出干净一点
+    router.onError(() => {})
+    await router.push('/unavailable')
+    return router
+  }
+
+  it('连上了就离开这一页', async () => {
+    const router = await routerFor(true)
+    expect(await retryNavigation(router, '/fine')).toBe('recovered')
+    expect(router.currentRoute.value.name).toBe('fine')
+  })
+
+  it('还是连不上：守卫转回这一页，导航不报错，也要算没成功', async () => {
+    const router = await routerFor(false)
+    expect(await retryNavigation(router, '/fine')).toBe('unreachable')
+    expect(router.currentRoute.value.name).toBe('unavailable')
+  })
+
+  it('接口通了、页面文件加载不到：导航 reject，要接住并算没成功', async () => {
+    const router = await routerFor(true)
+    expect(await retryNavigation(router, '/broken')).toBe('assets')
+    expect(router.currentRoute.value.name).toBe('unavailable')
   })
 })
 
 describe('登录页的地层', () => {
-  it('文字标、内容和一段地层都在，纹理定义也带上', async () => {
+  const strataOf = (html: string) => /<div class="entry-strata".*?<\/div>/s.exec(html)![0]
+
+  it('文字标、内容和一段地层都在', async () => {
     const html = await render(EntryFrame, {}, { default: () => '表单' })
     expect(html).toContain('aria-label="記憶"')
     expect(html).toContain('表单')
-    expect(html).toContain('<pattern')
-    expect(html).toContain('url(#strata-lines-lg)')
-    expect(html).toContain('url(#strata-dots-lg)')
+    expect(strataOf(html)).toContain('var(--layer-private)')
+  })
+
+  it('只铺层色，不铺纹理：纹理表示敏感级，这里没有数据', async () => {
+    const html = await render(EntryFrame, {}, { default: () => '表单' })
+    expect(html).not.toContain('<pattern')
+    expect(html).not.toContain('url(#')
+    expect(entryFrame).not.toContain('StrataPatterns')
+    expect(entryFrame).not.toContain('paintCell')
   })
 
   it('只是装饰，读屏不读', async () => {
     const html = await render(EntryFrame, {}, { default: () => '表单' })
-    expect(/<svg class="entry-strata"[^>]*>/.exec(html)![0]).toContain('aria-hidden="true"')
+    expect(/<div class="entry-strata"[^>]*>/.exec(html)![0]).toContain('aria-hidden="true"')
   })
 
   it('纵向顺序和地层柱一样，七层铺满，来自对话的两层用虚线隔开', async () => {
-    const html = await render(EntryFrame, {}, { default: () => '表单' })
-    const strata = /<svg class="entry-strata".*?<\/svg>/s.exec(html)![0]
-    const layers = [...strata.matchAll(/fill:var\(--layer-(\w+)\)/g)].map((m) => m[1])
-    expect(layers).toEqual([...STACK])
-    const heights = [...strata.matchAll(/<rect[^>]*height="(\d+)%"[^>]*fill:var\(--layer/g)].map(
-      (m) => Number(m[1]),
-    )
+    const strata = strataOf(await render(EntryFrame, {}, { default: () => '表单' }))
+    const bands = [...strata.matchAll(/<i([^>]*)>/g)].map((m) => m[1]!)
+    expect(bands.map((band) => /--layer-(\w+)/.exec(band)![1])).toEqual([...STACK])
+    const heights = bands.map((band) => Number(/flex-grow:(\d+)/.exec(band)![1]))
     expect(heights.reduce((a, b) => a + b, 0)).toBe(100)
-    expect(strata.match(/stroke-dasharray/g)).toHaveLength(1)
+    // 虚线只有一条，在联系人和私人之间
+    expect(bands.map((band) => band.includes('dashed'))).toEqual(
+      STACK.map((layer) => layer === 'private'),
+    )
   })
 
   it('不固定在视口上：窗口很矮或键盘弹出时不盖住表单', () => {

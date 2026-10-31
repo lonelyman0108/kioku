@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { ExtractionTestResult } from '@kioku/contracts'
+import type { ExtractionSettingsView, ExtractionTestResult } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
@@ -103,6 +103,13 @@ async function clear() {
   clearing.value = true
   try {
     await api.clearExtractionSettings()
+    // 先按「没有设置」填好界面，再去刷新：刷新出错时不能停在旧的设置上，那样清空的表单一直算有改动
+    queryClient.setQueryData<ExtractionSettingsView>(queryKey, {
+      configured: false,
+      baseUrl: null,
+      model: null,
+      hasApiKey: false,
+    })
     form.baseUrl = ''
     form.model = ''
     form.apiKey = ''
@@ -131,11 +138,9 @@ async function clear() {
     <NoteLine v-if="settings.isError.value" tone="error">
       {{ readFailure(settings.error.value) }}
     </NoteLine>
-    <form
-      v-if="!settings.isError.value || settings.data.value"
-      class="space-y-4"
-      @submit.prevent="save"
-    >
+    <!-- 没读到过设置时不给表单：空表单保存会盖掉读不到的那份。重新读取时错误会被清掉，所以只看有没有数据 -->
+    <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
+    <form v-else-if="settings.data.value" class="space-y-4" @submit.prevent="save">
       <UFormField label="接口地址" help="例如 https://api.example.com/v1">
         <UInput v-model="form.baseUrl" class="w-full font-mono" required />
       </UFormField>

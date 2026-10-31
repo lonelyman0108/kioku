@@ -177,7 +177,6 @@ const nextDirty = computed(() =>
 )
 // 换模型时照抄现在的渠道，改了接口主机的也要先说 Key 怎么处理，不要等点了确认框里的「开始」才报错
 const nextKeyMissing = computed(() => nextDrafts.value.some(needsNewKey))
-watch([activeDirty, nextDirty], ([a, n]) => (dirtyModel.value = a || n), { immediate: true })
 const confirmStart = ref(false)
 function askStart() {
   if (!nextKeyMissing.value) confirmStart.value = true
@@ -264,9 +263,14 @@ const remaining = computed(() => {
 // 「测试连接」测的是已保存的设置：有没保存的改动时先保存再测，改动之后旧的测试结果也不再显示
 const testing = ref(false)
 const result = ref<EmbeddingTestResult | null>(null)
-watch([activeDirty, nextDirty], ([a, n]) => {
-  if (a || n) result.value = null
-})
+watch(
+  [activeDirty, nextDirty],
+  ([a, n]) => {
+    dirtyModel.value = a || n
+    if (a || n) result.value = null
+  },
+  { immediate: true },
+)
 async function test() {
   testing.value = true
   try {
@@ -304,9 +308,6 @@ async function rebuild() {
 </script>
 
 <template>
-  <NoteLine v-if="settings.isError.value" tone="error">
-    {{ settings.error.value instanceof ApiError ? settings.error.value.message : '读取设置失败' }}
-  </NoteLine>
   <SettingsColumns>
     <SettingsBlock title="嵌入模型">
       <template #note>
@@ -316,12 +317,16 @@ async function rebuild() {
           整个实例共用一个模型。可配置多个渠道（同一模型的不同接口），按顺序请求，前一个出错时切换到下一个。
         </Hint>
       </template>
-      <!-- 没读到过现在的设置时不给表单：空表单会被当成第一次配置，保存就盖掉了读不到的那份 -->
-      <form
-        v-if="!settings.isError.value || settings.data.value"
-        class="space-y-4"
-        @submit.prevent="saveActive"
-      >
+      <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
+      <NoteLine v-if="settings.isError.value" tone="error">
+        {{ readFailure(settings.error.value) }}
+      </NoteLine>
+      <!--
+        没读到过设置时不给表单：空表单会被当成第一次配置，保存就盖掉了读不到的那份。
+        重新读取时错误会被清掉，所以只看有没有数据
+      -->
+      <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
+      <form v-else-if="settings.data.value" class="space-y-4" @submit.prevent="saveActive">
         <UFormField
           label="模型标识"
           :help="
