@@ -35,6 +35,7 @@ withDefaults(defineProps<{ tone?: 'neutral' | 'warning' | 'error' }>(), { tone: 
 .note-text {
   flex: 1 1 14em;
   min-width: 0;
+  overflow-wrap: anywhere;
 }
 .note-title {
   display: flex;

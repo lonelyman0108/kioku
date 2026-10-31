@@ -4,11 +4,15 @@ import type { ExtractionTestResult } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { needsNewKey, newKeyHint } from '../endpointKey'
-import { icons } from '../icons'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
+
+// 有没有没保存的修改：切到别的小节之后表单看不见了，交给页面在子导航上标出来
+const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -74,9 +78,14 @@ const dirty = computed(() => {
     form.clearKey
   )
 })
-watch(dirty, (changed) => {
-  if (changed) result.value = null
-})
+watch(
+  dirty,
+  (changed) => {
+    dirtyModel.value = changed
+    if (changed) result.value = null
+  },
+  { immediate: true },
+)
 async function test() {
   testing.value = true
   try {
@@ -111,23 +120,22 @@ async function clear() {
 </script>
 
 <template>
-  <UCard>
-    <template #header>
-      <h2 class="font-medium">抽取模型</h2>
-      <p class="mt-1 text-sm text-muted">
-        OpenAI 兼容的 /chat/completions 接口（例如 new-api），用于抽取事实、生成会话摘要。
-        <Hint>
-          从群聊与私聊中抽取关于对方的事实。整个实例共用一个模型；未配置时不抽取，对话缓冲到期后直接丢弃。
-        </Hint>
-      </p>
+  <SettingsBlock title="抽取模型">
+    <template #note>
+      OpenAI 兼容的 /chat/completions 接口（例如 new-api），用于抽取事实、生成会话摘要。
+      <Hint>
+        从群聊与私聊中抽取关于对方的事实。整个实例共用一个模型；未配置时不抽取，对话缓冲到期后直接丢弃。
+      </Hint>
     </template>
-    <UAlert
-      v-if="settings.isError.value && !settings.data.value"
-      color="error"
-      variant="subtle"
-      :title="settings.error.value instanceof ApiError ? settings.error.value.message : '读取失败'"
-    />
-    <form v-else class="space-y-4" @submit.prevent="save">
+    <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
+    <NoteLine v-if="settings.isError.value" tone="error">
+      {{ readFailure(settings.error.value) }}
+    </NoteLine>
+    <form
+      v-if="!settings.isError.value || settings.data.value"
+      class="space-y-4"
+      @submit.prevent="save"
+    >
       <UFormField label="接口地址" help="例如 https://api.example.com/v1">
         <UInput v-model="form.baseUrl" class="w-full font-mono" required />
       </UFormField>
@@ -157,13 +165,17 @@ async function clear() {
         label="清除已保存的 Key（新接口不需要 Key）"
       />
       <div class="flex flex-wrap items-center gap-2">
-        <UButton type="submit" :icon="icons.save" :loading="saving" :disabled="keyMissing"
+        <UButton
+          type="submit"
+          color="primary"
+          variant="outline"
+          :loading="saving"
+          :disabled="keyMissing"
           >保存</UButton
         >
         <UButton
-          :icon="icons.test"
           color="neutral"
-          variant="subtle"
+          variant="outline"
           :loading="testing"
           :disabled="!settings.data.value?.configured || dirty"
           @click="test"
@@ -173,20 +185,20 @@ async function clear() {
         <UButton
           v-if="settings.data.value?.configured"
           color="error"
-          variant="ghost"
+          variant="outline"
           @click="confirmingClear = true"
         >
           清除设置
         </UButton>
-        <span v-if="dirty && settings.data.value?.configured" class="text-sm text-muted"
+        <span v-if="dirty && settings.data.value?.configured" class="text-muted"
           >保存改动后才能测试</span
         >
-        <span v-if="result" class="text-sm" :class="result.ok ? 'text-success' : 'text-error'">
+        <span v-if="result" :class="result.ok ? 'text-success' : 'text-error'">
           {{ result.ok ? `连接正常，耗时 ${result.latencyMs} ms` : result.error }}
         </span>
       </div>
     </form>
-  </UCard>
+  </SettingsBlock>
 
   <UModal
     :open="confirmingClear"

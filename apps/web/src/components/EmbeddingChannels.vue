@@ -22,7 +22,7 @@ function add() {
 </script>
 
 <template>
-  <div class="space-y-3">
+  <div class="space-y-4">
     <EmbeddingChannelRow
       v-for="(draft, i) in channels"
       :key="draft.key"
@@ -38,7 +38,7 @@ function add() {
     <UButton
       :icon="icons.add"
       color="neutral"
-      variant="subtle"
+      variant="outline"
       :disabled="channels.length >= MAX_CHANNELS"
       @click="add"
     >

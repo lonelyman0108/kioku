@@ -8,7 +8,7 @@ import type {
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import {
   draftOf,
@@ -22,6 +22,12 @@ import { needsNewKey } from '../endpointKey'
 import { icons } from '../icons'
 import EmbeddingChannels from './EmbeddingChannels.vue'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
+import SettingsColumns from './strata/SettingsColumns.vue'
+
+// 有没有没保存的修改：切到别的小节之后表单看不见了，交给页面在子导航上标出来
+const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -171,6 +177,7 @@ const nextDirty = computed(() =>
 )
 // 换模型时照抄现在的渠道，改了接口主机的也要先说 Key 怎么处理，不要等点了确认框里的「开始」才报错
 const nextKeyMissing = computed(() => nextDrafts.value.some(needsNewKey))
+watch([activeDirty, nextDirty], ([a, n]) => (dirtyModel.value = a || n), { immediate: true })
 const confirmStart = ref(false)
 function askStart() {
   if (!nextKeyMissing.value) confirmStart.value = true
@@ -297,149 +304,61 @@ async function rebuild() {
 </script>
 
 <template>
-  <UAlert
-    v-if="settings.isError.value"
-    color="error"
-    variant="subtle"
-    :title="
-      settings.error.value instanceof ApiError ? settings.error.value.message : '读取设置失败'
-    "
-  />
-  <UCard>
-    <template #header>
-      <h2 class="font-medium">嵌入模型</h2>
-      <p class="mt-1 text-sm text-muted">
+  <NoteLine v-if="settings.isError.value" tone="error">
+    {{ settings.error.value instanceof ApiError ? settings.error.value.message : '读取设置失败' }}
+  </NoteLine>
+  <SettingsColumns>
+    <SettingsBlock title="嵌入模型">
+      <template #note>
         OpenAI 兼容的 /embeddings 接口，须支持 dimensions 参数，向量维度固定为
         {{ settings.data.value?.dimensions ?? 1024 }}。
         <Hint>
           整个实例共用一个模型。可配置多个渠道（同一模型的不同接口），按顺序请求，前一个出错时切换到下一个。
         </Hint>
-      </p>
-    </template>
-    <form class="space-y-4" @submit.prevent="saveActive">
-      <UFormField
-        label="模型标识"
-        :help="
-          active
-            ? '向量按此标识存储；更换模型请使用下方的「更换模型」。'
-            : '向量按此标识存储，例如模型名称。'
-        "
+      </template>
+      <!-- 没读到过现在的设置时不给表单：空表单会被当成第一次配置，保存就盖掉了读不到的那份 -->
+      <form
+        v-if="!settings.isError.value || settings.data.value"
+        class="space-y-4"
+        @submit.prevent="saveActive"
       >
-        <UInput v-model="modelId" class="w-full font-mono" :disabled="!!active" required />
-      </UFormField>
-      <EmbeddingChannels v-model="activeDrafts" />
-      <div class="flex flex-wrap items-center gap-2">
-        <UButton
-          type="submit"
-          :icon="icons.save"
-          :loading="saving"
-          :disabled="!activeDirty || activeKeyMissing"
-          >保存</UButton
+        <UFormField
+          label="模型标识"
+          :help="
+            active
+              ? '向量按此标识存储；更换模型请使用下方的「更换模型」。'
+              : '向量按此标识存储，例如模型名称。'
+          "
         >
-        <UButton
-          :icon="icons.test"
-          color="neutral"
-          variant="subtle"
-          :loading="testing"
-          :disabled="!active || activeDirty || nextDirty"
-          @click="test"
-        >
-          测试连接
-        </UButton>
-        <span v-if="activeKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
-        <span v-else-if="active && (activeDirty || nextDirty)" class="text-sm text-muted"
-          >保存改动后才能测试</span
-        >
-      </div>
-      <ul v-if="result?.active" class="space-y-1 text-sm">
-        <li
-          v-for="(item, i) in result.active"
-          :key="i"
-          :class="item.ok && (item.similarity ?? 1) >= 0.99 ? 'text-success' : 'text-error'"
-        >
-          渠道 {{ i + 1 }}：{{ describe(item) }}
-        </li>
-      </ul>
-    </form>
-  </UCard>
-
-  <UCard v-if="active">
-    <template #header>
-      <h2 class="font-medium">更换模型</h2>
-      <p class="mt-1 text-sm text-muted">
-        后台为全部记忆生成新模型的向量，补齐后自动切换。
-        <Hint>补齐前召回继续使用 {{ active.model }}；切换后删除旧模型的向量。</Hint>
-      </p>
-    </template>
-    <div v-if="next" class="space-y-4">
-      <div class="space-y-2">
-        <div class="flex items-baseline gap-2">
-          <span class="text-sm">正在更换为</span>
-          <span class="font-mono font-medium">{{ next.model }}</span>
-        </div>
-        <template v-if="status.data.value?.next">
-          <div class="flex items-baseline gap-2">
-            <span class="text-2xl font-semibold tabular-nums">
-              {{ status.data.value.next.embedded }} / {{ status.data.value.eligible }}
-            </span>
-            <span class="text-sm text-muted">条记忆已有新模型的向量</span>
-          </div>
-          <UProgress
-            v-if="percent(status.data.value.next.embedded) !== null"
-            :model-value="percent(status.data.value.next.embedded)!"
-          />
-        </template>
-        <UAlert
-          v-if="errorOf(next.model)"
-          color="error"
-          variant="subtle"
-          :title="errorOf(next.model)!.message"
-        />
-      </div>
-      <form class="space-y-4" @submit.prevent="saveNext">
-        <EmbeddingChannels v-model="nextDrafts" />
+          <UInput v-model="modelId" class="w-full font-mono" :disabled="!!active" required />
+        </UFormField>
+        <EmbeddingChannels v-model="activeDrafts" />
         <div class="flex flex-wrap items-center gap-2">
           <UButton
             type="submit"
-            :icon="icons.save"
-            :loading="savingNext"
-            :disabled="!nextDirty || nextKeyMissing"
+            color="primary"
+            variant="outline"
+            :loading="saving"
+            :disabled="!activeDirty || activeKeyMissing"
             >保存</UButton
           >
           <UButton
-            v-if="errorOf(next.model)"
-            :icon="icons.refresh"
             color="neutral"
-            variant="subtle"
-            :loading="retrying"
-            :disabled="nextDirty"
-            @click="retryNext"
+            variant="outline"
+            :loading="testing"
+            :disabled="!active || activeDirty || nextDirty"
+            @click="test"
           >
-            重试
+            测试连接
           </UButton>
-          <UButton
-            :icon="icons.moved"
-            color="neutral"
-            variant="subtle"
-            :disabled="nextDirty"
-            @click="confirmSwitch = true"
+          <span v-if="activeKeyMissing" class="text-error">{{ KEY_MISSING }}</span>
+          <span v-else-if="active && (activeDirty || nextDirty)" class="text-muted"
+            >保存改动后才能测试</span
           >
-            立即切换
-          </UButton>
-          <UButton
-            :icon="icons.cancel"
-            color="neutral"
-            variant="ghost"
-            :disabled="nextDirty"
-            @click="confirmAbort = true"
-          >
-            放弃
-          </UButton>
-          <span v-if="nextKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
         </div>
-        <ul v-if="result?.next" class="space-y-1 text-sm">
+        <ul v-if="result?.active" class="space-y-1">
           <li
-            v-for="(item, i) in result.next"
+            v-for="(item, i) in result.active"
             :key="i"
             :class="item.ok && (item.similarity ?? 1) >= 0.99 ? 'text-success' : 'text-error'"
           >
@@ -447,82 +366,158 @@ async function rebuild() {
           </li>
         </ul>
       </form>
-    </div>
-    <form v-else-if="starting" class="space-y-4" @submit.prevent="askStart">
-      <UFormField label="新模型的标识" help="须与当前标识不同；向量按此标识存储。">
-        <UInput v-model="nextModel" class="w-full font-mono" required />
-      </UFormField>
-      <EmbeddingChannels v-model="nextDrafts" />
-      <div class="flex flex-wrap items-center gap-2">
-        <UButton type="submit" :icon="icons.moved" :disabled="nextKeyMissing">开始更换模型</UButton>
-        <UButton color="neutral" variant="ghost" @click="starting = false">取消</UButton>
-        <span v-if="nextKeyMissing" class="text-sm text-error">{{ KEY_MISSING }}</span>
-      </div>
-    </form>
-    <UButton v-else :icon="icons.moved" color="neutral" variant="subtle" @click="openStart"
-      >更换模型…</UButton
-    >
-  </UCard>
+    </SettingsBlock>
 
-  <UCard>
-    <template #header>
-      <h2 class="font-medium">向量</h2>
-      <p class="mt-1 text-sm text-muted">
-        显示已生成当前模型向量的记忆数量。
-        <Hint>
-          统计范围为全实例当前有效、非机密、有正文的记忆。已过期的记忆不再召回，也不生成向量，恢复生效后再生成。新写入的记忆自动排队；接口出错后可以手动补齐。
-        </Hint>
-      </p>
+    <SettingsBlock v-if="active" title="更换模型">
+      <template #note>
+        后台为全部记忆生成新模型的向量，补齐后自动切换。
+        <Hint>补齐前召回继续使用 {{ active.model }}；切换后删除旧模型的向量。</Hint>
+      </template>
+      <div v-if="next" class="space-y-4">
+        <div class="space-y-2">
+          <div class="flex flex-wrap items-baseline gap-x-2">
+            <span>正在更换为</span>
+            <span class="font-mono font-medium break-all">{{ next.model }}</span>
+          </div>
+          <template v-if="status.data.value?.next">
+            <div class="flex flex-wrap items-baseline gap-x-2">
+              <span class="text-xl tabular-nums">
+                {{ status.data.value.next.embedded }} / {{ status.data.value.eligible }}
+              </span>
+              <span class="text-muted">条记忆已有新模型的向量</span>
+            </div>
+            <UProgress
+              v-if="percent(status.data.value.next.embedded) !== null"
+              :model-value="percent(status.data.value.next.embedded)!"
+            />
+          </template>
+          <NoteLine v-if="errorOf(next.model)" tone="error">
+            {{ errorOf(next.model)!.message }}
+          </NoteLine>
+        </div>
+        <form class="space-y-4" @submit.prevent="saveNext">
+          <EmbeddingChannels v-model="nextDrafts" />
+          <div class="flex flex-wrap items-center gap-2">
+            <UButton
+              type="submit"
+              color="primary"
+              variant="outline"
+              :loading="savingNext"
+              :disabled="!nextDirty || nextKeyMissing"
+              >保存</UButton
+            >
+            <UButton
+              v-if="errorOf(next.model)"
+              color="neutral"
+              variant="outline"
+              :loading="retrying"
+              :disabled="nextDirty"
+              @click="retryNext"
+            >
+              重试
+            </UButton>
+            <UButton
+              color="neutral"
+              variant="outline"
+              :disabled="nextDirty"
+              @click="confirmSwitch = true"
+            >
+              立即切换
+            </UButton>
+            <UButton
+              color="error"
+              variant="outline"
+              :disabled="nextDirty"
+              @click="confirmAbort = true"
+            >
+              放弃
+            </UButton>
+            <span v-if="nextKeyMissing" class="text-error">{{ KEY_MISSING }}</span>
+          </div>
+          <ul v-if="result?.next" class="space-y-1">
+            <li
+              v-for="(item, i) in result.next"
+              :key="i"
+              :class="item.ok && (item.similarity ?? 1) >= 0.99 ? 'text-success' : 'text-error'"
+            >
+              渠道 {{ i + 1 }}：{{ describe(item) }}
+            </li>
+          </ul>
+        </form>
+      </div>
+      <form v-else-if="starting" class="space-y-4" @submit.prevent="askStart">
+        <UFormField label="新模型的标识" help="须与当前标识不同；向量按此标识存储。">
+          <UInput v-model="nextModel" class="w-full font-mono" required />
+        </UFormField>
+        <EmbeddingChannels v-model="nextDrafts" />
+        <div class="flex flex-wrap items-center gap-2">
+          <UButton type="submit" color="primary" variant="outline" :disabled="nextKeyMissing"
+            >开始更换模型</UButton
+          >
+          <UButton color="neutral" variant="ghost" @click="starting = false">取消</UButton>
+          <span v-if="nextKeyMissing" class="text-error">{{ KEY_MISSING }}</span>
+        </div>
+      </form>
+      <UButton v-else color="neutral" variant="outline" @click="openStart">更换模型…</UButton>
+    </SettingsBlock>
+
+    <template #side>
+      <SettingsBlock title="向量">
+        <template #note>
+          显示已生成当前模型向量的记忆数量。
+          <Hint>
+            统计范围为全实例当前有效、非机密、有正文的记忆。已过期的记忆不再召回，也不生成向量，恢复生效后再生成。新写入的记忆自动排队；接口出错后可以手动补齐。
+          </Hint>
+        </template>
+        <!-- 后台刷新失败时读到过的进度留着，错误放在上面 -->
+        <NoteLine v-if="status.isError.value" tone="error">
+          {{ readFailure(status.error.value) }}
+        </NoteLine>
+        <div v-if="status.data.value" class="space-y-3">
+          <div class="flex flex-wrap items-baseline gap-x-2">
+            <span class="text-xl tabular-nums">
+              {{ status.data.value.active?.embedded ?? 0 }} / {{ status.data.value.eligible }}
+            </span>
+            <span class="text-muted">
+              {{
+                status.data.value.active
+                  ? `模型 ${status.data.value.active.model}`
+                  : '尚未配置嵌入模型'
+              }}
+            </span>
+          </div>
+          <UProgress
+            v-if="status.data.value.active && percent(status.data.value.active.embedded) !== null"
+            :model-value="percent(status.data.value.active.embedded)!"
+          />
+          <NoteLine v-if="errorOf(status.data.value.active?.model)" tone="error">
+            {{ errorOf(status.data.value.active?.model)!.message }}
+          </NoteLine>
+          <div class="flex flex-wrap items-center gap-2">
+            <UButton
+              color="neutral"
+              variant="outline"
+              :loading="rebuilding"
+              :disabled="!status.data.value.active"
+              @click="rebuild"
+            >
+              补齐向量
+            </UButton>
+            <UButton
+              :icon="icons.refresh"
+              color="neutral"
+              variant="ghost"
+              :loading="status.isRefetching.value"
+              @click="status.refetch()"
+            >
+              刷新
+            </UButton>
+            <span v-if="following" class="text-muted">正在刷新进度…</span>
+          </div>
+        </div>
+      </SettingsBlock>
     </template>
-    <UAlert
-      v-if="status.isError.value"
-      color="error"
-      variant="subtle"
-      :title="status.error.value instanceof ApiError ? status.error.value.message : '读取失败'"
-    />
-    <div v-else-if="status.data.value" class="space-y-3">
-      <div class="flex items-baseline gap-2">
-        <span class="text-2xl font-semibold tabular-nums">
-          {{ status.data.value.active?.embedded ?? 0 }} / {{ status.data.value.eligible }}
-        </span>
-        <span class="text-sm text-muted">
-          {{
-            status.data.value.active ? `模型 ${status.data.value.active.model}` : '尚未配置嵌入模型'
-          }}
-        </span>
-      </div>
-      <UProgress
-        v-if="status.data.value.active && percent(status.data.value.active.embedded) !== null"
-        :model-value="percent(status.data.value.active.embedded)!"
-      />
-      <UAlert
-        v-if="errorOf(status.data.value.active?.model)"
-        color="error"
-        variant="subtle"
-        :title="errorOf(status.data.value.active?.model)!.message"
-      />
-      <div class="flex flex-wrap items-center gap-2">
-        <UButton
-          :icon="icons.vector"
-          :loading="rebuilding"
-          :disabled="!status.data.value.active"
-          @click="rebuild"
-        >
-          补齐向量
-        </UButton>
-        <UButton
-          :icon="icons.refresh"
-          color="neutral"
-          variant="ghost"
-          :loading="status.isRefetching.value"
-          @click="status.refetch()"
-        >
-          刷新
-        </UButton>
-        <span v-if="following" class="text-sm text-muted">正在刷新进度…</span>
-      </div>
-    </div>
-  </UCard>
+  </SettingsColumns>
 
   <UModal :open="confirmStart" title="开始更换模型？" @update:open="(v) => (confirmStart = v)">
     <template #body>

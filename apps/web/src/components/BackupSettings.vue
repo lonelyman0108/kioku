@@ -4,13 +4,19 @@ import type { BackupRunStatus, BackupSettingsView, BackupTestResult } from '@kio
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { classifyError, defaultHour, formatBytes, hourLabel } from '../backup'
 import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
+import SettingsColumns from './strata/SettingsColumns.vue'
+
+// 有没有没保存的修改：切到别的小节之后表单看不见了，交给页面在子导航上标出来
+const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -120,9 +126,14 @@ async function save() {
 
 const testing = ref(false)
 const result = ref<BackupTestResult | null>(null)
-watch(dirty, (changed) => {
-  if (changed) result.value = null
-})
+watch(
+  dirty,
+  (changed) => {
+    dirtyModel.value = changed
+    if (changed) result.value = null
+  },
+  { immediate: true },
+)
 async function test() {
   testing.value = true
   try {
@@ -227,24 +238,19 @@ async function clear() {
 </script>
 
 <template>
-  <UCard>
-    <template #header>
-      <h2 class="font-medium">备份</h2>
-      <p class="mt-1 text-sm text-muted">
+  <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
+  <NoteLine v-if="settings.isError.value" tone="error">
+    {{ readFailure(settings.error.value) }}
+  </NoteLine>
+  <SettingsColumns v-if="!settings.isError.value || view">
+    <SettingsBlock title="备份">
+      <template #note>
         每天把整个实例加密备份到兼容S3的对象存储。恢复时需配置同一主密钥。
         <Hint>
           支持 MinIO、Cloudflare、Backblaze
           等，存储桶中只保留最近几份。备份使用主密钥派生的密钥加密；恢复步骤见 README。
         </Hint>
-      </p>
-    </template>
-    <UAlert
-      v-if="settings.isError.value && !view"
-      color="error"
-      variant="subtle"
-      :title="settings.error.value instanceof ApiError ? settings.error.value.message : '读取失败'"
-    />
-    <div v-else class="space-y-5">
+      </template>
       <form class="space-y-4" @submit.prevent="save">
         <UFormField
           label="接口地址"
@@ -299,13 +305,17 @@ async function clear() {
           </UFormField>
         </div>
         <div class="flex flex-wrap items-center gap-2">
-          <UButton type="submit" :icon="icons.save" :loading="saving" :disabled="secretMissing"
+          <UButton
+            type="submit"
+            color="primary"
+            variant="outline"
+            :loading="saving"
+            :disabled="secretMissing"
             >保存</UButton
           >
           <UButton
-            :icon="icons.test"
             color="neutral"
-            variant="subtle"
+            variant="outline"
             :loading="testing"
             :disabled="!configured || dirty"
             @click="test"
@@ -313,87 +323,82 @@ async function clear() {
             测试连接
           </UButton>
           <UButton
-            :icon="icons.backup"
             color="neutral"
-            variant="subtle"
+            variant="outline"
             :loading="starting || Boolean(runId)"
             :disabled="!configured || dirty"
             @click="runNow"
           >
             立即备份
           </UButton>
-          <UButton v-if="configured" color="error" variant="ghost" @click="confirmingClear = true">
+          <UButton
+            v-if="configured"
+            color="error"
+            variant="outline"
+            @click="confirmingClear = true"
+          >
             清除设置
           </UButton>
-          <span v-if="dirty && configured" class="text-sm text-muted"
-            >保存改动后才能测试和备份</span
-          >
-          <span v-if="result" class="text-sm" :class="result.ok ? 'text-success' : 'text-error'">
+          <span v-if="dirty && configured" class="text-muted">保存改动后才能测试和备份</span>
+          <span v-if="result" :class="result.ok ? 'text-success' : 'text-error'">
             {{ result.ok ? '连接正常' : result.error }}
           </span>
         </div>
       </form>
+    </SettingsBlock>
 
-      <template v-if="configured && view">
-        <USeparator />
-        <div class="space-y-3 text-sm">
-          <UAlert
-            v-if="problem"
-            :color="problem.kind"
-            variant="subtle"
-            :title="problem.error.message"
-            :description="`${formatTime(problem.error.at)}（${formatRelative(problem.error.at)}）`"
-          />
-          <p v-if="view.status.lastSuccess">
-            最近备份：{{ formatTime(view.status.lastSuccess.at) }}（{{
-              formatRelative(view.status.lastSuccess.at)
-            }}），{{ formatBytes(view.status.lastSuccess.bytes) }}
-          </p>
-          <p v-else class="text-muted">尚未备份。保存后一小时内生成第一份。</p>
-          <div>
-            <div class="mb-1 flex items-center justify-between">
-              <span class="font-medium">存储桶中的备份</span>
-              <UButton
-                :icon="icons.refresh"
-                size="xs"
-                color="neutral"
-                variant="ghost"
-                :loading="objects.isFetching.value"
-                @click="objects.refetch()"
-              >
-                刷新
-              </UButton>
-            </div>
-            <p v-if="objects.isError.value" class="text-error">
-              {{
-                objects.error.value instanceof ApiError
-                  ? objects.error.value.message
-                  : '无法列出备份'
-              }}
-            </p>
-            <p
-              v-else-if="objects.data.value && !objects.data.value.objects.length"
-              class="text-muted"
+    <template v-if="configured && view" #side>
+      <SettingsBlock title="最近备份">
+        <NoteLine v-if="problem" :tone="problem.kind">
+          {{ problem.error.message }}
+          <template #detail>
+            {{ formatTime(problem.error.at) }}（{{ formatRelative(problem.error.at) }}）
+          </template>
+        </NoteLine>
+        <p v-if="view.status.lastSuccess">
+          {{ formatTime(view.status.lastSuccess.at) }}（{{
+            formatRelative(view.status.lastSuccess.at)
+          }}），{{ formatBytes(view.status.lastSuccess.bytes) }}
+        </p>
+        <p v-else class="text-muted">尚未备份。保存后一小时内生成第一份。</p>
+      </SettingsBlock>
+      <SettingsBlock title="存储桶中的备份">
+        <template #actions>
+          <UButton
+            :icon="icons.refresh"
+            size="xs"
+            color="neutral"
+            variant="ghost"
+            :loading="objects.isFetching.value"
+            @click="objects.refetch()"
+          >
+            刷新
+          </UButton>
+        </template>
+        <!-- 刷新失败时读到过的列表留着，错误放在上面 -->
+        <NoteLine v-if="objects.isError.value" tone="error">
+          {{
+            objects.error.value instanceof ApiError ? objects.error.value.message : '无法列出备份'
+          }}
+        </NoteLine>
+        <p v-if="objects.data.value && !objects.data.value.objects.length" class="text-muted">
+          暂无备份
+        </p>
+        <ul v-else-if="objects.data.value" class="-mt-2">
+          <li
+            v-for="o in objects.data.value.objects"
+            :key="o.object"
+            class="flex flex-wrap items-baseline justify-between gap-x-4 border-b border-default py-1.5"
+          >
+            <span class="font-mono text-[13px] break-all">{{ o.object }}</span>
+            <span class="shrink-0 text-[13px] text-muted tabular-nums"
+              >{{ formatBytes(o.bytes) }} · {{ formatRelative(o.at) }}</span
             >
-              暂无备份
-            </p>
-            <ul v-else-if="objects.data.value" class="divide-y divide-default">
-              <li
-                v-for="o in objects.data.value.objects"
-                :key="o.object"
-                class="flex flex-wrap items-baseline justify-between gap-x-4 py-1.5"
-              >
-                <span class="font-mono text-xs break-all">{{ o.object }}</span>
-                <span class="shrink-0 text-xs text-muted tabular-nums"
-                  >{{ formatBytes(o.bytes) }} · {{ formatRelative(o.at) }}</span
-                >
-              </li>
-            </ul>
-          </div>
-        </div>
-      </template>
-    </div>
-  </UCard>
+          </li>
+        </ul>
+      </SettingsBlock>
+    </template>
+  </SettingsColumns>
 
   <UModal
     :open="confirmingClear"

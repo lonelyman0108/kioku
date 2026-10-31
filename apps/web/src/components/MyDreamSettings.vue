@@ -3,10 +3,12 @@ import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { dreamSettingsKey } from '../dream'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
 
 // 自己在这个空间里的 Dream 设置：每个成员都能改自己的，别人看不到也改不了
 const props = defineProps<{ spaceId: string }>()
@@ -45,34 +47,29 @@ async function save(includePrivate: boolean) {
 </script>
 
 <template>
-  <UCard class="max-w-2xl shrink-0">
-    <template #header>
-      <h2 class="font-medium">Dream 与私人内容</h2>
-      <p class="mt-1 text-sm text-muted">
-        开启后，当前账号的个人画像层与私人层（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。
-        <Hint>
-          <p>Dream 每天整理一次记忆，只提建议，执行后才会修改。相关建议仅当前账号可见。</p>
-          <p class="mt-1">
-            关闭后仅整理共享内容：已生成的建议保留待处理；再次开启时，继续整理关闭期间新增与修改的内容。正在整理时关闭，结果不保存。
-          </p>
-          <p class="mt-1">此设置仅对当前账号生效，每个空间单独设置。</p>
-        </Hint>
-      </p>
+  <SettingsBlock title="Dream 与私人内容">
+    <template #note>
+      开启后，当前账号的个人画像层与私人层（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。
+      <Hint>
+        <p>Dream 每天整理一次记忆，只提建议，执行后才会修改。相关建议仅当前账号可见。</p>
+        <p class="mt-1">
+          关闭后仅整理共享内容：已生成的建议保留待处理；再次开启时，继续整理关闭期间新增与修改的内容。正在整理时关闭，结果不保存。
+        </p>
+        <p class="mt-1">此设置仅对当前账号生效，每个空间单独设置。</p>
+      </Hint>
     </template>
-    <UAlert
-      v-if="settings.isError.value && !settings.data.value"
-      color="error"
-      variant="subtle"
-      :title="settings.error.value instanceof ApiError ? settings.error.value.message : '读取失败'"
-    />
-    <USkeleton v-else-if="!settings.data.value" class="h-6 w-72" />
+    <!-- 后台刷新失败时开关留着，错误放在上面 -->
+    <NoteLine v-if="settings.isError.value" tone="error">
+      {{ readFailure(settings.error.value) }}
+    </NoteLine>
+    <USkeleton v-if="settings.isPending.value" class="h-6 w-72 max-w-full" />
     <USwitch
-      v-else
+      v-else-if="settings.data.value"
       :model-value="settings.data.value.includePrivate"
       :loading="saving"
       :disabled="saving"
       label="允许 Dream 整理个人画像层与私人层"
       @update:model-value="save"
     />
-  </UCard>
+  </SettingsBlock>
 </template>

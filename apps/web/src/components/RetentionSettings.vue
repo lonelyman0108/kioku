@@ -4,12 +4,17 @@ import type { RetentionView } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { icons } from '../icons'
 import { attemptNote, pauseText, retentionSummary } from '../retention'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
+import SettingsColumns from './strata/SettingsColumns.vue'
+
+// 有没有没保存的修改：切到别的小节之后表单看不见了，交给页面在子导航上标出来
+const dirtyModel = defineModel<boolean>('dirty', { default: false })
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -43,6 +48,11 @@ const days = ref<number | undefined>()
 watch(
   () => view.value?.days,
   (saved) => (days.value = saved),
+  { immediate: true },
+)
+watch(
+  () => Boolean(view.value) && days.value !== view.value?.days,
+  (changed) => (dirtyModel.value = changed),
   { immediate: true },
 )
 // 改短了：下一次清理就按新的天数删
@@ -122,10 +132,13 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
 </script>
 
 <template>
-  <UCard>
-    <template #header>
-      <h2 class="font-medium">保留期</h2>
-      <p class="mt-1 text-sm text-muted">
+  <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
+  <NoteLine v-if="settings.isError.value" tone="error">
+    {{ readFailure(settings.error.value) }}
+  </NoteLine>
+  <SettingsColumns v-if="view">
+    <SettingsBlock title="保留期">
+      <template #note>
         超过保留期的内容将被永久删除，之后只能从备份恢复。
         <Hint>
           <p>
@@ -135,56 +148,52 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
             每天清理一次。保留期内已删除的记忆与凭据可以恢复。此设置与召回明细的保留天数相互独立。
           </p>
         </Hint>
-      </p>
-    </template>
-    <UAlert
-      v-if="settings.isError.value && !view"
-      color="error"
-      variant="subtle"
-      :title="settings.error.value instanceof ApiError ? settings.error.value.message : '读取失败'"
-    />
-    <div v-else-if="view" class="space-y-4">
-      <div v-if="pause" class="space-y-2">
-        <UAlert color="warning" variant="subtle" :icon="icons.expired" :title="pause.title">
-          <template #description>
-            {{ pause.description }}
-            <Hint>{{ pause.detail }}</Hint>
-          </template>
-        </UAlert>
-        <UButton color="neutral" variant="subtle" :loading="resuming" @click="askResume">
-          立即开始清理
-        </UButton>
-      </div>
-      <form class="flex flex-wrap items-end gap-2" @submit.prevent="save">
+      </template>
+      <NoteLine v-if="pause" tone="warning">
+        {{ pause.title }}
+        <template #detail>
+          {{ pause.description }}
+          <Hint>{{ pause.detail }}</Hint>
+        </template>
+        <template #actions>
+          <UButton color="neutral" variant="outline" :loading="resuming" @click="askResume">
+            立即开始清理
+          </UButton>
+        </template>
+      </NoteLine>
+      <form class="space-y-3" @submit.prevent="save">
         <UFormField label="保留天数" help="1 到 3650 天，默认 30 天">
           <UInputNumber v-model="days" :min="1" :max="3650" class="w-32" />
         </UFormField>
+        <p v-if="shortened" class="text-warning">
+          缩短后，下一次清理将按新的天数永久删除，不可撤销。
+        </p>
         <UButton
           type="submit"
-          :icon="icons.save"
+          color="primary"
+          variant="outline"
           :loading="saving"
           :disabled="!days || days === view.days"
         >
           保存
         </UButton>
       </form>
-      <p v-if="shortened" class="text-sm text-warning">
-        缩短后，下一次清理将按新的天数永久删除，不可撤销。
-      </p>
+    </SettingsBlock>
 
-      <USeparator />
-      <div class="space-y-2 text-sm">
-        <UAlert
-          v-if="view.status.lastError"
-          color="error"
-          variant="subtle"
-          :title="view.status.lastError.message"
-          :description="`${formatTime(view.status.lastError.at)}（${formatRelative(view.status.lastError.at)}）`"
-        />
+    <template #side>
+      <SettingsBlock title="最近一次清理">
+        <NoteLine v-if="view.status.lastError" tone="error">
+          {{ view.status.lastError.message }}
+          <template #detail>
+            {{ formatTime(view.status.lastError.at) }}（{{
+              formatRelative(view.status.lastError.at)
+            }}）
+          </template>
+        </NoteLine>
         <p v-if="attempt" class="text-warning">{{ attempt }}</p>
         <template v-if="view.status.lastRun">
           <p>
-            最近一次清理：{{ formatTime(view.status.lastRun.at) }}（{{
+            {{ formatTime(view.status.lastRun.at) }}（{{
               formatRelative(view.status.lastRun.at)
             }}），{{
               view.status.lastRun.paused
@@ -192,25 +201,25 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
                 : `按 ${view.status.lastRun.days} 天计算`
             }}
           </p>
-          <ul v-if="removed.length" class="divide-y divide-default">
+          <ul v-if="removed.length" class="mt-2 border-t border-default">
             <li
               v-for="item in removed"
               :key="item.label"
-              class="flex items-baseline justify-between gap-4 py-1.5"
+              class="flex items-baseline justify-between gap-4 border-b border-default py-1.5"
             >
               <span>{{ item.label }}</span>
-              <span class="shrink-0 tabular-nums">{{ item.count }} 条</span>
+              <span class="shrink-0 font-mono text-[13px]">{{ item.count }} 条</span>
             </li>
           </ul>
-          <p v-else class="text-muted">暂无到期内容</p>
+          <p v-else class="mt-2 text-muted">暂无到期内容</p>
         </template>
         <p v-else-if="waiting" class="text-muted">正在清理…</p>
         <p v-else-if="!view.status.lastAttempt" class="text-muted">
           尚未清理。每天一次，在每小时的定时清理之后执行。
         </p>
-      </div>
-    </div>
-  </UCard>
+      </SettingsBlock>
+    </template>
+  </SettingsColumns>
 
   <UModal
     :open="confirmingResume"
