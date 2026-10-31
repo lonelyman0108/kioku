@@ -223,16 +223,10 @@ describe('概览的一行', () => {
   }
 
   it('操作都叫「查看」时，读屏能分清是哪一行', async () => {
-    const link = await render({ title: '整理建议', value: 2, action: '查看', to: '/review' })
+    const link = await render({ title: '整理建议', value: 2, action: '查看', to: '/inbox' })
     expect(link).toContain('aria-label="整理建议：查看"')
-    const button = await render({
-      title: '账号绑定申请',
-      value: 1,
-      action: '查看',
-      expanded: false,
-    })
-    expect(button).toContain('aria-label="账号绑定申请：查看"')
-    expect(button).toContain('aria-expanded="false"')
+    const other = await render({ title: '账号绑定申请', value: 1, action: '查看', to: '/inbox' })
+    expect(other).toContain('aria-label="账号绑定申请：查看"')
   })
 
   it('没有要做的事时没有操作', async () => {
@@ -290,13 +284,6 @@ describe('记忆详情', () => {
 })
 
 describe('概览', () => {
-  it('账号绑定在这里能处理：行内展开，确认的说明还在', () => {
-    expect(overviewPage).toContain('<SubjectBindings')
-    expect(overviewPage).toContain(
-      '确认后，该账号的私聊视为本人对话，此操作不可撤销。如无法辨认，请拒绝。',
-    )
-  })
-
   it('待处理的数量来自接口的 inbox', () => {
     expect(overviewPage).toContain('data.inbox.total')
     expect(overviewPage).toContain('data.inbox.bindings')

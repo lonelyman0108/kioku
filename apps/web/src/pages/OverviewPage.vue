@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -9,7 +9,6 @@ import { backupNotice } from '../backup'
 import Hint from '../components/Hint.vue'
 import OverviewRow from '../components/OverviewRow.vue'
 import RecentChange from '../components/RecentChange.vue'
-import SubjectBindings from '../components/SubjectBindings.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataColumn from '../components/strata/StrataColumn.vue'
@@ -55,11 +54,7 @@ function openStrata(selection: StrataSelection) {
   void router.push({ name: 'memories', params, query: strataFilterQuery(selection) })
 }
 
-// 账号绑定只有这里和联系人详情能处理：行内展开
-const bindingsOpen = ref(false)
-const bindingsListed = computed(() => data.value?.pendingBindings.length ?? 0)
-
-// 另外三类待处理跳到它们的页面
+// 待处理的另外三类，都到待处理页处理
 const pending = computed(() => {
   const inbox = data.value?.inbox
   if (!inbox) return []
@@ -71,7 +66,7 @@ const pending = computed(() => {
       note: '来自群聊与陌生人私聊',
       action: '去确认',
       hot: true,
-      to: { name: 'review', params },
+      to: { name: 'inbox', params, query: { tab: 'review' } },
     },
     {
       title: '整理建议',
@@ -79,7 +74,7 @@ const pending = computed(() => {
       note: 'Dream 建议合并重复、标记过时',
       action: '查看',
       hot: false,
-      to: { name: 'review', params, query: { tab: 'dream' } },
+      to: { name: 'inbox', params, query: { tab: 'dream' } },
     },
     {
       title: '疑似明文凭据',
@@ -87,7 +82,7 @@ const pending = computed(() => {
       note: '建议转存为凭据，正文改用占位符',
       action: '逐条处理',
       hot: false,
-      to: { name: 'memories', params, query: { view: 'list', plaintext: 'true' } },
+      to: { name: 'inbox', params, query: { tab: 'plaintext' } },
     },
   ]
 })
@@ -157,23 +152,11 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             title="账号绑定申请"
             :value="data.inbox.bindings"
             :note="bindingNote(data.pendingBindings, data.inbox.bindings) ?? '暂无'"
-            :action="bindingsListed ? (bindingsOpen ? '收起' : '查看') : null"
-            :expanded="bindingsOpen"
+            :action="data.inbox.bindings ? '查看' : null"
+            :to="{ name: 'inbox', params: { spaceId }, query: { tab: 'binding' } }"
             :hot="data.inbox.bindings > 0"
             :zero="!data.inbox.bindings"
-            @action="bindingsOpen = !bindingsOpen"
           />
-          <div v-if="bindingsOpen && bindingsListed" class="bindings">
-            <p class="text-sm">
-              确认后，该账号的私聊视为本人对话，此操作不可撤销。如无法辨认，请拒绝。<Hint>
-                对方在 Bot 私聊中使用绑定码发起申请，确认后账号并入标记为本人的联系人。
-              </Hint>
-            </p>
-            <p v-if="data.inbox.bindings > bindingsListed" class="text-sm text-muted">
-              仅列出前 {{ bindingsListed }} 个，处理后显示其余的。
-            </p>
-            <SubjectBindings :space-id="spaceId" :items="data.pendingBindings" />
-          </div>
           <OverviewRow
             v-for="row in pending"
             :key="row.title"
@@ -393,10 +376,6 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
   gap: 7px;
   margin-top: 3px;
   color: var(--ui-text-muted);
-}
-.bindings {
-  padding: 12px 0 8px;
-  border-bottom: 1px solid var(--ui-border);
 }
 .meter {
   position: relative;

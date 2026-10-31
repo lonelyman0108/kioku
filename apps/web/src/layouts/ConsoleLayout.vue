@@ -12,6 +12,7 @@ import KiokuMark from '../components/KiokuMark.vue'
 import StrataPatterns from '../components/strata/StrataPatterns.vue'
 import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPreference'
 import { useConsoleSearch } from '../composables/useConsoleSearch'
+import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
@@ -80,7 +81,12 @@ interface NavItem {
   to: RouteLocationRaw
   // 这些路由算在这个入口下：详情页也要点亮列表的入口
   routes: string[]
+  // 入口后面的数字，0 不显示
+  count?: number | undefined
 }
+
+// 待处理的条数：角标和待处理页共用缓存，处理完待办之后失效，不跟着每个页面重取
+const inboxCounts = useInboxCounts(computed(() => space.value?.id ?? null))
 
 // 顶部导航按用途分组。路由名和路径不变，入口的名字按术语表
 const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
@@ -97,7 +103,7 @@ const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
       items: [
         { label: '概览', ...link('overview', icons.overview) },
         { label: '记忆', ...link('memories', icons.memories) },
-        { label: '待处理', ...link('review', icons.review) },
+        { label: '待处理', ...link('inbox', icons.review), count: inboxCounts.data.value?.total },
       ],
     },
     {
@@ -237,9 +243,12 @@ async function logout() {
             :key="item.label"
             :to="item.to"
             :aria-current="isCurrent(item) ? 'page' : undefined"
-            class="nav-link flex items-center px-1.5 whitespace-nowrap min-[1121px]:px-2"
+            class="nav-link flex items-center gap-1.5 px-1.5 whitespace-nowrap min-[1121px]:px-2"
           >
             {{ item.label }}
+            <span v-if="item.count" class="nav-count">
+              {{ item.count }}<span class="sr-only"> 项</span>
+            </span>
           </RouterLink>
         </div>
       </nav>
@@ -325,10 +334,13 @@ async function logout() {
                   :key="item.label"
                   :to="item.to"
                   :aria-current="isCurrent(item) ? 'page' : undefined"
-                  class="block py-2 text-[15px]/6 aria-[current=page]:font-semibold"
+                  class="flex items-baseline gap-1.5 py-2 text-[15px]/6 aria-[current=page]:font-semibold"
                   @click="navOpen = false"
                 >
                   {{ item.label }}
+                  <span v-if="item.count" class="nav-count">
+                    {{ item.count }}<span class="sr-only"> 项</span>
+                  </span>
                 </RouterLink>
               </div>
             </nav>
@@ -429,5 +441,12 @@ async function logout() {
 .nav-link[aria-current='page'] {
   font-weight: 600;
   box-shadow: inset 0 -2px 0 var(--ui-text-highlighted);
+}
+.nav-count {
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  line-height: 1;
+  color: var(--ui-error);
 }
 </style>

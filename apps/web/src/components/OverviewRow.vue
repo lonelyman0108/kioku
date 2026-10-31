@@ -14,10 +14,7 @@ defineProps<{
   hot?: boolean
   // 没有要处理的：数字退后一级
   zero?: boolean
-  // 操作是展开下面的内容时，展开了没有
-  expanded?: boolean
 }>()
-const emit = defineEmits<{ action: [] }>()
 </script>
 
 <template>
@@ -30,16 +27,6 @@ const emit = defineEmits<{ action: [] }>()
     <RouterLink v-if="action && to" :to="to" class="row-action" :aria-label="`${title}：${action}`">
       {{ action }}
     </RouterLink>
-    <button
-      v-else-if="action"
-      type="button"
-      class="row-action"
-      :aria-label="`${title}：${action}`"
-      :aria-expanded="expanded"
-      @click="emit('action')"
-    >
-      {{ action }}
-    </button>
     <slot />
   </div>
 </template>
