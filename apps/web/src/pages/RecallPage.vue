@@ -6,6 +6,7 @@ import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import Hint from '../components/Hint.vue'
 import { layerShortLabels, recallSourceLabels, sensitivityLabels } from '../labels'
 import { memoryRoute } from '../routes'
 import { formatTime } from '../time'
@@ -27,7 +28,7 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
 <template>
   <UDashboardPanel id="recall">
     <template #header>
-      <UDashboardNavbar title="召回分析" />
+      <UDashboardNavbar title="召回" />
     </template>
     <template #body>
       <UAlert
@@ -39,10 +40,13 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
       <USkeleton v-else-if="!stats.data.value" class="h-60 w-full" />
       <div v-else class="max-w-4xl space-y-6 text-sm">
         <p class="text-muted">
-          召回事件<template v-if="stats.data.value.recordingSince"
-            >从 {{ formatTime(stats.data.value.recordingSince) }} 开始记录，</template
-          >明细保留 {{ stats.data.value.retentionDays }} 天，更早的只留下每条记忆的累计次数。
-          次数只算你在管理界面里看得到的记忆；各应用的调用量只列你能管它 Key 的应用。
+          <template v-if="stats.data.value.recordingSince"
+            >{{ formatTime(stats.data.value.recordingSince) }} 开始记录，</template
+          >明细保留 {{ stats.data.value.retentionDays }} 天。
+          <Hint>
+            更早的事件只保留每条记忆的累计次数。次数仅统计当前账号有权查看的记忆；各应用的调用量仅列出当前账号可管理
+            Key 的应用。
+          </Hint>
         </p>
 
         <UCard>
@@ -64,11 +68,11 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
               <span class="text-xs text-muted">{{ sourceSummary(volume) }}</span>
             </li>
           </ul>
-          <p v-else class="text-muted">保留期内还没有召回。</p>
+          <p v-else class="text-muted">保留期内暂无召回</p>
         </UCard>
 
         <UCard>
-          <template #header><h2 class="font-medium">常被召回的</h2></template>
+          <template #header><h2 class="font-medium">常被召回的记忆</h2></template>
           <ul v-if="stats.data.value.top.length" class="divide-y divide-default">
             <li
               v-for="memory in stats.data.value.top"
@@ -83,21 +87,23 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
                 `${layerShortLabels[memory.layer]} · ${sensitivityLabels[memory.sensitivity]}`
               }}</UBadge>
               <span v-if="memory.lastRecalledAt" class="ml-auto text-xs text-muted"
-                >最后一次 {{ formatTime(memory.lastRecalledAt) }}</span
+                >最近一次 {{ formatTime(memory.lastRecalledAt) }}</span
               >
             </li>
           </ul>
-          <p v-else class="text-muted">还没有记忆被召回过。</p>
+          <p v-else class="text-muted">暂无被召回的记忆</p>
         </UCard>
 
         <UCard>
           <template #header>
-            <h2 class="font-medium">从没被召回的（{{ stats.data.value.neverTotal }}）</h2>
+            <h2 class="font-medium">从未召回（{{ stats.data.value.neverTotal }}）</h2>
             <p class="mt-1 text-xs text-muted">
-              最早建的在前。建了、以及开始记录召回事件都满 {{ stats.data.value.retentionDays }}
-              天才算；secret
-              不进召回，会进启动上下文的节点每次会话开始都注入，都不在这里。长期没被召回的，看看是缺关键词与
-              disclosure、写得太笼统，还是已经没用了。
+              创建已满 {{ stats.data.value.retentionDays }} 天，未被任何应用召回。
+              <Hint>
+                最早创建的排在前面。记忆创建和开始记录召回事件都满
+                {{ stats.data.value.retentionDays }}
+                天才计入。不含机密内容（不参与召回）和启动加载的节点（每次会话开始时注入）。长期未被召回时，可检查是否缺少关键词与触发场景、内容过于笼统或已无用处。
+              </Hint>
             </p>
           </template>
           <ul v-if="stats.data.value.never.length" class="divide-y divide-default">
@@ -113,16 +119,16 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
                 `${layerShortLabels[memory.layer]} · ${sensitivityLabels[memory.sensitivity]}`
               }}</UBadge>
               <span class="ml-auto text-xs text-muted"
-                >建于 {{ formatTime(memory.createdAt) }}</span
+                >创建于 {{ formatTime(memory.createdAt) }}</span
               >
             </li>
           </ul>
-          <p v-else class="text-muted">都被召回过。</p>
+          <p v-else class="text-muted">暂无从未召回的记忆</p>
           <p
             v-if="stats.data.value.neverTotal > stats.data.value.never.length"
             class="mt-2 text-xs text-muted"
           >
-            只列出了最早的 {{ stats.data.value.never.length }} 条。
+            仅显示最早的 {{ stats.data.value.never.length }} 条
           </p>
         </UCard>
       </div>

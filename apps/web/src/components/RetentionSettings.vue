@@ -9,12 +9,13 @@ import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { attemptNote, pauseText, retentionSummary } from '../retention'
 import { formatRelative, formatTime } from '../time'
+import Hint from './Hint.vue'
 
 const toast = useToast()
 const queryClient = useQueryClient()
 const queryKey = ['settings', 'retention']
 
-// 点了「现在开始清理」之后每隔几秒刷新，等这一次清理的结果出来。清理队列同时只跑一个，正有一次在跑时要等它做完
+// 点了「立即开始清理」之后每隔几秒刷新，等这一次清理的结果出来。清理队列同时只跑一个，正有一次在跑时要等它做完
 // （最长约半小时），所以只等两分钟，之后不再转圈、提示稍后再看。
 // 轮询间隔用计算属性：写成函数时，查询空闲着才开始等，不会触发轮询
 const waiting = ref(false)
@@ -77,7 +78,7 @@ function askResume() {
 watch(pause, (now) => {
   if (now || !confirmingResume.value || resuming.value) return
   confirmingResume.value = false
-  toast.add({ title: '暂停已经结束，不用再提前开始', color: 'info' })
+  toast.add({ title: '暂停已结束，无需提前开始', color: 'info' })
 })
 
 const resuming = ref(false)
@@ -96,18 +97,18 @@ async function resume() {
       giveUp = setTimeout(() => {
         if (!waiting.value) return
         stopWaiting()
-        toast.add({ title: '清理在后台进行，稍后再看', color: 'info' })
+        toast.add({ title: '清理正在后台进行，请稍后查看', color: 'info' })
       }, 2 * 60_000)
       toast.add({
-        title: '已排进清理队列',
-        description: '正有一次在跑时会等它结束再开始',
+        title: '已加入清理队列',
+        description: '如有清理正在进行，将等其结束后开始',
         color: 'success',
       })
     } else {
-      toast.add({ title: '已结束暂停，下一次定时清理时开始', color: 'info' })
+      toast.add({ title: '暂停已结束，将在下一次定时清理时开始', color: 'info' })
     }
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '没能开始清理', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '无法开始清理', color: 'error' })
   } finally {
     resuming.value = false
   }
@@ -125,7 +126,15 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
     <template #header>
       <h2 class="font-medium">保留期</h2>
       <p class="mt-1 text-sm text-muted">
-        删掉的记忆（连同历史、向量与召回统计）、被新事实推翻的事实、过期的会话摘要，以及抽取记录、凭据事件、已删除的凭据与凭据源，过了保留期就永久删除，每天清理一次。保留期内删掉的记忆与凭据还能撤销删除，更早的只能从备份里找回。和召回事件明细的保留天数是两回事。
+        超过保留期的内容将被永久删除，之后只能从备份恢复。
+        <Hint>
+          <p>
+            范围：已删除的记忆（连同历史、向量与召回统计）、已被取代的事实、过期的会话摘要，以及抽取记录、凭据事件、已删除的凭据与凭据源。
+          </p>
+          <p class="mt-1">
+            每天清理一次。保留期内已删除的记忆与凭据可以恢复。此设置与召回明细的保留天数相互独立。
+          </p>
+        </Hint>
       </p>
     </template>
     <UAlert
@@ -136,15 +145,14 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
     />
     <div v-else-if="view" class="space-y-4">
       <div v-if="pause" class="space-y-2">
-        <UAlert
-          color="warning"
-          variant="subtle"
-          :icon="icons.expired"
-          :title="pause.title"
-          :description="pause.description"
-        />
+        <UAlert color="warning" variant="subtle" :icon="icons.expired" :title="pause.title">
+          <template #description>
+            {{ pause.description }}
+            <Hint>{{ pause.detail }}</Hint>
+          </template>
+        </UAlert>
         <UButton color="neutral" variant="subtle" :loading="resuming" @click="askResume">
-          现在开始清理
+          立即开始清理
         </UButton>
       </div>
       <form class="flex flex-wrap items-end gap-2" @submit.prevent="save">
@@ -161,7 +169,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
         </UButton>
       </form>
       <p v-if="shortened" class="text-sm text-warning">
-        改短之后，下一次清理就按新的天数永久删除，删掉的不能撤销。
+        缩短后，下一次清理将按新的天数永久删除，不可撤销。
       </p>
 
       <USeparator />
@@ -180,8 +188,8 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
               formatRelative(view.status.lastRun.at)
             }}），{{
               view.status.lastRun.paused
-                ? '暂停中，只清了删账号留下的历史'
-                : `按 ${view.status.lastRun.days} 天算`
+                ? '暂停中，仅清理已删除账号留下的历史'
+                : `按 ${view.status.lastRun.days} 天计算`
             }}
           </p>
           <ul v-if="removed.length" class="divide-y divide-default">
@@ -194,11 +202,11 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
               <span class="shrink-0 tabular-nums">{{ item.count }} 条</span>
             </li>
           </ul>
-          <p v-else class="text-muted">没有到期的</p>
+          <p v-else class="text-muted">暂无到期内容</p>
         </template>
         <p v-else-if="waiting" class="text-muted">正在清理…</p>
         <p v-else-if="!view.status.lastAttempt" class="text-muted">
-          还没有清理过：每天一次，跟在每小时的定时清理后面做。
+          尚未清理。每天一次，在每小时的定时清理之后执行。
         </p>
       </div>
     </div>
@@ -206,7 +214,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
 
   <UModal
     :open="confirmingResume"
-    title="现在开始清理？"
+    title="立即开始清理？"
     :dismissible="!resuming"
     @update:open="(v) => !v && !resuming && (confirmingResume = false)"
   >

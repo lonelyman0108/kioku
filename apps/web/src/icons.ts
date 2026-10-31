@@ -2,6 +2,7 @@
 // 没列进来的图标会在运行时向公共 Iconify 接口请求，自托管服务不应该向第三方发请求
 export const icons = {
   overview: 'i-lucide-layout-dashboard',
+  info: 'i-lucide-info',
   activity: 'i-lucide-history',
   spaceSettings: 'i-lucide-sliders-horizontal',
   memories: 'i-lucide-brain',

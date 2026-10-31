@@ -2,10 +2,10 @@ import type { BindingStatus, SubjectBinding } from '@kioku/contracts'
 
 import { formatShort } from './time'
 
-// 绑定记录在界面上的说法：对象页的「绑定」与概览里等确认的绑定共用
+// 绑定记录在界面上的说法：对象页的「账号绑定」与概览里等确认的绑定共用
 
 export const bindingStatusLabels: Record<BindingStatus, string> = {
-  pending: '等确认',
+  pending: '待确认',
   merged: '已合并',
   confirmed: '已确认',
   rejected: '已拒绝',
@@ -38,21 +38,21 @@ const member = (ref: { displayName: string } | null) => `「${ref?.displayName ?
 export function bindingOutcome(binding: SubjectBinding, now: Date = new Date()): string {
   switch (binding.status) {
     case 'pending':
-      return `等${member(binding.confirmer)}确认，${formatShort(binding.expiresAt!, now)} 之前有效`
+      return `待${member(binding.confirmer)}确认，${formatShort(binding.expiresAt!, now)} 前有效`
     case 'merged':
-      return '收码的人确认后直接合并了，不用成员同意'
+      return '使用绑定码的账号确认后已直接合并，无需成员确认'
     case 'confirmed':
-      return `${member(binding.decidedBy)}确认后合并了`
+      return `${member(binding.decidedBy)}确认后已合并`
     case 'rejected':
-      return `${member(binding.decidedBy)}拒绝了，没有合并`
+      return `${member(binding.decidedBy)}已拒绝，未合并`
     case 'cancelled':
-      return `作废了：${binding.note ?? '期间情况变了'}`
+      return `已作废：${binding.note ?? '情况已变化'}`
     case 'expired':
-      return `${member(binding.confirmer)}在期限内没有处理，作废了`
+      return `${member(binding.confirmer)}未在期限内处理，已作废`
   }
 }
 
 // 绑定码是哪个平台账号、什么时候申请的，经由哪个应用
 export function bindingSource(binding: SubjectBinding, now: Date = new Date()): string {
-  return `${accountText(binding.issuedBy)} 在 ${formatShort(binding.issuedAt, now)} 申请的绑定码，经由「${binding.app.name}」`
+  return `${accountText(binding.issuedBy)} 于 ${formatShort(binding.issuedAt, now)} 申请绑定码，经由「${binding.app.name}」`
 }

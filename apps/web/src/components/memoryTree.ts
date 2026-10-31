@@ -52,7 +52,7 @@ export function toTreeItems(
   }))
   if (result.truncated) {
     items.push({
-      label: `这一级太多，只显示了前 ${result.children.length} 个`,
+      label: `此级条目过多，仅显示前 ${result.children.length} 个`,
       uri: `${result.children.at(-1)?.uri ?? ''}#more`,
       exists: false,
       loaded: true,

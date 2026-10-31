@@ -101,7 +101,7 @@ function closeIssue() {
 
 // 剪贴板接口只在 HTTPS 或 localhost 下可用；用局域网 HTTP 地址打开时提示手动复制
 const copyText = useCopy()
-const copy = (text: string) => copyText(text, '浏览器不允许自动复制，请手动选中 Key 复制')
+const copy = (text: string) => copyText(text, '浏览器不允许自动复制，请手动选中 Key 后复制')
 
 const revoking = ref<KeyInfo | null>(null)
 async function revoke() {
@@ -119,9 +119,9 @@ async function revoke() {
 // 当前有效上限与签发上限不同时（主人被降级），或 Key 已经作废（主人离开了空间）时要说明
 function effectiveNote(key: KeyInfo): string | null {
   if (key.revokedAt) return null
-  if (!key.effectiveScopes) return '已作废：应用主人已不在空间里'
+  if (!key.effectiveScopes) return '已作废：应用所有者已不在此空间'
   if (sameScopes(key.scopes, key.effectiveScopes)) return null
-  return `当前有效：${scopesSummary(key.effectiveScopes)}（按主人现在的角色收紧）`
+  return `当前有效范围：${scopesSummary(key.effectiveScopes)}（已按所有者当前角色收紧）`
 }
 
 const inspecting = ref<KeyInfo | null>(null)
@@ -137,18 +137,18 @@ const inspecting = ref<KeyInfo | null>(null)
         size="xs"
         variant="subtle"
         @click="issueOpen = true"
-        >签发</UButton
+        >签发 Key</UButton
       >
     </div>
     <p v-if="!isAppOwner && !isSpaceOwner" class="text-sm text-muted">
-      只有应用的主人能查看和签发它的 Key。
+      仅应用所有者可查看和签发 Key
     </p>
     <ul v-else class="divide-y divide-default text-sm">
       <li v-for="key in keys.data.value ?? []" :key="key.id" class="space-y-1 py-2">
         <div class="flex flex-wrap items-center gap-x-3 gap-y-1">
           <code>{{ key.prefix }}</code>
           <span>{{ key.name }}</span>
-          <span class="text-muted">签发：{{ scopesSummary(key.scopes) }}</span>
+          <span class="text-muted">签发范围：{{ scopesSummary(key.scopes) }}</span>
           <UBadge v-if="key.revokedAt" color="neutral" variant="subtle">已吊销</UBadge>
           <!-- 右侧这组一起换行，窄屏上按钮不会和使用时间分开 -->
           <div v-else class="ml-auto flex items-center gap-1">
@@ -164,7 +164,7 @@ const inspecting = ref<KeyInfo | null>(null)
               :icon="icons.matrix"
               size="xs"
               variant="ghost"
-              aria-label="权限矩阵"
+              aria-label="权限范围"
               @click="inspecting = key"
             />
             <UButton
@@ -179,7 +179,7 @@ const inspecting = ref<KeyInfo | null>(null)
         </div>
         <p v-if="effectiveNote(key)" class="text-xs text-warning">{{ effectiveNote(key) }}</p>
       </li>
-      <li v-if="keys.data.value?.length === 0" class="py-2 text-muted">还没有 Key。</li>
+      <li v-if="keys.data.value?.length === 0" class="py-2 text-muted">暂无 Key</li>
     </ul>
 
     <!-- 明文 Key 显示期间不能点遮罩、按 Esc 或右上角关掉，只能点「我已保存」，免得没复制就丢了 -->
@@ -195,7 +195,7 @@ const inspecting = ref<KeyInfo | null>(null)
           <UAlert
             color="warning"
             variant="subtle"
-            title="Key 只显示这一次，关闭后无法再看到，请现在保存。"
+            title="Key 只显示这一次，关闭后无法再次查看，请立即保存。"
           />
           <div class="flex items-center gap-2">
             <code class="flex-1 break-all rounded bg-elevated p-2 text-xs">{{ issued.key }}</code>
@@ -208,7 +208,7 @@ const inspecting = ref<KeyInfo | null>(null)
           </div>
         </div>
         <form v-else id="issue-key" class="space-y-4" @submit.prevent="issue">
-          <UFormField label="名称" help="用来辨认这把 Key，例如「MacBook 上的 Claude Code」">
+          <UFormField label="名称" help="用于辨认 Key，例如「MacBook 上的 Claude Code」">
             <UInput v-model="form.name" class="w-full" />
           </UFormField>
           <UFormField label="权限">
@@ -224,7 +224,7 @@ const inspecting = ref<KeyInfo | null>(null)
             </div>
           </UFormField>
           <template v-if="form.advanced">
-            <UFormField label="可读的层">
+            <UFormField label="可读层">
               <USelect
                 v-model="form.scopes.readLayers"
                 :items="layerItems"
@@ -232,7 +232,7 @@ const inspecting = ref<KeyInfo | null>(null)
                 class="w-full"
               />
             </UFormField>
-            <UFormField label="可写的层">
+            <UFormField label="可写层">
               <USelect
                 v-model="form.scopes.writeLayers"
                 :items="layerItems"
@@ -250,7 +250,7 @@ const inspecting = ref<KeyInfo | null>(null)
             <USwitch
               v-if="isSpaceOwner"
               v-model="form.scopes.admin"
-              :label="`${ADMIN_SCOPE_LABEL}：可以写任何人格与应用命名空间下的记忆`"
+              :label="`${ADMIN_SCOPE_LABEL}：可写入任意人格与应用命名空间下的记忆`"
             />
           </template>
         </form>
@@ -268,7 +268,7 @@ const inspecting = ref<KeyInfo | null>(null)
 
     <UModal
       :open="inspecting !== null"
-      :title="`权限矩阵 · ${inspecting?.name ?? ''}`"
+      :title="`权限范围 · ${inspecting?.name ?? ''}`"
       :ui="{ content: 'sm:max-w-2xl' }"
       @update:open="(v) => !v && (inspecting = null)"
     >
@@ -279,13 +279,13 @@ const inspecting = ref<KeyInfo | null>(null)
 
     <UModal
       :open="revoking !== null"
-      title="吊销这把 Key？"
+      title="吊销这个 Key？"
       @update:open="(v) => !v && (revoking = null)"
     >
       <template #body>
         <p class="text-sm">
           吊销 <code>{{ revoking?.prefix }}</code
-          >（{{ revoking?.name }}）后，用它的接入方会立刻失去访问权限。
+          >（{{ revoking?.name }}）后，使用它的客户端将立即失去访问权限。
         </p>
       </template>
       <template #footer>

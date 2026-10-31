@@ -354,7 +354,7 @@ async function logout() {
       v-model:search-term="searchTerm"
       :groups="searchGroups"
       :loading="searching"
-      placeholder="搜索记忆的 URI、关键词或内容，或跳转到页面"
+      placeholder="搜索记忆或跳转页面"
     />
 
     <main class="flex min-h-0 flex-1">
@@ -362,7 +362,7 @@ async function logout() {
       <UDashboardPanel v-if="me.data.value && route.params.spaceId && !space" id="not-member">
         <template #body>
           <div class="space-y-3">
-            <p class="text-muted">当前账号不是这个空间的成员，或已被移出。</p>
+            <p class="text-muted">无权访问此空间</p>
             <UButton :to="{ name: 'home' }" variant="subtle">返回我的空间</UButton>
           </div>
         </template>

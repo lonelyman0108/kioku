@@ -8,6 +8,7 @@ import { api } from '../api/endpoints'
 import BackupSettings from '../components/BackupSettings.vue'
 import EmbeddingSettings from '../components/EmbeddingSettings.vue'
 import ExtractionSettings from '../components/ExtractionSettings.vue'
+import Hint from '../components/Hint.vue'
 import RetentionSettings from '../components/RetentionSettings.vue'
 import SpaceImport from '../components/SpaceImport.vue'
 
@@ -77,8 +78,11 @@ async function saveRetention() {
           <template #header>
             <h2 class="font-medium">主密钥</h2>
             <p class="mt-1 text-sm text-muted">
-              加密 secret 记忆、托管的凭据值与这里的接口 Key，配在服务器的 KIOKU_MASTER_KEY
-              里。标识是哈希，推不出密钥本身，用来核对配的是哪一把。
+              用于加密机密记忆、托管的凭据值与接口 Key。
+              <Hint>
+                在服务器的 KIOKU_MASTER_KEY
+                中配置。标识是哈希值，无法反推密钥，用于核对当前配置的主密钥。
+              </Hint>
             </p>
           </template>
           <UAlert
@@ -91,7 +95,7 @@ async function saveRetention() {
           />
           <div v-else-if="masterKey.data.value" class="space-y-2 text-sm">
             <p v-if="!masterKey.data.value.configured" class="text-muted">
-              没有配置主密钥：secret 记忆、托管的凭据与接口 Key 都不能保存。
+              未配置主密钥，无法保存机密记忆、托管的凭据与接口 Key。
             </p>
             <template v-else>
               <p>
@@ -100,8 +104,8 @@ async function saveRetention() {
               <template v-if="masterKey.data.value.previousId">
                 <p>
                   正在轮换：旧主密钥
-                  <span class="font-mono">{{ masterKey.data.value.previousId }}</span> 包装的还剩
-                  {{ remaining }} 条（secret 记忆
+                  <span class="font-mono">{{ masterKey.data.value.previousId }}</span> 还有
+                  {{ remaining }} 条待重新包装（机密记忆
                   {{ masterKey.data.value.remaining.memories }}、托管的凭据
                   {{ masterKey.data.value.remaining.credentials }}、接口 Key
                   {{ masterKey.data.value.remaining.settings }}）
@@ -113,7 +117,7 @@ async function saveRetention() {
                   :title="masterKey.data.value.lastError.message"
                 />
                 <p v-if="remaining === 0" class="text-success">
-                  已经换完：可以从配置里去掉 KIOKU_MASTER_KEY_PREVIOUS，再重启服务。
+                  轮换完成。可以从配置中移除 KIOKU_MASTER_KEY_PREVIOUS，然后重启服务。
                 </p>
               </template>
             </template>
@@ -128,9 +132,10 @@ async function saveRetention() {
 
         <UCard>
           <template #header>
-            <h2 class="font-medium">召回事件</h2>
+            <h2 class="font-medium">召回记录</h2>
             <p class="mt-1 text-sm text-muted">
-              每次召回的明细（命中的记忆、分数、打过码的提示语）保留这么多天，更早的只留下每条记忆被召回的累计次数。
+              明细到期后删除，仅保留每条记忆的累计召回次数。
+              <Hint>明细包括命中的记忆、分数与打码后的提示语。</Hint>
             </p>
           </template>
           <UAlert

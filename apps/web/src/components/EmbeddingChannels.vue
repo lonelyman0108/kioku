@@ -42,7 +42,7 @@ function add() {
       :disabled="channels.length >= MAX_CHANNELS"
       @click="add"
     >
-      加一个渠道
+      添加渠道
     </UButton>
   </div>
 </template>

@@ -12,7 +12,7 @@ export const hasUnsavedChanges = ref(false)
 
 export function confirmDiscard(): boolean {
   if (!hasUnsavedChanges.value) return true
-  if (!window.confirm('有未保存的修改，离开后会丢失。确定离开吗？')) return false
+  if (!window.confirm('有未保存的改动，离开后将丢失。确定离开？')) return false
   hasUnsavedChanges.value = false
   return true
 }

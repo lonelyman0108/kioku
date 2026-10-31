@@ -29,7 +29,7 @@ export const chatTypeLabels: Record<ChatType, string> = {
   group: '群聊',
   channel: '频道',
   cron: '定时任务',
-  subagent: '子 agent',
+  subagent: '子 Agent',
 }
 
 export const usesGroup = (chatType: ChatType | null) =>
@@ -57,7 +57,7 @@ export function contextOf(form: ContextForm): SessionContextInput | undefined {
 
 // 折叠时显示的一句话
 export function contextSummary(form: ContextForm): string {
-  if (!form.chatType) return '不带（本机 agent 的钩子就是这样）'
+  if (!form.chatType) return '不带（与本机 Agent 的钩子相同）'
   const parts: string[] = [chatTypeLabels[form.chatType]]
   if (usesSender(form.chatType) && form.platform) parts.push(form.platform)
   if (usesGroup(form.chatType) && form.groupId) parts.push(`群 ${form.groupName || form.groupId}`)
@@ -345,7 +345,7 @@ const sessionIdField = (required: boolean) =>
   textField('sessionId', 'sessionId', {
     required,
     initial: 'bench-session',
-    description: '宿主的会话标识',
+    description: '客户端的会话标识',
   })
 
 const staticTarget = (
@@ -365,21 +365,21 @@ const lifecycleTarget = (id: string, description: string, fields: FormField[]) =
   })
 
 const LIFECYCLE_TARGETS: CallTarget[] = [
-  lifecycleTarget('session.start', '会话开始：宿主收到启动上下文。', [
+  lifecycleTarget('session.start', '会话开始：客户端收到启动加载内容。', [
     sessionIdField(false),
     textField('dirName', '目录名', {
       path: ['project', 'dirName'],
-      description: '目录名与仓库名用来召回与当前项目相关的记忆，可以不填',
+      description: '目录名与仓库名用于召回当前项目相关的记忆，可不填',
     }),
     textField('repoName', '仓库名', { path: ['project', 'repoName'] }),
   ]),
-  lifecycleTarget('prompt.submit', '每轮输入：宿主收到这一轮的召回块。', [
+  lifecycleTarget('prompt.submit', '每轮输入：客户端收到本轮的召回块。', [
     sessionIdField(false),
     textField('prompt', 'prompt', { required: true, multiline: true }),
   ]),
   lifecycleTarget(
     'turn.end',
-    '一轮结束：这一轮放进对话缓冲，攒批之后抽取。要带私聊、群聊或频道的会话上下文。',
+    '一轮结束：本轮写入对话缓冲，累积成批后抽取。需带私聊、群聊或频道的会话上下文。',
     [
       sessionIdField(true),
       textField('user', 'user', { required: true, multiline: true }),
@@ -389,7 +389,7 @@ const LIFECYCLE_TARGETS: CallTarget[] = [
 ]
 
 const REST_TARGETS: CallTarget[] = [
-  staticTarget('/recall', 'rest', '按查询召回候选，和 POST /v1/recall 相同。', {
+  staticTarget('/recall', 'rest', '按查询召回候选，与 POST /v1/recall 相同。', {
     fields: [
       textField('query', 'query', { required: true, multiline: true }),
       textField('limit', 'limit', { kind: 'number', placeholder: '默认 8' }),
@@ -399,14 +399,14 @@ const REST_TARGETS: CallTarget[] = [
     fixed: {},
     toStep: (body) => ({ kind: 'recall', body }),
   }),
-  staticTarget('/boot', 'rest', '启动节点，有结构化的 entries，和 GET /v1/boot 相同。', {
+  staticTarget('/boot', 'rest', '启动加载的节点，含结构化 entries，与 GET /v1/boot 相同。', {
     fields: [],
     hasBody: false,
     usesContext: false,
     fixed: {},
     toStep: () => ({ kind: 'boot' }),
   }),
-  staticTarget('/whoami', 'rest', '这把 Key 的应用与现在的上限，和 GET /v1/whoami 相同。', {
+  staticTarget('/whoami', 'rest', '当前 Key 的应用与当前上限，与 GET /v1/whoami 相同。', {
     fields: [],
     hasBody: false,
     usesContext: false,
@@ -453,9 +453,9 @@ export function targetUnavailable(
   catalog: CatalogState,
 ): string | null {
   if (targets.some((t) => t.id === target.id)) return null
-  if (catalog === 'pending') return `工具目录还在读取，读到之前不能运行 ${target.id}。`
-  if (catalog === 'failed') return `工具目录读取失败，读到之前不能运行 ${target.id}。`
-  return `这把 Key 的工具目录里没有 ${target.id}，不能运行：换一个调用。`
+  if (catalog === 'pending') return `工具目录读取中，完成前无法运行 ${target.id}。`
+  if (catalog === 'failed') return `工具目录读取失败，成功读取前无法运行 ${target.id}。`
+  return `当前 Key 的工具目录中没有 ${target.id}，无法运行。请选择其他调用。`
 }
 
 // 一个调用的草稿。切到别的调用再切回来时还在，只在内存里：可能有明文，不进浏览器存储
@@ -543,7 +543,7 @@ export function formFromJson(
     ? { ok: true, state }
     : {
         ok: false,
-        error: `这段 JSON 表单放不下（多余的字段、类型不对${target.usesContext ? '，或者 context 和上面的会话上下文不同' : ''}）：接着用 JSON 编辑，或者点「重置」`,
+        error: `此 JSON 无法转为表单（含多余字段、类型不符${target.usesContext ? '，或 context 与上方的会话上下文不同' : ''}）。请继续编辑 JSON，或点击「重置」。`,
       }
 }
 
@@ -561,7 +561,7 @@ export function buildStep(
     const parsed = parseJson(draft.text)
     if (!parsed.ok) return parsed
     if (target.group === 'tool' && !isRecord(parsed.value)) {
-      return { ok: false, error: '工具的参数要是一个 JSON 对象' }
+      return { ok: false, error: '工具参数必须是 JSON 对象' }
     }
     return { ok: true, step: target.toStep(parsed.value) }
   }
