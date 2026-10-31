@@ -8,6 +8,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { backupNotice } from '../backup'
 import ActivityEntry from '../components/ActivityEntry.vue'
+import Hint from '../components/Hint.vue'
 import SubjectBindings from '../components/SubjectBindings.vue'
 import { useSession } from '../composables/useSession'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
@@ -48,11 +49,11 @@ const budgetWarning = computed(() => {
   return {
     over,
     title: over
-      ? '本月的抽取预算用完了'
-      : `本月的抽取预算已用 ${Math.floor((e.usedTokens / e.monthlyTokens) * 100)}%`,
+      ? '本月抽取预算已用完'
+      : `本月抽取预算已用 ${Math.floor((e.usedTokens / e.monthlyTokens) * 100)}%`,
     description: over
-      ? `${used}之后只写会话摘要、不再抽取事实，Dream 也不再整理，下个月恢复；空间 owner 可以在空间设置里调高。`
-      : `${used}用完之后只写会话摘要、不再抽取事实，Dream 也不再整理。`,
+      ? `${used}本月仅写会话摘要，不再抽取事实，Dream 暂停，下月恢复。空间所有者可在空间设置中调高预算。`
+      : `${used}用完后本月仅写会话摘要，不再抽取事实，Dream 暂停。`,
   }
 })
 // 备份只给实例管理员提醒（别人拿到的是 null）
@@ -94,12 +95,11 @@ const activeKeys = computed(() =>
           v-if="data.pendingBindings.length"
           class="rounded-lg border border-warning/40 bg-warning/5 p-4"
         >
-          <h2 class="text-sm font-medium">
-            有 {{ data.pendingBindings.length }} 个平台账号想绑到你
-          </h2>
+          <h2 class="text-sm font-medium">{{ data.pendingBindings.length }} 个账号绑定申请</h2>
           <p class="mt-1 text-xs text-muted">
-            有人在 bot
-            的私聊里用绑定码申请把自己的账号并进标记成你的对象。确认之后，这些账号的私聊都算你的主人私聊；不认识的请拒绝。
+            确认后，该账号的私聊视为本人对话，此操作不可撤销。如无法辨认，请拒绝。<Hint>
+              对方在 Bot 私聊中使用绑定码发起申请，确认后账号并入标记为本人的联系人。
+            </Hint>
           </p>
           <SubjectBindings :space-id="spaceId" :items="data.pendingBindings" />
         </section>
@@ -112,12 +112,11 @@ const activeKeys = computed(() =>
         />
         <div class="grid gap-4 sm:grid-cols-2 lg:grid-cols-3 xl:grid-cols-5">
           <div class="rounded-lg border border-default p-4">
-            <p class="text-sm text-muted">记忆</p>
-            <p class="mt-1 text-2xl font-semibold tabular-nums">{{ data.total }}</p>
-            <p class="mt-1 text-xs text-muted">你读得到的策展记忆</p>
+            <p class="text-sm text-muted">总量 <Hint>统计范围为当前账号有权查看的内容。</Hint></p>
+            <p class="mt-1 text-2xl font-semibold tabular-nums">{{ data.total }} 条记忆</p>
           </div>
           <div class="rounded-lg border border-default p-4">
-            <p class="text-sm text-muted">缺 disclosure</p>
+            <p class="text-sm text-muted">未设触发场景</p>
             <p
               class="mt-1 text-2xl font-semibold tabular-nums"
               :class="data.missingDisclosure ? 'text-warning' : ''"
@@ -125,7 +124,7 @@ const activeKeys = computed(() =>
               {{ data.missingDisclosure }}
             </p>
             <p class="mt-1 text-xs text-muted">
-              没写什么场景下该想起，召回时少一条线索。
+              补全后召回更准确。
               <RouterLink
                 v-if="data.missingDisclosure"
                 class="underline"
@@ -135,12 +134,12 @@ const activeKeys = computed(() =>
                   query: { view: 'list', missingDisclosure: 'true' },
                 }"
               >
-                逐条补上
+                去补全
               </RouterLink>
             </p>
           </div>
           <div class="rounded-lg border border-default p-4">
-            <p class="text-sm text-muted">像有明文凭据</p>
+            <p class="text-sm text-muted">疑似明文凭据</p>
             <p
               class="mt-1 text-2xl font-semibold tabular-nums"
               :class="data.plaintextCredentials ? 'text-warning' : ''"
@@ -148,7 +147,7 @@ const activeKeys = computed(() =>
               {{ data.plaintextCredentials }}
             </p>
             <p class="mt-1 text-xs text-muted">
-              正文里像有密码或 Token，值该存成凭据、正文里换成占位符。
+              建议转存为凭据，正文改用占位符。
               <RouterLink
                 v-if="data.plaintextCredentials"
                 class="underline"
@@ -163,7 +162,7 @@ const activeKeys = computed(() =>
             </p>
           </div>
           <div class="rounded-lg border border-default p-4">
-            <p class="text-sm text-muted">从没被召回</p>
+            <p class="text-sm text-muted">从未召回</p>
             <p
               class="mt-1 text-2xl font-semibold tabular-nums"
               :class="data.neverRecalled ? 'text-warning' : ''"
@@ -171,18 +170,20 @@ const activeKeys = computed(() =>
               {{ data.neverRecalled }}
             </p>
             <p class="mt-1 text-xs text-muted">
-              建了一段时间还没被召回过，可能缺关键词、写得太笼统，或者已经没用了。
+              创建已久，未被任何应用召回。<Hint>
+                创建与开始记录召回均已满明细保留天数才计入，不含机密内容与启动加载的节点。可能缺少关键词、内容过于笼统，或已不再需要。
+              </Hint>
               <RouterLink
                 v-if="data.neverRecalled"
                 class="underline"
                 :to="{ name: 'recall', params: { spaceId } }"
               >
-                去看看
+                查看
               </RouterLink>
             </p>
           </div>
           <div class="rounded-lg border border-default p-4">
-            <p class="text-sm text-muted">向量</p>
+            <p class="text-sm text-muted">向量索引</p>
             <template v-if="data.embedding.configured">
               <p class="mt-1 text-2xl font-semibold tabular-nums">
                 {{ data.embedding.embedded }} / {{ data.embedding.eligible }}
@@ -191,9 +192,9 @@ const activeKeys = computed(() =>
               <p class="mt-1 truncate text-xs text-muted">模型 {{ data.embedding.model }}</p>
             </template>
             <template v-else>
-              <p class="mt-1 text-sm">还没有配置嵌入模型</p>
+              <p class="mt-1 text-sm">未配置嵌入模型</p>
               <p class="mt-1 text-xs text-muted">
-                召回暂时只走全文与关键词。
+                召回仅使用全文与关键词。
                 <RouterLink
                   v-if="me.data.value?.isAdmin"
                   :to="{ name: 'settings' }"
@@ -207,12 +208,12 @@ const activeKeys = computed(() =>
           <div class="rounded-lg border border-default p-4">
             <p class="text-sm text-muted">应用</p>
             <p class="mt-1 text-2xl font-semibold tabular-nums">{{ data.apps.length }}</p>
-            <p class="mt-1 text-xs text-muted">你看得到的有效 Key 共 {{ activeKeys }} 把</p>
+            <p class="mt-1 text-xs text-muted">{{ activeKeys }} 个有效 Key</p>
           </div>
         </div>
 
         <section>
-          <h2 class="mb-2 text-sm font-medium">按层与敏感级</h2>
+          <h2 class="mb-2 text-sm font-medium">记忆分布</h2>
           <div class="overflow-x-auto rounded-lg border border-default">
             <table class="w-full text-sm">
               <thead class="bg-elevated/50">
@@ -247,14 +248,14 @@ const activeKeys = computed(() =>
         <div class="grid gap-6 lg:grid-cols-2">
           <section>
             <div class="mb-2 flex items-center justify-between">
-              <h2 class="text-sm font-medium">最近的改动</h2>
+              <h2 class="text-sm font-medium">最近变更</h2>
               <UButton
                 :to="{ name: 'activity', params: { spaceId } }"
                 size="xs"
                 variant="link"
                 color="neutral"
               >
-                全部活动
+                全部变更
               </UButton>
             </div>
             <div
@@ -268,7 +269,7 @@ const activeKeys = computed(() =>
                 :space-id="spaceId"
               />
             </div>
-            <p v-else class="text-sm text-muted">还没有改动。</p>
+            <p v-else class="text-sm text-muted">暂无变更记录</p>
           </section>
           <section>
             <div class="mb-2 flex items-center justify-between">
@@ -279,7 +280,7 @@ const activeKeys = computed(() =>
                 variant="link"
                 color="neutral"
               >
-                管理应用与 Key
+                管理应用
               </UButton>
             </div>
             <ul
@@ -296,7 +297,7 @@ const activeKeys = computed(() =>
                 <UBadge variant="subtle" size="sm" color="neutral">{{ app.runtimeFamily }}</UBadge>
                 <span class="ml-auto text-xs text-muted">
                   <template v-if="app.keys">
-                    {{ app.keys.active }} 把有效 Key
+                    {{ app.keys.active }} 个有效 Key
                     <template v-if="app.keys.lastUsedAt">
                       · 最近使用
                       <time
@@ -306,13 +307,13 @@ const activeKeys = computed(() =>
                         {{ formatRelative(app.keys.lastUsedAt) }}
                       </time>
                     </template>
-                    <template v-else-if="app.keys.active">· 还没用过</template>
+                    <template v-else-if="app.keys.active">· 尚未使用</template>
                   </template>
-                  <template v-else>Key 的情况只给应用主人看</template>
+                  <template v-else>仅应用所有者可查看 Key</template>
                 </span>
               </li>
             </ul>
-            <p v-else class="text-sm text-muted">还没有应用。</p>
+            <p v-else class="text-sm text-muted">暂无应用</p>
           </section>
         </div>
       </div>

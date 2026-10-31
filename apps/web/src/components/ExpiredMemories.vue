@@ -13,6 +13,7 @@ import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { purgeAt, purgeNote, releasedNotice } from '../retention'
 import { formatRelative, formatTime } from '../time'
+import Hint from './Hint.vue'
 import MemoryHistory from './MemoryHistory.vue'
 
 const props = defineProps<{ spaceId: string }>()
@@ -68,13 +69,13 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
     // 写进这条记忆的缓存：这个 URI 上之前缓存的可能是别的记录、或者过期之前的版本
     queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
     void queryClient.invalidateQueries({ queryKey: ['memory-history', spaceId, memory.id] })
-    toast.add({ title: `已重新生效 ${memory.uri}`, color: 'success' })
+    toast.add({ title: `已恢复生效 ${memory.uri}`, color: 'success' })
     if (viewing.value?.id === item.id) viewing.value = null
     if (props.spaceId === spaceId) emit('reactivated', memory.uri)
     // 等列表重新拉取完、这一行消失之后按钮才恢复，免得再点一次。页面收到通知时已经发出了重新拉取，接着等它
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '重新生效失败', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '恢复生效失败', color: 'error' })
     // 版本对不上、已经被别人重新生效了：刷新列表
     if (err instanceof ApiError && err.status === 409) void expired.refetch()
   } finally {
@@ -86,9 +87,10 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
 <template>
   <div class="space-y-3">
     <p class="text-xs text-muted">
-      过了有效期的记忆不再召回、不进
-      boot。重新生效之后一直有效，需要的话再设新的有效期。标着「已让出」的，过期之后同一个 URI
-      上写了新的记忆，那条还在时要先把它移走或删掉。
+      已过期的记忆不再召回，也不进启动加载。<Hint>
+        恢复生效后长期有效，可再设置新的有效期。标记为「URI 已释放」的，过期后同一 URI
+        上已写入新记忆，需先移走或删除新记忆。
+      </Hint>
     </p>
     <p v-if="retention && anyReleased" class="flex items-start gap-1.5 text-xs text-warning">
       <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
@@ -126,9 +128,9 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
                 variant="outline"
                 color="warning"
                 class="shrink-0"
-                title="过期之后同一个 URI 上写了新的记忆，它让出了 URI"
+                title="过期后同一 URI 上已写入新记忆，URI 已释放"
               >
-                已让出
+                URI 已释放
               </UBadge>
             </span>
             <span class="text-xs text-muted">
@@ -140,7 +142,7 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
                 ·
                 <span
                   :class="{ 'text-warning': notes.get(item.id)!.soon }"
-                  :title="`让出于 ${formatTime(item.deletedAt)}，最早在 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 之后清除`"
+                  :title="`URI 释放于 ${formatTime(item.deletedAt)}，最早于 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 后清除`"
                 >
                   {{ notes.get(item.id)!.text }}
                 </span>
@@ -164,11 +166,11 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
             :loading="reactivating === item.id"
             @click="reactivate(item)"
           >
-            重新生效
+            恢复生效
           </UButton>
         </li>
       </ul>
-      <p v-if="!items.length" class="text-sm text-muted">没有过期的记忆。</p>
+      <p v-if="!items.length" class="text-sm text-muted">暂无已过期的记忆</p>
       <div v-if="expired.hasNextPage.value" class="flex justify-center">
         <UButton
           color="neutral"

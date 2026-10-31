@@ -6,6 +6,7 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import ActivityEntry from '../components/ActivityEntry.vue'
+import Hint from '../components/Hint.vue'
 import { icons } from '../icons'
 
 const route = useRoute()
@@ -24,7 +25,10 @@ const items = computed(() => activity.data.value?.pages.flatMap((page) => page.i
 <template>
   <UDashboardPanel id="activity">
     <template #header>
-      <UDashboardNavbar title="活动">
+      <UDashboardNavbar title="变更记录">
+        <template #trailing>
+          <Hint>通过 Key 写入的改动，操作方显示为应用。</Hint>
+        </template>
         <template #right>
           <UButton
             :icon="icons.refresh"
@@ -38,9 +42,6 @@ const items = computed(() => activity.data.value?.pages.flatMap((page) => page.i
       </UDashboardNavbar>
     </template>
     <template #body>
-      <p class="mb-4 text-sm text-muted">
-        谁、在什么时候改了哪些记忆。只列你看得到的记忆；通过 Key 写入的显示应用。
-      </p>
       <UAlert
         v-if="activity.isError.value"
         color="error"
@@ -56,7 +57,7 @@ const items = computed(() => activity.data.value?.pages.flatMap((page) => page.i
         <div class="divide-y divide-default">
           <ActivityEntry v-for="item in items" :key="item.id" :item="item" :space-id="spaceId" />
         </div>
-        <p v-if="!items.length" class="text-sm text-muted">还没有改动。</p>
+        <p v-if="!items.length" class="text-sm text-muted">暂无变更记录</p>
         <div v-if="activity.hasNextPage.value" class="mt-4 flex justify-center">
           <UButton
             color="neutral"

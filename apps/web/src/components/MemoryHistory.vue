@@ -10,6 +10,7 @@ import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import { icons } from '../icons'
 import { actorLabel, eventLabel, layerLabels, sensitivityLabels } from '../labels'
 import { formatRelative, formatTime, isExpired } from '../time'
+import Hint from './Hint.vue'
 
 const props = defineProps<{
   spaceId: string
@@ -36,7 +37,7 @@ const expiredNow = computed(() => {
   const m = current.value
   return !!m && isExpired(m.validTo) && (!m.deletedAt || m.released)
 })
-const validToText = (validTo: string | null) => (validTo ? formatTime(validTo) : '一直有效')
+const validToText = (validTo: string | null) => (validTo ? formatTime(validTo) : '长期有效')
 
 // 一次改动里变了的属性；正文另外按行对比
 function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): string[] {
@@ -52,16 +53,16 @@ function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): s
     )
   }
   if (before.priority !== after.priority)
-    list.push(`priority：${before.priority} → ${after.priority}`)
+    list.push(`优先级：P${before.priority} → P${after.priority}`)
   if (before.disclosure !== after.disclosure) {
-    list.push(`disclosure：${before.disclosure ?? '（无）'} → ${after.disclosure ?? '（无）'}`)
+    list.push(`触发场景：${before.disclosure ?? '（无）'} → ${after.disclosure ?? '（无）'}`)
   }
   const added = after.glossary.filter((k) => !before.glossary.includes(k))
   const removed = before.glossary.filter((k) => !after.glossary.includes(k))
-  if (added.length) list.push(`加关键词：${added.join('、')}`)
-  if (removed.length) list.push(`去掉关键词：${removed.join('、')}`)
+  if (added.length) list.push(`添加关键词：${added.join('、')}`)
+  if (removed.length) list.push(`移除关键词：${removed.join('、')}`)
   if (before.validTo !== after.validTo) {
-    list.push(`有效到：${validToText(before.validTo)} → ${validToText(after.validTo)}`)
+    list.push(`有效期：${validToText(before.validTo)} → ${validToText(after.validTo)}`)
   }
   return list
 }
@@ -115,7 +116,7 @@ const restorable = (event: HistoryEvent) =>
   !isCurrent(event) &&
   sameScope(event.after)
 
-// 点「恢复到这一版」时记下这条记忆与它现在的版本：确认期间历史重新拉取到了更新的版本，
+// 点「恢复此版本」时记下这条记忆与它现在的版本：确认期间历史重新拉取到了更新的版本，
 // 或编辑器换成了重建的另一条，恢复返回冲突，不会盖掉没看过的改动
 const confirming = ref<{ event: HistoryEvent; memoryId: string; version: number } | null>(null)
 function askRestore(event: HistoryEvent) {
@@ -134,7 +135,7 @@ async function restore() {
       expectedVersion: target.version,
     })
     confirming.value = null
-    toast.add({ title: '已恢复到这一版', color: 'success' })
+    toast.add({ title: '已恢复此版本', color: 'success' })
     // 直接写进这条记忆的缓存，编辑器会跟上（并通知页面）。不靠事件：侧栏在请求期间被关掉时，
     // 这个组件已经卸载，发出的事件没人收到。过期的记忆按 URI 读不到，不写进那个 URI 的缓存
     if (!isExpired(restored.validTo)) {
@@ -173,17 +174,17 @@ async function restore() {
         color="warning"
         variant="subtle"
         :icon="icons.expired"
-        :title="`这条记忆已于 ${formatTime(current.validTo)} 过期，不再召回、不进 boot`"
+        :title="`这条记忆已于 ${formatTime(current.validTo)} 过期，不再召回，也不进启动加载`"
         :description="
           current.released
-            ? '过期之后同一个 URI 上写了新的记忆，它让出了 URI；那条还在时，要先把它移走或删掉才能重新生效。'
+            ? '过期后同一 URI 上已写入新记忆，URI 已释放。需先移走或删除新记忆，才能恢复生效。'
             : undefined
         "
         :actions="
           canReactivate
             ? [
                 {
-                  label: '重新生效',
+                  label: '恢复生效',
                   icon: icons.reactivate,
                   color: 'neutral',
                   variant: 'subtle',
@@ -195,9 +196,10 @@ async function restore() {
         "
       />
       <p class="text-xs text-muted">
-        恢复只改正文、disclosure、priority 与关键词，不改
-        URI、层、敏感级与有效期（过期的记忆在「已过期」里重新生效）；层或归属和现在不同、敏感级比现在高的版本不能恢复。
-        <template v-if="history.data.value?.truncated">只列出了最近的 500 次改动。</template>
+        恢复此版本只改正文、触发场景、优先级与关键词。<Hint>
+          URI、层、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。层或归属与当前不同、敏感级高于当前的版本无法恢复。
+        </Hint>
+        <template v-if="history.data.value?.truncated">仅列出最近 500 次改动。</template>
       </p>
       <ol class="space-y-3">
         <li
@@ -212,7 +214,7 @@ async function restore() {
             />
             <span class="font-medium">{{ eventLabel(event.type).label }}</span>
             <span class="text-muted">{{ actorLabel(event.actor).name }}</span>
-            <UBadge v-if="isCurrent(event)" size="sm" variant="subtle">现在的版本</UBadge>
+            <UBadge v-if="isCurrent(event)" size="sm" variant="subtle">当前版本</UBadge>
             <time
               :datetime="event.createdAt"
               :title="formatTime(event.createdAt)"
@@ -222,7 +224,7 @@ async function restore() {
             </time>
           </div>
           <p v-if="event.left" class="mt-1 text-xs text-muted">
-            这次改动之后，它离开了你的可见范围，改后的内容看不到，也不能恢复到这一版。
+            此次改动后，这条记忆超出当前账号的可见范围，无法查看改后内容，也无法恢复此版本。
           </p>
           <ul v-else class="mt-1 space-y-0.5 text-xs text-muted">
             <li v-for="change in changes(event.before, event.after)" :key="change">
@@ -237,10 +239,10 @@ async function restore() {
               variant="ghost"
               @click="open = open === event.id ? null : event.id"
             >
-              {{ open === event.id ? '收起正文的改动' : '看正文的改动' }}
+              {{ open === event.id ? '收起改动' : '查看改动' }}
             </UButton>
             <span v-else-if="contentChange(event) === 'secret'" class="text-xs text-muted">
-              secret 的历史不含正文
+              机密内容的历史不含正文
             </span>
             <UButton
               v-if="restorable(event)"
@@ -251,7 +253,7 @@ async function restore() {
               class="ml-auto"
               @click="askRestore(event)"
             >
-              恢复到这一版
+              恢复此版本
             </UButton>
           </div>
           <pre
@@ -260,25 +262,24 @@ async function restore() {
           ><template v-for="(row, index) in openRows" :key="index"><span
             v-if="row.kind === 'skip'"
             class="block text-dimmed"
-          >… 省略没变的 {{ row.count }} 行</span><span
+          >… 省略未改动的 {{ row.count }} 行</span><span
             v-else
             class="block whitespace-pre-wrap"
             :class="row.kind === 'add' ? 'bg-success/15 text-success' : row.kind === 'remove' ? 'bg-error/15 text-error line-through' : ''"
           >{{ row.kind === 'add' ? '+ ' : row.kind === 'remove' ? '- ' : '  ' }}{{ row.text }}</span></template></pre>
         </li>
       </ol>
-      <p v-if="!events.length" class="text-sm text-muted">没有你看得到的改动记录。</p>
+      <p v-if="!events.length" class="text-sm text-muted">暂无变更记录</p>
     </template>
 
     <UModal
       :open="confirming !== null"
-      title="恢复到这一版？"
+      title="恢复此版本？"
       @update:open="(v) => !v && (confirming = null)"
     >
       <template #body>
         <p class="text-sm">
-          把正文、disclosure、priority
-          与关键词恢复成这次改动之后的样子，记一条新的改动；URI、层与敏感级不变。
+          正文、触发场景、优先级与关键词恢复为此次改动后的内容，并记录一次新改动；URI、层与敏感级不变。
         </p>
       </template>
       <template #footer>
