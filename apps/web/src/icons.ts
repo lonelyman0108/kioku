@@ -82,4 +82,10 @@ export const icons = {
   // 模型对话：发送与停止
   send: 'i-lucide-send',
   stop: 'i-lucide-circle-stop',
+  // 外壳：窄屏导航、菜单展开、主题切换
+  menu: 'i-lucide-menu',
+  chevronDown: 'i-lucide-chevron-down',
+  themeSystem: 'i-lucide-monitor',
+  themeLight: 'i-lucide-sun',
+  themeDark: 'i-lucide-moon',
 } as const

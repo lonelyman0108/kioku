@@ -4,6 +4,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import KiokuMark from '../components/KiokuMark.vue'
 import { ME_KEY } from '../composables/useSession'
 import { queryClient } from '../query'
 
@@ -41,7 +42,8 @@ async function submit() {
   <div class="flex min-h-screen items-center justify-center p-4">
     <UCard class="w-full max-w-sm">
       <template #header>
-        <h1 class="text-lg font-semibold">登录 Kioku</h1>
+        <KiokuMark :height="64" class="mb-3" />
+        <h1 class="text-lg font-semibold">登录</h1>
       </template>
       <form class="space-y-4" @submit.prevent="submit">
         <UFormField label="用户名">
