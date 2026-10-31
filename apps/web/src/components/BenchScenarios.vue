@@ -24,8 +24,10 @@ import { saveFile } from '../download'
 import { icons } from '../icons'
 import { scopesSummary } from '../labels'
 import BenchAgentBusy from './BenchAgentBusy.vue'
+import BenchNotice from './BenchNotice.vue'
 import BenchStepView from './BenchStepView.vue'
 import Hint from './Hint.vue'
+import SectionHeading from './strata/SectionHeading.vue'
 
 // 场景：一串步骤。选预设或导入 JSON，在文本框里编辑，运行，看断言结果。不存库，只在内存里：
 // 里面可能有明文，不进浏览器存储
@@ -194,124 +196,133 @@ function startRun() {
 </script>
 
 <template>
-  <div class="space-y-4 text-sm">
-    <p v-if="real" class="text-xs text-muted">
-      场景是一串步骤，步骤各自真实执行。
-      <Hint>
-        步骤自带会话上下文，页面上的不生效。步骤可读取已落库的写入，结果不进入调用台的时间线。
-      </Hint>
-    </p>
-    <p v-else class="text-xs text-muted">
-      场景是一串步骤，在单独的事务中运行。
-      <Hint>
-        步骤自带会话上下文，页面上的不生效。不带调用台当前会话的写入，结果也不进入其时间线。
-      </Hint>
-    </p>
-    <UAlert
-      v-if="presets.isError.value && !presets.data.value"
-      color="error"
-      variant="subtle"
-      :title="
-        presets.error.value instanceof ApiError ? presets.error.value.message : '读取预设失败'
-      "
-    />
-    <div class="flex flex-wrap items-end gap-2">
-      <UFormField label="预设" class="w-full sm:w-72">
-        <USelect
-          :model-value="presetId"
-          :items="presetItems"
-          :loading="presets.isPending.value"
-          placeholder="选择预设"
-          aria-label="预设"
-          class="w-full"
-          @update:model-value="(v) => pickPreset(String(v))"
+  <div class="scenarios">
+    <div class="scenario-source">
+      <p v-if="real" class="scenario-note">
+        场景是一串步骤，步骤各自真实执行。
+        <Hint>
+          步骤自带会话上下文，页面上的不生效。步骤可读取已落库的写入，结果不进入调用台的时间线。
+        </Hint>
+      </p>
+      <p v-else class="scenario-note">
+        场景是一串步骤，在单独的事务中运行。
+        <Hint>
+          步骤自带会话上下文，页面上的不生效。不带调用台当前会话的写入，结果也不进入其时间线。
+        </Hint>
+      </p>
+      <BenchNotice
+        v-if="presets.isError.value"
+        color="error"
+        :title="
+          presets.error.value instanceof ApiError ? presets.error.value.message : '读取预设失败'
+        "
+      />
+      <div class="scenario-pick">
+        <UFormField label="预设" class="min-w-0 flex-[1_1_14rem]">
+          <USelect
+            :model-value="presetId"
+            :items="presetItems"
+            :loading="presets.isPending.value"
+            placeholder="选择预设"
+            aria-label="预设"
+            class="w-full"
+            @update:model-value="(v) => pickPreset(String(v))"
+          />
+        </UFormField>
+        <input
+          ref="fileInput"
+          type="file"
+          accept=".json,application/json"
+          class="hidden"
+          aria-label="导入场景文件"
+          @change="onFile"
+        />
+        <UButton
+          :icon="icons.importSpace"
+          color="neutral"
+          variant="outline"
+          @click="fileInput?.click()"
+        >
+          导入 JSON
+        </UButton>
+        <UButton
+          :icon="icons.exportSpace"
+          color="neutral"
+          variant="outline"
+          :disabled="!text.trim()"
+          @click="startExport"
+        >
+          导出 JSON
+        </UButton>
+      </div>
+      <p v-if="preset?.description" class="scenario-note">{{ preset.description }}</p>
+      <details v-if="unusable.length" class="unusable">
+        <summary>不适用于当前应用的预设（{{ unusable.length }}）</summary>
+        <ul>
+          <li v-for="c in unusable" :key="c.scenario.id">{{ c.scenario.title }}：{{ c.reason }}</li>
+        </ul>
+      </details>
+
+      <UFormField label="场景 JSON">
+        <UTextarea
+          :model-value="text"
+          :rows="14"
+          placeholder="选择预设，或导入、粘贴 JSON"
+          aria-label="场景 JSON"
+          class="w-full font-mono"
+          :ui="{ base: 'lg:min-h-[28rem]' }"
+          @update:model-value="(v) => edit(String(v))"
         />
       </UFormField>
-      <input
-        ref="fileInput"
-        type="file"
-        accept=".json,application/json"
-        class="hidden"
-        aria-label="导入场景文件"
-        @change="onFile"
-      />
-      <UButton
-        :icon="icons.importSpace"
-        color="neutral"
-        variant="subtle"
-        @click="fileInput?.click()"
-      >
-        导入 JSON
-      </UButton>
-      <UButton
-        :icon="icons.exportSpace"
-        color="neutral"
-        variant="subtle"
-        :disabled="!text.trim()"
-        @click="startExport"
-      >
-        导出 JSON
-      </UButton>
+
+      <div class="scenario-end">
+        <BenchNotice
+          v-if="mismatch"
+          color="warning"
+          :title="`此场景${mismatch}，结果可能没有参考价值`"
+        />
+        <BenchNotice v-if="errors.length" color="error" title="场景不合法">
+          <template #description>
+            <span v-for="(line, i) in errors" :key="i" class="block wrap-anywhere">{{ line }}</span>
+          </template>
+        </BenchNotice>
+        <BenchNotice v-if="failure" color="error" :title="failure" />
+        <BenchAgentBusy />
+        <UButton
+          :icon="icons.preview"
+          :color="real ? 'error' : 'primary'"
+          :loading="scenarioRunning"
+          :disabled="!text.trim() || running"
+          @click="startRun"
+        >
+          {{ real ? '真实执行此场景' : '运行' }}
+        </UButton>
+      </div>
     </div>
-    <p v-if="preset?.description" class="text-xs text-muted">{{ preset.description }}</p>
-    <details v-if="unusable.length" class="text-xs text-muted">
-      <summary class="cursor-pointer">不适用于当前应用的预设（{{ unusable.length }}）</summary>
-      <ul class="mt-1 space-y-1">
-        <li v-for="c in unusable" :key="c.scenario.id">{{ c.scenario.title }}：{{ c.reason }}</li>
-      </ul>
-    </details>
 
-    <UFormField label="场景 JSON">
-      <UTextarea
-        :model-value="text"
-        :rows="14"
-        placeholder="选择预设，或导入、粘贴 JSON"
-        aria-label="场景 JSON"
-        class="w-full font-mono"
-        @update:model-value="(v) => edit(String(v))"
-      />
-    </UFormField>
-    <UAlert
-      v-if="mismatch"
-      color="warning"
-      variant="subtle"
-      :title="`此场景${mismatch}，结果可能没有参考价值`"
-    />
-    <UAlert v-if="errors.length" color="error" variant="subtle" title="场景不合法">
-      <template #description>
-        <ul class="space-y-1 wrap-anywhere">
-          <li v-for="(line, i) in errors" :key="i">{{ line }}</li>
-        </ul>
+    <div class="scenario-result">
+      <section v-if="outcome && summary">
+        <SectionHeading :title="outcome.title" />
+        <p class="summary" :class="`tone-${summary.color}`">{{ summary.title }}</p>
+        <p class="run-line">
+          运行标记 <code>{{ outcome.result.run }}</code> · {{ outcome.result.whoami.app.name }} ·
+          {{ scopesSummary(outcome.result.whoami.scopes) }}
+        </p>
+        <BenchStepView
+          v-for="step in outcome.result.steps"
+          :key="`${outcome.result.run}-${step.index}`"
+          :step="step"
+          :mode="mode"
+          :view="view"
+          :open="stepOpen(step, view)"
+          :number="step.index + 1"
+        />
+      </section>
+      <template v-else>
+        <SectionHeading title="运行结果" />
+        <p class="empty">暂无结果</p>
       </template>
-    </UAlert>
-    <UAlert v-if="failure" color="error" variant="subtle" :title="failure" />
-    <BenchAgentBusy />
-    <UButton
-      :icon="icons.preview"
-      :color="real ? 'error' : 'primary'"
-      :loading="scenarioRunning"
-      :disabled="!text.trim() || running"
-      @click="startRun"
-    >
-      {{ real ? '真实执行此场景' : '运行' }}
-    </UButton>
-
-    <section v-if="outcome && summary" class="space-y-2">
-      <h3 class="font-medium">{{ outcome.title }}</h3>
-      <UAlert :color="summary.color" variant="subtle" :title="summary.title" />
-      <p class="text-xs text-muted">
-        运行标记 <code>{{ outcome.result.run }}</code> · {{ outcome.result.whoami.app.name }} ·
-        {{ scopesSummary(outcome.result.whoami.scopes) }}
-      </p>
-      <BenchStepView
-        v-for="step in outcome.result.steps"
-        :key="`${outcome.result.run}-${step.index}`"
-        :step="step"
-        :mode="mode"
-        :view="view"
-        :open="stepOpen(step, view)"
-      />
-    </section>
+    </div>
 
     <UModal
       :open="confirming !== null"
@@ -365,3 +376,118 @@ function startRun() {
     </UModal>
   </div>
 </template>
+
+<style scoped>
+/* 左边写场景，右边是步骤列表，各自滚动：步骤再多也不用滚回去就能改了再跑 */
+.scenarios {
+  flex: 1 1 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1.25fr);
+  grid-template-rows: minmax(0, 1fr);
+  min-width: 0;
+  min-height: 0;
+}
+.scenario-source {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  min-width: 0;
+  padding: 12px 24px 0 32px;
+  overflow-y: auto;
+  border-right: 1px solid var(--ui-border);
+}
+.scenario-result {
+  min-width: 0;
+  padding: 12px 32px 40px 24px;
+  overflow-y: auto;
+}
+.scenario-note {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.scenario-pick {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 8px;
+}
+.unusable {
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.unusable > summary {
+  cursor: pointer;
+}
+.unusable > summary::marker {
+  font-size: 0.8em;
+}
+.unusable ul {
+  padding-top: 2px;
+}
+/* 运行按钮贴在这一栏底部：场景再长也够得着 */
+.scenario-end {
+  position: sticky;
+  bottom: 0;
+  z-index: 1;
+  display: flex;
+  flex-direction: column;
+  align-items: stretch;
+  padding: 8px 0 12px;
+  background: var(--ui-bg);
+}
+.scenario-end > button {
+  align-self: flex-start;
+}
+.summary {
+  padding-top: 8px;
+  font-size: 14px;
+  font-weight: 500;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.tone-error {
+  color: var(--ui-error);
+}
+.tone-warning {
+  color: var(--ui-warning);
+}
+.run-line {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+.empty {
+  padding: 6px 0;
+  color: var(--ui-text-muted);
+}
+/* 两栏放得下，但高度不够各自滚：整页滚动 */
+@media (max-width: 1240px) {
+  .scenarios {
+    flex: 1 0 auto;
+    grid-template-rows: auto;
+    min-height: 0;
+  }
+  .scenario-source,
+  .scenario-result {
+    overflow-y: visible;
+  }
+}
+@media (max-width: 1023.98px) {
+  .scenarios {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .scenario-source {
+    padding: 10px 16px 0;
+    border-right: 0;
+  }
+  .scenario-result {
+    padding: 14px 16px 28px;
+    border-top: 1px solid var(--strata-rule);
+  }
+}
+</style>

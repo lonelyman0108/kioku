@@ -5,9 +5,12 @@ import { ApiError } from '../api/client'
 import { REAL_MODE_CONSEQUENCES } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { scopesSummary } from '../labels'
+import BenchNotice from './BenchNotice.vue'
 import Hint from './Hint.vue'
+import PageHead from './strata/PageHead.vue'
+import StrataCore from './strata/StrataCore.vue'
 
-// 选应用与 Key、切模式。只列自己是主人的应用与还有效的 Key
+// 页头：标题在左，选应用与 Key、切模式在右。只列自己是主人的应用与还有效的 Key
 const {
   spaceId,
   apps,
@@ -43,90 +46,104 @@ const errorOf = (err: unknown, fallback: string) =>
 </script>
 
 <template>
-  <div class="space-y-3 text-sm">
-    <USkeleton v-if="apps.isPending.value" class="h-16 w-full" />
-    <UAlert
-      v-else-if="apps.isError.value && !apps.data.value"
-      color="error"
-      variant="subtle"
-      :title="errorOf(apps.error.value, '读取应用失败')"
-    />
-    <div v-else-if="!owned.length" class="space-y-2">
-      <p class="text-muted">
-        当前账号在此空间暂无应用。
-        <Hint>测试台仅限应用所有者使用：调用会读取所有者的私人层。</Hint>
-      </p>
-      <UButton :to="{ name: 'apps', params: { spaceId } }" size="sm" variant="subtle">
-        管理应用
-      </UButton>
-    </div>
-    <template v-else>
-      <p class="text-xs text-muted">
+  <div class="toolbar">
+    <PageHead title="测试台">
+      <template v-if="owned.length" #note>
         模拟应用调用 Kioku，不接入真实客户端。
         <Hint>
           工具走真实的 MCP 服务端，权限按当前 Key 的有效上限。不记录召回事件，不更新 Key
           的最近使用时间。机密正文与凭据的值一律打码，查看原值请到记忆页、凭据页。
         </Hint>
-      </p>
-      <div class="flex flex-wrap items-end gap-3">
-        <UFormField label="应用" class="w-full sm:w-64">
-          <USelect
-            :model-value="appId"
-            :items="appItems"
-            :disabled="running"
-            aria-label="应用"
-            class="w-full"
-            @update:model-value="(v) => selectApp(String(v))"
+      </template>
+      <template v-if="owned.length" #actions>
+        <div class="pickers">
+          <UFormField label="应用" class="w-full sm:w-52 min-[87.5rem]:w-60">
+            <USelect
+              :model-value="appId"
+              :items="appItems"
+              :disabled="running"
+              aria-label="应用"
+              class="w-full"
+              @update:model-value="(v) => selectApp(String(v))"
+            />
+          </UFormField>
+          <UFormField label="Key" class="w-full sm:w-60 min-[87.5rem]:w-64">
+            <USelect
+              :model-value="keyId"
+              :items="keyItems"
+              :disabled="running || !keyItems.length"
+              :placeholder="keys.data.value ? '暂无有效 Key' : ''"
+              aria-label="Key"
+              class="w-full"
+              @update:model-value="(v) => selectKey(String(v))"
+            />
+          </UFormField>
+          <div v-if="key?.effectiveScopes" class="key-limit">
+            <StrataCore
+              :scopes="key.effectiveScopes"
+              :width="28"
+              :height="48"
+              :label="`当前 Key 的上限：${scopesSummary(key.effectiveScopes)}`"
+            />
+            <p>
+              <span class="limit-label">当前 Key 的上限</span>
+              {{ scopesSummary(key.effectiveScopes) }}
+            </p>
+          </div>
+          <USwitch
+            :model-value="real"
+            label="真实执行"
+            :description="real ? '写入立即生效，不会回滚' : '默认回滚，不留痕迹'"
+            color="error"
+            :disabled="running || !key"
+            class="mode-switch"
+            @update:model-value="requestMode"
           />
-        </UFormField>
-        <UFormField label="Key" class="w-full sm:w-64">
-          <USelect
-            :model-value="keyId"
-            :items="keyItems"
-            :disabled="running || !keyItems.length"
-            placeholder="暂无有效 Key"
-            aria-label="Key"
-            class="w-full"
-            @update:model-value="(v) => selectKey(String(v))"
-          />
-        </UFormField>
-        <USwitch
-          :model-value="real"
-          label="真实执行"
-          :description="real ? '写入立即生效，不会回滚' : '默认回滚，不留痕迹'"
-          color="error"
-          :disabled="running || !key"
-          class="pb-1"
-          @update:model-value="requestMode"
-        />
-      </div>
-      <p v-if="key?.effectiveScopes" class="text-xs text-muted">
-        当前 Key 的上限：{{ scopesSummary(key.effectiveScopes) }}
-      </p>
-      <UAlert
-        v-if="selectionNotice"
-        color="warning"
-        variant="subtle"
-        :title="selectionNotice"
-        close
-        @update:open="(v) => !v && (selectionNotice = null)"
-      />
-      <UAlert
-        v-if="keys.isError.value && !keys.data.value"
+        </div>
+      </template>
+    </PageHead>
+
+    <div class="toolbar-notes">
+      <!-- 后台刷新失败时读到过的内容留着，错误放在上面；「暂无」只在真的读到空时说 -->
+      <BenchNotice
+        v-if="apps.isError.value"
         color="error"
-        variant="subtle"
-        :title="errorOf(keys.error.value, '读取 Key 失败')"
+        :title="errorOf(apps.error.value, '读取应用失败')"
       />
-      <p v-else-if="keys.isSuccess.value && !usable.length" class="text-muted">
-        当前应用暂无有效 Key，
-        <RouterLink
-          :to="{ name: 'app', params: { spaceId, appId } }"
-          class="text-primary hover:underline"
-          >签发 Key</RouterLink
-        >
-        后可使用测试台。
-      </p>
-    </template>
+      <USkeleton v-if="apps.isPending.value" class="h-16 w-full" />
+      <div v-else-if="apps.data.value && !owned.length" class="no-apps">
+        <p class="text-muted">
+          当前账号在此空间暂无应用。
+          <Hint>测试台仅限应用所有者使用：调用会读取所有者的私人层。</Hint>
+        </p>
+        <UButton :to="{ name: 'apps', params: { spaceId } }" size="sm" variant="outline">
+          管理应用
+        </UButton>
+      </div>
+      <template v-else-if="owned.length">
+        <BenchNotice
+          v-if="selectionNotice"
+          color="warning"
+          :title="selectionNotice"
+          close
+          @update:open="(v) => !v && (selectionNotice = null)"
+        />
+        <BenchNotice
+          v-if="keys.isError.value"
+          color="error"
+          :title="errorOf(keys.error.value, '读取 Key 失败')"
+        />
+        <p v-if="keys.data.value && !usable.length" class="text-muted">
+          当前应用暂无有效 Key，
+          <RouterLink
+            :to="{ name: 'app', params: { spaceId, appId } }"
+            class="text-primary hover:underline"
+            >签发 Key</RouterLink
+          >
+          后可使用测试台。
+        </p>
+      </template>
+    </div>
 
     <UModal
       :open="confirmingReal"
@@ -171,3 +188,59 @@ const errorOf = (err: unknown, fallback: string) =>
     </UModal>
   </div>
 </template>
+
+<style scoped>
+.toolbar {
+  flex: none;
+}
+.pickers {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: flex-end;
+  gap: 10px 14px;
+}
+.key-limit {
+  display: flex;
+  align-items: flex-end;
+  gap: 8px;
+  min-width: 0;
+}
+.key-limit svg {
+  flex: none;
+}
+.key-limit p {
+  font-size: 13px;
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+.limit-label {
+  display: block;
+  color: var(--ui-text-muted);
+}
+.mode-switch {
+  padding-bottom: 2px;
+}
+.toolbar-notes {
+  padding: 0 32px;
+}
+.toolbar-notes > p {
+  padding-bottom: 16px;
+}
+.no-apps {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  padding-bottom: 16px;
+}
+@media (max-width: 1023.98px) {
+  /* 页头的操作区按内容算宽度，Key 的名字一长就撑出屏幕 */
+  .toolbar :deep(.page-actions),
+  .pickers {
+    width: 100%;
+  }
+  .toolbar-notes {
+    padding: 0 16px;
+  }
+}
+</style>

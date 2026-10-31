@@ -11,29 +11,31 @@ import {
   roundRun,
   type AgentExchange,
 } from '../benchAgent'
+import BenchNotice from './BenchNotice.vue'
 import BenchStepView from './BenchStepView.vue'
+import BenchTag from './BenchTag.vue'
 
 // 一条用户消息的经过：生命周期事件、每一轮的助手文字与工具调用、turn.end。
 // 文字一律原样显示，不渲染：模型的输出与记忆里的内容都不可信
 defineProps<{ exchange: AgentExchange; mode: BenchMode; loop: BenchAgentLoop }>()
 
 const PRE_CLASS =
-  'mt-1 max-h-96 overflow-auto rounded bg-elevated p-3 font-mono text-xs wrap-anywhere whitespace-pre-wrap'
+  'mt-1 max-h-96 overflow-auto bg-elevated px-3 py-2 font-mono text-[13px]/5 wrap-anywhere whitespace-pre-wrap'
 </script>
 
 <template>
-  <article class="space-y-3">
-    <div class="flex flex-col items-end gap-1">
-      <p class="max-w-[85%] rounded-lg bg-elevated px-3 py-2 wrap-anywhere whitespace-pre-wrap">
-        {{ exchange.user }}
-      </p>
-      <p v-if="exchange.end && !exchange.inHistory" class="text-xs text-warning">
+  <article class="exchange">
+    <div class="turn">
+      <span class="role">用户</span>
+      <p class="message user">{{ exchange.user }}</p>
+      <p v-if="exchange.end && !exchange.inHistory" class="note text-warning">
         此消息未进入历史，模型后续不可见。
       </p>
-      <p v-else-if="exchange.attached" class="text-xs text-muted">{{ attachedNote(loop) }}</p>
+      <p v-else-if="exchange.attached" class="note text-muted">{{ attachedNote(loop) }}</p>
     </div>
 
-    <div v-if="exchange.lifecycle.length" class="space-y-2">
+    <div v-if="exchange.lifecycle.length" class="turn">
+      <span class="role">事件</span>
       <BenchStepView
         v-for="trace in exchange.lifecycle"
         :key="trace.step.index"
@@ -42,39 +44,32 @@ const PRE_CLASS =
         view="call"
         :open="callOpen(trace.step)"
       />
-      <p v-if="mode === 'real'" class="text-xs text-muted">
+      <p v-if="mode === 'real'" class="note text-muted">
         运行标记 <code>{{ exchange.lifecycle[0]?.run }}</code>
       </p>
     </div>
 
-    <section v-for="(round, index) in exchange.rounds" :key="index" class="space-y-2">
-      <details v-if="round.reasoning" class="text-xs">
-        <summary class="cursor-pointer text-muted">模型的思考过程</summary>
+    <section v-for="(round, index) in exchange.rounds" :key="index" class="turn">
+      <span class="role">模型</span>
+      <details v-if="round.reasoning" class="fold">
+        <summary>模型的思考过程</summary>
         <pre :class="PRE_CLASS">{{ round.reasoning }}</pre>
       </details>
-      <p v-if="round.text" class="wrap-anywhere whitespace-pre-wrap">{{ round.text }}</p>
-      <p v-else-if="round.refusal" class="wrap-anywhere whitespace-pre-wrap text-warning">
+      <p v-if="round.text" class="message">{{ round.text }}</p>
+      <p v-else-if="round.refusal" class="message text-warning">
         模型拒绝回答：{{ round.refusal }}
       </p>
       <p v-else-if="!round.calls.length" class="text-muted">（模型未返回文字）</p>
 
-      <div
-        v-for="call in round.calls"
-        :key="call.id"
-        class="space-y-2 rounded-lg border border-default px-3 py-2"
-      >
-        <p class="flex flex-wrap items-center gap-2 text-xs">
+      <div v-for="call in round.calls" :key="call.id" class="call">
+        <p class="call-line">
           <span class="text-muted">模型请求调用</span>
-          <code class="font-medium break-all">{{ call.name || '（无名称）' }}</code>
-          <UBadge v-if="call.trace?.kept" size="sm" color="neutral" variant="subtle">
-            写入已保留
-          </UBadge>
-          <UBadge v-else-if="call.trace?.removed" size="sm" color="warning" variant="subtle">
-            写入已移除
-          </UBadge>
+          <code class="call-name">{{ call.name || '（无名称）' }}</code>
+          <BenchTag v-if="call.trace?.kept">写入已保留</BenchTag>
+          <BenchTag v-else-if="call.trace?.removed" tone="warning">写入已移除</BenchTag>
         </p>
-        <details class="text-xs">
-          <summary class="cursor-pointer text-muted">参数</summary>
+        <details class="fold">
+          <summary>参数</summary>
           <pre :class="PRE_CLASS">{{ argumentsText(call) }}</pre>
         </details>
         <BenchStepView
@@ -84,11 +79,11 @@ const PRE_CLASS =
           view="call"
           :open="callOpen(call.trace.step)"
         />
-        <p v-else-if="call.reply" class="text-xs wrap-anywhere text-warning">{{ call.reply }}</p>
-        <p v-else class="text-xs text-muted">执行中…</p>
+        <p v-else-if="call.reply" class="note wrap-anywhere text-warning">{{ call.reply }}</p>
+        <p v-else class="note text-muted">执行中…</p>
       </div>
 
-      <p class="text-xs wrap-anywhere text-muted">
+      <p class="note wrap-anywhere text-muted">
         {{ roundMeta(round) }}
         <template v-if="mode === 'real' && roundRun(round)">
           · 运行标记 <code>{{ roundRun(round) }}</code>
@@ -96,30 +91,122 @@ const PRE_CLASS =
       </p>
     </section>
 
-    <div v-if="exchange.turnEnd" class="space-y-2">
+    <div v-if="exchange.turnEnd" class="turn">
+      <span class="role">事件</span>
       <BenchStepView
         :step="exchange.turnEnd.step"
         :mode="mode"
         view="call"
         :open="callOpen(exchange.turnEnd.step)"
       />
-      <p v-if="mode === 'real'" class="text-xs text-muted">
+      <p v-if="mode === 'real'" class="note text-muted">
         运行标记 <code>{{ exchange.turnEnd.run }}</code>
       </p>
     </div>
-    <p v-if="exchange.turnEndNote" class="text-xs wrap-anywhere text-warning">
+    <p v-if="exchange.turnEndNote" class="note end-note wrap-anywhere text-warning">
       {{ exchange.turnEndNote }}
     </p>
 
-    <p v-if="exchange.phase" role="status" class="text-xs text-muted">
+    <p v-if="exchange.phase" role="status" class="note end-note text-muted">
       {{ agentPhaseLabels[exchange.phase] }}
     </p>
-    <UAlert
+    <BenchNotice
       v-if="exchange.notice"
+      class="end-note"
       :color="noticeColor(exchange.end)"
-      variant="subtle"
-      class="wrap-anywhere"
       :title="exchange.notice"
     />
   </article>
 </template>
+
+<style scoped>
+/* 一列消息：左边窄窄一列写是谁，右边是内容。一条消息的经过之间用线分开，不用气泡 */
+.exchange {
+  --role-width: 2.5rem;
+  border-top: 1px solid var(--strata-rule);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.turn {
+  display: grid;
+  grid-template-columns: var(--role-width) minmax(0, 1fr);
+  column-gap: 8px;
+  row-gap: 6px;
+  padding: 8px 0;
+}
+.turn + .turn {
+  border-top: 1px solid var(--ui-border);
+}
+.turn > * {
+  grid-column: 2;
+  min-width: 0;
+}
+.turn > .role {
+  grid-column: 1;
+  grid-row: 1;
+  font-size: 13px;
+  line-height: 1.7;
+  color: var(--ui-text-muted);
+}
+.message {
+  max-width: 52em;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.message.user {
+  font-weight: 500;
+}
+.note {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.end-note {
+  margin-left: calc(var(--role-width) + 8px);
+  padding-bottom: 8px;
+}
+.fold {
+  font-size: 13px;
+  line-height: 1.6;
+}
+.fold > summary {
+  cursor: pointer;
+  color: var(--ui-text-muted);
+}
+.fold > summary::marker {
+  font-size: 0.8em;
+}
+/* 工具调用退后一级，靠一条竖线归到这一轮下面 */
+.call {
+  display: flex;
+  flex-direction: column;
+  gap: 4px;
+  padding-left: 12px;
+  border-left: 1px solid var(--ui-border-accented);
+}
+.call-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 8px;
+  font-size: 13px;
+  line-height: 1.6;
+}
+.call-name {
+  font-weight: 500;
+  word-break: break-all;
+}
+@media (max-width: 639.98px) {
+  .turn {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .turn > * {
+    grid-column: 1;
+  }
+  .turn > .role {
+    grid-row: auto;
+  }
+  .end-note {
+    margin-left: 0;
+  }
+}
+</style>

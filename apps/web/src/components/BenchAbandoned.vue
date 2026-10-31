@@ -2,6 +2,7 @@
 import { stepOpen } from '../benchScenarios'
 import { useBench } from '../composables/useBench'
 import { scopesSummary } from '../labels'
+import BenchNotice from './BenchNotice.vue'
 import BenchStepView from './BenchStepView.vue'
 
 // 真实模式中途作废的运行。放在分页外面：这把 Key 没了、分页隐藏的时候，切到另一个分页的时候都看得到
@@ -9,24 +10,22 @@ const { abandoned, abandonedInFlight, dismissAbandoned } = useBench()
 </script>
 
 <template>
-  <div v-if="abandonedInFlight || abandoned.length" class="space-y-3 text-sm">
-    <UAlert
+  <div v-if="abandonedInFlight || abandoned.length" class="abandoned">
+    <BenchNotice
       v-if="abandonedInFlight"
       color="warning"
-      variant="subtle"
       title="一次真实运行已中途作废，请求尚未返回，可能正在写入。结果返回后显示在此处。"
     />
-    <section v-for="run in abandoned" :key="run.id" class="space-y-2">
-      <UAlert
+    <section v-for="run in abandoned" :key="run.id" class="abandoned-run">
+      <BenchNotice
         color="warning"
-        variant="subtle"
         :title="run.title"
         :description="run.description"
         close
         @update:open="(v) => !v && dismissAbandoned(run.id)"
       />
       <template v-if="run.result">
-        <p class="text-xs text-muted">
+        <p class="run-line">
           运行标记 <code>{{ run.result.run }}</code> · {{ run.result.whoami.app.name }} ·
           {{ scopesSummary(run.result.whoami.scopes) }}
         </p>
@@ -37,8 +36,40 @@ const { abandoned, abandonedInFlight, dismissAbandoned } = useBench()
           mode="real"
           :view="run.view"
           :open="stepOpen(step, run.view)"
+          :number="step.index + 1"
         />
       </template>
     </section>
   </div>
 </template>
+
+<style scoped>
+.abandoned {
+  flex: none;
+  max-height: 40vh;
+  padding: 0 32px 16px;
+  overflow-y: auto;
+}
+.abandoned-run + .abandoned-run {
+  margin-top: 16px;
+}
+.run-line {
+  padding-bottom: 6px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 13px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+@media (max-width: 1240px) {
+  .abandoned {
+    max-height: none;
+    overflow-y: visible;
+  }
+}
+@media (max-width: 1023.98px) {
+  .abandoned {
+    padding: 0 16px 12px;
+  }
+}
+</style>

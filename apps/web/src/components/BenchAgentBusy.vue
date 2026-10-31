@@ -3,6 +3,7 @@ import { computed } from 'vue'
 
 import { useBench } from '../composables/useBench'
 import { icons } from '../icons'
+import BenchNotice from './BenchNotice.vue'
 
 // 模型循环可能持续数分钟，这期间别的分页跑不了：说清楚为什么，给停止的入口
 const { agentSending, agentStopping, stopAgent } = useBench()
@@ -19,10 +20,9 @@ const actions = computed(() => [
 </script>
 
 <template>
-  <UAlert
+  <BenchNotice
     v-if="agentSending"
     color="neutral"
-    variant="subtle"
     title="模型对话进行中，结束前无法运行。"
     :actions="actions"
   />
