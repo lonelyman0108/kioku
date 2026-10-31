@@ -285,7 +285,7 @@ async function logout() {
           v-model:open="navOpen"
           side="left"
           title="导航"
-          :ui="{ content: 'max-w-72', body: 'p-0 sm:p-0' }"
+          :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0' }"
         >
           <UButton
             :icon="icons.menu"
