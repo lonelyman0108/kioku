@@ -183,12 +183,12 @@
   --strata-band-line: #14181b;
   --strata-frame: #7e8483;
   --strata-on-layer: #14181b;
-  /* 真正的深色和页面底色分不开，机密用比底色亮的石板灰 */
-  --strata-solid: #3f464a;
+  /* 真正的深色和页面底色分不开，机密用比底色亮的石板灰；又不能亮到和只读的淡色混在一起 */
+  --strata-solid: #343a3e;
   --strata-on-solid: #e3e4dd;
   --strata-texture: rgba(20, 24, 27, 0.55);
   --strata-neutral: #aeb3b0;
-  --strata-tint: 40%;
+  --strata-tint: 46%;
   --strata-selected: #333b40;
   --strata-on-selected: #f0f1eb;
   --strata-on-selected-muted: #bcc0bc;

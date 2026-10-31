@@ -6,25 +6,36 @@ import {
   type Layer,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
+import { createSSRApp, type Component } from 'vue'
+import { renderToString } from 'vue/server-renderer'
 
+import AccessMatrix from '../AccessMatrix.vue'
+import StrataColumn from '../StrataColumn.vue'
+import StrataCore from '../StrataCore.vue'
+import StrataPatterns from '../StrataPatterns.vue'
+import StrataRibbon from '../StrataRibbon.vue'
 import {
   STACK,
+  TEXTURES,
   accessKind,
+  accessKindLabels,
   conversationTotal,
   coreCells,
   curatedTotal,
   deepestColumn,
+  issuedScopeRows,
   layerTotal,
   orderRows,
   paintAccess,
   paintCell,
   paintSwatch,
-  scopeRows,
   segments,
   sensitivityTotal,
   stackBands,
   tallyCounts,
   textureId,
+  type AccessKind,
+  type AccessRow,
   type StrataCounts,
 } from '../strata'
 
@@ -38,6 +49,19 @@ const sample = (): StrataCounts => ({
   subject: { public: 0, internal: 0, private: 31, secret: 0 },
   episode: { public: 0, internal: 0, private: 13, secret: 0 },
 })
+
+// 极端分布：一层一万条，其余一条或没有
+const extreme = (): StrataCounts =>
+  tallyCounts([
+    { layer: 'private', sensitivity: 'internal', count: 10000 },
+    { layer: 'base', sensitivity: 'public', count: 1 },
+    { layer: 'app', sensitivity: 'public', count: 1 },
+    { layer: 'subject', sensitivity: 'private', count: 1 },
+  ])
+
+// 没有组件测试的环境，组件用服务端渲染成 HTML 来看
+const render = (component: Component, props: Record<string, unknown>) =>
+  renderToString(createSSRApp(component, props))
 
 describe('条数', () => {
   it('接口的分组数合成每层每级的表，没有的是 0', () => {
@@ -86,6 +110,35 @@ describe('带的高度', () => {
     const bands = stackBands(sample(), 1000, 0)
     const h = (layer: Layer) => bands.find((b) => b.layer === layer)!.h
     expect(h('private') / h('episode')).toBeCloseTo(Math.sqrt(123 / 13), 1)
+  })
+
+  it('一层一万条、其余一条或没有时，小层也有最小高度，总高不变，带首尾相接', () => {
+    for (const [height, gap, min] of [
+      [612, 28, 24],
+      [476, 12, 34],
+      [72, 3, 6],
+    ] as const) {
+      const bands = stackBands(extreme(), height, gap, min)
+      expect(bands.reduce((a, b) => a + b.h, 0)).toBe(height - gap)
+      for (const band of bands.filter((b) => b.layer !== 'private')) expect(band.h).toBe(min)
+      expect(bands.find((b) => b.layer === 'private')!.h).toBe(height - gap - 6 * min)
+      expect(bands[bands.length - 1]!.y + bands[bands.length - 1]!.h).toBe(height)
+    }
+  })
+
+  it('不传最小高度时也不会有 0 高的带', () => {
+    for (const band of stackBands(extreme(), 40, 3)) expect(band.h).toBeGreaterThanOrEqual(1)
+  })
+
+  it('放不下最小高度时平分，比间隔还矮时全是 0，不出现负数', () => {
+    expect(stackBands(extreme(), 30, 2, 24).map((b) => b.h)).toEqual([4, 4, 4, 4, 4, 4, 4])
+    expect(stackBands(extreme(), 5, 12, 24).map((b) => b.h)).toEqual([0, 0, 0, 0, 0, 0, 0])
+  })
+
+  it('量出来的高度带小数时也是整数像素', () => {
+    const bands = stackBands(sample(), 520.5, 12, 34)
+    expect(bands.every((b) => Number.isInteger(b.h))).toBe(true)
+    expect(bands.reduce((a, b) => a + b.h, 0)).toBe(509)
   })
 
   it('空的层也占一条，不会消失', () => {
@@ -167,6 +220,9 @@ describe('上色', () => {
 
 describe('权限格子', () => {
   const cell = (read: AccessCell['read'], write: boolean): AccessCell => ({ read, write })
+  const KINDS = Object.keys(accessKindLabels) as AccessKind[]
+  const box = { x: 0, y: 0, width: 10, height: 10 }
+  const bar = { y: 7, height: 3 }
 
   it('读写的组合对应到说明', () => {
     expect(accessKind('private', cell('recall', true))).toBe('read-write')
@@ -177,20 +233,75 @@ describe('权限格子', () => {
     expect(accessKind('private', cell('none', false))).toBe('none')
   })
 
-  it('来自对话的两层能写时只是抽取写入，不能按 URI 直接写', () => {
-    expect(accessKind('subject', cell('recall', true))).toBe('extract')
-    expect(accessKind('episode', cell('none', true))).toBe('extract')
-    expect(accessKind('episode', cell('recall', false))).toBe('read')
+  it('来自对话的两层同样看读权限，读不到又能写时才是抽取写入', () => {
+    for (const layer of ['subject', 'episode'] as const) {
+      expect(accessKind(layer, cell('recall', true))).toBe('read-write')
+      expect(accessKind(layer, cell('recall', false))).toBe('read')
+      expect(accessKind(layer, cell('explicit', true))).toBe('explicit-write')
+      expect(accessKind(layer, cell('explicit', false))).toBe('explicit')
+      expect(accessKind(layer, cell('none', true))).toBe('extract')
+      expect(accessKind(layer, cell('none', false))).toBe('none')
+    }
   })
 
-  it('满色能写，淡色只读，抽取写入下沿一条满色，只能按 URI 读取是实心，没权限不画', () => {
-    const paint = (kind: Parameters<typeof paintAccess>[2]) =>
-      paintAccess('app', 'public', kind, { x: 0, y: 0, width: 10, height: 10 }, { y: 7, height: 3 })
+  it('文字说清每一种', () => {
+    expect(accessKindLabels).toEqual({
+      'read-write': '读写',
+      read: '只读',
+      explicit: '仅按 URI 读取',
+      'explicit-write': '按 URI 读取且可写',
+      extract: '仅抽取写入',
+      write: '仅写入',
+      none: '无权限',
+    })
+    expect(new Set(Object.values(accessKindLabels)).size).toBe(KINDS.length)
+  })
+
+  it('每种权限的画法两两不同：岩芯上没有文字，图例里一个色块也只能对应一种说法', () => {
+    for (const layer of LAYERS) {
+      for (const sensitivity of SENSITIVITIES) {
+        for (const scale of ['lg', 'sm'] as const) {
+          const painted = KINDS.map((kind) =>
+            JSON.stringify(paintAccess(layer, sensitivity, kind, box, bar, scale)),
+          )
+          expect(new Set(painted).size, `${layer} ${sensitivity} ${scale}`).toBe(KINDS.length)
+        }
+      }
+    }
+  })
+
+  it('底色说怎么读：满色能读能写，淡色只读，实心只能按 URI 读取，读不到的没有底色', () => {
+    const paint = (kind: AccessKind) => paintAccess('app', 'public', kind, box, bar)
     expect(paint('read-write').map((r) => r.fill)).toEqual(['var(--layer-app)'])
     expect(paint('read')[0]!.fill).toContain('color-mix')
-    expect(paint('extract')[1]).toMatchObject({ fill: 'var(--layer-app)', y: 7, height: 3 })
     expect(paint('explicit').map((r) => r.fill)).toEqual(['var(--strata-solid)'])
+    expect(paint('explicit-write')[0]).toMatchObject({ ...box, fill: 'var(--strata-solid)' })
     expect(paint('none')).toEqual([])
+    for (const kind of ['write', 'extract'] as const) {
+      for (const rect of paint(kind)) expect(rect).toMatchObject(bar)
+    }
+  })
+
+  it('下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入', () => {
+    const paint = (kind: AccessKind) =>
+      paintAccess('app', 'public', kind, box, bar, 'sm').filter((r) => r.y === bar.y)
+    const full = { ...bar, fill: 'var(--layer-app)' }
+    expect(paint('write')).toEqual([{ ...box, ...full }])
+    expect(paint('explicit-write')).toEqual([{ ...box, ...full }])
+    expect(paint('extract')).toEqual([
+      { ...box, ...full },
+      { ...box, ...bar, fill: `url(#${TEXTURES.gaps.sm})` },
+    ])
+    expect(paint('read-write')).toEqual([])
+    expect(paint('read')).toEqual([])
+    expect(paint('explicit')).toEqual([])
+  })
+
+  it('用到的纹理都有定义', async () => {
+    const html = await render(StrataPatterns, {})
+    for (const scales of Object.values(TEXTURES)) {
+      for (const id of Object.values(scales)) expect(html).toContain(`id="${id}"`)
+    }
   })
 
   it('只读格子上的纹理淡一点，读写格子不淡', () => {
@@ -199,26 +310,59 @@ describe('权限格子', () => {
     expect(paint('read')[1]!.opacity).toBe(0.55)
     expect(paint('read-write')[1]!.opacity).toBeUndefined()
   })
+
+  it('矩阵的图例：每种权限一个色块，色块互不相同', async () => {
+    const row = (layer: Layer, cells: AccessCell[]): AccessRow => ({
+      layer,
+      cells: cells.map((c, i) => ({ ...c, sensitivity: SENSITIVITIES[i]! })),
+    })
+    const html = await render(AccessMatrix, {
+      rows: [
+        row('private', [
+          cell('recall', true),
+          cell('recall', false),
+          cell('explicit', false),
+          cell('explicit', true),
+        ]),
+        row('base', [
+          cell('none', true),
+          cell('none', false),
+          cell('none', false),
+          cell('none', false),
+        ]),
+        row('subject', [
+          cell('none', true),
+          cell('none', false),
+          cell('none', false),
+          cell('none', false),
+        ]),
+      ],
+    })
+    const legend = html.slice(html.indexOf('mx-legend'))
+    const items = [...legend.matchAll(/<li[^>]*>(<svg.*?<\/svg>)<span[^>]*>(.*?)<\/span>/g)]
+    expect(items.map((m) => m[2]).sort()).toEqual(Object.values(accessKindLabels).sort())
+    expect(new Set(items.map((m) => m[1])).size).toBe(KINDS.length)
+  })
 })
 
-describe('Key 的范围换算成格子', () => {
+describe('Key 的签发范围换算成格子', () => {
   const scopes: KeyScopes = {
     readLayers: ['base', 'private', 'subject'],
     writeLayers: ['private', 'subject'],
     maxSensitivity: 'internal',
     admin: false,
   }
-  const at = (rows: ReturnType<typeof scopeRows>, layer: Layer, sensitivity: string) =>
+  const at = (rows: ReturnType<typeof issuedScopeRows>, layer: Layer, sensitivity: string) =>
     rows.find((r) => r.layer === layer)!.cells.find((c) => c.sensitivity === sensitivity)!
 
   it('每层每级都有一格', () => {
-    const rows = scopeRows(scopes)
+    const rows = issuedScopeRows(scopes)
     expect(rows.map((r) => r.layer)).toEqual([...LAYERS])
     for (const row of rows) expect(row.cells.map((c) => c.sensitivity)).toEqual([...SENSITIVITIES])
   })
 
   it('读和写都不超过 Key 的最高敏感级', () => {
-    const rows = scopeRows(scopes)
+    const rows = issuedScopeRows(scopes)
     expect(at(rows, 'private', 'internal')).toMatchObject({ read: 'recall', write: true })
     expect(at(rows, 'private', 'private')).toMatchObject({ read: 'none', write: false })
     expect(at(rows, 'base', 'public')).toMatchObject({ read: 'recall', write: false })
@@ -226,19 +370,22 @@ describe('Key 的范围换算成格子', () => {
   })
 
   it('机密只能按 URI 读取，要 Key 的上限到机密', () => {
-    const rows = scopeRows({ ...scopes, maxSensitivity: 'secret' })
+    const rows = issuedScopeRows({ ...scopes, maxSensitivity: 'secret' })
     expect(at(rows, 'private', 'secret')).toMatchObject({ read: 'explicit', write: true })
-    expect(at(scopeRows(scopes), 'private', 'secret')).toMatchObject({ read: 'none', write: false })
+    expect(at(issuedScopeRows(scopes), 'private', 'secret')).toMatchObject({
+      read: 'none',
+      write: false,
+    })
   })
 
   it('边界线落在碰得到的最高一级，一格都碰不到时是 -1', () => {
-    expect(deepestColumn(scopeRows(scopes))).toBe(1)
-    expect(deepestColumn(scopeRows({ ...scopes, maxSensitivity: 'secret' }))).toBe(3)
-    expect(deepestColumn(scopeRows({ ...scopes, readLayers: [], writeLayers: [] }))).toBe(-1)
+    expect(deepestColumn(issuedScopeRows(scopes))).toBe(1)
+    expect(deepestColumn(issuedScopeRows({ ...scopes, maxSensitivity: 'secret' }))).toBe(3)
+    expect(deepestColumn(issuedScopeRows({ ...scopes, readLayers: [], writeLayers: [] }))).toBe(-1)
   })
 
   it('接口给的行序统一成地层柱的顺序', () => {
-    expect(orderRows(scopeRows(scopes)).map((r) => r.layer)).toEqual([...STACK])
+    expect(orderRows(issuedScopeRows(scopes)).map((r) => r.layer)).toEqual([...STACK])
   })
 })
 
@@ -251,14 +398,14 @@ describe('岩芯', () => {
   }
 
   it('四列铺满宽度，七条带铺满高度，一共 28 格', () => {
-    const { columns, cells, bands } = coreCells(scopeRows(scopes), 44, 70, null, 0)
+    const { columns, cells, bands } = coreCells(issuedScopeRows(scopes), 44, 70, null, 0)
     expect(columns).toEqual([0, 11, 22, 33, 44])
     expect(cells).toHaveLength(28)
     expect(bands.reduce((a, b) => a + b.h, 0)).toBe(70)
   })
 
   it('格子的权限和位置对得上：纵向是层，横向是敏感级', () => {
-    const { cells } = coreCells(scopeRows(scopes), 44, 70, null, 0)
+    const { cells } = coreCells(issuedScopeRows(scopes), 44, 70, null, 0)
     const secret = cells.find((c) => c.layer === 'private' && c.sensitivity === 'secret')!
     expect(secret.kind).toBe('none')
     expect(secret.x).toBe(33)
@@ -268,10 +415,88 @@ describe('岩芯', () => {
   })
 
   it('下沿的条在格子里面，小格子也至少 2px', () => {
-    const { cells } = coreCells(scopeRows(scopes), 44, 21, null, 0)
+    const { cells } = coreCells(issuedScopeRows(scopes), 44, 21, null, 0)
     for (const cell of cells) {
       expect(cell.barHeight).toBeGreaterThanOrEqual(2)
       expect(cell.barY + cell.barHeight).toBe((cell.y as number) + (cell.height as number))
+    }
+  })
+
+  it('条数相差悬殊时小层的格子还在，条不画到别的带上', () => {
+    const { bands, cells } = coreCells(issuedScopeRows(scopes), 44, 72, extreme())
+    for (const band of bands) expect(band.h).toBeGreaterThanOrEqual(6)
+    expect(cells).toHaveLength(28)
+    for (const cell of cells) {
+      expect(cell.height).toBeGreaterThanOrEqual(6)
+      expect(cell.barY).toBeGreaterThanOrEqual(cell.y as number)
+    }
+  })
+
+  it('格子比 2px 还矮时，条也不超出格子', () => {
+    const { cells } = coreCells(issuedScopeRows(scopes), 44, 7, null, 0)
+    for (const cell of cells) {
+      expect(cell.height).toBe(1)
+      expect(cell.barHeight).toBe(1)
+      expect(cell.barY).toBe(cell.y)
+    }
+  })
+
+  it('读屏和悬停读到的是签发范围，不说成实际权限', async () => {
+    const html = await render(StrataCore, { scopes })
+    expect(html).toContain('aria-label="签发范围：可读 7 层，可写 1 层，最高私密"')
+    expect(html).toContain('<title>签发范围：可读 7 层，可写 1 层，最高私密</title>')
+  })
+
+  it('传了服务端算的 rows 就说是当前上下文的范围，哪怕也传了 scopes', async () => {
+    const rows = issuedScopeRows(scopes)
+    expect(await render(StrataCore, { rows, scopes })).toContain(
+      'aria-label="当前会话上下文的权限范围"',
+    )
+  })
+
+  it('已吊销：一格都不上色，读屏和悬停都说明已吊销，不再读范围', async () => {
+    const html = await render(StrataCore, { scopes, revoked: true })
+    expect(html).toContain('aria-label="已吊销，没有权限"')
+    expect(html).toContain('<title>已吊销，没有权限</title>')
+    expect(html).not.toContain('可读')
+    expect(html).not.toContain('--layer-')
+    expect(await render(StrataCore, { scopes, revoked: true, label: '旧笔记本' })).toContain(
+      'aria-label="旧笔记本，已吊销，没有权限"',
+    )
+  })
+})
+
+describe('要放文字的带', () => {
+  const sizes = (html: string, name: string, prop: 'height' | 'width') =>
+    [...html.matchAll(new RegExp(`class="[^"]*\\b${name}\\b[^"]*"[^>]*${prop}:(\\d+)px`, 'g'))].map(
+      (m) => Number(m[1]),
+    )
+
+  it('地层柱的每一行放得下层名和数字按钮', async () => {
+    const rows = sizes(await render(StrataColumn, { counts: extreme() }), 'fig-row', 'height')
+    expect(rows).toHaveLength(7)
+    for (const h of rows) expect(h).toBeGreaterThanOrEqual(24)
+  })
+
+  it('窄柱的每条带放得下两行标签，放倒时放得下三个字的简称', async () => {
+    const standing = await render(StrataRibbon, { counts: extreme(), length: 400 })
+    const heights = sizes(standing, 'rb-band', 'height')
+    expect(heights).toHaveLength(7)
+    for (const h of heights) expect(h).toBeGreaterThanOrEqual(34)
+    const lying = await render(StrataRibbon, {
+      counts: extreme(),
+      length: 343,
+      orientation: 'horizontal',
+    })
+    const widths = sizes(lying, 'rb-band', 'width')
+    expect(widths).toHaveLength(7)
+    for (const w of widths) expect(w).toBeGreaterThanOrEqual(38)
+  })
+
+  it('窄柱的边框不会有负的尺寸，哪怕放不下', async () => {
+    for (const length of [50, 56, 60, 400]) {
+      const html = await render(StrataRibbon, { counts: extreme(), length })
+      expect(html, String(length)).not.toMatch(/(height|width)="-/)
     }
   })
 })

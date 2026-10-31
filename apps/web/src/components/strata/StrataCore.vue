@@ -6,14 +6,15 @@ import { scopesSummary } from '../../labels'
 import {
   coreCells,
   isConversationLayer,
+  issuedScopeRows,
   paintAccess,
-  scopeRows,
   type AccessRow,
   type StrataCounts,
 } from './strata'
 
 // 岩芯：一个 Key 碰得到多深。纵向是层，顺序和地层柱一样；横向是敏感级，越往右越敏感。
-// 能碰到的格子上色，一眼看出范围。传 scopes 看签发上限，传 rows 看某个会话上下文下的实际范围
+// 能碰到的格子上色，一眼看出范围。传 scopes 看签发范围（不是实际权限，见 issuedScopeRows），
+// 传 rows 看服务端算出的某个会话上下文下的实际范围
 const props = withDefaults(
   defineProps<{
     scopes?: KeyScopes | null
@@ -40,7 +41,7 @@ const props = withDefaults(
 const GAP = 3
 const model = computed(() =>
   coreCells(
-    props.rows ?? (props.scopes ? scopeRows(props.scopes) : []),
+    props.rows ?? (props.scopes ? issuedScopeRows(props.scopes) : []),
     props.width,
     props.height,
     props.counts,
@@ -57,9 +58,13 @@ const groups = computed(() =>
     return { conversation, bands, top, bottom }
   }),
 )
-const name = computed(
-  () => props.label ?? (props.scopes ? scopesSummary(props.scopes) : '当前会话上下文的权限范围'),
-)
+const name = computed(() => {
+  if (props.revoked) return props.label ? `${props.label}，已吊销，没有权限` : '已吊销，没有权限'
+  if (props.label) return props.label
+  return props.scopes && !props.rows
+    ? `签发范围：${scopesSummary(props.scopes)}`
+    : '当前会话上下文的权限范围'
+})
 </script>
 
 <template>
@@ -131,7 +136,7 @@ const name = computed(
         x="0.5"
         :y="group.top + 0.5"
         :width="width - 1"
-        :height="group.bottom - group.top - 1"
+        :height="Math.max(0, group.bottom - group.top - 1)"
         fill="none"
         :stroke-dasharray="group.conversation || revoked ? '3 2' : undefined"
         :style="{ stroke: revoked ? 'var(--ui-border-accented)' : 'var(--strata-frame)' }"

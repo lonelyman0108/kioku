@@ -93,18 +93,43 @@ export interface Band {
   h: number
 }
 
+// 按权重把 total 分成整数份，合起来正好是 total。每份至少 min，放不下时 min 退到平分的大小。
+// 按比例算不够 min 的先固定，剩下的由其他份按权重分；固定一份可能让别的也不够，循环到稳定
+function allot(weights: readonly number[], total: number, min: number): number[] {
+  const floor = Math.min(min, Math.floor(total / weights.length))
+  const indexes = weights.map((_, i) => i)
+  const fixed = new Set<number>()
+  let unit = 0
+  for (;;) {
+    const free = indexes.filter((i) => !fixed.has(i))
+    unit = free.length ? (total - fixed.size * floor) / sum(free.map((i) => weights[i]!)) : 0
+    const tooSmall = free.filter((i) => weights[i]! * unit < floor)
+    if (!tooSmall.length) break
+    tooSmall.forEach((i) => fixed.add(i))
+  }
+  const exact = weights.map((weight, i) => (fixed.has(i) ? floor : weight * unit))
+  // 先取整，余下的给小数部分最大的那几份
+  const whole = exact.map(Math.floor)
+  const order = exact
+    .map((v, i) => ({ i, rest: v - Math.floor(v) }))
+    .sort((a, b) => b.rest - a.rest || a.i - b.i)
+  for (let left = total - sum(whole), k = 0; left > 0; left--, k++) {
+    const target = order[k % order.length]!.i
+    whole[target] = whole[target]! + 1
+  }
+  return whole
+}
+
 // 带高按条数的平方根分配，小层也读得清。没有条数时等高（岩芯脱离数据时用）。
+// 每条带至少 min 高，否则一层很大时小层取整成 0 就消失了，要放文字的带也会挤在一起。
 // 来自对话的两层在上，和下面五层之间留 gap
-export function stackBands(counts: StrataCounts | null, height: number, gap = 0): Band[] {
+export function stackBands(counts: StrataCounts | null, height: number, gap = 0, min = 1): Band[] {
   const weights = STACK.map((l) => (counts ? Math.sqrt(Math.max(layerTotal(counts, l), 1)) : 1))
-  const unit = (height - gap) / sum(weights)
-  let acc = 0
+  const heights = allot(weights, Math.max(0, Math.round(height - gap)), min)
   let start = 0
   return STACK.map((layer, i) => {
-    acc += (weights[i] ?? 0) * unit
-    const end = Math.round(acc)
-    const band = { layer, y: start + (isConversationLayer(layer) ? 0 : gap), h: end - start }
-    start = end
+    const band = { layer, y: start + (isConversationLayer(layer) ? 0 : gap), h: heights[i]! }
+    start += band.h
     return band
   })
 }
@@ -120,31 +145,14 @@ export interface Segment {
 export function segments(row: Record<Sensitivity, number>, width: number, min = 1): Segment[] {
   const present = SENSITIVITIES.filter((s) => row[s] > 0)
   if (!present.length || width <= 0) return []
-  const floor = Math.min(min, Math.floor(width / present.length))
-  // 按比例算不够 floor 的先固定，剩下的宽度由其他段按条数分；固定一段可能让别的段也不够，循环到稳定
-  const fixed = new Set<Sensitivity>()
-  for (;;) {
-    const free = present.filter((s) => !fixed.has(s))
-    const unit = (width - fixed.size * floor) / sum(free.map((s) => row[s]))
-    const tooSmall = free.filter((s) => row[s] * unit < floor)
-    if (!tooSmall.length) break
-    tooSmall.forEach((s) => fixed.add(s))
-  }
-  const free = present.filter((s) => !fixed.has(s))
-  const unit = free.length ? (width - fixed.size * floor) / sum(free.map((s) => row[s])) : 0
-  const exact = present.map((s) => (fixed.has(s) ? floor : row[s] * unit))
-  // 先取整，余下的像素给小数部分最大的段
-  const whole = exact.map(Math.floor)
-  const order = exact
-    .map((v, i) => ({ i, rest: v - Math.floor(v) }))
-    .sort((a, b) => b.rest - a.rest || a.i - b.i)
-  for (let left = width - sum(whole), k = 0; left > 0; left--, k++) {
-    const target = order[k % order.length]!.i
-    whole[target] = whole[target]! + 1
-  }
+  const widths = allot(
+    present.map((s) => row[s]),
+    width,
+    min,
+  )
   let x = 0
   return present.map((sensitivity, i) => {
-    const w = whole[i]!
+    const w = widths[i]!
     const segment = { sensitivity, count: row[sensitivity], x, w }
     x += w
     return segment
@@ -172,6 +180,8 @@ export interface Box {
 export const TEXTURES = {
   dots: { lg: 'strata-dots-lg', sm: 'strata-dots-sm' },
   lines: { lg: 'strata-lines-lg', sm: 'strata-lines-sm' },
+  // 压在满色的条上，挖出虚线的缺口
+  gaps: { lg: 'strata-gaps-lg', sm: 'strata-gaps-sm' },
 } as const
 
 // 公开无纹理，内部圆点，私密斜线；机密是实心，也没有纹理
@@ -222,28 +232,31 @@ export function swatchText(layer: Layer | null, sensitivity: Sensitivity | null)
 
 /* ———— 权限范围 ———— */
 
-// 一格的权限。对象层与情节层的写指对话抽取能写进去，不能按 URI 直接写，所以单独一种
+// 一格的权限，按读（召回、按 URI、读不到）和写的组合分。
+// 对象层与情节层的写指对话抽取能写进去，不能按 URI 直接写，所以读不到又能写时单独一种
 export type AccessKind =
-  'read-write' | 'read' | 'extract' | 'explicit' | 'explicit-write' | 'write' | 'none'
+  'read-write' | 'read' | 'explicit' | 'explicit-write' | 'extract' | 'write' | 'none'
 
 export const accessKindLabels: Record<AccessKind, string> = {
   'read-write': '读写',
   read: '只读',
-  extract: '仅抽取写入',
   explicit: '仅按 URI 读取',
-  'explicit-write': '按 URI 读写',
-  write: '只写',
+  'explicit-write': '按 URI 读取且可写',
+  extract: '仅抽取写入',
+  write: '仅写入',
   none: '无权限',
 }
 
 export function accessKind(layer: Layer, cell: AccessCell): AccessKind {
-  if (isConversationLayer(layer) && cell.write) return 'extract'
   if (cell.read === 'recall') return cell.write ? 'read-write' : 'read'
   if (cell.read === 'explicit') return cell.write ? 'explicit-write' : 'explicit'
-  return cell.write ? 'write' : 'none'
+  if (!cell.write) return 'none'
+  return isConversationLayer(layer) ? 'extract' : 'write'
 }
 
-// 同一套编码表示权限：满色能写，淡色只读，下沿一条满色表示只能靠抽取写入，实心是只能按 URI 读取
+// 同一套编码表示权限，岩芯上没有文字，每种都要一眼能分开。
+// 底色说怎么读：满色能读能写，淡色只读，实心只能按 URI 读取，空白读不到。
+// 下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入。读写已经是满色，不再加条
 export function paintAccess(
   layer: Layer,
   sensitivity: Sensitivity,
@@ -252,24 +265,29 @@ export function paintAccess(
   bar: { y: number | string; height: number | string },
   scale: TextureScale = 'lg',
 ): PaintRect[] {
-  if (kind === 'none') return []
-  if (kind === 'explicit' || kind === 'explicit-write') {
-    return [{ ...box, fill: 'var(--strata-solid)' }]
-  }
   const full = layerFill(layer)
+  const solid = { ...box, fill: 'var(--strata-solid)' }
+  const writeBar = { ...box, ...bar, fill: full }
+  if (kind === 'none') return []
+  if (kind === 'explicit') return [solid]
+  if (kind === 'explicit-write') return [solid, writeBar]
+  if (kind === 'write') return [writeBar]
+  if (kind === 'extract') {
+    return [writeBar, { ...box, ...bar, fill: `url(#${TEXTURES.gaps[scale]})` }]
+  }
   const tint = `color-mix(in srgb, ${full} var(--strata-tint), var(--ui-bg))`
   const strong = kind === 'read-write'
   const rects: PaintRect[] = [{ ...box, fill: strong ? full : tint }]
-  if (kind === 'extract' || kind === 'write') rects.push({ ...box, ...bar, fill: full })
   const texture = textureId(sensitivity, scale)
   if (texture)
     rects.push({ ...box, fill: `url(#${texture})`, ...(strong ? {} : { opacity: 0.55 }) })
   return rects
 }
 
-// Key 的签发上限换算成格子，和无上下文时的权限范围一致，只看层和敏感级。
-// 机密只能按 URI 读取，要 Key 的上限到机密；具体到某个上下文的结果由服务端的矩阵给
-export function scopeRows(scopes: KeyScopes): AccessRow[] {
+// Key 的签发范围换算成格子，只看层和敏感级；机密只能按 URI 读取，要上限到机密。
+// 这不是实际权限：人格、应用和会话上下文的规则都没算（没有人格的应用写不了人格层，这里仍画成可写），
+// 实际碰得到哪些格子看权限范围矩阵，由服务端的 accessMatrix 给
+export function issuedScopeRows(scopes: KeyScopes): AccessRow[] {
   const limit = SENSITIVITIES.indexOf(scopes.maxSensitivity)
   return LAYERS.map((layer) => ({
     layer,
@@ -320,8 +338,10 @@ export function coreCells(
   height: number,
   counts: StrataCounts | null = null,
   gap = 3,
+  // 带之间的分隔线占 1px，下沿的条至少 2px，再留出看得见底色的地方
+  minBand = 6,
 ): { bands: Band[]; columns: number[]; cells: CoreCell[] } {
-  const bands = stackBands(counts, height, gap)
+  const bands = stackBands(counts, height, gap, minBand)
   const columns = [0, 1, 2, 3, 4].map((i) => Math.round((i / 4) * width))
   const cells: CoreCell[] = []
   for (const band of bands) {
@@ -330,7 +350,8 @@ export function coreCells(
     SENSITIVITIES.forEach((sensitivity, i) => {
       const cell = row.cells.find((c) => c.sensitivity === sensitivity)
       if (!cell) return
-      const barHeight = Math.max(2, Math.round(band.h * 0.3))
+      // 条不能比格子高，否则画到相邻的带上
+      const barHeight = Math.min(band.h, Math.max(2, Math.round(band.h * 0.3)))
       cells.push({
         layer: band.layer,
         sensitivity,

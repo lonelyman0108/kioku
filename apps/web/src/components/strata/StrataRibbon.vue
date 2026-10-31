@@ -63,13 +63,23 @@ onBeforeUnmount(() => observer?.disconnect())
 const ALL_HEIGHT = 44
 const THICKNESS = 26
 const FLAT_THICKNESS = 22
+// 竖排的带放得下两行标签（12px 字、1.35 倍行高），横排的带放得下三个字的简称
+const MIN_BAND = 34
+const FLAT_MIN_BAND = 38
 const vertical = computed(() => props.orientation === 'vertical')
 const size = computed(() => {
   const total = props.length ?? measured.value
   return vertical.value ? total - ALL_HEIGHT : total
 })
 const bands = computed(() =>
-  size.value > 0 ? stackBands(props.counts, size.value, vertical.value ? 12 : 6) : [],
+  size.value > 0
+    ? stackBands(
+        props.counts,
+        size.value,
+        vertical.value ? 12 : 6,
+        vertical.value ? MIN_BAND : FLAT_MIN_BAND,
+      )
+    : [],
 )
 const lit = computed(() => Boolean(props.selected))
 
@@ -159,8 +169,8 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
           <rect
             x="0.5"
             y="0.5"
-            :width="bandSize(band).w - 1"
-            :height="bandSize(band).h - 1"
+            :width="Math.max(0, bandSize(band).w - 1)"
+            :height="Math.max(0, bandSize(band).h - 1)"
             fill="none"
             :stroke-dasharray="isConversationLayer(band.layer) ? '3 2' : undefined"
             style="stroke: var(--strata-rule)"
@@ -258,12 +268,16 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
 .rb-label {
   display: flex;
   flex-direction: column;
+  max-height: 100%;
+  overflow: hidden;
   padding-left: 3px;
   font-size: 12px;
   line-height: 1.35;
   white-space: nowrap;
 }
 .horizontal .rb-label {
+  max-width: 100%;
+  max-height: none;
   padding: 3px 0 0;
 }
 .rb-label b {

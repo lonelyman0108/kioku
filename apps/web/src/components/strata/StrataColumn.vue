@@ -37,7 +37,9 @@ const emit = defineEmits<{
 }>()
 
 const GAP = 28
-const bands = computed(() => stackBands(props.counts, props.height, GAP))
+// 一行放得下层名和数字按钮：14px 字、1.4 倍行高、上下各 1px 内边距，加 1px 分隔线
+const MIN_ROW = 24
+const bands = computed(() => stackBands(props.counts, props.height, GAP, MIN_ROW))
 const conversation = computed(() => bands.value.filter((b) => isConversationLayer(b.layer)))
 const curated = computed(() => bands.value.filter((b) => !isConversationLayer(b.layer)))
 const names = computed(() => (props.compact ? layerShortLabels : layerLabels))

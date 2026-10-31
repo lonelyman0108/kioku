@@ -30,16 +30,17 @@ const cellOf = (row: AccessRow, sensitivity: Sensitivity) => {
   return cell ? accessKind(row.layer, cell) : 'none'
 }
 const FULL = { x: 0, y: 0, width: '100%', height: '100%' }
-const BAR = { y: '70%', height: '30%' }
+// 只占文字下面的空白，文字不压在条上
+const BAR = { y: '84%', height: '16%' }
 
 // 图例只列这份矩阵里出现的
 const LEGEND_ORDER: AccessKind[] = [
   'read-write',
   'read',
-  'extract',
-  'write',
   'explicit',
   'explicit-write',
+  'extract',
+  'write',
   'none',
 ]
 const legendKinds = computed(() => {
@@ -197,11 +198,11 @@ const legendKinds = computed(() => {
 .c {
   position: relative;
   height: 36px;
-  padding: 0 0 0 8px;
+  /* 文字上下留的空白放得下下沿的条；列窄时文字折行，不压到旁边的格子上 */
+  padding: 7px 0 7px 8px;
   border: 1px solid var(--ui-border);
   font-size: 13px;
   line-height: 1;
-  white-space: nowrap;
 }
 .c svg {
   position: absolute;
@@ -223,8 +224,12 @@ const legendKinds = computed(() => {
 }
 .c.explicit .c-label,
 .c.explicit-write .c-label {
-  background: var(--strata-solid);
+  background: none;
   color: var(--strata-on-solid);
+}
+.c.extract .c-label,
+.c.write .c-label {
+  background: none;
 }
 .c.edge::after,
 .mx thead th.edge::after {

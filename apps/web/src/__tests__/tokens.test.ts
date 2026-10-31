@@ -92,6 +92,20 @@ describe('两套主题的令牌', () => {
         expect(contrast(t['--strata-on-solid'], t['--strata-solid'])).toBeGreaterThanOrEqual(4.5)
       })
 
+      it('只读的淡色和只能按 URI 读取的实心块分得开，上面的文字过线', () => {
+        const bg = hex(t['--ui-bg'])
+        const share = parseInt(t['--strata-tint']!) / 100
+        for (const layer of STACK) {
+          const tint = hex(t[`--layer-${layer}`]).map((v, i) =>
+            Math.round(v * share + bg[i]! * (1 - share)),
+          )
+          const color = `#${tint.map((v) => v.toString(16).padStart(2, '0')).join('')}`
+          expect(contrast(color, t['--strata-solid']), layer).toBeGreaterThanOrEqual(1.7)
+          expect(contrast(t['--ui-text-highlighted'], color), layer).toBeGreaterThanOrEqual(4.5)
+        }
+        expect(contrast(t['--strata-solid'], t['--ui-bg'])).toBeGreaterThanOrEqual(1.5)
+      })
+
       it('反色按钮的文字过线', () => {
         expect(contrast(t['--ui-text-inverted'], t['--ui-bg-inverted'])).toBeGreaterThanOrEqual(4.5)
       })
