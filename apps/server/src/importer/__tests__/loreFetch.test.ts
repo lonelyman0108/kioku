@@ -141,7 +141,7 @@ describe('拉取 Lore 的导出', () => {
     await new Promise((resolve) => server.close(resolve))
     await expect(fetchLoreBackup({ url, token: TOKEN }, undefined, limits)).rejects.toMatchObject({
       status: 400,
-      message: expect.stringContaining('连不上') as string,
+      message: expect.stringContaining('无法连接') as string,
     })
     expectCleanLog(hostOf(url), 'network')
   })
@@ -192,7 +192,7 @@ describe('拉取 Lore 的导出', () => {
         fetchLoreBackup({ url, token: '' }, undefined, short).catch((err: Error) => err.message),
         new Promise((resolve) => setTimeout(() => resolve('一直没有停下'), 1_500)),
       ])
-      expect(outcome).toContain('秒内没有拉完')
+      expect(outcome).toContain('秒内未能拉取完')
       expectCleanLog(hostOf(url), 'timeout')
     }
   })
@@ -214,7 +214,7 @@ describe('拉取 Lore 的导出', () => {
     ).catch((err: Error) => err)
     await arrived
     client.abort()
-    expect(((await pending) as Error).message).toBe('请求已经断开')
+    expect(((await pending) as Error).message).toBe('请求已断开')
     expectCleanLog(hostOf(url), 'aborted')
     await vi.waitFor(() => expect(closed).toBe(true))
   })

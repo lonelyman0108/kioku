@@ -135,7 +135,7 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
   })
 
   it('连通性测试：没配时说明原因；配了就带着 Key 请求一次，接口出错时给出状态码', async () => {
-    expect(await test()).toMatchObject({ ok: false, error: '还没有保存抽取模型的设置' })
+    expect(await test()).toMatchObject({ ok: false, error: '尚未保存抽取模型设置' })
     await call('PUT', '', { baseUrl: `${baseUrl}/v1`, model: 'm', apiKey: 'sk-extract' })
     expect(await test()).toMatchObject({ ok: true, error: null })
     expect(seen).toEqual([{ path: '/v1/chat/completions', authorization: 'Bearer sk-extract' }])
@@ -161,7 +161,7 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
     })
     const failed = await test()
     expect(failed.ok).toBe(false)
-    expect(failed.error).toContain('连不上抽取模型')
+    expect(failed.error).toContain('无法连接抽取模型')
     expect(failed.error).not.toContain('sk-pasted')
     expect(failed.error).not.toContain('with-newline')
     expect(seen).toEqual([])
@@ -180,12 +180,12 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
       return error
     }
     expect(await probe(appWith({ masterKey: null }))).toContain(
-      '抽取模型的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+      '抽取模型的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
     )
     const mismatch = await probe(appWith({ masterKey: randomBytes(32) }))
-    expect(mismatch).toContain('抽取模型的 Key 解不开')
+    expect(mismatch).toContain('抽取模型的 Key 无法解密')
     // 轮换主密钥时最容易碰到：提示旧的那把配在哪里
-    expect(mismatch).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+    expect(mismatch).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
     expect(seen).toEqual([])
   })
 
@@ -239,7 +239,7 @@ describe.skipIf(!testDatabaseUrl)('抽取模型的设置', () => {
     const inner = await put('sk-new\nkey')
     expect(inner.status).toBe(400)
     const { error } = (await inner.json()) as { error: string }
-    expect(error).toContain('只能有英文字母、数字和半角符号')
+    expect(error).toContain('只能包含英文字母、数字和半角符号')
     expect(error).not.toContain('sk-new')
     expect(await stored()).toBe('sk-extract')
 

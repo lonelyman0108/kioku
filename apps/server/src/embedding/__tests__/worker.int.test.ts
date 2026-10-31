@@ -413,7 +413,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     expect(await embeddedIds()).toEqual([...good].sort())
     // 四条合起来请求了一次，被拒之后逐条再试
     expect(embedder.calls[0]).toHaveLength(4)
-    expect((await loadEmbeddingError(database.db))?.message).toContain('有 1 条记忆生成不了向量')
+    expect((await loadEmbeddingError(database.db))?.message).toContain('1 条记忆无法生成向量')
 
     // 重试的时候接口收了：写上，之前记下的错误清掉
     state.rejecting = false
@@ -545,7 +545,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       expect(new Set(failed.values()).size).toBe(1)
       const error = (await loadEmbeddingError(database.db))!.message
       expect(error).toContain('HTTP 400')
-      expect(error).not.toContain('条记忆生成不了向量')
+      expect(error).not.toContain('条记忆无法生成向量')
     } finally {
       await server.close()
     }
@@ -598,7 +598,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
         tx.select({ id: memoryEmbeddings.memoryId }).from(memoryEmbeddings),
       )
       expect(there.map((r) => r.id).sort()).toEqual([...normal].sort())
-      expect((await loadEmbeddingError(database.db))?.message).toContain('有 1 条记忆生成不了向量')
+      expect((await loadEmbeddingError(database.db))?.message).toContain('1 条记忆无法生成向量')
     } finally {
       await server.close()
     }
@@ -730,10 +730,10 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     expect(state.aborted).toBe(1)
     // 没做完的算失败，交给任务自己的重试，不另排新任务
     expect([...failed.keys()].sort()).toEqual([1, 2])
-    expect(failed.get(1)!.message).toContain('没在时间内做完')
+    expect(failed.get(1)!.message).toContain('未在时限内完成')
     expect(requeued).toEqual([])
     expect(await embeddedIds()).toEqual([targets[0]!.memoryId])
-    expect((await loadEmbeddingError(database.db))?.message).toContain('没在时间内做完')
+    expect((await loadEmbeddingError(database.db))?.message).toContain('未在时限内完成')
 
     // 重试的时候接口快了：剩下的都写上
     state.ms = 0
@@ -814,7 +814,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     })
     expect(calls.map((c) => c.length)).toEqual([1, 3, 1, 1])
     expect(failed.get(0)!.message).toContain('HTTP 400')
-    for (const index of [1, 2, 3]) expect(failed.get(index)!.message).toContain('服务要停')
+    for (const index of [1, 2, 3]) expect(failed.get(index)!.message).toContain('服务正在停止')
     expect(await loadEmbeddingError(database.db)).toBeNull()
   })
 
@@ -830,7 +830,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     })
     expect(requeued).toEqual([[ws.spaceId, [locked]]])
     expect([...failed.keys()]).toEqual([1])
-    expect(failed.get(1)!.message).toContain('没排进去')
+    expect(failed.get(1)!.message).toContain('未能入队')
     expect(await embeddedIds()).toEqual([id])
   })
 
@@ -889,7 +889,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       expect(await backfillJob(database.db, staticEmbedderSource(fakeEmbedder()), retry)).toBe(0)
       expect(done).toEqual([[id]])
     })
-    expect((await loadEmbeddingError(database.db))?.message).toContain('另排的新任务没排进去')
+    expect((await loadEmbeddingError(database.db))?.message).toContain('新任务未能入队')
   })
 
   // 这几条记忆的向量任务在 pg-boss 里的样子
@@ -914,7 +914,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
         // 卡住的请求到了处理时间被取消，任务记成失败、等着重试
         await until(() => state.aborted > 0, 10_000)
         await until(async () => (await jobRows(ids)).some((r) => r.state === 'retry'), 10_000)
-        expect((await loadEmbeddingError(database.db))?.message).toContain('没在时间内做完')
+        expect((await loadEmbeddingError(database.db))?.message).toContain('未在时限内完成')
         state.ms = 0
         await until(async () => (await embeddedIds()).length === ids.length, 30_000)
         // 靠任务自己的重试补上的，没有另排新任务

@@ -99,7 +99,7 @@ export function authRoutes(deps: Deps) {
       const trustedDevice = await isTrustedDevice(deps.db, getCookie(c, DEVICE_COOKIE), account)
       // 先计数再校验：超限的请求不花任何 CPU。用户名不存在也照样计数，行为与存在时一致，不暴露账号是否存在
       if (!(await reserveAttempt(deps.db, username, client, trustedDevice))) {
-        return c.json({ error: '失败次数过多，请稍后再试' }, 429)
+        return c.json({ error: '失败次数过多，请稍后重试' }, 429)
       }
       // 用户名不存在时不跑 scrypt，改为等一段与一次校验相当的时间。它同样经过校验闸门，
       // 占本客户端的名额、闸门排满时同样被拒，只是不占全局名额：繁忙时的表现与存在的账号一致，

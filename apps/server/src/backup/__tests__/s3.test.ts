@@ -29,7 +29,7 @@ describe('请求对象存储时的报错', () => {
     ['会话令牌', { sessionToken: 'AKIAPASTED\nwith-newline' }],
   ])('%s里有换行：真实的 aws4fetch 把请求头写进错误，这里只说连不上', async (_, extra) => {
     const err = await failure(s3Client({ ...LOCATION, ...extra }).delete('x'))
-    expect(err.message).toContain('连不上存储')
+    expect(err.message).toContain('无法连接存储')
     const text = inspect(err, { depth: null })
     for (const leaked of ['Credential', 'Signature', 'AKIAPASTED', 'with-newline']) {
       expect(text).not.toContain(leaked)
@@ -43,7 +43,7 @@ describe('请求对象存储时的报错', () => {
       })
     })
     const err = await failure(s3Client(LOCATION).delete('x'))
-    expect(err.message).toBe('连不上存储（ECONNREFUSED）：检查实例设置里的接口地址与 Key')
+    expect(err.message).toBe('无法连接存储（ECONNREFUSED）：请检查实例设置中的接口地址与 Key')
   })
 
   it('到了时限：说清等了多久，一般请求和上传的时限不同', async () => {
@@ -67,7 +67,7 @@ describe('请求对象存储时的报错', () => {
       return (outcome as S3Error).message
     }
     const client = s3Client(LOCATION)
-    expect(await limited(client.delete('x'))).toBe('存储 30 秒内没有返回')
-    expect(await limited(client.put('x', Buffer.from('y')))).toBe('存储 600 秒内没有返回')
+    expect(await limited(client.delete('x'))).toBe('存储 30 秒内未返回')
+    expect(await limited(client.put('x', Buffer.from('y')))).toBe('存储 600 秒内未返回')
   })
 })

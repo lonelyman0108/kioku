@@ -59,7 +59,7 @@ function uploadLimit(): MiddlewareHandler<AppEnv> {
     onError: (c) =>
       c.json(
         {
-          error: `请求超过 ${LORE_UPLOAD_MAX_BYTES / 1024 / 1024} MB 的上限：上传的导出只留要用的五张表，确认文件是 Lore 的导出`,
+          error: `请求超过 ${LORE_UPLOAD_MAX_BYTES / 1024 / 1024} MB 上限。上传的导出文件只需保留要用的五张表，并确认文件是 Lore 的导出。`,
         },
         413,
       ),
@@ -185,16 +185,16 @@ async function readSource(
 ): Promise<ParsedLoreBackup> {
   if (source.kind === 'file') return parseLoreBackup(source.backup)
   if (!(await isInstanceAdmin(deps.db, accountId))) {
-    throw new MemoryError(403, '只有实例管理员能从地址拉取：服务端要向这个地址发请求')
+    throw new MemoryError(403, '仅实例管理员可从地址拉取：服务端会向此地址发送请求')
   }
   return parseLoreBackup(await fetchLoreBackup(source, signal))
 }
 
 async function assertOwner(deps: Deps, spaceId: string, accountId: string): Promise<void> {
   const role = await memberRole(deps, spaceId, accountId)
-  if (!role) throw new MemoryError(403, '不是该空间成员')
+  if (!role) throw new MemoryError(403, '无权访问此空间')
   // 导入要写 secret、新建人格和应用，和命令行一样要空间 owner
-  if (role !== 'owner') throw new MemoryError(403, '只有空间 owner 能从 Lore 导入')
+  if (role !== 'owner') throw new MemoryError(403, '仅空间所有者可从 Lore 导入')
 }
 
 export function loreImportRoutes(deps: Deps) {
@@ -231,8 +231,9 @@ export function loreImportRoutes(deps: Deps) {
       return withTransferSlot(accountId, c.req.raw.signal, async () => {
         const existing = await existingImportApps(deps.db, spaceId)
         const base = await basePlan(target, snapshot, existing, options)
+        // 这里的 409 结尾不带句号：界面在它后面接着写重算计划的说明（见 applyFailureNotice）
         if (base.fingerprint !== body.fingerprint) {
-          throw new MemoryError(409, '看过计划之后来源或这个空间有变化：要重新看计划')
+          throw new MemoryError(409, '来源或此空间在查看计划后已变化，请重新查看计划')
         }
         // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍
         const ticked = body.secretUris.length > 0 || body.excludeUris.length > 0
@@ -256,7 +257,7 @@ export function loreImportRoutes(deps: Deps) {
           if (stale) {
             throw new MemoryError(
               409,
-              '这个文件比这个空间已写入的数据旧，写入会把内容改回去：确认之后才能执行',
+              '此文件比空间已写入的数据旧，写入会把内容改回旧版本，确认后才能执行',
             )
           }
         }
@@ -271,7 +272,7 @@ export function loreImportRoutes(deps: Deps) {
             code: pgErrorCode(err) ?? (err instanceof Error ? err.name : 'unknown'),
             cause: pgCauseCode(err),
           })
-          return c.json({ error: '写到一半出错了，可能已写入一部分' }, 500)
+          return c.json({ error: '写入中途出错，可能已写入一部分' }, 500)
         } finally {
           // 向量只靠补齐：写了一半也要排，不看这次新建了多少（重试时前面的都按事件去重了）
           void deps.jobs?.enqueueBackfill()

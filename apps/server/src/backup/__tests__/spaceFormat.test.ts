@@ -50,24 +50,24 @@ describe('空间导出文件的加密', () => {
 
   it('口令不对、文件被改过或不完整、不是导出文件时都拒绝，并说清是哪一种', async () => {
     const file = await seal(passphrase, [plain])
-    await expect(open('wrong passphrase!', file)).rejects.toThrow('口令不对')
+    await expect(open('wrong passphrase!', file)).rejects.toThrow('口令错误')
     const tampered = Buffer.from(file)
     tampered[tampered.length - 20]! ^= 1
-    await expect(open(passphrase, tampered)).rejects.toThrow('文件不完整或被改过')
+    await expect(open(passphrase, tampered)).rejects.toThrow('文件不完整或已被修改')
     await expect(open(passphrase, file.subarray(0, file.length - 1))).rejects.toThrow(
-      '文件不完整或被改过',
+      '文件不完整或已被修改',
     )
     // 文件头不加密但参与认证：改了盐或参数，派生出的就不是同一把密钥
     const salted = Buffer.from(file)
     salted[12]! ^= 1
-    await expect(open(passphrase, salted)).rejects.toThrow('口令不对')
+    await expect(open(passphrase, salted)).rejects.toThrow('口令错误')
     const params = Buffer.from(file)
     params[9] = 9
-    await expect(open(passphrase, params)).rejects.toThrow('口令不对')
+    await expect(open(passphrase, params)).rejects.toThrow('口令错误')
     // 参数被改得超出接受的范围时不去派生（挡住拿文件头占满内存）
     const huge = Buffer.from(file)
     huge[8] = 30
-    await expect(open(passphrase, huge)).rejects.toThrow('加密参数超出了能接受的范围')
+    await expect(open(passphrase, huge)).rejects.toThrow('加密参数超出可接受的范围')
     await expect(open(passphrase, Buffer.from('PGDMP custom dump'))).rejects.toThrow(
       '不是 Kioku 的空间导出文件',
     )

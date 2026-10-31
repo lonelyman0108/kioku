@@ -26,11 +26,11 @@ export function loreExportUrl(address: string): URL {
     throw new MemoryError(400, 'Lore 地址只支持 http 与 https')
   }
   if (base.username || base.password) {
-    throw new MemoryError(400, 'Lore 地址里不能带账号密码，Token 单独填')
+    throw new MemoryError(400, 'Lore 地址不能包含账号密码，Token 请单独填写')
   }
   // 看 href：只写一个 ? 或 # 时 search 与 hash 都是空串，下面拼地址时路径会被丢掉，Token 发到同一主机的另一个路径
   if (/[?#]/.test(base.href)) {
-    throw new MemoryError(400, 'Lore 地址里不能带查询或片段，填到服务的根路径就好')
+    throw new MemoryError(400, 'Lore 地址不能包含查询或片段，填写到服务根路径即可')
   }
   const root = base.href.endsWith('/') ? base.href : `${base.href}/`
   return new URL('api/backup?action=export', root)
@@ -67,10 +67,10 @@ export async function fetchLoreBackup(
   const timeout = AbortSignal.timeout(limits.timeoutMs)
   const failed = () =>
     timeout.aborted
-      ? fail('timeout', `${limits.timeoutMs / 1000} 秒内没有拉完 Lore 的导出`)
+      ? fail('timeout', `${limits.timeoutMs / 1000} 秒内未能拉取完 Lore 的导出`)
       : signal?.aborted
-        ? fail('aborted', '请求已经断开')
-        : fail('network', '连不上 Lore，或者连接中途断了')
+        ? fail('aborted', '请求已断开')
+        : fail('network', '无法连接 Lore，或连接中途断开')
   let res: Response
   try {
     res = await fetch(url, {
@@ -85,10 +85,10 @@ export async function fetchLoreBackup(
   if (!res.ok) {
     await res.body?.cancel().catch(() => {})
     if (res.status >= 300 && res.status < 400) {
-      throw fail('redirect', 'Lore 返回了重定向，这里不跟随：填重定向之后的地址')
+      throw fail('redirect', 'Lore 返回了重定向，此处不跟随。请填写重定向后的地址。')
     }
     if (res.status === 401 || res.status === 403) {
-      throw fail('unauthorized', 'Lore 拒绝了这个 Token')
+      throw fail('unauthorized', 'Lore 拒绝了此 Token')
     }
     throw fail('status', `Lore 返回了错误（HTTP ${res.status}）`)
   }
@@ -101,12 +101,12 @@ export async function fetchLoreBackup(
   if (!body) {
     throw fail(
       'tooLarge',
-      `Lore 的导出超过 ${limits.maxBytes / 1024 / 1024} MB 的上限：导出时不要带召回事件`,
+      `Lore 的导出超过 ${limits.maxBytes / 1024 / 1024} MB 上限：导出时请勿包含召回事件`,
     )
   }
   try {
     return JSON.parse(body.toString('utf8'))
   } catch {
-    throw fail('json', 'Lore 返回的不是 JSON：确认地址填到了 Lore 服务的根路径')
+    throw fail('json', 'Lore 返回的不是 JSON。请确认地址填写到 Lore 服务的根路径。')
   }
 }

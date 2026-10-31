@@ -386,15 +386,15 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       const fromConsole = await errorOf(
         await send('PATCH', '/memories', { uri: m.uri, priority: 3 }),
       )
-      expect(fromConsole).toContain('占位符格式不对')
+      expect(fromConsole).toContain('占位符格式错误')
       expect(fromConsole).not.toContain('坏的片段')
       const fromKey = await errorOf(
         await keyCall('PATCH', '/memories', { uri: m.uri, priority: 3 }),
       )
-      expect(fromKey).toContain('占位符格式不对')
+      expect(fromKey).toContain('占位符格式错误')
       expect(fromKey).not.toContain('坏的片段')
       const fromTool = await mcp('kioku_update', { uri: m.uri, priority: 3 })
-      expect(fromTool).toContain('占位符格式不对')
+      expect(fromTool).toContain('占位符格式错误')
       expect(fromTool).not.toContain('坏的片段')
       expect(await accessOf(m.id)).toEqual([])
     })
@@ -432,7 +432,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       const field = await errorOf(
         await send('POST', '/memories/move', { from: m.uri, to: 'home://moved', layer: 'private' }),
       )
-      expect(field).toContain('没有这个字段')
+      expect(field).toContain('没有此字段')
       expect(field).not.toContain('missing-field')
       expect(field).not.toContain('nas')
       expect(await accessOf(m.id)).toEqual([])
@@ -443,7 +443,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       await legacy(m, FRAGMENT)
       expect((await send('DELETE', `/memories?uri=${encodeURIComponent(m.uri)}`)).status).toBe(204)
       const error = await errorOf(await send('POST', '/memories/undelete', { memoryId: m.id }))
-      expect(error).toContain('占位符格式不对')
+      expect(error).toContain('占位符格式错误')
       expect(error).not.toContain('坏的片段')
     })
 

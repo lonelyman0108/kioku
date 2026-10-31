@@ -43,7 +43,7 @@ import {
 } from '../../testing/fixtures'
 
 const DAY = 86_400_000
-const INVALID = '绑定码不对或已经失效，请重新申请'
+const INVALID = '绑定码错误或已失效，请重新申请'
 
 describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   let database: Database
@@ -378,12 +378,12 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   })
 
   it('群里不发码也不收码，不因此建对象', async () => {
-    expect(await errorOf(await issue(inGroup('1001')), 400)).toBe('只能在私聊里申请绑定码')
+    expect(await errorOf(await issue(inGroup('1001')), 400)).toBe('只能在私聊中申请绑定码')
     expect((await issue({ chatType: 'cron' })).status).toBe(400)
     const code = await codeFor(direct('1001'))
-    expect(await errorOf(await redeem(code, inGroup('1002')), 400)).toBe('只能在私聊里绑定')
+    expect(await errorOf(await redeem(code, inGroup('1002')), 400)).toBe('只能在私聊中绑定')
     expect(await errorOf(await redeem(code, inGroup('1002'), key, true), 400)).toBe(
-      '只能在私聊里绑定',
+      '只能在私聊中绑定',
     )
     // 群和群里的人都没建出来；码也还在
     const all = await inSpace((tx) => tx.select().from(subjectIdentities))
@@ -424,7 +424,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     for (let i = 3; i < VOID_REQUESTS; i++) await voidIn(wrongFor(code), inGroup('2002'))
     const live = await codeFor(direct('1001'))
     expect(await errorOf(await voidIn(live, inGroup('2002')), 429)).toMatch(
-      /^作废的请求太多了，\d+ 分钟后再试$/,
+      /^作废请求过多，请 \d+ 分钟后重试$/,
     )
     expect((await bind(live, direct('u2', 'tg'))).status).toBe('merged')
     // 别的发言人照常作废
@@ -434,20 +434,20 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
 
     // 只收群里的，要带发言人
     expect(await errorOf(await voidIn(live, direct('u3', 'tg')), 400)).toBe(
-      '只作废在群里发出来的绑定码',
+      '只作废群里发出的绑定码',
     )
     expect(
       await errorOf(
         await voidIn(live, { chatType: 'group', platform: 'qq', group: { id: '2001' } }),
         400,
       ),
-    ).toBe('要带上这条消息的发言人')
+    ).toBe('须带上这条消息的发言人')
   })
 
   it('不能绑自己：用申请的账号自己收码、或者已经并在一起的账号收码都不行', async () => {
     const code = await codeFor(direct('1001'))
     expect(await errorOf(await redeem(code, direct('1001')), 409)).toBe(
-      '这个账号和申请绑定码的账号已经是同一个人了',
+      '此账号与申请绑定码的账号已是同一个人',
     )
     expect((await bind(code, direct('u1', 'tg'))).status).toBe('merged')
     const again = await codeFor(direct('u1', 'tg'))
@@ -456,7 +456,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
 
   it('Key 在私聊里写不了对象层时不能申请、使用，也不能作废，不建对象', async () => {
     const episodeOnly = await ws.issueKey(appId, { ...FULL_SCOPES, writeLayers: ['episode'] })
-    const notAllowed = '这个 bot 的 Key 写不了对象层，不能绑定账号'
+    const notAllowed = '当前 bot 的 Key 无权写入联系人层，无法绑定账号'
     expect(await errorOf(await issue(direct('1001'), episodeOnly), 403)).toBe(notAllowed)
     const code = await codeFor(direct('1002'))
     expect(await errorOf(await redeem(code, direct('u1', 'tg'), episodeOnly), 403)).toBe(notAllowed)
@@ -502,9 +502,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     await link(b, bob.cookie)
     // 发码的没标记，收码的标记成 bob：合并会把发码的账号挂到 bob 名下。预览时就说清
     const code = await codeFor(direct('1001'))
-    expect(await errorOf(await redeem(code, direct('u1', 'tg')), 403)).toContain(
-      '标记成了空间里的成员',
-    )
+    expect(await errorOf(await redeem(code, direct('u1', 'tg')), 403)).toContain('已标记为空间成员')
     expect(await subjectIdOf('tg', 'u1')).toBe(b)
     expect((await detailOf(b)).account?.id).toBe(bob.accountId)
     // 码没有作废：没标记的账号照样能用
@@ -515,7 +513,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     await link(a)
     const second = await codeFor(direct('1001'))
     expect(await errorOf(await redeem(second, direct('u1', 'tg')), 403)).toBe(
-      '两个账号标记成了不同的成员，不能绑在一起',
+      '两个账号已标记为不同成员，无法绑定',
     )
     // 收码的也标记成 alice：只有本人能把对象标记成自己，没人能冒充，直接合并
     await link(b, bob.cookie, false)
@@ -592,7 +590,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
 
     // 空间 owner、viewer 都不能确认或拒绝
     expect(await errorOf(await confirm(pending!), 403)).toBe(
-      '只有这个对象标记成的成员本人能处理这次绑定',
+      '仅此联系人标记的成员本人可处理此次绑定',
     )
     expect((await reject(pending!)).status).toBe(403)
     expect((await confirm(pending!, carol.cookie)).status).toBe(403)
@@ -616,7 +614,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       },
     ])
     // 处理过的不能再处理
-    expect(await errorOf(await confirm(pending!, bob.cookie), 409)).toBe('已经合并了')
+    expect(await errorOf(await confirm(pending!, bob.cookie), 409)).toBe('已合并')
     expect((await reject(pending!, bob.cookie)).status).toBe(409)
     expect(await pendingOf(bob.cookie)).toEqual([])
   })
@@ -631,7 +629,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const [first] = await pendingOf(bob.cookie)
     expect((await reject(first!, bob.cookie)).status).toBe(204)
     expect(await subjectIdOf('tg', 'u1')).not.toBe(a)
-    expect(await errorOf(await confirm(first!, bob.cookie), 409)).toBe('已经拒绝了')
+    expect(await errorOf(await confirm(first!, bob.cookie), 409)).toBe('已拒绝')
     expect((await detailOf(a)).bindings).toMatchObject([
       { id: first!.id, status: 'rejected', decidedBy: { id: bob.accountId } },
     ])
@@ -646,7 +644,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     )
     expect(await pendingOf(bob.cookie)).toEqual([])
     expect(await errorOf(await confirm(second!, bob.cookie), 409)).toBe(
-      '已经过了确认期限，这次绑定作废了',
+      '已过确认期限，此次绑定已作废',
     )
     expect((await reject(second!, bob.cookie)).status).toBe(409)
     expect(await subjectIdOf('tg', 'u2')).not.toBe(a)
@@ -662,7 +660,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       .where(eq(spaceMembers.accountId, bob.accountId))
     const [third] = await pendingOf(bob.cookie)
     expect(third).toMatchObject({ canConfirm: false, canReject: true })
-    expect(await errorOf(await confirm(third!, bob.cookie), 403)).toBe('需要 owner 或 editor 角色')
+    expect(await errorOf(await confirm(third!, bob.cookie), 403)).toBe('需要空间所有者或编辑者角色')
     expect((await reject(third!, bob.cookie)).status).toBe(204)
     expect(await subjectIdOf('tg', 'u3')).not.toBe(a)
   })
@@ -682,11 +680,11 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect((await api('POST', `/subjects/${b}/merge`, { from: d })).status).toBe(200)
     expect(await pendingOf(bob.cookie)).toEqual([])
     expect(await errorOf(await confirm(pending!, bob.cookie), 409)).toBe(
-      '这次绑定已经作废：等确认期间对象被合并了',
+      '此次绑定已作废：待确认期间联系人已被合并',
     )
     expect(await subjectIdOf('tg', 'u1')).toBe(b)
     expect((await detailOf(b)).bindings).toMatchObject([
-      { id: pending!.id, status: 'cancelled', note: '等确认期间对象被合并了' },
+      { id: pending!.id, status: 'cancelled', note: '待确认期间联系人已被合并' },
     ])
 
     // bob 取消了「这是我」：确认时作废
@@ -694,7 +692,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     const [next] = await pendingOf(bob.cookie)
     await link(a, bob.cookie, false)
     expect(await errorOf(await confirm(next!, bob.cookie), 409)).toBe(
-      '这个对象已经不再标记成你，这次绑定作废了',
+      '此联系人的成员标记已变更，此次绑定已作废',
     )
     expect(await subjectIdOf('tg', 'u1')).toBe(b)
     const [row] = await inSpace((tx) =>
@@ -711,7 +709,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     }
     const limited = await redeem(wrong, direct('u9', 'tg'))
     const message = await errorOf(limited, 429)
-    expect(message).toMatch(/^输错的次数太多了，\d+ 分钟后再试$/)
+    expect(message).toMatch(/^输错次数过多，请 \d+ 分钟后重试$/)
     expect(Number(limited.headers.get('retry-after'))).toBeGreaterThan(3500)
     const right = await redeem(code, direct('u9', 'tg'))
     expect((await errorOf(right, 429)).replace(/\d+/, 'N')).toBe(message.replace(/\d+/, 'N'))
@@ -723,7 +721,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
   it('只有码不对才算输错：格式不对不占名额；预览、不能绑自己、标记冲突、绑成了都退回这一次，之前输错的留着', async () => {
     for (let i = 0; i < ACCOUNT_ATTEMPTS + 1; i++) {
       expect(await errorOf(await redeem('hello', direct('u9', 'tg')), 400)).toBe(
-        '绑定码是 8 位字母和数字',
+        '绑定码由 8 位字母和数字组成',
       )
     }
     expect(await counters()).toEqual({})
@@ -774,7 +772,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       }),
     )
     const res = await redeem(code, direct('fresh', 'tg'))
-    expect(await errorOf(res, 429)).toMatch(/^最近输错绑定码的太多，\d+ 分钟后再试$/)
+    expect(await errorOf(res, 429)).toMatch(/^近期输错绑定码的次数过多，请 \d+ 分钟后重试$/)
     expect(await counters()).toEqual({
       [accountCounter('tg', 'fresh')]: 0,
       [APP_COUNTER]: APP_ATTEMPTS + 1,

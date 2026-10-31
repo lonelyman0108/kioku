@@ -99,7 +99,7 @@ describe('OpenAI 兼容嵌入客户端', () => {
 
     it('Key 中间有换行：真实的 fetch 把整个请求头写进错误，这里报连不上，错误和 cause 里都没有 Key', async () => {
       const err = (await pasted.embed(['a']).catch((e: unknown) => e)) as Error
-      expect(err.message).toContain('连不上嵌入接口')
+      expect(err.message).toContain('无法连接嵌入接口')
       expectNoKey(err)
     })
 
@@ -107,7 +107,7 @@ describe('OpenAI 兼容嵌入客户端', () => {
       const deadline = new AbortController()
       deadline.abort()
       const err = await pasted.embed(['a'], { signal: deadline.signal }).catch((e: unknown) => e)
-      expect((err as Error).message).toBe('调用方的总时限到了，或者服务要停了')
+      expect((err as Error).message).toBe('已达调用方的总时限，或服务正在停止')
       expectNoKey(err)
     })
 
@@ -121,7 +121,7 @@ describe('OpenAI 兼容嵌入客户端', () => {
         }) as unknown as typeof fetch,
       )
       await expect(embedder.embed(['a'])).rejects.toThrow(
-        '连不上嵌入接口（ECONNREFUSED）：检查实例设置里的接口地址与 Key',
+        '无法连接嵌入接口（ECONNREFUSED）：请检查实例设置中的接口地址与 Key',
       )
     })
 
@@ -134,7 +134,7 @@ describe('OpenAI 兼容嵌入客户端', () => {
           })) as unknown as typeof fetch,
       )
       await expect(embedder.embed(['a'], { timeoutMs: 20 })).rejects.toThrow(
-        '嵌入接口 1 秒内没有返回',
+        '嵌入接口 1 秒内未返回',
       )
     })
   })
@@ -181,7 +181,7 @@ describe('一组渠道按顺序回退', () => {
     const deadline = new AbortController()
     deadline.abort()
     await expect(embedder.embed(['a'], { signal: deadline.signal })).rejects.toThrow(
-      '等待时间用完了',
+      '等待时间已用完',
     )
     expect(asked).toEqual([])
   })
@@ -196,7 +196,7 @@ describe('一组渠道按顺序回退', () => {
   it('都失败时把各个渠道的错误一起报出来', async () => {
     const { embedder } = await run(['auth', 'offline'])
     await expect(embedder.embed(['a'])).rejects.toThrow(
-      /所有渠道都失败了。渠道 1：嵌入接口返回 HTTP 401.*；渠道 2：连不上嵌入接口/,
+      /所有渠道均失败。渠道 1：嵌入接口返回 HTTP 401.*；渠道 2：无法连接嵌入接口/,
     )
   })
 })

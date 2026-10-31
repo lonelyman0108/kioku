@@ -60,7 +60,8 @@ export const unsealJson = (sealed: SealedJson): Sealed => ({
   wrappedKey: Buffer.from(sealed.wrappedKey, 'base64'),
 })
 
-// 解开加密保存的 Key；解不开时说清是哪一项，解密库的英文报错留在 cause 里。name 是这个密钥叫什么
+// 解开加密保存的 Key；解不开时说清是哪一项，解密库的英文报错留在 cause 里。name 是这个密钥叫什么。
+// 报错结尾不带句号：备份失败时界面在它后面接着写下一句
 export function openApiKey(
   masterKey: MasterKey | null,
   sealed: SealedJson,
@@ -69,13 +70,13 @@ export function openApiKey(
   name = 'Key',
 ): string {
   if (!masterKey) {
-    throw new ApiKeyLockedError(`${label}的 ${name} 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY`)
+    throw new ApiKeyLockedError(`${label}的 ${name} 已加密保存，但服务端未配置 KIOKU_MASTER_KEY`)
   }
   try {
     return decryptSecret(decryptionKey(masterKey, sealed.keyId), unsealJson(sealed), aad)
   } catch (cause) {
     throw new ApiKeyLockedError(
-      `${label}的 ${name} 解不开：配置的 KIOKU_MASTER_KEY 和保存时用的不是同一把，或者保存的内容坏了。轮换主密钥期间，旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS，等实例设置里显示换完再去掉`,
+      `${label}的 ${name} 无法解密：当前 KIOKU_MASTER_KEY 与保存时使用的不一致，或保存的内容已损坏。轮换主密钥期间，旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS，实例设置显示轮换完成后再移除`,
       { cause },
     )
   }
@@ -112,7 +113,7 @@ export function withoutKey(text: string, apiKey: string | null): string {
 // 也不把原来的错误放进 cause：cause 会进日志，后台任务的出错原因也可能取它
 export function fetchFailure(what: string, err: unknown): string {
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
-  return `连不上${what}${typeof code === 'string' ? `（${code}）` : ''}：检查实例设置里的接口地址与 Key`
+  return `无法连接${what}${typeof code === 'string' ? `（${code}）` : ''}：请检查实例设置中的接口地址与 Key`
 }
 
 // 读 2xx 响应的 JSON。解析失败时只报固定文字：SyntaxError 的文字带响应的开头，上游可能把 Key 写在那里。
@@ -152,9 +153,9 @@ export function resolveApiKey(
   const keep = previous ? sameOrigin(previous.baseUrl, input.baseUrl) : false
   if (!keep && previous?.apiKey && input.apiKey === undefined) {
     throw new SettingsInputError(
-      `${where}接口主机变了，已保存的 ${name} 不会发给新的主机：请重新填写${
-        required ? '' : `；新接口不需要 ${name} 时，清除已保存的 ${name}`
-      }`,
+      `${where}接口主机已变更，已保存的 ${name} 不会发送给新主机。请重新填写${
+        required ? '' : `；新接口不需要 ${name} 时，请清除已保存的 ${name}`
+      }。`,
     )
   }
   let result: SealedJson | null = keep ? (previous?.apiKey ?? null) : null

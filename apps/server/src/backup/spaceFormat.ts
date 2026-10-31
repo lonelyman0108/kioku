@@ -151,7 +151,7 @@ export async function openSpaceExport(
   if (isBackupFile(file)) {
     throw new MemoryError(
       400,
-      '这是全实例的备份文件，不是空间的导出文件：备份用 restore.mjs 恢复到新实例',
+      '这是全实例的备份文件，不是空间导出文件。备份文件请用 restore.mjs 恢复到新实例。',
     )
   }
   if (file.length < HEADER_LENGTH + TAG_LENGTH || !file.subarray(0, MAGIC.length).equals(MAGIC)) {
@@ -161,14 +161,14 @@ export async function openSpaceExport(
   let at = MAGIC.length
   const kdf: KdfParams = { logN: header[at++]!, r: header[at++]!, p: header[at++]! }
   if (!acceptable(kdf)) {
-    throw new MemoryError(400, '导出文件的文件头不对：加密参数超出了能接受的范围')
+    throw new MemoryError(400, '导出文件的文件头有误：加密参数超出可接受的范围')
   }
   const salt = header.subarray(at, (at += SALT_LENGTH))
   const iv = header.subarray(at, (at += IV_LENGTH))
   const expected = header.subarray(at, at + CHECK_LENGTH)
   const derived = await scryptAsync(passphrase, salt, kdf)
   if (!timingSafeEqual(checkValue(derived.subarray(32)), expected)) {
-    throw new MemoryError(400, '口令不对（也可能是文件头被改过）')
+    throw new MemoryError(400, '口令错误（也可能是文件头被修改）')
   }
   const decipher = createDecipheriv('aes-256-gcm', derived.subarray(0, 32), iv)
   decipher.setAAD(header)
@@ -180,7 +180,7 @@ export async function openSpaceExport(
       decipher.final(),
     ])
   } catch {
-    throw new MemoryError(400, '导出文件解不开：文件不完整或被改过')
+    throw new MemoryError(400, '导出文件无法解密：文件不完整或已被修改')
   }
   try {
     return await gunzipAsync(compressed, { maxOutputLength: maxPlainBytes })
@@ -188,6 +188,6 @@ export async function openSpaceExport(
     if ((err as { code?: string }).code === 'ERR_BUFFER_TOO_LARGE') {
       throw new MemoryError(400, `导出文件解压后超过 ${maxPlainBytes / 1024 / 1024} MB 的上限`)
     }
-    throw new MemoryError(400, '导出文件的内容不对：解压失败')
+    throw new MemoryError(400, '导出文件的内容有误：解压失败')
   }
 }

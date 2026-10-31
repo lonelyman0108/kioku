@@ -25,6 +25,7 @@ import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { sealedSettingsKeys } from '../crypto/rotation'
 import { pgErrorCode, withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
+import { LAYER_NAMES } from '../memory/names'
 import { MemoryError, MemoryService } from '../memory/service'
 import { APP_DOMAIN, DEFAULT_SENSITIVITY, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
 
@@ -259,7 +260,7 @@ export function planImport(
     }))
     if (!result.length) {
       if (existingApps.some((a) => a.slug === slug)) {
-        result = `应用标识 ${slug} 已被别的成员占用：先在管理界面建一个自己的、运行时类型为 ${family} 的应用，再重新导入`
+        result = `应用标识 ${slug} 已被其他成员占用。请先在管理界面新建一个属于当前账号、运行时类型为 ${family} 的应用，再重新导入。`
       } else if (!Slug.safeParse(slug).success) {
         result = `运行时 ${runtime} 无法作为应用标识`
       } else {
@@ -306,10 +307,10 @@ export function planImport(
 
   for (const node of snapshot.nodes) {
     for (const alias of node.aliases) {
-      plan.skipped.push({ source: alias, reason: `是 ${node.uri} 的别名，Kioku 没有别名` })
+      plan.skipped.push({ source: alias, reason: `是 ${node.uri} 的别名，Kioku 不支持别名` })
     }
     if (excludedNodes.has(node.uuid)) {
-      plan.skipped.push({ source: node.uri, reason: '这次选择不导入' })
+      plan.skipped.push({ source: node.uri, reason: '本次选择不导入' })
       continue
     }
     if (!node.content) {
@@ -322,7 +323,7 @@ export function planImport(
       const quoted = options.quoteMalformed ? ` ${malformed}` : ''
       plan.skipped.push({
         source: node.uri,
-        reason: `正文里有格式不对的凭据占位符${quoted}：写到这种写法的说明文字要去掉花括号`,
+        reason: `正文含格式错误的凭据占位符${quoted}。说明文字提到这种写法时，请去掉花括号。`,
       })
       continue
     }
@@ -387,7 +388,7 @@ export function planImport(
     if (disclosure && mentionsPlaceholder(disclosure)) {
       plan.skipped.push({
         source: node.uri,
-        reason: 'disclosure 里有凭据占位符：占位符只能写在正文里',
+        reason: '触发场景中有凭据占位符：占位符只能写在正文中',
       })
       continue
     }
@@ -405,7 +406,7 @@ export function planImport(
       if (hasRefs && !placeholderAllowed(target.layer, sensitivity)) {
         plan.skipped.push({
           source: node.uri,
-          reason: `正文里有凭据占位符，只能放在私人层、敏感级至少 private 的记忆里，${target.uri} 是 ${target.layer} 层`,
+          reason: `正文含凭据占位符，只能放在私人层、敏感级不低于私密的记忆中，${target.uri} 属于${LAYER_NAMES[target.layer]}`,
         })
         continue
       }
@@ -470,7 +471,7 @@ function keywordsOf(node: LoreNode, plan: ImportPlan): string[] {
       plan.droppedKeywords.push({
         source: node.uri,
         keyword,
-        reason: '有凭据占位符，占位符只能写在正文里',
+        reason: '含凭据占位符，占位符只能写在正文中',
       })
     } else if (keyword.length < 2) {
       plan.droppedKeywords.push({ source: node.uri, keyword, reason: '不足两个字' })
@@ -493,13 +494,13 @@ export function assertExecutable(plan: ImportPlan, masterKey: MasterKey | null):
   if (plan.errors.length) {
     const lines = plan.errors.map((e) =>
       e.kind === 'secretNotFound'
-        ? `要标成 secret 的 ${e.uri} 在 Lore 里不存在`
-        : `要跳过的 ${e.uri} 在 Lore 里不存在`,
+        ? `要标记为机密的 ${e.uri} 在 Lore 中不存在`
+        : `要跳过的 ${e.uri} 在 Lore 中不存在`,
     )
-    throw new MemoryError(400, `计划有错误，不能执行：${lines.join('；')}`)
+    throw new MemoryError(400, `计划有误，无法执行：${lines.join('；')}`)
   }
   if (!masterKey && plan.memories.some((m) => m.request.sensitivity === 'secret')) {
-    throw new MemoryError(400, '这个实例没有配置主密钥，不能导入 secret')
+    throw new MemoryError(400, '当前实例未配置主密钥，无法导入机密节点')
   }
 }
 
@@ -669,7 +670,7 @@ function dataWriteFailure(err: unknown): string | null {
   const code = pgErrorCode(err)
   if (!code?.startsWith('22') && !code?.startsWith('23')) return null
   console.error('写入 Lore 的节点时数据库报错', { code })
-  return `写不进数据库（${code}）`
+  return `写入数据库失败（${code}）`
 }
 
 // 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用
@@ -764,7 +765,7 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
   for (const item of plan.memories) {
     const app = item.context.targetApp
     if (typeof app === 'string' && blockedApps.has(app)) {
-      result.failed.push({ uri: item.request.uri, reason: `应用 ${app} 不属于导入者，没有写入` })
+      result.failed.push({ uri: item.request.uri, reason: `应用 ${app} 不属于导入者，未写入` })
       continue
     }
     const { state, found } = priorImport(item, done, moved)

@@ -124,14 +124,14 @@ describe('capture', () => {
 describe('requires', () => {
   it('层与最高敏感级都满足才算满足', () => {
     expect(unmetRequirement({ readLayers: ['private'] }, READONLY)).toBeNull()
-    expect(unmetRequirement({ writeLayers: ['private'] }, READONLY)).toContain('写不了 private')
+    expect(unmetRequirement({ writeLayers: ['private'] }, READONLY)).toContain('无权写入 private')
     expect(
       unmetRequirement(
         { readLayers: ['private'] },
         { ...READONLY, readLayers: ['base', 'persona'] },
       ),
-    ).toContain('读不了 private')
-    expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain('不到 secret')
+    ).toContain('无权读取 private')
+    expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain('低于 secret')
     expect(unmetRequirement({ maxSensitivity: 'private' }, READONLY)).toBeNull()
     expect(unmetRequirement({ maxSensitivity: 'public' }, READONLY)).toBeNull()
     expect(unmetRequirement({}, READONLY)).toBeNull()
@@ -243,7 +243,7 @@ describe('断言', () => {
     expect(step).toMatchObject({ status: 'failed', uris: null })
     expect(step.assertions.map((a) => a.ok)).toEqual([false, false])
     expect(step.assertions[0]!.message).toContain('URI 列表应有 a://b')
-    expect(step.assertions[0]!.message).toContain('分不清')
+    expect(step.assertions[0]!.message).toContain('无法区分')
     expect(step.assertions[1]!.message).toContain('URI 列表不应有 c://d')
   })
 
@@ -337,7 +337,7 @@ describe('变量与 capture', () => {
       ),
     )
     expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'skipped'])
-    expect(result.steps[0]!.reason).toContain('写不了 private')
+    expect(result.steps[0]!.reason).toContain('无权写入 private')
     expect(result.steps[1]!.reason).toContain('${version}')
     expect(seen).toHaveLength(0)
     expect(result.ok).toBe(true)

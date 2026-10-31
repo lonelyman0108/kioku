@@ -314,7 +314,7 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     expect(calls).toEqual([])
     expect(await turns()).toEqual([])
     expect(await runs()).toMatchObject([
-      { error: '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层', turns: 0 },
+      { error: '写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层', turns: 0 },
     ])
   })
 
@@ -357,7 +357,7 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     expect(calls).toEqual([])
     expect(await turns()).toEqual([])
     expect(await runs()).toMatchObject([
-      { error: '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层' },
+      { error: '写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层' },
     ])
   })
 

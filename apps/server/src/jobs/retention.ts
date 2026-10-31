@@ -441,14 +441,14 @@ const STEPS: Step[] = [
     batch: single('deletedMemories', (tx, r) => memoryBatch(tx, r.deletedMemories)),
   },
   {
-    label: '被推翻的事实',
+    label: '已被取代的事实',
     batch: single('supersededFacts', (tx, r) => memoryBatch(tx, r.supersededFacts)),
   },
   {
     label: '过期的会话摘要',
     batch: single('expiredSummaries', (tx, r) => memoryBatch(tx, r.expiredSummaries)),
   },
-  { label: '记忆已经不在的历史', always: true, batch: (tx) => orphanBatch(tx) },
+  { label: '记忆已不存在的历史', always: true, batch: (tx) => orphanBatch(tx) },
   {
     label: '已删账号的历史快照',
     always: true,
@@ -465,7 +465,7 @@ const STEPS: Step[] = [
     batch: single('dreamRuns', (tx, r) => tableBatch(tx, dreamRuns, dreamRuns.id, r.dreamRuns)),
   },
   {
-    label: 'Dream 的建议',
+    label: 'Dream 建议',
     batch: single('dreamSuggestions', (tx, r) =>
       tableBatch(tx, dreamSuggestions, dreamSuggestions.id, r.dreamSuggestions),
     ),
@@ -496,7 +496,7 @@ const STEPS: Step[] = [
     ),
   },
   {
-    label: '处理完的绑定记录',
+    label: '已处理的绑定记录',
     batch: single('subjectBindings', (tx, r) =>
       tableBatch(tx, subjectBindings, subjectBindings.id, r.subjectBindings),
     ),

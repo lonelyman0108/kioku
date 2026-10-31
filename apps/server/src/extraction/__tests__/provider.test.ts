@@ -81,7 +81,7 @@ describe('OpenAI 兼容的抽取模型客户端', () => {
     )
     await expect(
       model.complete([{ role: 'user', content: 'x' }], { timeoutMs: 20 }),
-    ).rejects.toThrow('抽取模型 1 秒内没有返回')
+    ).rejects.toThrow('抽取模型 1 秒内未返回')
   })
 
   it('非 2xx 时带上状态码与响应片段；没有 choices 时报错', async () => {
@@ -155,7 +155,7 @@ describe('OpenAI 兼容的抽取模型客户端', () => {
     const err = (await model
       .complete([{ role: 'user', content: 'x' }])
       .catch((e: unknown) => e)) as Error
-    expect(err.message).toContain('连不上抽取模型')
+    expect(err.message).toContain('无法连接抽取模型')
     const text = inspect(err, { depth: null })
     expect(text).not.toContain('sk-pasted')
     expect(text).not.toContain('with-newline')
@@ -171,7 +171,7 @@ describe('OpenAI 兼容的抽取模型客户端', () => {
       }) as unknown as typeof fetch,
     )
     await expect(model.complete([{ role: 'user', content: 'x' }])).rejects.toThrow(
-      '连不上抽取模型（ECONNREFUSED）：检查实例设置里的接口地址与 Key',
+      '无法连接抽取模型（ECONNREFUSED）：请检查实例设置中的接口地址与 Key',
     )
   })
 })

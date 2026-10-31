@@ -178,9 +178,9 @@ describe('真实模式的确认文字', () => {
 
 describe('运行失败的说明', () => {
   it('回滚模式：都回滚了，只说原因', () => {
-    expect(runFailureMessage(new ApiError(429, '同时运行的回滚太多'), 'rollback')).toBe(
-      '同时运行的回滚太多',
-    )
+    expect(
+      runFailureMessage(new ApiError(429, '测试台同时运行的回滚过多，请稍后重试'), 'rollback'),
+    ).toBe('测试台同时运行的回滚过多，请稍后重试')
     expect(runFailureMessage(new ApiError(500, '服务内部错误'), 'rollback')).toBe('服务内部错误')
     expect(runFailureMessage(new TypeError('fetch'), 'rollback')).toContain('网络错误')
   })
@@ -214,8 +214,8 @@ describe('运行请求失败后再发一次有没有用', () => {
 
 describe('工具目录读取失败的原因', () => {
   it('服务端说的原因；网络错误与响应对不上也要说', () => {
-    expect(catalogFailure(new ApiError(403, '只有应用主人能用测试台'))).toBe(
-      '读取工具目录失败：只有应用主人能用测试台',
+    expect(catalogFailure(new ApiError(403, '仅应用所有者可模拟此应用的 Key'))).toBe(
+      '读取工具目录失败：仅应用所有者可模拟此应用的 Key',
     )
     expect(catalogFailure(new TypeError('fetch'))).toBe('读取工具目录失败：网络错误或响应格式不符')
   })

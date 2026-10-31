@@ -519,7 +519,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     const res = await rebuild(ws.cookie)
     // 测试里没有启动后台任务：没排进队列，不能返回已接受
     expect(res.status).toBe(503)
-    expect(await res.json()).toEqual({ error: expect.stringContaining('没有排进队列') })
+    expect(await res.json()).toEqual({ error: expect.stringContaining('未能加入队列') })
 
     // 有后台任务时按入队结果返回，入队失败不能报成已排队
     for (const queued of [true, false]) {
@@ -547,7 +547,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       )
       expect(r.status).toBe(queued ? 202 : 503)
       expect(await r.json()).toEqual(
-        queued ? { queued: true } : { error: expect.stringContaining('没有排进队列') },
+        queued ? { queued: true } : { error: expect.stringContaining('未能加入队列') },
       )
     }
   })

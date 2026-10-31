@@ -54,7 +54,7 @@ export const SessionContextInput = z
     // 平台标识，例如 qq、telegram；带了群或发言人时必填。同一个人在不同平台的账号由管理界面合并
     platform: z
       .string()
-      .regex(/^[a-z0-9][a-z0-9_.-]{0,31}$/, '平台标识只用小写字母、数字和 _.-')
+      .regex(/^[a-z0-9][a-z0-9_.-]{0,31}$/, '平台标识只能包含小写字母、数字和 _.-')
       .optional(),
     // 群聊、频道里必填；别的会话不看
     group: PlatformRef.optional(),
@@ -63,13 +63,13 @@ export const SessionContextInput = z
   })
   .superRefine((c, ctx) => {
     if ((c.chatType === 'group' || c.chatType === 'channel') && !c.group) {
-      ctx.addIssue({ code: 'custom', path: ['group'], message: '群聊与频道要带上群' })
+      ctx.addIssue({ code: 'custom', path: ['group'], message: '群聊与频道须带上群' })
     }
     if (c.chatType === 'direct' && !c.sender) {
-      ctx.addIssue({ code: 'custom', path: ['sender'], message: '私聊要带上发言人' })
+      ctx.addIssue({ code: 'custom', path: ['sender'], message: '私聊须带上发言人' })
     }
     if ((c.group || c.sender) && !c.platform) {
-      ctx.addIssue({ code: 'custom', path: ['platform'], message: '带了群或发言人时要带上平台' })
+      ctx.addIssue({ code: 'custom', path: ['platform'], message: '带群或发言人时须带上平台' })
     }
   })
   .meta({ id: 'SessionContext' })
@@ -179,7 +179,7 @@ export const TurnEndEvent = z
       ctx.addIssue({
         code: 'custom',
         path: ['context', 'sender'],
-        message: '群聊与频道要带上这一轮的发言人',
+        message: '群聊与频道须带上本轮的发言人',
       })
     }
   })

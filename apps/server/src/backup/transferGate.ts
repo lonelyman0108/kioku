@@ -13,7 +13,7 @@ import { MemoryError } from '../memory/service'
 const RUNNING = 1
 const QUEUE = 4
 const PER_ACCOUNT = 1
-export const TRANSFER_BUSY = '导出导入正忙，稍后再试'
+export const TRANSFER_BUSY = '导出导入正忙，请稍后重试'
 
 let running = 0
 // 排着的请求：轮到它时调用
@@ -30,7 +30,7 @@ function leave(account: string): void {
 }
 
 // 请求已经断开：响应没人收，状态码只是给日志看的
-const cancelled = () => new MemoryError(400, '请求已经断开，不再排队')
+const cancelled = () => new MemoryError(400, '请求已断开，不再排队')
 
 // 拿一个名额，返回放掉它的函数（调几次都只放一次）。满了抛 429；排队时 signal 断开就从队列里移除并抛错
 export async function acquireTransferSlot(

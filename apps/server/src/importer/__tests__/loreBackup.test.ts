@@ -195,7 +195,7 @@ describe('解析 Lore 的导出', () => {
     ]
     for (const input of [...bad('机密a\u0000b'), ...bad('机密a\ud800b')]) {
       const message = rejected(input)
-      expect(message).toContain('存不进数据库')
+      expect(message).toContain('无法存入数据库')
       expect(message).not.toContain('机密')
     }
   })

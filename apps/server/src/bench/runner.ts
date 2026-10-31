@@ -100,12 +100,12 @@ function defaultLabel(step: BenchStep): string {
 // 不满足 requires 的原因；满足时为 null
 export function unmetRequirement(requires: BenchRequires, scopes: KeyScopes): string | null {
   const unreadable = requires.readLayers?.filter((l) => !scopes.readLayers.includes(l)) ?? []
-  if (unreadable.length) return `这把 Key 读不了 ${unreadable.join('、')} 层`
+  if (unreadable.length) return `当前 Key 无权读取 ${unreadable.join('、')} 层`
   const unwritable = requires.writeLayers?.filter((l) => !scopes.writeLayers.includes(l)) ?? []
-  if (unwritable.length) return `这把 Key 写不了 ${unwritable.join('、')} 层`
+  if (unwritable.length) return `当前 Key 无权写入 ${unwritable.join('、')} 层`
   const needed = requires.maxSensitivity
   if (needed && SENSITIVITIES.indexOf(scopes.maxSensitivity) < SENSITIVITIES.indexOf(needed)) {
-    return `这把 Key 的最高敏感级不到 ${needed}`
+    return `当前 Key 的敏感级上限低于 ${needed}`
   }
   return null
 }
@@ -141,7 +141,7 @@ function check(
   const onUris = (message: string, ok: (uris: string[]) => boolean): BenchAssertion =>
     outcome.uris
       ? { message, ok: ok(outcome.uris) }
-      : { message: `${message}：这种结果分不清 URI 列表，要看启动节点用 boot 步骤`, ok: false }
+      : { message: `${message}：此类结果无法区分 URI 列表，查看启动加载请用 boot 步骤`, ok: false }
   const assertions: BenchAssertion[] = []
   if (expected.error !== undefined) {
     assertions.push({

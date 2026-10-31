@@ -113,7 +113,7 @@ describe('校验场景', () => {
       return !parsed.ok ? parsed.errors.join('\n') : ''
     }
     expect(errorsOf({ id: 'Bad Id', title: '标题', steps: [{ kind: 'boot' }] })).toContain(
-      'id：场景 id 只用小写字母、数字和 -',
+      'id：场景 id 只能包含小写字母、数字和 -',
     )
     expect(errorsOf({ id: 'mine', title: '标题' })).toContain('steps')
     expect(errorsOf({ id: 'mine', title: '标题', steps: [{ kind: 'boot' }], x: 1 })).toContain('x')

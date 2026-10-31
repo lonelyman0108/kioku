@@ -225,7 +225,7 @@ describe.skipIf(!testDatabaseUrl)('抽取预算', () => {
     expect(await facts()).toEqual([])
     expect((await runs()).at(-1)).toMatchObject({
       summaryOnly: true,
-      error: '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要',
+      error: '本月的抽取预算已用完，这一批的 Key 也无权写入会话摘要',
     })
     expect(
       await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(conversationTurns)),

@@ -33,6 +33,7 @@ import {
   subjectIdentities,
   subjects,
 } from '../db/schema'
+import { LAYER_NAMES } from '../memory/names'
 import { MAX_PERSONA_DEPTH } from '../memory/personas'
 import {
   MemoryError,
@@ -84,7 +85,7 @@ export interface ParsedSpaceExport {
   memories: Lined<MemoryRecord>[]
 }
 
-const invalid = (detail: string) => new MemoryError(400, `导出文件的内容不对：${detail}`)
+const invalid = (detail: string) => new MemoryError(400, `导出文件的内容有误：${detail}`)
 
 function jsonLine(text: string, lineNo: number): unknown {
   try {
@@ -110,7 +111,7 @@ const HEADERS = new Map<unknown, z.ZodType<SpaceExportHeader>>([
 export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   const text = plain.toString('utf8')
   const rows = text.endsWith('\n') ? text.slice(0, -1).split('\n') : text.split('\n')
-  if (!rows[0]) throw invalid('是空的')
+  if (!rows[0]) throw invalid('文件为空')
   const first = jsonLine(rows[0], 1) as { format?: unknown; version?: unknown } | null
   if (first?.format !== SPACE_EXPORT_FORMAT) {
     throw new MemoryError(400, '不是 Kioku 的空间导出文件')
@@ -119,7 +120,7 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   if (!header) {
     throw new MemoryError(
       400,
-      `导出文件的格式版本是 ${String(first.version)}，这个版本的 Kioku 认 1 到 ${SPACE_EXPORT_VERSION}：升级到导出它的版本（或更新的）再导入`,
+      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 支持 1 到 ${SPACE_EXPORT_VERSION}。请升级到导出它的版本或更新的版本后再导入。`,
     )
   }
   const result: ParsedSpaceExport = {
@@ -189,7 +190,7 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
   distinct(x.personas, (p) => p.slug, '人格的标识')
   for (const p of x.personas) {
     if (p.extendsId && !personaById.has(p.extendsId)) {
-      throw invalid(`第 ${p.line} 行人格 ${p.slug} 继承的人格不在文件里`)
+      throw invalid(`第 ${p.line} 行人格 ${p.slug} 继承的人格不在文件中`)
     }
     // 继承关系不能成环，继承链（含自己）最多 MAX_PERSONA_DEPTH 层，和新建、修改人格时的规则一样
     const chain = new Set<string>()
@@ -206,23 +207,23 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
   distinct(x.apps, (a) => a.slug, '应用的标识')
   for (const a of x.apps) {
     if (a.defaultPersonaId && !personaById.has(a.defaultPersonaId)) {
-      throw invalid(`第 ${a.line} 行应用 ${a.slug} 的默认人格不在文件里`)
+      throw invalid(`第 ${a.line} 行应用 ${a.slug} 的默认人格不在文件中`)
     }
   }
-  const subjectById = byId(x.subjects, '对象')
+  const subjectById = byId(x.subjects, '联系人')
   for (const i of x.identities) {
     const subject = subjectById.get(i.subjectId)
     const label = `第 ${i.line} 行平台账号 ${i.platform}:${i.externalId}`
-    if (!subject) throw invalid(`${label} 挂的对象不在文件里`)
-    if (subject.kind !== i.kind) throw invalid(`${label} 和对象的种类不同`)
+    if (!subject) throw invalid(`${label} 关联的联系人不在文件中`)
+    if (subject.kind !== i.kind) throw invalid(`${label} 与联系人的类型不同`)
   }
   distinct(x.identities, (i) => `${i.platform}/${i.kind}/${i.externalId}`, '平台账号')
   for (const r of x.groupPersonas) {
     if (!appById.has(r.appId) || !personaById.has(r.personaId)) {
-      throw invalid(`第 ${r.line} 行按群换人格的规则指向的应用或人格不在文件里`)
+      throw invalid(`第 ${r.line} 行按群换人格的规则指向的应用或人格不在文件中`)
     }
     if (subjectById.get(r.subjectId)?.kind !== 'group') {
-      throw invalid(`第 ${r.line} 行按群换人格的规则指向的不是文件里的群`)
+      throw invalid(`第 ${r.line} 行按群换人格的规则指向的不是文件中的群`)
     }
   }
   distinct(x.groupPersonas, (r) => `${r.appId}/${r.subjectId}`, '按群换人格的规则')
@@ -231,7 +232,7 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
   distinct(x.credentials, (c) => c.identifier, '凭据的标识')
   for (const c of x.credentials) {
     if (c.source.kind === 'external' && !providerById.has(c.source.providerId)) {
-      throw invalid(`第 ${c.line} 行凭据 ${c.identifier} 绑的凭据源不在文件里`)
+      throw invalid(`第 ${c.line} 行凭据 ${c.identifier} 绑定的凭据源不在文件中`)
     }
   }
 
@@ -248,9 +249,9 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
   const liveMine = new Set<string>()
   for (const m of x.memories) {
     const label = `第 ${m.line} 行${m.uri ? `记忆 ${m.uri}` : '抽取的记忆'}`
-    if ((m.form === 'curated') !== (m.uri !== null)) throw invalid(`${label} 的形态与 URI 对不上`)
+    if ((m.form === 'curated') !== (m.uri !== null)) throw invalid(`${label} 的形态与 URI 不符`)
     if (m.provenance === 'untrusted' && m.layer !== 'subject' && m.layer !== 'episode') {
-      throw invalid(`${label} 来自不可信来源，只能在对象层或情节层`)
+      throw invalid(`${label} 来自未确认来源，只能在联系人层或情节层`)
     }
     const parsed = m.uri ? parseUri(m.uri) : null
     const namespaced = parsed?.domain === PERSONA_DOMAIN || parsed?.domain === APP_DOMAIN
@@ -258,25 +259,25 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
     const expected =
       m.layer === 'persona' || m.layer === 'app' || m.layer === 'subject' ? m.layer : null
     for (const [layer, id] of Object.entries(owners)) {
-      if ((layer === expected) !== (id !== null)) throw invalid(`${label} 的层与归属对不上`)
+      if ((layer === expected) !== (id !== null)) throw invalid(`${label} 的层与归属不符`)
     }
     if (m.layer === 'persona') {
       const persona = personaById.get(m.personaId!)
-      if (!persona) throw invalid(`${label} 的人格不在文件里`)
+      if (!persona) throw invalid(`${label} 的人格不在文件中`)
       if (parsed && (parsed.domain !== PERSONA_DOMAIN || parsed.namespaceSlug !== persona.slug)) {
-        throw invalid(`${label} 不在它的人格 ${persona.slug} 下面`)
+        throw invalid(`${label} 不在所属人格 ${persona.slug} 下`)
       }
     } else if (m.layer === 'app') {
       const app = appById.get(m.appId!)
-      if (!app) throw invalid(`${label} 的应用不在文件里`)
+      if (!app) throw invalid(`${label} 的应用不在文件中`)
       if (parsed && (parsed.domain !== APP_DOMAIN || parsed.namespaceSlug !== app.slug)) {
-        throw invalid(`${label} 不在它的应用 ${app.slug} 下面`)
+        throw invalid(`${label} 不在所属应用 ${app.slug} 下`)
       }
     } else if (namespaced) {
-      throw invalid(`${label} 在 ${parsed!.domain}:// 下面，却是 ${m.layer} 层`)
+      throw invalid(`${label} 位于 ${parsed!.domain}:// 下，却属于${LAYER_NAMES[m.layer]}`)
     }
     if (m.layer === 'subject' && !subjectById.has(m.subjectId!)) {
-      throw invalid(`${label} 的对象不在文件里`)
+      throw invalid(`${label} 的联系人不在文件中`)
     }
     if (!m.uri) continue
     const personal = PER_MEMBER_LAYERS.has(m.layer)
@@ -298,12 +299,12 @@ function requireMasterKey(x: ParsedSpaceExport, masterKey: MasterKey | null): vo
   const hosted = x.credentials.filter((c) => c.source.kind === 'hosted').length
   if (!secrets && !hosted) return
   const what = [
-    secrets ? `${secrets} 条 secret 记忆` : '',
+    secrets ? `${secrets} 条机密记忆` : '',
     hosted ? `${hosted} 条托管的凭据` : '',
   ].filter(Boolean)
   throw new MemoryError(
     400,
-    `文件里有 ${what.join('和 ')}，要用主密钥加密保存，这个实例没有配置 KIOKU_MASTER_KEY：配好主密钥、重启服务之后再导入`,
+    `文件中有 ${what.join('和 ')}，需要用主密钥加密保存，当前实例未配置 KIOKU_MASTER_KEY。请配置主密钥并重启服务后再导入。`,
   )
 }
 
@@ -402,8 +403,8 @@ export async function importSpace(
     // 说清是哪几行、违反了哪一条约束。22 类是值本身不对（例如时间超出范围），23 类是违反约束。
     // 只有正在写文件里来的值时才算文件的问题；成员、关键词、引用与事件是服务端自己派生的，出错是服务端的缺陷，照常 500
     if (progress.fromFile && (code?.startsWith('22') || code?.startsWith('23'))) {
-      const why = pgConstraint(err) ? `违反了约束 ${pgConstraint(err)}` : (pgMessage(err) ?? code)
-      throw invalid(`${progress.step}写不进数据库（${why}）`)
+      const why = pgConstraint(err) ? `违反约束 ${pgConstraint(err)}` : (pgMessage(err) ?? code)
+      throw invalid(`${progress.step}写入数据库失败（${why}）`)
     }
     throw err
   }
@@ -514,7 +515,7 @@ async function writeSpace(
     )
   }
   for (const batch of chunks(x.subjects)) {
-    step('对象', batch)
+    step('联系人', batch)
     await tx.insert(subjects).values(
       batch.map((s) => ({
         id: subjectIds.get(s.id)!,

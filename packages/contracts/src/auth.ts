@@ -4,9 +4,9 @@ import { KeyScopes, Layer, MemberRole, Sensitivity } from './memory'
 
 export const Username = z
   .string()
-  .regex(/^[a-z0-9][a-z0-9_.-]{1,31}$/, '用户名只用小写字母、数字和 _.-，2 到 32 位')
+  .regex(/^[a-z0-9][a-z0-9_.-]{1,31}$/, '用户名只能包含小写字母、数字和 _.-，长度 2 到 32 位')
 export const Password = z.string().min(10, '密码至少 10 位').max(256)
-export const Slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, '只用小写字母、数字和连字符')
+export const Slug = z.string().regex(/^[a-z0-9][a-z0-9-]{0,62}$/, '只能包含小写字母、数字和连字符')
 
 export const SetupStatus = z.object({ needsSetup: z.boolean() })
 export type SetupStatus = z.infer<typeof SetupStatus>

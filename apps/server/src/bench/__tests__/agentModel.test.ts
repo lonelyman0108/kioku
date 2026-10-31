@@ -770,7 +770,7 @@ describe('报错', () => {
     const err = (await requestAgentTurn(CONFIG, INPUT, fetchImpl).catch((e: unknown) => e)) as Error
     expect(err).toBeInstanceOf(AgentModelError)
     expect(err.message).not.toContain(API_KEY)
-    expect(err.message).toContain('连不上模型接口')
+    expect(err.message).toContain('无法连接模型接口')
   })
 
   // 一直不响应，等 signal 取消
@@ -785,7 +785,7 @@ describe('报错', () => {
       (e: unknown) => e,
     )) as Error
     expect(err).toBeInstanceOf(AgentModelError)
-    expect(err.message).toBe('模型 1 秒内没有返回')
+    expect(err.message).toBe('模型 1 秒内未返回')
   })
 
   // 响应头到了，正文一直不来，等 signal 取消
@@ -810,7 +810,7 @@ describe('报错', () => {
       new Promise((resolve) => setTimeout(() => resolve('时限没有生效'), 1_500)),
     ])
     expect(outcome).toBeInstanceOf(AgentModelError)
-    expect((outcome as Error).message).toBe('模型 1 秒内没有返回')
+    expect((outcome as Error).message).toBe('模型 1 秒内未返回')
   })
 
   it('请求的 signal 传给上游：客户端断开就取消', async () => {
@@ -822,7 +822,7 @@ describe('报错', () => {
       hanging,
     ).catch((e: unknown) => e)
     client.abort('Client connection prematurely closed.')
-    expect(((await pending) as Error).message).toBe('请求已经断开')
+    expect(((await pending) as Error).message).toBe('请求已断开')
   })
 
   it('读响应正文时断开也一样', async () => {
@@ -835,6 +835,6 @@ describe('报错', () => {
         return { ok: true, status: 200, text: () => Promise.reject(new Error('body')) } as Response
       }).fetchImpl,
     ).catch((e: unknown) => e)
-    expect(((await pending) as Error).message).toBe('请求已经断开')
+    expect(((await pending) as Error).message).toBe('请求已断开')
   })
 })

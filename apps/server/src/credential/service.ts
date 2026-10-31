@@ -70,7 +70,8 @@ export interface CredentialContext {
 const maskedHosted = (fields: readonly CredentialField[]) =>
   `${MASKED_HOSTED_PREFIX}字段：${fields.map((f) => f.name).join('、') || '无'}。要看值去凭据页。`
 // 打码时拒绝写回占位文字（见 rejectMaskedText）
-const MASKED_TEXT_WRITTEN = '值或条目位置里有测试台的占位文字，不是真实的内容：要改去凭据页'
+const MASKED_TEXT_WRITTEN =
+  '值或条目位置含测试台的占位文字，并非真实内容。如需修改，请到凭据页操作。'
 
 // 取用经由哪里，记在访问事件里
 export type CredentialVia = 'kioku_credential' | 'rest' | 'kioku_get'
@@ -179,19 +180,19 @@ export class CredentialService {
   // 能不能读到凭据：读不到私人层的 Key（以及群聊、私聊、定时任务等会话上下文）一条都看不到
   private requireRead(): void {
     if (!canReadCredential(this.ctx.access, { ownerAccountId: this.owner, appIds: null })) {
-      throw new MemoryError(403, '读不到凭据：需要能读私人层、最高敏感级至少 private')
+      throw new MemoryError(403, '无权读取凭据：需要可读私人层，敏感级上限不低于私密')
     }
   }
 
   private requireManage(): void {
     if (!canManageCredentials(this.ctx.access)) {
-      throw new MemoryError(403, '没有权限管理凭据：需要能读写私人层，并且是 secret 级')
+      throw new MemoryError(403, '无权管理凭据：需要可读写私人层，敏感级上限为机密')
     }
   }
 
   private seal(id: string, values: Record<string, string>) {
     if (!this.ctx.masterKey) {
-      throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，不能保存托管的凭据')
+      throw new MemoryError(400, '服务端未配置 KIOKU_MASTER_KEY，无法保存托管的凭据')
     }
     return sealCredentialValues(this.ctx.masterKey, id, values)
   }
@@ -199,7 +200,7 @@ export class CredentialService {
   private open(row: CredentialRow): Record<string, string> {
     if (!row.ciphertext || !row.wrappedKey) return {}
     if (!this.ctx.masterKey) {
-      throw new MemoryError(400, '服务端没有配置 KIOKU_MASTER_KEY，无法解密托管的凭据')
+      throw new MemoryError(400, '服务端未配置 KIOKU_MASTER_KEY，无法解密托管的凭据')
     }
     return openCredentialValues(this.ctx.masterKey, {
       ...row,
@@ -403,7 +404,7 @@ export class CredentialService {
       else merged[name] = value
     }
     const names = Object.keys(merged).sort()
-    if (!names.length) throw new MemoryError(400, '托管的凭据至少要有一个字段')
+    if (!names.length) throw new MemoryError(400, '托管的凭据至少需要一个字段')
     if (names.length > MAX_CREDENTIAL_FIELDS) {
       throw new MemoryError(400, `一条凭据最多 ${MAX_CREDENTIAL_FIELDS} 个字段`)
     }
@@ -461,7 +462,7 @@ export class CredentialService {
     input: Omit<UpdateCredentialRequest, 'appIds'> & { appIds?: string[] | null | undefined },
   ): Promise<Written> {
     this.requireManage()
-    if (before.deletedAt) throw new MemoryError(409, '这条凭据已被删除，先恢复再修改')
+    if (before.deletedAt) throw new MemoryError(409, '这条凭据已删除。请先恢复，再修改。')
     if (input.expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
     }
@@ -490,7 +491,7 @@ export class CredentialService {
     }
     if (input.appIds !== undefined) {
       // 被诱导的 agent 不能给自己放宽
-      if (this.viaKey) throw new MemoryError(403, '限定给哪些应用只能在管理界面改')
+      if (this.viaKey) throw new MemoryError(403, '限定的应用只能在管理界面修改')
       const appIds = input.appIds === null ? null : [...new Set(input.appIds)].sort()
       if (!sameJson(appIds, before.appIds)) {
         set.appIds = appIds
@@ -530,7 +531,7 @@ export class CredentialService {
 
   private async remove(tx: Tx, before: CredentialRow, expectedVersion?: number): Promise<void> {
     this.requireManage()
-    if (before.deletedAt) throw new MemoryError(409, '这条凭据已被删除')
+    if (before.deletedAt) throw new MemoryError(409, '这条凭据已删除')
     if (expectedVersion !== undefined && expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
     }
@@ -543,7 +544,7 @@ export class CredentialService {
       .for('update')
     const used = (await this.referenceCounts(tx, [before.identifier])).get(before.identifier) ?? 0
     if (used) {
-      throw new MemoryError(409, `还有 ${used} 条记忆引用这条凭据，先改掉这些引用再删除`)
+      throw new MemoryError(409, `仍有 ${used} 条记忆引用此凭据。请先修改这些引用，再删除。`)
     }
     const [row] = await tx
       .update(credentials)
@@ -649,7 +650,7 @@ export class CredentialService {
     return this.run(async (tx) => {
       this.requireManage()
       const before = await this.ownById(tx, id)
-      if (!before.deletedAt) throw new MemoryError(409, '这条凭据没有被删除')
+      if (!before.deletedAt) throw new MemoryError(409, '这条凭据未被删除')
       const [row] = await tx
         .update(credentials)
         .set({ deletedAt: null, version: sql`${credentials.version} + 1`, updatedAt: new Date() })
@@ -670,13 +671,13 @@ export class CredentialService {
         throw new MemoryError(
           409,
           now && !now.deletedAt
-            ? '这条凭据刚被别的请求恢复了'
+            ? '这条凭据刚被其他请求恢复'
             : `版本已变化：当前是 ${now?.version ?? before.version}，请先重新读取`,
         )
       }
       await this.event(tx, id, 'undelete')
       return this.consoleViewOf(tx, { row })
-    }, '同一个标识已经有一条有效的凭据，这一条不能恢复')
+    }, '同一标识已有有效凭据，无法恢复此凭据')
   }
 
   // 引用这条凭据的记忆，最近改过的在前
@@ -716,11 +717,11 @@ export class CredentialService {
     return this.run(async (tx) => {
       const row = await this.ownById(tx, id)
       if (!canRevealCredential(this.ctx.access, row)) {
-        throw new MemoryError(403, '只有空间 owner 能查看托管的值')
+        throw new MemoryError(403, '仅空间所有者可查看托管的值')
       }
-      if (row.deletedAt) throw new MemoryError(409, '这条凭据已被删除，先恢复再查看')
+      if (row.deletedAt) throw new MemoryError(409, '这条凭据已删除。请先恢复，再查看。')
       if (row.source !== 'hosted') {
-        throw new MemoryError(400, '这条凭据的值在外部凭据源里，Kioku 不保存')
+        throw new MemoryError(400, '这条凭据的值在外部凭据源中，Kioku 不保存')
       }
       const values = this.open(row)
       await this.event(tx, id, 'access', { via: 'console', fields: Object.keys(values).sort() })
@@ -904,7 +905,7 @@ export class CredentialService {
       if (!row) throw new MemoryError(404, '凭据源不存在')
       const bound = await this.boundCount(tx, id)
       if (bound) {
-        throw new MemoryError(409, `还有 ${bound} 条凭据绑定这个凭据源，先改绑或删除它们`)
+        throw new MemoryError(409, `仍有 ${bound} 条凭据绑定此凭据源。请先改绑或删除这些凭据。`)
       }
       await tx
         .update(credentialProviders)

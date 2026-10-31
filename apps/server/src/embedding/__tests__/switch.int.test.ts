@@ -173,7 +173,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     server.fail('b', 500)
     const third = await create('第三条')
     await expect(embedJob(database.db, source, ws.spaceId, third, noRetry)).rejects.toThrow(
-      '所有渠道都失败了',
+      '所有渠道均失败',
     )
     expect((await status()).lastError).toMatchObject({
       model: 'm1',
@@ -292,7 +292,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       await tx.execute(sql`select id from memories where id = ${locked} for update`)
       expect(await switchJob(database.db, source, async (_space, ids) => ids)).toBe('stuck')
     })
-    expect((await status()).lastError?.message).toContain('补了一遍也没补上')
+    expect((await status()).lastError?.message).toContain('补齐未成功')
   })
 
   it('一条坏记忆不拦住别的：整批失败时逐条再试，跳过它并记下原因；接口不可用时只多试几条就停', async () => {
@@ -305,7 +305,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect((await modelsOf()).length).toBe(2)
     expect((await status()).lastError).toMatchObject({
       model: 'm1',
-      message: expect.stringContaining('有 1 条记忆生成不了向量'),
+      message: expect.stringContaining('1 条记忆无法生成向量'),
     })
 
     // 整个接口都出错时：一批失败之后逐条最多再试三条，然后报错，不一条条把整批请求完
@@ -346,7 +346,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     expect(there.map((r) => r.model)).toEqual(['m2', 'm2'])
     expect((await status()).lastError).toMatchObject({
       model: 'm2',
-      message: expect.stringContaining('有 1 条记忆生成不了向量'),
+      message: expect.stringContaining('1 条记忆无法生成向量'),
     })
   })
 
@@ -574,13 +574,13 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     const noKey = await testWith({ masterKey: null })
     expect(noKey.status).toBe(400)
     expect(((await noKey.json()) as { error: string }).error).toContain(
-      '嵌入接口的 Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+      '嵌入接口的 Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
     )
     const mismatch = await testWith({ masterKey: randomBytes(32) })
     expect(mismatch.status).toBe(400)
     const { error } = (await mismatch.json()) as { error: string }
-    expect(error).toContain('嵌入接口的 Key 解不开')
-    expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+    expect(error).toContain('嵌入接口的 Key 无法解密')
+    expect(error).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
     expect(server.requests).toEqual([])
   })
 
@@ -615,7 +615,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
     const { active } = (await res.json()) as EmbeddingTestResult
     expect(active![0]).toMatchObject({
       ok: false,
-      error: expect.stringContaining('连不上嵌入接口'),
+      error: expect.stringContaining('无法连接嵌入接口'),
     })
     expect(active![0]!.error).not.toContain('sk-pasted')
     expect(active![0]!.error).not.toContain('with-newline')
@@ -635,7 +635,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       })
       expect(res.status).toBe(400)
       const { error } = (await res.json()) as { error: string }
-      expect(error).toContain('只能有英文字母、数字和半角符号')
+      expect(error).toContain('只能包含英文字母、数字和半角符号')
       expect(error).not.toContain('sk-new')
     }
     expect(await stored()).toBe('sk-chan')

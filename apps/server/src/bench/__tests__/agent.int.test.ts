@@ -206,7 +206,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       const server = await startModel(() => '不该请求到这里')
       const res = await postTurn({ messages: [USER] }, ws.cookie, path)
       expect(res.status).toBe(403)
-      expect(await errorOf(res)).toContain('主人')
+      expect(await errorOf(res)).toContain('所有者')
       expect((await getInfo(ws.cookie, path)).status).toBe(403)
       expect(server.requests).toHaveLength(0)
     })
@@ -216,7 +216,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       const server = await startModel(() => '不该请求到这里')
       const res = await postTurn({ messages: [USER] }, bob.cookie)
       expect(res.status).toBe(403)
-      expect(await errorOf(res)).toContain('主人')
+      expect(await errorOf(res)).toContain('所有者')
       expect((await getInfo(bob.cookie)).status).toBe(403)
       expect(server.requests).toHaveLength(0)
     })
@@ -345,9 +345,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         const res = await postTurn({ messages: [USER] }, ws.cookie, benchPath(), otherKey)
         expect(res.status).toBe(400)
         const error = await errorOf(res)
-        expect(error).toContain('抽取模型的 Key 解不开')
+        expect(error).toContain('抽取模型的 Key 无法解密')
         expect(error).toContain('KIOKU_MASTER_KEY')
-        expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+        expect(error).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
         const info = await getInfo(ws.cookie, benchPath(), otherKey)
         expect(info.status).toBe(200)
         expect(BenchAgentInfo.parse(await info.json())).toEqual(keyLocked(server))
@@ -920,7 +920,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       const res = await postTurn({ messages: [USER] })
       expect(res.status).toBe(502)
       const error = await errorOf(res)
-      expect(error).toContain('连不上模型接口')
+      expect(error).toContain('无法连接模型接口')
       expect(error).not.toContain('sk-pasted')
       expect(error).not.toContain('with-newline')
       expect(server.requests).toHaveLength(0)
@@ -931,7 +931,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       await server.close()
       const res = await postTurn({ messages: [USER] })
       expect(res.status).toBe(502)
-      expect(await errorOf(res)).toContain('连不上模型接口')
+      expect(await errorOf(res)).toContain('无法连接模型接口')
     })
   })
 
@@ -1025,7 +1025,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       }
       const longName = await postTurn({ messages: [USER], model: 'x'.repeat(129) })
       expect(longName.status).toBe(400)
-      expect(await errorOf(longName)).toContain('模型名太长')
+      expect(await errorOf(longName)).toContain('模型名过长')
       expect(server.requests).toHaveLength(0)
     })
 
@@ -1035,19 +1035,19 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         messages: Array.from({ length: BENCH_AGENT_MAX_MESSAGES + 1 }, () => USER),
       })
       expect(tooMany.status).toBe(400)
-      expect(await errorOf(tooMany)).toContain('对话太长')
+      expect(await errorOf(tooMany)).toContain('对话过长')
 
       const tooLarge = await postTurn({
         messages: [{ role: 'user', content: 'x'.repeat(BENCH_AGENT_MAX_BYTES) }],
       })
       expect(tooLarge.status).toBe(400)
-      expect(await errorOf(tooLarge)).toContain('对话太长')
+      expect(await errorOf(tooLarge)).toContain('对话过长')
 
       const tooBig = await postTurn({
         messages: [{ role: 'user', content: 'x'.repeat(BENCH_AGENT_MAX_BYTES + 128 * 1024) }],
       })
       expect(tooBig.status).toBe(413)
-      expect(await errorOf(tooBig)).toContain('对话太长')
+      expect(await errorOf(tooBig)).toContain('对话过长')
       expect(server.requests).toHaveLength(0)
     })
   })

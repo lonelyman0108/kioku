@@ -113,7 +113,7 @@ const exportRoute = createRoute({
 // 同时上传的个数不另外限制
 function uploadMiddleware(deps: Deps): MiddlewareHandler<AppEnv>[] {
   return [
-    requireInstanceAdmin(deps, '只有实例管理员能导入空间'),
+    requireInstanceAdmin(deps, '仅实例管理员可导入空间'),
     bodyLimit({
       maxSize: SPACE_EXPORT_MAX_BYTES + 64 * 1024,
       onError: (c) =>
@@ -283,9 +283,9 @@ export function spaceRoutes(deps: Deps) {
       const { spaceId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       const role = await memberRole(deps, spaceId, accountId)
-      if (!role) return c.json({ error: '不是该空间成员' }, 403)
+      if (!role) return c.json({ error: '无权访问此空间' }, 403)
       // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
-      if (role !== 'owner') return c.json({ error: '只有空间 owner 能导出空间' }, 403)
+      if (role !== 'owner') return c.json({ error: '仅空间所有者可导出空间' }, 403)
       const signal = c.req.raw.signal
       const limits = deps.exportSendLimits ?? {
         idleMs: EXPORT_SEND_IDLE_MS,
@@ -351,7 +351,7 @@ export function spaceRoutes(deps: Deps) {
     .openapi(members, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '不是该空间成员' }, 403)
+        return c.json({ error: '无权访问此空间' }, 403)
       }
       const rows = await deps.db
         .select({
@@ -369,7 +369,7 @@ export function spaceRoutes(deps: Deps) {
     .openapi(budget, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '不是该空间成员' }, 403)
+        return c.json({ error: '无权访问此空间' }, 403)
       }
       return c.json(await extractionUsage(deps.db, spaceId), 200)
     })
@@ -377,7 +377,7 @@ export function spaceRoutes(deps: Deps) {
       const { spaceId } = c.req.valid('param')
       // 预算管的是花钱的事，和 domain 默认层一样只有空间 owner 能改
       if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
-        return c.json({ error: '只有空间 owner 能改抽取预算' }, 403)
+        return c.json({ error: '仅空间所有者可修改抽取预算' }, 403)
       }
       await saveExtractionBudget(deps.db, spaceId, c.req.valid('json'))
       return c.json(await extractionUsage(deps.db, spaceId), 200)
@@ -385,7 +385,7 @@ export function spaceRoutes(deps: Deps) {
     .openapi(read, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '不是该空间成员' }, 403)
+        return c.json({ error: '无权访问此空间' }, 403)
       }
       const [row] = await deps.db
         .select({ domainLayers: spaces.domainLayers })
@@ -396,7 +396,7 @@ export function spaceRoutes(deps: Deps) {
     .openapi(save, async (c) => {
       const { spaceId } = c.req.valid('param')
       if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
-        return c.json({ error: '只有空间 owner 能改 domain 默认层' }, 403)
+        return c.json({ error: '仅空间所有者可修改 domain 默认层' }, 403)
       }
       const { defaults } = c.req.valid('json')
       await deps.db.update(spaces).set({ domainLayers: defaults }).where(eq(spaces.id, spaceId))

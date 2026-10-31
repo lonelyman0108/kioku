@@ -108,16 +108,16 @@ describe('请求本身有问题时的回复', () => {
     const body = JSON.stringify({ username: 'alice', password: 'correct horse battery' })
     expect(
       await errorOf(await post('/v1/auth/login', body, { 'content-type': 'text/plain' }), 415),
-    ).toBe('请求体的类型（Content-Type）不对')
+    ).toBe('请求体类型（Content-Type）错误')
     expect(
       await errorOf(
         await post('/v1/auth/login', body, { 'content-type': 'multipart/form-data; boundary=x' }),
         415,
       ),
-    ).toBe('请求体的类型（Content-Type）不对')
+    ).toBe('请求体类型（Content-Type）错误')
     // 字节数组作请求体时不会自动带上 Content-Type
     expect(await errorOf(await post('/v1/auth/login', new TextEncoder().encode(body)), 415)).toBe(
-      '请求体的类型（Content-Type）不对',
+      '请求体类型（Content-Type）错误',
     )
     expect(logged).not.toHaveBeenCalled()
   })

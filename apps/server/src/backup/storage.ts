@@ -63,7 +63,7 @@ export async function uploadBackup(
     const others = (await listBackups(client, config.prefix)).filter((o) => o.key !== object)
     for (const stale of others.slice(config.keep - 1)) await client.delete(stale.key)
   } catch (err) {
-    warning = `备份已经传上去，但删旧备份时出错：${(err as Error).message}`
+    warning = `备份已上传，但删除旧备份时出错：${(err as Error).message}`
   }
   return { run: { at: summary.createdAt, object, bytes: summary.bytes }, warning }
 }
@@ -86,7 +86,7 @@ export async function backupJob(
   }
   // 解开设置里的 Secret 也算在里面：解不开（例如没配主密钥）同样记下原因给管理员看
   try {
-    if (!masterKey) throw new Error('备份用主密钥加密：服务端没有配置 KIOKU_MASTER_KEY')
+    if (!masterKey) throw new Error('备份使用主密钥加密，服务端未配置 KIOKU_MASTER_KEY')
     const config = await loadBackupConfig(db, masterKey)
     if (!config) return 'skipped'
     const { run, warning } = await uploadBackup(db, masterKey, config)

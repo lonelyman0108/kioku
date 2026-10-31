@@ -84,7 +84,7 @@ def test_turn_end_and_validation_error():
         body = json.loads(request.content)
         assert body["event"] == "turn.end"
         assert body["user"] == "我在学日语"
-        return httpx.Response(400, json={"error": "群聊与频道要带上这一轮的发言人"})
+        return httpx.Response(400, json={"error": "群聊与频道须带上本轮的发言人"})
 
     # 群里不带发言人，服务端会拒绝
     result = post_v1_lifecycle_event.sync(
@@ -100,7 +100,7 @@ def test_turn_end_and_validation_error():
         ),
     )
     assert isinstance(result, ErrorResponse)
-    assert result.error == "群聊与频道要带上这一轮的发言人"
+    assert result.error == "群聊与频道须带上本轮的发言人"
 
 
 def test_recall_parses_candidates_and_subject_facts():

@@ -19,11 +19,11 @@ export const SpaceExportRequest = z.object({
 export type SpaceExportRequest = z.infer<typeof SpaceExportRequest>
 
 const ExportFile = z
-  .file('要上传导出文件')
+  .file('请上传导出文件')
   .max(SPACE_EXPORT_MAX_BYTES, `文件超过 ${SPACE_EXPORT_MAX_BYTES / 1024 / 1024} MB 的上限`)
   .meta({ type: 'string', format: 'binary' })
 // 口令只要求不为空：以后调高长度要求时，之前导出的文件照样能导入
-const ImportPassphrase = z.string().min(1, '要填导出时设的口令').max(PASSPHRASE_MAX)
+const ImportPassphrase = z.string().min(1, '请填写导出时设置的口令').max(PASSPHRASE_MAX)
 
 // 导入之前先检查文件：解开、核对内容，说清是谁导出的、导入后有哪些归你，不写库
 export const SpaceImportInspectForm = z.object({ file: ExportFile, passphrase: ImportPassphrase })

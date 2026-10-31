@@ -31,8 +31,8 @@ import { jsonBody, jsonResponse, router } from '../http/openapi'
 // 验证码自助绑定的接入方接口（见 access/binding.ts）。插件把这里的错误原样回复给发命令的人，所以说法要短
 
 const security = [{ bearer: [] }]
-const BUSY = '正忙，请稍后再试'
-const NOT_ALLOWED = '这个 bot 的 Key 写不了对象层，不能绑定账号'
+const BUSY = '服务繁忙，请稍后重试'
+const NOT_ALLOWED = '当前 bot 的 Key 无权写入联系人层，无法绑定账号'
 
 const codeRoute = createRoute({
   method: 'post',
@@ -87,9 +87,9 @@ const voidRoute = createRoute({
 })
 
 const LIMIT_MESSAGES: Record<AttemptLimit['scope'], string> = {
-  account: '输错的次数太多了',
-  app: '最近输错绑定码的太多',
-  void: '作废的请求太多了',
+  account: '输错次数过多',
+  app: '近期输错绑定码的次数过多',
+  void: '作废请求过多',
 }
 
 // 占一次名额。超了时设好 Retry-After，返回给人看的提示，调用方拿它回 429；没超时为 null。
@@ -102,7 +102,7 @@ async function overLimit(
   if (!limit) return null
   c.header('Retry-After', String(limit.waitSeconds))
   const minutes = Math.max(1, Math.ceil(limit.waitSeconds / 60))
-  return `${LIMIT_MESSAGES[limit.scope]}，${minutes} 分钟后再试`
+  return `${LIMIT_MESSAGES[limit.scope]}，请 ${minutes} 分钟后重试`
 }
 
 export function bindingRoutes(deps: Deps) {
@@ -113,7 +113,7 @@ export function bindingRoutes(deps: Deps) {
       const key = c.get('key')
       const { context } = c.req.valid('json')
       // 群里不发码：码会被群里的人看到
-      if (context.chatType !== 'direct') return c.json({ error: '只能在私聊里申请绑定码' }, 400)
+      if (context.chatType !== 'direct') return c.json({ error: '只能在私聊中申请绑定码' }, 400)
       if (!canBindWithKey(key)) return c.json({ error: NOT_ALLOWED }, 403)
       const session = await resolveKeySession(deps, key, context)
       // 契约保证私聊带着平台与发言人
@@ -143,11 +143,11 @@ export function bindingRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const { context } = body
       // 群里不收码：发在群里的码大家都看得到，谁都能抢先用（插件会把它作废）
-      if (context.chatType !== 'direct') return c.json({ error: '只能在私聊里绑定' }, 400)
+      if (context.chatType !== 'direct') return c.json({ error: '只能在私聊中绑定' }, 400)
       if (!canBindWithKey(key)) return c.json({ error: NOT_ALLOWED }, 403)
       // 格式不对的不可能是哪个码，不算输错
       const code = normalizeCode(body.code)
-      if (!code) return c.json({ error: '绑定码是 8 位字母和数字' }, 400)
+      if (!code) return c.json({ error: '绑定码由 8 位字母和数字组成' }, 400)
       const platform = context.platform!
       const sender = context.sender!
       const tooMany = await overLimit(c, reserveAttempt(deps.db, key, platform, sender.id))
@@ -207,20 +207,20 @@ export function bindingRoutes(deps: Deps) {
             200,
           )
         case 'invalid':
-          return c.json({ error: '绑定码不对或已经失效，请重新申请' }, 400)
+          return c.json({ error: '绑定码错误或已失效，请重新申请' }, 400)
         case 'same':
-          return c.json({ error: '这个账号和申请绑定码的账号已经是同一个人了' }, 409)
+          return c.json({ error: '此账号与申请绑定码的账号已是同一个人' }, 409)
         case 'linked':
           return c.json(
             {
               error: result.issuerLinked
-                ? '两个账号标记成了不同的成员，不能绑在一起'
-                : '这个账号标记成了空间里的成员，不能并到别的账号里；可以反过来，用这个账号申请绑定码',
+                ? '两个账号已标记为不同成员，无法绑定'
+                : '此账号已标记为空间成员，无法合并到其他账号。可改用此账号申请绑定码。',
             },
             403,
           )
         case 'kind':
-          return c.json({ error: '只能绑定人的账号' }, 400)
+          return c.json({ error: '只能绑定个人账号' }, 400)
         case 'busy':
           return c.json({ error: BUSY }, 409)
       }
@@ -230,10 +230,10 @@ export function bindingRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const { context } = body
       if (context.chatType !== 'group' && context.chatType !== 'channel') {
-        return c.json({ error: '只作废在群里发出来的绑定码' }, 400)
+        return c.json({ error: '只作废群里发出的绑定码' }, 400)
       }
       // 按发言人计次数：不带发言人就没法拦住拿它试码
-      if (!context.sender) return c.json({ error: '要带上这条消息的发言人' }, 400)
+      if (!context.sender) return c.json({ error: '须带上这条消息的发言人' }, 400)
       if (!canBindWithKey(key)) return c.json({ error: NOT_ALLOWED }, 403)
       // 格式不对的不可能是哪个码，什么都不用做
       const code = normalizeCode(body.code)

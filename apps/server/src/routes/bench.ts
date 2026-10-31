@@ -53,7 +53,7 @@ const runRoute = createRoute({
   middleware: [
     bodyLimit({
       maxSize: BENCH_MAX_REQUEST_BYTES,
-      onError: (c) => c.json({ error: '请求体太大，减少步骤或清空重放之后再试' }, 413),
+      onError: (c) => c.json({ error: '请求体过大，请减少步骤或清空重放后重试' }, 413),
     }),
   ],
   request: { params: KeyParams, body: jsonBody(BenchRunRequest) },
@@ -98,7 +98,7 @@ const agentTurnRoute = createRoute({
     bodyLimit({
       // 留出请求体里 messages 之外的部分，messages 本身的上限在契约里
       maxSize: BENCH_AGENT_MAX_BYTES + 64 * 1024,
-      onError: (c) => c.json({ error: '对话太长，清空之后再试' }, 413),
+      onError: (c) => c.json({ error: '对话过长，请清空后重试' }, 413),
     }),
   ],
   request: { params: KeyParams, body: jsonBody(BenchAgentTurnRequest) },
@@ -180,7 +180,7 @@ export function benchRoutes(deps: Deps) {
       if ('error' in found) return c.json({ error: found.error }, found.status)
       if (!(await isInstanceAdmin(deps.db, accountId))) {
         return c.json(
-          { error: '只有实例管理员能用模型代理：Key 是实例的，而且不计入抽取预算' },
+          { error: '仅实例管理员可使用模型代理：请求用的是实例的模型 Key，且不计入抽取预算' },
           403,
         )
       }
@@ -188,7 +188,7 @@ export function benchRoutes(deps: Deps) {
       if (!loaded.ok) return c.json({ error: loaded.error }, 400)
       const config = loaded.value
       if (!config) {
-        return c.json({ error: '还没有配模型：去实例设置配好抽取模型之后才能用模型代理' }, 400)
+        return c.json({ error: '未配置模型。请先在实例设置中配置抽取模型。' }, 400)
       }
       const { model, messages } = c.req.valid('json')
       const tools = agentGetsTools(agentLoopFor(found.key.app.runtimeFamily))

@@ -158,7 +158,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect(moved.status).toBe(400)
     // Secret 不能清除，只说重新填写
     expect(await moved.json()).toEqual({
-      error: '接口主机变了，已保存的 Secret Access Key 不会发给新的主机：请重新填写',
+      error: '接口主机已变更，已保存的 Secret Access Key 不会发送给新主机。请重新填写。',
     })
 
     expect((await send('PUT', '', settingsInput({ prefix: '/kioku/' }))).status).toBe(400)
@@ -323,7 +323,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect((await loadBackupStatus(database.db)).lastError).not.toBeNull()
     expect(await backupJob(database.db, null, true)).toBe('failed')
     expect((await loadBackupStatus(database.db)).lastError?.message).toContain(
-      '没有配置 KIOKU_MASTER_KEY',
+      '服务端未配置 KIOKU_MASTER_KEY',
     )
 
     s3.fail(403, 'PUT')
@@ -348,7 +348,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     expect(await backupJob(database.db, masterKey, true)).toBe('done')
     status = await loadBackupStatus(database.db)
     expect(status.lastSuccess).not.toBeNull()
-    expect(status.lastError?.message).toContain('备份已经传上去，但删旧备份时出错')
+    expect(status.lastError?.message).toContain('备份已上传，但删除旧备份时出错')
 
     // 之后整次成功就清掉提醒
     s3.fail(undefined, 'DELETE')
@@ -434,7 +434,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
     const res = await send('PUT', '', settingsInput({ secretAccessKey: 'other\nsecret' }))
     expect(res.status).toBe(400)
     const { error } = (await res.json()) as { error: string }
-    expect(error).toContain('Secret Access Key 只能有英文字母、数字和半角符号')
+    expect(error).toContain('Secret Access Key 只能包含英文字母、数字和半角符号')
     expect(error).not.toContain('other')
     expect(await stored()).toBe('backup-secret')
   })
@@ -442,15 +442,15 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
   it('Secret 解不开：报错按它的名字说，不叫 Key；提示轮换期间旧的那把配在哪里', async () => {
     await save()
     await expect(loadBackupConfig(database.db, null)).rejects.toThrow(
-      '备份存储的 Secret Access Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+      '备份存储的 Secret Access Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
     )
     const err = (await loadBackupConfig(database.db, randomBytes(32)).catch(
       (e: unknown) => e,
     )) as Error
     expect(err).toBeInstanceOf(ApiKeyLockedError)
-    expect(err.message).toContain('备份存储的 Secret Access Key 解不开')
+    expect(err.message).toContain('备份存储的 Secret Access Key 无法解密')
     expect(err.message).not.toContain('的 Key')
-    expect(err.message).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+    expect(err.message).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
   })
 
   // 同一个库，换一个主密钥或数据库建的应用，请求一个备份的路由
@@ -479,7 +479,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
   it.each(READS_CONFIG)('%s时还没有保存设置：400 并说明', async (_, method, path) => {
     const res = await send(method, path)
     expect(res.status).toBe(400)
-    expect(await res.json()).toEqual({ error: '还没有保存备份存储的设置' })
+    expect(await res.json()).toEqual({ error: '尚未保存备份存储设置' })
   })
 
   it.each(READS_CONFIG)(
@@ -489,13 +489,13 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       const noKey = await sendWith({ masterKey: null }, method, path)
       expect(noKey.status).toBe(400)
       expect(await noKey.json()).toEqual({
-        error: '备份存储的 Secret Access Key 已加密保存，但服务端没有配置 KIOKU_MASTER_KEY',
+        error: '备份存储的 Secret Access Key 已加密保存，但服务端未配置 KIOKU_MASTER_KEY',
       })
       const mismatch = await sendWith({ masterKey: randomBytes(32) }, method, path)
       expect(mismatch.status).toBe(400)
       const { error } = (await mismatch.json()) as { error: string }
-      expect(error).toContain('备份存储的 Secret Access Key 解不开')
-      expect(error).toContain('旧的那把要配在 KIOKU_MASTER_KEY_PREVIOUS')
+      expect(error).toContain('备份存储的 Secret Access Key 无法解密')
+      expect(error).toContain('旧密钥须配置在 KIOKU_MASTER_KEY_PREVIOUS')
       expect(s3.requests).toEqual([])
       expect(queued).toEqual([])
     },
@@ -544,7 +544,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       (await loadBackupStatus(database.db)).lastError?.message,
     ]
     for (const error of errors) {
-      expect(error).toContain('连不上存储')
+      expect(error).toContain('无法连接存储')
       for (const leaked of ['Credential', 'Signature', 'AKIAPASTED', 'with-newline']) {
         expect(error).not.toContain(leaked)
       }
@@ -578,7 +578,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
   it('Secret 也在主密钥管的数据里：启动检查认得它，轮换时换成新密钥的包装', async () => {
     await save()
     await expect(checkMasterKey(database.db, randomBytes(32))).rejects.toThrow(
-      '实例设置里的接口 Key 1 条解不开',
+      '实例设置中的接口 Key 1 条解不开',
     )
     const newKey = randomBytes(32)
     expect(

@@ -47,7 +47,7 @@ export const benchLimits = (deps: Deps): BenchLimits => ({ ...BENCH_LIMITS, ...d
 let running = 0
 
 function enterGate(limit: number): () => void {
-  if (running >= limit) throw new MemoryError(429, '测试台同时运行的回滚太多，稍后再试')
+  if (running >= limit) throw new MemoryError(429, '测试台同时运行的回滚过多，请稍后重试')
   running++
   return () => {
     running--
