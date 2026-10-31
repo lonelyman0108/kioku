@@ -213,7 +213,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
       expect((await suspects()).list).toEqual([m.uri])
     })
 
-    it('恢复旧版本：恢复成别的正文时回来，恢复成忽略时的那段正文时还算忽略', async () => {
+    it('恢复旧版本：恢复成别的正文时回来；再恢复成忽略时的那段正文也要重新忽略，哈希已经清掉了', async () => {
       const m = await remember({ uri: 'notes://wifi', content: SECOND })
       const edited = await edit({ uri: m.uri, content: FIRST })
       await ok(await ignore(edited))
@@ -243,8 +243,8 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
           }),
         ),
       )
-      expect(toFirst.plaintextIgnored).toBe(true)
-      expect((await suspects()).list).toEqual([])
+      expect(toFirst.plaintextIgnored).toBe(false)
+      expect((await suspects()).list).toEqual([m.uri])
     })
 
     it('导入同步', async () => {
@@ -274,6 +274,31 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
       expect(result.failed).toEqual([])
       expect((await suspects()).list).toEqual([m.uri])
     })
+  })
+
+  it('正文一变就清掉哈希：它是含旧值的正文的 SHA-256，留着能离线猜解；只改别的字段时留着', async () => {
+    const hashOf = async (id: string) =>
+      (
+        await inSpace((tx) =>
+          tx
+            .select({ hash: memories.plaintextIgnoredHash })
+            .from(memories)
+            .where(eq(memories.id, id)),
+        )
+      )[0]!.hash
+    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    await ok(await ignore(m))
+    expect(await hashOf(m.id)).toMatch(/^[0-9a-f]{64}$/)
+
+    await edit({ uri: m.uri, priority: 5 })
+    await edit({ uri: m.uri, disclosure: '连 Wi-Fi 时' })
+    expect(await hashOf(m.id)).not.toBeNull()
+    // 正文写回一样的不算变化
+    await edit({ uri: m.uri, content: '访客网络密码：guest-1234' })
+    expect(await hashOf(m.id)).not.toBeNull()
+
+    await edit({ uri: m.uri, content: '访客网络密码：guest-5678' })
+    expect(await hashOf(m.id)).toBeNull()
   })
 
   it('改成 secret 时清掉哈希（密文的哈希不留在明文列里），之后不算；降级回来提示也回来', async () => {

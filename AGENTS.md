@@ -101,7 +101,7 @@
 - 管理界面读记忆默认不给 secret 的正文，Key 读到要留痕，都由 `MemoryContext.secretRead` 决定，判断和记访问事件都在 `toView`，只此一处。新增返回 `MemoryView` 的路径要经过 `toView`，`via` 必填：响应里的正文是调用方刚写的或本来就是明文才传 null。内部路径（导入工具比对）不设它。解密的正文不进 `useQuery` 的缓存（`apps/web/src/secretContent.ts`）。原因：缓存活得比页面长，查看要每次留痕。
 - 管理界面的响应是 `ConsoleMemoryView`，比接入方的 `MemoryView` 多 `contentHidden`、`plaintextIgnored`。这两个字段不能加进 `MemoryView`，加了要重新生成 SDK；`toView` 只在 `secretRead` 为 `explicit` 时带上，Key 的响应才不多字段（`c.json` 不会按 schema 剥）。
 - 不改记忆的事件（`access`、`ignore_plaintext`、`unignore_plaintext`）只写 `before`，`after` 为 null。原因：界面按 `after.version` 标「现在的版本」，恢复也读 `after`，带上 `after` 就成了能恢复的版本。可见性靠 `before` 的敏感级，所以访问事件要写快照，不能两边都 null：否则降级之后 editor 也看得到之前的访问记录。`access` 不进活动（`activity` 里过滤），历史里另算上限，按保留期清（`retentionRules` 的 `accessEvents`）。
-- 忽略明文提示靠 `memories.plaintext_ignored_hash` 和现在的正文比，写入路径都不用管它：SQL（`IGNORED_NOW`）和 JS（`contentHash`）的算法要一致，`plaintextIgnore.int.test.ts` 核对。这一列不进事件快照（`UNSNAPSHOTTED`），不随空间导出，改成 secret 时清掉。
+- 忽略明文提示靠 `memories.plaintext_ignored_hash` 和现在的正文比，判断只看这个比较，新的写入路径不处理它也不会判错：SQL（`IGNORED_NOW`）和 JS（`contentHash`）的算法要一致，`plaintextIgnore.int.test.ts` 核对。`applyUpdate` 在正文变化时清掉它：它是含旧值的正文的哈希，能离线猜解；新增改正文的路径也要清。这一列不进事件快照（`UNSNAPSHOTTED`），不随空间导出，改成 secret 时清掉。
 - 转存为凭据靠 `scrubValue` 把值从 `memory_events` 里拿掉，只改 `scrubSnapshot` 认得的字段（正文、disclosure、关键词）。给快照加新的文字字段时要同步改它。写事件的路径都要先改或锁记忆那一行：否则带着旧正文的事件可能在转存提交之后才写进来，值又回到历史里。
 - 路由和测试台共用的处理函数（`lifecycle/handlers.ts`）不在里面新建 scope，由调用方传入，否则测试台关不掉 `record`。路由要显式只取 `LifecycleResponse` 的字段：`c.json` 不会按 schema 剥掉多余字段，`session` 不能加进 `LifecycleResponse`，加了要重新生成 SDK。
 - 新路由如果引用接入方的命名组件（`TurnEndEvent`、`SessionContext` 等），要挂在接入方路由后面（测试台路由挂在最后）。原因：OpenAPI 的组件按第一次用到的顺序排，挂早了 `sdks/python/generate.sh --check` 会失败，哪怕接口没变。

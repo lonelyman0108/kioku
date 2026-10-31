@@ -227,6 +227,18 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect(restored.content).not.toContain('第二版的备注')
   })
 
+  it('忽略过提示的：转存之后不留含这个值的正文的哈希', async () => {
+    const m = await seedNote()
+    const ignored = await send('POST', '/memories/ignore-plaintext', {
+      memoryId: m.id,
+      expectedVersion: m.version,
+    })
+    expect(ignored.status).toBe(200)
+    expect((await rowOf(m.id)).plaintextIgnoredHash).not.toBeNull()
+    await converted(m)
+    expect((await rowOf(m.id)).plaintextIgnoredHash).toBeNull()
+  })
+
   it('全文索引跟着新正文；向量在同一个事务里删掉，重新生成的按新正文', async () => {
     const m = await seedNote()
     const tokens = () =>

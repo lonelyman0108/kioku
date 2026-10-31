@@ -1277,6 +1277,8 @@ export class MemoryService {
       .update(memories)
       .set({
         ...body,
+        // 正文变了，忽略时记下的哈希就没用了；留着的话，它是含旧值的正文的 SHA-256，能离线猜解
+        ...(plaintext !== before.content ? { plaintextIgnoredHash: null } : {}),
         layer,
         ownerAccountId,
         sensitivity,
@@ -3207,7 +3209,7 @@ function neverRecalled(recall: RecallWindow): SQL {
 // 正文像有明文密码或 Token：与界面、导入工具同一条规则（PLAINTEXT_CREDENTIAL），PostgreSQL 的正则照原样能用，
 // ~* 不区分大小写，对应它的 i 标记。secret 的正文是密文（content 为空），结果为 NULL，不算
 const PLAINTEXT_MATCH = sql`(${memories.content} ~* ${PLAINTEXT_CREDENTIAL.source})`
-// 提示被忽略了：存着的哈希和现在的正文对得上。写入路径都不用管这一列，正文一改就对不上了。
+// 提示被忽略了：存着的哈希和现在的正文对得上。判断只看这个比较，applyUpdate 在正文变化时清掉哈希只是不留着它。
 // 没有哈希的行不算哈希（case 里不会执行），开销只落在忽略过的那几条上
 const IGNORED_NOW = sql`(case when ${memories.plaintextIgnoredHash} is null then false
   else ${memories.plaintextIgnoredHash} = encode(sha256(convert_to(${memories.content}, 'UTF8')), 'hex') end)`
