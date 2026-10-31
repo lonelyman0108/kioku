@@ -11,6 +11,7 @@ import { createApp } from '../app'
 import { RollbackRun } from '../bench/rollback'
 import {
   errorText,
+  pgCauseCode,
   isUniqueViolation,
   loggableError,
   pgConstraint,
@@ -241,8 +242,17 @@ describe('数据库错误的字段', () => {
       expect(errorText(err)).toBe('duplicate key value')
     })
 
-    it('日志：未包装的原样留着，它的 SQL 与参数不可枚举；包在 drizzle 里的只留三个字段', () => {
-      expect(loggableError(unique)).toBe(unique)
+    it('日志：包不包在 drizzle 里都只留三个字段：detail 带着数据的值', () => {
+      const leaky = Object.assign(postgresError('23505', 'duplicate key value'), {
+        constraint_name: 'memories_uri_live_idx',
+        detail: 'Key (username)=(不该进日志)',
+      })
+      expect(inspect(loggableError(leaky), { depth: null })).not.toContain('不该进日志')
+      expect(loggableError(unique)).toEqual({
+        code: '23505',
+        constraint: 'memories_uri_live_idx',
+        message: 'duplicate key value',
+      })
       expect(loggableError(wrap(unique))).toEqual({
         code: '23505',
         constraint: 'memories_uri_live_idx',
@@ -267,16 +277,18 @@ describe('数据库错误的字段', () => {
 
   describe('连接错误：不解开它自带的 cause，同一次断连记成同一个 code', () => {
     it.each([
-      ['后端被杀', connectionLost(terminated)],
-      ['网络断开', connectionLost(reset)],
-      ['没有 cause', connectionLost()],
-      ['后端被杀，包在 drizzle 的错误里', wrap(connectionLost(terminated))],
-      ['网络断开，包在 drizzle 的错误里', wrap(connectionLost(reset))],
-    ])('%s', (_, err) => {
+      ['后端被杀', connectionLost(terminated), terminated],
+      ['网络断开', connectionLost(reset), reset],
+      ['没有 cause', connectionLost(), null],
+      ['后端被杀，包在 drizzle 的错误里', wrap(connectionLost(terminated)), terminated],
+      ['网络断开，包在 drizzle 的错误里', wrap(connectionLost(reset)), reset],
+    ])('%s', (_, err, cause) => {
       expect(pgErrorCode(err)).toBe('CONNECTION_CLOSED')
       expect(pgMessage(err)).toBe(CLOSED_MESSAGE)
       expect(pgConstraint(err)).toBeUndefined()
-      expect(errorText(err)).toBe(CLOSED_MESSAGE)
+      // 原因单独给，给人看的文字不带数据库的地址
+      expect(pgCauseCode(err)).toBe(cause ? (cause as { code: string }).code : undefined)
+      expect(errorText(err)).toBe(cause ? `数据库连接断开：${cause.message}` : '数据库连接断开')
       expect(isLockBusy(err)).toBe(false)
       const run = newRun()
       run.note(err)

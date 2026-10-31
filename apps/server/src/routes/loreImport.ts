@@ -15,7 +15,7 @@ import { bodyLimit } from 'hono/body-limit'
 import { isInstanceAdmin, memberRole } from '../auth/middleware'
 import { withTransferSlot } from '../backup/transferGate'
 import { placeholderIdentifiers } from '../credential/placeholders'
-import { pgErrorCode } from '../db/client'
+import { pgCauseCode, pgErrorCode } from '../db/client'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import {
@@ -269,6 +269,7 @@ export function loreImportRoutes(deps: Deps) {
           // 驱动的错误里带着 SQL 与参数，也就是节点的正文，不能交给全局的错误处理打进日志
           console.error('从 Lore 导入时出错', {
             code: pgErrorCode(err) ?? (err instanceof Error ? err.name : 'unknown'),
+            cause: pgCauseCode(err),
           })
           return c.json({ error: '写到一半出错了，可能已写入一部分' }, 500)
         } finally {

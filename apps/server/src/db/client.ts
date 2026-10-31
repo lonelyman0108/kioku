@@ -76,11 +76,12 @@ export async function eachSpace(db: Db, fn: (tx: Tx) => Promise<void>): Promise<
 }
 
 // 数据库报的错：drizzle 把驱动的错误包在 cause 里，只解开这一种。驱动直接抛的错误不解开：
-// 连接错误（CONNECTION_CLOSED）自带 cause（57P01、ECONNRESET 这些），解开就成了另一个错误，同一次断连会记成不同的 code。
+// 连接错误（CONNECTION_CLOSED）自带 cause（57P01、ECONNRESET 这些），解开就成了另一个错误，连接本身的错误会记成不同的 code。
+// （正在执行的语句另有自己的错误，同一次断连里它报 57P01。）
 // drizzle 的错误没有 cause 时什么也不给：它的 message 带着 SQL 与全部参数
-function pgError(err: unknown): { code?: string; constraint_name?: string; message?: string } {
+function pgError(err: unknown): { code?: unknown; constraint_name?: string; message?: string } {
   const pg = err instanceof DrizzleQueryError ? err.cause : err
-  return (pg ?? {}) as { code?: string }
+  return (pg ?? {}) as { code?: unknown }
 }
 
 // 数据库给的错误说明（例如哪个值超出了范围），没有时为 undefined
@@ -88,9 +89,23 @@ export function pgMessage(err: unknown): string | undefined {
   return pgError(err).message
 }
 
-// 数据库报错的 SQLSTATE
+// 错误的 code：数据库报的是 SQLSTATE，驱动自己的连接错误是 CONNECTION_CLOSED 这类。不是字符串的不算
 export function pgErrorCode(err: unknown): string | undefined {
-  return pgError(err).code
+  const { code } = pgError(err)
+  return typeof code === 'string' ? code : undefined
+}
+
+// 连接错误的原因：它自带的 cause（57P01、ECONNRESET 这些）。不是连接错误时为 undefined
+function connectionCause(err: unknown): { code?: unknown; message?: string } | undefined {
+  if (!pgErrorCode(err)?.startsWith('CONNECTION_')) return undefined
+  const pg = pgError(err) as { cause?: unknown }
+  return (pg.cause ?? {}) as { code?: unknown; message?: string }
+}
+
+// 连接错误的原因的 code，日志里和 code 一起记：57P01 是数据库重启或被杀，ECONNRESET 是网络断了
+export function pgCauseCode(err: unknown): string | undefined {
+  const code = connectionCause(err)?.code
+  return typeof code === 'string' ? code : undefined
 }
 
 // 违反的是哪一条约束（唯一、外键、检查约束），数据库没给出时为 undefined
@@ -98,12 +113,13 @@ export function pgConstraint(err: unknown): string | undefined {
   return pgError(err).constraint_name
 }
 
-// 能写进日志的错误：drizzle 错误的 message 带着 SQL 与全部参数（正文、提示语、密文都可能在里面），不能整个打出来，
-// 只留 SQLSTATE、约束名与说明。别的错误原样，堆栈和 cause 都还在，否则查不出是哪里
+// 能写进日志的错误：drizzle 错误的 message 带着 SQL 与全部参数（正文、提示语、密文都可能在里面），不能整个打出来；
+// 驱动的 PostgresError 也一样，它的 detail 带着数据的值（Key (username)=(...)、Failing row contains (...)）。
+// 都只留 SQLSTATE、约束名与说明。别的错误原样，堆栈和 cause 都还在，否则查不出是哪里
 export function loggableError(err: unknown): unknown {
-  if (!(err instanceof DrizzleQueryError)) return err
-  const pg = err.cause as { code?: string; constraint_name?: string; message?: string } | undefined
-  return { code: pg?.code, constraint: pg?.constraint_name, message: pg?.message }
+  if (!(err instanceof DrizzleQueryError || err instanceof postgres.PostgresError)) return err
+  const pg = pgError(err)
+  return { code: pg.code, constraint: pg.constraint_name, message: pg.message }
 }
 
 export function logInternalError(where: string, err: unknown): void {
@@ -111,9 +127,12 @@ export function logInternalError(where: string, err: unknown): void {
 }
 
 // 能记进「最近的错误」、给人看的文字：drizzle 错误的 message 带着 SQL 与全部参数（正文、密文都可能在里面），
-// 只给数据库报的说明，没有说明时也不退回 message。别的错误给它自己的 message
+// 只给数据库报的说明，没有说明时也不退回 message。连接错误给断开的原因：它的 message 是数据库的地址
+// （write CONNECTION_CLOSED <主机>:<端口>），这段文字会存进设置，跟着进全实例备份。别的错误给它自己的 message
 export function errorText(err: unknown): string {
-  if (err instanceof DrizzleQueryError) return err.cause?.message ?? '数据库出错'
+  const lost = connectionCause(err)
+  if (lost) return lost.message ? `数据库连接断开：${lost.message}` : '数据库连接断开'
+  if (err instanceof DrizzleQueryError) return pgMessage(err) ?? '数据库出错'
   return err instanceof Error ? err.message : String(err)
 }
 

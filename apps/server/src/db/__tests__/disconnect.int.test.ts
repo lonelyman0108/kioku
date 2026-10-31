@@ -108,7 +108,7 @@ describe.skipIf(!testDatabaseUrl)('事务进行中连接断开', () => {
     await expectRecovered(pid)
   })
 
-  it('同一次断连，经不经 drizzle 包装都记成 CONNECTION_CLOSED，不解开它自带的 cause', async () => {
+  it('连接本身的错误，经不经 drizzle 包装都记成 CONNECTION_CLOSED，不解开它自带的 cause', async () => {
     const entered = deferred<number>()
     const resume = deferred()
     const wrapped = deferred<unknown>()
@@ -139,8 +139,14 @@ describe.skipIf(!testDatabaseUrl)('事务进行中连接断开', () => {
       statement.resolve(await failure(() => tx.execute(sql`select pg_sleep(60)`)))
     })
     const pid = await entered.promise
-    await untilRunning(pid)
-    expect(await killDuring(side.db, pid, running)).toMatchObject({ code: 'CONNECTION_CLOSED' })
+    // 等不到也要杀：留着 pg_sleep(60) 的事务会占着连接，还会把这一行提交，连累后面的用例
+    const notRunning = await untilRunning(pid).then(
+      () => null,
+      (err: unknown) => err,
+    )
+    const closed = await killDuring(side.db, pid, running)
+    if (notRunning) throw notRunning
+    expect(closed).toMatchObject({ code: 'CONNECTION_CLOSED' })
     expect(pgErrorCode(await statement.promise)).toBe('57P01')
     await expectRecovered(pid)
   })
