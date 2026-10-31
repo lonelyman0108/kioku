@@ -218,7 +218,7 @@ function actionOf(
   }
   switch (row.kind as DreamSuggestionKind) {
     case 'merge': {
-      if (extra(['content'])) throw new MemoryError(400, '合并只能改合并后的正文')
+      if (extra(['content'])) throw new MemoryError(400, '合并时只能修改合并后的正文')
       const text = edits.content ?? row.content ?? ''
       if (parseDreamScope(row.scope)?.kind === 'talk') {
         const content = oneLine(text)
@@ -255,10 +255,10 @@ function actionOf(
       }
     }
     case 'stale':
-      if (extra([])) throw new MemoryError(400, '这条建议没有能改的内容')
+      if (extra([])) throw new MemoryError(400, '这条建议没有可修改的内容')
       return { kind: 'stale' }
     case 'review':
-      if (extra([])) throw new MemoryError(400, '这条建议没有能改的内容')
+      if (extra([])) throw new MemoryError(400, '这条建议没有可修改的内容')
       return { kind: 'review', verdict: row.verdict as DreamVerdict }
   }
 }

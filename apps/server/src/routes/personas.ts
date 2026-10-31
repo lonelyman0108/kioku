@@ -128,10 +128,10 @@ async function inheritanceProblem(
     .where(eq(personas.id, parentId))
   if (!parent) return 'missing'
   const ancestors = await personaChain(tx, parentId)
-  if (personaId && ancestors.includes(personaId)) return '不能继承自己或自己的后代：继承关系会成环'
+  if (personaId && ancestors.includes(personaId)) return '不能继承自身或后代：继承关系会成环'
   const height = personaId ? await subtreeHeight(tx, personaId) : 1
   if (ancestors.length + height > MAX_PERSONA_DEPTH) {
-    return `继承链最多 ${MAX_PERSONA_DEPTH} 层（含自己与继承它的人格）`
+    return `继承链最多 ${MAX_PERSONA_DEPTH} 层（含自身与继承它的人格）`
   }
   return null
 }
@@ -146,7 +146,7 @@ export function personaRoutes(deps: Deps) {
     .openapi(list, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '不是该空间成员' }, 403)
+        return c.json({ error: '无权访问此空间' }, 403)
       }
       const rows = await withSpace(deps.db, spaceId, (tx) =>
         tx.select().from(personas).orderBy(asc(personas.createdAt)),
@@ -156,7 +156,7 @@ export function personaRoutes(deps: Deps) {
     .openapi(create, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await canManage(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       const body = c.req.valid('json')
       const result = await withSpace(deps.db, spaceId, async (tx) => {
@@ -258,7 +258,7 @@ export function personaRoutes(deps: Deps) {
     .openapi(update, async (c) => {
       const { spaceId, personaId } = c.req.valid('param')
       if (!(await canManage(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       const body = c.req.valid('json')
       const result = await withSpace(deps.db, spaceId, async (tx) => {
@@ -287,7 +287,7 @@ export function personaRoutes(deps: Deps) {
     .openapi(remove, async (c) => {
       const { spaceId, personaId } = c.req.valid('param')
       if (!(await canManage(spaceId, c.get('console').accountId))) {
-        return c.json({ error: '需要 owner 或 editor 角色' }, 403)
+        return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         await lockPersonaGraph(tx, spaceId)
@@ -310,18 +310,18 @@ export function personaRoutes(deps: Deps) {
           tx.select({ n: count() }).from(memories).where(eq(memories.personaId, personaId)),
         ])
         const reasons = [
-          users!.n ? `${users!.n} 个应用以它为默认人格` : '',
-          rules!.n ? `${rules!.n} 条按群换人格的规则用它` : '',
-          heirs!.n ? `${heirs!.n} 个人格继承它` : '',
+          users!.n ? `${users!.n} 个应用将其设为默认人格` : '',
+          rules!.n ? `${rules!.n} 条按群换人格的规则使用此人格` : '',
+          heirs!.n ? `${heirs!.n} 个人格继承此人格` : '',
           // 不给条数：里面可能有查看者读不到的 secret 记忆
-          stored!.n ? '还有人格层记忆（含已删除、还能撤销删除的）' : '',
+          stored!.n ? '仍有人格层记忆（含已删除但可恢复的）' : '',
         ].filter(Boolean)
         if (reasons.length) return reasons
         await tx.delete(personas).where(eq(personas.id, personaId))
         return []
       })
       if (!result) return c.json({ error: '人格不存在' }, 404)
-      if (result.length) return c.json({ error: `删不掉：${result.join('；')}` }, 409)
+      if (result.length) return c.json({ error: `无法删除：${result.join('；')}` }, 409)
       return c.body(null, 204)
     })
 }

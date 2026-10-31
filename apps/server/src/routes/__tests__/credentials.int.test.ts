@@ -192,7 +192,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         }),
         400,
       ),
-    ).toContain('至少要有一个字段')
+    ).toContain('至少需要一个字段')
   })
 
   it('条目位置与来源字段不能含有拼得出命令的字符与看不见的字符；给出的命令里它们都在单引号里', async () => {
@@ -226,7 +226,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
       expect(
         await errorOf(await asMember('POST', '/credentials', withLocation(location)), 400),
         JSON.stringify(location),
-      ).toContain('条目位置不能含有')
+      ).toContain('条目位置不能包含')
     }
     for (const sourceField of ['password;id', 'a|b', '$HOME', '-x']) {
       const body = {
@@ -236,7 +236,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
       expect(
         await errorOf(await asMember('POST', '/credentials', body), 400),
         sourceField,
-      ).toContain('来源字段不能含有')
+      ).toContain('来源字段不能包含')
     }
     // 空格、中文、括号这类条目名里常见的字符照常可以用，给出的命令里放在单引号里
     await ok(await asMember('POST', '/credentials', withLocation('家里的 NAS（admin）(2)')), 201)
@@ -289,7 +289,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect(listed!.credentialCount).toBe(1)
     expect(
       await errorOf(await asMember('DELETE', `/credential-providers/${provider.id}`), 409),
-    ).toContain('还有 1 条凭据')
+    ).toContain('仍有 1 条凭据')
     // 外部来源的值不在 Kioku 里
     expect(
       await errorOf(await asMember('POST', `/credentials/${credential.id}/reveal`), 400),
@@ -376,7 +376,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         await asMember('POST', `/credentials/${his.id}/reveal`, undefined, bob.cookie),
         403,
       ),
-    ).toContain('空间 owner')
+    ).toContain('空间所有者')
     expect(
       (
         await asMember(
@@ -555,14 +555,14 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     expect(used.credential.id).toBe(second.id)
     expect(
       await errorOf(await asMember('POST', `/credentials/${first.id}/undelete`), 409),
-    ).toContain('同一个标识已经有一条有效的凭据')
+    ).toContain('同一标识已有有效凭据')
     await ok(await asMember('DELETE', `/credentials/${second.id}`), 204)
     const restored = await ok<ConsoleCredential>(
       await asMember('POST', `/credentials/${first.id}/undelete`),
     )
     expect(restored.deletedAt).toBeNull()
     expect(await errorOf(await asMember('POST', `/credentials/${first.id}/undelete`), 409)).toBe(
-      '这条凭据没有被删除',
+      '这条凭据未被删除',
     )
   })
 
@@ -767,7 +767,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         }
         await tx`update credentials set deleted_at = null, version = version + 1 where id = ${created.id}`
       })
-      expect(await errorOf(await pending, 409)).toBe('这条凭据刚被别的请求恢复了')
+      expect(await errorOf(await pending, 409)).toBe('这条凭据刚被其他请求恢复')
     } finally {
       await side.end()
     }
@@ -797,7 +797,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         tx`insert into credentials (space_id, owner_account_id, identifier, name, source, provider_id, location, fields)
            values (${ws.spaceId}, ${ws.accountId}, 'router', '路由器', 'external', ${provider.id}, 'router admin', '[]'::jsonb)`,
     )
-    expect(await errorOf(removed, 409)).toContain('还有 1 条凭据')
+    expect(await errorOf(removed, 409)).toContain('仍有 1 条凭据')
   })
 
   it('凭据的事件不进空间的活动记录', async () => {

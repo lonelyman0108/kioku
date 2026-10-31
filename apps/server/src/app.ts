@@ -36,8 +36,8 @@ import { VERSION } from './version'
 // Content-Type 和接口收的不一样、或者有请求体却没写 Content-Type（415）
 const REQUEST_ERRORS: Partial<Record<number, string>> = {
   400: '请求格式错误',
-  413: '请求体太大',
-  415: '请求体的类型（Content-Type）不对',
+  413: '请求体过大',
+  415: '请求体类型（Content-Type）错误',
 }
 // 自带响应里只有这些跟着原来的正文走，换成 { error } 之后不再沿用
 const BODY_HEADERS = ['content-type', 'content-length', 'content-encoding']

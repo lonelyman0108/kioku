@@ -235,7 +235,7 @@ export const UpdateSubjectRequest = z
     linkedToMe: z.boolean().optional(),
   })
   .refine((v) => v.displayName !== undefined || v.linkedToMe !== undefined, {
-    message: '没有要改的内容',
+    message: '没有要修改的内容',
   })
 export type UpdateSubjectRequest = z.infer<typeof UpdateSubjectRequest>
 

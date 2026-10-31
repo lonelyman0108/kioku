@@ -440,14 +440,18 @@ describe('hook 循环', () => {
   it('生命周期事件的运行请求失败：不请求模型，这条消息不进历史，下一条接得上', async () => {
     const h = harness({
       turns: [reply('好')],
-      run: () => ({ kind: 'failed', message: '同时运行的回滚太多', retryable: true }),
+      run: () => ({
+        kind: 'failed',
+        message: '测试台同时运行的回滚过多，请稍后重试',
+        retryable: true,
+      }),
     })
     const done = await h.send(USER_TEXT)
     expect(h.turnRequests).toEqual([])
     expect(done.messages).toEqual([])
     expect(last(done).end).toBe('lifecycleFailed')
     expect(last(done).inHistory).toBe(false)
-    expect(last(done).notice).toContain('同时运行的回滚太多')
+    expect(last(done).notice).toContain('测试台同时运行的回滚过多，请稍后重试')
     expect(last(done).notice).toContain('未请求模型')
 
     const next = harness({ turns: [reply('好')] })
@@ -458,12 +462,12 @@ describe('hook 循环', () => {
   it('生命周期事件的运行请求被确定性地拒绝：只显示原因，不说可以再发', async () => {
     const h = harness({
       turns: [reply('不该到这里')],
-      run: () => ({ kind: 'failed', message: '没有这把 Key', retryable: false }),
+      run: () => ({ kind: 'failed', message: 'Key 不存在', retryable: false }),
     })
     const done = await h.send(USER_TEXT)
     expect(h.turnRequests).toEqual([])
     expect(last(done).end).toBe('lifecycleFailed')
-    expect(last(done).notice).toBe('没有这把 Key')
+    expect(last(done).notice).toBe('Key 不存在')
     expect(last(done).inHistory).toBe(false)
     expect(done.messages).toEqual([])
   })
@@ -553,9 +557,9 @@ describe('chat 循环', () => {
     [
       '群聊没有群',
       { chatType: 'group', platform: 'bench', sender: { id: 'u' } },
-      '群聊与频道要带上群',
+      '群聊与频道须带上群',
     ],
-    ['私聊没有发言人', { chatType: 'direct', platform: 'bench' }, '私聊要带上发言人'],
+    ['私聊没有发言人', { chatType: 'direct', platform: 'bench' }, '私聊须带上发言人'],
   ] as [string, SessionContextInput | undefined, string][])(
     '页面的上下文是%s：不发 turn.end，轨迹里说明原因，回复照样留着',
     async (_name, context, reason) => {
@@ -996,7 +1000,7 @@ describe('一轮的工具调用放不进一次运行', () => {
     expect(toolMessages(done.messages).at(-1)!.content).toContain('请求体上限')
   })
 
-  it('真实模式没有重放，一样按上限放', async () => {
+  it('真实模式不支持重放，一样按上限放', async () => {
     const calls = Array.from({ length: 51 }, (_, i) => list(`c${i}`))
     const h = harness({ mode: 'real', loop: 'tools', turns: [reply(null, calls), reply('好')] })
     const done = await h.send(USER_TEXT)
@@ -1213,10 +1217,14 @@ describe('toolReply：回给模型的文字不能是空的', () => {
   })
 
   it('没有执行与跳过：说明原因', () => {
-    const notRun = baseStep({ status: 'notRun', raw: null, reason: '根事务出错，这一步没有执行' })
-    expect(toolReply(notRun)).toBe('没有执行：根事务出错，这一步没有执行')
-    const skipped = baseStep({ status: 'skipped', raw: null, reason: '这把 Key 写不了 private 层' })
-    expect(toolReply(skipped)).toBe('没有执行：这把 Key 写不了 private 层')
+    const notRun = baseStep({ status: 'notRun', raw: null, reason: '根事务出错，此步未执行' })
+    expect(toolReply(notRun)).toBe('没有执行：根事务出错，此步未执行')
+    const skipped = baseStep({
+      status: 'skipped',
+      raw: null,
+      reason: '当前 Key 无权写入私人层（private）',
+    })
+    expect(toolReply(skipped)).toBe('没有执行：当前 Key 无权写入私人层（private）')
     expect(toolReply(baseStep({ status: 'failed', raw: null, text: '' }))).toBe('没有执行')
   })
 })
@@ -1503,15 +1511,19 @@ describe('请求模型失败', () => {
   })
 
   describe('4xx 是确定性的：只显示服务端的文字，不说可以再发', () => {
-    const TOO_LONG = 'messages：对话太长，清空之后再试'
+    const TOO_LONG = 'messages：对话过长，请清空后重试'
 
     it.each([
       [400, TOO_LONG, TOO_LONG],
-      [400, 'model：模型名太长，最多 128 个字符', 'model：模型名太长，最多 128 个字符'],
-      [400, '还没有配模型', '还没有配模型'],
+      [400, 'model：模型名过长，最多 128 个字符', 'model：模型名过长，最多 128 个字符'],
+      [
+        400,
+        '未配置模型。请先在实例设置中配置抽取模型。',
+        '未配置模型。请先在实例设置中配置抽取模型。',
+      ],
       [403, '只有实例管理员能用模型代理', '只有实例管理员能用模型代理'],
-      [404, '没有这把 Key', '没有这把 Key'],
-      [413, '对话太长，清空之后再试', '对话过长，请清空后重试'],
+      [404, 'Key 不存在', 'Key 不存在'],
+      [413, '对话过长，请清空后重试', '对话过长，请清空后重试'],
       // 反向代理拦下的：没有服务端的那句话，也要提示清空
       [413, '请求失败：HTTP 413', '对话过长，请清空后重试'],
     ])('HTTP %i「%s」：一轮都没回复时', async (status, message, notice) => {
@@ -1555,7 +1567,9 @@ describe('请求模型失败', () => {
     const gateway = turnFailureMessage(new ApiError(504, '请求失败：HTTP 504'))
     expect(gateway).toContain('反向代理')
     expect(gateway).toContain('120 秒')
-    expect(turnFailureMessage(new ApiError(400, '还没有配模型'))).toBe('还没有配模型')
+    expect(
+      turnFailureMessage(new ApiError(400, '未配置模型。请先在实例设置中配置抽取模型。')),
+    ).toBe('未配置模型。请先在实例设置中配置抽取模型。')
     expect(turnFailureMessage(new TypeError('Failed to fetch'))).toContain('网络错误')
     // 响应对不上契约（ZodError）也不把英文报错给用户
     expect(turnFailureMessage(new Error('Invalid input'))).not.toContain('Invalid')
@@ -1716,7 +1730,7 @@ describe('重放分叉', () => {
             status: 'notRun' as const,
             raw: null,
             replay: null,
-            reason: '重放的第 1 步报错，这一步没有执行',
+            reason: '重放的第 1 步报错，此步未执行',
           })),
         ),
         ok: false,

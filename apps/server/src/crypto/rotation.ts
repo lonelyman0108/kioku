@@ -17,7 +17,7 @@ import { keyIdOf, keyringOf, type Keyring, type MasterKey } from './keyring'
 
 // 记忆与凭据：加密的行、aad 怎么算。查询都带上 wrapped_key 不为空：key_id 的索引只建在加密的行上
 const TABLES = [
-  { field: 'memories', label: 'secret 记忆', table: memories, aad: (id: string) => id },
+  { field: 'memories', label: '机密记忆', table: memories, aad: (id: string) => id },
   { field: 'credentials', label: '托管的凭据', table: credentials, aad: credentialAad },
 ] as const
 
@@ -144,7 +144,7 @@ async function inspectMasterKey(db: Db, masterKey: MasterKey | null, fill: boole
       }
     }
   }
-  const settingsLabel = '实例设置里的接口 Key'
+  const settingsLabel = '实例设置中的接口 Key'
   if (!ring) {
     problem(settingsLabel, (await sealedSettingsKeys(db)).length)
   } else if (!fill) {
@@ -252,14 +252,14 @@ export async function rotateMasterKey(
       const wrappedKey = rewrapKey(previous, current, Buffer.from(sealed.wrappedKey, 'base64'), aad)
       return { ...sealed, wrappedKey: wrappedKey.toString('base64'), keyId: currentId }
     } catch {
-      failures.push('实例设置里的接口 Key')
+      failures.push('实例设置中的接口 Key')
       return sealed
     }
   })
   if (failures.length) {
     await recordMasterKeyError(
       db,
-      `${failures.length} 条用旧主密钥也解不开，没有换成新的包装：${failures.slice(0, 5).join('、')}`,
+      `${failures.length} 条用旧主密钥也无法解密，未能重新包装：${failures.slice(0, 5).join('、')}`,
     )
   }
   const { remaining } = await masterKeyStatus(db, masterKey)

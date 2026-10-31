@@ -242,7 +242,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(saved).toMatchObject({ content: '新的', validTo: soon.toISOString() })
       const other = new Date(soon.getTime() + 10_000).toISOString()
       expect(await errorOf(await keyPatch({ uri: m.uri, validTo: other }), 400)).toContain(
-        '晚至少一分钟',
+        '晚于当前时间至少一分钟',
       )
     })
 
@@ -252,9 +252,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       for (const validTo of [past, soon]) {
         expect(
           await errorOf(await keyCreate({ uri: 'a://b', content: 'x', validTo }), 400),
-        ).toContain('晚至少一分钟')
+        ).toContain('晚于当前时间至少一分钟')
         expect(await errorOf(await create({ uri: 'a://b', content: 'x', validTo }), 400)).toContain(
-          '晚至少一分钟',
+          '晚于当前时间至少一分钟',
         )
       }
       // 不带时区的时间说不清是哪个时刻
@@ -274,7 +274,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         await keyCreate({ uri: 'a://b', content: 'x', validTo: until }),
         201,
       )
-      expect(await errorOf(await keyPatch({ uri: m.uri, validTo: past }), 400)).toContain('删掉它')
+      expect(await errorOf(await keyPatch({ uri: m.uri, validTo: past }), 400)).toContain(
+        '请删除它',
+      )
       expect((await keyPatch({ uri: m.uri, validTo: soon })).status).toBe(400)
       expect(
         (await keyPatch({ uri: m.uri, validTo: new Date().toISOString(), content: '新的' })).status,
@@ -358,7 +360,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
             values (${ws.spaceId}, 'curated', 'private', 'private', 'agent', ${ws.accountId}, 'notes', 'race2', '新的')`
         },
       )
-      expect(await errorOf(res, 409)).toContain('先把那条移走或删掉')
+      expect(await errorOf(res, 409)).toBe('URI 已被占用。移走或删除占用它的记忆后可恢复生效。')
       const row = await rowOf(m.id)
       expect(row.deletedAt).not.toBeNull()
       expect(row.validTo).not.toBeNull()
@@ -676,7 +678,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(event.before?.validTo).not.toBeNull()
       expect(event.after?.validTo).toBeNull()
       expect(event.actor.accountName).toBe('alice')
-      expect(await errorOf(await reactivate(m.id, back.version), 409)).toContain('现在是有效的')
+      expect(await errorOf(await reactivate(m.id, back.version), 409)).toContain('当前有效')
     })
 
     it('过期后让出了 URI 的：列在已过期里，撤销删除不行；URI 被新的占着时 409，那条删掉之后一并撤销删除', async () => {
@@ -695,10 +697,12 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await history(old.id)).memory).toMatchObject({ released: true })
       expect((await expired()).items).toMatchObject([{ id: old.id, released: true }])
       expect((await deleted()).items).toEqual([])
-      expect(await errorOf(await undelete(old.id), 409)).toContain('重新生效')
+      expect(await errorOf(await undelete(old.id), 409)).toContain('恢复生效')
 
       const version = (await rowOf(old.id)).version
-      expect(await errorOf(await reactivate(old.id, version), 409)).toContain('先把那条移走或删掉')
+      expect(await errorOf(await reactivate(old.id, version), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
+      )
       expect((await rowOf(old.id)).deletedAt).not.toBeNull()
 
       await remove(fresh)
@@ -748,7 +752,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await deleted()).items).toMatchObject([{ id: m.id, validTo }])
       expect((await expired()).items).toEqual([])
       expect(await errorOf(await reactivate(m.id, (await rowOf(m.id)).version), 409)).toContain(
-        '撤销删除',
+        '请在「已删除」中恢复',
       )
 
       const undone = await ok<MemoryView>(await undelete(m.id))
@@ -778,7 +782,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       await remove(m)
       await deletedThenExpired(m.id)
       await ok<MemoryView>(await keyCreate({ uri: 'notes://slot', content: '新的' }), 201)
-      expect(await errorOf(await undelete(m.id), 409)).toContain('先把那条移走或删掉')
+      expect(await errorOf(await undelete(m.id), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复。',
+      )
       expect((await rowOf(m.id)).deletedAt).not.toBeNull()
     })
 
@@ -800,7 +806,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await expired()).items).toMatchObject([{ id: shared.id, released: false }])
       expect((await get(note.uri, editor.cookie)).status).toBe(200)
       const version = (await rowOf(shared.id)).version
-      expect(await errorOf(await reactivate(shared.id, version), 409)).toContain('另一条记忆占用')
+      expect(await errorOf(await reactivate(shared.id, version), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
+      )
     })
 
     it('共享的过期记忆和成员的私人节点并存时，重新生效返回 409；直接改库清掉有效期也被触发器拦下', async () => {
@@ -823,8 +831,8 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       )
       expect((await rowOf(shared.id)).deletedAt).toBeNull()
 
-      expect(await errorOf(await reactivate(shared.id, shared.version), 409)).toContain(
-        '另一条记忆占用',
+      expect(await errorOf(await reactivate(shared.id, shared.version), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
       )
       expect((await rowOf(shared.id)).validTo).not.toBeNull()
 
@@ -871,7 +879,10 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       ])
       expect((await reactivate(mine.id, mine.version, editor.cookie)).status).toBe(404)
       expect((await reactivate(secret.id, secret.version, editor.cookie)).status).toBe(404)
-      expect((await reactivate(appLayer.id, appLayer.version, editor.cookie)).status).toBe(403)
+      // 只给界面的错误不带取值
+      expect(
+        await errorOf(await reactivate(appLayer.id, appLayer.version, editor.cookie), 403),
+      ).toBe('无权让应用层的记忆恢复生效')
       expect((await reactivate(shared.id, shared.version, viewer.cookie)).status).toBe(403)
       expect((await reactivate('00000000-0000-4000-8000-000000000000', 1)).status).toBe(404)
       const viaKey = await app.request(
@@ -1127,7 +1138,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       ])
       const old = before.supersededFacts[0]!
       expect(await errorOf(await reactivateFact(id, old.id, old.version + 1), 409)).toContain(
-        '改过',
+        '刚被修改',
       )
 
       queued.length = 0
@@ -1148,7 +1159,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(events.map((e) => e.eventType)).toEqual(['create', 'update', 'reactivate'])
       expect((events[2]!.after as { validTo: unknown }).validTo).toBeNull()
       expect(await errorOf(await reactivateFact(id, old.id, old.version + 1), 409)).toContain(
-        '没有被推翻',
+        '未被取代',
       )
     })
 
@@ -1176,7 +1187,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       const past = new Date(Date.now() - 60_000)
       const lapsed = await insertFact({ expiresAt: past })
       expect(await errorOf(await reactivateFact(id, lapsed.id, lapsed.version), 409)).toContain(
-        '没有被推翻',
+        '未被取代',
       )
       // 被推翻了、到期时间也过了：清掉 valid_to 之后照样看不到
       const both = await insertFact({ validTo: past, expiresAt: past })
@@ -1191,7 +1202,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
     it('抽取的记忆不走记忆的重新生效：被推翻的事实与到期的会话摘要都返回 409，原样不动', async () => {
       const id = await subjectId()
       const old = (await detail(id)).supersededFacts[0]!
-      expect(await errorOf(await reactivate(old.id, old.version), 409)).toContain('对象页')
+      expect(await errorOf(await reactivate(old.id, old.version), 409)).toContain('联系人页')
       expect((await rowOf(old.id)).validTo).not.toBeNull()
       // 会话摘要按设计到期，不能借这里变成一直有效
       const [summary] = await withSpace(database.db, ws.spaceId, (tx) =>

@@ -52,7 +52,7 @@ export const CaptureName = z
   .string()
   .regex(
     /^(?!(?:run|expires)$)[A-Za-z_][A-Za-z0-9_]{0,63}$/,
-    '变量名只用字母、数字和下划线，不能以数字开头，不能叫 run 或 expires',
+    '变量名只能包含字母、数字和下划线，不能以数字开头，也不能是 run 或 expires',
   )
 export const BenchCapture = z.record(CaptureName, z.string().min(1).max(200))
 export type BenchCapture = z.infer<typeof BenchCapture>
@@ -133,22 +133,22 @@ export const BenchRunRequest = z
     steps: z.array(BenchStep).min(1).max(BENCH_MAX_STEPS),
     replay: z
       .array(BenchReplayStep)
-      .max(BENCH_MAX_REPLAY_STEPS, '重放的步骤太多，清空之后再试')
+      .max(BENCH_MAX_REPLAY_STEPS, '重放步骤过多，请清空后重试')
       .default([]),
   })
   .superRefine((request, ctx) => {
     if (request.mode === 'real' && request.replay.length) {
-      ctx.addIssue({ code: 'custom', path: ['replay'], message: '真实模式没有重放' })
+      ctx.addIssue({ code: 'custom', path: ['replay'], message: '真实模式不支持重放' })
     }
     if (utf8Bytes(JSON.stringify(request.replay)) > BENCH_MAX_REPLAY_BYTES) {
-      ctx.addIssue({ code: 'custom', path: ['replay'], message: '重放的内容太多，清空之后再试' })
+      ctx.addIssue({ code: 'custom', path: ['replay'], message: '重放内容过多，请清空后重试' })
     }
   })
 export type BenchRunRequest = z.infer<typeof BenchRunRequest>
 
 // 场景：一串步骤，内置预设放在代码里，自己的场景导入导出 JSON，不存库
 export const BenchScenario = z.strictObject({
-  id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, '场景 id 只用小写字母、数字和 -'),
+  id: z.string().regex(/^[a-z0-9][a-z0-9-]{0,63}$/, '场景 id 只能包含小写字母、数字和 -'),
   title: z.string().min(1).max(200),
   description: z.string().max(2000).optional(),
   // 适用的运行时类型；不给时所有运行时都适用
@@ -346,15 +346,15 @@ export type BenchAgentMessage = z.infer<typeof BenchAgentMessage>
 export const BenchAgentTurnRequest = z
   .strictObject({
     // 换一个模型名，接口与 Key 不变；不给时用实例设置里的模型
-    model: z.string().trim().min(1).max(128, '模型名太长，最多 128 个字符').optional(),
+    model: z.string().trim().min(1).max(128, '模型名过长，最多 128 个字符').optional(),
     messages: z
       .array(BenchAgentMessage)
       .min(1)
-      .max(BENCH_AGENT_MAX_MESSAGES, '对话太长，清空之后再试'),
+      .max(BENCH_AGENT_MAX_MESSAGES, '对话过长，请清空后重试'),
   })
   .superRefine((request, ctx) => {
     if (utf8Bytes(JSON.stringify(request.messages)) > BENCH_AGENT_MAX_BYTES) {
-      ctx.addIssue({ code: 'custom', path: ['messages'], message: '对话太长，清空之后再试' })
+      ctx.addIssue({ code: 'custom', path: ['messages'], message: '对话过长，请清空后重试' })
     }
   })
 export type BenchAgentTurnRequest = z.infer<typeof BenchAgentTurnRequest>

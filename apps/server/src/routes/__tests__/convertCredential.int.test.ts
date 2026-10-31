@@ -719,7 +719,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       const hers = await remember({ uri: 'notes://eve', content: BODY }, editor.cookie)
       const res = await convert(hers, {}, editor.cookie)
       expect(res.status).toBe(403)
-      expect(((await res.json()) as { error: string }).error).toContain('secret')
+      expect(((await res.json()) as { error: string }).error).toContain('机密')
       expect((await rowOf(hers.id)).content).toBe(BODY)
 
       const mine = await seedNote()

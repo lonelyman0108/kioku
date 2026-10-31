@@ -287,24 +287,24 @@ export function settingsRoutes(deps: Deps) {
     })
     .openapi(clearNext, async (c) => {
       const cleared = await clearNextEmbedding(deps.db)
-      if (cleared === null) return c.json({ error: '没有正在换的模型' }, 404)
+      if (cleared === null) return c.json({ error: '没有正在更换的模型' }, 404)
       deps.embedder.invalidate()
       void deps.jobs?.enqueuePrune()
       return c.body(null, 204)
     })
     .openapi(retryNext, async (c) => {
       if (!(await loadEmbeddingModels(deps.db)).next) {
-        return c.json({ error: '没有正在换的模型' }, 400)
+        return c.json({ error: '没有正在更换的模型' }, 400)
       }
       const queued = deps.jobs ? await deps.jobs.enqueueSwitch() : false
       return queued
         ? c.json({ queued }, 202)
-        : c.json({ error: '没有排进队列：服务没有启动后台任务，或入队失败，请稍后重试' }, 503)
+        : c.json({ error: '未能加入队列：服务未启动后台任务或入队失败，请稍后重试' }, 503)
     })
     .openapi(switchNow, async (c) => {
       const { next } = await loadEmbeddingModels(deps.db)
       if (!next || (await switchEmbedding(deps.db, next.model)) === null) {
-        return c.json({ error: '没有正在换的模型' }, 400)
+        return c.json({ error: '没有正在更换的模型' }, 400)
       }
       deps.embedder.invalidate()
       // 旧模型的向量删掉；还没有新模型向量的记忆接着补
@@ -353,7 +353,7 @@ export function settingsRoutes(deps: Deps) {
         c.json({ ok: error === null, latencyMs: Date.now() - started, error }, 200)
       const config = await unlocked(() => loadExtractionConfig(deps.db, deps.masterKey))
       if (!config.ok) return result(config.error)
-      if (!config.value) return result('还没有保存抽取模型的设置')
+      if (!config.value) return result('尚未保存抽取模型设置')
       try {
         await openAiChatModel(config.value).complete([
           { role: 'user', content: '这是连通性测试，只回复 ok。' },
@@ -384,13 +384,13 @@ export function settingsRoutes(deps: Deps) {
     })
     .openapi(rebuild, async (c) => {
       const stored = await loadEmbeddingModels(deps.db)
-      if (!stored.active) return c.json({ error: '还没有保存嵌入设置' }, 400)
+      if (!stored.active) return c.json({ error: '尚未保存嵌入设置' }, 400)
       if (stored.next) void deps.jobs?.enqueueSwitch()
       // 入队失败时如实返回，状态码也不报成已接受，不让管理员以为补齐已经在跑
       const queued = deps.jobs ? await deps.jobs.enqueueBackfill() : false
       return queued
         ? c.json({ queued }, 202)
-        : c.json({ error: '没有排进队列：服务没有启动后台任务，或入队失败，请稍后重试' }, 503)
+        : c.json({ error: '未能加入队列：服务未启动后台任务或入队失败，请稍后重试' }, 503)
     })
 }
 

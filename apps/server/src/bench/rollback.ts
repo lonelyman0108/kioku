@@ -47,7 +47,7 @@ export const benchLimits = (deps: Deps): BenchLimits => ({ ...BENCH_LIMITS, ...d
 let running = 0
 
 function enterGate(limit: number): () => void {
-  if (running >= limit) throw new MemoryError(429, '测试台同时运行的回滚太多，稍后再试')
+  if (running >= limit) throw new MemoryError(429, '测试台同时运行的回滚过多，请稍后重试')
   running++
   return () => {
     running--
@@ -63,7 +63,7 @@ const TIMEOUT_CODES: Record<string, BenchInternalDetail> = {
 // 运行已经结束，或者超过了总时长：代理不再开始新的事务；运行结束之后事务句柄也不能再用
 class RunStopped extends Error {
   constructor(readonly detail: BenchInternalDetail) {
-    super(detail === 'run_timeout' ? '测试台的运行超过了总时长' : '测试台的运行已经结束')
+    super(detail === 'run_timeout' ? '测试台的运行超过总时长' : '测试台的运行已结束')
   }
 }
 

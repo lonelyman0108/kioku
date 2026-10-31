@@ -55,8 +55,8 @@ describe('绑定记录的说法', () => {
       '「已删除的成员」已拒绝，未合并',
     )
     expect(
-      bindingOutcome(binding({ status: 'cancelled', note: '等确认期间对象被合并了' }), now),
-    ).toBe('已作废：等确认期间对象被合并了')
+      bindingOutcome(binding({ status: 'cancelled', note: '待确认期间联系人已被合并' }), now),
+    ).toBe('已作废：待确认期间联系人已被合并')
     expect(bindingOutcome(binding({ status: 'expired' }), now)).toBe(
       '「bob」未在期限内处理，已作废',
     )

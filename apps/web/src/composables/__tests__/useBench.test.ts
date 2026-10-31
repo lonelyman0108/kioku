@@ -451,7 +451,7 @@ describe('运行中途作废', () => {
 
   it('真实模式：写入之前就被拒绝（4xx）：什么都没发生，没有要说的', async () => {
     const { bench, run, outcome } = await abandonRun('real')
-    run.reject(new ApiError(404, '没有这把 Key'))
+    run.reject(new ApiError(404, 'Key 不存在'))
     expect(await outcome).toEqual({ kind: 'stale' })
     expect(bench.abandoned.value).toEqual([])
   })
@@ -782,7 +782,7 @@ describe('离开页面前提醒', () => {
 
   it('中途作废的真实运行写入之前就被拒绝（4xx）：什么都没留下，回来了就不用了', async () => {
     const { bench, run, outcome } = await abandonRun('real')
-    run.reject(new ApiError(404, '没有这把 Key'))
+    run.reject(new ApiError(404, 'Key 不存在'))
     await outcome
     expect(bench.abandoned.value).toEqual([])
     expect(dirty()).toBe(false)
@@ -1479,7 +1479,7 @@ describe('模型对话', () => {
     it.each([
       [400, '请求不合法'],
       [403, '没有权限'],
-      [404, '没有这把 Key'],
+      [404, 'Key 不存在'],
     ])('HTTP %i：确定性的拒绝，只显示原因', async (status, message) => {
       const bench = start()
       await settle()
@@ -1492,7 +1492,11 @@ describe('模型对话', () => {
 
     it.each([
       ['HTTP 500', new ApiError(500, '服务内部错误'), '服务内部错误'],
-      ['HTTP 429', new ApiError(429, '同时运行的回滚太多'), '同时运行的回滚太多'],
+      [
+        'HTTP 429',
+        new ApiError(429, '测试台同时运行的回滚过多，请稍后重试'),
+        '测试台同时运行的回滚过多，请稍后重试',
+      ],
       ['网络错误', new TypeError('Failed to fetch'), '网络错误'],
     ] as [string, Error, string][])(
       '%s：可能是暂时的，说可以再发一次',

@@ -471,7 +471,7 @@ export type DecideResult =
   | { ok: true; subjectId: string; outcome: MergeOutcome | null }
   | { ok: false; status: 403 | 404 | 409; error: string }
 
-const ONLY_CONFIRMER = '只有这个对象标记成的成员本人能处理这次绑定'
+const ONLY_CONFIRMER = '仅此联系人标记的成员本人可处理此次绑定'
 
 type BindingRow = typeof subjectBindings.$inferSelect
 
@@ -479,14 +479,14 @@ type BindingRow = typeof subjectBindings.$inferSelect
 function closedReason(binding: BindingRow, live: boolean): string | null {
   switch (binding.status) {
     case 'pending':
-      return live ? null : '已经过了确认期限，这次绑定作废了'
+      return live ? null : '已过确认期限，此次绑定已作废'
     case 'merged':
     case 'confirmed':
-      return '已经合并了'
+      return '已合并'
     case 'rejected':
-      return '已经拒绝了'
+      return '已拒绝'
     case 'cancelled':
-      return `这次绑定已经作废：${binding.note ?? '情况变了'}`
+      return `此次绑定已作废：${binding.note ?? '情况已变化'}`
   }
 }
 
@@ -505,7 +505,7 @@ async function cancel(tx: Tx, id: string, note: string) {
     .update(subjectBindings)
     .set({ status: 'cancelled', decidedAt: sql`now()`, note })
     .where(eq(subjectBindings.id, id))
-  return { ok: false as const, status: 409 as const, error: `${note}，这次绑定作废了` }
+  return { ok: false as const, status: 409 as const, error: `${note}，此次绑定已作废` }
 }
 
 // 确认：只有发码的对象标记成的成员本人能确认（空间 owner 也不行），还要 owner 或 editor 角色（合并对象要写权限）。
@@ -521,22 +521,22 @@ export async function confirmBinding(
     // 先不加锁读出两边，按 id 的顺序锁住两个对象，再锁这一条：和用码、合并对象的加锁顺序一致。
     // 两边在这期间被合并的话，这一条已经作废（合并时做的），下面按锁住之后的状态判断
     const [seen] = await tx.select().from(subjectBindings).where(eq(subjectBindings.id, bindingId))
-    if (!seen) return { ok: false, status: 404, error: '这次绑定不存在' }
+    if (!seen) return { ok: false, status: 404, error: '此次绑定不存在' }
     if (seen.accountId !== me) return { ok: false, status: 403, error: ONLY_CONFIRMER }
-    if (role === 'viewer') return { ok: false, status: 403, error: '需要 owner 或 editor 角色' }
+    if (role === 'viewer') return { ok: false, status: 403, error: '需要空间所有者或编辑者角色' }
     const rows = await lockSubjects(tx, [seen.subjectId, seen.fromSubjectId])
     const held = await lockBinding(tx, bindingId)
-    if (!held) return { ok: false, status: 404, error: '这次绑定不存在' }
+    if (!held) return { ok: false, status: 404, error: '此次绑定不存在' }
     const { binding } = held
     const closed = closedReason(binding, held.live)
     if (closed) return { ok: false, status: 409, error: closed }
     const into = rows.find((r) => r.id === binding.subjectId)
     const from = rows.find((r) => r.id === binding.fromSubjectId)
-    if (!into || !from || into.id === from.id) return cancel(tx, binding.id, '对象已经不在了')
-    if (into.kind !== from.kind) return cancel(tx, binding.id, '两边不是同一种对象')
-    if (into.accountId !== me) return cancel(tx, binding.id, '这个对象已经不再标记成你')
+    if (!into || !from || into.id === from.id) return cancel(tx, binding.id, '联系人已不存在')
+    if (into.kind !== from.kind) return cancel(tx, binding.id, '两边不是同一类型的联系人')
+    if (into.accountId !== me) return cancel(tx, binding.id, '此联系人的成员标记已变更')
     if (linkedToOthers([from], me)) {
-      return cancel(tx, binding.id, '要并进来的对象标记成了别的成员')
+      return cancel(tx, binding.id, '要并入的联系人已标记为其他成员')
     }
     await tx
       .update(subjectBindings)
@@ -555,7 +555,7 @@ export async function rejectBinding(
 ): Promise<DecideResult> {
   return withSpace(db, spaceId, async (tx) => {
     const held = await lockBinding(tx, bindingId)
-    if (!held) return { ok: false, status: 404, error: '这次绑定不存在' }
+    if (!held) return { ok: false, status: 404, error: '此次绑定不存在' }
     const { binding } = held
     if (binding.accountId !== me) return { ok: false, status: 403, error: ONLY_CONFIRMER }
     const closed = closedReason(binding, held.live)

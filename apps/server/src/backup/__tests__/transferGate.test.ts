@@ -57,14 +57,14 @@ describe('导出导入的闸门', () => {
     expect(queuedTransfers()).toBe(1)
     await busy(acquireTransferSlot('leaver'))
     controller.abort()
-    await expect(waiting).rejects.toThrow('请求已经断开')
+    await expect(waiting).rejects.toThrow('请求已断开')
     expect(queuedTransfers()).toBe(0)
     const again = acquireTransferSlot('leaver')
     expect(queuedTransfers()).toBe(1)
     holder()
     ;(await again)()
     // 已经断开的请求不再排
-    await expect(acquireTransferSlot('late', AbortSignal.abort())).rejects.toThrow('请求已经断开')
+    await expect(acquireTransferSlot('late', AbortSignal.abort())).rejects.toThrow('请求已断开')
     expect(queuedTransfers()).toBe(0)
   })
 

@@ -346,12 +346,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     ])
     const suggestion = await only()
     expect(await errorOf(await apply(suggestion.id, { uri: 'core://other' }), 400)).toBe(
-      '合并只能改合并后的正文',
+      '合并时只能修改合并后的正文',
     )
     // 改过的正文和模型给的过同一套检查
     expect(
       await errorOf(await apply(suggestion.id, { content: '回答用中文，token = abc123' }), 400),
-    ).toBe('合并后的正文像有明文密码或 Token：Dream 的建议里不写凭据的值')
+    ).toBe('合并后的正文疑似含明文密码或 Token：整理建议不写入凭据的值')
     expect(
       await ok<DreamApplied>(await apply(suggestion.id, { content: '回答一律用中文' })),
     ).toEqual({ memory: null })
@@ -381,8 +381,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
       decidedBy: ws.accountId,
     })
     expect((await list()).items).toEqual([])
-    expect(await errorOf(await apply(suggestion.id), 409)).toBe('这条建议已经处理过了')
-    expect(await errorOf(await reject(suggestion.id), 409)).toBe('这条建议已经处理过了')
+    expect(await errorOf(await apply(suggestion.id), 409)).toBe('这条建议已处理')
+    expect(await errorOf(await reject(suggestion.id), 409)).toBe('这条建议已处理')
   })
 
   it('建议生成之后涉及的记忆被改过就不执行，返回 409；正被别的写入改着时不等锁，马上返回 409；只是被外键引用着照常执行', async () => {
@@ -406,7 +406,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
       items.find((i) => i.kind === 'stale' && i.memories[0]!.content === content)!
     await edit({ uri: 'core://b', content: '用中文回答，先给结论' })
     expect(await errorOf(await apply(merge.id), 409)).toBe(
-      '建议生成之后这些记忆被改过，等下次整理或手动处理',
+      '建议生成后这些记忆已被修改。请等待下次整理，或手动处理。',
     )
     expect((await rowOf(merge.memories[0]!.id)).content).toBe('回答用中文')
     expect((await suggestionRow(merge.id)).status).toBe('pending')
@@ -434,7 +434,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
       const report = staleOf('周五交周报')
       expect(
         await errorOf(await whileLocked(report.memories[0]!.id, 'for update', report.id), 409),
-      ).toBe('这些记忆正被别的写入改动，请稍后再试')
+      ).toBe('这些记忆正被其他写入修改，请稍后重试')
       expect((await suggestionRow(report.id)).status).toBe('pending')
       await ok(await apply(report.id))
       expect((await rowOf(report.memories[0]!.id)).validTo).not.toBeNull()
@@ -467,10 +467,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     // 成员改过的正文和模型给的过同一套检查：像有明文密码的、带凭据占位符的不收
     expect(
       await errorOf(await apply(suggestion.id, { content: '在学日语，网站密码：hunter2' }), 400),
-    ).toBe('合并后的事实像有明文密码或 Token：Dream 的建议里不写凭据的值')
+    ).toBe('合并后的事实疑似含明文密码或 Token：整理建议不写入凭据的值')
     expect(
       await errorOf(await apply(suggestion.id, { content: '在学日语，账号见 {{cred:xm}}' }), 400),
-    ).toBe('合并后的事实里不能带凭据占位符')
+    ).toBe('合并后的事实不能含凭据占位符')
     expect((await suggestionRow(suggestion.id)).status).toBe('pending')
     await ok(await apply(suggestion.id, { content: '在学日语，\n准备考 N2' }))
     expect(await rowOf(f1.id)).toMatchObject({
@@ -544,7 +544,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     const suggestion = await only()
     expect(
       await errorOf(await apply(suggestion.id, { uri: 'people://taken', layer: 'base' }), 409),
-    ).toBe('这个 URI 已被另一条记忆占用，换一个 URI 再执行')
+    ).toBe('URI 已被其他记忆占用。请更换 URI 后再执行。')
     // editor 只能写自己是主人的应用的应用层
     expect((await apply(suggestion.id, { uri: `app://qq-bot/xiaoming` }, bob.cookie)).status).toBe(
       403,
@@ -558,10 +558,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
         }),
         400,
       ),
-    ).toBe('提炼的正文里不能带凭据占位符')
+    ).toBe('提炼的正文不能含凭据占位符')
     expect(
       await errorOf(await apply(suggestion.id, { disclosure: '登录时，密码：hunter2' }), 400),
-    ).toBe('disclosure 里不能有明文密码、Token 或凭据占位符')
+    ).toBe('触发场景不能含明文密码、Token 或凭据占位符')
     expect((await suggestionRow(suggestion.id)).status).toBe('pending')
     // 能改成别的 URI 与层
     const applied = await ok<DreamApplied>(
@@ -584,7 +584,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     await dream((_, h) => [{ kind: 'stale', memories: [h('周五交周报')], reason: '过了' }])
     const stale = (await list()).items.find((i) => i.kind === 'stale')!
     expect(await errorOf(await apply(stale.id, { content: '改一下' }), 400)).toBe(
-      '这条建议没有能改的内容',
+      '这条建议没有可修改的内容',
     )
   })
 
@@ -693,8 +693,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect((await list(bob.cookie)).items.every((i) => !i.actionable)).toBe(true)
     expect((await apply(mine!.id, {}, viewer.cookie)).status).toBe(403)
     expect((await reject(mine!.id, viewer.cookie)).status).toBe(403)
-    expect(await errorOf(await apply(mine!.id, {}, bob.cookie), 403)).toContain('没有权限')
-    expect(await errorOf(await apply(stale.id, {}, bob.cookie), 403)).toContain('没有权限')
+    expect(await errorOf(await apply(mine!.id, {}, bob.cookie), 403)).toContain('无权')
+    expect(await errorOf(await apply(stale.id, {}, bob.cookie), 403)).toContain('无权')
     expect((await reject(mine!.id, bob.cookie)).status).toBe(403)
     expect((await suggestionRow(mine!.id)).status).toBe('pending')
     expect(await rowOf(old.id)).toMatchObject({ validTo: null, version: 1 })
@@ -807,7 +807,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     await run(failing)
     expect((await runs(ws.cookie)).runs[0]!.entries[0]!.error).toContain('HTTP 502')
     expect((await runs(bob.cookie)).runs[0]!.entries[0]!.error).toBe(
-      '整理出错（原因只有实例管理员看得到）',
+      '整理出错（原因仅实例管理员可见）',
     )
     // 解析不了是服务端自己判断出的原因，谁都看得到
     await edit({ uri: 'core://rule', content: '共享的规则，又改过' })
@@ -1027,7 +1027,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     expect(await latest(bob.cookie)).toMatchObject({
       entries: [
         { scope: null, skipped: 'idle', error: null },
-        { scope: { kind: 'private' }, error: '整理出错（原因只有实例管理员看得到）' },
+        { scope: { kind: 'private' }, error: '整理出错（原因仅实例管理员可见）' },
       ],
       status: { state: 'finished', outcome: 'failed', reason: null },
     })

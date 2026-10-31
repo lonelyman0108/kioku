@@ -1,31 +1,25 @@
-import type {
-  AccessContext,
-  AppInfo,
-  BenchMark,
-  CredentialProviderKind,
-  CredentialSource,
-  EventActor,
-  KeyAccessMatrix,
-  KeyScopes,
-  Layer,
-  OriginScope,
-  Provenance,
-  ReadDenial,
-  RecallSource,
-  Sensitivity,
+import {
+  LAYER_NAMES,
+  SENSITIVITY_NAMES,
+  type AccessContext,
+  type AppInfo,
+  type BenchMark,
+  type CredentialProviderKind,
+  type CredentialSource,
+  type EventActor,
+  type KeyAccessMatrix,
+  type KeyScopes,
+  type Layer,
+  type OriginScope,
+  type Provenance,
+  type ReadDenial,
+  type RecallSource,
+  type Sensitivity,
 } from '@kioku/contracts'
 
 import { icons } from './icons'
 
-export const layerLabels: Record<Layer, string> = {
-  base: '基础',
-  persona: '人格',
-  app: '应用',
-  owner: '个人画像',
-  private: '私人',
-  subject: '联系人',
-  episode: '情节',
-}
+export const layerLabels = LAYER_NAMES
 
 // 目录与列表里放不下全名时用的简称
 export const layerShortLabels: Record<Layer, string> = {
@@ -38,12 +32,7 @@ export const layerShortLabels: Record<Layer, string> = {
   episode: '情节',
 }
 
-export const sensitivityLabels: Record<Sensitivity, string> = {
-  public: '公开',
-  internal: '内部',
-  private: '私密',
-  secret: '机密',
-}
+export const sensitivityLabels = SENSITIVITY_NAMES
 
 // Key 的 admin 在界面上不叫 admin，免得被当成空间管理员
 export const ADMIN_SCOPE_LABEL = '跨人格 / 应用写入'

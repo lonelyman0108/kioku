@@ -28,5 +28,5 @@ export function decryptionKey(key: MasterKey, id: string | null | undefined): Bu
   const { current, previous } = keyringOf(key)
   if (!id || id === keyIdOf(current)) return current
   if (previous && id === keyIdOf(previous)) return previous
-  throw new Error(`这条记录是用另一把主密钥（标识 ${id}）加密的，现在配置的主密钥解不开`)
+  throw new Error(`这条记录使用其他主密钥（标识 ${id}）加密，当前配置的主密钥无法解密`)
 }

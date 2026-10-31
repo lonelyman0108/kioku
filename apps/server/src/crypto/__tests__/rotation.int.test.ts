@@ -153,7 +153,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
 
     // 配错了主密钥、或者没配：拒绝启动
     await expect(prepareMasterKey(database.db, newKey)).rejects.toThrow(
-      /主密钥对不上：secret 记忆 2 条、托管的凭据 1 条、实例设置里的接口 Key 2 条解不开/,
+      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中的接口 Key 2 条解不开/,
     )
     await expect(prepareMasterKey(database.db, null)).rejects.toThrow('没有配置 KIOKU_MASTER_KEY')
 
@@ -279,7 +279,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 1, remaining: 1 })
     expect(await read(appWith(newKey), 'home://wifi')).toBe('无线密码')
     expect((await masterKeyStatus(database.db, rotating)).lastError).toMatchObject({
-      message: expect.stringContaining('1 条用旧主密钥也解不开'),
+      message: expect.stringContaining('1 条用旧主密钥也无法解密'),
     })
   })
 
@@ -302,7 +302,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       .where(eq(settings.key, 'extraction'))
     expect(JSON.stringify(extraction?.value)).not.toContain('keyId')
     await expect(checkMasterKey(database.db, newKey)).rejects.toThrow(
-      /主密钥对不上：secret 记忆 2 条、托管的凭据 1 条、实例设置里的接口 Key 2 条解不开/,
+      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中的接口 Key 2 条解不开/,
     )
   })
 

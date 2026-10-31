@@ -66,7 +66,7 @@ describe.each([
     const result = parse(value)
     expect(result.success).toBe(false)
     expect(result.message).toBe(
-      `${name} 只能有英文字母、数字和半角符号，检查粘贴的内容里有没有换行、零宽字符或全角符号`,
+      `${name} 只能包含英文字母、数字和半角符号，请检查粘贴的内容是否含换行、零宽字符或全角符号`,
     )
   })
 

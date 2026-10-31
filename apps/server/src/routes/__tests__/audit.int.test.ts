@@ -168,7 +168,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     // 照管理界面上的说法：重新填写，或者清除已保存的 Key，不提 null 这类接口细节
     expect(await moved.json()).toEqual({
       error:
-        '第 1 个渠道的接口主机变了，已保存的 Key 不会发给新的主机：请重新填写；新接口不需要 Key 时，清除已保存的 Key',
+        '第 1 个渠道的接口主机已变更，已保存的 Key 不会发送给新主机。请重新填写；新接口不需要 Key 时，请清除已保存的 Key。',
     })
     expect(
       await (

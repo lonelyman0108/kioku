@@ -311,11 +311,11 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       )
       const updated = await masked('kioku_update', { uri: 'notes://safe', priority: 5 })
       expect(updated.isError).toBe(true)
-      expect(updated.text).toContain('占位符格式不对')
+      expect(updated.text).toContain('占位符格式错误')
       expect(updated.text).not.toContain('坏的片段')
       // 真实接口没带正文时查的也是解出来的原文，同样不带（见 secretAccess.int.test.ts）
       const direct = await real('kioku_update', { uri: 'notes://safe', priority: 5 })
-      expect(direct.text).toContain('占位符格式不对')
+      expect(direct.text).toContain('占位符格式错误')
       expect(direct.text).not.toContain('坏的片段')
     })
 
@@ -355,11 +355,11 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       await seedLegacyRefs('旧数据 {{cred:nas#missing-field}}')
       const updated = await masked('kioku_update', { uri: 'notes://legacy', layer: 'private' })
       expect(updated.isError).toBe(true)
-      expect(updated.text).toContain('没有这个字段')
+      expect(updated.text).toContain('没有此字段')
       expect(updated.text).not.toContain('nas')
       expect(updated.text).not.toContain('missing-field')
       const direct = await real('kioku_update', { uri: 'notes://legacy', layer: 'private' })
-      expect(direct.text).toContain('没有这个字段')
+      expect(direct.text).toContain('没有此字段')
       expect(direct.text).not.toContain('missing-field')
     })
 

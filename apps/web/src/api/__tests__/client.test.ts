@@ -129,10 +129,10 @@ describe('API 客户端', () => {
     expect(filename).toBe('家-20261029T120000Z.kioku-space')
     vi.stubGlobal(
       'fetch',
-      vi.fn(async () => Response.json({ error: '只有空间 owner 能导出空间' }, { status: 403 })),
+      vi.fn(async () => Response.json({ error: '仅空间所有者可导出空间' }, { status: 403 })),
     )
     await expect(download('POST', '/spaces/s/export')).rejects.toEqual(
-      new ApiError(403, '只有空间 owner 能导出空间'),
+      new ApiError(403, '仅空间所有者可导出空间'),
     )
   })
 

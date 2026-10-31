@@ -392,7 +392,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       }
       expect(plan.skipped).toContainEqual({
         source: 'infra://broken',
-        reason: '正文里有格式不对的凭据占位符：写到这种写法的说明文字要去掉花括号',
+        reason: '正文含格式错误的凭据占位符。说明文字提到这种写法时，请去掉花括号。',
       })
       expect(plan.skipped.map((s) => s.source)).toContain('infra://big')
       expect(plan).toMatchObject({
@@ -804,7 +804,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         const res = await post('apply', { source, fingerprint: plan.fingerprint, ...selection })
         expect(res.status).toBe(400)
         const { error } = (await res.json()) as { error: string }
-        expect(error).toContain('在 Lore 里不存在')
+        expect(error).toContain('在 Lore 中不存在')
         expect(error).not.toContain('--secret')
       }
       expect(await counts()).toEqual(before)
@@ -1108,7 +1108,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         )
         const result = await applyImport(target, plan)
         expect(result.failed).toEqual([
-          { uri: 'app://claude-code/agent', reason: '应用 claude-code 不属于导入者，没有写入' },
+          { uri: 'app://claude-code/agent', reason: '应用 claude-code 不属于导入者，未写入' },
         ])
       })
 

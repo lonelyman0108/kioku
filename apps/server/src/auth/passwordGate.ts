@@ -22,9 +22,9 @@ export async function withPasswordGate<T>(
 ): Promise<T> {
   const key = client ?? ''
   const mine = client === null ? 0 : (perClient.get(key) ?? 0)
-  if (mine >= PER_CLIENT) throw new PasswordGateBusy('登录请求太多，请稍后再试')
+  if (mine >= PER_CLIENT) throw new PasswordGateBusy('登录请求过多，请稍后重试')
   if (running >= MAX_CONCURRENT && queue.length >= MAX_QUEUE) {
-    throw new PasswordGateBusy('登录请求太多，请稍后再试')
+    throw new PasswordGateBusy('登录请求过多，请稍后重试')
   }
   if (client !== null) perClient.set(key, mine + 1)
   try {

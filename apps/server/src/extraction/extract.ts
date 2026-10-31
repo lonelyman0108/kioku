@@ -29,11 +29,11 @@ import { extractionMessages, parseExtraction, summaryMessages, type PromptSubjec
 import type { ChatModel } from './provider'
 
 // 服务端自己判断出的失败原因，不带模型接口或数据库的原文，对象页里所有成员都看得到
-export const NO_USABLE_KEY = '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层'
-export const BUDGET_NO_SUMMARY = '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要'
+export const NO_USABLE_KEY = '写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层'
+export const BUDGET_NO_SUMMARY = '本月的抽取预算已用完，这一批的 Key 也无权写入会话摘要'
 
 // 抽取期间这一批对话被合并到了别的对象：这一批不写，交给合并后的批次
-export const BATCH_MOVED = '抽取期间对象被合并，这一批交给合并后的批次重新抽取'
+export const BATCH_MOVED = '抽取期间联系人已被合并，这一批将由合并后的批次重新抽取'
 class BatchMoved extends Error {}
 
 // 会话摘要在情节层留这么多天
