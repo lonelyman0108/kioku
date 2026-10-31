@@ -212,9 +212,8 @@ async function reveal() {
                 @click="copy(revealed[field.name]!)"
               />
             </span>
-            <!-- 没查看时是一块实心，和机密的画法一样 -->
             <span v-else class="field-value">
-              <i class="value-mask" role="img" aria-label="值已隐藏" />
+              <span class="value-mask" role="img" aria-label="值已隐藏">••••••</span>
             </span>
           </template>
           <span v-else class="field-value field-source">
@@ -402,10 +401,9 @@ async function reveal() {
   color: var(--ui-text-muted);
 }
 .value-mask {
-  display: block;
-  width: 88px;
-  height: 12px;
-  background: var(--strata-solid);
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ui-text-muted);
 }
 .reference-flags {
   display: inline-flex;

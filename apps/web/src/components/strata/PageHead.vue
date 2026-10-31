@@ -1,12 +1,15 @@
 <script setup lang="ts">
-// 页面顶上的标题：大字的名词短语，下面一行说明，右边放操作
+// 页面顶上的标题：大字的名词短语，下面一行说明，标题旁的提示放 hint，右边放操作
 defineProps<{ title: string }>()
 </script>
 
 <template>
   <header class="page-head">
     <div class="min-w-0">
-      <h1>{{ title }}</h1>
+      <div class="page-title">
+        <h1>{{ title }}</h1>
+        <slot name="hint" />
+      </div>
       <p v-if="$slots.note"><slot name="note" /></p>
     </div>
     <div v-if="$slots.actions" class="page-actions"><slot name="actions" /></div>
@@ -22,6 +25,11 @@ defineProps<{ title: string }>()
   justify-content: space-between;
   gap: 10px 24px;
   padding: 20px 32px 17px;
+}
+.page-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
 }
 h1 {
   font-size: 28px;

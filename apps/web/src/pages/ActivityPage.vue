@@ -33,8 +33,8 @@ const days = computed(() => groupByDay(items.value, now.value))
 <template>
   <div class="activity">
     <PageHead title="变更记录">
-      <template #note>
-        记忆的每次改动，新的在前。<Hint>通过 Key 写入的改动，操作方显示为应用。</Hint>
+      <template #hint>
+        <Hint>通过 Key 写入的改动，操作方显示为应用。</Hint>
       </template>
       <template #actions>
         <UButton

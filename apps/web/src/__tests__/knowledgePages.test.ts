@@ -164,6 +164,12 @@ describe('页面标题', () => {
     expect(full).toContain('说明')
     expect(full).toContain('page-actions')
   })
+
+  it('标题旁的提示不占说明那一行', async () => {
+    const html = await render(PageHead, { title: '变更记录' }, { hint: () => h('button', '提示') })
+    expect(html).toContain('提示')
+    expect(html).not.toContain('<p')
+  })
 })
 
 describe('改版之后的约束', () => {
