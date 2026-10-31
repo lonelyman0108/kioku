@@ -1,20 +1,25 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { AppConfig, AppInfo } from '@kioku/contracts'
+import { ACCESS_CONTEXTS, type AccessContext, type AppConfig, type AppInfo } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
 import AppRecallEvents from '../components/AppRecallEvents.vue'
 import AppSimulator from '../components/AppSimulator.vue'
 import Hint from '../components/Hint.vue'
+import KeyMatrix from '../components/KeyMatrix.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
+import SectionHeading from '../components/strata/SectionHeading.vue'
 import { forgetApp, refreshAppCaches } from '../appQueries'
+import { lastUsedAt } from '../apps'
+import { usableKeys } from '../benchSession'
 import { useSession } from '../composables/useSession'
-import { icons } from '../icons'
+import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
 const router = useRouter()
@@ -46,10 +51,44 @@ const canDelete = computed(() => canManage.value || isSpaceOwner.value)
 const ownerName = computed(
   () => members.data.value?.find((m) => m.accountId === app.value?.ownerAccountId)?.displayName,
 )
+const personaName = computed(
+  () => personas.data.value?.find((p) => p.id === app.value?.defaultPersonaId)?.name,
+)
 const personaItems = computed(() => [
   { label: '不使用人格', value: null },
   ...(personas.data.value ?? []).map((p) => ({ label: p.name, value: p.id })),
 ])
+
+// 只有应用所有者和空间所有者能看 Key。AppKeys 用同一份缓存
+const canSeeKeys = computed(() => isAppOwner.value || isSpaceOwner.value)
+const keys = useQuery({
+  queryKey: computed(() => ['keys', spaceId.value, appId.value]),
+  queryFn: () => api.keys(spaceId.value, appId.value),
+  enabled: canSeeKeys,
+})
+const usable = computed(() => usableKeys(keys.data.value ?? []))
+// 默认人格和所有者只显示名字，人格的选项也靠它：读不到时要说出来，不然分不清是没有还是没读到
+const readFailures = computed(() => [
+  ...new Set(
+    [apps, personas, members].filter((q) => q.isError.value).map((q) => readFailure(q.error.value)),
+  ),
+])
+const lastUsed = computed(() => lastUsedAt(keys.data.value ?? []))
+
+// 看的是哪个 Key、哪种会话上下文：记在地址里。地址里的 Key 失效了就看第一个有效的
+const selectedKey = computed(
+  () => usable.value.find((key) => key.id === route.query.key) ?? usable.value[0] ?? null,
+)
+function selectKey(id: string) {
+  void router.replace({ query: { ...route.query, key: id } })
+}
+const context = computed<AccessContext>({
+  get: () => ACCESS_CONTEXTS.find((c) => c === route.query.ctx) ?? 'none',
+  set: (value) =>
+    void router.replace({
+      query: { ...route.query, ctx: value === 'none' ? undefined : value },
+    }),
+})
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -116,6 +155,11 @@ const transferName = computed(
 const confirmingTransfer = ref(false)
 const transferringId = ref<string | null>(null)
 const transferring = computed(() => transferringId.value === appId.value)
+function closeTransfer() {
+  if (transferring.value) return
+  confirmingTransfer.value = false
+  transferTo.value = undefined
+}
 async function transfer() {
   if (!transferTo.value || transferring.value) return
   const sid = spaceId.value
@@ -165,192 +209,224 @@ watch([spaceId, appId], () => {
 </script>
 
 <template>
-  <UDashboardPanel id="app">
-    <template #header>
-      <UDashboardNavbar :title="app?.name ?? '应用'">
-        <template #leading>
-          <UButton
-            :icon="icons.back"
-            color="neutral"
-            variant="ghost"
-            size="sm"
-            aria-label="返回应用列表"
-            :to="{ name: 'apps', params: { spaceId } }"
-          />
-        </template>
-      </UDashboardNavbar>
-    </template>
-    <template #body>
-      <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
-      <UAlert
-        v-else-if="apps.isError.value && !apps.data.value"
-        color="error"
-        variant="subtle"
-        :title="apps.error.value instanceof ApiError ? apps.error.value.message : '读取失败'"
-      />
-      <UAlert v-else-if="!app" color="neutral" variant="subtle" title="应用不存在或已删除" />
-      <div v-else class="max-w-3xl space-y-6">
-        <div class="flex flex-wrap items-center gap-2 text-sm">
-          <code class="text-xs text-muted">app://{{ app.slug }}</code>
-          <UBadge variant="subtle">{{ app.runtimeFamily }}</UBadge>
-          <UBadge v-if="isAppOwner" color="primary" variant="subtle">我的</UBadge>
-          <span class="text-muted">所有者：{{ ownerName ?? '—' }}</span>
+  <div class="app-page">
+    <div v-if="readFailures.length" class="app-failed">
+      <NoteLine v-for="message in readFailures" :key="message" tone="error">{{ message }}</NoteLine>
+    </div>
+    <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
+    <div v-else-if="apps.data.value && !app" class="app-state">
+      <NoteLine>应用不存在或已删除</NoteLine>
+      <UButton
+        :to="{ name: 'apps', params: { spaceId } }"
+        size="sm"
+        color="primary"
+        variant="outline"
+      >
+        返回应用列表
+      </UButton>
+    </div>
+    <template v-else-if="app">
+      <header class="app-head">
+        <div class="app-title">
+          <nav class="crumbs" aria-label="路径">
+            <RouterLink :to="{ name: 'apps', params: { spaceId } }">应用</RouterLink>
+            <i aria-hidden="true">›</i>
+            <span>{{ app.name }}</span>
+          </nav>
+          <h1>{{ app.name }}</h1>
+          <code>app://{{ app.slug }}</code>
         </div>
-
-        <UCard>
-          <template #header><h2 class="text-sm font-medium">设置</h2></template>
-          <p v-if="!canManage" class="mb-4 text-sm text-muted">仅应用所有者可修改设置</p>
-          <div class="grid gap-4 sm:grid-cols-2">
-            <UFormField label="名称">
-              <div class="flex gap-2">
-                <UInput v-model="name" class="w-full" :disabled="!canManage" />
-                <UButton
-                  v-if="canManage"
-                  variant="subtle"
-                  class="shrink-0"
-                  :disabled="!name.trim() || name === app.name"
-                  @click="update({ name: name.trim() })"
-                  >保存</UButton
-                >
-              </div>
-            </UFormField>
-            <UFormField label="默认人格" help="应用读写所选人格的设定">
-              <template v-if="app.defaultPersonaId" #hint>
-                <RouterLink
-                  :to="{
-                    name: 'personas',
-                    params: { spaceId },
-                    query: { id: app.defaultPersonaId },
-                  }"
-                  class="text-primary hover:underline"
-                  >查看人格</RouterLink
-                >
-              </template>
-              <USelect
-                :model-value="app.defaultPersonaId"
-                :items="personaItems"
-                class="w-full"
-                :disabled="!canManage"
-                @update:model-value="
-                  (v) => update({ defaultPersonaId: (v as string | null) ?? null })
-                "
-              />
-            </UFormField>
-            <UFormField label="本人私聊时读取画像" help="识别为本人的私聊可读取个人画像（内部级）">
-              <USwitch
-                :model-value="app.config.elevateOwnerDirect === 'internal'"
-                :disabled="!canManage || savingConfig === app.id"
-                @update:model-value="
-                  (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
-                "
-              />
-            </UFormField>
-            <UFormField
-              label="记录召回提示语"
-              help="保留提示语前 200 字，疑似凭据的片段自动打码，仅所有者可见"
-            >
-              <USwitch
-                :model-value="app.config.recordPrompt !== false"
-                :disabled="!canManage || savingConfig === app.id"
-                @update:model-value="(v) => updateConfig({ recordPrompt: v ? undefined : false })"
-              />
-            </UFormField>
+        <dl class="app-meta">
+          <div>
+            <dt>运行时</dt>
+            <dd class="font-mono">{{ app.runtimeFamily }}</dd>
           </div>
-        </UCard>
+          <div>
+            <dt>默认人格</dt>
+            <dd>{{ personaName ?? '–' }}</dd>
+          </div>
+          <div>
+            <dt>有效 Key</dt>
+            <dd class="font-mono">{{ keys.data.value ? usable.length : '–' }}</dd>
+          </div>
+          <div>
+            <dt>最近使用</dt>
+            <dd>
+              <time v-if="lastUsed" :datetime="lastUsed" :title="formatTime(lastUsed)">
+                {{ formatRelative(lastUsed) }}
+              </time>
+              <template v-else>{{ usable.length ? '尚未使用' : '–' }}</template>
+            </dd>
+          </div>
+          <div>
+            <dt>所有者</dt>
+            <dd>{{ ownerName ?? '–' }}<span v-if="isAppOwner" class="app-mine">我的</span></dd>
+          </div>
+        </dl>
+      </header>
 
-        <UCard>
-          <AppGroupPersonas
-            :space-id="spaceId"
-            :app-id="app.id"
-            :can-manage="canManage"
-            :personas="personas.data.value ?? []"
-            :personas-loaded="personas.isSuccess.value"
-          />
-        </UCard>
+      <div class="app-grid" :class="{ solo: !selectedKey }">
+        <AppKeys
+          class="app-keys-area"
+          :space-id="spaceId"
+          :app-id="app.id"
+          :is-app-owner="isAppOwner"
+          :can-issue="canManage"
+          :is-space-owner="isSpaceOwner"
+          :selected="selectedKey?.id ?? null"
+          @select="selectKey"
+        />
 
-        <UCard>
-          <AppKeys
-            :space-id="spaceId"
-            :app-id="app.id"
-            :is-app-owner="isAppOwner"
-            :can-issue="canManage"
-            :is-space-owner="isSpaceOwner"
-          />
-        </UCard>
+        <KeyMatrix
+          v-if="selectedKey"
+          v-model:context="context"
+          class="app-matrix-area"
+          :space-id="spaceId"
+          :app-id="app.id"
+          :key-info="selectedKey"
+        />
 
-        <!-- 模拟会读到应用主人的私人层，只给应用主人 -->
-        <UCard v-if="isAppOwner">
+        <section class="app-settings-area">
+          <SectionHeading title="设置" />
+          <p v-if="!canManage" class="set-note">仅应用所有者可修改设置</p>
+          <div class="set">
+            <label :for="`app-name-${app.id}`">名称</label>
+            <div class="set-name">
+              <UInput :id="`app-name-${app.id}`" v-model="name" :disabled="!canManage" />
+              <UButton
+                v-if="canManage"
+                color="primary"
+                variant="outline"
+                :disabled="!name.trim() || name === app.name"
+                @click="update({ name: name.trim() })"
+                >保存</UButton
+              >
+            </div>
+          </div>
+          <div class="set">
+            <span class="set-label">
+              默认人格
+              <Hint>应用读写所选人格的设定。</Hint>
+              <RouterLink
+                v-if="app.defaultPersonaId"
+                :to="{
+                  name: 'personas',
+                  params: { spaceId },
+                  query: { id: app.defaultPersonaId },
+                }"
+                class="set-link"
+                >查看人格</RouterLink
+              >
+            </span>
+            <USelect
+              :model-value="app.defaultPersonaId"
+              :items="personaItems"
+              class="set-select"
+              aria-label="默认人格"
+              :disabled="!canManage"
+              @update:model-value="
+                (v) => update({ defaultPersonaId: (v as string | null) ?? null })
+              "
+            />
+          </div>
+          <div class="set">
+            <USwitch
+              label="本人私聊时读取画像"
+              :model-value="app.config.elevateOwnerDirect === 'internal'"
+              :disabled="!canManage || savingConfig === app.id"
+              @update:model-value="
+                (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
+              "
+            />
+            <Hint>识别为本人的私聊可读取个人画像（内部级）。</Hint>
+          </div>
+          <div class="set">
+            <USwitch
+              label="记录召回提示语"
+              :model-value="app.config.recordPrompt !== false"
+              :disabled="!canManage || savingConfig === app.id"
+              @update:model-value="(v) => updateConfig({ recordPrompt: v ? undefined : false })"
+            />
+            <Hint>保留提示语前 200 字，疑似凭据的片段自动打码，仅所有者可见。</Hint>
+          </div>
+          <div class="set col">
+            <AppGroupPersonas
+              :space-id="spaceId"
+              :app-id="app.id"
+              :can-manage="canManage"
+              :personas="personas.data.value ?? []"
+              :personas-loaded="personas.isSuccess.value"
+            />
+          </div>
+          <div v-if="isSpaceOwner || canDelete" class="set-actions">
+            <UButton
+              v-if="isSpaceOwner"
+              color="primary"
+              variant="outline"
+              @click="confirmingTransfer = true"
+            >
+              转移应用
+            </UButton>
+            <UButton
+              v-if="canDelete"
+              color="error"
+              variant="outline"
+              @click="confirmingDelete = true"
+            >
+              删除应用
+            </UButton>
+          </div>
+        </section>
+
+        <div class="app-side-area">
+          <!-- 模拟会读到应用所有者的私人层，只给应用所有者 -->
           <AppSimulator
+            v-if="isAppOwner"
+            class="app-boot-area"
             :space-id="spaceId"
             :app-id="app.id"
+            :key-id="selectedKey?.id"
             :settings="`${app.defaultPersonaId}:${app.config.elevateOwnerDirect ?? ''}`"
           />
-        </UCard>
-
-        <UCard>
-          <AppRecallEvents :space-id="spaceId" :app-id="app.id" />
-        </UCard>
-
-        <UCard v-if="isSpaceOwner">
-          <template #header><h2 class="text-sm font-medium">转移应用</h2></template>
-          <p class="mb-3 text-sm text-muted">
-            转移后现有 Key 全部吊销，新所有者需重新签发。
-            <Hint>应用读写的个人画像层与私人层属于应用所有者，转移后改为新所有者的。</Hint>
-          </p>
-          <div class="flex flex-wrap gap-2">
-            <USelect
-              v-model="transferTo"
-              :items="transferItems"
-              placeholder="选择新所有者（空间所有者或编辑者）"
-              aria-label="新所有者"
-              class="min-w-60"
-            />
-            <UButton
-              :icon="icons.transfer"
-              variant="subtle"
-              :disabled="!transferTo"
-              @click="confirmingTransfer = true"
-              >转移</UButton
-            >
-          </div>
-        </UCard>
-
-        <UCard v-if="canDelete">
-          <template #header><h2 class="text-sm font-medium">删除应用</h2></template>
-          <div class="flex flex-wrap items-center gap-3">
-            <p class="flex-1 text-sm text-muted">
-              其 Key 一并删除。仍有应用层记忆时无法删除。
-              <Hint>已删除但仍可恢复的应用层记忆也算在内，需先移到其他命名空间。</Hint>
-            </p>
-            <UButton color="error" variant="subtle" @click="confirmingDelete = true">删除</UButton>
-          </div>
-        </UCard>
+          <AppRecallEvents class="app-events-area" :space-id="spaceId" :app-id="app.id" />
+        </div>
       </div>
     </template>
-  </UDashboardPanel>
+  </div>
 
   <UModal
     :open="confirmingTransfer"
     title="转移这个应用？"
     :dismissible="!transferring"
-    @update:open="(v) => !v && !transferring && (confirmingTransfer = false)"
+    @update:open="(v) => !v && closeTransfer()"
   >
     <template #body>
-      <p class="text-sm">
-        转移给 {{ transferName }} 后，「{{ app?.name }}」现有的 Key
-        全部吊销，新所有者需重新签发；应用读取的个人画像层与私人层改为 {{ transferName }} 的。
-      </p>
+      <div class="space-y-3 text-sm">
+        <USelect
+          v-model="transferTo"
+          :items="transferItems"
+          placeholder="选择新所有者（空间所有者或编辑者）"
+          aria-label="新所有者"
+          class="w-full"
+        />
+        <p v-if="transferTo">
+          转移给 {{ transferName }} 后，「{{ app?.name }}」现有的 Key
+          全部吊销，新所有者需重新签发；应用读取的个人画像层与私人层改为 {{ transferName }} 的。
+        </p>
+        <p v-else>
+          转移后现有 Key 全部吊销，新所有者需重新签发。
+          <Hint>应用读写的个人画像层与私人层属于应用所有者，转移后改为新所有者的。</Hint>
+        </p>
+      </div>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
-        <UButton
-          color="neutral"
-          variant="ghost"
-          :disabled="transferring"
-          @click="confirmingTransfer = false"
+        <UButton color="neutral" variant="ghost" :disabled="transferring" @click="closeTransfer"
           >取消</UButton
         >
-        <UButton color="warning" :loading="transferring" @click="transfer">转移</UButton>
+        <UButton color="warning" :disabled="!transferTo" :loading="transferring" @click="transfer"
+          >转移</UButton
+        >
       </div>
     </template>
   </UModal>
@@ -362,9 +438,13 @@ watch([spaceId, appId], () => {
     @update:open="(v) => !v && !deleting && (confirmingDelete = false)"
   >
     <template #body>
-      <p class="text-sm">
-        删除「{{ app?.name }}」及其全部 Key 后，使用这些 Key 的客户端将立即失去访问权限。
-      </p>
+      <div class="space-y-2 text-sm">
+        <p>删除「{{ app?.name }}」及其全部 Key 后，使用这些 Key 的客户端将立即失去访问权限。</p>
+        <p class="text-muted">
+          仍有应用层记忆时无法删除。
+          <Hint>已删除但仍可恢复的应用层记忆也算在内，需先移到其他命名空间。</Hint>
+        </p>
+      </div>
     </template>
     <template #footer>
       <div class="flex w-full justify-end gap-2">
@@ -380,3 +460,229 @@ watch([spaceId, appId], () => {
     </template>
   </UModal>
 </template>
+
+<style scoped>
+.app-page {
+  flex: 1;
+  min-width: 0;
+  overflow-y: auto;
+  padding: 16px 32px 56px;
+}
+.app-failed {
+  max-width: 640px;
+  padding-top: 8px;
+}
+.app-state {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-start;
+  gap: 8px;
+  max-width: 640px;
+  padding-top: 8px;
+}
+.app-state > * {
+  width: 100%;
+}
+.app-state > a {
+  width: auto;
+}
+.app-head {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 32px;
+  padding-bottom: 15px;
+}
+.app-title {
+  min-width: 0;
+}
+.crumbs {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+}
+.crumbs a:hover {
+  color: var(--ui-text-highlighted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.crumbs span {
+  min-width: 0;
+  overflow: hidden;
+  color: var(--ui-text);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-title h1 {
+  font-size: 28px;
+  font-weight: 500;
+  line-height: 1.3;
+  overflow-wrap: anywhere;
+}
+.app-title code {
+  display: block;
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+.app-meta {
+  flex: none;
+  display: flex;
+  gap: 30px;
+}
+.app-meta dt {
+  font-size: 12px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+.app-meta dd {
+  max-width: 14em;
+  overflow: hidden;
+  font-size: 14px;
+  line-height: 1.55;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.app-mine {
+  margin-left: 6px;
+  font-size: 12px;
+  color: var(--ui-text-muted);
+}
+.app-grid {
+  display: grid;
+  grid-template-columns: 420px minmax(0, 1fr);
+  gap: 0 36px;
+}
+.app-keys-area {
+  grid-column: 1;
+  grid-row: 1;
+}
+.app-matrix-area {
+  grid-column: 2;
+  grid-row: 1;
+  min-width: 0;
+}
+.app-settings-area {
+  grid-column: 1;
+  grid-row: 2;
+  margin-top: 30px;
+}
+.app-side-area {
+  grid-column: 2;
+  grid-row: 2;
+  display: flex;
+  flex-direction: column;
+  gap: 30px;
+  margin-top: 30px;
+  min-width: 0;
+}
+/* 没有权限范围可看时（看不到 Key，或者暂无有效 Key）右栏从顶上开始 */
+.app-grid.solo .app-side-area {
+  grid-row: 1 / span 2;
+  margin-top: 0;
+}
+.set {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  min-height: 48px;
+  padding: 7px 0;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+}
+.set.col {
+  display: block;
+  padding: 11px 0 13px;
+}
+.set-note {
+  padding: 10px 0 6px;
+  font-size: 14px;
+  color: var(--ui-text-muted);
+}
+.set-label {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  white-space: nowrap;
+}
+.set-link {
+  margin-left: 4px;
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.set-link:hover {
+  color: var(--ui-text-highlighted);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.set-select {
+  flex: 0 1 200px;
+  min-width: 0;
+}
+.set-name {
+  flex: 0 1 260px;
+  display: flex;
+  gap: 6px;
+  min-width: 0;
+}
+.set-name > :first-child {
+  flex: 1;
+  min-width: 0;
+}
+.set-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 14px;
+}
+
+/* 单栏时的顺序：Key、权限范围、启动加载、设置，召回记录可能很长，放最后 */
+@media (max-width: 1240px) {
+  .app-grid,
+  .app-grid.solo {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .app-keys-area,
+  .app-matrix-area,
+  .app-settings-area {
+    grid-column: 1;
+    grid-row: auto;
+  }
+  .app-grid .app-side-area {
+    display: contents;
+  }
+  .app-matrix-area,
+  .app-boot-area,
+  .app-events-area {
+    margin-top: 30px;
+  }
+  .app-boot-area {
+    order: 3;
+  }
+  .app-settings-area {
+    order: 4;
+  }
+  .app-events-area {
+    order: 5;
+  }
+}
+@media (max-width: 1023.98px) {
+  .app-page {
+    padding: 12px 16px 40px;
+  }
+  .app-head {
+    display: block;
+  }
+  .app-meta {
+    flex-wrap: wrap;
+    gap: 6px 20px;
+    margin-top: 9px;
+  }
+}
+</style>

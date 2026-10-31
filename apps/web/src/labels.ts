@@ -50,6 +50,15 @@ export const accessContextLabels: Record<AccessContext, string> = {
   cron: '定时任务 / 子 Agent',
 }
 
+// 五根小岩芯下面放不下全称时用的简称，全称放在悬停和读屏里
+export const accessContextShortLabels: Record<AccessContext, string> = {
+  none: '无上下文',
+  direct: '陌生人私聊',
+  owner_direct: '本人私聊',
+  group: '群聊',
+  cron: '定时任务',
+}
+
 // 权限范围里「读得到哪些来源作用域写下的记忆」
 export const originScopeLabels: Record<KeyAccessMatrix['contexts'][number]['originScope'], string> =
   {

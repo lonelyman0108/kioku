@@ -42,6 +42,7 @@ import { tallyCounts } from '../components/strata/strata'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
+import { invalidateInboxCounts } from '../inbox'
 import { statsChanged } from '../memoryDetail'
 
 const route = useRoute()
@@ -85,8 +86,10 @@ const overview = useQuery({
   queryFn: () => api.overview(spaceId.value),
   staleTime: 60_000,
 })
+// 疑似明文的条数也可能跟着变，导航上的角标一起刷新
 function refreshCounts() {
   void overview.refetch()
+  void invalidateInboxCounts(queryClient, spaceId.value)
 }
 // 窄柱上有来自对话的两层，所以算上它们；列表只列记忆，它的总数不算（见 MemoryListView）
 const stackCounts = computed(() => {

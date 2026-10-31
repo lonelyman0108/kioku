@@ -1,5 +1,6 @@
 import type {
   DreamRunEntry,
+  DreamRunList,
   DreamRunStatus,
   DreamScope,
   DreamSkipReason,
@@ -7,34 +8,27 @@ import type {
   DreamTrigger,
 } from '@kioku/contracts'
 
-import { icons } from './icons'
 import { originScopeText } from './labels'
+import { formatShort } from './time'
 
-// Dream 的四种建议：卡片上的名字、图标与执行之后会怎样
-export const suggestionKinds: Record<
-  DreamSuggestionKind,
-  { label: string; icon: string; effect: string }
-> = {
+// Dream 的四种建议：名字与执行之后会怎样
+export const suggestionKinds: Record<DreamSuggestionKind, { label: string; effect: string }> = {
   merge: {
     label: '合并重复内容',
-    icon: icons.merge,
     effect:
       '执行后保留标记为「保留」的一条（URI 与层不变），正文替换为合并后的内容，其余几条删除。',
   },
   distill: {
     label: '提炼',
-    icon: icons.distill,
     effect: '执行后按草稿新建一条记忆，未选层时放在当前账号的私人层；作为来源的事实保持不变。',
   },
   stale: {
     label: '可能已过时',
-    icon: icons.stale,
     effect:
       '执行后有效期截止到当前时间，不再召回；记忆可在「已过期」中恢复生效，事实可在联系人页恢复生效。',
   },
   review: {
     label: '待确认内容',
-    icon: icons.review,
     effect: '确认后记为本人来源；删除后不再注入对话，从对话中抽取的内容无法在管理界面恢复。',
   },
 }
@@ -96,6 +90,13 @@ export function runEntrySummary(entry: DreamRunEntry): string {
   if (entry.dropped) parts.push(`已丢弃不合规建议 ${entry.dropped} 条`)
   if (entry.more) parts.push('还有未处理的内容，下次继续')
   return parts.join(' · ')
+}
+
+// 标题旁边的一句话：最近一次什么时候整理、处理了多少、用了多少。各个范围的加起来
+export function lastRunSummary(run: DreamRunList['runs'][number], now: Date = new Date()): string {
+  const considered = run.entries.reduce((sum, entry) => sum + entry.considered, 0)
+  const tokens = run.entries.reduce((sum, entry) => sum + entry.tokens, 0)
+  return `${formatShort(run.at, now)}，处理 ${considered} 条，用量 ${tokens.toLocaleString()} token`
 }
 
 // 「立即整理」做完之后的提示

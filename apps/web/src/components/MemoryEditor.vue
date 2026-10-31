@@ -2,6 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   PLAINTEXT_CREDENTIAL,
+  placeholderAllowed,
   type ConsoleMemoryView,
   type Layer,
   type Sensitivity,
@@ -14,6 +15,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useCopy } from '../composables/useCopy'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
+import { usePlaintextActions } from '../composables/usePlaintextActions'
 import { useNow } from '../composables/useNow'
 import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { icons } from '../icons'
@@ -33,6 +35,7 @@ import {
   recallText,
 } from '../memoryDetail'
 import { placeholderOf } from '../placeholders'
+import { CONVERT_SCOPE_TEXT } from '../plaintext'
 import {
   hiddenAgain,
   revealedAfterWrite,
@@ -50,6 +53,7 @@ import {
   toLocalInput,
   validToTooSoon,
 } from '../time'
+import ConvertCredentialModal from './ConvertCredentialModal.vue'
 import Hint from './Hint.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
@@ -286,7 +290,7 @@ function openCredential(id: string) {
 
 // 插入凭据引用：服务端只收私人层、敏感级至少 private 的记忆里的占位符
 const canReference = computed(
-  () => ownsCredentials.value && (form.sensitivity === 'private' || form.sensitivity === 'secret'),
+  () => !!base.value && placeholderAllowed(base.value.layer, form.sensitivity),
 )
 const contentInput = ref<{ textareaRef: HTMLTextAreaElement | null } | null>(null)
 const picking = ref(false)
@@ -520,6 +524,24 @@ const plaintext = computed(() => {
   const m = base.value
   return m && looksPlaintext(m) ? plaintextValues(m) : null
 })
+
+// 疑似明文的提示：转存为凭据、忽略、撤销忽略。结果写进缓存并载入，不用再读一次；
+// 版本变了的（转存）由 adopt 通知页面，版本没变的（忽略）条数和列表在 usePlaintextActions 里刷新
+const convertOpen = ref(false)
+// 占位符放不进这条记忆时转存一定失败，先调整
+const convertible = computed(
+  () => !!base.value && placeholderAllowed(base.value.layer, base.value.sensitivity),
+)
+const plaintextActions = usePlaintextActions(computed(() => props.spaceId))
+async function setPlaintextIgnored(ignored: boolean) {
+  const m = base.value
+  if (!m) return
+  const view = await (ignored ? plaintextActions.ignore(m) : plaintextActions.unignore(m))
+  if (view && view.id === base.value?.id) adopt(view)
+}
+function onConverted(memory: ConsoleMemoryView) {
+  if (memory.id === base.value?.id) adopt(memory)
+}
 
 watch(
   () => base.value?.layer,
@@ -775,7 +797,26 @@ const properties = computed<Property[][]>(() => {
         <template v-else>
           <NoteLine v-if="plaintext" tone="error">
             正文疑似包含明文凭据<Hint>建议转存为凭据，正文改用占位符。</Hint>
+            <template v-if="!readOnly && !convertible" #detail>{{ CONVERT_SCOPE_TEXT }}</template>
             <template v-if="!readOnly" #actions>
+              <UButton
+                v-if="convertible"
+                size="sm"
+                color="primary"
+                variant="outline"
+                @click="convertOpen = true"
+              >
+                转存为凭据
+              </UButton>
+              <UButton
+                size="sm"
+                color="primary"
+                variant="outline"
+                :loading="plaintextActions.busy.value === base.id"
+                @click="setPlaintextIgnored(true)"
+              >
+                忽略
+              </UButton>
               <UButton
                 size="sm"
                 color="primary"
@@ -783,6 +824,20 @@ const properties = computed<Property[][]>(() => {
                 :to="{ name: 'credentials', params: { spaceId } }"
               >
                 查看凭据
+              </UButton>
+            </template>
+          </NoteLine>
+          <NoteLine v-else-if="base.plaintextIgnored">
+            疑似明文的提示已忽略<Hint>正文修改后会重新提示。</Hint>
+            <template v-if="!readOnly" #actions>
+              <UButton
+                size="sm"
+                color="primary"
+                variant="outline"
+                :loading="plaintextActions.busy.value === base.id"
+                @click="setPlaintextIgnored(false)"
+              >
+                撤销忽略
               </UButton>
             </template>
           </NoteLine>
@@ -967,6 +1022,13 @@ const properties = computed<Property[][]>(() => {
 
     <template v-if="base">
       <MoveMemoryModal v-model:open="moveOpen" :space-id="spaceId" :memory="base" @done="onMoved" />
+
+      <ConvertCredentialModal
+        v-model:open="convertOpen"
+        :space-id="spaceId"
+        :uri="base.uri"
+        @converted="onConverted"
+      />
 
       <UModal v-model:open="picking" title="插入凭据引用" @after:leave="restoreCaret">
         <template #body>

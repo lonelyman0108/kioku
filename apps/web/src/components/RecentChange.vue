@@ -12,16 +12,15 @@ import {
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import ActorName from './strata/ActorName.vue'
 import UriPath from './strata/UriPath.vue'
 
 // 概览里最近变更的一行：URI 一行，谁改了什么一行。完整的版本是变更记录页的 ActivityEntry
 const props = defineProps<{ item: ActivityItem; spaceId: string }>()
 
-const summary = computed(() => {
+const change = computed(() => {
   const fields = props.item.changes.map((c) => changeLabels[c] ?? c).join('、')
-  return [actorLabel(props.item.actor).name, eventLabel(props.item.type).label, fields]
-    .filter(Boolean)
-    .join(' ')
+  return [eventLabel(props.item.type).label, fields].filter(Boolean).join(' ')
 })
 </script>
 
@@ -35,8 +34,8 @@ const summary = computed(() => {
       <UriPath :uri="item.uri" />
     </RouterLink>
     <UriPath v-else class="change-uri" :uri="item.uri" />
-    <span class="change-meta" :title="summary">
-      <span class="truncate">{{ summary }}</span>
+    <span class="change-meta" :title="`${actorLabel(item.actor).name} ${change}`">
+      <span class="truncate"><ActorName :actor="item.actor" /> {{ change }}</span>
       <span v-if="item.expired && !item.deleted" class="shrink-0">已过期</span>
       <span
         v-if="item.bench"

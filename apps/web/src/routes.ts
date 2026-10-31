@@ -2,6 +2,7 @@ import type { RouteRecordRaw, Router } from 'vue-router'
 
 import { api } from './api/endpoints'
 import { loadMe } from './composables/useSession'
+import { legacyReviewTab } from './inbox'
 import UnavailablePage from './pages/UnavailablePage.vue'
 
 export const routes: RouteRecordRaw[] = [
@@ -50,9 +51,19 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/SubjectDetailPage.vue'),
       },
       {
+        path: 'spaces/:spaceId/inbox',
+        name: 'inbox',
+        component: () => import('./pages/InboxPage.vue'),
+      },
+      // 旧地址：书签和别处的链接还能到对应的分类
+      {
         path: 'spaces/:spaceId/review',
         name: 'review',
-        component: () => import('./pages/ReviewPage.vue'),
+        redirect: (to) => ({
+          name: 'inbox',
+          params: to.params,
+          query: { tab: legacyReviewTab(to.query.tab) },
+        }),
       },
       {
         path: 'spaces/:spaceId/apps',

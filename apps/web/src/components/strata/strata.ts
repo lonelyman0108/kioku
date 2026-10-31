@@ -9,7 +9,7 @@ import {
   type Sensitivity,
 } from '@kioku/contracts'
 
-import { layerLabels, sensitivityLabels } from '../../labels'
+import { layerLabels, scopesSummary, sensitivityLabels } from '../../labels'
 
 // 地层编码的全部计算：颜色表示层，纹理表示敏感级，纵向顺序固定。地层柱、窄柱、色块、岩芯、矩阵都从这里取
 
@@ -200,9 +200,14 @@ export interface Box {
 export const TEXTURES = {
   dots: { lg: 'strata-dots-lg', sm: 'strata-dots-sm' },
   lines: { lg: 'strata-lines-lg', sm: 'strata-lines-sm' },
-  // 压在满色的条上，挖出虚线的缺口
-  gaps: { lg: 'strata-gaps-lg', sm: 'strata-gaps-sm' },
 } as const
+
+// 权限格子下沿的虚线条：每层一种颜色，缺口真的留空，底下是什么就透出什么。两种大小的实虚比例一样
+export const DASHES: Record<TextureScale, { on: number; off: number }> = {
+  lg: { on: 6, off: 4 },
+  sm: { on: 3, off: 2 },
+}
+export const dashId = (layer: Layer, scale: TextureScale) => `strata-dash-${layer}-${scale}`
 
 // 公开无纹理，内部圆点，私密斜线；机密是实心，也没有纹理
 export function textureId(sensitivity: Sensitivity, scale: TextureScale): string | null {
@@ -288,6 +293,23 @@ export function accessKind(layer: Layer, cell: AccessCell): AccessKind {
   return ACCESS_KINDS[cell.read][writing]
 }
 
+// 这一格的满色。层色本身明度差得多，权限格子用单独的一组（见 main.css 的 --access-*），淡层也拉得开
+export const accessFill = (layer: Layer) => `var(--access-${layer})`
+
+// 下沿的条占格子多高。矩阵、图例、岩芯都按这个比例，小格子至少 2px，也不能比格子高，否则画到相邻的带上
+const ACCESS_BAR_RATIO = 0.2
+export const ACCESS_BAR_PERCENT = { y: '80%', height: '20%' }
+export function accessBar(y: number, height: number): { y: number; height: number } {
+  const bar = Math.min(height, Math.max(2, Math.round(height * ACCESS_BAR_RATIO)))
+  return { y: y + height - bar, height: bar }
+}
+
+// 格子里下沿的条上面那一段。矩阵按百分比画，从格子顶上量；岩芯按像素画
+function aboveBar(box: Box, bar: { y: number | string }): Box {
+  const height = typeof bar.y === 'number' && typeof box.y === 'number' ? bar.y - box.y : bar.y
+  return { ...box, height }
+}
+
 // 同一套编码表示权限，岩芯上没有文字，每种都要一眼能分开。
 // 底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按 URI 读取，空白读不到。
 // 下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入。读写已经是满色，不再加条
@@ -299,35 +321,36 @@ export function paintAccess(
   bar: { y: number | string; height: number | string },
   scale: TextureScale = 'lg',
 ): PaintRect[] {
-  const full = layerFill(layer)
+  const full = accessFill(layer)
   const solid = { ...box, fill: 'var(--strata-explicit)' }
   const writeBar = { ...box, ...bar, fill: full }
-  const extractBar = [writeBar, { ...box, ...bar, fill: `url(#${TEXTURES.gaps[scale]})` }]
-  const recall = (strong: boolean) => {
+  const extractBar = { ...box, ...bar, fill: `url(#${dashId(layer, scale)})` }
+  // 下沿有条时，纹理只铺到条上面，虚线的缺口里露出的是底色，不是一半的圆点
+  const recall = (strong: boolean, textureBox: Box = box) => {
     const tint = `color-mix(in srgb, ${full} var(--strata-tint), var(--ui-bg))`
     const rects: PaintRect[] = [{ ...box, fill: strong ? full : tint }]
     const texture = textureId(sensitivity, scale)
     if (texture)
-      rects.push({ ...box, fill: `url(#${texture})`, ...(strong ? {} : { opacity: 0.55 }) })
+      rects.push({ ...textureBox, fill: `url(#${texture})`, ...(strong ? {} : { opacity: 0.55 }) })
     return rects
   }
   switch (kind) {
     case 'read-write':
       return recall(true)
     case 'read-extract':
-      return [...recall(false), ...extractBar]
+      return [...recall(false, aboveBar(box, bar)), extractBar]
     case 'read':
       return recall(false)
     case 'explicit-write':
       return [solid, writeBar]
     case 'explicit-extract':
-      return [solid, ...extractBar]
+      return [solid, extractBar]
     case 'explicit':
       return [solid]
     case 'write':
       return [writeBar]
     case 'extract':
-      return extractBar
+      return [extractBar]
     case 'none':
       return []
   }
@@ -367,6 +390,24 @@ export function deepestColumn(rows: readonly AccessRow[]): number {
   return deepest
 }
 
+// 这份权限里出现了哪几种，图例只列这些。读写、只读、无权限一直列着：看的人要知道还有别的情况
+const LEGEND_ORDER: AccessKind[] = [
+  'read-write',
+  'read-extract',
+  'read',
+  'explicit-write',
+  'explicit-extract',
+  'explicit',
+  'write',
+  'extract',
+  'none',
+]
+export function presentKinds(rows: readonly AccessRow[]): AccessKind[] {
+  const present = new Set<AccessKind>(['read-write', 'read', 'none'])
+  for (const row of rows) for (const cell of row.cells) present.add(accessKind(row.layer, cell))
+  return LEGEND_ORDER.filter((kind) => present.has(kind))
+}
+
 // 接口不保证顺序，统一成地层柱的顺序
 export function orderRows(rows: readonly AccessRow[]): AccessRow[] {
   return STACK.flatMap((layer) => rows.filter((row) => row.layer === layer))
@@ -399,8 +440,7 @@ export function coreCells(
     SENSITIVITIES.forEach((sensitivity, i) => {
       const cell = row.cells.find((c) => c.sensitivity === sensitivity)
       if (!cell) return
-      // 条不能比格子高，否则画到相邻的带上
-      const barHeight = Math.min(band.h, Math.max(2, Math.round(band.h * 0.3)))
+      const bar = accessBar(band.y, band.h)
       cells.push({
         layer: band.layer,
         sensitivity,
@@ -409,10 +449,43 @@ export function coreCells(
         y: band.y,
         width: columns[i + 1]! - columns[i]!,
         height: band.h,
-        barY: band.y + band.h - barHeight,
-        barHeight,
+        barY: bar.y,
+        barHeight: bar.height,
       })
     })
   }
   return { bands, columns, cells }
+}
+
+// 岩芯读出来是什么：传了服务端算的 rows 才是权限范围，只传签发范围时说清是签发范围（不是实际权限，
+// 见 issuedScopeRows），什么都没有时不能读成没有权限。label 说这是谁的
+export function coreName({
+  label,
+  rows,
+  scopes,
+  revoked,
+}: {
+  label?: string | undefined
+  rows?: readonly AccessRow[] | null
+  scopes?: KeyScopes | null
+  revoked?: boolean
+}): string {
+  if (revoked) return label ? `${label}，已吊销，没有权限` : '已吊销，没有权限'
+  if (rows) return label ? `${label}的权限范围` : '当前会话上下文的权限范围'
+  if (scopes) return `${label ? `${label}，` : ''}签发范围：${scopesSummary(scopes)}`
+  return label ? `${label}，暂无权限数据` : '暂无权限数据'
+}
+
+// 岩芯上标出一条记忆的位置：落在空白处就是这个 Key 碰不到。不知道敏感级时标整层
+export function coreMark(
+  model: { bands: readonly Band[]; columns: readonly number[] },
+  layer: Layer,
+  sensitivity: Sensitivity | null,
+): Box | null {
+  const band = model.bands.find((b) => b.layer === layer)
+  if (!band) return null
+  const column = sensitivity ? SENSITIVITIES.indexOf(sensitivity) : 0
+  const left = model.columns[column]!
+  const right = sensitivity ? model.columns[column + 1]! : model.columns[model.columns.length - 1]!
+  return { x: left + 0.5, y: band.y + 0.5, width: right - left - 1, height: band.h - 1 }
 }

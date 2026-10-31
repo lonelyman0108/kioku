@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { BenchMark, DeletionRetention, EventActor } from './console'
 import { ConsoleMemoryView } from './memories'
-import { Sensitivity } from './memory'
+import { SENSITIVITIES, Sensitivity, type Layer } from './memory'
 
 // 凭据的标识与字段名。记忆正文里用 {{cred:<标识>}} 引用整条凭据，{{cred:<标识>#<字段>}} 引用其中一个字段
 export const CREDENTIAL_NAME_PATTERN = /^[a-z0-9][a-z0-9_-]{0,63}$/
@@ -27,6 +27,14 @@ export const MAX_CREDENTIAL_FIELDS = 32
 export const CREDENTIAL_PLACEHOLDER_START = '{{cred:'
 export const CREDENTIAL_PLACEHOLDER =
   /\{\{cred:([a-z0-9][a-z0-9_-]{0,63})(?:#([a-z0-9][a-z0-9_-]{0,63}))?\}\}/
+
+// 占位符只能放在私人层、敏感级至少 private 的记忆里：按记忆的主人解析，别的层的读者解析不到。
+// 写入检查、导入计划、转存和管理界面的入口都按这一条判断
+export function placeholderAllowed(layer: Layer, sensitivity: Sensitivity): boolean {
+  return (
+    layer === 'private' && SENSITIVITIES.indexOf(sensitivity) >= SENSITIVITIES.indexOf('private')
+  )
+}
 
 // 空白字符逐个写出来（与 JS 的 \s 同一个集合）：服务端把这条规则的 source 原样交给 PostgreSQL，
 // 它的 \s 随数据库的 locale 变，全角空格、BOM 这类字符两边会判断得不一样
