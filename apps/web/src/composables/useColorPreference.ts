@@ -1,4 +1,6 @@
-import { useColorMode } from '@nuxt/ui/runtime/vue/stubs/base.js'
+// useColorMode 不从 @nuxt/ui/composables 导出。Nuxt UI 自己的组件（ColorModeButton）从 #imports 取，
+// 这个名字由它的 Vite 插件解析，这里照做；类型见 tsconfig.app.json 的 paths，用例在 useColorPreference.test.ts
+import { useColorMode } from '#imports'
 
 import { icons } from '../icons'
 

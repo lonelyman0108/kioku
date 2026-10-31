@@ -1,8 +1,10 @@
 import { readFileSync } from 'node:fs'
 
+import colorsPlugin from '@nuxt/ui/runtime/plugins/colors.js?raw'
 import { describe, expect, it } from 'vitest'
 
 import { STACK } from '../components/strata/strata'
+import { theme } from '../theme'
 
 // 令牌写在 CSS 里，这里直接读文件核对对比度：改颜色时不用开浏览器就知道过没过线。
 // 不能 import ?raw：vitest 默认把 CSS 文件换成空字符串
@@ -39,6 +41,21 @@ const dark = block('.dark')
 const themes = { 浅色: light, 深色: dark }
 const scale = (name: string, shade: number) =>
   new RegExp(`--color-${name}-${shade}:\\s*(#[0-9a-f]{6})`, 'i').exec(css)?.[1]
+
+describe('Nuxt UI 的语义色', () => {
+  it('theme.colors 里的每个名字在 main.css 里都有整套色阶', () => {
+    for (const [role, name] of Object.entries<string>(theme.colors)) {
+      for (const shade of [50, 100, 200, 300, 400, 500, 600, 700, 800, 900, 950]) {
+        expect(scale(name, shade), `${role} ${name}-${shade}`).toBeDefined()
+      }
+    }
+  })
+
+  it('中性色写的是自定义色阶：插件运行时还要按名字拼变量，否则断言成 stone 的那一处就不成立了', () => {
+    expect(theme.colors.neutral).toBe('paper')
+    expect(colorsPlugin).toMatch(/color-\$\{[^}]*value[^}]*\}-\$\{shade\}/)
+  })
+})
 
 describe('两套主题的令牌', () => {
   it('编码用到的令牌两边都有', () => {

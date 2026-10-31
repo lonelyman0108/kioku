@@ -4,7 +4,9 @@
     "lib": ["ES2023", "DOM", "DOM.Iterable"],
     "types": ["vite/client"],
     "paths": {
-      "#build/ui/*": ["./node_modules/.nuxt-ui/ui/*"]
+      "#build/ui/*": ["./node_modules/.nuxt-ui/ui/*"],
+      // 运行时由 Nuxt UI 的 Vite 插件解析，它没有给这个名字写类型，所以指到实现旁边的声明
+      "#imports": ["./node_modules/@nuxt/ui/dist/runtime/vue/stubs/base.d.ts"]
     },
     // Vue 模板里常给可选 props 传 undefined，组件库的类型没有按 exactOptionalPropertyTypes 写，界面这边关掉；服务端保持开启
     "exactOptionalPropertyTypes": false

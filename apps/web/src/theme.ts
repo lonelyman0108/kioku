@@ -155,7 +155,9 @@ export const theme = {
     info: 'lake',
     warning: 'ochre',
     error: 'brick',
-    // 类型只列了 Tailwind 自带的中性色；插件运行时按名字取 --color-paper-*
+    // 不是真的用 stone：Vite 插件选项的类型把 neutral 限定成 Tailwind 自带的几种中性色（别的语义色没有这个限制），
+    // 运行时 plugins/colors.js 按名字取 --color-paper-*，自定义的色阶能用，这里只是过类型。
+    // 这个行为和色阶齐不齐由 tokens.test.ts 核对，升级时那里先报错
     neutral: 'paper' as 'stone',
   },
 
