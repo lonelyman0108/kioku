@@ -91,7 +91,7 @@ export function channelEmbedder(
         }
       }
       if (signal?.aborted && errors.length < embedders.length) {
-        errors.push('等待时间已用完，后续渠道未重试')
+        errors.push('等待时间已用完，后续渠道未尝试')
       }
       throw new Error(errors.length === 1 ? errors[0] : `所有渠道均失败。${errors.join('；')}`)
     },

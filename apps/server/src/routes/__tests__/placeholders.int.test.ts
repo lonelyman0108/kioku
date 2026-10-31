@@ -128,7 +128,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       { uri: 'notes://open', content: WITH_REFS, sensitivity: 'internal' },
     ]) {
       expect(await errorOf(await createMemory(body), 400), JSON.stringify(body)).toContain(
-        '只能放在私人层，敏感级不低于私密',
+        '只能放在私人层（private），敏感级不低于私密（private）',
       )
     }
     // 去掉花括号的写法不算引用
@@ -185,7 +185,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
 
   it('改层、降级、移出私人层之后违反的同样被拒，在私人层里移动照常', async () => {
     await ok(await createMemory({ uri: 'notes://server', content: WITH_REFS }), 201)
-    const scope = '只能放在私人层，敏感级不低于私密'
+    const scope = '只能放在私人层（private），敏感级不低于私密（private）'
     expect(
       await errorOf(await patchMemory({ uri: 'notes://server', layer: 'base' }), 400),
     ).toContain(scope)
@@ -401,7 +401,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
         }),
         400,
       ),
-    ).toContain('触发场景（disclosure）与关键词中不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
     expect(
       await errorOf(
         await createMemory({
@@ -411,14 +411,14 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
         }),
         400,
       ),
-    ).toContain('触发场景（disclosure）与关键词中不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
     await ok(await createMemory({ uri: 'notes://plain', content: '正文' }), 201)
     expect(
       await errorOf(
         await patchMemory({ uri: 'notes://plain', disclosure: '{{cred:file-server}} 在哪' }),
         400,
       ),
-    ).toContain('触发场景（disclosure）与关键词中不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
   })
 
   it('规则之前写进 disclosure 的占位符不挡移动与撤销删除，只在写 disclosure 的时候检查', async () => {
@@ -444,7 +444,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     // 改 disclosure 时照常检查
     expect(
       await errorOf(await patchMemory({ uri: 'core://cue', disclosure: '还是 {{cred:x}}' }), 400),
-    ).toContain('触发场景（disclosure）与关键词中不能有凭据占位符')
+    ).toContain('触发场景（disclosure）与关键词（glossary）中不能有凭据占位符')
   })
 
   it('导入工具（来源记为 system）能新增引用，别的后台写入不能', async () => {

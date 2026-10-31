@@ -63,7 +63,7 @@ const TIMEOUT_CODES: Record<string, BenchInternalDetail> = {
 // 运行已经结束，或者超过了总时长：代理不再开始新的事务；运行结束之后事务句柄也不能再用
 class RunStopped extends Error {
   constructor(readonly detail: BenchInternalDetail) {
-    super(detail === 'run_timeout' ? '测试台的运行超过了总时长' : '测试台的运行已经结束')
+    super(detail === 'run_timeout' ? '测试台的运行超过总时长' : '测试台的运行已结束')
   }
 }
 

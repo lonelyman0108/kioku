@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import {
   CreateMemoryRequest,
+  LAYER_NAMES,
   RUNTIME_FAMILIES,
   Slug,
   type Layer,
@@ -25,7 +26,6 @@ import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { sealedSettingsKeys } from '../crypto/rotation'
 import { pgErrorCode, withSpace, type Db } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
-import { LAYER_NAMES } from '../memory/names'
 import { MemoryError, MemoryService } from '../memory/service'
 import { APP_DOMAIN, DEFAULT_SENSITIVITY, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
 
@@ -314,7 +314,7 @@ export function planImport(
       continue
     }
     if (!node.content) {
-      plan.skipped.push({ source: node.uri, reason: '没有正文' })
+      plan.skipped.push({ source: node.uri, reason: '正文为空' })
       continue
     }
     // 占位符的写入规则在计划里先查一遍，不用等执行时逐条失败
@@ -406,7 +406,7 @@ export function planImport(
       if (hasRefs && !placeholderAllowed(target.layer, sensitivity)) {
         plan.skipped.push({
           source: node.uri,
-          reason: `正文含凭据占位符，只能放在私人层、敏感级不低于私密的记忆中，${target.uri} 属于${LAYER_NAMES[target.layer]}`,
+          reason: `正文含凭据占位符，只能放在私人层、敏感级不低于私密的记忆中，${target.uri} 属于${LAYER_NAMES[target.layer]}层`,
         })
         continue
       }

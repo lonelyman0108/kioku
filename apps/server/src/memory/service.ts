@@ -3,6 +3,7 @@ import { createHash, randomUUID } from 'node:crypto'
 import {
   CREDENTIAL_PLACEHOLDER,
   CREDENTIAL_PLACEHOLDER_START,
+  LAYER_NAMES,
   PLAIN_LAYERS,
   PLAINTEXT_CREDENTIAL,
   PLAINTEXT_MASK,
@@ -134,7 +135,7 @@ import {
   type MemoryColumns,
 } from './filter'
 import { hasMaskedText } from './masked'
-import { LAYER_NAMES, SENSITIVITY_NAMES } from './names'
+import { layerWithValue, sensitivityWithValue } from './names'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
   DEFAULT_SENSITIVITY,
@@ -218,7 +219,8 @@ const perMember = (layer: Layer) => PER_MEMBER_LAYERS.includes(layer)
 
 // 在共享的层与个人的层之间转换会改变谁看得到它（共享的记忆从别人那里消失，或个人的内容给了别人），
 // 所以只能由人在管理界面里做，通过 Key 改层或移动都不行
-const KEY_CROSS_OWNERSHIP = '通过 Key 无法在共享层与个人层之间转换记忆，请在管理界面修改'
+const KEY_CROSS_OWNERSHIP =
+  '通过 Key 无法在共享层（base）与个人层（owner、private）之间转换记忆，请在管理界面修改'
 
 // Key 只能写应用当前的人格：继承来的祖先人格也被别的应用用着，群聊版的应用不能改掉主人格的设定
 const PERSONA_WRITE =
@@ -229,12 +231,12 @@ const UNTRUSTED_MODIFY = '来自群聊或陌生人私聊的写入不能修改受
 
 // 含凭据占位符的记忆只能在私人层、敏感级至少 private：读得到占位符的人，正好就是读得到凭据说明的人
 const PLACEHOLDER_SCOPE =
-  '含凭据占位符的记忆只能放在私人层，敏感级不低于私密。改层、降级或移出私人层前，请先去掉正文中的 {{cred:…}} 引用。'
+  '含凭据占位符的记忆只能放在私人层（private），敏感级不低于私密（private）。改层、降级或移出私人层前，请先去掉正文中的 {{cred:…}} 引用。'
 const PLAINTEXT_DOWNGRADE =
-  '正文疑似含明文密码或 Token。从机密降级后，这些内容会进入历史、全文检索和向量，且无法收回。请先把值换成凭据占位符，再降级。'
+  '正文疑似含明文密码或 Token。从机密（secret）降级后，这些内容会进入历史、全文检索和向量，且无法收回。请先把值换成凭据占位符，再降级。'
 // 打码时拒绝的写入（见 MemoryContext.maskSecret）
-const MASKED_DOWNGRADE = '测试台无法更改机密记忆的敏感级，请到记忆页修改'
-const MASKED_CONTENT = '测试台无法读取机密记忆的原文，也无法修改正文，请到记忆页修改'
+const MASKED_DOWNGRADE = '测试台无法更改机密（secret）记忆的敏感级，请到记忆页修改'
+const MASKED_CONTENT = '测试台无法读取机密（secret）记忆的原文，也无法修改正文，请到记忆页修改'
 const MASKED_TEXT_WRITTEN = '正文含测试台的占位文字，并非真实内容。如需写入这句话，请到记忆页操作。'
 const CONVERT_SECRET = '机密记忆的正文已加密，不进入历史、全文检索和向量，无需转存为凭据'
 const CONVERT_SCOPE =
@@ -261,7 +263,7 @@ function checkOutsideContent(
   if ([disclosure ?? '', ...glossary].some(mentionsPlaceholder)) {
     throw new MemoryError(
       400,
-      '触发场景（disclosure）与关键词中不能有凭据占位符，占位符只能写在正文中',
+      '触发场景（disclosure）与关键词（glossary）中不能有凭据占位符，占位符只能写在正文中',
     )
   }
 }
@@ -765,14 +767,17 @@ export class MemoryService {
     const access = this.ctx.access
     const forced = layerForDomain(parsed.domain)
     if (forced && requested && requested !== forced) {
-      throw new MemoryError(400, `${parsed.domain}:// 下的记忆只能属于${LAYER_NAMES[forced]}`)
+      throw new MemoryError(400, `${parsed.domain}:// 下的记忆只能属于${layerWithValue(forced)}`)
     }
     if (!forced && (requested === 'persona' || requested === 'app')) {
-      throw new MemoryError(400, `${LAYER_NAMES[requested]}的记忆须放在 ${requested}://<标识>/ 下`)
+      throw new MemoryError(
+        400,
+        `${layerWithValue(requested)}的记忆须放在 ${requested}://<标识>/ 下`,
+      )
     }
     const layer = forced ?? requested ?? 'private'
     if (layer === 'subject' || layer === 'episode') {
-      throw new MemoryError(400, `${LAYER_NAMES[layer]}由对话抽取写入，无法按 URI 新建`)
+      throw new MemoryError(400, `${layerWithValue(layer)}由对话抽取写入，无法按 URI 新建`)
     }
 
     const ownership: Ownership = { layer, ownerAccountId: null, personaId: null, appId: null }
@@ -790,7 +795,7 @@ export class MemoryService {
         .limit(1)
       if (!row) throw new MemoryError(404, `应用不存在：${parsed.namespaceSlug}`)
       if (!canWriteApp(access, row.id)) {
-        throw new MemoryError(403, '无权写入此应用的应用层记忆')
+        throw new MemoryError(403, '无权写入此应用的应用层（app）记忆')
       }
       ownership.appId = row.id
     }
@@ -988,7 +993,7 @@ export class MemoryService {
     const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
     this.assertWritable(
       { ...ownership, sensitivity },
-      `无权写入${LAYER_NAMES[ownership.layer]}的${SENSITIVITY_NAMES[sensitivity]}级记忆`,
+      `无权写入${layerWithValue(ownership.layer)}的${sensitivityWithValue(sensitivity)}记忆`,
     )
     if (meta.requireAppOwner && ownership.appId) {
       await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
@@ -1072,7 +1077,7 @@ export class MemoryService {
     try {
       this.assertWritable(
         { layer: item.layer, sensitivity, appId: null, personaId: null },
-        `无权写入${LAYER_NAMES[item.layer]}的记忆`,
+        `无权写入${LAYER_NAMES[item.layer]}层的记忆`,
       )
       await this.checkCredentialRefs(
         tx,
@@ -1143,7 +1148,7 @@ export class MemoryService {
 
   private seal(plaintext: string, id: string) {
     if (!this.ctx.masterKey)
-      throw new MemoryError(400, '服务端未配置 KIOKU_MASTER_KEY，无法保存机密记忆')
+      throw new MemoryError(400, '服务端未配置 KIOKU_MASTER_KEY，无法保存机密（secret）记忆')
     return sealMemoryContent(this.ctx.masterKey, id, plaintext)
   }
 
@@ -1195,10 +1200,10 @@ export class MemoryService {
     for (const s of new Set([before.sensitivity, sensitivity])) {
       this.assertWritable(
         { ...before, sensitivity: s },
-        `无权修改${LAYER_NAMES[before.layer]}的${SENSITIVITY_NAMES[s]}级记忆`,
+        `无权修改${layerWithValue(before.layer)}的${sensitivityWithValue(s)}记忆`,
       )
     }
-    this.assertModifiable(before, `无权修改${LAYER_NAMES[before.layer]}的记忆`)
+    this.assertModifiable(before, `无权修改${layerWithValue(before.layer)}的记忆`)
     if (this.ctx.maskSecret && before.sensitivity === 'secret') {
       if (sensitivity !== 'secret') throw new MemoryError(403, MASKED_DOWNGRADE)
       if (input.content !== undefined) throw new MemoryError(403, MASKED_CONTENT)
@@ -1229,14 +1234,14 @@ export class MemoryService {
       ) {
         throw new MemoryError(
           400,
-          `${LAYER_NAMES[before.layer]}的记忆无法直接改层。人格层与应用层须移动到其他命名空间。`,
+          `${layerWithValue(before.layer)}的记忆无法直接改层。人格层（persona）与应用层（app）须移动到其他命名空间。`,
         )
       }
       this.assertKeyTransition(before.layer, layer)
       if (!canWrite(this.ctx.access, { layer, sensitivity, appId: null, personaId: null })) {
         throw new MemoryError(
           403,
-          `无权把记忆改到${LAYER_NAMES[layer]}的${SENSITIVITY_NAMES[sensitivity]}级`,
+          `无权把记忆改到${layerWithValue(layer)}的${sensitivityWithValue(sensitivity)}`,
         )
       }
       // 新归属下已失效或过期、又挡着 URI 的记录先让出；真冲突由触发器与唯一索引判断，返回 409
@@ -1250,7 +1255,7 @@ export class MemoryService {
 
     // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
     const plaintext = input.content ?? this.contentOf(before)
-    if (plaintext === null) throw new MemoryError(403, '无权读取这条机密记忆的正文')
+    if (plaintext === null) throw new MemoryError(403, '无权读取这条机密（secret）记忆的正文')
     // 恢复到某一版：版本与现在同一归属，那时就在现在这个主人的层里，正文里的引用照「之前就有」算
     await this.checkCredentialRefs(
       tx,
@@ -1381,7 +1386,7 @@ export class MemoryService {
       if (row.version !== input.expectedVersion) {
         throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
       }
-      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
       if (row.content === null) {
         throw new MemoryError(400, '机密记忆的正文已加密，没有明文提示')
       }
@@ -1435,7 +1440,7 @@ export class MemoryService {
       if (row.version !== input.expectedVersion) {
         throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
       }
-      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
       if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)
       if (!placeholderAllowed(row.layer, row.sensitivity)) {
         throw new MemoryError(400, CONVERT_SCOPE)
@@ -1595,7 +1600,7 @@ export class MemoryService {
     const id = await this.run(async (tx, personaIds) => {
       const before = await this.findReadable(tx, parsed, personaIds)
       checkExpected(before, expected)
-      this.assertModifiable(before, `无权删除${LAYER_NAMES[before.layer]}的记忆`)
+      this.assertModifiable(before, `无权删除${layerWithValue(before.layer)}的记忆`)
       await this.softDelete(tx, before, () => new MemoryError(404, `记忆不存在：${uri}`))
       return before.id
     })
@@ -1645,7 +1650,7 @@ export class MemoryService {
         readableConditions(this.ctx.access, { personaIds }),
       )
       if (row.version !== version) throw new MemoryError(409, '这条事实刚被修改，请刷新后再删除')
-      this.assertModifiable(row, `无权删除${LAYER_NAMES[row.layer]}的记忆`)
+      this.assertModifiable(row, `无权删除${LAYER_NAMES[row.layer]}层的记忆`)
       await this.softDelete(tx, row, () => new MemoryError(404, '事实不存在'))
     })
     this.changed([factId])
@@ -1667,7 +1672,7 @@ export class MemoryService {
       // 只看推翻时设的 valid_to，清掉的也只有它；到期时间也过了的，清掉之后照样看不到，不能报成功
       if (!superseded) throw new MemoryError(409, '这条事实未被取代，无需恢复生效')
       if (lapsed) throw new MemoryError(409, '这条事实已过到期时间，恢复生效后仍不可见')
-      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
       const [after] = await tx
         .update(memories)
         .set({ validTo: null, version: row.version + 1, updatedAt: new Date() })
@@ -1698,7 +1703,7 @@ export class MemoryService {
       const targets = rows.filter((r) => seen.get(r.id) === r.version)
       if (!targets.length) return []
       for (const row of targets)
-        this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}的记忆`)
+        this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}层的记忆`)
       const handled = await this.settleReview(tx, targets, input.action, new Date())
       return handled.map((r) => r.id)
     })
@@ -1779,7 +1784,8 @@ export class MemoryService {
       // 核对与之后的写入用同一刻：核对时还有效的，删除、确认与设为过时都按这一刻算，不会在两步之间到期
       const now = new Date()
       const rows = await this.lockSuggested(tx, suggestion, now)
-      for (const row of rows) this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
+      for (const row of rows)
+        this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
       const action = suggestion.action(rows)
       let view: MemoryView | null = null
       switch (action.kind) {
@@ -1884,7 +1890,8 @@ export class MemoryService {
             suggestion.memories.map((m) => m.id),
           ),
         )
-      for (const row of rows) this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}的记忆`)
+      for (const row of rows)
+        this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}层的记忆`)
       await done(tx)
     })
   }
@@ -1989,7 +1996,7 @@ export class MemoryService {
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, from, personaIds)
       checkExpected(before, input)
-      this.assertModifiable(before, `无权移动${LAYER_NAMES[before.layer]}的记忆`)
+      this.assertModifiable(before, `无权移动${layerWithValue(before.layer)}的记忆`)
       const forced = layerForDomain(to.domain)
       if (forced && input.layer) {
         throw new MemoryError(400, `${to.domain}:// 下的层由 URI 决定，无需指定 layer`)
@@ -2007,7 +2014,7 @@ export class MemoryService {
         if (before.layer === 'subject' || before.layer === 'episode') {
           throw new MemoryError(
             400,
-            `${LAYER_NAMES[before.layer]}的记忆无法改层，也无法移到其他命名空间`,
+            `${layerWithValue(before.layer)}的记忆无法改层，也无法移到其他命名空间`,
           )
         }
         if (!forced && !input.layer && layerForDomain(from.domain)) {
@@ -2024,7 +2031,7 @@ export class MemoryService {
         this.assertKeyTransition(before.layer, ownership.layer)
         this.assertWritable(
           { ...ownership, sensitivity: before.sensitivity },
-          `无权把记忆移到${LAYER_NAMES[ownership.layer]}`,
+          `无权把记忆移到${layerWithValue(ownership.layer)}`,
         )
       }
       await this.checkKeptRefs(tx, before, ownership)
@@ -2942,7 +2949,7 @@ export class MemoryService {
           '这条记忆已过期并释放 URI，不是被删除的。请在「已过期」中恢复生效。',
         )
       }
-      this.assertModifiable(row, `无权恢复${LAYER_NAMES[row.layer]}的记忆`)
+      this.assertModifiable(row, `无权恢复${LAYER_NAMES[row.layer]}层的记忆`)
       // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
       await this.checkKeptRefs(tx, row, row)
       await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released)
@@ -3000,7 +3007,7 @@ export class MemoryService {
           '这条记忆是被删除的，不是过期后释放 URI 的。请在「已删除」中恢复。',
         )
       }
-      this.assertModifiable(row, `无权让${LAYER_NAMES[row.layer]}的记忆恢复生效`)
+      this.assertModifiable(row, `无权让${LAYER_NAMES[row.layer]}层的记忆恢复生效`)
       // 正文不变，归属也不变，不算新增引用（和撤销删除一样）
       await this.checkKeptRefs(tx, row, row)
       await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released, { except: row.id })
@@ -3154,7 +3161,7 @@ function checkValidTo(value: string, validFrom: Date): Date {
   if (at.getTime() < Date.now() + MIN_VALIDITY_MS || at.getTime() <= validFrom.getTime()) {
     throw new MemoryError(
       400,
-      '有效期须晚于当前时间至少一分钟。如需让这条记忆立即失效，请删除它（之后可恢复）。',
+      '有效期（valid_to）须晚于当前时间至少一分钟。如需让这条记忆立即失效，请删除它（之后可恢复）。',
     )
   }
   return at

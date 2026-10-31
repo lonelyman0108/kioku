@@ -181,7 +181,7 @@ describe('一组渠道按顺序回退', () => {
     const deadline = new AbortController()
     deadline.abort()
     await expect(embedder.embed(['a'], { signal: deadline.signal })).rejects.toThrow(
-      '等待时间已用完',
+      '等待时间已用完，后续渠道未尝试',
     )
     expect(asked).toEqual([])
   })

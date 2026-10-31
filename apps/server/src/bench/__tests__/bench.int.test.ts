@@ -842,7 +842,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       )
       const result = (await res.json()) as BenchRunResult
       expect(result.steps.map((s) => s.status)).toEqual(['passed', 'skipped'])
-      expect(result.steps[1]!.reason).toContain('无权写入 private')
+      expect(result.steps[1]!.reason).toContain('无权写入私人层（private）')
       expect(result.whoami.scopes.writeLayers).toEqual([])
       expect(result.ok).toBe(true)
     })

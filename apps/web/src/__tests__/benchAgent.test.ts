@@ -1217,10 +1217,14 @@ describe('toolReply：回给模型的文字不能是空的', () => {
   })
 
   it('没有执行与跳过：说明原因', () => {
-    const notRun = baseStep({ status: 'notRun', raw: null, reason: '根事务出错，这一步没有执行' })
-    expect(toolReply(notRun)).toBe('没有执行：根事务出错，这一步没有执行')
-    const skipped = baseStep({ status: 'skipped', raw: null, reason: '这把 Key 写不了 private 层' })
-    expect(toolReply(skipped)).toBe('没有执行：这把 Key 写不了 private 层')
+    const notRun = baseStep({ status: 'notRun', raw: null, reason: '根事务出错，此步未执行' })
+    expect(toolReply(notRun)).toBe('没有执行：根事务出错，此步未执行')
+    const skipped = baseStep({
+      status: 'skipped',
+      raw: null,
+      reason: '当前 Key 无权写入私人层（private）',
+    })
+    expect(toolReply(skipped)).toBe('没有执行：当前 Key 无权写入私人层（private）')
     expect(toolReply(baseStep({ status: 'failed', raw: null, text: '' }))).toBe('没有执行')
   })
 })
@@ -1726,7 +1730,7 @@ describe('重放分叉', () => {
             status: 'notRun' as const,
             raw: null,
             replay: null,
-            reason: '重放的第 1 步报错，这一步没有执行',
+            reason: '重放的第 1 步报错，此步未执行',
           })),
         ),
         ok: false,

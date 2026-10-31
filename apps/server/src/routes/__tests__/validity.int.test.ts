@@ -360,7 +360,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
             values (${ws.spaceId}, 'curated', 'private', 'private', 'agent', ${ws.accountId}, 'notes', 'race2', '新的')`
         },
       )
-      expect(await errorOf(res, 409)).toContain('URI 已被占用')
+      expect(await errorOf(res, 409)).toBe('URI 已被占用。移走或删除占用它的记忆后可恢复生效。')
       const row = await rowOf(m.id)
       expect(row.deletedAt).not.toBeNull()
       expect(row.validTo).not.toBeNull()
@@ -700,7 +700,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(await errorOf(await undelete(old.id), 409)).toContain('恢复生效')
 
       const version = (await rowOf(old.id)).version
-      expect(await errorOf(await reactivate(old.id, version), 409)).toContain('URI 已被占用')
+      expect(await errorOf(await reactivate(old.id, version), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
+      )
       expect((await rowOf(old.id)).deletedAt).not.toBeNull()
 
       await remove(fresh)
@@ -780,7 +782,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       await remove(m)
       await deletedThenExpired(m.id)
       await ok<MemoryView>(await keyCreate({ uri: 'notes://slot', content: '新的' }), 201)
-      expect(await errorOf(await undelete(m.id), 409)).toContain('URI 已被占用')
+      expect(await errorOf(await undelete(m.id), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复。',
+      )
       expect((await rowOf(m.id)).deletedAt).not.toBeNull()
     })
 
@@ -802,7 +806,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect((await expired()).items).toMatchObject([{ id: shared.id, released: false }])
       expect((await get(note.uri, editor.cookie)).status).toBe(200)
       const version = (await rowOf(shared.id)).version
-      expect(await errorOf(await reactivate(shared.id, version), 409)).toContain('URI 已被占用')
+      expect(await errorOf(await reactivate(shared.id, version), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
+      )
     })
 
     it('共享的过期记忆和成员的私人节点并存时，重新生效返回 409；直接改库清掉有效期也被触发器拦下', async () => {
@@ -825,8 +831,8 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       )
       expect((await rowOf(shared.id)).deletedAt).toBeNull()
 
-      expect(await errorOf(await reactivate(shared.id, shared.version), 409)).toContain(
-        'URI 已被占用',
+      expect(await errorOf(await reactivate(shared.id, shared.version), 409)).toBe(
+        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
       )
       expect((await rowOf(shared.id)).validTo).not.toBeNull()
 
@@ -873,7 +879,10 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       ])
       expect((await reactivate(mine.id, mine.version, editor.cookie)).status).toBe(404)
       expect((await reactivate(secret.id, secret.version, editor.cookie)).status).toBe(404)
-      expect((await reactivate(appLayer.id, appLayer.version, editor.cookie)).status).toBe(403)
+      // 只给界面的错误不带取值
+      expect(
+        await errorOf(await reactivate(appLayer.id, appLayer.version, editor.cookie), 403),
+      ).toBe('无权让应用层的记忆恢复生效')
       expect((await reactivate(shared.id, shared.version, viewer.cookie)).status).toBe(403)
       expect((await reactivate('00000000-0000-4000-8000-000000000000', 1)).status).toBe(404)
       const viaKey = await app.request(

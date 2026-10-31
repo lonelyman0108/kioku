@@ -1522,10 +1522,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
   })
 
-  it('写文件里来的值时数据库拒绝（值超出范围、违反约束）算文件的问题，说清是哪几行；派生的出错照常 500，都记日志', async () => {
+  it('写文件里来的值时数据库拒绝（值超出范围、违反约束）算文件的问题，说清是哪几行，只给错误码；派生的出错照常 500，都记日志', async () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()
-    // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束；
+    // 模拟数据库拒绝某个值：对象的名字是「坏的」时报 22 类错误，是「冲突的」时报违反约束，说明里都带着文件里的值；
     // 关键词是「坏关键词」时也报违反约束（关键词是文件里的值，算文件的问题）；
     // 正文是「事件出错」的记忆，写它的导入事件时报违反约束（导入事件是服务端派生的，不算文件的问题）
     await database.db.execute(
@@ -1534,10 +1534,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         -- 按表分开判断：PL/pgSQL 不短路，别的表的行上没有这些字段
         if tg_table_name = 'subjects' then
           if new.display_name = '坏的' then
-            raise exception '时间超出范围' using errcode = 'datetime_field_overflow';
+            raise exception '时间超出范围：%', new.display_name using errcode = 'datetime_field_overflow';
           end if;
           if new.display_name = '冲突的' then
-            raise exception '冲突' using errcode = 'check_violation', constraint = 'kioku_test_check';
+            raise exception '冲突：%', new.display_name using errcode = 'check_violation', constraint = 'kioku_test_check';
           end if;
         elsif tg_table_name = 'memory_glossary' then
           if new.keyword = '坏关键词' then
@@ -1582,12 +1582,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         expect(res.status, await res.clone().text()).toBe(400)
         expect(((await res.json()) as { error: string }).error).toBe(message)
       }
-      await rejected('坏的', '导出文件的内容有误：第 3–4 行的联系人写入数据库失败（时间超出范围）')
+      // 只给错误码：数据库的说明带着文件里的值，只进日志
+      await rejected('坏的', '导出文件的内容有误：第 3–4 行的联系人写入数据库失败（22008）')
       expect(wasLogged('第 3–4 行的联系人', '22008')).toBe(true)
-      await rejected(
-        '冲突的',
-        '导出文件的内容有误：第 3–4 行的联系人写入数据库失败（违反约束 kioku_test_check）',
-      )
+      await rejected('冲突的', '导出文件的内容有误：第 3–4 行的联系人写入数据库失败（23514）')
       expect(wasLogged('第 3–4 行的联系人', '23514', 'kioku_test_check')).toBe(true)
       // 关键词是文件里的值：写不进去算文件的问题
       const keyword = await importRequest(
@@ -1597,7 +1595,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       )
       expect(keyword.status, await keyword.clone().text()).toBe(400)
       expect(((await keyword.json()) as { error: string }).error).toBe(
-        '导出文件的内容有误：第 2 行的记忆的关键词写入数据库失败（违反约束 kioku_test_check）',
+        '导出文件的内容有误：第 2 行的记忆的关键词写入数据库失败（23514）',
       )
       expect(wasLogged('第 2 行的记忆的关键词', '23514', 'kioku_test_check')).toBe(true)
       // 导入事件是服务端派生的：出错是服务端的缺陷，不说成文件的问题

@@ -505,7 +505,7 @@ describe('运行结果怎么说', () => {
     const unsent = step({
       status: 'failed',
       raw: null,
-      assertions: [{ message: '变量 ${version} 没有取到', ok: false }],
+      assertions: [{ message: '变量 ${version} 未取到', ok: false }],
     })
     // 工具没报错，结果里却没有 capture 要的内容
     const uncaptured = step({

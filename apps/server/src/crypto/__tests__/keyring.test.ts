@@ -22,7 +22,7 @@ describe('主密钥', () => {
     expect(decryptionKey(ring, keyIdOf(previous))).toBe(previous)
     expect(decryptionKey(ring, keyIdOf(current))).toBe(current)
     expect(decryptionKey(ring, null)).toBe(current)
-    expect(() => decryptionKey(current, keyIdOf(previous))).toThrow('另一把主密钥')
+    expect(() => decryptionKey(current, keyIdOf(previous))).toThrow('使用其他主密钥')
   })
 
   it('配置：新旧两把同时配，旧的不能单独配，两把不能一样', () => {

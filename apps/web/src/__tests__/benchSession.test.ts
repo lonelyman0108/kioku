@@ -463,7 +463,7 @@ describe('重放分叉', () => {
   const notRun = step({
     status: 'notRun',
     raw: null,
-    reason: '重放的第 2 步报错，这一步没有执行',
+    reason: '重放的第 2 步报错，此步未执行',
   })
   const divergedAt = (index: number, internalError = false) =>
     result([notRun], {

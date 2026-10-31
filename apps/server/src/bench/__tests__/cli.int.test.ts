@@ -286,7 +286,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         ])
         const { code, stdout } = await bench(['--file', file], { KIOKU_BENCH_KEY: low.key })
         expect(code).toBe(0)
-        expect(stdout).toContain('跳过  要 secret 级：当前 Key 的敏感级上限低于 secret')
+        expect(stdout).toContain('跳过  要 secret 级：当前 Key 的敏感级上限低于机密级（secret）')
       },
       PROCESS_TIMEOUT,
     )

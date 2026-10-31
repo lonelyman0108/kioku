@@ -180,13 +180,19 @@ export class CredentialService {
   // 能不能读到凭据：读不到私人层的 Key（以及群聊、私聊、定时任务等会话上下文）一条都看不到
   private requireRead(): void {
     if (!canReadCredential(this.ctx.access, { ownerAccountId: this.owner, appIds: null })) {
-      throw new MemoryError(403, '无权读取凭据：需要可读私人层，敏感级上限不低于私密')
+      throw new MemoryError(
+        403,
+        '无权读取凭据：需要可读私人层（private），敏感级上限不低于私密（private）',
+      )
     }
   }
 
   private requireManage(): void {
     if (!canManageCredentials(this.ctx.access)) {
-      throw new MemoryError(403, '无权管理凭据：需要可读写私人层，敏感级上限为机密')
+      throw new MemoryError(
+        403,
+        '无权管理凭据：需要可读写私人层（private），敏感级上限为机密（secret）',
+      )
     }
   }
 

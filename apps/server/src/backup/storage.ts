@@ -63,7 +63,7 @@ export async function uploadBackup(
     const others = (await listBackups(client, config.prefix)).filter((o) => o.key !== object)
     for (const stale of others.slice(config.keep - 1)) await client.delete(stale.key)
   } catch (err) {
-    warning = `备份已上传，但删除旧备份时出错：${(err as Error).message}`
+    warning = `备份已上传，但删除旧备份时出错：${errorText(err)}`
   }
   return { run: { at: summary.createdAt, object, bytes: summary.bytes }, warning }
 }

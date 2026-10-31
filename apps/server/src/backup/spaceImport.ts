@@ -1,6 +1,11 @@
 import { randomUUID } from 'node:crypto'
 
-import type { SpaceImportCounts, SpaceImportPreview, SpaceImportResult } from '@kioku/contracts'
+import {
+  LAYER_NAMES,
+  type SpaceImportCounts,
+  type SpaceImportPreview,
+  type SpaceImportResult,
+} from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import type { z } from 'zod'
 
@@ -33,7 +38,6 @@ import {
   subjectIdentities,
   subjects,
 } from '../db/schema'
-import { LAYER_NAMES } from '../memory/names'
 import { MAX_PERSONA_DEPTH } from '../memory/personas'
 import {
   MemoryError,
@@ -274,7 +278,7 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
         throw invalid(`${label} 不在所属应用 ${app.slug} 下`)
       }
     } else if (namespaced) {
-      throw invalid(`${label} 位于 ${parsed!.domain}:// 下，却属于${LAYER_NAMES[m.layer]}`)
+      throw invalid(`${label} 位于 ${parsed!.domain}:// 下，却属于${LAYER_NAMES[m.layer]}层`)
     }
     if (m.layer === 'subject' && !subjectById.has(m.subjectId!)) {
       throw invalid(`${label} 的联系人不在文件中`)
@@ -400,11 +404,10 @@ export async function importSpace(
       })
     }
     // 上面的检查之外，数据库还拒绝了文件里的什么（例如被人改过、但口令对得上的文件）：整个撤销，
-    // 说清是哪几行、违反了哪一条约束。22 类是值本身不对（例如时间超出范围），23 类是违反约束。
+    // 说清是哪几行。22 类是值本身不对（例如时间超出范围），23 类是违反约束；只给错误码，数据库的说明可能带文件里的值。
     // 只有正在写文件里来的值时才算文件的问题；成员、关键词、引用与事件是服务端自己派生的，出错是服务端的缺陷，照常 500
     if (progress.fromFile && (code?.startsWith('22') || code?.startsWith('23'))) {
-      const why = pgConstraint(err) ? `违反约束 ${pgConstraint(err)}` : (pgMessage(err) ?? code)
-      throw invalid(`${progress.step}写入数据库失败（${why}）`)
+      throw invalid(`${progress.step}写入数据库失败（${code}）`)
     }
     throw err
   }

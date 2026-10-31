@@ -124,14 +124,18 @@ describe('capture', () => {
 describe('requires', () => {
   it('层与最高敏感级都满足才算满足', () => {
     expect(unmetRequirement({ readLayers: ['private'] }, READONLY)).toBeNull()
-    expect(unmetRequirement({ writeLayers: ['private'] }, READONLY)).toContain('无权写入 private')
+    expect(unmetRequirement({ writeLayers: ['private'] }, READONLY)).toContain(
+      '无权写入私人层（private）',
+    )
     expect(
       unmetRequirement(
         { readLayers: ['private'] },
         { ...READONLY, readLayers: ['base', 'persona'] },
       ),
-    ).toContain('无权读取 private')
-    expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain('低于 secret')
+    ).toContain('无权读取私人层（private）')
+    expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain(
+      '低于机密级（secret）',
+    )
     expect(unmetRequirement({ maxSensitivity: 'private' }, READONLY)).toBeNull()
     expect(unmetRequirement({ maxSensitivity: 'public' }, READONLY)).toBeNull()
     expect(unmetRequirement({}, READONLY)).toBeNull()
@@ -316,9 +320,7 @@ describe('变量与 capture', () => {
     expect(result.steps.map((s) => s.status)).toEqual(['failed', 'failed', 'passed'])
     // 界面（benchResult.ts）靠这个开头认出 capture 没取到，改了要一起改
     expect(result.steps[0]!.assertions[0]!.message).toMatch(/^capture version：/)
-    expect(result.steps[1]!.assertions).toEqual([
-      { message: '变量 ${version} 没有取到', ok: false },
-    ])
+    expect(result.steps[1]!.assertions).toEqual([{ message: '变量 ${version} 未取到', ok: false }])
     expect(seen).toHaveLength(2)
   })
 
@@ -337,7 +339,7 @@ describe('变量与 capture', () => {
       ),
     )
     expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'skipped'])
-    expect(result.steps[0]!.reason).toContain('无权写入 private')
+    expect(result.steps[0]!.reason).toContain('无权写入私人层（private）')
     expect(result.steps[1]!.reason).toContain('${version}')
     expect(seen).toHaveLength(0)
     expect(result.ok).toBe(true)
@@ -376,7 +378,7 @@ describe('变量与 capture', () => {
       )
       expect(result.steps.map((s) => s.status)).toEqual(['passed', 'failed', 'failed'])
       expect(result.steps[2]!.assertions).toEqual([
-        { message: '变量 ${version} 没有取到', ok: false },
+        { message: '变量 ${version} 未取到', ok: false },
       ])
       expect(seen).toHaveLength(2)
     })
