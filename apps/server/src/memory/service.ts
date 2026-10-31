@@ -807,10 +807,11 @@ export class MemoryService {
       content: string
     },
     baseline: RefBaseline | null,
+    // 查的是从库里解出来的原文（没带正文的写入，例如改层、移动），不是调用方这次写的
+    decrypted = false,
   ): Promise<void> {
-    // 打码时 secret 的正文不给出，报错也不带从里面读到的片段、标识与字段名：
-    // 没改正文的写入（例如改层）查的是解密出来的原文
-    const hideContent = this.ctx.maskSecret && final.sensitivity === 'secret'
+    // 报错不带解出来的片段、标识与字段名：调用方没有显式查看，这里也不留访问记录。打码时调用方写的也不回显
+    const hideContent = decrypted || (this.ctx.maskSecret && final.sensitivity === 'secret')
     const { refs, malformed } = scanPlaceholders(final.content)
     if (malformed.length) {
       const fragment = hideContent ? '' : `：${malformed[0]}`
@@ -895,6 +896,7 @@ export class MemoryService {
       tx,
       { ...final, sensitivity: row.sensitivity, content },
       { layer: row.layer, ownerAccountId: row.ownerAccountId, content: () => content },
+      row.sensitivity === 'secret',
     )
   }
 
@@ -1252,6 +1254,7 @@ export class MemoryService {
         content: () =>
           meta.existingRefs || input.content === undefined ? plaintext : this.contentOf(before),
       },
+      before.sensitivity === 'secret' && input.content === undefined,
     )
     // 降级之后正文会进历史快照、全文检索和向量，带着明文降级就收不回来了
     if (

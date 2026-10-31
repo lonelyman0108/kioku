@@ -313,9 +313,10 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect(updated.isError).toBe(true)
       expect(updated.text).toContain('占位符格式不对')
       expect(updated.text).not.toContain('坏的片段')
-      expect((await real('kioku_update', { uri: 'notes://safe', priority: 5 })).text).toContain(
-        '坏的片段',
-      )
+      // 真实接口没带正文时查的也是解出来的原文，同样不带（见 secretAccess.int.test.ts）
+      const direct = await real('kioku_update', { uri: 'notes://safe', priority: 5 })
+      expect(direct.text).toContain('占位符格式不对')
+      expect(direct.text).not.toContain('坏的片段')
     })
 
     // owner 层的 secret 正文写着占位符（旧数据）：改到私人层时引用都算新增，要重新检查
@@ -340,7 +341,8 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect(updated.text).toContain('不存在或不可用')
       expect(updated.text).not.toContain('missing-cred')
       const direct = await real('kioku_update', { uri: 'notes://legacy', layer: 'private' })
-      expect(direct.text).toContain('missing-cred')
+      expect(direct.text).toContain('不存在或不可用')
+      expect(direct.text).not.toContain('missing-cred')
     })
 
     it('引用没有的字段的旧数据：解密后的标识与字段名不进报错', async () => {
@@ -357,8 +359,8 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect(updated.text).not.toContain('nas')
       expect(updated.text).not.toContain('missing-field')
       const direct = await real('kioku_update', { uri: 'notes://legacy', layer: 'private' })
-      expect(direct.text).toContain('nas')
-      expect(direct.text).toContain('missing-field')
+      expect(direct.text).toContain('没有这个字段')
+      expect(direct.text).not.toContain('missing-field')
     })
 
     it('不是 secret 的记忆照常报出标识：正文本来就读得到', async () => {

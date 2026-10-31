@@ -16,7 +16,7 @@ import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { memories, memoryEvents } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { MemoryService } from '../../memory/service'
+import { MemoryService, sealMemoryContent } from '../../memory/service'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
   addMember,
@@ -360,6 +360,101 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       const res = await keyCall('PATCH', '/memories', { uri: plain.uri, sensitivity: 'secret' })
       expect(((await res.json()) as MemoryView).content).toBe('普通的正文')
       expect(await accessOf(plain.id)).toEqual([])
+    })
+  })
+
+  describe('写入检查的报错不带解出来的内容', () => {
+    // 规则之前写下的旧数据：直接写密文，接口现在不收这样的正文
+    const legacy = async (m: { id: string }, body: string, extra = {}) => {
+      const sealed = sealMemoryContent(masterKey, m.id, body)
+      await inSpace((tx) =>
+        tx
+          .update(memories)
+          .set({ ...sealed, ...extra })
+          .where(eq(memories.id, m.id)),
+      )
+    }
+    const errorOf = async (res: Response, status = 400) => {
+      expect(res.status).toBe(status)
+      return ((await res.json()) as { error: string }).error
+    }
+    const FRAGMENT = '旧数据 {{cred:坏的片段'
+
+    it('只改优先级：格式不对的片段不进报错，管理界面、REST 与 MCP 都一样，也不留访问记录', async () => {
+      const m = await secret()
+      await legacy(m, FRAGMENT)
+      const fromConsole = await errorOf(
+        await send('PATCH', '/memories', { uri: m.uri, priority: 3 }),
+      )
+      expect(fromConsole).toContain('占位符格式不对')
+      expect(fromConsole).not.toContain('坏的片段')
+      const fromKey = await errorOf(
+        await keyCall('PATCH', '/memories', { uri: m.uri, priority: 3 }),
+      )
+      expect(fromKey).toContain('占位符格式不对')
+      expect(fromKey).not.toContain('坏的片段')
+      const fromTool = await mcp('kioku_update', { uri: m.uri, priority: 3 })
+      expect(fromTool).toContain('占位符格式不对')
+      expect(fromTool).not.toContain('坏的片段')
+      expect(await accessOf(m.id)).toEqual([])
+    })
+
+    it('降级：查的是解出来的原文，同样不带', async () => {
+      const m = await secret()
+      await legacy(m, FRAGMENT)
+      const error = await errorOf(
+        await send('PATCH', '/memories', { uri: m.uri, sensitivity: 'private' }),
+      )
+      expect(error).not.toContain('坏的片段')
+    })
+
+    it('改层与移动：解出来的标识、字段名不进报错', async () => {
+      const m = await secret('home://owned', { layer: 'owner' })
+      await legacy(m, '旧数据 {{cred:missing-cred}}')
+      const relayered = await errorOf(
+        await send('PATCH', '/memories', { uri: m.uri, layer: 'private' }),
+      )
+      expect(relayered).toContain('不存在或不可用')
+      expect(relayered).not.toContain('missing-cred')
+      const moved = await errorOf(
+        await send('POST', '/memories/move', { from: m.uri, to: 'home://moved', layer: 'private' }),
+      )
+      expect(moved).toContain('不存在或不可用')
+      expect(moved).not.toContain('missing-cred')
+
+      const credential = await send('POST', '/credentials', {
+        identifier: 'nas',
+        name: 'NAS',
+        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+      })
+      expect(credential.status).toBe(201)
+      await legacy(m, '旧数据 {{cred:nas#missing-field}}')
+      const field = await errorOf(
+        await send('POST', '/memories/move', { from: m.uri, to: 'home://moved', layer: 'private' }),
+      )
+      expect(field).toContain('没有这个字段')
+      expect(field).not.toContain('missing-field')
+      expect(field).not.toContain('nas')
+      expect(await accessOf(m.id)).toEqual([])
+    })
+
+    it('撤销删除：同样不带', async () => {
+      const m = await secret('home://owned', { layer: 'owner' })
+      await legacy(m, FRAGMENT)
+      expect((await send('DELETE', `/memories?uri=${encodeURIComponent(m.uri)}`)).status).toBe(204)
+      const error = await errorOf(await send('POST', '/memories/undelete', { memoryId: m.id }))
+      expect(error).toContain('占位符格式不对')
+      expect(error).not.toContain('坏的片段')
+    })
+
+    it('调用方这次写的正文照常报出片段：它本来就知道；普通记忆也一样', async () => {
+      const m = await secret()
+      const own = await errorOf(await send('PATCH', '/memories', { uri: m.uri, content: FRAGMENT }))
+      expect(own).toContain('坏的片段')
+      const plain = await errorOf(
+        await send('POST', '/memories', { uri: 'home://plain', content: '{{cred:missing-cred}}' }),
+      )
+      expect(plain).toContain('missing-cred')
     })
   })
 
