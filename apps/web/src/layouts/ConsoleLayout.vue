@@ -1,13 +1,16 @@
 <script setup lang="ts">
-import type { CommandPaletteItem, DropdownMenuItem, NavigationMenuItem } from '@nuxt/ui'
+import type { CommandPaletteItem, DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery } from '@tanstack/vue-query'
-import { computed, watch } from 'vue'
-import { useRoute, useRouter } from 'vue-router'
+import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { ownedApps } from '../benchSession'
+import KiokuMark from '../components/KiokuMark.vue'
+import StrataPatterns from '../components/strata/StrataPatterns.vue'
+import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPreference'
 import { useConsoleSearch } from '../composables/useConsoleSearch'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { ME_KEY, useSession } from '../composables/useSession'
@@ -30,11 +33,36 @@ watch(
   },
 )
 
-const spaceItems = computed(() =>
-  (me.data.value?.spaces ?? []).map((s) => ({ label: s.name, value: s.id })),
+const spaces = computed(() => me.data.value?.spaces ?? [])
+
+// 窄屏的导航收进抽屉，换页就关上
+const navOpen = ref(false)
+watch(
+  () => route.fullPath,
+  () => {
+    navOpen.value = false
+  },
 )
 
+// 窗口变宽或转屏到放得下顶部导航时关上，不然抽屉盖着桌面布局。分界和模板里的 1024px 一致
+const wideScreen = window.matchMedia('(min-width: 1024px)')
+function closeNavOnWideScreen(event: MediaQueryListEvent) {
+  if (event.matches) navOpen.value = false
+}
+onMounted(() => wideScreen.addEventListener('change', closeNavOnWideScreen))
+onBeforeUnmount(() => wideScreen.removeEventListener('change', closeNavOnWideScreen))
+
+// 这时菜单按钮已经隐藏，焦点还不回去，放到账号菜单上
+const accountButton = ref<{ $el: HTMLElement } | null>(null)
+function focusAfterNavClosed(event: Event) {
+  if (!wideScreen.matches) return
+  event.preventDefault()
+  accountButton.value?.$el.focus()
+}
+
 function switchSpace(id: string) {
+  // 已经在这个空间的概览时地址不变，上面的 watch 不会触发，抽屉要在这里关
+  navOpen.value = false
   void router.push({ name: 'overview', params: { spaceId: id } })
 }
 
@@ -46,35 +74,68 @@ const apps = useQuery({
 })
 const ownsApp = computed(() => ownedApps(apps.data.value ?? [], me.data.value?.id).length > 0)
 
-const nav = computed<NavigationMenuItem[]>(() => {
+interface NavItem {
+  label: string
+  icon: string
+  to: RouteLocationRaw
+  // 这些路由算在这个入口下：详情页也要点亮列表的入口
+  routes: string[]
+}
+
+// 顶部导航按用途分组。路由名和路径不变，入口的名字按术语表
+const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
   const id = space.value?.id
   if (!id) return []
   const params = { spaceId: id }
+  const link = (name: string, icon: string, routes = [name]) => ({
+    icon,
+    to: { name, params },
+    routes,
+  })
   return [
-    { label: '概览', icon: icons.overview, to: { name: 'overview', params } },
-    { label: '记忆', icon: icons.memories, to: { name: 'memories', params } },
-    { label: '变更记录', icon: icons.activity, to: { name: 'activity', params } },
-    { label: '凭据', icon: icons.credentials, to: { name: 'credentials', params } },
-    { label: '人格', icon: icons.personas, to: { name: 'personas', params } },
-    { label: '联系人', icon: icons.subjects, to: { name: 'subjects', params } },
-    { label: '待处理', icon: icons.review, to: { name: 'review', params } },
-    { label: '应用', icon: icons.apps, to: { name: 'apps', params } },
-    { label: '召回', icon: icons.recall, to: { name: 'recall', params } },
-    ...(ownsApp.value
-      ? [{ label: '测试台', icon: icons.bench, to: { name: 'bench', params } }]
-      : []),
-    { label: '空间设置', icon: icons.spaceSettings, to: { name: 'space-settings', params } },
+    {
+      items: [
+        { label: '概览', ...link('overview', icons.overview) },
+        { label: '记忆', ...link('memories', icons.memories) },
+        { label: '待处理', ...link('review', icons.review) },
+      ],
+    },
+    {
+      title: '知识',
+      items: [
+        { label: '人格', ...link('personas', icons.personas) },
+        { label: '联系人', ...link('subjects', icons.subjects, ['subjects', 'subject']) },
+        { label: '凭据', ...link('credentials', icons.credentials) },
+      ],
+    },
+    {
+      title: '接入',
+      items: [
+        { label: '应用', ...link('apps', icons.apps, ['apps', 'app']) },
+        { label: '召回', ...link('recall', icons.recall) },
+        ...(ownsApp.value ? [{ label: '测试台', ...link('bench', icons.bench) }] : []),
+      ],
+    },
+    {
+      title: '空间',
+      items: [
+        { label: '变更记录', ...link('activity', icons.activity) },
+        // 「设置」指向空间设置，实例设置放在账号菜单里
+        { label: '设置', ...link('space-settings', icons.spaceSettings) },
+      ],
+    },
   ]
 })
-const instanceNav = computed<NavigationMenuItem[]>(() =>
+const instanceNav = computed<NavItem[]>(() =>
   me.data.value?.isAdmin
-    ? [{ label: '实例设置', icon: icons.settings, to: { name: 'settings' } }]
+    ? [{ label: '实例设置', icon: icons.settings, to: { name: 'settings' }, routes: ['settings'] }]
     : [],
 )
+const isCurrent = (item: NavItem) => item.routes.includes(String(route.name))
 
-// ⌘K 里的页面与侧栏一致；记忆的搜索结果来自服务端
+// ⌘K 里的页面与导航一致；记忆的搜索结果来自服务端
 const pages = computed<CommandPaletteItem[]>(() =>
-  [...nav.value, ...instanceNav.value].map((item) => ({
+  [...navGroups.value.flatMap((group) => group.items), ...instanceNav.value].map((item) => ({
     label: item.label,
     icon: item.icon,
     to: item.to,
@@ -89,10 +150,32 @@ const {
   pages,
 )
 
+const colorPreference = useColorPreference()
 const displayName = computed(() => me.data.value?.displayName ?? '')
 const userMenu = computed<DropdownMenuItem[][]>(() => [
   [{ type: 'label', label: displayName.value, description: me.data.value?.username }],
+  ...(instanceNav.value.length
+    ? [instanceNav.value.map((item) => ({ label: item.label, icon: item.icon, to: item.to }))]
+    : []),
+  [
+    { type: 'label', label: '主题' },
+    ...COLOR_PREFERENCES.map((option): DropdownMenuItem => ({
+      type: 'checkbox',
+      label: option.label,
+      icon: option.icon,
+      checked: colorPreference.current() === option.value,
+      onSelect: () => colorPreference.set(option.value),
+    })),
+  ],
   [{ label: '退出登录', icon: icons.logout, onSelect: () => void logout() }],
+])
+const spaceMenu = computed<DropdownMenuItem[][]>(() => [
+  spaces.value.map((s) => ({
+    type: 'checkbox',
+    label: s.name,
+    checked: s.id === space.value?.id,
+    onSelect: () => switchSpace(s.id),
+  })),
 ])
 
 async function logout() {
@@ -122,49 +205,188 @@ async function logout() {
 </script>
 
 <template>
-  <UDashboardGroup>
-    <UDashboardSidebar collapsible :ui="{ footer: 'border-t border-default' }">
-      <template #header="{ collapsed }">
-        <div class="flex w-full items-center gap-2">
-          <span v-if="!collapsed" class="font-semibold">Kioku</span>
-          <USelect
-            v-if="!collapsed && spaceItems.length > 1"
-            :model-value="space?.id"
-            :items="spaceItems"
-            class="ml-auto min-w-0 flex-1"
-            @update:model-value="switchSpace"
-          />
+  <!--
+    过渡：老页面还在用 UDashboardPanel，面板拖动和 ⌘K 都靠 UDashboardGroup 提供上下文。
+    Group 默认左右排，这里改成上下排，顶部导航在上、页面在下。页面都换完之后去掉 Group
+  -->
+  <UDashboardGroup class="flex-col">
+    <StrataPatterns />
+
+    <header
+      class="flex h-13 shrink-0 items-stretch gap-4 border-b border-rule px-4 min-[1121px]:gap-6 min-[1121px]:px-8"
+    >
+      <RouterLink :to="{ name: 'home' }" class="flex shrink-0 items-center">
+        <KiokuMark />
+      </RouterLink>
+
+      <nav class="flex shrink-0 items-stretch max-[1024px]:hidden" aria-label="主导航">
+        <div
+          v-for="(group, index) in navGroups"
+          :key="index"
+          class="relative flex items-stretch"
+          :class="index > 0 ? 'nav-group ml-1 pl-1 min-[1321px]:ml-2 min-[1321px]:pl-2' : ''"
+        >
+          <span
+            v-if="group.title"
+            class="self-center pr-px pl-2 text-xs whitespace-nowrap text-muted max-[1320px]:hidden"
+          >
+            {{ group.title }}
+          </span>
+          <RouterLink
+            v-for="item in group.items"
+            :key="item.label"
+            :to="item.to"
+            :aria-current="isCurrent(item) ? 'page' : undefined"
+            class="nav-link flex items-center px-1.5 whitespace-nowrap min-[1121px]:px-2"
+          >
+            {{ item.label }}
+          </RouterLink>
         </div>
-      </template>
+      </nav>
 
-      <template #default="{ collapsed }">
-        <UDashboardSearchButton :collapsed="collapsed" label="搜索" />
-        <UNavigationMenu :items="nav" :collapsed="collapsed" orientation="vertical" />
-        <UNavigationMenu
-          v-if="instanceNav.length"
-          :items="instanceNav"
-          :collapsed="collapsed"
-          orientation="vertical"
-          class="mt-auto"
+      <!-- 导航和搜索不缩，宽度不够时由这一段的名字让出来，账号菜单一直在屏幕里 -->
+      <div class="flex min-w-0 flex-1 items-center justify-end gap-1.5">
+        <UDashboardSearchButton
+          label="搜索"
+          aria-label="搜索"
+          color="neutral"
+          class="shrink-0"
+          :ui="{
+            label: 'max-[1320px]:hidden',
+            trailing: 'hidden min-[1024px]:flex items-center gap-0.5 ms-1',
+          }"
         />
-      </template>
-
-      <template #footer="{ collapsed }">
-        <div class="flex w-full items-center gap-1">
-          <UDropdownMenu :items="userMenu" :content="{ align: 'start' }">
+        <div class="flex min-w-0 items-center gap-1.5 max-[1024px]:hidden">
+          <UDropdownMenu
+            v-if="spaces.length > 1"
+            :items="spaceMenu"
+            :content="{ align: 'end' }"
+            :ui="{ content: 'max-w-80' }"
+            size="sm"
+          >
             <UButton
-              :avatar="{ alt: displayName }"
-              :label="collapsed ? undefined : displayName"
+              :label="space?.name ?? '选择空间'"
+              :title="space?.name"
+              :trailing-icon="icons.chevronDown"
               color="neutral"
               variant="ghost"
-              class="min-w-0 flex-1"
+              class="max-w-48 min-w-0"
+              aria-label="切换空间"
+            />
+          </UDropdownMenu>
+          <span
+            v-else-if="space"
+            class="max-w-48 min-w-0 truncate px-2.5 text-[13px] text-muted"
+            :title="space.name"
+          >
+            {{ space.name }}
+          </span>
+          <UDropdownMenu
+            :items="userMenu"
+            :content="{ align: 'end' }"
+            :ui="{ content: 'max-w-80' }"
+          >
+            <UButton
+              ref="accountButton"
+              :label="displayName"
+              :title="displayName"
+              :trailing-icon="icons.chevronDown"
+              color="neutral"
+              variant="ghost"
+              class="max-w-48 min-w-0"
               aria-label="账号菜单"
             />
           </UDropdownMenu>
-          <UColorModeButton v-if="!collapsed" />
         </div>
-      </template>
-    </UDashboardSidebar>
+        <USlideover
+          v-model:open="navOpen"
+          side="left"
+          title="导航"
+          :content="{ onCloseAutoFocus: focusAfterNavClosed }"
+          :ui="{ content: 'max-w-72 sm:max-w-72', body: 'p-0 sm:p-0' }"
+        >
+          <UButton
+            :icon="icons.menu"
+            color="neutral"
+            variant="ghost"
+            class="shrink-0 min-[1024px]:hidden"
+            aria-label="打开导航"
+          />
+          <template #body>
+            <nav aria-label="主导航">
+              <div
+                v-for="(group, index) in navGroups"
+                :key="index"
+                class="border-b border-default px-5 py-2"
+              >
+                <p v-if="group.title" class="pt-1 text-xs text-muted">{{ group.title }}</p>
+                <RouterLink
+                  v-for="item in group.items"
+                  :key="item.label"
+                  :to="item.to"
+                  :aria-current="isCurrent(item) ? 'page' : undefined"
+                  class="block py-2 text-[15px]/6 aria-[current=page]:font-semibold"
+                  @click="navOpen = false"
+                >
+                  {{ item.label }}
+                </RouterLink>
+              </div>
+            </nav>
+            <div class="space-y-3 px-5 py-4">
+              <div v-if="spaces.length > 1">
+                <p class="pb-1 text-xs text-muted">空间</p>
+                <button
+                  v-for="s in spaces"
+                  :key="s.id"
+                  type="button"
+                  class="block w-full truncate py-1.5 text-left text-sm/6"
+                  :class="s.id === space?.id ? 'font-semibold' : ''"
+                  :title="s.name"
+                  :aria-current="s.id === space?.id ? 'true' : undefined"
+                  @click="switchSpace(s.id)"
+                >
+                  {{ s.name }}
+                </button>
+              </div>
+              <div>
+                <p class="pb-1 text-xs text-muted">主题</p>
+                <div class="flex gap-1">
+                  <UButton
+                    v-for="option in COLOR_PREFERENCES"
+                    :key="option.value"
+                    :label="option.label"
+                    :variant="colorPreference.current() === option.value ? 'solid' : 'subtle'"
+                    :color="colorPreference.current() === option.value ? 'primary' : 'neutral'"
+                    size="sm"
+                    :aria-pressed="colorPreference.current() === option.value"
+                    @click="colorPreference.set(option.value)"
+                  />
+                </div>
+              </div>
+              <div class="border-t border-default pt-3">
+                <p class="truncate pb-1 text-sm" :title="displayName">{{ displayName }}</p>
+                <RouterLink
+                  v-for="item in instanceNav"
+                  :key="item.label"
+                  :to="item.to"
+                  class="block py-1.5 text-sm/6"
+                  @click="navOpen = false"
+                >
+                  {{ item.label }}
+                </RouterLink>
+                <button
+                  type="button"
+                  class="block w-full py-1.5 text-left text-sm/6"
+                  @click="logout"
+                >
+                  退出登录
+                </button>
+              </div>
+            </div>
+          </template>
+        </USlideover>
+      </div>
+    </header>
 
     <UDashboardSearch
       v-model:search-term="searchTerm"
@@ -173,15 +395,39 @@ async function logout() {
       placeholder="搜索记忆或跳转页面"
     />
 
-    <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
-    <UDashboardPanel v-if="me.data.value && route.params.spaceId && !space" id="not-member">
-      <template #body>
-        <div class="space-y-3">
-          <p class="text-muted">无权访问此空间</p>
-          <UButton :to="{ name: 'home' }" variant="subtle">回到我的空间</UButton>
-        </div>
-      </template>
-    </UDashboardPanel>
-    <RouterView v-else />
+    <main class="flex min-h-0 flex-1">
+      <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
+      <UDashboardPanel v-if="me.data.value && route.params.spaceId && !space" id="not-member">
+        <template #body>
+          <div class="space-y-3">
+            <p class="text-muted">无权访问此空间</p>
+            <UButton :to="{ name: 'home' }" variant="subtle">返回我的空间</UButton>
+          </div>
+        </template>
+      </UDashboardPanel>
+      <RouterView v-else />
+    </main>
   </UDashboardGroup>
 </template>
+
+<style scoped>
+/* 组之间一条短竖线 */
+.nav-group::before {
+  content: '';
+  position: absolute;
+  left: 0;
+  top: 19px;
+  bottom: 19px;
+  width: 1px;
+  background: var(--ui-border-accented);
+}
+
+/* 当前页靠字重和一条压在导航墨线上的 2px 墨线区分 */
+.nav-link:hover {
+  box-shadow: inset 0 -1px 0 var(--ui-text-highlighted);
+}
+.nav-link[aria-current='page'] {
+  font-weight: 600;
+  box-shadow: inset 0 -2px 0 var(--ui-text-highlighted);
+}
+</style>

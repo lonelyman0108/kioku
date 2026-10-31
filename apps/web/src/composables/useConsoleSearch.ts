@@ -65,6 +65,8 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
     const found = results.value
     if (!id || !found) return list
     const to = (uri: string) => memoryRoute(id, uri)
+    // URI 是地址，用等宽字
+    const uriLabel = { itemLabelBase: 'font-mono' }
     const direct = new Set(found.matches.map((m) => m.uri))
     // 服务端已经按查询词筛过，不再交给搜索框按文字过滤
     list.push(
@@ -77,6 +79,7 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
           suffix: m.disclosure ?? layerLabels[m.layer],
           icon: m.sensitivity === 'secret' ? icons.secret : icons.file,
           to: to(m.uri),
+          ui: uriLabel,
         })),
       },
       {
@@ -90,6 +93,7 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
             suffix: c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''),
             icon: icons.memories,
             to: to(c.uri),
+            ui: uriLabel,
           })),
       },
     )

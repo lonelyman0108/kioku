@@ -391,7 +391,7 @@ const crumbs = computed<BreadcrumbItem[]>(() => {
                 />
                 <span
                   v-if="item.priority !== null && item.priority !== undefined && item.priority <= 1"
-                  class="shrink-0 text-xs font-medium text-primary"
+                  class="shrink-0 px-1 font-mono text-xs/4 font-medium ring ring-rule ring-inset"
                 >
                   P{{ item.priority }}
                 </span>
