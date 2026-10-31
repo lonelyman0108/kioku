@@ -18,19 +18,19 @@ const summary = computed(() => contextSummary(contextForm))
 </script>
 
 <template>
-  <details class="rounded-lg border border-default px-3 py-2 text-sm">
-    <summary class="cursor-pointer">
+  <details class="context">
+    <summary>
       会话上下文：<span class="text-muted">{{ summary }}</span>
     </summary>
-    <div class="mt-3 space-y-3">
-      <p class="text-xs text-muted">
+    <div class="context-body">
+      <p class="context-note">
         仅作用于生命周期事件与 /recall，工具调用不带。
         <Hint>
           与真实 MCP 一致，工具调用按 Key 的全部权限读写。判断 Key
           接入群聊后可读取的内容，应看生命周期事件与 /recall，不要看工具。
         </Hint>
       </p>
-      <div class="grid gap-3 sm:grid-cols-2">
+      <div class="context-fields">
         <UFormField label="聊天类型">
           <USelect v-model="contextForm.chatType" :items="chatTypeItems" class="w-full" />
         </UFormField>
@@ -61,3 +61,34 @@ const summary = computed(() => contextSummary(contextForm))
     </div>
   </details>
 </template>
+
+<style scoped>
+.context {
+  padding-bottom: 8px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.context > summary {
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.context > summary::marker {
+  font-size: 0.8em;
+  color: var(--ui-text-muted);
+}
+.context-body {
+  padding-top: 8px;
+}
+.context-note {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+/* 放在调用台的表单上面是两列，放在模型对话的窄栏里是一列 */
+.context-fields {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(11rem, 1fr));
+  gap: 10px 12px;
+  padding-top: 8px;
+}
+</style>
