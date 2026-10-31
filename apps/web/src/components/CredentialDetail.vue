@@ -20,8 +20,12 @@ import {
   restrictedAppsLabel,
   sensitivityLabels,
 } from '../labels'
+import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import MemoryRow from './strata/MemoryRow.vue'
+import PropertyList from './strata/PropertyList.vue'
+import SectionHeading from './strata/SectionHeading.vue'
 
 const props = defineProps<{
   spaceId: string
@@ -95,30 +99,24 @@ async function reveal() {
 </script>
 
 <template>
-  <div class="space-y-6">
-    <div class="space-y-1">
-      <div class="flex flex-wrap items-center gap-2">
-        <code class="rounded bg-elevated px-1.5 py-0.5 text-sm">{{ c.identifier }}</code>
-        <UBadge variant="subtle">{{ credentialSourceLabels[c.source] }}</UBadge>
-        <UBadge v-if="c.deletedAt" color="error" variant="subtle">已删除</UBadge>
-      </div>
-      <p v-if="c.description" class="text-sm whitespace-pre-wrap">{{ c.description }}</p>
-      <div class="flex flex-wrap items-center gap-2 pt-1">
-        <UButton
-          :icon="icons.copy"
-          size="xs"
-          color="neutral"
-          variant="subtle"
-          @click="copy(placeholder())"
-        >
+  <div class="credential-detail">
+    <header class="detail-head">
+      <p class="detail-identifier">{{ c.identifier }}</p>
+      <p class="detail-source">
+        {{ credentialSourceLabels[c.source] }}
+        <span v-if="c.deletedAt" class="text-error">已删除</span>
+      </p>
+      <p v-if="c.description" class="detail-description">{{ c.description }}</p>
+      <div class="detail-actions">
+        <UButton size="sm" color="primary" variant="outline" @click="copy(placeholder())">
           复制凭据占位符
         </UButton>
         <template v-if="canManage">
           <UButton
             v-if="!c.deletedAt"
-            :icon="icons.edit"
-            size="xs"
-            variant="subtle"
+            size="sm"
+            color="primary"
+            variant="outline"
             @click="emit('edit')"
           >
             修改
@@ -133,100 +131,97 @@ async function reveal() {
             :disabled="!c.referenceCount"
           >
             <UButton
-              :icon="icons.remove"
-              size="xs"
+              size="sm"
               color="error"
-              variant="subtle"
+              variant="outline"
               :disabled="c.referenceCount > 0"
               @click="emit('remove')"
             >
               删除
             </UButton>
           </UTooltip>
-          <UButton
-            v-else
-            :icon="icons.undelete"
-            size="xs"
-            variant="subtle"
-            @click="emit('undelete')"
-          >
+          <UButton v-else size="sm" color="primary" variant="outline" @click="emit('undelete')">
             恢复
           </UButton>
         </template>
       </div>
-    </div>
+    </header>
 
-    <section class="space-y-2">
-      <h3 class="text-sm font-medium">来源</h3>
-      <dl v-if="c.source === 'external'" class="grid grid-cols-[6rem_1fr] gap-x-3 gap-y-1 text-sm">
-        <dt class="text-muted">凭据源</dt>
-        <dd>
+    <section>
+      <SectionHeading title="来源" :level="3" />
+      <PropertyList
+        v-if="c.source === 'external'"
+        class="pt-2"
+        :groups="[
+          [
+            { key: 'provider', label: '凭据源' },
+            { key: 'location', label: '条目位置' },
+          ],
+        ]"
+      >
+        <template #provider>
           <template v-if="c.provider">
             {{ c.provider.name }}（{{ providerKindLabels[c.provider.kind] }}）
-            <UBadge v-if="c.provider.deleted" color="warning" variant="subtle" size="sm">
-              已删除，需重新绑定
-            </UBadge>
+            <span v-if="c.provider.deleted" class="text-warning">已删除，需重新绑定</span>
           </template>
-        </dd>
-        <dt class="text-muted">条目位置</dt>
-        <dd class="break-all">{{ c.location }}</dd>
-      </dl>
-      <p v-else class="text-sm text-muted">
+        </template>
+        <template #location>
+          <span class="font-mono text-[13px]">{{ c.location }}</span>
+        </template>
+      </PropertyList>
+      <p v-else class="section-note">
         值由 Kioku 使用主密钥加密保存，仅在显式查看或 Agent 显式取用时解密。
       </p>
     </section>
 
-    <section class="space-y-2">
-      <div class="flex items-center gap-2">
-        <h3 class="text-sm font-medium">字段</h3>
-        <UButton
-          v-if="c.source === 'hosted' && canManage && !c.deletedAt && !revealed"
-          :icon="icons.reveal"
-          size="xs"
-          color="neutral"
-          variant="ghost"
-          class="ml-auto"
-          @click="confirmingReveal = true"
-        >
-          查看值
-        </UButton>
-        <UButton
-          v-else-if="revealed"
-          :icon="icons.left"
-          size="xs"
-          color="neutral"
-          variant="ghost"
-          class="ml-auto"
-          @click="revealed = null"
-        >
-          隐藏
-        </UButton>
-      </div>
-      <ul class="divide-y divide-default rounded-lg border border-default text-sm">
-        <li v-for="field in c.fields" :key="field.name" class="flex items-center gap-2 px-3 py-2">
-          <code class="text-xs">{{ field.name }}</code>
-          <span v-if="field.sourceField" class="text-xs text-muted">
-            → 条目字段 {{ field.sourceField }}
-          </span>
-          <template v-if="c.source === 'hosted'">
-            <code
-              v-if="revealed && field.name in revealed"
-              class="min-w-0 flex-1 break-all rounded bg-elevated px-1.5 py-0.5 text-xs"
-              >{{ revealed[field.name] }}</code
-            >
-            <span v-else class="flex-1 text-muted">••••••</span>
-            <UButton
-              v-if="revealed && field.name in revealed"
-              :icon="icons.copy"
-              size="xs"
-              color="neutral"
-              variant="ghost"
-              :aria-label="`复制 ${field.name} 的值`"
-              @click="copy(revealed[field.name]!)"
-            />
-          </template>
-          <span v-else class="flex-1" />
+    <section>
+      <SectionHeading title="字段" :level="3">
+        <template #actions>
           <UButton
+            v-if="c.source === 'hosted' && canManage && !c.deletedAt && !revealed"
+            size="xs"
+            color="primary"
+            variant="outline"
+            @click="confirmingReveal = true"
+          >
+            查看值
+          </UButton>
+          <UButton
+            v-else-if="revealed"
+            size="xs"
+            color="primary"
+            variant="outline"
+            @click="revealed = null"
+          >
+            隐藏
+          </UButton>
+        </template>
+      </SectionHeading>
+      <ul>
+        <li v-for="field in c.fields" :key="field.name" class="field-row">
+          <span class="field-name">{{ field.name }}</span>
+          <template v-if="c.source === 'hosted'">
+            <span v-if="revealed && field.name in revealed" class="field-value">
+              <code>{{ revealed[field.name] }}</code>
+              <UButton
+                :icon="icons.copy"
+                size="xs"
+                color="neutral"
+                variant="ghost"
+                :aria-label="`复制 ${field.name} 的值`"
+                @click="copy(revealed[field.name]!)"
+              />
+            </span>
+            <!-- 没查看时是一块实心，和机密的画法一样 -->
+            <span v-else class="field-value">
+              <i class="value-mask" role="img" aria-label="值已隐藏" />
+            </span>
+          </template>
+          <span v-else class="field-value field-source">
+            <template v-if="field.sourceField">→ 条目字段 {{ field.sourceField }}</template>
+          </span>
+          <UButton
+            class="shrink-0"
             size="xs"
             color="neutral"
             variant="ghost"
@@ -239,83 +234,78 @@ async function reveal() {
       </ul>
     </section>
 
-    <section class="space-y-1">
-      <h3 class="text-sm font-medium">限定应用</h3>
-      <p class="text-sm">{{ appNames }}</p>
+    <section>
+      <SectionHeading title="限定应用" :level="3" />
+      <p class="section-text">{{ appNames }}</p>
     </section>
 
-    <section class="space-y-2">
-      <h3 class="text-sm font-medium">引用此凭据的记忆</h3>
-      <p class="text-xs text-muted">
-        仍有引用时无法删除凭据。
-        <Hint>仅统计当前账号私人层中未删除、非机密、仍有效的记忆。</Hint>
-      </p>
+    <section>
+      <SectionHeading title="引用此凭据的记忆" :level="3">
+        <template #hint>
+          <Hint>仅统计当前账号私人层中未删除、非机密、仍有效的记忆。</Hint>
+        </template>
+      </SectionHeading>
+      <p class="section-note">仍有引用时无法删除凭据。</p>
       <USkeleton v-if="references.isPending.value" class="h-8 w-full" />
-      <ul v-else-if="references.data.value?.items.length" class="space-y-1 text-sm">
-        <li v-for="m in references.data.value.items" :key="m.id" class="flex items-center gap-2">
-          <ULink
-            :to="{ name: 'memories', params: { spaceId }, query: { uri: m.uri } }"
-            class="font-mono text-xs"
+      <ul v-else-if="references.data.value?.items.length">
+        <li v-for="m in references.data.value.items" :key="m.id">
+          <MemoryRow
+            flush
+            :uri="m.uri"
+            layer="private"
+            :sensitivity="m.sensitivity"
+            :to="memoryRoute(spaceId, m.uri)"
           >
-            {{ m.uri }}
-          </ULink>
-          <span class="text-xs text-muted">{{ sensitivityLabels[m.sensitivity] }}</span>
-          <time
-            :datetime="m.updatedAt"
-            :title="formatTime(m.updatedAt)"
-            class="ml-auto text-xs text-muted"
-          >
-            {{ formatRelative(m.updatedAt) }}
-          </time>
+            <template #flags>
+              <span class="reference-flags">
+                <span>{{ sensitivityLabels[m.sensitivity] }}</span>
+                <time :datetime="m.updatedAt" :title="formatTime(m.updatedAt)">
+                  {{ formatRelative(m.updatedAt) }}
+                </time>
+              </span>
+            </template>
+          </MemoryRow>
         </li>
-        <li v-if="references.data.value.truncated" class="text-xs text-muted">仅显示最近 200 条</li>
+        <li v-if="references.data.value.truncated" class="section-note">仅显示最近 200 条</li>
       </ul>
-      <p v-else class="text-sm text-muted">暂无引用</p>
+      <p v-else class="section-empty">暂无引用</p>
     </section>
 
-    <section class="space-y-2">
-      <h3 class="text-sm font-medium">记录</h3>
-      <p class="text-xs text-muted">
-        记录新建、修改、删除与每次取用。
-        <Hint>仅凭据所有者可见，不进入空间的变更记录。</Hint>
-      </p>
+    <section>
+      <SectionHeading title="记录" :level="3">
+        <template #hint>
+          <Hint>仅凭据所有者可见，不进入空间的变更记录。</Hint>
+        </template>
+      </SectionHeading>
+      <p class="section-note">记录新建、修改、删除与每次取用。</p>
       <USkeleton v-if="events.isPending.value" class="h-8 w-full" />
-      <ol v-else class="space-y-2 text-sm">
-        <li v-for="e in eventItems" :key="e.id" class="rounded-lg border border-default px-3 py-2">
-          <div class="flex flex-wrap items-center gap-2">
-            <UIcon
-              :name="(credentialEventLabels[e.type] ?? credentialEventLabels.update)!.icon"
-              class="size-4 text-muted"
-            />
-            <span class="font-medium">{{ credentialEventLabels[e.type]?.label ?? e.type }}</span>
-            <span class="text-muted">{{ actorLabel(e.actor).name }}</span>
+      <ol v-else>
+        <li v-for="e in eventItems" :key="e.id" class="event-row">
+          <span class="event-type">{{ credentialEventLabels[e.type]?.label ?? e.type }}</span>
+          <span class="event-actor">{{ actorLabel(e.actor).name }}</span>
+          <time class="event-time" :datetime="e.createdAt" :title="formatTime(e.createdAt)">
+            {{ formatRelative(e.createdAt) }}
+          </time>
+          <p v-if="describe(e) || e.bench" class="event-detail">
+            <span v-if="describe(e)">{{ describe(e) }}</span>
             <template v-if="e.bench">
-              <UBadge size="sm" color="info" variant="subtle" :title="`运行标记 ${e.bench.run}`">
-                测试台
-              </UBadge>
-              <span class="text-xs text-muted">操作账号：{{ benchAccountLabel(e.bench) }}</span>
+              <span class="bench-flag" :title="`运行标记 ${e.bench.run}`">测试台</span>
+              <span>操作账号：{{ benchAccountLabel(e.bench) }}</span>
             </template>
-            <time
-              :datetime="e.createdAt"
-              :title="formatTime(e.createdAt)"
-              class="ml-auto text-xs text-muted"
-            >
-              {{ formatRelative(e.createdAt) }}
-            </time>
-          </div>
-          <p v-if="describe(e)" class="mt-1 text-xs text-muted">{{ describe(e) }}</p>
+          </p>
         </li>
       </ol>
-      <UButton
-        v-if="events.hasNextPage.value"
-        size="xs"
-        color="neutral"
-        variant="subtle"
-        :loading="events.isFetchingNextPage.value"
-        @click="events.fetchNextPage()"
-      >
-        加载更早的记录
-      </UButton>
+      <div v-if="events.hasNextPage.value" class="pt-3">
+        <UButton
+          size="xs"
+          color="neutral"
+          variant="outline"
+          :loading="events.isFetchingNextPage.value"
+          @click="events.fetchNextPage()"
+        >
+          加载更早的记录
+        </UButton>
+      </div>
     </section>
 
     <UModal v-model:open="confirmingReveal" title="查看托管的值？">
@@ -331,3 +321,140 @@ async function reveal() {
     </UModal>
   </div>
 </template>
+
+<style scoped>
+.credential-detail section {
+  margin-top: 22px;
+}
+.detail-identifier {
+  font-family: var(--font-mono);
+  font-size: 18px;
+  font-weight: 500;
+  line-height: 1.4;
+  overflow-wrap: anywhere;
+}
+.detail-source {
+  display: flex;
+  gap: 10px;
+  margin-top: 1px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.detail-description {
+  margin-top: 6px;
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+.detail-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+  margin-top: 11px;
+}
+.section-note {
+  padding-top: 8px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.section-text {
+  padding-top: 8px;
+  line-height: 1.6;
+  overflow-wrap: anywhere;
+}
+.section-empty {
+  padding-top: 8px;
+  color: var(--ui-text-muted);
+}
+.field-row {
+  display: flex;
+  align-items: center;
+  gap: 10px;
+  min-height: 38px;
+  padding: 4px 0;
+  border-bottom: 1px solid var(--ui-border);
+}
+.field-name {
+  flex: none;
+  width: 7.5rem;
+  overflow: hidden;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  font-weight: 500;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.field-value {
+  flex: 1;
+  display: flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.field-value code {
+  min-width: 0;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  overflow-wrap: anywhere;
+}
+.field-source {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.value-mask {
+  display: block;
+  width: 88px;
+  height: 12px;
+  background: var(--strata-solid);
+}
+.reference-flags {
+  display: inline-flex;
+  gap: 10px;
+  font-size: 13px;
+  line-height: 1.4;
+  white-space: nowrap;
+  color: var(--ui-text-muted);
+}
+/* 压在整行的点击区上面，悬停才看得到完整时间 */
+.reference-flags time {
+  position: relative;
+  z-index: 1;
+}
+.event-row {
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  column-gap: 8px;
+  align-items: baseline;
+  padding: 7px 0 6px;
+  border-bottom: 1px solid var(--ui-border);
+  line-height: 1.5;
+}
+.event-type {
+  font-weight: 500;
+}
+.event-actor {
+  min-width: 0;
+  color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+.event-time {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+  white-space: nowrap;
+}
+.event-detail {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 8px;
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.bench-flag {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 12px;
+  line-height: 18px;
+}
+</style>

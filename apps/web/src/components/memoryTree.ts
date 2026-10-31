@@ -136,7 +136,9 @@ export function treeRowPlaces(
 
 // 一行要画的引线：祖先穿过去的竖线和自己这一级的竖线，最后一条带一小段横线连到这一行。
 // 横向位置按层算：第一层的竖线在 14px，每深一层多 16px
-export function guideLines(place: TreeRowPlace): { left: number; end: boolean; tick: boolean }[] {
+export function guideLines(
+  place: Pick<TreeRowPlace, 'depth' | 'prefix' | 'last'>,
+): { left: number; end: boolean; tick: boolean }[] {
   const x = (level: number) => 14 + (level - 1) * 16
   const lines = place.prefix.flatMap((has, i) =>
     has ? [{ left: x(i + 1), end: false, tick: false }] : [],
