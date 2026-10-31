@@ -169,7 +169,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
         </UButton>
       </form>
       <p v-if="shortened" class="text-sm text-warning">
-        缩短后，下一次清理将按新的天数永久删除，无法撤销。
+        缩短后，下一次清理将按新的天数永久删除，不可撤销。
       </p>
 
       <USeparator />

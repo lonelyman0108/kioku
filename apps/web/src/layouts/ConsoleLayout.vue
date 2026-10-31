@@ -53,13 +53,13 @@ const nav = computed<NavigationMenuItem[]>(() => {
   return [
     { label: '概览', icon: icons.overview, to: { name: 'overview', params } },
     { label: '记忆', icon: icons.memories, to: { name: 'memories', params } },
-    { label: '活动', icon: icons.activity, to: { name: 'activity', params } },
+    { label: '变更记录', icon: icons.activity, to: { name: 'activity', params } },
     { label: '凭据', icon: icons.credentials, to: { name: 'credentials', params } },
     { label: '人格', icon: icons.personas, to: { name: 'personas', params } },
-    { label: '对象', icon: icons.subjects, to: { name: 'subjects', params } },
-    { label: '待审', icon: icons.review, to: { name: 'review', params } },
-    { label: '应用与 Key', icon: icons.apps, to: { name: 'apps', params } },
-    { label: '召回分析', icon: icons.recall, to: { name: 'recall', params } },
+    { label: '联系人', icon: icons.subjects, to: { name: 'subjects', params } },
+    { label: '待处理', icon: icons.review, to: { name: 'review', params } },
+    { label: '应用', icon: icons.apps, to: { name: 'apps', params } },
+    { label: '召回', icon: icons.recall, to: { name: 'recall', params } },
     ...(ownsApp.value
       ? [{ label: '测试台', icon: icons.bench, to: { name: 'bench', params } }]
       : []),
@@ -138,7 +138,7 @@ async function logout() {
       </template>
 
       <template #default="{ collapsed }">
-        <UDashboardSearchButton :collapsed="collapsed" label="搜索记忆…" />
+        <UDashboardSearchButton :collapsed="collapsed" label="搜索" />
         <UNavigationMenu :items="nav" :collapsed="collapsed" orientation="vertical" />
         <UNavigationMenu
           v-if="instanceNav.length"
@@ -170,14 +170,14 @@ async function logout() {
       v-model:search-term="searchTerm"
       :groups="searchGroups"
       :loading="searching"
-      placeholder="搜索记忆的 URI、关键词或内容，或跳转到页面"
+      placeholder="搜索记忆或跳转页面"
     />
 
     <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
     <UDashboardPanel v-if="me.data.value && route.params.spaceId && !space" id="not-member">
       <template #body>
         <div class="space-y-3">
-          <p class="text-muted">你不是这个空间的成员，或者已经被移出。</p>
+          <p class="text-muted">无权访问此空间</p>
           <UButton :to="{ name: 'home' }" variant="subtle">回到我的空间</UButton>
         </div>
       </template>
