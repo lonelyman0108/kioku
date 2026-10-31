@@ -71,7 +71,7 @@ async function exportSpace() {
     <template #header>
       <h2 class="font-medium">导出空间</h2>
       <p class="mt-1 text-sm text-muted">
-        导出为口令加密的文件，由实例管理员在其他实例或当前实例导入为新空间。
+        导出为口令加密的文件，含机密记忆与托管的凭据值，由实例管理员在其他实例或当前实例导入为新空间。
         <Hint>
           <p>
             包含共享的记忆、人格、应用配置与联系人，以及当前账号的个人画像层与私人层（含是否允许

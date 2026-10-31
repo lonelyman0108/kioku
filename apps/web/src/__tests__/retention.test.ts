@@ -52,8 +52,9 @@ describe('暂停的说法', () => {
   it('从备份恢复的：说明恢复出的已删除记录早已到期，要找回的先恢复', () => {
     const text = pauseText({ ...pause, reason: 'restored' }, 30)
     expect(text.title).toMatch(/^已于 .+ 从备份恢复，清理暂停至 .+$/)
+    expect(text.description).toContain('恢复出的已删除记录多已超过保留期')
+    expect(text.description).toContain('暂停结束后将被永久删除')
     expect(text.description).toContain('请在暂停结束前到记忆页或凭据页恢复')
-    expect(text.detail).toContain('恢复出的已删除记录')
     expect(text.detail).toContain('已删除账号留下的历史仍每天清理')
     expect(text.confirm).toContain('删除超过 30 天的将被永久删除')
   })

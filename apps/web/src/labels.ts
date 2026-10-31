@@ -63,10 +63,10 @@ export const accessContextLabels: Record<AccessContext, string> = {
 // 权限范围里「读得到哪些来源作用域写下的记忆」
 export const originScopeLabels: Record<KeyAccessMatrix['contexts'][number]['originScope'], string> =
   {
-    any: '不限来源',
-    app: '仅含全局与本应用',
-    group: '仅含全局、本应用与本群',
-    direct: '仅含全局、本应用与此人的对话',
+    any: '来源不限',
+    app: '来源仅限全局与本应用',
+    group: '来源仅限全局、本应用与本群',
+    direct: '来源仅限全局、本应用与此人的对话',
   }
 
 // 召回事件的来路

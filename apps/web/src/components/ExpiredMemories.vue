@@ -89,7 +89,7 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
     <p class="text-xs text-muted">
       已过期的记忆不再召回，也不进启动加载。<Hint>
         恢复生效后长期有效，可再设置新的有效期。标记为「URI 已释放」的，过期后同一 URI
-        上已写入新记忆，需先移走或删除新记忆。
+        上已写入新记忆；那条记忆仍在时，需先移走或删除。
       </Hint>
     </p>
     <p v-if="retention && anyReleased" class="flex items-start gap-1.5 text-xs text-warning">

@@ -177,7 +177,7 @@ async function restore() {
         :title="`这条记忆已于 ${formatTime(current.validTo)} 过期，不再召回，也不进启动加载`"
         :description="
           current.released
-            ? '过期后同一 URI 上已写入新记忆，URI 已释放。需先移走或删除新记忆，才能恢复生效。'
+            ? '过期后同一 URI 上已写入新记忆，URI 已释放。那条记忆仍在时，需先移走或删除才能恢复生效。'
             : undefined
         "
         :actions="
@@ -269,7 +269,7 @@ async function restore() {
           >{{ row.kind === 'add' ? '+ ' : row.kind === 'remove' ? '- ' : '  ' }}{{ row.text }}</span></template></pre>
         </li>
       </ol>
-      <p v-if="!events.length" class="text-sm text-muted">暂无变更记录</p>
+      <p v-if="!events.length" class="text-sm text-muted">暂无可查看的变更记录</p>
     </template>
 
     <UModal

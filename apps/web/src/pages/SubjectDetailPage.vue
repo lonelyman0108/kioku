@@ -519,13 +519,18 @@ function runCounts(run: ExtractionRunInfo): string {
       >
         <template #body>
           <p class="text-sm">
-            将「{{ mergePicked?.label }}」合并到「{{ data?.displayName }}」：「{{
-              mergePicked?.label
-            }}」的平台账号、事实、对话中记下的内容和按群切换人格的规则全部转到「{{
+            将「{{ mergePicked?.label }}」合并到「{{
               data?.displayName
-            }}」，合并后两边的对话都能读取这些内容。相关的待确认绑定作废，「{{
+            }}」：平台账号、事实与按群切换人格的规则转到「{{ data?.displayName }}」，「{{
               mergePicked?.label
-            }}」随即删除。此操作不可撤销。
+            }}」随即删除，相关的待确认绑定作废。此操作不可撤销。
+          </p>
+          <p class="mt-2 text-sm text-muted">
+            「{{ mergePicked?.label }}」自身的私聊或群里记下的内容也归到「{{
+              data?.displayName
+            }}」；在其他群记下的内容不动，仍只在那个群可见。两边在同一应用都有按群切换人格的规则时，保留「{{
+              data?.displayName
+            }}」的规则。
           </p>
         </template>
         <template #footer>

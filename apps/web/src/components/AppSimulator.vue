@@ -276,8 +276,8 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
           </details>
           <section v-if="debug.filtered.length" class="space-y-1">
             <h3 class="font-medium">
-              当前 Key 无权读取
-              <Hint>管理界面能搜索到、当前 Key 无法读取的记忆。</Hint>
+              未进入当前 Key 的召回
+              <Hint>管理界面能搜索到，但当前 Key 不会召回的记忆，每条后面写着原因。</Hint>
             </h3>
             <ul class="divide-y divide-default">
               <li

@@ -118,11 +118,13 @@ const incomingText = (binding: SubjectBinding) =>
           <p>
             将 {{ incomingText(confirming) }} 合并到「{{
               confirming.subject.displayName
-            }}」：这些账号记下的事实与私聊内容全部转到「{{
+            }}」：这些账号的事实与私聊内容转到「{{
               confirming.subject.displayName
-            }}」，原联系人随即删除。此后这些账号的私聊视为本人对话，两边的私聊都能读取这些内容。此操作不可撤销。
+            }}」，原联系人随即删除。此后这些账号的私聊视为本人对话，用哪个账号私聊都能读取私聊内容。此操作不可撤销。
           </p>
-          <p class="text-muted">如无法辨认这些账号，或绑定码并非本人申请，请拒绝。</p>
+          <p class="text-muted">
+            在群里记下的内容不动，仍只在那个群可见。如无法辨认这些账号，或绑定码并非本人申请，请拒绝。
+          </p>
         </div>
       </template>
       <template #footer>

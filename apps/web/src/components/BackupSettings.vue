@@ -231,11 +231,10 @@ async function clear() {
     <template #header>
       <h2 class="font-medium">备份</h2>
       <p class="mt-1 text-sm text-muted">
-        每天把整个实例加密备份到兼容S3的对象存储。
+        每天把整个实例加密备份到兼容S3的对象存储。恢复时需配置同一主密钥。
         <Hint>
           支持 MinIO、Cloudflare、Backblaze
-          等，存储桶中只保留最近几份。备份使用主密钥派生的密钥加密，恢复时需配置同一主密钥；恢复步骤见
-          README。
+          等，存储桶中只保留最近几份。备份使用主密钥派生的密钥加密；恢复步骤见 README。
         </Hint>
       </p>
     </template>
