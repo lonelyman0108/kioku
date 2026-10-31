@@ -377,25 +377,18 @@ function consoleOnlyRoutes(deps: Deps) {
         c.get('console').accountId,
       )
       const { identifier, name, description, field, value } = c.req.valid('json')
-      const { memory, credential, ...outcome } = await service.convertToCredential(
-        c.req.valid('json'),
-        (tx) =>
+      const { memory, ...outcome } = await service.convertToCredential(c.req.valid('json'), {
+        create: (tx) =>
           credentials.createHostedIn(tx, {
             identifier,
             name,
             ...(description !== undefined ? { description } : {}),
             values: { [field]: value },
           }),
-      )
-      // 这一条记忆的引用已经写进索引，提交之后读才数得对
-      return c.json(
-        {
-          memory: ConsoleMemoryView.parse(memory),
-          credential: await credentials.get(credential),
-          ...outcome,
-        },
-        200,
-      )
+        view: (tx, id) => credentials.viewIn(tx, id),
+      })
+      // 已经提交了，这里不再做会失败的事。管理界面的服务给出的就是 ConsoleMemoryView（见 ConsoleView）
+      return c.json({ memory: memory as ConsoleMemoryView, ...outcome }, 200)
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)

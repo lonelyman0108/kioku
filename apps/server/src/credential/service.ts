@@ -629,6 +629,11 @@ export class CredentialService {
     }
   }
 
+  // 在调用方的事务里读一条自己的凭据：引用的条数要算上这个事务刚写的
+  viewIn(tx: Tx, id: string): Promise<ConsoleCredential> {
+    return this.ownById(tx, id).then((row) => this.consoleViewOf(tx, { row }))
+  }
+
   async update(id: string, input: UpdateCredentialRequest): Promise<ConsoleCredential> {
     return this.run(async (tx) =>
       this.consoleViewOf(tx, await this.modify(tx, await this.ownById(tx, id), input)),

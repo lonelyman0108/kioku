@@ -17,6 +17,7 @@ import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
+import { CredentialService } from '../../credential/service'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import {
   credentials,
@@ -674,6 +675,28 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect(row).toMatchObject({ version: m.version, content: BODY })
     expect((await eventsOf(m.id)).map((e) => e.eventType)).toEqual(['create'])
     expect(queued).not.toContain(m.id)
+  })
+
+  it('读响应用的凭据失败时什么都不留下，重试能成功：不会数据改了却报错', async () => {
+    const m = await seedNote()
+    const failing = vi
+      .spyOn(CredentialService.prototype, 'viewIn')
+      .mockRejectedValueOnce(new Error('读失败'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    try {
+      const res = await convert(m)
+      expect(res.status).toBe(500)
+    } finally {
+      failing.mockRestore()
+      logged.mockRestore()
+    }
+    expect(await credentialCount()).toBe(0)
+    const row = await rowOf(m.id)
+    expect(row).toMatchObject({ version: m.version, content: BODY })
+    expect((await eventsOf(m.id)).map((e) => e.eventType)).toEqual(['create'])
+
+    const retried = await converted(m)
+    expect(retried.credential).toMatchObject({ identifier: 'wifi', referenceCount: 1 })
   })
 
   it('转存之后这条记忆的引用算数：凭据删不掉', async () => {
