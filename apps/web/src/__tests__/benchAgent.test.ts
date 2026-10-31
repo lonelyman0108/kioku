@@ -448,7 +448,7 @@ describe('hook 循环', () => {
     expect(last(done).end).toBe('lifecycleFailed')
     expect(last(done).inHistory).toBe(false)
     expect(last(done).notice).toContain('同时运行的回滚太多')
-    expect(last(done).notice).toContain('没有请求模型')
+    expect(last(done).notice).toContain('未请求模型')
 
     const next = harness({ turns: [reply('好')] })
     const again = await next.send(USER_TEXT, done)
@@ -473,7 +473,7 @@ describe('hook 循环', () => {
       turns: [reply('不该到这里')],
       run: () => ({ kind: 'failed', message: '服务内部错误', retryable: true }),
     })
-    expect(last(await h.send(USER_TEXT)).notice).toBe('服务内部错误。没有请求模型，可以再发一次。')
+    expect(last(await h.send(USER_TEXT)).notice).toBe('服务内部错误。未请求模型，可再次发送。')
   })
 
   it('系统提示每次请求时才拼：这条消息之前改过的，下一轮就用新的，历史里不留', async () => {
@@ -563,7 +563,7 @@ describe('chat 循环', () => {
       const h = harness(context ? { ...options, context } : options)
       const done = await h.send(USER_TEXT)
       expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
-      expect(last(done).turnEndNote).toContain('没有发 turn.end')
+      expect(last(done).turnEndNote).toContain('未发送 turn.end')
       expect(last(done).turnEndNote).toContain(reason)
       expect(last(done).turnEnd).toBeNull()
       expect(last(done).end).toBe('done')
@@ -648,7 +648,7 @@ describe('chat 循环', () => {
     const done = await h.send(USER_TEXT)
     expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
     expect(last(done).turnEnd).toBeNull()
-    expect(last(done).turnEndNote).toContain('没有发 turn.end')
+    expect(last(done).turnEndNote).toContain('未发送 turn.end')
     expect(last(done).inHistory).toBe(false)
     expect(done.session.replay).toEqual([])
   })
@@ -665,7 +665,7 @@ describe('chat 循环', () => {
       const done = await h.send(USER_TEXT)
       expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
       expect(last(done).turnEnd).toBeNull()
-      expect(last(done).turnEndNote).toBe('模型没有回复，没有发 turn.end。')
+      expect(last(done).turnEndNote).toBe('模型未回复，未发送 turn.end。')
       expect(last(done).end).toBe('empty')
       expect(last(done).inHistory).toBe(true)
       expect(done.session.replay).toEqual([])
@@ -676,7 +676,7 @@ describe('chat 循环', () => {
   it('上下文不满足时回复是空的：说的是模型没有回复，不是上下文的问题', async () => {
     const h = harness({ loop: 'chat', turns: [reply(null)] })
     const done = await h.send(USER_TEXT)
-    expect(last(done).turnEndNote).toBe('模型没有回复，没有发 turn.end。')
+    expect(last(done).turnEndNote).toBe('模型未回复，未发送 turn.end。')
   })
 
   it('空回复之后的下一条有文字的回复：turn.end 照发', async () => {
@@ -788,7 +788,7 @@ describe('工具调用', () => {
     expect(argumentsText(traced[1]!)).toBe('{坏的')
     expect(argumentsText(traced[2]!)).toBe('{}')
     expect(JSON.stringify(done.messages)).not.toContain('{坏的')
-    expect(argumentsText({ ...traced[1]!, rawArguments: '' })).toBe('（没有参数）')
+    expect(argumentsText({ ...traced[1]!, rawArguments: '' })).toBe('（无参数）')
   })
 
   it('全部解析失败：不发运行请求，把错误回给模型，它可以重试', async () => {
@@ -1282,7 +1282,7 @@ describe('停止', () => {
     const done = await h.send(USER_TEXT)
     expect(last(done).end).toBe('stopped')
     expect(last(done).inHistory).toBe(false)
-    expect(last(done).notice).toContain('可以再发一次')
+    expect(last(done).notice).toContain('可再次发送')
     expect(noticeColor(last(done).end)).toBe('neutral')
     expect(done.messages).toEqual([])
 
@@ -1310,7 +1310,7 @@ describe('停止', () => {
     // 已经做了的写入还在重放日志里：模型也知道
     expect(done.session.replay).toHaveLength(1)
     expect(last(done).inHistory).toBe(true)
-    expect(last(done).notice).toContain('留在历史')
+    expect(last(done).notice).toContain('保留在历史')
   })
 
   it('模型的回复和停止撞在一起：要调的工具都不执行，补上 tool 消息', async () => {
@@ -1391,14 +1391,14 @@ describe('停止', () => {
     })
     const done = await h.send(USER_TEXT)
     expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
-    expect(last(done).turnEndNote).toContain('已停止，没有发 turn.end')
+    expect(last(done).turnEndNote).toContain('已停止，未发送 turn.end')
     expect(last(done).end).toBe('done')
     expect(contents(done.messages)).toEqual([USER_TEXT, '好'])
   })
 })
 
 describe('工具的运行请求失败', () => {
-  const failing = (message = '服务内部错误。可能已经执行了一部分，到活动里确认') => ({
+  const failing = (message = '服务内部错误。可能已执行一部分，请到变更记录确认') => ({
     loop: 'tools' as const,
     turns: [
       reply(null, [
@@ -1417,7 +1417,7 @@ describe('工具的运行请求失败', () => {
     expect(last(done).end).toBe('toolFailed')
     expect(noticeColor(last(done).end)).toBe('error')
     expect(last(done).notice).toContain('工具请求失败')
-    expect(last(done).notice).toContain('可能已经执行了一部分')
+    expect(last(done).notice).toContain('可能已执行一部分')
     expect(toolMessages(done.messages).map((m) => m.tool_call_id)).toEqual(['c1', 'c2', 'c3'])
     const [first, second, third] = toolMessages(done.messages).map((m) => m.content as string)
     expect(first).toContain('工具请求失败，没有拿到结果')
@@ -1454,7 +1454,7 @@ describe('请求模型失败', () => {
     expect(last(done).end).toBe('modelFailed')
     expect(last(done).inHistory).toBe(false)
     expect(last(done).notice).toContain('上游的错误原文')
-    expect(last(done).notice).toContain('可以再发一次')
+    expect(last(done).notice).toContain('可再次发送')
     expect(noticeColor(last(done).end)).toBe('error')
     // 启动上下文拿到了，下一条不用再发
     expect(done.sessionText).toBe(SESSION_TEXT)
@@ -1487,7 +1487,7 @@ describe('请求模型失败', () => {
     expect(last(done).end).toBe('modelFailed')
     expect(last(done).inHistory).toBe(true)
     expect(last(done).notice).toContain('上游挂了')
-    expect(last(done).notice).toContain('留在历史')
+    expect(last(done).notice).toContain('保留在历史')
     expect(done.session.replay).toHaveLength(1)
 
     const next = harness({ loop: 'tools', turns: [reply('接着来')] })
@@ -1511,9 +1511,9 @@ describe('请求模型失败', () => {
       [400, '还没有配模型', '还没有配模型'],
       [403, '只有实例管理员能用模型代理', '只有实例管理员能用模型代理'],
       [404, '没有这把 Key', '没有这把 Key'],
-      [413, '对话太长，清空之后再试', '对话太长，清空之后再试'],
+      [413, '对话太长，清空之后再试', '对话过长，请清空后重试'],
       // 反向代理拦下的：没有服务端的那句话，也要提示清空
-      [413, '请求失败：HTTP 413', '对话太长，清空之后再试'],
+      [413, '请求失败：HTTP 413', '对话过长，请清空后重试'],
     ])('HTTP %i「%s」：一轮都没回复时', async (status, message, notice) => {
       const h = harness({ turns: [new ApiError(status, message)] })
       const done = await h.send(USER_TEXT)
@@ -1536,12 +1536,12 @@ describe('请求模型失败', () => {
   })
 
   it.each([
-    ['500', new ApiError(500, '服务内部错误'), '服务内部错误。可以再发一次。'],
-    ['502', new ApiError(502, '上游挂了'), '上游挂了。可以再发一次。'],
+    ['500', new ApiError(500, '服务内部错误'), '服务内部错误。可再次发送。'],
+    ['502', new ApiError(502, '上游挂了'), '上游挂了。可再次发送。'],
     [
       '网络错误',
       new TypeError('Failed to fetch'),
-      `请求模型失败：${NOT_API_FAILURE}。可以再发一次。`,
+      `请求模型失败：${NOT_API_FAILURE}。可再次发送。`,
     ],
   ] as [string, Error, string][])('%s 可能是暂时的：可以再发一次', async (_name, err, notice) => {
     const h = harness({ loop: 'tools', turns: [err] })
@@ -1556,7 +1556,7 @@ describe('请求模型失败', () => {
     expect(gateway).toContain('反向代理')
     expect(gateway).toContain('120 秒')
     expect(turnFailureMessage(new ApiError(400, '还没有配模型'))).toBe('还没有配模型')
-    expect(turnFailureMessage(new TypeError('Failed to fetch'))).toContain('网络出错了')
+    expect(turnFailureMessage(new TypeError('Failed to fetch'))).toContain('网络错误')
     // 响应对不上契约（ZodError）也不把英文报错给用户
     expect(turnFailureMessage(new Error('Invalid input'))).not.toContain('Invalid')
   })
@@ -1566,7 +1566,7 @@ describe('请求模型失败', () => {
     const done = await h.send(USER_TEXT)
     expect(last(done).notice).not.toContain('。。')
     const plain = harness({ loop: 'tools', turns: [new ApiError(502, '上游挂了')] })
-    expect(last(await plain.send(USER_TEXT)).notice).toContain('上游挂了。可以再发一次')
+    expect(last(await plain.send(USER_TEXT)).notice).toContain('上游挂了。可再次发送')
   })
 })
 
@@ -1691,7 +1691,7 @@ describe('回滚模式的重放', () => {
     expect(done.session.replay).toEqual([])
     expect(h.runs).toHaveLength(1)
     expect(last(done).end).toBe('blocked')
-    expect(last(done).notice).toContain('放不进重放日志')
+    expect(last(done).notice).toContain('超出重放日志上限')
     expect(toolMessages(done.messages).at(-1)!.content).toBe('写入放不进重放日志了，没有执行')
 
     // 下一条消息一开始就拦下，不花模型的 token
@@ -1771,9 +1771,9 @@ describe('重放分叉', () => {
   it('内部错误的分叉多半是暂时的：不拦，这一轮的消息留在历史，说接着说下一句，不说再发一次：重打一遍模型看到的是重复的请求', async () => {
     const conversation = await afterDivergence(true)
     expect(last(conversation).inHistory).toBe(true)
-    expect(last(conversation).notice).toContain('可能是暂时的')
-    expect(last(conversation).notice).toContain('可以接着说下一句')
-    expect(last(conversation).notice).not.toContain('可以再发一次')
+    expect(last(conversation).notice).toContain('可能是暂时性错误')
+    expect(last(conversation).notice).toContain('可继续发送下一条')
+    expect(last(conversation).notice).not.toContain('可再次发送')
     expect(blockingDivergence(conversation.session)).toBeNull()
 
     const h = harness({
@@ -1939,8 +1939,8 @@ describe('重放分叉', () => {
     const h = harness({ turns: [reply('不该到这里')], run: diverged(true) })
     const done = await h.send('第二条', conversation)
     expect(last(done).inHistory).toBe(false)
-    expect(last(done).notice).toContain('可以再发一次')
-    expect(last(done).notice).not.toContain('接着说下一句')
+    expect(last(done).notice).toContain('可再次发送')
+    expect(last(done).notice).not.toContain('继续发送下一条')
   })
 
   it('turn.end 时的内部错误分叉：回复已经留在历史，说接着说下一句', async () => {
@@ -1956,15 +1956,15 @@ describe('重放分叉', () => {
     })
     const done = await h.send(USER_TEXT)
     expect(last(done).inHistory).toBe(true)
-    expect(last(done).turnEndNote).toContain('可以接着说下一句')
-    expect(last(done).turnEndNote).not.toContain('可以再发一次')
+    expect(last(done).turnEndNote).toContain('可继续发送下一条')
+    expect(last(done).turnEndNote).not.toContain('可再次发送')
   })
 
   it('数据对不上的分叉：不说接着来，要清空或接受', async () => {
     const conversation = await afterDivergence()
-    expect(last(conversation).notice).not.toContain('可以再发一次')
-    expect(last(conversation).notice).not.toContain('接着说下一句')
-    expect(last(conversation).notice).toContain('可以清空对话，或者接受')
+    expect(last(conversation).notice).not.toContain('可再次发送')
+    expect(last(conversation).notice).not.toContain('继续发送下一条')
+    expect(last(conversation).notice).toContain('可清空对话，或接受并移除此步')
   })
 
   it('prompt.submit 那里就分叉：不请求模型，这条消息不进历史', async () => {
@@ -1992,7 +1992,7 @@ describe('重放分叉', () => {
           : { kind: 'done', result: runResult('rollback', steps.map(defaultStep)) },
     })
     const done = await h.send(USER_TEXT)
-    expect(last(done).turnEndNote).toContain('重放这次对话的写入时')
+    expect(last(done).turnEndNote).toContain('重放当前对话的写入时')
     expect(last(done).turnEnd).toBeNull()
     expect(contents(done.messages)).toEqual([USER_TEXT, '好'])
   })
@@ -2129,10 +2129,10 @@ describe('模型没有文字也没有工具调用', () => {
     const h = harness({ loop: 'tools', turns: [reasoningOnly()] })
     const done = await h.send(USER_TEXT)
     const notice = last(done).notice!
-    expect(notice).toContain('模型没有返回文字')
+    expect(notice).toContain('模型未返回文字')
     expect(notice).toContain('结束原因 length')
     expect(notice).toContain('思考')
-    expect(notice).toContain('可以再发一次')
+    expect(notice).toContain('可再次发送')
     expect(noticeColor(last(done).end)).toBe('warning')
     const round = last(done).rounds[0]!
     expect(round.reasoning).toBe('想了很久')
@@ -2145,7 +2145,7 @@ describe('模型没有文字也没有工具调用', () => {
   it.each([
     ['stop', '结束原因 stop'],
     ['content_filter', '结束原因 content_filter'],
-    [null, '上游没有给结束原因'],
+    [null, '上游未提供结束原因'],
   ])('结束原因是 %s：说出来', async (finishReason, text) => {
     const h = harness({ loop: 'tools', turns: [reasoningOnly({ finishReason })] })
     expect(last(await h.send(USER_TEXT)).notice).toContain(text)
@@ -2164,7 +2164,7 @@ describe('模型没有文字也没有工具调用', () => {
     expect(last(done).end).toBe('empty')
     expect(last(done).inHistory).toBe(true)
     expect(last(done).notice).toContain('结束原因 length')
-    expect(last(done).notice).toContain('留在历史')
+    expect(last(done).notice).toContain('保留在历史')
     expect(last(done).rounds).toHaveLength(2)
     expect(done.session.replay).toHaveLength(1)
 
@@ -2210,7 +2210,7 @@ describe('模型拒绝回答：content 是空的，refusal 有文字', () => {
     const done = await h.send(USER_TEXT)
     expect(last(done).rounds[0]!.refusal).toBe('这个不能帮你')
     expect(last(done).rounds[0]!.text).toBe('')
-    expect(last(done).notice).toBe('模型拒绝了，原因见上面。')
+    expect(last(done).notice).toBe('模型拒绝回答，原因见上方。')
     expect(last(done).end).toBe('empty')
     expect(noticeColor(last(done).end)).toBe('warning')
     expect(last(done).inHistory).toBe(false)
@@ -2242,7 +2242,9 @@ describe('模型拒绝回答：content 是空的，refusal 有文字', () => {
       turns: [reply(null, [toolCall('c1', 'kioku_list')]), refused()],
     })
     const done = await h.send(USER_TEXT)
-    expect(last(done).notice).toBe('模型拒绝了，原因见上面。做过的都留在历史里，可以接着说下一句。')
+    expect(last(done).notice).toBe(
+      '模型拒绝回答，原因见上方。已执行的内容保留在历史中，可继续发送下一条。',
+    )
     expect(last(done).inHistory).toBe(true)
     expect(done.messages.map((m) => m.role)).toEqual(['user', 'assistant', 'tool'])
     expect(last(done).rounds.map((r) => r.refusal)).toEqual([null, '这个不能帮你'])
@@ -2252,7 +2254,7 @@ describe('模型拒绝回答：content 是空的，refusal 有文字', () => {
     const h = harness({ loop: 'chat', context: GROUP, turns: [refused()] })
     const done = await h.send(USER_TEXT)
     expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
-    expect(last(done).turnEndNote).toContain('没有发 turn.end')
+    expect(last(done).turnEndNote).toContain('未发送 turn.end')
   })
 
   it('有文字的回复带着 refusal 字段：正常的回复，进历史，不算拒绝', async () => {
@@ -2285,8 +2287,8 @@ describe('模型拒绝回答：content 是空的，refusal 有文字', () => {
     const h = harness({ loop: 'tools', turns: [reply(null, [], { refusal })] })
     const done = await h.send(USER_TEXT)
     expect(last(done).rounds[0]!.refusal).toBeNull()
-    expect(last(done).notice).toContain('模型没有返回文字')
-    expect(last(done).notice).toContain('可以再发一次')
+    expect(last(done).notice).toContain('模型未返回文字')
+    expect(last(done).notice).toContain('可再次发送')
   })
 })
 
@@ -2319,7 +2321,7 @@ describe('用量', () => {
     }
     expect(roundMeta(round)).toBe(`${MODEL} · 输入 100、输出 20 token · 1.5 秒`)
     expect(roundMeta({ ...round, usage: { promptTokens: 0, completionTokens: 0 } })).toContain(
-      '上游没有给用量',
+      '上游未提供用量',
     )
     expect(roundMeta({ ...round, finishReason: 'length' })).toContain('结束原因 length')
     expect(roundMeta({ ...round, finishReason: 'tool_calls' })).not.toContain('结束原因')
@@ -2395,20 +2397,20 @@ describe('开始之前的提示', () => {
       target({ endpoint: 'https://model.example.com:8443/openai/v1', model: 'deep-x' }),
       'rollback',
     )
-    expect(shown).toContain('会发给 https://model.example.com:8443/openai/v1 上的模型「deep-x」')
+    expect(shown).toContain('将发送给 https://model.example.com:8443/openai/v1 上的模型「deep-x」')
     // 服务端没有给地址时不写半句
     const none = consentText(target({ endpoint: null, model: 'deep-x' }), 'rollback')
-    expect(none).toContain('会发给模型「deep-x」')
+    expect(none).toContain('将发送给模型「deep-x」')
     expect(none).not.toContain('上的模型')
   })
 
   it('说清楚发什么内容：按循环', () => {
-    expect(text('hook')).toContain('启动上下文、召回块与工具结果')
-    expect(text('approximate')).toContain('启动上下文、召回块与工具结果')
-    expect(text('chat')).toContain('启动上下文与召回块')
+    expect(text('hook')).toContain('启动加载、召回块与工具结果')
+    expect(text('approximate')).toContain('启动加载、召回块与工具结果')
+    expect(text('chat')).toContain('启动加载与召回块')
     expect(text('chat')).not.toContain('工具结果')
     expect(text('tools')).toContain('工具结果')
-    expect(text('tools')).not.toContain('启动上下文')
+    expect(text('tools')).not.toContain('启动加载')
   })
 
   it('打码：回滚模式都打码；真实模式下外部凭据源照常返回，要说', () => {
@@ -2568,7 +2570,7 @@ describe('存成场景', () => {
   it('少了几个的说明：有才说', () => {
     expect(droppedNote(0)).toBeNull()
     expect(droppedNote(2)).toContain(`场景最多 ${BENCH_MAX_STEPS} 步`)
-    expect(droppedNote(2)).toContain('后面 2 个没有存')
+    expect(droppedNote(2)).toContain('其余 2 个未保存')
   })
 
   it('跨消息的都算；超过场景的步数上限时留前面的，说明少了几个', async () => {
@@ -2616,7 +2618,7 @@ describe('存成场景', () => {
     if (!made.parsed.ok) throw new Error(made.parsed.errors.join())
     const findings = plaintextIn(made.parsed.scenario)
     expect(findings.map((f) => f.step)).toEqual([1, 2])
-    expect(findings[0]!.what).toContain('secret')
+    expect(findings[0]!.what).toContain('机密')
     expect(findings[1]!.what).toContain('password')
   })
 

@@ -155,7 +155,7 @@ describe('按运行时筛', () => {
   it('不适用的说明原因', () => {
     const only = scenario([{ kind: 'boot' }], { runtimes: ['claudecode', 'codex'] })
     expect(runtimeMismatch(only, 'codex')).toBeNull()
-    expect(runtimeMismatch(only, 'astrbot')).toBe('只适用于 claudecode、codex，这个应用是 astrbot')
+    expect(runtimeMismatch(only, 'astrbot')).toBe('仅适用于 claudecode、codex，当前应用是 astrbot')
   })
 })
 
@@ -194,8 +194,8 @@ describe('导出前检测明文', () => {
       ]),
     )
     expect(findings).toEqual([
-      { step: 1, label: 'kioku_create', what: 'secret 级的正文' },
-      { step: 2, label: 'kioku_update', what: 'secret 级的正文' },
+      { step: 1, label: 'kioku_create', what: '机密级正文' },
+      { step: 2, label: 'kioku_update', what: '机密级正文' },
     ])
   })
 
@@ -223,7 +223,7 @@ describe('导出前检测明文', () => {
   })
 
   describe('按整个场景看：写的时候没带 sensitivity 也可能是 secret', () => {
-    const INFERRED = 'secret 级的正文（这条记忆在别的步骤里是 secret）'
+    const INFERRED = '机密级正文（此记忆在其他步骤中为机密）'
     const stepsIn = (...steps: BenchScenario['steps']) =>
       plaintextIn(scenario(steps)).map((finding) => finding.step)
 
@@ -236,7 +236,7 @@ describe('导出前检测明文', () => {
           ]),
         ),
       ).toEqual([
-        { step: 1, label: 'kioku_create', what: 'secret 级的正文' },
+        { step: 1, label: 'kioku_create', what: '机密级正文' },
         { step: 2, label: 'kioku_update', what: INFERRED },
       ])
     })
@@ -474,7 +474,7 @@ describe('运行结果怎么说', () => {
   it('有失败或没有执行的算失败，四个数都列出来', () => {
     expect(runSummary(result({ passed: 1, failed: 2, skipped: 3, notRun: 4 }), 'judged')).toEqual({
       color: 'error',
-      title: '有失败：通过 1，失败 2，跳过 3，没有执行 4',
+      title: '有失败：通过 1，失败 2，跳过 3，未执行 4',
     })
     expect(runSummary(result({ passed: 1, notRun: 1 }), 'judged').color).toBe('error')
   })
@@ -496,7 +496,7 @@ describe('运行结果怎么说', () => {
       'probe',
     )
     expect(summary.color).toBe('warning')
-    expect(summary.title).toContain('没有执行 1 步')
+    expect(summary.title).toContain('未执行 1 步')
     expect(summary.title).toContain('内部错误 1 步')
   })
 
@@ -521,11 +521,11 @@ describe('运行结果怎么说', () => {
     const titleOf = (...steps: BenchStepResult[]) =>
       runSummary(result({ failed: steps.length }, { steps }), 'probe')
 
-    it('依赖的变量没有取到：计入「没有执行」，和徽章说的一样', () => {
+    it('依赖的变量没有取到：计入「未执行」，和徽章说的一样', () => {
       const summary = titleOf(unsent)
       expect(summary.color).toBe('warning')
-      expect(summary.title).toContain('没有执行 1 步')
-      expect(stepBadge(unsent, 'probe').label).toBe('没有执行')
+      expect(summary.title).toContain('未执行 1 步')
+      expect(stepBadge(unsent, 'probe').label).toBe('未执行')
       expect(notExecuted(unsent)).toBe(true)
     })
 
@@ -537,14 +537,14 @@ describe('运行结果怎么说', () => {
         ),
         'probe',
       )
-      expect(summary.title).toContain('没有执行 2 步')
+      expect(summary.title).toContain('未执行 2 步')
     })
 
     it('工具没报错、capture 没取到：说出来', () => {
       const summary = titleOf(uncaptured)
       expect(summary.color).toBe('warning')
-      expect(summary.title).toContain('capture 没取到 1 步')
-      expect(summary.title).not.toContain('没有执行')
+      expect(summary.title).toContain('capture 未取到 1 步')
+      expect(summary.title).not.toContain('未执行')
     })
 
     it('工具报错（被拒绝）是正常的结果：不算', () => {
@@ -564,7 +564,7 @@ describe('运行结果怎么说', () => {
     it('内部错误不重复算成没有执行', () => {
       const summary = titleOf(step({ status: 'failed', internalError: true, raw: null }))
       expect(summary.title).toContain('内部错误 1 步')
-      expect(summary.title).not.toContain('没有执行')
+      expect(summary.title).not.toContain('未执行')
     })
 
     it('默认打开，看得到原因', () => {
@@ -607,7 +607,7 @@ describe('运行结果怎么说', () => {
       expect(shownAssertions(refused, 'call')).toEqual(refused.assertions)
     })
 
-    it('摘要里的「没有执行」和徽章对得上', () => {
+    it('摘要里的「未执行」和徽章对得上', () => {
       const steps = [
         unsent,
         uncaptured,
@@ -618,7 +618,7 @@ describe('运行结果怎么说', () => {
         step({ status: 'failed', internalError: true, raw: null }),
       ]
       for (const s of steps) {
-        expect(notExecuted(s)).toBe(stepBadge(s, 'probe').label === '没有执行')
+        expect(notExecuted(s)).toBe(stepBadge(s, 'probe').label === '未执行')
       }
     })
   })
@@ -633,7 +633,7 @@ describe('运行结果怎么说', () => {
     )
     expect(summary).toEqual({
       color: 'error',
-      title: '重放的第 1 步报错，这次的步骤都没有执行',
+      title: '重放的第 1 步报错，本次步骤均未执行',
     })
   })
 

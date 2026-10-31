@@ -38,7 +38,7 @@ export function parseScenario(text: string): ParsedScenario {
     .slice(0, MAX_ERRORS)
     .map((issue) => `${issuePath(issue.path)}：${issue.message}`)
   const more = parsed.error.issues.length - errors.length
-  return { ok: false, errors: more > 0 ? [...errors, `还有 ${more} 处，先改上面这些`] : errors }
+  return { ok: false, errors: more > 0 ? [...errors, `还有 ${more} 处，请先修改以上各项`] : errors }
 }
 
 export const formatScenario = (scenario: BenchScenario) => JSON.stringify(scenario, null, 2)
@@ -51,7 +51,7 @@ export const scenarioEdited = (text: string, loaded: string) =>
 export function runtimeMismatch(scenario: BenchScenario, runtime: string): string | null {
   const { runtimes } = scenario
   if (!runtimes || runtimes.includes(runtime)) return null
-  return `只适用于 ${runtimes.join('、')}，这个应用是 ${runtime}`
+  return `仅适用于 ${runtimes.join('、')}，当前应用是 ${runtime}`
 }
 
 // 场景里的明文：只看输入，服务端的打码管不到这里。导出的文件是拿来回归的，容易被提交进仓库
@@ -117,9 +117,9 @@ function plaintextOf(step: BenchStep, isSecret: (uri: string) => boolean): strin
     return names.length ? `凭据的值（字段 ${names.join('、')}）` : null
   }
   if (!writesMemory(step.tool) || args.content === undefined) return null
-  if (secretLevel(args.sensitivity)) return 'secret 级的正文'
+  if (secretLevel(args.sensitivity)) return '机密级正文'
   return typeof args.uri === 'string' && isSecret(args.uri)
-    ? 'secret 级的正文（这条记忆在别的步骤里是 secret）'
+    ? '机密级正文（此记忆在其他步骤中为机密）'
     : null
 }
 
@@ -178,7 +178,7 @@ export function runSummary(result: BenchRunResult, view: StepView): RunSummary {
   if (result.replayDiverged) {
     return {
       color: 'error',
-      title: `重放的第 ${result.replayDiverged.index + 1} 步报错，这次的步骤都没有执行`,
+      title: `重放的第 ${result.replayDiverged.index + 1} 步报错，本次步骤均未执行`,
     }
   }
   if (view === 'probe') {
@@ -190,23 +190,23 @@ export function runSummary(result: BenchRunResult, view: StepView): RunSummary {
     const notes = [
       `共 ${result.steps.length} 步`,
       ...(skipped ? [`跳过 ${skipped} 步`] : []),
-      ...(unsent ? [`没有执行 ${unsent} 步`] : []),
-      ...(uncaptured ? [`capture 没取到 ${uncaptured} 步`] : []),
+      ...(unsent ? [`未执行 ${unsent} 步`] : []),
+      ...(uncaptured ? [`capture 未取到 ${uncaptured} 步`] : []),
       ...(internal ? [`内部错误 ${internal} 步`] : []),
     ]
     return {
       color: unsent || uncaptured || internal ? 'warning' : 'neutral',
-      title: `只列结果，不判通过与失败：每把 Key 的正确结果都不同。${notes.join('，')}`,
+      title: `只列结果，不判通过与失败：每个 Key 的正确结果不同。${notes.join('，')}`,
     }
   }
   if (!result.ok) {
     return {
       color: 'error',
-      title: `有失败：通过 ${passed}，失败 ${failed}，跳过 ${skipped}，没有执行 ${notRun}`,
+      title: `有失败：通过 ${passed}，失败 ${failed}，跳过 ${skipped}，未执行 ${notRun}`,
     }
   }
   if (!passed && skipped) {
-    return { color: 'neutral', title: `全部跳过（${skipped} 步）：这把 Key 不满足这个场景要的权限` }
+    return { color: 'neutral', title: `全部跳过（${skipped} 步）：当前 Key 不满足此场景所需的权限` }
   }
   return {
     color: 'success',

@@ -25,6 +25,7 @@ import { icons } from '../icons'
 import { scopesSummary } from '../labels'
 import BenchAgentBusy from './BenchAgentBusy.vue'
 import BenchStepView from './BenchStepView.vue'
+import Hint from './Hint.vue'
 
 // 场景：一串步骤。选预设或导入 JSON，在文本框里编辑，运行，看断言结果。不存库，只在内存里：
 // 里面可能有明文，不进浏览器存储
@@ -81,7 +82,7 @@ function edit(next: string) {
 }
 
 function replaceText(next: string): boolean {
-  if (edited.value && !window.confirm('文本框里改过的内容会被换掉，继续吗？')) return false
+  if (edited.value && !window.confirm('替换文本框中已修改的内容？修改将丢失。')) return false
   setText(next)
   loaded.value = next
   return true
@@ -108,7 +109,7 @@ async function onFile(event: Event) {
   try {
     content = await file.text()
   } catch {
-    errors.value = ['读不出这个文件']
+    errors.value = ['无法读取此文件']
     return
   }
   const parsed = parseScenario(content)
@@ -195,10 +196,16 @@ function startRun() {
 <template>
   <div class="space-y-4 text-sm">
     <p v-if="real" class="text-xs text-muted">
-      场景是一串步骤，步骤自己带会话上下文，页面上的不起作用。步骤各自真实执行，读得到已经落库的写入，结果不进调用台的时间线。
+      场景是一串步骤，步骤各自真实执行。
+      <Hint>
+        步骤自带会话上下文，页面上的不生效。步骤可读取已落库的写入，结果不进入调用台的时间线。
+      </Hint>
     </p>
     <p v-else class="text-xs text-muted">
-      场景是一串步骤，步骤自己带会话上下文，页面上的不起作用。它单独一个事务：不带调用台这次会话的写入，结果也不进那里的时间线。
+      场景是一串步骤，在单独的事务中运行。
+      <Hint>
+        步骤自带会话上下文，页面上的不生效。不带调用台当前会话的写入，结果也不进入其时间线。
+      </Hint>
     </p>
     <UAlert
       v-if="presets.isError.value && !presets.data.value"
@@ -214,7 +221,7 @@ function startRun() {
           :model-value="presetId"
           :items="presetItems"
           :loading="presets.isPending.value"
-          placeholder="选一个预设"
+          placeholder="选择预设"
           aria-label="预设"
           class="w-full"
           @update:model-value="(v) => pickPreset(String(v))"
@@ -248,7 +255,7 @@ function startRun() {
     </div>
     <p v-if="preset?.description" class="text-xs text-muted">{{ preset.description }}</p>
     <details v-if="unusable.length" class="text-xs text-muted">
-      <summary class="cursor-pointer">不适用于这个应用的预设（{{ unusable.length }}）</summary>
+      <summary class="cursor-pointer">不适用于当前应用的预设（{{ unusable.length }}）</summary>
       <ul class="mt-1 space-y-1">
         <li v-for="c in unusable" :key="c.scenario.id">{{ c.scenario.title }}：{{ c.reason }}</li>
       </ul>
@@ -258,7 +265,7 @@ function startRun() {
       <UTextarea
         :model-value="text"
         :rows="14"
-        placeholder="选一个预设，或者导入、粘贴 JSON"
+        placeholder="选择预设，或导入、粘贴 JSON"
         aria-label="场景 JSON"
         class="w-full font-mono"
         @update:model-value="(v) => edit(String(v))"
@@ -268,7 +275,7 @@ function startRun() {
       v-if="mismatch"
       color="warning"
       variant="subtle"
-      :title="`这个场景${mismatch}：结果可能不说明问题`"
+      :title="`此场景${mismatch}，结果可能没有参考价值`"
     />
     <UAlert v-if="errors.length" color="error" variant="subtle" title="场景不合法">
       <template #description>
@@ -286,7 +293,7 @@ function startRun() {
       :disabled="!text.trim() || running"
       @click="startRun"
     >
-      {{ real ? '真实执行这个场景' : '运行' }}
+      {{ real ? '真实执行此场景' : '运行' }}
     </UButton>
 
     <section v-if="outcome && summary" class="space-y-2">
@@ -308,7 +315,7 @@ function startRun() {
 
     <UModal
       :open="confirming !== null"
-      title="在真实模式下运行这个场景？"
+      title="在真实模式下运行此场景？"
       @update:open="(v) => !v && (confirming = null)"
     >
       <template #body>
@@ -316,7 +323,7 @@ function startRun() {
           <p>
             「{{ confirming?.title }}」共 {{ confirming?.steps.length }} 步，其中
             {{ confirming ? writingSteps(confirming) : 0 }}
-            步可能写库。步骤各自真实执行，中途失败或断开时已经写下的不会撤回：
+            步可能写入数据库。步骤各自真实执行，中途失败或断开时，已写入的内容不会撤回：
           </p>
           <ul class="list-disc space-y-1 pl-5">
             <li v-for="line in REAL_MODE_CONSEQUENCES" :key="line">{{ line }}</li>
@@ -333,18 +340,18 @@ function startRun() {
 
     <UModal
       :open="exporting !== null"
-      title="这个场景里有明文"
+      title="导出含明文的场景？"
       @update:open="(v) => !v && (exporting = null)"
     >
       <template #body>
         <div class="space-y-2 text-sm">
-          <p>导出的文件里会有这些内容的原文。打码只管服务端返回的结果，管不到场景本身：</p>
+          <p>导出文件将包含以下内容的原文。打码仅作用于服务端返回的结果，不覆盖场景本身：</p>
           <ul class="list-disc space-y-1 pl-5">
             <li v-for="finding in exporting?.findings ?? []" :key="finding.step">
               第 {{ finding.step }} 步「{{ finding.label }}」：{{ finding.what }}
             </li>
           </ul>
-          <p>不要把它提交进仓库或发给别人。要去掉的话，先在文本框里改掉这些步骤。</p>
+          <p>请勿提交到仓库或发送给他人。如需去除，请先在文本框中修改这些步骤。</p>
         </div>
       </template>
       <template #footer>

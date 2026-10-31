@@ -81,19 +81,19 @@ describe('选中的调用不在目录里', () => {
 
   it('目录还在读取：说明，不能运行', () => {
     expect(targetUnavailable(get, noTools, 'pending')).toBe(
-      '工具目录还在读取，读到之前不能运行 kioku_get。',
+      '工具目录读取中，完成前无法运行 kioku_get。',
     )
   })
 
   it('目录读取失败：说明，不能运行', () => {
     expect(targetUnavailable(get, noTools, 'failed')).toBe(
-      '工具目录读取失败，读到之前不能运行 kioku_get。',
+      '工具目录读取失败，成功读取前无法运行 kioku_get。',
     )
   })
 
   it('这把 Key 没有这个工具：说明，不能运行', () => {
     expect(targetUnavailable(get, [start], 'ready')).toBe(
-      '这把 Key 的工具目录里没有 kioku_get，不能运行：换一个调用。',
+      '当前 Key 的工具目录中没有 kioku_get，无法运行。请选择其他调用。',
     )
   })
 })
@@ -287,7 +287,7 @@ describe('表单与 JSON 来回切换', () => {
     const draft = { ...newDraft(update), json: true, text: '{"uri":"a://b","extra":1}' }
     const refused = formFromJson(update, draft, undefined)
     expect(refused.ok).toBe(false)
-    expect(!refused.ok && refused.error).toContain('表单放不下')
+    expect(!refused.ok && refused.error).toContain('无法转为表单')
     expect(!refused.ok && refused.error).not.toContain('context')
     expect(formFromJson(update, { ...draft, text: '{oops' }, undefined)).toEqual({
       ok: false,
@@ -420,7 +420,7 @@ describe('发出去的步骤', () => {
     const draft = { ...newDraft(target), json: true, text: '[1]' }
     expect(buildStep(target, draft, undefined)).toEqual({
       ok: false,
-      error: '工具的参数要是一个 JSON 对象',
+      error: '工具参数必须是 JSON 对象',
     })
     expect(buildStep(target, { ...draft, text: '{oops' }, undefined)).toEqual({
       ok: false,

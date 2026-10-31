@@ -6,6 +6,7 @@ import { computed, nextTick, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
+  AGENT_LOOP_DETAILS,
   AGENT_LOOP_NOTES,
   AGENT_UNAVAILABLE_NOTES,
   agentScenario,
@@ -25,6 +26,7 @@ import { saveFile } from '../download'
 import { icons } from '../icons'
 import BenchAgentExchange from './BenchAgentExchange.vue'
 import BenchContextForm from './BenchContextForm.vue'
+import Hint from './Hint.vue'
 
 // 模型对话：用实例设置里抽取模型的接口与 Key，让模型自己决定调哪个工具。循环由浏览器驱动（benchAgent.ts），
 // 对话不存服务端、不进浏览器存储，状态在 useBench 里，换应用、Key、模式时清掉
@@ -57,7 +59,7 @@ const info = useQuery({
 const infoError = computed(() => {
   if (!info.isError.value || info.data.value) return null
   const err = info.error.value
-  return `读取模型代理的情况失败：${err instanceof ApiError ? err.message : NOT_API_FAILURE}`
+  return `读取模型代理状态失败：${err instanceof ApiError ? err.message : NOT_API_FAILURE}`
 })
 const retryInfo = computed(() => [
   {
@@ -104,7 +106,7 @@ const consent = computed<AgentConsent | null>(() =>
 const needsConsent = computed(() => !consent.value || consentNeeded(agent.value, consent.value))
 const consentActions = computed(() => [
   {
-    label: `发给 ${model.value}，开始对话`,
+    label: `发送至 ${model.value}，开始对话`,
     color: 'warning' as const,
     variant: 'subtle' as const,
     onClick: () => consent.value && consentTo(consent.value),
@@ -113,11 +115,11 @@ const consentActions = computed(() => [
 
 const blocker = computed(() => runBlocker(agent.value.session, mode.value))
 // 不说再运行一次：这条消息可能已经留在历史里，用户重打一遍的话模型看到的就是重复的请求
-const diverged = computed(() => divergenceNotice(agent.value.session, '可以接着发下一条'))
+const diverged = computed(() => divergenceNotice(agent.value.session, '可继续发送下一条'))
 // 运行期间不能接受或清空：结果回来时，第几步与这次的写入都是按发出请求时的日志算的
 const divergedActions = computed(() => [
   {
-    label: '接受：去掉这一步',
+    label: '接受并移除此步',
     color: 'neutral' as const,
     variant: 'subtle' as const,
     disabled: running.value,
@@ -188,7 +190,7 @@ function startExport() {
   const made = agentScenario(agent.value, new Date())
   if (!made) return
   if (!made.parsed.ok) {
-    exportNote.value = `存不成场景：${made.parsed.errors.join('；')}`
+    exportNote.value = `无法存为场景：${made.parsed.errors.join('；')}`
     return
   }
   const { scenario } = made.parsed
@@ -239,13 +241,15 @@ watch(generation, () => {
     <template v-if="available && loop">
       <p class="text-xs" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
         {{ AGENT_LOOP_NOTES[loop] }}
+        <Hint>{{ AGENT_LOOP_DETAILS[loop] }}</Hint>
       </p>
       <p v-if="real" class="text-xs text-error">
-        真实模式：模型调的写工具是真的写入，不会回滚。每一轮的下面有运行标记，到活动里对得上。
+        真实模式：模型调用写工具会真实写入，不会回滚。
+        <Hint>每一轮下方显示运行标记，可在变更记录中对应这些写入。</Hint>
       </p>
       <BenchContextForm v-if="loop !== 'tools'" />
       <div class="grid gap-3 sm:grid-cols-3">
-        <UFormField label="模型" help="接口与 Key 用实例设置里的抽取模型，这里只换模型名">
+        <UFormField label="模型" help="接口与 Key 沿用实例设置的抽取模型，此处仅改模型名">
           <UInput
             :model-value="modelText"
             :placeholder="defaultModel"
@@ -259,7 +263,9 @@ watch(generation, () => {
           class="sm:col-span-2"
           label="系统提示"
           :help="
-            loop === 'tools' ? '这种运行时没有 session.start' : 'session.start 的结果接在后面发出去'
+            loop === 'tools'
+              ? '此运行时没有 session.start'
+              : 'session.start 的结果追加在后面一并发送'
           "
         >
           <UTextarea
@@ -293,7 +299,7 @@ watch(generation, () => {
         color="warning"
         variant="subtle"
         class="wrap-anywhere"
-        title="开始之前"
+        title="发送前确认"
         :description="consentText(consent, mode)"
         :actions="consentActions"
       />
@@ -321,9 +327,9 @@ watch(generation, () => {
         autoresize
         :maxrows="8"
         :placeholder="
-          real ? '要对模型说的话（只有点按钮才发）' : '要对模型说的话（⌘ 或 Ctrl + 回车发送）'
+          real ? '发给模型的消息（仅点击按钮发送）' : '发给模型的消息（⌘ 或 Ctrl + 回车发送）'
         "
-        aria-label="要对模型说的话"
+        aria-label="发给模型的消息"
         class="w-full"
         @keydown="onKeydown"
       />
@@ -355,7 +361,7 @@ watch(generation, () => {
           :disabled="running || !hasCalls"
           @click="startExport"
         >
-          存成场景
+          存为场景
         </UButton>
         <UButton
           :icon="icons.clear"
@@ -373,12 +379,12 @@ watch(generation, () => {
 
     <UModal
       :open="confirmingClear"
-      title="清空这段对话？"
+      title="清空此对话？"
       @update:open="(v) => !v && (confirmingClear = false)"
     >
       <template #body>
         <p class="text-sm">
-          这段对话在真实模式下可能已经写库，已经写下的不会撤回。清空之后工具结果和运行标记都看不到了：运行标记是活动里对应这些写入的唯一线索，要留的话先记下来。
+          此对话在真实模式下可能已写入数据库，已写入的内容不会撤回。清空后，工具结果和运行标记不再显示：运行标记是在变更记录中对应这些写入的唯一线索，如需保留请先记下。
         </p>
       </template>
       <template #footer>
@@ -391,18 +397,18 @@ watch(generation, () => {
 
     <UModal
       :open="exporting !== null"
-      title="这些工具调用里有明文"
+      title="导出含明文的工具调用？"
       @update:open="(v) => !v && (exporting = null)"
     >
       <template #body>
         <div class="space-y-2 text-sm">
-          <p>导出的文件里会有这些内容的原文。打码只管服务端返回的结果，管不到模型写的参数：</p>
+          <p>导出文件将包含以下内容的原文。打码仅作用于服务端返回的结果，不覆盖模型写入的参数：</p>
           <ul class="list-disc space-y-1 pl-5">
             <li v-for="finding in exporting?.findings ?? []" :key="finding.step">
               第 {{ finding.step }} 步「{{ finding.label }}」：{{ finding.what }}
             </li>
           </ul>
-          <p>不要把它提交进仓库或发给别人。</p>
+          <p>请勿提交到仓库或发送给他人。</p>
         </div>
       </template>
       <template #footer>
