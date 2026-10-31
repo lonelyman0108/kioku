@@ -51,10 +51,15 @@ describe('图标', () => {
     expect(read('../../public/favicon.svg')).toContain('prefers-color-scheme:dark')
   })
 
-  it('字形来源登记在 NOTICE 里', () => {
+  it('字形来源登记在 NOTICE 里：字形轮廓算字体的一部分，版权声明和 OFL 全文都要带上', () => {
     const notice = read('../../../../NOTICE')
     expect(notice).toContain('Shippori Mincho')
-    expect(notice).toContain('Copyright 2021 The Shippori Mincho Project Authors')
-    expect(notice).toContain('SIL Open Font License')
+    expect(notice).toContain(
+      'Copyright 2021 The Shippori Mincho Project Authors (https://github.com/fontdasu/ShipporiMincho)',
+    )
+    expect(notice).toContain('SIL OPEN FONT LICENSE Version 1.1 - 26 February 2007')
+    expect(notice).toContain('PERMISSION & CONDITIONS')
+    expect(notice).toContain('2) Original or Modified Versions of the Font Software may be bundled')
+    expect(notice.trimEnd().endsWith('OTHER DEALINGS IN THE FONT SOFTWARE.')).toBe(true)
   })
 })
