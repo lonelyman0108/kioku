@@ -3,8 +3,11 @@ import { SENSITIVITIES, type Sensitivity } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { layerLabels, sensitivityLabels } from '../../labels'
+import AccessLegend from './AccessLegend.vue'
 import StrataSwatch from './StrataSwatch.vue'
 import {
+  ACCESS_BAR_PERCENT,
+  accessFill,
   accessKind,
   accessKindLabels,
   deepestColumn,
@@ -12,8 +15,8 @@ import {
   layerHints,
   orderRows,
   paintAccess,
+  presentKinds,
   sensitivityHints,
-  type AccessKind,
   type AccessRow,
 } from './strata'
 
@@ -30,26 +33,7 @@ const cellOf = (row: AccessRow, sensitivity: Sensitivity) => {
   return cell ? accessKind(row.layer, cell) : 'none'
 }
 const FULL = { x: 0, y: 0, width: '100%', height: '100%' }
-// 只占文字下面的空白，文字不压在条上
-const BAR = { y: '84%', height: '16%' }
-
-// 图例只列这份矩阵里出现的
-const LEGEND_ORDER: AccessKind[] = [
-  'read-write',
-  'read-extract',
-  'read',
-  'explicit-write',
-  'explicit-extract',
-  'explicit',
-  'write',
-  'extract',
-  'none',
-]
-const legendKinds = computed(() => {
-  const present = new Set<AccessKind>(['read-write', 'read', 'none'])
-  for (const row of props.rows) for (const s of SENSITIVITIES) present.add(cellOf(row, s))
-  return LEGEND_ORDER.filter((kind) => present.has(kind))
-})
+const legendKinds = computed(() => presentKinds(props.rows))
 </script>
 
 <template>
@@ -86,13 +70,20 @@ const legendKinds = computed(() => {
               :key="s"
               class="c"
               :class="[cellOf(row, s), { edge: i === deepest }]"
-              :style="{ '--c': `var(--layer-${row.layer})` }"
+              :style="{ '--c': accessFill(row.layer) }"
               :title="`${layerLabels[row.layer]} ${sensitivityLabels[s]}：${accessKindLabels[cellOf(row, s)]}`"
             >
               <template v-if="cellOf(row, s) !== 'none'">
                 <svg width="100%" height="100%" aria-hidden="true">
                   <rect
-                    v-for="(r, k) in paintAccess(row.layer, s, cellOf(row, s), FULL, BAR, 'lg')"
+                    v-for="(r, k) in paintAccess(
+                      row.layer,
+                      s,
+                      cellOf(row, s),
+                      FULL,
+                      ACCESS_BAR_PERCENT,
+                      'lg',
+                    )"
                     :key="k"
                     :x="r.x"
                     :y="r.y"
@@ -110,37 +101,7 @@ const legendKinds = computed(() => {
         </tbody>
       </table>
     </div>
-    <ul v-if="legend" class="mx-legend">
-      <li v-for="kind in legendKinds" :key="kind">
-        <svg width="26" height="16" viewBox="0 0 26 16" aria-hidden="true">
-          <rect
-            v-for="(r, k) in paintAccess(
-              'private',
-              'public',
-              kind,
-              { x: 0, y: 0, width: 26, height: 16 },
-              { y: 11, height: 5 },
-              'sm',
-            )"
-            :key="k"
-            :x="r.x"
-            :y="r.y"
-            :width="r.width"
-            :height="r.height"
-            :style="{ fill: r.fill }"
-          />
-          <rect
-            x="0.5"
-            y="0.5"
-            width="25"
-            height="15"
-            fill="none"
-            style="stroke: var(--strata-frame)"
-          />
-        </svg>
-        <span>{{ accessKindLabels[kind] }}</span>
-      </li>
-    </ul>
+    <AccessLegend v-if="legend" class="mx-legend" :kinds="legendKinds" />
   </div>
 </template>
 
@@ -154,24 +115,30 @@ const legendKinds = computed(() => {
 .mx-scroll {
   flex: 1 1 28rem;
   min-width: 0;
+  /* 边界线和合并的边框压出去 1px，不留这一点放得下时也会出滚动条 */
+  padding-right: 1px;
   overflow-x: auto;
 }
+/* 自动布局加百分比列：放得下时四列等宽，放不下时文字不折行，表格撑开，由外层横向滚动 */
 .mx {
   width: 100%;
-  min-width: 20rem;
-  table-layout: fixed;
+  table-layout: auto;
   border-collapse: collapse;
 }
 .mx thead th {
   position: relative;
+  width: 23%;
   height: 40px;
   padding: 0 0 5px 8px;
   font-weight: 400;
   text-align: left;
   vertical-align: bottom;
+  white-space: nowrap;
 }
 .mx thead th:first-child {
-  width: 78px;
+  width: 8%;
+  min-width: 78px;
+  padding-left: 0;
 }
 .mx-key {
   display: inline-flex;
@@ -183,7 +150,7 @@ const legendKinds = computed(() => {
 }
 .mx-limit {
   float: right;
-  margin-right: 8px;
+  margin: 0 8px 0 10px;
   font-size: 12px;
   line-height: 1.3;
   font-weight: 500;
@@ -200,11 +167,12 @@ const legendKinds = computed(() => {
 .c {
   position: relative;
   height: 36px;
-  /* 文字上下留的空白放得下下沿的条；列窄时文字折行，不压到旁边的格子上 */
-  padding: 7px 0 7px 8px;
+  /* 下沿的条占两成高，文字留在它上面 */
+  padding: 0 8px;
   border: 1px solid var(--ui-border);
   font-size: 13px;
   line-height: 1;
+  white-space: nowrap;
 }
 .c svg {
   position: absolute;
@@ -252,28 +220,44 @@ const legendKinds = computed(() => {
 .mx .conv th {
   color: var(--ui-text-muted);
 }
-.mx-legend {
+.strata-matrix .mx-legend {
   flex: none;
-  display: flex;
   flex-direction: column;
-  gap: 6px;
+  flex-wrap: nowrap;
   padding-top: 44px;
 }
-.mx-legend li {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  font-size: 12px;
-  line-height: 1.5;
-  color: var(--ui-text-muted);
-  white-space: nowrap;
-}
 @media (max-width: 900px) {
-  .mx-legend {
+  .mx thead th {
+    height: 46px;
+    padding-left: 4px;
+  }
+  .mx thead th:first-child {
+    min-width: 50px;
+  }
+  .mx-key {
+    flex-direction: column;
+    align-items: flex-start;
+    gap: 2px;
+  }
+  .mx-limit {
+    display: none;
+  }
+  .mx tbody th {
+    padding-right: 4px;
+    font-size: 12px;
+  }
+  .c {
+    padding: 0 4px;
+    font-size: 12px;
+  }
+  .c-label {
+    margin-left: 0;
+    padding: 2px;
+  }
+  .strata-matrix .mx-legend {
     flex: 1 1 100%;
     flex-direction: row;
     flex-wrap: wrap;
-    gap: 6px 12px;
     padding-top: 0;
   }
 }

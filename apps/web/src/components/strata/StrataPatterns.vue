@@ -1,10 +1,14 @@
 <script setup lang="ts">
-import { TEXTURES } from './strata'
+import { LAYERS } from '@kioku/contracts'
+
+import { DASHES, TEXTURES, accessFill, dashId, type TextureScale } from './strata'
+
+const SCALES: TextureScale[] = ['lg', 'sm']
 </script>
 
 <template>
   <!--
-    全站唯一一套纹理：内部圆点、私密斜线，再加一种纸色的缺口，把权限格子下沿的条挖成虚线。
+    全站唯一一套纹理：内部圆点、私密斜线，再加权限格子下沿的虚线条（每层一种颜色，缺口是透明的）。
     lg 用在大图形，sm 用在小色块。
     颜色走 CSS 变量，主题切换时跟着变。外壳里挂一次；不能 display: none，否则有的浏览器引用不到
   -->
@@ -36,12 +40,18 @@ import { TEXTURES } from './strata'
       >
         <rect class="strata-texture" width="1.05" height="3.4" />
       </pattern>
-      <pattern :id="TEXTURES.gaps.lg" width="10" height="10" patternUnits="userSpaceOnUse">
-        <rect class="strata-gap" x="6" width="4" height="10" />
-      </pattern>
-      <pattern :id="TEXTURES.gaps.sm" width="4" height="4" patternUnits="userSpaceOnUse">
-        <rect class="strata-gap" x="2" width="2" height="4" />
-      </pattern>
+      <template v-for="layer in LAYERS" :key="layer">
+        <pattern
+          v-for="scale in SCALES"
+          :id="dashId(layer, scale)"
+          :key="scale"
+          :width="DASHES[scale].on + DASHES[scale].off"
+          height="10"
+          patternUnits="userSpaceOnUse"
+        >
+          <rect :width="DASHES[scale].on" height="10" :style="{ fill: accessFill(layer) }" />
+        </pattern>
+      </template>
     </defs>
   </svg>
 </template>
@@ -53,8 +63,5 @@ import { TEXTURES } from './strata'
 }
 .strata-texture {
   fill: var(--strata-texture);
-}
-.strata-gap {
-  fill: var(--ui-bg);
 }
 </style>

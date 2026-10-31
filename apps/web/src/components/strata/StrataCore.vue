@@ -1,10 +1,11 @@
 <script setup lang="ts">
-import type { KeyScopes } from '@kioku/contracts'
+import type { KeyScopes, Layer, Sensitivity } from '@kioku/contracts'
 import { computed } from 'vue'
 
-import { scopesSummary } from '../../labels'
 import {
   coreCells,
+  coreMark,
+  coreName,
   isConversationLayer,
   issuedScopeRows,
   paintAccess,
@@ -13,8 +14,8 @@ import {
 } from './strata'
 
 // 岩芯：一个 Key 碰得到多深。纵向是层，顺序和地层柱一样；横向是敏感级，越往右越敏感。
-// 能碰到的格子上色，一眼看出范围。传 scopes 看签发范围（不是实际权限，见 issuedScopeRows），
-// 传 rows 看服务端算出的某个会话上下文下的实际范围
+// 能碰到的格子上色，一眼看出范围。传 rows 看服务端算出的实际范围，只传 scopes 看签发范围
+// （不是实际权限，见 issuedScopeRows）。两个都没有时只留虚线框，不能当成没有权限
 const props = withDefaults(
   defineProps<{
     scopes?: KeyScopes | null
@@ -25,7 +26,10 @@ const props = withDefaults(
     height?: number
     // 已吊销：只留虚线框，一格都不上色
     revoked?: boolean
+    // 这根岩芯是谁的，读屏和悬停时读出来
     label?: string
+    // 标出一条记忆的位置；不知道敏感级时标整层
+    mark?: { layer: Layer; sensitivity: Sensitivity | null } | null
   }>(),
   {
     scopes: null,
@@ -35,6 +39,7 @@ const props = withDefaults(
     height: 72,
     revoked: false,
     label: undefined,
+    mark: null,
   },
 )
 
@@ -58,18 +63,18 @@ const groups = computed(() =>
     return { conversation, bands, top, bottom }
   }),
 )
-const name = computed(() => {
-  if (props.revoked) return props.label ? `${props.label}，已吊销，没有权限` : '已吊销，没有权限'
-  if (props.label) return props.label
-  return props.scopes && !props.rows
-    ? `签发范围：${scopesSummary(props.scopes)}`
-    : '当前会话上下文的权限范围'
-})
+const name = computed(() =>
+  coreName({ label: props.label, rows: props.rows, scopes: props.scopes, revoked: props.revoked }),
+)
+const noData = computed(() => !props.rows && !props.scopes)
+const markBox = computed(() =>
+  props.mark ? coreMark(model.value, props.mark.layer, props.mark.sensitivity) : null,
+)
 </script>
 
 <template>
   <svg
-    class="strata-core"
+    class="strata-core block shrink-0"
     :width="width"
     :height="height"
     :viewBox="`0 0 ${width} ${height}`"
@@ -138,9 +143,22 @@ const name = computed(() => {
         :width="width - 1"
         :height="Math.max(0, group.bottom - group.top - 1)"
         fill="none"
-        :stroke-dasharray="group.conversation || revoked ? '3 2' : undefined"
-        :style="{ stroke: revoked ? 'var(--ui-border-accented)' : 'var(--strata-frame)' }"
+        :stroke-dasharray="group.conversation || revoked || noData ? '3 2' : undefined"
+        :style="{
+          stroke: revoked || noData ? 'var(--ui-border-accented)' : 'var(--strata-frame)',
+        }"
       />
     </template>
+    <rect
+      v-if="markBox"
+      class="core-mark"
+      :x="markBox.x"
+      :y="markBox.y"
+      :width="markBox.width"
+      :height="markBox.height"
+      fill="none"
+      stroke-width="2"
+      style="stroke: var(--ui-error)"
+    />
   </svg>
 </template>
