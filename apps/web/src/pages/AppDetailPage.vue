@@ -11,6 +11,7 @@ import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
 import AppRecallEvents from '../components/AppRecallEvents.vue'
 import AppSimulator from '../components/AppSimulator.vue'
+import Hint from '../components/Hint.vue'
 import { forgetApp, refreshAppCaches } from '../appQueries'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
@@ -121,7 +122,7 @@ async function transfer() {
   const id = appId.value
   transferringId.value = id
   try {
-    const done = await update({ ownerAccountId: transferTo.value }, '已转移，原来的 Key 都已吊销')
+    const done = await update({ ownerAccountId: transferTo.value }, '已转移，原有 Key 已全部吊销')
     if (done && stillOn(sid, id)) {
       confirmingTransfer.value = false
       transferTo.value = undefined
@@ -187,23 +188,18 @@ watch([spaceId, appId], () => {
         variant="subtle"
         :title="apps.error.value instanceof ApiError ? apps.error.value.message : '读取失败'"
       />
-      <UAlert
-        v-else-if="!app"
-        color="neutral"
-        variant="subtle"
-        title="应用不存在，可能已经被删除。"
-      />
+      <UAlert v-else-if="!app" color="neutral" variant="subtle" title="应用不存在或已删除" />
       <div v-else class="max-w-3xl space-y-6">
         <div class="flex flex-wrap items-center gap-2 text-sm">
           <code class="text-xs text-muted">app://{{ app.slug }}</code>
           <UBadge variant="subtle">{{ app.runtimeFamily }}</UBadge>
           <UBadge v-if="isAppOwner" color="primary" variant="subtle">我的</UBadge>
-          <span class="text-muted">主人：{{ ownerName ?? '—' }}</span>
+          <span class="text-muted">所有者：{{ ownerName ?? '—' }}</span>
         </div>
 
         <UCard>
           <template #header><h2 class="text-sm font-medium">设置</h2></template>
-          <p v-if="!canManage" class="mb-4 text-sm text-muted">应用的设置只有它的主人能改。</p>
+          <p v-if="!canManage" class="mb-4 text-sm text-muted">仅应用所有者可修改设置</p>
           <div class="grid gap-4 sm:grid-cols-2">
             <UFormField label="名称">
               <div class="flex gap-2">
@@ -218,7 +214,7 @@ watch([spaceId, appId], () => {
                 >
               </div>
             </UFormField>
-            <UFormField label="默认人格" help="这个应用读写哪个人格的设定">
+            <UFormField label="默认人格" help="应用读写所选人格的设定">
               <template v-if="app.defaultPersonaId" #hint>
                 <RouterLink
                   :to="{
@@ -240,10 +236,7 @@ watch([spaceId, appId], () => {
                 "
               />
             </UFormField>
-            <UFormField
-              label="主人私聊提升"
-              help="平台账号认出是主人时，私聊可读到主人画像（内部级）"
-            >
+            <UFormField label="本人私聊时读取画像" help="识别为本人的私聊可读取个人画像（内部级）">
               <USwitch
                 :model-value="app.config.elevateOwnerDirect === 'internal'"
                 :disabled="!canManage || savingConfig === app.id"
@@ -253,8 +246,8 @@ watch([spaceId, appId], () => {
               />
             </UFormField>
             <UFormField
-              label="召回事件记录提示语"
-              help="记下每次召回时提示语的前 200 字（像凭据的片段打码），只有你看得到"
+              label="记录召回提示语"
+              help="保留提示语前 200 字，疑似凭据的片段自动打码，仅所有者可见"
             >
               <USwitch
                 :model-value="app.config.recordPrompt !== false"
@@ -299,17 +292,17 @@ watch([spaceId, appId], () => {
         </UCard>
 
         <UCard v-if="isSpaceOwner">
-          <template #header><h2 class="text-sm font-medium">转给别的成员</h2></template>
+          <template #header><h2 class="text-sm font-medium">转移应用</h2></template>
           <p class="mb-3 text-sm text-muted">
-            应用读写的画像层与私人层属于它的主人。转移之后这个应用现有的 Key
-            全部吊销，新主人要重新签发。
+            转移后现有 Key 全部吊销，新所有者需重新签发。
+            <Hint>应用读写的个人画像层与私人层属于应用所有者，转移后改为新所有者的。</Hint>
           </p>
           <div class="flex flex-wrap gap-2">
             <USelect
               v-model="transferTo"
               :items="transferItems"
-              placeholder="选择新主人（owner 或 editor）"
-              aria-label="新主人"
+              placeholder="选择新所有者（空间所有者或编辑者）"
+              aria-label="新所有者"
               class="min-w-60"
             />
             <UButton
@@ -326,7 +319,8 @@ watch([spaceId, appId], () => {
           <template #header><h2 class="text-sm font-medium">删除应用</h2></template>
           <div class="flex flex-wrap items-center gap-3">
             <p class="flex-1 text-sm text-muted">
-              它的 Key 一起删除。还有应用层记忆（含已删除的）时删不掉，要先移到别的命名空间。
+              其 Key 一并删除。仍有应用层记忆时无法删除。
+              <Hint>已删除但仍可恢复的应用层记忆也算在内，需先移到其他命名空间。</Hint>
             </p>
             <UButton color="error" variant="subtle" @click="confirmingDelete = true">删除</UButton>
           </div>
@@ -343,8 +337,8 @@ watch([spaceId, appId], () => {
   >
     <template #body>
       <p class="text-sm">
-        转给 {{ transferName }} 之后，「{{ app?.name }}」现有的 Key
-        全部吊销，它读到的画像层与私人层换成 {{ transferName }} 的。
+        转移给 {{ transferName }} 后，「{{ app?.name }}」现有的 Key
+        全部吊销，新所有者需重新签发；应用读取的个人画像层与私人层改为 {{ transferName }} 的。
       </p>
     </template>
     <template #footer>
@@ -369,7 +363,7 @@ watch([spaceId, appId], () => {
   >
     <template #body>
       <p class="text-sm">
-        删除「{{ app?.name }}」和它的全部 Key，用这些 Key 的接入方会立刻失去访问权限。
+        删除「{{ app?.name }}」及其全部 Key 后，使用这些 Key 的客户端将立即失去访问权限。
       </p>
     </template>
     <template #footer>
