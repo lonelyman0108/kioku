@@ -88,7 +88,7 @@
 - Lore 文件旧不旧的基准是导入、同步事件里 `loreExportedAt` 的最大值（没有的是命令行写的，取事件时间）；确认写入旧文件不会降低这个时间。什么都没写的导入不产生事件，也不推进它。原因：同步只看是否相等，文件比已写入的数据旧时会把正文改回去，指纹拦不住。
 - Lore 导入的界面：计划显示后表单里不能有 `type=submit` 的按钮，回车的隐式提交会点默认按钮，没看完、没勾 secret 的节点就以明文写进去；`loreBackup.test.ts` 解析模板核对。界面按勾选算的写入（`loreBackup.ts` 的 `selectionEffects`、`staleNotice`）要和服务端按勾选重算的计划一致，它靠同步项的 `source` 等于节点主 URI、`uri` 等于目标 URI 对到目标，应用映射也和 `planImport` 结尾的过滤同一个规则，改这些要同步改它。
 - 按长度截断文字要防切开代理对：落单的代理项写进 text 不报错，被悄悄换成 U+FFFD，之后和原文比永远不等（同步每次都算要更新）；写进 jsonb 才报错。
-- `BOOT_ELIGIBLE` 有一份 JS 版（`memory/filter.ts` 的 `bootEligible`），导入计划标「进启动上下文」用它。改一边必须改另一边，`loreImport.int.test.ts` 拿写进去的行比对。
+- `BOOT_ELIGIBLE` 有一份 JS 版（contracts 的 `bootEligible`），导入计划标「进启动上下文」、管理界面标「启动加载」都用它。改一边必须改另一边，`loreImport.int.test.ts` 拿写进去的行比对。
 - 测试台的回滚模式靠换掉 `Deps.db` 实现（`bench/rollback.ts`），所以接入方路径（工具、生命周期事件、`/recall`）有几条约束。数据库访问都经过传入的 `deps` 或基于它建的服务：绕开 `deps` 的写入不会回滚。语句放进 `withSpace`：直接写在 `deps.db` 上的语句落在根事务上，出错（包括等锁超时）会中止整个运行，后面的步骤记为没有执行；现在只有 `bufferTurn` 读抽取设置这一句是例外。不在事务回调里发外部请求（嵌入、模型）：事务开着时前面步骤的行锁和 URI 咨询锁都没放；接入方路径新增要查向量的步骤时加进 `bench/inProcess.ts` 的 `literalQueries`，否则这一步只走全文与关键词。事务回调里不要并行开子事务：代理只让顶层事务排队，同一条连接上并行的 savepoint 会交错。
 - `set_config(..., true)` 与 `set local` 不随 savepoint 成功结束复原，只有 `rollback to` 才复原。`RollbackRun.clearSpace` 只清 `app.space_id`：`recall.ts` 的 `hnsw.*` 也留到回滚为止，它每次向量查询之前都设，所以没有影响；接入方路径上新的向量查询或别的事务级设置不能依赖默认值，否则回滚模式和真实不一样。
 - 日志不要整个打可能是数据库错误的 `err`，记进运行记录、最近错误的文字也不要直接用 `err.message`：`DrizzleQueryError` 带 SQL 与全部参数（也就是记忆正文、提示语），驱动的 `PostgresError` 的 `detail` 带数据的值，连接错误的 `message` 是数据库的地址。日志用 `logInternalError` 或 `loggableError(err)`，文字用 `errorText(err)`。
