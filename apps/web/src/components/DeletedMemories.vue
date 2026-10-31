@@ -13,6 +13,7 @@ import { icons } from '../icons'
 import { layerLabels, sensitivityColors, sensitivityLabels } from '../labels'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime, isExpired } from '../time'
+import Hint from './Hint.vue'
 
 const props = defineProps<{ spaceId: string }>()
 // restored：撤销删除之后回到了树上；showExpired：撤销之后它是过期的，要去「已过期」里看
@@ -55,11 +56,11 @@ async function undelete(item: DeletedMemory) {
     if (isExpired(memory.validTo)) {
       // 撤销删除不动有效期：删掉之后才到期的，撤销之后还是过期的，按 URI 读不到，不写那个 URI 的缓存，也不跳过去
       toast.add({
-        title: '已撤销删除；这条已经过期，在「已过期」里可以让它重新生效',
+        title: '已恢复；这条记忆已过期，可在「已过期」中恢复生效',
         color: 'success',
         actions: [
           {
-            label: '去已过期',
+            label: '查看已过期',
             color: 'neutral',
             variant: 'subtle',
             onClick: () => {
@@ -72,13 +73,13 @@ async function undelete(item: DeletedMemory) {
     } else {
       // 写进这条记忆的缓存：删除前留下的缓存版本号对不上，打开后第一次保存会冲突
       queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
-      toast.add({ title: `已撤销删除 ${memory.uri}`, color: 'success' })
+      toast.add({ title: `已恢复 ${memory.uri}`, color: 'success' })
       if (props.spaceId === spaceId) emit('restored', memory.uri)
     }
     // 等列表重新拉取完、这一行消失之后按钮才恢复，免得再点一次。页面收到通知时已经发出了重新拉取，接着等它
     await queryClient.invalidateQueries({ queryKey: key }, { cancelRefetch: false })
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '撤销删除失败', color: 'error' })
+    toast.add({ title: err instanceof ApiError ? err.message : '恢复失败', color: 'error' })
     // URI 刚被别的记忆占上、这条已经被别人撤销或永久清除、权限变了：列表已经过时，重新读，标记跟着变
     if (err instanceof ApiError && props.spaceId === spaceId) {
       void deleted.refetch()
@@ -91,14 +92,16 @@ async function undelete(item: DeletedMemory) {
 // URI 被别的记忆占着时撤销删除会冲突：说清楚为什么、该怎么办。按钮照样能点：标记是列表读出时的，
 // 占着的那条可能已经过期、被移走或删掉，点了还冲突时会重新读列表
 const TAKEN_HINT =
-  '这个 URI 被另一条记忆占着，撤销删除会冲突：先把那条移走或删掉，再撤销删除（标记按列表读出时算，可以直接再试）'
+  'URI 已被占用。移走或删除占用它的记忆后可恢复。标记按列表读取时计算，可直接重试。'
 </script>
 
 <template>
   <div class="space-y-3">
     <p class="text-xs text-muted">
-      删除的记忆可以撤销删除，原样回来；同一个 URI 上已经有别的记忆时撤销会冲突（标着「URI
-      已被占用」，先把那条移走或删掉）。撤销删除不动有效期：标着「已过期」的，撤销之后回到「已过期」里，在那里可以让它重新生效。
+      已删除的记忆在保留期内可以恢复。<Hint>
+        恢复后内容不变。同一 URI 已有其他记忆时会冲突（标记为「URI
+        已被占用」），需先移走或删除那条记忆。恢复不改变有效期：标记为「已过期」的记忆恢复后回到「已过期」，可在其中恢复生效。
+      </Hint>
     </p>
     <p v-if="retention" class="flex items-start gap-1.5 text-xs text-warning">
       <UIcon :name="icons.expired" class="mt-px size-3.5 shrink-0" />
@@ -136,7 +139,7 @@ const TAKEN_HINT =
                 variant="outline"
                 color="warning"
                 class="shrink-0"
-                :title="`删掉之后在 ${formatTime(item.validTo!)} 过期了，撤销删除之后回到「已过期」`"
+                :title="`删除后已于 ${formatTime(item.validTo!)} 过期，恢复后回到「已过期」`"
               >
                 已过期
               </UBadge>
@@ -160,7 +163,7 @@ const TAKEN_HINT =
                 ·
                 <span
                   :class="{ 'text-warning': notes.get(item.id)!.soon }"
-                  :title="`最早在 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 之后清除`"
+                  :title="`最早于 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 后清除`"
                 >
                   {{ notes.get(item.id)!.text }}
                 </span>
@@ -176,12 +179,12 @@ const TAKEN_HINT =
               :loading="restoring === item.id"
               @click="undelete(item)"
             >
-              撤销删除
+              恢复
             </UButton>
           </UTooltip>
         </li>
       </ul>
-      <p v-if="!items.length" class="text-sm text-muted">没有删除的记忆。</p>
+      <p v-if="!items.length" class="text-sm text-muted">暂无已删除的记忆</p>
       <div v-if="deleted.hasNextPage.value" class="flex justify-center">
         <UButton
           color="neutral"

@@ -9,6 +9,7 @@ import { describe, expect, it, vi } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
 import { ApiError } from '../api/client'
+import hintSource from '../components/Hint.vue?raw'
 import loreImportSource from '../components/LoreImport.vue?raw'
 import {
   applyFailureNotice,
@@ -100,10 +101,10 @@ describe('裁剪 Lore 的导出', () => {
     }
     expect(() => trimLoreBackup({ ...fullExport(), created_at: undefined })).toThrow('导出时间')
     const noTables = { format: LORE_BACKUP_FORMAT, created_at: at }
-    expect(() => trimLoreBackup(noTables)).toThrow('没有 nodes 这张表')
+    expect(() => trimLoreBackup(noTables)).toThrow('缺少 nodes 表')
     const raw = fullExport() as unknown as { tables: Record<string, unknown> }
     delete raw.tables.glossary_keywords
-    expect(() => trimLoreBackup(raw)).toThrow('没有 glossary_keywords 这张表')
+    expect(() => trimLoreBackup(raw)).toThrow('缺少 glossary_keywords 表')
   })
 
   it('读文件：不是 JSON 时报固定的文字，裁剪之后还超过上限时报错', async () => {
@@ -211,10 +212,10 @@ describe('勾选', () => {
   it('已导入的节点 secret 不起作用，不导入就是这次不同步；还有要新建的目标时照常', () => {
     const old = planNode('old', { targets: [imported] })
     expect(secretSelectable(old)).toBe(false)
-    expect(excludeLabel(old)).toBe('这次不同步')
+    expect(excludeLabel(old)).toBe('本次不同步')
     const moved = planNode('m', { targets: [target({ state: 'moved' })] })
     expect(secretSelectable(moved)).toBe(false)
-    expect(excludeLabel(moved)).toBe('这次不同步')
+    expect(excludeLabel(moved)).toBe('本次不同步')
     const mixed = planNode('mixed', { targets: [imported, target()] })
     expect(secretSelectable(mixed)).toBe(true)
     expect(excludeLabel(mixed)).toBe('不导入')
@@ -545,7 +546,7 @@ describe('文件比已写入的数据旧', () => {
 })
 
 describe('执行失败之后的说明', () => {
-  const PARTLY = '可能已经写入了一部分'
+  const PARTLY = '可能已写入一部分'
 
   it('确定什么都没写的：显示服务端的文字，不说写了一部分，不重看计划', () => {
     for (const status of [400, 401, 403, 404, 413, 429]) {
@@ -564,24 +565,24 @@ describe('执行失败之后的说明', () => {
     const failure = applyFailureOf(new ApiError(409, '计划变了'))
     expect(failure.kind).toBe('changed')
     const text = applyFailureNotice(failure, 'replanned')
-    expect(text).toBe('计划变了。已经重新算过计划，勾选还在。')
+    expect(text).toBe('计划变了。计划已重新生成，勾选已保留。')
     expect(text).not.toContain(PARTLY)
   })
 
   it('5xx 与网络错误才说可能写了一部分并重看计划：文字是界面自己的，不看服务端说了什么', () => {
     for (const [err, message] of [
       // 服务端写到一半时自己也说了一遍，不能重复，也不能因为它改了文字就不说
-      [new ApiError(500, '写到一半出错了，可能已写入一部分'), '服务端出错了（HTTP 500）'],
-      [new ApiError(500, '服务内部错误'), '服务端出错了（HTTP 500）'],
-      [new ApiError(502, '请求失败：HTTP 502'), '服务端出错了（HTTP 502）'],
-      [new ApiError(504, '请求失败：HTTP 504'), '服务端出错了（HTTP 504）'],
+      [new ApiError(500, '写到一半出错了，可能已写入一部分'), '服务端错误（HTTP 500）'],
+      [new ApiError(500, '服务内部错误'), '服务端错误（HTTP 500）'],
+      [new ApiError(502, '请求失败：HTTP 502'), '服务端错误（HTTP 502）'],
+      [new ApiError(504, '请求失败：HTTP 504'), '服务端错误（HTTP 504）'],
       // 网络错误的英文原文不给人看
-      [new TypeError('Failed to fetch'), '网络出错了'],
+      [new TypeError('Failed to fetch'), '网络错误'],
     ] as const) {
       const failure = applyFailureOf(err)
       expect(failure).toEqual({ kind: 'partial', message })
       expect(applyFailureNotice(failure, 'replanned')).toBe(
-        `${message}。${PARTLY}。已经重新算过计划：已写入的显示成已导入，勾选还在，再确认一次就接着做。`,
+        `${message}。${PARTLY}。计划已重新生成：已写入的显示为已导入，勾选已保留，再次确认即可继续。`,
       )
     }
   })
@@ -593,9 +594,9 @@ describe('执行失败之后的说明', () => {
       applyFailureOf(new TypeError('Failed to fetch')),
     ]) {
       const text = applyFailureNotice(failure, 'failed')
-      expect(text).not.toContain('已经重新算过')
-      expect(text).toContain('重看计划也失败了')
-      expect(text).toContain('勾选还在')
+      expect(text).not.toContain('计划已重新生成')
+      expect(text).toContain('重新生成计划也失败了')
+      expect(text).toContain('勾选已保留')
       expect(text.startsWith(failure.message)).toBe(true)
     }
     expect(applyFailureNotice(applyFailureOf(new TypeError('x')), 'failed')).toContain(PARTLY)
@@ -616,8 +617,8 @@ describe('执行失败之后的说明', () => {
     expect(shown).toEqual([applyFailureNotice(failure, 'replanning')])
     expect(shown[0]).toContain(failure.message)
     expect(shown[0]).toContain(PARTLY)
-    expect(shown[0]).toContain('正在重新算计划')
-    expect(shown[0]).not.toContain('已经重新算过')
+    expect(shown[0]).toContain('正在重新生成计划')
+    expect(shown[0]).not.toContain('计划已重新生成')
 
     finish(true)
     await done
@@ -637,7 +638,7 @@ describe('执行失败之后的说明', () => {
 
   it('计划变了（409）在重算期间不说写了一部分', () => {
     const text = applyFailureNotice(applyFailureOf(new ApiError(409, '计划变了')), 'replanning')
-    expect(text).toBe('计划变了。正在重新算计划，勾选还在。')
+    expect(text).toBe('计划变了。正在重新生成计划，勾选已保留。')
   })
 })
 
@@ -677,7 +678,7 @@ describe('写入只来自点确认导入', () => {
     expect(handler(confirm, 'click')).toBe('applyPlan')
     expect(staticType(confirm)).not.toBe('submit')
     // 计划显示时表单里没有提交按钮，只有看计划这一个
-    expect(elements.filter((el) => staticType(el) === 'submit')).toEqual([buttonOf('看计划')])
+    expect(elements.filter((el) => staticType(el) === 'submit')).toEqual([buttonOf('查看计划')])
   })
 
   it('表单的提交不执行，模板里只有确认导入一处执行', () => {
@@ -693,6 +694,13 @@ describe('写入只来自点确认导入', () => {
     expect(onSubmit).toContain('replan')
     expect(onSubmit).not.toContain('applyPlan')
     expect(script.match(/applyPlan/g)).toEqual(['applyPlan'])
+  })
+
+  it('表单里的提示层不是提交按钮：点开说明不能触发提交，也不能被回车的隐式提交点到', () => {
+    expect(elements.some((el) => el.tag === 'Hint')).toBe(true)
+    const hint = parse(hintSource).descriptor.template!.ast as unknown as TemplateNode
+    const buttons = walk(hint).filter((el) => el.type === ELEMENT && el.tag === 'button')
+    expect(buttons.map(staticType)).toEqual(['button'])
   })
 })
 
@@ -725,12 +733,12 @@ describe('请求期间与不能看计划时', () => {
     }
     expect(planBlocker(form)).toBeNull()
     expect(planBlocker({ ...form, sourceKind: 'url', hasFile: false, url: 'https://x' })).toBeNull()
-    expect(planBlocker({ ...form, busy: true })).toBe('上一个请求还没结束')
+    expect(planBlocker({ ...form, busy: true })).toBe('上一个请求尚未结束')
     expect(planBlocker({ ...form, personaProblem: '只用小写字母' })).toBe('人格标识只用小写字母')
-    expect(planBlocker({ ...form, personaName: '' })).toBe('要填人格名称')
-    expect(planBlocker({ ...form, hasFile: false })).toBe('要选 Lore 的导出文件')
+    expect(planBlocker({ ...form, personaName: '' })).toBe('请填写人格名称')
+    expect(planBlocker({ ...form, hasFile: false })).toBe('请选择 Lore 的导出文件')
     expect(planBlocker({ ...form, tooLarge: true })).toBe('导出文件超过上限')
-    expect(planBlocker({ ...form, sourceKind: 'url' })).toBe('要填 Lore 地址')
+    expect(planBlocker({ ...form, sourceKind: 'url' })).toBe('请填写 Lore 地址')
   })
 
   it('按钮看的和看计划看的是同一个原因；不能看时写进错误：失败说明会让人看下面的错误', () => {

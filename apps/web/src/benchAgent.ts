@@ -49,12 +49,19 @@ const AGENT_SESSION_ID = 'bench-agent'
 const LIFECYCLE_TEXT_MAX = 20_000
 
 export const AGENT_LOOP_NOTES: Record<BenchAgentLoop, string> = {
-  hook: '这个运行时有钩子：session.start 的结果进系统提示；每条消息先发 prompt.submit，召回块附在这条消息上、留在历史；给工具；回复后不发 turn.end。',
+  hook: '钩子运行时：每条消息先发 prompt.submit，召回块留在历史。',
+  approximate: '此运行时未单独模拟，按钩子运行时近似，可能与真实行为不同。',
+  chat: '群聊 Bot：不提供工具，召回块不留在历史，回复后发 turn.end。',
+  tools: '仅接入 MCP：不发生命周期事件，只提供工具。',
+}
+
+// 完整的循环，放在提示层
+export const AGENT_LOOP_DETAILS: Record<BenchAgentLoop, string> = {
+  hook: 'session.start 的结果进入系统提示。每条消息先发 prompt.submit，召回块附在此消息上并留在历史。提供工具。回复后不发 turn.end。',
   approximate:
-    '这个运行时这里没有单独模拟，按有钩子的运行时走（session.start 进系统提示，每条消息先发 prompt.submit，给工具，不发 turn.end）：只是近似，和它真实的行为可能不同。',
-  chat: '这个运行时是群聊 bot：session.start 的结果进系统提示；每条消息先发 prompt.submit，召回块只附在这一轮的请求上、不留在历史；不给工具；回复后发 turn.end（它要带私聊、群聊或频道的会话上下文，不满足时不发）。',
-  tools:
-    '这个运行时只接 MCP：不发 session.start 与 prompt.submit，只给工具，kioku_boot 由模型自己调。',
+    'session.start 的结果进入系统提示。每条消息先发 prompt.submit。提供工具。回复后不发 turn.end。',
+  chat: 'session.start 的结果进入系统提示。每条消息先发 prompt.submit，召回块只附在本轮请求上，不留在历史。不提供工具。回复后发 turn.end（需带私聊、群聊或频道的会话上下文，否则不发）。',
+  tools: '不发 session.start 与 prompt.submit，只提供工具，kioku_boot 由模型自行调用。',
 }
 
 export const AGENT_UNAVAILABLE_NOTES: Record<
@@ -62,19 +69,19 @@ export const AGENT_UNAVAILABLE_NOTES: Record<
   { title: string; description: string }
 > = {
   notAdmin: {
-    title: '模型对话只给实例管理员',
+    title: '模型对话仅限实例管理员',
     description:
-      '它用实例设置里抽取模型的接口与 Key：Key 是实例的，而且不计入抽取预算，不能让别的成员花。',
+      '模型对话使用实例设置中抽取模型的接口与 Key。Key 属于实例，且不计入抽取预算，因此不开放给其他成员。',
   },
   noModel: {
-    title: '还没有配模型',
+    title: '尚未配置模型',
     description:
-      '去实例设置配好抽取模型之后才能用，模型要支持工具调用。注意：配好之后抽取与 Dream 也会开始跑，Dream 默认把画像层与私人层发给这个模型；不想发的话，先在空间设置里关掉「Dream 与我的私人内容」再配。',
+      '在实例设置中配置抽取模型后可用，模型需支持工具调用。注意：配置后抽取与 Dream 也会开始运行，Dream 默认将画像层与私人层发送给该模型。如不希望发送，请先在空间设置中关闭「Dream 与私人内容」，再配置模型。',
   },
   keyLocked: {
-    title: '抽取模型的 Key 解不开',
+    title: '抽取模型的 Key 无法解密',
     description:
-      '配了模型，但保存的 Key 解不开：主密钥没配，或者换过。检查 KIOKU_MASTER_KEY（轮换时旧的那把配在 KIOKU_MASTER_KEY_PREVIOUS），或者在实例设置里重新填 Key。',
+      '已配置模型，但保存的 Key 无法解密：主密钥未配置或已更换。请检查 KIOKU_MASTER_KEY（轮换时，旧密钥配置在 KIOKU_MASTER_KEY_PREVIOUS），或在实例设置中重新填写 Key。',
   },
 }
 
@@ -90,17 +97,17 @@ export interface AgentConsent {
 // 外部凭据源只有回滚模式打码，真实模式照常返回（设计里的规则），所以要说
 export function consentText({ endpoint, model, loop }: AgentConsent, mode: BenchMode): string {
   const what: Record<BenchAgentLoop, string> = {
-    hook: '启动上下文、召回块与工具结果',
-    approximate: '启动上下文、召回块与工具结果',
-    chat: '启动上下文与召回块',
+    hook: '启动加载、召回块与工具结果',
+    approximate: '启动加载、召回块与工具结果',
+    chat: '启动加载与召回块',
     tools: '工具结果',
   }
   const masked =
     mode === 'real' && loop !== 'chat'
-      ? 'secret 的正文与托管凭据的值都打码；真实模式下外部凭据源的条目位置与取法照常返回，也会发过去。'
-      : 'secret 的正文与凭据的值都打码。'
+      ? '机密正文与托管凭据的值都会打码；真实模式下，外部凭据源的条目位置与取法照常返回，也会一并发送。'
+      : '机密正文与凭据的值都会打码。'
   const where = endpoint ? ` ${endpoint} 上的模型「${model}」` : `模型「${model}」`
-  return `${what[loop]}会发给${where}（实例设置里抽取模型的接口）。发出去的都是这把 Key 读得到的内容；${masked}用量不计入抽取预算。`
+  return `${what[loop]}将发送给${where}（实例设置中抽取模型的接口）。发送的都是当前 Key 可读取的内容；${masked}用量不计入抽取预算。`
 }
 
 // 消息的文字。content 可能是 null（只调工具时常见）、空串或分段数组（[{ type: 'text', text }]）
@@ -180,10 +187,10 @@ export interface AgentRound {
 export type AgentPhase = 'lifecycle' | 'model' | 'tools' | 'turnEnd'
 
 export const agentPhaseLabels: Record<AgentPhase, string> = {
-  lifecycle: '发生命周期事件…',
-  model: '等模型回复…',
+  lifecycle: '发送生命周期事件…',
+  model: '等待模型回复…',
   tools: '执行工具…',
-  turnEnd: '发 turn.end…',
+  turnEnd: '发送 turn.end…',
 }
 
 // 这条消息怎么结束的。done：模型给了最终回复；empty：模型没有文字也没有工具调用（包括拒绝回答）；stopped：用户停止；limit：到了轮数上限；
@@ -384,8 +391,8 @@ function divergedNotice(
   const step = session.replay[index]
   const which = `第 ${index + 1} 步${step ? `（${replayStepLabel(step)}）` : ''}`
   return internalError
-    ? `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。可能是暂时的，${retry}还是不行就清空对话，或者接受：去掉这一步。`
-    : `重放这次对话的写入时${which}报错，这一轮没有执行：${text}。现在的数据和对话做这一步时不一样了，可以清空对话，或者接受：去掉这一步。`
+    ? `重放当前对话的写入时${which}报错，本轮未执行：${text}。可能是暂时性错误，${retry}如仍失败，可清空对话，或接受并移除此步。`
+    : `重放当前对话的写入时${which}报错，本轮未执行：${text}。当前数据与对话执行此步时已不一致，可清空对话，或接受并移除此步。`
 }
 
 // 拦着下一条消息的重放分叉，没有时是 null。再发还是同样报错，只是白花模型的 token（mcp 的循环先请求模型才运行），
@@ -435,10 +442,10 @@ export function turnEndRefusal(
   body: unknown,
 ): string | null {
   if (!context) {
-    return '没有发 turn.end：它要带私聊、群聊或频道的上下文，页面上的会话上下文是「不带」。'
+    return '未发送 turn.end：需带私聊、群聊或频道的上下文，页面上的会话上下文为「不带」。'
   }
   const parsed = TurnEndEvent.safeParse(body)
-  return parsed.success ? null : `没有发 turn.end：${parsed.error.issues[0]?.message}。`
+  return parsed.success ? null : `未发送 turn.end：${parsed.error.issues[0]?.message}。`
 }
 
 // 请求模型失败的说明。502 带的是上游的错误原文（截断过，不带 API Key），只给实例管理员看。
@@ -446,9 +453,9 @@ export function turnEndRefusal(
 export function turnFailureMessage(err: unknown): string {
   if (!(err instanceof ApiError)) return `请求模型失败：${NOT_API_FAILURE}`
   if (err.status === 504) {
-    return '请求模型超时（HTTP 504）：可能是反向代理等不及了。模型一次可能要一两分钟，反向代理的读超时要大于 120 秒。'
+    return '请求模型超时（HTTP 504）：可能是反向代理等待超时。模型单次响应可能需要一两分钟，反向代理的读超时应大于 120 秒。'
   }
-  if (err.status === 413) return '对话太长，清空之后再试'
+  if (err.status === 413) return '对话过长，请清空后重试'
   return err.message
 }
 
@@ -456,8 +463,8 @@ export function turnFailureMessage(err: unknown): string {
 // 所以只给服务端的文字，不说可以再发。5xx 与网络错误才可能是暂时的
 const turnRetryable = (err: unknown) => !(err instanceof ApiError && err.status < 500)
 
-const RETRY = '可以再发一次。'
-const KEPT_IN_HISTORY = '做过的都留在历史里，可以接着说下一句。'
+const RETRY = '可再次发送。'
+const KEPT_IN_HISTORY = '已执行的内容保留在历史中，可继续发送下一条。'
 
 // 报错原文可能已经带句号，也可能没有
 const sentences = (first: string, second: string) =>
@@ -466,9 +473,9 @@ const sentences = (first: string, second: string) =>
 // 模型没有文字也没有工具调用的说明。length 多半是输出额度都用在了思考上（推理模型常见）
 function emptyReplyText(finishReason: string | null): string {
   if (finishReason === 'length') {
-    return '模型没有返回文字（结束原因 length：输出额度可能都用在了思考上）'
+    return '模型未返回文字（结束原因 length：输出额度可能已全部用于思考）'
   }
-  return `模型没有返回文字（${finishReason ? `结束原因 ${finishReason}` : '上游没有给结束原因'}）`
+  return `模型未返回文字（${finishReason ? `结束原因 ${finishReason}` : '上游未提供结束原因'}）`
 }
 
 // 发一条用户消息，走完这条消息的循环。无论怎样结束，历史都是合法的，用户还能接着说下一句：
@@ -571,7 +578,7 @@ export async function sendAgentMessage(
     if (outcome.kind === 'failed') {
       return finish(
         'lifecycleFailed',
-        outcome.retryable ? sentences(outcome.message, `没有请求模型，${RETRY}`) : outcome.message,
+        outcome.retryable ? sentences(outcome.message, `未请求模型，${RETRY}`) : outcome.message,
       )
     }
     updateExchange({ lifecycle: outcome.traces })
@@ -642,7 +649,7 @@ export async function sendAgentMessage(
       if (empty) {
         // 拒绝了：原因在轨迹上，再发一次多半还是一样，不邀请重发
         emptyNotice = answered.refusal
-          ? sentences('模型拒绝了，原因见上面', working.length ? KEPT_IN_HISTORY : '')
+          ? sentences('模型拒绝回答，原因见上方', working.length ? KEPT_IN_HISTORY : '')
           : sentences(emptyReplyText(turn.finishReason), afterReply())
       }
       break
@@ -666,14 +673,14 @@ export async function sendAgentMessage(
 
     if (signal.aborted) {
       answer(() => '已停止，没有执行')
-      return finish('stopped', `已停止，这一轮的工具调用没有执行。${KEPT_IN_HISTORY}`)
+      return finish('stopped', `已停止，本轮的工具调用未执行。${KEPT_IN_HISTORY}`)
     }
     // 这一轮的结果没有下一次请求能告诉模型了，执行了也白写
     if (round === AGENT_MAX_ROUNDS) {
       answer(() => `到了 ${AGENT_MAX_ROUNDS} 轮上限，没有执行`)
       return finish(
         'limit',
-        `到了 ${AGENT_MAX_ROUNDS} 轮上限：模型还想调工具，这些调用没有执行。可以接着说下一句，让它继续。`,
+        `已达 ${AGENT_MAX_ROUNDS} 轮上限：模型仍要调用工具，这些调用未执行。可继续发送下一条，让模型继续。`,
       )
     }
     // 上一轮有写入放不进重放日志：再运行就和模型知道的对不上了
@@ -725,9 +732,9 @@ export async function sendAgentMessage(
     const body = turnEndBody(context, text, reply)
     // 空回复不发：真实模式下空的一轮会进对话缓冲、可能触发抽取；这条消息回到发之前的话，文字放回输入框，再发一次就进两次
     const refusal = emptyNotice
-      ? '模型没有回复，没有发 turn.end。'
+      ? '模型未回复，未发送 turn.end。'
       : signal.aborted
-        ? '已停止，没有发 turn.end。'
+        ? '已停止，未发送 turn.end。'
         : (turnEndRefusal(context, body) ?? runBlocker(state.session, mode))
     if (refusal) {
       updateExchange({ turnEndNote: refusal })
@@ -757,8 +764,8 @@ export const noticeColor = (end: AgentEnd | null): 'neutral' | 'warning' | 'erro
 
 export const attachedNote = (loop: BenchAgentLoop) =>
   loop === 'chat'
-    ? 'prompt.submit 给的内容只附在这一轮的请求上，不留在历史。'
-    : 'prompt.submit 给的内容附在这条消息上，留在历史。'
+    ? 'prompt.submit 返回的内容只附在本轮请求上，不留在历史。'
+    : 'prompt.submit 返回的内容附在此消息上，保留在历史中。'
 
 // 这一步要不要展开：要看的是出了问题的那几步
 export const callOpen = (step: BenchStepResult) =>
@@ -766,7 +773,7 @@ export const callOpen = (step: BenchStepResult) =>
 
 // 显示用的参数：解析不出来时给模型写的原文
 export const argumentsText = (call: AgentToolTrace) =>
-  call.arguments ? JSON.stringify(call.arguments, null, 2) : call.rawArguments || '（没有参数）'
+  call.arguments ? JSON.stringify(call.arguments, null, 2) : call.rawArguments || '（无参数）'
 
 const seconds = (ms: number) => (ms / 1000).toFixed(1)
 
@@ -780,7 +787,7 @@ export function roundMeta(round: AgentRound): string {
     round.model,
     promptTokens || completionTokens
       ? `输入 ${promptTokens}、输出 ${completionTokens} token`
-      : '上游没有给用量',
+      : '上游未提供用量',
     `${seconds(round.ms)} 秒`,
     ...(NORMAL_FINISHES.has(round.finishReason) ? [] : [`结束原因 ${round.finishReason}`]),
   ].join(' · ')
@@ -811,7 +818,7 @@ export interface AgentScenarioExport {
 // 真的存了之后才说少了几个：有明文要确认时，取消了就什么都没存
 export const droppedNote = (dropped: number) =>
   dropped
-    ? `场景最多 ${BENCH_MAX_STEPS} 步：只存了前面的 ${BENCH_MAX_STEPS} 个工具调用，后面 ${dropped} 个没有存。`
+    ? `场景最多 ${BENCH_MAX_STEPS} 步：仅保存前 ${BENCH_MAX_STEPS} 个工具调用，其余 ${dropped} 个未保存。`
     : null
 
 // 这次对话的工具调用存成场景，按契约校验。没有发出去过工具调用时是 null
@@ -827,7 +834,7 @@ export function agentScenario(
       JSON.stringify({
         id: `agent-${now.toISOString().replace(/\D/g, '').slice(0, 14)}`,
         title: '模型对话的工具调用',
-        description: '从测试台的模型对话存下来的工具调用，参数是当时发出去的。',
+        description: '从测试台模型对话保存的工具调用，参数为当时发出的内容。',
         steps: kept.map((call) => ({
           kind: 'tool',
           tool: call.name,

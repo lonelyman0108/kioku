@@ -101,7 +101,7 @@ async function submit() {
   <UModal v-model:open="open" title="移动或改层" :dismissible="!saving" :close="!saving">
     <template #body>
       <form id="move-memory" class="space-y-4" @submit.prevent="submit">
-        <UFormField label="URI" help="改了就是移动；不改只改层">
+        <UFormField label="URI" help="修改 URI 即移动；不修改则只改层">
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
         </UFormField>
         <UFormField
@@ -109,7 +109,7 @@ async function submit() {
           label="层"
           :help="
             origin.layer === 'persona' || origin.layer === 'app'
-              ? '移出人格或应用的命名空间，要选新的层'
+              ? '移出人格或应用的命名空间时，需选择新的层'
               : undefined
           "
         >
@@ -125,19 +125,19 @@ async function submit() {
           v-if="crossing"
           color="warning"
           variant="subtle"
-          title="这会改变谁看得到它"
+          title="可见范围将改变"
           :description="
             personal(origin.layer)
-              ? '改成共享的层之后，空间里的其他成员与有权限的应用都能读到它。'
-              : '改成个人的层之后，它只属于你，其他成员与别人的应用就看不到了。'
+              ? '改为共享层后，空间内其他成员与有权限的应用均可读取。'
+              : '改为个人层后，这条记忆仅属于当前账号，其他成员及其应用将无法读取。'
           "
         />
         <UAlert
           v-if="stale"
           color="warning"
           variant="subtle"
-          title="打开之后这条记忆变了"
-          description="关掉重新打开，看过新的那一版再移动或改层。"
+          title="这条记忆已更新"
+          description="请关闭后重新打开，确认新版本后再操作。"
         />
         <UAlert v-else-if="error" color="error" variant="subtle" :title="error" />
       </form>

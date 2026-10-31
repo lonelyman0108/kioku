@@ -43,7 +43,7 @@ const linkable = computed(() => !props.item.left && !props.item.deleted && !prop
           {{ changeLabels[change] ?? change }}
         </UBadge>
         <UBadge v-if="item.expired && !item.deleted" size="sm" color="warning" variant="outline">
-          现在已过期
+          已过期
         </UBadge>
         <template v-if="item.bench">
           <UBadge size="sm" color="info" variant="subtle" :title="`运行标记 ${item.bench.run}`">
@@ -53,7 +53,7 @@ const linkable = computed(() => !props.item.left && !props.item.deleted && !prop
         </template>
       </div>
       <p v-if="item.left" class="text-xs text-muted">
-        这次改动之后，它离开了你的可见范围（例如被改进了别人的私人层，或改成了 secret）。
+        此次改动后，这条记忆超出当前账号的可见范围（例如改入其他成员的私人层，或改为机密）。
       </p>
     </div>
     <time

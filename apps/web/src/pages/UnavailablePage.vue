@@ -17,8 +17,8 @@ function retry() {
   <div class="flex min-h-svh items-center justify-center p-6">
     <UCard class="w-full max-w-sm">
       <div class="space-y-4">
-        <h1 class="text-lg font-semibold">暂时连不上 Kioku</h1>
-        <p class="text-sm text-muted">服务可能正在重启或升级。稍等片刻再重试。</p>
+        <h1 class="text-lg font-semibold">无法连接到服务</h1>
+        <p class="text-sm text-muted">服务可能正在重启或升级，请稍后重试。</p>
         <UButton block @click="retry">重试</UButton>
       </div>
     </UCard>

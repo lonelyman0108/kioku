@@ -247,8 +247,8 @@ function markCredentials(root: DocumentFragment, { byIdentifier, href }: Credent
       const badge = document.createElement('span')
       badge.className = 'kioku-cred kioku-cred-missing'
       badge.title = credential
-        ? `凭据 ${credential.name} 没有字段 ${ref.field}`
-        : '没有这条凭据，或者它已经删除'
+        ? `凭据 ${credential.name} 缺少字段 ${ref.field}`
+        : '凭据不存在或已删除'
       badge.textContent = label
       replacement.append(badge)
     }

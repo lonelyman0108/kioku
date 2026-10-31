@@ -8,6 +8,7 @@ import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { layerShortLabels, readDenialLabels, sensitivityLabels } from '../labels'
 import { memoryRoute } from '../routes'
+import Hint from './Hint.vue'
 
 // 启动预览与召回调试台：按应用的一把 Key 模拟，只给应用主人（会读到主人的私人层）
 // settings 是会影响模拟结果的应用设置（默认人格、主人私聊提升）拼成的串：变了的话，之前的结果就不是现在的样子了
@@ -34,7 +35,7 @@ watch(
 
 const tab = ref<'preview' | 'debug'>('preview')
 const tabs = [
-  { label: '启动预览', value: 'preview', icon: icons.preview },
+  { label: '启动加载预览', value: 'preview', icon: icons.preview },
   { label: '召回调试', value: 'debug', icon: icons.debug },
 ]
 
@@ -103,7 +104,7 @@ const parts = (c: DebugCandidate) =>
     ['向量', c.breakdown.semantic],
     ['全文', c.breakdown.fulltext],
     ['关键词', c.breakdown.glossary],
-    ['priority', c.breakdown.priority],
+    ['优先级', c.breakdown.priority],
   ]
     .filter(([, value]) => Number(value) > 0)
     .map(([label, value]) => `${label} ${Number(value).toFixed(2)}`)
@@ -114,12 +115,12 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
 <template>
   <div class="space-y-4 text-sm">
     <div class="flex flex-wrap items-center gap-2">
-      <h2 class="font-medium">启动预览与召回调试</h2>
+      <h2 class="font-medium">启动加载预览与召回调试</h2>
       <USelect
         v-model="keyId"
         :items="keyItems"
-        placeholder="选择一把 Key"
-        aria-label="模拟用的 Key"
+        placeholder="选择 Key"
+        aria-label="模拟使用的 Key"
         class="ml-auto min-w-56"
       />
       <UButton
@@ -139,12 +140,12 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
       :title="keys.error.value instanceof ApiError ? keys.error.value.message : '读取 Key 失败'"
     />
     <p v-else-if="keys.isSuccess.value && !keyItems.length" class="text-muted">
-      这个应用还没有有效的 Key，先签发一把再模拟。
+      暂无有效 Key。签发后可模拟。
     </p>
     <template v-else>
       <p class="text-xs text-muted">
-        按所选 Key
-        现在的有效上限模拟，不记召回事件。会话上下文（私聊、群聊）接入之后才能选，现在按无上下文模拟。
+        按所选 Key 的当前权限模拟，不计入召回记录。
+        <Hint>会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟。</Hint>
       </p>
       <UTabs v-model="tab" :items="tabs" :content="false" size="sm" class="w-full" />
       <UAlert v-if="failure" color="error" variant="subtle" :title="failure" />
@@ -161,21 +162,21 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             >预览</UButton
           >
         </form>
-        <p class="text-xs text-muted">目录名与仓库名用来召回与当前项目相关的记忆，可以不填。</p>
+        <p class="text-xs text-muted">目录名与仓库名用于召回与当前项目相关的记忆，可留空。</p>
         <template v-if="preview">
           <p>
-            共 {{ preview.context.length }} 字<template v-if="preview.limit">
-              ，宿主（{{ preview.runtimeFamily }}）能完整接收 {{ preview.limit }} 字</template
+            共 {{ preview.context.length }} 字<template v-if="preview.limit"
+              >，客户端（{{ preview.runtimeFamily }}）可完整接收 {{ preview.limit }} 字</template
             >。
           </p>
           <UAlert
             v-if="preview.dropped.length"
             color="warning"
             variant="subtle"
-            :title="`放不下，没有附上：${preview.dropped.map((d) => droppedLabels[d]).join('、')}`"
+            :title="`超出客户端接收上限，未附加：${preview.dropped.map((d) => droppedLabels[d]).join('、')}`"
           />
           <section class="space-y-1">
-            <h3 class="font-medium">启动节点</h3>
+            <h3 class="font-medium">启动加载的节点</h3>
             <ul v-if="preview.entries.length" class="divide-y divide-default">
               <li
                 v-for="entry in preview.entries"
@@ -191,23 +192,23 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
                 <span class="ml-auto text-xs text-muted">{{ entry.chars }} 字</span>
               </li>
             </ul>
-            <p v-else class="text-muted">没有启动节点。</p>
+            <p v-else class="text-muted">暂无启动加载的节点</p>
             <p v-if="preview.omitted.length" class="text-xs text-muted">
-              超出预算、没有展开的：{{ preview.omitted.join('、') }}
+              超出预算、未展开：{{ preview.omitted.join('、') }}
             </p>
           </section>
           <section v-if="preview.recent.length" class="space-y-1">
-            <h3 class="font-medium">近期更新的记忆</h3>
+            <h3 class="font-medium">近期更新</h3>
             <p class="font-mono text-xs">{{ preview.recent.map((m) => m.uri).join('、') }}</p>
           </section>
           <section v-if="preview.related.length" class="space-y-1">
-            <h3 class="font-medium">与当前项目相关的记忆</h3>
+            <h3 class="font-medium">与当前项目相关</h3>
             <p class="font-mono text-xs">
               {{ preview.related.map((c) => `${c.score.toFixed(2)} ${c.uri}`).join('、') }}
             </p>
           </section>
           <details>
-            <summary class="cursor-pointer text-muted">宿主收到的原文</summary>
+            <summary class="cursor-pointer text-muted">客户端收到的原文</summary>
             <pre
               class="mt-2 max-h-96 overflow-auto rounded bg-elevated p-3 text-xs whitespace-pre-wrap"
               >{{ preview.context }}</pre>
@@ -221,8 +222,8 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             v-model="query"
             :rows="2"
             autoresize
-            placeholder="输入一句话，看这把 Key 会召回什么"
-            aria-label="模拟的输入"
+            placeholder="输入一句话，查看当前 Key 的召回结果"
+            aria-label="模拟输入"
             class="w-full"
           />
           <UButton
@@ -235,11 +236,12 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
         </form>
         <template v-if="debug">
           <p class="text-xs text-muted">
-            {{ debug.semantic ? '走了向量这一路' : '没走向量（嵌入接口没配、出错或超时）' }}；分数过
-            {{ debug.minScore }} 的前几条会注入。
+            {{
+              debug.semantic ? '已使用向量检索' : '未使用向量检索（嵌入接口未配置、出错或超时）'
+            }}；分数达到 {{ debug.minScore }} 的前几条将注入。
           </p>
           <section class="space-y-1">
-            <h3 class="font-medium">会注入的</h3>
+            <h3 class="font-medium">将注入</h3>
             <ul v-if="debug.injected.length" class="divide-y divide-default">
               <li v-for="c in debug.injected" :key="c.uri" class="space-y-0.5 py-1.5">
                 <div class="flex flex-wrap items-center gap-2">
@@ -254,11 +256,11 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
                 <p class="text-xs text-muted">{{ parts(c) }}</p>
               </li>
             </ul>
-            <p v-else class="text-muted">没有过阈值的记忆，这一轮不会注入召回块。</p>
+            <p v-else class="text-muted">没有达到阈值的记忆，这一轮不注入内容。</p>
           </section>
           <details v-if="debug.others.length">
             <summary class="cursor-pointer font-medium">
-              没注入的（{{ debug.others.length }}）
+              未注入（{{ debug.others.length }}）
             </summary>
             <ul class="mt-1 divide-y divide-default">
               <li v-for="c in debug.others" :key="c.uri" class="space-y-0.5 py-1.5">
@@ -273,7 +275,10 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             </ul>
           </details>
           <section v-if="debug.filtered.length" class="space-y-1">
-            <h3 class="font-medium">管理界面搜得到、这把 Key 读不到的</h3>
+            <h3 class="font-medium">
+              未进入当前 Key 的召回
+              <Hint>管理界面能搜索到，但当前 Key 不会召回的记忆，每条后面写着原因。</Hint>
+            </h3>
             <ul class="divide-y divide-default">
               <li
                 v-for="f in debug.filtered"
@@ -291,7 +296,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             </ul>
           </section>
           <details v-if="debug.block">
-            <summary class="cursor-pointer text-muted">注入的召回块</summary>
+            <summary class="cursor-pointer text-muted">注入内容</summary>
             <pre class="mt-2 overflow-auto rounded bg-elevated p-3 text-xs whitespace-pre-wrap">{{
               debug.block
             }}</pre>

@@ -6,6 +6,7 @@ import { computed, ref } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { accessContextLabels, layerLabels, originScopeLabels, sensitivityLabels } from '../labels'
+import Hint from './Hint.vue'
 
 const props = defineProps<{ spaceId: string; appId: string; keyId: string }>()
 
@@ -20,7 +21,7 @@ const current = computed(() => matrix.data.value?.contexts.find((c) => c.context
 // 一格里写什么：进召回的读、只能按 URI 读、写
 function cellText(cell: AccessCell): string {
   const parts = [
-    cell.read === 'recall' ? '读' : cell.read === 'explicit' ? '按 URI 读' : '',
+    cell.read === 'recall' ? '读' : cell.read === 'explicit' ? '按 URI 读取' : '',
     cell.write ? '写' : '',
   ].filter(Boolean)
   return parts.length ? parts.join(' · ') : '—'
@@ -39,9 +40,12 @@ function cellText(cell: AccessCell): string {
     <USkeleton v-else-if="!current" class="h-48 w-full" />
     <template v-else>
       <p class="text-xs text-muted">
-        {{ originScopeLabels[current.originScope] }}。「按 URI
-        读」只能显式读取，不进召回与启动上下文；对象层与情节层的「写」指对话抽取能写进去，不能按 URI
-        直接写。会话上下文由接入方上报，只能收紧、不能放宽。
+        {{ originScopeLabels[current.originScope] }}。会话上下文只能收紧权限，不能放宽。
+        <Hint>
+          「按 URI
+          读取」只能显式读取，不进入召回与启动加载。联系人层与情节层的「写」指对话抽取写入，不能按
+          URI 直接写入。会话上下文由应用上报。
+        </Hint>
       </p>
       <div class="overflow-x-auto">
         <table class="w-full min-w-[28rem] border-collapse text-xs">

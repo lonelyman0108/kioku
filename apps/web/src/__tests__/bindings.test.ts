@@ -36,29 +36,29 @@ describe('绑定记录的说法', () => {
 
   it('说清绑定码是谁、什么时候申请的，经由哪个应用', () => {
     expect(bindingSource(binding({}), now)).toBe(
-      'aiocqhttp 1001 在 10-29 09:30 申请的绑定码，经由「群聊 bot」',
+      'aiocqhttp 1001 于 10-29 09:30 申请绑定码，经由「群聊 bot」',
     )
   })
 
   it('每种状态说清现在怎样了；成员的账号删掉了也说得出来', () => {
-    expect(bindingOutcome(binding({}), now)).toBe('等「bob」确认，10-31 10:30 之前有效')
+    expect(bindingOutcome(binding({}), now)).toBe('待「bob」确认，10-31 10:30 前有效')
     expect(bindingOutcome(binding({ status: 'merged', confirmer: null }), now)).toBe(
-      '收码的人确认后直接合并了，不用成员同意',
+      '使用绑定码的账号确认后已直接合并，无需成员确认',
     )
     expect(
       bindingOutcome(
         binding({ status: 'confirmed', decidedBy: { id: 'bob', displayName: 'bob' } }),
         now,
       ),
-    ).toBe('「bob」确认后合并了')
+    ).toBe('「bob」确认后已合并')
     expect(bindingOutcome(binding({ status: 'rejected', decidedBy: null }), now)).toBe(
-      '「已删除的成员」拒绝了，没有合并',
+      '「已删除的成员」已拒绝，未合并',
     )
     expect(
       bindingOutcome(binding({ status: 'cancelled', note: '等确认期间对象被合并了' }), now),
-    ).toBe('作废了：等确认期间对象被合并了')
+    ).toBe('已作废：等确认期间对象被合并了')
     expect(bindingOutcome(binding({ status: 'expired' }), now)).toBe(
-      '「bob」在期限内没有处理，作废了',
+      '「bob」未在期限内处理，已作废',
     )
   })
 })

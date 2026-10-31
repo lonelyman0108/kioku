@@ -7,6 +7,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { icons } from '../icons'
 import { formatTime } from '../time'
+import Hint from './Hint.vue'
 
 const props = defineProps<{ spaceId: string; editable: boolean }>()
 // 有没有没保存的修改：交给页面统一做离开前的确认
@@ -82,9 +83,11 @@ async function save() {
     <template #header>
       <h2 class="font-medium">抽取预算</h2>
       <p class="mt-1 text-sm text-muted">
-        从群聊与私聊里抽取事实、Dream 整理记忆花的
-        token，两者共用。用到八成时概览会提醒；用完之后只写会话摘要、不再抽取事实，Dream
-        也不再整理，下个月恢复（按 UTC 的自然月算）。每个对象每天最多写这么多条事实，防止被人刷。
+        抽取事实与 Dream 整理共用此 token 预算。
+        <Hint>
+          用量达到 80% 时在概览提醒。用完后本月仅写会话摘要，不再抽取事实，Dream 暂停，下月恢复（按
+          UTC 自然月计算）。每个联系人每天的事实写入有上限，防止恶意刷写。
+        </Hint>
       </p>
     </template>
     <UAlert
@@ -118,7 +121,7 @@ async function save() {
             class="w-44"
           />
         </UFormField>
-        <UFormField label="每个对象每天最多写几条">
+        <UFormField label="每个联系人每日写入上限">
           <UInputNumber v-model="form.dailyWritesPerSubject" :min="0" :max="1000" class="w-32" />
         </UFormField>
         <UButton type="submit" :icon="icons.save" :loading="saving" :disabled="!dirty">
@@ -126,8 +129,8 @@ async function save() {
         </UButton>
       </form>
       <p v-else class="text-sm text-muted">
-        每个对象每天最多写 {{ usage.data.value.dailyWritesPerSubject }} 条事实。只有空间 owner
-        能改预算。
+        每个联系人每天最多写入
+        {{ usage.data.value.dailyWritesPerSubject }} 条事实。仅空间所有者可修改预算。
       </p>
     </div>
   </UCard>

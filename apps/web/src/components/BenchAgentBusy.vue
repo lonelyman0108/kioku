@@ -23,7 +23,7 @@ const actions = computed(() => [
     v-if="agentSending"
     color="neutral"
     variant="subtle"
-    title="模型对话正在进行，结束之前这里不能运行。"
+    title="模型对话进行中，结束前无法运行。"
     :actions="actions"
   />
 </template>

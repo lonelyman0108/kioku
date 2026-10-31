@@ -47,7 +47,7 @@ function choose(uri: string) {
   <div class="kioku-markdown" @click="onClick" v-html="html" />
   <UModal
     :open="choices !== null"
-    :title="`关键词「${choices?.keyword}」也在这些记忆里`"
+    :title="`包含关键词「${choices?.keyword}」的记忆`"
     @update:open="(v) => !v && (choices = null)"
   >
     <template #body>

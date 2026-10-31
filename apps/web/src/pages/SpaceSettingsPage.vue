@@ -8,6 +8,7 @@ import { useRoute } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import ExtractionBudget from '../components/ExtractionBudget.vue'
+import Hint from '../components/Hint.vue'
 import LoreImport from '../components/LoreImport.vue'
 import MyDreamSettings from '../components/MyDreamSettings.vue'
 import SpaceExport from '../components/SpaceExport.vue'
@@ -75,7 +76,7 @@ const problem = computed(() => {
   const list = normalized(rows.value)
   const seen = new Set<string>()
   for (const r of list) {
-    if (seen.has(r.domain)) return `domain「${r.domain}」重复了`
+    if (seen.has(r.domain)) return `domain「${r.domain}」重复`
     seen.add(r.domain)
   }
   const parsed = DomainLayers.safeParse({
@@ -85,9 +86,9 @@ const problem = computed(() => {
   const issue = parsed.error.issues[0]
   // domain（记录的键）不合法时，zod 只在外层给一句英文，这里点出是哪个 domain
   if (issue?.code === 'invalid_key') {
-    return `domain「${String(issue.path.at(-1) ?? '')}」格式不对：小写字母开头，只用小写字母、数字和下划线`
+    return `domain「${String(issue.path.at(-1) ?? '')}」格式错误：须以小写字母开头，只能包含小写字母、数字和下划线`
   }
-  return issue?.message ?? '格式不对'
+  return issue?.message ?? '格式错误'
 })
 
 const layerItems = PLAIN_LAYERS.map((l) => ({ label: layerLabels[l], value: l }))
@@ -139,8 +140,11 @@ async function save() {
         <template #header>
           <h2 class="font-medium">domain 默认层</h2>
           <p class="mt-1 text-sm text-muted">
-            在管理界面新建记忆时，按 URI 的 domain 带出层，例如 core:// 默认是基础层。
-            只是默认值，新建时还能改；通过 Key 写入不受影响，没指定层时仍按私人层。
+            新建记忆时按 URI 的 domain 预填层，例如 core:// 默认为基础层。
+            <Hint>
+              仅作用于管理界面，且只是默认值，新建时可以修改。通过 Key
+              写入不受影响，未指定层时仍写入私人层。
+            </Hint>
           </p>
         </template>
         <UAlert
@@ -153,7 +157,7 @@ async function save() {
           <div v-if="baseline === null" class="space-y-2">
             <USkeleton v-for="n in 2" :key="n" class="h-8 w-full" />
           </div>
-          <p v-if="!isOwner" class="text-sm text-muted">只有空间 owner 能改。</p>
+          <p v-if="!isOwner" class="text-sm text-muted">仅空间所有者可修改</p>
           <div v-for="(row, index) in rows" :key="index" class="flex items-center gap-2">
             <UInput
               v-model="row.domain"
@@ -167,13 +171,13 @@ async function save() {
               :icon="icons.remove"
               color="neutral"
               variant="ghost"
-              aria-label="删除这一行"
+              aria-label="删除此行"
               :disabled="!editable"
               @click="rows.splice(index, 1)"
             />
           </div>
           <p v-if="baseline !== null && !rows.length" class="text-sm text-muted">
-            还没有配置，所有 domain 新建时都默认私人层。
+            暂无配置，所有 domain 新建时默认为私人层。
           </p>
           <UAlert v-if="problem" color="warning" variant="subtle" :title="problem" />
           <div v-if="isOwner" class="flex flex-wrap gap-2">
@@ -187,7 +191,7 @@ async function save() {
               添加一行
             </UButton>
             <UButton color="neutral" variant="ghost" :disabled="!editable" @click="fillSuggested">
-              按导入 Lore 的规则填入
+              填入 Lore 导入规则
             </UButton>
             <UButton
               :icon="icons.save"

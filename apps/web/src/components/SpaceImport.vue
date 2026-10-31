@@ -15,6 +15,7 @@ import { formatBytes } from '../backup'
 import { ME_KEY } from '../composables/useSession'
 import { icons } from '../icons'
 import { formatTime } from '../time'
+import Hint from './Hint.vue'
 
 const toast = useToast()
 const router = useRouter()
@@ -41,7 +42,7 @@ const ready = computed(
   () => Boolean(file.value) && !tooLarge.value && Boolean(passphrase.value) && !busy.value,
 )
 // 文件里写的导出人：是文件自带的，谁都能填，界面上不当成核实过的事实
-const exporter = computed(() => preview.value?.exporter.displayName || '（没写）')
+const exporter = computed(() => preview.value?.exporter.displayName || '（未填写）')
 
 async function inspect() {
   if (!ready.value || !file.value) return
@@ -75,7 +76,7 @@ async function importSpace() {
   const c = result.counts
   toast.add({
     title: `已导入「${result.name}」`,
-    description: `文件里导出人的画像层 ${c.ownerMemories} 条、私人层 ${c.privateMemories} 条记忆与 ${c.credentials} 条凭据已归你，共 ${c.memories} 条记忆。Key 没有带过来，给应用重新签发；向量在后台重新生成。`,
+    description: `共导入 ${c.memories} 条记忆。导出人的个人画像层 ${c.ownerMemories} 条、私人层 ${c.privateMemories} 条记忆与 ${c.credentials} 条凭据归当前账号所有。请为应用重新签发 Key；向量在后台重新生成。`,
     color: 'success',
   })
   // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员
@@ -90,10 +91,17 @@ async function importSpace() {
     <template #header>
       <h2 class="font-medium">导入空间</h2>
       <p class="mt-1 text-sm text-muted">
-        把在空间设置里导出的文件导入成一个新空间，你是新空间的
-        owner。导出人的画像层、私人层记忆与凭据导入后都归你，画像层会进你的 agent
-        的启动上下文：只导入你自己导出的、或者导出人同意交给你的文件。secret
-        记忆与托管的凭据值用这个实例的主密钥重新加密；Key 不在文件里，导入之后给应用重新签发。
+        将空间导出文件导入为新空间。仅导入本人导出、或导出人同意移交的文件。
+        <Hint>
+          <p>
+            当前账号成为新空间的所有者。导出人的个人画像层、私人层记忆与凭据导入后归当前账号所有，个人画像层将进入当前账号
+            Agent 的启动加载，被客户端当作指令读取。
+          </p>
+          <p class="mt-1">
+            机密记忆与托管的凭据值使用当前实例的主密钥重新加密。Key
+            不在文件中，导入后需为应用重新签发。
+          </p>
+        </Hint>
       </p>
     </template>
     <UAlert
@@ -101,18 +109,18 @@ async function importSpace() {
       color="warning"
       variant="subtle"
       class="mb-4"
-      title="这个实例没有配置主密钥：文件里有 secret 记忆或托管的凭据时导入不了，先配好 KIOKU_MASTER_KEY 再导入"
+      title="当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。"
     />
     <form class="space-y-4" @submit.prevent="preview ? importSpace() : inspect()">
       <UFormField
         label="导出文件"
         :help="`不超过 ${formatBytes(SPACE_EXPORT_MAX_BYTES)}`"
-        :error="tooLarge ? `文件超过 ${formatBytes(SPACE_EXPORT_MAX_BYTES)} 的上限` : undefined"
+        :error="tooLarge ? `文件超出 ${formatBytes(SPACE_EXPORT_MAX_BYTES)} 上限` : undefined"
       >
         <!-- 不预览文件内容：导出文件是加密的，预览要给它建 blob: 地址当图片加载，会被内容安全策略拦下 -->
         <UFileUpload
           v-model="file"
-          label="选择或拖进导出文件"
+          label="选择或拖入导出文件"
           description=".kioku-space"
           layout="list"
           :file-image="false"
@@ -120,7 +128,7 @@ async function importSpace() {
           :disabled="busy"
         />
       </UFormField>
-      <UFormField label="口令" help="导出时设的口令">
+      <UFormField label="口令" help="导出时设置的口令">
         <UInput
           v-model="passphrase"
           type="password"
@@ -133,31 +141,31 @@ async function importSpace() {
         <UAlert
           color="warning"
           variant="subtle"
-          :title="`文件里写的导出人：「${exporter}」（文件自带的信息，核实不了）`"
+          :title="`文件记录的导出人：「${exporter}」（文件自带信息，无法核实）`"
         >
           <template #description>
             <p>
-              文件里写着从空间「{{ preview.spaceName }}」导出，导出时间
-              {{ formatTime(preview.exportedAt) }}。共 {{ preview.counts.memories }} 条记忆（其中
-              secret {{ preview.counts.secrets }} 条）、{{ preview.counts.personas }} 个人格、{{
-                preview.counts.apps
+              文件记录的来源空间为「{{ preview.spaceName }}」，导出时间
+              {{ formatTime(preview.exportedAt) }}。共
+              {{ preview.counts.memories }} 条记忆（其中机密 {{ preview.counts.secrets }} 条）、{{
+                preview.counts.personas
               }}
-              个应用、{{ preview.counts.subjects }} 个对象。
+              个人格、{{ preview.counts.apps }} 个应用、{{ preview.counts.subjects }} 个联系人。
             </p>
             <p class="mt-1">
-              导入后，文件里导出人的画像层 {{ preview.counts.ownerMemories }} 条、私人层
+              导入后，导出人的个人画像层 {{ preview.counts.ownerMemories }} 条、私人层
               {{ preview.counts.privateMemories }} 条记忆，{{ preview.counts.credentials }} 条凭据与
-              {{ preview.counts.providers }} 个凭据源，以及标记成导出人本人的
-              {{ preview.counts.linkedSubjects }} 个对象都归你；画像层会进你的 agent
-              的启动上下文。只导入你自己导出的、或者导出人同意交给你的文件。
+              {{ preview.counts.providers }} 个凭据源，以及标记为导出人本人的
+              {{ preview.counts.linkedSubjects }} 个联系人均归当前账号所有；个人画像层将进入当前账号
+              Agent 的启动加载。仅导入本人导出、或导出人同意移交的文件。
             </p>
             <p v-if="!preview.exporter.dreamPrivate" class="mt-1">
-              导出人关掉了「让 Dream
-              整理我的画像层与私人层」：导入后在新空间里你的也是关着的，这两层不发给抽取模型，要整理时在新空间的空间设置里打开。
+              导出人已关闭「允许 Dream
+              整理个人画像层与私人层」：新空间中同样保持关闭，这两层不发送给抽取模型。如需整理，请在新空间的空间设置中开启。
             </p>
           </template>
         </UAlert>
-        <UFormField label="新空间的名字" :help="`留空时用导出时的空间名「${preview.spaceName}」`">
+        <UFormField label="新空间名称" :help="`留空时使用导出时的空间名称「${preview.spaceName}」`">
           <UInput
             v-model="name"
             class="w-full"

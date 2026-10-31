@@ -50,19 +50,23 @@ describe('保留期清理的结果', () => {
 describe('暂停的说法', () => {
   const pause = { since: '2026-10-29T05:00:00.000Z', until: '2026-11-28T05:00:00.000Z' }
 
-  it('从备份恢复的：说明恢复出的已删除记录早已到期，要找回的先撤销删除', () => {
+  it('从备份恢复的：说明恢复出的已删除记录早已到期，要找回的先恢复', () => {
     const text = pauseText({ ...pause, reason: 'restored' }, 30)
-    expect(text.title).toMatch(/^从备份恢复于 .+，清理暂停到 .+$/)
-    expect(text.description).toContain('恢复出的已删除记录')
-    expect(text.confirm).toContain('删除超过 30 天的会被永久删除')
+    expect(text.title).toMatch(/^已于 .+ 从备份恢复，清理暂停至 .+$/)
+    expect(text.description).toContain('恢复出的已删除记录多已超过保留期')
+    expect(text.description).toContain('暂停结束后将被永久删除')
+    expect(text.description).toContain('请在暂停结束前到记忆页或凭据页恢复')
+    expect(text.detail).toContain('已删除账号留下的历史仍每天清理')
+    expect(text.confirm).toContain('删除超过 30 天的将被永久删除')
   })
 
-  it('保留期第一次生效的：说明之前删掉的还有一个完整的保留期可以撤销', () => {
+  it('保留期第一次生效的：说明之前删掉的还有一个完整的保留期可以恢复', () => {
     const text = pauseText({ ...pause, reason: 'started' }, 7)
-    expect(text.title).toMatch(/^保留期从 .+ 开始生效，第一次清理在 .+$/)
-    expect(text.description).toContain('之前删掉的到现在都还能撤销')
-    expect(text.description).toContain('删账号留下的历史照常每天清理')
-    expect(text.confirm).toContain('已经删除超过 7 天的')
+    expect(text.title).toMatch(/^保留期自 .+ 起生效，首次清理在 .+$/)
+    expect(text.description).toContain('此前删除的内容在首次清理前仍可恢复')
+    expect(text.detail).toContain('先留出一个完整的保留期')
+    expect(text.detail).toContain('已删除账号留下的历史仍每天清理')
+    expect(text.confirm).toContain('已删除超过 7 天的')
   })
 })
 
@@ -81,17 +85,17 @@ describe('最近一次没做完的说法', () => {
     expect(attemptNote(attempt('2026-10-29T09:17:00.000Z', 1, true), now)).toBeNull()
   })
 
-  it('没做完时说删了多少、下一个小时再试', () => {
+  it('没做完时说删了多少、下一小时重试', () => {
     const note = attemptNote(attempt('2026-10-29T09:17:00.000Z', 2), now)
-    expect(note).toContain('这次删了 7 条')
-    expect(note).toMatch(/下一个小时再试$/)
+    expect(note).toContain('本次删除 7 条')
+    expect(note).toMatch(/下一小时重试$/)
   })
 
-  it('今天（UTC）已经试满了：明天再试；昨天试满的今天照常再试', () => {
+  it('今天（UTC）已经试满了：明天重试；昨天试满的今天照常再试', () => {
     expect(attemptNote(attempt('2026-10-29T09:17:00.000Z', 3), now)).toMatch(
-      /今天已经试了 3 次，明天再试$/,
+      /今天已尝试 3 次，明天重试$/,
     )
-    expect(attemptNote(attempt('2026-10-28T23:17:00.000Z', 3), now)).toMatch(/下一个小时再试$/)
+    expect(attemptNote(attempt('2026-10-28T23:17:00.000Z', 3), now)).toMatch(/下一小时重试$/)
   })
 })
 
@@ -133,9 +137,9 @@ describe('已删除的记忆什么时候永久清除', () => {
     expect(daysUntilPurge(ago(45), pausedUntil(ago(1)), now)).toBe(0)
   })
 
-  it('只知道在暂停时不催：到期的说暂停结束后才清除，没到期的说至少还要多久，都不标警示色', () => {
+  it('只知道在暂停时不催：到期的说暂停结束后清除，没到期的说至少还要多久，都不标警示色', () => {
     expect(purgeNote(ago(45), pausedOnly, now)).toEqual({
-      text: '暂停结束后才会清除',
+      text: '暂停结束后清除',
       soon: false,
     })
     expect(purgeNote(ago(28), pausedOnly, now)).toEqual({
@@ -150,11 +154,11 @@ describe('已删除的记忆什么时候永久清除', () => {
 
   it('已删除的凭据源：还有没删除的凭据指着时不说几天；否则从保留期的起点算，规则和别的已删除记录一样', () => {
     expect(providerPurgeNote({ retentionFrom: null }, normal, now)).toEqual({
-      text: '还有凭据指着，不会清除',
+      text: '仍有凭据绑定，暂不清除',
       soon: false,
     })
     expect(providerPurgeNote({ retentionFrom: null }, pausedUntil(later(12)), now)).toEqual({
-      text: '还有凭据指着，不会清除',
+      text: '仍有凭据绑定，暂不清除',
       soon: false,
     })
     // 起点是指着它的已删除凭据里最晚的删除时间时，照样按它算
@@ -175,32 +179,32 @@ describe('已删除的记忆什么时候永久清除', () => {
       soon: false,
     })
     expect(providerPurgeNote({ retentionFrom: ago(45) }, pausedOnly, now)).toEqual({
-      text: '暂停结束后才会清除',
+      text: '暂停结束后清除',
       soon: false,
     })
   })
 
-  it('已过期列表给「已让出」的说明：按让出的时间算，没让出的一直留着；暂停的说法和已删除的一样', () => {
+  it('已过期列表给「URI 已释放」的说明：按释放的时间算，未释放的一直保留；暂停的说法和已删除的一样', () => {
     expect(releasedNotice({ days: 7, paused: false, pausedUntil: null })).toBe(
-      '标着「已让出」的，让出超过 7 天会被永久清除，之后只能从备份找回；没让出的一直留着。',
+      '标记为「URI 已释放」的记忆，释放超过 7 天后永久清除，之后只能从备份恢复；未释放的记忆一直保留。',
     )
     expect(releasedNotice(pausedOnly)).toBe(
-      '标着「已让出」的，让出超过 30 天会被永久清除，之后只能从备份找回；没让出的一直留着。清理暂停中，暂时不会永久清除。',
+      '标记为「URI 已释放」的记忆，释放超过 30 天后永久清除，之后只能从备份恢复；未释放的记忆一直保留。清理已暂停，暂不永久清除。',
     )
     const paused = releasedNotice(pausedUntil(later(12)))
-    expect(paused).toMatch(/没让出的一直留着。清理暂停到 .+/)
-    expect(paused).toContain('这之前一条都不会清除')
+    expect(paused).toMatch(/未释放的记忆一直保留。清理暂停至 .+/)
+    expect(paused).toContain('在此之前不会清除任何内容')
   })
 
   it('列表上方说明多少天之后永久清除；暂停中的说暂时不会清除，知道到什么时候的再说出时间', () => {
     expect(deletionNotice({ days: 7, paused: false, pausedUntil: null })).toBe(
-      '删除超过 7 天会被永久清除，之后只能从备份找回。',
+      '删除超过 7 天后永久清除，之后只能从备份恢复。',
     )
     expect(deletionNotice(pausedOnly)).toBe(
-      '删除超过 30 天会被永久清除，之后只能从备份找回。清理暂停中，暂时不会永久清除。',
+      '删除超过 30 天后永久清除，之后只能从备份恢复。清理已暂停，暂不永久清除。',
     )
     const paused = deletionNotice(pausedUntil(later(12)))
-    expect(paused).toMatch(/^删除超过 30 天会被永久清除，之后只能从备份找回。清理暂停到 .+/)
-    expect(paused).toContain('这之前一条都不会清除')
+    expect(paused).toMatch(/^删除超过 30 天后永久清除，之后只能从备份恢复。清理暂停至 .+/)
+    expect(paused).toContain('在此之前不会清除任何内容')
   })
 })
