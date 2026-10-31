@@ -153,6 +153,16 @@ const unsaved = computed(() => [
         </template>
         <NoteLine v-if="recallSettings.isError.value" tone="error">
           {{ readFailure(recallSettings.error.value) }}
+          <template #actions>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :loading="recallSettings.isFetching.value"
+              @click="recallSettings.refetch()"
+              >重试</UButton
+            >
+          </template>
         </NoteLine>
         <USkeleton v-if="recallSettings.isPending.value" class="h-16 w-full" />
         <form

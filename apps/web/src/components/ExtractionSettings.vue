@@ -137,6 +137,16 @@ async function clear() {
     <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
     <NoteLine v-if="settings.isError.value" tone="error">
       {{ readFailure(settings.error.value) }}
+      <template #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :loading="settings.isFetching.value"
+          @click="settings.refetch()"
+          >重试</UButton
+        >
+      </template>
     </NoteLine>
     <!-- 没读到过设置时不给表单：空表单保存会盖掉读不到的那份。重新读取时错误会被清掉，所以只看有没有数据 -->
     <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />

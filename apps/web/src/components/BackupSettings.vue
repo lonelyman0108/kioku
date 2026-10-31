@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { BackupRunStatus, BackupSettingsView, BackupTestResult } from '@kioku/contracts'
+import type { BackupRunStatus, BackupTestResult } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { classifyError, formatBytes, hourLabel } from '../backup'
+import {
+  BACKUP_OBJECTS_KEY,
+  backupObjectsKey,
+  classifyError,
+  formatBytes,
+  hourLabel,
+} from '../backup'
 import { useBackupForm } from '../composables/useBackupForm'
 import { needsNewKey, newKeyHint } from '../endpointKey'
 import { icons } from '../icons'
@@ -22,20 +28,19 @@ const dirtyModel = defineModel<boolean>('dirty', { default: false })
 const toast = useToast()
 const queryClient = useQueryClient()
 const queryKey = ['settings', 'backup']
-const objectsKey = ['settings', 'backup', 'objects']
 
 const settings = useQuery({ queryKey, queryFn: api.backupSettings })
 const view = computed(() => settings.data.value)
 const configured = computed(() => Boolean(view.value?.configured))
 const objects = useQuery({
-  queryKey: objectsKey,
+  queryKey: computed(() => backupObjectsKey(view.value)),
   queryFn: api.backupObjects,
   enabled: configured,
   retry: false,
 })
 
 const hours = Array.from({ length: 24 }, (_, hour) => ({ label: hourLabel(hour), value: hour }))
-const { form, dirty, fill } = useBackupForm(view)
+const { form, dirty, commit } = useBackupForm(view, queryClient, queryKey)
 
 // 换了接口主机又没填 Secret：服务端会拒（Secret 不能清除），提交之前就在 Secret 旁边说明，保存按钮不可点
 const secretMissing = computed(() =>
@@ -63,11 +68,10 @@ async function save() {
       hour: form.hour,
       keep: form.keep,
     })
+    await commit(saved)
     form.secretAccessKey = ''
-    queryClient.setQueryData(queryKey, saved)
-    fill(saved)
     result.value = null
-    await queryClient.invalidateQueries({ queryKey: objectsKey })
+    await queryClient.invalidateQueries({ queryKey: BACKUP_OBJECTS_KEY })
     toast.add({ title: '已保存', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
@@ -150,7 +154,7 @@ watch([() => run.data.value, () => run.isError.value], async ([status, failed]) 
   stopWaiting()
   if (status?.state === 'finished' && status.outcome) toast.add(OUTCOMES[status.outcome])
   await queryClient.invalidateQueries({ queryKey, exact: true })
-  await queryClient.invalidateQueries({ queryKey: objectsKey })
+  await queryClient.invalidateQueries({ queryKey: BACKUP_OBJECTS_KEY })
 })
 
 const confirmingClear = ref(false)
@@ -165,8 +169,8 @@ async function clear() {
     form.secretAccessKey = ''
     // 清掉之后表单回到空白，正在填的内容也不留：先按「没有设置」填好界面（之后的刷新出错也不会停在旧的设置上），再去刷新。
     // 存储桶里的列表直接扔掉，不再去列
-    queryClient.removeQueries({ queryKey: objectsKey })
-    const cleared: BackupSettingsView = {
+    queryClient.removeQueries({ queryKey: BACKUP_OBJECTS_KEY })
+    await commit({
       configured: false,
       endpoint: null,
       region: null,
@@ -177,9 +181,7 @@ async function clear() {
       hour: null,
       keep: null,
       status: { lastSuccess: null, lastError: null },
-    }
-    queryClient.setQueryData(queryKey, cleared)
-    fill(cleared)
+    })
     await queryClient.invalidateQueries({ queryKey, exact: true })
     toast.add({ title: '已清除，定时备份已停止', color: 'success' })
   } catch (err) {
@@ -203,6 +205,16 @@ async function clear() {
       <!-- 标题和后果说明一直在；后台刷新失败时读到过的设置留着，错误放在上面 -->
       <NoteLine v-if="settings.isError.value" tone="error">
         {{ readFailure(settings.error.value) }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="settings.isFetching.value"
+            @click="settings.refetch()"
+            >重试</UButton
+          >
+        </template>
       </NoteLine>
       <!-- 没读到过设置时不给表单：空表单保存会盖掉读不到的那份。重新读取时错误会被清掉，所以只看有没有数据 -->
       <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
@@ -339,6 +351,7 @@ async function clear() {
             objects.error.value instanceof ApiError ? objects.error.value.message : '无法列出备份'
           }}
         </NoteLine>
+        <USkeleton v-else-if="objects.isPending.value" class="h-16 w-full" />
         <p v-else-if="objects.data.value && !objects.data.value.objects.length" class="text-muted">
           暂无备份
         </p>

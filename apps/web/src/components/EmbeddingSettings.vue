@@ -320,6 +320,16 @@ async function rebuild() {
       <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
       <NoteLine v-if="settings.isError.value" tone="error">
         {{ readFailure(settings.error.value) }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="settings.isFetching.value"
+            @click="settings.refetch()"
+            >重试</UButton
+          >
+        </template>
       </NoteLine>
       <!--
         没读到过设置时不给表单：空表单会被当成第一次配置，保存就盖掉了读不到的那份。
@@ -477,6 +487,16 @@ async function rebuild() {
         <!-- 后台刷新失败时读到过的进度留着，错误放在上面 -->
         <NoteLine v-if="status.isError.value" tone="error">
           {{ readFailure(status.error.value) }}
+          <template #actions>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :loading="status.isFetching.value"
+              @click="status.refetch()"
+              >重试</UButton
+            >
+          </template>
         </NoteLine>
         <div v-if="status.data.value" class="space-y-3">
           <div class="flex flex-wrap items-baseline gap-x-2">

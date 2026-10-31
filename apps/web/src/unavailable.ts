@@ -2,9 +2,21 @@ import type { Router } from 'vue-router'
 
 // 连接失败页的重试：走一遍路由，看还有没有留在这一页
 
-// 只回到站内路径
-export const retryTarget = (next: unknown): string =>
-  typeof next === 'string' && next.startsWith('/') && !next.startsWith('//') ? next : '/'
+const SAME_SITE = 'http://kioku.invalid'
+
+// 只回到站内路径。这个地址还会交给 location.assign，所以按浏览器的解析结果核对：
+// /\example.com、夹了制表符的写法看着是站内路径，解析出来是别的站点；
+// /.//example.com 解析出来的路径以 // 开头，交给浏览器时又成了别的站点
+export function retryTarget(next: unknown): string {
+  if (typeof next !== 'string' || !next.startsWith('/')) return '/'
+  try {
+    const url = new URL(next, SAME_SITE)
+    if (url.origin !== SAME_SITE || url.pathname.startsWith('//')) return '/'
+    return url.pathname + url.search + url.hash
+  } catch {
+    return '/'
+  }
+}
 
 export type RetryResult = 'recovered' | 'unreachable' | 'assets'
 

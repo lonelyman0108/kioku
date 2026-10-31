@@ -430,7 +430,9 @@ describe('读取失败', () => {
 
   it('备份表单的改动状态都来自 useBackupForm：和填入时的版本比，不和最新的设置比', () => {
     const script = scriptOf(backupSettings)
-    expect(script).toContain('const { form, dirty, fill } = useBackupForm(view)')
+    expect(script).toContain(
+      'const { form, dirty, commit } = useBackupForm(view, queryClient, queryKey)',
+    )
     expect(script).not.toMatch(/const (dirty|form)\b/)
   })
 
@@ -441,6 +443,47 @@ describe('读取失败', () => {
       )!
       expect(condition(side)).toMatch(/view$/)
     }
+  })
+
+  it('存储桶的列表按位置分开缓存，失效和删除都走前缀：立即备份之后还会刷新', () => {
+    const script = scriptOf(backupSettings)
+    expect(script).toContain('queryKey: computed(() => backupObjectsKey(view.value))')
+    expect(script.match(/invalidateQueries\(\{ queryKey: BACKUP_OBJECTS_KEY \}\)/g)).toHaveLength(2)
+    expect(script).toContain('queryClient.removeQueries({ queryKey: BACKUP_OBJECTS_KEY })')
+    const finished = /这一次做完了[^]*?\n\}\)/.exec(script)![0]
+    expect(finished).toContain('invalidateQueries({ queryKey: BACKUP_OBJECTS_KEY })')
+    const save = /async function save\(\)[^]*?\n\}/.exec(script)![0]
+    expect(save).toContain('invalidateQueries({ queryKey: BACKUP_OBJECTS_KEY })')
+  })
+
+  it('保存之后经 commit 写缓存和表单，再清掉填过的 Secret', () => {
+    const save = /async function save\(\)[^]*?\n\}/.exec(scriptOf(backupSettings))![0]
+    expect(save).not.toContain('setQueryData')
+    expect(save.indexOf('await commit(saved)')).toBeGreaterThan(-1)
+    expect(save.indexOf('await commit(saved)')).toBeLessThan(
+      save.indexOf("form.secretAccessKey = ''"),
+    )
+  })
+
+  // 读取失败之后表单不在了，要有地方重新读
+  it.each([
+    ['EmbeddingSettings', embeddingSettings, 'settings'],
+    ['EmbeddingSettings', embeddingSettings, 'status'],
+    ['ExtractionSettings', extractionSettings, 'settings'],
+    ['BackupSettings', backupSettings, 'settings'],
+    ['RetentionSettings', retentionSettings, 'settings'],
+    ['SettingsPage', settingsPage, 'recallSettings'],
+  ])('%s 的 %s 读取失败时有重试，调对应查询的 refetch', (name, source, query) => {
+    const note = elementsOf(template(source)).find(
+      (el) => el.tag === 'NoteLine' && condition(el) === `${query}.isError.value`,
+    )!
+    const actions = (note.children ?? []).find(
+      (c) => c.tag === 'template' && directive(c, 'slot')?.arg?.content === 'actions',
+    )!
+    const button = elementsOf(actions).find((el) => el.tag === 'UButton')!
+    expect(textOf(button), name).toBe('重试')
+    expect(handler(button, 'click'), name).toBe(`${query}.refetch()`)
+    expect(bound(button, 'loading'), name).toBe(`${query}.isFetching.value`)
   })
 
   it('存储桶的列表出错时只显示错误：外部的状态，错误下面还是旧桶的备份会有误导', () => {
@@ -457,6 +500,12 @@ describe('读取失败', () => {
     const list = elements.find((el) => el.tag === 'ul')!
     expect(condition(list)).toBeUndefined()
     expect(directive(list, 'else-if')?.exp?.content).toBe('objects.data.value')
+    // 换了位置之后还没读到时：显示在读，不是上一个位置的列表
+    const skeleton = elements.find(
+      (el) =>
+        el.tag === 'USkeleton' && directive(el, 'else-if')?.exp?.content.startsWith('objects'),
+    )!
+    expect(directive(skeleton, 'else-if')?.exp?.content).toBe('objects.isPending.value')
   })
 
   it('错误文字：服务端给了说明就用它', () => {
@@ -696,22 +745,20 @@ describe('带后果的文字整句留着', () => {
 describe('清除设置', () => {
   const body = (source: string) => /async function clear\(\)[^]*?\n\}/.exec(scriptOf(source))![0]
 
-  it.each([
-    ['抽取模型', extractionSettings],
-    ['备份', backupSettings],
-  ])(
-    '%s：先按「没有设置」写进缓存再去刷新：刷新失败时不能停在旧的设置上，清空的表单一直算有改动',
-    (name, source) => {
-      const clear = body(source)
-      const written = clear.indexOf('queryClient.setQueryData')
-      expect(written, name).toBeGreaterThan(-1)
-      expect(clear.indexOf('invalidateQueries({ queryKey')).toBeGreaterThan(written)
-      expect(clear).toContain('configured: false')
-    },
-  )
+  it('抽取模型：先按「没有设置」写进缓存再去刷新：刷新失败时不能停在旧的设置上，清空的表单一直算有改动', () => {
+    const clear = body(extractionSettings)
+    const written = clear.indexOf('queryClient.setQueryData')
+    expect(written).toBeGreaterThan(-1)
+    expect(clear.indexOf('invalidateQueries({ queryKey')).toBeGreaterThan(written)
+    expect(clear).toContain('configured: false')
+  })
 
-  it('备份清除时表单回到空白，填了一半的内容也不留', () => {
-    expect(body(backupSettings)).toContain('fill(cleared)')
+  it('备份：同样先写再刷新，表单回到空白，填了一半的内容也不留', () => {
+    const clear = body(backupSettings)
+    const written = clear.indexOf('await commit({')
+    expect(written).toBeGreaterThan(-1)
+    expect(clear.indexOf('invalidateQueries({ queryKey')).toBeGreaterThan(written)
+    expect(clear).toContain('configured: false')
   })
 })
 
@@ -837,28 +884,70 @@ describe('连接失败', () => {
     expect(text).toContain('持续无法连接时，请检查服务进程、数据库与反向代理的状态。')
   })
 
-  it('只回到站内路径', () => {
-    expect(retryTarget('/spaces/s1/memories?uri=core://agent')).toBe(
+  it('只回到站内路径：地址还会交给 location.assign，按浏览器的解析结果核对', () => {
+    for (const path of [
+      '/',
       '/spaces/s1/memories?uri=core://agent',
-    )
-    for (const next of ['//example.com', 'https://example.com', '', undefined, ['/spaces']]) {
+      '/settings?section=backup#x',
+    ]) {
+      expect(retryTarget(path)).toBe(path)
+    }
+    for (const next of [
+      '//example.com',
+      '//example.com/spaces',
+      '/.//example.com',
+      '/spaces/..//example.com',
+      'https://example.com',
+      'spaces/s1',
+      '/\\example.com',
+      '/\t/example.com',
+      '/\n/example.com',
+      '//[',
+      '',
+      undefined,
+      ['/spaces'],
+    ]) {
       expect(retryTarget(next)).toBe('/')
     }
     expect(script).toContain('retryTarget(route.query.next)')
   })
 
-  it('重试有反馈：转圈，没成功时说一声，页面文件加载不到时说要刷新', () => {
-    const button = elementsOf(template(unavailablePage)).find((el) => el.tag === 'UButton')!
-    expect(bound(button, 'loading')).toBe('retrying')
-    expect(handler(button, 'click')).toBe('retry')
-    const note = elementsOf(template(unavailablePage)).find((el) => condition(el) === 'failedAt')!
+  const branch = (name: 'if' | 'else') =>
+    elementsOf(template(unavailablePage)).find(
+      (el) => el.tag === 'template' && directive(el, name) !== undefined,
+    )!
+  const buttonsOf = (node: TemplateNode) => elementsOf(node).filter((el) => el.tag === 'UButton')
+  const titleOf = (node: TemplateNode) =>
+    attr(
+      elementsOf(node).find((el) => el.tag === 'SectionHeading')!,
+      'title',
+    )
+
+  it('连不上：重试有反馈，转圈，还是连不上时说一声', () => {
+    const unreachable = branch('else')
+    expect(titleOf(unreachable)).toBe('无法连接到服务')
+    const [button, ...others] = buttonsOf(unreachable)
+    expect(others).toEqual([])
+    expect(textOf(button!)).toBe('重试')
+    expect(bound(button!, 'loading')).toBe('retrying')
+    expect(handler(button!, 'click')).toBe('retry')
+    const note = elementsOf(unreachable).find((el) => condition(el) === 'failedAt')!
     expect(attr(note, 'role')).toBe('status')
     expect(flat(unavailablePage)).toContain('仍无法连接（{{formatTime(failedAt)}}）')
-    expect(flat(unavailablePage)).toContain(
-      '页面文件加载失败（{{formatTime(failedAt)}}）。服务可能已升级，请刷新页面。',
-    )
-    expect(script).toContain("if (result === 'recovered') return")
-    expect(script).toContain("assetsFailed.value = result === 'assets'")
+    expect(script).toContain("if (result === 'unreachable') failedAt.value")
+  })
+
+  it('页面文件加载不到：接口是通的，标题、说明都换掉，按钮改成整页跳回目标地址', () => {
+    const assets = branch('if')
+    expect(condition(assets)).toBe('assetsFailed')
+    expect(titleOf(assets)).toBe('页面文件已更新')
+    expect(flat(unavailablePage)).toContain('重新载入后回到之前的页面。')
+    const [button, ...others] = buttonsOf(assets)
+    expect(others).toEqual([])
+    expect(textOf(button!)).toBe('重新载入')
+    expect(handler(button!, 'click')).toBe('reload')
+    expect(script).toContain('const reload = () => window.location.assign(target.value)')
+    expect(script).toContain("if (result === 'assets') assetsFailed.value = true")
   })
 
   // 和实际一样：守卫连不上时转回连接失败页；页面文件按需加载
