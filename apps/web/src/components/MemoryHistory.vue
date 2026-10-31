@@ -8,7 +8,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import { icons } from '../icons'
-import { actorLabel, eventLabel, layerLabels, sensitivityLabels } from '../labels'
+import { actorLabel, eventLabel, layerLabels, memoryViaLabels, sensitivityLabels } from '../labels'
 import { formatRelative, formatTime, isExpired } from '../time'
 
 const props = defineProps<{
@@ -197,7 +197,9 @@ async function restore() {
       <p class="text-xs text-muted">
         恢复只改正文、disclosure、priority 与关键词，不改
         URI、层、敏感级与有效期（过期的记忆在「已过期」里重新生效）；层或归属和现在不同、敏感级比现在高的版本不能恢复。
-        <template v-if="history.data.value?.truncated">只列出了最近的 500 次改动。</template>
+        <template v-if="history.data.value?.truncated">
+          只列出了最近的 500 次改动与 100 次查看。
+        </template>
       </p>
       <ol class="space-y-3">
         <li
@@ -212,6 +214,9 @@ async function restore() {
             />
             <span class="font-medium">{{ eventLabel(event.type).label }}</span>
             <span class="text-muted">{{ actorLabel(event.actor).name }}</span>
+            <span v-if="event.via" class="text-xs text-muted">
+              {{ memoryViaLabels[event.via] ?? event.via }}
+            </span>
             <UBadge v-if="isCurrent(event)" size="sm" variant="subtle">现在的版本</UBadge>
             <time
               :datetime="event.createdAt"

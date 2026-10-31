@@ -691,7 +691,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         layer: 'persona',
         glossary: ['口吻'],
       })
-      expect((await read('home://wifi')).content).toBe('无线密码 hunter2-secret')
+      // 管理界面默认不给机密正文；用目标实例的主密钥解得开，见下面
+      expect((await read('home://wifi')).content).toBeNull()
       const [wifi] = await withSpace(database.db, newSpace, (tx) =>
         tx.select().from(memories).where(eq(memories.path, 'wifi')),
       )

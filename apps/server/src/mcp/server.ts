@@ -145,7 +145,7 @@ export function buildMcpServer(
     },
     ({ uri }) =>
       tool(async () => {
-        const view = await memory.get(uri)
+        const view = await memory.get(uri, 'kioku_get')
         // 占位符按记忆的主人解析：只有私人层的记忆能引用凭据，主人就是读者自己
         const identifiers = [...placeholderIdentifiers(view.content ?? '')]
         if (!identifiers.length) return formatMemory(view)
@@ -167,7 +167,9 @@ export function buildMcpServer(
     },
     ({ of }) =>
       tool(async () =>
-        of ? formatChildren(await memory.children(of)) : formatDomains(await memory.domains()),
+        of
+          ? formatChildren(await memory.children(of, 'kioku_list'))
+          : formatDomains(await memory.domains()),
       ),
   )
 
@@ -234,20 +236,23 @@ export function buildMcpServer(
     (args) =>
       tool(async () =>
         withPlaintextReminder(
-          await memory.update({
-            uri: args.uri,
-            ...(args.content !== undefined ? { content: args.content } : {}),
-            ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
-            ...(args.priority !== undefined ? { priority: args.priority } : {}),
-            ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
-            ...(args.layer ? { layer: args.layer } : {}),
-            ...(args.glossary_add ? { glossaryAdd: args.glossary_add } : {}),
-            ...(args.glossary_remove ? { glossaryRemove: args.glossary_remove } : {}),
-            ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
-            ...(args.expected_version !== undefined
-              ? { expectedVersion: args.expected_version }
-              : {}),
-          }),
+          await memory.update(
+            {
+              uri: args.uri,
+              ...(args.content !== undefined ? { content: args.content } : {}),
+              ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
+              ...(args.priority !== undefined ? { priority: args.priority } : {}),
+              ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
+              ...(args.layer ? { layer: args.layer } : {}),
+              ...(args.glossary_add ? { glossaryAdd: args.glossary_add } : {}),
+              ...(args.glossary_remove ? { glossaryRemove: args.glossary_remove } : {}),
+              ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
+              ...(args.expected_version !== undefined
+                ? { expectedVersion: args.expected_version }
+                : {}),
+            },
+            { via: 'kioku_update' },
+          ),
         ),
       ),
   )
@@ -279,7 +284,9 @@ export function buildMcpServer(
       },
     },
     ({ from, to, layer }) =>
-      tool(async () => formatMemory(await memory.move({ from, to, ...(layer ? { layer } : {}) }))),
+      tool(async () =>
+        formatMemory(await memory.move({ from, to, ...(layer ? { layer } : {}) }, 'kioku_move')),
+      ),
   )
 
   server.registerTool(

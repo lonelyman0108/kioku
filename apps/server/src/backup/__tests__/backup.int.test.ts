@@ -422,12 +422,12 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       { cookie },
     )
     expect(((await revealed.json()) as CredentialValues).values).toEqual({ password: 'nas-pass' })
-    // 序列推到了写回的最大值：之后写下的历史接着编号
+    // 序列推到了写回的最大值：之后写下的历史接着编号。上面 Key 读 secret 记了一条访问事件，这次修改是下一条
     await write('PATCH', { uri: 'home://nas', content: '恢复之后改的' })
     const [after] = await inSpace((tx) =>
       tx.execute<{ max: number }>(sql`select max(id)::int as max from memory_events`),
     )
-    expect(after!.max).toBe(events!.max + 1)
+    expect(after!.max).toBe(events!.max + 2)
     // 向量不在备份里，由补齐任务重新生成
     expect(await embeddings()).toBe(0)
     await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])

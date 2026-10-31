@@ -1,5 +1,10 @@
 <script setup lang="ts">
-import { PLAIN_LAYERS, URI_PATTERN, type MemoryView, type PlainLayer } from '@kioku/contracts'
+import {
+  PLAIN_LAYERS,
+  URI_PATTERN,
+  type ConsoleMemoryView,
+  type PlainLayer,
+} from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
@@ -7,9 +12,9 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { layerLabels } from '../labels'
 
-const props = defineProps<{ spaceId: string; memory: MemoryView }>()
+const props = defineProps<{ spaceId: string; memory: ConsoleMemoryView }>()
 const open = defineModel<boolean>('open', { required: true })
-const emit = defineEmits<{ done: [memory: MemoryView, from: string] }>()
+const emit = defineEmits<{ done: [memory: ConsoleMemoryView, from: string] }>()
 const queryClient = useQueryClient()
 
 const isPlain = (layer: string): layer is PlainLayer =>

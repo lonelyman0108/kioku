@@ -1,7 +1,13 @@
 import type { AppInfo, KeyScopes } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { benchAccountLabel, restrictedAppsLabel, scopesSummary } from '../labels'
+import {
+  benchAccountLabel,
+  eventLabel,
+  memoryViaLabels,
+  restrictedAppsLabel,
+  scopesSummary,
+} from '../labels'
 
 const app = (id: string, name: string, owner: string): AppInfo => ({
   id,
@@ -42,6 +48,17 @@ describe('Key 的权限', () => {
     expect(scopesSummary({ ...scopes, admin: true })).toBe(
       '读 2 层 · 写 1 层 · 最高私密 · 跨人格 / 应用写入',
     )
+  })
+})
+
+describe('记忆事件', () => {
+  it('访问有自己的说法，不把类型名显示出来', () => {
+    expect(eventLabel('access').label).toBe('查看正文')
+  })
+
+  it('访问经由哪里都有说法', () => {
+    const vias = ['console', 'rest', 'kioku_get', 'kioku_list', 'kioku_update', 'kioku_move']
+    expect(Object.keys(memoryViaLabels).sort()).toEqual([...vias].sort())
   })
 })
 

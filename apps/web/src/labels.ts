@@ -114,6 +114,17 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
   expire: { label: '过期后让出 URI', icon: icons.expired },
   reactivate: { label: '重新生效', icon: icons.reactivate },
   confirm: { label: '确认来源', icon: icons.confirmed },
+  access: { label: '查看正文', icon: icons.reveal },
+}
+
+// 机密记忆的访问事件经由哪里
+export const memoryViaLabels: Record<string, string> = {
+  console: '在管理界面查看',
+  rest: '通过 REST 接口',
+  kioku_get: '通过 kioku_get',
+  kioku_list: '通过 kioku_list',
+  kioku_update: '修改后的结果（kioku_update）',
+  kioku_move: '移动后的结果（kioku_move）',
 }
 
 export function eventLabel(type: string): { label: string; icon: string } {

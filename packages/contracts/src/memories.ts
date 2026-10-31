@@ -31,7 +31,7 @@ export const MemoryView = z
     sensitivity: Sensitivity,
     provenance: Provenance,
     originScope: z.string(),
-    // secret 没有显式读取权限时为 null
+    // 测试台读 secret 时为 null；管理界面见 ConsoleMemoryView
     content: z.string().nullable(),
     priority: z.number().int(),
     disclosure: z.string().nullable(),
@@ -45,6 +45,17 @@ export const MemoryView = z
   })
   .meta({ id: 'MemoryView' })
 export type MemoryView = z.infer<typeof MemoryView>
+
+// 管理界面读到的记忆。接入方的 MemoryView 不变，多的字段只给管理界面
+export const ConsoleMemoryView = MemoryView.extend({
+  // secret 有正文、这次没给（content 为 null），要显式查看（reveal），查看记一次访问
+  contentHidden: z.boolean(),
+})
+export type ConsoleMemoryView = z.infer<typeof ConsoleMemoryView>
+
+// 显式查看 secret 的正文，记一条访问事件
+export const RevealMemoryRequest = z.object({ memoryId: z.uuid() })
+export type RevealMemoryRequest = z.infer<typeof RevealMemoryRequest>
 
 // 树浏览的一个子节点。exists 为 false 表示这一级路径本身没有记忆，只是下面有调用方读得到的后代，
 // 像文件系统里的目录一样显示出来；此时 id、layer 等字段为 null
@@ -137,3 +148,8 @@ export const MemoryChildren = z
   })
   .meta({ id: 'MemoryChildren' })
 export type MemoryChildren = z.infer<typeof MemoryChildren>
+
+export const ConsoleMemoryChildren = MemoryChildren.extend({
+  parent: z.union([ConsoleMemoryView, z.null()]),
+})
+export type ConsoleMemoryChildren = z.infer<typeof ConsoleMemoryChildren>

@@ -136,12 +136,14 @@ export function memoryServiceForKey(
     masterKey: deps.masterKey,
     actor: { keyId: key.keyId },
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(key.spaceId, memoryId),
+    secretRead: 'audited',
     ...options,
   })
 }
 
 // 管理界面：按成员角色给权限，能看到空间里全部人格与应用的记忆，私人层只看得到自己的；
-// editor 只能写自己是主人的应用的应用层。能显式读 secret 的成员在树与列表里也看得到 secret 记忆。
+// editor 只能写自己是主人的应用的应用层。能显式读 secret 的成员在树与列表里也看得到 secret 记忆，
+// 正文要显式查看（reveal）才给。
 // 调用方已经读出了空间里的全部应用时传进 spaceApps，不再为 editor 查一次
 export async function memoryServiceForConsole(
   deps: Deps,
@@ -160,6 +162,7 @@ export async function memoryServiceForConsole(
     actor: { accountId },
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(spaceId, memoryId),
     listSecret: access.canReadSecret,
+    secretRead: 'explicit',
   })
 }
 

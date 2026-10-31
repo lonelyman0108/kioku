@@ -58,6 +58,7 @@ const ZERO: RetentionCounts = {
   dreamRuns: 0,
   dreamSuggestions: 0,
   credentialEvents: 0,
+  accessEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,
   subjectBindings: 0,
@@ -563,6 +564,76 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     )
     // 新建凭据时记下的事件是现在写的，还没到期
     expect(events.map((e) => e.type).sort()).toEqual(['access', 'create'])
+  })
+
+  it('读到机密正文的访问事件和凭据的访问事件一样按时间清；别的事件跟着记忆走，到了也留着', async () => {
+    const now = new Date('2026-03-10T12:00:00Z')
+    const m = await createMemory({ uri: 'home://door', content: '门禁', sensitivity: 'secret' })
+    const event = (type: string, createdAt: string) => ({
+      spaceId: ws.spaceId,
+      memoryId: m.id,
+      eventType: type,
+      actorAccountId: ws.accountId,
+      provenance: 'owner' as const,
+      before: { layer: 'private', sensitivity: 'secret', ownerAccountId: ws.accountId },
+      context: { via: 'console' },
+      createdAt: new Date(createdAt),
+    })
+    await inSpace((tx) =>
+      tx
+        .insert(memoryEvents)
+        .values([
+          event('access', '2026-03-01T00:00:00Z'),
+          event('access', '2026-03-09T00:00:00Z'),
+          event('update', '2026-03-01T00:00:00Z'),
+        ]),
+    )
+
+    // 保留 3 天：3 月 7 日中午之前的访问事件到期；同样旧的修改事件留着
+    const { counts } = await purge(3, now)
+    expect(counts).toEqual({ ...ZERO, accessEvents: 1 })
+    const left = await inSpace((tx) =>
+      tx
+        .select({ type: memoryEvents.eventType, at: memoryEvents.createdAt })
+        .from(memoryEvents)
+        .where(eq(memoryEvents.memoryId, m.id)),
+    )
+    expect(left.filter((e) => e.type === 'access').map((e) => e.at.toISOString())).toEqual([
+      '2026-03-09T00:00:00.000Z',
+    ])
+    expect(left.some((e) => e.type === 'update')).toBe(true)
+
+    // 暂停期间不清
+    await inSpace((tx) => tx.insert(memoryEvents).values(event('access', '2026-03-01T00:00:00Z')))
+    const paused = await purgeExpired(database.db, { days: 3, now, paused: true })
+    expect(paused.counts.accessEvents).toBe(0)
+  })
+
+  it('记忆硬删除时访问事件和别的事件一起删', async () => {
+    const m = await createMemory({ uri: 'home://door', content: '门禁', sensitivity: 'secret' })
+    await inSpace((tx) =>
+      tx.insert(memoryEvents).values({
+        spaceId: ws.spaceId,
+        memoryId: m.id,
+        eventType: 'access',
+        actorAccountId: ws.accountId,
+        provenance: 'owner',
+        before: { layer: 'private', sensitivity: 'secret', ownerAccountId: ws.accountId },
+        context: { via: 'console' },
+      }),
+    )
+    await inSpace((tx) =>
+      tx
+        .update(memories)
+        .set({ deletedAt: ago(40) })
+        .where(eq(memories.id, m.id)),
+    )
+    const { counts } = await purge(30, new Date())
+    expect(counts.deletedMemories).toBe(1)
+    const left = await inSpace((tx) =>
+      tx.select().from(memoryEvents).where(eq(memoryEvents.spaceId, ws.spaceId)),
+    )
+    expect(left.filter((e) => e.eventType === 'access')).toEqual([])
   })
 
   it('Dream 的运行记录和抽取记录一样留着本月的；建议过了保留期、并且已经作废的才删，还作数的留着', async () => {

@@ -168,6 +168,8 @@ export const RetentionCounts = z.object({
   dreamSuggestions: z.number().int().default(0),
   // 处理完的绑定记录（合并了、确认、拒绝、作废或过期的）
   subjectBindings: z.number().int().default(0),
+  // 读到 secret 正文的访问事件：和凭据的访问记录一样按时间清
+  accessEvents: z.number().int().default(0),
 })
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 

@@ -24,6 +24,7 @@ const zero: RetentionCounts = {
   dreamRuns: 0,
   dreamSuggestions: 0,
   credentialEvents: 0,
+  accessEvents: 0,
   deletedCredentials: 0,
   deletedProviders: 0,
   subjectBindings: 0,

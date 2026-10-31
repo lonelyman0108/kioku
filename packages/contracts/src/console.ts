@@ -146,13 +146,15 @@ export const BenchMark = z.object({ accountName: z.string().nullable(), run: z.s
 export type BenchMark = z.infer<typeof BenchMark>
 
 // 事件类型：create、import、update、move、delete、expire（让出 URI 的过期记录）、restore、undelete、
-// reactivate（让过期的记忆重新生效）
+// reactivate（让过期的记忆重新生效）、access（读到 secret 的正文，只在历史里，不进活动，不改记忆，after 为 null）
 export const HistoryEvent = z.object({
   id: z.number().int(),
   type: z.string(),
   provenance: Provenance,
   createdAt: z.string(),
   actor: EventActor,
+  // access 经由哪里：console、rest、kioku_get 等；其他事件为 null
+  via: z.string().nullable(),
   before: MemorySnapshot.nullable(),
   after: MemorySnapshot.nullable(),
   // 这次改动之后，这条记忆离开了你的可见范围（例如被改进了别的成员的私人层，或改成了 secret）：

@@ -1,6 +1,8 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
   ActivityList,
+  ConsoleMemoryChildren,
+  ConsoleMemoryView,
   ConsoleSearchRequest,
   ConsoleSearchResponse,
   CreateMemoryRequest,
@@ -20,6 +22,7 @@ import {
   PageQuery,
   ReactivateRequest,
   RestoreRequest,
+  RevealMemoryRequest,
   UndeleteRequest,
   UpdateMemoryRequest,
 } from '@kioku/contracts'
@@ -50,12 +53,20 @@ const errors = {
   409: jsonResponse('冲突', ErrorResponse),
 }
 
+// 管理界面的响应多一个字段（ConsoleMemoryView），由服务按 MemoryContext.secretRead 给出。
+// 路由这边按 MemoryView 写类型，两套路由和各处的返回值共用一份
+const ConsoleView: z.ZodType<MemoryView> = ConsoleMemoryView
+const ConsoleChildren: z.ZodType<MemoryChildren> = ConsoleMemoryChildren
+
 interface RouteSet {
   // 路径前缀，例如 '' 或 '/spaces/{spaceId}'
   prefix: string
   params: z.ZodObject
   tag: string
   security: { bearer: string[] }[] | undefined
+  // 响应里的记忆与子节点
+  view: z.ZodType<MemoryView>
+  children: z.ZodType<MemoryChildren>
   resolve: (c: Context<AppEnv>) => Promise<MemoryService>
 }
 
@@ -65,13 +76,14 @@ function memoryRouteSet(set: RouteSet) {
   const base = `${set.prefix}/memories`
   const common = { tags: [set.tag], ...(set.security ? { security: set.security } : {}) }
   const params = set.params
+  const view = set.view
   const get = createRoute({
     ...common,
     method: 'get',
     path: base,
     summary: '按 URI 读取一条记忆',
     request: { params, query: UriQuery },
-    responses: { 200: jsonResponse('记忆', MemoryView), ...errors },
+    responses: { 200: jsonResponse('记忆', view), ...errors },
   })
   const children = createRoute({
     ...common,
@@ -79,7 +91,7 @@ function memoryRouteSet(set: RouteSet) {
     path: `${base}/children`,
     summary: '列出一个节点或 domain 根下的直接子节点',
     request: { params, query: z.object({ of: z.string().min(1) }) },
-    responses: { 200: jsonResponse('子节点', MemoryChildren), ...errors },
+    responses: { 200: jsonResponse('子节点', set.children), ...errors },
   })
   const domains = createRoute({
     ...common,
@@ -95,7 +107,7 @@ function memoryRouteSet(set: RouteSet) {
     path: base,
     summary: '新建策展记忆；带 validTo 时到期后不再召回、不进 boot',
     request: { params, body: jsonBody(CreateMemoryRequest) },
-    responses: { 201: jsonResponse('已创建', MemoryView), ...errors },
+    responses: { 201: jsonResponse('已创建', view), ...errors },
   })
   const update = createRoute({
     ...common,
@@ -104,7 +116,7 @@ function memoryRouteSet(set: RouteSet) {
     summary:
       '修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间',
     request: { params, body: jsonBody(UpdateMemoryRequest) },
-    responses: { 200: jsonResponse('已修改', MemoryView), ...errors },
+    responses: { 200: jsonResponse('已修改', view), ...errors },
   })
   const remove = createRoute({
     ...common,
@@ -120,7 +132,7 @@ function memoryRouteSet(set: RouteSet) {
     path: `${base}/move`,
     summary: '修改记忆的 URI',
     request: { params, body: jsonBody(MoveMemoryRequest) },
-    responses: { 200: jsonResponse('已移动', MemoryView), ...errors },
+    responses: { 200: jsonResponse('已移动', view), ...errors },
   })
 
   const service = set.resolve
@@ -151,6 +163,8 @@ export function memoryRoutes(deps: Deps) {
       params: z.object({}),
       tag: 'memories',
       security: [{ bearer: [] }],
+      view: MemoryView,
+      children: MemoryChildren,
       resolve: async (c) => memoryServiceForKey(deps, c.get('key')),
     }),
   )
@@ -162,6 +176,8 @@ export function memoryRoutes(deps: Deps) {
       params: z.object({ spaceId: z.uuid() }),
       tag: 'console',
       security: undefined,
+      view: ConsoleView,
+      children: ConsoleChildren,
       resolve: async (c) => {
         const { service } = await consoleMember(deps, c)
         return service
@@ -218,7 +234,7 @@ function consoleOnlyRoutes(deps: Deps) {
     tags: ['console'],
     summary: '恢复到某个事件之后的那一版（只改正文、disclosure、priority 与关键词）',
     request: { params, body: jsonBody(RestoreRequest) },
-    responses: { 200: jsonResponse('恢复后的记忆', MemoryView), ...errors },
+    responses: { 200: jsonResponse('恢复后的记忆', ConsoleView), ...errors },
   })
   const undelete = createRoute({
     method: 'post',
@@ -226,7 +242,7 @@ function consoleOnlyRoutes(deps: Deps) {
     tags: ['console'],
     summary: '撤销删除',
     request: { params, body: jsonBody(UndeleteRequest) },
-    responses: { 200: jsonResponse('恢复后的记忆', MemoryView), ...errors },
+    responses: { 200: jsonResponse('恢复后的记忆', ConsoleView), ...errors },
   })
   const expired = createRoute({
     method: 'get',
@@ -242,7 +258,15 @@ function consoleOnlyRoutes(deps: Deps) {
     tags: ['console'],
     summary: '让过期的记忆重新生效（清掉有效期；过期之后让出了 URI 的一并撤销删除）',
     request: { params, body: jsonBody(ReactivateRequest) },
-    responses: { 200: jsonResponse('重新生效的记忆', MemoryView), ...errors },
+    responses: { 200: jsonResponse('重新生效的记忆', ConsoleView), ...errors },
+  })
+  const reveal = createRoute({
+    method: 'post',
+    path: '/spaces/{spaceId}/memories/reveal',
+    tags: ['console'],
+    summary: '显式查看 secret 的正文，记一条访问事件（只进这条记忆的历史，不进活动）',
+    request: { params, body: jsonBody(RevealMemoryRequest) },
+    responses: { 200: jsonResponse('带正文的记忆', ConsoleView), ...errors },
   })
   const glossary = createRoute({
     method: 'get',
@@ -300,6 +324,13 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(reactivate, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.reactivate(c.req.valid('json')), 200)
+    })
+    .openapi(reveal, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      const memory = await service.reveal(c.req.valid('json').memoryId)
+      // 带着明文的响应不让浏览器和代理缓存
+      c.header('Cache-Control', 'no-store')
+      return c.json(memory, 200)
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)

@@ -6,6 +6,7 @@ import type {
   ActivityList,
   BenchChanges,
   BenchMark,
+  ConsoleMemoryView,
   CreateMemoryRequest,
   DeletedMemoryList,
   DomainSummary,
@@ -161,9 +162,17 @@ export interface MemoryContext {
   // 模型读到占位文字再写回，新正文就是占位文字，而 secret 的历史不存正文，找不回来。
   // 新写入的正文里有占位文字时同样拒绝（见 memory/masked.ts）
   maskSecret?: boolean
+  // 响应里 secret 的正文怎么给。explicit（管理界面）：不给，要调 reveal，查看记一条访问事件；响应带上
+  // ConsoleMemoryView 多的两个字段。audited（Key）：照常给，接入方的契约不变，解密出来给了调用方就记访问事件。
+  // 不设时是内部路径（导入工具比对正文）：照常解密，不记。内部改写都用 contentOf，不受这一项影响
+  secretRead?: 'explicit' | 'audited'
   // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
   eventContext?: Record<string, unknown>
 }
+
+// 读到 secret 的正文经由哪里，记在访问事件的 context 里
+export type SecretVia =
+  'console' | 'rest' | 'kioku_get' | 'kioku_list' | 'kioku_update' | 'kioku_move'
 
 // 一批事件改了什么（见 eventChanges）；lastId 是这批里最后一条事件的 id，没有事件时为 0
 export type EventChanges = Pick<BenchChanges, 'memories' | 'hiddenReleased' | 'hiddenOther'> & {
@@ -297,6 +306,7 @@ export interface UpdateMeta {
   eventType?: 'update' | 'sync'
   eventContext?: Record<string, unknown>
   requireAppOwner?: string
+  via?: SecretVia
 }
 
 function parse(uri: string): ParsedUri {
@@ -643,15 +653,18 @@ export class MemoryService {
     })
   }
 
-  private toView(row: MemoryRow, glossary: string[]): MemoryView {
-    return {
+  // reveal 只给管理界面的显式查看：secretRead 为 explicit 时默认不解密
+  private toView(row: MemoryRow, glossary: string[], reveal = false): MemoryView {
+    const secret = row.sensitivity === 'secret'
+    const hidden = secret && this.ctx.secretRead === 'explicit' && !reveal
+    const view: MemoryView = {
       id: row.id,
       uri: formatUri(row.domain!, row.path!),
       layer: row.layer,
       sensitivity: row.sensitivity,
       provenance: row.provenance,
       originScope: row.originScope,
-      content: this.ctx.maskSecret && row.sensitivity === 'secret' ? null : this.contentOf(row),
+      content: hidden || (secret && this.ctx.maskSecret) ? null : this.contentOf(row),
       priority: row.priority,
       disclosure: row.disclosure,
       glossary,
@@ -661,6 +674,30 @@ export class MemoryService {
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     }
+    if (this.ctx.secretRead !== 'explicit') return view
+    const extra: Omit<ConsoleMemoryView, keyof MemoryView> = {
+      contentHidden: hidden,
+    }
+    return { ...view, ...extra }
+  }
+
+  // Key 读到 secret 的正文（解密出来放进了响应）时记一条访问事件。不改记忆，只有改前的快照：
+  // 快照的敏感级决定只有读得到 secret 的人看得到它（之后降级了，这些记录也不给 editor 看）
+  private async recordRead(
+    tx: Tx,
+    row: MemoryRow,
+    glossary: string[],
+    view: MemoryView,
+    via: SecretVia,
+  ): Promise<void> {
+    if (
+      this.ctx.secretRead !== 'audited' ||
+      row.sensitivity !== 'secret' ||
+      view.content === null
+    ) {
+      return
+    }
+    await this.event(tx, row.id, ACCESS_EVENT, snapshot(row, glossary), null, { via })
   }
 
   private async event(
@@ -866,11 +903,52 @@ export class MemoryService {
       )
   }
 
-  async get(uri: string): Promise<MemoryView> {
+  async get(uri: string, via: SecretVia = 'rest'): Promise<MemoryView> {
     const parsed = parse(uri)
     return this.run(async (tx, personaIds) => {
       const row = await this.findReadable(tx, parsed, personaIds)
-      return this.toView(row, (await this.glossaryOf(tx, [row.id])).get(row.id) ?? [])
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      const view = this.toView(row, glossary)
+      await this.recordRead(tx, row, glossary, view, via)
+      return view
+    })
+  }
+
+  // 这个 id 上调用方现在读得到的策展记忆，按显式读取算；读不到和不存在一样是 404。lock 时锁住这一行
+  // （FOR NO KEY UPDATE：别的表写外键时加的 KEY SHARE 锁和它不冲突），等到锁时已经被改的按改后的一版判断
+  private async readableById(
+    tx: Tx,
+    memoryId: string,
+    personaIds: string[],
+    lock = false,
+  ): Promise<MemoryRow> {
+    const query = tx
+      .select()
+      .from(memories)
+      .where(
+        and(
+          eq(memories.id, memoryId),
+          eq(memories.form, 'curated'),
+          readableConditions(this.ctx.access, { personaIds, explicit: true }),
+        ),
+      )
+    const [row] = lock ? await query.for('no key update') : await query
+    if (!row) throw new MemoryError(404, '记忆不存在')
+    return row
+  }
+
+  // 管理界面显式查看 secret 的正文，记一条访问事件。别的敏感级的正文本来就给，也不记
+  async reveal(memoryId: string): Promise<MemoryView> {
+    return this.run(async (tx, personaIds) => {
+      const row = await this.readableById(tx, memoryId, personaIds)
+      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+      const view = this.toView(row, glossary, true)
+      if (row.sensitivity === 'secret') {
+        await this.event(tx, row.id, ACCESS_EVENT, snapshot(row, glossary), null, {
+          via: 'console' satisfies SecretVia,
+        })
+      }
+      return view
     })
   }
 
@@ -1070,6 +1148,7 @@ export class MemoryService {
         released,
         ...(meta.eventType ? { eventType: meta.eventType } : {}),
         ...(meta.eventContext ? { eventContext: meta.eventContext } : {}),
+        ...(meta.via ? { via: meta.via } : {}),
       })
     })
   }
@@ -1089,6 +1168,8 @@ export class MemoryService {
       existingRefs?: boolean
       // 来源改成这个：按 Dream 的建议合并时记为主人，正文是成员确认过的（见 applySuggestion）
       provenance?: Provenance
+      // 响应带着解密出来的正文时经由哪里，记在访问事件里（见 recordRead）
+      via?: SecretVia
     } = {},
   ): Promise<MemoryView> {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
@@ -1247,7 +1328,12 @@ export class MemoryService {
       // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
       await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
     }
-    return this.toView(row, glossary)
+    const view = this.toView(row, glossary)
+    // 没带正文的修改，响应里的正文是解密出来的原文，也算读到；带了正文的是调用方自己刚写的
+    if (before.sensitivity === 'secret' && input.content === undefined) {
+      await this.recordRead(tx, row, glossary, view, meta.via ?? 'rest')
+    }
+    return view
   }
 
   private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
@@ -1649,7 +1735,7 @@ export class MemoryService {
   // 改 URI。移进、移出 persona:// 与 app://，或在不同的人格、应用之间移动时，层与归属跟着目标 URI 变：
   // 移到那里时层由 URI 决定，移出时要用 layer 指定新的层；普通 domain 之间给了 layer 就顺便改层。
   // 原来与目标两边都要有写权限
-  async move(input: MoveMemoryRequest): Promise<MemoryView> {
+  async move(input: MoveMemoryRequest, via: SecretVia = 'rest'): Promise<MemoryView> {
     const from = parse(input.from)
     const to = parse(input.to)
     return this.write(async (tx, personaIds, released) => {
@@ -1712,14 +1798,16 @@ export class MemoryService {
       if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
       const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
       await this.event(tx, before.id, 'move', snapshot(before, glossary), snapshot(row, glossary))
-      return this.toView(row, glossary)
+      const view = this.toView(row, glossary)
+      await this.recordRead(tx, row, glossary, view, via)
+      return view
     })
   }
 
   // 列出直接子节点；target 是 domain 名时列 domain 根下的第一层。
   // 子节点由调用方读得到的后代推出：某一级路径本身没有记忆时显示为虚拟节点，所以不要求父节点存在，
   // 删除或移走父节点也不会让子节点变得走不到；读不到的记忆既不出现，也不会产生虚拟节点
-  async children(target: string): Promise<MemoryChildren> {
+  async children(target: string, via: SecretVia = 'rest'): Promise<MemoryChildren> {
     const parsed = target.includes('://') ? parse(target) : null
     const domain = parsed?.domain ?? target
     if (!/^[a-z][a-z0-9_]{0,31}$/.test(domain))
@@ -1774,9 +1862,12 @@ export class MemoryService {
         disclosure: level.own?.disclosure ?? null,
         childCount: Number(level.below),
       }))
-      const parentView = parent
-        ? this.toView(parent, (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? [])
-        : null
+      let parentView: MemoryView | null = null
+      if (parent) {
+        const glossary = (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? []
+        parentView = this.toView(parent, glossary)
+        await this.recordRead(tx, parent, glossary, parentView, via)
+      }
       // 指定了路径、它本身没有可读的记忆、下面也没有可读的内容：和不存在一样返回 404，
       // 拼错路径时不会看起来像一个空目录
       if (parsed && !parent && !children.length) {
@@ -2277,15 +2368,26 @@ export class MemoryService {
   async history(memoryId: string): Promise<MemoryHistory> {
     return this.run(async (tx) => {
       const { row } = await this.findManageable(tx, memoryId)
-      // 太多时保留最近的：最新的几版才是最常要看、要恢复的
+      // 太多时保留最近的：最新的几版才是最常要看、要恢复的。访问事件另算上限：
+      // agent 每次会话都读的机密攒下的访问记录不能把改动挤出去
       const latest = await this.eventRows(
         tx,
-        eq(memoryEvents.memoryId, memoryId),
+        and(eq(memoryEvents.memoryId, memoryId), ne(memoryEvents.eventType, ACCESS_EVENT)),
         [desc(memoryEvents.id)],
         HISTORY_LIMIT + 1,
         false,
       )
-      const rows = latest.slice(0, HISTORY_LIMIT).reverse()
+      const reads = await this.eventRows(
+        tx,
+        and(eq(memoryEvents.memoryId, memoryId), eq(memoryEvents.eventType, ACCESS_EVENT)),
+        [desc(memoryEvents.id)],
+        ACCESS_HISTORY_LIMIT + 1,
+        false,
+      )
+      const rows = [
+        ...latest.slice(0, HISTORY_LIMIT),
+        ...reads.slice(0, ACCESS_HISTORY_LIMIT),
+      ].sort((a, b) => a.event.id - b.event.id)
       return {
         memory: {
           id: row.id,
@@ -2303,11 +2405,12 @@ export class MemoryService {
           provenance: r.event.provenance,
           createdAt: r.event.createdAt.toISOString(),
           actor: actorOf(r),
+          via: viaOf(r.event.context),
           before: toSnapshot(r.event.before),
           after: r.left ? null : toSnapshot(r.event.after),
           left: r.left,
         })),
-        truncated: latest.length > HISTORY_LIMIT,
+        truncated: latest.length > HISTORY_LIMIT || reads.length > ACCESS_HISTORY_LIMIT,
       }
     })
   }
@@ -2409,15 +2512,19 @@ export class MemoryService {
   }
 
   // 空间的活动流，最新的在前。按时间排序走 (space_id, created_at) 索引，不必扫别的空间的事件；
-  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id
+  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id。
+  // 访问事件不进活动：和凭据的访问记录一样，只有读得到这条 secret 的人在它的历史里看得到
   async activity(query: PageQuery): Promise<ActivityList> {
     const after = timeCursor(query.cursor, EVENT_ID)
     return this.run(async (tx) => {
       const rows = await this.eventRows(
         tx,
-        after
-          ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
-          : undefined,
+        and(
+          ne(memoryEvents.eventType, ACCESS_EVENT),
+          after
+            ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
+            : undefined,
+        ),
         [desc(memoryEvents.createdAt), desc(memoryEvents.id)],
         query.limit + 1,
       )
@@ -2667,6 +2774,10 @@ export class MemoryService {
 
 // 一条记忆的历史最多列这么多个事件
 const HISTORY_LIMIT = 500
+// 访问事件另算，最多列这么多个
+const ACCESS_HISTORY_LIMIT = 100
+// 读到 secret 正文的事件：只进这条记忆的历史，不进活动
+export const ACCESS_EVENT = 'access'
 
 // 调用方带着读到的 id 与版本号时核对。删除后在同一个 URI 重建的记忆版本号从 1 重新开始，只看版本号分不出来
 function checkExpected(
@@ -2831,6 +2942,12 @@ export async function benchMarkReader(
 
 function stringList(value: unknown): string[] {
   return Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+}
+
+// 访问事件经由哪里
+function viaOf(context: unknown): string | null {
+  const via = (context as { via?: unknown } | null)?.via
+  return typeof via === 'string' ? via : null
 }
 
 // 快照里界面要用的部分；快照是写入事件时记下的整行（不含密文），secret 的没有正文

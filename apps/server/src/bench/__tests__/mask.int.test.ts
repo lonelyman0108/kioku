@@ -149,6 +149,22 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect((await real('kioku_list', { of: 'notes://safe' })).text).toContain(SECRET_BODY)
     })
 
+    it('打码时不解密，也不记访问；真实接口读到才记', async () => {
+      await seedSecret()
+      await real('kioku_create', { uri: 'notes://safe/child', content: '子节点' })
+      const accessEvents = () =>
+        withSpace(database.db, ws.spaceId, (tx) =>
+          tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
+        )
+      await masked('kioku_get', { uri: 'notes://safe' })
+      await masked('kioku_list', { of: 'notes://safe' })
+      await masked('kioku_update', { uri: 'notes://safe', priority: 7 })
+      await masked('kioku_move', { from: 'notes://safe', to: 'notes://moved' })
+      expect(await accessEvents()).toEqual([])
+      await realBody('notes://moved')
+      expect((await accessEvents()).map((e) => e.context)).toEqual([{ via: 'kioku_get' }])
+    })
+
     it('kioku_move：结果不带正文，正文还在', async () => {
       await seedSecret()
       const moved = await masked('kioku_move', { from: 'notes://safe', to: 'notes://moved' })
