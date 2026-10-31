@@ -82,7 +82,8 @@ withDefaults(
 .row-link:focus-visible {
   outline-offset: -2px;
 }
-.memory-row.linked .row-actions,
+.memory-row.linked .row-actions :deep(a),
+.memory-row.linked .row-actions :deep(button),
 .memory-row.linked .row-sub :deep(a),
 .memory-row.linked .row-sub :deep(button) {
   position: relative;

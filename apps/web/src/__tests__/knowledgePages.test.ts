@@ -94,9 +94,9 @@ describe('变更记录的一行', () => {
   })
 
   it('应用写下的改动标出来，成员的不标', async () => {
-    expect(await entry()).toContain('entry-app')
+    expect(await entry()).toContain('actor-app')
     const member = { accountName: '林默', keyName: null, appName: null }
-    expect(await entry({ actor: member })).not.toContain('entry-app')
+    expect(await entry({ actor: member })).not.toContain('actor-app')
   })
 
   it('记忆还在才能点过去：已删除、已过期、超出可见范围的 URI 上可能是别的记忆', async () => {
@@ -188,25 +188,35 @@ describe('列表读取失败', () => {
     ['列表', memoryListView, 'list'],
     ['已过期', expiredMemories, 'expired'],
     ['已删除', deletedMemories, 'deleted'],
-  ])('%s：翻页和后台刷新失败时已读到的行留着，错误放在下面', (_, source, query) => {
-    const whole = source.indexOf(`v-if="${query}.isError.value && !${query}.data.value"`)
-    const below = source.indexOf(`v-if="${query}.isError.value"`)
-    expect(whole).toBeGreaterThan(-1)
-    expect(below).toBeGreaterThan(whole)
-    expect(source.indexOf(`${query}.fetchNextPage()`)).toBeGreaterThan(below)
+  ])('%s：读取失败时已读到的行留着，翻页失败的错误靠着「加载更多」', (_, source, query) => {
+    const markup = source.slice(source.indexOf('<template>'))
+    const above = markup.indexOf(`${query}.isError.value && !${query}.isFetchNextPageError.value`)
+    const rows = markup.indexOf(`v-else-if="${query}.data.value"`)
+    const below = markup.indexOf(`v-if="${query}.isFetchNextPageError.value"`)
+    expect(above).toBeGreaterThan(-1)
+    expect(rows).toBeGreaterThan(above)
+    expect(below).toBeGreaterThan(rows)
+    expect(markup.indexOf(`${query}.fetchNextPage()`)).toBeGreaterThan(below)
+    expect(markup).toContain(`v-if="${query}.isPending.value"`)
   })
 
   it.each([
     ['人格', personasPage, 'personas'],
     ['凭据', credentialsPage, 'credentials'],
     ['已删除的凭据', credentialsPage, 'deleted'],
-  ])('%s：后台刷新失败时不盖掉已读到的列表', (_, source, query) => {
-    expect(source).toContain(`v-if="${query}.isError.value && !${query}.data.value"`)
+  ])('%s：错误和读到过的列表可以同时显示，没读到时不说是空的', (_, source, query) => {
+    expect(source).toContain(`v-if="${query}.isError.value"`)
+    expect(source).toContain(`v-if="${query}.isPending.value"`)
+    expect(source).toMatch(new RegExp(`v-else-if="${query}\\.data\\.value" class="[\\w-]*empty"`))
   })
 
-  it('凭据详情的引用和记录读取失败时不显示成空', () => {
-    expect(credentialDetail).toContain('references.isError.value && !references.data.value')
-    expect(credentialDetail).toContain('v-if="events.isError.value"')
+  it('凭据详情的引用和记录读取失败时能重试，不显示成空', () => {
+    expect(credentialDetail).toContain('v-if="references.isError.value"')
+    expect(credentialDetail).toContain('@click="references.refetch()"')
+    expect(credentialDetail).toContain('v-else-if="references.data.value" class="section-empty"')
+    expect(credentialDetail).toContain('events.isError.value && !events.isFetchNextPageError.value')
+    expect(credentialDetail).toContain('@click="events.refetch()"')
+    expect(credentialDetail).toContain('v-if="events.isFetchNextPageError.value"')
   })
 })
 

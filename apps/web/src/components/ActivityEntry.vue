@@ -2,35 +2,23 @@
 import type { ActivityItem } from '@kioku/contracts'
 import { computed } from 'vue'
 
-import {
-  activityLinkable,
-  actorLabel,
-  benchAccountLabel,
-  changeLabels,
-  eventLabel,
-} from '../labels'
-import { icons } from '../icons'
+import { activityLinkable, benchAccountLabel, changeLabels, eventLabel } from '../labels'
 import { memoryRoute } from '../routes'
 import { formatClock, formatTime } from '../time'
 import Hint from './Hint.vue'
+import ActorName from './strata/ActorName.vue'
 import UriPath from './strata/UriPath.vue'
 
 // 变更记录页的一行：谁、做了什么、URI、改了哪些字段、几点。按天分组，所以时间只写时和分。
 // 概览里放不下这么多列的版本是 RecentChange
 const props = defineProps<{ item: ActivityItem; spaceId: string }>()
 
-const actor = computed(() => actorLabel(props.item.actor))
 const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c).join('、'))
 </script>
 
 <template>
   <li class="activity-entry">
-    <span class="entry-actor" :title="actor.name">
-      <template v-if="actor.viaApp">
-        <UIcon :name="icons.bot" class="entry-app" /><span class="sr-only">应用：</span>
-      </template>
-      {{ actor.name }}
-    </span>
+    <ActorName class="entry-actor" :actor="item.actor" />
     <span class="entry-action">{{ eventLabel(item.type).label }}</span>
     <RouterLink
       v-if="activityLinkable(item)"
@@ -76,11 +64,6 @@ const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c
   font-weight: 500;
   text-overflow: ellipsis;
   white-space: nowrap;
-}
-.entry-app {
-  margin-right: 4px;
-  vertical-align: -2px;
-  color: var(--ui-text-muted);
 }
 .entry-action {
   color: var(--ui-text-muted);

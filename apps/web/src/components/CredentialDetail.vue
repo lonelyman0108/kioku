@@ -4,13 +4,12 @@ import type { AppInfo, ConsoleCredential, CredentialEvent } from '@kioku/contrac
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useCopy } from '../composables/useCopy'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
-  actorLabel,
   benchAccountLabel,
   credentialChangeLabels,
   credentialEventLabels,
@@ -23,6 +22,7 @@ import {
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import ActorName from './strata/ActorName.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import PropertyList from './strata/PropertyList.vue'
@@ -57,10 +57,6 @@ const events = useInfiniteQuery({
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
 const eventItems = computed(() => events.data.value?.pages.flatMap((p) => p.items) ?? [])
-
-function failure(error: unknown) {
-  return error instanceof ApiError ? error.message : '读取失败'
-}
 
 // 事件的细节：取用经由哪里、改了哪些部分、涉及哪些字段
 function describe(e: CredentialEvent): string {
@@ -250,10 +246,15 @@ async function reveal() {
         </template>
       </SectionHeading>
       <p class="section-note">仍有引用时无法删除凭据。</p>
-      <USkeleton v-if="references.isPending.value" class="h-8 w-full" />
-      <NoteLine v-else-if="references.isError.value && !references.data.value" tone="error">
-        {{ failure(references.error.value) }}
+      <NoteLine v-if="references.isError.value" tone="error">
+        {{ readFailure(references.error.value) }}
+        <template #actions>
+          <UButton size="xs" color="neutral" variant="outline" @click="references.refetch()">
+            重试
+          </UButton>
+        </template>
       </NoteLine>
+      <USkeleton v-if="references.isPending.value" class="h-8 w-full" />
       <ul v-else-if="references.data.value?.items.length">
         <li v-for="m in references.data.value.items" :key="m.id">
           <MemoryRow
@@ -275,7 +276,7 @@ async function reveal() {
         </li>
         <li v-if="references.data.value.truncated" class="section-note">仅显示最近 200 条</li>
       </ul>
-      <p v-else class="section-empty">暂无引用</p>
+      <p v-else-if="references.data.value" class="section-empty">暂无引用</p>
     </section>
 
     <section>
@@ -285,11 +286,19 @@ async function reveal() {
         </template>
       </SectionHeading>
       <p class="section-note">记录新建、修改、删除与每次取用。</p>
+      <NoteLine v-if="events.isError.value && !events.isFetchNextPageError.value" tone="error">
+        {{ readFailure(events.error.value) }}
+        <template #actions>
+          <UButton size="xs" color="neutral" variant="outline" @click="events.refetch()">
+            重试
+          </UButton>
+        </template>
+      </NoteLine>
       <USkeleton v-if="events.isPending.value" class="h-8 w-full" />
       <ol v-else>
         <li v-for="e in eventItems" :key="e.id" class="event-row">
           <span class="event-type">{{ credentialEventLabels[e.type]?.label ?? e.type }}</span>
-          <span class="event-actor">{{ actorLabel(e.actor).name }}</span>
+          <ActorName class="event-actor" :actor="e.actor" />
           <time class="event-time" :datetime="e.createdAt" :title="formatTime(e.createdAt)">
             {{ formatRelative(e.createdAt) }}
           </time>
@@ -302,8 +311,8 @@ async function reveal() {
           </p>
         </li>
       </ol>
-      <div v-if="events.isError.value" class="pt-3">
-        <NoteLine tone="error">{{ failure(events.error.value) }}</NoteLine>
+      <div v-if="events.isFetchNextPageError.value" class="pt-3">
+        <NoteLine tone="error">{{ readFailure(events.error.value) }}</NoteLine>
       </div>
       <div v-if="events.hasNextPage.value" class="pt-3">
         <UButton

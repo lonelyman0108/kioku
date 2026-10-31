@@ -47,6 +47,13 @@ describe('人格列表的继承树', () => {
     expect(personaRows(personas).map((r) => r.depth)).toEqual([0, 0, 1])
   })
 
+  it('成环时环外的子人格也不会被拆出去，每个人格只出现一次', () => {
+    const personas = [persona('c', 'a'), persona('a', 'b'), persona('b', 'a')]
+    const rows = personaRows(personas)
+    expect(rows.map((r) => r.persona.id).sort()).toEqual(['a', 'b', 'c'])
+    expect(rows.find((r) => r.persona.id === 'c')?.depth).toBeGreaterThan(0)
+  })
+
   it('子人格排在被继承的人格下面，同一级保持接口的顺序', () => {
     // 接口按创建时间排，子人格可能比后来才设的父人格更早
     const personas = [

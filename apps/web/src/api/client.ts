@@ -10,6 +10,11 @@ export class ApiError extends Error {
   }
 }
 
+// 读取失败时显示的文字：服务端给了说明就用它
+export function readFailure(error: unknown): string {
+  return error instanceof ApiError ? error.message : '读取失败'
+}
+
 type Query = Record<string, string | number | undefined>
 
 interface RequestOptions<T> {

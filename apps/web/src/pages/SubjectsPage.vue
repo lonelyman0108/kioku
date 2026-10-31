@@ -4,7 +4,7 @@ import { useInfiniteQuery } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
@@ -59,10 +59,6 @@ const nothing = computed(() =>
 
 // 窄屏放不下两栏，人又可能很多：一次只显示一边，两边的查询和翻页都留着
 const shown = ref<SubjectKind>('person')
-
-function failure(error: unknown) {
-  return error instanceof ApiError ? error.message : '读取失败'
-}
 
 function accounts(subject: SubjectInfo) {
   return subject.identities.map((i) => `${i.platform} ${i.externalId}`).join('、')
@@ -129,14 +125,17 @@ function accounts(subject: SubjectInfo) {
               <span class="head-time">首次遇到</span>
             </template>
           </SectionHeading>
-          <!-- 翻页、后台刷新失败时已经读到的行留着，错误放在「加载更多」上面 -->
-          <div v-if="section.query.isError.value && !section.query.data.value" class="pt-3">
-            <NoteLine tone="error">{{ failure(section.query.error.value) }}</NoteLine>
+          <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
+          <div
+            v-if="section.query.isError.value && !section.query.isFetchNextPageError.value"
+            class="pt-3"
+          >
+            <NoteLine tone="error">{{ readFailure(section.query.error.value) }}</NoteLine>
           </div>
-          <div v-else-if="section.query.isPending.value" class="space-y-2 pt-3">
+          <div v-if="section.query.isPending.value" class="space-y-2 pt-3">
             <USkeleton v-for="n in 6" :key="n" class="h-11 w-full" />
           </div>
-          <template v-else>
+          <template v-else-if="section.query.data.value">
             <ul v-if="section.items.value.length">
               <li v-for="subject in section.items.value" :key="subject.id">
                 <RouterLink
@@ -174,8 +173,8 @@ function accounts(subject: SubjectInfo) {
               </li>
             </ul>
             <p v-else class="empty">{{ q ? '没有匹配的结果' : '暂无' }}</p>
-            <div v-if="section.query.isError.value" class="pt-3">
-              <NoteLine tone="error">{{ failure(section.query.error.value) }}</NoteLine>
+            <div v-if="section.query.isFetchNextPageError.value" class="pt-3">
+              <NoteLine tone="error">{{ readFailure(section.query.error.value) }}</NoteLine>
             </div>
             <div v-if="section.query.hasNextPage.value" class="flex justify-center py-4">
               <UButton

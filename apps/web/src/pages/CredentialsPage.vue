@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
@@ -264,16 +264,11 @@ async function removeProvider() {
         </div>
 
         <div v-if="tab === 'credentials'" class="column-body">
-          <div v-if="credentials.isError.value && !credentials.data.value" class="pt-3.5">
-            <NoteLine tone="error">
-              {{
-                credentials.error.value instanceof ApiError
-                  ? credentials.error.value.message
-                  : '读取失败'
-              }}
-            </NoteLine>
+          <!-- 后台刷新失败时读到过的列表留着，错误放在上面 -->
+          <div v-if="credentials.isError.value" class="pt-3.5">
+            <NoteLine tone="error">{{ readFailure(credentials.error.value) }}</NoteLine>
           </div>
-          <div v-else-if="credentials.isPending.value" class="space-y-2 pt-3.5">
+          <div v-if="credentials.isPending.value" class="space-y-2 pt-3.5">
             <USkeleton v-for="n in 5" :key="n" class="h-10 w-full" />
           </div>
           <template v-else-if="credentials.data.value?.items.length">
@@ -300,11 +295,9 @@ async function removeProvider() {
                     :class="{ zero: !c.referenceCount }"
                     data-label="引用"
                   >
-                    {{ c.referenceCount }}<span class="sr-only"> 条引用</span>
+                    {{ c.referenceCount }}
                   </span>
-                  <span class="row-muted row-apps" data-label="限定应用">
-                    <span class="sr-only">限定应用：</span>{{ appsOf(c) }}
-                  </span>
+                  <span class="row-muted row-apps" data-label="限定应用">{{ appsOf(c) }}</span>
                   <time
                     class="num row-muted row-time"
                     :datetime="c.updatedAt"
@@ -316,7 +309,7 @@ async function removeProvider() {
               </li>
             </ul>
           </template>
-          <p v-else class="empty">暂无凭据</p>
+          <p v-else-if="credentials.data.value" class="empty">暂无凭据</p>
           <p v-if="credentials.data.value?.truncated" class="ledger-note">仅显示前 1000 条</p>
         </div>
 
@@ -325,14 +318,10 @@ async function removeProvider() {
             已删除的凭据在保留期内可以恢复。<Hint>同一标识已有有效凭据时无法恢复。</Hint>
           </p>
           <p v-if="retention" class="deleted-note text-warning">{{ deletionNotice(retention) }}</p>
-          <div v-if="deleted.isError.value && !deleted.data.value" class="pt-3.5">
-            <NoteLine tone="error">
-              {{
-                deleted.error.value instanceof ApiError ? deleted.error.value.message : '读取失败'
-              }}
-            </NoteLine>
+          <div v-if="deleted.isError.value" class="pt-3.5">
+            <NoteLine tone="error">{{ readFailure(deleted.error.value) }}</NoteLine>
           </div>
-          <div v-else-if="deleted.isPending.value" class="space-y-2 pt-3.5">
+          <div v-if="deleted.isPending.value" class="space-y-2 pt-3.5">
             <USkeleton v-for="n in 3" :key="n" class="h-10 w-full" />
           </div>
           <template v-else-if="deleted.data.value?.items.length">
@@ -380,7 +369,7 @@ async function removeProvider() {
               </li>
             </ul>
           </template>
-          <p v-else class="empty">暂无已删除的凭据</p>
+          <p v-else-if="deleted.data.value" class="empty">暂无已删除的凭据</p>
 
           <template v-if="deletedProviders.data.value?.items.length">
             <SectionHeading class="mt-7" title="已删除的凭据源" />
@@ -717,6 +706,16 @@ button.row-name::after {
 }
 
 /* 表格放不下时，凭据源放到下面 */
+/* 宽屏的表头只给眼睛看，读屏靠这个知道一列是什么；窄屏没有表头，它显示出来 */
+[data-label]::before {
+  content: attr(data-label) ' ';
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
 @media (max-width: 1240px) {
   .columns {
     grid-template-columns: minmax(0, 1fr);
@@ -771,8 +770,12 @@ button.row-name::after {
     grid-column: 2 / -1;
   }
   [data-label]::before {
-    content: attr(data-label) ' ';
+    position: static;
+    width: auto;
+    height: auto;
     margin-right: 6px;
+    overflow: visible;
+    clip-path: none;
     font-family: var(--font-sans);
     font-size: 13px;
     font-weight: 400;

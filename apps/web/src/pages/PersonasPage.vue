@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import PersonaDetail from '../components/PersonaDetail.vue'
@@ -218,14 +218,11 @@ async function remove() {
         </Hint>
       </p>
       <div class="list-scroll">
-        <div v-if="personas.isError.value && !personas.data.value" class="list-failed">
-          <NoteLine tone="error">
-            {{
-              personas.error.value instanceof ApiError ? personas.error.value.message : '读取失败'
-            }}
-          </NoteLine>
+        <!-- 后台刷新失败时读到过的列表留着，错误放在上面 -->
+        <div v-if="personas.isError.value" class="list-failed">
+          <NoteLine tone="error">{{ readFailure(personas.error.value) }}</NoteLine>
         </div>
-        <div v-else-if="personas.isPending.value" class="space-y-2 p-3.5">
+        <div v-if="personas.isPending.value" class="space-y-2 p-3.5">
           <USkeleton v-for="n in 4" :key="n" class="h-11 w-full" />
         </div>
         <ul v-else-if="rows.length">
@@ -248,7 +245,7 @@ async function remove() {
             </button>
           </li>
         </ul>
-        <p v-else class="list-empty">暂无人格</p>
+        <p v-else-if="personas.data.value" class="list-empty">暂无人格</p>
       </div>
     </section>
 

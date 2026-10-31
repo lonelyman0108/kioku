@@ -4,7 +4,7 @@ import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { groupByDay } from '../activity'
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import ActivityEntry from '../components/ActivityEntry.vue'
 import Hint from '../components/Hint.vue'
@@ -28,11 +28,9 @@ const activity = useInfiniteQuery({
 const items = computed(() => activity.data.value?.pages.flatMap((page) => page.items) ?? [])
 // 页面开过零点时「今天」「昨天」跟着变
 const now = useNow()
+// 分组只看今天是哪天，换算一道，每分钟走时不用把读到的行全部重排一次
 const today = computed(() => localDate(now.value))
 const days = computed(() => groupByDay(items.value, new Date(`${today.value}T00:00`)))
-const failure = computed(() =>
-  activity.error.value instanceof ApiError ? activity.error.value.message : '读取失败',
-)
 </script>
 
 <template>
@@ -53,14 +51,14 @@ const failure = computed(() =>
       </template>
     </PageHead>
     <div class="activity-body">
-      <!-- 翻页、后台刷新失败时已经读到的行留着，错误放在「加载更多」上面 -->
-      <NoteLine v-if="activity.isError.value && !activity.data.value" tone="error">
-        {{ failure }}
+      <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
+      <NoteLine v-if="activity.isError.value && !activity.isFetchNextPageError.value" tone="error">
+        {{ readFailure(activity.error.value) }}
       </NoteLine>
-      <div v-else-if="activity.isPending.value" class="space-y-3">
+      <div v-if="activity.isPending.value" class="space-y-3">
         <USkeleton v-for="n in 6" :key="n" class="h-8 w-full" />
       </div>
-      <template v-else>
+      <template v-else-if="activity.data.value">
         <section v-for="day in days" :key="day.key" class="activity-day">
           <SectionHeading :title="day.label" />
           <ul>
@@ -73,8 +71,8 @@ const failure = computed(() =>
           </ul>
         </section>
         <p v-if="!items.length" class="empty">暂无变更记录</p>
-        <div v-if="activity.isError.value" class="pt-4">
-          <NoteLine tone="error">{{ failure }}</NoteLine>
+        <div v-if="activity.isFetchNextPageError.value" class="pt-4">
+          <NoteLine tone="error">{{ readFailure(activity.error.value) }}</NoteLine>
         </div>
         <div v-if="activity.hasNextPage.value" class="flex justify-center py-4">
           <UButton
