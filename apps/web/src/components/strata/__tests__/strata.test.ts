@@ -935,6 +935,11 @@ describe('状态行', () => {
     const html = await render(NoteLine, { tone: 'warning' })
     expect(html).toContain('class="warning note-title"')
   })
+
+  it('上面已经有线时不再画墨线，默认照常画', async () => {
+    expect(await render(NoteLine, { flush: true })).toMatch(/class="[^"]*\bflush\b/)
+    expect(await render(NoteLine, {})).not.toContain('flush')
+  })
 })
 
 describe('要放文字的带', () => {

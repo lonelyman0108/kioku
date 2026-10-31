@@ -1,5 +1,7 @@
 import { describe, expect, it } from 'vitest'
+import { createSSRApp, h, type Component } from 'vue'
 import { parse } from 'vue/compiler-sfc'
+import { renderToString } from 'vue/server-renderer'
 
 import webPackage from '../../package.json'
 import benchAgent from '../benchAgent?raw'
@@ -16,9 +18,19 @@ import benchAgentExchange from '../components/BenchAgentExchange.vue?raw'
 import benchCalls from '../components/BenchCalls.vue?raw'
 import benchContextForm from '../components/BenchContextForm.vue?raw'
 import benchField from '../components/BenchField.vue?raw'
+import BenchNotice from '../components/BenchNotice.vue'
+import benchNotice from '../components/BenchNotice.vue?raw'
+import benchRawText from '../components/BenchRawText.vue?raw'
+import BenchRunLine from '../components/BenchRunLine.vue'
+import benchRunLine from '../components/BenchRunLine.vue?raw'
 import benchScenariosView from '../components/BenchScenarios.vue?raw'
+import BenchStatus from '../components/BenchStatus.vue'
+import benchStatus from '../components/BenchStatus.vue?raw'
 import benchStepView from '../components/BenchStepView.vue?raw'
+import benchTag from '../components/BenchTag.vue?raw'
 import benchToolbar from '../components/BenchToolbar.vue?raw'
+import noteLine from '../components/strata/NoteLine.vue?raw'
+import UriPath from '../components/strata/UriPath.vue'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
 import useBench from '../composables/useBench?raw'
 import { icons } from '../icons'
@@ -79,6 +91,15 @@ const withHandler = (elements: TemplateNode[], event: string, expression: string
     elements.find((el) => handler(el, event) === expression),
     `@${event}="${expression}"`,
   )
+const buttonOfLabel = (elements: TemplateNode[], label: string) =>
+  must(
+    elements.find(
+      (el) =>
+        el.tag === 'UButton' &&
+        el.props?.some((p) => p.name === 'aria-label' && p.value?.content === label),
+    ),
+    `按钮「${label}」`,
+  )
 // 指令的表达式：if、else-if、for、show、model
 const directive = (el: TemplateNode, name: string) =>
   el.props?.find((p) => p.name === name)?.exp?.content
@@ -115,6 +136,32 @@ const bodyOf = (script: string, name: string) => {
   return script.slice(found.index, script.indexOf(`\n${found[1]}}`, found.index))
 }
 
+const classOf = (el: TemplateNode) => el.props?.find((p) => p.name === 'class')?.value?.content
+const withClass = (elements: TemplateNode[], name: string) =>
+  must(
+    elements.find((el) => classOf(el)?.split(' ').includes(name)),
+    `class="${name}"`,
+  )
+const attr = (el: TemplateNode, name: string) =>
+  el.props?.find((p) => p.name === name)?.value?.content
+// 样式：媒体查询里的一段，顶格写的一条规则（不含媒体查询里的）
+const styleOf = (source: string) =>
+  parse(source)
+    .descriptor.styles.map((style) => style.content)
+    .join('\n')
+const mediaOf = (source: string, condition: string) => {
+  const style = styleOf(source)
+  const from = style.indexOf(`@media (${condition}) {`)
+  expect(from, `样式里要有 @media (${condition})`).toBeGreaterThanOrEqual(0)
+  return style.slice(from, style.indexOf('\n}', from))
+}
+const ruleOf = (source: string, selector: string) => {
+  const css = styleOf(source)
+  const from = css.search(new RegExp(`^${selector.replace(/[.*+()]/g, '\\$&')} \\{`, 'm'))
+  expect(from, `样式里要有 ${selector}`).toBeGreaterThanOrEqual(0)
+  return css.slice(from, css.indexOf('\n}', from))
+}
+
 const SOURCES = {
   benchAgent,
   benchForm,
@@ -130,8 +177,13 @@ const SOURCES = {
   benchCalls,
   benchContextForm,
   benchField,
+  benchNotice,
+  benchRawText,
+  benchRunLine,
   benchScenariosView,
+  benchStatus,
   benchStepView,
+  benchTag,
   benchToolbar,
 }
 
@@ -232,7 +284,7 @@ describe('真实模式要确认', () => {
 
   it('选择失效的提示能关掉', () => {
     const alert = withIf(toolbar.elements, 'selectionNotice')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('selectionNotice')
     expect(alert.props?.some((p) => p.name === 'close')).toBe(true)
     expect(handler(alert, 'update:open')).toBe('(v) => !v && (selectionNotice = null)')
@@ -253,15 +305,31 @@ describe('真实模式要确认', () => {
     }
   })
 
-  it('真实模式的标记放在页头：内容滚动时一直看得到', () => {
+  it('真实模式的标记放在滚动区外面：内容滚动时一直看得到', () => {
     const { descriptor } = parse(benchPage)
-    const root = descriptor.template!.ast as unknown as TemplateNode
-    const header = walk(root).find(
-      (n) => n.tag === 'template' && n.props?.some((p) => p.arg?.content === 'header'),
-    )!
-    const banner = walk(header).find((n) => n.props?.some((p) => p.exp?.content === 'real'))
-    expect(banner).toBeDefined()
-    expect(walk(banner!).some((n) => n.content?.includes('真实模式'))).toBe(true)
+    const page = sfc(benchPage)
+    const banner = withIf(page.elements, 'real')
+    expect(textOf(banner)).toContain('真实模式')
+    expect(banner.props?.find((p) => p.name === 'role')?.value?.content).toBe('status')
+    const scroller = must(
+      page.elements.find(
+        (el) => walk(el).some((n) => n.tag === 'BenchToolbar') && el !== page.elements[0],
+      ),
+      '滚动区',
+    )
+    const classOf = (el: TemplateNode) => el.props?.find((p) => p.name === 'class')?.value?.content
+    // 标记和滚动区是兄弟，标记在前；滚动的只有滚动区，它们的上一层不滚
+    const siblings = page.elements[0]!.children!.filter((n) => n.type === ELEMENT)
+    expect(siblings).toEqual([banner, scroller])
+    const style = descriptor.styles[0]!.content
+    const rule = (name: string) => new RegExp(`\\.${name} \\{([^}]*)\\}`).exec(style)?.[1] ?? ''
+    expect(rule(classOf(scroller)!)).toContain('overflow-y: auto')
+    expect(rule(classOf(page.elements[0]!)!)).not.toContain('overflow')
+    expect(rule(classOf(banner)!)).toContain('flex: none')
+    // 下面的内容（工具栏、作废的运行、分页）都在滚动区里
+    for (const tag of ['BenchToolbar', 'BenchAbandoned', 'UTabs', 'BenchCalls']) {
+      expect(walk(scroller).map((n) => n.tag)).toContain(tag)
+    }
   })
 })
 
@@ -310,6 +378,19 @@ describe('调用台的运行', () => {
     expect(textOf(form.elements[0]!)).toContain('与真实 MCP 一致')
   })
 
+  it('会话上下文在表单上面：文案说的是「上方的会话上下文」', () => {
+    const context = withTag(calls.elements, 'BenchContextForm')
+    const form = withTag(calls.elements, 'form')
+    expect(textOf(form)).toContain('上方的会话上下文')
+    // 走读的顺序就是文档顺序；两个在同一栏里，窄屏排成一栏时也还在上面
+    expect(calls.elements.indexOf(context)).toBeLessThan(calls.elements.indexOf(form))
+    const column = must(
+      calls.elements.find((el) => el.children?.includes(form)),
+      '表单的上一层',
+    )
+    expect(column.children).toContain(context)
+  })
+
   it('会话上下文的表单接到共享的状态，折叠时也看得到选了什么', () => {
     const form = sfc(benchContextForm)
     const models = form.elements.map((el) => directive(el, 'model')).filter(Boolean)
@@ -331,10 +412,10 @@ describe('调用台的目录与表单', () => {
 
   it.each(['t', 'target'])('目录与标题都显示只读与破坏性（%s）', (name) => {
     const readOnly = withIf(calls.elements, `${name}.readOnly`)
-    expect(readOnly.tag).toBe('UBadge')
+    expect(readOnly.tag).toBe('BenchTag')
     expect(textOf(readOnly)).toContain('只读')
     const destructive = withIf(calls.elements, `${name}.destructive`)
-    expect(destructive.tag).toBe('UBadge')
+    expect(destructive.tag).toBe('BenchTag')
     expect(textOf(destructive)).toContain('破坏性')
   })
 
@@ -363,7 +444,7 @@ describe('调用台的目录与表单', () => {
     expect(back).toContain('formFromJson(target.value, draft.value, sessionContext.value)')
     expect(back).toContain('formError.value = made.error')
     const alert = withIf(calls.elements, 'formError')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('formError')
     expect(bound(withIf(calls.elements, 'failure'), 'title')).toBe('failure')
   })
@@ -382,7 +463,7 @@ describe('调用台的目录与表单', () => {
 
   it('JSON 里的 context 和页面上的不同时警告', () => {
     const alert = withIf(calls.elements, 'contextDiffers')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(alert.props?.find((p) => p.name === 'color')?.value?.content).toBe('warning')
     const title = alert.props?.find((p) => p.name === 'title')?.value?.content
     expect(title).toContain('与上方的会话上下文不同')
@@ -406,7 +487,7 @@ describe('选中的工具不在目录里', () => {
     const button = withHandler(calls.elements, 'click', 'onRunClick')
     expect(bound(button, 'disabled')).toBe('Boolean(unavailable || blocker || running)')
     const alert = withIf(calls.elements, 'unavailable')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('unavailable')
   })
 
@@ -419,7 +500,7 @@ describe('选中的工具不在目录里', () => {
       'catalogFailure(tools.error.value)',
     )
     const alert = withIf(calls.elements, 'toolsError')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('toolsError')
     expect(bound(alert, 'actions')).toBe('retryTools')
     expect(blockOf(calls.script, 'const retryTools = ')).toContain('tools.refetch()')
@@ -499,7 +580,7 @@ describe('这次会话：分叉、清空、时间线与上限', () => {
   it('重放分叉：提示第几步与错误，给出接受与清空', () => {
     expect(calls.script).toContain('divergenceNotice(session.value)')
     const alert = withIf(calls.elements, 'diverged')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('diverged.title')
     expect(bound(alert, 'description')).toBe('diverged.description')
     expect(bound(alert, 'actions')).toBe('divergedActions')
@@ -533,7 +614,7 @@ describe('这次会话：分叉、清空、时间线与上限', () => {
   it('超限：提示清空并禁用运行', () => {
     expect(calls.script).toContain('runBlocker(session.value, mode.value)')
     const alert = withIf(calls.elements, 'blocker')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('blocker')
     expect(bound(withHandler(calls.elements, 'click', 'onRunClick'), 'disabled')).toContain(
       'blocker',
@@ -553,13 +634,11 @@ describe('这次会话：分叉、清空、时间线与上限', () => {
     expect(item.tag).toBe('li')
     const button = withTag(walk(item), 'button')
     expect(handler(button, 'click')).toBe('shownId = entry.id')
-    expect(shownIn(button)).toEqual(
-      expect.arrayContaining([
-        "stepBadge(entry.step, 'call').label",
-        'entry.step.label',
-        'entry.step.ms',
-      ]),
+    // 状态按 stepBadge 的调用看法算，不看 status：没带断言时服务端一律算通过
+    expect(bound(withTag(walk(button), 'BenchStatus'), 'badge')).toBe(
+      "stepBadge(entry.step, 'call')",
     )
+    expect(shownIn(button)).toEqual(expect.arrayContaining(['entry.step.label', 'entry.step.ms']))
     const dropped = withIf(calls.elements, 'session.dropped')
     expect(shownIn(dropped)).toEqual(['session.dropped'])
   })
@@ -578,7 +657,7 @@ describe('这次会话：分叉、清空、时间线与上限', () => {
     expect(bound(view, 'step')).toBe('shown.step')
     expect(bound(view, 'mode')).toBe('mode')
     expect(view.props?.find((p) => p.name === 'view')?.value?.content).toBe('call')
-    expect(shownIn(block)).toEqual(expect.arrayContaining(['shown.run']))
+    expect(bound(withTag(walk(block), 'BenchRunLine'), 'result')).toBe('shown')
   })
 })
 
@@ -692,7 +771,7 @@ describe('场景的运行与导出', () => {
       'errors.value = parsed.ok ? [] : parsed.errors',
     )
     const alert = withIf(scenarios.elements, 'errors.length')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     const line = withFor(walk(alert), '(line, i) in errors')
     expect(shownIn(line)).toEqual(['line'])
   })
@@ -712,10 +791,18 @@ describe('场景的运行与导出', () => {
 
   it('运行结果：结论与每一步，按断言或只列结果的看法显示', () => {
     const section = withIf(scenarios.elements, 'outcome && summary')
-    const alert = withTag(walk(section), 'UAlert')
-    expect(bound(alert, 'color')).toBe('summary.color')
-    expect(bound(alert, 'title')).toBe('summary.title')
+    const conclusion = must(
+      walk(section).find((el) => shownIn(el).includes('summary.title') && el.tag === 'p'),
+      '结论',
+    )
+    expect(shownIn(conclusion)).toEqual(['summary.title'])
+    // 语气跟着结论走：失败是砖红，告警是赭色
+    expect(bound(conclusion, 'class')).toBe('`tone-${summary.color}`')
+    const style = parse(benchScenariosView).descriptor.styles[0]!.content
+    expect(style).toMatch(/\.tone-error \{\s+color: var\(--ui-error\)/)
+    expect(style).toMatch(/\.tone-warning \{\s+color: var\(--ui-warning\)/)
     expect(scenarios.script).toContain('runSummary(outcome.value.result, view.value)')
+    expect(bound(withTag(walk(section), 'BenchRunLine'), 'result')).toBe('outcome.result')
     const step = withFor(walk(section), 'step in outcome.result.steps')
     expect(step.tag).toBe('BenchStepView')
     expect(bound(step, 'step')).toBe('step')
@@ -772,15 +859,32 @@ describe('场景的运行与导出', () => {
 describe('一步的结果', () => {
   const view = sfc(benchStepView)
 
-  it('原文放在 pre 里原样显示', () => {
-    const pres = view.elements.filter((el) => el.tag === 'pre')
-    const contents = pres.map((pre) =>
-      walk(pre)
-        .filter((n) => n.type === 5 || n.type === TEXT)
-        .map((n) => n.content),
-    )
-    expect(pres.length).toBeGreaterThanOrEqual(2)
-    expect(JSON.stringify(contents)).not.toContain('trim')
+  it('原文经 BenchRawText 放在 pre 里原样显示：只有这一处放 pre', () => {
+    const pres = sfc(benchRawText).elements.filter((el) => el.tag === 'pre')
+    // 带标题折叠的、不带标题的
+    expect(pres).toHaveLength(2)
+    for (const pre of pres) expect(shownIn(pre)).toEqual(['text'])
+    expect(styleOf(benchRawText)).toMatch(/white-space: pre-wrap/)
+    for (const source of [benchStepView, benchAgentExchange]) {
+      expect(sfc(source).elements.map((el) => el.tag)).not.toContain('pre')
+    }
+    const texts = view.elements
+      .filter((el) => el.tag === 'BenchRawText')
+      .map((el) => bound(el, 'text'))
+    expect(texts.length).toBeGreaterThanOrEqual(3)
+    expect(JSON.stringify(texts)).not.toContain('trim')
+  })
+
+  it('原文的样式与折叠只有一份', () => {
+    for (const source of [benchStepView, benchAgentExchange]) {
+      expect(source).not.toContain('PRE_CLASS')
+      expect(styleOf(source)).not.toContain('.fold')
+    }
+    const raw = sfc(benchRawText)
+    const fold = withTag(raw.elements, 'details')
+    expect(directive(fold, 'if')).toBe('title')
+    expect(bound(fold, 'open')).toBe('open')
+    expect(shownIn(withTag(walk(fold), 'summary'))).toEqual(['title'])
   })
 
   it('uris 为 null 时不显示列表', () => {
@@ -796,14 +900,19 @@ describe('一步的结果', () => {
   })
 
   it('折叠时也看得到状态、步骤名、耗时与状态码', () => {
-    expect(shownIn(withTag(view.elements, 'summary'))).toEqual([
-      'badge.label',
-      'step.label',
-      'meta',
-    ])
+    const summary = withTag(view.elements, 'summary')
+    expect(bound(withTag(walk(summary), 'BenchStatus'), 'badge')).toBe('badge')
+    expect(view.script).toContain('stepBadge(props.step, props.view)')
+    expect(shownIn(summary)).toEqual(['number', 'step.label', 'meta'])
     expect(view.script).toContain('`HTTP ${httpStatus}`')
     expect(view.script).toContain('`${ms} ms`')
     expect(blockOf(view.script, 'const meta = ')).toContain("join(' · ')")
+  })
+
+  it('按断言通过的步骤报了错：折叠时也看得出来，只有场景的看法才标', () => {
+    const tag = withIf(view.elements, "error && view === 'judged'")
+    expect(walk(withTag(view.elements, 'summary'))).toContain(tag)
+    expect(textOf(tag)).toContain('报错')
   })
 
   it('跳过与没有执行的原因', () => {
@@ -812,7 +921,7 @@ describe('一步的结果', () => {
 
   it('内部错误显示原因，别的报错显示说明', () => {
     const alert = withIf(view.elements, 'step.internalError')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'description')).toBe('internalErrorText(step)')
     expect(view.script).toContain('errorNote(props.step, props.view)')
     expect(shownIn(withDirective(view.elements, 'else-if', 'error'))).toEqual(['error.text'])
@@ -827,24 +936,27 @@ describe('一步的结果', () => {
 
   // 收到的原文与原始响应：都只在有响应时显示
   const responses = view.elements.filter(
-    (el) => el.tag === 'details' && directive(el, 'if') === 'responded',
+    (el) => el.tag === 'BenchRawText' && directive(el, 'if') === 'responded',
   )
-  const preOf = (el: TemplateNode) => withTag(walk(el), 'pre')
 
   it('收到的原文，空的时候说明', () => {
     const text = must(
-      responses.find((el) => textOf(el).includes('收到的原文')),
+      responses.find((el) => attr(el, 'title') === '收到的原文'),
       '收到的原文',
     )
-    expect(shownIn(preOf(text))).toEqual(['step.text || emptyText'])
+    expect(bound(text, 'text')).toBe('step.text || emptyText')
+    // 默认展开
+    expect(text.props?.some((p) => p.name === 'open')).toBe(true)
   })
 
   it('原始响应', () => {
     const raw = must(
-      responses.find((el) => textOf(el).includes('原始响应')),
+      responses.find((el) => attr(el, 'title') === '原始响应'),
       '原始响应',
     )
-    expect(shownIn(preOf(raw))).toEqual(['raw'])
+    expect(bound(raw, 'text')).toBe('raw')
+    // 默认收起
+    expect(raw.props?.some((p) => p.name === 'open' || p.arg?.content === 'open')).toBe(false)
     expect(view.script).toContain('JSON.stringify(props.step.raw, null, 2)')
     // 没有响应的步骤没有原文可看
     expect(view.script).toContain('props.step.raw !== null')
@@ -852,7 +964,10 @@ describe('一步的结果', () => {
 
   it('结果里的 URI', () => {
     const list = withIf(view.elements, 'step.uris?.length')
-    expect(shownIn(withFor(walk(list), 'uri in step.uris'))).toEqual(['uri'])
+    const uri = withTag(walk(withFor(walk(list), 'uri in step.uris')), 'UriPath')
+    expect(bound(uri, 'uri')).toBe('uri')
+    // 要看全：不能缩成省略号
+    expect(uri.props?.some((p) => p.name === 'wrap')).toBe(true)
   })
 
   it('session.start 的字数上限、没展开的节点、放不下的附加块', () => {
@@ -898,7 +1013,7 @@ describe('一步的结果', () => {
   it('这一步改了什么：对话缓冲回显这一轮', () => {
     const turn = withIf(view.elements, 'step.changes.turn')
     expect(shownIn(turn)).toContain('step.changes.turn.sessionId')
-    const shown = shownIn(preOf(turn)).join()
+    const shown = bound(withTag(walk(turn), 'BenchRawText'), 'text')
     expect(shown).toContain('step.changes.turn.user')
     expect(shown).toContain('step.changes.turn.reply')
   })
@@ -925,7 +1040,7 @@ describe('页面的结构', () => {
         'BenchAgent',
       ]),
     )
-    expect(page.script).toContain("{ label: '模型对话', value: 'agent', icon: icons.bot }")
+    expect(page.script).toContain("{ label: '模型对话', value: 'agent' }")
   })
 
   it('换应用读 Key 的时候分页组件不卸载：卸载会丢掉草稿与文本框里的场景', () => {
@@ -977,7 +1092,7 @@ describe('真实模式中途作废的运行', () => {
 
   it('每一条有说明，能关掉；有结果就列出每一步，按真实模式说', () => {
     const run = withFor(abandoned.elements, 'run in abandoned')
-    const alert = withTag(walk(run), 'UAlert')
+    const alert = withTag(walk(run), 'BenchNotice')
     expect(bound(alert, 'title')).toBe('run.title')
     expect(bound(alert, 'description')).toBe('run.description')
     expect(alert.props?.some((p) => p.name === 'close')).toBe(true)
@@ -986,12 +1101,14 @@ describe('真实模式中途作废的运行', () => {
     expect(steps.tag).toBe('BenchStepView')
     expect(steps.props?.find((p) => p.name === 'mode')?.value?.content).toBe('real')
     expect(bound(steps, 'view')).toBe('run.view')
-    expect(shownIn(withIf(walk(run), 'run.result'))).toContain('run.result.run')
+    expect(bound(withTag(walk(withIf(walk(run), 'run.result')), 'BenchRunLine'), 'result')).toBe(
+      'run.result',
+    )
   })
 
   it('请求还没回来的时候也说一声', () => {
     const alert = withIf(abandoned.elements, 'abandonedInFlight')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain('可能正在写入')
   })
 })
@@ -1001,7 +1118,7 @@ describe('被模型对话占着时的说明', () => {
 
   it('只在模型对话进行时显示，说清楚为什么，能停止', () => {
     const alert = withIf(busy.elements, 'agentSending')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(alert.props?.find((p) => p.name === 'title')?.value?.content).toContain('模型对话进行中')
     expect(bound(alert, 'actions')).toBe('actions')
     const actions = blockOf(busy.script, 'const actions = ')
@@ -1016,7 +1133,7 @@ describe('模型对话的页面', () => {
   const exchange = sfc(benchAgentExchange)
   const alertWith = (expression: string) => {
     const alert = must(
-      view.elements.find((el) => el.tag === 'UAlert' && directive(el, 'if') === expression),
+      view.elements.find((el) => el.tag === 'BenchNotice' && directive(el, 'if') === expression),
       `v-if="${expression}" 的提示`,
     )
     return alert
@@ -1026,7 +1143,7 @@ describe('模型对话的页面', () => {
     expect(view.script).toContain('api.benchAgent(spaceId.value, appId.value!, keyId.value!)')
     expect(view.script).toContain('AGENT_UNAVAILABLE_NOTES[reason]')
     const alert = withDirective(view.elements, 'else-if', 'unavailable')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('unavailable.title')
     expect(bound(alert, 'description')).toBe('unavailable.description')
     expect(bound(alert, 'actions')).toBe('unavailableActions')
@@ -1051,11 +1168,16 @@ describe('模型对话的页面', () => {
     expect(guarded.flatMap(walk).some((el) => handler(el, 'click') === 'send')).toBe(true)
   })
 
-  it('读取失败时能重新读', () => {
-    const alert = withDirective(view.elements, 'else-if', 'infoError')
+  it('读取失败时能重新读；读到过的内容不被错误盖掉', () => {
+    const alert = withIf(view.elements, 'infoError')
     expect(bound(alert, 'title')).toBe('infoError')
     expect(bound(alert, 'actions')).toBe('retryInfo')
     expect(blockOf(view.script, 'const retryInfo = ')).toContain('info.refetch()')
+    // 和用不用得了的说明不是二选一
+    expect(withDirective(view.elements, 'else-if', 'unavailable')).toBeDefined()
+    expect(blockOf(view.script, 'const infoError = ')).toContain(
+      'if (!info.isError.value) return null',
+    )
   })
 
   it('循环的说明：按运行时，近似的那种用提醒的颜色说清楚', () => {
@@ -1296,9 +1418,10 @@ describe('模型对话的页面', () => {
     const round = withFor(exchange.elements, '(round, index) in exchange.rounds')
     const nodes = walk(round)
     const reasoning = withIf(nodes, 'round.reasoning')
-    expect(reasoning.tag).toBe('details')
+    expect(reasoning.tag).toBe('BenchRawText')
+    expect(bound(reasoning, 'text')).toBe('round.reasoning')
     // 折叠：不带 open
-    expect(reasoning.props?.some((p) => p.name === 'open')).toBe(false)
+    expect(reasoning.props?.some((p) => p.name === 'open' || p.arg?.content === 'open')).toBe(false)
     expect(shownIn(withIf(nodes, 'round.text'))).toEqual(['round.text'])
     expect(textOf(withDirective(nodes, 'else-if', '!round.calls.length'))).toContain(
       '模型未返回文字',
@@ -1319,7 +1442,9 @@ describe('模型对话的页面', () => {
     const call = withFor(exchange.elements, 'call in round.calls')
     const nodes = walk(call)
     expect(shownIn(call).join()).toContain('call.name')
-    expect(shownIn(call)).toContain('argumentsText(call)')
+    const args = withTag(nodes, 'BenchRawText')
+    expect(bound(args, 'text')).toBe('argumentsText(call)')
+    expect(args.props?.some((p) => p.name === 'open' || p.arg?.content === 'open')).toBe(false)
     const step = withIf(nodes, 'call.trace')
     expect(step.tag).toBe('BenchStepView')
     expect(bound(step, 'step')).toBe('call.trace.step')
@@ -1335,8 +1460,12 @@ describe('模型对话的页面', () => {
     const lifecycle = withFor(exchange.elements, 'trace in exchange.lifecycle')
     expect(lifecycle.tag).toBe('BenchStepView')
     expect(bound(lifecycle, 'step')).toBe('trace.step')
+    // 要看的是出了问题的那几步：别的折叠
+    expect(bound(lifecycle, 'open')).toBe('callOpen(trace.step)')
     const turnEnd = withIf(exchange.elements, 'exchange.turnEnd')
-    expect(bound(withTag(walk(turnEnd), 'BenchStepView'), 'step')).toBe('exchange.turnEnd.step')
+    const turnEndStep = withTag(walk(turnEnd), 'BenchStepView')
+    expect(bound(turnEndStep, 'step')).toBe('exchange.turnEnd.step')
+    expect(bound(turnEndStep, 'open')).toBe('callOpen(exchange.turnEnd.step)')
     expect(shownIn(withIf(exchange.elements, 'exchange.turnEndNote'))).toEqual([
       'exchange.turnEndNote',
     ])
@@ -1352,7 +1481,7 @@ describe('模型对话的页面', () => {
 
   it('结束时的提示与没进历史的说明', () => {
     const alert = withIf(exchange.elements, 'exchange.notice')
-    expect(alert.tag).toBe('UAlert')
+    expect(alert.tag).toBe('BenchNotice')
     expect(bound(alert, 'title')).toBe('exchange.notice')
     expect(bound(alert, 'color')).toBe('noticeColor(exchange.end)')
     expect(textOf(withIf(exchange.elements, 'exchange.end && !exchange.inHistory'))).toContain(
@@ -1374,6 +1503,443 @@ describe('模型对话的页面', () => {
     expect(directive(siblings[siblings.indexOf(note) - 1]!, 'if')).toBe(
       'exchange.end && !exchange.inHistory',
     )
+  })
+})
+
+describe('读取失败', () => {
+  const toolbar = sfc(benchToolbar)
+
+  it('错误放在上面，读到过的内容照常显示', () => {
+    const appsError = withIf(toolbar.elements, 'apps.isError.value')
+    expect(appsError.tag).toBe('BenchNotice')
+    const keysError = withIf(toolbar.elements, 'keys.isError.value')
+    expect(keysError.tag).toBe('BenchNotice')
+    // 缓存是空的又刷新失败时只剩这一句：要能重新读
+    expect(bound(appsError, 'actions')).toBe('retryApps')
+    expect(bound(keysError, 'actions')).toBe('retryKeys')
+    expect(toolbar.script).toContain('const retryApps = computed(() => retryOf(apps))')
+    expect(toolbar.script).toContain('const retryKeys = computed(() => retryOf(keys))')
+    const retry = blockOf(toolbar.script, 'const retryOf = ')
+    expect(retry).toContain('query.refetch()')
+    expect(retry).toContain('loading: query.isFetching.value')
+    expect(blockOf(sfc(benchCalls).script, 'const toolsError = ')).toContain(
+      'tools.isError.value ? catalogFailure(tools.error.value) : null',
+    )
+    expect(withIf(sfc(benchScenariosView).elements, 'presets.isError.value').tag).toBe(
+      'BenchNotice',
+    )
+  })
+
+  it('「暂无」只在真的读到空时说：读取中、读取失败时不说', () => {
+    // 缓存是空的又刷新失败时也不说：不知道到底有没有，不能把人引去再建一个
+    const noApps = withDirective(
+      toolbar.elements,
+      'else-if',
+      'apps.data.value && !owned.length && !apps.isError.value',
+    )
+    expect(textOf(noApps)).toContain('暂无应用')
+    const noKeys = withIf(
+      toolbar.elements,
+      'keys.data.value && !usable.length && !keys.isError.value',
+    )
+    expect(textOf(noKeys)).toContain('暂无有效 Key')
+    const keySelect = must(
+      toolbar.elements.find(
+        (el) =>
+          el.tag === 'USelect' &&
+          el.props?.some((p) => p.name === 'aria-label' && p.value?.content === 'Key'),
+      ),
+      'Key 的下拉框',
+    )
+    expect(bound(keySelect, 'placeholder')).toBe(
+      "keys.data.value && !keys.isError.value ? '暂无有效 Key' : ''",
+    )
+  })
+})
+
+describe('贴底的区块', () => {
+  const places = [
+    ['调用台', benchCalls, 'call-end', ['contextDiffers', 'unavailable', 'formError', 'failure']],
+    ['场景', benchScenariosView, 'scenario-end', ['mismatch', 'errors.length', 'failure']],
+    [
+      '模型对话',
+      benchAgentView,
+      'composer',
+      ['consent && needsConsent && !agentSending', 'blocker', 'diverged', 'exportNote'],
+    ],
+  ] as const
+
+  it.each(places)(
+    '%s：提示收进封顶的滚动区，键盘进得去，没有提示时不留空的停靠点',
+    (_name, source, end, notices) => {
+      const block = withClass(sfc(source).elements, end)
+      const notes = withClass(walk(block), 'end-notes')
+      const rule = ruleOf(source, '.end-notes')
+      // 不按窗口高度的比例封顶：矮窗口里栏只有 350 到 400，不能几乎盖满
+      expect(rule).toContain('max-height: min(30dvh, 14rem)')
+      expect(rule).toContain('overflow-y: auto')
+      expect(attr(notes, 'tabindex')).toBe('0')
+      expect(attr(notes, 'role')).toBe('region')
+      expect(attr(notes, 'aria-label')).toBeTruthy()
+      expect(ruleOf(source, '.end-notes:empty')).toContain('display: none')
+      for (const condition of notices) {
+        const notice = withIf(walk(notes), condition)
+        expect(notice.tag).toBe('BenchNotice')
+        // 叠在一起，和下面的 BenchAgentBusy 之间不多一条线、一段空白
+        expect(notice.props?.some((p) => p.name === 'flush')).toBe(true)
+      }
+      // 里面只有提示：换了结构也不能把按钮放进去
+      expect(notes.children!.filter((n) => n.type === ELEMENT).map((el) => el.tag)).toEqual(
+        notices.map(() => 'BenchNotice'),
+      )
+    },
+  )
+
+  it.each(places.slice(0, 2))(
+    '%s：运行按钮和停止模型对话都在滚动区外面，一直够得着',
+    (_name, source, end) => {
+      const block = withClass(sfc(source).elements, end)
+      expect(ruleOf(source, `.${end}`)).toContain('position: sticky')
+      expect(ruleOf(source, `.${end}`)).toContain('bottom: 0')
+      const notes = withClass(walk(block), 'end-notes')
+      const busy = withTag(walk(block), 'BenchAgentBusy')
+      expect(walk(notes)).not.toContain(busy)
+      expect(busy.props?.some((p) => p.name === 'flush')).toBe(true)
+      expect(walk(notes).map((el) => el.tag)).not.toContain('UButton')
+      // 紧跟在提示后面：两者之间没有别的东西
+      const kids = block.children!.filter((n) => n.type === ELEMENT)
+      expect(kids.indexOf(busy)).toBe(kids.indexOf(notes) + 1)
+    },
+  )
+
+  it('模型对话：文本框、发送、停止都在滚动区外面，放不下时只有提示缩小', () => {
+    const { elements } = sfc(benchAgentView)
+    const composer = withClass(elements, 'composer')
+    const notes = withClass(walk(composer), 'end-notes')
+    const kids = composer.children!.filter((n) => n.type === ELEMENT)
+    expect(kids.indexOf(notes)).toBe(0)
+    const input = must(
+      elements.find((el) => attr(el, 'aria-label') === '发给模型的消息'),
+      '发给模型的消息',
+    )
+    expect(kids).toContain(input)
+    const actions = withClass(walk(composer), 'composer-actions')
+    expect(kids).toContain(actions)
+    expect(walk(actions)).toContain(withHandler(elements, 'click', 'send'))
+    expect(walk(actions)).toContain(withHandler(elements, 'click', 'stopAgent'))
+    expect(walk(notes).map((el) => el.tag)).not.toContain('UButton')
+    // 输入区不自己滚：滚起来按钮就可能出视野。它能被压缩，压缩时只有提示让出高度
+    const rule = ruleOf(benchAgentView, '.composer')
+    expect(rule).toContain('max-height: 65%')
+    expect(rule).toContain('flex: 0 1 auto')
+    expect(rule).toContain('min-height: 0')
+    expect(rule).not.toContain('overflow')
+    const noteRule = ruleOf(benchAgentView, '.end-notes')
+    expect(noteRule).toContain('flex: 0 1 auto')
+    expect(noteRule).toContain('min-height: 0')
+    expect(ruleOf(benchAgentView, '.message-input')).toContain('flex: none')
+    expect(ruleOf(benchAgentView, '.composer-actions')).toContain('flex: none')
+    const narrow = mediaOf(benchAgentView, 'max-width: 1240px')
+    expect(narrow).toMatch(/\.composer \{[^}]*max-height: 70dvh/)
+    expect(narrow).not.toMatch(/\.composer \{[^}]*overflow/)
+  })
+})
+
+describe('提示里的操作', () => {
+  it('公共的 NoteLine：操作能换行，按钮比一行还长时能缩，文字由按钮截断', () => {
+    const rule = ruleOf(noteLine, '.note-actions')
+    expect(rule).toContain('flex-wrap: wrap')
+    expect(rule).toContain('min-width: 0')
+    expect(rule).toContain('max-width: 100%')
+    const slotted = ruleOf(noteLine, '.note-actions :slotted(*)')
+    expect(slotted).toContain('min-width: 0')
+    expect(slotted).toContain('max-width: 100%')
+  })
+
+  it('带模型名的长按钮放在 NoteLine 的操作里', () => {
+    const consent = withIf(sfc(benchAgentView).elements, 'consent && needsConsent && !agentSending')
+    expect(bound(consent, 'actions')).toBe('consentActions')
+    const button = must(
+      sfc(benchNotice).elements.find((el) => directive(el, 'for') === 'action in actions'),
+      '操作的按钮',
+    )
+    expect(button.tag).toBe('UButton')
+  })
+
+  it('线框的样子只写在 BenchNotice 一处：操作自己不带 variant', () => {
+    const button = must(
+      sfc(benchNotice).elements.find((el) => directive(el, 'for') === 'action in actions'),
+      '操作的按钮',
+    )
+    expect(attr(button, 'variant')).toBe('outline')
+    expect(sfc(benchNotice).script).not.toContain('variant')
+    for (const source of Object.values(SOURCES)) expect(source).not.toContain("variant: 'subtle'")
+  })
+
+  it('按钮文字被截断时悬停看得全：title 是完整的文字', () => {
+    const button = must(
+      sfc(benchNotice).elements.find((el) => directive(el, 'for') === 'action in actions'),
+      '操作的按钮',
+    )
+    expect(bound(button, 'title')).toBe('action.label')
+  })
+
+  it('叠在别的线下面时用 flush，不从外面改 NoteLine 的样式', () => {
+    for (const source of Object.values(SOURCES)) expect(source).not.toContain('.note-line')
+    expect(bound(withTag(sfc(benchNotice).elements, 'NoteLine'), 'flush')).toBe('flush')
+    expect(bound(withClass(sfc(noteLine).elements, 'note-line'), 'class')).toBe('{ flush }')
+    const rule = ruleOf(noteLine, '.note-line.flush')
+    expect(rule).toContain('border-top: 0')
+    // 下边距和 .note-line + .note-line 的负边距是一对：两个都要去掉，隔着一层包裹时才不多空白
+    expect(rule).toContain('margin-bottom: 0')
+    expect(ruleOf(noteLine, '.note-line.flush + .note-line.flush')).toContain('margin-top: 0')
+    expect(bound(withTag(sfc(benchAgentBusy).elements, 'BenchNotice'), 'flush')).toBe('flush')
+    // 贴底区块的顶上都有一条线
+    for (const [source, selector] of [
+      [benchCalls, '.call-end'],
+      [benchScenariosView, '.scenario-end'],
+      [benchAgentView, '.composer'],
+    ] as const) {
+      expect(ruleOf(source, selector)).toContain('border-top: 1px solid')
+    }
+  })
+})
+
+describe('运行中的状态', () => {
+  // 从根走到这个节点经过的元素（不含它自己）
+  const ancestorsOf = (root: TemplateNode, target: TemplateNode): TemplateNode[] | null => {
+    for (const child of root.children ?? []) {
+      if (child === target) return [root]
+      const found = ancestorsOf(child, target)
+      if (found) return [root, ...found]
+    }
+    return null
+  }
+  const conditional = (el: TemplateNode) =>
+    el.props?.some((p) => ['if', 'else-if', 'else'].includes(p.name))
+
+  it.each([
+    ['调用台', benchCalls, 'callRunning'],
+    ['场景', benchScenariosView, 'scenarioRunning'],
+  ])('%s：读屏念得到：role="status" 的元素一直在，只换文字', (_name, source, running) => {
+    const { elements } = sfc(source)
+    const status = must(
+      elements.find((el) => attr(el, 'role') === 'status'),
+      'role="status" 的元素',
+    )
+    expect(shownIn(status)).toEqual([`${running} ? '运行中…' : ''`])
+    expect(conditional(status)).toBe(false)
+    const ancestors = ancestorsOf(elements[0]!, status)
+    expect(ancestors).not.toBeNull()
+    for (const el of ancestors!) expect(conditional(el)).toBe(false)
+    expect(elements.filter((el) => attr(el, 'role') === 'status')).toHaveLength(1)
+    // 没在运行时不占地方，但不能用 display: none：那样就不是一直在了
+    expect(styleOf(source)).toMatch(/\.run-status:not\(:empty\) \{/)
+    expect(styleOf(source)).not.toMatch(/\.run-status[^{]*\{[^}]*display: none/)
+  })
+
+  it('场景：运行时不说暂无结果；结果和暂无结果都排在状态后面', () => {
+    const { elements } = sfc(benchScenariosView)
+    const result = withClass(elements, 'scenario-result')
+    const none = withDirective(walk(result), 'else-if', '!scenarioRunning')
+    expect(none.tag).toBe('p')
+    expect(textOf(none)).toContain('暂无结果')
+    const outcome = withIf(walk(result), 'outcome && summary')
+    const kids = result.children!.filter((n) => n.type === ELEMENT)
+    expect(kids.indexOf(none)).toBe(kids.indexOf(outcome) + 1)
+    const status = must(
+      kids.find((el) => attr(el, 'role') === 'status'),
+      '状态',
+    )
+    expect(kids.indexOf(status)).toBe(kids.indexOf(outcome) - 1)
+    // 标题跟着结果走，运行中和没有结果时是同一个标题
+    const heading = withTag(kids, 'SectionHeading')
+    expect(bound(heading, 'title')).toBe("outcome?.title ?? '运行结果'")
+  })
+
+  it('调用台：第一次调用时不说暂无调用，已有记录时也说运行中', () => {
+    const { elements } = sfc(benchCalls)
+    const none = withDirective(elements, 'else-if', '!callRunning')
+    expect(textOf(none)).toContain('暂无调用')
+    const list = withIf(elements, 'timeline.length')
+    const parent = must(
+      elements.find((el) => el.children?.includes(list)),
+      '时间线的上一层',
+    )
+    const siblings = parent.children!.filter((n) => n.type === ELEMENT)
+    const status = must(
+      siblings.find((el) => attr(el, 'role') === 'status'),
+      '状态',
+    )
+    expect(siblings.indexOf(status)).toBe(siblings.indexOf(list) - 1)
+    expect(siblings.indexOf(none)).toBe(siblings.indexOf(list) + 1)
+  })
+})
+
+describe('模型对话的版式', () => {
+  it('Tab 顺序和看到的一样：消息在前，侧栏在后；只有窄屏靠 order 把侧栏挪上去', () => {
+    const columns = withClass(sfc(benchAgentView).elements, 'agent-columns')
+    const kids = columns.children!.filter((n) => n.type === ELEMENT)
+    expect(kids.map(classOf)).toEqual(['agent-main', 'agent-side'])
+    const narrow = mediaOf(benchAgentView, 'max-width: 1023.98px')
+    expect(narrow).toMatch(/\.agent-side \{[^}]*order: -1/)
+    expect(styleOf(benchAgentView).replace(narrow, '')).not.toMatch(/\border:/)
+  })
+
+  it('跟到最后时留出输入区的高度，只在它盖在消息上时：宽屏留了只会把页头顶走', () => {
+    const { elements } = sfc(benchAgentView)
+    const end = must(
+      elements.find((el) => attr(el, 'ref') === 'end'),
+      'ref="end"',
+    )
+    expect(classOf(end)).toBe('thread-end')
+    expect(benchAgentView).not.toContain('scroll-mb')
+    const narrow = mediaOf(benchAgentView, 'max-width: 1240px')
+    expect(narrow).toMatch(/\.thread-end \{\s+scroll-margin-bottom: 14rem/)
+    expect(narrow).toMatch(/\.composer \{[^}]*position: sticky/)
+    const outside = styleOf(benchAgentView).replace(narrow, '')
+    expect(outside).not.toContain('scroll-margin')
+    expect(outside).not.toContain('position: sticky')
+  })
+})
+
+describe('运行标记那一行', () => {
+  it('只有一份：三处都用 BenchRunLine', () => {
+    for (const source of [benchCalls, benchScenariosView, benchAbandoned]) {
+      expect(sfc(source).elements.map((el) => el.tag)).toContain('BenchRunLine')
+      expect(source).not.toContain('run-line')
+      expect(source).not.toContain('scopesSummary')
+    }
+  })
+
+  it('运行标记、应用与权限范围都显示', async () => {
+    const app = createSSRApp(BenchRunLine, {
+      result: {
+        run: 'abc12345',
+        whoami: {
+          app: { name: '测试应用' },
+          scopes: {
+            readLayers: ['base'],
+            writeLayers: [],
+            maxSensitivity: 'internal',
+            admin: false,
+          },
+        },
+      },
+    })
+    const html = await renderToString(app)
+    expect(html).toContain('abc12345')
+    expect(html).toContain('测试应用')
+    expect(html).toContain('可读 1 层，可写 0 层，最高内部')
+  })
+})
+
+describe('改版之后的约束', () => {
+  const pages = [
+    ['BenchPage', benchPage],
+    ['BenchAbandoned', benchAbandoned],
+    ['BenchAgent', benchAgentView],
+    ['BenchAgentBusy', benchAgentBusy],
+    ['BenchAgentExchange', benchAgentExchange],
+    ['BenchCalls', benchCalls],
+    ['BenchContextForm', benchContextForm],
+    ['BenchField', benchField],
+    ['BenchNotice', benchNotice],
+    ['BenchRawText', benchRawText],
+    ['BenchRunLine', benchRunLine],
+    ['BenchScenarios', benchScenariosView],
+    ['BenchStatus', benchStatus],
+    ['BenchStepView', benchStepView],
+    ['BenchTag', benchTag],
+    ['BenchToolbar', benchToolbar],
+  ] as const
+
+  it.each(pages)('%s 不用彩色徽章、卡片和老外壳', (_name, source) => {
+    const tags = sfc(source).elements.map((el) => el.tag)
+    for (const old of ['UBadge', 'UCard', 'UAlert', 'UDashboardPanel', 'UDashboardNavbar']) {
+      expect(tags).not.toContain(old)
+    }
+  })
+
+  const render = (component: Component, props: Record<string, unknown>) => {
+    const app = createSSRApp(component, props)
+    app.component('UIcon', () => h('svg'))
+    app.component('UButton', (_, { attrs }) => h('button', String(attrs.label ?? '')))
+    return renderToString(app)
+  }
+
+  it.each([
+    ['success', 'neutral'],
+    ['neutral', 'neutral'],
+    ['warning', 'warning'],
+    ['error', 'error'],
+  ])('提示的语气：%s 显示成 %s，通过不上色', async (color, tone) => {
+    const html = await render(BenchNotice, { color, title: '标题' })
+    expect(html).toMatch(new RegExp(`class="${tone} note-title"`))
+    expect(html).toContain('标题')
+  })
+
+  it('提示的说明与操作都显示，能关掉的有关闭按钮，关闭只发 update:open', async () => {
+    const html = await render(BenchNotice, {
+      title: '标题',
+      description: '说明',
+      actions: [{ label: '重新读取' }],
+      close: true,
+    })
+    expect(html).toContain('说明')
+    expect(html).toContain('重新读取')
+    expect(handler(buttonOfLabel(sfc(benchNotice).elements, '关闭'), 'click')).toBe(
+      "emit('update:open', false)",
+    )
+    const plain = await render(BenchNotice, { title: '标题' })
+    expect(plain).not.toContain('<button')
+    expect(plain).not.toContain('note-detail')
+    // 只有操作、不能关掉的：不多一个按钮
+    const actionOnly = await render(BenchNotice, {
+      title: '标题',
+      actions: [{ label: '重新读取' }],
+    })
+    expect(actionOnly.match(/<button/g)).toHaveLength(1)
+  })
+
+  it.each([
+    ['success', false],
+    ['neutral', false],
+    ['warning', false],
+    ['error', true],
+  ])('步骤状态 %s 的文字一直在，只有出错才用砖红', async (color, brick) => {
+    const html = await render(BenchStatus, { badge: { label: '状态', color, icon: 'x' } })
+    expect(html).toContain('状态')
+    expect(/class="[^"]*\berror\b[^"]*"/.test(html)).toBe(brick)
+  })
+
+  it('URI 要看全时折行，默认一行放不下先缩上一级路径', async () => {
+    const wrapped = await render(UriPath, { uri: 'core://a/b', wrap: true })
+    expect(wrapped).toMatch(/class="[^"]*\bwrap\b[^"]*uri-path|class="[^"]*uri-path[^"]*\bwrap\b/)
+    const line = await render(UriPath, { uri: 'core://a/b' })
+    expect(line).not.toMatch(/class="[^"]*\bwrap\b/)
+  })
+
+  it('状态与断言不用绿色：颜色只留给失败', () => {
+    expect(benchStatus).not.toMatch(/success/)
+    for (const source of [benchStepView, benchCalls, benchAgentExchange, benchScenariosView]) {
+      expect(source).not.toContain('text-success')
+    }
+    const icon = withTag(
+      walk(withFor(sfc(benchStepView).elements, '(a, i) in assertions')),
+      'UIcon',
+    )
+    expect(bound(icon, 'class')).toBe("a.ok ? 'text-muted' : 'text-error'")
+  })
+
+  it('一串步骤标上第几步：和明文提示、重放分叉说的第几步对得上', () => {
+    for (const source of [benchScenariosView, benchAbandoned]) {
+      const step = must(
+        sfc(source).elements.find((el) => el.tag === 'BenchStepView'),
+        'BenchStepView',
+      )
+      expect(bound(step, 'number')).toBe('step.index + 1')
+    }
   })
 })
 
