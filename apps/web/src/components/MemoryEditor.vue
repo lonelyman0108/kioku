@@ -1,6 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import {
+  CONVERT_SCOPE_TEXT,
   PLAINTEXT_CREDENTIAL,
   placeholderAllowed,
   type ConsoleMemoryView,
@@ -35,7 +36,6 @@ import {
   recallText,
 } from '../memoryDetail'
 import { placeholderOf } from '../placeholders'
-import { CONVERT_SCOPE_TEXT } from '../plaintext'
 import {
   hiddenAgain,
   revealedAfterWrite,

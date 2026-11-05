@@ -5,7 +5,7 @@ import { useQueries, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError, readFailure, readFailures } from '../api/client'
 import { api } from '../api/endpoints'
 import { refreshAppCaches } from '../appQueries'
 import { lastUsedAt } from '../apps'
@@ -92,11 +92,9 @@ const legendKinds = computed(() =>
   presentKinds(liveKeys.value.flatMap(({ key }): readonly AccessRow[] => rowsOf(key.id) ?? [])),
 )
 // 默认人格和所有者只显示名字，读不到时是「–」：要说出来，不然分不清是没有还是没读到
-const readFailures = computed(() => [
-  ...new Set(
-    [apps, personas, members].filter((q) => q.isError.value).map((q) => readFailure(q.error.value)),
-  ),
-])
+const failures = computed(() =>
+  readFailures([apps.error.value, personas.error.value, members.error.value]),
+)
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -154,7 +152,7 @@ async function create() {
       </UButton>
     </header>
 
-    <NoteLine v-for="message in readFailures" :key="message" tone="error">{{ message }}</NoteLine>
+    <NoteLine v-for="message in failures" :key="message" tone="error">{{ message }}</NoteLine>
     <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
     <p v-else-if="apps.data.value && !apps.data.value.length" class="apps-empty">暂无应用</p>
     <template v-else-if="apps.data.value">

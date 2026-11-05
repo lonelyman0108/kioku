@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { placeholderAllowed, type MemoryListItem } from '@kioku/contracts'
+import { CONVERT_SCOPE_TEXT, placeholderAllowed, type MemoryListItem } from '@kioku/contracts'
 import { useInfiniteQuery } from '@tanstack/vue-query'
 import { computed, ref, toRef, watch } from 'vue'
 
@@ -8,7 +8,6 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { usePlaintextActions } from '../composables/usePlaintextActions'
-import { CONVERT_SCOPE_TEXT } from '../plaintext'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import ConvertCredentialModal from './ConvertCredentialModal.vue'

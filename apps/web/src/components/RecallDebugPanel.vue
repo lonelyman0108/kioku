@@ -42,6 +42,8 @@ const keyResults = useQueries({
 })
 const choices = computed(() => debugKeyChoices(owned.value, keyResults.value))
 const options = computed(() => choices.value.options)
+// 所有应用的 Key 都有结果（成功或失败）才显示表单：先到的先显示的话，后到的读到后选中项会变，
+// 进行中和已有的结果都被清掉；地址里的 Key 属于慢的应用时，这段时间还会用错 Key 运行
 const keysPending = computed(() => keyResults.value.some((result) => result.isPending))
 // 地址里的 Key 不在列表里（失效了、不是自己的）就用第一个
 const selected = computed(
@@ -135,10 +137,7 @@ const groupName = useId()
     >
       应用「{{ failed.app.name }}」的 Key：{{ failed.text }}
     </NoteLine>
-    <USkeleton
-      v-if="apps.isPending.value || (keysPending && !options.length)"
-      class="mt-3 h-40 w-full"
-    />
+    <USkeleton v-if="apps.isPending.value || keysPending" class="mt-3 h-40 w-full" />
     <NoteLine v-else-if="apps.data.value && !owned.length" class="debug-note">
       当前账号暂无应用，无法调试
       <template #detail>召回调试只能使用当前账号是所有者的应用的 Key。</template>

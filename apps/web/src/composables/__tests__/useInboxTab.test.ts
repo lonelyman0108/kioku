@@ -107,12 +107,33 @@ describe('地址没带分类', () => {
     expect(replace).toHaveBeenCalledTimes(1)
   })
 
-  it('读取失败时也定下来，不一直等', async () => {
+  it('读取失败时不一直等，但回退值不写回地址：那不是谁选的', async () => {
     fakes.api.inboxCounts.mockRejectedValue(new Error('读不到'))
     const tab = start()
     await settle()
     expect(tab.value).toBe('review')
-    expect(route.query.tab).toBe('review')
+    expect(replace).not.toHaveBeenCalled()
+    expect(route.query.tab).toBeUndefined()
+  })
+
+  it('读取恢复之后按真实条数定下来：不停在回退到的空分类', async () => {
+    fakes.api.inboxCounts.mockRejectedValue(new Error('读不到'))
+    const tab = start()
+    await settle()
+    expect(tab.value).toBe('review')
+    await setCounts(counts({ bindings: 3 }))
+    expect(tab.value).toBe('binding')
+    expect(route.query.tab).toBe('binding')
+    expect(replace).toHaveBeenCalledTimes(1)
+  })
+
+  it('读到过又刷新失败：手里的条数是真的，照样定下来', async () => {
+    fakes.api.inboxCounts.mockRejectedValue(new Error('读不到'))
+    client.setQueryData(['inbox-counts', 's1'], counts({ plaintext: 1 }))
+    const tab = start()
+    await settle()
+    expect(tab.value).toBe('plaintext')
+    expect(route.query.tab).toBe('plaintext')
   })
 
   it('换空间时不把上一个空间的分类写进地址', async () => {
@@ -138,6 +159,17 @@ describe('地址带了分类', () => {
     await settle()
     expect(tab.value).toBe('dream')
     expect(replace).not.toHaveBeenCalled()
+  })
+
+  it('读取失败时写错的也不改：恢复之后再写', async () => {
+    fakes.api.inboxCounts.mockRejectedValue(new Error('读不到'))
+    const tab = start({ tab: 'nope' })
+    await settle()
+    expect(tab.value).toBe('review')
+    expect(replace).not.toHaveBeenCalled()
+    await setCounts(counts({ dreamSuggestions: 1 }))
+    expect(tab.value).toBe('dream')
+    expect(route.query.tab).toBe('dream')
   })
 
   it('写错了按没写算，写回正确的', async () => {

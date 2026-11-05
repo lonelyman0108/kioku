@@ -41,7 +41,7 @@ export function useConvertCredential(
   const shown = ref(false)
   const checkedValue = ref<string | null>(null)
   const failure = ref<string | null>(null)
-  // 只有服务端上的版本比看到的新时才给：重新读取解决不了别的失败
+  // 只在 409 之后可能给：重新读取解决不了别的失败
   const canReload = ref(false)
   const submitting = ref(false)
   const result = ref<ConvertedToCredential | null>(null)
@@ -119,6 +119,8 @@ export function useConvertCredential(
 
   function reset() {
     loadId++
+    submitId++
+    submitting.value = false
     memory.value = null
     loading.value = false
     candidates.value = []
@@ -172,8 +174,11 @@ export function useConvertCredential(
       !problem.value,
   )
 
+  // 每次提交一个序号，和 loadId 一样：关掉或者换了空间之后，迟到的响应不碰这时的状态
+  let submitId = 0
   async function submit() {
     if (submitting.value || !canSubmit.value) return
+    const id = ++submitId
     const sid = spaceId.value
     const seen = memory.value!
     submitting.value = true
@@ -181,28 +186,33 @@ export function useConvertCredential(
     canReload.value = false
     try {
       const done = await api.convertToCredential(sid, body.value)
-      form.value = ''
-      shown.value = false
-      checkedValue.value = null
-      result.value = done
+      // 服务端已经写了，对话框还在不在，那个空间的缓存都要刷新
       refreshAfterPlaintext(queryClient, sid, done.memory)
       // 版本变了，涉及这条记忆的整理建议随之作废
       for (const key of ['credentials', 'dream-suggestions']) {
         void queryClient.invalidateQueries({ queryKey: [key, sid] })
       }
+      if (id !== submitId) return
+      form.value = ''
+      shown.value = false
+      checkedValue.value = null
+      result.value = done
       onConverted(done.memory, done)
     } catch (err) {
-      failure.value = err instanceof ApiError ? err.message : '转存失败'
       if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
         refreshAfterPlaintext(queryClient, sid)
       }
-      // 版本冲突和标识冲突都是 409：读一次比版本，不看文字
+      if (id !== submitId) return
+      failure.value = err instanceof ApiError ? err.message : '转存失败'
+      // 版本冲突和标识冲突都是 409：读一次比版本，不看文字。读到了且版本没变才不给重新读取；
+      // 读取失败时分不清，留着入口，不然提示让人重新读取却没有按钮，再提交一直 409
       if (err instanceof ApiError && err.status === 409) {
         const latest = await readMemory(sid, seen.uri).catch(() => null)
-        canReload.value = !!latest && (latest.id !== seen.id || latest.version !== seen.version)
+        if (id !== submitId) return
+        canReload.value = !latest || latest.id !== seen.id || latest.version !== seen.version
       }
     } finally {
-      submitting.value = false
+      if (id === submitId) submitting.value = false
     }
   }
 

@@ -36,6 +36,10 @@ export function placeholderAllowed(layer: Layer, sensitivity: Sensitivity): bool
   )
 }
 
+// 放不进时怎么说：服务端拒绝转存和管理界面提前拦下是同一句
+export const CONVERT_SCOPE_TEXT =
+  '凭据占位符只能放在私人层、敏感级不低于私密的记忆中。请先调整这条记忆的层与敏感级，再转存。'
+
 // 空白字符逐个写出来（与 JS 的 \s 同一个集合）：服务端把这条规则的 source 原样交给 PostgreSQL，
 // 它的 \s 随数据库的 locale 变，全角空格、BOM 这类字符两边会判断得不一样
 const SPACE =

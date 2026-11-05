@@ -402,7 +402,7 @@ describe('应用', () => {
   it('已作废的 Key 不能选，也不去查矩阵：接口返回 404', () => {
     expect(appKeys).toContain('.filter((key) => key.effectiveScopes)')
     expect(appKeys).toContain("key.effectiveScopes ? 'button' : 'div'")
-    expect(appDetailPage).toContain('usableKeys(keys.data.value ?? [])')
+    expect(appDetailPage).toContain('usableKeys(seenKeys.value ?? [])')
   })
 
   it('启动加载预览留在应用详情，链到召回调试和测试台，都带上 Key', () => {
@@ -582,12 +582,40 @@ describe('读取失败', () => {
 
   it('应用列表和详情：几个查询的错误都说出来，内容跟着 data 走', () => {
     for (const source of [appsPage, appDetailPage]) {
-      expect(source).toContain('[apps, personas, members].filter((q) => q.isError.value)')
+      expect(source).toContain(
+        'readFailures([apps.error.value, personas.error.value, members.error.value])',
+      )
       expect(source).not.toContain('apps.isError.value && !apps.data.value')
+      expect(source).not.toContain('new Set(')
     }
     expect(appsPage).toContain('<template v-else-if="apps.data.value">')
     expect(appDetailPage).toContain('<template v-else-if="app">')
     expect(appDetailPage).toContain('v-else-if="apps.data.value && !app"')
+  })
+
+  it('概览：没读到才只有错误；读到过的留着，错误放在上面', () => {
+    expect(overviewPage).toContain('<div v-if="overview.isError.value" class="overview-failed">')
+    expect(overviewPage).toContain('readFailure(overview.error.value)')
+    expect(overviewPage).toContain('<div v-if="overview.isPending.value" class="overview-grid">')
+    expect(overviewPage).toContain('<div v-else-if="data && counts" class="overview-grid">')
+    expect(overviewPage).not.toContain('v-else-if="!data')
+  })
+
+  it('召回调试：所有应用的 Key 都有结果才显示表单，先到的不先显示', () => {
+    expect(recallDebugPanel).toContain('v-if="apps.isPending.value || keysPending"')
+    expect(recallDebugPanel).toContain('keyResults.value.some((result) => result.isPending)')
+    expect(recallDebugPanel).not.toContain('keysPending && !options.length')
+  })
+
+  it('应用详情：转给别人之后不再用手里的 Key：查询停了，缓存还在', () => {
+    expect(appDetailPage).toContain(
+      'const seenKeys = computed(() => (canSeeKeys.value ? keys.data.value : undefined))',
+    )
+    expect(appDetailPage).toContain('usableKeys(seenKeys.value ?? [])')
+    expect(appDetailPage).toContain('lastUsedAt(seenKeys.value ?? [])')
+    expect(appDetailPage).toContain(`{{ seenKeys ? usable.length : '–' }}`)
+    expect(appDetailPage).not.toContain('usableKeys(keys.data.value')
+    expect(appDetailPage).not.toContain('lastUsedAt(keys.data.value')
   })
 
   it('「暂无」只在真的读到空时显示', () => {
@@ -612,6 +640,7 @@ describe('读取失败', () => {
       recallDebugPanel,
       appGroupPersonas,
       appSimulator,
+      overviewPage,
     ]) {
       expect(source).not.toContain("'读取失败'")
       expect(source).not.toContain("'读取 Key 失败'")

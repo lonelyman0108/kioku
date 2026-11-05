@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 import { inspect } from 'node:util'
 
 import {
+  CONVERT_SCOPE_TEXT,
   ConvertedToCredential,
   type ConsoleCredentialList,
   type CredentialEventList,
@@ -691,6 +692,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       const res = await convert(shared)
       expect(res.status).toBe(400)
       const { error } = (await res.json()) as { error: string }
+      expect(error).toBe(CONVERT_SCOPE_TEXT)
       expect(error).toContain('私人层')
       expect(error).toContain('先')
       await untouched(shared)

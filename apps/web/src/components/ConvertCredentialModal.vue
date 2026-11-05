@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  CONVERT_SCOPE_TEXT,
   CONVERT_VALUE_MIN_LENGTH,
   type ConsoleMemoryView,
   type ConvertedToCredential,
@@ -7,7 +8,7 @@ import {
 import { toRef, useId, watch } from 'vue'
 
 import { useConvertCredential } from '../composables/useConvertCredential'
-import { CONVERT_SCOPE_TEXT, convertSummary } from '../plaintext'
+import { convertSummary } from '../plaintext'
 import { memoryRoute } from '../routes'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'

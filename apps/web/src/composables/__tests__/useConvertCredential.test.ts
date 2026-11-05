@@ -308,13 +308,120 @@ describe('提交', () => {
     expect(convert.canReload.value).toBe(false)
   })
 
-  it('比版本时读取失败也不给', async () => {
+  it('比版本时读取失败要留着入口：提示让人重新读取，再提交一直 409', async () => {
     const convert = await shown()
     fakes.api.convertToCredential.mockRejectedValue(new ApiError(409, '版本已变化'))
     fakes.api.memory.mockRejectedValue(new ApiError(500, '读不到'))
     await convert.submit()
     await settle()
-    expect(convert.canReload.value).toBe(false)
+    expect(convert.canReload.value).toBe(true)
     expect(convert.submitting.value).toBe(false)
+  })
+
+  it('比版本时发现换成了同版本的另一条：给', async () => {
+    const convert = await shown()
+    fakes.api.convertToCredential.mockRejectedValue(new ApiError(409, '版本已变化'))
+    fakes.api.memory.mockResolvedValue(memory({ id: '00000000-0000-4000-8000-000000000002' }))
+    await convert.submit()
+    expect(convert.canReload.value).toBe(true)
+  })
+})
+
+// 切空间时对话框被重置，这时提交可能还没回来；重置之后可能已经打开了另一条记忆
+describe('提交没回来就被重置', () => {
+  const done = () =>
+    ({
+      memory: memory({ version: 2 }),
+      credential: { id: 'c1' },
+      memories: [],
+      plaintextVersions: 0,
+      plaintextElsewhere: 0,
+    }) as unknown as ConvertedToCredential
+
+  async function pending() {
+    const convert = await shown()
+    const response = deferred<ConvertedToCredential>()
+    fakes.api.convertToCredential.mockReturnValue(response.promise)
+    const submitted = convert.submit()
+    await nextTick()
+    expect(convert.submitting.value).toBe(true)
+    return { convert, response, submitted }
+  }
+
+  it('重置之后 submitting 立刻放开，不卡着新对话框', async () => {
+    const { convert, response, submitted } = await pending()
+    convert.reset()
+    expect(convert.submitting.value).toBe(false)
+    response.resolve(done())
+    await submitted
+    expect(convert.submitting.value).toBe(false)
+  })
+
+  it('迟到的成功不写状态、不触发回调，缓存照样刷新：服务端已经写了', async () => {
+    const { convert, response, submitted } = await pending()
+    convert.reset()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    response.resolve(done())
+    await submitted
+    expect(convert.result.value).toBeNull()
+    expect(onConverted).not.toHaveBeenCalled()
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['memory-list', 's1'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credentials', 's1'] })
+  })
+
+  it('新打开的另一条记忆不受迟到的响应影响', async () => {
+    const { convert, response, submitted } = await pending()
+    convert.reset()
+    fakes.api.memory.mockResolvedValue(memory({ content: '密码：another-value-1，别的记忆。' }))
+    await convert.load()
+    await nextTick()
+    expect(convert.form.value).toBe('another-value-1')
+    response.resolve(done())
+    await submitted
+    expect(convert.form.value).toBe('another-value-1')
+    expect(convert.result.value).toBeNull()
+    expect(onConverted).not.toHaveBeenCalled()
+  })
+
+  it('迟到的失败不写错误，也不去重读', async () => {
+    const { convert, response, submitted } = await pending()
+    convert.reset()
+    fakes.api.memory.mockClear()
+    response.reject(new ApiError(409, '版本已变化'))
+    await submitted
+    expect(convert.failure.value).toBeNull()
+    expect(convert.canReload.value).toBe(false)
+    expect(fakes.api.memory).not.toHaveBeenCalled()
+  })
+
+  it('比版本的途中被重置：结果丢掉', async () => {
+    const { convert, response, submitted } = await pending()
+    const reread = deferred<ConsoleMemoryView>()
+    fakes.api.memory.mockClear().mockReturnValue(reread.promise)
+    response.reject(new ApiError(409, '版本已变化'))
+    await settle()
+    expect(fakes.api.memory).toHaveBeenCalled()
+    expect(convert.failure.value).toBe('版本已变化')
+    convert.reset()
+    reread.resolve(memory({ version: 9 }))
+    await submitted
+    expect(convert.canReload.value).toBe(false)
+  })
+
+  it('旧的提交回来时不放开新提交的 submitting，也不写它的错误', async () => {
+    const { convert, response, submitted } = await pending()
+    convert.reset()
+    fakes.api.memory.mockResolvedValue(memory())
+    await convert.load()
+    convert.shown.value = true
+    await nextTick()
+    fakes.api.convertToCredential.mockReturnValue(new Promise(() => {}))
+    void convert.submit()
+    await nextTick()
+    expect(convert.submitting.value).toBe(true)
+    response.reject(new ApiError(500, '旧的'))
+    await submitted
+    expect(convert.submitting.value).toBe(true)
+    expect(convert.failure.value).toBeNull()
   })
 })

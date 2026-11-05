@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError, readFailures } from '../api/client'
 import { api } from '../api/endpoints'
 import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
@@ -66,14 +66,14 @@ const keys = useQuery({
   queryFn: () => api.keys(spaceId.value, appId.value),
   enabled: canSeeKeys,
 })
-const usable = computed(() => usableKeys(keys.data.value ?? []))
+// 应用转给别人之后查询停了，缓存还在：看不到 Key 的人不能再用手里这一份
+const seenKeys = computed(() => (canSeeKeys.value ? keys.data.value : undefined))
+const usable = computed(() => usableKeys(seenKeys.value ?? []))
 // 默认人格和所有者只显示名字，人格的选项也靠它：读不到时要说出来，不然分不清是没有还是没读到
-const readFailures = computed(() => [
-  ...new Set(
-    [apps, personas, members].filter((q) => q.isError.value).map((q) => readFailure(q.error.value)),
-  ),
-])
-const lastUsed = computed(() => lastUsedAt(keys.data.value ?? []))
+const failures = computed(() =>
+  readFailures([apps.error.value, personas.error.value, members.error.value]),
+)
+const lastUsed = computed(() => lastUsedAt(seenKeys.value ?? []))
 
 // 看的是哪个 Key、哪种会话上下文：记在地址里。地址里的 Key 失效了就看第一个有效的
 const selectedKey = computed(
@@ -210,8 +210,8 @@ watch([spaceId, appId], () => {
 
 <template>
   <div class="app-page">
-    <div v-if="readFailures.length" class="app-failed">
-      <NoteLine v-for="message in readFailures" :key="message" tone="error">{{ message }}</NoteLine>
+    <div v-if="failures.length" class="app-failed">
+      <NoteLine v-for="message in failures" :key="message" tone="error">{{ message }}</NoteLine>
     </div>
     <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
     <div v-else-if="apps.data.value && !app" class="app-state">
@@ -247,7 +247,7 @@ watch([spaceId, appId], () => {
           </div>
           <div>
             <dt>有效 Key</dt>
-            <dd class="font-mono">{{ keys.data.value ? usable.length : '–' }}</dd>
+            <dd class="font-mono">{{ seenKeys ? usable.length : '–' }}</dd>
           </div>
           <div>
             <dt>最近使用</dt>
