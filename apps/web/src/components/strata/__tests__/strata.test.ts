@@ -4,11 +4,14 @@ import {
   type AccessCell,
   type KeyScopes,
   type Layer,
+  type Sensitivity,
 } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 import { createSSRApp, type Component } from 'vue'
 import { renderToString } from 'vue/server-renderer'
 
+import { layerLabels, sensitivityLabels } from '../../../labels'
+import AccessLegend from '../AccessLegend.vue'
 import AccessMatrix from '../AccessMatrix.vue'
 import MemoryFlags from '../MemoryFlags.vue'
 import NoteLine from '../NoteLine.vue'
@@ -22,14 +25,21 @@ import StrataTag from '../StrataTag.vue'
 import SwatchOptions from '../SwatchOptions.vue'
 import UriPath from '../UriPath.vue'
 import {
+  ACCESS_BAR_PERCENT,
+  DASHES,
   STACK,
   TEXTURES,
+  accessBar,
+  accessFill,
   accessKind,
   accessKindLabels,
   columnSize,
   conversationTotal,
   coreCells,
+  coreMark,
+  coreName,
   curatedTotal,
+  dashId,
   deepestColumn,
   filteredTotal,
   issuedScopeRows,
@@ -38,6 +48,7 @@ import {
   paintAccess,
   paintCell,
   paintSwatch,
+  presentKinds,
   segments,
   sensitivityTotal,
   stackBands,
@@ -330,7 +341,7 @@ describe('权限格子', () => {
   it('底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按 URI 读取，读不到的没有底色', () => {
     const paint = (kind: AccessKind) => paintAccess('app', 'public', kind, box, bar)
     const solid = { ...box, fill: 'var(--strata-explicit)' }
-    expect(paint('read-write').map((r) => r.fill)).toEqual(['var(--layer-app)'])
+    expect(paint('read-write').map((r) => r.fill)).toEqual(['var(--access-app)'])
     for (const kind of ['read', 'read-extract'] as const) {
       expect(paint(kind)[0]).toMatchObject(box)
       expect(paint(kind)[0]!.fill).toContain('color-mix')
@@ -347,11 +358,11 @@ describe('权限格子', () => {
   it('下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入', () => {
     const paint = (kind: AccessKind) =>
       paintAccess('app', 'public', kind, box, bar, 'sm').filter((r) => r.y === bar.y)
-    const full = { ...box, ...bar, fill: 'var(--layer-app)' }
-    const gaps = { ...box, ...bar, fill: `url(#${TEXTURES.gaps.sm})` }
+    const full = { ...box, ...bar, fill: 'var(--access-app)' }
+    const dashed = { ...box, ...bar, fill: `url(#${dashId('app', 'sm')})` }
     for (const kind of ['write', 'explicit-write'] as const) expect(paint(kind)).toEqual([full])
     for (const kind of ['extract', 'read-extract', 'explicit-extract'] as const) {
-      expect(paint(kind)).toEqual([full, gaps])
+      expect(paint(kind)).toEqual([dashed])
     }
     for (const kind of ['read-write', 'read', 'explicit', 'none'] as const) {
       expect(paint(kind)).toEqual([])
@@ -363,9 +374,62 @@ describe('权限格子', () => {
     expect(rects.map((r) => r.fill)).toEqual([
       expect.stringContaining('color-mix'),
       `url(#${textureId('private', 'sm')})`,
-      'var(--layer-app)',
-      `url(#${TEXTURES.gaps.sm})`,
+      `url(#${dashId('app', 'sm')})`,
     ])
+  })
+
+  it('有虚线条时纹理只铺到条上面：缺口里露出底色，不是一半的圆点', () => {
+    const numeric = paintAccess('app', 'internal', 'read-extract', box, bar, 'sm')
+    expect(numeric[1]).toMatchObject({ y: 0, height: 7 })
+    const shifted = paintAccess(
+      'app',
+      'internal',
+      'read-extract',
+      { x: 0, y: 20, width: 10, height: 10 },
+      { y: 27, height: 3 },
+      'sm',
+    )
+    expect(shifted[1]).toMatchObject({ y: 20, height: 7 })
+    const percent = paintAccess(
+      'app',
+      'internal',
+      'read-extract',
+      { x: 0, y: 0, width: '100%', height: '100%' },
+      ACCESS_BAR_PERCENT,
+      'lg',
+    )
+    expect(percent[1]).toMatchObject({ y: 0, height: '80%' })
+    // 只读没有条，纹理铺满
+    expect(paintAccess('app', 'internal', 'read', box, bar, 'sm')[1]).toMatchObject(box)
+  })
+
+  it('虚线条的缺口真的留空：只画实的那几段，不是用页面底色盖上去的', async () => {
+    const html = await render(StrataPatterns, {})
+    expect(html).not.toContain('--ui-bg')
+    expect(html).not.toContain('strata-gap')
+    for (const layer of LAYERS) {
+      for (const scale of ['lg', 'sm'] as const) {
+        const { on, off } = DASHES[scale]
+        const pattern = new RegExp(
+          `<pattern id="${dashId(layer, scale)}" width="${on + off}"[^>]*><rect width="${on}"[^>]*style="fill:${accessFill(layer).replace(/[()]/g, '\\$&')};?"`,
+        )
+        expect(html, `${layer} ${scale}`).toMatch(pattern)
+      }
+    }
+  })
+
+  it('虚线的实虚比例、下沿的条占格子的比例，大小图形都一样', () => {
+    expect(DASHES.lg.on / DASHES.lg.off).toBe(DASHES.sm.on / DASHES.sm.off)
+    expect(ACCESS_BAR_PERCENT).toEqual({ y: '80%', height: '20%' })
+    // 矩阵一格 36 高，条在文字下面的空白里；图例 18 高；岩芯的带 10 高
+    expect(accessBar(0, 36)).toEqual({ y: 29, height: 7 })
+    expect(accessBar(0, 18)).toEqual({ y: 14, height: 4 })
+    expect(accessBar(5, 10)).toEqual({ y: 13, height: 2 })
+  })
+
+  it('条最少 2px，也不比格子高', () => {
+    expect(accessBar(0, 6).height).toBe(2)
+    expect(accessBar(0, 1)).toEqual({ y: 0, height: 1 })
   })
 
   it('权限的实心块和机密的实心块是两个令牌：调权限格子不能带着全站的机密一起变', () => {
@@ -416,10 +480,152 @@ describe('权限格子', () => {
         ]),
       ],
     })
+    expect(html).toContain('mx-legend')
     const legend = html.slice(html.indexOf('mx-legend'))
     const items = [...legend.matchAll(/<li[^>]*>(<svg.*?<\/svg>)<span[^>]*>(.*?)<\/span>/g)]
     expect(items.map((m) => m[2]).sort()).toEqual(Object.values(accessKindLabels).sort())
     expect(new Set(items.map((m) => m[1])).size).toBe(KINDS.length)
+  })
+})
+
+describe('权限范围的每种组合', () => {
+  const READS = ['none', 'explicit', 'recall'] as const
+  const WRITES = [true, false]
+  // 接口给的一格放进一张矩阵，其余的格子都没有权限
+  const single = (
+    layer: Layer,
+    sensitivity: Sensitivity,
+    read: AccessCell['read'],
+    write: boolean,
+  ) =>
+    LAYERS.map((l) => ({
+      layer: l,
+      cells: SENSITIVITIES.map((s) =>
+        l === layer && s === sensitivity
+          ? { sensitivity: s, read, write }
+          : { sensitivity: s, read: 'none' as const, write: false },
+      ),
+    }))
+  // 文字和接口一一对应：怎么读、怎么写，对话层的写是抽取写入
+  const expected = (layer: Layer, read: AccessCell['read'], write: boolean) => {
+    const writing = !write ? '' : layer === 'subject' || layer === 'episode' ? 'extract' : 'write'
+    return (
+      {
+        recall: { write: '读写', extract: '读取且抽取写入', '': '只读' },
+        explicit: {
+          write: '按 URI 读取且可写',
+          extract: '按 URI 读取且抽取写入',
+          '': '仅按 URI 读取',
+        },
+        none: { write: '仅写入', extract: '仅抽取写入', '': '无权限' },
+      } as const
+    )[read][writing]
+  }
+  const combos = LAYERS.flatMap((layer) =>
+    SENSITIVITIES.flatMap((sensitivity) =>
+      READS.flatMap((read) => WRITES.map((write) => ({ layer, sensitivity, read, write }))),
+    ),
+  )
+  // 矩阵里某一格的 HTML
+  const cellHtml = (html: string, layer: Layer, sensitivity: Sensitivity) => {
+    const title = `title="${layerLabels[layer]} ${sensitivityLabels[sensitivity]}：`
+    const at = html.indexOf(title)
+    expect(at, `${layer} ${sensitivity}`).toBeGreaterThan(0)
+    return html.slice(html.lastIndexOf('<td', at), html.indexOf('</td>', at))
+  }
+
+  it('矩阵：每一格的文字、标题、色块都和接口一致', async () => {
+    for (const { layer, sensitivity, read, write } of combos) {
+      const name = `${layer} ${sensitivity} ${read} ${write}`
+      const html = await render(AccessMatrix, { rows: single(layer, sensitivity, read, write) })
+      const cell = cellHtml(html, layer, sensitivity)
+      const text = expected(layer, read, write)
+      expect(cell, name).toContain(`：${text}"`)
+      expect(cell, name).toContain(`>${text}</span>`)
+      const kind = accessKind(layer, { read, write })
+      const rects = paintAccess(
+        layer,
+        sensitivity,
+        kind,
+        { x: 0, y: 0, width: '100%', height: '100%' },
+        ACCESS_BAR_PERCENT,
+        'lg',
+      )
+      expect(cell.match(/<rect/g)?.length ?? 0, name).toBe(rects.length)
+      if (read === 'none' && !write) {
+        expect(cell, name).not.toContain('<svg')
+      }
+      // 别的格子都是无权限
+      for (const other of SENSITIVITIES.filter((s) => s !== sensitivity)) {
+        expect(cellHtml(html, layer, other), name).toContain('：无权限"')
+      }
+    }
+  })
+
+  it('岩芯：每一格的画法和接口一致，别的格子不上色', async () => {
+    for (const { layer, sensitivity, read, write } of combos) {
+      const name = `${layer} ${sensitivity} ${read} ${write}`
+      const rows = single(layer, sensitivity, read, write)
+      const html = await render(StrataCore, { rows, width: 44, height: 72 })
+      const kind = accessKind(layer, { read, write })
+      const { cells } = coreCells(rows, 44, 72, null, 3)
+      const target = cells.find((c) => c.layer === layer && c.sensitivity === sensitivity)!
+      expect(target.kind, name).toBe(kind)
+      expect(target.x, name).toBe(Math.round((SENSITIVITIES.indexOf(sensitivity) / 4) * 44))
+      const painted = paintAccess(
+        layer,
+        sensitivity,
+        kind,
+        { x: target.x, y: target.y, width: target.width, height: target.height },
+        { y: target.barY, height: target.barHeight },
+        'sm',
+      )
+      // 这张图上的填色：底、网格和外框之外，只有这一格的那几块
+      const fills = [...html.matchAll(/style="fill:([^;"]+);?"/g)]
+        .map((m) => m[1]!.trim())
+        .filter((fill) => fill !== 'var(--ui-bg)')
+      expect(fills, name).toEqual(painted.map((r) => r.fill))
+    }
+  })
+
+  it('读屏读到的是接口给的范围，不是前端算的', async () => {
+    const rows = single('private', 'public', 'recall', true)
+    const html = await render(StrataCore, { rows, label: '群聊' })
+    expect(html).toContain('aria-label="群聊的权限范围"')
+  })
+})
+
+describe('图例', () => {
+  it('只列这份权限里出现的，读写、只读、无权限一直在', () => {
+    const rows: AccessRow[] = [
+      {
+        layer: 'subject',
+        cells: [{ sensitivity: 'public', read: 'recall', write: true }],
+      },
+    ]
+    expect(presentKinds([])).toEqual(['read-write', 'read', 'none'])
+    expect(presentKinds(rows)).toEqual(['read-write', 'read-extract', 'read', 'none'])
+  })
+
+  it('色块和格子同一种画法：下沿的条按同一个比例', async () => {
+    const html = await render(AccessLegend, { kinds: ['write'] })
+    const bar = accessBar(0, 18)
+    expect(html).toContain(`y="${bar.y}"`)
+    expect(html).toContain(`height="${bar.height}"`)
+    expect(html).toContain('仅写入')
+  })
+})
+
+describe('矩阵在窄宽度下', () => {
+  it('文字不折行，放不下时由外层横向滚动，每行一样高', async () => {
+    const css = (await import('../AccessMatrix.vue?raw')).default as string
+    const rule = (selector: string) =>
+      new RegExp(`\\n${selector.replace(/[.]/g, '\\.')} \\{([^}]*)\\}`).exec(css)![1]!
+    expect(rule('.mx-scroll')).toContain('overflow-x: auto')
+    expect(rule('.mx')).toContain('table-layout: auto')
+    expect(rule('.mx')).not.toContain('min-width')
+    expect(rule('.c')).toContain('white-space: nowrap')
+    expect(rule('.c')).toContain('height: 36px')
   })
 })
 
@@ -530,6 +736,49 @@ describe('岩芯', () => {
     expect(await render(StrataCore, { rows, scopes })).toContain(
       'aria-label="当前会话上下文的权限范围"',
     )
+  })
+
+  it('带 label 时说清是谁的，也说清是签发范围', async () => {
+    const html = await render(StrataCore, { scopes, label: 'MacBook' })
+    expect(html).toContain('aria-label="MacBook，签发范围：可读 7 层，可写 1 层，最高私密"')
+    const rows = issuedScopeRows(scopes)
+    expect(await render(StrataCore, { rows, label: '群聊' })).toContain(
+      'aria-label="群聊的权限范围"',
+    )
+  })
+
+  it('没有数据时不读成权限范围，框是虚线，和没有权限的岩芯分得开', async () => {
+    const html = await render(StrataCore, {})
+    expect(html).toContain('aria-label="暂无权限数据"')
+    expect(html).not.toContain('权限范围')
+    // 来自对话的两层本来就是虚线，没有数据时下面五层也是
+    expect(html.match(/stroke-dasharray="3 2"/g)).toHaveLength(2)
+    expect(await render(StrataCore, { label: 'MacBook' })).toContain(
+      'aria-label="MacBook，暂无权限数据"',
+    )
+    expect(coreName({ rows: null, scopes: null })).toBe('暂无权限数据')
+    // 全都没有权限的岩芯是有数据的：外框是实线
+    const none = issuedScopeRows({ ...scopes, readLayers: [], writeLayers: [] })
+    const blank = await render(StrataCore, { rows: none })
+    expect(blank).toContain('aria-label="当前会话上下文的权限范围"')
+    expect(blank.match(/stroke-dasharray="3 2"/g)).toHaveLength(1)
+  })
+
+  it('标记落在这一层这一级的格子上；不知道敏感级时标整层', () => {
+    const model = coreCells(issuedScopeRows(scopes), 44, 72)
+    const band = model.bands.find((b) => b.layer === 'owner')!
+    expect(coreMark(model, 'owner', 'private')).toEqual({
+      x: 22.5,
+      y: band.y + 0.5,
+      width: 10,
+      height: band.h - 1,
+    })
+    expect(coreMark(model, 'owner', null)).toEqual({
+      x: 0.5,
+      y: band.y + 0.5,
+      width: 43,
+      height: band.h - 1,
+    })
   })
 
   it('已吊销：一格都不上色，读屏和悬停都说明已吊销，不再读范围', async () => {

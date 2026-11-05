@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 
 import {
+  CONVERT_SCOPE_TEXT,
   CREDENTIAL_PLACEHOLDER,
   CREDENTIAL_PLACEHOLDER_START,
   LAYER_NAMES,
@@ -239,8 +240,6 @@ const MASKED_DOWNGRADE = '测试台无法更改机密（secret）记忆的敏感
 const MASKED_CONTENT = '测试台无法读取机密（secret）记忆的原文，也无法修改正文，请到记忆页修改'
 const MASKED_TEXT_WRITTEN = '正文含测试台的占位文字，并非真实内容。如需写入这句话，请到记忆页操作。'
 const CONVERT_SECRET = '机密记忆的正文已加密，不进入历史、全文检索和向量，无需转存为凭据'
-const CONVERT_SCOPE =
-  '凭据占位符只能放在私人层、敏感级不低于私密的记忆中。请先把这条记忆改到私人层、敏感级调到私密，再转存。'
 const CONVERT_NOT_FOUND = '正文中没有这段值，请重新读取后再转存'
 const CONVERT_ELSEWHERE =
   'URI、触发场景或关键词中也有这段值。这些字段是明文，也不能放占位符。请先从这些字段去掉，再转存。'
@@ -1443,7 +1442,7 @@ export class MemoryService {
       this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
       if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)
       if (!placeholderAllowed(row.layer, row.sensitivity)) {
-        throw new MemoryError(400, CONVERT_SCOPE)
+        throw new MemoryError(400, CONVERT_SCOPE_TEXT)
       }
       const placeholder = `{{cred:${input.identifier}#${input.field}}}`
       const { text: content, replaced } = replaceOutsidePlaceholders(

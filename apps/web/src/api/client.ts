@@ -15,6 +15,11 @@ export function readFailure(error: unknown): string {
   return error instanceof ApiError ? error.message : '读取失败'
 }
 
+// 一个页面读好几样时的错误文字：没出错的（query.error 是 null）跳过，说的是同一句只留一条
+export function readFailures(errors: readonly unknown[]): string[] {
+  return [...new Set(errors.filter((error) => error != null).map((error) => readFailure(error)))]
+}
+
 type Query = Record<string, string | number | undefined>
 
 interface RequestOptions<T> {

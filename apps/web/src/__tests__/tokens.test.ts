@@ -172,3 +172,37 @@ describe('两套主题的令牌', () => {
     expect(scale('ink', 100)!.toLowerCase()).toBe(dark['--ui-text'])
   })
 })
+
+describe('权限格子', () => {
+  // 明度（CIE L*）：色觉差异的人靠它分开满色、淡色、空白
+  const lightness = (color: string | undefined) => {
+    const y = luminance(hex(color))
+    return 116 * Math.cbrt(y) - 16
+  }
+  const share = (t: Record<string, string>) => Number(/(\d+)%/.exec(t['--strata-tint']!)![1]) / 100
+
+  it('每一层的满色、淡色、空白两两拉开：岩芯上没有文字', () => {
+    for (const [name, t] of Object.entries(themes)) {
+      for (const layer of STACK) {
+        const full = t[`--access-${layer}`]
+        const tint = over(full, share(t), t['--ui-bg'])
+        const label = `${name} ${layer}`
+        expect(Math.abs(lightness(full) - lightness(tint)), label).toBeGreaterThanOrEqual(11)
+        expect(Math.abs(lightness(tint) - lightness(t['--ui-bg'])), label).toBeGreaterThanOrEqual(
+          11,
+        )
+      }
+    }
+  })
+
+  it('读写格子上的文字过 4.5:1', () => {
+    for (const [name, t] of Object.entries(themes)) {
+      for (const layer of STACK) {
+        expect(
+          contrast(t['--strata-on-layer'], t[`--access-${layer}`]),
+          `${name} ${layer}`,
+        ).toBeGreaterThanOrEqual(4.5)
+      }
+    }
+  })
+})

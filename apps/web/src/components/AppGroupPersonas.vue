@@ -4,11 +4,12 @@ import type { GroupPersonaRule } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useDebounced } from '../composables/useDebounced'
 import { icons } from '../icons'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
 
 // 按群换人格的规则：应用在这些群里用规则里的人格。整组替换，改一条就把整组发回去；只有应用主人能改
 const props = defineProps<{
@@ -131,45 +132,36 @@ function remove(subjectId: string) {
 </script>
 
 <template>
-  <div class="space-y-3">
-    <div>
-      <h2 class="text-sm font-medium">按群切换人格</h2>
-      <p class="text-xs text-muted">
-        在指定的群（或频道）中使用对应人格。
-        <Hint
-          >启动加载、召回与写入都按此人格。其余群、私聊和不带会话上下文的请求使用默认人格。</Hint
-        >
-      </p>
-    </div>
+  <div class="group-personas">
+    <p class="group-title">
+      按群切换人格
+      <Hint>
+        在指定的群（或频道）中使用对应人格。启动加载、召回与写入都按此人格。其余群、私聊和不带会话上下文的请求使用默认人格。
+      </Hint>
+    </p>
+    <NoteLine v-if="rules.isError.value" tone="error">
+      {{ readFailure(rules.error.value) }}
+    </NoteLine>
     <USkeleton v-if="rules.isPending.value" class="h-10 w-full" />
-    <UAlert
-      v-else-if="rules.isError.value"
-      color="error"
-      variant="subtle"
-      :title="rules.error.value instanceof ApiError ? rules.error.value.message : '读取失败'"
-    />
-    <template v-else>
-      <ul v-if="rules.data.value?.rules.length" class="divide-y divide-default">
-        <li
-          v-for="rule in rules.data.value.rules"
-          :key="rule.subjectId"
-          class="flex flex-wrap items-center gap-2 py-2"
-        >
+    <template v-else-if="rules.data.value">
+      <ul v-if="rules.data.value?.rules.length" class="group-rules">
+        <li v-for="rule in rules.data.value.rules" :key="rule.subjectId">
           <RouterLink
             :to="{ name: 'subject', params: { spaceId, subjectId: rule.subjectId } }"
-            class="min-w-0 flex-1 truncate text-sm hover:underline"
+            class="group-name"
+            :title="rule.groupName"
             >{{ rule.groupName }}</RouterLink
           >
           <USelect
             v-if="canManage"
             :model-value="rule.personaId"
             :items="personaItems"
-            class="w-40"
+            class="w-36"
             :aria-label="`「${rule.groupName}」使用的人格`"
             :disabled="saving"
             @update:model-value="(v) => change(rule.subjectId, v as string)"
           />
-          <span v-else class="text-sm">{{ personaName(rule.personaId) }}</span>
+          <span v-else class="group-persona">{{ personaName(rule.personaId) }}</span>
           <UButton
             v-if="canManage"
             :icon="icons.remove"
@@ -182,8 +174,8 @@ function remove(subjectId: string) {
           />
         </li>
       </ul>
-      <p v-else class="text-sm text-muted">暂无规则，所有群使用默认人格</p>
-      <div v-if="canManage" class="flex flex-wrap items-center gap-2">
+      <p v-else class="group-empty">暂无规则，所有群使用默认人格</p>
+      <div v-if="canManage" class="group-add">
         <USelectMenu
           v-model="newGroup"
           v-model:search-term="searchTerm"
@@ -194,24 +186,82 @@ function remove(subjectId: string) {
           :search-input="{ name: 'q', placeholder: '群名或群号', loading: groups.isFetching.value }"
           placeholder="选择群"
           aria-label="选择群"
-          class="w-full sm:w-56"
+          class="w-full"
         />
         <USelect
           v-model="newPersona"
           :items="personaItems"
           placeholder="选择人格"
           aria-label="选择人格"
-          class="w-full sm:w-40"
+          class="w-full"
         />
         <UButton
-          variant="subtle"
-          :icon="icons.add"
+          color="primary"
+          variant="outline"
           :disabled="!newGroup || !newPersona"
           :loading="saving"
           @click="add"
           >添加</UButton
         >
       </div>
+      <p v-if="canManage && groups.isError.value" class="group-failed">
+        {{ readFailure(groups.error.value) }}
+      </p>
     </template>
   </div>
 </template>
+
+<style scoped>
+.group-title {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-bottom: 6px;
+  font-size: 14px;
+}
+.group-rules {
+  margin-bottom: 7px;
+}
+.group-rules li {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  padding: 3px 0;
+  font-size: 14px;
+}
+.group-name {
+  flex: 1 1 0;
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.group-name:hover {
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.group-persona {
+  flex: none;
+  color: var(--ui-text-muted);
+}
+.group-empty {
+  margin-bottom: 7px;
+  font-size: 14px;
+  color: var(--ui-text-muted);
+}
+.group-failed {
+  margin-top: 6px;
+  font-size: 14px;
+  color: var(--ui-error);
+}
+.group-add {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(0, 1fr) auto;
+  gap: 6px;
+}
+@media (max-width: 640px) {
+  .group-add {
+    grid-template-columns: minmax(0, 1fr);
+  }
+}
+</style>

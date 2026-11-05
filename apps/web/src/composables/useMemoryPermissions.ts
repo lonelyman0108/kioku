@@ -32,7 +32,7 @@ export function useMemoryPermissions(spaceId: Ref<string>) {
   }
 
   // 不能改时给出原因，显示在编辑器上方
-  function readOnlyReason(memory: MemoryView): string | null {
+  function readOnlyReason(memory: Pick<MemoryView, 'uri' | 'sensitivity'>): string | null {
     if (!canWrite.value) return '当前账号是此空间的查看者，无法修改。'
     if (!canWriteUri(memory.uri)) {
       // editor 要知道应用是不是自己的，得先读到应用列表

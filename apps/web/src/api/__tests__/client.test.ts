@@ -1,10 +1,24 @@
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
-import { ApiError, attachmentName, download, request } from '../client'
+import { ApiError, attachmentName, download, readFailures, request } from '../client'
 import { api } from '../endpoints'
 
 afterEach(() => vi.unstubAllGlobals())
+
+describe('几样一起读时的错误文字', () => {
+  it('没出错的跳过，说的是同一句只留一条，不认识的错误不漏内部信息', () => {
+    expect(readFailures([null, null])).toEqual([])
+    expect(
+      readFailures([
+        new ApiError(500, '服务端出错了'),
+        null,
+        new ApiError(502, '服务端出错了'),
+        new TypeError('Failed to fetch http://127.0.0.1'),
+      ]),
+    ).toEqual(['服务端出错了', '读取失败'])
+  })
+})
 
 describe('API 客户端', () => {
   it('带上查询参数与 JSON 请求体，按 schema 校验响应', async () => {

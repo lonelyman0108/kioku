@@ -17,8 +17,8 @@ import {
 import { refreshSubjectCaches } from '../subjectQueries'
 import { formatRelative, formatTime } from '../time'
 
-// 绑定记录与确认、拒绝：概览里列出等你确认的，对象页里列出这个对象的。
-// subjectId 是所在的对象页；不在对象页（概览）时每条都链到绑到的那个对象
+// 绑定记录与确认、拒绝：待处理页列出等当前账号确认的，联系人页列出这个联系人的。
+// subjectId 是所在的联系人页；不在联系人页（待处理）时每条都链到绑到的那个联系人
 const props = defineProps<{ spaceId: string; items: SubjectBinding[]; subjectId?: string }>()
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -63,46 +63,40 @@ const incomingText = (binding: SubjectBinding) =>
 
 <template>
   <div>
-    <ul class="divide-y divide-default">
-      <li v-for="binding in items" :key="binding.id" class="space-y-1 py-2 text-sm">
-        <div class="flex flex-wrap items-center gap-2">
-          <span class="text-xs" :class="statusText[bindingStatusColors[binding.status]]">
-            {{ bindingStatusLabels[binding.status] }}
-          </span>
-          <span class="font-medium">{{ accountText(binding.redeemedBy) }}</span>
-          <template v-if="binding.subject.id !== subjectId">
-            <span class="text-muted">绑定到</span>
-            <RouterLink
-              :to="{ name: 'subject', params: { spaceId, subjectId: binding.subject.id } }"
-              class="text-primary"
-              >{{ binding.subject.displayName }}</RouterLink
-            >
-          </template>
-          <time
-            class="ml-auto text-xs text-muted"
-            :datetime="binding.createdAt"
-            :title="formatTime(binding.createdAt)"
-            >{{ formatRelative(binding.createdAt) }}</time
-          >
+    <ul>
+      <li v-for="binding in items" :key="binding.id" class="binding">
+        <div class="binding-main">
+          <p class="binding-head">
+            <span class="binding-status" :class="statusText[bindingStatusColors[binding.status]]">
+              {{ bindingStatusLabels[binding.status] }}
+            </span>
+            <span class="binding-account">{{ accountText(binding.redeemedBy) }}</span>
+            <template v-if="binding.subject.id !== subjectId">
+              <span class="text-muted">绑定到</span>
+              <RouterLink
+                :to="{ name: 'subject', params: { spaceId, subjectId: binding.subject.id } }"
+                class="text-primary"
+                >{{ binding.subject.displayName }}</RouterLink
+              >
+            </template>
+            <time :datetime="binding.createdAt" :title="formatTime(binding.createdAt)">
+              {{ formatRelative(binding.createdAt) }}
+            </time>
+          </p>
+          <p v-if="binding.incoming">
+            确认后合并到「{{ binding.subject.displayName }}」的平台账号：{{ incomingText(binding) }}
+          </p>
+          <p class="text-muted">{{ bindingSource(binding) }}</p>
+          <p class="text-muted">{{ bindingOutcome(binding) }}</p>
         </div>
-        <p v-if="binding.incoming">
-          确认后合并到「{{ binding.subject.displayName }}」的平台账号：{{ incomingText(binding) }}
-        </p>
-        <p class="text-muted">{{ bindingSource(binding) }}</p>
-        <p class="text-muted">{{ bindingOutcome(binding) }}</p>
-        <div v-if="binding.canConfirm || binding.canReject" class="flex gap-2 pt-1">
-          <UButton
-            v-if="binding.canConfirm"
-            size="xs"
-            :disabled="busy !== null"
-            @click="confirming = binding"
+        <div v-if="binding.canConfirm || binding.canReject" class="binding-actions">
+          <UButton v-if="binding.canConfirm" :disabled="busy !== null" @click="confirming = binding"
             >确认</UButton
           >
           <UButton
             v-if="binding.canReject"
-            size="xs"
-            color="neutral"
-            variant="subtle"
+            color="primary"
+            variant="outline"
             :loading="busy === binding.id && confirming === null"
             :disabled="busy !== null"
             @click="decide(binding, 'reject')"
@@ -147,3 +141,53 @@ const incomingText = (binding: SubjectBinding) =>
     </UModal>
   </div>
 </template>
+
+<style scoped>
+.binding {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 24px;
+  padding: 14px 0;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.6;
+}
+.binding-main {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.binding-head {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 2px 10px;
+}
+.binding-status {
+  font-size: 13px;
+}
+.binding-account {
+  font-family: var(--font-mono);
+  font-size: 15px;
+}
+.binding-head time {
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.binding-actions {
+  flex: none;
+  display: flex;
+  gap: 6px;
+}
+@media (max-width: 1023.98px) {
+  .binding {
+    flex-direction: column;
+    align-items: stretch;
+    gap: 10px;
+  }
+  .binding-actions > * {
+    flex: 1;
+    justify-content: center;
+  }
+}
+</style>

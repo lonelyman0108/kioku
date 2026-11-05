@@ -1,15 +1,14 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { backupNotice } from '../backup'
 import Hint from '../components/Hint.vue'
 import OverviewRow from '../components/OverviewRow.vue'
 import RecentChange from '../components/RecentChange.vue'
-import SubjectBindings from '../components/SubjectBindings.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataColumn from '../components/strata/StrataColumn.vue'
@@ -21,6 +20,7 @@ import {
 } from '../components/strata/strata'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
+import { actionableInboxCount } from '../inbox'
 import { bindingNote, budgetWarning, splitNote, strataFilterQuery } from '../overview'
 import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
@@ -56,11 +56,14 @@ function openStrata(selection: StrataSelection) {
   void router.push({ name: 'memories', params, query: strataFilterQuery(selection) })
 }
 
-// 账号绑定只有这里和联系人详情能处理：行内展开
-const bindingsOpen = ref(false)
-const bindingsListed = computed(() => data.value?.pendingBindings.length ?? 0)
+// 查看者处理不了后三类：数字不算进「待处理」，不标红，操作只是查看
+const role = computed(() => space.value?.role ?? 'viewer')
+const canAct = computed(() => role.value !== 'viewer')
+const pendingTotal = computed(() =>
+  data.value ? actionableInboxCount(data.value.inbox, role.value) : 0,
+)
 
-// 另外三类待处理跳到它们的页面
+// 待处理的另外三类，都到待处理页处理
 const pending = computed(() => {
   const inbox = data.value?.inbox
   if (!inbox) return []
@@ -70,9 +73,9 @@ const pending = computed(() => {
       title: '待确认内容',
       count: inbox.review,
       note: '来自群聊与陌生人私聊',
-      action: '去确认',
-      hot: true,
-      to: { name: 'review', params },
+      action: canAct.value ? '去确认' : '查看',
+      hot: canAct.value,
+      to: { name: 'inbox', params, query: { tab: 'review' } },
     },
     {
       title: '整理建议',
@@ -80,15 +83,15 @@ const pending = computed(() => {
       note: 'Dream 建议合并重复、标记过时',
       action: '查看',
       hot: false,
-      to: { name: 'review', params, query: { tab: 'dream' } },
+      to: { name: 'inbox', params, query: { tab: 'dream' } },
     },
     {
       title: '疑似明文凭据',
       count: inbox.plaintext,
       note: '建议转存为凭据，正文改用占位符',
-      action: '逐条处理',
+      action: canAct.value ? '逐条处理' : '查看',
       hot: false,
-      to: { name: 'memories', params, query: { view: 'list', plaintext: 'true' } },
+      to: { name: 'inbox', params, query: { tab: 'plaintext' } },
     },
   ]
 })
@@ -112,21 +115,20 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
 
 <template>
   <div class="overview">
+    <!-- 读到过的内容留着，错误放在上面 -->
     <div v-if="overview.isError.value" class="overview-failed">
-      <NoteLine tone="error">
-        {{ overview.error.value instanceof ApiError ? overview.error.value.message : '读取失败' }}
-      </NoteLine>
+      <NoteLine tone="error">{{ readFailure(overview.error.value) }}</NoteLine>
     </div>
-    <div v-else-if="!data || !counts" class="overview-grid">
+    <div v-if="overview.isPending.value" class="overview-grid">
       <div v-for="n in 3" :key="n" class="overview-col space-y-4">
         <USkeleton class="h-8 w-2/3" />
         <USkeleton class="h-96 w-full" />
       </div>
     </div>
-    <div v-else class="overview-grid">
+    <div v-else-if="data && counts" class="overview-grid">
       <div class="overview-col plate">
         <header class="plate-head">
-          <h1>{{ data.total }} 条记忆，{{ data.inbox.total }} 项待处理</h1>
+          <h1>{{ data.total }} 条记忆，{{ pendingTotal }} 项待处理</h1>
           <p>
             <span v-if="extracted">另有 {{ extracted }} 条来自对话</span>
             <span v-else>统计范围</span>
@@ -158,23 +160,11 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             title="账号绑定申请"
             :value="data.inbox.bindings"
             :note="bindingNote(data.pendingBindings, data.inbox.bindings) ?? '暂无'"
-            :action="bindingsListed ? (bindingsOpen ? '收起' : '查看') : null"
-            :expanded="bindingsOpen"
+            :action="data.inbox.bindings ? '查看' : null"
+            :to="{ name: 'inbox', params: { spaceId }, query: { tab: 'binding' } }"
             :hot="data.inbox.bindings > 0"
             :zero="!data.inbox.bindings"
-            @action="bindingsOpen = !bindingsOpen"
           />
-          <div v-if="bindingsOpen && bindingsListed" class="bindings">
-            <p class="text-sm">
-              确认后，该账号的私聊视为本人对话，此操作不可撤销。如无法辨认，请拒绝。<Hint>
-                对方在 Bot 私聊中使用绑定码发起申请，确认后账号并入标记为本人的联系人。
-              </Hint>
-            </p>
-            <p v-if="data.inbox.bindings > bindingsListed" class="text-sm text-muted">
-              仅列出前 {{ bindingsListed }} 个，处理后显示其余的。
-            </p>
-            <SubjectBindings :space-id="spaceId" :items="data.pendingBindings" />
-          </div>
           <OverviewRow
             v-for="row in pending"
             :key="row.title"
@@ -348,17 +338,19 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
 
 <style scoped>
 .overview {
+  display: flex;
   flex: 1;
+  flex-direction: column;
   min-width: 0;
   overflow-y: auto;
 }
 .overview-failed {
-  padding: 24px 32px;
+  padding: 24px 32px 0;
 }
 .overview-grid {
   display: grid;
+  flex: 1 0 auto;
   grid-template-columns: 600px minmax(0, 1fr) minmax(0, 1fr);
-  min-height: 100%;
 }
 .overview-col {
   min-width: 0;
@@ -396,10 +388,6 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
   gap: 7px;
   margin-top: 3px;
   color: var(--ui-text-muted);
-}
-.bindings {
-  padding: 12px 0 8px;
-  border-bottom: 1px solid var(--ui-border);
 }
 .meter {
   position: relative;
@@ -522,9 +510,11 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
 }
 /* 窄屏单栏 */
 @media (max-width: 1023.98px) {
+  .overview-failed {
+    padding: 18px 16px 0;
+  }
   .overview-grid {
     display: block;
-    min-height: 0;
   }
   .overview-col {
     padding: 18px 16px;

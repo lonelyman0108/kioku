@@ -143,6 +143,17 @@
   /* 不带层的图例底色；只读格子是层色和纸按这个比例混出来的淡色 */
   --strata-neutral: #dedbca;
   --strata-tint: 52%;
+  /*
+   * 权限格子的满色。岩芯上没有文字，满色、淡色、空白三档只靠明度分开：
+   * 应用、个人画像、情节三层本来就淡，压暗到和别的层差不多的明度，三档才拉得开
+   */
+  --access-base: #94aebb;
+  --access-persona: #8fb29a;
+  --access-app: #a4b179;
+  --access-owner: #c1a970;
+  --access-private: #d39a80;
+  --access-subject: #afa3bd;
+  --access-episode: #b0a8b6;
   /* 选中行反白 */
   --strata-selected: #2a2b26;
   --strata-on-selected: #f1efe4;
@@ -193,6 +204,14 @@
   --strata-texture: rgba(20, 24, 27, 0.55);
   --strata-neutral: #aeb3b0;
   --strata-tint: 46%;
+  /* 深色底上三档本来就拉得开，用层色本身 */
+  --access-base: #9fb5c1;
+  --access-persona: #9cbba8;
+  --access-app: #bac794;
+  --access-owner: #d8c48f;
+  --access-private: #d3a690;
+  --access-subject: #b4a9c5;
+  --access-episode: #cac3d5;
   --strata-selected: #333b40;
   --strata-on-selected: #f0f1eb;
   --strata-on-selected-muted: #bcc0bc;
