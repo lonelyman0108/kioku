@@ -22,6 +22,7 @@ import {
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { bindingNote, budgetWarning, splitNote, strataFilterQuery } from '../overview'
+import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -257,7 +258,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               <span>{{ budget.note.first }}</span>
               <RouterLink
                 v-if="canAdjustBudget"
-                :to="{ name: 'space-settings', params: { spaceId } }"
+                :to="spaceSettingsRoute(spaceId, 'budget')"
                 class="notice-link"
               >
                 调整预算
@@ -276,7 +277,9 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             </p>
             <p class="notice-body">
               <span>{{ backup.note.first }}</span>
-              <RouterLink :to="{ name: 'settings' }" class="notice-link">去实例设置</RouterLink>
+              <RouterLink :to="instanceSettingsRoute('backup')" class="notice-link"
+                >去实例设置</RouterLink
+              >
             </p>
           </div>
           <p v-if="!budget && !backup" class="empty">暂无提醒</p>

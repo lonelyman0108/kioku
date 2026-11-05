@@ -1,9 +1,9 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import BackupSettings from '../components/BackupSettings.vue'
 import EmbeddingSettings from '../components/EmbeddingSettings.vue'
@@ -11,6 +11,11 @@ import ExtractionSettings from '../components/ExtractionSettings.vue'
 import Hint from '../components/Hint.vue'
 import RetentionSettings from '../components/RetentionSettings.vue'
 import SpaceImport from '../components/SpaceImport.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
+import PropertyList from '../components/strata/PropertyList.vue'
+import SettingsBlock from '../components/strata/SettingsBlock.vue'
+import SettingsFrame from '../components/strata/SettingsFrame.vue'
+import { INSTANCE_SECTIONS } from '../settingsSections'
 
 const toast = useToast()
 const queryClient = useQueryClient()
@@ -60,109 +65,124 @@ async function saveRetention() {
     savingRetention.value = false
   }
 }
+
+// 哪些小节有未保存的改动：切走之后表单看不见了，子导航上标出来
+const dirty = reactive({ embedding: false, extraction: false, backup: false, retention: false })
+const recallDirty = computed(
+  () =>
+    Boolean(recallSettings.data.value) &&
+    retentionDays.value !== recallSettings.data.value?.retentionDays,
+)
+const unsaved = computed(() => [
+  ...Object.entries(dirty).flatMap(([key, changed]) => (changed ? [key] : [])),
+  ...(recallDirty.value ? ['recall'] : []),
+])
 </script>
 
 <template>
-  <UDashboardPanel id="settings">
-    <template #header>
-      <UDashboardNavbar title="实例设置" />
+  <SettingsFrame title="实例设置" :sections="INSTANCE_SECTIONS" :unsaved="unsaved">
+    <template #embedding>
+      <EmbeddingSettings v-model:dirty="dirty.embedding" />
     </template>
-    <template #body>
-      <!-- 面板内容区是固定高度的竖向 flex 容器：卡片直接放进去会在内容超出时被压扁，所以包一层 -->
-      <div class="max-w-2xl space-y-6">
-        <EmbeddingSettings />
 
-        <ExtractionSettings />
+    <template #extraction>
+      <ExtractionSettings v-model:dirty="dirty.extraction" />
+    </template>
 
-        <UCard>
-          <template #header>
-            <h2 class="font-medium">主密钥</h2>
-            <p class="mt-1 text-sm text-muted">
-              用于加密机密记忆、托管的凭据值与接口 Key。
-              <Hint>
-                在服务器的 KIOKU_MASTER_KEY
-                中配置。标识是哈希值，无法反推密钥，用于核对当前配置的主密钥。
-              </Hint>
-            </p>
-          </template>
-          <UAlert
-            v-if="masterKey.isError.value"
-            color="error"
-            variant="subtle"
-            :title="
-              masterKey.error.value instanceof ApiError ? masterKey.error.value.message : '读取失败'
-            "
-          />
-          <div v-else-if="masterKey.data.value" class="space-y-2 text-sm">
-            <p v-if="!masterKey.data.value.configured" class="text-muted">
-              未配置主密钥，无法保存机密记忆、托管的凭据与接口 Key。
-            </p>
-            <template v-else>
-              <p>
-                标识 <span class="font-mono">{{ masterKey.data.value.currentId }}</span>
-              </p>
-              <template v-if="masterKey.data.value.previousId">
-                <p>
-                  正在轮换：旧主密钥
-                  <span class="font-mono">{{ masterKey.data.value.previousId }}</span> 还有
-                  {{ remaining }} 条待重新包装（机密记忆
-                  {{ masterKey.data.value.remaining.memories }}、托管的凭据
-                  {{ masterKey.data.value.remaining.credentials }}、接口 Key
-                  {{ masterKey.data.value.remaining.settings }}）
-                </p>
-                <UAlert
-                  v-if="masterKey.data.value.lastError"
-                  color="error"
-                  variant="subtle"
-                  :title="masterKey.data.value.lastError.message"
-                />
-                <p v-if="remaining === 0" class="text-success">
-                  轮换完成。可以从配置中移除 KIOKU_MASTER_KEY_PREVIOUS，然后重启服务。
-                </p>
+    <template #master-key>
+      <SettingsBlock title="主密钥">
+        <template #note>
+          用于加密机密记忆、托管的凭据值与接口 Key。
+          <Hint>
+            在服务器的 KIOKU_MASTER_KEY
+            中配置。标识是哈希值，无法反推密钥，用于核对当前配置的主密钥。
+          </Hint>
+        </template>
+        <!-- 后台刷新失败时读到过的状态留着，错误放在上面 -->
+        <NoteLine v-if="masterKey.isError.value" tone="error">
+          {{ readFailure(masterKey.error.value) }}
+        </NoteLine>
+        <div v-if="masterKey.data.value" class="space-y-3">
+          <p v-if="!masterKey.data.value.configured" class="text-muted">
+            未配置主密钥，无法保存机密记忆、托管的凭据与接口 Key。
+          </p>
+          <template v-else>
+            <PropertyList :groups="[[{ key: 'current', label: '标识' }]]">
+              <template #current>
+                <span class="font-mono text-[13px]">{{ masterKey.data.value.currentId }}</span>
               </template>
+            </PropertyList>
+            <template v-if="masterKey.data.value.previousId">
+              <p>
+                正在轮换：旧主密钥
+                <span class="font-mono text-[13px]">{{ masterKey.data.value.previousId }}</span>
+                还有 {{ remaining }} 条待重新包装（机密记忆
+                {{ masterKey.data.value.remaining.memories }}、托管的凭据
+                {{ masterKey.data.value.remaining.credentials }}、接口 Key
+                {{ masterKey.data.value.remaining.settings }}）
+              </p>
+              <NoteLine v-if="masterKey.data.value.lastError" tone="error">
+                {{ masterKey.data.value.lastError.message }}
+              </NoteLine>
+              <p v-if="remaining === 0" class="text-success">
+                轮换完成。可以从配置中移除 KIOKU_MASTER_KEY_PREVIOUS，然后重启服务。
+              </p>
             </template>
-          </div>
-        </UCard>
-
-        <BackupSettings />
-
-        <SpaceImport />
-
-        <RetentionSettings />
-
-        <UCard>
-          <template #header>
-            <h2 class="font-medium">召回记录</h2>
-            <p class="mt-1 text-sm text-muted">
-              明细到期后删除，仅保留每条记忆的累计召回次数。
-              <Hint>明细包括命中的记忆、分数与打码后的提示语。</Hint>
-            </p>
           </template>
-          <UAlert
-            v-if="recallSettings.isError.value && !recallSettings.data.value"
-            color="error"
-            variant="subtle"
-            :title="
-              recallSettings.error.value instanceof ApiError
-                ? recallSettings.error.value.message
-                : '读取失败'
-            "
-          />
-          <form v-else class="flex flex-wrap items-end gap-2" @submit.prevent="saveRetention">
-            <UFormField label="明细保留天数" help="1 到 365 天">
-              <UInputNumber v-model="retentionDays" :min="1" :max="365" class="w-32" />
-            </UFormField>
-            <UButton
-              type="submit"
-              :loading="savingRetention"
-              :disabled="
-                !retentionDays || retentionDays === recallSettings.data.value?.retentionDays
-              "
-              >保存</UButton
-            >
-          </form>
-        </UCard>
-      </div>
+        </div>
+      </SettingsBlock>
     </template>
-  </UDashboardPanel>
+
+    <template #backup>
+      <BackupSettings v-model:dirty="dirty.backup" />
+    </template>
+
+    <template #import>
+      <SpaceImport />
+    </template>
+
+    <template #retention>
+      <RetentionSettings v-model:dirty="dirty.retention" />
+    </template>
+
+    <template #recall>
+      <SettingsBlock title="召回记录">
+        <template #note>
+          明细到期后删除，仅保留每条记忆的累计召回次数。
+          <Hint>明细包括命中的记忆、分数与打码后的提示语。</Hint>
+        </template>
+        <NoteLine v-if="recallSettings.isError.value" tone="error">
+          {{ readFailure(recallSettings.error.value) }}
+          <template #actions>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :loading="recallSettings.isFetching.value"
+              @click="recallSettings.refetch()"
+              >重试</UButton
+            >
+          </template>
+        </NoteLine>
+        <USkeleton v-if="recallSettings.isPending.value" class="h-16 w-full" />
+        <form
+          v-else-if="recallSettings.data.value"
+          class="space-y-3"
+          @submit.prevent="saveRetention"
+        >
+          <UFormField label="明细保留天数" help="1 到 365 天">
+            <UInputNumber v-model="retentionDays" :min="1" :max="365" class="w-32" />
+          </UFormField>
+          <UButton
+            type="submit"
+            color="primary"
+            variant="outline"
+            :loading="savingRetention"
+            :disabled="!retentionDays || retentionDays === recallSettings.data.value?.retentionDays"
+            >保存</UButton
+          >
+        </form>
+      </SettingsBlock>
+    </template>
+  </SettingsFrame>
 </template>

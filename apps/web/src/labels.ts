@@ -15,7 +15,6 @@ import {
   type Provenance,
   type ReadDenial,
   type RecallSource,
-  type Sensitivity,
 } from '@kioku/contracts'
 
 import { icons } from './icons'
@@ -169,13 +168,6 @@ export const changeLabels: Record<string, string> = {
   uri: 'URI',
   glossary: '关键词',
   validTo: '有效期',
-}
-
-export const sensitivityColors: Record<Sensitivity, 'neutral' | 'info' | 'warning' | 'error'> = {
-  public: 'neutral',
-  internal: 'info',
-  private: 'warning',
-  secret: 'error',
 }
 
 export const providerKindLabels: Record<CredentialProviderKind, string> = {

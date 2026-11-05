@@ -531,6 +531,16 @@ export const theme = {
     },
   },
 
+  // 拖放区：虚线框里的上传图标和选好的文件图标都不要圆底
+  fileUpload: {
+    slots: {
+      base: 'border-accented',
+      avatar: 'rounded-none bg-transparent',
+      fileLeadingAvatar: 'rounded-none bg-transparent',
+    },
+    variants: { layout: { list: { file: 'border-accented' } } },
+  },
+
   progress: {
     slots: {
       base: 'rounded-none bg-transparent ring ring-inset ring-rule',

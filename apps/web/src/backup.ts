@@ -1,4 +1,11 @@
-import type { OverviewBackup } from '@kioku/contracts'
+import type { BackupSettingsView, OverviewBackup } from '@kioku/contracts'
+
+// 存储桶列表的缓存键。列的是这个位置的备份：换了接口地址、存储桶或目录就是另一份数据，
+// 重新列举期间、别的管理员换了位置之后，旧位置的列表都不会显示成当前的。失效和删除按前面的前缀来
+export const BACKUP_OBJECTS_KEY = ['settings', 'backup', 'objects']
+export const backupObjectsKey = (
+  s: Pick<BackupSettingsView, 'endpoint' | 'bucket' | 'prefix'> | undefined,
+) => [...BACKUP_OBJECTS_KEY, s?.endpoint, s?.bucket, s?.prefix]
 
 // UTC 钟点与本地钟点按今天换算，夏令时的地区也对得上。两个方向都从本地今天中午出发，落在同一天，
 // 夜里快到夏令时切换时也不会一个按今天、一个按明天

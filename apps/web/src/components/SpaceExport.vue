@@ -6,8 +6,9 @@ import { computed, ref, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { saveFile } from '../download'
-import { icons } from '../icons'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
 
 const props = defineProps<{ spaceId: string; spaceName: string; editable: boolean }>()
 
@@ -67,27 +68,24 @@ async function exportSpace() {
 </script>
 
 <template>
-  <UCard class="max-w-2xl shrink-0">
-    <template #header>
-      <h2 class="font-medium">导出空间</h2>
-      <p class="mt-1 text-sm text-muted">
-        导出为口令加密的文件，含机密记忆与托管的凭据值，由实例管理员在其他实例或当前实例导入为新空间。
-        <Hint>
-          <p>
-            包含共享的记忆、人格、应用配置与联系人，以及当前账号的个人画像层与私人层（含是否允许
-            Dream 整理的设置）、凭据与凭据源。机密记忆与托管的凭据值一并加密导出。
-          </p>
-          <p class="mt-1">
-            已过期的记忆与已被取代的事实也会导出，有效期不变，导入后可恢复生效（已被取代的事实不再保留取代它的记录）。已删除的内容不导出。
-          </p>
-          <p class="mt-1">
-            不包含其他成员的私人内容、会话、召回记录、对话缓冲、抽取记录、历史、向量与
-            Key。导入后需为应用重新签发 Key，向量按目标实例的设置重新生成。
-          </p>
-        </Hint>
-      </p>
+  <SettingsBlock title="导出空间">
+    <template #note>
+      导出为口令加密的文件，含机密记忆与托管的凭据值，由实例管理员在其他实例或当前实例导入为新空间。
+      <Hint>
+        <p>
+          包含共享的记忆、人格、应用配置与联系人，以及当前账号的个人画像层与私人层（含是否允许 Dream
+          整理的设置）、凭据与凭据源。机密记忆与托管的凭据值一并加密导出。
+        </p>
+        <p class="mt-1">
+          已过期的记忆与已被取代的事实也会导出，有效期不变，导入后可恢复生效（已被取代的事实不再保留取代它的记录）。已删除的内容不导出。
+        </p>
+        <p class="mt-1">
+          不包含其他成员的私人内容、会话、召回记录、对话缓冲、抽取记录、历史、向量与
+          Key。导入后需为应用重新签发 Key，向量按目标实例的设置重新生成。
+        </p>
+      </Hint>
     </template>
-    <p v-if="!editable" class="text-sm text-muted">仅空间所有者可导出</p>
+    <p v-if="!editable" class="text-muted">仅空间所有者可导出</p>
     <form v-else class="space-y-4" @submit.prevent="exportSpace">
       <UFormField
         label="口令"
@@ -110,12 +108,16 @@ async function exportSpace() {
           :disabled="exporting"
         />
       </UFormField>
-      <UAlert v-if="problem" color="warning" variant="subtle" :title="problem" />
-      <div class="flex justify-end">
-        <UButton type="submit" :icon="icons.exportSpace" :loading="exporting" :disabled="!ready">
-          导出
-        </UButton>
-      </div>
+      <NoteLine v-if="problem" tone="warning">{{ problem }}</NoteLine>
+      <UButton
+        type="submit"
+        color="primary"
+        variant="outline"
+        :loading="exporting"
+        :disabled="!ready"
+      >
+        导出
+      </UButton>
     </form>
-  </UCard>
+  </SettingsBlock>
 </template>

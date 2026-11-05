@@ -1,6 +1,15 @@
+import { QueryClient } from '@tanstack/vue-query'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
-import { backupNotice, classifyError, defaultHour, formatBytes, hourLabel } from '../backup'
+import {
+  BACKUP_OBJECTS_KEY,
+  backupNotice,
+  backupObjectsKey,
+  classifyError,
+  defaultHour,
+  formatBytes,
+  hourLabel,
+} from '../backup'
 
 describe('备份的显示', () => {
   // 在有夏令时的时区里核对：UTC 钟点与本地钟点的换算要按当天，固定用冬天的日期夏天就差一小时
@@ -89,5 +98,39 @@ describe('概览里的备份提醒', () => {
     expect(
       backupNotice(configured({ lastSuccessAt: hoursAgo(120), lastError: warned }), now),
     ).toMatchObject({ title: '近期没有新备份' })
+  })
+})
+
+describe('存储桶列表的缓存键', () => {
+  const place = { endpoint: 'https://s3.example.com', bucket: 'kioku-backup', prefix: 'kioku' }
+
+  it('换了接口地址、存储桶或目录就是另一份数据', () => {
+    const key = JSON.stringify(backupObjectsKey(place))
+    for (const changed of [
+      { endpoint: 'https://other.example.com' },
+      { bucket: 'other-bucket' },
+      { prefix: '' },
+    ]) {
+      expect(JSON.stringify(backupObjectsKey({ ...place, ...changed }))).not.toBe(key)
+    }
+  })
+
+  it('位置没变时是同一份：设置别的字段或备份状态变了，列表不用重新读', () => {
+    const more = { ...place, keep: 30, status: { lastSuccess: null, lastError: null } }
+    expect(backupObjectsKey(more)).toEqual(backupObjectsKey(place))
+  })
+
+  it('保存、立即备份之后的失效和清除时的删除，都按前缀覆盖每个位置的列表', async () => {
+    const client = new QueryClient()
+    const here = backupObjectsKey(place)
+    const there = backupObjectsKey({ ...place, bucket: 'other-bucket' })
+    client.setQueryData(here, { objects: [] })
+    client.setQueryData(there, { objects: [] })
+    await client.invalidateQueries({ queryKey: BACKUP_OBJECTS_KEY })
+    expect(client.getQueryState(here)?.isInvalidated).toBe(true)
+    expect(client.getQueryState(there)?.isInvalidated).toBe(true)
+    client.removeQueries({ queryKey: BACKUP_OBJECTS_KEY })
+    expect(client.getQueryData(here)).toBeUndefined()
+    expect(client.getQueryData(there)).toBeUndefined()
   })
 })

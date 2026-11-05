@@ -1152,7 +1152,7 @@ describe('模型对话的页面', () => {
       "info.data.value?.reason === 'notAdmin'",
     )
     expect(blockOf(view.script, 'const unavailableActions = ')).toContain(
-      "to: { name: 'settings' }",
+      "to: instanceSettingsRoute('extraction')",
     )
     // 模型名、系统提示与输入区都只在用得了时才有
     const guarded = view.elements.filter((el) => directive(el, 'if') === 'available && loop')

@@ -3,11 +3,12 @@ import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { icons } from '../icons'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
 
 const props = defineProps<{ spaceId: string; editable: boolean }>()
 // 有没有没保存的修改：交给页面统一做离开前的确认
@@ -79,35 +80,28 @@ async function save() {
 </script>
 
 <template>
-  <UCard class="max-w-2xl shrink-0">
-    <template #header>
-      <h2 class="font-medium">抽取预算</h2>
-      <p class="mt-1 text-sm text-muted">
-        抽取事实与 Dream 整理共用此 token 预算。
-        <Hint>
-          用量达到 80% 时在概览提醒。用完后本月仅写会话摘要，不再抽取事实，Dream 暂停，下月恢复（按
-          UTC 自然月计算）。每个联系人每天的事实写入有上限，防止恶意刷写。
-        </Hint>
-      </p>
+  <SettingsBlock title="抽取预算">
+    <template #note>
+      抽取事实与 Dream 整理共用此 token 预算。
+      <Hint>
+        用量达到 80% 时在概览提醒。用完后本月仅写会话摘要，不再抽取事实，Dream 暂停，下月恢复（按
+        UTC 自然月计算）。每个联系人每天的事实写入有上限，防止恶意刷写。
+      </Hint>
     </template>
-    <UAlert
-      v-if="usage.isError.value && !usage.data.value"
-      color="error"
-      variant="subtle"
-      :title="usage.error.value instanceof ApiError ? usage.error.value.message : '读取失败'"
-    />
-    <USkeleton v-else-if="!usage.data.value" class="h-24 w-full" />
-    <div v-else class="space-y-4">
+    <!-- 后台刷新失败时读到过的用量留着，错误放在上面 -->
+    <NoteLine v-if="usage.isError.value" tone="error">
+      {{ readFailure(usage.error.value) }}
+    </NoteLine>
+    <USkeleton v-if="usage.isPending.value" class="h-24 w-full" />
+    <div v-else-if="usage.data.value" class="space-y-4">
       <div class="space-y-2">
-        <p class="text-sm">
+        <p>
           本月已用
           <span class="font-semibold tabular-nums">{{
             usage.data.value.usedTokens.toLocaleString()
           }}</span>
           / {{ usage.data.value.monthlyTokens.toLocaleString() }} token
-          <span class="text-xs text-muted"
-            >（从 {{ formatTime(usage.data.value.periodStart) }} 起）</span
-          >
+          <span class="text-muted">（从 {{ formatTime(usage.data.value.periodStart) }} 起）</span>
         </p>
         <UProgress v-if="progress" :model-value="progress.percent" :color="progress.color" />
       </div>
@@ -124,14 +118,20 @@ async function save() {
         <UFormField label="每个联系人每日写入上限">
           <UInputNumber v-model="form.dailyWritesPerSubject" :min="0" :max="1000" class="w-32" />
         </UFormField>
-        <UButton type="submit" :icon="icons.save" :loading="saving" :disabled="!dirty">
+        <UButton
+          type="submit"
+          color="primary"
+          variant="outline"
+          :loading="saving"
+          :disabled="!dirty"
+        >
           保存
         </UButton>
       </form>
-      <p v-else class="text-sm text-muted">
+      <p v-else class="text-muted">
         每个联系人每天最多写入
         {{ usage.data.value.dailyWritesPerSubject }} 条事实。仅空间所有者可修改预算。
       </p>
     </div>
-  </UCard>
+  </SettingsBlock>
 </template>
