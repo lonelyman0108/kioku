@@ -24,6 +24,7 @@ import { divergenceNotice, NOT_API_FAILURE, runBlocker, sessionUsage } from '../
 import { useBench } from '../composables/useBench'
 import { saveFile } from '../download'
 import { icons } from '../icons'
+import { instanceSettingsRoute } from '../settingsSections'
 import BenchAgentExchange from './BenchAgentExchange.vue'
 import BenchContextForm from './BenchContextForm.vue'
 import BenchNotice from './BenchNotice.vue'
@@ -84,7 +85,7 @@ const unavailableActions = computed(() =>
         {
           label: '去实例设置',
           color: 'neutral' as const,
-          to: { name: 'settings' },
+          to: instanceSettingsRoute('extraction'),
         },
       ],
 )
