@@ -237,7 +237,8 @@ describe('这次改动动没动统计', () => {
       view({ priority: 0, version: 2 }),
       view({ glossary: ['关键词'], version: 2 }),
       view({ disclosure: '换一种说法', version: 2 }),
-      view({ validTo: later(3), version: 2 }),
+      // statsChanged 按真实时间判断是否过期，这里的有效期也要按真实时间往后推
+      view({ validTo: new Date(Date.now() + 3 * 86_400_000).toISOString(), version: 2 }),
     ]) {
       expect(statsChanged(before, after)).toBe(false)
     }
