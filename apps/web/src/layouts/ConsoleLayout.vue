@@ -10,6 +10,7 @@ import { api } from '../api/endpoints'
 import { ownedApps } from '../benchSession'
 import KiokuMark from '../components/KiokuMark.vue'
 import StrataPatterns from '../components/strata/StrataPatterns.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
 import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPreference'
 import { useConsoleSearch } from '../composables/useConsoleSearch'
 import { useInboxCounts } from '../composables/useInboxCounts'
@@ -218,8 +219,8 @@ async function logout() {
 
 <template>
   <!--
-    过渡：老页面还在用 UDashboardPanel，面板拖动和 ⌘K 都靠 UDashboardGroup 提供上下文。
-    Group 默认左右排，这里改成上下排，顶部导航在上、页面在下。页面都换完之后去掉 Group
+    UDashboardGroup 只为搜索留着：搜索按钮和 ⌘K 的开关状态靠它的上下文共享。
+    Group 默认左右排，这里改成上下排，顶部导航在上、页面在下
   -->
   <UDashboardGroup class="flex-col">
     <StrataPatterns />
@@ -415,20 +416,32 @@ async function logout() {
 
     <main class="flex min-h-0 flex-1">
       <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
-      <UDashboardPanel v-if="me.data.value && route.params.spaceId && !space" id="not-member">
-        <template #body>
-          <div class="space-y-3">
-            <p class="text-muted">无权访问此空间</p>
-            <UButton :to="{ name: 'home' }" variant="subtle">返回我的空间</UButton>
-          </div>
-        </template>
-      </UDashboardPanel>
+      <div v-if="me.data.value && route.params.spaceId && !space" class="not-member">
+        <NoteLine>
+          无权访问此空间
+          <template #actions>
+            <UButton :to="{ name: 'home' }" color="neutral" variant="outline" size="sm">
+              返回我的空间
+            </UButton>
+          </template>
+        </NoteLine>
+      </div>
       <RouterView v-else />
     </main>
   </UDashboardGroup>
 </template>
 
 <style scoped>
+.not-member {
+  flex: 1;
+  min-width: 0;
+  padding: 24px 32px;
+}
+@media (max-width: 1023.98px) {
+  .not-member {
+    padding: 16px;
+  }
+}
 /* 组之间一条短竖线 */
 .nav-group::before {
   content: '';

@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
+import { theme } from '../theme'
 
 // 没有组件测试的环境，所以看源码本身：外壳改过长相，这些逻辑不能跟着丢
 const { descriptor } = parse(consoleLayout)
@@ -178,5 +179,29 @@ describe('保留的逻辑', () => {
   it('主题用 Nuxt UI 的 color mode，不另存一份', () => {
     expect(script).toContain('useColorPreference()')
     expect(script).not.toContain('localStorage')
+  })
+})
+
+describe('老外壳的过渡代码', () => {
+  // 不在页面上用老面板：它们按组件库默认撑满视口，还带侧栏开关，放在顶部导航下面会溢出
+  const vueFiles = import.meta.glob<string>('../**/*.vue', {
+    query: '?raw',
+    import: 'default',
+    eager: true,
+  })
+
+  it('页面和组件都不再用老面板', () => {
+    expect(Object.keys(vueFiles).length).toBeGreaterThan(50)
+    for (const [file, source] of Object.entries(vueFiles)) {
+      for (const old of ['UDashboardPanel', 'UDashboardNavbar', 'UDashboardToolbar']) {
+        expect(source, file).not.toContain(old)
+      }
+    }
+  })
+
+  it('主题里没有老面板的覆盖', () => {
+    for (const key of ['dashboardPanel', 'dashboardNavbar', 'dashboardToolbar']) {
+      expect(Object.keys(theme)).not.toContain(key)
+    }
   })
 })

@@ -148,9 +148,7 @@ const retryKeys = computed(() => retryOf(keys))
         />
         <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">
           当前应用暂无有效 Key，
-          <RouterLink
-            :to="{ name: 'app', params: { spaceId, appId } }"
-            class="text-primary hover:underline"
+          <RouterLink :to="{ name: 'app', params: { spaceId, appId } }" class="text-primary"
             >签发 Key</RouterLink
           >
           后可使用测试台。
