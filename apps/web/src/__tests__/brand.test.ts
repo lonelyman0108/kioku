@@ -21,11 +21,13 @@ describe('文字标', () => {
     expect(mark).toContain('props.height <= SEMIBOLD_MAX_HEIGHT ? VERSIONS.semibold')
   })
 
-  it('登录页、初始化页的标题用文字标，不写产品名', () => {
-    for (const page of ['LoginPage', 'SetupPage']) {
+  it('登录页、初始化页、连接失败页的标题用文字标，不写产品名', () => {
+    expect(read('../components/strata/EntryFrame.vue')).toContain('<KiokuMark')
+    for (const page of ['LoginPage', 'SetupPage', 'UnavailablePage']) {
       const source = read(`../pages/${page}.vue`)
-      expect(source).toContain('<KiokuMark')
+      expect(source).toContain('<EntryFrame')
       expect(source).not.toMatch(/<h1[^>]*>[^<]*Kioku/)
+      expect(source).not.toMatch(/title="[^"]*Kioku/)
     }
   })
 })

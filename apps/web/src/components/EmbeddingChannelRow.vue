@@ -15,9 +15,9 @@ const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', tr
 </script>
 
 <template>
-  <div class="space-y-3 rounded-md border border-default p-3">
+  <div class="space-y-3 border-t border-default pt-2">
     <div class="flex items-center gap-1">
-      <span class="text-sm font-medium">渠道 {{ index + 1 }}</span>
+      <span class="font-medium">渠道 {{ index + 1 }}</span>
       <span class="flex-1" />
       <UButton
         :icon="icons.up"

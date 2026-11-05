@@ -13,9 +13,9 @@ export type SetupStatus = z.infer<typeof SetupStatus>
 
 export const SetupRequest = z.object({
   username: Username,
-  displayName: z.string().min(1).max(64),
+  displayName: z.string().min(1, '请填写显示名').max(64, '显示名不超过 64 个字符'),
   password: Password,
-  spaceName: z.string().min(1).max(64),
+  spaceName: z.string().min(1, '请填写空间名').max(64, '空间名不超过 64 个字符'),
 })
 export type SetupRequest = z.infer<typeof SetupRequest>
 

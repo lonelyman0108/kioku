@@ -4,7 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import KiokuMark from '../components/KiokuMark.vue'
+import EntryFrame from '../components/strata/EntryFrame.vue'
+import SectionHeading from '../components/strata/SectionHeading.vue'
 import { ME_KEY } from '../composables/useSession'
 import { queryClient } from '../query'
 
@@ -39,28 +40,30 @@ async function submit() {
 </script>
 
 <template>
-  <div class="flex min-h-screen items-center justify-center p-4">
-    <UCard class="w-full max-w-sm">
-      <template #header>
-        <KiokuMark :height="64" class="mb-3" />
-        <h1 class="text-lg font-semibold">登录</h1>
-      </template>
-      <form class="space-y-4" @submit.prevent="submit">
-        <UFormField label="用户名">
-          <UInput v-model="state.username" autocomplete="username" class="w-full" required />
-        </UFormField>
-        <UFormField label="密码">
-          <UInput
-            v-model="state.password"
-            type="password"
-            autocomplete="current-password"
-            class="w-full"
-            required
-          />
-        </UFormField>
-        <UAlert v-if="error" color="error" variant="subtle" :title="error" />
-        <UButton type="submit" block :loading="submitting">登录</UButton>
-      </form>
-    </UCard>
-  </div>
+  <EntryFrame>
+    <SectionHeading title="登录" :level="1" />
+    <form class="mt-4 space-y-4" @submit.prevent="submit">
+      <UFormField label="用户名">
+        <UInput
+          v-model="state.username"
+          size="lg"
+          autocomplete="username"
+          class="w-full"
+          required
+        />
+      </UFormField>
+      <UFormField label="密码">
+        <UInput
+          v-model="state.password"
+          size="lg"
+          type="password"
+          autocomplete="current-password"
+          class="w-full"
+          required
+        />
+      </UFormField>
+      <p v-if="error" class="text-error" role="alert">{{ error }}</p>
+      <UButton type="submit" size="lg" block :loading="submitting">登录</UButton>
+    </form>
+  </EntryFrame>
 </template>

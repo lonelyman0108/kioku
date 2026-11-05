@@ -5,17 +5,22 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import ExtractionBudget from '../components/ExtractionBudget.vue'
 import Hint from '../components/Hint.vue'
 import LoreImport from '../components/LoreImport.vue'
 import MyDreamSettings from '../components/MyDreamSettings.vue'
 import SpaceExport from '../components/SpaceExport.vue'
+import NoteLine from '../components/strata/NoteLine.vue'
+import SettingsBlock from '../components/strata/SettingsBlock.vue'
+import SettingsFrame from '../components/strata/SettingsFrame.vue'
+import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { layerLabels } from '../labels'
+import { SPACE_SECTIONS } from '../settingsSections'
 
 const route = useRoute()
 const toast = useToast()
@@ -67,9 +72,17 @@ watch(
   },
   { immediate: true },
 )
-// 有未保存的改动时（domain 默认层或抽取预算），离开这一页、换空间、退出登录或关掉标签页之前先确认
+// 有未保存的改动时（domain 默认层或抽取预算），离开这一页、换空间、退出登录或关掉标签页之前先确认。
+// 切换小节只改地址里的参数，表单都还挂着，不算离开
 const budgetDirty = ref(false)
-useUnsavedChangesGuard(computed(() => dirty.value || budgetDirty.value))
+useUnsavedChangesGuard(
+  computed(() => dirty.value || budgetDirty.value),
+  { leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId },
+)
+const unsaved = computed(() => [
+  ...(dirty.value ? ['layers'] : []),
+  ...(budgetDirty.value ? ['budget'] : []),
+])
 
 // 校验规则与服务端用同一个 schema；重复的 domain 会被合并掉，单独查
 const problem = computed(() => {
@@ -130,42 +143,40 @@ async function save() {
 </script>
 
 <template>
-  <UDashboardPanel id="space-settings">
-    <template #header>
-      <UDashboardNavbar title="空间设置" />
-    </template>
-    <template #body>
-      <!-- shrink-0：面板内容区是竖向 flex 容器，内容超出时卡片不能被压扁 -->
-      <UCard class="max-w-2xl shrink-0">
-        <template #header>
-          <h2 class="font-medium">domain 默认层</h2>
-          <p class="mt-1 text-sm text-muted">
-            新建记忆时按 URI 的 domain 预填层，例如 core:// 默认为基础层。
-            <Hint>
-              仅作用于管理界面，且只是默认值，新建时可以修改。通过 Key
-              写入不受影响，未指定层时仍写入私人层。
-            </Hint>
-          </p>
+  <SettingsFrame title="空间设置" :sections="SPACE_SECTIONS" :unsaved="unsaved">
+    <template #layers>
+      <SettingsBlock title="domain 默认层">
+        <template #note>
+          新建记忆时按 URI 的 domain 预填层，例如 core:// 默认为基础层。
+          <Hint>
+            仅作用于管理界面，且只是默认值，新建时可以修改。通过 Key
+            写入不受影响，未指定层时仍写入私人层。
+          </Hint>
         </template>
-        <UAlert
-          v-if="layers.isError.value"
-          color="error"
-          variant="subtle"
-          :title="layers.error.value instanceof ApiError ? layers.error.value.message : '读取失败'"
-        />
-        <div v-else class="space-y-3">
+        <!-- 后台刷新失败时读到过的配置留着，错误放在上面 -->
+        <NoteLine v-if="layers.isError.value" tone="error">
+          {{ readFailure(layers.error.value) }}
+        </NoteLine>
+        <div v-if="!layers.isError.value || baseline !== null" class="space-y-3">
           <div v-if="baseline === null" class="space-y-2">
             <USkeleton v-for="n in 2" :key="n" class="h-8 w-full" />
           </div>
-          <p v-if="!isOwner" class="text-sm text-muted">仅空间所有者可修改</p>
+          <p v-if="!isOwner" class="text-muted">仅空间所有者可修改</p>
           <div v-for="(row, index) in rows" :key="index" class="flex items-center gap-2">
             <UInput
               v-model="row.domain"
               placeholder="domain，例如 core"
-              class="flex-1 font-mono"
+              class="min-w-0 flex-1 font-mono"
               :disabled="!editable"
             />
-            <USelect v-model="row.layer" :items="layerItems" class="w-36" :disabled="!editable" />
+            <USelect v-model="row.layer" :items="layerItems" class="w-36" :disabled="!editable">
+              <template #leading>
+                <StrataSwatch :layer="row.layer" plain decorative :width="14" :height="10" />
+              </template>
+              <template #item-leading="{ item }">
+                <StrataSwatch :layer="item.value" plain decorative :width="14" :height="10" />
+              </template>
+            </USelect>
             <UButton
               v-if="isOwner"
               :icon="icons.remove"
@@ -176,25 +187,20 @@ async function save() {
               @click="rows.splice(index, 1)"
             />
           </div>
-          <p v-if="baseline !== null && !rows.length" class="text-sm text-muted">
+          <p v-if="baseline !== null && !rows.length" class="text-muted">
             暂无配置，所有 domain 新建时默认为私人层。
           </p>
-          <UAlert v-if="problem" color="warning" variant="subtle" :title="problem" />
-          <div v-if="isOwner" class="flex flex-wrap gap-2">
-            <UButton
-              :icon="icons.add"
-              color="neutral"
-              variant="subtle"
-              :disabled="!editable"
-              @click="addRow"
-            >
+          <NoteLine v-if="problem" tone="warning">{{ problem }}</NoteLine>
+          <div v-if="isOwner" class="flex flex-wrap gap-2 pt-1">
+            <UButton color="neutral" variant="outline" :disabled="!editable" @click="addRow">
               添加一行
             </UButton>
             <UButton color="neutral" variant="ghost" :disabled="!editable" @click="fillSuggested">
               填入 Lore 导入规则
             </UButton>
             <UButton
-              :icon="icons.save"
+              color="primary"
+              variant="outline"
               class="ml-auto"
               :loading="saving"
               :disabled="!dirty || !!problem"
@@ -204,19 +210,27 @@ async function save() {
             </UButton>
           </div>
         </div>
-      </UCard>
+      </SettingsBlock>
+    </template>
 
+    <template #budget>
       <ExtractionBudget v-model:dirty="budgetDirty" :space-id="spaceId" :editable="isOwner" />
+    </template>
 
+    <template #dream>
       <MyDreamSettings :space-id="spaceId" />
+    </template>
 
+    <template #export>
       <SpaceExport :space-id="spaceId" :space-name="space?.name ?? ''" :editable="isOwner" />
+    </template>
 
+    <template #lore>
       <LoreImport
         :space-id="spaceId"
         :editable="isOwner"
         :is-admin="me.data.value?.isAdmin ?? false"
       />
     </template>
-  </UDashboardPanel>
+  </SettingsFrame>
 </template>

@@ -27,6 +27,7 @@ import {
 import { invalidateInboxCounts } from '../inbox'
 import { layerLabels } from '../labels'
 import { memoryRoute } from '../routes'
+import { spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -268,7 +269,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           mine.data.value.includePrivate
             ? '当前账号的个人画像层与私人层（机密除外）也会发送给实例配置的抽取模型整理，'
             : '当前账号已关闭个人画像层与私人层的整理，目前仅整理共享内容，'
-        }}<RouterLink :to="{ name: 'space-settings', params: { spaceId } }" class="text-primary"
+        }}<RouterLink :to="spaceSettingsRoute(spaceId, 'dream')" class="text-primary"
           >可在空间设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
         >。
       </p>

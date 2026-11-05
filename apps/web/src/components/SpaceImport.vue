@@ -13,9 +13,10 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { formatBytes } from '../backup'
 import { ME_KEY } from '../composables/useSession'
-import { icons } from '../icons'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import SettingsBlock from './strata/SettingsBlock.vue'
 
 const toast = useToast()
 const router = useRouter()
@@ -87,30 +88,23 @@ async function importSpace() {
 </script>
 
 <template>
-  <UCard>
-    <template #header>
-      <h2 class="font-medium">导入空间</h2>
-      <p class="mt-1 text-sm text-muted">
-        将空间导出文件导入为新空间。仅导入本人导出、或导出人同意移交的文件。
-        <Hint>
-          <p>
-            当前账号成为新空间的所有者。导出人的个人画像层、私人层记忆与凭据导入后归当前账号所有，个人画像层将进入当前账号
-            Agent 的启动加载，被客户端当作指令读取。
-          </p>
-          <p class="mt-1">
-            机密记忆与托管的凭据值使用当前实例的主密钥重新加密。Key
-            不在文件中，导入后需为应用重新签发。
-          </p>
-        </Hint>
-      </p>
+  <SettingsBlock title="导入空间">
+    <template #note>
+      将空间导出文件导入为新空间。仅导入本人导出、或导出人同意移交的文件。
+      <Hint>
+        <p>
+          当前账号成为新空间的所有者。导出人的个人画像层、私人层记忆与凭据导入后归当前账号所有，个人画像层将进入当前账号
+          Agent 的启动加载，被客户端当作指令读取。
+        </p>
+        <p class="mt-1">
+          机密记忆与托管的凭据值使用当前实例的主密钥重新加密。Key
+          不在文件中，导入后需为应用重新签发。
+        </p>
+      </Hint>
     </template>
-    <UAlert
-      v-if="masterKey.data.value && !masterKey.data.value.configured"
-      color="warning"
-      variant="subtle"
-      class="mb-4"
-      title="当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。"
-    />
+    <NoteLine v-if="masterKey.data.value && !masterKey.data.value.configured" tone="warning">
+      当前实例未配置主密钥：文件包含机密记忆或托管的凭据时无法导入。请先配置 KIOKU_MASTER_KEY。
+    </NoteLine>
     <form class="space-y-4" @submit.prevent="preview ? importSpace() : inspect()">
       <UFormField
         label="导出文件"
@@ -138,12 +132,11 @@ async function importSpace() {
         />
       </UFormField>
       <template v-if="preview">
-        <UAlert
-          color="warning"
-          variant="subtle"
-          :title="`文件记录的导出人：「${exporter}」（文件自带信息，无法核实）`"
-        >
-          <template #description>
+        <div>
+          <NoteLine tone="warning">
+            文件记录的导出人：「{{ exporter }}」（文件自带信息，无法核实）
+          </NoteLine>
+          <div class="space-y-1">
             <p>
               文件记录的来源空间为「{{ preview.spaceName }}」，导出时间
               {{ formatTime(preview.exportedAt) }}。共
@@ -152,19 +145,19 @@ async function importSpace() {
               }}
               个人格、{{ preview.counts.apps }} 个应用、{{ preview.counts.subjects }} 个联系人。
             </p>
-            <p class="mt-1">
+            <p>
               导入后，导出人的个人画像层 {{ preview.counts.ownerMemories }} 条、私人层
               {{ preview.counts.privateMemories }} 条记忆，{{ preview.counts.credentials }} 条凭据与
               {{ preview.counts.providers }} 个凭据源，以及标记为导出人本人的
               {{ preview.counts.linkedSubjects }} 个联系人均归当前账号所有；个人画像层将进入当前账号
               Agent 的启动加载。仅导入本人导出、或导出人同意移交的文件。
             </p>
-            <p v-if="!preview.exporter.dreamPrivate" class="mt-1">
+            <p v-if="!preview.exporter.dreamPrivate">
               导出人已关闭「允许 Dream
               整理个人画像层与私人层」：新空间中同样保持关闭，这两层不发送给抽取模型。如需整理，请在新空间的空间设置中开启。
             </p>
-          </template>
-        </UAlert>
+          </div>
+        </div>
         <UFormField label="新空间名称" :help="`留空时使用导出时的空间名称「${preview.spaceName}」`">
           <UInput
             v-model="name"
@@ -175,21 +168,18 @@ async function importSpace() {
           />
         </UFormField>
       </template>
-      <UAlert v-if="error" color="error" variant="subtle" :title="error" />
-      <div class="flex justify-end">
-        <UButton
-          v-if="!preview"
-          type="submit"
-          :icon="icons.search"
-          :loading="busy"
-          :disabled="!ready"
-        >
-          检查文件
-        </UButton>
-        <UButton v-else type="submit" :icon="icons.importSpace" :loading="busy" :disabled="!ready">
-          确认导入
-        </UButton>
-      </div>
+      <NoteLine v-if="error" tone="error">{{ error }}</NoteLine>
+      <UButton
+        v-if="!preview"
+        type="submit"
+        color="primary"
+        variant="outline"
+        :loading="busy"
+        :disabled="!ready"
+      >
+        检查文件
+      </UButton>
+      <UButton v-else type="submit" :loading="busy" :disabled="!ready">确认导入</UButton>
     </form>
-  </UCard>
+  </SettingsBlock>
 </template>

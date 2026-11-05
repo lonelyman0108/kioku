@@ -1,6 +1,6 @@
 <script setup lang="ts">
 // 区块标题：名词短语加一条墨线。标题旁的提示放 hint，右边的操作放 actions
-withDefaults(defineProps<{ title?: string; level?: 2 | 3 }>(), { title: undefined, level: 2 })
+withDefaults(defineProps<{ title?: string; level?: 1 | 2 | 3 }>(), { title: undefined, level: 2 })
 </script>
 
 <template>
