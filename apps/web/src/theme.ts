@@ -596,24 +596,4 @@ export const theme = {
   dashboardSearch: {
     variants: { fullscreen: { false: { modal: 'sm:max-w-2xl sm:h-[26rem]' } } },
   },
-
-  // 过渡：老页面还在用 UDashboardPanel、UDashboardNavbar、UDashboardToolbar，放在顶部导航下面。
-  // 面板不再撑满整个视口；导航栏没有侧栏可以开关，不显示开关按钮。页面都换完之后删掉这一段
-  dashboardPanel: {
-    slots: {
-      root: 'min-h-0',
-      body: 'p-4 sm:px-8 sm:py-5 gap-4 sm:gap-5',
-    },
-  },
-  dashboardNavbar: {
-    slots: {
-      root: 'px-4 sm:px-8',
-      title: 'text-sm',
-      icon: 'size-4',
-      toggle: 'hidden',
-    },
-  },
-  dashboardToolbar: {
-    slots: { root: 'px-4 sm:px-8 min-h-0 py-1.5' },
-  },
 } satisfies NonNullable<NuxtUIOptions['ui']>

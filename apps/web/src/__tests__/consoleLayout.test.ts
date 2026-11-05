@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
+import theme from '../theme.ts?raw'
 
 // 没有组件测试的环境，所以看源码本身：外壳改过长相，这些逻辑不能跟着丢
 const { descriptor } = parse(consoleLayout)
@@ -178,5 +179,14 @@ describe('保留的逻辑', () => {
   it('主题用 Nuxt UI 的 color mode，不另存一份', () => {
     expect(script).toContain('useColorPreference()')
     expect(script).not.toContain('localStorage')
+  })
+})
+
+describe('老外壳的过渡代码', () => {
+  it('页面都换完了，外壳和主题里不再有老面板', () => {
+    expect(consoleLayout).not.toContain('UDashboardPanel')
+    for (const key of ['dashboardPanel', 'dashboardNavbar', 'dashboardToolbar']) {
+      expect(theme).not.toContain(key)
+    }
   })
 })
