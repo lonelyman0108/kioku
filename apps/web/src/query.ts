@@ -1,6 +1,6 @@
 import { QueryClient } from '@tanstack/vue-query'
 
-import { ApiError } from './api/client'
+import { retryable } from './api/client'
 
 // 当前登录账号的缓存键；为 null 表示未登录
 export const ME_KEY = ['me'] as const
@@ -10,7 +10,7 @@ export const queryClient = new QueryClient({
   defaultOptions: {
     queries: {
       // 401、403、404 是确定的结果，重试没有意义
-      retry: (count, error) => !(error instanceof ApiError && error.status < 500) && count < 2,
+      retry: (count, error) => retryable(error) && count < 2,
       staleTime: 10_000,
     },
   },

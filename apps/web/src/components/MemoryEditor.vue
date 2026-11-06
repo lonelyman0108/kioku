@@ -12,7 +12,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import { useCopy } from '../composables/useCopy'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
@@ -29,6 +29,7 @@ import {
   isBootNode,
   looksPlaintext,
   missingDisclosureHint,
+  missingDisclosureTitles,
   missingDisclosureTone,
   originScopeLabel,
   overriddenNode,
@@ -707,16 +708,24 @@ const properties = computed<Property[][]>(() => {
     </div>
     <div v-else-if="!base" class="detail-read">
       <NoteLine tone="error">
-        {{ memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败' }}
+        {{ readFailure(memory.error.value) }}
+        <template v-if="retryable(memory.error.value)" #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="memory.isFetching.value"
+            @click="memory.refetch()"
+            >重试</UButton
+          >
+        </template>
       </NoteLine>
     </div>
     <div v-else class="detail-main">
       <div class="detail-read">
         <!-- 已经载入过时，重新拉取失败（例如别处删除了它）也保留表单，免得丢掉正在编辑的内容 -->
         <NoteLine v-if="memory.isError.value" tone="warning">
-          刷新失败：{{
-            memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败'
-          }}
+          刷新失败：{{ readFailure(memory.error.value) }}
         </NoteLine>
         <NoteLine v-else-if="changedElsewhere && dirty" tone="warning">
           这条记忆已在别处修改，或已删除并重新创建。保存将提示冲突，可先复制当前改动，再载入新版本。
@@ -845,7 +854,8 @@ const properties = computed<Property[][]>(() => {
             v-if="disclosureTone"
             :tone="disclosureTone === 'warning' ? 'warning' : 'neutral'"
           >
-            未设触发场景<Hint>{{ missingDisclosureHint(base, now) }}</Hint>
+            {{ missingDisclosureTitles[disclosureTone]
+            }}<Hint>{{ missingDisclosureHint(base, now) }}</Hint>
             <template v-if="!readOnly && !base.contentHidden" #actions>
               <UButton size="sm" color="primary" variant="outline" @click="fillDisclosure">
                 去补全

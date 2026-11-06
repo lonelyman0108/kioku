@@ -101,6 +101,16 @@ const unsaved = computed(() => [
         <!-- 后台刷新失败时读到过的状态留着，错误放在上面 -->
         <NoteLine v-if="masterKey.isError.value" tone="error">
           {{ readFailure(masterKey.error.value) }}
+          <template #actions>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :loading="masterKey.isFetching.value"
+              @click="masterKey.refetch()"
+              >重试</UButton
+            >
+          </template>
         </NoteLine>
         <div v-if="masterKey.data.value" class="space-y-3">
           <p v-if="!masterKey.data.value.configured" class="text-muted">

@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { computed, type Ref } from 'vue'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { REAL_MODE_CONSEQUENCES } from '../benchSession'
 import { useBench } from '../composables/useBench'
 import { scopesSummary } from '../labels'
@@ -41,8 +41,6 @@ const appItems = computed(() =>
 const keyItems = computed(() =>
   usable.value.map((k) => ({ label: `${k.name}（${k.prefix}）`, value: k.id })),
 )
-const errorOf = (err: unknown, fallback: string) =>
-  err instanceof ApiError ? err.message : fallback
 const retryOf = (query: { isFetching: Readonly<Ref<boolean>>; refetch: () => unknown }) => [
   {
     label: '重新读取',
@@ -119,7 +117,7 @@ const retryKeys = computed(() => retryOf(keys))
       <BenchNotice
         v-if="apps.isError.value"
         color="error"
-        :title="errorOf(apps.error.value, '读取应用失败')"
+        :title="readFailure(apps.error.value)"
         :actions="retryApps"
       />
       <USkeleton v-if="apps.isPending.value" class="h-16 w-full" />
@@ -143,7 +141,7 @@ const retryKeys = computed(() => retryOf(keys))
         <BenchNotice
           v-if="keys.isError.value"
           color="error"
-          :title="errorOf(keys.error.value, '读取 Key 失败')"
+          :title="readFailure(keys.error.value)"
           :actions="retryKeys"
         />
         <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">

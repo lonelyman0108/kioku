@@ -15,6 +15,11 @@ export function readFailure(error: unknown): string {
   return error instanceof ApiError ? error.message : '读取失败'
 }
 
+// 值不值得再读一次：401、403、404 这类是确定的结果，再读也一样；网络错误和 5xx 才可能读到。
+// 查询的自动重试和界面上的「重试」按钮用这同一条规则
+export const retryable = (error: unknown): boolean =>
+  !(error instanceof ApiError && error.status < 500)
+
 // 一个页面读好几样时的错误文字：没出错的（query.error 是 null）跳过，说的是同一句只留一条
 export function readFailures(errors: readonly unknown[]): string[] {
   return [...new Set(errors.filter((error) => error != null).map((error) => readFailure(error)))]

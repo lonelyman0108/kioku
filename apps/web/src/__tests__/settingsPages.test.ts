@@ -513,7 +513,7 @@ describe('读取失败', () => {
       if (!source.includes('isError')) continue
       expect(source, name).not.toMatch(/isError\.value && !/)
     }
-    expect(backupSettings).toContain("objects.error.value.message : '无法列出备份'")
+    expect(backupSettings).toContain('readFailure(objects.error.value)')
     expect(embeddingSettings).toContain('readFailure(settings.error.value)')
     expect(embeddingSettings).not.toContain('读取设置失败')
   })

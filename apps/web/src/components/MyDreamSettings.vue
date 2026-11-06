@@ -61,6 +61,16 @@ async function save(includePrivate: boolean) {
     <!-- 后台刷新失败时开关留着，错误放在上面 -->
     <NoteLine v-if="settings.isError.value" tone="error">
       {{ readFailure(settings.error.value) }}
+      <template #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :loading="settings.isFetching.value"
+          @click="settings.refetch()"
+          >重试</UButton
+        >
+      </template>
     </NoteLine>
     <USkeleton v-if="settings.isPending.value" class="h-6 w-72 max-w-full" />
     <USwitch

@@ -7,6 +7,9 @@ import {
   isBootNode,
   looksPlaintext,
   missingDisclosureHint,
+  missingDisclosureLabel,
+  missingDisclosureLabels,
+  missingDisclosureTitles,
   missingDisclosureTone,
   originScopeLabel,
   overriddenNode,
@@ -98,12 +101,33 @@ describe('没写触发场景时的提示', () => {
   it('说明跟着情况换：只有走召回的才说召回更准', () => {
     expect(missingDisclosureHint(memory({}), now)).toBe('补全后召回更准确。')
     const boot = missingDisclosureHint(memory({ priority: 0 }), now)
-    expect(boot).toContain('启动加载不依赖触发场景')
+    expect(boot).toContain('未被加载时')
+    // 「启动加载不依赖触发场景」已经写在提示的标题上，说明里不再重复
+    expect(boot).not.toContain(missingDisclosureTitles.muted)
     const secret = missingDisclosureHint(memory({ sensitivity: 'secret' }), now)
     expect(secret).toContain('机密内容不参与召回')
     expect(secret).not.toContain('召回更准确')
     // 优先级够启动加载的机密也不进启动加载，按机密说
     expect(missingDisclosureHint(memory({ priority: 0, sensitivity: 'secret' }), now)).toBe(secret)
+  })
+
+  it('启动加载的节点写「启动加载」，要补的写「未设触发场景」：两种文字不同，不只靠颜色区分', () => {
+    expect(missingDisclosureLabel(memory({}), now)).toBe('未设触发场景')
+    expect(missingDisclosureLabel(memory({ priority: 0 }), now)).toBe('启动加载')
+    expect(missingDisclosureLabel(memory({ layer: 'persona', priority: 1 }), now)).toBe('启动加载')
+    // 机密够不上启动加载，照常要补；写了触发场景的不提示
+    expect(missingDisclosureLabel(memory({ priority: 0, sensitivity: 'secret' }), now)).toBe(
+      '未设触发场景',
+    )
+    expect(
+      missingDisclosureLabel(memory({ priority: 0, disclosure: '讨论发布时' }), now),
+    ).toBeNull()
+    expect(missingDisclosureLabels.warning).not.toBe(missingDisclosureLabels.muted)
+  })
+
+  it('详情的提示标题同样分开写：要补的写「未设触发场景」，启动加载的写明不依赖它', () => {
+    expect(missingDisclosureTitles.warning).toBe('未设触发场景')
+    expect(missingDisclosureTitles.muted).toBe('启动加载不依赖触发场景')
   })
 })
 

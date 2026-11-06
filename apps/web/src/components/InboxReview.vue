@@ -163,6 +163,16 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
       tone="error"
     >
       {{ readFailure(queue.error.value) }}
+      <template #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :loading="queue.isFetching.value"
+          @click="queue.refetch()"
+          >重试</UButton
+        >
+      </template>
     </NoteLine>
     <div v-if="queue.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 6" :key="n" class="h-12 w-full" />

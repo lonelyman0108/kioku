@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError, readFailure, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import PersonaDetail from '../components/PersonaDetail.vue'
@@ -220,7 +220,19 @@ async function remove() {
       <div class="list-scroll">
         <!-- 后台刷新失败时读到过的列表留着，错误放在上面 -->
         <div v-if="personas.isError.value" class="list-failed">
-          <NoteLine tone="error">{{ readFailure(personas.error.value) }}</NoteLine>
+          <NoteLine tone="error">
+            {{ readFailure(personas.error.value) }}
+            <template #actions>
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :loading="personas.isFetching.value"
+                @click="personas.refetch()"
+                >重试</UButton
+              >
+            </template>
+          </NoteLine>
         </div>
         <div v-if="personas.isPending.value" class="space-y-2 p-3.5">
           <USkeleton v-for="n in 4" :key="n" class="h-11 w-full" />
@@ -256,7 +268,17 @@ async function remove() {
           返回
         </button>
         <NoteLine tone="error">
-          {{ selected.error.value instanceof ApiError ? selected.error.value.message : '读取失败' }}
+          {{ readFailure(selected.error.value) }}
+          <template v-if="retryable(selected.error.value)" #actions>
+            <UButton
+              size="sm"
+              color="neutral"
+              variant="outline"
+              :loading="selected.isFetching.value"
+              @click="selected.refetch()"
+              >重试</UButton
+            >
+          </template>
         </NoteLine>
       </div>
       <PersonaDetail

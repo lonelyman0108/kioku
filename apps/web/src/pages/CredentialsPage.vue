@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError, readFailure, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
@@ -266,7 +266,19 @@ async function removeProvider() {
         <div v-if="tab === 'credentials'" class="column-body">
           <!-- 后台刷新失败时读到过的列表留着，错误放在上面 -->
           <div v-if="credentials.isError.value" class="pt-3.5">
-            <NoteLine tone="error">{{ readFailure(credentials.error.value) }}</NoteLine>
+            <NoteLine tone="error">
+              {{ readFailure(credentials.error.value) }}
+              <template #actions>
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :loading="credentials.isFetching.value"
+                  @click="credentials.refetch()"
+                  >重试</UButton
+                >
+              </template>
+            </NoteLine>
           </div>
           <div v-if="credentials.isPending.value" class="space-y-2 pt-3.5">
             <USkeleton v-for="n in 5" :key="n" class="h-10 w-full" />
@@ -319,7 +331,19 @@ async function removeProvider() {
           </p>
           <p v-if="retention" class="deleted-note text-warning">{{ deletionNotice(retention) }}</p>
           <div v-if="deleted.isError.value" class="pt-3.5">
-            <NoteLine tone="error">{{ readFailure(deleted.error.value) }}</NoteLine>
+            <NoteLine tone="error">
+              {{ readFailure(deleted.error.value) }}
+              <template #actions>
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :loading="deleted.isFetching.value"
+                  @click="deleted.refetch()"
+                  >重试</UButton
+                >
+              </template>
+            </NoteLine>
           </div>
           <div v-if="deleted.isPending.value" class="space-y-2 pt-3.5">
             <USkeleton v-for="n in 3" :key="n" class="h-10 w-full" />
@@ -470,7 +494,17 @@ async function removeProvider() {
   >
     <template #body>
       <NoteLine v-if="selected.isError.value" tone="error">
-        {{ selected.error.value instanceof ApiError ? selected.error.value.message : '读取失败' }}
+        {{ readFailure(selected.error.value) }}
+        <template v-if="retryable(selected.error.value)" #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="selected.isFetching.value"
+            @click="selected.refetch()"
+            >重试</UButton
+          >
+        </template>
       </NoteLine>
       <CredentialDetail
         v-else-if="detail"

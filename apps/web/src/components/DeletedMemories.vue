@@ -108,7 +108,19 @@ const TAKEN_HINT =
     </div>
     <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
     <div v-if="deleted.isError.value && !deleted.isFetchNextPageError.value" class="list-note">
-      <NoteLine tone="error">{{ readFailure(deleted.error.value) }}</NoteLine>
+      <NoteLine tone="error">
+        {{ readFailure(deleted.error.value) }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="deleted.isFetching.value"
+            @click="deleted.refetch()"
+            >重试</UButton
+          >
+        </template>
+      </NoteLine>
     </div>
     <div v-if="deleted.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />

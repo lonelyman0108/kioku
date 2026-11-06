@@ -11,7 +11,13 @@ import { useInboxCounts } from '../composables/useInboxCounts'
 import { useInboxTab } from '../composables/useInboxTab'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { INBOX_TABS, inboxTabCount, inboxTabLabels, refreshInbox } from '../inbox'
+import {
+  INBOX_TABS,
+  actionableInboxCount,
+  inboxTabCount,
+  inboxTabLabels,
+  refreshInbox,
+} from '../inbox'
 
 const route = useRoute()
 const queryClient = useQueryClient()
@@ -20,6 +26,12 @@ const spaceId = computed(() => String(route.params.spaceId))
 const canAct = computed(() => space.value?.role === 'owner' || space.value?.role === 'editor')
 
 const counts = useInboxCounts(spaceId)
+// 标题的大数字和导航角标、概览同一个口径：当前账号能处理的。各分类的行照常写各自的条数
+const total = computed(() =>
+  counts.data.value && space.value
+    ? actionableInboxCount(counts.data.value, space.value.role)
+    : null,
+)
 const tab = useInboxTab(counts)
 const refreshing = computed(() => counts.isFetching.value)
 // 换分类时回到顶上：各类共用一个滚动区
@@ -44,7 +56,7 @@ watch(tab, () => {
             :loading="refreshing"
             @click="refreshInbox(queryClient, spaceId)"
           />
-          <span class="inbox-total">{{ counts.data.value?.total ?? '–' }}</span>
+          <span class="inbox-total">{{ total ?? '–' }}</span>
         </div>
         <nav class="inbox-tabs" aria-label="待处理分类">
           <RouterLink

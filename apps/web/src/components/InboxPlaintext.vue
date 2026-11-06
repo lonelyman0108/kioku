@@ -73,6 +73,16 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
       tone="error"
     >
       {{ readFailure(list.error.value) }}
+      <template #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :loading="list.isFetching.value"
+          @click="list.refetch()"
+          >重试</UButton
+        >
+      </template>
     </NoteLine>
     <div v-if="list.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 3" :key="n" class="h-12 w-full" />

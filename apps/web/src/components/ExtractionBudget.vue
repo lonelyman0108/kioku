@@ -91,6 +91,16 @@ async function save() {
     <!-- 后台刷新失败时读到过的用量留着，错误放在上面 -->
     <NoteLine v-if="usage.isError.value" tone="error">
       {{ readFailure(usage.error.value) }}
+      <template #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :loading="usage.isFetching.value"
+          @click="usage.refetch()"
+          >重试</UButton
+        >
+      </template>
     </NoteLine>
     <USkeleton v-if="usage.isPending.value" class="h-24 w-full" />
     <div v-else-if="usage.data.value" class="space-y-4">

@@ -10,7 +10,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import SubjectBindings from '../components/SubjectBindings.vue'
@@ -198,7 +198,17 @@ function runCounts(run: ExtractionRunInfo): string {
         返回联系人列表
       </RouterLink>
       <NoteLine tone="error" class="mt-3">
-        {{ subject.error.value instanceof ApiError ? subject.error.value.message : '读取失败' }}
+        {{ readFailure(subject.error.value) }}
+        <template v-if="retryable(subject.error.value)" #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="subject.isFetching.value"
+            @click="subject.refetch()"
+            >重试</UButton
+          >
+        </template>
       </NoteLine>
     </div>
     <template v-else>

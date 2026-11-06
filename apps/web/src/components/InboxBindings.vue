@@ -32,6 +32,16 @@ const total = computed(() => overview.data.value?.inbox.bindings ?? 0)
     </SectionHeading>
     <NoteLine v-if="overview.isError.value" class="panel-note" tone="error">
       {{ readFailure(overview.error.value) }}
+      <template #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :loading="overview.isFetching.value"
+          @click="overview.refetch()"
+          >重试</UButton
+        >
+      </template>
     </NoteLine>
     <USkeleton v-if="overview.isPending.value" class="mt-3 h-24 w-full" />
     <p v-else-if="overview.data.value && !items.length" class="panel-empty">暂无账号绑定申请</p>

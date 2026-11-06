@@ -347,9 +347,7 @@ async function clear() {
           错误下面还是旧桶的备份，会让人以为新位置有可恢复的备份
         -->
         <NoteLine v-if="objects.isError.value" tone="error">
-          {{
-            objects.error.value instanceof ApiError ? objects.error.value.message : '无法列出备份'
-          }}
+          {{ readFailure(objects.error.value) }}
         </NoteLine>
         <USkeleton v-else-if="objects.isPending.value" class="h-16 w-full" />
         <p v-else-if="objects.data.value && !objects.data.value.objects.length" class="text-muted">

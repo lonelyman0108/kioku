@@ -7,6 +7,7 @@ import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import RecallDebugPanel from '../components/RecallDebugPanel.vue'
+import MemoryFlags from '../components/strata/MemoryFlags.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
@@ -33,6 +34,16 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
   <div class="recall-page">
     <NoteLine v-if="stats.isError.value" tone="error">
       {{ readFailure(stats.error.value) }}
+      <template #actions>
+        <UButton
+          size="sm"
+          color="neutral"
+          variant="outline"
+          :loading="stats.isFetching.value"
+          @click="stats.refetch()"
+          >重试</UButton
+        >
+      </template>
     </NoteLine>
     <div v-if="stats.isPending.value" class="stats">
       <USkeleton v-for="n in 4" :key="n" class="h-48 w-full" />
@@ -94,7 +105,10 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
         <ul v-if="data.top.length">
           <li v-for="memory in data.top" :key="memory.id" class="top-row">
             <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
-            <RouterLink :to="memoryLink(memory.uri)"><UriPath :uri="memory.uri" /></RouterLink>
+            <span class="row-uri">
+              <RouterLink :to="memoryLink(memory.uri)"><UriPath :uri="memory.uri" /></RouterLink>
+              <MemoryFlags :layer="memory.layer" :sensitivity="memory.sensitivity" />
+            </span>
             <span class="font-mono top-count">{{ memory.total }}</span>
             <time
               v-if="memory.lastRecalledAt"
@@ -127,7 +141,10 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
         <ul v-if="data.never.length">
           <li v-for="memory in data.never" :key="memory.id" class="never-row">
             <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
-            <RouterLink :to="memoryLink(memory.uri)"><UriPath :uri="memory.uri" /></RouterLink>
+            <span class="row-uri">
+              <RouterLink :to="memoryLink(memory.uri)"><UriPath :uri="memory.uri" /></RouterLink>
+              <MemoryFlags :layer="memory.layer" :sensitivity="memory.sensitivity" />
+            </span>
             <time
               class="never-when"
               :datetime="memory.createdAt"
@@ -275,6 +292,13 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
   border-bottom: 1px solid var(--ui-border);
   font-size: 14px;
   line-height: 1.5;
+}
+/* 层名跟在 URI 后面，和记忆列表一样：色块旁边要有文字。URI 放不下时先缩它，层名不缩 */
+.row-uri {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
 }
 .top-row a,
 .never-row a {

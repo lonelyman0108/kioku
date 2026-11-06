@@ -818,6 +818,12 @@ describe('窄柱', () => {
     expect(html).not.toContain('<b>')
   })
 
+  it('顶上的「全部」读到条数之后也不写总数：柱子里还画了来自对话的两层，数字容易误读', async () => {
+    const html = await render(StrataRibbon, { counts: sample(), length: 600 })
+    const all = html.split('<button').find((chunk) => /class="[^"]*\brb-all\b/.test(chunk))!
+    expect(all.slice(0, all.indexOf('</button>'))).toMatch(/>\s*<span[^>]*>全部<\/span>\s*$/)
+  })
+
   it('选中的层、当前记忆所在的层都标出来', async () => {
     const html = await render(StrataRibbon, {
       counts: sample(),

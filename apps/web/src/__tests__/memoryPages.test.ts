@@ -254,6 +254,13 @@ describe('记忆详情', () => {
     expect(memoryListView).not.toContain('启动加载')
   })
 
+  it('启动加载的节点和要补的节点写的字不同，列表和详情都从 memoryDetail 取，不只靠颜色区分', () => {
+    expect(memoryListView).toContain('{{ missingDisclosureLabel(item) }}')
+    expect(memoryListView).not.toMatch(/>\s*未设触发场景\s*</)
+    expect(memoryEditor).toContain('missingDisclosureTitles[disclosureTone]')
+    expect(memoryEditor).not.toMatch(/>\s*未设触发场景<Hint/)
+  })
+
   it('编辑和历史都就地切换，不弹窗', () => {
     expect(memoryEditor).not.toContain('USlideover')
     expect(memoryEditor).toContain('v-else-if="historyOpen"')

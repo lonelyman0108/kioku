@@ -9,10 +9,10 @@ import {
   type Sensitivity,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import DeletedMemories from '../components/DeletedMemories.vue'
@@ -134,8 +134,8 @@ const roots = ref<MemoryTreeItem[]>([])
 // 展开的节点由这里管理：重新载入某一级之后，要据此把展开着的子节点也重新加载
 const expanded = ref<string[]>([])
 const loadingRoots = ref(false)
-// 整棵树没读出来：和「暂无记忆」分开说，免得以为记忆没了
-const rootsFailed = ref(false)
+// 整棵树没读出来：和「暂无记忆」分开说，免得以为记忆没了。记下错误，说法和别处一样用 readFailure
+const rootsError = shallowRef<unknown>(null)
 const createOpen = ref(false)
 const createUri = ref('')
 
@@ -143,7 +143,7 @@ const createUri = ref('')
 let deletedUri: string | null = null
 
 function failed(err: unknown) {
-  toast.add({ title: err instanceof ApiError ? err.message : '读取失败', color: 'error' })
+  toast.add({ title: readFailure(err), color: 'error' })
 }
 
 // 列表、已删除、已过期、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
@@ -176,7 +176,7 @@ async function loadRoots() {
       ...DOMAINS_QUERY_OPTIONS,
     })
     if (forSpace !== spaceId.value) return
-    rootsFailed.value = false
+    rootsError.value = null
     roots.value = domains.map((d) => ({
       label: `${d.domain}://`,
       // domain 根用 domain 名作为键，与 children 接口的参数一致
@@ -196,7 +196,7 @@ async function loadRoots() {
     }))
     await restoreExpanded()
   } catch (err) {
-    if (forSpace === spaceId.value) rootsFailed.value = true
+    if (forSpace === spaceId.value) rootsError.value = err
     failed(err)
   } finally {
     loadingRoots.value = false
@@ -618,11 +618,18 @@ const crumbs = computed(() => {
         <p v-if="overview.data.value" class="index-count">
           <b>{{ overview.data.value.total }}</b> 条
         </p>
-        <div v-if="rootsFailed" class="index-note">
+        <div v-if="rootsError !== null" class="index-note">
           <NoteLine tone="error">
-            读取失败
+            {{ readFailure(rootsError) }}
             <template #actions>
-              <UButton size="sm" color="primary" variant="outline" @click="refresh">重试</UButton>
+              <UButton
+                size="sm"
+                color="neutral"
+                variant="outline"
+                :loading="loadingRoots"
+                @click="refresh"
+                >重试</UButton
+              >
             </template>
           </NoteLine>
         </div>

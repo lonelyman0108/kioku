@@ -54,6 +54,16 @@ const days = computed(() => groupByDay(items.value, new Date(`${today.value}T00:
       <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
       <NoteLine v-if="activity.isError.value && !activity.isFetchNextPageError.value" tone="error">
         {{ readFailure(activity.error.value) }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="activity.isFetching.value"
+            @click="activity.refetch()"
+            >重试</UButton
+          >
+        </template>
       </NoteLine>
       <div v-if="activity.isPending.value" class="space-y-3">
         <USkeleton v-for="n in 6" :key="n" class="h-8 w-full" />

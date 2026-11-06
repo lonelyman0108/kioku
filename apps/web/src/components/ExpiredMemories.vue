@@ -97,7 +97,19 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
     </div>
     <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
     <div v-if="expired.isError.value && !expired.isFetchNextPageError.value" class="list-note">
-      <NoteLine tone="error">{{ readFailure(expired.error.value) }}</NoteLine>
+      <NoteLine tone="error">
+        {{ readFailure(expired.error.value) }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="expired.isFetching.value"
+            @click="expired.refetch()"
+            >重试</UButton
+          >
+        </template>
+      </NoteLine>
     </div>
     <div v-if="expired.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />

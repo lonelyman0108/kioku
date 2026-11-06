@@ -7,10 +7,12 @@ import { renderToString } from 'vue/server-renderer'
 import ActivityEntry from '../components/ActivityEntry.vue'
 import activityEntry from '../components/ActivityEntry.vue?raw'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
+import credentialFormModal from '../components/CredentialFormModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
 import expiredMemories from '../components/ExpiredMemories.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
 import personaDetail from '../components/PersonaDetail.vue?raw'
+import providerFormModal from '../components/ProviderFormModal.vue?raw'
 import MemoryRow from '../components/strata/MemoryRow.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import activityPage from '../pages/ActivityPage.vue?raw'
@@ -284,5 +286,22 @@ describe('改版之后的约束', () => {
     expect(credentialsPage).toContain('曾绑定它的已删除凭据恢复后需重新绑定')
     expect(credentialsPage).toContain('已删除的凭据源无法恢复')
     expect(credentialsPage).toContain('deletionNotice(retention)')
+  })
+})
+
+describe('凭据的弹窗', () => {
+  it('禁用的「外部凭据源」只淡化圆钮和名称，下面不能选的原因用正常的次要文字色', () => {
+    const external = /label: '外部凭据源',[^]*?\n {2}\},/.exec(credentialFormModal)![0]
+    expect(external).toContain('disabled: !props.providers.length')
+    expect(external).toContain("item: 'opacity-100'")
+    expect(external).not.toMatch(/description: '[^']*opacity/)
+  })
+
+  it.each([
+    ['新建凭据', credentialFormModal],
+    ['凭据源', providerFormModal],
+  ])('%s：底部「为什么不能提交」的提示是 14px 的正文', (name, source) => {
+    expect(source, name).toContain('<span v-if="problem" class="mr-auto text-sm text-muted">')
+    expect(source, name).not.toContain('text-xs text-muted">{{ problem }}')
   })
 })

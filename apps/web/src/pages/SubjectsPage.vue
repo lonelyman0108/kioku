@@ -130,7 +130,19 @@ function accounts(subject: SubjectInfo) {
             v-if="section.query.isError.value && !section.query.isFetchNextPageError.value"
             class="pt-3"
           >
-            <NoteLine tone="error">{{ readFailure(section.query.error.value) }}</NoteLine>
+            <NoteLine tone="error">
+              {{ readFailure(section.query.error.value) }}
+              <template #actions>
+                <UButton
+                  size="sm"
+                  color="neutral"
+                  variant="outline"
+                  :loading="section.query.isFetching.value"
+                  @click="section.query.refetch()"
+                  >重试</UButton
+                >
+              </template>
+            </NoteLine>
           </div>
           <div v-if="section.query.isPending.value" class="space-y-2 pt-3">
             <USkeleton v-for="n in 6" :key="n" class="h-11 w-full" />

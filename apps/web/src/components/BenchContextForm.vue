@@ -81,7 +81,7 @@ const summary = computed(() => contextSummary(contextForm))
   padding-top: 8px;
 }
 .context-note {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ui-text-muted);
 }
 /* 放在调用台的表单上面是两列，放在模型对话的窄栏里是一列 */

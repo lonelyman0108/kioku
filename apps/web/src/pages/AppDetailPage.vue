@@ -73,6 +73,12 @@ const usable = computed(() => usableKeys(seenKeys.value ?? []))
 const failures = computed(() =>
   readFailures([apps.error.value, personas.error.value, members.error.value]),
 )
+// 读取失败时的「重试」：这一页读的几样里，失败的那几样重新读
+const reads = [apps, personas, members]
+const retrying = computed(() => reads.some((query) => query.isFetching.value))
+function retryReads() {
+  for (const query of reads) if (query.isError.value) void query.refetch()
+}
 const lastUsed = computed(() => lastUsedAt(seenKeys.value ?? []))
 
 // 看的是哪个 Key、哪种会话上下文：记在地址里。地址里的 Key 失效了就看第一个有效的
@@ -211,7 +217,19 @@ watch([spaceId, appId], () => {
 <template>
   <div class="app-page">
     <div v-if="failures.length" class="app-failed">
-      <NoteLine v-for="message in failures" :key="message" tone="error">{{ message }}</NoteLine>
+      <NoteLine v-for="message in failures" :key="message" tone="error">
+        {{ message }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="retrying"
+            @click="retryReads"
+            >重试</UButton
+          >
+        </template>
+      </NoteLine>
     </div>
     <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
     <div v-else-if="apps.data.value && !app" class="app-state">

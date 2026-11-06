@@ -117,7 +117,19 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
   <div class="overview">
     <!-- 读到过的内容留着，错误放在上面 -->
     <div v-if="overview.isError.value" class="overview-failed">
-      <NoteLine tone="error">{{ readFailure(overview.error.value) }}</NoteLine>
+      <NoteLine tone="error">
+        {{ readFailure(overview.error.value) }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="overview.isFetching.value"
+            @click="overview.refetch()"
+            >重试</UButton
+          >
+        </template>
+      </NoteLine>
     </div>
     <div v-if="overview.isPending.value" class="overview-grid">
       <div v-for="n in 3" :key="n" class="overview-col space-y-4">

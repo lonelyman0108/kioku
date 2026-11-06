@@ -1,6 +1,8 @@
 import type { InboxCounts } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
+import { parse } from 'vue/compiler-sfc'
 
+import dreamSuggestions from '../components/DreamSuggestions.vue?raw'
 import {
   INBOX_TABS,
   actionableInboxCount,
@@ -10,6 +12,7 @@ import {
   legacyReviewTab,
   resolveInboxTab,
 } from '../inbox'
+import inboxPage from '../pages/InboxPage.vue?raw'
 
 const counts = (over: Partial<InboxCounts> = {}): InboxCounts => ({
   bindings: 0,
@@ -74,5 +77,34 @@ describe('四类', () => {
 
   it('缓存键带空间', () => {
     expect(inboxCountsKey('s1')).toEqual(['inbox-counts', 's1'])
+  })
+})
+
+describe('待处理页', () => {
+  it('标题的大数字和导航角标、概览同一个口径，各分类照常写各自的条数', () => {
+    const script = parse(inboxPage).descriptor.scriptSetup!.content
+    expect(script).toContain('actionableInboxCount(counts.data.value, space.value.role)')
+    expect(inboxPage).toContain(`<span class="inbox-total">{{ total ?? '–' }}</span>`)
+    expect(inboxPage).not.toContain('counts.data.value?.total')
+    expect(inboxPage).toContain('inboxTabCount(counts.data.value, t)')
+  })
+
+  it('查看者看到的总数只算能处理的：只有待确认内容时是 0，分类里照样写 7', () => {
+    const viewer = counts({ review: 7, total: 7 })
+    expect(actionableInboxCount(viewer, 'viewer')).toBe(0)
+    expect(inboxTabCount(viewer, 'review')).toBe(7)
+  })
+
+  it('整理建议每张卡的操作都是线框，和其他三类一样；确认对话框里的按钮保持实心', () => {
+    const actions =
+      /<div v-if="canAct && item\.actionable" class="suggestion-actions">[^]*?\n {8}<\/div>/.exec(
+        dreamSuggestions,
+      )![0]
+    const buttons = actions.match(/<UButton[^>]*>/g)!
+    expect(buttons.length).toBeGreaterThanOrEqual(3)
+    for (const button of buttons) expect(button).toContain('variant="outline"')
+    const dialog = /<UModal[^]*?<\/UModal>/.exec(dreamSuggestions)![0]
+    const confirm = dialog.match(/<UButton[^>]*>/g)!.find((b) => b.includes('apply(confirming)'))!
+    expect(confirm).not.toContain('variant=')
   })
 })

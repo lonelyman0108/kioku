@@ -1996,3 +1996,20 @@ describe('图标', () => {
     for (const name of used) expect(Object.keys(icons)).toContain(name)
   })
 })
+
+describe('字号', () => {
+  // 正文不小于 14px：场景、工具、会话上下文、当前会话这些说明是完整的句子，不是标签
+  it.each([
+    ['场景说明', benchScenariosView, '.scenario-note'],
+    ['工具说明', benchCalls, '.call-head'],
+    ['参数的说明', benchCalls, '.note'],
+    ['当前会话的说明', benchCalls, '.usage'],
+    ['会话上下文的说明', benchContextForm, '.context-note'],
+    ['模型对话的说明', benchAgentView, '.side-note'],
+    ['模型对话的用量', benchAgentView, '.usage'],
+    ['每一轮的说明', benchAgentExchange, '.note'],
+    ['步骤结果的说明', benchStepView, '.note'],
+  ])('%s是 14px', (_name, source, selector) => {
+    expect(ruleOf(source, selector)).toContain('font-size: 14px;')
+  })
+})

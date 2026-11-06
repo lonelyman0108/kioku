@@ -95,6 +95,12 @@ const legendKinds = computed(() =>
 const failures = computed(() =>
   readFailures([apps.error.value, personas.error.value, members.error.value]),
 )
+// 读取失败时的「重试」：这一页读的几样里，失败的那几样重新读
+const reads = [apps, personas, members]
+const retrying = computed(() => reads.some((query) => query.isFetching.value))
+function retryReads() {
+  for (const query of reads) if (query.isError.value) void query.refetch()
+}
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -152,7 +158,14 @@ async function create() {
       </UButton>
     </header>
 
-    <NoteLine v-for="message in failures" :key="message" tone="error">{{ message }}</NoteLine>
+    <NoteLine v-for="message in failures" :key="message" tone="error">
+      {{ message }}
+      <template #actions>
+        <UButton size="sm" color="neutral" variant="outline" :loading="retrying" @click="retryReads"
+          >重试</UButton
+        >
+      </template>
+    </NoteLine>
     <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
     <p v-else-if="apps.data.value && !apps.data.value.length" class="apps-empty">暂无应用</p>
     <template v-else-if="apps.data.value">

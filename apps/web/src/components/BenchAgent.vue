@@ -455,7 +455,7 @@ watch(generation, () => {
   border-left: 1px solid var(--ui-border);
 }
 .side-note {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
 }
 .thread {
@@ -506,7 +506,7 @@ watch(generation, () => {
 .usage {
   flex: none;
   padding-top: 4px;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--ui-text-muted);
 }

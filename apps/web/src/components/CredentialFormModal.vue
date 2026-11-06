@@ -140,6 +140,10 @@ const sourceItems = computed(() => [
       : '请先在「凭据源」中添加密码管理器',
     value: 'external',
     disabled: !props.providers.length,
+    // 禁用的选项默认整项变淡，说明里写的是不能选的原因，要看得清：只淡化圆钮和名称，说明用正常的次要文字色
+    ui: props.providers.length
+      ? undefined
+      : { item: 'opacity-100', base: 'opacity-75', label: 'text-dimmed' },
   },
 ])
 
@@ -419,7 +423,7 @@ watch(open, (isOpen) => {
     </template>
     <template #footer>
       <div class="flex w-full items-center justify-end gap-2">
-        <span v-if="problem" class="mr-auto text-xs text-muted">{{ problem }}</span>
+        <span v-if="problem" class="mr-auto text-sm text-muted">{{ problem }}</span>
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
         <UButton type="submit" form="credential-form" :loading="saving" :disabled="!!problem">
           {{ editing ? '保存' : '新建' }}

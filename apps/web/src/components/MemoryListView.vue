@@ -15,7 +15,7 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { icons } from '../icons'
 import { sensitivityLabels } from '../labels'
-import { missingDisclosureTone } from '../memoryDetail'
+import { missingDisclosureLabel, missingDisclosureTone } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
 import { DOMAINS_QUERY_OPTIONS } from './memoryTree'
@@ -251,7 +251,19 @@ const total = computed(() => {
 
     <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
     <div v-if="list.isError.value && !list.isFetchNextPageError.value" class="list-note">
-      <NoteLine tone="error">{{ readFailure(list.error.value) }}</NoteLine>
+      <NoteLine tone="error">
+        {{ readFailure(list.error.value) }}
+        <template #actions>
+          <UButton
+            size="sm"
+            color="neutral"
+            variant="outline"
+            :loading="list.isFetching.value"
+            @click="list.refetch()"
+            >重试</UButton
+          >
+        </template>
+      </NoteLine>
     </div>
     <div v-if="list.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 5" :key="n" class="h-12 w-full" />
@@ -279,7 +291,7 @@ const total = computed(() => {
                       missingDisclosureTone(item) === 'warning' && item.uri !== selectedUri,
                   }"
                 >
-                  未设触发场景
+                  {{ missingDisclosureLabel(item) }}
                 </span>
                 <template v-else>{{ item.disclosure }}</template>
               </span>
