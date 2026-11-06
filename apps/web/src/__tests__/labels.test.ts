@@ -37,8 +37,8 @@ describe('凭据限定的应用', () => {
 
 describe('Key 的权限', () => {
   const scopes: KeyScopes = {
-    readLayers: ['base', 'private'],
-    writeLayers: ['private'],
+    readLayers: ['core', 'user'],
+    writeLayers: ['user'],
     maxSensitivity: 'private',
     admin: false,
   }

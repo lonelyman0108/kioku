@@ -146,8 +146,9 @@ describe('Token 会不会明文传输', () => {
 })
 
 const target = (extra: Partial<LorePlanNode['targets'][number]> = {}) => ({
-  uri: 'infra://a',
-  layer: 'private' as const,
+  uri: 'user://infra/a',
+  title: 'a',
+  layer: 'user' as const,
   sensitivity: 'private' as const,
   priority: 2,
   state: 'new' as const,

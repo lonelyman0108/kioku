@@ -62,18 +62,18 @@ describe('账号绑定那一行', () => {
 })
 
 describe('点地层柱的一格', () => {
-  it('跳到列表，带上层和敏感级', () => {
-    expect(strataFilterQuery({ layer: 'private', sensitivity: 'secret' })).toEqual({
+  it('跳到列表，带上归属和敏感级', () => {
+    expect(strataFilterQuery({ layer: 'user', sensitivity: 'secret' })).toEqual({
       view: 'list',
-      layer: 'private',
+      layer: 'user',
       sensitivity: 'secret',
     })
   })
 
-  it('只点一层或只点一个敏感级时，另一个不写进地址', () => {
-    expect(strataFilterQuery({ layer: 'base', sensitivity: null })).toEqual({
+  it('只点一类归属或只点一个敏感级时，另一个不写进地址', () => {
+    expect(strataFilterQuery({ layer: 'core', sensitivity: null })).toEqual({
       view: 'list',
-      layer: 'base',
+      layer: 'core',
     })
     expect(strataFilterQuery({ layer: null, sensitivity: 'internal' })).toEqual({
       view: 'list',

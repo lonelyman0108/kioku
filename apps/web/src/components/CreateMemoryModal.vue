@@ -1,12 +1,12 @@
 <script setup lang="ts">
 import { PLAINTEXT_CREDENTIAL, URI_PATTERN, type Layer, type Sensitivity } from '@kioku/contracts'
-import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
-import { creatableLayers, layerLabels, sensitivityLabels } from '../labels'
+import { layerOfUri } from '../coordinates'
+import { sensitivityLabels } from '../labels'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -19,8 +19,7 @@ const emit = defineEmits<{ created: [uri: string] }>()
 const form = reactive({
   uri: '',
   content: '',
-  layer: 'private' as Layer,
-  // null 表示按层默认；下拉框把 undefined 当成没有选，显示不出「按层默认」
+  // null 表示按归属默认；下拉框把 undefined 当成没有选，显示不出「按层默认」
   sensitivity: null as Sensitivity | null,
   disclosure: '',
   // 有效到，datetime-local 输入框的本地时间；空表示一直有效
@@ -31,65 +30,26 @@ const saving = ref(false)
 // 有效到最早能选的时间（见 earliestValidTo）：打开、聚焦选择器与提交之前重新算
 const minValidTo = ref('')
 
-// 手动选过层之后，就不再按 domain 默认层改它
-const layerTouched = ref(false)
-
 watch(open, (value) => {
   if (!value) return
   Object.assign(form, {
     uri: props.initialUri,
     content: '',
-    layer: 'private',
     sensitivity: null,
     disclosure: '',
     validTo: '',
   })
   minValidTo.value = earliestValidTo()
-  layerTouched.value = false
   error.value = null
 })
 
-// persona:// 与 app:// 下的层由 URI 决定，不再让人选
-const domain = computed(() => form.uri.split('://')[0] ?? '')
-const layerFixed = computed(() => domain.value === 'persona' || domain.value === 'app')
-
-// 空间配置的 domain 默认层：没手动选过层时，按 URI 的 domain 带出，没配置的按私人层
-const domainLayers = useQuery({
-  queryKey: computed(() => ['domain-layers', props.spaceId]),
-  queryFn: () => api.domainLayers(props.spaceId),
-})
-const suggestedLayer = computed(() => domainLayers.data.value?.defaults[domain.value])
-watch(
-  [suggestedLayer, open],
-  ([suggested, isOpen]) => {
-    if (isOpen && !layerTouched.value && !layerFixed.value) form.layer = suggested ?? 'private'
-  },
-  { immediate: true },
-)
-const layerHelp = computed(() => {
-  if (layerFixed.value) return undefined
-  if (suggestedLayer.value && !layerTouched.value) return '来自空间设置的分区默认层'
-  return undefined
-})
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
 // 正文像有明文密码或 Token 时提醒换成凭据占位符；只是提醒，照样能创建
 const looksPlaintext = computed(() => PLAINTEXT_CREDENTIAL.test(form.content))
-// 色块跟着另一个选项走：选了什么就看到什么样子。敏感级按层默认时，层的色块不带纹理
-const layerOptions = computed(() =>
-  creatableLayers.map((value) => ({
-    value,
-    label: layerLabels[value],
-    layer: value,
-    sensitivity: form.sensitivity,
-    plain: !form.sensitivity,
-  })),
-)
 // editor 签不了 secret，选项里也不给
 const { sensitivities } = useMemoryPermissions(computed(() => props.spaceId))
-// persona:// 与 app:// 下选不了层，色块按 URI 决定的层画
-const shownLayer = computed<Layer>(() =>
-  layerFixed.value ? (domain.value === 'persona' ? 'persona' : 'app') : form.layer,
-)
+// 归属由坐标的开头决定，色块按它画
+const shownLayer = computed<Layer | undefined>(() => layerOfUri(form.uri) ?? undefined)
 const sensitivityOptions = computed<
   {
     value: Sensitivity | null
@@ -126,7 +86,6 @@ async function submit() {
     const created = await api.createMemory(props.spaceId, {
       uri: form.uri,
       content: form.content,
-      ...(layerFixed.value ? {} : { layer: form.layer }),
       ...(form.sensitivity ? { sensitivity: form.sensitivity } : {}),
       ...(form.disclosure.trim() ? { disclosure: form.disclosure.trim() } : {}),
       ...(validTo ? { validTo } : {}),
@@ -148,16 +107,6 @@ async function submit() {
       <div class="space-y-4">
         <UFormField label="URI" help="分区://路径，例如 core://agent、projects://kioku">
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
-        </UFormField>
-        <UFormField label="层" :help="layerHelp">
-          <p v-if="layerFixed" class="text-sm text-muted">由 URI 决定</p>
-          <SwatchOptions
-            v-else
-            v-model="form.layer"
-            label="层"
-            :options="layerOptions"
-            @update:model-value="layerTouched = true"
-          />
         </UFormField>
         <UFormField label="敏感级">
           <SwatchOptions v-model="form.sensitivity" label="敏感级" :options="sensitivityOptions" />

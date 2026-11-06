@@ -30,7 +30,7 @@ describe('有效期的状态', () => {
 
 describe('启动加载', () => {
   const memory = (extra: object) => ({
-    layer: 'private' as const,
+    layer: 'user' as const,
     priority: 0,
     provenance: 'owner' as const,
     sensitivity: 'internal' as const,
@@ -38,7 +38,7 @@ describe('启动加载', () => {
     ...extra,
   })
 
-  it('和服务端同一个条件：优先级 0，人格和应用层到优先级 1', () => {
+  it('和服务端同一个条件：优先级 0，人格和应用到优先级 1', () => {
     expect(isBootNode(memory({}), now)).toBe(true)
     expect(isBootNode(memory({ priority: 1 }), now)).toBe(false)
     expect(isBootNode(memory({ layer: 'persona', priority: 1 }), now)).toBe(true)
@@ -46,7 +46,7 @@ describe('启动加载', () => {
     expect(isBootNode(memory({ layer: 'app', priority: 2 }), now)).toBe(false)
   })
 
-  it('来自对话的两层、未确认来源、过期了的都不算', () => {
+  it('来自对话的两类、未确认来源、过期了的都不算', () => {
     expect(isBootNode(memory({ layer: 'subject' }), now)).toBe(false)
     expect(isBootNode(memory({ layer: 'episode' }), now)).toBe(false)
     expect(isBootNode(memory({ provenance: 'untrusted' }), now)).toBe(false)
@@ -69,7 +69,7 @@ describe('启动加载', () => {
 describe('没写触发场景时的提示', () => {
   const memory = (extra: object) => ({
     disclosure: null,
-    layer: 'private' as const,
+    layer: 'user' as const,
     priority: 2,
     provenance: 'owner' as const,
     sensitivity: 'internal' as const,
@@ -234,8 +234,9 @@ describe('召回的说法', () => {
 describe('这次改动动没动统计', () => {
   const view = (extra: Partial<ConsoleMemoryView> = {}): ConsoleMemoryView => ({
     id: 'm1',
-    uri: 'notes://a',
-    layer: 'private',
+    uri: 'user://notes/a',
+    title: '笔记',
+    layer: 'user',
     sensitivity: 'internal',
     provenance: 'owner',
     originScope: 'global',
@@ -253,10 +254,11 @@ describe('这次改动动没动统计', () => {
     ...extra,
   })
 
-  it('只改正文、优先级、关键词、触发场景的文字时不动', () => {
+  it('只改正文、标题、优先级、关键词、触发场景的文字时不动', () => {
     const before = view()
     for (const after of [
       view({ content: '别的正文', version: 2 }),
+      view({ title: '别的标题', version: 2 }),
       view({ priority: 0, version: 2 }),
       view({ glossary: ['关键词'], version: 2 }),
       view({ disclosure: '换一种说法', version: 2 }),
@@ -267,10 +269,10 @@ describe('这次改动动没动统计', () => {
     }
   })
 
-  it('层、敏感级、有没有写触发场景、是不是疑似明文变了就动', () => {
+  it('归属、敏感级、有没有写触发场景、是不是疑似明文变了就动', () => {
     const before = view()
     for (const after of [
-      view({ layer: 'owner' }),
+      view({ uri: 'core://a', layer: 'core' }),
       view({ sensitivity: 'private' }),
       view({ disclosure: null }),
       view({ disclosure: '  ' }),

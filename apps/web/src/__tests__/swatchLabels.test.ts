@@ -8,7 +8,7 @@ import memoryRow from '../components/strata/MemoryRow.vue?raw'
 import recallPage from '../pages/RecallPage.vue?raw'
 
 // 颜色不单独承担信息：一行里有层的色块和 URI 时，色块旁边要写层名。
-// 和记忆列表一样用 MemoryFlags，或者同一个 layerShortLabels，不另写一份
+// 和记忆列表一样用 MemoryFlags，或者同一个 layerLabels，不另写一份
 
 interface TemplateNode {
   type: number
@@ -43,7 +43,7 @@ const namesLayer = (row: TemplateNode) =>
   nodesOf(row).some(
     (n) =>
       n.type === INTERPOLATION &&
-      (n.content as { content: string }).content.includes('layerShortLabels['),
+      (n.content as { content: string }).content.includes('layerLabels['),
   )
 
 describe('色块旁边的层名', () => {

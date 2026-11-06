@@ -5,8 +5,9 @@ import { hiddenAgain, revealedAfterWrite, stillRevealed, withRevealed } from '..
 
 const view = (extra: Partial<ConsoleMemoryView> = {}): ConsoleMemoryView => ({
   id: 'm1',
-  uri: 'home://wifi',
-  layer: 'private',
+  uri: 'user://home/wifi',
+  title: '家里的网络',
+  layer: 'user',
   sensitivity: 'secret',
   provenance: 'owner',
   originScope: 'global',

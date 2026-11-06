@@ -489,27 +489,6 @@ function runCounts(run: ExtractionRunInfo): string {
             </ul>
           </section>
 
-          <section v-if="data.summaries.length">
-            <SectionHeading :title="data.kind === 'group' ? '群聊的会话摘要' : '私聊的会话摘要'">
-              <template #actions>
-                <StrataSwatch layer="episode" plain label="layer" />
-              </template>
-            </SectionHeading>
-            <ul>
-              <li v-for="summary in data.summaries" :key="summary.id" class="entry-row">
-                <div class="entry-body">
-                  <p class="entry-text">{{ summary.content }}</p>
-                  <p class="entry-meta">
-                    <time :datetime="summary.createdAt" :title="formatTime(summary.createdAt)">
-                      {{ formatRelative(summary.createdAt) }}
-                    </time>
-                    <span v-if="summary.expiresAt"> {{ formatTime(summary.expiresAt) }} 到期 </span>
-                  </p>
-                </div>
-              </li>
-            </ul>
-          </section>
-
           <section>
             <SectionHeading title="最近抽取" />
             <p v-if="!data.runs.length" class="empty">暂无相关抽取</p>

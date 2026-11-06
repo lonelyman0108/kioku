@@ -1,4 +1,5 @@
 import {
+  CURATED_LAYERS,
   LAYERS,
   SENSITIVITIES,
   type AccessCell,
@@ -26,6 +27,7 @@ import SwatchOptions from '../SwatchOptions.vue'
 import UriPath from '../UriPath.vue'
 import {
   ACCESS_BAR_PERCENT,
+  CURATED_STACK,
   DASHES,
   STACK,
   TEXTURES,
@@ -42,6 +44,7 @@ import {
   dashId,
   deepestColumn,
   filteredTotal,
+  isConversationLayer,
   issuedScopeRows,
   layerTotal,
   orderRows,
@@ -59,22 +62,21 @@ import {
   type StrataCounts,
 } from '../strata'
 
-// 样例和设计稿同一组比例：私人层最大，来自对话的两层只有私密
+// 样例和设计稿同一组比例：本人最大（本人不设公开），来自对话的两类只有私密
 const sample = (): StrataCounts => ({
-  base: { public: 6, internal: 12, private: 0, secret: 0 },
+  core: { public: 6, internal: 12, private: 0, secret: 0 },
   persona: { public: 9, internal: 14, private: 0, secret: 0 },
   app: { public: 3, internal: 16, private: 2, secret: 0 },
-  owner: { public: 0, internal: 11, private: 8, secret: 0 },
-  private: { public: 4, internal: 38, private: 72, secret: 9 },
+  user: { public: 0, internal: 53, private: 80, secret: 9 },
   subject: { public: 0, internal: 0, private: 31, secret: 0 },
   episode: { public: 0, internal: 0, private: 13, secret: 0 },
 })
 
-// 极端分布：一层一万条，其余一条或没有
+// 极端分布：一类一万条，其余一条或没有
 const extreme = (): StrataCounts =>
   tallyCounts([
-    { layer: 'private', sensitivity: 'internal', count: 10000 },
-    { layer: 'base', sensitivity: 'public', count: 1 },
+    { layer: 'user', sensitivity: 'internal', count: 10000 },
+    { layer: 'core', sensitivity: 'public', count: 1 },
     { layer: 'app', sensitivity: 'public', count: 1 },
     { layer: 'subject', sensitivity: 'private', count: 1 },
   ])
@@ -84,38 +86,38 @@ const render = (component: Component, props: Record<string, unknown>) =>
   renderToString(createSSRApp(component, props))
 
 describe('条数', () => {
-  it('接口的分组数合成每层每级的表，没有的是 0', () => {
+  it('接口的分组数合成每类每级的表，没有的是 0', () => {
     const counts = tallyCounts([
-      { layer: 'private', sensitivity: 'secret', count: 2 },
-      { layer: 'base', sensitivity: 'public', count: 5 },
-      { layer: 'base', sensitivity: 'public', count: 1 },
+      { layer: 'user', sensitivity: 'secret', count: 2 },
+      { layer: 'core', sensitivity: 'public', count: 5 },
+      { layer: 'core', sensitivity: 'public', count: 1 },
     ])
-    expect(counts.private.secret).toBe(2)
-    expect(counts.base.public).toBe(6)
+    expect(counts.user.secret).toBe(2)
+    expect(counts.core.public).toBe(6)
     expect(counts.episode.internal).toBe(0)
     expect(Object.keys(counts).sort()).toEqual([...LAYERS].sort())
   })
 
-  it('记忆总数不含来自对话的两层，后者单独算', () => {
+  it('记忆总数不含来自对话的两类，后者单独算', () => {
     const counts = sample()
     expect(curatedTotal(counts)).toBe(204)
     expect(conversationTotal(counts)).toBe(44)
-    expect(layerTotal(counts, 'private')).toBe(123)
+    expect(layerTotal(counts, 'user')).toBe(142)
     expect(sensitivityTotal(counts, 'private')).toBe(82)
   })
 })
 
-describe('按层和敏感级筛选之后的总数', () => {
-  it('两个都可以不限；不限层时数 counts 里有的所有层', () => {
+describe('按归属和敏感级筛选之后的总数', () => {
+  it('两个都可以不限；不限归属时数 counts 里有的所有归属', () => {
     const counts = sample()
-    expect(filteredTotal(counts, 'private', 'private')).toBe(72)
-    expect(filteredTotal(counts, 'private', null)).toBe(123)
+    expect(filteredTotal(counts, 'user', 'private')).toBe(80)
+    expect(filteredTotal(counts, 'user', null)).toBe(142)
     expect(filteredTotal(counts, null, 'secret')).toBe(9)
     expect(filteredTotal(counts, null, null)).toBe(204 + 44)
   })
 
-  it('列表只给记忆的条数时，来自对话的两层不算', () => {
-    const counts = tallyCounts([{ layer: 'base', sensitivity: 'public', count: 3 }])
+  it('列表只给记忆的条数时，来自对话的两类不算', () => {
+    const counts = tallyCounts([{ layer: 'core', sensitivity: 'public', count: 3 }])
     expect(filteredTotal(counts, null, null)).toBe(3)
     expect(filteredTotal(counts, 'subject', null)).toBe(0)
   })
@@ -147,19 +149,23 @@ describe('概览里地层柱的尺寸', () => {
 })
 
 describe('带的高度', () => {
-  it('顺序固定：情节在上，基础在下', () => {
+  it('顺序固定：会话在上，通用在下', () => {
     expect(stackBands(sample(), 600, 28).map((b) => b.layer)).toEqual([...STACK])
-    expect(STACK[0]).toBe('episode')
-    expect(STACK[STACK.length - 1]).toBe('base')
+    expect(STACK).toEqual(['episode', 'subject', 'user', 'app', 'persona', 'core'])
     expect([...STACK].sort()).toEqual([...LAYERS].sort())
   })
 
-  it('带首尾相接，来自对话的两层之后留出间隔，总高正好', () => {
+  it('目录的四个根就是地层柱上记下的四类，顺序一样', () => {
+    expect([...CURATED_STACK]).toEqual(STACK.filter((layer) => !isConversationLayer(layer)))
+    expect([...CURATED_STACK].sort()).toEqual([...CURATED_LAYERS].sort())
+  })
+
+  it('带首尾相接，来自对话的两类之后留出间隔，总高正好', () => {
     const bands = stackBands(sample(), 600, 28)
     const byLayer = Object.fromEntries(bands.map((b) => [b.layer, b]))
     expect(byLayer.episode!.y).toBe(0)
     expect(byLayer.subject!.y).toBe(byLayer.episode!.h)
-    expect(byLayer.private!.y).toBe(byLayer.subject!.y + byLayer.subject!.h + 28)
+    expect(byLayer.user!.y).toBe(byLayer.subject!.y + byLayer.subject!.h + 28)
     const last = bands[bands.length - 1]!
     expect(last.y + last.h).toBe(600)
     for (let i = 3; i < bands.length; i++) {
@@ -167,13 +173,13 @@ describe('带的高度', () => {
     }
   })
 
-  it('高度按条数的平方根：123 条的带不是 13 条的 9 倍高，约 3 倍', () => {
+  it('高度按条数的平方根：142 条的带不是 13 条的 11 倍高，约 3 倍', () => {
     const bands = stackBands(sample(), 1000, 0)
     const h = (layer: Layer) => bands.find((b) => b.layer === layer)!.h
-    expect(h('private') / h('episode')).toBeCloseTo(Math.sqrt(123 / 13), 1)
+    expect(h('user') / h('episode')).toBeCloseTo(Math.sqrt(142 / 13), 1)
   })
 
-  it('一层一万条、其余一条或没有时，小层也有最小高度，总高不变，带首尾相接', () => {
+  it('一类一万条、其余一条或没有时，小的也有最小高度，总高不变，带首尾相接', () => {
     for (const [height, gap, min] of [
       [612, 28, 24],
       [476, 12, 34],
@@ -181,8 +187,8 @@ describe('带的高度', () => {
     ] as const) {
       const bands = stackBands(extreme(), height, gap, min)
       expect(bands.reduce((a, b) => a + b.h, 0)).toBe(height - gap)
-      for (const band of bands.filter((b) => b.layer !== 'private')) expect(band.h).toBe(min)
-      expect(bands.find((b) => b.layer === 'private')!.h).toBe(height - gap - 6 * min)
+      for (const band of bands.filter((b) => b.layer !== 'user')) expect(band.h).toBe(min)
+      expect(bands.find((b) => b.layer === 'user')!.h).toBe(height - gap - 5 * min)
       expect(bands[bands.length - 1]!.y + bands[bands.length - 1]!.h).toBe(height)
     }
   })
@@ -192,8 +198,8 @@ describe('带的高度', () => {
   })
 
   it('放不下最小高度时平分，比间隔还矮时全是 0，不出现负数', () => {
-    expect(stackBands(extreme(), 30, 2, 24).map((b) => b.h)).toEqual([4, 4, 4, 4, 4, 4, 4])
-    expect(stackBands(extreme(), 5, 12, 24).map((b) => b.h)).toEqual([0, 0, 0, 0, 0, 0, 0])
+    expect(stackBands(extreme(), 26, 2, 24).map((b) => b.h)).toEqual([4, 4, 4, 4, 4, 4])
+    expect(stackBands(extreme(), 5, 12, 24).map((b) => b.h)).toEqual([0, 0, 0, 0, 0, 0])
   })
 
   it('量出来的高度带小数时也是整数像素，合起来不超出可用高度', () => {
@@ -207,7 +213,7 @@ describe('带的高度', () => {
     }
   })
 
-  it('空的层也占一条，不会消失', () => {
+  it('空的归属也占一条，不会消失', () => {
     const counts = sample()
     counts.episode = { public: 0, internal: 0, private: 0, secret: 0 }
     const bands = stackBands(counts, 600, 28)
@@ -215,14 +221,14 @@ describe('带的高度', () => {
   })
 
   it('没有条数时等高', () => {
-    const heights = new Set(stackBands(null, 70, 0).map((b) => b.h))
-    expect(heights).toEqual(new Set([10]))
+    const heights = new Set(stackBands(null, 66, 0).map((b) => b.h))
+    expect(heights).toEqual(new Set([11]))
   })
 })
 
 describe('带内分段', () => {
   it('0 条的不画，顺序从公开到机密，首尾相接，合起来正好是带宽', () => {
-    const parts = segments(sample().private, 216, 2)
+    const parts = segments({ public: 4, internal: 38, private: 72, secret: 9 }, 216, 2)
     expect(parts.map((p) => p.sensitivity)).toEqual(['public', 'internal', 'private', 'secret'])
     let x = 0
     for (const p of parts) {
@@ -260,25 +266,25 @@ describe('上色', () => {
   const box = { x: 0, y: 0, width: 10, height: 10 }
 
   it('敏感级靠纹理：公开无纹理，内部圆点，私密斜线，机密实心', () => {
-    expect(paintCell('base', 'public', box).map((r) => r.fill)).toEqual(['var(--layer-base)'])
-    expect(paintCell('base', 'internal', box).map((r) => r.fill)).toEqual([
-      'var(--layer-base)',
+    expect(paintCell('core', 'public', box).map((r) => r.fill)).toEqual(['var(--layer-core)'])
+    expect(paintCell('core', 'internal', box).map((r) => r.fill)).toEqual([
+      'var(--layer-core)',
       `url(#${textureId('internal', 'lg')})`,
     ])
-    expect(paintCell('base', 'private', box, 'sm').map((r) => r.fill)).toEqual([
-      'var(--layer-base)',
+    expect(paintCell('core', 'private', box, 'sm').map((r) => r.fill)).toEqual([
+      'var(--layer-core)',
       `url(#${textureId('private', 'sm')})`,
     ])
-    expect(paintCell('base', 'secret', box).map((r) => r.fill)).toEqual(['var(--strata-solid)'])
+    expect(paintCell('core', 'secret', box).map((r) => r.fill)).toEqual(['var(--strata-solid)'])
   })
 
-  it('小色块上的机密留一条层色，否则看不出是哪一层', () => {
-    const rects = paintSwatch('private', 'secret', 18, 12)
+  it('小色块上的机密留一条归属色，否则看不出是哪一类', () => {
+    const rects = paintSwatch('user', 'secret', 18, 12)
     expect(rects[0]!.fill).toBe('var(--strata-solid)')
-    expect(rects[1]).toMatchObject({ fill: 'var(--layer-private)', width: 5 })
+    expect(rects[1]).toMatchObject({ fill: 'var(--layer-user)', width: 5 })
   })
 
-  it('没有层时用中性底色（图例），没有敏感级时只画层色', () => {
+  it('没有归属时用中性底色（图例），没有敏感级时只画归属色', () => {
     expect(paintSwatch(null, 'public', 18, 12)[0]!.fill).toBe('var(--strata-neutral)')
     expect(paintSwatch('app', null, 18, 12).map((r) => r.fill)).toEqual(['var(--layer-app)'])
   })
@@ -291,15 +297,15 @@ describe('权限格子', () => {
   const bar = { y: 7, height: 3 }
 
   it('读写的组合对应到说明', () => {
-    expect(accessKind('private', cell('recall', true))).toBe('read-write')
-    expect(accessKind('private', cell('recall', false))).toBe('read')
-    expect(accessKind('private', cell('explicit', false))).toBe('explicit')
-    expect(accessKind('private', cell('explicit', true))).toBe('explicit-write')
-    expect(accessKind('private', cell('none', true))).toBe('write')
-    expect(accessKind('private', cell('none', false))).toBe('none')
+    expect(accessKind('user', cell('recall', true))).toBe('read-write')
+    expect(accessKind('user', cell('recall', false))).toBe('read')
+    expect(accessKind('user', cell('explicit', false))).toBe('explicit')
+    expect(accessKind('user', cell('explicit', true))).toBe('explicit-write')
+    expect(accessKind('user', cell('none', true))).toBe('write')
+    expect(accessKind('user', cell('none', false))).toBe('none')
   })
 
-  it('来自对话的两层能写只是抽取写入，不能说成普通的写，读权限照样看', () => {
+  it('来自对话的两类能写只是抽取写入，不能说成普通的写，读权限照样看', () => {
     for (const layer of ['subject', 'episode'] as const) {
       expect(accessKind(layer, cell('recall', true))).toBe('read-extract')
       expect(accessKind(layer, cell('recall', false))).toBe('read')
@@ -460,13 +466,13 @@ describe('权限格子', () => {
     })
     const html = await render(AccessMatrix, {
       rows: [
-        row('private', [
+        row('app', [
           cell('recall', true),
           cell('recall', false),
           cell('explicit', false),
           cell('explicit', true),
         ]),
-        row('base', [
+        row('core', [
           cell('none', true),
           cell('none', false),
           cell('none', false),
@@ -506,7 +512,7 @@ describe('权限范围的每种组合', () => {
           : { sensitivity: s, read: 'none' as const, write: false },
       ),
     }))
-  // 文字和接口一一对应：怎么读、怎么写，对话层的写是抽取写入
+  // 文字和接口一一对应：怎么读、怎么写，来自对话的两类的写是抽取写入
   const expected = (layer: Layer, read: AccessCell['read'], write: boolean) => {
     const writing = !write ? '' : layer === 'subject' || layer === 'episode' ? 'extract' : 'write'
     return (
@@ -589,7 +595,7 @@ describe('权限范围的每种组合', () => {
   })
 
   it('读屏读到的是接口给的范围，不是前端算的', async () => {
-    const rows = single('private', 'public', 'recall', true)
+    const rows = single('app', 'public', 'recall', true)
     const html = await render(StrataCore, { rows, label: '群聊' })
     expect(html).toContain('aria-label="群聊的权限范围"')
   })
@@ -631,15 +637,15 @@ describe('矩阵在窄宽度下', () => {
 
 describe('Key 的签发范围换算成格子', () => {
   const scopes: KeyScopes = {
-    readLayers: ['base', 'private', 'subject'],
-    writeLayers: ['private', 'subject'],
+    readLayers: ['core', 'user', 'subject'],
+    writeLayers: ['user', 'subject'],
     maxSensitivity: 'internal',
     admin: false,
   }
   const at = (rows: ReturnType<typeof issuedScopeRows>, layer: Layer, sensitivity: string) =>
     rows.find((r) => r.layer === layer)!.cells.find((c) => c.sensitivity === sensitivity)!
 
-  it('每层每级都有一格', () => {
+  it('每类每级都有一格', () => {
     const rows = issuedScopeRows(scopes)
     expect(rows.map((r) => r.layer)).toEqual([...LAYERS])
     for (const row of rows) expect(row.cells.map((c) => c.sensitivity)).toEqual([...SENSITIVITIES])
@@ -647,16 +653,22 @@ describe('Key 的签发范围换算成格子', () => {
 
   it('读和写都不超过 Key 的最高敏感级', () => {
     const rows = issuedScopeRows(scopes)
-    expect(at(rows, 'private', 'internal')).toMatchObject({ read: 'recall', write: true })
-    expect(at(rows, 'private', 'private')).toMatchObject({ read: 'none', write: false })
-    expect(at(rows, 'base', 'public')).toMatchObject({ read: 'recall', write: false })
+    expect(at(rows, 'user', 'internal')).toMatchObject({ read: 'recall', write: true })
+    expect(at(rows, 'user', 'private')).toMatchObject({ read: 'none', write: false })
+    expect(at(rows, 'core', 'public')).toMatchObject({ read: 'recall', write: false })
     expect(at(rows, 'app', 'public')).toMatchObject({ read: 'none', write: false })
+  })
+
+  it('本人不设公开：签发了也是空格子，和服务端的权限范围一致', () => {
+    const rows = issuedScopeRows(scopes)
+    expect(at(rows, 'user', 'public')).toMatchObject({ read: 'none', write: false })
+    expect(at(rows, 'subject', 'public')).toMatchObject({ read: 'recall', write: true })
   })
 
   it('机密只能按 URI 读取，要 Key 的上限到机密', () => {
     const rows = issuedScopeRows({ ...scopes, maxSensitivity: 'secret' })
-    expect(at(rows, 'private', 'secret')).toMatchObject({ read: 'explicit', write: true })
-    expect(at(issuedScopeRows(scopes), 'private', 'secret')).toMatchObject({
+    expect(at(rows, 'user', 'secret')).toMatchObject({ read: 'explicit', write: true })
+    expect(at(issuedScopeRows(scopes), 'user', 'secret')).toMatchObject({
       read: 'none',
       write: false,
     })
@@ -676,26 +688,26 @@ describe('Key 的签发范围换算成格子', () => {
 describe('岩芯', () => {
   const scopes: KeyScopes = {
     readLayers: [...LAYERS],
-    writeLayers: ['private'],
+    writeLayers: ['user'],
     maxSensitivity: 'private',
     admin: false,
   }
 
-  it('四列铺满宽度，七条带铺满高度，一共 28 格', () => {
+  it('四列铺满宽度，六条带铺满高度，一共 24 格', () => {
     const { columns, cells, bands } = coreCells(issuedScopeRows(scopes), 44, 70, null, 0)
     expect(columns).toEqual([0, 11, 22, 33, 44])
-    expect(cells).toHaveLength(28)
+    expect(cells).toHaveLength(24)
     expect(bands.reduce((a, b) => a + b.h, 0)).toBe(70)
   })
 
-  it('格子的权限和位置对得上：纵向是层，横向是敏感级', () => {
+  it('格子的权限和位置对得上：纵向是归属，横向是敏感级', () => {
     const { cells } = coreCells(issuedScopeRows(scopes), 44, 70, null, 0)
-    const secret = cells.find((c) => c.layer === 'private' && c.sensitivity === 'secret')!
+    const secret = cells.find((c) => c.layer === 'user' && c.sensitivity === 'secret')!
     expect(secret.kind).toBe('none')
     expect(secret.x).toBe(33)
-    const writable = cells.find((c) => c.layer === 'private' && c.sensitivity === 'private')!
+    const writable = cells.find((c) => c.layer === 'user' && c.sensitivity === 'private')!
     expect(writable.kind).toBe('read-write')
-    expect(cells.find((c) => c.layer === 'base' && c.sensitivity === 'public')!.kind).toBe('read')
+    expect(cells.find((c) => c.layer === 'core' && c.sensitivity === 'public')!.kind).toBe('read')
   })
 
   it('下沿的条在格子里面，小格子也至少 2px', () => {
@@ -706,10 +718,10 @@ describe('岩芯', () => {
     }
   })
 
-  it('条数相差悬殊时小层的格子还在，条不画到别的带上', () => {
+  it('条数相差悬殊时小的归属的格子还在，条不画到别的带上', () => {
     const { bands, cells } = coreCells(issuedScopeRows(scopes), 44, 72, extreme())
     for (const band of bands) expect(band.h).toBeGreaterThanOrEqual(6)
-    expect(cells).toHaveLength(28)
+    expect(cells).toHaveLength(24)
     for (const cell of cells) {
       expect(cell.height).toBeGreaterThanOrEqual(6)
       expect(cell.barY).toBeGreaterThanOrEqual(cell.y as number)
@@ -717,7 +729,7 @@ describe('岩芯', () => {
   })
 
   it('格子比 2px 还矮时，条也不超出格子', () => {
-    const { cells } = coreCells(issuedScopeRows(scopes), 44, 7, null, 0)
+    const { cells } = coreCells(issuedScopeRows(scopes), 44, 6, null, 0)
     for (const cell of cells) {
       expect(cell.height).toBe(1)
       expect(cell.barHeight).toBe(1)
@@ -727,8 +739,8 @@ describe('岩芯', () => {
 
   it('读屏和悬停读到的是签发范围，不说成实际权限', async () => {
     const html = await render(StrataCore, { scopes })
-    expect(html).toContain('aria-label="签发范围：可读 7 层，可写 1 层，最高私密"')
-    expect(html).toContain('<title>签发范围：可读 7 层，可写 1 层，最高私密</title>')
+    expect(html).toContain('aria-label="签发范围：可读 6 层，可写 1 层，最高私密"')
+    expect(html).toContain('<title>签发范围：可读 6 层，可写 1 层，最高私密</title>')
   })
 
   it('传了服务端算的 rows 就说是当前上下文的范围，哪怕也传了 scopes', async () => {
@@ -740,7 +752,7 @@ describe('岩芯', () => {
 
   it('带 label 时说清是谁的，也说清是签发范围', async () => {
     const html = await render(StrataCore, { scopes, label: 'MacBook' })
-    expect(html).toContain('aria-label="MacBook，签发范围：可读 7 层，可写 1 层，最高私密"')
+    expect(html).toContain('aria-label="MacBook，签发范围：可读 6 层，可写 1 层，最高私密"')
     const rows = issuedScopeRows(scopes)
     expect(await render(StrataCore, { rows, label: '群聊' })).toContain(
       'aria-label="群聊的权限范围"',
@@ -751,7 +763,7 @@ describe('岩芯', () => {
     const html = await render(StrataCore, {})
     expect(html).toContain('aria-label="暂无权限数据"')
     expect(html).not.toContain('权限范围')
-    // 来自对话的两层本来就是虚线，没有数据时下面五层也是
+    // 来自对话的两类本来就是虚线，没有数据时下面四类也是
     expect(html.match(/stroke-dasharray="3 2"/g)).toHaveLength(2)
     expect(await render(StrataCore, { label: 'MacBook' })).toContain(
       'aria-label="MacBook，暂无权限数据"',
@@ -764,16 +776,16 @@ describe('岩芯', () => {
     expect(blank.match(/stroke-dasharray="3 2"/g)).toHaveLength(1)
   })
 
-  it('标记落在这一层这一级的格子上；不知道敏感级时标整层', () => {
+  it('标记落在这一类这一级的格子上；不知道敏感级时标整条带', () => {
     const model = coreCells(issuedScopeRows(scopes), 44, 72)
-    const band = model.bands.find((b) => b.layer === 'owner')!
-    expect(coreMark(model, 'owner', 'private')).toEqual({
+    const band = model.bands.find((b) => b.layer === 'user')!
+    expect(coreMark(model, 'user', 'private')).toEqual({
       x: 22.5,
       y: band.y + 0.5,
       width: 10,
       height: band.h - 1,
     })
-    expect(coreMark(model, 'owner', null)).toEqual({
+    expect(coreMark(model, 'user', null)).toEqual({
       x: 0.5,
       y: band.y + 0.5,
       width: 43,
@@ -800,44 +812,44 @@ describe('地层柱', () => {
     expect(rule).not.toContain('error')
   })
 
-  it('一层的合计能点，这一层没有记忆时不能点', async () => {
+  it('一类的合计能点，这一类没有记忆时不能点', async () => {
     const counts = sample()
     counts.episode = { public: 0, internal: 0, private: 0, secret: 0 }
     const html = await render(StrataColumn, { counts })
-    expect(html).toContain('aria-label="私人 123 条"')
-    expect(html).not.toMatch(/<button[^>]*aria-label="情节 0 条"/)
+    expect(html).toContain('aria-label="本人 142 条"')
+    expect(html).not.toMatch(/<button[^>]*aria-label="会话 0 条"/)
   })
 })
 
 describe('窄柱', () => {
   it('条数读到之前带等高、不写数字，筛选照样能点', async () => {
     const html = await render(StrataRibbon, { counts: null, length: 400 })
-    expect(html.match(/<button[^>]*class="rb-band/g)).toHaveLength(7)
-    expect(html).toContain('aria-label="私人"')
+    expect(html.match(/<button[^>]*class="rb-band/g)).toHaveLength(6)
+    expect(html).toContain('aria-label="本人"')
     expect(html).not.toContain('条')
     expect(html).not.toContain('<b>')
   })
 
-  it('顶上的「全部」读到条数之后也不写总数：柱子里还画了来自对话的两层，数字容易误读', async () => {
+  it('顶上的「全部」读到条数之后也不写总数：柱子里还画了来自对话的两类，数字容易误读', async () => {
     const html = await render(StrataRibbon, { counts: sample(), length: 600 })
     const all = html.split('<button').find((chunk) => /class="[^"]*\brb-all\b/.test(chunk))!
     expect(all.slice(0, all.indexOf('</button>'))).toMatch(/>\s*<span[^>]*>全部<\/span>\s*$/)
   })
 
-  it('选中的层、当前记忆所在的层都标出来', async () => {
+  it('选中的归属、当前记忆所在的归属都标出来', async () => {
     const html = await render(StrataRibbon, {
       counts: sample(),
       length: 600,
-      selected: 'private',
-      current: 'base',
+      selected: 'user',
+      current: 'core',
     })
     const band = (label: string) =>
       html.split('<button').find((chunk) => chunk.includes(`aria-label="${label}"`))!
-    expect(band('私人 123 条')).toContain('class="on rb-band"')
-    expect(band('私人 123 条')).toContain('aria-pressed="true"')
-    expect(band('基础 18 条')).toContain('aria-pressed="false"')
-    expect(band('基础 18 条')).toContain('rb-here')
-    expect(band('私人 123 条')).not.toContain('rb-here')
+    expect(band('本人 142 条')).toContain('class="on rb-band"')
+    expect(band('本人 142 条')).toContain('aria-pressed="true"')
+    expect(band('通用 18 条')).toContain('aria-pressed="false"')
+    expect(band('通用 18 条')).toContain('rb-here')
+    expect(band('本人 142 条')).not.toContain('rb-here')
   })
 })
 
@@ -852,8 +864,8 @@ describe('记忆的标记', () => {
     expect(await render(MemoryFlags, { sensitivity: 'private' })).not.toContain('flag-secret')
   })
 
-  it('层写简称，色块不单独说明是哪一层', async () => {
-    expect(await render(MemoryFlags, { layer: 'owner' })).toContain('画像')
+  it('写归属的名字，色块不单独说明是哪一类', async () => {
+    expect(await render(MemoryFlags, { layer: 'user' })).toContain('本人')
   })
 
   it('机密的标记和标签都不用红', async () => {
@@ -875,26 +887,26 @@ describe('URI', () => {
 })
 
 describe('详情的标签和条带', () => {
-  it('标签写全层和敏感级的名字，纹理跟着敏感级', async () => {
-    const html = await render(StrataTag, { layer: 'private', sensitivity: 'private' })
-    expect(html).toContain('私人')
+  it('标签写全归属和敏感级的名字，纹理跟着敏感级', async () => {
+    const html = await render(StrataTag, { layer: 'user', sensitivity: 'private' })
+    expect(html).toContain('本人')
     expect(html).toContain('私密')
-    expect(html).toContain('--layer-private')
+    expect(html).toContain('--layer-user')
     expect(html).toContain(`url(#${TEXTURES.lines.lg})`)
   })
 
-  it('机密的条带和标签是实心，看不出层色的地方靠文字', async () => {
-    expect(await render(StrataStrip, { layer: 'private', sensitivity: 'secret' })).toContain(
+  it('机密的条带和标签是实心，看不出归属色的地方靠文字', async () => {
+    expect(await render(StrataStrip, { layer: 'user', sensitivity: 'secret' })).toContain(
       '--strata-solid',
     )
-    const html = await render(StrataTag, { layer: 'private', sensitivity: 'secret' })
-    expect(html).toContain('私人')
+    const html = await render(StrataTag, { layer: 'user', sensitivity: 'secret' })
+    expect(html).toContain('本人')
     expect(html).toContain('机密')
     expect(html).toContain('--strata-solid')
   })
 
   it('条带不读屏，文字在标签里', async () => {
-    expect(await render(StrataStrip, { layer: 'base', sensitivity: 'public' })).toContain(
+    expect(await render(StrataStrip, { layer: 'core', sensitivity: 'public' })).toContain(
       'aria-hidden="true"',
     )
   })
@@ -903,8 +915,8 @@ describe('详情的标签和条带', () => {
 describe('带色块的单选', () => {
   const options = [
     { value: null, label: '按层默认', bare: true },
-    { value: 'public', label: '公开', layer: 'private', sensitivity: 'public' },
-    { value: 'secret', label: '机密', layer: 'private', sensitivity: 'secret' },
+    { value: 'public', label: '公开', layer: 'core', sensitivity: 'public' },
+    { value: 'secret', label: '机密', layer: 'core', sensitivity: 'secret' },
   ]
 
   it('当前的选中，每一项都有文字，色块不读屏', async () => {
@@ -924,14 +936,14 @@ describe('带色块的单选', () => {
 
   it('色块标成配图时不读屏也不弹说明', async () => {
     const html = await render(StrataSwatch, {
-      layer: 'base',
+      layer: 'core',
       sensitivity: 'public',
       decorative: true,
     })
     expect(html).toContain('aria-hidden="true"')
     expect(html).not.toContain('title=')
-    expect(await render(StrataSwatch, { layer: 'base', sensitivity: 'public' })).toContain(
-      'aria-label="基础 公开"',
+    expect(await render(StrataSwatch, { layer: 'core', sensitivity: 'public' })).toContain(
+      'aria-label="通用 公开"',
     )
   })
 })
@@ -954,16 +966,16 @@ describe('要放文字的带', () => {
       (m) => Number(m[1]),
     )
 
-  it('地层柱的每一行放得下层名和数字按钮', async () => {
+  it('地层柱的每一行放得下归属的名字和数字按钮', async () => {
     const rows = sizes(await render(StrataColumn, { counts: extreme() }), 'fig-row', 'height')
-    expect(rows).toHaveLength(7)
+    expect(rows).toHaveLength(6)
     for (const h of rows) expect(h).toBeGreaterThanOrEqual(24)
   })
 
-  it('窄柱的每条带放得下两行标签，放倒时放得下三个字的简称', async () => {
+  it('窄柱的每条带放得下两行标签，放倒时放得下三个字的名字', async () => {
     const standing = await render(StrataRibbon, { counts: extreme(), length: 400 })
     const heights = sizes(standing, 'rb-band', 'height')
-    expect(heights).toHaveLength(7)
+    expect(heights).toHaveLength(6)
     for (const h of heights) expect(h).toBeGreaterThanOrEqual(34)
     const lying = await render(StrataRibbon, {
       counts: extreme(),
@@ -971,7 +983,7 @@ describe('要放文字的带', () => {
       orientation: 'horizontal',
     })
     const widths = sizes(lying, 'rb-band', 'width')
-    expect(widths).toHaveLength(7)
+    expect(widths).toHaveLength(6)
     for (const w of widths) expect(w).toBeGreaterThanOrEqual(38)
   })
 

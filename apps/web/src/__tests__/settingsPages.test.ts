@@ -118,9 +118,11 @@ const settingsSources = {
 describe('小节记在地址里', () => {
   it('地址里写了存在的小节就看它，其余看第一节', () => {
     expect(currentSection(SPACE_SECTIONS, 'import')).toBe('import')
-    expect(currentSection(SPACE_SECTIONS, undefined)).toBe('layers')
-    expect(currentSection(SPACE_SECTIONS, 'nonsense')).toBe('layers')
-    expect(currentSection(SPACE_SECTIONS, ['import'])).toBe('layers')
+    expect(currentSection(SPACE_SECTIONS, undefined)).toBe('budget')
+    expect(currentSection(SPACE_SECTIONS, 'nonsense')).toBe('budget')
+    expect(currentSection(SPACE_SECTIONS, ['import'])).toBe('budget')
+    // 分区默认层这一节去掉了：旧地址落到第一节
+    expect(currentSection(SPACE_SECTIONS, 'layers')).toBe('budget')
     expect(currentSection(INSTANCE_SECTIONS, 'master-key')).toBe('master-key')
   })
 
@@ -142,7 +144,7 @@ describe('小节记在地址里', () => {
 
   it('改过名的小节：旧地址落到改名后的那一节，只在原来那个设置页里认', () => {
     expect(currentSection(SPACE_SECTIONS, 'lore')).toBe('import')
-    expect(currentSection(SPACE_SECTIONS, ['lore'])).toBe('layers')
+    expect(currentSection(SPACE_SECTIONS, ['lore'])).toBe('budget')
     expect(currentSection(INSTANCE_SECTIONS, 'lore')).toBe('embedding')
   })
 
@@ -181,10 +183,10 @@ describe('设置页的骨架', () => {
   const currentLinks = (html: string) => [...html.matchAll(/<a[^>]*aria-current="page"[^>]*>/g)]
 
   it('所有小节一直挂着，只显示当前这一节', async () => {
-    const html = await frame('/?section=budget')
+    const html = await frame('/?section=dream')
     for (const section of SPACE_SECTIONS) expect(html).toContain(`内容 ${section.key}`)
-    expect(sectionTag(html, '抽取预算')).not.toContain('display:none')
-    expect(sectionTag(html, '分区默认层')).toContain('display:none')
+    expect(sectionTag(html, '整理')).not.toContain('display:none')
+    expect(sectionTag(html, '抽取预算')).toContain('display:none')
     expect(sectionTag(html, '导入')).toContain('display:none')
   })
 
@@ -197,16 +199,16 @@ describe('设置页的骨架', () => {
   it('旧地址 section=lore 显示导入，子导航标出的也是导入', async () => {
     const html = await frame('/?section=lore')
     expect(sectionTag(html, '导入')).not.toContain('display:none')
-    expect(sectionTag(html, '分区默认层')).toContain('display:none')
+    expect(sectionTag(html, '抽取预算')).toContain('display:none')
     const current = currentLinks(html)
     expect(current).toHaveLength(1)
     expect(current[0]![0]).toContain('section=import')
   })
 
   it('子导航标出当前小节，地址不对时是第一节', async () => {
-    const budget = currentLinks(await frame('/?section=budget'))
-    expect(budget).toHaveLength(1)
-    expect(budget[0]![0]).toContain('section=budget')
+    const dream = currentLinks(await frame('/?section=dream'))
+    expect(dream).toHaveLength(1)
+    expect(dream[0]![0]).toContain('section=dream')
     const fallback = currentLinks(await frame('/?section=nonsense'))
     expect(fallback).toHaveLength(1)
     expect(fallback[0]![0]).not.toContain('section=')
@@ -292,7 +294,7 @@ describe('两个设置页', () => {
   it('空间设置只注册一份未保存确认，切小节不算离开，换空间算', () => {
     const script = scriptOf(spaceSettingsPage)
     expect(script.match(/useUnsavedChangesGuard\(/g)).toHaveLength(1)
-    expect(script).toContain('dirty.value || budgetDirty.value')
+    expect(script).toContain('useUnsavedChangesGuard(budgetDirty')
     expect(script).toContain('leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId')
     for (const [name, source] of Object.entries(settingsSources)) {
       if (name === 'SpaceSettingsPage') continue
@@ -388,12 +390,6 @@ describe('读取失败', () => {
     ['RetentionSettings', retentionSettings, 'settings', 'pause'],
     ['ExtractionBudget', extractionBudget, 'usage', 'usage.isPending.value'],
     ['MyDreamSettings', myDreamSettings, 'settings', 'settings.isPending.value'],
-    [
-      'SpaceSettingsPage',
-      spaceSettingsPage,
-      'layers',
-      '!layers.isError.value || baseline !== null',
-    ],
   ]
 
   it.each(reads)('%s 的 %s：错误放在上面，读到过的内容留着', (name, source, query, shown) => {
@@ -508,7 +504,6 @@ describe('读取失败', () => {
     ['SettingsPage', settingsPage, 'masterKey'],
     ['ExtractionBudget', extractionBudget, 'usage'],
     ['MyDreamSettings', myDreamSettings, 'settings'],
-    ['SpaceSettingsPage', spaceSettingsPage, 'layers'],
   ])('%s 的 %s 读取失败时有重试，重读的是这一样查询', (name, source, query) => {
     const note = elementsOf(template(source)).find(
       (el) => el.tag === 'ReadFailureNote' && condition(el) === `${query}.isError.value`,
@@ -550,14 +545,6 @@ describe('读取失败', () => {
       '<ReadFailureNote v-if="settings.isError.value" :query="settings" />',
     )
     expect(embeddingSettings).not.toContain('读取设置失败')
-  })
-
-  it('「暂无」只在真的读到空时显示', () => {
-    expect(
-      condition(
-        elementsOf(template(spaceSettingsPage)).find((el) => textOf(el).startsWith('暂无配置'))!,
-      ),
-    ).toBe('baseline !== null && !rows.length')
   })
 
   it('没读到过时不显示内容：用量和开关都要等读到才有', () => {
@@ -609,7 +596,6 @@ describe('标题和说明一直在', () => {
     ['备份', backupSettings, '恢复时需配置同一主密钥。'],
     ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
     ['召回记录', settingsPage, '明细到期后删除，仅保留每条记忆的累计召回次数。'],
-    ['分区默认层', spaceSettingsPage, '新建记忆时按 URI 的分区预填层'],
     ['抽取预算', extractionBudget, '抽取事实与整理共用此 token 预算。'],
     ['整理', myDreamSettings, '已发送的内容无法撤回。'],
     ['导入', spaceSettingsPage, '将其他工具的记忆导入当前空间，目前仅支持 Lore。'],
@@ -639,34 +625,11 @@ describe('没有权限时', () => {
   it('小节都在，内容和改版前一样收起', () => {
     const ownerOnly = (source: string, text: string) =>
       elementsOf(template(source)).find((el) => textOf(el) === text)
-    expect(condition(ownerOnly(spaceSettingsPage, '仅空间所有者可修改')!)).toBe('!isOwner')
     expect(condition(ownerOnly(spaceExport, '仅空间所有者可导出')!)).toBe('!editable')
     expect(condition(ownerOnly(loreImport, '仅空间所有者可导入')!)).toBe('!editable')
     expect(flat(extractionBudget)).toContain('仅空间所有者可修改预算')
     const budgetForm = elementsOf(template(extractionBudget)).find((el) => el.tag === 'form')!
     expect(condition(budgetForm)).toBe('editable')
-  })
-
-  it('分区默认层：不是所有者时输入框禁用、没有增删和保存', () => {
-    const elements = elementsOf(template(spaceSettingsPage))
-    expect(
-      bound(
-        elements.find((el) => el.tag === 'UInput')!,
-        'disabled',
-      ),
-    ).toBe('!editable')
-    expect(
-      bound(
-        elements.find((el) => el.tag === 'USelect')!,
-        'disabled',
-      ),
-    ).toBe('!editable')
-    expect(condition(elements.find((el) => attr(el, 'aria-label') === '删除此行')!)).toBe('isOwner')
-    const save = elements.find((el) => el.tag === 'UButton' && textOf(el) === '保存')!
-    expect(bound(save, 'disabled')).toBe('!dirty || !!problem')
-    expect(scriptOf(spaceSettingsPage)).toContain(
-      'isOwner.value && baseline.value !== null && !saving.value',
-    )
   })
 
   it('空间设置把权限传给各小节', () => {
@@ -1052,10 +1015,10 @@ describe('登录页的地层', () => {
     const html = await render(EntryFrame, {}, { default: () => '表单' })
     expect(html).toContain('aria-label="記憶"')
     expect(html).toContain('表单')
-    expect(strataOf(html)).toContain('var(--layer-private)')
+    expect(strataOf(html)).toContain('var(--layer-user)')
   })
 
-  it('只铺层色，不铺纹理：纹理表示敏感级，这里没有数据', async () => {
+  it('只铺归属色，不铺纹理：纹理表示敏感级，这里没有数据', async () => {
     const html = await render(EntryFrame, {}, { default: () => '表单' })
     expect(html).not.toContain('<pattern')
     expect(html).not.toContain('url(#')
@@ -1068,15 +1031,15 @@ describe('登录页的地层', () => {
     expect(/<div class="entry-strata"[^>]*>/.exec(html)![0]).toContain('aria-hidden="true"')
   })
 
-  it('纵向顺序和地层柱一样，七层铺满，来自对话的两层用虚线隔开', async () => {
+  it('纵向顺序和地层柱一样，六类铺满，来自对话的两类用虚线隔开', async () => {
     const strata = strataOf(await render(EntryFrame, {}, { default: () => '表单' }))
     const bands = [...strata.matchAll(/<i([^>]*)>/g)].map((m) => m[1]!)
     expect(bands.map((band) => /--layer-(\w+)/.exec(band)![1])).toEqual([...STACK])
     const heights = bands.map((band) => Number(/flex-grow:(\d+)/.exec(band)![1]))
     expect(heights.reduce((a, b) => a + b, 0)).toBe(100)
-    // 虚线只有一条，在联系人和私人之间
+    // 虚线只有一条，在联系人和本人之间
     expect(bands.map((band) => band.includes('dashed'))).toEqual(
-      STACK.map((layer) => layer === 'private'),
+      STACK.map((layer) => layer === 'user'),
     )
   })
 

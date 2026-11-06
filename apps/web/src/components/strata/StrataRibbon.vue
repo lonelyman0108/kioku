@@ -2,7 +2,7 @@
 import type { Layer, Sensitivity } from '@kioku/contracts'
 import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
-import { layerLabels, layerShortLabels } from '../../labels'
+import { layerLabels } from '../../labels'
 import {
   isConversationLayer,
   layerHints,
@@ -180,8 +180,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
         </svg>
         <i v-if="vertical" class="rb-tick" />
         <span class="rb-label">
-          {{ layerShortLabels[band.layer]
-          }}<b v-if="counts">{{ layerTotal(counts, band.layer) }}</b>
+          {{ layerLabels[band.layer] }}<b v-if="counts">{{ layerTotal(counts, band.layer) }}</b>
         </span>
       </button>
     </div>

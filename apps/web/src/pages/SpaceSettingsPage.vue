@@ -1,216 +1,33 @@
 <script setup lang="ts">
-import { useToast } from '@nuxt/ui/composables'
-import { DomainLayers, PLAIN_LAYERS, type PlainLayer } from '@kioku/contracts'
-import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, ref } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
-import { api } from '../api/endpoints'
 import ExtractionBudget from '../components/ExtractionBudget.vue'
-import Hint from '../components/Hint.vue'
 import LoreImport from '../components/LoreImport.vue'
 import MyDreamSettings from '../components/MyDreamSettings.vue'
 import SpaceExport from '../components/SpaceExport.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
-import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SettingsBlock from '../components/strata/SettingsBlock.vue'
 import SettingsFrame from '../components/strata/SettingsFrame.vue'
-import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
-import { icons } from '../icons'
-import { layerLabels } from '../labels'
 import { SPACE_SECTIONS } from '../settingsSections'
 
 const route = useRoute()
-const toast = useToast()
-const queryClient = useQueryClient()
 const { me, space } = useSession()
 const spaceId = computed(() => String(route.params.spaceId))
 const isOwner = computed(() => space.value?.role === 'owner')
 
-const queryKey = computed(() => ['domain-layers', spaceId.value])
-const layers = useQuery({ queryKey, queryFn: () => api.domainLayers(spaceId.value) })
-
-interface Row {
-  domain: string
-  layer: PlainLayer
-}
-const rows = ref<Row[]>([])
-// 表单是从哪一版载入的；还没载入时为 null，这时不算有改动，也不能保存。
-// 改动以它为准，而不是缓存里最新的那份：否则数据晚到时会被当成「有改动」而填不进表单
-const baseline = ref<Row[] | null>(null)
-const toRows = (defaults: Record<string, PlainLayer>) =>
-  Object.entries(defaults)
-    .map(([domain, layer]) => ({ domain, layer }))
-    .sort((a, b) => a.domain.localeCompare(b.domain))
-const normalized = (list: Row[]) =>
-  list
-    .map((r) => ({ domain: r.domain.trim(), layer: r.layer }))
-    .filter((r) => r.domain)
-    .sort((a, b) => a.domain.localeCompare(b.domain))
-const dirty = computed(
-  () =>
-    baseline.value !== null &&
-    JSON.stringify(normalized(rows.value)) !== JSON.stringify(normalized(baseline.value)),
-)
-
-function load(defaults: Record<string, PlainLayer>) {
-  rows.value = toRows(defaults)
-  baseline.value = toRows(defaults)
-}
-// 换了空间就重新载入；同一个空间里服务端的数据变了（例如别的标签页保存过），没有改动时才跟上
-watch(
-  [spaceId, () => layers.data.value],
-  ([id, data], previous) => {
-    // 第一次执行时 previous 是空数组
-    if (previous[0] !== undefined && id !== previous[0]) {
-      rows.value = []
-      baseline.value = null
-    }
-    if (data && (baseline.value === null || !dirty.value)) load(data.defaults)
-  },
-  { immediate: true },
-)
-// 有未保存的改动时（domain 默认层或抽取预算），离开这一页、换空间、退出登录或关掉标签页之前先确认。
+// 抽取预算有未保存的改动时，离开这一页、换空间、退出登录或关掉标签页之前先确认。
 // 切换小节只改地址里的参数，表单都还挂着，不算离开
 const budgetDirty = ref(false)
-useUnsavedChangesGuard(
-  computed(() => dirty.value || budgetDirty.value),
-  { leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId },
-)
-const unsaved = computed(() => [
-  ...(dirty.value ? ['layers'] : []),
-  ...(budgetDirty.value ? ['budget'] : []),
-])
-
-// 校验规则与服务端用同一个 schema；重复的 domain 会被合并掉，单独查
-const problem = computed(() => {
-  const list = normalized(rows.value)
-  const seen = new Set<string>()
-  for (const r of list) {
-    if (seen.has(r.domain)) return `分区「${r.domain}」重复`
-    seen.add(r.domain)
-  }
-  const parsed = DomainLayers.safeParse({
-    defaults: Object.fromEntries(list.map((r) => [r.domain, r.layer])),
-  })
-  if (parsed.success) return null
-  const issue = parsed.error.issues[0]
-  // domain（记录的键）不合法时，zod 只在外层给一句英文，这里点出是哪个 domain
-  if (issue?.code === 'invalid_key') {
-    return `分区「${String(issue.path.at(-1) ?? '')}」格式错误：须以小写字母开头，只能包含小写字母、数字和下划线`
-  }
-  return issue?.message ?? '格式错误'
+useUnsavedChangesGuard(budgetDirty, {
+  leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId,
 })
-
-const layerItems = PLAIN_LAYERS.map((l) => ({ label: layerLabels[l], value: l }))
-
-function addRow() {
-  rows.value.push({ domain: '', layer: 'private' })
-}
-// 与从 Lore 导入时的映射一致：core 是基础规则，preferences 是主人画像，其余按私人层
-function fillSuggested() {
-  const suggested: Row[] = [
-    { domain: 'core', layer: 'base' },
-    { domain: 'preferences', layer: 'owner' },
-  ]
-  for (const s of suggested) {
-    if (!rows.value.some((r) => r.domain.trim() === s.domain)) rows.value.push({ ...s })
-  }
-}
-
-const saving = ref(false)
-// 载入之前和保存期间不能改：载入会覆盖表单，保存的结果也会覆盖期间的改动
-const editable = computed(() => isOwner.value && baseline.value !== null && !saving.value)
-async function save() {
-  if (problem.value || baseline.value === null) return
-  saving.value = true
-  // 记下发起保存的空间：请求期间换了空间，结果不能写进新空间的表单
-  const forSpace = spaceId.value
-  try {
-    const defaults = Object.fromEntries(normalized(rows.value).map((r) => [r.domain, r.layer]))
-    const result = await api.saveDomainLayers(forSpace, defaults)
-    queryClient.setQueryData(['domain-layers', forSpace], result)
-    if (forSpace === spaceId.value) load(result.defaults)
-    toast.add({ title: '已保存', color: 'success' })
-  } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
-  } finally {
-    saving.value = false
-  }
-}
+const unsaved = computed(() => (budgetDirty.value ? ['budget'] : []))
 </script>
 
 <template>
   <SettingsFrame title="空间设置" :sections="SPACE_SECTIONS" :unsaved="unsaved">
-    <template #layers>
-      <SettingsBlock title="分区默认层">
-        <template #note>
-          新建记忆时按 URI 的分区预填层，例如 core:// 默认为基础层。
-          <Hint>
-            仅作用于管理界面，且只是默认值，新建时可以修改。通过访问密钥写入不受影响，未指定层时仍写入私人层。
-          </Hint>
-        </template>
-        <!-- 后台刷新失败时读到过的配置留着，错误放在上面 -->
-        <ReadFailureNote v-if="layers.isError.value" :query="layers" />
-        <div v-if="!layers.isError.value || baseline !== null" class="space-y-3">
-          <div v-if="baseline === null" class="space-y-2">
-            <USkeleton v-for="n in 2" :key="n" class="h-8 w-full" />
-          </div>
-          <p v-if="!isOwner" class="text-muted">仅空间所有者可修改</p>
-          <div v-for="(row, index) in rows" :key="index" class="flex items-center gap-2">
-            <UInput
-              v-model="row.domain"
-              placeholder="分区，例如 core"
-              class="min-w-0 flex-1 font-mono"
-              :disabled="!editable"
-            />
-            <USelect v-model="row.layer" :items="layerItems" class="w-36" :disabled="!editable">
-              <template #leading>
-                <StrataSwatch :layer="row.layer" plain decorative :width="14" :height="10" />
-              </template>
-              <template #item-leading="{ item }">
-                <StrataSwatch :layer="item.value" plain decorative :width="14" :height="10" />
-              </template>
-            </USelect>
-            <UButton
-              v-if="isOwner"
-              :icon="icons.remove"
-              color="neutral"
-              variant="ghost"
-              aria-label="删除此行"
-              :disabled="!editable"
-              @click="rows.splice(index, 1)"
-            />
-          </div>
-          <p v-if="baseline !== null && !rows.length" class="text-muted">
-            暂无配置，所有分区新建时默认为私人层。
-          </p>
-          <NoteLine v-if="problem" tone="warning">{{ problem }}</NoteLine>
-          <div v-if="isOwner" class="flex flex-wrap gap-2 pt-1">
-            <UButton color="neutral" variant="outline" :disabled="!editable" @click="addRow">
-              添加一行
-            </UButton>
-            <UButton color="neutral" variant="ghost" :disabled="!editable" @click="fillSuggested">
-              填入 Lore 导入规则
-            </UButton>
-            <UButton
-              color="primary"
-              variant="outline"
-              class="ml-auto"
-              :loading="saving"
-              :disabled="!dirty || !!problem"
-              @click="save"
-            >
-              保存
-            </UButton>
-          </div>
-        </div>
-      </SettingsBlock>
-    </template>
-
     <template #budget>
       <ExtractionBudget v-model:dirty="budgetDirty" :space-id="spaceId" :editable="isOwner" />
     </template>

@@ -77,7 +77,7 @@ async function importSpace() {
   const c = result.counts
   toast.add({
     title: `已导入「${result.name}」`,
-    description: `共导入 ${c.memories} 条记忆。导出人的个人画像层 ${c.ownerMemories} 条、私人层 ${c.privateMemories} 条记忆与 ${c.credentials} 条凭据归当前账号所有。请为应用重新签发访问密钥；向量在后台重新生成。`,
+    description: `共导入 ${c.memories} 条记忆。导出人的本人记忆 ${c.userMemories} 条与 ${c.credentials} 条凭据归当前账号所有。请为应用重新签发访问密钥；向量在后台重新生成。`,
     color: 'success',
   })
   // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员
@@ -145,8 +145,10 @@ async function importSpace() {
               个人格、{{ preview.counts.apps }} 个应用、{{ preview.counts.subjects }} 个联系人。
             </p>
             <p>
-              导入后，导出人的个人画像层 {{ preview.counts.ownerMemories }} 条、私人层
-              {{ preview.counts.privateMemories }} 条记忆，{{ preview.counts.credentials }} 条凭据与
+              导入后，导出人的本人记忆 {{ preview.counts.userMemories }} 条，{{
+                preview.counts.credentials
+              }}
+              条凭据与
               {{ preview.counts.providers }} 个凭据源，以及标记为导出人本人的
               {{ preview.counts.linkedSubjects }} 个联系人均归当前账号所有；个人画像层将进入当前账号
               Agent 的启动加载。仅导入本人导出、或导出人同意移交的文件。

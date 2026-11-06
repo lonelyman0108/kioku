@@ -43,7 +43,7 @@ const keyInfo = (over: Partial<KeyInfo> = {}): KeyInfo => {
   }
 }
 
-// 每种上下文只有一格不一样：只有基础层的公开这一格有权限，权限随上下文变
+// 每种上下文只有一格不一样：只有通用的公开这一格有权限，权限随上下文变
 const matrix: KeyAccessMatrix = {
   contexts: ACCESS_CONTEXTS.map((context, i) => ({
     context,
@@ -53,10 +53,10 @@ const matrix: KeyAccessMatrix = {
       cells: SENSITIVITIES.map((sensitivity) => ({
         sensitivity,
         read:
-          layer === 'base' && sensitivity === 'public'
+          layer === 'core' && sensitivity === 'public'
             ? (['recall', 'explicit', 'recall', 'explicit', 'none'] as const)[i]!
             : ('none' as const),
-        write: layer === 'base' && sensitivity === 'public' && i % 2 === 0,
+        write: layer === 'core' && sensitivity === 'public' && i % 2 === 0,
       })),
     })),
   })),
@@ -91,17 +91,17 @@ describe('权限范围', () => {
     expect(blocks).toHaveLength(ACCESS_CONTEXTS.length)
     const fill = (i: number, color: string) => blocks[i]!.includes(`fill:${color}`)
     // 能读能写是满色，只能按 URI 读取是实心，只写只有下沿的条
-    expect(fill(0, 'var(--access-base)')).toBe(true)
+    expect(fill(0, 'var(--access-core)')).toBe(true)
     expect(fill(1, 'var(--strata-explicit)')).toBe(true)
-    expect(fill(1, 'var(--access-base)')).toBe(false)
-    expect(fill(2, 'var(--access-base)')).toBe(true)
+    expect(fill(1, 'var(--access-core)')).toBe(false)
+    expect(fill(2, 'var(--access-core)')).toBe(true)
     expect(fill(3, 'var(--strata-explicit)')).toBe(true)
     expect(fill(4, 'var(--strata-explicit)')).toBe(false)
-    expect(fill(4, 'var(--access-base)')).toBe(true)
+    expect(fill(4, 'var(--access-core)')).toBe(true)
   })
 
   it('切到哪种上下文，矩阵就是接口给的那一份，来源范围也跟着变', async () => {
-    const title = `${layerLabels.base} ${sensitivityLabels.public}`
+    const title = `${layerLabels.core} ${sensitivityLabels.public}`
     for (const [i, c] of ACCESS_CONTEXTS.entries()) {
       const html = await render(c)
       expect(html, c).toContain(`title="${title}：${expected[i]}"`)

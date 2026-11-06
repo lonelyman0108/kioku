@@ -18,12 +18,12 @@ const entry: DreamRunEntry = {
 }
 
 describe('Dream 的范围', () => {
-  it('共享的层带名字，个人画像层与私人层只说层名，联系人与情节说是在哪里的对话里记下的', () => {
+  it('共享的归属带名字，本人只说归属名，联系人的事实与会话摘要说是在哪里的对话里记下的', () => {
     const base = { id: null, name: null, origin: null }
-    expect(dreamScopeText({ ...base, kind: 'base' })).toBe('基础层')
+    expect(dreamScopeText({ ...base, kind: 'core' })).toBe('通用')
     expect(dreamScopeText({ ...base, kind: 'persona', name: '豆包' })).toBe('人格「豆包」')
     expect(dreamScopeText({ ...base, kind: 'app' })).toBe('已删除的应用')
-    expect(dreamScopeText({ ...base, kind: 'private' })).toBe('私人层')
+    expect(dreamScopeText({ ...base, kind: 'user' })).toBe('本人')
     expect(
       dreamScopeText({
         ...base,

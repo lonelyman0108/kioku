@@ -421,7 +421,7 @@ export function acceptAgentDivergence(conversation: AgentConversation): AgentCon
   }
 }
 
-// turn.end 的请求体。契约要求带私聊、群聊或频道的上下文，群里要有发言人
+// turn.end 的请求体。群聊机器人发的带私聊、群聊或频道的上下文，群里要有发言人
 export function turnEndBody(
   context: SessionContextInput | undefined,
   user: string,
@@ -436,7 +436,8 @@ export function turnEndBody(
   }
 }
 
-// 页面上的会话上下文发不了 turn.end 的原因，能发时是 null。发不了就不发，轨迹里说明：规则按契约算，不另写一份
+// 页面上的会话上下文发不了 turn.end 的原因，能发时是 null。发不了就不发，轨迹里说明：带了上下文时规则按契约算，不另写一份；
+// 不带上下文的 turn.end 契约收（本机 Agent 只写会话摘要），但群聊机器人的对话总有上下文，这里照旧不发
 export function turnEndRefusal(
   context: SessionContextInput | undefined,
   body: unknown,

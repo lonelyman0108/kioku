@@ -7,7 +7,7 @@ export interface KeyPreset {
   scopes: KeyScopes
 }
 
-const shared: Layer[] = ['base', 'persona', 'app', 'subject', 'episode']
+const shared: Layer[] = ['core', 'persona', 'app', 'subject', 'episode']
 
 // 签发 Key 时的常用组合，与设计里的分层授权对应；高级模式可以逐项调整
 export const keyPresets: KeyPreset[] = [
@@ -41,7 +41,7 @@ export const keyPresets: KeyPreset[] = [
   },
 ]
 
-// 两组权限是否相同（层的先后不算）
+// 两组权限是否相同（归属的先后不算）
 export function sameScopes(a: KeyScopes, b: KeyScopes): boolean {
   const same = (x: Layer[], y: Layer[]) => x.length === y.length && x.every((l) => y.includes(l))
   return (

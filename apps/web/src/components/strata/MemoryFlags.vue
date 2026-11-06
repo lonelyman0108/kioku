@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import type { Layer, Sensitivity } from '@kioku/contracts'
 
-import { layerShortLabels } from '../../labels'
+import { layerLabels } from '../../labels'
 
 // 目录和列表一行末尾的标记：机密反白，优先级只标最高的两档，层写简称。
 // 色块旁边要有文字，放不下全名时靠这里的简称
@@ -21,7 +21,7 @@ defineProps<{
       :class="{ top: priority === 0 }"
       >P{{ priority }}</span
     >
-    <span v-if="layer" class="flag-layer">{{ layerShortLabels[layer] }}</span>
+    <span v-if="layer" class="flag-layer">{{ layerLabels[layer] }}</span>
   </span>
 </template>
 

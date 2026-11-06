@@ -36,16 +36,14 @@ export const suggestionKinds: Record<DreamSuggestionKind, { label: string; effec
 // 建议看的是哪一部分记忆
 export function dreamScopeText(scope: DreamScope): string {
   switch (scope.kind) {
-    case 'base':
-      return '基础层'
+    case 'core':
+      return '通用'
     case 'persona':
       return scope.name ? `人格「${scope.name}」` : '已删除的人格'
     case 'app':
       return scope.name ? `应用「${scope.name}」` : '已删除的应用'
-    case 'owner':
-      return '个人画像层'
-    case 'private':
-      return '私人层'
+    case 'user':
+      return '本人'
     case 'talk':
       return scope.origin ? `${originScopeText(scope.origin)}中记下的` : '对话中记下的'
   }

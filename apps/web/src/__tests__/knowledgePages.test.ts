@@ -72,7 +72,8 @@ describe('变更记录的一行', () => {
     id: 1,
     type: 'update',
     memoryId: '00000000-0000-4000-8000-000000000000',
-    uri: 'projects://atlas/release',
+    uri: 'user://projects/atlas/release',
+    title: '发布步骤',
     createdAt: new Date(2026, 9, 31, 7, 5).toISOString(),
     actor: { accountName: null, keyName: 'MacBook', appName: 'Claude Code' },
     changes: ['content', 'priority'],
@@ -89,7 +90,7 @@ describe('变更记录的一行', () => {
     const html = await entry()
     expect(html).toContain('Claude Code（MacBook）')
     expect(html).toContain('修改')
-    expect(html).toContain('projects://atlas/')
+    expect(html).toContain('user://projects/atlas/')
     expect(html).toContain('release')
     expect(html).toContain('正文、优先级')
     expect(html).toContain('07:05')

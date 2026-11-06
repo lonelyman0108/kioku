@@ -172,6 +172,7 @@ describe('这一步改了什么', () => {
         {
           type: 'update',
           uri: 'core://a',
+          title: 'a',
           fields: ['content', 'validTo', 'odd'],
           left: false,
           becameSecret: false,
@@ -190,7 +191,16 @@ describe('这一步改了什么', () => {
   it('改成 secret 时提示历史正文会被抹掉、向量会删', () => {
     const [item] = changeItems({
       ...noChanges,
-      memories: [{ type: 'update', uri: 'core://a', fields: [], left: false, becameSecret: true }],
+      memories: [
+        {
+          type: 'update',
+          uri: 'core://a',
+          title: 'a',
+          fields: [],
+          left: false,
+          becameSecret: true,
+        },
+      ],
     })
     expect(item!.warnings.join('')).toContain('历史中的正文将被抹除')
     expect(item!.warnings.join('')).toContain('向量将被删除')
@@ -199,7 +209,16 @@ describe('这一步改了什么', () => {
   it('改后看不到了：说明 URI 是改前的', () => {
     const [item] = changeItems({
       ...noChanges,
-      memories: [{ type: 'update', uri: 'core://a', fields: [], left: true, becameSecret: false }],
+      memories: [
+        {
+          type: 'update',
+          uri: 'core://a',
+          title: 'a',
+          fields: [],
+          left: true,
+          becameSecret: false,
+        },
+      ],
     })
     expect(item!.notes.join('')).toContain('修改前的 URI')
   })

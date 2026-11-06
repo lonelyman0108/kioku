@@ -508,7 +508,7 @@ describe('查询', () => {
 
   describe('权限范围什么时候失效', () => {
     const scopes = {
-      readLayers: ['base' as const],
+      readLayers: ['core' as const],
       writeLayers: [],
       maxSensitivity: 'internal' as const,
       admin: false,

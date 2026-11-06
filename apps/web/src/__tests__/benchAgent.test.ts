@@ -550,8 +550,8 @@ describe('chat 循环', () => {
 
   it.each([
     ['不带', undefined, '不带'],
-    ['定时任务', { chatType: 'cron' }, '只缓冲私聊、群聊与频道'],
-    ['子 agent', { chatType: 'subagent' }, '只缓冲私聊、群聊与频道'],
+    ['定时任务', { chatType: 'cron' }, '只缓冲私聊、群聊、频道与不带会话上下文的对话'],
+    ['子 agent', { chatType: 'subagent' }, '只缓冲私聊、群聊、频道与不带会话上下文的对话'],
     ['群聊没有发言人', { chatType: 'group', platform: 'bench', group: { id: 'g1' } }, '发言人'],
     ['频道没有发言人', { chatType: 'channel', platform: 'bench', group: { id: 'g1' } }, '发言人'],
     [

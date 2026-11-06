@@ -6,7 +6,7 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { bootUsage, simulatorState } from '../apps'
-import { layerShortLabels } from '../labels'
+import { layerLabels } from '../labels'
 import { memoryRoute } from '../routes'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -156,7 +156,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             <RouterLink :to="memoryLink(entry.uri)" class="boot-uri">
               <UriPath :uri="entry.uri" />
             </RouterLink>
-            <span class="boot-layer">{{ layerShortLabels[entry.layer] }}</span>
+            <span class="boot-layer">{{ layerLabels[entry.layer] }}</span>
             <span class="boot-chars">{{ entry.chars.toLocaleString() }}</span>
           </li>
         </ul>
@@ -198,7 +198,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
               <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri">
                 <UriPath :uri="candidate.uri" />
               </RouterLink>
-              <span class="boot-layer">{{ layerShortLabels[candidate.layer] }}</span>
+              <span class="boot-layer">{{ layerLabels[candidate.layer] }}</span>
               <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>
             </li>
           </ul>

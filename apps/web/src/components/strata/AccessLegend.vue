@@ -14,7 +14,7 @@ const HEIGHT = 18
       <svg :width="WIDTH" :height="HEIGHT" :viewBox="`0 0 ${WIDTH} ${HEIGHT}`" aria-hidden="true">
         <rect
           v-for="(r, k) in paintAccess(
-            'private',
+            'core',
             'public',
             kind,
             { x: 0, y: 0, width: WIDTH, height: HEIGHT },

@@ -1,27 +1,20 @@
 <script setup lang="ts">
-import {
-  PLAIN_LAYERS,
-  URI_PATTERN,
-  type ConsoleMemoryView,
-  type PlainLayer,
-} from '@kioku/contracts'
+import { URI_PATTERN, type ConsoleMemoryView } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import { layerOfUri } from '../coordinates'
 import { layerLabels } from '../labels'
 import NoteLine from './strata/NoteLine.vue'
-import SwatchOptions from './strata/SwatchOptions.vue'
 
 const props = defineProps<{ spaceId: string; memory: ConsoleMemoryView }>()
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ done: [memory: ConsoleMemoryView, from: string] }>()
 const queryClient = useQueryClient()
 
-const isPlain = (layer: string): layer is PlainLayer =>
-  (PLAIN_LAYERS as readonly string[]).includes(layer)
-const form = reactive({ uri: '', layer: 'private' as PlainLayer })
+const form = reactive({ uri: '' })
 const error = ref<string | null>(null)
 const saving = ref(false)
 
@@ -32,7 +25,6 @@ watch(open, (value) => {
   if (!value) return
   origin.value = props.memory
   form.uri = props.memory.uri
-  form.layer = isPlain(props.memory.layer) ? props.memory.layer : 'private'
   error.value = null
 })
 // 打开之后这条记忆变了：要关掉重新打开，看过新的那一版再操作
@@ -42,34 +34,16 @@ const stale = computed(
     (props.memory.id !== origin.value.id || props.memory.version !== origin.value.version),
 )
 
-const domain = computed(() => form.uri.split('://')[0] ?? '')
-// persona:// 与 app:// 下的层由 URI 决定；对象层与情节层来自对话，不能改层
-const namespaced = computed(() => domain.value === 'persona' || domain.value === 'app')
-const fromConversation = computed(
-  () => origin.value.layer === 'subject' || origin.value.layer === 'episode',
-)
-const canPickLayer = computed(() => !namespaced.value && !fromConversation.value)
+// 归属由坐标的开头决定
+const newLayer = computed(() => layerOfUri(form.uri))
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
-const layerOptions = computed(() =>
-  PLAIN_LAYERS.map((value) => ({
-    value,
-    label: layerLabels[value],
-    layer: value,
-    sensitivity: origin.value.sensitivity,
-  })),
-)
-// 只在真的换层时才带上 layer：从人格或应用的命名空间移出时必须给，普通 domain 之间没改就不带
-const newLayer = computed(() =>
-  canPickLayer.value && form.layer !== origin.value.layer ? form.layer : null,
-)
-const changed = computed(() => form.uri !== origin.value.uri || newLayer.value !== null)
+const changed = computed(() => form.uri !== origin.value.uri)
 
-// 在共享的层与个人的层之间转换会改变谁看得到它，提醒一句
-const personal = (layer: string) => layer === 'owner' || layer === 'private'
-const crossing = computed(() => {
-  const to = namespaced.value ? domain.value : (newLayer.value ?? origin.value.layer)
-  return personal(to) !== personal(origin.value.layer)
-})
+// 在共享的归属与本人之间转换会改变谁看得到它，提醒一句
+const personal = (layer: string | null) => layer === 'user'
+const crossing = computed(
+  () => !!newLayer.value && personal(newLayer.value) !== personal(origin.value.layer),
+)
 
 async function submit() {
   if (!uriValid.value || !changed.value || stale.value) return
@@ -79,15 +53,7 @@ async function submit() {
   // 带上打开时那一版的 id 与版本号：期间被改过、或删除后在同一个 URI 重建了，返回 409，不会动到别的记忆
   const expected = { expectedId: m.id, expectedVersion: m.version }
   try {
-    const result =
-      form.uri === m.uri
-        ? await api.updateMemory(props.spaceId, { uri: m.uri, ...expected, layer: form.layer })
-        : await api.moveMemory(props.spaceId, {
-            from: m.uri,
-            to: form.uri,
-            ...expected,
-            ...(newLayer.value ? { layer: newLayer.value } : {}),
-          })
+    const result = await api.moveMemory(props.spaceId, { from: m.uri, to: form.uri, ...expected })
     open.value = false
     emit('done', result, m.uri)
   } catch (err) {
@@ -114,23 +80,7 @@ async function submit() {
         <UFormField label="URI" help="修改 URI 即移动；不修改则只改层">
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
         </UFormField>
-        <UFormField
-          v-if="canPickLayer"
-          label="层"
-          :help="
-            origin.layer === 'persona' || origin.layer === 'app'
-              ? '移出人格或应用的命名空间时，需选择新的层'
-              : undefined
-          "
-        >
-          <SwatchOptions v-model="form.layer" label="层" :options="layerOptions" />
-        </UFormField>
-        <p v-else-if="namespaced" class="text-sm text-muted">
-          移到 {{ domain }}:// 下，层由 URI 决定：{{ domain === 'persona' ? '人格层' : '应用层' }}。
-        </p>
-        <p v-else class="text-sm text-muted">
-          {{ layerLabels[origin.layer] }}层的记忆来自对话，只能改 URI，不能改层。
-        </p>
+        <p v-if="newLayer" class="text-sm text-muted">{{ layerLabels[newLayer] }}</p>
         <NoteLine v-if="crossing" tone="warning">
           可见范围将改变
           <template #detail>

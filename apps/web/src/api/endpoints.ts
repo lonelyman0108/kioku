@@ -26,7 +26,6 @@ import {
   DeletedCredentialList,
   DeletedCredentialProviderList,
   DeletedMemoryList,
-  DomainLayers,
   DreamApplied,
   DreamMemberSettings,
   DreamQueued,
@@ -88,7 +87,6 @@ import {
   type LoreImportPlanRequest,
   type MemoryListQuery,
   type MoveMemoryRequest,
-  type PlainLayer,
   type PlaintextIgnoreRequest,
   type ReactivateRequest,
   type RestoreRequest,
@@ -398,17 +396,10 @@ export const api = {
     }),
   activity: (spaceId: string, cursor?: string) =>
     request('GET', `/spaces/${spaceId}/activity`, { query: { cursor }, schema: ActivityList }),
-  domainLayers: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/domain-layers`, { schema: DomainLayers }),
   extractionBudget: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/extraction-budget`, { schema: ExtractionUsage }),
   saveExtractionBudget: (spaceId: string, body: ExtractionBudget) =>
     request('PUT', `/spaces/${spaceId}/extraction-budget`, { body, schema: ExtractionUsage }),
-  saveDomainLayers: (spaceId: string, defaults: Record<string, PlainLayer>) =>
-    request('PUT', `/spaces/${spaceId}/domain-layers`, {
-      body: { defaults },
-      schema: DomainLayers,
-    }),
   // 导出文件是用口令加密的二进制文件，整个下载下来交给浏览器保存
   exportSpace: (spaceId: string, passphrase: string) =>
     download('POST', `/spaces/${spaceId}/export`, { passphrase }),

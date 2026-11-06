@@ -7,6 +7,7 @@ import { inheritedGroups, lostFromBoot, personaRows } from '../personas'
 
 const node = (uri: string, priority: number, overriddenBy: string | null = null): PersonaNode => ({
   uri,
+  title: uri.split('/').pop()!,
   personaId: '00000000-0000-4000-8000-000000000000',
   priority,
   sensitivity: 'public',
@@ -134,20 +135,20 @@ describe('继承来的节点按祖先分组', () => {
 
 describe('两组 Key 权限是否相同', () => {
   const scopes = {
-    readLayers: ['base', 'private'] as const,
-    writeLayers: ['private'] as const,
+    readLayers: ['core', 'user'] as const,
+    writeLayers: ['user'] as const,
     maxSensitivity: 'private' as const,
     admin: false,
   }
-  it('层的先后不算', () => {
+  it('归属的先后不算', () => {
     expect(
       sameScopes(
-        { ...scopes, readLayers: ['base', 'private'], writeLayers: ['private'] },
-        { ...scopes, readLayers: ['private', 'base'], writeLayers: ['private'] },
+        { ...scopes, readLayers: ['core', 'user'], writeLayers: ['user'] },
+        { ...scopes, readLayers: ['user', 'core'], writeLayers: ['user'] },
       ),
     ).toBe(true)
   })
-  it('敏感级、admin 或层不同就不同', () => {
+  it('敏感级、admin 或归属不同就不同', () => {
     const base = {
       ...scopes,
       readLayers: [...scopes.readLayers],

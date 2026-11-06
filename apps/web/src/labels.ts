@@ -10,7 +10,6 @@ import {
   type EventActor,
   type KeyAccessMatrix,
   type KeyScopes,
-  type Layer,
   type OriginScope,
   type Provenance,
   type ReadDenial,
@@ -20,17 +19,6 @@ import {
 import { icons } from './icons'
 
 export const layerLabels = LAYER_NAMES
-
-// 目录与列表里放不下全名时用的简称
-export const layerShortLabels: Record<Layer, string> = {
-  base: '基础',
-  persona: '人格',
-  app: '应用',
-  owner: '画像',
-  private: '私人',
-  subject: '联系人',
-  episode: '情节',
-}
 
 export const sensitivityLabels = SENSITIVITY_NAMES
 
@@ -91,9 +79,6 @@ export const readDenialLabels: Record<ReadDenial, string> = {
 
 // 表单上的 URI 格式提示。契约里那句是给接口与 MCP 的，中英并列；界面上只说中文
 export const URI_FORMAT_HINT = 'URI 格式应为 分区://路径，例如 core://agent'
-
-// 按 URI 直接新建时可选的层：persona:// 与 app:// 由 URI 决定，联系人层与情节层由对话抽取写入
-export const creatableLayers: Layer[] = ['base', 'owner', 'private']
 
 export const provenanceLabels: Record<Provenance, string> = {
   owner: '本人',

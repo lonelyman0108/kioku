@@ -259,9 +259,9 @@ const keywordIndex = computed(() =>
   glossary.data.value ? buildKeywordIndex(glossary.data.value.entries) : null,
 )
 
-// 凭据占位符按记忆的主人解析，而只有私人层的记忆能引用凭据：读得到的私人层记忆就是自己的，
-// 拿自己的凭据来画徽章；别的层不解析
-const ownsCredentials = computed(() => base.value?.layer === 'private')
+// 凭据占位符按记忆的所有者解析，而只有本人的记忆能引用凭据：读得到的本人记忆就是自己的，
+// 拿自己的凭据来画徽章；别的归属不解析
+const ownsCredentials = computed(() => base.value?.layer === 'user')
 const credentials = useQuery({
   queryKey: computed(() => ['credentials', props.spaceId] as const),
   queryFn: ({ queryKey: [, spaceId] }) => api.credentials(spaceId),
@@ -288,7 +288,7 @@ function openCredential(id: string) {
   void router.push({ name: 'credentials', params: { spaceId: props.spaceId }, query: { id } })
 }
 
-// 插入凭据引用：服务端只收私人层、敏感级至少 private 的记忆里的占位符
+// 插入凭据引用：服务端只收本人、敏感级至少 private 的记忆里的占位符
 const canReference = computed(
   () => !!base.value && placeholderAllowed(base.value.layer, form.sensitivity),
 )

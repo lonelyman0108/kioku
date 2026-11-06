@@ -44,7 +44,8 @@ describe('记忆树', () => {
           uri: 'core://agent',
           exists: true,
           id: 'a',
-          layer: 'base',
+          title: '工作流约束',
+          layer: 'core',
           sensitivity: 'public',
           priority: 0,
           disclosure: null,
@@ -54,7 +55,8 @@ describe('记忆树', () => {
           uri: 'core://soul',
           exists: true,
           id: 'b',
-          layer: 'base',
+          title: 'soul',
+          layer: 'core',
           sensitivity: 'public',
           priority: 0,
           disclosure: null,
@@ -64,6 +66,7 @@ describe('记忆树', () => {
           uri: 'core://notes',
           exists: false,
           id: null,
+          title: null,
           layer: null,
           sensitivity: null,
           priority: null,
@@ -78,9 +81,9 @@ describe('记忆树', () => {
       ['notes', false, 1, 1],
     ])
     expect(items[2]!.exists).toBe(false)
-    // 层、敏感级与 priority 带到节点上，树里标出来
+    // 归属、敏感级与 priority 带到节点上，树里标出来
     expect([items[0]!.layer, items[0]!.sensitivity, items[0]!.priority]).toEqual([
-      'base',
+      'core',
       'public',
       0,
     ])
@@ -93,10 +96,11 @@ describe('记忆树', () => {
       truncated: true,
       children: [
         {
-          uri: 'bulk://a',
+          uri: 'core://a',
           exists: true,
           id: '00000000-0000-4000-8000-000000000001',
-          layer: 'base',
+          title: 'a',
+          layer: 'core',
           sensitivity: 'public',
           priority: 2,
           disclosure: null,
