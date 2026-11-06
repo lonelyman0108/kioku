@@ -1,45 +1,56 @@
 <script setup lang="ts">
 import type { PersonaDetail, PersonaNode } from '@kioku/contracts'
-import { computed } from 'vue'
+import { computed, ref } from 'vue'
 
-import { useCopy } from '../composables/useCopy'
-import { icons } from '../icons'
 import { sensitivityLabels } from '../labels'
 import { overriddenNode } from '../memoryDetail'
 import { inheritedGroups, lostFromBoot } from '../personas'
 import { memoryRoute } from '../routes'
 import Hint from './Hint.vue'
+import CoordinateLine from './strata/CoordinateLine.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataStrip from './strata/StrataStrip.vue'
-import UriPath from './strata/UriPath.vue'
 
+// 记忆目录里选中一个人格时右边的内容：它的设置（继承关系、用它的应用）和记忆。
+// 自己的记忆照常列出；继承来的灰显，按来自哪个祖先分组，被覆盖的标出被哪条覆盖
 const props = defineProps<{
   spaceId: string
   persona: PersonaDetail
   canEdit: boolean
+  canWrite: boolean
 }>()
-defineEmits<{ edit: []; remove: []; open: [personaId: string] }>()
+defineEmits<{
+  edit: []
+  remove: []
+  create: []
+  open: [personaId: string]
+  openApp: [appId: string]
+}>()
 
-const copy = useCopy()
-const rootUri = computed(() => `persona://${props.persona.slug}/`)
+const head = computed(() => `persona://${props.persona.slug}/`)
 const nodes = computed(() => [...props.persona.own, ...props.persona.inherited])
-// 被覆盖、而覆盖它的那条进不了启动上下文：会话开始时这个路径就没有了，提示一下
+// 被覆盖、而覆盖它的那条进不了启动加载：会话开始时这个路径就没有了，提示一下
 const lost = (node: PersonaNode) => lostFromBoot(node, nodes.value)
 const groups = computed(() => inheritedGroups(props.persona))
 const overrides = (uri: string) => overriddenNode(props.persona, uri)
+const titleOf = (uri: string) => nodes.value.find((n) => n.uri === uri)?.title ?? uri
 
-// 删除人格会把它的人格层记忆连带硬删除，有引用时服务端会拒绝，界面先把原因列出来
+// 删除人格会把它的记忆连带硬删除，有引用时服务端会拒绝，界面先把原因列出来
 const blockers = computed(() =>
   [
     props.persona.apps.length ? `${props.persona.apps.length} 个应用将其设为默认人格` : '',
     props.persona.children.length ? `${props.persona.children.length} 个人格继承此人格` : '',
     props.persona.storedMemories
-      ? `仍有 ${props.persona.storedMemories} 条人格层记忆（含已删除）`
+      ? `仍有 ${props.persona.storedMemories} 条这个人格的记忆（含已删除）`
       : '',
   ].filter(Boolean),
 )
 const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
+
+// 窄屏上打开之后，页面把焦点放到标题
+const titleEl = ref<HTMLElement | null>(null)
+defineExpose({ focusTitle: () => titleEl.value?.focus() })
 </script>
 
 <template>
@@ -47,25 +58,18 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
     <StrataStrip layer="persona" sensitivity="public" />
     <header class="detail-head">
       <div class="detail-nav"><slot name="nav" /></div>
-      <h1>{{ persona.name }}</h1>
-      <div class="detail-uri">
-        <span>{{ rootUri }}</span>
-        <UButton
-          :icon="icons.copy"
-          size="xs"
-          color="neutral"
-          variant="ghost"
-          aria-label="复制 URI"
-          @click="copy(rootUri)"
-        />
-      </div>
+      <h1 ref="titleEl" tabindex="-1">{{ persona.name }}</h1>
       <p v-if="persona.description" class="detail-description">{{ persona.description }}</p>
       <p v-if="canEdit && blockers.length" class="detail-blocked">
         无法删除：{{ blockers.join('；') }}
       </p>
-      <div v-if="canEdit" class="detail-actions">
-        <UButton size="sm" @click="$emit('edit')">修改</UButton>
+      <div v-if="canWrite || canEdit" class="detail-actions">
+        <UButton v-if="canWrite" size="sm" @click="$emit('create')">新建记忆</UButton>
+        <UButton v-if="canEdit" size="sm" color="primary" variant="outline" @click="$emit('edit')">
+          修改人格
+        </UButton>
         <UButton
+          v-if="canEdit"
           size="sm"
           color="error"
           variant="outline"
@@ -82,7 +86,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         <!-- 使用方放的状态提示，比如后台刷新失败：放在节点上面，读到的内容照常显示 -->
         <slot name="notice" />
         <section>
-          <SectionHeading title="自己的节点">
+          <SectionHeading title="自己的记忆">
             <template #actions>
               <b class="count">{{ persona.own.length }}</b>
             </template>
@@ -92,6 +96,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
               <MemoryRow
                 flush
                 :uri="node.uri"
+                :title="node.title"
                 layer="persona"
                 :sensitivity="node.sensitivity"
                 :to="memoryLink(node.uri)"
@@ -104,22 +109,19 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
                 </template>
                 <span v-if="node.disclosure" class="block">{{ node.disclosure }}</span>
                 <span v-if="overrides(node.uri)" class="block">
-                  覆盖「{{ overrides(node.uri)!.persona }}」的同名节点
+                  覆盖「{{ overrides(node.uri)!.persona }}」的同名记忆
                 </span>
               </MemoryRow>
             </li>
           </ul>
-          <p v-else class="empty">
-            暂无节点。设定写在 <code>{{ rootUri }}</code> 下的记忆中。
-          </p>
+          <p v-else class="empty">暂无记忆</p>
         </section>
 
         <section v-if="persona.ancestors.length">
-          <SectionHeading title="继承来的节点">
+          <SectionHeading title="继承来的记忆">
             <template #hint>
               <Hint>
-                相同相对路径上，继承链中更近的人格节点覆盖祖先节点。被覆盖的节点不进入启动加载与召回，仍可按
-                URI 读取。
+                相同相对路径上，继承链中更近的人格覆盖祖先的记忆。被覆盖的不进入启动加载与召回，仍可按坐标读取。在当前人格的同一位置写一条同标识的记忆即可覆盖。
               </Hint>
             </template>
             <template #actions>
@@ -128,13 +130,15 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
           </SectionHeading>
           <template v-if="groups.length">
             <div v-for="group in groups" :key="group.id">
-              <h3 class="group-name">来自 {{ group.name }}</h3>
+              <h3 class="group-name">继承自 {{ group.name }}</h3>
               <ul>
                 <li v-for="node in group.nodes" :key="node.uri">
                   <MemoryRow
                     flush
+                    class="inherited"
                     :class="{ overridden: node.overriddenBy }"
                     :uri="node.uri"
+                    :title="node.title"
                     layer="persona"
                     :sensitivity="node.sensitivity"
                     :to="memoryLink(node.uri)"
@@ -148,22 +152,22 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
                     <span v-if="node.overriddenBy" class="node-by">
                       已被
                       <RouterLink :to="memoryLink(node.overriddenBy)">
-                        <UriPath :uri="node.overriddenBy" />
+                        「{{ titleOf(node.overriddenBy) }}」
                       </RouterLink>
                       覆盖
                     </span>
                     <span v-else-if="node.disclosure" class="block">{{ node.disclosure }}</span>
                     <span v-if="lost(node)" class="block text-warning">
-                      此节点本应进入启动加载，但覆盖它的节点优先级为 P{{
+                      此记忆本应进入启动加载，但覆盖它的记忆优先级为 P{{
                         lost(node)
-                      }}，无法进入启动加载，会话开始时此路径将缺失。
+                      }}，无法进入启动加载，会话开始时此位置将缺失。
                     </span>
                   </MemoryRow>
                 </li>
               </ul>
             </div>
           </template>
-          <p v-else class="empty">祖先人格暂无节点</p>
+          <p v-else class="empty">祖先人格暂无记忆</p>
         </section>
       </div>
 
@@ -204,19 +208,18 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
           <SectionHeading title="使用此人格的应用" />
           <ul v-if="persona.apps.length">
             <li v-for="app in persona.apps" :key="app.id" class="side-row">
-              <RouterLink
-                :to="{ name: 'app', params: { spaceId, appId: app.id } }"
-                class="side-name link"
-              >
+              <button type="button" class="side-name link" @click="$emit('openApp', app.id)">
                 {{ app.name }}
-              </RouterLink>
-              <span class="side-code">app://{{ app.slug }}</span>
+              </button>
+              <span class="side-code">{{ app.slug }}</span>
             </li>
           </ul>
           <p v-else class="side-empty">暂无应用将其设为默认人格</p>
         </section>
       </aside>
     </div>
+
+    <CoordinateLine :value="head" label="坐标开头" />
   </article>
 </template>
 
@@ -247,15 +250,8 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
   line-height: 1.4;
   overflow-wrap: anywhere;
 }
-.detail-uri {
-  display: flex;
-  align-items: center;
-  gap: 6px;
-  min-height: 26px;
-  font-family: var(--font-mono);
-  font-size: 14px;
-  color: var(--ui-text-muted);
-  overflow-wrap: anywhere;
+h1:focus {
+  outline: 0;
 }
 .detail-description {
   margin-top: 5px;
@@ -325,15 +321,20 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
   font-weight: 500;
   text-align: right;
 }
+/* 继承来的灰显：名字退一级灰度，色块淡一点；被覆盖的再划掉 */
+.inherited :deep(.row-swatch) {
+  opacity: 0.6;
+}
+.inherited :deep(.row-link) {
+  color: var(--ui-text-muted);
+}
 .overridden :deep(.row-swatch) {
-  opacity: 0.5;
+  opacity: 0.4;
 }
 .overridden :deep(.row-link) {
-  --uri-parent: var(--ui-text-dimmed);
   color: var(--ui-text-dimmed);
 }
-.overridden :deep(.row-link .uri-parent),
-.overridden :deep(.row-link .uri-leaf) {
+.overridden :deep(.row-title) {
   text-decoration: line-through;
 }
 .node-by {

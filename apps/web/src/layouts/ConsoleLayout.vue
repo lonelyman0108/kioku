@@ -69,7 +69,7 @@ function switchSpace(id: string) {
   void router.push({ name: 'overview', params: { spaceId: id } })
 }
 
-// 测试台只给应用主人（会读到主人的私人层）：这个空间里没有自己的应用时不显示入口，后端同样拒绝
+// 测试台只给应用所有者（会读到所有者的本人记忆）：这个空间里没有自己的应用时不显示入口，后端同样拒绝
 const apps = useQuery({
   queryKey: computed(() => ['apps', space.value?.id] as const),
   queryFn: ({ queryKey: [, id] }) => api.apps(id!),
@@ -95,7 +95,10 @@ const inboxBadge = computed(() =>
     : undefined,
 )
 
-// 顶部导航按用途分组。路由名和路径不变，入口的名字按术语表
+// 联系人详情也算在「对话」下面
+const CONVERSATION_ROUTES = ['conversations', 'contact']
+
+// 顶部导航按用途分组：人格与应用的记忆在「记忆」的目录里，联系人在「对话」里，不再单独成组。入口的名字按术语表
 const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
   const id = space.value?.id
   if (!id) return []
@@ -110,15 +113,9 @@ const navGroups = computed<{ title?: string; items: NavItem[] }[]>(() => {
       items: [
         { label: '概览', ...link('overview', icons.overview) },
         { label: '记忆', ...link('memories', icons.memories) },
-        { label: '待处理', ...link('inbox', icons.review), count: inboxBadge.value },
-      ],
-    },
-    {
-      title: '知识',
-      items: [
-        { label: '人格', ...link('personas', icons.personas) },
-        { label: '联系人', ...link('subjects', icons.subjects, ['subjects', 'subject']) },
+        { label: '对话', ...link('conversations', icons.conversations, CONVERSATION_ROUTES) },
         { label: '凭据', ...link('credentials', icons.credentials) },
+        { label: '待处理', ...link('inbox', icons.review), count: inboxBadge.value },
       ],
     },
     {

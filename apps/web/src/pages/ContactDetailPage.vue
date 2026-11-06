@@ -1,11 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type {
-  ExtractionRunInfo,
-  SubjectFact,
-  SupersededFact,
-  UpdateSubjectRequest,
-} from '@kioku/contracts'
+import type { SubjectFact, SupersededFact, UpdateSubjectRequest } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -20,6 +15,13 @@ import StrataStrip from '../components/strata/StrataStrip.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
+import {
+  conversationRoute,
+  conversationSubline,
+  conversationTitle,
+  heardFrom,
+  runCounts,
+} from '../conversations'
 import { icons } from '../icons'
 import { originScopeText, provenanceLabels } from '../labels'
 import { refreshSubjectCaches as refreshCaches } from '../subjectQueries'
@@ -174,17 +176,12 @@ async function merge() {
   }
 }
 
-// 一批抽取的结果：只列不为零的几项
-function runCounts(run: ExtractionRunInfo): string {
-  const parts = [`${run.turns} 轮`]
-  if (run.added) parts.push(`新增 ${run.added}`)
-  if (run.updated) parts.push(`更新 ${run.updated}`)
-  if (run.unchanged) parts.push(`已有 ${run.unchanged}`)
-  if (run.dropped) parts.push(`丢弃 ${run.dropped}`)
-  if (run.limited) parts.push(`超出每日上限 ${run.limited}`)
-  if (run.skippedTurns) parts.push(`${run.skippedTurns} 轮的访问密钥已失效`)
-  return parts.join(' · ')
-}
+// 对话页的联系人分页：面包屑与「返回」都回到那里
+const contactsRoute = computed(() => ({
+  name: 'conversations',
+  params: { spaceId: spaceId.value },
+  query: { tab: 'contacts' },
+}))
 </script>
 
 <template>
@@ -201,9 +198,7 @@ function runCounts(run: ExtractionRunInfo): string {
       v-else-if="!data || (subject.isError.value && !retryable(subject.error.value))"
       class="page-note"
     >
-      <RouterLink :to="{ name: 'subjects', params: { spaceId } }" class="back-link">
-        返回联系人列表
-      </RouterLink>
+      <RouterLink :to="contactsRoute" class="back-link"> 返回联系人列表 </RouterLink>
       <ReadFailureNote class="mt-3" :query="subject" />
     </div>
     <template v-else>
@@ -211,7 +206,7 @@ function runCounts(run: ExtractionRunInfo): string {
       <header class="subject-head">
         <div class="min-w-0">
           <nav class="crumbs" aria-label="路径">
-            <RouterLink :to="{ name: 'subjects', params: { spaceId } }">联系人</RouterLink>
+            <RouterLink :to="contactsRoute">联系人</RouterLink>
             <i aria-hidden="true">›</i>
             <span>{{ data.kind === 'group' ? '群' : '人' }}</span>
           </nav>
@@ -318,7 +313,7 @@ function runCounts(run: ExtractionRunInfo): string {
               </div>
               <p class="row-note">
                 标记后，当前账号的应用会将此人的私聊视为本人对话。<Hint>
-                  开启「本人私聊时读取画像」的应用还可读取当前账号的个人画像。只能标记为当前账号。
+                  开启「本人私聊时读取本人记忆」的应用还可读取当前账号的本人记忆（内部及以下）。只能标记为当前账号。
                 </Hint>
               </p>
             </div>
@@ -411,7 +406,7 @@ function runCounts(run: ExtractionRunInfo): string {
           </section>
         </div>
 
-        <!-- 记下了什么：事实、摘要与抽取记录 -->
+        <!-- 记下了什么：事实、参与的会话与抽取记录 -->
         <div class="subject-main">
           <section>
             <SectionHeading :title="`记下的事实（${data.factCount}）`">
@@ -428,7 +423,14 @@ function runCounts(run: ExtractionRunInfo): string {
                 <div class="entry-body">
                   <p class="entry-text">{{ fact.content }}</p>
                   <p class="entry-meta">
-                    <span>{{ originScopeText(fact.scope) }}</span>
+                    <RouterLink
+                      v-if="fact.conversationId"
+                      :to="conversationRoute(spaceId, fact.conversationId)"
+                      class="entry-link"
+                    >
+                      {{ heardFrom(fact.scope) }}
+                    </RouterLink>
+                    <span v-else>{{ heardFrom(fact.scope) }}</span>
                     <span>{{ provenanceLabels[fact.provenance] }}</span>
                     <time :datetime="fact.updatedAt" :title="formatTime(fact.updatedAt)">
                       {{ formatRelative(fact.updatedAt) }}
@@ -464,7 +466,7 @@ function runCounts(run: ExtractionRunInfo): string {
                     已被「{{ fact.supersededBy }}」取代
                   </p>
                   <p class="entry-meta">
-                    <span>{{ originScopeText(fact.scope) }}</span>
+                    <span>{{ heardFrom(fact.scope) }}</span>
                     <span>{{ provenanceLabels[fact.provenance] }}</span>
                     <span>
                       被取代于
@@ -489,21 +491,36 @@ function runCounts(run: ExtractionRunInfo): string {
             </ul>
           </section>
 
-          <section v-if="data.summaries.length">
-            <SectionHeading :title="data.kind === 'group' ? '群聊的会话摘要' : '私聊的会话摘要'">
+          <section>
+            <SectionHeading :title="`参与的会话（${data.conversations.length}）`">
+              <template #hint>
+                <Hint>
+                  {{
+                    data.kind === 'group'
+                      ? '在这个群里的会话。'
+                      : '和此人的私聊，以及此人说过话的群。'
+                  }}会话摘要在会话详情中查看。
+                </Hint>
+              </template>
               <template #actions>
                 <StrataSwatch layer="episode" plain label="layer" />
               </template>
             </SectionHeading>
-            <ul>
-              <li v-for="summary in data.summaries" :key="summary.id" class="entry-row">
+            <p v-if="!data.conversations.length" class="empty">暂无会话</p>
+            <ul v-else>
+              <li v-for="c in data.conversations" :key="c.id" class="entry-row">
                 <div class="entry-body">
-                  <p class="entry-text">{{ summary.content }}</p>
+                  <p>
+                    <RouterLink :to="conversationRoute(spaceId, c.id)" class="entry-link">
+                      {{ conversationTitle(c) }}
+                    </RouterLink>
+                  </p>
                   <p class="entry-meta">
-                    <time :datetime="summary.createdAt" :title="formatTime(summary.createdAt)">
-                      {{ formatRelative(summary.createdAt) }}
+                    <span>{{ conversationSubline(c) }}</span>
+                    <span>摘要 {{ c.summaryCount }} 段</span>
+                    <time :datetime="c.lastActiveAt" :title="formatTime(c.lastActiveAt)">
+                      {{ formatRelative(c.lastActiveAt) }}
                     </time>
-                    <span v-if="summary.expiresAt"> {{ formatTime(summary.expiresAt) }} 到期 </span>
                   </p>
                 </div>
               </li>
@@ -521,7 +538,14 @@ function runCounts(run: ExtractionRunInfo): string {
                       {{ formatShort(run.createdAt) }}
                     </time>
                     <span class="text-default">{{ run.app?.name ?? '已删除的应用' }}</span>
-                    <span>{{ originScopeText(run.scope) }}</span>
+                    <RouterLink
+                      v-if="run.conversationId"
+                      :to="conversationRoute(spaceId, run.conversationId)"
+                      class="entry-link"
+                    >
+                      {{ originScopeText(run.scope) }}
+                    </RouterLink>
+                    <span v-else>{{ originScopeText(run.scope) }}</span>
                     <span v-if="run.summaryOnly" class="text-warning">预算已用完，仅写入摘要</span>
                     <span v-else-if="run.summarized">已写入摘要</span>
                   </p>
@@ -762,6 +786,16 @@ function runCounts(run: ExtractionRunInfo): string {
 }
 .text-default {
   color: var(--ui-text);
+}
+.entry-link {
+  color: inherit;
+  text-decoration: underline;
+  text-decoration-color: color-mix(in srgb, currentColor 70%, transparent);
+  text-underline-offset: 3px;
+}
+.entry-link:hover {
+  color: var(--ui-text-highlighted);
+  text-decoration-color: currentColor;
 }
 
 /* 窄屏放不下两栏：上下排 */

@@ -57,8 +57,8 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
         <ul v-else class="event-hits">
           <li v-for="hit in event.hits" :key="hit.rank">
             <span class="hit-score">{{ hit.score.toFixed(2) }}</span>
-            <RouterLink v-if="hit.uri" :to="memoryLink(hit.uri)" class="hit-uri">
-              {{ hit.uri }}
+            <RouterLink v-if="hit.uri" :to="memoryLink(hit.uri)" class="hit-uri" :title="hit.uri">
+              {{ hit.title ?? hit.uri }}
             </RouterLink>
             <span v-else class="event-miss">（当前不可见）</span>
           </li>

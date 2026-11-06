@@ -369,7 +369,8 @@ REST 的错误一律是 `{ error }` 的 JSON：`/v1` 下没有的路径或方法
 
 | 运行时 | 系统提示 | 每条用户消息 | 工具 | 回复后 |
 |---|---|---|---|---|
-| `claudecode`、`codex` | 带 `session.start` 的结果 | 先发 `prompt.submit`，召回块附在这条消息上，留在历史 | 真实的 `tools/list` | 不发 `turn.end` |
+| `claudecode` | 带 `session.start` 的结果 | 先发 `prompt.submit`，召回块附在这条消息上，留在历史 | 真实的 `tools/list` | 发不带会话上下文的 `turn.end`（和插件一样，用来写会话摘要；回滚模式下进重放） |
+| `codex` | 带 `session.start` 的结果 | 先发 `prompt.submit`，召回块附在这条消息上，留在历史 | 真实的 `tools/list` | 不发 `turn.end` |
 | `astrbot` | 带 `session.start` 的结果 | 先发 `prompt.submit`，召回块只附在这一轮的请求上，不留在历史 | 不给（6.3 节） | 发 `turn.end`（回滚模式下进重放） |
 | `mcp` | 不带 | 不发 `prompt.submit` | 真实的 `tools/list`，`kioku_boot` 由模型自己调 | 不发 `turn.end` |
 

@@ -392,6 +392,16 @@ describe('发出去的步骤', () => {
     })
   })
 
+  it('不带上下文的 turn.end 照发：和 Claude Code 的插件一样，契约也收', () => {
+    const step = stepOf(buildWith('turn.end', { user: '问', reply: '答' }, undefined))
+    expect(step).toEqual({
+      kind: 'lifecycle',
+      body: { event: 'turn.end', sessionId: 'bench-session', user: '问', reply: '答' },
+    })
+    expect(BenchRunRequest.safeParse({ steps: [step] }).success).toBe(true)
+    expect(targetOf('turn.end').description).toContain('不带会话上下文时')
+  })
+
   it('/boot 与 /whoami 没有请求内容', () => {
     expect(stepOf(build('/boot', {}))).toEqual({ kind: 'boot' })
     expect(stepOf(build('/whoami', {}))).toEqual({ kind: 'whoami' })

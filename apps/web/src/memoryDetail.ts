@@ -76,7 +76,7 @@ export function missingDisclosure(
     short: UNSET,
     hint:
       memory.sensitivity === 'secret'
-        ? '机密内容不参与召回，只能按 URI 读取。写清在什么场景下需要它，便于判断是否读取。'
+        ? '机密内容不参与召回，只能按坐标读取。写清在什么场景下需要它，便于判断是否读取。'
         : '补全后召回更准确。',
   }
 }
@@ -101,7 +101,7 @@ export function plaintextValues(memory: PlaintextFields): string[] {
     .filter((value) => value.length >= CONVERT_VALUE_MIN_LENGTH)
 }
 
-// 这次改动动没动统计里的数：层、敏感级、有效与否、要不要补触发场景（missingDisclosure 是 warning 的才算，
+// 这次改动动没动统计里的数：归属、敏感级、有效与否、要不要补触发场景（missingDisclosure 是 warning 的才算，
 // 改优先级也可能进出启动加载）、是不是疑似明文。
 // 窄柱和列表上方的总数靠概览接口算，它要把整个概览算一遍，别的改动不用为它重取
 export function statsChanged(before: ConsoleMemoryView, after: ConsoleMemoryView): boolean {
@@ -121,14 +121,14 @@ export function statsChanged(before: ConsoleMemoryView, after: ConsoleMemoryView
 export function overriddenNode(
   detail: PersonaDetail | undefined,
   uri: string,
-): { uri: string; persona: string } | null {
+): { uri: string; title: string; persona: string } | null {
   const node = detail?.inherited.find((n) => n.overriddenBy === uri)
   if (!node) return null
   const persona = detail?.ancestors.find((a) => a.id === node.personaId)
-  return { uri: node.uri, persona: persona?.name ?? '祖先人格' }
+  return { uri: node.uri, title: node.title, persona: persona?.name ?? '祖先人格' }
 }
 
-// 记忆的来源范围（originScope，写成 app:<id> 这样）。记忆只来自全局或某个应用，群和私聊写下的在联系人层
+// 记忆的来源范围（originScope，写成 app:<id> 这样）。记忆只来自全局或某个应用，群和私聊写下的是联系人的事实与会话摘要
 export function originScopeLabel(scope: string, appName: (id: string) => string | undefined) {
   const [kind, id] = scope.split(':')
   if (kind === 'global') return '全局'

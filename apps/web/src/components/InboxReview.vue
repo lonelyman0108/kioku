@@ -7,14 +7,13 @@ import { computed, ref, watch } from 'vue'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
-import { originScopeText } from '../labels'
+import { heardFrom } from '../conversations'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
 
 // 待确认内容：未确认来源写下的内容，确认后记为本人来源，有误的可以删除
 const props = defineProps<{ spaceId: string; canAct: boolean }>()
@@ -189,15 +188,14 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
           <span class="row-about">
             <RouterLink
               v-if="item.subject"
-              :to="{ name: 'subject', params: { spaceId, subjectId: item.subject.id } }"
+              :to="{ name: 'contact', params: { spaceId, subjectId: item.subject.id } }"
               >{{ item.subject.displayName }}</RouterLink
             >
           </span>
           <div class="row-content">
             <p>{{ item.content }}</p>
-            <UriPath v-if="item.uri" class="row-uri" :uri="item.uri" />
           </div>
-          <span class="row-source">{{ originScopeText(item.scope) }}</span>
+          <span class="row-source">{{ heardFrom(item.scope) }}</span>
           <time class="row-time" :datetime="item.createdAt" :title="formatTime(item.createdAt)">
             {{ formatRelative(item.createdAt) }}
           </time>
@@ -332,10 +330,6 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
 .row-content p {
   white-space: pre-wrap;
   overflow-wrap: anywhere;
-}
-.row-uri {
-  font-size: 13px;
-  color: var(--ui-text-muted);
 }
 .row-source,
 .row-time {

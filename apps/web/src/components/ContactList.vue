@@ -2,23 +2,22 @@
 import type { SubjectInfo, SubjectKind } from '@kioku/contracts'
 import { useInfiniteQuery } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
-import { useRoute } from 'vue-router'
 
 import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import Hint from '../components/Hint.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
-import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
-import PageHead from '../components/strata/PageHead.vue'
-import SectionHeading from '../components/strata/SectionHeading.vue'
 import { useDebounced } from '../composables/useDebounced'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
+import Hint from './Hint.vue'
+import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
+import SectionHeading from './strata/SectionHeading.vue'
 
-const route = useRoute()
+// 对话页的联系人分页：机器人面对的人和群，人和群各一栏。点进去是联系人详情
+const props = defineProps<{ spaceId: string }>()
 const { me } = useSession()
-const spaceId = computed(() => String(route.params.spaceId))
+const spaceId = computed(() => props.spaceId)
 
 const search = ref('')
 const q = useDebounced(search)
@@ -68,13 +67,13 @@ function accounts(subject: SubjectInfo) {
 
 <template>
   <div class="subjects">
-    <PageHead title="联系人">
-      <template #note>
+    <div class="contacts-bar">
+      <p class="contacts-note">
         对话中遇到的人和群，以及记下的事实。<Hint>
           新遇到的排在前面。将本人在各平台的账号标记为「这是我」后，当前账号的应用会将这些私聊视为本人对话。
         </Hint>
-      </template>
-      <template #actions>
+      </p>
+      <div class="contacts-actions">
         <UInput
           v-model="search"
           name="q"
@@ -91,8 +90,8 @@ function accounts(subject: SubjectInfo) {
           :loading="refreshing"
           @click="refresh"
         />
-      </template>
-    </PageHead>
+      </div>
+    </div>
 
     <p v-if="nothing" class="nothing">
       {{ q ? '没有匹配的结果' : '暂无联系人。接入群聊机器人后，对话过的人和群将显示在这里。' }}
@@ -140,7 +139,7 @@ function accounts(subject: SubjectInfo) {
             <ul v-if="section.items.value.length">
               <li v-for="subject in section.items.value" :key="subject.id">
                 <RouterLink
-                  :to="{ name: 'subject', params: { spaceId, subjectId: subject.id } }"
+                  :to="{ name: 'contact', params: { spaceId, subjectId: subject.id } }"
                   class="subject-row"
                 >
                   <span class="subject-title">
@@ -200,6 +199,24 @@ function accounts(subject: SubjectInfo) {
   flex: 1;
   min-width: 0;
   overflow-y: auto;
+}
+.contacts-bar {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px 24px;
+  padding: 14px 32px 16px;
+}
+.contacts-note {
+  line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.contacts-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
 }
 .nothing {
   padding: 4px 32px 32px;
@@ -303,12 +320,15 @@ function accounts(subject: SubjectInfo) {
 
 /* 手机上查找框占满一行 */
 @media (max-width: 639.98px) {
-  .subjects :deep(.page-actions) {
+  .contacts-actions {
     flex: 1 1 100%;
   }
 }
 /* 窄屏放不下两栏：一次只显示一边，用开关切换 */
 @media (max-width: 1023.98px) {
+  .contacts-bar {
+    padding: 12px 16px 14px;
+  }
   .nothing {
     padding: 4px 16px 24px;
   }

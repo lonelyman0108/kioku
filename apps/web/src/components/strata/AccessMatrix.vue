@@ -20,7 +20,7 @@ import {
   type AccessRow,
 } from './strata'
 
-// 权限范围矩阵：7 层乘 4 个敏感级。行序和地层柱一样，格子用同一套编码，文字压在色带上时挖掉纹理保证可读。
+// 权限范围矩阵：6 类归属乘 4 个敏感级。行序和地层柱一样，格子用同一套编码，文字压在色带上时挖掉纹理保证可读。
 // 这份权限碰得到的最高敏感级画一条边界线。切换会话上下文由使用方传不同的 rows
 const props = withDefaults(defineProps<{ rows: readonly AccessRow[]; legend?: boolean }>(), {
   legend: true,
@@ -42,7 +42,7 @@ const legendKinds = computed(() => presentKinds(props.rows))
       <table class="mx">
         <thead>
           <tr>
-            <th scope="col"><span class="sr-only">层</span></th>
+            <th scope="col"><span class="sr-only">归属</span></th>
             <th
               v-for="(s, i) in SENSITIVITIES"
               :key="s"

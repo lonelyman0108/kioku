@@ -11,15 +11,16 @@ import credentialFormModal from '../components/CredentialFormModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
 import expiredMemories from '../components/ExpiredMemories.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
+import memoryRootPanel from '../components/MemoryRootPanel.vue?raw'
 import personaDetail from '../components/PersonaDetail.vue?raw'
+import personaPanel from '../components/PersonaPanel.vue?raw'
 import providerFormModal from '../components/ProviderFormModal.vue?raw'
 import MemoryRow from '../components/strata/MemoryRow.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import activityPage from '../pages/ActivityPage.vue?raw'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
-import personasPage from '../pages/PersonasPage.vue?raw'
-import subjectDetailPage from '../pages/SubjectDetailPage.vue?raw'
-import subjectsPage from '../pages/SubjectsPage.vue?raw'
+import subjectsPage from '../components/ContactList.vue?raw'
+import subjectDetailPage from '../pages/ContactDetailPage.vue?raw'
 
 // 人格、联系人、凭据、变更记录。长相改过，确认框的后果和值不进缓存这些约束不能跟着丢
 
@@ -72,7 +73,8 @@ describe('变更记录的一行', () => {
     id: 1,
     type: 'update',
     memoryId: '00000000-0000-4000-8000-000000000000',
-    uri: 'projects://atlas/release',
+    uri: 'user://projects/atlas/release',
+    title: '发布步骤',
     createdAt: new Date(2026, 9, 31, 7, 5).toISOString(),
     actor: { accountName: null, keyName: 'MacBook', appName: 'Claude Code' },
     changes: ['content', 'priority'],
@@ -85,12 +87,12 @@ describe('变更记录的一行', () => {
   const entry = (changes: Partial<ActivityItem> = {}) =>
     render(ActivityEntry, { item: item(changes), spaceId: 'space' })
 
-  it('谁、动作、URI、字段、时间都在一行里', async () => {
+  it('谁、动作、标题、字段、时间都在一行里，坐标放在悬停里', async () => {
     const html = await entry()
     expect(html).toContain('Claude Code（MacBook）')
     expect(html).toContain('修改')
-    expect(html).toContain('projects://atlas/')
-    expect(html).toContain('release')
+    expect(html).toContain('>发布步骤</span>')
+    expect(html).toContain('title="发布步骤\nuser://projects/atlas/release"')
     expect(html).toContain('正文、优先级')
     expect(html).toContain('07:05')
   })
@@ -116,7 +118,7 @@ describe('变更记录的一行', () => {
   it('超出可见范围的后果留在提示层里', async () => {
     expect(await entry({ left: true, changes: [] })).toContain('超出可见范围')
     expect(await entry()).not.toContain('超出可见范围')
-    expect(activityEntry).toContain('这条记忆超出当前账号的可见范围（例如改入其他成员的私人层')
+    expect(activityEntry).toContain('这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆')
   })
 
   it('测试台写下的事件标出测试台和操作账号', async () => {
@@ -203,7 +205,7 @@ describe('列表读取失败', () => {
   })
 
   it.each([
-    ['人格', personasPage, 'personas'],
+    ['人格', memoryRootPanel, 'personas'],
     ['凭据', credentialsPage, 'credentials'],
     ['已删除的凭据', credentialsPage, 'deleted'],
   ])('%s：错误和读到过的列表可以同时显示，没读到时不说是空的', (_, source, query) => {
@@ -227,7 +229,8 @@ describe('列表读取失败', () => {
 
 describe('改版之后的约束', () => {
   it.each([
-    ['人格页', personasPage],
+    ['人格的根', memoryRootPanel],
+    ['人格面板', personaPanel],
     ['人格详情', personaDetail],
     ['联系人页', subjectsPage],
     ['联系人详情', subjectDetailPage],
@@ -245,14 +248,15 @@ describe('改版之后的约束', () => {
   it('人格：有引用时不能删，原因和缺失启动加载的提示都在', () => {
     expect(bound(personaDetail, 'UButton', 'disabled')).toBe('blockers.length > 0')
     expect(personaDetail).toContain('无法删除：')
-    expect(personaDetail).toContain('此节点本应进入启动加载')
-    expect(personaDetail).toContain('会话开始时此路径将缺失')
-    expect(personasPage).toContain('可用于新人格')
+    expect(personaDetail).toContain('此记忆本应进入启动加载')
+    expect(personaDetail).toContain('会话开始时此位置将缺失')
+    expect(personaPanel).toContain('可用于新人格')
   })
 
-  it('人格：窄屏切换后焦点不掉到 body', () => {
-    expect(personasPage).toContain('focusAfterSelect(narrow.value, id, previous)')
-    expect(personasPage).toMatch(/ref="detailColumn"[^>]*tabindex="-1"/)
+  it('人格：窄屏切换后焦点不掉到 body，标题接得住焦点', () => {
+    expect(personaDetail).toMatch(/<h1 ref="titleEl" tabindex="-1">/)
+    expect(personaDetail).toContain('defineExpose({ focusTitle')
+    expect(personaPanel).toContain('defineExpose({ focusTitle')
   })
 
   it('联系人：绑定组件知道自己在哪个联系人页，确认后才能换到保留的那个', () => {

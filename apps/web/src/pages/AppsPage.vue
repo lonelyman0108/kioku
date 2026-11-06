@@ -136,7 +136,7 @@ async function create() {
         <p>
           每个接入的客户端（如 Claude Code、AstrBot）对应一个应用。
           <Hint>
-            应用读写的私人层属于应用所有者。访问密钥的权限在签发时确定，且不超过所有者当前的角色。点击名称可进入应用的设置、访问密钥与权限范围。
+            应用读写的本人记忆属于应用所有者。访问密钥的权限在签发时确定，且不超过所有者当前的角色。点击名称可进入应用的设置、访问密钥与权限范围。
           </Hint>
         </p>
       </div>
@@ -246,7 +246,7 @@ async function create() {
   <UModal v-model:open="open" title="新建应用">
     <template #body>
       <form id="create-app" class="space-y-4" @submit.prevent="create">
-        <UFormField label="标识" help="小写字母、数字和连字符；应用层记忆位于 app://<标识>/ 下">
+        <UFormField label="标识" help="小写字母、数字和连字符；这个应用的记忆位于 app://<标识>/ 下">
           <UInput v-model="form.slug" class="w-full font-mono" required />
         </UFormField>
         <UFormField label="名称">

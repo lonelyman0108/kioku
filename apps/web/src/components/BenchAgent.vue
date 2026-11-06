@@ -6,9 +6,9 @@ import { computed, nextTick, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
-  AGENT_LOOP_DETAILS,
-  AGENT_LOOP_NOTES,
   AGENT_UNAVAILABLE_NOTES,
+  agentLoopDetail,
+  agentLoopNote,
   agentScenario,
   blockingDivergence,
   consentNeeded,
@@ -16,6 +16,7 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   droppedNote,
   sentToolCalls,
+  turnEndPolicy,
   usageSummary,
   type AgentConsent,
 } from '../benchAgent'
@@ -34,6 +35,7 @@ import Hint from './Hint.vue'
 // 对话不存服务端、不进浏览器存储，状态在 useBench 里，换应用、Key、模式时清掉
 const {
   spaceId,
+  app,
   appId,
   keyId,
   real,
@@ -72,6 +74,10 @@ const retryInfo = computed(() => [
   },
 ])
 const loop = computed(() => info.data.value?.loop ?? null)
+// 回复之后发不发 turn.end：钩子运行时里只有 Claude Code 发
+const turnEnd = computed(() =>
+  loop.value ? turnEndPolicy(loop.value, app.value?.runtimeFamily) : 'none',
+)
 const available = computed(() => info.data.value?.available === true)
 const unavailable = computed(() => {
   const reason = info.data.value?.reason
@@ -332,8 +338,8 @@ watch(generation, () => {
 
       <aside v-if="available && loop" class="agent-side">
         <p class="side-note" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
-          {{ AGENT_LOOP_NOTES[loop] }}
-          <Hint>{{ AGENT_LOOP_DETAILS[loop] }}</Hint>
+          {{ agentLoopNote(loop, turnEnd) }}
+          <Hint>{{ agentLoopDetail(loop, turnEnd) }}</Hint>
         </p>
         <p v-if="real" class="side-note text-error">
           真实模式：模型调用写工具会真实写入，不会回滚。

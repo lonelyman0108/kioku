@@ -38,8 +38,8 @@ vi.mock('../useSession', () => ({ useSession: () => ({ me: { data: ref({ id: 'me
 vi.mock('../unsavedChanges', () => ({ useUnsavedChangesGuard: fakes.guard }))
 
 const SCOPES: KeyScopes = {
-  readLayers: ['private'],
-  writeLayers: ['private'],
+  readLayers: ['user'],
+  writeLayers: ['user'],
   maxSensitivity: 'private',
   admin: false,
 }

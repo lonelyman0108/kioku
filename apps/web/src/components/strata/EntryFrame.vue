@@ -5,24 +5,23 @@ import KiokuMark from '../KiokuMark.vue'
 import { isConversationLayer, STACK } from './strata'
 
 // 登录、初始化、连接失败共用的一屏：文字标在上，内容在下，页面底边压一段地层作为装饰。
-// 只铺层色，不铺纹理：纹理表示敏感级，这里没有数据。
+// 只铺归属色，不铺纹理：纹理表示敏感级，这里没有数据。
 // 连接失败页是静态引入的（后端连不上时按需加载的文件也拿不到），这里也不能依赖按需加载的东西
 
-// 每层占多高（百分比），只为好看，不代表任何数据
+// 每类归属占多高（百分比），只为好看，不代表任何数据
 const HEIGHTS: Record<Layer, number> = {
   episode: 9,
   subject: 14,
-  private: 27,
-  owner: 13,
-  app: 12,
-  persona: 13,
-  base: 12,
+  user: 30,
+  app: 13,
+  persona: 14,
+  core: 20,
 }
 
 const bands = STACK.map((layer, index) => ({
   layer,
   height: HEIGHTS[layer],
-  // 和上面一层的分界。来自对话的两层和前五层之间用虚线
+  // 和上面一类的分界。来自对话的两类和下面四类之间用虚线
   dashed: index > 0 && isConversationLayer(STACK[index - 1]!) !== isConversationLayer(layer),
 }))
 </script>

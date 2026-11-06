@@ -13,7 +13,7 @@ import { memoryRoute } from '../routes'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 // 转存为凭据的对话框，状态和规则在 useConvertCredential。没有表单：回车的隐式提交会跳过核对
 const props = defineProps<{ spaceId: string; uri: string | null }>()
@@ -100,7 +100,7 @@ const candidateGroup = useId()
       <div v-else-if="memory && blocked" class="convert-form">
         <p class="convert-target">
           <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
-          <UriPath :uri="memory.uri" />
+          <MemoryName :uri="memory.uri" :title="memory.title" />
         </p>
         <NoteLine tone="warning">
           这条记忆暂不能转存为凭据
@@ -121,7 +121,7 @@ const candidateGroup = useId()
       <div v-else-if="memory" class="convert-form">
         <p class="convert-target">
           <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
-          <UriPath :uri="memory.uri" />
+          <MemoryName :uri="memory.uri" :title="memory.title" />
         </p>
 
         <div

@@ -38,7 +38,7 @@ async function decide(binding: SubjectBinding, action: 'confirm' | 'reject') {
       toast.add({ title: `已合并到「${kept.displayName}」`, color: 'success' })
       // 在收码那个对象的页面上确认的：它已经并进别的对象、不在了，换到保留的那个对象
       if (props.subjectId && props.subjectId !== kept.id && props.spaceId === spaceId) {
-        await router.replace({ name: 'subject', params: { spaceId, subjectId: kept.id } })
+        await router.replace({ name: 'contact', params: { spaceId, subjectId: kept.id } })
       }
     } else {
       await api.rejectBinding(spaceId, binding.id)
@@ -74,7 +74,7 @@ const incomingText = (binding: SubjectBinding) =>
             <template v-if="binding.subject.id !== subjectId">
               <span class="text-muted">绑定到</span>
               <RouterLink
-                :to="{ name: 'subject', params: { spaceId, subjectId: binding.subject.id } }"
+                :to="{ name: 'contact', params: { spaceId, subjectId: binding.subject.id } }"
                 class="text-primary"
                 >{{ binding.subject.displayName }}</RouterLink
               >
