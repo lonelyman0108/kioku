@@ -187,10 +187,16 @@ function failed(err: unknown) {
   toast.add({ title: readFailure(err), color: 'error' })
 }
 
-// 列表、已删除、已过期与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
+// 列表、已删除、已过期、列表的位置选项与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
 // 概览只标记过期，见 refreshCounts
 function invalidateLists() {
-  for (const key of ['memory-list', 'memory-deleted', 'memory-expired', 'memory-glossary']) {
+  for (const key of [
+    'memory-list',
+    'memory-deleted',
+    'memory-expired',
+    'memory-children',
+    'memory-glossary',
+  ]) {
     void queryClient.invalidateQueries({ queryKey: [key, spaceId.value] })
   }
   void queryClient.invalidateQueries({
