@@ -351,7 +351,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     // 改过的正文和模型给的过同一套检查
     expect(
       await errorOf(await apply(suggestion.id, { content: '回答用中文，token = abc123' }), 400),
-    ).toBe('合并后的正文疑似含明文密码或 Token：整理建议不写入凭据的值')
+    ).toBe('合并后的正文疑似含明文密码或令牌：整理建议不写入凭据的值')
     expect(
       await ok<DreamApplied>(await apply(suggestion.id, { content: '回答一律用中文' })),
     ).toEqual({ memory: null })
@@ -467,7 +467,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     // 成员改过的正文和模型给的过同一套检查：像有明文密码的、带凭据占位符的不收
     expect(
       await errorOf(await apply(suggestion.id, { content: '在学日语，网站密码：hunter2' }), 400),
-    ).toBe('合并后的事实疑似含明文密码或 Token：整理建议不写入凭据的值')
+    ).toBe('合并后的事实疑似含明文密码或令牌：整理建议不写入凭据的值')
     expect(
       await errorOf(await apply(suggestion.id, { content: '在学日语，账号见 {{cred:xm}}' }), 400),
     ).toBe('合并后的事实不能含凭据占位符')
@@ -561,7 +561,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     ).toBe('提炼的正文不能含凭据占位符')
     expect(
       await errorOf(await apply(suggestion.id, { disclosure: '登录时，密码：hunter2' }), 400),
-    ).toBe('触发场景不能含明文密码、Token 或凭据占位符')
+    ).toBe('触发场景不能含明文密码、令牌或凭据占位符')
     expect((await suggestionRow(suggestion.id)).status).toBe('pending')
     // 能改成别的 URI 与层
     const applied = await ok<DreamApplied>(

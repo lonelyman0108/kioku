@@ -252,7 +252,7 @@ export async function rotateMasterKey(
       const wrappedKey = rewrapKey(previous, current, Buffer.from(sealed.wrappedKey, 'base64'), aad)
       return { ...sealed, wrappedKey: wrappedKey.toString('base64'), keyId: currentId }
     } catch {
-      failures.push('实例设置中的接口 Key')
+      failures.push('实例设置中的 API Key')
       return sealed
     }
   })

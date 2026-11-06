@@ -30,14 +30,14 @@ export async function keyToSimulate(
     return key ? { app, key } : ('no-key' as const)
   })
   if (found === 'no-app') return { error: '应用不存在', status: 404 }
-  if (found === 'forbidden') return { error: '仅应用所有者可模拟此应用的 Key', status: 403 }
-  if (found === 'no-key') return { error: 'Key 不存在', status: 404 }
+  if (found === 'forbidden') return { error: '仅应用所有者可模拟此应用的访问密钥', status: 403 }
+  if (found === 'no-key') return { error: '访问密钥不存在', status: 404 }
   const { app, key } = found
   const [owner] = await deps.db
     .select({ role: spaceMembers.role, memberSince: spaceMembers.createdAt })
     .from(spaceMembers)
     .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
   const scopes = keyEffectiveScopes({ ...key, scopes: KeyScopes.parse(key.scopes) }, owner)
-  if (!scopes) return { error: 'Key 已作废', status: 404 }
+  if (!scopes) return { error: '访问密钥已作废', status: 404 }
   return { key: keyPrincipal(key, app, scopes) }
 }

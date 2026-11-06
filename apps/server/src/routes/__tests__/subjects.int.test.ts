@@ -24,7 +24,7 @@ import {
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { ChatModel } from '../../extraction/provider'
-import { BATCH_MOVED, NO_USABLE_KEY } from '../../extraction/extract'
+import { BATCH_MOVED, BUDGET_NO_SUMMARY, NO_USABLE_KEY } from '../../extraction/extract'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
@@ -419,6 +419,19 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       tx.update(extractionRuns).set({ error: NO_USABLE_KEY }),
     )
     expect(await runError(carol.cookie)).toBe(NO_USABLE_KEY)
+    // 改过措辞的原因：存量记录里的旧文字按现在的显示，也照样谁都看得到
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(extractionRuns)
+        .set({ error: '写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层' }),
+    )
+    expect(await runError(carol.cookie)).toBe(NO_USABLE_KEY)
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(extractionRuns)
+        .set({ error: '本月的抽取预算已用完，这一批的 Key 也无权写入会话摘要' }),
+    )
+    expect(await runError(carol.cookie)).toBe(BUDGET_NO_SUMMARY)
   })
 
   it('合并两个人：平台账号、事实、私聊里记下的与缓冲都归到保留的那个，私聊作用域换过来，群里记下的不动', async () => {
