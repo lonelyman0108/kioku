@@ -35,23 +35,22 @@ export const SpaceImportForm = SpaceImportInspectForm.extend({
 })
 export type SpaceImportForm = z.infer<typeof SpaceImportForm>
 
-// 文件里有多少。导出人的画像层（ownerMemories）、私人层（privateMemories）、凭据、凭据源与标记成他本人的对象
-// （linkedSubjects）导入后都归导入人；secrets 是其中要用这个实例的主密钥重新加密的 secret 记忆
+// 文件里有多少。导出人的本人记忆（userMemories）、凭据、凭据源与标记成他本人的联系人（linkedSubjects）
+// 导入后都归导入人；secrets 是其中要用这个实例的主密钥重新加密的 secret 记忆
 export const SpaceImportCounts = z.object({
   personas: z.number().int(),
   apps: z.number().int(),
   subjects: z.number().int(),
   linkedSubjects: z.number().int(),
   memories: z.number().int(),
-  ownerMemories: z.number().int(),
-  privateMemories: z.number().int(),
+  userMemories: z.number().int(),
   secrets: z.number().int(),
   credentials: z.number().int(),
   providers: z.number().int(),
 })
 export type SpaceImportCounts = z.infer<typeof SpaceImportCounts>
 
-// 导出人：导出时的显示名，以及他让不让 Dream 整理画像层与私人层（导入后照样用在导入人身上）
+// 导出人：导出时的显示名，以及他让不让 Dream 整理本人的记忆（导入后照样用在导入人身上）
 const SpaceExporter = z.object({ displayName: z.string(), dreamPrivate: z.boolean() })
 
 export const SpaceImportPreview = z.object({

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { UriPrefix } from './memories'
 import { Layer, Provenance, Sensitivity } from './memory'
 import { RecallCandidate } from './recall'
 import { SubjectBinding } from './subjects'
@@ -12,16 +13,14 @@ export type MemoryListSort = z.infer<typeof MemoryListSort>
 
 // 所有筛选都是可选的；cursor 是上一页返回的 nextCursor，换了筛选或排序就要从头翻
 export const MemoryListQuery = z.object({
-  domain: z
-    .string()
-    .regex(/^[a-z][a-z0-9_]{0,31}$/, '分区格式错误')
-    .optional(),
+  // 位置：这个坐标前缀本身与它下面各级，例如 user://projects、persona://default
+  under: UriPrefix.optional(),
   layer: Layer.optional(),
   sensitivity: Sensitivity.optional(),
   provenance: Provenance.optional(),
   personaId: z.uuid().optional(),
   appId: z.uuid().optional(),
-  // 在 URI 与 disclosure 里按子串查找，不区分大小写
+  // 在标题、坐标与 disclosure 里按子串查找，不区分大小写
   q: z.string().trim().min(1).max(200).optional(),
   // true 只列要补 disclosure 的：没写、又不进启动上下文（会进的每次会话开始都注入，不靠它被想起），
   // 和概览的 missingDisclosure 同一个条件；false 列别的那些。查询参数按字符串 'true' / 'false' 传
@@ -42,6 +41,7 @@ export type MemoryListQuery = z.infer<typeof MemoryListQuery>
 export const MemoryListItem = z.object({
   id: z.uuid(),
   uri: z.string(),
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
   provenance: Provenance,
@@ -69,9 +69,10 @@ export const ConsoleSearchRequest = z.object({
 })
 export type ConsoleSearchRequest = z.infer<typeof ConsoleSearchRequest>
 
-// URI 或关键词直接命中的记忆，给快速跳转用
+// 标题、坐标或关键词直接命中的记忆，给快速跳转用
 export const MemoryMatch = z.object({
   uri: z.string(),
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
   priority: z.number().int(),
@@ -122,6 +123,8 @@ export type OverviewApp = z.infer<typeof OverviewApp>
 // 历史里的一个版本：事件前后记下的整条记忆里，界面要用的部分。secret 的快照没有正文
 export const MemorySnapshot = z.object({
   uri: z.string(),
+  // 恢复此版本时连标题一起恢复
+  title: z.string().nullable(),
   layer: Layer,
   sensitivity: Sensitivity,
   priority: z.number().int(),
@@ -172,6 +175,7 @@ export const MemoryHistory = z.object({
   memory: z.object({
     id: z.uuid(),
     uri: z.string(),
+    title: z.string(),
     layer: Layer,
     sensitivity: Sensitivity,
     version: z.number().int(),
@@ -199,6 +203,7 @@ export type PageQuery = z.infer<typeof PageQuery>
 export const DeletedMemory = z.object({
   id: z.uuid(),
   uri: z.string(),
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
   priority: z.number().int(),
@@ -236,6 +241,7 @@ export type DeletedMemoryList = z.infer<typeof DeletedMemoryList>
 export const ExpiredMemory = z.object({
   id: z.uuid(),
   uri: z.string(),
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
   priority: z.number().int(),
@@ -264,11 +270,12 @@ export const ActivityItem = z.object({
   id: z.number().int(),
   type: z.string(),
   memoryId: z.uuid(),
-  // 记忆现在的 URI；离开了你的可见范围的（left 为 true），是改动之前的 URI
+  // 记忆现在的坐标与标题；离开了你的可见范围的（left 为 true），是改动之前的
   uri: z.string(),
+  title: z.string(),
   createdAt: z.string(),
   actor: EventActor,
-  // 这次改了哪些字段：content、disclosure、priority、sensitivity、layer、uri、glossary；离开的事件为空
+  // 这次改了哪些字段：content、title、disclosure、priority、sensitivity、layer、uri、glossary；离开的事件为空
   changes: z.array(z.string()),
   // 见 HistoryEvent.left
   left: z.boolean(),
@@ -287,7 +294,7 @@ export const ActivityList = z.object({
 })
 export type ActivityList = z.infer<typeof ActivityList>
 
-// 恢复到某个事件之后的那一版：只改正文、disclosure、priority 与关键词。
+// 恢复到某个事件之后的那一版：只改正文、标题、disclosure、priority 与关键词。
 // expectedVersion 是界面上看到的当前版本号，期间被改过就返回 409
 export const RestoreRequest = z.object({
   memoryId: z.uuid(),

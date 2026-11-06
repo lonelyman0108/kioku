@@ -9,6 +9,7 @@ export type RecallVia = z.infer<typeof RecallVia>
 export const RecallCandidate = z
   .object({
     uri: z.string(),
+    title: z.string(),
     layer: Layer,
     priority: z.number().int(),
     disclosure: z.string().nullable(),
@@ -105,9 +106,10 @@ export const RecallResponse = z
   .meta({ id: 'RecallResponse' })
 export type RecallResponse = z.infer<typeof RecallResponse>
 
-// 最近更新的策展记忆：只有 URI 与 disclosure，不含正文，会话开始时列给模型
+// 最近更新的记忆：只有坐标、标题与 disclosure，不含正文，会话开始时列给模型
 export const RecentMemory = z.object({
   uri: z.string(),
+  title: z.string(),
   priority: z.number().int(),
   disclosure: z.string().nullable(),
   updatedAt: z.string(),
@@ -115,7 +117,7 @@ export const RecentMemory = z.object({
 export type RecentMemory = z.infer<typeof RecentMemory>
 
 export const BootEntry = z
-  .object({ uri: z.string(), layer: Layer, content: z.string() })
+  .object({ uri: z.string(), title: z.string(), layer: Layer, content: z.string() })
   .meta({ id: 'BootEntry' })
 export const BootResponse = z
   .object({
@@ -247,7 +249,13 @@ export const RecallDebug = z.object({
   semantic: z.boolean(),
   // 管理界面里搜得到、这把 Key 却读不到的记忆，以及原因
   filtered: z.array(
-    z.object({ uri: z.string(), layer: Layer, sensitivity: Sensitivity, reason: ReadDenial }),
+    z.object({
+      uri: z.string(),
+      title: z.string(),
+      layer: Layer,
+      sensitivity: Sensitivity,
+      reason: ReadDenial,
+    }),
   ),
 })
 export type RecallDebug = z.infer<typeof RecallDebug>
@@ -267,7 +275,9 @@ export const BootPreview = z.object({
   // 原样就是宿主收到的文字
   context: z.string(),
   // 展开的启动节点与各自占的字数（含标题）
-  entries: z.array(z.object({ uri: z.string(), layer: Layer, chars: z.number().int() })),
+  entries: z.array(
+    z.object({ uri: z.string(), title: z.string(), layer: Layer, chars: z.number().int() }),
+  ),
   // 超出预算、只列出 URI 的启动节点
   omitted: z.array(z.string()),
   recent: z.array(RecentMemory),
@@ -299,6 +309,7 @@ export type MemoryRecallStat = z.infer<typeof MemoryRecallStat>
 export const RecalledMemory = MemoryRecallStat.extend({
   id: z.uuid(),
   uri: z.string(),
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
 })
@@ -307,6 +318,7 @@ export type RecalledMemory = z.infer<typeof RecalledMemory>
 export const NeverRecalledMemory = z.object({
   id: z.uuid(),
   uri: z.string(),
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
   createdAt: z.string(),
@@ -348,10 +360,11 @@ export const RecallEventView = z.object({
   // 打过码的提示语前 200 字；应用关掉了记录提示语时为 null
   query: z.string().nullable(),
   createdAt: z.string(),
-  // 命中的记忆；现在看不到了的（例如被移进别的成员的本人）uri 为 null
+  // 命中的记忆；现在看不到了的（例如被移进别的成员的本人）uri 与 title 为 null
   hits: z.array(
     z.object({
       uri: z.string().nullable(),
+      title: z.string().nullable(),
       rank: z.number().int(),
       score: z.number(),
       via: z.array(RecallVia),

@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { ConversationInfo, ExtractionRunInfo, OriginScope } from './conversations'
 import { Provenance, SubjectKind } from './memory'
 import { SessionContextInput } from './recall'
 
@@ -44,19 +45,14 @@ export const SubjectList = z.object({
 })
 export type SubjectList = z.infer<typeof SubjectList>
 
-// 记忆从哪里来：全局、某个应用、某个群、和某个人的私聊。name 是应用或对象现在的名字，删掉了的为 null
-export const OriginScope = z.object({
-  kind: z.enum(['global', 'app', 'group', 'direct']),
-  id: z.uuid().nullable(),
-  name: z.string().nullable(),
-})
-export type OriginScope = z.infer<typeof OriginScope>
-
+// 挂在联系人上的一条事实。scope 是听自哪里（哪个群、和谁的私聊），conversationId 是听到它的那个会话：
+// 会话已经删掉、或者是在会话出现之前记下的为 null
 export const SubjectFact = z.object({
   id: z.uuid(),
   content: z.string(),
   provenance: Provenance,
   scope: OriginScope,
+  conversationId: z.uuid().nullable(),
   // 删除时带回来：看过之后被改过的不删
   version: z.number().int(),
   createdAt: z.iso.datetime(),
@@ -72,33 +68,6 @@ export const SupersededFact = SubjectFact.extend({
   supersededBy: z.string().nullable(),
 })
 export type SupersededFact = z.infer<typeof SupersededFact>
-
-// 会话摘要，到期自动失效
-export const ConversationSummary = z.object({
-  id: z.uuid(),
-  content: z.string(),
-  createdAt: z.iso.datetime(),
-  expiresAt: z.iso.datetime().nullable(),
-})
-export type ConversationSummary = z.infer<typeof ConversationSummary>
-
-export const ExtractionRunInfo = z.object({
-  id: z.number().int(),
-  createdAt: z.iso.datetime(),
-  app: z.object({ id: z.uuid(), name: z.string() }).nullable(),
-  scope: OriginScope,
-  turns: z.number().int(),
-  skippedTurns: z.number().int(),
-  added: z.number().int(),
-  updated: z.number().int(),
-  unchanged: z.number().int(),
-  dropped: z.number().int(),
-  limited: z.number().int(),
-  summarized: z.boolean(),
-  summaryOnly: z.boolean(),
-  error: z.string().nullable(),
-})
-export type ExtractionRunInfo = z.infer<typeof ExtractionRunInfo>
 
 // ---- 验证码自助绑定 ----
 
@@ -215,12 +184,13 @@ export const VoidBindCodeRequest = z
   .meta({ id: 'VoidBindCodeRequest' })
 export type VoidBindCodeRequest = z.infer<typeof VoidBindCodeRequest>
 
-// 对象详情：事实是挂在这个对象上的；会话摘要是群里（或和这个人的私聊里）的；抽取记录是涉及它的最近几批
+// 联系人详情：事实是挂在这个联系人上的；参与的会话是群聊时这个群的、私聊时和这个人的会话，以及这个人
+// 说过话的群（事实或抽取记录涉及他），最近活动的在前，最多 50 个，会话摘要在会话详情里看；抽取记录是涉及它的最近几批
 export const SubjectDetail = SubjectInfo.extend({
   facts: z.array(SubjectFact),
   // 最近被推翻的事实，新的在前
   supersededFacts: z.array(SupersededFact),
-  summaries: z.array(ConversationSummary),
+  conversations: z.array(ConversationInfo),
   runs: z.array(ExtractionRunInfo),
   // 最近的绑定记录：绑到这个对象的，以及这个对象申请绑到别处的，新的在前
   bindings: z.array(SubjectBinding),

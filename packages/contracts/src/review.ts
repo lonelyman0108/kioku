@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { SubjectKind } from './memory'
-import { OriginScope } from './subjects'
+import { OriginScope } from './conversations'
 
 // 待审队列：不可信来源（群聊、陌生人私聊）写下的联系人事实与会话摘要中，现在还有效的。
 // 确认之后来源改成主人；删除和删记忆一样，留着历史

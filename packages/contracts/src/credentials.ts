@@ -372,6 +372,7 @@ export const KeyDeleteCredentialQuery = z.object({
 export const CredentialReference = z.object({
   id: z.uuid(),
   uri: z.string(),
+  title: z.string(),
   sensitivity: Sensitivity,
   updatedAt: z.string(),
 })

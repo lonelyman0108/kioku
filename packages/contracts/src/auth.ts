@@ -64,6 +64,7 @@ export type RuntimeFamily = z.infer<typeof RuntimeFamily>
 
 export const AppConfig = z
   .object({
+    // 本人私聊时读取本人记忆：设了之后，应用所有者本人的私聊读得到本人的内部及以下；不设时和陌生人私聊一样
     elevateOwnerDirect: z.literal('internal').optional(),
     // 召回事件里记不记提示语（前 200 字，像凭据的片段打码）；不设时记
     recordPrompt: z.boolean().optional(),
@@ -118,6 +119,7 @@ export type UpdatePersonaRequest = z.infer<typeof UpdatePersonaRequest>
 // 人格详情里的一个节点（人格的记忆）
 export const PersonaNode = z.object({
   uri: z.string(),
+  title: z.string(),
   personaId: z.uuid(),
   priority: z.number().int(),
   sensitivity: Sensitivity,

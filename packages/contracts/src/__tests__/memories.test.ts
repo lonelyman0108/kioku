@@ -1,6 +1,12 @@
 import { describe, expect, it } from 'vitest'
 
-import { MemoryTitle, MemoryUri, URI_FORMAT_MESSAGE, URI_PATTERN } from '../memories'
+import {
+  MemoryTitle,
+  MemoryUri,
+  URI_FORMAT_MESSAGE,
+  URI_PATTERN,
+  URI_PREFIX_PATTERN,
+} from '../memories'
 import { CURATED_LAYERS } from '../memory'
 
 describe('坐标', () => {
@@ -62,6 +68,22 @@ describe('坐标', () => {
     expect(result.error?.issues[0]?.message).toBe(URI_FORMAT_MESSAGE)
     for (const root of ['core://', 'user://', 'persona://<人格标识>/', 'app://<应用标识>/']) {
       expect(URI_FORMAT_MESSAGE).toContain(root)
+    }
+  })
+})
+
+describe('坐标前缀', () => {
+  it('四种开头之一，后面至少一段；人格、应用只有标识也算', () => {
+    for (const prefix of [
+      'user://projects',
+      'persona://default',
+      'app://claudecode',
+      'core://a/b',
+    ]) {
+      expect(URI_PREFIX_PATTERN.test(prefix), prefix).toBe(true)
+    }
+    for (const prefix of ['user://', 'user', 'projects://x', 'core://a/', 'core://A']) {
+      expect(URI_PREFIX_PATTERN.test(prefix), prefix).toBe(false)
     }
   })
 })

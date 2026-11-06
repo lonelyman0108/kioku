@@ -181,6 +181,7 @@ export const BenchChanges = z.object({
     z.object({
       type: z.string(),
       uri: z.string(),
+      title: z.string(),
       // 改了哪些字段，见 ActivityItem.changes
       fields: z.array(z.string()),
       // 改后这把 Key 看不到了：uri 是改前的，不给改后的任何内容，见 ActivityItem.left

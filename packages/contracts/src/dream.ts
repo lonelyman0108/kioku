@@ -1,8 +1,8 @@
 import { z } from 'zod'
 
-import { MemoryUri } from './memories'
+import { MemoryTitle, MemoryUri } from './memories'
 import { Layer, Provenance, Sensitivity, SubjectKind } from './memory'
-import { OriginScope } from './subjects'
+import { OriginScope } from './conversations'
 
 // Dream：后台按空间整理记忆，只提建议。建议进待审，成员确认后才按建议执行，Dream 自己不写记忆。
 // 四种建议：合并（几条变一条）、提炼（几条抽取的事实变一个策展节点的草稿）、过时（这条可能已经不对了）、
@@ -34,8 +34,9 @@ export type DreamScope = z.infer<typeof DreamScope>
 // 建议涉及的一条记忆，是现在的样子：生成建议之后改过的建议不再列出，所以和建议生成时看到的是同一版
 export const DreamSuggestionMemory = z.object({
   id: z.uuid(),
-  // 策展记忆的 URI；抽取的事实与会话摘要没有
+  // 记下的记忆的坐标与标题；联系人的事实与会话摘要没有
   uri: z.string().nullable(),
+  title: z.string().nullable(),
   layer: Layer,
   sensitivity: Sensitivity,
   provenance: Provenance,
@@ -82,17 +83,19 @@ export const DreamSuggestionList = z.object({
 })
 export type DreamSuggestionList = z.infer<typeof DreamSuggestionList>
 
-// 执行时可以先改：合并只能改正文；提炼能改草稿的坐标、正文与 disclosure，归属随坐标的开头
+// 执行时可以先改：合并只能改正文；提炼能改草稿的坐标、标题、正文与 disclosure，归属随坐标的开头。
+// 提炼不给标题时和新建记忆一样，取正文第一个 # 标题，没有就用标识
 export const ApplyDreamSuggestion = z.object({
   content: z.string().trim().min(1).max(20_000).optional(),
   uri: MemoryUri.optional(),
+  title: MemoryTitle.optional(),
   disclosure: z.string().trim().max(500).nullable().optional(),
 })
 export type ApplyDreamSuggestion = z.infer<typeof ApplyDreamSuggestion>
 
 // 执行的结果：提炼时新建的策展记忆，别的种类为 null
 export const DreamApplied = z.object({
-  memory: z.object({ id: z.uuid(), uri: z.string() }).nullable(),
+  memory: z.object({ id: z.uuid(), uri: z.string(), title: z.string() }).nullable(),
 })
 export type DreamApplied = z.infer<typeof DreamApplied>
 

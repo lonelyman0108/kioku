@@ -13,13 +13,22 @@ export const URI_PATTERN = new RegExp(
 )
 // 接受坐标的工具和接口都会原样返回它，agent 照着改：四种开头各放什么都写清楚
 export const URI_FORMAT_MESSAGE =
-  '坐标（uri）只能用这四种开头：core:// 放通用的记忆，所有应用都用得到（例如 core://agent）；' +
+  '坐标（URI）只能用这四种开头：core:// 放通用的记忆，所有应用都用得到（例如 core://agent）；' +
   'user:// 放本人的习惯、偏好与私人事务（例如 user://preferences/reply_style）；' +
   'persona://<人格标识>/ 放某个人格的设定（例如 persona://default/soul）；' +
   'app://<应用标识>/ 放某个应用独有的内容（例如 app://claudecode/agent）。' +
   '开头之后是可省略的位置与最后一段标识，用 / 分隔，每段只用小写字母、数字、_ 或 -'
 export const MemoryUri = z.string().regex(URI_PATTERN, URI_FORMAT_MESSAGE)
 export const DomainOrUri = z.string().min(1)
+
+// 坐标前缀：四种开头之一，后面至少一段，例如 user://projects、persona://default（只有人格标识也行）。
+// 目录浏览与列表的位置筛选用它，匹配它本身与下面各级
+export const URI_PREFIX_PATTERN = new RegExp(
+  `^(${CURATED_LAYERS.join('|')})://(${URI_SEGMENT}(?:/${URI_SEGMENT}){0,15})$`,
+)
+export const UriPrefix = z
+  .string()
+  .regex(URI_PREFIX_PATTERN, '位置格式应为 开头://各级，例如 user://projects、persona://default')
 
 // 标题：记下的记忆给人看的名字，目录、列表、搜索与历史都显示它；改标题不改坐标。
 // 去掉首尾空白之后 1–80 个字符，不含控制字符（换行、制表符也算）

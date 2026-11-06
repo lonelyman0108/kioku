@@ -99,6 +99,8 @@ export type LoreTargetState = z.infer<typeof LoreTargetState>
 
 export const LorePlanTarget = z.object({
   uri: z.string(),
+  // 写进去的标题：正文第一个 # 标题，没有就用标识
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
   priority: z.number().int(),

@@ -27,10 +27,16 @@ export function bootEligible(layer: Layer, priority: number): boolean {
   return priority === 0 || ((layer === 'persona' || layer === 'app') && priority <= 1)
 }
 
-// 敏感级：能给谁看，按从宽到严排列，比较大小时用下标。本人（user）不设公开：本人的记忆到不了群聊与陌生人私聊
+// 敏感级：能给谁看，按从宽到严排列，比较大小时用下标
 export const SENSITIVITIES = ['public', 'internal', 'private', 'secret'] as const
 export const Sensitivity = z.enum(SENSITIVITIES)
 export type Sensitivity = z.infer<typeof Sensitivity>
+
+// 这一类归属收不收这一级：本人（user）不设公开，本人的记忆到不了群聊与陌生人私聊，给了公开只会让人以为群里能用。
+// 写入检查、权限范围与管理界面的选项都按它，库里另有检查约束兜底
+export function sensitivityAllowed(layer: Layer, sensitivity: Sensitivity): boolean {
+  return !(layer === 'user' && sensitivity === 'public')
+}
 
 // 写入来源：untrusted 只能写 subject 与 episode，且不参与跨作用域的自动注入
 export const PROVENANCES = ['owner', 'agent', 'untrusted', 'system'] as const
