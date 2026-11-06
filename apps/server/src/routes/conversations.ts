@@ -58,6 +58,8 @@ export function conversationRoutes(deps: Deps) {
       const { service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
       const after = decodeTimeCursor(query.cursor, UUID)
       if (after === 'invalid') return c.json({ error: INVALID_CURSOR }, 400)
+      // 按（最近活动、id）翻页。翻页期间变活跃的会话最近活动变新，排到已经读过的那几页前面，这一轮翻页里暂时看不到；
+      // 接受这个取舍，不为它换排序：重新读取时从第一页开始（管理界面的会话列表刷新就是这样），它会出现在最前面
       const page = await withSpace(deps.db, spaceId, (tx) =>
         conversationInfos(
           tx,

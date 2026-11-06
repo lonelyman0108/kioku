@@ -52,6 +52,8 @@ function withQuery(changes: Record<string, string | null>) {
 const select = (id: string | null) => router.replace(withQuery({ id }))
 const clearApp = () => router.replace(withQuery({ app: null }))
 
+// 重新读取（刷新、失效）从第一页读起，后面几页的游标按新读到的算：服务端按最近活动翻页，
+// 翻页期间变活跃的会话这时回到最前面（见服务端 routes/conversations.ts）
 const list = useInfiniteQuery({
   queryKey: computed(() => ['conversations', spaceId.value, appId.value] as const),
   // 参数从键里取：换了筛选之后，旧键剩下的页还在重新拉取时，不会用上新的筛选条件
