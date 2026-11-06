@@ -773,12 +773,19 @@ describe('请求期间与不能看计划时', () => {
 })
 
 describe('计划的分组', () => {
-  it('同步差异每种列出来，已是最新的只给个数，没有的不出现', () => {
+  it('同步差异每种列出来，已是最新的只给个数，没有的不出现；每行先写标题再写坐标', () => {
     const item = (state: LoreImportPlan['sync']['items'][number]['state'], uri: string) => ({
       source: uri,
       uri,
+      title: `标题${uri.slice(4)}`,
       state,
       changes: [],
+    })
+    const line = (n: number, extra: { target?: string; detail?: string } = {}) => ({
+      title: `标题${n}`,
+      uri: `a://${n}`,
+      target: extra.target ?? null,
+      detail: extra.detail ?? null,
     })
     const { current, groups } = syncGroups(
       planOf([], {
@@ -798,16 +805,25 @@ describe('计划的分组', () => {
     )
     expect(current).toBe(2)
     expect(groups.map((g) => [g.state, g.lines])).toEqual([
-      ['update', ['a://3：正文、关键词']],
-      ['edited', ['a://4']],
-      ['moved', ['a://5 → a://6']],
-      ['deleted', ['a://7']],
-      ['skipped', ['a://8：正文为空']],
-      ['unmapped', ['a://9']],
-      ['unreadable', ['a://10：记忆不存在']],
-      ['gone', ['a://11']],
+      ['update', [line(3, { detail: '正文、关键词' })]],
+      ['edited', [line(4)]],
+      ['moved', [line(5, { target: 'a://6' })]],
+      ['deleted', [line(7)]],
+      ['skipped', [line(8, { detail: '正文为空' })]],
+      ['unmapped', [line(9)]],
+      ['unreadable', [line(10, { detail: '记忆不存在' })]],
+      // Lore 里没有这个节点了，取不到标题，只写坐标
+      ['gone', [{ title: null, uri: 'a://11', target: null, detail: null }]],
     ])
+    expect(groups[0]!.heading).toBe('按 Lore 更新')
     expect(syncGroups(planOf([])).groups).toEqual([])
+  })
+
+  it('同步差异的每行和写入目标一样写标题，坐标跟在后面', () => {
+    const template = parse(loreImportSource).descriptor.template!.content
+    const row = /<li v-for="\(line, i\) in group\.lines"[^]*?<\/li>/.exec(template)![0]
+    expect(row).toContain('<span v-if="line.title" class="target-title">{{ line.title }}</span>')
+    expect(row.indexOf('{{ line.title }}')).toBeLessThan(row.indexOf(':uri="line.uri"'))
   })
 
   it('节点的筛选', () => {

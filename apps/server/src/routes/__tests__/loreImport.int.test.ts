@@ -566,6 +566,23 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(result.appsOtherPersona).toEqual(plan.appsOtherPersona)
     })
 
+    it('同步项带标题：取 Lore 正文的 # 标题，没有就用标识；记忆现在是机密的只用标识', async () => {
+      await seed('infra://titled', '# 有标题的节点\n正文')
+      await seed('infra://vault', '# 保险柜\n密码 hunter5')
+      await importAll(await fileSource(), { secretUris: ['infra://vault'] })
+      await editLore('infra://titled', '# 改过的标题\n新的正文')
+      await editLore('infra://vault', '# 保险柜\n密码 hunter6')
+      const plan = await planOf(await fileSource())
+      const item = (uri: string) => plan.sync.items.find((i) => i.uri === uri)
+      expect(item('user://infra/titled')).toMatchObject({
+        state: 'update',
+        title: '改过的标题',
+        changes: ['content'],
+      })
+      expect(item('user://infra/vault')).toMatchObject({ state: 'update', title: 'vault' })
+      expect(item('user://infra/nas')).toMatchObject({ state: 'current', title: 'nas' })
+    })
+
     it('回归：命令行导入并同步过的数据，八种状态与命令行的 --sync 逐项相同', async () => {
       await seed('infra://edit_in_kioku', '会在 Kioku 里改的')
       await seed('infra://rename_in_lore', '会在 Lore 里换路径的')
@@ -603,9 +620,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(await (await post('plan', { source })).text()).not.toContain('Bad Name')
       const comparable = (items: LoreSyncItem[]) =>
         items
-          .map(({ source, uri, state, target, reason, changes }) => ({
+          .map(({ source, uri, title, state, target, reason, changes }) => ({
             source,
             uri,
+            title,
             state,
             target,
             reason: reason?.replace(quoted, ''),
@@ -930,6 +948,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect(plan.sync.items.find((i) => i.uri === 'persona://default/soul/style')).toEqual({
           source: 'core://style',
           uri: 'persona://default/soul/style',
+          title: 'style',
           state: 'skipped',
           reason: skip!.reason,
           changes: [],

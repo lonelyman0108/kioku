@@ -257,6 +257,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
             {
               source: 'core://wifi',
               uri: m.uri,
+              title: 'wifi',
               state: 'update',
               changes: ['content'],
               request: {

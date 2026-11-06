@@ -596,6 +596,42 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       }
     })
 
+    it('同步项带标题：和写入目标同一个取法，按记忆现在的坐标；记忆现在是机密的只用标识', async () => {
+      await run()
+      expect((await move('user://preferences/user', 'user://preferences/me')).status).toBe(200)
+      const undoNetwork = await editLore('infra://office_network', {
+        content: '# 办公室网络\n换了新交换机',
+      })
+      const undoCreds = await editLore('infra://office_network/credentials', {
+        content: '# 路由器密码\nhunter3',
+      })
+      const undoPrefs = await editLore('preferences://user', { content: '# 回复的偏好\n中文' })
+      try {
+        const sync = await syncPlan()
+        const bySource = new Map(sync.items.map((i) => [i.source, i]))
+        expect(bySource.get('infra://office_network')).toMatchObject({
+          state: 'update',
+          title: '办公室网络',
+        })
+        // 同步不改敏感级：导入成机密的正文加密、标题是明文，和导入时一样只用标识
+        expect(bySource.get('infra://office_network/credentials')).toMatchObject({
+          state: 'update',
+          title: 'credentials',
+        })
+        expect(bySource.get('preferences://user')).toMatchObject({
+          state: 'edited',
+          uri: 'user://preferences/me',
+          title: '回复的偏好',
+        })
+        // 正文里没有 # 标题的用标识
+        expect(bySource.get('core://agent')).toMatchObject({ state: 'current', title: 'agent' })
+      } finally {
+        await undoPrefs()
+        await undoCreds()
+        await undoNetwork()
+      }
+    })
+
     it('在 Kioku 里改过、移动过、删除了的不同步，只列出来', async () => {
       await run()
       expect(
@@ -954,6 +990,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         expect(sync.items.find((i) => i.uri === 'user://infra/office_network')).toEqual({
           source: 'infra://office_network',
           uri: 'user://infra/office_network',
+          title: 'office_network',
           state: 'skipped',
           reason: '本次选择不导入',
           changes: [],

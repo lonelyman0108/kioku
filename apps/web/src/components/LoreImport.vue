@@ -676,9 +676,18 @@ const disclosureCut = computed(
               :key="group.state"
               :open="group.state === 'update'"
             >
-              <summary>{{ group.title }}（{{ group.lines.length }}）</summary>
+              <summary>{{ group.heading }}（{{ group.lines.length }}）</summary>
               <ul class="detail-list">
-                <li v-for="(line, i) in group.lines" :key="i">{{ line }}</li>
+                <!-- 和上面的写入目标一样先写标题，坐标跟在后面 -->
+                <li v-for="(line, i) in group.lines" :key="i" class="sync-line">
+                  <span v-if="line.title" class="target-title">{{ line.title }}</span>
+                  <UriPath :uri="line.uri" wrap />
+                  <template v-if="line.target">
+                    <span>→</span>
+                    <UriPath :uri="line.target" wrap />
+                  </template>
+                  <span v-if="line.detail">{{ line.detail }}</span>
+                </li>
               </ul>
             </details>
           </div>
@@ -770,6 +779,13 @@ const disclosureCut = computed(
   font-size: 14px;
   font-weight: 500;
   color: var(--ui-text-highlighted);
+}
+.sync-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  font-size: 13px;
 }
 summary {
   font-weight: 500;

@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest'
 import {
   assertExecutable,
   credentialHints,
+  loreTitle,
+  plainSensitivity,
   planFingerprint,
   planImport,
   requestLayer,
@@ -68,6 +70,33 @@ describe('Lore 导入计划', () => {
       ['infra://office_network', 'user://infra/office_network', 'user', 'private'],
     ])
     expect(plan.memories.map((m) => m.request.priority)).toEqual([0, 0, 0, 0, 1])
+  })
+
+  it('标题取正文第一个 # 标题，没有就用坐标的标识；标成 secret 的只用标识，和同步项、命令行同一个取法', () => {
+    const plan = planImport(
+      snapshot(
+        node('infra://nas', { content: '说明\n# 存储服务器\n## 别的' }),
+        node('infra://router', { content: '# 路由器密码\nhunter2' }),
+        node('infra://vpn', { content: '# 用 {{cred:vpn}} 登录\n正文' }),
+        node('preferences://user'),
+      ),
+      [],
+      { ...options, secretUris: new Set(['infra://router']) },
+    )
+    expect(
+      plan.memories.map((m) => [m.request.uri, m.request.title, m.request.sensitivity]),
+    ).toEqual([
+      ['user://infra/nas', '存储服务器', 'private'],
+      ['user://infra/router', 'router', 'secret'],
+      ['user://infra/vpn', 'vpn', 'private'],
+      ['user://preferences/user', 'user', 'internal'],
+    ])
+    for (const m of plan.memories) {
+      const layer = requestLayer(m.request)
+      const secret = m.request.sensitivity === 'secret'
+      expect(loreTitle(m.request.content, m.request.uri, secret)).toBe(m.request.title)
+      if (!secret) expect(plainSensitivity(m.source, layer)).toBe(m.request.sensitivity)
+    }
   })
 
   it('运行时先按应用标识匹配，再按运行时类型匹配，都没有就新建', () => {
@@ -721,12 +750,19 @@ describe('Lore 导入计划', () => {
           items: [
             {
               source: 'infra://x',
-              uri: 'infra://x',
+              uri: 'user://infra/x',
+              title: 'x 的标题',
               state: 'update',
               changes: ['content', 'priority'],
-              request: { uri: 'infra://x', expectedVersion: 3, expectedId: 'a' },
+              request: { uri: 'user://infra/x', expectedVersion: 3, expectedId: 'a' },
             },
-            { source: 'infra://y', uri: 'infra://y', state: 'current', changes: [] },
+            {
+              source: 'infra://y',
+              uri: 'user://infra/y',
+              title: 'y',
+              state: 'current',
+              changes: [],
+            },
           ],
           goneFromLore: ['infra://b', 'infra://a'],
         },
@@ -756,8 +792,9 @@ describe('Lore 导入计划', () => {
         item.updatedAt = new Date('2000-01-01T00:00:00Z')
         item.context.previousVersions = 99
       }
-      times.sync.items[0]!.request = { uri: 'infra://x', expectedVersion: 4, expectedId: 'b' }
+      times.sync.items[0]!.request = { uri: 'user://infra/x', expectedVersion: 4, expectedId: 'b' }
       times.sync.items[1]!.state = 'edited'
+      times.sync.items[1]!.title = '不写入的同步项换了标题'
       times.plan.droppedKeywords.push({ source: 'infra://token', keyword: '词', reason: '不要' })
       times.preview.importedPersonas.push('old')
       expect(fingerprint(times)).toBe(same)
@@ -797,7 +834,8 @@ describe('Lore 导入计划', () => {
         (i) => i.preview.targets.pop(),
         (i) => i.plan.skipped.pop(),
         (i) => i.plan.warnings.pop(),
-        (i) => (i.sync.items[0]!.uri = 'infra://z'),
+        (i) => (i.sync.items[0]!.uri = 'user://infra/z'),
+        (i) => (i.sync.items[0]!.title = '别的标题'),
         (i) => i.sync.items[0]!.changes.pop(),
         (i) => (i.sync.items[0]!.state = 'edited'),
         (i) => i.sync.goneFromLore.pop(),

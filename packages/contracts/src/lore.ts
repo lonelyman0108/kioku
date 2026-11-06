@@ -161,6 +161,9 @@ export const LoreSyncItem = z.object({
   source: z.string(),
   // 记忆现在的 URI；在 Kioku 里删除了的是导入时的 URI
   uri: z.string(),
+  // 和写入目标的标题同一个取法：Lore 正文第一个 # 标题，没有就用 uri 的标识。同步不改敏感级，
+  // 记忆现在是机密的不从正文取，只用标识
+  title: z.string(),
   state: LoreSyncState,
   target: z.string().optional(),
   reason: z.string().optional(),

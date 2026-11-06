@@ -8,6 +8,7 @@ import {
   type LorePlanNode,
   type LorePlanTarget,
   type LoreSyncChange,
+  type LoreSyncItem,
   type LoreSyncState,
   type LoreTargetState,
 } from '@kioku/contracts'
@@ -258,13 +259,23 @@ const SYNC_CHANGE_LABELS: Record<LoreSyncChange, string> = {
   glossary: '关键词',
 }
 
-export interface SyncGroup {
-  state: LoreSyncState | 'gone'
-  title: string
-  lines: string[]
+// 同步差异的一行：和计划里的写入目标一样先写标题、再写坐标，后面是要更新的几项或原因；
+// Lore 里换了路径的另给应在的坐标。Lore 中已不存在的只有坐标：节点不在了，取不到标题
+export interface SyncLine {
+  title: string | null
+  uri: string
+  target: string | null
+  detail: string | null
 }
 
-const SYNC_TITLES: Record<Exclude<LoreSyncState, 'current'>, string> = {
+export interface SyncGroup {
+  state: LoreSyncState | 'gone'
+  heading: string
+  lines: SyncLine[]
+}
+
+// 按这个顺序分组
+const SYNC_HEADINGS: Record<Exclude<LoreSyncState, 'current'>, string> = {
   update: '按 Lore 更新',
   edited: '导入后在 Kioku 中修改或移动过，不同步（如需跟随 Lore 请手动修改）',
   moved:
@@ -275,50 +286,37 @@ const SYNC_TITLES: Record<Exclude<LoreSyncState, 'current'>, string> = {
   unreadable: '无法读取，未同步',
 }
 
+// 要更新的写要改的几项，不导入的与无法读取的写原因
+const syncLine = (item: LoreSyncItem): SyncLine => ({
+  title: item.title,
+  uri: item.uri,
+  target: item.target ?? null,
+  detail:
+    item.state === 'update'
+      ? item.changes.map((c) => SYNC_CHANGE_LABELS[c]).join('、')
+      : (item.reason ?? null),
+})
+
 // 同步差异：和命令行 --sync 打印的是同一份。已是最新的只给个数，其余每种列出来，没有的不出现
 export function syncGroups(plan: LoreImportPlan): { current: number; groups: SyncGroup[] } {
-  const of = (state: LoreSyncState) => plan.sync.items.filter((i) => i.state === state)
   const groups: SyncGroup[] = []
-  const add = (state: SyncGroup['state'], title: string, lines: string[]) => {
-    if (lines.length) groups.push({ state, title, lines })
+  for (const [state, heading] of Object.entries(SYNC_HEADINGS) as [LoreSyncState, string][]) {
+    const lines = plan.sync.items.filter((i) => i.state === state).map(syncLine)
+    if (lines.length) groups.push({ state, heading, lines })
   }
-  add(
-    'update',
-    SYNC_TITLES.update,
-    of('update').map((i) => `${i.uri}：${i.changes.map((c) => SYNC_CHANGE_LABELS[c]).join('、')}`),
-  )
-  add(
-    'edited',
-    SYNC_TITLES.edited,
-    of('edited').map((i) => i.uri),
-  )
-  add(
-    'moved',
-    SYNC_TITLES.moved,
-    of('moved').map((i) => `${i.uri} → ${i.target ?? ''}`),
-  )
-  add(
-    'deleted',
-    SYNC_TITLES.deleted,
-    of('deleted').map((i) => i.uri),
-  )
-  add(
-    'skipped',
-    SYNC_TITLES.skipped,
-    of('skipped').map((i) => `${i.uri}：${i.reason ?? ''}`),
-  )
-  add(
-    'unmapped',
-    SYNC_TITLES.unmapped,
-    of('unmapped').map((i) => i.uri),
-  )
-  add(
-    'unreadable',
-    SYNC_TITLES.unreadable,
-    of('unreadable').map((i) => `${i.uri}：${i.reason ?? ''}`),
-  )
-  add('gone', 'Lore 中已不存在此节点，Kioku 中保留（如需删除请手动删除）', plan.sync.goneFromLore)
-  return { current: of('current').length, groups }
+  if (plan.sync.goneFromLore.length) {
+    groups.push({
+      state: 'gone',
+      heading: 'Lore 中已不存在此节点，Kioku 中保留（如需删除请手动删除）',
+      lines: plan.sync.goneFromLore.map((uri) => ({
+        title: null,
+        uri,
+        target: null,
+        detail: null,
+      })),
+    })
+  }
+  return { current: plan.sync.items.filter((i) => i.state === 'current').length, groups }
 }
 
 // 看计划时能筛的几种节点

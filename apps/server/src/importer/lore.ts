@@ -10,6 +10,7 @@ import {
   type LoreTargetState,
   type LoreWarningKind,
   type RuntimeFamily,
+  type Sensitivity,
   type UpdateMemoryRequest,
 } from '@kioku/contracts'
 import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
@@ -51,6 +52,18 @@ const LORE_URI = /^([a-z][a-z0-9_]{0,31}):\/\/([a-z0-9_-]{1,64}(?:\/[a-z0-9_-]{1
 // 计划里一条写入的归属：坐标的开头。计划里的坐标都经过 CreateMemoryRequest 的校验
 export function requestLayer(request: { uri: string }) {
   return layerOf(parseUri(request.uri)!)
+}
+
+// 不标机密时写入的敏感级：本人的偏好给内部（开启后本人私聊也能用），别的按归属的默认（本人的给私密）
+export function plainSensitivity(loreUri: string, layer: Layer): Sensitivity {
+  return loreUri.startsWith('preferences://') ? 'internal' : DEFAULT_SENSITIVITY[layer]
+}
+
+// 写进去的标题：正文第一个 # 标题，没有就用坐标的标识。机密的正文加密、标题是明文，不从正文取，只用标识
+// （deriveTitle 只分是不是机密）。写入目标、同步项与命令行列出的标题都按它取，和写进去的一样
+export function loreTitle(content: string | null, uri: string, secret: boolean): string {
+  const path = uri.slice(uri.indexOf('://') + 3)
+  return deriveTitle(content ?? '', path, secret ? 'secret' : 'private')
 }
 
 // Lore 里一个节点导入时需要的信息。一个节点可能挂在多条路径上，最早的一条作为它的 URI，其余是别名
@@ -393,9 +406,6 @@ export function planImport(
       // preferences:// 也放进 user:// 下面，保留原来的分区作为第一级
       targets = [{ uri: formatUri('user', `${parsed.domain}/${parsed.path}`), layer: 'user' }]
     }
-    // 本人的偏好给内部（开启后本人私聊也能用），别的本人记忆给私密
-    const preferences = parsed.domain === 'preferences'
-
     // 路径看主路径和别名；正文之外 disclosure 与关键词也看：secret 只加密正文，这两项始终是明文
     const secret = secretNodes.has(node.uuid)
     const extras = extrasOf(node)
@@ -446,11 +456,7 @@ export function planImport(
         continue
       }
       // 占位符的位置规则与写入检查相同
-      const sensitivity = secret
-        ? 'secret'
-        : preferences
-          ? 'internal'
-          : DEFAULT_SENSITIVITY[target.layer]
+      const sensitivity = secret ? 'secret' : plainSensitivity(node.uri, target.layer)
       if (hasRefs && !placeholderAllowed(target.layer, sensitivity)) {
         skip(
           `正文含凭据占位符，只能放在本人、敏感级不低于私密的记忆中，${target.uri} 是${LAYER_NAMES[target.layer]} · ${SENSITIVITY_NAMES[sensitivity]}`,
@@ -459,11 +465,7 @@ export function planImport(
       }
       const request = CreateMemoryRequest.safeParse({
         uri: target.uri,
-        title: deriveTitle(
-          node.content,
-          target.uri.slice(target.uri.indexOf('://') + 3),
-          sensitivity,
-        ),
+        title: loreTitle(node.content, target.uri, secret),
         content: node.content,
         sensitivity,
         priority: node.priority,
@@ -1089,6 +1091,8 @@ export interface SyncItem {
   source: string
   // 记忆现在的 URI；在 Kioku 里删除了的是导入时的 URI
   uri: string
+  // 给人看的标题，和写入目标同一个取法（loreTitle），按 uri 的标识；同步不改敏感级，记忆现在是机密的只用标识
+  title: string
   state: SyncState
   // state 为 moved 时，按 Lore 现在的路径应当在的 URI
   target?: string
@@ -1142,10 +1146,19 @@ export async function planSync(
 
   const service = importerService(target)
   const sync: SyncPlan = { items: [], goneFromLore: [] }
+  const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
   const reported = new Set<ImportedMemory>()
-  const report = (m: ImportedMemory, item: Omit<SyncItem, 'changes'> & Partial<SyncItem>) => {
+  const report = (
+    m: ImportedMemory,
+    item: Omit<SyncItem, 'changes' | 'title'> & Partial<SyncItem>,
+  ) => {
     reported.add(m)
-    sync.items.push({ changes: [], ...item })
+    const content = nodeByUuid.get(m.loreNodeUuid)?.content ?? null
+    sync.items.push({
+      changes: [],
+      title: loreTitle(content, item.uri, m.state === 'secret'),
+      ...item,
+    })
   }
   const moved = movedInLore(plan, done)
   for (const item of plan.memories) {
@@ -1233,7 +1246,6 @@ export async function planSync(
   // 占位符的位置规则等）只给这个目标对应的旧记录：去重键相同的，或者 Lore 里换了路径、现在对应到它的（moved，
   // 和同步决定移到哪个目标是同一份）。不再对应任何目标的旧记录不挂别的目标的原因，列为没有映射到。
   // 目标被别的记忆占用的只出现在要新建的目标上，没有对应的旧记录，不会挂到任何一条上
-  const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
   const nodeReasons = new Map<string, string[]>()
   // 一条旧记录对应几个被跳过的目标时（换了路径之后映射到几个应用）只写第一个目标的原因：几句常常是同一句
   const targetReason = new Map<ImportedMemory, string>()
@@ -1297,8 +1309,8 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
 
 // 计划的指纹：看计划与执行时都对不带勾选的基准计划算，所以勾选不影响它。
 // 覆盖人格与这次会不会新建它、应用映射、哪些应用会被设默认人格（新建的也算）或在用别的人格、
-// 每个写入目标（来源、URI、层、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
-// 不导入的、提醒、要更新的同步项与 Lore 里没有了的；都排好序，所以打乱导出的行序不会变。
+// 每个写入目标（来源、URI、归属、标题、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
+// 不导入的、提醒、要更新的同步项（URI、标题与要改的几项）与 Lore 里没有了的；都排好序，所以打乱导出的行序不会变。
 // 不覆盖版本号、时间与人格本身在不在：只有真要写的东西变了才算计划变了
 export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: SyncPlan): string {
   const canonical = <T>(items: T[]) => items.map((item) => JSON.stringify(item)).sort()
@@ -1334,7 +1346,7 @@ export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: 
         updates: canonical(
           sync.items
             .filter((i) => i.state === 'update')
-            .map((i) => ({ uri: i.uri, changes: [...i.changes].sort() })),
+            .map((i) => ({ uri: i.uri, title: i.title, changes: [...i.changes].sort() })),
         ),
         goneFromLore: [...sync.goneFromLore].sort(),
       }),

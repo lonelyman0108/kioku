@@ -172,9 +172,10 @@ function planView(
     droppedKeywords: plan.droppedKeywords,
     warnings: plan.warnings,
     sync: {
-      items: sync.items.map(({ source, uri, state, target, reason, changes }) => ({
+      items: sync.items.map(({ source, uri, title, state, target, reason, changes }) => ({
         source,
         uri,
+        title,
         state,
         changes,
         ...(target ? { target } : {}),
