@@ -38,6 +38,15 @@ export function sensitivityAllowed(layer: Layer, sensitivity: Sensitivity): bool
   return !(layer === 'user' && sensitivity === 'public')
 }
 
+// 记下的四类不给敏感级时的默认值：本人不设公开，默认私密，宁可收得紧；应用默认内部；人格与通用默认公开。
+// 服务端的写入（含 Lore 导入）与管理界面的新建弹窗都按它，来自对话的两类由抽取按会话定
+export const DEFAULT_SENSITIVITY: Record<CuratedLayer, Sensitivity> = {
+  core: 'public',
+  persona: 'public',
+  app: 'internal',
+  user: 'private',
+}
+
 // 写入来源：untrusted 只能写 subject 与 episode，且不参与跨作用域的自动注入
 export const PROVENANCES = ['owner', 'agent', 'untrusted', 'system'] as const
 export const Provenance = z.enum(PROVENANCES)

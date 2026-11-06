@@ -1,10 +1,4 @@
-import {
-  CURATED_LAYERS,
-  NAMESPACED_LAYERS,
-  URI_PATTERN,
-  type CuratedLayer,
-  type Sensitivity,
-} from '@kioku/contracts'
+import { CURATED_LAYERS, NAMESPACED_LAYERS, URI_PATTERN, type CuratedLayer } from '@kioku/contracts'
 
 // 坐标（代码里叫 uri）的拆分与拼接：开头://位置/标识。开头就是归属，人格与应用的开头还带着人格或应用的标识，
 // 位置是开头与标识之间的各级，标识是最后一段。格式由 contracts 的 URI_PATTERN 定，这里只拆，不校验
@@ -78,14 +72,6 @@ export interface CoordinateDraft {
   entity: string | null
   position: string
   identifier: string
-}
-
-// 新建时每类归属默认的敏感级：本人不设公开，默认私密；应用默认内部；人格与通用默认公开
-export const DEFAULT_SENSITIVITY: Record<CuratedLayer, Sensitivity> = {
-  user: 'private',
-  app: 'internal',
-  persona: 'public',
-  core: 'public',
 }
 
 const SEGMENT = /^[a-z0-9_-]{1,64}$/

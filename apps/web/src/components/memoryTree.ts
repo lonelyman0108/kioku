@@ -9,6 +9,7 @@ import {
   type Sensitivity,
 } from '@kioku/contracts'
 
+import { identifierOf } from '../coordinates'
 import { personaRows } from '../personas'
 
 // 记忆目录的一个节点。第一级是四个根（本人、应用、人格、通用），键就是归属的名字（user、app、persona、core）；
@@ -34,11 +35,6 @@ export interface MemoryTreeItem {
   meta?: string
   children?: MemoryTreeItem[]
   [key: string]: unknown
-}
-
-export function lastSegment(uri: string): string {
-  const path = uri.split('://')[1] ?? uri
-  return path.split('/').pop() ?? path
 }
 
 // 打开或选中之前，下一级先放一个「加载中」占位，展开时再替换
@@ -137,7 +133,7 @@ export function entityItems(
 // 这一级超过上限被截断时，末尾放一个说明，不让人以为已经列全
 export function toTreeItems(result: MemoryChildren): MemoryTreeItem[] {
   const items: MemoryTreeItem[] = result.children.map((child) => ({
-    label: child.exists ? child.title?.trim() || lastSegment(child.uri) : lastSegment(child.uri),
+    label: child.exists ? child.title?.trim() || identifierOf(child.uri) : identifierOf(child.uri),
     uri: child.uri,
     kind: child.exists ? ('memory' as const) : ('folder' as const),
     exists: child.exists,

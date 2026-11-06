@@ -31,7 +31,6 @@ import {
   entityItems,
   focusAfterSelect,
   guideLines,
-  lastSegment,
   nodeKeyOf,
   nodeOfItem,
   parentOf,
@@ -51,6 +50,7 @@ import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { CURATED_STACK, layerTotal, tallyCounts } from '../components/strata/strata'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useViewport } from '../composables/useViewport'
+import { identifierOf } from '../coordinates'
 import { icons } from '../icons'
 import { invalidateInboxCounts } from '../inbox'
 import { layerLabels } from '../labels'
@@ -626,7 +626,7 @@ const crumbs = computed(() => {
   if (!uri) return []
   return ancestorsOf(uri).map((key) => {
     const item = find(roots.value, key)
-    const label = item?.label ?? (key.includes('://') ? lastSegment(key) : rootLabel(key))
+    const label = item?.label ?? (key.includes('://') ? identifierOf(key) : rootLabel(key))
     if (!item || !selectable(item)) return { label }
     const node = nodeOfItem(item)
     return { label, to: withQuery(node ? { node, uri: null } : { uri: key, node: null }) }

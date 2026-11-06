@@ -6,7 +6,6 @@ import {
   entityItems,
   focusAfterSelect,
   guideLines,
-  lastSegment,
   nodeKeyOf,
   nodeOfItem,
   nodeParam,
@@ -103,10 +102,6 @@ describe('记忆树', () => {
     ])
     expect(ancestorsOf('core://agent')).toEqual(['core'])
     expect([depthOf('core'), depthOf('core://agent'), depthOf('core://agent/x')]).toEqual([0, 1, 2])
-  })
-
-  it('节点名取最后一段', () => {
-    expect(lastSegment('infra://servers/web')).toBe('web')
   })
 
   it('有下一级的节点放加载占位，展开时再加载；叶子没有 children', () => {

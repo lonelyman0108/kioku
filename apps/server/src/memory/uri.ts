@@ -2,7 +2,6 @@ import {
   MEMORY_TITLE_MAX,
   URI_PATTERN,
   type CuratedLayer,
-  type Layer,
   type Sensitivity,
 } from '@kioku/contracts'
 
@@ -43,16 +42,6 @@ export function layerOf(parsed: ParsedUri): CuratedLayer {
 // 标识：坐标的最后一段
 export function identifierOf(path: string): string {
   return path.slice(path.lastIndexOf('/') + 1)
-}
-
-// 不给敏感级时按归属取；本人不设公开，不给时按私密，宁可收得紧
-export const DEFAULT_SENSITIVITY: Record<Layer, Sensitivity> = {
-  core: 'public',
-  persona: 'public',
-  app: 'internal',
-  user: 'private',
-  subject: 'public',
-  episode: 'public',
 }
 
 // Markdown 的标题行（# 到 ######），代码块里的不算

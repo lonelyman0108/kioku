@@ -2,7 +2,6 @@ import { URI_PATTERN } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
-  DEFAULT_SENSITIVITY,
   coordinateHead,
   draftFromKey,
   draftFromUri,
@@ -133,10 +132,5 @@ describe('新建与移动的表单', () => {
       position: 'notes',
       identifier: 'commit_style',
     })
-  })
-
-  it('本人默认私密，不设公开', () => {
-    expect(DEFAULT_SENSITIVITY.user).toBe('private')
-    expect(DEFAULT_SENSITIVITY.app).toBe('internal')
   })
 })

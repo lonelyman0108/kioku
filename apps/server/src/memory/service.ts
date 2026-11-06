@@ -5,6 +5,7 @@ import {
   CREDENTIAL_PLACEHOLDER,
   CREDENTIAL_PLACEHOLDER_START,
   CURATED_LAYERS,
+  DEFAULT_SENSITIVITY,
   LAYER_NAMES,
   NAMESPACED_LAYERS,
   PLAINTEXT_CREDENTIAL,
@@ -143,7 +144,6 @@ import { hasMaskedText } from './masked'
 import { layerWithValue, sensitivityWithValue } from './names'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
-  DEFAULT_SENSITIVITY,
   deriveTitle,
   formatUri,
   headingsOf,
@@ -1039,7 +1039,7 @@ export class MemoryService {
     const validFrom = meta.createdAt ?? new Date()
     const validTo = input.validTo === undefined ? null : checkValidTo(input.validTo, validFrom)
     const ownership = await this.resolveOwnership(tx, parsed)
-    const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
+    const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[layerOf(parsed)]
     checkSensitivity(ownership.layer, sensitivity)
     const wanted = input.title ?? deriveTitle(input.content, parsed.path, sensitivity)
     const title =

@@ -1,5 +1,6 @@
 <script setup lang="ts">
 import {
+  DEFAULT_SENSITIVITY,
   MemoryTitle,
   PLAINTEXT_CREDENTIAL,
   SENSITIVITIES,
@@ -13,7 +14,6 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import {
-  DEFAULT_SENSITIVITY,
   draftFromKey,
   draftProblem,
   draftUri,

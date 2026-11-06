@@ -13,12 +13,12 @@ import { useRoute, useRouter } from 'vue-router'
 import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
+import { identifierOf } from '../coordinates'
 import { icons } from '../icons'
 import { layerLabels, sensitivityLabels } from '../labels'
 import { missingDisclosure } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
-import { lastSegment } from './memoryTree'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -118,7 +118,10 @@ const positionItems = computed(() => {
   ] as const) {
     for (const child of levels.data.value?.children ?? []) {
       if (child.childCount > 0) {
-        items.push({ label: `${layerLabels[layer]} › ${lastSegment(child.uri)}`, value: child.uri })
+        items.push({
+          label: `${layerLabels[layer]} › ${identifierOf(child.uri)}`,
+          value: child.uri,
+        })
       }
     }
   }

@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  DEFAULT_SENSITIVITY,
   ErrorResponse,
   LORE_DEFAULT_PERSONA,
   LORE_UPLOAD_MAX_BYTES,
@@ -46,7 +47,6 @@ import { parseLoreBackup, type ParsedLoreBackup } from '../importer/loreBackup'
 import { fetchLoreBackup } from '../importer/loreFetch'
 import { bootEligible } from '../memory/filter'
 import { MemoryError } from '../memory/service'
-import { DEFAULT_SENSITIVITY } from '../memory/uri'
 
 const params = z.object({ spaceId: z.uuid() })
 const errors = {

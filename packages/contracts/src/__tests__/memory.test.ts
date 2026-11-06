@@ -1,6 +1,27 @@
 import { describe, expect, it } from 'vitest'
 
-import { bootEligible, isBootCandidate, LAYERS } from '../memory'
+import {
+  bootEligible,
+  CURATED_LAYERS,
+  DEFAULT_SENSITIVITY,
+  isBootCandidate,
+  LAYERS,
+  sensitivityAllowed,
+} from '../memory'
+
+describe('不给敏感级时的默认值', () => {
+  it('本人默认私密、应用默认内部、人格与通用默认公开，每一类的默认都是这一类收的', () => {
+    expect(DEFAULT_SENSITIVITY).toEqual({
+      core: 'public',
+      persona: 'public',
+      app: 'internal',
+      user: 'private',
+    })
+    for (const layer of CURATED_LAYERS) {
+      expect(sensitivityAllowed(layer, DEFAULT_SENSITIVITY[layer]), layer).toBe(true)
+    }
+  })
+})
 
 describe('够格进启动加载的记忆', () => {
   const base = {

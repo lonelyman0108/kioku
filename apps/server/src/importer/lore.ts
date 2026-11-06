@@ -2,11 +2,12 @@ import { createHash } from 'node:crypto'
 
 import {
   CreateMemoryRequest,
+  DEFAULT_SENSITIVITY,
   LAYER_NAMES,
   SENSITIVITY_NAMES,
   RUNTIME_FAMILIES,
   Slug,
-  type Layer,
+  type CuratedLayer,
   type LoreSyncChange,
   type LoreTargetState,
   type LoreWarningKind,
@@ -32,7 +33,6 @@ import { apps, memories, memoryEvents, personas } from '../db/schema'
 import { MemoryError, MemoryService, ownerFor, uriConflicts } from '../memory/service'
 import {
   APP_DOMAIN,
-  DEFAULT_SENSITIVITY,
   PERSONA_DOMAIN,
   deriveTitle,
   formatUri,
@@ -56,7 +56,7 @@ export function requestLayer(request: { uri: string }) {
 }
 
 // 不标机密时写入的敏感级：本人的偏好给内部（开启后本人私聊也能用），别的按归属的默认（本人的给私密）
-export function plainSensitivity(loreUri: string, layer: Layer): Sensitivity {
+export function plainSensitivity(loreUri: string, layer: CuratedLayer): Sensitivity {
   return loreUri.startsWith('preferences://') ? 'internal' : DEFAULT_SENSITIVITY[layer]
 }
 
@@ -381,7 +381,7 @@ export function planImport(
     const parsed = { domain: lore[1]!, path: lore[2]! }
 
     const segments = parsed.path.split('/')
-    let targets: { uri: string; layer: Layer; app?: string; persona?: string }[]
+    let targets: { uri: string; layer: CuratedLayer; app?: string; persona?: string }[]
     if (parsed.domain === 'core' && segments[0] === 'soul') {
       targets = [
         {
