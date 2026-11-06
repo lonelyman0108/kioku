@@ -19,9 +19,13 @@ export const conversationKindLabels: Record<ConversationKind, string> = {
 export const conversationTitle = (c: Pick<ConversationInfo, 'kind' | 'app' | 'displayName'>) =>
   c.kind === 'none' ? c.app.name : c.displayName
 
+// 群聊还是私聊；不带会话上下文的写「本人」。应用的面板里只写这个，应用不用再说一遍
+export const conversationKind = (c: Pick<ConversationInfo, 'kind'>) =>
+  c.kind === 'none' ? '本人' : conversationKindLabels[c.kind]
+
 // 第二行：哪个应用、群聊还是私聊；不带会话上下文的写「本人」
 export const conversationSubline = (c: Pick<ConversationInfo, 'kind' | 'app'>) =>
-  c.kind === 'none' ? '本人' : `${c.app.name} · ${conversationKindLabels[c.kind]}`
+  c.kind === 'none' ? '本人' : `${c.app.name} · ${conversationKind(c)}`
 
 // 事实听自哪里：群或私聊前面写「听自」，全局与应用写下的照原样说
 export function heardFrom(scope: OriginScope): string {

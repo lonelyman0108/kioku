@@ -4,7 +4,7 @@ import { computed, ref } from 'vue'
 
 import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
-import { conversationRoute, conversationSubline, conversationTitle } from '../conversations'
+import { conversationKind, conversationRoute, conversationTitle } from '../conversations'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
@@ -162,7 +162,7 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
               {{ conversationTitle(c) }}
             </RouterLink>
             <span class="side-meta">
-              {{ conversationSubline(c) }} ·
+              {{ conversationKind(c) }} ·
               <time :datetime="c.lastActiveAt" :title="formatTime(c.lastActiveAt)">
                 {{ formatShort(c.lastActiveAt) }}
               </time>

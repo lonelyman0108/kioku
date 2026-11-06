@@ -219,4 +219,24 @@ describe('目录里选中一个应用', () => {
     expect(html).toContain('有效访问密钥')
     expect(html).toContain('app://claudecode/')
   })
+
+  it('会话只写群聊、私聊或本人：面板就是这个应用的，应用名不再写一遍', async () => {
+    const qq = {
+      ...app,
+      id: '00000000-0000-4000-8000-0000000000a3',
+      slug: 'qqbot',
+      name: 'QQ 机器人',
+    }
+    const group = detail({ app: { id: qq.id, name: qq.name } })
+    const html = await render(AppPanel, { spaceId: SPACE, appId: qq.id, canWrite: true }, [
+      [['apps', SPACE], [qq]],
+      [['personas', SPACE], [persona]],
+      [['memory-list', SPACE, { under: 'qqbot', panel: true }], { items: [], nextCursor: null }],
+      [['conversations', SPACE, qq.id, 'recent'], { items: [group], nextCursor: null }],
+      [['overview', SPACE], { apps: [{ id: qq.id, keys: { active: 1, lastUsedAt: null } }] }],
+    ])
+    expect(html).toContain('读书会')
+    expect(html).toContain('群聊')
+    expect(html).not.toContain('QQ 机器人 · 群聊')
+  })
 })
