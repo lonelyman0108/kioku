@@ -148,7 +148,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的命令行', () => {
       expect(first.stdout).toContain('确认无误后加 --apply 执行：新建 4 条。')
 
       const applied = await run(['--apply', '--secret', 'infra://vault'], masterKey)
-      expect(applied.stderr).toBe('')
+      // 测试库里不一定装了任务队列：排不上向量补齐时命令行只警告这一句（服务下次启动时会补上），别的输出都不该有
+      const stray = applied.stderr
+        .split('\n')
+        .filter(
+          (line) => line.trim() && !line.startsWith('没能安排向量补齐') && !/^\s+at /.test(line),
+        )
+      expect(stray).toEqual([])
       expect(applied.code).toBe(0)
       expect(applied.stdout).toContain(vault)
       expect(applied.stdout).toContain('新建 4 条；已导入、跳过 0 条')
