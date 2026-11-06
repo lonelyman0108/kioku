@@ -242,6 +242,7 @@ describe('勾选之后这次会动什么', () => {
   const updateOf = (node: LorePlanNode, uri = node.targets[0]!.uri) => ({
     source: node.uri,
     uri,
+    title: node.targets[0]!.title,
     state: 'update' as const,
     changes: ['content' as const],
   })
