@@ -473,9 +473,6 @@ async function writeSpace(
     role: 'owner',
     dreamPrivate: x.header.exporter.dreamPrivate,
   })
-  // app.importing_space 告诉 URI 互斥的触发器：这是导入新空间的事务，空间这一行刚写下、
-  // 别的事务还看不到它，不用为每个 URI 加咨询锁（见 0023 迁移）
-  await tx.execute(sql`select set_config('app.importing_space', ${spaceId}, true)`)
 
   const personaIds = new Map(x.personas.map((p) => [p.id, randomUUID()]))
   const appIds = new Map(x.apps.map((a) => [a.id, randomUUID()]))

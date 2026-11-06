@@ -65,7 +65,7 @@ describe.skipIf(!testDatabaseUrl)('召回分析', () => {
     return { status: res.status, body: (await res.json()) as T }
   }
   // 把记忆的建立时间往前挪，空间当作早就建了（空间建立之前不算开始记录召回事件）；
-  // 开始记录召回事件的时间（0015 迁移写的那一行）按需设置，测试开头会清掉设置表
+  // 开始记录召回事件的时间（迁移写的那一行）按需设置，测试开头会清掉设置表
   const backdate = async (days: number) => {
     await database.db
       .update(spaces)

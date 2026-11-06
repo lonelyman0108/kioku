@@ -1,8 +1,7 @@
 import { randomBytes } from 'node:crypto'
-import { readFileSync } from 'node:fs'
 
 import type { CreatedKey, MemoryChildren, MemoryView } from '@kioku/contracts'
-import { and, eq, isNull, sql } from 'drizzle-orm'
+import { and, eq, isNull } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -594,41 +593,6 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     }
   })
 
-  it('历史清理迁移在 RLS 下也能清掉旧 secret 事件里的明文', async () => {
-    const key = await ws.issueKey((await ws.createApp('agent')).id)
-    const res = await create(key, {
-      uri: 'home://router',
-      content: '管理密码 hunter2',
-      sensitivity: 'secret',
-    })
-    const id = ((await res.json()) as { id: string }).id
-    // 模拟清理上线之前留下的事件：快照里还有明文与全文向量
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.insert(memoryEvents).values({
-        spaceId: ws.spaceId,
-        memoryId: id,
-        eventType: 'update',
-        provenance: 'agent',
-        before: { content: '管理密码 hunter2', fts: "'hunter2':2" },
-        after: { content: null },
-      }),
-    )
-    const migration = readFileSync(
-      new URL('../../../migrations/0010_scrub_secret_history.sql', import.meta.url),
-      'utf8',
-    )
-    await database.db.transaction(async (tx) => {
-      for (const statement of migration.split('--> statement-breakpoint')) {
-        if (statement.replace(/--.*$/gm, '').trim()) await tx.execute(sql.raw(statement))
-      }
-    })
-    const events = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEvents))
-    expect(JSON.stringify(events)).not.toContain('hunter2')
-    const forced = await database.db.execute<{ relname: string; relforcerowsecurity: boolean }>(
-      sql`select relname, relforcerowsecurity from pg_class where relname in ('memories', 'memory_events')`,
-    )
-    expect(forced.every((r) => r.relforcerowsecurity)).toBe(true)
-  })
   it('一个客户端被锁之后再怎么试，也不会把主人从别处登录一起锁住', async () => {
     const proxied = proxiedApp()
     for (let i = 0; i < 60; i++) await loginFrom(proxied, '203.0.113.66', 'wrong')
