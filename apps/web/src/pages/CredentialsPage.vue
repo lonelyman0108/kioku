@@ -452,11 +452,9 @@ async function removeProvider() {
             <p v-else class="row-muted">暂无使用说明</p>
           </li>
         </ul>
-        <p v-else-if="providers.isError.value" class="empty text-error">
-          {{
-            providers.error.value instanceof ApiError ? providers.error.value.message : '读取失败'
-          }}
-        </p>
+        <div v-else-if="providers.isError.value" class="pt-3">
+          <NoteLine tone="error">{{ readFailure(providers.error.value) }}</NoteLine>
+        </div>
         <p v-else-if="providers.data.value" class="empty">
           暂无凭据源。全部由 Kioku 托管时无需添加。
         </p>
@@ -717,8 +715,10 @@ button.row-name::after {
   white-space: nowrap;
 }
 @media (max-width: 1240px) {
+  /* 上下排时凭据源紧跟在列表后面，多出的高度留给凭据源，不在两段之间空出来 */
   .columns {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
   .main-column {
     border-right: 0;

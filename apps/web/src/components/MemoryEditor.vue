@@ -1242,8 +1242,9 @@ const properties = computed<Property[][]>(() => {
   gap: 6px 16px;
   margin-bottom: 7px;
 }
+/* 和表单字段下的说明一样大：这是一句完整的说明，不是标签 */
 .edit-help {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ui-text-muted);
 }
 .edit-tools {
@@ -1292,8 +1293,10 @@ const properties = computed<Property[][]>(() => {
     flex-wrap: wrap;
     margin-top: 11px;
   }
+  /* 多出的高度留给属性栏，正文和属性栏之间不空出来 */
   .memory-detail > .detail-main {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
   .detail-side {
     padding: 6px 32px 40px;

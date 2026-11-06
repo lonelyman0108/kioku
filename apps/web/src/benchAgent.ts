@@ -76,7 +76,7 @@ export const AGENT_UNAVAILABLE_NOTES: Record<
   noModel: {
     title: '尚未配置模型',
     description:
-      '在实例设置中配置抽取模型后可用，模型需支持工具调用。注意：配置后抽取与 Dream 也会开始运行，Dream 默认将画像层与私人层发送给该模型。如不希望发送，请先在空间设置中关闭「Dream 与私人内容」，再配置模型。',
+      '在实例设置中配置抽取模型后可用，模型需支持工具调用。注意：配置后抽取与 Dream 也会开始运行，Dream 默认将个人画像层与私人层发送给该模型。如不希望发送，请先在空间设置中关闭「Dream 与私人内容」，再配置模型。',
   },
   keyLocked: {
     title: '抽取模型的 Key 无法解密',

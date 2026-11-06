@@ -439,8 +439,10 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
     grid-row: auto;
     margin-top: 11px;
   }
+  /* 多出的高度留给下面一段，节点和继承关系之间不空出来 */
   .persona-detail > .detail-main {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
   .detail-nodes {
     padding-bottom: 28px;
