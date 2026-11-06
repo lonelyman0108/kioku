@@ -298,9 +298,9 @@ describe('概览', () => {
     expect(overviewPage).toContain('data.inbox.bindings')
   })
 
-  it('来自对话的两层不在记忆列表里，带去联系人页', () => {
+  it('来自对话的两类不在记忆列表里，带去对话页对应的分页', () => {
     expect(overviewPage).toMatch(
-      /isConversationLayer\(selection\.layer\)\) \{\s+void router\.push\(\{ name: 'subjects'/,
+      /isConversationLayer\(selection\.layer\)\) \{\s+void router\.push\(conversationTabRoute\(/,
     )
   })
 })

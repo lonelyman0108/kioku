@@ -18,8 +18,8 @@ import PageHead from '../components/strata/PageHead.vue'
 import activityPage from '../pages/ActivityPage.vue?raw'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
 import personasPage from '../pages/PersonasPage.vue?raw'
-import subjectDetailPage from '../pages/SubjectDetailPage.vue?raw'
-import subjectsPage from '../pages/SubjectsPage.vue?raw'
+import subjectsPage from '../components/ContactList.vue?raw'
+import subjectDetailPage from '../pages/ContactDetailPage.vue?raw'
 
 // 人格、联系人、凭据、变更记录。长相改过，确认框的后果和值不进缓存这些约束不能跟着丢
 

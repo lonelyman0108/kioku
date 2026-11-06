@@ -189,7 +189,7 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
           <span class="row-about">
             <RouterLink
               v-if="item.subject"
-              :to="{ name: 'subject', params: { spaceId, subjectId: item.subject.id } }"
+              :to="{ name: 'contact', params: { spaceId, subjectId: item.subject.id } }"
               >{{ item.subject.displayName }}</RouterLink
             >
           </span>

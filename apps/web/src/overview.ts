@@ -3,6 +3,13 @@ import type { ExtractionUsage, SubjectBinding } from '@kioku/contracts'
 import { accountText } from './bindings'
 import type { StrataSelection } from './components/strata/strata'
 
+// 来自对话的两类在对话页：会话在会话分页，联系人的事实在联系人分页
+export const conversationTabRoute = (spaceId: string, layer: 'subject' | 'episode') => ({
+  name: 'conversations',
+  params: { spaceId },
+  query: layer === 'subject' ? { tab: 'contacts' } : {},
+})
+
 // 概览页的说法和计算
 
 // 本月抽取（含 Dream 的整理）的 token 用到八成时提醒；用完之后只写会话摘要、不再抽取事实，Dream 也不整理
@@ -36,8 +43,8 @@ export function bindingNote(items: readonly SubjectBinding[], total: number): st
   return total > 1 ? `${note}，共 ${total} 个` : note
 }
 
-// 点地层柱的一格：记忆列表按层和敏感级筛选。
-// 来自对话的两层不在记忆列表里（列表只列 URI 树上的记忆），调用方带去联系人页
+// 点地层柱的一格：记忆列表按归属和敏感级筛选。
+// 来自对话的两类不在记忆列表里（列表只列目录里的记忆），调用方带去对话页（conversationTabRoute）
 export function strataFilterQuery({ layer, sensitivity }: StrataSelection) {
   return {
     view: 'list',

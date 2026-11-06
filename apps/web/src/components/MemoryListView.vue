@@ -242,9 +242,9 @@ const total = computed(() => {
             size="sm"
             color="primary"
             variant="outline"
-            :to="{ name: 'subjects', params: { spaceId } }"
+            :to="{ name: 'conversations', params: { spaceId } }"
           >
-            查看联系人
+            查看对话
           </UButton>
         </template>
       </NoteLine>

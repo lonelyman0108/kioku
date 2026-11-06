@@ -6,6 +6,7 @@ export const icons = {
   activity: 'i-lucide-history',
   spaceSettings: 'i-lucide-sliders-horizontal',
   memories: 'i-lucide-brain',
+  conversations: 'i-lucide-message-square-text',
   personas: 'i-lucide-drama',
   subjects: 'i-lucide-users',
   review: 'i-lucide-inbox',

@@ -24,8 +24,10 @@ import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
 import personasPage from '../pages/PersonasPage.vue?raw'
 import recallPage from '../pages/RecallPage.vue?raw'
-import subjectDetailPage from '../pages/SubjectDetailPage.vue?raw'
-import subjectsPage from '../pages/SubjectsPage.vue?raw'
+import subjectsPage from '../components/ContactList.vue?raw'
+import conversationDetail from '../components/ConversationDetail.vue?raw'
+import subjectDetailPage from '../pages/ContactDetailPage.vue?raw'
+import conversationsPage from '../pages/ConversationsPage.vue?raw'
 import { failedReads, queryClient } from '../query'
 
 // 读取失败的写法：一律用 ReadFailureNote。文字经 readFailure；再读有用时给「重试」，重读的就是传进去的那一样，
@@ -210,6 +212,8 @@ describe('读取失败', () => {
     ['人格详情', personasPage, 'selected'],
     ['联系人', subjectsPage, 'section.query'],
     ['联系人详情', subjectDetailPage, 'subject'],
+    ['会话', conversationsPage, 'list'],
+    ['会话详情', conversationDetail, 'detail'],
     ['凭据', credentialsPage, 'credentials'],
     ['已删除的凭据', credentialsPage, 'deleted'],
     ['凭据详情', credentialsPage, 'selected'],
@@ -292,6 +296,12 @@ describe('读到过的内容不被错误盖掉', () => {
       subjectDetailPage,
       'subject',
       'v-else-if="!data || (subject.isError.value && !retryable(subject.error.value))"',
+    ],
+    [
+      '会话详情',
+      conversationDetail,
+      'detail',
+      'v-else-if="!data || (detail.isError.value && !retryable(detail.error.value))"',
     ],
     ['人格详情', personasPage, 'selected', '(!detail || !retryable(selected.error.value))'],
     [

@@ -17,6 +17,8 @@ import {
   ConsoleMemoryChildren,
   ConsoleMemoryView,
   ConsoleSearchResponse,
+  ConversationDetail,
+  ConversationList,
   ConvertedToCredential,
   CredentialEventList,
   CredentialProvider,
@@ -75,6 +77,7 @@ import {
   type BenchAgentTurnRequest,
   type BenchRunRequest,
   type BootPreviewRequest,
+  type ConversationListQuery,
   type ConvertToCredentialRequest,
   type CreateAppRequest,
   type CreateCredentialProviderRequest,
@@ -333,6 +336,11 @@ export const api = {
     request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),
   inboxCounts: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/inbox/counts`, { schema: InboxCounts }),
+  // 会话按最近活动从新到旧；按应用或联系人筛
+  conversations: (spaceId: string, query: ConversationListQuery) =>
+    request('GET', `/spaces/${spaceId}/conversations`, { query, schema: ConversationList }),
+  conversation: (spaceId: string, id: string) =>
+    request('GET', `/spaces/${spaceId}/conversations/${id}`, { schema: ConversationDetail }),
   subjects: (spaceId: string, query: SubjectListQuery) =>
     request('GET', `/spaces/${spaceId}/subjects`, { query, schema: SubjectList }),
   subject: (spaceId: string, id: string) =>

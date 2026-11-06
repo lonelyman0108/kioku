@@ -20,7 +20,13 @@ import {
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { actionableInboxCount } from '../inbox'
-import { bindingNote, budgetWarning, splitNote, strataFilterQuery } from '../overview'
+import {
+  bindingNote,
+  budgetWarning,
+  conversationTabRoute,
+  splitNote,
+  strataFilterQuery,
+} from '../overview'
 import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
 
@@ -45,11 +51,11 @@ const extracted = computed(() =>
   (data.value?.extractedCounts ?? []).reduce((sum, c) => sum + c.count, 0),
 )
 
-// 点地层柱：记忆列表按层和敏感级筛选。来自对话的两层不在记忆列表里，它们的内容在联系人页
+// 点地层柱：记忆列表按归属和敏感级筛选。来自对话的两类不在记忆列表里，去对话页对应的分页
 function openStrata(selection: StrataSelection) {
   const params = { spaceId: spaceId.value }
   if (selection.layer && isConversationLayer(selection.layer)) {
-    void router.push({ name: 'subjects', params })
+    void router.push(conversationTabRoute(spaceId.value, selection.layer))
     return
   }
   void router.push({ name: 'memories', params, query: strataFilterQuery(selection) })

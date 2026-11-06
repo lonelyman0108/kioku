@@ -318,7 +318,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                 </RouterLink>
                 <RouterLink
                   v-else-if="memory.subject"
-                  :to="{ name: 'subject', params: { spaceId, subjectId: memory.subject.id } }"
+                  :to="{ name: 'contact', params: { spaceId, subjectId: memory.subject.id } }"
                   class="memory-link"
                 >
                   关于「{{ memory.subject.displayName }}」

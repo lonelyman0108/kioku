@@ -41,14 +41,27 @@ export const routes: RouteRecordRaw[] = [
         component: () => import('./pages/PersonasPage.vue'),
       },
       {
+        path: 'spaces/:spaceId/conversations',
+        name: 'conversations',
+        component: () => import('./pages/ConversationsPage.vue'),
+      },
+      {
+        path: 'spaces/:spaceId/conversations/contacts/:subjectId',
+        name: 'contact',
+        component: () => import('./pages/ContactDetailPage.vue'),
+      },
+      // 旧地址：联系人并进了对话页的联系人分页
+      {
         path: 'spaces/:spaceId/subjects',
-        name: 'subjects',
-        component: () => import('./pages/SubjectsPage.vue'),
+        redirect: (to) => ({
+          name: 'conversations',
+          params: to.params,
+          query: { tab: 'contacts' },
+        }),
       },
       {
         path: 'spaces/:spaceId/subjects/:subjectId',
-        name: 'subject',
-        component: () => import('./pages/SubjectDetailPage.vue'),
+        redirect: (to) => ({ name: 'contact', params: to.params }),
       },
       {
         path: 'spaces/:spaceId/inbox',
