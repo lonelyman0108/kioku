@@ -288,7 +288,8 @@ export function buildMcpServer(
     {
       description:
         '修改记忆的坐标（URI）：换最后一段是改标识，换中间各级是挪位置，换开头就是改归属（例如从 core:// 移到 app://<应用>/）。' +
-        '共享的归属（core://、persona://、app://）与本人（user://）之间不能通过访问密钥移动：这会改变谁读得到它，要在管理界面里由人来移。标题不变。',
+        '共享的归属（core://、persona://、app://）与本人（user://）之间不能通过访问密钥移动：这会改变谁读得到它，要在管理界面里由人来移。' +
+        '标题不变；只有标题就是原来的标识时按新坐标重新取：正文有 # 标题取它，没有就用新的标识。',
       inputSchema: {
         from: MemoryUri.describe('现在的坐标（URI）'),
         to: MemoryUri.describe('新的坐标（URI）'),

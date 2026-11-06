@@ -147,6 +147,7 @@ import {
   deriveTitle,
   formatUri,
   headingsOf,
+  identifierOf,
   layerOf,
   parseUri,
   withoutHeading,
@@ -2085,12 +2086,18 @@ export class MemoryService {
       }
       await this.checkKeptRefs(tx, before, ownership)
       await this.claimUri(tx, to, ownership, released)
+      // 标题就是旧的标识（从标识来的）时按新坐标重新取，和新建时一样：有 # 标题取它，机密只用标识
+      const title =
+        before.title === identifierOf(before.path!)
+          ? deriveTitle(before.content ?? '', to.path, before.sensitivity)
+          : before.title
       const [row] = await tx
         .update(memories)
         .set({
           ...ownership,
           domain: to.domain,
           path: to.path,
+          title,
           version: sql`${memories.version} + 1`,
           updatedAt: new Date(),
         })

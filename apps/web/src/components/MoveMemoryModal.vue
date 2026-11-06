@@ -11,7 +11,7 @@ import { sensitivityLabels } from '../labels'
 import CoordinateFields from './CoordinateFields.vue'
 import NoteLine from './strata/NoteLine.vue'
 
-// 移动改的是坐标：换归属（换开头）、换位置、换标识。标题不变
+// 移动改的是坐标：换归属（换开头）、换位置、换标识。标题不变，只有标题就是原来的标识时服务端按新坐标重新取
 const props = defineProps<{ spaceId: string; memory: ConsoleMemoryView }>()
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ done: [memory: ConsoleMemoryView, from: string] }>()

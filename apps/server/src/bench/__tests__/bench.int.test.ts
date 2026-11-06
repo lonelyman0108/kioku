@@ -1251,18 +1251,19 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
           becameSecret: false,
         },
       ])
+      // 标题就是旧的标识，移动时跟着换成新的
       expect(move!.memories[0]).toMatchObject({
         type: 'move',
         uri: 'user://notes/b',
-        fields: ['uri'],
+        title: 'b',
+        fields: ['uri', 'title'],
       })
       expect(get!.memories).toEqual([])
       expect(secret!.memories).toEqual([
         {
           type: 'update',
           uri: 'user://notes/b',
-          // 移动不改标题
-          title: 'a',
+          title: 'b',
           fields: ['sensitivity'],
           left: false,
           becameSecret: true,

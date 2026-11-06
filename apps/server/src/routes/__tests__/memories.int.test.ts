@@ -230,6 +230,37 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect(((await out.json()) as MemoryView).layer).toBe('core')
   })
 
+  it('移动：标题就是旧标识（从标识来的）时按新坐标重新取，有 # 标题取它、机密只用标识；别的标题不动', async () => {
+    const move = async (from: string, to: string) => {
+      const res = await call('POST', '/memories/move', { from, to })
+      expect(res.status, await res.clone().text()).toBe(200)
+      return (await res.json()) as MemoryView
+    }
+    const titleOf = async (uri: string) => ((await (await get(uri)).json()) as MemoryView).title
+
+    // 没有 # 标题：标题跟着新的标识
+    await create({ uri: 'user://notes/router', content: '路由器的管理地址' })
+    expect((await move('user://notes/router', 'user://home/gateway')).title).toBe('gateway')
+    // 后来补上了 # 标题（修改正文不重新取标题）：移动时取它
+    await create({ uri: 'user://notes/nas', content: '在书房' })
+    await call('PATCH', '/memories', { uri: 'user://notes/nas', content: '# 书房的存储\n在书房' })
+    expect(await titleOf('user://notes/nas')).toBe('nas')
+    expect((await move('user://notes/nas', 'user://home/nas')).title).toBe('书房的存储')
+    // 机密只用标识，不从正文取
+    await create({
+      uri: 'user://notes/wifi',
+      content: '# 无线密码\nhunter2',
+      sensitivity: 'secret',
+    })
+    expect((await move('user://notes/wifi', 'user://home/wireless')).title).toBe('wireless')
+    expect(await titleOf('user://home/wireless')).toBe('wireless')
+    // 标题不是旧标识（从正文取的、明确给的）：不动
+    await create({ uri: 'user://notes/vpn', content: '# 公司的 VPN\n地址' })
+    expect((await move('user://notes/vpn', 'user://work/tunnel')).title).toBe('公司的 VPN')
+    await create({ uri: 'user://notes/printer', title: '打印机', content: '在客厅' })
+    expect((await move('user://notes/printer', 'user://home/printer2')).title).toBe('打印机')
+  })
+
   it('persona:// 自动归人格层，不存在的人格返回 404', async () => {
     const res = await create({ uri: 'persona://doubao/soul', content: '直接、有观点' })
     expect(((await res.json()) as MemoryView).layer).toBe('persona')

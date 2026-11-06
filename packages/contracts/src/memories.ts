@@ -159,7 +159,7 @@ export const UpdateMemoryRequest = z
   .meta({ id: 'UpdateMemoryRequest' })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>
 
-// 移动改的是坐标：换开头就是改归属，换最后一段就是改标识。标题不变
+// 移动改的是坐标：换开头就是改归属，换最后一段就是改标识。标题不变，只有标题就是原来的标识时按新坐标重新取
 export const MoveMemoryRequest = z
   .object({
     from: MemoryUri,
