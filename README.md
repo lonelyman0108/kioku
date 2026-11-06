@@ -131,8 +131,7 @@ docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres -
 - 贡献规范：[CONTRIBUTING.md](CONTRIBUTING.md)
 - agent 工作约定：[AGENTS.md](AGENTS.md)
 - 文档索引：[docs/README.md](docs/README.md)
-- Claude Code 插件：[plugins/claude-code/README.md](plugins/claude-code/README.md)
-- AstrBot 插件（群聊机器人）：[plugins/astrbot_plugin_kioku/README.md](plugins/astrbot_plugin_kioku/README.md)
+- Claude Code 插件与 AstrBot 插件（群聊机器人）在单独的仓库 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins)
 - 更新日志：[CHANGELOG.md](CHANGELOG.md)
 
 ## 许可证

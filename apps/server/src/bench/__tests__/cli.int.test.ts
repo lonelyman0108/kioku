@@ -5,11 +5,10 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import { tmpdir } from 'node:os'
-import { basename, join } from 'node:path'
+import { join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 import { serve } from '@hono/node-server'
-import type { BenchRunResult, LifecycleEvent } from '@kioku/contracts'
 import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -20,12 +19,8 @@ import type { Deps } from '../../http/env'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { httpExecutor } from '../httpExecutor'
-import { runSteps } from '../runner'
 
 const SERVER_DIR = fileURLToPath(new URL('../../..', import.meta.url))
-const FORWARD = fileURLToPath(
-  new URL('../../../../../plugins/claude-code/hooks/forward.mjs', import.meta.url),
-)
 const PROCESS_TIMEOUT = 30_000
 const BODY = '这段正文不应该默认打印出来'
 
@@ -622,71 +617,5 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         await executor.close()
       }
     })
-
-    it(
-      '真实 Key 跑一次钩子脚本：additionalContext 就是测试台看到的文字',
-      async () => {
-        await realCreate({
-          uri: 'core://agent',
-          content: '钩子要注入的启动节点',
-          sensitivity: 'public',
-          priority: 0,
-        })
-        await realCreate({
-          uri: 'user://notes/hook',
-          content: '召回用的记忆',
-          glossary: ['钩子关键词'],
-        })
-        const hook = (event: string, input: unknown) =>
-          runProcess(
-            [FORWARD, event],
-            {
-              CLAUDE_PLUGIN_OPTION_SERVER_URL: url,
-              CLAUDE_PLUGIN_OPTION_API_KEY: key,
-            },
-            JSON.stringify(input),
-          ).then((exited) => {
-            expect(exited.code).toBe(0)
-            expect(exited.stderr).toBe('')
-            return JSON.parse(exited.stdout) as {
-              hookSpecificOutput: { hookEventName: string; additionalContext: string }
-            }
-          })
-        const executor = httpExecutor({ url, key })
-        const benched = async (body: LifecycleEvent) => {
-          const result: BenchRunResult = await runSteps(executor, {
-            mode: 'real',
-            steps: [{ kind: 'lifecycle', body }],
-            replay: [],
-            run: 'hook',
-          })
-          return result.steps[0]!.text
-        }
-        try {
-          const sessionId = 'hook-session'
-          const started = await hook('session.start', { session_id: sessionId, cwd: dir })
-          expect(started.hookSpecificOutput.hookEventName).toBe('SessionStart')
-          expect(started.hookSpecificOutput.additionalContext).toContain('钩子要注入的启动节点')
-          expect(started.hookSpecificOutput.additionalContext).toBe(
-            await benched({
-              event: 'session.start',
-              sessionId,
-              project: { dirName: basename(dir) },
-            }),
-          )
-
-          const prompt = '钩子关键词是什么'
-          const submitted = await hook('prompt.submit', { session_id: sessionId, prompt })
-          expect(submitted.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit')
-          expect(submitted.hookSpecificOutput.additionalContext).toContain('user://notes/hook')
-          expect(submitted.hookSpecificOutput.additionalContext).toBe(
-            await benched({ event: 'prompt.submit', sessionId, prompt }),
-          )
-        } finally {
-          await executor.close()
-        }
-      },
-      PROCESS_TIMEOUT,
-    )
   })
 })

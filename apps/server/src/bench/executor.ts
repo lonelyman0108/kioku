@@ -127,7 +127,7 @@ export function restFailure(status: number, message: string): StepOutcome {
   }
 }
 
-// 宿主拿到的文字，规则和插件一样（plugins/claude-code/hooks/forward.mjs），return_value 取 context
+// 宿主拿到的文字，规则和 Claude Code 插件一样（kioku-plugins 仓库的 plugins/claude-code/hooks/forward.mjs，改这里要同步改它），return_value 取 context
 export function hostText(output: HostOutput): string {
   const value = output.value as {
     hookSpecificOutput?: { additionalContext?: unknown }
