@@ -1,8 +1,13 @@
 import { defineConfig } from 'vitest/config'
 
-// 集成测试共用一个数据库并会清空数据，测试文件之间必须串行
+import { testWorkers } from './src/testing/workers'
+
+// 集成测试会清空整个库，同一个库上的测试文件必须串行；
+// 设了 KIOKU_TEST_DATABASE_WORKERS 时每个 worker 有自己的库，按这个数并行
+const workers = testWorkers()
 export default defineConfig({
   test: {
-    fileParallelism: false,
+    fileParallelism: workers > 1,
+    maxWorkers: workers,
   },
 })

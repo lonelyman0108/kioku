@@ -14,7 +14,9 @@ if ! docker build --progress=plain -t "$image" . > "$log" 2>&1; then
   exit 1
 fi
 
-# 用单独的库，不碰集成测试的数据
+# 用单独的库，不碰集成测试的数据。连接串取 scripts/ci/test-db.sh 写下的，只换库名（端口由 Docker 分配）
+db_url=${KIOKU_TEST_DATABASE_URL:?先运行 scripts/ci/test-db.sh}
+db_url=${db_url%/*}/kioku_smoke
 sql() { docker exec kioku-test-db psql -q -v ON_ERROR_STOP=1 -U postgres "$@"; }
 sql -d postgres -c 'DROP DATABASE IF EXISTS kioku_smoke WITH (FORCE)' -c 'CREATE DATABASE kioku_smoke OWNER kioku'
 sql -d kioku_smoke -c 'CREATE EXTENSION vector' -c 'CREATE EXTENSION zhparser'
@@ -22,7 +24,7 @@ sql -d kioku_smoke -c 'CREATE EXTENSION vector' -c 'CREATE EXTENSION zhparser'
 docker rm -f "$name" > /dev/null 2>&1 || true
 trap 'docker rm -f "$name" > /dev/null 2>&1 || true' EXIT
 docker run -d --name "$name" --network host -e PORT="$port" \
-  -e DATABASE_URL=postgres://kioku:kioku@127.0.0.1:55432/kioku_smoke \
+  -e DATABASE_URL="$db_url" \
   -e KIOKU_MASTER_KEY="$(openssl rand -base64 32)" "$image" > /dev/null
 
 fail() {

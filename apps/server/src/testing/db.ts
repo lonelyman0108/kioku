@@ -7,11 +7,14 @@ import { connect, withSpace, type Database, type Db, type Tx } from '../db/clien
 import { runMigrations } from '../db/migrate'
 import { settings } from '../db/schema'
 import { settleRecallEvents } from '../recall/events'
+import { testWorkers, workerDatabaseUrl } from './workers'
 
 // 集成测试共用：需要真实 PostgreSQL。本地用 docker-compose.dev.yml 起库后设置 KIOKU_TEST_DATABASE_URL；
-// CI 里必须提供，没有就失败，避免集成测试被悄悄跳过。
-export const testDatabaseUrl = process.env.KIOKU_TEST_DATABASE_URL
-if (!testDatabaseUrl && process.env.CI) throw new Error('CI 环境缺少 KIOKU_TEST_DATABASE_URL')
+// CI 里必须提供，没有就失败，避免集成测试被悄悄跳过。并行时每个 worker 换成自己的库，见 workers.ts
+const baseUrl = process.env.KIOKU_TEST_DATABASE_URL
+if (!baseUrl && process.env.CI) throw new Error('CI 环境缺少 KIOKU_TEST_DATABASE_URL')
+export const testDatabaseUrl =
+  baseUrl && workerDatabaseUrl(baseUrl, testWorkers(), process.env.VITEST_POOL_ID)
 
 const migrationsFolder = fileURLToPath(new URL('../../migrations', import.meta.url))
 
