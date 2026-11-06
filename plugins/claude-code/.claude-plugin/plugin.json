@@ -1,7 +1,7 @@
 {
   "name": "kioku",
   "displayName": "Kioku",
-  "description": "Kioku 长期记忆：会话开始注入启动上下文，每轮注入召回候选，并提供读写记忆的 MCP 工具",
+  "description": "Kioku 长期记忆：会话开始时注入启动加载的内容，每轮注入召回候选，并提供读写记忆的 MCP 工具",
   "author": { "name": "Kioku" },
   "homepage": "https://github.com/lonelyman0108/kioku",
   "repository": "https://github.com/lonelyman0108/kioku",
@@ -16,8 +16,8 @@
     },
     "api_key": {
       "type": "string",
-      "title": "API Key",
-      "description": "在 Kioku 管理界面「应用与 Key」里为 Claude Code 应用签发的 Key",
+      "title": "访问密钥",
+      "description": "在 Kioku 管理界面的「应用」页为 Claude Code 应用签发的访问密钥",
       "required": true,
       "sensitive": true
     }

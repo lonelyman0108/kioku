@@ -1,7 +1,7 @@
 import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
-// 界面文字的禁用词，规则见 docs/plans/界面改版.md 的「术语」「文案规范」。
+// 界面文字的禁用词，规则见 docs/design.md 的「界面用语」和 AGENTS.md 的「管理界面的设计与文案」。
 // 这些写法是把代码逻辑直接翻成了大白话，或者是内部叫法，改过一遍之后不能再写回去
 // 英文字段名。Secret Access Key 是对象存储自己的字段名，不算
 const ENGLISH_TERMS = /(?<![\w/`.])(disclosure|priority|secret(?! access key)|boot)(?![\w/:`])/i

@@ -1,5 +1,5 @@
 {
-  "description": "会话开始时注入 Kioku 的启动上下文，每轮输入时注入召回候选",
+  "description": "会话开始时注入 Kioku 启动加载的内容，每轮输入时注入召回候选",
   "hooks": {
     "SessionStart": [
       {

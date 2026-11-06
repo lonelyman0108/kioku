@@ -73,7 +73,7 @@ async function main(event) {
     if (event === 'session.start') {
       writeContext(
         event,
-        'Kioku 插件还没有配置服务地址和 API Key，长期记忆不可用：在 /plugin 里为 kioku 填写配置。',
+        'Kioku 插件还没有配置服务地址和访问密钥，长期记忆不可用：在 /plugin 里为 kioku 填写配置。',
       )
     }
     return

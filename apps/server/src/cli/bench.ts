@@ -27,7 +27,7 @@ const HELP = `用真实 HTTP 与真实 Key 跑测试台的场景，覆盖鉴权�
   --list              列出内置预设，不连服务
   --allow-writes      允许写操作。这里没有回滚：写工具真的写入；kioku_credential 取值记访问事件；
                       turn.end 进对话缓冲、会排抽取；带私聊、群聊、频道上下文的生命周期事件与 /recall，
-                      第一次见到的平台账号会新建对象，对象没有删除接口，只能合并。
+                      第一次见到的平台账号会新建联系人，联系人没有删除接口，只能合并。
                       kioku_get 读到引用外部凭据的记忆时也记访问事件，不算写操作。
                       event、chatType 写成变量时运行前判不出来：展开之后才看出要写的步骤不发请求，算失败
   --show-output       打印每一步收到的原文。可能含明文：这里没有打码，取值是一次真实调用
@@ -41,7 +41,7 @@ const HELP = `用真实 HTTP 与真实 Key 跑测试台的场景，覆盖鉴权�
 不带正文；内部错误仍算失败。
 
 环境变量：
-  KIOKU_BENCH_KEY     API Key，不走命令行参数（参数会进 shell 历史与进程列表）
+  KIOKU_BENCH_KEY     访问密钥，不走命令行参数（参数会进 shell 历史与进程列表）
   KIOKU_BENCH_URL     服务地址
 
 退出码：0 没有失败的步骤；1 有失败或没有执行的步骤，或连不上服务；2 用法错误、运行前看得出要写却没有 --allow-writes`
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
   const url = values.url ?? process.env.KIOKU_BENCH_URL
   if (!url) throw new UsageError('缺少服务地址：--url 或环境变量 KIOKU_BENCH_URL')
   const key = process.env.KIOKU_BENCH_KEY
-  if (!key) throw new UsageError('缺少 API Key：环境变量 KIOKU_BENCH_KEY')
+  if (!key) throw new UsageError('缺少访问密钥：环境变量 KIOKU_BENCH_KEY')
 
   const chosen = values.scenario.map((id) => {
     const found = BENCH_SCENARIOS.find((s) => s.id === id)
