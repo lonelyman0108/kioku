@@ -59,8 +59,7 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
     <SectionHeading title="疑似明文凭据">
       <template #hint>
         <Hint>
-          正文疑似包含密码或
-          Token。建议转存为凭据，正文改用占位符。检测规则可能误判，确认不是凭据时可忽略；正文修改后会重新提示。
+          正文疑似包含密码或令牌。建议转存为凭据，正文改用占位符。检测规则可能误判，确认不是凭据时可忽略；正文修改后会重新提示。
         </Hint>
       </template>
     </SectionHeading>

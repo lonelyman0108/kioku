@@ -27,7 +27,7 @@ const total = computed(() => overview.data.value?.inbox.bindings ?? 0)
   <div>
     <SectionHeading title="账号绑定">
       <template #hint>
-        <Hint>对方在 Bot 私聊中使用绑定码发起申请，确认后账号并入标记为本人的联系人。</Hint>
+        <Hint>对方在与机器人的私聊中使用绑定码发起申请，确认后账号并入标记为本人的联系人。</Hint>
       </template>
     </SectionHeading>
     <NoteLine v-if="overview.isError.value" class="panel-note" tone="error">

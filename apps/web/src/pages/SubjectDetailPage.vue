@@ -182,7 +182,7 @@ function runCounts(run: ExtractionRunInfo): string {
   if (run.unchanged) parts.push(`已有 ${run.unchanged}`)
   if (run.dropped) parts.push(`丢弃 ${run.dropped}`)
   if (run.limited) parts.push(`超出每日上限 ${run.limited}`)
-  if (run.skippedTurns) parts.push(`${run.skippedTurns} 轮的 Key 已失效`)
+  if (run.skippedTurns) parts.push(`${run.skippedTurns} 轮的访问密钥已失效`)
   return parts.join(' · ')
 }
 </script>
@@ -356,8 +356,8 @@ function runCounts(run: ExtractionRunInfo): string {
               </template>
             </SectionHeading>
             <p class="section-note">
-              在 Bot 私聊中发送 /bind 获取绑定码，可将其他平台的账号合并到此联系人。<Hint>
-                到另一平台私聊同一 Bot，发送 /bind
+              在与机器人的私聊中发送 /bind 获取绑定码，可将其他平台的账号合并到此联系人。<Hint>
+                到另一平台私聊同一个机器人，发送 /bind
                 加绑定码，核对绑定目标后再发送一次确认，该平台账号即合并到申请绑定码的联系人。申请方已标记为成员、另一方未标记为同一成员时，还需该成员本人在此处或「待处理」中确认后才会合并。
               </Hint>
             </p>

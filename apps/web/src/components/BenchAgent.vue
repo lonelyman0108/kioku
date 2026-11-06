@@ -340,7 +340,7 @@ watch(generation, () => {
           <Hint>每一轮下方显示运行标记，可在变更记录中对应这些写入。</Hint>
         </p>
         <BenchContextForm v-if="loop !== 'tools'" />
-        <UFormField label="模型" help="接口与 Key 沿用实例设置的抽取模型，此处仅改模型名">
+        <UFormField label="模型" help="接口与 API Key 沿用实例设置的抽取模型，此处仅改模型名">
           <UInput
             :model-value="modelText"
             :placeholder="defaultModel"

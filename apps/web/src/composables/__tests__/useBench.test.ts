@@ -435,7 +435,7 @@ describe('运行中途作废', () => {
     expect(record?.title).toContain('可能已写入')
     expect(record?.title).toContain('请到变更记录确认')
     expect(record?.description).toContain('「我的场景」')
-    expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
+    expect(record?.description).toContain('「应用a1」的访问密钥「Keyk1」')
     expect(record?.result).toBe(RESULT)
     expect(record?.view).toBe('judged')
   })
@@ -1250,7 +1250,7 @@ describe('模型对话', () => {
     const [record] = bench.abandoned.value
     expect(record?.title).toContain('可能已写入')
     expect(record?.description).toContain('kioku_create')
-    expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
+    expect(record?.description).toContain('「应用a1」的访问密钥「Keyk1」')
     expect(record?.view).toBe('call')
     expect(record?.result).toBe(RESULT)
     // 不再请求模型：对话已经作废
@@ -1319,7 +1319,7 @@ describe('模型对话', () => {
     expect(bench.abandoned.value).toHaveLength(1)
     expect(record?.title).toContain('可能已写入')
     expect(record?.description).toContain('kioku_create')
-    expect(record?.description).toContain('「应用a1」的 Key「Keyk1」')
+    expect(record?.description).toContain('「应用a1」的访问密钥「Keyk1」')
     expect(record?.view).toBe('call')
     expect(record?.result?.run).toBe(RESULT.run)
     // 能一条一条关

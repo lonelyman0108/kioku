@@ -1,6 +1,8 @@
+import { URI_FORMAT_MESSAGE } from '@kioku/contracts'
 import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
+import { URI_FORMAT_HINT } from '../../labels'
 import { ApiError, attachmentName, download, readFailures, request } from '../client'
 import { api } from '../endpoints'
 
@@ -105,6 +107,22 @@ describe('API 客户端', () => {
       vi.fn(async () => Response.json({ error: '记忆不存在' }, { status: 404 })),
     )
     await expect(request('GET', '/x')).rejects.toEqual(new ApiError(404, '记忆不存在'))
+  })
+
+  it('URI 格式的报错是写给接口与 MCP 的：界面上换成只说中文的那句，去掉字段路径', async () => {
+    for (const error of [
+      URI_FORMAT_MESSAGE,
+      `uri：${URI_FORMAT_MESSAGE}`,
+      `to：${URI_FORMAT_MESSAGE}`,
+    ]) {
+      vi.stubGlobal(
+        'fetch',
+        vi.fn(async () => Response.json({ error }, { status: 400 })),
+      )
+      await expect(request('POST', '/x')).rejects.toEqual(new ApiError(400, URI_FORMAT_HINT))
+    }
+    expect(URI_FORMAT_HINT).toBe('URI 格式应为 分区://路径，例如 core://agent')
+    expect(URI_FORMAT_HINT).not.toMatch(/domain|path/)
   })
 
   it('响应不符合契约时直接报错', async () => {

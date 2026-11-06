@@ -57,8 +57,7 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
           <span>{{ formatShort(data.recordingSince) }} 开始记录，</span>
           <span class="me-1.5">明细保留 {{ data.retentionDays }} 天</span>
           <Hint>
-            更早的事件只保留每条记忆的累计次数。次数仅统计当前账号有权查看的记忆；各应用的调用量仅列出当前账号可管理
-            Key 的应用。
+            更早的事件只保留每条记忆的累计次数。次数仅统计当前账号有权查看的记忆；各应用的调用量仅列出当前账号可管理访问密钥的应用。
           </Hint>
         </p>
       </div>

@@ -100,8 +100,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
     <SectionHeading title="启动加载">
       <template #hint>
         <Hint>
-          按所选 Key
-          的当前权限模拟会话开始时注入的内容，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟。
+          按所选访问密钥的当前权限模拟会话开始时注入的内容，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟。
         </Hint>
       </template>
       <template v-if="usage" #actions>
@@ -124,7 +123,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
     <NoteLine v-else-if="state === 'failed'" class="boot-note" tone="error">
       {{ readFailure(keys.error.value) }}
     </NoteLine>
-    <p v-else-if="state === 'none'" class="boot-empty">暂无有效 Key。签发后可模拟。</p>
+    <p v-else-if="state === 'none'" class="boot-empty">暂无有效访问密钥。签发后可模拟。</p>
     <template v-else>
       <NoteLine v-if="failure" class="boot-note" tone="error">{{ failure }}</NoteLine>
       <USkeleton v-if="running && !preview" class="mt-3 h-40 w-full" />

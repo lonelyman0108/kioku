@@ -4,7 +4,13 @@ import { Writable } from 'node:stream'
 import type { MasterKey } from '../crypto/keyring'
 import { errorText, type Db } from '../db/client'
 import { createBackup } from './export'
-import { s3Client, type S3Client, type S3Location, type S3Object } from './s3'
+import {
+  s3Client,
+  SETTINGS_STORAGE_CHECK,
+  type S3Client,
+  type S3Location,
+  type S3Object,
+} from './s3'
 import {
   loadBackupConfig,
   loadBackupStatus,
@@ -55,7 +61,7 @@ export async function uploadBackup(
   )
   const body = Buffer.concat(chunks)
   chunks.length = 0
-  const client = s3Client(config)
+  const client = s3Client(config, SETTINGS_STORAGE_CHECK)
   const object = `${dirOf(config.prefix)}${nameOf(summary.createdAt)}`
   await client.put(object, body)
   let warning: string | null = null
@@ -100,7 +106,7 @@ export async function backupJob(
 
 // 测试连通：放一个小文件、列一遍、再删掉，读写删的权限都要有（删旧备份要用）。返回出错的原因，没出错返回 null
 export async function testBackupStorage(config: BackupConfig): Promise<string | null> {
-  const client = s3Client(config)
+  const client = s3Client(config, SETTINGS_STORAGE_CHECK)
   const probe = `${dirOf(config.prefix)}.kioku-probe-${randomUUID()}`
   try {
     await client.put(probe, Buffer.from('kioku'))
@@ -121,13 +127,14 @@ export async function testBackupStorage(config: BackupConfig): Promise<string | 
   return error
 }
 
-// 恢复用：从存储桶取一份备份，没指定对象名时取最新的
+// 恢复用：从存储桶取一份备份，没指定对象名时取最新的。check 是连不上时该检查的设置（见 s3Client）
 export async function fetchBackup(
   location: S3Location,
   prefix: string,
   object: string | null,
+  check: string,
 ): Promise<{ object: string; file: Buffer }> {
-  const client = s3Client(location)
+  const client = s3Client(location, check)
   const key = object ?? (await listBackups(client, prefix))[0]?.key
   if (!key) throw new Error(`存储桶里 ${dirOf(prefix) || '根目录'}下没有备份`)
   return { object: key, file: await client.get(key) }

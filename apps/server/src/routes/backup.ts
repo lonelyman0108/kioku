@@ -9,7 +9,7 @@ import {
   UpdateBackupSettings,
 } from '@kioku/contracts'
 
-import { s3Client } from '../backup/s3'
+import { s3Client, SETTINGS_STORAGE_CHECK } from '../backup/s3'
 import {
   backupSettingsView,
   clearBackupSettings,
@@ -37,7 +37,8 @@ const update = createRoute({
   method: 'put',
   path: '/settings/backup',
   tags: ['settings'],
-  summary: '修改备份存储：兼容S3的对象存储的接口、存储桶、访问密钥，每天几点（UTC）备份、留几份',
+  summary:
+    '修改备份存储：兼容S3的对象存储的接口、存储桶、Access Key ID 与 Secret Access Key，每天几点（UTC）备份、留几份',
   request: { body: jsonBody(UpdateBackupSettings) },
   responses: {
     200: jsonResponse('已保存', BackupSettingsView),
@@ -155,7 +156,10 @@ export function backupRoutes(deps: Deps) {
       const loaded = await configured()
       if (!loaded.ok) return c.json({ error: loaded.error }, 400)
       try {
-        const found = await listBackups(s3Client(loaded.config), loaded.config.prefix)
+        const found = await listBackups(
+          s3Client(loaded.config, SETTINGS_STORAGE_CHECK),
+          loaded.config.prefix,
+        )
         return c.json(
           { objects: found.map((o) => ({ object: o.key, bytes: o.bytes, at: o.at })) },
           200,

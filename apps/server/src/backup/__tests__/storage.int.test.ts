@@ -235,14 +235,15 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
       accessKeyId,
       secretAccessKey: 'backup-secret',
     }
-    expect((await fetchBackup(location, 'kioku', null)).object).toBe(made.object)
+    const check = '--s3-endpoint 与环境变量 AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY'
+    expect((await fetchBackup(location, 'kioku', null, check)).object).toBe(made.object)
     expect(
-      (await fetchBackup(location, 'kioku', 'kioku/kioku-2026-01-02T00-00-00Z.backup')).file,
+      (await fetchBackup(location, 'kioku', 'kioku/kioku-2026-01-02T00-00-00Z.backup', check)).file,
     ).toEqual(Buffer.from('old'))
-    await expect(fetchBackup(location, 'nothing', null)).rejects.toThrow('下没有备份')
+    await expect(fetchBackup(location, 'nothing', null, check)).rejects.toThrow('下没有备份')
     // 临时凭据带上会话令牌
     s3.requests.length = 0
-    await fetchBackup({ ...location, sessionToken: 'session-token' }, 'kioku', null)
+    await fetchBackup({ ...location, sessionToken: 'session-token' }, 'kioku', null, check)
     expect(s3.requests.length).toBeGreaterThan(0)
     expect(s3.requests.every((r) => r.token === 'session-token')).toBe(true)
   })
@@ -578,7 +579,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
   it('Secret 也在主密钥管的数据里：启动检查认得它，轮换时换成新密钥的包装', async () => {
     await save()
     await expect(checkMasterKey(database.db, randomBytes(32))).rejects.toThrow(
-      '实例设置中的接口 Key 1 条解不开',
+      '实例设置中加密保存的密钥 1 条解不开',
     )
     const newKey = randomBytes(32)
     expect(

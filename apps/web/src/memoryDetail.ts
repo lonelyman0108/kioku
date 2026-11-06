@@ -26,7 +26,7 @@ export function expiryState(validTo: string | null, now: Date = new Date()): Exp
 }
 
 // 启动加载的标记说的是够不够格，不是一定加载
-export const BOOT_HINT = '符合启动加载条件；实际是否加载取决于 Key 的权限、继承覆盖和字数上限'
+export const BOOT_HINT = '符合启动加载条件；实际是否加载取决于访问密钥的权限、继承覆盖和字数上限'
 
 // 够格进启动加载的节点。和服务端的 BOOT_ELIGIBLE 同一条规则，再加上启动加载用的读权限：机密永远不进。过期了也不算
 export function isBootNode(

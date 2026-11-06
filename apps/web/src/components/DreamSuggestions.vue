@@ -25,7 +25,7 @@ import {
   triggerLabels,
 } from '../dream'
 import { invalidateInboxCounts } from '../inbox'
-import { layerLabels } from '../labels'
+import { layerLabels, URI_FORMAT_HINT } from '../labels'
 import { memoryRoute } from '../routes'
 import { spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
@@ -104,7 +104,7 @@ function draftProblem(item: DreamSuggestion): string | null {
   if (!draft) return null
   if (!draft.content.trim()) return '正文不能为空'
   if (item.kind === 'distill' && !URI_PATTERN.test(draft.uri.trim())) {
-    return 'URI 格式为 domain://path，例如 people://xiaoming'
+    return URI_FORMAT_HINT
   }
   return null
 }
@@ -252,8 +252,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
     <SectionHeading title="整理建议">
       <template #hint>
         <Hint>
-          Dream
-          每天整理一次，只提建议，执行后才会修改记忆。建议分四类：合并重复内容、将多条事实提炼为一个节点、标记可能过时的内容、对未确认来源的内容建议确认或删除。执行后写入的来源记为本人；已拒绝的相同建议不再提出。
+          每天自动整理一次，只提建议，执行后才会修改记忆。建议分四类：合并重复内容、将多条事实提炼为一个节点、标记可能过时的内容、对未确认来源的内容建议确认或删除。执行后写入的来源记为本人；已拒绝的相同建议不再提出。
         </Hint>
       </template>
       <template v-if="lastRun" #actions>

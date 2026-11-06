@@ -16,8 +16,8 @@ export function budgetWarning(e: ExtractionUsage) {
       ? '本月抽取预算已用完'
       : `本月抽取预算已用 ${Math.floor((e.usedTokens / e.monthlyTokens) * 100)}%`,
     description: over
-      ? `${used}本月仅写会话摘要，不再抽取事实，Dream 暂停，下月恢复。空间所有者可在空间设置中调高预算。`
-      : `${used}用完后本月仅写会话摘要，不再抽取事实，Dream 暂停。`,
+      ? `${used}本月仅写会话摘要，不再抽取事实，整理暂停，下月恢复。空间所有者可在空间设置中调高预算。`
+      : `${used}用完后本月仅写会话摘要，不再抽取事实，整理暂停。`,
   }
 }
 

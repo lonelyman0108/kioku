@@ -142,8 +142,7 @@ async function create() {
         <p>
           每个接入的客户端（如 Claude Code、AstrBot）对应一个应用。
           <Hint>
-            应用读写的私人层属于应用所有者。Key
-            的权限在签发时确定，且不超过所有者当前的角色。点击名称可进入应用的设置、Key 与权限范围。
+            应用读写的私人层属于应用所有者。访问密钥的权限在签发时确定，且不超过所有者当前的角色。点击名称可进入应用的设置、访问密钥与权限范围。
           </Hint>
         </p>
       </div>
@@ -176,7 +175,7 @@ async function create() {
               <th scope="col">名称</th>
               <th scope="col">运行时</th>
               <th scope="col">默认人格</th>
-              <th scope="col">有效 Key</th>
+              <th scope="col">有效访问密钥</th>
               <th scope="col">最近使用</th>
               <th scope="col">所有者</th>
             </tr>
@@ -228,7 +227,7 @@ async function create() {
                     </li>
                   </ul>
                 </div>
-                <span v-else class="key-hidden">仅应用所有者可查看 Key</span>
+                <span v-else class="key-hidden">仅应用所有者可查看访问密钥</span>
                 <p v-if="keysFailure" class="key-failed">{{ keysFailure }}</p>
               </td>
               <td class="cell-used">

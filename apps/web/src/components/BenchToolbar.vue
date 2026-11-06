@@ -59,8 +59,8 @@ const retryKeys = computed(() => retryOf(keys))
       <template v-if="owned.length" #note>
         模拟应用调用 Kioku，不接入真实客户端。
         <Hint>
-          工具走真实的 MCP 服务端，权限按当前 Key 的有效上限。不记录召回事件，不更新 Key
-          的最近使用时间。机密正文与凭据的值一律打码，查看原值请到记忆页、凭据页。
+          工具走真实的 MCP
+          服务端，权限按当前访问密钥的有效上限。不记录召回事件，不更新访问密钥的最近使用时间。机密正文与凭据的值一律打码，查看原值请到记忆页、凭据页。
         </Hint>
       </template>
       <template v-if="owned.length" #actions>
@@ -75,13 +75,13 @@ const retryKeys = computed(() => retryOf(keys))
               @update:model-value="(v) => selectApp(String(v))"
             />
           </UFormField>
-          <UFormField label="Key" class="w-full sm:w-60 min-[87.5rem]:w-64">
+          <UFormField label="访问密钥" class="w-full sm:w-60 min-[87.5rem]:w-64">
             <USelect
               :model-value="keyId"
               :items="keyItems"
               :disabled="running || !keyItems.length"
-              :placeholder="keys.data.value && !keys.isError.value ? '暂无有效 Key' : ''"
-              aria-label="Key"
+              :placeholder="keys.data.value && !keys.isError.value ? '暂无有效访问密钥' : ''"
+              aria-label="访问密钥"
               class="w-full"
               @update:model-value="(v) => selectKey(String(v))"
             />
@@ -91,10 +91,10 @@ const retryKeys = computed(() => retryOf(keys))
               :scopes="key.effectiveScopes"
               :width="28"
               :height="48"
-              :label="`当前 Key 的上限：${scopesSummary(key.effectiveScopes)}`"
+              :label="`当前访问密钥的上限：${scopesSummary(key.effectiveScopes)}`"
             />
             <p>
-              <span class="limit-label">当前 Key 的上限</span>
+              <span class="limit-label">当前访问密钥的上限</span>
               {{ scopesSummary(key.effectiveScopes) }}
             </p>
           </div>
@@ -145,9 +145,9 @@ const retryKeys = computed(() => retryOf(keys))
           :actions="retryKeys"
         />
         <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">
-          当前应用暂无有效 Key，
+          当前应用暂无有效访问密钥，
           <RouterLink :to="{ name: 'app', params: { spaceId, appId } }" class="text-primary"
-            >签发 Key</RouterLink
+            >签发访问密钥</RouterLink
           >
           后可使用测试台。
         </p>
@@ -162,7 +162,9 @@ const retryKeys = computed(() => retryOf(keys))
       <template #body>
         <div class="space-y-2 text-sm">
           <p>
-            后续调用按「{{ app?.name }}」的 Key「{{ key?.name }}」真实执行，切回回滚模式也无法撤回：
+            后续调用按「{{ app?.name }}」的访问密钥「{{
+              key?.name
+            }}」真实执行，切回回滚模式也无法撤回：
           </p>
           <ul class="list-disc space-y-1 pl-5">
             <li v-for="line in REAL_MODE_CONSEQUENCES" :key="line">{{ line }}</li>

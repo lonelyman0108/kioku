@@ -61,7 +61,7 @@ export const LoreImportSource = z.discriminatedUnion('kind', [
     kind: z.literal('url'),
     url: z.string().min(1, '请填写 Lore 地址').max(2048, 'Lore 地址过长'),
     // Lore 没有设置 API_TOKEN 时可以留空
-    token: z.string().max(4096, 'Token 过长'),
+    token: z.string().max(4096, 'API Token 过长'),
   }),
 ])
 export type LoreImportSource = z.infer<typeof LoreImportSource>

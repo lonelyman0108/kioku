@@ -26,7 +26,7 @@ export function loreExportUrl(address: string): URL {
     throw new MemoryError(400, 'Lore 地址只支持 http 与 https')
   }
   if (base.username || base.password) {
-    throw new MemoryError(400, 'Lore 地址不能包含账号密码，Token 请单独填写')
+    throw new MemoryError(400, 'Lore 地址不能包含账号密码，API Token 请单独填写')
   }
   // 看 href：只写一个 ? 或 # 时 search 与 hash 都是空串，下面拼地址时路径会被丢掉，Token 发到同一主机的另一个路径
   if (/[?#]/.test(base.href)) {
@@ -88,7 +88,7 @@ export async function fetchLoreBackup(
       throw fail('redirect', 'Lore 返回了重定向，此处不跟随。请填写重定向后的地址。')
     }
     if (res.status === 401 || res.status === 403) {
-      throw fail('unauthorized', 'Lore 拒绝了此 Token')
+      throw fail('unauthorized', 'Lore 拒绝了此 API Token')
     }
     throw fail('status', `Lore 返回了错误（HTTP ${res.status}）`)
   }

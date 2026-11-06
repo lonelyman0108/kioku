@@ -406,7 +406,7 @@ const REST_TARGETS: CallTarget[] = [
     fixed: {},
     toStep: () => ({ kind: 'boot' }),
   }),
-  staticTarget('/whoami', 'rest', '当前 Key 的应用与当前上限，与 GET /v1/whoami 相同。', {
+  staticTarget('/whoami', 'rest', '当前访问密钥的应用与当前上限，与 GET /v1/whoami 相同。', {
     fields: [],
     hasBody: false,
     usesContext: false,
@@ -455,7 +455,7 @@ export function targetUnavailable(
   if (targets.some((t) => t.id === target.id)) return null
   if (catalog === 'pending') return `工具目录读取中，完成前无法运行 ${target.id}。`
   if (catalog === 'failed') return `工具目录读取失败，成功读取前无法运行 ${target.id}。`
-  return `当前 Key 的工具目录中没有 ${target.id}，无法运行。请选择其他调用。`
+  return `当前访问密钥的工具目录中没有 ${target.id}，无法运行。请选择其他调用。`
 }
 
 // 一个调用的草稿。切到别的调用再切回来时还在，只在内存里：可能有明文，不进浏览器存储

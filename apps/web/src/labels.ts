@@ -79,8 +79,8 @@ export const recallSourceLabels: Record<RecallSource, string> = {
 export const readDenialLabels: Record<ReadDenial, string> = {
   deleted: '已删除',
   expired: '已失效或过期',
-  layer: '超出 Key 的可读层',
-  sensitivity: '超出 Key 的敏感级上限',
+  layer: '超出访问密钥的可读层',
+  sensitivity: '超出访问密钥的敏感级上限',
   secret: '机密内容仅可按 URI 读取，不参与召回',
   origin: '来源范围不匹配',
   owner: '属于其他成员',
@@ -88,6 +88,9 @@ export const readDenialLabels: Record<ReadDenial, string> = {
   app: '属于其他应用',
   override: '已被更近的人格节点覆盖',
 }
+
+// 表单上的 URI 格式提示。契约里那句是给接口与 MCP 的，中英并列；界面上只说中文
+export const URI_FORMAT_HINT = 'URI 格式应为 分区://路径，例如 core://agent'
 
 // 按 URI 直接新建时可选的层：persona:// 与 app:// 由 URI 决定，联系人层与情节层由对话抽取写入
 export const creatableLayers: Layer[] = ['base', 'owner', 'private']

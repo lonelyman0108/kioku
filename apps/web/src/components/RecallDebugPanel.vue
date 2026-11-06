@@ -119,9 +119,7 @@ const groupName = useId()
       召回调试
       <template #hint>
         <Hint>
-          按所选 Key
-          的当前权限模拟一句话的召回，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟。模拟会读取应用所有者的私人层，只能选当前账号是所有者的应用的
-          Key。
+          按所选访问密钥的当前权限模拟一句话的召回，不计入召回记录。会话上下文（私聊、群聊）暂不可选，当前按无上下文模拟。模拟会读取应用所有者的私人层，只能选当前账号是所有者的应用的访问密钥。
         </Hint>
       </template>
     </SectionHeading>
@@ -136,12 +134,12 @@ const groupName = useId()
       class="debug-note"
       tone="error"
     >
-      应用「{{ failed.app.name }}」的 Key：{{ failed.text }}
+      应用「{{ failed.app.name }}」的访问密钥：{{ failed.text }}
     </NoteLine>
     <USkeleton v-if="apps.isPending.value || keysPending" class="mt-3 h-40 w-full" />
     <NoteLine v-else-if="apps.data.value && !owned.length" class="debug-note">
       当前账号暂无应用，无法调试
-      <template #detail>召回调试只能使用当前账号是所有者的应用的 Key。</template>
+      <template #detail>召回调试只能使用当前账号是所有者的应用的访问密钥。</template>
       <template #actions>
         <UButton
           :to="{ name: 'apps', params: { spaceId } }"
@@ -157,7 +155,7 @@ const groupName = useId()
       v-else-if="owned.length && !options.length && !choices.failures.length"
       class="debug-note"
     >
-      暂无有效 Key。签发后可调试。
+      暂无有效访问密钥。签发后可调试。
       <template #actions>
         <UButton
           :to="{ name: 'app', params: { spaceId, appId: owned[0]!.id } }"
@@ -165,14 +163,14 @@ const groupName = useId()
           color="primary"
           variant="outline"
         >
-          签发 Key
+          签发访问密钥
         </UButton>
       </template>
     </NoteLine>
     <div v-else-if="options.length" class="debug-body">
       <form class="debug-form" @submit.prevent="run">
         <fieldset>
-          <legend>Key</legend>
+          <legend>访问密钥</legend>
           <label
             v-for="option in options"
             :key="option.key.id"
@@ -206,7 +204,7 @@ const groupName = useId()
             v-model="query"
             :rows="2"
             autoresize
-            placeholder="查看当前 Key 的召回结果"
+            placeholder="查看当前访问密钥的召回结果"
             aria-label="模拟输入"
             class="w-full"
           />
@@ -222,7 +220,7 @@ const groupName = useId()
 
       <div class="debug-result">
         <NoteLine v-if="failure" class="debug-note" tone="error">{{ failure }}</NoteLine>
-        <p v-if="!debug && !failure" class="debug-idle">输入一句话，查看当前 Key 的召回结果</p>
+        <p v-if="!debug && !failure" class="debug-idle">输入一句话，查看当前访问密钥的召回结果</p>
         <div
           v-if="debug && axis"
           class="res"
@@ -361,9 +359,9 @@ const groupName = useId()
           <ul v-if="debug.filtered.length" class="denied-list">
             <li class="rg">
               <div class="rg-label">
-                <b>未进入当前 Key 的召回</b>
+                <b>未进入当前访问密钥的召回</b>
                 <span class="font-mono">{{ debug.filtered.length }}</span>
-                <Hint>管理界面能搜索到，但当前 Key 不会召回的记忆，每条后面写着原因。</Hint>
+                <Hint>管理界面能搜索到，但当前访问密钥不会召回的记忆，每条后面写着原因。</Hint>
               </div>
             </li>
             <li

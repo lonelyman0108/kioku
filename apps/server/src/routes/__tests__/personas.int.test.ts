@@ -394,7 +394,7 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       // 不是主人时，不存在的 Key 也是 403：探不出 Key 在不在
       const made = `/apps/${bot.id}/keys/00000000-0000-4000-8000-000000000000/matrix`
       expect((await as('GET', made, undefined, editor.cookie)).status).toBe(403)
-      expect(await errorOf(await as('GET', made))).toBe('Key 不存在')
+      expect(await errorOf(await as('GET', made))).toBe('访问密钥不存在')
       const noApp = `/apps/00000000-0000-4000-8000-000000000000/keys/${key!.id}/matrix`
       expect(await errorOf(await as('GET', noApp))).toBe('应用不存在')
       expect((await as('DELETE', `/apps/${bot.id}/keys/${key!.id}`)).status).toBe(204)
