@@ -2,6 +2,7 @@ import {
   CURATED_LAYERS,
   LAYERS,
   SENSITIVITIES,
+  sensitivityAllowed,
   type AccessCell,
   type KeyScopes,
   type Layer,
@@ -527,9 +528,11 @@ describe('权限范围的每种组合', () => {
       } as const
     )[read][writing]
   }
+  // 本人没有公开那一级，那一格另外测
   const combos = LAYERS.flatMap((layer) =>
-    SENSITIVITIES.flatMap((sensitivity) =>
-      READS.flatMap((read) => WRITES.map((write) => ({ layer, sensitivity, read, write }))),
+    SENSITIVITIES.filter((sensitivity) => sensitivityAllowed(layer, sensitivity)).flatMap(
+      (sensitivity) =>
+        READS.flatMap((read) => WRITES.map((write) => ({ layer, sensitivity, read, write }))),
     ),
   )
   // 矩阵里某一格的 HTML
@@ -561,9 +564,24 @@ describe('权限范围的每种组合', () => {
       if (read === 'none' && !write) {
         expect(cell, name).not.toContain('<svg')
       }
-      // 别的格子都是无权限
+      // 别的格子都是无权限，本人的公开那一格是不适用
       for (const other of SENSITIVITIES.filter((s) => s !== sensitivity)) {
-        expect(cellHtml(html, layer, other), name).toContain('：无权限"')
+        expect(cellHtml(html, layer, other), name).toContain(
+          sensitivityAllowed(layer, other) ? '：无权限"' : '：不适用，',
+        )
+      }
+    }
+  })
+
+  it('本人 × 公开写不适用：这一级不存在，和没给权限分开，接口给了什么都不画', async () => {
+    for (const read of READS) {
+      for (const write of WRITES) {
+        const html = await render(AccessMatrix, { rows: single('user', 'public', read, write) })
+        const cell = cellHtml(html, 'user', 'public')
+        expect(cell).toContain('title="本人 公开：不适用，本人不设公开"')
+        expect(cell).toContain('>不适用</span>')
+        expect(cell).not.toContain('<svg')
+        expect(cell).not.toContain('无权限')
       }
     }
   })
