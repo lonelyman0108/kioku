@@ -199,6 +199,7 @@ export interface MemoryStats {
   total: number
   // 来自对话的记忆，不算在 counts 与 total 里
   extractedCounts: LayerCount[]
+  // 要补 disclosure 的（NEEDS_DISCLOSURE）
   missingDisclosure: number
   plaintextCredentials: number
   neverRecalled: number
@@ -2240,8 +2241,8 @@ export class MemoryService {
             contains
               ? or(ilike(uriText, contains), ilike(memories.disclosure, contains))
               : undefined,
-            query.missingDisclosure === 'true' ? MISSING_DISCLOSURE : undefined,
-            query.missingDisclosure === 'false' ? sql`not ${MISSING_DISCLOSURE}` : undefined,
+            query.missingDisclosure === 'true' ? NEEDS_DISCLOSURE : undefined,
+            query.missingDisclosure === 'false' ? sql`not ${NEEDS_DISCLOSURE}` : undefined,
             query.plaintext === 'true' ? PLAINTEXT : undefined,
             query.plaintext === 'false' ? sql`not coalesce(${PLAINTEXT}, false)` : undefined,
             query.plaintext === 'ignored' ? PLAINTEXT_IGNORED : undefined,
@@ -2361,7 +2362,7 @@ export class MemoryService {
           layer: memories.layer,
           sensitivity: memories.sensitivity,
           count: count(),
-          missing: sql<number>`count(*) filter (where ${MISSING_DISCLOSURE})`.mapWith(Number),
+          missing: sql<number>`count(*) filter (where ${NEEDS_DISCLOSURE})`.mapWith(Number),
           plaintext: sql<number>`count(*) filter (where ${PLAINTEXT})`.mapWith(Number),
         })
         .from(memories)
@@ -3353,6 +3354,10 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
 
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
+// 要补 disclosure 的：没写，又不进启动上下文。进的是 BOOT_ELIGIBLE 里不是 secret 的（boot 照读权限不收 secret），
+// 每次会话开始都注入，不靠 disclosure 被想起；管理界面标成启动加载的就是这些（isBootNode）。
+// 概览的计数与列表的 missingDisclosure 筛选都用它，从概览点进列表的条数和概览一致
+const NEEDS_DISCLOSURE = sql`(${MISSING_DISCLOSURE} and not (${BOOT_ELIGIBLE} and ${memories.sensitivity} <> 'secret'))`
 
 // 召回事件的保留天数与开始记录的时间（没有记录时为 null），判断「从没被召回」用
 export interface RecallWindow {

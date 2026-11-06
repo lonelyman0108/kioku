@@ -23,7 +23,8 @@ export const MemoryListQuery = z.object({
   appId: z.uuid().optional(),
   // 在 URI 与 disclosure 里按子串查找，不区分大小写
   q: z.string().trim().min(1).max(200).optional(),
-  // true 只列没写 disclosure 的，false 只列写了的；查询参数按字符串 'true' / 'false' 传
+  // true 只列要补 disclosure 的：没写、又不进启动上下文（会进的每次会话开始都注入，不靠它被想起），
+  // 和概览的 missingDisclosure 同一个条件；false 列别的那些。查询参数按字符串 'true' / 'false' 传
   missingDisclosure: z.enum(['true', 'false']).optional(),
   // true 只列正文像有明文密码或 Token、提示没被忽略的（规则见 PLAINTEXT_CREDENTIAL；secret 的正文是密文，不算），
   // false 列别的那些，ignored 只列提示被忽略了的
@@ -360,6 +361,7 @@ export const SpaceOverview = z.object({
   total: z.number().int(),
   // 成员读得到、现在有效的来自对话的记忆（对象层的事实、情节层的会话摘要），同样分组；不算在 counts 与 total 里
   extractedCounts: z.array(LayerCount),
+  // 要补 disclosure 的记忆数，和列表的 missingDisclosure 筛选同一个条件
   missingDisclosure: z.number().int(),
   // 正文像有明文密码或 Token、该换成凭据占位符的记忆数，提示被忽略的不算
   plaintextCredentials: z.number().int(),

@@ -264,4 +264,13 @@ describe('这次改动动没动统计', () => {
     const plain = view({ content: '密码：not-a-real-secret' })
     expect(statsChanged(plain, { ...plain, plaintextIgnored: true })).toBe(true)
   })
+
+  it('没写触发场景时看要不要补：改优先级进出启动加载就动，启动加载的节点补上触发场景不动', () => {
+    const unset = view({ disclosure: null })
+    expect(statsChanged(unset, view({ disclosure: null, priority: 0, version: 2 }))).toBe(true)
+    expect(statsChanged(unset, view({ disclosure: null, priority: 1, version: 2 }))).toBe(false)
+    const boot = view({ disclosure: null, priority: 0 })
+    expect(statsChanged(boot, view({ priority: 0, version: 2 }))).toBe(false)
+    expect(statsChanged(boot, view({ disclosure: null, priority: 2, version: 2 }))).toBe(true)
+  })
 })

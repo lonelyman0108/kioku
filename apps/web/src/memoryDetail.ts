@@ -86,7 +86,11 @@ export function plaintextValues(memory: PlaintextFields): string[] {
     .filter((value) => value.length >= CONVERT_VALUE_MIN_LENGTH)
 }
 
-// 这次改动动没动统计里的数：层、敏感级、有效与否、有没有写触发场景、是不是疑似明文。
+// 概览的「未设触发场景」数的：没写触发场景，又不进启动加载（服务端的 NEEDS_DISCLOSURE）
+const needsDisclosure = (memory: ConsoleMemoryView) =>
+  !memory.disclosure?.trim() && !isBootNode(memory)
+
+// 这次改动动没动统计里的数：层、敏感级、有效与否、要不要补触发场景（改优先级也可能进出启动加载）、是不是疑似明文。
 // 窄柱和列表上方的总数靠概览接口算，它要把整个概览算一遍，别的改动不用为它重取
 export function statsChanged(before: ConsoleMemoryView, after: ConsoleMemoryView): boolean {
   return (
@@ -94,7 +98,7 @@ export function statsChanged(before: ConsoleMemoryView, after: ConsoleMemoryView
     before.layer !== after.layer ||
     before.sensitivity !== after.sensitivity ||
     isExpired(before.validTo) !== isExpired(after.validTo) ||
-    !before.disclosure?.trim() !== !after.disclosure?.trim() ||
+    needsDisclosure(before) !== needsDisclosure(after) ||
     looksPlaintext(before) !== looksPlaintext(after)
   )
 }
