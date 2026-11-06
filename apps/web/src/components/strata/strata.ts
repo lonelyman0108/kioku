@@ -1,7 +1,9 @@
 import {
   LAYERS,
   SENSITIVITIES,
+  sensitivityAllowed,
   type AccessCell,
+  type CuratedLayer,
   type KeyAccessMatrix,
   type KeyScopes,
   type Layer,
@@ -11,48 +13,42 @@ import {
 
 import { layerLabels, scopesSummary, sensitivityLabels } from '../../labels'
 
-// 地层编码的全部计算：颜色表示层，纹理表示敏感级，纵向顺序固定。地层柱、窄柱、色块、岩芯、矩阵都从这里取
+// 地层编码的全部计算：颜色表示归属，纹理表示敏感级，纵向顺序固定。地层柱、窄柱、色块、岩芯、矩阵都从这里取
 
 export type TextureScale = 'lg' | 'sm'
 export type StrataCounts = Record<Layer, Record<Sensitivity, number>>
 export type AccessRow = KeyAccessMatrix['contexts'][number]['rows'][number]
 
-// 地层柱上选中或悬停的位置：一层、一个敏感级，或者一层里的一段
+// 地层柱上选中或悬停的位置：一类归属、一个敏感级，或者一类归属里的一段
 export interface StrataSelection {
   layer: Layer | null
   sensitivity: Sensitivity | null
 }
 
-// 纵向顺序：情节在上，基础在下
-export const STACK: readonly Layer[] = [
-  'episode',
-  'subject',
-  'private',
-  'owner',
-  'app',
-  'persona',
-  'base',
-]
+// 纵向顺序：自上而下从具体到通用，会话在上，通用在下
+export const STACK: readonly Layer[] = ['episode', 'subject', 'user', 'app', 'persona', 'core']
 
-// 联系人和情节两层来自对话，和前五层隔开，边框用虚线
+// 会话和联系人两类来自对话，和下面四类隔开，边框用虚线
 export const isConversationLayer = (layer: Layer) => layer === 'subject' || layer === 'episode'
 
-// 只放提示层的一句话说明
+// 记下的四类，也是目录的四个根，顺序和地层柱一致
+export const CURATED_STACK: readonly CuratedLayer[] = ['user', 'app', 'persona', 'core']
+
+// 每类归属的适用范围。全站只在这里写一次，只放在提示层（地层柱的说明、记忆页根节点的提示）
 export const layerHints: Record<Layer, string> = {
-  base: '通用准则，全空间共享',
-  persona: '人格设定，可继承',
-  app: '某个应用独有',
-  owner: '本人的习惯与偏好',
-  private: '本人的私人事务',
-  subject: '从对话中记下的人和群',
-  episode: '会话摘要，到期清除',
+  episode: '所在的群或私聊；不带会话上下文的会话仅限本人的 Agent',
+  subject: '记下它的群或私聊',
+  user: '本人的 Agent；开启后也用于本人私聊（内部及以下）',
+  app: '该应用',
+  persona: '使用该人格的应用，含子人格',
+  core: '空间内所有应用',
 }
 
 export const sensitivityHints: Record<Sensitivity, string> = {
   public: '任何上下文可见',
   internal: '仅受信应用与上下文',
   private: '仅本人的私密上下文',
-  secret: '加密存储，不进召回，仅可按 URI 读取',
+  secret: '加密存储，不进召回，仅可按坐标读取',
 }
 
 const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
@@ -75,7 +71,7 @@ export function tallyCounts(rows: readonly LayerCount[]): StrataCounts {
 export const layerTotal = (counts: StrataCounts, layer: Layer) =>
   sum(SENSITIVITIES.map((s) => counts[layer][s]))
 
-// 记忆的条数不含来自对话的两层，后者单独说
+// 记忆的条数不含来自对话的两类，后者单独说
 export const curatedTotal = (counts: StrataCounts) =>
   sum(STACK.filter((l) => !isConversationLayer(l)).map((l) => layerTotal(counts, l)))
 
@@ -85,7 +81,7 @@ export const conversationTotal = (counts: StrataCounts) =>
 export const sensitivityTotal = (counts: StrataCounts, sensitivity: Sensitivity) =>
   sum(STACK.filter((l) => !isConversationLayer(l)).map((l) => counts[l][sensitivity]))
 
-// 按层、敏感级筛选之后一共多少条，两个都可以不限。counts 里有什么层就数什么层
+// 按归属、敏感级筛选之后一共多少条，两个都可以不限。counts 里有什么归属就数什么归属
 export const filteredTotal = (
   counts: StrataCounts,
   layer: Layer | null,
@@ -140,9 +136,9 @@ function allot(weights: readonly number[], total: number, min: number): number[]
   return whole
 }
 
-// 带高按条数的平方根分配，小层也读得清。没有条数时等高（岩芯脱离数据时用）。
-// 每条带至少 min 高，否则一层很大时小层取整成 0 就消失了，要放文字的带也会挤在一起。
-// 来自对话的两层在上，和下面五层之间留 gap
+// 带高按条数的平方根分配，小的归属也读得清。没有条数时等高（岩芯脱离数据时用）。
+// 每条带至少 min 高，否则一类很大时小的取整成 0 就消失了，要放文字的带也会挤在一起。
+// 来自对话的两类在上，和下面四类之间留 gap
 export function stackBands(counts: StrataCounts | null, height: number, gap = 0, min = 1): Band[] {
   const weights = STACK.map((l) => (counts ? Math.sqrt(Math.max(layerTotal(counts, l), 1)) : 1))
   const heights = allot(weights, Math.max(0, Math.floor(height - gap)), min)
@@ -202,7 +198,7 @@ export const TEXTURES = {
   lines: { lg: 'strata-lines-lg', sm: 'strata-lines-sm' },
 } as const
 
-// 权限格子下沿的虚线条：每层一种颜色，缺口真的留空，底下是什么就透出什么。两种大小的实虚比例一样
+// 权限格子下沿的虚线条：每类归属一种颜色，缺口真的留空，底下是什么就透出什么。两种大小的实虚比例一样
 export const DASHES: Record<TextureScale, { on: number; off: number }> = {
   lg: { on: 6, off: 4 },
   sm: { on: 3, off: 2 },
@@ -219,7 +215,7 @@ export function textureId(sensitivity: Sensitivity, scale: TextureScale): string
 const layerFill = (layer: Layer | null) =>
   layer ? `var(--layer-${layer})` : 'var(--strata-neutral)'
 
-// 一块区域的画法：层色打底，上面叠敏感级的纹理；没有层时（图例）用中性底色
+// 一块区域的画法：归属色打底，上面叠敏感级的纹理；没有归属时（图例）用中性底色
 export function paintCell(
   layer: Layer | null,
   sensitivity: Sensitivity,
@@ -233,7 +229,7 @@ export function paintCell(
   return rects
 }
 
-// 小色块：机密是实心深色，左边留一条层色，不然看不出是哪一层。没有敏感级时只画层色
+// 小色块：机密是实心深色，左边留一条归属色，不然看不出是哪一类。没有敏感级时只画归属色
 export function paintSwatch(
   layer: Layer | null,
   sensitivity: Sensitivity | null,
@@ -257,8 +253,8 @@ export function swatchText(layer: Layer | null, sensitivity: Sensitivity | null)
 
 /* ———— 权限范围 ———— */
 
-// 一格的权限：怎么读（召回、按 URI、读不到）和怎么写的组合。
-// 对象层与情节层的写指对话抽取能写进去，不能按 URI 直接写，和普通的写是两回事，每种读法都单独一种
+// 一格的权限：怎么读（召回、按坐标、读不到）和怎么写的组合。
+// 联系人与会话的写指对话抽取能写进去，它们没有坐标、不能直接写，和普通的写是两回事，每种读法都单独一种
 export type AccessKind =
   | 'read-write'
   | 'read-extract'
@@ -274,9 +270,9 @@ export const accessKindLabels: Record<AccessKind, string> = {
   'read-write': '读写',
   'read-extract': '读取且抽取写入',
   read: '只读',
-  'explicit-write': '按 URI 读取且可写',
-  'explicit-extract': '按 URI 读取且抽取写入',
-  explicit: '仅按 URI 读取',
+  'explicit-write': '按坐标读取且可写',
+  'explicit-extract': '按坐标读取且抽取写入',
+  explicit: '仅按坐标读取',
   write: '仅写入',
   extract: '仅抽取写入',
   none: '无权限',
@@ -293,7 +289,7 @@ export function accessKind(layer: Layer, cell: AccessCell): AccessKind {
   return ACCESS_KINDS[cell.read][writing]
 }
 
-// 这一格的满色。层色本身明度差得多，权限格子用单独的一组（见 main.css 的 --access-*），淡层也拉得开
+// 这一格的满色。归属色本身明度差得多，权限格子用单独的一组（见 main.css 的 --access-*），淡的归属也拉得开
 export const accessFill = (layer: Layer) => `var(--access-${layer})`
 
 // 下沿的条占格子多高。矩阵、图例、岩芯都按这个比例，小格子至少 2px，也不能比格子高，否则画到相邻的带上
@@ -311,7 +307,7 @@ function aboveBar(box: Box, bar: { y: number | string }): Box {
 }
 
 // 同一套编码表示权限，岩芯上没有文字，每种都要一眼能分开。
-// 底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按 URI 读取，空白读不到。
+// 底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按坐标读取，空白读不到。
 // 下沿的条说怎么写：满色的条能写，虚线的条只能靠抽取写入。读写已经是满色，不再加条
 export function paintAccess(
   layer: Layer,
@@ -356,15 +352,15 @@ export function paintAccess(
   }
 }
 
-// Key 的签发范围换算成格子，只看层和敏感级；机密只能按 URI 读取，要上限到机密。
-// 这不是实际权限：人格、应用和会话上下文的规则都没算（没有人格的应用写不了人格层，这里仍画成可写），
+// Key 的签发范围换算成格子，只看归属和敏感级；机密只能按坐标读取，要上限到机密，本人不设公开（sensitivityAllowed）。
+// 这不是实际权限：人格、应用和会话上下文的规则都没算（没有人格的应用写不了人格的记忆，这里仍画成可写），
 // 实际碰得到哪些格子看权限范围矩阵，由服务端的 accessMatrix 给
 export function issuedScopeRows(scopes: KeyScopes): AccessRow[] {
   const limit = SENSITIVITIES.indexOf(scopes.maxSensitivity)
   return LAYERS.map((layer) => ({
     layer,
     cells: SENSITIVITIES.map((sensitivity, rank) => {
-      const reachable = rank <= limit
+      const reachable = rank <= limit && sensitivityAllowed(layer, sensitivity)
       const readable = reachable && scopes.readLayers.includes(layer)
       return {
         sensitivity,
@@ -476,7 +472,7 @@ export function coreName({
   return label ? `${label}，暂无权限数据` : '暂无权限数据'
 }
 
-// 岩芯上标出一条记忆的位置：落在空白处就是这个 Key 碰不到。不知道敏感级时标整层
+// 岩芯上标出一条记忆的位置：落在空白处就是这个 Key 碰不到。不知道敏感级时标整条带
 export function coreMark(
   model: { bands: readonly Band[]; columns: readonly number[] },
   layer: Layer,

@@ -109,7 +109,7 @@ export function useConvertCredential(
         form.field,
         (existing?.items ?? []).map((c) => c.identifier),
       )
-      form.name = suggestName(view.uri)
+      form.name = suggestName(view)
     } catch (err) {
       if (id === loadId) loadFailure.value = readFailure(err)
     } finally {

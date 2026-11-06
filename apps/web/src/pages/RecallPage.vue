@@ -10,7 +10,7 @@ import MemoryFlags from '../components/strata/MemoryFlags.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
-import UriPath from '../components/strata/UriPath.vue'
+import MemoryName from '../components/strata/MemoryName.vue'
 import { recallTotal, volumeBars } from '../recall'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatShort, formatTime } from '../time'
@@ -92,7 +92,9 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
           <li v-for="memory in data.top" :key="memory.id" class="top-row">
             <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
             <span class="row-uri">
-              <RouterLink :to="memoryLink(memory.uri)"><UriPath :uri="memory.uri" /></RouterLink>
+              <RouterLink :to="memoryLink(memory.uri)" class="min-w-0"
+                ><MemoryName :uri="memory.uri" :title="memory.title"
+              /></RouterLink>
               <MemoryFlags :layer="memory.layer" :sensitivity="memory.sensitivity" />
             </span>
             <span class="font-mono top-count">{{ memory.total }}</span>
@@ -128,7 +130,9 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
           <li v-for="memory in data.never" :key="memory.id" class="never-row">
             <StrataSwatch :layer="memory.layer" :sensitivity="memory.sensitivity" />
             <span class="row-uri">
-              <RouterLink :to="memoryLink(memory.uri)"><UriPath :uri="memory.uri" /></RouterLink>
+              <RouterLink :to="memoryLink(memory.uri)" class="min-w-0"
+                ><MemoryName :uri="memory.uri" :title="memory.title"
+              /></RouterLink>
               <MemoryFlags :layer="memory.layer" :sensitivity="memory.sensitivity" />
             </span>
             <time

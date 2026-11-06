@@ -39,8 +39,8 @@ import {
 } from '../benchSession'
 
 const scopes: KeyScopes = {
-  readLayers: ['private'],
-  writeLayers: ['private'],
+  readLayers: ['user'],
+  writeLayers: ['user'],
   maxSensitivity: 'private',
   admin: false,
 }

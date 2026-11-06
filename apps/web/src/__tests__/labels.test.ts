@@ -37,16 +37,16 @@ describe('凭据限定的应用', () => {
 
 describe('Key 的权限', () => {
   const scopes: KeyScopes = {
-    readLayers: ['base', 'private'],
-    writeLayers: ['private'],
+    readLayers: ['core', 'user'],
+    writeLayers: ['user'],
     maxSensitivity: 'private',
     admin: false,
   }
 
   it('一句话说完，跨人格写入才提', () => {
-    expect(scopesSummary(scopes)).toBe('可读 2 层，可写 1 层，最高私密')
+    expect(scopesSummary(scopes)).toBe('可读 2 类归属，可写 1 类，最高私密')
     expect(scopesSummary({ ...scopes, admin: true })).toBe(
-      '可读 2 层，可写 1 层，最高私密，跨人格 / 应用写入',
+      '可读 2 类归属，可写 1 类，最高私密，跨人格 / 应用写入',
     )
   })
 })

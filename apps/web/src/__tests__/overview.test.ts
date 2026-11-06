@@ -1,7 +1,7 @@
 import type { SubjectBinding } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { bindingNote, budgetWarning, splitNote, strataFilterQuery } from '../overview'
+import { bindingNote, budgetWarning, splitNote, strataFilterQuery, strataTarget } from '../overview'
 
 const usage = (usedTokens: number, monthlyTokens = 500_000) => ({
   usedTokens,
@@ -61,19 +61,51 @@ describe('账号绑定那一行', () => {
   })
 })
 
-describe('点地层柱的一格', () => {
-  it('跳到列表，带上层和敏感级', () => {
-    expect(strataFilterQuery({ layer: 'private', sensitivity: 'secret' })).toEqual({
+describe('点地层柱去哪里', () => {
+  it('点一行：记下的四类去记忆页对应的根，来自对话的两类去对话页对应的分页', () => {
+    expect(strataTarget('s1', { layer: 'user', sensitivity: null })).toEqual({
+      name: 'memories',
+      params: { spaceId: 's1' },
+      query: { node: 'user' },
+    })
+    expect(strataTarget('s1', { layer: 'episode', sensitivity: null })).toEqual({
+      name: 'conversations',
+      params: { spaceId: 's1' },
+      query: {},
+    })
+    expect(strataTarget('s1', { layer: 'subject', sensitivity: 'public' })).toEqual({
+      name: 'conversations',
+      params: { spaceId: 's1' },
+      query: { tab: 'contacts' },
+    })
+  })
+
+  it('点一格或一个敏感级：记忆列表按归属与敏感级筛选', () => {
+    expect(strataTarget('s1', { layer: 'core', sensitivity: 'internal' })).toEqual({
+      name: 'memories',
+      params: { spaceId: 's1' },
+      query: { view: 'list', layer: 'core', sensitivity: 'internal' },
+    })
+    expect(strataTarget('s1', { layer: null, sensitivity: 'secret' }).query).toEqual({
       view: 'list',
-      layer: 'private',
+      sensitivity: 'secret',
+    })
+  })
+})
+
+describe('点地层柱的一格', () => {
+  it('跳到列表，带上归属和敏感级', () => {
+    expect(strataFilterQuery({ layer: 'user', sensitivity: 'secret' })).toEqual({
+      view: 'list',
+      layer: 'user',
       sensitivity: 'secret',
     })
   })
 
-  it('只点一层或只点一个敏感级时，另一个不写进地址', () => {
-    expect(strataFilterQuery({ layer: 'base', sensitivity: null })).toEqual({
+  it('只点一类归属或只点一个敏感级时，另一个不写进地址', () => {
+    expect(strataFilterQuery({ layer: 'core', sensitivity: null })).toEqual({
       view: 'list',
-      layer: 'base',
+      layer: 'core',
     })
     expect(strataFilterQuery({ layer: null, sensitivity: 'internal' })).toEqual({
       view: 'list',

@@ -51,9 +51,12 @@ const validToText = (validTo: string | null) => (validTo ? formatTime(validTo) :
 function changes(before: MemorySnapshot | null, after: MemorySnapshot | null): string[] {
   if (!before || !after) return []
   const list: string[] = []
-  if (before.uri !== after.uri) list.push(`URI：${before.uri} → ${after.uri}`)
+  if (before.title !== after.title && before.title && after.title) {
+    list.push(`标题：${before.title} → ${after.title}`)
+  }
+  if (before.uri !== after.uri) list.push(`坐标：${before.uri} → ${after.uri}`)
   if (before.layer !== after.layer) {
-    list.push(`层：${layerLabels[before.layer]} → ${layerLabels[after.layer]}`)
+    list.push(`归属：${layerLabels[before.layer]} → ${layerLabels[after.layer]}`)
   }
   if (before.sensitivity !== after.sensitivity) {
     list.push(
@@ -183,7 +186,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
       <NoteLine v-if="expiredNow && current?.validTo" tone="warning">
         这条记忆已于 {{ formatTime(current.validTo) }} 过期，不再召回，也不进启动加载
         <template v-if="current.released" #detail>
-          过期后同一 URI 上已写入新记忆，URI 已释放。那条记忆仍在时，需先移走或删除才能恢复生效。
+          过期后同一坐标上已写入新记忆，坐标已释放。那条记忆仍在时，需先移走或删除才能恢复生效。
         </template>
         <template v-if="canReactivate" #actions>
           <UButton
@@ -200,7 +203,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
       <SectionHeading title="历史">
         <template #hint>
           <Hint>
-            恢复此版本只改正文、触发场景、优先级与关键词。URI、层、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。层或归属与当前不同、敏感级高于当前的版本无法恢复。
+            恢复此版本只改正文、标题、触发场景、优先级与关键词。坐标、归属、敏感级与有效期不变（过期的记忆在「已过期」中恢复生效）。归属与当前不同、敏感级高于当前的版本无法恢复。
           </Hint>
         </template>
         <template v-if="history.data.value?.truncated" #actions>
@@ -286,7 +289,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
     >
       <template #body>
         <p class="text-sm">
-          正文、触发场景、优先级与关键词恢复为此次改动后的内容，并记录一次新改动；URI、层与敏感级不变。
+          正文、标题、触发场景、优先级与关键词恢复为此次改动后的内容，并记录一次新改动；坐标、归属与敏感级不变。
         </p>
       </template>
       <template #footer>

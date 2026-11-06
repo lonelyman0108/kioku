@@ -6,6 +6,10 @@ import { parse } from 'vue/compiler-sfc'
 // 英文字段名。Secret Access Key 是对象存储自己的字段名，不算
 const ENGLISH_TERMS = /(?<![\w/`.])(disclosure|priority|secret(?! access key)|boot)(?![\w/:`])/i
 
+// 记忆的位置叫坐标。URI 只留在直接展示接口的测试台与召回调试，以及说 Lore 那边的地方（「Lore 的 URI」）
+const URI = /(?<![\w/`.])(?<!Lore 的 )URI(?![\w`])/
+const URI_ALLOWED = [/\/Bench[^/]*\.vue$/, /\/bench[^/]*\.ts$/, /\/RecallDebugPanel\.vue$/]
+
 // 应用接入用的 Key 叫访问密钥，单数复数都查，「API Key」也算在内：访问密钥退回旧名时常写成它
 const ACCESS_KEY = /(?<![\w/`.])Keys?(?![\w`])/i
 // 讲上游自己的密钥的文件，只在这里放过上游的字段名：模型服务商的 API Key（嵌入、抽取设置，测试台的模型对话
@@ -49,10 +53,17 @@ const BANNED: [RegExp, string][] = [
   [/启动上下文|启动节点/, '写「启动加载」'],
   [/应用与\s*Key|召回分析/, '导航名是「应用」「召回」'],
   [/有效到/, '写「有效期」'],
+  [/分区/, '分区去掉了：坐标里开头与标识之间的各级写「位置」，记忆是谁的写「归属」'],
+  [/(?<!地|提示|弹出|外)层(?!次)/, '界面上指记忆是谁的写「归属」，不再说「层」'],
+  [URI, '记忆的位置写「坐标」；URI 只留在测试台、召回调试与 Lore 那边'],
+  [/情节/, '写「会话」或「会话摘要」'],
+  [/画像/, '写「本人」'],
+  [/私人(?!事务)/, '写「本人」'],
+  [/基础(?!文字)/, '写「通用」'],
   [ENGLISH_TERMS, '用术语表的中文名'],
   // 下面几条测试台也要守：没有哪个接口参数叫这些名字
   [ACCESS_KEY, '写「访问密钥」；上游的字段名只在 UPSTREAM_KEYS 列出的文件里写'],
-  [/(?<![\w/`.])domains?(?![\w`])/i, '写「分区」'],
+  [/(?<![\w/`.])domains?(?![\w`])/i, '分区去掉了：写「位置」或「归属」'],
   [/(?<![\w/`.])Dream(?![\w`])/i, '写「整理」'],
   [/(?<![\w/`.])Bots?(?![\w`])/i, '写「机器人」'],
   // 凭据里的 Token 叫令牌。Lore 的 API Token 是它自己的字段名；模型用量的 token 是小写，不算
@@ -165,9 +176,11 @@ describe('界面文字', () => {
     const found: string[] = []
     for (const [path, source] of files) {
       // 测试台直接展示接口，英文参数名照原样显示；其余的词同样不能写
-      const rules = /\/Bench[^/]*\.vue$/.test(path)
-        ? BANNED.filter(([pattern]) => pattern !== ENGLISH_TERMS)
-        : BANNED
+      const rules = BANNED.filter(
+        ([pattern]) =>
+          !(pattern === ENGLISH_TERMS && /\/Bench[^/]*\.vue$/.test(path)) &&
+          !(pattern === URI && URI_ALLOWED.some((allowed) => allowed.test(path))),
+      )
       const upstream = UPSTREAM_KEYS.find(([file]) => path.endsWith(file))?.[1]
       for (const { line, text } of visibleText(path, source)) {
         if (ALLOWED.some((a) => text.includes(a))) continue

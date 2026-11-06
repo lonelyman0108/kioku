@@ -59,7 +59,7 @@
   --color-brick-900: #451c11;
   --color-brick-950: #2a100a;
 
-  /* 赭：warning，和个人画像层同一族 */
+  /* 赭：warning，和本人同一族 */
   --color-ochre-50: #faf5e6;
   --color-ochre-100: #f3e8c8;
   --color-ochre-200: #e8d59c;
@@ -72,7 +72,7 @@
   --color-ochre-900: #332507;
   --color-ochre-950: #1f1704;
 
-  /* 苔：success，和人格层同一族 */
+  /* 苔：success，和人格同一族 */
   --color-moss-50: #eff6f1;
   --color-moss-100: #dcebe1;
   --color-moss-200: #bfdac8;
@@ -85,7 +85,7 @@
   --color-moss-900: #192b20;
   --color-moss-950: #0f1a13;
 
-  /* 湖：info，和基础层同一族 */
+  /* 湖：info，和通用同一族 */
   --color-lake-50: #eef4f7;
   --color-lake-100: #dae7ee;
   --color-lake-200: #bdd3df;
@@ -99,13 +99,12 @@
   --color-lake-950: #0e191f;
 }
 
-/* 地层的编码也做成工具类：bg-layer-private、border-rule 这样写，主题切换时跟着变 */
+/* 地层的编码也做成工具类：bg-layer-user、border-rule 这样写，主题切换时跟着变 */
 @theme inline {
-  --color-layer-base: var(--layer-base);
+  --color-layer-core: var(--layer-core);
   --color-layer-persona: var(--layer-persona);
   --color-layer-app: var(--layer-app);
-  --color-layer-owner: var(--layer-owner);
-  --color-layer-private: var(--layer-private);
+  --color-layer-user: var(--layer-user);
   --color-layer-subject: var(--layer-subject);
   --color-layer-episode: var(--layer-episode);
   --color-rule: var(--strata-rule);
@@ -120,38 +119,36 @@
 
 :root,
 .light {
-  /* 7 个层色：颜色表示层 */
-  --layer-base: #94aebb;
+  /* 6 个归属色：颜色表示归属 */
+  --layer-core: #94aebb;
   --layer-persona: #8fb29a;
   --layer-app: #b3c183;
-  --layer-owner: #e0c37f;
-  --layer-private: #d39a80;
+  --layer-user: #e0c37f;
   --layer-subject: #afa3bd;
   --layer-episode: #c8bfd0;
 
-  /* 结构线用墨；压在层色上的线和文字；机密的实心深色 */
+  /* 结构线用墨；压在归属色上的线和文字；机密的实心深色 */
   --strata-rule: #2a2b26;
   --strata-band-line: #2a2b26;
   --strata-frame: #2a2b26;
   --strata-on-layer: #2a2b26;
   --strata-solid: #2e2a26;
   --strata-on-solid: #f1efe4;
-  /* 权限格子里只能按 URI 读取的实心块，和机密的实心块不是一回事 */
+  /* 权限格子里只能按坐标读取的实心块，和机密的实心块不是一回事 */
   --strata-explicit: #2e2a26;
   /* 纹理：内部圆点、私密斜线的颜色。公开无纹理，机密是实心 */
   --strata-texture: rgba(42, 43, 38, 0.5);
-  /* 不带层的图例底色；只读格子是层色和纸按这个比例混出来的淡色 */
+  /* 不带归属的图例底色；只读格子是归属色和纸按这个比例混出来的淡色 */
   --strata-neutral: #dedbca;
   --strata-tint: 52%;
   /*
    * 权限格子的满色。岩芯上没有文字，满色、淡色、空白三档只靠明度分开：
-   * 应用、个人画像、情节三层本来就淡，压暗到和别的层差不多的明度，三档才拉得开
+   * 应用、本人、会话三类本来就淡，压暗到和别的归属差不多的明度，三档才拉得开
    */
-  --access-base: #94aebb;
+  --access-core: #94aebb;
   --access-persona: #8fb29a;
   --access-app: #a4b179;
-  --access-owner: #c1a970;
-  --access-private: #d39a80;
+  --access-user: #c1a970;
   --access-subject: #afa3bd;
   --access-episode: #b0a8b6;
   /* 选中行反白 */
@@ -182,13 +179,12 @@
   --ui-border-inverted: #2a2b26;
 }
 
-/* 夜间地图：层色整体提亮并降饱和，墨线变浅灰。选中不用反白，晚上太刺眼 */
+/* 夜间地图：归属色整体提亮并降饱和，墨线变浅灰。选中不用反白，晚上太刺眼 */
 .dark {
-  --layer-base: #9fb5c1;
+  --layer-core: #9fb5c1;
   --layer-persona: #9cbba8;
   --layer-app: #bac794;
-  --layer-owner: #d8c48f;
-  --layer-private: #d3a690;
+  --layer-user: #d8c48f;
   --layer-subject: #b4a9c5;
   --layer-episode: #cac3d5;
 
@@ -204,12 +200,11 @@
   --strata-texture: rgba(20, 24, 27, 0.55);
   --strata-neutral: #aeb3b0;
   --strata-tint: 46%;
-  /* 深色底上三档本来就拉得开，用层色本身 */
-  --access-base: #9fb5c1;
+  /* 深色底上三档本来就拉得开，用归属色本身 */
+  --access-core: #9fb5c1;
   --access-persona: #9cbba8;
   --access-app: #bac794;
-  --access-owner: #d8c48f;
-  --access-private: #d3a690;
+  --access-user: #d8c48f;
   --access-subject: #b4a9c5;
   --access-episode: #cac3d5;
   --strata-selected: #333b40;
@@ -274,7 +269,7 @@
   }
 
   ::selection {
-    background: var(--layer-owner);
+    background: var(--layer-user);
     color: #2a2b26;
   }
 

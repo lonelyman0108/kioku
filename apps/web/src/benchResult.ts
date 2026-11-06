@@ -165,7 +165,7 @@ export function changeItems(changes: BenchChanges): ChangeItem[] {
     add({ action: `已释放 ${changes.hiddenReleased} 条不可见过期记录的 URI（属于其他成员）` })
   }
   if (changes.hiddenOther) {
-    add({ action: `另有 ${changes.hiddenOther} 处不可见的改动（当前访问密钥可写但不可读的层）` })
+    add({ action: `另有 ${changes.hiddenOther} 处不可见的改动（当前访问密钥可写但不可读的归属）` })
   }
   for (const c of changes.credentials) {
     add({

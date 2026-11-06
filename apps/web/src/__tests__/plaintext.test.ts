@@ -57,8 +57,9 @@ describe('建议的标识', () => {
     expect(next).not.toBe(long)
   })
 
-  it('名称用路径', () => {
-    expect(suggestName('infra://nas/admin')).toBe('nas/admin')
+  it('名称用标题，没有标题时用开头之后的那一段', () => {
+    expect(suggestName({ uri: 'user://infra/nas', title: '家里的 NAS' })).toBe('家里的 NAS')
+    expect(suggestName({ uri: 'user://infra/nas', title: ' ' })).toBe('infra/nas')
   })
 })
 

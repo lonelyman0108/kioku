@@ -1,12 +1,10 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import {
-  PLAIN_LAYERS,
   PLAINTEXT_CREDENTIAL,
   URI_PATTERN,
   type ApplyDreamSuggestion,
   type DreamSuggestion,
-  type PlainLayer,
 } from '@kioku/contracts'
 import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
@@ -14,6 +12,7 @@ import { computed, onBeforeUnmount, reactive, ref, watch } from 'vue'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
+import { layerOfUri } from '../coordinates'
 import {
   dreamScopeText,
   dreamSettingsKey,
@@ -35,7 +34,7 @@ import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 const props = defineProps<{ spaceId: string; canAct: boolean }>()
 const toast = useToast()
@@ -63,19 +62,17 @@ const lastRun = computed(() => {
   const run = runs.data.value?.runs[0]
   return run ? lastRunSummary(run) : null
 })
-// 自己的画像层与私人层整理不整理：在空间设置里改，这里说一声
+// 自己的本人记忆整理不整理：在空间设置里改，这里说一声
 const mine = useQuery({
   queryKey: computed(() => dreamSettingsKey(props.spaceId)),
   queryFn: ({ queryKey: [, spaceId] }) => api.dreamSettings(spaceId),
   enabled: active,
 })
 
-// 正在改的合并正文与提炼草稿，按建议记下；没改的按建议原样执行。层为 default 时用默认的（自己的私人层）
-type LayerChoice = PlainLayer | 'default'
+// 正在改的合并正文与提炼草稿，按建议记下；没改的按建议原样执行。提炼的归属由坐标的开头决定
 interface Draft {
   content: string
   uri: string
-  layer: LayerChoice
   disclosure: string
 }
 const drafts = reactive(new Map<string, Draft>())
@@ -87,16 +84,14 @@ function startEdit(item: DreamSuggestion) {
   drafts.set(item.id, {
     content: item.content ?? '',
     uri: item.uri ?? '',
-    layer: 'default',
     disclosure: item.disclosure ?? '',
   })
 }
-const layerItems = [
-  { label: '默认：当前账号的私人层', value: 'default' },
-  ...PLAIN_LAYERS.map((l) => ({ label: layerLabels[l], value: l })),
-]
-// persona:// 与 app:// 下的层由 URI 决定
-const layerFixed = (uri: string) => /^(persona|app):\/\//.test(uri)
+// 草稿写到哪一类归属：坐标的开头说了算
+const draftLayer = (uri: string | null) => {
+  const layer = uri ? layerOfUri(uri.trim()) : null
+  return layer ? layerLabels[layer] : null
+}
 const looksPlaintext = (text: string) => PLAINTEXT_CREDENTIAL.test(text)
 
 // 改过的草稿能不能提交：URI 格式对、正文不空
@@ -115,12 +110,7 @@ function bodyOf(item: DreamSuggestion): ApplyDreamSuggestion {
   if (!draft) return {}
   if (item.kind === 'merge') return { content: draft.content }
   const uri = draft.uri.trim()
-  return {
-    uri,
-    content: draft.content,
-    disclosure: draft.disclosure.trim() || null,
-    ...(draft.layer !== 'default' && !layerFixed(uri) ? { layer: draft.layer } : {}),
-  }
+  return { uri, content: draft.content, disclosure: draft.disclosure.trim() || null }
 }
 
 // 执行按钮上的说法
@@ -166,7 +156,7 @@ async function apply(item: DreamSuggestion) {
     const result = await api.applyDreamSuggestion(spaceId, item.id, bodyOf(item))
     drafts.delete(item.id)
     toast.add({
-      title: result.memory ? `已新建 ${result.memory.uri}` : `已${actionLabel(item)}`,
+      title: result.memory ? `已新建「${result.memory.title}」` : `已${actionLabel(item)}`,
       color: 'success',
     })
     refresh(spaceId)
@@ -268,8 +258,8 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <p v-if="mine.data.value">
         {{
           mine.data.value.includePrivate
-            ? '当前账号的个人画像层与私人层（机密除外）也会发送给实例配置的抽取模型整理，'
-            : '当前账号已关闭个人画像层与私人层的整理，目前仅整理共享内容，'
+            ? '当前账号的本人记忆（机密除外）也会发送给实例配置的抽取模型整理，'
+            : '当前账号已关闭本人记忆的整理，目前仅整理共享内容，'
         }}<RouterLink :to="spaceSettingsRoute(spaceId, 'dream')" class="text-primary"
           >可在空间设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
         >。
@@ -324,17 +314,17 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   :to="memoryRoute(spaceId, memory.uri)"
                   class="memory-link"
                 >
-                  <UriPath :uri="memory.uri" />
+                  <MemoryName :uri="memory.uri" :title="memory.title" />
                 </RouterLink>
                 <RouterLink
                   v-else-if="memory.subject"
-                  :to="{ name: 'subject', params: { spaceId, subjectId: memory.subject.id } }"
+                  :to="{ name: 'contact', params: { spaceId, subjectId: memory.subject.id } }"
                   class="memory-link"
                 >
                   关于「{{ memory.subject.displayName }}」
                 </RouterLink>
                 <span v-else>{{ layerLabels[memory.layer] }}</span>
-                <!-- 色块旁边写层名，和记忆列表一样；没有 URI 也不是联系人时上面已经写了层的全名 -->
+                <!-- 色块旁边写归属，和记忆列表一样；没有坐标也不是联系人时上面已经写了归属的全名 -->
                 <MemoryFlags
                   v-if="memory.uri || memory.subject"
                   :layer="memory.layer"
@@ -366,22 +356,9 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           <template v-else-if="item.kind === 'distill'">
             <div v-if="drafts.has(item.id)" class="draft-form">
               <p class="draft-label">草稿</p>
-              <div class="grid gap-3 sm:grid-cols-2">
-                <UFormField label="URI">
-                  <UInput v-model="drafts.get(item.id)!.uri" class="w-full font-mono" />
-                </UFormField>
-                <UFormField
-                  label="层"
-                  :help="layerFixed(drafts.get(item.id)!.uri) ? '由 URI 决定' : undefined"
-                >
-                  <USelect
-                    v-model="drafts.get(item.id)!.layer"
-                    :items="layerItems"
-                    :disabled="layerFixed(drafts.get(item.id)!.uri)"
-                    class="w-full"
-                  />
-                </UFormField>
-              </div>
+              <UFormField label="坐标" :help="draftLayer(drafts.get(item.id)!.uri) ?? undefined">
+                <UInput v-model="drafts.get(item.id)!.uri" class="w-full font-mono" />
+              </UFormField>
               <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
                 <UInput v-model="drafts.get(item.id)!.disclosure" class="w-full" />
               </UFormField>
@@ -398,7 +375,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
               <span class="draft-label">草稿</span>
               <p class="draft-uri">
                 <code>{{ item.uri }}</code>
-                <span>默认放在当前账号的私人层</span>
+                <span v-if="draftLayer(item.uri)">{{ draftLayer(item.uri) }}</span>
               </p>
               <p v-if="item.disclosure" class="draft-uri">触发场景：{{ item.disclosure }}</p>
               <p>{{ item.content }}</p>
@@ -414,7 +391,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </NoteLine>
           <p class="suggestion-effect">{{ suggestionKinds[item.kind].effect }}</p>
           <p v-if="canAct && !item.actionable" class="suggestion-effect">
-            包含当前账号无权写入的记忆（如其他成员应用的应用层），需由有权限的成员处理。
+            包含当前账号无权写入的记忆（如其他成员的应用的记忆），需由有权限的成员处理。
           </p>
           <p v-if="draftProblem(item)" class="suggestion-problem">{{ draftProblem(item) }}</p>
         </div>
@@ -476,7 +453,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <SectionHeading title="最近整理" :level="3">
         <template #hint>
           <Hint>
-            整理使用抽取模型，用量计入空间的抽取预算。只处理上次以来新增或修改的记忆，其他成员的个人画像层与私人层不在此列出。共享内容先整理并记录一条汇总，之后才整理各成员的个人画像层与私人层，因此当前账号的结果可能稍晚于整理状态出现。
+            整理使用抽取模型，用量计入空间的抽取预算。只处理上次以来新增或修改的记忆，其他成员的本人记忆不在此列出。共享内容先整理并记录一条汇总，之后才整理各成员的本人记忆，因此当前账号的结果可能稍晚于整理状态出现。
           </Hint>
         </template>
       </SectionHeading>

@@ -14,11 +14,11 @@ import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { icons } from '../icons'
-import { sensitivityLabels } from '../labels'
+import { layerLabels, sensitivityLabels } from '../labels'
 import { missingDisclosure } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
-import { DOMAINS_QUERY_OPTIONS } from './memoryTree'
+import { lastSegment } from './memoryTree'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -53,10 +53,11 @@ function oneOf<T extends string>(key: string, values: readonly T[]): T | null {
 const sortLabels: Record<MemoryListSort, string> = {
   updated: '按最近更新',
   priority: '按优先级',
-  uri: '按 URI',
+  uri: '按坐标',
 }
 const filters = computed(() => ({
-  domain: text('domain'),
+  // 位置：坐标前缀，它本身与下面各级（例如 user://projects、persona://default）
+  under: text('under'),
   layer: oneOf('layer', LAYERS),
   sensitivity: oneOf('sensitivity', SENSITIVITIES),
   missingDisclosure: text('missingDisclosure') === 'true',
@@ -88,16 +89,50 @@ onBeforeUnmount(() => clearTimeout(timer))
 
 // 切到树或已删除时这个视图留在 KeepAlive 里，查询跟着停用
 const active = useActivated()
-const domains = useQuery({
-  queryKey: computed(() => ['memory-domains', props.spaceId]),
-  queryFn: () => api.memoryDomains(props.spaceId),
+
+// 位置的选项：各个人格、各个应用，以及本人与通用下面有下一级的第一级。更深的位置从地址里来
+// （例如从目录点过来），也列出来。整个本人、通用用窄柱按归属筛
+const levelsOf = (of: 'user' | 'core') =>
+  useQuery({
+    queryKey: computed(() => ['memory-children', props.spaceId, of] as const),
+    queryFn: ({ queryKey: [, sid, o] }) => api.memoryChildren(sid, o),
+    enabled: active,
+  })
+const userLevels = levelsOf('user')
+const coreLevels = levelsOf('core')
+const personas = useQuery({
+  queryKey: computed(() => ['personas', props.spaceId]),
+  queryFn: () => api.personas(props.spaceId),
   enabled: active,
-  ...DOMAINS_QUERY_OPTIONS,
 })
-const domainItems = computed(() => [
-  { label: '全部分区', value: null },
-  ...(domains.data.value ?? []).map((d) => ({ label: `${d.domain}://`, value: d.domain })),
-])
+const apps = useQuery({
+  queryKey: computed(() => ['apps', props.spaceId]),
+  queryFn: () => api.apps(props.spaceId),
+  enabled: active,
+})
+const positionItems = computed(() => {
+  const items: { label: string; value: string | null }[] = [{ label: '全部位置', value: null }]
+  for (const [layer, levels] of [
+    ['user', userLevels],
+    ['core', coreLevels],
+  ] as const) {
+    for (const child of levels.data.value?.children ?? []) {
+      if (child.childCount > 0) {
+        items.push({ label: `${layerLabels[layer]} › ${lastSegment(child.uri)}`, value: child.uri })
+      }
+    }
+  }
+  for (const p of personas.data.value ?? []) {
+    items.push({ label: `${layerLabels.persona} › ${p.name}`, value: `persona://${p.slug}` })
+  }
+  for (const a of apps.data.value ?? []) {
+    items.push({ label: `${layerLabels.app} › ${a.name}`, value: `app://${a.slug}` })
+  }
+  const under = filters.value.under
+  if (under && !items.some((item) => item.value === under))
+    items.push({ label: under, value: under })
+  return items
+})
 const sortItems = MEMORY_LIST_SORTS.map((s) => ({ label: sortLabels[s], value: s }))
 
 const list = useInfiniteQuery({
@@ -105,7 +140,7 @@ const list = useInfiniteQuery({
   // 参数从键里取：换了筛选之后，旧键剩下的页还在重新拉取时，不会用上新的筛选条件
   queryFn: ({ pageParam, queryKey: [, spaceId, f] }) => {
     return api.memoryList(spaceId, {
-      ...(f.domain ? { domain: f.domain } : {}),
+      ...(f.under ? { under: f.under } : {}),
       ...(f.layer ? { layer: f.layer } : {}),
       ...(f.sensitivity ? { sensitivity: f.sensitivity } : {}),
       ...(f.missingDisclosure ? { missingDisclosure: 'true' } : {}),
@@ -127,14 +162,14 @@ const rows = computed(() => items.value.map((item) => ({ item, missing: missingD
 function toggleSensitivity(value: string) {
   setFilter('sensitivity', filters.value.sensitivity === value ? null : value)
 }
-// 窄柱上的层和这里的敏感级一起清掉
+// 窄柱上的归属和这里的敏感级一起清掉
 function clearStrata() {
   const query = { ...route.query }
   delete query.layer
   delete query.sensitivity
   void router.replace({ query })
 }
-// 列表只列 URI 树上的记忆，来自对话的两层筛出来是空的：说清楚去哪里看
+// 列表只列目录里的记忆，来自对话的两类筛出来是空的：说清楚去哪里看
 const conversationLayer = computed(
   () => !!filters.value.layer && isConversationLayer(filters.value.layer),
 )
@@ -144,12 +179,12 @@ const strataTag = computed(() =>
     : null,
 )
 
-// 列表上方的总数：统计里有的才说。列表只列记忆，来自对话的两层不算，所以不用合并的条数。
-// 关键字、domain 或两个开关合用时算不出来，说已经载入了多少
+// 列表上方的总数：统计里有的才说。列表只列记忆，来自对话的两类不算，所以不用合并的条数。
+// 关键字、位置或两个开关合用时算不出来，说已经载入了多少
 const total = computed(() => {
   const data = props.overview
   const f = filters.value
-  if (!data || f.q || f.domain) return null
+  if (!data || f.q || f.under) return null
   const strata = f.layer || f.sensitivity
   if (f.missingDisclosure && f.plaintext) return null
   if (f.missingDisclosure) return strata ? null : data.missingDisclosure
@@ -164,16 +199,16 @@ const total = computed(() => {
       <UInput
         v-model="keyword"
         name="q"
-        placeholder="搜索 URI 与触发场景"
+        placeholder="搜索标题、坐标与触发场景"
         aria-label="关键字"
         class="w-full"
       />
       <div class="grid grid-cols-2 gap-2">
         <USelect
-          :model-value="filters.domain"
-          :items="domainItems"
-          aria-label="分区"
-          @update:model-value="(v) => setFilter('domain', (v as string | null) ?? null)"
+          :model-value="filters.under"
+          :items="positionItems"
+          aria-label="位置"
+          @update:model-value="(v) => setFilter('under', (v as string | null) ?? null)"
         />
         <USelect
           :model-value="filters.sort"
@@ -236,17 +271,15 @@ const total = computed(() => {
 
     <div v-if="conversationLayer" class="list-note">
       <NoteLine>
-        来自对话的内容不在记忆列表中<Hint>
-          联系人层的事实和情节层的会话摘要在联系人详情中查看。
-        </Hint>
+        来自对话的内容不在记忆列表中<Hint> 联系人的事实与会话摘要在「对话」中查看。 </Hint>
         <template #actions>
           <UButton
             size="sm"
             color="primary"
             variant="outline"
-            :to="{ name: 'subjects', params: { spaceId } }"
+            :to="{ name: 'conversations', params: { spaceId } }"
           >
-            查看联系人
+            查看对话
           </UButton>
         </template>
       </NoteLine>
@@ -266,6 +299,7 @@ const total = computed(() => {
             as="button"
             type="button"
             :uri="item.uri"
+            :title="item.title"
             :layer="item.layer"
             :sensitivity="item.sensitivity"
             :priority="item.priority"

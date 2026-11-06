@@ -262,7 +262,7 @@ const SYNC_TITLES: Record<Exclude<LoreSyncState, 'current'>, string> = {
   update: '按 Lore 更新',
   edited: '导入后在 Kioku 中修改或移动过，不同步（如需跟随 Lore 请手动修改）',
   moved:
-    'Lore 中路径已变更，不同步：移动可能改变层与可见范围，需手动移动（移动后此记忆只能手动更新）',
+    'Lore 中路径已变更，不同步：移动可能改变归属与可见范围，需手动移动（移动后此记忆只能手动更新）',
   deleted: '已在 Kioku 中删除，不同步',
   skipped: '本次计划不导入此节点，未同步',
   unmapped: '本次计划未映射到此节点（例如更换了人格，或对应的应用已不存在），未同步',

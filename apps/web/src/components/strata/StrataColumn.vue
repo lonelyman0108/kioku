@@ -2,7 +2,7 @@
 import { SENSITIVITIES, type Layer, type Sensitivity } from '@kioku/contracts'
 import { computed, ref } from 'vue'
 
-import { layerLabels, layerShortLabels, sensitivityLabels } from '../../labels'
+import { layerLabels, sensitivityLabels } from '../../labels'
 import StrataSwatch from './StrataSwatch.vue'
 import {
   conversationTotal,
@@ -23,7 +23,7 @@ import {
 const props = withDefaults(
   defineProps<{
     counts: StrataCounts
-    // 柱子的高度和宽度；compact 用在窄屏，层名用简称
+    // 柱子的高度和宽度；compact 用在窄屏，各列收窄
     height?: number
     width?: number
     compact?: boolean
@@ -42,7 +42,6 @@ const MIN_ROW = 24
 const bands = computed(() => stackBands(props.counts, props.height, GAP, MIN_ROW))
 const conversation = computed(() => bands.value.filter((b) => isConversationLayer(b.layer)))
 const curated = computed(() => bands.value.filter((b) => !isConversationLayer(b.layer)))
-const names = computed(() => (props.compact ? layerShortLabels : layerLabels))
 const cuts = computed(() =>
   bands.value.map((band) => ({
     band,
@@ -214,7 +213,7 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
           @blur="leave"
           @click="emit('select', { layer: band.layer, sensitivity: null })"
         >
-          {{ names[band.layer] }}
+          {{ layerLabels[band.layer] }}
         </button>
         <button
           v-if="layerTotal(counts, band.layer)"

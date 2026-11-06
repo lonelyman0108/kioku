@@ -12,12 +12,13 @@ const fakes = vi.hoisted(() => ({
 }))
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
 
-const URI = 'infra://nas'
+const URI = 'user://nas'
 const memory = (over: Partial<ConsoleMemoryView> = {}): ConsoleMemoryView =>
   ({
     id: '00000000-0000-4000-8000-000000000001',
     uri: URI,
-    layer: 'private',
+    title: 'NAS',
+    layer: 'user',
     sensitivity: 'private',
     version: 1,
     content: '密码：hunter2-not-real，平时不用。',
@@ -88,7 +89,7 @@ describe('读到记忆之后', () => {
       value: 'hunter2-not-real',
       field: 'password',
       identifier: 'nas',
-      name: 'nas',
+      name: 'NAS',
     })
     expect(convert.blocked.value).toBe(false)
   })
@@ -120,9 +121,9 @@ describe('读到记忆之后', () => {
 
 describe('占位符放不进这条记忆', () => {
   it.each([
-    ['基础层', { layer: 'base', sensitivity: 'internal' }],
-    ['私人层但敏感级不够', { layer: 'private', sensitivity: 'internal' }],
-    ['应用层、私密', { layer: 'app', sensitivity: 'private' }],
+    ['通用', { layer: 'core', sensitivity: 'internal' }],
+    ['本人但敏感级不够', { layer: 'user', sensitivity: 'internal' }],
+    ['应用、私密', { layer: 'app', sensitivity: 'private' }],
   ] as const)('%s：值不拿出来，提交不了', async (_name, over) => {
     const convert = await ready(over)
     expect(convert.blocked.value).toBe(true)
@@ -137,11 +138,11 @@ describe('占位符放不进这条记忆', () => {
 
   it('列表读旧了才走到这里：顺带让列表重读，那一行也换成去调整', async () => {
     const invalidate = vi.spyOn(client, 'invalidateQueries')
-    await ready({ layer: 'base', sensitivity: 'internal' })
+    await ready({ layer: 'core', sensitivity: 'internal' })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['memory-list', 's1'] })
   })
 
-  it('私人层、私密的不受影响', async () => {
+  it('本人、私密的不受影响', async () => {
     const invalidate = vi.spyOn(client, 'invalidateQueries')
     expect((await shown()).canSubmit.value).toBe(true)
     expect(invalidate).not.toHaveBeenCalled()
@@ -223,7 +224,7 @@ describe('重新读取', () => {
 
   it('重读之后变成放不进了：不留值', async () => {
     const convert = await shown()
-    fakes.api.memory.mockResolvedValue(memory({ version: 2, layer: 'base' }))
+    fakes.api.memory.mockResolvedValue(memory({ version: 2, layer: 'core' }))
     await convert.load()
     await nextTick()
     expect(convert.blocked.value).toBe(true)
@@ -265,7 +266,7 @@ describe('提交', () => {
       expectedVersion: 1,
       value: 'hunter2-not-real',
       identifier: 'nas',
-      name: 'nas',
+      name: 'NAS',
       field: 'password',
     })
     expect(convert.form.value).toBe('')

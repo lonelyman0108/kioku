@@ -172,6 +172,7 @@ describe('这一步改了什么', () => {
         {
           type: 'update',
           uri: 'core://a',
+          title: 'a',
           fields: ['content', 'validTo', 'odd'],
           left: false,
           becameSecret: false,
@@ -190,7 +191,16 @@ describe('这一步改了什么', () => {
   it('改成 secret 时提示历史正文会被抹掉、向量会删', () => {
     const [item] = changeItems({
       ...noChanges,
-      memories: [{ type: 'update', uri: 'core://a', fields: [], left: false, becameSecret: true }],
+      memories: [
+        {
+          type: 'update',
+          uri: 'core://a',
+          title: 'a',
+          fields: [],
+          left: false,
+          becameSecret: true,
+        },
+      ],
     })
     expect(item!.warnings.join('')).toContain('历史中的正文将被抹除')
     expect(item!.warnings.join('')).toContain('向量将被删除')
@@ -199,7 +209,16 @@ describe('这一步改了什么', () => {
   it('改后看不到了：说明 URI 是改前的', () => {
     const [item] = changeItems({
       ...noChanges,
-      memories: [{ type: 'update', uri: 'core://a', fields: [], left: true, becameSecret: false }],
+      memories: [
+        {
+          type: 'update',
+          uri: 'core://a',
+          title: 'a',
+          fields: [],
+          left: true,
+          becameSecret: false,
+        },
+      ],
     })
     expect(item!.notes.join('')).toContain('修改前的 URI')
   })
@@ -208,7 +227,7 @@ describe('这一步改了什么', () => {
     const items = changeItems({ ...noChanges, hiddenReleased: 2, hiddenOther: 3 })
     expect(items.map((i) => i.action)).toEqual([
       '已释放 2 条不可见过期记录的 URI（属于其他成员）',
-      '另有 3 处不可见的改动（当前访问密钥可写但不可读的层）',
+      '另有 3 处不可见的改动（当前访问密钥可写但不可读的归属）',
     ])
   })
 
