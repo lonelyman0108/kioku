@@ -57,21 +57,29 @@ export const DEFAULT_SENSITIVITY: Record<Layer, Sensitivity> = {
 
 // Markdown 的标题行（# 到 ######），代码块里的不算
 const HEADING = /^ {0,3}#{1,6}[ \t]+(.+?)(?:[ \t]+#+)?[ \t]*$/
-const FENCE = /^ {0,3}(`{3,}|~{3,})/
+// 代码块的围栏（照 CommonMark）：缩进不到四格，三个以上的 ` 或 ~，后面是信息串
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/
 // 换成空格的控制字符：标题里不能有
 const CONTROL = /\p{Cc}+/gu
 
 // 正文里第一个 # 标题，取不出来时为 null：没有 # 标题，或者第一个 # 标题里带凭据占位符（占位符只能写在正文里）。
+// 行尾的 \r（Windows 的换行）先去掉再认。代码块里的不算，代码块照 CommonMark 认：` 开头的围栏信息串里不能有 `；
+// 结束的围栏是同一种字符、不短于开头的，后面除了空格与制表符没有别的；没有结束的代码块一直到正文结尾。
 // 截到上限时不切开代理对
 export function firstHeading(content: string): string | null {
   let fence: string | null = null
-  for (const line of content.split('\n')) {
-    const opened = FENCE.exec(line)?.[1]
-    if (opened && (fence === null || opened[0] === fence[0])) {
-      fence = fence === null ? opened : null
+  for (const raw of content.split('\n')) {
+    const line = raw.endsWith('\r') ? raw.slice(0, -1) : raw
+    const [, marker, info = ''] = FENCE.exec(line) ?? []
+    if (fence !== null) {
+      const closes = marker !== undefined && marker[0] === fence[0] && marker.length >= fence.length
+      if (closes && /^[ \t]*$/.test(info)) fence = null
       continue
     }
-    if (fence !== null) continue
+    if (marker && !(marker[0] === '`' && info.includes('`'))) {
+      fence = marker
+      continue
+    }
     const heading = HEADING.exec(line)?.[1]?.replace(CONTROL, ' ').trim()
     if (heading) return mentionsPlaceholder(heading) ? null : clip(heading)
   }
