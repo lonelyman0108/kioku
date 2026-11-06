@@ -1,20 +1,47 @@
 #!/usr/bin/env bash
 # 构建服务端镜像，连 scripts/ci/test-db.sh 起的测试数据库启动一次：
 # 确认镜像里的迁移能跑、接口能用、首页是管理界面，避免 Dockerfile 悄悄失效。
+# 用法：smoke-image.sh          构建并检查
+#       smoke-image.sh --start  在后台构建，立刻返回：和后面的检查、测试同时进行
+#       smoke-image.sh --check  等后台的构建结束，再检查
+#       smoke-image.sh --build  只构建（--start 在后台调用它）
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 image=kioku:ci
 name=kioku-smoke
 port=18930
 base="http://127.0.0.1:$port"
-log=$(mktemp)
-if ! docker build --progress=plain -t "$image" . > "$log" 2>&1; then
-  tail -n 80 "$log" >&2
-  echo "服务端镜像构建失败" >&2
-  exit 1
-fi
 
-# 用单独的库，不碰集成测试的数据。连接串取 scripts/ci/test-db.sh 写下的，只换库名（端口由 Docker 分配）
+case "${1:-}" in
+  --start)
+    exec scripts/ci/background.sh start image "$0" --build
+    ;;
+  --build)
+    # 后台构建时，后面的步骤还在往工作区里写东西（node_modules、生成的类型声明、.venv），BuildKit 到
+    # COPY . . 时才读上下文，可能读进写了一半的文件。所以上下文用 git archive 打包的已跟踪文件，和这次要测的提交一致
+    git archive --format=tar HEAD | docker build --progress=plain -t "$image" -
+    exit 0
+    ;;
+  --check)
+    # 测试库在后台准备时也要等它：这一步要用它，单独跑这一步时它可能还没好
+    [ -z "${KIOKU_TEST_DATABASE_READY:-}" ] || scripts/ci/background.sh wait test-db
+    scripts/ci/background.sh wait image
+    ;;
+  '')
+    log=$(mktemp)
+    if ! docker build --progress=plain -t "$image" . > "$log" 2>&1; then
+      tail -n 80 "$log" >&2
+      echo "服务端镜像构建失败" >&2
+      exit 1
+    fi
+    ;;
+  *)
+    echo "用法：smoke-image.sh [--start|--check|--build]" >&2
+    exit 2
+    ;;
+esac
+
+# 用单独的库，不碰集成测试的数据。连接串取 scripts/ci/test-db.sh 写下的，只换库名
 db_url=${KIOKU_TEST_DATABASE_URL:?先运行 scripts/ci/test-db.sh}
 db_url=${db_url%/*}/kioku_smoke
 sql() { docker exec kioku-test-db psql -q -v ON_ERROR_STOP=1 -U postgres "$@"; }

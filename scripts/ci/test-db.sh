@@ -1,7 +1,10 @@
 #!/usr/bin/env bash
-# 在 CI 里构建 Kioku 的 PostgreSQL 镜像并启动一个临时实例，供集成测试使用。
-# 就绪后把连接串和并行数写入 GITHUB_ENV（KIOKU_TEST_DATABASE_URL、KIOKU_TEST_DATABASE_WORKERS）；
-# 本地开发用 docker-compose.dev.yml。
+# 在 CI 里构建 Kioku 的 PostgreSQL 镜像并启动一个临时实例，供集成测试使用。本地开发用 docker-compose.dev.yml。
+# 用法：test-db.sh               构建、启动，就绪后返回
+#       test-db.sh --background  在后台构建、启动，立刻返回：和后面的静态检查同时进行，
+#                                服务端测试开始前由 globalSetup 等它（apps/server/src/testing/globalSetup.ts）
+# 连接串和并行数写入 GITHUB_ENV（KIOKU_TEST_DATABASE_URL、KIOKU_TEST_DATABASE_WORKERS），后台时还有状态文件
+# 的路径（KIOKU_TEST_DATABASE_READY）。
 set -euo pipefail
 cd "$(dirname "$0")/../.."
 image=kioku-postgres:ci
@@ -9,18 +12,39 @@ name=kioku-test-db
 # 服务端测试的并行数：每个 worker 用自己的库（kioku_w1、kioku_w2…），见 apps/server/src/testing/workers.ts。
 # runner 只有 4 核，数据库也在这台机器上，再多 CPU 就不够了
 workers=3
+# 后台启动时连接串要先写出去，所以端口固定。选在临时端口范围（32768–60999）以下：
+# 范围里的端口可能正好被本机的出站连接占着，启动时报端口被占用
+port=15432
+
+write_env() {
+  {
+    echo "KIOKU_TEST_DATABASE_URL=postgres://kioku:kioku@127.0.0.1:$port/kioku"
+    echo "KIOKU_TEST_DATABASE_WORKERS=$workers"
+    for line in "$@"; do echo "$line"; done
+  } >> "${GITHUB_ENV:?只在 GitHub Actions 里运行}"
+}
+
+case "${1:-}" in
+  --background)
+    write_env "KIOKU_TEST_DATABASE_READY=$(scripts/ci/background.sh status-file test-db)"
+    exec scripts/ci/background.sh start test-db "$0" --no-env
+    ;;
+  --no-env | '') ;;
+  *)
+    echo "用法：test-db.sh [--background]" >&2
+    exit 2
+    ;;
+esac
+
 log=$(mktemp)
 if ! docker build --progress=plain -t "$image" docker/postgres > "$log" 2>&1; then
   tail -n 80 "$log" >&2
   echo "数据库镜像构建失败" >&2
   exit 1
 fi
-# 主机端口由 Docker 分配：写死的端口可能落在临时端口范围里，正好被本机的出站连接占着，启动时报端口被占用。
 # 几个 worker 同时跑，连接多的测试文件（各自开连接池和 pg-boss）凑到一起会超过默认的 100 个连接
-docker run -d --name "$name" -p 127.0.0.1::5432 \
+docker run -d --name "$name" -p "127.0.0.1:$port:5432" \
   -e POSTGRES_PASSWORD=postgres -e KIOKU_DB_PASSWORD=kioku "$image" -c max_connections=300 >/dev/null
-port=$(docker port "$name" 5432/tcp | head -n 1)
-port=${port##*:}
 
 sql() { docker exec "$name" psql -q -v ON_ERROR_STOP=1 -U postgres -d postgres "$@"; }
 # 初始化阶段的临时实例只监听 unix socket，所以走 TCP 探测，确认的是初始化完成后的正式实例
@@ -36,10 +60,7 @@ for _ in $(seq 1 60); do
         sleep 1
       done
     done
-    {
-      echo "KIOKU_TEST_DATABASE_URL=postgres://kioku:kioku@127.0.0.1:$port/kioku"
-      echo "KIOKU_TEST_DATABASE_WORKERS=$workers"
-    } >> "${GITHUB_ENV:?只在 GitHub Actions 里运行}"
+    [ "${1:-}" = --no-env ] || write_env
     echo "测试数据库已就绪：127.0.0.1:${port}，${workers} 个 worker 库"
     exit 0
   fi
