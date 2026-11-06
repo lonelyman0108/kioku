@@ -517,7 +517,7 @@ const contactsRoute = computed(() => ({
                   </p>
                   <p class="entry-meta">
                     <span>{{ conversationSubline(c) }}</span>
-                    <span>摘要 {{ c.summaryCount }} 段</span>
+                    <span>摘要 {{ c.summaryCount }} 条</span>
                     <time :datetime="c.lastActiveAt" :title="formatTime(c.lastActiveAt)">
                       {{ formatRelative(c.lastActiveAt) }}
                     </time>
