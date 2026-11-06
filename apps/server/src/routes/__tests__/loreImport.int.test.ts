@@ -23,6 +23,8 @@ import {
   applyImport,
   applySync,
   existingImportApps,
+  inPlanSnapshot,
+  PLAN_CHANGED,
   planImport,
   planImportFor,
   planSync,
@@ -200,18 +202,20 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
   const cli = async (persona = 'default') => {
     const target = { db: database.db, spaceId: ws.spaceId, accountId: ws.accountId, masterKey }
     const snapshot = await readLore(lore)
-    const { plan, imports } = await planImportFor(
-      target,
-      snapshot,
-      await existingImportApps(database.db, ws.spaceId),
-      {
-        accountId: ws.accountId,
-        persona: { slug: persona, name: '默认人格' },
-        secretUris: new Set(),
-        quoteMalformed: true,
-      },
-    )
-    const sync = await planSync(target, plan, snapshot, imports)
+    const { plan, sync } = await inPlanSnapshot(target, async (snap) => {
+      const base = await planImportFor(
+        snap,
+        snapshot,
+        await existingImportApps(snap.db, ws.spaceId),
+        {
+          accountId: ws.accountId,
+          persona: { slug: persona, name: '默认人格' },
+          secretUris: new Set(),
+          quoteMalformed: true,
+        },
+      )
+      return { plan: base.plan, sync: await planSync(snap, base.plan, snapshot, base.imports) }
+    })
     return { target, snapshot, plan, sync }
   }
   const cliApply = async (persona?: string) => {
@@ -851,6 +855,24 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         })
       })
 
+      it('Lore 里换了路径、新目标被跳过：原因挂到之前导入的那条上，它现在对应的就是这个目标', async () => {
+        await seed('core://soul/style', '人格的口吻', { priority: 1 })
+        await cliApply()
+        // Lore 里移到 core:// 下，正文又超出长度上限：新目标是基础层的 core://style，写不进去
+        await editLore('core://soul/style', '长'.repeat(20_001))
+        await renameLore('core://soul/style', 'style')
+        const plan = await planOf(await fileSource())
+        const skip = plan.skipped.find((s) => s.source === 'core://style')
+        expect(skip).toBeDefined()
+        expect(plan.sync.items.find((i) => i.uri === 'persona://default/soul/style')).toEqual({
+          source: 'core://style',
+          uri: 'persona://default/soul/style',
+          state: 'skipped',
+          reason: skip!.reason,
+          changes: [],
+        })
+      })
+
       it('占用的原因只挂到对应的目标：同一个节点之前导入到别处的那条列为没有映射到', async () => {
         await cliApply('old-persona')
         await ws.createPersona('default')
@@ -962,6 +984,36 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect(result.occupied).toEqual(['core://agent'])
         expect(result.created).not.toContain('core://agent')
         expect(await contentOf('core://agent')).toBe('后来写的')
+      })
+    })
+
+    describe('看过计划之后别处又导入了同样的节点', () => {
+      it('界面：写入事务里重读的导入记录和计划时的不一致，返回 409，不按旧的判断写', async () => {
+        const source = await fileSource()
+        const plan = await planOf(source)
+        const real =
+          await vi.importActual<typeof import('../../importer/lore')>('../../importer/lore')
+        // 出完基准计划、写入之前，命令行导入了同样的节点：计划的快照里看不到，写入事务里看得到
+        vi.mocked(planImportFor).mockImplementationOnce(async (...args) => {
+          const base = await real.planImportFor(...args)
+          await cliApply()
+          return base
+        })
+        const res = await post('apply', { source, fingerprint: plan.fingerprint })
+        expect(res.status).toBe(409)
+        expect(((await res.json()) as { error: string }).error).toBe(PLAN_CHANGED)
+        // 只有命令行那一次写下的
+        expect(await counts()).toMatchObject({ memories: 6, events: 6 })
+      })
+
+      it('命令行：没有指纹，按写入事务里读到的导入记录判断，导入过的不再写', async () => {
+        const { target, plan } = await cli()
+        await cliApply()
+        const result = await applyImport(target, plan)
+        expect(result.created).toEqual([])
+        expect(result.previouslyImported).toHaveLength(6)
+        expect(result.occupied).toEqual([])
+        expect(await counts()).toMatchObject({ memories: 6, events: 6 })
       })
     })
 

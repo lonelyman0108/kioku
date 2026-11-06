@@ -33,6 +33,11 @@ const options = {
   persona: { slug: 'default', name: '默认人格' },
   secretUris: new Set<string>(),
 }
+// 不导入的原因；只关于一个写入目标的带上那个目标的去重键（节点的 uuid 在这里就是 URI）
+const skipsOf = (plan: ImportPlan) =>
+  plan.skipped.map(({ source, reason, target }) =>
+    target ? { source, reason, importKey: target.importKey } : { source, reason },
+  )
 
 describe('Lore 导入计划', () => {
   it('按 domain 映射到层，core://soul 进人格、core://agent/<runtime> 进应用', () => {
@@ -298,8 +303,7 @@ describe('Lore 导入计划', () => {
       options,
     )
     expect(plan.memories.map((m) => m.source)).toEqual(['projects://router'])
-    // 只关于一个写入目标的原因带上它的去重键（节点的 uuid 在这里就是 URI）
-    expect(plan.skipped).toEqual([
+    expect(skipsOf(plan)).toEqual([
       {
         source: 'core://router',
         reason: expect.stringContaining('core://router 属于基础层'),
@@ -489,7 +493,7 @@ describe('Lore 导入计划', () => {
         reason: '和 core://agent/claude_code 映射到同一个 app://claude-code/agent',
         importKey: 'core://agent/claude-code@claude-code',
       }
-      expect(all.skipped).toEqual([clash])
+      expect(skipsOf(all)).toEqual([clash])
 
       const plan = planImport(snap, [], {
         ...options,
@@ -497,7 +501,7 @@ describe('Lore 导入计划', () => {
       })
       // 第二个节点在计划里没有写入目标，看不到也勾不了，不能在勾掉第一个之后写进去
       expect(plan.memories.map((m) => m.source)).toEqual(['infra://other'])
-      expect(plan.skipped).toEqual([
+      expect(skipsOf(plan)).toEqual([
         { source: 'core://agent/claude_code', reason: '本次选择不导入' },
         clash,
       ])
@@ -604,7 +608,7 @@ describe('Lore 导入计划', () => {
       const plan = planImport(snap, mine, { ...options, occupied })
       // 只少了占用的两个目标，写到两个应用的节点还写另一个
       expect(plan.memories).toEqual(draft.memories.filter((m) => !occupied.has(m.importKey)))
-      expect(plan.skipped).toEqual([
+      expect(skipsOf(plan)).toEqual([
         {
           source: 'core://agent/open_claw',
           reason: 'app://open-claw/agent 已被其他记忆占用',
@@ -632,7 +636,7 @@ describe('Lore 导入计划', () => {
         occupied: keysOf(draft, 'core://agent'),
       })
       expect(plan.memories).toEqual([])
-      expect(plan.skipped).toEqual([
+      expect(skipsOf(plan)).toEqual([
         {
           source: 'core://agent',
           reason: 'core://agent 已被其他记忆占用',

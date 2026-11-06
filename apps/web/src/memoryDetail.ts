@@ -28,12 +28,14 @@ export function expiryState(validTo: string | null, now: Date = new Date()): Exp
 // 启动加载的标记说的是够不够格，不是一定加载
 export const BOOT_HINT = '符合启动加载条件；实际是否加载取决于访问密钥的权限、继承覆盖和字数上限'
 
-// 够格进启动加载的节点（contracts 的 isBootCandidate，和服务端的 NEEDS_DISCLOSURE 同一条规则）。过期了也不算
+// 够格进启动加载的节点：contracts 的 isBootCandidate（和服务端的 BOOT_CANDIDATE 同一条规则），再除去已过期的。
+// 服务端只给现在有效的，过期这一条是给载入之后才到期的记忆。管理界面的列表与详情只有目录里的记忆（有 URI），
+// 视图里没有 form 这一项，按 curated 判断
 export function isBootNode(
   memory: Pick<MemoryView, 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'>,
   now: Date = new Date(),
 ): boolean {
-  return isBootCandidate(memory) && !isExpired(memory.validTo, now)
+  return isBootCandidate({ ...memory, form: 'curated' }) && !isExpired(memory.validTo, now)
 }
 
 type DisclosureFields = Pick<

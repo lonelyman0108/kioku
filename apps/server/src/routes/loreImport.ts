@@ -24,7 +24,9 @@ import {
   assertExecutable,
   credentialHints,
   existingImportApps,
+  inPlanSnapshot,
   loreDataTime,
+  PLAN_CHANGED,
   planFingerprint,
   planImport,
   planImportFor,
@@ -211,14 +213,18 @@ export function loreImportRoutes(deps: Deps) {
       const { source, persona = LORE_DEFAULT_PERSONA } = c.req.valid('json')
       const parsed = await readSource(deps, accountId, source, c.req.raw.signal)
       const target = { db: deps.db, spaceId, accountId, masterKey: deps.masterKey }
-      const existing = await existingImportApps(deps.db, spaceId)
-      const base = await basePlan(target, parsed.snapshot, existing, {
-        accountId,
-        persona,
-        exportedAt: parsed.exportedAt,
+      // 已有应用、基准计划与数据时间都在出计划的同一个快照里读
+      const { base, dataTime } = await inPlanSnapshot(target, async (snap) => {
+        const existing = await existingImportApps(snap.db, spaceId)
+        const base = await basePlan(snap, parsed.snapshot, existing, {
+          accountId,
+          persona,
+          exportedAt: parsed.exportedAt,
+        })
+        // 拉取读的是现在的 Lore，不用判断新旧
+        const dataTime = source.kind === 'file' ? await loreDataTime(snap.db, spaceId) : null
+        return { base, dataTime }
       })
-      // 拉取读的是现在的 Lore，不用判断新旧
-      const dataTime = source.kind === 'file' ? await loreDataTime(deps.db, spaceId) : null
       return c.json(planView(parsed, base, dataTime, deps.masterKey !== null), 200)
     })
     .openapi(applyRoute, async (c) => {
@@ -234,42 +240,44 @@ export function loreImportRoutes(deps: Deps) {
       // 名额只占「算基准计划、比指纹、写入」这一段，两次执行不会交错。客户端断开也写完：
       // 导入可以重复执行，停在中间没有好处
       return withTransferSlot(accountId, c.req.raw.signal, async () => {
-        const existing = await existingImportApps(deps.db, spaceId)
-        const base = await basePlan(target, snapshot, existing, options)
-        // 这里的 409 结尾不带句号：界面在它后面接着写重算计划的说明（见 applyFailureNotice）
-        if (base.fingerprint !== body.fingerprint) {
-          throw new MemoryError(409, '来源或此空间在查看计划后已变化，请重新查看计划')
-        }
-        // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍。有勾选时沿用基准计划查到的占用，不再查：
-        // 写入的才是看过的计划减去勾掉的（之后才被占用的由写入时的数据库判断）
-        const ticked = body.secretUris.length > 0 || body.excludeUris.length > 0
-        const plan = ticked
-          ? planImport(snapshot, existing, {
-              ...options,
-              secretUris: new Set(body.secretUris),
-              excludeUris: new Set(body.excludeUris),
-              occupied: base.occupied,
-            })
-          : base.plan
-        assertExecutable(plan, deps.masterKey)
-        const sync = ticked ? await planSync(target, plan, snapshot, base.imports) : base.sync
-        if (source.kind === 'file' && !body.confirmStale) {
-          const preview = ticked ? await previewImport(target, plan, base.imports) : base.preview
-          const stale = staleAgainst(
-            exportedAt,
-            await loreDataTime(deps.db, spaceId),
-            preview,
-            sync,
-          )
-          if (stale) {
-            throw new MemoryError(
-              409,
-              '此文件比空间已写入的数据旧，写入会把内容改回旧版本，确认后才能执行',
+        // 出计划的几步（基准计划、比指纹、按勾选重算、判断新旧）在同一个只读快照里，写入在快照之外
+        const { plan, sync, imports } = await inPlanSnapshot(target, async (snap) => {
+          const existing = await existingImportApps(snap.db, spaceId)
+          const base = await basePlan(snap, snapshot, existing, options)
+          if (base.fingerprint !== body.fingerprint) throw new MemoryError(409, PLAN_CHANGED)
+          // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍。有勾选时沿用基准计划查到的占用，不再查：
+          // 写入的才是看过的计划减去勾掉的（之后才被占用的由写入时的数据库判断）
+          const ticked = body.secretUris.length > 0 || body.excludeUris.length > 0
+          const plan = ticked
+            ? planImport(snapshot, existing, {
+                ...options,
+                secretUris: new Set(body.secretUris),
+                excludeUris: new Set(body.excludeUris),
+                occupied: base.occupied,
+              })
+            : base.plan
+          assertExecutable(plan, deps.masterKey)
+          const sync = ticked ? await planSync(snap, plan, snapshot, base.imports) : base.sync
+          if (source.kind === 'file' && !body.confirmStale) {
+            const preview = ticked ? await previewImport(snap, plan, base.imports) : base.preview
+            const stale = staleAgainst(
+              exportedAt,
+              await loreDataTime(snap.db, spaceId),
+              preview,
+              sync,
             )
+            if (stale) {
+              throw new MemoryError(
+                409,
+                '此文件比空间已写入的数据旧，写入会把内容改回旧版本，确认后才能执行',
+              )
+            }
           }
-        }
+          return { plan, sync, imports: base.imports }
+        })
         try {
-          const result = await applyImport(target, plan)
+          // 写入事务里重读导入记录，和出计划时的不一致（之间别处又导入过）就返回 409，见 applyImport
+          const result = await applyImport(target, plan, imports)
           const synced = await applySync(target, sync)
           return c.json({ ...result, sync: synced }, 200)
         } catch (err) {

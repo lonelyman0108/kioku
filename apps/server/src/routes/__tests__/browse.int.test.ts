@@ -22,6 +22,7 @@ import { apps, memories, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { backfillEmbeddings, embedMemories } from '../../embedding/worker'
 import { memoryServiceForConsole } from '../../memory/context'
+import { BOOT_CANDIDATE } from '../../memory/filter'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -394,6 +395,18 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
         .where(eq(memories.id, lapsed.id)),
     )
     await create(editor.cookie, { uri: 'home://diary', content: '日记' })
+    // 抽取的记忆落在启动加载的层、优先级也够：它没有 URI，不进启动加载，不在列表里，也不算要补的
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memories).values({
+        spaceId: ws.spaceId,
+        form: 'extracted',
+        layer: 'base',
+        sensitivity: 'public',
+        provenance: 'agent',
+        content: '抽取的事实',
+        priority: 0,
+      }),
+    )
 
     const expected = needed.map((m) => m.uri).sort()
     expect((await get<SpaceOverview>(ws.cookie, '/overview')).missingDisclosure).toBe(
@@ -409,12 +422,28 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
         .filter((uri) => !expected.includes(uri))
         .sort(),
     )
-    // SQL 的 NEEDS_DISCLOSURE 和 contracts 的 isBootCandidate（界面标「启动加载」用它）逐条对上
+    // 列表筛出来的就是没写触发场景、又不是 isBootCandidate 的（列表只有目录里的记忆）
     const byRule = all.items
-      .filter((m) => !m.disclosure?.trim() && !isBootCandidate(m))
+      .filter((m) => !m.disclosure?.trim() && !isBootCandidate({ ...m, form: 'curated' }))
       .map((m) => m.uri)
       .sort()
     expect(byRule).toEqual(expected)
+    // SQL 的 BOOT_CANDIDATE 和 contracts 的 isBootCandidate 逐行对上，抽取的与看不到的也算在内
+    const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .select({
+          form: memories.form,
+          layer: memories.layer,
+          priority: memories.priority,
+          provenance: memories.provenance,
+          sensitivity: memories.sensitivity,
+          boot: sql<boolean>`${BOOT_CANDIDATE}`,
+        })
+        .from(memories),
+    )
+    expect(rows.filter((r) => r.form === 'extracted' && r.layer === 'base')).toHaveLength(1)
+    expect(rows.filter((r) => r.boot).length).toBeGreaterThan(4)
+    for (const { boot, ...memory } of rows) expect(isBootCandidate(memory)).toBe(boot)
   })
 
   it('有已过期的记忆时，概览与实例设置的向量数一样：都只算现在有效的', async () => {

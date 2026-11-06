@@ -161,9 +161,13 @@ export interface ImportPlan {
   persona: { slug: string; name: string }
   apps: AppMapping[]
   memories: PlannedMemory[]
-  // 只关于一个写入目标的原因带上那个目标的去重键（同步时只挂到这个目标之前导入的那条上）；整个节点不导入的不带。
-  // 去重键不进计划视图
-  skipped: { source: string; reason: string; importKey?: string }[]
+  // 只关于一个写入目标的原因带上那个目标（去重键与事件 context）：同步时只挂到这个目标对应的旧记录上（见 planSync）；
+  // 整个节点不导入的不带。target 不进计划视图
+  skipped: {
+    source: string
+    reason: string
+    target?: Pick<PlannedMemory, 'importKey' | 'context'>
+  }[]
   droppedKeywords: { source: string; keyword: string; reason: string }[]
   // 文字由命令行与界面各自拼
   warnings: { uri: string; kind: LoreWarningKind }[]
@@ -416,9 +420,9 @@ export function planImport(
         ...(options.exportedAt ? { loreExportedAt: options.exportedAt } : {}),
       }
       const importKey = importKeyOf(context)
-      // 这里的原因只关于这一个写入目标，带上它的去重键：同步时只挂到这个目标之前导入的那条上（见 planSync）
+      // 这里的原因只关于这一个写入目标，带上这个目标：同步时只挂到它对应的旧记录上（见 planSync）
       const skip = (reason: string) => {
-        plan.skipped.push({ source: node.uri, reason, importKey })
+        plan.skipped.push({ source: node.uri, reason, target: { importKey, context } })
       }
       const earlier = plannedUris.get(target.uri)
       if (earlier) {
@@ -448,7 +452,8 @@ export function planImport(
       }
       plannedUris.set(target.uri, node.uri)
       // 被别的记忆占用的目标照样占着这个 URI（上面已经记下），映射到同一个 URI 的后一个节点不顶上来：
-      // 按占用重算的计划只比不看占用时少了这几个目标，别的都不变
+      // 按占用重算的计划只比不看占用时少了这几个目标，别的都不变。占用只出现在要新建的目标上（见 readPlanState），
+      // 它没有对应的旧记录，这条原因不会挂到任何同步项上；记成这个目标的原因，是为了不当成整个节点的、挂到同一节点别的旧记录上
       if (options.occupied?.has(importKey)) {
         skip(`${target.uri} 已被其他记忆占用`)
         continue
@@ -551,6 +556,7 @@ async function readPlanState(
   target: ImportTarget,
   draft: ImportPlan,
 ): Promise<{ imports: ImportRecords; occupied: Set<string> }> {
+  // 在 inPlanSnapshot 里时这是那个快照里的 savepoint；单独调用时自己开一个同样的快照
   return withSpace(
     target.db,
     target.spaceId,
@@ -571,9 +577,29 @@ async function readPlanState(
       const taken = await uriConflicts(tx, access, claims)
       return { imports, occupied: new Set([...taken].map((c) => c.importKey)) }
     },
-    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+    PLAN_SNAPSHOT,
   )
 }
+
+const PLAN_SNAPSHOT = { isolationLevel: 'repeatable read', accessMode: 'read only' } as const
+
+// 出计划的只读快照（命令行与路由共用）：已有应用、导入记录、占用、预览与同步都在这一个可重复读的只读事务里读，
+// 出自同一份数据。回调拿到的 target 的 db 换成了这个事务，里面再开的事务（withSpace、记忆服务的读取）都是它的 savepoint。
+// 同一条连接上并行的 savepoint 会交错，所以回调里只能一步一步地读，不能并行。写入不在这里，见 applyImport
+export function inPlanSnapshot<T>(
+  target: ImportTarget,
+  fn: (snapshot: ImportTarget) => Promise<T>,
+): Promise<T> {
+  return withSpace(
+    target.db,
+    target.spaceId,
+    (tx) => fn({ ...target, db: tx as unknown as Db }),
+    PLAN_SNAPSHOT,
+  )
+}
+
+// /apply 发现看过的计划已经不作数时的 409。结尾不带句号：界面在它后面接着写重算计划的说明（见 applyFailureNotice）
+export const PLAN_CHANGED = '来源或此空间在查看计划后已变化，请重新查看计划'
 
 export interface BasePlan {
   plan: ImportPlan
@@ -748,8 +774,14 @@ function dataWriteFailure(err: unknown): string | null {
   return `写入数据库失败（${code}）`
 }
 
-// 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用
-export async function applyImport(target: ImportTarget, plan: ImportPlan): Promise<ImportResult> {
+// 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用。
+// expected 是出计划时读到的导入记录（界面的 /apply 传）：写入事务里重读到的和它不一致，说明之后又有导入落地，
+// 返回 409 让人重看计划，不按旧的判断写。不传时（命令行，没有指纹）按写入事务里读到的判断
+export async function applyImport(
+  target: ImportTarget,
+  plan: ImportPlan,
+  expected?: ImportRecords,
+): Promise<ImportResult> {
   const { db, spaceId, accountId } = target
   const result: ImportResult = {
     personaUsed: false,
@@ -767,11 +799,14 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
   // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写。
   // 写入期间才被转走的，由每次写入时同一个事务里的归属核对拦下（requireAppOwner）
   const blockedApps = new Set<string>()
-  // 写入时重新读导入记录，不用计划时那份：计划之后命令行可能又导入过，按这一刻的去重
-  const done = await readImportRecords(target)
-  const moved = movedInLore(plan, done)
+  let done: ImportRecords = new Map()
+  let moved = new Map<string, ImportedMemory[]>()
 
   await withSpace(db, spaceId, async (tx) => {
+    // 在写入事务里读导入记录：和这里写下的人格、应用出自同一刻的判断
+    done = await importRecordsIn(tx)
+    if (expected && !sameImports(done, expected)) throw new MemoryError(409, PLAN_CHANGED)
+    moved = movedInLore(plan, done)
     const [created] = writesNewPersona(plan, done, moved)
       ? await tx
           .insert(personas)
@@ -913,6 +948,18 @@ export function readImportRecords(
   return withSpace(target.db, target.spaceId, importRecordsIn)
 }
 
+// 两份导入记录是不是同一份：同样的导入事件、对应的记忆还在同样的位置与状态。版本号不比：导入只看导入过没有、
+// 记忆在哪、是不是机密，同步另按版本号逐条核对（applySync 的 expectedVersion）
+function sameImports(a: ImportRecords, b: ImportRecords): boolean {
+  const canonical = (records: ImportRecords) =>
+    [...records.values()]
+      .flat()
+      .map((m) => JSON.stringify([m.key, m.memoryId, m.importedUri, m.state, m.uri]))
+      .sort()
+      .join('\n')
+  return canonical(a) === canonical(b)
+}
+
 async function importRecordsIn(tx: Tx): Promise<ImportRecords> {
   const imported = await tx
     .select({
@@ -965,15 +1012,20 @@ async function importRecordsIn(tx: Tx): Promise<ImportRecords> {
 // Lore 里换了路径、映射到别的应用或层的节点：去重键跟着变了，按键找不到之前的导入，不认出来就会在新位置再建一条。
 // 按节点 uuid 认：之前导入时的键这次的计划已经不再产生、Lore 里的 URI 也变了，才算换了路径。
 // 加了一个同类应用（节点多了一个目标）时原来的键仍在计划里，换个 --persona 时人格层两边的人格不同，都不算；
-// 之前的导入事件没记 loreUri 的不判断。返回：这次计划里的去重键 → 之前按别的键导入的那些记忆
+// 之前的导入事件没记 loreUri 的不判断。这次的目标包括要写的和只因这个目标本身被跳过的（skipped 里带 target 的）：
+// 被跳过的目标对应的旧记录，同步时拿到它被跳过的原因。返回：这次的去重键 → 之前按别的键导入的那些记忆
 function movedInLore(plan: ImportPlan, done: ImportRecords): Map<string, ImportedMemory[]> {
-  const planned = new Set(plan.memories.map((m) => m.importKey))
+  const targets = [
+    ...plan.memories,
+    ...plan.skipped.flatMap((s) => (s.target ? [{ source: s.source, ...s.target }] : [])),
+  ]
+  const planned = new Set(targets.map((t) => t.importKey))
   const byNode = new Map<string, ImportedMemory[]>()
   for (const m of [...done.values()].flat()) {
     byNode.set(m.loreNodeUuid, [...(byNode.get(m.loreNodeUuid) ?? []), m])
   }
   const moved = new Map<string, ImportedMemory[]>()
-  for (const item of plan.memories) {
+  for (const item of targets) {
     if (done.has(item.importKey)) continue
     const persona = item.context.targetPersona
     const earlier = (byNode.get(String(item.context.loreNodeUuid)) ?? []).filter(
@@ -1159,14 +1211,22 @@ export async function planSync(
   }
   // 剩下的是这次的计划没有对应目标的：节点不在 Lore 里了的只列出来；
   // 还在 Lore 里的，计划不导入它就给出原因，否则是计划没有映射到它（例如换了 --persona，或者对应的应用不在了），
-  // 都列出来，不能悄悄不同步。整个节点不导入的原因给这个节点之前导入的每一条；只关于一个写入目标的
-  // （撞 URI、目标被别的记忆占用等）只给那个目标之前导入的那条，按去重键对上，不挂到同一节点别的目标上
+  // 都列出来，不能悄悄不同步。整个节点不导入的原因给这个节点之前导入的每一条。只关于一个写入目标的（撞 URI、
+  // 占位符的位置规则等）只给这个目标对应的旧记录：去重键相同的，或者 Lore 里换了路径、现在对应到它的（moved，
+  // 和同步决定移到哪个目标是同一份）。不再对应任何目标的旧记录不挂别的目标的原因，列为没有映射到。
+  // 目标被别的记忆占用的只出现在要新建的目标上，没有对应的旧记录，不会挂到任何一条上
   const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
   const nodeReasons = new Map<string, string[]>()
-  const targetReasons = new Map<string, string[]>()
+  const targetReasons = new Map<ImportedMemory, string[]>()
   for (const s of plan.skipped) {
-    const [reasons, key] = s.importKey ? [targetReasons, s.importKey] : [nodeReasons, s.source]
-    reasons.set(key, [...(reasons.get(key) ?? []), s.reason])
+    if (!s.target) {
+      nodeReasons.set(s.source, [...(nodeReasons.get(s.source) ?? []), s.reason])
+      continue
+    }
+    const key = s.target.importKey
+    for (const m of [...(done.get(key) ?? []), ...(moved.get(key) ?? [])]) {
+      targetReasons.set(m, [...(targetReasons.get(m) ?? []), s.reason])
+    }
   }
   for (const m of all) {
     if (reported.has(m) || m.state === 'deleted' || !m.uri) continue
@@ -1175,7 +1235,7 @@ export async function planSync(
       sync.goneFromLore.push(m.uri)
       continue
     }
-    const reasons = [...(nodeReasons.get(node.uri) ?? []), ...(targetReasons.get(m.key) ?? [])]
+    const reasons = [...(nodeReasons.get(node.uri) ?? []), ...(targetReasons.get(m) ?? [])]
     report(
       m,
       reasons.length

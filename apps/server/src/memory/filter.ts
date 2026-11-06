@@ -45,6 +45,10 @@ export const BOOT_ELIGIBLE = and(
   ),
 )!
 
+// 够格进启动加载的记忆：BOOT_ELIGIBLE，再加上不是机密（boot 照读权限不收机密）。管理界面标成启动加载的、
+// 概览「未设触发场景」不算的就是这些。JS 版是 contracts 的 isBootCandidate，browse.int.test.ts 逐行比对
+export const BOOT_CANDIDATE = and(BOOT_ELIGIBLE, ne(memories.sensitivity, 'secret'))!
+
 // 读权限要看的那几个字段从哪里取。记忆表上就是这些列；事件的前后快照（jsonb）里有同名字段，
 // 用 snapshotColumns 取出来，这样历史也用同一套条件判断，不另写一份规则
 export interface MemoryColumns {
