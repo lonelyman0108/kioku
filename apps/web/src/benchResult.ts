@@ -8,7 +8,13 @@ import type {
 } from '@kioku/contracts'
 
 import { icons } from './icons'
-import { changeLabels, credentialChangeLabels, credentialEventLabels, eventLabel } from './labels'
+import {
+  changeLabels,
+  credentialChangeLabels,
+  credentialEventLabels,
+  eventLabel,
+  sessionExtraLabels,
+} from './labels'
 
 // 测试台一步的结果怎么显示：调用台、场景与模型对话共用
 
@@ -108,11 +114,6 @@ export const turnNotBuffered = (step: BenchStepResult) =>
 export const VECTOR_SKIPPED_NOTE =
   '此步只使用全文与关键词：查询向量在事务开始前计算，此查询未计算到（依赖前面步骤的结果，或嵌入接口出错、超时）。'
 
-const DROPPED_LABELS: Record<BenchSessionStart['dropped'][number], string> = {
-  recent: '近期更新的记忆',
-  related: '与当前项目相关的记忆',
-}
-
 // session.start 多带的三项：宿主能完整接收的字数、没展开的节点、放不下的附加块
 export function sessionNotes(session: BenchSessionStart, text: string) {
   return {
@@ -122,7 +123,7 @@ export function sessionNotes(session: BenchSessionStart, text: string) {
         : `共 ${text.length} 字，客户端可完整接收 ${session.limit} 字`,
     overLimit: session.limit !== null && text.length > session.limit,
     omitted: session.omitted,
-    dropped: session.dropped.map((d) => DROPPED_LABELS[d]),
+    dropped: session.dropped.map((d) => sessionExtraLabels[d]),
   }
 }
 

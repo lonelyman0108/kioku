@@ -6,8 +6,10 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { bootUsage, simulatorState } from '../apps'
-import { layerLabels } from '../labels'
+import { memoryTitle } from '../coordinates'
+import { layerLabels, sessionExtraLabels } from '../labels'
 import { memoryRoute } from '../routes'
+import { formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
@@ -90,8 +92,11 @@ watch(
 )
 
 const usage = computed(() => (preview.value ? bootUsage(preview.value) : null))
+// 放不下、没有附上的附加块
+const dropped = computed(() =>
+  (preview.value?.dropped ?? []).map((extra) => sessionExtraLabels[extra]).join('、'),
+)
 const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
-const droppedLabels = { recent: '近期更新的记忆', related: '与当前项目相关的记忆' }
 </script>
 
 <template>
@@ -142,11 +147,11 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             v-if="usage.other > 0"
             class="boot-other"
             :style="{ width: `${usage.other}%` }"
-            title="标题、近期更新与相关记忆"
+            title="标题、会话摘要、近期更新与相关记忆"
           />
         </div>
         <NoteLine v-if="preview.dropped.length" class="boot-note" tone="warning">
-          超出客户端接收上限，未附加：{{ preview.dropped.map((d) => droppedLabels[d]).join('、') }}
+          超出客户端接收上限，未附加：{{ dropped }}
         </NoteLine>
 
         <ul v-if="preview.entries.length" class="boot-list">
@@ -165,8 +170,33 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
           class="boot-omitted"
           :title="preview.omitted.map((node) => node.uri).join('\n')"
         >
-          超出预算、未展开：{{ preview.omitted.map((node) => node.title).join('、') }}
+          超出预算、未展开：{{ preview.omitted.map((node) => memoryTitle(node)).join('、') }}
         </p>
+
+        <!-- 附在启动加载后面的第一块：同一会话最近的摘要，新的在前 -->
+        <div v-if="preview.summaries.length" class="boot-summaries">
+          <SectionHeading title="会话摘要" :level="3" class="boot-sub-head">
+            <template #hint>
+              <Hint>不带会话上下文的会话最近几条摘要；群聊、私聊的摘要不进入启动加载。</Hint>
+            </template>
+          </SectionHeading>
+          <ul class="boot-list">
+            <li
+              v-for="(summary, i) in preview.summaries"
+              :key="`${summary.createdAt}|${i}`"
+              class="boot-summary"
+            >
+              <time
+                class="boot-date"
+                :datetime="summary.createdAt"
+                :title="formatTime(summary.createdAt)"
+              >
+                {{ formatShort(summary.createdAt) }}
+              </time>
+              <span class="boot-summary-text">{{ summary.content }}</span>
+            </li>
+          </ul>
+        </div>
       </template>
 
       <div class="boot-subs">
@@ -306,6 +336,23 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
   margin-top: 8px;
   font-size: 14px;
   color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+.boot-summaries {
+  margin-top: 17px;
+}
+.boot-list .boot-summary {
+  align-items: baseline;
+}
+.boot-date {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.boot-summary-text {
+  flex: 1 1 0;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 .boot-subs {

@@ -686,9 +686,17 @@ describe('启动加载', () => {
   })
 
   it('超出预算的节点写标题，坐标放在悬停里：omitted 的每一项是对象，直接 join 会显示成 [object Object]', () => {
-    expect(appSimulator).toContain("preview.omitted.map((node) => node.title).join('、')")
+    expect(appSimulator).toContain("preview.omitted.map((node) => memoryTitle(node)).join('、')")
     expect(appSimulator).toContain(`:title="preview.omitted.map((node) => node.uri).join('\\n')"`)
     expect(appSimulator).not.toContain('preview.omitted.join(')
+  })
+
+  it('会话摘要按服务端给的顺序列出（新的在前），写时间与正文；放不下的附加块用同一份说法', () => {
+    expect(appSimulator).toContain('v-for="(summary, i) in preview.summaries"')
+    expect(appSimulator).toContain('{{ formatShort(summary.createdAt) }}')
+    expect(appSimulator).toContain('{{ summary.content }}')
+    expect(appSimulator).toContain('v-if="preview.summaries.length"')
+    expect(appSimulator).toContain('sessionExtraLabels[extra]')
   })
 
   it('没有有效 Key 的说明只在读到了列表时显示', () => {

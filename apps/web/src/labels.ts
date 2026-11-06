@@ -14,6 +14,7 @@ import {
   type Provenance,
   type ReadDenial,
   type RecallSource,
+  type SessionExtra,
 } from '@kioku/contracts'
 
 import { icons } from './icons'
@@ -61,6 +62,13 @@ export const recallSourceLabels: Record<RecallSource, string> = {
   'prompt.submit': '每轮输入',
   'mcp.search': 'MCP 搜索',
   'rest.recall': 'REST 召回',
+}
+
+// 会话开始时附在启动加载后面的几块，放不下、没有附上时说是哪几块
+export const sessionExtraLabels: Record<SessionExtra, string> = {
+  summaries: '会话摘要',
+  recent: '近期更新的记忆',
+  related: '与当前项目相关的记忆',
 }
 
 // 召回调试里一条记忆被当前 Key 过滤掉的原因

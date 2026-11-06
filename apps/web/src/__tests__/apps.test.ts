@@ -89,6 +89,7 @@ describe('启动加载的用量条', () => {
       { uri: 'persona://b/c', title: 'c', layer: 'persona', chars: 300 },
     ],
     omitted: [],
+    summaries: [],
     recent: [],
     related: [],
     dropped: [],

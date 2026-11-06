@@ -141,14 +141,14 @@ describe('一步的状态', () => {
 describe('session.start 多带的三项', () => {
   it('字数上限、没展开的节点与放不下的附加块', () => {
     const notes = sessionNotes(
-      { limit: 10, omitted: ['core://a'], dropped: ['recent', 'related'] },
+      { limit: 10, omitted: ['core://a'], dropped: ['summaries', 'recent', 'related'] },
       '一二三',
     )
     expect(notes).toEqual({
       size: '共 3 字，客户端可完整接收 10 字',
       overLimit: false,
       omitted: ['core://a'],
-      dropped: ['近期更新的记忆', '与当前项目相关的记忆'],
+      dropped: ['会话摘要', '近期更新的记忆', '与当前项目相关的记忆'],
     })
   })
 
