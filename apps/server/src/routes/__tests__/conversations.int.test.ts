@@ -9,13 +9,14 @@ import type {
   SubjectDetail,
   SubjectList,
 } from '@kioku/contracts'
-import { asc, eq } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { asc, eq, sql } from 'drizzle-orm'
+import type { PgTable } from 'drizzle-orm/pg-core'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { canRead, type SessionContext } from '../../access/access'
 import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
-import { withSpace, type Database, type Tx } from '../../db/client'
+import { withSpace, type Database, type Db, type Tx } from '../../db/client'
 import {
   conversations,
   conversationTurns,
@@ -192,8 +193,11 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
     expect(first.items[0]).toMatchObject({ subject: null, owner: { id: ws.accountId } })
     expect(first.items[2]!.subject).toMatchObject({ kind: 'group', displayName: '读书会' })
 
-    // 同一个群里换个人说话：还是那个会话，只更新最近活动，排到最前面
-    const before = first.items[2]!
+    // 同一个群里换个人说话：还是那个会话，只更新最近活动，排到最前面（最近活动早于一分钟以前才更新，见下一个用例）
+    await inSpace((tx) =>
+      tx.update(conversations).set({ lastActiveAt: sql`now() - interval '2 minutes'` }),
+    )
+    const before = (await list()).items.find((c) => c.kind === 'group')!
     await event(
       { event: 'prompt.submit', prompt: '还是读书会', context: group('1003', '小刚') },
       botKey,
@@ -205,6 +209,69 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
       Date.parse(before.lastActiveAt),
     )
     expect(await conversationRows()).toHaveLength(3)
+  })
+
+  it('最近活动早于一分钟以前才更新：一分钟之内再来的生命周期事件不写会话这一行', async () => {
+    const row = async () => {
+      const [r] = await inSpace((tx) =>
+        tx.execute<{ xmin: string; at: string }>(
+          sql`select xmin::text as xmin, last_active_at::text as at from conversations`,
+        ),
+      )
+      return r!
+    }
+    await event({ event: 'session.start', sessionId: 'cc-1' }, ccKey.key)
+    const first = await row()
+    await event({ event: 'prompt.submit', prompt: '接着上次的' }, ccKey.key)
+    await event({ event: 'turn.end', sessionId: 'cc-1', user: '你好', reply: '你好' }, ccKey.key)
+    // 行没有改写：同一个事务号写下的同一版
+    expect(await row()).toEqual(first)
+
+    await inSpace((tx) =>
+      tx.update(conversations).set({ lastActiveAt: sql`now() - interval '2 minutes'` }),
+    )
+    const stale = await row()
+    await event({ event: 'prompt.submit', prompt: '过了一会儿' }, ccKey.key)
+    const touched = await row()
+    expect(touched.xmin).not.toBe(stale.xmin)
+    expect(Date.parse(touched.at) - Date.parse(stale.at)).toBeGreaterThan(60_000)
+  })
+
+  it('写会话出错时只记日志，生命周期事件照常处理', async () => {
+    // 写会话这一步报错，别的照常
+    const failing = (db: Db): Db =>
+      new Proxy(db, {
+        get(target, prop) {
+          if (prop === 'transaction') {
+            return (run: (tx: Db) => Promise<unknown>, config?: unknown) =>
+              target.transaction((tx) => run(failing(tx as unknown as Db)), config as never)
+          }
+          if (prop !== 'insert') return Reflect.get(target, prop)
+          return (table: PgTable) => {
+            if (table === conversations) throw new Error('写会话失败')
+            return target.insert(table)
+          }
+        },
+      })
+    const broken = createApp({
+      db: failing(database.db),
+      cookieSecure: false,
+      masterKey,
+      embedder: staticEmbedderSource(null),
+      jobs,
+    })
+    const warned = vi.spyOn(console, 'warn').mockImplementation(() => {})
+    try {
+      const res = await broken.request(
+        '/v1/lifecycle/event',
+        jsonRequest('POST', { event: 'session.start', sessionId: 'cc-1' }, bearer(ccKey.key)),
+      )
+      expect(res.status).toBe(200)
+      expect(warned).toHaveBeenCalledWith('记下会话的最近活动失败', expect.anything())
+    } finally {
+      warned.mockRestore()
+    }
+    expect(await conversationRows()).toEqual([])
   })
 
   it('不带会话上下文的会话只有所属成员看得到；群聊、私聊的会话成员都看得到', async () => {
