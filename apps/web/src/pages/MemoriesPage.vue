@@ -177,7 +177,8 @@ const loadingRoots = ref(false)
 // 根的下一级没读出来：和「暂无记忆」分开说，免得以为记忆没了。记下错误，说法和别处一样用 readFailure
 const rootsError = shallowRef<unknown>(null)
 const createOpen = ref(false)
-const createUri = ref('')
+// 新建从目录里哪一行出发：带出归属与位置（见 draftFromKey）
+const createFrom = ref('')
 
 // 刚删掉的那条：目录和列表马上就要去掉它，窄屏返回时焦点不放回那一行
 let deletedUri: string | null = null
@@ -369,9 +370,9 @@ function onSelect(event: Event, item: MemoryTreeItem) {
   void (node ? selectNode(node) : select(item.uri))
 }
 
-// 新建记忆：按选中的那一行带出归属与位置。坐标开头的写法见 CreateMemoryModal
+// 新建记忆：按选中的那一行带出归属与位置
 function openCreate(key: string) {
-  createUri.value = key.includes('://') ? `${key}/` : key ? `${key}://` : ''
+  createFrom.value = key
   createOpen.value = true
 }
 // 工具栏上的「新建」：选中记忆时和它放在同一级，选中根、人格或应用时放在它下面
@@ -920,7 +921,7 @@ const crumbs = computed(() => {
     <CreateMemoryModal
       v-model:open="createOpen"
       :space-id="spaceId"
-      :initial-uri="createUri"
+      :from="createFrom"
       @created="onCreated"
     />
     <PersonaFormModal
