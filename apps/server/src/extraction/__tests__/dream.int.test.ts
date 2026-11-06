@@ -33,6 +33,7 @@ import {
   openTestDatabase,
   resetDatabase,
   settingsQueryFails,
+  summaryConversation,
   testDatabaseUrl,
 } from '../../testing/db'
 import { fakeChatModel, dreamLines, handleOf } from '../../testing/fakeChatModel'
@@ -158,7 +159,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     )[0]!
   const summary = async (content: string, scope: string) =>
     (
-      await inSpace((tx) =>
+      await inSpace(async (tx) =>
         tx
           .insert(memories)
           .values({
@@ -168,6 +169,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
             sensitivity: 'public',
             provenance: 'untrusted',
             originScope: scope,
+            conversationId: await summaryConversation(tx, ws.spaceId),
             content,
             expiresAt: new Date(Date.now() + 30 * 86_400_000),
           })

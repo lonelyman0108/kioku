@@ -33,7 +33,12 @@ import {
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  conversationOfScope,
+  openTestDatabase,
+  resetDatabase,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 const fakeModel = (reply: unknown): ChatModel => ({
@@ -134,7 +139,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     originScope: string
     subjectId?: string
   }) =>
-    withSpace(database.db, ws.spaceId, (tx) =>
+    withSpace(database.db, ws.spaceId, async (tx) =>
       tx
         .insert(memories)
         .values({
@@ -143,6 +148,11 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
           sensitivity: 'public',
           provenance: 'untrusted',
           subjectId: values.subjectId ?? null,
+          // 会话摘要挂在这个作用域的会话上（群里的或和这个人的私聊）
+          conversationId:
+            values.layer === 'episode'
+              ? await conversationOfScope(tx, ws.spaceId, appId, values.originScope)
+              : null,
           expiresAt: values.layer === 'episode' ? new Date(Date.now() + 86_400_000) : null,
           ...values,
         })
@@ -230,7 +240,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect((await api('GET', '/subjects?cursor=abc')).status).toBe(400)
   })
 
-  it('详情：事实带来源（哪个群）、涉及它的抽取记录', async () => {
+  it('详情：事实带来源（哪个群）、参与的会话、涉及它的抽取记录', async () => {
     await chatInGroup()
     // 别的群的一批，不涉及这里的人
     await withSpace(database.db, ws.spaceId, (tx) =>
@@ -263,6 +273,18 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     ])
     const room = await detailOf(find(all, '读书会').id)
     expect(room.facts.map((f) => f.content)).toEqual(['是个读书会'])
+    // 群里的会话：群自己的，也是在群里说过话的人参与的；摘要挂在会话上，不挂在人身上
+    expect(room.conversations).toMatchObject([
+      {
+        kind: 'group',
+        displayName: '读书会',
+        summaryCount: 1,
+        latestSummary: { excerpt: '群里聊了学日语和猫' },
+      },
+    ])
+    expect(person.conversations.map((c) => c.id)).toEqual([room.conversations[0]!.id])
+    expect(person.facts[0]!.conversationId).toBe(room.conversations[0]!.id)
+    expect(person.runs[0]!.conversationId).toBe(room.conversations[0]!.id)
 
     // 被推翻（失效）的事实不列、不计数
     await withSpace(database.db, ws.spaceId, (tx) =>

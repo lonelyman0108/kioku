@@ -1,6 +1,7 @@
 import type { TurnEndEvent } from '@kioku/contracts'
 import { and, count, eq, sql } from 'drizzle-orm'
 
+import { sensitivityRank } from '../access/access'
 import type { KeySession } from '../access/session'
 import { withSpace, type Db, type Tx } from '../db/client'
 import { conversationTurns, spaces } from '../db/schema'
@@ -15,17 +16,29 @@ export const MAX_BUFFERED_TURNS = 100
 // 一批空闲这么久就整批删掉：正常情况下早就抽取完了，留下的是抽取不了的
 export const BUFFER_IDLE_HOURS = 24
 
-// 一批缓冲：按应用与来源作用域分（本群，或与此人的私聊），抽取写下的记忆都在这个作用域里
+// 一批缓冲：按应用与来源作用域分（本群，或与此人的私聊），抽取写下的记忆都在这个作用域里。
+// 不带会话上下文的轮次按应用与所属成员分：作用域是 global（不带会话上下文的 Key 写下的记忆的来源作用域），
+// 一个应用只有一个所有者；应用转给别人时旧 Key 都吊销了，旧所有者剩下的几轮抽取时按「没有能用的 Key」丢掉
+export const NO_CONTEXT_SCOPE = 'global'
+
 export interface BufferedSession {
   spaceId: string
   appId: string
   scope: string
 }
 
-// turn.end 能不能进缓冲：会话上下文只会把 Key 能写的层收紧到联系人的事实与会话摘要，Key 两层都写不了时，
-// 抽取出的东西写不进去，不必存下别人的话。只看 Key，不用先解析会话（解析会建对象）
-export function canBufferTurns(key: KeyPrincipal): boolean {
-  return key.scopes.writeLayers.some((layer) => layer === 'subject' || layer === 'episode')
+// turn.end 能不能进缓冲：会话上下文只会把 Key 能写的归属收紧到联系人的事实与会话摘要，Key 两类都写不了时，
+// 抽取出的东西写不进去，不必存下别人的话。只看 Key，不用先解析会话（解析会建联系人）。
+// 不带会话上下文的轮次只用来写会话摘要，摘要归所属成员、私密：Key 要写得了会话摘要、敏感级到私密
+export function canBufferTurns(key: KeyPrincipal, withContext: boolean): boolean {
+  const { writeLayers, maxSensitivity } = key.scopes
+  if (!withContext) {
+    return (
+      writeLayers.includes('episode') &&
+      sensitivityRank(maxSensitivity) >= sensitivityRank('private')
+    )
+  }
+  return writeLayers.some((layer) => layer === 'subject' || layer === 'episode')
 }
 
 // 把一轮对话放进缓冲，按轮数或空闲时间排抽取任务（同一批只排一个，空闲计时从最后一轮算起）。
@@ -38,10 +51,12 @@ export async function bufferTurn(
 ): Promise<void> {
   if (!(await extractionSettingsView(deps.db)).configured) return
   const { context } = session
-  // 契约保证 turn.end 是私聊、群聊或频道，并且带着发言人
-  const scope = context.groupSubjectId
-    ? `group:${context.groupSubjectId}`
-    : `direct:${context.senderSubjectId!}`
+  // 契约保证带会话上下文的 turn.end 是私聊、群聊或频道，并且带着发言人；不带的按应用与所属成员分批
+  const scope = !context.chatType
+    ? NO_CONTEXT_SCOPE
+    : context.groupSubjectId
+      ? `group:${context.groupSubjectId}`
+      : `direct:${context.senderSubjectId!}`
   const target: BufferedSession = { spaceId: key.spaceId, appId: key.app.id, scope }
   const buffered = await withSpace(deps.db, key.spaceId, async (tx) => {
     await tx.insert(conversationTurns).values({
@@ -50,9 +65,10 @@ export async function bufferTurn(
       keyId: key.keyId,
       scope,
       sessionId: input.sessionId,
-      chatType: context.chatType!,
+      chatType: context.chatType ?? 'none',
       groupSubjectId: context.groupSubjectId ?? null,
-      senderSubjectId: context.senderSubjectId!,
+      senderSubjectId: context.senderSubjectId ?? null,
+      ownerAccountId: context.chatType ? null : key.app.ownerAccountId,
       senderName: session.subjects.find((s) => s.role === 'sender')?.name ?? null,
       userText: input.user,
       replyText: input.reply,

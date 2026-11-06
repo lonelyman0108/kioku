@@ -45,7 +45,12 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bearer, bootstrap, FULL_SCOPES, jsonRequest } from '../../testing/fixtures'
 import { exportableMemories } from '../spaceExport'
 import { deriveExportKey, openSpaceExport, sealSpaceExport, type KdfParams } from '../spaceFormat'
@@ -477,6 +482,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         {
           ...extracted,
           layer: 'episode',
+          conversationId: await summaryConversation(tx, spaceId),
           content: '读书会讨论了村上春树',
           expiresAt: new Date(Date.now() + 86_400_000),
         },
@@ -868,13 +874,21 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           sensitivity: 'public' as const,
           provenance: 'owner' as const,
         }
+        const conversationId = await summaryConversation(tx, spaceId)
         await tx.insert(memories).values([
           { ...extracted, layer: 'subject', subjectId: ming!.id, content: '小明在学法语' },
           { ...extracted, layer: 'subject', subjectId: ming!.id, content: '小明在学日语' },
-          { ...extracted, layer: 'episode', content: '到期的会话摘要', expiresAt: past },
           {
             ...extracted,
             layer: 'episode',
+            conversationId,
+            content: '到期的会话摘要',
+            expiresAt: past,
+          },
+          {
+            ...extracted,
+            layer: 'episode',
+            conversationId,
             content: '没到期的会话摘要',
             expiresAt: new Date(Date.now() + 86_400_000),
           },
@@ -1455,7 +1469,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       )
       labels.set(row!.id, label)
     }
-    const episode = { form: 'extracted' as const, layer: 'episode' as const, ownerAccountId: null }
+    const episode = {
+      form: 'extracted' as const,
+      layer: 'episode' as const,
+      ownerAccountId: null,
+      conversationId: await withSpace(database.db, spaceId, (tx) =>
+        summaryConversation(tx, spaceId),
+      ),
+    }
     const noUri = { domain: null, path: null, title: null }
     await insert('live', {})
     await insert('expired', { validTo: past })

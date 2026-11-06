@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { WhoAmI } from './auth'
 import { Layer, Sensitivity, SubjectKind } from './memory'
-import { TurnEndEvent } from './recall'
+import { SessionExtra, TurnEndEvent } from './recall'
 
 // 测试台：不接真实客户端，按一把 Key 模拟接入方调用 Kioku，步骤的结果和真实接入方收到的一样。
 // 契约只放 zod schema，例外是最后的 isReplayStep 与 mayWrite：只看数据的判定，服务端、命令行与界面要一致
@@ -244,7 +244,7 @@ export type BenchAssertion = z.infer<typeof BenchAssertion>
 export const BenchSessionStart = z.object({
   limit: z.number().int().nullable(),
   omitted: z.array(z.string()),
-  dropped: z.array(z.enum(['recent', 'related'])),
+  dropped: z.array(SessionExtra),
 })
 export type BenchSessionStart = z.infer<typeof BenchSessionStart>
 
@@ -304,13 +304,13 @@ export type BenchRunResult = z.infer<typeof BenchRunResult>
 // 模型代理：一次请求只调一次模型，循环由浏览器驱动，模型要调工具时走运行接口。
 // 用实例设置里抽取模型的接口与 Key，对话不存服务端
 
-// 模型循环按运行时分几种，和真实接入一致：
+// 模型循环按运行时分几种，和真实接入一致。回复后发不发 turn.end 按运行时定，见 BenchAgentInfo.turnEnd：
 // hook（claudecode、codex）：系统提示带 session.start 的结果；每条用户消息先发 prompt.submit，召回块附在这条消息上、
-//   留在历史；给工具；回复后不发 turn.end
+//   留在历史；给工具；claudecode 回复后发不带会话上下文的 turn.end（插件的轮次结束钩子），codex 不发
 // chat（astrbot）：系统提示带 session.start 的结果；每条用户消息先发 prompt.submit，召回块只附在这一轮的请求上、
-//   不留在历史；不给工具；回复后发 turn.end（回滚模式下进重放）
+//   不留在历史；不给工具；回复后发 turn.end
 // tools（mcp）：系统提示不带 session.start，不发 prompt.submit；给工具，kioku_boot 由模型自己调；不发 turn.end
-// approximate（其余运行时）：按 hook 走，界面标明是近似
+// approximate（其余运行时）：按 hook 走、不发 turn.end，界面标明是近似。发出的 turn.end 在回滚模式下进重放
 export const BENCH_AGENT_LOOPS = ['hook', 'chat', 'tools', 'approximate'] as const
 export const BenchAgentLoop = z.enum(BENCH_AGENT_LOOPS)
 export type BenchAgentLoop = z.infer<typeof BenchAgentLoop>
@@ -332,6 +332,8 @@ export const BenchAgentInfo = z.object({
   loop: BenchAgentLoop,
   // 给不给模型工具
   tools: z.boolean(),
+  // 回复后发不发 turn.end：和真实接入一致，astrbot 带会话上下文发，claudecode 不带会话上下文发，别的不发
+  turnEnd: z.boolean(),
 })
 export type BenchAgentInfo = z.infer<typeof BenchAgentInfo>
 

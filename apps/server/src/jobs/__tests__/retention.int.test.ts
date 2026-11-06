@@ -40,7 +40,12 @@ import {
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { endPause, markRestored, purgeExpired, RETENTION_BATCH, retentionJob } from '../retention'
 
@@ -263,9 +268,11 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       content,
       validTo,
     })
+    const conversationId = await inSpace((tx) => summaryConversation(tx, ws.spaceId))
     const summary = (content: string, expiresAt: Date) => ({
       ...extracted,
       layer: 'episode' as const,
+      conversationId,
       content,
       expiresAt,
     })
@@ -972,10 +979,12 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   it('超过一批的分几批删完', async () => {
     const total = RETENTION_BATCH + 20
     await inSpace(async (tx) => {
+      const conversationId = await summaryConversation(tx, ws.spaceId)
       await tx.execute(sql`
-        insert into memories (space_id, form, layer, sensitivity, provenance, content, deleted_at)
+        insert into memories (space_id, form, layer, sensitivity, provenance, conversation_id, content, deleted_at)
         select ${ws.spaceId}::uuid, 'extracted'::memory_form, 'episode'::memory_layer,
-          'public'::sensitivity, 'untrusted'::provenance, '摘要 ' || g, ${ago(40).toISOString()}::timestamptz
+          'public'::sensitivity, 'untrusted'::provenance, ${conversationId}::uuid, '摘要 ' || g,
+          ${ago(40).toISOString()}::timestamptz
         from generate_series(1, ${total}::int) g`)
       await tx.execute(sql`
         insert into memory_events (space_id, memory_id, event_type, provenance, after)
@@ -1088,13 +1097,15 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   it('一次清理有时间预算：到了时间不记做完，下一个小时接着删，做完才记成最近一次（只记那一次删的）', async () => {
     await active()
     const total = RETENTION_BATCH + 20
-    await inSpace((tx) =>
-      tx.execute(sql`
-        insert into memories (space_id, form, layer, sensitivity, provenance, content, deleted_at)
+    await inSpace(async (tx) => {
+      const conversationId = await summaryConversation(tx, ws.spaceId)
+      await tx.execute(sql`
+        insert into memories (space_id, form, layer, sensitivity, provenance, conversation_id, content, deleted_at)
         select ${ws.spaceId}::uuid, 'extracted'::memory_form, 'episode'::memory_layer,
-          'public'::sensitivity, 'untrusted'::provenance, '摘要 ' || g, ${ago(40).toISOString()}::timestamptz
-        from generate_series(1, ${total}::int) g`),
-    )
+          'public'::sensitivity, 'untrusted'::provenance, ${conversationId}::uuid, '摘要 ' || g,
+          ${ago(40).toISOString()}::timestamptz
+        from generate_series(1, ${total}::int) g`)
+    })
     const first = new Date('2030-06-01T08:17:00Z')
     // 预算为 0：第一批总会做，之后就不再开新批次
     const partial = { ...ZERO, deletedMemories: RETENTION_BATCH }

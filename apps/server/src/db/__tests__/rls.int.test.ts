@@ -1,7 +1,12 @@
 import { eq, inArray, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { assertRuntimeRole, pgConstraint, withSpace, type Database, type Tx } from '../client'
 import {
   accounts,
@@ -221,10 +226,13 @@ describe.skipIf(!testDatabaseUrl)('数据层与空间隔离', () => {
     // 来自对话的两类不能是记下的（开头凑成和归属一样也不行），记下的四类也不能是来自对话的
     expect(
       await violation(
-        inA((tx) =>
-          tx
-            .insert(memories)
-            .values({ ...baseMemory(spaceA, 'e'), layer: 'episode', domain: 'episode' }),
+        inA(async (tx) =>
+          tx.insert(memories).values({
+            ...baseMemory(spaceA, 'e'),
+            layer: 'episode',
+            domain: 'episode',
+            conversationId: await summaryConversation(tx, spaceA),
+          }),
         ),
       ),
     ).toBe('memories_form_by_layer')
@@ -235,16 +243,27 @@ describe.skipIf(!testDatabaseUrl)('数据层与空间隔离', () => {
     ).toBe('memories_form_by_layer')
     expect(
       await violation(
-        inA((tx) =>
+        inA(async (tx) =>
           tx.insert(memories).values({
             ...baseMemory(spaceA, 'x'),
             ...extracted,
             layer: 'episode',
             title: '摘要',
+            conversationId: await summaryConversation(tx, spaceA),
           }),
         ),
       ),
     ).toBe('memories_title_by_form')
+    // 会话摘要都挂在会话上
+    expect(
+      await violation(
+        inA((tx) =>
+          tx
+            .insert(memories)
+            .values({ ...baseMemory(spaceA, 'x'), ...extracted, layer: 'episode' }),
+        ),
+      ),
+    ).toBe('memories_episode_conversation')
   })
 
   // 一个应用、一个 Key、一个群与一个人，会话与对话缓冲要挂在它们上面

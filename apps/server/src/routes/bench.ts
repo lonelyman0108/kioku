@@ -15,7 +15,7 @@ import { bodyLimit } from 'hono/body-limit'
 
 import { keyToSimulate } from '../access/simulate'
 import { isInstanceAdmin } from '../auth/middleware'
-import { agentGetsTools, agentLoopFor } from '../bench/agentLoop'
+import { agentGetsTools, agentLoopFor, agentSendsTurnEnd } from '../bench/agentLoop'
 import {
   AgentModelError,
   endpointAddress,
@@ -134,7 +134,11 @@ export function benchRoutes(deps: Deps) {
       const found = await keyToSimulate(deps, c.req.valid('param'), accountId)
       if ('error' in found) return c.json({ error: found.error }, found.status)
       const loop = agentLoopFor(found.key.app.runtimeFamily)
-      const runtime = { loop, tools: agentGetsTools(loop) }
+      const runtime = {
+        loop,
+        tools: agentGetsTools(loop),
+        turnEnd: agentSendsTurnEnd(found.key.app.runtimeFamily),
+      }
       // 先判身份、不查设置：模型配没配、配的什么都是实例设置，不给实例管理员之外的人看
       if (!(await isInstanceAdmin(deps.db, accountId))) {
         return c.json(

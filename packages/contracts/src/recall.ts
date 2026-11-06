@@ -267,6 +267,19 @@ export const BootPreviewRequest = z.object({
 })
 export type BootPreviewRequest = z.infer<typeof BootPreviewRequest>
 
+// 会话开始时附在启动加载后面的几块：同一会话最近的会话摘要（只有不带会话上下文的会话有）、近期更新的记忆、
+// 与当前项目相关的召回。字数不够时依次放不下的不附
+export const SESSION_EXTRAS = ['summaries', 'recent', 'related'] as const
+export const SessionExtra = z.enum(SESSION_EXTRAS)
+export type SessionExtra = z.infer<typeof SessionExtra>
+
+// 不带会话上下文的会话开始时附上的一段会话摘要：同一会话最近的几段，新的在前
+export const SessionSummary = z.object({
+  content: z.string(),
+  createdAt: z.iso.datetime(),
+})
+export type SessionSummary = z.infer<typeof SessionSummary>
+
 // 启动预览：按一把 Key 模拟会话开始时注入的内容
 export const BootPreview = z.object({
   runtimeFamily: z.string(),
@@ -280,10 +293,12 @@ export const BootPreview = z.object({
   ),
   // 超出预算、只列出坐标的启动节点（标题给界面显示，宿主收到的只有坐标）
   omitted: z.array(z.object({ uri: z.string(), title: z.string() })),
+  // 同一会话最近的会话摘要：只有不带会话上下文的会话有，群聊、私聊的摘要来自未确认来源，不进启动加载
+  summaries: z.array(SessionSummary),
   recent: z.array(RecentMemory),
   related: z.array(RecallCandidate),
   // 放不下、没有附上的附加块
-  dropped: z.array(z.enum(['recent', 'related'])),
+  dropped: z.array(SessionExtra),
 })
 export type BootPreview = z.infer<typeof BootPreview>
 

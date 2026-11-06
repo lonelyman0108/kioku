@@ -17,3 +17,9 @@ export function agentLoopFor(runtimeFamily: string): BenchAgentLoop {
 
 // 真实的聊天类宿主不能调记忆工具，这里也不给模型
 export const agentGetsTools = (loop: BenchAgentLoop) => loop !== 'chat'
+
+// 回复后发不发 turn.end，和真实接入一致：聊天类宿主带会话上下文发，Claude Code 的插件不带会话上下文发
+// （轮次结束的钩子，只用来写会话摘要），别的运行时不发
+export function agentSendsTurnEnd(runtimeFamily: string): boolean {
+  return CHAT_FAMILIES.has(runtimeFamily) || runtimeFamily === 'claudecode'
+}

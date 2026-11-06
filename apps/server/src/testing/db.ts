@@ -1,11 +1,12 @@
 import { fileURLToPath } from 'node:url'
 
-import { sql } from 'drizzle-orm'
+import { asc, eq, sql } from 'drizzle-orm'
 import { pgTable, text, type PgTable } from 'drizzle-orm/pg-core'
 
 import { connect, withSpace, type Database, type Db, type Tx } from '../db/client'
 import { runMigrations } from '../db/migrate'
-import { settings } from '../db/schema'
+import { ensureConversation } from '../access/conversations'
+import { accounts, apps, settings, subjects } from '../db/schema'
 import { settleRecallEvents } from '../recall/events'
 import { testWorkers, workerDatabaseUrl } from './workers'
 
@@ -97,4 +98,78 @@ export async function tableDigests(
     }
     return out
   })
+}
+
+// 直接往库里写会话摘要的测试用：会话摘要都要挂在会话上（约束 memories_episode_conversation）。
+// 用这个空间里最早的应用（没有就建一个，所有者取最早的账号，也没有账号时建一个）不带会话上下文的会话；
+// 要测群聊、私聊的会话时另外建
+export async function summaryConversation(tx: Tx, spaceId: string): Promise<string> {
+  const [app] = await tx
+    .select({ id: apps.id, ownerAccountId: apps.ownerAccountId })
+    .from(apps)
+    .where(eq(apps.spaceId, spaceId))
+    .orderBy(asc(apps.createdAt), asc(apps.id))
+    .limit(1)
+  let target = app
+  if (!target) {
+    const [account] = await tx
+      .select({ id: accounts.id })
+      .from(accounts)
+      .orderBy(asc(accounts.createdAt))
+      .limit(1)
+    const owner =
+      account ??
+      (
+        await tx
+          .insert(accounts)
+          .values({ username: 'summaries', displayName: '会话摘要', passwordHash: 'x' })
+          .returning({ id: accounts.id })
+      )[0]!
+    ;[target] = await tx
+      .insert(apps)
+      .values({
+        spaceId,
+        slug: 'summaries',
+        name: '会话摘要',
+        runtimeFamily: 'mcp',
+        ownerAccountId: owner.id,
+      })
+      .returning({ id: apps.id, ownerAccountId: apps.ownerAccountId })
+  }
+  return ensureConversation(tx, spaceId, target!.id, {
+    kind: 'none',
+    ownerAccountId: target!.ownerAccountId,
+  })
+}
+
+// 一个群和这个应用在群里的会话：直接写群聊的会话摘要的测试用
+export async function groupConversation(
+  tx: Tx,
+  spaceId: string,
+  appId: string,
+  name = '测试群',
+): Promise<{ subjectId: string; conversationId: string }> {
+  const [group] = await tx
+    .insert(subjects)
+    .values({ spaceId, kind: 'group', displayName: name })
+    .returning({ id: subjects.id })
+  const conversationId = await ensureConversation(tx, spaceId, appId, {
+    kind: 'group',
+    subjectId: group!.id,
+  })
+  return { subjectId: group!.id, conversationId }
+}
+
+// 来源作用域对应的会话：group:<群> 是这个群的会话，direct:<联系人> 是和这个人的私聊；别的作用域用 summaryConversation
+export async function conversationOfScope(
+  tx: Tx,
+  spaceId: string,
+  appId: string,
+  originScope: string,
+): Promise<string> {
+  const [kind, subjectId] = originScope.split(':') as [string, string | undefined]
+  if ((kind === 'group' || kind === 'direct') && subjectId) {
+    return ensureConversation(tx, spaceId, appId, { kind, subjectId })
+  }
+  return summaryConversation(tx, spaceId)
 }

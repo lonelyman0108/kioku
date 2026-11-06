@@ -9,7 +9,12 @@ import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { memories, memoryEmbeddings, memoryGlossary, settings, spaces } from '../../db/schema'
 import { startJobs, type Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { startFakeEmbeddingServer } from '../../testing/fakeEmbeddingServer'
 import { bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -653,6 +658,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
           layer: 'episode',
           sensitivity: 'private',
           provenance: 'owner',
+          conversationId: await summaryConversation(tx, ws.spaceId),
           content: '一段会话摘要',
           expiresAt: new Date(Date.now() + 86_400_000),
         })

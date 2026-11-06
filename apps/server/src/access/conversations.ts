@@ -3,8 +3,9 @@ import type {
   ConversationInfo,
   ConversationKind,
   ExtractionRunInfo,
+  SessionSummary,
 } from '@kioku/contracts'
-import { and, desc, eq, exists, inArray, isNull, or, sql, type SQL } from 'drizzle-orm'
+import { and, desc, eq, exists, inArray, isNull, ne, or, sql, type SQL } from 'drizzle-orm'
 
 import type { Tx } from '../db/client'
 import { microsOf } from '../db/paging'
@@ -12,9 +13,9 @@ import { accounts, apps, conversations, extractionRuns, memories, subjects } fro
 import { readableConditions } from '../memory/filter'
 import { scopeNames } from '../memory/scopes'
 import { clipChars, oneLine } from '../recall/text'
-import type { Access } from './access'
+import type { Access, SessionContext } from './access'
 
-// 会话的读取：对话页的会话列表与详情、联系人详情里参与的会话。
+// 会话的读取：对话页的会话列表与详情、联系人详情里参与的会话；文件末尾是会话的建立。
 // 看得到哪些：群聊、私聊的会话空间成员都看得到（和联系人一样）；不带会话上下文的会话只有所属成员本人看得到。
 // 摘要与事实照记忆的读权限（readableConditions）另外过滤
 
@@ -265,4 +266,109 @@ export async function conversationDetail(
     })),
     runs: await runInfos(tx, runs, new Set([id]), errorOf),
   }
+}
+
+// ---- 会话的建立 ----
+
+// 一个会话按（应用、群）、（应用、私聊的人）、（应用、所属成员）认；频道和群一样按群认
+export type ConversationRef =
+  { kind: 'group' | 'direct'; subjectId: string } | { kind: 'none'; ownerAccountId: string }
+
+// 一次请求的会话上下文落在哪个会话上。不带会话上下文的归应用所有者；定时任务与子 Agent 不算会话
+export function conversationRefOf(
+  context: SessionContext,
+  appOwnerAccountId: string,
+): ConversationRef | null {
+  if (!context.chatType) return { kind: 'none', ownerAccountId: appOwnerAccountId }
+  if (context.chatType === 'group' || context.chatType === 'channel') {
+    return context.groupSubjectId ? { kind: 'group', subjectId: context.groupSubjectId } : null
+  }
+  if (context.chatType === 'direct') {
+    return context.senderSubjectId ? { kind: 'direct', subjectId: context.senderSubjectId } : null
+  }
+  return null
+}
+
+const refValues = (spaceId: string, appId: string, ref: ConversationRef) => ({
+  spaceId,
+  appId,
+  kind: ref.kind,
+  subjectId: ref.kind === 'none' ? null : ref.subjectId,
+  ownerAccountId: ref.kind === 'none' ? ref.ownerAccountId : null,
+})
+// 两个唯一索引各管一种：群聊、私聊按联系人，不带会话上下文的按所属成员（空值不算重复）
+const refTarget = (ref: ConversationRef) =>
+  ref.kind === 'none'
+    ? [conversations.appId, conversations.ownerAccountId]
+    : [conversations.appId, conversations.subjectId]
+const refMatch = (appId: string, ref: ConversationRef) =>
+  and(
+    eq(conversations.appId, appId),
+    ref.kind === 'none'
+      ? eq(conversations.ownerAccountId, ref.ownerAccountId)
+      : eq(conversations.subjectId, ref.subjectId),
+  )!
+
+// 生命周期事件来时建立会话，已有的更新最近活动。时间都用数据库的 now()：测试台按 created_at = now()
+// 认这个事务写下的行，并发的两次请求也只建出一个（唯一索引上的 on conflict）
+export async function touchConversation(
+  tx: Tx,
+  spaceId: string,
+  appId: string,
+  ref: ConversationRef,
+): Promise<string> {
+  const [row] = await tx
+    .insert(conversations)
+    .values(refValues(spaceId, appId, ref))
+    .onConflictDoUpdate({ target: refTarget(ref), set: { lastActiveAt: sql`now()` } })
+    .returning({ id: conversations.id })
+  return row!.id
+}
+
+// 抽取写入时这一批的会话：没有就建（例如会话被删掉之后这一批才抽取），不推进最近活动
+export async function ensureConversation(
+  tx: Tx,
+  spaceId: string,
+  appId: string,
+  ref: ConversationRef,
+): Promise<string> {
+  const [created] = await tx
+    .insert(conversations)
+    .values(refValues(spaceId, appId, ref))
+    .onConflictDoNothing({ target: refTarget(ref) })
+    .returning({ id: conversations.id })
+  if (created) return created.id
+  return (await findConversation(tx, appId, ref))!
+}
+
+// 已有的会话，不建
+export async function findConversation(
+  tx: Tx,
+  appId: string,
+  ref: ConversationRef,
+): Promise<string | null> {
+  const [row] = await tx
+    .select({ id: conversations.id })
+    .from(conversations)
+    .where(refMatch(appId, ref))
+  return row?.id ?? null
+}
+
+// 一个会话最近的几段会话摘要，新的在前：不带会话上下文的会话开始时附上，接着上次的话题。
+// 会被当作指令级上下文，只收受信来源写下的（不带会话上下文的摘要都是）；读权限照这次的 Key
+export async function latestSummaries(
+  tx: Tx,
+  access: Access,
+  appId: string,
+  ref: ConversationRef,
+  limit: number,
+): Promise<SessionSummary[]> {
+  const rows = await tx
+    .select({ content: memories.content, createdAt: memories.createdAt })
+    .from(memories)
+    .innerJoin(conversations, eq(conversations.id, memories.conversationId))
+    .where(and(refMatch(appId, ref), summariesOf(access), ne(memories.provenance, 'untrusted')))
+    .orderBy(desc(memories.createdAt), desc(memories.id))
+    .limit(limit)
+  return rows.map((r) => ({ content: r.content ?? '', createdAt: r.createdAt.toISOString() }))
 }
