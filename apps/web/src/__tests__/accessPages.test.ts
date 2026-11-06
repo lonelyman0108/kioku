@@ -685,6 +685,12 @@ describe('启动加载', () => {
     expect(textOf(buttonOf(appSimulator, '预览'))).toBe('预览')
   })
 
+  it('超出预算的节点写标题，坐标放在悬停里：omitted 的每一项是对象，直接 join 会显示成 [object Object]', () => {
+    expect(appSimulator).toContain("preview.omitted.map((node) => node.title).join('、')")
+    expect(appSimulator).toContain(`:title="preview.omitted.map((node) => node.uri).join('\\n')"`)
+    expect(appSimulator).not.toContain('preview.omitted.join(')
+  })
+
   it('没有有效 Key 的说明只在读到了列表时显示', () => {
     expect(appSimulator).toContain(`<p v-else-if="state === 'none'" class="boot-empty">`)
     expect(appSimulator).toContain(`v-else-if="state === 'failed'"`)

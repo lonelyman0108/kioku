@@ -160,8 +160,12 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
           </li>
         </ul>
         <p v-else class="boot-empty">暂无启动加载的节点</p>
-        <p v-if="preview.omitted.length" class="boot-omitted">
-          超出预算、未展开：<span class="font-mono">{{ preview.omitted.join('、') }}</span>
+        <p
+          v-if="preview.omitted.length"
+          class="boot-omitted"
+          :title="preview.omitted.map((node) => node.uri).join('\n')"
+        >
+          超出预算、未展开：{{ preview.omitted.map((node) => node.title).join('、') }}
         </p>
       </template>
 
