@@ -18,6 +18,7 @@ import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
 import { withSpace, type Database, type Db, type Tx } from '../../db/client'
 import {
+  apiKeys,
   conversations,
   conversationTurns,
   extractionRuns,
@@ -25,6 +26,7 @@ import {
   settings,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import { NO_USABLE_KEY } from '../../extraction/extract'
 import type { ChatMessage, ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
@@ -355,6 +357,28 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
       await event({ event: 'turn.end', sessionId: 'cc-1', user: '你好', reply: '你好' }, key)
     }
     expect(await turns()).toEqual([])
+  })
+
+  it('缓冲之后 Key 的上限降到私密以下：抽取时按同一条规则，这几轮不给模型看', async () => {
+    await event({ event: 'turn.end', sessionId: 'cc-1', user: '你好', reply: '你好' }, ccKey.key)
+    expect(await turns()).toHaveLength(1)
+    // 签发范围在库里改低（模拟这把 Key 现在的上限不够写私密的会话摘要）
+    await database.db
+      .update(apiKeys)
+      .set({ scopes: { ...FULL_SCOPES, maxSensitivity: 'internal' } })
+      .where(eq(apiKeys.id, ccKey.id))
+    const { model, calls } = fakeModel(JSON.stringify({ summary: '不该写下的摘要' }))
+    await processSession(
+      database.db,
+      masterKey,
+      { spaceId: ws.spaceId, appId: ccApp, scope: 'global' },
+      () => model,
+    )
+    expect(calls).toEqual([])
+    expect(await turns()).toEqual([])
+    expect(await inSpace((tx) => tx.select().from(extractionRuns))).toMatchObject([
+      { error: NO_USABLE_KEY, turns: 0, skippedTurns: 1, summarized: false },
+    ])
   })
 
   it('会话开始带上同一会话最近 3 段摘要；别的成员、群聊、私聊、定时任务都读不到；启动预览也列出来', async () => {

@@ -1,4 +1,4 @@
-import type { TurnEndEvent } from '@kioku/contracts'
+import type { Layer, Sensitivity, TurnEndEvent } from '@kioku/contracts'
 import { and, count, eq, sql } from 'drizzle-orm'
 
 import { sensitivityRank } from '../access/access'
@@ -27,18 +27,21 @@ export interface BufferedSession {
   scope: string
 }
 
-// turn.end 能不能进缓冲：会话上下文只会把 Key 能写的归属收紧到联系人的事实与会话摘要，Key 两类都写不了时，
-// 抽取出的东西写不进去，不必存下别人的话。只看 Key，不用先解析会话（解析会建联系人）。
-// 不带会话上下文的轮次只用来写会话摘要，摘要归所属成员、私密：Key 要写得了会话摘要、敏感级到私密
-export function canBufferTurns(key: KeyPrincipal, withContext: boolean): boolean {
-  const { writeLayers, maxSensitivity } = key.scopes
+// 这些写权限写不写得下几轮对话抽取出的东西：带会话上下文的写联系人的事实或会话摘要，两类都写不了时写不进去；
+// 不带会话上下文的只写会话摘要，摘要归所属成员、私密，要写得了会话摘要、敏感级到私密。
+// 规则只有这一份：turn.end 进不进缓冲按 Key 的上限判断（会话上下文只会把能写的归属收紧到这两类，不用先解析会话，
+// 解析会建联系人），抽取时每一轮再按写入它的 Key 现在的上限与这一批的会话上下文判断一次（extract.ts）
+export function canWriteTurns(
+  write: { writeLayers: Iterable<Layer>; maxSensitivity: Sensitivity },
+  withContext: boolean,
+): boolean {
+  const layers = new Set(write.writeLayers)
   if (!withContext) {
     return (
-      writeLayers.includes('episode') &&
-      sensitivityRank(maxSensitivity) >= sensitivityRank('private')
+      layers.has('episode') && sensitivityRank(write.maxSensitivity) >= sensitivityRank('private')
     )
   }
-  return writeLayers.some((layer) => layer === 'subject' || layer === 'episode')
+  return layers.has('subject') || layers.has('episode')
 }
 
 // 把一轮对话放进缓冲，按轮数或空闲时间排抽取任务（同一批只排一个，空闲计时从最后一轮算起）。

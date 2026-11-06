@@ -1,6 +1,6 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 
-import { sensitivityRank, type Access, type SessionContext } from '../access/access'
+import type { Access, SessionContext } from '../access/access'
 import { ensureConversation, findConversation, type ConversationRef } from '../access/conversations'
 import { groupPersona, type KeySession } from '../access/session'
 import { principalForKeyId } from '../auth/middleware'
@@ -24,7 +24,7 @@ import { readableConditions } from '../memory/filter'
 import { MemoryService, type ExtractedWrite } from '../memory/service'
 import { oneLine } from '../recall/recall'
 import { readableSubjectFacts } from '../recall/subjects'
-import type { BufferedSession } from './buffer'
+import { canWriteTurns, type BufferedSession } from './buffer'
 import { extractionUsage, writesToday } from './budget'
 import { extractionMessages, parseExtraction, summaryMessages, type PromptSubject } from './prompt'
 import type { ChatModel } from './provider'
@@ -139,13 +139,10 @@ export async function extractBatch(
   for (const key of principals) {
     const session: KeySession = { context, personaId, subjects: [] }
     const access = accessForKey(key, session)
-    // 来源作用域由会话上下文算出，和缓冲分批用的是同一个。不带会话上下文的摘要私密：Key 的敏感级要到私密，
-    // 而且这几轮要还是应用现在的所有者的
-    const writable = noContext
-      ? access.writeLayers.has('episode') &&
-        sensitivityRank(access.maxSensitivity) >= sensitivityRank('private') &&
-        key.app.ownerAccountId === owner
-      : access.writeLayers.has('subject') || access.writeLayers.has('episode')
+    // 来源作用域由会话上下文算出，和缓冲分批用的是同一个。写不写得下和缓冲时同一条规则（canWriteTurns），
+    // 不带会话上下文的几轮还要是应用现在的所有者的
+    const writable =
+      canWriteTurns(access, !noContext) && (!noContext || key.app.ownerAccountId === owner)
     if (access.writeOriginScope === target.scope && writable) {
       writers.set(key.keyId, { key, session, access })
     }
