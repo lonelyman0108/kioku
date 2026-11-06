@@ -123,7 +123,7 @@
 - `pgErrorCode`、`pgConstraint`、`pgMessage` 只解开 `DrizzleQueryError` 的 cause。驱动直接抛的错误不解开：连接错误（`CONNECTION_CLOSED`）自带 cause（`57P01`、`ECONNRESET`），解开就成了另一个错误，连接本身的错误会记成不同的 code（要原因用 `pgCauseCode`）；正在执行的语句另有自己的错误，同一次断连里它报 `57P01`，搜日志时两种都要看。回调接住语句错误时，事务以未包装的 PostgresError reject，字段同样读得到。
 - 事务回调结束到 COMMIT 或 ROLLBACK 做完、连接归还之前，驱动还放行句柄上的语句，它们排在后面，落在事务外自动提交；连接归还和断开之后才拒绝（`UNSAFE_TRANSACTION`、`CONNECTION_CLOSED`）。所以事务回调里的语句都要 await 完。回滚模式靠 `RollbackRun.guard` 挡这一段，`inRollback` 在 fn 结束时（成功或抛错，放在 `finally` 里）先 `run.close()` 再让事务回滚，顺序不能换，`rollback.int.test.ts`「回滚做完之前发出的写入」核对这一点。
 - 测试：测连接断开直接用 `pg_terminate_backend` 杀（见 `db/__tests__/disconnect.int.test.ts`）：外层事务以 `CONNECTION_CLOSED` 立刻 reject，回调不会停，回调里后面的语句也 reject（经 drizzle 的包在 `cause` 里，开 savepoint 这类驱动直接发的不包）；正在执行的那条语句报 `57P01`。用 `testing/db.ts` 的 `killDuring`：它先接住事务的 promise 再杀，否则 kill 的响应回来之前事务可能已经 reject，算未处理的 rejection，用例偶发失败。测闸门要另开大一点的连接池：测试池 max 2，鉴权会卡在获取连接上，到不了闸门。
-- 测试台按 `created_at = now()` 认这个事务写下的行，所以 `memory_events`、`credential_events`、`subjects`、`subject_identities`、`conversation_turns` 在 Key 鉴权的路径上要用数据库默认值，写 JS 时间会漏报。
+- 测试台按 `created_at = now()` 认这个事务写下的行，所以 `memory_events`、`credential_events`、`subjects`、`subject_identities`、`conversation_turns`、`conversations` 在 Key 鉴权的路径上要用数据库默认值，写 JS 时间会漏报（会话的最近活动也写 `now()`，见 `touchConversation`）。
 - 测试台的打码只在 `toView` 和凭据的取用处判断，`contentOf` 不能打码（`applyUpdate` 靠它取原文再封存）。新增返回 `MemoryView` 的路径要经过 `toView`。错误信息不放解出来的内容，不只是打码时（`checkCredentialRefs` 的 `decrypted`）：没有显式查看的路径不能借报错读到正文，也不留访问记录。占位文字集中在 `memory/masked.ts`，新增的要加进 `MASKED_TEXTS`，写入检查才认得；这个文件不能依赖别的模块（`mcp/format.ts` 引用它，又打进不带 postgres 的 `dist/bench.mjs`）。
 - 管理界面读记忆默认不给机密记忆的正文，Key 读到要留痕，都由 `MemoryContext.secretRead` 决定，判断和记访问事件都在 `toView`，只此一处。新增返回 `MemoryView` 的路径要经过 `toView`，`via` 必填：响应里的正文是调用方刚写的或本来就是明文才传 null。内部路径（导入工具比对）不设它。解密的正文不进 `useQuery` 的缓存（`apps/web/src/secretContent.ts`）。原因：缓存活得比页面长，查看要每次留痕。
 - 管理界面的响应是 `ConsoleMemoryView`，比 Key 鉴权接口返回的 `MemoryView` 多 `contentHidden`、`plaintextIgnored`。这两个字段不能加进 `MemoryView`，加了要重新生成 SDK；`toView` 只在 `secretRead` 为 `explicit` 时带上，Key 的响应才不多字段（`c.json` 不会按 schema 剥）。
@@ -148,7 +148,8 @@
 - 硬删除记忆时 Lore 的导入事件（出处 `source` 为 `lore`）要留下（`memory_id` 置空、快照只留 `domain` 与 `path`），别的事件一起删，包括按空间导入的导入事件。原因：Lore 导入工具按导入事件去重，记忆整行不在时也认作「导入过、后来删掉了」；删掉这些事件，下次同步会把删过的节点写回。保留期的删除条件都在 `jobs/retention.ts` 的 `retentionRules`，改了要对照 `retention.int.test.ts`。
 - 「用户删掉」与「过期并释放 URI」不加标记列，按删除时间与过期时间的先后区分（已删除列表、已过期列表、恢复与恢复生效（`undelete`、`reactivate`）都靠它）。所以写 `deleted_at` 时要守住：用户删除只删在同一时刻仍有效的行、删除时间写这一刻；`claimUri` 只释放同一时刻已过期的行。新增删除路径时照这个写。
 - 本人不设公开有两份：contracts 的 `sensitivityAllowed` 与约束 `memories_user_not_public`。数据库的 CHECK 约束被违反时，服务层按 `memory/service.ts` 的 `CHECK_MESSAGES` 转成可读的 400；新加的约束也要在那里给出文字，否则落到 `onError` 成 500。
-- 合并联系人的步骤在 `access/subjects.ts`，管理界面的手动合并与 `/bind` 共用，规则只写一份；合并时要作废牵涉到两边的待确认绑定，并把绑定记录改指向保留的联系人。
+- 合并联系人的步骤在 `access/subjects.ts`，管理界面的手动合并与 `/bind` 共用，规则只写一份；合并时要作废牵涉到两边的待确认绑定，并把绑定记录改指向保留的联系人。会话跟着改指向：同一个应用里保留的那边已经有会话时并成一个（`mergeConversations`），摘要、事实与抽取记录先挪过去再删被合并的会话，否则删除会话的触发器会连带删掉还挂着的摘要。
+- 会话按（应用、群）、（应用、私聊的人）、（应用、所属成员）认，生命周期事件来时建立或更新最近活动（`lifecycle/handlers.ts`）；会话摘要都挂在会话上（约束 `memories_episode_conversation`），抽取在写入事务里找这一批的会话（`ensureConversation`）。不带会话上下文的轮次的缓冲作用域是 `global`（`NO_CONTEXT_SCOPE`，就是这类 Key 写下的记忆的来源作用域），按（应用、作用域）分批就是按应用与所属成员分：应用转给别人时旧 Key 都吊销了，旧所有者剩下的几轮按「没有能用的 Key」丢掉。测试里直接往库里写会话摘要时用 `testing/db.ts` 的 `summaryConversation`、`groupConversation` 或 `conversationOfScope` 先建会话。
 - 整理建议只经 `MemoryService.applySuggestion` 改记忆；`dream_suggestions` 用 id 与版本的数组引用记忆，没有外键，「建议还作不作数」只按版本判断，规则只有一处（SQL 的 `suggestionCurrent`，锁到行之后用 `isCurrentVersion`），列表、执行与保留期都用它。
 - 整理任务按 `dream_marks`（记忆 id 对应整理过的版本）找要处理的记忆，不靠更新时间：导入的记忆保留原来的更新时间，按时间推进的游标会永远看不到它们。
 - 迁移文件合并之后不要再改（包括注释）：恢复备份时按最后一个迁移的哈希核对库的结构，改过的文件会让之前的备份恢复不了。
