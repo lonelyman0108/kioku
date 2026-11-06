@@ -110,10 +110,11 @@ export function withoutKey(text: string, apiKey: string | null): string {
 }
 
 // fetch 自己报的错（连不上，或者请求头不合法）。只取错误类别，不用错误自己的文字：Key 里有换行时，它把整个请求头写进错误。
-// 也不把原来的错误放进 cause：cause 会进日志，后台任务的出错原因也可能取它
-export function fetchFailure(what: string, err: unknown): string {
+// 也不把原来的错误放进 cause：cause 会进日志，后台任务的出错原因也可能取它。
+// keys 是表单上密钥那几栏的名字：模型接口是 API Key，对象存储是 Access Key ID 与 Secret Access Key
+export function fetchFailure(what: string, err: unknown, keys: string): string {
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
-  return `无法连接${what}${typeof code === 'string' ? `（${code}）` : ''}：请检查实例设置中的接口地址与 API Key`
+  return `无法连接${what}${typeof code === 'string' ? `（${code}）` : ''}：请检查实例设置中的接口地址与 ${keys}`
 }
 
 // 读 2xx 响应的 JSON。解析失败时只报固定文字：SyntaxError 的文字带响应的开头，上游可能把 Key 写在那里。

@@ -242,7 +242,7 @@ export async function requestAgentTurn(
       throw new AgentModelError(`模型 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
     }
     if (signal?.aborted) throw new AgentModelError('请求已断开')
-    throw new AgentModelError(fetchFailure('模型接口', err))
+    throw new AgentModelError(fetchFailure('模型接口', err, 'API Key'))
   }
   if (!res.ok) {
     throw new AgentModelError(`模型接口返回 HTTP ${res.status}：${upstreamText(raw)}`)

@@ -6,6 +6,22 @@ import { parse } from 'vue/compiler-sfc'
 // 英文字段名。Secret Access Key 是对象存储自己的字段名，不算
 const ENGLISH_TERMS = /(?<![\w/`.])(disclosure|priority|secret(?! access key)|boot)(?![\w/:`])/i
 
+// 应用接入用的 Key 叫访问密钥，单数复数都查，「API Key」也算在内：访问密钥退回旧名时常写成它
+const ACCESS_KEY = /(?<![\w/`.])Keys?(?![\w`])/
+// 讲上游自己的密钥的文件，只在这里放过上游的字段名：模型服务商的 API Key（嵌入、抽取设置，测试台的模型对话
+// 用的也是抽取模型的），Lore 保存的 API Key（Lore 导入的提示），对象存储的 Access Key ID 与 Secret Access Key
+// （备份），主密钥加密的是 API Key 与 Secret Access Key。别的文件写这几个名字照样报
+const UPSTREAM_KEYS: [file: string, names: RegExp][] = [
+  ['/components/EmbeddingChannelRow.vue', /API Key/g],
+  ['/components/EmbeddingSettings.vue', /API Key/g],
+  ['/components/ExtractionSettings.vue', /API Key/g],
+  ['/benchAgent.ts', /API Key/g],
+  ['/components/BenchAgent.vue', /API Key/g],
+  ['/components/LoreImport.vue', /API Key/g],
+  ['/components/BackupSettings.vue', /Access Key ID|Secret Access Key/g],
+  ['/pages/SettingsPage.vue', /API Key|Secret Access Key/g],
+]
+
 const BANNED: [RegExp, string][] = [
   [/读得到|读不到|看得到|看不到/, '不讲权限逻辑：写「可见」「有权读取」「无权读取」，或者不写'],
   [/你/, '不用第二人称：写「当前账号」或省略'],
@@ -34,9 +50,8 @@ const BANNED: [RegExp, string][] = [
   [/应用与\s*Key|召回分析/, '导航名是「应用」「召回」'],
   [/有效到/, '写「有效期」'],
   [ENGLISH_TERMS, '用术语表的中文名'],
-  // 应用接入用的 Key 叫访问密钥。模型服务商的 API Key、对象存储的 Access Key ID 与 Secret Access Key
-  // 是上游的字段名，不算。下面几条测试台也要守：没有哪个接口参数叫这些名字
-  [/(?<![\w/`.])(?<!(API|Access) )Key(?![\w`])/, '写「访问密钥」，模型服务商的写「API Key」'],
+  // 下面几条测试台也要守：没有哪个接口参数叫这些名字
+  [ACCESS_KEY, '写「访问密钥」；上游的字段名只在 UPSTREAM_KEYS 列出的文件里写'],
   [/(?<![\w/`.])domains?(?![\w`])/i, '写「分区」'],
   [/(?<![\w/`.])Dream(?![\w`])/i, '写「整理」'],
   [/(?<![\w/`.])Bots?(?![\w`])/i, '写「机器人」'],
@@ -72,7 +87,8 @@ const sources = import.meta.glob<string>('../**/*.{vue,ts}', {
 })
 
 // 脚本部分：去掉注释之后取含中文（汉字或中文标点）的字符串片段，代码里的字段名不算。中文标点也算：
-// 插值把 `domain「${…}」重复` 切开之后，英文那一段只带着书名号。按行取，换行处切开的说法查不到
+// 插值把 `domain「${…}」重复` 切开之后，英文那一段只带着书名号。按行取，换行处切开的说法查不到。
+// 已知的盲区：纯英文的字符串取不到，例如 `newKeyHint('Key', true)` 这类拼进界面文字的函数参数
 function scriptFragments(source: string): { line: number; text: string }[] {
   const code = source.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ''))
   return code.split('\n').flatMap((raw, i) => {
@@ -149,10 +165,14 @@ describe('界面文字', () => {
       const rules = /\/Bench[^/]*\.vue$/.test(path)
         ? BANNED.filter(([pattern]) => pattern !== ENGLISH_TERMS)
         : BANNED
+      const upstream = UPSTREAM_KEYS.find(([file]) => path.endsWith(file))?.[1]
       for (const { line, text } of visibleText(path, source)) {
         if (ALLOWED.some((a) => text.includes(a))) continue
         for (const [pattern, hint] of rules) {
-          if (pattern.test(text)) found.push(`${path}:${line} ${hint}：${text.trim().slice(0, 60)}`)
+          const checked = pattern === ACCESS_KEY && upstream ? text.replace(upstream, '') : text
+          if (pattern.test(checked)) {
+            found.push(`${path}:${line} ${hint}：${text.trim().slice(0, 60)}`)
+          }
         }
       }
     }

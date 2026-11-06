@@ -598,7 +598,11 @@ describe('标题和说明一直在', () => {
     ['嵌入模型', embeddingSettings, 'OpenAI 兼容的 /embeddings 接口'],
     ['向量', embeddingSettings, '显示已生成当前模型向量的记忆数量。'],
     ['抽取模型', extractionSettings, 'OpenAI 兼容的 /chat/completions 接口'],
-    ['主密钥', settingsPage, '用于加密机密记忆、托管的凭据值与接口的 API Key。'],
+    [
+      '主密钥',
+      settingsPage,
+      '用于加密机密记忆、托管的凭据值，以及实例设置中保存的 API Key 与 Secret Access Key。',
+    ],
     ['备份', backupSettings, '恢复时需配置同一主密钥。'],
     ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
     ['召回记录', settingsPage, '明细到期后删除，仅保留每条记忆的累计召回次数。'],
@@ -714,6 +718,12 @@ describe('带后果的文字整句留着', () => {
       '开启后，当前账号的个人画像层与私人层（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。',
     ],
     ['导出口令', spaceExport, 'Kioku不保存口令，丢失后无法打开文件。'],
+    ['导出的文件去哪导入', spaceExport, '实例管理员可在「实例设置 › 导入空间」中将它导入为新空间'],
+    [
+      '空间文件不在这里导入',
+      spaceSettingsPage,
+      'Kioku 导出的空间文件请在「实例设置 › 导入空间」中导入为新空间。',
+    ],
     ['导出的口令提示', spaceExport, '请另行保存口令。Kioku不保存口令，丢失后无法打开此文件。'],
     ['导入空间', spaceImport, '仅导入本人导出、或导出人同意移交的文件。'],
     [
@@ -740,7 +750,11 @@ describe('带后果的文字整句留着', () => {
       'API Token将明文传输，而此API Token可清空整个Lore。请尽量改用https。',
     ],
     ['Lore 已导入的机密', loreImport, '此前已导入，当前仍为明文，本次标记的机密未生效。'],
-    ['主密钥', settingsPage, '未配置主密钥，无法保存机密记忆、托管的凭据与接口的API Key。'],
+    [
+      '主密钥',
+      settingsPage,
+      '未配置主密钥，无法保存机密记忆、托管的凭据，以及实例设置中的 API Key 与 Secret Access Key。',
+    ],
     [
       '轮换完成',
       settingsPage,

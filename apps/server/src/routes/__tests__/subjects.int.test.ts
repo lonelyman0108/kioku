@@ -414,24 +414,24 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(await runError(ws.cookie)).toBe('抽取模型返回 HTTP 401：令牌无效')
     expect(await runError(bob.cookie)).toBe('抽取失败（原因仅实例管理员可见）')
     expect(await runError(carol.cookie)).toBe('抽取失败（原因仅实例管理员可见）')
-    // 服务端自己判断出的原因不带外部原文，谁都看得到
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.update(extractionRuns).set({ error: NO_USABLE_KEY }),
-    )
-    expect(await runError(carol.cookie)).toBe(NO_USABLE_KEY)
-    // 改过措辞的原因：存量记录里的旧文字按现在的显示，也照样谁都看得到
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(extractionRuns)
-        .set({ error: '写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层' }),
-    )
-    expect(await runError(carol.cookie)).toBe(NO_USABLE_KEY)
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(extractionRuns)
-        .set({ error: '本月的抽取预算已用完，这一批的 Key 也无权写入会话摘要' }),
-    )
-    expect(await runError(carol.cookie)).toBe(BUDGET_NO_SUMMARY)
+    // 服务端自己判断出的原因不带外部原文，谁都看得到。旧版本写下的记录里是当时的写法，每一代都按现在的显示
+    const generations: [stored: string, shown: string][] = [
+      [NO_USABLE_KEY, NO_USABLE_KEY],
+      ['写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层', NO_USABLE_KEY],
+      ['写入这一批的 Key 都已吊销、作废或写不了对象层与情节层', NO_USABLE_KEY],
+      [BUDGET_NO_SUMMARY, BUDGET_NO_SUMMARY],
+      ['本月的抽取预算已用完，这一批的 Key 也无权写入会话摘要', BUDGET_NO_SUMMARY],
+      ['本月的抽取预算用完了，这一批的 Key 又写不了会话摘要', BUDGET_NO_SUMMARY],
+      [BATCH_MOVED, BATCH_MOVED],
+      ['抽取期间对象被合并，这一批交给合并后的批次重新抽取', BATCH_MOVED],
+    ]
+    for (const [stored, shown] of generations) {
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.update(extractionRuns).set({ error: stored }),
+      )
+      expect(await runError(carol.cookie), stored).toBe(shown)
+      expect(await runError(ws.cookie), stored).toBe(shown)
+    }
   })
 
   it('合并两个人：平台账号、事实、私聊里记下的与缓冲都归到保留的那个，私聊作用域换过来，群里记下的不动', async () => {

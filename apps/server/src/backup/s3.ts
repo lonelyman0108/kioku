@@ -78,7 +78,7 @@ export function s3Client(location: S3Location) {
     } catch (err) {
       if (timeout.aborted) throw new S3Error(`存储 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
       // 不用错误自己的文字：访问密钥或会话令牌里有换行时，它把整个请求头（Credential 与 Signature）写进错误
-      throw new S3Error(fetchFailure('存储', err))
+      throw new S3Error(fetchFailure('存储', err, 'Access Key ID、Secret Access Key'))
     }
     if (!res.ok) throw new S3Error(await describe(res))
     return res

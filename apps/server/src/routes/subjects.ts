@@ -54,7 +54,7 @@ import {
   subjectIdentities,
   subjects,
 } from '../db/schema'
-import { BATCH_MOVED, BUDGET_NO_SUMMARY, NO_USABLE_KEY } from '../extraction/extract'
+import { plainRunError } from '../extraction/extract'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor, consoleRoleFor } from '../memory/context'
@@ -68,13 +68,6 @@ const forbidden = jsonResponse('没有权限', ErrorResponse)
 const notFound = jsonResponse('不存在', ErrorResponse)
 
 const PAGE_SIZE = 50
-// 服务端自己判断出的失败原因，所有成员都看得到
-const PLAIN_RUN_ERRORS = new Set([NO_USABLE_KEY, BUDGET_NO_SUMMARY, BATCH_MOVED])
-// 改过措辞的失败原因：存量的抽取记录里还是改之前的文字，按现在的显示
-const REWORDED_RUN_ERRORS = new Map([
-  ['写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层', NO_USABLE_KEY],
-  ['本月的抽取预算已用完，这一批的 Key 也无权写入会话摘要', BUDGET_NO_SUMMARY],
-])
 // 详情里各部分最多列这么多条
 const DETAIL_FACTS = 200
 const DETAIL_SUPERSEDED = 50
@@ -370,12 +363,11 @@ export function subjectRoutes(deps: Deps) {
       const { role, service } = await consoleMemberFor(deps, spaceId, accountId)
       const access = service.access
       const admin = await isInstanceAdmin(deps.db, accountId)
-      // 模型接口或数据库报的原文可能带着内部的地址与响应，抽取模型由实例管理员配，原文只给他看
+      // 模型接口或数据库报的原文可能带着内部的地址与响应，抽取模型由实例管理员配，原文只给他看。
+      // 服务端自己判断出的原因（plainRunError）所有成员都看得到，按现在的写法显示
       const errorOf = (stored: string | null) => {
-        const error = stored && (REWORDED_RUN_ERRORS.get(stored) ?? stored)
-        return !error || admin || PLAIN_RUN_ERRORS.has(error)
-          ? error
-          : '抽取失败（原因仅实例管理员可见）'
+        if (!stored) return stored
+        return plainRunError(stored) ?? (admin ? stored : '抽取失败（原因仅实例管理员可见）')
       }
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         const [found] = await subjectInfos(tx, access, eq(subjects.id, subjectId))

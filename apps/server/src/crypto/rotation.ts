@@ -25,8 +25,8 @@ const TABLES = [
 // 新加了加密的设置项只要加在这里，启动检查、轮换、状态与导入工具核对主密钥都按它
 type SealedSetting = { sealed: Sealed; aad: string; keyId: string | null }
 type Change = (sealed: SealedJson, aad: string) => SealedJson
-// 这些设置项在启动检查与轮换出错时的统称
-const SETTINGS_LABEL = '实例设置中的 API Key'
+// 这些设置项在启动检查与轮换出错时的统称：嵌入、抽取模型的 API Key 与备份的 Secret Access Key
+const SETTINGS_LABEL = '实例设置中加密保存的密钥'
 const SETTINGS: {
   label: string
   read: (db: Db) => Promise<SealedSetting[]>

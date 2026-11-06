@@ -42,7 +42,7 @@ export function openAiEmbedder(config: EmbeddingConfig, fetchImpl: typeof fetch 
         // 取消了也不照原样抛：请求头不合法的错误比取消先报出来，文字里带着 Key（见 fetchFailure）
         if (timeout.aborted) throw new Error(`嵌入接口 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
         if (signal?.aborted) throw new Error('已达调用方的总时限，或服务正在停止')
-        throw new Error(fetchFailure('嵌入接口', err))
+        throw new Error(fetchFailure('嵌入接口', err, 'API Key'))
       })
       if (!res.ok) {
         // 先去掉 Key 再截断：先截断的话，截在 Key 中间时留下的半截就换不掉了

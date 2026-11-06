@@ -92,7 +92,7 @@ const unsaved = computed(() => [
     <template #master-key>
       <SettingsBlock title="主密钥">
         <template #note>
-          用于加密机密记忆、托管的凭据值与接口的 API Key。
+          用于加密机密记忆、托管的凭据值，以及实例设置中保存的 API Key 与 Secret Access Key。
           <Hint>
             在服务器的 KIOKU_MASTER_KEY
             中配置。标识是哈希值，无法反推密钥，用于核对当前配置的主密钥。
@@ -104,7 +104,8 @@ const unsaved = computed(() => [
         </NoteLine>
         <div v-if="masterKey.data.value" class="space-y-3">
           <p v-if="!masterKey.data.value.configured" class="text-muted">
-            未配置主密钥，无法保存机密记忆、托管的凭据与接口的 API Key。
+            未配置主密钥，无法保存机密记忆、托管的凭据，以及实例设置中的 API Key 与 Secret Access
+            Key。
           </p>
           <template v-else>
             <PropertyList :groups="[[{ key: 'current', label: '标识' }]]">
@@ -118,7 +119,7 @@ const unsaved = computed(() => [
                 <span class="font-mono text-[13px]">{{ masterKey.data.value.previousId }}</span>
                 还有 {{ remaining }} 条待重新包装（机密记忆
                 {{ masterKey.data.value.remaining.memories }}、托管的凭据
-                {{ masterKey.data.value.remaining.credentials }}、接口的 API Key
+                {{ masterKey.data.value.remaining.credentials }}、实例设置中加密保存的密钥
                 {{ masterKey.data.value.remaining.settings }}）
               </p>
               <NoteLine v-if="masterKey.data.value.lastError" tone="error">

@@ -8,7 +8,7 @@ export const URI_PATTERN =
   /^([a-z][a-z0-9_]{0,31}):\/\/([a-z0-9_-]{1,64}(?:\/[a-z0-9_-]{1,64}){0,15})$/
 export const MemoryUri = z
   .string()
-  .regex(URI_PATTERN, 'URI 格式应为 分区://路径，例如 core://agent')
+  .regex(URI_PATTERN, 'URI 格式应为 分区://路径（domain://path），例如 core://agent')
 export const DomainOrUri = z.string().min(1)
 
 // 至少两个字：召回按子串匹配关键词，单字几乎会命中所有提示语

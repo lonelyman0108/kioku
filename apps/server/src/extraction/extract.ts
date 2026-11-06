@@ -36,6 +36,26 @@ export const BUDGET_NO_SUMMARY = '本月的抽取预算已用完，这一批的�
 export const BATCH_MOVED = '抽取期间联系人已被合并，这一批将由合并后的批次重新抽取'
 class BatchMoved extends Error {}
 
+// 上面三个原因历次的写法，第一项是现在的。抽取记录存的是写入时的文字，旧版本写下的记录要按现在的写法显示、
+// 照样给所有成员看：改措辞时把旧句子留在这里，不要删
+const RUN_ERROR_WORDINGS: readonly (readonly [string, ...string[]])[] = [
+  [
+    NO_USABLE_KEY,
+    '写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层',
+    '写入这一批的 Key 都已吊销、作废或写不了对象层与情节层',
+  ],
+  [
+    BUDGET_NO_SUMMARY,
+    '本月的抽取预算已用完，这一批的 Key 也无权写入会话摘要',
+    '本月的抽取预算用完了，这一批的 Key 又写不了会话摘要',
+  ],
+  [BATCH_MOVED, '抽取期间对象被合并，这一批交给合并后的批次重新抽取'],
+]
+// 存下的失败原因是不是服务端自己判断出的：是的话返回现在的写法，否则返回 null
+export function plainRunError(stored: string): string | null {
+  return RUN_ERROR_WORDINGS.find((wordings) => wordings.includes(stored))?.[0] ?? null
+}
+
 // 会话摘要在情节层留这么多天
 export const EPISODE_TTL_DAYS = 30
 // 每个对象给模型看最近这么多条已有事实，用来判断是新的、更新还是已经记过

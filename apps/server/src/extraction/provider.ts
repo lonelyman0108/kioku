@@ -41,7 +41,7 @@ export function openAiChatModel(
         if ((err as Error).name === 'TimeoutError') {
           throw new Error(`抽取模型 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
         }
-        throw new Error(fetchFailure('抽取模型', err))
+        throw new Error(fetchFailure('抽取模型', err, 'API Key'))
       })
       if (!res.ok) {
         // 先去掉 Key 再截断：先截断的话，截在 Key 中间时留下的半截就换不掉了

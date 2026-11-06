@@ -2066,7 +2066,7 @@ export class MemoryService {
     const parsed = target.includes('://') ? parse(target) : null
     const domain = parsed?.domain ?? target
     if (!/^[a-z][a-z0-9_]{0,31}$/.test(domain))
-      throw new MemoryError(400, `分区格式错误：${domain}`)
+      throw new MemoryError(400, `分区（domain）格式错误：${domain}`)
     return this.run(async (tx, personaIds) => {
       const parent = parsed ? await this.findReadableOrNull(tx, parsed, personaIds) : null
       const prefix = parsed ? `${parsed.path}/` : ''
