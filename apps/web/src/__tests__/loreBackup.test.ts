@@ -793,7 +793,7 @@ describe('计划的分组', () => {
         items: [
           item('current', 'a://1'),
           item('current', 'a://2'),
-          { ...item('update', 'a://3'), changes: ['content', 'glossary'] },
+          { ...item('update', 'a://3'), changes: ['content', 'title', 'glossary'] },
           item('edited', 'a://4'),
           { ...item('moved', 'a://5'), target: 'a://6' },
           item('deleted', 'a://7'),
@@ -806,7 +806,7 @@ describe('计划的分组', () => {
     )
     expect(current).toBe(2)
     expect(groups.map((g) => [g.state, g.lines])).toEqual([
-      ['update', [line(3, { detail: '正文、关键词' })]],
+      ['update', [line(3, { detail: '正文、标题、关键词' })]],
       ['edited', [line(4)]],
       ['moved', [line(5, { target: 'a://6' })]],
       ['deleted', [line(7)]],

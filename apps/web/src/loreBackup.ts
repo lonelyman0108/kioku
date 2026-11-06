@@ -254,6 +254,7 @@ export const targetTitle = (target: Pick<LorePlanTarget, 'uri' | 'title'>, secre
 
 const SYNC_CHANGE_LABELS: Record<LoreSyncChange, string> = {
   content: '正文',
+  title: '标题',
   priority: '优先级',
   disclosure: '触发场景',
   glossary: '关键词',

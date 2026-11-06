@@ -577,7 +577,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(item('user://infra/titled')).toMatchObject({
         state: 'update',
         title: '改过的标题',
-        changes: ['content'],
+        changes: ['content', 'title'],
       })
       expect(item('user://infra/vault')).toMatchObject({ state: 'update', title: 'vault' })
       expect(item('user://infra/nas')).toMatchObject({ state: 'current', title: 'nas' })

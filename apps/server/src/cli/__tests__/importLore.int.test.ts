@@ -184,7 +184,9 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的命令行', () => {
     expect(res.stdout).toContain(
       '同步导入过的节点：按 Lore 更新 1 条，已是最新 2 条（--verbose 逐条列出）',
     )
-    expect(res.stdout).toContain('按 Lore 更新（1 条）：\n  新路由器  user://infra/router：正文')
+    expect(res.stdout).toContain(
+      '按 Lore 更新（1 条）：\n  新路由器  user://infra/router：正文、标题',
+    )
     expect(res.stdout).not.toContain('已是最新（')
     expect(res.stdout).toContain('确认无误后加 --apply 执行：新建 0 条、按 Lore 更新 1 条。')
     const verbose = await run(['--sync', '--verbose'], masterKey)

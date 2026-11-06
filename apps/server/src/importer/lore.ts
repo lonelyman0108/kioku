@@ -7,6 +7,7 @@ import {
   RUNTIME_FAMILIES,
   Slug,
   type Layer,
+  type LoreSyncChange,
   type LoreTargetState,
   type LoreWarningKind,
   type RuntimeFamily,
@@ -1079,7 +1080,8 @@ function importerService(target: ImportTarget): MemoryService {
   })
 }
 
-// 同步导入过的节点：把 Kioku 里的记忆改成 Lore 里现在的正文、priority、disclosure 与关键词，敏感级不动。
+// 同步导入过的节点：把 Kioku 里的记忆改成 Lore 里现在的正文、标题、priority、disclosure 与关键词，敏感级不动。
+// 标题和导入时同一个取法（loreTitle），Lore 里改了正文第一个 # 标题就跟着改。
 // 只动导入（或上次同步）之后在 Kioku 里没人改过的：记忆现在的版本号还是导入工具最后写下的那个才算，
 // 任何修改、移动、撤销删除都会让版本号加一。在 Kioku 里改过、移动过、删除了的一律不动，
 // 凭据迁移改过的凭据节点也就不会被 Lore 里的明文盖回去；
@@ -1091,14 +1093,15 @@ export interface SyncItem {
   source: string
   // 记忆现在的 URI；在 Kioku 里删除了的是导入时的 URI
   uri: string
-  // 给人看的标题，和写入目标同一个取法（loreTitle），按 uri 的标识；同步不改敏感级，记忆现在是机密的只用标识
+  // 给人看的标题，和写入目标同一个取法（loreTitle），按 uri 的标识；同步不改敏感级，记忆现在是机密的只用标识。
+  // 要更新的同步之后就是这个标题
   title: string
   state: SyncState
   // state 为 moved 时，按 Lore 现在的路径应当在的 URI
   target?: string
   // state 为 skipped（这次的导入计划不导入这个节点）或 unreadable 时的原因
   reason?: string
-  changes: ('content' | 'priority' | 'disclosure' | 'glossary')[]
+  changes: LoreSyncChange[]
   request?: UpdateMemoryRequest
   context?: Record<string, unknown>
 }
@@ -1216,6 +1219,13 @@ export async function planSync(
         request.content = want.content
         changes.push('content')
       }
+      // 没人改过的记忆的标题就是导入工具按当时的正文取的：同一个取法按现在的正文再取一次，不同就改。
+      // 在 Kioku 里改过标题的版本号已经变了，走不到这里；机密的标题本来就只用标识
+      const title = loreTitle(want.content, m.uri, m.state === 'secret')
+      if (current.title !== title) {
+        request.title = title
+        changes.push('title')
+      }
       if (want.priority !== undefined && current.priority !== want.priority) {
         request.priority = want.priority
         changes.push('priority')
@@ -1235,8 +1245,8 @@ export async function planSync(
       report(
         m,
         changes.length
-          ? { source, uri: m.uri, state: 'update', changes, request, context: item.context }
-          : { source, uri: m.uri, state: 'current' },
+          ? { source, uri: m.uri, title, state: 'update', changes, request, context: item.context }
+          : { source, uri: m.uri, title, state: 'current' },
       )
     }
   }

@@ -612,11 +612,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         expect(bySource.get('infra://office_network')).toMatchObject({
           state: 'update',
           title: '办公室网络',
+          changes: ['content', 'title'],
         })
-        // 同步不改敏感级：导入成机密的正文加密、标题是明文，和导入时一样只用标识
+        // 同步不改敏感级：导入成机密的正文加密、标题是明文，和导入时一样只用标识，标题不用改
         expect(bySource.get('infra://office_network/credentials')).toMatchObject({
           state: 'update',
           title: 'credentials',
+          changes: ['content'],
         })
         expect(bySource.get('preferences://user')).toMatchObject({
           state: 'edited',
@@ -628,6 +630,47 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       } finally {
         await undoPrefs()
         await undoCreds()
+        await undoNetwork()
+      }
+    })
+
+    it('Lore 里改了正文第一个 # 标题，同步后标题跟着改；在 Kioku 里改过标题的不动', async () => {
+      await run()
+      expect(
+        (await consoleUpdate({ uri: 'user://preferences/user', title: '在 Kioku 里改的标题' }))
+          .status,
+      ).toBe(200)
+      const undoNetwork = await editLore('infra://office_network', {
+        content: '# 办公室网络\n换了新交换机',
+      })
+      const undoPrefs = await editLore('preferences://user', { content: '# Lore 里的标题\n中文' })
+      try {
+        const sync = await syncPlan()
+        expect(sync.items.find((i) => i.source === 'preferences://user')).toMatchObject({
+          state: 'edited',
+        })
+        expect((await applySync(target(), sync)).updated).toEqual(['user://infra/office_network'])
+        const network = await importService().get('user://infra/office_network')
+        expect(network).toMatchObject({
+          title: '办公室网络',
+          content: '# 办公室网络\n换了新交换机',
+        })
+        const events = await memoryEventsOf(network.id)
+        expect(events.at(-1)).toMatchObject({
+          eventType: 'sync',
+          context: expect.objectContaining({ changes: ['content', 'title'] }) as unknown,
+        })
+        expect((await importService().get('user://preferences/user')).title).toBe(
+          '在 Kioku 里改的标题',
+        )
+        // 再算一次就是最新：同步写下的标题就是按现在的正文取的
+        const again = await syncPlan()
+        expect(again.items.find((i) => i.source === 'infra://office_network')).toMatchObject({
+          state: 'current',
+          title: '办公室网络',
+        })
+      } finally {
+        await undoPrefs()
         await undoNetwork()
       }
     })

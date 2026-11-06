@@ -66,7 +66,7 @@ Lore 的 URI 映射到这些坐标（括号里是归属，下级路径照搬）�
   --persona <标识>        core://soul 导入为这个人格的设定，默认 default；要写入新的 core://soul 时不存在就新建
   --persona-name <名称>   新建人格时用的名称，默认「默认人格」
   --secret <Lore 的 URI>  把这个节点导入为机密（正文加密存储），可以重复；对已导入的节点不生效
-  --sync                  同步导入过的节点：正文、优先级、触发场景与关键词改成 Lore 里现在的
+  --sync                  同步导入过的节点：正文、标题、优先级、触发场景与关键词改成 Lore 里现在的
   -v, --verbose           已导入的、同步时已是最新的也逐条列出（默认只给条数）
   --apply                 执行导入（与同步）；不加时只打印计划
 
@@ -376,6 +376,7 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
 
 const CHANGE_LABELS: Record<LoreSyncChange, string> = {
   content: '正文',
+  title: '标题',
   priority: '优先级',
   disclosure: '触发场景',
   glossary: '关键词',
