@@ -32,6 +32,24 @@ export const PROVENANCES = ['owner', 'agent', 'untrusted', 'system'] as const
 export const Provenance = z.enum(PROVENANCES)
 export type Provenance = z.infer<typeof Provenance>
 
+// 够格进启动加载的记忆：层与优先级够格（bootEligible），来源受信（未确认来源的不进，理由见服务端的 recall/boot.ts），
+// 不是机密（启动加载照读权限不收机密）。实际加载还看访问密钥的权限、继承覆盖与字数上限。
+// 管理界面标「启动加载」的（isBootNode，再除去已过期的）、概览「未设触发场景」不算的都是这些。
+// 服务端的 SQL 版是 BOOT_ELIGIBLE 加上 sensitivity <> 'secret'（memory/service.ts 的 NEEDS_DISCLOSURE），
+// 改了要一起改，browse.int.test.ts 拿列表逐条比对
+export function isBootCandidate(memory: {
+  layer: Layer
+  priority: number
+  provenance: Provenance
+  sensitivity: Sensitivity
+}): boolean {
+  return (
+    memory.provenance !== 'untrusted' &&
+    memory.sensitivity !== 'secret' &&
+    bootEligible(memory.layer, memory.priority)
+  )
+}
+
 // 形态：curated 是 URI 树上的策展节点，extracted 是从对话自动抽取的扁平事实
 export const MEMORY_FORMS = ['curated', 'extracted'] as const
 export const MemoryForm = z.enum(MEMORY_FORMS)

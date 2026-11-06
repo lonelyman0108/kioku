@@ -1,7 +1,7 @@
 import { randomBytes } from 'node:crypto'
 
 import {
-  bootEligible,
+  isBootCandidate,
   type ConsoleSearchResponse,
   type EmbeddingStatus,
   type KeyScopes,
@@ -409,17 +409,9 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
         .filter((uri) => !expected.includes(uri))
         .sort(),
     )
-    // 和 contracts 的 bootEligible 同一个判断：受信来源、不是机密、够格进启动加载的不用补
+    // SQL 的 NEEDS_DISCLOSURE 和 contracts 的 isBootCandidate（界面标「启动加载」用它）逐条对上
     const byRule = all.items
-      .filter(
-        (m) =>
-          !m.disclosure?.trim() &&
-          !(
-            m.provenance !== 'untrusted' &&
-            m.sensitivity !== 'secret' &&
-            bootEligible(m.layer, m.priority)
-          ),
-      )
+      .filter((m) => !m.disclosure?.trim() && !isBootCandidate(m))
       .map((m) => m.uri)
       .sort()
     expect(byRule).toEqual(expected)

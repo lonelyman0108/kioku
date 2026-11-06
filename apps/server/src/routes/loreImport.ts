@@ -31,9 +31,9 @@ import {
   planSync,
   previewImport,
   staleAgainst,
+  type BasePlan,
   type ExistingApp,
   type ImportOptions,
-  type ImportPlan,
   type ImportPreview,
   type ImportTarget,
   type LoreSnapshot,
@@ -95,26 +95,20 @@ const applyRoute = createRoute({
   },
 })
 
-// 不带勾选的基准计划：/plan 看的是它，/apply 重新算它来比指纹。occupied 是这份计划查到的占用，按勾选重算时沿用
+// 不带勾选的基准计划：/plan 看的是它，/apply 重新算它来比指纹。按勾选重算时沿用它查到的占用与读到的导入记录
 async function basePlan(
   target: ImportTarget,
   snapshot: LoreSnapshot,
   existing: ExistingApp[],
   options: Pick<ImportOptions, 'accountId' | 'persona' | 'exportedAt'>,
-): Promise<{
-  plan: ImportPlan
-  occupied: ReadonlySet<string>
-  preview: ImportPreview
-  sync: SyncPlan
-  fingerprint: string
-}> {
-  const { plan, occupied } = await planImportFor(target, snapshot, existing, {
+): Promise<BasePlan & { preview: ImportPreview; sync: SyncPlan; fingerprint: string }> {
+  const base = await planImportFor(target, snapshot, existing, {
     ...options,
     secretUris: new Set(),
   })
-  const preview = await previewImport(target, plan)
-  const sync = await planSync(target, plan, snapshot)
-  return { plan, occupied, preview, sync, fingerprint: planFingerprint(plan, preview, sync) }
+  const preview = await previewImport(target, base.plan, base.imports)
+  const sync = await planSync(target, base.plan, snapshot, base.imports)
+  return { ...base, preview, sync, fingerprint: planFingerprint(base.plan, preview, sync) }
 }
 
 // 计划视图：只有元数据，没有正文（同步项的 request 与 context 里有正文，这里不带）
@@ -169,7 +163,8 @@ function planView(
         },
       ]
     }),
-    skipped: plan.skipped,
+    // 去重键只给同步用，不进视图
+    skipped: plan.skipped.map(({ source, reason }) => ({ source, reason })),
     droppedKeywords: plan.droppedKeywords,
     warnings: plan.warnings,
     sync: {
@@ -257,9 +252,9 @@ export function loreImportRoutes(deps: Deps) {
             })
           : base.plan
         assertExecutable(plan, deps.masterKey)
-        const sync = ticked ? await planSync(target, plan, snapshot) : base.sync
+        const sync = ticked ? await planSync(target, plan, snapshot, base.imports) : base.sync
         if (source.kind === 'file' && !body.confirmStale) {
-          const preview = ticked ? await previewImport(target, plan) : base.preview
+          const preview = ticked ? await previewImport(target, plan, base.imports) : base.preview
           const stale = staleAgainst(
             exportedAt,
             await loreDataTime(deps.db, spaceId),

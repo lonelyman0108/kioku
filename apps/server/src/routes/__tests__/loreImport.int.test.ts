@@ -8,6 +8,7 @@ import {
   LoreImportResult,
   type LoreImportSource,
   type LoreSyncItem,
+  type MemoryView,
 } from '@kioku/contracts'
 import { and, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
@@ -27,6 +28,7 @@ import {
   planSync,
   previewImport,
   readLore,
+  type LoreSnapshot,
 } from '../../importer/lore'
 import type { Jobs } from '../../jobs/queue'
 import { BOOT_ELIGIBLE } from '../../memory/filter'
@@ -198,7 +200,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
   const cli = async (persona = 'default') => {
     const target = { db: database.db, spaceId: ws.spaceId, accountId: ws.accountId, masterKey }
     const snapshot = await readLore(lore)
-    const { plan } = await planImportFor(
+    const { plan, imports } = await planImportFor(
       target,
       snapshot,
       await existingImportApps(database.db, ws.spaceId),
@@ -209,7 +211,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         quoteMalformed: true,
       },
     )
-    const sync = await planSync(target, plan, snapshot)
+    const sync = await planSync(target, plan, snapshot, imports)
     return { target, snapshot, plan, sync }
   }
   const cliApply = async (persona?: string) => {
@@ -718,10 +720,148 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           jsonRequest('POST', body, { cookie }),
         )
         expect(res.status, await res.clone().text()).toBe(201)
+        return (await res.json()) as MemoryView
       }
-      const occupiedReason = (uri: string) => ({ source: uri, reason: `${uri} 已被其他记忆占用` })
+      const occupiedReason = (source: string, target = source) => ({
+        source,
+        reason: `${target} 已被其他记忆占用`,
+      })
       const occupy = (body: Record<string, unknown>) =>
         service().create(CreateMemoryRequest.parse(body))
+      const expire = (id: string) =>
+        withSpace(database.db, ws.spaceId, (tx) =>
+          tx
+            .update(memories)
+            .set({ validTo: new Date(Date.now() - 60_000) })
+            .where(eq(memories.id, id)),
+        )
+
+      describe('逐种拿计划标的占用和真去写入的结果比对', () => {
+        // 一个节点一份快照：看占用的计划标没标，和不看占用直接写下去时数据库拦没拦一致。返回计划的判断
+        const matchesWrite = async (uri: string) => {
+          const target = {
+            db: database.db,
+            spaceId: ws.spaceId,
+            accountId: ws.accountId,
+            masterKey,
+          }
+          const snapshot: LoreSnapshot = {
+            nodes: [
+              {
+                uuid: `uuid-${uri}`,
+                uri,
+                aliases: [],
+                priority: 2,
+                disclosure: null,
+                content: `${uri} 在 Lore 里的正文`,
+                createdAt: new Date(EARLIER),
+                updatedAt: new Date(EARLIER),
+                previousVersions: 0,
+                keywords: [],
+              },
+            ],
+            recallEvents: null,
+          }
+          const existing = await existingImportApps(database.db, ws.spaceId)
+          const options = {
+            accountId: ws.accountId,
+            persona: { slug: 'default', name: '默认人格' },
+            secretUris: new Set<string>(),
+          }
+          const { plan } = await planImportFor(target, snapshot, existing, options)
+          const flagged = plan.skipped.some((s) => s.reason.endsWith('已被其他记忆占用'))
+          expect(plan.memories.length).toBe(flagged ? 0 : 1)
+          const result = await applyImport(target, planImport(snapshot, existing, options))
+          expect(result.failed).toEqual([])
+          expect(result.occupied.length).toBe(flagged ? 1 : 0)
+          expect(result.created.length).toBe(flagged ? 0 : 1)
+          return flagged
+        }
+
+        it('同一归属被占（唯一索引）：共享的、导入者自己的私人与个人画像节点都标出来', async () => {
+          await occupy({ uri: 'core://same', content: '占着的', layer: 'base' })
+          expect(await matchesWrite('core://same')).toBe(true)
+          await occupy({ uri: 'projects://same', content: '占着的' })
+          expect(await matchesWrite('projects://same')).toBe(true)
+          await occupy({ uri: 'preferences://same', content: '占着的', layer: 'owner' })
+          expect(await matchesWrite('preferences://same')).toBe(true)
+        })
+
+        it('共享与成员节点互斥（触发器）：两边都有效时标出来；导入者和别的成员各自的节点不相干', async () => {
+          const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+          // 共享的目标上有成员的私人节点：别的成员的，或者导入者自己的
+          await asEditor(editor.cookie, { uri: 'core://door', content: '伊芙的', layer: 'private' })
+          expect(await matchesWrite('core://door')).toBe(true)
+          await occupy({ uri: 'core://mine', content: '自己的', layer: 'private' })
+          expect(await matchesWrite('core://mine')).toBe(true)
+          // 导入者的私人目标上有共享节点
+          await occupy({ uri: 'projects://plan', content: '共享的', layer: 'base' })
+          expect(await matchesWrite('projects://plan')).toBe(true)
+          // 别的成员同一个 URI 上的私人节点、个人画像节点不挡
+          await asEditor(editor.cookie, { uri: 'projects://diary', content: '伊芙的' })
+          expect(await matchesWrite('projects://diary')).toBe(false)
+          await asEditor(editor.cookie, {
+            uri: 'preferences://tone',
+            content: '伊芙的',
+            layer: 'owner',
+          })
+          expect(await matchesWrite('preferences://tone')).toBe(false)
+        })
+
+        it('占着的那条已过期：导入者释放得了的写入时先释放，不标；别的成员过期的私人节点不再挡共享目标', async () => {
+          const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+          await expire((await occupy({ uri: 'core://a', content: '过期的', layer: 'base' })).id)
+          expect(await matchesWrite('core://a')).toBe(false)
+          await expire((await occupy({ uri: 'projects://old', content: '过期的' })).id)
+          expect(await matchesWrite('projects://old')).toBe(false)
+          await expire(
+            (await occupy({ uri: 'projects://lapsed', content: '过期的', layer: 'base' })).id,
+          )
+          expect(await matchesWrite('projects://lapsed')).toBe(false)
+          const gate = await asEditor(editor.cookie, {
+            uri: 'core://gate',
+            content: '伊芙的',
+            layer: 'private',
+          })
+          await expire(gate.id)
+          expect(await matchesWrite('core://gate')).toBe(false)
+        })
+
+        it('人格层与应用层：同一个 URI 上有效的挡着，过期的写入时先释放', async () => {
+          await ws.createPersona('default')
+          await occupy({ uri: 'persona://default/soul/style', content: '手写的口吻' })
+          expect(await matchesWrite('core://soul/style')).toBe(true)
+          await expire((await occupy({ uri: 'persona://default/soul/old', content: '过期的' })).id)
+          expect(await matchesWrite('core://soul/old')).toBe(false)
+          await ws.createApp('bot', { runtimeFamily: 'other' })
+          await occupy({ uri: 'app://bot/agent/tools', content: '手写的工具说明' })
+          expect(await matchesWrite('core://agent/bot/tools')).toBe(true)
+        })
+
+        it('应用的时钟比数据库快：按应用的时间已经过期的，写入时 claimUri 先释放，计划照着判断', async () => {
+          // 有效到至少要晚一分钟：一分半之后到期，按数据库的时间还有效，按快了两分半的应用时间已经过期
+          const soon = new Date(Date.now() + 90_000).toISOString()
+          await occupy({ uri: 'core://skew', content: '快到期的', layer: 'base', validTo: soon })
+          vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 150_000 })
+          try {
+            expect(await matchesWrite('core://skew')).toBe(false)
+          } finally {
+            vi.useRealTimers()
+          }
+        })
+      })
+
+      it('占用的原因只挂到对应的目标：同一个节点之前导入到别处的那条列为没有映射到', async () => {
+        await cliApply('old-persona')
+        await ws.createPersona('default')
+        await occupy({ uri: 'persona://default/soul', content: '默认人格里手写的设定' })
+        const plan = await planOf(await fileSource())
+        expect(plan.skipped).toContainEqual(occupiedReason('core://soul', 'persona://default/soul'))
+        expect(plan.sync.items.find((i) => i.uri === 'persona://old-persona/soul')).toMatchObject({
+          state: 'unmapped',
+        })
+        expect(plan.sync.items.filter((i) => i.reason?.includes('占用'))).toEqual([])
+      })
 
       it('计划里就列为不导入，不带正文；要新建的就是写入的，勾掉一个也一样；命令行的计划同样列出', async () => {
         await seed('projects://atlas', 'Lore 里阿特拉斯的正文')
@@ -758,7 +898,9 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         }
         const plan = LoreImportPlan.parse(JSON.parse(text))
         const occupied = ['core://agent', 'projects://atlas', 'core://team']
-        expect(plan.skipped).toEqual(expect.arrayContaining(occupied.map(occupiedReason)))
+        expect(plan.skipped).toEqual(
+          expect.arrayContaining(occupied.map((uri) => occupiedReason(uri))),
+        )
         for (const uri of occupied) expect(nodeOf(plan, uri)).toBeUndefined()
         expect(stateOf(plan, 'infra://nas')).toBe('new')
         expect(stateOf(plan, 'preferences://user')).toBe('new')
@@ -771,7 +913,11 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
 
         // 命令行的计划是同一份
         const { plan: fromCli } = await cli()
-        expect(fromCli.skipped).toEqual(expect.arrayContaining(occupied.map(occupiedReason)))
+        // 计划里的去重键不进视图，比对时也去掉
+        const cliSkipped = fromCli.skipped.map(({ source, reason }) => ({ source, reason }))
+        expect(cliSkipped).toEqual(
+          expect.arrayContaining(occupied.map((uri) => occupiedReason(uri))),
+        )
         expect(fromCli.memories.map((m) => m.request.uri).sort()).toEqual(planned)
 
         // 按勾选重算沿用基准计划的占用：写入的是看过的计划减去勾掉的
@@ -788,7 +934,9 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
 
         // 再看计划：写进去的是已导入，占着的照样不导入
         const again = await planOf(source)
-        expect(again.skipped).toEqual(expect.arrayContaining(occupied.map(occupiedReason)))
+        expect(again.skipped).toEqual(
+          expect.arrayContaining(occupied.map((uri) => occupiedReason(uri))),
+        )
         expect(stateOf(again, 'infra://nas')).toBe('imported')
         expect(stateOf(again, 'infra://router/credentials')).toBe('new')
       })
@@ -1576,6 +1724,11 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       const next = await planOf(newer)
       const twice = await during(() => applyOf(newer, next, { excludeUris: ['infra://more'] }))
       expect(twice).toEqual([1, 1, 2, 2])
+      // 按勾选重算的预览与同步用基准计划读到的那份导入记录，不再各读一遍
+      const [baseSync, tickedSync] = vi.mocked(planSync).mock.calls
+      expect(tickedSync![3]).toBe(baseSync![3])
+      const [basePreview, tickedPreview] = vi.mocked(previewImport).mock.calls
+      expect(tickedPreview![2]).toBe(basePreview![2])
       expect(await counts()).toMatchObject({ memories: 7 })
 
       const third = await planOf(newer)

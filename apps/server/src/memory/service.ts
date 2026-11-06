@@ -248,7 +248,7 @@ const CONVERT_TOO_LONG = '换成占位符后正文超出长度上限。请先删
 
 // 要在一个 URI 上生效的一条（见 uriConflicts）：撤销删除的是那一行本身，ended 是它自己是不是已经过期；
 // 新建的还没有 id，现在有效
-interface UriClaim {
+export interface UriClaim {
   id: string | null
   domain: string | null
   path: string | null
@@ -257,6 +257,97 @@ interface UriClaim {
 }
 // uriConflicts 一条语句查多少个 URI
 const URI_CLAIM_BATCH = 1000
+
+// 别的成员的画像层、私人层记录：调用方看不到
+function foreignPrivate(access: Access, row: Pick<MemoryRow, 'ownerAccountId'>): boolean {
+  return row.ownerAccountId !== null && row.ownerAccountId !== access.ownerAccountId
+}
+
+// claimUri 能让出的过期记录：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
+// 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
+// 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
+function canRelease(
+  access: Access,
+  row: WriteIntent & Pick<MemoryRow, 'ownerAccountId' | 'provenance'>,
+): boolean {
+  return foreignPrivate(access, row) || canModify(access, row)
+}
+
+// 新写入的记忆归谁：主人层与私人层按成员各自占用，归写入者；别的层是共享的
+export function ownerFor(access: Access, layer: Layer): string | null {
+  return layer === 'owner' || layer === 'private' ? access.ownerAccountId : null
+}
+
+// 这几条要在各自的 URI 上生效（撤销删除、新建）会不会撞上 URI 冲突，返回会撞上的那些。照写入的几步判断：
+// 先由 claimUri 让出调用方能让出的过期记录，剩下的交给数据库——唯一索引 memories_uri_live_idx 看同一归属里没删除的，
+// 已过期的也算；互斥触发器 memories_uri_exclusive 只看两边都还有效的，有一边是共享节点、或者两边属于
+// 同一个成员就冲突（要生效的这一条自己已经过期时不检查）。是否过期照各自的时钟：claimUri 按应用的时间让出，
+// 触发器按数据库的时间（STILL_VALID）。
+// 它不看调用方读不读得到占着的那条：结果说得出别的成员的私人节点占不占某个 URI（不带内容），和写入撞上时的 409 一样多。
+// 所以只给两处用：已删除列表的标记（只算调用方恢复得了的，见 undeleteConflicts），和 Lore 导入的计划（导入者是空间所有者，
+// 只查这次要新建的目标，见 importer/lore.ts）。不做成 MemoryService 的公开方法，访问密钥走得到的路径不要调用它
+export async function uriConflicts<T extends UriClaim>(
+  tx: Tx,
+  access: Access,
+  claims: readonly T[],
+): Promise<Set<T>> {
+  const taken = new Set<T>()
+  const now = new Date()
+  // domain 里没有冒号，拼起来的 URI 不会撞
+  const uriOf = (c: { domain: string | null; path: string | null }) => `${c.domain}://${c.path}`
+  // 分批查：导入计划一次可能有上万个目标，一条语句的参数个数有上限
+  for (let start = 0; start < claims.length; start += URI_CLAIM_BATCH) {
+    const batch = claims.slice(start, start + URI_CLAIM_BATCH)
+    const rows = await tx
+      .select({
+        id: memories.id,
+        domain: memories.domain,
+        path: memories.path,
+        ownerAccountId: memories.ownerAccountId,
+        layer: memories.layer,
+        sensitivity: memories.sensitivity,
+        personaId: memories.personaId,
+        appId: memories.appId,
+        provenance: memories.provenance,
+        validTo: memories.validTo,
+        expiresAt: memories.expiresAt,
+        ended: sql<boolean>`(not ${STILL_VALID})`,
+      })
+      .from(memories)
+      .where(
+        and(
+          isNull(memories.deletedAt),
+          sql`(${memories.domain}, ${memories.path}) in (${sql.join(
+            batch.map((c) => sql`(${c.domain}, ${c.path})`),
+            sql`, `,
+          )})`,
+        ),
+      )
+    // 按 URI 归好，每一条只看自己 URI 上的
+    const occupants = new Map<string, typeof rows>()
+    for (const row of rows) {
+      const list = occupants.get(uriOf(row))
+      if (list) list.push(row)
+      else occupants.set(uriOf(row), [row])
+    }
+    for (const claim of batch) {
+      const blocked = (occupants.get(uriOf(claim)) ?? []).some((m) => {
+        if (m.id === claim.id) return false
+        // claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出。可能挡着的（同一归属，
+        // 或者有一边是共享节点）都在 claimUri 的候选里；两个成员各自的节点本来就不冲突
+        if (!isValidAt(m, now) && canRelease(access, m)) return false
+        // 同一归属：唯一索引挡着，已过期的也算（两边都有效时触发器也挡，结论一样）
+        if (m.ownerAccountId === claim.ownerAccountId) return true
+        // 归属不同：两边都还有效（按数据库的时间）、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
+        return (
+          !claim.ended && !m.ended && (claim.ownerAccountId === null || m.ownerAccountId === null)
+        )
+      })
+      if (blocked) taken.add(claim)
+    }
+  }
+  return taken
+}
 
 // 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
 interface RefBaseline {
@@ -503,8 +594,8 @@ export class MemoryService {
       ? await candidates.for('no key update', { skipLocked: true })
       : await candidates.for('no key update')
     for (const row of rows) {
-      if (!this.canRelease(row)) continue
-      const foreignPrivate = this.foreignPrivate(row)
+      if (!canRelease(this.ctx.access, row)) continue
+      const foreign = foreignPrivate(this.ctx.access, row)
       // 只让出这一刻仍然过期的，删除时间就是这一刻（不早于过期时间，见 isReleased）。行已经锁住，这里只是复查
       const [gone] = await tx
         .update(memories)
@@ -515,22 +606,10 @@ export class MemoryService {
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
       // 让出的是别的成员的私人记录时，事件记在本次写入者名下，快照里不放对方的正文
       const keep = (r: MemoryRow) =>
-        foreignPrivate ? { ...snapshot(r, glossary), content: null } : snapshot(r, glossary)
+        foreign ? { ...snapshot(r, glossary), content: null } : snapshot(r, glossary)
       await this.event(tx, row.id, 'expire', keep(row), keep(gone))
       released.push(row.id)
     }
-  }
-
-  // 别的成员的画像层、私人层记录：调用方看不到
-  private foreignPrivate(row: Pick<MemoryRow, 'ownerAccountId'>): boolean {
-    return row.ownerAccountId !== null && row.ownerAccountId !== this.ctx.access.ownerAccountId
-  }
-
-  // claimUri 能让出的过期记录：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
-  // 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
-  // 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
-  private canRelease(row: WriteIntent & Pick<MemoryRow, 'ownerAccountId' | 'provenance'>): boolean {
-    return this.foreignPrivate(row) || canModify(this.ctx.access, row)
   }
 
   // 撤销删除这几条会不会撞上 URI 冲突，返回会撞上的那些的 id（规则见 uriConflicts）。
@@ -548,75 +627,8 @@ export class MemoryService {
         ownerAccountId: row.ownerAccountId,
         ended,
       }))
-    const taken = await this.uriConflicts(tx, claims)
+    const taken = await uriConflicts(tx, this.ctx.access, claims)
     return new Set([...taken].map((c) => c.id))
-  }
-
-  // 在这些 URI 上新建记忆会不会撞上 URI 冲突，返回会撞上的 URI（规则见 uriConflicts）。新建的这一条现在有效，
-  // 归属按层定（ownerFor）。只用来提前标出来（Lore 导入的计划），写入时仍以数据库为准
-  async createConflicts(targets: readonly { uri: string; layer: Layer }[]): Promise<Set<string>> {
-    const claims = targets.map(({ uri, layer }) => {
-      const { domain, path } = parse(uri)
-      return { id: null, uri, domain, path, ownerAccountId: this.ownerFor(layer), ended: false }
-    })
-    const taken = await this.run((tx) => this.uriConflicts(tx, claims))
-    return new Set([...taken].map((c) => c.uri))
-  }
-
-  // 这几条要在各自的 URI 上生效（撤销删除、新建）会不会撞上 URI 冲突，返回会撞上的那些。照写入的几步判断：
-  // 先由 claimUri 让出调用方能让出的过期记录，剩下的交给数据库——唯一索引 memories_uri_live_idx 看同一归属里没删除的，
-  // 已过期的也算；互斥触发器 memories_uri_exclusive 只看两边都还有效的，有一边是共享节点、或者两边属于
-  // 同一个成员就冲突（要生效的这一条自己已经过期时不检查）。是否过期照各自的时钟：claimUri 按应用的时间让出，
-  // 触发器按数据库的时间（STILL_VALID）。
-  // 占着 URI 的那条只用来判断，调用方读不到它时也只知道被占用，拿不到它的内容
-  private async uriConflicts<T extends UriClaim>(tx: Tx, claims: readonly T[]): Promise<Set<T>> {
-    const taken = new Set<T>()
-    const now = new Date()
-    // 分批查：导入计划一次可能有上万个目标，一条语句的参数个数有上限
-    for (let start = 0; start < claims.length; start += URI_CLAIM_BATCH) {
-      const batch = claims.slice(start, start + URI_CLAIM_BATCH)
-      const occupants = await tx
-        .select({
-          id: memories.id,
-          domain: memories.domain,
-          path: memories.path,
-          ownerAccountId: memories.ownerAccountId,
-          layer: memories.layer,
-          sensitivity: memories.sensitivity,
-          personaId: memories.personaId,
-          appId: memories.appId,
-          provenance: memories.provenance,
-          validTo: memories.validTo,
-          expiresAt: memories.expiresAt,
-          ended: sql<boolean>`(not ${STILL_VALID})`,
-        })
-        .from(memories)
-        .where(
-          and(
-            isNull(memories.deletedAt),
-            sql`(${memories.domain}, ${memories.path}) in (${sql.join(
-              batch.map((c) => sql`(${c.domain}, ${c.path})`),
-              sql`, `,
-            )})`,
-          ),
-        )
-      for (const claim of batch) {
-        const blocked = occupants.some((m) => {
-          if (m.id === claim.id || m.domain !== claim.domain || m.path !== claim.path) return false
-          // claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出。可能挡着的（同一归属，
-          // 或者有一边是共享节点）都在 claimUri 的候选里；两个成员各自的节点本来就不冲突
-          if (!isValidAt(m, now) && this.canRelease(m)) return false
-          // 同一归属：唯一索引挡着，已过期的也算（两边都有效时触发器也挡，结论一样）
-          if (m.ownerAccountId === claim.ownerAccountId) return true
-          // 归属不同：两边都还有效（按数据库的时间）、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
-          return (
-            !claim.ended && !m.ended && (claim.ownerAccountId === null || m.ownerAccountId === null)
-          )
-        })
-        if (blocked) taken.add(claim)
-      }
-    }
-    return taken
   }
 
   private async findReadableOrNull(
@@ -800,11 +812,6 @@ export class MemoryService {
     )
   }
 
-  // 新写入的记忆归谁：主人层与私人层按成员各自占用，归调用方；别的层是共享的
-  private ownerFor(layer: Layer): string | null {
-    return layer === 'owner' || layer === 'private' ? this.ctx.access.ownerAccountId : null
-  }
-
   // 解析写入目标的层和归属；应用层只能写本应用（admin 例外），人格由调用方随后用 assertWritable 检查
   private async resolveOwnership(
     tx: Tx,
@@ -829,7 +836,7 @@ export class MemoryService {
 
     const ownership: Ownership = {
       layer,
-      ownerAccountId: this.ownerFor(layer),
+      ownerAccountId: ownerFor(access, layer),
       personaId: null,
       appId: null,
     }
@@ -3355,7 +3362,7 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
 // 没写 disclosure：为空或只有空白
 const MISSING_DISCLOSURE = sql`(${memories.disclosure} is null or btrim(${memories.disclosure}) = '')`
 // 要补 disclosure 的：没写，又不进启动上下文。进的是 BOOT_ELIGIBLE 里不是 secret 的（boot 照读权限不收 secret），
-// 每次会话开始都注入，不靠 disclosure 被想起；管理界面标成启动加载的就是这些（isBootNode）。
+// 每次会话开始都注入，不靠 disclosure 被想起；JS 版是 contracts 的 isBootCandidate，管理界面标成启动加载的就是这些。
 // 概览的计数与列表的 missingDisclosure 筛选都用它，从概览点进列表的条数和概览一致
 const NEEDS_DISCLOSURE = sql`(${MISSING_DISCLOSURE} and not (${BOOT_ELIGIBLE} and ${memories.sensitivity} <> 'secret'))`
 

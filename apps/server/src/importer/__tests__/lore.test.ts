@@ -298,11 +298,17 @@ describe('Lore 导入计划', () => {
       options,
     )
     expect(plan.memories.map((m) => m.source)).toEqual(['projects://router'])
+    // 只关于一个写入目标的原因带上它的去重键（节点的 uuid 在这里就是 URI）
     expect(plan.skipped).toEqual([
-      { source: 'core://router', reason: expect.stringContaining('core://router 属于基础层') },
+      {
+        source: 'core://router',
+        reason: expect.stringContaining('core://router 属于基础层'),
+        importKey: 'core://router@',
+      },
       {
         source: 'preferences://router',
         reason: expect.stringContaining('preferences://router 属于个人画像层'),
+        importKey: 'preferences://router@',
       },
     ])
   })
@@ -481,6 +487,7 @@ describe('Lore 导入计划', () => {
       const clash = {
         source: 'core://agent/claude-code',
         reason: '和 core://agent/claude_code 映射到同一个 app://claude-code/agent',
+        importKey: 'core://agent/claude-code@claude-code',
       }
       expect(all.skipped).toEqual([clash])
 
@@ -598,12 +605,21 @@ describe('Lore 导入计划', () => {
       // 只少了占用的两个目标，写到两个应用的节点还写另一个
       expect(plan.memories).toEqual(draft.memories.filter((m) => !occupied.has(m.importKey)))
       expect(plan.skipped).toEqual([
-        { source: 'core://agent/open_claw', reason: 'app://open-claw/agent 已被其他记忆占用' },
+        {
+          source: 'core://agent/open_claw',
+          reason: 'app://open-claw/agent 已被其他记忆占用',
+          importKey: 'core://agent/open_claw@open-claw',
+        },
         {
           source: 'core://agent/open-claw',
           reason: '和 core://agent/open_claw 映射到同一个 app://open-claw/agent',
+          importKey: 'core://agent/open-claw@open-claw',
         },
-        { source: 'core://agent/claudecode', reason: 'app://claude-a/agent 已被其他记忆占用' },
+        {
+          source: 'core://agent/claudecode',
+          reason: 'app://claude-a/agent 已被其他记忆占用',
+          importKey: 'core://agent/claudecode@claude-a',
+        },
       ])
       expect(plan.apps.map((m) => m.runtime)).toEqual(['claudecode'])
     })
@@ -617,7 +633,11 @@ describe('Lore 导入计划', () => {
       })
       expect(plan.memories).toEqual([])
       expect(plan.skipped).toEqual([
-        { source: 'core://agent', reason: 'core://agent 已被其他记忆占用' },
+        {
+          source: 'core://agent',
+          reason: 'core://agent 已被其他记忆占用',
+          importKey: 'core://agent@',
+        },
       ])
     })
   })

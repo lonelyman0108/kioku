@@ -94,7 +94,7 @@ async function main(): Promise<void> {
     const lore = postgres(loreUrl, { max: 1, onnotice: () => {} })
     const snapshot = await readLore(lore).finally(() => lore.end())
     // 和管理界面同一份计划：URI 已被别的记忆占用的目标在计划里就列为不导入
-    const { plan } = await planImportFor(
+    const { plan, imports } = await planImportFor(
       target,
       snapshot,
       await existingImportApps(database.db, spaceId),
@@ -111,7 +111,7 @@ async function main(): Promise<void> {
       `Lore：${snapshot.nodes.length} 个节点；${versions} 个旧版本不迁移` +
         (snapshot.recallEvents === null ? '' : `；${snapshot.recallEvents} 条召回事件不迁移`),
     )
-    printPlan(plan, await previewImport(target, plan))
+    printPlan(plan, await previewImport(target, plan, imports))
     if (plan.errors.length) {
       // 命令行只有 --secret 会对不上
       const lines = plan.errors.map((e) => `  --secret 指定的 ${e.uri} 在 Lore 里不存在`)
@@ -122,7 +122,7 @@ async function main(): Promise<void> {
     // 同步要读出 secret 记忆来比对：先确认主密钥和服务用的是同一把，免得解密失败时才发现
     if (values.sync && config.masterKey)
       await verifyMasterKey(database.db, spaceId, config.masterKey)
-    const sync = values.sync ? await planSync(target, plan, snapshot) : null
+    const sync = values.sync ? await planSync(target, plan, snapshot, imports) : null
     if (sync) printSync(sync)
     if (!values.apply) {
       console.log('\n以上是导入计划，没有写入任何数据。确认无误后加 --apply 执行。')

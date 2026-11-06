@@ -1,8 +1,8 @@
 import {
   CONVERT_VALUE_MIN_LENGTH,
   PLAINTEXT_CREDENTIAL,
-  bootEligible,
   findPlaintextCredentials,
+  isBootCandidate,
   type ConsoleMemoryView,
   type MemoryRecallStat,
   type MemoryView,
@@ -28,17 +28,12 @@ export function expiryState(validTo: string | null, now: Date = new Date()): Exp
 // 启动加载的标记说的是够不够格，不是一定加载
 export const BOOT_HINT = '符合启动加载条件；实际是否加载取决于访问密钥的权限、继承覆盖和字数上限'
 
-// 够格进启动加载的节点。和服务端的 BOOT_ELIGIBLE 同一条规则，再加上启动加载用的读权限：机密永远不进。过期了也不算
+// 够格进启动加载的节点（contracts 的 isBootCandidate，和服务端的 NEEDS_DISCLOSURE 同一条规则）。过期了也不算
 export function isBootNode(
   memory: Pick<MemoryView, 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'>,
   now: Date = new Date(),
 ): boolean {
-  return (
-    memory.provenance !== 'untrusted' &&
-    memory.sensitivity !== 'secret' &&
-    bootEligible(memory.layer, memory.priority) &&
-    !isExpired(memory.validTo, now)
-  )
+  return isBootCandidate(memory) && !isExpired(memory.validTo, now)
 }
 
 type DisclosureFields = Pick<
