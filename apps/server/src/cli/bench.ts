@@ -41,7 +41,7 @@ const HELP = `用真实 HTTP 与真实 Key 跑测试台的场景，覆盖鉴权�
 不带正文；内部错误仍算失败。
 
 环境变量：
-  KIOKU_BENCH_KEY     API Key，不走命令行参数（参数会进 shell 历史与进程列表）
+  KIOKU_BENCH_KEY     访问密钥，不走命令行参数（参数会进 shell 历史与进程列表）
   KIOKU_BENCH_URL     服务地址
 
 退出码：0 没有失败的步骤；1 有失败或没有执行的步骤，或连不上服务；2 用法错误、运行前看得出要写却没有 --allow-writes`
@@ -132,7 +132,7 @@ async function main(): Promise<void> {
   const url = values.url ?? process.env.KIOKU_BENCH_URL
   if (!url) throw new UsageError('缺少服务地址：--url 或环境变量 KIOKU_BENCH_URL')
   const key = process.env.KIOKU_BENCH_KEY
-  if (!key) throw new UsageError('缺少 API Key：环境变量 KIOKU_BENCH_KEY')
+  if (!key) throw new UsageError('缺少访问密钥：环境变量 KIOKU_BENCH_KEY')
 
   const chosen = values.scenario.map((id) => {
     const found = BENCH_SCENARIOS.find((s) => s.id === id)
