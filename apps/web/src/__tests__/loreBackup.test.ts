@@ -27,6 +27,7 @@ import {
   sourceTabs,
   staleNotice,
   syncGroups,
+  targetTitle,
   tokenInClear,
   trimLoreBackup,
 } from '../loreBackup'
@@ -185,6 +186,18 @@ const planOf = (
   droppedKeywords: [],
   warnings: [],
   sync: { items: [], goneFromLore: [], ...sync },
+})
+
+describe('目标的标题', () => {
+  it('写进去的标题；标机密的退回坐标的最后一段，和服务端一样不从正文取', () => {
+    const t = target({ uri: 'user://infra/docker_hosts/kioku', title: 'Kioku 部署' })
+    expect(targetTitle(t, false)).toBe('Kioku 部署')
+    expect(targetTitle(t, true)).toBe('kioku')
+  })
+
+  it('计划的每个目标写标题，机密按这次的勾选或现在的样子算', () => {
+    expect(loreImportSource).toContain('{{ targetTitle(target, secretNow(node, target)) }}')
+  })
 })
 
 describe('勾选', () => {

@@ -14,6 +14,7 @@ import {
 
 import { ApiError } from './api/client'
 import { formatBytes } from './backup'
+import { identifierOf } from './coordinates'
 
 // 从 Lore 导入时界面用的纯逻辑：裁剪导出文件、表单能不能看计划、勾选换算成请求、勾选之后这次写什么、计划的分组、执行失败的说明
 
@@ -244,6 +245,11 @@ export const targetStateLabels: Record<LoreTargetState, string> = {
   imported: '已导入',
   moved: 'Lore 中路径已变更',
 }
+
+// 计划里一个目标的标题：机密的不从正文取（标题是明文），和服务端写入时一样退回坐标的最后一段。
+// secret 是这次要标机密，或者之前导入的那条已经是机密
+export const targetTitle = (target: Pick<LorePlanTarget, 'uri' | 'title'>, secret: boolean) =>
+  secret ? identifierOf(target.uri) : target.title
 
 const SYNC_CHANGE_LABELS: Record<LoreSyncChange, string> = {
   content: '正文',

@@ -36,6 +36,7 @@ import {
   staleNotice,
   syncGroups,
   targetStateLabels,
+  targetTitle,
   tokenInClear,
   type ApplyFailure,
   type NodeFilter,
@@ -614,6 +615,7 @@ const disclosureCut = computed(
               </div>
               <div v-for="target in node.targets" :key="target.uri" class="node-target">
                 <UIcon :name="icons.inherits" class="target-arrow" />
+                <span class="target-title">{{ targetTitle(target, secretNow(node, target)) }}</span>
                 <UriPath :uri="target.uri" wrap />
                 <span :class="STATE_CLASSES[target.state]">
                   {{ targetStateLabels[target.state] }}
@@ -763,6 +765,11 @@ const disclosureCut = computed(
   width: 12px;
   height: 12px;
   color: var(--ui-text-muted);
+}
+.target-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
 }
 summary {
   font-weight: 500;
