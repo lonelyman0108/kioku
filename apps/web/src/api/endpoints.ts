@@ -221,10 +221,6 @@ export const api = {
       query: { of },
       schema: ConsoleMemoryChildren,
     }),
-  memoryDomains: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/memories/domains`, {
-      schema: z.array(z.object({ domain: z.string(), count: z.number() })),
-    }),
   createMemory: (
     spaceId: string,
     body: Partial<CreateMemoryRequest> & Pick<CreateMemoryRequest, 'uri' | 'content'>,

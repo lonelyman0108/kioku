@@ -35,10 +35,14 @@ export const routes: RouteRecordRaw[] = [
         name: 'credentials',
         component: () => import('./pages/CredentialsPage.vue'),
       },
+      // 旧地址：人格并进了记忆页的目录，选中人格时右边是它的设置
       {
         path: 'spaces/:spaceId/personas',
-        name: 'personas',
-        component: () => import('./pages/PersonasPage.vue'),
+        redirect: (to) => ({
+          name: 'memories',
+          params: to.params,
+          query: { node: typeof to.query.id === 'string' ? `persona:${to.query.id}` : 'persona' },
+        }),
       },
       {
         path: 'spaces/:spaceId/conversations',
@@ -118,6 +122,13 @@ export const memoryRoute = (spaceId: string, uri: string) => ({
   name: 'memories',
   params: { spaceId },
   query: { uri },
+})
+
+// 记忆页打开目录里的一个根（user、app、persona、core）、人格或应用（persona:<id>、app:<id>）
+export const memoryNodeRoute = (spaceId: string, node: string) => ({
+  name: 'memories',
+  params: { spaceId },
+  query: { node },
 })
 
 // 初始化状态只会从「需要」变成「不需要」，确认过一次就不再请求

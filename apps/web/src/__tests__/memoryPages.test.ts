@@ -11,7 +11,6 @@ import memoryHistory from '../components/MemoryHistory.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
 import moveMemoryModal from '../components/MoveMemoryModal.vue?raw'
 import OverviewRow from '../components/OverviewRow.vue'
-import { DOMAINS_QUERY_OPTIONS } from '../components/memoryTree'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
 
@@ -88,7 +87,7 @@ describe('记忆页', () => {
     expect(memoriesPage).toContain(':key="`${spaceId}|${selectedUri}`"')
   })
 
-  it('目录没有文件夹图标，按层筛选落在列表上', () => {
+  it('目录没有文件夹图标，按归属筛选落在列表上', () => {
     expect(memoriesPage).not.toContain('icons.folder')
     expect(memoriesPage).toMatch(/view: 'list',\s+layer: same \? null : layer/)
   })
@@ -129,8 +128,8 @@ describe('目录的键盘和无障碍', () => {
   })
 
   it('这一栏重新显示时告诉虚拟滚动，转屏后不空白', () => {
-    expect(memoriesPage).toContain('!narrow.value || !selectedUri.value')
-    expect(memoriesPage).toMatch(/watch\(indexVisible,[\s\S]*?scrollToRow\(selectedUri\.value\)/)
+    expect(memoriesPage).toContain('!narrow.value || !hasSelection.value')
+    expect(memoriesPage).toMatch(/watch\(indexVisible,[\s\S]*?scrollToRow\(selectedKey\.value\)/)
     expect(memoriesPage).toContain("el.dispatchEvent(new Event('scroll'))")
   })
 
@@ -178,12 +177,6 @@ describe('记忆页取统计', () => {
     const list = /for \(const key of \[([\s\S]*?)\]\)/.exec(body)![1]!
     expect(list).not.toContain('overview')
     expect(body).not.toContain('overview.refetch')
-  })
-
-  it('读 domain 列表不等重试，离线也不卡住目录的队列：每个用到这个查询的地方都带同样的选项', () => {
-    expect(DOMAINS_QUERY_OPTIONS).toEqual({ retry: false, networkMode: 'always' })
-    expect(memoriesPage.match(/\.\.\.DOMAINS_QUERY_OPTIONS/g)).toHaveLength(2)
-    expect(memoryListView).toContain('...DOMAINS_QUERY_OPTIONS')
   })
 })
 

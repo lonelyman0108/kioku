@@ -107,6 +107,7 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
         <li v-for="item in items" :key="item.id">
           <MemoryRow
             :uri="item.uri"
+            :title="item.title"
             :layer="item.layer"
             :sensitivity="item.sensitivity"
             :priority="item.priority"

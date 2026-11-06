@@ -6,29 +6,39 @@ import {
   SENSITIVITIES,
   type ConsoleMemoryView,
   type Layer,
+  type PersonaInfo,
   type Sensitivity,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, onMounted, ref, shallowRef, watch } from 'vue'
+import { computed, nextTick, onMounted, reactive, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
+import AppPanel from '../components/AppPanel.vue'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import DeletedMemories from '../components/DeletedMemories.vue'
 import ExpiredMemories from '../components/ExpiredMemories.vue'
 import Hint from '../components/Hint.vue'
 import MemoryEditor from '../components/MemoryEditor.vue'
 import MemoryListView from '../components/MemoryListView.vue'
+import MemoryRootPanel from '../components/MemoryRootPanel.vue'
+import PersonaFormModal from '../components/PersonaFormModal.vue'
+import PersonaPanel from '../components/PersonaPanel.vue'
 import {
-  DOMAINS_QUERY_OPTIONS,
   ancestorsOf,
   depthOf,
+  entityItems,
   focusAfterSelect,
   guideLines,
   lastSegment,
+  nodeKeyOf,
+  nodeOfItem,
   parentOf,
   parentRow,
+  parseNodeParam,
+  rootItems,
+  selectable,
   toTreeItems,
   treeRowPlaces,
   typeaheadMatch,
@@ -38,11 +48,12 @@ import MemoryFlags from '../components/strata/MemoryFlags.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import StrataRibbon from '../components/strata/StrataRibbon.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
-import { tallyCounts } from '../components/strata/strata'
+import { CURATED_STACK, layerTotal, tallyCounts } from '../components/strata/strata'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
 import { invalidateInboxCounts } from '../inbox'
+import { layerLabels } from '../labels'
 import { statsChanged } from '../memoryDetail'
 import type { ReadState } from '../query'
 
@@ -51,10 +62,17 @@ const router = useRouter()
 const toast = useToast()
 const queryClient = useQueryClient()
 const spaceId = computed(() => String(route.params.spaceId))
+// 选中的是一条记忆（uri），还是目录里的一个根、人格或应用（node，见 parseNodeParam）：地址里只有其中一个
 const selectedUri = computed(() => (typeof route.query.uri === 'string' ? route.query.uri : null))
-const { canWrite } = useMemoryPermissions(spaceId)
+const selectedNode = computed(() =>
+  !selectedUri.value && typeof route.query.node === 'string' ? route.query.node : null,
+)
+const nodeRef = computed(() => parseNodeParam(selectedNode.value))
+const { apps, role, canWrite } = useMemoryPermissions(spaceId)
+// 人格的增删改和服务端一样：空间所有者与编辑者
+const canEditPersonas = computed(() => role.value === 'owner' || role.value === 'editor')
 
-// 地址里除了选中的 uri，还有视图与列表的筛选条件：换选中的记忆时保留它们
+// 地址里除了选中的那一项，还有视图与列表的筛选条件：换选中的记忆时保留它们
 function withQuery(changes: Record<string, string | null>) {
   const query = { ...route.query }
   for (const [key, value] of Object.entries(changes)) {
@@ -64,7 +82,10 @@ function withQuery(changes: Record<string, string | null>) {
   return { query }
 }
 function select(uri: string | null) {
-  return router.replace(withQuery({ uri }))
+  return router.replace(withQuery({ uri, node: null }))
+}
+function selectNode(node: string | null) {
+  return router.replace(withQuery({ node, uri: null }))
 }
 
 type View = 'tree' | 'list' | 'deleted' | 'expired'
@@ -80,7 +101,7 @@ function setView(value: string | number) {
   void router.replace(withQuery({ view: value === 'tree' ? null : String(value) }))
 }
 
-// 窄柱的条数和列表上方的总数都来自概览的统计，和概览页共用一份缓存。这个接口要把整个概览算一遍，
+// 窄柱的条数、根的条数和列表上方的总数都来自概览的统计，和概览页共用一份缓存。这个接口要把整个概览算一遍，
 // 不跟着每次写入重取：写入时只标记过期（invalidateLists），别的页面进来时才取；这里在统计可能变了时取一次
 const overview = useQuery({
   queryKey: computed(() => ['overview', spaceId.value]),
@@ -92,13 +113,13 @@ function refreshCounts() {
   void overview.refetch()
   void invalidateInboxCounts(queryClient, spaceId.value)
 }
-// 窄柱上有来自对话的两层，所以算上它们；列表只列记忆，它的总数不算（见 MemoryListView）
+// 窄柱上有来自对话的两类，所以算上它们；列表只列记忆，它的总数不算（见 MemoryListView）
 const stackCounts = computed(() => {
   const data = overview.data.value
   return data ? tallyCounts([...data.counts, ...data.extractedCounts]) : null
 })
 
-// 窄柱按层筛选：目录是懒加载的，筛不了，所以筛选都落在列表上。切到别的视图时列表的条件留在地址里，窄柱不亮
+// 窄柱按归属筛选：目录是懒加载的，筛不了，所以筛选都落在列表上。切到别的视图时列表的条件留在地址里，窄柱不亮
 const filterLayer = computed(() => {
   const layer = route.query.layer as Layer
   return view.value === 'list' && LAYERS.includes(layer) ? layer : null
@@ -107,7 +128,7 @@ const filterSensitivity = computed(() => {
   const sensitivity = route.query.sensitivity as Sensitivity
   return view.value === 'list' && SENSITIVITIES.includes(sensitivity) ? sensitivity : null
 })
-// 再点同一层取消；换一层时敏感级的筛选不带过去，那一层可能一条都没有
+// 再点同一类取消；换一类时敏感级的筛选不带过去，那一类可能一条都没有
 function selectLayer(layer: Layer) {
   const same = filterLayer.value === layer
   void router.replace(
@@ -121,21 +142,39 @@ function selectLayer(layer: Layer) {
 function clearStrataFilter() {
   void router.replace(withQuery({ layer: null, sensitivity: null }))
 }
-// 当前记忆在哪一层，窄柱上标出来。层读完才知道，由编辑器告诉这里
+// 当前记忆在哪一类归属，窄柱上标出来。读完才知道，由编辑器告诉这里；选中的是根、人格或应用时就是它
 const currentLayer = ref<Layer | null>(null)
 watch(selectedUri, () => (currentLayer.value = null))
-// 悬停的那一行属于哪一层，窄柱上跟着亮。列表和目录一个委托够了，行再多也只有这一个监听
+const markedLayer = computed<Layer | null>(() => {
+  const node = nodeRef.value
+  if (!node) return currentLayer.value
+  return node.kind === 'root' ? node.layer : node.kind
+})
+// 悬停的那一行属于哪一类，窄柱上跟着亮。列表和目录一个委托够了，行再多也只有这一个监听
 const nearLayer = ref<Layer | null>(null)
 function onIndexHover(event: MouseEvent) {
   const row = (event.target as Element).closest?.('[data-layer]')
   nearLayer.value = (row?.getAttribute('data-layer') as Layer | undefined) ?? null
 }
 
+// 人格与应用的列表：人格、应用的根下面那一层，也用来把地址里的 persona:<id>、app:<id> 换成目录里的那一行
+const personas = useQuery({
+  queryKey: computed(() => ['personas', spaceId.value]),
+  queryFn: () => api.personas(spaceId.value),
+})
+const nodeKey = computed(() =>
+  nodeRef.value ? nodeKeyOf(nodeRef.value, personas.data.value, apps.data.value) : null,
+)
+// 目录里选中的那一行的键
+const selectedKey = computed(() => selectedUri.value ?? nodeKey.value)
+
+// 四个根默认展开：第一眼看到本人与通用的第一级、各个应用与人格
+const DEFAULT_EXPANDED: readonly string[] = CURATED_STACK
 const roots = ref<MemoryTreeItem[]>([])
 // 展开的节点由这里管理：重新载入某一级之后，要据此把展开着的子节点也重新加载
-const expanded = ref<string[]>([])
+const expanded = ref<string[]>([...DEFAULT_EXPANDED])
 const loadingRoots = ref(false)
-// 整棵树没读出来：和「暂无记忆」分开说，免得以为记忆没了。记下错误，说法和别处一样用 readFailure
+// 根的下一级没读出来：和「暂无记忆」分开说，免得以为记忆没了。记下错误，说法和别处一样用 readFailure
 const rootsError = shallowRef<unknown>(null)
 const createOpen = ref(false)
 const createUri = ref('')
@@ -147,16 +186,10 @@ function failed(err: unknown) {
   toast.add({ title: readFailure(err), color: 'error' })
 }
 
-// 列表、已删除、已过期、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
+// 列表、已删除、已过期与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
 // 概览只标记过期，见 refreshCounts
 function invalidateLists() {
-  for (const key of [
-    'memory-list',
-    'memory-deleted',
-    'memory-expired',
-    'memory-domains',
-    'memory-glossary',
-  ]) {
+  for (const key of ['memory-list', 'memory-deleted', 'memory-expired', 'memory-glossary']) {
     void queryClient.invalidateQueries({ queryKey: [key, spaceId.value] })
   }
   void queryClient.invalidateQueries({
@@ -165,48 +198,48 @@ function invalidateLists() {
   })
 }
 
+// 四个根是固定的，展开着的根再去读下一级。某个根读失败时在上面报错，读到的照常显示
 async function loadRoots() {
   loadingRoots.value = true
   // 切换空间时上一次请求可能后到，结果属于别的空间就丢掉
   const forSpace = spaceId.value
+  roots.value = rootItems(CURATED_STACK)
   try {
-    const domains = await queryClient.fetchQuery({
-      queryKey: ['memory-domains', forSpace],
-      queryFn: () => api.memoryDomains(forSpace),
-      staleTime: 0,
-      ...DOMAINS_QUERY_OPTIONS,
-    })
+    const rootError = await restoreExpanded()
     if (forSpace !== spaceId.value) return
-    rootsError.value = null
-    roots.value = domains.map((d) => ({
-      label: `${d.domain}://`,
-      // domain 根用 domain 名作为键，与 children 接口的参数一致
-      uri: d.domain,
-      exists: false,
-      loaded: false,
-      count: d.count,
-      children: [
-        {
-          label: '加载中……',
-          uri: `${d.domain}#loading`,
-          exists: false,
-          loaded: true,
-          disabled: true,
-        },
-      ],
-    }))
-    await restoreExpanded()
-  } catch (err) {
-    if (forSpace === spaceId.value) rootsError.value = err
-    failed(err)
+    rootsError.value = rootError
+    if (rootError) failed(rootError)
   } finally {
     loadingRoots.value = false
   }
 }
 
+// 人格与应用的根下面是各个人格、应用；别的行下面是坐标的下一级。
+// 人格、应用的坐标开头下面还没有记忆时接口返回 404，和空的一样
 async function loadChildren(item: MemoryTreeItem) {
-  const result = await api.memoryChildren(spaceId.value, item.uri)
-  const children = toTreeItems(result)
+  const forSpace = spaceId.value
+  let children: MemoryTreeItem[]
+  if (item.kind === 'root' && (item.uri === 'persona' || item.uri === 'app')) {
+    const layer = item.uri
+    const list =
+      layer === 'persona'
+        ? await queryClient.fetchQuery({
+            queryKey: ['personas', forSpace],
+            queryFn: () => api.personas(forSpace),
+          })
+        : await queryClient.fetchQuery({
+            queryKey: ['apps', forSpace],
+            queryFn: () => api.apps(forSpace),
+          })
+    children = entityItems(layer, list)
+  } else {
+    try {
+      children = toTreeItems(await api.memoryChildren(forSpace, item.uri))
+    } catch (err) {
+      if (!(item.kind === 'entity' && err instanceof ApiError && err.status === 404)) throw err
+      children = []
+    }
+  }
   item.children = children.length ? children : undefined
   item.loaded = true
 }
@@ -222,44 +255,45 @@ function find(items: MemoryTreeItem[] | undefined, uri: string): MemoryTreeItem 
 
 // 重新载入某一级之后，之前展开着的节点在新的子节点里还没加载：由浅到深把它们重新加载，
 // 已经不存在的从展开列表里去掉；否则这些节点会一直显示「加载中」。
-// 只去掉不存在的，加载期间用户自己展开或收起的不受影响
-async function restoreExpanded() {
+// 只去掉不存在的，加载期间用户自己展开或收起的不受影响。根读失败时把错误交给调用方
+async function restoreExpanded(): Promise<unknown> {
   const dropped = new Set<string>()
+  let rootError: unknown = null
   for (const key of [...expanded.value].sort((a, b) => depthOf(a) - depthOf(b))) {
     const item = find(roots.value, key)
     if (!item?.children) {
-      dropped.add(key)
+      // 根一直在：没有下一级时只是收起来，下次有了再展开
+      if (item?.kind !== 'root') dropped.add(key)
       continue
     }
     if (!item.loaded) {
       try {
         await loadChildren(item)
-      } catch {
-        dropped.add(key)
+      } catch (err) {
+        if (item.kind === 'root') rootError ??= err
+        else dropped.add(key)
       }
     }
   }
   if (dropped.size) expanded.value = expanded.value.filter((key) => !dropped.has(key))
+  return rootError
 }
 
-// 展开到某个节点，例如打开带 ?uri= 的链接、从列表或搜索里选中、新建之后
-async function reveal(uri: string) {
-  expanded.value = [...new Set([...expanded.value, ...ancestorsOf(uri)])]
+// 展开到某一行，例如打开带 ?uri= 或 ?node= 的链接、从列表或搜索里选中、新建之后
+async function reveal(key: string) {
+  expanded.value = [...new Set([...expanded.value, ...ancestorsOf(key)])]
   await restoreExpanded()
   await nextTick()
-  scrollToRow(uri)
+  scrollToRow(key)
 }
 
-// 新建、删除或移动之后刷新受影响的那一级；父级不在树里（例如新的 domain）就整棵重载。
-// 上一级被删空、成了不存在的虚拟节点时接口返回 404，再往上一级刷新
+// 新建、删除或移动之后刷新受影响的那一级。上一级被删空、成了不存在的虚拟节点时接口返回 404，再往上一级刷新
 async function refreshAround(uri: string) {
   for (let key = parentOf(uri); ; key = parentOf(key)) {
     const parent = find(roots.value, key)
     if (!parent) return loadRoots()
     try {
       await loadChildren(parent)
-      // domain 里的最后一条也删了：整棵重载，让这个 domain 从树里消失
-      if (!key.includes('://') && !parent.children) return loadRoots()
       return restoreExpanded()
     } catch (err) {
       if (!(err instanceof ApiError) || err.status !== 404 || !key.includes('://')) throw err
@@ -267,9 +301,18 @@ async function refreshAround(uri: string) {
   }
 }
 
+// 人格或应用增删改名之后，那个根下面的一层重读
+async function refreshRoot(layer: 'persona' | 'app') {
+  const root = find(roots.value, layer)
+  if (!root) return loadRoots()
+  root.children ??= []
+  await loadChildren(root)
+  await restoreExpanded()
+}
+
 // 树的加载一次只跑一个：几次重载同时进行时，后面的会对着只载入一半的树判断哪些展开的节点已经不在了，
 // 把还在的节点收起来。只在事件处理里排队，上面的函数互相调用时不再排队，否则会等自己。
-// 新建、移动、撤销删除之后先把刷新排进去再切到那一条：对 selectedUri 的监听把展开排在刷新后面，
+// 新建、移动、撤销删除之后先把刷新排进去再切到那一条：对 selectedKey 的监听把展开排在刷新后面，
 // 对着刷新过的树展开到新的位置；切过去也不用等树加载完
 let treeTask: Promise<unknown> = Promise.resolve()
 function serially<T>(task: () => Promise<T>): Promise<T> {
@@ -278,7 +321,7 @@ function serially<T>(task: () => Promise<T>): Promise<T> {
   return run
 }
 
-// 某个 URI 上的记忆没了或换了一条（删除、移走、新建）：清掉它的缓存，再打开时重新读取
+// 某个坐标上的记忆没了或换了一条（删除、移走、新建）：清掉它的缓存，再打开时重新读取
 function resetMemory(uri: string) {
   void queryClient.resetQueries({ queryKey: ['memory', spaceId.value, uri], exact: true })
 }
@@ -286,9 +329,11 @@ function resetMemory(uri: string) {
 function refresh() {
   invalidateLists()
   refreshCounts()
+  void queryClient.invalidateQueries({ queryKey: ['personas', spaceId.value] })
+  void queryClient.invalidateQueries({ queryKey: ['apps', spaceId.value] })
   void serially(loadRoots)
 }
-// 目录的根节点不是查询，照查询的形状交给 ReadFailureNote：错误、是否在读、重读
+// 根的下一级不是查询，照查询的形状交给 ReadFailureNote：错误、是否在读、重读
 const rootsRead: ReadState = {
   data: computed(() => (roots.value.length ? roots.value : undefined)),
   error: rootsError,
@@ -304,7 +349,7 @@ function clickedChevron(event: Event) {
 
 async function onToggle(event: Event, item: MemoryTreeItem) {
   const original = (event as CustomEvent<{ originalEvent: Event }>).detail.originalEvent
-  if (original.type === 'click' && item.exists && !clickedChevron(event)) {
+  if (original.type === 'click' && selectable(item) && !clickedChevron(event)) {
     event.preventDefault()
     return
   }
@@ -316,19 +361,27 @@ async function onToggle(event: Event, item: MemoryTreeItem) {
   }
 }
 
-// 不让树自己记选中状态，选中只跟着地址走：切换被取消时高亮留在原处，点虚拟目录也不会高亮
+// 不让树自己记选中状态，选中只跟着地址走：切换被取消时高亮留在原处，点位置也不会高亮
 function onSelect(event: Event, item: MemoryTreeItem) {
   event.preventDefault()
-  if (item.exists && !clickedChevron(event)) void select(item.uri)
+  if (!selectable(item) || clickedChevron(event)) return
+  const node = nodeOfItem(item)
+  void (node ? selectNode(node) : select(item.uri))
 }
 
-function openCreate(prefix: string) {
-  createUri.value = prefix.includes('://') ? `${prefix}/` : prefix ? `${prefix}://` : ''
+// 新建记忆：按选中的那一行带出归属与位置。坐标开头的写法见 CreateMemoryModal
+function openCreate(key: string) {
+  createUri.value = key.includes('://') ? `${key}/` : key ? `${key}://` : ''
   createOpen.value = true
 }
+// 工具栏上的「新建」：选中记忆时和它放在同一级，选中根、人格或应用时放在它下面
+const toolbarCreateKey = computed(() => {
+  if (selectedUri.value) return parentOf(selectedUri.value)
+  return nodeKey.value ?? ''
+})
 
 async function onCreated(uri: string) {
-  // 这个 URI 上可能还留着之前删掉的那条的缓存
+  // 这个坐标上可能还留着之前删掉的那条的缓存
   resetMemory(uri)
   invalidateLists()
   refreshCounts()
@@ -348,11 +401,12 @@ async function onDeleted(uri: string) {
   deletedUri = null
 }
 
-// 保存、恢复或只改了层之后，树上这一项的标记跟着变。不知道改之前什么样时按变了算
+// 保存、恢复之后，树上这一项的标题与标记跟着变。不知道改之前什么样时按变了算
 function onChanged(memory: ConsoleMemoryView, before?: ConsoleMemoryView) {
   const item = find(roots.value, memory.uri)
   if (item) {
     Object.assign(item, {
+      label: memory.title,
       layer: memory.layer,
       sensitivity: memory.sensitivity,
       priority: memory.priority,
@@ -370,7 +424,7 @@ async function onMoved(memory: ConsoleMemoryView, from: string) {
     await refreshAround(from).catch(failed)
     await refreshAround(memory.uri).catch(failed)
   })
-  // 原来的 URI 上已经没有这条记忆了：等原来的编辑器卸载后清掉它的缓存，退回去时重新读取。
+  // 原来的坐标上已经没有这条记忆了：等原来的编辑器卸载后清掉它的缓存，退回去时重新读取。
   // 没切过去（导航被取消）时编辑器还在用它，不清
   if (!(await select(memory.uri))) {
     await nextTick()
@@ -388,32 +442,49 @@ async function onRevived(uri: string) {
 
 // 正文里点了别的记忆的关键词：像链接一样跳过去，可以后退回来
 function openLinked(uri: string) {
-  void router.push(withQuery({ uri }))
+  void router.push(withQuery({ uri, node: null }))
+}
+
+// 人格的新建与修改：表单只有一个，放在这里，目录与右边的人格面板都用它
+const personaForm = reactive({ open: false, editing: null as PersonaInfo | null })
+function openPersonaForm(persona: PersonaInfo | null) {
+  personaForm.editing = persona
+  personaForm.open = true
+}
+function onPersonaSaved(persona: PersonaInfo, created: boolean) {
+  void serially(() => refreshRoot('persona')).catch(failed)
+  if (created) void selectNode(`persona:${persona.id}`)
+}
+function onPersonaRemoved() {
+  void selectNode('persona')
+  void serially(() => refreshRoot('persona')).catch(failed)
 }
 
 onMounted(() =>
   serially(async () => {
     await loadRoots()
-    if (selectedUri.value) await reveal(selectedUri.value)
+    if (selectedKey.value) await reveal(selectedKey.value)
   }),
 )
 watch(spaceId, () => {
-  // 上一个空间的目录不留：新空间读失败时错误下面不能是别的空间的树，展开它也会拿旧分区去请求新空间
+  // 上一个空间的目录不留：新空间读失败时错误下面不能是别的空间的树，展开它也会拿旧的节点去请求新空间
   roots.value = []
   rootsError.value = null
-  expanded.value = []
+  expanded.value = [...DEFAULT_EXPANDED]
   // 新建窗口里的内容属于上一个空间，不能带到新空间去提交
   createOpen.value = false
+  personaForm.open = false
   void serially(loadRoots)
 })
-// 从列表、搜索或正文的链接选中时，树也展开到那一条，切回树视图时看得到
-watch(selectedUri, (uri) => {
-  if (uri) void serially(() => reveal(uri))
+// 从列表、搜索或正文的链接选中时，树也展开到那一行，切回树视图时看得到。
+// 人格与应用要等列表读到才知道是哪一行，读到之后这里再展开
+watch(selectedKey, (key) => {
+  if (key) void serially(() => reveal(key))
 })
 
 // 树的选中状态跟着地址走：切换被取消（例如有未保存的修改）时，高亮也留在原来的节点
 const selectedItem = computed(() =>
-  selectedUri.value ? find(roots.value, selectedUri.value) : undefined,
+  selectedKey.value ? find(roots.value, selectedKey.value) : undefined,
 )
 
 // 目录一行多高：窄屏和触屏要点得准，高一些。虚拟滚动按这个高度算位置，要和样式一致
@@ -439,11 +510,12 @@ function scrollToRow(uri: string | null) {
 }
 // 这一栏从隐藏变成显示（窄屏返回、转屏）：虚拟滚动记的位置过期了，不告诉它目录就是一片空白。
 // 粗指针设备转屏时行高不变，树不会重建，只能靠这里
-const indexVisible = computed(() => !narrow.value || !selectedUri.value)
+const hasSelection = computed(() => Boolean(selectedUri.value || selectedNode.value))
+const indexVisible = computed(() => !narrow.value || !hasSelection.value)
 watch(indexVisible, async (visible) => {
   if (!visible) return
   await nextTick()
-  scrollToRow(selectedUri.value)
+  scrollToRow(selectedKey.value)
 })
 // 滚到这一行并把焦点给它。行是虚拟滚动渲染的，滚动之后要等几帧才出来；一直没出来时调用 missing。
 // 新的调用让还在等的作废，不然快速打字时旧的那一行出来后会抢走焦点
@@ -493,12 +565,12 @@ const treeVirtualize = computed(() => ({
 }))
 // 切回目录时树是新建的，滚动位置从头开始
 watch(view, async (next) => {
-  if (next !== 'tree' || !selectedUri.value) return
+  if (next !== 'tree' || !selectedKey.value) return
   await nextTick()
-  scrollToRow(selectedUri.value)
+  scrollToRow(selectedKey.value)
 })
 // 窄屏切换之后的焦点（见 focusAfterSelect）。原来那一行不在了（筛选换了、刚删掉）时放到当前的标签上
-const editorRef = ref<InstanceType<typeof MemoryEditor> | null>(null)
+const editorRef = ref<{ focusTitle: () => void } | null>(null)
 const indexColumn = ref<HTMLElement | null>(null)
 function focusIndexRow(uri: string) {
   const fallback = () =>
@@ -512,7 +584,7 @@ function focusIndexRow(uri: string) {
   row.scrollIntoView({ block: 'center' })
   row.focus({ preventScroll: true })
 }
-watch(selectedUri, async (uri, previous) => {
+watch(selectedKey, async (uri, previous) => {
   const target = focusAfterSelect(narrow.value, uri, previous)
   if (!target) return
   await nextTick()
@@ -532,45 +604,41 @@ watch(
   { flush: 'pre' },
 )
 
-// domain 根的条数：树只在整棵重载时读 domain 列表，新建、删除之后靠这个查询跟上
-const domains = useQuery({
-  queryKey: computed(() => ['memory-domains', spaceId.value]),
-  queryFn: () => api.memoryDomains(spaceId.value),
-  ...DOMAINS_QUERY_OPTIONS,
-})
+// 行尾的数字：根是这一类记忆的条数（来自概览的统计），收起的行是下一级有几个
 function rowCount(item: MemoryTreeItem, open: boolean) {
-  if (!item.children) return null
-  const place = places.value.get(item.uri)
-  if (place?.depth === 0) {
-    return domains.data.value?.find((d) => d.domain === item.uri)?.count ?? item.count ?? null
+  if (item.kind === 'root') {
+    return stackCounts.value && item.layer ? layerTotal(stackCounts.value, item.layer) : null
   }
+  if (!item.children) return null
   return open ? null : (item.count ?? null)
 }
 
-// 详情上方的路径；上一级本身是记忆、并且树里已经载入时可以点过去
+// 根的名字：树还没读到时也说中文
+const rootLabel = (key: string) => (key in layerLabels ? layerLabels[key as Layer] : key)
+
+// 详情上方的路径：根、人格或应用与各级位置。本身能打开的（根、人格、应用、有记忆的上一级）可以点过去
 const crumbs = computed(() => {
   const uri = selectedUri.value
   if (!uri) return []
-  const ancestors = ancestorsOf(uri)
-  return [
-    ...ancestors.map((key) => {
-      const label = key.includes('://') ? lastSegment(key) : `${key}://`
-      return find(roots.value, key)?.exists ? { label, to: withQuery({ uri: key }) } : { label }
-    }),
-    { label: lastSegment(uri) },
-  ]
+  return ancestorsOf(uri).map((key) => {
+    const item = find(roots.value, key)
+    const label = item?.label ?? (key.includes('://') ? lastSegment(key) : rootLabel(key))
+    if (!item || !selectable(item)) return { label }
+    const node = nodeOfItem(item)
+    return { label, to: withQuery(node ? { node, uri: null } : { uri: key, node: null }) }
+  })
 })
 </script>
 
 <template>
-  <!-- 窄屏放不下多栏：选中记忆时只显示详情，返回后再显示目录 -->
-  <div class="memories" :class="{ 'has-selection': selectedUri }">
+  <!-- 窄屏放不下多栏：选中记忆、根、人格或应用时只显示右边，返回后再显示目录 -->
+  <div class="memories" :class="{ 'has-selection': hasSelection }">
     <aside class="ribbon-column">
       <StrataRibbon
         :counts="stackCounts"
         :selected="filterLayer"
         :sensitivity="filterSensitivity"
-        :current="currentLayer"
+        :current="markedLayer"
         :near="nearLayer"
         @select="selectLayer"
         @clear="clearStrataFilter"
@@ -608,7 +676,7 @@ const crumbs = computed(() => {
             size="sm"
             color="primary"
             variant="outline"
-            @click="openCreate('')"
+            @click="openCreate(toolbarCreateKey)"
           >
             新建
           </UButton>
@@ -633,12 +701,9 @@ const crumbs = computed(() => {
         <div v-if="rootsError !== null" class="index-note">
           <ReadFailureNote :query="rootsRead" />
         </div>
-        <p v-if="rootsError === null && !loadingRoots && !roots.length" class="index-empty">
-          暂无记忆{{ canWrite ? '。点击「新建」添加第一条。' : '' }}
-        </p>
         <!-- 一级最多五百行，展开几级就是几千行：只渲染看得见的那些。行高固定，虚拟滚动不用量 -->
         <UTree
-          v-if="loadingRoots || roots.length"
+          v-if="roots.length"
           ref="treeRef"
           :key="rowHeight"
           v-model:expanded="expanded"
@@ -658,8 +723,9 @@ const crumbs = computed(() => {
               class="tree-row"
               :class="{
                 selected,
-                virtual: !item.exists,
-                root: places.get(item.uri)?.depth === 0,
+                virtual: item.kind === 'folder',
+                root: item.kind === 'root',
+                entity: item.kind === 'entity',
                 note: item.disabled,
               }"
               :style="{
@@ -668,7 +734,7 @@ const crumbs = computed(() => {
               }"
               :data-layer="item.layer ?? undefined"
               :data-uri="item.uri"
-              :title="item.exists || item.disabled ? undefined : '此路径没有记忆，只能展开'"
+              :title="item.kind === 'folder' ? '这一级没有记忆，只能展开' : undefined"
             >
               <template v-if="places.get(item.uri)">
                 <template v-for="line in guideLines(places.get(item.uri)!)" :key="line.left">
@@ -689,16 +755,25 @@ const crumbs = computed(() => {
               </span>
               <span v-else class="chevron" />
               <StrataSwatch
-                v-if="item.exists && item.layer && item.sensitivity"
+                v-if="item.kind === 'root' && item.layer"
+                class="me-[7px] shrink-0"
+                :layer="item.layer"
+                plain
+                decorative
+              />
+              <StrataSwatch
+                v-else-if="item.exists && item.layer && item.sensitivity"
                 class="me-[7px] shrink-0"
                 :layer="item.layer"
                 :sensitivity="item.sensitivity"
               />
-              <span class="tree-label">{{ item.label }}</span>
+              <span class="tree-label" :class="{ mono: item.kind === 'folder' }">{{
+                item.label
+              }}</span>
+              <span v-if="item.meta" class="tree-meta">{{ item.meta }}</span>
               <span class="tree-trail">
                 <MemoryFlags
                   v-if="item.exists"
-                  :layer="item.layer"
                   :sensitivity="item.sensitivity"
                   :priority="item.priority"
                 />
@@ -755,21 +830,90 @@ const crumbs = computed(() => {
             <UIcon :name="icons.back" class="size-4" />
             返回
           </button>
-          <nav class="crumbs" aria-label="路径">
+          <nav class="crumbs" aria-label="位置">
             <template v-for="(crumb, index) in crumbs" :key="index">
               <i v-if="index > 0" class="crumb-sep" aria-hidden="true">›</i>
               <RouterLink v-if="crumb.to" :to="crumb.to" class="crumb-link">
                 {{ crumb.label }}
               </RouterLink>
-              <span v-else :class="{ 'crumb-current': index === crumbs.length - 1 }">
-                {{ crumb.label }}
-              </span>
+              <span v-else>{{ crumb.label }}</span>
             </template>
           </nav>
         </template>
       </MemoryEditor>
+      <MemoryRootPanel
+        v-else-if="nodeRef?.kind === 'root'"
+        :key="`${spaceId}|${nodeRef.layer}`"
+        ref="editorRef"
+        :space-id="spaceId"
+        :layer="nodeRef.layer"
+        :counts="stackCounts"
+        :can-write="canWrite"
+        :can-edit-personas="canEditPersonas"
+        @create="openCreate(nodeRef.layer)"
+        @create-persona="openPersonaForm(null)"
+        @open-persona="(id) => selectNode(`persona:${id}`)"
+        @open-app="(id) => selectNode(`app:${id}`)"
+      >
+        <template #nav>
+          <button type="button" class="back" @click="selectNode(null)">
+            <UIcon :name="icons.back" class="size-4" />
+            返回
+          </button>
+        </template>
+      </MemoryRootPanel>
+      <PersonaPanel
+        v-else-if="nodeRef?.kind === 'persona'"
+        :key="`${spaceId}|${nodeRef.id}`"
+        ref="editorRef"
+        :space-id="spaceId"
+        :persona-id="nodeRef.id"
+        :can-edit="canEditPersonas"
+        :can-write="canWrite"
+        @edit="openPersonaForm"
+        @removed="onPersonaRemoved"
+        @create="openCreate(nodeKey ?? 'persona')"
+        @open="(id) => selectNode(`persona:${id}`)"
+        @open-app="(id) => selectNode(`app:${id}`)"
+      >
+        <template #nav>
+          <button type="button" class="back" @click="selectNode(null)">
+            <UIcon :name="icons.back" class="size-4" />
+            返回
+          </button>
+          <nav class="crumbs" aria-label="位置">
+            <RouterLink :to="withQuery({ node: 'persona', uri: null })" class="crumb-link">
+              人格
+            </RouterLink>
+          </nav>
+        </template>
+      </PersonaPanel>
+      <AppPanel
+        v-else-if="nodeRef?.kind === 'app'"
+        :key="`${spaceId}|${nodeRef.id}`"
+        ref="editorRef"
+        :space-id="spaceId"
+        :app-id="nodeRef.id"
+        :can-write="canWrite"
+        @create="openCreate(nodeKey ?? 'app')"
+        @open-persona="(id) => selectNode(`persona:${id}`)"
+      >
+        <template #nav>
+          <button type="button" class="back" @click="selectNode(null)">
+            <UIcon :name="icons.back" class="size-4" />
+            返回
+          </button>
+          <nav class="crumbs" aria-label="位置">
+            <RouterLink :to="withQuery({ node: 'app', uri: null })" class="crumb-link">
+              应用
+            </RouterLink>
+          </nav>
+        </template>
+      </AppPanel>
       <p v-else class="detail-empty">
-        选择一条记忆<Hint>目录中没有正文的路径是虚拟节点，只能展开。</Hint>
+        选择一条记忆<Hint
+          >目录中没有记忆的位置只能展开；选中本人、应用、人格、通用或某个人格、应用时，右边是它的设置与记忆。</Hint
+        >
       </p>
     </section>
 
@@ -778,6 +922,13 @@ const crumbs = computed(() => {
       :space-id="spaceId"
       :initial-uri="createUri"
       @created="onCreated"
+    />
+    <PersonaFormModal
+      v-model:open="personaForm.open"
+      :space-id="spaceId"
+      :personas="personas.data.value ?? []"
+      :editing="personaForm.editing"
+      @saved="onPersonaSaved"
     />
   </div>
 </template>
@@ -860,7 +1011,6 @@ const crumbs = computed(() => {
   display: flex;
   align-items: center;
   padding-right: 12px;
-  font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.4;
   white-space: nowrap;
@@ -891,7 +1041,8 @@ const crumbs = computed(() => {
 .tree-row.virtual:hover {
   color: var(--ui-text-highlighted);
 }
-.tree-row.root {
+.tree-row.root,
+.tree-row.entity {
   color: var(--ui-text);
   font-weight: 500;
 }
@@ -962,6 +1113,20 @@ const crumbs = computed(() => {
   overflow: hidden;
   text-overflow: ellipsis;
 }
+/* 位置是坐标里的一段，用等宽字；记忆写标题，人格与应用写名字 */
+.tree-label.mono {
+  font-family: var(--font-mono);
+}
+.tree-meta {
+  flex: none;
+  margin-left: 8px;
+  font-size: 12px;
+  font-weight: 400;
+  color: var(--ui-text-muted);
+}
+.tree-row.selected .tree-meta {
+  color: var(--strata-on-selected-muted);
+}
 .tree-trail {
   flex: none;
   display: inline-flex;
@@ -1004,7 +1169,6 @@ const crumbs = computed(() => {
   flex-wrap: wrap;
   align-items: baseline;
   gap: 0 6px;
-  font-family: var(--font-mono);
   font-size: 14px;
   line-height: 1.5;
   color: var(--ui-text-muted);
@@ -1016,9 +1180,6 @@ const crumbs = computed(() => {
   color: var(--ui-text-highlighted);
   text-decoration: underline;
   text-underline-offset: 3px;
-}
-.crumb-current {
-  color: var(--ui-text);
 }
 
 @media (max-width: 1240px) {

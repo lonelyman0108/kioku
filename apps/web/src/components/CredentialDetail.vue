@@ -254,6 +254,7 @@ async function reveal() {
           <MemoryRow
             flush
             :uri="m.uri"
+            :title="m.title"
             layer="user"
             :sensitivity="m.sensitivity"
             :to="memoryRoute(spaceId, m.uri)"

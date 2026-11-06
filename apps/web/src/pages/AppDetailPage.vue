@@ -21,6 +21,7 @@ import { lastUsedAt } from '../apps'
 import { usableKeys } from '../benchSession'
 import { useSession } from '../composables/useSession'
 import { failedReads } from '../query'
+import { memoryNodeRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -313,11 +314,7 @@ watch([spaceId, appId], () => {
               <Hint>应用读写所选人格的设定。</Hint>
               <RouterLink
                 v-if="app.defaultPersonaId"
-                :to="{
-                  name: 'personas',
-                  params: { spaceId },
-                  query: { id: app.defaultPersonaId },
-                }"
+                :to="memoryNodeRoute(spaceId, `persona:${app.defaultPersonaId}`)"
                 class="set-link"
                 >查看人格</RouterLink
               >

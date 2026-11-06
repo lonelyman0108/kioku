@@ -11,13 +11,14 @@ import credentialFormModal from '../components/CredentialFormModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
 import expiredMemories from '../components/ExpiredMemories.vue?raw'
 import memoryListView from '../components/MemoryListView.vue?raw'
+import memoryRootPanel from '../components/MemoryRootPanel.vue?raw'
 import personaDetail from '../components/PersonaDetail.vue?raw'
+import personaPanel from '../components/PersonaPanel.vue?raw'
 import providerFormModal from '../components/ProviderFormModal.vue?raw'
 import MemoryRow from '../components/strata/MemoryRow.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import activityPage from '../pages/ActivityPage.vue?raw'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
-import personasPage from '../pages/PersonasPage.vue?raw'
 import subjectsPage from '../components/ContactList.vue?raw'
 import subjectDetailPage from '../pages/ContactDetailPage.vue?raw'
 
@@ -204,7 +205,7 @@ describe('列表读取失败', () => {
   })
 
   it.each([
-    ['人格', personasPage, 'personas'],
+    ['人格', memoryRootPanel, 'personas'],
     ['凭据', credentialsPage, 'credentials'],
     ['已删除的凭据', credentialsPage, 'deleted'],
   ])('%s：错误和读到过的列表可以同时显示，没读到时不说是空的', (_, source, query) => {
@@ -228,7 +229,8 @@ describe('列表读取失败', () => {
 
 describe('改版之后的约束', () => {
   it.each([
-    ['人格页', personasPage],
+    ['人格的根', memoryRootPanel],
+    ['人格面板', personaPanel],
     ['人格详情', personaDetail],
     ['联系人页', subjectsPage],
     ['联系人详情', subjectDetailPage],
@@ -246,14 +248,15 @@ describe('改版之后的约束', () => {
   it('人格：有引用时不能删，原因和缺失启动加载的提示都在', () => {
     expect(bound(personaDetail, 'UButton', 'disabled')).toBe('blockers.length > 0')
     expect(personaDetail).toContain('无法删除：')
-    expect(personaDetail).toContain('此节点本应进入启动加载')
-    expect(personaDetail).toContain('会话开始时此路径将缺失')
-    expect(personasPage).toContain('可用于新人格')
+    expect(personaDetail).toContain('此记忆本应进入启动加载')
+    expect(personaDetail).toContain('会话开始时此位置将缺失')
+    expect(personaPanel).toContain('可用于新人格')
   })
 
-  it('人格：窄屏切换后焦点不掉到 body', () => {
-    expect(personasPage).toContain('focusAfterSelect(narrow.value, id, previous)')
-    expect(personasPage).toMatch(/ref="detailColumn"[^>]*tabindex="-1"/)
+  it('人格：窄屏切换后焦点不掉到 body，标题接得住焦点', () => {
+    expect(personaDetail).toMatch(/<h1 ref="titleEl" tabindex="-1">/)
+    expect(personaDetail).toContain('defineExpose({ focusTitle')
+    expect(personaPanel).toContain('defineExpose({ focusTitle')
   })
 
   it('联系人：绑定组件知道自己在哪个联系人页，确认后才能换到保留的那个', () => {
