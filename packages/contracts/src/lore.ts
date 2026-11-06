@@ -226,7 +226,7 @@ export const LoreImportResult = z.object({
   previouslyImported: z.array(z.string()),
   // 这次要求 secret、但之前导入过而且现在还是明文的：要在管理界面改
   secretAlreadyImported: z.array(z.object({ uri: z.string(), current: z.string() })),
-  // URI 已被不是导入产生的记忆占用
+  // 写入时 URI 已被别的记忆占用。计划里就占用了的列在计划的 skipped 里、不会写，这里只有算完计划之后才被占用的
   occupied: z.array(z.string()),
   movedInLore: z.array(z.object({ uri: z.string(), current: z.string().nullable() })),
   failed: z.array(LoreFailure),

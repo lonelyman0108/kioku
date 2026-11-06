@@ -27,6 +27,7 @@ import {
   loreDataTime,
   planFingerprint,
   planImport,
+  planImportFor,
   planSync,
   previewImport,
   staleAgainst,
@@ -94,17 +95,26 @@ const applyRoute = createRoute({
   },
 })
 
-// 不带勾选的基准计划：/plan 看的是它，/apply 重新算它来比指纹
+// 不带勾选的基准计划：/plan 看的是它，/apply 重新算它来比指纹。occupied 是这份计划查到的占用，按勾选重算时沿用
 async function basePlan(
   target: ImportTarget,
   snapshot: LoreSnapshot,
   existing: ExistingApp[],
   options: Pick<ImportOptions, 'accountId' | 'persona' | 'exportedAt'>,
-): Promise<{ plan: ImportPlan; preview: ImportPreview; sync: SyncPlan; fingerprint: string }> {
-  const plan = planImport(snapshot, existing, { ...options, secretUris: new Set() })
+): Promise<{
+  plan: ImportPlan
+  occupied: ReadonlySet<string>
+  preview: ImportPreview
+  sync: SyncPlan
+  fingerprint: string
+}> {
+  const { plan, occupied } = await planImportFor(target, snapshot, existing, {
+    ...options,
+    secretUris: new Set(),
+  })
   const preview = await previewImport(target, plan)
   const sync = await planSync(target, plan, snapshot)
-  return { plan, preview, sync, fingerprint: planFingerprint(plan, preview, sync) }
+  return { plan, occupied, preview, sync, fingerprint: planFingerprint(plan, preview, sync) }
 }
 
 // 计划视图：只有元数据，没有正文（同步项的 request 与 context 里有正文，这里不带）
@@ -235,13 +245,15 @@ export function loreImportRoutes(deps: Deps) {
         if (base.fingerprint !== body.fingerprint) {
           throw new MemoryError(409, '来源或此空间在查看计划后已变化，请重新查看计划')
         }
-        // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍
+        // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍。有勾选时沿用基准计划查到的占用，不再查：
+        // 写入的才是看过的计划减去勾掉的（之后才被占用的由写入时的数据库判断）
         const ticked = body.secretUris.length > 0 || body.excludeUris.length > 0
         const plan = ticked
           ? planImport(snapshot, existing, {
               ...options,
               secretUris: new Set(body.secretUris),
               excludeUris: new Set(body.excludeUris),
+              occupied: base.occupied,
             })
           : base.plan
         assertExecutable(plan, deps.masterKey)

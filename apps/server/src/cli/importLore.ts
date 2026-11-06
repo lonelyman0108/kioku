@@ -14,7 +14,7 @@ import {
   assertExecutable,
   existingImportApps,
   MAX_DISCLOSURE,
-  planImport,
+  planImportFor,
   planSync,
   previewImport,
   readLore,
@@ -90,21 +90,27 @@ async function main(): Promise<void> {
       values.space ?? null,
     )
 
+    const target = { db: database.db, spaceId, accountId, masterKey: config.masterKey }
     const lore = postgres(loreUrl, { max: 1, onnotice: () => {} })
     const snapshot = await readLore(lore).finally(() => lore.end())
-    const plan = planImport(snapshot, await existingImportApps(database.db, spaceId), {
-      accountId,
-      persona: { slug: values.persona, name: values['persona-name'] },
-      secretUris: new Set(values.secret),
-      quoteMalformed: true,
-    })
+    // 和管理界面同一份计划：URI 已被别的记忆占用的目标在计划里就列为不导入
+    const { plan } = await planImportFor(
+      target,
+      snapshot,
+      await existingImportApps(database.db, spaceId),
+      {
+        accountId,
+        persona: { slug: values.persona, name: values['persona-name'] },
+        secretUris: new Set(values.secret),
+        quoteMalformed: true,
+      },
+    )
 
     const versions = snapshot.nodes.reduce((n, node) => n + node.previousVersions, 0)
     console.log(
       `Lore：${snapshot.nodes.length} 个节点；${versions} 个旧版本不迁移` +
         (snapshot.recallEvents === null ? '' : `；${snapshot.recallEvents} 条召回事件不迁移`),
     )
-    const target = { db: database.db, spaceId, accountId, masterKey: config.masterKey }
     printPlan(plan, await previewImport(target, plan))
     if (plan.errors.length) {
       // 命令行只有 --secret 会对不上

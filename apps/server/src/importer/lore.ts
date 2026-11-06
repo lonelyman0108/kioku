@@ -131,6 +131,8 @@ export interface ImportOptions {
   // 跳过的原因里引用正文中那段格式不对的占位符，好到 Lore 里找。这段可能带着后面的明文，只有命令行打开：
   // 输出在主人自己的终端上。接口不打开，计划视图不含正文
   quoteMalformed?: boolean
+  // URI 已被空间里别的记忆占用的写入目标（去重键，见 occupiedTargets），计划里列为不导入
+  occupied?: ReadonlySet<string>
 }
 
 export interface ExistingApp {
@@ -216,7 +218,8 @@ export function credentialHints(node: LoreNode): {
   }
 }
 
-// 计划只依赖读出来的数据和已有应用，不写库：先打印给人确认，再执行
+// 计划只依赖读出来的数据、已有应用与查好的占用（options.occupied），不读写库：先打印给人确认，再执行。
+// 命令行与路由经 planImportFor 出计划，它先查好占用
 export function planImport(
   snapshot: LoreSnapshot,
   existingApps: ExistingApp[],
@@ -295,9 +298,14 @@ export function planImport(
   // 两个节点映射到同一个 URI 时只导入第一个
   const plannedUris = new Map<string, string>()
   // 勾掉的节点写到的 URI 还占着：写入的只能是看过的计划减去勾掉的。映射到同一个 URI 的下一个节点
-  // 在计划里没有写入目标，看不到也勾不了，不能让它顶上来。哪个节点占着要走完下面整段判断才知道，所以先算一次不勾的
+  // 在计划里没有写入目标，看不到也勾不了，不能让它顶上来。哪个节点占着要走完下面整段判断才知道，所以先算一次不勾的。
+  // 这一次不看 occupied：目标被别的记忆占用的节点同样占着这个 URI（见循环里的判断），只是不写入
   if (excludedNodes.size) {
-    const unticked = planImport(snapshot, existingApps, { ...options, excludeUris: new Set() })
+    const unticked = planImport(snapshot, existingApps, {
+      ...options,
+      excludeUris: new Set(),
+      occupied: new Set(),
+    })
     for (const m of unticked.memories) {
       if (excludedNodes.has(String(m.context.loreNodeUuid))) {
         plannedUris.set(m.request.uri, m.source)
@@ -436,17 +444,24 @@ export function planImport(
         previousVersions: node.previousVersions,
         ...(options.exportedAt ? { loreExportedAt: options.exportedAt } : {}),
       }
+      const importKey = importKeyOf(context)
+      // 被别的记忆占用的目标照样占着这个 URI（上面已经记下），映射到同一个 URI 的后一个节点不顶上来：
+      // 按占用重算的计划只比不看占用时少了这几个目标，别的都不变
+      if (options.occupied?.has(importKey)) {
+        plan.skipped.push({ source: node.uri, reason: `${target.uri} 已被其他记忆占用` })
+        continue
+      }
       plan.memories.push({
         source: node.uri,
         request: request.data,
         createdAt: node.createdAt,
         updatedAt: node.updatedAt,
-        importKey: importKeyOf(context),
+        importKey,
         context,
       })
     }
   }
-  // 走到应用映射的节点之后还可能被跳过（撞 URI、disclosure 里有占位符等），所以循环结束才知道要动哪些应用：
+  // 走到应用映射的节点之后还可能被跳过（撞 URI、目标被别的记忆占用、disclosure 里有占位符等），所以循环结束才知道要动哪些应用：
   // 运行时下有写入目标的留下；要新建的应用没有写入目标就不建，不留空应用；已有的应用保留，按人格的规则照常设默认人格，
   // 除非这个运行时下的节点被勾掉了，或者全部勾掉、什么都不写。界面的 selectionEffects 算的要和这里一样
   const written = new Set(plan.memories.map((m) => runtimeOf(m.source)))
@@ -525,6 +540,37 @@ export function existingImportApps(db: Db, spaceId: string): Promise<ExistingApp
   )
 }
 
+// 要新建的写入目标里，URI 已被空间里别的记忆占用的（去重键）。只看要新建的：导入过的、Lore 里换了路径的不再写入，
+// 占着 URI 的可能就是之前导入的那条。规则和新建时一样（MemoryService.createConflicts），让得出的过期记录
+// 按导入者写入的身份算。这里只是提前标出来，写入时仍以数据库为准：之后才被占用的照样记进结果的 occupied
+async function occupiedTargets(target: ImportTarget, plan: ImportPlan): Promise<Set<string>> {
+  const done = await importedMemories(target.db, target.spaceId)
+  const moved = movedInLore(plan, done)
+  const fresh = plan.memories.filter((m) => priorImport(m, done, moved).state === 'new')
+  if (!fresh.length) return new Set()
+  const taken = await importerService(target).createConflicts(
+    fresh.map((m) => ({ uri: m.request.uri, layer: m.request.layer! })),
+  )
+  return new Set(fresh.filter((m) => taken.has(m.request.uri)).map((m) => m.importKey))
+}
+
+// 出计划（命令行与路由共用）：先不看占用算一次，再把 URI 已被别的记忆占用的目标列为不导入，计划里要新建的就是会写入的。
+// 重算只少了这几个目标（见 planImport 循环里的判断），别的目标与状态都不变，不用再查一遍。
+// 按勾选重算时传入这里的 occupied：和看过的计划用同一份占用，写入的才是看过的计划减去勾掉的
+export async function planImportFor(
+  target: ImportTarget,
+  snapshot: LoreSnapshot,
+  existingApps: ExistingApp[],
+  options: Omit<ImportOptions, 'occupied'>,
+): Promise<{ plan: ImportPlan; occupied: ReadonlySet<string> }> {
+  const draft = planImport(snapshot, existingApps, options)
+  const occupied = await occupiedTargets(target, draft)
+  return {
+    plan: occupied.size ? planImport(snapshot, existingApps, { ...options, occupied }) : draft,
+    occupied,
+  }
+}
+
 export interface ImportResult {
   // 这次有没有人格可用：已有的，或者这次新建的（见 writesNewPersona）。没有时 personaCreated 总是 false
   personaUsed: boolean
@@ -540,7 +586,7 @@ export interface ImportResult {
   // 这次要求 secret、但之前导入过而且现在还是明文的：--secret 对它们不起作用，要在管理界面改。
   // current 是记忆现在的 URI，导入后移动过的与 uri 不同；同一个节点导入过多条的，每条明文各占一项
   secretAlreadyImported: { uri: string; current: string }[]
-  // URI 已被不是导入产生的记忆占用
+  // 写入时 URI 已被别的记忆占用。计划里就占用了的已经列为不导入，这里只有算完计划之后才被占用的
   occupied: string[]
   // Lore 里换了路径、映射到别的应用或层的节点（见 movedInLore）：没有在 uri 新建，之前导入的那条留在 current
   // （在 Kioku 里删除了的为 null）
