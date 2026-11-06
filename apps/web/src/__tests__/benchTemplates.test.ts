@@ -1182,13 +1182,20 @@ describe('模型对话的页面', () => {
 
   it('循环的说明：按运行时，近似的那种用提醒的颜色说清楚', () => {
     const note = must(
-      view.elements.find((el) => shownIn(el).includes('AGENT_LOOP_NOTES[loop]') && el.tag === 'p'),
+      view.elements.find(
+        (el) => shownIn(el).includes('agentLoopNote(loop, turnEnd)') && el.tag === 'p',
+      ),
       '循环的说明',
     )
     expect(bound(note, 'class')).toBe("loop === 'approximate' ? 'text-warning' : 'text-muted'")
     // 完整的循环在提示层里
-    expect(shownIn(note)).toContain('AGENT_LOOP_DETAILS[loop]')
+    expect(shownIn(note)).toContain('agentLoopDetail(loop, turnEnd)')
     expect(benchAgent).toMatch(/approximate:\s+'[^']*近似/)
+    // 回复后发不发 turn.end 按应用的运行时，和发消息时用的同一个
+    expect(blockOf(view.script, 'const turnEnd = ')).toContain(
+      'turnEndPolicy(loop.value, app.value?.runtimeFamily)',
+    )
+    expect(useBench).toContain('runtimeFamily: target.app.runtimeFamily')
   })
 
   it('会话上下文：mcp 不发生命周期事件，不显示', () => {

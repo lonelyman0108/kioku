@@ -379,7 +379,7 @@ const LIFECYCLE_TARGETS: CallTarget[] = [
   ]),
   lifecycleTarget(
     'turn.end',
-    '一轮结束：本轮写入对话缓冲，累积成批后抽取。需带私聊、群聊或频道的会话上下文。',
+    '一轮结束：本轮写入对话缓冲，累积成批后抽取。私聊、群聊与频道按会话上下文缓冲；不带会话上下文时按应用与所属成员缓冲，只写会话摘要。',
     [
       sessionIdField(true),
       textField('user', 'user', { required: true, multiline: true }),

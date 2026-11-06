@@ -398,6 +398,7 @@ export function createBench() {
     try {
       const finished = await sendAgentMessage(agent.value, text, {
         ...options,
+        runtimeFamily: target.app.runtimeFamily,
         mode: target.mode,
         context: sessionContext.value,
         signal: controller.signal,
