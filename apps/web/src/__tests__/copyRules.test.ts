@@ -7,7 +7,7 @@ import { parse } from 'vue/compiler-sfc'
 const ENGLISH_TERMS = /(?<![\w/`.])(disclosure|priority|secret(?! access key)|boot)(?![\w/:`])/i
 
 // 应用接入用的 Key 叫访问密钥，单数复数都查，「API Key」也算在内：访问密钥退回旧名时常写成它
-const ACCESS_KEY = /(?<![\w/`.])Keys?(?![\w`])/
+const ACCESS_KEY = /(?<![\w/`.])Keys?(?![\w`])/i
 // 讲上游自己的密钥的文件，只在这里放过上游的字段名：模型服务商的 API Key（嵌入、抽取设置，测试台的模型对话
 // 用的也是抽取模型的），Lore 保存的 API Key（Lore 导入的提示），对象存储的 Access Key ID 与 Secret Access Key
 // （备份），主密钥加密的是 API Key 与 Secret Access Key。别的文件写这几个名字照样报
@@ -113,9 +113,12 @@ interface TemplateNode {
   children?: TemplateNode[]
 }
 
-// 表达式里的字符串字面量：绑定的属性和插值里也可能直接写文字
+// 表达式里的字符串字面量：绑定的属性和插值里也可能直接写文字。模板字符串里的 ${…} 是代码不是文字，
+// 换成占位：不然 key、domain 这类变量名会被当成界面上的词；占位不是空白，「共 ${n} 把」照样查得出
 const literals = (expression: string) =>
-  [...expression.matchAll(/'([^']*)'|`([^`]*)`/g)].map((m) => m[1] ?? m[2] ?? '')
+  [...expression.matchAll(/'([^']*)'|`([^`]*)`/g)].map((m) =>
+    (m[1] ?? m[2] ?? '').replace(/\$\{[^}]*\}/g, '…'),
+  )
 
 // 模板部分走语法树：文字节点是完整的，Prettier 换行切不开一句话
 function templateText(source: string): { line: number; text: string }[] {

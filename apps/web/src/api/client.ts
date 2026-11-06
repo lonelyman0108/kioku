@@ -1,4 +1,7 @@
+import { URI_FORMAT_MESSAGE } from '@kioku/contracts'
 import type { z } from 'zod'
+
+import { URI_FORMAT_HINT } from '../labels'
 
 // 后端返回的业务错误统一是 { error }；这里把状态码和提示一起带出来，页面按状态码决定怎么处理
 export class ApiError extends Error {
@@ -18,6 +21,11 @@ export function readFailure(error: unknown): string {
 // 一个页面读好几样时的错误文字：没出错的（query.error 是 null）跳过，说的是同一句只留一条
 export function readFailures(errors: readonly unknown[]): string[] {
   return [...new Set(errors.filter((error) => error != null).map((error) => readFailure(error)))]
+}
+
+// 有的报错是写给接口与 MCP 的：URI 格式那句中英并列，前面还带着字段路径（uri：、to：）。界面上换成只说中文的那句
+function consoleMessage(message: string): string {
+  return message.endsWith(URI_FORMAT_MESSAGE) ? URI_FORMAT_HINT : message
 }
 
 type Query = Record<string, string | number | undefined>
@@ -63,7 +71,7 @@ async function send(method: string, path: string, options: RequestOptions<unknow
   if (!res.ok) {
     if (res.status === 401 && !SESSION_PATHS.includes(path)) onUnauthorized?.()
     const payload = (await res.json().catch(() => null)) as { error?: string } | null
-    throw new ApiError(res.status, payload?.error ?? `请求失败：HTTP ${res.status}`)
+    throw new ApiError(res.status, consoleMessage(payload?.error ?? `请求失败：HTTP ${res.status}`))
   }
   return res
 }

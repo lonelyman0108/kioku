@@ -38,7 +38,7 @@ class BatchMoved extends Error {}
 
 // 上面三个原因历次的写法，第一项是现在的。抽取记录存的是写入时的文字，旧版本写下的记录要按现在的写法显示、
 // 照样给所有成员看：改措辞时把旧句子留在这里，不要删
-const RUN_ERROR_WORDINGS: readonly (readonly [string, ...string[]])[] = [
+export const RUN_ERROR_WORDINGS: readonly (readonly [string, ...string[]])[] = [
   [
     NO_USABLE_KEY,
     '写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层',

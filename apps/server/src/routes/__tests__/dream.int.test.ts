@@ -32,7 +32,7 @@ import {
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { dreamSpace } from '../../extraction/dream'
+import { DREAM_ERROR_WORDINGS, dreamSpace } from '../../extraction/dream'
 import type { ChatMessage, ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Jobs } from '../../jobs/queue'
@@ -822,6 +822,31 @@ describe.skipIf(!testDatabaseUrl)('Dream 的建议（待审）', () => {
     ])
     // 四次整理各一条共享部分的汇总，加上基础层的三条与 alice 私人层的一条
     expect(await inSpace((tx) => tx.select().from(dreamRuns))).toHaveLength(8)
+
+    // 旧版本写下的记录里是当时的写法，每一代都按现在的显示，成员也看得到
+    const generations: [stored: string, shown: string][] = [
+      ['模型的输出里没有约定格式的 JSON 对象', '模型的输出里没有约定格式的 JSON 对象'],
+      [
+        '共享范围出错，本次已停止（原因见出错的范围）',
+        '共享范围出错，本次已停止（原因见出错的范围）',
+      ],
+      [
+        '共享的范围出错，这次停下了（原因见出错的那个范围）',
+        '共享范围出错，本次已停止（原因见出错的范围）',
+      ],
+    ]
+    // 和 DREAM_ERROR_WORDINGS 一一对应：那边加了旧句子，这里也要加一行核对
+    expect(new Set(generations.map(([stored]) => stored))).toEqual(
+      new Set(DREAM_ERROR_WORDINGS.flat()),
+    )
+    for (const [stored, shown] of generations) {
+      await inSpace((tx) => tx.update(dreamRuns).set({ error: stored }))
+      for (const cookie of [bob.cookie, ws.cookie]) {
+        const errors = (await runs(cookie)).runs.flatMap((r) => r.entries.map((e) => e.error))
+        expect(errors.length, stored).toBeGreaterThan(0)
+        expect(new Set(errors), stored).toEqual(new Set([shown]))
+      }
+    }
   })
 
   it('现在整理一次：viewer 不能；排不进后台任务时 503；查不到的编号 404', async () => {

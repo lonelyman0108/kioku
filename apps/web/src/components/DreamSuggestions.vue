@@ -25,7 +25,7 @@ import {
   triggerLabels,
 } from '../dream'
 import { invalidateInboxCounts } from '../inbox'
-import { layerLabels } from '../labels'
+import { layerLabels, URI_FORMAT_HINT } from '../labels'
 import { memoryRoute } from '../routes'
 import { spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
@@ -103,7 +103,7 @@ function draftProblem(item: DreamSuggestion): string | null {
   if (!draft) return null
   if (!draft.content.trim()) return '正文不能为空'
   if (item.kind === 'distill' && !URI_PATTERN.test(draft.uri.trim())) {
-    return 'URI 格式为「分区://路径」，例如 people://xiaoming'
+    return URI_FORMAT_HINT
   }
   return null
 }

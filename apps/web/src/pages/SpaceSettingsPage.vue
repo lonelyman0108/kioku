@@ -228,8 +228,8 @@ async function save() {
     <template #import>
       <SettingsBlock title="导入">
         <template #note>
-          将其他工具的记忆导入当前空间，目前仅支持 Lore。Kioku 导出的空间文件请在「实例设置 ›
-          导入空间」中导入为新空间。
+          将其他工具的记忆导入当前空间，目前仅支持 Lore。Kioku
+          导出的空间文件由实例管理员在「实例设置 › 导入空间」中导入为新空间。
         </template>
         <LoreImport
           :space-id="spaceId"

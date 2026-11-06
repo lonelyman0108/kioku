@@ -43,6 +43,8 @@ interface BucketSource {
   location: S3Location
   prefix: string
   object: string | null
+  // 连不上存储时该检查的设置：这里的位置与凭据来自参数和环境变量
+  check: string
 }
 
 // 从存储桶取备份的参数：位置写在命令行里，访问密钥从环境变量读（不出现在命令行里）。连库之前先核对，用法写错了马上说
@@ -76,11 +78,17 @@ function bucketSource(values: {
     },
     prefix: (values['s3-prefix'] ?? '').replace(/^\/+|\/+$/g, ''),
     object: values['s3-object'] ?? null,
+    check: `--s3-endpoint 与环境变量 AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY${sessionToken ? '、AWS_SESSION_TOKEN' : ''}`,
   }
 }
 
 async function download(source: BucketSource): Promise<Buffer> {
-  const { object, file } = await fetchBackup(source.location, source.prefix, source.object)
+  const { object, file } = await fetchBackup(
+    source.location,
+    source.prefix,
+    source.object,
+    source.check,
+  )
   console.log(`从存储桶取了 ${object}（${(file.length / 1024).toFixed(1)} KB）`)
   return file
 }

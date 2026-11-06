@@ -24,7 +24,12 @@ import {
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { ChatModel } from '../../extraction/provider'
-import { BATCH_MOVED, BUDGET_NO_SUMMARY, NO_USABLE_KEY } from '../../extraction/extract'
+import {
+  BATCH_MOVED,
+  BUDGET_NO_SUMMARY,
+  NO_USABLE_KEY,
+  RUN_ERROR_WORDINGS,
+} from '../../extraction/extract'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
@@ -425,6 +430,10 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       [BATCH_MOVED, BATCH_MOVED],
       ['抽取期间对象被合并，这一批交给合并后的批次重新抽取', BATCH_MOVED],
     ]
+    // 和 RUN_ERROR_WORDINGS 一一对应：那边加了旧句子，这里也要加一行核对
+    expect(new Set(generations.map(([stored]) => stored))).toEqual(
+      new Set(RUN_ERROR_WORDINGS.flat()),
+    )
     for (const [stored, shown] of generations) {
       await withSpace(database.db, ws.spaceId, (tx) =>
         tx.update(extractionRuns).set({ error: stored }),

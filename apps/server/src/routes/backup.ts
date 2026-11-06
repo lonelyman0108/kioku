@@ -9,7 +9,7 @@ import {
   UpdateBackupSettings,
 } from '@kioku/contracts'
 
-import { s3Client } from '../backup/s3'
+import { s3Client, SETTINGS_STORAGE_CHECK } from '../backup/s3'
 import {
   backupSettingsView,
   clearBackupSettings,
@@ -156,7 +156,10 @@ export function backupRoutes(deps: Deps) {
       const loaded = await configured()
       if (!loaded.ok) return c.json({ error: loaded.error }, 400)
       try {
-        const found = await listBackups(s3Client(loaded.config), loaded.config.prefix)
+        const found = await listBackups(
+          s3Client(loaded.config, SETTINGS_STORAGE_CHECK),
+          loaded.config.prefix,
+        )
         return c.json(
           { objects: found.map((o) => ({ object: o.key, bytes: o.bytes, at: o.at })) },
           200,
