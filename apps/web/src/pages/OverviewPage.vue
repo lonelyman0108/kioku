@@ -11,22 +11,11 @@ import RecentChange from '../components/RecentChange.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataColumn from '../components/strata/StrataColumn.vue'
-import {
-  columnSize,
-  isConversationLayer,
-  tallyCounts,
-  type StrataSelection,
-} from '../components/strata/strata'
+import { columnSize, tallyCounts, type StrataSelection } from '../components/strata/strata'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { actionableInboxCount } from '../inbox'
-import {
-  bindingNote,
-  budgetWarning,
-  conversationTabRoute,
-  splitNote,
-  strataFilterQuery,
-} from '../overview'
+import { bindingNote, budgetWarning, splitNote, strataTarget } from '../overview'
 import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
 
@@ -43,7 +32,7 @@ const data = computed(() => overview.data.value)
 const viewport = useViewport()
 const size = computed(() => columnSize(viewport.value))
 
-// 层 × 敏感级的条数：记忆加上来自对话的两层
+// 归属 × 敏感级的条数：记忆加上来自对话的两类
 const counts = computed(() =>
   data.value ? tallyCounts([...data.value.counts, ...data.value.extractedCounts]) : null,
 )
@@ -51,14 +40,9 @@ const extracted = computed(() =>
   (data.value?.extractedCounts ?? []).reduce((sum, c) => sum + c.count, 0),
 )
 
-// 点地层柱：记忆列表按归属和敏感级筛选。来自对话的两类不在记忆列表里，去对话页对应的分页
+// 点地层柱：一行去记忆页的根或对话页的分页，一格去记忆列表（见 strataTarget）
 function openStrata(selection: StrataSelection) {
-  const params = { spaceId: spaceId.value }
-  if (selection.layer && isConversationLayer(selection.layer)) {
-    void router.push(conversationTabRoute(spaceId.value, selection.layer))
-    return
-  }
-  void router.push({ name: 'memories', params, query: strataFilterQuery(selection) })
+  void router.push(strataTarget(spaceId.value, selection))
 }
 
 // 查看者处理不了后三类：数字不算进「待处理」，不标红，操作只是查看。记忆健康里的补全也一样
@@ -144,7 +128,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
           <SectionHeading title="记忆分布">
             <template #hint>
               <Hint>
-                带的高度表示条数的多少，数字是确切的条数。点击任意一格，查看对应的记忆；来自对话的两类在联系人页查看。
+                带的高度表示条数的多少，数字是确切的条数。点归属的名字打开记忆页的那一类或对话页的分页，点一格按归属与敏感级查看记忆列表。
               </Hint>
             </template>
           </SectionHeading>

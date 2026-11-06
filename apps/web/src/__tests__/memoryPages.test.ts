@@ -291,9 +291,7 @@ describe('概览', () => {
     expect(overviewPage).toContain('data.inbox.bindings')
   })
 
-  it('来自对话的两类不在记忆列表里，带去对话页对应的分页', () => {
-    expect(overviewPage).toMatch(
-      /isConversationLayer\(selection\.layer\)\) \{\s+void router\.push\(conversationTabRoute\(/,
-    )
+  it('点地层柱去哪里由 strataTarget 定：一行去根或对话的分页，一格去列表', () => {
+    expect(overviewPage).toContain('void router.push(strataTarget(spaceId.value, selection))')
   })
 })

@@ -1,7 +1,7 @@
 import type { SubjectBinding } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
-import { bindingNote, budgetWarning, splitNote, strataFilterQuery } from '../overview'
+import { bindingNote, budgetWarning, splitNote, strataFilterQuery, strataTarget } from '../overview'
 
 const usage = (usedTokens: number, monthlyTokens = 500_000) => ({
   usedTokens,
@@ -58,6 +58,38 @@ describe('账号绑定那一行', () => {
     expect(bindingNote([binding('u1'), binding('u2')], 25)).toBe(
       'telegram u1 申请绑定到「小明」，共 25 个',
     )
+  })
+})
+
+describe('点地层柱去哪里', () => {
+  it('点一行：记下的四类去记忆页对应的根，来自对话的两类去对话页对应的分页', () => {
+    expect(strataTarget('s1', { layer: 'user', sensitivity: null })).toEqual({
+      name: 'memories',
+      params: { spaceId: 's1' },
+      query: { node: 'user' },
+    })
+    expect(strataTarget('s1', { layer: 'episode', sensitivity: null })).toEqual({
+      name: 'conversations',
+      params: { spaceId: 's1' },
+      query: {},
+    })
+    expect(strataTarget('s1', { layer: 'subject', sensitivity: 'public' })).toEqual({
+      name: 'conversations',
+      params: { spaceId: 's1' },
+      query: { tab: 'contacts' },
+    })
+  })
+
+  it('点一格或一个敏感级：记忆列表按归属与敏感级筛选', () => {
+    expect(strataTarget('s1', { layer: 'core', sensitivity: 'internal' })).toEqual({
+      name: 'memories',
+      params: { spaceId: 's1' },
+      query: { view: 'list', layer: 'core', sensitivity: 'internal' },
+    })
+    expect(strataTarget('s1', { layer: null, sensitivity: 'secret' }).query).toEqual({
+      view: 'list',
+      sensitivity: 'secret',
+    })
   })
 })
 

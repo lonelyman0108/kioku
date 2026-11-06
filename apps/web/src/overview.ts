@@ -1,7 +1,8 @@
 import type { ExtractionUsage, SubjectBinding } from '@kioku/contracts'
 
 import { accountText } from './bindings'
-import type { StrataSelection } from './components/strata/strata'
+import { isConversationLayer, type StrataSelection } from './components/strata/strata'
+import { memoryNodeRoute } from './routes'
 
 // 来自对话的两类在对话页：会话在会话分页，联系人的事实在联系人分页
 export const conversationTabRoute = (spaceId: string, layer: 'subject' | 'episode') => ({
@@ -51,4 +52,15 @@ export function strataFilterQuery({ layer, sensitivity }: StrataSelection) {
     ...(layer ? { layer } : {}),
     ...(sensitivity ? { sensitivity } : {}),
   }
+}
+
+// 点地层柱去哪里：点一行（只有归属）去记忆页对应的根，来自对话的两类去对话页对应的分页；
+// 点一格或表头的一个敏感级，去记忆列表按归属与敏感级筛选
+export function strataTarget(spaceId: string, selection: StrataSelection) {
+  const { layer, sensitivity } = selection
+  if (layer && isConversationLayer(layer)) {
+    return conversationTabRoute(spaceId, layer as 'subject' | 'episode')
+  }
+  if (layer && !sensitivity) return memoryNodeRoute(spaceId, layer)
+  return { name: 'memories', params: { spaceId }, query: strataFilterQuery(selection) }
 }
