@@ -48,7 +48,7 @@ export const sensitivityHints: Record<Sensitivity, string> = {
   public: '任何上下文可见',
   internal: '仅受信应用与上下文',
   private: '仅本人的私密上下文',
-  secret: '加密存储，不进召回，仅可按 URI 读取',
+  secret: '加密存储，不进召回，仅可按坐标读取',
 }
 
 const sum = (values: readonly number[]) => values.reduce((a, b) => a + b, 0)
@@ -270,9 +270,9 @@ export const accessKindLabels: Record<AccessKind, string> = {
   'read-write': '读写',
   'read-extract': '读取且抽取写入',
   read: '只读',
-  'explicit-write': '按 URI 读取且可写',
-  'explicit-extract': '按 URI 读取且抽取写入',
-  explicit: '仅按 URI 读取',
+  'explicit-write': '按坐标读取且可写',
+  'explicit-extract': '按坐标读取且抽取写入',
+  explicit: '仅按坐标读取',
   write: '仅写入',
   extract: '仅抽取写入',
   none: '无权限',

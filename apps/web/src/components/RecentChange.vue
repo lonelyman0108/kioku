@@ -47,7 +47,7 @@ const change = computed(() => {
       <span v-if="item.left" class="inline-flex shrink-0 items-center gap-1">
         超出可见范围
         <Hint>
-          此次改动后，这条记忆超出当前账号的可见范围（例如改入其他成员的私人层，或改为机密）。
+          此次改动后，这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆，或改为机密）。
         </Hint>
       </span>
     </span>

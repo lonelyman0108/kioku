@@ -243,7 +243,7 @@ async function reveal() {
     <section>
       <SectionHeading title="引用此凭据的记忆" :level="3">
         <template #hint>
-          <Hint>仅统计当前账号私人层中未删除、非机密、仍有效的记忆。</Hint>
+          <Hint>仅统计当前账号的本人记忆中未删除、非机密、仍有效的记忆。</Hint>
         </template>
       </SectionHeading>
       <p class="section-note">仍有引用时无法删除凭据。</p>

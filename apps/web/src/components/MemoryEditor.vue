@@ -572,7 +572,7 @@ const properties = computed<Property[][]>(() => {
   if (!m) return []
   return [
     [
-      { key: 'layer', label: '层' },
+      { key: 'layer', label: '归属' },
       { key: 'sensitivity', label: '敏感级' },
       { key: 'priority', label: '优先级' },
     ],
@@ -614,7 +614,7 @@ const properties = computed<Property[][]>(() => {
           size="xs"
           color="neutral"
           variant="ghost"
-          aria-label="复制 URI"
+          aria-label="复制坐标"
           @click="copy(base?.uri ?? uri)"
         />
       </div>
@@ -660,7 +660,7 @@ const properties = computed<Property[][]>(() => {
               variant="outline"
               @click="moveOpen = true"
             >
-              移动或改层
+              移动
             </UButton>
             <UButton
               v-if="canCreateChild"
@@ -739,7 +739,7 @@ const properties = computed<Property[][]>(() => {
             </p>
             <div class="edit-tools">
               <UTooltip
-                :text="canReference ? undefined : '仅私人层中敏感级不低于私密的记忆可引用凭据'"
+                :text="canReference ? undefined : '仅本人中敏感级不低于私密的记忆可引用凭据'"
                 :disabled="canReference"
               >
                 <UButton
@@ -899,7 +899,7 @@ const properties = computed<Property[][]>(() => {
         <!-- 编辑时属性栏也可以改 -->
         <div v-if="mode === 'edit'" class="edit-fields">
           <div class="edit-layer">
-            <span>层</span>
+            <span>归属</span>
             <StrataSwatch :layer="base.layer" plain label="layer" />
           </div>
           <UFormField label="优先级" help="0 最重要">

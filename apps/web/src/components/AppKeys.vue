@@ -254,7 +254,7 @@ async function revoke() {
               </div>
             </UFormField>
             <template v-if="form.advanced">
-              <UFormField label="可读层">
+              <UFormField label="可读归属">
                 <USelect
                   v-model="form.scopes.readLayers"
                   :items="layerItems"
@@ -262,7 +262,7 @@ async function revoke() {
                   class="w-full"
                 />
               </UFormField>
-              <UFormField label="可写层">
+              <UFormField label="可写归属">
                 <USelect
                   v-model="form.scopes.writeLayers"
                   :items="layerItems"

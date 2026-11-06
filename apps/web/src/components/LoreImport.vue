@@ -307,9 +307,9 @@ const disclosureCut = computed(
     <template #note>
       导入 Lore 的节点，确认计划后才写入。
       <Hint>
-        映射规则与命令行相同：core://agent 进入基础层，core://soul
-        进入人格层，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
-        进入当前账号的个人画像层，其余进入当前账号的私人层。可重复执行：已导入的不重复写入，Lore
+        映射规则与命令行相同：core://agent 进入通用，core://soul
+        进入人格，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
+        进入当前账号的本人记忆（内部），其余进入当前账号的本人记忆（私密）。可重复执行：已导入的不重复写入，Lore
         中修改过的按 Lore 同步；在 Kioku 中修改、移动或删除过的不变。
       </Hint>
     </template>
@@ -362,7 +362,7 @@ const disclosureCut = computed(
       >
         <li v-for="uri in result.occupied" :key="`occupied-${uri}`">
           跳过 <code class="uri">{{ uri }}</code
-          >：URI 已被其他记忆占用
+          >：坐标已被其他记忆占用
         </li>
         <li v-for="m in result.movedInLore" :key="`moved-${m.uri}-${m.current}`">
           跳过 <code class="uri">{{ m.uri }}</code

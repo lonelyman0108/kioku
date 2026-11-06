@@ -62,7 +62,7 @@ const lastRun = computed(() => {
   const run = runs.data.value?.runs[0]
   return run ? lastRunSummary(run) : null
 })
-// 自己的画像层与私人层整理不整理：在空间设置里改，这里说一声
+// 自己的本人记忆整理不整理：在空间设置里改，这里说一声
 const mine = useQuery({
   queryKey: computed(() => dreamSettingsKey(props.spaceId)),
   queryFn: ({ queryKey: [, spaceId] }) => api.dreamSettings(spaceId),
@@ -258,8 +258,8 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <p v-if="mine.data.value">
         {{
           mine.data.value.includePrivate
-            ? '当前账号的个人画像层与私人层（机密除外）也会发送给实例配置的抽取模型整理，'
-            : '当前账号已关闭个人画像层与私人层的整理，目前仅整理共享内容，'
+            ? '当前账号的本人记忆（机密除外）也会发送给实例配置的抽取模型整理，'
+            : '当前账号已关闭本人记忆的整理，目前仅整理共享内容，'
         }}<RouterLink :to="spaceSettingsRoute(spaceId, 'dream')" class="text-primary"
           >可在空间设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
         >。
@@ -324,7 +324,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   关于「{{ memory.subject.displayName }}」
                 </RouterLink>
                 <span v-else>{{ layerLabels[memory.layer] }}</span>
-                <!-- 色块旁边写层名，和记忆列表一样；没有 URI 也不是联系人时上面已经写了层的全名 -->
+                <!-- 色块旁边写归属，和记忆列表一样；没有坐标也不是联系人时上面已经写了归属的全名 -->
                 <MemoryFlags
                   v-if="memory.uri || memory.subject"
                   :layer="memory.layer"
@@ -356,7 +356,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           <template v-else-if="item.kind === 'distill'">
             <div v-if="drafts.has(item.id)" class="draft-form">
               <p class="draft-label">草稿</p>
-              <UFormField label="URI" :help="draftLayer(drafts.get(item.id)!.uri) ?? undefined">
+              <UFormField label="坐标" :help="draftLayer(drafts.get(item.id)!.uri) ?? undefined">
                 <UInput v-model="drafts.get(item.id)!.uri" class="w-full font-mono" />
               </UFormField>
               <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
@@ -391,7 +391,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           </NoteLine>
           <p class="suggestion-effect">{{ suggestionKinds[item.kind].effect }}</p>
           <p v-if="canAct && !item.actionable" class="suggestion-effect">
-            包含当前账号无权写入的记忆（如其他成员应用的应用层），需由有权限的成员处理。
+            包含当前账号无权写入的记忆（如其他成员的应用的记忆），需由有权限的成员处理。
           </p>
           <p v-if="draftProblem(item)" class="suggestion-problem">{{ draftProblem(item) }}</p>
         </div>
@@ -453,7 +453,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       <SectionHeading title="最近整理" :level="3">
         <template #hint>
           <Hint>
-            整理使用抽取模型，用量计入空间的抽取预算。只处理上次以来新增或修改的记忆，其他成员的个人画像层与私人层不在此列出。共享内容先整理并记录一条汇总，之后才整理各成员的个人画像层与私人层，因此当前账号的结果可能稍晚于整理状态出现。
+            整理使用抽取模型，用量计入空间的抽取预算。只处理上次以来新增或修改的记忆，其他成员的本人记忆不在此列出。共享内容先整理并记录一条汇总，之后才整理各成员的本人记忆，因此当前账号的结果可能稍晚于整理状态出现。
           </Hint>
         </template>
       </SectionHeading>

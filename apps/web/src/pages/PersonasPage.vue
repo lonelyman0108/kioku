@@ -310,8 +310,8 @@ async function remove() {
           label="标识"
           :help="
             editing
-              ? '标识是人格层记忆 URI 的一部分，不可修改'
-              : '小写字母、数字和连字符；用于记忆 URI，例如 persona://doubao/soul'
+              ? '标识是这个人格的记忆的坐标开头，不可修改'
+              : '小写字母、数字和连字符；用在坐标的开头，例如 persona://doubao/soul'
           "
         >
           <UInput

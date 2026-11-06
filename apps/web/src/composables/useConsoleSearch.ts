@@ -72,7 +72,7 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
     list.push(
       {
         id: 'matches',
-        label: 'URI 与关键词',
+        label: '标题、坐标与关键词',
         ignoreFilter: true,
         items: found.matches.map((m) => ({
           label: m.uri,

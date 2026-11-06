@@ -278,7 +278,7 @@ describe('读到过的内容不被错误盖掉', () => {
     expect(tree.props?.some((p) => p.name === 'else' || p.name === 'else-if')).toBe(false)
   })
 
-  it('记忆目录：换空间时上一个空间的树和错误都清掉，不拿旧分区去请求新空间', () => {
+  it('记忆目录：换空间时上一个空间的树和错误都清掉，不拿旧的节点去请求新空间', () => {
     const watcher = /watch\(spaceId, \(\) => \{[^]*?\n\}\)/.exec(memoriesPage)![0]
     expect(watcher).toContain('roots.value = []')
     expect(watcher).toContain('rootsError.value = null')

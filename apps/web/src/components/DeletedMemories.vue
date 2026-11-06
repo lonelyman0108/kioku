@@ -21,7 +21,7 @@ const props = defineProps<{ spaceId: string }>()
 const emit = defineEmits<{ restored: [uri: string]; showExpired: [] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
-// 和别处一样按条判断：editor 撤销不了别人的应用的应用层记忆
+// 和别处一样按条判断：editor 撤销不了别人的应用的记忆
 const { canWriteUri } = useMemoryPermissions(computed(() => props.spaceId))
 
 const queryKey = computed(() => ['memory-deleted', props.spaceId] as const)
@@ -90,10 +90,10 @@ async function undelete(item: DeletedMemory) {
   }
 }
 
-// URI 被别的记忆占着时撤销删除会冲突：说清楚为什么、该怎么办。按钮照样能点：标记是列表读出时的，
-// 占着的那条可能已经过期、被移走或删掉，点了还冲突时会重新读列表
+// 坐标被别的记忆占用时撤销删除会冲突：说清楚为什么、该怎么办。按钮照样能点：标记是列表读出时的，
+// 占用的那条可能已经过期、被移走或删掉，点了还冲突时会重新读列表
 const TAKEN_HINT =
-  'URI 已被占用。移走或删除占用它的记忆后可恢复。标记按列表读取时计算，可直接重试。'
+  '坐标已被占用。移走或删除占用它的记忆后可恢复。标记按列表读取时计算，可直接重试。'
 </script>
 
 <template>
@@ -101,8 +101,7 @@ const TAKEN_HINT =
     <div class="list-head">
       <p>
         已删除的记忆在保留期内可以恢复。<Hint>
-          恢复后内容不变。同一 URI 已有其他记忆时会冲突（标记为「URI
-          已被占用」），需先移走或删除那条记忆。恢复不改变有效期：标记为「已过期」的记忆恢复后回到「已过期」，可在其中恢复生效。
+          恢复后内容不变。同一坐标已有其他记忆时会冲突（标记为「坐标已被占用」），需先移走或删除那条记忆。恢复不改变有效期：标记为「已过期」的记忆恢复后回到「已过期」，可在其中恢复生效。
         </Hint>
       </p>
       <p v-if="retention" class="text-warning">{{ deletionNotice(retention) }}</p>
@@ -146,7 +145,7 @@ const TAKEN_HINT =
               >
                 已过期
               </span>
-              <span v-if="item.uriTaken" class="text-error" :title="TAKEN_HINT">URI 已被占用</span>
+              <span v-if="item.uriTaken" class="text-error" :title="TAKEN_HINT">坐标已被占用</span>
             </span>
             <template v-if="canWriteUri(item.uri)" #actions>
               <UTooltip :text="TAKEN_HINT" :disabled="!item.uriTaken">

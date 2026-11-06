@@ -61,7 +61,7 @@ const matrix: KeyAccessMatrix = {
     })),
   })),
 }
-const expected = ['读写', '仅按 URI 读取', '读写', '仅按 URI 读取', '仅写入']
+const expected = ['读写', '仅按坐标读取', '读写', '仅按坐标读取', '仅写入']
 
 function render(context: (typeof ACCESS_CONTEXTS)[number], key = keyInfo()) {
   const queryClient = new QueryClient()
@@ -90,7 +90,7 @@ describe('权限范围', () => {
     const blocks = html.split('<label').slice(1)
     expect(blocks).toHaveLength(ACCESS_CONTEXTS.length)
     const fill = (i: number, color: string) => blocks[i]!.includes(`fill:${color}`)
-    // 能读能写是满色，只能按 URI 读取是实心，只写只有下沿的条
+    // 能读能写是满色，只能按坐标读取是实心，只写只有下沿的条
     expect(fill(0, 'var(--access-core)')).toBe(true)
     expect(fill(1, 'var(--strata-explicit)')).toBe(true)
     expect(fill(1, 'var(--access-core)')).toBe(false)

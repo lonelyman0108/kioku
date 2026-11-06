@@ -29,13 +29,13 @@ const lost = (node: PersonaNode) => lostFromBoot(node, nodes.value)
 const groups = computed(() => inheritedGroups(props.persona))
 const overrides = (uri: string) => overriddenNode(props.persona, uri)
 
-// 删除人格会把它的人格层记忆连带硬删除，有引用时服务端会拒绝，界面先把原因列出来
+// 删除人格会把它的记忆连带硬删除，有引用时服务端会拒绝，界面先把原因列出来
 const blockers = computed(() =>
   [
     props.persona.apps.length ? `${props.persona.apps.length} 个应用将其设为默认人格` : '',
     props.persona.children.length ? `${props.persona.children.length} 个人格继承此人格` : '',
     props.persona.storedMemories
-      ? `仍有 ${props.persona.storedMemories} 条人格层记忆（含已删除）`
+      ? `仍有 ${props.persona.storedMemories} 条这个人格的记忆（含已删除）`
       : '',
   ].filter(Boolean),
 )
@@ -55,7 +55,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
           size="xs"
           color="neutral"
           variant="ghost"
-          aria-label="复制 URI"
+          aria-label="复制坐标的开头"
           @click="copy(rootUri)"
         />
       </div>
@@ -118,8 +118,7 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
           <SectionHeading title="继承来的节点">
             <template #hint>
               <Hint>
-                相同相对路径上，继承链中更近的人格节点覆盖祖先节点。被覆盖的节点不进入启动加载与召回，仍可按
-                URI 读取。
+                相同相对路径上，继承链中更近的人格节点覆盖祖先节点。被覆盖的节点不进入启动加载与召回，仍可按坐标读取。
               </Hint>
             </template>
             <template #actions>

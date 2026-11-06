@@ -46,7 +46,7 @@ describe('签发上限和当前有效上限', () => {
     const narrowed = key({ effectiveScopes: scopes({ writeLayers: [] }) })
     expect(isNarrowed(narrowed)).toBe(true)
     expect(effectiveNote(narrowed)).toBe(
-      '当前有效范围：可读 1 层，可写 0 层，最高内部（已按所有者当前角色收紧）',
+      '当前有效范围：可读 1 类归属，可写 0 类，最高内部（已按所有者当前角色收紧）',
     )
   })
 

@@ -138,7 +138,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
           <SectionHeading title="记忆分布">
             <template #hint>
               <Hint>
-                带的高度表示条数的多少，数字是确切的条数。点击任意一格，查看对应的记忆；来自对话的两层在联系人页查看。
+                带的高度表示条数的多少，数字是确切的条数。点击任意一格，查看对应的记忆；来自对话的两类在联系人页查看。
               </Hint>
             </template>
           </SectionHeading>

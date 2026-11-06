@@ -335,14 +335,14 @@ watch([spaceId, appId], () => {
           </div>
           <div class="set">
             <USwitch
-              label="本人私聊时读取画像"
+              label="本人私聊时读取本人记忆"
               :model-value="app.config.elevateOwnerDirect === 'internal'"
               :disabled="!canManage || savingConfig === app.id"
               @update:model-value="
                 (v) => updateConfig({ elevateOwnerDirect: v ? 'internal' : undefined })
               "
             />
-            <Hint>识别为本人的私聊可读取个人画像（内部级）。</Hint>
+            <Hint>识别为本人的私聊可读取本人记忆中内部及以下的。</Hint>
           </div>
           <div class="set">
             <USwitch
@@ -383,7 +383,7 @@ watch([spaceId, appId], () => {
         </section>
 
         <div class="app-side-area">
-          <!-- 模拟会读到应用所有者的私人层，只给应用所有者 -->
+          <!-- 模拟会读到应用所有者的本人记忆，只给应用所有者 -->
           <AppSimulator
             v-if="isAppOwner"
             class="app-boot-area"
@@ -416,12 +416,12 @@ watch([spaceId, appId], () => {
         <p v-if="transferTo">
           转移给 {{ transferName }} 后，「{{
             app?.name
-          }}」现有的访问密钥全部吊销，新所有者需重新签发；应用读取的个人画像层与私人层改为
+          }}」现有的访问密钥全部吊销，新所有者需重新签发；应用读取的本人记忆改为
           {{ transferName }} 的。
         </p>
         <p v-else>
           转移后现有访问密钥全部吊销，新所有者需重新签发。
-          <Hint>应用读写的个人画像层与私人层属于应用所有者，转移后改为新所有者的。</Hint>
+          <Hint>应用读写的本人记忆属于应用所有者，转移后改为新所有者的。</Hint>
         </p>
       </div>
     </template>
@@ -449,8 +449,8 @@ watch([spaceId, appId], () => {
           删除「{{ app?.name }}」及其全部访问密钥后，使用这些访问密钥的客户端将立即失去访问权限。
         </p>
         <p class="text-muted">
-          仍有应用层记忆时无法删除。
-          <Hint>已删除但仍可恢复的应用层记忆也算在内，需先移到其他命名空间。</Hint>
+          仍有这个应用的记忆时无法删除。
+          <Hint>已删除但仍可恢复的也算在内，需先移到其他归属。</Hint>
         </p>
       </div>
     </template>

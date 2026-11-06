@@ -318,7 +318,7 @@ function runCounts(run: ExtractionRunInfo): string {
               </div>
               <p class="row-note">
                 标记后，当前账号的应用会将此人的私聊视为本人对话。<Hint>
-                  开启「本人私聊时读取画像」的应用还可读取当前账号的个人画像。只能标记为当前账号。
+                  开启「本人私聊时读取本人记忆」的应用还可读取当前账号的本人记忆（内部及以下）。只能标记为当前账号。
                 </Hint>
               </p>
             </div>

@@ -18,7 +18,7 @@ import type { StepView } from './benchResult'
 // 测试台的共享逻辑：谁能用、选择写回地址、真实模式的后果、运行失败与中途作废的说明、
 // 切换模式会清掉什么、连续调用（重放日志与时间线）
 
-// 只有应用主人能用测试台（会读到主人的私人层，空间 owner 也不行），所以只列自己是主人的应用
+// 只有应用所有者能用测试台（会读到所有者的本人记忆，空间 owner 也不行），所以只列自己是所有者的应用
 export const ownedApps = (apps: readonly AppInfo[], accountId: string | undefined) =>
   apps.filter((app) => app.ownerAccountId === accountId)
 
@@ -62,7 +62,7 @@ export function selectionFix(
 export const REAL_MODE_CONSEQUENCES = [
   '写入立即生效：步骤与当前访问密钥的真实调用一样落库，不回滚，并排入向量与抽取任务。',
   '新建的联系人没有删除接口，只能合并：带私聊、群聊或频道上下文的步骤，遇到首次出现的平台账号时会新建联系人。',
-  'turn.end 将本轮写入对话缓冲，累积成批后排入抽取（消耗模型 token，抽取的事实写入联系人层）。',
+  'turn.end 将本轮写入对话缓冲，累积成批后排入抽取（消耗模型 token，抽取的事实记在联系人上）。',
   '写入的事件带「测试台」标记与当前账号，可在变更记录和凭据访问记录中查看。',
 ] as const
 

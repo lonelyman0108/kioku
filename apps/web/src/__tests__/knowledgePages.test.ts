@@ -117,7 +117,7 @@ describe('变更记录的一行', () => {
   it('超出可见范围的后果留在提示层里', async () => {
     expect(await entry({ left: true, changes: [] })).toContain('超出可见范围')
     expect(await entry()).not.toContain('超出可见范围')
-    expect(activityEntry).toContain('这条记忆超出当前账号的可见范围（例如改入其他成员的私人层')
+    expect(activityEntry).toContain('这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆')
   })
 
   it('测试台写下的事件标出测试台和操作账号', async () => {

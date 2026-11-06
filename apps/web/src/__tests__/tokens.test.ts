@@ -127,7 +127,7 @@ describe('两套主题的令牌', () => {
         expect(contrast(t['--strata-on-solid'], t['--strata-solid'])).toBeGreaterThanOrEqual(4.5)
       })
 
-      it('只读的淡色和只能按 URI 读取的实心块分得开，上面的文字过线', () => {
+      it('只读的淡色和只能按坐标读取的实心块分得开，上面的文字过线', () => {
         const share = parseInt(t['--strata-tint']!) / 100
         for (const layer of STACK) {
           const tint = over(t[`--layer-${layer}`], share, t['--ui-bg'])

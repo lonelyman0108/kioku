@@ -53,7 +53,7 @@ function oneOf<T extends string>(key: string, values: readonly T[]): T | null {
 const sortLabels: Record<MemoryListSort, string> = {
   updated: '按最近更新',
   priority: '按优先级',
-  uri: '按 URI',
+  uri: '按坐标',
 }
 const filters = computed(() => ({
   domain: text('domain'),
@@ -164,7 +164,7 @@ const total = computed(() => {
       <UInput
         v-model="keyword"
         name="q"
-        placeholder="搜索 URI 与触发场景"
+        placeholder="搜索标题、坐标与触发场景"
         aria-label="关键字"
         class="w-full"
       />
@@ -236,9 +236,7 @@ const total = computed(() => {
 
     <div v-if="conversationLayer" class="list-note">
       <NoteLine>
-        来自对话的内容不在记忆列表中<Hint>
-          联系人层的事实和情节层的会话摘要在联系人详情中查看。
-        </Hint>
+        来自对话的内容不在记忆列表中<Hint> 联系人的事实与会话摘要在「对话」中查看。 </Hint>
         <template #actions>
           <UButton
             size="sm"

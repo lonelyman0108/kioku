@@ -21,7 +21,7 @@ const props = defineProps<{ spaceId: string }>()
 const emit = defineEmits<{ reactivated: [uri: string] }>()
 const toast = useToast()
 const queryClient = useQueryClient()
-// 和别处一样按条判断：editor 改不了别人的应用的应用层记忆
+// 和别处一样按条判断：editor 改不了别人的应用的记忆
 const { canWriteUri } = useMemoryPermissions(computed(() => props.spaceId))
 
 const queryKey = computed(() => ['memory-expired', props.spaceId] as const)
@@ -90,8 +90,7 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
     <div class="list-head">
       <p>
         已过期的记忆不再召回，也不进启动加载。<Hint>
-          恢复生效后长期有效，可再设置新的有效期。标记为「URI 已释放」的，过期后同一 URI
-          上已写入新记忆；那条记忆仍在时，需先移走或删除。
+          恢复生效后长期有效，可再设置新的有效期。标记为「坐标已释放」的，过期后同一坐标上已写入新记忆；那条记忆仍在时，需先移走或删除。
         </Hint>
       </p>
       <p v-if="retention && anyReleased" class="text-warning">{{ releasedNotice(retention) }}</p>
@@ -121,7 +120,7 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
                 ·
                 <span
                   :class="{ 'text-warning': notes.get(item.id)!.soon }"
-                  :title="`URI 释放于 ${formatTime(item.deletedAt)}，最早于 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 后清除`"
+                  :title="`坐标释放于 ${formatTime(item.deletedAt)}，最早于 ${formatTime(purgeAt(item.deletedAt, retention).toISOString())} 后清除`"
                 >
                   {{ notes.get(item.id)!.text }}
                 </span>
@@ -130,9 +129,9 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
             <span
               v-if="item.released"
               class="block text-warning"
-              title="过期后同一 URI 上已写入新记忆，URI 已释放"
+              title="过期后同一坐标上已写入新记忆，坐标已释放"
             >
-              URI 已释放
+              坐标已释放
             </span>
             <template #actions>
               <UButton

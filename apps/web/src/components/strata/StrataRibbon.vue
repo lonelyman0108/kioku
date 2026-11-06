@@ -108,7 +108,7 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
     ref="root"
     class="strata-ribbon"
     :class="[orientation, { lit }]"
-    aria-label="按层筛选"
+    aria-label="按归属筛选"
     role="group"
   >
     <button

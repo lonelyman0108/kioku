@@ -321,9 +321,9 @@ describe('权限格子', () => {
       'read-write': '读写',
       'read-extract': '读取且抽取写入',
       read: '只读',
-      'explicit-write': '按 URI 读取且可写',
-      'explicit-extract': '按 URI 读取且抽取写入',
-      explicit: '仅按 URI 读取',
+      'explicit-write': '按坐标读取且可写',
+      'explicit-extract': '按坐标读取且抽取写入',
+      explicit: '仅按坐标读取',
       write: '仅写入',
       extract: '仅抽取写入',
       none: '无权限',
@@ -344,7 +344,7 @@ describe('权限格子', () => {
     }
   })
 
-  it('底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按 URI 读取，读不到的没有底色', () => {
+  it('底色说怎么读：满色能读能写，淡色读得到但不能直接写，实心只能按坐标读取，读不到的没有底色', () => {
     const paint = (kind: AccessKind) => paintAccess('app', 'public', kind, box, bar)
     const solid = { ...box, fill: 'var(--strata-explicit)' }
     expect(paint('read-write').map((r) => r.fill)).toEqual(['var(--access-app)'])
@@ -519,9 +519,9 @@ describe('权限范围的每种组合', () => {
       {
         recall: { write: '读写', extract: '读取且抽取写入', '': '只读' },
         explicit: {
-          write: '按 URI 读取且可写',
-          extract: '按 URI 读取且抽取写入',
-          '': '仅按 URI 读取',
+          write: '按坐标读取且可写',
+          extract: '按坐标读取且抽取写入',
+          '': '仅按坐标读取',
         },
         none: { write: '仅写入', extract: '仅抽取写入', '': '无权限' },
       } as const
@@ -665,7 +665,7 @@ describe('Key 的签发范围换算成格子', () => {
     expect(at(rows, 'subject', 'public')).toMatchObject({ read: 'recall', write: true })
   })
 
-  it('机密只能按 URI 读取，要 Key 的上限到机密', () => {
+  it('机密只能按坐标读取，要 Key 的上限到机密', () => {
     const rows = issuedScopeRows({ ...scopes, maxSensitivity: 'secret' })
     expect(at(rows, 'user', 'secret')).toMatchObject({ read: 'explicit', write: true })
     expect(at(issuedScopeRows(scopes), 'user', 'secret')).toMatchObject({
@@ -739,8 +739,8 @@ describe('岩芯', () => {
 
   it('读屏和悬停读到的是签发范围，不说成实际权限', async () => {
     const html = await render(StrataCore, { scopes })
-    expect(html).toContain('aria-label="签发范围：可读 6 层，可写 1 层，最高私密"')
-    expect(html).toContain('<title>签发范围：可读 6 层，可写 1 层，最高私密</title>')
+    expect(html).toContain('aria-label="签发范围：可读 6 类归属，可写 1 类，最高私密"')
+    expect(html).toContain('<title>签发范围：可读 6 类归属，可写 1 类，最高私密</title>')
   })
 
   it('传了服务端算的 rows 就说是当前上下文的范围，哪怕也传了 scopes', async () => {
@@ -752,7 +752,7 @@ describe('岩芯', () => {
 
   it('带 label 时说清是谁的，也说清是签发范围', async () => {
     const html = await render(StrataCore, { scopes, label: 'MacBook' })
-    expect(html).toContain('aria-label="MacBook，签发范围：可读 6 层，可写 1 层，最高私密"')
+    expect(html).toContain('aria-label="MacBook，签发范围：可读 6 类归属，可写 1 类，最高私密"')
     const rows = issuedScopeRows(scopes)
     expect(await render(StrataCore, { rows, label: '群聊' })).toContain(
       'aria-label="群聊的权限范围"',
