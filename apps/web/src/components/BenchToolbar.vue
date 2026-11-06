@@ -117,7 +117,7 @@ const retryKeys = computed(() => retryOf(keys))
       <BenchNotice
         v-if="apps.isError.value"
         color="error"
-        :title="readFailure(apps.error.value)"
+        :title="readFailure(apps.error.value, '读取应用失败')"
         :actions="retryApps"
       />
       <USkeleton v-if="apps.isPending.value" class="h-16 w-full" />
@@ -141,7 +141,7 @@ const retryKeys = computed(() => retryOf(keys))
         <BenchNotice
           v-if="keys.isError.value"
           color="error"
-          :title="readFailure(keys.error.value)"
+          :title="readFailure(keys.error.value, '读取访问密钥失败')"
           :actions="retryKeys"
         />
         <p v-if="keys.data.value && !usable.length && !keys.isError.value" class="text-muted">

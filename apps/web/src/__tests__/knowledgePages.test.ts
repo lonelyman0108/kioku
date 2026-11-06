@@ -213,11 +213,14 @@ describe('列表读取失败', () => {
   })
 
   it('凭据详情的引用和记录读取失败时能重试，不显示成空', () => {
-    expect(credentialDetail).toContain('v-if="references.isError.value"')
-    expect(credentialDetail).toContain('@click="references.refetch()"')
+    // ReadFailureNote 按传入的查询给重试，重读的就是它
+    expect(credentialDetail).toContain(
+      '<ReadFailureNote v-if="references.isError.value" :query="references" />',
+    )
     expect(credentialDetail).toContain('v-else-if="references.data.value" class="section-empty"')
-    expect(credentialDetail).toContain('events.isError.value && !events.isFetchNextPageError.value')
-    expect(credentialDetail).toContain('@click="events.refetch()"')
+    expect(credentialDetail).toMatch(
+      /<ReadFailureNote\s+v-if="events\.isError\.value && !events\.isFetchNextPageError\.value"\s+:query="events"/,
+    )
     expect(credentialDetail).toContain('v-if="events.isFetchNextPageError.value"')
   })
 })

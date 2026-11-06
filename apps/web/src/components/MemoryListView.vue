@@ -15,12 +15,13 @@ import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { icons } from '../icons'
 import { sensitivityLabels } from '../labels'
-import { missingDisclosureLabel, missingDisclosureTone } from '../memoryDetail'
+import { missingDisclosure } from '../memoryDetail'
 import { formatRelative, formatShort, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
 import { DOMAINS_QUERY_OPTIONS } from './memoryTree'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import {
   filteredTotal,
@@ -119,6 +120,8 @@ const list = useInfiniteQuery({
   enabled: active,
 })
 const items = computed(() => list.data.value?.pages.flatMap((page) => page.items) ?? [])
+// 每一行没写触发场景时怎么提示：随列表算一次，渲染时不再每行重复判断
+const rows = computed(() => items.value.map((item) => ({ item, missing: missingDisclosure(item) })))
 
 // 再点一次取消这个敏感级
 function toggleSensitivity(value: string) {
@@ -251,26 +254,14 @@ const total = computed(() => {
 
     <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
     <div v-if="list.isError.value && !list.isFetchNextPageError.value" class="list-note">
-      <NoteLine tone="error">
-        {{ readFailure(list.error.value) }}
-        <template #actions>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="list.isFetching.value"
-            @click="list.refetch()"
-            >重试</UButton
-          >
-        </template>
-      </NoteLine>
+      <ReadFailureNote :query="list" />
     </div>
     <div v-if="list.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 5" :key="n" class="h-12 w-full" />
     </div>
     <template v-else-if="list.data.value">
       <ul>
-        <li v-for="item in items" :key="item.id">
+        <li v-for="{ item, missing } in rows" :key="item.id">
           <MemoryRow
             as="button"
             type="button"
@@ -285,13 +276,12 @@ const total = computed(() => {
             <span class="flex items-baseline gap-2">
               <span class="min-w-0 flex-1 truncate">
                 <span
-                  v-if="missingDisclosureTone(item)"
+                  v-if="missing"
                   :class="{
-                    'text-warning':
-                      missingDisclosureTone(item) === 'warning' && item.uri !== selectedUri,
+                    'text-warning': missing.tone === 'warning' && item.uri !== selectedUri,
                   }"
                 >
-                  {{ missingDisclosureLabel(item) }}
+                  {{ missing.short }}
                 </span>
                 <template v-else>{{ item.disclosure }}</template>
               </span>

@@ -3,7 +3,7 @@ import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import BackupSettings from '../components/BackupSettings.vue'
 import EmbeddingSettings from '../components/EmbeddingSettings.vue'
@@ -12,6 +12,7 @@ import Hint from '../components/Hint.vue'
 import RetentionSettings from '../components/RetentionSettings.vue'
 import SpaceImport from '../components/SpaceImport.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PropertyList from '../components/strata/PropertyList.vue'
 import SettingsBlock from '../components/strata/SettingsBlock.vue'
 import SettingsFrame from '../components/strata/SettingsFrame.vue'
@@ -99,19 +100,7 @@ const unsaved = computed(() => [
           </Hint>
         </template>
         <!-- 后台刷新失败时读到过的状态留着，错误放在上面 -->
-        <NoteLine v-if="masterKey.isError.value" tone="error">
-          {{ readFailure(masterKey.error.value) }}
-          <template #actions>
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :loading="masterKey.isFetching.value"
-              @click="masterKey.refetch()"
-              >重试</UButton
-            >
-          </template>
-        </NoteLine>
+        <ReadFailureNote v-if="masterKey.isError.value" :query="masterKey" />
         <div v-if="masterKey.data.value" class="space-y-3">
           <p v-if="!masterKey.data.value.configured" class="text-muted">
             未配置主密钥，无法保存机密记忆、托管的凭据，以及实例设置中的 API Key 与 Secret Access
@@ -162,19 +151,7 @@ const unsaved = computed(() => [
           明细到期后删除，仅保留每条记忆的累计召回次数。
           <Hint>明细包括命中的记忆、分数与打码后的提示语。</Hint>
         </template>
-        <NoteLine v-if="recallSettings.isError.value" tone="error">
-          {{ readFailure(recallSettings.error.value) }}
-          <template #actions>
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :loading="recallSettings.isFetching.value"
-              @click="recallSettings.refetch()"
-              >重试</UButton
-            >
-          </template>
-        </NoteLine>
+        <ReadFailureNote v-if="recallSettings.isError.value" :query="recallSettings" />
         <USkeleton v-if="recallSettings.isPending.value" class="h-16 w-full" />
         <form
           v-else-if="recallSettings.data.value"

@@ -25,6 +25,7 @@ import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import PropertyList from './strata/PropertyList.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
@@ -246,14 +247,7 @@ async function reveal() {
         </template>
       </SectionHeading>
       <p class="section-note">仍有引用时无法删除凭据。</p>
-      <NoteLine v-if="references.isError.value" tone="error">
-        {{ readFailure(references.error.value) }}
-        <template #actions>
-          <UButton size="xs" color="neutral" variant="outline" @click="references.refetch()">
-            重试
-          </UButton>
-        </template>
-      </NoteLine>
+      <ReadFailureNote v-if="references.isError.value" :query="references" />
       <USkeleton v-if="references.isPending.value" class="h-8 w-full" />
       <ul v-else-if="references.data.value?.items.length">
         <li v-for="m in references.data.value.items" :key="m.id">
@@ -286,14 +280,10 @@ async function reveal() {
         </template>
       </SectionHeading>
       <p class="section-note">记录新建、修改、删除与每次取用。</p>
-      <NoteLine v-if="events.isError.value && !events.isFetchNextPageError.value" tone="error">
-        {{ readFailure(events.error.value) }}
-        <template #actions>
-          <UButton size="xs" color="neutral" variant="outline" @click="events.refetch()">
-            重试
-          </UButton>
-        </template>
-      </NoteLine>
+      <ReadFailureNote
+        v-if="events.isError.value && !events.isFetchNextPageError.value"
+        :query="events"
+      />
       <USkeleton v-if="events.isPending.value" class="h-8 w-full" />
       <ol v-else>
         <li v-for="e in eventItems" :key="e.id" class="event-row">

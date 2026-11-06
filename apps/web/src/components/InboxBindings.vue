@@ -2,12 +2,11 @@
 import { useQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 
-import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import Hint from './Hint.vue'
 import SubjectBindings from './SubjectBindings.vue'
-import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
 // 账号绑定：等当前账号确认的绑定只有概览接口给，和概览共用一份缓存
@@ -30,19 +29,7 @@ const total = computed(() => overview.data.value?.inbox.bindings ?? 0)
         <Hint>对方在与机器人的私聊中使用绑定码发起申请，确认后账号并入标记为本人的联系人。</Hint>
       </template>
     </SectionHeading>
-    <NoteLine v-if="overview.isError.value" class="panel-note" tone="error">
-      {{ readFailure(overview.error.value) }}
-      <template #actions>
-        <UButton
-          size="sm"
-          color="neutral"
-          variant="outline"
-          :loading="overview.isFetching.value"
-          @click="overview.refetch()"
-          >重试</UButton
-        >
-      </template>
-    </NoteLine>
+    <ReadFailureNote v-if="overview.isError.value" class="panel-note" :query="overview" />
     <USkeleton v-if="overview.isPending.value" class="mt-3 h-24 w-full" />
     <p v-else-if="overview.data.value && !items.length" class="panel-empty">暂无账号绑定申请</p>
     <template v-else-if="overview.data.value">

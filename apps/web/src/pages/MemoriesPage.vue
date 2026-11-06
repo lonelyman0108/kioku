@@ -35,7 +35,7 @@ import {
   type MemoryTreeItem,
 } from '../components/memoryTree'
 import MemoryFlags from '../components/strata/MemoryFlags.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import StrataRibbon from '../components/strata/StrataRibbon.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { tallyCounts } from '../components/strata/strata'
@@ -44,6 +44,7 @@ import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
 import { invalidateInboxCounts } from '../inbox'
 import { statsChanged } from '../memoryDetail'
+import type { ReadState } from '../query'
 
 const route = useRoute()
 const router = useRouter()
@@ -287,6 +288,8 @@ function refresh() {
   refreshCounts()
   void serially(loadRoots)
 }
+// 目录的根节点不是查询，照查询的形状交给 ReadFailureNote：错误、是否在读、重读
+const rootsRead: ReadState = { error: rootsError, isFetching: loadingRoots, refetch: refresh }
 
 // 这次点在箭头上。树的点击同时算选中和展开：点箭头只展开收起，点名字只打开
 function clickedChevron(event: Event) {
@@ -618,27 +621,16 @@ const crumbs = computed(() => {
         <p v-if="overview.data.value" class="index-count">
           <b>{{ overview.data.value.total }}</b> 条
         </p>
+        <!-- 重读失败时已经读到的目录留着，展开的节点也不丢：错误放在上面 -->
         <div v-if="rootsError !== null" class="index-note">
-          <NoteLine tone="error">
-            {{ readFailure(rootsError) }}
-            <template #actions>
-              <UButton
-                size="sm"
-                color="neutral"
-                variant="outline"
-                :loading="loadingRoots"
-                @click="refresh"
-                >重试</UButton
-              >
-            </template>
-          </NoteLine>
+          <ReadFailureNote :query="rootsRead" />
         </div>
-        <p v-else-if="!loadingRoots && !roots.length" class="index-empty">
+        <p v-if="rootsError === null && !loadingRoots && !roots.length" class="index-empty">
           暂无记忆{{ canWrite ? '。点击「新建」添加第一条。' : '' }}
         </p>
         <!-- 一级最多五百行，展开几级就是几千行：只渲染看得见的那些。行高固定，虚拟滚动不用量 -->
         <UTree
-          v-else
+          v-if="loadingRoots || roots.length"
           ref="treeRef"
           :key="rowHeight"
           v-model:expanded="expanded"

@@ -14,6 +14,7 @@ import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 
 const props = defineProps<{ spaceId: string }>()
 // restored：撤销删除之后回到了树上；showExpired：撤销之后它是过期的，要去「已过期」里看
@@ -108,19 +109,7 @@ const TAKEN_HINT =
     </div>
     <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
     <div v-if="deleted.isError.value && !deleted.isFetchNextPageError.value" class="list-note">
-      <NoteLine tone="error">
-        {{ readFailure(deleted.error.value) }}
-        <template #actions>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="deleted.isFetching.value"
-            @click="deleted.refetch()"
-            >重试</UButton
-          >
-        </template>
-      </NoteLine>
+      <ReadFailureNote :query="deleted" />
     </div>
     <div v-if="deleted.isPending.value" class="space-y-2 p-3.5">
       <USkeleton v-for="n in 4" :key="n" class="h-12 w-full" />

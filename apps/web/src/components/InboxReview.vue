@@ -11,6 +11,7 @@ import { originScopeText } from '../labels'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import UriPath from './strata/UriPath.vue'
@@ -157,23 +158,11 @@ async function act(action: 'confirm' | 'delete', items: Seen[]) {
         </UButton>
       </div>
     </div>
-    <NoteLine
+    <ReadFailureNote
       v-if="queue.isError.value && !queue.isFetchNextPageError.value"
       class="review-note"
-      tone="error"
-    >
-      {{ readFailure(queue.error.value) }}
-      <template #actions>
-        <UButton
-          size="sm"
-          color="neutral"
-          variant="outline"
-          :loading="queue.isFetching.value"
-          @click="queue.refetch()"
-          >重试</UButton
-        >
-      </template>
-    </NoteLine>
+      :query="queue"
+    />
     <div v-if="queue.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 6" :key="n" class="h-12 w-full" />
     </div>

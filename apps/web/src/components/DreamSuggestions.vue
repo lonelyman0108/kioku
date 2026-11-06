@@ -32,6 +32,7 @@ import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import UriPath from './strata/UriPath.vue'
@@ -284,23 +285,11 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       </UButton>
     </div>
 
-    <NoteLine
+    <ReadFailureNote
       v-if="suggestions.isError.value && !suggestions.isFetchNextPageError.value"
       class="dream-note"
-      tone="error"
-    >
-      {{ readFailure(suggestions.error.value) }}
-      <template #actions>
-        <UButton
-          size="sm"
-          color="neutral"
-          variant="outline"
-          :loading="suggestions.isFetching.value"
-          @click="suggestions.refetch()"
-          >重试</UButton
-        >
-      </template>
-    </NoteLine>
+      :query="suggestions"
+    />
     <div v-if="suggestions.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 3" :key="n" class="h-32 w-full" />
     </div>

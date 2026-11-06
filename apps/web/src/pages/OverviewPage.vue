@@ -3,13 +3,12 @@ import { useQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { backupNotice } from '../backup'
 import Hint from '../components/Hint.vue'
 import OverviewRow from '../components/OverviewRow.vue'
 import RecentChange from '../components/RecentChange.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataColumn from '../components/strata/StrataColumn.vue'
 import {
@@ -117,19 +116,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
   <div class="overview">
     <!-- 读到过的内容留着，错误放在上面 -->
     <div v-if="overview.isError.value" class="overview-failed">
-      <NoteLine tone="error">
-        {{ readFailure(overview.error.value) }}
-        <template #actions>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="overview.isFetching.value"
-            @click="overview.refetch()"
-            >重试</UButton
-          >
-        </template>
-      </NoteLine>
+      <ReadFailureNote :query="overview" />
     </div>
     <div v-if="overview.isPending.value" class="overview-grid">
       <div v-for="n in 3" :key="n" class="overview-col space-y-4">

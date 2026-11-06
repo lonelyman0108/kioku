@@ -3,12 +3,11 @@ import { useQuery } from '@tanstack/vue-query'
 import { computed } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import RecallDebugPanel from '../components/RecallDebugPanel.vue'
 import MemoryFlags from '../components/strata/MemoryFlags.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import UriPath from '../components/strata/UriPath.vue'
@@ -32,19 +31,7 @@ const memoryLink = (uri: string) => memoryRoute(spaceId.value, uri)
 
 <template>
   <div class="recall-page">
-    <NoteLine v-if="stats.isError.value" tone="error">
-      {{ readFailure(stats.error.value) }}
-      <template #actions>
-        <UButton
-          size="sm"
-          color="neutral"
-          variant="outline"
-          :loading="stats.isFetching.value"
-          @click="stats.refetch()"
-          >重试</UButton
-        >
-      </template>
-    </NoteLine>
+    <ReadFailureNote v-if="stats.isError.value" :query="stats" />
     <div v-if="stats.isPending.value" class="stats">
       <USkeleton v-for="n in 4" :key="n" class="h-48 w-full" />
     </div>

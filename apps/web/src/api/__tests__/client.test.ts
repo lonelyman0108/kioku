@@ -3,22 +3,48 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
 import { URI_FORMAT_HINT } from '../../labels'
-import { ApiError, attachmentName, download, readFailures, request } from '../client'
+import { ApiError, attachmentName, download, readFailure, request, retryable } from '../client'
 import { api } from '../endpoints'
 
 afterEach(() => vi.unstubAllGlobals())
 
-describe('几样一起读时的错误文字', () => {
-  it('没出错的跳过，说的是同一句只留一条，不认识的错误不漏内部信息', () => {
-    expect(readFailures([null, null])).toEqual([])
-    expect(
-      readFailures([
-        new ApiError(500, '服务端出错了'),
-        null,
-        new ApiError(502, '服务端出错了'),
-        new TypeError('Failed to fetch http://127.0.0.1'),
-      ]),
-    ).toEqual(['服务端出错了', '读取失败'])
+describe('读取失败的文字', () => {
+  it('服务端给了说明就用它；没有时用兜底的说法，不漏内部信息', () => {
+    expect(readFailure(new ApiError(500, '服务端出错了'))).toBe('服务端出错了')
+    expect(readFailure(new TypeError('Failed to fetch http://127.0.0.1'))).toBe('读取失败')
+    expect(readFailure(new TypeError('Failed to fetch'), '读取预设失败')).toBe('读取预设失败')
+    // 有服务端的说明时兜底的说法不用
+    expect(readFailure(new ApiError(404, '预设不存在'), '读取预设失败')).toBe('预设不存在')
+  })
+})
+
+describe('值不值得再读一次', () => {
+  it('网络错误、请求中止、5xx、请求超时与太频繁可以再读', () => {
+    expect(retryable(new TypeError('Failed to fetch'))).toBe(true)
+    expect(retryable(new DOMException('aborted', 'AbortError'))).toBe(true)
+    for (const status of [500, 502, 503, 408, 429]) {
+      expect(retryable(new ApiError(status, '…')), String(status)).toBe(true)
+    }
+  })
+
+  it('确定的结果再读也一样：401、403、404、409，以及响应和契约对不上', () => {
+    for (const status of [400, 401, 403, 404, 409, 422]) {
+      expect(retryable(new ApiError(status, '…')), String(status)).toBe(false)
+    }
+    const parsed = z.object({ ok: z.boolean() }).safeParse({ ok: 'yes' })
+    expect(parsed.success).toBe(false)
+    expect(retryable(parsed.error)).toBe(false)
+  })
+
+  it('响应解析不过时 request 抛的就是这种错误：不会被当成可以再读', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({ ok: 'yes' })),
+    )
+    const failure = await request('GET', '/x', { schema: z.object({ ok: z.boolean() }) }).catch(
+      (err: unknown) => err,
+    )
+    expect(retryable(failure)).toBe(false)
   })
 })
 

@@ -14,9 +14,11 @@ import { icons } from '../icons'
 import {
   INBOX_TABS,
   actionableInboxCount,
+  inboxTabActionable,
   inboxTabCount,
   inboxTabLabels,
   refreshInbox,
+  type InboxTab,
 } from '../inbox'
 
 const route = useRoute()
@@ -26,12 +28,15 @@ const spaceId = computed(() => String(route.params.spaceId))
 const canAct = computed(() => space.value?.role === 'owner' || space.value?.role === 'editor')
 
 const counts = useInboxCounts(spaceId)
-// 标题的大数字和导航角标、概览同一个口径：当前账号能处理的。各分类的行照常写各自的条数
+// 标题的大数字和导航角标、概览同一个口径：当前账号能处理的；计数到了就显示，不等空间信息。
+// 各分类照常写各自的条数，当前账号处理不了的那几类和 0 一样不醒目
 const total = computed(() =>
-  counts.data.value && space.value
-    ? actionableInboxCount(counts.data.value, space.value.role)
-    : null,
+  counts.data.value ? actionableInboxCount(counts.data.value, space.value?.role) : null,
 )
+const quiet = (tab: InboxTab) =>
+  !counts.data.value ||
+  !inboxTabCount(counts.data.value, tab) ||
+  !inboxTabActionable(tab, space.value?.role)
 const tab = useInboxTab(counts)
 const refreshing = computed(() => counts.isFetching.value)
 // 换分类时回到顶上：各类共用一个滚动区
@@ -68,7 +73,7 @@ watch(tab, () => {
             :aria-current="tab === t ? 'page' : undefined"
           >
             <span>{{ inboxTabLabels[t] }}</span>
-            <b :class="{ none: !counts.data.value || !inboxTabCount(counts.data.value, t) }">
+            <b :class="{ none: quiet(t) }">
               {{ counts.data.value ? inboxTabCount(counts.data.value, t) : '–' }}
             </b>
           </RouterLink>
@@ -162,6 +167,10 @@ watch(tab, () => {
 }
 .inbox-tab[aria-current='page'] b {
   color: var(--strata-on-selected);
+}
+/* 选中的那一类反白，不醒目的数字也要退一级 */
+.inbox-tab[aria-current='page'] b.none {
+  color: var(--strata-on-selected-muted);
 }
 .inbox-tab:focus-visible {
   outline-offset: -2px;

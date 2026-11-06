@@ -13,19 +13,22 @@ export class ApiError extends Error {
   }
 }
 
-// 读取失败时显示的文字：服务端给了说明就用它
-export function readFailure(error: unknown): string {
-  return error instanceof ApiError ? error.message : '读取失败'
+// 读取失败时显示的文字：服务端给了说明就用它。没有说明时（网络错误、响应格式不符）用 fallback，
+// 一页上读好几样的地方传具体的说法，免得几处都只写「读取失败」分不清是哪一样
+export function readFailure(error: unknown, fallback = '读取失败'): string {
+  return error instanceof ApiError ? error.message : fallback
 }
 
-// 值不值得再读一次：401、403、404 这类是确定的结果，再读也一样；网络错误和 5xx 才可能读到。
-// 查询的自动重试和界面上的「重试」按钮用这同一条规则
-export const retryable = (error: unknown): boolean =>
-  !(error instanceof ApiError && error.status < 500)
+// 4xx 里只有这两个是暂时的：请求超时、请求太频繁
+const TRANSIENT_STATUSES = [408, 429]
 
-// 一个页面读好几样时的错误文字：没出错的（query.error 是 null）跳过，说的是同一句只留一条
-export function readFailures(errors: readonly unknown[]): string[] {
-  return [...new Set(errors.filter((error) => error != null).map((error) => readFailure(error)))]
+// 值不值得再读一次：401、403、404 这类是确定的结果，再读也一样；响应和契约对不上（zod 解析不过）
+// 也是确定的。网络错误、请求中止、5xx、408、429 才可能读到。查询的自动重试和界面上的「重试」用这同一条规则
+export function retryable(error: unknown): boolean {
+  if (error instanceof ApiError)
+    return error.status >= 500 || TRANSIENT_STATUSES.includes(error.status)
+  // 按名字认 zod 的解析错误：这里只引了 zod 的类型，不为一次判断把它作为运行时依赖引进来
+  return !(error instanceof Error && error.name === 'ZodError')
 }
 
 // 有的报错是写给接口与 MCP 的：URI 格式那句中英并列，前面还带着字段路径（uri：、to：）。界面上换成只说中文的那句

@@ -9,6 +9,7 @@ import { api } from '../api/endpoints'
 import ActivityEntry from '../components/ActivityEntry.vue'
 import Hint from '../components/Hint.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import { useNow } from '../composables/useNow'
@@ -52,19 +53,10 @@ const days = computed(() => groupByDay(items.value, new Date(`${today.value}T00:
     </PageHead>
     <div class="activity-body">
       <!-- 读取失败时已经读到的行留着：翻页失败的错误放在「加载更多」上面，其余放在最上面 -->
-      <NoteLine v-if="activity.isError.value && !activity.isFetchNextPageError.value" tone="error">
-        {{ readFailure(activity.error.value) }}
-        <template #actions>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="activity.isFetching.value"
-            @click="activity.refetch()"
-            >重试</UButton
-          >
-        </template>
-      </NoteLine>
+      <ReadFailureNote
+        v-if="activity.isError.value && !activity.isFetchNextPageError.value"
+        :query="activity"
+      />
       <div v-if="activity.isPending.value" class="space-y-3">
         <USkeleton v-for="n in 6" :key="n" class="h-8 w-full" />
       </div>

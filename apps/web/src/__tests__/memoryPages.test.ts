@@ -243,22 +243,24 @@ describe('记忆详情', () => {
   })
 
   it('补全的说明跟着情况换，不一律说召回', () => {
-    expect(memoryEditor).toContain('{{ missingDisclosureHint(base, now) }}')
+    expect(memoryEditor).toContain('<Hint>{{ missingNote.hint }}</Hint>')
     expect(memoryEditor).not.toContain('<Hint>补全后召回更准确。</Hint>')
   })
 
-  it('没写触发场景的提示按 missingDisclosureTone 走，列表和详情一个规则', () => {
-    expect(memoryEditor).toContain('missingDisclosureTone(base.value, now.value)')
-    expect(memoryEditor).toMatch(/<NoteLine\s+v-if="disclosureTone"/)
-    expect(memoryListView).toContain('v-if="missingDisclosureTone(item)"')
+  it('没写触发场景的提示按 missingDisclosure 走，列表和详情一个规则，一次判断给全', () => {
+    expect(memoryEditor).toContain('missingDisclosure(base.value, now.value)')
+    expect(memoryEditor).toMatch(/<NoteLine\s+v-if="missingNote"/)
+    expect(memoryListView).toContain('missing: missingDisclosure(item)')
+    expect(memoryListView).toContain('v-for="{ item, missing } in rows"')
     expect(memoryListView).not.toContain('启动加载')
   })
 
   it('启动加载的节点和要补的节点写的字不同，列表和详情都从 memoryDetail 取，不只靠颜色区分', () => {
-    expect(memoryListView).toContain('{{ missingDisclosureLabel(item) }}')
+    expect(memoryListView).toContain('{{ missing.short }}')
     expect(memoryListView).not.toMatch(/>\s*未设触发场景\s*</)
-    expect(memoryEditor).toContain('missingDisclosureTitles[disclosureTone]')
-    expect(memoryEditor).not.toMatch(/>\s*未设触发场景<Hint/)
+    expect(memoryEditor).toContain('{{ missingNote.text }}<Hint>')
+    expect(memoryEditor).toContain('{{ missingNote.short }}')
+    expect(memoryEditor).not.toMatch(/>\s*未设触发场景\s*</)
   })
 
   it('编辑和历史都就地切换，不弹窗', () => {

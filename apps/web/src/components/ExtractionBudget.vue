@@ -3,11 +3,11 @@ import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
-import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
 const props = defineProps<{ spaceId: string; editable: boolean }>()
@@ -89,19 +89,7 @@ async function save() {
       </Hint>
     </template>
     <!-- 后台刷新失败时读到过的用量留着，错误放在上面 -->
-    <NoteLine v-if="usage.isError.value" tone="error">
-      {{ readFailure(usage.error.value) }}
-      <template #actions>
-        <UButton
-          size="sm"
-          color="neutral"
-          variant="outline"
-          :loading="usage.isFetching.value"
-          @click="usage.refetch()"
-          >重试</UButton
-        >
-      </template>
-    </NoteLine>
+    <ReadFailureNote v-if="usage.isError.value" :query="usage" />
     <USkeleton v-if="usage.isPending.value" class="h-24 w-full" />
     <div v-else-if="usage.data.value" class="space-y-4">
       <div class="space-y-2">

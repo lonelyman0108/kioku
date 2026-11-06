@@ -213,7 +213,7 @@ function startRun() {
       <BenchNotice
         v-if="presets.isError.value"
         color="error"
-        :title="readFailure(presets.error.value)"
+        :title="readFailure(presets.error.value, '读取预设失败')"
       />
       <div class="scenario-pick">
         <UFormField label="预设" class="min-w-0 flex-[1_1_14rem]">
