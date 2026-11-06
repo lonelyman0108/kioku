@@ -35,7 +35,7 @@ export async function readableSubjectFacts(
     .from(memories)
     .where(
       and(
-        // 只看对象层，人格的挑选用不上
+        // 只看联系人的事实，人格的挑选用不上
         readableConditions(access, { personaIds: [] }),
         eq(memories.layer, 'subject'),
         eq(memories.form, 'extracted'),
@@ -56,9 +56,9 @@ export async function readableSubjectFacts(
   }))
 }
 
-// 对象直连：当前发言人与本群的对象层里抽取的事实，不看查询直接注入。
+// 对象直连：当前发言人与本群身上抽取的事实，不看查询直接注入。
 // 仍然先套读权限：来源作用域只含全局、本应用与本群（私聊时是与此人的对话），群里读不到私聊里记下的事实。
-// 只收抽取的事实：策展的对象层节点有 URI，照常走各路召回。没有事实的对象不列
+// 只收抽取的事实：记下的记忆有坐标，照常走各路召回。没有事实的对象不列
 export async function subjectFacts(
   tx: Tx,
   access: Access,

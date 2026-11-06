@@ -111,7 +111,8 @@ def test_recall_parses_candidates_and_subject_facts():
                 "candidates": [
                     {
                         "uri": "core://rules",
-                        "layer": "base",
+                        "title": "群里的规则",
+                        "layer": "core",
                         "priority": 0,
                         "disclosure": None,
                         "score": 0.5,
@@ -135,5 +136,6 @@ def test_recall_parses_candidates_and_subject_facts():
     )
     assert isinstance(result, RecallResponse)
     assert result.candidates[0].uri == "core://rules"
+    assert result.candidates[0].title == "群里的规则"
     assert result.subjects[0].name is None
     assert result.subjects[0].facts[0].content == "在学日语"

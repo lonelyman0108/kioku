@@ -86,7 +86,7 @@ const remove = createRoute({
   method: 'delete',
   path: '/spaces/{spaceId}/personas/{personaId}',
   tags: ['personas'],
-  summary: '删除人格：有应用在用、被别的人格继承、或还有人格层记忆（含已删除的）时不能删',
+  summary: '删除人格：有应用在用、被别的人格继承、或还有这个人格的记忆（含已删除的）时不能删',
   request: { params: PersonaParams },
   responses: {
     204: { description: '已删除' },
@@ -202,6 +202,7 @@ export function personaRoutes(deps: Deps) {
             .select({
               domain: memories.domain,
               path: memories.path,
+              title: memories.title,
               personaId: memories.personaId,
               priority: memories.priority,
               sensitivity: memories.sensitivity,
@@ -231,6 +232,7 @@ export function personaRoutes(deps: Deps) {
         const byId = new Map(related.map((p) => [p.id, p]))
         const toNode = (n: (typeof nodes)[number]) => ({
           uri: formatUri(n.domain!, n.path!),
+          title: n.title!,
           personaId: n.personaId!,
           priority: n.priority,
           sensitivity: n.sensitivity,
@@ -306,7 +308,7 @@ export function personaRoutes(deps: Deps) {
             .from(appGroupPersonas)
             .where(eq(appGroupPersonas.personaId, personaId)),
           tx.select({ n: count() }).from(personas).where(eq(personas.extendsId, personaId)),
-          // 人格层记忆会被连带硬删除，已删除、还能撤销删除的也算
+          // 这个人格的记忆会被连带硬删除，已删除、还能撤销删除的也算
           tx.select({ n: count() }).from(memories).where(eq(memories.personaId, personaId)),
         ])
         const reasons = [
@@ -314,7 +316,7 @@ export function personaRoutes(deps: Deps) {
           rules!.n ? `${rules!.n} 条按群换人格的规则使用此人格` : '',
           heirs!.n ? `${heirs!.n} 个人格继承此人格` : '',
           // 不给条数：里面可能有查看者读不到的 secret 记忆
-          stored!.n ? '仍有人格层记忆（含已删除但可恢复的）' : '',
+          stored!.n ? '仍有这个人格的记忆（含已删除但可恢复的）' : '',
         ].filter(Boolean)
         if (reasons.length) return reasons
         await tx.delete(personas).where(eq(personas.id, personaId))

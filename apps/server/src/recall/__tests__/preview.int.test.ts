@@ -9,11 +9,8 @@ import type {
 } from '@kioku/contracts'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
-import { and, eq } from 'drizzle-orm'
-
 import { createApp } from '../../app'
-import { withSpace, type Database } from '../../db/client'
-import { memories } from '../../db/schema'
+import type { Database } from '../../db/client'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import {
@@ -86,12 +83,12 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
       glossary: ['回复'],
     })
     await createMemory({
-      uri: 'notes://reply',
+      uri: 'user://notes/reply',
       content: '私下的回复习惯',
       glossary: ['回复'],
       sensitivity: 'private',
     })
-    await createMemory({ uri: 'notes://weather', content: '今天天气不错' })
+    await createMemory({ uri: 'user://notes/weather', content: '今天天气不错' })
 
     const res = await as('POST', `/apps/${appId}/keys/${keyId}/debug`, { query: '群里怎么回复' })
     expect(res.status).toBe(200)
@@ -107,7 +104,7 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
       expect.arrayContaining([
         ['persona://doubao/style', 'override'],
         ['app://other/rules', 'app'],
-        ['notes://reply', 'sensitivity'],
+        ['user://notes/reply', 'sensitivity'],
       ]),
     )
     expect(debug.filtered).toHaveLength(3)
@@ -117,13 +114,12 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     await createMemory({
       uri: 'core://agent',
       content: '先读正文再信任',
-      layer: 'base',
       priority: 0,
     })
     await createMemory({ uri: 'persona://doubao/soul', content: '主人格的设定', priority: 0 })
     await createMemory({ uri: 'persona://doubao-group/soul', content: '群聊版的设定', priority: 0 })
     await createMemory({
-      uri: 'projects://kioku',
+      uri: 'user://projects/kioku',
       content: 'Kioku 是记忆服务',
       glossary: ['kioku'],
       sensitivity: 'internal',
@@ -143,7 +139,7 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     ])
     const soul = preview.entries.find((e) => e.uri === 'persona://doubao-group/soul')!
     expect(soul.chars).toBe(bootEntryChars(soul.uri, '群聊版的设定'))
-    expect(preview.related.map((c) => c.uri)).toContain('projects://kioku')
+    expect(preview.related.map((c) => c.uri)).toContain('user://projects/kioku')
     expect(preview.dropped).toEqual([])
 
     const lifecycle = await app.request(
@@ -163,7 +159,6 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     await createMemory({
       uri: 'core://rules',
       content: '群里讲话要友善，\n读书会每周五晚上八点开始。',
-      layer: 'base',
       glossary: ['读书会'],
     })
     // 两个启动节点合计超出 boot 的字数预算，后一个展不开
@@ -171,7 +166,6 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
       await createMemory({
         uri: `core://long-${name}`,
         content: name.repeat(9_000),
-        layer: 'base',
         priority: 0,
       })
     }
@@ -192,7 +186,7 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     ).json()) as BootPreview
     expect(preview.entries.map((e) => e.uri)).toEqual(['core://long-a'])
     // 预览列出没展开的，看得出哪些没注入；给 bot 的内容里连 URI 也没有
-    expect(preview.omitted).toEqual(['core://long-b'])
+    expect(preview.omitted).toEqual([{ uri: 'core://long-b', title: 'long-b' }])
     expect(preview.context).not.toContain('core://long-b')
     const start = await app.request(
       '/v1/lifecycle/event',
@@ -202,23 +196,24 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     expect((started as { context: string }).context).toBe(preview.context)
   })
 
-  it('过滤原因按查看者看到的那条记忆给出：同一 URI 上另有一条过期的共享记录时不会认错', async () => {
-    // 先有一条共享的，再让它过期；写不了基础层的 Key 在同一个 URI 上建私人记录时，过期的共享记录留着
-    await createMemory({
-      uri: 'notes://dup',
-      content: '重复的路径',
-      glossary: ['重复'],
-      layer: 'base',
-    })
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx
-        .update(memories)
-        .set({ validTo: new Date(Date.now() - 60_000) })
-        .where(and(eq(memories.domain, 'notes'), eq(memories.path, 'dup'))),
+  it('过滤原因按查看者看到的那条记忆给出：别的成员在同一坐标上也有本人记忆时不会认错', async () => {
+    // bob 的本人里也有这个坐标，内部级：按坐标去找的话可能找到他的那条
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const theirs = await as(
+      'POST',
+      '/memories',
+      {
+        uri: 'user://notes/dup',
+        content: '别人的重复路径',
+        glossary: ['重复'],
+        sensitivity: 'internal',
+      },
+      bob.cookie,
     )
+    expect(theirs.status).toBe(201)
     const writer = await ws.issueKey(appId, {
       ...FULL_SCOPES,
-      writeLayers: ['private'],
+      writeLayers: ['user'],
       maxSensitivity: 'private',
     })
     const created = await app.request(
@@ -226,7 +221,7 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
       jsonRequest(
         'POST',
         {
-          uri: 'notes://dup',
+          uri: 'user://notes/dup',
           content: '私下重复的路径',
           glossary: ['重复'],
           sensitivity: 'private',
@@ -238,7 +233,9 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
 
     const res = await as('POST', `/apps/${appId}/keys/${keyId}/debug`, { query: '重复' })
     const debug = (await res.json()) as RecallDebug
-    expect(debug.filtered.map((f) => [f.uri, f.reason])).toEqual([['notes://dup', 'sensitivity']])
+    expect(debug.filtered.map((f) => [f.uri, f.reason])).toEqual([
+      ['user://notes/dup', 'sensitivity'],
+    ])
   })
 
   it('只给应用主人：空间 owner 也不能模拟成员的 Key；作废与不存在的 Key 返回 404', async () => {

@@ -3,12 +3,11 @@ from enum import StrEnum
 
 class MemorySummaryLayerType3Type1(StrEnum):
     APP = "app"
-    BASE = "base"
+    CORE = "core"
     EPISODE = "episode"
-    OWNER = "owner"
     PERSONA = "persona"
-    PRIVATE = "private"
     SUBJECT = "subject"
+    USER = "user"
 
     def __str__(self) -> str:
         return str(self.value)

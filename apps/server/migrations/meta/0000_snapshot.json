@@ -1,5 +1,5 @@
 {
-  "id": "8b903c64-3b02-4b01-82c3-7d15d9c98893",
+  "id": "93a2dff7-f6be-449e-a228-41df61320b2b",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -1730,6 +1730,12 @@
           "primaryKey": false,
           "notNull": true
         },
+        "conversation_id": {
+          "name": "conversation_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
         "subject_ids": {
           "name": "subject_ids",
           "type": "uuid[]",
@@ -1868,6 +1874,28 @@
           "concurrently": false,
           "method": "gin",
           "with": {}
+        },
+        "extraction_runs_conversation_idx": {
+          "name": "extraction_runs_conversation_idx",
+          "columns": [
+            {
+              "expression": "conversation_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            },
+            {
+              "expression": "created_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "where": "\"extraction_runs\".\"conversation_id\" is not null",
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
         }
       },
       "foreignKeys": {
@@ -1887,6 +1915,15 @@
           "columnsFrom": ["space_id", "app_id"],
           "columnsTo": ["space_id", "id"],
           "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "extraction_runs_conversation_fk": {
+          "name": "extraction_runs_conversation_fk",
+          "tableFrom": "extraction_runs",
+          "tableTo": "conversations",
+          "columnsFrom": ["space_id", "conversation_id"],
+          "columnsTo": ["space_id", "id"],
+          "onDelete": "set null",
           "onUpdate": "no action"
         }
       },

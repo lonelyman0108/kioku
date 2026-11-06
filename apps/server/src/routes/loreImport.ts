@@ -32,6 +32,7 @@ import {
   planImportFor,
   planSync,
   previewImport,
+  requestLayer,
   staleAgainst,
   type BasePlan,
   type ExistingApp,
@@ -149,9 +150,10 @@ function planView(
           uri: node.uri,
           aliases: node.aliases,
           targets: targets.map(({ item, state, current }) => {
-            const layer = item.request.layer!
+            const layer = requestLayer(item.request)
             return {
               uri: item.request.uri,
+              title: item.request.title ?? item.request.uri,
               layer,
               sensitivity: item.request.sensitivity ?? DEFAULT_SENSITIVITY[layer],
               priority: item.request.priority,

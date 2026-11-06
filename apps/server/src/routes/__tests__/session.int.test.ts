@@ -61,23 +61,20 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
     await consoleCreate({
       uri: 'core://rules',
       content: '基础规则',
-      layer: 'base',
       sensitivity: 'public',
       priority: 0,
       glossary: ['规则'],
     })
-    await consoleCreate({ uri: 'notes://lan', content: '家里的内网', glossary: ['内网'] })
+    await consoleCreate({ uri: 'user://notes/lan', content: '家里的内网', glossary: ['内网'] })
     await consoleCreate({
-      uri: 'preferences://user',
+      uri: 'user://preferences/user',
       content: '主人喜欢简洁',
-      layer: 'owner',
       sensitivity: 'internal',
       glossary: ['简洁'],
     })
     await consoleCreate({
-      uri: 'notes://team',
+      uri: 'core://notes/team',
       content: '团队约定',
-      layer: 'base',
       sensitivity: 'internal',
       glossary: ['团队'],
     })
@@ -211,10 +208,10 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
     const plain = await recall(ALL)
     expect(plain.status).toBe(200)
     expect(plain.body.candidates.map((c) => c.uri).sort()).toEqual([
+      'core://notes/team',
       'core://rules',
-      'notes://lan',
-      'notes://team',
-      'preferences://user',
+      'user://notes/lan',
+      'user://preferences/user',
     ])
     expect(plain.body.subjects).toEqual([])
     expect(await identities()).toEqual([])
@@ -419,11 +416,14 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
     }
   })
 
-  it('权限按会话上下文收紧：群聊与私聊只读得到 public 的共享层，主人私聊开了提升再加画像层', async () => {
+  it('权限按会话上下文收紧：群聊与私聊只读得到 public 的共享记忆，本人私聊开启后再加本人的内部记忆', async () => {
     expect(await recallUris(ALL, group('500', '600'))).toEqual(['core://rules'])
     expect(await recallUris(ALL, direct('600'))).toEqual(['core://rules'])
-    // 定时任务读不到画像层与私人层，最高 internal
-    expect(await recallUris(ALL, { chatType: 'cron' })).toEqual(['core://rules', 'notes://team'])
+    // 定时任务读不到本人的记忆，最高 internal
+    expect(await recallUris(ALL, { chatType: 'cron' })).toEqual([
+      'core://notes/team',
+      'core://rules',
+    ])
 
     // 标记为主人：对象关联应用主人的账号。没开提升时和陌生人私聊一样
     const owner = await subjectOf('qq', 'person', '600')
@@ -436,9 +436,9 @@ describe.skipIf(!testDatabaseUrl)('会话上下文与对象', () => {
     })
     expect(res.status).toBe(200)
     expect(await recallUris(ALL, direct('600'))).toEqual([
+      'core://notes/team',
       'core://rules',
-      'notes://team',
-      'preferences://user',
+      'user://preferences/user',
     ])
     // 别人的私聊、主人在群里说话都不提升
     expect(await recallUris(ALL, direct('601'))).toEqual(['core://rules'])

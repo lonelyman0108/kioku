@@ -2,6 +2,7 @@ import {
   ACCESS_CONTEXTS,
   LAYERS,
   SENSITIVITIES,
+  sensitivityAllowed,
   type AccessContext,
   type KeyAccessMatrix,
   type KeyScopes,
@@ -28,9 +29,9 @@ export interface SessionContext {
 export interface AppAccessConfig {
   appId: string
   ownerAccountId: string
-  // 应用当前的人格。Key 写人格层只能写它，不能改继承链上的祖先；没有人格时人格层一条也写不了
+  // 应用当前的人格。Key 写人格的记忆只能写它，不能改继承链上的祖先；没有人格时人格的记忆一条也写不了
   personaId?: string | null
-  // 主人私聊时最多提升到哪一级；不配置就不提升，和陌生人私聊一样
+  // 本人私聊时读取本人记忆（界面上的开关）：开启后本人私聊读本人的内部及以下，不开就和陌生人私聊一样
   elevateOwnerDirect?: 'internal'
 }
 
@@ -44,21 +45,21 @@ export interface Access {
   writeOriginScope: string
   writeProvenance: Provenance
   ownerAccountId: string
-  // null 表示管理界面：不代表某个应用，能看到空间里所有应用的应用层记忆
+  // null 表示管理界面：不代表某个应用，能看到空间里所有应用的记忆
   appId: string | null
-  // 能写哪些应用的应用层。'all'：admin Key 与管理界面里的空间 owner；Key 只能写自己的应用；
-  // 管理界面里的 editor 只能写自己是主人的应用，与签发 Key 的规则一致（Key 只能由应用主人签发）
+  // 能写哪些应用的记忆。'all'：admin Key 与管理界面里的空间 owner；Key 只能写自己的应用；
+  // 管理界面里的 editor 只能写自己是所有者的应用，与签发 Key 的规则一致（Key 只能由应用所有者签发）
   writableAppIds: ReadonlySet<string> | 'all'
-  // 能写哪些人格的人格层。'all'：admin Key 与管理界面；Key 只能写应用当前的人格，
+  // 能写哪些人格的记忆。'all'：admin Key 与管理界面；Key 只能写应用当前的人格，
   // 否则群聊版的应用能改掉它继承的主人格的设定
   writablePersonaIds: ReadonlySet<string> | 'all'
-  // 允许按 URI 显式读取 secret；召回和搜索永远不返回 secret
+  // 允许按坐标显式读取 secret；召回和搜索永远不返回 secret
   canReadSecret: boolean
   admin: boolean
 }
 
-const PRIVATE_LAYERS: readonly Layer[] = ['owner', 'private']
-const SHARED_CONTEXT_LAYERS: readonly Layer[] = ['base', 'persona', 'app', 'subject', 'episode']
+// 带会话上下文时读得到的归属：本人之外的五类。本人只给不带会话上下文的访问密钥，开启之后再给本人私聊
+const SHARED_CONTEXT_LAYERS: readonly Layer[] = ['core', 'persona', 'app', 'subject', 'episode']
 const UNTRUSTED_WRITE_LAYERS: readonly Layer[] = ['subject', 'episode']
 
 export function sensitivityRank(s: Sensitivity): number {
@@ -103,7 +104,7 @@ export function resolveAccess(
     }
   }
 
-  // 定时任务与子 agent：不是和主人对话，拿不到主人画像和私人层
+  // 定时任务与子 agent：不是和本人对话，读不到本人的记忆
   if (context.chatType === 'cron' || context.chatType === 'subagent') {
     return {
       ...common,
@@ -138,14 +139,15 @@ export function resolveAccess(
   const elevated = context.senderIsOwner === true && app.elevateOwnerDirect === 'internal'
   return {
     ...common,
+    // 开启「本人私聊时读取本人记忆」后加上本人，敏感级到内部为止：本人的私密只给不带会话上下文的访问密钥
     readLayers: elevated
-      ? intersect(scopes.readLayers, [...SHARED_CONTEXT_LAYERS, 'owner'])
+      ? intersect(scopes.readLayers, [...SHARED_CONTEXT_LAYERS, 'user'])
       : intersect(scopes.readLayers, SHARED_CONTEXT_LAYERS),
     writeLayers: intersect(scopes.writeLayers, UNTRUSTED_WRITE_LAYERS),
     maxSensitivity: minSensitivity(scopes.maxSensitivity, elevated ? 'internal' : 'public'),
     originScopes: new Set(['global', appScope, directScope]),
     writeOriginScope: directScope,
-    // 平台账号能证明的身份有限，主人私聊写入也按 untrusted 处理
+    // 平台账号能证明的身份有限，本人私聊写入也按 untrusted 处理
     writeProvenance: 'untrusted',
     canReadSecret: false,
   }
@@ -174,7 +176,7 @@ export function keyEffectiveScopes(
   return clampScopesToRole(key.scopes, owner.role)
 }
 
-// 权限矩阵用的会话上下文：对象只是占位，矩阵只看层与敏感级，来源作用域另外说明
+// 权限范围用的会话上下文：联系人只是占位，只看归属与敏感级，来源作用域另外说明
 const MATRIX_CONTEXTS: Record<AccessContext, SessionContext> = {
   none: {},
   direct: { chatType: 'direct', senderSubjectId: 'sender' },
@@ -183,8 +185,8 @@ const MATRIX_CONTEXTS: Record<AccessContext, SessionContext> = {
   cron: { chatType: 'cron' },
 }
 
-// 一把 Key 在各种会话上下文下实际能读写哪些层、哪些敏感级：每一格按 canRead 与 canWrite 判断一条
-// 属于这个应用、应用主人与当前人格的记忆，不另写一份规则
+// 一把 Key 在各种会话上下文下实际能读写哪些归属、哪些敏感级：每一格按 canRead 与 canWrite 判断一条
+// 属于这个应用、应用所有者与当前人格的记忆，不另写一份规则。本人不设公开，那一格读写都没有
 export function accessMatrix(scopes: KeyScopes, app: AppAccessConfig): KeyAccessMatrix {
   const personaId = app.personaId ?? null
   const personaIds = personaId ? [personaId] : []
@@ -215,11 +217,13 @@ export function accessMatrix(scopes: KeyScopes, app: AppAccessConfig): KeyAccess
               expiresAt: null,
               deletedAt: null,
             }
-            const read = !canRead(access, facts, { personaIds, explicit: true })
+            const read = !sensitivityAllowed(layer, sensitivity)
               ? 'none'
-              : canRead(access, facts, { personaIds })
-                ? 'recall'
-                : 'explicit'
+              : !canRead(access, facts, { personaIds, explicit: true })
+                ? 'none'
+                : canRead(access, facts, { personaIds })
+                  ? 'recall'
+                  : 'explicit'
             return {
               sensitivity,
               read,
@@ -246,12 +250,12 @@ export interface MemoryFacts {
 }
 
 export interface ReadOptions {
-  // 当前人格及其继承链；persona 层只能读到这些人格的记忆
+  // 当前人格及其继承链；人格的记忆只能读到这些人格的
   personaIds: readonly string[]
-  // 按 URI 显式读取时才可能读到 secret
+  // 按坐标显式读取时才可能读到 secret
   explicit?: boolean
   // 管理读取：管理界面看历史、恢复时用。不看有效期与删除状态（历史就是给过期、被推翻和删掉的版本看的），
-  // 按显式读取算，人格层也不限人格（管理界面本来看得到全部人格，删掉的人格的旧快照照样看得到）
+  // 按显式读取算，人格也不限（管理界面本来看得到全部人格，删掉的人格的旧快照照样看得到）
   management?: boolean
   now?: Date
 }
@@ -260,8 +264,7 @@ export function canRead(access: Access, memory: MemoryFacts, options: ReadOption
   return readDenial(access, memory, options) === null
 }
 
-// 有效期过了没有：失效（valid_to：被推翻、到了有效到）或到期（expires_at：会话摘要）的时刻不晚于 now 就算过了，
-// 和 URI 互斥触发器里的条件一样。readDenial 与导入时核对 URI 的互斥都按它判断
+// 有效期过了没有：失效（valid_to：被推翻、到了有效到）或到期（expires_at：会话摘要）的时刻不晚于 now 就算过了
 export function lapsed(memory: Pick<MemoryFacts, 'validTo' | 'expiresAt'>, now: Date): boolean {
   return (
     (memory.validTo !== null && memory.validTo <= now) ||
@@ -289,7 +292,8 @@ export function readDenial(
   }
 
   if (access.originScopes && !access.originScopes.has(memory.originScope)) return 'origin'
-  if (PRIVATE_LAYERS.includes(memory.layer) && memory.ownerAccountId !== access.ownerAccountId) {
+  // 归某个成员的（本人，以及不带会话上下文的会话摘要）只有这个成员读得到
+  if (memory.ownerAccountId !== null && memory.ownerAccountId !== access.ownerAccountId) {
     return 'owner'
   }
   if (
@@ -308,21 +312,22 @@ export function readDenial(
 export interface WriteIntent {
   layer: Layer
   sensitivity: Sensitivity
-  // 应用层记忆所属的应用、人格层记忆所属的人格；其他层为 null
+  // 应用的记忆所属的应用、人格的记忆所属的人格；其他归属为 null
   appId: string | null
   personaId: string | null
 }
 
 export function canWrite(access: Access, intent: WriteIntent): boolean {
   if (!access.writeLayers.has(intent.layer)) return false
+  if (!sensitivityAllowed(intent.layer, intent.sensitivity)) return false
   if (intent.layer === 'app' && !canWriteApp(access, intent.appId)) return false
   if (intent.layer === 'persona' && !canWritePersona(access, intent.personaId)) return false
   if (intent.sensitivity === 'secret') return access.canReadSecret
   return sensitivityRank(intent.sensitivity) <= sensitivityRank(access.maxSensitivity)
 }
 
-// 改动已有的记录（修改、移动、删除、推翻、恢复）：在能写这一层之上，不可信来源（群聊、陌生人私聊）
-// 只能动不可信来源写下的记录。否则群里的人能改掉受信的记忆（例如主人确认过的事实），来源却仍显示受信
+// 改动已有的记录（修改、移动、删除、推翻、恢复）：在能写这一类之上，不可信来源（群聊、陌生人私聊）
+// 只能动不可信来源写下的记录。否则群里的人能改掉受信的记忆（例如本人确认过的事实），来源却仍显示受信
 export function canModify(access: Access, row: WriteIntent & { provenance: Provenance }): boolean {
   return (
     canWrite(access, row) &&
@@ -341,8 +346,8 @@ export function canWritePersona(access: Access, personaId: string | null): boole
   )
 }
 
-// 凭据归某个成员，和私人层一样：读说明与绑定要能读私人层、最高敏感级至少 private，
-// 凭据属于这次访问代表的成员（Key 是应用主人）。限定了应用的，只有那些应用的 Key 能用；
+// 凭据归某个成员，和本人的记忆一样：读说明与绑定要能读本人、最高敏感级至少 private，
+// 凭据属于这次访问代表的成员（Key 是应用所有者）。限定了应用的，只有那些应用的 Key 能用；
 // 跨人格 / 应用写入（admin）也不放宽。管理界面不代表某个应用，不受这个限制
 export interface CredentialFacts {
   ownerAccountId: string
@@ -351,7 +356,7 @@ export interface CredentialFacts {
 
 export function canReadCredential(access: Access, credential: CredentialFacts): boolean {
   if (credential.ownerAccountId !== access.ownerAccountId) return false
-  if (!access.readLayers.has('private')) return false
+  if (!access.readLayers.has('user')) return false
   if (sensitivityRank(access.maxSensitivity) < sensitivityRank('private')) return false
   return (
     access.appId === null || credential.appIds === null || credential.appIds.includes(access.appId)
@@ -363,18 +368,16 @@ export function canRevealCredential(access: Access, credential: CredentialFacts)
   return canReadCredential(access, credential) && access.canReadSecret
 }
 
-// 新建、修改、删除凭据（包括说明、字段、绑定与托管的值）：要能读、写私人层，并且是 secret 级。
+// 新建、修改、删除凭据（包括说明、字段、绑定与托管的值）：要能读、写本人，并且是 secret 级。
 // 凭据的说明会下发给别的 agent，绑定决定 agent 去哪里取值，要求比读更高
 export function canManageCredentials(access: Access): boolean {
-  return (
-    access.readLayers.has('private') && access.writeLayers.has('private') && access.canReadSecret
-  )
+  return access.readLayers.has('user') && access.writeLayers.has('user') && access.canReadSecret
 }
 
 export type ConsoleRole = 'owner' | 'editor' | 'viewer'
 
 // 管理界面里成员本人的权限，与签发 Key 的规则一致：secret 只有空间 owner 能读写，viewer 只读，
-// 应用层 editor 只能写自己是主人的应用（ownedAppIds）。私人层与画像层只看得到自己的；
+// 应用的记忆 editor 只能写自己是所有者的应用（ownedAppIds）。本人的记忆与不带会话上下文的会话摘要只看得到自己的；
 // 所有人格、所有应用的记忆都能看到（personaIds 由调用方传入全部人格）
 export function consoleAccess(
   role: ConsoleRole,
@@ -392,7 +395,7 @@ export function consoleAccess(
     ownerAccountId: accountId,
     appId: null,
     writableAppIds: role === 'owner' ? 'all' : new Set(role === 'editor' ? ownedAppIds : []),
-    // 人格层不设限：editor 本来就能建一个用任意人格的应用、再用它的 Key 写那个人格
+    // 人格不设限：editor 本来就能建一个用任意人格的应用、再用它的 Key 写那个人格
     writablePersonaIds: 'all',
     canReadSecret: role === 'owner',
     admin: role === 'owner',

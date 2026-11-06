@@ -46,7 +46,7 @@ const codeRoute = createRoute({
     200: jsonResponse('绑定码', BindCode),
     400: jsonResponse('不是私聊', ErrorResponse),
     401: jsonResponse('Key 无效', ErrorResponse),
-    403: jsonResponse('Key 写不了对象层', ErrorResponse),
+    403: jsonResponse('Key 写不了联系人的事实', ErrorResponse),
     409: jsonResponse('正忙，稍后再试', ErrorResponse),
   },
 })
@@ -63,7 +63,7 @@ const bindRoute = createRoute({
     200: jsonResponse('预览、已合并，或在等确认', BindResult),
     400: jsonResponse('不是私聊、码的格式不对，或者码不对、已失效', ErrorResponse),
     401: jsonResponse('Key 无效', ErrorResponse),
-    403: jsonResponse('Key 写不了对象层，或者这个账号标记成了别的成员', ErrorResponse),
+    403: jsonResponse('Key 写不了联系人的事实，或者这个账号标记成了别的成员', ErrorResponse),
     409: jsonResponse('已经是同一个人，或者正忙', ErrorResponse),
     429: jsonResponse('输错的次数太多', ErrorResponse),
   },
@@ -81,7 +81,7 @@ const voidRoute = createRoute({
     204: { description: '这个码（如果有的话）已经作废' },
     400: jsonResponse('不是群聊，或者没带发言人', ErrorResponse),
     401: jsonResponse('Key 无效', ErrorResponse),
-    403: jsonResponse('Key 写不了对象层', ErrorResponse),
+    403: jsonResponse('Key 写不了联系人的事实', ErrorResponse),
     429: jsonResponse('请求太多', ErrorResponse),
   },
 })

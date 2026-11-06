@@ -100,7 +100,6 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
     const created = await callTool('kioku_create', {
       uri: 'core://agent',
       content: '先读正文再信任',
-      layer: 'base',
       disclosure: '每次会话开始',
       glossary: ['规则'],
     })
@@ -109,17 +108,23 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
     expect(got.content[0]!.text).toContain('先读正文再信任')
     expect(got.content[0]!.text).toContain('Disclosure: 每次会话开始')
     const domains = await callTool('kioku_list', {})
-    expect(domains.content[0]!.text).toContain('core://（1 个节点）')
+    expect(domains.content[0]!.text).toContain('core://（通用，1 个节点）')
   })
 
-  it('kioku_update 能在 owner 与 private 之间改层，不能改成共享的层', async () => {
-    await callTool('kioku_create', { uri: 'notes://plan', content: '计划' })
-    const toOwner = await callTool('kioku_update', { uri: 'notes://plan', layer: 'owner' })
-    expect(toOwner.isError).toBeFalsy()
-    expect(toOwner.content[0]!.text).toContain('owner')
-    const toBase = await callTool('kioku_update', { uri: 'notes://plan', layer: 'base' })
-    expect(toBase.isError).toBe(true)
-    expect(toBase.content[0]!.text).toContain('管理界面')
+  it('kioku_update 能调本人记忆的敏感级，不能设成公开；Key 不能把本人的移进共享的归属', async () => {
+    await callTool('kioku_create', { uri: 'user://notes/plan', content: '计划' })
+    const internal = await callTool('kioku_update', {
+      uri: 'user://notes/plan',
+      sensitivity: 'internal',
+    })
+    expect(internal.isError).toBeFalsy()
+    expect(internal.content[0]!.text).toContain('敏感级: internal')
+    const pub = await callTool('kioku_update', { uri: 'user://notes/plan', sensitivity: 'public' })
+    expect(pub.isError).toBe(true)
+    expect(pub.content[0]!.text).toContain('本人（user://）的记忆不设公开')
+    const shared = await callTool('kioku_move', { from: 'user://notes/plan', to: 'core://plan' })
+    expect(shared.isError).toBe(true)
+    expect(shared.content[0]!.text).toContain('管理界面')
   })
 
   it('kioku_create 与 kioku_update 能设、清掉有效到，设在过去时返回工具错误', async () => {
@@ -133,22 +138,22 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
 
     const until = new Date(Date.now() + 86_400_000).toISOString()
     const created = await callTool('kioku_create', {
-      uri: 'trip://plan',
+      uri: 'user://trip/plan',
       content: '下周出差',
       valid_to: until,
     })
     expect(created.isError).toBeFalsy()
     expect(created.content[0]!.text).toContain(`有效到: ${until}`)
-    expect((await callTool('kioku_get', { uri: 'trip://plan' })).content[0]!.text).toContain(
+    expect((await callTool('kioku_get', { uri: 'user://trip/plan' })).content[0]!.text).toContain(
       `有效到: ${until}`,
     )
     const past = await callTool('kioku_update', {
-      uri: 'trip://plan',
+      uri: 'user://trip/plan',
       valid_to: new Date(Date.now() - 60_000).toISOString(),
     })
     expect(past.isError).toBe(true)
     expect(past.content[0]!.text).toContain('晚于当前时间至少一分钟')
-    const cleared = await callTool('kioku_update', { uri: 'trip://plan', valid_to: null })
+    const cleared = await callTool('kioku_update', { uri: 'user://trip/plan', valid_to: null })
     expect(cleared.isError).toBeFalsy()
     expect(cleared.content[0]!.text).not.toContain('有效到')
   })
@@ -217,7 +222,7 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
         const result = await callWith(statementFails(database.db), {
-          uri: 'notes://x',
+          uri: 'user://notes/x',
           content: '不该出现在结果与日志里的正文',
         })
         expect(result.isError).toBe(true)
@@ -238,7 +243,7 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
         const cause = Object.assign(new Error('deadlock detected'), { code: '40P01' })
         const failing = new DrizzleQueryError('insert into memories', ['明文的参数'], cause)
         const db = { transaction: () => Promise.reject(failing) } as unknown as Db
-        const result = await callWith(db, { uri: 'notes://x', content: '正文' })
+        const result = await callWith(db, { uri: 'user://notes/x', content: '正文' })
         expect(result.content[0]!.text).toBe(TOOL_INTERNAL_ERROR)
         const logged = JSON.stringify(error.mock.calls[0])
         expect(logged).toContain('40P01')
@@ -254,7 +259,7 @@ describe.skipIf(!testDatabaseUrl)('MCP 接口', () => {
       const error = vi.spyOn(console, 'error').mockImplementation(() => {})
       try {
         const db = { transaction: () => Promise.reject(new TypeError('坏了')) } as unknown as Db
-        const result = await callWith(db, { uri: 'notes://x', content: '正文' })
+        const result = await callWith(db, { uri: 'user://notes/x', content: '正文' })
         expect(result.content[0]!.text).toBe(TOOL_INTERNAL_ERROR)
         expect((error.mock.calls[0]![1] as { stack: string }).stack).toContain('坏了')
       } finally {

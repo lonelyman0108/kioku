@@ -2,6 +2,7 @@ import { LAYERS, type KeyScopes } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
+  accessMatrix,
   canManageCredentials,
   canModify,
   canRead,
@@ -24,7 +25,7 @@ const fullKey: KeyScopes = {
 }
 
 const memory = (over: Partial<MemoryFacts> = {}): MemoryFacts => ({
-  layer: 'base',
+  layer: 'core',
   sensitivity: 'public',
   originScope: 'global',
   ownerAccountId: null,
@@ -36,20 +37,28 @@ const memory = (over: Partial<MemoryFacts> = {}): MemoryFacts => ({
   ...over,
 })
 const opts = { personaIds: ['persona-1'] }
-const privateFact = memory({ layer: 'private', sensitivity: 'private', ownerAccountId: OWNER })
-const ownerPref = memory({ layer: 'owner', sensitivity: 'internal', ownerAccountId: OWNER })
+// 本人的私密记忆与内部记忆（原来的私人层与个人画像合并成了本人，按敏感级区分）
+const privateFact = memory({ layer: 'user', sensitivity: 'private', ownerAccountId: OWNER })
+const ownerPref = memory({ layer: 'user', sensitivity: 'internal', ownerAccountId: OWNER })
 const soul = memory({ layer: 'persona', personaId: 'persona-1' })
+// 不带会话上下文的会话摘要：归所属成员、私密
+const localSummary = memory({ layer: 'episode', sensitivity: 'private', ownerAccountId: OWNER })
 
 describe('没有会话上下文（本机 agent）', () => {
   const access = resolveAccess(fullKey, app)
 
-  it('能读主人的私人层和画像', () => {
+  it('能读本人的私密与内部记忆', () => {
     expect(canRead(access, privateFact, opts)).toBe(true)
     expect(canRead(access, ownerPref, opts)).toBe(true)
   })
 
-  it('读不到别的成员的私人层', () => {
+  it('读不到别的成员的本人记忆', () => {
     expect(canRead(access, { ...privateFact, ownerAccountId: 'someone-else' }, opts)).toBe(false)
+  })
+
+  it('读得到本人不带会话上下文的会话摘要，别的成员的读不到', () => {
+    expect(canRead(access, localSummary, opts)).toBe(true)
+    expect(canRead(access, { ...localSummary, ownerAccountId: 'someone-else' }, opts)).toBe(false)
   })
 
   it('不会超过 Key 的敏感级上限', () => {
@@ -66,12 +75,13 @@ describe('群聊', () => {
     expect(canRead(access, soul, opts)).toBe(true)
   })
 
-  it('读不到私人层和主人画像，即使 Key 有权限', () => {
+  it('读不到本人的记忆与不带会话上下文的会话摘要，即使 Key 有权限', () => {
     expect(canRead(access, privateFact, opts)).toBe(false)
     expect(canRead(access, ownerPref, opts)).toBe(false)
+    expect(canRead(access, localSummary, opts)).toBe(false)
   })
 
-  it('只看得到本群和全局来源的对象记忆', () => {
+  it('只看得到本群和全局来源的联系人事实', () => {
     const inGroup = memory({ layer: 'subject', originScope: 'group:g1' })
     expect(canRead(access, inGroup, opts)).toBe(true)
     expect(canRead(access, { ...inGroup, originScope: 'group:g2' }, opts)).toBe(false)
@@ -82,16 +92,17 @@ describe('群聊', () => {
     expect(canRead(access, memory({ sensitivity: 'internal' }), opts)).toBe(false)
   })
 
-  it('只能以 untrusted 身份写对象层和情节层', () => {
+  it('只能以 untrusted 身份写联系人的事实与会话摘要', () => {
     expect(access.writeProvenance).toBe('untrusted')
     expect(access.writeOriginScope).toBe('group:g1')
     const intent = { sensitivity: 'public', appId: null, personaId: null } as const
     expect(canWrite(access, { ...intent, layer: 'subject' })).toBe(true)
+    expect(canWrite(access, { ...intent, layer: 'episode' })).toBe(true)
     expect(canWrite(access, { ...intent, layer: 'persona' })).toBe(false)
-    expect(canWrite(access, { ...intent, layer: 'private' })).toBe(false)
+    expect(canWrite(access, { ...intent, layer: 'user' })).toBe(false)
   })
 
-  it('只能改动不可信来源写下的记录：受信的（主人确认过的、agent 写的）动不了', () => {
+  it('只能改动不可信来源写下的记录：受信的（本人确认过的、agent 写的）动不了', () => {
     const row = { layer: 'subject', sensitivity: 'public', appId: null, personaId: null } as const
     expect(canModify(access, { ...row, provenance: 'untrusted' })).toBe(true)
     expect(canModify(access, { ...row, provenance: 'owner' })).toBe(false)
@@ -102,13 +113,13 @@ describe('群聊', () => {
     expect(canModify(agent, { ...row, provenance: 'owner' })).toBe(true)
   })
 
-  it('缺少群对象时拒绝解析', () => {
+  it('缺少群时拒绝解析', () => {
     expect(() => resolveAccess(fullKey, app, { chatType: 'group' })).toThrow()
   })
 })
 
 describe('私聊', () => {
-  it('陌生人私聊只看得到与自己相关的对象记忆', () => {
+  it('陌生人私聊只看得到与自己相关的联系人事实', () => {
     const access = resolveAccess(fullKey, app, { chatType: 'direct', senderSubjectId: 'bob' })
     const aboutBob = memory({ layer: 'subject', originScope: 'direct:bob' })
     expect(canRead(access, aboutBob, opts)).toBe(true)
@@ -116,7 +127,7 @@ describe('私聊', () => {
     expect(canRead(access, ownerPref, opts)).toBe(false)
   })
 
-  it('主人私聊默认不提升', () => {
+  it('本人私聊默认不读本人的记忆', () => {
     const access = resolveAccess(fullKey, app, {
       chatType: 'direct',
       senderSubjectId: 'me',
@@ -126,7 +137,7 @@ describe('私聊', () => {
     expect(canRead(access, ownerPref, opts)).toBe(false)
   })
 
-  it('配置提升后主人私聊能读画像，但仍读不到私人层', () => {
+  it('开启「本人私聊时读取本人记忆」后读得到本人的内部记忆，私密的与本机会话的摘要仍读不到', () => {
     const access = resolveAccess(
       fullKey,
       { ...app, elevateOwnerDirect: 'internal' },
@@ -135,9 +146,10 @@ describe('私聊', () => {
     expect(access.maxSensitivity).toBe('internal')
     expect(canRead(access, { ...ownerPref, originScope: 'global' }, opts)).toBe(true)
     expect(canRead(access, privateFact, opts)).toBe(false)
+    expect(canRead(access, localSummary, opts)).toBe(false)
   })
 
-  it('非主人即使应用开了提升也不提升', () => {
+  it('不是本人时即使应用开了也不读本人的记忆', () => {
     const access = resolveAccess(
       fullKey,
       { ...app, elevateOwnerDirect: 'internal' },
@@ -157,8 +169,8 @@ describe('上下文只能收紧', () => {
     expect(access.maxSensitivity).toBe('public')
   })
 
-  it('Key 没给的层，任何上下文都拿不到', () => {
-    const access = resolveAccess({ ...fullKey, readLayers: ['base'] }, app)
+  it('Key 没给的归属，任何上下文都拿不到', () => {
+    const access = resolveAccess({ ...fullKey, readLayers: ['core'] }, app)
     expect(canRead(access, soul, opts)).toBe(false)
   })
 })
@@ -190,18 +202,18 @@ describe('有效期', () => {
     expect(canRead(access, memory({ deletedAt: past }), { ...opts, now })).toBe(false)
   })
 
-  it('人格层只能读当前人格继承链上的', () => {
+  it('人格的记忆只能读当前人格继承链上的', () => {
     expect(canRead(access, { ...soul, personaId: 'other' }, opts)).toBe(false)
   })
 
-  it('应用层只能读本应用的', () => {
+  it('应用的记忆只能读本应用的', () => {
     const appRule = memory({ layer: 'app', appId: 'app-1' })
     expect(canRead(access, appRule, opts)).toBe(true)
     expect(canRead(access, { ...appRule, appId: 'app-2' }, opts)).toBe(false)
   })
 })
 
-describe('应用层的写入', () => {
+describe('应用的记忆的写入', () => {
   const appRule = (appId: string) => ({
     layer: 'app' as const,
     sensitivity: 'internal' as const,
@@ -209,14 +221,14 @@ describe('应用层的写入', () => {
     personaId: null,
   })
 
-  it('Key 只能写本应用的应用层，admin Key 不限', () => {
+  it('Key 只能写本应用的记忆，admin Key 不限', () => {
     const access = resolveAccess(fullKey, app)
     expect(canWrite(access, appRule('app-1'))).toBe(true)
     expect(canWrite(access, appRule('app-2'))).toBe(false)
     expect(canWrite(resolveAccess({ ...fullKey, admin: true }, app), appRule('app-2'))).toBe(true)
   })
 
-  it('管理界面里 owner 能写所有应用，editor 只能写自己是主人的应用，viewer 都不能写', () => {
+  it('管理界面里 owner 能写所有应用，editor 只能写自己是所有者的应用，viewer 都不能写', () => {
     expect(canWrite(consoleAccess('owner', OWNER), appRule('app-2'))).toBe(true)
     const editor = consoleAccess('editor', 'bob', ['app-bob'])
     expect(canWrite(editor, appRule('app-bob'))).toBe(true)
@@ -228,7 +240,7 @@ describe('应用层的写入', () => {
   })
 })
 
-describe('人格层的写入', () => {
+describe('人格的记忆的写入', () => {
   const personaRule = (personaId: string) => ({
     layer: 'persona' as const,
     sensitivity: 'public' as const,
@@ -249,7 +261,7 @@ describe('人格层的写入', () => {
     ).toBe(true)
   })
 
-  it('应用没有人格时 Key 写不了人格层', () => {
+  it('应用没有人格时 Key 写不了人格的记忆', () => {
     expect(canWrite(resolveAccess(fullKey, app), personaRule('persona-child'))).toBe(false)
   })
 
@@ -264,7 +276,7 @@ describe('凭据', () => {
   const secretKey: KeyScopes = { ...fullKey, maxSensitivity: 'secret' }
   const own = { ownerAccountId: OWNER, appIds: null }
 
-  it('和私人层一样：读说明要能读私人层、至少 private 级，取托管的值还要 secret 级', () => {
+  it('和本人的私密记忆一样：读说明要能读本人、至少 private 级，取托管的值还要 secret 级', () => {
     const privateLevel = resolveAccess(fullKey, app)
     expect(canReadCredential(privateLevel, own)).toBe(true)
     expect(canRevealCredential(privateLevel, own)).toBe(false)
@@ -273,7 +285,7 @@ describe('凭据', () => {
     const internalOnly = resolveAccess({ ...secretKey, maxSensitivity: 'internal' }, app)
     expect(canReadCredential(internalOnly, own)).toBe(false)
     const noPrivate = resolveAccess(
-      { ...secretKey, readLayers: LAYERS.filter((l) => l !== 'private') },
+      { ...secretKey, readLayers: LAYERS.filter((l) => l !== 'user') },
       app,
     )
     expect(canReadCredential(noPrivate, own)).toBe(false)
@@ -285,7 +297,7 @@ describe('凭据', () => {
     expect(canReadCredential(access, { ...own, ownerAccountId: 'someone-else' })).toBe(false)
   })
 
-  it('群聊、私聊（包括提升后的主人私聊）、定时任务与子 agent 都看不到凭据', () => {
+  it('群聊、私聊（包括开启后的本人私聊）、定时任务与子 agent 都看不到凭据', () => {
     const contexts = [
       resolveAccess(secretKey, app, { chatType: 'group', groupSubjectId: 'g1' }),
       resolveAccess(
@@ -314,17 +326,17 @@ describe('凭据', () => {
     expect(canReadCredential(consoleAccess('owner', OWNER), limited)).toBe(true)
   })
 
-  it('管理凭据要能读写私人层并且是 secret 级：只读、只写或 private 级的 Key 都不行', () => {
+  it('管理凭据要能读写本人并且是 secret 级：只读、只写或 private 级的 Key 都不行', () => {
     expect(canManageCredentials(resolveAccess(secretKey, app))).toBe(true)
     expect(canManageCredentials(resolveAccess(fullKey, app))).toBe(false)
     expect(
       canManageCredentials(
-        resolveAccess({ ...secretKey, writeLayers: LAYERS.filter((l) => l !== 'private') }, app),
+        resolveAccess({ ...secretKey, writeLayers: LAYERS.filter((l) => l !== 'user') }, app),
       ),
     ).toBe(false)
     expect(
       canManageCredentials(
-        resolveAccess({ ...secretKey, readLayers: LAYERS.filter((l) => l !== 'private') }, app),
+        resolveAccess({ ...secretKey, readLayers: LAYERS.filter((l) => l !== 'user') }, app),
       ),
     ).toBe(false)
   })
@@ -356,7 +368,7 @@ describe('读不到的原因', () => {
     expect(
       readDenial(
         access,
-        memory({ layer: 'private', sensitivity: 'private', ownerAccountId: 'x' }),
+        memory({ layer: 'user', sensitivity: 'private', ownerAccountId: 'x' }),
         opts,
       ),
     ).toBe('owner')
@@ -369,5 +381,25 @@ describe('读不到的原因', () => {
     const group = resolveAccess(fullKey, app, { chatType: 'group', groupSubjectId: 'g1' })
     expect(readDenial(group, memory({ sensitivity: 'internal' }), opts)).toBe('sensitivity')
     expect(readDenial(group, memory({ originScope: 'group:g2' }), opts)).toBe('origin')
+  })
+})
+
+describe('本人不设公开', () => {
+  it('写不了本人的公开记忆，权限范围里那一格读写都没有', () => {
+    const access = resolveAccess(fullKey, app)
+    const intent = { layer: 'user', appId: null, personaId: null } as const
+    expect(canWrite(access, { ...intent, sensitivity: 'public' })).toBe(false)
+    expect(canWrite(access, { ...intent, sensitivity: 'internal' })).toBe(true)
+    const none = accessMatrix(fullKey, app).contexts.find((c) => c.context === 'none')!
+    const user = none.rows.find((r) => r.layer === 'user')!
+    expect(user.cells.find((c) => c.sensitivity === 'public')).toEqual({
+      sensitivity: 'public',
+      read: 'none',
+      write: false,
+    })
+    expect(user.cells.find((c) => c.sensitivity === 'private')).toMatchObject({
+      read: 'recall',
+      write: true,
+    })
   })
 })

@@ -40,8 +40,8 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
     ws = await bootstrap(app)
     appId = (await ws.createApp('agent', { runtimeFamily: 'claudecode' })).id
     key = await ws.issueKey(appId)
-    await create({ uri: 'projects://kioku', content: 'Kioku 是记忆服务', glossary: ['kioku'] })
-    await create({ uri: 'notes://deploy', content: '部署步骤', glossary: ['部署'] })
+    await create({ uri: 'user://projects/kioku', content: 'Kioku 是记忆服务', glossary: ['kioku'] })
+    await create({ uri: 'user://notes/deploy', content: '部署步骤', glossary: ['部署'] })
   })
 
   const create = async (body: Record<string, unknown>) => {

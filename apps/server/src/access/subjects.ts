@@ -62,7 +62,7 @@ async function mergeInto(
     .set({ subjectId: into.id })
     .where(eq(subjectIdentities.subjectId, from.id))
   // Dream 按记忆记下整理过的版本（dream_marks），这里不加版本，标记留着的话合并之后放到一起的记忆不会被再看，
-  // 合并带来的重复也就一直留着。要再看的只有对象层与情节层：别的层的 Dream 范围和对象、来源作用域无关，合并不改变
+  // 合并带来的重复也就一直留着。要再看的只有联系人的事实与会话摘要：别的层的 Dream 范围和对象、来源作用域无关，合并不改变
   // 谁和谁一起看。按合并前的样子找出要放在一起看的：from 自己作用域里的（并进 into 的作用域）与关于 from 的（换成 into），
   // 以及它们要并进去的那边原有的——from 自己的作用域里有记忆时 into 自己作用域里的，关于 from 的记忆所在的作用域里
   // 关于 into 的。from 什么都带不过来时一条也不用再看

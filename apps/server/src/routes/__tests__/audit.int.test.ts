@@ -79,7 +79,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
   const get = (key: string, uri: string) =>
     app.request(`/v1/memories?uri=${encodeURIComponent(uri)}`, { headers: bearer(key) })
 
-  it('同一空间的两个成员各有自己的 owner 层 URI', async () => {
+  it('同一空间的两个成员各有自己的本人坐标', async () => {
     const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     const keyA = ws.issueKey((await ws.createApp('a-agent')).id)
     const keyB = (
@@ -87,18 +87,29 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     ).key
     const ka = await keyA
     expect(
-      (await create(ka, { uri: 'preferences://user', content: 'A 的偏好', layer: 'owner' })).status,
+      (
+        await create(ka, {
+          uri: 'user://preferences/user',
+          sensitivity: 'internal',
+          content: 'A 的偏好',
+        })
+      ).status,
     ).toBe(201)
     expect(
-      (await create(keyB, { uri: 'preferences://user', content: 'B 的偏好', layer: 'owner' }))
-        .status,
+      (
+        await create(keyB, {
+          uri: 'user://preferences/user',
+          sensitivity: 'internal',
+          content: 'B 的偏好',
+        })
+      ).status,
     ).toBe(201)
-    expect(((await (await get(ka, 'preferences://user')).json()) as MemoryView).content).toBe(
+    expect(((await (await get(ka, 'user://preferences/user')).json()) as MemoryView).content).toBe(
       'A 的偏好',
     )
-    expect(((await (await get(keyB, 'preferences://user')).json()) as MemoryView).content).toBe(
-      'B 的偏好',
-    )
+    expect(
+      ((await (await get(keyB, 'user://preferences/user')).json()) as MemoryView).content,
+    ).toBe('B 的偏好')
   })
 
   it('空间 owner 不能给别的成员的应用签发 Key，但可以吊销', async () => {
@@ -125,10 +136,10 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
 
   it('改成 secret 后历史事件里不再有明文', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'home://router', content: '管理密码 hunter2' })
+    await create(key, { uri: 'user://home/router', content: '管理密码 hunter2' })
     await app.request(
       '/v1/memories',
-      jsonRequest('PATCH', { uri: 'home://router', sensitivity: 'secret' }, bearer(key)),
+      jsonRequest('PATCH', { uri: 'user://home/router', sensitivity: 'secret' }, bearer(key)),
     )
     const events = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEvents))
     expect(events).toHaveLength(2)
@@ -137,15 +148,15 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
 
   it('已失效的记忆让出 URI', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'home://ip', content: '旧地址' })
+    await create(key, { uri: 'user://home/ip', content: '旧地址' })
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
         .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'ip')),
+        .where(eq(memories.path, 'home/ip')),
     )
-    expect((await create(key, { uri: 'home://ip', content: '新地址' })).status).toBe(201)
-    expect(((await (await get(key, 'home://ip')).json()) as MemoryView).content).toBe('新地址')
+    expect((await create(key, { uri: 'user://home/ip', content: '新地址' })).status).toBe(201)
+    expect(((await (await get(key, 'user://home/ip')).json()) as MemoryView).content).toBe('新地址')
   })
 
   it('换了嵌入接口的主机必须重新说明 Key 怎么处理', async () => {
@@ -206,7 +217,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
         method: 'tools/call',
         params: {
           name: 'kioku_create',
-          arguments: { uri: 'core://big', content: 'x'.repeat(20_001), layer: 'base' },
+          arguments: { uri: 'core://big', content: 'x'.repeat(20_001) },
         },
       }),
     })
@@ -229,37 +240,30 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect((await keyAs(b.cookie, bApp)).status).toBe(201)
   })
 
-  it('共享节点与私人节点不能占同一个 URI', async () => {
+  it('同一归属里坐标不重复：本人的按成员各自占用，共享的只能有一条', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await create(key, { uri: 'home://wifi', content: '共享', layer: 'base' })).status).toBe(
-      201,
-    )
-    expect(
-      (await create(key, { uri: 'home://wifi', content: '私人', layer: 'private' })).status,
-    ).toBe(409)
-    expect(
-      (await create(key, { uri: 'prefs://user', content: '私人', layer: 'owner' })).status,
-    ).toBe(201)
+    expect((await create(key, { uri: 'user://home/wifi', content: '本人的' })).status).toBe(201)
+    expect((await create(key, { uri: 'user://home/wifi', content: '又一条' })).status).toBe(409)
+    expect((await create(key, { uri: 'core://prefs/user', content: '共享' })).status).toBe(201)
     const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     const bKey = (
       (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
     ).key
-    expect(
-      (await create(bKey, { uri: 'prefs://user', content: '共享', layer: 'base' })).status,
-    ).toBe(409)
+    expect((await create(bKey, { uri: 'user://home/wifi', content: 'bob 的' })).status).toBe(201)
+    expect((await create(bKey, { uri: 'core://prefs/user', content: '共享' })).status).toBe(409)
   })
 
   it('并发创建同一个 URI：一个成功，其余 409 而不是 500', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
     const results = await Promise.all(
-      Array.from({ length: 5 }, (_, i) => create(key, { uri: 'home://ip', content: `${i}` })),
+      Array.from({ length: 5 }, (_, i) => create(key, { uri: 'user://home/ip', content: `${i}` })),
     )
     expect(results.map((r) => r.status).sort()).toEqual([201, 409, 409, 409, 409])
   })
 
   it('请求嵌入期间记忆改成了 secret，旧内容的向量不会写回', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    const res = await create(key, { uri: 'home://router', content: '管理密码 hunter2' })
+    const res = await create(key, { uri: 'user://home/router', content: '管理密码 hunter2' })
     const id = ((await res.json()) as { id: string }).id
     const inner = fakeEmbedder()
     const racing = {
@@ -268,7 +272,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
         // 模拟嵌入请求还没返回时，另一个请求把记忆改成了 secret
         await app.request(
           '/v1/memories',
-          jsonRequest('PATCH', { uri: 'home://router', sensitivity: 'secret' }, bearer(key)),
+          jsonRequest('PATCH', { uri: 'user://home/router', sensitivity: 'secret' }, bearer(key)),
         )
         return inner.embed(texts)
       },
@@ -288,12 +292,16 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
 
   it('父节点不存在时也能创建，并通过虚拟节点浏览到', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await create(key, { uri: 'projects://kioku/notes', content: 'x' })).status).toBe(201)
-    const root = await children(key, 'projects')
-    expect(root.children).toMatchObject([{ uri: 'projects://kioku', exists: false, childCount: 1 }])
-    const level = await children(key, 'projects://kioku')
+    expect((await create(key, { uri: 'user://projects/kioku/notes', content: 'x' })).status).toBe(
+      201,
+    )
+    const root = await children(key, 'user://projects')
+    expect(root.children).toMatchObject([
+      { uri: 'user://projects/kioku', exists: false, childCount: 1 },
+    ])
+    const level = await children(key, 'user://projects/kioku')
     expect(level.parent).toBeNull()
-    expect(level.children).toMatchObject([{ uri: 'projects://kioku/notes', exists: true }])
+    expect(level.children).toMatchObject([{ uri: 'user://projects/kioku/notes', exists: true }])
   })
 
   it('读不到的记忆不出现，也不会产生虚拟节点', async () => {
@@ -301,23 +309,26 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     const bKey = (
       (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
     ).key
-    await create(bKey, { uri: 'home://lab/secret-project', content: 'B 的私事', layer: 'private' })
+    await create(bKey, { uri: 'user://home/lab/secret-project', content: 'B 的私事' })
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await children(key, 'home')).children).toEqual([])
+    expect((await children(key, 'user')).children).toEqual([])
     // 对 A 来说这个路径下什么都读不到，和不存在一样是 404
-    const lab = await app.request(`/v1/memories/children?of=${encodeURIComponent('home://lab')}`, {
-      headers: bearer(key),
-    })
+    const lab = await app.request(
+      `/v1/memories/children?of=${encodeURIComponent('user://home/lab')}`,
+      {
+        headers: bearer(key),
+      },
+    )
     expect(lab.status).toBe(404)
-    expect((await children(bKey, 'home')).children).toMatchObject([
-      { uri: 'home://lab', exists: false },
+    expect((await children(bKey, 'user://home')).children).toMatchObject([
+      { uri: 'user://home/lab', exists: false },
     ])
   })
 
   it('删除或移走父节点后，子节点仍然可以浏览到', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'core://agent', content: 'x', layer: 'base' })
-    await create(key, { uri: 'core://agent/codex', content: 'x', layer: 'base' })
+    await create(key, { uri: 'core://agent', content: 'x' })
+    await create(key, { uri: 'core://agent/codex', content: 'x' })
     const del = await app.request('/v1/memories?uri=core%3A%2F%2Fagent', {
       method: 'DELETE',
       headers: bearer(key),
@@ -370,13 +381,19 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
 
   it('浏览结果按层聚合，每一级只出现一次', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    for (const uri of ['kb://a', 'kb://a/x', 'kb://a/y', 'kb://a/y/z', 'kb://b/q']) {
-      await create(key, { uri, content: uri, layer: 'base' })
+    for (const uri of [
+      'user://kb/a',
+      'user://kb/a/x',
+      'user://kb/a/y',
+      'user://kb/a/y/z',
+      'user://kb/b/q',
+    ]) {
+      await create(key, { uri, content: uri })
     }
-    const root = await children(key, 'kb')
+    const root = await children(key, 'user://kb')
     expect(root.children.map((c) => [c.uri, c.exists, c.childCount])).toEqual([
-      ['kb://a', true, 2],
-      ['kb://b', false, 1],
+      ['user://kb/a', true, 2],
+      ['user://kb/b', false, 1],
     ])
   })
   it('转移应用所有权会吊销旧 Key，且不能夹带别的修改', async () => {
@@ -396,24 +413,27 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect((await app.request('/v1/whoami', { headers: bearer(oldKey) })).status).toBe(401)
   })
 
-  it('数据库层也不允许共享节点与成员节点占同一 URI', async () => {
+  it('数据库层也保证同一归属里坐标不重复', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'home://wifi', content: '共享', layer: 'base' })
+    await create(key, { uri: 'user://home/wifi', content: '本人的' })
+    const row = (ownerAccountId: string) => ({
+      spaceId: ws.spaceId,
+      form: 'curated' as const,
+      layer: 'user' as const,
+      sensitivity: 'private' as const,
+      provenance: 'agent' as const,
+      ownerAccountId,
+      domain: 'user',
+      path: 'home/wifi',
+      title: 'wifi',
+      content: '绕过服务层',
+    })
     await expect(
-      withSpace(database.db, ws.spaceId, (tx) =>
-        tx.insert(memories).values({
-          spaceId: ws.spaceId,
-          form: 'curated',
-          layer: 'private',
-          sensitivity: 'private',
-          provenance: 'agent',
-          ownerAccountId: ws.accountId,
-          domain: 'home',
-          path: 'wifi',
-          content: '绕过服务层',
-        }),
-      ),
+      withSpace(database.db, ws.spaceId, (tx) => tx.insert(memories).values(row(ws.accountId))),
     ).rejects.toThrow()
+    // 别的成员的本人里可以有同一个坐标
+    const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    await withSpace(database.db, ws.spaceId, (tx) => tx.insert(memories).values(row(b.accountId)))
   })
 
   it('别人的过期记录也会让出 URI', async () => {
@@ -421,48 +441,43 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     const bKey = (
       (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
     ).key
-    await create(bKey, { uri: 'home://x', content: 'B 的旧事', layer: 'private' })
+    await create(bKey, { uri: 'core://home/x', content: 'B 的旧事' })
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
         .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'x')),
+        .where(eq(memories.path, 'home/x')),
     )
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    expect((await create(key, { uri: 'home://x', content: '共享', layer: 'base' })).status).toBe(
-      201,
-    )
+    expect((await create(key, { uri: 'core://home/x', content: '共享' })).status).toBe(201)
   })
 
-  it('写不了的过期共享记录留着：成员节点可以和它并存，同样是共享节点的写入照样冲突', async () => {
+  it('写不了的过期共享记录留着：同一个共享坐标的写入照样冲突，本人的坐标不受影响', async () => {
     const ownerKey = await ws.issueKey((await ws.createApp('agent')).id)
     await create(ownerKey, {
-      uri: 'home://vault',
+      uri: 'core://home/vault',
       content: '旧密码',
-      layer: 'base',
       sensitivity: 'secret',
     })
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
         .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'vault')),
+        .where(eq(memories.path, 'home/vault')),
     )
     const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     const bKey = (
       (await (await keyAs(b.cookie, await appAs(b.cookie, 'b-agent'))).json()) as CreatedKey
     ).key
-    expect(
-      (await create(bKey, { uri: 'home://vault', content: '共享', layer: 'base' })).status,
-    ).toBe(409)
-    expect(
-      (await create(bKey, { uri: 'home://vault', content: 'bob 自己的', layer: 'private' })).status,
-    ).toBe(201)
+    expect((await create(bKey, { uri: 'core://home/vault', content: '共享' })).status).toBe(409)
+    expect((await create(bKey, { uri: 'user://home/vault', content: 'bob 自己的' })).status).toBe(
+      201,
+    )
     const rows = await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.select().from(memories).where(eq(memories.path, 'vault')),
+      tx.select().from(memories).where(eq(memories.path, 'home/vault')),
     )
     expect(rows.filter((r) => r.deletedAt === null)).toHaveLength(2)
-    expect(((await (await get(bKey, 'home://vault')).json()) as MemoryView).content).toBe(
+    expect(((await (await get(bKey, 'user://home/vault')).json()) as MemoryView).content).toBe(
       'bob 自己的',
     )
   })
@@ -477,9 +492,12 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
 
   it('浏览时 priority 高的节点排在前面', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'kb://aaa', content: 'x', layer: 'base', priority: 2 })
-    await create(key, { uri: 'kb://zzz', content: 'x', layer: 'base', priority: 0 })
-    expect((await children(key, 'kb')).children.map((c) => c.uri)).toEqual(['kb://zzz', 'kb://aaa'])
+    await create(key, { uri: 'core://kb/aaa', content: 'x', priority: 2 })
+    await create(key, { uri: 'core://kb/zzz', content: 'x', priority: 0 })
+    expect((await children(key, 'core://kb')).children.map((c) => c.uri)).toEqual([
+      'core://kb/zzz',
+      'core://kb/aaa',
+    ])
   })
   it('应用只能转给 owner 或 editor', async () => {
     const v = await addMember(database.db, ws.spaceId, 'victor', 'viewer')
@@ -491,27 +509,32 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     expect(res.status).toBe(400)
   })
 
-  it('已过期的共享记录不挡住绕过服务层的写入', async () => {
+  it('绕开服务层的写入撞上同一归属里过期的记录时，唯一索引照样拦下', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'home://old', content: '旧', layer: 'base' })
-    await withSpace(database.db, ws.spaceId, async (tx) => {
-      await tx
+    await create(key, { uri: 'core://home/old', content: '旧' })
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
         .update(memories)
         .set({ validTo: new Date(Date.now() - 1000) })
-        .where(eq(memories.path, 'old'))
-      await tx.insert(memories).values({
-        spaceId: ws.spaceId,
-        form: 'curated',
-        layer: 'private',
-        sensitivity: 'private',
-        provenance: 'agent',
-        ownerAccountId: ws.accountId,
-        domain: 'home',
-        path: 'old',
-        content: '新',
-      })
-    })
-    expect(((await (await get(key, 'home://old')).json()) as MemoryView).content).toBe('新')
+        .where(eq(memories.path, 'home/old')),
+    )
+    await expect(
+      withSpace(database.db, ws.spaceId, (tx) =>
+        tx.insert(memories).values({
+          spaceId: ws.spaceId,
+          form: 'curated',
+          layer: 'core',
+          sensitivity: 'public',
+          provenance: 'agent',
+          domain: 'core',
+          path: 'home/old',
+          title: 'old',
+          content: '新',
+        }),
+      ),
+    ).rejects.toThrow()
+    // 经过服务层就由 claimUri 先让出
+    expect((await create(key, { uri: 'core://home/old', content: '新' })).status).toBe(201)
   })
   const proxiedApp = () =>
     createApp({
@@ -552,8 +575,8 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
   it('应用主人被降级后，他签的 Key 随之收紧；离开空间后 Key 作废', async () => {
     const appId = (await ws.createApp('agent')).id
     const key = await ws.issueKey(appId)
-    await create(key, { uri: 'home://wifi', content: 'hunter2', sensitivity: 'secret' })
-    expect((await get(key, 'home://wifi')).status).toBe(200)
+    await create(key, { uri: 'user://home/wifi', content: 'hunter2', sensitivity: 'secret' })
+    expect((await get(key, 'user://home/wifi')).status).toBe(200)
 
     // 另找一位 owner，再把原 owner 降成 editor
     await addMember(database.db, ws.spaceId, 'olga', 'owner')
@@ -561,7 +584,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
       .update(spaceMembers)
       .set({ role: 'editor' })
       .where(and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, ws.accountId)))
-    expect((await get(key, 'home://wifi')).status).toBe(404)
+    expect((await get(key, 'user://home/wifi')).status).toBe(404)
     const who = (await (await app.request('/v1/whoami', { headers: bearer(key) })).json()) as {
       scopes: { maxSensitivity: string; admin: boolean }
     }
@@ -601,7 +624,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
 
   it('记忆改成 secret 时，它的向量在同一个事务里删除', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    const res = await create(key, { uri: 'home://router', content: '管理密码 hunter2' })
+    const res = await create(key, { uri: 'user://home/router', content: '管理密码 hunter2' })
     const id = ((await res.json()) as { id: string }).id
     await embedMemories(database.db, fakeEmbedder(), ws.spaceId, [id])
     expect(
@@ -609,7 +632,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
     ).toHaveLength(1)
     await app.request(
       '/v1/memories',
-      jsonRequest('PATCH', { uri: 'home://router', sensitivity: 'secret' }, bearer(key)),
+      jsonRequest('PATCH', { uri: 'user://home/router', sensitivity: 'secret' }, bearer(key)),
     )
     expect(
       await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEmbeddings)),
@@ -814,7 +837,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
 
   it('浏览一个不存在、下面也没有可读内容的路径返回 404', async () => {
     const key = await ws.issueKey((await ws.createApp('agent')).id)
-    await create(key, { uri: 'core://agent', content: 'x', layer: 'base' })
+    await create(key, { uri: 'core://agent', content: 'x' })
     expect(
       (
         await app.request(`/v1/memories/children?of=${encodeURIComponent('core://agnet')}`, {
@@ -822,8 +845,12 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
         })
       ).status,
     ).toBe(404)
+    // 开头本身下面没有内容时是空的一级；不是四种开头之一的是格式错误
+    expect(
+      (await app.request('/v1/memories/children?of=user', { headers: bearer(key) })).status,
+    ).toBe(200)
     expect(
       (await app.request('/v1/memories/children?of=emptydomain', { headers: bearer(key) })).status,
-    ).toBe(200)
+    ).toBe(400)
   })
 })

@@ -15,7 +15,6 @@ import {
   isNull,
   lte,
   ne,
-  notInArray,
   or,
   sql,
   type SQL,
@@ -29,10 +28,10 @@ import { memories } from '../db/schema'
 // 还没有失效或过期，按数据库的时间
 export const STILL_VALID = sql`((${memories.validTo} is null or ${memories.validTo} > now()) and (${memories.expiresAt} is null or ${memories.expiresAt} > now()))`
 
-// 启动上下文只收受信来源的这几个策展层（理由见 recall/boot.ts）。JS 版的判断在 contracts，管理界面也要用
+// 启动加载只收受信来源写下的、记下的四类（理由见 recall/boot.ts）。JS 版的判断在 contracts，管理界面也要用
 export { BOOT_LAYERS, bootEligible }
 
-// 会进启动上下文的节点：受信来源的策展层里 priority 0 的，加上人格与应用层 priority ≤ 1 的。
+// 会进启动加载的节点：受信来源写下的、记下的四类里 priority 0 的，加上人格与应用 priority ≤ 1 的。
 // boot 按它挑选（再套读权限、继承覆盖与字数预算）；召回分析的「从没被召回」不算它们：
 // 每次会话开始都注入，只是不记成召回
 export const BOOT_ELIGIBLE = and(
@@ -148,10 +147,8 @@ export function readableConditions(
   if (access.originScopes) conditions.push(inArray(cols.originScope, [...access.originScopes]))
 
   conditions.push(
-    or(
-      notInArray(cols.layer, ['owner', 'private']),
-      eq(cols.ownerAccountId, access.ownerAccountId),
-    ),
+    // 归某个成员的（本人，以及不带会话上下文的会话摘要）只有这个成员读得到
+    or(isNull(cols.ownerAccountId), eq(cols.ownerAccountId, access.ownerAccountId)),
     options.management
       ? undefined
       : options.personaIds.length
@@ -162,7 +159,7 @@ export function readableConditions(
   return and(...conditions)!
 }
 
-// 待审队列里的：不可信来源写进对象层与情节层、现在有效、读得到的。列表与处理都按它
+// 待审队列里的：不可信来源写下的联系人事实与会话摘要中，现在有效、读得到的。列表与处理都按它
 export function pendingReview(access: Access, personaIds: readonly string[]): SQL {
   return and(
     eq(memories.provenance, 'untrusted'),

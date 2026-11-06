@@ -8,7 +8,6 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.create_memory_request_layer import CreateMemoryRequestLayer
 from ..models.create_memory_request_sensitivity import CreateMemoryRequestSensitivity
 from ..types import UNSET, Unset
 from typing import cast
@@ -24,7 +23,7 @@ class CreateMemoryRequest:
     Attributes:
         uri (str):
         content (str):
-        layer (CreateMemoryRequestLayer | Unset):
+        title (str | Unset):
         sensitivity (CreateMemoryRequestSensitivity | Unset):
         priority (int | Unset):  Default: 2.
         disclosure (str | Unset):
@@ -35,7 +34,7 @@ class CreateMemoryRequest:
 
     uri: str
     content: str
-    layer: CreateMemoryRequestLayer | Unset = UNSET
+    title: str | Unset = UNSET
     sensitivity: CreateMemoryRequestSensitivity | Unset = UNSET
     priority: int | Unset = 2
     disclosure: str | Unset = UNSET
@@ -48,9 +47,7 @@ class CreateMemoryRequest:
 
         content = self.content
 
-        layer: str | Unset = UNSET
-        if not isinstance(self.layer, Unset):
-            layer = self.layer.value
+        title = self.title
 
         sensitivity: str | Unset = UNSET
         if not isinstance(self.sensitivity, Unset):
@@ -76,8 +73,8 @@ class CreateMemoryRequest:
                 "content": content,
             }
         )
-        if layer is not UNSET:
-            field_dict["layer"] = layer
+        if title is not UNSET:
+            field_dict["title"] = title
         if sensitivity is not UNSET:
             field_dict["sensitivity"] = sensitivity
         if priority is not UNSET:
@@ -98,12 +95,7 @@ class CreateMemoryRequest:
 
         content = d.pop("content")
 
-        _layer = d.pop("layer", UNSET)
-        layer: CreateMemoryRequestLayer | Unset
-        if isinstance(_layer, Unset):
-            layer = UNSET
-        else:
-            layer = CreateMemoryRequestLayer(_layer)
+        title = d.pop("title", UNSET)
 
         _sensitivity = d.pop("sensitivity", UNSET)
         sensitivity: CreateMemoryRequestSensitivity | Unset
@@ -128,7 +120,7 @@ class CreateMemoryRequest:
         create_memory_request = cls(
             uri=uri,
             content=content,
-            layer=layer,
+            title=title,
             sensitivity=sensitivity,
             priority=priority,
             disclosure=disclosure,

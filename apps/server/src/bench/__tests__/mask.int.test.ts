@@ -122,17 +122,17 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
     })
     return parse(res)
   }
-  const seedSecret = async (uri = 'notes://safe') => {
+  const seedSecret = async (uri = 'user://notes/safe') => {
     const created = await real('kioku_create', { uri, content: SECRET_BODY, sensitivity: 'secret' })
     expect(created.isError).toBe(false)
     expect(created.text).toContain(SECRET_BODY)
   }
-  const realBody = async (uri = 'notes://safe') => (await real('kioku_get', { uri })).text
+  const realBody = async (uri = 'user://notes/safe') => (await real('kioku_get', { uri })).text
 
   describe('记忆', () => {
     it('kioku_get：不给 secret 的正文，真实接口照常给', async () => {
       await seedSecret()
-      const got = await masked('kioku_get', { uri: 'notes://safe' })
+      const got = await masked('kioku_get', { uri: 'user://notes/safe' })
       expect(got.isError).toBe(false)
       expect(got.text).toContain('敏感级: secret')
       expect(got.text).toContain('secret 正文需要显式读取权限')
@@ -142,41 +142,44 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
 
     it('kioku_list 的父节点：不给 secret 的正文', async () => {
       await seedSecret()
-      await real('kioku_create', { uri: 'notes://safe/child', content: '子节点' })
-      const listed = await masked('kioku_list', { of: 'notes://safe' })
-      expect(listed.text).toContain('notes://safe/child')
+      await real('kioku_create', { uri: 'user://notes/safe/child', content: '子节点' })
+      const listed = await masked('kioku_list', { of: 'user://notes/safe' })
+      expect(listed.text).toContain('user://notes/safe/child')
       expect(listed.text).not.toContain(SECRET_BODY)
-      expect((await real('kioku_list', { of: 'notes://safe' })).text).toContain(SECRET_BODY)
+      expect((await real('kioku_list', { of: 'user://notes/safe' })).text).toContain(SECRET_BODY)
     })
 
     it('打码时不解密，也不记访问；真实接口读到才记', async () => {
       await seedSecret()
-      await real('kioku_create', { uri: 'notes://safe/child', content: '子节点' })
+      await real('kioku_create', { uri: 'user://notes/safe/child', content: '子节点' })
       const accessEvents = () =>
         withSpace(database.db, ws.spaceId, (tx) =>
           tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'access')),
         )
-      await masked('kioku_get', { uri: 'notes://safe' })
-      await masked('kioku_list', { of: 'notes://safe' })
-      await masked('kioku_update', { uri: 'notes://safe', priority: 7 })
-      await masked('kioku_move', { from: 'notes://safe', to: 'notes://moved' })
+      await masked('kioku_get', { uri: 'user://notes/safe' })
+      await masked('kioku_list', { of: 'user://notes/safe' })
+      await masked('kioku_update', { uri: 'user://notes/safe', priority: 7 })
+      await masked('kioku_move', { from: 'user://notes/safe', to: 'user://notes/moved' })
       expect(await accessEvents()).toEqual([])
-      await realBody('notes://moved')
+      await realBody('user://notes/moved')
       expect((await accessEvents()).map((e) => e.context)).toEqual([{ via: 'kioku_get' }])
     })
 
     it('kioku_move：结果不带正文，正文还在', async () => {
       await seedSecret()
-      const moved = await masked('kioku_move', { from: 'notes://safe', to: 'notes://moved' })
+      const moved = await masked('kioku_move', {
+        from: 'user://notes/safe',
+        to: 'user://notes/moved',
+      })
       expect(moved.isError).toBe(false)
-      expect(moved.text).toContain('URI: notes://moved')
+      expect(moved.text).toContain('URI: user://notes/moved')
       expect(moved.text).not.toContain(SECRET_BODY)
-      expect(await realBody('notes://moved')).toContain(SECRET_BODY)
+      expect(await realBody('user://notes/moved')).toContain(SECRET_BODY)
     })
 
     it('只改 priority 的 kioku_update：结果不带正文，封存回去的还是原文，不是占位文字', async () => {
       await seedSecret()
-      const updated = await masked('kioku_update', { uri: 'notes://safe', priority: 7 })
+      const updated = await masked('kioku_update', { uri: 'user://notes/safe', priority: 7 })
       expect(updated.isError).toBe(false)
       expect(updated.text).toContain('priority: 7')
       expect(updated.text).not.toContain(SECRET_BODY)
@@ -187,26 +190,26 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
 
     it('secret 级的 kioku_create：结果不带正文，存下的是传入的原文', async () => {
       const created = await masked('kioku_create', {
-        uri: 'notes://new-safe',
+        uri: 'user://notes/new-safe',
         content: SECRET_BODY,
         sensitivity: 'secret',
       })
       expect(created.isError).toBe(false)
       expect(created.text).toContain('敏感级: secret')
       expect(created.text).not.toContain(SECRET_BODY)
-      expect(await realBody('notes://new-safe')).toContain(SECRET_BODY)
+      expect(await realBody('user://notes/new-safe')).toContain(SECRET_BODY)
     })
 
     it('把 secret 改成别的敏感级被拒绝：结果与之后读到的都没有明文，敏感级不变', async () => {
       await seedSecret()
       const downgraded = await masked('kioku_update', {
-        uri: 'notes://safe',
+        uri: 'user://notes/safe',
         sensitivity: 'private',
       })
       expect(downgraded.isError).toBe(true)
       expect(downgraded.text).toContain('记忆页')
       expect(downgraded.text).not.toContain(SECRET_BODY)
-      const got = await masked('kioku_get', { uri: 'notes://safe' })
+      const got = await masked('kioku_get', { uri: 'user://notes/safe' })
       expect(got.text).toContain('敏感级: secret')
       expect(got.text).not.toContain(SECRET_BODY)
       expect(await realBody()).toContain('敏感级: secret')
@@ -214,23 +217,28 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       const searched = await masked('kioku_search', { query: '保险柜' })
       expect(searched.isError).toBe(false)
       expect(searched.text).not.toContain(SECRET_BODY)
-      expect(searched.text).not.toContain('notes://safe')
+      expect(searched.text).not.toContain('user://notes/safe')
       expect(
-        (await real('kioku_update', { uri: 'notes://safe', sensitivity: 'private' })).isError,
+        (await real('kioku_update', { uri: 'user://notes/safe', sensitivity: 'private' })).isError,
       ).toBe(false)
-      expect((await masked('kioku_search', { query: '保险柜' })).text).toContain('notes://safe')
+      expect((await masked('kioku_search', { query: '保险柜' })).text).toContain(
+        'user://notes/safe',
+      )
     })
 
     it('改 secret 的正文被拒绝：读不到原文，写回占位文字会永久覆盖', async () => {
       await seedSecret()
-      const placeholder = (await masked('kioku_get', { uri: 'notes://safe' })).text
-      const rewritten = await masked('kioku_update', { uri: 'notes://safe', content: placeholder })
+      const placeholder = (await masked('kioku_get', { uri: 'user://notes/safe' })).text
+      const rewritten = await masked('kioku_update', {
+        uri: 'user://notes/safe',
+        content: placeholder,
+      })
       expect(rewritten.isError).toBe(true)
       expect(rewritten.text).toContain('记忆页')
       expect(await realBody()).toContain(SECRET_BODY)
       // 带着 secret 不变的敏感级一起改也一样
       const same = await masked('kioku_update', {
-        uri: 'notes://safe',
+        uri: 'user://notes/safe',
         content: '新正文',
         sensitivity: 'secret',
       })
@@ -240,44 +248,44 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
 
     it('正文里有占位文字时拒绝：模型照抄读到的结果，新建与改普通记忆都一样', async () => {
       await seedSecret()
-      const copied = (await masked('kioku_get', { uri: 'notes://safe' })).text
-      const created = await masked('kioku_create', { uri: 'notes://copy', content: copied })
+      const copied = (await masked('kioku_get', { uri: 'user://notes/safe' })).text
+      const created = await masked('kioku_create', { uri: 'user://notes/copy', content: copied })
       expect(created.isError).toBe(true)
       expect(created.text).toContain('占位文字')
-      expect((await real('kioku_get', { uri: 'notes://copy' })).isError).toBe(true)
+      expect((await real('kioku_get', { uri: 'user://notes/copy' })).isError).toBe(true)
       const sealed = await masked('kioku_create', {
-        uri: 'notes://copy',
+        uri: 'user://notes/copy',
         content: copied,
         sensitivity: 'secret',
       })
       expect(sealed.isError).toBe(true)
-      expect((await real('kioku_get', { uri: 'notes://copy' })).isError).toBe(true)
+      expect((await real('kioku_get', { uri: 'user://notes/copy' })).isError).toBe(true)
 
-      await real('kioku_create', { uri: 'notes://plain', content: '普通正文' })
+      await real('kioku_create', { uri: 'user://notes/plain', content: '普通正文' })
       for (const placeholder of [MASKED_SECRET_CONTENT, MASKED_BINDING, MASKED_HOSTED_PREFIX]) {
         const updated = await masked('kioku_update', {
-          uri: 'notes://plain',
+          uri: 'user://notes/plain',
           content: `前面的话 ${placeholder} 后面的话`,
         })
         expect(updated.isError, placeholder).toBe(true)
         expect(updated.text, placeholder).toContain('占位文字')
       }
-      const after = await realBody('notes://plain')
+      const after = await realBody('user://notes/plain')
       expect(after).toContain('普通正文')
       expect(after).toContain('版本: 1')
       // 只改别的字段不受影响
-      const raised = await masked('kioku_update', { uri: 'notes://plain', priority: 7 })
+      const raised = await masked('kioku_update', { uri: 'user://notes/plain', priority: 7 })
       expect(raised.isError).toBe(false)
     })
 
     it('真实接口不受影响：正文里可以写到占位文字', async () => {
       const created = await real('kioku_create', {
-        uri: 'notes://about-mask',
+        uri: 'user://notes/about-mask',
         content: `测试台读 secret 时显示 ${MASKED_SECRET_CONTENT}`,
       })
       expect(created.isError).toBe(false)
       const updated = await real('kioku_update', {
-        uri: 'notes://about-mask',
+        uri: 'user://notes/about-mask',
         content: MASKED_HOSTED_PREFIX,
       })
       expect(updated.isError).toBe(false)
@@ -285,87 +293,52 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
 
     it('真实接口不受影响：照常能改 secret 的正文与敏感级', async () => {
       await seedSecret()
-      const rewritten = await real('kioku_update', { uri: 'notes://safe', content: '新正文' })
+      const rewritten = await real('kioku_update', { uri: 'user://notes/safe', content: '新正文' })
       expect(rewritten.isError).toBe(false)
-      const downgraded = await real('kioku_update', { uri: 'notes://safe', sensitivity: 'private' })
+      const downgraded = await real('kioku_update', {
+        uri: 'user://notes/safe',
+        sensitivity: 'private',
+      })
       expect(downgraded.isError).toBe(false)
       expect(downgraded.text).toContain('新正文')
     })
 
     it('改成 secret 可以，结果不带正文', async () => {
-      await real('kioku_create', { uri: 'notes://plain', content: '普通正文' })
-      const raised = await masked('kioku_update', { uri: 'notes://plain', sensitivity: 'secret' })
+      await real('kioku_create', { uri: 'user://notes/plain', content: '普通正文' })
+      const raised = await masked('kioku_update', {
+        uri: 'user://notes/plain',
+        sensitivity: 'secret',
+      })
       expect(raised.isError).toBe(false)
       expect(raised.text).not.toContain('普通正文')
-      expect(await realBody('notes://plain')).toContain('普通正文')
+      expect(await realBody('user://notes/plain')).toContain('普通正文')
     })
 
     it('占位符格式不对的旧数据：解密后的片段不进报错', async () => {
       await seedSecret()
       const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
-        tx.select().from(memories).where(eq(memories.path, 'safe')),
+        tx.select().from(memories).where(eq(memories.path, 'notes/safe')),
       )
       const legacy = sealMemoryContent(masterKey, row!.id, '旧数据 {{cred:坏的片段')
       await withSpace(database.db, ws.spaceId, (tx) =>
         tx.update(memories).set(legacy).where(eq(memories.id, row!.id)),
       )
-      const updated = await masked('kioku_update', { uri: 'notes://safe', priority: 5 })
+      const updated = await masked('kioku_update', { uri: 'user://notes/safe', priority: 5 })
       expect(updated.isError).toBe(true)
       expect(updated.text).toContain('占位符格式错误')
       expect(updated.text).not.toContain('坏的片段')
       // 真实接口没带正文时查的也是解出来的原文，同样不带（见 secretAccess.int.test.ts）
-      const direct = await real('kioku_update', { uri: 'notes://safe', priority: 5 })
+      const direct = await real('kioku_update', { uri: 'user://notes/safe', priority: 5 })
       expect(direct.text).toContain('占位符格式错误')
       expect(direct.text).not.toContain('坏的片段')
     })
 
-    // owner 层的 secret 正文写着占位符（旧数据）：改到私人层时引用都算新增，要重新检查
-    const seedLegacyRefs = async (body: string) => {
-      await seedSecret('notes://legacy')
-      expect((await real('kioku_update', { uri: 'notes://legacy', layer: 'owner' })).isError).toBe(
-        false,
-      )
-      const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
-        tx.select().from(memories).where(eq(memories.path, 'legacy')),
-      )
-      const legacy = sealMemoryContent(masterKey, row!.id, body)
-      await withSpace(database.db, ws.spaceId, (tx) =>
-        tx.update(memories).set(legacy).where(eq(memories.id, row!.id)),
-      )
-    }
-
-    it('引用不存在的凭据的旧数据：解密后的标识不进报错', async () => {
-      await seedLegacyRefs('旧数据 {{cred:missing-cred}}')
-      const updated = await masked('kioku_update', { uri: 'notes://legacy', layer: 'private' })
-      expect(updated.isError).toBe(true)
-      expect(updated.text).toContain('不存在或不可用')
-      expect(updated.text).not.toContain('missing-cred')
-      const direct = await real('kioku_update', { uri: 'notes://legacy', layer: 'private' })
-      expect(direct.text).toContain('不存在或不可用')
-      expect(direct.text).not.toContain('missing-cred')
-    })
-
-    it('引用没有的字段的旧数据：解密后的标识与字段名不进报错', async () => {
-      const saved = await real('kioku_credential_save', {
-        identifier: 'nas',
-        name: 'NAS',
-        values: { password: HOSTED_VALUE },
-      })
-      expect(saved.isError).toBe(false)
-      await seedLegacyRefs('旧数据 {{cred:nas#missing-field}}')
-      const updated = await masked('kioku_update', { uri: 'notes://legacy', layer: 'private' })
-      expect(updated.isError).toBe(true)
-      expect(updated.text).toContain('没有此字段')
-      expect(updated.text).not.toContain('nas')
-      expect(updated.text).not.toContain('missing-field')
-      const direct = await real('kioku_update', { uri: 'notes://legacy', layer: 'private' })
-      expect(direct.text).toContain('没有此字段')
-      expect(direct.text).not.toContain('missing-field')
-    })
+    // 旧数据里的占位符在移进本人时按新增检查，只有管理界面能在共享的归属与本人之间移动，
+    // 报错不带解出来的标识与字段名由 secretAccess.int.test.ts 核对；Key 的路径上本人里的引用都不算新增
 
     it('不是 secret 的记忆照常报出标识：正文本来就读得到', async () => {
       const created = await masked('kioku_create', {
-        uri: 'notes://refs',
+        uri: 'user://notes/refs',
         content: '{{cred:missing-cred}}',
       })
       expect(created.isError).toBe(true)
@@ -550,11 +523,10 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
         const external = await seedExternal()
         const hosted = await seedHosted()
         await real('kioku_create', {
-          uri: 'notes://login',
+          uri: 'user://notes/login',
           content: '路由器 {{cred:router#password}}，NAS {{cred:nas#password}}',
-          layer: 'private',
         })
-        const got = await masked('kioku_get', { uri: 'notes://login' }, mask)
+        const got = await masked('kioku_get', { uri: 'user://notes/login' }, mask)
         expect(got.text).toContain('正文里引用的凭据')
         expect(got.text).not.toContain(HOSTED_VALUE)
         for (const text of [LOCATION, INSTRUCTIONS, 'bw get item']) {
@@ -568,13 +540,13 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
 
   describe('事件的标记', () => {
     it('写下的事件都带标记，让出 URI 时的 expire 事件也一样；活动接口返回它', async () => {
-      const uri = 'notes://expiring'
+      const uri = 'user://notes/expiring'
       await real('kioku_create', { uri, content: '旧的' })
       await withSpace(database.db, ws.spaceId, (tx) =>
         tx
           .update(memories)
           .set({ validTo: new Date(Date.now() - 60_000) })
-          .where(eq(memories.path, 'expiring')),
+          .where(eq(memories.path, 'notes/expiring')),
       )
       const created = await masked('kioku_create', { uri, content: '新的' })
       expect(created.isError).toBe(false)
@@ -606,7 +578,7 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
         }),
         recallScopeForKey(deps, key),
         credentialServiceForKey(deps, key),
-        rpc('kioku_create', { uri: 'notes://orphan', content: '正文' }),
+        rpc('kioku_create', { uri: 'user://notes/orphan', content: '正文' }),
       )
       const res = await app.request(`/v1/spaces/${ws.spaceId}/activity`, {
         headers: { cookie: ws.cookie },

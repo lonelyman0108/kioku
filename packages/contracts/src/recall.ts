@@ -278,8 +278,8 @@ export const BootPreview = z.object({
   entries: z.array(
     z.object({ uri: z.string(), title: z.string(), layer: Layer, chars: z.number().int() }),
   ),
-  // 超出预算、只列出 URI 的启动节点
-  omitted: z.array(z.string()),
+  // 超出预算、只列出坐标的启动节点（标题给界面显示，宿主收到的只有坐标）
+  omitted: z.array(z.object({ uri: z.string(), title: z.string() })),
   recent: z.array(RecentMemory),
   related: z.array(RecallCandidate),
   // 放不下、没有附上的附加块

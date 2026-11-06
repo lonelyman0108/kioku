@@ -83,7 +83,7 @@ export function overviewRoutes(deps: Deps) {
           pendingBindingsFor(tx, { accountId, role }, PENDING_BINDINGS_LIMIT),
         ),
       ])
-    // 应用表只读上面这一次：editor 能写哪些应用的应用层也从这里挑
+    // 应用表只读上面这一次：editor 能写哪些应用的记忆也从这里挑
     const service = await memoryServiceForConsole(deps, spaceId, accountId, role, appRows)
     const [stats, recent] = await Promise.all([
       service.stats(settings.active?.model ?? null, {

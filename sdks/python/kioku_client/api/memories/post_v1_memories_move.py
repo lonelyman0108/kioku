@@ -88,7 +88,7 @@ def sync_detailed(
     client: AuthenticatedClient,
     body: MoveMemoryRequest,
 ) -> Response[ErrorResponse | MemoryView]:
-    """修改记忆的 URI
+    """修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动
 
     Args:
         body (MoveMemoryRequest):
@@ -117,7 +117,7 @@ def sync(
     client: AuthenticatedClient,
     body: MoveMemoryRequest,
 ) -> ErrorResponse | MemoryView | None:
-    """修改记忆的 URI
+    """修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动
 
     Args:
         body (MoveMemoryRequest):
@@ -141,7 +141,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     body: MoveMemoryRequest,
 ) -> Response[ErrorResponse | MemoryView]:
-    """修改记忆的 URI
+    """修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动
 
     Args:
         body (MoveMemoryRequest):
@@ -168,7 +168,7 @@ async def asyncio(
     client: AuthenticatedClient,
     body: MoveMemoryRequest,
 ) -> ErrorResponse | MemoryView | None:
-    """修改记忆的 URI
+    """修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动
 
     Args:
         body (MoveMemoryRequest):

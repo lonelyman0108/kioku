@@ -9,7 +9,6 @@ import {
   ConvertToCredentialRequest,
   CreateMemoryRequest,
   DeletedMemoryList,
-  DomainSummary,
   ErrorResponse,
   ExpiredMemoryList,
   GlossaryIndex,
@@ -85,7 +84,7 @@ function memoryRouteSet(set: RouteSet) {
     ...common,
     method: 'get',
     path: base,
-    summary: '按 URI 读取一条记忆',
+    summary: '按坐标（URI）读取一条记忆',
     request: { params, query: UriQuery },
     responses: { 200: jsonResponse('记忆', view), ...errors },
   })
@@ -93,23 +92,16 @@ function memoryRouteSet(set: RouteSet) {
     ...common,
     method: 'get',
     path: `${base}/children`,
-    summary: '列出一个节点或 domain 根下的直接子节点',
+    summary:
+      '列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）',
     request: { params, query: z.object({ of: z.string().min(1) }) },
     responses: { 200: jsonResponse('子节点', set.children), ...errors },
-  })
-  const domains = createRoute({
-    ...common,
-    method: 'get',
-    path: `${base}/domains`,
-    summary: '列出可见的 domain 及节点数',
-    request: { params },
-    responses: { 200: jsonResponse('domain 列表', z.array(DomainSummary)), ...errors },
   })
   const create = createRoute({
     ...common,
     method: 'post',
     path: base,
-    summary: '新建策展记忆；带 validTo 时到期后不再召回、不进 boot',
+    summary: '新建记忆，坐标的开头决定归属；带 validTo 时到期后不再召回、不进 boot',
     request: { params, body: jsonBody(CreateMemoryRequest) },
     responses: { 201: jsonResponse('已创建', view), ...errors },
   })
@@ -118,7 +110,7 @@ function memoryRouteSet(set: RouteSet) {
     method: 'patch',
     path: base,
     summary:
-      '修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间',
+      '修改记忆的标题、正文、敏感级、priority、disclosure、glossary 或有效期；换坐标或归属用 move',
     request: { params, body: jsonBody(UpdateMemoryRequest) },
     responses: { 200: jsonResponse('已修改', view), ...errors },
   })
@@ -134,7 +126,7 @@ function memoryRouteSet(set: RouteSet) {
     ...common,
     method: 'post',
     path: `${base}/move`,
-    summary: '修改记忆的 URI',
+    summary: '修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动',
     request: { params, body: jsonBody(MoveMemoryRequest) },
     responses: { 200: jsonResponse('已移动', view), ...errors },
   })
@@ -145,7 +137,6 @@ function memoryRouteSet(set: RouteSet) {
     .openapi(children, async (c) =>
       c.json(await (await service(c)).children(c.req.valid('query').of), 200),
     )
-    .openapi(domains, async (c) => c.json(await (await service(c)).domains(), 200))
     .openapi(create, async (c) => c.json(await (await service(c)).create(c.req.valid('json')), 201))
     .openapi(update, async (c) => c.json(await (await service(c)).update(c.req.valid('json')), 200))
     .openapi(remove, async (c) => {

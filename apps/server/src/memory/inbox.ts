@@ -21,7 +21,7 @@ export async function inboxCounts(
   const [others, suspects] = await Promise.all([
     withSpace(db, spaceId, async (tx) => {
       const bindings = await pendingBindingCount(tx, viewer)
-      // 对象层与情节层不分人格，读权限里的人格限制用不上
+      // 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上
       const [review] = await tx
         .select({ n: count() })
         .from(memories)

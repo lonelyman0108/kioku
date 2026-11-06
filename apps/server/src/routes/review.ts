@@ -34,7 +34,7 @@ const list = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/review',
   tags: ['review'],
-  summary: '待审队列：不可信来源写进对象层与情节层的记忆，新的在前',
+  summary: '待审队列：不可信来源写进联系人的事实与会话摘要的记忆，新的在前',
   request: { params: SpaceParams, query: ReviewQuery },
   responses: {
     200: jsonResponse('待审的记忆', ReviewList),
@@ -63,7 +63,7 @@ export function reviewRoutes(deps: Deps) {
       const { service } = await consoleMemberFor(deps, spaceId, c.get('console').accountId)
       const after = decodeTimeCursor(query.cursor, UUID)
       if (after === 'invalid') return c.json({ error: INVALID_CURSOR }, 400)
-      // 对象层与情节层不分人格，读权限里的人格限制用不上
+      // 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上
       const pending = and(
         pendingReview(service.access, []),
         query.layer ? eq(memories.layer, query.layer) : undefined,

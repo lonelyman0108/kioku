@@ -22,7 +22,7 @@ import type { Jobs } from '../../jobs/queue'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import type { BufferedSession } from '../buffer'
-import { EPISODE_TTL_DAYS } from '../extract'
+import { EPISODE_TTL_DAYS, NO_USABLE_KEY } from '../extract'
 import type { ChatMessage, ChatModel } from '../provider'
 import { saveExtractionConfig } from '../settings'
 import { processSession } from '../worker'
@@ -313,9 +313,7 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     await extract(model, await batch())
     expect(calls).toEqual([])
     expect(await turns()).toEqual([])
-    expect(await runs()).toMatchObject([
-      { error: '写入这一批的访问密钥均已吊销、作废或无权写入联系人层与情节层', turns: 0 },
-    ])
+    expect(await runs()).toMatchObject([{ error: NO_USABLE_KEY, turns: 0 }])
   })
 
   it('应用主人被降成 viewer 之后写不了，丢掉这一批并记下原因', async () => {
@@ -336,7 +334,7 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
         {
           name: 'k',
           scopes: {
-            readLayers: ['base', 'subject', 'episode'],
+            readLayers: ['core', 'subject', 'episode'],
             writeLayers: ['subject', 'episode'],
             maxSensitivity: 'private',
             admin: false,
@@ -356,9 +354,7 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     await extract(model, target)
     expect(calls).toEqual([])
     expect(await turns()).toEqual([])
-    expect(await runs()).toMatchObject([
-      { error: '写入这一批的访问密钥均已吊销、作废或无权写入联系人层与情节层' },
-    ])
+    expect(await runs()).toMatchObject([{ error: NO_USABLE_KEY }])
   })
 
   it('请求模型失败：记下原因、缓冲留着，抛出交给后台任务重试', async () => {
@@ -505,7 +501,7 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
 
   it('只能写情节层的 Key 也说了话的一批，事实一条都不写，只写摘要', async () => {
     const episodeOnly = await ws.issueKey(appId, {
-      readLayers: ['base', 'subject', 'episode'],
+      readLayers: ['core', 'subject', 'episode'],
       writeLayers: ['episode'],
       maxSensitivity: 'public',
       admin: false,

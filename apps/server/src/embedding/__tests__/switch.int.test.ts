@@ -111,7 +111,7 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
       '/v1/memories',
       jsonRequest(
         'POST',
-        { uri: `core://${randomBytes(4).toString('hex')}`, content, layer: 'base' },
+        { uri: `core://${randomBytes(4).toString('hex')}`, content },
         bearer(key),
       ),
     )
@@ -329,11 +329,12 @@ describe.skipIf(!testDatabaseUrl)('嵌入渠道与换模型', () => {
         ['a', 'b'].map((path) => ({
           spaceId: other!.id,
           form: 'curated' as const,
-          layer: 'base' as const,
+          layer: 'core' as const,
           sensitivity: 'private' as const,
           provenance: 'owner' as const,
           domain: 'core',
           path,
+          title: path,
           content: `另一个空间的 ${path}`,
         })),
       ),

@@ -3,7 +3,7 @@ import type { BenchScenarioInput } from '@kioku/contracts'
 import { BENCH_GROUP_CONTEXT, GUIDANCE_START } from './shared'
 
 // AstrBot 群聊一轮：群聊 bot 不调记忆工具，每轮按群与发言人的上下文注入，回复之后把这一轮放进缓冲。
-// Key 写不了对象层与情节层、或者没配抽取模型时 turn.end 什么都不写，照样不报错，所以不断言进了缓冲
+// Key 写不了联系人与会话摘要、或者没配抽取模型时 turn.end 什么都不写，照样不报错，所以不断言进了缓冲
 export const astrbotRound: BenchScenarioInput = {
   id: 'astrbot-group-round',
   title: 'AstrBot 群聊一轮',

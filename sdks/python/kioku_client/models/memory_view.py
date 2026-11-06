@@ -24,6 +24,7 @@ class MemoryView:
     Attributes:
         id (UUID):
         uri (str):
+        title (str):
         layer (MemoryViewLayer):
         sensitivity (MemoryViewSensitivity):
         provenance (MemoryViewProvenance):
@@ -41,6 +42,7 @@ class MemoryView:
 
     id: UUID
     uri: str
+    title: str
     layer: MemoryViewLayer
     sensitivity: MemoryViewSensitivity
     provenance: MemoryViewProvenance
@@ -60,6 +62,8 @@ class MemoryView:
         id = str(self.id)
 
         uri = self.uri
+
+        title = self.title
 
         layer = self.layer.value
 
@@ -96,6 +100,7 @@ class MemoryView:
             {
                 "id": id,
                 "uri": uri,
+                "title": title,
                 "layer": layer,
                 "sensitivity": sensitivity,
                 "provenance": provenance,
@@ -120,6 +125,8 @@ class MemoryView:
         id = UUID(d.pop("id"))
 
         uri = d.pop("uri")
+
+        title = d.pop("title")
 
         layer = MemoryViewLayer(d.pop("layer"))
 
@@ -165,6 +172,7 @@ class MemoryView:
         memory_view = cls(
             id=id,
             uri=uri,
+            title=title,
             layer=layer,
             sensitivity=sensitivity,
             provenance=provenance,

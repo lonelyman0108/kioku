@@ -1,5 +1,5 @@
 import { AppConfig, SPACE_EXPORT_MAX_BYTES, type RuntimeFamily } from '@kioku/contracts'
-import { and, asc, eq, gt, inArray, isNull, or, sql, type SQL } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNull, ne, or, type SQL } from 'drizzle-orm'
 import type { z } from 'zod'
 
 import { consoleAccess } from '../access/access'
@@ -46,8 +46,8 @@ import {
 } from './spaceRecords'
 
 // 按空间导出：只导出导出人读得到的。导出人是空间 owner（路由检查），按他在管理界面里的权限读：
-// 共享的层（基础、人格、应用、对象与情节层）、人格、应用、对象与按群换人格，加上他自己的画像层与私人层、
-// 他自己的凭据与凭据源，以及他让不让 Dream 整理这两层；别的成员的画像、私人层、凭据与设置都不导出。
+// 共享的归属（通用、人格、应用）、联系人的事实、人格、应用、对象与按群换人格，加上他自己的本人记忆、
+// 他自己的凭据与凭据源，以及他让不让 Dream 整理本人记忆；别的成员的本人记忆、凭据与设置都不导出。
 // 记忆按管理读取挑（和历史、已过期列表同一套规则）：已过期的策展记忆与被推翻的事实也带上，有效期原样写出，
 // 导入后照样在「已过期」与对象页的「被推翻的事实」里，能重新生效。
 // 不导出：Key、会话、召回事件与召回统计、对话缓冲、抽取记录、记忆与凭据的历史、向量；
@@ -111,7 +111,6 @@ export async function exportSpace(
           exporter: { displayName: exporter.displayName, dreamPrivate: exporter.dreamPrivate },
           space: {
             name: space.name,
-            domainLayers: space.domainLayers,
             extractionMonthlyTokens: space.extractionMonthlyTokens,
             extractionDailyWrites: space.extractionDailyWrites,
           },
@@ -422,16 +421,16 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
 }
 
 // 导出哪些记忆。底子是导出人在管理界面里的管理读取，和历史、已过期列表同一套条件（readableConditions，不另写）：
-// 不看有效期，所以已过期的策展记忆与被推翻的事实也在里面，导入后能重新生效；人格层不限人格；secret 导出人是
-// 空间 owner，读得到；别的成员的画像层与私人层不在里面。管理读取也不看删除状态，在它之外再去掉两种：
-// - 已删除的（包括过期之后让出了 URI 的）：删掉的不搬走，撤销删除只在原来的空间里做；
-// - 到期的会话摘要（只有会话摘要有 expires_at）：按设计到期、不能重新生效，搬过去也只是等着被保留期清掉。
+// 不看有效期，所以已过期的记忆与被推翻的事实也在里面，导入后能重新生效；人格不限；secret 导出人是
+// 空间 owner，读得到；别的成员的本人记忆不在里面。管理读取也不看删除状态，在它之外再去掉两种：
+// - 已删除的（包括过期之后让出了坐标的）：删掉的不搬走，撤销删除只在原来的空间里做；
+// - 会话摘要：挂在会话上，会话不导出（30 天后本来也会清掉）。
 // 时间按数据库的 now()，导出整份在一个事务里，就是事务开始的那一刻
 export function exportableMemories(accountId: string): SQL {
   return and(
     readableConditions(consoleAccess('owner', accountId), { personaIds: [], management: true }),
     isNull(memories.deletedAt),
-    or(isNull(memories.expiresAt), gt(memories.expiresAt, sql`now()`)),
+    ne(memories.layer, 'episode'),
   )!
 }
 
@@ -540,6 +539,7 @@ function memoryRecord(
     appId: row.appId,
     subjectId: row.subjectId,
     uri: row.domain && row.path ? formatUri(row.domain, row.path) : null,
+    title: row.title,
     content: content ?? '',
     priority: row.priority,
     disclosure: row.disclosure,

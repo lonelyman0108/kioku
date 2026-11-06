@@ -96,11 +96,10 @@
                 "items": {
                   "type": "string",
                   "enum": [
-                    "base",
+                    "core",
                     "persona",
                     "app",
-                    "owner",
-                    "private",
+                    "user",
                     "subject",
                     "episode"
                   ]
@@ -111,11 +110,10 @@
                 "items": {
                   "type": "string",
                   "enum": [
-                    "base",
+                    "core",
                     "persona",
                     "app",
-                    "owner",
-                    "private",
+                    "user",
                     "subject",
                     "episode"
                   ]
@@ -154,14 +152,16 @@
           "uri": {
             "type": "string"
           },
+          "title": {
+            "type": "string"
+          },
           "layer": {
             "type": "string",
             "enum": [
-              "base",
+              "core",
               "persona",
               "app",
-              "owner",
-              "private",
+              "user",
               "subject",
               "episode"
             ]
@@ -193,6 +193,7 @@
         },
         "required": [
           "uri",
+          "title",
           "layer",
           "priority",
           "disclosure",
@@ -232,14 +233,16 @@
           "uri": {
             "type": "string"
           },
+          "title": {
+            "type": "string"
+          },
           "layer": {
             "type": "string",
             "enum": [
-              "base",
+              "core",
               "persona",
               "app",
-              "owner",
-              "private",
+              "user",
               "subject",
               "episode"
             ]
@@ -308,6 +311,7 @@
         "required": [
           "id",
           "uri",
+          "title",
           "layer",
           "sensitivity",
           "provenance",
@@ -368,17 +372,22 @@
             ],
             "format": "uuid"
           },
+          "title": {
+            "type": [
+              "string",
+              "null"
+            ]
+          },
           "layer": {
             "type": [
               "string",
               "null"
             ],
             "enum": [
-              "base",
+              "core",
               "persona",
               "app",
-              "owner",
-              "private",
+              "user",
               "subject",
               "episode",
               null
@@ -417,6 +426,7 @@
           "uri",
           "exists",
           "id",
+          "title",
           "layer",
           "sensitivity",
           "priority",
@@ -424,44 +434,23 @@
           "childCount"
         ]
       },
-      "DomainSummary": {
-        "type": "object",
-        "properties": {
-          "domain": {
-            "type": "string"
-          },
-          "count": {
-            "type": "integer"
-          }
-        },
-        "required": [
-          "domain",
-          "count"
-        ]
-      },
       "CreateMemoryRequest": {
         "type": "object",
         "properties": {
           "uri": {
             "type": "string",
-            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+          },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^\\P{Cc}*$/u"
           },
           "content": {
             "type": "string",
             "minLength": 1,
             "maxLength": 20000
-          },
-          "layer": {
-            "type": "string",
-            "enum": [
-              "base",
-              "persona",
-              "app",
-              "owner",
-              "private",
-              "subject",
-              "episode"
-            ]
           },
           "sensitivity": {
             "type": "string",
@@ -508,7 +497,7 @@
         "properties": {
           "uri": {
             "type": "string",
-            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
           },
           "expectedVersion": {
             "type": "integer"
@@ -517,18 +506,16 @@
             "type": "string",
             "format": "uuid"
           },
+          "title": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 80,
+            "pattern": "^\\P{Cc}*$/u"
+          },
           "content": {
             "type": "string",
             "minLength": 1,
             "maxLength": 20000
-          },
-          "layer": {
-            "type": "string",
-            "enum": [
-              "base",
-              "owner",
-              "private"
-            ]
           },
           "sensitivity": {
             "type": "string",
@@ -590,19 +577,11 @@
         "properties": {
           "from": {
             "type": "string",
-            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
           },
           "to": {
             "type": "string",
-            "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
-          },
-          "layer": {
-            "type": "string",
-            "enum": [
-              "base",
-              "owner",
-              "private"
-            ]
+            "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
           },
           "expectedId": {
             "type": "string",
@@ -776,14 +755,16 @@
           "uri": {
             "type": "string"
           },
+          "title": {
+            "type": "string"
+          },
           "layer": {
             "type": "string",
             "enum": [
-              "base",
+              "core",
               "persona",
               "app",
-              "owner",
-              "private",
+              "user",
               "subject",
               "episode"
             ]
@@ -794,6 +775,7 @@
         },
         "required": [
           "uri",
+          "title",
           "layer",
           "content"
         ]
@@ -915,7 +897,6 @@
         "required": [
           "event",
           "sessionId",
-          "context",
           "user",
           "reply"
         ]
@@ -1089,12 +1070,12 @@
             "bearer": []
           }
         ],
-        "summary": "按 URI 读取一条记忆",
+        "summary": "按坐标（URI）读取一条记忆",
         "parameters": [
           {
             "schema": {
               "type": "string",
-              "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+              "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
             },
             "required": true,
             "name": "uri",
@@ -1173,7 +1154,7 @@
             "bearer": []
           }
         ],
-        "summary": "新建策展记忆；带 validTo 时到期后不再召回、不进 boot",
+        "summary": "新建记忆，坐标的开头决定归属；带 validTo 时到期后不再召回、不进 boot",
         "requestBody": {
           "required": true,
           "content": {
@@ -1256,7 +1237,7 @@
             "bearer": []
           }
         ],
-        "summary": "修改记忆正文、敏感级、层、priority、disclosure、glossary 或有效期；通过 Key 改层只能在 owner 与 private 之间",
+        "summary": "修改记忆的标题、正文、敏感级、priority、disclosure、glossary 或有效期；换坐标或归属用 move",
         "requestBody": {
           "required": true,
           "content": {
@@ -1344,7 +1325,7 @@
           {
             "schema": {
               "type": "string",
-              "pattern": "^([a-z][a-z0-9_]{0,31}):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
+              "pattern": "^(?!(?:persona|app):\\/\\/[a-z0-9_-]{1,64}$)(core|persona|app|user):\\/\\/([a-z0-9_-]{1,64}(?:\\/[a-z0-9_-]{1,64}){0,15})$"
             },
             "required": true,
             "name": "uri",
@@ -1438,7 +1419,7 @@
             "bearer": []
           }
         ],
-        "summary": "列出一个节点或 domain 根下的直接子节点",
+        "summary": "列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）",
         "parameters": [
           {
             "schema": {
@@ -1514,84 +1495,6 @@
         }
       }
     },
-    "/v1/memories/domains": {
-      "get": {
-        "tags": [
-          "memories"
-        ],
-        "security": [
-          {
-            "bearer": []
-          }
-        ],
-        "summary": "列出可见的 domain 及节点数",
-        "responses": {
-          "200": {
-            "description": "domain 列表",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "type": "array",
-                  "items": {
-                    "$ref": "#/components/schemas/DomainSummary"
-                  }
-                }
-              }
-            }
-          },
-          "400": {
-            "description": "请求不合法",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "401": {
-            "description": "未登录或凭据无效",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "403": {
-            "description": "没有权限",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "404": {
-            "description": "不存在或不可见",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          },
-          "409": {
-            "description": "冲突",
-            "content": {
-              "application/json": {
-                "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
-                }
-              }
-            }
-          }
-        }
-      }
-    },
     "/v1/memories/move": {
       "post": {
         "tags": [
@@ -1602,7 +1505,7 @@
             "bearer": []
           }
         ],
-        "summary": "修改记忆的 URI",
+        "summary": "修改记忆的坐标（URI）：换开头就是改归属，Key 不能在共享的归属与本人之间移动",
         "requestBody": {
           "required": true,
           "content": {
@@ -1903,7 +1806,7 @@
             }
           },
           "403": {
-            "description": "Key 写不了对象层",
+            "description": "Key 写不了联系人的事实",
             "content": {
               "application/json": {
                 "schema": {
@@ -1978,7 +1881,7 @@
             }
           },
           "403": {
-            "description": "Key 写不了对象层，或者这个账号标记成了别的成员",
+            "description": "Key 写不了联系人的事实，或者这个账号标记成了别的成员",
             "content": {
               "application/json": {
                 "schema": {
@@ -2056,7 +1959,7 @@
             }
           },
           "403": {
-            "description": "Key 写不了对象层",
+            "description": "Key 写不了联系人的事实",
             "content": {
               "application/json": {
                 "schema": {

@@ -5,6 +5,7 @@ import {
   credentialHints,
   planFingerprint,
   planImport,
+  requestLayer,
   type ImportPlan,
   type ImportPreview,
   type LoreNode,
@@ -52,12 +53,19 @@ describe('Lore 导入计划', () => {
       [],
       options,
     )
-    expect(plan.memories.map((m) => [m.source, m.request.uri, m.request.layer])).toEqual([
-      ['core://agent', 'core://agent', 'base'],
-      ['core://soul', 'persona://default/soul', 'persona'],
-      ['core://agent/claudecode', 'app://claudecode/agent', 'app'],
-      ['preferences://user', 'preferences://user', 'owner'],
-      ['infra://office_network', 'infra://office_network', 'private'],
+    expect(
+      plan.memories.map((m) => [
+        m.source,
+        m.request.uri,
+        requestLayer(m.request),
+        m.request.sensitivity,
+      ]),
+    ).toEqual([
+      ['core://agent', 'core://agent', 'core', 'public'],
+      ['core://soul', 'persona://default/soul', 'persona', 'public'],
+      ['core://agent/claudecode', 'app://claudecode/agent', 'app', 'internal'],
+      ['preferences://user', 'user://preferences/user', 'user', 'internal'],
+      ['infra://office_network', 'user://infra/office_network', 'user', 'private'],
     ])
     expect(plan.memories.map((m) => m.request.priority)).toEqual([0, 0, 0, 0, 1])
   })
@@ -142,7 +150,11 @@ describe('Lore 导入计划', () => {
       [],
       options,
     )
-    expect(twice.memories).toHaveLength(1)
+    // Lore 里 persona:// 下的节点和别的分区一样进本人，不和 core://soul 撞
+    expect(twice.memories.map((m) => m.request.uri)).toEqual([
+      'persona://default/soul',
+      'user://persona/default/soul',
+    ])
     expect(twice.skipped.map((s) => s.reason)).toContain(
       '和 core://soul 映射到同一个 persona://default/soul',
     )
@@ -187,9 +199,9 @@ describe('Lore 导入计划', () => {
     )
     expect(plan.memories.map((m) => m.request.sensitivity)).toEqual([
       'secret',
-      undefined,
-      undefined,
-      undefined,
+      'private',
+      'private',
+      'private',
     ])
     expect(plan.errors).toEqual([{ kind: 'secretNotFound', uri: 'infra://nope' }])
     expect(plan.warnings).toEqual([
@@ -219,7 +231,7 @@ describe('Lore 导入计划', () => {
     ])
   })
 
-  it('别名、没有正文、占用保留 domain 的节点不导入，并说明原因', () => {
+  it('别名、没有正文、正文太长的节点不导入，并说明原因；Lore 里 persona:// 下的照常进本人', () => {
     const plan = planImport(
       snapshot(
         node('infra://a', { aliases: ['infra://old_a'] }),
@@ -230,11 +242,13 @@ describe('Lore 导入计划', () => {
       [],
       options,
     )
-    expect(plan.memories.map((m) => m.source)).toEqual(['infra://a'])
+    expect(plan.memories.map((m) => [m.source, m.request.uri])).toEqual([
+      ['infra://a', 'user://infra/a'],
+      ['persona://x', 'user://persona/x'],
+    ])
     expect(plan.skipped.map((s) => s.source)).toEqual([
       'infra://old_a',
       'infra://empty',
-      'persona://x',
       'infra://big',
     ])
   })
@@ -291,7 +305,7 @@ describe('Lore 导入计划', () => {
     ])
   })
 
-  it('正文里有占位符的节点只能进私人层：映射到基础层、主人层的在计划里就不导入', () => {
+  it('正文里有占位符的节点只能进本人的私密记忆：映射到通用、本人的内部记忆的在计划里就不导入', () => {
     const body = '登录用 {{cred:router#password}}'
     const plan = planImport(
       snapshot(
@@ -306,12 +320,12 @@ describe('Lore 导入计划', () => {
     expect(skipsOf(plan)).toEqual([
       {
         source: 'core://router',
-        reason: expect.stringContaining('core://router 属于基础层'),
+        reason: expect.stringContaining('core://router 是通用 · 公开'),
         importKey: 'core://router@',
       },
       {
         source: 'preferences://router',
-        reason: expect.stringContaining('preferences://router 属于个人画像层'),
+        reason: expect.stringContaining('user://preferences/router 是本人 · 内部'),
         importKey: 'preferences://router@',
       },
     ])
@@ -486,7 +500,7 @@ describe('Lore 导入计划', () => {
       const all = planImport(snap, [], options)
       expect(all.memories.map((m) => [m.source, m.request.uri])).toEqual([
         ['core://agent/claude_code', 'app://claude-code/agent'],
-        ['infra://other', 'infra://other'],
+        ['infra://other', 'user://infra/other'],
       ])
       const clash = {
         source: 'core://agent/claude-code',
@@ -602,7 +616,7 @@ describe('Lore 导入计划', () => {
         'app://open-claw/agent',
         'app://claude-a/agent',
         'app://claude-b/agent',
-        'infra://a',
+        'user://infra/a',
       ])
       const occupied = keysOf(draft, 'app://open-claw/agent', 'app://claude-a/agent')
       const plan = planImport(snap, mine, { ...options, occupied })
@@ -774,7 +788,7 @@ describe('Lore 导入计划', () => {
         (i) => i.plan.apps[0]!.apps.pop(),
         (i) => (i.preview.targets[0]!.item.source = 'core://agent/other'),
         (i) => (i.preview.targets[0]!.item.request.uri = 'app://claude-c/agent'),
-        (i) => (i.preview.targets[0]!.item.request.layer = 'base'),
+        (i) => (i.preview.targets[0]!.item.request.title = '别的标题'),
         (i) => (i.preview.targets[0]!.item.request.priority = 9),
         (i) => (i.preview.targets[0]!.item.request.disclosure = '别的时候'),
         (i) => i.preview.targets[0]!.item.request.glossary.push('新词'),

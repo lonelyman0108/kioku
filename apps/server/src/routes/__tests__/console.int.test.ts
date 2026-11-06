@@ -69,10 +69,10 @@ describe.skipIf(!testDatabaseUrl)('管理界面的记忆接口', () => {
   it('私人层只看得到自己的', async () => {
     const b = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     expect(
-      (await consoleCreate(b.cookie, { uri: 'home://diary', content: 'B 的日记' })).status,
+      (await consoleCreate(b.cookie, { uri: 'user://home/diary', content: 'B 的日记' })).status,
     ).toBe(201)
-    expect((await consoleGet(b.cookie, 'home://diary')).status).toBe(200)
-    expect((await consoleGet(ws.cookie, 'home://diary')).status).toBe(404)
+    expect((await consoleGet(b.cookie, 'user://home/diary')).status).toBe(200)
+    expect((await consoleGet(ws.cookie, 'user://home/diary')).status).toBe(404)
   })
 
   it('editor 在管理界面里只能改自己是主人的应用的应用层，owner 都能改', async () => {
@@ -144,36 +144,33 @@ describe.skipIf(!testDatabaseUrl)('管理界面的记忆接口', () => {
     expect(
       (
         await consoleCreate(ws.cookie, {
-          uri: 'kb://wifi',
+          uri: 'core://kb/wifi',
           content: 'hunter2',
-          layer: 'base',
           sensitivity: 'secret',
         })
       ).status,
     ).toBe(201)
     expect(
-      (await consoleCreate(ws.cookie, { uri: 'kb://faq', content: '常见问题', layer: 'base' }))
-        .status,
+      (await consoleCreate(ws.cookie, { uri: 'core://kb/faq', content: '常见问题' })).status,
     ).toBe(201)
     // owner 也要显式查看才拿得到正文，见 secretAccess.int.test.ts
-    const wifi = (await (await consoleGet(ws.cookie, 'kb://wifi')).json()) as MemoryView
+    const wifi = (await (await consoleGet(ws.cookie, 'core://kb/wifi')).json()) as MemoryView
     expect(wifi.content).toBeNull()
     const revealed = await app.request(
       `${base()}/reveal`,
       jsonRequest('POST', { memoryId: wifi.id }, { cookie: ws.cookie }),
     )
     expect(((await revealed.json()) as MemoryView).content).toBe('hunter2')
-    expect((await consoleGet(editor.cookie, 'kb://wifi')).status).toBe(404)
-    expect((await consoleGet(viewer.cookie, 'kb://faq')).status).toBe(200)
-    expect(
-      (await consoleCreate(viewer.cookie, { uri: 'kb://x', content: 'x', layer: 'base' })).status,
-    ).toBe(403)
+    expect((await consoleGet(editor.cookie, 'core://kb/wifi')).status).toBe(404)
+    expect((await consoleGet(viewer.cookie, 'core://kb/faq')).status).toBe(200)
+    expect((await consoleCreate(viewer.cookie, { uri: 'core://kb/x', content: 'x' })).status).toBe(
+      403,
+    )
     expect(
       (
         await consoleCreate(editor.cookie, {
-          uri: 'kb://y',
+          uri: 'core://kb/y',
           content: 'x',
-          layer: 'base',
           sensitivity: 'secret',
         })
       ).status,
@@ -181,7 +178,7 @@ describe.skipIf(!testDatabaseUrl)('管理界面的记忆接口', () => {
   })
 
   it('写入记录操作账号，来源是 owner', async () => {
-    await consoleCreate(ws.cookie, { uri: 'core://agent', content: '规则', layer: 'base' })
+    await consoleCreate(ws.cookie, { uri: 'core://agent', content: '规则' })
     const [event] = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memoryEvents))
     expect(event).toMatchObject({
       actorAccountId: ws.accountId,
@@ -194,12 +191,12 @@ describe.skipIf(!testDatabaseUrl)('管理界面的记忆接口', () => {
     const other = '00000000-0000-4000-8000-000000000000'
     expect(
       (
-        await app.request(`/v1/spaces/${other}/memories/domains`, {
+        await app.request(`/v1/spaces/${other}/memories/children?of=core`, {
           headers: { cookie: ws.cookie },
         })
       ).status,
     ).toBe(403)
-    expect((await app.request(`${base()}/domains`)).status).toBe(401)
+    expect((await app.request(`${base()}/children?of=core`)).status).toBe(401)
   })
 
   it('OpenAPI 文档同时包含两套记忆接口', async () => {

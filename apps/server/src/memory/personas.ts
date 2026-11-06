@@ -54,7 +54,7 @@ export function runInSpace<T>(
 // 人格继承的覆盖：子人格有同一相对路径（persona://<人格>/ 之后的部分）的节点时，boot、召回与近期列表里
 // 不再放祖先的那条。只在这次请求读得到的节点之间比较，子人格的那条读不到时照常用祖先的。
 // 覆盖之后这个路径就是子人格的那条，priority 也按它的：它进不了 boot 时，boot 里就没有这个路径。
-// 人格层的节点都来自受信来源（数据库约束 memories_untrusted_layers），覆盖不用再看来源。
+// 人格的记忆都来自受信来源（数据库约束 memories_untrusted_layers），覆盖不用再看来源。
 // 这是挑选规则，不是权限：按 URI 读取和树浏览照样看得到祖先的节点
 const NEARER = 'nearer'
 const nearer = alias(memories, NEARER)

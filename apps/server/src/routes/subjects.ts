@@ -26,6 +26,11 @@ import {
 } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
+import {
+  participatedConversations,
+  runInfos,
+  visibleConversationIds,
+} from '../access/conversations'
 import { confirmBinding, rejectBinding, subjectBindingHistory } from '../access/binding'
 import {
   enqueueMerged,
@@ -59,7 +64,7 @@ import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { consoleMemberFor, consoleRoleFor } from '../memory/context'
 import { readableConditions } from '../memory/filter'
-import { scopeNames, subjectScope } from '../memory/scopes'
+import { scopeNames } from '../memory/scopes'
 
 const SpaceParams = z.object({ spaceId: z.uuid() })
 const SubjectParams = SpaceParams.extend({ subjectId: z.uuid() })
@@ -71,7 +76,6 @@ const PAGE_SIZE = 50
 // 详情里各部分最多列这么多条
 const DETAIL_FACTS = 200
 const DETAIL_SUPERSEDED = 50
-const DETAIL_SUMMARIES = 20
 const DETAIL_RUNS = 20
 const DETAIL_BINDINGS = 20
 // 合并时对象正被抽取或别的写入占着
@@ -94,7 +98,7 @@ const detail = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/subjects/{subjectId}',
   tags: ['subjects'],
-  summary: '对象详情：平台账号、记下的事实、会话摘要与最近的抽取记录',
+  summary: '联系人详情：平台账号、记下的事实、参与的会话与最近的抽取记录',
   request: { params: SubjectParams },
   responses: { 200: jsonResponse('对象详情', SubjectDetail), 403: forbidden, 404: notFound },
 })
@@ -195,7 +199,7 @@ const reactivateFact = createRoute({
   },
 })
 
-// 对象层与情节层不分人格，读权限里的人格限制用不上
+// 联系人的事实与会话摘要不分人格，读权限里的人格限制用不上
 const readable = (access: Access) => readableConditions(access, { personaIds: [] })
 
 // 现在有效、查看者读得到的抽取事实
@@ -372,9 +376,7 @@ export function subjectRoutes(deps: Deps) {
       const result = await withSpace(deps.db, spaceId, async (tx) => {
         const [found] = await subjectInfos(tx, access, eq(subjects.id, subjectId))
         if (!found) return null
-        // 会话摘要按来源作用域找：群里的，或和这个人的私聊里的
-        const scope = subjectScope(found.info.kind, subjectId)
-        const [facts, superseded, summaries, runs, bindings] = await Promise.all([
+        const [facts, superseded, conversations, runs, bindings] = await Promise.all([
           tx
             .select()
             .from(memories)
@@ -387,19 +389,7 @@ export function subjectRoutes(deps: Deps) {
             .where(and(eq(memories.subjectId, subjectId), supersededOf(access)))
             .orderBy(desc(memories.validTo), desc(memories.id))
             .limit(DETAIL_SUPERSEDED),
-          tx
-            .select()
-            .from(memories)
-            .where(
-              and(
-                eq(memories.form, 'extracted'),
-                eq(memories.layer, 'episode'),
-                eq(memories.originScope, scope),
-                readable(access),
-              ),
-            )
-            .orderBy(desc(memories.createdAt), desc(memories.id))
-            .limit(DETAIL_SUMMARIES),
+          participatedConversations(tx, access, subjectId),
           tx
             .select({ run: extractionRuns, appName: apps.name })
             .from(extractionRuns)
@@ -409,17 +399,21 @@ export function subjectRoutes(deps: Deps) {
             .limit(DETAIL_RUNS),
           subjectBindingHistory(tx, subjectId, { accountId, role }, DETAIL_BINDINGS),
         ])
-        const [named, superseding] = await Promise.all([
+        const [named, superseding, shown] = await Promise.all([
           scopeNames(tx, [
             ...facts.map((f) => f.originScope),
             ...superseded.map((f) => f.originScope),
-            ...runs.map((r) => r.run.scope),
           ]),
           supersedingContents(
             tx,
             access,
             superseded.map((f) => f.id),
           ),
+          visibleConversationIds(tx, access, [
+            ...facts.map((f) => f.conversationId),
+            ...superseded.map((f) => f.conversationId),
+            ...runs.map((r) => r.run.conversationId),
+          ]),
         ])
         const fact = (f: (typeof facts)[number]) => ({
           id: f.id,
@@ -427,6 +421,7 @@ export function subjectRoutes(deps: Deps) {
           provenance: f.provenance,
           version: f.version,
           scope: named(f.originScope),
+          conversationId: f.conversationId && shown.has(f.conversationId) ? f.conversationId : null,
           createdAt: f.createdAt.toISOString(),
           updatedAt: f.updatedAt.toISOString(),
         })
@@ -438,28 +433,8 @@ export function subjectRoutes(deps: Deps) {
             supersededAt: f.validTo!.toISOString(),
             supersededBy: superseding.get(f.id) ?? null,
           })),
-          summaries: summaries.map((s) => ({
-            id: s.id,
-            content: s.content ?? '',
-            createdAt: s.createdAt.toISOString(),
-            expiresAt: s.expiresAt?.toISOString() ?? null,
-          })),
-          runs: runs.map(({ run, appName }) => ({
-            id: run.id,
-            createdAt: run.createdAt.toISOString(),
-            app: appName ? { id: run.appId, name: appName } : null,
-            scope: named(run.scope),
-            turns: run.turns,
-            skippedTurns: run.skippedTurns,
-            added: run.added,
-            updated: run.updated,
-            unchanged: run.unchanged,
-            dropped: run.dropped,
-            limited: run.limited,
-            summarized: run.summarized,
-            summaryOnly: run.summaryOnly,
-            error: errorOf(run.error),
-          })),
+          conversations,
+          runs: await runInfos(tx, runs, shown, errorOf),
           bindings,
         }
       })

@@ -8,7 +8,6 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.update_memory_request_layer import UpdateMemoryRequestLayer
 from ..models.update_memory_request_sensitivity import UpdateMemoryRequestSensitivity
 from ..types import UNSET, Unset
 from typing import cast
@@ -26,8 +25,8 @@ class UpdateMemoryRequest:
         uri (str):
         expected_version (int | Unset):
         expected_id (UUID | Unset):
+        title (str | Unset):
         content (str | Unset):
-        layer (UpdateMemoryRequestLayer | Unset):
         sensitivity (UpdateMemoryRequestSensitivity | Unset):
         priority (int | Unset):
         disclosure (None | str | Unset):
@@ -41,8 +40,8 @@ class UpdateMemoryRequest:
     uri: str
     expected_version: int | Unset = UNSET
     expected_id: UUID | Unset = UNSET
+    title: str | Unset = UNSET
     content: str | Unset = UNSET
-    layer: UpdateMemoryRequestLayer | Unset = UNSET
     sensitivity: UpdateMemoryRequestSensitivity | Unset = UNSET
     priority: int | Unset = UNSET
     disclosure: None | str | Unset = UNSET
@@ -61,11 +60,9 @@ class UpdateMemoryRequest:
         if not isinstance(self.expected_id, Unset):
             expected_id = str(self.expected_id)
 
-        content = self.content
+        title = self.title
 
-        layer: str | Unset = UNSET
-        if not isinstance(self.layer, Unset):
-            layer = self.layer.value
+        content = self.content
 
         sensitivity: str | Unset = UNSET
         if not isinstance(self.sensitivity, Unset):
@@ -108,10 +105,10 @@ class UpdateMemoryRequest:
             field_dict["expectedVersion"] = expected_version
         if expected_id is not UNSET:
             field_dict["expectedId"] = expected_id
+        if title is not UNSET:
+            field_dict["title"] = title
         if content is not UNSET:
             field_dict["content"] = content
-        if layer is not UNSET:
-            field_dict["layer"] = layer
         if sensitivity is not UNSET:
             field_dict["sensitivity"] = sensitivity
         if priority is not UNSET:
@@ -143,14 +140,9 @@ class UpdateMemoryRequest:
         else:
             expected_id = UUID(_expected_id)
 
-        content = d.pop("content", UNSET)
+        title = d.pop("title", UNSET)
 
-        _layer = d.pop("layer", UNSET)
-        layer: UpdateMemoryRequestLayer | Unset
-        if isinstance(_layer, Unset):
-            layer = UNSET
-        else:
-            layer = UpdateMemoryRequestLayer(_layer)
+        content = d.pop("content", UNSET)
 
         _sensitivity = d.pop("sensitivity", UNSET)
         sensitivity: UpdateMemoryRequestSensitivity | Unset
@@ -197,8 +189,8 @@ class UpdateMemoryRequest:
             uri=uri,
             expected_version=expected_version,
             expected_id=expected_id,
+            title=title,
             content=content,
-            layer=layer,
             sensitivity=sensitivity,
             priority=priority,
             disclosure=disclosure,

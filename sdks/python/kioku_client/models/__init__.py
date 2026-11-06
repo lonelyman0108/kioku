@@ -14,9 +14,7 @@ from .boot_entry_layer import BootEntryLayer
 from .boot_response import BootResponse
 from .chat_type import ChatType
 from .create_memory_request import CreateMemoryRequest
-from .create_memory_request_layer import CreateMemoryRequestLayer
 from .create_memory_request_sensitivity import CreateMemoryRequestSensitivity
-from .domain_summary import DomainSummary
 from .error_response import ErrorResponse
 from .host_output import HostOutput
 from .host_output_mode import HostOutputMode
@@ -35,7 +33,6 @@ from .memory_view_layer import MemoryViewLayer
 from .memory_view_provenance import MemoryViewProvenance
 from .memory_view_sensitivity import MemoryViewSensitivity
 from .move_memory_request import MoveMemoryRequest
-from .move_memory_request_layer import MoveMemoryRequestLayer
 from .platform_ref import PlatformRef
 from .prompt_submit_event import PromptSubmitEvent
 from .prompt_submit_event_event import PromptSubmitEventEvent
@@ -53,7 +50,6 @@ from .subject_facts_role import SubjectFactsRole
 from .turn_end_event import TurnEndEvent
 from .turn_end_event_event import TurnEndEventEvent
 from .update_memory_request import UpdateMemoryRequest
-from .update_memory_request_layer import UpdateMemoryRequestLayer
 from .update_memory_request_sensitivity import UpdateMemoryRequestSensitivity
 from .void_bind_code_request import VoidBindCodeRequest
 from .who_am_i import WhoAmI
@@ -77,9 +73,7 @@ __all__ = (
     "BootResponse",
     "ChatType",
     "CreateMemoryRequest",
-    "CreateMemoryRequestLayer",
     "CreateMemoryRequestSensitivity",
-    "DomainSummary",
     "ErrorResponse",
     "HostOutput",
     "HostOutputMode",
@@ -98,7 +92,6 @@ __all__ = (
     "MemoryViewProvenance",
     "MemoryViewSensitivity",
     "MoveMemoryRequest",
-    "MoveMemoryRequestLayer",
     "PlatformRef",
     "PromptSubmitEvent",
     "PromptSubmitEventEvent",
@@ -116,7 +109,6 @@ __all__ = (
     "TurnEndEvent",
     "TurnEndEventEvent",
     "UpdateMemoryRequest",
-    "UpdateMemoryRequestLayer",
     "UpdateMemoryRequestSensitivity",
     "VoidBindCodeRequest",
     "WhoAmI",
