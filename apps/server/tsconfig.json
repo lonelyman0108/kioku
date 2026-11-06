@@ -1,7 +1,9 @@
 {
   "extends": "../../tsconfig.base.json",
   "compilerOptions": {
-    "types": ["node"]
+    "types": ["node"],
+    // vitest.config.ts 引用 src 里的模块要写扩展名，否则 Vite 的原生配置加载器会警告（同 apps/web 的 vite.config.ts）
+    "allowImportingTsExtensions": true
   },
   "include": ["src", "tsdown.config.ts", "drizzle.config.ts", "vitest.config.ts"]
 }
