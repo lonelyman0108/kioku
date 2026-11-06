@@ -1192,7 +1192,7 @@ export async function planSync(
       // 只有真要读出来比对的 secret 才需要主密钥
       if (m.state === 'secret' && !target.masterKey) {
         throw new Error(
-          `${m.uri} 是 secret，同步要读出来比对：需要设置与服务相同的 KIOKU_MASTER_KEY`,
+          `${m.uri} 是机密记忆，同步要读出来比对：需要设置与服务相同的 KIOKU_MASTER_KEY`,
         )
       }
       let current
@@ -1438,6 +1438,6 @@ export async function verifyMasterKey(
     )
     return true
   } catch {
-    throw new Error('KIOKU_MASTER_KEY 解不开已有的 secret 记忆：它和服务使用的主密钥不一致')
+    throw new Error('KIOKU_MASTER_KEY 解不开已有的机密记忆：它和服务使用的主密钥不一致')
   }
 }
