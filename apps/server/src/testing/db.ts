@@ -21,6 +21,10 @@ const migrationsFolder = fileURLToPath(new URL('../../migrations', import.meta.u
 export async function openTestDatabase(): Promise<Database> {
   const database = connect(testDatabaseUrl!, { max: 2 })
   await runMigrations(database, migrationsFolder)
+  // 实例设置不挂在 spaces、accounts 下，resetDatabase 清不到。每个文件开始时清掉：同一个库上先跑的文件
+  // 留下的设置（比如换过的嵌入模型）会让后面的文件读错，并行时每次跑的先后还不一样。
+  // 文件自己在 beforeAll 里写的设置在这之后，照常保留
+  await database.db.execute(sql`truncate settings`)
   return database
 }
 
