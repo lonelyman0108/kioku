@@ -152,6 +152,20 @@ describe('目录的键盘和无障碍', () => {
     expect(memoriesPage).toContain("matchMedia('(pointer: coarse)')")
   })
 
+  it('选中的行写在各类行的颜色后面：根、人格与应用的行选中后名字也看得见', () => {
+    const style = memoriesPage.slice(memoriesPage.indexOf('<style'))
+    const selected = style.indexOf('.tree-row.selected,\n.tree-row.selected:hover {')
+    expect(selected).toBeGreaterThan(0)
+    for (const rule of [
+      '.tree-row.root,\n.tree-row.entity {',
+      '.tree-row.virtual {',
+      '.tree-row.note {',
+    ]) {
+      expect(style.indexOf(rule)).toBeGreaterThan(0)
+      expect(style.indexOf(rule)).toBeLessThan(selected)
+    }
+  })
+
   it('热区只往左伸，不盖到色块和名字：点名字要是打开', () => {
     const coarse = /@media \(pointer: coarse\) \{([\s\S]*?)\n\}/.exec(memoriesPage)![1]!
     const before = /\.chevron::before \{([\s\S]*?)\}/.exec(coarse)![1]!

@@ -1030,15 +1030,6 @@ const crumbs = computed(() => {
 .tree-row:focus-visible {
   outline-offset: -2px;
 }
-.tree-row.selected,
-.tree-row.selected:hover {
-  --strata-frame: var(--strata-selected-frame);
-  --flag-muted: var(--strata-on-selected-muted);
-  --flag-solid: var(--strata-on-selected);
-  --flag-on-solid: var(--strata-selected);
-  background: var(--strata-selected);
-  color: var(--strata-on-selected);
-}
 .tree-row.virtual {
   color: var(--ui-text-muted);
 }
@@ -1054,6 +1045,17 @@ const crumbs = computed(() => {
   font-family: var(--font-sans);
   font-size: 13px;
   color: var(--ui-text-muted);
+}
+/* 选中的行写在各类行的后面：选择器的优先级相同，后写的才压得住。写在前面时根、人格与应用的名字
+   取 --ui-text，鼠标移开之后和选中的底色一样深，看不见 */
+.tree-row.selected,
+.tree-row.selected:hover {
+  --strata-frame: var(--strata-selected-frame);
+  --flag-muted: var(--strata-on-selected-muted);
+  --flag-solid: var(--strata-on-selected);
+  --flag-on-solid: var(--strata-selected);
+  background: var(--strata-selected);
+  color: var(--strata-on-selected);
 }
 .guide {
   position: absolute;
