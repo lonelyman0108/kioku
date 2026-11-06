@@ -24,7 +24,7 @@ export function plaintextCandidates(content: string): PlaintextCandidate[] {
 
 const IDENTIFIER_MAX = 64
 
-// 按 URI 建议一个标识：路径的各段连起来，比如 infra://nas/admin 是 nas-admin。URI 的段已经只有小写字母、
+// 按坐标建议一个标识：开头之后的各段连起来，比如 user://nas/admin 是 nas-admin。坐标的段已经只有小写字母、
 // 数字、_ 和 -，开头是 _ 或 - 时去掉。已经有这个标识的凭据时加上字段名，再不行加序号
 export function suggestIdentifier(uri: string, field: string, taken: readonly string[]): string {
   const path = uri.split('://')[1] ?? ''

@@ -76,6 +76,18 @@ describe('文字链接', () => {
 })
 
 describe('两套主题的令牌', () => {
+  it('六个归属各一种颜色，原来的层色不留', () => {
+    expect(STACK).toHaveLength(6)
+    for (const name of ['base', 'owner', 'private']) {
+      expect(css).not.toContain(`--layer-${name}`)
+      expect(css).not.toContain(`--access-${name}`)
+    }
+    for (const layer of STACK) {
+      expect(light[`--access-${layer}`]).toBeDefined()
+      expect(dark[`--access-${layer}`]).toBeDefined()
+    }
+  })
+
   it('编码用到的令牌两边都有', () => {
     const names = (t: Record<string, string>) =>
       Object.keys(t).filter((k) => k.startsWith('--strata-') || k.startsWith('--layer-'))
