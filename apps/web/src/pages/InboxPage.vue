@@ -28,15 +28,16 @@ const spaceId = computed(() => String(route.params.spaceId))
 const canAct = computed(() => space.value?.role === 'owner' || space.value?.role === 'editor')
 
 const counts = useInboxCounts(spaceId)
-// 标题的大数字和导航角标、概览同一个口径：当前账号能处理的；计数到了就显示，不等空间信息。
-// 各分类照常写各自的条数，当前账号处理不了的那几类和 0 一样不醒目
+// 标题的大数字和导航角标、概览同一个口径：当前账号能处理的。角色读到之前不知道口径，先写「–」
+const role = computed(() => space.value?.role)
 const total = computed(() =>
-  counts.data.value ? actionableInboxCount(counts.data.value, space.value?.role) : null,
+  counts.data.value && role.value ? actionableInboxCount(counts.data.value, role.value) : null,
 )
+// 各分类照常写各自的条数：0 不醒目；当前账号处理不了的那几类也一样，等角色读到再定
 const quiet = (tab: InboxTab) =>
   !counts.data.value ||
   !inboxTabCount(counts.data.value, tab) ||
-  !inboxTabActionable(tab, space.value?.role)
+  (role.value !== undefined && !inboxTabActionable(tab, role.value))
 const tab = useInboxTab(counts)
 const refreshing = computed(() => counts.isFetching.value)
 // 换分类时回到顶上：各类共用一个滚动区

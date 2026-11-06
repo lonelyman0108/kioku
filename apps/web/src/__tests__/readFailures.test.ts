@@ -3,7 +3,7 @@ import { createSSRApp, h, ref, type Component } from 'vue'
 import { parse } from 'vue/compiler-sfc'
 import { renderToString } from 'vue/server-renderer'
 
-import { ApiError } from '../api/client'
+import { ApiError, NetworkError } from '../api/client'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
 import dreamSuggestions from '../components/DreamSuggestions.vue?raw'
@@ -29,7 +29,7 @@ import subjectsPage from '../pages/SubjectsPage.vue?raw'
 import { failedReads, queryClient } from '../query'
 
 // 读取失败的写法：一律用 ReadFailureNote。文字经 readFailure；再读有用时给「重试」，重读的就是传进去的那一样，
-// 重读期间转圈。读到过内容的，内容照常显示，错误放在上面
+// 重读期间转圈。读到过内容、还能再读的，内容照常显示，这一行写「刷新失败」
 
 interface TemplateNode {
   type: number
@@ -49,13 +49,18 @@ const bound = (el: TemplateNode, name: string) =>
 const notesOf = (source: string) =>
   elementsOf(template(source)).filter((el) => el.tag === 'ReadFailureNote')
 
-// 一样读取：错误、是否在读、重读
-const read = (error: unknown, isFetching = false) => ({
+// 一样读取：读到的内容、错误、是否在读、重读
+const read = (
+  error: unknown,
+  { data, isFetching = false }: { data?: unknown; isFetching?: boolean } = {},
+) => ({
+  data: ref(data),
   error: ref(error),
   isError: ref(error !== null),
   isFetching: ref(isFetching),
   refetch: vi.fn(),
 })
+const offline = () => new NetworkError(new TypeError('Failed to fetch'))
 
 // 没有组件测试的环境，组件用服务端渲染成 HTML 来看
 const render = (props: Record<string, unknown>) =>
@@ -68,7 +73,9 @@ const retryButton = (html: string) =>
 
 describe('ReadFailureNote', () => {
   it('服务端给了说明就写它；再读有用时给重试，重读期间转圈', async () => {
-    const html = await render({ query: read(new ApiError(500, '服务内部错误'), true) })
+    const html = await render({
+      query: read(new ApiError(500, '服务内部错误'), { isFetching: true }),
+    })
     expect(html).toContain('服务内部错误')
     expect(toneOf(html)).toBe('error note-title')
     expect(retryButton(html)).toContain('animate-spin')
@@ -85,27 +92,41 @@ describe('ReadFailureNote', () => {
     }
   })
 
-  it('网络错误写兜底的说法：默认「读取失败」，传了 fallback 用它', async () => {
-    expect(await render({ query: read(new TypeError('Failed to fetch')) })).toContain('读取失败')
-    const html = await render({
-      query: read(new TypeError('Failed to fetch')),
-      fallback: '无法列出备份',
-    })
+  it('连不上时写兜底的说法：默认「读取失败」，传了 fallback 用它；程序自己的错误不给重试', async () => {
+    expect(await render({ query: read(offline()) })).toContain('读取失败')
+    const html = await render({ query: read(offline()), fallback: '无法列出备份' })
     expect(html).toContain('无法列出备份')
+    expect(retryButton(html)).toBeDefined()
+    expect(
+      retryButton(await render({ query: read(new TypeError('x is undefined')) })),
+    ).toBeUndefined()
+  })
+
+  it('读到过内容、还能再读时自己换成刷新失败的语气，不用使用方传', async () => {
+    const html = await render({ query: read(new ApiError(502, '服务内部错误'), { data: [1] }) })
+    expect(html).toContain('刷新失败：服务内部错误')
+    expect(toneOf(html)).toBe('note-title warning')
     expect(retryButton(html)).toBeDefined()
   })
 
-  it('读到过内容、刷新失败时用提醒的语气，写明是刷新失败', async () => {
-    const html = await render({ query: read(new ApiError(502, '服务内部错误')), stale: true })
-    expect(html).toContain('刷新失败：服务内部错误')
-    expect(toneOf(html)).toBe('note-title warning')
+  it('读到过内容、但是确定的结果（别处删掉了）：照常是错误的语气，不写刷新失败', async () => {
+    const html = await render({
+      query: read(new ApiError(404, '凭据不存在'), { data: { id: 'c1' } }),
+    })
+    expect(html).not.toContain('刷新失败')
+    expect(toneOf(html)).toBe('error note-title')
+    expect(retryButton(html)).toBeUndefined()
   })
 
-  it('点重试重读的是传进去的那一样', () => {
+  it('点重试重读的是传进去的那一样，按钮大小跟着所在区块', () => {
     expect(readFailureNote).toContain('@click="query.refetch()"')
     expect(readFailureNote).toContain(':loading="query.isFetching.value"')
-    expect(readFailureNote).toContain('v-if="retryable(query.error.value)"')
+    expect(readFailureNote).toContain(':size="size"')
+    expect(readFailureNote).toContain("size: 'sm'")
     expect(readFailureNote).toContain('readFailure(query.error.value, fallback)')
+    // 凭据详情里两小节照原来用小一号的按钮
+    expect(credentialDetail).toContain(':query="references" size="xs"')
+    expect(credentialDetail).toMatch(/:query="events"\s+size="xs"/)
   })
 })
 
@@ -117,11 +138,13 @@ describe('查询的自动重试', () => {
     ) => boolean
     expect(retry(0, new ApiError(429, '请求过于频繁'))).toBe(true)
     expect(retry(0, new ApiError(408, '请求超时'))).toBe(true)
-    expect(retry(1, new TypeError('Failed to fetch'))).toBe(true)
-    expect(retry(2, new TypeError('Failed to fetch'))).toBe(false)
+    expect(retry(1, offline())).toBe(true)
+    expect(retry(2, offline())).toBe(false)
+    expect(retry(0, new DOMException('aborted', 'AbortError'))).toBe(true)
     expect(retry(0, new ApiError(404, '记忆不存在'))).toBe(false)
-    const zod = Object.assign(new Error('invalid'), { name: 'ZodError' })
-    expect(retry(0, zod)).toBe(false)
+    // 程序自己的错误和契约对不上，再试也一样
+    expect(retry(0, new TypeError('x is undefined'))).toBe(false)
+    expect(retry(0, Object.assign(new Error('invalid'), { name: 'ZodError' }))).toBe(false)
   })
 })
 
@@ -131,14 +154,14 @@ describe('几样一起读', () => {
       read(new ApiError(500, '服务内部错误')),
       read(null),
       read(new ApiError(502, '服务内部错误')),
-      read(new TypeError('Failed to fetch http://127.0.0.1')),
+      read(offline()),
     ])
     expect(groups.map((g) => g.message)).toEqual(['服务内部错误', '读取失败'])
   })
 
-  it('每条的重试只重读说这句话的那几样，转圈也只看它们', () => {
+  it('每条的重试只重读这一组，转圈也只看它们', () => {
     const apps = read(new ApiError(500, '服务内部错误'))
-    const personas = read(null, true)
+    const personas = read(null, { isFetching: true })
     const members = read(new ApiError(503, '服务内部错误'))
     const [group] = failedReads([apps, personas, members])
     expect(group!.read.error.value).toBe(apps.error.value)
@@ -150,6 +173,25 @@ describe('几样一起读', () => {
     expect(apps.refetch).toHaveBeenCalledOnce()
     expect(members.refetch).toHaveBeenCalledOnce()
     expect(personas.refetch).not.toHaveBeenCalled()
+  })
+
+  it('同一句话，能再读的和不能再读的分开：不能再读的那条没有重试，能再读的只重读它们', () => {
+    const transient = read(new ApiError(503, '暂时无法读取'))
+    const final = read(new ApiError(403, '暂时无法读取'))
+    const groups = failedReads([transient, final])
+    expect(groups).toHaveLength(2)
+    expect(new Set(groups.map((g) => g.key)).size).toBe(2)
+    const again = groups.find((g) => g.read.error.value === transient.error.value)!
+    again.read.refetch()
+    expect(transient.refetch).toHaveBeenCalledOnce()
+    expect(final.refetch).not.toHaveBeenCalled()
+  })
+
+  it('一组里每样都读到过内容才算刷新失败', () => {
+    const a = read(new ApiError(500, '服务内部错误'), { data: [] })
+    const b = read(new ApiError(500, '服务内部错误'))
+    expect(failedReads([a])[0]!.read.data.value).not.toBeUndefined()
+    expect(failedReads([a, b])[0]!.read.data.value).toBeUndefined()
   })
 })
 
@@ -226,8 +268,9 @@ describe('读取失败', () => {
 describe('读到过的内容不被错误盖掉', () => {
   it('记忆目录：重读根节点失败时树照常显示、展开的节点不丢，错误放在上面', () => {
     expect(memoriesPage).toContain('<ReadFailureNote :query="rootsRead" />')
+    // 有没有读到过看根节点：有就写刷新失败
     expect(memoriesPage).toContain(
-      'const rootsRead: ReadState = { error: rootsError, isFetching: loadingRoots, refetch: refresh }',
+      'data: computed(() => (roots.value.length ? roots.value : undefined))',
     )
     const tree = elementsOf(template(memoriesPage)).find((el) => el.tag === 'UTree')!
     const condition = tree.props?.find((p) => p.name === 'if')?.exp?.content
@@ -235,23 +278,41 @@ describe('读到过的内容不被错误盖掉', () => {
     expect(tree.props?.some((p) => p.name === 'else' || p.name === 'else-if')).toBe(false)
   })
 
+  it('记忆目录：换空间时上一个空间的树和错误都清掉，不拿旧分区去请求新空间', () => {
+    const watcher = /watch\(spaceId, \(\) => \{[^]*?\n\}\)/.exec(memoriesPage)![0]
+    expect(watcher).toContain('roots.value = []')
+    expect(watcher).toContain('rootsError.value = null')
+    expect(watcher).toContain('expanded.value = []')
+    expect(watcher.indexOf('roots.value = []')).toBeLessThan(watcher.indexOf('serially(loadRoots)'))
+  })
+
   it.each([
-    ['联系人详情', subjectDetailPage, 'subject', '<div v-else-if="!data" class="page-note">'],
     [
-      '人格详情',
-      personasPage,
-      'selected',
-      'v-if="selectedId !== null && selected.isError.value && !detail"',
+      '联系人详情',
+      subjectDetailPage,
+      'subject',
+      'v-else-if="!data || (subject.isError.value && !retryable(subject.error.value))"',
     ],
-    ['凭据详情', credentialsPage, 'selected', 'v-if="selected.isError.value && !detail"'],
+    ['人格详情', personasPage, 'selected', '(!detail || !retryable(selected.error.value))'],
+    [
+      '凭据详情',
+      credentialsPage,
+      'selected',
+      'v-if="selected.isError.value && (!detail || !retryable(selected.error.value))"',
+    ],
   ])(
-    '%s：没读到过才整块报错；读到过、刷新失败时照常显示，上面一条刷新失败',
+    '%s：没读到过、或是确定的结果（删掉、合并后的 404）时整块报错；还能再读的刷新失败才留着内容',
     (name, source, query, whole) => {
-      expect(source, name).toContain(whole)
-      const stale = notesOf(source).filter(
-        (note) => bound(note, 'query') === query && note.props?.some((p) => p.name === 'stale'),
-      )
-      expect(stale, name).toHaveLength(1)
+      expect(source.replace(/\s+/g, ' '), name).toContain(whole)
+      // 留着内容时上面也有一条，说法由 ReadFailureNote 按有没有读到过自己定，不用传
+      const notes = notesOf(source).filter((note) => bound(note, 'query') === query)
+      expect(notes.length, name).toBe(2)
+      for (const note of notes) {
+        expect(
+          note.props?.some((p) => p.name === 'stale' || p.arg?.content === 'stale'),
+          name,
+        ).toBe(false)
+      }
     },
   )
 
@@ -262,7 +323,19 @@ describe('读到过的内容不被错误盖掉', () => {
 
   it('记忆详情：刷新失败时表单留着，提示带重试', () => {
     expect(memoryEditor).toContain(
-      '<ReadFailureNote v-if="memory.isError.value" :query="memory" stale />',
+      '<ReadFailureNote v-if="memory.isError.value" :query="memory" />',
     )
+  })
+
+  it('哪里都不再自己传 stale：读到过没有由 ReadFailureNote 自己看', () => {
+    const sources = import.meta.glob<string>('../**/*.vue', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    })
+    const passing = Object.entries(sources)
+      .filter(([, source]) => /<ReadFailureNote\b[^>]*\bstale\b/.test(source))
+      .map(([path]) => path)
+    expect(passing).toEqual([])
   })
 })

@@ -3,7 +3,15 @@ import { afterEach, describe, expect, it, vi } from 'vitest'
 import { z } from 'zod'
 
 import { URI_FORMAT_HINT } from '../../labels'
-import { ApiError, attachmentName, download, readFailure, request, retryable } from '../client'
+import {
+  ApiError,
+  NetworkError,
+  attachmentName,
+  download,
+  readFailure,
+  request,
+  retryable,
+} from '../client'
 import { api } from '../endpoints'
 
 afterEach(() => vi.unstubAllGlobals())
@@ -19,21 +27,51 @@ describe('读取失败的文字', () => {
 })
 
 describe('值不值得再读一次', () => {
-  it('网络错误、请求中止、5xx、请求超时与太频繁可以再读', () => {
-    expect(retryable(new TypeError('Failed to fetch'))).toBe(true)
+  it('只认服务端暂时的失败、连不上、超时或取消', () => {
+    expect(retryable(new NetworkError(new TypeError('Failed to fetch')))).toBe(true)
     expect(retryable(new DOMException('aborted', 'AbortError'))).toBe(true)
+    expect(retryable(new DOMException('timed out', 'TimeoutError'))).toBe(true)
     for (const status of [500, 502, 503, 408, 429]) {
       expect(retryable(new ApiError(status, '…')), String(status)).toBe(true)
     }
   })
 
-  it('确定的结果再读也一样：401、403、404、409，以及响应和契约对不上', () => {
+  it('确定的结果、契约对不上、程序自己的错误再读也一样', () => {
     for (const status of [400, 401, 403, 404, 409, 422]) {
       expect(retryable(new ApiError(status, '…')), String(status)).toBe(false)
     }
     const parsed = z.object({ ok: z.boolean() }).safeParse({ ok: 'yes' })
     expect(parsed.success).toBe(false)
     expect(retryable(parsed.error)).toBe(false)
+    expect(retryable(new TypeError("Cannot read properties of undefined (reading 'x')"))).toBe(
+      false,
+    )
+    expect(retryable('出错了')).toBe(false)
+  })
+
+  it('fetch 本身 reject 时包成 NetworkError，原来的错误放在 cause 里', async () => {
+    const offline = new TypeError('Failed to fetch')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => {
+        throw offline
+      }),
+    )
+    const failure = await request('GET', '/x').catch((err: unknown) => err)
+    expect(failure).toBeInstanceOf(NetworkError)
+    expect((failure as NetworkError).cause).toBe(offline)
+    expect(retryable(failure)).toBe(true)
+    expect(readFailure(failure)).toBe('读取失败')
+  })
+
+  it('请求体序列化不了是程序的问题，不算网络错误', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json({})),
+    )
+    const failure = await request('POST', '/x', { body: { n: 1n } }).catch((err: unknown) => err)
+    expect(failure).toBeInstanceOf(TypeError)
+    expect(retryable(failure)).toBe(false)
   })
 
   it('响应解析不过时 request 抛的就是这种错误：不会被当成可以再读', async () => {

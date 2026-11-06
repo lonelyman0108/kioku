@@ -247,7 +247,7 @@ async function reveal() {
         </template>
       </SectionHeading>
       <p class="section-note">仍有引用时无法删除凭据。</p>
-      <ReadFailureNote v-if="references.isError.value" :query="references" />
+      <ReadFailureNote v-if="references.isError.value" :query="references" size="xs" />
       <USkeleton v-if="references.isPending.value" class="h-8 w-full" />
       <ul v-else-if="references.data.value?.items.length">
         <li v-for="m in references.data.value.items" :key="m.id">
@@ -283,6 +283,7 @@ async function reveal() {
       <ReadFailureNote
         v-if="events.isError.value && !events.isFetchNextPageError.value"
         :query="events"
+        size="xs"
       />
       <USkeleton v-if="events.isPending.value" class="h-8 w-full" />
       <ol v-else>

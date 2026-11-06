@@ -10,7 +10,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import SubjectBindings from '../components/SubjectBindings.vue'
@@ -193,8 +193,14 @@ function runCounts(run: ExtractionRunInfo): string {
       <USkeleton class="h-8 w-1/4" />
       <USkeleton class="h-40 w-full" />
     </div>
-    <!-- 没读到过才整块报错；读到过、后台刷新失败时详情照常显示，错误放在上面 -->
-    <div v-else-if="!data" class="page-note">
+    <!--
+      没读到过，或者是确定的结果（别处删掉、合并之后的 404）：整块报错，旧内容和操作都不留。
+      还能再读的刷新失败才照常显示详情，错误放在上面
+    -->
+    <div
+      v-else-if="!data || (subject.isError.value && !retryable(subject.error.value))"
+      class="page-note"
+    >
       <RouterLink :to="{ name: 'subjects', params: { spaceId } }" class="back-link">
         返回联系人列表
       </RouterLink>
@@ -232,7 +238,7 @@ function runCounts(run: ExtractionRunInfo): string {
       </header>
 
       <div v-if="subject.isError.value" class="stale-note">
-        <ReadFailureNote :query="subject" stale />
+        <ReadFailureNote :query="subject" />
       </div>
       <div class="subject-body">
         <!-- 这个联系人是谁：名字、标记、账号，以及绑定与合并 -->

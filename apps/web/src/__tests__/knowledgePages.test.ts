@@ -215,7 +215,7 @@ describe('列表读取失败', () => {
   it('凭据详情的引用和记录读取失败时能重试，不显示成空', () => {
     // ReadFailureNote 按传入的查询给重试，重读的就是它
     expect(credentialDetail).toContain(
-      '<ReadFailureNote v-if="references.isError.value" :query="references" />',
+      '<ReadFailureNote v-if="references.isError.value" :query="references" size="xs" />',
     )
     expect(credentialDetail).toContain('v-else-if="references.data.value" class="section-empty"')
     expect(credentialDetail).toMatch(

@@ -9,7 +9,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError, readFailure, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
@@ -470,10 +470,16 @@ async function removeProvider() {
     @update:open="(v) => !v && (selectedId = null)"
   >
     <template #body>
-      <!-- 没读到过才只有错误；读到过、后台刷新失败时详情照常显示，错误放在上面 -->
-      <ReadFailureNote v-if="selected.isError.value && !detail" :query="selected" />
+      <!--
+        没读到过，或者是确定的结果（别处删掉之后的 404）：只有错误，旧内容和操作都不留。
+        还能再读的刷新失败才照常显示详情，错误放在上面
+      -->
+      <ReadFailureNote
+        v-if="selected.isError.value && (!detail || !retryable(selected.error.value))"
+        :query="selected"
+      />
       <template v-else-if="detail">
-        <ReadFailureNote v-if="selected.isError.value" :query="selected" stale />
+        <ReadFailureNote v-if="selected.isError.value" :query="selected" />
         <CredentialDetail
           :space-id="spaceId"
           :credential="detail"

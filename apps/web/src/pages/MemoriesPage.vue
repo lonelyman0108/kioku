@@ -289,7 +289,12 @@ function refresh() {
   void serially(loadRoots)
 }
 // 目录的根节点不是查询，照查询的形状交给 ReadFailureNote：错误、是否在读、重读
-const rootsRead: ReadState = { error: rootsError, isFetching: loadingRoots, refetch: refresh }
+const rootsRead: ReadState = {
+  data: computed(() => (roots.value.length ? roots.value : undefined)),
+  error: rootsError,
+  isFetching: loadingRoots,
+  refetch: refresh,
+}
 
 // 这次点在箭头上。树的点击同时算选中和展开：点箭头只展开收起，点名字只打开
 function clickedChevron(event: Event) {
@@ -393,6 +398,9 @@ onMounted(() =>
   }),
 )
 watch(spaceId, () => {
+  // 上一个空间的目录不留：新空间读失败时错误下面不能是别的空间的树，展开它也会拿旧分区去请求新空间
+  roots.value = []
+  rootsError.value = null
   expanded.value = []
   // 新建窗口里的内容属于上一个空间，不能带到新空间去提交
   createOpen.value = false

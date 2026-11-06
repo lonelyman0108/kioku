@@ -82,21 +82,21 @@ describe('四类', () => {
 })
 
 describe('待处理页', () => {
-  it('标题的大数字和导航角标、概览同一个口径，计数到了就显示，不等空间信息', () => {
+  it('标题的大数字和导航角标、概览同一个口径；角色读到之前不知道口径，先写「–」', () => {
     const script = parse(inboxPage).descriptor.scriptSetup!.content
     expect(script).toContain(
-      'counts.data.value ? actionableInboxCount(counts.data.value, space.value?.role) : null',
+      'counts.data.value && role.value ? actionableInboxCount(counts.data.value, role.value) : null',
     )
     expect(inboxPage).toContain(`<span class="inbox-total">{{ total ?? '–' }}</span>`)
     expect(inboxPage).not.toContain('counts.data.value?.total')
   })
 
-  it('各分类照常写各自的条数，当前账号处理不了的和 0 一样不醒目', () => {
+  it('各分类照常写各自的条数：0 不醒目，处理不了的那几类等角色读到再定，也一样不醒目', () => {
     const script = parse(inboxPage).descriptor.scriptSetup!.content
     expect(inboxPage).toContain('inboxTabCount(counts.data.value, t)')
     expect(inboxPage).toContain(`<b :class="{ none: quiet(t) }">`)
     expect(script).toContain('!inboxTabCount(counts.data.value, tab)')
-    expect(script).toContain('!inboxTabActionable(tab, space.value?.role)')
+    expect(script).toContain('(role.value !== undefined && !inboxTabActionable(tab, role.value))')
     // 选中的那一类反白时也退一级
     expect(inboxPage).toContain(".inbox-tab[aria-current='page'] b.none {")
   })
@@ -107,15 +107,13 @@ describe('待处理页', () => {
     expect(inboxTabCount(viewer, 'review')).toBe(7)
   })
 
-  it('能处理的分类：查看者只有账号绑定；角色还不知道时按都能处理算，和总数同一个口径', () => {
+  it('能处理的分类：查看者只有账号绑定；和总数同一个口径', () => {
     for (const tab of INBOX_TABS) {
       expect(inboxTabActionable(tab, 'owner')).toBe(true)
       expect(inboxTabActionable(tab, 'editor')).toBe(true)
-      expect(inboxTabActionable(tab, undefined)).toBe(true)
       expect(inboxTabActionable(tab, 'viewer')).toBe(tab === 'binding')
     }
     const all = counts({ bindings: 1, review: 2, dreamSuggestions: 3, plaintext: 4, total: 10 })
-    expect(actionableInboxCount(all, undefined)).toBe(10)
     for (const role of ['owner', 'editor', 'viewer'] as const) {
       const sum = INBOX_TABS.filter((t) => inboxTabActionable(t, role))
         .map((t) => inboxTabCount(all, t))

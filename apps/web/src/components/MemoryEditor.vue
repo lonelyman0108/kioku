@@ -709,7 +709,7 @@ const properties = computed<Property[][]>(() => {
     <div v-else class="detail-main">
       <div class="detail-read">
         <!-- 已经载入过时，重新拉取失败（例如别处删除了它）也保留表单，免得丢掉正在编辑的内容 -->
-        <ReadFailureNote v-if="memory.isError.value" :query="memory" stale />
+        <ReadFailureNote v-if="memory.isError.value" :query="memory" />
         <NoteLine v-else-if="changedElsewhere && dirty" tone="warning">
           这条记忆已在别处修改，或已删除并重新创建。保存将提示冲突，可先复制当前改动，再载入新版本。
           <template #actions>

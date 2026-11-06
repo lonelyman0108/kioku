@@ -215,7 +215,7 @@ watch([spaceId, appId], () => {
 <template>
   <div class="app-page">
     <div v-if="failures.length" class="app-failed">
-      <ReadFailureNote v-for="failure in failures" :key="failure.message" :query="failure.read" />
+      <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
     </div>
     <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
     <div v-else-if="apps.data.value && !app" class="app-state">

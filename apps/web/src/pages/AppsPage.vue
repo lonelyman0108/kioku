@@ -151,7 +151,7 @@ async function create() {
       </UButton>
     </header>
 
-    <ReadFailureNote v-for="failure in failures" :key="failure.message" :query="failure.read" />
+    <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
     <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
     <p v-else-if="apps.data.value && !apps.data.value.length" class="apps-empty">暂无应用</p>
     <template v-else-if="apps.data.value">

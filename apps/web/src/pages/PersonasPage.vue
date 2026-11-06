@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import PersonaDetail from '../components/PersonaDetail.vue'
@@ -250,8 +250,18 @@ async function remove() {
     </section>
 
     <section ref="detailColumn" class="detail-column" aria-label="详情" tabindex="-1">
-      <!-- 没读到过才整块报错；读到过、后台刷新失败时详情照常显示，错误放在节点上面 -->
-      <div v-if="selectedId !== null && selected.isError.value && !detail" class="detail-note">
+      <!--
+        没读到过，或者是确定的结果（别处删掉之后的 404）：整块报错，旧内容和操作都不留。
+        还能再读的刷新失败才照常显示详情，错误放在节点上面
+      -->
+      <div
+        v-if="
+          selectedId !== null &&
+          selected.isError.value &&
+          (!detail || !retryable(selected.error.value))
+        "
+        class="detail-note"
+      >
         <button type="button" class="back" @click="selectedId = null">
           <UIcon :name="icons.back" class="size-4" />
           返回
@@ -275,7 +285,7 @@ async function remove() {
           </button>
         </template>
         <template v-if="selected.isError.value" #notice>
-          <ReadFailureNote :query="selected" stale />
+          <ReadFailureNote :query="selected" />
         </template>
       </PersonaDetail>
       <div v-else-if="selectedId !== null" class="detail-note space-y-3">
