@@ -24,7 +24,12 @@ import { backfillEmbeddings, embedMemories } from '../../embedding/worker'
 import { memoryServiceForConsole } from '../../memory/context'
 import { BOOT_CANDIDATE } from '../../memory/filter'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 const EDITOR_SCOPES: KeyScopes = {
@@ -418,13 +423,14 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
     )
     await create(editor.cookie, { uri: 'user://home/diary', content: '日记' })
     // 来自对话的记忆（这里是一条受信的会话摘要）优先级也够：它没有坐标，不进启动加载，不在列表里，也不算要补的
-    await withSpace(database.db, ws.spaceId, (tx) =>
+    await withSpace(database.db, ws.spaceId, async (tx) =>
       tx.insert(memories).values({
         spaceId: ws.spaceId,
         form: 'extracted',
         layer: 'episode',
         sensitivity: 'public',
         provenance: 'agent',
+        conversationId: await summaryConversation(tx, ws.spaceId),
         content: '抽取的摘要',
         priority: 0,
       }),

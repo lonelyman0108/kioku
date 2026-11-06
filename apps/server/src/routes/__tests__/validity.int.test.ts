@@ -33,7 +33,12 @@ import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
 import { uriConflicts } from '../../memory/service'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 const fakeModel = (reply: unknown): ChatModel => ({
@@ -556,7 +561,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('待审里删除时刚好到期：跳过，不写删除标记', async () => {
       const until = new Date(Date.now() + 3_000)
-      const [item] = await withSpace(database.db, ws.spaceId, (tx) =>
+      const [item] = await withSpace(database.db, ws.spaceId, async (tx) =>
         tx
           .insert(memories)
           .values({
@@ -566,6 +571,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
             sensitivity: 'public',
             provenance: 'untrusted',
             originScope: 'global',
+            conversationId: await summaryConversation(tx, ws.spaceId),
             content: '群里说下周三停电',
             expiresAt: until,
           })
@@ -1133,7 +1139,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect(await errorOf(await reactivate(old.id, old.version), 409)).toContain('联系人页')
       expect((await rowOf(old.id)).validTo).not.toBeNull()
       // 会话摘要按设计到期，不能借这里变成一直有效
-      const [summary] = await withSpace(database.db, ws.spaceId, (tx) =>
+      const [summary] = await withSpace(database.db, ws.spaceId, async (tx) =>
         tx
           .insert(memories)
           .values({
@@ -1143,6 +1149,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
             sensitivity: 'public',
             provenance: 'untrusted',
             originScope: 'global',
+            conversationId: await summaryConversation(tx, ws.spaceId),
             content: '昨天聊了读书会的安排',
             expiresAt: new Date(Date.now() - 60_000),
           })

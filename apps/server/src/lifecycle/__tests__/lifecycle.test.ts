@@ -25,6 +25,7 @@ const scopeWith = (
   recall: async () => [candidate],
   boot: async () => ({ entries: [], omitted: [], [OMITTED_TITLES]: [] }),
   recent: async () => [],
+  summaries: async () => [],
   subjects,
   contents,
   record: () => {},
@@ -168,6 +169,52 @@ describe('每轮输入的召回', () => {
       { event: 'prompt.submit', prompt: '规则' },
     )
     expect(prompt).not.toHaveProperty('session')
+  })
+
+  it('同一会话最近的会话摘要排在附加块的最前面，压成一行；放不下时和别的附加块一样不附', async () => {
+    const summaries = vi.fn<RecallScope['summaries']>(async () => [
+      { content: '讨论了记忆架构改版\n下一步做会话', createdAt: '2026-11-06T08:00:00.000Z' },
+      { content: '整理了导入的映射', createdAt: '2026-11-05T08:00:00.000Z' },
+    ])
+    const recent = async () => [
+      {
+        uri: 'core://recent',
+        title: 'recent',
+        priority: 2,
+        disclosure: null,
+        updatedAt: '2026-10-26T08:00:00Z',
+      },
+    ]
+    const res = await handleLifecycle(
+      { ...scopeWith(async () => []), summaries, recent },
+      'claudecode',
+      { event: 'session.start' },
+    )
+    expect(summaries).toHaveBeenCalledWith(3)
+    const context = (res.hostOutput.value as { hookSpecificOutput: { additionalContext: string } })
+      .hookSpecificOutput.additionalContext
+    expect(context).toContain(
+      '## 最近的会话摘要\n\n- 2026-11-06：讨论了记忆架构改版 下一步做会话\n- 2026-11-05：整理了导入的映射',
+    )
+    expect(context.indexOf('## 最近的会话摘要')).toBeLessThan(context.indexOf('## 近期更新的记忆'))
+
+    // 启动节点占满了字数：摘要也放不下
+    const full = await handleLifecycle(
+      {
+        ...scopeWith(async () => []),
+        summaries,
+        boot: async () => ({
+          entries: [
+            { uri: 'core://agent', title: 'agent', layer: 'core', content: '正'.repeat(9_400) },
+          ],
+          omitted: [],
+          [OMITTED_TITLES]: [],
+        }),
+      },
+      'claudecode',
+      { event: 'session.start' },
+    )
+    expect(full.session?.dropped).toEqual(['summaries'])
   })
 
   it('astrbot 会话开始只给指引与展开的启动节点：不提记忆工具，也不附只有 URI 的内容', async () => {

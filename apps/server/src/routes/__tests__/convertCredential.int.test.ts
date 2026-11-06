@@ -30,7 +30,12 @@ import {
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { embedMemories } from '../../embedding/worker'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { MemoryService } from '../../memory/service'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -415,6 +420,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
         layer: 'episode',
         sensitivity: 'public',
         provenance: 'untrusted',
+        conversationId: await summaryConversation(tx, ws.spaceId),
         content: `群里说的 ${value}`,
         expiresAt: new Date(Date.now() + 86_400_000),
       })

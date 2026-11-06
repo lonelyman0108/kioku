@@ -13,7 +13,12 @@ import type { ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 const fakeModel = (reply: unknown): ChatModel => ({
@@ -159,8 +164,9 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     expect((await api('GET', '/review?cursor=abc')).status).toBe(400)
 
     // 每页 50 条；总数只在第一页给
-    await withSpace(database.db, ws.spaceId, (tx) =>
-      tx.insert(memories).values(
+    await withSpace(database.db, ws.spaceId, async (tx) => {
+      const conversationId = await summaryConversation(tx, ws.spaceId)
+      await tx.insert(memories).values(
         Array.from({ length: 55 }, (_, i) => ({
           spaceId: ws.spaceId,
           form: 'extracted' as const,
@@ -168,11 +174,12 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
           sensitivity: 'public' as const,
           provenance: 'untrusted' as const,
           originScope: 'global',
+          conversationId,
           content: `摘要${i}`,
           expiresAt: new Date(Date.now() + 86_400_000),
         })),
-      ),
-    )
+      )
+    })
     const first = await queue('?layer=episode')
     expect([first.items.length, first.total]).toEqual([50, 56])
     const second = await queue(`?layer=episode&cursor=${first.nextCursor}`)

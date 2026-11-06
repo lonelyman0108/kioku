@@ -186,6 +186,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         endpoint: null,
         loop: 'hook',
         tools: true,
+        turnEnd: true,
       }
 
       const before = await getInfo(bob.cookie, path)
@@ -276,6 +277,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         endpoint: null,
         loop: 'hook',
         tools: true,
+        turnEnd: true,
       })
 
       const server = await startModel(() => '好')
@@ -286,6 +288,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         endpoint: server.url,
         loop: 'hook',
         tools: true,
+        turnEnd: true,
       })
     })
 
@@ -324,6 +327,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       endpoint: server.url,
       loop: 'hook',
       tools: true,
+      turnEnd: true,
     })
 
     it('Key 解不开（没配主密钥）：400 并说明，不请求模型；查情况给原因', async () => {
@@ -429,28 +433,32 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     })
 
     it.each([
-      ['claudecode', 'hook', true],
-      ['codex', 'hook', true],
-      ['astrbot', 'chat', false],
-      ['mcp', 'tools', true],
-      ['openclaw', 'approximate', true],
-      ['other', 'approximate', true],
-    ])('%s：循环是 %s，给不给工具 %s，和实际请求一致', async (runtimeFamily, loop, tools) => {
-      const created = (await ws.createApp(`app-${runtimeFamily}`, { runtimeFamily })).id
-      const key = await ws.createKey(created)
-      const path = benchPath(created, key.id)
-      const server = await startModel(() => '好')
-      expect(await (await getInfo(ws.cookie, path)).json()).toEqual({
-        available: true,
-        reason: null,
-        defaultModel: 'fake-model',
-        endpoint: server.url,
-        loop,
-        tools,
-      })
-      expect((await postTurn({ messages: [USER] }, ws.cookie, path)).status).toBe(200)
-      expect(server.tools[0] !== undefined).toBe(tools)
-    })
+      ['claudecode', 'hook', true, true],
+      ['codex', 'hook', true, false],
+      ['astrbot', 'chat', false, true],
+      ['mcp', 'tools', true, false],
+      ['openclaw', 'approximate', true, false],
+      ['other', 'approximate', true, false],
+    ])(
+      '%s：循环是 %s，给不给工具 %s、回复后发不发 turn.end %s，和实际请求一致',
+      async (runtimeFamily, loop, tools, turnEnd) => {
+        const created = (await ws.createApp(`app-${runtimeFamily}`, { runtimeFamily })).id
+        const key = await ws.createKey(created)
+        const path = benchPath(created, key.id)
+        const server = await startModel(() => '好')
+        expect(await (await getInfo(ws.cookie, path)).json()).toEqual({
+          available: true,
+          reason: null,
+          defaultModel: 'fake-model',
+          endpoint: server.url,
+          loop,
+          tools,
+          turnEnd,
+        })
+        expect((await postTurn({ messages: [USER] }, ws.cookie, path)).status).toBe(200)
+        expect(server.tools[0] !== undefined).toBe(tools)
+      },
+    )
   })
 
   describe('消息', () => {

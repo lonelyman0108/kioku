@@ -458,6 +458,11 @@ export const memories = pgTable(
       'memories_conversation_by_layer',
       sql`${t.conversationId} is null or ${t.layer} in ('subject', 'episode')`,
     ),
+    // 会话摘要都挂在会话上（会话删掉时摘要由触发器先删，见基线末尾）；联系人的事实可以没有，会话删掉时只断开关联
+    check(
+      'memories_episode_conversation',
+      sql`${t.layer} <> 'episode' or ${t.conversationId} is not null`,
+    ),
     // 本人不设公开：本人的记忆到不了群聊与陌生人私聊
     check('memories_user_not_public', sql`${t.layer} <> 'user' or ${t.sensitivity} <> 'public'`),
     // 未确认来源只能写联系人的事实与会话摘要

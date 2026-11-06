@@ -396,9 +396,10 @@ async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<voi
 }
 
 // 抽取写下的记忆：联系人的事实挂在联系人上，可以推翻同一个联系人的一条旧事实；会话摘要带到期时间
+// 会话摘要带 ownerAccountId 时（不带会话上下文的会话）归这个成员、私密，别的都是公开、不归成员
 export type ExtractedWrite =
   | { layer: 'subject'; subjectId: string; content: string; replaces?: string | undefined }
-  | { layer: 'episode'; content: string; expiresAt: Date }
+  | { layer: 'episode'; content: string; expiresAt: Date; ownerAccountId: string | null }
 
 export type ExtractedOutcome = 'added' | 'updated' | 'skipped'
 
@@ -1104,13 +1105,15 @@ export class MemoryService {
     items: readonly ExtractedWrite[],
     eventContext: Record<string, unknown>,
     finish: (tx: Tx, outcomes: ExtractedOutcome[]) => Promise<void>,
-    // 写之前在同一个事务里先做的检查，抛错就整批不写
-    start?: (tx: Tx) => Promise<void>,
+    // 写之前在同一个事务里先做的检查，抛错就整批不写；返回这一批的会话，写下的都挂在它上面
+    start: (tx: Tx) => Promise<string | null>,
   ): Promise<ExtractedOutcome[]> {
     return this.run(async (tx) => {
-      await start?.(tx)
+      const conversationId = await start(tx)
       const outcomes: ExtractedOutcome[] = []
-      for (const item of items) outcomes.push(await this.writeExtracted(tx, item, eventContext))
+      for (const item of items) {
+        outcomes.push(await this.writeExtracted(tx, item, conversationId, eventContext))
+      }
       await finish(tx, outcomes)
       return outcomes
     })
@@ -1119,9 +1122,11 @@ export class MemoryService {
   private async writeExtracted(
     tx: Tx,
     item: ExtractedWrite,
+    conversationId: string | null,
     eventContext: Record<string, unknown>,
   ): Promise<ExtractedOutcome> {
-    const sensitivity = 'public' as const
+    const owner = item.layer === 'episode' ? item.ownerAccountId : null
+    const sensitivity = owner ? ('private' as const) : ('public' as const)
     try {
       this.assertWritable(
         { layer: item.layer, sensitivity, appId: null, personaId: null },
@@ -1129,7 +1134,7 @@ export class MemoryService {
       )
       await this.checkCredentialRefs(
         tx,
-        { layer: item.layer, sensitivity, ownerAccountId: null, content: item.content },
+        { layer: item.layer, sensitivity, ownerAccountId: owner, content: item.content },
         null,
       )
     } catch (err) {
@@ -1169,7 +1174,9 @@ export class MemoryService {
         sensitivity,
         provenance: this.ctx.access.writeProvenance,
         originScope: this.ctx.access.writeOriginScope,
+        ownerAccountId: owner,
         subjectId: item.layer === 'subject' ? item.subjectId : null,
+        conversationId,
         content: item.content,
         expiresAt: item.layer === 'episode' ? item.expiresAt : null,
       })

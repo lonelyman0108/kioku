@@ -18,6 +18,7 @@ import { createApp } from '../../app'
 import { connect, withSpace, type Database, type Db } from '../../db/client'
 import {
   apiKeys,
+  conversations,
   conversationTurns,
   memories,
   recallEvents,
@@ -1300,6 +1301,37 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
       ]) {
         expect(allChanges).not.toContain(content)
       }
+    })
+
+    it('不带会话上下文的 turn.end（Claude Code 回复后发的）：回滚模式下照常进缓冲、建会话，改动照常列出，结束后都不留', async () => {
+      await saveExtractionConfig(database.db, masterKey, {
+        baseUrl: 'http://127.0.0.1:1/v1',
+        model: 'fake',
+        apiKey: 'x',
+      })
+      const local = {
+        event: 'turn.end',
+        sessionId: 'cc-session',
+        user: '本机说的话',
+        reply: '回复',
+      }
+      const result = await run({
+        steps: [lifecycle(local), lifecycle({ ...local, user: '第二轮' })],
+      })
+      expect(result.ok).toBe(true)
+      const [first, second] = result.steps.map(changesOf)
+      expect(first).toMatchObject({
+        subjects: 0,
+        identities: [],
+        turns: 1,
+        turn: { sessionId: 'cc-session', user: '本机说的话', reply: '回复' },
+      })
+      expect(second).toMatchObject({ subjects: 0, turns: 1, turn: { user: '第二轮' } })
+      const left = await withSpace(database.db, ws.spaceId, async (tx) => ({
+        turns: await tx.select().from(conversationTurns),
+        conversations: await tx.select().from(conversations),
+      }))
+      expect(left).toEqual({ turns: [], conversations: [] })
     })
 
     it('重放不列改动，全部重放完推进一次水位：第一个真实步骤的改动不含重放的写入', async () => {

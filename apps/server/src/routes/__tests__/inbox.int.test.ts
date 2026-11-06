@@ -14,7 +14,12 @@ import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { dreamSuggestions, memories, subjectBindings, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
@@ -59,7 +64,8 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     expect(res.status, await res.clone().text()).toBe(201)
     return (await res.json()) as MemoryView
   }
-  // 不可信来源写下的对象层、情节层记忆：待确认内容
+  // 不可信来源写下的联系人事实与会话摘要：待确认内容。会话摘要挂在 conversation 上，写之前先取
+  let conversation: string | null = null
   const untrusted = (extra: Partial<typeof memories.$inferInsert> = {}) => ({
     spaceId: ws.spaceId,
     form: 'extracted' as const,
@@ -68,6 +74,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     provenance: 'untrusted' as const,
     content: '群里聊了学日语',
     expiresAt: new Date(Date.now() + 86_400_000),
+    conversationId: extra.layer === 'subject' ? null : conversation,
     ...extra,
   })
   let fingerprint = 0
@@ -76,7 +83,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     extra: Partial<typeof dreamSuggestions.$inferInsert> = {},
   ) => ({
     spaceId: ws.spaceId,
-    scope: 'base',
+    scope: 'core',
     kind: 'stale',
     memoryIds: [memory.id],
     versions: [memory.version],
@@ -133,6 +140,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     const changed = await remember({ uri: 'core://kb/changed', content: '会改的' })
 
     await inSpace(async (tx) => {
+      conversation = await summaryConversation(tx, ws.spaceId)
       // 待确认内容：现在有效的两条；到期的、删掉的、受信来源的不算
       await tx
         .insert(memories)
@@ -207,6 +215,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     await remember({ uri: 'core://kb/faq', content: '常见问题', sensitivity: 'public' })
     const past = new Date(Date.now() - 1000)
     await inSpace(async (tx) => {
+      conversation = await summaryConversation(tx, ws.spaceId)
       const [person] = await tx
         .insert(subjects)
         .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })

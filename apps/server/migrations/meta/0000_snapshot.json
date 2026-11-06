@@ -1,5 +1,5 @@
 {
-  "id": "93a2dff7-f6be-449e-a228-41df61320b2b",
+  "id": "8f5187cb-515c-45ca-93be-2ef5e4d86a0b",
   "prevId": "00000000-0000-0000-0000-000000000000",
   "version": "7",
   "dialect": "postgresql",
@@ -2398,6 +2398,10 @@
         "memories_conversation_by_layer": {
           "name": "memories_conversation_by_layer",
           "value": "\"memories\".\"conversation_id\" is null or \"memories\".\"layer\" in ('subject', 'episode')"
+        },
+        "memories_episode_conversation": {
+          "name": "memories_episode_conversation",
+          "value": "\"memories\".\"layer\" <> 'episode' or \"memories\".\"conversation_id\" is not null"
         },
         "memories_user_not_public": {
           "name": "memories_user_not_public",

@@ -1,4 +1,4 @@
-import type { BootResponse, RecentMemory } from '@kioku/contracts'
+import type { BootResponse, RecentMemory, SessionSummary } from '@kioku/contracts'
 import { and, asc, desc, eq, inArray, ne } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
@@ -146,6 +146,13 @@ export async function recentMemories(
     disclosure: r.disclosure,
     updatedAt: r.updatedAt.toISOString(),
   }))
+}
+
+// 同一会话最近的会话摘要，接着上次的话题。摘要压成一行：它和启动加载一起被当作指令级上下文
+export function formatSummaryBlock(summaries: SessionSummary[]): string {
+  if (!summaries.length) return ''
+  const lines = summaries.map((s) => `- ${s.createdAt.slice(0, 10)}：${inlineText(s.content)}`)
+  return ['## 最近的会话摘要', '', ...lines].join('\n')
 }
 
 export function formatRecentBlock(recent: RecentMemory[]): string {

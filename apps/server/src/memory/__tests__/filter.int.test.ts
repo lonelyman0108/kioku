@@ -17,7 +17,12 @@ import {
 } from '../../access/access'
 import { withSpace, type Database } from '../../db/client'
 import { accounts, apps, memories, memoryEvents, personas, spaces } from '../../db/schema'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { readableConditions, snapshotColumns, snapshotFacts } from '../filter'
 
 // edge 那几条的有效到：按时间点判断时，正好在这一刻前后比对
@@ -123,9 +128,17 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
         }
       }
       // 联系人的事实要挂真实的联系人，这里改成不挂联系人的会话摘要来覆盖来源作用域
+      // 会话摘要都挂在会话上；读权限不看是哪个会话
+      const conversationId = await summaryConversation(tx, spaceId)
       const inserted = await tx
         .insert(memories)
-        .values(rows.map((r) => (r.layer === 'subject' ? { ...r, layer: 'episode' as const } : r)))
+        .values(
+          rows.map((r) =>
+            r.layer === 'subject' || r.layer === 'episode'
+              ? { ...r, layer: 'episode' as const, conversationId }
+              : r,
+          ),
+        )
         .returning()
       // 每条记忆再记一个事件，「改后」快照就是这一行，用来比对快照上的 SQL 条件；
       // 另外几十条缺字段的旧快照，两边的处理也要一致

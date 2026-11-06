@@ -281,6 +281,7 @@ CREATE TABLE "memories" (
         and ("memories"."layer" = 'app') = ("memories"."app_id" is not null)
         and ("memories"."layer" = 'subject') = ("memories"."subject_id" is not null)),
 	CONSTRAINT "memories_conversation_by_layer" CHECK ("memories"."conversation_id" is null or "memories"."layer" in ('subject', 'episode')),
+	CONSTRAINT "memories_episode_conversation" CHECK ("memories"."layer" <> 'episode' or "memories"."conversation_id" is not null),
 	CONSTRAINT "memories_user_not_public" CHECK ("memories"."layer" <> 'user' or "memories"."sensitivity" <> 'public'),
 	CONSTRAINT "memories_untrusted_layers" CHECK ("memories"."provenance" <> 'untrusted' or "memories"."layer" in ('subject', 'episode')),
 	CONSTRAINT "memories_priority_nonneg" CHECK ("memories"."priority" >= 0)

@@ -2,6 +2,7 @@ import type { MemberRole, RecallCandidate } from '@kioku/contracts'
 import { and, eq, inArray } from 'drizzle-orm'
 
 import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
+import { conversationRefOf, latestSummaries } from '../access/conversations'
 import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
 import { loggableError, withSpace, type Tx } from '../db/client'
@@ -207,6 +208,13 @@ export function recallScopeForKey(
       run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
+    summaries: async (limit) => {
+      const ref = conversationRefOf(session.context, key.app.ownerAccountId)
+      if (ref?.kind !== 'none') return []
+      return withSpace(deps.db, key.spaceId, (tx) =>
+        latestSummaries(tx, access, key.app.id, ref, limit),
+      )
+    },
     // 联系人的事实不用人格链，不经过 run。对象直连只是附加的线索：读取失败时记日志、返回空，不影响召回本身
     subjects: async () => {
       if (!session.subjects.length) return []

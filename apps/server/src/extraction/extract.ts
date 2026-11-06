@@ -1,6 +1,7 @@
 import { and, asc, eq, inArray, sql } from 'drizzle-orm'
 
-import type { Access, SessionContext } from '../access/access'
+import { sensitivityRank, type Access, type SessionContext } from '../access/access'
+import { ensureConversation, findConversation, type ConversationRef } from '../access/conversations'
 import { groupPersona, type KeySession } from '../access/session'
 import { principalForKeyId } from '../auth/middleware'
 import {
@@ -76,11 +77,19 @@ const placeColumns = {
   scope: conversationTurns.scope,
   senderSubjectId: conversationTurns.senderSubjectId,
   groupSubjectId: conversationTurns.groupSubjectId,
+  ownerAccountId: conversationTurns.ownerAccountId,
 }
 type Place = Pick<
   typeof conversationTurns.$inferSelect,
-  'id' | 'scope' | 'senderSubjectId' | 'groupSubjectId'
+  'id' | 'scope' | 'senderSubjectId' | 'groupSubjectId' | 'ownerAccountId'
 >
+
+// 一轮对话所在的会话：群聊、频道按群，私聊按发言人，不带会话上下文的按所属成员
+function conversationOfTurn(turn: Place): ConversationRef {
+  if (turn.groupSubjectId) return { kind: 'group', subjectId: turn.groupSubjectId }
+  if (turn.senderSubjectId) return { kind: 'direct', subjectId: turn.senderSubjectId }
+  return { kind: 'none', ownerAccountId: turn.ownerAccountId! }
+}
 
 // 抽取一批缓冲：让模型按 JSON 给出候选事实，与相关对象已有的事实比对后写成联系人的事实，会话摘要挂在会话上，
 // 记一条抽取记录，删掉用过的缓冲（抽取期间新进来的留着，由它们排的任务处理）。写入、抽取记录与删缓冲
@@ -107,9 +116,14 @@ export async function extractBatch(
   const last = all.at(-1)
   if (!last) return
   const groupId = last.groupSubjectId
-  const context: SessionContext = groupId
-    ? { chatType: last.chatType === 'channel' ? 'channel' : 'group', groupSubjectId: groupId }
-    : { chatType: 'direct', senderSubjectId: last.senderSubjectId! }
+  // 不带会话上下文的一批（例如本机的 Claude Code）：只写会话摘要，摘要归所属成员、私密，不记联系人的事实
+  const noContext = last.chatType === 'none'
+  const owner = noContext ? last.ownerAccountId! : null
+  const context: SessionContext = noContext
+    ? {}
+    : groupId
+      ? { chatType: last.chatType === 'channel' ? 'channel' : 'group', groupSubjectId: groupId }
+      : { chatType: 'direct', senderSubjectId: last.senderSubjectId! }
 
   const keyIds = [...new Set(all.map((t) => t.keyId))]
   const principals = (await Promise.all(keyIds.map((id) => principalForKeyId(db, id)))).filter(
@@ -125,30 +139,43 @@ export async function extractBatch(
   for (const key of principals) {
     const session: KeySession = { context, personaId, subjects: [] }
     const access = accessForKey(key, session)
-    // 来源作用域由会话上下文算出，和缓冲分批用的是同一个
-    const writable = access.writeLayers.has('subject') || access.writeLayers.has('episode')
+    // 来源作用域由会话上下文算出，和缓冲分批用的是同一个。不带会话上下文的摘要私密：Key 的敏感级要到私密，
+    // 而且这几轮要还是应用现在的所有者的
+    const writable = noContext
+      ? access.writeLayers.has('episode') &&
+        sensitivityRank(access.maxSensitivity) >= sensitivityRank('private') &&
+        key.app.ownerAccountId === owner
+      : access.writeLayers.has('subject') || access.writeLayers.has('episode')
     if (access.writeOriginScope === target.scope && writable) {
       writers.set(key.keyId, { key, session, access })
     }
   }
-  const turns = all.filter((t) => writers.has(t.keyId))
-  // 这一批的内容只写进每一轮的 Key 都写得了的层：只能写会话摘要的 Key 说的话，不能借别的 Key 写成联系人的事实
+  const turns = all.filter(
+    (t) => writers.has(t.keyId) && (!noContext || t.ownerAccountId === owner),
+  )
+  // 这一批的内容只写进每一轮的 Key 都写得了的归属：只能写会话摘要的 Key 说的话，不能借别的 Key 写成联系人的事实
   const used = [...new Set(turns.map((t) => t.keyId))].map((id) => writers.get(id)!.access)
   const layers = {
-    subject: used.every((a) => a.writeLayers.has('subject')),
+    subject: !noContext && used.every((a) => a.writeLayers.has('subject')),
     episode: used.every((a) => a.writeLayers.has('episode')),
   }
-  // 私聊、群聊与频道的轮次都带着发言人
-  const senderIds = [...new Set(turns.map((t) => t.senderSubjectId!))]
+  // 私聊、群聊与频道的轮次都带着发言人；不带会话上下文的没有联系人
+  const senderIds = noContext ? [] : [...new Set(turns.map((t) => t.senderSubjectId!))]
   const subjectIds = groupId ? [...senderIds, groupId] : senderIds
   // 抽取记录挂在这一批对话现在所在的作用域与对象上：模型还在算时对象被合并，对话跟着换了过去，
   // 记录也跟过去，合并后的对象页才看得到
   const before = new Map(all.map((t) => [t.id, t]))
-  const runOf = (fields: RunFields, now: Place[]): typeof extractionRuns.$inferInsert => {
+  const runOf = (
+    fields: RunFields,
+    now: Place[],
+    conversationId: string | null,
+  ): typeof extractionRuns.$inferInsert => {
     const moved = new Map<string, string>()
     for (const row of now) {
       const turn = before.get(row.id)!
-      moved.set(turn.senderSubjectId!, row.senderSubjectId!)
+      if (turn.senderSubjectId && row.senderSubjectId) {
+        moved.set(turn.senderSubjectId, row.senderSubjectId)
+      }
       if (turn.groupSubjectId && row.groupSubjectId) {
         moved.set(turn.groupSubjectId, row.groupSubjectId)
       }
@@ -157,6 +184,7 @@ export async function extractBatch(
       spaceId: target.spaceId,
       appId: target.appId,
       scope: now[0]?.scope ?? target.scope,
+      conversationId,
       subjectIds: [...new Set(subjectIds.map((id) => moved.get(id) ?? id))],
       turns: turns.length,
       skippedTurns: all.length - turns.length,
@@ -167,18 +195,22 @@ export async function extractBatch(
     eq(conversationTurns.appId, target.appId),
     inArray(conversationTurns.id, [...before.keys()]),
   )
+  // 抽取记录挂在这一批现在所在的会话上：合并之后跟着换过去。只找已有的，不建（写失败、联系人已经合并掉时也记得下）
+  const conversationNow = (tx: Tx, now: Place[]) =>
+    findConversation(tx, target.appId, conversationOfTurn(now[0] ?? last))
   const record = async (tx: Tx, fields: RunFields) => {
     const now = await tx.select(placeColumns).from(conversationTurns).where(batch)
-    await tx.insert(extractionRuns).values(runOf(fields, now))
+    await tx.insert(extractionRuns).values(runOf(fields, now, await conversationNow(tx, now)))
   }
   // 记一条抽取记录，并删掉这一批读到的那几轮：抽取期间合并移进这个批次的对话还没抽取，留着
   const close = async (tx: Tx, fields: RunFields) => {
     const now = await tx.delete(conversationTurns).where(batch).returning(placeColumns)
-    await tx.insert(extractionRuns).values(runOf(fields, now))
+    await tx.insert(extractionRuns).values(runOf(fields, now, await conversationNow(tx, now)))
   }
   // 写之前锁住这一批涉及的对象、确认都还在：抽取期间被合并掉的对象已经删了，写下的东西会挂在它们上面。
   // 和合并一样先按 id 的顺序锁对象，两边不会互相等成死锁；锁住之后合并要等这一批写完
   const stillHere = async (tx: Tx) => {
+    if (!subjectIds.length) return
     const rows = await tx
       .select({ id: subjectTable.id })
       .from(subjectTable)
@@ -192,13 +224,16 @@ export async function extractBatch(
     await withSpace(db, target.spaceId, (tx) => close(tx, { error: NO_USABLE_KEY }))
     return
   }
-  // 本月的 token 预算用完了就只要会话摘要，不再抽取事实，下个月恢复；连摘要也写不了时不请求模型
+  // 本月的 token 预算用完了就只要会话摘要，不再抽取事实，下个月恢复；连摘要也写不了时不请求模型。
+  // 不带会话上下文的一批本来就只要摘要，用量同样计入月度预算
   const budget = await extractionUsage(db, target.spaceId)
-  const summaryOnly = budget.usedTokens >= budget.monthlyTokens
+  // 抽取记录里的 summaryOnly 只说预算用完了（界面据此提示）；不带会话上下文的一批照常只要摘要，不算降级
+  const overBudget = budget.usedTokens >= budget.monthlyTokens
+  const summaryOnly = noContext || overBudget
   if (summaryOnly && !layers.episode) {
     await withSpace(db, target.spaceId, (tx) =>
       close(tx, {
-        summaryOnly,
+        summaryOnly: overBudget,
         error: BUDGET_NO_SUMMARY,
       }),
     )
@@ -247,7 +282,8 @@ export async function extractBatch(
   }
   const handleOf = new Map(subjects.map((s) => [s.id, s.handle]))
   const transcript = turns.map((t) => ({
-    speaker: handleOf.get(t.senderSubjectId!)!,
+    // 不带会话上下文的是所属成员和自己的 Agent 在说话
+    speaker: noContext ? '本人' : handleOf.get(t.senderSubjectId!)!,
     speakerName: t.senderName,
     user: t.userText,
     reply: t.replyText,
@@ -357,6 +393,7 @@ export async function extractBatch(
       layer: 'episode',
       content: summary,
       expiresAt: new Date(Date.now() + EPISODE_TTL_DAYS * 86_400_000),
+      ownerAccountId: owner,
     })
   }
 
@@ -368,6 +405,7 @@ export async function extractBatch(
     masterKey,
     actor: { keyId: writer.key.keyId },
   })
+  // 写下的事实与摘要挂在这一批的会话上：确认联系人都还在之后找会话，没有就建
   try {
     await service.writeExtraction(
       writes,
@@ -382,11 +420,14 @@ export async function extractBatch(
           unchanged: counts.unchanged,
           dropped: counts.dropped + count('subject', 'skipped'),
           summarized: count('episode', 'added') > 0,
-          summaryOnly,
+          summaryOnly: overBudget,
           limited: counts.limited,
         })
       },
-      stillHere,
+      async (tx) => {
+        await stillHere(tx)
+        return ensureConversation(tx, target.spaceId, target.appId, conversationOfTurn(last))
+      },
     )
   } catch (err) {
     if (err instanceof BatchMoved) {
