@@ -213,7 +213,7 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
     expect(await conversationRows()).toHaveLength(3)
   })
 
-  it('最近活动早于一分钟以前才更新：一分钟之内再来的生命周期事件不写会话这一行', async () => {
+  it('最近活动早于一分钟以前才更新：一分钟之内再来的生命周期事件不写会话这一行；最近活动在将来时照样更新', async () => {
     const row = async () => {
       const [r] = await inSpace((tx) =>
         tx.execute<{ xmin: string; at: string }>(
@@ -237,6 +237,16 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
     const touched = await row()
     expect(touched.xmin).not.toBe(stale.xmin)
     expect(Date.parse(touched.at) - Date.parse(stale.at)).toBeGreaterThan(60_000)
+
+    // 最近活动在将来（时钟偏差、合并时带过来的时间）：下一次事件把它拉回现在，不会一直停着
+    await inSpace((tx) =>
+      tx.update(conversations).set({ lastActiveAt: sql`now() + interval '1 hour'` }),
+    )
+    const ahead = await row()
+    await event({ event: 'prompt.submit', prompt: '又来了' }, ccKey.key)
+    const pulled = await row()
+    expect(pulled.xmin).not.toBe(ahead.xmin)
+    expect(Date.parse(pulled.at)).toBeLessThan(Date.parse(ahead.at))
   })
 
   it('写会话出错时只记日志，生命周期事件照常处理', async () => {

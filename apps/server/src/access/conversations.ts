@@ -311,7 +311,8 @@ const refMatch = (appId: string, ref: ConversationRef) =>
 
 // 生命周期事件来时建立会话，已有的更新最近活动。时间都用数据库的 now()：测试台按 created_at = now()
 // 认这个事务写下的行，并发的两次请求也只建出一个（唯一索引上的 on conflict）。
-// 每轮都有好几个生命周期事件：最近活动早于一分钟以前才更新，否则不写这一行（列表的先后最多差一分钟）
+// 每轮都有好几个生命周期事件：最近活动早于一分钟以前才更新，否则不写这一行（列表的先后最多差一分钟）。
+// 最近活动在将来（时钟偏差、合并联系人时带过来的时间）也更新，否则它一直停在那里
 export async function touchConversation(
   tx: Tx,
   spaceId: string,
@@ -324,7 +325,7 @@ export async function touchConversation(
     .onConflictDoUpdate({
       target: refTarget(ref),
       set: { lastActiveAt: sql`now()` },
-      setWhere: sql`${conversations.lastActiveAt} < now() - interval '1 minute'`,
+      setWhere: sql`${conversations.lastActiveAt} < now() - interval '1 minute' or ${conversations.lastActiveAt} > now()`,
     })
 }
 
