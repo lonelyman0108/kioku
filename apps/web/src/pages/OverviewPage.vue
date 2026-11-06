@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { useQuery } from '@tanstack/vue-query'
-import { computed } from 'vue'
+import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
 import { api } from '../api/endpoints'
@@ -30,7 +30,19 @@ const overview = useQuery({
 const data = computed(() => overview.data.value)
 
 const viewport = useViewport()
-const size = computed(() => columnSize(viewport.value))
+// 地层柱所在那一栏的实际宽度：窄屏、中等宽度的两栏里都可能比视口窄得多
+const strataBox = ref<HTMLElement | null>(null)
+const strataWidth = ref<number | null>(null)
+let strataObserver: ResizeObserver | null = null
+onMounted(() => {
+  if (!strataBox.value || typeof ResizeObserver === 'undefined') return
+  strataObserver = new ResizeObserver(([entry]) => {
+    if (entry) strataWidth.value = entry.contentRect.width
+  })
+  strataObserver.observe(strataBox.value)
+})
+onBeforeUnmount(() => strataObserver?.disconnect())
+const size = computed(() => columnSize(viewport.value, strataWidth.value ?? viewport.value.width))
 
 // 归属 × 敏感级的条数：记忆加上来自对话的两类
 const counts = computed(() =>
@@ -124,7 +136,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             <Hint>统计范围为当前账号有权查看的内容，不含从对话中记下的事实与会话摘要。</Hint>
           </p>
         </header>
-        <section>
+        <section ref="strataBox">
           <SectionHeading title="记忆分布">
             <template #hint>
               <Hint>
