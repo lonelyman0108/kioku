@@ -161,6 +161,10 @@ describe('保留的逻辑', () => {
     expect(script).toContain('useConsoleSearch(')
     expect(template).toContain('<UDashboardSearch')
     expect(template).toContain('<UDashboardSearchButton')
+    // 空状态不用组件库的「没有匹配的数据」：还在搜记忆时说搜索中
+    expect(template).toContain(
+      `<template #empty>{{ searching ? '搜索中' : '暂无匹配' }}</template>`,
+    )
   })
 
   it('品牌区只有 KiokuMark，外壳不写死品牌字样', () => {

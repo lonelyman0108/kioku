@@ -404,12 +404,15 @@ async function logout() {
       </div>
     </header>
 
+    <!-- 组件库默认的空状态是「没有匹配的数据」，记忆还在搜的时候也这么说：搜索中另说，搜完再说暂无匹配 -->
     <UDashboardSearch
       v-model:search-term="searchTerm"
       :groups="searchGroups"
       :loading="searching"
       placeholder="搜索记忆或跳转页面"
-    />
+    >
+      <template #empty>{{ searching ? '搜索中' : '暂无匹配' }}</template>
+    </UDashboardSearch>
 
     <main class="flex min-h-0 flex-1">
       <!-- 地址里的空间不是自己的（被移出了、或打开了旧链接）：说明情况，不展示别的空间的内容和操作 -->
