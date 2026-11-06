@@ -3,7 +3,7 @@ import { z } from 'zod'
 import { SubjectKind } from './memory'
 import { OriginScope } from './subjects'
 
-// 待审队列：不可信来源（群聊、陌生人私聊）写进对象层与情节层、现在还有效的记忆。
+// 待审队列：不可信来源（群聊、陌生人私聊）写下的联系人事实与会话摘要中，现在还有效的。
 // 确认之后来源改成主人；删除和删记忆一样，留着历史
 
 export const REVIEW_LAYERS = ['subject', 'episode'] as const
@@ -13,10 +13,10 @@ export type ReviewLayer = z.infer<typeof ReviewLayer>
 export const ReviewItem = z.object({
   id: z.uuid(),
   layer: ReviewLayer,
-  // Key 在群聊里写的策展记忆有 URI，从对话里抽取的没有
+  // 来自对话的记忆没有坐标，恒为 null
   uri: z.string().nullable(),
   content: z.string(),
-  // 对象层的记忆挂在哪个对象上；情节层的为 null
+  // 联系人的事实挂在哪个联系人上；会话摘要为 null
   subject: z.object({ id: z.uuid(), kind: SubjectKind, displayName: z.string() }).nullable(),
   scope: OriginScope,
   // 处理时带回来：看过之后被改过的不处理，免得确认了没看过的内容

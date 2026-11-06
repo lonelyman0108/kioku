@@ -57,7 +57,7 @@ export const CaptureName = z
 export const BenchCapture = z.record(CaptureName, z.string().min(1).max(200))
 export type BenchCapture = z.infer<typeof BenchCapture>
 
-// requires：这一步要的层与最高敏感级，运行前按 whoami 判断，不满足的步骤记「跳过」，不算失败
+// requires：这一步要的归属与最高敏感级，运行前按 whoami 判断，不满足的步骤记「跳过」，不算失败
 export const BenchRequires = z.strictObject({
   readLayers: z.array(Layer).optional(),
   writeLayers: z.array(Layer).optional(),
@@ -191,7 +191,7 @@ export const BenchChanges = z.object({
   ),
   // 让出了多少条看不到的过期记录（别的成员的），不给任何字段
   hiddenReleased: z.number().int(),
-  // 别的看不到的改动（Key 能写却读不到的层）
+  // 别的看不到的改动（Key 能写却读不到的归属）
   hiddenOther: z.number().int(),
   credentials: z.array(
     z.object({

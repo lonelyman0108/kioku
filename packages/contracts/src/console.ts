@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { Layer, PlainLayer, Provenance, Sensitivity } from './memory'
+import { Layer, Provenance, Sensitivity } from './memory'
 import { RecallCandidate } from './recall'
 import { SubjectBinding } from './subjects'
 
@@ -160,7 +160,7 @@ export const HistoryEvent = z.object({
   via: z.string().nullable(),
   before: MemorySnapshot.nullable(),
   after: MemorySnapshot.nullable(),
-  // 这次改动之后，这条记忆离开了你的可见范围（例如被改进了别的成员的私人层，或改成了 secret）：
+  // 这次改动之后，这条记忆离开了你的可见范围（例如被移进了别的成员的本人，或改成了 secret）：
   // 只给改前的版本，after 为 null，也不能拿来恢复
   left: z.boolean(),
 })
@@ -345,7 +345,7 @@ export type OverviewBackup = z.infer<typeof OverviewBackup>
 export const InboxCounts = z.object({
   // 等查看者本人确认的账号绑定
   bindings: z.number().int(),
-  // 待确认内容：不可信来源写进对象层与情节层的记忆（待审队列）
+  // 待确认内容：不可信来源写下的联系人事实与会话摘要（待审队列）
   review: z.number().int(),
   // Dream 的建议：还没处理、还作数的
   dreamSuggestions: z.number().int(),
@@ -356,10 +356,10 @@ export const InboxCounts = z.object({
 export type InboxCounts = z.infer<typeof InboxCounts>
 
 export const SpaceOverview = z.object({
-  // 成员读得到的策展记忆，按层与敏感级分组
+  // 成员读得到的记下的记忆（通用、人格、应用、本人），按归属与敏感级分组
   counts: z.array(LayerCount),
   total: z.number().int(),
-  // 成员读得到、现在有效的来自对话的记忆（对象层的事实、情节层的会话摘要），同样分组；不算在 counts 与 total 里
+  // 成员读得到、现在有效的来自对话的记忆（联系人的事实、会话摘要），同样分组；不算在 counts 与 total 里
   extractedCounts: z.array(LayerCount),
   // 要补 disclosure 的记忆数，和列表的 missingDisclosure 筛选同一个条件
   missingDisclosure: z.number().int(),
@@ -380,12 +380,3 @@ export const SpaceOverview = z.object({
   inbox: InboxCounts,
 })
 export type SpaceOverview = z.infer<typeof SpaceOverview>
-
-// 空间的 domain 默认层：管理界面新建记忆时按 domain 带出层。只是默认值，通过 Key 写入不受影响
-export const DomainLayers = z.object({
-  defaults: z
-    .record(z.string().regex(/^[a-z][a-z0-9_]{0,31}$/, '分区格式错误'), PlainLayer)
-    .refine((r) => Object.keys(r).length <= 64, '最多配置 64 个分区')
-    .refine((r) => !('persona' in r) && !('app' in r), 'persona 与 app 的层由 URI 决定，无需配置'),
-})
-export type DomainLayers = z.infer<typeof DomainLayers>

@@ -73,7 +73,7 @@ export const SupersededFact = SubjectFact.extend({
 })
 export type SupersededFact = z.infer<typeof SupersededFact>
 
-// 情节层里的会话摘要，到期自动失效
+// 会话摘要，到期自动失效
 export const ConversationSummary = z.object({
   id: z.uuid(),
   content: z.string(),

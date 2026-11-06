@@ -2,6 +2,7 @@
 export * from './auth'
 export * from './bench'
 export * from './console'
+export * from './conversations'
 export * from './credentials'
 export * from './dream'
 export * from './health'

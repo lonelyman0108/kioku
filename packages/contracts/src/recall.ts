@@ -84,7 +84,7 @@ export const RecallRequest = z
   .meta({ id: 'RecallRequest' })
 export type RecallRequest = z.infer<typeof RecallRequest>
 
-// 对象直连：当前发言人与本群的对象层里抽取的事实，不看查询，直接带正文（抽取的事实没有 URI）。
+// 联系人直连：当前发言人与本群的联系人身上抽取的事实，不看查询，直接带正文（抽取的事实没有坐标）。
 // 只在带了会话上下文时有；事实来自对话，可能是别人写进来的，只能当参考资料
 export const SubjectFacts = z
   .object({
@@ -156,23 +156,25 @@ export const PromptSubmitEvent = z
   })
   .meta({ id: 'PromptSubmitEvent' })
 
-// 一轮对话结束：用户说的话与 bot 的回复进会话缓冲，攒批之后由后台任务抽取。只缓冲私聊、群聊与频道，
-// 群里要带上这一轮的发言人（事实要记到人身上）
+// 一轮对话结束：用户说的话与回复进会话缓冲，攒批之后由后台任务抽取。缓冲私聊、群聊与频道，群里要带上这一轮的发言人
+// （事实要记到人身上）；不带会话上下文时（例如本机的 Claude Code）按应用与所属成员缓冲，只用来写会话摘要。
+// 定时任务与子 Agent 的对话不缓冲
 export const TurnEndEvent = z
   .object({
     event: z.literal('turn.end'),
-    // 缓冲按应用与会话分，插件用宿主的会话标识（例如 AstrBot 的 unified_msg_origin）
+    // 插件用宿主的会话标识（例如 AstrBot 的 unified_msg_origin），只做记录：缓冲按应用与会话上下文分
     sessionId: z.string().min(1).max(200),
-    context: SessionContextInput,
+    context: SessionContextInput.optional(),
     user: z.string().min(1).max(20_000),
     reply: z.string().max(20_000),
   })
   .superRefine((e, ctx) => {
+    if (!e.context) return
     if (e.context.chatType === 'cron' || e.context.chatType === 'subagent') {
       ctx.addIssue({
         code: 'custom',
         path: ['context', 'chatType'],
-        message: '只缓冲私聊、群聊与频道的对话',
+        message: '只缓冲私聊、群聊、频道与不带会话上下文的对话',
       })
     }
     if ((e.context.chatType === 'group' || e.context.chatType === 'channel') && !e.context.sender) {
@@ -211,9 +213,9 @@ export const LifecycleResponse = z
   .meta({ id: 'LifecycleResponse' })
 export type LifecycleResponse = z.infer<typeof LifecycleResponse>
 
-// 一条记忆这次读不到的原因：deleted、expired 已删除或失效；layer 层不在可读范围；sensitivity 超出最高敏感级；
-// secret 只能按 URI 显式读取；origin 来源作用域不在范围；owner 别的成员的画像或私人层；persona 不在人格继承链上；
-// app 别的应用的应用层；override 被继承链上更近的人格同一相对路径的节点覆盖
+// 一条记忆这次读不到的原因：deleted、expired 已删除或失效；layer 归属不在可读范围；sensitivity 超出最高敏感级；
+// secret 只能按坐标显式读取；origin 来源作用域不在范围；owner 别的成员的本人记忆或会话摘要；persona 不在人格继承链上；
+// app 别的应用的记忆；override 被继承链上更近的人格同一相对路径的节点覆盖
 export const READ_DENIALS = [
   'deleted',
   'expired',
@@ -346,7 +348,7 @@ export const RecallEventView = z.object({
   // 打过码的提示语前 200 字；应用关掉了记录提示语时为 null
   query: z.string().nullable(),
   createdAt: z.string(),
-  // 命中的记忆；现在看不到了的（例如被移进别的成员的私人层）uri 为 null
+  // 命中的记忆；现在看不到了的（例如被移进别的成员的本人）uri 为 null
   hits: z.array(
     z.object({
       uri: z.string().nullable(),

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { MemoryUri } from './memories'
-import { Layer, PlainLayer, Provenance, Sensitivity, SubjectKind } from './memory'
+import { Layer, Provenance, Sensitivity, SubjectKind } from './memory'
 import { OriginScope } from './subjects'
 
 // Dream：后台按空间整理记忆，只提建议。建议进待审，成员确认后才按建议执行，Dream 自己不写记忆。
@@ -17,15 +17,16 @@ export const DREAM_VERDICTS = ['confirm', 'delete'] as const
 export const DreamVerdict = z.enum(DREAM_VERDICTS)
 export type DreamVerdict = z.infer<typeof DreamVerdict>
 
-// 整理的范围：一次模型调用、一条建议里只有同一个范围的记忆。共享的层按层分开（全局、各人格、各应用），
-// 每个成员的画像层与私人层各自一个范围（只有本人看得到），对象层与情节层按来源作用域分（同一个群、同一个人的私聊）
-export const DREAM_SCOPE_KINDS = ['base', 'persona', 'app', 'owner', 'private', 'talk'] as const
+// 整理的范围：一次模型调用、一条建议里只有同一个范围的记忆。共享的归属按类分开（通用、各人格、各应用），
+// 每个成员的本人（连同他不带会话上下文的会话摘要）一个范围（只有本人看得到），联系人的事实与群聊、私聊的会话摘要
+// 按来源作用域分（同一个群、同一个人的私聊）
+export const DREAM_SCOPE_KINDS = ['core', 'persona', 'app', 'user', 'talk'] as const
 export const DreamScope = z.object({
   kind: z.enum(DREAM_SCOPE_KINDS),
   // 人格与应用：id 与现在的名字（删掉了的名字为 null）；别的范围为 null
   id: z.uuid().nullable(),
   name: z.string().nullable(),
-  // 对象与情节：这些内容是在哪里的对话里记下的
+  // 联系人的事实与会话摘要：这些内容是在哪里的对话里记下的
   origin: OriginScope.nullable(),
 })
 export type DreamScope = z.infer<typeof DreamScope>
@@ -39,7 +40,7 @@ export const DreamSuggestionMemory = z.object({
   sensitivity: Sensitivity,
   provenance: Provenance,
   content: z.string(),
-  // 对象层的事实挂在哪个对象上
+  // 联系人的事实挂在哪个联系人上
   subject: z.object({ id: z.uuid(), kind: SubjectKind, displayName: z.string() }).nullable(),
   updatedAt: z.iso.datetime(),
 })
@@ -52,11 +53,11 @@ export const DreamSuggestion = z.object({
   // 模型给的理由
   reason: z.string(),
   memories: z.array(DreamSuggestionMemory),
-  // 合并：保留哪一条（URI 与层不变，其余几条删掉）
+  // 合并：保留哪一条（坐标与归属不变，其余几条删掉）
   keepId: z.uuid().nullable(),
   // 合并后的正文；提炼的草稿正文
   content: z.string().nullable(),
-  // 提炼：草稿的 URI 与 disclosure；层不填时是执行的成员自己的私人层
+  // 提炼：草稿的坐标与 disclosure，坐标的开头决定归属
   uri: z.string().nullable(),
   disclosure: z.string().nullable(),
   // 审核：建议确认还是删除
@@ -81,12 +82,10 @@ export const DreamSuggestionList = z.object({
 })
 export type DreamSuggestionList = z.infer<typeof DreamSuggestionList>
 
-// 执行时可以先改：合并只能改正文；提炼能改草稿的 URI、层、正文与 disclosure。
-// persona:// 与 app:// 下的层由 URI 决定，不用给层
+// 执行时可以先改：合并只能改正文；提炼能改草稿的坐标、正文与 disclosure，归属随坐标的开头
 export const ApplyDreamSuggestion = z.object({
   content: z.string().trim().min(1).max(20_000).optional(),
   uri: MemoryUri.optional(),
-  layer: PlainLayer.optional(),
   disclosure: z.string().trim().max(500).nullable().optional(),
 })
 export type ApplyDreamSuggestion = z.infer<typeof ApplyDreamSuggestion>
@@ -103,14 +102,14 @@ export const DreamTrigger = z.enum(DREAM_TRIGGERS)
 export type DreamTrigger = z.infer<typeof DreamTrigger>
 
 // 没整理的原因：没配抽取模型、本月的抽取预算用完了、上次以来没有新增或改动的内容；
-// opted-out：请求模型期间这一组的主人关掉了 Dream 整理画像层与私人层，这一次的结果没有存（只有本人看得到）
+// opted-out：请求模型期间这一组的所有者关掉了 Dream 整理本人的记忆，这一次的结果没有存（只有本人看得到）
 export const DREAM_SKIP_REASONS = ['no-model', 'budget', 'idle', 'opted-out'] as const
 export const DreamSkipReason = z.enum(DREAM_SKIP_REASONS)
 export type DreamSkipReason = z.infer<typeof DreamSkipReason>
 
 // 一次整理里的一项：整理了一个范围（预算用完、主人关掉了时带上没整理的原因）；scope 为 null 的是共享部分的汇总，
 // 每次一条：整理过了（more 表示还有没看完的）、没整理（带上原因，整次没走到范围时也是这一条）或者出错了。
-// 共享的范围先整理、汇总在它们之后写下，各人的画像层与私人层在汇总之后
+// 共享的范围先整理、汇总在它们之后写下，各人的本人记忆在汇总之后
 export const DreamRunEntry = z.object({
   scope: DreamScope.nullable(),
   model: z.string().nullable(),
@@ -134,7 +133,7 @@ export const DreamRunInfo = z.object({
   runId: z.uuid(),
   trigger: DreamTrigger,
   at: z.iso.datetime(),
-  // 只列查看者看得到的范围：别的成员的画像层与私人层不列
+  // 只列查看者看得到的范围：别的成员的本人记忆不列
   entries: z.array(DreamRunEntry),
 })
 export type DreamRunInfo = z.infer<typeof DreamRunInfo>
@@ -142,8 +141,8 @@ export type DreamRunInfo = z.infer<typeof DreamRunInfo>
 export const DreamRunList = z.object({ runs: z.array(DreamRunInfo) })
 export type DreamRunList = z.infer<typeof DreamRunList>
 
-// 成员自己在一个空间里的 Dream 设置，只有本人能看、能改。includePrivate：让不让 Dream 整理自己的画像层与私人层
-// （secret 本来就不读），默认整理。开着时这两层会发给实例配置的抽取模型；关掉之后只整理共享的内容，
+// 成员自己在一个空间里的 Dream 设置，只有本人能看、能改。includePrivate：让不让 Dream 整理自己的本人记忆
+// （连同不带会话上下文的会话摘要；secret 本来就不读），默认整理。开着时这些内容会发给实例配置的抽取模型；关掉之后只整理共享的内容，
 // 已经生成的建议留着，再打开时接着整理关掉期间新增与改动的
 export const DreamMemberSettings = z.object({ includePrivate: z.boolean() })
 export type DreamMemberSettings = z.infer<typeof DreamMemberSettings>
@@ -154,8 +153,8 @@ export const DreamQueued = z.object({ runId: z.uuid() })
 export type DreamQueued = z.infer<typeof DreamQueued>
 
 // 一次整理的状态：排着、正在整理、做完了。做完了的结果：整理过了、没整理（原因见 reason）、出错了。
-// 共享部分的汇总写下就算做完，结果按汇总与查看者自己的画像层、私人层算：别的成员的整理了没有、出没出错、
-// 花了多久都不影响。查看者自己的画像层与私人层在汇总之后整理，结果可能晚一点才出现在运行记录里
+// 共享部分的汇总写下就算做完，结果按汇总与查看者自己的本人记忆算：别的成员的整理了没有、出没出错、
+// 花了多久都不影响。查看者自己的本人记忆在汇总之后整理，结果可能晚一点才出现在运行记录里
 export const DreamRunStatus = z.object({
   state: z.enum(['queued', 'running', 'finished']),
   outcome: z.enum(['done', 'skipped', 'failed']).nullable(),
