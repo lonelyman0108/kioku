@@ -16,7 +16,6 @@ import {
   DEFAULT_SYSTEM_PROMPT,
   droppedNote,
   sentToolCalls,
-  turnEndPolicy,
   usageSummary,
   type AgentConsent,
 } from '../benchAgent'
@@ -35,7 +34,6 @@ import Hint from './Hint.vue'
 // 对话不存服务端、不进浏览器存储，状态在 useBench 里，换应用、Key、模式时清掉
 const {
   spaceId,
-  app,
   appId,
   keyId,
   real,
@@ -52,7 +50,7 @@ const {
   consentTo,
 } = useBench()
 
-// 用不用得了、默认模型、接口的地址、这个运行时走哪种循环
+// 用不用得了、默认模型、接口的地址、这个运行时走哪种循环、回复后发不发 turn.end
 const info = useQuery({
   queryKey: computed(() => ['bench-agent', spaceId.value, appId.value, keyId.value]),
   queryFn: () => api.benchAgent(spaceId.value, appId.value!, keyId.value!),
@@ -74,10 +72,7 @@ const retryInfo = computed(() => [
   },
 ])
 const loop = computed(() => info.data.value?.loop ?? null)
-// 回复之后发不发 turn.end：钩子运行时里只有 Claude Code 发
-const turnEnd = computed(() =>
-  loop.value ? turnEndPolicy(loop.value, app.value?.runtimeFamily) : 'none',
-)
+const turnEnd = computed(() => info.data.value?.turnEnd === true)
 const available = computed(() => info.data.value?.available === true)
 const unavailable = computed(() => {
   const reason = info.data.value?.reason
@@ -156,6 +151,7 @@ async function send() {
   input.value = ''
   const finished = await sendToAgent(text, {
     loop: loop.value,
+    turnEnd: turnEnd.value,
     system: system.value,
     model: model.value,
   })

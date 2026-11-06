@@ -48,14 +48,15 @@ const AGENT_SESSION_ID = 'bench-agent'
 // 生命周期事件的文字上限和契约相同。插件同样先截：超长的话整个事件被拒，这一轮什么都拿不到
 const LIFECYCLE_TEXT_MAX = 20_000
 
+// 侧栏的一句话与提示层里完整的循环。回复后发不发 turn.end 不看循环，按服务端给的 turnEnd（BenchAgentInfo），
+// 见 agentLoopNote 与 agentLoopDetail
 export const AGENT_LOOP_NOTES: Record<BenchAgentLoop, string> = {
   hook: '钩子运行时：每条消息先发 prompt.submit，召回块留在历史。',
   approximate: '此运行时未单独模拟，按钩子运行时近似，可能与真实行为不同。',
-  chat: '群聊机器人：不提供工具，召回块不留在历史，回复后发 turn.end。',
+  chat: '群聊机器人：不提供工具，召回块不留在历史。',
   tools: '仅接入 MCP：不发生命周期事件，只提供工具。',
 }
 
-// 完整的循环，放在提示层。回复之后发不发 turn.end 由运行时决定，见 turnEndPolicy 与 agentLoopDetail
 export const AGENT_LOOP_DETAILS: Record<BenchAgentLoop, string> = {
   hook: 'session.start 的结果进入系统提示。每条消息先发 prompt.submit，召回块附在此消息上并留在历史。提供工具。',
   approximate: 'session.start 的结果进入系统提示。每条消息先发 prompt.submit。提供工具。',
@@ -63,32 +64,18 @@ export const AGENT_LOOP_DETAILS: Record<BenchAgentLoop, string> = {
   tools: '不发 session.start 与 prompt.submit，只提供工具，kioku_boot 由模型自行调用。',
 }
 
-// 回复之后发不发 turn.end，和真实的插件一致：群聊机器人（chat）带着会话上下文发，不带时不发；
-// Claude Code 的插件（钩子运行时里的 claudecode）每轮回复之后也发，本机上一般不带会话上下文，
-// 这时按应用与所属成员缓冲、只写会话摘要。别的运行时不发
-export type TurnEndPolicy = 'chat' | 'agent' | 'none'
-export function turnEndPolicy(
-  loop: BenchAgentLoop,
-  runtimeFamily: string | null | undefined,
-): TurnEndPolicy {
-  if (loop === 'chat') return 'chat'
-  if (loop === 'hook' && runtimeFamily === 'claudecode') return 'agent'
-  return 'none'
+export const agentLoopNote = (loop: BenchAgentLoop, turnEnd: boolean) =>
+  turnEnd ? `${AGENT_LOOP_NOTES[loop]}回复后发 turn.end。` : AGENT_LOOP_NOTES[loop]
+
+// 群聊机器人的对话总有会话上下文，页面上选了「不带」时不发；钩子运行时（Claude Code 的插件）不带也发
+export function agentLoopDetail(loop: BenchAgentLoop, turnEnd: boolean): string {
+  const after = !turnEnd
+    ? '回复后不发 turn.end。'
+    : loop === 'chat'
+      ? '回复后发 turn.end（需带私聊、群聊或频道的会话上下文，否则不发）。'
+      : '回复后发 turn.end；不带会话上下文时按应用与所属成员缓冲，只写会话摘要。'
+  return `${AGENT_LOOP_DETAILS[loop]}${after}`
 }
-
-const TURN_END_DETAILS: Record<TurnEndPolicy, string> = {
-  chat: '回复后发 turn.end（需带私聊、群聊或频道的会话上下文，否则不发）。',
-  agent:
-    '回复后发 turn.end，与 Claude Code 的插件相同；不带会话上下文时按应用与所属成员缓冲，只写会话摘要。',
-  none: '回复后不发 turn.end。',
-}
-
-// 侧栏的一句话：钩子运行时里的 Claude Code 回复后也发 turn.end，要说出来
-export const agentLoopNote = (loop: BenchAgentLoop, policy: TurnEndPolicy) =>
-  policy === 'agent' ? `${AGENT_LOOP_NOTES[loop]}回复后发 turn.end。` : AGENT_LOOP_NOTES[loop]
-
-export const agentLoopDetail = (loop: BenchAgentLoop, policy: TurnEndPolicy) =>
-  `${AGENT_LOOP_DETAILS[loop]}${TURN_END_DETAILS[policy]}`
 
 export const AGENT_UNAVAILABLE_NOTES: Record<
   BenchAgentUnavailable,
@@ -304,8 +291,8 @@ export interface AgentIO {
 
 export interface AgentSendOptions {
   loop: BenchAgentLoop
-  // 应用的运行时：钩子运行时里只有 Claude Code 回复后发 turn.end（见 turnEndPolicy）
-  runtimeFamily: string | null
+  // 回复后发不发 turn.end：服务端按运行时给（BenchAgentInfo.turnEnd），和真实接入一致
+  turnEnd: boolean
   mode: BenchMode
   // 系统提示的基础文字
   system: string
@@ -468,11 +455,11 @@ export function turnEndBody(
 // 页面上的会话上下文发不了 turn.end 的原因，能发时是 null。发不了就不发，轨迹里说明：规则按契约算，不另写一份。
 // 不带上下文的 turn.end 契约收（本机 Agent 只写会话摘要），Claude Code 就这样发；群聊机器人的对话总有上下文，不带时照旧不发
 export function turnEndRefusal(
-  policy: TurnEndPolicy,
+  loop: BenchAgentLoop,
   context: SessionContextInput | undefined,
   body: unknown,
 ): string | null {
-  if (policy === 'chat' && !context) {
+  if (loop === 'chat' && !context) {
     return '未发送 turn.end：需带私聊、群聊或频道的上下文，页面上的会话上下文为「不带」。'
   }
   const parsed = TurnEndEvent.safeParse(body)
@@ -520,9 +507,8 @@ function emptyReplyText(finishReason: string | null): string {
 export async function sendAgentMessage(
   start: AgentConversation,
   text: string,
-  { loop, runtimeFamily, mode, system, model, context, signal, io, onChange }: AgentSendOptions,
+  { loop, turnEnd, mode, system, model, context, signal, io, onChange }: AgentSendOptions,
 ): Promise<AgentConversation> {
-  const turnEnd = turnEndPolicy(loop, runtimeFamily)
   let state: AgentConversation = {
     ...start,
     exchanges: [
@@ -760,14 +746,14 @@ export async function sendAgentMessage(
     )
   }
 
-  if (turnEnd !== 'none') {
+  if (turnEnd) {
     const body = turnEndBody(context, text, reply)
     // 空回复不发：真实模式下空的一轮会进对话缓冲、可能触发抽取；这条消息回到发之前的话，文字放回输入框，再发一次就进两次
     const refusal = emptyNotice
       ? '模型未回复，未发送 turn.end。'
       : signal.aborted
         ? '已停止，未发送 turn.end。'
-        : (turnEndRefusal(turnEnd, context, body) ?? runBlocker(state.session, mode))
+        : (turnEndRefusal(loop, context, body) ?? runBlocker(state.session, mode))
     if (refusal) {
       updateExchange({ turnEndNote: refusal })
     } else {

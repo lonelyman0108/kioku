@@ -156,6 +156,7 @@ describe('API 客户端', () => {
       endpoint: null,
       loop: 'hook',
       tools: true,
+      turnEnd: true,
     }
     const fetchMock = vi.fn(async () => Response.json(info))
     vi.stubGlobal('fetch', fetchMock)

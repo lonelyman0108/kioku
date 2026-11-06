@@ -1191,11 +1191,9 @@ describe('模型对话的页面', () => {
     // 完整的循环在提示层里
     expect(shownIn(note)).toContain('agentLoopDetail(loop, turnEnd)')
     expect(benchAgent).toMatch(/approximate:\s+'[^']*近似/)
-    // 回复后发不发 turn.end 按应用的运行时，和发消息时用的同一个
-    expect(blockOf(view.script, 'const turnEnd = ')).toContain(
-      'turnEndPolicy(loop.value, app.value?.runtimeFamily)',
-    )
-    expect(useBench).toContain('runtimeFamily: target.app.runtimeFamily')
+    // 回复后发不发 turn.end 用服务端给的，说明和发消息用的是同一个
+    expect(blockOf(view.script, 'const turnEnd = ')).toContain('info.data.value?.turnEnd')
+    expect(bodyOf(view.script, 'send')).toContain('turnEnd: turnEnd.value')
   })
 
   it('会话上下文：mcp 不发生命周期事件，不显示', () => {
