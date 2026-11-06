@@ -33,6 +33,11 @@ const options = {
   persona: { slug: 'default', name: '默认人格' },
   secretUris: new Set<string>(),
 }
+// 不导入的原因；只关于一个写入目标的带上那个目标的去重键（节点的 uuid 在这里就是 URI）
+const skipsOf = (plan: ImportPlan) =>
+  plan.skipped.map(({ source, reason, target }) =>
+    target ? { source, reason, importKey: target.importKey } : { source, reason },
+  )
 
 describe('Lore 导入计划', () => {
   it('按 domain 映射到层，core://soul 进人格、core://agent/<runtime> 进应用', () => {
@@ -298,11 +303,16 @@ describe('Lore 导入计划', () => {
       options,
     )
     expect(plan.memories.map((m) => m.source)).toEqual(['projects://router'])
-    expect(plan.skipped).toEqual([
-      { source: 'core://router', reason: expect.stringContaining('core://router 属于基础层') },
+    expect(skipsOf(plan)).toEqual([
+      {
+        source: 'core://router',
+        reason: expect.stringContaining('core://router 属于基础层'),
+        importKey: 'core://router@',
+      },
       {
         source: 'preferences://router',
         reason: expect.stringContaining('preferences://router 属于个人画像层'),
+        importKey: 'preferences://router@',
       },
     ])
   })
@@ -481,8 +491,9 @@ describe('Lore 导入计划', () => {
       const clash = {
         source: 'core://agent/claude-code',
         reason: '和 core://agent/claude_code 映射到同一个 app://claude-code/agent',
+        importKey: 'core://agent/claude-code@claude-code',
       }
-      expect(all.skipped).toEqual([clash])
+      expect(skipsOf(all)).toEqual([clash])
 
       const plan = planImport(snap, [], {
         ...options,
@@ -490,14 +501,14 @@ describe('Lore 导入计划', () => {
       })
       // 第二个节点在计划里没有写入目标，看不到也勾不了，不能在勾掉第一个之后写进去
       expect(plan.memories.map((m) => m.source)).toEqual(['infra://other'])
-      expect(plan.skipped).toEqual([
+      expect(skipsOf(plan)).toEqual([
         { source: 'core://agent/claude_code', reason: '本次选择不导入' },
         clash,
       ])
       expect(plan.errors).toEqual([])
     })
 
-    it('不管勾掉哪些节点，写入的都是不勾时减去勾掉的', () => {
+    it('不管勾掉哪些节点，写入的都是不勾时减去勾掉的；有目标被别的记忆占用时也一样', () => {
       const mine = [
         { slug: 'claude-a', runtimeFamily: 'claudecode', ownerAccountId: ME },
         { slug: 'claude-b', runtimeFamily: 'claudecode', ownerAccountId: ME },
@@ -517,28 +528,46 @@ describe('Lore 导入计划', () => {
       )
       const writes = (plan: ImportPlan) =>
         plan.memories.map((m) => ({ source: m.source, uri: m.request.uri, key: m.importKey }))
-      const base = planImport(snap, mine, options)
-      expect(base.memories).toHaveLength(6)
-      const baseApps = base.apps.flatMap((m) => m.apps.map((a) => a.slug))
+      const draft = planImport(snap, mine, options)
+      expect(draft.memories).toHaveLength(6)
+      // 占用：映射到同一个 URI 的三个节点里占着它的那个，以及写到两个应用的节点的一个目标
+      const occupiedKeys = new Set(
+        draft.memories
+          .filter(
+            (m) =>
+              m.source === 'core://agent/open_claw_x' || m.request.uri === 'app://claude-a/agent',
+          )
+          .map((m) => m.importKey),
+      )
+      expect(occupiedKeys.size).toBe(2)
       const uris = snap.nodes.map((n) => n.uri)
-      for (let mask = 0; mask < 1 << uris.length; mask++) {
-        const excluded = uris.filter((_, i) => mask & (1 << i))
-        const plan = planImport(snap, mine, { ...options, excludeUris: new Set(excluded) })
-        expect(plan.errors).toEqual([])
-        expect(writes(plan)).toEqual(writes(base).filter((w) => !excluded.includes(w.source)))
-        expect(baseApps).toEqual(
-          expect.arrayContaining(plan.apps.flatMap((m) => m.apps.map((a) => a.slug))),
-        )
-        // 要新建的应用都有写入目标
-        const used = plan.memories.map((m) => m.context.targetApp)
-        for (const app of plan.apps.flatMap((m) => m.apps).filter((a) => a.create)) {
-          expect(used).toContain(app.slug)
+      for (const occupied of [new Set<string>(), occupiedKeys]) {
+        const base = planImport(snap, mine, { ...options, occupied })
+        expect(base.memories).toHaveLength(6 - occupied.size)
+        const baseApps = base.apps.flatMap((m) => m.apps.map((a) => a.slug))
+        for (let mask = 0; mask < 1 << uris.length; mask++) {
+          const excluded = uris.filter((_, i) => mask & (1 << i))
+          const plan = planImport(snap, mine, {
+            ...options,
+            excludeUris: new Set(excluded),
+            occupied,
+          })
+          expect(plan.errors).toEqual([])
+          expect(writes(plan)).toEqual(writes(base).filter((w) => !excluded.includes(w.source)))
+          expect(baseApps).toEqual(
+            expect.arrayContaining(plan.apps.flatMap((m) => m.apps.map((a) => a.slug))),
+          )
+          // 要新建的应用都有写入目标
+          const used = plan.memories.map((m) => m.context.targetApp)
+          for (const app of plan.apps.flatMap((m) => m.apps).filter((a) => a.create)) {
+            expect(used).toContain(app.slug)
+          }
         }
+        // 全部勾掉就什么都不写，应用也不建
+        const none = planImport(snap, mine, { ...options, excludeUris: new Set(uris), occupied })
+        expect(none.memories).toEqual([])
+        expect(none.apps).toEqual([])
       }
-      // 全部勾掉就什么都不写，应用也不建
-      const none = planImport(snap, mine, { ...options, excludeUris: new Set(uris) })
-      expect(none.memories).toEqual([])
-      expect(none.apps).toEqual([])
     })
 
     it('对不上任何节点时是错误；同时标了 secret 时以不导入为准', () => {
@@ -550,6 +579,70 @@ describe('Lore 导入计划', () => {
       expect(plan.errors).toEqual([{ kind: 'excludeNotFound', uri: 'infra://nope' }])
       expect(plan.memories).toEqual([])
       expect(plan.skipped.map((s) => s.source)).toEqual(['infra://a'])
+    })
+  })
+
+  describe('目标 URI 已被别的记忆占用', () => {
+    const mine = [
+      { slug: 'claude-a', runtimeFamily: 'claudecode', ownerAccountId: ME },
+      { slug: 'claude-b', runtimeFamily: 'claudecode', ownerAccountId: ME },
+    ]
+    const snap = snapshot(
+      node('core://agent/open_claw'),
+      node('core://agent/open-claw'),
+      node('core://agent/claudecode'),
+      node('infra://a'),
+    )
+    const keysOf = (plan: ImportPlan, ...uris: string[]) =>
+      new Set(plan.memories.filter((m) => uris.includes(m.request.uri)).map((m) => m.importKey))
+
+    it('列为不导入并说明，照样占着这个 URI：后一个节点不顶上来，没有写入目标的新应用不建', () => {
+      const draft = planImport(snap, mine, options)
+      expect(draft.memories.map((m) => m.request.uri)).toEqual([
+        'app://open-claw/agent',
+        'app://claude-a/agent',
+        'app://claude-b/agent',
+        'infra://a',
+      ])
+      const occupied = keysOf(draft, 'app://open-claw/agent', 'app://claude-a/agent')
+      const plan = planImport(snap, mine, { ...options, occupied })
+      // 只少了占用的两个目标，写到两个应用的节点还写另一个
+      expect(plan.memories).toEqual(draft.memories.filter((m) => !occupied.has(m.importKey)))
+      expect(skipsOf(plan)).toEqual([
+        {
+          source: 'core://agent/open_claw',
+          reason: 'app://open-claw/agent 已被其他记忆占用',
+          importKey: 'core://agent/open_claw@open-claw',
+        },
+        {
+          source: 'core://agent/open-claw',
+          reason: '和 core://agent/open_claw 映射到同一个 app://open-claw/agent',
+          importKey: 'core://agent/open-claw@open-claw',
+        },
+        {
+          source: 'core://agent/claudecode',
+          reason: 'app://claude-a/agent 已被其他记忆占用',
+          importKey: 'core://agent/claudecode@claude-a',
+        },
+      ])
+      expect(plan.apps.map((m) => m.runtime)).toEqual(['claudecode'])
+    })
+
+    it('原因不引用正文', () => {
+      const secretBody = node('core://agent', { content: '不该出现在原因里的正文 hunter2' })
+      const draft = planImport(snapshot(secretBody), [], options)
+      const plan = planImport(snapshot(secretBody), [], {
+        ...options,
+        occupied: keysOf(draft, 'core://agent'),
+      })
+      expect(plan.memories).toEqual([])
+      expect(skipsOf(plan)).toEqual([
+        {
+          source: 'core://agent',
+          reason: 'core://agent 已被其他记忆占用',
+          importKey: 'core://agent@',
+        },
+      ])
     })
   })
 

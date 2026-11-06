@@ -1,8 +1,8 @@
 import {
   CONVERT_VALUE_MIN_LENGTH,
   PLAINTEXT_CREDENTIAL,
-  bootEligible,
   findPlaintextCredentials,
+  isBootCandidate,
   type ConsoleMemoryView,
   type MemoryRecallStat,
   type MemoryView,
@@ -28,17 +28,14 @@ export function expiryState(validTo: string | null, now: Date = new Date()): Exp
 // 启动加载的标记说的是够不够格，不是一定加载
 export const BOOT_HINT = '符合启动加载条件；实际是否加载取决于访问密钥的权限、继承覆盖和字数上限'
 
-// 够格进启动加载的节点。和服务端的 BOOT_ELIGIBLE 同一条规则，再加上启动加载用的读权限：机密永远不进。过期了也不算
+// 够格进启动加载的节点：contracts 的 isBootCandidate（和服务端的 BOOT_CANDIDATE 同一条规则），再除去已过期的。
+// 服务端只给现在有效的，过期这一条是给载入之后才到期的记忆。管理界面的列表与详情只有目录里的记忆（有 URI），
+// 视图里没有 form 这一项，按 curated 判断
 export function isBootNode(
   memory: Pick<MemoryView, 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'>,
   now: Date = new Date(),
 ): boolean {
-  return (
-    memory.provenance !== 'untrusted' &&
-    memory.sensitivity !== 'secret' &&
-    bootEligible(memory.layer, memory.priority) &&
-    !isExpired(memory.validTo, now)
-  )
+  return isBootCandidate({ ...memory, form: 'curated' }) && !isExpired(memory.validTo, now)
 }
 
 type DisclosureFields = Pick<
@@ -46,9 +43,10 @@ type DisclosureFields = Pick<
   'disclosure' | 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'
 >
 
-// 没写触发场景时的提示，写了的是 null。概览的「未设触发场景」把启动加载的节点也算在内，这里要对得上，
-// 不然点「去补全」过来看不出要补什么。一次判断给全：tone 决定颜色；文字两种情况不同，分不清颜色时也认得出来：
-// 要补的写「未设触发场景」，启动加载的节点不靠它被想起，写明是启动加载。列表一行放不下长句，用 short。
+// 没写触发场景时的提示，写了的是 null。要补的是 warning，和服务端的 NEEDS_DISCLOSURE 同一条规则：概览的「未设触发场景」
+// 只数这些，点「去补全」过来的列表也只列这些。启动加载的节点不靠触发场景被想起，不算要补的，是 muted。
+// 一次判断给全：tone 决定颜色；文字两种情况不同，分不清颜色时也认得出来：要补的写「未设触发场景」，
+// 启动加载的节点写明是启动加载。列表一行放不下长句，用 short。
 // hint 说补全它有什么用：机密不进召回，启动加载不靠它，只有别的记忆才是召回更准
 export interface MissingDisclosure {
   tone: 'warning' | 'muted'
@@ -103,15 +101,18 @@ export function plaintextValues(memory: PlaintextFields): string[] {
     .filter((value) => value.length >= CONVERT_VALUE_MIN_LENGTH)
 }
 
-// 这次改动动没动统计里的数：层、敏感级、有效与否、有没有写触发场景、是不是疑似明文。
+// 这次改动动没动统计里的数：层、敏感级、有效与否、要不要补触发场景（missingDisclosure 是 warning 的才算，
+// 改优先级也可能进出启动加载）、是不是疑似明文。
 // 窄柱和列表上方的总数靠概览接口算，它要把整个概览算一遍，别的改动不用为它重取
 export function statsChanged(before: ConsoleMemoryView, after: ConsoleMemoryView): boolean {
+  const needsDisclosure = (memory: ConsoleMemoryView) =>
+    missingDisclosure(memory)?.tone === 'warning'
   return (
     before.id !== after.id ||
     before.layer !== after.layer ||
     before.sensitivity !== after.sensitivity ||
     isExpired(before.validTo) !== isExpired(after.validTo) ||
-    !before.disclosure?.trim() !== !after.disclosure?.trim() ||
+    needsDisclosure(before) !== needsDisclosure(after) ||
     looksPlaintext(before) !== looksPlaintext(after)
   )
 }

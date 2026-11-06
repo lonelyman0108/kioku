@@ -37,6 +37,25 @@ export const MEMORY_FORMS = ['curated', 'extracted'] as const
 export const MemoryForm = z.enum(MEMORY_FORMS)
 export type MemoryForm = z.infer<typeof MemoryForm>
 
+// 够格进启动加载的记忆：目录里的（form 为 curated），层与优先级够格（bootEligible），来源受信（未确认来源的不进，
+// 理由见服务端的 recall/boot.ts），不是机密（启动加载照读权限不收机密）。实际加载还看访问密钥的权限、继承覆盖与字数上限。
+// 服务端的 SQL 版是 memory/filter.ts 的 BOOT_CANDIDATE（BOOT_ELIGIBLE 加上不是机密），改了要一起改，
+// browse.int.test.ts 逐行比对。管理界面的 isBootNode 在它之外再除去已过期的
+export function isBootCandidate(memory: {
+  form: MemoryForm
+  layer: Layer
+  priority: number
+  provenance: Provenance
+  sensitivity: Sensitivity
+}): boolean {
+  return (
+    memory.form === 'curated' &&
+    memory.provenance !== 'untrusted' &&
+    memory.sensitivity !== 'secret' &&
+    bootEligible(memory.layer, memory.priority)
+  )
+}
+
 export const MEMBER_ROLES = ['owner', 'editor', 'viewer'] as const
 export const MemberRole = z.enum(MEMBER_ROLES)
 export type MemberRole = z.infer<typeof MemberRole>

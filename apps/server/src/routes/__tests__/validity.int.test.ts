@@ -16,6 +16,7 @@ import { and, asc, eq } from 'drizzle-orm'
 import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
+import { consoleAccess } from '../../access/access'
 import { createApp } from '../../app'
 import { isUniqueViolation, withSpace, type Database } from '../../db/client'
 import {
@@ -31,6 +32,7 @@ import type { ChatModel } from '../../extraction/provider'
 import { saveExtractionConfig } from '../../extraction/settings'
 import { processSession } from '../../extraction/worker'
 import type { Jobs } from '../../jobs/queue'
+import { uriConflicts } from '../../memory/service'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
@@ -1042,6 +1044,19 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       } finally {
         vi.useRealTimers()
       }
+    })
+
+    it('同一批里有抽取的记忆（没有 URI）和普通记录：抽取的那条不和真在 null://null 的记录撞上', async () => {
+      // 已删除列表只列目录里的记忆，这里直接按抽取的记忆会给出的样子调用
+      await shared('null://null')
+      const claims = [
+        { id: null, domain: null, path: null, ownerAccountId: null, ended: false },
+        { id: null, domain: 'null', path: 'null', ownerAccountId: null, ended: false },
+      ]
+      const taken = await withSpace(database.db, ws.spaceId, (tx) =>
+        uriConflicts(tx, consoleAccess('owner', ws.accountId), claims),
+      )
+      expect([...taken]).toEqual([claims[1]])
     })
 
     it('没有权限撤销的不标：viewer 看不出 URI 被别人占着', async () => {

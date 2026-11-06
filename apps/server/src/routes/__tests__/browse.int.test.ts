@@ -1,13 +1,14 @@
 import { randomBytes } from 'node:crypto'
 
-import type {
-  ConsoleSearchResponse,
-  EmbeddingStatus,
-  KeyScopes,
-  MemoryChildren,
-  MemoryList,
-  MemoryView,
-  SpaceOverview,
+import {
+  isBootCandidate,
+  type ConsoleSearchResponse,
+  type EmbeddingStatus,
+  type KeyScopes,
+  type MemoryChildren,
+  type MemoryList,
+  type MemoryView,
+  type SpaceOverview,
 } from '@kioku/contracts'
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { drizzle } from 'drizzle-orm/postgres-js'
@@ -21,6 +22,7 @@ import { apps, memories, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { backfillEmbeddings, embedMemories } from '../../embedding/worker'
 import { memoryServiceForConsole } from '../../memory/context'
+import { BOOT_CANDIDATE } from '../../memory/filter'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -355,6 +357,93 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       eligible: 4,
       embedded: 1,
     })
+  })
+
+  it('未设触发场景只算要补的：会进启动加载的不算，机密照算；概览的数字和列表筛选的条数一致', async () => {
+    await ws.createPersona('muse')
+    await ws.createApp('bot')
+    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const needed = [
+      { uri: 'core://notes', content: '基础层 p2', layer: 'base' },
+      { uri: 'projects://p1', content: '私人层 p1', priority: 1 },
+      { uri: 'projects://blank', content: '只有空白', disclosure: '  ' },
+      { uri: 'persona://muse/more', content: '人格层 p2' },
+      { uri: 'app://bot/agent/extra', content: '应用层 p2' },
+      // 机密不进启动加载，写清在什么场景下需要它才知道要不要读
+      { uri: 'kb://key', content: 'hunter2', layer: 'base', sensitivity: 'secret', priority: 0 },
+    ]
+    const boot = [
+      { uri: 'core://boot', content: '基础层 p0', layer: 'base', priority: 0 },
+      { uri: 'preferences://top', content: '主人层 p0', layer: 'owner', priority: 0 },
+      { uri: 'projects://top', content: '私人层 p0', priority: 0, disclosure: '  ' },
+      { uri: 'persona://muse/style', content: '人格层 p1', priority: 1 },
+      { uri: 'app://bot/agent', content: '应用层 p1', priority: 1 },
+    ]
+    for (const body of [...needed, ...boot]) await create(ws.cookie, body)
+    await create(ws.cookie, {
+      uri: 'core://agent',
+      content: '写了的',
+      priority: 2,
+      disclosure: '每次',
+    })
+    // 已过期的不在列表里，也不算；别人的私人层看不到，也不算
+    const lapsed = await create(ws.cookie, { uri: 'projects://lapsed', content: '到期了' })
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(memories)
+        .set({ validTo: new Date(Date.now() - 60_000) })
+        .where(eq(memories.id, lapsed.id)),
+    )
+    await create(editor.cookie, { uri: 'home://diary', content: '日记' })
+    // 抽取的记忆落在启动加载的层、优先级也够：它没有 URI，不进启动加载，不在列表里，也不算要补的
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(memories).values({
+        spaceId: ws.spaceId,
+        form: 'extracted',
+        layer: 'base',
+        sensitivity: 'public',
+        provenance: 'agent',
+        content: '抽取的事实',
+        priority: 0,
+      }),
+    )
+
+    const expected = needed.map((m) => m.uri).sort()
+    expect((await get<SpaceOverview>(ws.cookie, '/overview')).missingDisclosure).toBe(
+      expected.length,
+    )
+    const flagged = uris(await list(ws.cookie, 'missingDisclosure=true&limit=200')).sort()
+    expect(flagged).toEqual(expected)
+    // false 列别的那些，两边合起来就是整个列表
+    const all = await list(ws.cookie, 'limit=200')
+    const rest = uris(await list(ws.cookie, 'missingDisclosure=false&limit=200')).sort()
+    expect(rest).toEqual(
+      uris(all)
+        .filter((uri) => !expected.includes(uri))
+        .sort(),
+    )
+    // 列表筛出来的就是没写触发场景、又不是 isBootCandidate 的（列表只有目录里的记忆）
+    const byRule = all.items
+      .filter((m) => !m.disclosure?.trim() && !isBootCandidate({ ...m, form: 'curated' }))
+      .map((m) => m.uri)
+      .sort()
+    expect(byRule).toEqual(expected)
+    // SQL 的 BOOT_CANDIDATE 和 contracts 的 isBootCandidate 逐行对上，抽取的与看不到的也算在内
+    const rows = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .select({
+          form: memories.form,
+          layer: memories.layer,
+          priority: memories.priority,
+          provenance: memories.provenance,
+          sensitivity: memories.sensitivity,
+          boot: sql<boolean>`${BOOT_CANDIDATE}`,
+        })
+        .from(memories),
+    )
+    expect(rows.filter((r) => r.form === 'extracted' && r.layer === 'base')).toHaveLength(1)
+    expect(rows.filter((r) => r.boot).length).toBeGreaterThan(4)
+    for (const { boot, ...memory } of rows) expect(isBootCandidate(memory)).toBe(boot)
   })
 
   it('有已过期的记忆时，概览与实例设置的向量数一样：都只算现在有效的', async () => {

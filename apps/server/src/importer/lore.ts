@@ -14,7 +14,7 @@ import {
 import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
 import type postgres from 'postgres'
 
-import { consoleAccess } from '../access/access'
+import { consoleAccess, type Access } from '../access/access'
 import {
   looksLikePlaintextCredential,
   mentionsPlaceholder,
@@ -24,9 +24,9 @@ import {
 import { decryptSecret } from '../crypto/envelope'
 import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { sealedSettingsKeys } from '../crypto/rotation'
-import { pgErrorCode, withSpace, type Db } from '../db/client'
+import { pgErrorCode, withSpace, type Db, type Tx } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
-import { MemoryError, MemoryService } from '../memory/service'
+import { MemoryError, MemoryService, ownerFor, uriConflicts } from '../memory/service'
 import { APP_DOMAIN, DEFAULT_SENSITIVITY, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
 
 // 从 Lore 导入，规则与步骤见 docs/migrate-from-lore.md。Lore 只读访问；映射规则：
@@ -131,6 +131,8 @@ export interface ImportOptions {
   // 跳过的原因里引用正文中那段格式不对的占位符，好到 Lore 里找。这段可能带着后面的明文，只有命令行打开：
   // 输出在主人自己的终端上。接口不打开，计划视图不含正文
   quoteMalformed?: boolean
+  // URI 已被空间里别的记忆占用的写入目标（去重键，见 occupiedTargets），计划里列为不导入
+  occupied?: ReadonlySet<string>
 }
 
 export interface ExistingApp {
@@ -159,7 +161,13 @@ export interface ImportPlan {
   persona: { slug: string; name: string }
   apps: AppMapping[]
   memories: PlannedMemory[]
-  skipped: { source: string; reason: string }[]
+  // 只关于一个写入目标的原因带上那个目标（去重键与事件 context）：同步时只挂到这个目标对应的旧记录上（见 planSync）；
+  // 整个节点不导入的不带。target 不进计划视图
+  skipped: {
+    source: string
+    reason: string
+    target?: Pick<PlannedMemory, 'importKey' | 'context'>
+  }[]
   droppedKeywords: { source: string; keyword: string; reason: string }[]
   // 文字由命令行与界面各自拼
   warnings: { uri: string; kind: LoreWarningKind }[]
@@ -216,7 +224,8 @@ export function credentialHints(node: LoreNode): {
   }
 }
 
-// 计划只依赖读出来的数据和已有应用，不写库：先打印给人确认，再执行
+// 计划只依赖读出来的数据、已有应用与查好的占用（options.occupied），不读写库：先打印给人确认，再执行。
+// 命令行与路由经 planImportFor 出计划，它先查好占用
 export function planImport(
   snapshot: LoreSnapshot,
   existingApps: ExistingApp[],
@@ -295,9 +304,14 @@ export function planImport(
   // 两个节点映射到同一个 URI 时只导入第一个
   const plannedUris = new Map<string, string>()
   // 勾掉的节点写到的 URI 还占着：写入的只能是看过的计划减去勾掉的。映射到同一个 URI 的下一个节点
-  // 在计划里没有写入目标，看不到也勾不了，不能让它顶上来。哪个节点占着要走完下面整段判断才知道，所以先算一次不勾的
+  // 在计划里没有写入目标，看不到也勾不了，不能让它顶上来。哪个节点占着要走完下面整段判断才知道，所以先算一次不勾的。
+  // 这一次不看 occupied：目标被别的记忆占用的节点同样占着这个 URI（见循环里的判断），只是不写入
   if (excludedNodes.size) {
-    const unticked = planImport(snapshot, existingApps, { ...options, excludeUris: new Set() })
+    const unticked = planImport(snapshot, existingApps, {
+      ...options,
+      excludeUris: new Set(),
+      occupied: new Set(),
+    })
     for (const m of unticked.memories) {
       if (excludedNodes.has(String(m.context.loreNodeUuid))) {
         plannedUris.set(m.request.uri, m.source)
@@ -396,18 +410,31 @@ export function planImport(
     const hasRefs = scanPlaceholders(node.content).refs.length > 0
 
     for (const target of targets) {
+      const context = {
+        source: 'lore',
+        loreUri: node.uri,
+        loreNodeUuid: node.uuid,
+        targetApp: target.app ?? null,
+        targetPersona: target.persona ?? null,
+        previousVersions: node.previousVersions,
+        ...(options.exportedAt ? { loreExportedAt: options.exportedAt } : {}),
+      }
+      const importKey = importKeyOf(context)
+      // 这里的原因只关于这一个写入目标，带上这个目标：同步时只挂到它对应的旧记录上（见 planSync）
+      const skip = (reason: string) => {
+        plan.skipped.push({ source: node.uri, reason, target: { importKey, context } })
+      }
       const earlier = plannedUris.get(target.uri)
       if (earlier) {
-        plan.skipped.push({ source: node.uri, reason: `和 ${earlier} 映射到同一个 ${target.uri}` })
+        skip(`和 ${earlier} 映射到同一个 ${target.uri}`)
         continue
       }
       // 占位符的位置规则与写入检查相同
       const sensitivity = secret ? 'secret' : DEFAULT_SENSITIVITY[target.layer]
       if (hasRefs && !placeholderAllowed(target.layer, sensitivity)) {
-        plan.skipped.push({
-          source: node.uri,
-          reason: `正文含凭据占位符，只能放在私人层、敏感级不低于私密的记忆中，${target.uri} 属于${LAYER_NAMES[target.layer]}层`,
-        })
+        skip(
+          `正文含凭据占位符，只能放在私人层、敏感级不低于私密的记忆中，${target.uri} 属于${LAYER_NAMES[target.layer]}层`,
+        )
         continue
       }
       const request = CreateMemoryRequest.safeParse({
@@ -420,33 +447,28 @@ export function planImport(
         glossary,
       })
       if (!request.success) {
-        plan.skipped.push({
-          source: node.uri,
-          reason: request.error.issues.map((i) => i.message).join('；'),
-        })
+        skip(request.error.issues.map((i) => i.message).join('；'))
         continue
       }
       plannedUris.set(target.uri, node.uri)
-      const context = {
-        source: 'lore',
-        loreUri: node.uri,
-        loreNodeUuid: node.uuid,
-        targetApp: target.app ?? null,
-        targetPersona: target.persona ?? null,
-        previousVersions: node.previousVersions,
-        ...(options.exportedAt ? { loreExportedAt: options.exportedAt } : {}),
+      // 被别的记忆占用的目标照样占着这个 URI（上面已经记下），映射到同一个 URI 的后一个节点不顶上来：
+      // 按占用重算的计划只比不看占用时少了这几个目标，别的都不变。占用只出现在要新建的目标上（见 readPlanState），
+      // 它没有对应的旧记录，这条原因不会挂到任何同步项上；记成这个目标的原因，是为了不当成整个节点的、挂到同一节点别的旧记录上
+      if (options.occupied?.has(importKey)) {
+        skip(`${target.uri} 已被其他记忆占用`)
+        continue
       }
       plan.memories.push({
         source: node.uri,
         request: request.data,
         createdAt: node.createdAt,
         updatedAt: node.updatedAt,
-        importKey: importKeyOf(context),
+        importKey,
         context,
       })
     }
   }
-  // 走到应用映射的节点之后还可能被跳过（撞 URI、disclosure 里有占位符等），所以循环结束才知道要动哪些应用：
+  // 走到应用映射的节点之后还可能被跳过（撞 URI、目标被别的记忆占用、disclosure 里有占位符等），所以循环结束才知道要动哪些应用：
   // 运行时下有写入目标的留下；要新建的应用没有写入目标就不建，不留空应用；已有的应用保留，按人格的规则照常设默认人格，
   // 除非这个运行时下的节点被勾掉了，或者全部勾掉、什么都不写。界面的 selectionEffects 算的要和这里一样
   const written = new Set(plan.memories.map((m) => runtimeOf(m.source)))
@@ -525,6 +547,82 @@ export function existingImportApps(db: Db, spaceId: string): Promise<ExistingApp
   )
 }
 
+// 计划要用的库里的状态：导入记录，和要新建的写入目标里 URI 已被空间里别的记忆占用的（去重键）。两样在同一个只读快照里读：
+// 分开读时，中间落下的一次导入（命令行、别的账号的 /apply）会让节点自己刚写下的那条被说成占用。
+// 只看要新建的：导入过的、Lore 里换了路径的不再写入，占着 URI 的可能就是之前导入的那条。规则和写入时数据库的判断
+// 同一份（uriConflicts），能释放的过期记录按导入者写入的身份算。这里只是提前标出来，写入时仍以数据库为准：
+// 之后才被占用的照样记进结果的 occupied
+async function readPlanState(
+  snap: PlanSnapshot,
+  draft: ImportPlan,
+): Promise<{ imports: ImportRecords; occupied: Set<string> }> {
+  const imports = await importRecordsIn(snap.tx)
+  const moved = movedInLore(draft, imports)
+  const access = importerAccess(snap)
+  const claims = draft.memories
+    .filter((m) => priorImport(m, imports, moved).state === 'new')
+    .map((m) => ({
+      importKey: m.importKey,
+      id: null,
+      // 计划里的 URI 都经过 CreateMemoryRequest 的校验
+      ...parseUri(m.request.uri)!,
+      ownerAccountId: ownerFor(access, m.request.layer!),
+      ended: false,
+    }))
+  const taken = await uriConflicts(snap.tx, access, claims)
+  return { imports, occupied: new Set([...taken].map((c) => c.importKey)) }
+}
+
+// 出计划的快照：target 的 db 换成了快照的事务（给预览、同步与记忆服务用），tx 是这个事务本身
+export interface PlanSnapshot extends ImportTarget {
+  tx: Tx
+}
+
+// 出计划的只读快照（命令行与路由共用）：已有应用、导入记录、占用、预览与同步都在这一个可重复读的只读事务里读，
+// 出自同一份数据；导入记录只在这里读（planImportFor 要求传入快照）。回调拿到的 db 是这个事务，里面再开的事务
+// （withSpace、记忆服务的读取）都是它的 savepoint：传给它们的事务配置（隔离级别、只读）不生效，照外层的；
+// 同一条连接上并行的 savepoint 会交错，所以回调里只能一步一步地读，不能并行（并行读的，比如 verifyMasterKey，
+// 放在快照之外或用连接池另开连接）。写入不在这里，见 applyImport
+export function inPlanSnapshot<T>(
+  target: ImportTarget,
+  fn: (snapshot: PlanSnapshot) => Promise<T>,
+): Promise<T> {
+  return withSpace(
+    target.db,
+    target.spaceId,
+    (tx) => fn({ ...target, db: tx as unknown as Db, tx }),
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
+  )
+}
+
+// /apply 发现看过的计划已经不作数时的 409。结尾不带句号：界面在它后面接着写重算计划的说明（见 applyFailureNotice）
+export const PLAN_CHANGED = '来源或此空间在查看计划后已变化，请重新查看计划'
+
+export interface BasePlan {
+  plan: ImportPlan
+  // 计划查到的占用：按勾选重算时传回 planImport，和看过的计划用同一份，写入的才是看过的计划减去勾掉的
+  occupied: ReadonlySet<string>
+  // 计划读到的导入记录：预览（previewImport）与同步（planSync）都用这一份，不再各读一遍
+  imports: ImportRecords
+}
+
+// 出计划（命令行与路由共用）：先不看占用算一次，再把 URI 已被别的记忆占用的目标列为不导入，计划里要新建的就是会写入的。
+// 重算只少了这几个目标（见 planImport 循环里的判断），别的目标与状态都不变，不用再查一遍
+export async function planImportFor(
+  snap: PlanSnapshot,
+  snapshot: LoreSnapshot,
+  existingApps: ExistingApp[],
+  options: Omit<ImportOptions, 'occupied'>,
+): Promise<BasePlan> {
+  const draft = planImport(snapshot, existingApps, options)
+  const { imports, occupied } = await readPlanState(snap, draft)
+  return {
+    plan: occupied.size ? planImport(snapshot, existingApps, { ...options, occupied }) : draft,
+    occupied,
+    imports,
+  }
+}
+
 export interface ImportResult {
   // 这次有没有人格可用：已有的，或者这次新建的（见 writesNewPersona）。没有时 personaCreated 总是 false
   personaUsed: boolean
@@ -540,7 +638,7 @@ export interface ImportResult {
   // 这次要求 secret、但之前导入过而且现在还是明文的：--secret 对它们不起作用，要在管理界面改。
   // current 是记忆现在的 URI，导入后移动过的与 uri 不同；同一个节点导入过多条的，每条明文各占一项
   secretAlreadyImported: { uri: string; current: string }[]
-  // URI 已被不是导入产生的记忆占用
+  // 写入时 URI 已被别的记忆占用。计划里就占用了的已经列为不导入，这里只有算完计划之后才被占用的
   occupied: string[]
   // Lore 里换了路径、映射到别的应用或层的节点（见 movedInLore）：没有在 uri 新建，之前导入的那条留在 current
   // （在 Kioku 里删除了的为 null）
@@ -564,7 +662,7 @@ function personaEffect(
 // 一个写入目标这次算什么、之前导入的是哪些记忆（新建时是空的）。计划预览与真正写入都按这个判断
 function priorImport(
   item: PlannedMemory,
-  done: Map<string, ImportedMemory[]>,
+  done: ImportRecords,
   moved: Map<string, ImportedMemory[]>,
 ): { state: LoreTargetState; found: ImportedMemory[] } {
   const earlier = moved.get(item.importKey)
@@ -578,7 +676,7 @@ function priorImport(
 // 不存在就没有人格可用，新建的应用默认人格为空。计划预览与真正写入都按这个判断
 function writesNewPersona(
   plan: ImportPlan,
-  done: Map<string, ImportedMemory[]>,
+  done: ImportRecords,
   moved: Map<string, ImportedMemory[]>,
 ): boolean {
   return plan.memories.some(
@@ -610,9 +708,9 @@ export interface ImportPreview {
 export async function previewImport(
   target: ImportTarget,
   plan: ImportPlan,
+  done: ImportRecords,
 ): Promise<ImportPreview> {
   const { db, spaceId, accountId } = target
-  const done = await importedMemories(db, spaceId)
   const moved = movedInLore(plan, done)
   const { persona, rows } = await withSpace(db, spaceId, async (tx) => ({
     persona: (
@@ -673,8 +771,14 @@ function dataWriteFailure(err: unknown): string | null {
   return `写入数据库失败（${code}）`
 }
 
-// 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用
-export async function applyImport(target: ImportTarget, plan: ImportPlan): Promise<ImportResult> {
+// 按计划写入。可以重复执行：导入过的节点按导入事件去重，已有的人格与应用直接复用。
+// expected 是出计划时读到的导入记录（界面的 /apply 传）：写入事务里重读到的和它不一致，说明之后又有导入落地，
+// 返回 409 让人重看计划，不按旧的判断写。不传时（命令行，没有指纹）按写入事务里读到的判断
+export async function applyImport(
+  target: ImportTarget,
+  plan: ImportPlan,
+  expected?: ImportRecords,
+): Promise<ImportResult> {
   const { db, spaceId, accountId } = target
   const result: ImportResult = {
     personaUsed: false,
@@ -692,10 +796,14 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
   // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写。
   // 写入期间才被转走的，由每次写入时同一个事务里的归属核对拦下（requireAppOwner）
   const blockedApps = new Set<string>()
-  const done = await importedMemories(db, spaceId)
-  const moved = movedInLore(plan, done)
+  let done: ImportRecords = new Map()
+  let moved = new Map<string, ImportedMemory[]>()
 
   await withSpace(db, spaceId, async (tx) => {
+    // 在写入事务里读导入记录：和这里写下的人格、应用出自同一刻的判断
+    done = await importRecordsIn(tx)
+    if (expected && !sameImports(plan, done, expected)) throw new MemoryError(409, PLAN_CHANGED)
+    moved = movedInLore(plan, done)
     const [created] = writesNewPersona(plan, done, moved)
       ? await tx
           .insert(personas)
@@ -810,7 +918,7 @@ export async function applyImport(target: ImportTarget, plan: ImportPlan): Promi
   return result
 }
 
-interface ImportedMemory {
+export interface ImportedMemory {
   key: string
   memoryId: string | null
   loreNodeUuid: string
@@ -828,29 +936,45 @@ interface ImportedMemory {
 // 导入过的节点：去重键 → 每条导入事件对应的记忆现在的状态（是不是 secret，或者已经删除）与现在的 URI。
 // 早期版本去重不上时会把同一个节点再写一条，所以一个键可能对应多条记忆。
 // 早期的导入事件没有记 targetPersona：人格层的从导入时的快照补出来（当时 URI 的第一段就是人格），
-// 记忆后来删掉了也补得出，去重键才与现在的一致
-async function importedMemories(db: Db, spaceId: string): Promise<Map<string, ImportedMemory[]>> {
-  const imported = await withSpace(db, spaceId, (tx) =>
-    tx
-      .select({
-        memoryId: memoryEvents.memoryId,
-        context: memoryEvents.context,
-        importedDomain: sql<string | null>`${memoryEvents.after}->>'domain'`,
-        importedPath: sql<string | null>`${memoryEvents.after}->>'path'`,
-        sensitivity: memories.sensitivity,
-        deletedAt: memories.deletedAt,
-        domain: memories.domain,
-        path: memories.path,
-        version: memories.version,
-      })
-      .from(memoryEvents)
-      .leftJoin(memories, eq(memories.id, memoryEvents.memoryId))
-      .where(
-        and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
-      )
-      .orderBy(memoryEvents.id),
-  )
-  const done = new Map<string, ImportedMemory[]>()
+// 记忆后来删掉了也补得出，去重键才与现在的一致。一次计划只读一次（planImportFor），预览与同步都用它
+export type ImportRecords = Map<string, ImportedMemory[]>
+
+// 两份导入记录对这份计划来说是不是一样：只看这次要写的节点的导入事件，和会改变怎么写的几项——有没有、
+// 对应哪个去重键、导入时在 Lore 的哪个 URI、写到哪个人格（新建、已导入、换了路径都按这几项判断）。
+// 别的节点的不比；记忆现在在哪、是不是机密、删没删、版本号也不比：导入的判断用不到，空间里的记忆多半是导入的，
+// 比了就会时常误报。同步另按版本号逐条核对（applySync 的 expectedVersion）
+function sameImports(plan: ImportPlan, a: ImportRecords, b: ImportRecords): boolean {
+  const nodes = new Set(plan.memories.map((m) => String(m.context.loreNodeUuid)))
+  const canonical = (records: ImportRecords) =>
+    [...records.values()]
+      .flat()
+      .filter((m) => nodes.has(m.loreNodeUuid))
+      .map((m) => JSON.stringify([m.key, m.loreNodeUuid, m.loreUri, m.targetPersona]))
+      .sort()
+      .join('\n')
+  return canonical(a) === canonical(b)
+}
+
+async function importRecordsIn(tx: Tx): Promise<ImportRecords> {
+  const imported = await tx
+    .select({
+      memoryId: memoryEvents.memoryId,
+      context: memoryEvents.context,
+      importedDomain: sql<string | null>`${memoryEvents.after}->>'domain'`,
+      importedPath: sql<string | null>`${memoryEvents.after}->>'path'`,
+      sensitivity: memories.sensitivity,
+      deletedAt: memories.deletedAt,
+      domain: memories.domain,
+      path: memories.path,
+      version: memories.version,
+    })
+    .from(memoryEvents)
+    .leftJoin(memories, eq(memories.id, memoryEvents.memoryId))
+    .where(
+      and(eq(memoryEvents.eventType, 'import'), sql`${memoryEvents.context}->>'source' = 'lore'`),
+    )
+    .orderBy(memoryEvents.id)
+  const done: ImportRecords = new Map()
   for (const e of imported) {
     const context = e.context as ImportKeyParts & { loreUri?: unknown }
     const parts =
@@ -883,18 +1007,20 @@ async function importedMemories(db: Db, spaceId: string): Promise<Map<string, Im
 // Lore 里换了路径、映射到别的应用或层的节点：去重键跟着变了，按键找不到之前的导入，不认出来就会在新位置再建一条。
 // 按节点 uuid 认：之前导入时的键这次的计划已经不再产生、Lore 里的 URI 也变了，才算换了路径。
 // 加了一个同类应用（节点多了一个目标）时原来的键仍在计划里，换个 --persona 时人格层两边的人格不同，都不算；
-// 之前的导入事件没记 loreUri 的不判断。返回：这次计划里的去重键 → 之前按别的键导入的那些记忆
-function movedInLore(
-  plan: ImportPlan,
-  done: Map<string, ImportedMemory[]>,
-): Map<string, ImportedMemory[]> {
-  const planned = new Set(plan.memories.map((m) => m.importKey))
+// 之前的导入事件没记 loreUri 的不判断。这次的目标包括要写的和只因这个目标本身被跳过的（skipped 里带 target 的）：
+// 被跳过的目标对应的旧记录，同步时拿到它被跳过的原因。返回：这次的去重键 → 之前按别的键导入的那些记忆
+function movedInLore(plan: ImportPlan, done: ImportRecords): Map<string, ImportedMemory[]> {
+  const targets = [
+    ...plan.memories,
+    ...plan.skipped.flatMap((s) => (s.target ? [{ source: s.source, ...s.target }] : [])),
+  ]
+  const planned = new Set(targets.map((t) => t.importKey))
   const byNode = new Map<string, ImportedMemory[]>()
   for (const m of [...done.values()].flat()) {
     byNode.set(m.loreNodeUuid, [...(byNode.get(m.loreNodeUuid) ?? []), m])
   }
   const moved = new Map<string, ImportedMemory[]>()
-  for (const item of plan.memories) {
+  for (const item of targets) {
     if (done.has(item.importKey)) continue
     const persona = item.context.targetPersona
     const earlier = (byNode.get(String(item.context.loreNodeUuid)) ?? []).filter(
@@ -909,13 +1035,18 @@ function movedInLore(
   return moved
 }
 
-// 按空间 owner 的管理界面权限写入，来源记为 system。正文里已有的凭据占位符照常检查（要解析到导入者的凭据），
+// 导入者写入的身份：空间 owner 的管理界面权限，来源记为 system。写入与计划里查占用都按它
+function importerAccess(target: Pick<ImportTarget, 'accountId'>): Access {
+  return { ...consoleAccess('owner', target.accountId), writeProvenance: 'system' }
+}
+
+// 按导入者的身份写入。正文里已有的凭据占位符照常检查（要解析到导入者的凭据），
 // 但允许新增：这是主人自己把数据搬进自己的私人层，不是抽取或 Dream
 function importerService(target: ImportTarget): MemoryService {
   return new MemoryService({
     db: target.db,
     spaceId: target.spaceId,
-    access: { ...consoleAccess('owner', target.accountId), writeProvenance: 'system' },
+    access: importerAccess(target),
     personaId: 'all',
     masterKey: target.masterKey,
     actor: { accountId: target.accountId },
@@ -956,8 +1087,8 @@ export async function planSync(
   target: ImportTarget,
   plan: ImportPlan,
   snapshot: LoreSnapshot,
+  done: ImportRecords,
 ): Promise<SyncPlan> {
-  const done = await importedMemories(target.db, target.spaceId)
   const all = [...done.values()].flat()
   const live = all.filter((m) => m.state !== 'deleted' && m.memoryId)
   // 导入工具最后一次写下的版本号：导入与同步事件的快照里都有
@@ -1075,11 +1206,24 @@ export async function planSync(
   }
   // 剩下的是这次的计划没有对应目标的：节点不在 Lore 里了的只列出来；
   // 还在 Lore 里的，计划不导入它就给出原因，否则是计划没有映射到它（例如换了 --persona，或者对应的应用不在了），
-  // 都列出来，不能悄悄不同步
+  // 都列出来，不能悄悄不同步。整个节点不导入的原因给这个节点之前导入的每一条。只关于一个写入目标的（撞 URI、
+  // 占位符的位置规则等）只给这个目标对应的旧记录：去重键相同的，或者 Lore 里换了路径、现在对应到它的（moved，
+  // 和同步决定移到哪个目标是同一份）。不再对应任何目标的旧记录不挂别的目标的原因，列为没有映射到。
+  // 目标被别的记忆占用的只出现在要新建的目标上，没有对应的旧记录，不会挂到任何一条上
   const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
-  const skipReasons = new Map<string, string[]>()
-  for (const s of plan.skipped)
-    skipReasons.set(s.source, [...(skipReasons.get(s.source) ?? []), s.reason])
+  const nodeReasons = new Map<string, string[]>()
+  // 一条旧记录对应几个被跳过的目标时（换了路径之后映射到几个应用）只写第一个目标的原因：几句常常是同一句
+  const targetReason = new Map<ImportedMemory, string>()
+  for (const s of plan.skipped) {
+    if (!s.target) {
+      nodeReasons.set(s.source, [...(nodeReasons.get(s.source) ?? []), s.reason])
+      continue
+    }
+    const key = s.target.importKey
+    for (const m of [...(done.get(key) ?? []), ...(moved.get(key) ?? [])]) {
+      if (!targetReason.has(m)) targetReason.set(m, s.reason)
+    }
+  }
   for (const m of all) {
     if (reported.has(m) || m.state === 'deleted' || !m.uri) continue
     const node = nodeByUuid.get(m.loreNodeUuid)
@@ -1087,10 +1231,13 @@ export async function planSync(
       sync.goneFromLore.push(m.uri)
       continue
     }
-    const reasons = skipReasons.get(node.uri)
+    const reason = targetReason.get(m)
+    const reasons = [
+      ...new Set([...(nodeReasons.get(node.uri) ?? []), ...(reason ? [reason] : [])]),
+    ]
     report(
       m,
-      reasons
+      reasons.length
         ? { source: node.uri, uri: m.uri, state: 'skipped', reason: reasons.join('；') }
         : { source: node.uri, uri: m.uri, state: 'unmapped' },
     )
