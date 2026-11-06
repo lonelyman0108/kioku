@@ -50,6 +50,8 @@ const { rowsOf, failureOf } = useKeyMatrices(
 )
 
 const issueOpen = ref(false)
+// 签发预览里悬停的那一格的说明；没有悬停时显示整体的概括
+const previewCell = ref<string | null>(null)
 const issued = ref<CreatedKey | null>(null)
 const form = reactive({
   name: '',
@@ -109,6 +111,7 @@ watch(
 function closeIssue() {
   issueOpen.value = false
   issued.value = null
+  previewCell.value = null
   form.name = ''
   form.advanced = false
   pickPreset(form.preset)
@@ -281,8 +284,17 @@ async function revoke() {
             </template>
           </form>
           <aside class="issue-preview">
-            <StrataCore :scopes="form.scopes" :width="64" :height="108" />
-            <p>{{ scopesSummary(form.scopes) }}</p>
+            <StrataCore
+              :scopes="form.scopes"
+              :width="96"
+              :height="156"
+              interactive
+              @hover="previewCell = $event"
+            />
+            <p :class="{ 'is-cell': previewCell }" aria-live="polite">
+              {{ previewCell ?? scopesSummary(form.scopes) }}
+            </p>
+            <p v-if="!previewCell" class="preview-hint">鼠标移到格子上查看说明</p>
           </aside>
         </div>
       </template>
@@ -413,7 +425,7 @@ button.key-main:focus-visible {
 }
 .issue {
   display: grid;
-  grid-template-columns: minmax(0, 1fr) 148px;
+  grid-template-columns: minmax(0, 1fr) 168px;
   gap: 24px;
 }
 .issue-preview {
@@ -425,6 +437,14 @@ button.key-main:focus-visible {
   font-size: 14px;
   line-height: 1.65;
   color: var(--ui-text-muted);
+}
+.issue-preview p.is-cell {
+  color: var(--ui-text-highlighted);
+}
+.issue-preview .preview-hint {
+  margin-top: 4px;
+  font-size: 12px;
+  color: var(--ui-text-dimmed);
 }
 @media (max-width: 640px) {
   .issue {
