@@ -36,6 +36,7 @@ import {
   summaryConversation,
   testDatabaseUrl,
 } from '../../testing/db'
+import { DREAM_SCOPE_KEY } from '../../memory/scopes'
 import { fakeChatModel, dreamLines, handleOf } from '../../testing/fakeChatModel'
 import { startFakeChatServer } from '../../testing/fakeChatServer'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
@@ -552,6 +553,37 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect((await send('POST', `/dream/suggestions/${bobs.id}/reject`)).status).toBe(404)
   })
 
+  it('不带会话上下文的会话摘要不参与整理：不在本人的范围里，也不发给模型', async () => {
+    await remember({ uri: 'user://home/alice', content: 'alice 的私事' })
+    const [own] = await inSpace(async (tx) =>
+      tx
+        .insert(memories)
+        .values({
+          spaceId: ws.spaceId,
+          form: 'extracted',
+          layer: 'episode',
+          sensitivity: 'private',
+          provenance: 'agent',
+          originScope: 'global',
+          ownerAccountId: ws.accountId,
+          conversationId: await summaryConversation(tx, ws.spaceId),
+          content: '本机会话里讨论了记忆架构改版',
+          expiresAt: new Date(Date.now() + 30 * 86_400_000),
+        })
+        .returning(),
+    )
+    // 这条摘要不属于任何范围：本人的范围、对话的范围都不收它
+    const [scope] = await inSpace((tx) =>
+      tx.select({ key: DREAM_SCOPE_KEY }).from(memories).where(eq(memories.id, own!.id)),
+    )
+    expect(scope!.key).toBeNull()
+    const { model, calls } = fakeChatModel(reply([]))
+    await dream(model)
+    expect(calls.map((c) => [titleOf(c), contentsOf(c)])).toEqual([
+      ['一位成员本人的习惯、偏好与私人事务（本人）', ['alice 的私事']],
+    ])
+  })
+
   describe('成员让不让 Dream 整理自己的本人记忆', () => {
     const setting = async (includePrivate: boolean, cookie: string) => {
       const res = await send('PUT', '/me/dream', { includePrivate }, cookie)
@@ -813,7 +845,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         ),
       )
     const BASE = '全空间共用的通用规则与知识（通用）'
-    const PRIVATE = '一位成员本人的习惯、偏好与私人事务，以及他不带会话上下文的会话摘要（本人）'
+    const PRIVATE = '一位成员本人的习惯、偏好与私人事务（本人）'
 
     it('共享的范围分几批时，都在本人之前整理完，汇总记在它们之间', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')

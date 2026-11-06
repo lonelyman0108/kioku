@@ -18,8 +18,8 @@ export const DreamVerdict = z.enum(DREAM_VERDICTS)
 export type DreamVerdict = z.infer<typeof DreamVerdict>
 
 // 整理的范围：一次模型调用、一条建议里只有同一个范围的记忆。共享的归属按类分开（通用、各人格、各应用），
-// 每个成员的本人（连同他不带会话上下文的会话摘要）一个范围（只有本人看得到），联系人的事实与群聊、私聊的会话摘要
-// 按来源作用域分（同一个群、同一个人的私聊）
+// 每个成员的本人一个范围（只有本人看得到），联系人的事实与群聊、私聊的会话摘要按来源作用域分（同一个群、同一个人的私聊）。
+// 不带会话上下文的会话摘要不参与整理
 export const DREAM_SCOPE_KINDS = ['core', 'persona', 'app', 'user', 'talk'] as const
 export const DreamScope = z.object({
   kind: z.enum(DREAM_SCOPE_KINDS),
@@ -145,7 +145,7 @@ export const DreamRunList = z.object({ runs: z.array(DreamRunInfo) })
 export type DreamRunList = z.infer<typeof DreamRunList>
 
 // 成员自己在一个空间里的 Dream 设置，只有本人能看、能改。includePrivate：让不让 Dream 整理自己的本人记忆
-// （连同不带会话上下文的会话摘要；secret 本来就不读），默认整理。开着时这些内容会发给实例配置的抽取模型；关掉之后只整理共享的内容，
+// （secret 本来就不读），默认整理。开着时这些内容会发给实例配置的抽取模型；关掉之后只整理共享的内容，
 // 已经生成的建议留着，再打开时接着整理关掉期间新增与改动的
 export const DreamMemberSettings = z.object({ includePrivate: z.boolean() })
 export type DreamMemberSettings = z.infer<typeof DreamMemberSettings>

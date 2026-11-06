@@ -100,7 +100,7 @@ export const spaceMembers = pgTable(
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     role: memberRole().notNull(),
-    // 让不让 Dream 整理这个成员的本人记忆，连同他不带会话上下文的会话摘要（secret 本来就不读）：默认整理，只有本人能改。
+    // 让不让 Dream 整理这个成员的本人记忆（secret 本来就不读）：默认整理，只有本人能改。
     // 关掉之后这些内容不发给抽取模型，整理标记也不前进，再打开时接着看关掉期间新增与改动的（见 extraction/dream.ts）
     dreamPrivate: boolean().notNull().default(true),
     createdAt: createdAt(),

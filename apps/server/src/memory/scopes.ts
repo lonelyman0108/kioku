@@ -50,9 +50,10 @@ export async function scopeNames(
 // ---- Dream 的范围 ----
 // 一次模型调用、一条建议里只放同一个范围的记忆，不把不同成员的私人内容混在一起：
 // 共享的归属按类分开（core、各人格 persona:<id>、各应用 app:<id>）；每个成员的本人一个（user:<成员>），
-// 连同他不带会话上下文的会话摘要（同样归这个成员），关于它们的建议只有本人看得到；
-// 联系人的事实与群聊、私聊的会话摘要按来源作用域分（talk:<来源作用域>，同一个群、同一个人的私聊里记下的），
-// 合并不会把私聊里的事带进群里
+// 关于它们的建议只有本人看得到；联系人的事实与群聊、私聊的会话摘要按来源作用域分（talk:<来源作用域>，
+// 同一个群、同一个人的私聊里记下的），合并不会把私聊里的事带进群里。
+// 不带会话上下文的会话摘要（归所属成员、来源 Agent）不参与整理：能提的建议里没有一种用得上它（审核只收未确认来源的），
+// 不给范围，也就不发给模型
 
 // 来自对话的两类：不归某个成员的按来源作用域分范围，范围是 talk:<来源作用域>
 export const TALK_LAYERS = ['subject', 'episode'] as const
@@ -63,9 +64,10 @@ export const DREAM_SCOPE_KEY = sql<string>`(case
   when ${memories.layer} = 'core' then 'core'
   when ${memories.layer} = 'persona' then 'persona:' || ${memories.personaId}::text
   when ${memories.layer} = 'app' then 'app:' || ${memories.appId}::text
-  when ${memories.layer} in ('user', 'episode') and ${memories.ownerAccountId} is not null
+  when ${memories.layer} = 'user' and ${memories.ownerAccountId} is not null
     then 'user:' || ${memories.ownerAccountId}::text
-  when ${inArray(memories.layer, [...TALK_LAYERS])} then 'talk:' || ${memories.originScope} end)`
+  when ${inArray(memories.layer, [...TALK_LAYERS])} and ${memories.ownerAccountId} is null
+    then 'talk:' || ${memories.originScope} end)`
 
 export type DreamScopeKind = DreamScope['kind']
 
@@ -107,10 +109,7 @@ export function dreamScopeCondition(scope: ParsedDreamScope): SQL {
     case 'app':
       return and(eq(memories.layer, 'app'), eq(memories.appId, scope.id!))!
     case 'user':
-      return and(
-        inArray(memories.layer, ['user', 'episode']),
-        eq(memories.ownerAccountId, scope.id!),
-      )!
+      return and(eq(memories.layer, 'user'), eq(memories.ownerAccountId, scope.id!))!
     case 'talk':
       return and(
         inArray(memories.layer, [...TALK_LAYERS]),

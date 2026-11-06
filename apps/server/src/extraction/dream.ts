@@ -141,7 +141,8 @@ async function lockedSwitch(tx: Tx, spaceId: string, owner: string): Promise<boo
   return row ? row.on : null
 }
 
-// 能提建议的记忆里，归某个成员的（本人，以及不带会话上下文的会话摘要）只收名单里的成员的（名单见 allowedOwners）
+// 能提建议的记忆里，归某个成员的（本人）只收名单里的成员的（名单见 allowedOwners）。不带会话上下文的会话摘要也归成员，
+// 但它来源受信，CANDIDATE 本来就不收，也没有范围（见 memory/scopes.ts 的 DREAM_SCOPE_KEY）
 const candidate = (owners: readonly string[]) =>
   and(
     CANDIDATE,
@@ -526,7 +527,7 @@ async function scopeTitle(tx: Tx, pending: PendingScope): Promise<DreamPromptSco
       return { title: `应用「${name(scope.name)}」独有的记忆（应用）`, talk: false }
     case 'user':
       return {
-        title: '一位成员本人的习惯、偏好与私人事务，以及他不带会话上下文的会话摘要（本人）',
+        title: '一位成员本人的习惯、偏好与私人事务（本人）',
         talk: false,
       }
     case 'talk': {
