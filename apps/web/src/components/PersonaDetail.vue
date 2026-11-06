@@ -149,13 +149,11 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
                         <b>P{{ node.priority }}</b>
                       </span>
                     </template>
-                    <span v-if="node.overriddenBy" class="node-by">
-                      已被
-                      <RouterLink :to="memoryLink(node.overriddenBy)">
-                        「{{ titleOf(node.overriddenBy) }}」
-                      </RouterLink>
-                      覆盖
-                    </span>
+                    <span v-if="node.overriddenBy" class="node-by"
+                      >已被<RouterLink :to="memoryLink(node.overriddenBy)"
+                        >「{{ titleOf(node.overriddenBy) }}」</RouterLink
+                      >覆盖</span
+                    >
                     <span v-else-if="node.disclosure" class="block">{{ node.disclosure }}</span>
                     <span v-if="lost(node)" class="block text-warning">
                       此记忆本应进入启动加载，但覆盖它的记忆优先级为 P{{
