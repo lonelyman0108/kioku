@@ -147,6 +147,13 @@ describe('概览里地层柱的尺寸', () => {
       compact: true,
     })
   })
+
+  it('按放柱子的容器宽度判断：视口够宽、容器放不下数字时也换紧凑版', () => {
+    // 手机上页面一旦溢出，innerWidth 会跟着变宽，只看视口就换不回来
+    expect(columnSize({ width: 756, height: 900 }, 378).compact).toBe(true)
+    expect(columnSize({ width: 1440, height: 900 }, 519).compact).toBe(true)
+    expect(columnSize({ width: 1440, height: 900 }, 520).compact).toBe(false)
+  })
 })
 
 describe('带的高度', () => {

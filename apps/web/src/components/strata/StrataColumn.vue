@@ -96,13 +96,23 @@ function leave() {
 
 // 悬停柱子时贴着指针的说明，带一条引线
 const body = ref<HTMLElement | null>(null)
-const note = ref<{ x: number; y: number; lines: string[] } | null>(null)
+const NOTE_MAX_WIDTH = 300
+const note = ref<{ x: number; y: number; width: number; tip: number; lines: string[] } | null>(null)
 function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity, count: number) {
   enter({ layer, sensitivity })
   const rect = body.value?.getBoundingClientRect()
+  const figure = body.value?.closest('figure')?.getBoundingClientRect()
+  const left = rect?.left ?? 0
+  const pointer = event.clientX - left
+  // 提示层不伸出整张图：宽度不超过图，中心离图的两边至少半个宽度；引线仍指着指针
+  const width = Math.min(NOTE_MAX_WIDTH, figure?.width ?? NOTE_MAX_WIDTH)
+  const min = (figure ? figure.left - left : 0) + width / 2
+  const max = (figure ? figure.right - left : NOTE_MAX_WIDTH) - width / 2
+  const x = Math.min(Math.max(pointer, min), Math.max(min, max))
   note.value = {
-    // 贴着左边时不伸出柱子外面：提示层以这个位置居中，大约 180px 宽
-    x: Math.max(90, event.clientX - (rect?.left ?? 0)),
+    x,
+    width,
+    tip: pointer - (x - width / 2),
     y: event.clientY - (rect?.top ?? 0),
     lines: [
       `${layerLabels[layer]} ${sensitivityLabels[sensitivity]} ${count} 条`,
@@ -258,7 +268,12 @@ function enterSegment(event: MouseEvent, layer: Layer, sensitivity: Sensitivity,
         v-if="note"
         class="fig-note"
         :class="{ below: note.y < 96 }"
-        :style="{ left: `${note.x}px`, top: `${note.y}px` }"
+        :style="{
+          left: `${note.x}px`,
+          top: `${note.y}px`,
+          maxWidth: `${note.width}px`,
+          '--tip': `${note.tip}px`,
+        }"
       >
         <b>{{ note.lines[0] }}</b>
         <span v-for="line in note.lines.slice(1)" :key="line">{{ line }}</span>
@@ -453,7 +468,7 @@ button.fig-total:hover,
 .fig-note::after {
   content: '';
   position: absolute;
-  left: 50%;
+  left: var(--tip, 50%);
   top: 100%;
   width: 1px;
   height: 9px;

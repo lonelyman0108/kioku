@@ -97,8 +97,17 @@ export const filteredTotal = (
 
 // 概览里地层柱的尺寸：一屏放下，高度跟着视口。放不下数字的窄屏换紧凑版。
 // 288 是导航、状态句、区块标题和表头表尾占掉的高度
-export function columnSize(viewport: { width: number; height: number }) {
-  if (viewport.width < 640) return { width: 92, height: 470, compact: true }
+// 完整版的柱子连同右边的数字至少要这么宽；容器比它窄就换紧凑版
+export const FULL_COLUMN_MIN_WIDTH = 520
+
+// available 是放地层柱的容器宽度。只看视口不够：手机上页面一旦溢出，innerWidth 跟着变宽，就一直换不回紧凑版
+export function columnSize(
+  viewport: { width: number; height: number },
+  available = viewport.width,
+) {
+  if (viewport.width < 640 || available < FULL_COLUMN_MIN_WIDTH) {
+    return { width: 92, height: 470, compact: true }
+  }
   const height = viewport.width < 1024 ? 470 : Math.max(440, Math.min(680, viewport.height - 288))
   return { width: 216, height, compact: false }
 }
