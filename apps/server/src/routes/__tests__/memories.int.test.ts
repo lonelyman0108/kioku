@@ -230,7 +230,7 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     expect(((await out.json()) as MemoryView).layer).toBe('core')
   })
 
-  it('移动：标题就是旧标识（从标识来的）时按新坐标重新取，有 # 标题取它、机密只用标识；别的标题不动', async () => {
+  it('移动：标识变了、标题就是旧标识（从标识来的）时按新坐标重新取，有 # 标题取它、机密只用标识；只换位置或别的标题不动', async () => {
     const move = async (from: string, to: string) => {
       const res = await call('POST', '/memories/move', { from, to })
       expect(res.status, await res.clone().text()).toBe(200)
@@ -241,11 +241,15 @@ describe.skipIf(!testDatabaseUrl)('记忆读写接口', () => {
     // 没有 # 标题：标题跟着新的标识
     await create({ uri: 'user://notes/router', content: '路由器的管理地址' })
     expect((await move('user://notes/router', 'user://home/gateway')).title).toBe('gateway')
-    // 后来补上了 # 标题（修改正文不重新取标题）：移动时取它
+    // 后来补上了 # 标题（修改正文不重新取标题）：标识变了时取它
     await create({ uri: 'user://notes/nas', content: '在书房' })
     await call('PATCH', '/memories', { uri: 'user://notes/nas', content: '# 书房的存储\n在书房' })
     expect(await titleOf('user://notes/nas')).toBe('nas')
-    expect((await move('user://notes/nas', 'user://home/nas')).title).toBe('书房的存储')
+    expect((await move('user://notes/nas', 'user://home/storage')).title).toBe('书房的存储')
+    // 只换位置、标识没变：标题不动，哪怕正文后来有了 # 标题
+    await create({ uri: 'user://notes/disk', content: '在抽屉里' })
+    await call('PATCH', '/memories', { uri: 'user://notes/disk', content: '# 移动硬盘\n在抽屉里' })
+    expect((await move('user://notes/disk', 'user://home/disk')).title).toBe('disk')
     // 机密只用标识，不从正文取
     await create({
       uri: 'user://notes/wifi',
