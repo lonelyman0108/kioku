@@ -23,6 +23,8 @@ case "${1:-}" in
     exit 0
     ;;
   --check)
+    # 测试库在后台准备时也要等它：这一步要用它，单独跑这一步时它可能还没好
+    [ -z "${KIOKU_TEST_DATABASE_READY:-}" ] || scripts/ci/background.sh wait test-db
     scripts/ci/background.sh wait image
     ;;
   '')

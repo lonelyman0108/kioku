@@ -32,6 +32,9 @@ jobs:
       - name: 改动类型
         id: kind
         run: scripts/ci/changed-kind.sh >> "$GITHUB_OUTPUT"
+      # 提交信息只要 git 和 bash：放在后台构建之前，标题不合规时不白跑两个构建
+      - name: 提交信息
+        run: scripts/ci/check-msg.sh
       # 两个镜像在后台构建，和后面的准备、完整检查同时进行：测试库由服务端测试开始前等，服务端镜像到冒烟时再等
       - name: 测试数据库（后台准备）
         if: steps.kind.outputs.code == 'true'
@@ -51,8 +54,6 @@ jobs:
           version: 0.13.5
       - name: 准备工具
         run: scripts/ci/setup-tools.sh >> "$GITHUB_PATH"
-      - name: 提交信息
-        run: scripts/ci/check-msg.sh
       - name: 快速检查
         if: steps.kind.outputs.code != 'true'
         run: scripts/check.sh --quick
