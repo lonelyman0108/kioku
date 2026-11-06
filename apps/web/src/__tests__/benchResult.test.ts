@@ -208,7 +208,7 @@ describe('这一步改了什么', () => {
     const items = changeItems({ ...noChanges, hiddenReleased: 2, hiddenOther: 3 })
     expect(items.map((i) => i.action)).toEqual([
       '已释放 2 条不可见过期记录的 URI（属于其他成员）',
-      '另有 3 处不可见的改动（当前 Key 可写但不可读的层）',
+      '另有 3 处不可见的改动（当前访问密钥可写但不可读的层）',
     ])
   })
 

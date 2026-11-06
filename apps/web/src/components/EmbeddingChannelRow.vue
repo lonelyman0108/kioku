@@ -11,7 +11,9 @@ defineProps<{ index: number; first: boolean; last: boolean; only: boolean }>()
 const emit = defineEmits<{ up: []; down: []; remove: [] }>()
 
 // 换了接口主机又没说 Key 怎么处理：在 Key 旁边说清楚，保存按钮由外面禁用
-const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', true) : undefined))
+const keyError = computed(() =>
+  needsNewKey(draft.value) ? newKeyHint('API Key', true) : undefined,
+)
 </script>
 
 <template>
@@ -58,7 +60,7 @@ const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', tr
       :help="
         draft.hasApiKey
           ? '已加密保存；留空表示不修改，更换接口主机时必须重新填写。'
-          : '使用实例主密钥加密保存；接口不需要 Key 时留空。'
+          : '使用实例主密钥加密保存；接口不需要 API Key 时留空。'
       "
       :error="keyError"
     >
@@ -73,7 +75,7 @@ const keyError = computed(() => (needsNewKey(draft.value) ? newKeyHint('Key', tr
     <UCheckbox
       v-if="draft.hasApiKey"
       v-model="draft.clearKey"
-      label="清除已保存的 Key（接口不需要 Key）"
+      label="清除已保存的 API Key（接口不需要时）"
     />
   </div>
 </template>

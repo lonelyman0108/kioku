@@ -63,7 +63,7 @@ describe('启动加载', () => {
 
   it('提示层说的是够格，不是一定加载', () => {
     expect(BOOT_HINT).toContain('符合启动加载条件')
-    expect(BOOT_HINT).toContain('Key 的权限、继承覆盖和字数上限')
+    expect(BOOT_HINT).toContain('访问密钥的权限、继承覆盖和字数上限')
   })
 })
 

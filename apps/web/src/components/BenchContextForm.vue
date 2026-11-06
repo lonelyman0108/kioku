@@ -26,8 +26,9 @@ const summary = computed(() => contextSummary(contextForm))
       <p class="context-note">
         仅作用于生命周期事件与 /recall，工具调用不带。
         <Hint>
-          与真实 MCP 一致，工具调用按 Key 的全部权限读写。判断 Key
-          接入群聊后可读取的内容，应看生命周期事件与 /recall，不要看工具。
+          与真实 MCP
+          一致，工具调用按访问密钥的全部权限读写。判断访问密钥接入群聊后可读取的内容，应看生命周期事件与
+          /recall，不要看工具。
         </Hint>
       </p>
       <div class="context-fields">

@@ -183,7 +183,7 @@ describe('待处理', () => {
     expect(inboxBindings).toContain(
       '确认后，该账号的私聊视为本人对话，此操作不可撤销。如无法辨认，请拒绝。',
     )
-    expect(inboxBindings).toContain('对方在 Bot 私聊中使用绑定码发起申请')
+    expect(inboxBindings).toContain('对方在与机器人的私聊中使用绑定码发起申请')
     expect(inboxBindings).toContain('仅列出前 {{ items.length }} 个，处理后显示其余的。')
     expect(subjectBindings).toContain('此操作不可撤销')
     expect(subjectBindings).toContain('原联系人随即删除')
@@ -332,17 +332,17 @@ describe('转存对话框', () => {
 describe('应用', () => {
   it('只有应用所有者和空间所有者能看 Key', () => {
     expect(appKeys).toContain('enabled: computed(() => props.isAppOwner || props.isSpaceOwner)')
-    expect(appKeys).toContain('仅应用所有者可查看和签发 Key')
+    expect(appKeys).toContain('仅应用所有者可查看和签发访问密钥')
     expect(appDetailPage).toContain(
       'const canSeeKeys = computed(() => isAppOwner.value || isSpaceOwner.value)',
     )
     expect(appDetailPage).toContain('enabled: canSeeKeys')
     expect(appsPage).toContain('isSpaceOwner.value || app.ownerAccountId === me.data.value?.id')
-    expect(appsPage).toContain('仅应用所有者可查看 Key')
+    expect(appsPage).toContain('仅应用所有者可查看访问密钥')
   })
 
   it('明文 Key 显示期间不能点遮罩、按 Esc 或右上角关掉', () => {
-    const modal = elementsOf(appKeys).find((el) => attr(el, 'title') === '签发 API Key')!
+    const modal = elementsOf(appKeys).find((el) => attr(el, 'title') === '签发访问密钥')!
     expect(bound(modal, 'dismissible')).toBe('!issued')
     expect(bound(modal, 'close')).toBe('!issued')
     expect(handler(buttonOf(appKeys, '我已保存'), 'click')).toBe('closeIssue')
@@ -363,10 +363,10 @@ describe('应用', () => {
   it('转移会吊销 Key、删除有限制：后果都还在，只有有权限的人看得到按钮', () => {
     expect(appDetailPage).toContain('全部吊销，新所有者需重新签发')
     expect(appDetailPage).toContain('应用读取的个人画像层与私人层改为')
-    expect(appDetailPage).toContain("'已转移，原有 Key 已全部吊销'")
+    expect(appDetailPage).toContain("'已转移，原有访问密钥已全部吊销'")
     expect(appDetailPage).toContain('仍有应用层记忆时无法删除。')
     expect(appDetailPage).toContain('已删除但仍可恢复的应用层记忆也算在内，需先移到其他命名空间。')
-    expect(appDetailPage).toContain('使用这些 Key 的客户端将立即失去访问权限。')
+    expect(appDetailPage).toContain('使用这些访问密钥的客户端将立即失去访问权限。')
     const elements = elementsOf(appDetailPage)
     const directive = (el: TemplateNode) => el.props?.find((p) => p.name === 'if')?.exp?.content
     expect(directive(buttonOf(appDetailPage, '转移应用'))).toBe('isSpaceOwner')
@@ -429,7 +429,7 @@ describe('召回调试', () => {
 
   it('没有自己的应用、没有有效 Key 时给出说明', () => {
     expect(recallDebugPanel).toContain('当前账号暂无应用，无法调试')
-    expect(recallDebugPanel).toContain('暂无有效 Key。签发后可调试。')
+    expect(recallDebugPanel).toContain('暂无有效访问密钥。签发后可调试。')
   })
 
   it('地址里的 Key 不在列表里时不用它', () => {
@@ -448,7 +448,7 @@ describe('召回调试', () => {
   it('三组都在，阈值线贯穿', () => {
     expect(recallDebugPanel).toContain('<b>将注入</b>')
     expect(recallDebugPanel).toContain('<b>未注入</b>')
-    expect(recallDebugPanel).toContain('<b>未进入当前 Key 的召回</b>')
+    expect(recallDebugPanel).toContain('<b>未进入当前访问密钥的召回</b>')
     expect(recallDebugPanel).toContain("'--threshold': `${axis.threshold}%`")
     expect(recallDebugPanel.match(/left: var\(--threshold\)/g)!.length).toBeGreaterThanOrEqual(2)
     expect(recallDebugPanel).toContain('<summary>注入内容</summary>')
@@ -643,7 +643,7 @@ describe('读取失败', () => {
       overviewPage,
     ]) {
       expect(source).not.toContain("'读取失败'")
-      expect(source).not.toContain("'读取 Key 失败'")
+      expect(source).not.toContain("'读取访问密钥失败'")
     }
   })
 

@@ -117,11 +117,33 @@ const settingsSources = {
 
 describe('小节记在地址里', () => {
   it('地址里写了存在的小节就看它，其余看第一节', () => {
-    expect(currentSection(SPACE_SECTIONS, 'lore')).toBe('lore')
+    expect(currentSection(SPACE_SECTIONS, 'import')).toBe('import')
     expect(currentSection(SPACE_SECTIONS, undefined)).toBe('layers')
     expect(currentSection(SPACE_SECTIONS, 'nonsense')).toBe('layers')
-    expect(currentSection(SPACE_SECTIONS, ['lore'])).toBe('layers')
+    expect(currentSection(SPACE_SECTIONS, ['import'])).toBe('layers')
     expect(currentSection(INSTANCE_SECTIONS, 'master-key')).toBe('master-key')
+  })
+
+  it('导入按来源分块，小节名和子导航上不写来源', () => {
+    for (const section of [...SPACE_SECTIONS, ...INSTANCE_SECTIONS]) {
+      expect(section.label).not.toContain('Lore')
+    }
+    expect(SPACE_SECTIONS.find((s) => s.key === 'import')?.label).toBe('导入')
+    const importSlot = elementsOf(template(spaceSettingsPage)).find(
+      (el) => el.tag === 'template' && directive(el, 'slot')?.arg?.content === 'import',
+    )!
+    const block = elementsOf(importSlot).find((el) => el.tag === 'SettingsBlock')!
+    expect(attr(block, 'title')).toBe('导入')
+    expect(elementsOf(block).some((el) => el.tag === 'LoreImport')).toBe(true)
+    const lore = elementsOf(template(loreImport)).find((el) => el.tag === 'SettingsBlock')!
+    expect(attr(lore, 'title')).toBe('Lore')
+    expect(bound(lore, 'level')).toBe('3')
+  })
+
+  it('改过名的小节：旧地址落到改名后的那一节，只在原来那个设置页里认', () => {
+    expect(currentSection(SPACE_SECTIONS, 'lore')).toBe('import')
+    expect(currentSection(SPACE_SECTIONS, ['lore'])).toBe('layers')
+    expect(currentSection(INSTANCE_SECTIONS, 'lore')).toBe('embedding')
   })
 
   it('第一节是默认的，不写进地址', () => {
@@ -162,14 +184,23 @@ describe('设置页的骨架', () => {
     const html = await frame('/?section=budget')
     for (const section of SPACE_SECTIONS) expect(html).toContain(`内容 ${section.key}`)
     expect(sectionTag(html, '抽取预算')).not.toContain('display:none')
-    expect(sectionTag(html, 'domain 默认层')).toContain('display:none')
-    expect(sectionTag(html, '从 Lore 导入')).toContain('display:none')
+    expect(sectionTag(html, '分区默认层')).toContain('display:none')
+    expect(sectionTag(html, '导入')).toContain('display:none')
   })
 
   it('模板里用 v-show 不用 v-if：切走再回来，填了一半的表单还在', () => {
     const section = elementsOf(template(settingsFrame)).find((el) => el.tag === 'section')!
     expect(directive(section, 'show')?.exp?.content).toBe('section.key === current')
     expect(directive(section, 'if')).toBeUndefined()
+  })
+
+  it('旧地址 section=lore 显示导入，子导航标出的也是导入', async () => {
+    const html = await frame('/?section=lore')
+    expect(sectionTag(html, '导入')).not.toContain('display:none')
+    expect(sectionTag(html, '分区默认层')).toContain('display:none')
+    const current = currentLinks(html)
+    expect(current).toHaveLength(1)
+    expect(current[0]![0]).toContain('section=import')
   })
 
   it('子导航标出当前小节，地址不对时是第一节', async () => {
@@ -567,13 +598,15 @@ describe('标题和说明一直在', () => {
     ['嵌入模型', embeddingSettings, 'OpenAI 兼容的 /embeddings 接口'],
     ['向量', embeddingSettings, '显示已生成当前模型向量的记忆数量。'],
     ['抽取模型', extractionSettings, 'OpenAI 兼容的 /chat/completions 接口'],
-    ['主密钥', settingsPage, '用于加密机密记忆、托管的凭据值与接口 Key。'],
+    ['主密钥', settingsPage, '用于加密机密记忆、托管的凭据值与接口的 API Key。'],
     ['备份', backupSettings, '恢复时需配置同一主密钥。'],
     ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
     ['召回记录', settingsPage, '明细到期后删除，仅保留每条记忆的累计召回次数。'],
-    ['domain 默认层', spaceSettingsPage, '新建记忆时按 URI 的 domain 预填层'],
-    ['抽取预算', extractionBudget, '抽取事实与 Dream 整理共用此 token 预算。'],
-    ['Dream 与私人内容', myDreamSettings, '已发送的内容无法撤回。'],
+    ['分区默认层', spaceSettingsPage, '新建记忆时按 URI 的分区预填层'],
+    ['抽取预算', extractionBudget, '抽取事实与整理共用此 token 预算。'],
+    ['整理', myDreamSettings, '已发送的内容无法撤回。'],
+    ['导入', spaceSettingsPage, '将其他工具的记忆导入当前空间，目前仅支持 Lore。'],
+    ['Lore', loreImport, '导入 Lore 的节点，确认计划后才写入。'],
   ]
 
   it.each(blocks)('%s：读取失败或加载中也有标题和后果说明', (title, source, sentence) => {
@@ -607,7 +640,7 @@ describe('没有权限时', () => {
     expect(condition(budgetForm)).toBe('editable')
   })
 
-  it('domain 默认层：不是所有者时输入框禁用、没有增删和保存', () => {
+  it('分区默认层：不是所有者时输入框禁用、没有增删和保存', () => {
     const elements = elementsOf(template(spaceSettingsPage))
     expect(
       bound(
@@ -676,7 +709,7 @@ describe('带后果的文字整句留着', () => {
     ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
     ['缩短保留期', retentionSettings, '缩短后，下一次清理将按新的天数永久删除，不可撤销。'],
     [
-      'Dream',
+      '整理',
       myDreamSettings,
       '开启后，当前账号的个人画像层与私人层（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。',
     ],
@@ -701,9 +734,13 @@ describe('带后果的文字整句留着', () => {
       '同步只比较内容是否相同，用旧文件写入会把内容改回旧版，还可能新建已在Lore中删除的节点。建议重新导出；之后上传新的导出文件可同步回来。',
     ],
     ['Lore 中途出错', loreImport, '写入中途出错时，已写入的内容保留，重新生成计划后可继续。'],
-    ['Lore 明文 Token', loreImport, 'Token将明文传输，而此Token可清空整个Lore。请尽量改用https。'],
+    [
+      'Lore 明文 API Token',
+      loreImport,
+      'API Token将明文传输，而此API Token可清空整个Lore。请尽量改用https。',
+    ],
     ['Lore 已导入的机密', loreImport, '此前已导入，当前仍为明文，本次标记的机密未生效。'],
-    ['主密钥', settingsPage, '未配置主密钥，无法保存机密记忆、托管的凭据与接口Key。'],
+    ['主密钥', settingsPage, '未配置主密钥，无法保存机密记忆、托管的凭据与接口的API Key。'],
     [
       '轮换完成',
       settingsPage,

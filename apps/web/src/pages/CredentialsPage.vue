@@ -229,7 +229,7 @@ async function removeProvider() {
   <div class="credentials">
     <PageHead title="凭据">
       <template #note>
-        密码与 Token 存为凭据，记忆正文只放占位符，例如
+        密码与令牌存为凭据，记忆正文只放占位符，例如
         <code v-pre class="font-mono text-[13px]">{{cred:file-server#password}}</code
         >。<Hint>
           Agent 用到时才取值。值由 Kioku 加密保存，或保留在密码管理器（凭据源）中，由 Agent

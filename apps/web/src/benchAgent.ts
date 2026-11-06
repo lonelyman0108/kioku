@@ -51,7 +51,7 @@ const LIFECYCLE_TEXT_MAX = 20_000
 export const AGENT_LOOP_NOTES: Record<BenchAgentLoop, string> = {
   hook: '钩子运行时：每条消息先发 prompt.submit，召回块留在历史。',
   approximate: '此运行时未单独模拟，按钩子运行时近似，可能与真实行为不同。',
-  chat: '群聊 Bot：不提供工具，召回块不留在历史，回复后发 turn.end。',
+  chat: '群聊机器人：不提供工具，召回块不留在历史，回复后发 turn.end。',
   tools: '仅接入 MCP：不发生命周期事件，只提供工具。',
 }
 
@@ -71,17 +71,17 @@ export const AGENT_UNAVAILABLE_NOTES: Record<
   notAdmin: {
     title: '模型对话仅限实例管理员',
     description:
-      '模型对话使用实例设置中抽取模型的接口与 Key。Key 属于实例，且不计入抽取预算，因此不开放给其他成员。',
+      '模型对话使用实例设置中抽取模型的接口与 API Key。API Key 属于实例，且不计入抽取预算，因此不开放给其他成员。',
   },
   noModel: {
     title: '尚未配置模型',
     description:
-      '在实例设置中配置抽取模型后可用，模型需支持工具调用。注意：配置后抽取与 Dream 也会开始运行，Dream 默认将画像层与私人层发送给该模型。如不希望发送，请先在空间设置中关闭「Dream 与私人内容」，再配置模型。',
+      '在实例设置中配置抽取模型后可用，模型需支持工具调用。注意：配置后抽取与整理也会开始运行，整理默认将画像层与私人层发送给该模型。如不希望发送，请先在空间设置中关闭「允许整理个人画像层与私人层」，再配置模型。',
   },
   keyLocked: {
-    title: '抽取模型的 Key 无法解密',
+    title: '抽取模型的 API Key 无法解密',
     description:
-      '已配置模型，但保存的 Key 无法解密：主密钥未配置或已更换。请检查 KIOKU_MASTER_KEY（轮换时，旧密钥配置在 KIOKU_MASTER_KEY_PREVIOUS），或在实例设置中重新填写 Key。',
+      '已配置模型，但保存的 API Key 无法解密：主密钥未配置或已更换。请检查 KIOKU_MASTER_KEY（轮换时，旧密钥配置在 KIOKU_MASTER_KEY_PREVIOUS），或在实例设置中重新填写 API Key。',
   },
 }
 
@@ -107,7 +107,7 @@ export function consentText({ endpoint, model, loop }: AgentConsent, mode: Bench
       ? '机密正文与托管凭据的值都会打码；真实模式下，外部凭据源的条目位置与取法照常返回，也会一并发送。'
       : '机密正文与凭据的值都会打码。'
   const where = endpoint ? ` ${endpoint} 上的模型「${model}」` : `模型「${model}」`
-  return `${what[loop]}将发送给${where}（实例设置中抽取模型的接口）。发送的都是当前 Key 可读取的内容；${masked}用量不计入抽取预算。`
+  return `${what[loop]}将发送给${where}（实例设置中抽取模型的接口）。发送的都是当前访问密钥可读取的内容；${masked}用量不计入抽取预算。`
 }
 
 // 消息的文字。content 可能是 null（只调工具时常见）、空串或分段数组（[{ type: 'text', text }]）

@@ -92,7 +92,7 @@ const activeDirty = computed(() =>
 )
 // 有渠道换了接口主机、又没说 Key 怎么处理（见 needsNewKey）：服务端会拒，提交之前就拦下，
 // 按钮旁边说一句，具体的说明在那个渠道的 Key 旁边
-const KEY_MISSING = '有渠道更换了接口主机，请重新填写或清除其 Key'
+const KEY_MISSING = '有渠道更换了接口主机，请重新填写或清除其 API Key'
 const activeKeyMissing = computed(() => activeDrafts.value.some(needsNewKey))
 const saving = ref(false)
 async function saveActive() {

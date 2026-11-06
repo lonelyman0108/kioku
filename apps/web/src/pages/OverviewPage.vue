@@ -80,7 +80,7 @@ const pending = computed(() => {
     {
       title: '整理建议',
       count: inbox.dreamSuggestions,
-      note: 'Dream 建议合并重复、标记过时',
+      note: '建议合并重复、标记过时',
       action: '查看',
       hot: false,
       to: { name: 'inbox', params, query: { tab: 'dream' } },
@@ -313,7 +313,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               </RouterLink>
               <template v-if="app.keys">
                 <span class="app-meta">
-                  有效 Key <span class="font-mono">{{ app.keys.active }}</span>
+                  有效访问密钥 <span class="font-mono">{{ app.keys.active }}</span>
                 </span>
                 <time
                   v-if="app.keys.lastUsedAt"
@@ -326,7 +326,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
                 <span v-else-if="app.keys.active" class="app-meta">尚未使用</span>
                 <span v-else class="app-meta" />
               </template>
-              <span v-else class="app-meta app-hidden">仅应用所有者可查看 Key</span>
+              <span v-else class="app-meta app-hidden">仅应用所有者可查看访问密钥</span>
             </li>
           </ul>
           <p v-else class="empty">暂无应用</p>

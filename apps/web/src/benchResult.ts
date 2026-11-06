@@ -157,7 +157,7 @@ export function changeItems(changes: BenchChanges): ChangeItem[] {
       fields: m.fields.map((f) => changeLabels[f] ?? f),
       warnings: m.becameSecret ? ['改为机密：此记忆历史中的正文将被抹除，向量将被删除'] : [],
       notes: m.left
-        ? ['修改后当前 Key 无法读取此记忆：此处为修改前的 URI，不提供修改后的任何内容']
+        ? ['修改后当前访问密钥无法读取此记忆：此处为修改前的 URI，不提供修改后的任何内容']
         : [],
     })
   }
@@ -165,7 +165,7 @@ export function changeItems(changes: BenchChanges): ChangeItem[] {
     add({ action: `已释放 ${changes.hiddenReleased} 条不可见过期记录的 URI（属于其他成员）` })
   }
   if (changes.hiddenOther) {
-    add({ action: `另有 ${changes.hiddenOther} 处不可见的改动（当前 Key 可写但不可读的层）` })
+    add({ action: `另有 ${changes.hiddenOther} 处不可见的改动（当前访问密钥可写但不可读的层）` })
   }
   for (const c of changes.credentials) {
     add({

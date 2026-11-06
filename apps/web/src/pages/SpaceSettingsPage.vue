@@ -89,7 +89,7 @@ const problem = computed(() => {
   const list = normalized(rows.value)
   const seen = new Set<string>()
   for (const r of list) {
-    if (seen.has(r.domain)) return `domain「${r.domain}」重复`
+    if (seen.has(r.domain)) return `分区「${r.domain}」重复`
     seen.add(r.domain)
   }
   const parsed = DomainLayers.safeParse({
@@ -99,7 +99,7 @@ const problem = computed(() => {
   const issue = parsed.error.issues[0]
   // domain（记录的键）不合法时，zod 只在外层给一句英文，这里点出是哪个 domain
   if (issue?.code === 'invalid_key') {
-    return `domain「${String(issue.path.at(-1) ?? '')}」格式错误：须以小写字母开头，只能包含小写字母、数字和下划线`
+    return `分区「${String(issue.path.at(-1) ?? '')}」格式错误：须以小写字母开头，只能包含小写字母、数字和下划线`
   }
   return issue?.message ?? '格式错误'
 })
@@ -145,12 +145,11 @@ async function save() {
 <template>
   <SettingsFrame title="空间设置" :sections="SPACE_SECTIONS" :unsaved="unsaved">
     <template #layers>
-      <SettingsBlock title="domain 默认层">
+      <SettingsBlock title="分区默认层">
         <template #note>
-          新建记忆时按 URI 的 domain 预填层，例如 core:// 默认为基础层。
+          新建记忆时按 URI 的分区预填层，例如 core:// 默认为基础层。
           <Hint>
-            仅作用于管理界面，且只是默认值，新建时可以修改。通过 Key
-            写入不受影响，未指定层时仍写入私人层。
+            仅作用于管理界面，且只是默认值，新建时可以修改。通过访问密钥写入不受影响，未指定层时仍写入私人层。
           </Hint>
         </template>
         <!-- 后台刷新失败时读到过的配置留着，错误放在上面 -->
@@ -165,7 +164,7 @@ async function save() {
           <div v-for="(row, index) in rows" :key="index" class="flex items-center gap-2">
             <UInput
               v-model="row.domain"
-              placeholder="domain，例如 core"
+              placeholder="分区，例如 core"
               class="min-w-0 flex-1 font-mono"
               :disabled="!editable"
             />
@@ -188,7 +187,7 @@ async function save() {
             />
           </div>
           <p v-if="baseline !== null && !rows.length" class="text-muted">
-            暂无配置，所有 domain 新建时默认为私人层。
+            暂无配置，所有分区新建时默认为私人层。
           </p>
           <NoteLine v-if="problem" tone="warning">{{ problem }}</NoteLine>
           <div v-if="isOwner" class="flex flex-wrap gap-2 pt-1">
@@ -225,12 +224,16 @@ async function save() {
       <SpaceExport :space-id="spaceId" :space-name="space?.name ?? ''" :editable="isOwner" />
     </template>
 
-    <template #lore>
-      <LoreImport
-        :space-id="spaceId"
-        :editable="isOwner"
-        :is-admin="me.data.value?.isAdmin ?? false"
-      />
+    <!-- 每个来源一块，标题是来源的名字 -->
+    <template #import>
+      <SettingsBlock title="导入">
+        <template #note>将其他工具的记忆导入当前空间，目前仅支持 Lore。</template>
+        <LoreImport
+          :space-id="spaceId"
+          :editable="isOwner"
+          :is-admin="me.data.value?.isAdmin ?? false"
+        />
+      </SettingsBlock>
     </template>
   </SettingsFrame>
 </template>

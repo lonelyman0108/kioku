@@ -94,7 +94,7 @@ function accounts(subject: SubjectInfo) {
     </PageHead>
 
     <p v-if="nothing" class="nothing">
-      {{ q ? '没有匹配的结果' : '暂无联系人。接入群聊 Bot 后，对话过的人和群将显示在这里。' }}
+      {{ q ? '没有匹配的结果' : '暂无联系人。接入群聊机器人后，对话过的人和群将显示在这里。' }}
     </p>
     <template v-else>
       <div class="kind-switch" role="group" aria-label="人和群">

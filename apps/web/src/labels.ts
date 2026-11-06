@@ -79,8 +79,8 @@ export const recallSourceLabels: Record<RecallSource, string> = {
 export const readDenialLabels: Record<ReadDenial, string> = {
   deleted: '已删除',
   expired: '已失效或过期',
-  layer: '超出 Key 的可读层',
-  sensitivity: '超出 Key 的敏感级上限',
+  layer: '超出访问密钥的可读层',
+  sensitivity: '超出访问密钥的敏感级上限',
   secret: '机密内容仅可按 URI 读取，不参与召回',
   origin: '来源范围不匹配',
   owner: '属于其他成员',
