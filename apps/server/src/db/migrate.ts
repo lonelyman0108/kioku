@@ -9,16 +9,45 @@ import type { Database, Db, Tx } from './client'
 // 执行迁移的咨询锁：服务启动时的迁移与恢复备份时的迁移用同一把，互相排队
 const MIGRATE_LOCK = 'kioku.migrate'
 
+// 记忆架构改版时迁移重来了一份基线（0000_baseline），不兼容旧数据：改版之前的库与备份里的迁移都早于基线
+const PRE_BASELINE_DATABASE =
+  '数据库是记忆架构改版之前的结构，这个版本不兼容旧数据，无法在上面迁移：清空数据库重建后再启动，然后从 Lore 重新导入（见 docs/migrate-from-lore.md）'
+
 // 多个实例同时启动时用会话级咨询锁串行执行迁移。锁和迁移必须在同一条连接上，
 // 所以单独开一个只有一条连接的客户端，用完即关。
 export async function runMigrations(database: Database, migrationsFolder: string): Promise<void> {
   const client = postgres(database.url, { max: 1, onnotice: () => {} })
   try {
     await client`select pg_advisory_lock(hashtext(${MIGRATE_LOCK}))`
+    await assertKnownMigrations(client, readMigrationFiles({ migrationsFolder }))
     await migrate(drizzle(client, { casing: 'snake_case' }), { migrationsFolder })
   } finally {
     await client.end()
   }
+}
+
+// 库里执行过的迁移都要在这个版本的迁移目录里（按哈希，drizzle 记的是迁移文件内容的 sha256）。drizzle 只看最后一个
+// 迁移的时间戳：改版之前的库按时间戳还差着基线，它会从头建表，在已有的表上报「已存在」，看不出是怎么回事
+async function assertKnownMigrations(
+  client: postgres.Sql,
+  local: readonly MigrationMeta[],
+): Promise<void> {
+  const [table] = await client<{ exists: boolean }[]>`
+    select to_regclass('drizzle.__drizzle_migrations') is not null as exists`
+  if (!table?.exists) return
+  const hashes = new Set(local.map((m) => m.hash))
+  const unknown = (
+    await client<{ hash: string; at: string }[]>`
+      select hash, created_at::text as at from drizzle.__drizzle_migrations`
+  ).filter((m) => !hashes.has(m.hash))
+  if (!unknown.length) return
+  const baseline = local[0]?.folderMillis ?? 0
+  if (unknown.some((m) => Number(m.at) < baseline)) {
+    throw new Error(PRE_BASELINE_DATABASE)
+  }
+  throw new Error(
+    `数据库里有这个版本没有的迁移（${unknown.length} 个）：库来自更新的版本，或者迁移文件在合并之后改过。用做这个库的版本启动`,
+  )
 }
 
 // 在调用方的事务里拿住迁移的锁：到事务结束前，别的连接（例如正在启动的服务）都执行不了迁移

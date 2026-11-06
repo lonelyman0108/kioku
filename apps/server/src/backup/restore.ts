@@ -142,6 +142,12 @@ export async function restoreBackup(
   const positionOf = (at: number) => local.findIndex((m) => m.folderMillis === at) + 1
   const backup = header.migrations
   const position = positionOf(backup.at)
+  // 改版之前的备份：迁移早于这个版本的第一个迁移（基线），见 db/migrate.ts 的 PRE_BASELINE_DATABASE
+  if (!position && backup.at < local[0]!.folderMillis) {
+    throw new Error(
+      `备份来自记忆架构改版之前的版本（${header.kioku}），这个版本不兼容旧数据，无法恢复：在新建的空库上启动这个版本，从 Lore 重新导入（见 docs/migrate-from-lore.md）；要用这份备份，用做备份的版本恢复`,
+    )
+  }
   if (!position && backup.at > local[local.length - 1]!.folderMillis) {
     throw new Error(
       `备份来自更新的版本（${header.kioku}），有这个版本没有的迁移：用不低于它的版本恢复`,

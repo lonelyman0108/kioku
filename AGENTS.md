@@ -152,5 +152,5 @@
 - 会话按（应用、群）、（应用、私聊的人）、（应用、所属成员）认，生命周期事件来时建立或更新最近活动（`lifecycle/handlers.ts`）；会话摘要都挂在会话上（约束 `memories_episode_conversation`），抽取在写入事务里找这一批的会话（`ensureConversation`）。不带会话上下文的轮次的缓冲作用域是 `global`（`NO_CONTEXT_SCOPE`，就是这类 Key 写下的记忆的来源作用域），按（应用、作用域）分批就是按应用与所属成员分：应用转给别人时旧 Key 都吊销了，旧所有者剩下的几轮按「没有能用的 Key」丢掉。测试里直接往库里写会话摘要时用 `testing/db.ts` 的 `summaryConversation`、`groupConversation` 或 `conversationOfScope` 先建会话。
 - 整理建议只经 `MemoryService.applySuggestion` 改记忆；`dream_suggestions` 用 id 与版本的数组引用记忆，没有外键，「建议还作不作数」只按版本判断，规则只有一处（SQL 的 `suggestionCurrent`，锁到行之后用 `isCurrentVersion`），列表、执行与保留期都用它。
 - 整理任务按 `dream_marks`（记忆 id 对应整理过的版本）找要处理的记忆，不靠更新时间：导入的记忆保留原来的更新时间，按时间推进的游标会永远看不到它们。
-- 迁移文件合并之后不要再改（包括注释）：恢复备份时按最后一个迁移的哈希核对库的结构，改过的文件会让之前的备份恢复不了。
+- 迁移文件合并之后不要再改（包括注释）：恢复备份时按最后一个迁移的哈希核对库的结构，改过的文件会让之前的备份恢复不了；服务启动时也核对库里执行过的每个迁移的哈希（`db/migrate.ts` 的 `runMigrations`），有这个版本没有的就拒绝启动，改过的文件会让已经迁移过的库起不来。迁移从 `0000_baseline`（记忆架构改版时重来的基线）起算，之前的备份不能恢复、之前的库不能迁移：启动与恢复按早于基线的迁移认出它们，报错说明是改版之前的结构，要清空数据库重建后从 Lore 重新导入。
 - 在 Mac 上用非交互会话（agent 的 shell）拉镜像会卡在钥匙串，需要用不带 credsStore 的 `DOCKER_CONFIG`。

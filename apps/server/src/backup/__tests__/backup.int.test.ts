@@ -652,6 +652,61 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     expect(((await wifi.json()) as MemoryView).content).toBe('无线密码')
   })
 
+  it('改版之前的库与备份：启动时不迁移、恢复时拒绝，都说清是改版之前的结构，要清空数据库重建后从 Lore 重新导入', async () => {
+    // 改版之前的迁移都早于这个版本的第一个迁移（基线）
+    const old = readMigrationFiles({ migrationsFolder })[0]!.folderMillis - 86_400_000
+    const { file } = await backup()
+    const lines = readBackup(masterKey, file).plain.toString('utf8').split('\n')
+    const header = JSON.parse(lines[0]!) as Record<string, unknown>
+    const before = await collect(
+      sealBackup(
+        masterKey,
+        parts(
+          [
+            JSON.stringify({ ...header, migrations: { hash: 'x', at: old } }),
+            ...lines.slice(1),
+          ].join('\n'),
+        ),
+      ),
+    )
+    await wipe('2030-01-01T00:00:00.000Z')
+    await expect(restore(before)).rejects.toThrow(
+      /^备份来自记忆架构改版之前的版本（.+），这个版本不兼容旧数据，无法恢复.*从 Lore 重新导入/,
+    )
+
+    // 改版之前的库：迁移记录里只有这个版本没有的、更早的迁移。照常迁移的话 drizzle 从基线开始建表，
+    // 在已有的表上报「已存在」，看不出是怎么回事
+    const saved = await database.db.execute<{ hash: string; at: string }>(
+      sql`select hash, created_at::text as at from drizzle.__drizzle_migrations order by id`,
+    )
+    const rewrite = async (rows: { hash: string; at: string }[]) => {
+      await database.db.execute(sql`delete from drizzle.__drizzle_migrations`)
+      for (const r of rows) {
+        await database.db.execute(
+          sql`insert into drizzle.__drizzle_migrations (hash, created_at) values (${r.hash}, ${r.at}::bigint)`,
+        )
+      }
+    }
+    try {
+      await rewrite([
+        { hash: 'before-1', at: String(old - 1000) },
+        { hash: 'before-2', at: String(old) },
+      ])
+      await expect(runMigrations(database, migrationsFolder)).rejects.toThrow(
+        /^数据库是记忆架构改版之前的结构.*清空数据库重建.*从 Lore 重新导入/,
+      )
+      // 库里有这个版本没有、却不早于基线的迁移（更新的版本，或者合并之后改过的迁移文件）：同样不迁移
+      await rewrite([...saved, { hash: 'newer', at: String(latest.folderMillis + 1000) }])
+      await expect(runMigrations(database, migrationsFolder)).rejects.toThrow(
+        '数据库里有这个版本没有的迁移',
+      )
+    } finally {
+      await rewrite([...saved])
+    }
+    expect(await pendingMigrations(database.db, migrationsFolder)).toBe(0)
+    await runMigrations(database, migrationsFolder)
+  })
+
   it('较早的备份：写回之后在同一个事务里执行这个版本新增的迁移；新增的迁移失败时数据一条也不留下', async () => {
     await write('POST', { uri: 'user://home/nas', content: 'NAS 在书房' })
     const { file } = await backup()
