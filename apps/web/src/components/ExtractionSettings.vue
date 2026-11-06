@@ -164,7 +164,7 @@ async function clear() {
             ? '已加密保存；留空表示不修改，更换接口主机时必须重新填写。'
             : '使用实例主密钥加密保存。'
         "
-        :error="keyMissing ? newKeyHint('Key', true) : undefined"
+        :error="keyMissing ? newKeyHint('API Key', true) : undefined"
       >
         <UInput
           v-model="form.apiKey"
@@ -177,7 +177,7 @@ async function clear() {
       <UCheckbox
         v-if="settings.data.value?.hasApiKey"
         v-model="form.clearKey"
-        label="清除已保存的 Key（新接口不需要 Key）"
+        label="清除已保存的 API Key（新接口不需要时）"
       />
       <div class="flex flex-wrap items-center gap-2">
         <UButton

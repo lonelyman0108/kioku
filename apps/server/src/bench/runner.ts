@@ -101,12 +101,12 @@ function defaultLabel(step: BenchStep): string {
 // 不满足 requires 的原因；满足时为 null
 export function unmetRequirement(requires: BenchRequires, scopes: KeyScopes): string | null {
   const unreadable = requires.readLayers?.filter((l) => !scopes.readLayers.includes(l)) ?? []
-  if (unreadable.length) return `当前 Key 无权读取${unreadable.map(layerWithValue).join('、')}`
+  if (unreadable.length) return `当前访问密钥无权读取${unreadable.map(layerWithValue).join('、')}`
   const unwritable = requires.writeLayers?.filter((l) => !scopes.writeLayers.includes(l)) ?? []
-  if (unwritable.length) return `当前 Key 无权写入${unwritable.map(layerWithValue).join('、')}`
+  if (unwritable.length) return `当前访问密钥无权写入${unwritable.map(layerWithValue).join('、')}`
   const needed = requires.maxSensitivity
   if (needed && SENSITIVITIES.indexOf(scopes.maxSensitivity) < SENSITIVITIES.indexOf(needed)) {
-    return `当前 Key 的敏感级上限低于${sensitivityWithValue(needed)}`
+    return `当前访问密钥的敏感级上限低于${sensitivityWithValue(needed)}`
   }
   return null
 }

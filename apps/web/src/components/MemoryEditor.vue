@@ -394,9 +394,8 @@ function failed(err: unknown, fallback: string) {
 const plaintextWarning = ref<{ downgrade: boolean } | null>(null)
 // 写成一整句：模板里中文换行会多出一个空格
 const PLAINTEXT_DOWNGRADE_TEXT =
-  '降级后，正文将写入历史、全文索引和向量，无法撤回。请先将凭据转存，并确认正文不含密码或 Token。'
-const PLAINTEXT_TEXT =
-  '正文疑似包含密码或 Token（例如「密码：…」）。建议转存为凭据，正文改用占位符。'
+  '降级后，正文将写入历史、全文索引和向量，无法撤回。请先将凭据转存，并确认正文不含密码或令牌。'
+const PLAINTEXT_TEXT = '正文疑似包含密码或令牌（例如「密码：…」）。建议转存为凭据，正文改用占位符。'
 function requestSave() {
   const m = base.value
   if (!m || saving.value) return
@@ -743,9 +742,7 @@ const properties = computed<Property[][]>(() => {
         <template v-if="mode === 'edit'">
           <div class="edit-head">
             <p class="edit-help">
-              Markdown。密码与 Token 存为凭据，正文只放占位符。<Hint
-                >写清背景、原因和适用条件。</Hint
-              >
+              Markdown。密码与令牌存为凭据，正文只放占位符。<Hint>写清背景、原因和适用条件。</Hint>
             </p>
             <div class="edit-tools">
               <UTooltip

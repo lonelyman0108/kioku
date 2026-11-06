@@ -398,9 +398,9 @@ watch(open, (isOpen) => {
 
         <UFormField label="限定应用">
           <template #help>
-            仅选中应用的 Key 可以取用。
+            仅选中应用的访问密钥可以取用。
             <Hint>
-              列表仅含当前账号所有的应用。通过 Key 新建的凭据默认限定给该应用，只能在此处修改。
+              列表仅含当前账号所有的应用。通过访问密钥新建的凭据默认限定给该应用，只能在此处修改。
             </Hint>
           </template>
           <div class="space-y-2">

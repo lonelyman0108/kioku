@@ -396,7 +396,7 @@ export function spaceRoutes(deps: Deps) {
     .openapi(save, async (c) => {
       const { spaceId } = c.req.valid('param')
       if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
-        return c.json({ error: '仅空间所有者可修改 domain 默认层' }, 403)
+        return c.json({ error: '仅空间所有者可修改分区默认层' }, 403)
       }
       const { defaults } = c.req.valid('json')
       await deps.db.update(spaces).set({ domainLayers: defaults }).where(eq(spaces.id, spaceId))

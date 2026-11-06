@@ -77,7 +77,7 @@ async function importSpace() {
   const c = result.counts
   toast.add({
     title: `已导入「${result.name}」`,
-    description: `共导入 ${c.memories} 条记忆。导出人的个人画像层 ${c.ownerMemories} 条、私人层 ${c.privateMemories} 条记忆与 ${c.credentials} 条凭据归当前账号所有。请为应用重新签发 Key；向量在后台重新生成。`,
+    description: `共导入 ${c.memories} 条记忆。导出人的个人画像层 ${c.ownerMemories} 条、私人层 ${c.privateMemories} 条记忆与 ${c.credentials} 条凭据归当前账号所有。请为应用重新签发访问密钥；向量在后台重新生成。`,
     color: 'success',
   })
   // 新空间要先出现在自己的空间列表里，跳过去才不会被当成不是成员
@@ -97,8 +97,7 @@ async function importSpace() {
           Agent 的启动加载，被客户端当作指令读取。
         </p>
         <p class="mt-1">
-          机密记忆与托管的凭据值使用当前实例的主密钥重新加密。Key
-          不在文件中，导入后需为应用重新签发。
+          机密记忆与托管的凭据值使用当前实例的主密钥重新加密。访问密钥不在文件中，导入后需为应用重新签发。
         </p>
       </Hint>
     </template>
@@ -153,8 +152,7 @@ async function importSpace() {
               Agent 的启动加载。仅导入本人导出、或导出人同意移交的文件。
             </p>
             <p v-if="!preview.exporter.dreamPrivate">
-              导出人已关闭「允许 Dream
-              整理个人画像层与私人层」：新空间中同样保持关闭，这两层不发送给抽取模型。如需整理，请在新空间的空间设置中开启。
+              导出人已关闭「允许整理个人画像层与私人层」：新空间中同样保持关闭，这两层不发送给抽取模型。如需整理，请在新空间的空间设置中开启。
             </p>
           </div>
         </div>

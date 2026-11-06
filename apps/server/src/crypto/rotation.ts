@@ -25,6 +25,8 @@ const TABLES = [
 // 新加了加密的设置项只要加在这里，启动检查、轮换、状态与导入工具核对主密钥都按它
 type SealedSetting = { sealed: Sealed; aad: string; keyId: string | null }
 type Change = (sealed: SealedJson, aad: string) => SealedJson
+// 这些设置项在启动检查与轮换出错时的统称：嵌入、抽取模型的 API Key 与备份的 Secret Access Key
+const SETTINGS_LABEL = '实例设置中加密保存的密钥'
 const SETTINGS: {
   label: string
   read: (db: Db) => Promise<SealedSetting[]>
@@ -144,24 +146,23 @@ async function inspectMasterKey(db: Db, masterKey: MasterKey | null, fill: boole
       }
     }
   }
-  const settingsLabel = '实例设置中的接口 Key'
   if (!ring) {
-    problem(settingsLabel, (await sealedSettingsKeys(db)).length)
+    problem(SETTINGS_LABEL, (await sealedSettingsKeys(db)).length)
   } else if (!fill) {
     for (const { sealed, aad, keyId } of await sealedSettingsKeys(db)) {
       if (keyId ? !known.includes(keyId) : !identify(ring, sealed.wrappedKey, aad)) {
-        problem(settingsLabel)
+        problem(SETTINGS_LABEL)
       }
     }
   } else {
     await mapSettingsKeys(db, (sealed, aad) => {
       if (sealed.keyId) {
-        if (!known.includes(sealed.keyId)) problem(settingsLabel)
+        if (!known.includes(sealed.keyId)) problem(SETTINGS_LABEL)
         return sealed
       }
       const id = identify(ring, Buffer.from(sealed.wrappedKey, 'base64'), aad)
       if (!id) {
-        problem(settingsLabel)
+        problem(SETTINGS_LABEL)
         return sealed
       }
       return { ...sealed, keyId: id }
@@ -252,7 +253,7 @@ export async function rotateMasterKey(
       const wrappedKey = rewrapKey(previous, current, Buffer.from(sealed.wrappedKey, 'base64'), aad)
       return { ...sealed, wrappedKey: wrappedKey.toString('base64'), keyId: currentId }
     } catch {
-      failures.push('实例设置中的接口 Key')
+      failures.push(SETTINGS_LABEL)
       return sealed
     }
   })

@@ -433,7 +433,7 @@ export function appRoutes(deps: Deps) {
       if (!owner) return c.json({ error: '应用不存在' }, 404)
       // 列表只有元数据、不含明文；空间 owner 要能看到 Key 编号才能吊销泄露的 Key
       if (owner !== accountId && role !== 'owner') {
-        return c.json({ error: '仅应用所有者或空间所有者可查看 Key' }, 403)
+        return c.json({ error: '仅应用所有者或空间所有者可查看访问密钥' }, 403)
       }
       const rows = await deps.db
         .select()
@@ -458,7 +458,7 @@ export function appRoutes(deps: Deps) {
       // Key 的上限不能超过签发人的角色：admin 与 secret 级只有空间 owner 能给。
       // editor 签发的 Key 仍能读写应用主人（也就是 editor 自己）的私人层，以及 secret 以下的共享内容
       if (role !== 'owner' && (body.scopes.admin || body.scopes.maxSensitivity === 'secret')) {
-        return c.json({ error: '仅空间所有者可签发「跨人格 / 应用写入」或机密级的 Key' }, 403)
+        return c.json({ error: '仅空间所有者可签发「跨人格 / 应用写入」或机密级的访问密钥' }, 403)
       }
       const generated = generateApiKey()
       const result = await withSpace(deps.db, spaceId, async (tx) => {
@@ -479,7 +479,9 @@ export function appRoutes(deps: Deps) {
         return row!
       })
       if (result === 'missing') return c.json({ error: '应用不存在' }, 404)
-      if (result === 'not-owner') return c.json({ error: '仅应用所有者可签发此应用的 Key' }, 403)
+      if (result === 'not-owner') {
+        return c.json({ error: '仅应用所有者可签发此应用的访问密钥' }, 403)
+      }
       const membership = await ownerMembership(deps, spaceId, accountId)
       return c.json({ ...toKeyInfo(result, membership), key: generated.plaintext }, 201)
     })
@@ -500,16 +502,16 @@ export function appRoutes(deps: Deps) {
         return key ? { app, key } : ('missing' as const)
       })
       if (found === 'no-app') return c.json({ error: '应用不存在' }, 404)
-      if (found === 'missing') return c.json({ error: 'Key 不存在' }, 404)
+      if (found === 'missing') return c.json({ error: '访问密钥不存在' }, 404)
       if (found === 'forbidden') {
-        return c.json({ error: '仅应用所有者或空间所有者可查看 Key' }, 403)
+        return c.json({ error: '仅应用所有者或空间所有者可查看访问密钥' }, 403)
       }
       const { app, key } = found
       const scopes = keyEffectiveScopes(
         { ...key, scopes: KeyScopes.parse(key.scopes) },
         await ownerMembership(deps, spaceId, app.ownerAccountId),
       )
-      if (!scopes) return c.json({ error: 'Key 已作废' }, 404)
+      if (!scopes) return c.json({ error: '访问密钥已作废' }, 404)
       const config = AppConfig.parse(app.config)
       return c.json(
         accessMatrix(scopes, {
@@ -527,7 +529,7 @@ export function appRoutes(deps: Deps) {
       const role = await roleOf(spaceId, accountId)
       const owner = role ? await withSpace(deps.db, spaceId, (tx) => appOwnerOf(tx, appId)) : null
       if (role !== 'owner' && owner !== accountId) {
-        return c.json({ error: '仅应用所有者或空间所有者可吊销 Key' }, 403)
+        return c.json({ error: '仅应用所有者或空间所有者可吊销访问密钥' }, 403)
       }
       const rows = await deps.db
         .update(apiKeys)
@@ -541,7 +543,7 @@ export function appRoutes(deps: Deps) {
           ),
         )
         .returning({ id: apiKeys.id })
-      if (!rows[0]) return c.json({ error: 'Key 不存在或已吊销' }, 404)
+      if (!rows[0]) return c.json({ error: '访问密钥不存在或已吊销' }, 404)
       return c.body(null, 204)
     })
 }

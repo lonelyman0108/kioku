@@ -6,12 +6,31 @@ import { parse } from 'vue/compiler-sfc'
 // 英文字段名。Secret Access Key 是对象存储自己的字段名，不算
 const ENGLISH_TERMS = /(?<![\w/`.])(disclosure|priority|secret(?! access key)|boot)(?![\w/:`])/i
 
+// 应用接入用的 Key 叫访问密钥，单数复数都查，「API Key」也算在内：访问密钥退回旧名时常写成它
+const ACCESS_KEY = /(?<![\w/`.])Keys?(?![\w`])/i
+// 讲上游自己的密钥的文件，只在这里放过上游的字段名：模型服务商的 API Key（嵌入、抽取设置，测试台的模型对话
+// 用的也是抽取模型的），Lore 保存的 API Key（Lore 导入的提示），对象存储的 Access Key ID 与 Secret Access Key
+// （备份），主密钥加密的是 API Key 与 Secret Access Key。别的文件写这几个名字照样报
+const UPSTREAM_KEYS: [file: string, names: RegExp][] = [
+  ['/components/EmbeddingChannelRow.vue', /API Key/g],
+  ['/components/EmbeddingSettings.vue', /API Key/g],
+  ['/components/ExtractionSettings.vue', /API Key/g],
+  ['/benchAgent.ts', /API Key/g],
+  ['/components/BenchAgent.vue', /API Key/g],
+  ['/components/LoreImport.vue', /API Key/g],
+  ['/components/BackupSettings.vue', /Access Key ID|Secret Access Key/g],
+  ['/pages/SettingsPage.vue', /API Key|Secret Access Key/g],
+]
+
 const BANNED: [RegExp, string][] = [
   [/读得到|读不到|看得到|看不到/, '不讲权限逻辑：写「可见」「有权读取」「无权读取」，或者不写'],
   [/你/, '不用第二人称：写「当前账号」或省略'],
   [/像有|像凭据/, '写「疑似」'],
-  // 插值把数字切开之后，片段以「把」开头；「把 Key 吊销」里的「把」是动词，不算
-  [/[一这那每几]把|共 ?\S* ?把|^\s*把\s*(有效|可用|未吊销)\S*\s*Key|\d\s*把/, 'Key 的量词用「个」'],
+  // 插值把数字切开之后，片段以「把」开头；「把访问密钥吊销」里的「把」是动词，不算
+  [
+    /[一这那每几]把|共 ?\S* ?把|^\s*把\s*(有效|可用|未吊销)\S*\s*(Key|访问密钥)|\d\s*把/,
+    '访问密钥的量词用「个」',
+  ],
   [/从没/, '写「从未」'],
   [/还没/, '写「暂无」或「尚未」'],
   [/删不掉|用不了|没做成|占着|放不下|读不出|存不成|列不出|解不开|去看看/, '口语，换成产品用语'],
@@ -31,6 +50,13 @@ const BANNED: [RegExp, string][] = [
   [/应用与\s*Key|召回分析/, '导航名是「应用」「召回」'],
   [/有效到/, '写「有效期」'],
   [ENGLISH_TERMS, '用术语表的中文名'],
+  // 下面几条测试台也要守：没有哪个接口参数叫这些名字
+  [ACCESS_KEY, '写「访问密钥」；上游的字段名只在 UPSTREAM_KEYS 列出的文件里写'],
+  [/(?<![\w/`.])domains?(?![\w`])/i, '写「分区」'],
+  [/(?<![\w/`.])Dream(?![\w`])/i, '写「整理」'],
+  [/(?<![\w/`.])Bots?(?![\w`])/i, '写「机器人」'],
+  // 凭据里的 Token 叫令牌。Lore 的 API Token 是它自己的字段名；模型用量的 token 是小写，不算
+  [/(?<![\w/`.])(?<!API )Token(?![\w`])/, '写「令牌」'],
 ]
 
 // 给人看的属性。其余属性多半是代码取值，比如 color、v-if
@@ -60,13 +86,15 @@ const sources = import.meta.glob<string>('../**/*.{vue,ts}', {
   eager: true,
 })
 
-// 脚本部分：去掉注释之后取含中文的字符串片段，代码里的字段名不算。按行取，换行处切开的说法查不到
+// 脚本部分：去掉注释之后取含中文（汉字或中文标点）的字符串片段，代码里的字段名不算。中文标点也算：
+// 插值把 `domain「${…}」重复` 切开之后，英文那一段只带着书名号。按行取，换行处切开的说法查不到。
+// 已知的盲区：纯英文的字符串取不到，例如 `newKeyHint('Key', true)` 这类拼进界面文字的函数参数
 function scriptFragments(source: string): { line: number; text: string }[] {
   const code = source.replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ''))
   return code.split('\n').flatMap((raw, i) => {
     const fragments = raw
       .replace(/(^|\s)\/\/.*$/, '')
-      .match(/[^<>"'`={}]*[\u4e00-\u9fa5][^<>"'`={}]*/g)
+      .match(/[^<>"'`={}]*[\u4e00-\u9fa5\u3000-\u303f\uff00-\uffef][^<>"'`={}]*/g)
     return (fragments ?? []).map((text) => ({ line: i + 1, text }))
   })
 }
@@ -85,9 +113,12 @@ interface TemplateNode {
   children?: TemplateNode[]
 }
 
-// 表达式里的字符串字面量：绑定的属性和插值里也可能直接写文字
+// 表达式里的字符串字面量：绑定的属性和插值里也可能直接写文字。模板字符串里的 ${…} 是代码不是文字，
+// 换成占位：不然 key、domain 这类变量名会被当成界面上的词；占位不是空白，「共 ${n} 把」照样查得出
 const literals = (expression: string) =>
-  [...expression.matchAll(/'([^']*)'|`([^`]*)`/g)].map((m) => m[1] ?? m[2] ?? '')
+  [...expression.matchAll(/'([^']*)'|`([^`]*)`/g)].map((m) =>
+    (m[1] ?? m[2] ?? '').replace(/\$\{[^}]*\}/g, '…'),
+  )
 
 // 模板部分走语法树：文字节点是完整的，Prettier 换行切不开一句话
 function templateText(source: string): { line: number; text: string }[] {
@@ -137,10 +168,14 @@ describe('界面文字', () => {
       const rules = /\/Bench[^/]*\.vue$/.test(path)
         ? BANNED.filter(([pattern]) => pattern !== ENGLISH_TERMS)
         : BANNED
+      const upstream = UPSTREAM_KEYS.find(([file]) => path.endsWith(file))?.[1]
       for (const { line, text } of visibleText(path, source)) {
         if (ALLOWED.some((a) => text.includes(a))) continue
         for (const [pattern, hint] of rules) {
-          if (pattern.test(text)) found.push(`${path}:${line} ${hint}：${text.trim().slice(0, 60)}`)
+          const checked = pattern === ACCESS_KEY && upstream ? text.replace(upstream, '') : text
+          if (pattern.test(checked)) {
+            found.push(`${path}:${line} ${hint}：${text.trim().slice(0, 60)}`)
+          }
         }
       }
     }

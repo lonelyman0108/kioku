@@ -180,7 +180,10 @@ export function benchRoutes(deps: Deps) {
       if ('error' in found) return c.json({ error: found.error }, found.status)
       if (!(await isInstanceAdmin(deps.db, accountId))) {
         return c.json(
-          { error: '仅实例管理员可使用模型代理：请求用的是实例的模型 Key，且不计入抽取预算' },
+          {
+            error:
+              '仅实例管理员可使用模型代理：请求用的是实例中抽取模型的 API Key，且不计入抽取预算',
+          },
           403,
         )
       }

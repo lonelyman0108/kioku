@@ -7,7 +7,12 @@ import type {
   BenchTool,
 } from '@kioku/contracts'
 
-import { fetchFailure, withoutKey, type EndpointConfig } from '../settings/endpoint'
+import {
+  fetchFailure,
+  MODEL_ENDPOINT_CHECK,
+  withoutKey,
+  type EndpointConfig,
+} from '../settings/endpoint'
 
 // 模型代理的一次请求：OpenAI 兼容接口、带工具。和抽取用的 ChatModel 分开：这里消息要原样转发（tool_calls、tool 消息、
 // reasoning_content 这些字段都不能丢），模型给的工具参数不合法也不算请求失败。和 ChatModel 一样不传 temperature、
@@ -242,7 +247,7 @@ export async function requestAgentTurn(
       throw new AgentModelError(`模型 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
     }
     if (signal?.aborted) throw new AgentModelError('请求已断开')
-    throw new AgentModelError(fetchFailure('模型接口', err))
+    throw new AgentModelError(fetchFailure('模型接口', err, MODEL_ENDPOINT_CHECK))
   }
   if (!res.ok) {
     throw new AgentModelError(`模型接口返回 HTTP ${res.status}：${upstreamText(raw)}`)

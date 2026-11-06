@@ -231,7 +231,7 @@ describe('真实模式的运行中途作废', () => {
     expect(notice.title).toContain('中途作废')
     expect(notice.title).toContain('可能已写入')
     expect(notice.title).toContain('请到变更记录确认')
-    expect(notice.description).toContain('「存凭据」按「应用」的 Key「主 Key」真实执行')
+    expect(notice.description).toContain('「存凭据」按「应用」的访问密钥「主 Key」真实执行')
     expect(notice.result).toBe(made)
     expect(notice.view).toBe('judged')
   })

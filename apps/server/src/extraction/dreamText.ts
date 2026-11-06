@@ -15,7 +15,7 @@ export const MERGED_NODE_CHARS = 6_000
 export const DRAFT_CHARS = 2_000
 export const DISCLOSURE_CHARS = 200
 
-const PLAINTEXT = '疑似含明文密码或 Token：整理建议不写入凭据的值'
+const PLAINTEXT = '疑似含明文密码或令牌：整理建议不写入凭据的值'
 
 // 合并后的事实：一句话，长度和抽取的事实一样有上限
 export function factProblem(text: string): string | null {
@@ -56,7 +56,7 @@ export function draftProblem(text: string): string | null {
 export function disclosureProblem(text: string): string | null {
   if ([...text].length > DISCLOSURE_CHARS) return `触发场景不超过 ${DISCLOSURE_CHARS} 个字`
   if (looksLikePlaintextCredential(text) || mentionsPlaceholder(text)) {
-    return '触发场景不能含明文密码、Token 或凭据占位符'
+    return '触发场景不能含明文密码、令牌或凭据占位符'
   }
   return null
 }

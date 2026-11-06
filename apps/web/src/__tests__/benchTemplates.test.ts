@@ -277,9 +277,9 @@ describe('真实模式要确认', () => {
     expect(bound(select('应用'), 'model-value')).toBe('appId')
     expect(bound(select('应用'), 'items')).toBe('appItems')
     expect(handler(select('应用'), 'update:model-value')).toBe('(v) => selectApp(String(v))')
-    expect(bound(select('Key'), 'model-value')).toBe('keyId')
-    expect(bound(select('Key'), 'items')).toBe('keyItems')
-    expect(handler(select('Key'), 'update:model-value')).toBe('(v) => selectKey(String(v))')
+    expect(bound(select('访问密钥'), 'model-value')).toBe('keyId')
+    expect(bound(select('访问密钥'), 'items')).toBe('keyItems')
+    expect(handler(select('访问密钥'), 'update:model-value')).toBe('(v) => selectKey(String(v))')
   })
 
   it('选择失效的提示能关掉', () => {
@@ -1542,17 +1542,17 @@ describe('读取失败', () => {
       toolbar.elements,
       'keys.data.value && !usable.length && !keys.isError.value',
     )
-    expect(textOf(noKeys)).toContain('暂无有效 Key')
+    expect(textOf(noKeys)).toContain('暂无有效访问密钥')
     const keySelect = must(
       toolbar.elements.find(
         (el) =>
           el.tag === 'USelect' &&
-          el.props?.some((p) => p.name === 'aria-label' && p.value?.content === 'Key'),
+          el.props?.some((p) => p.name === 'aria-label' && p.value?.content === '访问密钥'),
       ),
-      'Key 的下拉框',
+      '访问密钥的下拉框',
     )
     expect(bound(keySelect, 'placeholder')).toBe(
-      "keys.data.value && !keys.isError.value ? '暂无有效 Key' : ''",
+      "keys.data.value && !keys.isError.value ? '暂无有效访问密钥' : ''",
     )
   })
 })

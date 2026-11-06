@@ -94,7 +94,7 @@ const domains = useQuery({
   ...DOMAINS_QUERY_OPTIONS,
 })
 const domainItems = computed(() => [
-  { label: '全部 domain', value: null },
+  { label: '全部分区', value: null },
   ...(domains.data.value ?? []).map((d) => ({ label: `${d.domain}://`, value: d.domain })),
 ])
 const sortItems = MEMORY_LIST_SORTS.map((s) => ({ label: sortLabels[s], value: s }))
@@ -169,7 +169,7 @@ const total = computed(() => {
         <USelect
           :model-value="filters.domain"
           :items="domainItems"
-          aria-label="domain"
+          aria-label="分区"
           @update:model-value="(v) => setFilter('domain', (v as string | null) ?? null)"
         />
         <USelect

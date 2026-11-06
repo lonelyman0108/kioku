@@ -1222,9 +1222,9 @@ describe('toolReply：回给模型的文字不能是空的', () => {
     const skipped = baseStep({
       status: 'skipped',
       raw: null,
-      reason: '当前 Key 无权写入私人层（private）',
+      reason: '当前访问密钥无权写入私人层（private）',
     })
-    expect(toolReply(skipped)).toBe('没有执行：当前 Key 无权写入私人层（private）')
+    expect(toolReply(skipped)).toBe('没有执行：当前访问密钥无权写入私人层（private）')
     expect(toolReply(baseStep({ status: 'failed', raw: null, text: '' }))).toBe('没有执行')
   })
 })

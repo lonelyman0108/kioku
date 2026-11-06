@@ -127,7 +127,7 @@ const emptyText = computed(() =>
         <p v-if="!step.changes" class="note text-muted">无法列出此步的改动</p>
         <template v-else>
           <p v-if="turnNotBuffered(step)" class="note text-muted">
-            本轮未写入对话缓冲：未配置抽取模型，或当前 Key 无权写入联系人层与情节层。
+            本轮未写入对话缓冲：未配置抽取模型，或当前访问密钥无权写入联系人层与情节层。
           </p>
           <p v-if="!changes.length && !step.changes.turn" class="note text-muted">
             {{

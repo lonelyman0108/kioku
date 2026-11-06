@@ -196,7 +196,7 @@ export function runSummary(result: BenchRunResult, view: StepView): RunSummary {
     ]
     return {
       color: unsent || uncaptured || internal ? 'warning' : 'neutral',
-      title: `只列结果，不判通过与失败：每个 Key 的正确结果不同。${notes.join('，')}`,
+      title: `只列结果，不判通过与失败：每个访问密钥的正确结果不同。${notes.join('，')}`,
     }
   }
   if (!result.ok) {
@@ -206,7 +206,10 @@ export function runSummary(result: BenchRunResult, view: StepView): RunSummary {
     }
   }
   if (!passed && skipped) {
-    return { color: 'neutral', title: `全部跳过（${skipped} 步）：当前 Key 不满足此场景所需的权限` }
+    return {
+      color: 'neutral',
+      title: `全部跳过（${skipped} 步）：当前访问密钥不满足此场景所需的权限`,
+    }
   }
   return {
     color: 'success',
