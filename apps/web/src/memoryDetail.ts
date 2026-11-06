@@ -46,24 +46,41 @@ type DisclosureFields = Pick<
   'disclosure' | 'layer' | 'priority' | 'provenance' | 'sensitivity' | 'validTo'
 >
 
-// 没写触发场景时怎么提示，写了的是 null。概览的「未设触发场景」把启动加载的节点也算在内，这里要对得上，
-// 不然点「去补全」过来看不出要补什么；它们不靠触发场景被想起，语气弱一点
-export function missingDisclosureTone(
-  memory: DisclosureFields,
-  now: Date = new Date(),
-): 'warning' | 'muted' | null {
-  if (memory.disclosure?.trim()) return null
-  return isBootNode(memory, now) ? 'muted' : 'warning'
+// 没写触发场景时的提示，写了的是 null。概览的「未设触发场景」把启动加载的节点也算在内，这里要对得上，
+// 不然点「去补全」过来看不出要补什么。一次判断给全：tone 决定颜色；文字两种情况不同，分不清颜色时也认得出来：
+// 要补的写「未设触发场景」，启动加载的节点不靠它被想起，写明是启动加载。列表一行放不下长句，用 short。
+// hint 说补全它有什么用：机密不进召回，启动加载不靠它，只有别的记忆才是召回更准
+export interface MissingDisclosure {
+  tone: 'warning' | 'muted'
+  text: string
+  short: string
+  hint: string
 }
 
-// 补全它有什么用：机密不进召回，启动加载不靠它，只有别的记忆才是召回更准
-export function missingDisclosureHint(memory: DisclosureFields, now: Date = new Date()): string {
-  if (memory.sensitivity === 'secret') {
-    return '机密内容不参与召回，只能按 URI 读取。写清在什么场景下需要它，便于判断是否读取。'
+const UNSET = '未设触发场景'
+
+export function missingDisclosure(
+  memory: DisclosureFields,
+  now: Date = new Date(),
+): MissingDisclosure | null {
+  if (memory.disclosure?.trim()) return null
+  if (isBootNode(memory, now)) {
+    return {
+      tone: 'muted',
+      text: '启动加载不依赖触发场景',
+      short: '启动加载',
+      hint: '未被加载时（例如超出字数上限），补全后召回更准确。',
+    }
   }
-  return isBootNode(memory, now)
-    ? '启动加载不依赖触发场景。未被加载时（例如超出字数上限），补全后召回更准确。'
-    : '补全后召回更准确。'
+  return {
+    tone: 'warning',
+    text: UNSET,
+    short: UNSET,
+    hint:
+      memory.sensitivity === 'secret'
+        ? '机密内容不参与召回，只能按 URI 读取。写清在什么场景下需要它，便于判断是否读取。'
+        : '补全后召回更准确。',
+  }
 }
 
 type PlaintextFields = Pick<ConsoleMemoryView, 'content' | 'sensitivity' | 'plaintextIgnored'>

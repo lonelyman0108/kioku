@@ -4,12 +4,13 @@ import type { RetentionView } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { attemptNote, pauseText, retentionSummary } from '../retention'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsColumns from './strata/SettingsColumns.vue'
 
@@ -146,19 +147,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
         </Hint>
       </template>
       <!-- 标题和后果说明一直在；后台刷新失败时读到过的设置留着，错误放在上面 -->
-      <NoteLine v-if="settings.isError.value" tone="error">
-        {{ readFailure(settings.error.value) }}
-        <template #actions>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="settings.isFetching.value"
-            @click="settings.refetch()"
-            >重试</UButton
-          >
-        </template>
-      </NoteLine>
+      <ReadFailureNote v-if="settings.isError.value" :query="settings" />
       <NoteLine v-if="pause" tone="warning">
         {{ pause.title }}
         <template #detail>

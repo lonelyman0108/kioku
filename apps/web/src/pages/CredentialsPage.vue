@@ -9,13 +9,14 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError, readFailure, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import CredentialDetail from '../components/CredentialDetail.vue'
 import CredentialFormModal from '../components/CredentialFormModal.vue'
 import Hint from '../components/Hint.vue'
 import ProviderFormModal from '../components/ProviderFormModal.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import { useNow } from '../composables/useNow'
@@ -266,7 +267,7 @@ async function removeProvider() {
         <div v-if="tab === 'credentials'" class="column-body">
           <!-- 后台刷新失败时读到过的列表留着，错误放在上面 -->
           <div v-if="credentials.isError.value" class="pt-3.5">
-            <NoteLine tone="error">{{ readFailure(credentials.error.value) }}</NoteLine>
+            <ReadFailureNote :query="credentials" />
           </div>
           <div v-if="credentials.isPending.value" class="space-y-2 pt-3.5">
             <USkeleton v-for="n in 5" :key="n" class="h-10 w-full" />
@@ -319,7 +320,7 @@ async function removeProvider() {
           </p>
           <p v-if="retention" class="deleted-note text-warning">{{ deletionNotice(retention) }}</p>
           <div v-if="deleted.isError.value" class="pt-3.5">
-            <NoteLine tone="error">{{ readFailure(deleted.error.value) }}</NoteLine>
+            <ReadFailureNote :query="deleted" />
           </div>
           <div v-if="deleted.isPending.value" class="space-y-2 pt-3.5">
             <USkeleton v-for="n in 3" :key="n" class="h-10 w-full" />
@@ -452,11 +453,9 @@ async function removeProvider() {
             <p v-else class="row-muted">暂无使用说明</p>
           </li>
         </ul>
-        <p v-else-if="providers.isError.value" class="empty text-error">
-          {{
-            providers.error.value instanceof ApiError ? providers.error.value.message : '读取失败'
-          }}
-        </p>
+        <div v-else-if="providers.isError.value" class="pt-3">
+          <NoteLine tone="error">{{ readFailure(providers.error.value) }}</NoteLine>
+        </div>
         <p v-else-if="providers.data.value" class="empty">
           暂无凭据源。全部由 Kioku 托管时无需添加。
         </p>
@@ -471,19 +470,26 @@ async function removeProvider() {
     @update:open="(v) => !v && (selectedId = null)"
   >
     <template #body>
-      <NoteLine v-if="selected.isError.value" tone="error">
-        {{ selected.error.value instanceof ApiError ? selected.error.value.message : '读取失败' }}
-      </NoteLine>
-      <CredentialDetail
-        v-else-if="detail"
-        :space-id="spaceId"
-        :credential="detail"
-        :apps="apps.data.value"
-        :can-manage="canManage"
-        @edit="openEdit"
-        @remove="removing = detail"
-        @undelete="undelete(detail)"
+      <!--
+        没读到过，或者是确定的结果（别处删掉之后的 404）：只有错误，旧内容和操作都不留。
+        还能再读的刷新失败才照常显示详情，错误放在上面
+      -->
+      <ReadFailureNote
+        v-if="selected.isError.value && (!detail || !retryable(selected.error.value))"
+        :query="selected"
       />
+      <template v-else-if="detail">
+        <ReadFailureNote v-if="selected.isError.value" :query="selected" />
+        <CredentialDetail
+          :space-id="spaceId"
+          :credential="detail"
+          :apps="apps.data.value"
+          :can-manage="canManage"
+          @edit="openEdit"
+          @remove="removing = detail"
+          @undelete="undelete(detail)"
+        />
+      </template>
       <USkeleton v-else class="h-40 w-full" />
     </template>
   </USlideover>
@@ -717,8 +723,10 @@ button.row-name::after {
   white-space: nowrap;
 }
 @media (max-width: 1240px) {
+  /* 上下排时凭据源紧跟在列表后面，多出的高度留给凭据源，不在两段之间空出来 */
   .columns {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
   .main-column {
     border-right: 0;

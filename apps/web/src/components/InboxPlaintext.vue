@@ -14,6 +14,7 @@ import ConvertCredentialModal from './ConvertCredentialModal.vue'
 import Hint from './Hint.vue'
 import MemoryFlags from './strata/MemoryFlags.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import UriPath from './strata/UriPath.vue'
@@ -66,13 +67,11 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
     <div class="plain-bar">
       <UTabs v-model="filter" :items="filters" :content="false" size="sm" class="w-auto" />
     </div>
-    <NoteLine
+    <ReadFailureNote
       v-if="list.isError.value && !list.isFetchNextPageError.value"
       class="plain-note"
-      tone="error"
-    >
-      {{ readFailure(list.error.value) }}
-    </NoteLine>
+      :query="list"
+    />
     <div v-if="list.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 3" :key="n" class="h-12 w-full" />
     </div>

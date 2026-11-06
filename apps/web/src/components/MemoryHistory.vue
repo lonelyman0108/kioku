@@ -4,7 +4,7 @@ import { SENSITIVITIES, type HistoryEvent, type MemorySnapshot } from '@kioku/co
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
 import {
@@ -174,7 +174,7 @@ const versionOf = (event: HistoryEvent) => event.after?.version ?? event.before?
       v-if="history.isError.value"
       color="error"
       variant="subtle"
-      :title="history.error.value instanceof ApiError ? history.error.value.message : '读取失败'"
+      :title="readFailure(history.error.value)"
     />
     <div v-else-if="history.isPending.value" class="space-y-3">
       <USkeleton v-for="n in 4" :key="n" class="h-14 w-full" />

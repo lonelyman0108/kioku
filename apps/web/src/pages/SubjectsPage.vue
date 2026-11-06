@@ -8,6 +8,7 @@ import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import { useDebounced } from '../composables/useDebounced'
@@ -130,7 +131,7 @@ function accounts(subject: SubjectInfo) {
             v-if="section.query.isError.value && !section.query.isFetchNextPageError.value"
             class="pt-3"
           >
-            <NoteLine tone="error">{{ readFailure(section.query.error.value) }}</NoteLine>
+            <ReadFailureNote :query="section.query" />
           </div>
           <div v-if="section.query.isPending.value" class="space-y-2 pt-3">
             <USkeleton v-for="n in 6" :key="n" class="h-11 w-full" />

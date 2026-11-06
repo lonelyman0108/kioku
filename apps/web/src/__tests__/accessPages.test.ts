@@ -548,6 +548,10 @@ describe('查询', () => {
 })
 
 describe('读取失败', () => {
+  // 读取失败的文字经 readFailure：直接写，或者交给 ReadFailureNote（:query 只出现在它上面）
+  const saysReadFailure = (source: string, query: string) =>
+    source.includes(`readFailure(${query}.error.value`) || source.includes(`:query="${query}"`)
+
   // 翻页的：翻页失败的错误放在「加载更多」上面，其余放在最上面；内容跟着 data 走，不跟着 isSuccess
   it.each([
     ['待确认内容', inboxReview, 'queue'],
@@ -560,7 +564,7 @@ describe('读取失败', () => {
     )
     expect(source).toContain(`v-if="${query}.isFetchNextPageError.value"`)
     expect(source).toContain(`${query}.data.value`)
-    expect(source).toContain(`readFailure(${query}.error.value)`)
+    expect(saysReadFailure(source, query)).toBe(true)
     expect(source).not.toContain(`${query}.isError.value && !${query}.data.value`)
   })
 
@@ -574,17 +578,19 @@ describe('读取失败', () => {
     ['最近整理', dreamSuggestions, 'runs'],
     ['按群切换人格', appGroupPersonas, 'rules'],
   ])('%s：后台刷新失败时有提示，读到的内容还在', (_name, source, query) => {
-    expect(source).toContain(`<NoteLine v-if="${query}.isError.value"`)
-    expect(source).toContain(`readFailure(${query}.error.value)`)
+    expect(source).toMatch(
+      new RegExp(`<(NoteLine|ReadFailureNote) v-if="${query}\\.isError\\.value"`),
+    )
+    expect(saysReadFailure(source, query)).toBe(true)
     expect(source).not.toContain(`${query}.isError.value && !${query}.data.value`)
     expect(source).not.toContain(`v-else-if="${query}.isError.value"`)
   })
 
   it('应用列表和详情：几个查询的错误都说出来，内容跟着 data 走', () => {
     for (const source of [appsPage, appDetailPage]) {
-      expect(source).toContain(
-        'readFailures([apps.error.value, personas.error.value, members.error.value])',
-      )
+      // 同一句说法只提示一次，每条的重试只重读说这句话的查询，见 readFailures.test.ts
+      expect(source).toContain('failedReads([apps, personas, members])')
+      expect(source).toContain(':query="failure.read"')
       expect(source).not.toContain('apps.isError.value && !apps.data.value')
       expect(source).not.toContain('new Set(')
     }
@@ -595,7 +601,7 @@ describe('读取失败', () => {
 
   it('概览：没读到才只有错误；读到过的留着，错误放在上面', () => {
     expect(overviewPage).toContain('<div v-if="overview.isError.value" class="overview-failed">')
-    expect(overviewPage).toContain('readFailure(overview.error.value)')
+    expect(overviewPage).toContain('<ReadFailureNote :query="overview" />')
     expect(overviewPage).toContain('<div v-if="overview.isPending.value" class="overview-grid">')
     expect(overviewPage).toContain('<div v-else-if="data && counts" class="overview-grid">')
     expect(overviewPage).not.toContain('v-else-if="!data')

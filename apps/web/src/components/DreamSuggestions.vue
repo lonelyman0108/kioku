@@ -30,7 +30,9 @@ import { memoryRoute } from '../routes'
 import { spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
+import MemoryFlags from './strata/MemoryFlags.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import UriPath from './strata/UriPath.vue'
@@ -283,13 +285,11 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
       </UButton>
     </div>
 
-    <NoteLine
+    <ReadFailureNote
       v-if="suggestions.isError.value && !suggestions.isFetchNextPageError.value"
       class="dream-note"
-      tone="error"
-    >
-      {{ readFailure(suggestions.error.value) }}
-    </NoteLine>
+      :query="suggestions"
+    />
     <div v-if="suggestions.isPending.value" class="mt-3 space-y-3">
       <USkeleton v-for="n in 3" :key="n" class="h-32 w-full" />
     </div>
@@ -334,6 +334,12 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   关于「{{ memory.subject.displayName }}」
                 </RouterLink>
                 <span v-else>{{ layerLabels[memory.layer] }}</span>
+                <!-- 色块旁边写层名，和记忆列表一样；没有 URI 也不是联系人时上面已经写了层的全名 -->
+                <MemoryFlags
+                  v-if="memory.uri || memory.subject"
+                  :layer="memory.layer"
+                  :sensitivity="memory.sensitivity"
+                />
                 <span v-if="item.keepId === memory.id" class="memory-flag">保留</span>
                 <span v-if="memory.provenance === 'untrusted'" class="memory-flag warning">
                   未确认来源
@@ -413,9 +419,11 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           <p v-if="draftProblem(item)" class="suggestion-problem">{{ draftProblem(item) }}</p>
         </div>
 
+        <!-- 每张建议的操作都用线框，和待处理的其他三类一样；实心只留给确认对话框 -->
         <div v-if="canAct && item.actionable" class="suggestion-actions">
           <UButton
             :color="item.kind === 'review' && item.verdict === 'delete' ? 'error' : 'primary'"
+            variant="outline"
             :loading="busy === item.id"
             :disabled="Boolean(busy) || Boolean(draftProblem(item))"
             @click="destructive(item) ? (confirming = item) : apply(item)"

@@ -21,10 +21,16 @@ export const inboxTabCount = (counts: InboxCounts, tab: InboxTab): number =>
     plaintext: counts.plaintext,
   })[tab]
 
-// 红色角标和「N 项待处理」的数字：当前账号动得了手的。查看者只能拒绝等本人确认的账号绑定，
-// 别的几类动不了，算进去这个数字永远消不掉
+// 当前账号动得了手的分类：查看者只能拒绝等本人确认的账号绑定，别的几类动不了
+export const inboxTabActionable = (tab: InboxTab, role: MemberRole): boolean =>
+  role !== 'viewer' || tab === 'binding'
+
+// 红色角标和「N 项待处理」的数字：动得了手的几类加起来。算进动不了的，这个数字永远消不掉
 export const actionableInboxCount = (counts: InboxCounts, role: MemberRole): number =>
-  role === 'viewer' ? counts.bindings : counts.total
+  INBOX_TABS.filter((tab) => inboxTabActionable(tab, role)).reduce(
+    (sum, tab) => sum + inboxTabCount(counts, tab),
+    0,
+  )
 
 const isInboxTab = (value: unknown): value is InboxTab =>
   (INBOX_TABS as readonly unknown[]).includes(value)

@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailures } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
@@ -14,11 +14,13 @@ import AppSimulator from '../components/AppSimulator.vue'
 import Hint from '../components/Hint.vue'
 import KeyMatrix from '../components/KeyMatrix.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import { forgetApp, refreshAppCaches } from '../appQueries'
 import { lastUsedAt } from '../apps'
 import { usableKeys } from '../benchSession'
 import { useSession } from '../composables/useSession'
+import { failedReads } from '../query'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -70,9 +72,8 @@ const keys = useQuery({
 const seenKeys = computed(() => (canSeeKeys.value ? keys.data.value : undefined))
 const usable = computed(() => usableKeys(seenKeys.value ?? []))
 // 默认人格和所有者只显示名字，人格的选项也靠它：读不到时要说出来，不然分不清是没有还是没读到
-const failures = computed(() =>
-  readFailures([apps.error.value, personas.error.value, members.error.value]),
-)
+// 同一句说法只提示一次，每条的重试只重读说这句话的那几样
+const failures = computed(() => failedReads([apps, personas, members]))
 const lastUsed = computed(() => lastUsedAt(seenKeys.value ?? []))
 
 // 看的是哪个 Key、哪种会话上下文：记在地址里。地址里的 Key 失效了就看第一个有效的
@@ -214,7 +215,7 @@ watch([spaceId, appId], () => {
 <template>
   <div class="app-page">
     <div v-if="failures.length" class="app-failed">
-      <NoteLine v-for="message in failures" :key="message" tone="error">{{ message }}</NoteLine>
+      <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
     </div>
     <div v-if="apps.isPending.value" class="app-state"><USkeleton class="h-40 w-full" /></div>
     <div v-else-if="apps.data.value && !app" class="app-state">

@@ -4,7 +4,6 @@ import { computed, onBeforeUnmount, onMounted, ref } from 'vue'
 
 import { layerLabels, layerShortLabels } from '../../labels'
 import {
-  curatedTotal,
   isConversationLayer,
   layerHints,
   layerTotal,
@@ -16,7 +15,8 @@ import {
 } from './strata'
 
 // 地层柱的窄版，兼作层筛选器：点带筛选，再点取消由使用方决定。默认竖排，窄屏放倒横排。
-// 高度或宽度不传时撑满父元素
+// 高度或宽度不传时撑满父元素。顶上的「全部」不写总数：列表头已经写了记忆的条数，
+// 柱子里还画了来自对话的两层，写在这里容易看成整根柱子的合计
 const props = withDefaults(
   defineProps<{
     // 条数还没读到或读取失败时为 null：带等高、不写数字，筛选照样能点
@@ -120,7 +120,6 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
       @click="emit('clear')"
     >
       <span>全部</span>
-      <b v-if="counts">{{ curatedTotal(counts) }}</b>
     </button>
     <div class="rb-stack">
       <button
@@ -211,11 +210,6 @@ const faded = (band: Band, sensitivity: Sensitivity) =>
   font-size: 12px;
   line-height: 1.3;
   color: var(--ui-text-muted);
-}
-.rb-all b {
-  font-family: var(--font-mono);
-  font-weight: 600;
-  color: var(--ui-text-highlighted);
 }
 .rb-all:hover,
 .rb-band:hover,

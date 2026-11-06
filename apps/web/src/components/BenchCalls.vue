@@ -515,7 +515,7 @@ function onRunClick() {
   padding-top: 12px;
 }
 .call-head {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
 }
 .call-head h3 {
@@ -530,7 +530,7 @@ function onRunClick() {
   overflow-wrap: anywhere;
 }
 .note {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
 }
 /* 运行按钮贴在这一栏底部：参数再多也够得着。提示可能很长，自己滚动，不盖住表单、不把按钮挤走 */
@@ -563,7 +563,7 @@ function onRunClick() {
 
 .usage {
   padding: 6px 0;
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;

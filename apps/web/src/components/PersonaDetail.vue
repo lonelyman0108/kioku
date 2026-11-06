@@ -79,6 +79,8 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
 
     <div class="detail-main">
       <div class="detail-nodes">
+        <!-- 使用方放的状态提示，比如后台刷新失败：放在节点上面，读到的内容照常显示 -->
+        <slot name="notice" />
         <section>
           <SectionHeading title="自己的节点">
             <template #actions>
@@ -439,8 +441,10 @@ const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
     grid-row: auto;
     margin-top: 11px;
   }
+  /* 多出的高度留给下面一段，节点和继承关系之间不空出来 */
   .persona-detail > .detail-main {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
   .detail-nodes {
     padding-bottom: 28px;

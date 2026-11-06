@@ -13,6 +13,7 @@ import { readDenialLabels } from '../labels'
 import { debugKeyChoices, scoreAxis, scoreParts } from '../recall'
 import { memoryRoute } from '../routes'
 import Hint from './Hint.vue'
+import MemoryFlags from './strata/MemoryFlags.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
@@ -272,7 +273,10 @@ const groupName = useId()
               <div class="rr-uri">
                 <StrataSwatch :layer="c.layer" plain />
                 <div class="rr-uri-text">
-                  <RouterLink :to="memoryLink(c.uri)"><UriPath :uri="c.uri" /></RouterLink>
+                  <span class="rr-uri-line">
+                    <RouterLink :to="memoryLink(c.uri)"><UriPath :uri="c.uri" /></RouterLink>
+                    <MemoryFlags :layer="c.layer" />
+                  </span>
                   <span v-if="c.cues.length" class="rr-cues">{{ c.cues.join('、') }}</span>
                 </div>
               </div>
@@ -319,7 +323,10 @@ const groupName = useId()
                 <div class="rr-uri">
                   <StrataSwatch :layer="c.layer" plain />
                   <div class="rr-uri-text">
-                    <RouterLink :to="memoryLink(c.uri)"><UriPath :uri="c.uri" /></RouterLink>
+                    <span class="rr-uri-line">
+                      <RouterLink :to="memoryLink(c.uri)"><UriPath :uri="c.uri" /></RouterLink>
+                      <MemoryFlags :layer="c.layer" />
+                    </span>
                   </div>
                 </div>
                 <div class="rr-score">{{ c.score.toFixed(2) }}</div>
@@ -366,7 +373,10 @@ const groupName = useId()
               <div class="rr-uri">
                 <StrataSwatch :layer="f.layer" :sensitivity="f.sensitivity" />
                 <div class="rr-uri-text">
-                  <RouterLink :to="memoryLink(f.uri)"><UriPath :uri="f.uri" /></RouterLink>
+                  <span class="rr-uri-line">
+                    <RouterLink :to="memoryLink(f.uri)"><UriPath :uri="f.uri" /></RouterLink>
+                    <MemoryFlags :layer="f.layer" :sensitivity="f.sensitivity" />
+                  </span>
                 </div>
               </div>
               <div class="rr-score">–</div>
@@ -598,6 +608,16 @@ legend {
   min-width: 0;
   font-size: 14px;
   line-height: 1.5;
+}
+/* 层名跟在 URI 后面，和记忆列表一样：色块旁边要有文字。URI 放不下时先缩它，层名不缩 */
+.rr-uri-line {
+  display: flex;
+  align-items: baseline;
+  gap: 7px;
+  min-width: 0;
+}
+.rr-uri-line > a {
+  min-width: 0;
 }
 .rr-uri-text a:hover {
   text-decoration: underline;
