@@ -215,8 +215,8 @@ async function loadRoots() {
   }
 }
 
-// 人格与应用的根下面是各个人格、应用；别的行下面是坐标的下一级。
-// 人格、应用的坐标开头下面还没有记忆时接口返回 404，和空的一样
+// 人格与应用的根下面是各个人格、应用；别的行下面是坐标的下一级。人格、应用的列表每次都重读：
+// 增删人格之后紧接着刷新这一层，缓存里可能还是旧的。人格、应用的坐标开头下面还没有记忆时接口返回 404，和空的一样
 async function loadChildren(item: MemoryTreeItem) {
   const forSpace = spaceId.value
   let children: MemoryTreeItem[]
@@ -227,10 +227,12 @@ async function loadChildren(item: MemoryTreeItem) {
         ? await queryClient.fetchQuery({
             queryKey: ['personas', forSpace],
             queryFn: () => api.personas(forSpace),
+            staleTime: 0,
           })
         : await queryClient.fetchQuery({
             queryKey: ['apps', forSpace],
             queryFn: () => api.apps(forSpace),
+            staleTime: 0,
           })
     children = entityItems(layer, list)
   } else {

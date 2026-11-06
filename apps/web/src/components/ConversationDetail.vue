@@ -51,7 +51,8 @@ defineExpose({ focusTitle: () => titleEl.value?.focus() })
         <slot name="nav" />
         <h2 ref="titleEl" tabindex="-1">{{ conversationTitle(data) }}</h2>
         <p class="head-meta">
-          <span>{{ data.app.name }}</span>
+          <!-- 不带会话上下文的会话，名字就是应用 -->
+          <span v-if="data.kind !== 'none'">{{ data.app.name }}</span>
           <span>{{ data.kind === 'none' ? '本人' : conversationKindLabels[data.kind] }}</span>
           <RouterLink
             v-if="data.subject"
