@@ -7,7 +7,7 @@ import type {
   MemoryView,
   SpaceOverview,
 } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { canRead, consoleAccess, type Access } from '../../access/access'
@@ -354,6 +354,91 @@ describe.skipIf(!testDatabaseUrl)('管理界面的历史、撤销删除与恢复
       expectedVersion: h2.memory.version,
     })
     expect(res.status).toBe(400)
+  })
+
+  // 这条记忆的标题、全文检索与全部事件快照里的标题
+  async function titlesOf(id: string) {
+    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .select({ title: memories.title, fts: sql<string>`${memories.fts}::text` })
+        .from(memories)
+        .where(eq(memories.id, id)),
+    )
+    const events = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(memoryEvents).where(eq(memoryEvents.memoryId, id)),
+    )
+    const snapshots = events.flatMap((e) => [e.before, e.after]).filter(Boolean)
+    return {
+      title: row!.title,
+      fts: row!.fts,
+      snapshots: snapshots.map((s) => (s as { title: unknown }).title),
+      events: JSON.stringify(events),
+    }
+  }
+
+  it('改成机密：从正文 # 标题取的标题换成标识，列、全文检索与历史快照里都不留，恢复此版本也带不回来', async () => {
+    const m = await create(ws.cookie, {
+      uri: 'user://notes/router',
+      content: '# 家里的路由器\n管理地址贴在背面',
+    })
+    expect(m.title).toBe('家里的路由器')
+    await patch(ws.cookie, { uri: m.uri, priority: 3 })
+    const secret = await patch(ws.cookie, { uri: m.uri, sensitivity: 'secret' })
+    expect(secret.title).toBe('router')
+    const after = await titlesOf(m.id)
+    expect(after.title).toBe('router')
+    expect(after.fts).not.toContain('路由器')
+    expect(after.snapshots).toEqual(Array(after.snapshots.length).fill('router'))
+    expect(after.events).not.toContain('家里的路由器')
+
+    // 恢复到改成机密之前的一版：快照里的标题已经换掉了，正文也没有
+    const h = await history(ws.cookie, m.id)
+    expect(h.events.map((e) => e.after?.title)).toEqual(['router', 'router', 'router'])
+    const restored = await ok<MemoryView>(
+      await restoreRes(ws.cookie, {
+        memoryId: m.id,
+        eventId: h.events[0]!.id,
+        expectedVersion: secret.version,
+      }),
+    )
+    expect(restored).toMatchObject({ title: 'router', priority: 2, content: null })
+    expect((await titlesOf(m.id)).events).not.toContain('家里的路由器')
+  })
+
+  it('改成机密：正文改过、标题还是之前那版正文的 # 标题的也换掉；明确给的别的标题照旧，等于正文 # 标题的照样换', async () => {
+    const vpn = await create(ws.cookie, { uri: 'user://notes/vpn', content: '# 旧的 VPN\n地址' })
+    await patch(ws.cookie, { uri: vpn.uri, content: '# 新的 VPN\n新地址' })
+    expect((await titlesOf(vpn.id)).title).toBe('旧的 VPN')
+    // 正文与敏感级一起改：标题是改之前那版正文的 # 标题
+    const both = await create(ws.cookie, { uri: 'user://notes/both', content: '# 甲\n一' })
+    expect(
+      (await patch(ws.cookie, { uri: both.uri, content: '# 乙\n二', sensitivity: 'secret' })).title,
+    ).toBe('both')
+    expect((await patch(ws.cookie, { uri: vpn.uri, sensitivity: 'secret' })).title).toBe('vpn')
+    for (const id of [vpn.id, both.id]) {
+      const titles = await titlesOf(id)
+      for (const leaked of ['VPN', '甲', '乙']) expect(titles.events).not.toContain(leaked)
+    }
+
+    // 明确给的标题和正文的 # 标题不同：照旧，和触发场景、关键词一样是明文
+    const nas = await create(ws.cookie, {
+      uri: 'user://notes/nas',
+      title: '书房的存储',
+      content: '# NAS\n在书房',
+    })
+    const kept = await patch(ws.cookie, { uri: nas.uri, sensitivity: 'secret' })
+    expect(kept.title).toBe('书房的存储')
+    expect((await titlesOf(nas.id)).snapshots).toEqual(['书房的存储', '书房的存储', '书房的存储'])
+    // 机密记忆的标题写成正文的 # 标题：分不清是不是照抄正文，一样换成标识
+    expect((await patch(ws.cookie, { uri: nas.uri, title: 'NAS' })).title).toBe('nas')
+    const wifi = await create(ws.cookie, {
+      uri: 'user://notes/wifi',
+      title: '无线网络',
+      content: '# 无线网络\n密码在柜子里',
+      sensitivity: 'secret',
+    })
+    expect(wifi.title).toBe('wifi')
+    expect((await titlesOf(wifi.id)).events).not.toContain('无线网络')
   })
 
   it('撤销删除：原样恢复（secret 的正文也在），版本加一，重新生成向量；URI 被占用时 409', async () => {

@@ -61,24 +61,43 @@ const FENCE = /^ {0,3}(`{3,}|~{3,})/
 // 换成空格的控制字符：标题里不能有
 const CONTROL = /\p{Cc}+/gu
 
-// 不给标题时的标题：正文里第一个 # 标题，没有就用标识。机密的正文是加密的、标题是明文，
-// 不从正文里取；标题里带凭据占位符的也不取（占位符只能写在正文里）。截到上限时不切开代理对
-export function deriveTitle(content: string, path: string, sensitivity: Sensitivity): string {
-  if (sensitivity !== 'secret') {
-    let fence: string | null = null
-    for (const line of content.split('\n')) {
-      const opened = FENCE.exec(line)?.[1]
-      if (opened && (fence === null || opened[0] === fence[0])) {
-        fence = fence === null ? opened : null
-        continue
-      }
-      if (fence !== null) continue
-      const heading = HEADING.exec(line)?.[1]?.replace(CONTROL, ' ').trim()
-      if (heading && !mentionsPlaceholder(heading)) return clip(heading)
-      if (heading) break
+// 正文里第一个 # 标题，取不出来时为 null：没有 # 标题，或者第一个 # 标题里带凭据占位符（占位符只能写在正文里）。
+// 截到上限时不切开代理对
+export function firstHeading(content: string): string | null {
+  let fence: string | null = null
+  for (const line of content.split('\n')) {
+    const opened = FENCE.exec(line)?.[1]
+    if (opened && (fence === null || opened[0] === fence[0])) {
+      fence = fence === null ? opened : null
+      continue
     }
+    if (fence !== null) continue
+    const heading = HEADING.exec(line)?.[1]?.replace(CONTROL, ' ').trim()
+    if (heading) return mentionsPlaceholder(heading) ? null : clip(heading)
   }
-  return identifierOf(path)
+  return null
+}
+
+// 不给标题时的标题：正文里第一个 # 标题，没有就用标识。机密的正文是加密的、标题是明文，不从正文里取
+export function deriveTitle(content: string, path: string, sensitivity: Sensitivity): string {
+  return (sensitivity !== 'secret' && firstHeading(content)) || identifierOf(path)
+}
+
+// 几段正文各自的第一个 # 标题（不是字符串的跳过）
+export function headingsOf(contents: Iterable<unknown>): Set<string> {
+  const headings = new Set<string>()
+  for (const content of contents) {
+    const heading = typeof content === 'string' ? firstHeading(content) : null
+    if (heading) headings.add(heading)
+  }
+  return headings
+}
+
+// 机密记忆的标题：等于正文（headings 是这条记忆各版明文正文的 # 标题）第一个 # 标题的换成标识。没给标题时标题就是
+// 从正文取的，正文加密、历史抹掉之后它还以明文留在标题、全文检索与快照里；分不清是取的还是照抄的，一律换。
+// 别的标题照旧，和触发场景、关键词一样是明文
+export function withoutHeading(title: string, path: string, headings: ReadonlySet<string>): string {
+  return headings.has(title) ? identifierOf(path) : title
 }
 
 // 和契约里的长度上限一样按 UTF-16 码元算，按码点往里放

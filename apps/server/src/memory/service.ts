@@ -146,8 +146,10 @@ import {
   DEFAULT_SENSITIVITY,
   deriveTitle,
   formatUri,
+  headingsOf,
   layerOf,
   parseUri,
+  withoutHeading,
   type ParsedUri,
 } from './uri'
 
@@ -1038,7 +1040,11 @@ export class MemoryService {
     const ownership = await this.resolveOwnership(tx, parsed)
     const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
     checkSensitivity(ownership.layer, sensitivity)
-    const title = input.title ?? deriveTitle(input.content, parsed.path, sensitivity)
+    const wanted = input.title ?? deriveTitle(input.content, parsed.path, sensitivity)
+    const title =
+      sensitivity === 'secret'
+        ? withoutHeading(wanted, parsed.path, headingsOf([input.content]))
+        : wanted
     this.assertWritable(
       { ...ownership, sensitivity },
       `无权写入${layerWithValue(ownership.layer)}的${sensitivityWithValue(sensitivity)}记忆`,
@@ -1310,6 +1316,18 @@ export class MemoryService {
     const beforeGlossary =
       meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
     checkOutsideContent(input.disclosure, input.glossaryAdd ?? [], input.title)
+    // 改标题不改坐标。结果是机密时，标题不能是明文正文的 # 标题（见 withoutHeading）：这次的正文、改之前的正文，
+    // 改成机密时还有历史里的每一版（它们随后由 scrubHistory 抹掉），恢复此版本带回来的标题也一样
+    const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
+    const headings =
+      sensitivity === 'secret'
+        ? headingsOf([
+            plaintext,
+            before.content,
+            ...(becameSecret ? await this.historyContents(tx, before.id) : []),
+          ])
+        : null
+    const title = input.title ?? before.title
     const [row] = await tx
       .update(memories)
       .set({
@@ -1317,8 +1335,7 @@ export class MemoryService {
         // 正文变了，忽略时记下的哈希就没用了；留着的话，它是含旧值的正文的 SHA-256，能离线猜解
         ...(plaintext !== before.content ? { plaintextIgnoredHash: null } : {}),
         sensitivity,
-        // 改标题不改坐标
-        ...(input.title !== undefined ? { title: input.title } : {}),
+        title: headings && title !== null ? withoutHeading(title, before.path!, headings) : title,
         ...(meta.provenance ? { provenance: meta.provenance } : {}),
         priority: input.priority ?? before.priority,
         disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
@@ -1361,7 +1378,6 @@ export class MemoryService {
     }
     const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
     await this.syncCredentialRefs(tx, before.id, sensitivity, plaintext)
-    const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
     await this.event(
       tx,
       before.id,
@@ -1372,7 +1388,7 @@ export class MemoryService {
     )
     // 改成 secret 之后，历史事件里不能再留着明文
     if (becameSecret) {
-      await this.scrubHistory(tx, before.id)
+      await this.scrubHistory(tx, before.id, headings!)
       // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
       await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
     }
@@ -1381,14 +1397,40 @@ export class MemoryService {
     return this.toView(tx, row, glossary, read ? (meta.via ?? 'rest') : null)
   }
 
-  private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
-    await tx
-      .update(memoryEvents)
-      .set({
-        before: sql`case when ${memoryEvents.before} is null then null else ${memoryEvents.before} - 'content' - 'fts' end`,
-        after: sql`case when ${memoryEvents.after} is null then null else ${memoryEvents.after} - 'content' - 'fts' end`,
+  // 这条记忆历史快照里的各版正文：改成机密之前，标题可能取自其中任何一版的 # 标题（修改正文不重新取标题）
+  private async historyContents(tx: Tx, memoryId: string): Promise<(string | null)[]> {
+    const rows = await tx
+      .select({
+        before: sql<string | null>`${memoryEvents.before}->>'content'`,
+        after: sql<string | null>`${memoryEvents.after}->>'content'`,
       })
+      .from(memoryEvents)
       .where(eq(memoryEvents.memoryId, memoryId))
+    return rows.flatMap((r) => [r.before, r.after])
+  }
+
+  // 改成机密之后，历史快照里不能再留着明文：去掉正文与旧快照里的全文检索向量，标题是某一版正文的 # 标题的
+  // （headings，见 applyUpdate）换成那一版的标识。取 # 标题的规则只有 firstHeading 一份，所以在 JS 里改
+  private async scrubHistory(
+    tx: Tx,
+    memoryId: string,
+    headings: ReadonlySet<string>,
+  ): Promise<void> {
+    const events = await tx
+      .select({ id: memoryEvents.id, before: memoryEvents.before, after: memoryEvents.after })
+      .from(memoryEvents)
+      .where(eq(memoryEvents.memoryId, memoryId))
+    for (const event of events) {
+      const before = secretSnapshot(event.before, headings)
+      const after = secretSnapshot(event.after, headings)
+      if (
+        JSON.stringify(before) === JSON.stringify(event.before) &&
+        JSON.stringify(after) === JSON.stringify(event.after)
+      ) {
+        continue
+      }
+      await tx.update(memoryEvents).set({ before, after }).where(eq(memoryEvents.id, event.id))
+    }
   }
 
   // 忽略明文提示：记下这段正文的哈希，正文改了（不管经哪条写入路径）就不再算（见 PLAINTEXT）。要写得了这条记忆，
@@ -3320,6 +3362,18 @@ function scrubSnapshot(
     if (typeof version[key] === 'string') {
       version[key] = version[key].split(value).join(PLAINTEXT_MASK)
     }
+  }
+  return version
+}
+
+// 改成机密时的一个快照：去掉正文与全文检索向量，标题是正文 # 标题的换成这一版的标识（见 scrubHistory）
+function secretSnapshot(raw: unknown, headings: ReadonlySet<string>): unknown {
+  if (!raw || typeof raw !== 'object') return raw ?? null
+  const version: Record<string, unknown> = { ...raw }
+  delete version.content
+  delete version.fts
+  if (typeof version.title === 'string' && typeof version.path === 'string') {
+    version.title = withoutHeading(version.title, version.path, headings)
   }
   return version
 }
