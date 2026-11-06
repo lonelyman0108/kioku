@@ -34,7 +34,7 @@ import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 const props = defineProps<{ spaceId: string; canAct: boolean }>()
 const toast = useToast()
@@ -156,7 +156,7 @@ async function apply(item: DreamSuggestion) {
     const result = await api.applyDreamSuggestion(spaceId, item.id, bodyOf(item))
     drafts.delete(item.id)
     toast.add({
-      title: result.memory ? `已新建 ${result.memory.uri}` : `已${actionLabel(item)}`,
+      title: result.memory ? `已新建「${result.memory.title}」` : `已${actionLabel(item)}`,
       color: 'success',
     })
     refresh(spaceId)
@@ -314,7 +314,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
                   :to="memoryRoute(spaceId, memory.uri)"
                   class="memory-link"
                 >
-                  <UriPath :uri="memory.uri" />
+                  <MemoryName :uri="memory.uri" :title="memory.title" />
                 </RouterLink>
                 <RouterLink
                   v-else-if="memory.subject"

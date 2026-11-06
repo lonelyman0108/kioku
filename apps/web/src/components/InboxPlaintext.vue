@@ -17,7 +17,7 @@ import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 // 疑似明文凭据：逐条转存为凭据或者忽略，忽略过的可以看、可以撤销。列表接口不给正文，这里也不显示值
 const props = defineProps<{ spaceId: string }>()
@@ -83,8 +83,8 @@ const convertible = (item: MemoryListItem) => placeholderAllowed(item.layer, ite
         <li v-for="item in items" :key="item.id" class="plain-row">
           <div class="plain-uri">
             <StrataSwatch :layer="item.layer" :sensitivity="item.sensitivity" />
-            <RouterLink :to="memoryRoute(spaceId, item.uri)"
-              ><UriPath :uri="item.uri"
+            <RouterLink :to="memoryRoute(spaceId, item.uri)" class="min-w-0"
+              ><MemoryName :uri="item.uri" :title="item.title"
             /></RouterLink>
             <MemoryFlags :layer="item.layer" :sensitivity="item.sensitivity" />
           </div>

@@ -87,12 +87,12 @@ describe('变更记录的一行', () => {
   const entry = (changes: Partial<ActivityItem> = {}) =>
     render(ActivityEntry, { item: item(changes), spaceId: 'space' })
 
-  it('谁、动作、URI、字段、时间都在一行里', async () => {
+  it('谁、动作、标题、字段、时间都在一行里，坐标放在悬停里', async () => {
     const html = await entry()
     expect(html).toContain('Claude Code（MacBook）')
     expect(html).toContain('修改')
-    expect(html).toContain('user://projects/atlas/')
-    expect(html).toContain('release')
+    expect(html).toContain('>发布步骤</span>')
+    expect(html).toContain('title="发布步骤\nuser://projects/atlas/release"')
     expect(html).toContain('正文、优先级')
     expect(html).toContain('07:05')
   })

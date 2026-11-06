@@ -12,7 +12,6 @@ import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
 
 // 启动加载预览：按应用的一个 Key 模拟会话开始，只给应用所有者（会读到所有者的私人层）。
 // keyId 是左边选中的 Key，没有有效 Key 时没有。
@@ -137,7 +136,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             v-for="segment in usage.segments"
             :key="segment.uri"
             :style="{ width: `${segment.width}%`, background: `var(--layer-${segment.layer})` }"
-            :title="`${segment.uri}：${segment.chars} 字`"
+            :title="`${segment.title}：${segment.chars} 字`"
           />
           <i
             v-if="usage.other > 0"
@@ -153,8 +152,8 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
         <ul v-if="preview.entries.length" class="boot-list">
           <li v-for="entry in preview.entries" :key="entry.uri">
             <StrataSwatch :layer="entry.layer" plain />
-            <RouterLink :to="memoryLink(entry.uri)" class="boot-uri">
-              <UriPath :uri="entry.uri" />
+            <RouterLink :to="memoryLink(entry.uri)" class="boot-uri" :title="entry.uri">
+              {{ entry.title }}
             </RouterLink>
             <span class="boot-layer">{{ layerLabels[entry.layer] }}</span>
             <span class="boot-chars">{{ entry.chars.toLocaleString() }}</span>
@@ -171,8 +170,8 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
           <SectionHeading title="近期更新" :level="3" class="boot-sub-head" />
           <ul v-if="preview.recent.length" class="boot-list">
             <li v-for="memory in preview.recent" :key="memory.uri">
-              <RouterLink :to="memoryLink(memory.uri)" class="boot-uri">
-                <UriPath :uri="memory.uri" />
+              <RouterLink :to="memoryLink(memory.uri)" class="boot-uri" :title="memory.uri">
+                {{ memory.title }}
               </RouterLink>
             </li>
           </ul>
@@ -195,8 +194,8 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
           <ul v-if="preview?.related.length" class="boot-list">
             <li v-for="candidate in preview.related" :key="candidate.uri">
               <StrataSwatch :layer="candidate.layer" plain />
-              <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri">
-                <UriPath :uri="candidate.uri" />
+              <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri" :title="candidate.uri">
+                {{ candidate.title }}
               </RouterLink>
               <span class="boot-layer">{{ layerLabels[candidate.layer] }}</span>
               <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>

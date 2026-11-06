@@ -7,7 +7,7 @@ import { memoryRoute } from '../routes'
 import { formatClock, formatTime } from '../time'
 import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 // 变更记录页的一行：谁、做了什么、URI、改了哪些字段、几点。按天分组，所以时间只写时和分。
 // 概览里放不下这么多列的版本是 RecentChange
@@ -25,9 +25,9 @@ const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c
       :to="memoryRoute(spaceId, item.uri)"
       class="entry-uri"
     >
-      <UriPath :uri="item.uri" />
+      <MemoryName :uri="item.uri" :title="item.title" />
     </RouterLink>
-    <UriPath v-else class="entry-uri" :uri="item.uri" />
+    <MemoryName v-else class="entry-uri" :uri="item.uri" :title="item.title" />
     <span class="entry-notes">
       <span v-if="fields">{{ fields }}</span>
       <span v-if="item.expired && !item.deleted" class="text-warning">已过期</span>

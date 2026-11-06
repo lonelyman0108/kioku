@@ -13,7 +13,7 @@ import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 // 概览里最近变更的一行：URI 一行，谁改了什么一行。完整的版本是变更记录页的 ActivityEntry
 const props = defineProps<{ item: ActivityItem; spaceId: string }>()
@@ -31,9 +31,9 @@ const change = computed(() => {
       :to="memoryRoute(spaceId, item.uri)"
       class="change-uri change-link"
     >
-      <UriPath :uri="item.uri" />
+      <MemoryName :uri="item.uri" :title="item.title" />
     </RouterLink>
-    <UriPath v-else class="change-uri" :uri="item.uri" />
+    <MemoryName v-else class="change-uri" :uri="item.uri" :title="item.title" />
     <span class="change-meta" :title="`${actorLabel(item.actor).name} ${change}`">
       <span class="truncate"><ActorName :actor="item.actor" /> {{ change }}</span>
       <span v-if="item.expired && !item.deleted" class="shrink-0">已过期</span>

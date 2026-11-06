@@ -30,9 +30,11 @@ const nodesOf = (node: TemplateNode): TemplateNode[] => [
 ]
 const contains = (el: TemplateNode, tag: string) => elementsOf(el).some((e) => e.tag === tag)
 
-// 同时有色块和 URI 的最小那一层元素，就是一行
+// 同时有色块和记忆（写坐标的 UriPath，或写标题、链到记忆的 RouterLink）的最小那一层元素，就是一行
 function swatchRows(source: string): TemplateNode[] {
-  const both = (el: TemplateNode) => contains(el, 'StrataSwatch') && contains(el, 'UriPath')
+  const both = (el: TemplateNode) =>
+    contains(el, 'StrataSwatch') &&
+    (contains(el, 'UriPath') || contains(el, 'MemoryName') || contains(el, 'RouterLink'))
   return elementsOf(template(source)).filter(
     (el) => both(el) && !(el.children ?? []).some((c) => c.type === ELEMENT && both(c)),
   )

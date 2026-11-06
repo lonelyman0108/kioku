@@ -67,7 +67,7 @@ import StrataStrip from './strata/StrataStrip.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import StrataTag from './strata/StrataTag.vue'
 import SwatchOptions from './strata/SwatchOptions.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 const props = defineProps<{ spaceId: string; uri: string }>()
 const emit = defineEmits<{
@@ -862,10 +862,10 @@ const properties = computed<Property[][]>(() => {
             </template>
           </NoteLine>
           <NoteLine v-if="overrides">
-            覆盖「{{ overrides.persona }}」的同名节点
+            覆盖「{{ overrides.persona }}」的同名记忆
             <template #actions>
               <button type="button" class="override-link" @click="emit('open', overrides!.uri)">
-                <UriPath :uri="overrides.uri" />
+                <MemoryName :uri="overrides.uri" :title="overrides.title" />
               </button>
             </template>
           </NoteLine>

@@ -1,12 +1,6 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import {
-  LAYERS,
-  SENSITIVITIES,
-  type CreatedKey,
-  type KeyInfo,
-  type KeyScopes,
-} from '@kioku/contracts'
+import { SENSITIVITIES, type CreatedKey, type KeyInfo, type KeyScopes } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, toRef, watch } from 'vue'
 
@@ -22,6 +16,7 @@ import { keyPresets } from './keyPresets'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
+import { STACK } from './strata/strata'
 
 const props = defineProps<{
   spaceId: string
@@ -62,7 +57,8 @@ const form = reactive({
   advanced: false,
   scopes: { ...keyPresets[0]!.scopes } as KeyScopes,
 })
-const layerItems = LAYERS.map((l) => ({ label: layerLabels[l], value: l }))
+// 和岩芯同一个顺序：会话在上，通用在下
+const layerItems = STACK.map((l) => ({ label: layerLabels[l], value: l }))
 // 编辑者无法签发机密级和跨人格写入的 Key，选项里也不给
 const sensitivityItems = computed(() =>
   SENSITIVITIES.filter((s) => props.isSpaceOwner || s !== 'secret').map((s) => ({
@@ -280,7 +276,7 @@ async function revoke() {
               <USwitch
                 v-if="isSpaceOwner"
                 v-model="form.scopes.admin"
-                :label="`${ADMIN_SCOPE_LABEL}：可写入任意人格与应用命名空间下的记忆`"
+                :label="`${ADMIN_SCOPE_LABEL}：可写入任意人格与应用的记忆`"
               />
             </template>
           </form>

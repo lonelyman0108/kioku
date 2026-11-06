@@ -121,11 +121,11 @@ export function statsChanged(before: ConsoleMemoryView, after: ConsoleMemoryView
 export function overriddenNode(
   detail: PersonaDetail | undefined,
   uri: string,
-): { uri: string; persona: string } | null {
+): { uri: string; title: string; persona: string } | null {
   const node = detail?.inherited.find((n) => n.overriddenBy === uri)
   if (!node) return null
   const persona = detail?.ancestors.find((a) => a.id === node.personaId)
-  return { uri: node.uri, persona: persona?.name ?? '祖先人格' }
+  return { uri: node.uri, title: node.title, persona: persona?.name ?? '祖先人格' }
 }
 
 // 记忆的来源范围（originScope，写成 app:<id> 这样）。记忆只来自全局或某个应用，群和私聊写下的是联系人的事实与会话摘要

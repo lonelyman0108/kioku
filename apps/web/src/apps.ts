@@ -41,6 +41,7 @@ export function simulatorState(
 
 export interface BootSegment {
   uri: string
+  title: string
   layer: Layer
   chars: number
   // 占整条的百分比
@@ -65,6 +66,7 @@ export function bootUsage(preview: BootPreview): BootUsage {
   const whole = Math.max(limit ?? used, used, 1)
   const segments = preview.entries.map((entry) => ({
     uri: entry.uri,
+    title: entry.title,
     layer: entry.layer,
     chars: entry.chars,
     width: (entry.chars / whole) * 100,
