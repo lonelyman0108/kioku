@@ -88,7 +88,7 @@ def sync_detailed(
     client: AuthenticatedClient,
     uri: str,
 ) -> Response[ErrorResponse | MemoryView]:
-    """按 URI 读取一条记忆
+    """按坐标（URI）读取一条记忆
 
     Args:
         uri (str):
@@ -117,7 +117,7 @@ def sync(
     client: AuthenticatedClient,
     uri: str,
 ) -> ErrorResponse | MemoryView | None:
-    """按 URI 读取一条记忆
+    """按坐标（URI）读取一条记忆
 
     Args:
         uri (str):
@@ -141,7 +141,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     uri: str,
 ) -> Response[ErrorResponse | MemoryView]:
-    """按 URI 读取一条记忆
+    """按坐标（URI）读取一条记忆
 
     Args:
         uri (str):
@@ -168,7 +168,7 @@ async def asyncio(
     client: AuthenticatedClient,
     uri: str,
 ) -> ErrorResponse | MemoryView | None:
-    """按 URI 读取一条记忆
+    """按坐标（URI）读取一条记忆
 
     Args:
         uri (str):

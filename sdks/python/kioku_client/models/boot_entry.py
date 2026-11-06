@@ -19,17 +19,21 @@ class BootEntry:
     """
     Attributes:
         uri (str):
+        title (str):
         layer (BootEntryLayer):
         content (str):
     """
 
     uri: str
+    title: str
     layer: BootEntryLayer
     content: str
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
         uri = self.uri
+
+        title = self.title
 
         layer = self.layer.value
 
@@ -40,6 +44,7 @@ class BootEntry:
         field_dict.update(
             {
                 "uri": uri,
+                "title": title,
                 "layer": layer,
                 "content": content,
             }
@@ -52,12 +57,15 @@ class BootEntry:
         d = dict(src_dict)
         uri = d.pop("uri")
 
+        title = d.pop("title")
+
         layer = BootEntryLayer(d.pop("layer"))
 
         content = d.pop("content")
 
         boot_entry = cls(
             uri=uri,
+            title=title,
             layer=layer,
             content=content,
         )

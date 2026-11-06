@@ -9,6 +9,7 @@ from attrs import field as _attrs_field
 from ..types import UNSET, Unset
 
 from ..models.turn_end_event_event import TurnEndEventEvent
+from ..types import UNSET, Unset
 from typing import cast
 
 if TYPE_CHECKING:
@@ -24,16 +25,16 @@ class TurnEndEvent:
     Attributes:
         event (TurnEndEventEvent):
         session_id (str):
-        context (SessionContext):
         user (str):
         reply (str):
+        context (SessionContext | Unset):
     """
 
     event: TurnEndEventEvent
     session_id: str
-    context: SessionContext
     user: str
     reply: str
+    context: SessionContext | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -43,11 +44,13 @@ class TurnEndEvent:
 
         session_id = self.session_id
 
-        context = self.context.to_dict()
-
         user = self.user
 
         reply = self.reply
+
+        context: dict[str, Any] | Unset = UNSET
+        if not isinstance(self.context, Unset):
+            context = self.context.to_dict()
 
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
@@ -55,11 +58,12 @@ class TurnEndEvent:
             {
                 "event": event,
                 "sessionId": session_id,
-                "context": context,
                 "user": user,
                 "reply": reply,
             }
         )
+        if context is not UNSET:
+            field_dict["context"] = context
 
         return field_dict
 
@@ -72,18 +76,23 @@ class TurnEndEvent:
 
         session_id = d.pop("sessionId")
 
-        context = SessionContext.from_dict(d.pop("context"))
-
         user = d.pop("user")
 
         reply = d.pop("reply")
 
+        _context = d.pop("context", UNSET)
+        context: SessionContext | Unset
+        if isinstance(_context, Unset):
+            context = UNSET
+        else:
+            context = SessionContext.from_dict(_context)
+
         turn_end_event = cls(
             event=event,
             session_id=session_id,
-            context=context,
             user=user,
             reply=reply,
+            context=context,
         )
 
         turn_end_event.additional_properties = d

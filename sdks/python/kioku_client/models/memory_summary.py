@@ -28,6 +28,7 @@ class MemorySummary:
         uri (str):
         exists (bool):
         id (None | UUID):
+        title (None | str):
         layer (MemorySummaryLayerType1 | MemorySummaryLayerType2Type1 | MemorySummaryLayerType3Type1 | None):
         sensitivity (MemorySummarySensitivityType1 | MemorySummarySensitivityType2Type1 |
             MemorySummarySensitivityType3Type1 | None):
@@ -39,6 +40,7 @@ class MemorySummary:
     uri: str
     exists: bool
     id: None | UUID
+    title: None | str
     layer: (
         MemorySummaryLayerType1 | MemorySummaryLayerType2Type1 | MemorySummaryLayerType3Type1 | None
     )
@@ -63,6 +65,9 @@ class MemorySummary:
             id = str(self.id)
         else:
             id = self.id
+
+        title: None | str
+        title = self.title
 
         layer: None | str
         if isinstance(self.layer, MemorySummaryLayerType1):
@@ -99,6 +104,7 @@ class MemorySummary:
                 "uri": uri,
                 "exists": exists,
                 "id": id,
+                "title": title,
                 "layer": layer,
                 "sensitivity": sensitivity,
                 "priority": priority,
@@ -130,6 +136,13 @@ class MemorySummary:
             return cast(None | UUID, data)
 
         id = _parse_id(d.pop("id"))
+
+        def _parse_title(data: object) -> None | str:
+            if data is None:
+                return data
+            return cast(None | str, data)
+
+        title = _parse_title(d.pop("title"))
 
         def _parse_layer(
             data: object,
@@ -239,6 +252,7 @@ class MemorySummary:
             uri=uri,
             exists=exists,
             id=id,
+            title=title,
             layer=layer,
             sensitivity=sensitivity,
             priority=priority,

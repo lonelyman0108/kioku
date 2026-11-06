@@ -8,7 +8,6 @@ from attrs import field as _attrs_field
 
 from ..types import UNSET, Unset
 
-from ..models.move_memory_request_layer import MoveMemoryRequestLayer
 from ..types import UNSET, Unset
 from uuid import UUID
 
@@ -22,14 +21,12 @@ class MoveMemoryRequest:
     Attributes:
         from_ (str):
         to (str):
-        layer (MoveMemoryRequestLayer | Unset):
         expected_id (UUID | Unset):
         expected_version (int | Unset):
     """
 
     from_: str
     to: str
-    layer: MoveMemoryRequestLayer | Unset = UNSET
     expected_id: UUID | Unset = UNSET
     expected_version: int | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
@@ -38,10 +35,6 @@ class MoveMemoryRequest:
         from_ = self.from_
 
         to = self.to
-
-        layer: str | Unset = UNSET
-        if not isinstance(self.layer, Unset):
-            layer = self.layer.value
 
         expected_id: str | Unset = UNSET
         if not isinstance(self.expected_id, Unset):
@@ -57,8 +50,6 @@ class MoveMemoryRequest:
                 "to": to,
             }
         )
-        if layer is not UNSET:
-            field_dict["layer"] = layer
         if expected_id is not UNSET:
             field_dict["expectedId"] = expected_id
         if expected_version is not UNSET:
@@ -73,13 +64,6 @@ class MoveMemoryRequest:
 
         to = d.pop("to")
 
-        _layer = d.pop("layer", UNSET)
-        layer: MoveMemoryRequestLayer | Unset
-        if isinstance(_layer, Unset):
-            layer = UNSET
-        else:
-            layer = MoveMemoryRequestLayer(_layer)
-
         _expected_id = d.pop("expectedId", UNSET)
         expected_id: UUID | Unset
         if isinstance(_expected_id, Unset):
@@ -92,7 +76,6 @@ class MoveMemoryRequest:
         move_memory_request = cls(
             from_=from_,
             to=to,
-            layer=layer,
             expected_id=expected_id,
             expected_version=expected_version,
         )
