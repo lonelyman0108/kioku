@@ -93,7 +93,7 @@ describe('选中的调用不在目录里', () => {
 
   it('这把 Key 没有这个工具：说明，不能运行', () => {
     expect(targetUnavailable(get, [start], 'ready')).toBe(
-      '当前 Key 的工具目录中没有 kioku_get，无法运行。请选择其他调用。',
+      '当前访问密钥的工具目录中没有 kioku_get，无法运行。请选择其他调用。',
     )
   })
 })

@@ -256,11 +256,11 @@ function onRunClick() {
             <p v-if="target.description" class="text-muted">{{ target.description }}</p>
             <template v-if="target.group === 'tool'">
               <p class="text-muted">
-                工具调用不带会话上下文，与真实 MCP 一致，按当前 Key 的全部权限读写。
+                工具调用不带会话上下文，与真实 MCP 一致，按当前访问密钥的全部权限读写。
               </p>
               <p v-if="app?.runtimeFamily === 'astrbot'" class="text-warning">
-                请勿为群聊 Bot 接入 MCP：群成员可借工具读取当前 Key
-                能读取的全部内容。此处仅测试工具本身。
+                请勿为群聊机器人接入
+                MCP：群成员可借工具读取当前访问密钥能读取的全部内容。此处仅测试工具本身。
               </p>
             </template>
             <template v-else-if="target.usesContext">

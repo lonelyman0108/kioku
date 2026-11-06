@@ -37,7 +37,7 @@ const days = computed(() => groupByDay(items.value, new Date(`${today.value}T00:
   <div class="activity">
     <PageHead title="变更记录">
       <template #hint>
-        <Hint>通过 Key 写入的改动，操作方显示为应用。</Hint>
+        <Hint>通过访问密钥写入的改动，操作方显示为应用。</Hint>
       </template>
       <template #actions>
         <UButton

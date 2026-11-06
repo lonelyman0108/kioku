@@ -6,9 +6,9 @@ import { Layer, PlainLayer, Provenance, Sensitivity } from './memory'
 // 两个保留 domain：persona://<人格标识>/... 属于人格层，app://<应用标识>/... 属于应用层。
 export const URI_PATTERN =
   /^([a-z][a-z0-9_]{0,31}):\/\/([a-z0-9_-]{1,64}(?:\/[a-z0-9_-]{1,64}){0,15})$/
-export const MemoryUri = z
-  .string()
-  .regex(URI_PATTERN, 'URI 格式应为 domain://path，例如 core://agent')
+// 接受 URI 的工具和接口都会返回它：工具参数里叫 domain，所以中英并列
+export const URI_FORMAT_MESSAGE = 'URI 格式应为 分区://路径（domain://path），例如 core://agent'
+export const MemoryUri = z.string().regex(URI_PATTERN, URI_FORMAT_MESSAGE)
 export const DomainOrUri = z.string().min(1)
 
 // 至少两个字：召回按子串匹配关键词，单字几乎会命中所有提示语

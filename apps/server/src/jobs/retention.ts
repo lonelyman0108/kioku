@@ -461,11 +461,11 @@ const STEPS: Step[] = [
     ),
   },
   {
-    label: 'Dream 的运行记录',
+    label: '整理的运行记录',
     batch: single('dreamRuns', (tx, r) => tableBatch(tx, dreamRuns, dreamRuns.id, r.dreamRuns)),
   },
   {
-    label: 'Dream 建议',
+    label: '整理建议',
     batch: single('dreamSuggestions', (tx, r) =>
       tableBatch(tx, dreamSuggestions, dreamSuggestions.id, r.dreamSuggestions),
     ),

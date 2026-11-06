@@ -12,7 +12,7 @@ export const memoryCrud: BenchScenarioInput = {
   id: 'memory-crud',
   title: '记忆增删改查',
   description:
-    '新建、读取、修改、浏览、移动、搜索、删除一条私人层的记忆；secret 级的 Key 再走一遍新建与读取。',
+    '新建、读取、修改、浏览、移动、搜索、删除一条私人层的记忆；机密级的访问密钥再走一遍新建与读取。',
   steps: [
     {
       kind: 'tool',
@@ -108,7 +108,7 @@ export const memoryCrud: BenchScenarioInput = {
     },
     {
       kind: 'tool',
-      label: '新建 secret',
+      label: '新建机密记忆',
       tool: 'kioku_create',
       arguments: {
         uri: SEALED,
@@ -122,7 +122,7 @@ export const memoryCrud: BenchScenarioInput = {
     },
     {
       kind: 'tool',
-      label: '读 secret 的元数据',
+      label: '读机密记忆的元数据',
       tool: 'kioku_get',
       arguments: { uri: SEALED },
       requires: SECRET_WRITE,
@@ -130,7 +130,7 @@ export const memoryCrud: BenchScenarioInput = {
     },
     {
       kind: 'tool',
-      label: '删掉 secret',
+      label: '删掉机密记忆',
       tool: 'kioku_delete',
       arguments: { uri: SEALED },
       requires: SECRET_WRITE,

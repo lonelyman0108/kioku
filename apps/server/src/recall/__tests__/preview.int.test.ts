@@ -276,6 +276,6 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
     })
     const revoked = await as('POST', `/apps/${appId}/keys/${keyId}/preview`)
     expect(revoked.status).toBe(404)
-    expect(((await revoked.json()) as { error: string }).error).toBe('Key 已作废')
+    expect(((await revoked.json()) as { error: string }).error).toBe('访问密钥已作废')
   })
 })

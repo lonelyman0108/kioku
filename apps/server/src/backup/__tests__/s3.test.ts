@@ -2,7 +2,7 @@ import { inspect } from 'node:util'
 
 import { afterEach, describe, expect, it, vi } from 'vitest'
 
-import { S3Error, s3Client } from '../s3'
+import { S3Error, s3Client, SETTINGS_STORAGE_CHECK } from '../s3'
 
 const LOCATION = {
   endpoint: 'https://s3.example.com',
@@ -28,7 +28,9 @@ describe('请求对象存储时的报错', () => {
     ['Access Key ID', { accessKeyId: 'AKIAPASTED\nwith-newline' }],
     ['会话令牌', { sessionToken: 'AKIAPASTED\nwith-newline' }],
   ])('%s里有换行：真实的 aws4fetch 把请求头写进错误，这里只说连不上', async (_, extra) => {
-    const err = await failure(s3Client({ ...LOCATION, ...extra }).delete('x'))
+    const err = await failure(
+      s3Client({ ...LOCATION, ...extra }, SETTINGS_STORAGE_CHECK).delete('x'),
+    )
     expect(err.message).toContain('无法连接存储')
     const text = inspect(err, { depth: null })
     for (const leaked of ['Credential', 'Signature', 'AKIAPASTED', 'with-newline']) {
@@ -42,8 +44,15 @@ describe('请求对象存储时的报错', () => {
         cause: Object.assign(new Error('connect backup-secret'), { code: 'ECONNREFUSED' }),
       })
     })
-    const err = await failure(s3Client(LOCATION).delete('x'))
-    expect(err.message).toBe('无法连接存储（ECONNREFUSED）：请检查实例设置中的接口地址与 Key')
+    const err = await failure(s3Client(LOCATION, SETTINGS_STORAGE_CHECK).delete('x'))
+    expect(err.message).toBe(
+      '无法连接存储（ECONNREFUSED）：请检查实例设置中的接口地址与 Access Key ID、Secret Access Key',
+    )
+    // 命令行 restore 的位置与凭据来自参数和环境变量，该检查什么由它给
+    const cli = '--s3-endpoint 与环境变量 AWS_ACCESS_KEY_ID、AWS_SECRET_ACCESS_KEY'
+    expect((await failure(s3Client(LOCATION, cli).delete('x'))).message).toBe(
+      `无法连接存储（ECONNREFUSED）：请检查${cli}`,
+    )
   })
 
   it('到了时限：说清等了多久，一般请求和上传的时限不同', async () => {
@@ -66,7 +75,7 @@ describe('请求对象存储时的报错', () => {
       expect(outcome).toBeInstanceOf(S3Error)
       return (outcome as S3Error).message
     }
-    const client = s3Client(LOCATION)
+    const client = s3Client(LOCATION, SETTINGS_STORAGE_CHECK)
     expect(await limited(client.delete('x'))).toBe('存储 30 秒内未返回')
     expect(await limited(client.put('x', Buffer.from('y')))).toBe('存储 600 秒内未返回')
   })

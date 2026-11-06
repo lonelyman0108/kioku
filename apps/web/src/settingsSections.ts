@@ -3,6 +3,8 @@
 export interface SettingsSection {
   key: string
   label: string
+  // 改名之前的 key：书签和别处的旧链接还能到这一节
+  legacyKeys?: readonly string[]
 }
 
 export const INSTANCE_SECTIONS = [
@@ -16,19 +18,22 @@ export const INSTANCE_SECTIONS = [
 ] as const satisfies readonly SettingsSection[]
 
 export const SPACE_SECTIONS = [
-  { key: 'layers', label: 'domain 默认层' },
+  { key: 'layers', label: '分区默认层' },
   { key: 'budget', label: '抽取预算' },
-  { key: 'dream', label: 'Dream 与私人内容' },
-  { key: 'export', label: '导出空间' },
-  { key: 'lore', label: '从 Lore 导入' },
+  { key: 'dream', label: '整理' },
+  { key: 'export', label: '导出' },
+  { key: 'import', label: '导入', legacyKeys: ['lore'] },
 ] as const satisfies readonly SettingsSection[]
 
 export type InstanceSectionKey = (typeof INSTANCE_SECTIONS)[number]['key']
 export type SpaceSectionKey = (typeof SPACE_SECTIONS)[number]['key']
 
-// 当前看哪一节：地址里写的不存在（链接过期、手写）时看第一节
+// 当前看哪一节：地址里写的是改名之前的 key 时看改名后的那一节，不存在（链接过期、手写）时看第一节
 export const currentSection = (sections: readonly SettingsSection[], value: unknown): string =>
-  sections.find((section) => section.key === value)?.key ?? sections[0]!.key
+  sections.find(
+    (section) =>
+      section.key === value || (typeof value === 'string' && section.legacyKeys?.includes(value)),
+  )?.key ?? sections[0]!.key
 
 // 子导航的链接带的参数：第一节是默认的，不写进地址
 export const sectionQuery = (

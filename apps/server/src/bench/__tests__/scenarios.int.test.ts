@@ -214,10 +214,10 @@ describe.skipIf(!testDatabaseUrl)('内置场景：三种执行方式、四种 Ke
   const expectRan = (name: string, scenario: BenchScenario, result: BenchRunResult) => {
     const ran = ranLabels(result)
     if (scenario.id === 'memory-crud') {
-      if (name === 'secret') expect(ran).toContain('新建 secret')
+      if (name === 'secret') expect(ran).toContain('新建机密记忆')
       if (name === 'agent') {
         expect(ran).toContain('新建')
-        expect(ran).not.toContain('新建 secret')
+        expect(ran).not.toContain('新建机密记忆')
       }
       if (name === 'bot' || name === 'readonly') expect(ran).toEqual(['读启动基线'])
     }

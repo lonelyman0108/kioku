@@ -28,7 +28,7 @@ export const usableKeys = (keys: readonly KeyInfo[]) => keys.filter((key) => key
 export const APP_REPLACED_NOTICE =
   '所选应用不属于当前账号，或已转移、删除。测试台仅限应用所有者使用，已切换到当前账号的另一个应用。'
 export const KEY_REPLACED_NOTICE =
-  '所选 Key 已失效或不属于当前应用，已切换到该应用的其他有效 Key，权限可能不同。'
+  '所选访问密钥已失效或不属于当前应用，已切换到该应用的其他有效访问密钥，权限可能不同。'
 
 export interface SelectionFix {
   // 要写回地址的参数，undefined 表示去掉
@@ -60,7 +60,7 @@ export function selectionFix(
 
 // 切到真实模式、在真实模式下运行场景之前都列出这些后果，由用户确认
 export const REAL_MODE_CONSEQUENCES = [
-  '写入立即生效：步骤与当前 Key 的真实调用一样落库，不回滚，并排入向量与抽取任务。',
+  '写入立即生效：步骤与当前访问密钥的真实调用一样落库，不回滚，并排入向量与抽取任务。',
   '新建的联系人没有删除接口，只能合并：带私聊、群聊或频道上下文的步骤，遇到首次出现的平台账号时会新建联系人。',
   'turn.end 将本轮写入对话缓冲，累积成批后排入抽取（消耗模型 token，抽取的事实写入联系人层）。',
   '写入的事件带「测试台」标记与当前账号，可在变更记录和凭据访问记录中查看。',
@@ -113,8 +113,8 @@ export function abandonedRun(
   if ('error' in settled && refusedBeforeWrite(settled.error)) return null
   const { id, view } = run
   const title =
-    '本次真实运行已中途作废（运行期间应用、Key 或模式发生变化），但可能已写入，请到变更记录确认。'
-  const what = `「${run.label}」按「${run.app}」的 Key「${run.key}」真实执行`
+    '本次真实运行已中途作废（运行期间应用、访问密钥或模式发生变化），但可能已写入，请到变更记录确认。'
+  const what = `「${run.label}」按「${run.app}」的访问密钥「${run.key}」真实执行`
   if ('result' in settled) {
     return { id, title, description: `${what}，结果如下。`, view, result: settled.result }
   }

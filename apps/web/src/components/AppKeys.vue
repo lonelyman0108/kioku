@@ -120,7 +120,7 @@ function closeIssue() {
 
 // 剪贴板接口只在 HTTPS 或 localhost 下可用；用局域网 HTTP 地址打开时提示手动复制
 const copyText = useCopy()
-const copy = (text: string) => copyText(text, '浏览器不允许自动复制，请手动选中 Key 后复制')
+const copy = (text: string) => copyText(text, '浏览器不允许自动复制，请手动选中访问密钥后复制')
 
 const revoking = ref<KeyInfo | null>(null)
 async function revoke() {
@@ -129,7 +129,7 @@ async function revoke() {
     await api.revokeKey(props.spaceId, props.appId, revoking.value.id)
     revoking.value = null
     await queryClient.invalidateQueries({ queryKey: queryKey.value })
-    toast.add({ title: 'Key 已吊销', color: 'success' })
+    toast.add({ title: '访问密钥已吊销', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '吊销失败', color: 'error' })
   }
@@ -138,20 +138,20 @@ async function revoke() {
 
 <template>
   <section class="app-keys">
-    <SectionHeading title="API Key">
+    <SectionHeading title="访问密钥">
       <template v-if="canIssue" #actions>
         <UButton size="sm" color="primary" variant="outline" @click="issueOpen = true">
-          签发 Key
+          签发访问密钥
         </UButton>
       </template>
     </SectionHeading>
-    <p v-if="!isAppOwner && !isSpaceOwner" class="keys-empty">仅应用所有者可查看和签发 Key</p>
+    <p v-if="!isAppOwner && !isSpaceOwner" class="keys-empty">仅应用所有者可查看和签发访问密钥</p>
     <template v-else>
       <NoteLine v-if="keys.isError.value" class="keys-failed" tone="error">
         {{ readFailure(keys.error.value) }}
       </NoteLine>
       <USkeleton v-if="keys.isPending.value" class="mt-3 h-24 w-full" />
-      <p v-else-if="keys.data.value && !keys.data.value.length" class="keys-empty">暂无 Key</p>
+      <p v-else-if="keys.data.value && !keys.data.value.length" class="keys-empty">暂无访问密钥</p>
       <ul>
         <li v-for="key in live" :key="key.id" class="key-row" :class="{ on: key.id === selected }">
           <!-- 已作废的 Key 没有权限范围可看，只能吊销 -->
@@ -216,7 +216,7 @@ async function revoke() {
     <!-- 明文 Key 显示期间不能点遮罩、按 Esc 或右上角关掉，只能点「我已保存」，免得没复制就丢了 -->
     <UModal
       :open="issueOpen"
-      title="签发 API Key"
+      title="签发访问密钥"
       :dismissible="!issued"
       :close="!issued"
       :ui="{ content: 'sm:max-w-2xl' }"
@@ -224,7 +224,7 @@ async function revoke() {
     >
       <template #body>
         <div v-if="issued" class="space-y-3">
-          <NoteLine tone="warning">Key 只显示这一次，关闭后无法再次查看，请立即保存。</NoteLine>
+          <NoteLine tone="warning">访问密钥只显示这一次，关闭后无法再次查看，请立即保存。</NoteLine>
           <div class="once">
             <code>{{ issued.key }}</code>
             <UButton
@@ -238,7 +238,7 @@ async function revoke() {
         </div>
         <div v-else class="issue">
           <form id="issue-key" class="space-y-4" @submit.prevent="issue">
-            <UFormField label="名称" help="用于辨认 Key，例如「MacBook 上的 Claude Code」">
+            <UFormField label="名称" help="用于辨认访问密钥，例如「MacBook 上的 Claude Code」">
               <UInput v-model="form.name" class="w-full" />
             </UFormField>
             <UFormField label="权限">
@@ -303,7 +303,7 @@ async function revoke() {
 
     <UModal
       :open="revoking !== null"
-      title="吊销这个 Key？"
+      title="吊销这个访问密钥？"
       @update:open="(v) => !v && (revoking = null)"
     >
       <template #body>

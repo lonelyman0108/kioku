@@ -10,7 +10,7 @@ const SESSION_ID = 'bench-${run}'
 export const claudeCodeSession: BenchScenarioInput = {
   id: 'claude-code-session',
   title: 'Claude Code 一次会话',
-  description: '会话开始注入启动上下文，每轮输入召回，模型用工具读写记忆，最后删掉写下的。',
+  description: '会话开始时注入启动加载的内容，每轮输入召回，模型用工具读写记忆，最后删掉写下的。',
   runtimes: ['claudecode', 'codex'],
   steps: [
     {

@@ -19,7 +19,7 @@ describe('抽取预算的提醒', () => {
   it('用完之后说清后果，后果一句都不能少', () => {
     const near = budgetWarning(usage(410_000))!
     expect(near.over).toBe(false)
-    expect(near.description).toContain('用完后本月仅写会话摘要，不再抽取事实，Dream 暂停。')
+    expect(near.description).toContain('用完后本月仅写会话摘要，不再抽取事实，整理暂停。')
     const over = budgetWarning(usage(500_000))!
     expect(over.over).toBe(true)
     expect(over.title).toBe('本月抽取预算已用完')

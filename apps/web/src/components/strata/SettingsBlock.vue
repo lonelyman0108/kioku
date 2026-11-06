@@ -2,13 +2,16 @@
 import SectionHeading from './SectionHeading.vue'
 
 // 设置里的一块：标题、一句说明，下面是表单或状态。块之间靠标题的墨线和留白分开。
-// 表单太宽不好读，默认限宽；要放长列表的用 wide
-withDefaults(defineProps<{ title: string; wide?: boolean }>(), { wide: false })
+// 表单太宽不好读，默认限宽；要放长列表的用 wide。一块里还能再分块（例如导入的各个来源），里面那块用 level 3
+withDefaults(defineProps<{ title: string; wide?: boolean; level?: 2 | 3 }>(), {
+  wide: false,
+  level: 2,
+})
 </script>
 
 <template>
   <section class="settings-block" :class="{ wide }">
-    <SectionHeading :title="title">
+    <SectionHeading :title="title" :level="level">
       <template v-if="$slots.actions" #actions><slot name="actions" /></template>
     </SectionHeading>
     <p v-if="$slots.note" class="block-note"><slot name="note" /></p>
@@ -20,7 +23,9 @@ withDefaults(defineProps<{ title: string; wide?: boolean }>(), { wide: false })
 .settings-block {
   max-width: 40rem;
 }
-.settings-block.wide {
+/* 里面那块放宽时外面跟着放宽，不然被外面的限宽挡住 */
+.settings-block.wide,
+.settings-block:has(.settings-block.wide) {
   max-width: 60rem;
 }
 .settings-block + .settings-block {

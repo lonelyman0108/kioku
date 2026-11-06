@@ -303,9 +303,9 @@ const disclosureCut = computed(
 </script>
 
 <template>
-  <SettingsBlock title="从 Lore 导入" :wide="Boolean(plan)">
+  <SettingsBlock title="Lore" :level="3" :wide="Boolean(plan)">
     <template #note>
-      将 Lore 的节点导入当前空间，确认计划后才写入。
+      导入 Lore 的节点，确认计划后才写入。
       <Hint>
         映射规则与命令行相同：core://agent 进入基础层，core://soul
         进入人格层，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
@@ -331,7 +331,9 @@ const disclosureCut = computed(
           core://soul：未新建人格，新建应用的默认人格为空
         </li>
         <li v-if="result.appsCreated.length">
-          新建应用：{{ result.appsCreated.join('、') }}。暂无 Key，请在「应用」中为要接入的应用签发
+          新建应用：{{
+            result.appsCreated.join('、')
+          }}。暂无访问密钥，请在「应用」中为要接入的应用签发
         </li>
         <li v-if="result.appsGivenPersona.length">
           设为默认人格 {{ persona.slug }}：{{ result.appsGivenPersona.join('、') }}
@@ -425,7 +427,7 @@ const disclosureCut = computed(
             在 Lore 设置页导出的 JSON，不超过 {{ formatBytes(LORE_FILE_MAX_BYTES) }}。
             <Hint>
               导出时不要包含召回事件：导入不使用，且文件会很大。文件先在浏览器中裁剪再上传，只上传所需的五张表（不超过
-              {{ formatBytes(LORE_UPLOAD_MAX_BYTES) }}），Lore 的接口
+              {{ formatBytes(LORE_UPLOAD_MAX_BYTES) }}），Lore 保存的 API
               Key、事件、日记与旧版本正文不会离开浏览器。
             </Hint>
           </template>
@@ -465,8 +467,8 @@ const disclosureCut = computed(
             />
           </UFormField>
           <NoteLine v-if="tokenExposed" tone="warning">
-            此地址为 http 且不在内网：Token 将明文传输，而此 Token 可清空整个 Lore。请尽量改用
-            https。
+            此地址为 http 且不在内网：API Token 将明文传输，而此 API Token 可清空整个
+            Lore。请尽量改用 https。
           </NoteLine>
         </template>
         <div class="grid gap-4 sm:grid-cols-2">
@@ -524,7 +526,7 @@ const disclosureCut = computed(
         </NoteLine>
 
         <section>
-          <SectionHeading title="人格与应用" :level="3" />
+          <SectionHeading title="人格与应用" :level="4" />
           <div class="plan-body space-y-1">
             <p v-if="effects.writesPersona">
               core://soul 导入为 <code class="uri">{{ plan.persona.slug }}</code>
@@ -566,7 +568,7 @@ const disclosureCut = computed(
         </section>
 
         <section>
-          <SectionHeading title="节点" :level="3">
+          <SectionHeading title="节点" :level="4">
             <template #actions>
               <USelect
                 v-model="filter"
@@ -661,7 +663,7 @@ const disclosureCut = computed(
         </details>
 
         <section v-if="sync">
-          <SectionHeading title="同步已导入的节点" :level="3" />
+          <SectionHeading title="同步已导入的节点" :level="4" />
           <div class="plan-body space-y-2">
             <p v-if="sync.current || sync.groups.length">
               已是最新 {{ sync.current }} 条。如不需要同步某节点，请在上方勾选「本次不同步」。

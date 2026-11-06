@@ -48,7 +48,10 @@ async function describe(res: Response): Promise<string> {
   return `存储返回 ${res.status}${detail ? `（${detail}）` : ''}`
 }
 
-export function s3Client(location: S3Location) {
+// 连不上存储时该检查的设置：实例设置里的备份按表单上的字段说；命令行 restore 的凭据来自参数与环境变量，由它自己给
+export const SETTINGS_STORAGE_CHECK = '实例设置中的接口地址与 Access Key ID、Secret Access Key'
+
+export function s3Client(location: S3Location, check: string) {
   // aws4fetch 自己会对 5xx 与 429 重试，次数调小，存储不可用时不要等太久
   const aws = new AwsClient({
     accessKeyId: location.accessKeyId,
@@ -78,7 +81,7 @@ export function s3Client(location: S3Location) {
     } catch (err) {
       if (timeout.aborted) throw new S3Error(`存储 ${Math.ceil(timeoutMs / 1000)} 秒内未返回`)
       // 不用错误自己的文字：访问密钥或会话令牌里有换行时，它把整个请求头（Credential 与 Signature）写进错误
-      throw new S3Error(fetchFailure('存储', err))
+      throw new S3Error(fetchFailure('存储', err, check))
     }
     if (!res.ok) throw new S3Error(await describe(res))
     return res

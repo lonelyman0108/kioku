@@ -68,7 +68,7 @@ watch(
 )
 const layerHelp = computed(() => {
   if (layerFixed.value) return undefined
-  if (suggestedLayer.value && !layerTouched.value) return '来自空间设置的 domain 默认层'
+  if (suggestedLayer.value && !layerTouched.value) return '来自空间设置的分区默认层'
   return undefined
 })
 const uriValid = computed(() => URI_PATTERN.test(form.uri))
@@ -146,7 +146,7 @@ async function submit() {
     <template #body>
       <!-- 不用 form：单选在表单里时回车会隐式提交，层和敏感级还没看完就建好了。只有点创建才提交 -->
       <div class="space-y-4">
-        <UFormField label="URI" help="domain://path，例如 core://agent、projects://kioku">
+        <UFormField label="URI" help="分区://路径，例如 core://agent、projects://kioku">
           <UInput v-model="form.uri" class="w-full font-mono" autofocus />
         </UFormField>
         <UFormField label="层" :help="layerHelp">
