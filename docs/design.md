@@ -271,7 +271,7 @@ REST 的错误一律是 `{ error }` 的 JSON：`/v1` 下没有的路径或方法
 
 ### 6.3 群聊机器人插件（AstrBot）
 
-插件在 `plugins/astrbot_plugin_kioku`（AstrBot 按目录名认插件），用 OpenAPI 生成的 Python SDK，自身不含记忆逻辑与提示词；要 AstrBot 4.24.1 以上（临时的额外用户内容从这个版本才有）。
+插件在单独的仓库 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins) 的 `plugins/astrbot_plugin_kioku`（AstrBot 按目录名认插件），用 OpenAPI 生成的 Python SDK，自身不含记忆逻辑与提示词；要 AstrBot 4.24.1 以上（临时的额外用户内容从这个版本才有）。
 
 - `on_llm_request`：从事件里取出 `chatType`、平台、群与发言人，同时调 `session.start` 与 `prompt.submit`。`session.start` 的结果（指引与启动加载的节点）追加到系统提示：它很少变，插件按会话缓存 10 分钟（没取到时 1 分钟后再试），不破坏服务商的提示缓存。`prompt.submit` 的结果（召回块与联系人直连）作为临时的额外用户内容附在这一轮，不进对话历史。
 - `on_llm_response`：把这一轮的用户消息与回复交给 `turn.end`，不等它完成，不拖慢回复。

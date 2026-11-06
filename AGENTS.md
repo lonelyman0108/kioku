@@ -34,7 +34,7 @@
 - 开 PR：`scripts/pr.sh`（`--no-merge` 只开不合并）
 - 本地运行：`pnpm dev`（后端 18920，管理界面 5173）
 - 单项检查：`pnpm typecheck`、`pnpm lint`、`pnpm format:check`、`pnpm test`、`pnpm build`
-- Python（`sdks/python` 与插件目录里各自执行）：`uv run pytest`、`uv run ruff check .`、`uv run ruff format --check .`
+- Python（`sdks/python` 里执行）：`uv run pytest`、`uv run ruff check .`、`uv run ruff format --check .`
 
 ## 目录与约定
 
@@ -51,7 +51,7 @@
 
 - workspace 包以 TS 源码互相引用（`exports` 指向 `src/`），后端用 tsdown 打包时一并打进产物。原因：省掉各包单独构建的步骤。
 - 依赖版本写死、不加 `^`。pnpm 默认拒绝发布不足一天的新版本，遇到时换前一个版本，不要加 `minimumReleaseAgeExclude`。原因：给被投毒的包留出被发现的时间。
-- `sdks/python` 由服务端的 OpenAPI 生成：改了应用调用的接口（Key 鉴权的生命周期、召回、启动加载、记忆、whoami）或它们用到的契约后，跑 `sdks/python/generate.sh`，生成的改动一起提交；门禁会重新生成并比对。原因：AstrBot 插件用它，接口变了 SDK 没跟上时要到运行时才出错。
+- `sdks/python` 由服务端的 OpenAPI 生成：改了应用调用的接口（Key 鉴权的生命周期、召回、启动加载、记忆、whoami）或它们用到的契约后，跑 `sdks/python/generate.sh`，生成的改动一起提交；门禁会重新生成并比对。合并之后到插件仓库 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins) 用 `scripts/sync-client.sh` 同步一份给 AstrBot 插件。原因：AstrBot 插件用它，接口变了 SDK 没跟上时要到运行时才出错。插件（Claude Code、AstrBot）都在那个仓库里，改生命周期事件的输出格式时要同步看那边的钩子。
 - 管理界面的 `typecheck` 先跑一次 `vite build`：Nuxt UI 的 Vite 插件在构建时才生成 `auto-imports.d.ts`、`components.d.ts`，没有它们 vue-tsc 会报找不到组件。
 
 ## 管理界面的设计与文案
