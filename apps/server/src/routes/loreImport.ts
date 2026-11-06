@@ -37,7 +37,7 @@ import {
   type ExistingApp,
   type ImportOptions,
   type ImportPreview,
-  type ImportTarget,
+  type PlanSnapshot,
   type LoreSnapshot,
   type SyncPlan,
 } from '../importer/lore'
@@ -99,17 +99,17 @@ const applyRoute = createRoute({
 
 // 不带勾选的基准计划：/plan 看的是它，/apply 重新算它来比指纹。按勾选重算时沿用它查到的占用与读到的导入记录
 async function basePlan(
-  target: ImportTarget,
+  snap: PlanSnapshot,
   snapshot: LoreSnapshot,
   existing: ExistingApp[],
   options: Pick<ImportOptions, 'accountId' | 'persona' | 'exportedAt'>,
 ): Promise<BasePlan & { preview: ImportPreview; sync: SyncPlan; fingerprint: string }> {
-  const base = await planImportFor(target, snapshot, existing, {
+  const base = await planImportFor(snap, snapshot, existing, {
     ...options,
     secretUris: new Set(),
   })
-  const preview = await previewImport(target, base.plan, base.imports)
-  const sync = await planSync(target, base.plan, snapshot, base.imports)
+  const preview = await previewImport(snap, base.plan, base.imports)
+  const sync = await planSync(snap, base.plan, snapshot, base.imports)
   return { ...base, preview, sync, fingerprint: planFingerprint(base.plan, preview, sync) }
 }
 

@@ -553,48 +553,45 @@ export function existingImportApps(db: Db, spaceId: string): Promise<ExistingApp
 // 同一份（uriConflicts），能释放的过期记录按导入者写入的身份算。这里只是提前标出来，写入时仍以数据库为准：
 // 之后才被占用的照样记进结果的 occupied
 async function readPlanState(
-  target: ImportTarget,
+  snap: PlanSnapshot,
   draft: ImportPlan,
 ): Promise<{ imports: ImportRecords; occupied: Set<string> }> {
-  // 在 inPlanSnapshot 里时这是那个快照里的 savepoint；单独调用时自己开一个同样的快照
-  return withSpace(
-    target.db,
-    target.spaceId,
-    async (tx) => {
-      const imports = await importRecordsIn(tx)
-      const moved = movedInLore(draft, imports)
-      const access = importerAccess(target)
-      const claims = draft.memories
-        .filter((m) => priorImport(m, imports, moved).state === 'new')
-        .map((m) => ({
-          importKey: m.importKey,
-          id: null,
-          // 计划里的 URI 都经过 CreateMemoryRequest 的校验
-          ...parseUri(m.request.uri)!,
-          ownerAccountId: ownerFor(access, m.request.layer!),
-          ended: false,
-        }))
-      const taken = await uriConflicts(tx, access, claims)
-      return { imports, occupied: new Set([...taken].map((c) => c.importKey)) }
-    },
-    PLAN_SNAPSHOT,
-  )
+  const imports = await importRecordsIn(snap.tx)
+  const moved = movedInLore(draft, imports)
+  const access = importerAccess(snap)
+  const claims = draft.memories
+    .filter((m) => priorImport(m, imports, moved).state === 'new')
+    .map((m) => ({
+      importKey: m.importKey,
+      id: null,
+      // 计划里的 URI 都经过 CreateMemoryRequest 的校验
+      ...parseUri(m.request.uri)!,
+      ownerAccountId: ownerFor(access, m.request.layer!),
+      ended: false,
+    }))
+  const taken = await uriConflicts(snap.tx, access, claims)
+  return { imports, occupied: new Set([...taken].map((c) => c.importKey)) }
 }
 
-const PLAN_SNAPSHOT = { isolationLevel: 'repeatable read', accessMode: 'read only' } as const
+// 出计划的快照：target 的 db 换成了快照的事务（给预览、同步与记忆服务用），tx 是这个事务本身
+export interface PlanSnapshot extends ImportTarget {
+  tx: Tx
+}
 
 // 出计划的只读快照（命令行与路由共用）：已有应用、导入记录、占用、预览与同步都在这一个可重复读的只读事务里读，
-// 出自同一份数据。回调拿到的 target 的 db 换成了这个事务，里面再开的事务（withSpace、记忆服务的读取）都是它的 savepoint。
-// 同一条连接上并行的 savepoint 会交错，所以回调里只能一步一步地读，不能并行。写入不在这里，见 applyImport
+// 出自同一份数据；导入记录只在这里读（planImportFor 要求传入快照）。回调拿到的 db 是这个事务，里面再开的事务
+// （withSpace、记忆服务的读取）都是它的 savepoint：传给它们的事务配置（隔离级别、只读）不生效，照外层的；
+// 同一条连接上并行的 savepoint 会交错，所以回调里只能一步一步地读，不能并行（并行读的，比如 verifyMasterKey，
+// 放在快照之外或用连接池另开连接）。写入不在这里，见 applyImport
 export function inPlanSnapshot<T>(
   target: ImportTarget,
-  fn: (snapshot: ImportTarget) => Promise<T>,
+  fn: (snapshot: PlanSnapshot) => Promise<T>,
 ): Promise<T> {
   return withSpace(
     target.db,
     target.spaceId,
-    (tx) => fn({ ...target, db: tx as unknown as Db }),
-    PLAN_SNAPSHOT,
+    (tx) => fn({ ...target, db: tx as unknown as Db, tx }),
+    { isolationLevel: 'repeatable read', accessMode: 'read only' },
   )
 }
 
@@ -612,13 +609,13 @@ export interface BasePlan {
 // 出计划（命令行与路由共用）：先不看占用算一次，再把 URI 已被别的记忆占用的目标列为不导入，计划里要新建的就是会写入的。
 // 重算只少了这几个目标（见 planImport 循环里的判断），别的目标与状态都不变，不用再查一遍
 export async function planImportFor(
-  target: ImportTarget,
+  snap: PlanSnapshot,
   snapshot: LoreSnapshot,
   existingApps: ExistingApp[],
   options: Omit<ImportOptions, 'occupied'>,
 ): Promise<BasePlan> {
   const draft = planImport(snapshot, existingApps, options)
-  const { imports, occupied } = await readPlanState(target, draft)
+  const { imports, occupied } = await readPlanState(snap, draft)
   return {
     plan: occupied.size ? planImport(snapshot, existingApps, { ...options, occupied }) : draft,
     occupied,
@@ -805,7 +802,7 @@ export async function applyImport(
   await withSpace(db, spaceId, async (tx) => {
     // 在写入事务里读导入记录：和这里写下的人格、应用出自同一刻的判断
     done = await importRecordsIn(tx)
-    if (expected && !sameImports(done, expected)) throw new MemoryError(409, PLAN_CHANGED)
+    if (expected && !sameImports(plan, done, expected)) throw new MemoryError(409, PLAN_CHANGED)
     moved = movedInLore(plan, done)
     const [created] = writesNewPersona(plan, done, moved)
       ? await tx
@@ -942,19 +939,17 @@ export interface ImportedMemory {
 // 记忆后来删掉了也补得出，去重键才与现在的一致。一次计划只读一次（planImportFor），预览与同步都用它
 export type ImportRecords = Map<string, ImportedMemory[]>
 
-export function readImportRecords(
-  target: Pick<ImportTarget, 'db' | 'spaceId'>,
-): Promise<ImportRecords> {
-  return withSpace(target.db, target.spaceId, importRecordsIn)
-}
-
-// 两份导入记录是不是同一份：同样的导入事件、对应的记忆还在同样的位置与状态。版本号不比：导入只看导入过没有、
-// 记忆在哪、是不是机密，同步另按版本号逐条核对（applySync 的 expectedVersion）
-function sameImports(a: ImportRecords, b: ImportRecords): boolean {
+// 两份导入记录对这份计划来说是不是一样：只看这次要写的节点的导入事件，和会改变怎么写的几项——有没有、
+// 对应哪个去重键、导入时在 Lore 的哪个 URI、写到哪个人格（新建、已导入、换了路径都按这几项判断）。
+// 别的节点的不比；记忆现在在哪、是不是机密、删没删、版本号也不比：导入的判断用不到，空间里的记忆多半是导入的，
+// 比了就会时常误报。同步另按版本号逐条核对（applySync 的 expectedVersion）
+function sameImports(plan: ImportPlan, a: ImportRecords, b: ImportRecords): boolean {
+  const nodes = new Set(plan.memories.map((m) => String(m.context.loreNodeUuid)))
   const canonical = (records: ImportRecords) =>
     [...records.values()]
       .flat()
-      .map((m) => JSON.stringify([m.key, m.memoryId, m.importedUri, m.state, m.uri]))
+      .filter((m) => nodes.has(m.loreNodeUuid))
+      .map((m) => JSON.stringify([m.key, m.loreNodeUuid, m.loreUri, m.targetPersona]))
       .sort()
       .join('\n')
   return canonical(a) === canonical(b)
@@ -1217,7 +1212,8 @@ export async function planSync(
   // 目标被别的记忆占用的只出现在要新建的目标上，没有对应的旧记录，不会挂到任何一条上
   const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
   const nodeReasons = new Map<string, string[]>()
-  const targetReasons = new Map<ImportedMemory, string[]>()
+  // 一条旧记录对应几个被跳过的目标时（换了路径之后映射到几个应用）只写第一个目标的原因：几句常常是同一句
+  const targetReason = new Map<ImportedMemory, string>()
   for (const s of plan.skipped) {
     if (!s.target) {
       nodeReasons.set(s.source, [...(nodeReasons.get(s.source) ?? []), s.reason])
@@ -1225,7 +1221,7 @@ export async function planSync(
     }
     const key = s.target.importKey
     for (const m of [...(done.get(key) ?? []), ...(moved.get(key) ?? [])]) {
-      targetReasons.set(m, [...(targetReasons.get(m) ?? []), s.reason])
+      if (!targetReason.has(m)) targetReason.set(m, s.reason)
     }
   }
   for (const m of all) {
@@ -1235,7 +1231,10 @@ export async function planSync(
       sync.goneFromLore.push(m.uri)
       continue
     }
-    const reasons = [...(nodeReasons.get(node.uri) ?? []), ...(targetReasons.get(m) ?? [])]
+    const reason = targetReason.get(m)
+    const reasons = [
+      ...new Set([...(nodeReasons.get(node.uri) ?? []), ...(reason ? [reason] : [])]),
+    ]
     report(
       m,
       reasons.length

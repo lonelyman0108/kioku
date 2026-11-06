@@ -772,7 +772,9 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
             persona: { slug: 'default', name: '默认人格' },
             secretUris: new Set<string>(),
           }
-          const { plan } = await planImportFor(target, snapshot, existing, options)
+          const { plan } = await inPlanSnapshot(target, (snap) =>
+            planImportFor(snap, snapshot, existing, options),
+          )
           const flagged = plan.skipped.some((s) => s.reason.endsWith('已被其他记忆占用'))
           expect(plan.memories.length).toBe(flagged ? 0 : 1)
           const result = await applyImport(target, planImport(snapshot, existing, options))
@@ -853,6 +855,58 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
             vi.useRealTimers()
           }
         })
+      })
+
+      it('一条旧记录对应几个被跳过的目标时，原因只写一句', async () => {
+        await ws.createApp('claude-a', { runtimeFamily: 'claudecode' })
+        await ws.createApp('claude-b', { runtimeFamily: 'claudecode' })
+        await seed('core://soul/tools', '人格里的工具说明', { priority: 1 })
+        await cliApply()
+        // Lore 里移到 core://agent/claudecode 下，映射到两个应用；正文又超出长度上限，两个目标都写不进去
+        await editLore('core://soul/tools', '长'.repeat(20_001))
+        await renameLore('core://soul/tools', 'agent/claudecode/tools')
+        const plan = await planOf(await fileSource())
+        const skips = plan.skipped.filter((s) => s.source === 'core://agent/claudecode/tools')
+        expect(skips).toHaveLength(2)
+        expect(plan.sync.items.find((i) => i.uri === 'persona://default/soul/tools')).toMatchObject(
+          { state: 'skipped', reason: skips[0]!.reason },
+        )
+      })
+
+      it('同一个节点之前导入的那个目标这次被跳过：Lore 里换了路径时，另一个应用的目标按新建写入，不当成换了路径', async () => {
+        // 按现在的跳过规则，同一个节点的几个应用目标要么一起跳过、要么一起写，这里直接把一个目标标成被占用来钉住这条语义
+        await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
+        await seed('core://agent/claudecode/tools', '工具说明')
+        await cliApply()
+        await ws.createApp('open-claw', { runtimeFamily: 'claudecode' })
+        await renameLore('core://agent/claudecode/tools', 'agent/claudecode/tooling')
+        const target = { db: database.db, spaceId: ws.spaceId, accountId: ws.accountId, masterKey }
+        const snapshot = await readLore(lore)
+        const existing = await existingImportApps(database.db, ws.spaceId)
+        const options = {
+          accountId: ws.accountId,
+          persona: { slug: 'default', name: '默认人格' },
+          secretUris: new Set<string>(),
+        }
+        const { plan, state } = await inPlanSnapshot(target, async (snap) => {
+          const base = await planImportFor(snap, snapshot, existing, options)
+          const old = base.plan.memories.find(
+            (m) => m.request.uri === 'app://claude-code/agent/tooling',
+          )!
+          const plan = planImport(snapshot, existing, {
+            ...options,
+            occupied: new Set([old.importKey]),
+          })
+          const preview = await previewImport(snap, plan, base.imports)
+          const state = preview.targets.find(
+            (t) => t.item.request.uri === 'app://open-claw/agent/tooling',
+          )!.state
+          return { plan, state }
+        })
+        expect(state).toBe('new')
+        const result = await applyImport(target, plan)
+        expect(result.created).toContain('app://open-claw/agent/tooling')
+        expect(result.movedInLore).toEqual([])
       })
 
       it('Lore 里换了路径、新目标被跳过：原因挂到之前导入的那条上，它现在对应的就是这个目标', async () => {
@@ -1004,6 +1058,61 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect(((await res.json()) as { error: string }).error).toBe(PLAN_CHANGED)
         // 只有命令行那一次写下的
         expect(await counts()).toMatchObject({ memories: 6, events: 6 })
+      })
+
+      it('界面：之间改的只是导入过的记忆现在的样子（移动、改成机密、删除），或者导入了别的节点，照常写入', async () => {
+        await cliApply()
+        await seed('infra://more', '又多了一个节点')
+        const source = await fileSource()
+        const plan = await planOf(source)
+        const real =
+          await vi.importActual<typeof import('../../importer/lore')>('../../importer/lore')
+        vi.mocked(planImportFor).mockImplementationOnce(async (...args) => {
+          const base = await real.planImportFor(...args)
+          // 这份计划里的节点导入过的记忆：移走、改成机密、删掉都不改变这次怎么写
+          await service().move({ from: 'infra://nas', to: 'infra://storage' })
+          await service().update({ uri: 'core://agent', sensitivity: 'secret' })
+          await service().delete('preferences://user')
+          // 别处导入了不在这份计划里的节点
+          const target = {
+            db: database.db,
+            spaceId: ws.spaceId,
+            accountId: ws.accountId,
+            masterKey,
+          }
+          const elsewhere = {
+            nodes: [
+              {
+                uuid: 'uuid-elsewhere',
+                uri: 'notes://elsewhere',
+                aliases: [],
+                priority: 2,
+                disclosure: null,
+                content: '另一份导出里的节点',
+                createdAt: new Date(EARLIER),
+                updatedAt: new Date(EARLIER),
+                previousVersions: 0,
+                keywords: [],
+              },
+            ],
+            recallEvents: null,
+          }
+          const other = real.planImport(
+            elsewhere,
+            await existingImportApps(database.db, ws.spaceId),
+            {
+              accountId: ws.accountId,
+              persona: { slug: 'default', name: '默认人格' },
+              secretUris: new Set(),
+            },
+          )
+          expect((await real.applyImport(target, other)).created).toEqual(['notes://elsewhere'])
+          return base
+        })
+        // 命令行写下的事件没有导出时间，文件算旧：这里不看新旧，直接确认
+        const result = await applyOf(source, plan, { confirmStale: true })
+        expect(result.created).toEqual(['infra://more'])
+        expect(result.previouslyImported).toHaveLength(6)
       })
 
       it('命令行：没有指纹，按写入事务里读到的导入记录判断，导入过的不再写', async () => {

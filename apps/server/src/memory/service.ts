@@ -295,9 +295,11 @@ export async function uriConflicts<T extends UriClaim>(
   const taken = new Set<T>()
   const now = new Date()
   // 没有 URI 的（抽取的记忆）不占也不挡别的 URI：不进查询，也不按 URI 归类，免得空值拼成的键撞上真有这个 URI 的记录
-  const withUri = claims.filter((c) => c.domain !== null && c.path !== null)
+  const withUri = claims.filter(
+    (c): c is T & { domain: string; path: string } => c.domain !== null && c.path !== null,
+  )
   // domain 里没有冒号，拼起来的 URI 不会撞
-  const uriOf = (c: { domain: string | null; path: string | null }) => `${c.domain}://${c.path}`
+  const uriOf = (domain: string, path: string) => `${domain}://${path}`
   // 分批查：导入计划一次可能有上万个目标，一条语句的参数个数有上限
   for (let start = 0; start < withUri.length; start += URI_CLAIM_BATCH) {
     const batch = withUri.slice(start, start + URI_CLAIM_BATCH)
@@ -326,16 +328,16 @@ export async function uriConflicts<T extends UriClaim>(
           )})`,
         ),
       )
-    // 按 URI 归好，每一条只看自己 URI 上的
+    // 按 URI 归好，每一条只看自己 URI 上的。查出来的都有 URI：(domain, path) in (...) 匹配不到空值
     const occupants = new Map<string, typeof rows>()
     for (const row of rows) {
-      if (row.domain === null || row.path === null) continue
-      const list = occupants.get(uriOf(row))
+      const uri = uriOf(row.domain!, row.path!)
+      const list = occupants.get(uri)
       if (list) list.push(row)
-      else occupants.set(uriOf(row), [row])
+      else occupants.set(uri, [row])
     }
     for (const claim of batch) {
-      const blocked = (occupants.get(uriOf(claim)) ?? []).some((m) => {
+      const blocked = (occupants.get(uriOf(claim.domain, claim.path)) ?? []).some((m) => {
         if (m.id === claim.id) return false
         // claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出。可能挡着的（同一归属，
         // 或者有一边是共享节点）都在 claimUri 的候选里；两个成员各自的节点本来就不冲突

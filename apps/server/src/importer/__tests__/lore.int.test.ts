@@ -20,8 +20,10 @@ import {
   applyImport,
   applySync,
   planImport,
+  existingImportApps,
+  inPlanSnapshot,
+  planImportFor,
   planSync,
-  readImportRecords,
   readLore,
   verifyMasterKey,
   type ImportPlan,
@@ -439,10 +441,29 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       accountId: ws.accountId,
       masterKey,
     })
-    // 导入记录在这里另读一次：用例的计划不经 planImportFor
-    const records = () => readImportRecords(target())
-    const syncPlan = async () =>
-      planSync(target(), await plan(), await readLore(lore), await records())
+    // 和命令行、路由一样在出计划的快照里出计划再同步：导入记录只在快照里读
+    const syncPlan = async (
+      persona = 'default',
+      secretUris = ['infra://office_network/credentials'],
+      excludeUris: string[] = [],
+      at: ReturnType<typeof target> | { masterKey: null } = target(),
+    ) => {
+      const snapshot = await readLore(lore)
+      return inPlanSnapshot({ ...target(), ...at }, async (snap) => {
+        const base = await planImportFor(
+          snap,
+          snapshot,
+          await existingImportApps(snap.db, ws.spaceId),
+          {
+            accountId: ws.accountId,
+            persona: { slug: persona, name: persona },
+            secretUris: new Set(secretUris),
+            excludeUris: new Set(excludeUris),
+          },
+        )
+        return planSync(snap, base.plan, snapshot, base.imports)
+      })
+    }
     const consoleUpdate = (body: Record<string, unknown>) =>
       app.request(
         `/v1/spaces/${ws.spaceId}/memories`,
@@ -739,23 +760,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
     it('要比对的 secret 没有主密钥就不能同步；secret 在 Kioku 里改过之后就不再需要', async () => {
       await run()
-      await expect(
-        planSync(
-          { ...target(), masterKey: null },
-          await plan(),
-          await readLore(lore),
-          await records(),
-        ),
-      ).rejects.toThrow('KIOKU_MASTER_KEY')
+      await expect(syncPlan(undefined, undefined, undefined, { masterKey: null })).rejects.toThrow(
+        'KIOKU_MASTER_KEY',
+      )
       expect(
         (await consoleUpdate({ uri: 'infra://office_network/credentials', priority: 1 })).status,
       ).toBe(200)
-      const sync = await planSync(
-        { ...target(), masterKey: null },
-        await plan(),
-        await readLore(lore),
-        await records(),
-      )
+      const sync = await syncPlan(undefined, undefined, undefined, { masterKey: null })
       expect(sync.items.find((i) => i.uri === 'infra://office_network/credentials')).toMatchObject({
         state: 'edited',
       })
@@ -868,12 +879,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         const result = await run('other')
         expect(result.created).toEqual(['persona://other/soul/style'])
         expect(result.movedInLore).toEqual([])
-        const sync = await planSync(
-          target(),
-          await plan('other'),
-          await readLore(lore),
-          await records(),
-        )
+        const sync = await syncPlan('other')
         expect(sync.items.filter((i) => i.uri === 'persona://default/soul')).toEqual([
           expect.objectContaining({ state: 'unmapped' }),
         ])
@@ -886,12 +892,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       await run()
       const undoDrop = await dropLore('infra://office_network/credentials')
       try {
-        const sync = await planSync(
-          { ...target(), masterKey: null },
-          await plan('default', []),
-          await readLore(lore),
-          await records(),
-        )
+        const sync = await syncPlan('default', [], [], { masterKey: null })
         expect(sync.goneFromLore).toEqual(['infra://office_network/credentials'])
       } finally {
         await undoDrop()
@@ -919,13 +920,11 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       await run()
       const undo = await editLore('infra://office_network', { content: 'Lore 里又改了' })
       try {
-        const snapshot = await readLore(lore)
         const unticked = await syncPlan()
         expect(unticked.items.find((i) => i.uri === 'infra://office_network')!.state).toBe('update')
 
         // 计划带勾选，snapshot 不过滤：过滤了的话这个节点会查不到，错报成 Lore 里没有了
-        const ticked = await plan('default', undefined, ['infra://office_network'])
-        const sync = await planSync(target(), ticked, snapshot, await records())
+        const sync = await syncPlan('default', undefined, ['infra://office_network'])
         expect(sync.items.find((i) => i.uri === 'infra://office_network')).toEqual({
           source: 'infra://office_network',
           uri: 'infra://office_network',
