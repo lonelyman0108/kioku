@@ -398,14 +398,15 @@ describe('读取失败', () => {
 
   it.each(reads)('%s 的 %s：错误放在上面，读到过的内容留着', (name, source, query, shown) => {
     const expression = `${query}.isError.value`
+    // 读取失败的一行是 ReadFailureNote：文字、重试、转圈都按这一样查询
+    const isNote = (c: TemplateNode) =>
+      c.tag === 'ReadFailureNote' && condition(c) === expression && bound(c, 'query') === query
     const siblings = elementsOf(template(source)).find((el) =>
-      (el.children ?? []).some((c) => c.tag === 'NoteLine' && condition(c) === expression),
+      (el.children ?? []).some(isNote),
     )?.children
     const list = siblings ?? template(source).children ?? []
     const elementsAfter = list.filter((n) => n.type === ELEMENT)
-    const index = elementsAfter.findIndex(
-      (c) => c.tag === 'NoteLine' && condition(c) === expression,
-    )
+    const index = elementsAfter.findIndex(isNote)
     expect(index, `${name} ${query}`).toBeGreaterThanOrEqual(0)
     // 错误和内容不是二选一
     const next = elementsAfter[index + 1]
@@ -496,7 +497,7 @@ describe('读取失败', () => {
     )
   })
 
-  // 读取失败之后表单不在了，要有地方重新读
+  // 读取失败之后表单不在了，要有地方重新读：ReadFailureNote 按传入的查询给重试（重读的就是它），见 readFailures.test.ts
   it.each([
     ['EmbeddingSettings', embeddingSettings, 'settings'],
     ['EmbeddingSettings', embeddingSettings, 'status'],
@@ -504,17 +505,16 @@ describe('读取失败', () => {
     ['BackupSettings', backupSettings, 'settings'],
     ['RetentionSettings', retentionSettings, 'settings'],
     ['SettingsPage', settingsPage, 'recallSettings'],
-  ])('%s 的 %s 读取失败时有重试，调对应查询的 refetch', (name, source, query) => {
+    ['SettingsPage', settingsPage, 'masterKey'],
+    ['ExtractionBudget', extractionBudget, 'usage'],
+    ['MyDreamSettings', myDreamSettings, 'settings'],
+    ['SpaceSettingsPage', spaceSettingsPage, 'layers'],
+  ])('%s 的 %s 读取失败时有重试，重读的是这一样查询', (name, source, query) => {
     const note = elementsOf(template(source)).find(
-      (el) => el.tag === 'NoteLine' && condition(el) === `${query}.isError.value`,
-    )!
-    const actions = (note.children ?? []).find(
-      (c) => c.tag === 'template' && directive(c, 'slot')?.arg?.content === 'actions',
-    )!
-    const button = elementsOf(actions).find((el) => el.tag === 'UButton')!
-    expect(textOf(button), name).toBe('重试')
-    expect(handler(button, 'click'), name).toBe(`${query}.refetch()`)
-    expect(bound(button, 'loading'), name).toBe(`${query}.isFetching.value`)
+      (el) => el.tag === 'ReadFailureNote' && condition(el) === `${query}.isError.value`,
+    )
+    expect(note, name).toBeDefined()
+    expect(bound(note!, 'query'), name).toBe(query)
   })
 
   it('存储桶的列表出错时只显示错误：外部的状态，错误下面还是旧桶的备份会有误导', () => {
@@ -544,8 +544,11 @@ describe('读取失败', () => {
       if (!source.includes('isError')) continue
       expect(source, name).not.toMatch(/isError\.value && !/)
     }
-    expect(backupSettings).toContain("objects.error.value.message : '无法列出备份'")
-    expect(embeddingSettings).toContain('readFailure(settings.error.value)')
+    // 服务端没给说明时用具体的说法，和别处的「读取失败」分得开
+    expect(backupSettings).toContain("readFailure(objects.error.value, '无法列出备份')")
+    expect(embeddingSettings).toContain(
+      '<ReadFailureNote v-if="settings.isError.value" :query="settings" />',
+    )
     expect(embeddingSettings).not.toContain('读取设置失败')
   })
 

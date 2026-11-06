@@ -3,7 +3,7 @@ import { BENCH_MAX_REQUEST_BYTES, type BenchScenario } from '@kioku/contracts'
 import { useQuery } from '@tanstack/vue-query'
 import { computed, ref, shallowRef, useTemplateRef, watch, watchEffect } from 'vue'
 
-import { ApiError } from '../api/client'
+import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { formatBytes } from '../backup'
 import {
@@ -213,9 +213,7 @@ function startRun() {
       <BenchNotice
         v-if="presets.isError.value"
         color="error"
-        :title="
-          presets.error.value instanceof ApiError ? presets.error.value.message : '读取预设失败'
-        "
+        :title="readFailure(presets.error.value, '读取预设失败')"
       />
       <div class="scenario-pick">
         <UFormField label="预设" class="min-w-0 flex-[1_1_14rem]">
@@ -402,7 +400,7 @@ function startRun() {
   overflow-y: auto;
 }
 .scenario-note {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
   color: var(--ui-text-muted);
 }

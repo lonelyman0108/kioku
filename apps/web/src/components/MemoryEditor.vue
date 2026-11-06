@@ -28,8 +28,7 @@ import {
   expiryState,
   isBootNode,
   looksPlaintext,
-  missingDisclosureHint,
-  missingDisclosureTone,
+  missingDisclosure,
   originScopeLabel,
   overriddenNode,
   plaintextValues,
@@ -59,6 +58,7 @@ import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import PropertyList, { type Property } from './strata/PropertyList.vue'
 import StrataStrip from './strata/StrataStrip.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
@@ -516,9 +516,8 @@ const shownPriority = computed(() =>
 
 const expiry = computed(() => expiryState(base.value?.validTo ?? null, now.value))
 const bootNode = computed(() => !!base.value && isBootNode(base.value, now.value))
-const disclosureTone = computed(() =>
-  base.value ? missingDisclosureTone(base.value, now.value) : null,
-)
+// 没写触发场景时的提示：颜色、文字和说明一次判断给全，列表也用同一个函数
+const missingNote = computed(() => (base.value ? missingDisclosure(base.value, now.value) : null))
 const plaintext = computed(() => {
   const m = base.value
   return m && looksPlaintext(m) ? plaintextValues(m) : null
@@ -705,18 +704,12 @@ const properties = computed<Property[][]>(() => {
       <USkeleton class="h-40 w-full" />
     </div>
     <div v-else-if="!base" class="detail-read">
-      <NoteLine tone="error">
-        {{ memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败' }}
-      </NoteLine>
+      <ReadFailureNote :query="memory" />
     </div>
     <div v-else class="detail-main">
       <div class="detail-read">
         <!-- 已经载入过时，重新拉取失败（例如别处删除了它）也保留表单，免得丢掉正在编辑的内容 -->
-        <NoteLine v-if="memory.isError.value" tone="warning">
-          刷新失败：{{
-            memory.error.value instanceof ApiError ? memory.error.value.message : '读取失败'
-          }}
-        </NoteLine>
+        <ReadFailureNote v-if="memory.isError.value" :query="memory" />
         <NoteLine v-else-if="changedElsewhere && dirty" tone="warning">
           这条记忆已在别处修改，或已删除并重新创建。保存将提示冲突，可先复制当前改动，再载入新版本。
           <template #actions>
@@ -839,10 +832,10 @@ const properties = computed<Property[][]>(() => {
             </template>
           </NoteLine>
           <NoteLine
-            v-if="disclosureTone"
-            :tone="disclosureTone === 'warning' ? 'warning' : 'neutral'"
+            v-if="missingNote"
+            :tone="missingNote.tone === 'warning' ? 'warning' : 'neutral'"
           >
-            未设触发场景<Hint>{{ missingDisclosureHint(base, now) }}</Hint>
+            {{ missingNote.text }}<Hint>{{ missingNote.hint }}</Hint>
             <template v-if="!readOnly && !base.contentHidden" #actions>
               <UButton size="sm" color="primary" variant="outline" @click="fillDisclosure">
                 去补全
@@ -981,9 +974,9 @@ const properties = computed<Property[][]>(() => {
             <span v-if="bootNode" class="boot-flag" :title="BOOT_HINT"> 启动加载 </span>
           </template>
           <template #disclosure>
-            <template v-if="!disclosureTone">{{ base.disclosure }}</template>
-            <span v-else :class="disclosureTone === 'warning' ? 'text-warning' : 'text-muted'">
-              未设触发场景
+            <template v-if="!missingNote">{{ base.disclosure }}</template>
+            <span v-else :class="missingNote.tone === 'warning' ? 'text-warning' : 'text-muted'">
+              {{ missingNote.short }}
             </span>
           </template>
           <template #glossary>
@@ -1239,8 +1232,9 @@ const properties = computed<Property[][]>(() => {
   gap: 6px 16px;
   margin-bottom: 7px;
 }
+/* 和表单字段下的说明一样大：这是一句完整的说明，不是标签 */
 .edit-help {
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ui-text-muted);
 }
 .edit-tools {
@@ -1289,8 +1283,10 @@ const properties = computed<Property[][]>(() => {
     flex-wrap: wrap;
     margin-top: 11px;
   }
+  /* 多出的高度留给属性栏，正文和属性栏之间不空出来 */
   .memory-detail > .detail-main {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
   .detail-side {
     padding: 6px 32px 40px;

@@ -11,7 +11,15 @@ import { useInboxCounts } from '../composables/useInboxCounts'
 import { useInboxTab } from '../composables/useInboxTab'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { INBOX_TABS, inboxTabCount, inboxTabLabels, refreshInbox } from '../inbox'
+import {
+  INBOX_TABS,
+  actionableInboxCount,
+  inboxTabActionable,
+  inboxTabCount,
+  inboxTabLabels,
+  refreshInbox,
+  type InboxTab,
+} from '../inbox'
 
 const route = useRoute()
 const queryClient = useQueryClient()
@@ -20,6 +28,16 @@ const spaceId = computed(() => String(route.params.spaceId))
 const canAct = computed(() => space.value?.role === 'owner' || space.value?.role === 'editor')
 
 const counts = useInboxCounts(spaceId)
+// 标题的大数字和导航角标、概览同一个口径：当前账号能处理的。角色读到之前不知道口径，先写「–」
+const role = computed(() => space.value?.role)
+const total = computed(() =>
+  counts.data.value && role.value ? actionableInboxCount(counts.data.value, role.value) : null,
+)
+// 各分类照常写各自的条数：0 不醒目；当前账号处理不了的那几类也一样，等角色读到再定
+const quiet = (tab: InboxTab) =>
+  !counts.data.value ||
+  !inboxTabCount(counts.data.value, tab) ||
+  (role.value !== undefined && !inboxTabActionable(tab, role.value))
 const tab = useInboxTab(counts)
 const refreshing = computed(() => counts.isFetching.value)
 // 换分类时回到顶上：各类共用一个滚动区
@@ -44,7 +62,7 @@ watch(tab, () => {
             :loading="refreshing"
             @click="refreshInbox(queryClient, spaceId)"
           />
-          <span class="inbox-total">{{ counts.data.value?.total ?? '–' }}</span>
+          <span class="inbox-total">{{ total ?? '–' }}</span>
         </div>
         <nav class="inbox-tabs" aria-label="待处理分类">
           <RouterLink
@@ -56,7 +74,7 @@ watch(tab, () => {
             :aria-current="tab === t ? 'page' : undefined"
           >
             <span>{{ inboxTabLabels[t] }}</span>
-            <b :class="{ none: !counts.data.value || !inboxTabCount(counts.data.value, t) }">
+            <b :class="{ none: quiet(t) }">
               {{ counts.data.value ? inboxTabCount(counts.data.value, t) : '–' }}
             </b>
           </RouterLink>
@@ -150,6 +168,10 @@ watch(tab, () => {
 }
 .inbox-tab[aria-current='page'] b {
   color: var(--strata-on-selected);
+}
+/* 选中的那一类反白，不醒目的数字也要退一级 */
+.inbox-tab[aria-current='page'] b.none {
+  color: var(--strata-on-selected-muted);
 }
 .inbox-tab:focus-visible {
   outline-offset: -2px;

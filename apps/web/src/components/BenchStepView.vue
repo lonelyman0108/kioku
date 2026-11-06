@@ -247,7 +247,7 @@ h4 {
   line-height: 1.6;
 }
 .note {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
 }
 .assertions {

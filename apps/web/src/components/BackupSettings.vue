@@ -19,6 +19,7 @@ import { icons } from '../icons'
 import { formatRelative, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsColumns from './strata/SettingsColumns.vue'
 
@@ -203,19 +204,7 @@ async function clear() {
         </Hint>
       </template>
       <!-- 标题和后果说明一直在；后台刷新失败时读到过的设置留着，错误放在上面 -->
-      <NoteLine v-if="settings.isError.value" tone="error">
-        {{ readFailure(settings.error.value) }}
-        <template #actions>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="settings.isFetching.value"
-            @click="settings.refetch()"
-            >重试</UButton
-          >
-        </template>
-      </NoteLine>
+      <ReadFailureNote v-if="settings.isError.value" :query="settings" />
       <!-- 没读到过设置时不给表单：空表单保存会盖掉读不到的那份。重新读取时错误会被清掉，所以只看有没有数据 -->
       <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
       <form v-else-if="view" class="space-y-4" @submit.prevent="save">
@@ -347,9 +336,7 @@ async function clear() {
           错误下面还是旧桶的备份，会让人以为新位置有可恢复的备份
         -->
         <NoteLine v-if="objects.isError.value" tone="error">
-          {{
-            objects.error.value instanceof ApiError ? objects.error.value.message : '无法列出备份'
-          }}
+          {{ readFailure(objects.error.value, '无法列出备份') }}
         </NoteLine>
         <USkeleton v-else-if="objects.isPending.value" class="h-16 w-full" />
         <p v-else-if="objects.data.value && !objects.data.value.objects.length" class="text-muted">

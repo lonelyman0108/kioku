@@ -198,6 +198,7 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
               <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri">
                 <UriPath :uri="candidate.uri" />
               </RouterLink>
+              <span class="boot-layer">{{ layerShortLabels[candidate.layer] }}</span>
               <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>
             </li>
           </ul>

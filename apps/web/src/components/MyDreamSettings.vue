@@ -3,11 +3,11 @@ import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { dreamSettingsKey } from '../dream'
 import Hint from './Hint.vue'
-import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
 // 自己在这个空间里的 Dream 设置：每个成员都能改自己的，别人看不到也改不了
@@ -59,9 +59,7 @@ async function save(includePrivate: boolean) {
       </Hint>
     </template>
     <!-- 后台刷新失败时开关留着，错误放在上面 -->
-    <NoteLine v-if="settings.isError.value" tone="error">
-      {{ readFailure(settings.error.value) }}
-    </NoteLine>
+    <ReadFailureNote v-if="settings.isError.value" :query="settings" />
     <USkeleton v-if="settings.isPending.value" class="h-6 w-72 max-w-full" />
     <USwitch
       v-else-if="settings.data.value"

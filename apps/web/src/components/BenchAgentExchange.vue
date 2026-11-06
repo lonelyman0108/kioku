@@ -149,7 +149,7 @@ defineProps<{ exchange: AgentExchange; mode: BenchMode; loop: BenchAgentLoop }>(
   font-weight: 500;
 }
 .note {
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.6;
 }
 .end-note {

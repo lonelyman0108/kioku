@@ -8,7 +8,7 @@ import type {
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
   draftOf,
@@ -23,6 +23,7 @@ import { icons } from '../icons'
 import EmbeddingChannels from './EmbeddingChannels.vue'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsColumns from './strata/SettingsColumns.vue'
 
@@ -318,19 +319,7 @@ async function rebuild() {
         </Hint>
       </template>
       <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
-      <NoteLine v-if="settings.isError.value" tone="error">
-        {{ readFailure(settings.error.value) }}
-        <template #actions>
-          <UButton
-            size="sm"
-            color="neutral"
-            variant="outline"
-            :loading="settings.isFetching.value"
-            @click="settings.refetch()"
-            >重试</UButton
-          >
-        </template>
-      </NoteLine>
+      <ReadFailureNote v-if="settings.isError.value" :query="settings" />
       <!--
         没读到过设置时不给表单：空表单会被当成第一次配置，保存就盖掉了读不到的那份。
         重新读取时错误会被清掉，所以只看有没有数据
@@ -485,19 +474,7 @@ async function rebuild() {
           </Hint>
         </template>
         <!-- 后台刷新失败时读到过的进度留着，错误放在上面 -->
-        <NoteLine v-if="status.isError.value" tone="error">
-          {{ readFailure(status.error.value) }}
-          <template #actions>
-            <UButton
-              size="sm"
-              color="neutral"
-              variant="outline"
-              :loading="status.isFetching.value"
-              @click="status.refetch()"
-              >重试</UButton
-            >
-          </template>
-        </NoteLine>
+        <ReadFailureNote v-if="status.isError.value" :query="status" />
         <div v-if="status.data.value" class="space-y-3">
           <div class="flex flex-wrap items-baseline gap-x-2">
             <span class="text-xl tabular-nums">

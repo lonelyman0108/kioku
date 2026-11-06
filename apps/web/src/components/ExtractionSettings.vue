@@ -4,11 +4,11 @@ import type { ExtractionSettingsView, ExtractionTestResult } from '@kioku/contra
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { needsNewKey, newKeyHint } from '../endpointKey'
 import Hint from './Hint.vue'
-import NoteLine from './strata/NoteLine.vue'
+import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 
 // 有没有没保存的修改：切到别的小节之后表单看不见了，交给页面在子导航上标出来
@@ -135,19 +135,7 @@ async function clear() {
       </Hint>
     </template>
     <!-- 后台刷新失败时读到过的设置留着，错误放在上面 -->
-    <NoteLine v-if="settings.isError.value" tone="error">
-      {{ readFailure(settings.error.value) }}
-      <template #actions>
-        <UButton
-          size="sm"
-          color="neutral"
-          variant="outline"
-          :loading="settings.isFetching.value"
-          @click="settings.refetch()"
-          >重试</UButton
-        >
-      </template>
-    </NoteLine>
+    <ReadFailureNote v-if="settings.isError.value" :query="settings" />
     <!-- 没读到过设置时不给表单：空表单保存会盖掉读不到的那份。重新读取时错误会被清掉，所以只看有没有数据 -->
     <USkeleton v-if="settings.isPending.value" class="h-40 w-full" />
     <form v-else-if="settings.data.value" class="space-y-4" @submit.prevent="save">

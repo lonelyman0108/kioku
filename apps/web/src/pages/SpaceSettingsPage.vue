@@ -5,7 +5,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import ExtractionBudget from '../components/ExtractionBudget.vue'
 import Hint from '../components/Hint.vue'
@@ -13,6 +13,7 @@ import LoreImport from '../components/LoreImport.vue'
 import MyDreamSettings from '../components/MyDreamSettings.vue'
 import SpaceExport from '../components/SpaceExport.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SettingsBlock from '../components/strata/SettingsBlock.vue'
 import SettingsFrame from '../components/strata/SettingsFrame.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
@@ -153,9 +154,7 @@ async function save() {
           </Hint>
         </template>
         <!-- 后台刷新失败时读到过的配置留着，错误放在上面 -->
-        <NoteLine v-if="layers.isError.value" tone="error">
-          {{ readFailure(layers.error.value) }}
-        </NoteLine>
+        <ReadFailureNote v-if="layers.isError.value" :query="layers" />
         <div v-if="!layers.isError.value || baseline !== null" class="space-y-3">
           <div v-if="baseline === null" class="space-y-2">
             <USkeleton v-for="n in 2" :key="n" class="h-8 w-full" />

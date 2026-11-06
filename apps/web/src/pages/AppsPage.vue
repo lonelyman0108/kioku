@@ -5,20 +5,21 @@ import { useQueries, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError, readFailure, readFailures } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { refreshAppCaches } from '../appQueries'
 import { lastUsedAt } from '../apps'
 import { usableKeys } from '../benchSession'
 import Hint from '../components/Hint.vue'
 import AccessLegend from '../components/strata/AccessLegend.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import StrataCore from '../components/strata/StrataCore.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { presentKinds, type AccessRow } from '../components/strata/strata'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { useSession } from '../composables/useSession'
 import { scopesSummary, sensitivityLabels } from '../labels'
+import { failedReads } from '../query'
 import { formatRelative, formatTime } from '../time'
 
 const route = useRoute()
@@ -92,9 +93,8 @@ const legendKinds = computed(() =>
   presentKinds(liveKeys.value.flatMap(({ key }): readonly AccessRow[] => rowsOf(key.id) ?? [])),
 )
 // 默认人格和所有者只显示名字，读不到时是「–」：要说出来，不然分不清是没有还是没读到
-const failures = computed(() =>
-  readFailures([apps.error.value, personas.error.value, members.error.value]),
-)
+// 同一句说法只提示一次，每条的重试只重读说这句话的那几样
+const failures = computed(() => failedReads([apps, personas, members]))
 
 function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
@@ -151,7 +151,7 @@ async function create() {
       </UButton>
     </header>
 
-    <NoteLine v-for="message in failures" :key="message" tone="error">{{ message }}</NoteLine>
+    <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
     <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
     <p v-else-if="apps.data.value && !apps.data.value.length" class="apps-empty">暂无应用</p>
     <template v-else-if="apps.data.value">

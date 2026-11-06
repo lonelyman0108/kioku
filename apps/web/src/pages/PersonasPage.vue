@@ -5,12 +5,12 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, nextTick, reactive, ref, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError, readFailure } from '../api/client'
+import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import PersonaDetail from '../components/PersonaDetail.vue'
 import { focusAfterSelect, guideLines } from '../components/memoryTree'
-import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
@@ -220,7 +220,7 @@ async function remove() {
       <div class="list-scroll">
         <!-- 后台刷新失败时读到过的列表留着，错误放在上面 -->
         <div v-if="personas.isError.value" class="list-failed">
-          <NoteLine tone="error">{{ readFailure(personas.error.value) }}</NoteLine>
+          <ReadFailureNote :query="personas" />
         </div>
         <div v-if="personas.isPending.value" class="space-y-2 p-3.5">
           <USkeleton v-for="n in 4" :key="n" class="h-11 w-full" />
@@ -250,14 +250,23 @@ async function remove() {
     </section>
 
     <section ref="detailColumn" class="detail-column" aria-label="详情" tabindex="-1">
-      <div v-if="selectedId !== null && selected.isError.value" class="detail-note">
+      <!--
+        没读到过，或者是确定的结果（别处删掉之后的 404）：整块报错，旧内容和操作都不留。
+        还能再读的刷新失败才照常显示详情，错误放在节点上面
+      -->
+      <div
+        v-if="
+          selectedId !== null &&
+          selected.isError.value &&
+          (!detail || !retryable(selected.error.value))
+        "
+        class="detail-note"
+      >
         <button type="button" class="back" @click="selectedId = null">
           <UIcon :name="icons.back" class="size-4" />
           返回
         </button>
-        <NoteLine tone="error">
-          {{ selected.error.value instanceof ApiError ? selected.error.value.message : '读取失败' }}
-        </NoteLine>
+        <ReadFailureNote :query="selected" />
       </div>
       <PersonaDetail
         v-else-if="detail"
@@ -274,6 +283,9 @@ async function remove() {
             <UIcon :name="icons.back" class="size-4" />
             返回
           </button>
+        </template>
+        <template v-if="selected.isError.value" #notice>
+          <ReadFailureNote :query="selected" />
         </template>
       </PersonaDetail>
       <div v-else-if="selectedId !== null" class="detail-note space-y-3">

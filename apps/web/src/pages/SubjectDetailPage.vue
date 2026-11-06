@@ -10,11 +10,11 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, retryable } from '../api/client'
 import { api } from '../api/endpoints'
 import Hint from '../components/Hint.vue'
 import SubjectBindings from '../components/SubjectBindings.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import SectionHeading from '../components/strata/SectionHeading.vue'
 import StrataStrip from '../components/strata/StrataStrip.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
@@ -193,13 +193,18 @@ function runCounts(run: ExtractionRunInfo): string {
       <USkeleton class="h-8 w-1/4" />
       <USkeleton class="h-40 w-full" />
     </div>
-    <div v-else-if="subject.isError.value || !data" class="page-note">
+    <!--
+      没读到过，或者是确定的结果（别处删掉、合并之后的 404）：整块报错，旧内容和操作都不留。
+      还能再读的刷新失败才照常显示详情，错误放在上面
+    -->
+    <div
+      v-else-if="!data || (subject.isError.value && !retryable(subject.error.value))"
+      class="page-note"
+    >
       <RouterLink :to="{ name: 'subjects', params: { spaceId } }" class="back-link">
         返回联系人列表
       </RouterLink>
-      <NoteLine tone="error" class="mt-3">
-        {{ subject.error.value instanceof ApiError ? subject.error.value.message : '读取失败' }}
-      </NoteLine>
+      <ReadFailureNote class="mt-3" :query="subject" />
     </div>
     <template v-else>
       <StrataStrip layer="subject" sensitivity="public" />
@@ -232,6 +237,9 @@ function runCounts(run: ExtractionRunInfo): string {
         </dl>
       </header>
 
+      <div v-if="subject.isError.value" class="stale-note">
+        <ReadFailureNote :query="subject" />
+      </div>
       <div class="subject-body">
         <!-- 这个联系人是谁：名字、标记、账号，以及绑定与合并 -->
         <div class="subject-side">
@@ -587,6 +595,9 @@ function runCounts(run: ExtractionRunInfo): string {
 .page-note {
   padding: 24px 32px;
 }
+.stale-note {
+  padding: 0 32px;
+}
 .back-link,
 .crumbs a {
   color: var(--ui-text-muted);
@@ -757,6 +768,9 @@ function runCounts(run: ExtractionRunInfo): string {
 @media (max-width: 1023.98px) {
   .page-note {
     padding: 16px;
+  }
+  .stale-note {
+    padding: 0 16px;
   }
   .subject-head {
     padding: 12px 16px 14px;

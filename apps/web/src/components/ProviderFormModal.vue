@@ -97,7 +97,7 @@ async function submit() {
     </template>
     <template #footer>
       <div class="flex w-full items-center justify-end gap-2">
-        <span v-if="problem" class="mr-auto text-xs text-muted">{{ problem }}</span>
+        <span v-if="problem" class="mr-auto text-sm text-muted">{{ problem }}</span>
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
         <UButton type="submit" form="provider-form" :loading="saving" :disabled="!!problem">
           {{ editingId ? '保存' : '添加' }}

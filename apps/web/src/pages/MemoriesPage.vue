@@ -9,10 +9,10 @@ import {
   type Sensitivity,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, nextTick, onMounted, ref, watch } from 'vue'
+import { computed, nextTick, onMounted, ref, shallowRef, watch } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 
-import { ApiError } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import CreateMemoryModal from '../components/CreateMemoryModal.vue'
 import DeletedMemories from '../components/DeletedMemories.vue'
@@ -35,7 +35,7 @@ import {
   type MemoryTreeItem,
 } from '../components/memoryTree'
 import MemoryFlags from '../components/strata/MemoryFlags.vue'
-import NoteLine from '../components/strata/NoteLine.vue'
+import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import StrataRibbon from '../components/strata/StrataRibbon.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { tallyCounts } from '../components/strata/strata'
@@ -44,6 +44,7 @@ import { useViewport } from '../composables/useViewport'
 import { icons } from '../icons'
 import { invalidateInboxCounts } from '../inbox'
 import { statsChanged } from '../memoryDetail'
+import type { ReadState } from '../query'
 
 const route = useRoute()
 const router = useRouter()
@@ -134,8 +135,8 @@ const roots = ref<MemoryTreeItem[]>([])
 // 展开的节点由这里管理：重新载入某一级之后，要据此把展开着的子节点也重新加载
 const expanded = ref<string[]>([])
 const loadingRoots = ref(false)
-// 整棵树没读出来：和「暂无记忆」分开说，免得以为记忆没了
-const rootsFailed = ref(false)
+// 整棵树没读出来：和「暂无记忆」分开说，免得以为记忆没了。记下错误，说法和别处一样用 readFailure
+const rootsError = shallowRef<unknown>(null)
 const createOpen = ref(false)
 const createUri = ref('')
 
@@ -143,7 +144,7 @@ const createUri = ref('')
 let deletedUri: string | null = null
 
 function failed(err: unknown) {
-  toast.add({ title: err instanceof ApiError ? err.message : '读取失败', color: 'error' })
+  toast.add({ title: readFailure(err), color: 'error' })
 }
 
 // 列表、已删除、已过期、domain 与关键词索引都按查询缓存；树按需加载，由下面的函数单独刷新。
@@ -176,7 +177,7 @@ async function loadRoots() {
       ...DOMAINS_QUERY_OPTIONS,
     })
     if (forSpace !== spaceId.value) return
-    rootsFailed.value = false
+    rootsError.value = null
     roots.value = domains.map((d) => ({
       label: `${d.domain}://`,
       // domain 根用 domain 名作为键，与 children 接口的参数一致
@@ -196,7 +197,7 @@ async function loadRoots() {
     }))
     await restoreExpanded()
   } catch (err) {
-    if (forSpace === spaceId.value) rootsFailed.value = true
+    if (forSpace === spaceId.value) rootsError.value = err
     failed(err)
   } finally {
     loadingRoots.value = false
@@ -286,6 +287,13 @@ function refresh() {
   invalidateLists()
   refreshCounts()
   void serially(loadRoots)
+}
+// 目录的根节点不是查询，照查询的形状交给 ReadFailureNote：错误、是否在读、重读
+const rootsRead: ReadState = {
+  data: computed(() => (roots.value.length ? roots.value : undefined)),
+  error: rootsError,
+  isFetching: loadingRoots,
+  refetch: refresh,
 }
 
 // 这次点在箭头上。树的点击同时算选中和展开：点箭头只展开收起，点名字只打开
@@ -390,6 +398,9 @@ onMounted(() =>
   }),
 )
 watch(spaceId, () => {
+  // 上一个空间的目录不留：新空间读失败时错误下面不能是别的空间的树，展开它也会拿旧分区去请求新空间
+  roots.value = []
+  rootsError.value = null
   expanded.value = []
   // 新建窗口里的内容属于上一个空间，不能带到新空间去提交
   createOpen.value = false
@@ -618,20 +629,16 @@ const crumbs = computed(() => {
         <p v-if="overview.data.value" class="index-count">
           <b>{{ overview.data.value.total }}</b> 条
         </p>
-        <div v-if="rootsFailed" class="index-note">
-          <NoteLine tone="error">
-            读取失败
-            <template #actions>
-              <UButton size="sm" color="primary" variant="outline" @click="refresh">重试</UButton>
-            </template>
-          </NoteLine>
+        <!-- 重读失败时已经读到的目录留着，展开的节点也不丢：错误放在上面 -->
+        <div v-if="rootsError !== null" class="index-note">
+          <ReadFailureNote :query="rootsRead" />
         </div>
-        <p v-else-if="!loadingRoots && !roots.length" class="index-empty">
+        <p v-if="rootsError === null && !loadingRoots && !roots.length" class="index-empty">
           暂无记忆{{ canWrite ? '。点击「新建」添加第一条。' : '' }}
         </p>
         <!-- 一级最多五百行，展开几级就是几千行：只渲染看得见的那些。行高固定，虚拟滚动不用量 -->
         <UTree
-          v-else
+          v-if="loadingRoots || roots.length"
           ref="treeRef"
           :key="rowHeight"
           v-model:expanded="expanded"
