@@ -2,8 +2,11 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   CONVERT_SCOPE_TEXT,
+  MEMORY_TITLE_MAX,
+  MemoryTitle,
   PLAINTEXT_CREDENTIAL,
   placeholderAllowed,
+  sensitivityAllowed,
   type ConsoleMemoryView,
   type Layer,
   type Sensitivity,
@@ -14,12 +17,11 @@ import { useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import { useCopy } from '../composables/useCopy'
 import { useMemoryPermissions } from '../composables/useMemoryPermissions'
 import { usePlaintextActions } from '../composables/usePlaintextActions'
 import { useNow } from '../composables/useNow'
 import { hasUnsavedChanges, useUnsavedChangesGuard } from '../composables/unsavedChanges'
-import { icons } from '../icons'
+import { identifierOf, parseCoordinate } from '../coordinates'
 import { buildKeywordIndex } from '../keywords'
 import { provenanceLabels, sensitivityLabels } from '../labels'
 import type { CredentialLinks } from '../markdown'
@@ -58,13 +60,14 @@ import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
 import NoteLine from './strata/NoteLine.vue'
+import CoordinateLine from './strata/CoordinateLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import PropertyList, { type Property } from './strata/PropertyList.vue'
 import StrataStrip from './strata/StrataStrip.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import StrataTag from './strata/StrataTag.vue'
 import SwatchOptions from './strata/SwatchOptions.vue'
-import UriPath from './strata/UriPath.vue'
+import MemoryName from './strata/MemoryName.vue'
 
 const props = defineProps<{ spaceId: string; uri: string }>()
 const emit = defineEmits<{
@@ -88,6 +91,7 @@ const memory = useQuery({
 })
 
 const form = reactive({
+  title: '',
   content: '',
   disclosure: '',
   priority: 2,
@@ -113,6 +117,7 @@ function load(next: ConsoleMemoryView) {
   if (!stillRevealed(next, revealed.value)) revealed.value = null
   const m = withRevealed(next, revealed.value)
   base.value = m
+  form.title = m.title
   form.content = m.content ?? ''
   form.disclosure = m.disclosure ?? ''
   form.priority = m.priority
@@ -125,6 +130,7 @@ const dirty = computed(() => {
   const m = base.value
   if (!m) return false
   return (
+    form.title !== m.title ||
     form.content !== (m.content ?? '') ||
     form.disclosure !== (m.disclosure ?? '') ||
     form.priority !== m.priority ||
@@ -259,9 +265,9 @@ const keywordIndex = computed(() =>
   glossary.data.value ? buildKeywordIndex(glossary.data.value.entries) : null,
 )
 
-// 凭据占位符按记忆的主人解析，而只有私人层的记忆能引用凭据：读得到的私人层记忆就是自己的，
-// 拿自己的凭据来画徽章；别的层不解析
-const ownsCredentials = computed(() => base.value?.layer === 'private')
+// 凭据占位符按记忆的所有者解析，而只有本人的记忆能引用凭据：读得到的本人记忆就是自己的，
+// 拿自己的凭据来画徽章；别的归属不解析
+const ownsCredentials = computed(() => base.value?.layer === 'user')
 const credentials = useQuery({
   queryKey: computed(() => ['credentials', props.spaceId] as const),
   queryFn: ({ queryKey: [, spaceId] }) => api.credentials(spaceId),
@@ -288,7 +294,7 @@ function openCredential(id: string) {
   void router.push({ name: 'credentials', params: { spaceId: props.spaceId }, query: { id } })
 }
 
-// 插入凭据引用：服务端只收私人层、敏感级至少 private 的记忆里的占位符
+// 插入凭据引用：服务端只收本人、敏感级至少 private 的记忆里的占位符
 const canReference = computed(
   () => !!base.value && placeholderAllowed(base.value.layer, form.sensitivity),
 )
@@ -373,13 +379,16 @@ async function onMoved(next: ConsoleMemoryView, from: string) {
 }
 
 const canCreateChild = computed(() => permissions.canWriteUri(props.uri))
+// 本人不设公开：选项里也不给
 const sensitivityOptions = computed(() =>
-  permissions.sensitivities.value.map((value) => ({
-    value,
-    label: sensitivityLabels[value],
-    layer: base.value?.layer ?? null,
-    sensitivity: value,
-  })),
+  permissions.sensitivities.value
+    .filter((value) => !base.value || sensitivityAllowed(base.value.layer, value))
+    .map((value) => ({
+      value,
+      label: sensitivityLabels[value],
+      layer: base.value?.layer ?? null,
+      sensitivity: value,
+    })),
 )
 const saving = ref(false)
 // 要删除的那一版，在打开确认框时记下：确认期间编辑器可能载入了删除后重建的另一条，不能把它一起删掉
@@ -420,6 +429,11 @@ async function save(allowPlaintext = false) {
   if (!m || saving.value) return
   // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
   const sent = { ...form, glossary: [...form.glossary] }
+  const title = MemoryTitle.safeParse(sent.title)
+  if (sent.title !== m.title && !title.success) {
+    toast.add({ title: title.error.issues[0]?.message ?? '标题格式错误', color: 'error' })
+    return
+  }
   const validToChanged = sent.validTo !== validToInput(m)
   const validTo = sent.validTo ? fromLocalInput(sent.validTo) : null
   if (validToChanged && sent.validTo && !validTo) {
@@ -439,6 +453,7 @@ async function save(allowPlaintext = false) {
       // 带上表单载入时的 id 与版本号：别人改过、或删除后重建了之后返回 409，不会悄悄覆盖
       expectedId: m.id,
       expectedVersion: m.version,
+      ...(title.success && title.data !== m.title ? { title: title.data } : {}),
       ...(sent.content !== (m.content ?? '') ? { content: sent.content } : {}),
       // 只在改了的时候发：服务端会检查写进去的 disclosure，规则之前写着的不该挡住改别的
       ...((sent.disclosure.trim() || null) !== (m.disclosure ?? null)
@@ -458,6 +473,7 @@ async function save(allowPlaintext = false) {
     revealed.value = revealedAfterWrite(next, sent.content)
     const saved = withRevealed(next, revealed.value)
     base.value = saved
+    if (form.title === sent.title) form.title = saved.title
     if (form.content === sent.content) form.content = saved.content ?? ''
     if (form.disclosure === sent.disclosure) form.disclosure = next.disclosure ?? ''
     if (form.priority === sent.priority) form.priority = next.priority
@@ -499,8 +515,6 @@ async function remove() {
     }
   }
 }
-
-const copy = useCopy()
 
 // 窄屏上打开一条之后，页面把焦点放到这里
 const titleEl = ref<HTMLElement | null>(null)
@@ -567,12 +581,21 @@ const persona = useQuery({
 const overrides = computed(() => overriddenNode(persona.data.value, props.uri))
 
 const appName = (id: string) => permissions.apps.data.value?.find((a) => a.id === id)?.name
+// 归属后面接上是哪个人格、哪个应用：坐标里写的是标识，这里换成名字
+const ownerName = computed(() => {
+  const c = base.value ? parseCoordinate(base.value.uri) : null
+  if (!c?.entity) return null
+  if (c.layer === 'persona') {
+    return personas.data.value?.find((p) => p.slug === c.entity)?.name ?? c.entity
+  }
+  return permissions.apps.data.value?.find((a) => a.slug === c.entity)?.name ?? c.entity
+})
 const properties = computed<Property[][]>(() => {
   const m = base.value
   if (!m) return []
   return [
     [
-      { key: 'layer', label: '层' },
+      { key: 'layer', label: '归属' },
       { key: 'sensitivity', label: '敏感级' },
       { key: 'priority', label: '优先级' },
     ],
@@ -607,16 +630,8 @@ const properties = computed<Property[][]>(() => {
     <StrataStrip v-if="base" :layer="base.layer" :sensitivity="shownSensitivity" />
     <header class="detail-head">
       <div class="detail-nav"><slot name="nav" /></div>
-      <div class="detail-uri">
-        <h1 ref="titleEl" tabindex="-1">{{ base?.uri ?? uri }}</h1>
-        <UButton
-          :icon="icons.copy"
-          size="xs"
-          color="neutral"
-          variant="ghost"
-          aria-label="复制 URI"
-          @click="copy(base?.uri ?? uri)"
-        />
+      <div class="detail-title">
+        <h1 ref="titleEl" tabindex="-1">{{ base?.title ?? identifierOf(uri) }}</h1>
       </div>
       <template v-if="base">
         <div class="detail-tag">
@@ -660,7 +675,7 @@ const properties = computed<Property[][]>(() => {
               variant="outline"
               @click="moveOpen = true"
             >
-              移动或改层
+              移动
             </UButton>
             <UButton
               v-if="canCreateChild"
@@ -733,13 +748,17 @@ const properties = computed<Property[][]>(() => {
 
         <!-- 编辑：就地改原文，可以并排预览 -->
         <template v-if="mode === 'edit'">
+          <UFormField label="标题" class="edit-title">
+            <template #hint><Hint>目录、列表与搜索显示标题；改标题不改坐标</Hint></template>
+            <UInput v-model="form.title" :maxlength="MEMORY_TITLE_MAX" class="w-full" />
+          </UFormField>
           <div class="edit-head">
             <p class="edit-help">
               Markdown。密码与令牌存为凭据，正文只放占位符。<Hint>写清背景、原因和适用条件。</Hint>
             </p>
             <div class="edit-tools">
               <UTooltip
-                :text="canReference ? undefined : '仅私人层中敏感级不低于私密的记忆可引用凭据'"
+                :text="canReference ? undefined : '仅本人中敏感级不低于私密的记忆可引用凭据'"
                 :disabled="canReference"
               >
                 <UButton
@@ -843,10 +862,10 @@ const properties = computed<Property[][]>(() => {
             </template>
           </NoteLine>
           <NoteLine v-if="overrides">
-            覆盖「{{ overrides.persona }}」的同名节点
+            覆盖「{{ overrides.persona }}」的同名记忆
             <template #actions>
               <button type="button" class="override-link" @click="emit('open', overrides!.uri)">
-                <UriPath :uri="overrides.uri" />
+                <MemoryName :uri="overrides.uri" :title="overrides.title" />
               </button>
             </template>
           </NoteLine>
@@ -899,7 +918,7 @@ const properties = computed<Property[][]>(() => {
         <!-- 编辑时属性栏也可以改 -->
         <div v-if="mode === 'edit'" class="edit-fields">
           <div class="edit-layer">
-            <span>层</span>
+            <span>归属</span>
             <StrataSwatch :layer="base.layer" plain label="layer" />
           </div>
           <UFormField label="优先级" help="0 最重要">
@@ -965,7 +984,10 @@ const properties = computed<Property[][]>(() => {
           </PropertyList>
         </div>
         <PropertyList v-else :groups="properties">
-          <template #layer><StrataSwatch :layer="base.layer" plain label="layer" /></template>
+          <template #layer>
+            <StrataSwatch :layer="base.layer" plain label="layer" />
+            <span v-if="ownerName"> · {{ ownerName }}</span>
+          </template>
           <template #sensitivity>
             <StrataSwatch :layer="base.layer" :sensitivity="base.sensitivity" label="sensitivity" />
           </template>
@@ -1009,6 +1031,8 @@ const properties = computed<Property[][]>(() => {
         </PropertyList>
       </aside>
     </div>
+
+    <CoordinateLine v-if="base" :value="base.uri" />
 
     <template v-if="base">
       <MoveMemoryModal v-model:open="moveOpen" :space-id="spaceId" :memory="base" @done="onMoved" />
@@ -1086,8 +1110,9 @@ const properties = computed<Property[][]>(() => {
       >
         <template #body>
           <p class="text-sm">
-            删除 <code>{{ props.uri }}</code
-            >。历史事件将保留，可在「已删除」中恢复；子节点不受影响。
+            删除「{{
+              deleting?.title
+            }}」。历史事件将保留，可在「已删除」中恢复；下一级的记忆不受影响。
           </p>
         </template>
         <template #footer>
@@ -1123,7 +1148,7 @@ const properties = computed<Property[][]>(() => {
   grid-column: 1;
   min-width: 0;
 }
-.detail-uri {
+.detail-title {
   grid-column: 1;
   display: flex;
   align-items: center;
@@ -1131,13 +1156,15 @@ const properties = computed<Property[][]>(() => {
   margin-top: 1px;
   min-width: 0;
 }
-.detail-uri h1 {
+.detail-title h1 {
   min-width: 0;
-  font-family: var(--font-mono);
   font-size: 21px;
   font-weight: 500;
   line-height: 1.4;
   overflow-wrap: anywhere;
+}
+.edit-title {
+  margin-bottom: 14px;
 }
 .detail-tag {
   grid-column: 1;
@@ -1298,7 +1325,7 @@ const properties = computed<Property[][]>(() => {
   .detail-head {
     padding: 12px 16px 14px;
   }
-  .detail-uri h1 {
+  .detail-title h1 {
     font-size: 18px;
   }
   .detail-read {

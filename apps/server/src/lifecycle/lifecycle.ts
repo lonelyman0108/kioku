@@ -1,7 +1,8 @@
 import type {
   BenchSessionStart,
-  BootResponse,
   HostOutput,
+  SessionExtra,
+  SessionSummary,
   LifecycleEvent,
   LifecycleProject,
   LifecycleResponse,
@@ -11,12 +12,19 @@ import type {
 
 import { loggableError } from '../db/client'
 import { BOOT_LAYERS } from '../memory/filter'
-import { formatBootBlock, formatRecentBlock } from '../recall/boot'
+import {
+  formatBootBlock,
+  formatRecentBlock,
+  formatSummaryBlock,
+  type BootResult,
+} from '../recall/boot'
 import { CANDIDATE_ID, formatRecallBlock, type RecordableCandidate } from '../recall/recall'
 import { formatSubjectBlock } from '../recall/subjects'
 import type { RecallScope } from './scope'
 
 const RECENT_LIMIT = 5
+// 不带会话上下文的会话开始时附上同一会话最近几段会话摘要
+const SUMMARY_LIMIT = 3
 const PROJECT_RECALL_LIMIT = 5
 // 每轮召回注入几条；召回调试台照这个模拟
 export const PROMPT_RECALL_LIMIT = 8
@@ -46,6 +54,7 @@ export const GUIDANCE = [
   'Kioku 是你的长期记忆，会话结束后上下文会消失，Kioku 里的不会。',
   '- 每轮回复前留意 <recall> 候选：它只是线索，引用前先用 kioku_get 读正文。',
   '- 用户透露了重要的新信息、纠正了你、或你得出了值得长期保留的结论时，用 kioku_create / kioku_update 记下来，正文写清背景和适用条件，disclosure 写清什么场景下该想起；只在一段时间内成立的事带上 valid_to，到期后就不再召回。',
+  '- 坐标（URI）的开头决定归属：core:// 是通用的规则与知识，user:// 是本人的偏好与私人事务，persona://<人格>/ 是人格的设定，app://<应用>/ 是这个应用独有的。',
   '- 记忆之间冲突时，以 priority 数字更小的为准，同时考虑适用范围、时间与用户当前的指令。',
   '- 正文里的 {{cred:<标识>#<字段>}} 是凭据占位符：用到时才用 kioku_credential 取值，不要把值写回记忆，也不要显示在回复里。',
 ].join('\n')
@@ -93,13 +102,15 @@ export interface SessionStart {
   context: string
   // 宿主能完整接收的字数；没有限制的宿主为 null
   limit: number | null
-  boot: BootResponse
+  boot: BootResult
+  // 同一会话最近的会话摘要，只有不带会话上下文的会话有
+  summaries: SessionSummary[]
   recent: RecentMemory[]
   // 项目召回的查询（目录名与仓库名）与注入的候选；没有项目、或项目召回失败时查询为空
   query: string
   related: RecordableCandidate[]
   // 放不下、没有附上的附加块
-  dropped: ('recent' | 'related')[]
+  dropped: SessionExtra[]
 }
 
 export async function sessionStart(
@@ -116,9 +127,10 @@ export async function sessionStart(
   // 已经在 boot 里展开的节点不再重复列出；多取几条，去掉它们之后仍能凑够
   const booted = new Set(result.entries.map((e) => e.uri))
   const query = chat ? '' : projectQuery(input.project)
-  // 近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
+  // 会话摘要、近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
   // 过滤也和 boot 一样（受信来源、boot 的那几层）：它不需要用户提到任何东西就会注入
-  const [recent, related] = await Promise.allSettled([
+  const [summaries, recent, related] = await Promise.allSettled([
+    scope.summaries(SUMMARY_LIMIT),
     chat ? Promise.resolve([]) : scope.recent(RECENT_LIMIT + booted.size),
     query
       ? scope.recall(query, {
@@ -129,11 +141,12 @@ export async function sessionStart(
         })
       : Promise.resolve([]),
   ])
-  for (const r of [recent, related]) {
+  for (const r of [summaries, recent, related]) {
     if (r.status === 'rejected') {
       console.warn('会话开始时附加的记忆读取失败', loggableError(r.reason))
     }
   }
+  const summaryList = summaries.status === 'fulfilled' ? summaries.value : []
   const recentList = (recent.status === 'fulfilled' ? recent.value : [])
     .filter((m) => !booted.has(m.uri))
     .slice(0, RECENT_LIMIT)
@@ -145,6 +158,7 @@ export async function sessionStart(
   // 群聊 bot 读不了未展开的节点，连 URI 也不列；启动预览照样列出，看得出哪些没注入
   const parts = [formatBootBlock(chat ? { ...result, omitted: [] } : result, guidance)]
   const extras = [
+    ['summaries', formatSummaryBlock(summaryList)],
     ['recent', formatRecentBlock(recentList)],
     ['related', relatedBlock && `与当前项目相关的记忆，需要时用 kioku_get 读取：\n${relatedBlock}`],
   ] as const
@@ -161,6 +175,7 @@ export async function sessionStart(
     context: parts.join('\n\n'),
     limit: limit ?? null,
     boot: result,
+    summaries: dropped.includes('summaries') ? [] : summaryList,
     query: related.status === 'fulfilled' ? query : '',
     recent: dropped.includes('recent') ? [] : recentList,
     related: dropped.includes('related') ? [] : relatedList,

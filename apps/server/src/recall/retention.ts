@@ -11,7 +11,7 @@ export async function loadRecallSettings(db: Db): Promise<RecallSettings> {
   return (await loadRecallWindow(db)).settings
 }
 
-// 召回设置与开始记录召回事件的时间，一次查出。开始记录的时间由 0015 迁移写入；这一行缺了或读不出日期时
+// 召回设置与开始记录召回事件的时间，一次查出。开始记录的时间由迁移写入；这一行缺了或读不出日期时
 // 当作刚开始记录：宁可暂时不列「从没被召回」，也不把之前没机会被记下召回的旧记忆一下子全算进来。
 // 给了空间时，空间建立之前不算开始记录：从别的实例导入的空间保留着记忆原来的建立时间，召回统计却没有带过来
 export async function loadRecallWindow(

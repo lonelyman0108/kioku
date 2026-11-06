@@ -38,8 +38,8 @@ vi.mock('../useSession', () => ({ useSession: () => ({ me: { data: ref({ id: 'me
 vi.mock('../unsavedChanges', () => ({ useUnsavedChangesGuard: fakes.guard }))
 
 const SCOPES: KeyScopes = {
-  readLayers: ['private'],
-  writeLayers: ['private'],
+  readLayers: ['user'],
+  writeLayers: ['user'],
   maxSensitivity: 'private',
   admin: false,
 }
@@ -849,7 +849,12 @@ const WRITE_CALL: BenchAgentToolCall = {
   arguments: { uri: 'core://a', content: '甲' },
   parseError: null,
 }
-const TOOLS_LOOP = { loop: 'tools' as const, system: '基础', model: 'fake-model' }
+const TOOLS_LOOP = {
+  loop: 'tools' as const,
+  turnEnd: false,
+  system: '基础',
+  model: 'fake-model',
+}
 const CONSENT = {
   endpoint: 'https://model.example.com/v1',
   model: 'fake-model',
@@ -919,6 +924,29 @@ describe('模型对话', () => {
       chatType: 'group',
       group: { id: 'bench-group' },
     })
+  })
+
+  it('服务端说回复后发 turn.end（Claude Code）：回复之后发一次，页面上不带会话上下文时也不带', async () => {
+    const bench = start()
+    await settle()
+    fakes.api.benchRun.mockImplementation(async (_s, _a, _k, request) => ({
+      ...RESULT,
+      mode: 'rollback',
+      steps: request.steps.map((_step: unknown, index: number) => ({
+        ...RESULT.steps[0]!,
+        index,
+        text: '',
+      })),
+    }))
+    fakes.api.benchAgentTurn.mockResolvedValueOnce(modelReply('好'))
+    await bench.sendToAgent('你好', { ...TOOLS_LOOP, loop: 'hook', turnEnd: true })
+    const [, , , request] = fakes.api.benchRun.mock.calls.at(-1)!
+    expect(request.steps).toEqual([
+      {
+        kind: 'lifecycle',
+        body: { event: 'turn.end', sessionId: 'bench-agent', user: '你好', reply: '好' },
+      },
+    ])
   })
 
   it('整个循环占着运行状态：模型请求之间也不能切换，别的调用发不出去', async () => {

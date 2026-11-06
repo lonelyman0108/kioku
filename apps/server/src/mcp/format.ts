@@ -1,15 +1,18 @@
-import type {
-  CredentialAccess,
-  CredentialSummary,
-  DomainSummary,
-  KeyCredentialList,
-  MemoryChildren,
-  MemoryView,
+import {
+  LAYER_NAMES,
+  type CredentialAccess,
+  type CredentialSummary,
+  type CuratedLayer,
+  type DomainSummary,
+  type KeyCredentialList,
+  type MemoryChildren,
+  type MemoryView,
 } from '@kioku/contracts'
 
 import { CREDENTIAL_NOTICE } from '../credential/methods'
 import type { PlaceholderCredential } from '../credential/service'
 import { MASKED_SECRET_CONTENT } from '../memory/masked'
+import { inlineText, titleSuffix } from '../recall/text'
 
 // 工具里的非业务错误只回这句，和 REST 一致。测试台也按它认内部错误
 export const TOOL_INTERNAL_ERROR = '服务内部错误'
@@ -18,7 +21,8 @@ export const TOOL_INTERNAL_ERROR = '服务内部错误'
 export function formatMemory(m: MemoryView): string {
   const lines = [
     `URI: ${m.uri}`,
-    `层: ${m.layer}，敏感级: ${m.sensitivity}，priority: ${m.priority}，版本: ${m.version}`,
+    `标题: ${inlineText(m.title)}`,
+    `归属: ${m.layer}，敏感级: ${m.sensitivity}，priority: ${m.priority}，版本: ${m.version}`,
   ]
   if (m.validTo) lines.push(`有效到: ${m.validTo}（到期后不再召回）`)
   if (m.disclosure) lines.push(`Disclosure: ${m.disclosure}`)
@@ -33,7 +37,8 @@ export function formatChildren(result: MemoryChildren): string {
   const rows = result.children.map((c) => {
     const below = c.childCount ? `，${c.childCount} 个子节点` : ''
     if (!c.exists) return `- ${c.uri}（路径本身没有记忆${below}）`
-    return `- ${c.uri}（${c.layer}，priority ${c.priority}${below}）${c.disclosure ? `：${c.disclosure}` : ''}`
+    const title = c.title ? titleSuffix(c.uri, c.title) : ''
+    return `- ${c.uri}${title}（${c.layer}，priority ${c.priority}${below}）${c.disclosure ? `：${c.disclosure}` : ''}`
   })
   const more = result.truncated
     ? '\n（这一级太多，只列出了前面的一部分，用 kioku_search 查找其余的）'
@@ -41,9 +46,15 @@ export function formatChildren(result: MemoryChildren): string {
   return `${head}子节点：\n${rows.join('\n')}${more}`
 }
 
+// 有记忆的开头，各带归属的中文名
 export function formatDomains(domains: DomainSummary[]): string {
   if (!domains.length) return '还没有可见的记忆'
-  return domains.map((d) => `- ${d.domain}://（${d.count} 个节点）`).join('\n')
+  return domains
+    .map((d) => {
+      const name = LAYER_NAMES[d.domain as CuratedLayer] ?? d.domain
+      return `- ${d.domain}://（${name}，${d.count} 个节点）`
+    })
+    .join('\n')
 }
 
 const sourceLabel = (c: CredentialSummary) =>

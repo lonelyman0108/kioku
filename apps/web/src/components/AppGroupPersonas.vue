@@ -147,7 +147,7 @@ function remove(subjectId: string) {
       <ul v-if="rules.data.value?.rules.length" class="group-rules">
         <li v-for="rule in rules.data.value.rules" :key="rule.subjectId">
           <RouterLink
-            :to="{ name: 'subject', params: { spaceId, subjectId: rule.subjectId } }"
+            :to="{ name: 'contact', params: { spaceId, subjectId: rule.subjectId } }"
             class="group-name"
             :title="rule.groupName"
             >{{ rule.groupName }}</RouterLink

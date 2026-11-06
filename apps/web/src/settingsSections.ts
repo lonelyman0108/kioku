@@ -18,7 +18,6 @@ export const INSTANCE_SECTIONS = [
 ] as const satisfies readonly SettingsSection[]
 
 export const SPACE_SECTIONS = [
-  { key: 'layers', label: '分区默认层' },
   { key: 'budget', label: '抽取预算' },
   { key: 'dream', label: '整理' },
   { key: 'export', label: '导出' },

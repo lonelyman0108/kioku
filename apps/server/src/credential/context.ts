@@ -4,7 +4,7 @@ import type { Deps, KeyPrincipal } from '../http/env'
 import { accessForKey, consoleRoleFor } from '../memory/context'
 import { CredentialService, type CredentialContext } from './service'
 
-// 凭据和私人层一样按应用主人算，会话上下文的收紧照常生效：群聊、私聊、定时任务读不到私人层，也就看不到凭据。
+// 凭据和本人的记忆一样按应用所有者算，会话上下文的收紧照常生效：群聊、私聊、定时任务读不到本人，也就看不到凭据。
 // options 给测试台：打码与事件的标记
 export function credentialServiceForKey(
   deps: Deps,

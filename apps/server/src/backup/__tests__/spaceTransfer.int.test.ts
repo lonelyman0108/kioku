@@ -9,7 +9,6 @@ import type {
   CredentialAccess,
   CredentialEventList,
   CredentialValues,
-  DomainLayers,
   DreamMemberSettings,
   ExpiredMemoryList,
   ExtractionUsage,
@@ -46,7 +45,12 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bearer, bootstrap, FULL_SCOPES, jsonRequest } from '../../testing/fixtures'
 import { exportableMemories } from '../spaceExport'
 import { deriveExportKey, openSpaceExport, sealSpaceExport, type KdfParams } from '../spaceFormat'
@@ -190,7 +194,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     createdAt: new Date().toISOString(),
     kioku: 'test',
     exporter: { displayName: '拼文件的人', dreamPrivate: true },
-    space: { name, domainLayers: {}, extractionMonthlyTokens: 1000, extractionDailyWrites: 5 },
+    space: { name, extractionMonthlyTokens: 1000, extractionDailyWrites: 5 },
   })
   // 文件头按原样写出，测别的格式版本、缺字段时传别的样子
   async function craft(records: SpaceExportRecord[], head: object = header()): Promise<Buffer> {
@@ -208,7 +212,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     type: 'memory',
     id: randomUUID(),
     form: 'curated',
-    layer: 'private',
+    layer: 'user',
     sensitivity: 'private',
     provenance: 'owner',
     originScope: 'global',
@@ -216,6 +220,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     appId: null,
     subjectId: null,
     uri,
+    title: uri.slice(uri.lastIndexOf('/') + 1),
     content: `${uri} 的正文`,
     priority: 2,
     disclosure: null,
@@ -360,34 +365,44 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       bobCookie,
     )
 
-    await memory({ uri: 'core://agent', content: '先读正文再信任', layer: 'base', priority: 0 })
+    await memory({ uri: 'core://agent', content: '先读正文再信任', priority: 0 })
     await memory({ uri: 'persona://zeta-base/soul', content: '基础人格的设定' })
     await memory({ uri: 'persona://alpha-child/soul', content: '子人格的口吻', glossary: ['口吻'] })
     await memory({ uri: 'app://agent/rules', content: '提交规范', priority: 1 })
     await memory({ uri: 'app://bob-app/notes', content: 'bob 的应用层笔记' }, bobCookie)
-    await memory({ uri: 'preferences://user', content: '回答用中文', layer: 'owner' })
+    await memory({ uri: 'user://preferences/user', sensitivity: 'internal', content: '回答用中文' })
     await memory({
-      uri: 'home://nas',
+      uri: 'user://home/nas',
       content: 'NAS 在书房，密码见 {{cred:nas#password}}',
       glossary: ['书房存储', 'NAS'],
       disclosure: '要连 NAS 的时候',
     })
-    await memory({ uri: 'home://wifi', content: '无线密码 hunter2-secret', sensitivity: 'secret' })
-    await memory({ uri: 'bob://diary', content: 'bob 的日记' }, bobCookie)
-    await memory({ uri: 'bob://vault', content: 'bob 的秘密', sensitivity: 'secret' }, bobCookie)
-    await memory({ uri: 'preferences://user', content: 'bob 的偏好', layer: 'owner' }, bobCookie)
-    await memory({ uri: 'home://old', content: '要删掉的' })
+    await memory({
+      uri: 'user://home/wifi',
+      content: '无线密码 hunter2-secret',
+      sensitivity: 'secret',
+    })
+    await memory({ uri: 'user://bob/diary', content: 'bob 的日记' }, bobCookie)
+    await memory(
+      { uri: 'user://bob/vault', content: 'bob 的秘密', sensitivity: 'secret' },
+      bobCookie,
+    )
+    await memory(
+      { uri: 'user://preferences/user', sensitivity: 'internal', content: 'bob 的偏好' },
+      bobCookie,
+    )
+    await memory({ uri: 'user://home/old', content: '要删掉的' })
     await ok(
       send(
         source,
         'DELETE',
-        `/v1/spaces/${spaceId}/memories?uri=home%3A%2F%2Fold`,
+        `/v1/spaces/${spaceId}/memories?uri=user%3A%2F%2Fhome%2Fold`,
         undefined,
         cookie,
       ),
       204,
     )
-    const expired = await memory({ uri: 'home://expired', content: '已经过期的' })
+    const expired = await memory({ uri: 'user://home/expired', content: '已经过期的' })
 
     // 群聊与私聊里认出的对象：群、群里的发言人（标记成 alice）、私聊的人（标记成 bob）
     const recall = (key: string, query: string, context?: object) =>
@@ -445,22 +460,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       send(
         source,
         'PUT',
-        `/v1/spaces/${spaceId}/domain-layers`,
-        { defaults: { core: 'base', preferences: 'owner' } },
-        cookie,
-      ),
-    )
-    await ok(
-      send(
-        source,
-        'PUT',
         `/v1/spaces/${spaceId}/extraction-budget`,
         { monthlyTokens: 123_456, dailyWritesPerSubject: 7 },
         cookie,
       ),
     )
 
-    // 抽取的事实与会话摘要来自群聊，是不可信来源；还有一条的群已经删掉了（作用域指向不在的对象）
+    // 抽取的事实与会话摘要来自群聊，是不可信来源；还有一条事实是在已经删掉的群里听到的（作用域指向不在的联系人）。
+    // 会话摘要挂在会话上，不随空间导出
     const orphanGroup = randomUUID()
     await withSpace(database.db, spaceId, async (tx) => {
       const extracted = {
@@ -475,14 +482,16 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         {
           ...extracted,
           layer: 'episode',
+          conversationId: await summaryConversation(tx, spaceId),
           content: '读书会讨论了村上春树',
           expiresAt: new Date(Date.now() + 86_400_000),
         },
         {
           ...extracted,
-          layer: 'episode',
+          layer: 'subject',
+          subjectId: ming.id,
           originScope: `group:${orphanGroup}`,
-          content: '一个已经删掉的群里的摘要',
+          content: '一个已经删掉的群里听到的事',
         },
       ])
       await tx
@@ -521,7 +530,6 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const parsed = await contents(file)
       expect(parsed.header.space).toEqual({
         name: '家',
-        domainLayers: { core: 'base', preferences: 'owner' },
         extractionMonthlyTokens: 123_456,
         extractionDailyWrites: 7,
       })
@@ -531,21 +539,25 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           'app://agent/rules',
           'app://bob-app/notes',
           'core://agent',
-          'home://expired',
-          'home://nas',
-          'home://wifi',
+          'user://home/expired',
+          'user://home/nas',
+          'user://home/wifi',
           'persona://alpha-child/soul',
           'persona://zeta-base/soul',
-          'preferences://user',
+          'user://preferences/user',
         ].sort(),
       )
-      // 画像只有 alice 自己的那份；bob 的私人层与删掉的不在；过期的带上，有效期原样写出
-      expect(parsed.memories.find((m) => m.uri === 'preferences://user')!.content).toBe(
+      // 本人的只有 alice 自己的那份；bob 的本人与删掉的不在；过期的带上，有效期原样写出
+      expect(parsed.memories.find((m) => m.uri === 'user://preferences/user')!.content).toBe(
         '回答用中文',
       )
-      expect(parsed.memories.find((m) => m.uri === 'home://expired')!.validTo).not.toBeNull()
-      expect(parsed.memories.filter((m) => m.form === 'extracted')).toHaveLength(3)
-      expect(parsed.memories.find((m) => m.uri === 'home://wifi')).toMatchObject({
+      expect(parsed.memories.find((m) => m.uri === 'user://home/expired')!.validTo).not.toBeNull()
+      // 来自对话的只有联系人的事实，会话摘要不导出
+      expect(parsed.memories.filter((m) => m.form === 'extracted').map((m) => m.layer)).toEqual([
+        'subject',
+        'subject',
+      ])
+      expect(parsed.memories.find((m) => m.uri === 'user://home/wifi')).toMatchObject({
         sensitivity: 'secret',
         content: '无线密码 hunter2-secret',
       })
@@ -613,9 +625,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         apps: 3,
         subjects: 3,
         linkedSubjects: 1,
-        memories: 12,
-        ownerMemories: 1,
-        privateMemories: 3,
+        memories: 11,
+        userMemories: 4,
         secrets: 1,
         credentials: 3,
         providers: 2,
@@ -675,25 +686,22 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(rules.rules).toEqual([
         { subjectId: newGroup.id, personaId: newChild.id, groupName: '读书会' },
       ])
-      expect(await get<DomainLayers>('/domain-layers')).toEqual({
-        defaults: { core: 'base', preferences: 'owner' },
-      })
       expect(await get<ExtractionUsage>('/extraction-budget')).toMatchObject({
         monthlyTokens: 123_456,
         dailyWritesPerSubject: 7,
         usedTokens: 0,
       })
 
-      // 记忆的正文、层与来源照旧；secret 用这个实例的主密钥重新加密，读得出来
+      // 记忆的正文、归属与来源照旧；secret 用这个实例的主密钥重新加密，读得出来
       const read = (uri: string) => get<MemoryView>(`/memories?uri=${encodeURIComponent(uri)}`)
-      expect(await read('preferences://user')).toMatchObject({
-        layer: 'owner',
+      expect(await read('user://preferences/user')).toMatchObject({
+        layer: 'user',
         content: '回答用中文',
         provenance: 'owner',
         version: 1,
       })
-      expect(await read('home://nas')).toMatchObject({
-        layer: 'private',
+      expect(await read('user://home/nas')).toMatchObject({
+        layer: 'user',
         sensitivity: 'private',
         glossary: ['NAS', '书房存储'],
         disclosure: '要连 NAS 的时候',
@@ -703,9 +711,9 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         glossary: ['口吻'],
       })
       // 管理界面默认不给机密正文；用目标实例的主密钥解得开，见下面
-      expect((await read('home://wifi')).content).toBeNull()
+      expect((await read('user://home/wifi')).content).toBeNull()
       const [wifi] = await withSpace(database.db, newSpace, (tx) =>
-        tx.select().from(memories).where(eq(memories.path, 'wifi')),
+        tx.select().from(memories).where(eq(memories.path, 'home/wifi')),
       )
       expect(wifi!.keyId).toBe(keyIdOf(targetKey))
       expect(
@@ -723,28 +731,25 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         ),
       ).toThrow()
       // 每条记一条导入事件，历史从这里开始
-      const nas = await read('home://nas')
+      const nas = await read('user://home/nas')
       const history = await get<MemoryHistory>(`/memories/history?id=${nas.id}`)
       expect(history.events.map((e) => e.type)).toEqual(['import'])
-      expect(history.events[0]!.after).toMatchObject({ content: nas.content, layer: 'private' })
+      expect(history.events[0]!.after).toMatchObject({ content: nas.content, layer: 'user' })
 
       // 抽取的事实仍是不可信来源，作用域换成新的群，照样进待审；作用域指向不在的群的，换成另一个不在的群，不会变成全局
       const ming = subjectList.items.find((s) => s.displayName === '小明')!
       const detail = await get<SubjectDetail>(`/subjects/${ming.id}`)
-      expect(detail.facts).toMatchObject([
-        {
-          content: '小明在学日语',
-          provenance: 'untrusted',
-          scope: { kind: 'group', id: newGroup.id },
-        },
-      ])
+      expect(detail.facts.find((f) => f.content === '小明在学日语')).toMatchObject({
+        provenance: 'untrusted',
+        scope: { kind: 'group', id: newGroup.id },
+      })
       const review = await get<ReviewList>('/review')
       expect(review.items.map((i) => i.content).sort()).toEqual(
-        ['一个已经删掉的群里的摘要', '小明在学日语', '读书会讨论了村上春树'].sort(),
+        ['一个已经删掉的群里听到的事', '小明在学日语'].sort(),
       )
       const scopes = await withSpace(database.db, newSpace, (tx) =>
         tx.execute<{ scope: string }>(
-          sql`select origin_scope as scope from memories where content = '一个已经删掉的群里的摘要'`,
+          sql`select origin_scope as scope from memories where content = '一个已经删掉的群里听到的事'`,
         ),
       )
       expect(scopes[0]!.scope).toMatch(/^group:/)
@@ -792,7 +797,13 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(
         (
           await ok<MemoryView>(
-            send(target, 'GET', '/v1/memories?uri=home%3A%2F%2Fwifi', undefined, bearer(newKey)),
+            send(
+              target,
+              'GET',
+              '/v1/memories?uri=user%3A%2F%2Fhome%2Fwifi',
+              undefined,
+              bearer(newKey),
+            ),
           )
         ).content,
       ).toBe('无线密码 hunter2-secret')
@@ -816,7 +827,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
   )
 
   it(
-    '已过期的策展记忆与被推翻的事实按管理读取一起导出，导入后有效期不变、能重新生效；删掉的、到期的会话摘要、别的成员的私人层不带',
+    '已过期的记下的记忆与被推翻的事实按管理读取一起导出，导入后有效期不变、能重新生效；删掉的、会话摘要、别的成员的本人记忆不带',
     { timeout: 30_000 },
     async () => {
       const alice = await bootstrap(source, 'alice')
@@ -831,43 +842,27 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           tx.update(memories).set({ validTo: past }).where(eq(memories.id, id)),
         )
 
-      const plan = await memory({ uri: 'home://plan', content: '十月的旅行计划' })
+      const plan = await memory({ uri: 'user://home/plan', content: '十月的旅行计划' })
       await expire(plan.id)
-      // 共享节点过期之后，只能写私人层的 Key 在同一个 URI 写了个人节点：它让不出共享节点，两条并存
-      const shared = await memory({ uri: 'core://taken', content: '过期的共享节点', layer: 'base' })
+      const shared = await memory({ uri: 'core://taken', content: '过期的共享节点' })
       await expire(shared.id)
-      const agent = await alice.createApp('agent')
-      const privateOnly = await alice.issueKey(agent.id, {
-        ...FULL_SCOPES,
-        writeLayers: ['private'],
-      })
-      await ok(
-        send(
-          source,
-          'POST',
-          '/v1/memories',
-          { uri: 'core://taken', content: '现在的个人节点', layer: 'private' },
-          bearer(privateOnly),
-        ),
-        201,
-      )
-      await memory({ uri: 'home://gone', content: '删掉的' })
+      await memory({ uri: 'user://home/gone', content: '删掉的' })
       await ok(
         send(
           source,
           'DELETE',
-          `/v1/spaces/${spaceId}/memories?uri=home%3A%2F%2Fgone`,
+          `/v1/spaces/${spaceId}/memories?uri=user%3A%2F%2Fhome%2Fgone`,
           undefined,
           cookie,
         ),
         204,
       )
       const bobs = await memory(
-        { uri: 'bob://old', content: 'bob 过期的日记' },
+        { uri: 'user://bob/old', content: 'bob 过期的日记' },
         { cookie: bob.cookie },
       )
       await expire(bobs.id)
-      // 对象上被推翻的与现在的事实，到期的与没到期的会话摘要
+      // 联系人上被推翻的与现在的事实，到期的与没到期的会话摘要
       await withSpace(database.db, spaceId, async (tx) => {
         const [ming] = await tx
           .insert(subjects)
@@ -879,13 +874,21 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           sensitivity: 'public' as const,
           provenance: 'owner' as const,
         }
+        const conversationId = await summaryConversation(tx, spaceId)
         await tx.insert(memories).values([
           { ...extracted, layer: 'subject', subjectId: ming!.id, content: '小明在学法语' },
           { ...extracted, layer: 'subject', subjectId: ming!.id, content: '小明在学日语' },
-          { ...extracted, layer: 'episode', content: '到期的会话摘要', expiresAt: past },
           {
             ...extracted,
             layer: 'episode',
+            conversationId,
+            content: '到期的会话摘要',
+            expiresAt: past,
+          },
+          {
+            ...extracted,
+            layer: 'episode',
+            conversationId,
             content: '没到期的会话摘要',
             expiresAt: new Date(Date.now() + 86_400_000),
           },
@@ -897,14 +900,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const parsed = await contents(file)
       const byContent = new Map(parsed.memories.map((m) => [m.content, m]))
       expect([...byContent.keys()].sort()).toEqual(
-        [
-          '十月的旅行计划',
-          '过期的共享节点',
-          '现在的个人节点',
-          '小明在学法语',
-          '小明在学日语',
-          '没到期的会话摘要',
-        ].sort(),
+        ['十月的旅行计划', '过期的共享节点', '小明在学法语', '小明在学日语'].sort(),
       )
       expect(byContent.get('十月的旅行计划')!.validTo).toBe(past.toISOString())
       expect(byContent.get('小明在学法语')!.validTo).toBe(past.toISOString())
@@ -939,13 +935,16 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           undefined,
           cookie,
         )
-      expect((await byUri('home://plan')).status).toBe(404)
-      expect((await ok<MemoryView>(byUri('core://taken'))).content).toBe('现在的个人节点')
+      expect((await byUri('user://home/plan')).status).toBe(404)
+      expect((await byUri('core://taken')).status).toBe(404)
 
-      // 已过期的在「已过期」里，能重新生效；共享节点的 URI 被个人节点占着，和原来的空间一样不能重新生效
+      // 已过期的在「已过期」里，能重新生效
       const expiredList = await get<ExpiredMemoryList>('/memories/expired')
       const expiredOf = (uri: string) => expiredList.items.find((m) => m.uri === uri)!
-      expect(expiredList.items.map((m) => m.uri).sort()).toEqual(['core://taken', 'home://plan'])
+      expect(expiredList.items.map((m) => m.uri).sort()).toEqual([
+        'core://taken',
+        'user://home/plan',
+      ])
       const reactivate = (item: ExpiredMemoryList['items'][number]) =>
         send(
           source,
@@ -954,11 +953,12 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           { memoryId: item.id, expectedVersion: item.version },
           cookie,
         )
-      await ok(reactivate(expiredOf('home://plan')))
-      expect((await ok<MemoryView>(byUri('home://plan'))).content).toBe('十月的旅行计划')
-      expect((await reactivate(expiredOf('core://taken'))).status).toBe(409)
+      await ok(reactivate(expiredOf('user://home/plan')))
+      expect((await ok<MemoryView>(byUri('user://home/plan'))).content).toBe('十月的旅行计划')
+      await ok(reactivate(expiredOf('core://taken')))
+      expect((await ok<MemoryView>(byUri('core://taken'))).content).toBe('过期的共享节点')
 
-      // 被推翻的事实在对象页上，能重新生效
+      // 被推翻的事实在联系人详情里，能重新生效
       const people = await get<SubjectList>('/subjects')
       const ming = people.items.find((s) => s.displayName === '小明')!
       const detail = await get<SubjectDetail>(`/subjects/${ming.id}`)
@@ -1003,12 +1003,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
             { cookie: alice.cookie },
           ),
         )
-      const original = await read(spaceId, 'home://wifi')
-      const copied = await read(copy.spaceId, 'home://wifi')
+      const original = await read(spaceId, 'user://home/wifi')
+      const copied = await read(copy.spaceId, 'user://home/wifi')
       expect(copied.content).toBe(original.content)
       expect(copied.id).not.toBe(original.id)
       // 同一个实例里两个空间的凭据互不相干
-      expect((await read(copy.spaceId, 'home://nas')).content).toContain('{{cred:nas#password}}')
+      expect((await read(copy.spaceId, 'user://home/nas')).content).toContain(
+        '{{cred:nas#password}}',
+      )
       expect(await spaceCount()).toBe(2)
     },
   )
@@ -1045,23 +1047,26 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const remember = (body: object, who = cookie) =>
       ok<MemoryView>(send(source, 'POST', `${space}/memories`, body, who), 201)
     const shared = await remember({
-      uri: 'kb://door',
+      uri: 'core://kb/door',
       content: '机房门禁 8842',
-      layer: 'base',
       sensitivity: 'secret',
     })
     const mine = await remember({
-      uri: 'notes://vault',
+      uri: 'user://notes/vault',
       content: '保险柜 1234',
       sensitivity: 'secret',
     })
-    await remember({ uri: 'notes://plain', content: '普通的正文' })
+    await remember({ uri: 'user://notes/plain', content: '普通的正文' })
     // 别的成员私人层的、已删除的不在文件里
     await remember(
-      { uri: 'notes://hers', content: 'bob 的', sensitivity: 'secret' },
+      { uri: 'user://notes/hers', content: 'bob 的', sensitivity: 'secret' },
       { cookie: bob.cookie },
     )
-    const gone = await remember({ uri: 'notes://gone', content: '删了', sensitivity: 'secret' })
+    const gone = await remember({
+      uri: 'user://notes/gone',
+      content: '删了',
+      sensitivity: 'secret',
+    })
     await ok(
       send(
         source,
@@ -1112,7 +1117,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         source,
         'POST',
         `${space}/memories`,
-        { uri: 'notes://api', content: 'token = abc' },
+        { uri: 'user://notes/api', content: 'token = abc' },
         cookie,
       ),
       201,
@@ -1131,7 +1136,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         source,
         'POST',
         `${space}/memories`,
-        { uri: 'notes://vault', content: '门禁 8842', sensitivity: 'secret' },
+        { uri: 'user://notes/vault', content: '门禁 8842', sensitivity: 'secret' },
         cookie,
       ),
       201,
@@ -1164,7 +1169,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(new Set(events.map((e) => e.type))).toEqual(new Set(['import']))
   })
 
-  it('导出人关掉的 Dream 整理画像层与私人层跟着文件走：导入人在新空间里也关着；文件格式升到 2，格式 1 的旧文件按开着，更新的格式拒收', async () => {
+  it('导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 3，改版之前的 1、2 与更新的格式都拒收', async () => {
     const alice = await bootstrap(source, 'alice')
     const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
     const cookie = { cookie: alice.cookie }
@@ -1209,8 +1214,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const again = await ok<SpaceImportResult>(importRequest(source, alice.cookie, reopened), 201)
     expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
 
-    // 带上这一项之后文件格式是 2，2 的文件里必须有它
-    expect((await contents(file)).header.version).toBe(2)
+    // 文件里必须有这一项
+    expect((await contents(file)).header.version).toBe(3)
     const missing = await importRequest(
       source,
       alice.cookie,
@@ -1221,28 +1226,20 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       '第 1 行 exporter.dreamPrivate',
     )
 
-    // 格式 1 的文件（有这一项之前导出的）照样认：那时还关不掉，按开着
-    const older = await ok<SpaceImportResult>(
-      importRequest(
+    // 记忆架构改版之前的格式（层、坐标与本人都不一样）和认不得的更新的格式都拒收，不悄悄丢掉或猜测内容
+    const before = await spaceCount()
+    for (const version of [1, 2, 4]) {
+      const res = await inspectRequest(
         source,
         alice.cookie,
-        await craft([], { ...header(), version: 1, exporter: { displayName: '旧版本导出的人' } }),
-      ),
-      201,
-    )
-    expect(older.exporter).toEqual({ displayName: '旧版本导出的人', dreamPrivate: true })
-    expect(await mine(older.spaceId)).toEqual({ includePrivate: true })
-
-    // 认不得的更新的格式拒收，不悄悄丢掉不认识的内容（只认 1 的旧版本遇到 2 也是这样）
-    const newer = await inspectRequest(
-      source,
-      alice.cookie,
-      await craft([], { ...header(), version: 3 }),
-    )
-    expect(newer.status).toBe(400)
-    expect(((await newer.json()) as { error: string }).error).toBe(
-      '导出文件的格式版本是 3，当前 Kioku 支持 1 到 2。请升级到导出它的版本或更新的版本后再导入。',
-    )
+        await craft([], { ...header(), version }),
+      )
+      expect(res.status).toBe(400)
+      expect(((await res.json()) as { error: string }).error).toBe(
+        `导出文件的格式版本是 ${version}，当前 Kioku 只支持 3。版本 1、2 是记忆架构改版之前的格式，无法导入；更新的版本请升级 Kioku 后再导入。`,
+      )
+    }
+    expect(await spaceCount()).toBe(before)
   })
 
   it('只有空间 owner 能导出，只有实例管理员能导入', async () => {
@@ -1311,7 +1308,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       )
       expect(await spaceCount()).toBe(before)
       // 没有要加密的内容时照样能导入
-      const plain = await craft([curated('home://plain')])
+      const plain = await craft([curated('user://home/plain')])
       expect((await importRequest(appWith(null), alice.cookie, plain)).status).toBe(201)
     },
   )
@@ -1365,7 +1362,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     for (const next of queued) (await next)()
   })
 
-  it('文件里的内容对不上时拒绝：URI 冲突、继承成环、层与 URI 不符、指向不在的对象', async () => {
+  it('文件里的内容对不上时拒绝：坐标重复、继承成环、归属与坐标不符、指向不在的对象', async () => {
     const alice = await bootstrap(source, 'alice')
     const before = await spaceCount()
     const importing = async (records: SpaceExportRecord[], message: string) => {
@@ -1383,15 +1380,25 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       createdAt: now,
       updatedAt: now,
     })
+    const shared = { layer: 'core', sensitivity: 'public' } as const
     await importing(
-      [curated('core://agent', { layer: 'base', sensitivity: 'public' }), curated('core://agent')],
-      '既有有效的共享记忆，又有有效的个人记忆',
+      [curated('core://agent', shared), curated('core://agent', shared)],
+      '第 3 行记忆 core://agent 的坐标重复',
     )
-    await importing([curated('home://a'), curated('home://a')], '第 3 行记忆 home://a 的 URI 重复')
+    await importing(
+      [curated('user://home/a'), curated('user://home/a')],
+      '第 3 行记忆 user://home/a 的坐标重复',
+    )
     // 同一归属里过期的也算重复（唯一索引不看有效期）
     await importing(
-      [curated('home://a', { validTo: '2020-01-01T00:00:00.000Z' }), curated('home://a')],
-      '第 3 行记忆 home://a 的 URI 重复',
+      [curated('user://home/a', { validTo: '2020-01-01T00:00:00.000Z' }), curated('user://home/a')],
+      '第 3 行记忆 user://home/a 的坐标重复',
+    )
+    // 开头决定归属：写着本人的却是 core:// 的坐标
+    await importing([curated('core://agent')], '第 2 行记忆 core://agent 的坐标开头与归属不符')
+    await importing(
+      [curated('user://home/open', { sensitivity: 'public' })],
+      '属于本人，本人的记忆不设公开',
     )
     const [a, b] = [randomUUID(), randomUUID()]
     await importing([persona(a, 'a', b), persona(b, 'b', a)], '继承关系成环')
@@ -1399,10 +1406,13 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       [persona(a, 'a', null), curated('persona://b/soul', { layer: 'persona', personaId: a })],
       '不在所属人格 a 下',
     )
-    await importing([curated('persona://a/soul', { layer: 'base' })], '却属于基础层')
     await importing(
-      [curated('home://x', { layer: 'base', provenance: 'untrusted' })],
-      '来自未确认来源，只能在联系人层或情节层',
+      [curated('persona://a/soul', { layer: 'core', sensitivity: 'public' })],
+      '的坐标开头与归属不符',
+    )
+    await importing(
+      [curated('core://x', { layer: 'core', sensitivity: 'public', provenance: 'untrusted' })],
+      '来自未确认来源，只能是联系人的事实',
     )
     await importing(
       [
@@ -1420,42 +1430,17 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     )
     // 数据库存不下的值在检查文件时就挡下，说清是第几行：公元 0 年的时间、NUL 字符
     await importing(
-      [curated('home://old', { createdAt: '0000-06-01T00:00:00.000Z' })],
+      [curated('user://home/old', { createdAt: '0000-06-01T00:00:00.000Z' })],
       '第 2 行 createdAt：不是有效的时间',
     )
     await importing(
-      [curated('home://nul', { content: '前\u0000后' })],
+      [curated('user://home/nul', { content: '前\u0000后' })],
       '第 2 行 content：含无法存入数据库的字符（NUL 或落单的代理项）',
     )
     expect(await spaceCount()).toBe(before)
   })
 
-  it('导入前核对 URI 的互斥按数据库的时间：应用的时钟走快了，也不把还有效的共享节点当成过期的', async () => {
-    const alice = await bootstrap(source, 'alice')
-    const before = await spaceCount()
-    // 共享节点一小时后才过期，同一个 URI 上又有个人节点：现在两条都有效，不能一起导入
-    const inAnHour = new Date(Date.now() + 3_600_000).toISOString()
-    const file = await craft([
-      curated('core://clock', { layer: 'base', sensitivity: 'public', validTo: inAnHour }),
-      curated('core://clock'),
-    ])
-    // 应用的时钟快了两小时，数据库的没变：按应用的时间核对，会以为共享节点已经过期
-    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 2 * 3_600_000 })
-    try {
-      for (const request of [inspectRequest, importRequest]) {
-        const res = await request(source, alice.cookie, file)
-        expect(res.status, await res.clone().text()).toBe(400)
-        expect(((await res.json()) as { error: string }).error).toContain(
-          '既有有效的共享记忆，又有有效的个人记忆',
-        )
-      }
-    } finally {
-      vi.useRealTimers()
-    }
-    expect(await spaceCount()).toBe(before)
-  })
-
-  it('导出挑记忆的条件：管理读取之外，去掉已删除的（含过期后让出 URI 的）与到期的会话摘要', async () => {
+  it('导出挑记忆的条件：管理读取之外，去掉已删除的（含过期后让出坐标的）与会话摘要', async () => {
     const alice = await bootstrap(source, 'alice')
     const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
     const spaceId = alice.spaceId
@@ -1470,12 +1455,13 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           .values({
             spaceId,
             form: 'curated',
-            layer: 'private',
+            layer: 'user',
             sensitivity: 'private',
             provenance: 'owner',
             ownerAccountId: alice.accountId,
-            domain: 'home',
-            path: label,
+            domain: 'user',
+            path: `home/${label}`,
+            title: label,
             content: label,
             ...values,
           })
@@ -1483,13 +1469,20 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       )
       labels.set(row!.id, label)
     }
-    const episode = { form: 'extracted' as const, layer: 'episode' as const, ownerAccountId: null }
-    const noUri = { domain: null, path: null }
+    const episode = {
+      form: 'extracted' as const,
+      layer: 'episode' as const,
+      ownerAccountId: null,
+      conversationId: await withSpace(database.db, spaceId, (tx) =>
+        summaryConversation(tx, spaceId),
+      ),
+    }
+    const noUri = { domain: null, path: null, title: null }
     await insert('live', {})
     await insert('expired', { validTo: past })
     await insert('deleted', { deletedAt: past })
     await insert('released', { validTo: past, deletedAt: new Date() })
-    await insert('shared', { layer: 'base', ownerAccountId: null })
+    await insert('shared', { layer: 'core', ownerAccountId: null, domain: 'core' })
     await insert('persona', {
       layer: 'persona',
       ownerAccountId: null,
@@ -1518,7 +1511,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       tx.select({ id: memories.id }).from(memories).where(exportableMemories(alice.accountId)),
     )
     expect(picked.map((r) => labels.get(r.id)).sort()).toEqual(
-      ['live', 'expired', 'shared', 'persona', 'secret', 'summary', 'summary-stale'].sort(),
+      ['live', 'expired', 'shared', 'persona', 'secret'].sort(),
     )
   })
 
@@ -1577,7 +1570,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
             (detail as { constraint?: string }).constraint === constraint,
         )
       const rejected = async (name: string, message: string) => {
-        const file = await craft([curated('home://a'), subject('好的'), subject(name)])
+        const file = await craft([curated('user://home/a'), subject('好的'), subject(name)])
         const res = await importRequest(source, alice.cookie, file)
         expect(res.status, await res.clone().text()).toBe(400)
         expect(((await res.json()) as { error: string }).error).toBe(message)
@@ -1591,7 +1584,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const keyword = await importRequest(
         source,
         alice.cookie,
-        await craft([curated('home://a', { glossary: ['坏关键词'] })]),
+        await craft([curated('user://home/a', { glossary: ['坏关键词'] })]),
       )
       expect(keyword.status, await keyword.clone().text()).toBe(400)
       expect(((await keyword.json()) as { error: string }).error).toBe(
@@ -1602,7 +1595,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const derived = await importRequest(
         source,
         alice.cookie,
-        await craft([curated('home://a', { content: '事件出错' })]),
+        await craft([curated('user://home/a', { content: '事件出错' })]),
       )
       expect(derived.status).toBe(500)
       expect(((await derived.json()) as { error: string }).error).toBe('服务内部错误')
@@ -1637,7 +1630,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         source,
         alice.cookie,
         await craft([
-          curated('home://a'),
+          curated('user://home/a'),
           {
             type: 'subject',
             id: randomUUID(),
@@ -1677,11 +1670,14 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     }
     // JSON 里的 "\ud800" 解出来是落单的代理项：写进 text 会被换成 U+FFFD，写进 jsonb（导入事件）会报错
     await rejected(
-      [curated('home://a'), curated('home://b', { content: '半个\ud800字' })],
+      [curated('user://home/a'), curated('user://home/b', { content: '半个\ud800字' })],
       '第 3 行 content',
     )
-    await rejected([curated('home://a', { glossary: ['好的', '\udc00坏'] })], '第 2 行 glossary.1')
-    await rejected([curated('home://a', { disclosure: '有\u0000的' })], '第 2 行 disclosure')
+    await rejected(
+      [curated('user://home/a', { glossary: ['好的', '\udc00坏'] })],
+      '第 2 行 glossary.1',
+    )
+    await rejected([curated('user://home/a', { disclosure: '有\u0000的' })], '第 2 行 disclosure')
     // 外部凭据的条目位置用的是接口的定义，也一样查
     const provider = randomUUID()
     await rejected(
@@ -1841,13 +1837,13 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           source,
           'POST',
           `/v1/spaces/${space}/memories`,
-          { uri: 'home://wifi', content: '无线密码', sensitivity: 'secret' },
+          { uri: 'user://home/wifi', content: '无线密码', sensitivity: 'secret' },
           cookie,
         ),
         201,
       )
       await inSpace(sql`update memories set wrapped_key = ${randomBytes(60)}`)
-      await failing('机密记忆 home://wifi 无法解密')
+      await failing('机密记忆 user://home/wifi 无法解密')
       await inSpace(sql`update memories set deleted_at = now()`)
 
       // 规则收紧之前存下的条目位置（带分号）：导出了也导入不了，导出时就点名
@@ -2159,8 +2155,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         )
       return {
         alice,
-        first: await remember('notes://first'),
-        second: await remember('notes://second'),
+        first: await remember('user://notes/first'),
+        second: await remember('user://notes/second'),
       }
     }
     const accessEvents = (spaceId: string) =>
@@ -2178,7 +2174,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       )
       expect(res.status, await res.clone().text()).toBe(200)
       const parsed = await contents(Buffer.from(await res.arrayBuffer()))
-      expect(parsed.memories.map((m) => m.uri).sort()).toEqual(['notes://first', 'notes://second'])
+      expect(parsed.memories.map((m) => m.uri).sort()).toEqual([
+        'user://notes/first',
+        'user://notes/second',
+      ])
       expect((await accessEvents(alice.spaceId)).map((e) => e.memoryId)).toEqual([second.id])
     })
 
@@ -2189,7 +2188,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           source,
           'POST',
           `/v1/spaces/${alice.spaceId}/memories`,
-          { uri: 'notes://only', content: '只有一条', sensitivity: 'secret' },
+          { uri: 'user://notes/only', content: '只有一条', sensitivity: 'secret' },
           { cookie: alice.cookie },
         ),
         201,
@@ -2262,7 +2261,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         source,
         'POST',
         `/v1/spaces/${alice.spaceId}/memories`,
-        { uri: 'notes://vault', content: '保险柜 1234', sensitivity: 'secret' },
+        { uri: 'user://notes/vault', content: '保险柜 1234', sensitivity: 'secret' },
         { cookie: alice.cookie },
       ),
       201,
@@ -2340,7 +2339,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     async () => {
       const alice = await bootstrap(source, 'alice')
       const records = Array.from({ length: 20_000 }, (_, i) =>
-        curated(`bulk://n${i}`, { glossary: i % 2 ? ['批量'] : [] }),
+        curated(`user://bulk/n${i}`, { glossary: i % 2 ? ['批量'] : [] }),
       )
       const result = await ok<SpaceImportResult>(
         importRequest(source, alice.cookie, await craft(records)),
@@ -2370,86 +2369,5 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       { isolationLevel: 'repeatable read', accessMode: 'read only' },
     )
     expect(row).toEqual({ isolation: 'repeatable read', readOnly: 'on', space: alice.spaceId })
-  })
-
-  describe('URI 互斥的触发器', () => {
-    // 单独的一条连接：这个会话里从来没设过 app.importing_space
-    let fresh: Database
-    beforeAll(() => {
-      fresh = connect(testDatabaseUrl!, { max: 1 })
-    })
-    afterAll(async () => {
-      await fresh?.close()
-    })
-
-    const locksAfterInsert = (
-      setup: (spaceId: string) => ReturnType<typeof sql>,
-      options: { reuse?: string } = {},
-    ): Promise<number> =>
-      fresh.db.transaction(async (tx) => {
-        const spaceId =
-          options.reuse ??
-          (await tx.insert(spaces).values({ name: 't' }).returning({ id: spaces.id }))[0]!.id
-        await tx.execute(setup(spaceId))
-        await tx.insert(memories).values(
-          ['a', 'b', 'c'].map((path) => ({
-            spaceId,
-            form: 'curated' as const,
-            layer: 'base' as const,
-            sensitivity: 'public' as const,
-            provenance: 'owner' as const,
-            domain: 'core',
-            path,
-            content: path,
-          })),
-        )
-        const [row] = await tx.execute<{ n: number }>(
-          sql`select count(*)::int as n from pg_locks where locktype = 'advisory' and pid = pg_backend_pid()`,
-        )
-        return row!.n
-      })
-
-    it('导入的事务里、空间是这个事务刚建的才不加锁；别的情况照常每个 URI 一把', async () => {
-      const importing = (id: string) =>
-        sql`select set_config('app.space_id', ${id}, true), set_config('app.importing_space', ${id}, true)`
-      const plain = (id: string) => sql`select set_config('app.space_id', ${id}, true)`
-      // 这个会话里还没设过 app.importing_space（读出来是 NULL），空间是本事务建的：照样加锁
-      expect(await locksAfterInsert(plain)).toBe(3)
-      expect(await locksAfterInsert(importing)).toBe(0)
-      // 设过一次之后读出来是空串：照样加锁
-      expect(await locksAfterInsert(plain)).toBe(3)
-      // 空间早就提交了，导入的标记对不上它的 xmin：照常加锁
-      const [old] = await database.db.insert(spaces).values({ name: 'old' }).returning()
-      expect(await locksAfterInsert(importing, { reuse: old!.id })).toBe(3)
-    })
-
-    it('不加锁时冲突照样拦下', async () => {
-      await expect(
-        fresh.db.transaction(async (tx) => {
-          const [space] = await tx.insert(spaces).values({ name: 't' }).returning()
-          const [account] = await tx.execute<{ id: string }>(
-            sql`insert into accounts (username, display_name, password_hash) values ('t', 't', 'x') returning id`,
-          )
-          await tx.execute(
-            sql`select set_config('app.space_id', ${space!.id}, true), set_config('app.importing_space', ${space!.id}, true)`,
-          )
-          const row = {
-            spaceId: space!.id,
-            form: 'curated' as const,
-            sensitivity: 'private' as const,
-            provenance: 'owner' as const,
-            domain: 'home',
-            path: 'x',
-            content: 'x',
-          }
-          await tx.insert(memories).values({ ...row, layer: 'base' })
-          await tx
-            .insert(memories)
-            .values({ ...row, layer: 'private', ownerAccountId: account!.id })
-        }),
-      ).rejects.toMatchObject({
-        cause: { code: '23505', constraint_name: 'memories_uri_live_idx' },
-      })
-    })
   })
 })

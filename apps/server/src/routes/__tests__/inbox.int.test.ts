@@ -14,7 +14,12 @@ import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { dreamSuggestions, memories, subjectBindings, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
@@ -59,7 +64,8 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     expect(res.status, await res.clone().text()).toBe(201)
     return (await res.json()) as MemoryView
   }
-  // 不可信来源写下的对象层、情节层记忆：待确认内容
+  // 不可信来源写下的联系人事实与会话摘要：待确认内容。会话摘要挂在 conversation 上，写之前先取
+  let conversation: string | null = null
   const untrusted = (extra: Partial<typeof memories.$inferInsert> = {}) => ({
     spaceId: ws.spaceId,
     form: 'extracted' as const,
@@ -68,6 +74,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     provenance: 'untrusted' as const,
     content: '群里聊了学日语',
     expiresAt: new Date(Date.now() + 86_400_000),
+    conversationId: extra.layer === 'subject' ? null : conversation,
     ...extra,
   })
   let fingerprint = 0
@@ -76,7 +83,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     extra: Partial<typeof dreamSuggestions.$inferInsert> = {},
   ) => ({
     spaceId: ws.spaceId,
-    scope: 'base',
+    scope: 'core',
     kind: 'stale',
     memoryIds: [memory.id],
     versions: [memory.version],
@@ -122,14 +129,18 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
   // 四类都有：共享的、只有某个成员看得到的，以及对应的列表里不该出现的
   async function seed() {
     // 疑似明文：共享的一条、alice 与 eve 私人层各一条；secret 的正文是密文不算，没写明文的不算
-    await remember({ uri: 'kb://api', content: 'token = abc123', layer: 'base' })
-    const aliceNote = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
-    await remember({ uri: 'notes://eve', content: 'password = eve-1234' }, editor.cookie)
-    await remember({ uri: 'notes://vault', content: '密码：hunter2', sensitivity: 'secret' })
-    const plain = await remember({ uri: 'kb://faq', content: '常见问题', layer: 'base' })
-    const changed = await remember({ uri: 'kb://changed', content: '会改的', layer: 'base' })
+    await remember({ uri: 'core://kb/api', content: 'token = abc123' })
+    const aliceNote = await remember({
+      uri: 'user://notes/wifi',
+      content: '访客网络密码：guest-1234',
+    })
+    await remember({ uri: 'user://notes/eve', content: 'password = eve-1234' }, editor.cookie)
+    await remember({ uri: 'user://notes/vault', content: '密码：hunter2', sensitivity: 'secret' })
+    const plain = await remember({ uri: 'core://kb/faq', content: '常见问题' })
+    const changed = await remember({ uri: 'core://kb/changed', content: '会改的' })
 
     await inSpace(async (tx) => {
+      conversation = await summaryConversation(tx, ws.spaceId)
       // 待确认内容：现在有效的两条；到期的、删掉的、受信来源的不算
       await tx
         .insert(memories)
@@ -143,7 +154,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
       await tx.insert(dreamSuggestions).values([
         // 共享层的一条，所有成员都看得到；alice 私人层的一条只有她看得到
         suggestion(plain),
-        suggestion(aliceNote, { scope: `private:${ws.accountId}` }),
+        suggestion(aliceNote, { scope: `user:${ws.accountId}` }),
         // 处理过的、涉及的记忆改过的不算
         suggestion(plain, { status: 'rejected' }),
         suggestion(changed, { versions: [changed.version + 1] }),
@@ -201,9 +212,10 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
   })
 
   it('概览单独给出来自对话的条数：按层与敏感级分组，读权限和别处一样；counts 与 total 只算策展记忆', async () => {
-    await remember({ uri: 'kb://faq', content: '常见问题', layer: 'base', sensitivity: 'public' })
+    await remember({ uri: 'core://kb/faq', content: '常见问题', sensitivity: 'public' })
     const past = new Date(Date.now() - 1000)
     await inSpace(async (tx) => {
+      conversation = await summaryConversation(tx, ws.spaceId)
       const [person] = await tx
         .insert(subjects)
         .values({ spaceId: ws.spaceId, kind: 'person', displayName: '小明' })
@@ -239,7 +251,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
       ...shared,
       { layer: 'episode', sensitivity: 'secret', count: 1 },
     ])
-    expect(owner.counts).toEqual([{ layer: 'base', sensitivity: 'public', count: 1 }])
+    expect(owner.counts).toEqual([{ layer: 'core', sensitivity: 'public', count: 1 }])
     expect(owner.total).toBe(1)
     for (const cookie of [editor.cookie, viewer.cookie]) {
       const o = await get<SpaceOverview>('/overview', cookie)

@@ -213,7 +213,7 @@ describe('待处理', () => {
     expect(dreamSuggestions).toContain('suggestionKinds[item.kind].effect')
     expect(dreamSuggestions).toContain('suggestionKinds[confirming.kind].effect')
     expect(dreamSuggestions).toContain(
-      '包含当前账号无权写入的记忆（如其他成员应用的应用层），需由有权限的成员处理。',
+      '包含当前账号无权写入的记忆（如其他成员的应用的记忆），需由有权限的成员处理。',
     )
     expect(dreamSuggestions).toContain('正文疑似包含明文凭据')
     expect(dream).toContain('其余几条删除')
@@ -362,10 +362,10 @@ describe('应用', () => {
 
   it('转移会吊销 Key、删除有限制：后果都还在，只有有权限的人看得到按钮', () => {
     expect(appDetailPage).toContain('全部吊销，新所有者需重新签发')
-    expect(appDetailPage).toContain('应用读取的个人画像层与私人层改为')
+    expect(appDetailPage).toContain('应用读取的本人记忆改为')
     expect(appDetailPage).toContain("'已转移，原有访问密钥已全部吊销'")
-    expect(appDetailPage).toContain('仍有应用层记忆时无法删除。')
-    expect(appDetailPage).toContain('已删除但仍可恢复的应用层记忆也算在内，需先移到其他命名空间。')
+    expect(appDetailPage).toContain('仍有这个应用的记忆时无法删除。')
+    expect(appDetailPage).toContain('已删除但仍可恢复的也算在内，需先移到其他归属。')
     expect(appDetailPage).toContain('使用这些访问密钥的客户端将立即失去访问权限。')
     const elements = elementsOf(appDetailPage)
     const directive = (el: TemplateNode) => el.props?.find((p) => p.name === 'if')?.exp?.content
@@ -508,7 +508,7 @@ describe('查询', () => {
 
   describe('权限范围什么时候失效', () => {
     const scopes = {
-      readLayers: ['base' as const],
+      readLayers: ['core' as const],
       writeLayers: [],
       maxSensitivity: 'internal' as const,
       admin: false,
@@ -683,6 +683,20 @@ describe('启动加载', () => {
     )
     expect(conditions.join(' ')).not.toContain('preview')
     expect(textOf(buttonOf(appSimulator, '预览'))).toBe('预览')
+  })
+
+  it('超出预算的节点写标题，坐标放在悬停里：omitted 的每一项是对象，直接 join 会显示成 [object Object]', () => {
+    expect(appSimulator).toContain("preview.omitted.map((node) => memoryTitle(node)).join('、')")
+    expect(appSimulator).toContain(`:title="preview.omitted.map((node) => node.uri).join('\\n')"`)
+    expect(appSimulator).not.toContain('preview.omitted.join(')
+  })
+
+  it('会话摘要按服务端给的顺序列出（新的在前），写时间与正文；放不下的附加块用同一份说法', () => {
+    expect(appSimulator).toContain('v-for="(summary, i) in preview.summaries"')
+    expect(appSimulator).toContain('{{ formatShort(summary.createdAt) }}')
+    expect(appSimulator).toContain('{{ summary.content }}')
+    expect(appSimulator).toContain('v-if="preview.summaries.length"')
+    expect(appSimulator).toContain('sessionExtraLabels[extra]')
   })
 
   it('没有有效 Key 的说明只在读到了列表时显示', () => {

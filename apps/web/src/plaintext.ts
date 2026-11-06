@@ -24,7 +24,7 @@ export function plaintextCandidates(content: string): PlaintextCandidate[] {
 
 const IDENTIFIER_MAX = 64
 
-// 按 URI 建议一个标识：路径的各段连起来，比如 infra://nas/admin 是 nas-admin。URI 的段已经只有小写字母、
+// 按坐标建议一个标识：开头之后的各段连起来，比如 user://nas/admin 是 nas-admin。坐标的段已经只有小写字母、
 // 数字、_ 和 -，开头是 _ 或 - 时去掉。已经有这个标识的凭据时加上字段名，再不行加序号
 export function suggestIdentifier(uri: string, field: string, taken: readonly string[]): string {
   const path = uri.split('://')[1] ?? ''
@@ -43,8 +43,9 @@ export function suggestIdentifier(uri: string, field: string, taken: readonly st
   }
 }
 
-// 建议的名称：路径本身，比 URI 少了 domain，人读起来够了
-export const suggestName = (uri: string) => uri.split('://')[1] ?? uri
+// 建议的名称：记忆的标题，给人看的名字本来就是它；没有标题时用开头之后的那一段
+export const suggestName = (memory: { uri: string; title: string }) =>
+  memory.title.trim() || (memory.uri.split('://')[1] ?? memory.uri)
 
 // 正文里跳过占位符之后的几段：值恰好是占位符里的标识时不算，和服务端替换时一个规则
 function outsidePlaceholders(content: string): { text: string; start: number }[] {

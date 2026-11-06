@@ -201,11 +201,10 @@ describe('转存为凭据的请求', () => {
 })
 
 describe('占位符能放在哪里', () => {
-  it('只有私人层、敏感级不低于私密', () => {
+  it('只有本人、敏感级不低于私密', () => {
     for (const layer of LAYERS) {
       for (const sensitivity of SENSITIVITIES) {
-        const expected =
-          layer === 'private' && (sensitivity === 'private' || sensitivity === 'secret')
+        const expected = layer === 'user' && (sensitivity === 'private' || sensitivity === 'secret')
         expect(placeholderAllowed(layer, sensitivity), `${layer} ${sensitivity}`).toBe(expected)
       }
     }

@@ -11,7 +11,7 @@ export interface DreamPromptItem {
   fresh: boolean
   kind: 'node' | 'fact' | 'summary'
   uri: string | null
-  // 对象层的事实挂在谁身上（平台上的名字）
+  // 联系人的事实挂在谁身上（平台上的名字）
   subject: string | null
   trusted: boolean
   // 策展记忆的敏感级说法：只合并相同的
@@ -42,7 +42,7 @@ const MERGE_NODE =
 const MERGE_FACT =
   '- merge：同一个对象（subject 相同）的几条事实说的是同一件事、可以并成一条。memories 填这几条的代号（至少两条），keep 填保留的那条（其余几条删掉），content 写合并之后的事实：一句话，第三人称，不超过 60 字，不写名字与代号。'
 const DISTILL =
-  '- distill：几条事实（至少两条）合起来是一个值得长期记住的主题，例如一个人的情况、一个群的规矩。memories 填这几条的代号，uri 写建议放在哪里（domain://path，例如 people://xiaoming，只用小写字母、数字、_ 和 -），content 写提炼之后的正文：重新组织、浓缩，不是把几条拼起来；disclosure 用一句话写什么场景下需要想起它。'
+  '- distill：几条事实（至少两条）合起来是一个值得长期记住的主题，例如一个人的情况、一个群的规矩。memories 填这几条的代号，uri 写建议放在哪里（user://<位置>/<标识>，例如 user://people/xiaoming，只用小写字母、数字、_ 和 -；成员执行时可以改到别处），content 写提炼之后的正文：重新组织、浓缩，不是把几条拼起来；disclosure 用一句话写什么场景下需要想起它。'
 const STALE_NODE =
   '- stale：某一条可能已经不对了，例如被后来的记忆推翻、说的是已经过去的安排或期限。memories 只填这一条。'
 const STALE_FACT =

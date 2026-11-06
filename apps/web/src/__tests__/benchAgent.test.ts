@@ -23,8 +23,11 @@ import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import {
   acceptAgentDivergence,
+  AGENT_LOOP_DETAILS,
   AGENT_LOOP_NOTES,
   AGENT_MAX_ROUNDS,
+  agentLoopDetail,
+  agentLoopNote,
   agentScenario,
   argumentsText,
   blockingDivergence,
@@ -211,6 +214,8 @@ type TurnScript =
 
 interface HarnessOptions {
   loop?: BenchAgentLoop
+  // 回复后发不发 turn.end，服务端按运行时给：默认和服务端一样，群聊机器人发，钩子运行时里只有 Claude Code 发
+  turnEnd?: boolean
   mode?: BenchMode
   system?: string
   context?: SessionContextInput
@@ -220,7 +225,14 @@ interface HarnessOptions {
 
 // 注入假的模型与运行接口。发出去的请求都按契约校验，并记下来；每次请求模型都核对一遍历史是否合法
 function harness(options: HarnessOptions = {}) {
-  const { loop = 'hook', mode = 'rollback', system = '基础提示', context, run } = options
+  const {
+    loop = 'hook',
+    turnEnd = loop === 'chat',
+    mode = 'rollback',
+    system = '基础提示',
+    context,
+    run,
+  } = options
   const script = [...(options.turns ?? [])]
   const turnRequests: BenchAgentMessage[][] = []
   const runs: { steps: BenchStep[]; replay: unknown[]; label: string }[] = []
@@ -252,6 +264,7 @@ function harness(options: HarnessOptions = {}) {
   const send = async (text: string, from: AgentConversation = emptyConversation()) => {
     const finished = await sendAgentMessage(from, text, {
       loop,
+      turnEnd,
       mode,
       system,
       model: MODEL,
@@ -283,8 +296,9 @@ const hangUntilAborted = (signal: AbortSignal) =>
   })
 
 describe('hook 循环', () => {
-  it('session.start 的结果进系统提示；召回块附在这条消息上、留在历史；给工具，不发 turn.end', async () => {
+  it('session.start 的结果进系统提示；召回块附在这条消息上、留在历史；给工具；codex 不发 turn.end', async () => {
     const h = harness({
+      turnEnd: false,
       turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好了'), reply('第二句')],
     })
     const first = await h.send(USER_TEXT)
@@ -360,10 +374,10 @@ describe('hook 循环', () => {
     expect(h.runs[1]!.steps[0]).toEqual({ kind: 'tool', tool: 'kioku_list', arguments: {} })
   })
 
-  it.each(['hook', 'approximate', 'tools'] as const)(
-    '%s 不发 turn.end：上下文满足时也不发，也不说没发的原因',
+  it.each(['hook', 'approximate', 'tools', 'chat'] as const)(
+    '%s：服务端说回复后不发时不发 turn.end，上下文满足时也不发，也不说没发的原因',
     async (loop) => {
-      const h = harness({ loop, context: GROUP, turns: [reply('好')] })
+      const h = harness({ loop, turnEnd: false, context: GROUP, turns: [reply('好')] })
       const done = await h.send(USER_TEXT)
       expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
       expect(last(done).turnEnd).toBeNull()
@@ -550,8 +564,8 @@ describe('chat 循环', () => {
 
   it.each([
     ['不带', undefined, '不带'],
-    ['定时任务', { chatType: 'cron' }, '只缓冲私聊、群聊与频道'],
-    ['子 agent', { chatType: 'subagent' }, '只缓冲私聊、群聊与频道'],
+    ['定时任务', { chatType: 'cron' }, '只缓冲私聊、群聊、频道与不带会话上下文的对话'],
+    ['子 agent', { chatType: 'subagent' }, '只缓冲私聊、群聊、频道与不带会话上下文的对话'],
     ['群聊没有发言人', { chatType: 'group', platform: 'bench', group: { id: 'g1' } }, '发言人'],
     ['频道没有发言人', { chatType: 'channel', platform: 'bench', group: { id: 'g1' } }, '发言人'],
     [
@@ -581,7 +595,7 @@ describe('chat 循环', () => {
     ['频道', { ...GROUP, chatType: 'channel' }],
   ] as [string, SessionContextInput][])('上下文是%s：发 turn.end', (_name, context) => {
     const body = turnEndBody(context, '问', '答')
-    expect(turnEndRefusal(context, body)).toBeNull()
+    expect(turnEndRefusal('chat', context, body)).toBeNull()
   })
 
   it('turn.end 超长时先截，不切开代理对：超长的话整个事件被拒，这一轮就没了', async () => {
@@ -689,6 +703,122 @@ describe('chat 循环', () => {
     const next = harness({ loop: 'chat', context: GROUP, turns: [reply('好')] })
     await next.send(USER_TEXT, conversation)
     expect(next.runs.flatMap((r) => events(r.steps))).toContain('turn.end')
+  })
+})
+
+describe('Claude Code：hook 循环回复后发 turn.end', () => {
+  it('不带会话上下文，和插件一样：用户的原话与最后的回复，不带召回块；回滚模式下进重放，下一条带着它', async () => {
+    const h = harness({
+      turnEnd: true,
+      turns: [reply(null, [toolCall('c1', 'kioku_list')]), reply('好了'), reply('第二句')],
+    })
+    const first = await h.send(USER_TEXT)
+
+    // 工具照给，召回块照旧留在历史；turn.end 在工具之后、最后的回复回来之后
+    expect(events(h.runs[0]!.steps)).toEqual(['session.start', 'prompt.submit'])
+    expect(h.runs[1]!.steps).toEqual([{ kind: 'tool', tool: 'kioku_list', arguments: {} }])
+    expect(events(h.runs[2]!.steps)).toEqual(['turn.end'])
+    expect((h.runs[2]!.steps[0] as { body: unknown }).body).toEqual({
+      event: 'turn.end',
+      sessionId: 'bench-agent',
+      user: USER_TEXT,
+      reply: '好了',
+    })
+    expect(first.messages[0]).toEqual({ role: 'user', content: `${USER_TEXT}\n\n${RECALL_TEXT}` })
+    expect(last(first).turnEnd?.step.label).toBe('turn.end')
+    expect(last(first).turnEndNote).toBeNull()
+    expect(last(first).end).toBe('done')
+    expect(first.session.replay).toHaveLength(1)
+
+    const second = await h.send('第二条', first)
+    expect(events(h.runs[3]!.steps)).toEqual(['prompt.submit'])
+    expect(h.runs[3]!.replay).toEqual(first.session.replay)
+    expect(events(h.runs[4]!.steps)).toEqual(['turn.end'])
+    expect((h.runs[4]!.steps[0] as { body: { reply: string } }).body.reply).toBe('第二句')
+    expect(second.session.replay).toHaveLength(2)
+  })
+
+  it('真实模式：turn.end 真实执行，不进重放，算可能写过', async () => {
+    const h = harness({ turnEnd: true, mode: 'real', turns: [reply('好')] })
+    const done = await h.send(USER_TEXT)
+    expect(events(h.runs[1]!.steps)).toEqual(['turn.end'])
+    expect(h.runs.every((run) => run.replay.length === 0)).toBe(true)
+    expect(done.session.replay).toEqual([])
+    expect(done.mayHaveWritten).toBe(true)
+    expect(last(done).turnEnd?.run).toBe('run12345')
+  })
+
+  it.each([
+    ['私聊', { chatType: 'direct', platform: 'bench', sender: { id: 'u' } }],
+    ['群聊', GROUP],
+  ] as [string, SessionContextInput][])(
+    '页面的上下文是%s：turn.end 带着它，和别的生命周期事件一样',
+    async (_name, context) => {
+      const h = harness({ turnEnd: true, context, turns: [reply('好')] })
+      await h.send(USER_TEXT)
+      expect(events(h.runs[1]!.steps)).toEqual(['turn.end'])
+      expect((h.runs[1]!.steps[0] as { body: { context: unknown } }).body.context).toEqual(context)
+    },
+  )
+
+  it.each([
+    ['定时任务', { chatType: 'cron' }, '只缓冲私聊、群聊、频道与不带会话上下文的对话'],
+    ['子 agent', { chatType: 'subagent' }, '只缓冲私聊、群聊、频道与不带会话上下文的对话'],
+    ['群聊没有发言人', { chatType: 'group', platform: 'bench', group: { id: 'g1' } }, '发言人'],
+  ] as [string, SessionContextInput, string][])(
+    '页面的上下文是%s：契约不收，不发 turn.end，轨迹里说明原因',
+    async (_name, context, reason) => {
+      const h = harness({ turnEnd: true, context, turns: [reply('好')] })
+      const done = await h.send(USER_TEXT)
+      expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
+      expect(last(done).turnEndNote).toContain('未发送 turn.end')
+      expect(last(done).turnEndNote).toContain(reason)
+      expect(last(done).end).toBe('done')
+    },
+  )
+
+  it('模型什么都没回：不发 turn.end，这条消息回到发之前', async () => {
+    const h = harness({ turnEnd: true, turns: [reply(null)] })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
+    expect(last(done).turnEndNote).toBe('模型未回复，未发送 turn.end。')
+    expect(last(done).inHistory).toBe(false)
+    expect(done.session.replay).toEqual([])
+  })
+
+  it('回复回来之后才停止：不再发 turn.end，轨迹里说明', async () => {
+    const h = harness({
+      turnEnd: true,
+      turns: [
+        () => {
+          h.controller.abort()
+          return reply('好')
+        },
+      ],
+    })
+    const done = await h.send(USER_TEXT)
+    expect(h.runs.flatMap((r) => events(r.steps))).not.toContain('turn.end')
+    expect(last(done).turnEndNote).toBe('已停止，未发送 turn.end。')
+  })
+
+  it('不带会话上下文：Claude Code 的 turn.end 契约收，群聊机器人的不发', () => {
+    const body = turnEndBody(undefined, '问', '答')
+    expect(body).not.toHaveProperty('context')
+    expect(turnEndRefusal('hook', undefined, body)).toBeNull()
+    expect(turnEndRefusal('chat', undefined, body)).toContain('未发送 turn.end')
+  })
+
+  it('侧栏的说明跟着服务端给的 turnEnd：发的写明回复后发 turn.end，不发的写明不发', () => {
+    expect(agentLoopNote('hook', true)).toBe(`${AGENT_LOOP_NOTES.hook}回复后发 turn.end。`)
+    expect(agentLoopNote('hook', false)).toBe(AGENT_LOOP_NOTES.hook)
+    expect(agentLoopNote('chat', true)).toBe(`${AGENT_LOOP_NOTES.chat}回复后发 turn.end。`)
+    for (const loop of ['hook', 'approximate', 'chat', 'tools'] as const) {
+      expect(AGENT_LOOP_NOTES[loop]).not.toContain('turn.end')
+      expect(agentLoopDetail(loop, false)).toBe(`${AGENT_LOOP_DETAILS[loop]}回复后不发 turn.end。`)
+    }
+    expect(agentLoopDetail('hook', true)).toContain('回复后发 turn.end')
+    expect(agentLoopDetail('hook', true)).toContain('不带会话上下文时按应用与所属成员缓冲')
+    expect(agentLoopDetail('chat', true)).toContain('需带私聊、群聊或频道的会话上下文')
   })
 })
 
@@ -1222,9 +1352,9 @@ describe('toolReply：回给模型的文字不能是空的', () => {
     const skipped = baseStep({
       status: 'skipped',
       raw: null,
-      reason: '当前访问密钥无权写入私人层（private）',
+      reason: '当前访问密钥无权写入本人（user）',
     })
-    expect(toolReply(skipped)).toBe('没有执行：当前访问密钥无权写入私人层（private）')
+    expect(toolReply(skipped)).toBe('没有执行：当前访问密钥无权写入本人（user）')
     expect(toolReply(baseStep({ status: 'failed', raw: null, text: '' }))).toBe('没有执行')
   })
 })

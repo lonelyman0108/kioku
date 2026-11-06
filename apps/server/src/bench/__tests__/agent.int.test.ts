@@ -46,8 +46,8 @@ const USER = { role: 'user', content: '你好' }
 // 等着模型的用例：里面按断言等几秒，要比这些等待长，等不到时才是断言失败而不是用例超时
 const WAITING_TIMEOUT = 15_000
 const MEMBER_SCOPES = {
-  readLayers: ['private'],
-  writeLayers: ['private'],
+  readLayers: ['user'],
+  writeLayers: ['user'],
   maxSensitivity: 'private',
   admin: false,
 }
@@ -186,6 +186,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         endpoint: null,
         loop: 'hook',
         tools: true,
+        turnEnd: true,
       }
 
       const before = await getInfo(bob.cookie, path)
@@ -276,6 +277,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         endpoint: null,
         loop: 'hook',
         tools: true,
+        turnEnd: true,
       })
 
       const server = await startModel(() => '好')
@@ -286,6 +288,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         endpoint: server.url,
         loop: 'hook',
         tools: true,
+        turnEnd: true,
       })
     })
 
@@ -324,6 +327,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       endpoint: server.url,
       loop: 'hook',
       tools: true,
+      turnEnd: true,
     })
 
     it('Key 解不开（没配主密钥）：400 并说明，不请求模型；查情况给原因', async () => {
@@ -429,28 +433,32 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     })
 
     it.each([
-      ['claudecode', 'hook', true],
-      ['codex', 'hook', true],
-      ['astrbot', 'chat', false],
-      ['mcp', 'tools', true],
-      ['openclaw', 'approximate', true],
-      ['other', 'approximate', true],
-    ])('%s：循环是 %s，给不给工具 %s，和实际请求一致', async (runtimeFamily, loop, tools) => {
-      const created = (await ws.createApp(`app-${runtimeFamily}`, { runtimeFamily })).id
-      const key = await ws.createKey(created)
-      const path = benchPath(created, key.id)
-      const server = await startModel(() => '好')
-      expect(await (await getInfo(ws.cookie, path)).json()).toEqual({
-        available: true,
-        reason: null,
-        defaultModel: 'fake-model',
-        endpoint: server.url,
-        loop,
-        tools,
-      })
-      expect((await postTurn({ messages: [USER] }, ws.cookie, path)).status).toBe(200)
-      expect(server.tools[0] !== undefined).toBe(tools)
-    })
+      ['claudecode', 'hook', true, true],
+      ['codex', 'hook', true, false],
+      ['astrbot', 'chat', false, true],
+      ['mcp', 'tools', true, false],
+      ['openclaw', 'approximate', true, false],
+      ['other', 'approximate', true, false],
+    ])(
+      '%s：循环是 %s，给不给工具 %s、回复后发不发 turn.end %s，和实际请求一致',
+      async (runtimeFamily, loop, tools, turnEnd) => {
+        const created = (await ws.createApp(`app-${runtimeFamily}`, { runtimeFamily })).id
+        const key = await ws.createKey(created)
+        const path = benchPath(created, key.id)
+        const server = await startModel(() => '好')
+        expect(await (await getInfo(ws.cookie, path)).json()).toEqual({
+          available: true,
+          reason: null,
+          defaultModel: 'fake-model',
+          endpoint: server.url,
+          loop,
+          tools,
+          turnEnd,
+        })
+        expect((await postTurn({ messages: [USER] }, ws.cookie, path)).status).toBe(200)
+        expect(server.tools[0] !== undefined).toBe(tools)
+      },
+    )
   })
 
   describe('消息', () => {
@@ -1000,7 +1008,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       await startModel(() => ({
         content: null,
         reasoning_content: '想',
-        tool_calls: [toolCall('c', 'kioku_create', { uri: 'notes://x', content: '不会写' })],
+        tool_calls: [toolCall('c', 'kioku_create', { uri: 'user://notes/x', content: '不会写' })],
       }))
       const before = await tableDigests(database, ws.spaceId)
       await turn({ messages: [USER] })
@@ -1055,7 +1063,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
   describe('和运行接口串起来', () => {
     const seedSecrets = async () => {
       const created = await realTool('kioku_create', {
-        uri: 'notes://safe',
+        uri: 'user://notes/safe',
         content: SECRET_BODY,
         sensitivity: 'secret',
       })
@@ -1074,7 +1082,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       )
       expect(credential.ok).toBe(true)
       // 对照：真实的接口读得到明文，下面没有明文不是因为没读到
-      expect((await realTool('kioku_get', { uri: 'notes://safe' })).text).toContain(SECRET_BODY)
+      expect((await realTool('kioku_get', { uri: 'user://notes/safe' })).text).toContain(
+        SECRET_BODY,
+      )
       expect((await realTool('kioku_credential', { identifier: 'nas' })).text).toContain(
         HOSTED_VALUE,
       )
@@ -1090,7 +1100,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
             : {
                 content: null,
                 tool_calls: [
-                  toolCall('get', 'kioku_get', { uri: 'notes://safe' }),
+                  toolCall('get', 'kioku_get', { uri: 'user://notes/safe' }),
                   toolCall('cred', 'kioku_credential', { identifier: 'nas' }),
                 ],
               },
@@ -1107,7 +1117,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         expect(output).not.toContain(HOSTED_VALUE)
         // 工具确实跑了，结果是打过码的
         expect(result.steps[0]!.text).toContain('敏感级: secret')
-        expect(result.steps[0]!.text).toContain('notes://safe')
+        expect(result.steps[0]!.text).toContain('user://notes/safe')
         expect(result.steps[1]!.text).toContain('password')
 
         const history = [
@@ -1125,7 +1135,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     )
 
     it('回滚模式跨轮：第一轮写的，第二轮带重放读得到，模型收到结果，库里没有留下', async () => {
-      const uri = 'notes://agent-made'
+      const uri = 'user://notes/agent-made'
       const body = '模型第一轮写下的内容'
       const server = await startModel((messages) => {
         const answered = messages.filter((m) => m.role === 'tool').length

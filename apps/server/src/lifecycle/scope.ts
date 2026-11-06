@@ -1,11 +1,12 @@
 import type {
-  BootResponse,
   Layer,
   RecallSource,
   RecentMemory,
+  SessionSummary,
   SubjectFacts,
 } from '@kioku/contracts'
 
+import type { BootResult } from '../recall/boot'
 import type { RecordableCandidate } from '../recall/recall'
 
 // 召回与 boot 的执行范围：权限、空间与人格链都已绑定。
@@ -26,9 +27,11 @@ export interface ScopeRecallOptions {
 export interface RecallScope {
   // 候选在 Symbol 键上带着记忆 id（记召回事件要用），序列化时不会带出去
   recall(query: string, options: ScopeRecallOptions): Promise<RecordableCandidate[]>
-  // budget 是正文字数预算，不传时用默认值
-  boot(budget?: number): Promise<BootResponse>
+  // budget 是正文字数预算，不传时用默认值。没展开的节点的标题在 Symbol 键上，序列化时不会带出去
+  boot(budget?: number): Promise<BootResult>
   recent(limit: number): Promise<RecentMemory[]>
+  // 同一会话最近的会话摘要（新的在前）：只有不带会话上下文的会话有，群聊、私聊的摘要来自未确认来源，不进会话开始
+  summaries(limit: number): Promise<SessionSummary[]>
   // 对象直连：当前发言人与本群的事实；不带会话上下文时没有。只是附加的线索，读取失败时返回空、不抛错
   subjects(): Promise<SubjectFacts[]>
   // 召回候选的正文（记忆 id → 正文），读权限和召回相同；给读不了正文的宿主直接带上

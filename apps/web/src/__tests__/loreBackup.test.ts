@@ -27,6 +27,7 @@ import {
   sourceTabs,
   staleNotice,
   syncGroups,
+  targetTitle,
   tokenInClear,
   trimLoreBackup,
 } from '../loreBackup'
@@ -146,8 +147,9 @@ describe('Token 会不会明文传输', () => {
 })
 
 const target = (extra: Partial<LorePlanNode['targets'][number]> = {}) => ({
-  uri: 'infra://a',
-  layer: 'private' as const,
+  uri: 'user://infra/a',
+  title: 'a',
+  layer: 'user' as const,
   sensitivity: 'private' as const,
   priority: 2,
   state: 'new' as const,
@@ -184,6 +186,18 @@ const planOf = (
   droppedKeywords: [],
   warnings: [],
   sync: { items: [], goneFromLore: [], ...sync },
+})
+
+describe('目标的标题', () => {
+  it('写进去的标题；标机密的退回坐标的最后一段，和服务端一样不从正文取', () => {
+    const t = target({ uri: 'user://infra/docker_hosts/kioku', title: 'Kioku 部署' })
+    expect(targetTitle(t, false)).toBe('Kioku 部署')
+    expect(targetTitle(t, true)).toBe('kioku')
+  })
+
+  it('计划的每个目标写标题，机密按这次的勾选或现在的样子算', () => {
+    expect(loreImportSource).toContain('{{ targetTitle(target, secretNow(node, target)) }}')
+  })
 })
 
 describe('勾选', () => {
@@ -228,6 +242,7 @@ describe('勾选之后这次会动什么', () => {
   const updateOf = (node: LorePlanNode, uri = node.targets[0]!.uri) => ({
     source: node.uri,
     uri,
+    title: node.targets[0]!.title,
     state: 'update' as const,
     changes: ['content' as const],
   })
@@ -759,19 +774,26 @@ describe('请求期间与不能看计划时', () => {
 })
 
 describe('计划的分组', () => {
-  it('同步差异每种列出来，已是最新的只给个数，没有的不出现', () => {
+  it('同步差异每种列出来，已是最新的只给个数，没有的不出现；每行先写标题再写坐标', () => {
     const item = (state: LoreImportPlan['sync']['items'][number]['state'], uri: string) => ({
       source: uri,
       uri,
+      title: `标题${uri.slice(4)}`,
       state,
       changes: [],
+    })
+    const line = (n: number, extra: { target?: string; detail?: string } = {}) => ({
+      title: `标题${n}`,
+      uri: `a://${n}`,
+      target: extra.target ?? null,
+      detail: extra.detail ?? null,
     })
     const { current, groups } = syncGroups(
       planOf([], {
         items: [
           item('current', 'a://1'),
           item('current', 'a://2'),
-          { ...item('update', 'a://3'), changes: ['content', 'glossary'] },
+          { ...item('update', 'a://3'), changes: ['content', 'title', 'glossary'] },
           item('edited', 'a://4'),
           { ...item('moved', 'a://5'), target: 'a://6' },
           item('deleted', 'a://7'),
@@ -784,16 +806,25 @@ describe('计划的分组', () => {
     )
     expect(current).toBe(2)
     expect(groups.map((g) => [g.state, g.lines])).toEqual([
-      ['update', ['a://3：正文、关键词']],
-      ['edited', ['a://4']],
-      ['moved', ['a://5 → a://6']],
-      ['deleted', ['a://7']],
-      ['skipped', ['a://8：正文为空']],
-      ['unmapped', ['a://9']],
-      ['unreadable', ['a://10：记忆不存在']],
-      ['gone', ['a://11']],
+      ['update', [line(3, { detail: '正文、标题、关键词' })]],
+      ['edited', [line(4)]],
+      ['moved', [line(5, { target: 'a://6' })]],
+      ['deleted', [line(7)]],
+      ['skipped', [line(8, { detail: '正文为空' })]],
+      ['unmapped', [line(9)]],
+      ['unreadable', [line(10, { detail: '记忆不存在' })]],
+      // Lore 里没有这个节点了，取不到标题，只写坐标
+      ['gone', [{ title: null, uri: 'a://11', target: null, detail: null }]],
     ])
+    expect(groups[0]!.heading).toBe('按 Lore 更新')
     expect(syncGroups(planOf([])).groups).toEqual([])
+  })
+
+  it('同步差异的每行和写入目标一样写标题，坐标跟在后面', () => {
+    const template = parse(loreImportSource).descriptor.template!.content
+    const row = /<li v-for="\(line, i\) in group\.lines"[^]*?<\/li>/.exec(template)![0]
+    expect(row).toContain('<span v-if="line.title" class="target-title">{{ line.title }}</span>')
+    expect(row.indexOf('{{ line.title }}')).toBeLessThan(row.indexOf(':uri="line.uri"'))
   })
 
   it('节点的筛选', () => {

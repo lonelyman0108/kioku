@@ -156,6 +156,7 @@ describe('API 客户端', () => {
       endpoint: null,
       loop: 'hook',
       tools: true,
+      turnEnd: true,
     }
     const fetchMock = vi.fn(async () => Response.json(info))
     vi.stubGlobal('fetch', fetchMock)
@@ -173,7 +174,7 @@ describe('API 客户端', () => {
     await expect(request('GET', '/x')).rejects.toEqual(new ApiError(404, '记忆不存在'))
   })
 
-  it('URI 格式的报错是写给接口与 MCP 的：界面上换成只说中文的那句，去掉字段路径', async () => {
+  it('坐标格式的报错是写给接口与 MCP 的：界面上换成只说格式的那句，去掉字段路径', async () => {
     for (const error of [
       URI_FORMAT_MESSAGE,
       `uri：${URI_FORMAT_MESSAGE}`,
@@ -185,8 +186,8 @@ describe('API 客户端', () => {
       )
       await expect(request('POST', '/x')).rejects.toEqual(new ApiError(400, URI_FORMAT_HINT))
     }
-    expect(URI_FORMAT_HINT).toBe('URI 格式应为 分区://路径，例如 core://agent')
-    expect(URI_FORMAT_HINT).not.toMatch(/domain|path/)
+    expect(URI_FORMAT_HINT).toContain('坐标只能以 core://、user://')
+    expect(URI_FORMAT_HINT).not.toMatch(/domain|path|URI|分区/)
   })
 
   it('响应不符合契约时直接报错', async () => {

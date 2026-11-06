@@ -108,7 +108,7 @@ describe('按 inputSchema 生成表单', () => {
     expect(targetOf('kioku_delete').destructive).toBe(true)
     expect(targetOf('kioku_delete').readOnly).toBe(false)
     expect(targetOf('kioku_create').readOnly).toBe(false)
-    expect(targetOf('kioku_get').description).toContain('按 URI 读取')
+    expect(targetOf('kioku_get').description).toContain('按坐标（URI）读取')
   })
 
   it('没有参数的工具没有字段', () => {
@@ -120,8 +120,23 @@ describe('按 inputSchema 生成表单', () => {
     expect(query).toMatchObject({ kind: 'string', required: true, multiline: true })
     expect(query.description).toContain('要找的内容')
     expect(fieldOf('kioku_search', 'limit')).toMatchObject({ kind: 'number', required: false })
-    expect(fieldOf('kioku_create', 'layer')).toMatchObject({ kind: 'enum', required: false })
-    expect(fieldOf('kioku_create', 'layer').options).toContain('private')
+    // 归属由坐标的开头定，没有单独的字段；user:// 不能是 public 由服务端判断，表单只按 schema 列出四级
+    expect(fieldsFor('kioku_create').map((f) => f.name)).not.toContain('layer')
+    expect(fieldOf('kioku_create', 'sensitivity')).toMatchObject({ kind: 'enum', required: false })
+    expect(fieldOf('kioku_create', 'sensitivity').options).toEqual([
+      'public',
+      'internal',
+      'private',
+      'secret',
+    ])
+    expect(fieldOf('kioku_create', 'sensitivity').description).toContain('不能是 public')
+    expect(fieldOf('kioku_create', 'title')).toMatchObject({
+      kind: 'string',
+      required: false,
+      multiline: false,
+    })
+    expect(fieldOf('kioku_update', 'title')).toMatchObject({ kind: 'string', required: false })
+    expect(fieldOf('kioku_update', 'sensitivity').options).toContain('secret')
     expect(fieldOf('kioku_create', 'priority').placeholder).toBe('默认 2')
     expect(fieldOf('kioku_create', 'uri')).toMatchObject({ required: true, multiline: false })
     expect(fieldOf('kioku_create', 'valid_to').placeholder).toContain('2026-12-31')
@@ -390,6 +405,16 @@ describe('发出去的步骤', () => {
       kind: 'lifecycle',
       body: { event: 'prompt.submit', sessionId: 'bench-session', prompt: '你好' },
     })
+  })
+
+  it('不带上下文的 turn.end 照发：和 Claude Code 的插件一样，契约也收', () => {
+    const step = stepOf(buildWith('turn.end', { user: '问', reply: '答' }, undefined))
+    expect(step).toEqual({
+      kind: 'lifecycle',
+      body: { event: 'turn.end', sessionId: 'bench-session', user: '问', reply: '答' },
+    })
+    expect(BenchRunRequest.safeParse({ steps: [step] }).success).toBe(true)
+    expect(targetOf('turn.end').description).toContain('不带会话上下文时')
   })
 
   it('/boot 与 /whoami 没有请求内容', () => {

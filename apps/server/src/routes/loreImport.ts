@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  DEFAULT_SENSITIVITY,
   ErrorResponse,
   LORE_DEFAULT_PERSONA,
   LORE_UPLOAD_MAX_BYTES,
@@ -32,6 +33,7 @@ import {
   planImportFor,
   planSync,
   previewImport,
+  requestLayer,
   staleAgainst,
   type BasePlan,
   type ExistingApp,
@@ -45,7 +47,6 @@ import { parseLoreBackup, type ParsedLoreBackup } from '../importer/loreBackup'
 import { fetchLoreBackup } from '../importer/loreFetch'
 import { bootEligible } from '../memory/filter'
 import { MemoryError } from '../memory/service'
-import { DEFAULT_SENSITIVITY } from '../memory/uri'
 
 const params = z.object({ spaceId: z.uuid() })
 const errors = {
@@ -149,9 +150,10 @@ function planView(
           uri: node.uri,
           aliases: node.aliases,
           targets: targets.map(({ item, state, current }) => {
-            const layer = item.request.layer!
+            const layer = requestLayer(item.request)
             return {
               uri: item.request.uri,
+              title: item.request.title ?? item.request.uri,
               layer,
               sensitivity: item.request.sensitivity ?? DEFAULT_SENSITIVITY[layer],
               priority: item.request.priority,
@@ -170,9 +172,10 @@ function planView(
     droppedKeywords: plan.droppedKeywords,
     warnings: plan.warnings,
     sync: {
-      items: sync.items.map(({ source, uri, state, target, reason, changes }) => ({
+      items: sync.items.map(({ source, uri, title, state, target, reason, changes }) => ({
         source,
         uri,
+        title,
         state,
         changes,
         ...(target ? { target } : {}),

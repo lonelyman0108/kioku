@@ -94,7 +94,7 @@ const status = createRoute({
   path: '/spaces/{spaceId}/dream/runs/{runId}',
   tags: ['review'],
   summary:
-    '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）；共享的内容整理完就算做完，结果按共享部分的汇总与自己的画像层、私人层算，别的成员的不影响',
+    '一次整理的状态：排着、正在整理、做完了（整理过了、没整理、出错了）；共享的内容整理完就算做完，结果按共享部分的汇总与自己的本人记忆算，别的成员的不影响',
   request: { params: SpaceParams.extend({ runId: z.uuid() }) },
   responses: {
     200: jsonResponse('状态', DreamRunStatus),
@@ -108,7 +108,7 @@ const mySettings = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/me/dream',
   tags: ['review'],
-  summary: '自己在这个空间里的 Dream 设置：让不让 Dream 整理自己的画像层与私人层',
+  summary: '自己在这个空间里的 Dream 设置：让不让 Dream 整理自己的本人记忆',
   request: { params: SpaceParams },
   responses: { 200: jsonResponse('设置', DreamMemberSettings), 403: forbidden },
 })
@@ -118,7 +118,7 @@ const saveMySettings = createRoute({
   path: '/spaces/{spaceId}/me/dream',
   tags: ['review'],
   summary:
-    '改自己的 Dream 设置（只改得了自己的）：关掉之后自己的画像层与私人层不再发给抽取模型，已经生成的建议留着',
+    '改自己的 Dream 设置（只改得了自己的）：关掉之后自己的本人记忆不再发给抽取模型，已经生成的建议留着',
   request: { params: SpaceParams, body: jsonBody(DreamMemberSettings) },
   responses: {
     200: jsonResponse('已保存', DreamMemberSettings),
@@ -187,9 +187,9 @@ export function dreamRoutes(deps: Deps) {
       const found = await deps.jobs.dreamRun(spaceId, runId)
       if (!found) return c.json({ error: '此次整理不存在' }, 404)
       if (found.state === 'queued') return c.json(found, 200)
-      // 共享部分的汇总写下之后就算做完了，结果按汇总与查看者自己的画像层、私人层算（见 dreamRunOutcome）。
+      // 共享部分的汇总写下之后就算做完了，结果按汇总与查看者自己的本人记忆算（见 dreamRunOutcome）。
       // 还没写下时：任务还在跑就是共享的那一段还在整理；任务已经停了（停在共享的那一段或者更早）按出错算，
-      // 不用任务自己的结果，那里面算上了画像层与私人层
+      // 不用任务自己的结果，那里面算上了本人记忆
       const seen = await dreamRunOutcome(deps.db, spaceId, runId, accountId)
       if (seen) return c.json({ state: 'finished' as const, ...seen }, 200)
       return c.json(

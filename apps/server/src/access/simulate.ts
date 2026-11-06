@@ -9,7 +9,7 @@ import { keyEffectiveScopes } from './access'
 
 export type SimulatedKey = { key: KeyPrincipal } | { error: string; status: 403 | 404 }
 
-// 模拟用的 Key（启动预览、召回调试、测试台）：只有应用主人能用，因为模拟会读到主人的私人层与提示语（空间 owner 也不行）。
+// 模拟用的 Key（启动预览、召回调试、测试台）：只有应用主人能用，因为模拟会读到所有者本人的记忆与提示语（空间 owner 也不行）。
 // 权限按这把 Key 现在的有效上限，作废的 Key 不能模拟
 export async function keyToSimulate(
   deps: Deps,

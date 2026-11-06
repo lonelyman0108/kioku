@@ -121,13 +121,13 @@ const deleteApp = createRoute({
   method: 'delete',
   path: '/spaces/{spaceId}/apps/{appId}',
   tags: ['apps'],
-  summary: '删除应用：还有应用层记忆（含已删除的）时不能删；它的 Key 一起删除',
+  summary: '删除应用：还有这个应用的记忆（含已删除的）时不能删；它的 Key 一起删除',
   request: { params: AppParams },
   responses: {
     204: { description: '已删除' },
     403: forbidden,
     404: notFound,
-    409: jsonResponse('还有应用层记忆', ErrorResponse),
+    409: jsonResponse('还有这个应用的记忆', ErrorResponse),
   },
 })
 
@@ -290,7 +290,7 @@ export function appRoutes(deps: Deps) {
             )
             .for('update')
           if (member?.role !== 'owner' && member?.role !== 'editor') return 'bad-owner' as const
-          // Key 的权限按应用当前主人计算：不吊销的话，前一位主人手里的 Key 会转而读到新主人的私人层
+          // Key 的权限按应用当前主人计算：不吊销的话，前一位主人手里的 Key 会转而读到新所有者本人的记忆
           if (ownerAccountId !== owner) {
             await tx
               .update(apiKeys)
@@ -322,11 +322,11 @@ export function appRoutes(deps: Deps) {
       const role = await roleOf(spaceId, accountId)
       if (!canManageApps(role)) return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       const result = await withSpace(deps.db, spaceId, async (tx) => {
-        // 锁住应用这一行：写应用层记忆时的外键检查要等这把锁，检查之后不会再冒出一条被连带删掉的记忆
+        // 锁住应用这一行：写这个应用的记忆时的外键检查要等这把锁，检查之后不会再冒出一条被连带删掉的记忆
         const owner = await appOwnerOf(tx, appId, true)
         if (!owner) return 'missing' as const
         if (owner !== accountId && role !== 'owner') return 'forbidden' as const
-        // 删除应用会把应用层记忆连带硬删除，已删除、还能撤销删除的也算
+        // 删除应用会把它的记忆连带硬删除，已删除、还能撤销删除的也算
         const [stored] = await tx
           .select({ n: count() })
           .from(memories)
@@ -342,7 +342,7 @@ export function appRoutes(deps: Deps) {
       if (result === 'stored') {
         return c.json(
           {
-            error: '仍有应用层记忆（含已删除但可恢复的）。移到其他命名空间后才能删除应用。',
+            error: '仍有这个应用的记忆（含已删除但可恢复的）。移到别的坐标之后才能删除应用。',
           },
           409,
         )
@@ -456,7 +456,7 @@ export function appRoutes(deps: Deps) {
         return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
       // Key 的上限不能超过签发人的角色：admin 与 secret 级只有空间 owner 能给。
-      // editor 签发的 Key 仍能读写应用主人（也就是 editor 自己）的私人层，以及 secret 以下的共享内容
+      // editor 签发的 Key 仍能读写应用所有者（也就是 editor 自己）的本人记忆，以及 secret 以下的共享内容
       if (role !== 'owner' && (body.scopes.admin || body.scopes.maxSensitivity === 'secret')) {
         return c.json({ error: '仅空间所有者可签发「跨人格 / 应用写入」或机密级的访问密钥' }, 403)
       }

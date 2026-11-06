@@ -157,6 +157,7 @@ export async function listSuggestions(
           memories: items.map(({ row, subjectName, subjectKind }) => ({
             id: row.id,
             uri: row.domain && row.path ? formatUri(row.domain, row.path) : null,
+            title: row.title,
             layer: row.layer,
             sensitivity: row.sensitivity,
             provenance: row.provenance,
@@ -248,7 +249,7 @@ function actionOf(
         kind: 'distill',
         draft: {
           uri: edits.uri ?? row.uri!,
-          ...(edits.layer ? { layer: edits.layer } : {}),
+          ...(edits.title ? { title: edits.title } : {}),
           content,
           disclosure,
         },
@@ -284,7 +285,7 @@ export async function applySuggestion(
     settle(suggestionId, 'applied', accountId),
     { source: 'dream', suggestionId },
   )
-  return { memory: created && { id: created.id, uri: created.uri } }
+  return { memory: created && { id: created.id, uri: created.uri, title: created.title } }
 }
 
 export async function rejectSuggestion(

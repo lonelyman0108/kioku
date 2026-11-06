@@ -426,6 +426,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(nodeOf(plan, 'core://soul').targets).toEqual([
         {
           uri: 'persona://default/soul',
+          title: 'soul',
           layer: 'persona',
           sensitivity: 'public',
           priority: 0,
@@ -435,8 +436,15 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         },
       ])
       expect(nodeOf(plan, 'infra://nas').targets[0]).toMatchObject({
-        layer: 'private',
+        uri: 'user://infra/nas',
+        layer: 'user',
+        sensitivity: 'private',
         boot: false,
+      })
+      expect(nodeOf(plan, 'preferences://user').targets[0]).toMatchObject({
+        uri: 'user://preferences/user',
+        layer: 'user',
+        sensitivity: 'internal',
       })
       expect(nodeOf(plan, 'projects://kioku').credentialRefs).toEqual(['ap', 'nas'])
       expect(nodeOf(plan, 'projects://kioku').targets[0]!.boot).toBe(true)
@@ -452,13 +460,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
     })
 
     it('计划标出的启动上下文和写进去之后的 BOOT_ELIGIBLE 一致', async () => {
-      await seed('core://low', '基础层 p1', { priority: 1 })
-      await seed('core://soul/style', '人格层 p1', { priority: 1 })
-      await seed('core://soul/more', '人格层 p2', { priority: 2 })
-      await seed('core://agent/claudecode/tools', '应用层 p1', { priority: 1 })
-      await seed('core://agent/claudecode/extra', '应用层 p2', { priority: 2 })
-      await seed('preferences://top', '主人层 p0', { priority: 0 })
-      await seed('projects://top', '私人层 p0', { priority: 0 })
+      await seed('core://low', '通用 p1', { priority: 1 })
+      await seed('core://soul/style', '人格 p1', { priority: 1 })
+      await seed('core://soul/more', '人格 p2', { priority: 2 })
+      await seed('core://agent/claudecode/tools', '应用 p1', { priority: 1 })
+      await seed('core://agent/claudecode/extra', '应用 p2', { priority: 2 })
+      await seed('preferences://top', '本人的偏好 p0', { priority: 0 })
+      await seed('projects://top', '本人的私密 p0', { priority: 0 })
       const source = await fileSource()
       const plan = await planOf(source)
       expect((await applyOf(source, plan)).failed).toEqual([])
@@ -523,14 +531,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
     it('给出已导入与换了路径的状态，以及之前导入的记忆现在的样子', async () => {
       await cliApply()
       // 在 Kioku 里移动、删除、改成 secret；在 Lore 里换路径
-      await service().move({ from: 'infra://nas', to: 'infra://storage' })
-      await service().delete('preferences://user')
+      await service().move({ from: 'user://infra/nas', to: 'user://infra/storage' })
+      await service().delete('user://preferences/user')
       await service().update({ uri: 'core://agent', sensitivity: 'secret' })
       await renameLore('core://agent/claudecode', 'claude_rules')
       const plan = await planOf(await fileSource())
       expect(nodeOf(plan, 'infra://nas').targets[0]).toMatchObject({
         state: 'imported',
-        current: [{ uri: 'infra://storage', secret: false }],
+        current: [{ uri: 'user://infra/storage', secret: false }],
       })
       expect(nodeOf(plan, 'preferences://user').targets[0]).toMatchObject({
         state: 'imported',
@@ -558,6 +566,23 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(result.appsOtherPersona).toEqual(plan.appsOtherPersona)
     })
 
+    it('同步项带标题：取 Lore 正文的 # 标题，没有就用标识；记忆现在是机密的只用标识', async () => {
+      await seed('infra://titled', '# 有标题的节点\n正文')
+      await seed('infra://vault', '# 保险柜\n密码 hunter5')
+      await importAll(await fileSource(), { secretUris: ['infra://vault'] })
+      await editLore('infra://titled', '# 改过的标题\n新的正文')
+      await editLore('infra://vault', '# 保险柜\n密码 hunter6')
+      const plan = await planOf(await fileSource())
+      const item = (uri: string) => plan.sync.items.find((i) => i.uri === uri)
+      expect(item('user://infra/titled')).toMatchObject({
+        state: 'update',
+        title: '改过的标题',
+        changes: ['content', 'title'],
+      })
+      expect(item('user://infra/vault')).toMatchObject({ state: 'update', title: 'vault' })
+      expect(item('user://infra/nas')).toMatchObject({ state: 'current', title: 'nas' })
+    })
+
     it('回归：命令行导入并同步过的数据，八种状态与命令行的 --sync 逐项相同', async () => {
       await seed('infra://edit_in_kioku', '会在 Kioku 里改的')
       await seed('infra://rename_in_lore', '会在 Lore 里换路径的')
@@ -572,13 +597,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       await editLore('infra://change_in_lore', '同步过一次的正文')
       await cliApply()
 
-      await service().update({ uri: 'infra://edit_in_kioku', content: 'Kioku 里改过' })
-      await service().delete('infra://delete_in_kioku')
+      await service().update({ uri: 'user://infra/edit_in_kioku', content: 'Kioku 里改过' })
+      await service().delete('user://infra/delete_in_kioku')
       await withSpace(database.db, ws.spaceId, (tx) =>
         tx
           .update(memories)
           .set({ expiresAt: new Date(Date.now() - 86_400_000) })
-          .where(memoryWhere('infra', 'unreadable')),
+          .where(memoryWhere('user', 'infra/unreadable')),
       )
       await renameLore('infra://rename_in_lore', 'renamed_in_lore')
       await editLore('infra://broken_in_lore', '坏的占位符 {{cred:Bad Name}}')
@@ -589,15 +614,16 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       const source = await fileSource()
       const plan = await planOf(source)
       expect(plan.apps).toEqual(fromCli.apps)
-      // 命令行的原因引用那段坏占位符（打在主人自己的终端上），计划视图不含正文：只差这一处。看原始的响应
+      // 命令行的原因引用那段坏占位符（打在导入者自己的终端上），计划视图不含正文：只差这一处。看原始的响应
       const quoted = ' {{cred:Bad Name}}'
       expect(sync.items.find((i) => i.state === 'skipped')!.reason).toContain(quoted)
       expect(await (await post('plan', { source })).text()).not.toContain('Bad Name')
       const comparable = (items: LoreSyncItem[]) =>
         items
-          .map(({ source, uri, state, target, reason, changes }) => ({
+          .map(({ source, uri, title, state, target, reason, changes }) => ({
             source,
             uri,
+            title,
             state,
             target,
             reason: reason?.replace(quoted, ''),
@@ -614,14 +640,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           .filter((i) => i.state === state)
           .map((i) => i.uri)
           .sort()
-      expect(by('update')).toEqual(['infra://change_in_lore'])
-      expect(by('edited')).toEqual(['infra://edit_in_kioku'])
-      expect(by('moved')).toEqual(['infra://rename_in_lore'])
-      expect(by('deleted')).toEqual(['infra://delete_in_kioku'])
-      expect(by('skipped')).toEqual(['infra://broken_in_lore'])
+      expect(by('update')).toEqual(['user://infra/change_in_lore'])
+      expect(by('edited')).toEqual(['user://infra/edit_in_kioku'])
+      expect(by('moved')).toEqual(['user://infra/rename_in_lore'])
+      expect(by('deleted')).toEqual(['user://infra/delete_in_kioku'])
+      expect(by('skipped')).toEqual(['user://infra/broken_in_lore'])
       expect(by('unmapped')).toEqual(['persona://old-persona/soul'])
-      expect(by('unreadable')).toEqual(['infra://unreadable'])
-      expect(plan.sync.goneFromLore).toEqual(['infra://gone_from_lore'])
+      expect(by('unreadable')).toEqual(['user://infra/unreadable'])
+      expect(plan.sync.goneFromLore).toEqual(['user://infra/gone_from_lore'])
       expect(by('current')).toContain('persona://default/soul')
       expect(by('current')).toContain('core://agent')
       expect(plan.nodes.flatMap((n) => n.targets).filter((t) => t.state === 'new')).toEqual([])
@@ -638,14 +664,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         [
           'app://claudecode/agent',
           'core://agent',
-          'infra://nas',
-          'infra://router/credentials',
+          'user://infra/nas',
+          'user://infra/router/credentials',
           'persona://default/soul',
-          'preferences://user',
+          'user://preferences/user',
         ].sort(),
       )
       expect(backfills).toBe(1)
-      expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
+      expect(await contentOf('user://infra/nas')).toBe('存储服务器的正文')
       const events = await withSpace(database.db, ws.spaceId, (tx) =>
         tx.select().from(memoryEvents),
       )
@@ -668,27 +694,27 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         secretUris: ['infra://router/credentials', 'core://agent'],
         excludeUris: ['core://agent', 'preferences://user'],
       })
-      expect(result.created).toContain('infra://router/credentials')
+      expect(result.created).toContain('user://infra/router/credentials')
       expect(result.created).not.toContain('core://agent')
-      expect(result.created).not.toContain('preferences://user')
+      expect(result.created).not.toContain('user://preferences/user')
       const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
-        tx.select().from(memories).where(memoryWhere('infra', 'router/credentials')),
+        tx.select().from(memories).where(memoryWhere('user', 'infra/router/credentials')),
       )
       expect(row).toMatchObject({ sensitivity: 'secret', content: null })
-      expect(await contentOf('infra://router/credentials')).toBe('路由器密码 hunter2')
+      expect(await contentOf('user://infra/router/credentials')).toBe('路由器密码 hunter2')
 
       await editLore('infra://nas', 'Lore 里改过的正文')
       const newer = await fileSource(LATER)
       const next = await planOf(newer)
-      expect(next.sync.items.find((i) => i.uri === 'infra://nas')!.state).toBe('update')
+      expect(next.sync.items.find((i) => i.uri === 'user://infra/nas')!.state).toBe('update')
       // 这次不同步。不算 Lore 里没有了由 planSync 的用例保证：结果里不带同步状态，这里看不出来
       const synced = await applyOf(newer, next, { excludeUris: ['infra://nas', 'core://agent'] })
       expect(synced.sync.updated).toEqual([])
-      expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
-      expect(synced.created).toEqual(['preferences://user'])
+      expect(await contentOf('user://infra/nas')).toBe('存储服务器的正文')
+      expect(synced.created).toEqual(['user://preferences/user'])
       // 勾选只管这一次：再看计划它还是要更新
       const after = await planOf(newer)
-      expect(after.sync.items.find((i) => i.uri === 'infra://nas')!.state).toBe('update')
+      expect(after.sync.items.find((i) => i.uri === 'user://infra/nas')!.state).toBe('update')
     })
 
     it('勾掉一个节点时，映射到同一个 URI、计划里不导入的节点不会写进去', async () => {
@@ -784,51 +810,52 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           return flagged
         }
 
-        it('同一归属被占（唯一索引）：共享的、导入者自己的私人与个人画像节点都标出来', async () => {
-          await occupy({ uri: 'core://same', content: '占着的', layer: 'base' })
+        it('同一归属被占（唯一索引）：通用的（谁写的都算）与导入者自己的本人记忆都标出来', async () => {
+          const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+          await occupy({ uri: 'core://same', content: '占着的' })
           expect(await matchesWrite('core://same')).toBe(true)
-          await occupy({ uri: 'projects://same', content: '占着的' })
+          // 通用是共享的：别的成员写下的同样占着
+          await asEditor(editor.cookie, { uri: 'core://eve_wrote', content: '伊芙写的' })
+          expect(await matchesWrite('core://eve_wrote')).toBe(true)
+          // 本人的私密与偏好（内部）是同一个归属
+          await occupy({ uri: 'user://projects/same', content: '占着的' })
           expect(await matchesWrite('projects://same')).toBe(true)
-          await occupy({ uri: 'preferences://same', content: '占着的', layer: 'owner' })
+          await occupy({
+            uri: 'user://preferences/same',
+            content: '占着的',
+            sensitivity: 'internal',
+          })
           expect(await matchesWrite('preferences://same')).toBe(true)
         })
 
-        it('共享与成员节点互斥（触发器）：两边都有效时标出来；导入者和别的成员各自的节点不相干', async () => {
+        it('别的归属里同一个位置不算占用：通用的与本人的互不相干，导入者和别的成员各自的本人也不相干', async () => {
           const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-          // 共享的目标上有成员的私人节点：别的成员的，或者导入者自己的
-          await asEditor(editor.cookie, { uri: 'core://door', content: '伊芙的', layer: 'private' })
-          expect(await matchesWrite('core://door')).toBe(true)
-          await occupy({ uri: 'core://mine', content: '自己的', layer: 'private' })
-          expect(await matchesWrite('core://mine')).toBe(true)
-          // 导入者的私人目标上有共享节点
-          await occupy({ uri: 'projects://plan', content: '共享的', layer: 'base' })
-          expect(await matchesWrite('projects://plan')).toBe(true)
-          // 别的成员同一个 URI 上的私人节点、个人画像节点不挡
-          await asEditor(editor.cookie, { uri: 'projects://diary', content: '伊芙的' })
+          // 通用的目标，同一个位置上有本人的记忆（别的成员的、导入者自己的）：开头不同，是另一个坐标
+          await asEditor(editor.cookie, { uri: 'user://door', content: '伊芙的' })
+          expect(await matchesWrite('core://door')).toBe(false)
+          await occupy({ uri: 'user://mine', content: '自己的' })
+          expect(await matchesWrite('core://mine')).toBe(false)
+          // 导入者的本人目标，同一个位置上有通用的记忆
+          await occupy({ uri: 'core://projects/plan', content: '共享的' })
+          expect(await matchesWrite('projects://plan')).toBe(false)
+          // 别的成员同一个坐标上的本人记忆（私密的、偏好）不挡
+          await asEditor(editor.cookie, { uri: 'user://projects/diary', content: '伊芙的' })
           expect(await matchesWrite('projects://diary')).toBe(false)
           await asEditor(editor.cookie, {
-            uri: 'preferences://tone',
+            uri: 'user://preferences/tone',
             content: '伊芙的',
-            layer: 'owner',
+            sensitivity: 'internal',
           })
           expect(await matchesWrite('preferences://tone')).toBe(false)
         })
 
-        it('占着的那条已过期：导入者释放得了的写入时先释放，不标；别的成员过期的私人节点不再挡共享目标', async () => {
+        it('占着的那条已过期：导入者让得出的写入时先让出，不标；别的成员写下的通用记忆也一样', async () => {
           const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-          await expire((await occupy({ uri: 'core://a', content: '过期的', layer: 'base' })).id)
+          await expire((await occupy({ uri: 'core://a', content: '过期的' })).id)
           expect(await matchesWrite('core://a')).toBe(false)
-          await expire((await occupy({ uri: 'projects://old', content: '过期的' })).id)
+          await expire((await occupy({ uri: 'user://projects/old', content: '过期的' })).id)
           expect(await matchesWrite('projects://old')).toBe(false)
-          await expire(
-            (await occupy({ uri: 'projects://lapsed', content: '过期的', layer: 'base' })).id,
-          )
-          expect(await matchesWrite('projects://lapsed')).toBe(false)
-          const gate = await asEditor(editor.cookie, {
-            uri: 'core://gate',
-            content: '伊芙的',
-            layer: 'private',
-          })
+          const gate = await asEditor(editor.cookie, { uri: 'core://gate', content: '伊芙的' })
           await expire(gate.id)
           expect(await matchesWrite('core://gate')).toBe(false)
         })
@@ -847,7 +874,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         it('应用的时钟比数据库快：按应用的时间已经过期的，写入时 claimUri 先释放，计划照着判断', async () => {
           // 有效到至少要晚一分钟：一分半之后到期，按数据库的时间还有效，按快了两分半的应用时间已经过期
           const soon = new Date(Date.now() + 90_000).toISOString()
-          await occupy({ uri: 'core://skew', content: '快到期的', layer: 'base', validTo: soon })
+          await occupy({ uri: 'core://skew', content: '快到期的', validTo: soon })
           vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 150_000 })
           try {
             expect(await matchesWrite('core://skew')).toBe(false)
@@ -912,7 +939,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       it('Lore 里换了路径、新目标被跳过：原因挂到之前导入的那条上，它现在对应的就是这个目标', async () => {
         await seed('core://soul/style', '人格的口吻', { priority: 1 })
         await cliApply()
-        // Lore 里移到 core:// 下，正文又超出长度上限：新目标是基础层的 core://style，写不进去
+        // Lore 里移到 core:// 下，正文又超出长度上限：新目标是通用的 core://style，写不进去
         await editLore('core://soul/style', '长'.repeat(20_001))
         await renameLore('core://soul/style', 'style')
         const plan = await planOf(await fileSource())
@@ -921,6 +948,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         expect(plan.sync.items.find((i) => i.uri === 'persona://default/soul/style')).toEqual({
           source: 'core://style',
           uri: 'persona://default/soul/style',
+          title: 'style',
           state: 'skipped',
           reason: skip!.reason,
           changes: [],
@@ -942,22 +970,18 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       it('计划里就列为不导入，不带正文；要新建的就是写入的，勾掉一个也一样；命令行的计划同样列出', async () => {
         await seed('projects://atlas', 'Lore 里阿特拉斯的正文')
         await seed('core://team', 'Lore 里团队约定的正文')
-        // 共享节点，和导入者自己的私人节点
-        await occupy({ uri: 'core://agent', content: '占着的工作流', layer: 'base' })
-        await occupy({ uri: 'projects://atlas', content: '占着的阿特拉斯' })
-        // 别的成员的私人节点挡共享节点，不挡导入者自己的私人节点
+        // 通用的，和导入者自己的本人记忆
+        await occupy({ uri: 'core://agent', content: '占着的工作流' })
+        await occupy({ uri: 'user://projects/atlas', content: '占着的阿特拉斯' })
+        // 别的成员写下的通用记忆同样挡着；别的成员的本人记忆不挡导入者同一个坐标的本人目标
         const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-        await asEditor(editor.cookie, {
-          uri: 'core://team',
-          content: '伊芙的团队笔记',
-          layer: 'private',
-        })
-        await asEditor(editor.cookie, { uri: 'infra://nas', content: '伊芙的存储笔记' })
+        await asEditor(editor.cookie, { uri: 'core://team', content: '伊芙的团队笔记' })
+        await asEditor(editor.cookie, { uri: 'user://infra/nas', content: '伊芙的存储笔记' })
         // 已过期、导入者让得出的不挡：写入时先让出
         const lapsed = await occupy({
-          uri: 'preferences://user',
+          uri: 'user://preferences/user',
           content: '过期的偏好',
-          layer: 'owner',
+          sensitivity: 'internal',
         })
         await withSpace(database.db, ws.spaceId, (tx) =>
           tx
@@ -973,11 +997,15 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           expect(text).not.toContain(body)
         }
         const plan = LoreImportPlan.parse(JSON.parse(text))
-        const occupied = ['core://agent', 'projects://atlas', 'core://team']
-        expect(plan.skipped).toEqual(
-          expect.arrayContaining(occupied.map((uri) => occupiedReason(uri))),
-        )
-        for (const uri of occupied) expect(nodeOf(plan, uri)).toBeUndefined()
+        // Lore 的 URI 与写入目标
+        const occupied = [
+          ['core://agent', 'core://agent'],
+          ['projects://atlas', 'user://projects/atlas'],
+          ['core://team', 'core://team'],
+        ] as const
+        const reasons = occupied.map(([uri, target]) => occupiedReason(uri, target))
+        expect(plan.skipped).toEqual(expect.arrayContaining(reasons))
+        for (const [uri] of occupied) expect(nodeOf(plan, uri)).toBeUndefined()
         expect(stateOf(plan, 'infra://nas')).toBe('new')
         expect(stateOf(plan, 'preferences://user')).toBe('new')
         const planned = plan.nodes
@@ -991,28 +1019,24 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         const { plan: fromCli } = await cli()
         // 计划里的去重键不进视图，比对时也去掉
         const cliSkipped = fromCli.skipped.map(({ source, reason }) => ({ source, reason }))
-        expect(cliSkipped).toEqual(
-          expect.arrayContaining(occupied.map((uri) => occupiedReason(uri))),
-        )
+        expect(cliSkipped).toEqual(expect.arrayContaining(reasons))
         expect(fromCli.memories.map((m) => m.request.uri).sort()).toEqual(planned)
 
         // 按勾选重算沿用基准计划的占用：写入的是看过的计划减去勾掉的
         const result = await applyOf(source, plan, { excludeUris: ['infra://router/credentials'] })
         expect(result.created.sort()).toEqual(
-          planned.filter((uri) => uri !== 'infra://router/credentials'),
+          planned.filter((uri) => uri !== 'user://infra/router/credentials'),
         )
         expect(result.occupied).toEqual([])
         expect(result.failed).toEqual([])
         expect(await contentOf('core://agent')).toBe('占着的工作流')
-        expect(await contentOf('projects://atlas')).toBe('占着的阿特拉斯')
-        expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
-        expect(await contentOf('preferences://user')).toBe('偏好的正文')
+        expect(await contentOf('user://projects/atlas')).toBe('占着的阿特拉斯')
+        expect(await contentOf('user://infra/nas')).toBe('存储服务器的正文')
+        expect(await contentOf('user://preferences/user')).toBe('偏好的正文')
 
         // 再看计划：写进去的是已导入，占着的照样不导入
         const again = await planOf(source)
-        expect(again.skipped).toEqual(
-          expect.arrayContaining(occupied.map((uri) => occupiedReason(uri))),
-        )
+        expect(again.skipped).toEqual(expect.arrayContaining(reasons))
         expect(stateOf(again, 'infra://nas')).toBe('imported')
         expect(stateOf(again, 'infra://router/credentials')).toBe('new')
       })
@@ -1028,7 +1052,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         const source = await fileSource()
         const plan = await planOf(source)
         const { target, plan: fromCli } = await cli()
-        await occupy({ uri: 'core://agent', content: '后来写的', layer: 'base' })
+        await occupy({ uri: 'core://agent', content: '后来写的' })
         const before = await counts()
         const res = await post('apply', { source, fingerprint: plan.fingerprint })
         expect(res.status).toBe(409)
@@ -1070,9 +1094,9 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         vi.mocked(planImportFor).mockImplementationOnce(async (...args) => {
           const base = await real.planImportFor(...args)
           // 这份计划里的节点导入过的记忆：移走、改成机密、删掉都不改变这次怎么写
-          await service().move({ from: 'infra://nas', to: 'infra://storage' })
+          await service().move({ from: 'user://infra/nas', to: 'user://infra/storage' })
           await service().update({ uri: 'core://agent', sensitivity: 'secret' })
-          await service().delete('preferences://user')
+          await service().delete('user://preferences/user')
           // 别处导入了不在这份计划里的节点
           const target = {
             db: database.db,
@@ -1106,12 +1130,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
               secretUris: new Set(),
             },
           )
-          expect((await real.applyImport(target, other)).created).toEqual(['notes://elsewhere'])
+          expect((await real.applyImport(target, other)).created).toEqual([
+            'user://notes/elsewhere',
+          ])
           return base
         })
         // 命令行写下的事件没有导出时间，文件算旧：这里不看新旧，直接确认
         const result = await applyOf(source, plan, { confirmStale: true })
-        expect(result.created).toEqual(['infra://more'])
+        expect(result.created).toEqual(['user://infra/more'])
         expect(result.previouslyImported).toHaveLength(6)
       })
 
@@ -1158,10 +1184,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       expect(plan.warnings).toContainEqual({ uri: 'infra://emoji', kind: 'disclosureTruncated' })
       const result = await applyOf(source, plan)
       expect(result.failed).toEqual([])
-      expect(result.created).toContain('infra://emoji')
-      expect((await service().get('infra://emoji')).disclosure).toBe('长'.repeat(499))
+      expect(result.created).toContain('user://infra/emoji')
+      expect((await service().get('user://infra/emoji')).disclosure).toBe('长'.repeat(499))
       const again = await planOf(source)
-      expect(again.sync.items.find((i) => i.uri === 'infra://emoji')!.state).toBe('current')
+      expect(again.sync.items.find((i) => i.uri === 'user://infra/emoji')!.state).toBe('current')
     })
 
     it('同步写下 sync 事件，context 记下导出时间；secret 节点的 context 里没有正文', async () => {
@@ -1176,16 +1202,19 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           .filter((i) => i.state === 'update')
           .map((i) => i.uri)
           .sort(),
-      ).toEqual(['infra://nas', 'infra://router/credentials'])
+      ).toEqual(['user://infra/nas', 'user://infra/router/credentials'])
       // 计划里只有要改什么，新正文不在里面。看原始的响应：解析时会丢掉契约里没有的字段
       const raw = await (await post('plan', { source: newer })).text()
       for (const body of ['Lore 里改过的正文', 'hunter3']) {
         expect(raw).not.toContain(body)
       }
       const result = await applyOf(newer, plan)
-      expect(result.sync.updated.sort()).toEqual(['infra://nas', 'infra://router/credentials'])
-      expect(await contentOf('infra://nas')).toBe('Lore 里改过的正文')
-      expect(await contentOf('infra://router/credentials')).toBe('路由器密码 hunter3')
+      expect(result.sync.updated.sort()).toEqual([
+        'user://infra/nas',
+        'user://infra/router/credentials',
+      ])
+      expect(await contentOf('user://infra/nas')).toBe('Lore 里改过的正文')
+      expect(await contentOf('user://infra/router/credentials')).toBe('路由器密码 hunter3')
       const events = await withSpace(database.db, ws.spaceId, (tx) =>
         tx.select().from(memoryEvents).where(eq(memoryEvents.eventType, 'sync')),
       )
@@ -1251,11 +1280,11 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       await editLore('infra://nas', 'Lore 里改过的正文')
       const newer = await fileSource(LATER)
       const plan = await planOf(newer)
-      await service().update({ uri: 'infra://nas', priority: 7 })
+      await service().update({ uri: 'user://infra/nas', priority: 7 })
       const edited = await post('apply', { source: newer, fingerprint: plan.fingerprint })
       expect(edited.status).toBe(409)
-      expect((await service().get('infra://nas')).priority).toBe(7)
-      expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
+      expect((await service().get('user://infra/nas')).priority).toBe(7)
+      expect(await contentOf('user://infra/nas')).toBe('存储服务器的正文')
 
       const fresh = await planOf(newer)
       await ws.createApp('claude-two', { runtimeFamily: 'claudecode' })
@@ -1319,7 +1348,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       await refused(present)
     })
 
-    describe('计划不写入新的人格层记忆时，别人新建或删掉同名人格', () => {
+    describe('计划不写入新的人格的记忆时，别人新建或删掉同名人格', () => {
       const dropPersona = () =>
         withSpace(database.db, ws.spaceId, (tx) =>
           tx.delete(personas).where(eq(personas.slug, 'default')),
@@ -1637,24 +1666,24 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         const newer = await fileSource(LATER)
         expect((await planOf(newer)).staleSince).toBeNull()
         await importAll(newer)
-        expect(await contentOf('infra://nas')).toBe('新的正文')
+        expect(await contentOf('user://infra/nas')).toBe('新的正文')
 
         // 同一份新文件再执行：不算旧，也没有要写的
         expect((await planOf(newer)).staleSince).toBeNull()
 
         const plan = await planOf(old)
         expect(plan.staleSince).toBe(LATER)
-        expect(plan.sync.items.find((i) => i.uri === 'infra://nas')!.state).toBe('update')
+        expect(plan.sync.items.find((i) => i.uri === 'user://infra/nas')!.state).toBe('update')
         const before = await counts()
         const refused = await post('apply', { source: old, fingerprint: plan.fingerprint })
         expect(refused.status).toBe(409)
         expect(((await refused.json()) as { error: string }).error).toContain('旧')
-        expect(await contentOf('infra://nas')).toBe('新的正文')
+        expect(await contentOf('user://infra/nas')).toBe('新的正文')
         expect(await counts()).toEqual(before)
 
         const confirmed = await applyOf(old, plan, { confirmStale: true })
-        expect(confirmed.sync.updated).toEqual(['infra://nas'])
-        expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
+        expect(confirmed.sync.updated).toEqual(['user://infra/nas'])
+        expect(await contentOf('user://infra/nas')).toBe('存储服务器的正文')
 
         // 数据时间还是新文件的：确认过一次之后再传这份旧文件，要改回去的已经改完了，没有要写的就不提醒
         expect((await planOf(old)).staleSince).toBeNull()
@@ -1662,7 +1691,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         const back = await planOf(newer)
         expect(back.staleSince).toBeNull()
         await applyOf(newer, back)
-        expect(await contentOf('infra://nas')).toBe('新的正文')
+        expect(await contentOf('user://infra/nas')).toBe('新的正文')
       })
 
       it('没有要写的就不算旧：不用确认，数据时间照样给出来', async () => {
@@ -1673,7 +1702,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         const plan = await planOf(old)
         expect(plan.dataTime).toBe(LATER)
         expect(plan.staleSince).toBeNull()
-        expect(plan.sync.goneFromLore).toEqual(['infra://later'])
+        expect(plan.sync.goneFromLore).toEqual(['user://infra/later'])
         await applyOf(old, plan)
       })
 
@@ -1710,7 +1739,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
         await editLore('infra://nas', 'Lore 里改过的正文')
         const plan = await planOf(remote)
         expect(plan.staleSince).toBeNull()
-        expect((await applyOf(remote, plan)).sync.updated).toEqual(['infra://nas'])
+        expect((await applyOf(remote, plan)).sync.updated).toEqual(['user://infra/nas'])
       })
     })
 
@@ -1749,12 +1778,12 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       it('22、23 类的数据错误只算这一条失败，别的照写；日志只记 SQLSTATE；同步也一样', async () => {
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
         try {
-          await reject('nas', '22023')
+          await reject('infra/nas', '22023')
           const source = await fileSource()
           const plan = await planOf(source)
           const result = await applyOf(source, plan)
           expect(result.failed).toEqual([
-            { uri: 'infra://nas', reason: expect.stringContaining('22023') as string },
+            { uri: 'user://infra/nas', reason: expect.stringContaining('22023') as string },
           ])
           expect(result.created).toHaveLength(5)
           expect(backfills).toBe(1)
@@ -1766,19 +1795,19 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           expect(again.staleSince).toBeNull()
           expect(stateOf(again, 'infra://nas')).toBe('new')
           expect(stateOf(again, 'core://agent')).toBe('imported')
-          expect((await applyOf(source, again)).created).toEqual(['infra://nas'])
+          expect((await applyOf(source, again)).created).toEqual(['user://infra/nas'])
           expect(await eventsPerMemory()).toEqual(new Array(6).fill(1))
 
           // 同步写库时报错也只算这一条
           logged.mockClear()
           await editLore('infra://nas', 'Lore 里改过的正文')
           await editLore('core://agent', 'Lore 里改过的约束')
-          await reject('nas', '23514')
+          await reject('infra/nas', '23514')
           const newer = await fileSource(LATER)
           const synced = await applyOf(newer, await planOf(newer))
           expect(synced.sync.updated).toEqual(['core://agent'])
           expect(synced.sync.failed).toEqual([
-            { uri: 'infra://nas', reason: expect.stringContaining('23514') as string },
+            { uri: 'user://infra/nas', reason: expect.stringContaining('23514') as string },
           ])
           expect(logged.mock.calls).toEqual([['写入 Lore 的节点时数据库报错', { code: '23514' }]])
         } finally {
@@ -1789,7 +1818,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       it('别的错误中止：返回 500、日志没有 SQL 与正文、照样排补齐；重看计划能接着做', async () => {
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
         try {
-          await reject('nas', 'P0001')
+          await reject('infra/nas', 'P0001')
           const source = await fileSource()
           const plan = await planOf(source)
           const res = await post('apply', { source, fingerprint: plan.fingerprint })
@@ -1813,8 +1842,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           expect(stale.status).toBe(409)
           const result = await applyOf(source, again)
           expect(result.failed).toEqual([])
-          expect(result.created).toContain('infra://nas')
-          expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
+          expect(result.created).toContain('user://infra/nas')
+          expect(await contentOf('user://infra/nas')).toBe('存储服务器的正文')
           expect(await eventsPerMemory()).toEqual(new Array(6).fill(1))
         } finally {
           logged.mockRestore()
@@ -1824,7 +1853,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       it('写到一半连接断开：和别的错误一样中止，日志记 CONNECTION_CLOSED；重看计划能接着做', async () => {
         const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
         try {
-          await onPath('nas', 'perform pg_terminate_backend(pg_backend_pid())')
+          await onPath('infra/nas', 'perform pg_terminate_backend(pg_backend_pid())')
           const source = await fileSource()
           const plan = await planOf(source)
           const res = await post('apply', { source, fingerprint: plan.fingerprint })
@@ -1837,7 +1866,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
           expect(stateOf(again, 'core://agent')).toBe('imported')
           expect(stateOf(again, 'infra://nas')).toBe('new')
           expect((await applyOf(source, again)).failed).toEqual([])
-          expect(await contentOf('infra://nas')).toBe('存储服务器的正文')
+          expect(await contentOf('user://infra/nas')).toBe('存储服务器的正文')
         } finally {
           logged.mockRestore()
         }
@@ -1896,7 +1925,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的接口', () => {
       const secret = await during(() => applyOf(newer, third, { secretUris: ['infra://more'] }))
       expect(secret).toEqual([1, 1, 2, 2])
       const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
-        tx.select().from(memories).where(memoryWhere('infra', 'more')),
+        tx.select().from(memories).where(memoryWhere('user', 'infra/more')),
       )
       expect(row).toMatchObject({ sensitivity: 'secret', content: null })
 

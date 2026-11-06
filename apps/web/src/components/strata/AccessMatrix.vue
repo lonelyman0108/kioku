@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { SENSITIVITIES, type Sensitivity } from '@kioku/contracts'
+import { SENSITIVITIES, sensitivityAllowed, type Sensitivity } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import { layerLabels, sensitivityLabels } from '../../labels'
@@ -20,7 +20,7 @@ import {
   type AccessRow,
 } from './strata'
 
-// 权限范围矩阵：7 层乘 4 个敏感级。行序和地层柱一样，格子用同一套编码，文字压在色带上时挖掉纹理保证可读。
+// 权限范围矩阵：6 类归属乘 4 个敏感级。行序和地层柱一样，格子用同一套编码，文字压在色带上时挖掉纹理保证可读。
 // 这份权限碰得到的最高敏感级画一条边界线。切换会话上下文由使用方传不同的 rows
 const props = withDefaults(defineProps<{ rows: readonly AccessRow[]; legend?: boolean }>(), {
   legend: true,
@@ -32,6 +32,15 @@ const cellOf = (row: AccessRow, sensitivity: Sensitivity) => {
   const cell = row.cells.find((c) => c.sensitivity === sensitivity)
   return cell ? accessKind(row.layer, cell) : 'none'
 }
+// 这一类归属没有这一级（本人不设公开）：不是没给权限，格子写明不适用，不和无权限画成一样
+const allowed = (row: AccessRow, sensitivity: Sensitivity) =>
+  sensitivityAllowed(row.layer, sensitivity)
+const cellTitle = (row: AccessRow, sensitivity: Sensitivity) => {
+  const place = `${layerLabels[row.layer]} ${sensitivityLabels[sensitivity]}`
+  return allowed(row, sensitivity)
+    ? `${place}：${accessKindLabels[cellOf(row, sensitivity)]}`
+    : `${place}：不适用，${layerLabels[row.layer]}不设${sensitivityLabels[sensitivity]}`
+}
 const FULL = { x: 0, y: 0, width: '100%', height: '100%' }
 const legendKinds = computed(() => presentKinds(props.rows))
 </script>
@@ -42,7 +51,7 @@ const legendKinds = computed(() => presentKinds(props.rows))
       <table class="mx">
         <thead>
           <tr>
-            <th scope="col"><span class="sr-only">层</span></th>
+            <th scope="col"><span class="sr-only">归属</span></th>
             <th
               v-for="(s, i) in SENSITIVITIES"
               :key="s"
@@ -69,11 +78,12 @@ const legendKinds = computed(() => presentKinds(props.rows))
               v-for="(s, i) in SENSITIVITIES"
               :key="s"
               class="c"
-              :class="[cellOf(row, s), { edge: i === deepest }]"
+              :class="[cellOf(row, s), { edge: i === deepest, na: !allowed(row, s) }]"
               :style="{ '--c': accessFill(row.layer) }"
-              :title="`${layerLabels[row.layer]} ${sensitivityLabels[s]}：${accessKindLabels[cellOf(row, s)]}`"
+              :title="cellTitle(row, s)"
             >
-              <template v-if="cellOf(row, s) !== 'none'">
+              <span v-if="!allowed(row, s)" class="c-na">不适用</span>
+              <template v-else-if="cellOf(row, s) !== 'none'">
                 <svg width="100%" height="100%" aria-hidden="true">
                   <rect
                     v-for="(r, k) in paintAccess(
@@ -201,6 +211,10 @@ const legendKinds = computed(() => presentKinds(props.rows))
 .c.extract .c-label,
 .c.write .c-label {
   background: none;
+}
+.c-na {
+  font-size: 12px;
+  color: var(--ui-text-muted);
 }
 .c.edge::after,
 .mx thead th.edge::after {

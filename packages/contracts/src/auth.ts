@@ -64,6 +64,7 @@ export type RuntimeFamily = z.infer<typeof RuntimeFamily>
 
 export const AppConfig = z
   .object({
+    // 本人私聊时读取本人记忆：设了之后，应用所有者本人的私聊读得到本人的内部及以下；不设时和陌生人私聊一样
     elevateOwnerDirect: z.literal('internal').optional(),
     // 召回事件里记不记提示语（前 200 字，像凭据的片段打码）；不设时记
     recordPrompt: z.boolean().optional(),
@@ -106,7 +107,7 @@ export const CreatePersonaRequest = z.object({
 })
 export type CreatePersonaRequest = z.infer<typeof CreatePersonaRequest>
 
-// 标识不能改：人格层记忆的 URI（persona://<标识>/…）里写着它
+// 标识不能改：人格的记忆的坐标（persona://<标识>/…）里写着它
 export const UpdatePersonaRequest = z.object({
   name: z.string().min(1).max(64).optional(),
   description: z.string().max(500).nullable().optional(),
@@ -115,9 +116,10 @@ export const UpdatePersonaRequest = z.object({
 })
 export type UpdatePersonaRequest = z.infer<typeof UpdatePersonaRequest>
 
-// 人格详情里的一个人格层节点
+// 人格详情里的一个节点（人格的记忆）
 export const PersonaNode = z.object({
   uri: z.string(),
+  title: z.string(),
   personaId: z.uuid(),
   priority: z.number().int(),
   sensitivity: Sensitivity,
@@ -130,7 +132,7 @@ export type PersonaNode = z.infer<typeof PersonaNode>
 export const AppRef = z.object({ id: z.uuid(), slug: z.string(), name: z.string() })
 export type AppRef = z.infer<typeof AppRef>
 
-// 节点按查看者在管理界面里读得到的算：私人层不在人格层里，secret 只给读得到的成员
+// 节点按查看者在管理界面里读得到的算：secret 只给读得到的成员
 export const PersonaDetail = PersonaInfo.extend({
   // 从直接继承的那个到最远的祖先
   ancestors: z.array(PersonaInfo),
@@ -142,7 +144,7 @@ export const PersonaDetail = PersonaInfo.extend({
   inherited: z.array(PersonaNode),
   // 默认人格是它的应用
   apps: z.array(AppRef),
-  // 查看者在管理界面里看得到的人格层记忆总数，含已删除、已过期的：删除人格会把它们连带硬删除，
+  // 查看者在管理界面里看得到的这个人格的记忆总数，含已删除、已过期的：删除人格会把它们连带硬删除，
   // 所以有记忆时删不掉（删除时还会算上查看者读不到的）
   storedMemories: z.number().int(),
 })
@@ -206,8 +208,8 @@ export const ACCESS_CONTEXTS = ['none', 'direct', 'owner_direct', 'group', 'cron
 export const AccessContext = z.enum(ACCESS_CONTEXTS)
 export type AccessContext = z.infer<typeof AccessContext>
 
-// 一格：这一层这一级的记忆。read 为 explicit 时只能按 URI 显式读取（secret），recall 时也进召回与 boot。
-// 对象层与情节层的 write 指对话抽取能写进去，不能按 URI 直接写
+// 一格：这一类归属、这一级的记忆。read 为 explicit 时只能按坐标显式读取（secret），recall 时也进召回与 boot。
+// 联系人与会话的 write 指对话抽取能写进去，它们没有坐标、不能直接写
 export const AccessCell = z.object({
   read: z.enum(['none', 'explicit', 'recall']),
   write: z.boolean(),

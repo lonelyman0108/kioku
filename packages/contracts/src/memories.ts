@@ -1,15 +1,44 @@
 import { z } from 'zod'
 
-import { Layer, PlainLayer, Provenance, Sensitivity } from './memory'
+import { CURATED_LAYERS, Layer, NAMESPACED_LAYERS, Provenance, Sensitivity } from './memory'
 
-// URI = domain://path。domain 是小写标识；path 是用 / 分隔的段，每段小写字母、数字、_ 或 -。
-// 两个保留 domain：persona://<人格标识>/... 属于人格层，app://<应用标识>/... 属于应用层。
-export const URI_PATTERN =
-  /^([a-z][a-z0-9_]{0,31}):\/\/([a-z0-9_-]{1,64}(?:\/[a-z0-9_-]{1,64}){0,15})$/
-// 接受 URI 的工具和接口都会返回它：工具参数里叫 domain，所以中英并列
-export const URI_FORMAT_MESSAGE = 'URI 格式应为 分区://路径（domain://path），例如 core://agent'
+// 坐标（代码与 MCP 里叫 uri）= 开头://位置/标识，存成 domain 与 path 两列。开头只有四种，就是记下的四类归属
+// （CURATED_LAYERS）：core://、user://，以及 persona://<人格标识>/、app://<应用标识>/，后两种开头之后的第一段是人格或应用的标识，
+// 之后至少还要有一段。位置是开头与标识之间的各级，可以没有；标识是最后一段。每段是小写字母、数字、_ 或 -，最长 64 个字符，
+// 开头之后最多 16 段（人格与应用的标识也算一段）。第一组是开头（domain），第二组是开头之后的整段（path）
+const URI_SEGMENT = '[a-z0-9_-]{1,64}'
+export const URI_PATTERN = new RegExp(
+  `^(?!(?:${NAMESPACED_LAYERS.join('|')})://${URI_SEGMENT}$)` +
+    `(${CURATED_LAYERS.join('|')})://(${URI_SEGMENT}(?:/${URI_SEGMENT}){0,15})$`,
+)
+// 接受坐标的工具和接口都会原样返回它，agent 照着改：四种开头各放什么都写清楚
+export const URI_FORMAT_MESSAGE =
+  '坐标（URI）只能用这四种开头：core:// 放通用的记忆，所有应用都用得到（例如 core://agent）；' +
+  'user:// 放本人的习惯、偏好与私人事务（例如 user://preferences/reply_style）；' +
+  'persona://<人格标识>/ 放某个人格的设定（例如 persona://default/soul）；' +
+  'app://<应用标识>/ 放某个应用独有的内容（例如 app://claudecode/agent）。' +
+  '开头之后是可省略的位置与最后一段标识，用 / 分隔，每段只用小写字母、数字、_ 或 -'
 export const MemoryUri = z.string().regex(URI_PATTERN, URI_FORMAT_MESSAGE)
 export const DomainOrUri = z.string().min(1)
+
+// 坐标前缀：四种开头之一，后面至少一段，例如 user://projects、persona://default（只有人格标识也行）。
+// 目录浏览与列表的位置筛选用它，匹配它本身与下面各级
+export const URI_PREFIX_PATTERN = new RegExp(
+  `^(${CURATED_LAYERS.join('|')})://(${URI_SEGMENT}(?:/${URI_SEGMENT}){0,15})$`,
+)
+export const UriPrefix = z
+  .string()
+  .regex(URI_PREFIX_PATTERN, '位置格式应为 开头://各级，例如 user://projects、persona://default')
+
+// 标题：记下的记忆给人看的名字，目录、列表、搜索与历史都显示它；改标题不改坐标。
+// 去掉首尾空白之后 1–80 个字符，不含控制字符（换行、制表符也算）
+export const MEMORY_TITLE_MAX = 80
+export const MemoryTitle = z
+  .string()
+  .trim()
+  .min(1, '标题不能为空')
+  .max(MEMORY_TITLE_MAX, `标题最多 ${MEMORY_TITLE_MAX} 个字符`)
+  .regex(/^\P{Cc}*$/u, '标题不能含控制字符')
 
 // 至少两个字：召回按子串匹配关键词，单字几乎会命中所有提示语
 export const Keyword = z.string().trim().min(2, '关键词至少两个字').max(64)
@@ -27,6 +56,7 @@ export const MemoryView = z
   .object({
     id: z.uuid(),
     uri: z.string(),
+    title: z.string(),
     layer: Layer,
     sensitivity: Sensitivity,
     provenance: Provenance,
@@ -66,13 +96,14 @@ export const PlaintextIgnoreRequest = z.object({
 })
 export type PlaintextIgnoreRequest = z.infer<typeof PlaintextIgnoreRequest>
 
-// 树浏览的一个子节点。exists 为 false 表示这一级路径本身没有记忆，只是下面有调用方读得到的后代，
-// 像文件系统里的目录一样显示出来；此时 id、layer 等字段为 null
+// 目录浏览的一个子节点。exists 为 false 表示这一级本身没有记忆，只是下面有调用方读得到的后代，
+// 像文件系统里的目录一样显示出来；此时 id、title、layer 等字段为 null
 export const MemorySummary = z
   .object({
     uri: z.string(),
     exists: z.boolean(),
     id: z.uuid().nullable(),
+    title: z.string().nullable(),
     layer: Layer.nullable(),
     sensitivity: Sensitivity.nullable(),
     priority: z.number().int().nullable(),
@@ -83,13 +114,14 @@ export const MemorySummary = z
   .meta({ id: 'MemorySummary' })
 export type MemorySummary = z.infer<typeof MemorySummary>
 
+// 归属由坐标的开头决定，不另外传
 export const CreateMemoryRequest = z
   .object({
     uri: MemoryUri,
+    // 不填时取正文里第一个 # 标题，没有就用标识（坐标的最后一段）
+    title: MemoryTitle.optional(),
     content: z.string().min(1).max(20_000),
-    // 不填时由 URI 推断：persona:// 与 app:// 按 domain 决定，其余默认 private
-    layer: Layer.optional(),
-    // 不填时按层取默认值
+    // 不填时按归属取默认值；本人不收公开
     sensitivity: Sensitivity.optional(),
     priority: z.number().int().min(0).max(99).default(2),
     disclosure: z.string().max(500).optional(),
@@ -109,9 +141,9 @@ export const UpdateMemoryRequest = z
     expectedVersion: z.number().int().optional(),
     // 填了就核对是不是同一条记忆：删除后在同一个 URI 重建的记忆版本号从 1 重新开始，只看版本号分不出来
     expectedId: z.uuid().optional(),
+    // 改标题不改坐标；改标识或归属要移动
+    title: MemoryTitle.optional(),
     content: z.string().min(1).max(20_000).optional(),
-    // 改层：只在 base、owner、private 之间；改成人格层或应用层要移动到 persona:// 或 app:// 下
-    layer: PlainLayer.optional(),
     sensitivity: Sensitivity.optional(),
     priority: z.number().int().min(0).max(99).optional(),
     disclosure: z.string().max(500).nullable().optional(),
@@ -127,13 +159,11 @@ export const UpdateMemoryRequest = z
   .meta({ id: 'UpdateMemoryRequest' })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>
 
-// 移到 persona:// 或 app:// 下时层随 URI 变；从那里移出时要用 layer 指定新的层，
-// 普通 domain 之间移动时给了 layer 就顺便改层
+// 移动改的是坐标：换开头就是改归属，换最后一段就是改标识。标题不变，只有标题就是原来的标识时按新坐标重新取
 export const MoveMemoryRequest = z
   .object({
     from: MemoryUri,
     to: MemoryUri,
-    layer: PlainLayer.optional(),
     // 与修改相同：填了就核对 from 上现在是不是这一条、这一版，不是就返回 409
     expectedId: z.uuid().optional(),
     expectedVersion: z.number().int().optional(),
@@ -148,7 +178,7 @@ export type DomainSummary = z.infer<typeof DomainSummary>
 
 export const MemoryChildren = z
   .object({
-    // 为 null 表示列的是 domain 根，或这一级路径本身没有可读的记忆
+    // 为 null 表示列的是开头这一级（例如 core://），或这一级本身没有可读的记忆
     // 写成并集而不是 .nullable()：OpenAPI 文档里才是 anyOf [$ref, null]，生成客户端的工具认得
     parent: z.union([MemoryView, z.null()]),
     children: z.array(MemorySummary),

@@ -1,5 +1,5 @@
 import { execFileSync, spawn } from 'node:child_process'
-import { mkdtempSync, rmSync } from 'node:fs'
+import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { createServer } from 'node:http'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -183,5 +183,100 @@ describe('Claude Code 钩子转发', () => {
     const result = await run('prompt.submit', 'not json')
     expect(result).toMatchObject({ code: 0, stdout: '' })
     expect(requests).toHaveLength(0)
+  })
+
+  describe('一轮结束', () => {
+    // 写一份会话记录（JSONL），返回路径
+    function transcript(entries, extra = '') {
+      const dir = mkdtempSync(join(tmpdir(), 'kioku-transcript-'))
+      const path = join(dir, 'session.jsonl')
+      writeFileSync(path, entries.map((e) => JSON.stringify(e)).join('\n') + '\n' + extra)
+      return { path, cleanup: () => rmSync(dir, { recursive: true, force: true }) }
+    }
+    const user = (content, more = {}) => ({
+      type: 'user',
+      message: { role: 'user', content },
+      ...more,
+    })
+    const assistant = (content, more = {}) => ({
+      type: 'assistant',
+      message: { role: 'assistant', content },
+      ...more,
+    })
+
+    it('取最后一条用户输入和之后的回复文字，不带会话上下文转发 turn.end，不写标准输出', async () => {
+      const { path, cleanup } = transcript(
+        [
+          user('上一轮的问题'),
+          assistant([{ type: 'text', text: '上一轮的回复' }]),
+          user('办公室的网络怎么配的'),
+          assistant([
+            { type: 'text', text: '先查一下记忆。' },
+            { type: 'tool_use', id: 't1', name: 'kioku_search', input: { query: '网络' } },
+          ]),
+          user([{ type: 'tool_result', tool_use_id: 't1', content: '候选' }]),
+          user([{ type: 'text', text: '系统注入的提醒' }], { isMeta: true }),
+          assistant([{ type: 'text', text: '主路由器在机房。' }]),
+          assistant([{ type: 'text', text: '子 Agent 的话' }], { isSidechain: true }),
+        ],
+        '{"type":"assistant","message":{"content":',
+      )
+      try {
+        const result = await run('turn.end', { session_id: 's1', transcript_path: path })
+        expect(result).toMatchObject({ code: 0, stdout: '' })
+        expect(requests).toHaveLength(1)
+        expect(requests[0].url).toBe('/v1/lifecycle/event')
+        expect(requests[0].body).toEqual({
+          event: 'turn.end',
+          sessionId: 's1',
+          user: '办公室的网络怎么配的',
+          reply: '先查一下记忆。\n主路由器在机房。',
+        })
+      } finally {
+        cleanup()
+      }
+    })
+
+    it('别的钩子让 Claude 接着说时这一轮还没完，不发；没有会话记录或用户输入也不发', async () => {
+      const { path, cleanup } = transcript([
+        user('你好'),
+        assistant([{ type: 'text', text: '你好' }]),
+      ])
+      try {
+        await run('turn.end', { session_id: 's1', transcript_path: path, stop_hook_active: true })
+        await run('turn.end', { session_id: 's1' })
+        await run('turn.end', {
+          session_id: 's1',
+          transcript_path: join(tmpdir(), 'no-such.jsonl'),
+        })
+        await run('turn.end', { transcript_path: path })
+        expect(requests).toHaveLength(0)
+      } finally {
+        cleanup()
+      }
+      const empty = transcript([assistant([{ type: 'text', text: '只有回复' }])])
+      try {
+        const result = await run('turn.end', { session_id: 's1', transcript_path: empty.path })
+        expect(result).toMatchObject({ code: 0, stdout: '' })
+        expect(requests).toHaveLength(0)
+      } finally {
+        empty.cleanup()
+      }
+    })
+
+    it('服务端出错时静默退出', async () => {
+      reply = () => ({ status: 500, body: { error: 'boom' } })
+      const { path, cleanup } = transcript([
+        user('你好'),
+        assistant([{ type: 'text', text: '你好' }]),
+      ])
+      try {
+        const result = await run('turn.end', { session_id: 's1', transcript_path: path })
+        expect(result).toMatchObject({ code: 0, stdout: '' })
+        expect(result.stderr).toContain('HTTP 500')
+      } finally {
+        cleanup()
+      }
+    })
   })
 })

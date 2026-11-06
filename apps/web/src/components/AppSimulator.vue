@@ -6,13 +6,14 @@ import { computed, reactive, ref, watch } from 'vue'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { bootUsage, simulatorState } from '../apps'
-import { layerShortLabels } from '../labels'
+import { memoryTitle } from '../coordinates'
+import { layerLabels, sessionExtraLabels } from '../labels'
 import { memoryRoute } from '../routes'
+import { formatShort, formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
-import UriPath from './strata/UriPath.vue'
 
 // 启动加载预览：按应用的一个 Key 模拟会话开始，只给应用所有者（会读到所有者的私人层）。
 // keyId 是左边选中的 Key，没有有效 Key 时没有。
@@ -91,8 +92,11 @@ watch(
 )
 
 const usage = computed(() => (preview.value ? bootUsage(preview.value) : null))
+// 放不下、没有附上的附加块
+const dropped = computed(() =>
+  (preview.value?.dropped ?? []).map((extra) => sessionExtraLabels[extra]).join('、'),
+)
 const memoryLink = (uri: string) => memoryRoute(props.spaceId, uri)
-const droppedLabels = { recent: '近期更新的记忆', related: '与当前项目相关的记忆' }
 </script>
 
 <template>
@@ -137,33 +141,62 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
             v-for="segment in usage.segments"
             :key="segment.uri"
             :style="{ width: `${segment.width}%`, background: `var(--layer-${segment.layer})` }"
-            :title="`${segment.uri}：${segment.chars} 字`"
+            :title="`${segment.title}：${segment.chars} 字`"
           />
           <i
             v-if="usage.other > 0"
             class="boot-other"
             :style="{ width: `${usage.other}%` }"
-            title="标题、近期更新与相关记忆"
+            title="标题、会话摘要、近期更新与相关记忆"
           />
         </div>
         <NoteLine v-if="preview.dropped.length" class="boot-note" tone="warning">
-          超出客户端接收上限，未附加：{{ preview.dropped.map((d) => droppedLabels[d]).join('、') }}
+          超出客户端接收上限，未附加：{{ dropped }}
         </NoteLine>
 
         <ul v-if="preview.entries.length" class="boot-list">
           <li v-for="entry in preview.entries" :key="entry.uri">
             <StrataSwatch :layer="entry.layer" plain />
-            <RouterLink :to="memoryLink(entry.uri)" class="boot-uri">
-              <UriPath :uri="entry.uri" />
+            <RouterLink :to="memoryLink(entry.uri)" class="boot-uri" :title="entry.uri">
+              {{ entry.title }}
             </RouterLink>
-            <span class="boot-layer">{{ layerShortLabels[entry.layer] }}</span>
+            <span class="boot-layer">{{ layerLabels[entry.layer] }}</span>
             <span class="boot-chars">{{ entry.chars.toLocaleString() }}</span>
           </li>
         </ul>
         <p v-else class="boot-empty">暂无启动加载的节点</p>
-        <p v-if="preview.omitted.length" class="boot-omitted">
-          超出预算、未展开：<span class="font-mono">{{ preview.omitted.join('、') }}</span>
+        <p
+          v-if="preview.omitted.length"
+          class="boot-omitted"
+          :title="preview.omitted.map((node) => node.uri).join('\n')"
+        >
+          超出预算、未展开：{{ preview.omitted.map((node) => memoryTitle(node)).join('、') }}
         </p>
+
+        <!-- 附在启动加载后面的第一块：同一会话最近的摘要，新的在前 -->
+        <div v-if="preview.summaries.length" class="boot-summaries">
+          <SectionHeading title="会话摘要" :level="3" class="boot-sub-head">
+            <template #hint>
+              <Hint>不带会话上下文的会话最近几条摘要；群聊、私聊的摘要不进入启动加载。</Hint>
+            </template>
+          </SectionHeading>
+          <ul class="boot-list">
+            <li
+              v-for="(summary, i) in preview.summaries"
+              :key="`${summary.createdAt}|${i}`"
+              class="boot-summary"
+            >
+              <time
+                class="boot-date"
+                :datetime="summary.createdAt"
+                :title="formatTime(summary.createdAt)"
+              >
+                {{ formatShort(summary.createdAt) }}
+              </time>
+              <span class="boot-summary-text">{{ summary.content }}</span>
+            </li>
+          </ul>
+        </div>
       </template>
 
       <div class="boot-subs">
@@ -171,8 +204,8 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
           <SectionHeading title="近期更新" :level="3" class="boot-sub-head" />
           <ul v-if="preview.recent.length" class="boot-list">
             <li v-for="memory in preview.recent" :key="memory.uri">
-              <RouterLink :to="memoryLink(memory.uri)" class="boot-uri">
-                <UriPath :uri="memory.uri" />
+              <RouterLink :to="memoryLink(memory.uri)" class="boot-uri" :title="memory.uri">
+                {{ memory.title }}
               </RouterLink>
             </li>
           </ul>
@@ -195,10 +228,10 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
           <ul v-if="preview?.related.length" class="boot-list">
             <li v-for="candidate in preview.related" :key="candidate.uri">
               <StrataSwatch :layer="candidate.layer" plain />
-              <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri">
-                <UriPath :uri="candidate.uri" />
+              <RouterLink :to="memoryLink(candidate.uri)" class="boot-uri" :title="candidate.uri">
+                {{ candidate.title }}
               </RouterLink>
-              <span class="boot-layer">{{ layerShortLabels[candidate.layer] }}</span>
+              <span class="boot-layer">{{ layerLabels[candidate.layer] }}</span>
               <span class="boot-chars">{{ candidate.score.toFixed(2) }}</span>
             </li>
           </ul>
@@ -303,6 +336,23 @@ const droppedLabels = { recent: '近期更新的记忆', related: '与当前项�
   margin-top: 8px;
   font-size: 14px;
   color: var(--ui-text-muted);
+  overflow-wrap: anywhere;
+}
+.boot-summaries {
+  margin-top: 17px;
+}
+.boot-list .boot-summary {
+  align-items: baseline;
+}
+.boot-date {
+  flex: none;
+  font-family: var(--font-mono);
+  font-size: 13px;
+  color: var(--ui-text-muted);
+}
+.boot-summary-text {
+  flex: 1 1 0;
+  min-width: 0;
   overflow-wrap: anywhere;
 }
 .boot-subs {

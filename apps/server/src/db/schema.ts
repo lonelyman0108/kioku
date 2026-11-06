@@ -1,5 +1,7 @@
 import {
+  CONVERSATION_KINDS,
   CREDENTIAL_PROVIDER_KINDS,
+  CURATED_LAYERS,
   DEFAULT_EXTRACTION_DAILY_WRITES,
   DEFAULT_EXTRACTION_MONTHLY_TOKENS,
   CREDENTIAL_SOURCES,
@@ -11,7 +13,6 @@ import {
   SUBJECT_KINDS,
   type CredentialField,
   type KeyScopes,
-  type PlainLayer,
 } from '@kioku/contracts'
 import { sql } from 'drizzle-orm'
 import {
@@ -59,6 +60,7 @@ export const memberRole = pgEnum('member_role', MEMBER_ROLES)
 export const subjectKind = pgEnum('subject_kind', SUBJECT_KINDS)
 export const credentialProviderKind = pgEnum('credential_provider_kind', CREDENTIAL_PROVIDER_KINDS)
 export const credentialSource = pgEnum('credential_source', CREDENTIAL_SOURCES)
+export const conversationKind = pgEnum('conversation_kind', CONVERSATION_KINDS)
 
 // ---- 身份表 ----
 
@@ -82,8 +84,6 @@ export const settings = pgTable('settings', {
 export const spaces = pgTable('spaces', {
   id: uuid().primaryKey().defaultRandom(),
   name: text().notNull(),
-  // domain → 管理界面新建记忆时带出的层（只能是 base、owner、private）
-  domainLayers: jsonb().$type<Record<string, PlainLayer>>().notNull().default({}),
   // 抽取预算：每月最多用多少 token（UTC 自然月），每个对象每天最多写几条事实
   extractionMonthlyTokens: integer().notNull().default(DEFAULT_EXTRACTION_MONTHLY_TOKENS),
   extractionDailyWrites: integer().notNull().default(DEFAULT_EXTRACTION_DAILY_WRITES),
@@ -100,8 +100,8 @@ export const spaceMembers = pgTable(
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     role: memberRole().notNull(),
-    // 让不让 Dream 整理这个成员的画像层与私人层（secret 本来就不读）：默认整理，只有本人能改。
-    // 关掉之后这两层不发给抽取模型，整理标记也不前进，再打开时接着看关掉期间新增与改动的（见 extraction/dream.ts）
+    // 让不让 Dream 整理这个成员的本人记忆（secret 本来就不读）：默认整理，只有本人能改。
+    // 关掉之后这些内容不发给抽取模型，整理标记也不前进，再打开时接着看关掉期间新增与改动的（见 extraction/dream.ts）
     dreamPrivate: boolean().notNull().default(true),
     createdAt: createdAt(),
   },
@@ -181,7 +181,7 @@ export const personas = pgTable(
   (t) => [uniqueIndex().on(t.spaceId, t.slug), unique().on(t.spaceId, t.id)],
 )
 
-// 一个接入方实例；ownerAccountId 是这个 bot 的「主人」，决定 owner 层读谁的画像
+// 一个接入方实例；ownerAccountId 是应用所有者，决定本人（user）读的是哪个成员的记忆
 export const apps = pgTable(
   'apps',
   {
@@ -288,6 +288,54 @@ export const appGroupPersonas = pgTable(
   ],
 )
 
+// 会话：某个应用在一个群里（group，频道也算）、和一个人私聊（direct），或不带会话上下文时（none，例如本机的 Claude Code）
+// 的那一串对话，挂着会话摘要。按（应用、群）、（应用、私聊的人）、（应用、所属成员）认一个会话，生命周期事件来时
+// 建立或更新最近活动。删掉会话时它的会话摘要跟着删，在这里听到的联系人事实只断开关联（迁移里的触发器与外键动作）。
+// 应用、联系人或成员删掉时会话跟着删；合并联系人时改指向保留的联系人
+export const conversations = pgTable(
+  'conversations',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    appId: uuid().notNull(),
+    kind: conversationKind().notNull(),
+    // 群聊是那个群，私聊是那个人；不带会话上下文的为空
+    subjectId: uuid(),
+    // 不带会话上下文的会话归哪个成员；群聊、私聊为空
+    ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
+    createdAt: createdAt(),
+    lastActiveAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+  },
+  (t) => [
+    unique().on(t.spaceId, t.id),
+    // 同一个应用里，一个群或一个人只有一个会话，一个成员只有一个不带会话上下文的会话（空值不算重复）
+    uniqueIndex('conversations_subject_idx').on(t.appId, t.subjectId),
+    uniqueIndex('conversations_owner_idx').on(t.appId, t.ownerAccountId),
+    // 对话页按最近活动从新到旧列出
+    index().on(t.spaceId, t.lastActiveAt),
+    // 合并联系人时按联系人找会话
+    index().on(t.subjectId),
+    foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
+      'cascade',
+    ),
+    foreignKey({
+      columns: [t.spaceId, t.subjectId],
+      foreignColumns: [subjects.spaceId, subjects.id],
+    }).onDelete('cascade'),
+    check(
+      'conversations_kind_shape',
+      sql`case when ${t.kind} = 'none'
+        then ${t.subjectId} is null and ${t.ownerAccountId} is not null
+        else ${t.subjectId} is not null and ${t.ownerAccountId} is null end`,
+    ),
+  ],
+)
+
+// 记下的四类（通用、人格、应用、本人）在检查约束里的写法
+const curatedLayers = sql.raw(CURATED_LAYERS.map((l) => `'${l}'`).join(', '))
+
 export const memories = pgTable(
   'memories',
   {
@@ -301,14 +349,19 @@ export const memories = pgTable(
     provenance: provenance().notNull(),
     // global | app:<id> | group:<subject id> | direct:<subject id>
     originScope: text().notNull().default('global'),
-    // 归属：按层只填其中一个，约束见下方 check
+    // 归属到谁：按归属只填其中一个，约束见下方 check。本人（user）填所属成员；
+    // 不带会话上下文的会话摘要（episode）也填所属成员，群聊、私聊的会话摘要不填
     ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
     personaId: uuid(),
     appId: uuid(),
     subjectId: uuid(),
-    // 策展记忆的 URI = domain://path；抽取记忆没有 URI
+    // 会话摘要挂在哪个会话上，联系人的事实是在哪个会话里听到的；记下的四类为空
+    conversationId: uuid(),
+    // 记下的四类的坐标 = domain://path，domain 就是归属（core、user、persona、app）；来自对话的没有坐标
     domain: text(),
     path: text(),
+    // 记下的四类给人看的名字，必填；来自对话的为空。secret 的标题和坐标一样是明文
+    title: text(),
     // secret 级只存密文：content 为空，ciphertext 与被主密钥包装过的数据密钥成对出现
     content: text(),
     ciphertext: bytea(),
@@ -328,15 +381,15 @@ export const memories = pgTable(
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: timestamp({ withTimezone: true }),
-    // 中文全文检索；secret 的 content 为空，不会被索引
+    // 中文全文检索：标题、坐标、触发场景与正文；secret 的 content 为空，不会被索引
     fts: tsvector().generatedAlwaysAs(
-      sql`to_tsvector('kioku_zh'::regconfig, coalesce(domain, '') || ' ' || coalesce(path, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(content, ''))`,
+      sql`to_tsvector('kioku_zh'::regconfig, coalesce(title, '') || ' ' || coalesce(domain, '') || ' ' || coalesce(path, '') || ' ' || coalesce(disclosure, '') || ' ' || coalesce(content, ''))`,
     ),
   },
   (t) => [
     index('memories_fts_idx').using('gin', t.fts),
-    // URI 在空间内唯一，但 owner 与 private 层按成员各存一份：唯一键带上归属成员，
-    // 共享层（归属为空）合并成同一个键。两个成员可以各有一条 preferences://user
+    // 坐标在同一归属里唯一：本人按成员各存一份，唯一键带上所属成员，共享的归属（成员为空）合并成同一个键。
+    // 两个成员可以各有一条 user://preferences/user；共享与本人的开头不同，坐标不会互相撞
     uniqueIndex('memories_uri_live_idx')
       .on(
         t.spaceId,
@@ -347,6 +400,10 @@ export const memories = pgTable(
       .where(sql`${t.deletedAt} is null`),
     index().on(t.spaceId, t.layer),
     index().on(t.subjectId),
+    // 会话详情列出它的摘要与在这里听到的事实；删掉会话时外键动作与触发器也按它找
+    index('memories_conversation_idx')
+      .on(t.conversationId)
+      .where(sql`${t.conversationId} is not null`),
     // 轮换主密钥时按主密钥的标识找加密的行；只建在加密的行上（secret 不多）
     index('memories_key_id_idx')
       .on(t.spaceId, t.keyId)
@@ -363,23 +420,52 @@ export const memories = pgTable(
       columns: [t.spaceId, t.subjectId],
       foreignColumns: [subjects.spaceId, subjects.id],
     }).onDelete('cascade'),
+    // 删掉会话时只把 conversation_id 置空（space_id 不动）：drizzle 写不出带列名的 SET NULL，
+    // 迁移里这条外键的动作是手写的 ON DELETE SET NULL ("conversation_id")。会话摘要由迁移里的触发器先删掉
+    foreignKey({
+      name: 'memories_conversation_fk',
+      columns: [t.spaceId, t.conversationId],
+      foreignColumns: [conversations.spaceId, conversations.id],
+    }).onDelete('set null'),
+    // 记下的四类有坐标与标题，来自对话的两类都没有；坐标的开头就是归属
+    check(
+      'memories_form_by_layer',
+      sql`(${t.form} = 'curated') = (${t.layer} in (${curatedLayers}))`,
+    ),
     check(
       'memories_uri_by_form',
       sql`(${t.form} = 'curated') = (${t.domain} is not null and ${t.path} is not null)`,
     ),
+    check('memories_domain_by_layer', sql`${t.domain} is null or ${t.domain} = ${t.layer}::text`),
+    check('memories_title_by_form', sql`(${t.form} = 'curated') = (${t.title} is not null)`),
     check(
       'memories_secret_encrypted',
       sql`case when ${t.sensitivity} = 'secret'
         then ${t.content} is null and ${t.ciphertext} is not null and ${t.wrappedKey} is not null
         else ${t.content} is not null and ${t.ciphertext} is null and ${t.wrappedKey} is null end`,
     ),
+    // 本人必须有所属成员；会话摘要可以有（不带会话上下文的会话）；别的归属没有
     check(
       'memories_owner_by_layer',
-      sql`(${t.layer} in ('owner', 'private')) = (${t.ownerAccountId} is not null)
+      sql`case ${t.layer} when 'user' then ${t.ownerAccountId} is not null
+          when 'episode' then true
+          else ${t.ownerAccountId} is null end
         and (${t.layer} = 'persona') = (${t.personaId} is not null)
         and (${t.layer} = 'app') = (${t.appId} is not null)
         and (${t.layer} = 'subject') = (${t.subjectId} is not null)`,
     ),
+    check(
+      'memories_conversation_by_layer',
+      sql`${t.conversationId} is null or ${t.layer} in ('subject', 'episode')`,
+    ),
+    // 会话摘要都挂在会话上（会话删掉时摘要由触发器先删，见基线末尾）；联系人的事实可以没有，会话删掉时只断开关联
+    check(
+      'memories_episode_conversation',
+      sql`${t.layer} <> 'episode' or ${t.conversationId} is not null`,
+    ),
+    // 本人不设公开：本人的记忆到不了群聊与陌生人私聊
+    check('memories_user_not_public', sql`${t.layer} <> 'user' or ${t.sensitivity} <> 'public'`),
+    // 未确认来源只能写联系人的事实与会话摘要
     check(
       'memories_untrusted_layers',
       sql`${t.provenance} <> 'untrusted' or ${t.layer} in ('subject', 'episode')`,
@@ -569,7 +655,7 @@ export const credentialEvents = pgTable(
 
 // 记忆正文里引用了哪些凭据标识：列出一条凭据被哪些记忆用着、挡住删除。每次写入按正文重写这条记忆的引用，
 // secret 的不进来（明文标识会透露加密正文写的是什么）。算不算数在查询时与记忆表关联判断
-// （没删除、不是 secret、仍有效、在凭据主人的私人层），所以删除、撤销删除、让出 URI 都不用另外维护
+// （没删除、不是 secret、仍有效、在凭据主人的本人记忆里），所以删除、撤销删除、让出 URI 都不用另外维护
 export const memoryCredentialRefs = pgTable(
   'memory_credential_refs',
   {
@@ -592,7 +678,7 @@ export const memoryCredentialRefs = pgTable(
 
 // 召回事件：会话开始的项目召回、每轮输入的召回、MCP 搜索与 REST 召回各记一条，管理界面里的搜索与调试不记。
 // 明细保留一段时间（实例设置），清理前把次数并入 memory_recall_stats。明细只给事件发生时的应用主人看：
-// 里面有那位主人的提示语和私人层的命中，应用转给别人之后不跟着转。不挂应用的外键：删掉应用之后，
+// 里面有那位主人的提示语和本人记忆的命中，应用转给别人之后不跟着转。不挂应用的外键：删掉应用之后，
 // 它召回过的次数仍算在记忆上，明细到期照常清理
 export const recallEvents = pgTable(
   'recall_events',
@@ -666,10 +752,11 @@ export const memoryRecallStats = pgTable(
   ],
 )
 
-// 会话缓冲：私聊与群聊里一轮轮的对话，只是抽取的输入。攒批抽取完就删，空闲超过一天的也删，
+// 会话缓冲：私聊、群聊与不带会话上下文的会话里一轮轮的对话，只是抽取的输入。攒批抽取完就删，空闲超过一天的也删，
 // 不进召回、不进活动，也没有读取的接口（群聊原文里有别人的话，不该长期留）。
-// 按应用与来源作用域（本群，或与此人的私聊）分批，不按插件给的会话标识：标识重了也不会把私聊混进群里的那一批。
-// 会话上下文按这一轮解析出的对象记下；抽取时按写入这一轮的 Key 重新算权限，Key 吊销或作废就不抽取
+// 按应用与来源作用域（本群，或与此人的私聊）分批，不带会话上下文的按应用与所属成员分批，不按插件给的会话标识：
+// 标识重了也不会把私聊混进群里的那一批。会话上下文按这一轮解析出的对象记下；
+// 抽取时按写入这一轮的 Key 重新算权限，Key 吊销或作废就不抽取
 export const conversationTurns = pgTable(
   'conversation_turns',
   {
@@ -685,10 +772,13 @@ export const conversationTurns = pgTable(
     scope: text().notNull(),
     // 插件给的会话标识，只做记录
     sessionId: text().notNull(),
-    // direct | group | channel
+    // direct | group | channel | none（不带会话上下文，例如本机的 Claude Code）
     chatType: text().notNull(),
     groupSubjectId: uuid(),
-    senderSubjectId: uuid().notNull(),
+    // 私聊、群聊与频道里这一轮的发言人；不带会话上下文的没有
+    senderSubjectId: uuid(),
+    // 不带会话上下文的这一轮归哪个成员（应用所有者）；私聊、群聊与频道为空
+    ownerAccountId: uuid().references(() => accounts.id, { onDelete: 'cascade' }),
     // 这一轮上报的发言人名字（群里可能是群名片），抽取时给模型分清谁说的
     senderName: text(),
     userText: text().notNull(),
@@ -712,8 +802,16 @@ export const conversationTurns = pgTable(
     }).onDelete('cascade'),
     check(
       'conversation_turns_chat_type',
-      sql`${t.chatType} in ('direct', 'group', 'channel')
-        and (${t.chatType} = 'direct') = (${t.groupSubjectId} is null)`,
+      sql`case ${t.chatType}
+          when 'none' then ${t.groupSubjectId} is null and ${t.senderSubjectId} is null
+            and ${t.ownerAccountId} is not null
+          when 'direct' then ${t.groupSubjectId} is null and ${t.senderSubjectId} is not null
+            and ${t.ownerAccountId} is null
+          when 'group' then ${t.groupSubjectId} is not null and ${t.senderSubjectId} is not null
+            and ${t.ownerAccountId} is null
+          when 'channel' then ${t.groupSubjectId} is not null and ${t.senderSubjectId} is not null
+            and ${t.ownerAccountId} is null
+          else false end`,
     ),
   ],
 )
@@ -729,7 +827,9 @@ export const extractionRuns = pgTable(
     appId: uuid().notNull(),
     // 这一批的来源作用域，见 conversation_turns.scope
     scope: text().notNull(),
-    // 这一批涉及的对象（发言人与群），对象页按它找抽取记录
+    // 这一批是哪个会话的：会话详情按它找抽取记录。会话删掉时置空，记录留到保留期
+    conversationId: uuid(),
+    // 这一批涉及的联系人（发言人与群），联系人详情按它找抽取记录
     subjectIds: uuid().array().notNull(),
     // 给模型看了几轮；写入它们的 Key 吊销、作废或写不了的那几轮没给模型看，单独计数，随这一批删掉
     turns: integer().notNull(),
@@ -754,9 +854,18 @@ export const extractionRuns = pgTable(
   (t) => [
     index().on(t.spaceId, t.createdAt),
     index().using('gin', t.subjectIds),
+    index('extraction_runs_conversation_idx')
+      .on(t.conversationId, t.createdAt)
+      .where(sql`${t.conversationId} is not null`),
     foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
       'cascade',
     ),
+    // 和记忆指向会话的外键一样，迁移里手写成 ON DELETE SET NULL ("conversation_id")，只置空这一列
+    foreignKey({
+      name: 'extraction_runs_conversation_fk',
+      columns: [t.spaceId, t.conversationId],
+      foreignColumns: [conversations.spaceId, conversations.id],
+    }).onDelete('set null'),
   ],
 )
 
@@ -895,7 +1004,7 @@ export const subjectBindAttempts = pgTable(
 
 // Dream 的运行记录：一次整理（每天一次或手动）逐个范围记一条，整次没走到范围时（没配模型、预算用完、没有新内容）
 // 记一条范围为空的；同一次整理的几条 run_id 相同。用量计入抽取的同一份月度预算（见 extraction/budget.ts），
-// 保留期的清理和抽取记录一样留着本月的。范围是某个成员的画像层或私人层时记下这个成员，只给他看
+// 保留期的清理和抽取记录一样留着本月的。范围是某个成员的本人记忆时记下这个成员，只给他看
 export const dreamRuns = pgTable(
   'dream_runs',
   {
@@ -934,7 +1043,7 @@ export const dreamRuns = pgTable(
 
 // Dream 的建议：进待审，成员确认后才按建议执行，Dream 自己不写记忆。涉及的记忆与生成时各自的版本按下标对应，
 // 执行时版本对不上就不执行。指纹是「种类 + 涉及的记忆 id 与版本」，在空间里唯一：还在待审的、执行过的、拒绝过的
-// 都不再提；涉及的记忆改过之后版本变了，指纹也跟着变，可以再提。范围是某个成员的画像层或私人层时记下这个成员
+// 都不再提；涉及的记忆改过之后版本变了，指纹也跟着变，可以再提。范围是某个成员的本人记忆时记下这个成员
 export const dreamSuggestions = pgTable(
   'dream_suggestions',
   {
@@ -1004,6 +1113,7 @@ export const RLS_TABLES = [
   'subjects',
   'subject_identities',
   'app_group_personas',
+  'conversations',
   'memories',
   'memory_embeddings',
   'memory_glossary',

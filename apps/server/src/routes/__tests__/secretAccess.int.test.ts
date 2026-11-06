@@ -71,7 +71,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
   const view = async (res: Response, status = 200) => ConsoleMemoryView.parse(await ok(res, status))
   const remember = async (body: Record<string, unknown>, cookie = ws.cookie) =>
     view(await send('POST', '/memories', body, cookie), 201)
-  const secret = (uri = 'home://door', extra: Record<string, unknown> = {}) =>
+  const secret = (uri = 'user://home/door', extra: Record<string, unknown> = {}) =>
     remember({ uri, content: BODY, sensitivity: 'secret', ...extra })
   const reveal = (memoryId: string, cookie = ws.cookie) =>
     send('POST', '/memories/reveal', { memoryId }, cookie)
@@ -113,15 +113,15 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
 
   describe('管理界面', () => {
     it('所有响应默认都不给机密正文，标着有正文要显式查看；不解密就不记访问', async () => {
-      const created = await secret('home://door', { disclosure: '一' })
+      const created = await secret('user://home/door', { disclosure: '一' })
       expect(created).toMatchObject({ content: null, contentHidden: true })
 
-      const got = await view(await send('GET', '/memories?uri=home%3A%2F%2Fdoor'))
+      const got = await view(await send('GET', '/memories?uri=user%3A%2F%2Fhome%2Fdoor'))
       expect(got).toMatchObject({ content: null, contentHidden: true })
 
-      await remember({ uri: 'home://door/child', content: '子节点' })
+      await remember({ uri: 'user://home/door/child', content: '子节点' })
       const children = ConsoleMemoryChildren.parse(
-        await ok(await send('GET', '/memories/children?of=home%3A%2F%2Fdoor')),
+        await ok(await send('GET', '/memories/children?of=user%3A%2F%2Fhome%2Fdoor')),
       )
       expect(children.parent).toMatchObject({ content: null, contentHidden: true })
 
@@ -136,9 +136,9 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       expect(rewritten).toMatchObject({ content: null, contentHidden: true })
 
       const moved = await view(
-        await send('POST', '/memories/move', { from: created.uri, to: 'home://gate' }),
+        await send('POST', '/memories/move', { from: created.uri, to: 'user://home/gate' }),
       )
-      expect(moved).toMatchObject({ content: null, contentHidden: true, uri: 'home://gate' })
+      expect(moved).toMatchObject({ content: null, contentHidden: true, uri: 'user://home/gate' })
 
       const events = (await historyOf(created.id)).events
       const restored = await view(
@@ -150,7 +150,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       )
       expect(restored).toMatchObject({ content: null, contentHidden: true, disclosure: '一' })
 
-      expect((await send('DELETE', '/memories?uri=home%3A%2F%2Fgate')).status).toBe(204)
+      expect((await send('DELETE', '/memories?uri=user%3A%2F%2Fhome%2Fgate')).status).toBe(204)
       const back = await view(await send('POST', '/memories/undelete', { memoryId: created.id }))
       expect(back).toMatchObject({ content: null, contentHidden: true })
 
@@ -219,7 +219,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
     })
 
     it('别的敏感级的正文本来就给，查看不记', async () => {
-      const m = await remember({ uri: 'home://plain', content: '普通的正文' })
+      const m = await remember({ uri: 'user://home/plain', content: '普通的正文' })
       expect(m).toMatchObject({ content: '普通的正文', contentHidden: false })
       expect(await view(await reveal(m.id))).toMatchObject({ content: '普通的正文' })
       expect(await accessOf(m.id)).toEqual([])
@@ -228,7 +228,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
     it('读不到的和不存在一样是 404，不留记录', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
       const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
-      const shared = await secret('kb://door', { layer: 'base' })
+      const shared = await secret('user://kb/door', { layer: 'core' })
       const mine = await secret()
       expect((await reveal(shared.id, editor.cookie)).status).toBe(404)
       expect((await reveal(shared.id, viewer.cookie)).status).toBe(404)
@@ -239,14 +239,14 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       expect((await reveal(mine.id, other.cookie)).status).toBe(404)
       expect((await historyOf(shared.id, ws.cookie)).events.map((e) => e.type)).toEqual(['create'])
       // 删掉、过期的读不到，这里也不给
-      expect((await send('DELETE', '/memories?uri=home%3A%2F%2Fdoor')).status).toBe(204)
+      expect((await send('DELETE', '/memories?uri=user%3A%2F%2Fhome%2Fdoor')).status).toBe(204)
       expect((await reveal(mine.id)).status).toBe(404)
     })
 
     it('访问记录只给读得到这条机密的人：另一个空间 owner 看得到；降级之后 editor 读得到记忆，也看不到之前的访问记录', async () => {
       const other = await addMember(database.db, ws.spaceId, 'bob', 'owner')
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      const m = await secret('kb://door', { layer: 'base' })
+      const m = await secret('core://kb/door')
       await view(await reveal(m.id))
       expect((await historyOf(m.id, other.cookie)).events.map((e) => e.type)).toContain('access')
       expect(
@@ -322,18 +322,23 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       expect(((await edited.json()) as MemoryView).content).toBe(BODY)
       expect(await viaOf(m.id)).toEqual(['rest'])
 
-      const moved = await keyCall('POST', '/memories/move', { from: m.uri, to: 'home://gate' })
+      const moved = await keyCall('POST', '/memories/move', { from: m.uri, to: 'user://home/gate' })
       expect(((await moved.json()) as MemoryView).content).toBe(BODY)
       expect(await viaOf(m.id)).toEqual(['rest', 'rest'])
 
-      expect(await mcp('kioku_update', { uri: 'home://gate', priority: 4 })).toContain(BODY)
-      expect(await mcp('kioku_move', { from: 'home://gate', to: 'home://door' })).toContain(BODY)
+      expect(await mcp('kioku_update', { uri: 'user://home/gate', priority: 4 })).toContain(BODY)
+      expect(
+        await mcp('kioku_move', { from: 'user://home/gate', to: 'user://home/door' }),
+      ).toContain(BODY)
       expect(await viaOf(m.id)).toEqual(['rest', 'rest', 'kioku_update', 'kioku_move'])
 
-      const rewritten = await keyCall('PATCH', '/memories', { uri: 'home://door', content: '新的' })
+      const rewritten = await keyCall('PATCH', '/memories', {
+        uri: 'user://home/door',
+        content: '新的',
+      })
       expect(((await rewritten.json()) as MemoryView).content).toBe('新的')
       const created = await keyCall('POST', '/memories', {
-        uri: 'home://new',
+        uri: 'user://home/new',
         content: '自己写的',
         sensitivity: 'secret',
       })
@@ -344,7 +349,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
     })
 
     it('普通记忆不记；读不到的不记', async () => {
-      const plain = await remember({ uri: 'home://plain', content: '普通的正文' })
+      const plain = await remember({ uri: 'user://home/plain', content: '普通的正文' })
       await keyGet(plain.uri)
       expect(await accessOf(plain.id)).toEqual([])
 
@@ -356,7 +361,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
     })
 
     it('改成 secret 那一次的响应是原来的明文，不算读到机密', async () => {
-      const plain = await remember({ uri: 'home://plain', content: '普通的正文' })
+      const plain = await remember({ uri: 'user://home/plain', content: '普通的正文' })
       const res = await keyCall('PATCH', '/memories', { uri: plain.uri, sensitivity: 'secret' })
       expect(((await res.json()) as MemoryView).content).toBe('普通的正文')
       expect(await accessOf(plain.id)).toEqual([])
@@ -408,16 +413,11 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       expect(error).not.toContain('坏的片段')
     })
 
-    it('改层与移动：解出来的标识、字段名不进报错', async () => {
-      const m = await secret('home://owned', { layer: 'owner' })
+    it('从共享的归属移进本人：解出来的标识、字段名不进报错', async () => {
+      const m = await secret('core://kb/owned')
       await legacy(m, '旧数据 {{cred:missing-cred}}')
-      const relayered = await errorOf(
-        await send('PATCH', '/memories', { uri: m.uri, layer: 'private' }),
-      )
-      expect(relayered).toContain('不存在或不可用')
-      expect(relayered).not.toContain('missing-cred')
       const moved = await errorOf(
-        await send('POST', '/memories/move', { from: m.uri, to: 'home://moved', layer: 'private' }),
+        await send('POST', '/memories/move', { from: m.uri, to: 'user://home/moved' }),
       )
       expect(moved).toContain('不存在或不可用')
       expect(moved).not.toContain('missing-cred')
@@ -430,7 +430,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       expect(credential.status).toBe(201)
       await legacy(m, '旧数据 {{cred:nas#missing-field}}')
       const field = await errorOf(
-        await send('POST', '/memories/move', { from: m.uri, to: 'home://moved', layer: 'private' }),
+        await send('POST', '/memories/move', { from: m.uri, to: 'user://home/moved' }),
       )
       expect(field).toContain('没有此字段')
       expect(field).not.toContain('missing-field')
@@ -439,7 +439,8 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
     })
 
     it('撤销删除：同样不带', async () => {
-      const m = await secret('home://owned', { layer: 'owner' })
+      // 不在本人里的才查：本人里私密及以上的撤销删除不改变谁读得到占位符
+      const m = await secret('core://kb/owned')
       await legacy(m, FRAGMENT)
       expect((await send('DELETE', `/memories?uri=${encodeURIComponent(m.uri)}`)).status).toBe(204)
       const error = await errorOf(await send('POST', '/memories/undelete', { memoryId: m.id }))
@@ -452,7 +453,10 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       const own = await errorOf(await send('PATCH', '/memories', { uri: m.uri, content: FRAGMENT }))
       expect(own).toContain('坏的片段')
       const plain = await errorOf(
-        await send('POST', '/memories', { uri: 'home://plain', content: '{{cred:missing-cred}}' }),
+        await send('POST', '/memories', {
+          uri: 'user://home/plain',
+          content: '{{cred:missing-cred}}',
+        }),
       )
       expect(plain).toContain('missing-cred')
     })
@@ -498,8 +502,8 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       tx.execute(sql`
         insert into memory_events (space_id, memory_id, event_type, actor_account_id, provenance, before, context)
         select ${ws.spaceId}::uuid, ${m.id}::uuid, 'access', ${ws.accountId}::uuid, 'owner',
-          jsonb_build_object('layer', 'private', 'sensitivity', 'secret', 'originScope', 'global',
-            'ownerAccountId', ${ws.accountId}::text, 'domain', 'home', 'path', 'door'),
+          jsonb_build_object('layer', 'user', 'sensitivity', 'secret', 'originScope', 'global',
+            'ownerAccountId', ${ws.accountId}::text, 'domain', 'user', 'path', 'home/door'),
           jsonb_build_object('via', 'rest')
         from generate_series(1, 600)`),
     )

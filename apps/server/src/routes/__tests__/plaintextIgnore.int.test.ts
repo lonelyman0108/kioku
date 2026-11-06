@@ -105,10 +105,10 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     ok<MemoryHistory>(await send('GET', `/memories/history?id=${id}`))
 
   it('忽略之后列表筛选、概览与待处理总数都不再算；能单独列出忽略掉的；记忆本身不变', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
-    await remember({ uri: 'notes://api', content: 'token = abc123' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
+    await remember({ uri: 'user://notes/api', content: 'token = abc123' })
     expect(await suspects()).toEqual({
-      list: ['notes://api', 'notes://wifi'],
+      list: ['user://notes/api', 'user://notes/wifi'],
       overview: 2,
       counts: 2,
     })
@@ -117,12 +117,12 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     expect(ignored).toMatchObject({ plaintextIgnored: true, version: m.version })
     expect(ignored.updatedAt).toBe(m.updatedAt)
     expect(ignored.content).toBe(m.content)
-    expect(await suspects()).toEqual({ list: ['notes://api'], overview: 1, counts: 1 })
-    expect(await listed('ignored')).toEqual(['notes://wifi'])
-    expect(await listed('false')).toEqual(['notes://wifi'])
+    expect(await suspects()).toEqual({ list: ['user://notes/api'], overview: 1, counts: 1 })
+    expect(await listed('ignored')).toEqual(['user://notes/wifi'])
+    expect(await listed('false')).toEqual(['user://notes/wifi'])
     // 读的时候也知道被忽略了：界面按它显示「撤销忽略」
     const read = ConsoleMemoryView.parse(
-      await ok(await send('GET', '/memories?uri=notes%3A%2F%2Fwifi')),
+      await ok(await send('GET', '/memories?uri=user%3A%2F%2Fnotes%2Fwifi')),
     )
     expect(read.plaintextIgnored).toBe(true)
     // 向量任务按 xmin 判断记忆被改过没有：这次写入也要排一次，正文没变它会直接跳过
@@ -130,7 +130,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
   })
 
   it('历史里看得到是谁忽略、谁撤销的；进变更记录；快照里没有正文和哈希；不是一个能恢复的版本', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     await ok(await ignore(m))
     await ok(await unignore(m))
     const history = await historyOf(m.id)
@@ -169,7 +169,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
   })
 
   it('撤销之后提示回来；连点两次只留一条事件；没被忽略时撤销什么都不写', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     await ok(await unignore(m))
     await ok(await ignore(m))
     await ok(await ignore(m))
@@ -179,7 +179,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     ])
     const back = ConsoleMemoryView.parse(await ok(await unignore(m)))
     expect(back.plaintextIgnored).toBe(false)
-    expect((await suspects()).list).toEqual(['notes://wifi'])
+    expect((await suspects()).list).toEqual(['user://notes/wifi'])
   })
 
   describe('正文改了提示自动回来', () => {
@@ -187,7 +187,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     const SECOND = '访客网络密码：guest-5678'
 
     it('修改', async () => {
-      const m = await remember({ uri: 'notes://wifi', content: FIRST })
+      const m = await remember({ uri: 'user://notes/wifi', content: FIRST })
       await ok(await ignore(m))
       const edited = await edit({ uri: m.uri, content: SECOND })
       expect(edited.plaintextIgnored).toBe(false)
@@ -195,14 +195,14 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     })
 
     it('只改别的字段不算：提示不回来', async () => {
-      const m = await remember({ uri: 'notes://wifi', content: FIRST })
+      const m = await remember({ uri: 'user://notes/wifi', content: FIRST })
       await ok(await ignore(m))
       expect((await edit({ uri: m.uri, priority: 5 })).plaintextIgnored).toBe(true)
       expect((await suspects()).list).toEqual([])
     })
 
     it('通过 Key 修改', async () => {
-      const m = await remember({ uri: 'notes://wifi', content: FIRST })
+      const m = await remember({ uri: 'user://notes/wifi', content: FIRST })
       await ok(await ignore(m))
       const key = await ws.issueKey((await ws.createApp('agent')).id)
       const res = await app.request(
@@ -214,7 +214,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     })
 
     it('恢复旧版本：恢复成别的正文时回来；再恢复成忽略时的那段正文也要重新忽略，哈希已经清掉了', async () => {
-      const m = await remember({ uri: 'notes://wifi', content: SECOND })
+      const m = await remember({ uri: 'user://notes/wifi', content: SECOND })
       const edited = await edit({ uri: m.uri, content: FIRST })
       await ok(await ignore(edited))
       expect((await suspects()).list).toEqual([])
@@ -248,7 +248,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     })
 
     it('导入同步', async () => {
-      const m = await remember({ uri: 'notes://wifi', content: FIRST })
+      const m = await remember({ uri: 'user://notes/wifi', content: FIRST })
       await ok(await ignore(m))
       const result = await applySync(
         { db: database.db, spaceId: ws.spaceId, accountId: ws.accountId, masterKey },
@@ -257,6 +257,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
             {
               source: 'core://wifi',
               uri: m.uri,
+              title: 'wifi',
               state: 'update',
               changes: ['content'],
               request: {
@@ -286,7 +287,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
             .where(eq(memories.id, id)),
         )
       )[0]!.hash
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     await ok(await ignore(m))
     expect(await hashOf(m.id)).toMatch(/^[0-9a-f]{64}$/)
 
@@ -372,7 +373,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
   })
 
   it('判断只看比较：哈希和现在的正文对不上就不算忽略，别的路径没清掉哈希也不会判错', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     await ok(await ignore(m))
     // 不经过服务改正文，哈希留着：回滚到旧版本之后的写入就是这样
     await inSpace((tx) =>
@@ -381,13 +382,13 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     expect((await suspects()).list).toEqual([m.uri])
     expect(await listed('ignored')).toEqual([])
     const read = ConsoleMemoryView.parse(
-      await ok(await send('GET', '/memories?uri=notes%3A%2F%2Fwifi')),
+      await ok(await send('GET', '/memories?uri=user%3A%2F%2Fnotes%2Fwifi')),
     )
     expect(read.plaintextIgnored).toBe(false)
   })
 
   it('改成 secret 时清掉哈希（密文的哈希不留在明文列里），之后不算；降级回来提示也回来', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     await ok(await ignore(m))
     const raised = await edit({ uri: m.uri, sensitivity: 'secret' })
     const [row] = await inSpace((tx) => tx.select().from(memories).where(eq(memories.id, m.id)))
@@ -403,15 +404,14 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
   it('写权限和改这条记忆一样：viewer 不行，读不到的和不存在一样；看过之后被改过的 409；没有疑似明文的不用忽略', async () => {
     const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    const shared = await remember({ uri: 'kb://api', content: 'token = abc123', layer: 'base' })
-    const mine = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const shared = await remember({ uri: 'core://kb/api', content: 'token = abc123' })
+    const mine = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     const secret = await remember({
-      uri: 'kb://vault',
+      uri: 'core://kb/vault',
       content: '密码：hunter2',
-      layer: 'base',
       sensitivity: 'secret',
     })
-    const plain = await remember({ uri: 'notes://plain', content: '普通的一段话' })
+    const plain = await remember({ uri: 'user://notes/plain', content: '普通的一段话' })
 
     expect((await ignore(shared, viewer.cookie)).status).toBe(403)
     expect((await unignore(shared, viewer.cookie)).status).toBe(403)
@@ -440,7 +440,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
 
   it('数据库与 JS 算的哈希一样：中文、emoji、全角空格都对得上', async () => {
     const content = '密码：　p@ss😀word 中文 \t\n第二行 "引号" \\ 反斜杠'
-    const m = await remember({ uri: 'notes://mixed', content })
+    const m = await remember({ uri: 'user://notes/mixed', content })
     await ok(await ignore(m))
     expect(await listed('ignored')).toEqual([m.uri])
     const read = ConsoleMemoryView.parse(
@@ -460,7 +460,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
   })
 
   it('等锁期间正文被改了：不替新的正文做决定，返回 409，新的明文照常提示', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
     let pending: Promise<Response> | undefined
     try {
@@ -489,7 +489,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
   })
 
   it('接入方的响应不带这两个字段', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
     await ok(await ignore(m))
     const key = await ws.issueKey((await ws.createApp('agent')).id, FULL_SCOPES)
     const res = await app.request(`/v1/memories?uri=${encodeURIComponent(m.uri)}`, {

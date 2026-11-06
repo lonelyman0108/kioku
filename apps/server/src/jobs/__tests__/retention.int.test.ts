@@ -40,7 +40,12 @@ import {
   subjects,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { endPause, markRestored, purgeExpired, RETENTION_BATCH, retentionJob } from '../retention'
 
@@ -117,6 +122,8 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     ok<MemoryView>(await send('POST', '/memories', body, cookie, spaceId), 201)
   const updateMemory = async (body: object, cookie = ws.cookie) =>
     ok<MemoryView>(await send('PATCH', '/memories', body, cookie))
+  const moveMemory = async (from: string, to: string, cookie = ws.cookie) =>
+    ok<MemoryView>(await send('POST', '/memories/move', { from, to }, cookie))
   const deleteMemory = async (uri: string, cookie = ws.cookie, spaceId = ws.spaceId) =>
     ok(
       await send('DELETE', `/memories?uri=${encodeURIComponent(uri)}`, undefined, cookie, spaceId),
@@ -159,19 +166,22 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       201,
     )
     const old = await createMemory({
-      uri: 'notes://old',
+      uri: 'user://notes/old',
       content: 'NAS 的密码见 {{cred:nas#password}}',
       glossary: ['旧笔记'],
     })
-    await updateMemory({ uri: 'notes://old', content: 'NAS 在书房，密码见 {{cred:nas#password}}' })
+    await updateMemory({
+      uri: 'user://notes/old',
+      content: 'NAS 在书房，密码见 {{cred:nas#password}}',
+    })
     const recent = await createMemory({
-      uri: 'notes://recent',
+      uri: 'user://notes/recent',
       content: '最近才删的，密码见 {{cred:nas#password}}',
       glossary: ['新笔记'],
     })
-    const live = await createMemory({ uri: 'notes://live', content: '还在用的' })
-    await deleteMemory('notes://old')
-    await deleteMemory('notes://recent')
+    const live = await createMemory({ uri: 'user://notes/live', content: '还在用的' })
+    await deleteMemory('user://notes/old')
+    await deleteMemory('user://notes/recent')
     await deletedDaysAgo(old.id, 31)
     await deletedDaysAgo(recent.id, 29)
     // 向量、召回明细与累计统计直接写进表里
@@ -258,20 +268,23 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       content,
       validTo,
     })
+    const conversationId = await inSpace((tx) => summaryConversation(tx, ws.spaceId))
     const summary = (content: string, expiresAt: Date) => ({
       ...extracted,
       layer: 'episode' as const,
+      conversationId,
       content,
       expiresAt,
     })
     const curated = (path: string, extra: { validTo: Date; deletedAt?: Date }) => ({
       spaceId: ws.spaceId,
       form: 'curated' as const,
-      layer: 'base' as const,
+      layer: 'core' as const,
       sensitivity: 'internal' as const,
       provenance: 'owner' as const,
-      domain: 'notes',
-      path,
+      domain: 'core',
+      path: `notes/${path}`,
+      title: path,
       content: `${path} 的正文`,
       ...extra,
     })
@@ -311,10 +324,10 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         i.released,
         i.deletedAt,
       ])
-    const released = rows.find((r) => r.path === 'released')!
+    const released = rows.find((r) => r.path === 'notes/released')!
     expect(await expiredUris()).toEqual([
-      ['notes://expired', false, null],
-      ['notes://released', true, released.deletedAt!.toISOString()],
+      ['core://notes/expired', false, null],
+      ['core://notes/released', true, released.deletedAt!.toISOString()],
     ])
 
     const { counts } = await purge()
@@ -324,7 +337,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       supersededFacts: 2,
       expiredSummaries: 1,
     })
-    expect(await expiredUris()).toEqual([['notes://expired', false, null]])
+    expect(await expiredUris()).toEqual([['core://notes/expired', false, null]])
     const left = await inSpace((tx) =>
       tx.select({ content: memories.content }).from(memories).orderBy(asc(memories.content)),
     )
@@ -343,7 +356,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
 
   it('记忆硬删除时导入事件留下当作去重记录：memory_id 置空，快照只剩 URI', async () => {
     const imported = await createMemory({
-      uri: 'notes://imported',
+      uri: 'user://notes/imported',
       content: '从 Lore 导进来的正文',
       disclosure: '想起 Lore 时',
       glossary: ['导入'],
@@ -355,8 +368,8 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         .set({ eventType: 'import', context: { source: 'lore', loreNodeUuid: 'node-1' } })
         .where(eq(memoryEvents.memoryId, imported.id)),
     )
-    await updateMemory({ uri: 'notes://imported', content: '在 Kioku 里改过' })
-    await deleteMemory('notes://imported')
+    await updateMemory({ uri: 'user://notes/imported', content: '在 Kioku 里改过' })
+    await deleteMemory('user://notes/imported')
     await deletedDaysAgo(imported.id, 31)
 
     expect((await purge()).counts).toEqual({ ...ZERO, deletedMemories: 1 })
@@ -366,7 +379,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         memoryId: null,
         eventType: 'import',
         before: null,
-        after: { domain: 'notes', path: 'imported' },
+        after: { domain: 'user', path: 'notes/imported' },
         context: { source: 'lore', loreNodeUuid: 'node-1' },
       }),
     ])
@@ -375,8 +388,14 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   })
 
   it('只有 Lore 的导入事件留作去重记录：按空间导入的导入事件随记忆硬删除，之前削成 URI 留下的也删掉', async () => {
-    const fromLore = await createMemory({ uri: 'notes://from-lore', content: '从 Lore 导进来的' })
-    const fromFile = await createMemory({ uri: 'notes://from-file', content: '从导出文件导进来的' })
+    const fromLore = await createMemory({
+      uri: 'user://notes/from-lore',
+      content: '从 Lore 导进来的',
+    })
+    const fromFile = await createMemory({
+      uri: 'user://notes/from-file',
+      content: '从导出文件导进来的',
+    })
     const moved = { source: 'space-export', exportedAt: '2026-10-01T00:00:00.000Z' }
     await inSpace(async (tx) => {
       await tx
@@ -394,12 +413,12 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         eventType: 'import',
         provenance: 'system',
         before: null,
-        after: { domain: 'notes', path: 'long-gone' },
+        after: { domain: 'user', path: 'notes/long-gone' },
         context: { ...moved, previousVersions: 2 },
       })
     })
-    await deleteMemory('notes://from-lore')
-    await deleteMemory('notes://from-file')
+    await deleteMemory('user://notes/from-lore')
+    await deleteMemory('user://notes/from-file')
     await deletedDaysAgo(fromLore.id, 31)
     await deletedDaysAgo(fromFile.id, 31)
 
@@ -409,64 +428,60 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         memoryId: null,
         eventType: 'import',
         before: null,
-        after: { domain: 'notes', path: 'from-lore' },
+        after: { domain: 'user', path: 'notes/from-lore' },
         context: { source: 'lore', loreNodeUuid: 'node-lore' },
       }),
     ])
     expect((await purge()).counts).toEqual(ZERO)
   })
 
-  it('删账号留下的快照：记忆整行不在的事件删掉、导入事件削成 URI；已删账号个人层的快照抹掉正文，别人看到的历史不变', async () => {
+  it('删账号留下的快照：记忆整行不在的事件删掉、导入事件削成 URI；已删账号本人时的快照抹掉正文，别人看到的历史不变', async () => {
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    // 只在 bob 的私人层：删账号时数据库连带删掉
+    // 只在 bob 的本人：删账号时数据库连带删掉
     const diary = await createMemory(
       {
-        uri: 'notes://diary',
+        uri: 'user://notes/diary',
         content: '鲍勃的日记',
         disclosure: '写日记时',
         glossary: ['日记'],
       },
       bob.cookie,
     )
-    await updateMemory({ uri: 'notes://diary', content: '鲍勃的日记，第二天' }, bob.cookie)
+    await updateMemory({ uri: 'user://notes/diary', content: '鲍勃的日记，第二天' }, bob.cookie)
     await inSpace((tx) =>
       tx.insert(memoryEvents).values({
         spaceId: ws.spaceId,
         memoryId: diary.id,
         eventType: 'import',
         provenance: 'system',
-        after: { domain: 'notes', path: 'diary', content: '鲍勃的日记（导入）' },
+        after: { domain: 'user', path: 'notes/diary', content: '鲍勃的日记（导入）' },
         context: { source: 'lore', loreNodeUuid: 'node-diary' },
       }),
     )
-    // 在 bob 的私人层写过草稿，之后改成了共享的基础层：记忆留着，私人层时的快照里有草稿
+    // 在 bob 的本人里写过草稿，改好之后移进了共享的通用：记忆留着，本人时的快照里有草稿
     const draft = await createMemory(
-      { uri: 'notes://draft', content: '鲍勃私下的草稿', disclosure: '草稿' },
+      { uri: 'user://notes/draft', content: '鲍勃私下的草稿', disclosure: '草稿' },
       bob.cookie,
     )
     await updateMemory(
-      { uri: 'notes://draft', content: '公开的版本', layer: 'base', sensitivity: 'internal' },
+      { uri: 'user://notes/draft', content: '公开的版本', sensitivity: 'internal' },
       bob.cookie,
     )
-    await updateMemory({ uri: 'notes://draft', content: '公开的版本，alice 改过' })
-    // alice 的共享记忆被 bob 拿进私人层又放回来：alice 看得到一条「离开」
+    await moveMemory('user://notes/draft', 'core://notes/draft', bob.cookie)
+    await updateMemory({ uri: 'core://notes/draft', content: '公开的版本，alice 改过' })
+    // alice 的共享记忆被 bob 拿进本人、改过又放回来：alice 看得到一条「离开」
     const shared = await createMemory({
-      uri: 'notes://shared',
+      uri: 'core://notes/shared',
       content: '共享的笔记',
-      layer: 'base',
       sensitivity: 'internal',
     })
-    await updateMemory(
-      { uri: 'notes://shared', layer: 'private', content: '在鲍勃那里改过的' },
-      bob.cookie,
-    )
-    await updateMemory(
-      { uri: 'notes://shared', layer: 'base', sensitivity: 'internal', content: '放回来的版本' },
-      bob.cookie,
-    )
-    // 还在的账号的私人层历史不动
-    const mine = await createMemory({ uri: 'notes://mine', content: 'alice 的私事' })
-    await updateMemory({ uri: 'notes://mine', content: 'alice 的私事，改过' })
+    await moveMemory('core://notes/shared', 'user://notes/shared', bob.cookie)
+    await updateMemory({ uri: 'user://notes/shared', content: '在鲍勃那里改过的' }, bob.cookie)
+    await updateMemory({ uri: 'user://notes/shared', content: '放回来的版本' }, bob.cookie)
+    await moveMemory('user://notes/shared', 'core://notes/shared', bob.cookie)
+    // 还在的账号的本人历史不动
+    const mine = await createMemory({ uri: 'user://notes/mine', content: 'alice 的私事' })
+    await updateMemory({ uri: 'user://notes/mine', content: 'alice 的私事，改过' })
 
     await database.db.delete(accounts).where(eq(accounts.id, bob.accountId))
     expect(await memoryIds()).not.toContain(diary.id)
@@ -478,7 +493,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     }
     expect(before.shared.events.map((e) => [e.type, e.left])).toEqual([
       ['create', false],
-      ['update', true],
+      ['move', true],
     ])
     expect(before.mine.events.map((e) => e.after?.content)).toEqual([
       'alice 的私事',
@@ -486,8 +501,9 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     ])
 
     const { counts } = await purge()
-    // 日记的新建与修改两条删掉、导入的那条削掉；草稿的两条与共享笔记的两条抹掉正文
-    expect(counts).toEqual({ ...ZERO, orphanEvents: 2, scrubbedSnapshots: 5 })
+    // 日记的新建与修改两条删掉、导入的那条削掉；草稿在本人时的三条（新建、修改、移出）与共享笔记在本人时的四条
+    // （移进、两次修改、移出）抹掉正文
+    expect(counts).toEqual({ ...ZERO, orphanEvents: 2, scrubbedSnapshots: 8 })
     const rows = await inSpace((tx) => tx.select().from(memoryEvents))
     const text = JSON.stringify(rows)
     for (const secret of ['鲍勃的日记', '鲍勃私下的草稿', '在鲍勃那里改过的', '写日记时', '日记']) {
@@ -496,7 +512,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(rows.filter((r) => r.memoryId === null)).toEqual([
       expect.objectContaining({
         eventType: 'import',
-        after: { domain: 'notes', path: 'diary' },
+        after: { domain: 'user', path: 'notes/diary' },
         context: { source: 'lore', loreNodeUuid: 'node-diary' },
       }),
     ])
@@ -568,14 +584,18 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
 
   it('读到机密正文的访问事件和凭据的访问事件一样按时间清；别的事件跟着记忆走，到了也留着', async () => {
     const now = new Date('2026-03-10T12:00:00Z')
-    const m = await createMemory({ uri: 'home://door', content: '门禁', sensitivity: 'secret' })
+    const m = await createMemory({
+      uri: 'user://home/door',
+      content: '门禁',
+      sensitivity: 'secret',
+    })
     const event = (type: string, createdAt: string) => ({
       spaceId: ws.spaceId,
       memoryId: m.id,
       eventType: type,
       actorAccountId: ws.accountId,
       provenance: 'owner' as const,
-      before: { layer: 'private', sensitivity: 'secret', ownerAccountId: ws.accountId },
+      before: { layer: 'user', sensitivity: 'secret', ownerAccountId: ws.accountId },
       context: { via: 'console' },
       createdAt: new Date(createdAt),
     })
@@ -610,7 +630,11 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   })
 
   it('记忆硬删除时访问事件和别的事件一起删', async () => {
-    const m = await createMemory({ uri: 'home://door', content: '门禁', sensitivity: 'secret' })
+    const m = await createMemory({
+      uri: 'user://home/door',
+      content: '门禁',
+      sensitivity: 'secret',
+    })
     await inSpace((tx) =>
       tx.insert(memoryEvents).values({
         spaceId: ws.spaceId,
@@ -618,7 +642,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         eventType: 'access',
         actorAccountId: ws.accountId,
         provenance: 'owner',
-        before: { layer: 'private', sensitivity: 'secret', ownerAccountId: ws.accountId },
+        before: { layer: 'user', sensitivity: 'secret', ownerAccountId: ws.accountId },
         context: { via: 'console' },
       }),
     )
@@ -638,13 +662,13 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
 
   it('Dream 的运行记录和抽取记录一样留着本月的；建议过了保留期、并且已经作废的才删，还作数的留着', async () => {
     const now = new Date('2026-03-10T12:00:00Z')
-    const live = await createMemory({ uri: 'core://live', content: '没改过', layer: 'base' })
-    const other = await createMemory({ uri: 'core://other', content: '也没改过', layer: 'base' })
-    const changed = await createMemory({ uri: 'core://changed', content: '改过', layer: 'base' })
+    const live = await createMemory({ uri: 'core://live', content: '没改过' })
+    const other = await createMemory({ uri: 'core://other', content: '也没改过' })
+    const changed = await createMemory({ uri: 'core://changed', content: '改过' })
     await updateMemory({ uri: changed.uri, content: '改过了' })
-    const gone = await createMemory({ uri: 'core://gone', content: '删掉了', layer: 'base' })
+    const gone = await createMemory({ uri: 'core://gone', content: '删掉了' })
     await deleteMemory(gone.uri)
-    const ended = await createMemory({ uri: 'core://ended', content: '过期了', layer: 'base' })
+    const ended = await createMemory({ uri: 'core://ended', content: '过期了' })
     await inSpace((tx) =>
       tx
         .update(memories)
@@ -907,8 +931,8 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   })
 
   it('正被别的事务锁着的记忆（例如正在撤销删除）这次跳过、不等锁，下一次再删', async () => {
-    const busy = await createMemory({ uri: 'notes://busy', content: '正在撤销删除' })
-    const idle = await createMemory({ uri: 'notes://idle', content: '没人碰' })
+    const busy = await createMemory({ uri: 'user://notes/busy', content: '正在撤销删除' })
+    const idle = await createMemory({ uri: 'user://notes/idle', content: '没人碰' })
     for (const m of [busy, idle]) {
       await deleteMemory(m.uri)
       await deletedDaysAgo(m.id, 40)
@@ -927,10 +951,18 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     const [other] = await database.db.insert(spaces).values({ name: '别人家' }).returning()
     const dave = await addMember(database.db, other!.id, 'dave', 'owner')
     const plant = async (cookie: string, spaceId: string) => {
-      const old = await createMemory({ uri: 'notes://old', content: '早就删了' }, cookie, spaceId)
-      const recent = await createMemory({ uri: 'notes://recent', content: '刚删' }, cookie, spaceId)
-      await deleteMemory('notes://old', cookie, spaceId)
-      await deleteMemory('notes://recent', cookie, spaceId)
+      const old = await createMemory(
+        { uri: 'user://notes/old', content: '早就删了' },
+        cookie,
+        spaceId,
+      )
+      const recent = await createMemory(
+        { uri: 'user://notes/recent', content: '刚删' },
+        cookie,
+        spaceId,
+      )
+      await deleteMemory('user://notes/old', cookie, spaceId)
+      await deleteMemory('user://notes/recent', cookie, spaceId)
       await deletedDaysAgo(old.id, 40, spaceId)
       await deletedDaysAgo(recent.id, 10, spaceId)
       return recent.id
@@ -947,10 +979,12 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   it('超过一批的分几批删完', async () => {
     const total = RETENTION_BATCH + 20
     await inSpace(async (tx) => {
+      const conversationId = await summaryConversation(tx, ws.spaceId)
       await tx.execute(sql`
-        insert into memories (space_id, form, layer, sensitivity, provenance, content, deleted_at)
+        insert into memories (space_id, form, layer, sensitivity, provenance, conversation_id, content, deleted_at)
         select ${ws.spaceId}::uuid, 'extracted'::memory_form, 'episode'::memory_layer,
-          'public'::sensitivity, 'untrusted'::provenance, '摘要 ' || g, ${ago(40).toISOString()}::timestamptz
+          'public'::sensitivity, 'untrusted'::provenance, ${conversationId}::uuid, '摘要 ' || g,
+          ${ago(40).toISOString()}::timestamptz
         from generate_series(1, ${total}::int) g`)
       await tx.execute(sql`
         insert into memory_events (space_id, memory_id, event_type, provenance, after)
@@ -1003,7 +1037,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     }
     expect(await view()).toEqual({ days: 30, pause: null, status: EMPTY_STATUS })
 
-    await plant('notes://first')
+    await plant('user://notes/first')
     await database.db.execute(sql`
       create or replace function retention_test_fail() returns trigger language plpgsql
       as $$ begin raise exception '测试里故意出的错'; end $$`)
@@ -1051,7 +1085,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     })
 
     // 今天做完了，同一天不再做；第二天照常
-    await plant('notes://second')
+    await plant('user://notes/second')
     expect(await retentionJob(database.db, new Date('2030-05-02T23:17:00Z'))).toBeNull()
     expect((await retentionJob(database.db, new Date('2030-05-03T00:17:00Z')))?.counts).toEqual({
       ...ZERO,
@@ -1063,13 +1097,15 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   it('一次清理有时间预算：到了时间不记做完，下一个小时接着删，做完才记成最近一次（只记那一次删的）', async () => {
     await active()
     const total = RETENTION_BATCH + 20
-    await inSpace((tx) =>
-      tx.execute(sql`
-        insert into memories (space_id, form, layer, sensitivity, provenance, content, deleted_at)
+    await inSpace(async (tx) => {
+      const conversationId = await summaryConversation(tx, ws.spaceId)
+      await tx.execute(sql`
+        insert into memories (space_id, form, layer, sensitivity, provenance, conversation_id, content, deleted_at)
         select ${ws.spaceId}::uuid, 'extracted'::memory_form, 'episode'::memory_layer,
-          'public'::sensitivity, 'untrusted'::provenance, '摘要 ' || g, ${ago(40).toISOString()}::timestamptz
-        from generate_series(1, ${total}::int) g`),
-    )
+          'public'::sensitivity, 'untrusted'::provenance, ${conversationId}::uuid, '摘要 ' || g,
+          ${ago(40).toISOString()}::timestamptz
+        from generate_series(1, ${total}::int) g`)
+    })
     const first = new Date('2030-06-01T08:17:00Z')
     // 预算为 0：第一批总会做，之后就不再开新批次
     const partial = { ...ZERO, deletedMemories: RETENTION_BATCH }
@@ -1110,7 +1146,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       key: 'retention',
       value: { days: 'abc', pause: { since: '不是时间', reason: 'restored' }, extra: 1 },
     })
-    const old = await plantDeleted('notes://old', 40)
+    const old = await plantDeleted('user://notes/old', 40)
     expect(await view()).toMatchObject({ days: 30, pause: null })
     expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(old)
@@ -1198,7 +1234,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   })
 
   it('保留期第一次生效时先暂停一个保留期：之前删掉的不删，删账号留下的历史照常每天清；到期之后照常清理', async () => {
-    const old = await plantDeleted('notes://before-upgrade', 400)
+    const old = await plantDeleted('user://notes/before-upgrade', 400)
     // 删账号时数据库连带删掉的记忆留下的历史
     await inSpace((tx) =>
       tx.insert(memoryEvents).values({
@@ -1243,14 +1279,14 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
   it('暂停自然结束后清掉：之后调大天数不会又算出一段暂停，照常清理', async () => {
     // 30 天的暂停十天前就结束了
     await database.db.transaction((tx) => markRestored(tx, ago(40)))
-    const first = await plantDeleted('notes://first', 45)
+    const first = await plantDeleted('user://notes/first', 45)
     expect((await view()).pause).toBeNull()
     expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(first)
     // 清理时把结束了的暂停去掉了
     expect(await storedSettings()).toEqual({})
     expect((await ok<RetentionView>(await put({ days: 60 }))).pause).toBeNull()
-    const second = await plantDeleted('notes://second', 65)
+    const second = await plantDeleted('user://notes/second', 65)
     expect((await retentionJob(database.db, after(new Date(), 1)))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(second)
   })
@@ -1261,7 +1297,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     const saved = await ok<RetentionView>(await put({ days: 60 }))
     expect(saved.pause).toBeNull()
     expect(await storedSettings()).toEqual({ days: 60 })
-    const old = await plantDeleted('notes://old', 65)
+    const old = await plantDeleted('user://notes/old', 65)
     expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(old)
   })
@@ -1341,7 +1377,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect((await put({ days: 30 }, editor.cookie)).status).toBe(403)
     expect((await resume(app, editor.cookie)).status).toBe(403)
 
-    const week = await plantDeleted('notes://week', 8)
+    const week = await plantDeleted('user://notes/week', 8)
     expect(await retentionJob(database.db)).toMatchObject({ paused: true, counts: ZERO })
     expect(await memoryIds()).toContain(week)
     // 没有后台任务时排不上，如实返回
@@ -1354,7 +1390,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
 
   it('从备份恢复之后暂停到恢复时间加保留天数：暂停中只清删账号留下的历史；调大天数暂停跟着延长；提前开始之后马上能清', async () => {
     const restoredAt = new Date()
-    const kept = await plantDeleted('notes://restored', 40)
+    const kept = await plantDeleted('user://notes/restored', 40)
     // 上一个实例最近一次清理的结果随恢复清掉
     await database.db.insert(settings).values({
       key: 'retention-status',
@@ -1388,7 +1424,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(await memoryIds()).not.toContain(kept)
 
     // 再恢复一次，点「现在开始清理」：暂停清掉、马上排一次清理，当天就能清（保留天数现在是 60）
-    const again = await plantDeleted('notes://again', 70)
+    const again = await plantDeleted('user://notes/again', 70)
     await database.db.transaction((tx) => markRestored(tx, new Date()))
     expect(await retentionJob(database.db)).toMatchObject({ paused: true, counts: ZERO })
     let cleanups = 0

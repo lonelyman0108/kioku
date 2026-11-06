@@ -119,10 +119,9 @@ describe.skipIf(!testDatabaseUrl)('人格继承的覆盖', () => {
     expect(await recallUris('群聊版的设定')).toEqual(['persona://doubao-group/soul'])
   })
 
-  it('多级继承按最近的人格覆盖，人格根节点也按相对路径算', async () => {
+  it('多级继承按最近的人格覆盖', async () => {
     const grandchild = (await ws.createPersona('doubao-night', childId)).id
     const nightApp = (await ws.createApp('night-bot', { defaultPersonaId: grandchild })).id
-    await consoleCreate({ uri: 'persona://doubao', content: '主人格总述', priority: 0 })
     await consoleCreate({ uri: 'persona://doubao/soul', content: '主人格的设定', priority: 0 })
     await consoleCreate({ uri: 'persona://doubao/tone', content: '主人格的口吻', priority: 0 })
     await consoleCreate({
@@ -130,7 +129,6 @@ describe.skipIf(!testDatabaseUrl)('人格继承的覆盖', () => {
       content: '群聊版的设定',
       priority: 0,
     })
-    await consoleCreate({ uri: 'persona://doubao-night', content: '夜间版总述', priority: 0 })
     await consoleCreate({
       uri: 'persona://doubao-night/tone',
       content: '夜间版的口吻',
@@ -138,7 +136,6 @@ describe.skipIf(!testDatabaseUrl)('人格继承的覆盖', () => {
     })
     expect(await bootUris(await ws.issueKey(nightApp))).toEqual([
       'persona://doubao-group/soul',
-      'persona://doubao-night',
       'persona://doubao-night/tone',
     ])
   })

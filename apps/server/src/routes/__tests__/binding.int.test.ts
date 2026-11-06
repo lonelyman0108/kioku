@@ -32,7 +32,12 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import { saveExtractionConfig } from '../../extraction/settings'
 import type { Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  conversationOfScope,
+  openTestDatabase,
+  resetDatabase,
+  testDatabaseUrl,
+} from '../../testing/db'
 import {
   addMember,
   bearer,
@@ -188,13 +193,18 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     originScope: string
     subjectId?: string
   }) =>
-    inSpace((tx) =>
+    inSpace(async (tx) =>
       tx.insert(memories).values({
         spaceId: ws.spaceId,
         form: 'extracted',
         sensitivity: 'public',
         provenance: 'untrusted',
         subjectId: values.subjectId ?? null,
+        // 会话摘要挂在这个作用域的会话上（群里的或和这个人的私聊）
+        conversationId:
+          values.layer === 'episode'
+            ? await conversationOfScope(tx, ws.spaceId, appId, values.originScope)
+            : null,
         expiresAt: values.layer === 'episode' ? new Date(Date.now() + DAY) : null,
         ...values,
       }),
@@ -301,7 +311,14 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(merged.facts.map((f) => [f.content, f.scope.kind, f.scope.id])).toEqual([
       ['住在上海', 'direct', a],
     ])
-    expect(merged.summaries.map((s) => s.content)).toEqual(['私聊里聊了上海'])
+    // 私聊里的会话摘要跟着并过来
+    const [summary] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .select({ originScope: memories.originScope })
+        .from(memories)
+        .where(eq(memories.content, '私聊里聊了上海')),
+    )
+    expect(summary!.originScope).toBe(`direct:${a}`)
     // 缓冲里还没抽取的对话跟过来，按合并后的批次排抽取
     expect(queued).toEqual([{ scope: `direct:${a}`, delay: 600 }])
     // 合并后用哪个平台账号私聊，都读得到私聊里记下的

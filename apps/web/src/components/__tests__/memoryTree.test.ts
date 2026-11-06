@@ -3,17 +3,90 @@ import { describe, expect, it } from 'vitest'
 import {
   ancestorsOf,
   depthOf,
+  entityItems,
   focusAfterSelect,
   guideLines,
-  lastSegment,
+  nodeKeyOf,
+  nodeOfItem,
+  nodeParam,
   parentOf,
   parentRow,
+  parseNodeParam,
+  rootItems,
+  selectable,
   splitUri,
   toTreeItems,
   treeRowPlaces,
   typeaheadMatch,
   type MemoryTreeItem,
 } from '../memoryTree'
+import { CURATED_STACK } from '../strata/strata'
+
+const persona = (id: string, slug: string, name: string, extendsId: string | null = null) => ({
+  id,
+  slug,
+  name,
+  extendsId,
+  description: null,
+})
+
+describe('四个根与人格、应用', () => {
+  it('根的顺序和地层柱一样，键是归属的名字，读之前先放一个加载中', () => {
+    const roots = rootItems(CURATED_STACK)
+    expect(roots.map((r) => [r.uri, r.label, r.kind])).toEqual([
+      ['user', '本人', 'root'],
+      ['app', '应用', 'root'],
+      ['persona', '人格', 'root'],
+      ['core', '通用', 'root'],
+    ])
+    expect(roots.every((r) => !r.loaded && r.children?.[0]?.kind === 'note')).toBe(true)
+  })
+
+  it('人格按继承关系排，被继承的在前，键是坐标开头，继承了谁写在行尾', () => {
+    const items = entityItems('persona', [
+      persona('b', 'doubao', '豆包', 'a'),
+      persona('a', 'default', '默认'),
+    ])
+    expect(items.map((i) => [i.uri, i.label, i.entityId, i.meta])).toEqual([
+      ['persona://default', '默认', 'a', undefined],
+      ['persona://doubao', '豆包', 'b', '继承默认'],
+    ])
+    // 坐标开头是它下面各级的上一级，它自己的上一级是人格的根
+    expect(parentOf('persona://doubao/soul')).toBe('persona://doubao')
+    expect(parentOf('persona://doubao')).toBe('persona')
+    expect(ancestorsOf('persona://doubao/soul')).toEqual(['persona', 'persona://doubao'])
+  })
+
+  it('能选中的是根、人格与应用、记忆；位置和说明行不能', () => {
+    expect(['root', 'entity', 'memory'].every((kind) => selectable({ kind } as never))).toBe(true)
+    expect(selectable({ kind: 'folder' })).toBe(false)
+    expect(selectable({ kind: 'note' })).toBe(false)
+  })
+
+  it('地址里的 node：根写归属，人格与应用写 id，换成目录里的那一行', () => {
+    expect(parseNodeParam('user')).toEqual({ kind: 'root', layer: 'user' })
+    expect(parseNodeParam('persona:p1')).toEqual({ kind: 'persona', id: 'p1' })
+    expect(parseNodeParam('app:a1')).toEqual({ kind: 'app', id: 'a1' })
+    for (const bad of [null, '', 'subject', 'episode', 'nope:1']) {
+      expect(parseNodeParam(bad)).toBeNull()
+    }
+    expect(nodeParam({ kind: 'persona', id: 'p1' })).toBe('persona:p1')
+    expect(nodeParam({ kind: 'root', layer: 'core' })).toBe('core')
+    const personas = [{ id: 'p1', slug: 'doubao' }]
+    expect(nodeKeyOf({ kind: 'persona', id: 'p1' }, personas, [])).toBe('persona://doubao')
+    // 列表还没读到、或者已经删掉了：不知道是哪一行
+    expect(nodeKeyOf({ kind: 'persona', id: 'p1' }, undefined, [])).toBeNull()
+    expect(nodeKeyOf({ kind: 'app', id: 'gone' }, personas, [])).toBeNull()
+    expect(nodeKeyOf({ kind: 'root', layer: 'app' }, undefined, undefined)).toBe('app')
+  })
+
+  it('目录里的一行换回地址里的 node', () => {
+    const [entity] = entityItems('persona', [persona('p1', 'default', '默认')])
+    expect(nodeOfItem(entity!)).toBe('persona:p1')
+    expect(nodeOfItem(rootItems(['core'])[0]!)).toBe('core')
+    expect(nodeOfItem({ kind: 'memory', uri: 'core://agent', layer: 'core' })).toBeNull()
+  })
+})
 
 describe('记忆树', () => {
   it('父级：一层路径的父级是 domain 根，多层取上一级', () => {
@@ -31,10 +104,6 @@ describe('记忆树', () => {
     expect([depthOf('core'), depthOf('core://agent'), depthOf('core://agent/x')]).toEqual([0, 1, 2])
   })
 
-  it('节点名取最后一段', () => {
-    expect(lastSegment('infra://servers/web')).toBe('web')
-  })
-
   it('有下一级的节点放加载占位，展开时再加载；叶子没有 children', () => {
     const items = toTreeItems({
       parent: null,
@@ -44,7 +113,8 @@ describe('记忆树', () => {
           uri: 'core://agent',
           exists: true,
           id: 'a',
-          layer: 'base',
+          title: '工作流约束',
+          layer: 'core',
           sensitivity: 'public',
           priority: 0,
           disclosure: null,
@@ -54,7 +124,8 @@ describe('记忆树', () => {
           uri: 'core://soul',
           exists: true,
           id: 'b',
-          layer: 'base',
+          title: 'soul',
+          layer: 'core',
           sensitivity: 'public',
           priority: 0,
           disclosure: null,
@@ -64,6 +135,7 @@ describe('记忆树', () => {
           uri: 'core://notes',
           exists: false,
           id: null,
+          title: null,
           layer: null,
           sensitivity: null,
           priority: null,
@@ -72,15 +144,17 @@ describe('记忆树', () => {
         },
       ],
     })
+    // 有记忆的写标题，位置写它在坐标里的那一段
     expect(items.map((i) => [i.label, i.loaded, i.children?.length ?? 0, i.count])).toEqual([
-      ['agent', false, 1, 2],
+      ['工作流约束', false, 1, 2],
       ['soul', true, 0, 0],
       ['notes', false, 1, 1],
     ])
+    expect(items.map((i) => i.kind)).toEqual(['memory', 'memory', 'folder'])
     expect(items[2]!.exists).toBe(false)
-    // 层、敏感级与 priority 带到节点上，树里标出来
+    // 归属、敏感级与 priority 带到节点上，树里标出来
     expect([items[0]!.layer, items[0]!.sensitivity, items[0]!.priority]).toEqual([
-      'base',
+      'core',
       'public',
       0,
     ])
@@ -93,10 +167,11 @@ describe('记忆树', () => {
       truncated: true,
       children: [
         {
-          uri: 'bulk://a',
+          uri: 'core://a',
           exists: true,
           id: '00000000-0000-4000-8000-000000000001',
-          layer: 'base',
+          title: 'a',
+          layer: 'core',
           sensitivity: 'public',
           priority: 2,
           disclosure: null,
@@ -124,6 +199,7 @@ describe('目录的引线', () => {
   const node = (uri: string, children?: MemoryTreeItem[]): MemoryTreeItem => ({
     label: uri,
     uri,
+    kind: 'memory',
     exists: true,
     loaded: true,
     ...(children ? { children } : {}),
@@ -186,7 +262,13 @@ describe('目录的引线', () => {
 describe('打字跳转', () => {
   const places = (labels: string[]) =>
     treeRowPlaces(
-      labels.map((label) => ({ label, uri: `u:${label}`, exists: true, loaded: true })),
+      labels.map((label) => ({
+        label,
+        uri: `u:${label}`,
+        kind: 'memory' as const,
+        exists: true,
+        loaded: true,
+      })),
       [],
     )
   const rows = places(['alpha', 'beta', 'atlas', 'Beacon'])
@@ -214,7 +296,16 @@ describe('打字跳转', () => {
 
   it('「加载中」这类说明行不算', () => {
     const list = treeRowPlaces(
-      [{ label: '加载中', uri: 'x#loading', exists: false, loaded: true, disabled: true }],
+      [
+        {
+          label: '加载中',
+          uri: 'x#loading',
+          kind: 'note',
+          exists: false,
+          loaded: true,
+          disabled: true,
+        },
+      ],
       [],
     )
     expect(typeaheadMatch(list, '加', null)).toBeNull()

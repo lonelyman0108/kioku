@@ -15,10 +15,12 @@ import { prepareMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { lastMigration, pendingMigrations, runMigrations } from '../../db/migrate'
 import {
+  conversations,
   dreamMarks,
   dreamRuns,
   dreamSuggestions,
   extractionRuns,
+  memories,
   memoryRecallStats,
   settings,
   spaceMembers,
@@ -53,6 +55,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   let database: Database
   let api: ReturnType<typeof createApp>
   let ws: Workspace
+  let agentId: string
   let key: string
   let original: (typeof settings.$inferSelect)[] = []
   const masterKey = randomBytes(32)
@@ -87,7 +90,8 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   beforeEach(async () => {
     await wipe('2001-01-01T00:00:00.000Z')
     ws = await bootstrap(api)
-    key = await ws.issueKey((await ws.createApp('agent')).id)
+    agentId = (await ws.createApp('agent')).id
+    key = await ws.issueKey(agentId)
   })
 
   const send = (method: string, path: string, body: unknown, headers: Record<string, string>) =>
@@ -104,13 +108,14 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   }
   const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
 
-  // 每张进备份的表都写上数据：成员（有一个关掉了 Dream 整理画像层与私人层）、继承的人格、两个应用与 Key、
-  // 各种记忆（secret、带关键词与凭据引用、改过的、删掉的）、凭据源与托管的凭据、召回记录与命中、群聊里认出的对象、
-  // 按群换人格、召回统计、抽取记录、等确认的绑定、嵌入接口与抽取模型的设置，以及（不进备份的）向量
+  // 每张进备份的表都写上数据：成员（有一个关掉了 Dream 整理本人的记忆）、继承的人格、两个应用与 Key、
+  // 各种记忆（secret、带关键词与凭据引用、改过的、删掉的）、凭据源与托管的凭据、召回记录与命中、群聊里认出的联系人、
+  // 按群换人格、群聊与不带会话上下文的会话（挂着会话摘要与听到的事实）、召回统计、抽取记录、等确认的绑定、
+  // 嵌入接口与抽取模型的设置，以及（不进备份的）向量
   async function seed() {
     const cookie = { cookie: ws.cookie }
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    // bob 关掉了 Dream 整理他的画像层与私人层：成员的设置也要跟着恢复
+    // bob 关掉了 Dream 整理他的本人记忆：成员的设置也要跟着恢复
     expect(
       (
         await send(
@@ -159,20 +164,25 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     const credentialId = ((await credential.json()) as { id: string }).id
 
     await write('POST', {
-      uri: 'home://wifi',
+      uri: 'user://home/wifi',
       content: '无线密码 hunter2',
-      layer: 'private',
       sensitivity: 'secret',
     })
     const nas = await write('POST', {
-      uri: 'home://nas',
+      uri: 'user://home/nas',
+      title: '书房的 NAS',
       content: 'NAS 在书房，密码见 {{cred:nas}}',
+      sensitivity: 'private',
       glossary: ['书房存储'],
     })
-    await write('POST', { uri: 'home://notes', content: '第一行\n第二行 "引号" \\ 反斜杠 😀' })
+    await write('POST', {
+      uri: 'user://home/notes',
+      title: '笔记 "引号" \\ 😀',
+      content: '第一行\n第二行 "引号" \\ 反斜杠 😀',
+    })
     // 忽略过明文提示的：哈希在记忆表上，要跟着恢复
     const dismissed = await write('POST', {
-      uri: 'home://dismissed',
+      uri: 'user://home/dismissed',
       content: 'token = 分词器的说明',
     })
     expect(
@@ -185,10 +195,11 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         )
       ).status,
     ).toBe(200)
-    await write('PATCH', { uri: 'home://notes', content: '改过的笔记\t带制表符' })
-    await write('POST', { uri: 'home://old', content: '要删掉的' })
+    await write('PATCH', { uri: 'user://home/notes', content: '改过的笔记\t带制表符' })
+    await write('POST', { uri: 'user://home/old', content: '要删掉的' })
     expect(
-      (await send('DELETE', '/v1/memories?uri=home%3A%2F%2Fold', undefined, bearer(key))).status,
+      (await send('DELETE', '/v1/memories?uri=user%3A%2F%2Fhome%2Fold', undefined, bearer(key)))
+        .status,
     ).toBe(204)
 
     expect((await send('POST', '/v1/recall', { query: 'NAS 在书房吗' }, bearer(key))).status).toBe(
@@ -268,8 +279,45 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         model: 'm',
         added: 1,
       })
+      // 群里的会话挂着一段会话摘要，在群里听到的事实也记着这个会话；不带会话上下文的会话归成员本人。
+      // 记忆指向会话：写回时会话要排在记忆前面
+      const [talk] = await tx
+        .insert(conversations)
+        .values({ spaceId: ws.spaceId, appId: bot.id, kind: 'group', subjectId: group!.id })
+        .returning({ id: conversations.id })
+      const [local] = await tx
+        .insert(conversations)
+        .values({ spaceId: ws.spaceId, appId: agentId, kind: 'none', ownerAccountId: ws.accountId })
+        .returning({ id: conversations.id })
+      const heard = {
+        spaceId: ws.spaceId,
+        form: 'extracted' as const,
+        provenance: 'untrusted' as const,
+        sensitivity: 'public' as const,
+        originScope: `group:${group!.id}`,
+        conversationId: talk!.id,
+      }
+      await tx.insert(memories).values([
+        {
+          ...heard,
+          layer: 'episode',
+          content: '读书会定了下周的书目',
+          expiresAt: new Date(Date.now() + 30 * 86_400_000),
+        },
+        { ...heard, layer: 'subject', subjectId: person!.id, content: '小明在学日语' },
+        {
+          spaceId: ws.spaceId,
+          form: 'extracted',
+          layer: 'episode',
+          sensitivity: 'private',
+          provenance: 'agent',
+          ownerAccountId: ws.accountId,
+          conversationId: local!.id,
+          content: '讨论了记忆架构改版',
+        },
+      ])
       // Dream 的运行记录、一条拒绝过的建议（指纹要跟着恢复，不然同样的建议会再提）与整理过的标记
-      const scope = `private:${ws.accountId}`
+      const scope = `user:${ws.accountId}`
       await tx.insert(dreamRuns).values({
         spaceId: ws.spaceId,
         runId: randomUUID(),
@@ -346,6 +394,38 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   }
   const restore = (file: Buffer, key: Buffer = masterKey, folder = migrationsFolder) =>
     restoreBackup(database, { migrationsFolder: folder, masterKey: key, file })
+
+  // 模拟更新的版本：迁移目录里多一个迁移。用完由 forget 撤掉它在库里留下的表与迁移记录
+  const latest = readMigrationFiles({ migrationsFolder }).at(-1)!
+  const folders: string[] = []
+  const newer = async (statement: string) => {
+    const folder = await mkdtemp(join(tmpdir(), 'kioku-test-migrations-'))
+    folders.push(folder)
+    await cp(migrationsFolder, folder, { recursive: true })
+    const journalFile = join(folder, 'meta/_journal.json')
+    const journal = JSON.parse(await readFile(journalFile, 'utf8')) as {
+      entries: { idx: number; when: number; tag: string }[]
+    }
+    const last = journal.entries[journal.entries.length - 1]!
+    journal.entries.push({
+      ...last,
+      idx: last.idx + 1,
+      when: latest.folderMillis + 1000,
+      tag: '9999_probe',
+    })
+    await writeFile(journalFile, JSON.stringify(journal))
+    await writeFile(join(folder, '9999_probe.sql'), statement)
+    return folder
+  }
+  const forget = async () => {
+    await database.db.execute(sql`drop table if exists restore_probe`)
+    await database.db.execute(
+      sql`delete from drizzle.__drizzle_migrations where created_at > ${latest.folderMillis}`,
+    )
+  }
+  afterAll(async () => {
+    for (const folder of folders) await rm(folder, { recursive: true, force: true })
+  })
   const backup = async () => {
     const chunks: Buffer[] = []
     const out = new Writable({
@@ -428,7 +508,12 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       .find((c) => c.startsWith('kioku_session='))!
       .split(';')[0]!
     // Key 照常可用，secret 与托管的凭据都解得开
-    const wifi = await send('GET', '/v1/memories?uri=home%3A%2F%2Fwifi', undefined, bearer(key))
+    const wifi = await send(
+      'GET',
+      '/v1/memories?uri=user%3A%2F%2Fhome%2Fwifi',
+      undefined,
+      bearer(key),
+    )
     expect(((await wifi.json()) as MemoryView).content).toBe('无线密码 hunter2')
     const revealed = await send(
       'POST',
@@ -445,10 +530,10 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       { cookie },
     )
     expect(((await dismissed.json()) as MemoryList).items.map((m) => m.uri)).toEqual([
-      'home://dismissed',
+      'user://home/dismissed',
     ])
     // 序列推到了写回的最大值：之后写下的历史接着编号。上面 Key 读 secret 记了一条访问事件，这次修改是下一条
-    await write('PATCH', { uri: 'home://nas', content: '恢复之后改的' })
+    await write('PATCH', { uri: 'user://home/nas', content: '恢复之后改的' })
     const [after] = await inSpace((tx) =>
       tx.execute<{ max: number }>(sql`select max(id)::int as max from memory_events`),
     )
@@ -473,16 +558,14 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   })
 
   // 先写两万条再备份、恢复，CI 的机器上要五秒上下，单独放宽时限
-  it('两万条带 URI 的记忆也在一个事务里写回：不逐行加 URI 互斥检查的咨询锁', async () => {
-    // 写入时每行一把咨询锁，一个事务里放不下这么多，分批写
-    for (let i = 0; i < 20_000; i += 1000) {
-      await inSpace((tx) =>
-        tx.execute(sql`
-          insert into memories (space_id, form, layer, sensitivity, provenance, domain, path, content)
-          select ${ws.spaceId}, 'curated', 'base', 'public', 'owner', 'bulk', 'n' || g, '第 ' || g || ' 条'
-          from generate_series(${i}::int, ${i + 999}::int) g`),
-      )
-    }
+  it('两万条记忆也在一个事务里写回', async () => {
+    await inSpace((tx) =>
+      tx.execute(sql`
+        insert into memories (space_id, form, layer, sensitivity, provenance, domain, path, title, content)
+        select ${ws.spaceId}, 'curated', 'core', 'public', 'owner', 'core', 'bulk/n' || g, 'n' || g,
+          '第 ' || g || ' 条'
+        from generate_series(0, 19999) g`),
+    )
     const { file, summary } = await backup()
     expect(summary.rows.memories).toBe(20_000)
 
@@ -504,21 +587,28 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   }, 30_000)
 
   it('主密钥不对、格式版本或迁移对不上、内容不对时拒绝；写回到一半失败时什么都不留下', async () => {
-    await write('POST', { uri: 'home://wifi', content: '无线密码', sensitivity: 'secret' })
-    await write('POST', { uri: 'home://nas', content: 'NAS 在书房', glossary: ['书房存储'] })
+    await write('POST', { uri: 'user://home/wifi', content: '无线密码', sensitivity: 'secret' })
+    await write('POST', { uri: 'user://home/nas', content: 'NAS 在书房', glossary: ['书房存储'] })
+    // 会话表上有触发器：写回期间停用，失败后要照常开着
+    await inSpace((tx) =>
+      tx.insert(conversations).values({
+        spaceId: ws.spaceId,
+        appId: agentId,
+        kind: 'none',
+        ownerAccountId: ws.accountId,
+      }),
+    )
     const { file } = await backup()
     const lines = readBackup(masterKey, file).plain.toString('utf8').split('\n')
     const header = JSON.parse(lines[0]!) as Record<string, unknown>
     const reseal = (changed: object, rest = lines.slice(1)) =>
       collect(sealBackup(masterKey, parts([JSON.stringify(changed), ...rest].join('\n'))))
-    const local = readMigrationFiles({ migrationsFolder })
     await wipe('2030-01-01T00:00:00.000Z')
 
     await expect(restore(file, randomBytes(32))).rejects.toThrow('另一把主密钥')
     await expect(restore(await reseal({ ...header, version: 2 }))).rejects.toThrow(
       '备份的格式版本是 2',
     )
-    const latest = local[local.length - 1]!
     const migrated = (migrations: { hash: string; at: number }) => reseal({ ...header, migrations })
     await expect(
       restore(await migrated({ hash: 'x', at: latest.folderMillis + 1 })),
@@ -526,64 +616,100 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     await expect(restore(await migrated({ hash: 'x', at: latest.folderMillis }))).rejects.toThrow(
       '备份的迁移与这个版本的对不上',
     )
-    // 较早版本的备份只能恢复到新建的空库：这个库已经迁移到了这个版本
-    const older = local[local.length - 2]!
-    await expect(
-      restore(await migrated({ hash: older.hash, at: older.folderMillis })),
-    ).rejects.toThrow(
-      `这个库已经执行过迁移（到第 ${local.length} 个），备份是在第 ${local.length - 1} 个时做的`,
-    )
+    // 较早版本的备份只能恢复到新建的空库：这个库已经迁移到了更新的版本
+    const count = readMigrationFiles({ migrationsFolder }).length
+    const probe = await newer('CREATE TABLE restore_probe (id int)')
+    try {
+      await runMigrations(database, probe)
+      await expect(restore(file, masterKey, probe)).rejects.toThrow(
+        `这个库已经执行过迁移（到第 ${count + 1} 个），备份是在第 ${count} 个时做的`,
+      )
+    } finally {
+      await forget()
+    }
     // 记录出现在任何段头之前
     await expect(restore(await reseal(header, [lines[2]!, ...lines.slice(1)]))).rejects.toThrow(
       '备份的内容不是预期的格式',
     )
 
-    // 关键词那一段多出一行重复的：前面的账号、记忆都已写下，失败后整个撤销，触发器也照常开着
+    // 关键词那一段多出一行重复的：前面的账号、会话、记忆都已写下，失败后整个撤销，触发器也照常开着
     const at = lines.findIndex((l) => l.startsWith('["memory_glossary"'))
     const duplicated = [...lines.slice(1, at + 2), lines[at + 1]!, ...lines.slice(at + 2)]
     await expect(restore(await reseal(header, duplicated))).rejects.toThrow()
     const [state] = await database.db.execute<{ accounts: number; trigger: string }>(sql`
       select (select count(*) from accounts)::int as accounts,
-        (select tgenabled from pg_trigger where tgname = 'memories_uri_exclusive') as trigger`)
+        (select tgenabled from pg_trigger where tgname = 'conversations_delete_summaries') as trigger`)
     expect(state).toEqual({ accounts: 0, trigger: 'O' })
 
     // 原样的备份照常恢复
     await restore(file)
-    const wifi = await send('GET', '/v1/memories?uri=home%3A%2F%2Fwifi', undefined, bearer(key))
+    const wifi = await send(
+      'GET',
+      '/v1/memories?uri=user%3A%2F%2Fhome%2Fwifi',
+      undefined,
+      bearer(key),
+    )
     expect(((await wifi.json()) as MemoryView).content).toBe('无线密码')
   })
 
-  it('较早的备份：写回之后在同一个事务里执行这个版本新增的迁移；新增的迁移失败时数据一条也不留下', async () => {
-    await write('POST', { uri: 'home://nas', content: 'NAS 在书房' })
+  it('改版之前的库与备份：启动时不迁移、恢复时拒绝，都说清是改版之前的结构，要清空数据库重建后从 Lore 重新导入', async () => {
+    // 改版之前的迁移都早于这个版本的第一个迁移（基线）
+    const old = readMigrationFiles({ migrationsFolder })[0]!.folderMillis - 86_400_000
     const { file } = await backup()
-    const latest = readMigrationFiles({ migrationsFolder }).at(-1)!
-    const folders: string[] = []
-    // 模拟更新的版本：迁移目录里多一个迁移
-    const newer = async (statement: string) => {
-      const folder = await mkdtemp(join(tmpdir(), 'kioku-test-migrations-'))
-      folders.push(folder)
-      await cp(migrationsFolder, folder, { recursive: true })
-      const journalFile = join(folder, 'meta/_journal.json')
-      const journal = JSON.parse(await readFile(journalFile, 'utf8')) as {
-        entries: { idx: number; when: number; tag: string }[]
+    const lines = readBackup(masterKey, file).plain.toString('utf8').split('\n')
+    const header = JSON.parse(lines[0]!) as Record<string, unknown>
+    const before = await collect(
+      sealBackup(
+        masterKey,
+        parts(
+          [
+            JSON.stringify({ ...header, migrations: { hash: 'x', at: old } }),
+            ...lines.slice(1),
+          ].join('\n'),
+        ),
+      ),
+    )
+    await wipe('2030-01-01T00:00:00.000Z')
+    await expect(restore(before)).rejects.toThrow(
+      /^备份来自记忆架构改版之前的版本（.+），这个版本不兼容旧数据，无法恢复.*从 Lore 重新导入/,
+    )
+
+    // 改版之前的库：迁移记录里只有这个版本没有的、更早的迁移。照常迁移的话 drizzle 从基线开始建表，
+    // 在已有的表上报「已存在」，看不出是怎么回事
+    const saved = await database.db.execute<{ hash: string; at: string }>(
+      sql`select hash, created_at::text as at from drizzle.__drizzle_migrations order by id`,
+    )
+    const rewrite = async (rows: { hash: string; at: string }[]) => {
+      await database.db.execute(sql`delete from drizzle.__drizzle_migrations`)
+      for (const r of rows) {
+        await database.db.execute(
+          sql`insert into drizzle.__drizzle_migrations (hash, created_at) values (${r.hash}, ${r.at}::bigint)`,
+        )
       }
-      const last = journal.entries[journal.entries.length - 1]!
-      journal.entries.push({
-        ...last,
-        idx: last.idx + 1,
-        when: latest.folderMillis + 1000,
-        tag: '9999_probe',
-      })
-      await writeFile(journalFile, JSON.stringify(journal))
-      await writeFile(join(folder, '9999_probe.sql'), statement)
-      return folder
     }
-    const forget = async () => {
-      await database.db.execute(sql`drop table if exists restore_probe`)
-      await database.db.execute(
-        sql`delete from drizzle.__drizzle_migrations where created_at > ${latest.folderMillis}`,
+    try {
+      await rewrite([
+        { hash: 'before-1', at: String(old - 1000) },
+        { hash: 'before-2', at: String(old) },
+      ])
+      await expect(runMigrations(database, migrationsFolder)).rejects.toThrow(
+        /^数据库是记忆架构改版之前的结构.*清空数据库重建.*从 Lore 重新导入/,
       )
+      // 库里有这个版本没有、却不早于基线的迁移（更新的版本，或者合并之后改过的迁移文件）：同样不迁移
+      await rewrite([...saved, { hash: 'newer', at: String(latest.folderMillis + 1000) }])
+      await expect(runMigrations(database, migrationsFolder)).rejects.toThrow(
+        '数据库里有这个版本没有的迁移',
+      )
+    } finally {
+      await rewrite([...saved])
     }
+    expect(await pendingMigrations(database.db, migrationsFolder)).toBe(0)
+    await runMigrations(database, migrationsFolder)
+  })
+
+  it('较早的备份：写回之后在同一个事务里执行这个版本新增的迁移；新增的迁移失败时数据一条也不留下', async () => {
+    await write('POST', { uri: 'user://home/nas', content: 'NAS 在书房' })
+    const { file } = await backup()
     try {
       // 新增的迁移读写回的数据：能看出它是在写回之后执行的
       await wipe('2030-01-01T00:00:00.000Z')
@@ -609,7 +735,6 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       expect((await lastMigration(database.db))?.at).toBe(latest.folderMillis)
     } finally {
       await forget()
-      for (const folder of folders) await rm(folder, { recursive: true, force: true })
     }
   })
 })

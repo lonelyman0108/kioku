@@ -58,19 +58,22 @@
 
 改界面时遵守这一节；新旧术语对照与每个词的含义见 `docs/design.md`「界面用语」。
 
-- 样式变量只在两处：`apps/web/src/assets/css/main.css`（纸、墨、层色、纹理色、字体栈，浅色深色各一套，映射到 Nuxt UI 的变量）和 `apps/web/src/theme.ts`（组件 slot 的全局覆盖）；层与敏感级的编码计算集中在 `apps/web/src/components/strata/strata.ts`。页面里不写颜色值和字体名。原因：两套主题要一起换；`tokens.test.ts` 核对这些变量（对比度、圆角归零、色阶、权限格子的明度差等），页面里写死的值它查不到。
-- 颜色表示层，纹理表示敏感级：七个层色的纵向顺序固定（情节在上、基础在下，来自对话的两层用虚线隔开）；公开无纹理、内部圆点、私密斜线、机密实心深色，图案只用 `StrataPatterns.vue` 那一套。原因：两个维度各占一种视觉通道，叠在一起也分得开。
-- 颜色不单独承担信息：色块旁要有文字（层名、状态），或者靠固定的位置表达；敏感级靠纹理，不用告警色。原因：色觉差异的人分不清七个低饱和的层色。
+- 样式变量只在两处：`apps/web/src/assets/css/main.css`（纸、墨、归属色、纹理色、字体栈，浅色深色各一套，映射到 Nuxt UI 的变量）和 `apps/web/src/theme.ts`（组件 slot 的全局覆盖）；归属与敏感级的编码计算集中在 `apps/web/src/components/strata/strata.ts`。页面里不写颜色值和字体名。原因：两套主题要一起换；`tokens.test.ts` 核对这些变量（对比度、圆角归零、色阶、权限格子的明度差等），页面里写死的值它查不到。
+- 颜色表示归属，纹理表示敏感级：六个归属色（`--layer-<归属>`，权限格子的满色另有一组 `--access-<归属>`）的纵向顺序固定，自上而下会话、联系人、本人、应用、人格、通用（`STACK`），越往下越通用；来自对话的会话、联系人两类用虚线和下面记下的四类隔开。公开无纹理、内部圆点、私密斜线、机密实心深色，图案只用 `StrataPatterns.vue` 那一套。原因：两个维度各占一种视觉通道，叠在一起也分得开；目录、地层柱、岩芯与权限范围是同一个顺序，一处学会处处读得懂。
+- 颜色不单独承担信息：色块旁要有文字（归属名、状态），或者靠固定的位置表达（目录里在哪个根下面）；敏感级靠纹理，不用告警色。原因：色觉差异的人分不清六个低饱和的归属色。
 - 砖红（Nuxt UI 的 `error`）是唯一的强调色，只给告警和破坏性操作。原因：红色一多，真正的告警就不显眼了。
 - 零圆角，层次用线不用阴影：结构线是 1px 墨线，次级线浅灰；`main.css` 把 `--ui-radius` 设为 0、清空了整组 `--shadow-*`。原因：维护者选定的「地层」方向靠线条与色带分层次，圆角和阴影会打散它。
 - 只用系统字体栈，不打包字体、不向第三方请求字体；logo（`KiokuMark.vue`，`public/` 下的图标同款）只取 Shippori Mincho 的字形轮廓写成路径，来源与许可证登记在 `NOTICE`。原因：自托管服务不向第三方发请求，中文字体文件也太大。
-- 正文不小于 14px，标签不小于 12px；URI、访问密钥前缀、代码用等宽字，目录、列表与详情里的 URI 经 `UriPath.vue` 显示（上一级路径退一级灰度）。原因：更小的中文看不清；URI 是地址，要能逐字核对。
+- 正文不小于 14px，标签不小于 12px；坐标、目录里的位置、访问密钥前缀、代码用等宽字。原因：更小的中文看不清；坐标是地址，要能逐字核对。
+- 记忆给人看的名字是标题：目录、列表、搜索、变更记录与启动加载预览都写标题（`MemoryName.vue`，`MemoryRow` 的 `title`），坐标放在悬停里；坐标只在记忆详情底部（`CoordinateLine.vue`，可以复制）、测试台与召回调试里显示，经 `UriPath.vue`（上一级退一级灰度）。人格、应用与四个根的详情底部写坐标的开头。原因：坐标是给 Agent 读写用的，弱化它在界面上的分量；标题才是人认得出的名字。
+- 记忆页的目录第一级是本人、应用、人格、通用四个根（`CURATED_STACK`，和地层柱同一个顺序），人格与应用的根下面先列出各个人格、应用，再往下是坐标的各级；选中根、人格、应用时右边是它的设置（地址参数 `node`），选中记忆时是 `uri`。会话与联系人在对话页，不进目录。新建与移动只选归属（人格、应用再选是哪个）、位置与标识，坐标随之拼出、可以折叠（`coordinates.ts`），不单独选归属以外的东西；本人不给公开（契约的 `sensitivityAllowed`）。原因：坐标的开头就是归属，目录、地层柱与坐标是同一个结构。
 - 文案不把代码逻辑翻成大白话：标题、标签、按钮、空状态用名词短语或短词（「暂无访问密钥」，不是「还没有访问密钥。」），完整的句子才加句号；默认一句话，只讲结果和下一步，原理、规则和例外放进提示层（`Hint.vue`）或展开，信息不能丢。原因：维护者定的文案方向，界面上的字要短，细节按需展开。
-- 不把权限逻辑讲一遍：不写「读得到的」「只给…看」，范围说明全局只说一次、放在提示层；不用第二人称，确实要指操作者时写「当前账号」。原因：同一条权限规则在各处换着说法讲，几处的说法会对不上。
+- 不把权限逻辑讲一遍：不写「读得到的」「只给…看」，范围说明全局只说一次、放在提示层：每类归属的适用范围只写在 `strata.ts` 的 `layerHints`，出现在地层柱的说明、色块的悬停与根的标题提示里；不用第二人称，确实要指操作者时写「当前账号」。原因：同一条权限规则在各处换着说法讲，几处的说法会对不上。
 - 不可逆操作和安全提示不删后果，只把句式写规范：结果、影响、动作。原因：省掉后果的提示等于没有提示。
-- 口语换成产品用语（疑似、从未、无法删除、不可用、失败、占用、超出、获取、查看），英文说法换成中文（访问密钥、分区、整理、群聊机器人、令牌；URI、JSON、MCP、Agent、产品名、模型用量的 token 保留），量词用「个」「条」，访问密钥不用「把」；术语按「界面用语」，英文字段名只留在测试台与接口相关的地方。原因：全站说法统一，文档也照这份写。
+- 口语换成产品用语（疑似、从未、无法删除、不可用、失败、占用、超出、获取、查看），英文说法换成中文（访问密钥、整理、群聊机器人、令牌；JSON、MCP、Agent、产品名、模型用量的 token 保留），量词用「个」「条」，访问密钥不用「把」；术语按「界面用语」，英文字段名只留在测试台与接口相关的地方。原因：全站说法统一，文档也照这份写。
+- 记忆是谁的写「归属」（会话、联系人、本人、应用、人格、通用），不说「层」；记忆的位置写「坐标」，坐标里开头与标识之间的各级写「位置」，最后一段写「标识」，给人看的名字写「标题」。不再出现分区、情节、个人画像、私人层、基础；URI 只留在测试台、召回调试与「Lore 的 URI」。原因：「层」同时装着归属、可见范围与形态，改版后拆开了，旧说法会把旧模型带回来。
 - 界面上 Key 叫访问密钥（签发访问密钥、有效访问密钥、当前访问密钥）。本文件讲代码行为的条目仍写 Key，和 `issueKey`、`api_keys`、Key 鉴权这些标识符对得上。原因：代码里的名字没有跟着界面改，写成访问密钥反而对不上代码。
-- `apps/web/src/__tests__/copyRules.test.ts` 扫全部 `.vue`、`.ts` 里的界面文字查禁用词（测试台的组件 `Bench*.vue` 不查 disclosure 这类接口字段名，但访问密钥、分区、整理、机器人、令牌这几条测试台也要守；模型服务商的 API Key、对象存储的 Access Key ID 这类上游字段名只在它的 `UPSTREAM_KEYS` 列出的文件里放过）；发给模型的提示词和工具结果不算界面文字，要原样保留的句子加进它的 `ALLOWED`。新定的说法规则同时加进它和「界面用语」。原因：改过一遍的写法很容易被写回去。
+- `apps/web/src/__tests__/copyRules.test.ts` 扫全部 `.vue`、`.ts` 里的界面文字查禁用词（测试台的组件 `Bench*.vue` 不查 disclosure 这类接口字段名，访问密钥、分区、层、整理、机器人、令牌这些测试台也要守；URI 只在测试台与召回调试的文件（`URI_ALLOWED`）和「Lore 的 URI」里放过；模型服务商的 API Key、对象存储的 Access Key ID 这类上游字段名只在它的 `UPSTREAM_KEYS` 列出的文件里放过）；发给模型的提示词和工具结果不算界面文字，要原样保留的句子加进它的 `ALLOWED`。新定的说法规则同时加进它和「界面用语」。原因：改过一遍的写法很容易被写回去。
 
 ## 已知的坑
 
@@ -82,24 +85,24 @@
 - 记忆目录用 `UTree` 的虚拟滚动，只渲染看得见的行：行高固定，`MemoriesPage` 的 `rowHeight` 同时给样式和 `estimateSize`，改一边要改另一边。组件库把 `data-index` 放在外层的 `li` 上，又把 `textContent` 多解了一层，它自带的打字跳转会报错、也无法获得焦点，左键也只在渲染出来的行里找上一级，所以这两个键在页面里自己做（`typeaheadMatch`、`parentRow`）。目录从隐藏变成显示时设 `scrollTop` 不发 scroll 事件，虚拟滚动不知道位置变了，`scrollToRow` 替它发一个。升级 Nuxt UI 时复查。
 - 记忆页的统计（窄柱、列表上方的总数）来自概览接口，它要把整个概览算一遍：写入时 `refetchType: 'none'` 只标记过期，只在 `statsChanged` 认为动了统计时取一次。统计新用到别的字段时要加进 `statsChanged`。
 - 记忆的新建、移动弹窗不用 `<form>`：单选在表单里时回车会隐式提交，尚未看到「可见范围将改变」就移动了。只有点按钮才提交，`memoryPages.test.ts` 核对。
-- 记忆列表、目录只列有 URI 的记忆（`form = curated`）。概览和窄柱的条数含来自对话的两层（`extractedCounts`），列表筛这两层是空的，它们的内容在联系人页；算列表总数时只用 `counts`。
+- 记忆列表、目录只列有坐标的记忆（`form = curated`，记下的四类）。概览和窄柱的条数含来自对话的两类（`extractedCounts`），列表筛这两类是空的，它们的内容在对话页（会话分页与联系人分页）；算列表总数时只用 `counts`。
 - `useToast` 等 Nuxt UI 组合式函数显式从 `@nuxt/ui/composables` 导入，不依赖自动导入。
 - 内容表（带 `space_id`、在 `RLS_TABLES` 里的表）只能在 `withSpace()` 里访问，否则 RLS 让查询返回空、写入失败。新增内容表时同时加进 `RLS_TABLES` 和迁移里的策略，`rls.int.test.ts` 会核对两者一致。
 - 集成测试需要 `KIOKU_TEST_DATABASE_URL`：本地 `docker compose -f docker-compose.dev.yml up -d --build` 后设为 `postgres://kioku:kioku@localhost:55432/kioku`；没设置时跳过，CI 里没设置直接失败。测试会清空整个库，所以同一个库上的测试文件串行。CI 里还设 `KIOKU_TEST_DATABASE_WORKERS=3`：测试文件按 3 个 worker 并行，每个 worker 连 `<库名>_w<编号>`，这几个库由 `scripts/ci/test-db.sh` 用超级用户从 `kioku` 复制出来（应用角色不能建库）；本地不设就是串行，要并行先自己建好这几个库。原因：串行时服务端测试要 8 分钟。CI 里测试库和服务端镜像都在后台构建（`scripts/ci/background.sh`），和静态检查同时进行：服务端测试开始前由 globalSetup 按 `KIOKU_TEST_DATABASE_READY` 等测试库，镜像到冒烟那一步再等。所以测试不能依赖整个实例的状态：查 `pg_stat_activity` 要限定在本库或被自己阻塞的连接上，监听端口用 0，临时文件用 `mkdtemp`。同一个库上先跑哪个文件每次都不一样，所以 `openTestDatabase` 会清空实例设置（`settings`，`resetDatabase` 清不到），文件要用的设置在 `beforeAll` 里自己写。
 - 读权限的规则有两份：`access/access.ts` 的 `canRead`（单条判断）和 `memory/filter.ts` 的 `readableConditions`（SQL）。改一边必须改另一边，`filter.int.test.ts` 会逐条比对。`readableConditions` 也用在记忆事件的前后快照上（`snapshotColumns`），历史与恢复用其中的管理读取（不看有效期与删除状态、人格不限），一致性测试两边都比，不要为快照另写一份规则。
-- 启动加载（`boot`）会被客户端当作指令级上下文，只能收受信来源写下的、来自对话以外几层的记忆（`recall/boot.ts` 的 `BOOT_LAYERS` 与 provenance 过滤）。召回块里的线索文本要经 `inlineText` 处理。原因：群聊写入的内容不能变成所有者的 agent 的指令。
-- URI 要么是共享的，要么按成员各自占用（个人画像层与私人层，`owner`、`private`），二者不共存。冲突只由数据库判断：唯一索引 `memories_uri_live_idx` 保证同一归属不重复，触发器 `memories_uri_exclusive` 保证共享与成员节点互斥（它对 URI 加咨询锁串行检查，不看已失效或过期的记录；有效期变化时也检查，被写的那行自己已经过期时不参与），冲突时服务层把唯一约束错误转成 409。`claimUri` 只负责把调用方能释放的过期记录软删除、释放它们占用的 URI；绕开它的写入遇到同一归属的过期记录仍会因唯一索引冲突。已知代价：写共享节点撞上别的成员的私人 URI 时返回 409，写入方能知道这个 URI 被占用（不含内容）。
-- 已删除列表的「URI 已被占用」标记和 Lore 导入计划里「已被其他记忆占用」的跳过（`memory/service.ts` 的 `uriConflicts`，分别经 `MemoryService.undeleteConflicts` 和 `importer/lore.ts` 的计划快照调用）在 JS 里照唯一索引、互斥触发器与 `claimUri` 的释放规则（`canRelease`）写了一份：改其中任何一处都要同步改它。`validity.int.test.ts` 逐种用标记和真去恢复（`undelete`）的结果比对，`loreImport.int.test.ts` 逐种用计划和真去写入的结果比对。`uriConflicts` 不看调用方读不读得到占着的那条，能探出别的成员的私人节点占不占某个 URI，所以只给这两处用，不做成服务的公开方法。原因：标记只用来提前提示，冲突仍以数据库为准，两边不一致时界面会标错。
+- 启动加载（`boot`）会被客户端当作指令级上下文，只能收受信来源写下的、记下的四类记忆（contracts 的 `BOOT_LAYERS`、`memory/filter.ts` 的 `BOOT_ELIGIBLE` 与 provenance 过滤）。召回块与启动加载里的线索文本、标题要经 `inlineText` 处理（标题经 `recall/text.ts` 的 `titleSuffix`）。会话开始附上的会话摘要（`recall/boot.ts` 的 `formatSummaryBlock`，只有不带会话上下文的会话有）来源受信，正文却是模型从对话里写的，可能转述了网页、文件这类工具结果：同样经 `inlineText` 压成单行，并写明只作参考、不是指令，和联系人的事实一样。原因：群聊写入的内容、工具读到的外部内容都不能变成所有者的 agent 的指令。
+- 坐标（URI）的开头就是归属（`memory/uri.ts` 的 `layerOf`）：`core://`、`persona://<人格>/`、`app://<应用>/` 是共享的，`user://` 按成员各自占用，不同成员的本人里可以有同一个坐标；人格与应用的开头之后至少还要有一段。冲突只由数据库判断：唯一索引 `memories_uri_live_idx`（坐标加所属成员，不看有效期）保证同一归属不重复，冲突时服务层把唯一约束错误转成 409；共享与本人的开头不同，不会互相冲突，所以没有互斥的触发器。`claimUri` 只负责把调用方能释放的、同一归属的过期记录软删除，释放它们占用的坐标；绕开它的写入遇到同一归属的过期记录仍会因唯一索引冲突。已知代价：写入撞上调用方读不到、也释放不了的同一归属记录（例如编辑者撞上过期的机密）时返回 409，写入方能知道这个坐标被占用（不含内容）。
+- 已删除列表的「URI 已被占用」标记和 Lore 导入计划里「已被其他记忆占用」的跳过（`memory/service.ts` 的 `uriConflicts`，分别经 `MemoryService.undeleteConflicts` 和 `importer/lore.ts` 的计划快照调用）在 JS 里照唯一索引与 `claimUri` 的释放规则（`canRelease`）写了一份：改其中任何一处都要同步改它。`validity.int.test.ts` 逐种用标记和真去恢复（`undelete`）的结果比对，`loreImport.int.test.ts` 逐种用计划和真去写入的结果比对。`uriConflicts` 不看调用方读不读得到占着的那条，能探出读不到的记录（例如写不了的机密）占不占某个坐标，所以只给这两处用，不做成服务的公开方法。原因：标记只用来提前提示，冲突仍以数据库为准，两边不一致时界面会标错。
 - 过期的会话与登录失败计数由后台定时任务每小时清理（`jobs/cleanup.ts`）。清理登录计数时跳过被锁住的行：登录的计数事务按「本客户端 → 合计」的顺序加锁，按别的顺序等锁会互相等待成死锁。
-- 机密（`secret`）只加密正文：URI、触发场景（`disclosure`）、关键词仍是明文（目录浏览与召回线索要用），不要把需要保密的内容写进这些字段。
+- 机密（`secret`）只加密正文：坐标（URI）、标题、触发场景（`disclosure`）、关键词仍是明文（目录浏览、列表与召回线索要用），不要把需要保密的内容写进这些字段，明确给的标题照旧是明文。没填标题时机密取标识，不从正文的 `#` 标题取（`deriveTitle`）；结果是机密的写入（新建、修改、恢复此版本），标题等于明文正文的第一个 `#` 标题时一律换成标识（`memory/uri.ts` 的 `withoutHeading`，分不清是取的还是照抄的），改成机密时还比历史里的每一版正文，`scrubHistory` 把快照里这种标题一起换掉，恢复此版本就带不回来。取 `#` 标题的规则只有 `firstHeading` 一份。原因：标题是从正文取的话，正文加密、历史抹掉之后它还以明文留在标题列、全文检索与历史快照里。
 - 部署在反向代理后面时要设 `KIOKU_TRUSTED_PROXIES=<受信代理层数>`，登录限流才能按真实客户端区分；客户端地址从 `X-Forwarded-For` 右边数，最左边的项由请求方填写、可以伪造。不在代理后面时保持 0。没配置受信代理时一律按连接对端区分客户端，请求头不能改变限流行为。 配置了受信代理时，后端端口不能对外直连，否则直连请求可以自己填 `X-Forwarded-For`。
 - 登录防护的顺序：先计数（同一用户名 + 客户端 5 次、同一用户名合计 50 次，IPv6 按 /64 计为一个客户端；计数键用 JSON 数组编码，后一级超限时退回前一级）→ 进入 scrypt 并发闸门（全局 4 个运行 + 32 个排队，每个客户端 2 个；繁忙时退回计数）→ 用户名不存在时同样过闸门、占本客户端的名额，但不占全局名额，也不跑 scrypt，等一次校验的时长 → 成功清掉本客户端的计数，并退回这次在合计里占的名额（别人的失败不清）。登录成功下发设备 Cookie（`kioku_device`，服务端签名、绑定当前密码指纹、180 天），带着它不受合计上限约束，改密码后失效。原因：账号存在与否在计数、闸门繁忙、返回内容上表现一致，不能借此探出账号；随机用户名耗不了 CPU、挤不满全局名额；合计上限挡分布式猜测，设备 Cookie 让账号本人不被它锁住。
 - 本地跑集成测试时不要同时开着连同一个数据库的本地服务：服务的 pg-boss 进程会抢走测试的后台任务，导致向量相关的用例超时。
-- 迁移里要改 FORCE RLS 的表（`RLS_TABLES`）时，迁移连接没有设置 `app.space_id`，UPDATE / DELETE 会被策略过滤成零行而不报错；需要先 `NO FORCE`、改完再 `FORCE`（见 0010 迁移）。drizzle 把所有待执行的迁移放在一个事务里，中途失败会整体回滚。
+- 迁移里要改 FORCE RLS 的表（`RLS_TABLES`）时，迁移连接没有设置 `app.space_id`，UPDATE / DELETE 会被策略过滤成零行而不报错；需要先 `NO FORCE`、改完再 `FORCE`。drizzle 把所有待执行的迁移放在一个事务里，中途失败会整体回滚。
 - Key 的有效上限 = 签发时的 scopes 再按应用所有者当前角色收紧（`clampScopesToRole`）；所有者离开空间后 Key 作废。
-- 目录浏览（`children`、`kioku_list`）由调用方读得到的后代推出，路径本身没有记忆的一级显示为虚拟节点（`exists: false`），所以不要求父节点存在、也不限制删除或移动父节点。原因：父子可见性受层、敏感级、来源作用域、成员、有效期共同影响，强制「看得到子就看得到父」会不断出现漏洞。
+- 目录浏览（`children`、`kioku_list`）由调用方读得到的后代推出，路径本身没有记忆的一级显示为虚拟节点（`exists: false`），所以不要求父节点存在、也不限制删除或移动父节点。原因：父子可见性受归属、敏感级、来源作用域、成员、有效期共同影响，强制「看得到子就看得到父」会不断出现漏洞。只有人格或应用标识的一级（`persona://<人格>`、`app://<应用>`）和开头本身一样，没有记忆时是空的一级，不返回 404。
 - 应用的权限按应用所有者算，所以只有应用所有者能改应用配置、签发和查看它的 Key；空间所有者只能吊销。
-- 管理界面的权限不能超过成员能获得的 Key：空间所有者（`owner`）可以写任何应用的应用层与机密级；编辑者（`editor`）最高到私密级，应用层只能写自己是所有者的应用；查看者（`viewer`）只读。写入检查一律经过 `canWrite`，应用层要带上记忆的 `appId`。
+- 管理界面的权限不能超过成员能获得的 Key：空间所有者（`owner`）可以写任何应用的记忆与机密级；编辑者（`editor`）最高到私密级，应用的记忆只能写自己是所有者的应用；查看者（`viewer`）只读。写入检查一律经过 `canWrite`，应用的记忆要带上 `appId`。通过 Key 不能在共享的归属与本人之间移动记忆（`assertKeyTransition`），只有管理界面里由人来移：移动会改变谁看得到它。
 - 记忆接口对「读不到」和「不存在」都返回 404，不要改成 403。原因：403 会暴露这里有一条调用方看不见的记忆。
 - 流程编号检查扫整行（注释与文案），会把测试数据里「小写 v 加数字」的字符串当迭代标记，也会把前后是空格或标点的S3、R2这类大写字母加数字当编号：测试数据换成别的写法；对象存储在代码与界面文案里写「对象存储」，要点明时写成「兼容S3」（不加空格）。
 - 新加的表自动进全实例备份（`backup/tables.ts` 从表定义里取；会话这类恢复后用不上的、能重新生成的，加进它的排除清单）。`backup.int.test.ts` 要求每张进备份的表都有数据，新表要在它的种子里写上一行。原因：恢复按表逐行比对，空表测不出写回的问题。
@@ -120,7 +123,7 @@
 - `pgErrorCode`、`pgConstraint`、`pgMessage` 只解开 `DrizzleQueryError` 的 cause。驱动直接抛的错误不解开：连接错误（`CONNECTION_CLOSED`）自带 cause（`57P01`、`ECONNRESET`），解开就成了另一个错误，连接本身的错误会记成不同的 code（要原因用 `pgCauseCode`）；正在执行的语句另有自己的错误，同一次断连里它报 `57P01`，搜日志时两种都要看。回调接住语句错误时，事务以未包装的 PostgresError reject，字段同样读得到。
 - 事务回调结束到 COMMIT 或 ROLLBACK 做完、连接归还之前，驱动还放行句柄上的语句，它们排在后面，落在事务外自动提交；连接归还和断开之后才拒绝（`UNSAFE_TRANSACTION`、`CONNECTION_CLOSED`）。所以事务回调里的语句都要 await 完。回滚模式靠 `RollbackRun.guard` 挡这一段，`inRollback` 在 fn 结束时（成功或抛错，放在 `finally` 里）先 `run.close()` 再让事务回滚，顺序不能换，`rollback.int.test.ts`「回滚做完之前发出的写入」核对这一点。
 - 测试：测连接断开直接用 `pg_terminate_backend` 杀（见 `db/__tests__/disconnect.int.test.ts`）：外层事务以 `CONNECTION_CLOSED` 立刻 reject，回调不会停，回调里后面的语句也 reject（经 drizzle 的包在 `cause` 里，开 savepoint 这类驱动直接发的不包）；正在执行的那条语句报 `57P01`。用 `testing/db.ts` 的 `killDuring`：它先接住事务的 promise 再杀，否则 kill 的响应回来之前事务可能已经 reject，算未处理的 rejection，用例偶发失败。测闸门要另开大一点的连接池：测试池 max 2，鉴权会卡在获取连接上，到不了闸门。
-- 测试台按 `created_at = now()` 认这个事务写下的行，所以 `memory_events`、`credential_events`、`subjects`、`subject_identities`、`conversation_turns` 在 Key 鉴权的路径上要用数据库默认值，写 JS 时间会漏报。
+- 测试台按 `created_at = now()` 认这个事务写下的行，所以 `memory_events`、`credential_events`、`subjects`、`subject_identities`、`conversation_turns`、`conversations` 在 Key 鉴权的路径上要用数据库默认值，写 JS 时间会漏报（会话的最近活动也写 `now()`，见 `touchConversation`）。
 - 测试台的打码只在 `toView` 和凭据的取用处判断，`contentOf` 不能打码（`applyUpdate` 靠它取原文再封存）。新增返回 `MemoryView` 的路径要经过 `toView`。错误信息不放解出来的内容，不只是打码时（`checkCredentialRefs` 的 `decrypted`）：没有显式查看的路径不能借报错读到正文，也不留访问记录。占位文字集中在 `memory/masked.ts`，新增的要加进 `MASKED_TEXTS`，写入检查才认得；这个文件不能依赖别的模块（`mcp/format.ts` 引用它，又打进不带 postgres 的 `dist/bench.mjs`）。
 - 管理界面读记忆默认不给机密记忆的正文，Key 读到要留痕，都由 `MemoryContext.secretRead` 决定，判断和记访问事件都在 `toView`，只此一处。新增返回 `MemoryView` 的路径要经过 `toView`，`via` 必填：响应里的正文是调用方刚写的或本来就是明文才传 null。内部路径（导入工具比对）不设它。解密的正文不进 `useQuery` 的缓存（`apps/web/src/secretContent.ts`）。原因：缓存活得比页面长，查看要每次留痕。
 - 管理界面的响应是 `ConsoleMemoryView`，比 Key 鉴权接口返回的 `MemoryView` 多 `contentHidden`、`plaintextIgnored`。这两个字段不能加进 `MemoryView`，加了要重新生成 SDK；`toView` 只在 `secretRead` 为 `explicit` 时带上，Key 的响应才不多字段（`c.json` 不会按 schema 剥）。
@@ -130,13 +133,13 @@
 - 路由和测试台共用的处理函数（`lifecycle/handlers.ts`）不在里面新建 scope，由调用方传入，否则测试台关不掉 `record`。路由要显式只取 `LifecycleResponse` 的字段：`c.json` 不会按 schema 剥掉多余字段，`session` 不能加进 `LifecycleResponse`，加了要重新生成 SDK。
 - 新路由如果引用 Key 鉴权接口的命名组件（`TurnEndEvent`、`SessionContext` 等），要挂在这些路由后面（测试台路由挂在最后）。原因：OpenAPI 的组件按第一次用到的顺序排，挂早了 `sdks/python/generate.sh --check` 会失败，哪怕接口没变。
 - 新加 MCP 工具要写进 contracts 的 `BENCH_READ_TOOLS` 或 `BENCH_WRITE_TOOLS`：命令行握手按这份名单严格核对，`mayWrite` 对不认识的工具按写算。内置场景的 `capture` 与断言依赖工具结果的文字（「版本: 」「URI: 」等），`bench/executor.ts` 也按这些行与 `formatRecallBlock` 解析 URI 列表，改 `mcp/format.ts` 的文字要同步改，门禁里的矩阵会报。测试台步骤的说明与断言文字只展开 `${run}`、`${expires}`，新增命令行默认打印的文字时也不能展开 `capture` 的变量：它可能取到凭据的值。内置预设写记忆要带 `valid_to: EXPIRES`；`${run}`、`${expires}` 是保留的变量名。
-- contracts 里的 `isReplayStep`、`mayWrite`、`findPlaintextCredentials`、`placeholderAllowed`（连同说明 `CONVERT_SCOPE_TEXT`）和 `names.ts`（层与敏感级的中文名）是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定和用词。
+- contracts 里的 `isReplayStep`、`mayWrite`、`findPlaintextCredentials`、`placeholderAllowed`（连同说明 `CONVERT_SCOPE_TEXT`）、`sensitivityAllowed` 与 `DEFAULT_SENSITIVITY`（各归属能用的敏感级与默认敏感级）和 `names.ts`（归属与敏感级的中文名）是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定和用词。
 - 读实例设置的函数（`loadExtractionConfig` 这类）既读库又解密，不要 catch 全部再回 `err.message`：读库出错也会被接住，drizzle 的错误信息带 SQL 与全部参数。用 `settings/endpoint.ts` 的 `unlocked`：只认 `ApiKeyLockedError`，其余重新抛给 `onError`。测读设置出错用 `testing/db.ts` 的 `settingsQueryFails`。
 - 带 API Key 的 `fetch` 不要把 `err.message` 给调用方或写进日志，也不要放进 `cause`（日志也打印）：API Key 中间有换行时，undici 的 Headers 报错会带上整个 Authorization 值，`signal` 已经取消时也先报这个，用 `fetchFailure` 只取错误类别；响应解析失败的文字可能带响应开头（可能回显 API Key），用 `upstreamJson`。上游写进报错的 API Key 用 `withoutKey`，先换再截断：`fetch` 会去掉结尾的空白，上游见到的 API Key 和保存的写法可能不同。保存时已经 `trim` 并拒绝控制字符，但存量 API Key 不迁移，这两处不能当多余的删掉。
 - 模型代理返回的 `message.tool_calls` 不是严格原样：id 可能是生成的，不是对象的项会被去掉，`arguments` 只放合法的 JSON 对象（原文在 `rawArguments`，只给界面显示）。`tool` 消息的 `tool_call_id` 要用 `toolCalls[i].id`，两者一一对应。
 - 测试模型代理：测时限不能靠到点 abort 来结束用例，`requestAgentTurn` 的 catch 先看 `timeout.aborted`，这个信号不管有没有传给 `fetch` 都会按时到期，时限失效时用例照样通过，要和哨兵定时器 `Promise.race`。客户端断开的信号来自 Node 适配器（reason 是字符串，不是 AbortError，要看 `signal.aborted`），`app.request` 走不到，要测断开必须起真实端口。「请求模型期间不占连接」的用例依赖测试连接池只有 2 条。
 - 导航角标和待处理页的条数是同一个查询（`inbox-counts`，`staleTime` 60 秒，接口每次跑正则），不跟着换页重取。新增能改变四类条数的操作（包括改动记忆使疑似明文变化）要让它失效：`invalidateInboxCounts`，或者加进已有的刷新清单（`refreshSubjectCaches`、`refreshAfterPlaintext`、记忆页的 `refreshCounts`）。
-- 权限格子的满色是 `--access-*`，不是层色：浅色主题下应用、个人画像、情节三层太淡，满色、淡色、空白分不开，岩芯上又没有文字。改层色时要同步改它，`tokens.test.ts` 按明度核对。岩芯和权限范围一律用 `api.keyMatrix` 的结果，`issuedScopeRows` 只用于签发时的预览（不是实际权限）。
+- 权限格子的满色是 `--access-*`，不是归属色：浅色主题下应用、本人、会话三类太淡，满色、淡色、空白分不开，岩芯上又没有文字。改归属色时要同步改它，`tokens.test.ts` 按明度核对。岩芯和权限范围一律用 `api.keyMatrix` 的结果，`issuedScopeRows` 只用于签发时的预览（不是实际权限，只按归属、敏感级与 `sensitivityAllowed` 换算）。
 - 测试台界面：`BenchStepResult.status` 在没带断言时一律是 `passed`，哪怕工具报错，显示调用结果要看 `isError` 与 `internalError`（`benchResult.ts` 的 `stepBadge`）。重放分叉的 `index` 是发出请求时那份日志的下标，结果回来时按当时的 session 记录，所以运行期间不能改 session，新加能动会话的操作都要判断 `running`；`BenchSession` 的 `replay` 与 `replayEntryIds` 下标一一对应，要一起改。新分页放进 `BenchPage` 里 `v-if="mounted" v-show="ready"` 那一层并用 `v-show` 切换：换应用时 Key 要重读，跟着卸载的话草稿与文本框里的场景会丢。
 - 测试台的地址会被写回成实际选择：同一页面上不带 `app`、`key` 参数的导航（侧栏入口）不算换选择，要换走 `selectApp`、`selectKey`；按列表判断地址里的选择时只认读取成功且不在刷新的结果（`isSuccess && !isFetching`），否则缓存里的旧列表会冤枉模拟器链接带来的 Key。`useQuery` 的选项在 pre 阶段才更新，按查询结果做判断并写回时要用 post flush（`watchPostEffect`），pre 下会把上一个应用的 Key 写进地址。`hasUnsavedChanges` 是全局一个，一个页面只能注册一份 `useUnsavedChangesGuard`，测试台由 `createBench` 注册，分页通过 `unsaved` 报上去。`abandoned` 不随 `generation` 清掉，新增调用 `execute` 的地方要传 `label` 与 `view`。`useUnsavedChangesGuard` 注册时就读一次 `dirty`，用到的状态要先建好，否则页面打开就抛 TDZ 错误。
 - 权限探测靠「capture 」开头认出 capture 没取到的断言（`benchResult.ts`），改 `runner.ts` 里这句说明要一起改，`runner.test.ts` 钉住了这个开头。
@@ -144,9 +147,10 @@
 - `benchScenarios.ts` 的明文检测按工具名判断：新增能写记忆正文或能改 URI 的工具要同步改 `writesMemory` 与 `kioku_move` 的分支，否则导出时不提示。`apps/web/src/__tests__/benchTools.fixture.json` 是真实 `tools/list` 的快照，改了工具 `inputSchema` 的形状要重新生成，否则用例测的是旧形状、也不会变红。
 - 硬删除记忆时 Lore 的导入事件（出处 `source` 为 `lore`）要留下（`memory_id` 置空、快照只留 `domain` 与 `path`），别的事件一起删，包括按空间导入的导入事件。原因：Lore 导入工具按导入事件去重，记忆整行不在时也认作「导入过、后来删掉了」；删掉这些事件，下次同步会把删过的节点写回。保留期的删除条件都在 `jobs/retention.ts` 的 `retentionRules`，改了要对照 `retention.int.test.ts`。
 - 「用户删掉」与「过期并释放 URI」不加标记列，按删除时间与过期时间的先后区分（已删除列表、已过期列表、恢复与恢复生效（`undelete`、`reactivate`）都靠它）。所以写 `deleted_at` 时要守住：用户删除只删在同一时刻仍有效的行、删除时间写这一刻；`claimUri` 只释放同一时刻已过期的行。新增删除路径时照这个写。
-- `memories_uri_exclusive()` 前后好几个迁移都用 CREATE OR REPLACE 改过，后一个会整个覆盖前一个：再改时以最新那个迁移里的函数为准，把前面加的条件一起带上（0023 里有：被写的行自己过期就不检查、导入自己刚建的空间时不加咨询锁）。`app.importing_space` 只给按空间导入的事务设，别的写入设了会跳过这个咨询锁。
-- 合并联系人的步骤在 `access/subjects.ts`，管理界面的手动合并与 `/bind` 共用，规则只写一份；合并时要作废牵涉到两边的待确认绑定，并把绑定记录改指向保留的联系人。
+- 本人不设公开有两份：contracts 的 `sensitivityAllowed` 与约束 `memories_user_not_public`。数据库的 CHECK 约束被违反时，服务层按 `memory/service.ts` 的 `CHECK_MESSAGES` 转成可读的 400；新加的约束也要在那里给出文字，否则落到 `onError` 成 500。
+- 合并联系人的步骤在 `access/subjects.ts`，管理界面的手动合并与 `/bind` 共用，规则只写一份；合并时要作废牵涉到两边的待确认绑定，并把绑定记录改指向保留的联系人。会话跟着改指向：同一个应用里保留的那边已经有会话时并成一个（`mergeConversations`），摘要、事实与抽取记录先挪过去再删被合并的会话，否则删除会话的触发器会连带删掉还挂着的摘要。
+- 会话按（应用、群）、（应用、私聊的人）、（应用、所属成员）认，生命周期事件来时建立或更新最近活动（`lifecycle/handlers.ts`；最近活动早于一分钟以前才更新，否则不写这一行，见 `touchConversation`；写不进去只记日志，不影响召回与缓冲）；会话摘要都挂在会话上（约束 `memories_episode_conversation`），抽取在写入事务里找这一批的会话（`ensureConversation`）。不带会话上下文的轮次的缓冲作用域是 `global`（`NO_CONTEXT_SCOPE`，就是这类 Key 写下的记忆的来源作用域），按（应用、作用域）分批就是按应用与所属成员分：应用转给别人时旧 Key 都吊销了，旧所有者剩下的几轮按「没有能用的 Key」丢掉。测试里直接往库里写会话摘要时用 `testing/db.ts` 的 `summaryConversation`、`groupConversation` 或 `conversationOfScope` 先建会话。
 - 整理建议只经 `MemoryService.applySuggestion` 改记忆；`dream_suggestions` 用 id 与版本的数组引用记忆，没有外键，「建议还作不作数」只按版本判断，规则只有一处（SQL 的 `suggestionCurrent`，锁到行之后用 `isCurrentVersion`），列表、执行与保留期都用它。
 - 整理任务按 `dream_marks`（记忆 id 对应整理过的版本）找要处理的记忆，不靠更新时间：导入的记忆保留原来的更新时间，按时间推进的游标会永远看不到它们。
-- 迁移文件合并之后不要再改（包括注释）：恢复备份时按最后一个迁移的哈希核对库的结构，改过的文件会让之前的备份恢复不了。
+- 迁移文件合并之后不要再改（包括注释）：恢复备份时按最后一个迁移的哈希核对库的结构，改过的文件会让之前的备份恢复不了；服务启动时也核对库里执行过的每个迁移的哈希（`db/migrate.ts` 的 `runMigrations`），有这个版本没有的就拒绝启动，改过的文件会让已经迁移过的库起不来。迁移从 `0000_baseline`（记忆架构改版时重来的基线）起算，之前的备份不能恢复、之前的库不能迁移：启动与恢复按早于基线的迁移认出它们，报错说明是改版之前的结构，要清空数据库重建后从 Lore 重新导入。
 - 在 Mac 上用非交互会话（agent 的 shell）拉镜像会卡在钥匙串，需要用不带 credsStore 的 `DOCKER_CONFIG`。

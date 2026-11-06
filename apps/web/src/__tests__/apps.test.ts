@@ -4,8 +4,8 @@ import { describe, expect, it } from 'vitest'
 import { bootUsage, effectiveNote, isNarrowed, lastUsedAt, simulatorState } from '../apps'
 
 const scopes = (over: Partial<KeyScopes> = {}): KeyScopes => ({
-  readLayers: ['base'],
-  writeLayers: ['base'],
+  readLayers: ['core'],
+  writeLayers: ['core'],
   maxSensitivity: 'internal',
   admin: false,
   ...over,
@@ -46,7 +46,7 @@ describe('签发上限和当前有效上限', () => {
     const narrowed = key({ effectiveScopes: scopes({ writeLayers: [] }) })
     expect(isNarrowed(narrowed)).toBe(true)
     expect(effectiveNote(narrowed)).toBe(
-      '当前有效范围：可读 1 层，可写 0 层，最高内部（已按所有者当前角色收紧）',
+      '当前有效范围：可读 1 类归属，可写 0 类，最高内部（已按所有者当前角色收紧）',
     )
   })
 
@@ -85,10 +85,11 @@ describe('启动加载的用量条', () => {
     limit: 1000,
     context: 'x'.repeat(500),
     entries: [
-      { uri: 'core://a', layer: 'base', chars: 100 },
-      { uri: 'persona://b', layer: 'persona', chars: 300 },
+      { uri: 'core://a', title: 'a', layer: 'core', chars: 100 },
+      { uri: 'persona://b/c', title: 'c', layer: 'persona', chars: 300 },
     ],
     omitted: [],
+    summaries: [],
     recent: [],
     related: [],
     dropped: [],
@@ -100,7 +101,7 @@ describe('启动加载的用量条', () => {
     expect(usage.used).toBe(500)
     expect(usage.limit).toBe(1000)
     expect(usage.segments.map((s) => s.width)).toEqual([10, 30])
-    expect(usage.segments.map((s) => s.layer)).toEqual(['base', 'persona'])
+    expect(usage.segments.map((s) => s.layer)).toEqual(['core', 'persona'])
     expect(usage.other).toBe(10)
     expect(usage.over).toBe(false)
   })

@@ -1,6 +1,6 @@
 import type { BenchScenarioInput } from '@kioku/contracts'
 
-import { EXPIRES, GUIDANCE_START, PRIVATE_WRITE, runUri, SECRET_WRITE } from './shared'
+import { EXPIRES, GUIDANCE_START, USER_WRITE, runUri, SECRET_WRITE } from './shared'
 
 const NOTE = runUri('note')
 const MOVED = runUri('moved')
@@ -12,7 +12,7 @@ export const memoryCrud: BenchScenarioInput = {
   id: 'memory-crud',
   title: '记忆增删改查',
   description:
-    '新建、读取、修改、浏览、移动、搜索、删除一条私人层的记忆；机密级的访问密钥再走一遍新建与读取。',
+    '新建、读取、修改、浏览、移动、搜索、删除一条本人的记忆；机密级的访问密钥再走一遍新建与读取。',
   steps: [
     {
       kind: 'tool',
@@ -27,13 +27,12 @@ export const memoryCrud: BenchScenarioInput = {
       arguments: {
         uri: NOTE,
         content: '测试台写下的记忆，运行标记 ${run}。',
-        layer: 'private',
         priority: 2,
         disclosure: '测试台的增删改查场景',
         glossary: [KEYWORD],
         valid_to: EXPIRES,
       },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, contains: [`URI: ${NOTE}`, '敏感级: private', '版本: 1'] },
       capture: { version: '版本: ' },
     },
@@ -42,7 +41,7 @@ export const memoryCrud: BenchScenarioInput = {
       label: '读取',
       tool: 'kioku_get',
       arguments: { uri: NOTE },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, contains: ['运行标记 ${run}'] },
     },
     {
@@ -55,7 +54,7 @@ export const memoryCrud: BenchScenarioInput = {
         priority: 3,
         expected_version: '${version}',
       },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, contains: ['改过的记忆', 'priority: 3', '版本: 2'] },
     },
     {
@@ -63,15 +62,15 @@ export const memoryCrud: BenchScenarioInput = {
       label: '版本号不对时报错',
       tool: 'kioku_update',
       arguments: { uri: NOTE, priority: 4, expected_version: 999 },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: true, contains: ['版本已变化'] },
     },
     {
       kind: 'tool',
       label: '浏览父路径',
       tool: 'kioku_list',
-      arguments: { of: 'projects://bench/${run}' },
-      requires: PRIVATE_WRITE,
+      arguments: { of: 'user://bench/${run}' },
+      requires: USER_WRITE,
       expect: { error: false, uris: [NOTE] },
     },
     {
@@ -79,7 +78,7 @@ export const memoryCrud: BenchScenarioInput = {
       label: '移动',
       tool: 'kioku_move',
       arguments: { from: NOTE, to: MOVED },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, contains: [`URI: ${MOVED}`, '版本: 3'] },
     },
     {
@@ -87,7 +86,7 @@ export const memoryCrud: BenchScenarioInput = {
       label: '搜索',
       tool: 'kioku_search',
       arguments: { query: KEYWORD },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, uris: [MOVED], notUris: [NOTE] },
     },
     {
@@ -95,7 +94,7 @@ export const memoryCrud: BenchScenarioInput = {
       label: '删除',
       tool: 'kioku_delete',
       arguments: { uri: MOVED },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false },
     },
     {
@@ -103,7 +102,7 @@ export const memoryCrud: BenchScenarioInput = {
       label: '删掉之后读不到',
       tool: 'kioku_get',
       arguments: { uri: MOVED },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: true, contains: ['不存在'] },
     },
     {
@@ -113,7 +112,6 @@ export const memoryCrud: BenchScenarioInput = {
       arguments: {
         uri: SEALED,
         content: '测试台写下的 secret 正文，不是真的内容。',
-        layer: 'private',
         sensitivity: 'secret',
         valid_to: EXPIRES,
       },

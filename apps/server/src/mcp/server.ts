@@ -6,13 +6,12 @@ import {
   CredentialIdentifier,
   KeyCreateCredentialRequest,
   KeyUpdateCredentialRequest,
-  Layer,
   MemoryUri,
-  PlainLayer,
   type MemoryView,
   RecallRequest,
   Sensitivity,
   UpdateMemoryRequest,
+  URI_FORMAT_MESSAGE,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -60,6 +59,10 @@ function parse<T>(schema: z.ZodType<T>, value: unknown): T {
   const where = issue?.path.length ? `${issue.path.join('.')}：` : ''
   throw new MemoryError(400, `${where}${issue?.message ?? '参数格式错误'}`)
 }
+
+// 标题参数的说明，新建与修改共用
+const TITLE_HELP =
+  '标题：给人看的名字，最多 80 个字符；不填时取正文第一个 # 标题，没有就用坐标的最后一段'
 
 // 有效到参数的说明，新建与修改共用
 const VALID_TO_HELP =
@@ -121,7 +124,8 @@ export function buildMcpServer(
   server.registerTool(
     'kioku_search',
     {
-      description: '按语义、全文和关键词搜索记忆，返回候选 URI 与线索；需要正文时再用 kioku_get。',
+      description:
+        '按语义、全文和关键词搜索记忆，返回候选的坐标（URI）、标题与线索；需要正文时再用 kioku_get。',
       inputSchema: {
         query: RecallRequest.shape.query.describe('要找的内容，用自然语言描述'),
         limit: z.number().int().min(1).max(30).optional().describe('最多返回几条，默认 10'),
@@ -139,18 +143,19 @@ export function buildMcpServer(
   server.registerTool(
     'kioku_get',
     {
-      description: '按 URI 读取一条记忆的完整正文。召回结果只是候选，引用之前先用它读正文。',
-      inputSchema: { uri: MemoryUri.describe('记忆 URI，例如 core://agent') },
+      description:
+        '按坐标（URI）读取一条记忆的标题与完整正文。召回结果只是候选，引用之前先用它读正文。',
+      inputSchema: { uri: MemoryUri.describe('记忆的坐标（URI），例如 core://agent') },
       annotations: { readOnlyHint: true },
     },
     ({ uri }) =>
       tool(async () => {
         const view = await memory.get(uri, 'kioku_get')
-        // 占位符按记忆的主人解析：只有私人层的记忆能引用凭据，主人就是读者自己
+        // 占位符按记忆的所有者解析：只有本人的记忆能引用凭据，所有者就是读者自己
         const identifiers = [...placeholderIdentifiers(view.content ?? '')]
         if (!identifiers.length) return formatMemory(view)
         const found =
-          view.layer === 'private'
+          view.layer === 'user'
             ? await credentials.forPlaceholders(identifiers)
             : identifiers.map((identifier) => ({ identifier, available: false as const }))
         return `${formatMemory(view)}\n\n${formatPlaceholderCredentials(found)}`
@@ -161,8 +166,14 @@ export function buildMcpServer(
     'kioku_list',
     {
       description:
-        '浏览记忆树：不带参数列出所有 domain；给 domain 名或 URI 时列出它下面的直接子节点。',
-      inputSchema: { of: z.string().optional().describe('domain 名（如 core）或节点 URI') },
+        '浏览记忆的目录：不带参数列出有记忆的开头（core://、user://、persona://、app://）；' +
+        '给开头（如 core）或坐标（URI）时列出它下面的直接子节点，persona://<人格标识> 与 app://<应用标识> 列这个人格、应用下的第一级。',
+      inputSchema: {
+        of: z
+          .string()
+          .optional()
+          .describe('开头（core、user、persona、app）或坐标（URI），例如 user://projects'),
+      },
       annotations: { readOnlyHint: true },
     },
     ({ of }) =>
@@ -178,18 +189,18 @@ export function buildMcpServer(
     {
       description:
         '新建一条长期记忆。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。' +
-        'persona://<人格>/ 与 app://<应用>/ 下的记忆分别属于人格层和应用层，只能写本应用当前的人格与本应用；' +
-        '其余 domain 不指定 layer 时按私人层保存。',
+        `${URI_FORMAT_MESSAGE}。坐标的开头决定这条记忆归谁、谁读得到：人格与应用的记忆只能写本应用当前的人格与本应用；` +
+        'user:// 下的只有本人的 agent 读得到，不能设为 public。',
       inputSchema: {
         // 长度与数量限制和 REST 共用 contracts 里的定义
-        uri: MemoryUri.describe('新记忆的 URI'),
+        uri: MemoryUri.describe('新记忆的坐标（URI），开头决定归属'),
+        title: CreateMemoryRequest.shape.title.describe(TITLE_HELP),
         content: CreateMemoryRequest.shape.content.describe('正文'),
         disclosure: CreateMemoryRequest.shape.disclosure.describe('什么场景下需要想起这条记忆'),
         priority: CreateMemoryRequest.shape.priority.describe('0 最重要，默认 2'),
         glossary: CreateMemoryRequest.shape.glossary.describe('关键词，用于召回'),
-        layer: Layer.optional().describe('层：base / owner / private 等'),
         sensitivity: Sensitivity.optional().describe(
-          '敏感级：public / internal / private / secret',
+          '敏感级：public / internal / private / secret。不填时按归属取默认值，user:// 下默认 private、不能是 public',
         ),
         valid_to: CreateMemoryRequest.shape.validTo.describe(VALID_TO_HELP),
       },
@@ -199,11 +210,11 @@ export function buildMcpServer(
         withPlaintextReminder(
           await memory.create({
             uri: args.uri,
+            ...(args.title ? { title: args.title } : {}),
             content: args.content,
             priority: args.priority,
             glossary: args.glossary,
             ...(args.disclosure ? { disclosure: args.disclosure } : {}),
-            ...(args.layer ? { layer: args.layer } : {}),
             ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
             ...(args.valid_to ? { validTo: args.valid_to } : {}),
           }),
@@ -215,15 +226,16 @@ export function buildMcpServer(
     'kioku_update',
     {
       description:
-        '修改已有记忆。改之前先用 kioku_get 读正文；带上 expected_version 防止覆盖别人的修改。',
+        '修改已有记忆。改之前先用 kioku_get 读正文；带上 expected_version 防止覆盖别人的修改。' +
+        '改标题不改坐标；要换位置、标识或归属（坐标的开头）用 kioku_move。',
       inputSchema: {
-        uri: MemoryUri,
+        uri: MemoryUri.describe('要修改的记忆的坐标（URI）'),
+        title: UpdateMemoryRequest.shape.title.describe(TITLE_HELP),
         content: UpdateMemoryRequest.shape.content.describe('新的完整正文'),
         disclosure: UpdateMemoryRequest.shape.disclosure,
         priority: UpdateMemoryRequest.shape.priority,
-        sensitivity: Sensitivity.optional(),
-        layer: PlainLayer.optional().describe(
-          '新的层。只能在 owner 与 private 之间改；与 base 互转会改变谁看得到它，要在管理界面里改',
+        sensitivity: Sensitivity.optional().describe(
+          '敏感级：public / internal / private / secret；user:// 下的不能是 public',
         ),
         glossary_add: UpdateMemoryRequest.shape.glossaryAdd,
         glossary_remove: UpdateMemoryRequest.shape.glossaryRemove,
@@ -239,11 +251,11 @@ export function buildMcpServer(
           await memory.update(
             {
               uri: args.uri,
+              ...(args.title !== undefined ? { title: args.title } : {}),
               ...(args.content !== undefined ? { content: args.content } : {}),
               ...(args.disclosure !== undefined ? { disclosure: args.disclosure } : {}),
               ...(args.priority !== undefined ? { priority: args.priority } : {}),
               ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
-              ...(args.layer ? { layer: args.layer } : {}),
               ...(args.glossary_add ? { glossaryAdd: args.glossary_add } : {}),
               ...(args.glossary_remove ? { glossaryRemove: args.glossary_remove } : {}),
               ...(args.valid_to !== undefined ? { validTo: args.valid_to } : {}),
@@ -261,7 +273,7 @@ export function buildMcpServer(
     'kioku_delete',
     {
       description: '删除一条记忆。历史事件会保留，必要时可以恢复。',
-      inputSchema: { uri: MemoryUri },
+      inputSchema: { uri: MemoryUri.describe('要删除的记忆的坐标（URI）') },
       annotations: { destructiveHint: true },
     },
     ({ uri }) =>
@@ -275,18 +287,15 @@ export function buildMcpServer(
     'kioku_move',
     {
       description:
-        '修改记忆的 URI（改名或移到别的父节点下）。移到 persona:// 或 app:// 下时层跟着 URI 变；' +
-        '从那里移出时要用 layer 指定新的层（base、owner 或 private）。',
+        '修改记忆的坐标（URI）：换最后一段是改标识，换中间各级是挪位置，换开头就是改归属（例如从 core:// 移到 app://<应用>/）。' +
+        '共享的归属（core://、persona://、app://）与本人（user://）之间不能通过访问密钥移动：这会改变谁读得到它，要在管理界面里由人来移。' +
+        '标题不变；只有标识变了、标题又就是原来的标识时，按新坐标重新取：正文有 # 标题取它，没有就用新的标识。',
       inputSchema: {
-        from: MemoryUri,
-        to: MemoryUri,
-        layer: PlainLayer.optional().describe('移出 persona:// 或 app:// 时的新层'),
+        from: MemoryUri.describe('现在的坐标（URI）'),
+        to: MemoryUri.describe('新的坐标（URI）'),
       },
     },
-    ({ from, to, layer }) =>
-      tool(async () =>
-        formatMemory(await memory.move({ from, to, ...(layer ? { layer } : {}) }, 'kioku_move')),
-      ),
+    ({ from, to }) => tool(async () => formatMemory(await memory.move({ from, to }, 'kioku_move'))),
   )
 
   server.registerTool(
@@ -317,7 +326,7 @@ export function buildMcpServer(
     'kioku_credential_save',
     {
       description:
-        '新建或修改凭据（要能读写私人层的 secret 级 Key）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
+        '新建或修改凭据（要能读写本人（user://）、secret 级的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
         '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。值由 Kioku 托管时给 values；值在外部密码管理器里时给 provider_id、location 与 fields，' +
         'Kioku 只记条目位置、不存值。说明里不要写值。',
       inputSchema: {

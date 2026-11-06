@@ -1,15 +1,13 @@
 import { randomUUID } from 'node:crypto'
 
 import {
-  LAYER_NAMES,
+  sensitivityAllowed,
   type SpaceImportCounts,
   type SpaceImportPreview,
   type SpaceImportResult,
 } from '@kioku/contracts'
-import { sql } from 'drizzle-orm'
 import type { z } from 'zod'
 
-import { lapsed } from '../access/access'
 import { placeholderIdentifiers } from '../credential/placeholders'
 import { sealCredentialValues } from '../credential/service'
 import type { MasterKey } from '../crypto/keyring'
@@ -53,7 +51,6 @@ import {
   SPACE_EXPORT_MAX_PLAIN_BYTES,
   SPACE_EXPORT_VERSION,
   SpaceExportHeader,
-  SpaceExportHeaderV1,
   SpaceExportRecord,
   type AppRecord,
   type CredentialRecord,
@@ -67,8 +64,8 @@ import {
 
 // 把空间的导出文件导入成这个实例里的一个新空间，导入人是新空间的 owner。全部在一个事务里写：
 // 失败时什么都不留下，新空间也不会出现。id 全部重新生成，文件里的互相指认按新 id 对上；
-// 导出人的画像层、私人层、凭据与凭据源归导入人，对象上「这是我」的标记也换成导入人
-// （画像层会进导入人的 agent 的启动上下文，所以导入之前先用 inspectSpaceImport 告诉他文件是谁导出的、有多少）。
+// 导出人的本人记忆、凭据与凭据源归导入人，对象上「这是我」的标记也换成导入人
+// （本人的记忆会进导入人的 agent 的启动加载，所以导入之前先用 inspectSpaceImport 告诉他文件是谁导出的、有多少）。
 // secret 记忆与托管的凭据值用这个实例的主密钥重新加密（新的数据密钥，aad 绑新的 id）；
 // 没配主密钥而文件里有这两样时拒绝导入，不悄悄丢掉。
 // 记忆按导出时的样子写回（来源、来源作用域、有效期、时间都不变；不可信来源的仍是不可信，照样进待审），
@@ -105,9 +102,8 @@ function parseLine<T>(value: unknown, schema: z.ZodType<T>, lineNo: number): T {
   return parsed.data
 }
 
-// 认得的文件头，按格式版本：这个版本写的，和更早的（读进来换成这个版本的样子）
+// 认得的文件头：只有这个版本写的（见 SPACE_EXPORT_VERSION）
 const HEADERS = new Map<unknown, z.ZodType<SpaceExportHeader>>([
-  [1, SpaceExportHeaderV1],
   [SPACE_EXPORT_VERSION, SpaceExportHeader],
 ])
 
@@ -124,7 +120,7 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   if (!header) {
     throw new MemoryError(
       400,
-      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 支持 1 到 ${SPACE_EXPORT_VERSION}。请升级到导出它的版本或更新的版本后再导入。`,
+      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，无法导入；更新的版本请升级 Kioku 后再导入。`,
     )
   }
   const result: ParsedSpaceExport = {
@@ -185,11 +181,9 @@ function distinct<T extends { line: number }>(
   }
 }
 
-const PER_MEMBER_LAYERS = new Set(['owner', 'private'])
-
-// 文件里的互相指认要对得上，URI 不能冲突，层与归属要一致：写库之前查一遍，出错时说清是哪一行，
-// 不等写到一半被数据库的约束拦下。now 是数据库的时间（见 databaseNow），判断记忆过期没有和触发器用同一个钟
-export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
+// 文件里的互相指认要对得上，坐标不能冲突，归属要和坐标、所属的人格与应用一致：写库之前查一遍，出错时说清是哪一行，
+// 不等写到一半被数据库的约束拦下
+export function checkSpaceExport(x: ParsedSpaceExport): void {
   const personaById = byId(x.personas, '人格')
   distinct(x.personas, (p) => p.slug, '人格的标识')
   for (const p of x.personas) {
@@ -241,24 +235,24 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
   }
 
   byId(x.memories, '记忆')
-  // URI 的规则和数据库一样：同一归属里不重复，已过期的也算（唯一索引）；共享的与个人的（导入后都是导入人的）
-  // 不共存，只看现在还有效的（URI 互斥的触发器：已失效或过期的记录不挡别人）。导出带着已过期的记忆，
-  // 共享节点过期之后同一个 URI 上又有了个人节点，这样的两条一起导出、一起导入。
-  // 写库的事务比这里晚开始，那时过期的只会更多，这里通过了触发器也不会拦
-  const live = (m: MemoryRecord) =>
-    !lapsed({ validTo: optionalTime(m.validTo), expiresAt: optionalTime(m.expiresAt) }, now)
-  const shared = new Set<string>()
-  const mine = new Set<string>()
-  const liveShared = new Set<string>()
-  const liveMine = new Set<string>()
+  // 坐标的规则和数据库一样：同一归属里不重复，已过期的也算（唯一索引）。本人的记忆导入后都是导入人的；
+  // 共享的与本人的开头不同，不会互相撞
+  const uris = new Set<string>()
   for (const m of x.memories) {
-    const label = `第 ${m.line} 行${m.uri ? `记忆 ${m.uri}` : '抽取的记忆'}`
-    if ((m.form === 'curated') !== (m.uri !== null)) throw invalid(`${label} 的形态与 URI 不符`)
-    if (m.provenance === 'untrusted' && m.layer !== 'subject' && m.layer !== 'episode') {
-      throw invalid(`${label} 来自未确认来源，只能在联系人层或情节层`)
+    const label = `第 ${m.line} 行${m.uri ? `记忆 ${m.uri}` : '联系人的事实'}`
+    if (m.layer === 'episode') throw invalid(`${label} 是会话摘要：会话摘要不随空间导出`)
+    if ((m.form === 'curated') !== (m.uri !== null)) throw invalid(`${label} 的形态与坐标不符`)
+    if ((m.form === 'curated') !== (m.title !== null)) throw invalid(`${label} 的形态与标题不符`)
+    if (m.provenance === 'untrusted' && m.layer !== 'subject') {
+      throw invalid(`${label} 来自未确认来源，只能是联系人的事实`)
+    }
+    if (!sensitivityAllowed(m.layer, m.sensitivity)) {
+      throw invalid(`${label} 属于本人，本人的记忆不设公开`)
     }
     const parsed = m.uri ? parseUri(m.uri) : null
-    const namespaced = parsed?.domain === PERSONA_DOMAIN || parsed?.domain === APP_DOMAIN
+    if (parsed ? parsed.domain !== m.layer : m.layer !== 'subject') {
+      throw invalid(`${label} 的坐标开头与归属不符`)
+    }
     const owners = { persona: m.personaId, app: m.appId, subject: m.subjectId }
     const expected =
       m.layer === 'persona' || m.layer === 'app' || m.layer === 'subject' ? m.layer : null
@@ -277,21 +271,13 @@ export function checkSpaceExport(x: ParsedSpaceExport, now: Date): void {
       if (parsed && (parsed.domain !== APP_DOMAIN || parsed.namespaceSlug !== app.slug)) {
         throw invalid(`${label} 不在所属应用 ${app.slug} 下`)
       }
-    } else if (namespaced) {
-      throw invalid(`${label} 位于 ${parsed!.domain}:// 下，却属于${LAYER_NAMES[m.layer]}层`)
     }
     if (m.layer === 'subject' && !subjectById.has(m.subjectId!)) {
       throw invalid(`${label} 的联系人不在文件中`)
     }
     if (!m.uri) continue
-    const personal = PER_MEMBER_LAYERS.has(m.layer)
-    const bucket = personal ? mine : shared
-    if (bucket.has(m.uri)) throw invalid(`${label} 的 URI 重复`)
-    bucket.add(m.uri)
-    if (live(m)) (personal ? liveMine : liveShared).add(m.uri)
-  }
-  for (const uri of liveMine) {
-    if (liveShared.has(uri)) throw invalid(`URI ${uri} 既有有效的共享记忆，又有有效的个人记忆`)
+    if (uris.has(m.uri)) throw invalid(`${label} 的坐标重复`)
+    uris.add(m.uri)
   }
 }
 
@@ -320,8 +306,7 @@ function countsOf(x: ParsedSpaceExport): SpaceImportCounts {
     subjects: x.subjects.length,
     linkedSubjects: x.subjects.filter((s) => s.linkedToExporter).length,
     memories: x.memories.length,
-    ownerMemories: layer('owner'),
-    privateMemories: layer('private'),
+    userMemories: layer('user'),
     secrets: x.memories.filter((m) => m.sensitivity === 'secret').length,
     credentials: x.credentials.length,
     providers: x.providers.length,
@@ -334,12 +319,6 @@ export interface InspectSpaceOptions {
 }
 
 // 解开文件、按导入时的规则核对一遍，不写库：返回解开的内容
-// 数据库的现在。URI 互斥的触发器按数据库的 now() 判断记录过期没有，导入前核对时用同一个钟，不用应用的时间
-async function databaseNow(db: Db): Promise<Date> {
-  const [row] = await db.execute<{ now: Date | string }>(sql`select now() as now`)
-  return new Date(row!.now)
-}
-
 async function openAndCheck(
   db: Db,
   masterKey: MasterKey | null,
@@ -350,7 +329,7 @@ async function openAndCheck(
     maxPlainBytes: SPACE_EXPORT_MAX_PLAIN_BYTES,
   })
   const x = parseSpaceExport(plain)
-  checkSpaceExport(x, await databaseNow(db))
+  checkSpaceExport(x)
   requireMasterKey(x, masterKey)
   return x
 }
@@ -461,21 +440,17 @@ async function writeSpace(
   await tx.insert(spaces).values({
     id: spaceId,
     name: ctx.name,
-    domainLayers: x.header.space.domainLayers,
     extractionMonthlyTokens: x.header.space.extractionMonthlyTokens,
     extractionDailyWrites: x.header.space.extractionDailyWrites,
   })
   derived('新空间的成员')
-  // 导出人的画像层与私人层归了导入人，导出人关掉的 Dream 整理在导入人身上也关着，由导入人决定要不要打开
+  // 导出人的本人记忆归了导入人，导出人关掉的 Dream 整理在导入人身上也关着，由导入人决定要不要打开
   await tx.insert(spaceMembers).values({
     spaceId,
     accountId,
     role: 'owner',
     dreamPrivate: x.header.exporter.dreamPrivate,
   })
-  // app.importing_space 告诉 URI 互斥的触发器：这是导入新空间的事务，空间这一行刚写下、
-  // 别的事务还看不到它，不用为每个 URI 加咨询锁（见 0023 迁移）
-  await tx.execute(sql`select set_config('app.importing_space', ${spaceId}, true)`)
 
   const personaIds = new Map(x.personas.map((p) => [p.id, randomUUID()]))
   const appIds = new Map(x.apps.map((a) => [a.id, randomUUID()]))
@@ -658,12 +633,13 @@ async function writeSpace(
           sensitivity: m.sensitivity,
           provenance: m.provenance,
           originScope: scopeOf(m.originScope),
-          ownerAccountId: PER_MEMBER_LAYERS.has(m.layer) ? accountId : null,
+          ownerAccountId: m.layer === 'user' ? accountId : null,
           personaId: mapped(personaIds, m.personaId),
           appId: mapped(appIds, m.appId),
           subjectId: mapped(subjectIds, m.subjectId),
           domain: parsed?.domain ?? null,
           path: parsed?.path ?? null,
+          title: m.title,
           ...(m.sensitivity === 'secret'
             ? { content: null, ...sealMemoryContent(masterKey!, id, m.content) }
             : { content: m.content, ciphertext: null, wrappedKey: null, keyId: null }),

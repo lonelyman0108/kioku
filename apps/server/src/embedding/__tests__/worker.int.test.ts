@@ -9,7 +9,12 @@ import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { memories, memoryEmbeddings, memoryGlossary, settings, spaces } from '../../db/schema'
 import { startJobs, type Jobs } from '../../jobs/queue'
-import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import {
+  openTestDatabase,
+  resetDatabase,
+  summaryConversation,
+  testDatabaseUrl,
+} from '../../testing/db'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { startFakeEmbeddingServer } from '../../testing/fakeEmbeddingServer'
 import { bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
@@ -104,7 +109,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
       await body(async (uri, content) => {
         const res = await withJobs.request(
           '/v1/memories',
-          jsonRequest('POST', { uri, content, layer: 'base' }, bearer(key)),
+          jsonRequest('POST', { uri, content }, bearer(key)),
         )
         expect(res.status).toBe(201)
         return ((await res.json()) as { id: string }).id
@@ -116,7 +121,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
   it('写回时记忆正被别的事务锁着就跳过、交给调用方重试，不等锁', async () => {
     const embedder = fakeEmbedder()
-    const id = await create({ uri: 'core://agent', content: '先读正文再信任', layer: 'base' })
+    const id = await create({ uri: 'core://agent', content: '先读正文再信任' })
     const skipped: string[][] = []
     await withSpace(database.db, ws.spaceId, async (tx) => {
       await tx.execute(sql`select id from memories where id = ${id} for update`)
@@ -135,8 +140,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     const skipped: string[][] = []
     const onSkipped = (ids: string[]) => void skipped.push(ids)
     // 每种情况一条还没有向量的记忆：已经有最新的向量时不用锁行，测不出来
-    const fresh = (path: string) =>
-      create({ uri: `core://${path}`, content: `${path} 的正文`, layer: 'base' })
+    const fresh = (path: string) => create({ uri: `core://${path}`, content: `${path} 的正文` })
     // 另一个事务拿着这一行上的某种锁（还没提交）时生成向量
     const whileHolding = (hold: (tx: Tx) => Promise<unknown>, id: string) =>
       withSpace(database.db, ws.spaceId, async (tx) => {
@@ -189,7 +193,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
   it('只剩别的模型的旧向量要清时，往记忆上写外键的事务同样不挡它', async () => {
     const embedder = fakeEmbedder()
-    const id = await create({ uri: 'core://cleaned', content: '已经有向量的一条', layer: 'base' })
+    const id = await create({ uri: 'core://cleaned', content: '已经有向量的一条' })
     expect(await embedMemories(database.db, embedder, ws.spaceId, [id])).toBe(1)
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx.insert(memoryEmbeddings).values({
@@ -210,7 +214,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
   it('生成向量；正文不变时不重复请求，改了才重新生成', async () => {
     const embedder = fakeEmbedder()
-    const id = await create({ uri: 'core://agent', content: '先读正文再信任', layer: 'base' })
+    const id = await create({ uri: 'core://agent', content: '先读正文再信任' })
     expect(await embedMemories(database.db, embedder, ws.spaceId, [id])).toBe(1)
     expect(await embedMemories(database.db, embedder, ws.spaceId, [id])).toBe(0)
     expect(embedder.calls).toHaveLength(1)
@@ -228,11 +232,15 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
   it('secret 不生成向量；删除后向量随之清除', async () => {
     const embedder = fakeEmbedder()
-    const secret = await create({ uri: 'home://wifi', content: 'hunter2', sensitivity: 'secret' })
+    const secret = await create({
+      uri: 'user://home/wifi',
+      content: 'hunter2',
+      sensitivity: 'secret',
+    })
     expect(await embedMemories(database.db, embedder, ws.spaceId, [secret])).toBe(0)
     expect(embedder.calls).toHaveLength(0)
 
-    const id = await create({ uri: 'core://x', content: 'x', layer: 'base' })
+    const id = await create({ uri: 'core://x', content: 'x' })
     await embedMemories(database.db, embedder, ws.spaceId, [id])
     await app.request('/v1/memories?uri=core%3A%2F%2Fx', { method: 'DELETE', headers: bearer(key) })
     await embedMemories(database.db, embedder, ws.spaceId, [id])
@@ -241,7 +249,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
   it('过期的记忆不生成向量，过期之前生成的在下次处理时删掉，补齐的范围与覆盖率的口径一致；重新生效之后再生成', async () => {
     const embedder = fakeEmbedder()
-    const id = await create({ uri: 'core://soon', content: '很快过期', layer: 'base' })
+    const id = await create({ uri: 'core://soon', content: '很快过期' })
     expect(await embedMemories(database.db, embedder, ws.spaceId, [id])).toBe(1)
     const validTo = (at: Date | null) =>
       withSpace(database.db, ws.spaceId, (tx) =>
@@ -268,8 +276,8 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
   it('每小时的清理锁着一条记忆、正删它的向量时，向量任务照常做完别的，不在向量行上等锁', async () => {
     const embedder = fakeEmbedder()
-    const a = await create({ uri: 'core://a', content: '照常生成', layer: 'base' })
-    const b = await create({ uri: 'core://b', content: '已经过期', layer: 'base' })
+    const a = await create({ uri: 'core://a', content: '照常生成' })
+    const b = await create({ uri: 'core://b', content: '已经过期' })
     await withSpace(database.db, ws.spaceId, async (tx) => {
       await tx
         .update(memories)
@@ -317,7 +325,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   })
 
   it('全量补齐覆盖所有记忆；换模型后旧向量被替换', async () => {
-    for (const p of ['a', 'b', 'c']) await create({ uri: `core://${p}`, content: p, layer: 'base' })
+    for (const p of ['a', 'b', 'c']) await create({ uri: `core://${p}`, content: p })
     expect(await backfillEmbeddings(database.db, fakeEmbedder('m1'))).toBe(3)
     expect(await backfillEmbeddings(database.db, fakeEmbedder('m1'))).toBe(0)
     expect(await backfillEmbeddings(database.db, fakeEmbedder('m2'))).toBe(3)
@@ -343,7 +351,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     try {
       await withJobs.request(
         '/v1/memories',
-        jsonRequest('POST', { uri: 'core://auto', content: '自动', layer: 'base' }, bearer(key)),
+        jsonRequest('POST', { uri: 'core://auto', content: '自动' }, bearer(key)),
       )
       const deadline = Date.now() + 20_000
       while (Date.now() < deadline && (await embeddings()).length === 0) {
@@ -389,11 +397,11 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
     const { embedder, state } = pickyEmbedder('坏的')
     const source = staticEmbedderSource(embedder)
     const good = [
-      await create({ uri: 'core://a', content: '好的一条', layer: 'base' }),
-      await create({ uri: 'core://b', content: '好的另一条', layer: 'base' }),
+      await create({ uri: 'core://a', content: '好的一条' }),
+      await create({ uri: 'core://b', content: '好的另一条' }),
     ]
-    const bad = await create({ uri: 'core://bad', content: '坏的一条', layer: 'base' })
-    const locked = await create({ uri: 'core://locked', content: '锁着的一条', layer: 'base' })
+    const bad = await create({ uri: 'core://bad', content: '坏的一条' })
+    const locked = await create({ uri: 'core://locked', content: '锁着的一条' })
     const target = (memoryId: string) => ({ spaceId: ws.spaceId, memoryId })
     // 坏的那条连着改过两次，有两项（第 1 与第 4 项）
     const targets = [target(good[0]!), target(bad), target(good[1]!), target(locked), target(bad)]
@@ -427,8 +435,8 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   it('一批里有几个空间的记忆：按空间分开读写，同一个空间的合起来请求一次', async () => {
     const embedder = fakeEmbedder()
     const here = [
-      await create({ uri: 'core://a', content: '这个空间的一条', layer: 'base' }),
-      await create({ uri: 'core://b', content: '这个空间的另一条', layer: 'base' }),
+      await create({ uri: 'core://a', content: '这个空间的一条' }),
+      await create({ uri: 'core://b', content: '这个空间的另一条' }),
     ]
     const [other] = await database.db.insert(spaces).values({ name: '另一个' }).returning()
     const [there] = await withSpace(database.db, other!.id, (tx) =>
@@ -437,11 +445,12 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
         .values({
           spaceId: other!.id,
           form: 'curated',
-          layer: 'base',
+          layer: 'core',
           sensitivity: 'private',
           provenance: 'owner',
           domain: 'core',
           path: 'a',
+          title: 'a',
           content: '另一个空间的一条',
         })
         .returning(),
@@ -474,11 +483,12 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
           ...(id ? { id } : {}),
           spaceId,
           form: 'curated',
-          layer: 'base',
+          layer: 'core',
           sensitivity: 'private',
           provenance: 'owner',
           domain: 'core',
           path,
+          title: path,
           content,
         })
         .returning({ id: memories.id }),
@@ -648,6 +658,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
           layer: 'episode',
           sensitivity: 'private',
           provenance: 'owner',
+          conversationId: await summaryConversation(tx, ws.spaceId),
           content: '一段会话摘要',
           expiresAt: new Date(Date.now() + 86_400_000),
         })
@@ -929,7 +940,7 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   it('后台任务写回时被锁着的另排新任务：原任务做完时新任务已经排好，放开之后补上', async () => {
     const embedder = fakeEmbedder()
     // 先写好记忆（这个 app 不排向量任务），锁住它，再交给后台任务
-    const id = await create({ uri: 'core://locked', content: '锁着的一条', layer: 'base' })
+    const id = await create({ uri: 'core://locked', content: '锁着的一条' })
     await withQueue(embedder, async (_write, jobs) => {
       let locked!: () => void
       let release!: () => void
@@ -959,8 +970,8 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
 
   it('清掉记下的错误时出错只记日志：已经写好的不算失败，被锁着的照样另排', async () => {
     const embedder = fakeEmbedder()
-    const id = await create({ uri: 'core://a', content: '好的一条', layer: 'base' })
-    const locked = await create({ uri: 'core://locked', content: '锁着的一条', layer: 'base' })
+    const id = await create({ uri: 'core://a', content: '好的一条' })
+    const locked = await create({ uri: 'core://locked', content: '锁着的一条' })
     await recordEmbeddingError(database.db, embedder.model, '之前的错误')
     // 让删除那条错误记录时数据库报错
     await database.db.execute(
@@ -1097,14 +1108,14 @@ describe.skipIf(!testDatabaseUrl)('向量生成', () => {
   })
 
   it('全文检索列由数据库生成，secret 不进索引', async () => {
-    await create({ uri: 'home://router', content: '路由器在机房', layer: 'private' })
-    await create({ uri: 'home://wifi', content: '机房无线密码', sensitivity: 'secret' })
+    await create({ uri: 'user://home/router', content: '路由器在机房' })
+    await create({ uri: 'user://home/wifi', content: '机房无线密码', sensitivity: 'secret' })
     const matched = await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .select({ path: memories.path })
         .from(memories)
         .where(sql`${memories.fts} @@ plainto_tsquery('kioku_zh', '机房')`),
     )
-    expect(matched.map((r) => r.path)).toEqual(['router'])
+    expect(matched.map((r) => r.path)).toEqual(['home/router'])
   })
 })

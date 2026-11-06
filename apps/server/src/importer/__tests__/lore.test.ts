@@ -3,8 +3,11 @@ import { describe, expect, it } from 'vitest'
 import {
   assertExecutable,
   credentialHints,
+  loreTitle,
+  plainSensitivity,
   planFingerprint,
   planImport,
+  requestLayer,
   type ImportPlan,
   type ImportPreview,
   type LoreNode,
@@ -52,14 +55,48 @@ describe('Lore 导入计划', () => {
       [],
       options,
     )
-    expect(plan.memories.map((m) => [m.source, m.request.uri, m.request.layer])).toEqual([
-      ['core://agent', 'core://agent', 'base'],
-      ['core://soul', 'persona://default/soul', 'persona'],
-      ['core://agent/claudecode', 'app://claudecode/agent', 'app'],
-      ['preferences://user', 'preferences://user', 'owner'],
-      ['infra://office_network', 'infra://office_network', 'private'],
+    expect(
+      plan.memories.map((m) => [
+        m.source,
+        m.request.uri,
+        requestLayer(m.request),
+        m.request.sensitivity,
+      ]),
+    ).toEqual([
+      ['core://agent', 'core://agent', 'core', 'public'],
+      ['core://soul', 'persona://default/soul', 'persona', 'public'],
+      ['core://agent/claudecode', 'app://claudecode/agent', 'app', 'internal'],
+      ['preferences://user', 'user://preferences/user', 'user', 'internal'],
+      ['infra://office_network', 'user://infra/office_network', 'user', 'private'],
     ])
     expect(plan.memories.map((m) => m.request.priority)).toEqual([0, 0, 0, 0, 1])
+  })
+
+  it('标题取正文第一个 # 标题，没有就用坐标的标识；标成 secret 的只用标识，和同步项、命令行同一个取法', () => {
+    const plan = planImport(
+      snapshot(
+        node('infra://nas', { content: '说明\n# 存储服务器\n## 别的' }),
+        node('infra://router', { content: '# 路由器密码\nhunter2' }),
+        node('infra://vpn', { content: '# 用 {{cred:vpn}} 登录\n正文' }),
+        node('preferences://user'),
+      ),
+      [],
+      { ...options, secretUris: new Set(['infra://router']) },
+    )
+    expect(
+      plan.memories.map((m) => [m.request.uri, m.request.title, m.request.sensitivity]),
+    ).toEqual([
+      ['user://infra/nas', '存储服务器', 'private'],
+      ['user://infra/router', 'router', 'secret'],
+      ['user://infra/vpn', 'vpn', 'private'],
+      ['user://preferences/user', 'user', 'internal'],
+    ])
+    for (const m of plan.memories) {
+      const layer = requestLayer(m.request)
+      const secret = m.request.sensitivity === 'secret'
+      expect(loreTitle(m.request.content, m.request.uri, secret)).toBe(m.request.title)
+      if (!secret) expect(plainSensitivity(m.source, layer)).toBe(m.request.sensitivity)
+    }
   })
 
   it('运行时先按应用标识匹配，再按运行时类型匹配，都没有就新建', () => {
@@ -142,7 +179,11 @@ describe('Lore 导入计划', () => {
       [],
       options,
     )
-    expect(twice.memories).toHaveLength(1)
+    // Lore 里 persona:// 下的节点和别的分区一样进本人，不和 core://soul 撞
+    expect(twice.memories.map((m) => m.request.uri)).toEqual([
+      'persona://default/soul',
+      'user://persona/default/soul',
+    ])
     expect(twice.skipped.map((s) => s.reason)).toContain(
       '和 core://soul 映射到同一个 persona://default/soul',
     )
@@ -187,9 +228,9 @@ describe('Lore 导入计划', () => {
     )
     expect(plan.memories.map((m) => m.request.sensitivity)).toEqual([
       'secret',
-      undefined,
-      undefined,
-      undefined,
+      'private',
+      'private',
+      'private',
     ])
     expect(plan.errors).toEqual([{ kind: 'secretNotFound', uri: 'infra://nope' }])
     expect(plan.warnings).toEqual([
@@ -219,7 +260,7 @@ describe('Lore 导入计划', () => {
     ])
   })
 
-  it('别名、没有正文、占用保留 domain 的节点不导入，并说明原因', () => {
+  it('别名、没有正文、正文太长的节点不导入，并说明原因；Lore 里 persona:// 下的照常进本人', () => {
     const plan = planImport(
       snapshot(
         node('infra://a', { aliases: ['infra://old_a'] }),
@@ -230,11 +271,13 @@ describe('Lore 导入计划', () => {
       [],
       options,
     )
-    expect(plan.memories.map((m) => m.source)).toEqual(['infra://a'])
+    expect(plan.memories.map((m) => [m.source, m.request.uri])).toEqual([
+      ['infra://a', 'user://infra/a'],
+      ['persona://x', 'user://persona/x'],
+    ])
     expect(plan.skipped.map((s) => s.source)).toEqual([
       'infra://old_a',
       'infra://empty',
-      'persona://x',
       'infra://big',
     ])
   })
@@ -291,7 +334,7 @@ describe('Lore 导入计划', () => {
     ])
   })
 
-  it('正文里有占位符的节点只能进私人层：映射到基础层、主人层的在计划里就不导入', () => {
+  it('正文里有占位符的节点只能进本人的私密记忆：映射到通用、本人的内部记忆的在计划里就不导入', () => {
     const body = '登录用 {{cred:router#password}}'
     const plan = planImport(
       snapshot(
@@ -306,12 +349,12 @@ describe('Lore 导入计划', () => {
     expect(skipsOf(plan)).toEqual([
       {
         source: 'core://router',
-        reason: expect.stringContaining('core://router 属于基础层'),
+        reason: expect.stringContaining('core://router 是通用 · 公开'),
         importKey: 'core://router@',
       },
       {
         source: 'preferences://router',
-        reason: expect.stringContaining('preferences://router 属于个人画像层'),
+        reason: expect.stringContaining('user://preferences/router 是本人 · 内部'),
         importKey: 'preferences://router@',
       },
     ])
@@ -486,7 +529,7 @@ describe('Lore 导入计划', () => {
       const all = planImport(snap, [], options)
       expect(all.memories.map((m) => [m.source, m.request.uri])).toEqual([
         ['core://agent/claude_code', 'app://claude-code/agent'],
-        ['infra://other', 'infra://other'],
+        ['infra://other', 'user://infra/other'],
       ])
       const clash = {
         source: 'core://agent/claude-code',
@@ -602,7 +645,7 @@ describe('Lore 导入计划', () => {
         'app://open-claw/agent',
         'app://claude-a/agent',
         'app://claude-b/agent',
-        'infra://a',
+        'user://infra/a',
       ])
       const occupied = keysOf(draft, 'app://open-claw/agent', 'app://claude-a/agent')
       const plan = planImport(snap, mine, { ...options, occupied })
@@ -707,12 +750,19 @@ describe('Lore 导入计划', () => {
           items: [
             {
               source: 'infra://x',
-              uri: 'infra://x',
+              uri: 'user://infra/x',
+              title: 'x 的标题',
               state: 'update',
               changes: ['content', 'priority'],
-              request: { uri: 'infra://x', expectedVersion: 3, expectedId: 'a' },
+              request: { uri: 'user://infra/x', expectedVersion: 3, expectedId: 'a' },
             },
-            { source: 'infra://y', uri: 'infra://y', state: 'current', changes: [] },
+            {
+              source: 'infra://y',
+              uri: 'user://infra/y',
+              title: 'y',
+              state: 'current',
+              changes: [],
+            },
           ],
           goneFromLore: ['infra://b', 'infra://a'],
         },
@@ -742,8 +792,9 @@ describe('Lore 导入计划', () => {
         item.updatedAt = new Date('2000-01-01T00:00:00Z')
         item.context.previousVersions = 99
       }
-      times.sync.items[0]!.request = { uri: 'infra://x', expectedVersion: 4, expectedId: 'b' }
+      times.sync.items[0]!.request = { uri: 'user://infra/x', expectedVersion: 4, expectedId: 'b' }
       times.sync.items[1]!.state = 'edited'
+      times.sync.items[1]!.title = '不写入的同步项换了标题'
       times.plan.droppedKeywords.push({ source: 'infra://token', keyword: '词', reason: '不要' })
       times.preview.importedPersonas.push('old')
       expect(fingerprint(times)).toBe(same)
@@ -774,7 +825,7 @@ describe('Lore 导入计划', () => {
         (i) => i.plan.apps[0]!.apps.pop(),
         (i) => (i.preview.targets[0]!.item.source = 'core://agent/other'),
         (i) => (i.preview.targets[0]!.item.request.uri = 'app://claude-c/agent'),
-        (i) => (i.preview.targets[0]!.item.request.layer = 'base'),
+        (i) => (i.preview.targets[0]!.item.request.title = '别的标题'),
         (i) => (i.preview.targets[0]!.item.request.priority = 9),
         (i) => (i.preview.targets[0]!.item.request.disclosure = '别的时候'),
         (i) => i.preview.targets[0]!.item.request.glossary.push('新词'),
@@ -783,7 +834,8 @@ describe('Lore 导入计划', () => {
         (i) => i.preview.targets.pop(),
         (i) => i.plan.skipped.pop(),
         (i) => i.plan.warnings.pop(),
-        (i) => (i.sync.items[0]!.uri = 'infra://z'),
+        (i) => (i.sync.items[0]!.uri = 'user://infra/z'),
+        (i) => (i.sync.items[0]!.title = '别的标题'),
         (i) => i.sync.items[0]!.changes.pop(),
         (i) => (i.sync.items[0]!.state = 'edited'),
         (i) => i.sync.goneFromLore.pop(),

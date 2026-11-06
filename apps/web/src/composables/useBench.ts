@@ -384,7 +384,7 @@ export function createBench() {
   // 返回这条消息的经过；中途作废时是 null
   async function sendToAgent(
     text: string,
-    options: { loop: BenchAgentLoop; system: string; model: string },
+    options: { loop: BenchAgentLoop; turnEnd: boolean; system: string; model: string },
   ): Promise<AgentExchange | null> {
     const target = runTarget()
     if (running.value || !target) return null

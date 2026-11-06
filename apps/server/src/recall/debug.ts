@@ -16,7 +16,7 @@ import {
 import { accessForKey, recallScopeForKey, semanticFor } from '../memory/context'
 import { personaOverride, runInSpace } from '../memory/personas'
 import { formatUri } from '../memory/uri'
-import { bootEntryChars } from './boot'
+import { bootEntryChars, bootHeading, OMITTED_TITLES } from './boot'
 import {
   DEFAULT_MIN_SCORE,
   normalizeQuery,
@@ -44,10 +44,15 @@ export async function bootPreview(
     context: start.context,
     entries: start.boot.entries.map((e) => ({
       uri: e.uri,
+      title: e.title,
       layer: e.layer,
-      chars: bootEntryChars(e.uri, e.content),
+      chars: bootEntryChars(bootHeading(e.uri, e.title), e.content),
     })),
-    omitted: start.boot.omitted,
+    omitted: start.boot.omitted.map((uri, i) => ({
+      uri,
+      title: start.boot[OMITTED_TITLES][i] ?? '',
+    })),
+    summaries: start.summaries,
     recent: start.recent,
     // Symbol 键上的记忆 id 序列化时带不出去
     related: start.related,
@@ -82,7 +87,7 @@ export async function recallDebug(
         personaIds: chain,
         inheritance: true,
       })
-      // 按记忆 id 比对：同一个 URI 上可能还有别的记录（例如过期的共享记录），按 URI 会找错
+      // 按记忆 id 比对：同一个坐标上可能还有别的记录（例如别的成员的本人记忆），按坐标会找错
       const seen = new Set(scored.map((c) => c.id))
       const missing = visible.filter((c) => !seen.has(c.id)).map((c) => c.id)
       return { scored, filtered: await explainHidden(tx, keyAccess, chain, missing) }
@@ -140,6 +145,7 @@ async function explainHidden(
       ? [
           {
             uri: formatUri(row.domain!, row.path!),
+            title: row.title!,
             layer: row.layer,
             sensitivity: row.sensitivity,
             reason,

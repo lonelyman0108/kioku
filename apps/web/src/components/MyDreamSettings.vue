@@ -33,9 +33,7 @@ async function save(includePrivate: boolean) {
     const saved = await api.saveDreamSettings(spaceId, { includePrivate })
     queryClient.setQueryData(dreamSettingsKey(spaceId), saved)
     toast.add({
-      title: saved.includePrivate
-        ? '已开启：将整理当前账号的个人画像层与私人层'
-        : '已关闭：仅整理共享内容',
+      title: saved.includePrivate ? '已开启：将整理当前账号的本人记忆' : '已关闭：仅整理共享内容',
       color: 'success',
     })
   } catch (err) {
@@ -49,7 +47,7 @@ async function save(includePrivate: boolean) {
 <template>
   <SettingsBlock title="整理">
     <template #note>
-      开启后，当前账号的个人画像层与私人层（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。
+      开启后，当前账号的本人记忆（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。
       <Hint>
         <p>每天自动整理一次记忆，只提建议，执行后才会修改。相关建议仅当前账号可见。</p>
         <p class="mt-1">
@@ -66,7 +64,7 @@ async function save(includePrivate: boolean) {
       :model-value="settings.data.value.includePrivate"
       :loading="saving"
       :disabled="saving"
-      label="允许整理个人画像层与私人层"
+      label="允许整理本人记忆"
       @update:model-value="save"
     />
   </SettingsBlock>

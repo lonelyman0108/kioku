@@ -38,25 +38,21 @@ describe('顶部导航', () => {
     expect(labels).toEqual([
       '概览',
       '记忆',
-      '待处理',
-      '人格',
-      '联系人',
+      '对话',
       '凭据',
+      '待处理',
       '应用',
       '召回',
       '测试台',
       '变更记录',
       '设置',
     ])
-    expect([...script.matchAll(/title: '([^']+)'/g)].map((m) => m[1])).toEqual([
-      '知识',
-      '接入',
-      '空间',
-    ])
+    expect([...script.matchAll(/title: '([^']+)'/g)].map((m) => m[1])).toEqual(['接入', '空间'])
   })
 
   it('详情页点亮列表的入口', () => {
-    expect(script).toContain("link('subjects', icons.subjects, ['subjects', 'subject'])")
+    expect(script).toContain("link('conversations', icons.conversations, CONVERSATION_ROUTES)")
+    expect(script).toContain("const CONVERSATION_ROUTES = ['conversations', 'contact']")
     expect(script).toContain("link('apps', icons.apps, ['apps', 'app'])")
   })
 
@@ -165,6 +161,10 @@ describe('保留的逻辑', () => {
     expect(script).toContain('useConsoleSearch(')
     expect(template).toContain('<UDashboardSearch')
     expect(template).toContain('<UDashboardSearchButton')
+    // 空状态不用组件库的「没有匹配的数据」：还在搜记忆时说搜索中
+    expect(template).toContain(
+      `<template #empty>{{ searching ? '搜索中' : '暂无匹配' }}</template>`,
+    )
   })
 
   it('品牌区只有 KiokuMark，外壳不写死品牌字样', () => {

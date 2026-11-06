@@ -88,7 +88,7 @@ def sync_detailed(
     client: AuthenticatedClient,
     of: str,
 ) -> Response[ErrorResponse | MemoryChildren]:
-    """列出一个节点或 domain 根下的直接子节点
+    """列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）
 
     Args:
         of (str):
@@ -117,7 +117,7 @@ def sync(
     client: AuthenticatedClient,
     of: str,
 ) -> ErrorResponse | MemoryChildren | None:
-    """列出一个节点或 domain 根下的直接子节点
+    """列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）
 
     Args:
         of (str):
@@ -141,7 +141,7 @@ async def asyncio_detailed(
     client: AuthenticatedClient,
     of: str,
 ) -> Response[ErrorResponse | MemoryChildren]:
-    """列出一个节点或 domain 根下的直接子节点
+    """列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）
 
     Args:
         of (str):
@@ -168,7 +168,7 @@ async def asyncio(
     client: AuthenticatedClient,
     of: str,
 ) -> ErrorResponse | MemoryChildren | None:
-    """列出一个节点或 domain 根下的直接子节点
+    """列出直接子节点：of 是开头（core、user、persona、app）或坐标前缀（如 user://projects、persona://default）
 
     Args:
         of (str):

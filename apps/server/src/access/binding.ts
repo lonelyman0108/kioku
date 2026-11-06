@@ -102,7 +102,7 @@ function matchCode<T extends { codeHash: string }>(rows: T[], hash: string): T |
   return found
 }
 
-// 绑定会把两个对象并成一个、改对象层记忆的归属，所以要求这把 Key 在私聊里写得了对象层
+// 绑定会把两个对象并成一个、改联系人事实的归属，所以要求这把 Key 在私聊里写得了联系人的事实
 // （应用主人是 viewer 时 Key 什么都写不了）。按私聊的规则判断，不用先解析会话：解析会建对象
 export function canBindWithKey(key: KeyPrincipal): boolean {
   const access = accessForKey(key, {

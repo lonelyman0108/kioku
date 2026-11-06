@@ -32,7 +32,7 @@ import {
 } from '../../testing/fixtures'
 
 const PASSWORD = 'pw-correct-horse-staple'
-const withoutPrivate = LAYERS.filter((l) => l !== 'private')
+const withoutPrivate = LAYERS.filter((l) => l !== 'user')
 const PRIVATE_LEVEL: KeyScopes = { ...FULL_SCOPES, maxSensitivity: 'private' }
 
 describe.skipIf(!testDatabaseUrl)('凭据', () => {

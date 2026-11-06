@@ -36,6 +36,7 @@ import {
   staleNotice,
   syncGroups,
   targetStateLabels,
+  targetTitle,
   tokenInClear,
   type ApplyFailure,
   type NodeFilter,
@@ -307,9 +308,9 @@ const disclosureCut = computed(
     <template #note>
       导入 Lore 的节点，确认计划后才写入。
       <Hint>
-        映射规则与命令行相同：core://agent 进入基础层，core://soul
-        进入人格层，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
-        进入当前账号的个人画像层，其余进入当前账号的私人层。可重复执行：已导入的不重复写入，Lore
+        映射规则与命令行相同：core://agent 进入通用，core://soul
+        进入人格，core://agent/&lt;运行时&gt; 进入当前账号的对应应用，preferences://
+        进入当前账号的本人记忆（内部），其余进入当前账号的本人记忆（私密）。可重复执行：已导入的不重复写入，Lore
         中修改过的按 Lore 同步；在 Kioku 中修改、移动或删除过的不变。
       </Hint>
     </template>
@@ -362,7 +363,7 @@ const disclosureCut = computed(
       >
         <li v-for="uri in result.occupied" :key="`occupied-${uri}`">
           跳过 <code class="uri">{{ uri }}</code
-          >：URI 已被其他记忆占用
+          >：坐标已被其他记忆占用
         </li>
         <li v-for="m in result.movedInLore" :key="`moved-${m.uri}-${m.current}`">
           跳过 <code class="uri">{{ m.uri }}</code
@@ -614,6 +615,7 @@ const disclosureCut = computed(
               </div>
               <div v-for="target in node.targets" :key="target.uri" class="node-target">
                 <UIcon :name="icons.inherits" class="target-arrow" />
+                <span class="target-title">{{ targetTitle(target, secretNow(node, target)) }}</span>
                 <UriPath :uri="target.uri" wrap />
                 <span :class="STATE_CLASSES[target.state]">
                   {{ targetStateLabels[target.state] }}
@@ -674,9 +676,18 @@ const disclosureCut = computed(
               :key="group.state"
               :open="group.state === 'update'"
             >
-              <summary>{{ group.title }}（{{ group.lines.length }}）</summary>
+              <summary>{{ group.heading }}（{{ group.lines.length }}）</summary>
               <ul class="detail-list">
-                <li v-for="(line, i) in group.lines" :key="i">{{ line }}</li>
+                <!-- 和上面的写入目标一样先写标题，坐标跟在后面 -->
+                <li v-for="(line, i) in group.lines" :key="i" class="sync-line">
+                  <span v-if="line.title" class="target-title">{{ line.title }}</span>
+                  <UriPath :uri="line.uri" wrap />
+                  <template v-if="line.target">
+                    <span>→</span>
+                    <UriPath :uri="line.target" wrap />
+                  </template>
+                  <span v-if="line.detail">{{ line.detail }}</span>
+                </li>
               </ul>
             </details>
           </div>
@@ -763,6 +774,18 @@ const disclosureCut = computed(
   width: 12px;
   height: 12px;
   color: var(--ui-text-muted);
+}
+.target-title {
+  font-size: 14px;
+  font-weight: 500;
+  color: var(--ui-text-highlighted);
+}
+.sync-line {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  font-size: 13px;
 }
 summary {
   font-weight: 500;

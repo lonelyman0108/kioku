@@ -4,12 +4,17 @@ import {
   CONVERT_SCOPE_TEXT,
   CREDENTIAL_PLACEHOLDER,
   CREDENTIAL_PLACEHOLDER_START,
+  CURATED_LAYERS,
+  DEFAULT_SENSITIVITY,
   LAYER_NAMES,
-  PLAIN_LAYERS,
+  NAMESPACED_LAYERS,
   PLAINTEXT_CREDENTIAL,
   PLAINTEXT_MASK,
   SENSITIVITIES,
+  sensitivityAllowed,
   UpdateMemoryRequest,
+  URI_FORMAT_MESSAGE,
+  URI_PREFIX_PATTERN,
 } from '@kioku/contracts'
 import type {
   ActivityItem,
@@ -39,7 +44,6 @@ import type {
   MoveMemoryRequest,
   NeverRecalledMemory,
   PageQuery,
-  PlainLayer,
   PlaintextIgnoreRequest,
   Provenance,
   RecalledMemory,
@@ -97,7 +101,7 @@ import {
   replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
-import { isUniqueViolation, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, pgConstraint, pgErrorCode, type Db, type Tx } from '../db/client'
 import {
   decodeTimeCursor,
   encodeTimeCursor,
@@ -140,11 +144,13 @@ import { hasMaskedText } from './masked'
 import { layerWithValue, sensitivityWithValue } from './names'
 import { personaIdsBySlug, runInSpace } from './personas'
 import {
-  DEFAULT_SENSITIVITY,
+  deriveTitle,
   formatUri,
-  layerForDomain,
+  headingsOf,
+  identifierOf,
+  layerOf,
   parseUri,
-  toParsed,
+  withoutHeading,
   type ParsedUri,
 } from './uri'
 
@@ -213,17 +219,16 @@ type MemoryRow = typeof memories.$inferSelect
 // 修改时可以改的字段（URI 与 expectedId 由调用方先核对）
 type UpdateFields = Omit<UpdateMemoryRequest, 'uri' | 'expectedId'>
 
-// 一条记忆属于谁：层，以及按层填的主人、人格或应用
+// 一条记忆属于谁：归属，以及按归属填的所有者、人格或应用
 type Ownership = Pick<MemoryRow, 'layer' | 'ownerAccountId' | 'personaId' | 'appId'>
 
-// 个人的层：按成员各存一份，只有本人读得到；其余的层是共享的
-const PER_MEMBER_LAYERS: readonly Layer[] = ['owner', 'private']
-const perMember = (layer: Layer) => PER_MEMBER_LAYERS.includes(layer)
+// 按成员各存一份的归属：本人，只有本人读得到；记下的另三类（通用、人格、应用）是共享的
+const perMember = (layer: Layer) => layer === 'user'
 
-// 在共享的层与个人的层之间转换会改变谁看得到它（共享的记忆从别人那里消失，或个人的内容给了别人），
-// 所以只能由人在管理界面里做，通过 Key 改层或移动都不行
+// 在共享的归属与本人之间转换会改变谁看得到它（共享的记忆从别人那里消失，或本人的内容给了别人），
+// 所以只能由人在管理界面里做，通过 Key 移动不行
 const KEY_CROSS_OWNERSHIP =
-  '通过 Key 无法在共享层（base）与个人层（owner、private）之间转换记忆，请在管理界面修改'
+  '通过访问密钥无法在共享的归属（core://、persona://、app://）与本人（user://）之间移动记忆：这会改变谁看得到它。请在管理界面移动。'
 
 // Key 只能写应用当前的人格：继承来的祖先人格也被别的应用用着，群聊版的应用不能改掉主人格的设定
 const PERSONA_WRITE =
@@ -232,9 +237,12 @@ const PERSONA_WRITE =
 // 不可信来源只能改动不可信来源写下的记录（见 canModify）
 const UNTRUSTED_MODIFY = '来自群聊或陌生人私聊的写入不能修改受信来源的记忆'
 
-// 含凭据占位符的记忆只能在私人层、敏感级至少 private：读得到占位符的人，正好就是读得到凭据说明的人
+// 含凭据占位符的记忆只能在本人、敏感级至少 private：读得到占位符的人，正好就是读得到凭据说明的人
 const PLACEHOLDER_SCOPE =
-  '含凭据占位符的记忆只能放在私人层（private），敏感级不低于私密（private）。改层、降级或移出私人层前，请先去掉正文中的 {{cred:…}} 引用。'
+  '含凭据占位符的记忆只能放在本人（user://）下，敏感级不低于私密（private）。移出本人或降级前，请先去掉正文中的 {{cred:…}} 引用。'
+// 本人不设公开（见 contracts 的 sensitivityAllowed）
+const USER_PUBLIC =
+  '本人（user://）的记忆不设公开（public）：本人的记忆到不了群聊与陌生人私聊。请改用内部（internal）或更高的敏感级；要在群里用的内容写进人格（persona://）或通用（core://）。'
 const PLAINTEXT_DOWNGRADE =
   '正文疑似含明文密码或令牌。从机密（secret）降级后，这些内容会进入历史、全文检索和向量，且无法收回。请先把值换成凭据占位符，再降级。'
 // 打码时拒绝的写入（见 MemoryContext.maskSecret）
@@ -244,49 +252,39 @@ const MASKED_TEXT_WRITTEN = '正文含测试台的占位文字，并非真实内
 const CONVERT_SECRET = '机密记忆的正文已加密，不进入历史、全文检索和向量，无需转存为凭据'
 const CONVERT_NOT_FOUND = '正文中没有这段值，请重新读取后再转存'
 const CONVERT_ELSEWHERE =
-  'URI、触发场景或关键词中也有这段值。这些字段是明文，也不能放占位符。请先从这些字段去掉，再转存。'
+  '坐标、标题、触发场景或关键词中也有这段值。这些字段是明文，也不能放占位符。请先从这些字段去掉，再转存。'
 const CONVERT_TOO_LONG = '换成占位符后正文超出长度上限。请先删减内容，再转存。'
 
-// 要在一个 URI 上生效的一条（见 uriConflicts）：撤销删除的是那一行本身，ended 是它自己是不是已经过期；
-// 新建的还没有 id，现在有效
+// 要在一个坐标上生效的一条（见 uriConflicts）：撤销删除的是那一行本身；新建的还没有 id
 export interface UriClaim {
   id: string | null
   domain: string | null
   path: string | null
   ownerAccountId: string | null
-  ended: boolean
 }
-// uriConflicts 一条语句查多少个 URI
+// uriConflicts 一条语句查多少个坐标
 const URI_CLAIM_BATCH = 1000
 
-// 别的成员的画像层、私人层记录：调用方看不到
-function foreignPrivate(access: Access, row: Pick<MemoryRow, 'ownerAccountId'>): boolean {
-  return row.ownerAccountId !== null && row.ownerAccountId !== access.ownerAccountId
-}
-
-// claimUri 能让出的过期记录：调用方有写权限的共享或自己的记录；以及别的成员的私人记录——它对任何人都不可见，
-// 又只属于那个成员，不让出就会永远挡住共享 URI。调用方写不了的共享记录留着：
-// 同一归属的写入会撞上唯一索引得到 409，成员节点则可以和它并存（它已不可见）
+// claimUri 能让出的过期记录：调用方改得了的。共享与本人的开头不同，同一个坐标上只有同一归属的记录；
+// 调用方改不了的留着，写入撞上唯一索引得到 409
 function canRelease(
   access: Access,
   row: WriteIntent & Pick<MemoryRow, 'ownerAccountId' | 'provenance'>,
 ): boolean {
-  return foreignPrivate(access, row) || canModify(access, row)
+  return canModify(access, row)
 }
 
-// 新写入的记忆归谁：主人层与私人层按成员各自占用，归写入者；别的层是共享的
+// 新写入的记忆归谁：本人按成员各自占用，归写入者；别的归属是共享的
 export function ownerFor(access: Access, layer: Layer): string | null {
-  return layer === 'owner' || layer === 'private' ? access.ownerAccountId : null
+  return layer === 'user' ? access.ownerAccountId : null
 }
 
-// 这几条要在各自的 URI 上生效（撤销删除、新建）会不会撞上 URI 冲突，返回会撞上的那些。照写入的几步判断：
-// 先由 claimUri 让出调用方能让出的过期记录，剩下的交给数据库——唯一索引 memories_uri_live_idx 看同一归属里没删除的，
-// 已过期的也算；互斥触发器 memories_uri_exclusive 只看两边都还有效的，有一边是共享节点、或者两边属于
-// 同一个成员就冲突（要生效的这一条自己已经过期时不检查）。是否过期照各自的时钟：claimUri 按应用的时间让出，
-// 触发器按数据库的时间（STILL_VALID）。
-// 它不看调用方读不读得到占着的那条：结果说得出别的成员的私人节点占不占某个 URI（不带内容），和写入撞上时的 409 一样多。
-// 所以只给两处用：已删除列表的标记（只算调用方恢复得了的，见 undeleteConflicts），和 Lore 导入的计划（导入者是空间所有者，
-// 只查这次要新建的目标，见 importer/lore.ts）。不做成 MemoryService 的公开方法，访问密钥走得到的路径不要调用它
+// 这几条要在各自的坐标上生效（撤销删除、新建）会不会撞上冲突，返回会撞上的那些。照写入的几步判断：
+// 先由 claimUri 让出调用方能让出的过期记录（按应用的时间判断过期），剩下的交给唯一索引 memories_uri_live_idx：
+// 同一归属里（共享的、或同一个成员的本人）没删除的，已过期的也算。共享与本人的开头不同，不会互相挡。
+// 它不看调用方读不读得到占着的那条，只说占不占，和写入撞上时的 409 一样多。只给两处用：已删除列表的标记
+// （只算调用方恢复得了的，见 undeleteConflicts），和 Lore 导入的计划（导入者是空间所有者，只查这次要新建的目标，
+// 见 importer/lore.ts）。不做成 MemoryService 的公开方法，访问密钥走得到的路径不要调用它
 export async function uriConflicts<T extends UriClaim>(
   tx: Tx,
   access: Access,
@@ -316,7 +314,6 @@ export async function uriConflicts<T extends UriClaim>(
         provenance: memories.provenance,
         validTo: memories.validTo,
         expiresAt: memories.expiresAt,
-        ended: sql<boolean>`(not ${STILL_VALID})`,
       })
       .from(memories)
       .where(
@@ -337,44 +334,58 @@ export async function uriConflicts<T extends UriClaim>(
       else occupants.set(uri, [row])
     }
     for (const claim of batch) {
-      const blocked = (occupants.get(uriOf(claim.domain, claim.path)) ?? []).some((m) => {
-        if (m.id === claim.id) return false
-        // claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出。可能挡着的（同一归属，
-        // 或者有一边是共享节点）都在 claimUri 的候选里；两个成员各自的节点本来就不冲突
-        if (!isValidAt(m, now) && canRelease(access, m)) return false
-        // 同一归属：唯一索引挡着，已过期的也算（两边都有效时触发器也挡，结论一样）
-        if (m.ownerAccountId === claim.ownerAccountId) return true
-        // 归属不同：两边都还有效（按数据库的时间）、有一边是共享节点时触发器挡着；两个成员各自的节点不冲突
-        return (
-          !claim.ended && !m.ended && (claim.ownerAccountId === null || m.ownerAccountId === null)
-        )
-      })
+      const blocked = (occupants.get(uriOf(claim.domain, claim.path)) ?? []).some(
+        (m) =>
+          m.id !== claim.id &&
+          // 两个成员各自的本人不冲突
+          m.ownerAccountId === claim.ownerAccountId &&
+          // claimUri 先让出的不挡：按应用的时间已经过期、调用方让得出
+          !(!isValidAt(m, now) && canRelease(access, m)),
+      )
       if (blocked) taken.add(claim)
     }
   }
   return taken
 }
 
-// 这次写入之前的状态：在谁的哪一层、正文是什么（secret 的要解密，用到时才读）
+// 这次写入之前的状态：在谁的哪一类归属、正文是什么（secret 的要解密，用到时才读）
 interface RefBaseline {
   layer: Layer
   ownerAccountId: string | null
   content: () => string | null
 }
 
-// 占位符只能写在正文里：disclosure 与关键词会进召回与 boot 的线索，任何层的读者都看得到，
-// 写在那里就绕过了「只能在私人层」的规则。只查这次写进去的：规则之前已经写着的不挡移动与撤销删除，
+// 占位符只能写在正文里：标题、disclosure 与关键词会进目录、召回与 boot 的线索，任何归属的读者都看得到，
+// 写在那里就绕过了「只能在本人」的规则。只查这次写进去的：规则之前已经写着的不挡移动与撤销删除，
 // 否则那样的记忆删了就撤销不了
 function checkOutsideContent(
   disclosure: string | null | undefined,
   glossary: readonly string[],
+  title?: string,
 ): void {
-  if ([disclosure ?? '', ...glossary].some(mentionsPlaceholder)) {
+  if ([title ?? '', disclosure ?? '', ...glossary].some(mentionsPlaceholder)) {
     throw new MemoryError(
       400,
-      '触发场景（disclosure）与关键词（glossary）中不能有凭据占位符，占位符只能写在正文中',
+      '标题（title）、触发场景（disclosure）与关键词（glossary）中不能有凭据占位符，占位符只能写在正文中',
     )
   }
+}
+
+// 本人不设公开：写入、改敏感级与移进本人时检查，返回 400（权限范围里这一格本来就不能写）
+function checkSensitivity(layer: Layer, sensitivity: Sensitivity): void {
+  if (!sensitivityAllowed(layer, sensitivity)) throw new MemoryError(400, USER_PUBLIC)
+}
+
+// 违反检查约束时的说法：服务层检查过的，库里的约束只是兜底，绕开服务层的写入撞上时也说清楚是哪一条，不变成 500
+const CHECK_MESSAGES: Record<string, string> = {
+  memories_user_not_public: USER_PUBLIC,
+  memories_title_by_form: '记下的记忆必须有标题（title），来自对话的记忆没有标题',
+  memories_domain_by_layer: '坐标（URI）的开头必须和归属一致：core://、user://、persona://、app://',
+  memories_form_by_layer:
+    '只有通用、人格、应用与本人的记忆有坐标（URI），联系人的事实与会话摘要来自对话',
+  memories_untrusted_layers: '来自群聊或陌生人私聊的写入只能写联系人的事实与会话摘要',
+  memories_owner_by_layer: '本人（user://）的记忆必须归某个成员，共享的记忆不归成员',
+  memories_conversation_by_layer: '只有联系人的事实与会话摘要挂在会话上',
 }
 
 // 在写入的同一个事务里锁住应用行，核对应用现在的主人（见 CreateMeta.requireAppOwner）
@@ -387,20 +398,21 @@ async function assertAppOwner(tx: Tx, appId: string, owner: string): Promise<voi
   if (app?.owner !== owner) throw new MemoryError(403, '此应用已不属于导入者')
 }
 
-// 抽取写下的记忆：对象层的事实挂在对象上，可以推翻同一个对象的一条旧事实；情节层的会话摘要带到期时间
+// 抽取写下的记忆：联系人的事实挂在联系人上，可以推翻同一个联系人的一条旧事实；会话摘要带到期时间
+// 会话摘要带 ownerAccountId 时（不带会话上下文的会话）归这个成员、私密，别的都是公开、不归成员
 export type ExtractedWrite =
   | { layer: 'subject'; subjectId: string; content: string; replaces?: string | undefined }
-  | { layer: 'episode'; content: string; expiresAt: Date }
+  | { layer: 'episode'; content: string; expiresAt: Date; ownerAccountId: string | null }
 
 export type ExtractedOutcome = 'added' | 'updated' | 'skipped'
 
-// Dream 的一条建议要做的事（成员执行前改过的已经换进来）：合并到保留的那条，提炼成一条新的策展记忆，
+// Dream 的一条建议要做的事（成员执行前改过的已经换进来）：合并到保留的那条，提炼成一条新的记忆，
 // 设为过时，确认或删除不可信来源写下的
 export type SuggestionAction =
   | { kind: 'merge'; keepId: string; content: string }
   | {
       kind: 'distill'
-      draft: { uri: string; layer?: PlainLayer; content: string; disclosure: string | null }
+      draft: { uri: string; title?: string; content: string; disclosure: string | null }
     }
   | { kind: 'stale' }
   | { kind: 'review'; verdict: 'confirm' | 'delete' }
@@ -420,7 +432,7 @@ const SUGGESTION_BUSY = '这些记忆正被其他写入修改，请稍后重试'
 // 成员确认之后按建议执行，写下的都记为主人：合并、提炼、确认（和待审队列的确认一样）
 const SUGGESTION_PROVENANCE = 'owner'
 const suggestionStale = () => new MemoryError(409, SUGGESTION_STALE)
-const SUGGESTION_URI_CONFLICT = 'URI 已被其他记忆占用。请更换 URI 后再执行。'
+const SUGGESTION_URI_CONFLICT = '坐标（URI）已被其他记忆占用。请更换坐标后再执行。'
 const SUGGESTION_CONSOLE_ONLY = '整理建议只能在管理界面处理'
 
 // 从别的系统导入时用：事件记成 import 并带上出处，时间沿用来源系统里的
@@ -429,7 +441,7 @@ export interface CreateMeta {
   eventContext?: Record<string, unknown>
   createdAt?: Date
   updatedAt?: Date
-  // 写应用层时要求应用当前的主人是这个账号，在写入的同一个事务里锁住应用行核对：
+  // 写应用的记忆时要求应用当前的所有者是这个账号，在写入的同一个事务里锁住应用行核对：
   // 导入是一个长循环，期间应用被转给别人，也不能把记忆写进别人的应用
   requireAppOwner?: string
   // 来源：不给时是这次写入的来源；按 Dream 的建议执行时记为主人
@@ -446,7 +458,7 @@ export interface UpdateMeta {
 
 function parse(uri: string): ParsedUri {
   const parsed = parseUri(uri)
-  if (!parsed) throw new MemoryError(400, `URI 格式错误：${uri}`)
+  if (!parsed) throw new MemoryError(400, `坐标（URI）格式错误：${uri}。${URI_FORMAT_MESSAGE}`)
   return parsed
 }
 
@@ -505,16 +517,18 @@ export class MemoryService {
     return this.ctx.access.appId !== null
   }
 
-  // URI 冲突由数据库判断（同一归属的唯一索引，以及共享与成员节点互斥的触发器，二者都按唯一约束报错），
-  // 在这里转成 409，REST 与 MCP 都能拿到明确的提示；conflict 是给这次操作的更具体的说法
+  // 坐标冲突由数据库判断（同一归属的唯一索引），在这里转成 409，REST 与 MCP 都能拿到明确的提示；
+  // conflict 是给这次操作的更具体的说法。记忆表的检查约束是兜底，撞上时转成 400
   private async run<T>(
     fn: (tx: Tx, personaIds: string[]) => Promise<T>,
-    conflict = 'URI 已被占用',
+    conflict = '坐标（URI）已被占用',
   ): Promise<T> {
     try {
       return await runInSpace(this.ctx.db, this.ctx.spaceId, this.ctx.personaId, fn)
     } catch (err) {
       if (isUniqueViolation(err, 'memories_uri_live_idx')) throw new MemoryError(409, conflict)
+      const check = pgErrorCode(err) === '23514' ? pgConstraint(err) : undefined
+      if (check && CHECK_MESSAGES[check]) throw new MemoryError(400, CHECK_MESSAGES[check])
       throw err
     }
   }
@@ -535,8 +549,8 @@ export class MemoryService {
     return view
   }
 
-  // 按 URI 找当前调用方对应的、仍然有效的那条：别的成员的 owner / private 记忆不在候选里，
-  // 已失效或已过期的也不算。数据库保证这样的记录在一个 URI 上至多一条（共享与成员节点互斥），所以不用排序
+  // 按坐标找当前调用方对应的、仍然有效的那条：别的成员的本人记忆不在候选里，已失效或已过期的也不算。
+  // 共享的坐标与本人的坐标开头不同，唯一索引保证这样的记录在一个坐标上至多一条，所以不用排序
   private async findLive(tx: Tx, parsed: ParsedUri): Promise<MemoryRow | undefined> {
     const [row] = await tx
       .select()
@@ -557,14 +571,12 @@ export class MemoryService {
     return row
   }
 
-  // 一个 URI 要么是共享的，要么按成员各自占用，二者不共存：否则成员自己的私人节点会遮住同名的共享节点。
-  // 冲突检查交给数据库：同一归属下的唯一索引 memories_uri_live_idx，以及共享与成员节点互斥的触发器
-  // memories_uri_exclusive（它对同一个 URI 加咨询锁串行检查，不看已失效或过期的记录），冲突时 run() 转成 409。
-  // 这里只做数据库做不了的一步：目标 URI 上已失效或过期、调用方又能让出的记录，软删除并让出 URI，
-  // 否则同一归属下谁都看不见它，却会一直撞上唯一索引。让出的记录删除时间不早于过期时间（见 isReleased）。
-  // reviving 是让过期的记录重新生效：它自己也是这个 URI 上过期的记录，不能被让出（except）；它在这之前已经锁住了，
+  // 冲突检查交给数据库：同一归属下的唯一索引 memories_uri_live_idx，冲突时 run() 转成 409。共享与本人的开头不同，
+  // 不会互相挡。这里只做数据库做不了的一步：目标坐标上同一归属里已失效或过期、调用方又能让出的记录，
+  // 软删除并让出坐标，否则同一归属下谁都看不见它，却会一直撞上唯一索引。让出的记录删除时间不早于过期时间（见 isReleased）。
+  // reviving 是让过期的记录重新生效：它自己也是这个坐标上过期的记录，不能被让出（except）；它在这之前已经锁住了，
   // 再等别的候选行的锁，会和按 id 顺序加锁的另一次写入互相等成死锁，所以被锁着的候选跳过，
-  // 没让出的照样由唯一索引与触发器判断。两种都用 FOR NO KEY UPDATE（让出只改 deleted_at 与 updated_at，不改键列）：
+  // 没让出的照样由唯一索引判断。两种都用 FOR NO KEY UPDATE（让出只改 deleted_at 与 updated_at，不改键列）：
   // 别的表插入指向候选行的记录（事件、关键词、向量）时外键检查加的 KEY SHARE 锁和它不冲突，跳过时不会被当成正在改，
   // 等锁时也不用等它
   private async claimUri(
@@ -587,12 +599,10 @@ export class MemoryService {
           isNull(memories.deletedAt),
           endedAt(now),
           reviving ? ne(memories.id, reviving.except) : undefined,
+          // 同一归属：共享的（成员为空），或者同一个成员的本人
           target.ownerAccountId
-            ? or(
-                isNull(memories.ownerAccountId),
-                eq(memories.ownerAccountId, target.ownerAccountId),
-              )
-            : undefined,
+            ? eq(memories.ownerAccountId, target.ownerAccountId)
+            : isNull(memories.ownerAccountId),
         ),
       )
       .orderBy(asc(memories.id))
@@ -601,7 +611,6 @@ export class MemoryService {
       : await candidates.for('no key update')
     for (const row of rows) {
       if (!canRelease(this.ctx.access, row)) continue
-      const foreign = foreignPrivate(this.ctx.access, row)
       // 只让出这一刻仍然过期的，删除时间就是这一刻（不早于过期时间，见 isReleased）。行已经锁住，这里只是复查
       const [gone] = await tx
         .update(memories)
@@ -610,28 +619,21 @@ export class MemoryService {
         .returning()
       if (!gone) continue
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-      // 让出的是别的成员的私人记录时，事件记在本次写入者名下，快照里不放对方的正文
-      const keep = (r: MemoryRow) =>
-        foreign ? { ...snapshot(r, glossary), content: null } : snapshot(r, glossary)
-      await this.event(tx, row.id, 'expire', keep(row), keep(gone))
+      await this.event(tx, row.id, 'expire', snapshot(row, glossary), snapshot(gone, glossary))
       released.push(row.id)
     }
   }
 
-  // 撤销删除这几条会不会撞上 URI 冲突，返回会撞上的那些的 id（规则见 uriConflicts）。
-  // 只看调用方撤销得了的（canModify，撤销不了的是 403，不替他去看这个 URI 上有没有别人的记录）
-  private async undeleteConflicts(
-    tx: Tx,
-    rows: { row: MemoryRow; ended: boolean }[],
-  ): Promise<Set<string>> {
+  // 撤销删除这几条会不会撞上坐标冲突，返回会撞上的那些的 id（规则见 uriConflicts）。
+  // 只看调用方撤销得了的（canModify，撤销不了的是 403，不替他去看这个坐标上有没有别的记录）
+  private async undeleteConflicts(tx: Tx, rows: MemoryRow[]): Promise<Set<string>> {
     const claims = rows
-      .filter(({ row }) => canModify(this.ctx.access, row))
-      .map(({ row, ended }) => ({
+      .filter((row) => canModify(this.ctx.access, row))
+      .map((row) => ({
         id: row.id,
         domain: row.domain,
         path: row.path,
         ownerAccountId: row.ownerAccountId,
-        ended,
       }))
     const taken = await uriConflicts(tx, this.ctx.access, claims)
     return new Set([...taken].map((c) => c.id))
@@ -653,7 +655,7 @@ export class MemoryService {
     return row
   }
 
-  // 写不了时报 403。能写人格层、只是人格不对的单独说明：Key 读得到继承来的祖先人格，却只能写应用当前的人格
+  // 写不了时报 403。能写人格、只是人格不对的单独说明：Key 读得到继承来的祖先人格，却只能写应用当前的人格
   private assertWritable(intent: WriteIntent, message: string): void {
     if (canWrite(this.ctx.access, intent)) return
     const wrongPersona =
@@ -708,8 +710,8 @@ export class MemoryService {
     if (!canModify(this.ctx.access, row)) throw new MemoryError(403, UNTRUSTED_MODIFY)
   }
 
-  // 改层与移动共用（原因见 KEY_CROSS_OWNERSHIP）：通过 Key 不能在共享的层与个人的层之间转换，
-  // 个人的层之间、共享的层之间照常；管理界面里由人来改不受这个限制
+  // 移动时用（原因见 KEY_CROSS_OWNERSHIP）：通过 Key 不能在共享的归属与本人之间转换，
+  // 共享的归属之间照常；管理界面里由人来改不受这个限制
   private assertKeyTransition(from: Layer, to: Layer): void {
     if (this.viaKey && perMember(from) !== perMember(to)) {
       throw new MemoryError(403, KEY_CROSS_OWNERSHIP)
@@ -755,6 +757,7 @@ export class MemoryService {
     const view: MemoryView = {
       id: row.id,
       uri: formatUri(row.domain!, row.path!),
+      title: row.title!,
       layer: row.layer,
       sensitivity: row.sensitivity,
       provenance: row.provenance,
@@ -818,28 +821,10 @@ export class MemoryService {
     )
   }
 
-  // 解析写入目标的层和归属；应用层只能写本应用（admin 例外），人格由调用方随后用 assertWritable 检查
-  private async resolveOwnership(
-    tx: Tx,
-    parsed: ParsedUri,
-    requested: Layer | undefined,
-  ): Promise<Ownership> {
+  // 写入目标的归属：坐标的开头就是归属。应用的记忆只能写本应用（admin 例外），人格由调用方随后用 assertWritable 检查
+  private async resolveOwnership(tx: Tx, parsed: ParsedUri): Promise<Ownership> {
     const access = this.ctx.access
-    const forced = layerForDomain(parsed.domain)
-    if (forced && requested && requested !== forced) {
-      throw new MemoryError(400, `${parsed.domain}:// 下的记忆只能属于${layerWithValue(forced)}`)
-    }
-    if (!forced && (requested === 'persona' || requested === 'app')) {
-      throw new MemoryError(
-        400,
-        `${layerWithValue(requested)}的记忆须放在 ${requested}://<标识>/ 下`,
-      )
-    }
-    const layer = forced ?? requested ?? 'private'
-    if (layer === 'subject' || layer === 'episode') {
-      throw new MemoryError(400, `${layerWithValue(layer)}由对话抽取写入，无法按 URI 新建`)
-    }
-
+    const layer = layerOf(parsed)
     const ownership: Ownership = {
       layer,
       ownerAccountId: ownerFor(access, layer),
@@ -859,19 +844,19 @@ export class MemoryService {
         .limit(1)
       if (!row) throw new MemoryError(404, `应用不存在：${parsed.namespaceSlug}`)
       if (!canWriteApp(access, row.id)) {
-        throw new MemoryError(403, '无权写入此应用的应用层（app）记忆')
+        throw new MemoryError(403, '无权写入这个应用（app://）的记忆')
       }
       ownership.appId = row.id
     }
     return ownership
   }
 
-  // 凭据占位符的写入检查，每次写入之后看最终状态：正文里有 {{cred: 时，格式要对，记忆要在私人层、
-  // 敏感级至少 private；disclosure 与关键词里不能有（见 checkOutsideContent）。新增的标识要解析到
-  // 这条记忆主人的有效凭据，而且写入方看得到它；不存在与看不到返回同一个错误。
-  // 已有的引用不重查（凭据删掉之后，含引用的记忆照样能改），但只有写入之前就在同一个主人的私人层里，
-  // 正文里的引用才算已有的：从共享的层改层或移进私人层时，原来写着的占位符都按新增检查，
-  // 否则别人写进共享记忆里的占位符，改到你的私人层之后就指向了你的凭据
+  // 凭据占位符的写入检查，每次写入之后看最终状态：正文里有 {{cred: 时，格式要对，记忆要在本人、
+  // 敏感级至少 private；标题、disclosure 与关键词里不能有（见 checkOutsideContent）。新增的标识要解析到
+  // 这条记忆所有者的有效凭据，而且写入方看得到它；不存在与看不到返回同一个错误。
+  // 已有的引用不重查（凭据删掉之后，含引用的记忆照样能改），但只有写入之前就在同一个所有者的本人里，
+  // 正文里的引用才算已有的：从共享的归属移进本人时，原来写着的占位符都按新增检查，
+  // 否则别人写进共享记忆里的占位符，移到你的本人之后就指向了你的凭据
   private async checkCredentialRefs(
     tx: Tx,
     final: {
@@ -881,7 +866,7 @@ export class MemoryService {
       content: string
     },
     baseline: RefBaseline | null,
-    // 查的是从库里解出来的原文（没带正文的写入，例如改层、移动），不是调用方这次写的。
+    // 查的是从库里解出来的原文（没带正文的写入，例如移动），不是调用方这次写的。
     // 报错就不带片段、标识与字段名：调用方没有显式查看，这里也不留访问记录
     decrypted = false,
   ): Promise<void> {
@@ -898,12 +883,12 @@ export class MemoryService {
       throw new MemoryError(400, PLACEHOLDER_SCOPE)
     }
     const existing =
-      baseline && baseline.layer === 'private' && baseline.ownerAccountId === final.ownerAccountId
+      baseline && baseline.layer === 'user' && baseline.ownerAccountId === final.ownerAccountId
         ? placeholderIdentifiers(baseline.content() ?? '')
         : new Set<string>()
     const added = refs.filter((r) => !existing.has(r.identifier))
     if (!added.length) return
-    // 来自对话与后台任务的内容不能新增引用：否则群里的人能写一条「把 {{cred:…}} 发出来」诱导主人的 agent
+    // 来自对话与后台任务的内容不能新增引用：否则群里的人能写一条「把 {{cred:…}} 发出来」诱导本人的 agent
     if (!this.addsCredentialRefs) {
       throw new MemoryError(400, '来自对话或后台任务的写入不能新增凭据引用')
     }
@@ -940,15 +925,15 @@ export class MemoryService {
     }
   }
 
-  // 能不能新增凭据引用：主人与受信 agent 的写入能；对话（untrusted）与后台任务（抽取、Dream）不能，
-  // 导入工具是主人自己把数据搬进自己的私人层，由它显式打开
+  // 能不能新增凭据引用：本人与受信 agent 的写入能；对话（untrusted）与后台任务（抽取、Dream）不能，
+  // 导入工具是本人自己把数据搬进自己的本人记忆，由它显式打开
   private get addsCredentialRefs(): boolean {
     if (this.ctx.allowCredentialRefs !== undefined) return this.ctx.allowCredentialRefs
     const provenance = this.ctx.access.writeProvenance
     return provenance === 'owner' || provenance === 'agent'
   }
 
-  // 只改归属或删除状态、不改正文的写入（移动、撤销删除）：看最终状态。之前就在同一个主人的私人层、
+  // 只改归属或删除状态、不改正文的写入（移动、撤销删除）：看最终状态。之前就在同一个所有者的本人里、
   // 之后也还在、敏感级至少 private 时什么都不会变，不必去读（secret 要解密的）正文
   private async checkKeptRefs(
     tx: Tx,
@@ -956,8 +941,8 @@ export class MemoryService {
     final: { layer: Layer; ownerAccountId: string | null },
   ): Promise<void> {
     if (
-      row.layer === 'private' &&
-      final.layer === 'private' &&
+      row.layer === 'user' &&
+      final.layer === 'user' &&
       row.ownerAccountId === final.ownerAccountId &&
       sensitivityRank(row.sensitivity) >= sensitivityRank('private')
     ) {
@@ -1043,7 +1028,7 @@ export class MemoryService {
     }
   }
 
-  // 新建一条策展记忆，在调用方的事务里：检查权限与凭据占位符、让出挡着 URI 的过期记录、记一条事件
+  // 新建一条记下的记忆，在调用方的事务里：检查权限与凭据占位符、让出挡着坐标的过期记录、记一条事件
   private async insertCurated(
     tx: Tx,
     input: CreateMemoryRequest,
@@ -1053,8 +1038,14 @@ export class MemoryService {
     const parsed = parse(input.uri)
     const validFrom = meta.createdAt ?? new Date()
     const validTo = input.validTo === undefined ? null : checkValidTo(input.validTo, validFrom)
-    const ownership = await this.resolveOwnership(tx, parsed, input.layer)
-    const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[ownership.layer]
+    const ownership = await this.resolveOwnership(tx, parsed)
+    const sensitivity = input.sensitivity ?? DEFAULT_SENSITIVITY[layerOf(parsed)]
+    checkSensitivity(ownership.layer, sensitivity)
+    const wanted = input.title ?? deriveTitle(input.content, parsed.path, sensitivity)
+    const title =
+      sensitivity === 'secret'
+        ? withoutHeading(wanted, parsed.path, headingsOf([input.content]))
+        : wanted
     this.assertWritable(
       { ...ownership, sensitivity },
       `无权写入${layerWithValue(ownership.layer)}的${sensitivityWithValue(sensitivity)}记忆`,
@@ -1063,7 +1054,7 @@ export class MemoryService {
       await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
     }
     this.rejectMaskedText(input.content)
-    checkOutsideContent(input.disclosure, input.glossary)
+    checkOutsideContent(input.disclosure, input.glossary, input.title)
     await this.checkCredentialRefs(tx, { ...ownership, sensitivity, content: input.content }, null)
     await this.claimUri(tx, parsed, ownership, released)
 
@@ -1084,6 +1075,7 @@ export class MemoryService {
         originScope: this.ctx.access.writeOriginScope,
         domain: parsed.domain,
         path: parsed.path,
+        title,
         ...body,
         priority: input.priority,
         disclosure: input.disclosure ?? null,
@@ -1111,7 +1103,7 @@ export class MemoryService {
     return this.toView(tx, row!, glossary, null)
   }
 
-  // 写下一批抽取的结果（对象层的事实与情节层的会话摘要，没有 URI、不建向量），连同调用方的收尾
+  // 写下一批抽取的结果（联系人的事实与会话摘要，没有 URI、不建向量），连同调用方的收尾
   // （记抽取记录、删掉用过的缓冲）在同一个事务里：中途失败整批回滚，后台任务重试时不会重复写入。
   // 敏感级 public，来源与来源作用域按这次的会话上下文；逐条检查权限与凭据占位符（对话来的内容不能新增引用），
   // 写不进去的那条跳过。replaces 指向这次读得到、写得了、还有效的同一个对象的事实时推翻它：旧的设 valid_to
@@ -1120,13 +1112,15 @@ export class MemoryService {
     items: readonly ExtractedWrite[],
     eventContext: Record<string, unknown>,
     finish: (tx: Tx, outcomes: ExtractedOutcome[]) => Promise<void>,
-    // 写之前在同一个事务里先做的检查，抛错就整批不写
-    start?: (tx: Tx) => Promise<void>,
+    // 写之前在同一个事务里先做的检查，抛错就整批不写；返回这一批的会话，写下的都挂在它上面
+    start: (tx: Tx) => Promise<string | null>,
   ): Promise<ExtractedOutcome[]> {
     return this.run(async (tx) => {
-      await start?.(tx)
+      const conversationId = await start(tx)
       const outcomes: ExtractedOutcome[] = []
-      for (const item of items) outcomes.push(await this.writeExtracted(tx, item, eventContext))
+      for (const item of items) {
+        outcomes.push(await this.writeExtracted(tx, item, conversationId, eventContext))
+      }
       await finish(tx, outcomes)
       return outcomes
     })
@@ -1135,17 +1129,19 @@ export class MemoryService {
   private async writeExtracted(
     tx: Tx,
     item: ExtractedWrite,
+    conversationId: string | null,
     eventContext: Record<string, unknown>,
   ): Promise<ExtractedOutcome> {
-    const sensitivity = 'public' as const
+    const owner = item.layer === 'episode' ? item.ownerAccountId : null
+    const sensitivity = owner ? ('private' as const) : ('public' as const)
     try {
       this.assertWritable(
         { layer: item.layer, sensitivity, appId: null, personaId: null },
-        `无权写入${LAYER_NAMES[item.layer]}层的记忆`,
+        `无权写入${LAYER_NAMES[item.layer]}的记忆`,
       )
       await this.checkCredentialRefs(
         tx,
-        { layer: item.layer, sensitivity, ownerAccountId: null, content: item.content },
+        { layer: item.layer, sensitivity, ownerAccountId: owner, content: item.content },
         null,
       )
     } catch (err) {
@@ -1185,7 +1181,9 @@ export class MemoryService {
         sensitivity,
         provenance: this.ctx.access.writeProvenance,
         originScope: this.ctx.access.writeOriginScope,
+        ownerAccountId: owner,
         subjectId: item.layer === 'subject' ? item.subjectId : null,
+        conversationId,
         content: item.content,
         expiresAt: item.layer === 'episode' ? item.expiresAt : null,
       })
@@ -1261,6 +1259,7 @@ export class MemoryService {
       throw new MemoryError(403, '通过 Key 无法强制降级，请在管理界面由空间所有者确认')
     }
     const sensitivity = input.sensitivity ?? before.sensitivity
+    checkSensitivity(before.layer, sensitivity)
     for (const s of new Set([before.sensitivity, sensitivity])) {
       this.assertWritable(
         { ...before, sensitivity: s },
@@ -1275,7 +1274,7 @@ export class MemoryService {
     this.rejectMaskedText(input.content)
     // 有效期：不给就不动，null 清掉（一直有效），给了就要比现在晚至少一分钟（见 checkValidTo）。
     // 和现在存的一样时不算改动、也不检查：读到整条记忆再原样送回来（MCP 与 SDK 常这样做）时，
-    // 不能在它的最后一分钟里因为「至少晚一分钟」被拒。只在要改时写这一列：URI 互斥的触发器在有效期变化时也检查
+    // 不能在它的最后一分钟里因为「至少晚一分钟」被拒
     const validTo =
       input.validTo === undefined || sameTime(input.validTo, before.validTo)
         ? undefined
@@ -1283,44 +1282,13 @@ export class MemoryService {
           ? null
           : checkValidTo(input.validTo, before.validFrom)
 
-    // 改层只在 base、owner、private 之间：共享与按成员互转时归属跟着变，按成员的层归写入方
-    const layer = input.layer ?? before.layer
-    const ownerAccountId =
-      layer === before.layer
-        ? before.ownerAccountId
-        : layer === 'base'
-          ? null
-          : this.ctx.access.ownerAccountId
-    if (layer !== before.layer) {
-      if (
-        layerForDomain(before.domain!) ||
-        !(PLAIN_LAYERS as readonly Layer[]).includes(before.layer)
-      ) {
-        throw new MemoryError(
-          400,
-          `${layerWithValue(before.layer)}的记忆无法直接改层。人格层（persona）与应用层（app）须移动到其他命名空间。`,
-        )
-      }
-      this.assertKeyTransition(before.layer, layer)
-      if (!canWrite(this.ctx.access, { layer, sensitivity, appId: null, personaId: null })) {
-        throw new MemoryError(
-          403,
-          `无权把记忆改到${layerWithValue(layer)}的${sensitivityWithValue(sensitivity)}`,
-        )
-      }
-      // 新归属下已失效或过期、又挡着 URI 的记录先让出；真冲突由触发器与唯一索引判断，返回 409
-      await this.claimUri(
-        tx,
-        toParsed(before.domain!, before.path!),
-        { ownerAccountId },
-        meta.released ?? [],
-      )
-    }
+    // 归属不在这里改：换归属就是换坐标的开头，走移动
+    const { layer, ownerAccountId } = before
 
     // 敏感级跨过 secret 边界时，正文在明文与密文之间转换
     const plaintext = input.content ?? this.contentOf(before)
     if (plaintext === null) throw new MemoryError(403, '无权读取这条机密（secret）记忆的正文')
-    // 恢复到某一版：版本与现在同一归属，那时就在现在这个主人的层里，正文里的引用照「之前就有」算
+    // 恢复到某一版：版本与现在同一归属，那时就在现在这个所有者的本人里，正文里的引用照「之前就有」算
     await this.checkCredentialRefs(
       tx,
       { layer, sensitivity, ownerAccountId, content: plaintext },
@@ -1348,16 +1316,27 @@ export class MemoryService {
 
     const beforeGlossary =
       meta.glossary ?? (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
-    checkOutsideContent(input.disclosure, input.glossaryAdd ?? [])
+    checkOutsideContent(input.disclosure, input.glossaryAdd ?? [], input.title)
+    // 改标题不改坐标。结果是机密时，标题不能是明文正文的 # 标题（见 withoutHeading）：这次的正文、改之前的正文，
+    // 改成机密时还有历史里的每一版（它们随后由 scrubHistory 抹掉），恢复此版本带回来的标题也一样
+    const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
+    const headings =
+      sensitivity === 'secret'
+        ? headingsOf([
+            plaintext,
+            before.content,
+            ...(becameSecret ? await this.historyContents(tx, before.id) : []),
+          ])
+        : null
+    const title = input.title ?? before.title
     const [row] = await tx
       .update(memories)
       .set({
         ...body,
         // 正文变了，忽略时记下的哈希就没用了；留着的话，它是含旧值的正文的 SHA-256，能离线猜解
         ...(plaintext !== before.content ? { plaintextIgnoredHash: null } : {}),
-        layer,
-        ownerAccountId,
         sensitivity,
+        title: headings && title !== null ? withoutHeading(title, before.path!, headings) : title,
         ...(meta.provenance ? { provenance: meta.provenance } : {}),
         priority: input.priority ?? before.priority,
         disclosure: input.disclosure === undefined ? before.disclosure : input.disclosure,
@@ -1400,7 +1379,6 @@ export class MemoryService {
     }
     const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
     await this.syncCredentialRefs(tx, before.id, sensitivity, plaintext)
-    const becameSecret = sensitivity === 'secret' && before.sensitivity !== 'secret'
     await this.event(
       tx,
       before.id,
@@ -1411,7 +1389,7 @@ export class MemoryService {
     )
     // 改成 secret 之后，历史事件里不能再留着明文
     if (becameSecret) {
-      await this.scrubHistory(tx, before.id)
+      await this.scrubHistory(tx, before.id, headings!)
       // 向量由明文生成，不能等后台任务异步清理，在同一个事务里删掉
       await tx.delete(memoryEmbeddings).where(eq(memoryEmbeddings.memoryId, before.id))
     }
@@ -1420,14 +1398,40 @@ export class MemoryService {
     return this.toView(tx, row, glossary, read ? (meta.via ?? 'rest') : null)
   }
 
-  private async scrubHistory(tx: Tx, memoryId: string): Promise<void> {
-    await tx
-      .update(memoryEvents)
-      .set({
-        before: sql`case when ${memoryEvents.before} is null then null else ${memoryEvents.before} - 'content' - 'fts' end`,
-        after: sql`case when ${memoryEvents.after} is null then null else ${memoryEvents.after} - 'content' - 'fts' end`,
+  // 这条记忆历史快照里的各版正文：改成机密之前，标题可能取自其中任何一版的 # 标题（修改正文不重新取标题）
+  private async historyContents(tx: Tx, memoryId: string): Promise<(string | null)[]> {
+    const rows = await tx
+      .select({
+        before: sql<string | null>`${memoryEvents.before}->>'content'`,
+        after: sql<string | null>`${memoryEvents.after}->>'content'`,
       })
+      .from(memoryEvents)
       .where(eq(memoryEvents.memoryId, memoryId))
+    return rows.flatMap((r) => [r.before, r.after])
+  }
+
+  // 改成机密之后，历史快照里不能再留着明文：去掉正文与旧快照里的全文检索向量，标题是某一版正文的 # 标题的
+  // （headings，见 applyUpdate）换成那一版的标识。取 # 标题的规则只有 firstHeading 一份，所以在 JS 里改
+  private async scrubHistory(
+    tx: Tx,
+    memoryId: string,
+    headings: ReadonlySet<string>,
+  ): Promise<void> {
+    const events = await tx
+      .select({ id: memoryEvents.id, before: memoryEvents.before, after: memoryEvents.after })
+      .from(memoryEvents)
+      .where(eq(memoryEvents.memoryId, memoryId))
+    for (const event of events) {
+      const before = secretSnapshot(event.before, headings)
+      const after = secretSnapshot(event.after, headings)
+      if (
+        JSON.stringify(before) === JSON.stringify(event.before) &&
+        JSON.stringify(after) === JSON.stringify(event.after)
+      ) {
+        continue
+      }
+      await tx.update(memoryEvents).set({ before, after }).where(eq(memoryEvents.id, event.id))
+    }
   }
 
   // 忽略明文提示：记下这段正文的哈希，正文改了（不管经哪条写入路径）就不再算（见 PLAINTEXT）。要写得了这条记忆，
@@ -1450,7 +1454,7 @@ export class MemoryService {
       if (row.version !== input.expectedVersion) {
         throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
       }
-      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
       if (row.content === null) {
         throw new MemoryError(400, '机密记忆的正文已加密，没有明文提示')
       }
@@ -1504,7 +1508,7 @@ export class MemoryService {
       if (row.version !== input.expectedVersion) {
         throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
       }
-      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
       if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)
       if (!placeholderAllowed(row.layer, row.sensitivity)) {
         throw new MemoryError(400, CONVERT_SCOPE_TEXT)
@@ -1517,7 +1521,12 @@ export class MemoryService {
       )
       if (!replaced) throw new MemoryError(400, CONVERT_NOT_FOUND)
       const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-      const elsewhere = [formatUri(row.domain!, row.path!), row.disclosure ?? '', ...glossary]
+      const elsewhere = [
+        formatUri(row.domain!, row.path!),
+        row.title ?? '',
+        row.disclosure ?? '',
+        ...glossary,
+      ]
       if (elsewhere.some((text) => text.includes(input.value))) {
         throw new MemoryError(400, CONVERT_ELSEWHERE)
       }
@@ -1551,7 +1560,7 @@ export class MemoryService {
     return result
   }
 
-  // 把一个值从这条记忆的历史快照里拿掉，这次转存自己的事件也在内。和这条记忆的主人同在私人层的版本换成占位符，
+  // 把一个值从这条记忆的历史快照里拿掉，这次转存自己的事件也在内。和这条记忆的所有者同在本人的版本换成占位符，
   // 这样恢复到旧版本也不会把明文带回来；别的版本（改层、移动之前的）换成星号，别的成员可能看得到它们，不给标识。
   // 调用方锁着记忆这一行，写事件的路径都先改或锁这一行，不会有带着旧正文的事件在这之后才写进来。
   // 只处理这一个值：快照里别的疑似明文（例如换过的旧密码）不动，规则会误判，盖掉会把旧版本改坏，只数出来告诉调用方
@@ -1628,7 +1637,7 @@ export class MemoryService {
   }
 
   // 别的记忆里还有几条含这个值：转存不动它们，要告诉调用方。按管理读取数，已删除、过期的也算：撤销删除就回来了。
-  // 正文、触发场景、URI 与关键词都算。secret 的正文是密文，数不到；占位符里的不算，和替换时跳过的一样：
+  // 正文、标题、触发场景、坐标与关键词都算。secret 的正文是密文，数不到；占位符里的不算，和替换时跳过的一样：
   // 占位符换成 {{cred:，值里不会有它（见 ConvertToCredentialRequest），两边的文字拼不成这个值。
   // 要扫一遍这个空间的记忆，调用方放在拿锁之前
   private async othersWithValue(tx: Tx, memoryId: string, value: string): Promise<number> {
@@ -1647,6 +1656,7 @@ export class MemoryService {
           this.manageable(),
           or(
             and(has(memories.content), has(outsidePlaceholders)),
+            has(memories.title),
             has(memories.disclosure),
             has(sql`${memories.domain} || '://' || ${memories.path}`),
             exists(keyword),
@@ -1671,7 +1681,7 @@ export class MemoryService {
     this.changed([id])
   }
 
-  // 对象页上的一条事实（从对话里抽取、挂在这个对象上的对象层记忆），锁住这一行。删除与重新生效只是读得到的条件不同。
+  // 对象页上的一条事实（从对话里抽取、挂在这个联系人上的记忆），锁住这一行。删除与重新生效只是读得到的条件不同。
   // state 时一起算出它是不是被推翻了（推翻时设的 valid_to 已过）、是不是已经到期（expires_at 已过），
   // 都按数据库的时间，和已过期列表同一个时钟；删除不要，不算。找不到和读不到一样是 404
   private async lockFact(
@@ -1714,7 +1724,7 @@ export class MemoryService {
         readableConditions(this.ctx.access, { personaIds }),
       )
       if (row.version !== version) throw new MemoryError(409, '这条事实刚被修改，请刷新后再删除')
-      this.assertModifiable(row, `无权删除${LAYER_NAMES[row.layer]}层的记忆`)
+      this.assertModifiable(row, `无权删除${LAYER_NAMES[row.layer]}的记忆`)
       await this.softDelete(tx, row, () => new MemoryError(404, '事实不存在'))
     })
     this.changed([factId])
@@ -1736,7 +1746,7 @@ export class MemoryService {
       // 只看推翻时设的 valid_to，清掉的也只有它；到期时间也过了的，清掉之后照样看不到，不能报成功
       if (!superseded) throw new MemoryError(409, '这条事实未被取代，无需恢复生效')
       if (lapsed) throw new MemoryError(409, '这条事实已过到期时间，恢复生效后仍不可见')
-      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
+      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
       const [after] = await tx
         .update(memories)
         .set({ validTo: null, version: row.version + 1, updatedAt: new Date() })
@@ -1767,7 +1777,7 @@ export class MemoryService {
       const targets = rows.filter((r) => seen.get(r.id) === r.version)
       if (!targets.length) return []
       for (const row of targets)
-        this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}层的记忆`)
+        this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}的记忆`)
       const handled = await this.settleReview(tx, targets, input.action, new Date())
       return handled.map((r) => r.id)
     })
@@ -1827,12 +1837,12 @@ export class MemoryService {
   // ---- Dream 的建议（管理界面）----
   // 建议存在 dream_suggestions 里：调用方锁住那一行，按建议与成员的修改给出要做的事（lock），处理完在同一个事务里
   // 把它标成执行过或拒绝了（done）。这里管记忆这一边：涉及的每条记忆按管理读取都读得到，这条建议对查看者才存在，
-  // 否则和不存在一样是 404；处理要每条都写得了（canModify，应用层按记忆的 appId）。
+  // 否则和不存在一样是 404；处理要每条都写得了（canModify，应用的记忆按 appId）。
   // 执行时写下的来源记为主人（成员确认过）：Dream 自己不写记忆，确认之前模型给出的文字不进任何记忆
 
   // 按建议执行，所有改动在一个事务里。带上建议生成时各条记忆的版本：锁住这几行再核对，任何一条改过、删掉或过期了就 409。
   // 合并：保留的那条换成合并后的正文（URI 与层不变），其余几条删掉；提炼：新建一条策展记忆
-  // （默认放在执行的成员自己的私人层），作为来源的事实不动；过时：有效到设为现在（服务端写入，不受「至少晚一分钟」的限制），
+  // （默认放在执行的成员自己的本人记忆里），作为来源的事实不动；过时：有效到设为现在（服务端写入，不受「至少晚一分钟」的限制），
   // 之后能重新生效；审核：和待审队列一样确认或删除。写下的来源都记为主人（见 SUGGESTION_PROVENANCE）。
   // 每一步照常记事件、过写入检查。返回提炼时新建的记忆
   async applySuggestion(
@@ -1848,8 +1858,7 @@ export class MemoryService {
       // 核对与之后的写入用同一刻：核对时还有效的，删除、确认与设为过时都按这一刻算，不会在两步之间到期
       const now = new Date()
       const rows = await this.lockSuggested(tx, suggestion, now)
-      for (const row of rows)
-        this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}层的记忆`)
+      for (const row of rows) this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
       const action = suggestion.action(rows)
       let view: MemoryView | null = null
       switch (action.kind) {
@@ -1866,7 +1875,7 @@ export class MemoryService {
               { eventContext: keepContext, released, provenance: SUGGESTION_PROVENANCE },
             )
           } else {
-            // 事实在对象层，占位符写不进去（最终状态检查照常走）
+            // 事实来自对话，占位符写不进去（最终状态检查照常走）
             await this.checkCredentialRefs(
               tx,
               {
@@ -1903,8 +1912,8 @@ export class MemoryService {
             tx,
             {
               uri: draft.uri,
+              ...(draft.title ? { title: draft.title } : {}),
               content: draft.content,
-              ...(draft.layer ? { layer: draft.layer } : {}),
               ...(draft.disclosure ? { disclosure: draft.disclosure } : {}),
               priority: 2,
               glossary: [],
@@ -1954,8 +1963,7 @@ export class MemoryService {
             suggestion.memories.map((m) => m.id),
           ),
         )
-      for (const row of rows)
-        this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}层的记忆`)
+      for (const row of rows) this.assertModifiable(row, `无权处理${LAYER_NAMES[row.layer]}的记忆`)
       await done(tx)
     })
   }
@@ -2051,9 +2059,8 @@ export class MemoryService {
     )
   }
 
-  // 改 URI。移进、移出 persona:// 与 app://，或在不同的人格、应用之间移动时，层与归属跟着目标 URI 变：
-  // 移到那里时层由 URI 决定，移出时要用 layer 指定新的层；普通 domain 之间给了 layer 就顺便改层。
-  // 原来与目标两边都要有写权限
+  // 改坐标：换最后一段是改标识，换位置只是挪地方；换开头（或者换到别的人格、应用下）就是改归属，
+  // 归属跟着目标坐标变，要能写新的归属。共享的归属与本人之间只能在管理界面由人来做（见 KEY_CROSS_OWNERSHIP）
   async move(input: MoveMemoryRequest, via: SecretVia = 'rest'): Promise<MemoryView> {
     const from = parse(input.from)
     const to = parse(input.to)
@@ -2061,38 +2068,17 @@ export class MemoryService {
       const before = await this.findReadable(tx, from, personaIds)
       checkExpected(before, input)
       this.assertModifiable(before, `无权移动${layerWithValue(before.layer)}的记忆`)
-      const forced = layerForDomain(to.domain)
-      if (forced && input.layer) {
-        throw new MemoryError(400, `${to.domain}:// 下的层由 URI 决定，无需指定 layer`)
-      }
-      const sameNamespace = from.domain === to.domain && from.namespaceSlug === to.namespaceSlug
-      const crossing = !sameNamespace && (layerForDomain(from.domain) !== null || forced !== null)
+      const sameOwner = from.domain === to.domain && from.namespaceSlug === to.namespaceSlug
       let ownership: Ownership = {
         layer: before.layer,
         ownerAccountId: before.ownerAccountId,
         personaId: before.personaId,
         appId: before.appId,
       }
-      if (crossing || (input.layer && input.layer !== before.layer)) {
-        // 对象层与情节层来自对话，不能借移动换到别的层：不可信的内容进不了受信的层
-        if (before.layer === 'subject' || before.layer === 'episode') {
-          throw new MemoryError(
-            400,
-            `${layerWithValue(before.layer)}的记忆无法改层，也无法移到其他命名空间`,
-          )
-        }
-        if (!forced && !input.layer && layerForDomain(from.domain)) {
-          throw new MemoryError(
-            400,
-            `移出 ${from.domain}:// 时须指定新的层（base、owner 或 private）`,
-          )
-        }
-        ownership = await this.resolveOwnership(
-          tx,
-          to,
-          forced ? undefined : (input.layer ?? before.layer),
-        )
+      if (!sameOwner) {
+        ownership = await this.resolveOwnership(tx, to)
         this.assertKeyTransition(before.layer, ownership.layer)
+        checkSensitivity(ownership.layer, before.sensitivity)
         this.assertWritable(
           { ...ownership, sensitivity: before.sensitivity },
           `无权把记忆移到${layerWithValue(ownership.layer)}`,
@@ -2100,12 +2086,20 @@ export class MemoryService {
       }
       await this.checkKeptRefs(tx, before, ownership)
       await this.claimUri(tx, to, ownership, released)
+      // 标识变了、标题就是旧的标识（从标识来的）时按新坐标重新取，和新建时一样：有 # 标题取它，机密只用标识。
+      // 只换位置、标识没变时标题不动：标题等于标识也可能是特意这么起的
+      const oldIdentifier = identifierOf(before.path!)
+      const title =
+        before.title === oldIdentifier && identifierOf(to.path) !== oldIdentifier
+          ? deriveTitle(before.content ?? '', to.path, before.sensitivity)
+          : before.title
       const [row] = await tx
         .update(memories)
         .set({
           ...ownership,
           domain: to.domain,
           path: to.path,
+          title,
           version: sql`${memories.version} + 1`,
           updatedAt: new Date(),
         })
@@ -2118,23 +2112,35 @@ export class MemoryService {
         )
         .returning()
       if (!row) throw new MemoryError(409, '记忆刚被其他请求修改，请重新读取')
+      // 换了归属：引用索引按正文重写一次，规则收紧之前写下、没进索引的占位符也补上（secret 的不进索引）
+      if (!sameOwner && row.content !== null) {
+        await this.syncCredentialRefs(tx, row.id, row.sensitivity, row.content)
+      }
       const glossary = (await this.glossaryOf(tx, [before.id])).get(before.id) ?? []
       await this.event(tx, before.id, 'move', snapshot(before, glossary), snapshot(row, glossary))
       return this.toView(tx, row, glossary, via)
     })
   }
 
-  // 列出直接子节点；target 是 domain 名时列 domain 根下的第一层。
-  // 子节点由调用方读得到的后代推出：某一级路径本身没有记忆时显示为虚拟节点，所以不要求父节点存在，
+  // 列出直接子节点。target 是开头（core、user、persona、app）时列它下面的第一级，是坐标前缀时列前缀下面的一级：
+  // persona://<人格标识> 与 app://<应用标识> 列这个人格、应用下的第一级。
+  // 子节点由调用方读得到的后代推出：某一级本身没有记忆时显示为虚拟节点，所以不要求父节点存在，
   // 删除或移走父节点也不会让子节点变得走不到；读不到的记忆既不出现，也不会产生虚拟节点
   async children(target: string, via: SecretVia = 'rest'): Promise<MemoryChildren> {
-    const parsed = target.includes('://') ? parse(target) : null
-    const domain = parsed?.domain ?? target
-    if (!/^[a-z][a-z0-9_]{0,31}$/.test(domain))
-      throw new MemoryError(400, `分区（domain）格式错误：${domain}`)
+    const prefixed = target.includes('://') ? URI_PREFIX_PATTERN.exec(target) : null
+    if (target.includes('://') && !prefixed) {
+      throw new MemoryError(400, `坐标（URI）格式错误：${target}。${URI_FORMAT_MESSAGE}`)
+    }
+    const domain = prefixed?.[1] ?? target
+    if (!(CURATED_LAYERS as readonly string[]).includes(domain)) {
+      throw new MemoryError(400, `开头只能是 core、user、persona 或 app：${target}`)
+    }
+    const path = prefixed?.[2] ?? null
+    // 只有完整的坐标上才可能有记忆本身；persona://<人格标识> 这样只有标识的没有
+    const parsed = path === null ? null : parseUri(formatUri(domain, path))
     return this.run(async (tx, personaIds) => {
       const parent = parsed ? await this.findReadableOrNull(tx, parsed, personaIds) : null
-      const prefix = parsed ? `${parsed.path}/` : ''
+      const prefix = path === null ? '' : `${path}/`
       // 在 SQL 里按下一级路径聚合：每一级一行，带上这一级本身的记忆（如果有）和它下面可见的下一级数量
       // 前缀长度直接写进 SQL（整数，由我们自己算出），这样各处的 split_part 是同一个表达式，才能按它分组
       const rest = sql`substr(${memories.path}, ${sql.raw(String(prefix.length + 1))})`
@@ -2143,13 +2149,15 @@ export class MemoryService {
       // 这一级本身的记忆：各字段打包成一个对象聚合，取同一行，按 id 排序保证结果确定
       const own = sql<{
         id: string
+        title: string
         layer: Layer
         sensitivity: Sensitivity
         priority: number
         disclosure: string | null
       } | null>`(array_agg(jsonb_build_object(
-          'id', ${memories.id}, 'layer', ${memories.layer}, 'sensitivity', ${memories.sensitivity},
-          'priority', ${memories.priority}, 'disclosure', ${memories.disclosure}
+          'id', ${memories.id}, 'title', ${memories.title}, 'layer', ${memories.layer},
+          'sensitivity', ${memories.sensitivity}, 'priority', ${memories.priority},
+          'disclosure', ${memories.disclosure}
         ) order by ${memories.id}) filter (where ${next} = ''))[1]`
       const rows = await tx
         .select({
@@ -2176,6 +2184,7 @@ export class MemoryService {
         uri: formatUri(domain, `${prefix}${level.segment}`),
         exists: level.own !== null,
         id: level.own?.id ?? null,
+        title: level.own?.title ?? null,
         layer: level.own?.layer ?? null,
         sensitivity: level.own?.sensitivity ?? null,
         priority: level.own?.priority ?? null,
@@ -2187,10 +2196,15 @@ export class MemoryService {
         const glossary = (await this.glossaryOf(tx, [parent.id])).get(parent.id) ?? []
         parentView = await this.toView(tx, parent, glossary, via)
       }
-      // 指定了路径、它本身没有可读的记忆、下面也没有可读的内容：和不存在一样返回 404，
-      // 拼错路径时不会看起来像一个空目录
-      if (parsed && !parent && !children.length) {
-        throw new MemoryError(404, `记忆不存在：${formatUri(parsed.domain, parsed.path)}`)
+      // 指定了位置、它本身没有可读的记忆、下面也没有可读的内容：和不存在一样返回 404，
+      // 拼错位置时不会看起来像一个空目录。只有人格或应用标识的（persona://<人格标识>、app://<应用标识>）
+      // 和开头本身一样是一级目录，还没有记忆时是空的一级
+      const namespaceRoot =
+        path !== null &&
+        (NAMESPACED_LAYERS as readonly string[]).includes(domain) &&
+        !path.includes('/')
+      if (path !== null && !namespaceRoot && !parent && !children.length) {
+        throw new MemoryError(404, `记忆不存在：${formatUri(domain, path)}`)
       }
       return { parent: parentView, children, truncated }
     })
@@ -2228,6 +2242,7 @@ export class MemoryService {
           id: memories.id,
           domain: memories.domain,
           path: memories.path,
+          title: memories.title,
           layer: memories.layer,
           sensitivity: memories.sensitivity,
           provenance: memories.provenance,
@@ -2245,14 +2260,18 @@ export class MemoryService {
           and(
             this.listable(personaIds),
             eq(memories.form, 'curated'),
-            query.domain ? eq(memories.domain, query.domain) : undefined,
+            query.under ? underPrefix(query.under) : undefined,
             query.layer ? eq(memories.layer, query.layer) : undefined,
             query.sensitivity ? eq(memories.sensitivity, query.sensitivity) : undefined,
             query.provenance ? eq(memories.provenance, query.provenance) : undefined,
             query.personaId ? eq(memories.personaId, query.personaId) : undefined,
             query.appId ? eq(memories.appId, query.appId) : undefined,
             contains
-              ? or(ilike(uriText, contains), ilike(memories.disclosure, contains))
+              ? or(
+                  ilike(memories.title, contains),
+                  ilike(uriText, contains),
+                  ilike(memories.disclosure, contains),
+                )
               : undefined,
             query.missingDisclosure === 'true' ? NEEDS_DISCLOSURE : undefined,
             query.missingDisclosure === 'false' ? sql`not ${NEEDS_DISCLOSURE}` : undefined,
@@ -2277,6 +2296,7 @@ export class MemoryService {
         items: page.map((r) => ({
           id: r.id,
           uri: formatUri(r.domain!, r.path!),
+          title: r.title!,
           layer: r.layer,
           sensitivity: r.sensitivity,
           provenance: r.provenance,
@@ -2316,7 +2336,7 @@ export class MemoryService {
     })
   }
 
-  // 快速跳转：URI 里含有查询词、或有关键词以它开头的记忆，priority 小的在前
+  // 快速跳转：标题或坐标里含有查询词、或有关键词以它开头的记忆，priority 小的在前
   async matches(text: string, limit: number): Promise<MemoryMatch[]> {
     const needle = text.trim().toLowerCase()
     if (!needle) return []
@@ -2337,6 +2357,7 @@ export class MemoryService {
         .select({
           domain: memories.domain,
           path: memories.path,
+          title: memories.title,
           layer: memories.layer,
           sensitivity: memories.sensitivity,
           priority: memories.priority,
@@ -2347,13 +2368,18 @@ export class MemoryService {
           and(
             this.listable(personaIds),
             eq(memories.form, 'curated'),
-            or(like(uriText, `%${escapeLike(needle)}%`), keywordHit),
+            or(
+              like(sql`lower(${memories.title})`, `%${escapeLike(needle)}%`),
+              like(uriText, `%${escapeLike(needle)}%`),
+              keywordHit,
+            ),
           ),
         )
         .orderBy(asc(memories.priority), asc(memories.domain), asc(memories.path))
         .limit(limit)
       return rows.map((r) => ({
         uri: formatUri(r.domain!, r.path!),
+        title: r.title!,
         layer: r.layer,
         sensitivity: r.sensitivity,
         priority: r.priority,
@@ -2434,6 +2460,7 @@ export class MemoryService {
         id: string
         domain: string
         path: string
+        title: string
         layer: Layer
         sensitivity: Sensitivity
         recent: number
@@ -2446,7 +2473,7 @@ export class MemoryService {
           group by h.memory_id
         )
         select ${memories.id} as id, ${memories.domain} as domain, ${memories.path} as path,
-          ${memories.layer} as layer, ${memories.sensitivity} as sensitivity,
+          ${memories.title} as title, ${memories.layer} as layer, ${memories.sensitivity} as sensitivity,
           coalesce(r.hits, 0) as recent, coalesce(r.hits, 0) + coalesce(s.count, 0) as total,
           greatest(r.last, s.last_recalled_at) as last
         from ${memories}
@@ -2462,6 +2489,7 @@ export class MemoryService {
             id: memories.id,
             domain: memories.domain,
             path: memories.path,
+            title: memories.title,
             layer: memories.layer,
             sensitivity: memories.sensitivity,
             createdAt: memories.createdAt,
@@ -2476,6 +2504,7 @@ export class MemoryService {
         top: top.map((r) => ({
           id: r.id,
           uri: formatUri(r.domain, r.path),
+          title: r.title,
           layer: r.layer,
           sensitivity: r.sensitivity,
           recent: Number(r.recent),
@@ -2485,6 +2514,7 @@ export class MemoryService {
         never: never.map((r) => ({
           id: r.id,
           uri: formatUri(r.domain!, r.path!),
+          title: r.title!,
           layer: r.layer,
           sensitivity: r.sensitivity,
           createdAt: r.createdAt.toISOString(),
@@ -2519,7 +2549,7 @@ export class MemoryService {
   }
 
   // 召回事件的明细只给事件发生时的应用主人：按这位成员是事件里记下的主人过滤。
-  // 命中的记忆现在按管理读取看不到的（例如被移进了别的成员的私人层），不给 URI
+  // 命中的记忆现在按管理读取看不到的（例如被移进了别的成员的本人），不给坐标与标题
   async recallEvents(query: RecallEventQuery, limit: number): Promise<RecallEventList> {
     return this.run(async (tx) => {
       const keyVisible = this.ctx.access.admin
@@ -2554,6 +2584,7 @@ export class MemoryService {
               via: recallEventHits.via,
               domain: memories.domain,
               path: memories.path,
+              title: memories.title,
               shown: sql<boolean>`coalesce(${this.manageable()}, false)`,
             })
             .from(recallEventHits)
@@ -2574,6 +2605,7 @@ export class MemoryService {
             .filter((h) => h.eventId === r.event.id)
             .map((h) => ({
               uri: h.shown && h.domain && h.path ? formatUri(h.domain, h.path) : null,
+              title: h.shown ? h.title : null,
               rank: h.rank,
               score: Math.round(h.score * 100) / 100,
               via: h.via as RecallVia[],
@@ -2599,7 +2631,7 @@ export class MemoryService {
   // 一个事件对调用方是什么样，三种结果：
   // - false，照常看得到：前后快照各按管理读取判断，有一边看不到就不算；为空的一边（新建事件没有「改前」）不参与。
   //   给了 memory 时还要记忆现在满足它（活动流要求记忆现在读得到；历史已经先查过这条记忆，不给）。
-  // - true，「离开」：改前看得到、改后看不到，例如被别的成员改进了他的私人层，或改成了 secret。
+  // - true，「离开」：改前看得到、改后看不到，例如被别的成员移进了他的本人，或改成了 secret。
   //   对改前看得到的人保留这条记录，只给改前的版本、时间与操作者，改后的一概不给，也不能拿来恢复：
   //   否则共享的记忆被人拿走之后，谁拿走的、什么时候拿走的，连空间 owner 都查不到。不看记忆现在的状态：
   //   离开之后，原来看得到它的人本来就读不到了。
@@ -2675,6 +2707,7 @@ export class MemoryService {
         createdMicros: sql<string>`${microsOf(memoryEvents.createdAt)}::text`,
         domain: memories.domain,
         path: memories.path,
+        title: memories.title,
         memoryDeleted: sql<boolean>`(${memories.deletedAt} is not null)`,
         memoryExpired: sql<boolean>`(not ${STILL_VALID})`,
         accountName: accounts.displayName,
@@ -2720,6 +2753,7 @@ export class MemoryService {
         memory: {
           id: row.id,
           uri: formatUri(row.domain!, row.path!),
+          title: row.title!,
           layer: row.layer,
           sensitivity: row.sensitivity,
           version: row.version,
@@ -2754,7 +2788,6 @@ export class MemoryService {
         .select({
           row: memories,
           deletedMicros: sql<string>`${DELETED_MICROS}::text`,
-          ended: sql<boolean>`(not ${STILL_VALID})`,
         })
         .from(memories)
         .where(
@@ -2771,11 +2804,15 @@ export class MemoryService {
         .limit(query.limit + 1)
       const page = rows.slice(0, query.limit)
       const last = page.at(-1)
-      const taken = await this.undeleteConflicts(tx, page)
+      const taken = await this.undeleteConflicts(
+        tx,
+        page.map(({ row }) => row),
+      )
       return {
         items: page.map(({ row }) => ({
           id: row.id,
           uri: formatUri(row.domain!, row.path!),
+          title: row.title!,
           layer: row.layer,
           sensitivity: row.sensitivity,
           priority: row.priority,
@@ -2821,6 +2858,7 @@ export class MemoryService {
         items: page.map(({ row }) => ({
           id: row.id,
           uri: formatUri(row.domain!, row.path!),
+          title: row.title!,
           layer: row.layer,
           sensitivity: row.sensitivity,
           priority: row.priority,
@@ -2866,8 +2904,9 @@ export class MemoryService {
           id: r.event.id,
           type: r.event.eventType,
           memoryId: r.event.memoryId!,
-          // 离开了可见范围的，只给改前的 URI：记忆现在的 URI 在别人那里
+          // 离开了可见范围的，只给改前的坐标与标题：记忆现在的样子在别人那里
           uri: r.left ? toSnapshot(r.event.before)!.uri : formatUri(r.domain!, r.path!),
+          title: (r.left ? toSnapshot(r.event.before)!.title : r.title) ?? '',
           createdAt: r.event.createdAt.toISOString(),
           actor: actorOf(r),
           changes: r.left
@@ -2888,7 +2927,7 @@ export class MemoryService {
   }
 
   // 测试台：一批事件改了什么，只给字段名，不带内容。可见性和历史同一套规则（eventVisibility）：
-  // 看不到的只数条数，例如让出别的成员的过期记录时写下的事件，快照里有对方的 disclosure 与关键词
+  // 看不到的只数条数
   async eventChanges(where: SQL): Promise<EventChanges> {
     return this.run(async (tx) => {
       const rows = await tx
@@ -2916,9 +2955,11 @@ export class MemoryService {
         }
         const before = toSnapshot(row.before)
         const after = toSnapshot(row.after)
+        const shown = (row.left ? before : (after ?? before))!
         result.memories.push({
           type: row.type,
-          uri: (row.left ? before : (after ?? before))!.uri,
+          uri: shown.uri,
+          title: shown.title ?? '',
           fields: row.left ? [] : changedFields(before, after),
           left: row.left,
           becameSecret:
@@ -2932,9 +2973,9 @@ export class MemoryService {
     })
   }
 
-  // 恢复到某个事件之后的那一版：只改正文、disclosure、priority 与关键词，不改 URI、层、主人、敏感级与有效期。
+  // 恢复到某个事件之后的那一版：只改正文、标题、disclosure、priority 与关键词，不改坐标、归属、所有者、敏感级与有效期。
   // 快照里没有正文（secret 的快照，或改成 secret 时被抹掉正文的旧快照）时正文保持不变。
-  // 只用和现在同一归属（层、主人、人格、应用）、敏感级不高于现在的版本：恢复不能把内容带到更宽的可见范围里
+  // 只用和现在同一归属（归属、所有者、人格、应用）、敏感级不高于现在的版本：恢复不能把内容带到更宽的可见范围里
   async restore(input: RestoreRequest): Promise<MemoryView> {
     return this.write(async (tx) => {
       const { row: current } = await this.findManageable(tx, input.memoryId)
@@ -2963,7 +3004,7 @@ export class MemoryService {
       if (!sameOwner) {
         throw new MemoryError(
           400,
-          '此版本与当前版本的层或归属不同。请先改回原来的层，再恢复此版本。',
+          '此版本与当前版本的归属不同。请先把记忆移回原来的位置，再恢复此版本。',
         )
       }
       const targetSensitivity = target.sensitivity as Sensitivity
@@ -2984,6 +3025,7 @@ export class MemoryService {
         {
           expectedVersion: input.expectedVersion,
           ...(typeof target.content === 'string' ? { content: target.content } : {}),
+          ...(typeof target.title === 'string' ? { title: target.title } : {}),
           disclosure: typeof target.disclosure === 'string' ? target.disclosure : null,
           ...(typeof target.priority === 'number' ? { priority: target.priority } : {}),
           glossaryAdd: wanted.filter((k) => !glossaryNow.includes(k)),
@@ -3001,8 +3043,8 @@ export class MemoryService {
 
   // 撤销删除：清掉删除标记，这一行原样留下（secret 的密文也还在），不从快照重建，也不动有效期：
   // 撤销删除和过期互不相干，删掉之后才到期的撤销之后回到过期的状态，在已过期里能重新生效。
-  // 过期之后被让出 URI 的不走这里（见 reactivate）。URI 已被同一归属的别的记录占用时由唯一索引判断，返回 409；
-  // 这一行自己已经过期时不和成员节点或共享节点互斥（触发器不看过期的记录），重新生效时才检查。提交后重新排队生成向量
+  // 过期之后被让出坐标的不走这里（见 reactivate）。坐标已被同一归属的别的记录占用时由唯一索引判断，返回 409。
+  // 提交后重新排队生成向量
   async undelete(input: UndeleteRequest): Promise<MemoryView> {
     return this.write(async (tx, _personaIds, released) => {
       const { row } = await this.findManageable(tx, input.memoryId)
@@ -3010,13 +3052,13 @@ export class MemoryService {
       if (isReleased(row)) {
         throw new MemoryError(
           409,
-          '这条记忆已过期并释放 URI，不是被删除的。请在「已过期」中恢复生效。',
+          '这条记忆已过期并释放坐标，不是被删除的。请在「已过期」中恢复生效。',
         )
       }
-      this.assertModifiable(row, `无权恢复${LAYER_NAMES[row.layer]}层的记忆`)
+      this.assertModifiable(row, `无权恢复${LAYER_NAMES[row.layer]}的记忆`)
       // 正文不变，归属也不变，不算新增引用；引用索引的那几行一直留着，撤销之后照常算数
       await this.checkKeptRefs(tx, row, row)
-      await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released)
+      await this.claimUri(tx, parse(formatUri(row.domain!, row.path!)), row, released)
       const [restored] = await tx
         .update(memories)
         .set({ deletedAt: null, version: sql`${memories.version} + 1`, updatedAt: new Date() })
@@ -3068,13 +3110,15 @@ export class MemoryService {
       if (row.deletedAt && !isReleased(row)) {
         throw new MemoryError(
           409,
-          '这条记忆是被删除的，不是过期后释放 URI 的。请在「已删除」中恢复。',
+          '这条记忆是被删除的，不是过期后释放坐标的。请在「已删除」中恢复。',
         )
       }
-      this.assertModifiable(row, `无权让${LAYER_NAMES[row.layer]}层的记忆恢复生效`)
+      this.assertModifiable(row, `无权让${LAYER_NAMES[row.layer]}的记忆恢复生效`)
       // 正文不变，归属也不变，不算新增引用（和撤销删除一样）
       await this.checkKeptRefs(tx, row, row)
-      await this.claimUri(tx, toParsed(row.domain!, row.path!), row, released, { except: row.id })
+      await this.claimUri(tx, parse(formatUri(row.domain!, row.path!)), row, released, {
+        except: row.id,
+      })
       const [revived] = await tx
         .update(memories)
         .set({
@@ -3293,8 +3337,8 @@ function isLoreImport(event: { type: string; context: unknown }): boolean {
   )
 }
 
-// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，disclosure、关键词与 URI 里的也不留（那里放不了占位符）；
-// 旧快照里可能有全文检索向量，一起去掉。快照的 URI 只用来显示（恢复不改 URI，可见性不看它），除了 keepUri 的（见 isLoreImport）
+// 历史快照里拿掉一个值（见 scrubValue）：正文换掉，标题、disclosure、关键词与坐标里的也不留（那里放不了占位符）；
+// 旧快照里可能有全文检索向量，一起去掉。快照的坐标只用来显示（恢复不改坐标，可见性不看它），除了 keepUri 的（见 isLoreImport）
 function scrubSnapshot(
   raw: unknown,
   value: string,
@@ -3305,7 +3349,7 @@ function scrubSnapshot(
   if (!raw || typeof raw !== 'object') return raw ?? null
   const version: Record<string, unknown> = { ...raw }
   delete version.fts
-  const inPlace = version.layer === 'private' && version.ownerAccountId === owner
+  const inPlace = version.layer === 'user' && version.ownerAccountId === owner
   if (typeof version.content === 'string') {
     version.content = replaceOutsidePlaceholders(
       version.content,
@@ -3313,8 +3357,10 @@ function scrubSnapshot(
       inPlace ? placeholder : PLAINTEXT_MASK,
     ).text
   }
-  if (typeof version.disclosure === 'string') {
-    version.disclosure = replaceOutsidePlaceholders(version.disclosure, value, PLAINTEXT_MASK).text
+  for (const key of ['title', 'disclosure']) {
+    if (typeof version[key] === 'string') {
+      version[key] = replaceOutsidePlaceholders(version[key], value, PLAINTEXT_MASK).text
+    }
   }
   if (Array.isArray(version.glossary)) {
     version.glossary = version.glossary.filter(
@@ -3329,6 +3375,18 @@ function scrubSnapshot(
   return version
 }
 
+// 改成机密时的一个快照：去掉正文与全文检索向量，标题是正文 # 标题的换成这一版的标识（见 scrubHistory）
+function secretSnapshot(raw: unknown, headings: ReadonlySet<string>): unknown {
+  if (!raw || typeof raw !== 'object') return raw ?? null
+  const version: Record<string, unknown> = { ...raw }
+  delete version.content
+  delete version.fts
+  if (typeof version.title === 'string' && typeof version.path === 'string') {
+    version.title = withoutHeading(version.title, version.path, headings)
+  }
+  return version
+}
+
 // 快照里界面要用的部分；快照是写入事件时记下的整行（不含密文），secret 的没有正文
 function toSnapshot(raw: unknown): MemorySnapshot | null {
   if (!raw || typeof raw !== 'object') return null
@@ -3336,6 +3394,7 @@ function toSnapshot(raw: unknown): MemorySnapshot | null {
   const text = (key: string) => (typeof s[key] === 'string' ? (s[key] as string) : null)
   return {
     uri: formatUri(text('domain') ?? '', text('path') ?? ''),
+    title: text('title'),
     layer: s.layer as Layer,
     sensitivity: s.sensitivity as Sensitivity,
     priority: typeof s.priority === 'number' ? s.priority : 0,
@@ -3353,6 +3412,7 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
   if (!before || !after) return []
   const changes: string[] = []
   if (before.uri !== after.uri) changes.push('uri')
+  if (before.title !== after.title) changes.push('title')
   if (before.layer !== after.layer) changes.push('layer')
   if (before.sensitivity !== after.sensitivity) changes.push('sensitivity')
   if (before.priority !== after.priority) changes.push('priority')
@@ -3363,6 +3423,15 @@ function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | nu
   }
   if (before.validTo !== after.validTo) changes.push('validTo')
   return changes
+}
+
+// 坐标前缀本身与它下面各级（列表的位置筛选）。前缀已经按 URI_PREFIX_PATTERN 校验过；段里允许 _，LIKE 要转义
+function underPrefix(prefix: string): SQL {
+  const [, domain, path] = URI_PREFIX_PATTERN.exec(prefix)!
+  return and(
+    eq(memories.domain, domain!),
+    or(eq(memories.path, path!), like(memories.path, `${escapeLike(path!)}/%`)),
+  )!
 }
 
 // 没写 disclosure：为空或只有空白

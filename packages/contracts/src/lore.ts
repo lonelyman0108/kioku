@@ -99,6 +99,8 @@ export type LoreTargetState = z.infer<typeof LoreTargetState>
 
 export const LorePlanTarget = z.object({
   uri: z.string(),
+  // 写进去的标题：正文第一个 # 标题，没有就用标识
+  title: z.string(),
   layer: Layer,
   sensitivity: Sensitivity,
   priority: z.number().int(),
@@ -151,7 +153,8 @@ export const LORE_SYNC_STATES = [
 export const LoreSyncState = z.enum(LORE_SYNC_STATES)
 export type LoreSyncState = z.infer<typeof LoreSyncState>
 
-export const LORE_SYNC_CHANGES = ['content', 'priority', 'disclosure', 'glossary'] as const
+// 同步改的几项。标题和导入时同一个取法，Lore 里改了正文第一个 # 标题就跟着改
+export const LORE_SYNC_CHANGES = ['content', 'title', 'priority', 'disclosure', 'glossary'] as const
 export const LoreSyncChange = z.enum(LORE_SYNC_CHANGES)
 export type LoreSyncChange = z.infer<typeof LoreSyncChange>
 
@@ -159,6 +162,9 @@ export const LoreSyncItem = z.object({
   source: z.string(),
   // 记忆现在的 URI；在 Kioku 里删除了的是导入时的 URI
   uri: z.string(),
+  // 和写入目标的标题同一个取法：Lore 正文第一个 # 标题，没有就用 uri 的标识。同步不改敏感级，
+  // 记忆现在是机密的不从正文取，只用标识。要更新的同步之后就是这个标题
+  title: z.string(),
   state: LoreSyncState,
   target: z.string().optional(),
   reason: z.string().optional(),

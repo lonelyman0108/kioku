@@ -235,7 +235,7 @@ function choose(uri: string) {
 .kioku-markdown :deep(mark.kioku-own-keyword) {
   background: none;
   color: inherit;
-  text-decoration: underline 2px var(--layer-owner);
+  text-decoration: underline 2px var(--layer-user);
   text-underline-offset: 3px;
 }
 /* 疑似明文的值：红色加下划线，红色是留给告警的 */

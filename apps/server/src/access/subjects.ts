@@ -3,6 +3,7 @@ import { and, arrayContains, asc, count, eq, exists, gt, inArray, or, sql } from
 import { loggableError, pgErrorCode, type Tx } from '../db/client'
 import {
   appGroupPersonas,
+  conversations,
   conversationTurns,
   dreamMarks,
   extractionRuns,
@@ -62,7 +63,7 @@ async function mergeInto(
     .set({ subjectId: into.id })
     .where(eq(subjectIdentities.subjectId, from.id))
   // Dream 按记忆记下整理过的版本（dream_marks），这里不加版本，标记留着的话合并之后放到一起的记忆不会被再看，
-  // 合并带来的重复也就一直留着。要再看的只有对象层与情节层：别的层的 Dream 范围和对象、来源作用域无关，合并不改变
+  // 合并带来的重复也就一直留着。要再看的只有联系人的事实与会话摘要：别的层的 Dream 范围和对象、来源作用域无关，合并不改变
   // 谁和谁一起看。按合并前的样子找出要放在一起看的：from 自己作用域里的（并进 into 的作用域）与关于 from 的（换成 into），
   // 以及它们要并进去的那边原有的——from 自己的作用域里有记忆时 into 自己作用域里的，关于 from 的记忆所在的作用域里
   // 关于 into 的。from 什么都带不过来时一条也不用再看
@@ -121,6 +122,7 @@ async function mergeInto(
     .set({ scope: newScope })
     .where(eq(conversationTurns.scope, oldScope))
     .returning({ appId: conversationTurns.appId })
+  await mergeConversations(tx, from, into)
   await tx
     .update(extractionRuns)
     .set({
@@ -180,6 +182,37 @@ async function mergeInto(
   // 被合并掉的对象还没用的绑定码随它删掉（外键级联）
   await tx.delete(subjects).where(eq(subjects.id, from.id))
   return { scope: newScope, apps: [...new Set(moved.map((m) => m.appId))] }
+}
+
+// 会话跟着改指向保留的联系人。同一个应用里保留的那边已经有会话时并成一个：摘要、事实与抽取记录挪过去，
+// 最近活动取较新的，再删掉被合并的那个。先挪后删：删除会话时触发器会连带删掉还挂在上面的摘要
+async function mergeConversations(tx: Tx, from: SubjectRow, into: SubjectRow): Promise<void> {
+  const gone = await tx.select().from(conversations).where(eq(conversations.subjectId, from.id))
+  for (const c of gone) {
+    const [kept] = await tx
+      .select({ id: conversations.id })
+      .from(conversations)
+      .where(and(eq(conversations.appId, c.appId), eq(conversations.subjectId, into.id)))
+    if (!kept) {
+      await tx.update(conversations).set({ subjectId: into.id }).where(eq(conversations.id, c.id))
+      continue
+    }
+    await tx
+      .update(memories)
+      .set({ conversationId: kept.id })
+      .where(eq(memories.conversationId, c.id))
+    await tx
+      .update(extractionRuns)
+      .set({ conversationId: kept.id })
+      .where(eq(extractionRuns.conversationId, c.id))
+    await tx
+      .update(conversations)
+      .set({
+        lastActiveAt: sql`greatest(${conversations.lastActiveAt}, ${c.lastActiveAt.toISOString()}::timestamptz)`,
+      })
+      .where(eq(conversations.id, kept.id))
+    await tx.delete(conversations).where(eq(conversations.id, c.id))
+  }
 }
 
 // 合并之后要排抽取的批次：移过来的缓冲和原有的并成一批

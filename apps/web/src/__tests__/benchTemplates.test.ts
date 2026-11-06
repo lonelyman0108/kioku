@@ -1182,13 +1182,18 @@ describe('模型对话的页面', () => {
 
   it('循环的说明：按运行时，近似的那种用提醒的颜色说清楚', () => {
     const note = must(
-      view.elements.find((el) => shownIn(el).includes('AGENT_LOOP_NOTES[loop]') && el.tag === 'p'),
+      view.elements.find(
+        (el) => shownIn(el).includes('agentLoopNote(loop, turnEnd)') && el.tag === 'p',
+      ),
       '循环的说明',
     )
     expect(bound(note, 'class')).toBe("loop === 'approximate' ? 'text-warning' : 'text-muted'")
     // 完整的循环在提示层里
-    expect(shownIn(note)).toContain('AGENT_LOOP_DETAILS[loop]')
+    expect(shownIn(note)).toContain('agentLoopDetail(loop, turnEnd)')
     expect(benchAgent).toMatch(/approximate:\s+'[^']*近似/)
+    // 回复后发不发 turn.end 用服务端给的，说明和发消息用的是同一个
+    expect(blockOf(view.script, 'const turnEnd = ')).toContain('info.data.value?.turnEnd')
+    expect(bodyOf(view.script, 'send')).toContain('turnEnd: turnEnd.value')
   })
 
   it('会话上下文：mcp 不发生命周期事件，不显示', () => {
@@ -1830,7 +1835,7 @@ describe('运行标记那一行', () => {
     const html = await renderToString(app)
     expect(html).toContain('abc12345')
     expect(html).toContain('测试应用')
-    expect(html).toContain('可读 1 层，可写 0 层，最高内部')
+    expect(html).toContain('可读 1 类归属，可写 0 类，最高内部')
   })
 })
 

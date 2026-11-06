@@ -142,6 +142,12 @@ export async function restoreBackup(
   const positionOf = (at: number) => local.findIndex((m) => m.folderMillis === at) + 1
   const backup = header.migrations
   const position = positionOf(backup.at)
+  // 改版之前的备份：迁移早于这个版本的第一个迁移（基线），见 db/migrate.ts 的 PRE_BASELINE_DATABASE
+  if (!position && backup.at < local[0]!.folderMillis) {
+    throw new Error(
+      `备份来自记忆架构改版之前的版本（${header.kioku}），这个版本不兼容旧数据，无法恢复：在新建的空库上启动这个版本，从 Lore 重新导入（见 docs/migrate-from-lore.md）；要用这份备份，用做备份的版本恢复`,
+    )
+  }
   if (!position && backup.at > local[local.length - 1]!.folderMillis) {
     throw new Error(
       `备份来自更新的版本（${header.kioku}），有这个版本没有的迁移：用不低于它的版本恢复`,
@@ -229,8 +235,8 @@ async function writeSections(
   // 恢复期间别的连接（例如没停的服务）不能初始化这个实例
   await tx.execute(sql`lock table public.accounts, public.spaces in share mode`)
   await assertNoAccounts(tx)
-  // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：URI 互斥的检查每行一把咨询锁，
-  // 上万条记忆放在一个事务里会占满锁表；触发器写下的派生数据本身也在备份里，再执行一遍会重复。外键照常检查。
+  // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：触发器写下的派生数据本身也在备份里，
+  // 再执行一遍会重复（现在的触发器只管删除，写回时本来也不触发）。外键照常检查。
   // 到事务结束前这些表别的连接也写不进来
   for (const table of tables) {
     await tx.execute(sql`alter table ${tableRef(table)} disable trigger user`)

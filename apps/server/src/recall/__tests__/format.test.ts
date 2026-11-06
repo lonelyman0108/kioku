@@ -10,8 +10,9 @@ import {
 } from '../recall'
 
 const candidate = {
-  uri: 'subject://x',
-  layer: 'base' as const,
+  uri: 'core://x',
+  title: 'x',
+  layer: 'core' as const,
   priority: 2,
   score: 0.5,
   via: [],

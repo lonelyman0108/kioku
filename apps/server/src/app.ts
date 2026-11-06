@@ -29,6 +29,7 @@ import { settingsRoutes } from './routes/settings'
 import { setupRoutes } from './routes/setup'
 import { spaceRoutes } from './routes/spaces'
 import { subjectRoutes } from './routes/subjects'
+import { conversationRoutes } from './routes/conversations'
 import { whoamiRoutes } from './routes/whoami'
 import { VERSION } from './version'
 
@@ -93,6 +94,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', spaceRoutes(deps))
   app.route('/v1', loreImportRoutes(deps))
   app.route('/v1', subjectRoutes(deps))
+  app.route('/v1', conversationRoutes(deps))
   app.route('/v1', reviewRoutes(deps))
   app.route('/v1', dreamRoutes(deps))
   app.route('/v1', recallRoutes(deps))

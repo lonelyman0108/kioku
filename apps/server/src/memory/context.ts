@@ -2,6 +2,7 @@ import type { MemberRole, RecallCandidate } from '@kioku/contracts'
 import { and, eq, inArray } from 'drizzle-orm'
 
 import { consoleAccess, resolveAccess, type Access, type ConsoleRole } from '../access/access'
+import { conversationRefOf, latestSummaries } from '../access/conversations'
 import { defaultSession, type KeySession } from '../access/session'
 import { memberRole } from '../auth/middleware'
 import { loggableError, withSpace, type Tx } from '../db/client'
@@ -46,7 +47,7 @@ export function accessForKey(key: KeyPrincipal, session: KeySession = defaultSes
 // 空间里的应用，只要知道主人是谁
 type AppOwner = { id: string; ownerAccountId: string }
 
-// 管理界面里成员本人的权限；editor 只能写自己是主人的应用的应用层，要先查出这些应用。
+// 管理界面里成员本人的权限；editor 只能写自己是所有者的应用的记忆，要先查出这些应用。
 // 调用方已经读出了空间里的全部应用时传进来（spaceApps），从里面挑，不再查一次
 async function accessForConsole(
   deps: Deps,
@@ -141,8 +142,8 @@ export function memoryServiceForKey(
   })
 }
 
-// 管理界面：按成员角色给权限，能看到空间里全部人格与应用的记忆，私人层只看得到自己的；
-// editor 只能写自己是主人的应用的应用层。能显式读 secret 的成员在树与列表里也看得到 secret 记忆，
+// 管理界面：按成员角色给权限，能看到空间里全部人格与应用的记忆，本人的记忆只看得到自己的；
+// editor 只能写自己是所有者的应用的记忆。能显式读 secret 的成员在树与列表里也看得到 secret 记忆，
 // 正文要显式查看（reveal）才给。
 // 调用方已经读出了空间里的全部应用时传进 spaceApps，不再为 editor 查一次
 export async function memoryServiceForConsole(
@@ -207,7 +208,14 @@ export function recallScopeForKey(
       run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
-    // 对象层不用人格链，不经过 run。对象直连只是附加的线索：读取失败时记日志、返回空，不影响召回本身
+    summaries: async (limit) => {
+      const ref = conversationRefOf(session.context, key.app.ownerAccountId)
+      if (ref?.kind !== 'none') return []
+      return withSpace(deps.db, key.spaceId, (tx) =>
+        latestSummaries(tx, access, key.app.id, ref, limit),
+      )
+    },
+    // 联系人的事实不用人格链，不经过 run。对象直连只是附加的线索：读取失败时记日志、返回空，不影响召回本身
     subjects: async () => {
       if (!session.subjects.length) return []
       try {

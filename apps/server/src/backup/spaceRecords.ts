@@ -2,12 +2,12 @@ import {
   AppConfig,
   CredentialIdentifier,
   CredentialProviderKind,
-  DomainLayers,
   ExternalCredentialSource,
   ExtractionBudget,
   HostedCredentialSource,
   Layer,
   MemoryForm,
+  MemoryTitle,
   MemoryUri,
   Provenance,
   RuntimeFamily,
@@ -18,15 +18,16 @@ import {
 import { z } from 'zod'
 
 // 空间导出文件解密、解压后的正文：JSON Lines，第一行是文件头，之后每行一条记录，type 说明是什么。
-// 记录里的 id 是导出时的 id，只用来在文件里互相指认（人格的继承、应用的默认人格、记忆挂的人格、应用与对象、
-// 按群换人格、凭据绑的凭据源与限定的应用）；导入时全部重新生成。归属成员的东西（画像、私人层、凭据、凭据源）
+// 记录里的 id 是导出时的 id，只用来在文件里互相指认（人格的继承、应用的默认人格、记忆挂的人格、应用与联系人、
+// 按群换人格、凭据绑的凭据源与限定的应用）；导入时全部重新生成。归属成员的东西（本人的记忆、凭据、凭据源）
 // 只有导出人自己的，不记是谁的：导入后全部归导入人。
-// 记忆按导出时的样子写出（secret 是明文，整个文件另用口令加密），不含历史、向量与召回统计。
+// 记忆按导出时的样子写出（secret 是明文，整个文件另用口令加密），不含历史、向量与召回统计；
+// 会话与会话摘要不导出，联系人的事实不带听到它的会话。
 // 导出时每条记录先按这里的定义检查一遍，写得出来的就一定导入得了
 export const SPACE_EXPORT_FORMAT = 'kioku-space-export'
-// 文件格式的版本，导出时写这个。2 起文件头的导出人带上 dreamPrivate；导入时也认 1（见 SpaceExportHeaderV1），
-// 认不得的更新的版本拒收：旧版本遇到 2 同样拒收，不会悄悄丢掉它不认识的内容
-export const SPACE_EXPORT_VERSION = 2
+// 文件格式的版本，导出时写这个，导入也只认它。3 是记忆架构改版之后的格式（归属、坐标与标题），
+// 之前的文件按七层写，不再能导入；更新的版本同样拒收，旧版本遇到 3 也拒收，不会悄悄丢掉不认识的内容
+export const SPACE_EXPORT_VERSION = 3
 
 // 压缩前的正文最多这么大：导出时超出就拒绝，导入时解压超出就停下（挡住压缩炸弹）
 export const SPACE_EXPORT_MAX_PLAIN_BYTES = 128 * 1024 * 1024
@@ -66,7 +67,7 @@ export function describeIssue(error: z.ZodError): string {
   return `${where}${issue?.message ?? '格式错误'}`
 }
 
-// 导出人导出时的显示名：导入前告诉导入人这是谁的画像、私人层与凭据
+// 导出人导出时的显示名：导入前告诉导入人这是谁的本人记忆与凭据
 const Exporter = z.object({ displayName: Text.max(200) })
 
 export const SpaceExportHeader = z.object({
@@ -75,27 +76,16 @@ export const SpaceExportHeader = z.object({
   createdAt: Time,
   // 做导出的 Kioku 版本，导入出错时提示用
   kioku: Text,
-  // dreamPrivate：导出人让不让 Dream 整理他的画像层与私人层，导入后照样用在导入人身上（这两层归了导入人）
+  // dreamPrivate：导出人让不让 Dream 整理他的本人记忆，导入后照样用在导入人身上（本人的记忆归了导入人）
   exporter: Exporter.extend({ dreamPrivate: z.boolean() }),
-  // 空间级的设置：名字（导入时没填名字就用它）、domain 默认层与抽取预算
+  // 空间级的设置：名字（导入时没填名字就用它）与抽取预算
   space: z.object({
     name: Text.min(1).max(64),
-    domainLayers: DomainLayers.shape.defaults,
     extractionMonthlyTokens: ExtractionBudget.shape.monthlyTokens,
     extractionDailyWrites: ExtractionBudget.shape.dailyWritesPerSubject,
   }),
 })
 export type SpaceExportHeader = z.infer<typeof SpaceExportHeader>
-
-// 版本 1 的文件头：导出人没有 dreamPrivate（那时还关不掉），读进来换成这个版本的样子，按开着
-export const SpaceExportHeaderV1 = SpaceExportHeader.extend({
-  version: z.literal(1),
-  exporter: Exporter,
-}).transform((header): SpaceExportHeader => ({
-  ...header,
-  version: SPACE_EXPORT_VERSION,
-  exporter: { ...header.exporter, dreamPrivate: true },
-}))
 
 export const PersonaRecord = z.object({
   type: z.literal('persona'),
@@ -126,7 +116,7 @@ export const SubjectRecord = z.object({
   kind: SubjectKind,
   displayName: Text.min(1).max(1000),
   nameLocked: z.boolean(),
-  // 导出人在对象页里把这个人标记成了「这是我」：导入后标记成导入人。标记成别的成员的不带过去
+  // 导出人在联系人详情里把这个人标记成了「这是我」：导入后标记成导入人。标记成别的成员的不带过去
   linkedToExporter: z.boolean(),
   createdAt: Time,
   updatedAt: Time,
@@ -190,13 +180,14 @@ export const MemoryRecord = z.object({
   layer: Layer,
   sensitivity: Sensitivity,
   provenance: Provenance,
-  // global、app:<应用>、group:<对象>、direct:<对象>，导入时换成新的 id
+  // global、app:<应用>、group:<联系人>、direct:<联系人>，导入时换成新的 id
   originScope: z.string().regex(new RegExp(`^(global|(app|group|direct):${UUID_TEXT})$`)),
   personaId: Id.nullable(),
   appId: Id.nullable(),
   subjectId: Id.nullable(),
-  // 策展记忆的 URI；抽取的记忆没有
+  // 记下的四类的坐标与标题；来自对话的记忆没有
   uri: MemoryUri.nullable(),
+  title: MemoryTitle.nullable(),
   content: Text.min(1).max(20_000),
   priority: z.number().int().min(0).max(99),
   disclosure: Text.max(500).nullable(),

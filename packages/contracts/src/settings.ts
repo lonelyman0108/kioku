@@ -156,7 +156,7 @@ export const RetentionCounts = z.object({
   expiredSummaries: z.number().int(),
   // 记忆整行已经不在的历史事件（例如删账号时数据库连带删掉的记忆留下的）
   orphanEvents: z.number().int(),
-  // 事件留着、快照里的正文抹掉了的：已删账号的画像层与私人层快照，记忆已经不在的导入事件
+  // 事件留着、快照里的正文抹掉了的：已删账号的本人记忆的快照，记忆已经不在的导入事件
   scrubbedSnapshots: z.number().int(),
   extractionRuns: z.number().int(),
   credentialEvents: z.number().int(),

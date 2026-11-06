@@ -2,13 +2,17 @@ import { createHash } from 'node:crypto'
 
 import {
   CreateMemoryRequest,
+  DEFAULT_SENSITIVITY,
   LAYER_NAMES,
+  SENSITIVITY_NAMES,
   RUNTIME_FAMILIES,
   Slug,
-  type Layer,
+  type CuratedLayer,
+  type LoreSyncChange,
   type LoreTargetState,
   type LoreWarningKind,
   type RuntimeFamily,
+  type Sensitivity,
   type UpdateMemoryRequest,
 } from '@kioku/contracts'
 import { and, asc, eq, inArray, isNotNull, sql } from 'drizzle-orm'
@@ -27,13 +31,41 @@ import { sealedSettingsKeys } from '../crypto/rotation'
 import { pgErrorCode, withSpace, type Db, type Tx } from '../db/client'
 import { apps, memories, memoryEvents, personas } from '../db/schema'
 import { MemoryError, MemoryService, ownerFor, uriConflicts } from '../memory/service'
-import { APP_DOMAIN, DEFAULT_SENSITIVITY, PERSONA_DOMAIN, formatUri, parseUri } from '../memory/uri'
+import {
+  APP_DOMAIN,
+  PERSONA_DOMAIN,
+  deriveTitle,
+  formatUri,
+  layerOf,
+  parseUri,
+} from '../memory/uri'
 
-// 从 Lore 导入，规则与步骤见 docs/migrate-from-lore.md。Lore 只读访问；映射规则：
-// core://agent → 基础层；core://soul → 指定人格的 persona 层；core://agent/<runtime> → 对应应用的应用层；
-// preferences:// → 主人层；其余 domain → 导入者的私人层。
+// 从 Lore 导入，规则与步骤见 docs/migrate-from-lore.md。Lore 只读访问；映射规则（Lore 的 URI → 坐标）：
+// core://agent 与 core:// 下别的 → 通用 core://…；core://soul → 指定人格的 persona://<人格>/soul；
+// core://agent/<runtime> → 对应应用的 app://<应用>/agent；preferences://… → 本人 user://preferences/…（内部）；
+// 其余 <分区>://<路径> → 导入者本人的 user://<分区>/<路径>（私密）。标题取正文第一个 # 标题，没有就用标识。
 // 历史版本不迁移，每条记忆记一条 import 事件，带上 Lore 的节点 uuid 与旧版本数；召回事件不迁移
 // 导入过的节点在 Lore 里又改了，用 planSync / applySync 同步（命令行的 --sync）
+
+// Lore 的 URI：分区://路径，分区是任意的小写标识（Kioku 的坐标只认四种开头，两边的写法不同）
+const LORE_URI = /^([a-z][a-z0-9_]{0,31}):\/\/([a-z0-9_-]{1,64}(?:\/[a-z0-9_-]{1,64}){0,15})$/
+
+// 计划里一条写入的归属：坐标的开头。计划里的坐标都经过 CreateMemoryRequest 的校验
+export function requestLayer(request: { uri: string }) {
+  return layerOf(parseUri(request.uri)!)
+}
+
+// 不标机密时写入的敏感级：本人的偏好给内部（开启后本人私聊也能用），别的按归属的默认（本人的给私密）
+export function plainSensitivity(loreUri: string, layer: CuratedLayer): Sensitivity {
+  return loreUri.startsWith('preferences://') ? 'internal' : DEFAULT_SENSITIVITY[layer]
+}
+
+// 写进去的标题：正文第一个 # 标题，没有就用坐标的标识。机密的正文加密、标题是明文，不从正文取，只用标识
+// （deriveTitle 只分是不是机密）。写入目标、同步项与命令行列出的标题都按它取，和写进去的一样
+export function loreTitle(content: string | null, uri: string, secret: boolean): string {
+  const path = uri.slice(uri.indexOf('://') + 3)
+  return deriveTitle(content ?? '', path, secret ? 'secret' : 'private')
+}
 
 // Lore 里一个节点导入时需要的信息。一个节点可能挂在多条路径上，最早的一条作为它的 URI，其余是别名
 export interface LoreNode {
@@ -118,7 +150,7 @@ export async function readLore(sql: postgres.Sql): Promise<LoreSnapshot> {
 }
 
 export interface ImportOptions {
-  // 导入者：主人层、私人层归他；core://agent/<runtime> 只会写进他自己的应用
+  // 导入者：本人的记忆归他；core://agent/<runtime> 只会写进他自己的应用
   accountId: string
   persona: { slug: string; name: string }
   // 这些 Lore URI（含别名）导入为 secret（加密存储）
@@ -341,18 +373,15 @@ export function planImport(
       })
       continue
     }
-    const parsed = parseUri(node.uri)
-    if (!parsed) {
-      plan.skipped.push({ source: node.uri, reason: 'URI 不符合 Kioku 的格式' })
+    const lore = LORE_URI.exec(node.uri)
+    if (!lore) {
+      plan.skipped.push({ source: node.uri, reason: 'URI 不符合 Lore 的格式' })
       continue
     }
-    if (parsed.domain === PERSONA_DOMAIN || parsed.domain === APP_DOMAIN) {
-      plan.skipped.push({ source: node.uri, reason: `${parsed.domain}:// 是 Kioku 的保留分区` })
-      continue
-    }
+    const parsed = { domain: lore[1]!, path: lore[2]! }
 
     const segments = parsed.path.split('/')
-    let targets: { uri: string; layer: Layer; app?: string; persona?: string }[]
+    let targets: { uri: string; layer: CuratedLayer; app?: string; persona?: string }[]
     if (parsed.domain === 'core' && segments[0] === 'soul') {
       targets = [
         {
@@ -373,13 +402,11 @@ export function planImport(
         app: app.slug,
       }))
     } else if (parsed.domain === 'core') {
-      targets = [{ uri: node.uri, layer: 'base' }]
-    } else if (parsed.domain === 'preferences') {
-      targets = [{ uri: node.uri, layer: 'owner' }]
+      targets = [{ uri: node.uri, layer: 'core' }]
     } else {
-      targets = [{ uri: node.uri, layer: 'private' }]
+      // preferences:// 也放进 user:// 下面，保留原来的分区作为第一级
+      targets = [{ uri: formatUri('user', `${parsed.domain}/${parsed.path}`), layer: 'user' }]
     }
-
     // 路径看主路径和别名；正文之外 disclosure 与关键词也看：secret 只加密正文，这两项始终是明文
     const secret = secretNodes.has(node.uuid)
     const extras = extrasOf(node)
@@ -430,18 +457,18 @@ export function planImport(
         continue
       }
       // 占位符的位置规则与写入检查相同
-      const sensitivity = secret ? 'secret' : DEFAULT_SENSITIVITY[target.layer]
+      const sensitivity = secret ? 'secret' : plainSensitivity(node.uri, target.layer)
       if (hasRefs && !placeholderAllowed(target.layer, sensitivity)) {
         skip(
-          `正文含凭据占位符，只能放在私人层、敏感级不低于私密的记忆中，${target.uri} 属于${LAYER_NAMES[target.layer]}层`,
+          `正文含凭据占位符，只能放在本人、敏感级不低于私密的记忆中，${target.uri} 是${LAYER_NAMES[target.layer]} · ${SENSITIVITY_NAMES[sensitivity]}`,
         )
         continue
       }
       const request = CreateMemoryRequest.safeParse({
         uri: target.uri,
+        title: loreTitle(node.content, target.uri, secret),
         content: node.content,
-        layer: target.layer,
-        ...(secret ? { sensitivity: 'secret' } : {}),
+        sensitivity,
         priority: node.priority,
         ...(disclosure ? { disclosure } : {}),
         glossary,
@@ -566,8 +593,7 @@ async function readPlanState(
       id: null,
       // 计划里的 URI 都经过 CreateMemoryRequest 的校验
       ...parseUri(m.request.uri)!,
-      ownerAccountId: ownerFor(access, m.request.layer!),
-      ended: false,
+      ownerAccountId: ownerFor(access, requestLayer(m.request)),
     }))
   const taken = await uriConflicts(snap.tx, access, claims)
   return { imports, occupied: new Set([...taken].map((c) => c.importKey)) }
@@ -671,7 +697,7 @@ function priorImport(
   return found ? { state: 'imported', found } : { state: 'new', found: [] }
 }
 
-// 这次要不要写入新的人格层记忆：人格层目标里有状态是新建的。已导入的、Lore 里换了路径的、在 Kioku 里删除了的都不算，
+// 这次要不要写入新的人格的记忆：人格的写入目标里有状态是新建的。已导入的、Lore 里换了路径的、在 Kioku 里删除了的都不算，
 // 勾掉的不在计划里。只有这时人格不存在才新建；否则不新建，已有的人格照常用（跳过 soul 的同步不改变应用用哪个人格），
 // 不存在就没有人格可用，新建的应用默认人格为空。计划预览与真正写入都按这个判断
 function writesNewPersona(
@@ -680,7 +706,7 @@ function writesNewPersona(
   moved: Map<string, ImportedMemory[]>,
 ): boolean {
   return plan.memories.some(
-    (m) => m.request.layer === 'persona' && priorImport(m, done, moved).state === 'new',
+    (m) => requestLayer(m.request) === 'persona' && priorImport(m, done, moved).state === 'new',
   )
 }
 
@@ -935,7 +961,7 @@ export interface ImportedMemory {
 
 // 导入过的节点：去重键 → 每条导入事件对应的记忆现在的状态（是不是 secret，或者已经删除）与现在的 URI。
 // 早期版本去重不上时会把同一个节点再写一条，所以一个键可能对应多条记忆。
-// 早期的导入事件没有记 targetPersona：人格层的从导入时的快照补出来（当时 URI 的第一段就是人格），
+// 早期的导入事件没有记 targetPersona：人格的从导入时的快照补出来（当时 URI 的第一段就是人格），
 // 记忆后来删掉了也补得出，去重键才与现在的一致。一次计划只读一次（planImportFor），预览与同步都用它
 export type ImportRecords = Map<string, ImportedMemory[]>
 
@@ -1006,7 +1032,7 @@ async function importRecordsIn(tx: Tx): Promise<ImportRecords> {
 
 // Lore 里换了路径、映射到别的应用或层的节点：去重键跟着变了，按键找不到之前的导入，不认出来就会在新位置再建一条。
 // 按节点 uuid 认：之前导入时的键这次的计划已经不再产生、Lore 里的 URI 也变了，才算换了路径。
-// 加了一个同类应用（节点多了一个目标）时原来的键仍在计划里，换个 --persona 时人格层两边的人格不同，都不算；
+// 加了一个同类应用（节点多了一个目标）时原来的键仍在计划里，换个 --persona 时人格的两边人格不同，都不算；
 // 之前的导入事件没记 loreUri 的不判断。这次的目标包括要写的和只因这个目标本身被跳过的（skipped 里带 target 的）：
 // 被跳过的目标对应的旧记录，同步时拿到它被跳过的原因。返回：这次的去重键 → 之前按别的键导入的那些记忆
 function movedInLore(plan: ImportPlan, done: ImportRecords): Map<string, ImportedMemory[]> {
@@ -1041,7 +1067,7 @@ function importerAccess(target: Pick<ImportTarget, 'accountId'>): Access {
 }
 
 // 按导入者的身份写入。正文里已有的凭据占位符照常检查（要解析到导入者的凭据），
-// 但允许新增：这是主人自己把数据搬进自己的私人层，不是抽取或 Dream
+// 但允许新增：这是本人自己把数据搬进自己的本人记忆，不是抽取或 Dream
 function importerService(target: ImportTarget): MemoryService {
   return new MemoryService({
     db: target.db,
@@ -1054,11 +1080,12 @@ function importerService(target: ImportTarget): MemoryService {
   })
 }
 
-// 同步导入过的节点：把 Kioku 里的记忆改成 Lore 里现在的正文、priority、disclosure 与关键词，敏感级不动。
+// 同步导入过的节点：把 Kioku 里的记忆改成 Lore 里现在的正文、标题、priority、disclosure 与关键词，敏感级不动。
+// 标题和导入时同一个取法（loreTitle），Lore 里改了正文第一个 # 标题就跟着改。
 // 只动导入（或上次同步）之后在 Kioku 里没人改过的：记忆现在的版本号还是导入工具最后写下的那个才算，
 // 任何修改、移动、撤销删除都会让版本号加一。在 Kioku 里改过、移动过、删除了的一律不动，
 // 凭据迁移改过的凭据节点也就不会被 Lore 里的明文盖回去；
-// Lore 里路径变了的也不动，移动可能改变层（例如移进 core:// 就成了所有应用都读的基础层），要由人决定
+// Lore 里路径变了的也不动，移动可能改变归属（例如移进 core:// 就成了所有应用都读的通用记忆），要由人决定
 export type SyncState =
   'update' | 'current' | 'edited' | 'moved' | 'deleted' | 'skipped' | 'unmapped' | 'unreadable'
 
@@ -1066,12 +1093,15 @@ export interface SyncItem {
   source: string
   // 记忆现在的 URI；在 Kioku 里删除了的是导入时的 URI
   uri: string
+  // 给人看的标题，和写入目标同一个取法（loreTitle），按 uri 的标识；同步不改敏感级，记忆现在是机密的只用标识。
+  // 要更新的同步之后就是这个标题
+  title: string
   state: SyncState
   // state 为 moved 时，按 Lore 现在的路径应当在的 URI
   target?: string
   // state 为 skipped（这次的导入计划不导入这个节点）或 unreadable 时的原因
   reason?: string
-  changes: ('content' | 'priority' | 'disclosure' | 'glossary')[]
+  changes: LoreSyncChange[]
   request?: UpdateMemoryRequest
   context?: Record<string, unknown>
 }
@@ -1119,10 +1149,19 @@ export async function planSync(
 
   const service = importerService(target)
   const sync: SyncPlan = { items: [], goneFromLore: [] }
+  const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
   const reported = new Set<ImportedMemory>()
-  const report = (m: ImportedMemory, item: Omit<SyncItem, 'changes'> & Partial<SyncItem>) => {
+  const report = (
+    m: ImportedMemory,
+    item: Omit<SyncItem, 'changes' | 'title'> & Partial<SyncItem>,
+  ) => {
     reported.add(m)
-    sync.items.push({ changes: [], ...item })
+    const content = nodeByUuid.get(m.loreNodeUuid)?.content ?? null
+    sync.items.push({
+      changes: [],
+      title: loreTitle(content, item.uri, m.state === 'secret'),
+      ...item,
+    })
   }
   const moved = movedInLore(plan, done)
   for (const item of plan.memories) {
@@ -1153,7 +1192,7 @@ export async function planSync(
       // 只有真要读出来比对的 secret 才需要主密钥
       if (m.state === 'secret' && !target.masterKey) {
         throw new Error(
-          `${m.uri} 是 secret，同步要读出来比对：需要设置与服务相同的 KIOKU_MASTER_KEY`,
+          `${m.uri} 是机密记忆，同步要读出来比对：需要设置与服务相同的 KIOKU_MASTER_KEY`,
         )
       }
       let current
@@ -1180,6 +1219,13 @@ export async function planSync(
         request.content = want.content
         changes.push('content')
       }
+      // 没人改过的记忆的标题就是导入工具按当时的正文取的：同一个取法按现在的正文再取一次，不同就改。
+      // 在 Kioku 里改过标题的版本号已经变了，走不到这里；机密的标题本来就只用标识
+      const title = loreTitle(want.content, m.uri, m.state === 'secret')
+      if (current.title !== title) {
+        request.title = title
+        changes.push('title')
+      }
       if (want.priority !== undefined && current.priority !== want.priority) {
         request.priority = want.priority
         changes.push('priority')
@@ -1199,8 +1245,8 @@ export async function planSync(
       report(
         m,
         changes.length
-          ? { source, uri: m.uri, state: 'update', changes, request, context: item.context }
-          : { source, uri: m.uri, state: 'current' },
+          ? { source, uri: m.uri, title, state: 'update', changes, request, context: item.context }
+          : { source, uri: m.uri, title, state: 'current' },
       )
     }
   }
@@ -1210,7 +1256,6 @@ export async function planSync(
   // 占位符的位置规则等）只给这个目标对应的旧记录：去重键相同的，或者 Lore 里换了路径、现在对应到它的（moved，
   // 和同步决定移到哪个目标是同一份）。不再对应任何目标的旧记录不挂别的目标的原因，列为没有映射到。
   // 目标被别的记忆占用的只出现在要新建的目标上，没有对应的旧记录，不会挂到任何一条上
-  const nodeByUuid = new Map(snapshot.nodes.map((n) => [n.uuid, n]))
   const nodeReasons = new Map<string, string[]>()
   // 一条旧记录对应几个被跳过的目标时（换了路径之后映射到几个应用）只写第一个目标的原因：几句常常是同一句
   const targetReason = new Map<ImportedMemory, string>()
@@ -1274,8 +1319,8 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
 
 // 计划的指纹：看计划与执行时都对不带勾选的基准计划算，所以勾选不影响它。
 // 覆盖人格与这次会不会新建它、应用映射、哪些应用会被设默认人格（新建的也算）或在用别的人格、
-// 每个写入目标（来源、URI、层、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
-// 不导入的、提醒、要更新的同步项与 Lore 里没有了的；都排好序，所以打乱导出的行序不会变。
+// 每个写入目标（来源、URI、归属、标题、priority、disclosure、排好序的关键词、正文的哈希、新建或已导入）、
+// 不导入的、提醒、要更新的同步项（URI、标题与要改的几项）与 Lore 里没有了的；都排好序，所以打乱导出的行序不会变。
 // 不覆盖版本号、时间与人格本身在不在：只有真要写的东西变了才算计划变了
 export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: SyncPlan): string {
   const canonical = <T>(items: T[]) => items.map((item) => JSON.stringify(item)).sort()
@@ -1297,7 +1342,8 @@ export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: 
           preview.targets.map(({ item, state }) => ({
             source: item.source,
             uri: item.request.uri,
-            layer: item.request.layer ?? null,
+            layer: requestLayer(item.request),
+            title: item.request.title ?? null,
             priority: item.request.priority,
             disclosure: item.request.disclosure ?? null,
             glossary: [...item.request.glossary].sort(),
@@ -1310,7 +1356,7 @@ export function planFingerprint(plan: ImportPlan, preview: ImportPreview, sync: 
         updates: canonical(
           sync.items
             .filter((i) => i.state === 'update')
-            .map((i) => ({ uri: i.uri, changes: [...i.changes].sort() })),
+            .map((i) => ({ uri: i.uri, title: i.title, changes: [...i.changes].sort() })),
         ),
         goneFromLore: [...sync.goneFromLore].sort(),
       }),
@@ -1392,6 +1438,6 @@ export async function verifyMasterKey(
     )
     return true
   } catch {
-    throw new Error('KIOKU_MASTER_KEY 解不开已有的 secret 记忆：它和服务使用的主密钥不一致')
+    throw new Error('KIOKU_MASTER_KEY 解不开已有的机密记忆：它和服务使用的主密钥不一致')
   }
 }

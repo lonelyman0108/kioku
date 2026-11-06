@@ -124,7 +124,7 @@ const retryKeys = computed(() => retryOf(keys))
       <div v-else-if="apps.data.value && !owned.length && !apps.isError.value" class="no-apps">
         <p class="text-muted">
           当前账号在此空间暂无应用。
-          <Hint>测试台仅限应用所有者使用：调用会读取所有者的私人层。</Hint>
+          <Hint>测试台仅限应用所有者使用：调用会读取所有者的本人记忆。</Hint>
         </p>
         <UButton :to="{ name: 'apps', params: { spaceId } }" size="sm" variant="outline">
           管理应用

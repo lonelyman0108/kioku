@@ -10,27 +10,16 @@ import {
   type EventActor,
   type KeyAccessMatrix,
   type KeyScopes,
-  type Layer,
   type OriginScope,
   type Provenance,
   type ReadDenial,
   type RecallSource,
+  type SessionExtra,
 } from '@kioku/contracts'
 
 import { icons } from './icons'
 
 export const layerLabels = LAYER_NAMES
-
-// 目录与列表里放不下全名时用的简称
-export const layerShortLabels: Record<Layer, string> = {
-  base: '基础',
-  persona: '人格',
-  app: '应用',
-  owner: '画像',
-  private: '私人',
-  subject: '联系人',
-  episode: '情节',
-}
 
 export const sensitivityLabels = SENSITIVITY_NAMES
 
@@ -39,7 +28,7 @@ export const ADMIN_SCOPE_LABEL = '跨人格 / 应用写入'
 
 // 一个 Key 的权限，一句话说完
 export const scopesSummary = (s: KeyScopes) =>
-  `可读 ${s.readLayers.length} 层，可写 ${s.writeLayers.length} 层，最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? `，${ADMIN_SCOPE_LABEL}` : ''}`
+  `可读 ${s.readLayers.length} 类归属，可写 ${s.writeLayers.length} 类，最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? `，${ADMIN_SCOPE_LABEL}` : ''}`
 
 export const accessContextLabels: Record<AccessContext, string> = {
   none: '无上下文（本机 Agent）',
@@ -75,13 +64,20 @@ export const recallSourceLabels: Record<RecallSource, string> = {
   'rest.recall': 'REST 召回',
 }
 
+// 会话开始时附在启动加载后面的几块，放不下、没有附上时说是哪几块
+export const sessionExtraLabels: Record<SessionExtra, string> = {
+  summaries: '会话摘要',
+  recent: '近期更新的记忆',
+  related: '与当前项目相关的记忆',
+}
+
 // 召回调试里一条记忆被当前 Key 过滤掉的原因
 export const readDenialLabels: Record<ReadDenial, string> = {
   deleted: '已删除',
   expired: '已失效或过期',
-  layer: '超出访问密钥的可读层',
+  layer: '超出访问密钥的可读归属',
   sensitivity: '超出访问密钥的敏感级上限',
-  secret: '机密内容仅可按 URI 读取，不参与召回',
+  secret: '机密内容仅可按坐标读取，不参与召回',
   origin: '来源范围不匹配',
   owner: '属于其他成员',
   persona: '不在当前人格的继承链上',
@@ -89,11 +85,9 @@ export const readDenialLabels: Record<ReadDenial, string> = {
   override: '已被更近的人格节点覆盖',
 }
 
-// 表单上的 URI 格式提示。契约里那句是给接口与 MCP 的，中英并列；界面上只说中文
-export const URI_FORMAT_HINT = 'URI 格式应为 分区://路径，例如 core://agent'
-
-// 按 URI 直接新建时可选的层：persona:// 与 app:// 由 URI 决定，联系人层与情节层由对话抽取写入
-export const creatableLayers: Layer[] = ['base', 'owner', 'private']
+// 表单上的坐标格式提示。契约里那句是给接口与 MCP 的，四种开头各放什么都写了；界面上只说格式
+export const URI_FORMAT_HINT =
+  '坐标只能以 core://、user://、persona://<人格标识>/ 或 app://<应用标识>/ 开头，各段只用小写字母、数字、_ 或 -'
 
 export const provenanceLabels: Record<Provenance, string> = {
   owner: '本人',
@@ -112,7 +106,7 @@ export const eventLabels: Record<string, { label: string; icon: string }> = {
   delete: { label: '删除', icon: icons.remove },
   restore: { label: '恢复旧版本', icon: icons.restore },
   undelete: { label: '恢复', icon: icons.undelete },
-  expire: { label: '过期并释放 URI', icon: icons.expired },
+  expire: { label: '过期并释放坐标', icon: icons.expired },
   reactivate: { label: '恢复生效', icon: icons.reactivate },
   confirm: { label: '确认来源', icon: icons.confirmed },
   convert_credential: { label: '转存为凭据', icon: icons.credentials },
@@ -150,8 +144,8 @@ export function originScopeText(scope: OriginScope): string {
   }
 }
 
-// 变更记录里的 URI 能不能点过去。记忆已经删除（包括过期后让出 URI 的）或过期了，按 URI 打开的是那里别的记忆、
-// 或者读不到；离开了可见范围的 URI 是改动之前的。这几种不给链接，同一条记忆更早的改动也一样
+// 变更记录里的一行能不能点过去。记忆已经删除（包括过期后释放坐标的）或过期了，按坐标打开的是那里别的记忆、
+// 或者读不到；离开了可见范围的坐标是改动之前的。这几种不给链接，同一条记忆更早的改动也一样
 export const activityLinkable = (item: Pick<ActivityItem, 'left' | 'deleted' | 'expired'>) =>
   !item.left && !item.deleted && !item.expired
 
@@ -173,11 +167,12 @@ export const benchAccountLabel = (mark: BenchMark) => mark.accountName ?? '已�
 // 变更记录里「改了哪些字段」
 export const changeLabels: Record<string, string> = {
   content: '正文',
+  title: '标题',
   disclosure: '触发场景',
   priority: '优先级',
   sensitivity: '敏感级',
-  layer: '层',
-  uri: 'URI',
+  layer: '归属',
+  uri: '坐标',
   glossary: '关键词',
   validTo: '有效期',
 }

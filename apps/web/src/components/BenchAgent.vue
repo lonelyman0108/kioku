@@ -6,9 +6,9 @@ import { computed, nextTick, ref, shallowRef, useTemplateRef, watch } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import {
-  AGENT_LOOP_DETAILS,
-  AGENT_LOOP_NOTES,
   AGENT_UNAVAILABLE_NOTES,
+  agentLoopDetail,
+  agentLoopNote,
   agentScenario,
   blockingDivergence,
   consentNeeded,
@@ -50,7 +50,7 @@ const {
   consentTo,
 } = useBench()
 
-// 用不用得了、默认模型、接口的地址、这个运行时走哪种循环
+// 用不用得了、默认模型、接口的地址、这个运行时走哪种循环、回复后发不发 turn.end
 const info = useQuery({
   queryKey: computed(() => ['bench-agent', spaceId.value, appId.value, keyId.value]),
   queryFn: () => api.benchAgent(spaceId.value, appId.value!, keyId.value!),
@@ -72,6 +72,7 @@ const retryInfo = computed(() => [
   },
 ])
 const loop = computed(() => info.data.value?.loop ?? null)
+const turnEnd = computed(() => info.data.value?.turnEnd === true)
 const available = computed(() => info.data.value?.available === true)
 const unavailable = computed(() => {
   const reason = info.data.value?.reason
@@ -150,6 +151,7 @@ async function send() {
   input.value = ''
   const finished = await sendToAgent(text, {
     loop: loop.value,
+    turnEnd: turnEnd.value,
     system: system.value,
     model: model.value,
   })
@@ -332,8 +334,8 @@ watch(generation, () => {
 
       <aside v-if="available && loop" class="agent-side">
         <p class="side-note" :class="loop === 'approximate' ? 'text-warning' : 'text-muted'">
-          {{ AGENT_LOOP_NOTES[loop] }}
-          <Hint>{{ AGENT_LOOP_DETAILS[loop] }}</Hint>
+          {{ agentLoopNote(loop, turnEnd) }}
+          <Hint>{{ agentLoopDetail(loop, turnEnd) }}</Hint>
         </p>
         <p v-if="real" class="side-note text-error">
           真实模式：模型调用写工具会真实写入，不会回滚。

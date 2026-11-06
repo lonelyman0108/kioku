@@ -21,6 +21,7 @@ class RecallCandidate:
     """
     Attributes:
         uri (str):
+        title (str):
         layer (RecallCandidateLayer):
         priority (int):
         disclosure (None | str):
@@ -30,6 +31,7 @@ class RecallCandidate:
     """
 
     uri: str
+    title: str
     layer: RecallCandidateLayer
     priority: int
     disclosure: None | str
@@ -40,6 +42,8 @@ class RecallCandidate:
 
     def to_dict(self) -> dict[str, Any]:
         uri = self.uri
+
+        title = self.title
 
         layer = self.layer.value
 
@@ -62,6 +66,7 @@ class RecallCandidate:
         field_dict.update(
             {
                 "uri": uri,
+                "title": title,
                 "layer": layer,
                 "priority": priority,
                 "disclosure": disclosure,
@@ -77,6 +82,8 @@ class RecallCandidate:
     def from_dict(cls: type[T], src_dict: Mapping[str, Any]) -> T:
         d = dict(src_dict)
         uri = d.pop("uri")
+
+        title = d.pop("title")
 
         layer = RecallCandidateLayer(d.pop("layer"))
 
@@ -102,6 +109,7 @@ class RecallCandidate:
 
         recall_candidate = cls(
             uri=uri,
+            title=title,
             layer=layer,
             priority=priority,
             disclosure=disclosure,

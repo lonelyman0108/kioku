@@ -65,21 +65,18 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
     const found = results.value
     if (!id || !found) return list
     const to = (uri: string) => memoryRoute(id, uri)
-    // URI 是地址，用等宽字
-    const uriLabel = { itemLabelBase: 'font-mono' }
     const direct = new Set(found.matches.map((m) => m.uri))
     // 服务端已经按查询词筛过，不再交给搜索框按文字过滤
     list.push(
       {
         id: 'matches',
-        label: 'URI 与关键词',
+        label: '标题、坐标与关键词',
         ignoreFilter: true,
         items: found.matches.map((m) => ({
-          label: m.uri,
+          label: m.title,
           suffix: m.disclosure ?? layerLabels[m.layer],
           icon: m.sensitivity === 'secret' ? icons.secret : icons.file,
           to: to(m.uri),
-          ui: uriLabel,
         })),
       },
       {
@@ -89,11 +86,10 @@ export function useConsoleSearch(spaceId: Ref<string | null>, pages: Ref<Command
         items: found.candidates
           .filter((c) => !direct.has(c.uri))
           .map((c) => ({
-            label: c.uri,
+            label: c.title,
             suffix: c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''),
             icon: icons.memories,
             to: to(c.uri),
-            ui: uriLabel,
           })),
       },
     )

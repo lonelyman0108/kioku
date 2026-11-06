@@ -1,6 +1,6 @@
 import type { BenchScenarioInput } from '@kioku/contracts'
 
-import { EXPIRES, GUIDANCE_START, PRIVATE_WRITE, runUri } from './shared'
+import { EXPIRES, GUIDANCE_START, USER_WRITE, runUri } from './shared'
 
 const NOTE = runUri('note')
 const KEYWORD = 'bench${run}'
@@ -36,13 +36,12 @@ export const claudeCodeSession: BenchScenarioInput = {
       arguments: {
         uri: NOTE,
         content: '测试台写下的记忆，运行标记 ${run}。',
-        layer: 'private',
         priority: 2,
         disclosure: '测试台的 Claude Code 会话场景',
         glossary: [KEYWORD],
         valid_to: EXPIRES,
       },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, contains: [`URI: ${NOTE}`, '版本: 1'] },
       capture: { version: '版本: ' },
     },
@@ -50,7 +49,7 @@ export const claudeCodeSession: BenchScenarioInput = {
       kind: 'lifecycle',
       label: '下一轮召回得到它',
       body: { event: 'prompt.submit', sessionId: SESSION_ID, prompt: `回忆一下 ${KEYWORD} 这条` },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, uris: [NOTE] },
     },
     {
@@ -58,7 +57,7 @@ export const claudeCodeSession: BenchScenarioInput = {
       label: '读正文',
       tool: 'kioku_get',
       arguments: { uri: NOTE },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, contains: ['运行标记 ${run}', 'Disclosure: '] },
     },
     {
@@ -66,7 +65,7 @@ export const claudeCodeSession: BenchScenarioInput = {
       label: '改它',
       tool: 'kioku_update',
       arguments: { uri: NOTE, priority: 3, expected_version: '${version}' },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, contains: ['priority: 3', '版本: 2'] },
     },
     {
@@ -74,7 +73,7 @@ export const claudeCodeSession: BenchScenarioInput = {
       label: '搜得到',
       tool: 'kioku_search',
       arguments: { query: KEYWORD },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false, uris: [NOTE] },
     },
     {
@@ -82,7 +81,7 @@ export const claudeCodeSession: BenchScenarioInput = {
       label: '删掉',
       tool: 'kioku_delete',
       arguments: { uri: NOTE },
-      requires: PRIVATE_WRITE,
+      requires: USER_WRITE,
       expect: { error: false },
     },
   ],

@@ -22,10 +22,13 @@ import appsPage from '../pages/AppsPage.vue?raw'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
 import memoriesPage from '../pages/MemoriesPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
-import personasPage from '../pages/PersonasPage.vue?raw'
+import memoryRootPanel from '../components/MemoryRootPanel.vue?raw'
+import personaPanel from '../components/PersonaPanel.vue?raw'
 import recallPage from '../pages/RecallPage.vue?raw'
-import subjectDetailPage from '../pages/SubjectDetailPage.vue?raw'
-import subjectsPage from '../pages/SubjectsPage.vue?raw'
+import subjectsPage from '../components/ContactList.vue?raw'
+import conversationDetail from '../components/ConversationDetail.vue?raw'
+import subjectDetailPage from '../pages/ContactDetailPage.vue?raw'
+import conversationsPage from '../pages/ConversationsPage.vue?raw'
 import { failedReads, queryClient } from '../query'
 
 // 读取失败的写法：一律用 ReadFailureNote。文字经 readFailure；再读有用时给「重试」，重读的就是传进去的那一样，
@@ -206,10 +209,12 @@ describe('读取失败', () => {
     ['整理建议', dreamSuggestions, 'suggestions'],
     ['疑似明文凭据', inboxPlaintext, 'list'],
     ['账号绑定', inboxBindings, 'overview'],
-    ['人格列表', personasPage, 'personas'],
-    ['人格详情', personasPage, 'selected'],
+    ['人格列表', memoryRootPanel, 'personas'],
+    ['人格详情', personaPanel, 'selected'],
     ['联系人', subjectsPage, 'section.query'],
     ['联系人详情', subjectDetailPage, 'subject'],
+    ['会话', conversationsPage, 'list'],
+    ['会话详情', conversationDetail, 'detail'],
     ['凭据', credentialsPage, 'credentials'],
     ['已删除的凭据', credentialsPage, 'deleted'],
     ['凭据详情', credentialsPage, 'selected'],
@@ -266,7 +271,7 @@ describe('读取失败', () => {
 })
 
 describe('读到过的内容不被错误盖掉', () => {
-  it('记忆目录：重读根节点失败时树照常显示、展开的节点不丢，错误放在上面', () => {
+  it('记忆目录：根的下一级读失败时树照常显示、展开的节点不丢，错误放在上面', () => {
     expect(memoriesPage).toContain('<ReadFailureNote :query="rootsRead" />')
     // 有没有读到过看根节点：有就写刷新失败
     expect(memoriesPage).toContain(
@@ -274,15 +279,16 @@ describe('读到过的内容不被错误盖掉', () => {
     )
     const tree = elementsOf(template(memoriesPage)).find((el) => el.tag === 'UTree')!
     const condition = tree.props?.find((p) => p.name === 'if')?.exp?.content
-    expect(condition).toBe('loadingRoots || roots.length')
+    // 四个根是固定的，一开始就在
+    expect(condition).toBe('roots.length')
     expect(tree.props?.some((p) => p.name === 'else' || p.name === 'else-if')).toBe(false)
   })
 
-  it('记忆目录：换空间时上一个空间的树和错误都清掉，不拿旧分区去请求新空间', () => {
+  it('记忆目录：换空间时上一个空间的树和错误都清掉，不拿旧的节点去请求新空间', () => {
     const watcher = /watch\(spaceId, \(\) => \{[^]*?\n\}\)/.exec(memoriesPage)![0]
     expect(watcher).toContain('roots.value = []')
     expect(watcher).toContain('rootsError.value = null')
-    expect(watcher).toContain('expanded.value = []')
+    expect(watcher).toContain('expanded.value = [...DEFAULT_EXPANDED]')
     expect(watcher.indexOf('roots.value = []')).toBeLessThan(watcher.indexOf('serially(loadRoots)'))
   })
 
@@ -293,7 +299,13 @@ describe('读到过的内容不被错误盖掉', () => {
       'subject',
       'v-else-if="!data || (subject.isError.value && !retryable(subject.error.value))"',
     ],
-    ['人格详情', personasPage, 'selected', '(!detail || !retryable(selected.error.value))'],
+    [
+      '会话详情',
+      conversationDetail,
+      'detail',
+      'v-else-if="!data || (detail.isError.value && !retryable(detail.error.value))"',
+    ],
+    ['人格详情', personaPanel, 'selected', '(!detail || !retryable(selected.error.value))'],
     [
       '凭据详情',
       credentialsPage,
@@ -318,7 +330,7 @@ describe('读到过的内容不被错误盖掉', () => {
 
   it('人格详情的刷新失败放在节点上面：PersonaDetail 给使用方留了位置', () => {
     expect(personaDetail).toContain('<slot name="notice" />')
-    expect(personasPage).toContain('<template v-if="selected.isError.value" #notice>')
+    expect(personaPanel).toContain('<template v-if="selected.isError.value" #notice>')
   })
 
   it('记忆详情：刷新失败时表单留着，提示带重试', () => {
