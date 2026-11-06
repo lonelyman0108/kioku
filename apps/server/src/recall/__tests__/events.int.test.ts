@@ -222,7 +222,7 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
         for (let i = 0; ; i++) {
           const rows = await side<{ pid: number; by: number[] }[]>`
             select pid, pg_blocking_pids(pid) as by from pg_stat_activity
-            where cardinality(pg_blocking_pids(pid)) > 0`
+            where datname = current_database() and cardinality(pg_blocking_pids(pid)) > 0`
           const waiting = new Set([pid])
           for (let grew = true; grew;) {
             grew = false
