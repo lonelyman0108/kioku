@@ -85,7 +85,7 @@ describe('没写触发场景时的提示', () => {
     expect(tone({})).toBe('warning')
   })
 
-  it('启动加载的节点也提示，和概览的数字对得上，只是语气弱一点', () => {
+  it('启动加载的节点不算要补的，语气弱一点：概览的「未设触发场景」不数它们', () => {
     expect(tone({ priority: 0 })).toBe('muted')
     expect(tone({ layer: 'persona', priority: 1 })).toBe('muted')
   })
