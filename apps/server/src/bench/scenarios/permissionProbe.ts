@@ -15,11 +15,11 @@ export const permissionProbe: BenchScenarioInput = {
   id: 'permission-probe',
   title: '权限探测',
   description:
-    '列出这把 Key 不带上下文、带群聊与定时任务上下文时读写的结果，不判通过与失败。会话上下文只作用于生命周期事件与 /recall，工具调用不带，真实的 MCP 也不带。写的那几步只写私人层，最后删掉。',
+    '列出当前访问密钥不带上下文、带群聊与定时任务上下文时读写的结果，不判通过与失败。会话上下文只作用于生命周期事件与 /recall，工具调用不带，真实的 MCP 也不带。写的那几步只写私人层，最后删掉。',
   probe: true,
   steps: [
-    { kind: 'whoami', label: 'Key 的上限' },
-    { kind: 'boot', label: '启动节点' },
+    { kind: 'whoami', label: '当前访问密钥的上限' },
+    { kind: 'boot', label: '启动加载' },
     tool('启动基线（工具）', 'kioku_boot'),
     tool('记忆树', 'kioku_list'),
     tool('按 URI 读 core://agent', 'kioku_get', { uri: 'core://agent' }),
@@ -52,7 +52,7 @@ export const permissionProbe: BenchScenarioInput = {
       priority: 2,
       valid_to: EXPIRES,
     }),
-    tool('写 secret 级', 'kioku_create', {
+    tool('写机密级', 'kioku_create', {
       uri: PROBE_SECRET,
       content: '测试台的权限探测写下的 secret 正文，不是真的内容。',
       layer: 'private',
@@ -60,6 +60,6 @@ export const permissionProbe: BenchScenarioInput = {
       valid_to: EXPIRES,
     }),
     tool('删掉写私人层的那条', 'kioku_delete', { uri: PROBE }),
-    tool('删掉写 secret 级的那条', 'kioku_delete', { uri: PROBE_SECRET }),
+    tool('删掉写机密级的那条', 'kioku_delete', { uri: PROBE_SECRET }),
   ],
 }

@@ -286,7 +286,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         ])
         const { code, stdout } = await bench(['--file', file], { KIOKU_BENCH_KEY: low.key })
         expect(code).toBe(0)
-        expect(stdout).toContain('跳过  要 secret 级：当前 Key 的敏感级上限低于机密级（secret）')
+        expect(stdout).toContain('跳过  要 secret 级：当前访问密钥的敏感级上限低于机密级（secret）')
       },
       PROCESS_TIMEOUT,
     )
@@ -304,8 +304,8 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
           KIOKU_BENCH_KEY: low.key,
         })
         expect(code).toBe(0)
-        expect(stdout).toContain('成功  Key 的上限')
-        expect(stdout).toContain('报错  写 secret 级')
+        expect(stdout).toContain('成功  当前访问密钥的上限')
+        expect(stdout).toContain('报错  写机密级')
         expect(stdout).not.toContain('通过  ')
         expect(stdout).not.toMatch(/通过 \d/)
         expect(stdout).toMatch(/成功 \d+，报错 [1-9]\d*，失败 0，跳过 0，没有执行 0/)
@@ -315,7 +315,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         // 同一个场景，能写的 Key 这一步就是成功
         const full = await bench(['--scenario', 'permission-probe', '--allow-writes'])
         expect(full.code).toBe(0)
-        expect(full.stdout).toContain('成功  写 secret 级')
+        expect(full.stdout).toContain('成功  写机密级')
         expect(full.stdout).not.toContain('测试台的权限探测写下的')
       },
       PROCESS_TIMEOUT,

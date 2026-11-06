@@ -299,7 +299,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     )
     expect(
       await errorOf(await patchMemory({ uri: 'notes://old', sensitivity: 'private' }), 400),
-    ).toContain('正文疑似含明文密码或 Token')
+    ).toContain('正文疑似含明文密码或令牌')
     // 值写在下一行的也算
     await ok(
       await createMemory({
@@ -311,7 +311,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
     )
     expect(
       await errorOf(await patchMemory({ uri: 'notes://multiline', sensitivity: 'private' }), 400),
-    ).toContain('正文疑似含明文密码或 Token')
+    ).toContain('正文疑似含明文密码或令牌')
     const key = await ws.issueKey((await ws.createApp('agent')).id, FULL_SCOPES)
     expect(
       await errorOf(

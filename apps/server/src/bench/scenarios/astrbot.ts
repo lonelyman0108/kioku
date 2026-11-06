@@ -7,7 +7,7 @@ import { BENCH_GROUP_CONTEXT, GUIDANCE_START } from './shared'
 export const astrbotRound: BenchScenarioInput = {
   id: 'astrbot-group-round',
   title: 'AstrBot 群聊一轮',
-  description: '带群与发言人的会话开始、每轮召回与 turn.end。第一次见到的平台账号会新建对象。',
+  description: '带群与发言人的会话开始、每轮召回与 turn.end。第一次见到的平台账号会新建联系人。',
   runtimes: ['astrbot'],
   steps: [
     {

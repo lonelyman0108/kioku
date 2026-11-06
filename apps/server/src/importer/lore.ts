@@ -333,7 +333,7 @@ export function planImport(
       continue
     }
     if (parsed.domain === PERSONA_DOMAIN || parsed.domain === APP_DOMAIN) {
-      plan.skipped.push({ source: node.uri, reason: `${parsed.domain}:// 是 Kioku 的保留 domain` })
+      plan.skipped.push({ source: node.uri, reason: `${parsed.domain}:// 是 Kioku 的保留分区` })
       continue
     }
 

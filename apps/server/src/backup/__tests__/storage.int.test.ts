@@ -578,7 +578,7 @@ describe.skipIf(!testDatabaseUrl)('备份到对象存储', () => {
   it('Secret 也在主密钥管的数据里：启动检查认得它，轮换时换成新密钥的包装', async () => {
     await save()
     await expect(checkMasterKey(database.db, randomBytes(32))).rejects.toThrow(
-      '实例设置中的接口 Key 1 条解不开',
+      '实例设置中的 API Key 1 条解不开',
     )
     const newKey = randomBytes(32)
     expect(

@@ -121,7 +121,7 @@ describe('OpenAI 兼容嵌入客户端', () => {
         }) as unknown as typeof fetch,
       )
       await expect(embedder.embed(['a'])).rejects.toThrow(
-        '无法连接嵌入接口（ECONNREFUSED）：请检查实例设置中的接口地址与 Key',
+        '无法连接嵌入接口（ECONNREFUSED）：请检查实例设置中的接口地址与 API Key',
       )
     })
 

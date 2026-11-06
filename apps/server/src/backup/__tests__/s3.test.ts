@@ -43,7 +43,7 @@ describe('请求对象存储时的报错', () => {
       })
     })
     const err = await failure(s3Client(LOCATION).delete('x'))
-    expect(err.message).toBe('无法连接存储（ECONNREFUSED）：请检查实例设置中的接口地址与 Key')
+    expect(err.message).toBe('无法连接存储（ECONNREFUSED）：请检查实例设置中的接口地址与 API Key')
   })
 
   it('到了时限：说清等了多久，一般请求和上传的时限不同', async () => {

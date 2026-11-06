@@ -153,7 +153,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
 
     // 配错了主密钥、或者没配：拒绝启动
     await expect(prepareMasterKey(database.db, newKey)).rejects.toThrow(
-      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中的接口 Key 2 条解不开/,
+      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中的 API Key 2 条解不开/,
     )
     await expect(prepareMasterKey(database.db, null)).rejects.toThrow('没有配置 KIOKU_MASTER_KEY')
 
@@ -302,7 +302,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       .where(eq(settings.key, 'extraction'))
     expect(JSON.stringify(extraction?.value)).not.toContain('keyId')
     await expect(checkMasterKey(database.db, newKey)).rejects.toThrow(
-      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中的接口 Key 2 条解不开/,
+      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中的 API Key 2 条解不开/,
     )
   })
 

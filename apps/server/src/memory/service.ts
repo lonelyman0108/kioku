@@ -234,7 +234,7 @@ const UNTRUSTED_MODIFY = '来自群聊或陌生人私聊的写入不能修改受
 const PLACEHOLDER_SCOPE =
   '含凭据占位符的记忆只能放在私人层（private），敏感级不低于私密（private）。改层、降级或移出私人层前，请先去掉正文中的 {{cred:…}} 引用。'
 const PLAINTEXT_DOWNGRADE =
-  '正文疑似含明文密码或 Token。从机密（secret）降级后，这些内容会进入历史、全文检索和向量，且无法收回。请先把值换成凭据占位符，再降级。'
+  '正文疑似含明文密码或令牌。从机密（secret）降级后，这些内容会进入历史、全文检索和向量，且无法收回。请先把值换成凭据占位符，再降级。'
 // 打码时拒绝的写入（见 MemoryContext.maskSecret）
 const MASKED_DOWNGRADE = '测试台无法更改机密（secret）记忆的敏感级，请到记忆页修改'
 const MASKED_CONTENT = '测试台无法读取机密（secret）记忆的原文，也无法修改正文，请到记忆页修改'
@@ -2066,7 +2066,7 @@ export class MemoryService {
     const parsed = target.includes('://') ? parse(target) : null
     const domain = parsed?.domain ?? target
     if (!/^[a-z][a-z0-9_]{0,31}$/.test(domain))
-      throw new MemoryError(400, `domain 格式错误：${domain}`)
+      throw new MemoryError(400, `分区格式错误：${domain}`)
     return this.run(async (tx, personaIds) => {
       const parent = parsed ? await this.findReadableOrNull(tx, parsed, personaIds) : null
       const prefix = parsed ? `${parsed.path}/` : ''

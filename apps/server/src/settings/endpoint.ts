@@ -113,7 +113,7 @@ export function withoutKey(text: string, apiKey: string | null): string {
 // 也不把原来的错误放进 cause：cause 会进日志，后台任务的出错原因也可能取它
 export function fetchFailure(what: string, err: unknown): string {
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
-  return `无法连接${what}${typeof code === 'string' ? `（${code}）` : ''}：请检查实例设置中的接口地址与 Key`
+  return `无法连接${what}${typeof code === 'string' ? `（${code}）` : ''}：请检查实例设置中的接口地址与 API Key`
 }
 
 // 读 2xx 响应的 JSON。解析失败时只报固定文字：SyntaxError 的文字带响应的开头，上游可能把 Key 写在那里。

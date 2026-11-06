@@ -19,7 +19,7 @@ const HELP = `把备份恢复到一个新实例。
 再按原来的 id 写回全部数据，并执行这个版本新增的迁移（较早版本做的备份也能恢复）。写回与新增的迁移在一个事务里，
 失败时数据一条也不留下，可以直接重试。库里已经有账号或空间时拒绝恢复。
 
-恢复之后启动服务：向量在后台重新生成，生成完之前召回只靠全文检索；所有人要重新登录，Key 照常可用。
+恢复之后启动服务：向量在后台重新生成，生成完之前召回只靠全文检索；所有人要重新登录，访问密钥照常可用。
 
   --file <备份文件>       backup 命令做出的文件；写 - 时从标准输入读
   --s3-endpoint <地址>    从对象存储取定时备份：接口地址、存储桶与前缀和实例设置里填的一样
@@ -31,9 +31,9 @@ const HELP = `把备份恢复到一个新实例。
   DATABASE_URL               新实例的数据库
   KIOKU_MASTER_KEY           做备份时的主密钥
   KIOKU_MASTER_KEY_PREVIOUS  备份之后轮换过主密钥时：KIOKU_MASTER_KEY 配新的，这里配做备份时的那把
-  AWS_ACCESS_KEY_ID          从存储桶取备份时用的访问密钥
-  AWS_SECRET_ACCESS_KEY
-  AWS_SESSION_TOKEN          访问密钥是临时凭据时带上
+  AWS_ACCESS_KEY_ID          从存储桶取备份时用的 Access Key ID
+  AWS_SECRET_ACCESS_KEY      对应的 Secret Access Key
+  AWS_SESSION_TOKEN          上面两项是临时凭据时带上
   AWS_REGION                 存储的区域，默认 us-east-1`
 
 const readInput = (file: string): Promise<Buffer> =>

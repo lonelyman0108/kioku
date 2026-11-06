@@ -171,7 +171,7 @@ describe('OpenAI 兼容的抽取模型客户端', () => {
       }) as unknown as typeof fetch,
     )
     await expect(model.complete([{ role: 'user', content: 'x' }])).rejects.toThrow(
-      '无法连接抽取模型（ECONNREFUSED）：请检查实例设置中的接口地址与 Key',
+      '无法连接抽取模型（ECONNREFUSED）：请检查实例设置中的接口地址与 API Key',
     )
   })
 })
