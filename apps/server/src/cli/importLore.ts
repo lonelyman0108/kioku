@@ -185,8 +185,7 @@ const WARNINGS: Record<LoreWarningKind, (uri: string) => string> = {
   credentialPath: (uri) => `${uri} 的路径疑似凭据，未用 --secret 标记`,
   credentialContent: (uri) => `${uri} 的正文疑似含密码或令牌，未用 --secret 标记`,
   credentialExtras: (uri) => `${uri} 的触发场景或关键词疑似含密码或令牌，未用 --secret 标记`,
-  secretExtras: (uri) =>
-    `${uri} 的触发场景或关键词疑似含凭据：机密只加密正文，这两项仍为明文`,
+  secretExtras: (uri) => `${uri} 的触发场景或关键词疑似含凭据：机密只加密正文，这两项仍为明文`,
   disclosureTruncated: (uri) => `${uri} 的触发场景超过 ${MAX_DISCLOSURE} 字，已截断`,
 }
 
