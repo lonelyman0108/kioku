@@ -182,12 +182,11 @@ async function resolveTarget(
 }
 
 const WARNINGS: Record<LoreWarningKind, (uri: string) => string> = {
-  credentialPath: (uri) => `${uri} 看起来是凭据，没有用 --secret 标记`,
-  credentialContent: (uri) => `${uri} 的正文里像有密码或 Token，没有用 --secret 标记`,
-  credentialExtras: (uri) => `${uri} 的正文里像有密码或 Token，没有用 --secret 标记`,
-  secretExtras: (uri) =>
-    `${uri} 的 disclosure 或关键词里像有凭据：secret 只加密正文，这两项仍是明文`,
-  disclosureTruncated: (uri) => `${uri} 的 disclosure 超过 ${MAX_DISCLOSURE} 字，已截断`,
+  credentialPath: (uri) => `${uri} 的路径疑似凭据，未用 --secret 标记`,
+  credentialContent: (uri) => `${uri} 的正文疑似含密码或令牌，未用 --secret 标记`,
+  credentialExtras: (uri) => `${uri} 的触发场景或关键词疑似含密码或令牌，未用 --secret 标记`,
+  secretExtras: (uri) => `${uri} 的触发场景或关键词疑似含凭据：机密只加密正文，这两项仍为明文`,
+  disclosureTruncated: (uri) => `${uri} 的触发场景超过 ${MAX_DISCLOSURE} 字，已截断`,
 }
 
 function personaLine(plan: ImportPlan, preview: ImportPreview): string {
@@ -245,7 +244,7 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
   }
   if (result.appsOtherPersona.length) {
     console.log(
-      `  这些应用在用别的人格，core://soul 不会进入它们的启动上下文：${result.appsOtherPersona.join('、')}`,
+      `  这些应用在用别的人格，core://soul 不会进入它们的启动加载：${result.appsOtherPersona.join('、')}`,
     )
   }
   console.log(
@@ -263,12 +262,12 @@ function printResult(plan: ImportPlan, result: ImportResult): void {
   for (const { uri, current } of result.secretAlreadyImported) {
     const moved = current === uri ? '' : `（导入后移到了 ${current}）`
     console.log(
-      `  注意 ${uri}${moved}：之前导入过，现在还是明文，这次的 --secret 没有生效。请在管理界面把 ${current} 改成 secret（会同时清除历史里的明文）`,
+      `  注意 ${uri}${moved}：之前导入过，现在还是明文，这次的 --secret 没有生效。请在管理界面把 ${current} 改为机密（会同时清除历史里的明文）`,
     )
   }
   for (const f of result.failed) console.log(`  失败 ${f.uri}：${f.reason}`)
   if (result.appsCreated.length) {
-    console.log('  新建的应用还没有 Key：在管理界面「应用与 Key」里为要接入的应用签发')
+    console.log('  新建的应用暂无访问密钥：在管理界面的「应用」页为要接入的应用签发')
   }
 }
 

@@ -2,7 +2,7 @@
 
 | 文档 | 说明 |
 |---|---|
-| [design.md](design.md) | 总体设计：数据模型、分层与授权、接入协议 |
+| [design.md](design.md) | 总体设计：数据模型、分层与授权、接入协议、界面用语 |
 | [migrate-from-lore.md](migrate-from-lore.md) | 从 Lore 迁移：映射规则、导入步骤与对照检查 |
 | [SETUP.md](SETUP.md) | 仓库与平台设置、secrets 名字、runner label、部署位置、重建步骤 |
 | [plans/PLAN.md](plans/PLAN.md) | 计划模板：新主题复制一份改名，全生命周期持续勾选 |

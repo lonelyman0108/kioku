@@ -6,9 +6,9 @@
     "default": ""
   },
   "kioku_key": {
-    "description": "Kioku 的 API Key",
+    "description": "Kioku 的访问密钥",
     "type": "string",
-    "hint": "在 Kioku 管理界面的「应用与 Key」里为这个 bot 建一个应用（运行时家族选 astrbot）并签发",
+    "hint": "在 Kioku 管理界面的「应用」页为这个机器人建一个应用（运行时选 astrbot），再签发访问密钥",
     "default": ""
   },
   "boot": {
