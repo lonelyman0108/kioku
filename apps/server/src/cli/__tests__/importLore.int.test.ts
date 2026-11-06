@@ -96,9 +96,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入的命令行', () => {
     })
     await service.create(
       CreateMemoryRequest.parse({
-        uri: 'kb://wifi',
+        uri: 'core://kb/wifi',
         content: '无线网的密码',
-        layer: 'base',
         sensitivity: 'secret',
       }),
     )

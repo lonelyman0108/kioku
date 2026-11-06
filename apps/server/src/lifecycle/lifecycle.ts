@@ -1,6 +1,5 @@
 import type {
   BenchSessionStart,
-  BootResponse,
   HostOutput,
   LifecycleEvent,
   LifecycleProject,
@@ -11,7 +10,7 @@ import type {
 
 import { loggableError } from '../db/client'
 import { BOOT_LAYERS } from '../memory/filter'
-import { formatBootBlock, formatRecentBlock } from '../recall/boot'
+import { formatBootBlock, formatRecentBlock, type BootResult } from '../recall/boot'
 import { CANDIDATE_ID, formatRecallBlock, type RecordableCandidate } from '../recall/recall'
 import { formatSubjectBlock } from '../recall/subjects'
 import type { RecallScope } from './scope'
@@ -46,6 +45,7 @@ export const GUIDANCE = [
   'Kioku 是你的长期记忆，会话结束后上下文会消失，Kioku 里的不会。',
   '- 每轮回复前留意 <recall> 候选：它只是线索，引用前先用 kioku_get 读正文。',
   '- 用户透露了重要的新信息、纠正了你、或你得出了值得长期保留的结论时，用 kioku_create / kioku_update 记下来，正文写清背景和适用条件，disclosure 写清什么场景下该想起；只在一段时间内成立的事带上 valid_to，到期后就不再召回。',
+  '- 坐标（URI）的开头决定归属：core:// 是通用的规则与知识，user:// 是本人的偏好与私人事务，persona://<人格>/ 是人格的设定，app://<应用>/ 是这个应用独有的。',
   '- 记忆之间冲突时，以 priority 数字更小的为准，同时考虑适用范围、时间与用户当前的指令。',
   '- 正文里的 {{cred:<标识>#<字段>}} 是凭据占位符：用到时才用 kioku_credential 取值，不要把值写回记忆，也不要显示在回复里。',
 ].join('\n')
@@ -93,7 +93,7 @@ export interface SessionStart {
   context: string
   // 宿主能完整接收的字数；没有限制的宿主为 null
   limit: number | null
-  boot: BootResponse
+  boot: BootResult
   recent: RecentMemory[]
   // 项目召回的查询（目录名与仓库名）与注入的候选；没有项目、或项目召回失败时查询为空
   query: string

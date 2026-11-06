@@ -28,7 +28,7 @@ import { runBench } from '../inProcess'
 import { BENCH_EXPIRES_AFTER_MS, runSteps } from '../runner'
 import { BENCH_SCENARIOS, scenariosForRuntime } from '../scenarios'
 
-const SHARED: KeyScopes['readLayers'] = ['base', 'persona', 'app', 'subject', 'episode']
+const SHARED: KeyScopes['readLayers'] = ['core', 'persona', 'app', 'subject', 'episode']
 // 四种 Key：secret 级，以及管理界面签发 Key 的三种预设（apps/web/src/components/keyPresets.ts）
 const KEYS: Record<string, KeyScopes> = {
   secret: {
@@ -95,10 +95,10 @@ describe('内置场景的约定', () => {
     ),
   )
 
-  it('只写私人层、不用 priority 0，URI 带 ${run}，都带有效期', () => {
+  it('只写本人（user://）、不用 priority 0，URI 带 ${run}，都带有效期', () => {
     expect(writes.length).toBeGreaterThan(0)
     for (const [id, step] of writes) {
-      expect(step.arguments.layer, id).toBe('private')
+      expect(step.arguments.uri, id).toMatch(/^user:\/\//)
       expect(step.arguments.priority ?? 2, id).toBeGreaterThan(0)
       expect(step.arguments.uri, id).toContain('${run}')
       expect(step.arguments.valid_to, id).toBe('${expires}')

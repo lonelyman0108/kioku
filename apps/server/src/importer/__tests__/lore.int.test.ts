@@ -167,30 +167,40 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         'app://claude-code/agent',
         'app://zcode/agent',
         'core://agent',
-        'infra://office_network',
-        'infra://office_network/credentials',
+        'user://infra/office_network',
+        'user://infra/office_network/credentials',
         'persona://default/soul',
-        'preferences://user',
+        'user://preferences/user',
       ].sort(),
     )
 
     const rows = await withSpace(database.db, ws.spaceId, (tx) => tx.select().from(memories))
     const byUri = new Map(rows.map((r) => [`${r.domain}://${r.path}`, r]))
-    expect(byUri.get('core://agent')).toMatchObject({ layer: 'base', provenance: 'system' })
-    expect(byUri.get('preferences://user')).toMatchObject({
-      layer: 'owner',
-      ownerAccountId: ws.accountId,
+    expect(byUri.get('core://agent')).toMatchObject({
+      layer: 'core',
+      provenance: 'system',
+      ownerAccountId: null,
     })
-    expect(byUri.get('infra://office_network')).toMatchObject({
-      layer: 'private',
+    // 偏好进本人的内部，别的分区进本人的私密；正文里没有 # 标题，标题取标识
+    expect(byUri.get('user://preferences/user')).toMatchObject({
+      layer: 'user',
+      sensitivity: 'internal',
+      ownerAccountId: ws.accountId,
+      title: 'user',
+    })
+    expect(byUri.get('user://infra/office_network')).toMatchObject({
+      layer: 'user',
+      sensitivity: 'private',
+      ownerAccountId: ws.accountId,
+      title: 'office_network',
       priority: 1,
       disclosure: '排查网络时',
     })
-    expect(byUri.get('infra://office_network')!.createdAt.toISOString()).toBe(
+    expect(byUri.get('user://infra/office_network')!.createdAt.toISOString()).toBe(
       '2025-03-01T00:00:00.000Z',
     )
-    const secret = byUri.get('infra://office_network/credentials')!
-    expect(secret).toMatchObject({ sensitivity: 'secret', content: null })
+    const secret = byUri.get('user://infra/office_network/credentials')!
+    expect(secret).toMatchObject({ sensitivity: 'secret', content: null, title: 'credentials' })
     expect(secret.ciphertext).not.toBeNull()
 
     const events = await withSpace(database.db, ws.spaceId, (tx) =>
@@ -217,12 +227,14 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         `/v1/spaces/${ws.spaceId}/memories${method === 'POST' ? '/move' : ''}`,
         jsonRequest(method, body, { cookie: ws.cookie }),
       )
-    await app.request(
-      `/v1/spaces/${ws.spaceId}/memories?uri=${encodeURIComponent('infra://office_network/credentials')}`,
-      { method: 'DELETE', headers: { cookie: ws.cookie, 'sec-fetch-site': 'same-origin' } },
-    )
+    expect((await remove('user://infra/office_network/credentials')).status).toBe(204)
     expect(
-      (await viaConsole('POST', { from: 'infra://office_network', to: 'infra://network' })).status,
+      (
+        await viaConsole('POST', {
+          from: 'user://infra/office_network',
+          to: 'user://infra/network',
+        })
+      ).status,
     ).toBe(200)
 
     const again = await run()
@@ -233,9 +245,11 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     const live = await withSpace(database.db, ws.spaceId, (tx) =>
       tx.select({ path: memories.path, deletedAt: memories.deletedAt }).from(memories),
     )
-    expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain('office_network')
     expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain(
-      'office_network/credentials',
+      'infra/office_network',
+    )
+    expect(live.filter((m) => !m.deletedAt).map((m) => m.path)).not.toContain(
+      'infra/office_network/credentials',
     )
   })
 
@@ -268,16 +282,21 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     await run('default', [])
     const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([
-      { uri: 'infra://office_network/credentials', current: 'infra://office_network/credentials' },
+      {
+        uri: 'user://infra/office_network/credentials',
+        current: 'user://infra/office_network/credentials',
+      },
     ])
   })
 
   it('按明文导入后移动过的节点，提醒里给出它现在的 URI', async () => {
     await run('default', [])
-    expect((await move('infra://office_network/credentials', 'infra://creds')).status).toBe(200)
+    expect(
+      (await move('user://infra/office_network/credentials', 'user://infra/creds')).status,
+    ).toBe(200)
     const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([
-      { uri: 'infra://office_network/credentials', current: 'infra://creds' },
+      { uri: 'user://infra/office_network/credentials', current: 'user://infra/creds' },
     ])
   })
 
@@ -293,7 +312,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       `/v1/spaces/${ws.spaceId}/memories`,
       jsonRequest(
         'PATCH',
-        { uri: 'infra://office_network/credentials', sensitivity: 'secret' },
+        { uri: 'user://infra/office_network/credentials', sensitivity: 'secret' },
         { cookie: ws.cookie },
       ),
     )
@@ -303,10 +322,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
   it('按明文导入后删掉了的节点，再带 --secret 执行时不提醒', async () => {
     await run('default', [])
-    expect((await remove('infra://office_network/credentials')).status).toBe(204)
+    expect((await remove('user://infra/office_network/credentials')).status).toBe(204)
     const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([])
-    expect(again.previouslyImported).toContain('infra://office_network/credentials')
+    expect(again.previouslyImported).toContain('user://infra/office_network/credentials')
   })
 
   it('按明文导入后整行都不在了的节点，再带 --secret 执行时也不提醒', async () => {
@@ -315,11 +334,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .delete(memories)
-        .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network/credentials'))),
+        .where(
+          and(eq(memories.domain, 'user'), eq(memories.path, 'infra/office_network/credentials')),
+        ),
     )
     const again = await run('default', ['infra://office_network/credentials'])
     expect(again.secretAlreadyImported).toEqual([])
-    expect(again.previouslyImported).toContain('infra://office_network/credentials')
+    expect(again.previouslyImported).toContain('user://infra/office_network/credentials')
   })
 
   it('早期没有记人格的导入事件也能去重：删掉的人格设定不会被写回', async () => {
@@ -419,7 +440,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     )
   })
 
-  it('导入后 Claude Code 的启动上下文与 Lore 一致：基础、人格、本应用与主人画像', async () => {
+  it('导入后 Claude Code 的启动上下文与 Lore 一致：通用、人格、本应用与本人的偏好', async () => {
     const claude = await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
     await run()
     const key = await ws.issueKey(claude.id)
@@ -430,7 +451,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       'core://agent',
       'persona://default/soul',
       'app://claude-code/agent',
-      'preferences://user',
+      'user://preferences/user',
     ])
   })
 
@@ -543,17 +564,18 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         const sync = await syncPlan()
         expect(sync.items.filter((i) => i.state !== 'current')).toEqual([
           expect.objectContaining({
-            uri: 'infra://office_network',
+            source: 'infra://office_network',
+            uri: 'user://infra/office_network',
             state: 'update',
             changes: ['content', 'priority', 'glossary'],
           }),
         ])
         expect(sync.goneFromLore).toEqual([])
         expect(await applySync(target(), sync)).toEqual({
-          updated: ['infra://office_network'],
+          updated: ['user://infra/office_network'],
           failed: [],
         })
-        const view = await importService().get('infra://office_network')
+        const view = await importService().get('user://infra/office_network')
         expect(view).toMatchObject({
           content: '办公室的网络，换了新交换机',
           priority: 0,
@@ -577,9 +599,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
     it('在 Kioku 里改过、移动过、删除了的不同步，只列出来', async () => {
       await run()
       expect(
-        (await consoleUpdate({ uri: 'infra://office_network', content: '在 Kioku 里改过' })).status,
+        (await consoleUpdate({ uri: 'user://infra/office_network', content: '在 Kioku 里改过' }))
+          .status,
       ).toBe(200)
-      expect((await move('preferences://user', 'preferences://me')).status).toBe(200)
+      expect((await move('user://preferences/user', 'user://preferences/me')).status).toBe(200)
       expect((await remove('core://agent')).status).toBe(204)
       const undoNetwork = await editLore('infra://office_network', { content: 'Lore 里也改了' })
       const undoPrefs = await editLore('preferences://user', { content: 'Lore 里改了偏好' })
@@ -588,18 +611,18 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         const bySource = new Map(sync.items.map((i) => [i.source, i]))
         expect(bySource.get('infra://office_network')).toMatchObject({
           state: 'edited',
-          uri: 'infra://office_network',
+          uri: 'user://infra/office_network',
         })
         expect(bySource.get('preferences://user')).toMatchObject({
           state: 'edited',
-          uri: 'preferences://me',
+          uri: 'user://preferences/me',
         })
         expect(bySource.get('core://agent')).toMatchObject({
           state: 'deleted',
           uri: 'core://agent',
         })
         expect((await applySync(target(), sync)).updated).toEqual([])
-        expect((await importService().get('infra://office_network')).content).toBe(
+        expect((await importService().get('user://infra/office_network')).content).toBe(
           '在 Kioku 里改过',
         )
       } finally {
@@ -610,8 +633,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
 
     it('导入后删掉的记忆过了保留期被硬删除：同步与再导入都不写回，导入事件只剩写到的 URI', async () => {
       await run()
-      expect((await remove('infra://office_network')).status).toBe(204)
-      const network = and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network'))
+      expect((await remove('user://infra/office_network')).status).toBe(204)
+      const network = and(eq(memories.domain, 'user'), eq(memories.path, 'infra/office_network'))
       await withSpace(database.db, ws.spaceId, (tx) =>
         tx
           .update(memories)
@@ -628,7 +651,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         expect.objectContaining({
           eventType: 'import',
           before: null,
-          after: { domain: 'infra', path: 'office_network' },
+          after: { domain: 'user', path: 'infra/office_network' },
           context: expect.objectContaining({
             source: 'lore',
             loreUri: 'infra://office_network',
@@ -643,12 +666,12 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         const sync = await syncPlan()
         expect(sync.items.find((i) => i.source === 'infra://office_network')).toMatchObject({
           state: 'deleted',
-          uri: 'infra://office_network',
+          uri: 'user://infra/office_network',
         })
         expect((await applySync(target(), sync)).updated).toEqual([])
         const again = await run()
         expect(again.created).toEqual([])
-        expect(again.previouslyImported).toContain('infra://office_network')
+        expect(again.previouslyImported).toContain('user://infra/office_network')
         const rows = await withSpace(database.db, ws.spaceId, (tx) =>
           tx.select().from(memories).where(network),
         )
@@ -668,8 +691,8 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
           expect.objectContaining({
             source: 'infra://office_lan',
             state: 'moved',
-            uri: 'infra://office_network',
-            target: 'infra://office_lan',
+            uri: 'user://infra/office_network',
+            target: 'user://infra/office_lan',
           }),
         ])
         expect(sync.goneFromLore).toEqual(['app://zcode/agent'])
@@ -690,24 +713,27 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         const sync = await syncPlan()
         expect(sync.items.filter((i) => i.state !== 'current')).toEqual([
           expect.objectContaining({
-            uri: 'infra://office_network/credentials',
+            uri: 'user://infra/office_network/credentials',
             state: 'update',
             changes: ['content'],
           }),
         ])
         expect((await applySync(target(), sync)).updated).toEqual([
-          'infra://office_network/credentials',
+          'user://infra/office_network/credentials',
         ])
         const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
           tx
             .select()
             .from(memories)
             .where(
-              and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network/credentials')),
+              and(
+                eq(memories.domain, 'user'),
+                eq(memories.path, 'infra/office_network/credentials'),
+              ),
             ),
         )
         expect(row).toMatchObject({ sensitivity: 'secret', content: null })
-        expect((await importService().get('infra://office_network/credentials')).content).toBe(
+        expect((await importService().get('user://infra/office_network/credentials')).content).toBe(
           '路由器密码 hunter3',
         )
         expect(JSON.stringify(await memoryEventsOf(row!.id))).not.toContain('hunter')
@@ -722,15 +748,18 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       try {
         const sync = await syncPlan()
         expect(
-          (await consoleUpdate({ uri: 'infra://office_network', content: '计划之后改的' })).status,
+          (await consoleUpdate({ uri: 'user://infra/office_network', content: '计划之后改的' }))
+            .status,
         ).toBe(200)
         expect(await applySync(target(), sync)).toEqual({
           updated: [],
           failed: [
-            { uri: 'infra://office_network', reason: expect.stringContaining('版本已变化') },
+            { uri: 'user://infra/office_network', reason: expect.stringContaining('版本已变化') },
           ],
         })
-        expect((await importService().get('infra://office_network')).content).toBe('计划之后改的')
+        expect((await importService().get('user://infra/office_network')).content).toBe(
+          '计划之后改的',
+        )
       } finally {
         await undo()
       }
@@ -764,12 +793,13 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         'KIOKU_MASTER_KEY',
       )
       expect(
-        (await consoleUpdate({ uri: 'infra://office_network/credentials', priority: 1 })).status,
+        (await consoleUpdate({ uri: 'user://infra/office_network/credentials', priority: 1 }))
+          .status,
       ).toBe(200)
       const sync = await syncPlan(undefined, undefined, undefined, { masterKey: null })
-      expect(sync.items.find((i) => i.uri === 'infra://office_network/credentials')).toMatchObject({
-        state: 'edited',
-      })
+      expect(
+        sync.items.find((i) => i.uri === 'user://infra/office_network/credentials'),
+      ).toMatchObject({ state: 'edited' })
     })
 
     it('按版本号判断有没有人改过：最近一条事件仍是导入，版本号变了也算改过', async () => {
@@ -781,20 +811,22 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
           tx
             .update(memories)
             .set({ content: '有人刚改的', version: sql`${memories.version} + 1` })
-            .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network'))),
+            .where(and(eq(memories.domain, 'user'), eq(memories.path, 'infra/office_network'))),
         )
         const sync = await syncPlan()
-        expect(sync.items.find((i) => i.uri === 'infra://office_network')).toMatchObject({
+        expect(sync.items.find((i) => i.uri === 'user://infra/office_network')).toMatchObject({
           state: 'edited',
         })
         expect((await applySync(target(), sync)).updated).toEqual([])
-        expect((await importService().get('infra://office_network')).content).toBe('有人刚改的')
+        expect((await importService().get('user://infra/office_network')).content).toBe(
+          '有人刚改的',
+        )
       } finally {
         await undo()
       }
     })
 
-    it('Lore 里换了路径、映射到别的层的节点只列出来；不加 --sync 重新导入也不在新位置再建一条', async () => {
+    it('Lore 里换了路径、映射到别的归属的节点只列出来；不加 --sync 重新导入也不在新位置再建一条', async () => {
       await ws.createApp('claude-code', { runtimeFamily: 'claudecode' })
       await run()
       const undoRename = await renameLore('core://agent/claudecode', 'claude_rules')
@@ -818,15 +850,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         expect(core.map((r) => r.path)).not.toContain('claude_rules')
 
         // 照提示在管理界面移到新位置之后，再同步就算在 Kioku 里改过，不再提示移动
-        const moved = await app.request(
-          `/v1/spaces/${ws.spaceId}/memories/move`,
-          jsonRequest(
-            'POST',
-            { from: 'app://claude-code/agent', to: 'core://claude_rules', layer: 'base' },
-            { cookie: ws.cookie },
-          ),
-        )
-        expect(moved.status).toBe(200)
+        expect((await move('app://claude-code/agent', 'core://claude_rules')).status).toBe(200)
         const after = await syncPlan()
         expect(after.items.filter((i) => i.source === 'core://claude_rules')).toEqual([
           expect.objectContaining({ uri: 'core://claude_rules', state: 'edited' }),
@@ -893,7 +917,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       const undoDrop = await dropLore('infra://office_network/credentials')
       try {
         const sync = await syncPlan('default', [], [], { masterKey: null })
-        expect(sync.goneFromLore).toEqual(['infra://office_network/credentials'])
+        expect(sync.goneFromLore).toEqual(['user://infra/office_network/credentials'])
       } finally {
         await undoDrop()
       }
@@ -907,7 +931,7 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         expect(sync.items.filter((i) => i.state === 'skipped')).toEqual([
           expect.objectContaining({
             source: 'infra://office_network',
-            uri: 'infra://office_network',
+            uri: 'user://infra/office_network',
             reason: expect.stringContaining('格式错误的凭据占位符'),
           }),
         ])
@@ -921,13 +945,15 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
       const undo = await editLore('infra://office_network', { content: 'Lore 里又改了' })
       try {
         const unticked = await syncPlan()
-        expect(unticked.items.find((i) => i.uri === 'infra://office_network')!.state).toBe('update')
+        expect(unticked.items.find((i) => i.uri === 'user://infra/office_network')!.state).toBe(
+          'update',
+        )
 
         // 计划带勾选，snapshot 不过滤：过滤了的话这个节点会查不到，错报成 Lore 里没有了
         const sync = await syncPlan('default', undefined, ['infra://office_network'])
-        expect(sync.items.find((i) => i.uri === 'infra://office_network')).toEqual({
+        expect(sync.items.find((i) => i.uri === 'user://infra/office_network')).toEqual({
           source: 'infra://office_network',
-          uri: 'infra://office_network',
+          uri: 'user://infra/office_network',
           state: 'skipped',
           reason: '本次选择不导入',
           changes: [],
@@ -940,7 +966,9 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         )
 
         expect((await applySync(target(), sync)).updated).toEqual([])
-        expect((await importService().get('infra://office_network')).content).toBe('办公室的网络')
+        expect((await importService().get('user://infra/office_network')).content).toBe(
+          '办公室的网络',
+        )
       } finally {
         await undo()
       }
@@ -953,10 +981,10 @@ describe.skipIf(!testDatabaseUrl)('从 Lore 导入', () => {
         tx
           .update(memories)
           .set({ expiresAt: new Date(Date.now() - 86_400_000) })
-          .where(and(eq(memories.domain, 'infra'), eq(memories.path, 'office_network'))),
+          .where(and(eq(memories.domain, 'user'), eq(memories.path, 'infra/office_network'))),
       )
       const sync = await syncPlan()
-      expect(sync.items.find((i) => i.uri === 'infra://office_network')).toMatchObject({
+      expect(sync.items.find((i) => i.uri === 'user://infra/office_network')).toMatchObject({
         state: 'unreadable',
         reason: expect.stringContaining('记忆不存在'),
       })

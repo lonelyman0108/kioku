@@ -200,13 +200,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
   const forget = () => inSpace((tx) => tx.delete(dreamMarks))
 
   it('提出四种建议：策展记忆的合并与过时，事实的合并、提炼与过时，不可信内容的审核；每个范围请求一次', async () => {
-    const a = await remember({ uri: 'core://style', content: '回答用中文', layer: 'base' })
+    const a = await remember({ uri: 'core://style', content: '回答用中文' })
     const b = await remember({
       uri: 'core://style-more',
       content: '回答时用中文，先给结论',
-      layer: 'base',
     })
-    const c = await remember({ uri: 'core://report', content: '周五之前交周报', layer: 'base' })
+    const c = await remember({ uri: 'core://report', content: '周五之前交周报' })
     const group = await subject('group', '读书会')
     const xm = await subject('person', '小明')
     const scope = `group:${group}`
@@ -216,7 +215,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     const s1 = await summary('聊了读书会的安排', scope)
     const { model, calls } = fakeChatModel((messages) => {
       const h = (content: string) => handleOf(messages, content)!
-      if (titleOf(messages).includes('基础层')) {
+      if (titleOf(messages).includes('（通用）')) {
         return reply([
           {
             kind: 'merge',
@@ -239,7 +238,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         {
           kind: 'distill',
           memories: [h('在学日语'), h('喜欢村上春树')],
-          uri: 'people://xiaoming',
+          uri: 'user://people/xiaoming',
           content: '小明在学日语，喜欢村上春树',
           disclosure: '和小明聊天时',
           reason: '可以整理成小明的情况',
@@ -256,10 +255,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     })
     expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
     expect(calls.map(titleOf)).toEqual([
-      '全空间共用的基础规则与知识（基础层）',
+      '全空间共用的通用规则与知识（通用）',
       '群「读书会」的聊天里记下的事实与会话摘要',
     ])
-    // 基础层的那次只有基础层的记忆，对象与情节的那次只有那个群里的
+    // 通用的那次只有通用的记忆，联系人的事实与会话摘要的那次只有那个群里的
     expect(contentsOf(calls[0]!).sort()).toEqual(
       ['周五之前交周报', '回答时用中文，先给结论', '回答用中文'].sort(),
     )
@@ -287,7 +286,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     const pick = (kind: string, ids: string[]) =>
       rows.find((r) => r.kind === kind && r.memoryIds.join() === ids.join())!
     expect(pick('merge', [a.id, b.id])).toMatchObject({
-      scope: 'base',
+      scope: 'core',
       ownerAccountId: null,
       versions: [1, 1],
       keepId: a.id,
@@ -295,14 +294,14 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       reason: '两条说的是同一件事',
       status: 'pending',
     })
-    expect(pick('stale', [c.id])).toMatchObject({ scope: 'base', versions: [1] })
+    expect(pick('stale', [c.id])).toMatchObject({ scope: 'core', versions: [1] })
     expect(pick('merge', [f1.id, f2.id])).toMatchObject({
       scope: `talk:${scope}`,
       keepId: f1.id,
       content: '在学日语',
     })
     expect(pick('distill', [f1.id, f3.id])).toMatchObject({
-      uri: 'people://xiaoming',
+      uri: 'user://people/xiaoming',
       content: '小明在学日语，喜欢村上春树',
       disclosure: '和小明聊天时',
     })
@@ -321,14 +320,14 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         r.more,
       ]),
     ).toEqual([
-      ['base', 3, 3, 2, 0, false],
+      ['core', 3, 3, 2, 0, false],
       [`talk:${scope}`, 4, 4, 5, 0, false],
     ])
     // 共享的范围都整理完之后记一条汇总：整理过了，没有没看完的
     expect(
       (await runs()).map((r) => [r.scope, r.skipped, r.error, r.more, r.promptTokens]),
     ).toEqual([
-      ['base', null, null, false, 120],
+      ['core', null, null, false, 120],
       [`talk:${scope}`, null, null, false, 120],
       [null, null, null, false, 0],
     ])
@@ -346,12 +345,11 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     )
   })
 
-  it('不合规则的建议丢掉：引用了这次没给出的代号、不同对象的事实合并、敏感级不同的合并、提炼到人格层等', async () => {
-    await remember({ uri: 'core://lang', content: '回答用中文', layer: 'base' })
+  it('不合规则的建议丢掉：引用了这次没给出的代号、不同联系人的事实合并、敏感级不同的合并、提炼到人格等', async () => {
+    await remember({ uri: 'core://lang', content: '回答用中文' })
     await remember({
       uri: 'core://lang-internal',
       content: '回答前先查内部文档',
-      layer: 'base',
       sensitivity: 'internal',
     })
     const group = await subject('group', '读书会')
@@ -369,7 +367,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     await summary('聊了学外语', scope)
     const { model } = fakeChatModel((messages) => {
       const h = (content: string) => handleOf(messages, content)!
-      if (titleOf(messages).includes('基础层')) {
+      if (titleOf(messages).includes('（通用）')) {
         return reply([
           {
             kind: 'merge',
@@ -401,12 +399,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
           memories: [h('在学日语'), h('是群主')],
           uri: 'persona://doubao/xiaoming',
           content: '小明是群主，在学日语',
-          reason: '人格层不收',
+          reason: '人格不收',
         },
         {
           kind: 'distill',
           memories: [h('在学日语')],
-          uri: 'people://xiaoming',
+          uri: 'user://people/xiaoming',
           content: '小明在学日语',
           reason: '只有一条',
         },
@@ -438,14 +436,17 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         })
       ).status,
     ).toBe(201)
-    const p1 = await remember({ uri: 'home://nas', content: 'NAS 在书房，密码见 {{cred:nas}}' })
+    const p1 = await remember({
+      uri: 'user://home/nas',
+      content: 'NAS 在书房，密码见 {{cred:nas}}',
+    })
     const p2 = await remember({
-      uri: 'home://nas-web',
+      uri: 'user://home/nas-web',
       content: 'NAS 的管理页面是 https://nas.example.com',
     })
-    await remember({ uri: 'home://router', content: '路由器在客厅' })
+    await remember({ uri: 'user://home/router', content: '路由器在客厅' })
     const p4 = await remember({
-      uri: 'home://router-web',
+      uri: 'user://home/router-web',
       content: '路由器的管理页面是 https://router.example.com',
     })
     const { model } = fakeChatModel((messages) => {
@@ -483,38 +484,43 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       ],
       ['stale', null, '密码：***'],
     ])
-    // 私人层的建议记下是谁的
-    expect(rows.every((r) => r.scope === `private:${ws.accountId}`)).toBe(true)
+    // 本人的建议记下是谁的
+    expect(rows.every((r) => r.scope === `user:${ws.accountId}`)).toBe(true)
     expect(rows.every((r) => r.ownerAccountId === ws.accountId)).toBe(true)
   })
 
   it('读不到 secret：连 URI 都不给模型看', async () => {
-    await remember({ uri: 'home://wifi', content: '无线密码 hunter2', sensitivity: 'secret' })
-    await remember({ uri: 'home://router', content: '路由器在客厅' })
+    await remember({ uri: 'user://home/wifi', content: '无线密码 hunter2', sensitivity: 'secret' })
+    await remember({ uri: 'user://home/router', content: '路由器在客厅' })
     const { model, calls } = fakeChatModel(reply([]))
     await dream(model)
     expect(calls).toHaveLength(1)
     const sent = JSON.stringify(calls)
     expect(sent).toContain('路由器在客厅')
-    expect(sent).not.toContain('home://wifi')
+    expect(sent).not.toContain('user://home/wifi')
     expect(sent).not.toContain('hunter2')
   })
 
-  it('一次请求只放同一个范围的记忆：每个成员的画像层与私人层各自一次，已经离开空间的成员不整理', async () => {
+  it('一次请求只放同一个范围的记忆：每个成员的本人各自一次，已经离开空间的成员不整理', async () => {
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     const carol = await addMember(database.db, ws.spaceId, 'carol', 'editor')
-    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
-    await remember({ uri: 'preferences://user', content: 'alice 喜欢简洁', layer: 'owner' })
-    await remember({ uri: 'home://alice', content: 'alice 的私事' })
-    await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
-    await remember({ uri: 'home://carol', content: 'carol 的私事' }, carol.cookie)
+    await remember({ uri: 'core://rule', content: '共享的规则' })
+    await remember({
+      uri: 'user://preferences/user',
+      sensitivity: 'internal',
+      content: 'alice 喜欢简洁',
+    })
+    await remember({ uri: 'user://home/alice', content: 'alice 的私事' })
+    await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
+    await remember({ uri: 'user://home/carol', content: 'carol 的私事' }, carol.cookie)
     await database.db.delete(spaceMembers).where(eq(spaceMembers.accountId, carol.accountId))
     const { model, calls } = fakeChatModel(
       reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }]),
     )
     await dream(model)
-    expect(calls.map(contentsOf).sort()).toEqual(
-      [['共享的规则'], ['alice 喜欢简洁'], ['alice 的私事'], ['bob 的私事']].sort(),
+    // 本人的内部与私密记忆在同一次请求里
+    expect(calls.map((c) => contentsOf(c).sort()).sort()).toEqual(
+      [['共享的规则'], ['alice 喜欢简洁', 'alice 的私事'].sort(), ['bob 的私事']].sort(),
     )
     expect(JSON.stringify(calls)).not.toContain('carol')
     expect(
@@ -523,14 +529,13 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         .sort((x, y) => x[0]!.localeCompare(y[0]!)),
     ).toEqual(
       [
-        ['base', null],
-        [`owner:${ws.accountId}`, ws.accountId],
-        [`private:${bob.accountId}`, bob.accountId],
-        [`private:${ws.accountId}`, ws.accountId],
+        ['core', null],
+        [`user:${ws.accountId}`, ws.accountId],
+        [`user:${bob.accountId}`, bob.accountId],
       ].sort((x, y) => x[0]!.localeCompare(y[0]!)),
     )
 
-    // 关于画像层与私人层的建议只有本人看得到
+    // 关于本人记忆的建议只有本人看得到
     const visible = async (cookie: string) => {
       const res = await send('GET', '/dream/suggestions', undefined, cookie)
       expect(res.status).toBe(200)
@@ -538,14 +543,14 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         .map((i) => i.memories[0]!.content)
         .sort()
     }
-    expect(await visible(ws.cookie)).toEqual(['alice 喜欢简洁', 'alice 的私事', '共享的规则'])
+    expect(await visible(ws.cookie)).toEqual(['alice 喜欢简洁', '共享的规则'])
     expect(await visible(bob.cookie)).toEqual(['bob 的私事', '共享的规则'])
     const bobs = (await stored()).find((s) => s.ownerAccountId === bob.accountId)!
     expect((await send('POST', `/dream/suggestions/${bobs.id}/apply`, {})).status).toBe(404)
     expect((await send('POST', `/dream/suggestions/${bobs.id}/reject`)).status).toBe(404)
   })
 
-  describe('成员让不让 Dream 整理自己的画像层与私人层', () => {
+  describe('成员让不让 Dream 整理自己的本人记忆', () => {
     const setting = async (includePrivate: boolean, cookie: string) => {
       const res = await send('PUT', '/me/dream', { includePrivate }, cookie)
       expect(res.status, await res.clone().text()).toBe(200)
@@ -561,47 +566,49 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         (await inSpace((tx) => tx.select().from(dreamMarks))).map((m) => [m.memoryId, m.version]),
       )
 
-    it('默认整理；关掉之后这两层不发给模型、整理标记不前进，别的成员与共享的照常；再打开后接着整理关掉期间新增与改动的', async () => {
+    it('默认整理；关掉之后本人的记忆不发给模型、整理标记不前进，别的成员与共享的照常；再打开后接着整理关掉期间新增与改动的', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
-      await remember({ uri: 'preferences://alice', content: 'alice 喜欢简洁', layer: 'owner' })
-      await remember({ uri: 'home://alice', content: 'alice 的私事' })
+      await remember({ uri: 'core://rule', content: '共享的规则' })
+      await remember({
+        uri: 'user://preferences/alice',
+        sensitivity: 'internal',
+        content: 'alice 喜欢简洁',
+      })
+      await remember({ uri: 'user://home/alice', content: 'alice 的私事' })
       const habit = await remember(
-        { uri: 'preferences://bob', content: 'bob 喜欢详细', layer: 'owner' },
+        { uri: 'user://preferences/bob', sensitivity: 'internal', content: 'bob 喜欢详细' },
         bob.cookie,
       )
-      const diary = await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const diary = await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
       const { model, calls } = fakeChatModel(
         reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }]),
       )
 
-      // 没改过设置：每个成员的画像层与私人层都整理
+      // 没改过设置：每个成员的本人都整理
       await dream(model)
       expect(calls.map(fresh).sort()).toEqual(
         [
           ['共享的规则'],
-          ['alice 喜欢简洁'],
-          ['alice 的私事'],
-          ['bob 喜欢详细'],
-          ['bob 的私事'],
+          ['alice 喜欢简洁', 'alice 的私事'].sort(),
+          ['bob 喜欢详细', 'bob 的私事'].sort(),
         ].sort(),
       )
 
       // bob 关掉之后改的、新记的都不发给模型，也不记整理标记；alice 与共享的照常
       await setting(false, bob.cookie)
-      await edit({ uri: 'home://bob', content: 'bob 的私事，后来改了' }, bob.cookie)
+      await edit({ uri: 'user://home/bob', content: 'bob 的私事，后来改了' }, bob.cookie)
       await remember(
-        { uri: 'preferences://bob-more', content: 'bob 后来的习惯', layer: 'owner' },
+        { uri: 'user://preferences/bob-more', sensitivity: 'internal', content: 'bob 后来的习惯' },
         bob.cookie,
       )
       const later = await remember(
-        { uri: 'home://bob-later', content: 'bob 关掉之后记的' },
+        { uri: 'user://home/bob-later', content: 'bob 关掉之后记的' },
         bob.cookie,
       )
-      await remember({ uri: 'home://alice-later', content: 'alice 后来记的' })
-      await remember({ uri: 'core://rule-later', content: '后来加的共享规则', layer: 'base' })
+      await remember({ uri: 'user://home/alice-later', content: 'alice 后来记的' })
+      await remember({ uri: 'core://rule-later', content: '后来加的共享规则' })
       let seen = calls.length
-      // 读出了这一批的范围（读出来是空的不算）：关掉的成员的这两层连读都不读出来，不只是不发
+      // 读出了这一批的范围（读出来是空的不算）：关掉的成员的本人连读都不读出来，不只是不发
       const loaded: string[] = []
       expect(
         await dreamSpace(database.db, masterKey, {
@@ -614,7 +621,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
           },
         }),
       ).toEqual({ outcome: 'done', reason: null })
-      expect(loaded.sort()).toEqual(['base', `private:${ws.accountId}`])
+      expect(loaded.sort()).toEqual(['core', `user:${ws.accountId}`])
       expect(calls.slice(seen).map(fresh).sort()).toEqual(
         [['后来加的共享规则'], ['alice 后来记的']].sort(),
       )
@@ -630,7 +637,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       const listed = await send('GET', '/dream/suggestions', undefined, bob.cookie)
       const items = ((await listed.json()) as DreamSuggestionList).items
       const kept = items.find((i) => i.memories[0]!.id === habit.id)!
-      expect(kept).toMatchObject({ kind: 'stale', scope: { kind: 'owner' }, actionable: true })
+      expect(kept).toMatchObject({ kind: 'stale', scope: { kind: 'user' }, actionable: true })
       expect(
         (await send('POST', `/dream/suggestions/${kept.id}/reject`, undefined, bob.cookie)).status,
       ).toBe(204)
@@ -639,25 +646,25 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       await setting(true, bob.cookie)
       seen = calls.length
       await dream(model)
-      expect(calls.slice(seen).map(fresh).sort()).toEqual(
-        [['bob 后来的习惯'], ['bob 关掉之后记的', 'bob 的私事，后来改了'].sort()].sort(),
-      )
+      expect(calls.slice(seen).map(fresh)).toEqual([
+        ['bob 后来的习惯', 'bob 关掉之后记的', 'bob 的私事，后来改了'].sort(),
+      ])
       expect((await marks()).get(diary.id)).toBe(2)
       expect((await marks()).get(later.id)).toBe(1)
       expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
     })
 
-    it('整理到一半时关掉：还没请求的那几次不再发这个成员的画像层与私人层', async () => {
+    it('整理到一半时关掉：还没请求的那几次不再发这个成员的本人记忆', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+      await remember({ uri: 'core://rule', content: '共享的规则' })
       await remember(
-        { uri: 'preferences://bob', content: 'bob 喜欢详细', layer: 'owner' },
+        { uri: 'user://preferences/bob', sensitivity: 'internal', content: 'bob 喜欢详细' },
         bob.cookie,
       )
-      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
-      // 共享的范围排在前面：模型收到基础层的这一次请求时，bob 关掉了
+      await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
+      // 共享的范围排在前面：模型收到通用的这一次请求时，bob 关掉了
       const { model, calls } = fakeChatModel(async (messages) => {
-        if (titleOf(messages).includes('基础层')) await setting(false, bob.cookie)
+        if (titleOf(messages).includes('（通用）')) await setting(false, bob.cookie)
         return reply([])
       })
       expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
@@ -668,7 +675,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
 
     it('读完这一批之后、请求模型之前关掉：这一组不发给模型，不记整理标记、不存建议', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const diary = await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const diary = await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
       const { model, calls } = fakeChatModel(
         reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }]),
       )
@@ -678,7 +685,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         trigger: 'manual',
         modelFor: () => model,
         afterBatch: async (scope) => {
-          if (scope === `private:${bob.accountId}`) await setting(false, bob.cookie)
+          if (scope === `user:${bob.accountId}`) await setting(false, bob.cookie)
         },
       })
       expect(outcome).toEqual({ outcome: 'skipped', reason: 'idle' })
@@ -689,7 +696,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
 
     it('请求模型期间关掉：发出去的收不回来，但这一次的建议与整理标记都不存，只记下用掉的 token，只有本人看得到', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const diary = await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const diary = await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
       // 模型收到 bob 的这一组时 bob 关掉了，模型照样回了一条建议
       const { model, calls } = fakeChatModel(async () => {
         await setting(false, bob.cookie)
@@ -708,14 +715,14 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         ]),
       ).toEqual([
         [null, null, 'idle', 0],
-        [`private:${bob.accountId}`, bob.accountId, 'opted-out', 150],
+        [`user:${bob.accountId}`, bob.accountId, 'opted-out', 150],
       ])
       const latest = async (cookie: string) =>
         ((await (await send('GET', '/dream/runs', undefined, cookie)).json()) as DreamRunList)
           .runs[0]!.entries
       expect(await latest(bob.cookie)).toMatchObject([
         { scope: null, skipped: 'idle' },
-        { scope: { kind: 'private' }, skipped: 'opted-out', tokens: 150 },
+        { scope: { kind: 'user' }, skipped: 'opted-out', tokens: 150 },
       ])
       expect(await latest(ws.cookie)).toMatchObject([{ scope: null, skipped: 'idle' }])
 
@@ -731,7 +738,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       { timeout: 15_000 },
       async () => {
         const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-        const diary = await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+        const diary = await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
         const { model, calls } = fakeChatModel(
           reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }]),
         )
@@ -765,7 +772,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         expect((await marks()).has(diary.id)).toBe(false)
         expect(await stored()).toEqual([])
         expect((await runs()).at(-1)).toMatchObject({
-          scope: `private:${bob.accountId}`,
+          scope: `user:${bob.accountId}`,
           skipped: 'opted-out',
         })
       },
@@ -773,7 +780,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
 
     it('请求模型期间不再是成员：建议与整理标记都不存，也不给他记「你关掉了」', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const diary = await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      const diary = await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
       const { model, calls } = fakeChatModel(async () => {
         await database.db.delete(spaceMembers).where(eq(spaceMembers.accountId, bob.accountId))
         return reply([{ kind: 'stale', memories: ['M1'], reason: '试试' }])
@@ -786,37 +793,38 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     })
   })
 
-  describe('先整理共享的范围，再整理各人的画像层与私人层', () => {
+  describe('先整理共享的范围，再整理各人的本人记忆', () => {
     const notes = (count: number) =>
       inSpace((tx) =>
         tx.insert(memories).values(
           Array.from({ length: count }, (_, i) => ({
             spaceId: ws.spaceId,
             form: 'curated' as const,
-            layer: 'base' as const,
+            layer: 'core' as const,
             sensitivity: 'public' as const,
             provenance: 'owner' as const,
             domain: 'core',
             path: `note-${String(i).padStart(3, '0')}`,
+            title: `note-${String(i).padStart(3, '0')}`,
             content: `第 ${i} 条笔记`,
           })),
         ),
       )
-    const BASE = '全空间共用的基础规则与知识（基础层）'
-    const PRIVATE = '一位成员的私人事务（私人层）'
+    const BASE = '全空间共用的通用规则与知识（通用）'
+    const PRIVATE = '一位成员本人的习惯、偏好与私人事务，以及他不带会话上下文的会话摘要（本人）'
 
-    it('共享的范围分几批时，都在画像层与私人层之前整理完，汇总记在它们之间', async () => {
+    it('共享的范围分几批时，都在本人之前整理完，汇总记在它们之间', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
       await notes(DREAM_CHANGED_PER_CALL + 5)
-      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
       const { model, calls } = fakeChatModel(reply([]))
       expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
       expect(calls.map(titleOf)).toEqual([BASE, BASE, PRIVATE])
       expect((await runs()).map((r) => [r.scope, r.more])).toEqual([
-        ['base', true],
-        ['base', false],
+        ['core', true],
+        ['core', false],
         [null, false],
-        [`private:${bob.accountId}`, false],
+        [`user:${bob.accountId}`, false],
       ])
     })
 
@@ -828,7 +836,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         await side.begin(async (tx) => {
           await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
           // 按 Dream 取一批的顺序，第一批的这些行都被别的写入锁着（例如合并的事务还开着）
-          await tx`select id from memories where layer = 'base'
+          await tx`select id from memories where layer = 'core'
             order by updated_at, id limit ${DREAM_CHANGED_PER_CALL} for no key update`
           expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
         })
@@ -838,7 +846,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       expect(calls).toHaveLength(1)
       // 还有没整理的：没记上的这一批与后面的，下次接着
       expect((await runs()).map((r) => [r.scope, r.more])).toEqual([
-        ['base', true],
+        ['core', true],
         [null, true],
       ])
       await dream(model)
@@ -858,20 +866,20 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         .filter((r) => r.ownerAccountId === null)
         .map((r) => [r.scope, r.changed, r.more])
     const BACKLOGGED = [
-      ...Array.from({ length: SHARED_CALLS }, () => ['base', DREAM_CHANGED_PER_CALL, true]),
+      ...Array.from({ length: SHARED_CALLS }, () => ['core', DREAM_CHANGED_PER_CALL, true]),
       [null, 0, true],
     ]
 
-    it('共享的内容积压很多时，画像层与私人层照样整理：共享的那一段最多用到上限减去留量，没用完的留量也不还给它', async () => {
+    it('共享的内容积压很多时，本人照样整理：共享的那一段最多用到上限减去留量，没用完的留量也不还给它', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
       await notes(BACKLOG)
-      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
       const { model, calls } = fakeChatModel(reply([]))
       expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
       expect(calls.map(titleOf)).toEqual([...Array(SHARED_CALLS).fill(BASE), PRIVATE])
       expect(await sharedRuns()).toEqual(BACKLOGGED)
       expect((await scopeRuns()).at(-1)).toMatchObject({
-        scope: `private:${bob.accountId}`,
+        scope: `user:${bob.accountId}`,
         changed: 1,
       })
       // 下一次：共享的接着整理剩下的
@@ -880,7 +888,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       expect((await summaries()).at(-1)).toMatchObject({ more: false })
     })
 
-    it('没有画像层与私人层要整理时，共享的那一段也只用到同样的上限：别的成员看到的不随有没有私人内容变', async () => {
+    it('没有本人的记忆要整理时，共享的那一段也只用到同样的上限：别的成员看到的不随有没有私人内容变', async () => {
       await notes(BACKLOG)
       const { model, calls } = fakeChatModel(reply([]))
       await dream(model)
@@ -892,10 +900,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     it.each([
       ['共享的那一段用到上限减去留量就停', DREAM_MAX_TOKENS - DREAM_PERSONAL_TOKENS],
       ['共享的那一段一次就用超了上限，超出的部分不占留量', DREAM_MAX_TOKENS],
-    ])('用量也给画像层与私人层留一部分：%s', async (_, perCall) => {
+    ])('用量也给本人留一部分：%s', async (_, perCall) => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
       await notes(DREAM_CHANGED_PER_CALL * 2)
-      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
+      await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
       const { model, calls } = fakeChatModel(reply([]), {
         promptTokens: perCall,
         completionTokens: 0,
@@ -905,12 +913,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       expect((await summaries()).at(-1)).toMatchObject({ more: true })
     })
 
-    it('一个成员的画像层或私人层请求出错，不耽误别的成员的：接着整理下一个，结果照样存下', async () => {
+    it('一个成员的本人请求出错，不耽误别的成员的：接着整理下一个，结果照样存下', async () => {
       const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
       const carol = await addMember(database.db, ws.spaceId, 'carol', 'editor')
-      await remember({ uri: 'home://bob', content: 'bob 的私事' }, bob.cookie)
-      await remember({ uri: 'home://carol', content: 'carol 的私事' }, carol.cookie)
-      // 第一个请求的私人层出错，第二个照常回一条建议
+      await remember({ uri: 'user://home/bob', content: 'bob 的私事' }, bob.cookie)
+      await remember({ uri: 'user://home/carol', content: 'carol 的私事' }, carol.cookie)
+      // 第一个成员的请求出错，第二个照常回一条建议
       const seen: string[][] = []
       const model: ChatModel = {
         model: 'fake-model',
@@ -933,7 +941,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     })
   })
 
-  it('对象与情节按来源作用域分：群里记下的和私聊里记下的不在同一次请求里', async () => {
+  it('联系人的事实与会话摘要按来源作用域分：群里记下的和私聊里记下的不在同一次请求里', async () => {
     const group = await subject('group', '读书会')
     const xm = await subject('person', '小明')
     await fact(xm, '在群里说在学日语', `group:${group}`)
@@ -990,7 +998,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     const backendPid = async (tx: postgres.TransactionSql) =>
       ((await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }])[0].pid
 
-    it('放到一起的对象层与情节层记忆下一次整理会再看：两边私聊里的、同一个群里关于这两个对象的；别的不再看', async () => {
+    it('放到一起的联系人事实与会话摘要下一次整理会再看：两边私聊里的、同一个群里关于这两个联系人的；别的不再看', async () => {
       const xm = await subject('person', '小明')
       const alt = await subject('person', '小明的小号')
       const zs = await subject('person', '张三')
@@ -1002,18 +1010,19 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       await fact(xm, '养了一只猫', `group:${hikers}`)
       await fact(xm, '在找新工作', `direct:${xm}`)
       await fact(alt, '想换工作', `direct:${alt}`)
-      // 私人层的记忆来源作用域也是这个私聊，但它的范围和对象、来源作用域无关，合并之后不用再看
+      // 本人记忆的来源作用域也是这个私聊，但它的范围和联系人、来源作用域无关，合并之后不用再看
       await inSpace((tx) =>
         tx.insert(memories).values({
           spaceId: ws.spaceId,
           form: 'curated',
-          layer: 'private',
+          layer: 'user',
           sensitivity: 'private',
           provenance: 'owner',
           ownerAccountId: ws.accountId,
           originScope: `direct:${alt}`,
-          domain: 'home',
-          path: 'alt-chat',
+          domain: 'user',
+          path: 'home/alt-chat',
+          title: 'alt-chat',
           content: '小号私聊里记下的待办',
         }),
       )
@@ -1157,9 +1166,9 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
   })
 
   it('增量：只看上次以来新增或改动的，没有就不请求模型；改过的那条连同近邻再看一遍', async () => {
-    const a = await remember({ uri: 'core://lang', content: '回答问题用中文', layer: 'base' })
-    await remember({ uri: 'core://lang-more', content: '用中文回答问题，先给结论', layer: 'base' })
-    await remember({ uri: 'core://report', content: '周五交周报', layer: 'base' })
+    const a = await remember({ uri: 'core://lang', content: '回答问题用中文' })
+    await remember({ uri: 'core://lang-more', content: '用中文回答问题，先给结论' })
+    await remember({ uri: 'core://report', content: '周五交周报' })
     let answer = reply([])
     const { model, calls } = fakeChatModel(() => answer)
     await dream(model)
@@ -1202,11 +1211,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         Array.from({ length: DREAM_CHANGED_PER_CALL + 5 }, (_, i) => ({
           spaceId: ws.spaceId,
           form: 'curated' as const,
-          layer: 'base' as const,
+          layer: 'core' as const,
           sensitivity: 'public' as const,
           provenance: 'owner' as const,
           domain: 'core',
           path: `note-${String(i).padStart(2, '0')}`,
+          title: `note-${String(i).padStart(2, '0')}`,
           content: `第 ${i} 条笔记`,
         })),
       ),
@@ -1224,8 +1234,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     )
     expect(new Set(seen).size).toBe(DREAM_CHANGED_PER_CALL + 5)
     expect((await runs()).map((r) => [r.scope, r.changed, r.more])).toEqual([
-      ['base', DREAM_CHANGED_PER_CALL, true],
-      ['base', 5, false],
+      ['core', DREAM_CHANGED_PER_CALL, true],
+      ['core', 5, false],
       [null, 0, false],
     ])
     expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'idle' })
@@ -1241,10 +1251,10 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       ),
     )
     expect(res.status).toBe(200)
-    await remember({ uri: 'core://a', content: '回答问题时用中文', layer: 'base' })
-    await remember({ uri: 'core://b', content: '回答问题时用中文并且先给结论', layer: 'base' })
-    await remember({ uri: 'core://c', content: '周五下午交周报', layer: 'base' })
-    await remember({ uri: 'core://e', content: '中文', layer: 'base' })
+    await remember({ uri: 'core://a', content: '回答问题时用中文' })
+    await remember({ uri: 'core://b', content: '回答问题时用中文并且先给结论' })
+    await remember({ uri: 'core://c', content: '周五下午交周报' })
+    await remember({ uri: 'core://e', content: '中文' })
     await backfillJob(database.db, staticEmbedderSource(fakeEmbedder('m')), async () => [])
     const { model, calls } = fakeChatModel(reply([]))
     await dream(model)
@@ -1294,8 +1304,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         promptTokens: 1_000,
       }),
     )
-    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
-    await remember({ uri: 'home://note', content: '自己的笔记' })
+    await remember({ uri: 'core://rule', content: '共享的规则' })
+    await remember({ uri: 'user://home/note', content: '自己的笔记' })
     const { model, calls } = fakeChatModel(reply([]))
 
     await budget(1_000)
@@ -1303,21 +1313,21 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect(calls).toEqual([])
     expect((await runs()).at(-1)).toMatchObject({ scope: null, skipped: 'budget', promptTokens: 0 })
 
-    // 还剩一点：第一个范围用掉 150，超出之后第二个范围不再请求，没整理的原因记在那个范围上（私人层的只给本人看）
+    // 还剩一点：第一个范围用掉 150，超出之后第二个范围不再请求，没整理的原因记在那个范围上（本人的只给本人看）
     await budget(1_100)
     expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
     expect(calls).toHaveLength(1)
     expect(await usage()).toBe(1_150)
-    // 共享的汇总写在画像层与私人层之前，私人层没整理的原因只记在它自己的范围上
+    // 共享的汇总写在本人之前，本人没整理的原因只记在它自己的范围上
     expect((await runs()).slice(-3).map((r) => [r.scope, r.ownerAccountId, r.skipped])).toEqual([
-      ['base', null, null],
+      ['core', null, null],
       [null, null, null],
-      [`private:${ws.accountId}`, ws.accountId, 'budget'],
+      [`user:${ws.accountId}`, ws.accountId, 'budget'],
     ])
   })
 
   it('没配抽取模型时不整理，记下原因', async () => {
-    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+    await remember({ uri: 'core://rule', content: '共享的规则' })
     await clearExtractionConfig(database.db)
     const { model, calls } = fakeChatModel(reply([]))
     expect(await dream(model)).toEqual({ outcome: 'skipped', reason: 'no-model' })
@@ -1326,8 +1336,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
   })
 
   it('拒绝过的、还在待审里的建议不再提；涉及的记忆改过之后可以再提', async () => {
-    await remember({ uri: 'core://report', content: '周五之前交周报', layer: 'base' })
-    await remember({ uri: 'core://meeting', content: '周一开例会', layer: 'base' })
+    await remember({ uri: 'core://report', content: '周五之前交周报' })
+    await remember({ uri: 'core://meeting', content: '周一开例会' })
     const { model } = fakeChatModel((messages) =>
       reply(
         dreamLines(messages).map((l) => ({ kind: 'stale', memories: [l.id], reason: '过时了' })),
@@ -1362,8 +1372,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
   })
 
   it('请求模型失败时记下原因、不记整理过，这次就停下；输出解析不了时记下原因与用量、记下整理过', async () => {
-    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
-    await remember({ uri: 'home://note', content: '自己的笔记' })
+    await remember({ uri: 'core://rule', content: '共享的规则' })
+    await remember({ uri: 'user://home/note', content: '自己的笔记' })
     const failing: ChatModel = {
       model: 'fake-model',
       async complete() {
@@ -1371,9 +1381,9 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       },
     }
     expect(await dream(failing)).toEqual({ outcome: 'failed', reason: null })
-    // 共享的范围出错就停下，汇总记出错，画像层与私人层这次不整理
+    // 共享的范围出错就停下，汇总记出错，本人这次不整理
     expect(await runs()).toMatchObject([
-      { scope: 'base', error: '抽取模型返回 HTTP 502：bad gateway', promptTokens: 0 },
+      { scope: 'core', error: '抽取模型返回 HTTP 502：bad gateway', promptTokens: 0 },
       { scope: null, error: '共享范围出错，本次已停止（原因见出错的范围）' },
     ])
     expect(await inSpace((tx) => tx.select().from(dreamMarks))).toEqual([])
@@ -1382,9 +1392,9 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     expect(await dream(model)).toEqual({ outcome: 'done', reason: null })
     expect(calls).toHaveLength(2)
     expect((await scopeRuns()).slice(1)).toMatchObject([
-      { scope: 'base', error: '模型的输出里没有约定格式的 JSON 对象', promptTokens: 120 },
+      { scope: 'core', error: '模型的输出里没有约定格式的 JSON 对象', promptTokens: 120 },
       {
-        scope: `private:${ws.accountId}`,
+        scope: `user:${ws.accountId}`,
         error: '模型的输出里没有约定格式的 JSON 对象',
         promptTokens: 120,
       },
@@ -1395,7 +1405,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
   })
 
   it('不按时间判断：写了很久才提交的、导入的（带着原来的更新时间）都会整理；整理过、没改过的不再给模型看', async () => {
-    await remember({ uri: 'core://a', content: '刚写下的', layer: 'base' })
+    await remember({ uri: 'core://a', content: '刚写下的' })
     // 另一条连接里写下一条、先不提交：更新时间是十分钟前（像是事务开始得早、过了很久才提交）
     const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
     let commit!: () => void
@@ -1404,8 +1414,8 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       const late = side.begin(async (tx) => {
         await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
         await tx`
-          insert into memories (space_id, form, layer, sensitivity, provenance, domain, path, content, updated_at)
-          values (${ws.spaceId}, 'curated', 'base', 'public', 'owner', 'core', 'late', '晚提交的',
+          insert into memories (space_id, form, layer, sensitivity, provenance, domain, path, title, content, updated_at)
+          values (${ws.spaceId}, 'curated', 'core', 'public', 'owner', 'core', 'late', 'late', '晚提交的',
             now() - interval '10 minutes')`
         await committed
       })
@@ -1429,11 +1439,12 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         tx.insert(memories).values({
           spaceId: ws.spaceId,
           form: 'curated',
-          layer: 'base',
+          layer: 'core',
           sensitivity: 'public',
           provenance: 'owner',
           domain: 'core',
           path: 'imported',
+          title: 'imported',
           content: '导入的',
           createdAt: new Date(Date.now() - 365 * 86_400_000),
           updatedAt: new Date(Date.now() - 365 * 86_400_000),
@@ -1458,7 +1469,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       model: 'm',
       apiKey: 'test-api-key',
     })
-    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+    await remember({ uri: 'core://rule', content: '共享的规则' })
     const { model, calls } = fakeChatModel(reply([]))
     // 没配主密钥：抽取模型的 Key 解不开，读设置时就出错
     const outcome = await dreamSpace(database.db, null, {
@@ -1485,7 +1496,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       model: 'm',
       apiKey: 'test-api-key',
     })
-    await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+    await remember({ uri: 'core://rule', content: '共享的规则' })
     const { model, calls } = fakeChatModel(reply([]))
     const failing = () =>
       dreamSpace(database.db, randomBytes(32), {
@@ -1619,7 +1630,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
     }
     try {
       await saveExtractionConfig(database.db, masterKey, { baseUrl: server.url, model: 'm' })
-      await remember({ uri: 'core://rule', content: '共享的规则', layer: 'base' })
+      await remember({ uri: 'core://rule', content: '共享的规则' })
       const res = await call('POST', '/dream/runs')
       expect(res.status).toBe(202)
       const { runId } = (await res.json()) as DreamQueued
@@ -1627,7 +1638,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
       expect(server.requests).toHaveLength(1)
       expect(await stored()).toMatchObject([{ kind: 'stale', status: 'pending' }])
       expect(await runs()).toMatchObject([
-        { runId, trigger: 'manual', scope: 'base', suggested: 1 },
+        { runId, trigger: 'manual', scope: 'core', suggested: 1 },
         { runId, scope: null, skipped: null, error: null },
       ])
 

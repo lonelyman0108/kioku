@@ -50,11 +50,12 @@ const OUTCOME_DEFAULTS = {
   changes: null,
 } as const
 
-// 工具结果里的结构行（见 mcp/format.ts 与 formatRecallBlock）。正则是写死的，不接受场景给的模式
+// 工具结果里的结构行（见 mcp/format.ts 与 formatRecallBlock）。正则是写死的，不接受场景给的模式。
+// 坐标后面可能跟着「标题」（见 recall/text.ts 的 titleSuffix，标题里的「」已经去掉）
 const MEMORY_URI_LINE = /^URI: ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)$/
 const CHILD_ROW =
-  /^- ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)（(?:路径本身没有记忆|[a-z]+，priority -?\d+)(?:，\d+ 个子节点)?）/
-const RECALL_ROW = /^\d+\.\d+ \| ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)(?: \| |$)/
+  /^- ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)(?:「[^」\n]*」)?（(?:路径本身没有记忆|[a-z]+，priority -?\d+)(?:，\d+ 个子节点)?）/
+const RECALL_ROW = /^\d+\.\d+ \| ([a-z][a-z0-9_]*:\/\/[a-z0-9_/-]+)(?:「[^」\n]*」)?(?: \| |$)/
 
 const urisIn = (lines: readonly string[], row: RegExp) =>
   lines.flatMap((line) => {

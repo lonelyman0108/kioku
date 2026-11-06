@@ -48,7 +48,6 @@ export const credentialFlow: BenchScenarioInput = {
       arguments: {
         uri: LOGIN,
         content: `测试台的登录说明，密码 {{cred:${IDENTIFIER}#password}}。`,
-        layer: 'private',
         priority: 2,
         valid_to: EXPIRES,
       },

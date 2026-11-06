@@ -22,7 +22,7 @@ export interface BufferedSession {
   scope: string
 }
 
-// turn.end 能不能进缓冲：会话上下文只会把 Key 能写的层收紧到对象层与情节层，Key 两层都写不了时，
+// turn.end 能不能进缓冲：会话上下文只会把 Key 能写的层收紧到联系人的事实与会话摘要，Key 两层都写不了时，
 // 抽取出的东西写不进去，不必存下别人的话。只看 Key，不用先解析会话（解析会建对象）
 export function canBufferTurns(key: KeyPrincipal): boolean {
   return key.scopes.writeLayers.some((layer) => layer === 'subject' || layer === 'episode')

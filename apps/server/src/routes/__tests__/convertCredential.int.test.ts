@@ -91,8 +91,10 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     ok<MemoryView>(await send('POST', '/memories', body, cookie), 201)
   const edit = async (body: Record<string, unknown>) =>
     ok<MemoryView>(await send('PATCH', '/memories', body))
+  const move = async (from: string, to: string) =>
+    ok<MemoryView>(await send('POST', '/memories/move', { from, to }))
   const seedNote = (extra: Record<string, unknown> = {}) =>
-    remember({ uri: 'notes://wifi', content: BODY, ...extra })
+    remember({ uri: 'user://notes/wifi', content: BODY, ...extra })
   const convert = (
     m: { id: string; version: number },
     extra: Record<string, unknown> = {},
@@ -289,7 +291,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
   })
 
   it('值写在引号或反引号里：引号留着，占位符在里面，也不再算疑似明文', async () => {
-    const m = await remember({ uri: 'notes://quoted', content: `密码：\`${VALUE}\`` })
+    const m = await remember({ uri: 'user://notes/quoted', content: `密码：\`${VALUE}\`` })
     const { memory } = await converted(m)
     expect(memory.content).toBe('密码：`{{cred:wifi#password}}`')
     const list = await ok<MemoryList>(await send('GET', '/memories/list?plaintext=true'))
@@ -309,7 +311,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       ).toBe(201)
     await credentialNamed('prod-db')
     const m = await remember({
-      uri: 'notes://db',
+      uri: 'user://notes/db',
       content: '{{cred:prod-db#password}} 的主机是 prod-db',
     })
     const edited = await edit({
@@ -319,13 +321,13 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     await inSpace((tx) =>
       tx.insert(dreamSuggestions).values({
         spaceId: ws.spaceId,
-        scope: `private:${ws.accountId}`,
+        scope: `user:${ws.accountId}`,
         ownerAccountId: ws.accountId,
         kind: 'distill',
         memoryIds: [m.id],
         versions: [edited.version],
         content: '{{cred:prod-db#password}} 的主机是 prod-db',
-        uri: 'notes://distilled',
+        uri: 'user://notes/distilled',
         reason: '都写着 prod-db',
         fingerprint: 'with-placeholder',
       }),
@@ -354,19 +356,22 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
 
     // 值是 cred：占位符的写法不受影响，别处的换掉
     await credentialNamed('foo')
-    const other = await remember({ uri: 'notes://two', content: '{{cred:foo}} 是 cred 的例子' })
+    const other = await remember({
+      uri: 'user://notes/two',
+      content: '{{cred:foo}} 是 cred 的例子',
+    })
     const second = await converted(other, { value: 'cred', identifier: 'word', field: 'text' })
     expect(second.memory.content).toBe('{{cred:foo}} 是 {{cred:word#text}} 的例子')
 
     // 只在占位符里出现：正文里没有这段值
-    const only = await remember({ uri: 'notes://three', content: '只有 {{cred:foo}}' })
+    const only = await remember({ uri: 'user://notes/three', content: '只有 {{cred:foo}}' })
     const res = await convert(only, { value: 'foo', identifier: 'bar', field: 'text' })
     expect(res.status).toBe(400)
     expect((await rowOf(only.id)).content).toBe(only.content)
   })
 
   it('换过的旧密码不是这个值，留在历史里：数出来告诉调用方；现在正文里别的明文不算历史', async () => {
-    const m = await remember({ uri: 'notes://wifi', content: '密码：old-password-1' })
+    const m = await remember({ uri: 'user://notes/wifi', content: '密码：old-password-1' })
     const rotated = await edit({ uri: m.uri, content: `密码：${VALUE}` })
     const result = await converted(rotated)
     expect(result.plaintextVersions).toBe(1)
@@ -374,7 +379,10 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect(events).not.toContain(VALUE)
     expect(events).toContain('old-password-1')
 
-    const other = await remember({ uri: 'notes://two', content: `密码：${VALUE} token=abcd1234` })
+    const other = await remember({
+      uri: 'user://notes/two',
+      content: `密码：${VALUE} token=abcd1234`,
+    })
     const second = await converted(other, { identifier: 'two' })
     // 这一版换掉之后的正文还有 token，它就是现在的正文，不算历史版本
     expect(second.plaintextVersions).toBe(0)
@@ -382,16 +390,20 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
 
   it('别的记忆里还有这个值时数出来：调用方有权看到的，已删除、过期的也算；这次不动它们', async () => {
     const value = 'hunter2-copied'
-    const m = await remember({ uri: 'notes://wifi', content: `密码：${value}` })
+    const m = await remember({ uri: 'user://notes/wifi', content: `密码：${value}` })
     // 数得到的：有效的、共享层的、触发场景里的、已删除的、过期的、来自对话的
-    const copy = await remember({ uri: 'notes://copy', content: `也写着 ${value}` })
-    await remember({ uri: 'kb://copy', content: `共享的 ${value}`, layer: 'base' })
-    await remember({ uri: 'notes://hint', content: '正文没有', disclosure: `提到 ${value} 时` })
-    await remember({ uri: `notes://${value}-note`, content: 'URI 里有' })
-    await remember({ uri: 'notes://tagged', content: '关键词里有', glossary: [`词 ${value}`] })
-    const gone = await remember({ uri: 'notes://gone', content: `合并之前的 ${value}` })
+    const copy = await remember({ uri: 'user://notes/copy', content: `也写着 ${value}` })
+    await remember({ uri: 'core://kb/copy', content: `共享的 ${value}` })
+    await remember({
+      uri: 'user://notes/hint',
+      content: '正文没有',
+      disclosure: `提到 ${value} 时`,
+    })
+    await remember({ uri: `user://notes/${value}-note`, content: 'URI 里有' })
+    await remember({ uri: 'user://notes/tagged', content: '关键词里有', glossary: [`词 ${value}`] })
+    const gone = await remember({ uri: 'user://notes/gone', content: `合并之前的 ${value}` })
     expect((await send('DELETE', `/memories?uri=${encodeURIComponent(gone.uri)}`)).status).toBe(204)
-    const lapsed = await remember({ uri: 'notes://lapsed', content: `过期的 ${value}` })
+    const lapsed = await remember({ uri: 'user://notes/lapsed', content: `过期的 ${value}` })
     await inSpace(async (tx) => {
       await tx
         .update(memories)
@@ -409,8 +421,8 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     })
     // 数不到的：别的成员的私人层、secret 的密文、只在占位符里的
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-    await remember({ uri: 'notes://bobs', content: `bob 的 ${value}` }, bob.cookie)
-    await remember({ uri: 'notes://vault', content: value, sensitivity: 'secret' })
+    await remember({ uri: 'user://notes/bobs', content: `bob 的 ${value}` }, bob.cookie)
+    await remember({ uri: 'user://notes/vault', content: value, sensitivity: 'secret' })
     expect(
       (
         await send('POST', '/credentials', {
@@ -420,7 +432,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
         })
       ).status,
     ).toBe(201)
-    await remember({ uri: 'notes://ref', content: `{{cred:${value}}}` })
+    await remember({ uri: 'user://notes/ref', content: `{{cred:${value}}}` })
     // 占位符两边的文字拼起来才像这个值的不算：另一个占位符里有这个值，粗算时扫得到这一行
     expect(
       (
@@ -432,7 +444,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       ).status,
     ).toBe(201)
     await remember({
-      uri: 'notes://spliced',
+      uri: 'user://notes/spliced',
       content: `{{cred:${value}}} 和 hunter2{{cred:foo}}-copied`,
     })
 
@@ -476,7 +488,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
 
   it('别的记忆里没有这个值时是 0', async () => {
     const m = await seedNote()
-    await remember({ uri: 'notes://other', content: '没写' })
+    await remember({ uri: 'user://notes/other', content: '没写' })
     expect((await converted(m)).otherMemories).toBe(0)
   })
 
@@ -497,30 +509,28 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     }
   })
 
-  it('改层之前的版本别的成员可能看得到：换成星号，不给标识；旧版本的 disclosure 与关键词也不留这个值', async () => {
+  it('移进本人之前的版本别的成员可能看得到：换成星号，不给标识；旧版本的 disclosure 与关键词也不留这个值', async () => {
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
     const m = await remember({
-      uri: 'kb://wifi',
+      uri: 'core://kb/wifi',
       content: `密码：${VALUE}`,
-      layer: 'base',
       sensitivity: 'private',
       disclosure: `提到 ${VALUE} 时`,
       glossary: [`词-${VALUE}`, '无线网络'],
     })
     await edit({ uri: m.uri, disclosure: '连 Wi-Fi 时', glossaryRemove: [`词-${VALUE}`] })
-    const moved = await edit({ uri: m.uri, layer: 'private' })
+    const moved = await move(m.uri, 'user://kb/wifi')
     const result = await converted(moved)
     // 盖过的版本（密码：***）不算还有明文
     expect(result.plaintextVersions).toBe(0)
 
     // 写在引号里的值，盖过之后也不算
     const quoted = await remember({
-      uri: 'kb://quoted',
+      uri: 'core://kb/quoted',
       content: `password: "${VALUE}"`,
-      layer: 'base',
       sensitivity: 'private',
     })
-    const quotedAway = await edit({ uri: quoted.uri, layer: 'private' })
+    const quotedAway = await move(quoted.uri, 'user://kb/quoted')
     const second = await converted(quotedAway, { identifier: 'quoted' })
     expect(second.plaintextVersions).toBe(0)
     expect(((await eventsOf(quoted.id))[0]!.after as { content: string }).content).toBe(
@@ -533,39 +543,37 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     expect(created.content).toBe('密码：***')
     expect(created.disclosure).toBe('提到 *** 时')
     expect(created.glossary).toEqual(['无线网络'])
-    // 改层之前的版本 bob 看得到（离开的记录），里面没有私人层凭据的标识
+    // 移进本人之前的版本 bob 看得到（离开的记录），里面没有本人凭据的标识
     const seen = JSON.stringify(await inSpace((tx) => tx.select().from(memoryEvents)))
     expect(seen).toContain('密码：***')
     expect(bob.accountId).toBeTruthy()
-    // 这条已经在私人层，那时候的版本（「改层」事件的改后）用占位符
-    const layered = events.find((e) => (e.after as { layer?: string } | null)?.layer === 'private')!
+    // 这条已经在本人里，那时候的版本（移动事件的改后）用占位符
+    const layered = events.find((e) => (e.after as { layer?: string } | null)?.layer === 'user')!
     expect((layered.after as { content: string }).content).toBe('密码：{{cred:wifi#password}}')
   })
 
   it('改名之前的 URI 里有这个值：历史里也换掉，现在的 URI 里有才拒绝', async () => {
     const value = 'hunter2box'
-    const m = await remember({ uri: `${value}://notes/${value}/a`, content: `密码：${value}` })
-    const moved = await ok<MemoryView>(
-      await send('POST', '/memories/move', { from: m.uri, to: 'notes://wifi' }),
-    )
+    const m = await remember({ uri: `user://${value}/notes/${value}/a`, content: `密码：${value}` })
+    const moved = await move(m.uri, 'user://notes/wifi')
     await converted(moved, { value })
 
     const events = await eventsOf(m.id)
     expect(JSON.stringify(events)).not.toContain(value)
-    expect(events[0]!.after).toMatchObject({ domain: '***', path: 'notes/***/a' })
+    expect(events[0]!.after).toMatchObject({ domain: 'user', path: '***/notes/***/a' })
     const history = await ok<MemoryHistory>(await send('GET', `/memories/history?id=${m.id}`))
-    expect(history.events[0]!.after!.uri).toBe('***://notes/***/a')
-    expect(history.events[1]!.before!.uri).toBe('***://notes/***/a')
-    expect(history.events[1]!.after!.uri).toBe('notes://wifi')
+    expect(history.events[0]!.after!.uri).toBe('user://***/notes/***/a')
+    expect(history.events[1]!.before!.uri).toBe('user://***/notes/***/a')
+    expect(history.events[1]!.after!.uri).toBe('user://notes/wifi')
   })
 
   it('Lore 的导入事件留着 URI：导入工具靠它认出导入过的节点，换了会被当成新节点写回；正文照样换', async () => {
     const value = 'hunter2box'
-    const m = await remember({ uri: 'notes://wifi', content: `密码：${value}` })
+    const m = await remember({ uri: 'user://notes/wifi', content: `密码：${value}` })
     const version = {
       domain: value,
       path: `notes/${value}`,
-      layer: 'private',
+      layer: 'user',
       sensitivity: 'private',
       ownerAccountId: ws.accountId,
       originScope: 'global',
@@ -611,18 +619,18 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
 
   it('Dream 的建议里抄下的这个值也换掉', async () => {
     const m = await seedNote()
-    const other = await remember({ uri: 'notes://other', content: `也写着 ${VALUE}` })
+    const other = await remember({ uri: 'user://notes/other', content: `也写着 ${VALUE}` })
     await inSpace((tx) =>
       tx.insert(dreamSuggestions).values([
         {
           spaceId: ws.spaceId,
-          scope: `private:${ws.accountId}`,
+          scope: `user:${ws.accountId}`,
           ownerAccountId: ws.accountId,
           kind: 'distill',
           memoryIds: [m.id],
           versions: [m.version],
           content: `提炼：Wi-Fi 是 ${VALUE}`,
-          uri: `notes://${VALUE}`,
+          uri: `user://notes/${VALUE}`,
           disclosure: `提到 ${VALUE} 时`,
           reason: `都写着 ${VALUE}`,
           fingerprint: 'a',
@@ -630,7 +638,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
         // 不涉及这条记忆的不动
         {
           spaceId: ws.spaceId,
-          scope: `private:${ws.accountId}`,
+          scope: `user:${ws.accountId}`,
           ownerAccountId: ws.accountId,
           kind: 'stale',
           memoryIds: [other.id],
@@ -646,7 +654,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     )
     expect(rows[0]).toMatchObject({
       content: '提炼：Wi-Fi 是 ***',
-      uri: 'notes://***',
+      uri: 'user://notes/***',
       disclosure: '提到 *** 时',
       reason: '都写着 ***',
     })
@@ -687,20 +695,19 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       expect(list.items.map((c) => c.name)).toEqual(['已有的'])
     })
 
-    it('不在私人层、敏感级不够私密时拒绝，并说明要先怎么做', async () => {
-      const shared = await remember({ uri: 'kb://wifi', content: BODY, layer: 'base' })
+    it('不在本人、敏感级不够私密时拒绝，并说明要先怎么做', async () => {
+      const shared = await remember({ uri: 'core://kb/wifi', content: BODY })
       const res = await convert(shared)
       expect(res.status).toBe(400)
       const { error } = (await res.json()) as { error: string }
       expect(error).toBe(CONVERT_SCOPE_TEXT)
-      expect(error).toContain('私人层')
+      expect(error).toContain('本人')
       expect(error).toContain('先')
       await untouched(shared)
 
       const open = await remember({
-        uri: 'notes://open',
+        uri: 'user://notes/open',
         content: BODY,
-        layer: 'private',
         sensitivity: 'internal',
       })
       const lower = await convert(open)
@@ -709,7 +716,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     })
 
     it('机密记忆不用转存', async () => {
-      const m = await remember({ uri: 'notes://vault', content: BODY, sensitivity: 'secret' })
+      const m = await remember({ uri: 'user://notes/vault', content: BODY, sensitivity: 'secret' })
       const res = await convert(m)
       expect(res.status).toBe(400)
       expect(await credentialCount()).toBe(0)
@@ -718,7 +725,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     it('托管凭据要空间所有者；viewer 写不了；读不到的和不存在一样', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
       const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
-      const hers = await remember({ uri: 'notes://eve', content: BODY }, editor.cookie)
+      const hers = await remember({ uri: 'user://notes/eve', content: BODY }, editor.cookie)
       const res = await convert(hers, {}, editor.cookie)
       expect(res.status).toBe(403)
       expect(((await res.json()) as { error: string }).error).toContain('机密')
@@ -727,7 +734,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       const mine = await seedNote()
       expect((await convert(mine, {}, editor.cookie)).status).toBe(404)
       expect((await convert(mine, {}, viewer.cookie)).status).toBe(404)
-      const shared = await remember({ uri: 'kb://faq', content: BODY, layer: 'base' })
+      const shared = await remember({ uri: 'core://kb/faq', content: BODY })
       expect((await convert(shared, {}, viewer.cookie)).status).toBe(403)
       expect(await credentialCount()).toBe(0)
     })
@@ -778,18 +785,21 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       await untouched(inDisclosure)
 
       const inGlossary = await remember({
-        uri: 'notes://two',
+        uri: 'user://notes/two',
         content: BODY,
         glossary: [VALUE],
       })
       expect((await convert(inGlossary)).status).toBe(400)
 
-      const inUri = await remember({ uri: 'notes://hunter2-box', content: '密码：hunter2-box' })
+      const inUri = await remember({
+        uri: 'user://notes/hunter2-box',
+        content: '密码：hunter2-box',
+      })
       expect((await convert(inUri, { value: 'hunter2-box' })).status).toBe(400)
     })
 
     it('换成占位符之后超过正文的长度上限时拒绝', async () => {
-      const m = await remember({ uri: 'notes://long', content: 'abcd '.repeat(4000) })
+      const m = await remember({ uri: 'user://notes/long', content: 'abcd '.repeat(4000) })
       const res = await convert(m, { value: 'abcd' })
       expect(res.status).toBe(400)
       expect(((await res.json()) as { error: string }).error).toContain('长度上限')

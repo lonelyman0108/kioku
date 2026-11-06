@@ -305,7 +305,7 @@ end)`
 
 // Lore 导入工具写下的导入事件（context 里的出处 source 是 lore）：它按这些事件去重（见 importer/lore.ts），
 // 记忆硬删除之后也要留下。别的导入事件没人拿来去重（例如按空间导入的，出处是 space-export），
-// 和普通事件一样删掉：留着只会一直攒下去，私人层的 URI 也一直留在库里。没有出处的也不算，条件不会是 NULL
+// 和普通事件一样删掉：留着只会一直攒下去，本人记忆的坐标也一直留在库里。没有出处的也不算，条件不会是 NULL
 const LORE_IMPORT = sql`(${memoryEvents.eventType} = 'import' and coalesce(${memoryEvents.context} ->> 'source', '') = 'lore')`
 // Lore 的导入事件削成只剩写到的 URI：记忆整行不在了（memory_id 为空）导入工具也认得出
 // 「导入过、后来删掉了」，不会再写回来；正文、disclosure 与关键词都不留
@@ -346,7 +346,7 @@ async function memoryBatch(tx: Tx, where: SQL): Promise<number> {
   return ids.length
 }
 
-// 记忆整行已经不在的历史：删账号时数据库连带删掉他的画像层、私人层记忆，外键把事件的 memory_id 置空，
+// 记忆整行已经不在的历史：删账号时数据库连带删掉他的本人记忆，外键把事件的 memory_id 置空，
 // 快照里的正文却留着。管理界面里看不到（历史与活动只列记忆还在的），和硬删除时一样处理。
 // 只跳过已经削好的 Lore 导入事件；别的导入事件削好了也删（之前的清理把它们也削成了 URI 留着）
 async function orphanBatch(tx: Tx) {
@@ -367,14 +367,15 @@ async function orphanBatch(tx: Tx) {
   return { picked: rows.length, counts: { orphanEvents: removed, scrubbedSnapshots: trimmed } }
 }
 
-// 快照在已经不在的账号的画像层或私人层：管理读取只给本人看，账号删了谁也看不到，里面却还有那个人写的正文
-// （记忆还在：删账号之前移进了共享的层）。抹掉正文、disclosure 与关键词，事件和判断可见性的字段留着，
-// 别人看得到的历史（包括「离开」的记录）不变。先按层过滤，再按 uuid 查账号（走主键）；主人不是 uuid 的也算不在
+// 快照归已经不在的账号（本人的记忆，或不带会话上下文的会话摘要）：管理读取只给本人看，账号删了谁也看不到，
+// 里面却还有那个人写的正文（记忆还在：删账号之前移进了共享的归属）。抹掉正文、标题、disclosure 与关键词，
+// 事件和判断可见性的字段留着，别人看得到的历史（包括「离开」的记录）不变。先看有没有所属成员，
+// 再按 uuid 查账号（走主键）；所属成员不是 uuid 的也算不在
 const UUID_TEXT = '^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$'
-const TEXT_KEYS = sql`array['content', 'disclosure', 'glossary']`
+const TEXT_KEYS = sql`array['content', 'title', 'disclosure', 'glossary']`
 const goneOwner = (snapshot: SQLWrapper) => {
   const owner = sql`(${snapshot} ->> 'ownerAccountId')`
-  return sql`((${snapshot} ->> 'layer') in ('owner', 'private') and not exists (select 1 from ${accounts}
+  return sql`(${owner} is not null and not exists (select 1 from ${accounts}
     where ${accounts.id} = case when ${owner} ~ ${UUID_TEXT} then ${owner}::uuid end))`
 }
 const scrubbed = (snapshot: SQLWrapper) =>

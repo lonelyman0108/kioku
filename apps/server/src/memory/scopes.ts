@@ -1,5 +1,5 @@
 import type { DreamScope, OriginScope, SubjectKind } from '@kioku/contracts'
-import { and, eq, inArray, sql, type SQL } from 'drizzle-orm'
+import { and, eq, inArray, isNull, sql, type SQL } from 'drizzle-orm'
 
 import type { Tx } from '../db/client'
 import { UUID } from '../db/paging'
@@ -49,20 +49,22 @@ export async function scopeNames(
 
 // ---- Dream 的范围 ----
 // 一次模型调用、一条建议里只放同一个范围的记忆，不把不同成员的私人内容混在一起：
-// 共享的层按层分开（base、各人格 persona:<id>、各应用 app:<id>）；每个成员的画像层与私人层各自一个
-// （owner:<成员>、private:<成员>），关于它们的建议只有本人看得到；对象层与情节层按来源作用域分
-// （talk:<来源作用域>，同一个群、同一个人的私聊里记下的），合并不会把私聊里的事带进群里
+// 共享的归属按类分开（core、各人格 persona:<id>、各应用 app:<id>）；每个成员的本人一个（user:<成员>），
+// 连同他不带会话上下文的会话摘要（同样归这个成员），关于它们的建议只有本人看得到；
+// 联系人的事实与群聊、私聊的会话摘要按来源作用域分（talk:<来源作用域>，同一个群、同一个人的私聊里记下的），
+// 合并不会把私聊里的事带进群里
 
-// 按来源作用域分范围的层（对象层与情节层），范围是 talk:<来源作用域>；别的层的范围和来源作用域无关
+// 来自对话的两类：不归某个成员的按来源作用域分范围，范围是 talk:<来源作用域>
 export const TALK_LAYERS = ['subject', 'episode'] as const
 
-// 一条记忆所在的范围；dreamScopeCondition 是反过来按范围取记忆的条件，两边要对得上。每一层都写明，
-// 没列出的层（以后新加的）没有范围（为空），Dream 不整理它们，不会悄悄并进哪个范围
+// 一条记忆所在的范围；dreamScopeCondition 是反过来按范围取记忆的条件，两边要对得上。每一类都写明，
+// 没列出的（以后新加的）没有范围（为空），Dream 不整理它们，不会悄悄并进哪个范围
 export const DREAM_SCOPE_KEY = sql<string>`(case
-  when ${memories.layer} = 'base' then 'base'
+  when ${memories.layer} = 'core' then 'core'
   when ${memories.layer} = 'persona' then 'persona:' || ${memories.personaId}::text
   when ${memories.layer} = 'app' then 'app:' || ${memories.appId}::text
-  when ${memories.layer} in ('owner', 'private') then ${memories.layer}::text || ':' || ${memories.ownerAccountId}::text
+  when ${memories.layer} in ('user', 'episode') and ${memories.ownerAccountId} is not null
+    then 'user:' || ${memories.ownerAccountId}::text
   when ${inArray(memories.layer, [...TALK_LAYERS])} then 'talk:' || ${memories.originScope} end)`
 
 export type DreamScopeKind = DreamScope['kind']
@@ -71,45 +73,48 @@ export interface ParsedDreamScope {
   kind: DreamScopeKind
   // 人格、应用与成员的 id
   id: string | null
-  // 对象与情节的来源作用域
+  // 联系人的事实与会话摘要的来源作用域
   origin: string | null
 }
 
 // 认不出的为 null
 export function parseDreamScope(key: string): ParsedDreamScope | null {
-  if (key === 'base') return { kind: 'base', id: null, origin: null }
+  if (key === 'core') return { kind: 'core', id: null, origin: null }
   const at = key.indexOf(':')
   if (at < 0) return null
   const kind = key.slice(0, at)
   const rest = key.slice(at + 1)
   if (kind === 'talk') return rest ? { kind, id: null, origin: rest } : null
-  if (kind === 'persona' || kind === 'app' || kind === 'owner' || kind === 'private') {
+  if (kind === 'persona' || kind === 'app' || kind === 'user') {
     return UUID.test(rest) ? { kind, id: rest, origin: null } : null
   }
   return null
 }
 
-// 范围属于哪个成员：画像层与私人层的范围是那个成员的，别的范围为 null
+// 范围属于哪个成员：本人的范围是那个成员的，别的范围为 null
 export function dreamScopeOwner(key: string): string | null {
   const parsed = parseDreamScope(key)
-  return parsed && (parsed.kind === 'owner' || parsed.kind === 'private') ? parsed.id : null
+  return parsed?.kind === 'user' ? parsed.id : null
 }
 
 // 范围里的记忆（只按层与归属，有效与否、敏感级由调用方另加）
 export function dreamScopeCondition(scope: ParsedDreamScope): SQL {
   switch (scope.kind) {
-    case 'base':
-      return eq(memories.layer, 'base')
+    case 'core':
+      return eq(memories.layer, 'core')
     case 'persona':
       return and(eq(memories.layer, 'persona'), eq(memories.personaId, scope.id!))!
     case 'app':
       return and(eq(memories.layer, 'app'), eq(memories.appId, scope.id!))!
-    case 'owner':
-    case 'private':
-      return and(eq(memories.layer, scope.kind), eq(memories.ownerAccountId, scope.id!))!
+    case 'user':
+      return and(
+        inArray(memories.layer, ['user', 'episode']),
+        eq(memories.ownerAccountId, scope.id!),
+      )!
     case 'talk':
       return and(
         inArray(memories.layer, [...TALK_LAYERS]),
+        isNull(memories.ownerAccountId),
         eq(memories.originScope, scope.origin!),
       )!
   }
@@ -145,14 +150,14 @@ export async function dreamScopeNames(
   const names = new Map([...personaRows, ...appRows].map((r) => [r.id, r.name]))
   return (key) => {
     const scope = parseDreamScope(key)
-    if (!scope) return { kind: 'base', id: null, name: null, origin: null }
+    if (!scope) return { kind: 'core', id: null, name: null, origin: null }
     if (scope.kind === 'talk') {
       return { kind: 'talk', id: null, name: null, origin: origins(scope.origin!) }
     }
     if (scope.kind === 'persona' || scope.kind === 'app') {
       return { kind: scope.kind, id: scope.id, name: names.get(scope.id!) ?? null, origin: null }
     }
-    // 画像层与私人层只给本人看，不用带名字
+    // 本人的范围只给本人看，不用带名字
     return { kind: scope.kind, id: null, name: null, origin: null }
   }
 }

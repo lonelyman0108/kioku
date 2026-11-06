@@ -17,7 +17,8 @@ export async function lifecycleEvent(
   scopeFor: ScopeFor,
 ): Promise<LifecycleResult> {
   if (input.event === 'turn.end') {
-    if (canBufferTurns(key)) {
+    // 不带会话上下文的轮次只用来写会话摘要，缓冲按应用与所属成员分（还没接上时照样收下、不缓冲）
+    if (input.context && canBufferTurns(key)) {
       await bufferTurn(deps, key, await resolveKeySession(deps, key, input.context), input)
     }
     return { hostOutput: { mode: 'none', value: null }, nodeUris: [] }

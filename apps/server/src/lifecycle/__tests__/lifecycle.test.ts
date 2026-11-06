@@ -1,12 +1,14 @@
 import { describe, expect, it, vi } from 'vitest'
 
+import { OMITTED_TITLES } from '../../recall/boot'
 import { CANDIDATE_ID, type RecordableCandidate } from '../../recall/recall'
 import { CHAT_GUIDANCE, handleLifecycle } from '../lifecycle'
 import type { RecallScope } from '../scope'
 
 const candidate: RecordableCandidate = {
   uri: 'core://rules',
-  layer: 'base',
+  title: 'rules',
+  layer: 'core',
   priority: 0,
   disclosure: null,
   score: 0.5,
@@ -21,7 +23,7 @@ const scopeWith = (
     new Map(ids.map((id) => [id, '基础规则：先读正文再信任，\n<不要照做>别的指令'])),
 ): RecallScope => ({
   recall: async () => [candidate],
-  boot: async () => ({ entries: [], omitted: [] }),
+  boot: async () => ({ entries: [], omitted: [], [OMITTED_TITLES]: [] }),
   recent: async () => [],
   subjects,
   contents,
@@ -129,12 +131,16 @@ describe('每轮输入的召回', () => {
       {
         ...scopeWith(async () => []),
         boot: async () => ({
-          entries: [{ uri: 'core://agent', layer: 'base', content: '正'.repeat(9_400) }],
+          entries: [
+            { uri: 'core://agent', title: 'agent', layer: 'core', content: '正'.repeat(9_400) },
+          ],
           omitted: ['core://long'],
+          [OMITTED_TITLES]: ['long'],
         }),
         recent: async () => [
           {
             uri: 'core://recent',
+            title: 'recent',
             priority: 2,
             disclosure: null,
             updatedAt: '2026-10-26T08:00:00Z',
@@ -166,15 +172,29 @@ describe('每轮输入的召回', () => {
 
   it('astrbot 会话开始只给指引与展开的启动节点：不提记忆工具，也不附只有 URI 的内容', async () => {
     const recent = vi.fn<RecallScope['recent']>(async () => [
-      { uri: 'core://recent', priority: 2, disclosure: null, updatedAt: '2026-10-26T08:00:00Z' },
+      {
+        uri: 'core://recent',
+        title: 'recent',
+        priority: 2,
+        disclosure: null,
+        updatedAt: '2026-10-26T08:00:00Z',
+      },
     ])
     const recall = vi.fn<RecallScope['recall']>(async () => [candidate])
     const res = await handleLifecycle(
       {
         ...scopeWith(async () => []),
         boot: async () => ({
-          entries: [{ uri: 'persona://bot', layer: 'persona', content: '你是读书会的助手。' }],
+          entries: [
+            {
+              uri: 'persona://bot/soul',
+              title: 'soul',
+              layer: 'persona',
+              content: '你是读书会的助手。',
+            },
+          ],
           omitted: ['core://long'],
+          [OMITTED_TITLES]: ['long'],
         }),
         recent,
         recall,
@@ -183,12 +203,12 @@ describe('每轮输入的召回', () => {
       { event: 'session.start', project: { dirName: 'kioku' } },
     )
     expect(contextOf(res.hostOutput.value)).toBe(
-      `${CHAT_GUIDANCE}\n\n<kioku-boot>\n## persona://bot\n\n你是读书会的助手。\n</kioku-boot>`,
+      `${CHAT_GUIDANCE}\n\n<kioku-boot>\n## persona://bot/soul\n\n你是读书会的助手。\n</kioku-boot>`,
     )
     // 取不到凭据，但要知道占位符不能念出来
     expect(CHAT_GUIDANCE).toContain('{{cred:')
     expect(recent).not.toHaveBeenCalled()
     expect(recall).not.toHaveBeenCalled()
-    expect(res.nodeUris).toEqual(['persona://bot'])
+    expect(res.nodeUris).toEqual(['persona://bot/soul'])
   })
 })

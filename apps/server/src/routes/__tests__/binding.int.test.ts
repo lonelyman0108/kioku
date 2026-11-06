@@ -301,7 +301,14 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
     expect(merged.facts.map((f) => [f.content, f.scope.kind, f.scope.id])).toEqual([
       ['住在上海', 'direct', a],
     ])
-    expect(merged.summaries.map((s) => s.content)).toEqual(['私聊里聊了上海'])
+    // 私聊里的会话摘要跟着并过来
+    const [summary] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .select({ originScope: memories.originScope })
+        .from(memories)
+        .where(eq(memories.content, '私聊里聊了上海')),
+    )
+    expect(summary!.originScope).toBe(`direct:${a}`)
     // 缓冲里还没抽取的对话跟过来，按合并后的批次排抽取
     expect(queued).toEqual([{ scope: `direct:${a}`, delay: 600 }])
     // 合并后用哪个平台账号私聊，都读得到私聊里记下的

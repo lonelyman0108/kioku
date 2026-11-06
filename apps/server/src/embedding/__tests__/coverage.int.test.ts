@@ -48,11 +48,12 @@ describe.skipIf(!testDatabaseUrl)('实例的向量覆盖率', () => {
         const curated = (path: string, extra: Partial<typeof memories.$inferInsert> = {}) => ({
           spaceId: space.id,
           form: 'curated' as const,
-          layer: 'base' as const,
+          layer: 'core' as const,
           sensitivity: 'private' as const,
           provenance: 'owner' as const,
           domain: 'core',
           path,
+          title: path,
           content: `${path} 的正文`,
           ...extra,
         })

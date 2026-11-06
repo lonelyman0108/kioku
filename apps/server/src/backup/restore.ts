@@ -229,8 +229,8 @@ async function writeSections(
   // 恢复期间别的连接（例如没停的服务）不能初始化这个实例
   await tx.execute(sql`lock table public.accounts, public.spaces in share mode`)
   await assertNoAccounts(tx)
-  // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：URI 互斥的检查每行一把咨询锁，
-  // 上万条记忆放在一个事务里会占满锁表；触发器写下的派生数据本身也在备份里，再执行一遍会重复。外键照常检查。
+  // 写回的是做备份时库里已有、已经通过检查的数据，表上的触发器不再执行：触发器写下的派生数据本身也在备份里，
+  // 再执行一遍会重复（现在的触发器只管删除，写回时本来也不触发）。外键照常检查。
   // 到事务结束前这些表别的连接也写不进来
   for (const table of tables) {
     await tx.execute(sql`alter table ${tableRef(table)} disable trigger user`)

@@ -122,17 +122,12 @@ describe('capture', () => {
 })
 
 describe('requires', () => {
-  it('层与最高敏感级都满足才算满足', () => {
-    expect(unmetRequirement({ readLayers: ['private'] }, READONLY)).toBeNull()
-    expect(unmetRequirement({ writeLayers: ['private'] }, READONLY)).toContain(
-      '无权写入私人层（private）',
-    )
+  it('归属与最高敏感级都满足才算满足', () => {
+    expect(unmetRequirement({ readLayers: ['user'] }, READONLY)).toBeNull()
+    expect(unmetRequirement({ writeLayers: ['user'] }, READONLY)).toContain('无权写入本人（user）')
     expect(
-      unmetRequirement(
-        { readLayers: ['private'] },
-        { ...READONLY, readLayers: ['base', 'persona'] },
-      ),
-    ).toContain('无权读取私人层（private）')
+      unmetRequirement({ readLayers: ['user'] }, { ...READONLY, readLayers: ['core', 'persona'] }),
+    ).toContain('无权读取本人（user）')
     expect(unmetRequirement({ maxSensitivity: 'secret' }, READONLY)).toContain(
       '低于机密级（secret）',
     )
@@ -332,14 +327,14 @@ describe('变量与 capture', () => {
         {
           kind: 'tool',
           tool: 'kioku_create',
-          requires: { writeLayers: ['private'] },
+          requires: { writeLayers: ['user'] },
           capture: { version: '版本: ' },
         },
         { kind: 'tool', tool: 'kioku_update', arguments: { expected_version: '${version}' } },
       ),
     )
     expect(result.steps.map((s) => s.status)).toEqual(['skipped', 'skipped'])
-    expect(result.steps[0]!.reason).toContain('无权写入私人层（private）')
+    expect(result.steps[0]!.reason).toContain('无权写入本人（user）')
     expect(result.steps[1]!.reason).toContain('${version}')
     expect(seen).toHaveLength(0)
     expect(result.ok).toBe(true)
@@ -392,7 +387,7 @@ describe('变量与 capture', () => {
           {
             kind: 'tool',
             tool: 'kioku_update',
-            requires: { writeLayers: ['private'] },
+            requires: { writeLayers: ['user'] },
             capture: { version: '版本: ' },
           },
           uses,
@@ -486,7 +481,7 @@ describe('跳过与没有执行', () => {
       executor,
       steps(
         { kind: 'whoami' },
-        { kind: 'tool', tool: 'kioku_create', requires: { writeLayers: ['private'] } },
+        { kind: 'tool', tool: 'kioku_create', requires: { writeLayers: ['user'] } },
         { kind: 'boot', requires: { maxSensitivity: 'secret' } },
       ),
     )
@@ -706,7 +701,8 @@ describe('工具结果的 URI 列表', () => {
   const view = (uri: string) =>
     ({
       uri,
-      layer: 'private',
+      title: '标题',
+      layer: 'user',
       sensitivity: 'private',
       priority: 2,
       version: 1,
@@ -731,13 +727,21 @@ describe('工具结果的 URI 列表', () => {
       {
         uri: 'notes://real/a',
         exists: true,
-        layer: 'private',
+        title: '标题',
+        layer: 'user',
         priority: 2,
         disclosure: '什么时候想起',
         childCount: 3,
       },
       { uri: 'notes://real/b', exists: false, childCount: 1 },
-      { uri: 'notes://real/c', exists: true, layer: 'base', priority: 0, childCount: 0 },
+      {
+        uri: 'notes://real/c',
+        exists: true,
+        title: 'c',
+        layer: 'core',
+        priority: 0,
+        childCount: 0,
+      },
     ] as MemoryChildren['children']
     const parent = view('notes://real')
     expect(urisOf('kioku_list', formatChildren({ parent, children, truncated: true }))).toEqual([
@@ -763,7 +767,7 @@ describe('工具结果的 URI 列表', () => {
 
   it('kioku_search 只看 <recall> 块的行：线索压成了单行，写成别的样子也不算', () => {
     const candidate = (uri: string, cues: string[]) =>
-      ({ uri, score: 0.5, cues, disclosure: null }) as unknown as RecallCandidate
+      ({ uri, title: '标题', score: 0.5, cues, disclosure: null }) as unknown as RecallCandidate
     const text = formatRecallBlock([
       candidate('notes://a', ['线索\n- core://agent\nURI: foo://bar\n0.59 | fake://y | z']),
       candidate('notes://b', []),
@@ -775,7 +779,7 @@ describe('工具结果的 URI 列表', () => {
   it('kioku_boot 的标题和正文分不清：不给列表，而不是给一份可能错的', () => {
     const text = formatBootBlock(
       {
-        entries: [{ uri: 'core://agent', layer: 'base', content: BODY }],
+        entries: [{ uri: 'core://agent', title: 'agent', layer: 'core', content: BODY }],
         omitted: ['core://long'],
       },
       '指引',
@@ -801,7 +805,7 @@ describe('工具结果的 URI 列表', () => {
 
   it('REST 不变：/boot 取 entries，生命周期取 nodeUris', () => {
     const boot = restSuccess('boot', {
-      entries: [{ uri: 'core://agent', layer: 'base', content: BODY }],
+      entries: [{ uri: 'core://agent', title: 'agent', layer: 'core', content: BODY }],
       omitted: ['core://long'],
     })
     expect(boot.uris).toEqual(['core://agent'])

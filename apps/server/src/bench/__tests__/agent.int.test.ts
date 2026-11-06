@@ -46,8 +46,8 @@ const USER = { role: 'user', content: '你好' }
 // 等着模型的用例：里面按断言等几秒，要比这些等待长，等不到时才是断言失败而不是用例超时
 const WAITING_TIMEOUT = 15_000
 const MEMBER_SCOPES = {
-  readLayers: ['private'],
-  writeLayers: ['private'],
+  readLayers: ['user'],
+  writeLayers: ['user'],
   maxSensitivity: 'private',
   admin: false,
 }
@@ -1000,7 +1000,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       await startModel(() => ({
         content: null,
         reasoning_content: '想',
-        tool_calls: [toolCall('c', 'kioku_create', { uri: 'notes://x', content: '不会写' })],
+        tool_calls: [toolCall('c', 'kioku_create', { uri: 'user://notes/x', content: '不会写' })],
       }))
       const before = await tableDigests(database, ws.spaceId)
       await turn({ messages: [USER] })
@@ -1055,7 +1055,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
   describe('和运行接口串起来', () => {
     const seedSecrets = async () => {
       const created = await realTool('kioku_create', {
-        uri: 'notes://safe',
+        uri: 'user://notes/safe',
         content: SECRET_BODY,
         sensitivity: 'secret',
       })
@@ -1074,7 +1074,9 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
       )
       expect(credential.ok).toBe(true)
       // 对照：真实的接口读得到明文，下面没有明文不是因为没读到
-      expect((await realTool('kioku_get', { uri: 'notes://safe' })).text).toContain(SECRET_BODY)
+      expect((await realTool('kioku_get', { uri: 'user://notes/safe' })).text).toContain(
+        SECRET_BODY,
+      )
       expect((await realTool('kioku_credential', { identifier: 'nas' })).text).toContain(
         HOSTED_VALUE,
       )
@@ -1090,7 +1092,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
             : {
                 content: null,
                 tool_calls: [
-                  toolCall('get', 'kioku_get', { uri: 'notes://safe' }),
+                  toolCall('get', 'kioku_get', { uri: 'user://notes/safe' }),
                   toolCall('cred', 'kioku_credential', { identifier: 'nas' }),
                 ],
               },
@@ -1107,7 +1109,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
         expect(output).not.toContain(HOSTED_VALUE)
         // 工具确实跑了，结果是打过码的
         expect(result.steps[0]!.text).toContain('敏感级: secret')
-        expect(result.steps[0]!.text).toContain('notes://safe')
+        expect(result.steps[0]!.text).toContain('user://notes/safe')
         expect(result.steps[1]!.text).toContain('password')
 
         const history = [
@@ -1125,7 +1127,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
     )
 
     it('回滚模式跨轮：第一轮写的，第二轮带重放读得到，模型收到结果，库里没有留下', async () => {
-      const uri = 'notes://agent-made'
+      const uri = 'user://notes/agent-made'
       const body = '模型第一轮写下的内容'
       const server = await startModel((messages) => {
         const answered = messages.filter((m) => m.role === 'tool').length

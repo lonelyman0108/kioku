@@ -822,7 +822,9 @@ export const extractionRuns = pgTable(
     appId: uuid().notNull(),
     // 这一批的来源作用域，见 conversation_turns.scope
     scope: text().notNull(),
-    // 这一批涉及的对象（发言人与群），对象页按它找抽取记录
+    // 这一批是哪个会话的：会话详情按它找抽取记录。会话删掉时置空，记录留到保留期
+    conversationId: uuid(),
+    // 这一批涉及的联系人（发言人与群），联系人详情按它找抽取记录
     subjectIds: uuid().array().notNull(),
     // 给模型看了几轮；写入它们的 Key 吊销、作废或写不了的那几轮没给模型看，单独计数，随这一批删掉
     turns: integer().notNull(),
@@ -847,9 +849,18 @@ export const extractionRuns = pgTable(
   (t) => [
     index().on(t.spaceId, t.createdAt),
     index().using('gin', t.subjectIds),
+    index('extraction_runs_conversation_idx')
+      .on(t.conversationId, t.createdAt)
+      .where(sql`${t.conversationId} is not null`),
     foreignKey({ columns: [t.spaceId, t.appId], foreignColumns: [apps.spaceId, apps.id] }).onDelete(
       'cascade',
     ),
+    // 和记忆指向会话的外键一样，迁移里手写成 ON DELETE SET NULL ("conversation_id")，只置空这一列
+    foreignKey({
+      name: 'extraction_runs_conversation_fk',
+      columns: [t.spaceId, t.conversationId],
+      foreignColumns: [conversations.spaceId, conversations.id],
+    }).onDelete('set null'),
   ],
 )
 

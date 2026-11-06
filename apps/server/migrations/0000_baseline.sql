@@ -1,5 +1,5 @@
 -- 迁移基线：表、类型、约束与索引由 drizzle-kit 按 src/db/schema.ts 生成，生成不了的几处手写在这里（文件开头的全文检索配置、
--- 外键 memories_conversation_fk 的动作，以及文件末尾的行级安全、触发器与默认设置）。
+-- 指向会话的两条外键 memories_conversation_fk、extraction_runs_conversation_fk 的动作，以及文件末尾的行级安全、触发器与默认设置）。
 --
 -- 中文全文检索配置：zhparser 扩展由数据库初始化脚本以超级用户安装，这里只建配置。memories.fts 是用它的生成列，
 -- 所以要在建表之前
@@ -211,6 +211,7 @@ CREATE TABLE "extraction_runs" (
 	"space_id" uuid NOT NULL,
 	"app_id" uuid NOT NULL,
 	"scope" text NOT NULL,
+	"conversation_id" uuid,
 	"subject_ids" uuid[] NOT NULL,
 	"turns" integer NOT NULL,
 	"skipped_turns" integer DEFAULT 0 NOT NULL,
@@ -503,13 +504,15 @@ ALTER TABLE "dream_suggestions" ADD CONSTRAINT "dream_suggestions_owner_account_
 ALTER TABLE "dream_suggestions" ADD CONSTRAINT "dream_suggestions_decided_by_accounts_id_fk" FOREIGN KEY ("decided_by") REFERENCES "public"."accounts"("id") ON DELETE set null ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "extraction_runs" ADD CONSTRAINT "extraction_runs_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "extraction_runs" ADD CONSTRAINT "extraction_runs_space_id_app_id_apps_space_id_id_fk" FOREIGN KEY ("space_id","app_id") REFERENCES "public"."apps"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
+-- 和 memories_conversation_fk 一样只置空 conversation_id：抽取记录留到保留期
+ALTER TABLE "extraction_runs" ADD CONSTRAINT "extraction_runs_conversation_fk" FOREIGN KEY ("space_id","conversation_id") REFERENCES "public"."conversations"("space_id","id") ON DELETE SET NULL ("conversation_id") ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_owner_account_id_accounts_id_fk" FOREIGN KEY ("owner_account_id") REFERENCES "public"."accounts"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_space_id_persona_id_personas_space_id_id_fk" FOREIGN KEY ("space_id","persona_id") REFERENCES "public"."personas"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_space_id_app_id_apps_space_id_id_fk" FOREIGN KEY ("space_id","app_id") REFERENCES "public"."apps"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memories" ADD CONSTRAINT "memories_space_id_subject_id_subjects_space_id_id_fk" FOREIGN KEY ("space_id","subject_id") REFERENCES "public"."subjects"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 -- 删掉会话时只把 conversation_id 置空、space_id 不动（drizzle 生成的 SET NULL 不带列名，会把两列都置空）。
--- 会话摘要在会话删掉之前就由下面的触发器删掉了，这里只剩在这个会话里听到的联系人事实
+-- 会话摘要在会话删掉之前就由文件末尾的触发器删掉了，这里只剩在这个会话里听到的联系人事实
 ALTER TABLE "memories" ADD CONSTRAINT "memories_conversation_fk" FOREIGN KEY ("space_id","conversation_id") REFERENCES "public"."conversations"("space_id","id") ON DELETE SET NULL ("conversation_id") ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memory_credential_refs" ADD CONSTRAINT "memory_credential_refs_space_id_spaces_id_fk" FOREIGN KEY ("space_id") REFERENCES "public"."spaces"("id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
 ALTER TABLE "memory_credential_refs" ADD CONSTRAINT "memory_credential_refs_memory_fk" FOREIGN KEY ("space_id","memory_id") REFERENCES "public"."memories"("space_id","id") ON DELETE cascade ON UPDATE no action;--> statement-breakpoint
@@ -565,6 +568,7 @@ CREATE UNIQUE INDEX "dream_suggestions_fingerprint_idx" ON "dream_suggestions" U
 CREATE INDEX "dream_suggestions_space_id_status_created_at_index" ON "dream_suggestions" USING btree ("space_id","status","created_at");--> statement-breakpoint
 CREATE INDEX "extraction_runs_space_id_created_at_index" ON "extraction_runs" USING btree ("space_id","created_at");--> statement-breakpoint
 CREATE INDEX "extraction_runs_subject_ids_index" ON "extraction_runs" USING gin ("subject_ids");--> statement-breakpoint
+CREATE INDEX "extraction_runs_conversation_idx" ON "extraction_runs" USING btree ("conversation_id","created_at") WHERE "extraction_runs"."conversation_id" is not null;--> statement-breakpoint
 CREATE INDEX "login_attempts_reset_at_index" ON "login_attempts" USING btree ("reset_at");--> statement-breakpoint
 CREATE INDEX "memories_fts_idx" ON "memories" USING gin ("fts");--> statement-breakpoint
 CREATE UNIQUE INDEX "memories_uri_live_idx" ON "memories" USING btree ("space_id","domain","path",coalesce("owner_account_id", '00000000-0000-0000-0000-000000000000'::uuid)) WHERE "memories"."deleted_at" is null;--> statement-breakpoint

@@ -115,23 +115,23 @@ describe.skipIf(!testDatabaseUrl)('明文凭据提醒', () => {
         jsonRequest('PATCH', { uri, sensitivity: 'private' }, { cookie: ws.cookie }),
       )
     }
-    expect((await lower('notes://real', '密码：***hunter2***')).status).toBe(400)
-    expect((await lower('notes://prefix', '密码：***x')).status).toBe(400)
-    expect((await lower('notes://masked', '密码：***')).status).toBe(200)
-    expect((await lower('notes://quoted', 'password: "***"')).status).toBe(200)
+    expect((await lower('user://notes/real', '密码：***hunter2***')).status).toBe(400)
+    expect((await lower('user://notes/prefix', '密码：***x')).status).toBe(400)
+    expect((await lower('user://notes/masked', '密码：***')).status).toBe(200)
+    expect((await lower('user://notes/quoted', 'password: "***"')).status).toBe(200)
   })
 
   it('概览数出像有明文凭据的记忆，列表能按它筛选；secret 的正文是密文，不算', async () => {
-    await create({ uri: 'notes://wifi', content: '访客网络密码：guest-1234' })
-    await create({ uri: 'core://api', content: 'token = abc123', layer: 'base' })
-    await create({ uri: 'notes://ok', content: '密码放在密码库里，用到时再取' })
-    await create({ uri: 'notes://vault', content: '密码：hunter2', sensitivity: 'secret' })
+    await create({ uri: 'user://notes/wifi', content: '访客网络密码：guest-1234' })
+    await create({ uri: 'core://api', content: 'token = abc123' })
+    await create({ uri: 'user://notes/ok', content: '密码放在密码库里，用到时再取' })
+    await create({ uri: 'user://notes/vault', content: '密码：hunter2', sensitivity: 'secret' })
 
     const overview = await get<SpaceOverview>('/overview')
     expect(overview.plaintextCredentials).toBe(2)
     const hits = await get<MemoryList>('/memories/list?plaintext=true&sort=uri')
-    expect(hits.items.map((m) => m.uri)).toEqual(['core://api', 'notes://wifi'])
+    expect(hits.items.map((m) => m.uri)).toEqual(['core://api', 'user://notes/wifi'])
     const rest = await get<MemoryList>('/memories/list?plaintext=false&sort=uri')
-    expect(rest.items.map((m) => m.uri)).toEqual(['notes://ok', 'notes://vault'])
+    expect(rest.items.map((m) => m.uri)).toEqual(['user://notes/ok', 'user://notes/vault'])
   })
 })

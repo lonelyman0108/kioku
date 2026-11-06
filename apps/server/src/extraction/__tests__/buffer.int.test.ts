@@ -99,11 +99,11 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
     (await identities()).find((r) => r.kind === kind && r.externalId === externalId)!.subjectId
   const batch = (scope: string): BufferedSession => ({ spaceId: ws.spaceId, appId, scope })
 
-  it('格式不对返回 400：要带会话、私聊群聊或频道的上下文，群里要带发言人', async () => {
+  it('格式不对返回 400：要带会话标识，定时任务与子 agent 的不收，群里要带发言人', async () => {
     for (const body of [
       { context: direct(), user: '你好', reply: '你好呀' },
-      { sessionId: 's1', user: '你好', reply: '你好呀' },
       { sessionId: 's1', context: { chatType: 'cron' }, user: '你好', reply: '你好呀' },
+      { sessionId: 's1', context: { chatType: 'subagent' }, user: '你好', reply: '你好呀' },
       {
         sessionId: 's1',
         context: { chatType: 'group', platform: 'qq', group: { id: '2001' } },
@@ -188,7 +188,7 @@ describe.skipIf(!testDatabaseUrl)('会话缓冲', () => {
 
   it('Key 写不了对象层与情节层时不缓冲，也不解析会话、不建对象', async () => {
     const readOnly = await ws.issueKey(appId, { ...FULL_SCOPES, writeLayers: [] })
-    const privateOnly = await ws.issueKey(appId, { ...FULL_SCOPES, writeLayers: ['private'] })
+    const privateOnly = await ws.issueKey(appId, { ...FULL_SCOPES, writeLayers: ['user'] })
     for (const k of [readOnly, privateOnly]) {
       const res = await turnEnd({ sessionId: 's', context: group(), user: '你好', reply: '嗯' }, k)
       expect(res.status).toBe(200)

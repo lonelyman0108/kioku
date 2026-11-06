@@ -173,7 +173,7 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       )
     })
 
-    it('有应用在用、被别的人格继承、或还有人格层记忆（含已删除的）时删不掉', async () => {
+    it('有应用在用、被别的人格继承、或还有这个人格的记忆（含已删除的）时删不掉', async () => {
       const used = await ws.createPersona('used')
       await ws.createApp('bot', { defaultPersonaId: used.id })
       const inherited = await ws.createPersona('inherited')
@@ -185,7 +185,7 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       for (const [persona, reason] of [
         [used, '应用'],
         [inherited, '继承'],
-        [remembered, '人格层记忆'],
+        [remembered, '这个人格的记忆'],
       ] as const) {
         const res = await as('DELETE', `/personas/${persona.id}`)
         expect(res.status).toBe(409)
@@ -257,13 +257,13 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       const res = await as('DELETE', `/personas/${persona.id}`, undefined, editor.cookie)
       expect(res.status).toBe(409)
       const error = await errorOf(res)
-      expect(error).toContain('人格层记忆')
+      expect(error).toContain('这个人格的记忆')
       expect(error).not.toMatch(/\d/)
     })
   })
 
   describe('应用', () => {
-    it('还有应用层记忆（含已删除的）时删不掉；删掉之后它的 Key 失效', async () => {
+    it('还有这个应用的记忆（含已删除的）时删不掉；删掉之后它的 Key 失效', async () => {
       const bot = await ws.createApp('bot')
       const key = await ws.issueKey(bot.id)
       await createMemory({ uri: 'app://bot/rules', content: '群规' })
@@ -271,7 +271,7 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
       const blocked = await as('DELETE', `/apps/${bot.id}`)
       expect(blocked.status).toBe(409)
       const error = await errorOf(blocked)
-      expect(error).toContain('应用层记忆')
+      expect(error).toContain('这个应用的记忆')
       expect(error).not.toMatch(/\d/)
 
       const other = await ws.createApp('other')
@@ -371,17 +371,21 @@ describe.skipIf(!testDatabaseUrl)('人格、应用与 Key 的管理', () => {
         ['group', 'group'],
         ['cron', 'app'],
       ])
-      expect(cell('none', 'private', 'private')).toMatchObject({ read: 'recall', write: true })
-      expect(cell('none', 'private', 'secret')).toMatchObject({ read: 'explicit', write: true })
+      expect(cell('none', 'user', 'private')).toMatchObject({ read: 'recall', write: true })
+      expect(cell('none', 'user', 'secret')).toMatchObject({ read: 'explicit', write: true })
+      // 本人不设公开：那一格读写都没有
+      expect(cell('none', 'user', 'public')).toMatchObject({ read: 'none', write: false })
       expect(cell('none', 'persona', 'public')).toMatchObject({ read: 'recall', write: true })
-      expect(cell('group', 'private', 'public')).toMatchObject({ read: 'none', write: false })
-      expect(cell('group', 'base', 'public')).toMatchObject({ read: 'recall', write: false })
-      expect(cell('group', 'base', 'internal').read).toBe('none')
+      expect(cell('group', 'user', 'internal')).toMatchObject({ read: 'none', write: false })
+      expect(cell('group', 'core', 'public')).toMatchObject({ read: 'recall', write: false })
+      expect(cell('group', 'core', 'internal').read).toBe('none')
       expect(cell('group', 'subject', 'public')).toMatchObject({ read: 'recall', write: true })
-      expect(cell('direct', 'owner', 'public').read).toBe('none')
-      expect(cell('owner_direct', 'owner', 'internal').read).toBe('recall')
-      expect(cell('cron', 'base', 'internal')).toMatchObject({ read: 'recall', write: true })
-      expect(cell('cron', 'owner', 'public').read).toBe('none')
+      expect(cell('direct', 'user', 'internal').read).toBe('none')
+      // 开启「本人私聊时读取本人记忆」：读得到本人的内部记忆，私密的仍然读不到
+      expect(cell('owner_direct', 'user', 'internal').read).toBe('recall')
+      expect(cell('owner_direct', 'user', 'private').read).toBe('none')
+      expect(cell('cron', 'core', 'internal')).toMatchObject({ read: 'recall', write: true })
+      expect(cell('cron', 'user', 'internal').read).toBe('none')
     })
 
     it('矩阵只给应用主人与空间 owner；作废的 Key 返回 404', async () => {

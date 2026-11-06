@@ -136,13 +136,13 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     it(
       '全部通过时退出码 0，默认只输出步骤名与通过与否，不打印正文；--show-output 才打印',
       async () => {
-        await realCreate({ uri: 'notes://x', content: BODY })
+        await realCreate({ uri: 'user://notes/x', content: BODY })
         const file = await scenarioFile([
           {
             kind: 'tool',
             label: '读那条记忆',
             tool: 'kioku_get',
-            arguments: { uri: 'notes://x' },
+            arguments: { uri: 'user://notes/x' },
             expect: { error: false, contains: [BODY] },
           },
         ])
@@ -165,13 +165,13 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     it(
       '有失败时退出码 1，只输出失败的断言，不打印实际结果',
       async () => {
-        await realCreate({ uri: 'notes://x', content: BODY })
+        await realCreate({ uri: 'user://notes/x', content: BODY })
         const file = await scenarioFile([
           {
             kind: 'tool',
             label: '断言不成立',
             tool: 'kioku_get',
-            arguments: { uri: 'notes://x' },
+            arguments: { uri: 'user://notes/x' },
             expect: { contains: ['没有这句话'] },
           },
           { kind: 'whoami', label: '后面照常跑' },
@@ -275,7 +275,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
       '跳过不算失败',
       async () => {
         const low = await ws.createKey((await ws.createApp('low')).id, {
-          readLayers: ['base'],
+          readLayers: ['core'],
           writeLayers: [],
           maxSensitivity: 'public',
           admin: false,
@@ -295,7 +295,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
       '权限探测只列结果：被拒的步骤显示报错，不显示通过，也不算进通过；退出码 0',
       async () => {
         const low = await ws.createKey((await ws.createApp('low')).id, {
-          readLayers: ['base'],
+          readLayers: ['core'],
           writeLayers: [],
           maxSensitivity: 'public',
           admin: false,
@@ -463,13 +463,13 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
     describe('运行前判不出来的：event、chatType 写成变量', () => {
       // 只读的一步取到变量；group 的上下文第一次见到时新建对象，能看出真的写了
       const scenario = async (step: unknown) => {
-        await realCreate({ uri: 'notes://vars', content: '事件: turn.end\n会话: group' })
+        await realCreate({ uri: 'user://notes/vars', content: '事件: turn.end\n会话: group' })
         return scenarioFile([
           {
             kind: 'tool',
             label: '取变量',
             tool: 'kioku_get',
-            arguments: { uri: 'notes://vars' },
+            arguments: { uri: 'user://notes/vars' },
             capture: { e: '事件: ', c: '会话: ' },
           },
           step,
@@ -539,12 +539,12 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
       it(
         '展开之后不写的照常执行：cron 上下文',
         async () => {
-          await realCreate({ uri: 'notes://vars', content: '会话: cron' })
+          await realCreate({ uri: 'user://notes/vars', content: '会话: cron' })
           const file = await scenarioFile([
             {
               kind: 'tool',
               tool: 'kioku_get',
-              arguments: { uri: 'notes://vars' },
+              arguments: { uri: 'user://notes/vars' },
               capture: { c: '会话: ' },
             },
             {
@@ -629,12 +629,11 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
         await realCreate({
           uri: 'core://agent',
           content: '钩子要注入的启动节点',
-          layer: 'base',
           sensitivity: 'public',
           priority: 0,
         })
         await realCreate({
-          uri: 'notes://hook',
+          uri: 'user://notes/hook',
           content: '召回用的记忆',
           glossary: ['钩子关键词'],
         })
@@ -679,7 +678,7 @@ describe.skipIf(!testDatabaseUrl)('命令行', () => {
           const prompt = '钩子关键词是什么'
           const submitted = await hook('prompt.submit', { session_id: sessionId, prompt })
           expect(submitted.hookSpecificOutput.hookEventName).toBe('UserPromptSubmit')
-          expect(submitted.hookSpecificOutput.additionalContext).toContain('notes://hook')
+          expect(submitted.hookSpecificOutput.additionalContext).toContain('user://notes/hook')
           expect(submitted.hookSpecificOutput.additionalContext).toBe(
             await benched({ event: 'prompt.submit', sessionId, prompt }),
           )

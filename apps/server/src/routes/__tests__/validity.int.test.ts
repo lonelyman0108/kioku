@@ -18,7 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vites
 
 import { consoleAccess } from '../../access/access'
 import { createApp } from '../../app'
-import { isUniqueViolation, withSpace, type Database } from '../../db/client'
+import { withSpace, type Database } from '../../db/client'
 import {
   conversationTurns,
   memories,
@@ -183,7 +183,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       // 带时区的写法，存下来是同一个时刻
       const local = new Date(until.getTime() + 8 * 3_600_000).toISOString().replace('Z', '+08:00')
       const m = await ok<MemoryView>(
-        await keyCreate({ uri: 'trip://plan', content: '下周出差', validTo: local }),
+        await keyCreate({ uri: 'user://trip/plan', content: '下周出差', validTo: local }),
         201,
       )
       expect(m.validTo).toBe(until.toISOString())
@@ -202,13 +202,13 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       // 管理界面新建时也能设，列表里带着它
       const soon = inDays(1)
       await ok<MemoryView>(
-        await create({ uri: 'trip://visa', content: '签证', validTo: soon }),
+        await create({ uri: 'user://trip/visa', content: '签证', validTo: soon }),
         201,
       )
       const items = (await ok<MemoryList>(await list('/memories/list?sort=uri'))).items
       expect(items.map((i) => [i.uri, i.validTo])).toEqual([
-        ['trip://plan', null],
-        ['trip://visa', soon],
+        ['user://trip/plan', null],
+        ['user://trip/visa', soon],
       ])
 
       const h = await history(m.id)
@@ -227,7 +227,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('修改时原样带回没改过的有效到不检查：在最后一分钟里改别的字段照样成功，换成别的近时间照样拒绝', async () => {
       const m = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://last', content: '旧的', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/last', content: '旧的', validTo: inDays(1) }),
         201,
       )
       // 只剩半分钟（接口不收这么近的时间，直接改库）
@@ -253,27 +253,32 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       const soon = new Date(Date.now() + 30_000).toISOString()
       for (const validTo of [past, soon]) {
         expect(
-          await errorOf(await keyCreate({ uri: 'a://b', content: 'x', validTo }), 400),
+          await errorOf(await keyCreate({ uri: 'user://a/b', content: 'x', validTo }), 400),
         ).toContain('晚于当前时间至少一分钟')
-        expect(await errorOf(await create({ uri: 'a://b', content: 'x', validTo }), 400)).toContain(
-          '晚于当前时间至少一分钟',
-        )
+        expect(
+          await errorOf(await create({ uri: 'user://a/b', content: 'x', validTo }), 400),
+        ).toContain('晚于当前时间至少一分钟')
       }
       // 不带时区的时间说不清是哪个时刻
       expect(
-        (await keyCreate({ uri: 'a://b', content: 'x', validTo: '2030-01-01T00:00:00' })).status,
+        (await keyCreate({ uri: 'user://a/b', content: 'x', validTo: '2030-01-01T00:00:00' }))
+          .status,
       ).toBe(400)
-      expect((await keyGet('a://b')).status).toBe(404)
+      expect((await keyGet('user://a/b')).status).toBe(404)
       // 两分钟之后的可以
       const later = new Date(Date.now() + 120_000).toISOString()
       expect(
-        (await ok<MemoryView>(await keyCreate({ uri: 'a://c', content: 'y', validTo: later }), 201))
-          .validTo,
+        (
+          await ok<MemoryView>(
+            await keyCreate({ uri: 'user://a/c', content: 'y', validTo: later }),
+            201,
+          )
+        ).validTo,
       ).toBe(later)
 
       const until = inDays(2)
       const m = await ok<MemoryView>(
-        await keyCreate({ uri: 'a://b', content: 'x', validTo: until }),
+        await keyCreate({ uri: 'user://a/b', content: 'x', validTo: until }),
         201,
       )
       expect(await errorOf(await keyPatch({ uri: m.uri, validTo: past }), 400)).toContain(
@@ -331,13 +336,13 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('让出 URI 时，读到之后被别的事务重新生效的记录不会被软删除', async () => {
       const old = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://race', content: '旧的', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/race', content: '旧的', validTo: inDays(1) }),
         201,
       )
       await expire(old.id)
       const res = await whileBlocking(
         (tx) => tx`select id from memories where id = ${old.id} for update`,
-        () => keyCreate({ uri: 'notes://race', content: '新的' }),
+        () => keyCreate({ uri: 'user://notes/race', content: '新的' }),
         // 新建等在让出这一条的行锁上时，另一个事务让它重新生效
         (tx) => tx`update memories set valid_to = null where id = ${old.id}`,
       )
@@ -348,7 +353,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('重新生效先锁住这一行再判断：等锁期间被让出、新记录占了 URI 时按现在的状态返回 409，不会报成功', async () => {
       const m = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://race2', content: '过期的', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/race2', content: '过期的', validTo: inDays(1) }),
         201,
       )
       await expire(m.id)
@@ -358,8 +363,8 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         // 重新生效等在这一行的锁上时，另一次写入让出了它（软删除，版本号不变）、在这个 URI 上写了新的
         async (tx) => {
           await tx`update memories set deleted_at = now() where id = ${m.id}`
-          await tx`insert into memories (space_id, form, layer, sensitivity, provenance, owner_account_id, domain, path, content)
-            values (${ws.spaceId}, 'curated', 'private', 'private', 'agent', ${ws.accountId}, 'notes', 'race2', '新的')`
+          await tx`insert into memories (space_id, form, layer, sensitivity, provenance, owner_account_id, domain, path, title, content)
+            values (${ws.spaceId}, 'curated', 'user', 'private', 'agent', ${ws.accountId}, 'user', 'notes/race2', 'race2', '新的')`
         },
       )
       expect(await errorOf(res, 409)).toBe('URI 已被占用。移走或删除占用它的记忆后可恢复生效。')
@@ -370,7 +375,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('重新生效时版本号和锁到的那一版比：等锁期间被改过的返回版本已变化', async () => {
       const m = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://race3', content: '过期的', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/race3', content: '过期的', validTo: inDays(1) }),
         201,
       )
       await expire(m.id)
@@ -387,13 +392,13 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('让出 URI 时锁住候选行，事件里的「改前」是锁到的那一版', async () => {
       const old = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://snap', content: '第一版', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/snap', content: '第一版', validTo: inDays(1) }),
         201,
       )
       await expire(old.id)
       const res = await whileBlocking(
         (tx) => tx`select id from memories where id = ${old.id} for update`,
-        () => keyCreate({ uri: 'notes://snap', content: '新的' }),
+        () => keyCreate({ uri: 'user://notes/snap', content: '新的' }),
         // 新建等在这一行的锁上时，它被改过（仍然过期）
         (tx) =>
           tx`update memories set content = '改过的', version = version + 1 where id = ${old.id}`,
@@ -404,35 +409,28 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
     })
 
     it('重新生效时被别的写入锁着的候选跳过，不和按 id 顺序加锁的写入互相等成死锁', async () => {
-      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      // 同一个 URI 上：共享的过期记忆（secret，editor 让不出它），和 editor 已经过期的私人记忆，两者并存
-      const shared = await ok<MemoryView>(
-        await create({
-          uri: 'kb://plan',
-          content: '共享的',
-          layer: 'base',
-          sensitivity: 'secret',
-          validTo: inDays(1),
-        }),
+      // 同一个坐标、同一归属先后两条：旧的过期之后被新的让出，新的也过期了
+      const old = await ok<MemoryView>(
+        await create({ uri: 'core://kb/plan', content: '旧的', validTo: inDays(1) }),
         201,
       )
-      await expire(shared.id)
-      const mine = await ok<MemoryView>(
-        await create({ uri: 'kb://plan', content: 'eve 的', validTo: inDays(1) }, editor.cookie),
+      await expire(old.id)
+      const next = await ok<MemoryView>(
+        await create({ uri: 'core://kb/plan', content: '新的', validTo: inDays(1) }),
         201,
       )
-      await expire(mine.id)
-      // 另一次写入（例如 editor 在这个 URI 上新建，按 id 顺序加锁）已经锁住了 editor 的那一条，还要来等共享的那一条。
-      // 共享的那一条重新生效时先锁住了自己：让出 URI 时再等 editor 那一条的锁，两边就互相等成死锁。
-      // 所以锁还拿着的时候，重新生效就该做完
+      await expire(next.id)
+      // 另一次写入（例如在这个坐标上新建，按 id 顺序加锁）已经锁住了新的那一条，还要来等旧的那一条。
+      // 旧的那一条重新生效时先锁住了自己：让出坐标时再等新的那一条的锁，两边就互相等成死锁。
+      // 所以锁着的候选跳过，让不出就按被占用返回，锁还拿着的时候重新生效就该做完
       const side = postgres(testDatabaseUrl!, { max: 1, onnotice: () => {} })
       let pending: Promise<Response> | undefined
       let outcome = 'blocked' as Response | 'blocked'
       try {
         await side.begin(async (tx) => {
           await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
-          await tx`select id from memories where id = ${mine.id} for update`
-          pending = Promise.resolve(reactivate(shared.id, shared.version))
+          await tx`select id from memories where id = ${next.id} for update`
+          pending = Promise.resolve(reactivate(old.id, (await rowOf(old.id)).version))
           outcome = await Promise.race([
             pending,
             new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 3_000)),
@@ -443,15 +441,15 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         await side.end()
       }
       expect(outcome).not.toBe('blocked')
-      expect((outcome as Response).status).toBe(200)
-      expect(await rowOf(shared.id)).toMatchObject({ validTo: null, deletedAt: null })
+      expect((outcome as Response).status).toBe(409)
+      expect((await rowOf(old.id)).validTo).not.toBeNull()
       // 被锁着的那一条没有被让出
-      expect((await rowOf(mine.id)).deletedAt).toBeNull()
+      expect((await rowOf(next.id)).deletedAt).toBeNull()
     })
 
     it('写入让出 URI 时，候选行上只有外键检查加的 KEY SHARE 锁（别的表正往它上面挂记录）：不用等它，照常让出', async () => {
       const old = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://keyshare', content: '旧的', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/keyshare', content: '旧的', validTo: inDays(1) }),
         201,
       )
       await expire(old.id)
@@ -463,7 +461,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
           await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
           // 插入事件、关键词与向量时，外键检查在记忆行上加的就是这把锁
           await tx`select id from memories where id = ${old.id} for key share`
-          pending = Promise.resolve(keyCreate({ uri: 'notes://keyshare', content: '新的' }))
+          pending = Promise.resolve(keyCreate({ uri: 'user://notes/keyshare', content: '新的' }))
           outcome = await Promise.race([
             pending,
             new Promise<'blocked'>((resolve) => setTimeout(() => resolve('blocked'), 3_000)),
@@ -482,12 +480,12 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       // 同一个 URI、同一归属先后两条：旧的过期之后被新的让出，新的也过期了。旧的重新生效要先让出新的那条，
       // 不然撞上唯一索引
       const old = await ok<MemoryView>(
-        await create({ uri: 'kb://handover', content: '旧的', layer: 'base', validTo: inDays(1) }),
+        await create({ uri: 'core://kb/handover', content: '旧的', validTo: inDays(1) }),
         201,
       )
       await expire(old.id)
       const next = await ok<MemoryView>(
-        await create({ uri: 'kb://handover', content: '新的', layer: 'base', validTo: inDays(1) }),
+        await create({ uri: 'core://kb/handover', content: '新的', validTo: inDays(1) }),
         201,
       )
       await expire(next.id)
@@ -597,7 +595,6 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         await keyCreate({
           uri: 'core://deadline',
           content: '截止日期之前每天提醒一次进度',
-          layer: 'base',
           priority: 0,
           glossary: ['截止提醒'],
           validTo: inDays(1),
@@ -608,7 +605,6 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         await keyCreate({
           uri: 'core://agent',
           content: '先读正文再信任',
-          layer: 'base',
           priority: 0,
         }),
         201,
@@ -656,7 +652,6 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
         await keyCreate({
           uri: 'core://deadline',
           content: '每天提醒进度',
-          layer: 'base',
           priority: 0,
           validTo: inDays(1),
         }),
@@ -685,13 +680,17 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('过期后让出了 URI 的：列在已过期里，撤销删除不行；URI 被新的占着时 409，那条删掉之后一并撤销删除', async () => {
       const old = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://weekly', content: '第一周的安排', validTo: inDays(1) }),
+        await keyCreate({
+          uri: 'user://notes/weekly',
+          content: '第一周的安排',
+          validTo: inDays(1),
+        }),
         201,
       )
       await expire(old.id)
       // 同一个 URI 上写新的，过期的那条被让出（软删除，记一条 expire 事件）
       const fresh = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://weekly', content: '第二周的安排' }),
+        await keyCreate({ uri: 'user://notes/weekly', content: '第二周的安排' }),
         201,
       )
       const released = await rowOf(old.id)
@@ -710,7 +709,9 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       await remove(fresh)
       const back = await ok<MemoryView>(await reactivate(old.id, version))
       expect(back).toMatchObject({ id: old.id, content: '第一周的安排', validTo: null })
-      expect(await ok<MemoryView>(await keyGet('notes://weekly'))).toMatchObject({ id: old.id })
+      expect(await ok<MemoryView>(await keyGet('user://notes/weekly'))).toMatchObject({
+        id: old.id,
+      })
       expect((await rowOf(old.id)).deletedAt).toBeNull()
       expect((await history(old.id)).events.map((e) => e.type)).toEqual([
         'create',
@@ -724,12 +725,12 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('重新生效时，同一个 URI 上挡着它的别的过期记录先让出', async () => {
       const first = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://w', content: '一', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/w', content: '一', validTo: inDays(1) }),
         201,
       )
       await expire(first.id)
       const second = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://w', content: '二', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/w', content: '二', validTo: inDays(1) }),
         201,
       )
       await expire(second.id)
@@ -744,7 +745,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('删掉之后才过期的：列在已删除里，撤销删除不动有效期，回到已过期里，再重新生效', async () => {
       const m = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://gone', content: '删掉的', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/gone', content: '删掉的', validTo: inDays(1) }),
         201,
       )
       await remove(m)
@@ -778,97 +779,39 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
     it('撤销删除时同一归属的新记录占着 URI 返回 409，撤销的这条已经过期也一样', async () => {
       const m = await ok<MemoryView>(
-        await keyCreate({ uri: 'notes://slot', content: '原来的', validTo: inDays(1) }),
+        await keyCreate({ uri: 'user://notes/slot', content: '原来的', validTo: inDays(1) }),
         201,
       )
       await remove(m)
       await deletedThenExpired(m.id)
-      await ok<MemoryView>(await keyCreate({ uri: 'notes://slot', content: '新的' }), 201)
+      await ok<MemoryView>(await keyCreate({ uri: 'user://notes/slot', content: '新的' }), 201)
       expect(await errorOf(await undelete(m.id), 409)).toBe(
         'URI 已被占用。移走或删除占用它的记忆后可恢复。',
       )
       expect((await rowOf(m.id)).deletedAt).not.toBeNull()
     })
 
-    it('撤销删除一条删掉之后才过期的共享记忆：成员的私人节点占着同一个 URI 时照样撤销，重新生效时才拦下', async () => {
-      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      const shared = await ok<MemoryView>(
-        await create({ uri: 'kb://door', content: '旧门禁码', layer: 'base', validTo: inDays(1) }),
-        201,
-      )
-      await remove(shared)
-      await deletedThenExpired(shared.id)
-      const note = await ok<MemoryView>(
-        await create({ uri: 'kb://door', content: 'eve 的笔记' }, editor.cookie),
-        201,
-      )
-      // 它自己已经过期，不和成员节点互斥（触发器不检查被写入的这一行已经过期的情况）：撤销之后回到已过期里
-      await ok<MemoryView>(await undelete(shared.id))
-      expect((await rowOf(shared.id)).deletedAt).toBeNull()
-      expect((await expired()).items).toMatchObject([{ id: shared.id, released: false }])
-      expect((await get(note.uri, editor.cookie)).status).toBe(200)
-      const version = (await rowOf(shared.id)).version
-      expect(await errorOf(await reactivate(shared.id, version), 409)).toBe(
-        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
-      )
-    })
-
-    it('共享的过期记忆和成员的私人节点并存时，重新生效返回 409；直接改库清掉有效期也被触发器拦下', async () => {
-      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      // editor 写不了 secret，让不出这条过期的共享记忆，只能和它并存
-      const shared = await ok<MemoryView>(
-        await create({
-          uri: 'kb://wifi',
-          content: '旧密码',
-          layer: 'base',
-          sensitivity: 'secret',
-          validTo: inDays(1),
-        }),
-        201,
-      )
-      await expire(shared.id)
-      await ok<MemoryView>(
-        await create({ uri: 'kb://wifi', content: 'eve 的笔记' }, editor.cookie),
-        201,
-      )
-      expect((await rowOf(shared.id)).deletedAt).toBeNull()
-
-      expect(await errorOf(await reactivate(shared.id, shared.version), 409)).toBe(
-        'URI 已被占用。移走或删除占用它的记忆后可恢复生效。',
-      )
-      expect((await rowOf(shared.id)).validTo).not.toBeNull()
-
-      // 绕开服务层只改有效期：触发器在有效期变化时也检查
-      const direct = withSpace(database.db, ws.spaceId, (tx) =>
-        tx.update(memories).set({ validTo: null }).where(eq(memories.id, shared.id)),
-      )
-      await expect(direct).rejects.toSatisfy((err: unknown) =>
-        isUniqueViolation(err, 'memories_uri_live_idx'),
-      )
-    })
-
-    it('读不到的 404、写不了的 403；editor 的已过期列表里没有别人的私人层与 secret；Key 没有这个接口', async () => {
+    it('读不到的 404、写不了的 403；editor 的已过期列表里没有别人的本人记忆与 secret；Key 没有这个接口', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
       const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
       const mine = await ok<MemoryView>(
-        await create({ uri: 'home://plan', content: '私事', validTo: inDays(1) }),
+        await create({ uri: 'user://home/plan', content: '私事', validTo: inDays(1) }),
         201,
       )
       const secret = await ok<MemoryView>(
         await create({
-          uri: 'kb://token',
+          uri: 'core://kb/token',
           content: 'x',
-          layer: 'base',
           sensitivity: 'secret',
           validTo: inDays(1),
         }),
         201,
       )
       const shared = await ok<MemoryView>(
-        await create({ uri: 'kb://faq', content: '常见问题', layer: 'base', validTo: inDays(1) }),
+        await create({ uri: 'core://kb/faq', content: '常见问题', validTo: inDays(1) }),
         201,
       )
-      // 应用主人是 alice：editor 读得到这个应用的应用层，写不了
+      // 应用所有者是 alice：editor 读得到这个应用的记忆，写不了
       const appLayer = await ok<MemoryView>(
         await create({ uri: 'app://agent/rules', content: '提交规范', validTo: inDays(1) }),
         201,
@@ -877,14 +820,14 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
 
       expect((await expired(editor.cookie)).items.map((i) => i.uri).sort()).toEqual([
         'app://agent/rules',
-        'kb://faq',
+        'core://kb/faq',
       ])
       expect((await reactivate(mine.id, mine.version, editor.cookie)).status).toBe(404)
       expect((await reactivate(secret.id, secret.version, editor.cookie)).status).toBe(404)
       // 只给界面的错误不带取值
       expect(
         await errorOf(await reactivate(appLayer.id, appLayer.version, editor.cookie), 403),
-      ).toBe('无权让应用层的记忆恢复生效')
+      ).toBe('无权让应用的记忆恢复生效')
       expect((await reactivate(shared.id, shared.version, viewer.cookie)).status).toBe(403)
       expect((await reactivate('00000000-0000-4000-8000-000000000000', 1)).status).toBe(404)
       const viaKey = await app.request(
@@ -895,7 +838,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       for (const m of [mine, secret, shared, appLayer]) {
         expect((await rowOf(m.id)).validTo).not.toBeNull()
       }
-      // editor 写得了共享的基础层
+      // editor 写得了共享的通用
       expect((await reactivate(shared.id, shared.version, editor.cookie)).status).toBe(200)
     })
 
@@ -903,7 +846,7 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       const ids: string[] = []
       for (const [i, name] of ['a', 'b', 'c'].entries()) {
         const m = await ok<MemoryView>(
-          await keyCreate({ uri: `notes://${name}`, content: name, validTo: inDays(1) }),
+          await keyCreate({ uri: `user://notes/${name}`, content: name, validTo: inDays(1) }),
           201,
         )
         await withSpace(database.db, ws.spaceId, (tx) =>
@@ -917,21 +860,18 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       const first = await expired(ws.cookie, '?limit=2')
       const second = await expired(ws.cookie, `?limit=2&cursor=${first.nextCursor}`)
       expect([...first.items, ...second.items].map((i) => i.uri)).toEqual([
-        'notes://c',
-        'notes://b',
-        'notes://a',
+        'user://notes/c',
+        'user://notes/b',
+        'user://notes/a',
       ])
       expect(second.nextCursor).toBeNull()
       expect((await list('/memories/expired?cursor=abc')).status).toBe(400)
     })
   })
 
-  describe('已删除列表标出撤销删除会撞上 URI 的', () => {
+  describe('已删除列表标出撤销删除会撞上坐标的', () => {
     const shared = async (uri: string, extra: Record<string, unknown> = {}, cookie = ws.cookie) =>
-      ok<MemoryView>(
-        await create({ uri, content: `${uri} 的正文`, layer: 'base', ...extra }, cookie),
-        201,
-      )
+      ok<MemoryView>(await create({ uri, content: `${uri} 的正文`, ...extra }, cookie), 201)
     const personal = async (uri: string, cookie = ws.cookie) =>
       ok<MemoryView>(await create({ uri, content: `${uri} 的私人笔记` }, cookie), 201)
     // 标记和真去撤销删除的结果一致：标着的返回 409、什么都不改，没标的撤销成功。返回标记
@@ -943,115 +883,88 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       return item.uriTaken
     }
 
-    it('同一归属被占（唯一索引）：共享的与个人的都标出来', async () => {
-      const old = await shared('kb://faq')
+    it('同一归属被占（唯一索引）：共享的与本人的都标出来', async () => {
+      const old = await shared('core://kb/faq')
       await remove(old)
-      await shared('kb://faq')
+      await shared('core://kb/faq')
       expect(await matchesUndelete(old.id)).toBe(true)
 
-      const mine = await personal('notes://todo')
+      const mine = await personal('user://notes/todo')
       await remove(mine)
-      await personal('notes://todo')
+      await personal('user://notes/todo')
       expect(await matchesUndelete(mine.id)).toBe(true)
     })
 
-    it('共享节点与成员节点互斥（触发器）：两边都有效时标出来；两个成员各自的私人节点不冲突', async () => {
+    it('别的归属里同一个位置不算占用：共享的与本人的、两个成员各自的本人互不相干', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      // 共享的删掉之后，eve 在同一个 URI 上写了私人笔记：alice 看不到那条，只知道被占用
-      const door = await shared('kb://door')
+      // 共享的删掉之后，eve 在本人里用了同一个位置：开头不同，是另一个坐标
+      const door = await shared('core://kb/door')
       await remove(door)
-      const note = await personal('kb://door', editor.cookie)
-      const list = await deleted()
-      expect(list.items.find((i) => i.id === door.id)?.uriTaken).toBe(true)
-      expect(JSON.stringify(list)).not.toContain(note.id)
-      expect(JSON.stringify(list)).not.toContain('私人笔记')
-      expect(await matchesUndelete(door.id)).toBe(true)
+      await personal('user://kb/door', editor.cookie)
+      expect(await matchesUndelete(door.id)).toBe(false)
 
-      // alice 的私人记忆删掉之后，同一个 URI 上有了共享的
-      const plan = await personal('notes://plan')
+      // alice 的本人记忆删掉之后，通用里有了同一个位置
+      const plan = await personal('user://notes/plan')
       await remove(plan)
-      await shared('notes://plan')
-      expect(await matchesUndelete(plan.id)).toBe(true)
+      await shared('core://notes/plan')
+      expect(await matchesUndelete(plan.id)).toBe(false)
 
-      // eve 也有一条同 URI 的私人记忆：和 alice 的互不相干
-      const diary = await personal('notes://diary')
+      // eve 也有一条同坐标的本人记忆：和 alice 的互不相干
+      const diary = await personal('user://notes/diary')
       await remove(diary)
-      await personal('notes://diary', editor.cookie)
+      await personal('user://notes/diary', editor.cookie)
       expect(await matchesUndelete(diary.id)).toBe(false)
     })
 
-    it('占着的那条已过期：同一归属的唯一索引照样算，撤销时让得出的先让出；共享与成员节点不再互斥', async () => {
+    it('占着的那条已过期：同一归属的唯一索引照样算，撤销时让得出的先让出', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      // 同一归属、alice 让得出：撤销时先让出这条过期的，不标
-      const first = await shared('kb://a')
+      // alice 让得出：撤销时先让出这条过期的，不标
+      const first = await shared('core://kb/a')
       await remove(first)
-      const lapsed = await shared('kb://a')
+      const lapsed = await shared('core://kb/a')
       await expire(lapsed.id)
       expect(await matchesUndelete(first.id)).toBe(false)
       expect((await rowOf(lapsed.id)).deletedAt).not.toBeNull()
 
-      // 同一归属、eve 让不出（她写不了 secret）：唯一索引挡着，对 eve 标出来；alice 撤销时能让出，不标
-      const wifi = await shared('kb://wifi')
+      // eve 让不出（她写不了 secret）：唯一索引挡着，对 eve 标出来；alice 撤销时能让出，不标
+      const wifi = await shared('core://kb/wifi')
       await remove(wifi)
-      const secret = await shared('kb://wifi', { sensitivity: 'secret' })
+      const secret = await shared('core://kb/wifi', { sensitivity: 'secret' })
       await expire(secret.id)
       expect(JSON.stringify(await deleted(editor.cookie))).not.toContain(secret.id)
       expect(await matchesUndelete(wifi.id, editor.cookie)).toBe(true)
       expect(await matchesUndelete(wifi.id)).toBe(false)
 
-      // 共享的与成员的：占着的那条过期了，触发器不看它
-      const gate = await shared('kb://gate')
-      await remove(gate)
-      const note = await personal('kb://gate', editor.cookie)
-      await expire(note.id)
-      expect(await matchesUndelete(gate.id)).toBe(false)
-
-      // 被撤销的这一条自己已经过期：成员节点还有效也不互斥；同一归属的照样挡着
-      const room = await shared('kb://room', { validTo: inDays(1) })
-      await remove(room)
-      await deletedThenExpired(room.id)
-      await personal('kb://room', editor.cookie)
-      expect(await matchesUndelete(room.id)).toBe(false)
-      const slot = await shared('kb://slot', { validTo: inDays(1) })
+      // 被撤销的这一条自己已经过期：同一归属的照样挡着
+      const slot = await shared('core://kb/slot', { validTo: inDays(1) })
       await remove(slot)
       await deletedThenExpired(slot.id)
-      await shared('kb://slot')
+      await shared('core://kb/slot')
       expect(await matchesUndelete(slot.id)).toBe(true)
     })
 
     it('应用的时钟比数据库快：撤销时 claimUri 按应用的时间先让出占着的那条，标记照着判断', async () => {
-      const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-      // 占着的两条都在一分半之后到期（有效到至少要晚一分钟）：按数据库的时间还有效，
-      // 按快了两分半的应用时间已经过期，alice 都让得出
+      // 占着的那条在一分半之后到期（有效到至少要晚一分钟）：按数据库的时间还有效，
+      // 按快了两分半的应用时间已经过期，alice 让得出
       const soon = new Date(Date.now() + 90_000).toISOString()
-      const same = await shared('kb://skew')
+      const same = await shared('core://kb/skew')
       await remove(same)
-      await shared('kb://skew', { validTo: soon })
-      const other = await shared('kb://skew-shared')
-      await remove(other)
-      ok<MemoryView>(
-        await create(
-          { uri: 'kb://skew-shared', content: 'eve 的私人笔记', validTo: soon },
-          editor.cookie,
-        ),
-        201,
-      )
+      await shared('core://kb/skew', { validTo: soon })
       vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 150_000 })
       try {
-        // 同一归属的唯一索引、共享与成员节点的互斥触发器都碰不上：claimUri 先让出了占着的那条
+        // 同一归属的唯一索引碰不上：claimUri 先让出了占着的那条
         expect(await matchesUndelete(same.id)).toBe(false)
-        expect(await matchesUndelete(other.id)).toBe(false)
       } finally {
         vi.useRealTimers()
       }
     })
 
-    it('同一批里有抽取的记忆（没有 URI）和普通记录：抽取的那条不和真在 null://null 的记录撞上', async () => {
+    it('同一批里有抽取的记忆（没有坐标）和普通记录：抽取的那条不和真在 core://null 的记录撞上', async () => {
       // 已删除列表只列目录里的记忆，这里直接按抽取的记忆会给出的样子调用
-      await shared('null://null')
+      await shared('core://null')
       const claims = [
         { id: null, domain: null, path: null, ownerAccountId: null, ended: false },
-        { id: null, domain: 'null', path: 'null', ownerAccountId: null, ended: false },
+        { id: null, domain: 'core', path: 'null', ownerAccountId: null, ended: false },
       ]
       const taken = await withSpace(database.db, ws.spaceId, (tx) =>
         uriConflicts(tx, consoleAccess('owner', ws.accountId), claims),
@@ -1059,12 +972,12 @@ describe.skipIf(!testDatabaseUrl)('有效期与重新生效', () => {
       expect([...taken]).toEqual([claims[1]])
     })
 
-    it('没有权限撤销的不标：viewer 看不出 URI 被别人占着', async () => {
+    it('没有权限撤销的不标：viewer 看不出坐标被占着', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
       const viewer = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
-      const door = await shared('kb://door')
+      const door = await shared('core://kb/door')
       await remove(door)
-      await personal('kb://door', editor.cookie)
+      await shared('core://kb/door', {}, editor.cookie)
       const seen = (await deleted(viewer.cookie)).items.find((i) => i.id === door.id)
       expect(seen?.uriTaken).toBe(false)
       expect((await undelete(door.id, viewer.cookie)).status).toBe(403)

@@ -143,15 +143,15 @@ describe.skipIf(!testDatabaseUrl)('定时清理', () => {
     const create = async (uri: string) => {
       const res = await app.request(
         `/v1/spaces/${ws.spaceId}/memories`,
-        jsonRequest('POST', { uri, content: uri, layer: 'base' }, { cookie: ws.cookie }),
+        jsonRequest('POST', { uri, content: uri }, { cookie: ws.cookie }),
       )
       expect(res.status).toBe(201)
       const { id } = (await res.json()) as { id: string }
       expect(await embedMemories(database.db, embedder, ws.spaceId, [id])).toBe(1)
       return id
     }
-    const kept = await create('kb://kept')
-    const lapsed = await create('kb://lapsed')
+    const kept = await create('user://kb/kept')
+    const lapsed = await create('user://kb/lapsed')
     // 到期是时间到了，没有写入，也就没有向量任务来删它的向量
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx.update(memories).set({ validTo: past() }).where(eq(memories.id, lapsed)),

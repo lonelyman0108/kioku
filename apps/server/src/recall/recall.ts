@@ -8,6 +8,9 @@ import type { Embedder } from '../embedding/provider'
 import { readableConditions } from '../memory/filter'
 import { personaOverride, type PersonaSelection } from '../memory/personas'
 import { formatUri } from '../memory/uri'
+import { clipChars, inlineText, titleSuffix } from './text'
+
+export { clipChars, inlineText, oneLine, titleSuffix } from './text'
 
 // 多路召回：向量相似度、中文全文检索、glossary 关键词命中。三路都先套同一套读权限过滤，
 // 再按加权分数合并。权重是经验值，召回分析做出来之后再调。
@@ -34,13 +37,13 @@ const WORD_END = '\\M'
 const REGEX_META = '([.^$*+?()\\[\\]{}|\\\\-])'
 const ESCAPE_MATCH = '\\\\\\1'
 
-// 人格按 PersonaSelection 挑选（persona 层过滤与继承覆盖）；召回永远不返回 secret
+// 人格按 PersonaSelection 挑选（人格的过滤与继承覆盖）；召回永远不返回 secret
 export interface RecallOptions extends PersonaSelection {
   limit: number
   minScore?: number
   // 只收受信来源（不含 untrusted 写入的）
   trustedOnly?: boolean
-  // 只收这些层
+  // 只收这些归属
   layers?: Layer[]
 }
 
@@ -110,6 +113,7 @@ export type RecordableCandidate = RecallCandidate & { readonly [CANDIDATE_ID]: s
 export function publicCandidate(c: ScoredCandidate): RecordableCandidate {
   return {
     uri: c.uri,
+    title: c.title,
     layer: c.layer,
     priority: c.priority,
     disclosure: c.disclosure,
@@ -139,7 +143,7 @@ export async function scoreRecall(
 ): Promise<ScoredCandidate[]> {
   const query = normalizeQuery(rawQuery)
   if (!query) return []
-  // 召回只面向有 URI 的策展记忆；抽取记忆另有展示方式，不能在各路里占掉名额
+  // 召回只面向有坐标的记忆（目录里的四类）；来自对话的记忆另有展示方式，不能在各路里占掉名额
   const readable = and(
     readableConditions(access, { personaIds: options.personaIds }),
     personaOverride(access, options),
@@ -152,6 +156,7 @@ export async function scoreRecall(
     id: memories.id,
     domain: memories.domain,
     path: memories.path,
+    title: memories.title,
     layer: memories.layer,
     priority: memories.priority,
     disclosure: memories.disclosure,
@@ -160,6 +165,7 @@ export async function scoreRecall(
     id: string
     domain: string | null
     path: string | null
+    title: string | null
     layer: Layer
     priority: number
     disclosure: string | null
@@ -206,7 +212,7 @@ export async function scoreRecall(
     const ftsRows = await tx.execute<Row & { score: string; scale: string }>(sql`
       with cand as (
         select ${memories.id} as id, ${memories.domain} as domain, ${memories.path} as path,
-          ${memories.layer} as layer, ${memories.priority} as priority,
+          ${memories.title} as title, ${memories.layer} as layer, ${memories.priority} as priority,
           ${memories.disclosure} as disclosure, ${memories.fts} as fts, length(${memories.fts}) as dl
         from ${memories}
         where ${readable} and ${memories.fts} @@ ${anyTermQuery(terms)}::tsquery
@@ -221,11 +227,11 @@ export async function scoreRecall(
           ln(1 + (greatest((select count(*) from ${memories} where ${readable}), ${BM25.minDocs}::int) - count(*) + 0.5) / (count(*) + 0.5)) as w
         from tf group by lexeme
       )
-      select c.id, c.domain, c.path, c.layer, c.priority, c.disclosure,
+      select c.id, c.domain, c.path, c.title, c.layer, c.priority, c.disclosure,
         sum(idf.w * tf.n * (${k1} + 1) / (tf.n + ${k1} * (1 - ${b} + ${b} * c.dl / (select avg(dl) from cand)))) as score,
         (select max(w) from idf) as scale
       from cand c join tf on tf.id = c.id join idf on idf.lexeme = tf.lexeme
-      group by c.id, c.domain, c.path, c.layer, c.priority, c.disclosure
+      group by c.id, c.domain, c.path, c.title, c.layer, c.priority, c.disclosure
       order by score desc, c.priority, c.id
       limit ${PER_PATH_LIMIT}`)
     for (const r of ftsRows) {
@@ -284,6 +290,7 @@ export async function scoreRecall(
       .map(({ h, parts, score }) => ({
         id: h.row.id,
         uri: formatUri(h.row.domain!, h.row.path!),
+        title: h.row.title!,
         layer: h.row.layer,
         priority: h.row.priority,
         disclosure: h.row.disclosure,
@@ -302,27 +309,6 @@ export async function scoreRecall(
 }
 
 const round = (n: number) => Math.round(n * 100) / 100
-
-// 压成单行：去掉控制字符（数据库的文本里存不了 \u0000），连续的空白换成一个空格
-export function oneLine(text: string): string {
-  const printable = [...text].filter((ch) => {
-    const code = ch.codePointAt(0)!
-    return code >= 0x20 ? code !== 0x7f : /\s/.test(ch)
-  })
-  return printable.join('').replace(/\s+/g, ' ').trim()
-}
-
-// 召回块会原样进入宿主的上下文。disclosure 与关键词可能来自不可信的写入者，
-// 压成单行并去掉尖括号，避免伪造 </recall> 闭合标签后注入任意文本
-export function inlineText(text: string): string {
-  return oneLine(text.replace(/[<>]/g, ''))
-}
-
-// 按字符（不是 UTF-16 码元）截断，免得切开表情符号；截掉了才接上 suffix
-export function clipChars(text: string, max: number, suffix = ''): string {
-  const chars = [...text]
-  return chars.length > max ? `${chars.slice(0, max).join('')}${suffix}` : text
-}
 
 // 带正文时每条最多这么多字
 const INLINE_CONTENT_CHARS = 300
@@ -351,7 +337,7 @@ export function formatRecallBlock(
     const cues =
       (content && contentHead(content)) ||
       inlineText(c.cues.length ? c.cues.join(' · ') : (c.disclosure ?? ''))
-    return `${c.score.toFixed(2)} | ${c.uri}${cues ? ` | ${cues}` : ''}`
+    return `${c.score.toFixed(2)} | ${c.uri}${titleSuffix(c.uri, c.title)}${cues ? ` | ${cues}` : ''}`
   })
   return [open, ...lines, '</recall>'].join('\n')
 }

@@ -35,7 +35,7 @@ import {
   TALK_LAYERS,
   type ParsedDreamScope,
 } from '../memory/scopes'
-import { formatUri, layerForDomain } from '../memory/uri'
+import { formatUri } from '../memory/uri'
 import { anyTermQuery, clipChars, inlineText, oneLine, searchTerms } from '../recall/recall'
 import type { EndpointConfig } from '../settings/endpoint'
 import { extractionUsage } from './budget'
@@ -62,9 +62,9 @@ import { loadExtractionConfig } from './settings'
 // 每个范围（见 memory/scopes.ts）单独请求模型，只看上次以来新增或改动的记忆，再带上它们的近邻作对照
 
 // 每次整理最多请求模型这么多次、用掉这么多 token（到了就不再开始新的一次），剩下的下次接着整理。
-// 共享的范围先用，但最多用到上限减去固定留给画像层与私人层的（DREAM_PERSONAL_*）；画像层与私人层用剩下的、至少是留量，
-// 没用完的也不还给共享的那一段（见 dreamOnce）。共享的内容积压很多时（例如刚导入一大批），画像层与私人层不用等积压清完。
-// 留量是常量，不看有没有画像层与私人层要整理：共享的那一段整理到哪里所有成员都看得到，跟着变就泄露了有没有私人内容。
+// 共享的范围先用，但最多用到上限减去固定留给本人记忆的（DREAM_PERSONAL_*）；本人的记忆用剩下的、至少是留量，
+// 没用完的也不还给共享的那一段（见 dreamOnce）。共享的内容积压很多时（例如刚导入一大批），本人的记忆不用等积压清完。
+// 留量是常量，不看有没有本人的记忆要整理：共享的那一段整理到哪里所有成员都看得到，跟着变就泄露了有没有私人内容。
 // 请求次数一共不超过 DREAM_MAX_CALLS；token 的上限是开始一次请求之前看的，每一段的最后一次都可能超出，
 // 共享的那一段超出的部分也不占留量，所以一次整理实际用掉的可能比 DREAM_MAX_TOKENS 多出两段各自最后一次请求的用量
 export const DREAM_MAX_CALLS = 8
@@ -100,8 +100,8 @@ const HIDDEN_ERROR = '整理出错（原因仅实例管理员可见）'
 type MemoryRow = typeof memories.$inferSelect
 
 // 能提建议的记忆：没删除、现在有效、不是 secret（Dream 读不到 secret，连 URI 都不给模型看），并且至少有一种建议用得上：
-// 策展层的策展记忆（合并、过时）；对象层抽取的事实（合并、提炼、过时、审核）；不可信来源写进对象层与情节层的（审核）。
-// 画像层与私人层的还要主人允许，见 candidate
+// 记下的记忆（合并、过时）；联系人的事实（合并、提炼、过时、审核）；不可信来源写下的联系人事实与会话摘要（审核）。
+// 归某个成员的还要这个成员允许，见 candidate
 const CANDIDATE = and(
   isNull(memories.deletedAt),
   STILL_VALID,
@@ -113,7 +113,7 @@ const CANDIDATE = and(
   ),
 )!
 
-// 让 Dream 整理自己的画像层与私人层的成员：现在还是成员，开关（space_members.dream_private，默认开）开着。
+// 让 Dream 整理自己本人记忆的成员：现在还是成员，开关（space_members.dream_private，默认开）开着。
 // 离开了空间的成员看不到建议，整理了也白花 token；关掉了的不发给模型，也就不记整理标记，再打开时接着看。
 // 选范围时读一次，每次请求模型之前再读一次（见 dreamScope），不在每条记忆上去查成员表；只问一个成员时给 owner
 async function allowedOwners(db: Db | Tx, spaceId: string, owner?: string): Promise<string[]> {
@@ -141,11 +141,11 @@ async function lockedSwitch(tx: Tx, spaceId: string, owner: string): Promise<boo
   return row ? row.on : null
 }
 
-// 能提建议的记忆里，画像层与私人层的只收名单里的主人的（名单见 allowedOwners）
+// 能提建议的记忆里，归某个成员的（本人，以及不带会话上下文的会话摘要）只收名单里的成员的（名单见 allowedOwners）
 const candidate = (owners: readonly string[]) =>
   and(
     CANDIDATE,
-    sql`(${memories.layer} not in ('owner', 'private') or ${memories.ownerAccountId} = any(${sql.param(owners)}::uuid[]))`,
+    sql`(${memories.ownerAccountId} is null or ${memories.ownerAccountId} = any(${sql.param(owners)}::uuid[]))`,
   )!
 
 const isFact = (row: MemoryRow) => row.form === 'extracted' && row.layer === 'subject'
@@ -181,9 +181,9 @@ interface Progress {
 }
 
 // 整理一个空间：没配抽取模型、本月的预算用完了、上次以来没有新增或改动的内容时不整理，记下原因。
-// 否则分两段：先把共享的范围整理完，记一条共享部分的汇总，再整理各人的画像层与私人层（见 dreamOnce）。
+// 否则分两段：先把共享的范围整理完，记一条共享部分的汇总，再整理各人的本人的记忆（见 dreamOnce）。
 // 中途出了没料到的错（例如抽取模型的 Key 解不开、读库出错）也记一条运行记录写明原因：当天就算整理过，
-// 每小时的检查不会接着一遍遍再排。汇总还没写下时出的错，这一条就是汇总；之后出的错记在当时那个画像层或私人层的
+// 每小时的检查不会接着一遍遍再排。汇总还没写下时出的错，这一条就是汇总；之后出的错记在当时那个本人记忆的
 // 范围上，只给本人看。连这一条都写不进去时，两个错误都记进日志，原来的错误照样抛出去，由后台任务记下这次失败；
 // 没有运行记录，下一个小时会再排
 export async function dreamSpace(
@@ -221,14 +221,14 @@ export async function dreamSpace(
   }
 }
 
-// 别的成员看到的列表与状态只按共享部分的汇总与他自己的画像层、私人层算（见 dreamRunOutcome），
-// 所以分两段整理，共享的那一段不受任何人的画像层与私人层影响：
-// 1. 先把共享的范围整理完，没看完的接着看，都在画像层与私人层之前；这一段最多用到每次整理的请求次数与用量上限
-//    减去留给画像层与私人层的（见 DREAM_PERSONAL_CALLS），上限是常量，不看后面有没有要整理的。
+// 别的成员看到的列表与状态只按共享部分的汇总与他自己的本人记忆算（见 dreamRunOutcome），
+// 所以分两段整理，共享的那一段不受任何人的本人的记忆影响：
+// 1. 先把共享的范围整理完，没看完的接着看，都在本人的记忆之前；这一段最多用到每次整理的请求次数与用量上限
+//    减去留给本人记忆的（见 DREAM_PERSONAL_CALLS），上限是常量，不看后面有没有要整理的。
 //    出错就停下：多半是接口或库的问题，别的范围也会一样；
 // 2. 接着记一条共享部分的汇总（范围为空）：出错了、整理过了（还有没看完的）、没有要整理的。
 //    整次没走到范围时（没配模型、预算用完、什么都没有要整理的）记的那一条也是汇总；
-// 3. 再整理画像层与私人层，用剩下的请求次数与用量，至少是留量。结果、出错与用量只记在各自的范围上，
+// 3. 再整理本人的记忆，用剩下的请求次数与用量，至少是留量。结果、出错与用量只记在各自的范围上，
 //    一个范围出错不耽误别人的范围，接着整理下一个
 async function dreamOnce(
   db: Db,
@@ -303,7 +303,7 @@ async function dreamOnce(
     return { calls, tokens, failed, more: pending.length > 0 || left }
   }
 
-  // 范围已经按 pendingScopes 排好，共享的在前：开头没有主人的那些是第一段，从第一个画像层或私人层的范围起是第二段
+  // 范围已经按 pendingScopes 排好，共享的在前：开头没有主人的那些是第一段，从第一个本人记忆的范围起是第二段
   const cut = queue.findIndex((s) => s.owner !== null)
   const shared = await runSegment(
     cut < 0 ? queue : queue.slice(0, cut),
@@ -348,7 +348,7 @@ async function recordRun(tx: Tx, options: DreamOptions, fields: RunFields): Prom
 interface PendingScope {
   key: string
   scope: ParsedDreamScope
-  // 画像层与私人层的范围属于哪个成员
+  // 本人记忆的范围属于哪个成员
   owner: string | null
 }
 
@@ -358,12 +358,12 @@ const UNMARKED = sql`not exists (
   select 1 from ${dreamMarks}
   where ${dreamMarks.memoryId} = ${memories.id} and ${dreamMarks.version} = ${memories.version})`
 
-// 范围是某个成员的画像层或私人层（owner:<成员>、private:<成员>，见 memory/scopes.ts 的 DREAM_SCOPE_KEY）
-const personalScope = (scope: SQL) => sql`(${scope} like 'owner:%' or ${scope} like 'private:%')`
+// 范围是某个成员的本人记忆（user:<成员>，见 memory/scopes.ts 的 DREAM_SCOPE_KEY）
+const personalScope = (scope: SQL) => sql`(${scope} like 'user:%')`
 
-// 有要看的记忆的范围，顺序只在这里定：共享的在前、画像层与私人层的在后（见 dreamOnce）；再按上次整理的时间，
+// 有要看的记忆的范围，顺序只在这里定：共享的在前、本人记忆的在后（见 dreamOnce）；再按上次整理的时间，
 // 整理得早的（从没整理过、记录已经清掉的最先）排在前面，没整理成的（预算用完、主人关掉了）不算整理过。
-// 画像层与私人层的范围只有主人允许时才有（见 allowedOwners）
+// 本人记忆的范围只有主人允许时才有（见 allowedOwners）
 async function pendingScopes(db: Db, spaceId: string): Promise<PendingScope[]> {
   const rows = await withSpace(db, spaceId, async (tx) => {
     const owners = await allowedOwners(tx, spaceId)
@@ -402,7 +402,7 @@ function pick(row: MemoryRow, fresh: boolean): Picked {
 }
 
 // 这一次给模型看的记忆：没整理过或整理之后改过的（按更新时间与 id，正文合计不超过上限），以及它们的近邻。
-// owners 是这时允许整理画像层与私人层的成员（见 allowedOwners），近邻也只从这些里找
+// owners 是这时允许整理本人记忆的成员（见 allowedOwners），近邻也只从这些里找
 async function loadBatch(
   tx: Tx,
   pending: PendingScope,
@@ -513,21 +513,22 @@ async function nearby(
     .limit(NEIGHBORS_EACH)
 }
 
-// 范围的说明：人格、应用、群与私聊对象带上名字；画像层与私人层不写是谁的
+// 范围的说明：人格、应用、群与私聊的联系人带上名字；本人不写是谁的
 async function scopeTitle(tx: Tx, pending: PendingScope): Promise<DreamPromptScope> {
   const scope = (await dreamScopeNames(tx, [pending.key]))(pending.key)
   const name = (value: string | null) => clipChars(inlineText(value ?? ''), 40, '…')
   switch (scope.kind) {
-    case 'base':
-      return { title: '全空间共用的基础规则与知识（基础层）', talk: false }
+    case 'core':
+      return { title: '全空间共用的通用规则与知识（通用）', talk: false }
     case 'persona':
-      return { title: `人格「${name(scope.name)}」的设定（人格层）`, talk: false }
+      return { title: `人格「${name(scope.name)}」的设定（人格）`, talk: false }
     case 'app':
-      return { title: `应用「${name(scope.name)}」独有的记忆（应用层）`, talk: false }
-    case 'owner':
-      return { title: '一位成员的画像：习惯、偏好、关系（画像层）', talk: false }
-    case 'private':
-      return { title: '一位成员的私人事务（私人层）', talk: false }
+      return { title: `应用「${name(scope.name)}」独有的记忆（应用）`, talk: false }
+    case 'user':
+      return {
+        title: '一位成员本人的习惯、偏好与私人事务，以及他不带会话上下文的会话摘要（本人）',
+        talk: false,
+      }
     case 'talk': {
       const origin = scope.origin
       const where =
@@ -554,7 +555,7 @@ interface ScopeResult {
 // 整理一个范围：读出这一次的记忆，请求模型，挑出合规的建议，在一个事务里存下建议、给这一批记下整理过的版本、记一条运行记录。
 // 请求模型失败时只记原因、不记整理过（下次重来）；输出解析不了时记下原因与用量、记下整理过：
 // 同样的输入多半还是解析不了，重试只会白花 token。没有要看的记忆时（期间被删掉了，或者主人关掉了整理）返回 null。
-// 画像层与私人层的范围看三次主人的开关：读这一批时按允许的名单取；读完之后、请求模型之前再看一眼，这之间关掉的不发；
+// 本人记忆的范围看三次主人的开关：读这一批时按允许的名单取；读完之后、请求模型之前再看一眼，这之间关掉的不发；
 // 写结果的事务里锁住成员那一行再看一眼，请求模型期间关掉的，这一次的建议与整理标记都不存，只记下用掉的 token；
 // 请求期间不再是成员的，什么都不存也不记。已经发给模型的那一次收不回来
 async function dreamScope(
@@ -774,7 +775,7 @@ function cleanReason(reason: string): string | null {
 
 // 按规则检查模型给的一条建议，不合规就丢掉（返回 null）：只能引用这次给出的代号，至少涉及一条新增或改动的记忆；
 // 合并要求几条的敏感级与来源作用域都相同（合并到保留的那条之后，内容不会给到更宽的可见范围），事实还要是同一个对象的，
-// 正文给全了的才能合并；提炼只收事实；过时只收策展记忆与事实；审核只收不可信来源写进对象层与情节层的。
+// 正文给全了的才能合并；提炼只收事实；过时只收策展记忆与事实；审核只收不可信来源写进联系人的事实与会话摘要的。
 // 要写进记忆的文字和执行时过同一套检查（见 dreamText.ts），不合规就丢掉；disclosure 先截到上限，不合规的只去掉它
 function validate(
   candidate: DreamCandidate | null,
@@ -840,8 +841,8 @@ function validate(
       if (!talk || picked.length < 2 || !rows.every(isFact)) return null
       const uri = candidate.uri.trim()
       const match = URI_PATTERN.exec(uri)
-      // persona:// 与 app:// 下的层由 URI 决定，草稿默认放在执行的成员自己的私人层，不收这两种
-      if (!match || layerForDomain(match[1]!)) return null
+      // 草稿放在执行的成员自己的本人（user://）下，别的开头不收；成员执行时可以改到别处
+      if (match?.[1] !== 'user') return null
       const content = candidate.content.trim()
       if (draftProblem(content)) return null
       const disclosure = candidate.disclosure
@@ -890,14 +891,14 @@ export async function dreamsDue(db: Db, now = new Date()): Promise<string[]> {
   return due
 }
 
-// 运行记录里的一条给谁看：共享部分的汇总（范围为空）与共享范围的给所有成员，画像层与私人层的只给本人。
-// 共享范围的记录都在汇总之前写下（见 dreamOnce），内容与时间都和任何人的画像层、私人层无关
+// 运行记录里的一条给谁看：共享部分的汇总（范围为空）与共享范围的给所有成员，本人记忆的只给本人。
+// 共享范围的记录都在汇总之前写下（见 dreamOnce），内容与时间都和任何人的本人记忆无关
 const visibleRun = (accountId: string) =>
   sql`(${dreamRuns.scope} is null or not ${personalScope(sql`${dreamRuns.scope}`)}
     or ${dreamRuns.ownerAccountId} = ${accountId})`
 
-// 一次整理在一个成员看来的结果：只看共享部分的汇总（范围为空的那一条）与他自己的画像层、私人层的记录，
-// 别的成员的画像层与私人层整理了没有、出没出错、花了多久都不影响。有出错的就是出错，有整理过的（汇总说整理过了，
+// 一次整理在一个成员看来的结果：只看共享部分的汇总（范围为空的那一条）与他自己的本人记忆的记录，
+// 别的成员的本人的记忆整理了没有、出没出错、花了多久都不影响。有出错的就是出错，有整理过的（汇总说整理过了，
 // 或者自己的范围整理过）就是整理过，否则是没整理，原因先取「没有要整理的」以外的；模型的输出解析不了的那一批
 // 记了整理过（见 dreamScope），不算出错。汇总还没写下时为 null：共享的那一段还在整理，或者没写下汇总就停了
 export async function dreamRunOutcome(

@@ -19,6 +19,7 @@ import {
   planSync,
   previewImport,
   readLore,
+  requestLayer,
   verifyMasterKey,
   type ImportPlan,
   type ImportPreview,
@@ -40,8 +41,8 @@ const HELP = `从 Lore 导入记忆。
 加 --sync 时，导入过的节点也按 Lore 现在的内容更新，但只更新导入（或上次同步）之后
 在 Kioku 里没人改过的；改过、移动过、删除了的，以及 Lore 里换了路径的，都只列出来。
 
-  --account <用户名>     导入到这个账号名下，需要是空间 owner。preferences:// 进它的主人层，
-                         core:// 以外的其余 domain 进它的私人层
+  --account <用户名>     导入到这个账号名下，需要是空间 owner。preferences:// 进它本人的 user://preferences/（内部），
+                         core:// 以外的其余分区进它本人的 user://<分区>/（私密）
   --space <空间 id>      账号属于多个空间时指定
   --persona <标识>       core://soul 导入成这个人格的设定，默认 default；要写入新的 core://soul 时不存在就新建
   --persona-name <名称>  新建人格时用的名称，默认「默认人格」
@@ -200,7 +201,7 @@ function personaLine(plan: ImportPlan, preview: ImportPreview): string {
   if (!preview.personaExists && !preview.createsPersona) {
     return `这次没有要写入的 core://soul，人格 ${slug} 也不存在：不新建，新建的应用默认人格为空`
   }
-  return plan.memories.some((m) => m.request.layer === 'persona')
+  return plan.memories.some((m) => requestLayer(m.request) === 'persona')
     ? `core://soul 导入为 ${slug}（不存在时新建为「${name}」）`
     : `这次没有要导入的 core://soul，不新建人格；已有的人格 ${slug} 照常用，新建的应用和还没有默认人格的应用设成它`
 }
@@ -218,7 +219,7 @@ function printPlan(plan: ImportPlan, preview: ImportPreview): void {
   }
   console.log(`\n记忆（${plan.memories.length} 条）：`)
   for (const m of plan.memories) {
-    const layer = m.request.layer!
+    const layer = requestLayer(m.request)
     const sensitivity = m.request.sensitivity ?? DEFAULT_SENSITIVITY[layer]
     const target = m.request.uri === m.source ? '' : ` → ${m.request.uri}`
     console.log(`  ${m.source}${target}  [${layer} · ${sensitivity} · p${m.request.priority}]`)

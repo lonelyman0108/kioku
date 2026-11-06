@@ -107,6 +107,15 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect(res.status).toBe(200)
     return (await res.json()) as SubjectDetail
   }
+  const summaryScope = async (content: string) => {
+    const [row] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .select({ originScope: memories.originScope })
+        .from(memories)
+        .where(eq(memories.content, content)),
+    )
+    return row?.originScope
+  }
   const group = (sender: string, name: string): SessionContextInput => ({
     chatType: 'group',
     platform: 'qq',
@@ -221,7 +230,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     expect((await api('GET', '/subjects?cursor=abc')).status).toBe(400)
   })
 
-  it('详情：事实带来源（哪个群）、群的会话摘要、涉及它的抽取记录', async () => {
+  it('详情：事实带来源（哪个群）、涉及它的抽取记录', async () => {
     await chatInGroup()
     // 别的群的一批，不涉及这里的人
     await withSpace(database.db, ws.spaceId, (tx) =>
@@ -242,8 +251,6 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
         scope: { kind: 'group', id: find(all, '读书会').id, name: '读书会' },
       },
     ])
-    // 摘要是群里的，不挂在人身上
-    expect(person.summaries).toEqual([])
     expect(person.runs).toMatchObject([
       {
         app: { id: appId, name: '群聊 bot' },
@@ -256,8 +263,6 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     ])
     const room = await detailOf(find(all, '读书会').id)
     expect(room.facts.map((f) => f.content)).toEqual(['是个读书会'])
-    expect(room.summaries.map((s) => s.content)).toEqual(['群里聊了学日语和猫'])
-    expect(room.summaries[0]!.expiresAt).not.toBeNull()
 
     // 被推翻（失效）的事实不列、不计数
     await withSpace(database.db, ws.spaceId, (tx) =>
@@ -339,9 +344,8 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
 
     // 应用开了主人私聊的提升：标记为自己的人私聊时读得到画像层，别人读不到
     await api('POST', '/memories', {
-      uri: 'preferences://user',
+      uri: 'user://preferences/user',
       content: '主人喜欢简洁',
-      layer: 'owner',
       sensitivity: 'internal',
       glossary: ['简洁'],
     })
@@ -355,7 +359,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       )
       return ((await res.json()) as RecallResponse).candidates.map((c) => c.uri)
     }
-    expect(await recallAs('1001')).toEqual(['preferences://user'])
+    expect(await recallAs('1001')).toEqual(['user://preferences/user'])
     expect(await recallAs('1002')).toEqual([])
   })
 
@@ -422,6 +426,7 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     // 服务端自己判断出的原因不带外部原文，谁都看得到。旧版本写下的记录里是当时的写法，每一代都按现在的显示
     const generations: [stored: string, shown: string][] = [
       [NO_USABLE_KEY, NO_USABLE_KEY],
+      ['写入这一批的访问密钥均已吊销、作废或无权写入联系人层与情节层', NO_USABLE_KEY],
       ['写入这一批的 Key 均已吊销、作废或无权写入联系人层与情节层', NO_USABLE_KEY],
       ['写入这一批的 Key 都已吊销、作废或写不了对象层与情节层', NO_USABLE_KEY],
       [BUDGET_NO_SUMMARY, BUDGET_NO_SUMMARY],
@@ -483,7 +488,8 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
       ['住在上海', 'direct', '小明'],
       ['在学日语', 'group', '读书会'],
     ])
-    expect(merged.summaries.map((s) => s.content)).toEqual(['私聊里聊了上海'])
+    // 私聊里的会话摘要跟着并过来
+    expect(await summaryScope('私聊里聊了上海')).toBe(`direct:${keep.id}`)
     expect(merged.runs.map((r) => r.scope.kind).sort()).toEqual(['direct', 'group'])
     // 两个都在同一批里时，换完不留两个一样的 id
     const runIds = await withSpace(database.db, ws.spaceId, (tx) =>

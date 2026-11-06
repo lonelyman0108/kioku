@@ -114,12 +114,12 @@ const LIST_LIMIT = 1000
 // 凭据详情里最多列出这么多条引用它的记忆
 const REFERENCE_LIMIT = 200
 
-// 算数的引用：凭据主人私人层里没删除、不是 secret、仍有效的记忆（索引按正文重写，状态在这里判断）
+// 算数的引用：凭据所有者本人的记忆里没删除、不是 secret、仍有效的（索引按正文重写，状态在这里判断）
 const effectiveRef = (ownerAccountId: string) =>
   and(
     eq(memories.id, memoryCredentialRefs.memoryId),
     eq(memories.ownerAccountId, ownerAccountId),
-    eq(memories.layer, 'private'),
+    eq(memories.layer, 'user'),
     isNull(memories.deletedAt),
     ne(memories.sensitivity, 'secret'),
     STILL_VALID,
@@ -177,22 +177,19 @@ export class CredentialService {
     }
   }
 
-  // 能不能读到凭据：读不到私人层的 Key（以及群聊、私聊、定时任务等会话上下文）一条都看不到
+  // 能不能读到凭据：读不到本人的 Key（以及群聊、私聊、定时任务等会话上下文）一条都看不到
   private requireRead(): void {
     if (!canReadCredential(this.ctx.access, { ownerAccountId: this.owner, appIds: null })) {
       throw new MemoryError(
         403,
-        '无权读取凭据：需要可读私人层（private），敏感级上限不低于私密（private）',
+        '无权读取凭据：需要可读本人（user），敏感级上限不低于私密（private）',
       )
     }
   }
 
   private requireManage(): void {
     if (!canManageCredentials(this.ctx.access)) {
-      throw new MemoryError(
-        403,
-        '无权管理凭据：需要可读写私人层（private），敏感级上限为机密（secret）',
-      )
+      throw new MemoryError(403, '无权管理凭据：需要可读写本人（user），敏感级上限为机密（secret）')
     }
   }
 
@@ -698,6 +695,7 @@ export class CredentialService {
           id: memories.id,
           domain: memories.domain,
           path: memories.path,
+          title: memories.title,
           sensitivity: memories.sensitivity,
           updatedAt: memories.updatedAt,
         })
@@ -710,6 +708,7 @@ export class CredentialService {
         items: rows.slice(0, REFERENCE_LIMIT).map((r) => ({
           id: r.id,
           uri: formatUri(r.domain!, r.path!),
+          title: r.title!,
           sensitivity: r.sensitivity,
           updatedAt: r.updatedAt.toISOString(),
         })),

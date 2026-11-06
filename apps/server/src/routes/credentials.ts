@@ -246,7 +246,7 @@ function consoleCredentialRoutes(deps: Deps) {
     })
 }
 
-// 接入方：按标识访问应用主人的凭据，权限按 Key 算：读说明同私人层，取托管的值与管理凭据要 secret 级
+// 接入方：按标识访问应用所有者的凭据，权限按 Key 算：读说明同本人的私密记忆，取托管的值与管理凭据要 secret 级
 function keyCredentialRoutes(deps: Deps) {
   const common = { tags: ['credentials'], security: [{ bearer: [] }] }
   const use = createRoute({
@@ -268,7 +268,7 @@ function keyCredentialRoutes(deps: Deps) {
     ...common,
     method: 'post',
     path: '/credentials',
-    summary: '新建凭据，只给这个应用用；要能读写私人层的 secret 级 Key',
+    summary: '新建凭据，只给这个应用用；要能读写本人（user://）、secret 级的访问密钥',
     request: { body: jsonBody(KeyCreateCredentialRequest) },
     responses: { 201: jsonResponse('已创建', CredentialSummary), ...errors },
   })

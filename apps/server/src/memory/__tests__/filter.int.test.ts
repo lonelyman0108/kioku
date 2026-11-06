@@ -1,4 +1,11 @@
-import { LAYERS, SENSITIVITIES, type KeyScopes } from '@kioku/contracts'
+import {
+  CURATED_LAYERS,
+  LAYERS,
+  SENSITIVITIES,
+  sensitivityAllowed,
+  type KeyScopes,
+  type Layer,
+} from '@kioku/contracts'
 import { afterAll, beforeAll, describe, expect, it } from 'vitest'
 
 import {
@@ -70,29 +77,32 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
       // expired 是有效到已过，lapsed 是到期时间已过，future 是有效到还没到，edge 的有效到正好是 EDGE
       const variants = ['own', 'foreign', 'expired', 'lapsed', 'future', 'edge', 'deleted'] as const
       for (const layer of LAYERS) {
+        const curated = (CURATED_LAYERS as readonly Layer[]).includes(layer)
         for (const sensitivity of SENSITIVITIES) {
+          // 本人不设公开，数据库也不收
+          if (!sensitivityAllowed(layer, sensitivity)) continue
           for (const originScope of scopes) {
             for (const variant of variants) {
               n++
               const secret = sensitivity === 'secret'
+              // 本人的记忆都归某个成员；会话摘要里 own 与 foreign 两种归成员（不带会话上下文的会话），其余不归
+              const ownerBound =
+                layer === 'user' ||
+                (layer === 'episode' && (variant === 'own' || variant === 'foreign'))
               rows.push({
                 spaceId,
-                form: 'curated',
+                form: curated ? 'curated' : 'extracted',
                 layer,
                 sensitivity,
-                provenance: layer === 'subject' || layer === 'episode' ? 'untrusted' : 'agent',
+                provenance: curated ? 'agent' : 'untrusted',
                 originScope,
-                domain: 'd',
-                path: `m${n}`,
+                domain: curated ? layer : null,
+                path: curated ? `m${n}` : null,
+                title: curated ? `m${n}` : null,
                 content: secret ? null : 'c',
                 ciphertext: secret ? Buffer.from('x') : null,
                 wrappedKey: secret ? Buffer.from('x') : null,
-                ownerAccountId:
-                  layer === 'owner' || layer === 'private'
-                    ? variant === 'foreign'
-                      ? other
-                      : owner
-                    : null,
+                ownerAccountId: ownerBound ? (variant === 'foreign' ? other : owner) : null,
                 personaId:
                   layer === 'persona' ? (variant === 'foreign' ? foreignPersona : personaId) : null,
                 appId: layer === 'app' ? (variant === 'foreign' ? otherApp : appId) : null,
@@ -112,7 +122,7 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
           }
         }
       }
-      // subject 层需要真实对象，这里改为不挂对象的 episode 来覆盖来源作用域
+      // 联系人的事实要挂真实的联系人，这里改成不挂联系人的会话摘要来覆盖来源作用域
       const inserted = await tx
         .insert(memories)
         .values(rows.map((r) => (r.layer === 'subject' ? { ...r, layer: 'episode' as const } : r)))
@@ -161,7 +171,7 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
   }
   const cases: [string, KeyScopes, SessionContext][] = [
     ['无上下文 · 全权限', full, {}],
-    ['无上下文 · 只读 base 与 persona', { ...full, readLayers: ['base', 'persona'] }, {}],
+    ['无上下文 · 只读 core 与 persona', { ...full, readLayers: ['core', 'persona'] }, {}],
     ['无上下文 · public 上限', { ...full, maxSensitivity: 'public' }, {}],
     ['群聊 g1', full, { chatType: 'group', groupSubjectId: 'g1' }],
     ['陌生人私聊 s1', full, { chatType: 'direct', senderSubjectId: 's1' }],

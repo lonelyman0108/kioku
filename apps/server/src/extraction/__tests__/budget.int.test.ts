@@ -211,7 +211,7 @@ describe.skipIf(!testDatabaseUrl)('抽取预算', () => {
 
   it('预算用完了、这一批的 Key 又写不了会话摘要时，不请求模型', async () => {
     key = await ws.issueKey(appId, {
-      readLayers: ['base', 'subject', 'episode'],
+      readLayers: ['core', 'subject', 'episode'],
       writeLayers: ['subject'],
       maxSensitivity: 'public',
       admin: false,

@@ -1,7 +1,6 @@
 import type { HttpBindings } from '@hono/node-server'
 import { createRoute, z } from '@hono/zod-openapi'
 import {
-  DomainLayers,
   ErrorResponse,
   ExtractionBudget,
   ExtractionUsage,
@@ -21,7 +20,7 @@ import { memberRole, requireInstanceAdmin } from '../auth/middleware'
 import { exportSpace, type SpaceExport } from '../backup/spaceExport'
 import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
 import { acquireTransferSlot, withTransferSlot } from '../backup/transferGate'
-import { accounts, spaceMembers, spaces } from '../db/schema'
+import { accounts, spaceMembers } from '../db/schema'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -30,28 +29,6 @@ const params = z.object({ spaceId: z.uuid() })
 const forbidden = jsonResponse('没有权限', ErrorResponse)
 // 导出、检查与导入同时只做一个、排队有上限、每个账号同时最多占一个：满了就是这个
 const busy = jsonResponse('导出导入正忙，稍后再试', ErrorResponse)
-
-const read = createRoute({
-  method: 'get',
-  path: '/spaces/{spaceId}/domain-layers',
-  tags: ['console'],
-  summary: '空间的 domain 默认层：管理界面新建记忆时按 domain 带出层',
-  request: { params },
-  responses: { 200: jsonResponse('默认层', DomainLayers), 403: forbidden },
-})
-
-const save = createRoute({
-  method: 'put',
-  path: '/spaces/{spaceId}/domain-layers',
-  tags: ['console'],
-  summary: '修改空间的 domain 默认层（只有空间 owner）',
-  request: { params, body: jsonBody(DomainLayers) },
-  responses: {
-    200: jsonResponse('已保存', DomainLayers),
-    400: jsonResponse('请求不合法', ErrorResponse),
-    403: forbidden,
-  },
-})
 
 const budget = createRoute({
   method: 'get',
@@ -89,7 +66,7 @@ const exportRoute = createRoute({
   path: '/spaces/{spaceId}/export',
   tags: ['console'],
   summary:
-    '导出这个空间（只有空间 owner）：共享的内容加上自己的画像、私人层与凭据，用口令加密成一个文件，可以导入到另一个实例的新空间',
+    '导出这个空间（只有空间 owner）：共享的内容加上自己的本人记忆与凭据，用口令加密成一个文件，可以导入到另一个实例的新空间',
   request: { params, body: jsonBody(SpaceExportRequest) },
   responses: {
     200: {
@@ -152,7 +129,7 @@ function importRoute(deps: Deps) {
     path: '/spaces/import',
     tags: ['console'],
     summary:
-      '把导出文件导入成一个新空间（只有实例管理员），导入人是新空间的 owner，导出人的画像层、私人层与凭据都归导入人；Key 不在文件里，要重新签发',
+      '把导出文件导入成一个新空间（只有实例管理员），导入人是新空间的 owner，导出人的本人记忆与凭据都归导入人；Key 不在文件里，要重新签发',
     middleware: uploadMiddleware(deps),
     request: {
       body: { required: true, content: { 'multipart/form-data': { schema: SpaceImportForm } } },
@@ -381,25 +358,5 @@ export function spaceRoutes(deps: Deps) {
       }
       await saveExtractionBudget(deps.db, spaceId, c.req.valid('json'))
       return c.json(await extractionUsage(deps.db, spaceId), 200)
-    })
-    .openapi(read, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '无权访问此空间' }, 403)
-      }
-      const [row] = await deps.db
-        .select({ domainLayers: spaces.domainLayers })
-        .from(spaces)
-        .where(eq(spaces.id, spaceId))
-      return c.json({ defaults: row?.domainLayers ?? {} }, 200)
-    })
-    .openapi(save, async (c) => {
-      const { spaceId } = c.req.valid('param')
-      if ((await memberRole(deps, spaceId, c.get('console').accountId)) !== 'owner') {
-        return c.json({ error: '仅空间所有者可修改分区默认层' }, 403)
-      }
-      const { defaults } = c.req.valid('json')
-      await deps.db.update(spaces).set({ domainLayers: defaults }).where(eq(spaces.id, spaceId))
-      return c.json({ defaults }, 200)
     })
 }
