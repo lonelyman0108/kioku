@@ -36,7 +36,6 @@ import {
 } from './types'
 import { decodeItem, decodeSync, type SyncedState } from './vault'
 
-export { totpCode } from './totp'
 export type { VaultDiagnostic } from './http'
 
 export interface VaultClientOptions {

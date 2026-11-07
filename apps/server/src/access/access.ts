@@ -395,10 +395,6 @@ export function canUseCredential(access: Access, credential: CredentialFacts): b
   return credentialDenial(access, credential, 'use') === null
 }
 
-export function canManageCredentials(access: Access): boolean {
-  return credentialDenial(access, { appIds: null }, 'manage') === null
-}
-
 export type ConsoleRole = 'owner' | 'editor' | 'viewer'
 
 // 管理界面里成员本人的权限，与签发 Key 的规则一致：secret 只有空间 owner 能读写，viewer 只读，

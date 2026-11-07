@@ -3,7 +3,6 @@ import { describe, expect, it } from 'vitest'
 
 import {
   accessMatrix,
-  canManageCredentials,
   canModify,
   canRead,
   canUseCredential,
@@ -309,7 +308,7 @@ describe('凭据', () => {
     ]
     for (const access of contexts) {
       expect(credentialDenial(access, own, 'use')).toBe('context')
-      expect(canManageCredentials(access)).toBe(false)
+      expect(credentialDenial(access, own, 'manage')).toBe('context')
     }
   })
 
@@ -322,7 +321,7 @@ describe('凭据', () => {
   })
 
   it('管理要凭据能力是管理，并能读写本人', () => {
-    expect(canManageCredentials(resolveAccess(manageKey, app))).toBe(true)
+    expect(credentialDenial(resolveAccess(manageKey, app), own, 'manage')).toBeNull()
     expect(credentialDenial(resolveAccess(useKey, app), own, 'manage')).toBe('capability')
     expect(
       credentialDenial(
@@ -337,9 +336,9 @@ describe('凭据', () => {
     for (const role of ['editor', 'viewer'] as const) {
       const access = consoleAccess(role, OWNER)
       expect(canUseCredential(access, own)).toBe(true)
-      expect(canManageCredentials(access)).toBe(false)
+      expect(credentialDenial(access, own, 'manage')).not.toBeNull()
     }
-    expect(canManageCredentials(consoleAccess('owner', OWNER))).toBe(true)
+    expect(credentialDenial(consoleAccess('owner', OWNER), own, 'manage')).toBeNull()
   })
 
   it('权限范围给出每个会话上下文下实际的凭据能力', () => {
