@@ -15,7 +15,9 @@ import { bodyLimit } from 'hono/body-limit'
 
 import { isInstanceAdmin, memberRole } from '../auth/middleware'
 import { withTransferSlot } from '../backup/transferGate'
+import { credentialServiceForConsole } from '../credential/context'
 import { placeholderIdentifiers } from '../credential/placeholders'
+import type { KnownCredentialValues } from '../credential/service'
 import { pgCauseCode, pgErrorCode } from '../db/client'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -25,6 +27,7 @@ import {
   assertExecutable,
   credentialHints,
   existingImportApps,
+  hasConvertedImports,
   inPlanSnapshot,
   loreDataTime,
   PLAN_CHANGED,
@@ -32,6 +35,7 @@ import {
   planImport,
   planImportFor,
   planSync,
+  plaintextSpots,
   previewImport,
   requestLayer,
   staleAgainst,
@@ -39,6 +43,8 @@ import {
   type ExistingApp,
   type ImportOptions,
   type ImportPreview,
+  type PlaintextConversion,
+  type PlaintextSpot,
   type PlanSnapshot,
   type LoreSnapshot,
   type SyncPlan,
@@ -104,22 +110,87 @@ async function basePlan(
   snapshot: LoreSnapshot,
   existing: ExistingApp[],
   options: Pick<ImportOptions, 'accountId' | 'persona' | 'exportedAt'>,
+  known: KnownCredentialValues | null,
 ): Promise<BasePlan & { preview: ImportPreview; sync: SyncPlan; fingerprint: string }> {
   const base = await planImportFor(snap, snapshot, existing, {
     ...options,
     secretUris: new Set(),
   })
   const preview = await previewImport(snap, base.plan, base.imports)
-  const sync = await planSync(snap, base.plan, snapshot, base.imports)
+  const sync = await planSync(snap, base.plan, snapshot, base.imports, known)
   return { ...base, preview, sync, fingerprint: planFingerprint(base.plan, preview, sync) }
 }
 
-// 计划视图：只有元数据，没有正文（同步项的 request 与 context 里有正文，这里不带）
+// 凭据现在的值：比对正文里的疑似明文、同步换过占位符的记忆都要用。要请求密码库，所以在出计划的快照之外、
+// 每次出计划之前取一次；没有疑似明文、也没有换过占位符的导入时不取，不碰密码库
+async function knownValues(
+  deps: Deps,
+  spaceId: string,
+  accountId: string,
+  snapshot: LoreSnapshot,
+): Promise<KnownCredentialValues | null> {
+  const spotted = snapshot.nodes.some((n) => plaintextSpots(n.content, null).length > 0)
+  if (!spotted && !(await hasConvertedImports(deps.db, spaceId))) return null
+  return (await credentialServiceForConsole(deps, spaceId, accountId)).knownValues()
+}
+
+// 每个节点正文里的疑似明文与对上的凭据：节点 uuid → 各处（含值，只在服务端里用）
+function spotsOf(
+  snapshot: LoreSnapshot,
+  known: KnownCredentialValues | null,
+): Map<string, PlaintextSpot[]> {
+  return new Map(snapshot.nodes.map((n) => [n.uuid, plaintextSpots(n.content, known)]))
+}
+
+// 要换成占位符的几处：按 Lore 的 URI（别名也算）找到节点，按 index 找到那一处；对不上节点或那一处时 400。
+// 写入之前刚比过一次（spots 是这次取的值算的），这时对不上凭据的照原样写，见 PlaintextConversion
+function conversionsOf(
+  snapshot: LoreSnapshot,
+  spots: Map<string, PlaintextSpot[]>,
+  wanted: { source: string; index: number }[],
+): Map<string, PlaintextConversion[]> {
+  const nodeByUri = new Map<string, LoreSnapshot['nodes'][number]>()
+  for (const node of snapshot.nodes) {
+    nodeByUri.set(node.uri, node)
+    for (const alias of node.aliases) nodeByUri.set(alias, node)
+  }
+  const out = new Map<string, PlaintextConversion[]>()
+  const problems: string[] = []
+  for (const { source, index } of wanted) {
+    const node = nodeByUri.get(source)
+    const spot = node ? spots.get(node.uuid)?.[index] : undefined
+    if (!node) {
+      problems.push(`要换成占位符的 ${source} 在 Lore 中不存在`)
+      continue
+    }
+    if (!spot) {
+      problems.push(`${source} 的正文中没有第 ${index + 1} 处疑似明文`)
+      continue
+    }
+    const list = out.get(node.uuid) ?? []
+    if (list.some((c) => c.value === spot.value && c.line === spot.line)) continue
+    list.push({
+      line: spot.line,
+      value: spot.value,
+      credential: spot.credential
+        ? { identifier: spot.credential.identifier, field: spot.credential.field }
+        : null,
+    })
+    out.set(node.uuid, list)
+  }
+  if (problems.length) {
+    throw new MemoryError(400, `计划有误，无法执行：${[...new Set(problems)].join('；')}`)
+  }
+  return out
+}
+
+// 计划视图：只有元数据，没有正文（同步项的 request 与 context 里有正文，这里不带）。疑似明文只给位置、类别与对上的凭据
 function planView(
   { snapshot, exportedAt }: ParsedLoreBackup,
   { plan, preview, sync, fingerprint }: Awaited<ReturnType<typeof basePlan>>,
   dataTime: Date | null,
   secretAvailable: boolean,
+  spots: Map<string, PlaintextSpot[]>,
 ): LoreImportPlan {
   const targetsOf = new Map<string, ImportPreview['targets']>()
   for (const t of preview.targets) {
@@ -164,6 +235,12 @@ function planView(
           }),
           credentialRefs: [...placeholderIdentifiers(node.content ?? '')].sort(),
           credentialHints: credentialHints(node),
+          plaintext: (spots.get(node.uuid) ?? []).map(({ index, line, kind, credential }) => ({
+            index,
+            line,
+            kind,
+            credential,
+          })),
         },
       ]
     }),
@@ -216,19 +293,25 @@ export function loreImportRoutes(deps: Deps) {
       const { source, persona = LORE_DEFAULT_PERSONA } = c.req.valid('json')
       const parsed = await readSource(deps, accountId, source, c.req.raw.signal)
       const target = { db: deps.db, spaceId, accountId, masterKey: deps.masterKey }
+      const known = await knownValues(deps, spaceId, accountId, parsed.snapshot)
       // 已有应用、基准计划与数据时间都在出计划的同一个快照里读
       const { base, dataTime } = await inPlanSnapshot(target, async (snap) => {
         const existing = await existingImportApps(snap.db, spaceId)
-        const base = await basePlan(snap, parsed.snapshot, existing, {
-          accountId,
-          persona,
-          exportedAt: parsed.exportedAt,
-        })
+        const base = await basePlan(
+          snap,
+          parsed.snapshot,
+          existing,
+          { accountId, persona, exportedAt: parsed.exportedAt },
+          known,
+        )
         // 拉取读的是现在的 Lore，不用判断新旧
         const dataTime = source.kind === 'file' ? await loreDataTime(snap.db, spaceId) : null
         return { base, dataTime }
       })
-      return c.json(planView(parsed, base, dataTime, deps.masterKey !== null), 200)
+      return c.json(
+        planView(parsed, base, dataTime, deps.masterKey !== null, spotsOf(parsed.snapshot, known)),
+        200,
+      )
     })
     .openapi(applyRoute, async (c) => {
       const { spaceId } = c.req.valid('param')
@@ -240,27 +323,35 @@ export function loreImportRoutes(deps: Deps) {
       const { snapshot, exportedAt } = await readSource(deps, accountId, source, c.req.raw.signal)
       const target = { db: deps.db, spaceId, accountId, masterKey: deps.masterKey }
       const options = { accountId, persona, exportedAt }
+      // 凭据的值在占名额之前、事务之外重新取：要换的几处在这里再和凭据比一次，同步也按它
+      const known = await knownValues(deps, spaceId, accountId, snapshot)
+      const convert = conversionsOf(snapshot, spotsOf(snapshot, known), body.convertPlaintext)
       // 名额只占「算基准计划、比指纹、写入」这一段，两次执行不会交错。客户端断开也写完：
       // 导入可以重复执行，停在中间没有好处
       return withTransferSlot(accountId, c.req.raw.signal, async () => {
         // 出计划的几步（基准计划、比指纹、按勾选重算、判断新旧）在同一个只读快照里，写入在快照之外
         const { plan, sync, imports } = await inPlanSnapshot(target, async (snap) => {
           const existing = await existingImportApps(snap.db, spaceId)
-          const base = await basePlan(snap, snapshot, existing, options)
+          const base = await basePlan(snap, snapshot, existing, options, known)
           if (base.fingerprint !== body.fingerprint) throw new MemoryError(409, PLAN_CHANGED)
           // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍。有勾选时沿用基准计划查到的占用，不再查：
           // 写入的才是看过的计划减去勾掉的（之后才被占用的由写入时的数据库判断）
           const ticked = body.secretUris.length > 0 || body.excludeUris.length > 0
-          const plan = ticked
-            ? planImport(snapshot, existing, {
-                ...options,
-                secretUris: new Set(body.secretUris),
-                excludeUris: new Set(body.excludeUris),
-                occupied: base.occupied,
-              })
-            : base.plan
+          // 换占位符只改新建时写的正文（PlannedMemory.converted），预览、同步与新旧的判断都不受它影响
+          const plan =
+            ticked || convert.size
+              ? planImport(snapshot, existing, {
+                  ...options,
+                  secretUris: new Set(body.secretUris),
+                  excludeUris: new Set(body.excludeUris),
+                  occupied: base.occupied,
+                  convert,
+                })
+              : base.plan
           assertExecutable(plan, deps.masterKey)
-          const sync = ticked ? await planSync(snap, plan, snapshot, base.imports) : base.sync
+          const sync = ticked
+            ? await planSync(snap, plan, snapshot, base.imports, known)
+            : base.sync
           if (source.kind === 'file' && !body.confirmStale) {
             const preview = ticked ? await previewImport(snap, plan, base.imports) : base.preview
             const stale = staleAgainst(

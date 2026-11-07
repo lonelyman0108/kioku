@@ -243,3 +243,22 @@ export function decodeItem(json: unknown, state: SyncedState): VaultItem {
   const decoded = decodeCipher(json, orgKey, true)
   return { ...decoded.summary, values: decoded.values }
 }
+
+// 同步响应里组织条目的值：和 decodeSync 读同一份响应、用同一份组织密钥，算哪些条目的规则也一样
+// （回收站里的、个人条目、组织密钥不在手里的不算），解不开的跳过
+export function decodeSyncItems(json: unknown, state: SyncedState): VaultItem[] {
+  const items: VaultItem[] = []
+  for (const cipher of list(prop(json, 'ciphers'))) {
+    if (prop(cipher, 'deletedDate')) continue
+    const organizationId = str(cipher, 'organizationId')
+    const orgKey = organizationId ? state.orgKeys.get(organizationId) : undefined
+    if (!orgKey) continue
+    try {
+      const decoded = decodeCipher(cipher, orgKey, true)
+      items.push({ ...decoded.summary, values: decoded.values })
+    } catch (err) {
+      if (!unreadable(err)) throw err
+    }
+  }
+  return items
+}

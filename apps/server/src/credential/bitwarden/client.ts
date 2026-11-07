@@ -34,7 +34,7 @@ import {
   type VaultSnapshot,
   type VaultTwoFactorProvider,
 } from './types'
-import { decodeItem, decodeSync, type SyncedState } from './vault'
+import { decodeItem, decodeSync, decodeSyncItems, type SyncedState } from './vault'
 
 export type { VaultDiagnostic } from './http'
 
@@ -226,6 +226,8 @@ interface Access {
   expiresAt: number
   // 最近一次同步的结果，再同步时换掉
   state: SyncedState
+  // 换令牌时那次同步的原始响应（条目的值还是密文）：紧接着的 items() 直接用它，不再同步第二次。用过、或者这个令牌再被用到时就丢掉
+  raw: unknown
 }
 
 class Session implements VaultSession {
@@ -255,7 +257,20 @@ class Session implements VaultSession {
     await this.saveRefreshToken()
     const fresh = await this.ensureAccess()
     if (fresh.synced) return fresh.access.state.snapshot
-    return (await this.withAccess((access) => this.sync(access))).snapshot
+    return (await this.withAccess((access) => this.sync(access))).state.snapshot
+  }
+
+  async items(): Promise<VaultItem[]> {
+    await this.saveRefreshToken()
+    const { json, state } = await this.withAccess(async (access, fresh) => {
+      if (fresh && access.raw !== null) {
+        const json = access.raw
+        access.raw = null
+        return { json, state: access.state }
+      }
+      return this.sync(access)
+    })
+    return formatLogged(this.http, 'sync', () => decodeSyncItems(json, state))
   }
 
   async item(id: string): Promise<VaultItem> {
@@ -285,7 +300,7 @@ class Session implements VaultSession {
       ) {
         const synced = await this.sync(access)
         if (!synced) return null
-        return { json: res.json, state: synced }
+        return { json: res.json, state: synced.state }
       }
       return { json: res.json, state: access.state }
     })
@@ -315,6 +330,7 @@ class Session implements VaultSession {
   private async ensureAccess(): Promise<{ access: Access; synced: boolean }> {
     const current = this.access
     if (current && current.expiresAt - EXPIRY_MARGIN_MS > this.now()) {
+      current.raw = null
       return { access: current, synced: false }
     }
     this.pending ??= this.refresh().finally(() => {
@@ -345,9 +361,14 @@ class Session implements VaultSession {
     await this.saveRefreshToken()
 
     // 刚换到的令牌就被拒绝：按需要重新登录算
-    const state = await this.checkedSync(grant.accessToken)
-    if (!state) throw reauth()
-    const access: Access = { token: grant.accessToken, expiresAt: grant.expiresAt, state }
+    const synced = await this.checkedSync(grant.accessToken)
+    if (!synced) throw reauth()
+    const access: Access = {
+      token: grant.accessToken,
+      expiresAt: grant.expiresAt,
+      state: synced.state,
+      raw: synced.json,
+    }
     this.access = access
     return access
   }
@@ -375,21 +396,21 @@ class Session implements VaultSession {
   }
 
   // 用这个令牌再同步一次，结果交给 onSynced 之后换掉内存里的快照与组织密钥。401 返回 null
-  private async sync(access: Access): Promise<SyncedState | null> {
-    let state: SyncedState | null
+  private async sync(access: Access): Promise<{ json: unknown; state: SyncedState } | null> {
+    let synced: { json: unknown; state: SyncedState } | null
     try {
-      state = await this.checkedSync(access.token)
+      synced = await this.checkedSync(access.token)
     } catch (err) {
       // onSynced 拒绝了（或者同步失败）：丢掉这个令牌，下一次调用重新换令牌、再检查一遍，不用缓存的结果取值
       if (this.access === access) this.access = null
       throw err
     }
-    if (state) access.state = state
-    return state
+    if (synced) access.state = synced.state
+    return synced
   }
 
   // 同步并交给 onSynced；它抛错时以同样的错误失败，这次同步的结果不用。401 返回 null
-  private async checkedSync(token: string): Promise<SyncedState | null> {
+  private async checkedSync(token: string): Promise<{ json: unknown; state: SyncedState } | null> {
     const res = await vaultRequest(this.http, `${this.endpoints.api}/sync?excludeDomains=true`, {
       method: 'GET',
       headers: { authorization: `Bearer ${token}` },
@@ -398,6 +419,6 @@ class Session implements VaultSession {
     if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
     const state = formatLogged(this.http, 'sync', () => decodeSync(res.json, this.userKey))
     await this.input.onSynced?.(state.snapshot)
-    return state
+    return { json: res.json, state }
   }
 }

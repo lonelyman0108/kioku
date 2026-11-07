@@ -90,10 +90,11 @@ export const LoreImportApplyRequest = LoreImportPlanRequest.extend({
   excludeUris: SelectedUris,
   // 文件比这个空间已写入的数据旧时，确认仍要写
   confirmStale: z.boolean().default(false),
-  // 要换成占位符的疑似明文：source 是节点的 Lore URI（别名也算），index 是计划里这个节点 plaintext 的 index。
-  // 只收计划里对上了凭据的那几处：重算的计划里这一处对不上凭据、或对上的不是同一条时返回 409，要重看。
-  // 这个值在正文里出现几处换几处，写成 {{cred:<标识>#<字段>}}；节点的写入目标放不进占位符时
-  // （见 placeholderAllowed，标了 secret 的按机密算）返回 400。同时在 excludeUris 里的以那边为准
+  // 要换成占位符的疑似明文：source 是节点的 Lore URI（别名也算），index 是计划里这个节点 plaintext 的 index，
+  // 对不上节点或那一处时返回 400。写入之前服务端重新取凭据的值、再比一次，这个值在正文里出现几处换几处，
+  // 写成 {{cred:<标识>#<字段>}}。只改新建的目标：之前已导入的、写入目标放不进占位符的（见 placeholderAllowed，
+  // 标了 secret 的按机密算）、值也出现在坐标、标题、触发场景或关键词里的、再比时已对不上凭据的（凭据刚改过值），
+  // 都照原样写，原因列进结果的 plaintextKept。勾选不改变计划的指纹、同步与新旧的判断。同时在 excludeUris 里的以那边为准
   convertPlaintext: z
     .array(z.object({ source: z.string().max(2048), index: z.number().int().min(0) }))
     .max(100_000)
@@ -262,5 +263,9 @@ export const LoreImportResult = z.object({
   movedInLore: z.array(z.object({ uri: z.string(), current: z.string().nullable() })),
   failed: z.array(LoreFailure),
   sync: z.object({ updated: z.array(z.string()), failed: z.array(LoreFailure) }),
+  // 按 convertPlaintext 换了占位符的新建目标
+  plaintextConverted: z.array(z.string()).default([]),
+  // 勾选了换占位符、却照原样写的目标与原因（不含正文与值），这些明文导入后可在待处理中转存
+  plaintextKept: z.array(LoreFailure).default([]),
 })
 export type LoreImportResult = z.infer<typeof LoreImportResult>

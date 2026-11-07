@@ -284,7 +284,7 @@ function consoleOnlyRoutes(deps: Deps) {
     path: '/spaces/{spaceId}/memories/convert-to-credential',
     tags: ['console'],
     summary:
-      '把正文里的一段明文转存成托管的凭据：一个事务里建凭据、把值换成占位符、从历史快照里拿掉这个值、删掉旧向量。响应不带值',
+      '把正文里的一段明文转存成凭据（只有空间 owner）：新建托管的、换成已有凭据的字段，或给密码库的条目起标识。后两种先在事务外核对这个字段现在的值，不等时 400。然后一个事务里建凭据、把值换成占位符、从历史快照里拿掉这个值、删掉旧向量。响应不带值',
     request: { params, body: jsonBody(ConvertToCredentialRequest) },
     responses: { 200: jsonResponse('转存的结果', ConvertedToCredential), ...errors },
   })
@@ -367,19 +367,23 @@ function consoleOnlyRoutes(deps: Deps) {
         spaceId,
         c.get('console').accountId,
       )
-      const { identifier, name, description, field, value } = c.req.valid('json')
-      const { memory, ...outcome } = await service.convertToCredential(c.req.valid('json'), {
-        create: (tx) =>
-          credentials.createHostedIn(tx, {
-            identifier,
-            name,
-            ...(description !== undefined ? { description } : {}),
-            values: { [field]: value },
-          }),
-        view: (tx, id) => credentials.viewIn(tx, id),
-      })
+      const body = c.req.valid('json')
+      // 去处在事务外准备好：credential 与 vault 要先向密码库核对值，不在事务里请求外部服务
+      const sink = await credentials.convertTarget(body.target, body.value)
+      const { memory, ...outcome } = await service.convertToCredential(
+        { ...body, identifier: sink.identifier, field: sink.field },
+        { create: sink.apply, view: (tx, id) => credentials.viewIn(tx, id) },
+      )
       // 已经提交了，这里不再做会失败的事。管理界面的服务给出的就是 ConsoleMemoryView（见 ConsoleView）
-      return c.json({ memory: memory as ConsoleMemoryView, ...outcome }, 200)
+      return c.json(
+        {
+          memory: memory as ConsoleMemoryView,
+          ...outcome,
+          created: sink.created,
+          field: sink.field,
+        },
+        200,
+      )
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)
