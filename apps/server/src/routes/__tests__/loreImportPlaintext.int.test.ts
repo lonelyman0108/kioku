@@ -9,7 +9,7 @@ import {
 } from '@kioku/contracts'
 import { and, eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { consoleAccess } from '../../access/access'
 import { createApp } from '../../app'
@@ -28,6 +28,7 @@ import {
   PLAN_CHANGED,
   planImportFor,
   planSync,
+  plaintextSpots,
   readLore,
 } from '../../importer/lore'
 import { MemoryService } from '../../memory/service'
@@ -40,6 +41,12 @@ import {
   seedLoreNode,
   withoutDeprecatedContent,
 } from '../../testing/loreFixture'
+
+// 数逐处扫正文的次数，实现不变
+vi.mock('../../importer/lore', async (importOriginal) => {
+  const actual = await importOriginal<typeof import('../../importer/lore')>()
+  return { ...actual, plaintextSpots: vi.fn(actual.plaintextSpots) }
+})
 
 const EXPORTED = '2026-01-01T00:00:00.000Z'
 const WIFI = 'hunter2-Very-Secret'
@@ -230,6 +237,16 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
     expect(plan.credentialMatch).toEqual({ unavailableConnections: 0, unreadableCredentials: 0 })
     // 比值不算取用，不记访问事件
     expect(await accessEvents()).toBe(accessBefore)
+  })
+
+  it('一次 /plan 里每个节点的正文只逐处扫一次', async () => {
+    await hostedWifi()
+    const source = await fileSource()
+    vi.mocked(plaintextSpots).mockClear()
+    await planOf(source)
+    const scanned = vi.mocked(plaintextSpots).mock.calls.map(([content]) => content)
+    expect(scanned).toHaveLength(3)
+    expect(new Set(scanned).size).toBe(3)
   })
 
   it('没有疑似明文、也没有换过占位符的导入时不碰密码库，计划里不报比对情况', async () => {
