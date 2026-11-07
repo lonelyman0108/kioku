@@ -164,6 +164,8 @@ function planView(
           }),
           credentialRefs: [...placeholderIdentifiers(node.content ?? '')].sort(),
           credentialHints: credentialHints(node),
+          // 和已有凭据同值的疑似明文还没有比对
+          plaintext: [],
         },
       ]
     }),

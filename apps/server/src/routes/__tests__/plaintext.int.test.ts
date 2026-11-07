@@ -9,24 +9,11 @@ import type { Database } from '../../db/client'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { TOKEN_SAMPLES } from '../../testing/plaintext'
 
-// 令牌样例在运行时拼出来：仓库里不出现完整的令牌写法，免得被托管平台的密钥扫描拦下
 const join = (...parts: string[]) => parts.join('')
 const run = (n: number) => 'aB3dE5gH7jK9mN1pQ2rS4tU6vW8xY0zC'.repeat(4).slice(0, n)
-const TOKENS = [
-  join('sk', '-', run(48)),
-  join('sk', '-proj-', run(20), '_', run(40)),
-  join('sk', '-ant-api03-', run(40), '-', run(40)),
-  join('gh', 'p_', run(36)),
-  join('github', '_pat_', run(22), '_', run(59)),
-  join('gl', 'pat-', run(20)),
-  join('xo', 'xb-', '1234567890-', run(24)),
-  join('AK', 'IA', run(16).toUpperCase()),
-  join('ey', 'J', run(30), '.', 'ey', 'J', run(40), '.', run(43)),
-  join('-----BEGIN RSA ', 'PRIVATE KEY-----\n', run(64)),
-  join('-----BEGIN PGP ', 'PRIVATE KEY BLOCK-----\n\n', run(64)),
-  join('kio', 'ku_', run(12), '_', run(40)),
-]
+const TOKENS = TOKEN_SAMPLES.map((t) => t.token)
 
 // 界面、导入工具与概览统计用的是同一条规则：JS 里直接用正则，数据库里把它的 source 交给 ~*
 const SAMPLES = [
@@ -133,7 +120,7 @@ describe.skipIf(!testDatabaseUrl)('明文凭据提醒', () => {
   const create = async (body: Record<string, unknown>) => {
     const res = await app.request(
       `${space()}/memories`,
-      jsonRequest('POST', body, { cookie: ws.cookie }),
+      jsonRequest('POST', { ...body, allowPlaintext: true }, { cookie: ws.cookie }),
     )
     expect(res.status).toBe(201)
   }

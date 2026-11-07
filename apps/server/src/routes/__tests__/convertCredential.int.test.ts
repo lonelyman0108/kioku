@@ -1,4 +1,4 @@
-import { randomBytes } from 'node:crypto'
+import { randomBytes, randomUUID } from 'node:crypto'
 import { inspect } from 'node:util'
 
 import {
@@ -39,6 +39,7 @@ import {
 import { MemoryService } from '../../memory/service'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { setPlaintextContent } from '../../testing/plaintext'
 
 const VALUE = 'hunter2-Very-Secret'
 const BODY = `访客网络的密码：${VALUE}，别告诉别人。备用写法 ${VALUE}`
@@ -92,17 +93,31 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     if (res.status !== status) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return (await res.json()) as T
   }
-  const remember = async (body: Record<string, unknown>, cookie = ws.cookie) =>
-    ok<MemoryView>(await send('POST', '/memories', body, cookie), 201)
+  // 空间 owner 带着疑似明文照样保存；别的成员先写一段普通的正文，再直接改成要的正文
+  const remember = async (body: Record<string, unknown>, cookie = ws.cookie) => {
+    if (cookie === ws.cookie) {
+      return ok<MemoryView>(
+        await send('POST', '/memories', { ...body, allowPlaintext: true }, cookie),
+        201,
+      )
+    }
+    const view = await ok<MemoryView>(
+      await send('POST', '/memories', { ...body, content: '待改的正文' }, cookie),
+      201,
+    )
+    await setPlaintextContent(database.db, ws.spaceId, view.id, body.content as string)
+    return { ...view, content: body.content as string }
+  }
   const edit = async (body: Record<string, unknown>) =>
-    ok<MemoryView>(await send('PATCH', '/memories', body))
+    ok<MemoryView>(await send('PATCH', '/memories', { ...body, allowPlaintext: true }))
   const move = async (from: string, to: string) =>
     ok<MemoryView>(await send('POST', '/memories/move', { from, to }))
   const seedNote = (extra: Record<string, unknown> = {}) =>
     remember({ uri: 'user://notes/wifi', content: BODY, ...extra })
+  // extra 里的 value 放在请求的顶层，其余的放进托管的去处
   const convert = (
     m: { id: string; version: number },
-    extra: Record<string, unknown> = {},
+    { value = VALUE, ...target }: Record<string, unknown> = {},
     cookie = ws.cookie,
   ) =>
     send(
@@ -111,11 +126,14 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       {
         memoryId: m.id,
         expectedVersion: m.version,
-        value: VALUE,
-        identifier: 'wifi',
-        name: '无线网络',
-        field: 'password',
-        ...extra,
+        value,
+        target: {
+          kind: 'hosted',
+          identifier: 'wifi',
+          name: '无线网络',
+          field: 'password',
+          ...target,
+        },
       },
       cookie,
     )
@@ -683,6 +701,30 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       await untouched(m)
     })
 
+    it('换成已有凭据、给密码库条目起标识这两种去处暂不支持：400，什么都不改', async () => {
+      const m = await seedNote()
+      for (const target of [
+        { kind: 'credential', credentialId: randomUUID(), field: 'password' },
+        {
+          kind: 'vault',
+          connectionId: randomUUID(),
+          itemId: 'item-1',
+          itemField: 'login.password',
+          identifier: 'wifi',
+        },
+      ]) {
+        const res = await send('POST', '/memories/convert-to-credential', {
+          memoryId: m.id,
+          expectedVersion: m.version,
+          value: VALUE,
+          target,
+        })
+        expect(res.status, target.kind).toBe(400)
+        expect(((await res.json()) as { error: string }).error).toBe('暂不支持这种转存去处')
+      }
+      await untouched(m)
+    })
+
     it('标识冲突：409，什么都不留下', async () => {
       const m = await seedNote()
       const taken = await send('POST', '/credentials', {
@@ -762,9 +804,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
             memoryId: m.id,
             expectedVersion: m.version,
             value: VALUE,
-            identifier: 'wifi',
-            name: '无线网络',
-            field: 'password',
+            target: { kind: 'hosted', identifier: 'wifi', name: '无线网络', field: 'password' },
           },
           { cookie: ws.cookie },
         ),

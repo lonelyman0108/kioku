@@ -107,7 +107,13 @@ export function createApp(deps: Deps) {
   // 业务规则错误带着自己的状态码；请求本身的问题（依赖库抛出的 4xx）是调用方的错，不打堆栈（见 requestError）；
   // 其余错误不把内部信息透给调用方，日志也不带 SQL 与参数（参数可能就是记忆正文，见 logInternalError）
   app.onError((err, c) => {
-    if (err instanceof MemoryError) return c.json({ error: err.message }, err.status)
+    if (err instanceof MemoryError) {
+      // 新增的疑似明文被拒时带上每一处的行号与类别（MemoryWriteError）
+      const body = err.plaintext
+        ? { error: err.message, plaintext: err.plaintext }
+        : { error: err.message }
+      return c.json(body, err.status)
+    }
     if (err instanceof HTTPException && err.status < 500) return requestError(c, err)
     logInternalError('接口内部错误', err)
     return c.json({ error: '服务内部错误' }, 500)

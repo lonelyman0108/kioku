@@ -7,6 +7,7 @@ import {
   replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../placeholders'
+import { TOKEN_SAMPLES } from '../../testing/plaintext'
 
 describe('凭据占位符', () => {
   it('找出整条与单个字段的引用，代码块与行内代码里的也算', () => {
@@ -176,5 +177,32 @@ describe('提示语打码', () => {
     expect(maskPlaintextCredentials('密码：{{cred:router#password}}')).toBe(
       '密码：{{cred:router#password}}',
     )
+  })
+
+  it('每一类令牌整个盖掉：单独写、写在句子里、写在引号里、跟在写法后面', () => {
+    for (const { name, token } of TOKEN_SAMPLES) {
+      for (const [text, expected] of [
+        [token, '***'],
+        [`第一行\n用 ${token}`, '第一行\n用 ***'],
+        [`export KEY="${token}"`, 'export KEY=***'],
+        [`token: ${token}`, 'token: ***'],
+        [`secret = \n${token}`, 'secret = \n***'],
+      ] as const) {
+        const masked = maskPlaintextCredentials(text)
+        expect(masked, `${name}: ${text}`).toBe(expected)
+        expect(looksLikePlaintextCredential(masked), name).toBe(false)
+      }
+    }
+  })
+
+  it('私钥块跨好几行，整段盖掉，之后的行照常', () => {
+    const key = TOKEN_SAMPLES.find((s) => s.name === 'private_key')!.token
+    expect(maskPlaintextCredentials(`私钥：\n${key}\n用完删掉`)).toBe('私钥：\n***\n用完删掉')
+  })
+
+  it('值里带着占位符的照样盖掉', () => {
+    const masked = maskPlaintextCredentials('前一行\n密码："abc{{cred:x}}"')
+    expect(masked).toBe('前一行\n***')
+    expect(looksLikePlaintextCredential(masked)).toBe(false)
   })
 })

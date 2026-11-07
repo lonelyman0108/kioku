@@ -922,7 +922,9 @@ export async function applyImport(
       continue
     }
     try {
+      // 疑似明文在计划里处理（标成机密或换成占位符），这里不再拦
       await service.create(item.request, {
+        plaintextGate: false,
         eventType: 'import',
         eventContext: item.context,
         createdAt: item.createdAt,
@@ -1303,6 +1305,7 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
     try {
       // 计划之后有人改过、或者同一个 URI 上换了一条记忆，按 expectedId 与 expectedVersion 拒绝
       await service.update(item.request, {
+        plaintextGate: false,
         eventType: 'sync',
         eventContext: { ...item.context, changes: item.changes },
         requireAppOwner: target.accountId,

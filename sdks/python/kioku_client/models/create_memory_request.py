@@ -30,6 +30,9 @@ class CreateMemoryRequest:
         glossary (list[str] | Unset):
         valid_to (datetime.datetime | Unset): 有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或
             2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；不填就一直有效
+        plaintext_ok (bool | Unset): 正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符
+        ignore_plaintext (bool | Unset): 只给管理界面
+        allow_plaintext (bool | Unset): 只给管理界面的空间所有者
     """
 
     uri: str
@@ -40,6 +43,9 @@ class CreateMemoryRequest:
     disclosure: str | Unset = UNSET
     glossary: list[str] | Unset = UNSET
     valid_to: datetime.datetime | Unset = UNSET
+    plaintext_ok: bool | Unset = UNSET
+    ignore_plaintext: bool | Unset = UNSET
+    allow_plaintext: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
     def to_dict(self) -> dict[str, Any]:
@@ -65,6 +71,12 @@ class CreateMemoryRequest:
         if not isinstance(self.valid_to, Unset):
             valid_to = self.valid_to.isoformat()
 
+        plaintext_ok = self.plaintext_ok
+
+        ignore_plaintext = self.ignore_plaintext
+
+        allow_plaintext = self.allow_plaintext
+
         field_dict: dict[str, Any] = {}
         field_dict.update(self.additional_properties)
         field_dict.update(
@@ -85,6 +97,12 @@ class CreateMemoryRequest:
             field_dict["glossary"] = glossary
         if valid_to is not UNSET:
             field_dict["validTo"] = valid_to
+        if plaintext_ok is not UNSET:
+            field_dict["plaintextOk"] = plaintext_ok
+        if ignore_plaintext is not UNSET:
+            field_dict["ignorePlaintext"] = ignore_plaintext
+        if allow_plaintext is not UNSET:
+            field_dict["allowPlaintext"] = allow_plaintext
 
         return field_dict
 
@@ -117,6 +135,12 @@ class CreateMemoryRequest:
         else:
             valid_to = datetime.datetime.fromisoformat(_valid_to)
 
+        plaintext_ok = d.pop("plaintextOk", UNSET)
+
+        ignore_plaintext = d.pop("ignorePlaintext", UNSET)
+
+        allow_plaintext = d.pop("allowPlaintext", UNSET)
+
         create_memory_request = cls(
             uri=uri,
             content=content,
@@ -126,6 +150,9 @@ class CreateMemoryRequest:
             disclosure=disclosure,
             glossary=glossary,
             valid_to=valid_to,
+            plaintext_ok=plaintext_ok,
+            ignore_plaintext=ignore_plaintext,
+            allow_plaintext=allow_plaintext,
         )
 
         create_memory_request.additional_properties = d

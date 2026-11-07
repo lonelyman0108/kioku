@@ -34,7 +34,9 @@ class UpdateMemoryRequest:
         glossary_remove (list[str] | Unset):
         valid_to (datetime.datetime | None | Unset): 有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或
             2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；填 null 清掉，一直有效
-        allow_plaintext (bool | Unset):
+        plaintext_ok (bool | Unset): 正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符
+        ignore_plaintext (bool | Unset): 只给管理界面
+        allow_plaintext (bool | Unset): 只给管理界面的空间所有者
     """
 
     uri: str
@@ -48,6 +50,8 @@ class UpdateMemoryRequest:
     glossary_add: list[str] | Unset = UNSET
     glossary_remove: list[str] | Unset = UNSET
     valid_to: datetime.datetime | None | Unset = UNSET
+    plaintext_ok: bool | Unset = UNSET
+    ignore_plaintext: bool | Unset = UNSET
     allow_plaintext: bool | Unset = UNSET
     additional_properties: dict[str, Any] = _attrs_field(init=False, factory=dict)
 
@@ -92,6 +96,10 @@ class UpdateMemoryRequest:
         else:
             valid_to = self.valid_to
 
+        plaintext_ok = self.plaintext_ok
+
+        ignore_plaintext = self.ignore_plaintext
+
         allow_plaintext = self.allow_plaintext
 
         field_dict: dict[str, Any] = {}
@@ -121,6 +129,10 @@ class UpdateMemoryRequest:
             field_dict["glossaryRemove"] = glossary_remove
         if valid_to is not UNSET:
             field_dict["validTo"] = valid_to
+        if plaintext_ok is not UNSET:
+            field_dict["plaintextOk"] = plaintext_ok
+        if ignore_plaintext is not UNSET:
+            field_dict["ignorePlaintext"] = ignore_plaintext
         if allow_plaintext is not UNSET:
             field_dict["allowPlaintext"] = allow_plaintext
 
@@ -183,6 +195,10 @@ class UpdateMemoryRequest:
 
         valid_to = _parse_valid_to(d.pop("validTo", UNSET))
 
+        plaintext_ok = d.pop("plaintextOk", UNSET)
+
+        ignore_plaintext = d.pop("ignorePlaintext", UNSET)
+
         allow_plaintext = d.pop("allowPlaintext", UNSET)
 
         update_memory_request = cls(
@@ -197,6 +213,8 @@ class UpdateMemoryRequest:
             glossary_add=glossary_add,
             glossary_remove=glossary_remove,
             valid_to=valid_to,
+            plaintext_ok=plaintext_ok,
+            ignore_plaintext=ignore_plaintext,
             allow_plaintext=allow_plaintext,
         )
 

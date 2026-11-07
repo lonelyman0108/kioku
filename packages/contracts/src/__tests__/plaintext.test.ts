@@ -275,12 +275,17 @@ describe('已知格式的令牌', () => {
     }
   })
 
-  it('「token: 」后面跟着令牌时只算一处，按写法算', () => {
-    const text = `token: ${TOKEN_SAMPLES.github}`
-    const found = findPlaintextCredentials(text)
-    expect(found.map((m) => [text.slice(m.start, m.end), m.kind])).toEqual([
-      [TOKEN_SAMPLES.github, 'label'],
-    ])
+  it('写法后面的值是令牌时只算一处，按令牌算，值是整个令牌', () => {
+    for (const [name, token] of Object.entries(TOKEN_SAMPLES)) {
+      for (const text of [`token: ${token}`, `secret = "${token}"`, `密码：\n${token}`]) {
+        const found = findPlaintextCredentials(text)
+        expect(found.length, `${name}: ${text}`).toBe(1)
+        expect(text.slice(found[0]!.start, found[0]!.end), name).toBe(
+          name === 'pgpKey' ? token.trimEnd() : token,
+        )
+        expect(found[0]!.kind, name).toBe(FIELDS[name]![0])
+      }
+    }
   })
 
   it('私钥块到 END 那一行为止，后面的字不算', () => {

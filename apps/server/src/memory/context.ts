@@ -164,6 +164,7 @@ export async function memoryServiceForConsole(
     onChanged: (memoryId) => deps.jobs?.enqueueEmbed(spaceId, memoryId),
     listSecret: access.canReadSecret,
     secretRead: 'explicit',
+    spaceOwner: role === 'owner',
   })
 }
 

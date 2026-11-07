@@ -21,6 +21,7 @@ import {
   testDatabaseUrl,
 } from '../../testing/db'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { setPlaintextContent } from '../../testing/plaintext'
 
 describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
   let database: Database
@@ -56,13 +57,22 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     return (await res.json()) as T
   }
   const counts = (cookie = ws.cookie) => get<InboxCounts>('/inbox/counts', cookie)
+  // 空间 owner 带着疑似明文照样保存；别的成员先写一段普通的正文，再直接改成要的正文
   const remember = async (body: Record<string, unknown>, cookie = ws.cookie) => {
+    const owner = cookie === ws.cookie
     const res = await app.request(
       `/v1/spaces/${ws.spaceId}/memories`,
-      jsonRequest('POST', body, { cookie }),
+      jsonRequest(
+        'POST',
+        owner ? { ...body, allowPlaintext: true } : { ...body, content: '待改的正文' },
+        { cookie },
+      ),
     )
     expect(res.status, await res.clone().text()).toBe(201)
-    return (await res.json()) as MemoryView
+    const view = (await res.json()) as MemoryView
+    if (owner) return view
+    await setPlaintextContent(database.db, ws.spaceId, view.id, body.content as string)
+    return { ...view, content: body.content as string }
   }
   // 不可信来源写下的联系人事实与会话摘要：待确认内容。会话摘要挂在 conversation 上，写之前先取
   let conversation: string | null = null

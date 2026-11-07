@@ -19,6 +19,7 @@ import {
   MemoryListQuery,
   MemoryUri,
   MemoryView,
+  MemoryWriteError,
   MoveMemoryRequest,
   PageQuery,
   PlaintextIgnoreRequest,
@@ -48,12 +49,23 @@ const DeleteQuery = UriQuery.extend({
   expectedId: z.uuid().optional(),
   expectedVersion: z.coerce.number().int().optional(),
 })
+// 转存的去处只实现了托管
+const CONVERT_TARGET_UNSUPPORTED = '暂不支持这种转存去处'
+
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
   401: jsonResponse('未登录或凭据无效', ErrorResponse),
   403: jsonResponse('没有权限', ErrorResponse),
   404: jsonResponse('不存在或不可见', ErrorResponse),
   409: jsonResponse('冲突', ErrorResponse),
+}
+// 新建与修改：正文里有新增的疑似明文被拒时，400 的错误体带上每一处的行号与类别
+const writeErrors = {
+  ...errors,
+  400: jsonResponse(
+    '请求不合法，或正文里有新增的疑似明文凭据（plaintext 列出每一处）',
+    MemoryWriteError,
+  ),
 }
 
 // 管理界面的响应多两个字段（ConsoleMemoryView），由服务按 MemoryContext.secretRead 给出。
@@ -103,7 +115,7 @@ function memoryRouteSet(set: RouteSet) {
     path: base,
     summary: '新建记忆，坐标的开头决定归属；带 validTo 时到期后不再召回、不进 boot',
     request: { params, body: jsonBody(CreateMemoryRequest) },
-    responses: { 201: jsonResponse('已创建', view), ...errors },
+    responses: { 201: jsonResponse('已创建', view), ...writeErrors },
   })
   const update = createRoute({
     ...common,
@@ -112,7 +124,7 @@ function memoryRouteSet(set: RouteSet) {
     summary:
       '修改记忆的标题、正文、敏感级、priority、disclosure、glossary 或有效期；换坐标或归属用 move',
     request: { params, body: jsonBody(UpdateMemoryRequest) },
-    responses: { 200: jsonResponse('已修改', view), ...errors },
+    responses: { 200: jsonResponse('已修改', view), ...writeErrors },
   })
   const remove = createRoute({
     ...common,
@@ -367,19 +379,26 @@ function consoleOnlyRoutes(deps: Deps) {
         spaceId,
         c.get('console').accountId,
       )
-      const { identifier, name, description, field, value } = c.req.valid('json')
-      const { memory, ...outcome } = await service.convertToCredential(c.req.valid('json'), {
-        create: (tx) =>
-          credentials.createHostedIn(tx, {
-            identifier,
-            name,
-            ...(description !== undefined ? { description } : {}),
-            values: { [field]: value },
-          }),
-        view: (tx, id) => credentials.viewIn(tx, id),
-      })
+      const { target, ...request } = c.req.valid('json')
+      // 换成已有凭据、给密码库条目起标识这两种去处还没有实现
+      if (target.kind !== 'hosted') return c.json({ error: CONVERT_TARGET_UNSUPPORTED }, 400)
+      const { identifier, name, description, field } = target
+      const { value } = request
+      const { memory, ...outcome } = await service.convertToCredential(
+        { ...request, identifier, field },
+        {
+          create: (tx) =>
+            credentials.createHostedIn(tx, {
+              identifier,
+              name,
+              ...(description !== undefined ? { description } : {}),
+              values: { [field]: value },
+            }),
+          view: (tx, id) => credentials.viewIn(tx, id),
+        },
+      )
       // 已经提交了，这里不再做会失败的事。管理界面的服务给出的就是 ConsoleMemoryView（见 ConsoleView）
-      return c.json({ memory: memory as ConsoleMemoryView, ...outcome }, 200)
+      return c.json({ memory: memory as ConsoleMemoryView, ...outcome, created: true, field }, 200)
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)

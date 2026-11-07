@@ -603,13 +603,17 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       )
     })
 
-    it('写入的正文像有明文凭据时提醒换成占位符；使用指引里有凭据占位符的说明', async () => {
+    it('正文里原来就有疑似明文时，写入结果提醒换成占位符；使用指引里有凭据占位符的说明', async () => {
       const key = await ws.issueKey((await ws.createApp('agent')).id, FULL_SCOPES)
+      // 带了 plaintext_ok 就是确认过不是凭据，不提醒
       const created = await callTool(key, 'kioku_create', {
         uri: 'user://notes/wifi',
         content: '访客网络密码：guest-1234',
+        plaintext_ok: true,
       })
-      expect(created).toContain('提醒：正文像有明文密码或 Token')
+      expect(created).not.toContain('提醒')
+      const updated = await callTool(key, 'kioku_update', { uri: 'user://notes/wifi', priority: 1 })
+      expect(updated).toContain('提醒：正文像有明文密码或 Token')
       const clean = await callTool(key, 'kioku_create', {
         uri: 'user://notes/wifi2',
         content: '访客网络密码 {{cred:file-server#password}}',

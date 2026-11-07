@@ -228,6 +228,18 @@ export function findPlaintextCredentials(text: string): PlaintextCredentialMatch
     if (label) {
       kind = 'label'
       span = plaintextValue(text, m.index + m[0].length - 1)
+      // 写法后面的值本身是已知格式的令牌（token: ghp_…、secret: -----BEGIN …）：按令牌算，
+      // 值取整个令牌（私钥块跨好几行，按写法只取得到第一段）。前面的引号与粗体不算令牌的一部分
+      let at = span.start
+      while (at < text.length && PLAINTEXT_QUOTES.includes(text[at]!)) at++
+      const rest = text.slice(at)
+      for (const [token, rule] of TOKEN_ANCHORED) {
+        const hit = rule.exec(rest)
+        if (!hit) continue
+        kind = token
+        span = tokenValue(text, token, at, hit[0].length)
+        break
+      }
     } else {
       // 各类的开头互不相同，按开头认出是哪一类
       const token = TOKEN_ANCHORED.find(([, rule]) => rule.test(m[0]))![0]
