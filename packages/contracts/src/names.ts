@@ -1,13 +1,15 @@
 import type {
   CredentialAccessReason,
   CredentialAccessResult,
+  CredentialExpiry,
   PlaintextKind,
   VaultConnectionStatus,
   VaultDisabledReason,
+  VaultErrorKind,
 } from './credentials'
 import type { CredentialCapability, Layer, Sensitivity } from './memory'
 
-// 归属、敏感级、凭据能力、密码库连接状态与疑似明文类别的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
+// 归属、敏感级、凭据能力、密码库连接状态与错误、凭据的到期与轮换、疑似明文类别的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
 // 契约只放 zod schema，这里是例外，和 bench.ts 的 isReplayStep、mayWrite 一样
 export const LAYER_NAMES: Record<Layer, string> = {
   core: '通用',
@@ -65,6 +67,33 @@ export const CREDENTIAL_ACCESS_REASON_NAMES: Record<CredentialAccessReason, stri
   master_key: '主密钥不可用',
   internal_error: 'Kioku 内部出错',
 }
+
+// 和密码库通信失败的类别：连接的最近错误，也是写回失败（新建、修改条目）时给调用方的说法。
+// read_only 与 item_conflict 只在写回时出现：服务端回 409，item_conflict 要先重新读取凭据再改
+export const VAULT_ERROR_KIND_NAMES: Record<VaultErrorKind, string> = {
+  invalid_credentials: '邮箱或主密码错误',
+  two_factor_invalid: '验证码错误',
+  unsupported_two_factor: '不支持此两步验证方式',
+  reauth_required: '登录已失效',
+  item_unavailable: '条目不可用',
+  read_only: '集合只读',
+  item_conflict: '条目已在别处修改',
+  unsupported_format: '无法识别的加密格式',
+  integrity: '内容校验失败',
+  unreachable: '无法连接服务器',
+  server_error: '服务器返回错误',
+}
+
+export const CREDENTIAL_EXPIRY_NAMES: Record<CredentialExpiry, string> = {
+  expiring: '快到期',
+  expired: '已到期',
+}
+
+// 凭据上「需要轮换」的标记，待处理与凭据详情共用
+export const CREDENTIAL_ROTATION_NAME = '需要轮换'
+
+// 新建凭据时值写到了哪里（CredentialStoredIn）：托管写「Kioku 托管」，密码库写集合的名称
+export const CREDENTIAL_HOSTED_NAME = 'Kioku 托管'
 
 // 疑似明文的类别：写入被拒时的说明与管理界面逐处处理时用
 export const PLAINTEXT_KIND_NAMES: Record<PlaintextKind, string> = {
