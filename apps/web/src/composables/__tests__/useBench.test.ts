@@ -42,6 +42,7 @@ const SCOPES: KeyScopes = {
   writeLayers: ['user'],
   maxSensitivity: 'private',
   admin: false,
+  credentials: 'none' as const,
 }
 const app = (id: string, ownerAccountId = 'me') =>
   ({ id, name: `应用${id}`, ownerAccountId, runtimeFamily: 'claudecode' }) as AppInfo

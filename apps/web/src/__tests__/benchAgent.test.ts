@@ -2507,8 +2507,7 @@ describe('开始之前的提示', () => {
     loop: 'hook',
     ...over,
   })
-  const text = (loop: BenchAgentLoop, mode: BenchMode = 'rollback') =>
-    consentText(target({ loop }), mode)
+  const text = (loop: BenchAgentLoop) => consentText(target({ loop }))
 
   it('没同意过要问；三样都一样不再问', () => {
     expect(consentNeeded(emptyConversation(), target())).toBe(true)
@@ -2539,11 +2538,10 @@ describe('开始之前的提示', () => {
   it('说清楚发给哪个接口的哪个模型', () => {
     const shown = consentText(
       target({ endpoint: 'https://model.example.com:8443/openai/v1', model: 'deep-x' }),
-      'rollback',
     )
     expect(shown).toContain('将发送给 https://model.example.com:8443/openai/v1 上的模型「deep-x」')
     // 服务端没有给地址时不写半句
-    const none = consentText(target({ endpoint: null, model: 'deep-x' }), 'rollback')
+    const none = consentText(target({ endpoint: null, model: 'deep-x' }))
     expect(none).toContain('将发送给模型「deep-x」')
     expect(none).not.toContain('上的模型')
   })
@@ -2557,13 +2555,10 @@ describe('开始之前的提示', () => {
     expect(text('tools')).not.toContain('启动加载')
   })
 
-  it('打码：回滚模式都打码；真实模式下外部凭据源照常返回，要说', () => {
-    expect(text('hook')).toContain('打码')
-    expect(text('hook')).not.toContain('外部凭据源')
-    expect(text('hook', 'real')).toContain('外部凭据源')
-    expect(text('tools', 'real')).toContain('外部凭据源')
-    // 不给工具，取不到凭据
-    expect(text('chat', 'real')).not.toContain('外部凭据源')
+  it('打码：测试台里取用凭据一律不给值，不分模式', () => {
+    for (const loop of ['hook', 'tools', 'chat'] as const) {
+      expect(text(loop)).toContain('机密正文与凭据的值都会打码。')
+    }
   })
 })
 

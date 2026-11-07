@@ -1,6 +1,5 @@
 import {
   RETENTION_DAILY_TRIES,
-  type DeletedCredentialProvider,
   type DeletionRetention,
   type RetentionCounts,
   type RetentionStatus,
@@ -45,17 +44,6 @@ export function purgeNote(
   return { text: days > 0 ? `约 ${days} 天后永久清除` : '即将永久清除', soon: days <= SOON_DAYS }
 }
 
-// 已删除的凭据源什么时候永久清除。retentionFrom 为 null 时还有没删除的凭据指着它，清理不删它，不说几天；
-// 否则和别的已删除记录一样，只是从 retentionFrom 算起（指着它的已删除凭据清除之后才轮到它）
-export function providerPurgeNote(
-  provider: Pick<DeletedCredentialProvider, 'retentionFrom'>,
-  retention: DeletionRetention,
-  now: Date = new Date(),
-): { text: string; soon: boolean } {
-  if (provider.retentionFrom === null) return { text: '仍有凭据绑定，暂不清除', soon: false }
-  return purgeNote(provider.retentionFrom, retention, now)
-}
-
 // 列表上方说明的后半句：清理暂停中的说暂时不会清除，知道到什么时候的再说出时间
 function pauseNotice(retention: DeletionRetention): string {
   if (!retention.paused) return ''
@@ -87,7 +75,7 @@ export const retentionLabels: Record<keyof RetentionCounts, string> = {
   credentialEvents: '凭据事件',
   accessEvents: '记忆的访问记录',
   deletedCredentials: '已删除的凭据',
-  deletedProviders: '已删除的凭据源',
+  vaultConnections: '已断开的密码库连接',
   subjectBindings: '已处理的绑定记录',
 }
 

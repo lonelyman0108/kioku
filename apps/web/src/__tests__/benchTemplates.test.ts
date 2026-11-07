@@ -1202,7 +1202,7 @@ describe('模型对话的页面', () => {
 
   it('开始前要点一下：提示写明接口地址、模型名与内容，点了才放开发送；任何一个变了再问', () => {
     const alert = alertWith('consent && needsConsent && !agentSending')
-    expect(bound(alert, 'description')).toBe('consentText(consent, mode)')
+    expect(bound(alert, 'description')).toBe('consentText(consent)')
     expect(bound(alert, 'actions')).toBe('consentActions')
     const actions = blockOf(view.script, 'const consentActions = ')
     expect(actions).toContain('`发送至 ${model.value}，开始对话`')

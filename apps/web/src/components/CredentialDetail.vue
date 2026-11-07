@@ -11,16 +11,19 @@ import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import {
   benchAccountLabel,
-  credentialChangeLabels,
   credentialEventLabels,
   credentialSourceLabels,
-  credentialViaLabels,
-  providerKindLabels,
   restrictedAppsLabel,
   sensitivityLabels,
 } from '../labels'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
+import {
+  connectionStatusText,
+  credentialEventParts,
+  itemFieldLabel,
+  itemsAvailable,
+} from '../vault'
 import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
 import MemoryRow from './strata/MemoryRow.vue'
@@ -59,18 +62,36 @@ const events = useInfiniteQuery({
 })
 const eventItems = computed(() => events.data.value?.pages.flatMap((p) => p.items) ?? [])
 
-// 事件的细节：取用经由哪里、改了哪些部分、涉及哪些字段
-function describe(e: CredentialEvent): string {
-  const parts: string[] = []
-  if (e.via) parts.push(credentialViaLabels[e.via] ?? e.via)
-  if (e.changes.length) {
-    parts.push(`修改了${e.changes.map((x) => credentialChangeLabels[x] ?? x).join('、')}`)
-  }
-  if (e.fields.length) parts.push(`字段 ${e.fields.join('、')}`)
-  return parts.join('；')
-}
+// 事件的细节：结果与原因、经由、会话上下文、用途、改了哪些部分、涉及哪些字段
+const describe = (e: CredentialEvent) => credentialEventParts(e).join('；')
 
-// 查看托管的值：要先确认，每次查看都记一条访问事件。值只放在这个组件里，不进查询缓存，换了凭据或关掉就清掉
+// 密码库来源：连接与条目。条目名称从连接的条目列表里取，和凭据页同一个查询；只有可用的连接列得出条目
+const connections = useQuery({
+  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
+  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
+  enabled: computed(() => c.value.vault !== null),
+})
+const connection = computed(() =>
+  c.value.vault
+    ? (connections.data.value?.items.find((x) => x.id === c.value.vault!.connectionId) ?? null)
+    : null,
+)
+const items = useQuery({
+  queryKey: computed(
+    () => ['vault-items', props.spaceId, c.value.vault?.connectionId ?? null] as const,
+  ),
+  queryFn: ({ queryKey: [, sid, id] }) => api.vaultItems(sid, id!),
+  enabled: computed(
+    () => props.canManage && !!connection.value && itemsAvailable(connection.value),
+  ),
+})
+// 条目：读到了列表却没有它，就是不可用（被删、移出集合）；列表没读到时不下结论
+const item = computed(() => {
+  if (!c.value.vault || !items.data.value) return undefined
+  return items.data.value.items.find((i) => i.id === c.value.vault!.itemId) ?? null
+})
+
+// 查看值：要先确认，每次查看都记一条访问事件。值只放在这个组件里，不进查询缓存，换了凭据或关掉就清掉
 const revealed = ref<Record<string, string> | null>(null)
 const confirmingReveal = ref(false)
 const revealing = ref(false)
@@ -106,7 +127,7 @@ async function reveal() {
       <p class="detail-identifier">{{ c.identifier }}</p>
       <p class="detail-source">
         {{ credentialSourceLabels[c.source] }}
-        <span v-if="c.deletedAt" class="text-error">已删除</span>
+        <span v-if="c.deletedAt">已删除</span>
       </p>
       <p v-if="c.description" class="detail-description">{{ c.description }}</p>
       <div class="detail-actions">
@@ -152,23 +173,28 @@ async function reveal() {
     <section>
       <SectionHeading title="来源" :level="3" />
       <PropertyList
-        v-if="c.source === 'external'"
+        v-if="c.vault"
         class="pt-2"
         :groups="[
           [
-            { key: 'provider', label: '凭据源' },
-            { key: 'location', label: '条目位置' },
+            { key: 'connection', label: '连接' },
+            { key: 'item', label: '条目' },
           ],
         ]"
       >
-        <template #provider>
-          <template v-if="c.provider">
-            {{ c.provider.name }}（{{ providerKindLabels[c.provider.kind] }}）
-            <span v-if="c.provider.deleted" class="text-warning">已删除，需重新绑定</span>
+        <template #connection>
+          <template v-if="connection">
+            {{ connection.email }}
+            <span class="text-muted">{{ connectionStatusText(connection) }}</span>
           </template>
+          <span v-else-if="connections.isError.value" class="text-muted">读取失败</span>
+          <span v-else-if="connections.data.value" class="text-muted">连接不存在</span>
         </template>
-        <template #location>
-          <span class="font-mono text-[13px]">{{ c.location }}</span>
+        <template #item>
+          <template v-if="item">{{ item.name }}</template>
+          <span v-else-if="item === null" class="text-warning">条目不可用</span>
+          <span v-else-if="items.isError.value" class="text-muted">读取失败</span>
+          <span v-else class="text-muted">—</span>
         </template>
       </PropertyList>
       <p v-else class="section-note">
@@ -180,7 +206,7 @@ async function reveal() {
       <SectionHeading title="字段" :level="3">
         <template #actions>
           <UButton
-            v-if="c.source === 'hosted' && canManage && !c.deletedAt && !revealed"
+            v-if="canManage && !c.deletedAt && !revealed"
             size="xs"
             color="primary"
             variant="outline"
@@ -202,24 +228,22 @@ async function reveal() {
       <ul>
         <li v-for="field in c.fields" :key="field.name" class="field-row">
           <span class="field-name" :title="field.name">{{ field.name }}</span>
-          <template v-if="c.source === 'hosted'">
-            <span v-if="revealed && field.name in revealed" class="field-value">
-              <code>{{ revealed[field.name] }}</code>
-              <UButton
-                :icon="icons.copy"
-                size="xs"
-                color="neutral"
-                variant="ghost"
-                :aria-label="`复制 ${field.name} 的值`"
-                @click="copy(revealed[field.name]!)"
-              />
-            </span>
-            <span v-else class="field-value">
-              <span class="value-mask" role="img" aria-label="值已隐藏">••••••</span>
-            </span>
-          </template>
-          <span v-else class="field-value field-source">
-            <template v-if="field.sourceField">→ 条目字段 {{ field.sourceField }}</template>
+          <span v-if="revealed && field.name in revealed" class="field-value">
+            <code>{{ revealed[field.name] }}</code>
+            <UButton
+              :icon="icons.copy"
+              size="xs"
+              color="neutral"
+              variant="ghost"
+              :aria-label="`复制 ${field.name} 的值`"
+              @click="copy(revealed[field.name]!)"
+            />
+          </span>
+          <span v-else class="field-value">
+            <span class="value-mask" role="img" aria-label="值已隐藏">••••••</span>
+          </span>
+          <span v-if="field.itemField" class="field-source" :title="`条目字段 ${field.itemField}`">
+            {{ itemFieldLabel(field.itemField) }}
           </span>
           <UButton
             class="shrink-0"
@@ -277,7 +301,9 @@ async function reveal() {
     <section>
       <SectionHeading title="记录" :level="3">
         <template #hint>
-          <Hint>仅凭据所有者可见，不进入空间的变更记录。</Hint>
+          <Hint>
+            仅凭据所有者可见，不进入空间的变更记录。取用被拒或向密码库取值失败也会记录。
+          </Hint>
         </template>
       </SectionHeading>
       <p class="section-note">记录新建、修改、删除与每次取用。</p>
@@ -319,9 +345,13 @@ async function reveal() {
       </div>
     </section>
 
-    <UModal v-model:open="confirmingReveal" title="查看托管的值？">
+    <UModal v-model:open="confirmingReveal" title="查看凭据的值？">
       <template #body>
-        <p class="text-sm">值将显示在此页面上，并记录一次访问。查看后请点击「隐藏」或关闭面板。</p>
+        <p class="text-sm">
+          值将显示在此页面上，并记录一次访问。<template v-if="c.vault"
+            >值从密码库获取，TOTP 显示当前的验证码。</template
+          >查看后请点击「隐藏」或关闭面板。
+        </p>
       </template>
       <template #footer>
         <div class="flex w-full justify-end gap-2">
@@ -409,8 +439,13 @@ async function reveal() {
   overflow-wrap: anywhere;
 }
 .field-source {
+  flex: none;
+  max-width: 9rem;
+  overflow: hidden;
   font-size: 13px;
   color: var(--ui-text-muted);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 .value-mask {
   font-family: var(--font-mono);

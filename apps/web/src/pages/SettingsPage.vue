@@ -28,14 +28,17 @@ const masterKey = useQuery({
   refetchInterval: (query) => {
     const data = query.state.data
     const left = data
-      ? data.remaining.memories + data.remaining.credentials + data.remaining.settings
+      ? data.remaining.memories +
+        data.remaining.credentials +
+        data.remaining.vaultConnections +
+        data.remaining.settings
       : 0
     return left > 0 && !data?.lastError ? 5_000 : false
   },
 })
 const remaining = computed(() => {
   const r = masterKey.data.value?.remaining
-  return r ? r.memories + r.credentials + r.settings : 0
+  return r ? r.memories + r.credentials + r.vaultConnections + r.settings : 0
 })
 
 // 召回事件明细的保留天数：更早的明细在下一次清理时并入每条记忆的累计次数后删除
@@ -118,7 +121,8 @@ const unsaved = computed(() => [
                 <span class="font-mono text-[13px]">{{ masterKey.data.value.previousId }}</span>
                 还有 {{ remaining }} 条待重新包装（机密记忆
                 {{ masterKey.data.value.remaining.memories }}、托管的凭据
-                {{ masterKey.data.value.remaining.credentials }}、实例设置中加密保存的密钥
+                {{ masterKey.data.value.remaining.credentials }}、密码库连接
+                {{ masterKey.data.value.remaining.vaultConnections }}、实例设置中加密保存的密钥
                 {{ masterKey.data.value.remaining.settings }}）
               </p>
               <NoteLine v-if="masterKey.data.value.lastError" tone="error">

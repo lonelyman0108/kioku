@@ -254,7 +254,7 @@ watch(generation, () => {
               flush
               color="warning"
               title="发送前确认"
-              :description="consentText(consent, mode)"
+              :description="consentText(consent)"
               :actions="consentActions"
             />
             <BenchNotice v-if="blocker" flush color="warning" :title="blocker" />

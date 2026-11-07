@@ -107,18 +107,15 @@ export interface AgentConsent {
 }
 
 // 开始之前的提示：哪些内容会发给哪个接口的哪个模型。发出去的是操作者自己这把 Key 读得到的内容，打码同样生效；
-// 外部凭据源只有回滚模式打码，真实模式照常返回（设计里的规则），所以要说
-export function consentText({ endpoint, model, loop }: AgentConsent, mode: BenchMode): string {
+// 测试台里取用凭据一律不给值，不分来源、不分模式，所以两种模式说法一样
+export function consentText({ endpoint, model, loop }: AgentConsent): string {
   const what: Record<BenchAgentLoop, string> = {
     hook: '启动加载、召回块与工具结果',
     approximate: '启动加载、召回块与工具结果',
     chat: '启动加载与召回块',
     tools: '工具结果',
   }
-  const masked =
-    mode === 'real' && loop !== 'chat'
-      ? '机密正文与托管凭据的值都会打码；真实模式下，外部凭据源的条目位置与取法照常返回，也会一并发送。'
-      : '机密正文与凭据的值都会打码。'
+  const masked = '机密正文与凭据的值都会打码。'
   const where = endpoint ? ` ${endpoint} 上的模型「${model}」` : `模型「${model}」`
   return `${what[loop]}将发送给${where}（实例设置中抽取模型的接口）。发送的都是当前访问密钥可读取的内容；${masked}用量不计入抽取预算。`
 }

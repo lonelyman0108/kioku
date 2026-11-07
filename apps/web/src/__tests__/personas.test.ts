@@ -139,6 +139,7 @@ describe('两组 Key 权限是否相同', () => {
     writeLayers: ['user'] as const,
     maxSensitivity: 'private' as const,
     admin: false,
+    credentials: 'none' as const,
   }
   it('归属的先后不算', () => {
     expect(

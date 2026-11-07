@@ -21,12 +21,10 @@ import {
   ConversationList,
   ConvertedToCredential,
   CredentialEventList,
-  CredentialProvider,
   CredentialReferenceList,
   CredentialValues,
   CreatedKey,
   DeletedCredentialList,
-  DeletedCredentialProviderList,
   DeletedMemoryList,
   DreamApplied,
   DreamMemberSettings,
@@ -73,6 +71,10 @@ import {
   SubjectDetail,
   SubjectInfo,
   SubjectList,
+  VaultConnectResult,
+  VaultConnection,
+  VaultConnectionList,
+  VaultItemList,
   type ApplyDreamSuggestion,
   type BenchAgentTurnRequest,
   type BenchRunRequest,
@@ -80,7 +82,7 @@ import {
   type ConversationListQuery,
   type ConvertToCredentialRequest,
   type CreateAppRequest,
-  type CreateCredentialProviderRequest,
+  type ConnectVaultRequest,
   type CreateCredentialRequest,
   type CreateKeyRequest,
   type CreateMemoryRequest,
@@ -100,7 +102,7 @@ import {
   type SubjectListQuery,
   type UpdateAppRequest,
   type UpdateBackupSettings,
-  type UpdateCredentialProviderRequest,
+  type ReconnectVaultRequest,
   type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
   type UpdateExtractionSettings,
@@ -307,26 +309,26 @@ export const api = {
     request('GET', `/spaces/${spaceId}/credentials/${id}/references`, {
       schema: CredentialReferenceList,
     }),
-  credentialProviders: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/credential-providers`, {
-      schema: z.array(CredentialProvider),
-    }),
-  deletedCredentialProviders: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/credential-providers/deleted`, {
-      schema: DeletedCredentialProviderList,
-    }),
-  createCredentialProvider: (spaceId: string, body: CreateCredentialProviderRequest) =>
-    request('POST', `/spaces/${spaceId}/credential-providers`, {
+  // 密码库连接：只给连接的所有者。主密码只在请求体里，不进缓存
+  vaultConnections: (spaceId: string) =>
+    request('GET', `/spaces/${spaceId}/vault-connections`, { schema: VaultConnectionList }),
+  connectVault: (spaceId: string, body: ConnectVaultRequest) =>
+    request('POST', `/spaces/${spaceId}/vault-connections`, { body, schema: VaultConnectResult }),
+  reconnectVault: (spaceId: string, id: string, body: ReconnectVaultRequest) =>
+    request('POST', `/spaces/${spaceId}/vault-connections/${id}/reconnect`, {
       body,
-      schema: CredentialProvider,
+      schema: VaultConnectResult,
     }),
-  updateCredentialProvider: (spaceId: string, id: string, body: UpdateCredentialProviderRequest) =>
-    request('PATCH', `/spaces/${spaceId}/credential-providers/${id}`, {
-      body,
-      schema: CredentialProvider,
+  checkVault: (spaceId: string, id: string) =>
+    request('POST', `/spaces/${spaceId}/vault-connections/${id}/check`, {
+      schema: VaultConnection,
     }),
-  deleteCredentialProvider: (spaceId: string, id: string) =>
-    request('DELETE', `/spaces/${spaceId}/credential-providers/${id}`),
+  disconnectVault: (spaceId: string, id: string) =>
+    request('POST', `/spaces/${spaceId}/vault-connections/${id}/disconnect`, {
+      schema: VaultConnection,
+    }),
+  vaultItems: (spaceId: string, id: string) =>
+    request('GET', `/spaces/${spaceId}/vault-connections/${id}/items`, { schema: VaultItemList }),
 
   overview: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),
