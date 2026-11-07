@@ -290,7 +290,8 @@ describe.skipIf(!testDatabaseUrl)('对象页', () => {
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
-        .set({ validTo: sql`now()` })
+        // 读取按服务的时间判断，数据库容器的时钟可能快几毫秒：设成一秒前才算已失效
+        .set({ validTo: sql`now() - interval '1 second'` })
         .where(eq(memories.content, '在学日语')),
     )
     expect((await detailOf(person.id)).facts).toEqual([])

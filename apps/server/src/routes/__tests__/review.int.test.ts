@@ -157,7 +157,8 @@ describe.skipIf(!testDatabaseUrl)('待审队列', () => {
     await withSpace(database.db, ws.spaceId, (tx) =>
       tx
         .update(memories)
-        .set({ validTo: sql`now()` })
+        // 读取按服务的时间判断，数据库容器的时钟可能快几毫秒：设成一秒前才算已失效
+        .set({ validTo: sql`now() - interval '1 second'` })
         .where(eq(memories.content, '是个读书会')),
     )
     expect((await queue()).total).toBe(2)
