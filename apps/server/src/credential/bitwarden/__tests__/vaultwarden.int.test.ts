@@ -3,7 +3,15 @@ import { randomUUID } from 'node:crypto'
 import { afterAll, beforeAll, describe, expect, it, vi } from 'vitest'
 
 import { bwAvailable, startBw, type BwCli } from '../../../testing/bwCli'
-import { nextTotp, seedVaultwarden, type Seeded } from '../../../testing/vaultwarden'
+import {
+  addMember,
+  createOrgCipher,
+  nextTotp,
+  registerAccount,
+  relogin,
+  seedVaultwarden,
+  type Seeded,
+} from '../../../testing/vaultwarden'
 import { createVaultClient, totpCode } from '../client'
 import { VaultError, type VaultLoginInput, type VaultSecrets } from '../types'
 
@@ -57,8 +65,9 @@ describe.skipIf(!base)('Vaultwarden', () => {
     const snapshot = await session.snapshot()
     expect(onSynced).toHaveBeenCalledTimes(1)
     expect(snapshot.organizations).toEqual([
-      expect.objectContaining({ id: seed.org.id, role: 'user' }),
+      expect.objectContaining({ id: seed.org.id, role: 'user', allCollections: false }),
     ])
+    expect(snapshot.unreadableItemCount).toBe(0)
     expect(snapshot.collections.map((c) => c.name)).toEqual(['Agent'])
     expect(snapshot.personalItemCount).toBe(2)
     expect(snapshot.items.map((i) => i.id).sort()).toEqual(
@@ -84,9 +93,47 @@ describe.skipIf(!base)('Vaultwarden', () => {
       secrets: await login(seed.member),
     })
     const snapshot = await session.snapshot()
-    expect(snapshot.organizations[0]?.role).toBe('owner')
+    expect(snapshot.organizations[0]).toMatchObject({ role: 'owner', allCollections: true })
     expect(snapshot.collections.map((c) => c.name).sort()).toEqual(['Agent', 'Private'])
     expect((await session.item(seed.items.hidden)).type).toBe('login')
+  })
+
+  // Vaultwarden 1.37 不认邀请与修改成员时的 accessAll，也不在 profile 里给出：普通成员照样只看得到分给它的集合
+  it('Vaultwarden 上给普通成员 accessAll 不生效，allCollections 仍为 false', async () => {
+    const extra = await registerAccount(url, `all-${randomUUID().slice(0, 8)}@example.com`, {
+      kind: 'pbkdf2',
+      iterations: 600_000,
+    })
+    await addMember(url, seed.member, seed.org, extra, 2, [], { accessAll: true })
+    await relogin(url, extra)
+    const snapshot = await client
+      .session({ serverUrl: url, deviceId: randomUUID(), secrets: await login(extra) })
+      .snapshot()
+    expect(snapshot.organizations[0]).toMatchObject({ role: 'user', allCollections: false })
+    expect(snapshot.collections).toEqual([])
+  })
+
+  it('解不开的条目计进 unreadableItemCount，取它时报 integrity', async () => {
+    const good = (
+      await client
+        .session({ serverUrl: url, deviceId: randomUUID(), secrets: await login(seed.dedicated) })
+        .snapshot()
+    ).items.length
+    // 名称是合法格式的密文，MAC 对不上
+    const bad = await createOrgCipher(url, seed.member, seed.org, [seed.agentCollection], {
+      type: 'login',
+      login: { name: 'x', password: 'y' },
+      rawName: `2.${Buffer.alloc(16).toString('base64')}|${Buffer.alloc(16).toString('base64')}|${Buffer.alloc(32).toString('base64')}`,
+    })
+    const session = client.session({
+      serverUrl: url,
+      deviceId: randomUUID(),
+      secrets: await login(seed.dedicated),
+    })
+    const snapshot = await session.snapshot()
+    expect(snapshot.unreadableItemCount).toBe(1)
+    expect(snapshot.items).toHaveLength(good)
+    expect(await kindOf(session.item(bad))).toBe('integrity')
   })
 
   it('两步验证', async () => {

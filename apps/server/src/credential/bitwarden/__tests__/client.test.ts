@@ -38,6 +38,9 @@ interface Fixture {
   exchanges: RecordedExchange[]
 }
 
+// 客户端默认把诊断打到 console.warn，这里静音；要核对日志的用例自己传 log
+vi.spyOn(console, 'warn').mockImplementation(() => {})
+
 const fixture = JSON.parse(
   readFileSync(new URL('./fixtures/vaultwarden.json', import.meta.url), 'utf8'),
 ) as Fixture
@@ -199,25 +202,31 @@ describe('登录', () => {
     })
   })
 
-  it('邮件验证码映射成 email，不认识的方式不列出；都不认识时报 unsupported_two_factor', async () => {
-    const withProviders = (providers: Record<string, null>) =>
+  it('只认验证器：有验证器时只返回它；只有别的方式（邮件等）或服务端给了原型上的键时报 unsupported_two_factor', async () => {
+    const withProviders = (providers: string) =>
       replay(['dedicated.login'], (call) =>
         call.form
-          ? json(400, {
-              error: 'invalid_grant',
-              error_description: 'Two factor required.',
-              TwoFactorProviders2: providers,
-            })
+          ? json(
+              400,
+              `{"error":"invalid_grant","error_description":"Two factor required.","TwoFactorProviders2":${providers}}`,
+            )
           : undefined,
       ).fetch
-    const both = await createVaultClient({
-      fetch: withProviders({ '1': null, '0': null, '3': null }),
+    const mixed = await createVaultClient({
+      fetch: withProviders('{"1":null,"0":null,"3":null}'),
     }).login(loginInput('dedicated'))
-    expect(both).toEqual({ kind: 'two_factor_required', providers: ['authenticator', 'email'] })
-    const none = createVaultClient({ fetch: withProviders({ '3': null, '7': null }) }).login(
-      loginInput('dedicated'),
-    )
-    expect(await kindOf(none)).toBe('unsupported_two_factor')
+    expect(mixed).toEqual({ kind: 'two_factor_required', providers: ['authenticator'] })
+    for (const providers of [
+      '{"1":null}',
+      '{"3":null,"7":null}',
+      '{"constructor":null,"__proto__":null,"toString":null}',
+    ]) {
+      const err = await errorOf(
+        createVaultClient({ fetch: withProviders(providers) }).login(loginInput('dedicated')),
+      )
+      expect(err.kind).toBe('unsupported_two_factor')
+      expect(err.message).toContain('验证器')
+    }
   })
 
   it('主密码不对报 invalid_credentials', async () => {
@@ -236,21 +245,50 @@ describe('登录', () => {
           })
         : undefined,
     )
-    expect(await kindOf(createVaultClient({ fetch }).login(loginInput('dedicated')))).toBe(
-      'unsupported_two_factor',
-    )
+    const err = await errorOf(createVaultClient({ fetch }).login(loginInput('dedicated')))
+    expect(err.kind).toBe('unsupported_two_factor')
+    expect(err.message).toContain('验证器')
   })
 
   it('KDF 参数超出范围报 unsupported_format，不发登录请求', async () => {
-    const { fetch, calls } = replay(['dedicated.login'], (call) =>
-      call.url.pathname.endsWith('/prelogin')
-        ? json(200, { kdf: 0, kdfIterations: 1_000_000_000 })
-        : undefined,
-    )
-    expect(await kindOf(createVaultClient({ fetch }).login(loginInput('dedicated')))).toBe(
-      'unsupported_format',
-    )
-    expect(calls.some((c) => c.form)).toBe(false)
+    for (const prelogin of [
+      { kdf: 0, kdfIterations: 2_000_001 },
+      { kdf: 1, kdfIterations: 3, kdfMemory: 257, kdfParallelism: 4 },
+      { kdf: 1, kdfIterations: 11, kdfMemory: 64, kdfParallelism: 4 },
+      { kdf: 1, kdfIterations: 3, kdfMemory: 64, kdfParallelism: 17 },
+    ]) {
+      const { fetch, calls } = replay(['dedicated.login'], (call) =>
+        call.url.pathname.endsWith('/prelogin') ? json(200, prelogin) : undefined,
+      )
+      const err = await errorOf(createVaultClient({ fetch }).login(loginInput('dedicated')))
+      expect(err.kind).toBe('unsupported_format')
+      expect(err.message).toContain('超出范围')
+      expect(calls.some((c) => c.form)).toBe(false)
+    }
+  })
+
+  it('http 只收本机回环地址，别的在发请求之前报错', async () => {
+    const { fetch, calls } = replay(['dedicated.login'])
+    for (const serverUrl of [
+      'http://vault.example.com',
+      'http://10.0.0.1:8080',
+      'http://vault.bitwarden.com',
+    ]) {
+      expect(
+        await kindOf(createVaultClient({ fetch }).login({ ...loginInput('dedicated'), serverUrl })),
+      ).toBe('unreachable')
+      expect(() =>
+        createVaultClient({ fetch }).session({
+          serverUrl,
+          deviceId: fixture.accounts.dedicated.deviceId,
+          secrets: dedicatedSecrets,
+        }),
+      ).toThrow(VaultError)
+    }
+    expect(calls).toHaveLength(0)
+    for (const host of ['http://localhost:8080', 'http://127.0.0.1', 'http://[::1]:18081']) {
+      expect(vaultEndpoints(host).api).toBe(`${host}/api`)
+    }
   })
 
   it('账户密钥的 MAC 被改过时报 integrity', async () => {
@@ -276,11 +314,22 @@ function syncBody(name: 'dedicated' | 'member') {
   return structuredClone(
     fixture.exchanges.find((e) => e.scenario === `${name}.session` && e.path === '/api/sync')!.body,
   ) as {
-    profile: { organizations: { key: string; type: number }[] }
+    profile: {
+      privateKey: string
+      organizations: {
+        id: string
+        key: string
+        type: unknown
+        accessAll?: boolean
+        permissions: Record<string, boolean>
+      }[]
+    }
     collections: { name: string }[]
     ciphers: {
       id: string
       name: string
+      type: unknown
+      revisionDate?: string
       organizationId: string | null
       deletedDate: string | null
     }[]
@@ -293,8 +342,9 @@ describe('同步', () => {
     const snapshot = await session.snapshot()
     expect(snapshot.account.email).toBe(fixture.accounts.dedicated.email)
     expect(snapshot.organizations).toEqual([
-      expect.objectContaining({ id: fixture.organizationId, role: 'user' }),
+      expect.objectContaining({ id: fixture.organizationId, role: 'user', allCollections: false }),
     ])
+    expect(snapshot.unreadableItemCount).toBe(0)
     expect(snapshot.collections).toEqual([
       { id: fixture.collections.agent, organizationId: fixture.organizationId, name: 'Agent' },
     ])
@@ -335,72 +385,93 @@ describe('同步', () => {
   it('成员本人：所有者，看得到全部集合', async () => {
     const { session } = sessionOf('member', memberSecrets)
     const snapshot = await session.snapshot()
-    expect(snapshot.organizations[0]?.role).toBe('owner')
+    expect(snapshot.organizations[0]).toMatchObject({ role: 'owner', allCollections: true })
     expect(snapshot.collections.map((c) => c.name).sort()).toEqual(['Agent', 'Private'])
     expect(snapshot.personalItemCount).toBe(1)
     expect(snapshot.items.map((i) => i.id)).toContain(fixture.items.hidden)
     expect(snapshot.items.map((i) => i.id)).not.toContain(fixture.items.trashed)
   })
 
-  it('不认识的组织角色不当作普通成员', async () => {
-    const body = syncBody('dedicated')
-    body.profile.organizations[0]!.type = 9
-    const { session } = sessionOf(
-      'dedicated',
-      dedicatedSecrets,
-      {},
-      {
-        override: (call) => (call.url.pathname === '/api/sync' ? json(200, body) : undefined),
-      },
-    )
-    expect(await kindOf(session.snapshot())).toBe('server_error')
+  const withSync = (body: unknown) => ({
+    override: (call: Call) => (call.url.pathname === '/api/sync' ? json(200, body) : undefined),
   })
 
-  it('条目名称的 MAC 被改过时报 integrity', async () => {
-    const body = syncBody('dedicated')
-    const cipher = body.ciphers.find((c) => c.id === fixture.items.login)!
-    cipher.name = tamperMac(cipher.name)
-    const { session } = sessionOf(
-      'dedicated',
-      dedicatedSecrets,
-      {},
-      {
-        override: (call) => (call.url.pathname === '/api/sync' ? json(200, body) : undefined),
-      },
-    )
-    expect(await kindOf(session.snapshot())).toBe('integrity')
+  it('不认识的组织角色（包括原型上的名字）不当作普通成员', async () => {
+    for (const type of [9, '2', 'constructor', '__proto__']) {
+      const body = syncBody('dedicated')
+      body.profile.organizations[0]!.type = type
+      const { session } = sessionOf('dedicated', dedicatedSecrets, {}, withSync(body))
+      expect(await kindOf(session.snapshot())).toBe('server_error')
+    }
   })
 
-  it('不认识的加密格式报 unsupported_format：类型 0、1、未知类型，组织密钥的类型 6', async () => {
+  it('普通成员开了访问全部集合，或者能编辑、删除任何集合时算看得到全部集合', async () => {
+    const mutations: ((org: ReturnType<typeof syncBody>['profile']['organizations'][0]) => void)[] =
+      [
+        (org) => (org.accessAll = true),
+        (org) => (org.permissions.editAnyCollection = true),
+        (org) => (org.permissions.deleteAnyCollection = true),
+        (org) => (org.type = 1),
+      ]
+    for (const mutate of mutations) {
+      const body = syncBody('dedicated')
+      mutate(body.profile.organizations[0]!)
+      const { session } = sessionOf('dedicated', dedicatedSecrets, {}, withSync(body))
+      expect((await session.snapshot()).organizations[0]?.allCollections).toBe(true)
+    }
+  })
+
+  it('一个条目解不开（MAC 不对、不认识的格式、缺字段、不认识的类型）只跳过它，计进 unreadableItemCount', async () => {
+    const login = (b: ReturnType<typeof syncBody>) =>
+      b.ciphers.find((x) => x.id === fixture.items.login)!
     const cases: ((b: ReturnType<typeof syncBody>) => void)[] = [
-      (b) => {
-        const c = b.ciphers.find((x) => x.id === fixture.items.login)!
-        c.name = `0.${c.name.slice(2).split('|').slice(0, 2).join('|')}`
-      },
-      (b) => {
-        const c = b.ciphers.find((x) => x.id === fixture.items.login)!
-        c.name = `1.${c.name.slice(2)}`
-      },
-      (b) => {
-        b.collections[0]!.name = `8.${b.collections[0]!.name.slice(2)}`
-      },
-      (b) => {
-        const org = b.profile.organizations[0]!
-        org.key = `6.${org.key.slice(2)}|AAAA`
-      },
+      (b) => (login(b).name = tamperMac(login(b).name)),
+      (b) => (login(b).name = `0.${login(b).name.slice(2).split('|').slice(0, 2).join('|')}`),
+      (b) => (login(b).name = `1.${login(b).name.slice(2)}`),
+      (b) => (login(b).name = `7.${login(b).name.slice(2)}`),
+      (b) => delete login(b).revisionDate,
+      (b) => (login(b).type = 99),
+      (b) => (login(b).type = 'constructor'),
     ]
     for (const mutate of cases) {
       const body = syncBody('dedicated')
       mutate(body)
-      const { session } = sessionOf(
-        'dedicated',
-        dedicatedSecrets,
-        {},
-        {
-          override: (call) => (call.url.pathname === '/api/sync' ? json(200, body) : undefined),
-        },
-      )
-      expect(await kindOf(session.snapshot())).toBe('unsupported_format')
+      const { session } = sessionOf('dedicated', dedicatedSecrets, {}, withSync(body))
+      const snapshot = await session.snapshot()
+      expect(snapshot.unreadableItemCount).toBe(1)
+      expect(snapshot.items.map((i) => i.id)).not.toContain(fixture.items.login)
+      expect(snapshot.items).toHaveLength(4)
+    }
+  })
+
+  it('集合解不开时不列，条目照常', async () => {
+    const body = syncBody('dedicated')
+    body.collections[0]!.name = `8.${body.collections[0]!.name.slice(2)}`
+    const { session } = sessionOf('dedicated', dedicatedSecrets, {}, withSync(body))
+    const snapshot = await session.snapshot()
+    expect(snapshot.collections).toEqual([])
+    expect(snapshot.items).toHaveLength(5)
+  })
+
+  it('组织密钥解不开时这个组织的条目都算解不开，取其中的条目报同样的错误', async () => {
+    const cases: [(b: ReturnType<typeof syncBody>) => void, string][] = [
+      [
+        (b) =>
+          (b.profile.organizations[0]!.key = `6.${b.profile.organizations[0]!.key.slice(2)}|AAAA`),
+        'unsupported_format',
+      ],
+      [(b) => (b.profile.privateKey = tamperMac(b.profile.privateKey)), 'integrity'],
+    ]
+    for (const [mutate, kind] of cases) {
+      const body = syncBody('dedicated')
+      mutate(body)
+      const { session } = sessionOf('dedicated', dedicatedSecrets, {}, withSync(body))
+      const snapshot = await session.snapshot()
+      expect(snapshot.items).toEqual([])
+      expect(snapshot.unreadableItemCount).toBe(5)
+      expect(snapshot.organizations).toHaveLength(1)
+      expect(snapshot.personalItemCount).toBe(2)
+      expect(await kindOf(session.item(fixture.items.login))).toBe(kind)
     }
   })
 })
@@ -444,6 +515,77 @@ describe('取条目', () => {
     )
     expect(await kindOf(session.item(fixture.items.login))).toBe('integrity')
   })
+
+  it('条目是不认识的格式时报 unsupported_format', async () => {
+    const recorded = fixture.exchanges.find(
+      (e) => e.scenario === 'dedicated.session' && e.path === `/api/ciphers/${fixture.items.login}`,
+    )!
+    for (const mutate of [
+      (b: { name: string; type: unknown }) => (b.name = `1.${b.name.slice(2)}`),
+      (b: { name: string; type: unknown }) => (b.type = 'constructor'),
+    ]) {
+      const body = structuredClone(recorded.body) as { name: string; type: unknown }
+      mutate(body)
+      const { session } = sessionOf(
+        'dedicated',
+        dedicatedSecrets,
+        {},
+        { override: (call) => (call.url.pathname === recorded.path ? json(200, body) : undefined) },
+      )
+      expect(await kindOf(session.item(fixture.items.login))).toBe('unsupported_format')
+    }
+  })
+
+  it('没见过的组织：重新同步一次，结果交给 onSynced；重新同步遇到 401 时换令牌再试', async () => {
+    const withoutOrg = syncBody('dedicated')
+    withoutOrg.profile.organizations = []
+    let syncs = 0
+    const onSynced = vi.fn<(snapshot: VaultSnapshot) => Promise<void>>(async () => {})
+    const { session, calls } = sessionOf(
+      'dedicated',
+      dedicatedSecrets,
+      { onSynced },
+      {
+        override: (call) => {
+          if (call.url.pathname !== '/api/sync') return undefined
+          syncs++
+          if (syncs === 1) return json(200, withoutOrg)
+          if (syncs === 2) return json(401, {})
+          return undefined
+        },
+      },
+    )
+    expect((await session.item(fixture.items.login)).values).toEqual(fixture.values.login)
+    expect(tokenCalls(calls)).toHaveLength(2)
+    expect(syncs).toBe(3)
+    // 第一次换令牌后的同步（没有组织）与第二次换令牌后的同步都交给了 onSynced
+    expect(onSynced).toHaveBeenCalledTimes(2)
+    expect(onSynced.mock.calls[0]![0].organizations).toEqual([])
+    expect(onSynced.mock.calls[1]![0].organizations).toHaveLength(1)
+  })
+
+  it('为没见过的组织重新同步时 onSynced 抛错，取值失败', async () => {
+    const withoutOrg = syncBody('dedicated')
+    withoutOrg.profile.organizations = []
+    let syncs = 0
+    const refusal = new Error('角色不对')
+    const onSynced = vi.fn(async () => {
+      if (onSynced.mock.calls.length === 2) throw refusal
+    })
+    const { session } = sessionOf(
+      'dedicated',
+      dedicatedSecrets,
+      { onSynced },
+      {
+        override: (call) => {
+          if (call.url.pathname !== '/api/sync') return undefined
+          syncs++
+          return syncs === 1 ? json(200, withoutOrg) : undefined
+        },
+      },
+    )
+    await expect(session.item(fixture.items.login)).rejects.toBe(refusal)
+  })
 })
 
 describe('会话', () => {
@@ -459,12 +601,12 @@ describe('会话', () => {
     expect(calls.filter((c) => c.url.pathname === '/api/sync')).toHaveLength(1)
     expect(onSynced).toHaveBeenCalledTimes(1)
     expect(onSynced.mock.calls[0]![0].personalItemCount).toBe(2)
-    // 令牌没过期：再取不换令牌；列出条目时重新同步，但不再调用 onSynced
+    // 令牌没过期：再取不换令牌；列出条目时重新同步，同步的结果也交给 onSynced
     await session.item(fixture.items.itemKey)
     await session.snapshot()
     expect(tokenCalls(calls)).toHaveLength(1)
     expect(calls.filter((c) => c.url.pathname === '/api/sync')).toHaveLength(2)
-    expect(onSynced).toHaveBeenCalledTimes(1)
+    expect(onSynced).toHaveBeenCalledTimes(2)
   })
 
   it('访问令牌过期后换新的，再同步一次', async () => {
@@ -561,37 +703,64 @@ describe('会话', () => {
     expect(tokenCalls(calls)).toHaveLength(2)
   })
 
-  it('onSecretsChanged 抛错时调用失败，下一次用新的刷新令牌换', async () => {
-    let rotations = 0
+  it('snapshot() 的同步被 onSynced 拒绝时，丢掉令牌，下一次取值重新换令牌并检查', async () => {
+    const refusal = new Error('出现了个人条目')
+    const onSynced = vi.fn(async () => {
+      if (onSynced.mock.calls.length === 2) throw refusal
+    })
+    const { session, calls } = sessionOf('dedicated', dedicatedSecrets, { onSynced })
+    await session.item(fixture.items.login)
+    await expect(session.snapshot()).rejects.toBe(refusal)
+    await session.item(fixture.items.login)
+    expect(tokenCalls(calls)).toHaveLength(2)
+    expect(onSynced).toHaveBeenCalledTimes(3)
+  })
+
+  it('onSecretsChanged 抛错不影响调用：会话接着用新的，下次换令牌再保存', async () => {
+    let now = 1_000_000
+    // 服务端第一次换出新令牌，之后几次都给同一个
     const failure = new Error('保存失败')
-    const onSecretsChanged = vi.fn(async () => {
+    const onSecretsChanged = vi.fn<(secrets: VaultSecrets) => Promise<void>>(async () => {
       if (onSecretsChanged.mock.calls.length === 1) throw failure
     })
+    const log = vi.fn()
     const { session, calls } = sessionOf(
       'dedicated',
       dedicatedSecrets,
       { onSecretsChanged },
       {
+        now: () => now,
+        log,
         override: (call, recorded) => {
           if (call.form?.grant_type !== 'refresh_token' || !recorded) return undefined
-          rotations++
-          return json(200, { ...(recorded.body as object), refresh_token: `rotated-${rotations}` })
+          return json(200, { ...(recorded.body as object), refresh_token: 'rotated' })
         },
       },
     )
-    await expect(session.snapshot()).rejects.toBe(failure)
+    expect((await session.snapshot()).items).toHaveLength(5)
+    expect(log).toHaveBeenCalledWith({ what: 'secrets_not_saved' })
+    now += 3 * 60 * 60 * 1000
     await session.snapshot()
-    expect(tokenCalls(calls)[1]!.form!.refresh_token).toBe('rotated-1')
+    // 用的是新令牌；服务端给的和已保存的（旧的）不同，再交给 onSecretsChanged
+    expect(tokenCalls(calls)[1]!.form!.refresh_token).toBe('rotated')
+    expect(onSecretsChanged).toHaveBeenCalledTimes(2)
+    expect(onSecretsChanged.mock.calls[1]![0].refreshToken).toBe('rotated')
+    // 保存成功之后，同一个令牌不再交给它
+    now += 3 * 60 * 60 * 1000
+    await session.snapshot()
+    expect(onSecretsChanged).toHaveBeenCalledTimes(2)
   })
 })
 
 describe('网络', () => {
   it('每个请求都不跟随重定向；3xx 报 server_error', async () => {
+    const log = vi.fn()
     const { session, calls } = sessionOf(
       'dedicated',
       dedicatedSecrets,
       {},
       {
+        log,
         override: (call) =>
           call.url.pathname === '/api/sync'
             ? new Response(null, { status: 302, headers: { location: 'http://10.0.0.1/' } })
@@ -600,8 +769,8 @@ describe('网络', () => {
     )
     const err = await errorOf(session.snapshot())
     expect(err.kind).toBe('server_error')
-    expect(err.message).toContain('重定向（302）')
-    expect(err.message).not.toContain('10.0.0.1')
+    expect(err.message).toBe('密码库返回了意外的响应')
+    expect(log).toHaveBeenCalledWith({ what: 'redirect', status: 302 })
     expect(calls.length).toBeGreaterThan(0)
     for (const call of calls) expect(call.init.redirect).toBe('manual')
   })
@@ -623,30 +792,34 @@ describe('网络', () => {
     expect(await kindOf(slow.login(loginInput('dedicated')))).toBe('unreachable')
   })
 
-  it('连不上时只写错误代码', async () => {
+  it('连不上时错误文字只写类别，错误代码进内部日志', async () => {
     const refuse = vi.fn(async () => {
       throw Object.assign(new TypeError('fetch failed: Authorization Bearer leaked-token'), {
         cause: { code: 'ECONNREFUSED' },
       })
     })
+    const log = vi.fn()
     const err = await errorOf(
-      createVaultClient({ fetch: refuse as unknown as typeof fetch }).login(
+      createVaultClient({ fetch: refuse as unknown as typeof fetch, log }).login(
         loginInput('dedicated'),
       ),
     )
-
     expect(err.kind).toBe('unreachable')
-    expect(err.message).toContain('ECONNREFUSED')
-    expect(err.message).not.toContain('leaked-token')
+    expect(err.message).toBe('无法连接密码库')
+    // 错误代码只进内部日志
+    expect(log).toHaveBeenCalledWith({ what: 'connect', code: 'ECONNREFUSED' })
+    expect(JSON.stringify(log.mock.calls)).not.toContain('leaked-token')
     expect(err.cause).toBeUndefined()
   })
 
   it('意外的状态码与不是 JSON 的响应报 server_error', async () => {
     for (const res of [json(500, { message: 'boom' }), new Response('<html>', { status: 200 })]) {
+      const log = vi.fn()
       const { fetch } = replay(['dedicated.login'], () => res.clone())
-      expect(await kindOf(createVaultClient({ fetch }).login(loginInput('dedicated')))).toBe(
-        'server_error',
-      )
+      const err = await errorOf(createVaultClient({ fetch, log }).login(loginInput('dedicated')))
+      expect(err.kind).toBe('server_error')
+      expect(err.message).toBe('密码库返回了意外的响应')
+      if (res.status === 500) expect(log).toHaveBeenCalledWith({ what: 'status', status: 500 })
     }
   })
 
@@ -661,11 +834,17 @@ describe('网络', () => {
     })
     expect(() => vaultEndpoints('file:///etc/passwd')).toThrow(VaultError)
     expect(() => vaultEndpoints('https://user:pass@vault.example.com')).toThrow(VaultError)
+    // 主机名是原型上的名字时不当作官方服务
+    expect(vaultEndpoints('https://constructor').api).toBe('https://constructor/api')
+    expect(vaultEndpoints('https://__proto__.example.com').api).toBe(
+      'https://__proto__.example.com/api',
+    )
   })
 })
 
 describe('错误信息', () => {
-  it('不带主密码、令牌与响应正文', async () => {
+  it('不带主密码、令牌、响应正文、状态码与错误代码；内部日志也不带正文', async () => {
+    const log = vi.fn()
     const marker = 'RESPONSE-BODY-MARKER'
     const refreshToken = fixture.exchanges.find((e) => e.form?.grant_type === 'refresh_token')!
       .form!.refresh_token!
@@ -684,15 +863,17 @@ describe('错误信息', () => {
     ]
     for (const body of bodies) {
       await collect(
-        createVaultClient({ fetch: replay(['dedicated.login'], () => body.clone()).fetch }).login(
-          loginInput('dedicated'),
-        ),
+        createVaultClient({
+          fetch: replay(['dedicated.login'], () => body.clone()).fetch,
+          log,
+        }).login(loginInput('dedicated')),
       )
       const { session } = sessionOf(
         'dedicated',
         dedicatedSecrets,
         {},
         {
+          log,
           override: (call) => (call.url.pathname.startsWith('/api/') ? body.clone() : undefined),
         },
       )
@@ -728,6 +909,9 @@ describe('错误信息', () => {
       ]) {
         expect(text).not.toContain(secret)
       }
+      expect((err as Error).message).not.toMatch(/\b[1-5]\d\d\b|E[A-Z]{3,}/)
     }
+    expect(log).toHaveBeenCalled()
+    expect(JSON.stringify(log.mock.calls)).not.toContain(marker)
   })
 })

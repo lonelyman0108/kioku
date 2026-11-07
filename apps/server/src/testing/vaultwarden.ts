@@ -234,7 +234,7 @@ export async function addMember(
   member: SeedAccount,
   type: number,
   collectionIds: string[],
-  readOnly = true,
+  { readOnly = true, accessAll = false }: { readOnly?: boolean; accessAll?: boolean } = {},
 ): Promise<void> {
   await call(
     base,
@@ -243,7 +243,7 @@ export async function addMember(
     {
       emails: [member.email],
       type,
-      accessAll: false,
+      accessAll,
       groups: [],
       permissions: {},
       collections: collectionIds.map((id) => ({
@@ -262,7 +262,7 @@ export async function addMember(
     undefined,
     owner.accessToken,
   )) as { data: { id: string; email: string; userId: string }[] }
-  const orgUser = users.data.find((u) => u.email === member.email)
+  const orgUser = users.data.find((u) => u.email === member.email.toLowerCase())
   if (!orgUser) throw new Error('受邀的成员不在组织里')
   const { publicKey } = (await call(
     base,
@@ -296,6 +296,8 @@ export interface SeedCipher {
   note?: { name: string; notes: string; fields?: { name: string; value: string }[] }
   // 条目自己的密钥：内容用它加密，它用组织密钥（或账户密钥）加密
   itemKey?: boolean
+  // 直接写进名称的密文（不加密），用来造解不开的条目
+  rawName?: string
 }
 
 function cipherBody(
@@ -319,7 +321,7 @@ function cipherBody(
     organizationId,
     encryptedFor,
     key: itemKeyBytes ? encryptBytes(itemKeyBytes, outer) : null,
-    name: enc(src.name),
+    name: c.rawName ?? enc(src.name),
     notes: enc(c.type === 'login' ? c.login!.notes : c.note!.notes),
     favorite: false,
     reprompt: 0,

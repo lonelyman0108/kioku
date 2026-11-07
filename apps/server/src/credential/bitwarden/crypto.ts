@@ -106,12 +106,16 @@ export function encryptText(plain: string, key: SymmetricKey): string {
   return encryptBytes(Buffer.from(plain, 'utf8'), key)
 }
 
-// RSA-OAEP：类型 3 是 SHA-256，类型 4 是 SHA-1。带 MAC 的 5、6 已被官方废弃，不认
-const RSA_HASH: Record<number, string> = { 3: 'sha256', 4: 'sha1' }
+// RSA-OAEP：类型 3 是 SHA-256，类型 4 是 SHA-1。带 MAC 的 5、6 已被官方废弃，不认。
+// 键来自服务端，用 Map 查，免得 constructor 这类原型上的名字被当成认识的
+const RSA_HASH = new Map<number, string>([
+  [3, 'sha256'],
+  [4, 'sha1'],
+])
 
 export function decryptRsa(enc: string, privateKeyDer: Buffer): Buffer {
   const { type, body } = encType(enc)
-  const oaepHash = RSA_HASH[type]
+  const oaepHash = RSA_HASH.get(type)
   if (!oaepHash) {
     throw new VaultError('unsupported_format', `不支持的加密格式（类型 ${type}）`)
   }
@@ -134,7 +138,8 @@ export function encryptRsa(
   return `${oaepHash === 'sha1' ? 4 : 3}.${data.toString('base64')}`
 }
 
-// 预登录给的 KDF 参数。范围照官方客户端的上下限：服务器地址由成员填写，参数过大会拖住整个进程
+// 预登录给的 KDF 参数，由服务器决定。Argon2id 在主线程上跑，内存比官方客户端的上限（1024 MiB）收得更紧，
+// 免得一个服务器拖住整个进程；专用账号用默认参数（PBKDF2 600000 次，或 Argon2id 64 MiB、3 次、4 路）都在范围里
 export type KdfParams =
   | { kind: 'pbkdf2'; iterations: number }
   | { kind: 'argon2id'; iterations: number; memoryMiB: number; parallelism: number }
@@ -148,31 +153,48 @@ export function kdfParams(raw: {
   memory: unknown
   parallelism: unknown
 }): KdfParams {
-  if (raw.kdf === 0 && inRange(raw.iterations, 5000, 2_000_000)) {
-    return { kind: 'pbkdf2', iterations: raw.iterations }
-  }
-  if (
-    raw.kdf === 1 &&
-    inRange(raw.iterations, 2, 10) &&
-    inRange(raw.memory, 15, 1024) &&
-    inRange(raw.parallelism, 1, 16)
-  ) {
-    return {
-      kind: 'argon2id',
-      iterations: raw.iterations,
-      memoryMiB: raw.memory,
-      parallelism: raw.parallelism,
+  if (raw.kdf === 0) {
+    if (inRange(raw.iterations, 5000, 2_000_000)) {
+      return { kind: 'pbkdf2', iterations: raw.iterations }
     }
+    throw outOfRange()
   }
-  throw new VaultError('unsupported_format', '不支持的密钥派生参数')
+  if (raw.kdf === 1) {
+    if (
+      inRange(raw.iterations, 2, 10) &&
+      inRange(raw.memory, 15, 256) &&
+      inRange(raw.parallelism, 1, 16)
+    ) {
+      return {
+        kind: 'argon2id',
+        iterations: raw.iterations,
+        memoryMiB: raw.memory,
+        parallelism: raw.parallelism,
+      }
+    }
+    throw outOfRange()
+  }
+  throw new VaultError('unsupported_format', '不支持的密钥派生方式')
+}
+
+const outOfRange = () =>
+  new VaultError('unsupported_format', '密钥派生参数超出范围，专用账号请使用默认的密钥派生参数')
+
+// 进程里的密钥派生排成一队，一次只跑一个：Argon2id 占主线程与几十 MB 内存，几个登录同时来时不叠加
+let kdfQueue: Promise<unknown> = Promise.resolve()
+
+function queued<T>(task: () => Promise<T>): Promise<T> {
+  const run = kdfQueue.then(task, task)
+  kdfQueue = run.catch(() => {})
+  return run
 }
 
 // 主密钥：盐是规范化的邮箱（去掉首尾空白、小写）；Argon2id 的盐是它的 SHA-256
-export async function deriveMasterKey(
-  password: string,
-  salt: string,
-  kdf: KdfParams,
-): Promise<Buffer> {
+export function deriveMasterKey(password: string, salt: string, kdf: KdfParams): Promise<Buffer> {
+  return queued(() => derive(password, salt, kdf))
+}
+
+async function derive(password: string, salt: string, kdf: KdfParams): Promise<Buffer> {
   const pass = Buffer.from(password, 'utf8')
   if (kdf.kind === 'pbkdf2') return pbkdf2Async(pass, salt, kdf.iterations, 32, 'sha256')
   const out = await argon2id({

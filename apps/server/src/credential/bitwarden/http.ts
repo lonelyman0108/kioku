@@ -1,11 +1,20 @@
 import { VaultError } from './types'
 
 // 向密码库发请求。服务器地址由成员填写，可能指向内网：响应正文只在这里解析成 JSON 交给调用方的解析函数，
-// 不以任何形式（错误信息、cause、日志）透出去；错误信息只写类别与状态码
+// 不以任何形式（错误信息、cause、日志）透出去。给调用方的错误文字只写类别（无法连接、超时、意外的响应），
+// 不写错误代码与状态码，否则能拿服务器地址探测内网的端口；这些细节只交给 log，log 也不带响应正文
+
+// 内部日志里记的细节：哪一类问题，加上状态码或连接错误的代码
+export interface VaultDiagnostic {
+  what: 'connect' | 'timeout' | 'redirect' | 'status' | 'too_large' | 'secrets_not_saved'
+  status?: number
+  code?: string
+}
 
 export interface HttpOptions {
   fetch: typeof fetch
   timeoutMs: number
+  log: (diagnostic: VaultDiagnostic) => void
 }
 
 export interface HttpResponse {
@@ -23,16 +32,19 @@ export interface VaultEndpoints {
   identity: string
 }
 
-const OFFICIAL: Record<string, VaultEndpoints> = {
-  'vault.bitwarden.com': {
-    api: 'https://api.bitwarden.com',
-    identity: 'https://identity.bitwarden.com',
-  },
-  'vault.bitwarden.eu': {
-    api: 'https://api.bitwarden.eu',
-    identity: 'https://identity.bitwarden.eu',
-  },
-}
+const OFFICIAL = new Map<string, VaultEndpoints>([
+  [
+    'vault.bitwarden.com',
+    { api: 'https://api.bitwarden.com', identity: 'https://identity.bitwarden.com' },
+  ],
+  [
+    'vault.bitwarden.eu',
+    { api: 'https://api.bitwarden.eu', identity: 'https://identity.bitwarden.eu' },
+  ],
+])
+
+// 只有本机回环地址能用 http（测试与装在同一台机器上的密码库）：令牌与密文不能明文过网络
+const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
 
 export function vaultEndpoints(serverUrl: string): VaultEndpoints {
   let url: URL
@@ -44,25 +56,34 @@ export function vaultEndpoints(serverUrl: string): VaultEndpoints {
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
     throw new VaultError('unreachable', '服务器地址无效')
   }
-  const official = url.protocol === 'https:' && !url.port ? OFFICIAL[url.hostname] : undefined
+  if (url.protocol === 'http:' && !LOOPBACK.has(url.hostname)) {
+    throw new VaultError('unreachable', '服务器地址须使用 https，只有本机地址可以用 http')
+  }
+  const official = url.protocol === 'https:' && !url.port ? OFFICIAL.get(url.hostname) : undefined
   if (official) return official
   const base = `${url.origin}${url.pathname.replace(/\/+$/, '')}`
   return { api: `${base}/api`, identity: `${base}/identity` }
 }
 
-// 连接错误只取错误代码（例如 ECONNREFUSED），不用错误自己的文字
-function connectFailure(err: unknown): VaultError {
+// 连接错误：日志里只记错误代码（例如 ECONNREFUSED），不用错误自己的文字（可能带着请求头）
+function connectFailure(http: HttpOptions, err: unknown): VaultError {
   const name = (err as { name?: unknown } | null)?.name
   if (name === 'TimeoutError' || name === 'AbortError') {
+    http.log({ what: 'timeout' })
     return new VaultError('unreachable', '连接密码库超时')
   }
   const code = (err as { cause?: { code?: unknown } } | null)?.cause?.code
-  const shown = typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? `（${code}）` : ''
-  return new VaultError('unreachable', `无法连接密码库${shown}`)
+  http.log({
+    what: 'connect',
+    ...(typeof code === 'string' && /^[A-Z0-9_]{1,40}$/.test(code) ? { code } : {}),
+  })
+  return new VaultError('unreachable', '无法连接密码库')
 }
 
+const UNEXPECTED = '密码库返回了意外的响应'
+
 // 到时限就取消读取：fetch 自己按 signal 中止正文，这里再管一道，换了 fetch 实现（测试注入的）也一样
-async function readBody(res: Response, signal: AbortSignal): Promise<string> {
+async function readBody(http: HttpOptions, res: Response, signal: AbortSignal): Promise<string> {
   if (!res.body) return ''
   const reader = res.body.getReader()
   const cancel = () => void reader.cancel().catch(() => {})
@@ -78,7 +99,8 @@ async function readBody(res: Response, signal: AbortSignal): Promise<string> {
       size += value.byteLength
       if (size > MAX_BODY_BYTES) {
         cancel()
-        throw new VaultError('server_error', '密码库的响应过大')
+        http.log({ what: 'too_large' })
+        throw new VaultError('server_error', UNEXPECTED)
       }
       chunks.push(value)
     }
@@ -105,19 +127,20 @@ export async function vaultRequest(
       signal,
     })
   } catch (err) {
-    throw connectFailure(err)
+    throw connectFailure(http, err)
   }
   // 不跟随重定向：跳到哪里由服务器决定，可能是别的主机
   if (res.type === 'opaqueredirect' || (res.status >= 300 && res.status < 400)) {
     await res.body?.cancel().catch(() => {})
-    throw new VaultError('server_error', `密码库返回了重定向（${res.status}）`)
+    http.log({ what: 'redirect', status: res.status })
+    throw new VaultError('server_error', UNEXPECTED)
   }
   let text: string
   try {
-    text = await readBody(res, signal)
+    text = await readBody(http, res, signal)
   } catch (err) {
     if (err instanceof VaultError) throw err
-    throw connectFailure(signal.aborted ? signal.reason : err)
+    throw connectFailure(http, signal.aborted ? signal.reason : err)
   }
   let json: unknown
   try {
@@ -128,19 +151,20 @@ export async function vaultRequest(
   return { status: res.status, json }
 }
 
-export function unexpectedStatus(status: number): VaultError {
-  return new VaultError('server_error', `密码库返回了意外的状态码（${status}）`)
+export function unexpectedStatus(http: HttpOptions, status: number): VaultError {
+  http.log({ what: 'status', status })
+  return new VaultError('server_error', UNEXPECTED)
 }
 
-export const badResponse = () => new VaultError('server_error', '密码库的响应格式无法识别')
+export const badResponse = () => new VaultError('server_error', UNEXPECTED)
 
 // 字段名大小写：Bitwarden 的接口是 camelCase，旧版 Vaultwarden 有 PascalCase 的，两种都认
 export function prop(obj: unknown, name: string): unknown {
   if (!obj || typeof obj !== 'object') return undefined
   const record = obj as Record<string, unknown>
-  if (name in record) return record[name]
+  if (Object.hasOwn(record, name)) return record[name]
   const pascal = name[0]!.toUpperCase() + name.slice(1)
-  return record[pascal]
+  return Object.hasOwn(record, pascal) ? record[pascal] : undefined
 }
 
 export function str(obj: unknown, name: string): string | undefined {

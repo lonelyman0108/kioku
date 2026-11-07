@@ -17,6 +17,7 @@ import {
   vaultEndpoints,
   vaultRequest,
   type HttpOptions,
+  type VaultDiagnostic,
   type VaultEndpoints,
 } from './http'
 import {
@@ -26,7 +27,6 @@ import {
   type VaultItem,
   type VaultLoginInput,
   type VaultLoginResult,
-  type VaultSecrets,
   type VaultSession,
   type VaultSessionInput,
   type VaultSnapshot,
@@ -35,6 +35,7 @@ import {
 import { decodeItem, decodeSync, type SyncedState } from './vault'
 
 export { totpCode } from './totp'
+export type { VaultDiagnostic } from './http'
 
 export interface VaultClientOptions {
   fetch?: typeof fetch
@@ -42,7 +43,11 @@ export interface VaultClientOptions {
   now?: () => number
   // 每个请求的时限，含读完正文
   timeoutMs?: number
+  // 内部日志：连接错误的代码、意外的状态码这类细节只记在这里，不进给调用方的错误文字。默认打到标准错误
+  log?: (diagnostic: VaultDiagnostic) => void
 }
+
+const defaultLog = (diagnostic: VaultDiagnostic) => console.warn('密码库请求', diagnostic)
 
 // 身份服务认的客户端：client_id 与设备类型照官方命令行（LinuxCLI），设备名写 Kioku
 const CLIENT_ID = 'cli'
@@ -53,7 +58,9 @@ const SCOPE = 'api offline_access'
 // 访问令牌提前这么久当作过期，免得请求发出去时刚好过期
 const EXPIRY_MARGIN_MS = 60_000
 
-const TWO_FACTOR: Record<string, VaultTwoFactorProvider> = { '0': 'authenticator', '1': 'email' }
+// 两步验证的方式里只认验证器应用（0）
+const AUTHENTICATOR = '0'
+const NEEDS_AUTHENTICATOR = '密码库要求的两步验证方式不受支持：专用账号请改用验证器应用做两步验证'
 
 const formBody = (fields: Record<string, string>) => new URLSearchParams(fields).toString()
 
@@ -101,6 +108,7 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
   const http: HttpOptions = {
     fetch: options.fetch ?? ((url, init) => globalThis.fetch(url, init)),
     timeoutMs: options.timeoutMs ?? 10_000,
+    log: options.log ?? defaultLog,
   }
   const now = options.now ?? Date.now
 
@@ -113,7 +121,7 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
       headers: { 'content-type': 'application/json' },
       body: JSON.stringify({ email }),
     })
-    if (pre.status !== 200) throw unexpectedStatus(pre.status)
+    if (pre.status !== 200) throw unexpectedStatus(http, pre.status)
     const settings = prop(pre.json, 'kdfSettings')
     const kdfType = prop(pre.json, 'kdf') ?? prop(settings, 'kdfType')
     if (kdfType === undefined) throw badResponse()
@@ -148,7 +156,7 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
     }
     if (input.twoFactor) {
       fields.twoFactorToken = input.twoFactor.code.replace(/\s/g, '')
-      fields.twoFactorProvider = input.twoFactor.provider === 'authenticator' ? '0' : '1'
+      fields.twoFactorProvider = AUTHENTICATOR
       fields.twoFactorRemember = '0'
     }
     const res = await vaultRequest(http, `${endpoints.identity}/connect/token`, {
@@ -161,18 +169,15 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
       const providers = twoFactorProviders(res.json)
       if (providers) {
         if (input.twoFactor) throw new VaultError('two_factor_invalid', '两步验证码不正确或已过期')
-        const supported = providers.flatMap((p) => (TWO_FACTOR[p] ? [TWO_FACTOR[p]] : []))
-        if (supported.length === 0) {
-          throw new VaultError('unsupported_two_factor', '密码库要求的两步验证方式不受支持')
+        if (!providers.includes(AUTHENTICATOR)) {
+          throw new VaultError('unsupported_two_factor', NEEDS_AUTHENTICATOR)
         }
+        const supported: VaultTwoFactorProvider[] = ['authenticator']
         return { kind: 'two_factor_required', providers: supported }
       }
       // 官方服务对没开两步验证的账号在新设备上另要邮件里的验证码（新设备验证），这里不支持
       if (/new device/i.test(`${str(res.json, 'error_description')} ${str(res.json, 'message')}`)) {
-        throw new VaultError(
-          'unsupported_two_factor',
-          '密码库要求新设备验证，请为这个账号开启两步验证',
-        )
+        throw new VaultError('unsupported_two_factor', NEEDS_AUTHENTICATOR)
       }
       // 其余的 400 都是凭据不对：官方服务回 invalid_grant，Vaultwarden 的 error 是空的、只在 message 里说明。
       // 带着验证码时主密码已经在上一步验过，验证码不对 Vaultwarden 也不再带 TwoFactorProviders
@@ -180,9 +185,9 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
         if (input.twoFactor) throw new VaultError('two_factor_invalid', '两步验证码不正确或已过期')
         throw new VaultError('invalid_credentials', '邮箱或主密码不正确')
       }
-      throw unexpectedStatus(res.status)
+      throw unexpectedStatus(http, res.status)
     }
-    if (res.status !== 200) throw unexpectedStatus(res.status)
+    if (res.status !== 200) throw unexpectedStatus(http, res.status)
 
     const grant = tokenGrant(res.json, now())
     if (!grant.refreshToken) throw badResponse()
@@ -217,7 +222,9 @@ interface Access {
 }
 
 class Session implements VaultSession {
-  private secrets: VaultSecrets
+  // 当前用的刷新令牌，和已经交给 onSecretsChanged 保存成功的那份分开记：保存失败时会话照样用新的，下次换令牌再试着保存
+  private refreshToken: string
+  private savedRefreshToken: string
   private readonly endpoints: VaultEndpoints
   private readonly userKey: SymmetricKey
   private access: Access | null = null
@@ -229,7 +236,8 @@ class Session implements VaultSession {
     private readonly now: () => number,
     private readonly input: VaultSessionInput,
   ) {
-    this.secrets = input.secrets
+    this.refreshToken = input.secrets.refreshToken
+    this.savedRefreshToken = input.secrets.refreshToken
     this.endpoints = vaultEndpoints(input.serverUrl)
     this.userKey = splitKey(Buffer.from(input.secrets.userKey))
   }
@@ -244,7 +252,8 @@ class Session implements VaultSession {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new VaultError('item_unavailable', '条目不可用')
     }
-    const { json, access } = await this.withAccess(async (access) => {
+    // 取条目与为它重新同步都在同一个令牌下做：哪一步遇到 401，都换一次令牌从头再来
+    const { json, state } = await this.withAccess(async (access) => {
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
         method: 'GET',
         headers: { authorization: `Bearer ${access.token}` },
@@ -254,16 +263,20 @@ class Session implements VaultSession {
       if (res.status === 400 || res.status === 403 || res.status === 404) {
         throw new VaultError('item_unavailable', '条目不可用')
       }
-      if (res.status !== 200) throw unexpectedStatus(res.status)
-      return { json: res.json, access }
+      if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
+      const orgId = str(res.json, 'organizationId')
+      // 上次同步之后才加入的组织：重新同步一次取它的密钥
+      if (orgId && !access.state.orgKeys.has(orgId) && !access.state.orgKeyErrors.has(orgId)) {
+        const synced = await this.sync(access)
+        if (!synced) return null
+        return { json: res.json, state: synced }
+      }
+      return { json: res.json, state: access.state }
     })
-    const orgId = str(json, 'organizationId')
-    // 上次同步之后才加入的组织：重新同步一次取它的密钥
-    if (orgId && !access.state.orgKeys.has(orgId)) await this.sync(access)
-    const item = decodeItem(json, access.state.orgKeys)
+    const item = decodeItem(json, state)
     // Vaultwarden 给非管理员的单个条目不带集合，用同步时的
     if (item.collectionIds.length === 0) {
-      item.collectionIds = access.state.snapshot.items.find((i) => i.id === id)?.collectionIds ?? []
+      item.collectionIds = state.snapshot.items.find((i) => i.id === id)?.collectionIds ?? []
     }
     return item
   }
@@ -300,43 +313,65 @@ class Session implements VaultSession {
       body: formBody({
         grant_type: 'refresh_token',
         client_id: CLIENT_ID,
-        refresh_token: this.secrets.refreshToken,
+        refresh_token: this.refreshToken,
       }),
     })
     if (res.status === 401 || (res.status === 400 && str(res.json, 'error') === 'invalid_grant')) {
       throw reauth()
     }
-    if (res.status !== 200) throw unexpectedStatus(res.status)
+    if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
     const grant = tokenGrant(res.json, this.now())
+    // 旧的刷新令牌可能已经作废，马上换成新的
+    if (grant.refreshToken) this.refreshToken = grant.refreshToken
+    await this.saveRefreshToken()
 
-    if (grant.refreshToken && grant.refreshToken !== this.secrets.refreshToken) {
-      // 旧的刷新令牌可能已经作废：先换成新的，保存失败时这次调用失败，下一次用新的再换
-      this.secrets = { refreshToken: grant.refreshToken, userKey: this.secrets.userKey }
-      await this.input.onSecretsChanged?.(this.secrets)
-    }
-
-    const state = await this.fetchSync(grant.accessToken)
+    // 刚换到的令牌就被拒绝：按需要重新登录算
+    const state = await this.checkedSync(grant.accessToken)
     if (!state) throw reauth()
-    await this.input.onSynced?.(state.snapshot)
-    const access = { token: grant.accessToken, expiresAt: grant.expiresAt, state }
+    const access: Access = { token: grant.accessToken, expiresAt: grant.expiresAt, state }
     this.access = access
     return access
   }
 
-  // 再同步一次，更新这个令牌下的组织密钥与快照。401 返回 null
+  // 当前的刷新令牌和保存成功的不同时交给 onSecretsChanged。它失败了不影响这次调用：会话接着用新的，下次换令牌再试
+  private async saveRefreshToken(): Promise<void> {
+    const token = this.refreshToken
+    if (token === this.savedRefreshToken || !this.input.onSecretsChanged) return
+    try {
+      await this.input.onSecretsChanged({
+        refreshToken: token,
+        userKey: this.input.secrets.userKey,
+      })
+      this.savedRefreshToken = token
+    } catch {
+      this.http.log({ what: 'secrets_not_saved' })
+    }
+  }
+
+  // 用这个令牌再同步一次，结果交给 onSynced 之后换掉内存里的快照与组织密钥。401 返回 null
   private async sync(access: Access): Promise<SyncedState | null> {
-    const state = await this.fetchSync(access.token)
+    let state: SyncedState | null
+    try {
+      state = await this.checkedSync(access.token)
+    } catch (err) {
+      // onSynced 拒绝了（或者同步失败）：丢掉这个令牌，下一次调用重新换令牌、再检查一遍，不用缓存的结果取值
+      if (this.access === access) this.access = null
+      throw err
+    }
     if (state) access.state = state
     return state
   }
 
-  private async fetchSync(token: string): Promise<SyncedState | null> {
+  // 同步并交给 onSynced；它抛错时以同样的错误失败，这次同步的结果不用。401 返回 null
+  private async checkedSync(token: string): Promise<SyncedState | null> {
     const res = await vaultRequest(this.http, `${this.endpoints.api}/sync?excludeDomains=true`, {
       method: 'GET',
       headers: { authorization: `Bearer ${token}` },
     })
     if (res.status === 401) return null
-    if (res.status !== 200) throw unexpectedStatus(res.status)
-    return decodeSync(res.json, this.userKey)
+    if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
+    const state = decodeSync(res.json, this.userKey)
+    await this.input.onSynced?.(state.snapshot)
+    return state
   }
 }

@@ -132,11 +132,30 @@ describe('KDF 参数', () => {
       { kdf: 0, iterations: 100, memory: null, parallelism: null },
       { kdf: 0, iterations: 1e9, memory: null, parallelism: null },
       { kdf: 1, iterations: 3, memory: 1e6, parallelism: 4 },
+      { kdf: 1, iterations: 3, memory: 257, parallelism: 4 },
+      { kdf: 1, iterations: 11, memory: 64, parallelism: 4 },
+      { kdf: 1, iterations: 3, memory: 64, parallelism: 17 },
+      { kdf: 0, iterations: 2_000_001, memory: null, parallelism: null },
       { kdf: 1, iterations: 3, memory: 64, parallelism: 0 },
       { kdf: 2, iterations: 3, memory: 64, parallelism: 4 },
       { kdf: '0', iterations: 600_000, memory: null, parallelism: null },
     ]
     for (const raw of bad) expect(kindOf(() => kdfParams(raw))).toBe('unsupported_format')
+  })
+
+  it('上限本身可以用；超出范围的说明换回默认参数', () => {
+    expect(kdfParams({ kdf: 1, iterations: 10, memory: 256, parallelism: 16 }).kind).toBe(
+      'argon2id',
+    )
+    expect(kdfParams({ kdf: 0, iterations: 2_000_000, memory: null, parallelism: null }).kind).toBe(
+      'pbkdf2',
+    )
+    try {
+      kdfParams({ kdf: 1, iterations: 3, memory: 512, parallelism: 4 })
+    } catch (err) {
+      expect((err as Error).message).toContain('超出范围')
+      expect((err as Error).message).toContain('默认')
+    }
   })
 
   it('拉伸主密钥的两半不同，也都不等于主密钥', () => {
