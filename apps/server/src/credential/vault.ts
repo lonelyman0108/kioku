@@ -1,4 +1,4 @@
-import { createHash, randomUUID } from 'node:crypto'
+import { randomUUID } from 'node:crypto'
 
 import {
   CREDENTIAL_ACCESS_REASON_NAMES,
@@ -13,7 +13,7 @@ import {
   type VaultErrorKind,
   type VaultItemList,
 } from '@kioku/contracts'
-import { and, asc, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
+import { and, asc, count, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from 'drizzle-orm'
 
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
@@ -60,7 +60,7 @@ export function openVaultSecrets(
   return { refreshToken: parsed.refreshToken, userKey: Buffer.from(parsed.userKey, 'base64') }
 }
 
-// 专用账号的检查：有不属于组织的条目，或在某个组织里看得到全部集合时不能用。看全部集合的不只是所有者、管理员，
+// 专用账号的检查：有不属于组织的条目，或在某个组织里可访问全部集合时不能用。可访问全部集合的不只是所有者、管理员，
 // Vaultwarden 还有开了「访问全部集合」的普通成员，所以以 allCollections 为准，角色只作兜底
 export function snapshotViolation(snapshot: VaultSnapshot): VaultDisabledReason | null {
   if (snapshot.personalItemCount > 0) return 'personal_items'
@@ -76,7 +76,7 @@ const VIOLATION_TEXT: Record<VaultDisabledReason, string> = {
   personal_items:
     '这个账号里有不属于组织的条目（个人条目）。Kioku 只接专用账号：请把要给 agent 用的条目移进组织的集合，个人条目清空后再连接。',
   organization_role:
-    '这个账号在组织里看得到全部集合（所有者、管理员，或开了「访问全部集合」）。Kioku 只接专用账号：请把它的角色改成用户、关掉「访问全部集合」，只分配给 agent 用的集合。',
+    '这个账号在组织里可访问全部集合（所有者、管理员，或开了「访问全部集合」）。Kioku 只接专用账号：请把它的角色改成用户、关掉「访问全部集合」，只分配给 agent 用的集合。',
 }
 
 // 同步时发现违规、连接刚被停用：这次调用以「连接已停用」失败
@@ -97,6 +97,12 @@ export function vaultReason(kind: VaultErrorKind): CredentialAccessReason {
     default:
       return 'vault_error'
   }
+}
+
+// 取不到值的原因对应的状态：密码库连不上或返回的内容认不出是 502，主密钥的问题 400，连接与条目的状态问题 409
+export function reasonStatus(reason: CredentialAccessReason): 400 | 409 | 502 {
+  if (reason === 'unreachable' || reason === 'vault_error') return 502
+  return reason === 'master_key' ? 400 : 409
 }
 
 // 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的
@@ -120,7 +126,7 @@ function loginFailure(err: unknown): never {
     case 'two_factor_invalid':
       throw new MemoryError(400, '两步验证码不正确或已过期')
     case 'unsupported_two_factor':
-      throw new MemoryError(400, '账号的两步验证方式不受支持：只支持验证器应用与邮件验证码')
+      throw new MemoryError(400, '账号的两步验证方式不受支持：只支持验证器应用')
     case 'unreachable':
       throw new MemoryError(502, '密码库无法连接，请检查服务器地址后重试')
     default:
@@ -128,11 +134,8 @@ function loginFailure(err: unknown): never {
   }
 }
 
-// 密文的指纹：会话缓存按它认出连接是不是被重新登录、断开过
-const stampOf = (ciphertext: Buffer) => createHash('sha256').update(ciphertext).digest('hex')
-
+// 缓存的会话记着建它时（或它最近一次保存的）密文：密文变了就是重新登录或换过令牌，换一个会话
 interface CachedSession {
-  stamp: string
   ciphertext: Buffer
   session: VaultSession
 }
@@ -143,6 +146,11 @@ const SESSIONS = new WeakMap<VaultClient, Map<string, CachedSession>>()
 // 正在连接或重新登录的成员（空间 + 成员）。密钥派生可能很慢、在进程里排队一次只跑一个，
 // 同一个成员重复提交会排出很长的队，所以同时只收一个，后来的直接 409。只记在内存里，请求结束就释放
 const LOGINS_IN_FLIGHT = new Set<string>()
+
+// 测试用：这个客户端的缓存里有没有这个连接的会话
+export function hasCachedSession(client: VaultClient, connectionId: string): boolean {
+  return sessionsOf(client).has(connectionId)
+}
 
 function sessionsOf(client: VaultClient): Map<string, CachedSession> {
   let map = SESSIONS.get(client)
@@ -182,17 +190,14 @@ export class VaultConnections {
   }
 
   private async own(tx: Tx, id: string): Promise<ConnectionRow> {
-    const [row] = await tx
-      .select()
-      .from(vaultConnections)
-      .where(
-        and(
-          eq(vaultConnections.id, id),
-          eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId),
-        ),
-      )
+    const row = await this.load(tx, id)
     if (!row) throw new MemoryError(404, '密码库连接不存在')
     return row
+  }
+
+  // 连接不能用了（断开、需要重新登录、停用、被删掉）：缓存里这个连接的会话带着解开的令牌与账户密钥，不再留着
+  forget(id: string): void {
+    this.cache.delete(id)
   }
 
   // 按 id 读一个连接（含密文），取用凭据时用
@@ -407,14 +412,14 @@ export class VaultConnections {
             .returning()
       return { row: row!, view: await this.viewOf(tx, row!) }
     })
-    entry = { stamp: stampOf(saved.row.ciphertext!), ciphertext: saved.row.ciphertext!, session }
+    entry = { ciphertext: saved.row.ciphertext!, session }
     const cached = entry
     persist = (next) => this.saveSecrets(id, cached, next)
     this.cache.set(id, cached)
     return { kind: 'connected', connection: saved.view }
   }
 
-  // 会话换了刷新令牌：密文没被别的请求换掉（重新登录、断开）时才写，写了就跟着更新缓存的指纹
+  // 会话换了刷新令牌：密文没被别的请求换掉（重新登录、断开）时才写，写了就跟着更新缓存里记的密文
   private async saveSecrets(id: string, entry: CachedSession, next: VaultSecrets): Promise<void> {
     const masterKey = this.requireMasterKey()
     const sealed = sealVaultSecrets(masterKey, id, next)
@@ -433,7 +438,6 @@ export class VaultConnections {
     )
     if (row?.ciphertext) {
       entry.ciphertext = row.ciphertext
-      entry.stamp = stampOf(row.ciphertext)
     } else if (this.cache.get(id) === entry) {
       this.cache.delete(id)
     }
@@ -455,9 +459,8 @@ export class VaultConnections {
   // 连接的会话：缓存里有、密文也没变就用它，否则解开密文新建一个。调用方先确认连接没有断开
   session(row: ConnectionRow): VaultSession {
     const ciphertext = row.ciphertext!
-    const stamp = stampOf(ciphertext)
     const cached = this.cache.get(row.id)
-    if (cached && cached.stamp === stamp) return cached.session
+    if (cached && cached.ciphertext.equals(ciphertext)) return cached.session
     const masterKey = this.requireMasterKey()
     const secrets = openVaultSecrets(masterKey, {
       id: row.id,
@@ -466,7 +469,6 @@ export class VaultConnections {
       keyId: row.keyId,
     })
     const entry: CachedSession = {
-      stamp,
       ciphertext,
       session: this.ctx.client.session({
         serverUrl: row.serverUrl,
@@ -486,14 +488,28 @@ export class VaultConnections {
     const live = and(eq(vaultConnections.id, row.id), ne(vaultConnections.status, 'disconnected'))
     if (outcome.kind === 'disabled') return
     if (outcome.kind === 'ok' || outcome.error === 'item_unavailable') {
+      // 每次取用都成功的话不必每次都写这一行：有最近的错误要清，或者上次检查已经过了一分钟才写
       await tx
         .update(vaultConnections)
         .set({ lastErrorKind: null, lastErrorAt: null, lastCheckedAt: now })
-        .where(live)
+        .where(
+          and(
+            live,
+            or(
+              isNotNull(vaultConnections.lastErrorKind),
+              isNull(vaultConnections.lastCheckedAt),
+              lt(vaultConnections.lastCheckedAt, sql`now() - interval '1 minute'`),
+            ),
+          ),
+        )
       return
     }
     if (outcome.error === 'reauth_required') {
-      this.cache.delete(row.id)
+      // 只删用这份密文建的会话：所有者可能刚重新登录，缓存里已经是新的
+      const cached = this.cache.get(row.id)
+      if (cached && row.ciphertext && cached.ciphertext.equals(row.ciphertext)) {
+        this.cache.delete(row.id)
+      }
       await tx
         .update(vaultConnections)
         .set({ status: 'reauth_required', disabledReason: null, updatedAt: now })
@@ -530,13 +546,13 @@ export class VaultConnections {
       else throw err
     }
     const updated = await this.run(async (tx) => {
+      // 违规的话 onSynced 已经停用了连接并抛错（每次同步都调），能拿到快照就是干净的，停用的恢复成可用
       if (snapshot) {
-        const violation = snapshotViolation(snapshot)
         await tx
           .update(vaultConnections)
           .set({
-            status: violation ? 'disabled' : 'ok',
-            disabledReason: violation,
+            status: 'ok',
+            disabledReason: null,
             lastErrorKind: null,
             lastErrorAt: null,
             lastCheckedAt: new Date(),
@@ -582,7 +598,7 @@ export class VaultConnections {
             ? '，请重新登录'
             : ''
       throw new MemoryError(
-        reason === 'unreachable' || reason === 'vault_error' ? 502 : 409,
+        reasonStatus(reason),
         `无法列出条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail}`,
       )
     }
@@ -622,8 +638,8 @@ export class VaultConnections {
 
   // 断开：立即清掉令牌与密钥，这一行与指着它的凭据留着。要让 Kioku 手里的旧令牌立即失效，在密码库的设备列表里注销它
   async disconnect(id: string): Promise<VaultConnection> {
-    this.cache.delete(id)
-    return this.run(async (tx) => {
+    this.forget(id)
+    const view = await this.run(async (tx) => {
       const row = await this.own(tx, id)
       if (row.status === 'disconnected') return this.viewOf(tx, row)
       const now = new Date()
@@ -642,5 +658,9 @@ export class VaultConnections {
         .returning()
       return this.viewOf(tx, updated!)
     })
+    // 提交之前并发的取用可能读到还连着、又建了会话放回缓存：提交之后再清一次。
+    // 提交之后才读到的取用看到已断开，会自己清掉（CredentialService 的 prepare）
+    this.forget(id)
+    return view
   }
 }

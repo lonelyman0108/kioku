@@ -10,7 +10,8 @@ import type {
   VaultConnectResult,
   VaultItemList,
 } from '@kioku/contracts'
-import { eq } from 'drizzle-orm'
+import { eq, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -22,7 +23,7 @@ import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/
 import { fakeVault, type FakeVault } from '../../testing/fakeVault'
 import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { credentialServiceForKey } from '../context'
-import { sealVaultSecrets } from '../vault'
+import { hasCachedSession, sealVaultSecrets, VaultConnections } from '../vault'
 import { totpCode } from '../totp'
 
 const EMAIL = 'agent@example.com'
@@ -245,7 +246,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
         }),
         400,
       ),
-    ).toContain('看得到全部集合')
+    ).toContain('可访问全部集合')
     expect(
       (await ok<VaultConnectionList>(await asMember('GET', '/vault-connections'))).items,
     ).toEqual([])
@@ -597,5 +598,187 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     expect(got.values).toBeNull()
     expect(vault.calls.item).toBe(calls)
     expect(await accessEvents(created.id)).toEqual([])
+  })
+
+  // 直接操作连接（不经过路由）：用来复现几个交错的顺序
+  const connectionsOf = () =>
+    new VaultConnections({
+      db: database.db,
+      spaceId: ws.spaceId,
+      ownerAccountId: ws.accountId,
+      masterKey,
+      client: vault.client,
+    })
+  const keyService = async () =>
+    credentialServiceForKey(
+      {
+        db: database.db,
+        cookieSecure: false,
+        masterKey,
+        embedder: staticEmbedderSource(null),
+        jobs: null,
+        vault: vault.client,
+      },
+      (await principalForKeyId(database.db, keyId))!,
+    )
+
+  it('并发的取用在断开之前读到可用、断开提交之后才建会话：下一次取用发现已断开，把会话从缓存里删掉', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    await ok(await use('identifier=router'))
+    const stale = await connectionRow(connection.id)
+    await ok(await asMember('POST', `/vault-connections/${connection.id}/disconnect`))
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
+    // 那次取用读到的还是带着密文的那一行，这时才建会话、放回缓存
+    connectionsOf().session(stale)
+    expect(hasCachedSession(vault.client, connection.id)).toBe(true)
+    expect(await errorOf(await use('identifier=router'), 409)).toContain('连接已断开')
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
+  })
+
+  it('断开的事务提交之前放回缓存的会话，提交之后再清一次', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    await ok(await use('identifier=router'))
+    const stale = await connectionRow(connection.id)
+    const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+    try {
+      let pending!: Promise<Response>
+      await side.begin(async (tx) => {
+        await tx`select set_config('app.space_id', ${ws.spaceId}, true)`
+        await tx`select id from vault_connections where id = ${connection.id} for update`
+        const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [{ pid: number }]
+        pending = Promise.resolve(
+          asMember('POST', `/vault-connections/${connection.id}/disconnect`),
+        )
+        for (let i = 0; ; i++) {
+          const [row] = await side<{ n: number }[]>`
+            select count(*)::int as n from pg_stat_activity
+            where ${pid}::int = any(pg_blocking_pids(pid))`
+          if (row!.n > 0) break
+          if (i >= 80) throw new Error('断开没有等在连接的行锁上')
+          await new Promise((r) => setTimeout(r, 25))
+        }
+        // 断开已经清过一次缓存、正等着提交：这时并发的取用把会话放回去
+        connectionsOf().session(stale)
+        expect(hasCachedSession(vault.client, connection.id)).toBe(true)
+      })
+      await ok(await pending)
+    } finally {
+      await side.end()
+    }
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
+  })
+
+  it('刷新令牌失效时只删用这份密文建的会话：所有者刚重新登录过的，新会话留着', async () => {
+    const connection = await connected()
+    const old = await connectionRow(connection.id)
+    await ok(
+      await asMember('POST', `/vault-connections/${connection.id}/reconnect`, {
+        masterPassword: MASTER,
+      }),
+    )
+    expect(hasCachedSession(vault.client, connection.id)).toBe(true)
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      connectionsOf().record(tx, old, { kind: 'error', error: 'reauth_required' }),
+    )
+    expect(hasCachedSession(vault.client, connection.id)).toBe(true)
+    // 密文没变，状态也不改
+    expect((await connectionRow(connection.id)).status).toBe('ok')
+    await withSpace(database.db, ws.spaceId, async (tx) =>
+      connectionsOf().record(tx, (await connectionsOf().load(tx, connection.id))!, {
+        kind: 'error',
+        error: 'reauth_required',
+      }),
+    )
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
+    expect((await connectionRow(connection.id)).status).toBe('reauth_required')
+  })
+
+  it('不是密码库报的错也记一条失败：意外的错误记成密码库出错，重读的令牌解不开记成主密钥', async () => {
+    const connection = await connected()
+    const created = await identify(
+      connection.id,
+      vault.addItem({ name: '路由器', values: routerValues }),
+    )
+    vault.state.beforeItem = () => Promise.reject(new Error('模拟的意外错误'))
+    expect((await use('identifier=router')).status).toBe(500)
+
+    // 第一段读完之后令牌失效、库里换成解不开的密文：重试时解密失败
+    await ok(await use('identifier=router'))
+    const old = vault.refreshTokens.at(-1)!
+    vault.state.beforeItem = async () => {
+      vault.revokeToken(old)
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(vaultConnections)
+          .set({ ciphertext: randomBytes(80) })
+          .where(eq(vaultConnections.id, connection.id)),
+      )
+    }
+    expect(await errorOf(await use('identifier=router'), 400)).toContain('主密钥不可用')
+    expect((await accessEvents(created.id)).map((e) => [e.result, e.reason])).toEqual([
+      ['failed', 'master_key'],
+      ['ok', null],
+      ['failed', 'vault_error'],
+    ])
+  })
+
+  it('kioku_get 末尾按连接的状态说明：断开、需要重新登录、停用的不写可以取用，也不请求密码库', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    const service = await keyService()
+    const calls = { ...vault.calls }
+    expect(await service.forPlaceholders(['router'])).toEqual([
+      { identifier: 'router', state: 'usable', name: '路由器' },
+    ])
+    for (const status of ['reauth_required', 'disabled'] as const) {
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(vaultConnections)
+          .set({
+            status,
+            disabledReason: status === 'disabled' ? 'personal_items' : null,
+          })
+          .where(eq(vaultConnections.id, connection.id)),
+      )
+      expect((await service.forPlaceholders(['router']))[0]!.state).toBe(status)
+    }
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(vaultConnections)
+        .set({ status: 'ok', disabledReason: null })
+        .where(eq(vaultConnections.id, connection.id)),
+    )
+    await ok(await asMember('POST', `/vault-connections/${connection.id}/disconnect`))
+    expect((await service.forPlaceholders(['router']))[0]!.state).toBe('disconnected')
+    expect(vault.calls).toEqual(calls)
+  })
+
+  it('取用成功时不必每次都写连接那一行：有最近的错误要清，或者上次检查过了一分钟才写', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    const stamp = async () => (await connectionRow(connection.id)).lastCheckedAt!.getTime()
+    const first = await stamp()
+    await ok(await use('identifier=router'))
+    expect(await stamp()).toBe(first)
+
+    const back = (minutes: number) =>
+      withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(vaultConnections)
+          .set({ lastCheckedAt: sql`now() - make_interval(mins => ${minutes})` })
+          .where(eq(vaultConnections.id, connection.id)),
+      )
+    await back(2)
+    const old = await stamp()
+    await ok(await use('identifier=router'))
+    expect(await stamp()).toBeGreaterThan(old)
+
+    // 一分钟以内，但有最近的错误：照样写，把错误清掉
+    vault.failNext('unreachable')
+    expect((await use('identifier=router')).status).toBe(502)
+    await ok(await use('identifier=router'))
+    expect((await connectionRow(connection.id)).lastErrorKind).toBeNull()
   })
 })

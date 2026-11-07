@@ -531,7 +531,7 @@ export const VAULT_CONNECTION_STATUSES = [
 export const VaultConnectionStatus = z.enum(VAULT_CONNECTION_STATUSES)
 export type VaultConnectionStatus = z.infer<typeof VaultConnectionStatus>
 
-// 停用的原因：账号里有不属于组织的条目；在某个组织里看得到全部集合（所有者、管理员，或开了「访问全部集合」的成员）
+// 停用的原因：账号里有不属于组织的条目；在某个组织里可访问全部集合（所有者、管理员，或开了「访问全部集合」的成员）
 export const VAULT_DISABLED_REASONS = ['personal_items', 'organization_role'] as const
 export const VaultDisabledReason = z.enum(VAULT_DISABLED_REASONS)
 export type VaultDisabledReason = z.infer<typeof VaultDisabledReason>
@@ -600,7 +600,8 @@ export const VaultServerUrl = z
   )
   .transform((v) => v.replace(/\/+$/, ''))
 
-const VaultEmail = z
+// 密码库账号的邮箱：连接、重新登录与空间导入都按它检查
+export const VaultEmail = z
   .string()
   .trim()
   .max(320, '邮箱最多 320 个字符')

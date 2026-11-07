@@ -1,4 +1,5 @@
 import {
+  CREDENTIAL_ACCESS_REASON_NAMES,
   LAYER_NAMES,
   type CredentialAccess,
   type CredentialSummary,
@@ -57,13 +58,18 @@ export function formatDomains(domains: DomainSummary[]): string {
 }
 
 const sourceLabel = (c: CredentialSummary) => (c.source === 'hosted' ? 'Kioku 托管' : '密码库')
+// 凭据的明文字段可能是别的 Key 写的（有管理能力的 agent 可能被诱导）：写进给模型的文字之前一律压成单行，
+// 免得多行的说明伪造出「值：…」或指令。标识与字段名有格式限制，也一样处理，规则只有一处
+const credentialHead = (c: CredentialSummary) =>
+  `${inlineText(c.identifier)}（${inlineText(c.name)}）`
+const fieldList = (c: CredentialSummary) => c.fields.map(inlineText).join('、') || '无'
 
 // 取用结果：值用 JSON 写出，多行的值（例如私钥）也不会和别的行混在一起。测试台里不给值，写占位文字
 export function formatCredentialAccess(a: CredentialAccess): string {
   const c = a.credential
-  const lines = [`凭据：${c.identifier}（${c.name}），版本 ${c.version}`]
-  if (c.description) lines.push(`说明：${c.description}`)
-  lines.push(`来源：${sourceLabel(c)}，字段 ${c.fields.join('、') || '无'}`)
+  const lines = [`凭据：${credentialHead(c)}，版本 ${c.version}`]
+  if (c.description) lines.push(`说明：${inlineText(c.description)}`)
+  lines.push(`来源：${sourceLabel(c)}，字段 ${fieldList(c)}`)
   lines.push(`值：${a.values ? JSON.stringify(a.values) : MASKED_CREDENTIAL_VALUES}`)
   lines.push('', a.notice)
   return lines.join('\n')
@@ -72,7 +78,7 @@ export function formatCredentialAccess(a: CredentialAccess): string {
 export function formatCredentialList(list: KeyCredentialList): string {
   const items = list.items.map(
     (c) =>
-      `- ${c.identifier}（${c.name}）：${sourceLabel(c)}，字段 ${c.fields.join('、') || '无'}，版本 ${c.version}${c.description ? `。${inlineText(c.description)}` : ''}`,
+      `- ${credentialHead(c)}：${sourceLabel(c)}，字段 ${fieldList(c)}，版本 ${c.version}${c.description ? `。${inlineText(c.description)}` : ''}`,
   )
   return [
     items.length ? `凭据：\n${items.join('\n')}` : '凭据：暂无可取用的凭据',
@@ -83,19 +89,20 @@ export function formatCredentialList(list: KeyCredentialList): string {
 }
 
 export function formatCredentialSummary(verb: string, c: CredentialSummary): string {
-  return `${verb}凭据 ${c.identifier}（${c.name}）：${sourceLabel(c)}，字段 ${c.fields.join('、')}，版本 ${c.version}`
+  return `${verb}凭据 ${credentialHead(c)}：${sourceLabel(c)}，字段 ${fieldList(c)}，版本 ${c.version}`
 }
 
 export const PLAINTEXT_REMINDER =
   '提醒：正文像有明文密码或 Token。凭据用 kioku_credential_save 存起来，正文里换成 {{cred:<标识>#<字段>}} 占位符。'
 
-// kioku_get 末尾的凭据列表：只说能不能取用，不给值，也不记访问
+// kioku_get 末尾的凭据列表：只说能不能取用（密码库的连接不可用时说明原因），不给值，也不记访问
 export function formatPlaceholderCredentials(items: PlaceholderCredential[]): string {
-  const rows = items.map((c) =>
-    c.usable
-      ? `- ${c.identifier}（${inlineText(c.name ?? '')}）：可以取用`
-      : `- ${c.identifier}：无权查看或不存在`,
-  )
+  const rows = items.map((c) => {
+    if (c.state === 'unavailable') return `- ${inlineText(c.identifier)}：无权查看或不存在`
+    const state =
+      c.state === 'usable' ? '可以取用' : `暂时取不到，${CREDENTIAL_ACCESS_REASON_NAMES[c.state]}`
+    return `- ${inlineText(c.identifier)}（${inlineText(c.name ?? '')}）：${state}`
+  })
   return [
     '正文里引用的凭据（值不在这里；用到时再用 kioku_credential 取，取到的值不要写回记忆，也不要显示在回复里）：',
     ...rows,

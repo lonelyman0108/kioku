@@ -1716,6 +1716,42 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(await spaceCount()).toBe(before)
   })
 
+  it('密码库连接的地址与邮箱按连接接口的规则检查：末尾的 / 去掉，外网的 http 拒收', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const record = (serverUrl: string, email = 'agent@example.com'): SpaceExportRecord => ({
+      type: 'vault_connection',
+      id: randomUUID(),
+      serverUrl,
+      email,
+      vaultUserId: 'user-1',
+      defaultCollectionId: null,
+      createdAt: now,
+      updatedAt: now,
+    })
+    const imported = await ok<SpaceImportResult>(
+      importRequest(source, alice.cookie, await craft([record('https://vault.example.com/')])),
+      201,
+    )
+    const connections = await ok<VaultConnectionList>(
+      send(source, 'GET', `/v1/spaces/${imported.spaceId}/vault-connections`, undefined, {
+        cookie: alice.cookie,
+      }),
+    )
+    expect(connections.items.map((v) => [v.serverUrl, v.status])).toEqual([
+      ['https://vault.example.com', 'disconnected'],
+    ])
+    const before = await spaceCount()
+    for (const [bad, where] of [
+      [record('http://vault.example.com'), '第 2 行 serverUrl'],
+      [record('https://vault.example.com', '不是邮箱'), '第 2 行 email'],
+    ] as const) {
+      const res = await importRequest(source, alice.cookie, await craft([bad]))
+      expect(res.status, await res.clone().text()).toBe(400)
+      expect(((await res.json()) as { error: string }).error).toContain(where)
+    }
+    expect(await spaceCount()).toBe(before)
+  })
+
   it('密码库凭据没有字段、或者字段重名：导入时被拒，导出时也被拒', async () => {
     const alice = await bootstrap(source, 'alice')
     const space = alice.spaceId

@@ -35,6 +35,7 @@ import {
   credentials,
   memories,
   memoryCredentialRefs,
+  vaultConnections,
 } from '../db/schema'
 import { STILL_VALID } from '../memory/filter'
 import { hasMaskedText } from '../memory/masked'
@@ -45,6 +46,7 @@ import { CREDENTIAL_NOTICE } from './methods'
 import { TotpFormatError, totpCode } from './totp'
 import {
   VaultConnections,
+  reasonStatus,
   VaultDisabledError,
   vaultReason,
   type ConnectionRow,
@@ -77,8 +79,9 @@ export type CredentialVia = 'kioku_credential' | 'rest' | 'console' | 'space_exp
 // kioku_get 末尾列出的一条凭据：只说能不能取用，不给值，也不记访问
 export interface PlaceholderCredential {
   identifier: string
-  usable: boolean
-  // 能取用时给名称
+  // usable 能取用；unavailable 无权查看或不存在；其余是密码库连接的状态（取用时会以它失败）
+  state: 'usable' | 'unavailable' | 'disconnected' | 'reauth_required' | 'disabled'
+  // 看得到这条凭据时给名称
   name: string | null
 }
 
@@ -192,9 +195,7 @@ function failureError(
   detail?: string,
 ): MemoryError {
   const text = `取不到 ${identifier} 的值：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail ? `（${detail}）` : ''}`
-  const status =
-    reason === 'unreachable' || reason === 'vault_error' ? 502 : reason === 'master_key' ? 400 : 409
-  return new MemoryError(status, text)
+  return new MemoryError(reasonStatus(reason), text)
 }
 
 interface AccessRecord {
@@ -609,7 +610,14 @@ export class CredentialService {
       }
     }
     const connection = await this.vault.load(tx, row.vaultConnectionId!)
-    if (!connection || connection.status === 'disconnected') return fail('disconnected')
+    // 连接不能用了（断开、需要重新登录、停用、被保留期删掉）：缓存里这个连接的会话一并删掉。
+    // 断开与并发的取用交错时，会话可能在断开提交之后才放回缓存，靠这里清掉
+    if (!connection || connection.status !== 'ok' || !connection.ciphertext) {
+      this.vault.forget(row.vaultConnectionId!)
+    }
+    if (!connection || connection.status === 'disconnected' || !connection.ciphertext) {
+      return fail('disconnected')
+    }
     if (connection.status === 'disabled') {
       return fail(
         'disabled',
@@ -639,8 +647,10 @@ export class CredentialService {
   ): Promise<Record<string, string> | null> {
     if (prepared.kind === 'error') throw prepared.error
     if (prepared.kind === 'values') return prepared.values
-    let outcome: VaultOutcome
+    let outcome: VaultOutcome | null
     let result: Record<string, string> | CredentialAccessReason
+    // 不是密码库报的错（解不开重读的密文、保存新令牌或停用连接时的数据库错误）：也记一条失败，再原样抛出
+    let unexpected: unknown = null
     let connection = prepared.connection
     try {
       let item: VaultItem
@@ -660,7 +670,13 @@ export class CredentialService {
           throw err
         }
         connection = fresh
-        item = await this.vault.session(fresh).item(row.vaultItemId!)
+        let session: VaultSession
+        try {
+          session = this.vault.session(fresh)
+        } catch (openErr) {
+          throw new SecretsUnreadable(openErr)
+        }
+        item = await session.item(row.vaultItemId!)
       }
       outcome = { kind: 'ok' }
       result = itemValues(item, fields)
@@ -672,19 +688,31 @@ export class CredentialService {
         outcome = { kind: 'error', error: err.kind }
         result = vaultReason(err.kind)
       } else {
-        throw err
+        // 和 prepare 里解不开令牌一样记成主密钥的问题；别的意外记成密码库出错。连接的状态不动
+        outcome = null
+        result = err instanceof SecretsUnreadable ? 'master_key' : 'vault_error'
+        unexpected = err
       }
     }
     const names = fields.map((f) => f.name)
-    await this.run(async (tx) => {
-      await this.vault.record(tx, connection, outcome)
-      await this.accessEvent(tx, row.id, {
+    const finish = (tx: Tx) =>
+      this.accessEvent(tx, row.id, {
         via,
         fields: names,
         purpose,
         result: typeof result === 'string' ? 'failed' : 'ok',
         reason: typeof result === 'string' ? result : null,
       })
+    if (unexpected !== null) {
+      // 记失败本身也可能出错（例如数据库连不上）：那时抛出原来的错误
+      await this.run(finish).catch(() => {})
+      // 解不开令牌和 prepare 里一样给出「主密钥不可用」；别的意外原样抛出，按内部错误处理
+      if (result === 'master_key') throw failureError(result, row.identifier)
+      throw unexpected
+    }
+    await this.run(async (tx) => {
+      if (outcome) await this.vault.record(tx, connection, outcome)
+      await finish(tx)
     })
     if (typeof result === 'string') throw failureError(result, row.identifier)
     return result
@@ -755,7 +783,6 @@ export class CredentialService {
     let item: VaultItem
     try {
       item = await this.vault.session(connection).item(source.itemId)
-      await this.run((tx) => this.vault.record(tx, connection, { kind: 'ok' }))
     } catch (err) {
       if (err instanceof VaultDisabledError) {
         throw new MemoryError(409, `密码库连接已停用：${VAULT_DISABLED_REASON_NAMES[err.reason]}`)
@@ -764,7 +791,7 @@ export class CredentialService {
       await this.run((tx) => this.vault.record(tx, connection, { kind: 'error', error: err.kind }))
       const reason = vaultReason(err.kind)
       throw new MemoryError(
-        reason === 'unreachable' || reason === 'vault_error' ? 502 : 409,
+        reasonStatus(reason),
         `无法读取这个条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}`,
       )
     }
@@ -797,6 +824,8 @@ export class CredentialService {
         })
         .returning()
       await this.event(tx, id, 'create')
+      // 刚才那次取条目是成功的：和插入放在一个事务里更新连接
+      await this.vault.record(tx, connection, { kind: 'ok' })
       return this.consoleViewOf(tx, row!)
     }, conflict)
   }
@@ -1041,18 +1070,20 @@ export class CredentialService {
   // kioku_get 读到含占位符的记忆时，末尾列出这些凭据能不能取用：不给值，也不记访问
   async forPlaceholders(identifiers: string[]): Promise<PlaceholderCredential[]> {
     const wanted = [...new Set(identifiers)]
-    const unusable = (identifier: string): PlaceholderCredential => ({
+    const unavailable = (identifier: string): PlaceholderCredential => ({
       identifier,
-      usable: false,
+      state: 'unavailable',
       name: null,
     })
     if (!wanted.length || credentialDenial(this.ctx.access, { appIds: null }, 'use')) {
-      return wanted.map(unusable)
+      return wanted.map(unavailable)
     }
+    // 密码库的凭据连上连接的状态：不请求密码库，连不上这类要到取用时才知道
     const rows = await this.run((tx) =>
       tx
-        .select()
+        .select({ row: credentials, status: vaultConnections.status })
         .from(credentials)
+        .leftJoin(vaultConnections, eq(vaultConnections.id, credentials.vaultConnectionId))
         .where(
           and(
             eq(credentials.ownerAccountId, this.owner),
@@ -1062,10 +1093,10 @@ export class CredentialService {
         ),
     )
     return wanted.map((identifier) => {
-      const row = rows.find((r) => r.identifier === identifier)
-      return row && canUseCredential(this.ctx.access, row)
-        ? { identifier, usable: true, name: row.name }
-        : unusable(identifier)
+      const found = rows.find((r) => r.row.identifier === identifier)
+      if (!found || !canUseCredential(this.ctx.access, found.row)) return unavailable(identifier)
+      const status = found.row.source === 'vault' ? (found.status ?? 'disconnected') : 'ok'
+      return { identifier, state: status === 'ok' ? 'usable' : status, name: found.row.name }
     })
   }
 
@@ -1099,5 +1130,12 @@ export class CredentialService {
 }
 
 const FALLBACK_CLIENT = unavailableVaultClient()
+
+// 重读的密文解不开：记成主密钥的问题
+class SecretsUnreadable extends Error {
+  constructor(readonly original: unknown) {
+    super('密码库连接保存的令牌解不开')
+  }
+}
 const ACCESS_RESULTS = new Set<string | null>(['ok', 'denied', 'failed'])
 const ACCESS_REASONS = new Set<string | null>(Object.keys(CREDENTIAL_ACCESS_REASON_NAMES))

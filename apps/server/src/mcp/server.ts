@@ -132,7 +132,11 @@ export function buildMcpServer(
         const found =
           view.layer === 'user'
             ? await credentials.forPlaceholders(identifiers)
-            : identifiers.map((identifier) => ({ identifier, usable: false, name: null }))
+            : identifiers.map((identifier) => ({
+                identifier,
+                state: 'unavailable' as const,
+                name: null,
+              }))
         return `${formatMemory(view)}\n\n${formatPlaceholderCredentials(found)}`
       }),
   )

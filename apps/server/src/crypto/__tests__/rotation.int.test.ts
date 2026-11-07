@@ -17,7 +17,13 @@ import { credentialAad } from '../../credential/service'
 import { openVaultSecrets, sealVaultSecrets } from '../../credential/vault'
 import { rewrapKey } from '../envelope'
 import { keyIdOf, type MasterKey } from '../keyring'
-import { checkMasterKey, masterKeyStatus, prepareMasterKey, rotateMasterKey } from '../rotation'
+import {
+  checkMasterKey,
+  masterKeyStatus,
+  prepareMasterKey,
+  rotateMasterKey,
+  rotationPass,
+} from '../rotation'
 
 describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
   let database: Database
@@ -439,6 +445,34 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       },
     )
     expect((await loadExtractionConfig(database.db, newKey))?.apiKey).toBe('sk-extract')
+  })
+
+  it('轮换任务：只剩密码库连接还用旧主密钥时也接着换，换完再来一次什么都不做', async () => {
+    const connectionId = crypto.randomUUID()
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(vaultConnections).values({
+        id: connectionId,
+        spaceId: ws.spaceId,
+        ownerAccountId: ws.accountId,
+        serverUrl: 'https://vault.example.com',
+        email: 'agent@example.com',
+        vaultUserId: 'user-1',
+        deviceId: crypto.randomUUID(),
+        ...sealVaultSecrets(oldKey, connectionId, {
+          refreshToken: 'refresh-token',
+          userKey: Buffer.alloc(64, 7),
+        }),
+      }),
+    )
+    expect((await masterKeyStatus(database.db, rotating)).remaining).toEqual({
+      memories: 0,
+      credentials: 0,
+      vaultConnections: 1,
+      settings: 0,
+    })
+    expect(await rotationPass(database.db, rotating)).toEqual({ rewrapped: 1, remaining: 0 })
+    expect((await masterKeyStatus(database.db, rotating)).remaining.vaultConnections).toBe(0)
+    expect(await rotationPass(database.db, rotating)).toBeNull()
   })
 
   it('主密钥状态只给实例管理员', async () => {

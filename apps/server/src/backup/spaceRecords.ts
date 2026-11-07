@@ -13,7 +13,9 @@ import {
   Slug,
   SubjectKind,
   VaultCredentialFields,
+  VaultEmail,
   VaultItemId,
+  VaultServerUrl,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
@@ -145,8 +147,9 @@ export const GroupPersonaRecord = z.object({
 export const VaultConnectionRecord = z.object({
   type: z.literal('vault_connection'),
   id: Id,
-  serverUrl: Text.min(1).max(500),
-  email: Text.min(1).max(320),
+  // 和连接接口同一个规则：只收 https（本机与不带点的主机名可以是 http），末尾的 / 去掉
+  serverUrl: Text.pipe(VaultServerUrl),
+  email: Text.pipe(VaultEmail),
   vaultUserId: Text.min(1).max(100),
   defaultCollectionId: Text.max(100).nullable(),
   createdAt: Time,

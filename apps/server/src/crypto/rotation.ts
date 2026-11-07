@@ -271,11 +271,23 @@ export async function rotateMasterKey(
       `${failures.length} 条用旧主密钥也无法解密，未能重新包装：${failures.slice(0, 5).join('、')}`,
     )
   }
-  const { remaining } = await masterKeyStatus(db, masterKey)
-  const left =
-    remaining.memories + remaining.credentials + remaining.vaultConnections + remaining.settings
+  const left = remainingTotal((await masterKeyStatus(db, masterKey)).remaining)
   if (!left) await clearMasterKeyError(db)
   return { rewrapped, remaining: left }
+}
+
+// 还剩多少条用旧主密钥包装：加了新的加密数据时只改这里，轮换任务提前结束的判断也用它
+export function remainingTotal(remaining: MasterKeyStatus['remaining']): number {
+  return Object.values(remaining).reduce((sum, n) => sum + n, 0)
+}
+
+// 轮换任务的一次：先数一数，已经换完（旧的那把还没从配置里去掉）就不用再扫一遍、锁设置，返回 null
+export async function rotationPass(
+  db: Db,
+  masterKey: MasterKey,
+): Promise<{ rewrapped: number; remaining: number } | null> {
+  if (!remainingTotal((await masterKeyStatus(db, masterKey)).remaining)) return null
+  return rotateMasterKey(db, masterKey)
 }
 
 export async function masterKeyStatus(

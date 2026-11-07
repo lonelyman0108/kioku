@@ -4,7 +4,7 @@ import { PgBoss, type JobResult } from 'pg-boss'
 import { backupJob } from '../backup/storage'
 import type { MasterKey } from '../crypto/keyring'
 import { keyringOf } from '../crypto/keyring'
-import { masterKeyStatus, recordMasterKeyError, rotateMasterKey } from '../crypto/rotation'
+import { recordMasterKeyError, rotationPass } from '../crypto/rotation'
 import { errorText, loggableError, type Db } from '../db/client'
 import { backfillJob, embedJobs, pruneJob, switchJob, type EmbedTarget } from '../embedding/jobs'
 import type { EmbedderSource } from '../embedding/source'
@@ -206,10 +206,9 @@ export async function startJobs(options: {
   await boss.work(ROTATE, async () => {
     if (!masterKey || !keyringOf(masterKey).previous) return
     try {
-      // 先数一数：已经换完（旧的那把还没从配置里去掉）就不用再扫一遍、锁设置
-      const { remaining: left } = await masterKeyStatus(options.db, masterKey)
-      if (!(left.memories + left.credentials + left.settings)) return
-      const { rewrapped, remaining } = await rotateMasterKey(options.db, masterKey)
+      const pass = await rotationPass(options.db, masterKey)
+      if (!pass) return
+      const { rewrapped, remaining } = pass
       console.log(`主密钥轮换：这次换了 ${rewrapped} 条，还剩 ${remaining} 条`)
       if (remaining) void send(ROTATE, {}, ROTATE_AGAIN_SECONDS)
     } catch (err) {
