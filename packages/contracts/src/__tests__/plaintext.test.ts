@@ -1139,3 +1139,64 @@ describe('整体审查补的几类', () => {
     }
   })
 })
+
+describe('最后一轮补的几类', () => {
+  const flagged = (text: string) => {
+    const found = findPlaintextCredentials(text)
+    expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(found.length > 0)
+    return found.length > 0
+  }
+  const added = (before: string | null, after: string) =>
+    addedPlaintextCredentials(before, after).map((m) => after.slice(m.start, m.end))
+
+  it('单个强调符写在冒号外面也认得出', () => {
+    expect(values('*Password*: hunter2')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('_Password_: hunter2')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(flagged('*密码*：见 1Password')).toBe(false)
+  })
+
+  it('注解里没有 ASCII 字母或数字才算原有的', () => {
+    expect(added('password: hunter2', 'password: hunter2（旧）')).toEqual([])
+    expect(added('password: hunter2', 'password: hunter2（已作废）')).toEqual([])
+    for (const note of ['（新密码Xk9mQ2vLp）', '（2024 年改的）', '（old）']) {
+      expect(added('password: hunter2', `password: hunter2${note}`), note).toEqual(['hunter2'])
+    }
+  })
+
+  it('引号里占位符后面隔着空格还有字：照样算，值是后面的部分', () => {
+    expect(values('password: "{{cred:a}} hunter2"')).toEqual([
+      { value: 'hunter2', field: 'password' },
+    ])
+    expect(added('password: "{{cred:a}}"', 'password: "{{cred:a}} hunter2"')).toEqual(['hunter2'])
+    for (const text of [
+      'password: "{{cred:a}}"',
+      'password: "{{cred:a}} "',
+      'password: "  {{cred:a}}  "',
+      'password: “{{cred:a}}”',
+      // 不写在引号里的：值到空白为止，后面的字不看
+      'password: {{cred:a}} hunter2',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+  })
+
+  it('常见的容器与一层嵌套的泛型不算，类型参数里不是类型名的照样算', () => {
+    for (const text of [
+      'password: List[Dict[str, int]]',
+      'token: Map<string, string>',
+      'token: Record<string, any>',
+      'token: Array<string>',
+      'token: Set<string>',
+      'token: Promise<void>',
+      'token: Partial<Record<string, string>>',
+      'token: Tuple[str, int]',
+      'token: Sequence[str]',
+      'token: Iterable[str] = ()',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+    for (const value of ['str[hunter2]', 'Map<hunter2>', 'List[Dict[hunter2]]', 'Array<string>x']) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+  })
+})
