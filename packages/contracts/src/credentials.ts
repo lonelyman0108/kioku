@@ -538,6 +538,8 @@ export const CredentialValueMatches = z.object({
   items: z.array(CredentialValueMatch),
   // 这次读不了的连接数（不可用、需要重新登录、无法连接等）：它们的条目和指着它们的凭据都没比，对不上不等于没有
   unavailableConnections: z.number().int(),
+  // 读不到值的托管凭据条数（没配主密钥、解不开）：这些也没比，对不上不等于没有
+  unreadableCredentials: z.number().int(),
 })
 export type CredentialValueMatches = z.infer<typeof CredentialValueMatches>
 

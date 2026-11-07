@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto'
 
 import {
+  ConvertibleValue,
   CREDENTIAL_ACCESS_REASON_NAMES,
   defaultCredentialFields,
   MAX_CREDENTIAL_FIELDS,
@@ -909,27 +910,22 @@ export class CredentialService {
     const missing = fields.find((f) => !item.fields.includes(f.itemField!))
     if (missing) throw new MemoryError(400, `条目里没有字段 ${missing.itemField}`)
     return this.run(async (tx) => {
-      const id = randomUUID()
-      const [row] = await tx
-        .insert(credentials)
-        .values({
-          id,
-          spaceId: this.ctx.spaceId,
-          ownerAccountId: this.owner,
+      const id = await this.insertVault(
+        tx,
+        {
           identifier: input.identifier,
           name: input.name,
           description: input.description ?? null,
-          source: 'vault',
-          vaultConnectionId: connection.id,
-          vaultItemId: source.itemId,
+          connectionId: connection.id,
+          itemId: source.itemId,
           fields,
-          appIds,
-        })
-        .returning()
-      await this.event(tx, id, 'create')
+        },
+        appIds,
+        ITEM_BOUND_CREATE,
+      )
       // 刚才那次取条目是成功的：和插入放在一个事务里更新连接
       await this.vault.record(tx, connection, { kind: 'ok' })
-      return this.consoleViewOf(tx, row!)
+      return this.consoleViewOf(tx, await this.ownById(tx, id))
     }, conflict)
   }
 
@@ -959,21 +955,26 @@ export class CredentialService {
   private async collectValues(scope: 'all' | 'bound'): Promise<CollectedValues> {
     this.requireManage()
     const sessions: PreparedSession[] = []
-    const { rows, hosted, unavailable } = await this.run(async (tx) => {
+    const { rows, hosted, unavailable, unreadable } = await this.run(async (tx) => {
       const rows = await tx
         .select()
         .from(credentials)
         .where(and(eq(credentials.ownerAccountId, this.owner), isNull(credentials.deletedAt)))
         .orderBy(asc(credentials.identifier))
       const hosted = new Map<string, Record<string, string>>()
+      // 读不到值的托管凭据（没配主密钥、解不开）不比，数出来交给调用方：不说的话会被当成没有同值的
+      let unreadable = 0
       for (const row of rows) {
-        if (row.source !== 'hosted' || !this.ctx.masterKey) continue
+        if (row.source !== 'hosted') continue
+        if (!this.ctx.masterKey) {
+          unreadable++
+          continue
+        }
         try {
           hosted.set(row.id, this.open(row))
         } catch (err) {
-          // 解不开的（主密钥换过却没有重新包装这类）不比，和读不到一样
-          if (err instanceof MemoryError) continue
-          logInternalError('按值比对时托管的凭据解不开', err)
+          unreadable++
+          if (!(err instanceof MemoryError)) logInternalError('按值比对时托管的凭据解不开', err)
         }
       }
       const bound = new Set(rows.flatMap((r) => (r.vaultConnectionId ? [r.vaultConnectionId] : [])))
@@ -1002,13 +1003,13 @@ export class CredentialService {
           unavailable++
         }
       }
-      return { rows, hosted, unavailable }
+      return { rows, hosted, unavailable, unreadable }
     }).catch(this.releasingOnError(sessions))
 
-    const calls: VaultCall<VaultItem[]>[] = []
-    for (const prepared of sessions) {
-      calls.push(await this.vaultCall(prepared, (session) => session.items()))
-    }
+    // 各连接并行取：vaultCall 不抛错，一个失败不影响别的，每个会话下面都照样 record
+    const calls = await Promise.all(
+      sessions.map((prepared) => this.vaultCall(prepared, (session) => session.items())),
+    )
     const touched = calls.map((c) => ({ connection: c.connection, session: c.used }))
     await this.run(async (tx) => {
       for (const call of calls)
@@ -1024,9 +1025,16 @@ export class CredentialService {
     if (unexpected) throw unexpected.error
     const items = new Map<string, VaultItem[]>()
     for (const [i, call] of calls.entries()) {
-      if (call.error === null) items.set(sessions[i]!.connection.id, call.value!)
+      if (call.error === null)
+        items.set(sessions[i]!.connection.id, [...call.value!].sort(byItemName))
     }
-    return { rows, hosted, items, unavailableConnections: unavailable + calls.length - items.size }
+    return {
+      rows,
+      hosted,
+      items,
+      unavailableConnections: unavailable + calls.length - items.size,
+      unreadableCredentials: unreadable,
+    }
   }
 
   // 按值查找：每个值和当前账号的托管凭据、可用的密码库连接里的条目逐个字段比，按字面比较。
@@ -1038,16 +1046,24 @@ export class CredentialService {
       if (row.source === 'vault') boundItem.set(`${row.vaultConnectionId}/${row.vaultItemId}`, row)
     }
     const entries = credentialEntries(collected)
+    // 条目在 collectValues 里排好了，字段在这里排一次，不随每个值重排
+    const fieldsOf = new Map<VaultItem, [string, string][]>()
+    for (const items of collected.items.values()) {
+      for (const item of items) {
+        fieldsOf.set(
+          item,
+          Object.entries(item.values).sort(([a], [b]) => a.localeCompare(b)),
+        )
+      }
+    }
     return {
       items: values.map((value) => {
         const matched = entries.filter((e) => e.value === value)
         const vaultItems: CredentialValueMatches['items'][number]['vaultItems'] = []
         for (const [connectionId, items] of collected.items) {
-          for (const item of [...items].sort(byItemName)) {
+          for (const item of items) {
             const bound = boundItem.get(`${connectionId}/${item.id}`)
-            for (const [itemField, itemValue] of Object.entries(item.values).sort(([a], [b]) =>
-              a.localeCompare(b),
-            )) {
+            for (const [itemField, itemValue] of fieldsOf.get(item)!) {
               if (itemField === TOTP_FIELD || itemValue !== value) continue
               // 已经对应到凭据字段的只列在 credentials 里
               if (bound?.fields.some((f) => f.itemField === itemField)) continue
@@ -1072,20 +1088,30 @@ export class CredentialService {
         }
       }),
       unavailableConnections: collected.unavailableConnections,
+      unreadableCredentials: collected.unreadableCredentials,
     }
   }
 
   // 当前账号有效凭据各字段现在的值（Lore 导入用）：托管的解开，密码库的只取有凭据指着的连接。
-  // 读不到值的凭据（连接不可用、条目不可用、解不开）列进 unresolved
+  // 只留能用来按值替换的值（ConvertibleValue：太短的会换掉正文里别的内容），不能用的列进 unconvertible。
+  // 读不到值的凭据列进 unresolved：hosted 是解不开，vault 是连接或条目不可用
   async knownValues(): Promise<KnownCredentialValues> {
     const collected = await this.collectValues('bound')
-    const entries = credentialEntries(collected)
-    const resolved = new Set(entries.map((e) => e.id))
+    const all = credentialEntries(collected)
+    const read = new Set(all.map((e) => e.id))
+    const unresolved = new Map<string, 'hosted' | 'vault'>()
+    for (const row of collected.rows) {
+      if (!read.has(row.id) && !hostedRead(collected, row))
+        unresolved.set(row.identifier, row.source)
+    }
     return {
-      entries,
-      unresolved: new Set(
-        collected.rows.filter((r) => !resolved.has(r.id)).map((r) => r.identifier),
+      entries: all.filter((e) => isConvertibleValue(e.value)),
+      unconvertible: new Set(
+        all.filter((e) => !isConvertibleValue(e.value)).map((e) => `${e.identifier}#${e.field}`),
       ),
+      unresolved,
+      unavailableConnections: collected.unavailableConnections,
+      unreadableCredentials: collected.unreadableCredentials,
     }
   }
 
@@ -1226,6 +1252,7 @@ export class CredentialService {
             fields,
           },
           null,
+          ITEM_BOUND,
         ),
     }
   }
@@ -1287,6 +1314,8 @@ export class CredentialService {
       fields: CredentialField[]
     },
     appIds: string[] | null,
+    // 同一个条目已有有效凭据时的说法：新建与转存给的下一步不同
+    boundText: string,
   ): Promise<string> {
     const id = randomUUID()
     try {
@@ -1308,7 +1337,7 @@ export class CredentialService {
         throw new MemoryError(409, `标识已被占用或不可用：${input.identifier}`)
       }
       if (isUniqueViolation(err, 'credentials_vault_item_live_idx')) {
-        throw new MemoryError(409, ITEM_BOUND)
+        throw new MemoryError(409, boundText)
       }
       throw err
     }
@@ -1841,6 +1870,7 @@ const CONVERT_TOTP = '验证码字段给出的是现算的验证码，不是条�
 const CONVERT_MISMATCH = '所选字段现在的值与要转存的值不同，未做任何修改。请确认选对了凭据与字段'
 const CONVERT_TEXT_HAS_VALUE = '标识、名称、说明与字段名不能包含要转存的值'
 const ITEM_BOUND = '这个条目已经起过标识，请改用这条凭据转存'
+const ITEM_BOUND_CREATE = '这个条目已经起过标识，一个条目只对应一条有效凭据'
 
 interface CollectedValues {
   // 当前账号的有效凭据，按标识排序
@@ -1850,7 +1880,16 @@ interface CollectedValues {
   // 取到了条目的连接：连接 id → 全部条目
   items: Map<string, VaultItem[]>
   unavailableConnections: number
+  // 读不到值的托管凭据条数
+  unreadableCredentials: number
 }
+
+// 托管的这条解开了（只是声明的字段没有存值，不算读不到）
+const hostedRead = (collected: CollectedValues, row: CredentialRow) =>
+  row.source === 'hosted' && collected.hosted.has(row.id)
+
+// 能按值替换的值：和转存的请求同一个规则（ConvertibleValue）
+export const isConvertibleValue = (value: string) => ConvertibleValue.safeParse(value).success
 
 // 一条凭据的一个字段现在的值。只在服务端里比对用
 export interface CredentialValueEntry {
@@ -1862,10 +1901,14 @@ export interface CredentialValueEntry {
 }
 
 export interface KnownCredentialValues {
-  // 按标识、字段排序：同一个值对上几条时取第一条
+  // 按标识、字段排序：同一个值对上几条时取第一条。只有满足 ConvertibleValue 的值
   entries: CredentialValueEntry[]
-  // 读不到值的凭据的标识
-  unresolved: ReadonlySet<string>
+  // 值读到了、却不能用来按值替换的字段（标识#字段）
+  unconvertible: ReadonlySet<string>
+  // 读不到值的凭据：标识 → 来源（hosted 解不开，vault 连接或条目不可用）
+  unresolved: ReadonlyMap<string, 'hosted' | 'vault'>
+  unavailableConnections: number
+  unreadableCredentials: number
 }
 
 // 转存的去处准备好了：占位符写成 {{cred:<identifier>#<field>}}，apply 在转存的事务里执行，返回凭据 id

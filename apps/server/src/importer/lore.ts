@@ -28,7 +28,7 @@ import {
   replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
-import type { KnownCredentialValues } from '../credential/service'
+import { isConvertibleValue, type KnownCredentialValues } from '../credential/service'
 import { decryptSecret } from '../crypto/envelope'
 import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { sealedSettingsKeys } from '../crypto/rotation'
@@ -183,7 +183,8 @@ export interface PlaintextSpot {
   credential: { id: string; identifier: string; name: string; field: string } | null
 }
 
-// 正文里的疑似明文，按值和已有的凭据比（known 为 null 时都对不上）。同一个值对上几条时取标识、字段排在前面的那条
+// 正文里的疑似明文，按值和已有的凭据比（known 为 null 时都对不上）。同一个值对上几条时取标识、字段排在前面的那条。
+// 值不满足 ConvertibleValue 的（太短、前后有空白等）不比：按值替换会换掉正文里别的内容
 export function plaintextSpots(
   content: string | null,
   known: KnownCredentialValues | null,
@@ -191,7 +192,9 @@ export function plaintextSpots(
   const text = content ?? ''
   return findPlaintextCredentials(text).map((m, index) => {
     const value = text.slice(m.start, m.end)
-    const entry = known?.entries.find((e) => e.value === value)
+    const entry = isConvertibleValue(value)
+      ? known?.entries.find((e) => e.value === value)
+      : undefined
     return {
       index,
       line: m.line,
@@ -204,12 +207,12 @@ export function plaintextSpots(
   })
 }
 
-// 写入时要换的一处：credential 为 null 表示写入前重新比对时已经对不上凭据了（凭据刚改过值），照原样写
-export interface PlaintextConversion {
-  line: number
-  value: string
-  credential: { identifier: string; field: string } | null
-}
+// 写入时要换的一处：credential 为 null 时照原样写，problem 说明原因：
+// stale 是核对时计划里那条凭据这个字段的值已经不等于这一处（改过值、删了），unconvertible 是值不满足 ConvertibleValue
+export type PlaintextConversion = { line: number; value: string } & (
+  | { credential: { identifier: string; field: string }; problem?: undefined }
+  | { credential: null; problem: 'stale' | 'unconvertible' }
+)
 
 // 一处疑似明文换成的占位符，事件里记的也是这一对
 export interface ConvertedRef {
@@ -583,11 +586,15 @@ function convertTarget(
   const kept: string[] = []
   const lines = (list: PlaintextConversion[]) =>
     [...new Set(list.map((c) => c.line))].sort((a, b) => a - b).join('、')
-  const stale = conversions.filter((c) => !c.credential)
+  const stale = conversions.filter((c) => c.problem === 'stale')
   if (stale.length) {
     kept.push(
-      `正文第 ${lines(stale)} 行的疑似明文与凭据已对不上（凭据可能刚修改过），照原样写入，可在待处理中转存`,
+      `正文第 ${lines(stale)} 行的疑似明文与计划中的凭据已对不上（凭据可能刚修改或删除），照原样写入，可在待处理中转存`,
     )
+  }
+  const short = conversions.filter((c) => c.problem === 'unconvertible')
+  if (short.length) {
+    kept.push(`正文第 ${lines(short)} 行的值太短或前后有空白，按值替换会改到别的内容，照原样写入`)
   }
   let usable = conversions.filter((c) => c.credential)
   if (usable.length && !placeholderAllowed(layer, sensitivity)) {
@@ -1261,30 +1268,51 @@ export interface SyncPlan {
 // 导入、同步事件的 context 里记下的换过的占位符（ConvertedRef 的数组），不记值
 export const CONVERTED_KEY = 'plaintextCredentials'
 
-// 换过占位符的记忆，Kioku 的正文和 Lore 的不一样了：比较之前把 Lore 正文里等于这些凭据现在的值的明文换成同样的占位符。
-// 读不到值的（凭据删掉了、密码库不可用，或者调用方没给 known，例如命令行）不比：照字面比会把明文写回去。
-// 换完还缺某个占位符、正文里又还有疑似明文时，多半是凭据改了值、Lore 里还是旧的明文，也不比
+// 换过占位符的记忆，Kioku 的正文和 Lore 的不一样了：比较之前把 Lore 正文里这些凭据现在的值换成同样的占位符。
+// 规则是严格的：每一次记录过的转存，只要 Kioku 的正文里现在还有这个占位符，Lore 的正文里就要找得到这条凭据现在的值
+// （或者已经写着这个占位符），找不到（missing）就不比。不靠疑似明文的规则猜：Lore 里的旧值换了写法认不出时，
+// 照字面比会把旧明文写回去。Kioku 里已经没有这个占位符的转存不再管。
+// 读不到值的（凭据删了、密码库不可用、值不能按值替换，或者调用方没给 known，例如命令行）为 unknown，也不比
 type ProtectedContent =
-  { kind: 'ok'; content: string } | { kind: 'unknown' | 'plaintext'; ref: ConvertedRef }
+  { kind: 'ok'; content: string } | { kind: 'unknown' | 'missing'; ref: ConvertedRef }
 function protectLoreContent(
   content: string,
+  current: string,
   refs: ConvertedRef[],
   known: KnownCredentialValues | null,
 ): ProtectedContent {
-  const values = refs.map((ref) => ({
-    ref,
-    value: known?.entries.find((e) => e.identifier === ref.identifier && e.field === ref.field)
-      ?.value,
-  }))
-  const missing = values.find((v) => v.value === undefined)
-  if (missing) return { kind: 'unknown', ref: missing.ref }
-  let text = content
-  for (const { ref, value } of [...values].sort((a, b) => b.value!.length - a.value!.length)) {
-    text = replaceOutsidePlaceholders(text, value!, placeholderOf(ref)).text
+  const live = refs.filter((ref) => current.includes(placeholderOf(ref)))
+  const values: { ref: ConvertedRef; value: string }[] = []
+  for (const ref of live) {
+    const value = known?.entries.find(
+      (e) => e.identifier === ref.identifier && e.field === ref.field,
+    )?.value
+    if (value === undefined || !isConvertibleValue(value)) return { kind: 'unknown', ref }
+    values.push({ ref, value })
   }
-  const lost = refs.find((ref) => !text.includes(placeholderOf(ref)))
-  if (lost && findPlaintextCredentials(text).length) return { kind: 'plaintext', ref: lost }
+  let text = content
+  // 长的先换：一个值是另一个值的一部分时，先换短的会把长的拆开
+  for (const { ref, value } of [...values].sort((a, b) => b.value.length - a.value.length)) {
+    const swapped = replaceOutsidePlaceholders(text, value, placeholderOf(ref))
+    if (!swapped.replaced && !text.includes(placeholderOf(ref))) return { kind: 'missing', ref }
+    text = swapped.text
+  }
   return { kind: 'ok', content: text }
+}
+
+// 读不到这条凭据的值时怎么说：命令行不给 known；值读到了却不能按值替换；读不到（解不开、密码库不可用）；不在了
+function unknownReason(ref: ConvertedRef, known: KnownCredentialValues | null | undefined): string {
+  const at = `${ref.identifier}#${ref.field}`
+  const head = `导入时已换成 ${at} 的占位符`
+  if (known === undefined) return `${head}，命令行无法核对凭据的值：请在管理界面同步`
+  if (known === null) return `${head}，这次没有读取凭据的值：请重新查看计划`
+  if (known.unconvertible.has(at)) {
+    return `${head}，这条凭据现在的值太短或前后有空白，无法按值核对，这次不同步`
+  }
+  const source = known.unresolved.get(ref.identifier)
+  if (source === 'vault') return `${head}，密码库连接或条目暂时不可用，这次不同步`
+  if (source === 'hosted') return `${head}，这条凭据的值无法解密，这次不同步`
+  return `${head}，这条凭据已删除或没有这个字段，这次不同步`
 }
 
 // 只读：算出同步要做什么，打印给人确认；执行时再按版本号核对一次。
@@ -1420,26 +1448,28 @@ export async function planSync(
       const refs = convertedOf.get(m.memoryId!) ?? []
       let wantContent = want.content
       if (refs.length) {
-        const prepared = protectLoreContent(want.content, refs, known ?? null)
+        const prepared = protectLoreContent(
+          want.content,
+          current.content ?? '',
+          refs,
+          known ?? null,
+        )
         if (prepared.kind !== 'ok') {
           const at = `${prepared.ref.identifier}#${prepared.ref.field}`
           report(
             m,
-            prepared.kind === 'plaintext'
+            prepared.kind === 'missing'
               ? {
                   source,
                   uri: m.uri,
                   state: 'skipped',
-                  reason: `导入时已换成 ${at} 的占位符，Lore 的正文里还有与它现在的值不同的明文：请先在 Lore 里换成占位符，再同步`,
+                  reason: `导入时已换成 ${at} 的占位符，Lore 的正文里找不到这条凭据现在的值：值换过的，请把 Lore 里的值换成这个占位符；Lore 里删掉了这一处的，请先在 Kioku 里删掉这个占位符`,
                 }
               : {
                   source,
                   uri: m.uri,
                   state: 'unreadable',
-                  reason:
-                    known === undefined
-                      ? `导入时已换成 ${at} 的占位符，命令行无法核对凭据的值：请在管理界面同步`
-                      : `导入时已换成 ${at} 的占位符，暂时无法读取这条凭据的值（凭据已删除或密码库不可用），这次不同步`,
+                  reason: unknownReason(prepared.ref, known),
                 },
           )
           continue

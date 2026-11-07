@@ -21,6 +21,7 @@ import {
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
+import { VaultError } from '../../credential/bitwarden/types'
 import { fakeVault } from '../../testing/fakeVault'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
@@ -248,6 +249,75 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       const connection = await connect()
       await ok(await send('POST', `/vault-connections/${connection.id}/disconnect`))
       expect((await matched([NAS_PW])).unavailableConnections).toBe(0)
+    })
+
+    it('读不到值的托管凭据计进 unreadableCredentials，不说成没有同值的', async () => {
+      await hosted('file-server', { password: HOSTED_PW })
+      expect((await matched([HOSTED_PW])).unreadableCredentials).toBe(0)
+      // 换了主密钥的实例解不开它
+      const otherKey = createApp({
+        db: database.db,
+        cookieSecure: false,
+        masterKey: randomBytes(32),
+        embedder: staticEmbedderSource(null),
+        jobs: null,
+        vault: vault.client,
+      })
+      const res = await otherKey.request(
+        `/v1/spaces/${ws.spaceId}/credentials/match`,
+        jsonRequest('POST', { values: [HOSTED_PW] }, { cookie: ws.cookie }),
+      )
+      const locked = CredentialValueMatches.parse(await ok(res))
+      expect(locked.items[0]).toEqual({ credentials: [], vaultItems: [] })
+      expect(locked.unreadableCredentials).toBe(1)
+    })
+
+    it('几个连接并行取：一个连不上不影响别的，各自更新连接', async () => {
+      const first = await connect()
+      vault.addAccount('agent2@example.com', 'master-pw')
+      const second = (
+        await ok<{ connection: VaultConnection }>(
+          await send('POST', '/vault-connections', {
+            serverUrl: 'https://vault2.example.com',
+            email: 'agent2@example.com',
+            masterPassword: 'master-pw',
+          }),
+        )
+      ).connection
+      vault.failNext('unreachable')
+      const res = await matched([NAS_PW])
+      expect(res.unavailableConnections).toBe(1)
+      // 另一个照常比到了 NAS（两个连接看到的是同一份假条目）
+      expect(res.items[0]!.vaultItems).toHaveLength(1)
+      const rows = await inSpace((tx) => tx.select().from(vaultConnections))
+      const errors = rows
+        .filter((r) => [first.id, second.id].includes(r.id))
+        .map((r) => r.lastErrorKind)
+        .sort()
+      expect(errors).toEqual(['unreachable', null].sort())
+    })
+
+    it('几个连接的条目同时取，不一个等一个', async () => {
+      await connect()
+      vault.addAccount('agent3@example.com', 'master-pw')
+      await ok(
+        await send('POST', '/vault-connections', {
+          serverUrl: 'https://vault3.example.com',
+          email: 'agent3@example.com',
+          masterPassword: 'master-pw',
+        }),
+      )
+      const start = vault.calls.items
+      // 第一个取条目的停在这里，等第二个也开始取；一个等一个时等不到，按连不上算
+      vault.state.beforeItem = async () => {
+        const deadline = Date.now() + 2000
+        while (vault.calls.items < start + 2) {
+          if (Date.now() > deadline) throw new VaultError('unreachable', '没有并行')
+          await new Promise((r) => setTimeout(r, 10))
+        }
+      }
+      const res = await matched([NAS_PW])
+      expect(res.unavailableConnections).toBe(0)
     })
 
     it('只给空间所有者，别的成员 403', async () => {

@@ -17,7 +17,7 @@ import { isInstanceAdmin, memberRole } from '../auth/middleware'
 import { withTransferSlot } from '../backup/transferGate'
 import { credentialServiceForConsole } from '../credential/context'
 import { placeholderIdentifiers } from '../credential/placeholders'
-import type { KnownCredentialValues } from '../credential/service'
+import { isConvertibleValue, type KnownCredentialValues } from '../credential/service'
 import { pgCauseCode, pgErrorCode } from '../db/client'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -142,13 +142,15 @@ function spotsOf(
   return new Map(snapshot.nodes.map((n) => [n.uuid, plaintextSpots(n.content, known)]))
 }
 
-// 要换成占位符的几处：按 Lore 的 URI（别名也算）找到节点，按 index 找到那一处；对不上节点或那一处时 400。
-// 写入之前刚比过一次（spots 是这次取的值算的），这时对不上凭据的照原样写，见 PlaintextConversion
+// 要换成占位符的几处：按 Lore 的 URI（别名也算）找到节点，按 index 找到那一处，对不上节点或那一处时 400
+// （调用方先比过指纹，来源变了的已经是 409）。只核对计划里显示的那条凭据（credentialId 与 field）这个字段现在的值
+// （known 是写入之前刚取的）：还等于这一处的值才换成它的占位符，否则照原样写，不改去换成别的同值凭据，见 PlaintextConversion
 function conversionsOf(
   snapshot: LoreSnapshot,
-  spots: Map<string, PlaintextSpot[]>,
-  wanted: { source: string; index: number }[],
+  known: KnownCredentialValues | null,
+  wanted: { source: string; index: number; credentialId: string; field: string }[],
 ): Map<string, PlaintextConversion[]> {
+  const spots = spotsOf(snapshot, null)
   const nodeByUri = new Map<string, LoreSnapshot['nodes'][number]>()
   for (const node of snapshot.nodes) {
     nodeByUri.set(node.uri, node)
@@ -156,7 +158,7 @@ function conversionsOf(
   }
   const out = new Map<string, PlaintextConversion[]>()
   const problems: string[] = []
-  for (const { source, index } of wanted) {
+  for (const { source, index, credentialId, field } of wanted) {
     const node = nodeByUri.get(source)
     const spot = node ? spots.get(node.uuid)?.[index] : undefined
     if (!node) {
@@ -169,13 +171,15 @@ function conversionsOf(
     }
     const list = out.get(node.uuid) ?? []
     if (list.some((c) => c.value === spot.value && c.line === spot.line)) continue
-    list.push({
-      line: spot.line,
-      value: spot.value,
-      credential: spot.credential
-        ? { identifier: spot.credential.identifier, field: spot.credential.field }
-        : null,
-    })
+    const entry = known?.entries.find((e) => e.id === credentialId && e.field === field)
+    const base = { line: spot.line, value: spot.value }
+    list.push(
+      !isConvertibleValue(spot.value)
+        ? { ...base, credential: null, problem: 'unconvertible' }
+        : entry && entry.value === spot.value
+          ? { ...base, credential: { identifier: entry.identifier, field: entry.field } }
+          : { ...base, credential: null, problem: 'stale' },
+    )
     out.set(node.uuid, list)
   }
   if (problems.length) {
@@ -191,6 +195,7 @@ function planView(
   dataTime: Date | null,
   secretAvailable: boolean,
   spots: Map<string, PlaintextSpot[]>,
+  known: KnownCredentialValues | null,
 ): LoreImportPlan {
   const targetsOf = new Map<string, ImportPreview['targets']>()
   for (const t of preview.targets) {
@@ -204,6 +209,10 @@ function planView(
     previousVersions: snapshot.nodes.reduce((n, node) => n + node.previousVersions, 0),
     fingerprint,
     secretAvailable,
+    credentialMatch: known && {
+      unavailableConnections: known.unavailableConnections,
+      unreadableCredentials: known.unreadableCredentials,
+    },
     persona: {
       ...plan.persona,
       exists: preview.personaExists,
@@ -309,7 +318,14 @@ export function loreImportRoutes(deps: Deps) {
         return { base, dataTime }
       })
       return c.json(
-        planView(parsed, base, dataTime, deps.masterKey !== null, spotsOf(parsed.snapshot, known)),
+        planView(
+          parsed,
+          base,
+          dataTime,
+          deps.masterKey !== null,
+          spotsOf(parsed.snapshot, known),
+          known,
+        ),
         200,
       )
     })
@@ -325,7 +341,6 @@ export function loreImportRoutes(deps: Deps) {
       const options = { accountId, persona, exportedAt }
       // 凭据的值在占名额之前、事务之外重新取：要换的几处在这里再和凭据比一次，同步也按它
       const known = await knownValues(deps, spaceId, accountId, snapshot)
-      const convert = conversionsOf(snapshot, spotsOf(snapshot, known), body.convertPlaintext)
       // 名额只占「算基准计划、比指纹、写入」这一段，两次执行不会交错。客户端断开也写完：
       // 导入可以重复执行，停在中间没有好处
       return withTransferSlot(accountId, c.req.raw.signal, async () => {
@@ -334,6 +349,8 @@ export function loreImportRoutes(deps: Deps) {
           const existing = await existingImportApps(snap.db, spaceId)
           const base = await basePlan(snap, snapshot, existing, options, known)
           if (base.fingerprint !== body.fingerprint) throw new MemoryError(409, PLAN_CHANGED)
+          // 指纹之后才查要换的几处：来源变了、那一处没了的先报计划变了
+          const convert = conversionsOf(snapshot, known, body.convertPlaintext)
           // 没有勾选时要执行的就是基准计划，不用占着名额再算一遍。有勾选时沿用基准计划查到的占用，不再查：
           // 写入的才是看过的计划减去勾掉的（之后才被占用的由写入时的数据库判断）
           const ticked = body.secretUris.length > 0 || body.excludeUris.length > 0

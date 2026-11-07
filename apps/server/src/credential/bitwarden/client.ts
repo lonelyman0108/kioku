@@ -226,7 +226,9 @@ interface Access {
   expiresAt: number
   // 最近一次同步的结果，再同步时换掉
   state: SyncedState
-  // 换令牌时那次同步的原始响应（条目的值还是密文）：紧接着的 items() 直接用它，不再同步第二次。用过、或者这个令牌再被用到时就丢掉
+  // 换令牌时那次同步的原始响应（条目的值还是密文）：紧接着的 items() 直接用它，不再同步第二次。
+  // 只有 items() 用得上：它用过、snapshot() 与 item() 拿到这个令牌、或者这个令牌再被用到时都丢掉，
+  // 缓存着的会话不长期带着整个密码库的一份密文
   raw: unknown
 }
 
@@ -256,6 +258,7 @@ class Session implements VaultSession {
   async snapshot(): Promise<VaultSnapshot> {
     await this.saveRefreshToken()
     const fresh = await this.ensureAccess()
+    fresh.access.raw = null
     if (fresh.synced) return fresh.access.state.snapshot
     return (await this.withAccess((access) => this.sync(access))).state.snapshot
   }
@@ -280,6 +283,7 @@ class Session implements VaultSession {
     await this.saveRefreshToken()
     // 取条目与为它重新同步都在同一个令牌下做：哪一步遇到 401，都换一次令牌从头再来
     const { json, state } = await this.withAccess(async (access, fresh) => {
+      access.raw = null
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
         method: 'GET',
         headers: { authorization: `Bearer ${access.token}` },

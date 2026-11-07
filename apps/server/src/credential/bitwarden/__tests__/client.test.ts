@@ -685,6 +685,20 @@ describe('取全部条目', () => {
     expect(onSynced).toHaveBeenCalledTimes(2)
   })
 
+  it('换令牌时的同步响应只留给紧接着的 items()：snapshot() 与 item() 拿到令牌后就丢掉', async () => {
+    const rawOf = (session: unknown) =>
+      (session as { access: { raw: unknown } | null }).access?.raw ?? null
+    for (const first of [
+      (s: ReturnType<typeof sessionOf>['session']) => s.snapshot(),
+      (s: ReturnType<typeof sessionOf>['session']) => s.item(fixture.items.login),
+      (s: ReturnType<typeof sessionOf>['session']) => s.items(),
+    ]) {
+      const { session } = sessionOf('dedicated', dedicatedSecrets)
+      await first(session)
+      expect(rawOf(session)).toBeNull()
+    }
+  })
+
   it('解不开的条目跳过，别的照常', async () => {
     const body = syncBody('dedicated')
     const login = body.ciphers.find((x) => x.id === fixture.items.login)!
