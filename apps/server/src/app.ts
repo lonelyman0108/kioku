@@ -108,10 +108,14 @@ export function createApp(deps: Deps) {
   // 其余错误不把内部信息透给调用方，日志也不带 SQL 与参数（参数可能就是记忆正文，见 logInternalError）
   app.onError((err, c) => {
     if (err instanceof MemoryError) {
-      // 新增的疑似明文被拒时带上每一处的行号与类别（MemoryWriteError）
-      const body = err.plaintext
-        ? { error: err.message, plaintext: err.plaintext }
-        : { error: err.message }
+      // 新增的疑似明文被拒时带上每一处的行号与类别（MemoryWriteError）；凭据写入失败时带上原因，
+      // 写进了密码库、凭据却没建成时带上留下的条目（CredentialWriteError）
+      const body = {
+        error: err.message,
+        ...(err.plaintext ? { plaintext: err.plaintext } : {}),
+        ...(err.write?.reason ? { reason: err.write.reason } : {}),
+        ...(err.write?.vaultItem ? { vaultItem: err.write.vaultItem } : {}),
+      }
       return c.json(body, err.status)
     }
     if (err instanceof HTTPException && err.status < 500) return requestError(c, err)

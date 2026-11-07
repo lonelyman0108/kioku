@@ -158,7 +158,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       await send('POST', '/credentials', {
         identifier: 'nas',
         name: 'NAS',
-        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+        source: { kind: 'new', values: { password: 'nas-pass' } },
       }),
       201,
     )
@@ -537,7 +537,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       await send('POST', '/credentials', {
         identifier: 'nas',
         name: 'NAS',
-        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+        source: { kind: 'new', values: { password: 'nas-pass' } },
       }),
       201,
     )
@@ -782,7 +782,7 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
         await send('POST', '/credentials', {
           identifier,
           name: identifier,
-          source: { kind: 'hosted', values: { password: 'pw' } },
+          source: { kind: 'new', values: { password: 'pw' } },
         }),
         201,
       )

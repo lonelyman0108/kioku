@@ -22,6 +22,8 @@ import {
 import type {
   ActivityItem,
   ActivityList,
+  CredentialWriteReason,
+  OrphanVaultItem,
   BenchChanges,
   BenchMark,
   ConsoleMemoryView,
@@ -162,14 +164,20 @@ import {
 
 export class MemoryError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409 | 429 | 502,
+    readonly status: 400 | 403 | 404 | 409 | 429 | 500 | 502,
     message: string,
     // 正文里有新增的疑似明文被拒时的每一处（行号与类别，不带值），进错误体的 plaintext（MemoryWriteError）
     readonly plaintext?: PlaintextFinding[],
+    // 凭据写入失败的原因与留在密码库里的条目，进错误体的 reason、vaultItem（CredentialWriteError）
+    readonly write?: { reason?: CredentialWriteReason; vaultItem?: OrphanVaultItem },
   ) {
     super(message)
   }
 }
+
+// 读到之后被别的请求改过：错误体带上 reason: version，界面据此提示重新读取
+export const versionConflict = (message: string) =>
+  new MemoryError(409, message, undefined, { reason: 'version' })
 
 export interface MemoryContext {
   db: Db
@@ -1672,7 +1680,7 @@ export class MemoryService {
       const otherMemories = await this.othersWithValue(tx, input.memoryId, input.value)
       const row = await this.readableById(tx, input.memoryId, personaIds, true)
       if (row.version !== input.expectedVersion) {
-        throw new MemoryError(409, `版本已变化：当前是 ${row.version}，请先重新读取`)
+        throw versionConflict(`版本已变化：当前是 ${row.version}，请先重新读取`)
       }
       this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
       if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)

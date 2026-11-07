@@ -4,9 +4,13 @@ import {
   ConsoleCredentialList,
   ConnectVaultRequest,
   CreateCredentialRequest,
+  CreatedCredential,
   CredentialAccess,
   CredentialEventList,
+  CredentialEventQuery,
   CredentialIdentifierQuery,
+  CredentialListQuery,
+  CredentialWriteError,
   CredentialReferenceList,
   CredentialSummary,
   CredentialValueMatches,
@@ -14,15 +18,17 @@ import {
   DeletedCredentialList,
   ErrorResponse,
   KeyCreateCredentialRequest,
+  KeyCreatedCredential,
   KeyCredentialList,
   KeyDeleteCredentialQuery,
   KeyUpdateCredentialRequest,
   MatchCredentialValuesRequest,
-  PageQuery,
   ReconnectVaultRequest,
   ResolveCredentialsRequest,
   ResolvedCredentials,
+  SetVaultDestinationRequest,
   UpdateCredentialRequest,
+  VaultCheckResult,
   VaultConnection,
   VaultConnectionList,
   VaultConnectResult,
@@ -68,8 +74,9 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'get',
     path: base,
-    summary: '列出自己的凭据（不含值）',
-    request: { params: SpaceParams },
+    summary:
+      '列出自己的凭据（不含值）；attention=true 只列快到期、已到期或需要轮换的（待处理的凭据一类）',
+    request: { params: SpaceParams, query: CredentialListQuery },
     responses: { 200: jsonResponse('凭据', ConsoleCredentialList), ...errors },
   })
   const deleted = createRoute({
@@ -84,9 +91,14 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'post',
     path: base,
-    summary: '新建凭据：值由 Kioku 加密保存，或给连接的密码库里的条目起标识',
+    summary:
+      '新建凭据：带值的设了去处时写进密码库、没设时由 Kioku 托管；或给连接的密码库里的条目起标识。写进密码库之后没建成凭据时，错误体带上留下的条目',
     request: { params: SpaceParams, body: jsonBody(CreateCredentialRequest) },
-    responses: { 201: jsonResponse('已创建', ConsoleCredential), ...errors },
+    responses: {
+      201: jsonResponse('已创建', CreatedCredential),
+      ...errors,
+      409: jsonResponse('冲突', CredentialWriteError),
+    },
   })
   const match = createRoute({
     ...common,
@@ -142,7 +154,7 @@ function consoleCredentialRoutes(deps: Deps) {
     method: 'get',
     path: `${base}/{credentialId}/events`,
     summary: '凭据的事件（新建、修改、删除与取用），最新的在前',
-    request: { params: CredentialParams, query: PageQuery },
+    request: { params: CredentialParams, query: CredentialEventQuery },
     responses: { 200: jsonResponse('事件', CredentialEventList), ...errors },
   })
   const references = createRoute({
@@ -186,7 +198,24 @@ function consoleCredentialRoutes(deps: Deps) {
     summary:
       '重新同步一次：停用的原因已经消失就恢复成可用；连不上或返回的内容无法识别时记下最近的错误，回 502',
     request: { params: ConnectionParams },
-    responses: { 200: jsonResponse('连接', VaultConnection), ...errors },
+    responses: { 200: jsonResponse('连接与读到的集合', VaultCheckResult), ...errors },
+  })
+  const setDestination = createRoute({
+    ...connCommon,
+    method: 'put',
+    path: `${connBase}/{connectionId}/destination`,
+    summary:
+      '设新凭据的去处：连接里一个可以编辑的集合。先同步一次核对集合；别的连接上的去处一起清掉，返回全部连接',
+    request: { params: ConnectionParams, body: jsonBody(SetVaultDestinationRequest) },
+    responses: { 200: jsonResponse('连接', VaultConnectionList), ...errors },
+  })
+  const clearDestination = createRoute({
+    ...connCommon,
+    method: 'delete',
+    path: `${connBase}/{connectionId}/destination`,
+    summary: '清除新凭据的去处，之后新建的凭据由 Kioku 托管',
+    request: { params: ConnectionParams },
+    responses: { 200: jsonResponse('连接', VaultConnectionList), ...errors },
   })
   const disconnect = createRoute({
     ...connCommon,
@@ -221,7 +250,7 @@ function consoleCredentialRoutes(deps: Deps) {
 
   // 固定路径（deleted）先于带 id 的路径注册
   return router()
-    .openapi(list, async (c) => c.json(await (await service(c)).list(), 200))
+    .openapi(list, async (c) => c.json(await (await service(c)).list(c.req.valid('query')), 200))
     .openapi(deleted, async (c) =>
       c.json(await withRetention(c, (await service(c)).listDeleted()), 200),
     )
@@ -268,6 +297,15 @@ function consoleCredentialRoutes(deps: Deps) {
       c.json(await (await vault(c)).reconnect(connectionId(c), c.req.valid('json')), 200),
     )
     .openapi(check, async (c) => c.json(await (await vault(c)).check(connectionId(c)), 200))
+    .openapi(setDestination, async (c) =>
+      c.json(
+        await (await vault(c)).setDestination(connectionId(c), c.req.valid('json').collectionId),
+        200,
+      ),
+    )
+    .openapi(clearDestination, async (c) =>
+      c.json(await (await vault(c)).clearDestination(connectionId(c)), 200),
+    )
     .openapi(disconnect, async (c) =>
       c.json(await (await vault(c)).disconnect(connectionId(c)), 200),
     )
@@ -301,15 +339,17 @@ function keyCredentialRoutes(deps: Deps) {
     ...common,
     method: 'post',
     path: '/credentials',
-    summary: '新建 Kioku 托管的凭据，只给这个应用用；要凭据能力为「管理」的访问密钥',
+    summary:
+      '新建凭据，只给这个应用用；要凭据能力为「管理」的访问密钥。所有者设了去处时写进密码库，没设时由 Kioku 托管，响应说明写到了哪里',
     request: { body: jsonBody(KeyCreateCredentialRequest) },
-    responses: { 201: jsonResponse('已创建', CredentialSummary), ...errors },
+    responses: { 201: jsonResponse('已创建', KeyCreatedCredential), ...errors },
   })
   const update = createRoute({
     ...common,
     method: 'patch',
     path: '/credentials',
-    summary: '按标识修改凭据；不能改限定的应用，密码库的凭据只能改名称与说明',
+    summary:
+      '按标识修改凭据；不能改限定的应用与需要轮换。密码库的凭据改值时写回原条目，只改给了的字段；条目在别处改过时 409，要先重新读取',
     request: { body: jsonBody(KeyUpdateCredentialRequest) },
     responses: { 200: jsonResponse('已修改', CredentialSummary), ...errors },
   })

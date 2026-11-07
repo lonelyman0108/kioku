@@ -108,7 +108,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       await send('POST', '/credentials', {
         identifier,
         name: `托管 ${identifier}`,
-        source: { kind: 'hosted', values },
+        source: { kind: 'new', values },
       }),
       201,
     )

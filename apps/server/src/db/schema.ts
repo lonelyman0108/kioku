@@ -573,8 +573,11 @@ export const vaultConnections = pgTable(
     lastErrorAt: timestamp({ withTimezone: true }),
     // 最近一次成功同步的时间
     lastCheckedAt: timestamp({ withTimezone: true }),
-    // 写回时新凭据的去处：组织里的一个集合
+    // 新凭据的去处：组织里的一个集合，连同它所在的组织与名称（设定或最近一次同步时的）。
+    // 每个成员最多一个（vault_connections_destination_idx）；断开、停用时留着
     defaultCollectionId: text(),
+    defaultOrganizationId: text(),
+    defaultCollectionName: text(),
     disconnectedAt: timestamp({ withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
@@ -607,6 +610,16 @@ export const vaultConnections = pgTable(
       'vault_connections_last_error',
       sql`(${t.lastErrorKind} is null) = (${t.lastErrorAt} is null)`,
     ),
+    // 去处的三列一起有或一起没有
+    check(
+      'vault_connections_destination_shape',
+      sql`(${t.defaultCollectionId} is null) = (${t.defaultOrganizationId} is null)
+        and (${t.defaultCollectionId} is null) = (${t.defaultCollectionName} is null)`,
+    ),
+    // 每个成员最多一个去处：设去处时先清掉别的连接上的，并发时由它挡下
+    uniqueIndex('vault_connections_destination_idx')
+      .on(t.spaceId, t.ownerAccountId)
+      .where(sql`${t.defaultCollectionId} is not null`),
   ],
 )
 
@@ -640,6 +653,16 @@ export const credentials = pgTable(
     // 只给这些应用用；null 表示不限定
     appIds: uuid().array(),
     version: integer().notNull().default(1),
+    // 到期时间；null 表示不到期
+    expiresAt: timestamp({ withTimezone: true }),
+    // 标了「需要轮换」的时间；值改过就清掉（托管的改了值时，密码库的看到条目的修改时间变了时）
+    rotationRequestedAt: timestamp({ withTimezone: true }),
+    // 托管的值版本：最近一次改了值的那次修改之后的版本号。访问事件记下它，据此判断交出的是不是现在的值
+    valueVersion: integer().notNull().default(1),
+    // 上次改值的时间：托管的是新建或改了值的时间，密码库的是最近看到的条目修改时间
+    valueChangedAt: timestamp({ withTimezone: true }),
+    // 密码库的凭据：Kioku 最近看到的条目修改时间，原样记下（写回时用它判断条目在别处改过没有）
+    vaultRevision: text(),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
     deletedAt: timestamp({ withTimezone: true }),

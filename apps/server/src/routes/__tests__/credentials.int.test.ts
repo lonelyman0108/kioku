@@ -93,7 +93,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     identifier,
     name: '文件服务器',
     description: '管理后台的登录账号',
-    source: { kind: 'hosted', values: { username: 'alice', password: PASSWORD, ...values } },
+    source: { kind: 'new', values: { username: 'alice', password: PASSWORD, ...values } },
   })
   const createCredential = async (body: unknown, cookie = ws.cookie) =>
     ok<ConsoleCredential>(await asMember('POST', '/credentials', body, cookie), 201)
