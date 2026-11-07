@@ -1,5 +1,9 @@
 # 本地开发与集成测试用的数据库。启动：docker compose -f docker-compose.dev.yml up -d --build
 # 连接串：postgres://kioku:kioku@localhost:55432/kioku
+#
+# 密码库客户端的集成测试另用一个 Vaultwarden，放在 profile 里、默认不启动：
+#   docker compose -f docker-compose.dev.yml --profile vaultwarden up -d vaultwarden
+# 然后设 KIOKU_TEST_VAULTWARDEN_URL=http://127.0.0.1:18081。数据不落盘，容器删掉就清空；测试每次新注册账号，可以反复跑
 name: kioku-dev
 services:
   postgres:
@@ -17,5 +21,19 @@ services:
       interval: 2s
       timeout: 3s
       retries: 30
+  vaultwarden:
+    image: vaultwarden/server:1.37.4
+    profiles: [vaultwarden]
+    environment:
+      SIGNUPS_ALLOWED: 'true'
+      DOMAIN: http://127.0.0.1:18081
+      I_REALLY_WANT_VOLATILE_STORAGE: 'true'
+      # 测试会在短时间里注册、登录很多次，放宽限流
+      LOGIN_RATELIMIT_SECONDS: '1'
+      LOGIN_RATELIMIT_MAX_BURST: '1000'
+      UNAUTHENTICATED_RATELIMIT_SECONDS: '1'
+      UNAUTHENTICATED_RATELIMIT_MAX_BURST: '1000'
+    ports:
+      - '127.0.0.1:18081:80'
 volumes:
   pgdata:
