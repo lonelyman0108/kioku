@@ -1,8 +1,9 @@
 // Bitwarden 兼容服务端（官方服务、Vaultwarden）的客户端接口。凭据服务只通过这里的类型用它，
 // 实现在同目录的 client.ts。值只在 VaultItem.values 里出现：错误信息、日志都不带主密码、令牌、密钥与响应正文
 
-// 两步验证只支持验证器应用与邮件验证码（Bitwarden 的 0 与 1），别的方式报 unsupported_two_factor
-export type VaultTwoFactorProvider = 'authenticator' | 'email'
+// 两步验证只支持验证器应用（Bitwarden 的 0）。邮件验证码要另外请求发送，几种方式并存时服务端不会自动发，
+// 所以不支持；只开了别的方式（邮件、WebAuthn、Duo、YubiKey）时报 unsupported_two_factor
+export type VaultTwoFactorProvider = 'authenticator'
 
 export interface VaultLoginInput {
   // 服务器地址，例如 https://vault.example.com，末尾不带 /
@@ -52,12 +53,20 @@ export interface VaultItemSummary {
 // 这个账号看得到什么：凭据服务用它检查个人条目与组织角色、列出条目。回收站里的不算
 export interface VaultSnapshot {
   account: VaultAccount
-  organizations: { id: string; name: string; role: VaultOrganizationRole }[]
+  // allCollections：看得到组织里全部的集合（所有者、管理员，或开了「访问全部集合」的成员）
+  organizations: {
+    id: string
+    name: string
+    role: VaultOrganizationRole
+    allCollections: boolean
+  }[]
   collections: { id: string; organizationId: string; name: string }[]
   // 不属于组织的条目数
   personalItemCount: number
-  // 只含组织里的条目
+  // 只含组织里解得开的条目
   items: VaultItemSummary[]
+  // 组织里解不开的条目数（格式不认识或校验不过），这些条目跳过不列
+  unreadableItemCount: number
 }
 
 export interface VaultItem extends VaultItemSummary {
@@ -69,10 +78,10 @@ export interface VaultSessionInput {
   serverUrl: string
   deviceId: string
   secrets: VaultSecrets
-  // 服务端换了新的刷新令牌时调用，调用方要把新的加密保存，之后用新的构造会话
+  // 服务端换了新的刷新令牌时调用，调用方把新的加密保存；会话自己接着用新的。保存失败时，下次换令牌再调用
   onSecretsChanged?: (secrets: VaultSecrets) => Promise<void>
-  // 每次换到新的访问令牌之后，会话先同步一次（顺带取组织密钥），把结果交给它；它抛错时这次调用以同样的错误失败。
-  // 凭据服务在这里检查个人条目与组织角色
+  // 每次同步之后都把结果交给它：换到新的访问令牌之后、取条目遇到没见过的组织而重新同步之后，以及 snapshot()。
+  // 它抛错时这次调用以同样的错误失败，这次同步的结果不用。凭据服务在这里检查个人条目与组织角色
   onSynced?: (snapshot: VaultSnapshot) => Promise<void>
 }
 
