@@ -203,6 +203,12 @@ function failureError(
 
 // 一次取几个字段时，错误写出是哪一项（标识#字段），不带任何值
 const refText = (ref: CredentialFieldRef) => `${ref.identifier}#${ref.field}`
+// 取不到值时写在哪：某个字段缺失时写「标识#字段」，整条凭据的失败只写标识
+const failedAt = (identifier: string, field: string | undefined) =>
+  field ? `${identifier}#${field}` : identifier
+
+// 准备过的一个密码库会话
+type PreparedSession = { connection: ConnectionRow; session: VaultSession }
 const refError = (ref: CredentialFieldRef, err: MemoryError) =>
   new MemoryError(err.status, `${refText(ref)}：${err.message}`)
 
@@ -681,22 +687,23 @@ export class CredentialService {
     prepared: Prepared,
   ): Promise<Record<string, string> | null> {
     if (prepared.kind === 'error') {
-      throw failureError(prepared.reason, row.identifier, prepared.detail)
+      throw failureError(prepared.reason, failedAt(row.identifier, prepared.field), prepared.detail)
     }
     if (prepared.kind === 'values') return prepared.values
     const fetched = await this.fetchItem(row, fields, prepared)
     const { result } = fetched
+    const where = failedAt(row.identifier, fetched.missing)
     if (fetched.unexpected !== null) {
       // 记失败本身也可能出错（例如数据库连不上）：记进日志，抛出原来的错误
       await this.run((tx) => this.settle(tx, row, fields, via, purpose, fetched)).catch(
         (err: unknown) => logInternalError('凭据取用失败之后记访问事件出错', err),
       )
       // 解不开令牌和 prepare 里一样给出「主密钥不可用」；别的意外原样抛出，按内部错误处理
-      if (result === 'master_key') throw failureError(result, row.identifier)
+      if (result === 'master_key') throw failureError(result, where)
       throw fetched.unexpected
     }
     await this.run((tx) => this.settle(tx, row, fields, via, purpose, fetched))
-    if (typeof result === 'string') throw failureError(result, row.identifier)
+    if (typeof result === 'string') throw failureError(result, where)
     return result
   }
 
@@ -1003,11 +1010,14 @@ export class CredentialService {
   // 管理界面查看值：托管的与密码库的都给（totp 给验证码），记一条访问事件。和 secret 一样，目前要求是空间 owner
   async reveal(id: string): Promise<CredentialValues> {
     this.requireManage()
+    const sessions: PreparedSession[] = []
     const { row, prepared } = await this.run(async (tx) => {
       const row = await this.ownById(tx, id)
       if (row.deletedAt) throw new MemoryError(409, '这条凭据已删除。请先恢复，再查看。')
-      return { row, prepared: await this.prepare(tx, row, row.fields, 'console', undefined) }
-    })
+      const prepared = await this.prepare(tx, row, row.fields, 'console', undefined)
+      if (prepared.kind === 'vault') sessions.push(prepared)
+      return { row, prepared }
+    }).catch(this.releasingOnError(sessions))
     return { values: (await this.deliver(row, row.fields, 'console', undefined, prepared)) ?? {} }
   }
 
@@ -1104,6 +1114,8 @@ export class CredentialService {
     via: CredentialVia,
     purpose: string | undefined,
   ): Promise<UseCheck> {
+    // 同一个字段要了几次（kioku run 里几个变量取同一个字段）只算一次
+    fieldNames = fieldNames && [...new Set(fieldNames)]
     const denial = credentialDenial(this.ctx.access, row ?? { appIds: null }, 'use')
     if (denial) {
       if (row) {
@@ -1135,6 +1147,7 @@ export class CredentialService {
     via: CredentialVia,
     purpose?: string,
   ): Promise<CredentialAccess> {
+    const sessions: PreparedSession[] = []
     const first = await this.run(async (tx) => {
       const check = await this.checkUse(
         tx,
@@ -1153,8 +1166,10 @@ export class CredentialService {
           return { error: new MemoryError(404, `凭据 ${identifier} 没有字段 ${check.field}`) }
       }
       const { row, fields } = check
-      return { row, fields, prepared: await this.prepare(tx, row, fields, via, purpose) }
-    })
+      const prepared = await this.prepare(tx, row, fields, via, purpose)
+      if (prepared.kind === 'vault') sessions.push(prepared)
+      return { row, fields, prepared }
+    }).catch(this.releasingOnError(sessions))
     if ('error' in first) throw first.error
     const values = await this.deliver(first.row, first.fields, via, purpose, first.prepared)
     return {
@@ -1166,15 +1181,31 @@ export class CredentialService {
 
   // 准备过的密码库凭据都要经过 vault.record（没有取条目的传 null，只确认连接还能不能用）：
   // 断开与准备交错时，会话可能在断开提交之后才放回缓存，靠它清掉。出错只记日志，不盖过原来的错误
-  private async releaseSessions(
-    sessions: { connection: ConnectionRow; session: VaultSession }[],
-  ): Promise<void> {
+  // 同一个连接加同一个会话只确认一次
+  private async recordSessions(tx: Tx, sessions: PreparedSession[]): Promise<void> {
+    const seen = new Map<string, Set<VaultSession>>()
+    for (const { connection, session } of sessions) {
+      const done = seen.get(connection.id) ?? new Set<VaultSession>()
+      if (done.has(session)) continue
+      done.add(session)
+      seen.set(connection.id, done)
+      await this.vault.record(tx, connection, null, session)
+    }
+  }
+
+  private async releaseSessions(sessions: PreparedSession[]): Promise<void> {
     if (!sessions.length) return
-    await this.run(async (tx) => {
-      for (const { connection, session } of sessions) {
-        await this.vault.record(tx, connection, null, session)
-      }
-    }).catch((err: unknown) => logInternalError('凭据取用失败之后确认连接状态出错', err))
+    await this.run((tx) => this.recordSessions(tx, sessions)).catch((err: unknown) =>
+      logInternalError('凭据取用失败之后确认连接状态出错', err),
+    )
+  }
+
+  // 事务失败回滚时，里面的 vault.record 也跟着回滚了：另开一个事务放掉会话，再抛出原来的错误
+  private releasingOnError(sessions: PreparedSession[]) {
+    return async (err: unknown): Promise<never> => {
+      await this.releaseSessions(sessions)
+      throw err
+    }
   }
 
   // kioku run 一次取几个字段，要么全给，要么一个都不给。第一段在一个事务里做完全部的权限与存在性检查，
@@ -1197,7 +1228,7 @@ export class CredentialService {
     })
     type Planned = { row: CredentialRow; fields: CredentialField[] }
     // 第一段里准备好的密码库会话：没走完的也要 releaseSessions
-    const sessions: { connection: ConnectionRow; session: VaultSession }[] = []
+    const sessions: PreparedSession[] = []
 
     const first = await this.run(async (tx) => {
       const rows = new Map(
@@ -1215,9 +1246,9 @@ export class CredentialService {
         ).map((r) => [r.identifier, r]),
       )
       // 报 refs 里最靠前的那一项
-      const worst: { index: number; error: MemoryError | null } = { index: Infinity, error: null }
+      let worst: { index: number; error: MemoryError } | undefined
       const fail = (index: number, error: MemoryError) => {
-        if (index < worst.index) Object.assign(worst, { index, error })
+        if (!worst || index < worst.index) worst = { index, error }
       }
       const planned: Planned[] = []
       for (const [identifier, group] of groups) {
@@ -1250,24 +1281,20 @@ export class CredentialService {
             planned.push({ row: check.row, fields: check.fields })
         }
       }
-      if (worst.error) return { error: worst.error }
+      if (worst) return { error: worst.error }
 
       // 都通过了：托管的解开（先不记交出），密码库的确认连接可用。失败的那条已记好事件
       const prepared: Prepared[] = []
       for (const { row, fields } of planned) {
         const p = await this.prepare(tx, row, fields, via, purpose, true)
         if (p.kind === 'error') {
-          const where = p.field ? `${row.identifier}#${p.field}` : row.identifier
-          return { error: failureError(p.reason, where, p.detail) }
+          return { error: failureError(p.reason, failedAt(row.identifier, p.field), p.detail) }
         }
-        if (p.kind === 'vault') sessions.push({ connection: p.connection, session: p.session })
+        if (p.kind === 'vault') sessions.push(p)
         prepared.push(p)
       }
       return { planned, prepared }
-    }).catch(async (err: unknown) => {
-      await this.releaseSessions(sessions)
-      throw err
-    })
+    }).catch(this.releasingOnError(sessions))
     if ('error' in first) {
       await this.releaseSessions(sessions)
       throw first.error
@@ -1286,35 +1313,40 @@ export class CredentialService {
         break
       }
     }
+    // 没轮到取条目的会话；取过的用这次真正用的会话（重试时换过）
+    const unfetched: PreparedSession[] = prepared.flatMap((p, i) =>
+      p.kind === 'vault' && !fetched.has(i) ? [p] : [],
+    )
+    const touched: PreparedSession[] = [
+      ...[...fetched.values()].map((f) => ({ connection: f.connection, session: f.used })),
+      ...unfetched,
+    ]
     // 取过的都更新连接。有取不到的时只给它记失败，取到了却没交出的不记；没轮到取的只确认连接状态
     const settleFetched = async (tx: Tx) => {
       for (const [i, f] of fetched) {
         const { row, fields } = planned[i]!
         await this.settle(tx, row, fields, via, purpose, f, failed === null || i === failed)
       }
-      for (const [i, p] of prepared.entries()) {
-        if (p.kind === 'vault' && !fetched.has(i)) {
-          await this.vault.record(tx, p.connection, null, p.session)
-        }
-      }
+      await this.recordSessions(tx, unfetched)
     }
     if (failed !== null) {
       const f = fetched.get(failed)!
       const { row } = planned[failed]!
       const reason = f.result as CredentialAccessReason
-      const where = f.missing ? `${row.identifier}#${f.missing}` : row.identifier
+      const where = failedAt(row.identifier, f.missing)
       if (f.unexpected !== null) {
-        await this.run(settleFetched).catch((err: unknown) =>
-          logInternalError('凭据取用失败之后记访问事件出错', err),
-        )
+        await this.run(settleFetched).catch(async (err: unknown) => {
+          logInternalError('凭据取用失败之后记访问事件出错', err)
+          await this.releaseSessions(touched)
+        })
         if (reason === 'master_key') throw failureError(reason, where)
         throw f.unexpected
       }
-      await this.run(settleFetched)
+      await this.run(settleFetched).catch(this.releasingOnError(touched))
       throw failureError(reason, where)
     }
 
-    // 第三段：都取到了，一起记交出（密码库的在 settleFetched 里记）
+    // 第三段：都取到了，一起记交出（密码库的在 settleFetched 里记）。失败回滚时另开事务放掉会话
     await this.run(async (tx) => {
       await settleFetched(tx)
       for (const [i, { row, fields }] of planned.entries()) {
@@ -1327,7 +1359,7 @@ export class CredentialService {
           reason: null,
         })
       }
-    })
+    }).catch(this.releasingOnError(touched))
     const values = new Map<string, Record<string, string>>()
     for (const [i, { row }] of planned.entries()) {
       const p = prepared[i]!

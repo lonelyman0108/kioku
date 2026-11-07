@@ -14,6 +14,7 @@ import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
 import { defaultSession } from '../../access/session'
 import { credentialServiceForKey } from '../../credential/context'
+import { CredentialService } from '../../credential/service'
 import { VaultConnections } from '../../credential/vault'
 import { withSpace, type Database } from '../../db/client'
 import { credentials } from '../../db/schema'
@@ -386,10 +387,10 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
     // use 也一样：取全部字段时整条失败，不给缺了值的那部分
     const use = (query: string) => send('GET', `/v1/credentials?${query}`, undefined, bearer(key))
     expect(await errorOf(await use('identifier=file-server'), 409)).toBe(
-      '取不到 file-server 的值：条目里没有这个字段',
+      '取不到 file-server#pin 的值：条目里没有这个字段',
     )
     expect(await errorOf(await use('identifier=file-server&field=pin'), 409)).toBe(
-      '取不到 file-server 的值：条目里没有这个字段',
+      '取不到 file-server#pin 的值：条目里没有这个字段',
     )
     expect(await errorOf(await use('identifier=file-server&field=nope'), 404)).toBe(
       '凭据 file-server 没有字段 nope',
@@ -468,6 +469,156 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
       ),
     ).toBe('取不到 router 的值：连接已断开')
     expect(hasCachedSession(vault.client, second.id)).toBe(false)
+  })
+
+  it('use 与查看值：条目里缺字段时写「标识#字段」，整条凭据的失败只写标识', async () => {
+    const connection = await connect()
+    const routerCred = await router(connection.id)
+    vault.setItemValues(routerItem, { ...ROUTER_VALUES, 'login.totp': '' })
+    const use = (query: string) => send('GET', `/v1/credentials?${query}`, undefined, bearer(key))
+    expect(await errorOf(await use('identifier=router&field=otp'), 409)).toBe(
+      '取不到 router#otp 的值：条目里没有这个字段',
+    )
+    expect(await errorOf(await asMember('POST', `/credentials/${routerCred.id}/reveal`), 409)).toBe(
+      '取不到 router#otp 的值：条目里没有这个字段',
+    )
+    vault.failNext('unreachable')
+    expect(await errorOf(await use('identifier=router&field=password'), 502)).toMatch(
+      /^取不到 router 的值：密码库无法连接/,
+    )
+    await ok(await asMember('POST', `/vault-connections/${connection.id}/disconnect`))
+    expect(await errorOf(await use('identifier=router&field=password'), 409)).toBe(
+      '取不到 router 的值：连接已断开',
+    )
+  })
+
+  // 让下一个事务的回调做完之后失败回滚（像提交时出错）：回调里 prepare 建的会话照样要确认连接状态
+  const failNextTransaction = () => {
+    const proto = CredentialService.prototype as unknown as {
+      run: (fn: (tx: unknown) => Promise<unknown>, conflict?: string) => Promise<unknown>
+    }
+    const run = proto.run
+    vi.spyOn(proto, 'run').mockImplementationOnce(function (this: CredentialService, fn, conflict) {
+      return run.call(
+        this,
+        async (tx) => {
+          await fn(tx)
+          throw new Error('提交时出错')
+        },
+        conflict,
+      )
+    })
+  }
+
+  it('use 与查看值的第一个事务在准备之后回滚：照样确认连接状态，断开了就清掉缓存里的会话', async () => {
+    const connection = await connect()
+    const routerCred = await router(connection.id)
+    failNextTransaction()
+
+    disconnectAfterLoad(connection.id)
+    const use = (query: string) => send('GET', `/v1/credentials?${query}`, undefined, bearer(key))
+    expect((await use('identifier=router&field=password')).status).toBe(500)
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
+
+    vi.restoreAllMocks()
+    await ok(
+      await asMember('POST', `/vault-connections/${connection.id}/reconnect`, {
+        masterPassword: 'master-pw',
+      }),
+    )
+    failNextTransaction()
+    disconnectAfterLoad(connection.id)
+    expect((await asMember('POST', `/credentials/${routerCred.id}/reveal`)).status).toBe(500)
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
+  })
+
+  it('第三段记交出失败回滚时，另开事务确认连接状态：断开了就清掉缓存里的会话', async () => {
+    const first = await connect()
+    const second = await connect('second@example.com')
+    await router(first.id)
+    const otherItem = vault.addItem({ name: '交换机', values: ROUTER_VALUES })
+    await router(second.id, 'switch', otherItem)
+    disconnectAfterLoad(second.id)
+    // 第一条凭据记交出时出错：第二条的 vault.record 还没轮到，事务就回滚了
+    const proto = CredentialService.prototype as unknown as {
+      accessEvent: (tx: unknown, id: string, record: { result: string }) => Promise<void>
+    }
+    const accessEvent = proto.accessEvent
+    vi.spyOn(proto, 'accessEvent').mockImplementation(async function (
+      this: CredentialService,
+      tx,
+      id,
+      record,
+    ) {
+      if (record.result === 'ok') throw new Error('记交出出错')
+      return accessEvent.call(this, tx, id, record)
+    })
+
+    const res = await resolve({
+      refs: [
+        { identifier: 'router', field: 'password' },
+        { identifier: 'switch', field: 'password' },
+      ],
+    })
+    expect(res.status).toBe(500)
+    expect(await res.text()).not.toContain(ROUTER_PASSWORD)
+    expect(hasCachedSession(vault.client, second.id)).toBe(false)
+  })
+
+  it('没轮到取条目的几条凭据在同一个连接、同一个会话上时，只确认一次连接状态', async () => {
+    const connection = await connect()
+    await router(connection.id)
+    for (const identifier of ['switch', 'modem']) {
+      await router(
+        connection.id,
+        identifier,
+        vault.addItem({ name: identifier, values: ROUTER_VALUES }),
+      )
+    }
+    vault.removeItem(routerItem)
+    const record = vi.spyOn(VaultConnections.prototype, 'record')
+    expect(
+      (
+        await resolve({
+          refs: ['router', 'switch', 'modem'].map((identifier) => ({
+            identifier,
+            field: 'password',
+          })),
+        })
+      ).status,
+    ).toBe(409)
+    // 取过条目的 router 一次（带结果），没轮到的 switch 与 modem 合起来一次（null）
+    expect(record.mock.calls.map((c) => c[2])).toEqual([
+      { kind: 'error', error: 'item_unavailable' },
+      null,
+    ])
+  })
+
+  it('同一个字段要了几次时只取一次，访问事件里只记一次', async () => {
+    const fileServer = await hosted()
+    const created = await ws.createKey((await ws.createApp('direct')).id, FULL_SCOPES)
+    const principal = (await principalForKeyId(database.db, created.id))!
+    const service = credentialServiceForKey(deps, principal)
+    // 契约不收重复的项，直接调服务
+    expect(
+      await service.resolve(
+        [
+          { identifier: 'file-server', field: 'password' },
+          { identifier: 'file-server', field: 'password' },
+          { identifier: 'file-server', field: 'username' },
+        ],
+        'run',
+      ),
+    ).toEqual({
+      values: [
+        { identifier: 'file-server', field: 'password', value: HOSTED_PASSWORD },
+        { identifier: 'file-server', field: 'password', value: HOSTED_PASSWORD },
+        { identifier: 'file-server', field: 'username', value: 'alice' },
+      ],
+    })
+    expect((await accessEvents(fileServer.id)).map((e) => e.fields)).toEqual([
+      ['password', 'username'],
+    ])
   })
 
   it('测试台里不能用：回 400，不给值', async () => {
