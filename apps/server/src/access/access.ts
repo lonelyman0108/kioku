@@ -4,6 +4,8 @@ import {
   SENSITIVITIES,
   sensitivityAllowed,
   type AccessContext,
+  type CredentialAccessReason,
+  type CredentialCapability,
   type KeyAccessMatrix,
   type KeyScopes,
   type Layer,
@@ -56,6 +58,8 @@ export interface Access {
   // 允许按坐标显式读取 secret；召回和搜索永远不返回 secret
   canReadSecret: boolean
   admin: boolean
+  // 凭据能力：Key 的签发上限，带会话上下文时一律是 none；管理界面里空间 owner 是 manage，别人是 use
+  credentials: CredentialCapability
 }
 
 // 带会话上下文时读得到的归属：本人之外的五类。本人只给不带会话上下文的访问密钥，开启之后再给本人私聊
@@ -87,6 +91,8 @@ export function resolveAccess(
       ? ('all' as const)
       : new Set(app.personaId ? [app.personaId] : []),
     admin: scopes.admin,
+    // 凭据只给不带会话上下文的访问：群聊、私聊、定时任务与子 agent 都没有
+    credentials: 'none' as CredentialCapability,
   }
   const appScope = `app:${app.appId}`
 
@@ -101,6 +107,7 @@ export function resolveAccess(
       writeOriginScope: 'global',
       writeProvenance: 'agent',
       canReadSecret: scopes.maxSensitivity === 'secret',
+      credentials: scopes.credentials ?? 'none',
     }
   }
 
@@ -154,7 +161,7 @@ export function resolveAccess(
 }
 
 // Key 的有效上限还要受应用主人「当前」角色约束：签发之后主人被降级，Key 也随之降级，
-// 与签发规则一致：admin 与 secret 只属于空间 owner，viewer 只读
+// 与签发规则一致：admin、secret 与凭据能力（取用、管理）只属于空间 owner，viewer 只读
 export function clampScopesToRole(scopes: KeyScopes, role: MemberRole): KeyScopes {
   if (role === 'owner') return scopes
   return {
@@ -162,6 +169,7 @@ export function clampScopesToRole(scopes: KeyScopes, role: MemberRole): KeyScope
     writeLayers: role === 'viewer' ? [] : scopes.writeLayers,
     maxSensitivity: minSensitivity(scopes.maxSensitivity, 'private'),
     admin: false,
+    credentials: 'none',
   }
 }
 
@@ -196,6 +204,10 @@ export function accessMatrix(scopes: KeyScopes, app: AppAccessConfig): KeyAccess
       const origins = access.originScopes ? [...access.originScopes] : null
       return {
         context,
+        credentials:
+          CREDENTIAL_CAPABILITIES_DESC.find(
+            (need) => credentialDenial(access, { appIds: null }, need) === null,
+          ) ?? 'none',
         originScope: !origins
           ? 'any'
           : origins.some((o) => o.startsWith('group:'))
@@ -346,32 +358,45 @@ export function canWritePersona(access: Access, personaId: string | null): boole
   )
 }
 
-// 凭据归某个成员，和本人的记忆一样：读说明与绑定要能读本人、最高敏感级至少 private，
-// 凭据属于这次访问代表的成员（Key 是应用所有者）。限定了应用的，只有那些应用的 Key 能用；
-// 跨人格 / 应用写入（admin）也不放宽。管理界面不代表某个应用，不受这个限制
+// 凭据归某个成员，和本人的记忆一样：取用（列出、取值）要凭据能力至少是 use，能读本人、最高敏感级至少 private，
+// 并且不带会话上下文；管理（新建、修改、删除）要能力是 manage，并且还能写本人。凭据属于这次访问代表的成员
+// （Key 是应用所有者），只查这个成员的凭据，所以这里不比所有者。限定了应用的，只有那些应用的 Key 能用；
+// 跨人格 / 应用写入（admin）也不放宽。管理界面不代表某个应用，不受这个限制。不再借用 secret 级
 export interface CredentialFacts {
-  ownerAccountId: string
   appIds: readonly string[] | null
 }
 
-export function canReadCredential(access: Access, credential: CredentialFacts): boolean {
-  if (credential.ownerAccountId !== access.ownerAccountId) return false
-  if (!access.readLayers.has('user')) return false
-  if (sensitivityRank(access.maxSensitivity) < sensitivityRank('private')) return false
-  return (
-    access.appId === null || credential.appIds === null || credential.appIds.includes(access.appId)
-  )
+const CAPABILITY_RANK: Record<CredentialCapability, number> = { none: 0, use: 1, manage: 2 }
+// 从高到低，权限范围按它找出某个会话上下文下实际的能力
+const CREDENTIAL_CAPABILITIES_DESC = ['manage', 'use'] as const
+
+// 不能取用或管理的第一个原因，能时为 null。原因记进访问事件，见 contracts 的 CREDENTIAL_ACCESS_REASONS
+export function credentialDenial(
+  access: Access,
+  credential: CredentialFacts,
+  need: 'use' | 'manage',
+): CredentialAccessReason | null {
+  if (access.appId !== null && access.originScopes !== null) return 'context'
+  if (CAPABILITY_RANK[access.credentials] < CAPABILITY_RANK[need]) return 'capability'
+  if (!access.readLayers.has('user')) return 'scope'
+  if (sensitivityRank(access.maxSensitivity) < sensitivityRank('private')) return 'scope'
+  if (need === 'manage' && !access.writeLayers.has('user')) return 'scope'
+  if (
+    access.appId !== null &&
+    credential.appIds !== null &&
+    !credential.appIds.includes(access.appId)
+  ) {
+    return 'app'
+  }
+  return null
 }
 
-// 取托管的值：在能读之上还要 secret 级
-export function canRevealCredential(access: Access, credential: CredentialFacts): boolean {
-  return canReadCredential(access, credential) && access.canReadSecret
+export function canUseCredential(access: Access, credential: CredentialFacts): boolean {
+  return credentialDenial(access, credential, 'use') === null
 }
 
-// 新建、修改、删除凭据（包括说明、字段、绑定与托管的值）：要能读、写本人，并且是 secret 级。
-// 凭据的说明会下发给别的 agent，绑定决定 agent 去哪里取值，要求比读更高
 export function canManageCredentials(access: Access): boolean {
-  return access.readLayers.has('user') && access.writeLayers.has('user') && access.canReadSecret
+  return credentialDenial(access, { appIds: null }, 'manage') === null
 }
 
 export type ConsoleRole = 'owner' | 'editor' | 'viewer'
@@ -399,5 +424,7 @@ export function consoleAccess(
     writablePersonaIds: 'all',
     canReadSecret: role === 'owner',
     admin: role === 'owner',
+    // 凭据和机密记忆一样，目前只有空间 owner 能管理（含连接密码库与查看值）
+    credentials: role === 'owner' ? 'manage' : 'use',
   }
 }

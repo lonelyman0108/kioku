@@ -70,7 +70,7 @@ describe.skipIf(!testDatabaseUrl)('审查回归', { timeout: 30_000 }, () => {
       // editor 能签发的最高敏感级是 private
       jsonRequest(
         'POST',
-        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private' } },
+        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private', credentials: 'none' } },
         { cookie },
       ),
     )

@@ -4,11 +4,9 @@
 
 // 读不到 secret 的正文时给的文字
 export const MASKED_SECRET_CONTENT = '（secret 正文需要显式读取权限）'
-// 回滚模式下换掉的外部绑定
-export const MASKED_BINDING = '（测试台的回滚模式不显示，要看去凭据页）'
-// 托管的值的说明开头，后面接字段名
-export const MASKED_HOSTED_PREFIX = '值由 Kioku 托管，测试台不解密。'
+// 测试台里取用凭据时代替值的文字：两种来源、两种模式都不给值
+export const MASKED_CREDENTIAL_VALUES = '（测试台不给凭据的值，要看去凭据页）'
 
-const MASKED_TEXTS = [MASKED_SECRET_CONTENT, MASKED_BINDING, MASKED_HOSTED_PREFIX]
+const MASKED_TEXTS = [MASKED_SECRET_CONTENT, MASKED_CREDENTIAL_VALUES]
 
 export const hasMaskedText = (text: string) => MASKED_TEXTS.some((masked) => text.includes(masked))

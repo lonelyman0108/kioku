@@ -37,6 +37,7 @@ const EDITOR_SCOPES: KeyScopes = {
   writeLayers: [],
   maxSensitivity: 'private',
   admin: false,
+  credentials: 'none',
 }
 
 describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () => {

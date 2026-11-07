@@ -1,36 +1,29 @@
 import { randomUUID } from 'node:crypto'
 
 import {
+  CREDENTIAL_ACCESS_REASON_NAMES,
+  defaultCredentialFields,
   MAX_CREDENTIAL_FIELDS,
+  VAULT_DISABLED_REASON_NAMES,
   type ConsoleCredential,
   type ConsoleCredentialList,
-  type CreateCredentialProviderRequest,
   type CreateCredentialRequest,
   type CredentialAccess,
+  type CredentialAccessReason,
+  type CredentialAccessResult,
   type CredentialEventList,
   type CredentialField,
-  type CredentialInfo,
-  type CredentialProvider,
-  type CredentialProviderKind,
   type CredentialReferenceList,
-  type CredentialSourceInput,
-  type CredentialSourceUpdate,
   type CredentialSummary,
   type CredentialValues,
-  type DeletedCredentialProviderList,
+  type KeyCreateCredentialRequest,
   type KeyCredentialList,
   type PageQuery,
-  type UpdateCredentialProviderRequest,
   type UpdateCredentialRequest,
 } from '@kioku/contracts'
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm'
 
-import {
-  canManageCredentials,
-  canReadCredential,
-  canRevealCredential,
-  type Access,
-} from '../access/access'
+import { canUseCredential, credentialDenial, type Access } from '../access/access'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
 import { isUniqueViolation, withSpace, type Db, type Tx } from '../db/client'
@@ -39,75 +32,63 @@ import {
   apiKeys,
   apps,
   credentialEvents,
-  credentialProviders,
   credentials,
   memories,
   memoryCredentialRefs,
+  vaultConnections,
 } from '../db/schema'
-import { providerRetentionFrom } from '../jobs/retention'
 import { STILL_VALID } from '../memory/filter'
-import { hasMaskedText, MASKED_BINDING, MASKED_HOSTED_PREFIX } from '../memory/masked'
+import { hasMaskedText } from '../memory/masked'
 import { benchMarkReader, MemoryError } from '../memory/service'
 import { formatUri } from '../memory/uri'
-import { CREDENTIAL_NOTICE, externalMethod } from './methods'
+import { VaultError, type VaultClient, type VaultItem, type VaultSession } from './bitwarden/types'
+import { CREDENTIAL_NOTICE } from './methods'
+import { TotpFormatError, totpCode } from './totp'
+import {
+  VaultConnections,
+  reasonStatus,
+  VaultDisabledError,
+  vaultReason,
+  type ConnectionRow,
+  type VaultOutcome,
+} from './vault'
+import { unavailableVaultClient } from './vaultClient'
 
 export interface CredentialContext {
   db: Db
   spaceId: string
-  // 凭据按这次访问代表的成员找：管理界面是成员本人，Key 是应用主人
+  // 凭据按这次访问代表的成员找：管理界面是成员本人，Key 是应用所有者
   access: Access
   masterKey: MasterKey | null
+  vault?: VaultClient | undefined
   actor: { keyId?: string; accountId?: string }
-  // 测试台不把值发出去。'hosted'（真实模式）：托管的不解密、不记访问，只列字段名；外部的照常返回，访问记录带着标记。
-  // 'all'（回滚模式）：外部的条目位置、取法与使用说明也换成占位文字，也不记访问：
-  // 访问记录会被回滚，发给模型的内容却查不到
-  mask?: 'hosted' | 'all'
+  // 通过 Key 来的会话上下文（不带的是 none），记进访问事件；管理界面为 undefined
+  chatType?: string
+  // 测试台：取用一律不给值、不记访问，也不向密码库请求。结果会显示在界面上、导出成场景，也会发给接入的模型
+  bench?: boolean
   // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
   eventContext?: Record<string, unknown>
 }
 
-// 打码时托管的值这样说明：只列字段名
-const maskedHosted = (fields: readonly CredentialField[]) =>
-  `${MASKED_HOSTED_PREFIX}字段：${fields.map((f) => f.name).join('、') || '无'}。要看值去凭据页。`
-// 打码时拒绝写回占位文字（见 rejectMaskedText）
-const MASKED_TEXT_WRITTEN =
-  '值或条目位置含测试台的占位文字，并非真实内容。如需修改，请到凭据页操作。'
+// 测试台里读到的是占位文字，照抄回来就成了新的值，而事件不留旧值，找不回来
+const MASKED_TEXT_WRITTEN = '值含测试台的占位文字，并非真实内容。如需修改，请到凭据页操作。'
 
 // 取用经由哪里，记在访问事件里
-export type CredentialVia = 'kioku_credential' | 'rest' | 'kioku_get'
+export type CredentialVia = 'kioku_credential' | 'rest' | 'console' | 'space_export'
 
-// 给 agent 的取法（不含值）：外部来源的凭据源（已删除时为 null）与按来源给出的说明
-interface Binding {
-  provider: { kind: CredentialProviderKind; name: string; instructions: string } | null
-  method: string
-  // 托管的值这次访问能不能取到：给不给值与取法的文字都按它，免得各算一次对不上
-  revealable: boolean
+// kioku_get 末尾列出的一条凭据：只说能不能取用，不给值，也不记访问
+export interface PlaceholderCredential {
+  identifier: string
+  // usable 能取用；unavailable 无权查看或不存在；其余是密码库连接的状态（取用时会以它失败）
+  state: 'usable' | 'unavailable' | 'disconnected' | 'reauth_required' | 'disabled'
+  // 看得到这条凭据时给名称
+  name: string | null
 }
-
-// kioku_get 末尾列出的一条凭据：读者取不了的只标「无权查看或不存在」，不给凭据源与条目位置
-export type PlaceholderCredential =
-  | { identifier: string; available: false }
-  | ({
-      identifier: string
-      available: true
-      name: string
-      source: 'hosted' | 'external'
-      // 外部来源的条目位置
-      location: string | null
-    } & Pick<Binding, 'provider' | 'method'>)
 
 type CredentialRow = typeof credentials.$inferSelect
-type ProviderRow = typeof credentialProviders.$inferSelect
-
-// 写入之后的一行，以及写入时读到的凭据源：null 是托管的，undefined 是这次没动来源
-interface Written {
-  row: CredentialRow
-  provider?: ProviderRow | null | undefined
-}
 
 // 改了凭据的哪些部分，记在修改事件里（不含任何值）
-type CredentialChange =
-  'name' | 'description' | 'source' | 'provider' | 'location' | 'fields' | 'values' | 'appIds'
+type CredentialChange = 'name' | 'description' | 'values' | 'fields' | 'appIds'
 
 // 一次列出的凭据上限，个人用的空间远到不了
 const LIST_LIMIT = 1000
@@ -151,10 +132,98 @@ export function openCredentialValues(
   return JSON.parse(text) as Record<string, string>
 }
 
+// 从解开的条目里取出凭据的字段。totp 给现算的验证码，密钥本身不出 Kioku。条目里没有的字段报 field_missing
+export function itemValues(
+  item: VaultItem,
+  fields: readonly CredentialField[],
+  now: number = Date.now(),
+): Record<string, string> | CredentialAccessReason {
+  const values: Record<string, string> = {}
+  for (const f of fields) {
+    const value = f.itemField ? item.values[f.itemField] : undefined
+    if (value === undefined || value === '') return 'field_missing'
+    if (f.itemField === 'login.totp') {
+      try {
+        values[f.name] = totpCode(value, now)
+      } catch (err) {
+        if (err instanceof TotpFormatError) return 'vault_error'
+        throw err
+      }
+    } else {
+      values[f.name] = value
+    }
+  }
+  return values
+}
+
 const sameJson = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
+// 被拒的说法：能力、范围与会话上下文不看凭据存不存在，一律 403；限定给别的应用的和不存在一样是 404
+function denialError(
+  reason: CredentialAccessReason,
+  need: 'use' | 'manage',
+  identifier: string,
+  viaKey = true,
+) {
+  switch (reason) {
+    case 'capability':
+      if (!viaKey) return new MemoryError(403, '仅空间所有者可管理凭据与密码库连接')
+      return new MemoryError(
+        403,
+        need === 'use'
+          ? '访问密钥的凭据能力不足：取用凭据需要「取用」或「管理」'
+          : '访问密钥的凭据能力不足：新建、修改、删除凭据需要「管理」',
+      )
+    case 'scope':
+      return new MemoryError(
+        403,
+        need === 'use'
+          ? '凭据需要可读本人（user）、敏感级上限不低于私密（private）的访问密钥'
+          : '管理凭据需要可读写本人（user）、敏感级上限不低于私密（private）的访问密钥',
+      )
+    case 'context':
+      return new MemoryError(403, '带会话上下文（群聊、私聊、定时任务、子 agent）时不能使用凭据')
+    default:
+      return new MemoryError(404, `凭据不存在：${identifier}`)
+  }
+}
+
+// 取不到值的说法：连接与条目的状态问题 409，密码库连不上或内容认不出 502，主密钥的问题 400
+function failureError(
+  reason: CredentialAccessReason,
+  identifier: string,
+  detail?: string,
+): MemoryError {
+  const text = `取不到 ${identifier} 的值：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail ? `（${detail}）` : ''}`
+  return new MemoryError(reasonStatus(reason), text)
+}
+
+interface AccessRecord {
+  via: CredentialVia
+  fields: string[]
+  purpose: string | undefined
+  result: CredentialAccessResult
+  reason: CredentialAccessReason | null
+}
+
+// 取值第一段的结果：已经有值（托管的）、要向密码库取（密码库的），或者失败（已记好事件，提交之后抛出）
+type Prepared =
+  | { kind: 'values'; values: Record<string, string> | null }
+  | { kind: 'vault'; connection: ConnectionRow; session: VaultSession }
+  | { kind: 'error'; error: MemoryError }
+
 export class CredentialService {
-  constructor(private readonly ctx: CredentialContext) {}
+  readonly vault: VaultConnections
+
+  constructor(private readonly ctx: CredentialContext) {
+    this.vault = new VaultConnections({
+      db: ctx.db,
+      spaceId: ctx.spaceId,
+      ownerAccountId: ctx.access.ownerAccountId,
+      masterKey: ctx.masterKey,
+      client: ctx.vault ?? FALLBACK_CLIENT,
+    })
+  }
 
   // 这次是不是接入方通过 Key 来的：管理界面不代表某个应用，appId 为 null
   private get viaKey(): boolean {
@@ -173,24 +242,23 @@ export class CredentialService {
       if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
         throw new MemoryError(409, conflict ?? '标识已被占用或不可用')
       }
+      if (isUniqueViolation(err, 'credentials_vault_item_live_idx')) {
+        throw new MemoryError(409, '这个条目已经起过标识，一个条目只对应一条有效凭据')
+      }
       throw err
     }
   }
 
-  // 能不能读到凭据：读不到本人的 Key（以及群聊、私聊、定时任务等会话上下文）一条都看不到
-  private requireRead(): void {
-    if (!canReadCredential(this.ctx.access, { ownerAccountId: this.owner, appIds: null })) {
-      throw new MemoryError(
-        403,
-        '无权读取凭据：需要可读本人（user），敏感级上限不低于私密（private）',
-      )
-    }
+  // 列出、取用：凭据能力至少是取用。不看凭据存不存在，没有权限时一律 403
+  requireUse(): void {
+    const denial = credentialDenial(this.ctx.access, { appIds: null }, 'use')
+    if (denial) throw denialError(denial, 'use', '', this.viaKey)
   }
 
-  private requireManage(): void {
-    if (!canManageCredentials(this.ctx.access)) {
-      throw new MemoryError(403, '无权管理凭据：需要可读写本人（user），敏感级上限为机密（secret）')
-    }
+  // 新建、修改、删除凭据，连接密码库，管理界面里查看值：凭据能力是管理
+  requireManage(): void {
+    const denial = credentialDenial(this.ctx.access, { appIds: null }, 'manage')
+    if (denial) throw denialError(denial, 'manage', '', this.viaKey)
   }
 
   private seal(id: string, values: Record<string, string>) {
@@ -228,66 +296,51 @@ export class CredentialService {
     })
   }
 
-  // ---- 读出与视图 ----
-
-  private async providersOf(tx: Tx, rows: CredentialRow[]): Promise<Map<string, ProviderRow>> {
-    const ids = [...new Set(rows.map((r) => r.providerId).filter((id): id is string => !!id))]
-    if (!ids.length) return new Map()
-    const found = await tx
-      .select()
-      .from(credentialProviders)
-      .where(inArray(credentialProviders.id, ids))
-    return new Map(found.map((p) => [p.id, p]))
+  // 访问事件：交出值、被拒或失败才记。测试台不记
+  private async accessEvent(tx: Tx, credentialId: string, record: AccessRecord): Promise<void> {
+    if (this.ctx.bench) return
+    await this.event(tx, credentialId, 'access', {
+      via: record.via,
+      fields: record.fields,
+      ...(record.purpose ? { purpose: record.purpose } : {}),
+      result: record.result,
+      ...(record.reason ? { reason: record.reason } : {}),
+      ...(this.ctx.chatType ? { chatType: this.ctx.chatType } : {}),
+    })
   }
 
-  private base(row: CredentialRow, providers: Map<string, ProviderRow>) {
-    const provider = row.providerId ? providers.get(row.providerId) : undefined
+  // ---- 读出与视图 ----
+
+  private base(row: CredentialRow) {
     return {
       id: row.id,
       identifier: row.identifier,
       name: row.name,
       description: row.description,
       source: row.source,
-      provider: provider
-        ? {
-            id: provider.id,
-            kind: provider.kind,
-            name: provider.name,
-            deleted: provider.deletedAt !== null,
-          }
-        : null,
       version: row.version,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     }
   }
 
-  private info(row: CredentialRow, providers: Map<string, ProviderRow>): CredentialInfo {
-    return { ...this.base(row, providers), location: row.location, fields: row.fields }
+  private summary(row: CredentialRow): CredentialSummary {
+    return { ...this.base(row), fields: row.fields.map((f) => f.name) }
   }
 
-  private summary(row: CredentialRow, providers: Map<string, ProviderRow>): CredentialSummary {
-    return { ...this.base(row, providers), fields: row.fields.map((f) => f.name) }
-  }
-
-  private consoleView(
-    row: CredentialRow,
-    providers: Map<string, ProviderRow>,
-    references: Map<string, number>,
-  ): ConsoleCredential {
+  private consoleView(row: CredentialRow, references: Map<string, number>): ConsoleCredential {
     return {
-      ...this.info(row, providers),
+      ...this.base(row),
+      fields: row.fields,
+      vault:
+        row.source === 'vault'
+          ? { connectionId: row.vaultConnectionId!, itemId: row.vaultItemId! }
+          : null,
       appIds: row.appIds,
       deletedAt: row.deletedAt?.toISOString() ?? null,
       // 引用按标识解析到有效的那一条；已删除的这条不算被谁引用（同名的有效凭据可能正被引用着）
       referenceCount: row.deletedAt ? 0 : (references.get(row.identifier) ?? 0),
     }
-  }
-
-  // 已经知道凭据源时直接用（写入时刚读过），否则查一次
-  private async providersFor(tx: Tx, { row, provider }: Written) {
-    if (provider === undefined) return this.providersOf(tx, [row])
-    return new Map(provider ? [[provider.id, provider]] : [])
   }
 
   // 各标识被多少条记忆引用（只算 effectiveRef 的）
@@ -302,16 +355,8 @@ export class CredentialService {
     return new Map(rows.map((r) => [r.identifier, r.n]))
   }
 
-  private async consoleViewOf(tx: Tx, written: Written): Promise<ConsoleCredential> {
-    return this.consoleView(
-      written.row,
-      await this.providersFor(tx, written),
-      await this.referenceCounts(tx, [written.row.identifier]),
-    )
-  }
-
-  private async summaryOf(tx: Tx, written: Written): Promise<CredentialSummary> {
-    return this.summary(written.row, await this.providersFor(tx, written))
+  private async consoleViewOf(tx: Tx, row: CredentialRow): Promise<ConsoleCredential> {
+    return this.consoleView(row, await this.referenceCounts(tx, [row.identifier]))
   }
 
   // 管理界面：按 id 找成员自己的凭据，已删除的也算；不是自己的和不存在一样是 404
@@ -324,8 +369,7 @@ export class CredentialService {
     return row
   }
 
-  // Key：按标识找应用主人的有效凭据。不存在与看不到（包括限定给别的应用的）一律 404
-  private async visibleByIdentifier(tx: Tx, identifier: string): Promise<CredentialRow> {
+  private async liveByIdentifier(tx: Tx, identifier: string): Promise<CredentialRow | undefined> {
     const [row] = await tx
       .select()
       .from(credentials)
@@ -336,73 +380,36 @@ export class CredentialService {
           isNull(credentials.deletedAt),
         ),
       )
-    if (!row || !canReadCredential(this.ctx.access, row)) {
+    return row
+  }
+
+  // Key 管理凭据：按标识找应用所有者的有效凭据。不存在与限定给别的应用的一律 404
+  private async manageableByIdentifier(tx: Tx, identifier: string): Promise<CredentialRow> {
+    const row = await this.liveByIdentifier(tx, identifier)
+    if (!row || !canUseCredential(this.ctx.access, row)) {
       throw new MemoryError(404, `凭据不存在：${identifier}`)
     }
     return row
   }
 
-  // ---- 来源 ----
-
-  private async liveProvider(tx: Tx, providerId: string): Promise<ProviderRow> {
-    const [row] = await tx
-      .select()
-      .from(credentialProviders)
-      .where(
-        and(
-          eq(credentialProviders.id, providerId),
-          eq(credentialProviders.ownerAccountId, this.owner),
-          isNull(credentialProviders.deletedAt),
-        ),
-      )
-      // 和删除凭据源互斥：删除那边锁住这一行再数绑定，这边等它提交后重新读，读到已删除就是 404
-      .for('share')
-    if (!row) throw new MemoryError(404, '凭据源不存在')
-    return row
-  }
-
-  // 打码时读到的是占位文字，照抄回来就成了新的值，而事件不留旧值，找不回来。两档打码都拒绝
-  private rejectMaskedText(source: CredentialSourceInput | CredentialSourceUpdate): void {
-    if (!this.ctx.mask) return
-    const written =
-      source.kind === 'external'
-        ? [source.location, ...source.fields.map((f) => f.sourceField)]
-        : Object.values(source.values)
-    if (written.some((text) => text !== null && hasMaskedText(text))) {
+  // 测试台里读到的是占位文字，照抄回来就成了新的值
+  private rejectMaskedText(values: Record<string, string | null> | undefined): void {
+    if (!this.ctx.bench || !values) return
+    if (Object.values(values).some((v) => v !== null && hasMaskedText(v))) {
       throw new MemoryError(400, MASKED_TEXT_WRITTEN)
     }
   }
 
-  // 按请求算出来源相关的几列。托管的值与现有的合并：给了 null 的字段删掉，没给的不变；
-  // 从外部来源改成托管时，现有的值为空，给出的就是全部字段
-  private async sourceColumns(
-    tx: Tx,
+  // 托管的值与现有的合并：给了 null 的字段删掉，没给的不变
+  private hostedColumns(
     id: string,
-    source: CredentialSourceInput | CredentialSourceUpdate,
+    values: Record<string, string | null>,
     before: CredentialRow | null,
   ) {
-    this.rejectMaskedText(source)
-    if (source.kind === 'external') {
-      const provider = await this.liveProvider(tx, source.providerId)
-      return {
-        columns: {
-          source: 'external' as const,
-          providerId: source.providerId,
-          location: source.location,
-          fields: source.fields,
-          ciphertext: null,
-          wrappedKey: null,
-          keyId: null,
-        },
-        // 从托管改成外部时，Kioku 里存的值就删掉了，事件里要记下是哪些字段
-        changedValues:
-          before?.source === 'hosted' ? before.fields.map((f) => f.name).sort() : ([] as string[]),
-        provider,
-      }
-    }
-    const current = before?.source === 'hosted' ? this.open(before) : {}
+    this.rejectMaskedText(values)
+    const current = before ? this.open(before) : {}
     const merged: Record<string, string> = { ...current }
-    for (const [name, value] of Object.entries(source.values)) {
+    for (const [name, value] of Object.entries(values)) {
       if (value === null) delete merged[name]
       else merged[name] = value
     }
@@ -416,32 +423,28 @@ export class CredentialService {
       .sort()
     // 值没变时不动密文这几列：不再加密一遍，也不把读到的旧值写回去（轮换主密钥可能刚换过它们的包装）
     const sealed =
-      before?.source === 'hosted' && !changedValues.length
+      before && !changedValues.length
         ? {}
         : this.seal(id, Object.fromEntries(names.map((n) => [n, merged[n]!])))
     return {
       columns: {
-        source: 'hosted' as const,
-        providerId: null,
-        location: null,
-        fields: names.map((name): CredentialField => ({ name, sourceField: null })),
+        fields: names.map((name): CredentialField => ({ name, itemField: null })),
         ...sealed,
       },
       changedValues,
-      provider: null,
     }
   }
 
   // ---- 写入（管理界面与 Key 共用）----
 
-  private async insert(
+  private async insertHosted(
     tx: Tx,
-    input: Omit<CreateCredentialRequest, 'appIds'>,
+    input: KeyCreateCredentialRequest,
     appIds: string[] | null,
-  ): Promise<Written> {
+  ): Promise<CredentialRow> {
     this.requireManage()
     const id = randomUUID()
-    const { columns, provider } = await this.sourceColumns(tx, id, input.source, null)
+    const { columns } = this.hostedColumns(id, input.values, null)
     const [row] = await tx
       .insert(credentials)
       .values({
@@ -451,23 +454,30 @@ export class CredentialService {
         identifier: input.identifier,
         name: input.name,
         description: input.description ?? null,
+        source: 'hosted',
         ...columns,
         appIds,
       })
       .returning()
     await this.event(tx, id, 'create')
-    return { row: row!, provider }
+    return row!
   }
 
   private async modify(
     tx: Tx,
     before: CredentialRow,
     input: Omit<UpdateCredentialRequest, 'appIds'> & { appIds?: string[] | null | undefined },
-  ): Promise<Written> {
+  ): Promise<CredentialRow> {
     this.requireManage()
     if (before.deletedAt) throw new MemoryError(409, '这条凭据已删除。请先恢复，再修改。')
     if (input.expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
+    }
+    if (input.values !== undefined && before.source !== 'hosted') {
+      throw new MemoryError(400, '这条凭据的值在密码库里，Kioku 不保存，到密码库里修改')
+    }
+    if (input.fields !== undefined && before.source !== 'vault') {
+      throw new MemoryError(400, '字段对应只用于密码库的凭据；托管的凭据改 values')
     }
     const changes: CredentialChange[] = []
     const set: Partial<typeof credentials.$inferInsert> = {}
@@ -480,17 +490,18 @@ export class CredentialService {
       changes.push('description')
     }
     let changedValues: string[] = []
-    let provider: ProviderRow | null | undefined
-    if (input.source) {
-      const next = await this.sourceColumns(tx, before.id, input.source, before)
-      Object.assign(set, next.columns)
+    if (input.values !== undefined) {
+      const next = this.hostedColumns(before.id, input.values, before)
       changedValues = next.changedValues
-      provider = next.provider
-      if (next.columns.source !== before.source) changes.push('source')
-      if (next.columns.providerId !== before.providerId) changes.push('provider')
-      if (next.columns.location !== before.location) changes.push('location')
-      if (!sameJson(next.columns.fields, before.fields)) changes.push('fields')
-      if (changedValues.length) changes.push('values')
+      if (changedValues.length) {
+        Object.assign(set, next.columns)
+        changes.push('values')
+        if (!sameJson(next.columns.fields, before.fields)) changes.push('fields')
+      }
+    }
+    if (input.fields !== undefined && !sameJson(input.fields, before.fields)) {
+      set.fields = input.fields
+      changes.push('fields')
     }
     if (input.appIds !== undefined) {
       // 被诱导的 agent 不能给自己放宽
@@ -502,7 +513,7 @@ export class CredentialService {
       }
     }
     // 什么都没改时不升版本、不记事件：别的页面拿着同一个版本号还能接着改
-    if (!changes.length) return { row: before, provider }
+    if (!changes.length) return before
     const [row] = await tx
       .update(credentials)
       .set({ ...set, version: sql`${credentials.version} + 1`, updatedAt: new Date() })
@@ -519,7 +530,7 @@ export class CredentialService {
       changes,
       ...(changedValues.length ? { fields: changedValues } : {}),
     })
-    return { row, provider }
+    return row
   }
 
   // 读完之后、写入之前被别的请求改了：告诉调用方现在的版本号，接着改的时候带上它
@@ -564,6 +575,149 @@ export class CredentialService {
     await this.event(tx, before.id, 'delete')
   }
 
+  // ---- 取值 ----
+
+  // 第一段，在调用方的事务里：托管的解开（并记访问事件），密码库的读连接、看状态、解开令牌与密钥。
+  // 失败时访问事件已经记好，错误由调用方在事务提交之后抛出
+  private async prepare(
+    tx: Tx,
+    row: CredentialRow,
+    fields: CredentialField[],
+    via: CredentialVia,
+    purpose: string | undefined,
+  ): Promise<Prepared> {
+    const names = fields.map((f) => f.name)
+    const record = (result: CredentialAccessResult, reason: CredentialAccessReason | null) =>
+      this.accessEvent(tx, row.id, { via, fields: names, purpose, result, reason })
+    const fail = async (reason: CredentialAccessReason, detail?: string): Promise<Prepared> => {
+      await record('failed', reason)
+      return { kind: 'error', error: failureError(reason, row.identifier, detail) }
+    }
+    if (this.ctx.bench) return { kind: 'values', values: null }
+    if (row.source === 'hosted') {
+      let all: Record<string, string>
+      try {
+        if (!this.ctx.masterKey) return await fail('master_key')
+        all = this.open(row)
+      } catch (err) {
+        if (err instanceof MemoryError) throw err
+        return fail('master_key')
+      }
+      await record('ok', null)
+      return {
+        kind: 'values',
+        values: Object.fromEntries(names.flatMap((n) => (n in all ? [[n, all[n]!]] : []))),
+      }
+    }
+    const connection = await this.vault.load(tx, row.vaultConnectionId!)
+    // 连接不能用了（断开、需要重新登录、停用、被保留期删掉）：缓存里这个连接的会话一并删掉。
+    // 断开与并发的取用交错时，会话可能在断开提交之后才放回缓存，靠这里清掉
+    if (!connection || connection.status !== 'ok' || !connection.ciphertext) {
+      this.vault.forget(row.vaultConnectionId!)
+    }
+    if (!connection || connection.status === 'disconnected' || !connection.ciphertext) {
+      return fail('disconnected')
+    }
+    if (connection.status === 'disabled') {
+      return fail(
+        'disabled',
+        connection.disabledReason
+          ? VAULT_DISABLED_REASON_NAMES[connection.disabledReason]
+          : undefined,
+      )
+    }
+    if (connection.status === 'reauth_required') return fail('reauth_required')
+    if (!this.ctx.masterKey) return fail('master_key')
+    try {
+      return { kind: 'vault', connection, session: this.vault.session(connection) }
+    } catch (err) {
+      if (err instanceof MemoryError) throw err
+      return fail('master_key')
+    }
+  }
+
+  // 交出一条凭据的值：第一段在 first 的事务里做完（prepare），第二段在事务外向密码库取条目，
+  // 第三段另开一个短事务记访问事件、更新连接的状态。不在事务里请求外部服务
+  private async deliver(
+    row: CredentialRow,
+    fields: CredentialField[],
+    via: CredentialVia,
+    purpose: string | undefined,
+    prepared: Prepared,
+  ): Promise<Record<string, string> | null> {
+    if (prepared.kind === 'error') throw prepared.error
+    if (prepared.kind === 'values') return prepared.values
+    let outcome: VaultOutcome | null
+    let result: Record<string, string> | CredentialAccessReason
+    // 不是密码库报的错（解不开重读的密文、保存新令牌或停用连接时的数据库错误）：也记一条失败，再原样抛出
+    let unexpected: unknown = null
+    let connection = prepared.connection
+    try {
+      let item: VaultItem
+      try {
+        item = await prepared.session.item(row.vaultItemId!)
+      } catch (err) {
+        // 刷新令牌失效之前先重读一次：别的进程可能刚换过令牌（密文变了），用新的建会话再试一次，
+        // 还是失败才算需要重新登录
+        if (!(err instanceof VaultError) || err.kind !== 'reauth_required') throw err
+        const fresh = await this.run((tx) => this.vault.load(tx, connection.id))
+        if (
+          !fresh ||
+          fresh.status !== 'ok' ||
+          !fresh.ciphertext ||
+          fresh.ciphertext.equals(connection.ciphertext!)
+        ) {
+          throw err
+        }
+        connection = fresh
+        let session: VaultSession
+        try {
+          session = this.vault.session(fresh)
+        } catch (openErr) {
+          throw new SecretsUnreadable(openErr)
+        }
+        item = await session.item(row.vaultItemId!)
+      }
+      outcome = { kind: 'ok' }
+      result = itemValues(item, fields)
+    } catch (err) {
+      if (err instanceof VaultDisabledError) {
+        outcome = { kind: 'disabled' }
+        result = 'disabled'
+      } else if (err instanceof VaultError) {
+        outcome = { kind: 'error', error: err.kind }
+        result = vaultReason(err.kind)
+      } else {
+        // 和 prepare 里解不开令牌一样记成主密钥的问题；别的意外记成密码库出错。连接的状态不动
+        outcome = null
+        result = err instanceof SecretsUnreadable ? 'master_key' : 'vault_error'
+        unexpected = err
+      }
+    }
+    const names = fields.map((f) => f.name)
+    const finish = (tx: Tx) =>
+      this.accessEvent(tx, row.id, {
+        via,
+        fields: names,
+        purpose,
+        result: typeof result === 'string' ? 'failed' : 'ok',
+        reason: typeof result === 'string' ? result : null,
+      })
+    if (unexpected !== null) {
+      // 记失败本身也可能出错（例如数据库连不上）：那时抛出原来的错误
+      await this.run(finish).catch(() => {})
+      // 解不开令牌和 prepare 里一样给出「主密钥不可用」；别的意外原样抛出，按内部错误处理
+      if (result === 'master_key') throw failureError(result, row.identifier)
+      throw unexpected
+    }
+    await this.run(async (tx) => {
+      if (outcome) await this.vault.record(tx, connection, outcome)
+      await finish(tx)
+    })
+    if (typeof result === 'string') throw failureError(result, row.identifier)
+    return result
+  }
+
   // ---- 管理界面 ----
 
   async list(): Promise<ConsoleCredentialList> {
@@ -579,7 +733,7 @@ export class CredentialService {
     where: ReturnType<typeof isNull>,
     order: ReturnType<typeof asc>,
   ): Promise<ConsoleCredentialList> {
-    this.requireRead()
+    this.requireUse()
     return this.run(async (tx) => {
       const rows = await tx
         .select()
@@ -588,29 +742,92 @@ export class CredentialService {
         .orderBy(order, asc(credentials.id))
         .limit(LIST_LIMIT + 1)
       const page = rows.slice(0, LIST_LIMIT)
-      const providers = await this.providersOf(tx, page)
       const references = await this.referenceCounts(
         tx,
         page.map((r) => r.identifier),
       )
       return {
-        items: page.map((r) => this.consoleView(r, providers, references)),
+        items: page.map((r) => this.consoleView(r, references)),
         truncated: rows.length > LIST_LIMIT,
       }
     })
   }
 
   async get(id: string): Promise<ConsoleCredential> {
-    this.requireRead()
-    return this.run(async (tx) => this.consoleViewOf(tx, { row: await this.ownById(tx, id) }))
+    this.requireUse()
+    return this.run(async (tx) => this.consoleViewOf(tx, await this.ownById(tx, id)))
   }
 
   async create(input: CreateCredentialRequest): Promise<ConsoleCredential> {
+    this.requireManage()
+    // 在管理界面新建的默认不限定应用，由所有者决定
+    const appIds = input.appIds ? [...new Set(input.appIds)].sort() : null
+    const conflict = `标识已被占用或不可用：${input.identifier}`
+    const { source } = input
+    if (source.kind === 'hosted') {
+      return this.run(
+        async (tx) =>
+          this.consoleViewOf(
+            tx,
+            await this.insertHosted(tx, { ...input, values: source.values }, appIds),
+          ),
+        conflict,
+      )
+    }
+    // 给密码库的条目起标识：先向密码库取这个条目，确认读得到、字段对得上，再写库
+    const connection = await this.run((tx) => this.vault.load(tx, source.connectionId))
+    if (!connection) throw new MemoryError(404, '密码库连接不存在')
+    if (connection.status !== 'ok') {
+      throw new MemoryError(409, '密码库连接不可用，请先在密码库里重新检查或重新登录')
+    }
+    let item: VaultItem
+    try {
+      item = await this.vault.session(connection).item(source.itemId)
+    } catch (err) {
+      if (err instanceof VaultDisabledError) {
+        throw new MemoryError(409, `密码库连接已停用：${VAULT_DISABLED_REASON_NAMES[err.reason]}`)
+      }
+      if (!(err instanceof VaultError)) throw err
+      await this.run((tx) => this.vault.record(tx, connection, { kind: 'error', error: err.kind }))
+      const reason = vaultReason(err.kind)
+      throw new MemoryError(
+        reasonStatus(reason),
+        `无法读取这个条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}`,
+      )
+    }
+    const fields = source.fields ?? defaultCredentialFields(item.fields)
+    if (!fields.length) throw new MemoryError(400, '这个条目里没有能用的字段')
+    if (fields.length > MAX_CREDENTIAL_FIELDS) {
+      throw new MemoryError(
+        400,
+        `条目里的字段超过 ${MAX_CREDENTIAL_FIELDS} 个，请给出字段对应，只选要用的字段`,
+      )
+    }
+    const missing = fields.find((f) => !item.fields.includes(f.itemField!))
+    if (missing) throw new MemoryError(400, `条目里没有字段 ${missing.itemField}`)
     return this.run(async (tx) => {
-      // 在管理界面新建的默认不限定应用，由主人决定
-      const appIds = input.appIds ? [...new Set(input.appIds)].sort() : null
-      return this.consoleViewOf(tx, await this.insert(tx, input, appIds))
-    }, `标识已被占用或不可用：${input.identifier}`)
+      const id = randomUUID()
+      const [row] = await tx
+        .insert(credentials)
+        .values({
+          id,
+          spaceId: this.ctx.spaceId,
+          ownerAccountId: this.owner,
+          identifier: input.identifier,
+          name: input.name,
+          description: input.description ?? null,
+          source: 'vault',
+          vaultConnectionId: connection.id,
+          vaultItemId: source.itemId,
+          fields,
+          appIds,
+        })
+        .returning()
+      await this.event(tx, id, 'create')
+      // 刚才那次取条目是成功的：和插入放在一个事务里更新连接
+      await this.vault.record(tx, connection, { kind: 'ok' })
+      return this.consoleViewOf(tx, row!)
+    }, conflict)
   }
 
   // 在调用方的事务里新建一条托管的凭据，返回 id（转存为凭据：和改记忆放在一个事务里）。
@@ -621,10 +838,8 @@ export class CredentialService {
       values: Record<string, string>
     },
   ): Promise<string> {
-    const { values, ...rest } = input
     try {
-      const { row } = await this.insert(tx, { ...rest, source: { kind: 'hosted', values } }, null)
-      return row.id
+      return (await this.insertHosted(tx, input, null)).id
     } catch (err) {
       if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
         throw new MemoryError(409, `标识已被占用或不可用：${input.identifier}`)
@@ -635,7 +850,7 @@ export class CredentialService {
 
   // 在调用方的事务里读一条自己的凭据：引用的条数要算上这个事务刚写的
   async viewIn(tx: Tx, id: string): Promise<ConsoleCredential> {
-    return this.consoleViewOf(tx, { row: await this.ownById(tx, id) })
+    return this.consoleViewOf(tx, await this.ownById(tx, id))
   }
 
   async update(id: string, input: UpdateCredentialRequest): Promise<ConsoleCredential> {
@@ -648,7 +863,8 @@ export class CredentialService {
     await this.run(async (tx) => this.remove(tx, await this.ownById(tx, id), expectedVersion))
   }
 
-  // 撤销删除。同一个标识已经有一条有效的凭据时不能恢复：引用按标识解析，两条同名的有效凭据会分不清
+  // 撤销删除。同一个标识已经有一条有效的凭据时不能恢复：引用按标识解析，两条同名的有效凭据会分不清；
+  // 同一个条目已经有有效的凭据时也不能（唯一索引，见 run）
   async undelete(id: string): Promise<ConsoleCredential> {
     return this.run(async (tx) => {
       this.requireManage()
@@ -679,13 +895,13 @@ export class CredentialService {
         )
       }
       await this.event(tx, id, 'undelete')
-      return this.consoleViewOf(tx, { row })
+      return this.consoleViewOf(tx, row)
     }, '同一标识已有有效凭据，无法恢复此凭据')
   }
 
   // 引用这条凭据的记忆，最近改过的在前
   async references(id: string): Promise<CredentialReferenceList> {
-    this.requireRead()
+    this.requireUse()
     return this.run(async (tx) => {
       const row = await this.ownById(tx, id)
       // 已删除的凭据不算被引用：同一个标识的引用解析到有效的那一条（见 consoleView）
@@ -717,26 +933,20 @@ export class CredentialService {
     })
   }
 
-  // 查看托管的值，记一条访问事件。和 secret 一样，目前要求是空间 owner
+  // 管理界面查看值：托管的与密码库的都给（totp 给验证码），记一条访问事件。和 secret 一样，目前要求是空间 owner
   async reveal(id: string): Promise<CredentialValues> {
-    return this.run(async (tx) => {
+    this.requireManage()
+    const { row, prepared } = await this.run(async (tx) => {
       const row = await this.ownById(tx, id)
-      if (!canRevealCredential(this.ctx.access, row)) {
-        throw new MemoryError(403, '仅空间所有者可查看托管的值')
-      }
       if (row.deletedAt) throw new MemoryError(409, '这条凭据已删除。请先恢复，再查看。')
-      if (row.source !== 'hosted') {
-        throw new MemoryError(400, '这条凭据的值在外部凭据源中，Kioku 不保存')
-      }
-      const values = this.open(row)
-      await this.event(tx, id, 'access', { via: 'console', fields: Object.keys(values).sort() })
-      return { values }
+      return { row, prepared: await this.prepare(tx, row, row.fields, 'console', undefined) }
     })
+    return { values: (await this.deliver(row, row.fields, 'console', undefined, prepared)) ?? {} }
   }
 
-  // 一条凭据的事件，最新的在前。Key 的名字和 Key 列表一样，只给应用主人与空间 owner 看
+  // 一条凭据的事件，最新的在前。Key 的名字和 Key 列表一样，只给应用所有者与空间 owner 看
   async events(id: string, page: PageQuery): Promise<CredentialEventList> {
-    this.requireRead()
+    this.requireUse()
     if (page.cursor !== undefined && !EVENT_ID.test(page.cursor)) {
       throw new MemoryError(400, '翻页参数无效，请从第一页重新开始')
     }
@@ -767,171 +977,42 @@ export class CredentialService {
       const items = rows.slice(0, page.limit)
       const list = (value: unknown) =>
         Array.isArray(value) ? value.filter((v): v is string => typeof v === 'string') : []
+      const text = (value: unknown) => (typeof value === 'string' ? value : null)
       const benchMark = await benchMarkReader(
         tx,
         items.map((r) => r.event.context),
       )
       return {
-        items: items.map((r) => ({
-          id: r.event.id,
-          type: r.event.eventType,
-          createdAt: r.event.createdAt.toISOString(),
-          actor: { accountName: r.accountName, keyName: r.keyName, appName: r.appName },
-          via: typeof r.event.context.via === 'string' ? r.event.context.via : null,
-          fields: list(r.event.context.fields),
-          changes: list(r.event.context.changes),
-          bench: benchMark(r.event.context),
-        })),
+        items: items.map((r) => {
+          const c = r.event.context
+          const result = text(c.result)
+          const reason = text(c.reason)
+          return {
+            id: r.event.id,
+            type: r.event.eventType,
+            createdAt: r.event.createdAt.toISOString(),
+            actor: { accountName: r.accountName, keyName: r.keyName, appName: r.appName },
+            via: text(c.via),
+            fields: list(c.fields),
+            purpose: text(c.purpose),
+            result: ACCESS_RESULTS.has(result) ? (result as CredentialAccessResult) : null,
+            reason: ACCESS_REASONS.has(reason) ? (reason as CredentialAccessReason) : null,
+            chatType: text(c.chatType),
+            changes: list(c.changes),
+            bench: benchMark(c),
+          }
+        }),
         nextCursor:
           rows.length > page.limit && items.length ? String(items.at(-1)!.event.id) : null,
       }
     })
   }
 
-  // ---- 凭据源（只在管理界面配置）----
-
-  private liveProviders(tx: Tx): Promise<ProviderRow[]> {
-    return tx
-      .select()
-      .from(credentialProviders)
-      .where(
-        and(
-          eq(credentialProviders.ownerAccountId, this.owner),
-          isNull(credentialProviders.deletedAt),
-        ),
-      )
-      .orderBy(asc(credentialProviders.createdAt), asc(credentialProviders.id))
-  }
-
-  async providers(): Promise<CredentialProvider[]> {
-    this.requireRead()
-    return this.run(async (tx) => {
-      const rows = await this.liveProviders(tx)
-      if (!rows.length) return []
-      const counts = await tx
-        .select({ providerId: credentials.providerId, n: count() })
-        .from(credentials)
-        .where(
-          and(
-            inArray(
-              credentials.providerId,
-              rows.map((r) => r.id),
-            ),
-            isNull(credentials.deletedAt),
-          ),
-        )
-        .groupBy(credentials.providerId)
-      const bound = new Map(counts.map((c) => [c.providerId, c.n]))
-      return rows.map((r) => providerView(r, bound.get(r.id) ?? 0))
-    })
-  }
-
-  // 已删除的凭据源，最近删除的在前。不能恢复，列出来是让主人知道它什么时候永久清除：
-  // 保留期从什么时候算起和清理的规则一致（providerRetentionFrom），保留期的提示由路由补上
-  async deletedProviders(): Promise<Omit<DeletedCredentialProviderList, 'retention'>> {
-    this.requireRead()
-    return this.run(async (tx) => {
-      const rows = await tx
-        .select({
-          row: credentialProviders,
-          retentionFrom: providerRetentionFrom().mapWith(credentialProviders.deletedAt),
-        })
-        .from(credentialProviders)
-        .where(
-          and(
-            eq(credentialProviders.ownerAccountId, this.owner),
-            isNotNull(credentialProviders.deletedAt),
-          ),
-        )
-        .orderBy(desc(credentialProviders.deletedAt), asc(credentialProviders.id))
-        .limit(LIST_LIMIT + 1)
-      return {
-        items: rows.slice(0, LIST_LIMIT).map(({ row, retentionFrom }) => ({
-          id: row.id,
-          kind: row.kind,
-          name: row.name,
-          deletedAt: row.deletedAt!.toISOString(),
-          retentionFrom: retentionFrom?.toISOString() ?? null,
-        })),
-        truncated: rows.length > LIST_LIMIT,
-      }
-    })
-  }
-
-  async createProvider(input: CreateCredentialProviderRequest): Promise<CredentialProvider> {
-    this.requireManage()
-    return this.run(async (tx) => {
-      const [row] = await tx
-        .insert(credentialProviders)
-        .values({ spaceId: this.ctx.spaceId, ownerAccountId: this.owner, ...input })
-        .returning()
-      return providerView(row!, 0)
-    })
-  }
-
-  async updateProvider(
-    id: string,
-    input: UpdateCredentialProviderRequest,
-  ): Promise<CredentialProvider> {
-    this.requireManage()
-    return this.run(async (tx) => {
-      const [row] = await tx
-        .update(credentialProviders)
-        .set({ ...input, updatedAt: new Date() })
-        .where(
-          and(
-            eq(credentialProviders.id, id),
-            eq(credentialProviders.ownerAccountId, this.owner),
-            isNull(credentialProviders.deletedAt),
-          ),
-        )
-        .returning()
-      if (!row) throw new MemoryError(404, '凭据源不存在')
-      return providerView(row, await this.boundCount(tx, id))
-    })
-  }
-
-  // 软删除：已删除的凭据仍指向它，恢复之后显示「凭据源已删除」，要重新绑定。还有有效的凭据绑定它时不能删
-  async deleteProvider(id: string): Promise<void> {
-    this.requireManage()
-    await this.run(async (tx) => {
-      const [row] = await tx
-        .select({ id: credentialProviders.id })
-        .from(credentialProviders)
-        .where(
-          and(
-            eq(credentialProviders.id, id),
-            eq(credentialProviders.ownerAccountId, this.owner),
-            isNull(credentialProviders.deletedAt),
-          ),
-        )
-        // 和新建、修改凭据时的检查互斥：删除期间不会冒出新绑定到它的凭据
-        .for('update')
-      if (!row) throw new MemoryError(404, '凭据源不存在')
-      const bound = await this.boundCount(tx, id)
-      if (bound) {
-        throw new MemoryError(409, `仍有 ${bound} 条凭据绑定此凭据源。请先改绑或删除这些凭据。`)
-      }
-      await tx
-        .update(credentialProviders)
-        .set({ deletedAt: new Date(), updatedAt: new Date() })
-        .where(eq(credentialProviders.id, id))
-    })
-  }
-
-  private async boundCount(tx: Tx, providerId: string): Promise<number> {
-    const [row] = await tx
-      .select({ n: count() })
-      .from(credentials)
-      .where(and(eq(credentials.providerId, providerId), isNull(credentials.deletedAt)))
-    return row?.n ?? 0
-  }
-
   // ---- Key ----
 
-  // 列出这把 Key 看得到的凭据与凭据源。不含外部条目的位置与字段对应：绑定只在取用时给，并记访问事件
+  // 列出这把 Key 能取用的凭据，不含值与条目
   async keyList(): Promise<KeyCredentialList> {
-    this.requireRead()
+    this.requireUse()
     return this.run(async (tx) => {
       const rows = (
         await tx
@@ -939,200 +1020,122 @@ export class CredentialService {
           .from(credentials)
           .where(and(eq(credentials.ownerAccountId, this.owner), isNull(credentials.deletedAt)))
           .orderBy(asc(credentials.identifier))
-      ).filter((r) => canReadCredential(this.ctx.access, r))
-      const page = rows.slice(0, LIST_LIMIT)
-      const providers = await this.providersOf(tx, page)
-      const live = await this.liveProviders(tx)
+      ).filter((r) => canUseCredential(this.ctx.access, r))
       return {
-        items: page.map((r) => this.summary(r, providers)),
-        providers: live.map((p) => ({ id: p.id, kind: p.kind, name: p.name, deleted: false })),
+        items: rows.slice(0, LIST_LIMIT).map((r) => this.summary(r)),
         truncated: rows.length > LIST_LIMIT,
       }
     })
   }
 
-  // 怎么取到这条凭据的值，kioku_credential 与 kioku_get 共用。托管的看这次访问能不能取值，
-  // inline 为 true 表示值就在这次的结果里；外部的给凭据源、主人写的使用说明与按类型的取法
-  private binding(
-    row: CredentialRow,
-    providers: Map<string, ProviderRow>,
-    fields: readonly CredentialField[],
-    inline: boolean,
-  ): Binding {
-    if (row.source === 'hosted') {
-      if (!canRevealCredential(this.ctx.access, row)) {
-        return {
-          provider: null,
-          method:
-            '值由 Kioku 托管，这把 Key 不是 secret 级，取不到；需要时请主人在管理界面查看，或换一把 secret 级的 Key。',
-          revealable: false,
+  // 取用一条凭据：给值（测试台里为 null）与提醒。交出值、被拒或失败时各记一条访问事件
+  async use(
+    identifier: string,
+    field: string | undefined,
+    via: CredentialVia,
+    purpose?: string,
+  ): Promise<CredentialAccess> {
+    const first = await this.run(async (tx) => {
+      const row = await this.liveByIdentifier(tx, identifier)
+      const denial = credentialDenial(this.ctx.access, row ?? { appIds: null }, 'use')
+      if (denial) {
+        // 凭据存在、取用被拒的也记；不存在的没有可记的地方。说法不看存不存在
+        if (row) {
+          await this.accessEvent(tx, row.id, {
+            via,
+            fields: field ? [field] : row.fields.map((f) => f.name),
+            purpose,
+            result: 'denied',
+            reason: denial,
+          })
         }
+        return { error: denialError(denial, 'use', identifier) }
       }
-      if (inline && this.ctx.mask) {
-        return { provider: null, method: maskedHosted(fields), revealable: false }
-      }
-      return {
-        provider: null,
-        method: inline
-          ? '值由 Kioku 托管，就在 values 里。'
-          : '值由 Kioku 托管，用 kioku_credential 取。',
-        revealable: true,
-      }
-    }
-    const provider = providers.get(row.providerId!)
-    if (!provider || provider.deletedAt) {
-      return {
-        provider: null,
-        method: '这条凭据绑定的凭据源已被删除，取不到值；请主人在管理界面重新绑定。',
-        revealable: false,
-      }
-    }
-    if (this.masksBinding) {
-      return {
-        provider: { kind: provider.kind, name: provider.name, instructions: MASKED_BINDING },
-        method: MASKED_BINDING,
-        revealable: false,
-      }
-    }
-    return {
-      provider: { kind: provider.kind, name: provider.name, instructions: provider.instructions },
-      method: externalMethod(provider.kind, row.location!, fields),
-      revealable: false,
-    }
-  }
-
-  // 回滚模式：外部绑定换成占位文字，也不记访问（见 CredentialContext.mask）
-  private get masksBinding(): boolean {
-    return this.ctx.mask === 'all'
-  }
-
-  // 取用一条凭据：托管的给值（要 secret 级），外部的给凭据源、条目位置与取法。取到值或绑定时记一条访问事件
-  async use(identifier: string, field: string | undefined, via: CredentialVia) {
-    return this.run(async (tx): Promise<CredentialAccess> => {
-      const row = await this.visibleByIdentifier(tx, identifier)
+      if (!row) return { error: new MemoryError(404, `凭据不存在：${identifier}`) }
       const fields = field ? row.fields.filter((f) => f.name === field) : row.fields
       if (field && !fields.length) {
-        throw new MemoryError(404, `凭据 ${identifier} 没有字段 ${field}`)
+        return { error: new MemoryError(404, `凭据 ${identifier} 没有字段 ${field}`) }
       }
-      const names = fields.map((f) => f.name)
-      const providers = await this.providersOf(tx, [row])
-      const { provider, method, revealable } = this.binding(row, providers, fields, true)
-      let values: Record<string, string> | null = null
-      if (revealable) {
-        const all = this.open(row)
-        values = Object.fromEntries(names.flatMap((n) => (n in all ? [[n, all[n]!]] : [])))
-      }
-      if (revealable || (row.source === 'external' && !this.masksBinding)) {
-        await this.event(tx, row.id, 'access', { via, fields: names })
-      }
-      const info = this.info(row, providers)
-      return {
-        credential:
-          row.source === 'external' && this.masksBinding
-            ? {
-                ...info,
-                location: MASKED_BINDING,
-                fields: info.fields.map((f) => ({ ...f, sourceField: null })),
-              }
-            : info,
-        values,
-        provider,
-        method,
-        notice: CREDENTIAL_NOTICE,
-      }
+      return { row, fields, prepared: await this.prepare(tx, row, fields, via, purpose) }
     })
+    if ('error' in first) throw first.error
+    const values = await this.deliver(first.row, first.fields, via, purpose, first.prepared)
+    return {
+      credential: this.summary(first.row),
+      values,
+      notice: CREDENTIAL_NOTICE,
+    }
   }
 
-  // kioku_get 读到含占位符的记忆时，末尾列出这些凭据怎么取。权限检查与 kioku_credential 相同：
-  // 读者取不了的只标「无权查看或不存在」，不给凭据源与条目位置；给出外部绑定的记一条访问事件。
-  // 托管的值不在这里给，要显式调用 kioku_credential
+  // kioku_get 读到含占位符的记忆时，末尾列出这些凭据能不能取用：不给值，也不记访问
   async forPlaceholders(identifiers: string[]): Promise<PlaceholderCredential[]> {
     const wanted = [...new Set(identifiers)]
-    const readable = canReadCredential(this.ctx.access, {
-      ownerAccountId: this.owner,
-      appIds: null,
+    const unavailable = (identifier: string): PlaceholderCredential => ({
+      identifier,
+      state: 'unavailable',
+      name: null,
     })
-    if (!wanted.length || !readable) {
-      return wanted.map((identifier) => ({ identifier, available: false }))
+    if (!wanted.length || credentialDenial(this.ctx.access, { appIds: null }, 'use')) {
+      return wanted.map(unavailable)
     }
-    return this.run(async (tx) => {
-      const rows = await tx
-        .select()
+    // 密码库的凭据连上连接的状态：不请求密码库，连不上这类要到取用时才知道
+    const rows = await this.run((tx) =>
+      tx
+        .select({ row: credentials, status: vaultConnections.status })
         .from(credentials)
+        .leftJoin(vaultConnections, eq(vaultConnections.id, credentials.vaultConnectionId))
         .where(
           and(
             eq(credentials.ownerAccountId, this.owner),
             inArray(credentials.identifier, wanted),
             isNull(credentials.deletedAt),
           ),
-        )
-      const providers = await this.providersOf(tx, rows)
-      const result: PlaceholderCredential[] = []
-      for (const identifier of wanted) {
-        const row = rows.find((r) => r.identifier === identifier)
-        if (!row || !canReadCredential(this.ctx.access, row)) {
-          result.push({ identifier, available: false })
-          continue
-        }
-        if (row.source === 'external' && !this.masksBinding) {
-          await this.event(tx, row.id, 'access', {
-            via: 'kioku_get' satisfies CredentialVia,
-            fields: row.fields.map((f) => f.name),
-          })
-        }
-        // revealable 是 use() 决定给不给值用的，不放进给 agent 看的列表
-        const { provider, method } = this.binding(row, providers, row.fields, false)
-        result.push({
-          identifier,
-          available: true,
-          name: row.name,
-          source: row.source,
-          location:
-            row.source !== 'external' ? null : this.masksBinding ? MASKED_BINDING : row.location,
-          provider,
-          method,
-        })
-      }
-      return result
+        ),
+    )
+    return wanted.map((identifier) => {
+      const found = rows.find((r) => r.row.identifier === identifier)
+      if (!found || !canUseCredential(this.ctx.access, found.row)) return unavailable(identifier)
+      const status = found.row.source === 'vault' ? (found.status ?? 'disconnected') : 'ok'
+      return { identifier, state: status === 'ok' ? 'usable' : status, name: found.row.name }
     })
   }
 
-  // 通过 Key 新建的只给这个应用用：被诱导的 agent 建的凭据不会被别的应用拿去用
-  async keyCreate(input: Omit<CreateCredentialRequest, 'appIds'>): Promise<CredentialSummary> {
+  // 通过 Key 新建的只给这个应用用：被诱导的 agent 建的凭据不会被别的应用拿去用。只收托管的值
+  async keyCreate(input: KeyCreateCredentialRequest): Promise<CredentialSummary> {
+    this.requireManage()
     return this.run(
-      async (tx) => this.summaryOf(tx, await this.insert(tx, input, [this.ctx.access.appId!])),
+      async (tx) => this.summary(await this.insertHosted(tx, input, [this.ctx.access.appId!])),
       `标识已被占用或不可用：${input.identifier}`,
     )
   }
 
   async keyUpdate(
     identifier: string,
-    input: Omit<UpdateCredentialRequest, 'appIds'>,
+    input: Omit<UpdateCredentialRequest, 'appIds' | 'fields'>,
   ): Promise<CredentialSummary> {
+    // 先确认有管理权限，再找凭据：没有权限时不论存不存在都是 403
+    this.requireManage()
     return this.run(async (tx) => {
-      // 先确认有管理权限，再找凭据：没有权限时不论存不存在都是 403
-      this.requireManage()
-      const before = await this.visibleByIdentifier(tx, identifier)
-      return this.summaryOf(tx, await this.modify(tx, before, input))
+      const before = await this.manageableByIdentifier(tx, identifier)
+      return this.summary(await this.modify(tx, before, input))
     })
   }
 
   async keyDelete(identifier: string, expectedVersion?: number): Promise<void> {
+    this.requireManage()
     await this.run(async (tx) => {
-      this.requireManage()
-      await this.remove(tx, await this.visibleByIdentifier(tx, identifier), expectedVersion)
+      await this.remove(tx, await this.manageableByIdentifier(tx, identifier), expectedVersion)
     })
   }
 }
 
-function providerView(row: ProviderRow, credentialCount: number): CredentialProvider {
-  return {
-    id: row.id,
-    kind: row.kind,
-    name: row.name,
-    instructions: row.instructions,
-    credentialCount,
-    createdAt: row.createdAt.toISOString(),
-    updatedAt: row.updatedAt.toISOString(),
+const FALLBACK_CLIENT = unavailableVaultClient()
+
+// 重读的密文解不开：记成主密钥的问题
+class SecretsUnreadable extends Error {
+  constructor(readonly original: unknown) {
+    super('密码库连接保存的令牌解不开')
   }
 }
+const ACCESS_RESULTS = new Set<string | null>(['ok', 'denied', 'failed'])
+const ACCESS_REASONS = new Set<string | null>(Object.keys(CREDENTIAL_ACCESS_REASON_NAMES))

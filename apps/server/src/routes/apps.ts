@@ -455,10 +455,18 @@ export function appRoutes(deps: Deps) {
       if (role !== 'owner' && role !== 'editor') {
         return c.json({ error: '需要空间所有者或编辑者角色' }, 403)
       }
-      // Key 的上限不能超过签发人的角色：admin 与 secret 级只有空间 owner 能给。
+      // Key 的上限不能超过签发人的角色：admin、secret 级与凭据能力只有空间 owner 能给。
       // editor 签发的 Key 仍能读写应用所有者（也就是 editor 自己）的本人记忆，以及 secret 以下的共享内容
-      if (role !== 'owner' && (body.scopes.admin || body.scopes.maxSensitivity === 'secret')) {
-        return c.json({ error: '仅空间所有者可签发「跨人格 / 应用写入」或机密级的访问密钥' }, 403)
+      if (
+        role !== 'owner' &&
+        (body.scopes.admin ||
+          body.scopes.maxSensitivity === 'secret' ||
+          body.scopes.credentials !== 'none')
+      ) {
+        return c.json(
+          { error: '仅空间所有者可签发「跨人格 / 应用写入」、机密级或可使用凭据的访问密钥' },
+          403,
+        )
       }
       const generated = generateApiKey()
       const result = await withSpace(deps.db, spaceId, async (tx) => {

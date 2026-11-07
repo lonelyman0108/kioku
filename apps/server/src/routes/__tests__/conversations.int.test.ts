@@ -420,7 +420,7 @@ describe.skipIf(!testDatabaseUrl)('会话', () => {
       `/v1/spaces/${ws.spaceId}/apps/${bobAppId}/keys`,
       jsonRequest(
         'POST',
-        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private' } },
+        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private', credentials: 'none' } },
         { cookie: bob.cookie },
       ),
     )

@@ -30,7 +30,7 @@ describe.skipIf(!testDatabaseUrl)('启动预览与召回调试台', () => {
   let appId: string
   let key: string
   let keyId: string
-  const internal: KeyScopes = { ...FULL_SCOPES, maxSensitivity: 'internal' }
+  const internal: KeyScopes = { ...FULL_SCOPES, maxSensitivity: 'internal', credentials: 'none' }
 
   beforeAll(async () => {
     database = await openTestDatabase()

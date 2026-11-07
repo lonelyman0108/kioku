@@ -14,11 +14,13 @@ import {
   apps,
   conversations,
   conversationTurns,
+  credentials,
   memories,
   personas,
   RLS_TABLES,
   spaces,
   subjects,
+  vaultConnections,
 } from '../schema'
 
 describe.skipIf(!testDatabaseUrl)('数据层与空间隔离', () => {
@@ -287,7 +289,13 @@ describe.skipIf(!testDatabaseUrl)('数据层与空间隔离', () => {
           name: 'k',
           prefix: 'kk_test',
           secretHash: 'x',
-          scopes: { readLayers: [], writeLayers: [], maxSensitivity: 'public', admin: false },
+          scopes: {
+            readLayers: [],
+            writeLayers: [],
+            maxSensitivity: 'public',
+            admin: false,
+            credentials: 'none',
+          },
         })
         .returning({ id: apiKeys.id })
       const [group, person] = await tx
@@ -441,6 +449,100 @@ describe.skipIf(!testDatabaseUrl)('数据层与空间隔离', () => {
         'conversation_turns_chat_type',
       )
     }
+  })
+
+  it('密码库连接断开时没有密文，停用时有原因；凭据按来源指向连接与条目', async () => {
+    const connection = (values: Partial<typeof vaultConnections.$inferInsert>) =>
+      inA((tx) =>
+        tx
+          .insert(vaultConnections)
+          .values({
+            spaceId: spaceA,
+            ownerAccountId: accountId,
+            serverUrl: 'https://vault.example.com',
+            email: 'agent@example.com',
+            vaultUserId: crypto.randomUUID(),
+            deviceId: crypto.randomUUID(),
+            ciphertext: Buffer.from('c'),
+            wrappedKey: Buffer.from('k'),
+            ...values,
+          })
+          .returning({ id: vaultConnections.id }),
+      )
+    const [live] = await connection({})
+    await connection({ status: 'disabled', disabledReason: 'personal_items' })
+    await connection({
+      status: 'disconnected',
+      ciphertext: null,
+      wrappedKey: null,
+      disconnectedAt: new Date(),
+    })
+    for (const values of [
+      { ciphertext: null, wrappedKey: null },
+      { status: 'disconnected' as const, disconnectedAt: new Date() },
+      { status: 'disconnected' as const, ciphertext: null, wrappedKey: null },
+      { wrappedKey: null },
+    ]) {
+      expect(await violation(connection(values)), JSON.stringify(values)).toBe(
+        'vault_connections_secrets_shape',
+      )
+    }
+    expect(await violation(connection({ status: 'disabled' }))).toBe(
+      'vault_connections_disabled_reason',
+    )
+    expect(await violation(connection({ disabledReason: 'organization_role' }))).toBe(
+      'vault_connections_disabled_reason',
+    )
+    expect(await violation(connection({ lastErrorKind: 'unreachable' }))).toBe(
+      'vault_connections_last_error',
+    )
+
+    const credential = (values: Partial<typeof credentials.$inferInsert>) =>
+      inA((tx) =>
+        tx.insert(credentials).values({
+          spaceId: spaceA,
+          ownerAccountId: accountId,
+          identifier: `c-${crypto.randomUUID()}`,
+          name: '凭据',
+          source: 'vault',
+          vaultConnectionId: live!.id,
+          vaultItemId: crypto.randomUUID(),
+          ...values,
+        }),
+      )
+    await credential({})
+    await credential({
+      source: 'hosted',
+      vaultConnectionId: null,
+      vaultItemId: null,
+      ciphertext: Buffer.from('c'),
+      wrappedKey: Buffer.from('k'),
+    })
+    expect(await violation(credential({ vaultItemId: null }))).toBe('credentials_source_shape')
+    expect(await violation(credential({ ciphertext: Buffer.from('c') }))).toBe(
+      'credentials_source_shape',
+    )
+    expect(
+      await violation(
+        credential({
+          source: 'hosted',
+          ciphertext: Buffer.from('c'),
+          wrappedKey: Buffer.from('k'),
+        }),
+      ),
+    ).toBe('credentials_source_shape')
+    // 一个条目只起一个标识；连接要是同一个成员的
+    await credential({ vaultItemId: 'same-item' })
+    expect(await violation(credential({ vaultItemId: 'same-item' }))).toBe(
+      'credentials_vault_item_live_idx',
+    )
+    const [other] = await database.db
+      .insert(accounts)
+      .values({ username: 'bob', displayName: 'Bob', passwordHash: 'x' })
+      .returning({ id: accounts.id })
+    expect(await violation(credential({ ownerAccountId: other!.id }))).toBe(
+      'credentials_vault_connection_fk',
+    )
   })
 
   it('中文全文检索配置能分词', async () => {
