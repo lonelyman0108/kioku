@@ -332,7 +332,7 @@ async function submit() {
   } catch (err) {
     failure.value = err instanceof ApiError ? err.message : '保存失败'
     orphan.value = orphanVaultItem(err)
-    const next = writeFailureNext(err)
+    const next = writeFailureNext(err, before ? 'update' : 'create')
     failureDetail.value = next.detail
     // 留下的条目出现在条目列表里，可以起标识
     if (orphan.value) void queryClient.invalidateQueries({ queryKey: ['vault-items', spaceId] })

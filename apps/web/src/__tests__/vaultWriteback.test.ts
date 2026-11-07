@@ -41,6 +41,8 @@ import {
   type ExpiresField,
 } from '../vault'
 import picker from '../components/ConvertDestinationPicker.vue?raw'
+import useConvert from '../composables/useConvertCredential?raw'
+import usePlaintext from '../composables/usePlaintextSave?raw'
 
 const conn = (over: Partial<VaultConnection> = {}): VaultConnection => ({
   id: '00000000-0000-4000-8000-000000000001',
@@ -366,29 +368,57 @@ describe('写入失败的原因', () => {
     new ApiError(status, '服务端的文字', { error: '服务端的文字', ...(reason ? { reason } : {}) })
 
   it('version 与 item_conflict 给重新读取；read_only、value_too_long 说明该改什么，不给重新读取', () => {
-    expect(writeFailureNext(fail('version')).reload).toBe(true)
-    expect(writeFailureNext(fail('item_conflict')).reload).toBe(true)
-    const readOnly = writeFailureNext(fail('read_only'))
+    expect(writeFailureNext(fail('version'), 'create').reload).toBe(true)
+    expect(writeFailureNext(fail('item_conflict'), 'create').reload).toBe(true)
+    const readOnly = writeFailureNext(fail('read_only'), 'create')
     expect(readOnly.reload).toBe(false)
     expect(readOnly.detail).toContain('更改去处')
-    const tooLong = writeFailureNext(fail('value_too_long', 400))
+    const tooLong = writeFailureNext(fail('value_too_long', 400), 'create')
     expect(tooLong.reload).toBe(false)
     expect(tooLong.detail).toContain('缩短')
     // 值已写进密码库、凭据却被删了：不给重新读取，指向「已删除」
-    const deleted = writeFailureNext(fail('deleted'))
+    const deleted = writeFailureNext(fail('deleted'), 'create')
     expect(deleted.reload).toBe(false)
     expect(deleted.detail).toContain('已删除')
-    expect(writeFailureNext(fail())).toEqual({ reload: false, detail: null })
-    expect(writeFailureNext(new Error('x'))).toEqual({ reload: false, detail: null })
+    expect(writeFailureNext(fail(), 'create')).toEqual({ reload: false, detail: null })
+    expect(writeFailureNext(new Error('x'), 'create')).toEqual({ reload: false, detail: null })
   })
 
   it('修改凭据：只在 reason 要重新读取时给重新读取，别的显示下一步', () => {
-    expect(credentialForm).toContain('const next = writeFailureNext(err)')
+    expect(credentialForm).toContain(
+      "const next = writeFailureNext(err, before ? 'update' : 'create')",
+    )
     expect(credentialForm).toMatch(/if \(before && next\.reload\)/)
     expect(credentialForm).not.toContain('err.status === 409 && before')
     for (const source of [credentialForm, convertModal, saveModal]) {
       expect(source).toContain('failureDetail')
     }
+  })
+})
+
+describe('写回失败时按新建还是修改给建议', () => {
+  const fail = (reason: string, status = 409) => new ApiError(status, 'x', { error: 'x', reason })
+
+  it('修改已有的密码库凭据：值写回原条目，不提去处', () => {
+    const readOnly = writeFailureNext(fail('read_only'), 'update')
+    expect(readOnly).toEqual({
+      reload: false,
+      detail: '条目所在的集合只读或不可用。请给专用账号这个集合的编辑权限。',
+    })
+    const tooLong = writeFailureNext(fail('value_too_long', 400), 'update')
+    expect(tooLong).toEqual({ reload: false, detail: '值超出密码库的长度上限，请缩短。' })
+    for (const next of [readOnly, tooLong]) expect(next.detail).not.toContain('去处')
+  })
+
+  it('新建与转存照旧：可以改去处或改由 Kioku 托管', () => {
+    expect(writeFailureNext(fail('read_only'), 'create').detail).toContain('更改去处')
+    expect(writeFailureNext(fail('value_too_long', 400), 'create').detail).toContain('清除去处')
+  })
+
+  it('三处调用方各按自己的情况传：修改凭据看有没有原来的一版，转存与保存前处理都是新建', () => {
+    expect(credentialForm).toContain("writeFailureNext(err, before ? 'update' : 'create')")
+    expect(useConvert).toContain("writeFailureNext(err, 'create')")
+    expect(usePlaintext).toContain("writeFailureNext(err, 'create')")
   })
 })
 

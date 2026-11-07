@@ -389,7 +389,7 @@ export function usePlaintextSave(
       if (left) void queryClient.invalidateQueries({ queryKey: ['vault-items', sid] })
       if (id !== runId) return
       failure.value = err instanceof ApiError ? err.message : '新建凭据失败'
-      failureDetail.value = writeFailureNext(err).detail
+      failureDetail.value = writeFailureNext(err, 'create').detail
       orphan.value = left
     } finally {
       if (createdAny) {
