@@ -31,6 +31,7 @@ import {
   formatCredentialAccess,
   formatCredentialList,
   formatCredentialSummary,
+  formatCredentialUnchanged,
   formatDomains,
   formatMemory,
   formatPlaceholderCredentials,
@@ -385,7 +386,12 @@ export function buildMcpServer(
           values: args.values,
           expiresAt: args.expires_at,
         })
-        return formatCredentialSummary('已修改', await credentials.keyUpdate(identifier, input))
+        const updated = await credentials.keyUpdate(identifier, input)
+        // 什么都没改时版本号不变：如实说没有改动，不说已修改
+        if (updated.version === input.expectedVersion) {
+          return formatCredentialUnchanged(updated, input.values !== undefined)
+        }
+        return formatCredentialSummary('已修改', updated)
       }),
   )
 

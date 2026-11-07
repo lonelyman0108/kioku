@@ -412,8 +412,9 @@ export class VaultConnections {
       },
       onSynced: async (snapshot) => {
         if (entry) {
-          entry.collections = snapshot.collections
           await this.synced(id, snapshot)
+          // 违规检查通过之后再存：被拒的那份同步结果不进缓存
+          entry.collections = snapshot.collections
         }
       },
     })
@@ -536,9 +537,9 @@ export class VaultConnections {
         deviceId: row.deviceId,
         secrets,
         onSecretsChanged: (next) => this.saveSecrets(row.id, entry, next),
-        onSynced: (snapshot) => {
+        onSynced: async (snapshot) => {
+          await this.synced(row.id, snapshot)
           entry.collections = snapshot.collections
-          return this.synced(row.id, snapshot)
         },
       }),
     }
@@ -843,6 +844,13 @@ const revisionTime = (revision: string): Date | null => {
   return Number.isNaN(at.getTime()) ? null : at
 }
 
+// 修改时间 next 比 prev 新吗：都能解析成时间时按时间比；解析不了的只要不相同就算新的
+export function isNewerRevision(next: string, prev: string): boolean {
+  if (next === prev) return false
+  const [a, b] = [revisionTime(next), revisionTime(prev)]
+  return a && b ? a > b : true
+}
+
 // Kioku 看到了条目现在的修改时间（取用、列条目、重新检查、按值比对、写回冲突之后）：和记下的不同就是值在别处改过，
 // 记下新的修改时间与上次改值的时间，版本号加一（带着旧版本号的修改返回 409，要先重新读取），清掉「需要轮换」。
 // 还没记下过修改时间的（刚起标识、迁移之前的）只记下，不算改过值。已删除的凭据不动，恢复之后下一次看到时再比
@@ -877,8 +885,7 @@ export async function observeRevisions(
     if (revision === undefined || revision === b.seen) continue
     const changed = b.seen !== null
     // 并发的读取可能晚一步带回更早的修改时间（别的请求已经记下了更新的）：不往回改
-    const [next, prev] = [revisionTime(revision), b.seen === null ? null : revisionTime(b.seen)]
-    if (next && prev && next <= prev) continue
+    if (b.seen !== null && !isNewerRevision(revision, b.seen)) continue
     await tx
       .update(credentials)
       .set({
