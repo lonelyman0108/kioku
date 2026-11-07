@@ -10,8 +10,56 @@ import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
+// 令牌样例在运行时拼出来：仓库里不出现完整的令牌写法，免得被托管平台的密钥扫描拦下
+const join = (...parts: string[]) => parts.join('')
+const run = (n: number) => 'aB3dE5gH7jK9mN1pQ2rS4tU6vW8xY0zC'.repeat(4).slice(0, n)
+const TOKENS = [
+  join('sk', '-', run(48)),
+  join('sk', '-proj-', run(20), '_', run(40)),
+  join('sk', '-ant-api03-', run(40), '-', run(40)),
+  join('gh', 'p_', run(36)),
+  join('github', '_pat_', run(22), '_', run(59)),
+  join('gl', 'pat-', run(20)),
+  join('xo', 'xb-', '1234567890-', run(24)),
+  join('AK', 'IA', run(16).toUpperCase()),
+  join('ey', 'J', run(30), '.', 'ey', 'J', run(40), '.', run(43)),
+  join('-----BEGIN RSA ', 'PRIVATE KEY-----\n', run(64)),
+  join('-----BEGIN PGP ', 'PRIVATE KEY BLOCK-----\n\n', run(64)),
+  join('kio', 'ku_', run(12), '_', run(40)),
+]
+
 // 界面、导入工具与概览统计用的是同一条规则：JS 里直接用正则，数据库里把它的 source 交给 ~*
 const SAMPLES = [
+  // 已知格式的令牌：单独写、写在句子里、大小写换过
+  ...TOKENS,
+  ...TOKENS.map((t) => `前面 ${t} 后面`),
+  ...TOKENS.map((t) => t.toUpperCase()),
+  // 紧挨着别的词、太短或结构不对的不算
+  ...TOKENS.map((t) => `x${t}`),
+  `${join('AK', 'IA', run(16).toUpperCase())}X`,
+  `${join('kio', 'ku_', run(12), '_', run(40))}x`,
+  `task-${run(20)}`,
+  'sk-learn-is-a-python-library',
+  join('kio', 'ku_', run(12)),
+  join('ey', 'J', run(30), '.', run(40), '.', run(40)),
+  join('私钥以 -----BEGIN OPENSSH ', 'PRIVATE KEY----- 开头'),
+  join('-----BEGIN PUBLIC KEY-----\n', run(64)),
+  'e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855',
+  '0f8fad5b-d9cb-469f-a165-70867728950e',
+  'Asia Pacific Regional Summit',
+  // 值以中文开头的不算，前面隔着引号、粗体或括号也一样；全角字母、emoji 开头的照常算
+  '密码：见 Vaultwarden 条目',
+  'password: 见团队的密码库',
+  '密码："见条目"',
+  '密码：**在 1Password 里**',
+  '密码：（见 Vaultwarden）',
+  '密码：【已轮换】',
+  '口令：ひみつ',
+  'password: 비밀',
+  '密码：(abc)',
+  '密码：ｈｕｎｔｅｒ２',
+  '密码：😀abc',
+  `API Key：见下面 ${join('sk', '-', run(48))}`,
   '密码：hunter2',
   'password = abc',
   'API Key: xyz',

@@ -1,12 +1,13 @@
 import type {
   CredentialAccessReason,
   CredentialAccessResult,
+  PlaintextKind,
   VaultConnectionStatus,
   VaultDisabledReason,
 } from './credentials'
 import type { CredentialCapability, Layer, Sensitivity } from './memory'
 
-// 归属、敏感级、凭据能力与密码库连接状态的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
+// 归属、敏感级、凭据能力、密码库连接状态与疑似明文类别的中文名，管理界面和服务端的错误信息共用一份，用词才不会分叉。
 // 契约只放 zod schema，这里是例外，和 bench.ts 的 isReplayStep、mayWrite 一样
 export const LAYER_NAMES: Record<Layer, string> = {
   core: '通用',
@@ -63,4 +64,17 @@ export const CREDENTIAL_ACCESS_REASON_NAMES: Record<CredentialAccessReason, stri
   vault_error: '密码库返回的内容无法解开',
   master_key: '主密钥不可用',
   internal_error: 'Kioku 内部出错',
+}
+
+// 疑似明文的类别：写入被拒时的说明与管理界面逐处处理时用
+export const PLAINTEXT_KIND_NAMES: Record<PlaintextKind, string> = {
+  label: '标注的密码或令牌',
+  sk: 'sk- 开头的密钥',
+  github: 'GitHub 令牌',
+  gitlab: 'GitLab 令牌',
+  slack: 'Slack 令牌',
+  aws: 'AWS 密钥 ID',
+  jwt: 'JWT',
+  private_key: '私钥',
+  kioku: 'Kioku 访问密钥',
 }

@@ -114,6 +114,26 @@ export const MemorySummary = z
   .meta({ id: 'MemorySummary' })
 export type MemorySummary = z.infer<typeof MemorySummary>
 
+// 正文里有这次新增的疑似明文（规则见 contracts 的 PLAINTEXT_CREDENTIAL，「新增」见 addedPlaintextCredentials）时，
+// 写入默认被拒（400，MemoryWriteError 带上行号与类别）。下面三个标记放行，各自只给一边，给错了被拒：
+// plaintextOk 只给 Key，ignorePlaintext 与 allowPlaintext 只给管理界面
+const PlaintextFlags = {
+  // Key：确认不是凭据，照常写入；这条记忆进待处理的「疑似明文凭据」，由人看过之后忽略或转存。
+  // 只放行新增的疑似明文，不放行从 secret 降级
+  plaintextOk: z
+    .boolean()
+    .optional()
+    .describe(
+      '正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符',
+    ),
+  // 管理界面：确认不是凭据，能改这条记忆的成员都能用。照常写入，同时把写入后的正文记为「已忽略」
+  // （和忽略明文提示的效果相同，管整段正文），不进待处理。结果是 secret 或正文没有疑似明文时不记
+  ignorePlaintext: z.boolean().optional().describe('只给管理界面'),
+  // 管理界面的空间 owner：不处理疑似明文，照样写入，这条记忆进待处理。
+  // 从 secret 降级时正文还像有明文凭据，确认没有、仍要降级，也用它；Key 不行
+  allowPlaintext: z.boolean().optional().describe('只给管理界面的空间所有者'),
+}
+
 // 归属由坐标的开头决定，不另外传
 export const CreateMemoryRequest = z
   .object({
@@ -130,6 +150,7 @@ export const CreateMemoryRequest = z
     validTo: ValidTo.optional().describe(
       `有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；不填就一直有效`,
     ),
+    ...PlaintextFlags,
   })
   .meta({ id: 'CreateMemoryRequest' })
 export type CreateMemoryRequest = z.infer<typeof CreateMemoryRequest>
@@ -153,8 +174,7 @@ export const UpdateMemoryRequest = z
     validTo: ValidTo.nullable()
       .optional()
       .describe(`有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；填 null 清掉，一直有效`),
-    // 从 secret 降级时正文还像有明文凭据，确认没有、仍要降级。只有管理界面里的空间 owner 能用，Key 不行
-    allowPlaintext: z.boolean().optional(),
+    ...PlaintextFlags,
   })
   .meta({ id: 'UpdateMemoryRequest' })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>

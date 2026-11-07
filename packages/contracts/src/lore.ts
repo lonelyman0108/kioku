@@ -1,6 +1,7 @@
 import { z } from 'zod'
 
 import { Slug } from './auth'
+import { PlaintextKind } from './credentials'
 import { Layer, Sensitivity } from './memory'
 
 // 从 Lore 导入（管理界面）：映射、去重与同步的规则和命令行是同一份，数据来源换成 Lore 的导出。
@@ -89,6 +90,14 @@ export const LoreImportApplyRequest = LoreImportPlanRequest.extend({
   excludeUris: SelectedUris,
   // 文件比这个空间已写入的数据旧时，确认仍要写
   confirmStale: z.boolean().default(false),
+  // 要换成占位符的疑似明文：source 是节点的 Lore URI（别名也算），index 是计划里这个节点 plaintext 的 index。
+  // 只收计划里对上了凭据的那几处：重算的计划里这一处对不上凭据、或对上的不是同一条时返回 409，要重看。
+  // 这个值在正文里出现几处换几处，写成 {{cred:<标识>#<字段>}}；节点的写入目标放不进占位符时
+  // （见 placeholderAllowed，标了 secret 的按机密算）返回 400。同时在 excludeUris 里的以那边为准
+  convertPlaintext: z
+    .array(z.object({ source: z.string().max(2048), index: z.number().int().min(0) }))
+    .max(100_000)
+    .default([]),
 })
 export type LoreImportApplyRequest = z.input<typeof LoreImportApplyRequest>
 
@@ -112,6 +121,20 @@ export const LorePlanTarget = z.object({
 })
 export type LorePlanTarget = z.infer<typeof LorePlanTarget>
 
+// 节点正文里的一处疑似明文：只有位置、类别与对上的凭据，不含正文与值。
+// index 是 findPlaintextCredentials(正文) 结果里的第几处（从 0 起），line 是它所在的行。
+// credential 是导入人的有效凭据里和这处同值的字段（托管与密码库来源都算），对不上时为 null。
+// 只比已有的凭据，导入时不起新的标识：密码库里还没起标识的条目要先在凭据页起好
+export const LorePlaintextSpot = z.object({
+  index: z.number().int(),
+  line: z.number().int(),
+  kind: PlaintextKind,
+  credential: z
+    .object({ id: z.uuid(), identifier: z.string(), name: z.string(), field: z.string() })
+    .nullable(),
+})
+export type LorePlaintextSpot = z.infer<typeof LorePlaintextSpot>
+
 export const LorePlanNode = z.object({
   uuid: z.string(),
   // Lore 里的主路径与别名
@@ -122,6 +145,8 @@ export const LorePlanNode = z.object({
   credentialRefs: z.array(z.string()),
   // 像不像含凭据：路径、正文、disclosure 或关键词分开看。secret 只加密正文，后两项分开才说得清勾上之后还剩什么
   credentialHints: z.object({ path: z.boolean(), content: z.boolean(), extras: z.boolean() }),
+  // 正文里的疑似明文，按在正文里的先后排列；disclosure 与关键词里的不在这里（放不进占位符）
+  plaintext: z.array(LorePlaintextSpot),
 })
 export type LorePlanNode = z.infer<typeof LorePlanNode>
 
