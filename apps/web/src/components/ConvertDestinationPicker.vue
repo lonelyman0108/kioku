@@ -8,15 +8,21 @@ import {
   type NewCredentialFields,
   type UnmappedVaultField,
 } from '../plaintext'
-import { CREDENTIAL_URL_HINT, itemFieldPhrase, storeName, type NewCredentialStore } from '../vault'
+import { storeLabel } from '../composables/useNewCredentialStore'
+import {
+  CREDENTIAL_URL_HINT,
+  expiresInputBad,
+  itemFieldPhrase,
+  type NewCredentialStore,
+} from '../vault'
 import Hint from './Hint.vue'
 
 // 转存的去处：已有凭据、还没起标识的密码库条目、新建凭据，单选。选中条目时填它的标识，
 // 选中新建凭据时填标识、名称、字段名、网址与到期时间，并说明写到哪里（store：设了去处写进那个集合，
-// 没有时由 Kioku 托管；连接列表没读到时为 null）。起了标识却没对应这个字段的条目只列出来，不能选。
+// 没有时由 Kioku 托管；连接列表没读到时为 null，读取失败时 storeFailed）。起了标识却没对应这个字段的条目只列出来，不能选。
 // locked：已经建好的不能再改（保存前处理中途失败之后），freshLocked 管新建的凭据，lockedItems 按条目（itemKey）。
 // 条目的标识（vaultIdentifiers，按 itemKey）与新建凭据的几项（fresh）归调用方所有，这里只读，
-// 改了什么经 vaultIdentifier、freshField 两个事件交给调用方去写
+// 改了什么经 vaultIdentifier、freshField、freshExpiresBad 几个事件交给调用方去写
 withDefaults(
   defineProps<{
     destinations: ConvertDestination[]
@@ -24,16 +30,24 @@ withDefaults(
     vaultIdentifiers: Readonly<Record<string, string>>
     fresh: Readonly<NewCredentialFields>
     store: NewCredentialStore | null
+    storeFailed?: boolean
     // 去处眼下用不了的原因（vault.ts 的 destinationProblem），新建会失败
     storeIssue?: string | null
     freshLocked?: boolean
     lockedItems?: ReadonlySet<string>
   }>(),
-  { storeIssue: null, freshLocked: false, lockedItems: () => new Set<string>() },
+  {
+    storeFailed: false,
+    storeIssue: null,
+    freshLocked: false,
+    lockedItems: () => new Set<string>(),
+  },
 )
 const emit = defineEmits<{
   vaultIdentifier: [key: string, identifier: string]
-  freshField: [field: keyof NewCredentialFields, value: string]
+  freshField: [field: Exclude<keyof NewCredentialFields, 'expiresBad'>, value: string]
+  // 到期时间的输入框填了一半：这时值是空的，要另外报上去
+  freshExpiresBad: [bad: boolean]
 }>()
 const selected = defineModel<string>({ required: true })
 const group = useId()
@@ -58,7 +72,7 @@ const group = useId()
         </span>
         <span v-else class="min-w-0">
           新建凭据
-          <span class="text-muted">{{ store ? storeName(store) : '…' }}</span>
+          <span class="text-muted">{{ storeLabel(store, storeFailed) }}</span>
         </span>
       </label>
       <div v-if="selected === d.key && d.kind === 'vault'" class="destination-body">
@@ -130,6 +144,9 @@ const group = useId()
               aria-label="到期时间"
               :disabled="freshLocked"
               @update:model-value="(v: string) => emit('freshField', 'expires', v)"
+              @input="(e: Event) => emit('freshExpiresBad', expiresInputBad(e))"
+              @keyup="(e: Event) => emit('freshExpiresBad', expiresInputBad(e))"
+              @blur="(e: Event) => emit('freshExpiresBad', expiresInputBad(e))"
             />
           </UFormField>
         </div>

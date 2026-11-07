@@ -14,7 +14,13 @@ import {
 
 // 接口换成假的，别的都是真的：保存前逐处处理的规则都在这里定，对话框只管长相
 const fakes = vi.hoisted(() => ({
-  api: { credentials: vi.fn(), matchCredentialValues: vi.fn(), createCredential: vi.fn() },
+  api: {
+    credentials: vi.fn(),
+    matchCredentialValues: vi.fn(),
+    createCredential: vi.fn(),
+    vaultConnections: vi.fn(),
+    vaultItems: vi.fn(),
+  },
 }))
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
 
@@ -94,6 +100,9 @@ const created = (over: Partial<ConsoleCredential>) =>
   ({ id: 'x', identifier: 'x', name: 'x', fields: [], ...over }) as unknown as ConsoleCredential
 
 beforeEach(() => {
+  // 新建凭据的去处：默认没设，由 Kioku 托管
+  fakes.api.vaultConnections.mockReset().mockResolvedValue({ items: [] })
+  fakes.api.vaultItems.mockReset()
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   fakes.api.credentials.mockReset().mockResolvedValue({
     items: [{ identifier: 'infra-nas' }],
@@ -256,6 +265,27 @@ describe('保存', () => {
       { identifier: 'infra-nas-token', storedIn: { kind: 'vault', collectionName: 'Agent' } },
     ])
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['inbox-counts', 's1'] })
+  })
+
+  it('去处读取失败时新建的那一处不能保存；转存成已有凭据的不受影响', async () => {
+    fakes.api.vaultConnections.mockRejectedValue(new ApiError(500, '服务器错误'))
+    const { save } = await start()
+    await settle()
+    const token = save.rows.value[1]!
+    token.choice = 'convert'
+    await nextTick()
+    expect(save.storeFailed.value).toBe(true)
+    expect(save.rowProblem(token)).toBe('去处读取失败')
+    expect(save.rowProblem(save.rows.value[0]!)).toBeNull()
+  })
+
+  it('到期时间的输入框填了一半：值是空的，照样不能保存', async () => {
+    const { save } = await start()
+    const token = save.rows.value[1]!
+    token.choice = 'convert'
+    token.fresh.expiresBad = true
+    await nextTick()
+    expect(save.rowProblem(token)).toBe('请填写完整的到期时间')
   })
 
   it('网址里有要转存的值时不能保存：网址写进条目，是明文', async () => {

@@ -7,7 +7,7 @@ import {
   type ConsoleCredential,
   type CredentialEvent,
 } from '@kioku/contracts'
-import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
+import { useInfiniteQuery, useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
 import { ApiError, readFailure } from '../api/client'
@@ -31,8 +31,10 @@ import {
   itemFieldLabel,
   itemsAvailable,
 } from '../vault'
+import { fetchVaultItems } from '../vaultQueries'
 import Hint from './Hint.vue'
 import ActorName from './strata/ActorName.vue'
+import FlagTag from './strata/FlagTag.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -48,6 +50,7 @@ const props = defineProps<{
 }>()
 const emit = defineEmits<{ edit: []; remove: []; undelete: [] }>()
 const toast = useToast()
+const queryClient = useQueryClient()
 
 const c = computed(() => props.credential)
 const placeholder = (field?: string) => `{{cred:${c.value.identifier}${field ? `#${field}` : ''}}}`
@@ -103,7 +106,7 @@ const items = useQuery({
   queryKey: computed(
     () => ['vault-items', props.spaceId, c.value.vault?.connectionId ?? null] as const,
   ),
-  queryFn: ({ queryKey: [, sid, id] }) => api.vaultItems(sid, id!),
+  queryFn: ({ queryKey: [, sid, id] }) => fetchVaultItems(queryClient, sid, id!),
   enabled: computed(
     () => props.canManage && !!connection.value && itemsAvailable(connection.value),
   ),
@@ -151,7 +154,7 @@ async function reveal() {
       <p class="detail-source">
         {{ credentialSourceLabels[c.source] }}
         <span v-if="c.deletedAt">已删除</span>
-        <span v-for="flag in credentialFlags(c)" :key="flag" class="detail-flag">{{ flag }}</span>
+        <FlagTag v-for="flag in credentialFlags(c)" :key="flag">{{ flag }}</FlagTag>
       </p>
       <p v-if="c.description" class="detail-description">{{ c.description }}</p>
       <div class="detail-actions">
@@ -241,9 +244,7 @@ async function reveal() {
         <template #expires>
           <template v-if="c.expiresAt">
             <time :datetime="c.expiresAt">{{ formatTime(c.expiresAt) }}</time>
-            <span v-if="c.expiry" class="detail-flag ml-2">{{
-              CREDENTIAL_EXPIRY_NAMES[c.expiry]
-            }}</span>
+            <FlagTag v-if="c.expiry" class="ml-2">{{ CREDENTIAL_EXPIRY_NAMES[c.expiry] }}</FlagTag>
           </template>
           <span v-else class="text-muted">不到期</span>
         </template>
@@ -402,7 +403,7 @@ async function reveal() {
           <p v-if="describe(e) || e.bench" class="event-detail">
             <span v-if="describe(e)">{{ describe(e) }}</span>
             <template v-if="e.bench">
-              <span class="bench-flag" :title="`运行标记 ${e.bench.run}`">测试台</span>
+              <FlagTag :title="`运行标记 ${e.bench.run}`">测试台</FlagTag>
               <span>操作账号：{{ benchAccountLabel(e.bench) }}</span>
             </template>
           </p>
@@ -574,19 +575,5 @@ async function reveal() {
   gap: 2px 8px;
   line-height: 1.6;
   color: var(--ui-text-muted);
-}
-.detail-flag {
-  padding: 0 5px;
-  border: 1px solid var(--ui-border-accented);
-  font-size: 12px;
-  line-height: 18px;
-  white-space: nowrap;
-  color: var(--ui-text-toned);
-}
-.bench-flag {
-  padding: 0 5px;
-  border: 1px solid var(--ui-border-accented);
-  font-size: 12px;
-  line-height: 18px;
 }
 </style>

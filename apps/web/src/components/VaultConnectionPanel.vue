@@ -24,6 +24,7 @@ import {
   itemsAvailable,
   vaultItemTypeLabels,
 } from '../vault'
+import { fetchVaultItems } from '../vaultQueries'
 import Hint from './Hint.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 
@@ -40,7 +41,7 @@ const queryClient = useQueryClient()
 const c = computed(() => props.connection)
 const items = useQuery({
   queryKey: computed(() => ['vault-items', props.spaceId, c.value.id] as const),
-  queryFn: ({ queryKey: [, sid, id] }) => api.vaultItems(sid, id),
+  queryFn: ({ queryKey: [, sid, id] }) => fetchVaultItems(queryClient, sid, id),
   enabled: computed(() => props.canManage && itemsAvailable(c.value)),
 })
 // 列条目时服务端会同步一次：连不上记进最近的错误，出现个人条目这类情况连接停用。读取失败时重读连接，状态跟上
@@ -124,7 +125,9 @@ async function saveDestination(collectionId: string | null) {
     toast.add({ title: collectionId ? '已设为去处' : '已清除去处', color: 'success' })
   } catch (err) {
     toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
+    // 「集合只读」「集合不存在或不可用」：选择框读的是条目列表里的集合，一起重读，不然同一个集合还能选
     void queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] })
+    void queryClient.invalidateQueries({ queryKey: ['vault-items', sid, c.value.id] })
   } finally {
     busy.value = false
   }
@@ -240,7 +243,7 @@ const itemRows = computed(() => {
         </UButton>
       </span>
     </div>
-    <p v-if="destinationIssue" class="conn-error text-warning">{{ destinationIssue }}</p>
+    <p v-if="destinationIssue" class="conn-error is-warning">{{ destinationIssue }}</p>
 
     <template v-if="canManage && itemsAvailable(c)">
       <div v-if="items.isError.value" class="pt-2">
@@ -408,6 +411,10 @@ const itemRows = computed(() => {
   margin-top: 2px;
   line-height: 1.6;
   color: var(--ui-text-muted);
+}
+/* scoped 样式不在 layer 里，压得过 text-warning 这类工具类：警告色在这里给 */
+.conn-error.is-warning {
+  color: var(--ui-warning);
 }
 .conn-destination {
   display: flex;

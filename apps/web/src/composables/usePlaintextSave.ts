@@ -33,7 +33,8 @@ import {
 import { saveFlags, type GateOutcome, type PlaintextSpot, type SpotChoice } from '../plaintextSave'
 import { clipText } from '../text'
 import { fromLocalInput } from '../time'
-import { expiresProblem, orphanVaultItem } from '../vault'
+import { optionalExpiresProblem, orphanVaultItem } from '../vault'
+import { storeBlocker, useNewCredentialStore } from './useNewCredentialStore'
 
 // 保存记忆之前逐处处理新增的疑似明文：转存为凭据或不是凭据。转存的先建好凭据，再把正文里的值换成占位符，
 // 最后才保存，明文不会先进历史。对话框只管长相，规则都在这里
@@ -104,6 +105,12 @@ export function usePlaintextSave(
   const orphan = ref<OrphanVaultItem | null>(null)
   const stored = ref<StoredCredential[]>([])
 
+  // 新建的凭据写到哪里，读不到时不能新建
+  const newStore = useNewCredentialStore(
+    spaceId,
+    computed(() => request.value !== null && canConvert.value),
+  )
+
   const scopeAllowed = computed(
     () => !!request.value && placeholderAllowed(request.value.layer, request.value.sensitivity),
   )
@@ -151,7 +158,14 @@ export function usePlaintextSave(
         spot,
         choice: null,
         destination: NEW_DESTINATION.key,
-        fresh: { identifier: '', name: suggestName(req), field: spot.field, url: '', expires: '' },
+        fresh: {
+          identifier: '',
+          name: suggestName(req),
+          field: spot.field,
+          url: '',
+          expires: '',
+          expiresBad: false,
+        },
         created: false,
       }))
       void prepare(id, req)
@@ -230,7 +244,8 @@ export function usePlaintextSave(
   // 新建的凭据的请求，界面上先按接口的定义检查
   function newBody(row: SpotRow) {
     const url = row.fresh.url.trim()
-    const expiresAt = row.fresh.expires ? fromLocalInput(row.fresh.expires) : null
+    const expiresAt =
+      row.fresh.expires && !row.fresh.expiresBad ? fromLocalInput(row.fresh.expires) : null
     return {
       identifier: row.fresh.identifier,
       name: row.fresh.name.trim(),
@@ -270,7 +285,9 @@ export function usePlaintextSave(
       return identifierProblem(body.identifier)
     }
     if (row.created) return null
-    const expires = expiresProblem(row.fresh.expires)
+    const waiting = storeBlocker({ store: newStore.store.value, failed: newStore.failed.value })
+    if (waiting) return waiting
+    const expires = optionalExpiresProblem(row.fresh.expires, row.fresh.expiresBad)
     if (expires) return expires
     const parsed = CreateCredentialRequest.safeParse(newBody(row))
     if (!parsed.success) return parsed.error.issues[0]?.message ?? '填写内容有误'
@@ -410,6 +427,9 @@ export function usePlaintextSave(
     failure,
     orphan,
     stored,
+    store: newStore.store,
+    storeIssue: newStore.issue,
+    storeFailed: newStore.failed,
     problem,
     ready,
     convertBlocker,

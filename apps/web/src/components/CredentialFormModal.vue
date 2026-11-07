@@ -9,17 +9,25 @@ import {
   type VaultItemSummary,
 } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref, watch } from 'vue'
+import { computed, reactive, ref, toRef, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import {
+  storeBlocker,
+  storeLabel,
+  useNewCredentialStore,
+} from '../composables/useNewCredentialStore'
 import { useSession } from '../composables/useSession'
 import {
   createBody,
+  editableState,
   formProblem,
+  mergeReloaded,
   updateBody,
   type CredentialFormInput,
   type CredentialFormMode,
+  type CredentialFormState,
   type ValueRow,
   type VaultRow,
   type VaultValueRow,
@@ -28,18 +36,17 @@ import { icons } from '../icons'
 import { invalidateInboxCounts } from '../inbox'
 import {
   CREDENTIAL_URL_HINT,
-  destinationProblem,
-  expiresInput,
+  expiresField,
+  expiresInputBad,
   itemFieldLabel,
   itemsAvailable,
-  newCredentialStore,
   orphanNotice,
   orphanVaultItem,
-  storedInName,
   storeName,
   vaultCredentialDraft,
   writableVaultField,
 } from '../vault'
+import { fetchVaultItems } from '../vaultQueries'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 
@@ -68,23 +75,25 @@ const queryClient = useQueryClient()
 
 let nextKey = 0
 const mode = ref<CredentialFormMode>({ kind: 'new' })
-const form = reactive({
+const form = reactive<CredentialFormState>({
   identifier: '',
   name: '',
   description: '',
   restrict: false,
-  appIds: [] as string[],
+  appIds: [],
   url: '',
-  expires: '',
+  expires: expiresField(null),
   needsRotation: false,
 })
 const valueRows = ref<ValueRow[]>([])
 const vaultRows = ref<VaultRow[]>([])
 const vaultValues = ref<VaultValueRow[]>([])
-// 提交失败的说明；409 时可以重新读取；写进了密码库却没建成凭据时留下的条目
+// 提交失败的说明；409 时可以重新读取；写进了密码库却没建成凭据时留下的条目；
+// 重新读取之后和新的一版合不起来的地方
 const failure = ref<string | null>(null)
 const conflict = ref(false)
 const orphan = ref<OrphanVaultItem | null>(null)
+const mergeConflicts = ref<string[]>([])
 
 const valueRow = (name = '', existing = false): ValueRow => ({
   key: nextKey++,
@@ -112,8 +121,8 @@ function clearValues() {
   for (const row of vaultValues.value) row.value = ''
 }
 
-// 按凭据或条目填好表单。keep：重新读取之后，同名字段里已经填的值留着
-function fill(c: ConsoleCredential | null, keep?: Map<string, string>) {
+// 按凭据或条目填好表单
+function fill(c: ConsoleCredential | null) {
   const item = c ? null : props.vaultItem
   const draft = item ? vaultCredentialDraft(item.item, props.identifiers) : null
   mode.value = c
@@ -123,13 +132,17 @@ function fill(c: ConsoleCredential | null, keep?: Map<string, string>) {
       : { kind: 'new' }
   Object.assign(form, {
     identifier: draft?.identifier ?? '',
-    name: c?.name ?? draft?.name ?? '',
-    description: c?.description ?? '',
-    restrict: c?.appIds != null,
-    appIds: c?.appIds ?? [],
     url: '',
-    expires: expiresInput(c?.expiresAt ?? null),
-    needsRotation: c?.rotationRequestedAt != null,
+    ...(c
+      ? editableState(c)
+      : {
+          name: draft?.name ?? '',
+          description: '',
+          restrict: false,
+          appIds: [],
+          expires: expiresField(null),
+          needsRotation: false,
+        }),
   })
   valueRows.value =
     c?.source === 'hosted'
@@ -145,14 +158,10 @@ function fill(c: ConsoleCredential | null, keep?: Map<string, string>) {
           f.itemField ? [{ name: f.name, itemField: f.itemField, value: '' }] : [],
         )
       : []
-  if (keep) {
-    for (const row of [...valueRows.value, ...vaultValues.value]) {
-      row.value = keep.get(row.name) ?? ''
-    }
-  }
   failure.value = null
   conflict.value = false
   orphan.value = null
+  mergeConflicts.value = []
 }
 
 watch(open, (isOpen) => {
@@ -173,13 +182,17 @@ const connection = computed(
 )
 const items = useQuery({
   queryKey: computed(() => ['vault-items', props.spaceId, editingConnection.value] as const),
-  queryFn: ({ queryKey: [, sid, id] }) => api.vaultItems(sid, id!),
+  queryFn: ({ queryKey: [, sid, id] }) => fetchVaultItems(queryClient, sid, id!),
   enabled: computed(() => open.value && !!connection.value && itemsAvailable(connection.value)),
 })
-// 新建的值写到哪里；去处用不了时提醒（服务端整次失败，不退回托管）
-const store = computed(() => newCredentialStore(connections.data.value?.items))
-const storeIssue = computed(() =>
-  store.value?.kind === 'vault' ? destinationProblem(store.value.connection) : null,
+// 新建的值写到哪里；去处用不了时提醒（服务端整次失败，不退回托管），读不到时不能新建
+const {
+  store,
+  issue: storeIssue,
+  failed: storeFailed,
+} = useNewCredentialStore(
+  toRef(props, 'spaceId'),
+  computed(() => open.value && isNew.value),
 )
 
 const itemFields = computed<string[]>(() => {
@@ -217,7 +230,11 @@ const input = (): CredentialFormInput => ({
   vaultRows: vaultRows.value,
   vaultValues: vaultValues.value,
 })
-const problem = computed(() => formProblem(input()))
+const problem = computed(
+  () =>
+    (isNew.value ? storeBlocker({ store: store.value, failed: storeFailed.value }) : null) ??
+    formProblem(input()),
+)
 
 // 已有的字段标记删除（再点一次取消），新加的直接去掉
 function removeValueRow(row: ValueRow) {
@@ -247,7 +264,7 @@ async function submit() {
     } else {
       const { storedIn, ...created } = await api.createCredential(spaceId, createBody(input()))
       saved = created
-      if (creating) stored = storedInName(storedIn)
+      if (creating) stored = storeName(storedIn)
     }
     // 填过的值不留在页面里
     clearValues()
@@ -273,7 +290,8 @@ async function submit() {
   }
 }
 
-// 重新读取：换成最新的一版，已经填的值按字段名留着；条目的修改时间也变了，条目列表一起重读
+// 重新读取：只换掉服务端的那一份，表单里的改动都留着，和新的一版合起来（credentialForm.ts 的 mergeReloaded）；
+// 合不起来的逐条提示。条目的修改时间也变了，条目列表一起重读
 const reloading = ref(false)
 async function reload() {
   const before = origin.value
@@ -286,10 +304,15 @@ async function reload() {
     void queryClient.invalidateQueries({ queryKey: ['vault-items', spaceId] })
     void invalidateInboxCounts(queryClient, spaceId)
     if (!open.value || origin.value?.id !== before.id) return
-    const keep = new Map(
-      [...valueRows.value, ...vaultValues.value].map((r) => [r.name, r.value] as const),
-    )
-    fill(fresh, keep)
+    const merged = mergeReloaded(input(), before, fresh, () => nextKey++)
+    mode.value = merged.input.mode
+    Object.assign(form, merged.input.form)
+    valueRows.value = merged.input.valueRows
+    vaultRows.value = merged.input.vaultRows
+    vaultValues.value = merged.input.vaultValues
+    mergeConflicts.value = merged.conflicts
+    failure.value = null
+    conflict.value = false
   } catch (err) {
     failure.value = err instanceof ApiError ? err.message : '读取失败'
   } finally {
@@ -336,9 +359,7 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
 
         <UFormField v-if="isNew" label="写到">
           <p class="store-line">
-            <span v-if="store">{{ storeName(store) }}</span>
-            <span v-else-if="connections.isError.value" class="text-muted">去处读取失败</span>
-            <span v-else class="text-muted">…</span>
+            <span :class="{ 'text-muted': !store }">{{ storeLabel(store, storeFailed) }}</span>
             <span v-if="store?.kind === 'vault'" class="text-muted">{{
               store.connection.email
             }}</span>
@@ -463,7 +484,7 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
 
         <UFormField v-if="isNew" label="网址">
           <template #help>
-            可选。<Hint>{{ CREDENTIAL_URL_HINT }}</Hint>
+            可选<Hint>{{ CREDENTIAL_URL_HINT }}</Hint>
           </template>
           <UInput
             v-model="form.url"
@@ -476,24 +497,38 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
         <UFormField label="到期时间">
           <template #help>
             可选；到期前 {{ CREDENTIAL_EXPIRING_DAYS }} 天起进入待处理。<Hint>
-              到期后照常可以取用，取用结果中注明已到期。留空表示不到期。
+              到期后照常可以取用，取用结果中注明已到期。
             </Hint>
           </template>
-          <div class="flex items-center gap-2">
+          <!-- 不到期是单独的状态：输入框填了一半时值也是空的，不能靠清空输入框来清除 -->
+          <div v-if="form.expires.noExpiry" class="flex items-center gap-2">
+            <span class="text-sm">不到期</span>
+            <UButton
+              size="xs"
+              color="neutral"
+              variant="outline"
+              @click="form.expires.noExpiry = false"
+            >
+              设置到期时间
+            </UButton>
+          </div>
+          <div v-else class="flex items-center gap-2">
             <UInput
-              v-model="form.expires"
+              v-model="form.expires.input"
               type="datetime-local"
               aria-label="到期时间"
               class="w-full sm:w-64"
+              @input="(e: Event) => (form.expires.bad = expiresInputBad(e))"
+              @keyup="(e: Event) => (form.expires.bad = expiresInputBad(e))"
+              @blur="(e: Event) => (form.expires.bad = expiresInputBad(e))"
             />
             <UButton
-              v-if="form.expires"
               size="xs"
               color="neutral"
               variant="ghost"
-              @click="form.expires = ''"
+              @click="form.expires = { noExpiry: true, input: '', bad: false }"
             >
-              清除
+              不到期
             </UButton>
           </div>
         </UFormField>
@@ -525,6 +560,11 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
           </div>
         </UFormField>
 
+        <NoteLine v-if="mergeConflicts.length" tone="warning">
+          已重新读取，以下改动需要核对
+          <template #detail>{{ mergeConflicts.join('；') }}</template>
+        </NoteLine>
+        <!-- 留下的条目与失败的原因都要显示：只看到条目的提示，不知道为什么失败，再提交又多建一个 -->
         <NoteLine v-if="orphanText" tone="warning">
           {{ orphanText.title }}
           <template #detail>{{ orphanText.detail }}</template>
@@ -534,9 +574,9 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
             </UButton>
           </template>
         </NoteLine>
-        <NoteLine v-else-if="failure" tone="error">
+        <NoteLine v-if="failure" tone="error">
           {{ failure }}
-          <template v-if="conflict" #detail>重新读取后再修改，已填写的值保留。</template>
+          <template v-if="conflict" #detail>重新读取后再保存，表单中的改动保留。</template>
           <template v-if="conflict" #actions>
             <UButton
               size="sm"

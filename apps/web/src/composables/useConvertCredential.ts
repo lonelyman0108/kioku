@@ -31,7 +31,8 @@ import {
 } from '../plaintext'
 import { placeholderOf } from '../placeholders'
 import { fromLocalInput } from '../time'
-import { expiresProblem, orphanVaultItem } from '../vault'
+import { optionalExpiresProblem, orphanVaultItem } from '../vault'
+import { storeBlocker, useNewCredentialStore } from './useNewCredentialStore'
 import { refreshAfterPlaintext } from './usePlaintextActions'
 
 // 转存为凭据的状态和规则，对话框只管长相。规则只认得出值从哪里开始，结尾是猜的，所以值默认遮盖，
@@ -51,7 +52,8 @@ export function useConvertCredential(
   const memory = ref<ConsoleMemoryView | null>(null)
   const loading = ref(false)
   const loadFailure = ref<string | null>(null)
-  // url 与 expires 只给新建凭据；expires 是 datetime-local 的本地时间
+  // url 与 expires 只给新建凭据；expires 是 datetime-local 的本地时间，空的是不到期，
+  // expiresBad 是输入框填了一半（这时 expires 也是空的）
   const form = reactive({
     value: '',
     field: 'password',
@@ -59,7 +61,13 @@ export function useConvertCredential(
     name: '',
     url: '',
     expires: '',
+    expiresBad: false,
   })
+  // 新建的凭据写到哪里，读不到时不能新建
+  const newStore = useNewCredentialStore(
+    spaceId,
+    computed(() => uri.value !== null),
+  )
   const candidates = ref<PlaintextCandidate[]>([])
   // 当前显示着值吗。核对过的那个值记在 checkedValue：隐藏之后改过，要再显示一次才算核对过
   const shown = ref(false)
@@ -204,6 +212,7 @@ export function useConvertCredential(
       name: '',
       url: '',
       expires: '',
+      expiresBad: false,
     })
     shown.value = false
     checkedValue.value = null
@@ -295,7 +304,7 @@ export function useConvertCredential(
       }
     }
     const url = form.url.trim()
-    const expiresAt = form.expires ? fromLocalInput(form.expires) : null
+    const expiresAt = form.expires && !form.expiresBad ? fromLocalInput(form.expires) : null
     return {
       kind: 'new',
       identifier: form.identifier,
@@ -315,7 +324,12 @@ export function useConvertCredential(
   const problem = computed<string | null>(() => {
     if (!memory.value || blocked.value) return null
     if (selected.value.kind === 'new') {
-      const expires = expiresProblem(form.expires)
+      const blocker = storeBlocker({
+        store: newStore.store.value,
+        failed: newStore.failed.value,
+      })
+      if (blocker) return blocker
+      const expires = optionalExpiresProblem(form.expires, form.expiresBad)
       if (expires) return expires
     }
     const parsed = ConvertToCredentialRequest.safeParse(body.value)
@@ -394,6 +408,9 @@ export function useConvertCredential(
     shown,
     failure,
     orphan,
+    store: newStore.store,
+    storeIssue: newStore.issue,
+    storeFailed: newStore.failed,
     canReload,
     submitting,
     result,

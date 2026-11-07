@@ -14,6 +14,8 @@ const fakes = vi.hoisted(() => ({
     credentials: vi.fn(),
     convertToCredential: vi.fn(),
     matchCredentialValues: vi.fn(),
+    vaultConnections: vi.fn(),
+    vaultItems: vi.fn(),
   },
 }))
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
@@ -77,6 +79,9 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  // 新建凭据的去处：默认没设，由 Kioku 托管
+  fakes.api.vaultConnections.mockReset().mockResolvedValue({ items: [] })
+  fakes.api.vaultItems.mockReset()
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   fakes.api.memory.mockReset()
   fakes.api.credentials.mockReset().mockResolvedValue({ items: [], truncated: false })
@@ -317,6 +322,23 @@ describe('提交', () => {
       url: 'https://nas.example.com',
       expiresAt: new Date('2026-12-01T08:00').toISOString(),
     })
+  })
+
+  it('去处读取失败时不能新建：不知道值会写进密码库还是托管；别的去处照常', async () => {
+    fakes.api.vaultConnections.mockRejectedValue(new ApiError(500, '服务器错误'))
+    const convert = await shown()
+    await settle()
+    expect(convert.storeFailed.value).toBe(true)
+    expect(convert.selected.value.kind).toBe('new')
+    expect(convert.problem.value).toBe('去处读取失败')
+    expect(convert.canSubmit.value).toBe(false)
+  })
+
+  it('到期时间的输入框填了一半：值是空的，照样不能提交', async () => {
+    const convert = await shown()
+    convert.form.expiresBad = true
+    await nextTick()
+    expect(convert.problem.value).toBe('请填写完整的到期时间')
   })
 
   it('写进了密码库却没建成凭据：记下留下的条目，条目列表重读', async () => {

@@ -8,6 +8,7 @@ import { useActivated } from '../composables/useActivated'
 import { attentionCredentialsKey } from '../inbox'
 import { attentionNotes, credentialFlags } from '../vault'
 import Hint from './Hint.vue'
+import FlagTag from './strata/FlagTag.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
@@ -29,7 +30,7 @@ const items = computed(() => list.data.value?.items ?? [])
       <template #hint>
         <Hint>
           到期前 {{ CREDENTIAL_EXPIRING_DAYS }}
-          天起列在这里，已到期的照常可以取用。改值后需要轮换的标记自动清除。仅列出当前账号的凭据。
+          天起列在这里，已到期的照常可以取用。改值后需要轮换的标记自动清除。
         </Hint>
       </template>
     </SectionHeading>
@@ -46,7 +47,7 @@ const items = computed(() => list.data.value?.items ?? [])
               c.name
             }}</RouterLink>
             <code class="cred-identifier">{{ c.identifier }}</code>
-            <span v-for="flag in credentialFlags(c)" :key="flag" class="cred-flag">{{ flag }}</span>
+            <FlagTag v-for="flag in credentialFlags(c)" :key="flag">{{ flag }}</FlagTag>
           </div>
           <p class="cred-sub">
             <span v-for="note in attentionNotes(c)" :key="note">{{ note }}</span>
@@ -105,14 +106,6 @@ const items = computed(() => list.data.value?.items ?? [])
   font-family: var(--font-mono);
   font-size: 13px;
   color: var(--ui-text-muted);
-}
-.cred-flag {
-  padding: 0 5px;
-  border: 1px solid var(--ui-border-accented);
-  font-size: 12px;
-  line-height: 18px;
-  white-space: nowrap;
-  color: var(--ui-text-toned);
 }
 .cred-sub {
   display: flex;

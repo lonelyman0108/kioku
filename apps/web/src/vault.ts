@@ -90,11 +90,18 @@ export function checkNotice(
 }
 
 // 重新检查之后要重读的查询。失败时服务端已经记下最近的错误，只重读连接；条目不重读：
-// 列条目会对着连不上的密码库再同步一次，失败了还会自动重试
+// 列条目会对着连不上的密码库再同步一次，失败了还会自动重试。
+// 成功时服务端可能看到条目改过、清掉了「需要轮换」并把版本号加一：凭据列表、详情与待处理的条数一起重读
 export function checkRefreshKeys(spaceId: string, succeeded: boolean): string[][] {
   const connections = ['vault-connections', spaceId]
   return succeeded
-    ? [connections, ['vault-items', spaceId], ['credentials', spaceId]]
+    ? [
+        connections,
+        ['vault-items', spaceId],
+        ['credentials', spaceId],
+        ['credential', spaceId],
+        ['inbox-counts', spaceId],
+      ]
     : [connections]
 }
 
@@ -196,13 +203,9 @@ export function newCredentialStore(
 }
 
 // 写到哪里的名字：密码库的写集合，托管的写「Kioku 托管」。新建之前的去处与新建之后的结果（storedIn）共用
-export function storeName(
-  store: { kind: 'hosted' } | { kind: 'vault'; collectionName: string },
-): string {
+export function storeName(store: NewCredentialStore | CredentialStoredIn): string {
   return store.kind === 'vault' ? `密码库集合「${store.collectionName}」` : CREDENTIAL_HOSTED_NAME
 }
-
-export const storedInName = (storedIn: CredentialStoredIn) => storeName(storedIn)
 
 // 去处眼下用不了的原因：连接不可用，或者读到的集合里没有它、它变成了只读。用得了时为 null。
 // collections 是最近一次同步读到的集合，没读到时只看连接的状态
@@ -284,17 +287,42 @@ export function attentionNotes(
 // 到期时间的输入框：datetime-local 的本地时间，没设时为空
 export const expiresInput = (expiresAt: string | null) => (expiresAt ? toLocalInput(expiresAt) : '')
 
-// 到期时间要发什么：没改为 undefined，清空为 null，否则是带时区的 ISO 时间。
-// 输入框只到分钟，按分钟比较，打开表单什么都没改时不发；填得不完整也不发，由 expiresProblem 拦下
-export function expiresChange(before: string | null, input: string): string | null | undefined {
-  if (input === expiresInput(before)) return undefined
-  if (!input) return null
-  return fromLocalInput(input) ?? undefined
+// 表单里的到期时间。datetime-local 没填完时 value 也是空字符串，和清空分不出来，所以「不到期」是单独的状态
+// （按钮切换），不靠清空输入框；bad 是输入框 validity.badInput（填了一半），见 expiresInputBad
+export interface ExpiresField {
+  noExpiry: boolean
+  input: string
+  bad: boolean
 }
 
-// 填了却不是完整的日期与时间
-export const expiresProblem = (input: string) =>
-  input && !fromLocalInput(input) ? '请填写完整的到期时间' : null
+export const expiresField = (expiresAt: string | null): ExpiresField => ({
+  noExpiry: expiresAt === null,
+  input: expiresInput(expiresAt),
+  bad: false,
+})
+
+// 到期时间要发什么：没改为 undefined，选了不到期为 null，否则是带时区的 ISO 时间。
+// 输入框只到分钟，按分钟比较，打开表单什么都没改时不发；空的、填了一半的不发，由 expiresProblem 拦下
+export function expiresChange(
+  before: string | null,
+  field: ExpiresField,
+): string | null | undefined {
+  if (field.noExpiry) return before === null ? undefined : null
+  if (!field.input || field.bad || field.input === expiresInput(before)) return undefined
+  return fromLocalInput(field.input) ?? undefined
+}
+
+// 要设到期时间，输入框却是空的、填了一半或写法不对
+export const expiresProblem = (field: ExpiresField) =>
+  !field.noExpiry && (field.bad || !fromLocalInput(field.input)) ? '请填写完整的到期时间' : null
+
+// 新建凭据（转存、保存前处理）里可选的到期时间：空的就是不到期，填了一半（bad）照样拦下
+export const optionalExpiresProblem = (input: string, bad: boolean) =>
+  bad || (input && !fromLocalInput(input)) ? '请填写完整的到期时间' : null
+
+// 输入框事件里认出填了一半：这时 value 是空字符串，只有 validity.badInput 为真
+export const expiresInputBad = (event: Event) =>
+  (event.target as HTMLInputElement | null)?.validity?.badInput ?? false
 
 // 密码库凭据的值写回原条目时，对应到 TOTP 密钥的字段不能改（取用时给的是现算的验证码）
 export const writableVaultField = (field: Pick<CredentialField, 'itemField'>) =>

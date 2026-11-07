@@ -10,7 +10,7 @@ import {
 } from '@kioku/contracts'
 
 import { placeholderOf } from './placeholders'
-import { storedInName, suggestIdentifier as suggestItemIdentifier } from './vault'
+import { storeName, suggestIdentifier as suggestItemIdentifier } from './vault'
 
 // 转存为凭据的对话框：猜出来的值、建议的标识、值在正文里的位置和次数
 
@@ -112,7 +112,7 @@ export function convertSummary(result: ConvertedToCredential): string {
   const what = !result.created
     ? `已换成凭据「${credential.name}」的字段 ${result.field}`
     : result.storedIn
-      ? `已新建凭据「${credential.name}」（${storedInName(result.storedIn)}）`
+      ? `已新建凭据「${credential.name}」（${storeName(result.storedIn)}）`
       : `已给密码库条目起标识 ${credential.identifier}`
   const placeholder = placeholderOf(credential.identifier, result.field)
   const done = `${what}，正文中 ${result.replaced} 处已换成 ${placeholder}。`
@@ -184,13 +184,15 @@ export interface UnmappedVaultField {
 
 export const NEW_DESTINATION: ConvertDestination = { kind: 'new', key: 'new' }
 
-// 新建凭据时填的：标识、名称、字段名，写进密码库时的网址，到期时间（datetime-local 的本地时间）
+// 新建凭据时填的：标识、名称、字段名，写进密码库时的网址，到期时间（datetime-local 的本地时间，空的是不到期）。
+// expiresBad：到期时间的输入框填了一半（validity.badInput），这时 expires 也是空的
 export interface NewCredentialFields {
   identifier: string
   name: string
   field: string
   url: string
   expires: string
+  expiresBad: boolean
 }
 
 // 密码库的一个条目：同一个条目的几个字段共用一条凭据，起标识按条目记

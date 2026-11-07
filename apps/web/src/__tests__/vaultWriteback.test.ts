@@ -24,15 +24,18 @@ import {
   destinationConnection,
   destinationProblem,
   expiresChange,
+  expiresField,
   expiresInput,
+  expiresInputBad,
   expiresProblem,
   isLoginFields,
   newCredentialStore,
   orphanNotice,
+  optionalExpiresProblem,
   orphanVaultItem,
-  storedInName,
   storeName,
   writableVaultField,
+  type ExpiresField,
 } from '../vault'
 
 const conn = (over: Partial<VaultConnection> = {}): VaultConnection => ({
@@ -69,8 +72,8 @@ describe('新凭据的去处', () => {
   it('写到哪里的名字：去处与结果同一个说法，托管用契约的「Kioku 托管」', () => {
     expect(storeName({ kind: 'hosted' })).toBe(CREDENTIAL_HOSTED_NAME)
     expect(storeName({ kind: 'vault', collectionName: 'Agent' })).toBe('密码库集合「Agent」')
-    expect(storedInName({ kind: 'hosted', bench: false })).toBe('Kioku 托管')
-    expect(storedInName({ kind: 'vault', collectionName: 'Agent' })).toBe('密码库集合「Agent」')
+    expect(storeName({ kind: 'hosted', bench: false })).toBe('Kioku 托管')
+    expect(storeName({ kind: 'vault', collectionName: 'Agent' })).toBe('密码库集合「Agent」')
   })
 
   it('连接不可用时去处照样留着，提示新建会失败', () => {
@@ -154,10 +157,59 @@ describe('写进密码库却没建成凭据', () => {
     expect(notice.detail).toContain('另建一个条目')
   })
 
-  it('新建、转存与保存前处理都提示它', () => {
+  it('新建、转存与保存前处理都提示它，失败的原因与下一步照样显示，不被条目的提示压住', () => {
     for (const source of [credentialForm, convertModal, saveModal]) {
       expect(source).toContain('orphanNotice(orphan.value)')
+      expect(source).toMatch(/<NoteLine v-if="failure"/)
+      expect(source).not.toContain('v-else-if="failure"')
     }
+    // 409 之后的重新读取也还在
+    expect(convertModal).toMatch(/<NoteLine v-if="failure"[\s\S]*?v-if="canReload"/)
+    expect(credentialForm).toMatch(/<NoteLine v-if="failure"[\s\S]*?@click="reload"/)
+  })
+})
+
+describe('去处的几处共用一份', () => {
+  it('转存与保存前处理不再自己读连接列表，去处读取失败时说明', () => {
+    for (const source of [convertModal, saveModal]) {
+      expect(source).not.toContain("['vault-connections'")
+      expect(source).toContain(':store-failed="storeFailed"')
+    }
+    expect(credentialForm).toContain('useNewCredentialStore(')
+    expect(credentialForm).toContain('storeLabel(store, storeFailed)')
+    expect(vaultSource).not.toContain('storedInName')
+  })
+
+  it('去处的警告色在 scoped 里给：scoped 的 color 压得过 text-warning', () => {
+    expect(vaultPanel).not.toContain('conn-error text-warning')
+    expect(vaultPanel).toContain('class="conn-error is-warning"')
+    expect(vaultPanel).toMatch(/\.conn-error\.is-warning \{\s+color: var\(--ui-warning\);/)
+  })
+
+  it('设去处失败时条目列表里的集合一起重读，不然同一个集合还能选', () => {
+    const save = vaultPanel.slice(vaultPanel.indexOf('async function saveDestination'))
+    const failed = save.slice(save.indexOf('} catch'), save.indexOf('} finally'))
+    expect(failed).toContain("queryKey: ['vault-items', sid, c.value.id]")
+  })
+
+  it('条目列表都经 fetchVaultItems 读：读到之后凭据与待处理的条数跟着失效', () => {
+    for (const source of [vaultPanel, credentialDetail, credentialForm]) {
+      expect(source).toContain('fetchVaultItems(queryClient, sid, id')
+      expect(source).not.toContain('api.vaultItems(')
+    }
+  })
+
+  it('标记的样式只有一份', () => {
+    for (const source of [credentialDetail, credentialsPage, inboxCredentials]) {
+      expect(source).toContain('<FlagTag')
+      expect(source).not.toMatch(/\.(row|detail|cred|bench)-flag \{/)
+    }
+  })
+
+  it('待处理的说明不再讲一遍范围；「可选」不是句子，不带句号', () => {
+    expect(inboxCredentials).not.toContain('仅列出当前账号')
+    expect(credentialForm).toContain('可选<Hint>')
+    expect(credentialForm).not.toContain('可选。')
   })
 })
 
@@ -197,22 +249,56 @@ describe('到期与轮换', () => {
     ).toMatch(/已到期$/)
   })
 
-  it('到期时间：没改不发，清空发 null，改了发带时区的时间；按分钟比较', () => {
+  const at = (input: string, bad = false): ExpiresField => ({ noExpiry: false, input, bad })
+  const none: ExpiresField = { noExpiry: true, input: '', bad: false }
+
+  it('到期时间：没改不发，选了不到期发 null，改了发带时区的时间；按分钟比较', () => {
     const iso = '2026-12-01T10:30:00.000Z'
     expect(expiresInput(null)).toBe('')
-    expect(expiresInput(iso)).toBe(toLocalInput(iso))
-    expect(expiresChange(iso, toLocalInput(iso))).toBeUndefined()
+    expect(expiresField(null)).toEqual(none)
+    expect(expiresField(iso)).toEqual(at(toLocalInput(iso)))
+    expect(expiresChange(iso, at(toLocalInput(iso)))).toBeUndefined()
     // 秒被输入框截掉，照样算没改
-    expect(expiresChange('2026-12-01T10:30:42.000Z', toLocalInput(iso))).toBeUndefined()
-    expect(expiresChange(iso, '')).toBeNull()
-    expect(expiresChange(null, '')).toBeUndefined()
-    expect(expiresChange(null, '2026-12-01T08:00')).toBe(new Date('2026-12-01T08:00').toISOString())
+    expect(expiresChange('2026-12-01T10:30:42.000Z', at(toLocalInput(iso)))).toBeUndefined()
+    expect(expiresChange(iso, none)).toBeNull()
+    expect(expiresChange(null, none)).toBeUndefined()
+    expect(expiresChange(null, at('2026-12-01T08:00'))).toBe(
+      new Date('2026-12-01T08:00').toISOString(),
+    )
   })
 
-  it('填了却不完整时提示；空的不算', () => {
-    expect(expiresProblem('')).toBeNull()
-    expect(expiresProblem('2026-12-01')).toBe('请填写完整的到期时间')
-    expect(expiresProblem('2026-12-01T08:00')).toBeNull()
+  it('输入框填了一半时值是空的，不能当成清除：原来的到期时间不发 null', () => {
+    const iso = '2026-12-01T10:30:00.000Z'
+    expect(expiresChange(iso, at('', true))).toBeUndefined()
+    expect(expiresChange(iso, at(''))).toBeUndefined()
+    expect(expiresProblem(at('', true))).toBe('请填写完整的到期时间')
+    expect(expiresProblem(at(''))).toBe('请填写完整的到期时间')
+    expect(expiresProblem(at('2026-12-01'))).toBe('请填写完整的到期时间')
+    expect(expiresProblem(at('2026-12-01T08:00'))).toBeNull()
+    expect(expiresProblem(none)).toBeNull()
+  })
+
+  it('新建时可选的到期时间：空的是不到期，填了一半照样拦下', () => {
+    expect(optionalExpiresProblem('', false)).toBeNull()
+    expect(optionalExpiresProblem('', true)).toBe('请填写完整的到期时间')
+    expect(optionalExpiresProblem('2026-12-01T08:00', false)).toBeNull()
+  })
+
+  it('认出填了一半的输入框：看 validity.badInput', () => {
+    const event = (badInput: boolean) =>
+      ({ target: { validity: { badInput } } }) as unknown as Event
+    expect(expiresInputBad(event(true))).toBe(true)
+    expect(expiresInputBad(event(false))).toBe(false)
+    expect(expiresInputBad({ target: null } as unknown as Event)).toBe(false)
+  })
+
+  it('表单里清除是单独的「不到期」按钮，输入框绑着 badInput', () => {
+    expect(credentialForm).toContain('v-model="form.expires.input"')
+    expect(credentialForm).toContain("form.expires = { noExpiry: true, input: '', bad: false }")
+    expect(credentialForm).toContain('(form.expires.bad = expiresInputBad(e))')
+    for (const source of [convertModal, saveModal]) {
+      expect(source).toContain('@fresh-expires-bad=')
+    }
   })
 
   it('修改记录里的到期时间与需要轮换有名字', () => {
@@ -257,15 +343,16 @@ describe('写回密码库', () => {
     expect(isLoginFields(['token'])).toBe(false)
   })
 
-  it('409 时留在表单里，可以一键重新读取；写进去的值按字段名留着', () => {
+  it('409 时留在表单里，可以一键重新读取；重新读取和表单里的改动合起来，不重建表单', () => {
     expect(credentialForm).toContain('conflict.value = true')
     expect(credentialForm).toContain('const fresh = await api.credential(spaceId, before.id)')
-    expect(credentialForm).toContain('fill(fresh, keep)')
+    expect(credentialForm).toContain('mergeReloaded(input(), before, fresh')
+    expect(credentialForm).not.toMatch(/function reload[\s\S]*?fill\(fresh/)
     expect(credentialForm).toContain('@click="reload"')
   })
 
   it('新建的结果按 storedIn 说明写到了哪里', () => {
-    expect(credentialForm).toContain('stored = storedInName(storedIn)')
-    expect(saveModal).toContain('storedInName(s.storedIn)')
+    expect(credentialForm).toContain('stored = storeName(storedIn)')
+    expect(saveModal).toContain('storeName(s.storedIn)')
   })
 })

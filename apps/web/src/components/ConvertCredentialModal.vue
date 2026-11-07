@@ -5,14 +5,12 @@ import {
   type ConsoleMemoryView,
   type ConvertedToCredential,
 } from '@kioku/contracts'
-import { useQuery } from '@tanstack/vue-query'
 import { computed, toRef, useId, watch } from 'vue'
 
-import { api } from '../api/endpoints'
 import { useConvertCredential } from '../composables/useConvertCredential'
 import { convertSummary, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
 import { memoryRoute } from '../routes'
-import { destinationProblem, newCredentialStore, orphanNotice } from '../vault'
+import { orphanNotice } from '../vault'
 import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -35,6 +33,9 @@ const {
   shown,
   failure,
   orphan,
+  store,
+  storeIssue,
+  storeFailed,
   canReload,
   submitting,
   result,
@@ -85,16 +86,6 @@ const unmatched = computed(() =>
   }),
 )
 
-// 新建的凭据写到哪里：和凭据页同一个连接列表
-const connections = useQuery({
-  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
-  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
-  enabled: open,
-})
-const store = computed(() => newCredentialStore(connections.data.value?.items))
-const storeIssue = computed(() =>
-  store.value?.kind === 'vault' ? destinationProblem(store.value.connection) : null,
-)
 const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : null))
 
 const valueInput = useId()
@@ -226,10 +217,12 @@ const candidateGroup = useId()
             :vault-identifiers="vaultIdentifiers"
             :fresh="form"
             :store="store"
+            :store-failed="storeFailed"
             :store-issue="storeIssue"
             @update:model-value="choose"
             @vault-identifier="(key, identifier) => (vaultIdentifiers[key] = identifier)"
             @fresh-field="(field, value) => (form[field] = value)"
+            @fresh-expires-bad="(bad) => (form.expiresBad = bad)"
           />
         </div>
 
@@ -240,11 +233,12 @@ const candidateGroup = useId()
           </template>
         </p>
 
+        <!-- 留下的条目与失败的原因都要显示：只看到条目的提示，不知道为什么失败，再提交又多建一个 -->
         <NoteLine v-if="orphanText" tone="warning">
           {{ orphanText.title }}
           <template #detail>{{ orphanText.detail }}</template>
         </NoteLine>
-        <NoteLine v-else-if="failure" tone="error">
+        <NoteLine v-if="failure" tone="error">
           {{ failure }}
           <template v-if="canReload" #actions>
             <UButton size="sm" color="primary" variant="outline" @click="load">重新读取</UButton>

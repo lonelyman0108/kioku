@@ -3,13 +3,17 @@ import { describe, expect, it } from 'vitest'
 
 import {
   createBody,
+  editableState,
   formProblem,
+  mergeReloaded,
   updateBody,
   type CredentialFormInput,
   type CredentialFormMode,
   type CredentialFormState,
 } from '../credentialForm'
-import { toLocalInput } from '../time'
+import { expiresField, type ExpiresField } from '../vault'
+
+const at = (input: string, bad = false): ExpiresField => ({ noExpiry: false, input, bad })
 
 const form = (over: Partial<CredentialFormState> = {}): CredentialFormState => ({
   identifier: 'nas',
@@ -18,7 +22,7 @@ const form = (over: Partial<CredentialFormState> = {}): CredentialFormState => (
   restrict: false,
   appIds: [],
   url: '',
-  expires: '',
+  expires: expiresField(null),
   needsRotation: false,
   ...over,
 })
@@ -68,11 +72,7 @@ const input = (over: Partial<CredentialFormInput> = {}): CredentialFormInput => 
 const edit = (origin: ConsoleCredential, over: Partial<CredentialFormInput> = {}) =>
   input({
     mode: { kind: 'edit', origin },
-    form: form({
-      name: origin.name,
-      expires: origin.expiresAt ? toLocalInput(origin.expiresAt) : '',
-      needsRotation: origin.rotationRequestedAt !== null,
-    }),
+    form: form(editableState(origin)),
     valueRows: origin.fields.map((f, i) => ({
       key: i,
       name: f.name,
@@ -101,7 +101,7 @@ describe('新建', () => {
       source: { kind: 'new', values: { password: 'hunter22' } },
     })
     const body = createBody(
-      input({ form: form({ url: ' https://nas.example.com ', expires: '2026-12-01T08:00' }) }),
+      input({ form: form({ url: ' https://nas.example.com ', expires: at('2026-12-01T08:00') }) }),
     )
     expect(body.source).toEqual({
       kind: 'new',
@@ -116,13 +116,17 @@ describe('新建', () => {
     expect(formProblem(input({ form: form({ url: 'nas.example.com' }) }))).toBe(
       '网址要以 http:// 或 https:// 开头',
     )
-    expect(formProblem(input({ form: form({ expires: '2026-12-01' }) }))).toBe(
+    expect(formProblem(input({ form: form({ expires: at('2026-12-01') }) }))).toBe(
+      '请填写完整的到期时间',
+    )
+    // 填了一半：值是空的，badInput 为真
+    expect(formProblem(input({ form: form({ expires: at('', true) }) }))).toBe(
       '请填写完整的到期时间',
     )
   })
 
   it('已经过去的到期时间也收：记下一个已经到期的令牌', () => {
-    expect(formProblem(input({ form: form({ expires: '2020-01-01T00:00' }) }))).toBeNull()
+    expect(formProblem(input({ form: form({ expires: at('2020-01-01T00:00') }) }))).toBeNull()
   })
 
   it('给条目起标识时来源是 vault，网址不发，到期时间照样能设', () => {
@@ -139,7 +143,7 @@ describe('新建', () => {
     const body = createBody(
       input({
         mode: { kind: 'name-item', connectionId: '00000000-0000-4000-8000-0000000000a1', item },
-        form: form({ url: 'https://nas.example.com', expires: '2026-12-01T08:00' }),
+        form: form({ url: 'https://nas.example.com', expires: at('2026-12-01T08:00') }),
         vaultRows: [{ key: 1, name: 'password', itemField: 'login.password' }],
       }),
     )
@@ -163,15 +167,23 @@ describe('修改', () => {
     })
   })
 
-  it('到期时间能设、能清除；没改不发', () => {
+  it('到期时间能设、能清除（选不到期）；没改不发', () => {
     const origin = credential({ expiresAt: '2026-12-01T10:30:00.000Z' })
     expect(updateBody(edit(origin))).not.toHaveProperty('expiresAt')
     const cleared = edit(origin)
-    cleared.form.expires = ''
+    cleared.form.expires = { noExpiry: true, input: '', bad: false }
     expect(updateBody(cleared).expiresAt).toBeNull()
     const moved = edit(origin)
-    moved.form.expires = '2027-01-01T00:00'
+    moved.form.expires = at('2027-01-01T00:00')
     expect(updateBody(moved).expiresAt).toBe(new Date('2027-01-01T00:00').toISOString())
+  })
+
+  it('到期时间填到一半不当成清除：不发 null，也不能保存', () => {
+    const origin = credential({ expiresAt: '2026-12-01T10:30:00.000Z' })
+    const half = edit(origin)
+    half.form.expires = at('', true)
+    expect(updateBody(half)).not.toHaveProperty('expiresAt')
+    expect(formProblem(half)).toBe('请填写完整的到期时间')
   })
 
   it('需要轮换能标、能清除；没变不发', () => {
@@ -220,5 +232,93 @@ describe('修改', () => {
     e.valueRows[0]!.removed = true
     e.valueRows[1]!.value = 'new-pass'
     expect(updateBody(e).values).toEqual({ username: null, password: 'new-pass' })
+  })
+})
+
+describe('409 之后重新读取', () => {
+  let n = 100
+  const key = () => n++
+
+  it('加的字段与要删的标记都留着，版本换成新读到的；没有冲突', () => {
+    const before = credential({
+      fields: [
+        { name: 'username', itemField: null },
+        { name: 'password', itemField: null },
+      ],
+    })
+    const mine = edit(before)
+    mine.valueRows[0]!.removed = true
+    mine.valueRows.push({
+      key: 9,
+      name: 'token',
+      value: 'abcd1234',
+      existing: false,
+      removed: false,
+    })
+    mine.form.description = '改过的说明'
+    mine.form.expires = { noExpiry: false, input: '2027-01-01T00:00', bad: false }
+    // 别处改了名称与到期时间，版本加一
+    const fresh = {
+      ...before,
+      version: 4,
+      name: '别处改的名称',
+      expiresAt: '2026-12-25T00:00:00.000Z',
+    }
+    const { input: merged, conflicts } = mergeReloaded(mine, before, fresh, key)
+    expect(conflicts).toEqual([])
+    expect(merged.mode).toEqual({ kind: 'edit', origin: fresh })
+    expect(merged.valueRows.find((r) => r.name === 'username')!.removed).toBe(true)
+    expect(merged.valueRows.find((r) => r.name === 'token')!.value).toBe('abcd1234')
+    // 没动过的取新的，动过的留着表单里的
+    expect(merged.form.name).toBe('别处改的名称')
+    expect(merged.form.description).toBe('改过的说明')
+    expect(merged.form.expires.input).toBe('2027-01-01T00:00')
+    const body = updateBody(merged)
+    expect(body.expectedVersion).toBe(4)
+    expect(body.values).toEqual({ username: null, token: 'abcd1234' })
+  })
+
+  it('要改的字段在新版本里没了：明确提示，别处新加的字段列出来', () => {
+    const before = credential({
+      fields: [
+        { name: 'username', itemField: null },
+        { name: 'password', itemField: null },
+      ],
+    })
+    const mine = edit(before)
+    mine.valueRows[0]!.value = 'admin'
+    const fresh = {
+      ...before,
+      version: 4,
+      fields: [
+        { name: 'password', itemField: null },
+        { name: 'pin', itemField: null },
+      ],
+    }
+    const { input: merged, conflicts } = mergeReloaded(mine, before, fresh, key)
+    expect(conflicts).toEqual(['字段 username 已在别处删除'])
+    expect(merged.valueRows.map((r) => r.name)).toEqual(['password', 'pin'])
+  })
+
+  it('密码库的：填的值按字段名留着；字段对应两边都改了时提示核对', () => {
+    const before = vaultCredential()
+    const mine = edit(before)
+    mine.vaultValues[1]!.value = 'new-pass'
+    const fresh = { ...before, version: 4 }
+    const kept = mergeReloaded(mine, before, fresh, key)
+    expect(kept.conflicts).toEqual([])
+    expect(updateBody(kept.input).values).toEqual({ password: 'new-pass' })
+
+    const renamed = edit(before)
+    renamed.vaultRows[0]!.name = 'user'
+    const theirs = {
+      ...before,
+      version: 4,
+      fields: [{ name: 'password', itemField: 'login.password' }],
+    }
+    renamed.vaultValues[0]!.value = 'admin'
+    const merged = mergeReloaded(renamed, before, theirs, key)
+    expect(merged.conflicts).toContain('字段对应在别处也修改过，保存时以表单中的为准，请核对')
+    expect(merged.conflicts).toContain('字段 username 已在别处删除，填写的值未保留')
   })
 })

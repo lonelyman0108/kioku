@@ -8,9 +8,15 @@ import {
 } from '@kioku/contracts'
 
 import { fromLocalInput } from './time'
-import { expiresChange, expiresProblem, writableVaultField } from './vault'
+import {
+  expiresChange,
+  expiresField,
+  expiresProblem,
+  writableVaultField,
+  type ExpiresField,
+} from './vault'
 
-// 凭据表单（新建、给条目起标识、修改）的请求怎么拼、哪里不对。对话框只管长相
+// 凭据表单（新建、给条目起标识、修改）的请求怎么拼、哪里不对、409 之后怎么和新读到的合起来。对话框只管长相
 
 // 带值的一行（新建，或者修改托管的）：existing 表示修改时已有的字段，值留空就是不改，removed 表示删掉它
 export interface ValueRow {
@@ -41,8 +47,7 @@ export interface CredentialFormState {
   appIds: string[]
   // 新建时写进密码库条目的网址，托管时服务端不保存
   url: string
-  // datetime-local 的本地时间，空表示不到期
-  expires: string
+  expires: ExpiresField
   needsRotation: boolean
 }
 
@@ -65,6 +70,20 @@ const isVault = (mode: CredentialFormMode) =>
 
 const liveRows = (rows: readonly ValueRow[]) => rows.filter((r) => !r.removed)
 
+// 修改时按凭据填的表单项（标识与网址只在新建时有）
+export function editableState(
+  c: ConsoleCredential,
+): Omit<CredentialFormState, 'identifier' | 'url'> {
+  return {
+    name: c.name,
+    description: c.description ?? '',
+    restrict: c.appIds !== null,
+    appIds: [...(c.appIds ?? [])],
+    expires: expiresField(c.expiresAt),
+    needsRotation: c.rotationRequestedAt !== null,
+  }
+}
+
 // 修改托管的值：只发改了的字段，删掉的为 null
 export function hostedChanges(
   rows: readonly ValueRow[],
@@ -79,12 +98,14 @@ export function hostedChanges(
 
 const vaultFields = (rows: readonly VaultRow[]) =>
   rows.map((r) => ({ name: r.name, itemField: r.itemField }))
+const originFields = (origin: ConsoleCredential) =>
+  origin.fields.flatMap((f) => (f.itemField ? [{ name: f.name, itemField: f.itemField }] : []))
+const sameFields = (a: unknown, b: unknown) => JSON.stringify(a) === JSON.stringify(b)
 
 // 修改密码库的字段对应：整个替换，没改就不发
 export function vaultFieldChanges(origin: ConsoleCredential, rows: readonly VaultRow[]) {
   const fields = vaultFields(rows)
-  const before = origin.fields.map((f) => ({ name: f.name, itemField: f.itemField }))
-  return JSON.stringify(before) === JSON.stringify(fields) ? undefined : fields
+  return sameFields(originFields(origin), fields) ? undefined : fields
 }
 
 // 写回密码库条目的值：只发填了的、能改的字段；不能删字段，所以没有 null
@@ -98,7 +119,8 @@ export function vaultValueChanges(
   return Object.keys(values).length ? values : undefined
 }
 
-const expiresAtOf = (input: string) => (input ? (fromLocalInput(input) ?? undefined) : undefined)
+const expiresAtOf = (field: ExpiresField) =>
+  field.noExpiry || field.bad ? undefined : (fromLocalInput(field.input) ?? undefined)
 
 export function createBody({ mode, form, valueRows, vaultRows }: CredentialFormInput) {
   const url = form.url.trim()
@@ -189,4 +211,85 @@ export function formProblem(input: CredentialFormInput): string | null {
     ? UpdateCredentialRequest.safeParse(updateBody(input))
     : CreateCredentialRequest.safeParse(createBody(input))
   return result.success ? null : (result.error.issues[0]?.message ?? '填写内容有误')
+}
+
+// ---- 409 之后重新读取 ----
+
+export interface ReloadedForm {
+  input: CredentialFormInput
+  // 合不起来的地方，逐条告诉人；为空时表示新读到的一版和表单里的改动没有冲突
+  conflicts: string[]
+}
+
+// 重新读取之后：只换掉服务端的那一份（版本、字段与字段对应、到期与轮换的现状），表单里做过的改动都留着，再和新的一版合起来。
+// 按三方合并：表单里某一项和打开时（before）一样，说明没动过，取新读到的（fresh）；动过的留着表单里的。
+// 要改的字段在新版本里没了、两边都改了字段对应这类合不起来的，写进 conflicts。key 给新加的行编号
+export function mergeReloaded(
+  current: CredentialFormInput,
+  before: ConsoleCredential,
+  fresh: ConsoleCredential,
+  key: () => number,
+): ReloadedForm {
+  const conflicts: string[] = []
+  const base = editableState(before)
+  const theirs = editableState(fresh)
+  const mine = current.form
+  const pick = <K extends keyof typeof base>(k: K): (typeof base)[K] =>
+    sameFields(mine[k], base[k]) ? theirs[k] : mine[k]
+  const form: CredentialFormState = {
+    ...mine,
+    name: pick('name'),
+    description: pick('description'),
+    restrict: pick('restrict'),
+    appIds: pick('appIds'),
+    expires: pick('expires'),
+    needsRotation: pick('needsRotation'),
+  }
+
+  const freshNames = new Set(fresh.fields.map((f) => f.name))
+  let valueRows = current.valueRows
+  if (fresh.source === 'hosted') {
+    valueRows = []
+    for (const row of current.valueRows) {
+      if (row.existing && !freshNames.has(row.name)) {
+        if (row.value || row.removed) conflicts.push(`字段 ${row.name} 已在别处删除`)
+        continue
+      }
+      if (!row.existing && freshNames.has(row.name) && row.name) {
+        conflicts.push(`字段 ${row.name} 已在别处添加，保存时将改为填写的值`)
+        valueRows.push({ ...row, existing: true })
+        continue
+      }
+      valueRows.push(row)
+    }
+    for (const f of fresh.fields) {
+      if (!valueRows.some((r) => r.name === f.name)) {
+        valueRows.push({ key: key(), name: f.name, value: '', existing: true, removed: false })
+      }
+    }
+  }
+
+  let vaultRows = current.vaultRows
+  let vaultValues: VaultValueRow[] = []
+  if (fresh.source === 'vault') {
+    const mineFields = vaultFields(current.vaultRows)
+    const freshFields = originFields(fresh)
+    if (sameFields(mineFields, originFields(before))) {
+      vaultRows = freshFields.map((f) => ({ key: key(), ...f }))
+    } else if (!sameFields(freshFields, originFields(before))) {
+      conflicts.push('字段对应在别处也修改过，保存时以表单中的为准，请核对')
+    }
+    const typed = new Map(current.vaultValues.map((r) => [r.name, r.value] as const))
+    vaultValues = freshFields.map((f) => ({ ...f, value: typed.get(f.name) ?? '' }))
+    for (const [name, value] of typed) {
+      if (value && !freshFields.some((f) => f.name === name)) {
+        conflicts.push(`字段 ${name} 已在别处删除，填写的值未保留`)
+      }
+    }
+  }
+
+  return {
+    input: { mode: { kind: 'edit', origin: fresh }, form, valueRows, vaultRows, vaultValues },
+    conflicts,
+  }
 }

@@ -13,6 +13,7 @@ import Hint from '../components/Hint.vue'
 import VaultConnectionPanel from '../components/VaultConnectionPanel.vue'
 import VaultLoginModal from '../components/VaultLoginModal.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
+import FlagTag from '../components/strata/FlagTag.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
@@ -279,9 +280,9 @@ async function undelete(c: ConsoleCredential) {
                 <button type="button" class="ledger-row credential-grid" @click="selectedId = c.id">
                   <span class="row-name">
                     {{ c.name }}
-                    <span v-for="flag in credentialFlags(c)" :key="flag" class="row-flag">{{
+                    <FlagTag v-for="flag in credentialFlags(c)" :key="flag" class="ml-1.5">{{
                       flag
-                    }}</span>
+                    }}</FlagTag>
                   </span>
                   <span class="row-code">{{ c.identifier }}</span>
                   <span class="row-source" data-label="来源">{{ sourceOf(c) }}</span>
@@ -560,16 +561,6 @@ button.row-name::after {
 .row-purge {
   position: relative;
   z-index: 1;
-}
-.row-flag {
-  margin-left: 6px;
-  padding: 0 5px;
-  border: 1px solid var(--ui-border-accented);
-  font-size: 12px;
-  font-weight: 400;
-  line-height: 18px;
-  white-space: nowrap;
-  color: var(--ui-text-toned);
 }
 .row-code {
   font-family: var(--font-mono);
