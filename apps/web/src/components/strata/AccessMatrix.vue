@@ -7,6 +7,7 @@ import AccessLegend from './AccessLegend.vue'
 import StrataSwatch from './StrataSwatch.vue'
 import {
   ACCESS_BAR_PERCENT,
+  accessCellText,
   accessFill,
   accessKind,
   accessKindLabels,
@@ -35,12 +36,8 @@ const cellOf = (row: AccessRow, sensitivity: Sensitivity) => {
 // 这一类归属没有这一级（本人不设公开）：不是没给权限，格子写明不适用，不和无权限画成一样
 const allowed = (row: AccessRow, sensitivity: Sensitivity) =>
   sensitivityAllowed(row.layer, sensitivity)
-const cellTitle = (row: AccessRow, sensitivity: Sensitivity) => {
-  const place = `${layerLabels[row.layer]} ${sensitivityLabels[sensitivity]}`
-  return allowed(row, sensitivity)
-    ? `${place}：${accessKindLabels[cellOf(row, sensitivity)]}`
-    : `${place}：不适用，${layerLabels[row.layer]}不设${sensitivityLabels[sensitivity]}`
-}
+const cellTitle = (row: AccessRow, sensitivity: Sensitivity) =>
+  accessCellText(row.layer, sensitivity, cellOf(row, sensitivity))
 const FULL = { x: 0, y: 0, width: '100%', height: '100%' }
 const legendKinds = computed(() => presentKinds(props.rows))
 </script>

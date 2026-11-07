@@ -33,6 +33,7 @@ import {
   STACK,
   TEXTURES,
   accessBar,
+  accessCellText,
   accessFill,
   accessKind,
   accessKindLabels,
@@ -711,6 +712,24 @@ describe('Key 的签发范围换算成格子', () => {
 })
 
 describe('岩芯', () => {
+  it('格子的说明：写明归属、敏感级与权限；本人 × 公开写不适用，不说成无权限', () => {
+    expect(accessCellText('user', 'private', 'read-write')).toBe('本人 私密：读写')
+    expect(accessCellText('core', 'secret', 'explicit')).toBe('通用 机密：仅按坐标读取')
+    expect(accessCellText('user', 'public', 'none')).toBe('本人 公开：不适用，本人不设公开')
+  })
+
+  it('可交互时每一格都有命中区，读屏读到这一格的说明；默认不带', async () => {
+    const plain = await render(StrataCore, { scopes })
+    expect(plain).not.toContain('core-hit')
+    const html = await render(StrataCore, { scopes, interactive: true })
+    expect(html.match(/class="core-hit"/g)).toHaveLength(24)
+    expect(html).toContain('aria-label="本人 公开：不适用，本人不设公开"')
+    // 吊销的不给命中区：一格都不上色，也没有可说明的权限
+    expect(await render(StrataCore, { scopes, interactive: true, revoked: true })).not.toContain(
+      'core-hit',
+    )
+  })
+
   const scopes: KeyScopes = {
     readLayers: [...LAYERS],
     writeLayers: ['user'],

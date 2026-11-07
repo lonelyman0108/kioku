@@ -3,6 +3,7 @@ import type { KeyScopes, Layer, Sensitivity } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import {
+  accessCellText,
   coreCells,
   coreMark,
   coreName,
@@ -30,6 +31,8 @@ const props = withDefaults(
     label?: string
     // 标出一条记忆的位置；不知道敏感级时标整层
     mark?: { layer: Layer; sensitivity: Sensitivity | null } | null
+    // 每一格能悬停：放上去时发出这一格的说明，离开时发出 null，由外面决定显示在哪
+    interactive?: boolean
   }>(),
   {
     scopes: null,
@@ -40,8 +43,10 @@ const props = withDefaults(
     revoked: false,
     label: undefined,
     mark: null,
+    interactive: false,
   },
 )
+const emit = defineEmits<{ hover: [text: string | null] }>()
 
 const GAP = 3
 const model = computed(() =>
@@ -149,6 +154,27 @@ const markBox = computed(() =>
         }"
       />
     </template>
+    <template v-if="interactive && !revoked">
+      <!-- 透明的命中区：盖住整格（含格子之间的缝），悬停与键盘聚焦都给出这一格的说明 -->
+      <rect
+        v-for="cell in model.cells"
+        :key="`hit-${cell.layer}-${cell.sensitivity}`"
+        class="core-hit"
+        :x="cell.x"
+        :y="cell.y"
+        :width="cell.width"
+        :height="cell.height"
+        fill="transparent"
+        tabindex="0"
+        :aria-label="accessCellText(cell.layer, cell.sensitivity, cell.kind)"
+        @mouseenter="emit('hover', accessCellText(cell.layer, cell.sensitivity, cell.kind))"
+        @focus="emit('hover', accessCellText(cell.layer, cell.sensitivity, cell.kind))"
+        @mouseleave="emit('hover', null)"
+        @blur="emit('hover', null)"
+      >
+        <title>{{ accessCellText(cell.layer, cell.sensitivity, cell.kind) }}</title>
+      </rect>
+    </template>
     <rect
       v-if="markBox"
       class="core-mark"
@@ -162,3 +188,16 @@ const markBox = computed(() =>
     />
   </svg>
 </template>
+
+<!-- 不用 scoped：scoped 会给 <title> 也加上属性，读屏的文字跟着变；选择器带着 .strata-core，不影响别处 -->
+<style>
+.strata-core .core-hit {
+  cursor: default;
+  outline: none;
+}
+.strata-core .core-hit:hover,
+.strata-core .core-hit:focus-visible {
+  stroke: var(--ui-text-highlighted);
+  stroke-width: 1.5px;
+}
+</style>

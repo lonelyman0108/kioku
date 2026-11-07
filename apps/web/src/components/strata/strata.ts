@@ -287,6 +287,14 @@ export const accessKindLabels: Record<AccessKind, string> = {
   none: '无权限',
 }
 
+// 一格的说明：岩芯与权限范围共用。这一类归属没有这一级（本人不设公开）时写明不适用，不说成无权限
+export function accessCellText(layer: Layer, sensitivity: Sensitivity, kind: AccessKind): string {
+  const place = `${layerLabels[layer]} ${sensitivityLabels[sensitivity]}`
+  return sensitivityAllowed(layer, sensitivity)
+    ? `${place}：${accessKindLabels[kind]}`
+    : `${place}：不适用，${layerLabels[layer]}不设${sensitivityLabels[sensitivity]}`
+}
+
 const ACCESS_KINDS: Record<AccessCell['read'], Record<'write' | 'extract' | 'none', AccessKind>> = {
   recall: { write: 'read-write', extract: 'read-extract', none: 'read' },
   explicit: { write: 'explicit-write', extract: 'explicit-extract', none: 'explicit' },
