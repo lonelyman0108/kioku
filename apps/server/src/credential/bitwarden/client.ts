@@ -20,6 +20,7 @@ import {
   vaultRequest,
   type HttpOptions,
   type VaultDiagnostic,
+  type HttpResponse,
   type VaultEndpoints,
 } from './http'
 import {
@@ -27,7 +28,9 @@ import {
   type VaultAccount,
   type VaultClient,
   type VaultItem,
+  type VaultItemChanges,
   type VaultLoginInput,
+  type VaultNewItem,
   type VaultLoginResult,
   type VaultSession,
   type VaultSessionInput,
@@ -35,6 +38,7 @@ import {
   type VaultTwoFactorProvider,
 } from './types'
 import { decodeItem, decodeSync, decodeSyncItems, type SyncedState } from './vault'
+import { checkChanges, checkNewItem, newCipherBody, updatedCipherBody } from './write'
 
 export type { VaultDiagnostic } from './http'
 
@@ -221,6 +225,25 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
 
 const reauth = () => new VaultError('reauth_required', '密码库的登录已失效，需要重新登录')
 
+const readOnly = () => new VaultError('read_only', '集合只读：专用账号没有这个集合的编辑权限')
+const conflict = () => new VaultError('item_conflict', '条目已在别处修改过，请重新读取后再改')
+const COLLECTION_UNAVAILABLE = '集合不可用：专用账号不在这个集合里，或者无法解开它'
+
+const JSON_BODY = { 'content-type': 'application/json; charset=utf-8' }
+
+// 写入被拒时服务端的说明。Vaultwarden：Cipher is not write accessible、No rights to modify the collection、
+// You don't have permission to ...、Invalid collection ID provided、The client copy of this cipher is out of date、
+// Cipher doesn't exist；官方服务：You do not have permissions to edit this、The cipher you are updating is out of date
+const READ_ONLY_MESSAGE = /not write accessible|no rights to modify|permission|invalid collection/i
+const CONFLICT_MESSAGE = /out of date/i
+const MISSING_MESSAGE = /doesn't exist|does not exist|not found/i
+
+function checkId(id: string): void {
+  if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
+    throw new VaultError('item_unavailable', '条目不可用')
+  }
+}
+
 interface Access {
   token: string
   expiresAt: number
@@ -274,52 +297,158 @@ class Session implements VaultSession {
     return formatLogged(this.http, 'sync', () => decodeSyncItems(json, state))
   }
 
-  // 写入还没有实现：加密、放进集合、只改给了的字段，见 types.ts 的 VaultSession
-  createItem(): Promise<VaultItem> {
-    return Promise.reject(new VaultError('server_error', '暂不支持写入密码库'))
-  }
-
-  updateItem(): Promise<VaultItem> {
-    return Promise.reject(new VaultError('server_error', '暂不支持写入密码库'))
-  }
-
   async item(id: string): Promise<VaultItem> {
-    if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
-      throw new VaultError('item_unavailable', '条目不可用')
-    }
+    checkId(id)
     await this.saveRefreshToken()
     // 取条目与为它重新同步都在同一个令牌下做：哪一步遇到 401，都换一次令牌从头再来
-    const { json, state } = await this.withAccess(async (access, fresh) => {
-      const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
-        method: 'GET',
-        headers: { authorization: `Bearer ${access.token}` },
-      })
-      if (res.status === 401) return null
-      // 不存在、看不到（不在分给它的集合里）时 Vaultwarden 回 400，官方服务回 404
-      if (res.status === 400 || res.status === 403 || res.status === 404) {
-        throw new VaultError('item_unavailable', '条目不可用')
-      }
-      if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
-      const orgId = str(res.json, 'organizationId')
-      // 上次同步之后才加入的组织：重新同步一次取它的密钥。刚换令牌时已经同步过，不再同步第二次，按不可用处理
-      if (
-        !fresh &&
-        orgId &&
-        !access.state.orgKeys.has(orgId) &&
-        !access.state.orgKeyErrors.has(orgId)
-      ) {
+    const { json, state } = await this.withAccess((access, fresh) =>
+      this.fetchCipher(access, fresh, id),
+    )
+    return this.decoded(json, state, [])
+  }
+
+  async createItem(input: VaultNewItem): Promise<VaultItem> {
+    // 字段不对时在发请求之前报错
+    checkNewItem(input)
+    await this.saveRefreshToken()
+    return this.withAccess(async (access, fresh) => {
+      let state = access.state
+      const find = (s: SyncedState) =>
+        s.snapshot.collections.find(
+          (c) => c.id === input.collectionId && c.organizationId === input.organizationId,
+        )
+      let collection = find(state)
+      // 上次同步之后才分到的集合：重新同步一次。刚换令牌时已经同步过，不再同步第二次
+      if (!collection && !fresh) {
         const synced = await this.sync(access)
         if (!synced) return null
-        return { json: res.json, state: synced.state }
+        state = synced.state
+        collection = find(state)
       }
-      return { json: res.json, state: access.state }
+      if (!collection) throw new VaultError('read_only', COLLECTION_UNAVAILABLE)
+      if (collection.readOnly) throw readOnly()
+      const orgKey = state.orgKeys.get(input.organizationId)
+      if (!orgKey) throw new VaultError('read_only', COLLECTION_UNAVAILABLE)
+      const body = newCipherBody(input, orgKey, state.snapshot.account.userId)
+      const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/create`, {
+        method: 'POST',
+        headers: { authorization: `Bearer ${access.token}`, ...JSON_BODY },
+        body: JSON.stringify(body),
+      })
+      if (res.status === 401) return null
+      if (res.status !== 200) throw this.writeRejected(res, 'cipher_create')
+      return this.decoded(res.json, state, [input.collectionId])
     })
+  }
+
+  async updateItem(
+    id: string,
+    changes: VaultItemChanges,
+    expectedRevisionDate: string,
+  ): Promise<VaultItem> {
+    checkId(id)
+    // 类型要取到条目才知道，这里先查字段的写法
+    checkChanges(changes, null)
+    await this.saveRefreshToken()
+    return this.withAccess(async (access, fresh) => {
+      const fetched = await this.fetchCipher(access, fresh, id)
+      if (!fetched) return null
+      const { json, state } = fetched
+      const current = this.decoded(json, state, [])
+      if (current.revisionDate !== expectedRevisionDate) throw conflict()
+      // 服务端给的 edit 为 false，或者条目所在的集合都只读：改不了
+      const collections = current.collectionIds.map((cid) =>
+        state.snapshot.collections.find((c) => c.id === cid),
+      )
+      if (
+        prop(json, 'edit') === false ||
+        (collections.length > 0 && collections.every((c) => c?.readOnly === true))
+      ) {
+        throw readOnly()
+      }
+      const body = formatLogged(this.http, 'cipher', () =>
+        updatedCipherBody({
+          raw: json,
+          type: current.type,
+          changes,
+          // decodeItem 解开了，组织密钥一定在
+          orgKey: state.orgKeys.get(current.organizationId)!,
+          userId: state.snapshot.account.userId,
+          now: new Date(this.now()).toISOString(),
+        }),
+      )
+      const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
+        method: 'PUT',
+        headers: { authorization: `Bearer ${access.token}`, ...JSON_BODY },
+        body: JSON.stringify(body),
+      })
+      if (res.status === 401) return null
+      if (res.status !== 200) throw this.writeRejected(res, 'cipher_update')
+      // 修改不动集合：响应里没有集合时用原来的
+      return this.decoded(res.json, state, current.collectionIds)
+    })
+  }
+
+  // 取一个条目的原始响应；为没见过的组织重新同步。401 返回 null
+  private async fetchCipher(
+    access: Access,
+    fresh: boolean,
+    id: string,
+  ): Promise<{ json: unknown; state: SyncedState } | null> {
+    const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
+      method: 'GET',
+      headers: { authorization: `Bearer ${access.token}` },
+    })
+    if (res.status === 401) return null
+    // 不存在、看不到（不在分给它的集合里）时 Vaultwarden 回 400，官方服务回 404
+    if (res.status === 400 || res.status === 403 || res.status === 404) {
+      throw new VaultError('item_unavailable', '条目不可用')
+    }
+    if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
+    const orgId = str(res.json, 'organizationId')
+    // 上次同步之后才加入的组织：重新同步一次取它的密钥。刚换令牌时已经同步过，不再同步第二次，按不可用处理
+    if (
+      !fresh &&
+      orgId &&
+      !access.state.orgKeys.has(orgId) &&
+      !access.state.orgKeyErrors.has(orgId)
+    ) {
+      const synced = await this.sync(access)
+      if (!synced) return null
+      return { json: res.json, state: synced.state }
+    }
+    return { json: res.json, state: access.state }
+  }
+
+  // 解开条目。Vaultwarden 给非管理员的单个条目不带集合：用同步时的，同步里也没有时用 fallback
+  private decoded(json: unknown, state: SyncedState, fallback: string[]): VaultItem {
     const item = formatLogged(this.http, 'cipher', () => decodeItem(json, state))
-    // Vaultwarden 给非管理员的单个条目不带集合，用同步时的
     if (item.collectionIds.length === 0) {
-      item.collectionIds = state.snapshot.items.find((i) => i.id === id)?.collectionIds ?? []
+      const synced = state.snapshot.items.find((i) => i.id === item.id)?.collectionIds ?? []
+      item.collectionIds = synced.length ? synced : [...fallback]
     }
     return item
+  }
+
+  // 写入被拒。按服务端的说明分出只读与冲突；说明只用来分类，不进错误与日志
+  private writeRejected(res: HttpResponse, endpoint: string): VaultError {
+    const message = str(res.json, 'message') ?? ''
+    if (res.status === 400 && CONFLICT_MESSAGE.test(message)) {
+      this.http.log({ what: 'rejected', status: res.status, endpoint, problem: 'conflict' })
+      return conflict()
+    }
+    if (res.status === 403 || (res.status === 400 && READ_ONLY_MESSAGE.test(message))) {
+      this.http.log({ what: 'rejected', status: res.status, endpoint, problem: 'read_only' })
+      return readOnly()
+    }
+    if (
+      endpoint === 'cipher_update' &&
+      (res.status === 404 || (res.status === 400 && MISSING_MESSAGE.test(message)))
+    ) {
+      this.http.log({ what: 'rejected', status: res.status, endpoint, problem: 'missing' })
+      return new VaultError('item_unavailable', '条目不可用')
+    }
+    return unexpectedStatus(this.http, res.status)
   }
 
   // 带着访问令牌执行；令牌被服务端拒绝（401，fn 返回 null）时换一次令牌再试

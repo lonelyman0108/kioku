@@ -117,7 +117,11 @@ export interface VaultSession {
   createItem(item: VaultNewItem): Promise<VaultItem>
   // 修改条目，返回改后的条目。expectedRevisionDate 是读到条目时的修改时间：期间别处改过就抛 item_conflict，
   // 不覆盖；条目所在的集合都只读时抛 read_only；不存在、看不到时抛 item_unavailable
-  updateItem(id: string, changes: VaultItemChanges, expectedRevisionDate: string): Promise<VaultItem>
+  updateItem(
+    id: string,
+    changes: VaultItemChanges,
+    expectedRevisionDate: string,
+  ): Promise<VaultItem>
 }
 
 export interface VaultClient {

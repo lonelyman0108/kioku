@@ -7,7 +7,15 @@ import { VaultError } from './types'
 // 内部日志里记的细节：哪一类问题，加上状态码、连接错误的代码，或者哪个接口的响应缺了什么（只有字段名，不带正文）。
 // error 是 onSecretsChanged 抛的错误经 loggableError 处理之后的样子
 export interface VaultDiagnostic {
-  what: 'connect' | 'timeout' | 'redirect' | 'status' | 'too_large' | 'format' | 'secrets_not_saved'
+  what:
+    | 'connect'
+    | 'timeout'
+    | 'redirect'
+    | 'status'
+    | 'too_large'
+    | 'format'
+    | 'secrets_not_saved'
+    | 'rejected'
   status?: number
   code?: string
   endpoint?: string
@@ -144,7 +152,7 @@ async function readBody(http: HttpOptions, res: Response, signal: AbortSignal): 
 export async function vaultRequest(
   http: HttpOptions,
   url: string,
-  init: { method: 'GET' | 'POST'; headers?: Record<string, string>; body?: string },
+  init: { method: 'GET' | 'POST' | 'PUT'; headers?: Record<string, string>; body?: string },
 ): Promise<HttpResponse> {
   // 计时覆盖读正文：服务器发完响应头之后不再发正文，也按超时算
   const signal = AbortSignal.timeout(http.timeoutMs)
