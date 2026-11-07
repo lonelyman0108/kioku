@@ -276,6 +276,11 @@ describe('登录', () => {
       'http://vault.bitwarden.com',
       'http://[fd00::1]:8080',
       'http://vaultwarden.',
+      // 写成数字的主机名会被 URL 规范成 IPv4 地址，按写下的判断，和契约一致
+      'http://3232235777',
+      'http://2130706433',
+      'http://0x7f000001',
+      'http://127.1',
     ]) {
       expect(
         await kindOf(createVaultClient({ fetch }).login({ ...loginInput('dedicated'), serverUrl })),

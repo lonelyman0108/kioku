@@ -4,7 +4,7 @@ import {
   type VaultConnection,
   type VaultTwoFactorProvider,
 } from '@kioku/contracts'
-import { computed, reactive, ref, type Ref } from 'vue'
+import { computed, reactive, ref, watch, type Ref } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -28,20 +28,43 @@ export function useVaultLogin(
   // 每次提交一个序号：关掉、返回之后迟到的结果不碰这时的状态
   let submitId = 0
 
+  // 当前这一步输入过没有：重置、换步骤、失败时清掉。这里自己改表单（清空主密码、填回原来的地址）不算输入，
+  // 所以表单的改动同步地看，自己改的时候先把 quiet 打开
+  const touched = ref(false)
+  let quiet = false
+  watch(
+    form,
+    () => {
+      if (!quiet) touched.value = true
+    },
+    { deep: true, flush: 'sync' },
+  )
+  function quietly(fn: () => void) {
+    quiet = true
+    try {
+      fn()
+    } finally {
+      quiet = false
+    }
+  }
+
   // 打开时：重新登录的带上原来的地址与邮箱，别的都清掉
   function reset() {
     submitId++
     const c = target.value
-    Object.assign(form, {
-      serverUrl: c?.serverUrl ?? '',
-      email: c?.email ?? '',
-      masterPassword: '',
-      code: '',
-    })
+    quietly(() =>
+      Object.assign(form, {
+        serverUrl: c?.serverUrl ?? '',
+        email: c?.email ?? '',
+        masterPassword: '',
+        code: '',
+      }),
+    )
     step.value = 'login'
     provider.value = undefined
     submitting.value = false
     failure.value = null
+    touched.value = false
   }
 
   // 回到第一步：验证码作废，主密码要重新填
@@ -49,9 +72,9 @@ export function useVaultLogin(
     submitId++
     submitting.value = false
     step.value = 'login'
-    form.masterPassword = ''
-    form.code = ''
+    quietly(() => Object.assign(form, { masterPassword: '', code: '' }))
     failure.value = null
+    touched.value = false
   }
 
   const twoFactor = () =>
@@ -86,6 +109,9 @@ export function useVaultLogin(
     return parsed.success ? null : (parsed.error.issues[0]?.message ?? '填写内容有误')
   })
 
+  // 页脚说明「连接」为什么点不了：当前这一步输入过之后才显示。有失败原因、失败之后还没改过表单时只显示失败原因
+  const hint = computed(() => (touched.value ? problem.value : null))
+
   async function submit() {
     if (submitting.value || problem.value) return
     const id = ++submitId
@@ -103,27 +129,27 @@ export function useVaultLogin(
         // 主密码留到第二次提交
         step.value = 'two_factor'
         provider.value = result.providers[0]
-        form.code = ''
+        quietly(() => (form.code = ''))
         if (!provider.value) {
-          form.masterPassword = ''
+          quietly(() => (form.masterPassword = ''))
           failure.value = '不支持此账号的两步验证方式，请为专用账号改用验证器应用'
         }
+        touched.value = false
         return
       }
-      form.masterPassword = ''
-      form.code = ''
+      quietly(() => Object.assign(form, { masterPassword: '', code: '' }))
       onConnected(result.connection, sid)
     } catch (err) {
       if (id !== submitId) return
-      form.masterPassword = ''
-      form.code = ''
+      quietly(() => Object.assign(form, { masterPassword: '', code: '' }))
       // 主密码清掉了，验证码这一步也接不下去，回到第一步重新填
       step.value = 'login'
       failure.value = err instanceof ApiError ? err.message : '连接失败'
+      touched.value = false
     } finally {
       if (id === submitId) submitting.value = false
     }
   }
 
-  return { form, step, provider, submitting, failure, problem, reset, back, submit }
+  return { form, step, provider, submitting, failure, problem, hint, reset, back, submit }
 }

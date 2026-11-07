@@ -12,7 +12,8 @@ import {
   seedVaultwarden,
   type Seeded,
 } from '../../../testing/vaultwarden'
-import { createVaultClient, totpCode } from '../client'
+import { createVaultClient } from '../client'
+import { totpCode } from '../totp'
 import { VaultError, type VaultLoginInput, type VaultSecrets } from '../types'
 
 // 真连 Vaultwarden：设 KIOKU_TEST_VAULTWARDEN_URL（例如 http://127.0.0.1:18081，起法见 docker-compose.dev.yml），

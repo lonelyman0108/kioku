@@ -160,6 +160,77 @@ describe('连接密码库', () => {
   })
 })
 
+describe('页脚的提示', () => {
+  const twoFactor = () =>
+    fakes.api.connectVault.mockResolvedValueOnce({
+      kind: 'two_factor_required',
+      providers: ['authenticator'],
+    })
+
+  it('空表单不提示，输入之后提示', () => {
+    const login = start()
+    expect(login.problem.value).not.toBeNull()
+    expect(login.hint.value).toBeNull()
+    login.form.serverUrl = 'ftp://vault.example.com'
+    expect(login.hint.value).toBe(login.problem.value)
+    expect(login.hint.value).not.toBeNull()
+  })
+
+  it('重新登录时填回的地址与邮箱不算输入', () => {
+    const login = start(connection({ status: 'reauth_required' }))
+    expect(login.problem.value).toBe('主密码不能为空')
+    expect(login.hint.value).toBeNull()
+  })
+
+  it('刚进入两步验证那一步不提示，填过验证码之后才提示', async () => {
+    twoFactor()
+    const login = start()
+    fill(login)
+    expect(login.hint.value).toBeNull()
+    await login.submit()
+    expect(login.step.value).toBe('two_factor')
+    expect(login.problem.value).toBe('验证码不能为空')
+    expect(login.hint.value).toBeNull()
+    login.form.code = '1'
+    login.form.code = ''
+    expect(login.hint.value).toBe('验证码不能为空')
+  })
+
+  it('上一步之后不提示', async () => {
+    twoFactor()
+    const login = start()
+    fill(login)
+    await login.submit()
+    login.form.code = '1'
+    login.back()
+    expect(login.problem.value).toBe('主密码不能为空')
+    expect(login.hint.value).toBeNull()
+  })
+
+  it('失败之后只显示失败原因；改过表单之后提示照常显示', async () => {
+    fakes.api.connectVault.mockRejectedValueOnce(new ApiError(400, '邮箱或主密码不正确'))
+    const login = start()
+    fill(login)
+    await login.submit()
+    expect(login.failure.value).toBe('邮箱或主密码不正确')
+    expect(login.problem.value).toBe('主密码不能为空')
+    expect(login.hint.value).toBeNull()
+
+    login.form.email = 'not-an-email'
+    expect(login.hint.value).not.toBeNull()
+    expect(login.hint.value).toBe(login.problem.value)
+    expect(login.failure.value).toBe('邮箱或主密码不正确')
+  })
+
+  it('重置之后不提示', () => {
+    const login = start()
+    login.form.email = 'x'
+    expect(login.hint.value).not.toBeNull()
+    login.reset()
+    expect(login.hint.value).toBeNull()
+  })
+})
+
 describe('重新登录', () => {
   it('地址与邮箱带上原来的；邮箱没改不发，改了发新的', async () => {
     const conn = connection({ status: 'reauth_required' })

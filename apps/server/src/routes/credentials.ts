@@ -170,7 +170,8 @@ function consoleCredentialRoutes(deps: Deps) {
     ...connCommon,
     method: 'post',
     path: `${connBase}/{connectionId}/check`,
-    summary: '重新同步一次：停用的原因已经消失就恢复成可用',
+    summary:
+      '重新同步一次：停用的原因已经消失就恢复成可用；连不上或返回的内容无法识别时记下最近的错误，回 502',
     request: { params: ConnectionParams },
     responses: { 200: jsonResponse('连接', VaultConnection), ...errors },
   })

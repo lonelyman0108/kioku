@@ -50,29 +50,46 @@ const OFFICIAL = new Map<string, VaultEndpoints>([
 // http 只给两种地址：本机回环地址（测试与装在同一台机器上的密码库），和不带点的单段主机名
 // （同一个 Docker 网络里的服务名，例如 vaultwarden）。别的地址要 https：令牌与密文不能明文过网络
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
+// 单段的主机名全是数字（或 0x 开头的十六进制）时，URL 把它当成 IPv4 地址，规范成带点的写法
+// （http://3232235777 → 192.168.1.1），不是服务名
+const NUMERIC_HOST = /^(?:\d+|0x[0-9a-f]*)$/i
+const SERVICE_NAME = /^[a-z0-9-]+$/i
 
-function plainHttpAllowed(hostname: string): boolean {
-  if (LOOPBACK.has(hostname)) return true
-  // IPv6 地址写在方括号里、也不带点，不算服务名
-  return hostname !== '' && !hostname.includes('.') && !hostname.startsWith('[')
+export const PLAIN_HTTP_RULE =
+  '服务器地址须使用 https；本机地址与同一个 Docker 网络里的服务名（不带点的主机名）可以用 http'
+
+// 按写下的主机名判断，不用 URL 解析之后的：解析会把数字写法的主机名换成 IPv4 地址。规则和契约的 VaultServerUrl 一致
+function plainHttpAllowed(host: string): boolean {
+  const name = host.toLowerCase()
+  if (LOOPBACK.has(name)) return true
+  return SERVICE_NAME.test(name) && !NUMERIC_HOST.test(name)
 }
 
-export function vaultEndpoints(serverUrl: string): VaultEndpoints {
+// 地址里写下的主机名：去掉协议、路径与端口；IPv6 地址带着方括号
+function writtenHost(serverUrl: string): string {
+  const authority = /^[a-z][a-z0-9+.-]*:\/\/([^/?#\\]*)/i.exec(serverUrl.trim())?.[1] ?? ''
+  return authority.replace(/:\d*$/, '')
+}
+
+// 地址不能用的原因，能用时为 null。登录之前也用它检查，地址的问题不当作连不上
+export function serverUrlProblem(serverUrl: string): string | null {
   let url: URL
   try {
     url = new URL(serverUrl)
   } catch {
-    throw new VaultError('unreachable', '服务器地址无效')
+    return '服务器地址无效'
   }
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
-    throw new VaultError('unreachable', '服务器地址无效')
+    return '服务器地址无效'
   }
-  if (url.protocol === 'http:' && !plainHttpAllowed(url.hostname)) {
-    throw new VaultError(
-      'unreachable',
-      '服务器地址须使用 https；本机地址与同一个 Docker 网络里的服务名（不带点的主机名）可以用 http',
-    )
-  }
+  if (url.protocol === 'http:' && !plainHttpAllowed(writtenHost(serverUrl))) return PLAIN_HTTP_RULE
+  return null
+}
+
+export function vaultEndpoints(serverUrl: string): VaultEndpoints {
+  const problem = serverUrlProblem(serverUrl)
+  if (problem) throw new VaultError('unreachable', problem)
+  const url = new URL(serverUrl)
   const official = url.protocol === 'https:' && !url.port ? OFFICIAL.get(url.hostname) : undefined
   if (official) return official
   const base = `${url.origin}${url.pathname.replace(/\/+$/, '')}`

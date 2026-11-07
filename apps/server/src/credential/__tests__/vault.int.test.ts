@@ -26,6 +26,7 @@ import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../
 import { credentialServiceForKey } from '../context'
 import { CredentialService } from '../service'
 import { sealVaultSecrets, VaultConnections } from '../vault'
+import { PLAIN_HTTP_RULE } from '../bitwarden/http'
 import { totpCode } from '../bitwarden/totp'
 
 const EMAIL = 'agent@example.com'
@@ -187,6 +188,34 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
         502,
       ),
     ).toContain('无法连接')
+  })
+
+  it('地址不合客户端的规则时回 400 并说明规则，不说成连不上，也不向密码库请求', async () => {
+    // 契约与客户端是同一条规则，经接口进不来：直接调服务，以及库里留着按旧规则存下的地址
+    await expect(
+      connectionsOf().connect({
+        serverUrl: 'http://3232235777',
+        email: EMAIL,
+        masterPassword: MASTER,
+      }),
+    ).rejects.toMatchObject({ status: 400, message: PLAIN_HTTP_RULE })
+    const connection = await connected()
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(vaultConnections)
+        .set({ serverUrl: 'http://0xc0a80101' })
+        .where(eq(vaultConnections.id, connection.id)),
+    )
+    const logins = vault.calls.login
+    expect(
+      await errorOf(
+        await asMember('POST', `/vault-connections/${connection.id}/reconnect`, {
+          masterPassword: MASTER,
+        }),
+        400,
+      ),
+    ).toBe(PLAIN_HTTP_RULE)
+    expect(vault.calls.login).toBe(logins)
   })
 
   it('同一个成员同时只收一个连接或重新登录的请求，结束之后释放', async () => {
@@ -424,6 +453,31 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       ['ok', null],
       ['failed', 'unreachable'],
     ])
+  })
+
+  it('重新检查连不上或返回的内容无法识别时记下最近的错误，回 502，文字和列出条目时一样', async () => {
+    const connection = await connected()
+    const check = () => asMember('POST', `/vault-connections/${connection.id}/check`)
+    const items = () => asMember('GET', `/vault-connections/${connection.id}/items`)
+
+    vault.failNext('unreachable')
+    const checkText = await errorOf(await check(), 502)
+    expect(checkText).toBe('无法列出条目：密码库无法连接')
+    expect((await connectionRow(connection.id)).lastErrorKind).toBe('unreachable')
+    vault.failNext('unreachable')
+    expect(await errorOf(await items(), 502)).toBe(checkText)
+
+    vault.failNext('unsupported_format')
+    const formatText = await errorOf(await check(), 502)
+    expect((await connectionRow(connection.id)).lastErrorKind).toBe('unsupported_format')
+    vault.failNext('unsupported_format')
+    expect(await errorOf(await items(), 502)).toBe(formatText)
+
+    // 状态没变，成功一次就清掉最近的错误
+    expect(await ok<VaultConnection>(await check())).toMatchObject({
+      status: 'ok',
+      lastError: null,
+    })
   })
 
   it('刷新令牌失效时先重读库里的密文：别的进程刚换过令牌就用新的再试一次', async () => {

@@ -15,8 +15,11 @@ import {
   sameScopes,
 } from '../components/keyPresets'
 import { scopesSummary } from '../labels'
+import { remainingTotal } from '../masterKey'
+import { ApiError } from '../api/client'
 import {
   canManageCredentials,
+  checkNotice,
   collectionNames,
   connectionStatusText,
   credentialEventParts,
@@ -109,6 +112,24 @@ describe('连接', () => {
     expect(
       connectionStatusText(conn({ status: 'disabled', disabledReason: 'organization_role' })),
     ).toBe('已停用：组织里可访问全部集合')
+  })
+
+  it('重新检查：可用、连接的状态，失败时按服务端的错误提示', () => {
+    expect(checkNotice({ connection: { status: 'ok', disabledReason: null } })).toEqual({
+      title: '连接可用',
+      color: 'success',
+    })
+    expect(
+      checkNotice({ connection: { status: 'disabled', disabledReason: 'personal_items' } }).color,
+    ).toBe('warning')
+    expect(checkNotice({ error: new ApiError(502, '无法列出条目：密码库无法连接') })).toEqual({
+      title: '无法列出条目：密码库无法连接',
+      color: 'error',
+    })
+    expect(checkNotice({ error: new TypeError('x') })).toEqual({
+      title: '检查失败',
+      color: 'error',
+    })
   })
 
   it('只有可用的连接列条目', () => {
@@ -262,15 +283,40 @@ describe('界面用上了这些规则', () => {
     expect(credentialForm).toContain('vaultCredentialDraft(item.item, props.identifiers)')
   })
 
+  it('重新检查失败时按错误提示，成败都重读连接列表', () => {
+    expect(vaultPanel).toContain('toast.add(checkNotice({ error: err }))')
+    expect(vaultPanel).toMatch(/finally \{\s+busy\.value = false\s+await refresh\(sid\)/)
+    expect(vaultPanel).toContain(
+      "queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] })",
+    )
+  })
+
+  it('修改凭据的表单和详情一样，只在连接可用时读条目', () => {
+    expect(credentialForm).toContain(
+      'enabled: computed(() => open.value && !!connection.value && itemsAvailable(connection.value))',
+    )
+    expect(credentialForm).toContain(
+      "queryKey: computed(() => ['vault-connections', props.spaceId] as const)",
+    )
+    expect(credentialDetail).toContain('itemsAvailable(connection.value)')
+  })
+
   it('两步验证只填验证码，不选方式；解不开的条目数写在条目表上方', () => {
     expect(vaultLogin).not.toContain('URadioGroup')
     expect(vaultLogin).not.toContain('邮件')
     expect(vaultPanel).toContain('{{ items.data.value.unreadableCount }} 个条目无法解开<Hint>')
   })
 
-  it('主密钥剩余的总数算上密码库连接', () => {
-    expect(settingsPage).toContain('r.memories + r.credentials + r.vaultConnections + r.settings')
-    expect(settingsPage).toContain('data.remaining.vaultConnections +')
+  it('主密钥剩余的总数把各类加在一起，算上密码库连接；轮询与显示用同一个函数', () => {
+    expect(remainingTotal({ memories: 1, credentials: 2, vaultConnections: 4, settings: 8 })).toBe(
+      15,
+    )
+    expect(remainingTotal({ memories: 0, credentials: 0, vaultConnections: 3, settings: 0 })).toBe(
+      3,
+    )
+    expect(remainingTotal(undefined)).toBe(0)
+    expect(settingsPage.match(/remainingTotal\(/g)).toHaveLength(2)
+    expect(settingsPage).not.toContain('.memories +')
   })
 
   it('查看的值只放在详情组件里，不进查询缓存', () => {

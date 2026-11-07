@@ -588,10 +588,12 @@ export type VaultConnectionList = z.infer<typeof VaultConnectionList>
 // 服务器地址：https:// 都收；http:// 只收本机回环地址（localhost、127.0.0.1、[::1]）与不带点的主机名
 // （例如 Docker Compose 的服务名 vaultwarden，流量不出 Docker 网络）。不带账号、查询参数与 #，末尾的 / 去掉。
 // 主密码与令牌都发到这里，所以别的地址不收明文的 http。
+// 不带点的主机名全是数字（或 0x 开头的十六进制）时不收：URL 把它当成 IPv4 地址，规范成带点的写法
+// （http://3232235777 → 192.168.1.1），不是服务名。密码库客户端（credential/bitwarden/http.ts）按同一条规则判断。
 // 契约不依赖 URL（浏览器与 Node 之外也要能用），按写法判断，服务端请求之前再用 URL 解析一次
 const SERVER_URL = /^https:\/\/[^\s/?#@\\]+(?:\/[^\s?#\\]*)?$/i
 const LOCAL_HTTP_URL =
-  /^http:\/\/(?:[a-z0-9-]+|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:\/[^\s?#\\]*)?$/i
+  /^http:\/\/(?:(?!(?:\d+|0x[0-9a-f]*)(?:[:/]|$))[a-z0-9-]+|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:\/[^\s?#\\]*)?$/i
 export const VaultServerUrl = z
   .string()
   .trim()

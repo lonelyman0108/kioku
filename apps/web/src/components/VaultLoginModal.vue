@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import type { VaultConnection } from '@kioku/contracts'
-import { computed, nextTick, ref, toRef, watch } from 'vue'
+import { computed, toRef, watch } from 'vue'
 
 import { useVaultLogin } from '../composables/useVaultLogin'
 import Hint from './Hint.vue'
@@ -14,31 +14,15 @@ const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ connected: [connection: VaultConnection, spaceId: string] }>()
 const toast = useToast()
 
-const { form, step, provider, submitting, failure, problem, reset, back, submit } = useVaultLogin(
-  toRef(props, 'spaceId'),
-  toRef(props, 'connection'),
-  (connection, sid) => {
+const { form, step, provider, submitting, failure, problem, hint, reset, back, submit } =
+  useVaultLogin(toRef(props, 'spaceId'), toRef(props, 'connection'), (connection, sid) => {
     open.value = false
     toast.add({ title: props.connection ? '已重新登录' : '已连接密码库', color: 'success' })
     emit('connected', connection, sid)
-  },
-)
-
-// 页脚的提示说明「连接」为什么点不了：刚打开的空表单不提示，有失败原因时只显示失败原因
-const edited = ref(false)
-watch(form, () => (edited.value = true), { deep: true })
-const hint = computed(() => (edited.value && !failure.value ? problem.value : null))
+  })
 
 // 打开时按要连的那一个重新填；关掉时清掉主密码与验证码
-watch(
-  open,
-  async () => {
-    reset()
-    await nextTick()
-    edited.value = false
-  },
-  { immediate: true },
-)
+watch(open, () => reset(), { immediate: true })
 
 const reconnecting = computed(() => props.connection !== null)
 </script>

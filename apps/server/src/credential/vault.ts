@@ -20,6 +20,7 @@ import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
 import { withSpace, type Db, type Tx } from '../db/client'
 import { credentials, vaultConnections } from '../db/schema'
 import { MemoryError } from '../memory/service'
+import { serverUrlProblem } from './bitwarden/http'
 import {
   VaultError,
   type VaultClient,
@@ -132,6 +133,28 @@ function loginFailure(err: unknown): never {
     default:
       throw new MemoryError(502, '密码库返回的内容无法识别')
   }
+}
+
+// 同步之后拿不到条目时的错误：停用、需要重新登录按连接的状态说，其余按最近的错误说
+function syncFailure(row: ConnectionRow): MemoryError {
+  const reason: CredentialAccessReason =
+    row.status === 'disabled'
+      ? 'disabled'
+      : row.status === 'reauth_required'
+        ? 'reauth_required'
+        : row.lastErrorKind === 'unreachable'
+          ? 'unreachable'
+          : 'vault_error'
+  const detail =
+    row.disabledReason !== null
+      ? `：${VAULT_DISABLED_REASON_NAMES[row.disabledReason]}`
+      : reason === 'reauth_required'
+        ? '，请重新登录'
+        : ''
+  return new MemoryError(
+    reasonStatus(reason),
+    `无法列出条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail}`,
+  )
 }
 
 // 缓存的会话记着建它时（或它最近一次保存的）密文：密文变了就是重新登录或换过令牌，换一个会话
@@ -333,6 +356,9 @@ export class VaultConnections {
     expected: ConnectionRow | null,
   ): Promise<VaultConnectResult> {
     const masterKey = this.requireMasterKey()
+    // 地址不合规则时客户端报的是连不上，这里先用它的判断查一遍，说明地址的规则
+    const urlProblem = serverUrlProblem(input.serverUrl)
+    if (urlProblem) throw new MemoryError(400, urlProblem)
     const result = await this.ctx.client.login(input).catch(loginFailure)
     if (result.kind === 'two_factor_required') {
       return { kind: 'two_factor_required', providers: result.providers }
@@ -534,7 +560,7 @@ export class VaultConnections {
     if (!now || now.status !== 'ok' || !now.ciphertext) this.forget(row.id)
   }
 
-  // 同步一次：停用的原因消失了就恢复成可用，没消失就照旧停用。连接出错时更新状态、照样返回连接
+  // 同步一次：停用的原因消失了就恢复成可用，没消失就照旧停用。连接出错时更新状态，快照为 null
   private async sync(
     row: ConnectionRow,
   ): Promise<{ snapshot: VaultSnapshot | null; row: ConnectionRow }> {
@@ -585,9 +611,12 @@ export class VaultConnections {
     return { snapshot, row: updated }
   }
 
+  // 同步失败（连不上、认不出的内容）时记下最近的错误之后报错，和列出条目连不上时同一句；
+  // 停用与需要重新登录是连接的状态，照常返回连接
   async check(id: string): Promise<VaultConnection> {
     const row = await this.run((tx) => this.own(tx, id))
-    const { row: updated } = await this.sync(row)
+    const { snapshot, row: updated } = await this.sync(row)
+    if (!snapshot && updated.status === 'ok') throw syncFailure(updated)
     return this.run((tx) => this.viewOf(tx, updated))
   }
 
@@ -595,26 +624,7 @@ export class VaultConnections {
   async items(id: string): Promise<VaultItemList> {
     const row = await this.run((tx) => this.own(tx, id))
     const { snapshot, row: updated } = await this.sync(row)
-    if (!snapshot || updated.status !== 'ok') {
-      const reason: CredentialAccessReason =
-        updated.status === 'disabled'
-          ? 'disabled'
-          : updated.status === 'reauth_required'
-            ? 'reauth_required'
-            : updated.lastErrorKind === 'unreachable'
-              ? 'unreachable'
-              : 'vault_error'
-      const detail =
-        updated.disabledReason !== null
-          ? `：${VAULT_DISABLED_REASON_NAMES[updated.disabledReason]}`
-          : reason === 'reauth_required'
-            ? '，请重新登录'
-            : ''
-      throw new MemoryError(
-        reasonStatus(reason),
-        `无法列出条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail}`,
-      )
-    }
+    if (!snapshot || updated.status !== 'ok') throw syncFailure(updated)
     const bound = await this.run((tx) =>
       tx
         .select({

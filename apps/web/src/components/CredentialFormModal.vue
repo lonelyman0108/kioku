@@ -16,7 +16,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { itemFieldLabel, vaultCredentialDraft } from '../vault'
+import { itemFieldLabel, itemsAvailable, vaultCredentialDraft } from '../vault'
 import Hint from './Hint.vue'
 
 // 新建托管凭据、给密码库条目起标识、修改两种凭据共用。修改时打开的那一刻记下这一版：
@@ -112,18 +112,26 @@ watch(open, (isOpen) => {
     : (draft?.fields ?? []).map((f) => vaultRow(f.name, f.itemField!))
 })
 
-// 修改密码库凭据时，可选的条目字段从连接的条目列表里取；和凭据页、详情同一个查询
+// 修改密码库凭据时，可选的条目字段从连接的条目列表里取；和凭据页、详情同一个查询，只有可用的连接列得出条目
 const editingConnection = computed(() => origin.value?.vault?.connectionId ?? null)
+const connections = useQuery({
+  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
+  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
+  enabled: computed(() => open.value && editingConnection.value !== null),
+})
+const connection = computed(
+  () => connections.data.value?.items.find((x) => x.id === editingConnection.value) ?? null,
+)
 const items = useQuery({
   queryKey: computed(() => ['vault-items', props.spaceId, editingConnection.value] as const),
   queryFn: ({ queryKey: [, sid, id] }) => api.vaultItems(sid, id!),
-  enabled: computed(() => open.value && editingConnection.value !== null),
+  enabled: computed(() => open.value && !!connection.value && itemsAvailable(connection.value)),
 })
 const itemFields = computed<string[]>(() => {
   if (target.value) return target.value.item.fields
   const itemId = origin.value?.vault?.itemId
   const found = items.data.value?.items.find((i) => i.id === itemId)
-  // 条目读不到时（不可用、列表读取失败）只能在已有的对应里改
+  // 条目读不到时（连接不可用、条目不可用、列表读取失败）只能在已有的对应里改
   const known = found?.fields ?? []
   const current = vaultRows.value.map((r) => r.itemField)
   return [...new Set([...known, ...current])]
