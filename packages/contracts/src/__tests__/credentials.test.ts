@@ -9,6 +9,7 @@ import {
   CredentialListQuery,
   CredentialStoredIn,
   CredentialUrl,
+  CredentialWriteError,
   defaultCredentialFields,
   isVaultFieldRef,
   KeyCreateCredentialRequest,
@@ -280,5 +281,25 @@ describe('筛选与去处', () => {
         .success,
     ).toBe(true)
     expect(SetVaultDestinationRequest.safeParse({ collectionId: '../x' }).success).toBe(false)
+  })
+})
+
+describe('写入的错误体', () => {
+  it('原因只收几种，留在密码库里的条目可选', () => {
+    for (const reason of ['version', 'item_conflict', 'read_only', 'value_too_long']) {
+      expect(CredentialWriteError.safeParse({ error: 'x', reason }).success, reason).toBe(true)
+    }
+    expect(CredentialWriteError.safeParse({ error: 'x', reason: 'other' }).success).toBe(false)
+    expect(
+      CredentialWriteError.safeParse({
+        error: 'x',
+        vaultItem: {
+          connectionId: '00000000-0000-4000-8000-000000000000',
+          itemId: 'item-1',
+          itemName: '邮箱',
+          collectionName: 'Agent',
+        },
+      }).success,
+    ).toBe(true)
   })
 })

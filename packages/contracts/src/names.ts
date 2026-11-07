@@ -69,15 +69,18 @@ export const CREDENTIAL_ACCESS_REASON_NAMES: Record<CredentialAccessReason, stri
 }
 
 // 和密码库通信失败的类别：连接的最近错误，也是写回失败（新建、修改条目）时给调用方的说法。
-// read_only 与 item_conflict 只在写回时出现：服务端回 409，item_conflict 要先重新读取凭据再改
+// read_only、item_conflict 与 value_too_long 只在写回时出现：前两种服务端回 409，item_conflict 要先重新读取凭据再改；
+// value_too_long 回 400，可以改成托管或缩短值。
+// read_only 也用在集合不在同步结果里、组织密钥解不开时，所以说法两种情况都读得通
 export const VAULT_ERROR_KIND_NAMES: Record<VaultErrorKind, string> = {
   invalid_credentials: '邮箱或主密码错误',
   two_factor_invalid: '验证码错误',
   unsupported_two_factor: '不支持此两步验证方式',
   reauth_required: '登录已失效',
   item_unavailable: '条目不可用',
-  read_only: '集合只读',
+  read_only: '集合只读或不可用',
   item_conflict: '条目已在别处修改',
+  value_too_long: '值超出密码库的长度上限',
   unsupported_format: '无法识别的加密格式',
   integrity: '内容校验失败',
   unreachable: '无法连接服务器',

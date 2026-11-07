@@ -5,6 +5,7 @@ import type {
   CredentialAccess,
   CredentialEventList,
   CredentialValues,
+  VaultCheckResult,
   VaultConnection,
   VaultConnectionList,
   VaultConnectResult,
@@ -297,7 +298,9 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
         credential: null,
       }),
     ])
-    expect(items.collections).toEqual([{ id: 'col-1', organizationId: 'org-1', name: 'Agent' }])
+    expect(items.collections).toEqual([
+      { id: 'col-1', organizationId: 'org-1', name: 'Agent', readOnly: false },
+    ])
     expect(items.unreadableCount).toBe(0)
     vault.state.unreadableItemCount = 2
     expect(
@@ -361,16 +364,16 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
         409,
       ),
     ).toContain('条目不可用')
-    // 密码库的凭据不收值，只改字段对应
+    // 密码库的凭据改值时写回条目，不能删字段（写回见 credentialWriteback.int.test.ts）
     expect(
       await errorOf(
         await asMember('PATCH', `/credentials/${created.id}`, {
           expectedVersion: created.version,
-          values: { password: 'x' },
+          values: { password: null },
         }),
         400,
       ),
-    ).toContain('值在密码库里')
+    ).toContain('不能删字段')
     const narrowed = await ok<ConsoleCredential>(
       await asMember('PATCH', `/credentials/${created.id}`, {
         expectedVersion: created.version,
@@ -407,7 +410,8 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     expect(
       (await ok<CredentialAccess>(await use('identifier=router&field=password'))).values,
     ).toEqual({ password: 'changed-pw' })
-    expect(vault.calls.item).toBe(3)
+    // 起标识用的是同步（要写明条目所在的集合），之后每次取用各取一次条目
+    expect(vault.calls.item).toBe(2)
 
     const revealed = await ok<CredentialValues>(
       await asMember('POST', `/credentials/${created.id}/reveal`),
@@ -479,7 +483,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     expect(await errorOf(await check(), 502)).toBe('重新检查失败：密码库无法连接')
 
     // 状态没变，成功一次就清掉最近的错误
-    expect(await ok<VaultConnection>(await check())).toMatchObject({
+    expect((await ok<VaultCheckResult>(await check())).connection).toMatchObject({
       status: 'ok',
       lastError: null,
     })
@@ -490,7 +494,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     const check = () => asMember('POST', `/vault-connections/${connection.id}/check`)
 
     vault.failNext('item_unavailable')
-    expect(await ok<VaultConnection>(await check())).toMatchObject({
+    expect((await ok<VaultCheckResult>(await check())).connection).toMatchObject({
       status: 'ok',
       lastError: null,
     })
@@ -505,7 +509,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
         tx.update(vaultConnections).set(sealed).where(eq(vaultConnections.id, connection.id)),
       )
     }
-    expect(await ok<VaultConnection>(await check())).toMatchObject({
+    expect((await ok<VaultCheckResult>(await check())).connection).toMatchObject({
       status: 'ok',
       lastError: null,
     })
@@ -516,7 +520,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     const connection = await connected()
     const check = () => asMember('POST', `/vault-connections/${connection.id}/check`)
     vault.state.personalItemCount = 1
-    expect(await ok<VaultConnection>(await check())).toMatchObject({
+    expect((await ok<VaultCheckResult>(await check())).connection).toMatchObject({
       status: 'disabled',
       disabledReason: 'personal_items',
     })
@@ -528,7 +532,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       lastErrorKind: 'unreachable',
     })
 
-    expect(await ok<VaultConnection>(await check())).toMatchObject({
+    expect((await ok<VaultCheckResult>(await check())).connection).toMatchObject({
       status: 'disabled',
       disabledReason: 'personal_items',
       lastError: null,
@@ -632,14 +636,18 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     ).toContain('连接已停用')
 
     // 没清掉时重新检查照旧停用
-    const still = await ok<VaultConnection>(
-      await asMember('POST', `/vault-connections/${connection.id}/check`),
-    )
+    const still = (
+      await ok<VaultCheckResult>(
+        await asMember('POST', `/vault-connections/${connection.id}/check`),
+      )
+    ).connection
     expect(still).toMatchObject({ status: 'disabled', disabledReason: 'personal_items' })
     vault.state.personalItemCount = 0
-    const checked = await ok<VaultConnection>(
-      await asMember('POST', `/vault-connections/${connection.id}/check`),
-    )
+    const checked = (
+      await ok<VaultCheckResult>(
+        await asMember('POST', `/vault-connections/${connection.id}/check`),
+      )
+    ).connection
     expect(checked).toMatchObject({ status: 'ok', disabledReason: null })
     await ok(await use('identifier=router'))
     expect((await accessEvents(created.id)).map((e) => [e.result, e.reason])).toEqual([
@@ -914,7 +922,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
       await asMember('POST', '/credentials', {
         identifier: 'nas',
         name: 'NAS',
-        source: { kind: 'hosted', values: { password: 'pw' } },
+        source: { kind: 'new', values: { password: 'pw' } },
       }),
       201,
     )
@@ -940,18 +948,22 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     vault.state.skipOnSynced = true
     vault.state.personalItemCount = 1
     expect(
-      await ok<VaultConnection>(
-        await asMember('POST', `/vault-connections/${connection.id}/check`),
-      ),
+      (
+        await ok<VaultCheckResult>(
+          await asMember('POST', `/vault-connections/${connection.id}/check`),
+        )
+      ).connection,
     ).toMatchObject({ status: 'disabled', disabledReason: 'personal_items' })
     expect(
       await errorOf(await asMember('GET', `/vault-connections/${connection.id}/items`), 409),
     ).toContain('连接已停用')
     vault.state.personalItemCount = 0
     expect(
-      await ok<VaultConnection>(
-        await asMember('POST', `/vault-connections/${connection.id}/check`),
-      ),
+      (
+        await ok<VaultCheckResult>(
+          await asMember('POST', `/vault-connections/${connection.id}/check`),
+        )
+      ).connection,
     ).toMatchObject({ status: 'ok' })
   })
 
@@ -1003,9 +1015,11 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     const connection = await connected()
     vault.rotateSecrets()
     vault.state.revokeAfterRotate = true
-    const checked = await ok<VaultConnection>(
-      await asMember('POST', `/vault-connections/${connection.id}/check`),
-    )
+    const checked = (
+      await ok<VaultCheckResult>(
+        await asMember('POST', `/vault-connections/${connection.id}/check`),
+      )
+    ).connection
     expect(checked.status).toBe('reauth_required')
     expect(hasCachedSession(vault.client, connection.id)).toBe(false)
   })

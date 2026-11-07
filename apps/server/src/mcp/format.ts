@@ -1,7 +1,9 @@
 import {
   CREDENTIAL_ACCESS_REASON_NAMES,
+  CREDENTIAL_EXPIRY_NAMES,
   LAYER_NAMES,
   type CredentialAccess,
+  type CredentialStoredIn,
   type CredentialSummary,
   type CuratedLayer,
   type DomainSummary,
@@ -63,11 +65,22 @@ const sourceLabel = (c: CredentialSummary) => (c.source === 'hosted' ? 'Kioku �
 const credentialHead = (c: CredentialSummary) =>
   `${inlineText(c.identifier)}（${inlineText(c.name)}）`
 const fieldList = (c: CredentialSummary) => c.fields.map(inlineText).join('、') || '无'
+// 到期：已到期、快到期的写在版本号前面（测试台按「版本 」取到行尾，版本号要在行尾）
+const expiryText = (c: CredentialSummary) =>
+  c.expiry && c.expiresAt ? `，${CREDENTIAL_EXPIRY_NAMES[c.expiry]}（${c.expiresAt}）` : ''
+// 新建的凭据存在哪里（来源已经写在前面）：写进密码库的给出集合，集合的名称是密码库里的明文，也压成单行；
+// 测试台里不写密码库，说明一句
+const storedText = (stored: CredentialStoredIn) =>
+  stored.kind === 'vault'
+    ? `，已写进集合「${inlineText(stored.collectionName)}」`
+    : stored.bench
+      ? '（测试台里不写密码库）'
+      : ''
 
 // 取用结果：值用 JSON 写出，多行的值（例如私钥）也不会和别的行混在一起。测试台里不给值，写占位文字
 export function formatCredentialAccess(a: CredentialAccess): string {
   const c = a.credential
-  const lines = [`凭据：${credentialHead(c)}，版本 ${c.version}`]
+  const lines = [`凭据：${credentialHead(c)}${expiryText(c)}，版本 ${c.version}`]
   if (c.description) lines.push(`说明：${inlineText(c.description)}`)
   lines.push(`来源：${sourceLabel(c)}，字段 ${fieldList(c)}`)
   lines.push(`值：${a.values ? JSON.stringify(a.values) : MASKED_CREDENTIAL_VALUES}`)
@@ -78,7 +91,7 @@ export function formatCredentialAccess(a: CredentialAccess): string {
 export function formatCredentialList(list: KeyCredentialList): string {
   const items = list.items.map(
     (c) =>
-      `- ${credentialHead(c)}：${sourceLabel(c)}，字段 ${fieldList(c)}，版本 ${c.version}${c.description ? `。${inlineText(c.description)}` : ''}`,
+      `- ${credentialHead(c)}：${sourceLabel(c)}，字段 ${fieldList(c)}${expiryText(c)}，版本 ${c.version}${c.description ? `。${inlineText(c.description)}` : ''}`,
   )
   return [
     items.length ? `凭据：\n${items.join('\n')}` : '凭据：暂无可取用的凭据',
@@ -88,8 +101,12 @@ export function formatCredentialList(list: KeyCredentialList): string {
     .join('\n\n')
 }
 
-export function formatCredentialSummary(verb: string, c: CredentialSummary): string {
-  return `${verb}凭据 ${credentialHead(c)}：${sourceLabel(c)}，字段 ${fieldList(c)}，版本 ${c.version}`
+export function formatCredentialSummary(
+  verb: string,
+  c: CredentialSummary,
+  stored?: CredentialStoredIn,
+): string {
+  return `${verb}凭据 ${credentialHead(c)}：${sourceLabel(c)}${stored ? storedText(stored) : ''}，字段 ${fieldList(c)}${expiryText(c)}，版本 ${c.version}`
 }
 
 export const PLAINTEXT_REMINDER =

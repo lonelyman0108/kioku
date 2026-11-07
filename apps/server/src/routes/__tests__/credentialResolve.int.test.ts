@@ -101,7 +101,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
       await asMember('POST', '/credentials', {
         identifier,
         name: '文件服务器',
-        source: { kind: 'hosted', values: { username: 'alice', password: HOSTED_PASSWORD } },
+        source: { kind: 'new', values: { username: 'alice', password: HOSTED_PASSWORD } },
       }),
       201,
     )

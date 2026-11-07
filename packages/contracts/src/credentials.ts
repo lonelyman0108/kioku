@@ -736,7 +736,8 @@ export const ConsoleCredential = CredentialBase.extend({
 })
 export type ConsoleCredential = z.infer<typeof ConsoleCredential>
 
-// 新建的结果：凭据与它写到了哪里
+// 新建的结果：凭据与它写到了哪里。给已有的条目起标识时也给 vault，collectionName 是条目所在的集合：
+// 条目在几个集合里时，是去处的那个集合优先，否则按名称排在最前的那个
 export const CreatedCredential = ConsoleCredential.extend({ storedIn: CredentialStoredIn })
 export type CreatedCredential = z.infer<typeof CreatedCredential>
 
@@ -835,7 +836,8 @@ export const CreateCredentialRequest = z.object({
 })
 export type CreateCredentialRequest = z.infer<typeof CreateCredentialRequest>
 
-// 来源不能改，要换条目就删掉，再用同一个标识新建。fields 只给密码库的，给托管的返回 400。
+// 来源不能改，要换条目就删掉，再用同一个标识新建。fields 只给密码库的，给托管的返回 400；
+// fields 与 values 不能在同一次修改里一起给（values 按哪一份字段对应写会说不清），一起给时返回 400。
 // values：托管的照常改 Kioku 里的值；密码库的写回原条目（要空间所有者，通过 Key 要凭据能力「管理」），规则见下：
 // - 只改给了的字段，别的字段与 Kioku 不认识的内容原样带回；改密码时旧密码进条目的密码历史；
 // - 只能改字段对应里已有的字段，不能删字段（值为 null）、不能改对应到 login.totp 的字段，违反时返回 400；
@@ -1063,11 +1065,26 @@ export const OrphanVaultItem = z.object({
 })
 export type OrphanVaultItem = z.infer<typeof OrphanVaultItem>
 
-// 管理界面新建凭据与转存的错误体：error 之外，写进了密码库却没建成凭据时带 vaultItem。
+// 写入（新建、修改、转存）失败的原因，界面据此给出不同的下一步：
+// version 读到之后被别的请求改过（凭据或记忆的版本号），重新读取再改；item_conflict 条目在别处改过，重新读取凭据再改；
+// read_only 集合只读或不可用，重新读取没有用，要改专用账号的权限或换去处；value_too_long 值超出密码库的长度上限（400），
+// 缩短值，或清除去处改由 Kioku 托管。别的错误不带原因
+export const CREDENTIAL_WRITE_REASONS = [
+  'version',
+  'item_conflict',
+  'read_only',
+  'value_too_long',
+] as const
+export const CredentialWriteReason = z.enum(CREDENTIAL_WRITE_REASONS)
+export type CredentialWriteReason = z.infer<typeof CredentialWriteReason>
+
+// 凭据新建、修改与转存的错误体：error 之外，有上面的原因时带 reason（Key 的错误体也带）；
+// 管理界面里写进了密码库却没建成凭据时带 vaultItem。
 // 通过 Key 的错误体不带它（Key 的响应里没有连接与条目的 id），只在 error 的文字里写明集合与条目的名称、
 // 要所有者在管理界面给它起标识：agent 照原样重试会在集合里再建一个
 export const CredentialWriteError = z.object({
   error: z.string(),
+  reason: CredentialWriteReason.optional(),
   vaultItem: OrphanVaultItem.optional(),
 })
 export type CredentialWriteError = z.infer<typeof CredentialWriteError>
@@ -1256,6 +1273,8 @@ export const VAULT_ERROR_KINDS = [
   'item_unavailable',
   'read_only',
   'item_conflict',
+  // 写入时值加密之后超出密码库的长度上限（客户端发请求之前检查），只在写回时出现
+  'value_too_long',
   'unsupported_format',
   'integrity',
   'unreachable',
@@ -1324,6 +1343,7 @@ export const VaultConnectionList = z.object({ items: z.array(VaultConnection) })
 export type VaultConnectionList = z.infer<typeof VaultConnectionList>
 
 // 设去处：PUT /spaces/{spaceId}/vault-connections/{connectionId}/destination，只给空间所有者。
+// 清除（DELETE）不请求密码库，连接在任何状态下都能清除；设置才要求连接可用。
 // 连接要可用；服务端先同步一次（不在事务里请求密码库），集合要在这个账号读得到的集合里、不是只读，
 // 不在时 400「集合不存在或不可用」，只读时 400「集合只读」。成功时同一个成员别的连接上的去处一起清掉，
 // 响应是这个成员的全部连接（VaultConnectionList）。清除：DELETE 同一个地址，没设也照常返回列表

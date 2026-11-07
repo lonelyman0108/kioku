@@ -120,7 +120,7 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   if (!header) {
     throw new MemoryError(
       400,
-      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
     )
   }
   const result: ParsedSpaceExport = {
@@ -227,6 +227,11 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
   distinct(x.groupPersonas, (r) => `${r.appId}/${r.subjectId}`, '按群换人格的规则')
   const connectionById = byId(x.vaultConnections, '密码库连接')
   distinct(x.vaultConnections, (v) => `${v.serverUrl}/${v.vaultUserId}`, '密码库连接的账号')
+  // 每个成员最多一个去处（唯一索引 vault_connections_destination_idx）
+  const destinations = x.vaultConnections.filter((v) => v.destination)
+  if (destinations.length > 1) {
+    throw invalid(`第 ${destinations[1]!.line} 行密码库连接也设了去处：导出人的去处最多一个`)
+  }
   byId(x.credentials, '凭据')
   distinct(x.credentials, (c) => c.identifier, '凭据的标识')
   distinct(
@@ -554,7 +559,10 @@ async function writeSpace(
         vaultUserId: v.vaultUserId,
         deviceId: randomUUID(),
         status: 'disconnected' as const,
-        defaultCollectionId: v.defaultCollectionId,
+        // 去处留着：重新登录同一个账号就接着用
+        defaultCollectionId: v.destination?.collectionId ?? null,
+        defaultOrganizationId: v.destination?.organizationId ?? null,
+        defaultCollectionName: v.destination?.collectionName ?? null,
         disconnectedAt: now,
         createdAt: time(v.createdAt),
         updatedAt: time(v.updatedAt),
@@ -571,6 +579,8 @@ async function writeSpace(
       description: c.description,
       // 限定的应用换成新的 id；文件里没有的（导出前已经删掉的应用）去掉，限定只会更严，不会变成不限定
       appIds: c.appIds && c.appIds.flatMap((app) => (appIds.has(app) ? [appIds.get(app)!] : [])),
+      expiresAt: c.expiresAt === null ? null : time(c.expiresAt),
+      rotationRequestedAt: c.rotationRequestedAt === null ? null : time(c.rotationRequestedAt),
       createdAt: time(c.createdAt),
       updatedAt: time(c.updatedAt),
     }
@@ -590,6 +600,8 @@ async function writeSpace(
       ...common,
       source: 'hosted' as const,
       fields: names.map((name) => ({ name, itemField: null })),
+      // 值重新加密了，从导入这一刻算起
+      valueChangedAt: new Date(),
       ...sealCredentialValues(
         masterKey!,
         id,
