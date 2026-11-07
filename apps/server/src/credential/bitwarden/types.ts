@@ -115,14 +115,22 @@ export interface VaultSession {
   items(): Promise<VaultItem[]>
   // 在集合里新建一个条目，返回解开的新条目。集合只读时抛 read_only
   createItem(item: VaultNewItem): Promise<VaultItem>
-  // 修改条目，返回改后的条目。expectedRevisionDate 是读到条目时的修改时间：期间别处改过就抛 item_conflict，
-  // 不覆盖；条目所在的集合都只读时抛 read_only；不存在、看不到时抛 item_unavailable。
-  // 值都和现在相同时不发修改，原样返回，修改时间不变：凭据服务按修改时间变没变判断是不是改了值
+  // 修改条目。expectedRevisionDate 是 Kioku 最近看到的修改时间：条目的修改时间比它晚 1 秒以上（在别处改过）时
+  // 抛 item_conflict，不覆盖（怎么比见 revision.ts）；条目所在的集合都只读时抛 read_only；不存在、看不到时抛
+  // item_unavailable；要写的字段和条目的类型对不上时抛 VaultFieldError。
+  // 值都和现在相同时不发修改，changed 为 false，条目与修改时间都不变
   updateItem(
     id: string,
     changes: VaultItemChanges,
     expectedRevisionDate: string,
-  ): Promise<VaultItem>
+  ): Promise<VaultUpdated>
+}
+
+// 修改的结果：改后的条目，以及有没有真的发修改。凭据服务按 changed 判断是不是改了值，不按修改时间推断：
+// 修改时间按 1 秒的容差比，1 秒之内的两次写入分不出来
+export interface VaultUpdated {
+  item: VaultItem
+  changed: boolean
 }
 
 export interface VaultClient {
@@ -161,5 +169,15 @@ export class VaultError extends Error {
   ) {
     super(message)
     this.name = 'VaultError'
+  }
+}
+
+// 要写的字段和条目对不上：往不是登录的条目里写用户名、密码，或者写 Kioku 不写的字段（TOTP 的密钥）。
+// kind 仍是 unsupported_format，但说的是这次写入的请求，不是密码库的内容认不出：
+// 凭据服务按它回 400，不记进连接的最近错误。别的 unsupported_format（解不开的密文、缺组织密钥）照常是连接的问题
+export class VaultFieldError extends VaultError {
+  constructor(message: string) {
+    super('unsupported_format', message)
+    this.name = 'VaultFieldError'
   }
 }

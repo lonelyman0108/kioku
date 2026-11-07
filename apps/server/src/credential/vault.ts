@@ -2,6 +2,7 @@ import { randomUUID } from 'node:crypto'
 
 import {
   CREDENTIAL_ACCESS_REASON_NAMES,
+  isNewerRevision,
   VAULT_DISABLED_REASON_NAMES,
   type ConnectVaultRequest,
   type CredentialAccessReason,
@@ -110,7 +111,8 @@ export function reasonStatus(reason: CredentialAccessReason): 400 | 409 | 502 {
 
 // 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的。
 // 写入本身的错误（read_only、item_conflict、value_too_long）不在这里：它们说的是这次写入，不改连接的状态。
-// 写入时的 unsupported_format（字段和条目的类型不符）也是写入本身的错误，写回那边先把它换掉（writeOutcome）
+// 字段和条目的类型对不上（VaultFieldError，kind 也是 unsupported_format）也是写入本身的错误，
+// 写入那边先把它换掉（service 的 writeOutcome）
 const CONNECTION_ERRORS = new Set<VaultErrorKind>([
   'unreachable',
   'server_error',
@@ -549,6 +551,18 @@ export class VaultConnections {
     return entry.session
   }
 
+  // 按 id 的顺序锁住几个连接这一行。锁的顺序：先连接、再这个连接下的凭据（按凭据 id），凭据只在锁着它的连接时才锁；
+  // 一个事务要动几个连接（kioku run 跨连接取值、按值比对）时先用它一次锁全，连接按 id 排就不会互相等待成死锁
+  async lock(tx: Tx, ids: readonly string[]): Promise<void> {
+    if (!ids.length) return
+    await tx
+      .select({ id: vaultConnections.id })
+      .from(vaultConnections)
+      .where(inArray(vaultConnections.id, [...new Set(ids)]))
+      .orderBy(asc(vaultConnections.id))
+      .for('no key update')
+  }
+
   // 按一次通信的结果更新连接，在调用方的事务里，取用的每一次第一段（prepare）之后都跟着它。
   // session 是这次用的会话：刷新令牌失效时只删它（所有者可能刚重新登录，缓存里已经是新的），
   // 改状态的条件用它最近一次保存的密文（这次调用里换过令牌时，和开始时读到的不同）。
@@ -560,6 +574,9 @@ export class VaultConnections {
     outcome: VaultOutcome | null,
     session?: VaultSession,
   ): Promise<void> {
+    // 不管下面要不要改这一行都先锁住它：只在要改时才锁的话，没改的那次就没锁，调用方接着锁凭据
+    // （observeRevisions、写回），之后同一个事务里再改连接，就成了先凭据、后连接，和同步互相等待成死锁
+    await this.lock(tx, [row.id])
     const live = and(eq(vaultConnections.id, row.id), ne(vaultConnections.status, 'disconnected'))
     const entry = session ? ENTRIES.get(session) : undefined
     if (
@@ -627,8 +644,9 @@ export class VaultConnections {
     const updated = await this.run(async (tx) => {
       // 拿到快照之后自己再查一遍，不只靠客户端在 onSynced 里抛错：换一个客户端、或者 snapshot() 走了别的路径，
       // 违规的连接也不会被恢复。判断与 onSynced 是同一个 snapshotViolation
-      // 锁的顺序：先连接、再凭据（凭据按 id）。取用、写回与按值比对都是 record 先改连接、再看修改时间，
-      // 这里也先改连接这一行，再 observeRevisions，否则两边并发会互相等待成死锁
+      // 锁的顺序：先连接、再凭据（凭据按 id）。取用、写回与按值比对都是 record 先锁连接、再看修改时间，
+      // 这里也先锁连接这一行（改连接的条件不成立时 UPDATE 不加锁），再 observeRevisions，否则两边并发会互相等待成死锁
+      await this.lock(tx, [row.id])
       if (snapshot) {
         const violation = snapshotViolation(snapshot)
         await tx
@@ -847,25 +865,15 @@ const revisionTime = (revision: string): Date | null => {
   return Number.isNaN(at.getTime()) ? null : at
 }
 
-// 修改时间 next 比 prev 新吗：都能解析成时间时按时间比；解析不了的只要不相同就算新的
-export function isNewerRevision(next: string, prev: string): boolean {
-  if (next === prev) return false
-  const [a, b] = [revisionTime(next), revisionTime(prev)]
-  return a && b ? a > b : true
-}
-
-// Kioku 看到了条目现在的修改时间（取用、列条目、重新检查、按值比对、写回冲突之后）：和记下的不同就是值在别处改过，
-// 记下新的修改时间与上次改值的时间，版本号加一（带着旧版本号的修改返回 409，要先重新读取），清掉「需要轮换」。
-// 还没记下过修改时间的（刚起标识、迁移之前的）只记下，不算改过值。已删除的凭据不动，恢复之后下一次看到时再比
-// fresh：这个修改时间是刚从服务器读到的、以它为准（写回冲突之后的重读）：和记下的不同就记，不管新旧。
-// Vaultwarden 用 MySQL 时存下的修改时间去掉了小数秒，比写入响应里的「旧」，按新旧比会永远记不下。
-// 别的观察路径照旧不往回改：并发的读取可能晚一步带回更早的修改时间。
-// 锁的顺序：调用方先锁连接（vault.record、sync 里改连接那一行），这里再按凭据 id 锁凭据
+// Kioku 看到了条目现在的修改时间（取用、列条目、重新检查、按值比对、写回冲突之后）：比记下的晚 1 秒以上
+// （isNewerRevision）就是值在别处改过，记下新的修改时间与上次改值的时间，版本号加一（带着旧版本号的修改返回 409，
+// 要先重新读取），清掉「需要轮换」。相差不到 1 秒的算同一个，更早的不记：并发的读取可能晚一步带回更早的修改时间。
+// 还没记下过修改时间的（刚起标识、迁移之前的）只记下，不算改过值。已删除的凭据不动，恢复之后下一次看到时再比。
+// 锁的顺序：调用方先锁连接（vault.record、vault.lock、sync 里改连接那一行），这里再按凭据 id 锁凭据
 export async function observeRevisions(
   tx: Tx,
   connectionId: string,
   items: readonly { id: string; revisionDate: string }[],
-  options: { fresh?: boolean } = {},
 ): Promise<void> {
   if (!items.length) return
   const bound = await tx
@@ -890,10 +898,9 @@ export async function observeRevisions(
   // 按 id 排序加锁，和别的批量写入一样
   for (const b of [...bound].sort((x, y) => x.id.localeCompare(y.id))) {
     const revision = revisions.get(b.itemId!)
-    if (revision === undefined || revision === b.seen) continue
+    if (revision === undefined) continue
+    if (b.seen !== null && !isNewerRevision(revision, b.seen)) continue
     const changed = b.seen !== null
-    // 并发的读取可能晚一步带回更早的修改时间（别的请求已经记下了更新的）：不往回改
-    if (!options.fresh && b.seen !== null && !isNewerRevision(revision, b.seen)) continue
     await tx
       .update(credentials)
       .set({

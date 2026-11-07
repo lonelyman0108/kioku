@@ -1,7 +1,10 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 
+import { isNewerRevision } from '@kioku/contracts'
+
 import {
   VaultError,
+  VaultFieldError,
   type VaultClient,
   type VaultErrorKind,
   type VaultItem,
@@ -10,13 +13,15 @@ import {
   type VaultSecrets,
   type VaultSnapshot,
   type VaultTwoFactorProvider,
+  type VaultUpdated,
 } from '../credential/bitwarden/types'
 
 // 测试用的密码库客户端：账号、条目与组织都在内存里，能按需模拟各种 VaultError，
 // 每次新建的会话第一次调用时、以及每次 snapshot() 都同步一次（触发 onSynced），也能让会话换一次刷新令牌（触发 onSecretsChanged）。
 // 写入照真的客户端的约定：每次改动条目的修改时间往后走；目标集合只读或不在集合列表里报 read_only；
-// 修改时期望的修改时间对不上报 item_conflict；写不认识的字段（含 login.totp）报 unsupported_format；
-// 改密码与隐藏字段时旧值进条目的密码历史；值超过 maxValueLength 时报 value_too_long；值都没变时不改、修改时间不动
+// 修改时条目的修改时间比期望的晚 1 秒以上报 item_conflict（修改时间每次往后走 1 秒，正好够）；
+// 写不认识的字段（含 login.totp）报 VaultFieldError；改密码与隐藏字段时旧值进条目的密码历史；
+// 值超过 maxValueLength 时报 value_too_long；值都没变时不改、修改时间不动，changed 为 false
 
 export interface FakeVaultItem {
   id?: string
@@ -288,13 +293,13 @@ export function fakeVault(): FakeVault {
           items.set(id, item)
           return { ...summary(item), values: { ...item.values } }
         },
-        async updateItem(id, changes, expectedRevisionDate): Promise<VaultItem> {
+        async updateItem(id, changes, expectedRevisionDate): Promise<VaultUpdated> {
           calls.updateItem++
           await beforeWrite()
           await prelude()
           const item = items.get(id)
           if (!item) throw new VaultError('item_unavailable', '条目不可用')
-          if (item.revisionDate !== expectedRevisionDate) {
+          if (isNewerRevision(item.revisionDate, expectedRevisionDate)) {
             throw new VaultError('item_conflict', '条目已在别处修改')
           }
           checkWrite(item.collectionId, changes.values ?? {}, item.type)
@@ -302,7 +307,8 @@ export function fakeVault(): FakeVault {
           const same =
             Object.entries(changes.values ?? {}).every(([ref, v]) => item.values[ref] === v) &&
             (changes.name === undefined || changes.name === item.name)
-          if (same) return { ...summary(item), values: { ...item.values } }
+          if (same)
+            return { item: { ...summary(item), values: { ...item.values } }, changed: false }
           for (const [ref, value] of Object.entries(changes.values ?? {})) {
             const old = item.values[ref]
             if (historied(ref) && old !== undefined && old !== '' && old !== value) {
@@ -312,7 +318,7 @@ export function fakeVault(): FakeVault {
           }
           if (changes.name !== undefined) item.name = changes.name
           item.revisionDate = nextRevision()
-          return { ...summary(item), values: { ...item.values } }
+          return { item: { ...summary(item), values: { ...item.values } }, changed: true }
         },
       }
     },
@@ -325,13 +331,13 @@ export function fakeVault(): FakeVault {
   }
 
   // 写入前的检查，和真的客户端同一个顺序：集合能不能写、字段认不认得、值长不长
-  // 登录条目才有 login.* 字段：往别的类型里写用户名、密码时，和不认识的字段一样报 unsupported_format
+  // 登录条目才有 login.* 字段：往别的类型里写用户名、密码时，和不认识的字段一样报 VaultFieldError
   function checkWrite(collectionId: string, values: Record<string, string>, type: VaultItemType) {
     const collection = state.collections.find((c) => c.id === collectionId)
     if (!collection || collection.readOnly) throw new VaultError('read_only', '集合只读或不可用')
     for (const [ref, value] of Object.entries(values)) {
       if (!writable(ref) || (ref.startsWith('login.') && type !== 'login')) {
-        throw new VaultError('unsupported_format', '不支持写入这个字段')
+        throw new VaultFieldError('不支持写入这个字段')
       }
       if (state.maxValueLength !== null && value.length > state.maxValueLength) {
         throw new VaultError(VALUE_TOO_LONG, '值超出密码库的长度上限')

@@ -1,3 +1,5 @@
+import { isNewerRevision } from '@kioku/contracts'
+
 import {
   decryptBytes,
   deriveMasterKey,
@@ -37,6 +39,7 @@ import {
   type VaultSessionInput,
   type VaultSnapshot,
   type VaultTwoFactorProvider,
+  type VaultUpdated,
 } from './types'
 import { decodeItem, decodeSync, decodeSyncItems, type SyncedState } from './vault'
 import {
@@ -375,7 +378,7 @@ class Session implements VaultSession {
       if (item.collectionIds.length === 0) item.collectionIds = [input.collectionId]
       // 下一次同步之前取这个条目时，Vaultwarden 的单个条目不带集合，同步的缓存里也还没有它
       this.createdCollections.set(item.id, item.collectionIds)
-      return this.reread(access, item)
+      return item
     })
   }
 
@@ -383,7 +386,7 @@ class Session implements VaultSession {
     id: string,
     changes: VaultItemChanges,
     expectedRevisionDate: string,
-  ): Promise<VaultItem> {
+  ): Promise<VaultUpdated> {
     checkId(id)
     // 类型要取到条目才知道，这里先查字段的写法
     const values = writeValues(changes.values ?? {}, null)
@@ -394,7 +397,8 @@ class Session implements VaultSession {
       const { json } = fetched
       let { state } = fetched
       let current = this.decoded(json, state)
-      if (current.revisionDate !== expectedRevisionDate) throw conflict()
+      // 比期望的晚 1 秒以上才算在别处改过：Vaultwarden 用 MySQL 时存下的修改时间是整秒，和写入响应里的差零点几秒
+      if (isNewerRevision(current.revisionDate, expectedRevisionDate)) throw conflict()
       checkType(values, current.type)
       // 只按缓存的集合判成只读（服务端没给 edit）时，和新建一样，上次同步过了一阵就重新同步一次再看
       if (!this.editable(json, current, state) && typeof prop(json, 'edit') !== 'boolean') {
@@ -422,7 +426,7 @@ class Session implements VaultSession {
         }),
       )
       // 什么都没变：不发修改，免得服务端改了修改时间
-      if (!body) return current
+      if (!body) return { item: current, changed: false }
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
         method: 'PUT',
         headers: { authorization: `Bearer ${access.token}`, ...JSON_BODY },
@@ -433,42 +437,8 @@ class Session implements VaultSession {
       // 修改不动集合：响应里没有集合时用原来的
       const item = this.decoded(res.json, state)
       if (item.collectionIds.length === 0) item.collectionIds = current.collectionIds
-      return this.reread(access, item)
+      return { item, changed: true }
     })
-  }
-
-  // 写入成功之后再取一次条目，返回库里存下的那一份：Vaultwarden 用 MySQL 时修改时间存成整秒，写入响应里的
-  // revisionDate 却带着小数，之后同步与取条目给的是整秒的，拿写入响应的那个去改就会被判成冲突。
-  // 集合照写入时的。取不到（连不上、意外的状态、解不开）时退回写入响应的那一份，日志记一条（不带值）；
-  // 401 时换一次令牌再取
-  private async reread(access: Access, written: VaultItem): Promise<VaultItem> {
-    let current = access
-    for (let attempt = 0; attempt < 2; attempt++) {
-      try {
-        const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${written.id}`, {
-          method: 'GET',
-          headers: { authorization: `Bearer ${current.token}` },
-        })
-        if (res.status === 401 && attempt === 0) {
-          if (this.access === current) this.access = null
-          current = (await this.ensureAccess()).access
-          continue
-        }
-        if (res.status !== 200) {
-          this.http.log({ what: 'reread_failed', status: res.status, endpoint: 'cipher' })
-          return written
-        }
-        const item = this.decoded(res.json, current.state)
-        if (item.collectionIds.length === 0) item.collectionIds = written.collectionIds
-        return item
-      } catch (err) {
-        if (!(err instanceof VaultError)) throw err
-        this.http.log({ what: 'reread_failed', endpoint: 'cipher', problem: err.kind })
-        return written
-      }
-    }
-    this.http.log({ what: 'reread_failed', status: 401, endpoint: 'cipher' })
-    return written
   }
 
   private syncStale(): boolean {

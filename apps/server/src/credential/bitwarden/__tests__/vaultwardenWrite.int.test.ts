@@ -185,7 +185,7 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
     const first = randomUUID()
     const created = await newLogin({ 'login.username': 'agent', 'login.password': first })
     const second = randomUUID()
-    const updated = await writer.updateItem(
+    const { item: updated } = await writer.updateItem(
       created.id,
       { values: { 'login.password': second } },
       created.revisionDate,
@@ -244,7 +244,7 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
     const stored = await raw(id)
 
     const item = await writer.item(id)
-    const updated = await writer.updateItem(
+    const { item: updated } = await writer.updateItem(
       id,
       { values: { 'login.password': 'new-password', 'field:api token': 'new-token' } },
       item.revisionDate,
@@ -403,7 +403,7 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
 
     await setMemberCollections(url, seed.member, seed.org, account, [agent, other], false)
     // 同一个会话，缓存里 Private 还是只读：修改以刚取到的 edit 为准，新建先重新同步
-    const updated = await session.updateItem(
+    const { item: updated } = await session.updateItem(
       hidden.id,
       { values: { notes: 'now writable' } },
       hidden.revisionDate,
@@ -423,7 +423,7 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
     expect(stored.key).toBeTruthy()
     const item = await writer.item(id)
     const password = randomUUID()
-    const updated = await writer.updateItem(
+    const { item: updated } = await writer.updateItem(
       id,
       { name: 'item key renamed', values: { 'login.password': password, 'field:extra': 'v' } },
       item.revisionDate,

@@ -68,11 +68,9 @@ const json = (status: number, body: unknown) =>
     headers: { 'content-type': 'application/json' },
   })
 
-// 按场景回放：方法、路径与 grant_type 对得上的第一条。密码登录时核对发出的主密码哈希和录下的一样（验证 KDF）。
-// 回放过一次录下的写入之后，取这个条目时用录下的、排在那次写入后面的那一条（写完再取的那份）
+// 按场景回放：方法、路径与 grant_type 对得上的第一条。密码登录时核对发出的主密码哈希和录下的一样（验证 KDF）
 function replay(scenarios: string[], override?: Override) {
   const calls: Call[] = []
-  const writtenAt = new Map<string, number>()
   const fetchFn = vi.fn(async (input: string | URL | Request, init: RequestInit = {}) => {
     const url = new URL(String(input))
     const form = url.pathname.endsWith('/connect/token')
@@ -80,25 +78,16 @@ function replay(scenarios: string[], override?: Override) {
       : null
     const call = { url, init, form }
     calls.push(call)
-    const matches = (e: RecordedExchange) =>
-      (scenarios.includes(e.scenario) || e.path === '/api/config') &&
-      e.method === (init.method ?? 'GET') &&
-      e.path === url.pathname &&
-      (e.form?.grant_type ?? null) === (form?.grant_type ?? null)
-    const after = writtenAt.get(url.pathname)
-    const recorded =
-      (after === undefined
-        ? undefined
-        : fixture.exchanges.find((e, i) => i > after && matches(e))) ??
-      fixture.exchanges.find(matches)
+    const recorded = fixture.exchanges.find(
+      (e) =>
+        (scenarios.includes(e.scenario) || e.path === '/api/config') &&
+        e.method === (init.method ?? 'GET') &&
+        e.path === url.pathname &&
+        (e.form?.grant_type ?? null) === (form?.grant_type ?? null),
+    )
     const replaced = override?.(call, recorded)
     if (replaced) return replaced
     if (!recorded) throw new Error(`没有录下的响应：${init.method} ${url.pathname}`)
-    if (recorded.status === 200 && (init.method === 'PUT' || init.method === 'POST')) {
-      const id = (recorded.body as { id?: unknown } | null)?.id
-      if (typeof id === 'string')
-        writtenAt.set(`/api/ciphers/${id}`, fixture.exchanges.indexOf(recorded))
-    }
     if (form?.grant_type === 'password') expect(form.password).toBe(recorded.form?.password)
     return json(recorded.status, recorded.body)
   })
@@ -1212,16 +1201,10 @@ describe('写入', () => {
     delete copy.edit
     return copy
   }
-  // 取条目时给 raw，直到发出写入：写完再取的那次用录下的
-  const withGet = (raw: unknown, path = createdLoginPath): Override => {
-    let written = false
-    return (call) => {
-      if (writeCalls([call]).length) written = true
-      return !written && call.init.method === 'GET' && call.url.pathname === path
-        ? json(200, raw)
-        : undefined
-    }
-  }
+  const withGet =
+    (raw: unknown, path = createdLoginPath): Override =>
+    (call) =>
+      call.init.method === 'GET' && call.url.pathname === path ? json(200, raw) : undefined
 
   it('新建登录条目：用组织密钥加密，放进集合，网址按主机加端口或不匹配，返回服务端给的条目', async () => {
     const { session, calls } = writer('writer.createLogin')
@@ -1374,12 +1357,13 @@ describe('写入', () => {
       reprompt: 1,
     })
     const { session, calls } = writer('writer.update', { override: withGet(raw) })
-    const item = await session.updateItem(
+    const { item, changed } = await session.updateItem(
       fixture.items.createdLogin,
       { values: fixture.writes.update },
       raw.revisionDate,
     )
     const response = recorded('writer.update', 'PUT', createdLoginPath)
+    expect(changed).toBe(true)
     expect(item.revisionDate).toBe(response.revisionDate)
     expect(item.values['login.password']).toBe(fixture.writes.update['login.password'])
     expect(item.collectionIds).toEqual([fixture.collections.agent])
@@ -1426,8 +1410,12 @@ describe('写入', () => {
       {},
       { values: {} },
     ]) {
-      const item = await session.updateItem(fixture.items.createdLogin, changes, raw.revisionDate)
-      expect(item).toEqual(current)
+      const updated = await session.updateItem(
+        fixture.items.createdLogin,
+        changes,
+        raw.revisionDate,
+      )
+      expect(updated).toEqual({ item: current, changed: false })
     }
     expect(writeCalls(calls)).toHaveLength(0)
   })
@@ -1567,7 +1555,7 @@ describe('写入', () => {
       ),
     ).toBe('value_too_long')
     expect(writeCalls(calls)).toHaveLength(0)
-    const ok = await session.updateItem(
+    const { item: ok } = await session.updateItem(
       fixture.items.createdLogin,
       { values: { notes: long(7000) } },
       raw.revisionDate,
@@ -1618,11 +1606,10 @@ describe('写入', () => {
       },
     ]
     const log = vi.fn()
-    const getRaw = withGet(raw)
     const { session, calls } = writer('writer.update', {
       log,
       override: (call, recordedExchange) =>
-        officialConfig(call, recordedExchange) ?? getRaw(call, recordedExchange),
+        officialConfig(call, recordedExchange) ?? withGet(raw)(call, recordedExchange),
     })
     await session.updateItem(
       fixture.items.createdLogin,
@@ -1643,7 +1630,7 @@ describe('写入', () => {
     const path = `/api/ciphers/${fixture.items.itemKey}`
     const raw = recorded('writer.updateItemKey', 'GET', path)
     const { session, calls } = writer('writer.updateItemKey')
-    const item = await session.updateItem(
+    const { item } = await session.updateItem(
       fixture.items.itemKey,
       { values: fixture.writes.updateItemKey },
       raw.revisionDate,
@@ -1657,10 +1644,11 @@ describe('写入', () => {
     expect(sent.passwordHistory![0]!.password).toBe(raw.login.password)
   })
 
-  it('修改时间和读到时不同：报 item_conflict，不发修改', async () => {
+  it('条目的修改时间比期望的晚 1 秒以上：报 item_conflict，不发修改', async () => {
     const raw = recorded('writer.update', 'GET', createdLoginPath)
     const { session, calls } = writer('writer.update')
-    for (const expected of ['2020-01-01T00:00:00.000000Z', raw.revisionDate.replace('Z', '')]) {
+    const earlier = (ms: number) => new Date(Date.parse(raw.revisionDate) - ms).toISOString()
+    for (const expected of ['2020-01-01T00:00:00.000000Z', earlier(1000)]) {
       expect(
         await kindOf(
           session.updateItem(fixture.items.createdLogin, { values: { notes: 'x' } }, expected),
@@ -1668,6 +1656,26 @@ describe('写入', () => {
       ).toBe('item_conflict')
     }
     expect(writeCalls(calls)).toHaveLength(0)
+  })
+
+  // MySQL 的 DATETIME 不带小数秒：写入响应里带着小数，存下的（之后同步与取条目给的）是整秒，可能去掉也可能进位
+  it('修改时间相差不到 1 秒算同一个：拿带小数秒的写入响应去改整秒的条目，照常写', async () => {
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const at = Date.parse(raw.revisionDate)
+    for (const expected of [
+      new Date(at + 678).toISOString(),
+      new Date(at - 678).toISOString(),
+      raw.revisionDate.replace(/Z$/, '+00:00'),
+    ]) {
+      const { session, calls } = writer('writer.update')
+      const { changed } = await session.updateItem(
+        fixture.items.createdLogin,
+        { values: { notes: 'x' } },
+        expected,
+      )
+      expect(changed).toBe(true)
+      expect(writeCalls(calls)).toHaveLength(1)
+    }
   })
 
   it('条目不可编辑（edit 为 false）或所在的集合都只读：报 read_only，不发修改', async () => {
@@ -1722,13 +1730,14 @@ describe('写入', () => {
       { ...raw, edit: true },
       { ...withoutEdit, collectionIds: [] },
     ]) {
-      const getGot = withGet(got)
       const { session, calls } = writer('writer.update', {
         override: (call) =>
-          call.url.pathname === '/api/sync' ? json(200, readOnlySync) : getGot(call, undefined),
+          call.url.pathname === '/api/sync'
+            ? json(200, readOnlySync)
+            : withGet(got)(call, undefined),
       })
       expect((await session.snapshot()).collections.every((c) => c.readOnly)).toBe(true)
-      const item = await session.updateItem(
+      const { item } = await session.updateItem(
         fixture.items.createdLogin,
         { values: fixture.writes.update },
         raw.revisionDate,
@@ -1778,7 +1787,6 @@ describe('写入', () => {
     for (const c of readOnlySync.collections) c.readOnly = true
     let syncs = 0
     let clock = NOW
-    const getWithoutEdit = withGet(omitEdit(raw))
     const { session, calls } = writer('writer.update', {
       now: () => clock,
       override: (call) => {
@@ -1786,7 +1794,7 @@ describe('写入', () => {
           syncs++
           return syncs === 1 ? json(200, readOnlySync) : undefined
         }
-        return getWithoutEdit(call, undefined)
+        return withGet(omitEdit(raw))(call, undefined)
       },
     })
     await session.snapshot()
@@ -1796,7 +1804,7 @@ describe('写入', () => {
     ).toBe('read_only')
     expect(syncs).toBe(1)
     clock += 61_000
-    const item = await session.updateItem(fixture.items.createdLogin, change, raw.revisionDate)
+    const { item } = await session.updateItem(fixture.items.createdLogin, change, raw.revisionDate)
     expect(item.values['login.password']).toBe(fixture.writes.update['login.password'])
     expect(syncs).toBe(2)
     expect(writeCalls(calls)).toHaveLength(1)
@@ -1851,7 +1859,7 @@ describe('写入', () => {
     const item = await session.createItem(loginItem)
     expect(item.collectionIds).toEqual([fixture.collections.agent])
     expect((await session.item(item.id)).collectionIds).toEqual([fixture.collections.agent])
-    const updated = await session.updateItem(
+    const { item: updated } = await session.updateItem(
       item.id,
       { values: fixture.writes.update },
       raw.revisionDate,
@@ -1978,132 +1986,6 @@ describe('写入', () => {
     })
   })
 
-  // 写完再取的那份：录下的这个场景里，这个条目最后一次 GET
-  const reread = (scenario: string, path: string) =>
-    structuredClone(
-      fixture.exchanges.findLast(
-        (e) => e.scenario === scenario && e.method === 'GET' && e.path === path,
-      )!.body,
-    ) as Body
-
-  // MySQL 的 DATETIME 不带小数秒：写入响应里带着小数，存下的（之后同步与取条目给的）是整秒
-  const wholeSecond = (date: string) => date.replace(/\.\d+Z$/, '.000000Z')
-  const fractional = (date: string) => date.replace(/\.\d+Z$/, '.678901Z')
-
-  it('写入之后再取一次：修改时间以库里存下的为准，紧接着再改不报冲突', async () => {
-    const put = recorded('writer.update', 'PUT', createdLoginPath)
-    const after = reread('writer.update', createdLoginPath)
-    const stored = wholeSecond(after.revisionDate)
-    const raw = recorded('writer.update', 'GET', createdLoginPath)
-    let written = false
-    const mysql = writer('writer.update', {
-      override: (call) => {
-        if (call.url.pathname !== createdLoginPath) return undefined
-        if (call.init.method === 'PUT') {
-          written = true
-          return json(200, { ...put, revisionDate: fractional(put.revisionDate) })
-        }
-        return json(200, written ? { ...after, revisionDate: stored } : raw)
-      },
-    })
-    const item = await mysql.session.updateItem(
-      fixture.items.createdLogin,
-      { values: fixture.writes.update },
-      raw.revisionDate,
-    )
-    expect(item.revisionDate).toBe(stored)
-    expect(item.values['login.password']).toBe(fixture.writes.update['login.password'])
-    expect(item.collectionIds).toEqual([fixture.collections.agent])
-    // 拿返回的修改时间紧接着再改：取到的还是整秒的那个，不报冲突
-    const again = await mysql.session.updateItem(
-      fixture.items.createdLogin,
-      { values: { notes: 'again' } },
-      item.revisionDate,
-    )
-    expect(again.revisionDate).toBe(stored)
-    expect(writeCalls(mysql.calls)).toHaveLength(2)
-  })
-
-  it('新建之后也再取一次：修改时间以库里存下的为准，集合照新建时的', async () => {
-    const created = recorded('writer.createLogin', 'POST', '/api/ciphers/create')
-    const after = reread('writer.createLogin', createdLoginPath)
-    const stored = wholeSecond(after.revisionDate)
-    const { session } = writer('writer.createLogin', {
-      override: (call) => {
-        if (call.url.pathname === '/api/ciphers/create') {
-          return json(200, { ...created, revisionDate: fractional(created.revisionDate) })
-        }
-        if (call.init.method === 'GET' && call.url.pathname === createdLoginPath) {
-          // Vaultwarden 给非管理员的单个条目可能不带集合
-          return json(200, { ...after, revisionDate: stored, collectionIds: [] })
-        }
-        return undefined
-      },
-    })
-    const item = await session.createItem(loginItem)
-    expect(item.revisionDate).toBe(stored)
-    expect(item.collectionIds).toEqual([fixture.collections.agent])
-  })
-
-  it('写完再取失败（意外的状态、连不上、解不开）时退回写入响应的那一份，日志记一条不带值；401 换令牌再取', async () => {
-    const put = recorded('writer.update', 'PUT', createdLoginPath)
-    const raw = recorded('writer.update', 'GET', createdLoginPath)
-    const failures: (() => Response)[] = [
-      () => json(500, { message: 'secret-marker' }),
-      () => {
-        throw new TypeError('fetch failed')
-      },
-      () => json(200, { ...raw, name: '2.AAAA|BBBB|CCCC' }),
-    ]
-    for (const fail of failures) {
-      const log = vi.fn()
-      let written = false
-      const { session } = writer('writer.update', {
-        log,
-        override: (call) => {
-          if (call.url.pathname !== createdLoginPath) return undefined
-          if (call.init.method === 'PUT') {
-            written = true
-            return undefined
-          }
-          return written ? fail() : json(200, raw)
-        },
-      })
-      const item = await session.updateItem(
-        fixture.items.createdLogin,
-        { values: fixture.writes.update },
-        raw.revisionDate,
-      )
-      expect(item.revisionDate).toBe(put.revisionDate)
-      expect(item.values['login.password']).toBe(fixture.writes.update['login.password'])
-      expect(log).toHaveBeenCalledWith(expect.objectContaining({ what: 'reread_failed' }))
-      expect(JSON.stringify(log.mock.calls)).not.toContain('secret-marker')
-    }
-
-    let rereads = 0
-    let written = false
-    const { session, calls } = writer('writer.update', {
-      override: (call) => {
-        if (call.url.pathname !== createdLoginPath) return undefined
-        if (call.init.method === 'PUT') {
-          written = true
-          return undefined
-        }
-        if (!written) return json(200, raw)
-        return ++rereads === 1 ? json(401, {}) : undefined
-      },
-    })
-    const item = await session.updateItem(
-      fixture.items.createdLogin,
-      { values: fixture.writes.update },
-      raw.revisionDate,
-    )
-    expect(rereads).toBe(2)
-    expect(item.revisionDate).toBe(reread('writer.update', createdLoginPath).revisionDate)
-    expect(tokenCalls(calls)).toHaveLength(2)
-    expect(writeCalls(calls)).toHaveLength(1)
-  })
-
   it('修改与新建遇到 401 时换令牌、重新取条目再写', async () => {
     const raw = recorded('writer.update', 'GET', createdLoginPath)
     let puts = 0
@@ -2117,7 +1999,7 @@ describe('写入', () => {
       },
     })
     await session.snapshot()
-    const item = await session.updateItem(
+    const { item } = await session.updateItem(
       fixture.items.createdLogin,
       { values: fixture.writes.update },
       raw.revisionDate,
@@ -2125,8 +2007,7 @@ describe('写入', () => {
     expect(item.values['login.password']).toBe(fixture.writes.update['login.password'])
     expect(puts).toBe(2)
     const gets = calls.filter((c) => c.init.method === 'GET' && c.url.pathname === createdLoginPath)
-    // 取一次、401 之后再取一次、写完再取一次
-    expect(gets).toHaveLength(3)
+    expect(gets).toHaveLength(2)
     expect((await session.createItem(loginItem)).id).toBe(fixture.items.createdLogin)
     expect(posts).toBe(2)
     expect(tokenCalls(calls)).toHaveLength(3)

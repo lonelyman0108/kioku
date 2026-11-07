@@ -7,6 +7,7 @@ import {
   CREDENTIAL_ROTATION_NAME,
   CredentialWriteError,
   defaultCredentialFields,
+  sameRevision,
   VAULT_CONNECTION_STATUS_NAMES,
   VAULT_CUSTOM_FIELD_PREFIX,
   VAULT_DISABLED_REASON_NAMES,
@@ -261,7 +262,7 @@ export function writeFailureNext(err: unknown, action: WriteAction): WriteFailur
 }
 
 // 读到条目列表之后，哪些凭据可能被服务端改过：条目绑着凭据、条目的修改时间和缓存里那条凭据的 valueChangedAt 对不上
-// （服务端看到修改时间变了会清掉需要轮换、版本号加一），或者那条凭据还没缓存。known 按凭据 id 给缓存里的 valueChangedAt，
+// （服务端看到修改时间晚了 1 秒以上会清掉需要轮换、版本号加一），或者那条凭据还没缓存。known 按凭据 id 给缓存里的 valueChangedAt，
 // 没缓存的为 undefined
 export function staleCredentialIds(
   items: readonly Pick<VaultItemSummary, 'revisionDate' | 'credential'>[],
@@ -271,8 +272,8 @@ export function staleCredentialIds(
   for (const item of items) {
     if (!item.credential) continue
     const seen = known(item.credential.id)
-    const same =
-      typeof seen === 'string' && new Date(seen).getTime() === new Date(item.revisionDate).getTime()
+    // 和服务端判断条目改过没有同一个规则：相差不到 1 秒算同一个（写回之后记下的带小数秒，列出来的是整秒）
+    const same = typeof seen === 'string' && sameRevision(seen, item.revisionDate)
     if (!same) ids.push(item.credential.id)
   }
   return ids

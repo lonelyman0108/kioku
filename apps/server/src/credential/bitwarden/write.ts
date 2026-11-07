@@ -2,7 +2,13 @@ import { createHash } from 'node:crypto'
 
 import { decryptBytes, decryptText, encryptText, splitKey, type SymmetricKey } from './crypto'
 import { prop, str } from './http'
-import { VaultError, type VaultFieldRef, type VaultItemType, type VaultNewItem } from './types'
+import {
+  VaultError,
+  VaultFieldError,
+  type VaultFieldRef,
+  type VaultItemType,
+  type VaultNewItem,
+} from './types'
 import { isEnc, namedFields } from './vault'
 
 // 新建与修改条目的请求体。值都加密成 EncString 类型 2。新条目不生成条目密钥，用组织密钥加密（官方客户端只在服务端
@@ -29,7 +35,7 @@ export interface WriteValue {
   value: string
 }
 
-const unsupportedField = () => new VaultError('unsupported_format', '不支持写入这个字段')
+const unsupportedField = () => new VaultFieldError('不支持写入这个字段')
 
 function writeTarget(ref: VaultFieldRef): WriteTarget {
   if (ref === 'notes' || ref === 'login.username' || ref === 'login.password') return { kind: ref }

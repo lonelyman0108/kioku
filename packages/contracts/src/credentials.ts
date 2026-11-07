@@ -1419,6 +1419,28 @@ export const VaultConnectResult = z.discriminatedUnion('kind', [
 export type VaultConnectResult = z.infer<typeof VaultConnectResult>
 
 // 连接读得到的一个条目：名称与字段名，不含值。credential 是给它起了标识的有效凭据，没起的为 null
+// 条目修改时间的比较：服务端判断条目改过没有（写回的冲突、Kioku 看到值在别处改过）与管理界面判断缓存过期没有共用这一份。
+// 按 1 秒的容差比：Vaultwarden 用 MySQL 时把修改时间存成整秒（去掉或四舍五入小数），写入的响应却带着小数秒，
+// 同一次写入前后读到的会差零点几秒；Vaultwarden 自己判断条目过期也留了 1 秒。
+// 所以相差不到 1 秒的算同一个修改时间，晚 1 秒以上的才算更新。代价是 1 秒之内的另一次修改认不出来，和服务端一样
+export const REVISION_TOLERANCE_MS = 1000
+
+// 两个修改时间算不算同一个。解析不了时按原文比
+export function sameRevision(a: string, b: string): boolean {
+  const x = Date.parse(a)
+  const y = Date.parse(b)
+  if (Number.isNaN(x) || Number.isNaN(y)) return a === b
+  return Math.abs(x - y) < REVISION_TOLERANCE_MS
+}
+
+// next 是不是比 prev 更新：晚 1 秒以上才算。解析不了时，原文不同就算更新
+export function isNewerRevision(next: string, prev: string): boolean {
+  const x = Date.parse(next)
+  const y = Date.parse(prev)
+  if (Number.isNaN(x) || Number.isNaN(y)) return next !== prev
+  return x - y >= REVISION_TOLERANCE_MS
+}
+
 export const VaultItemSummary = z.object({
   id: z.string(),
   organizationId: z.string(),
