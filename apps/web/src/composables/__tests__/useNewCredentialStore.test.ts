@@ -5,7 +5,8 @@ import { createApp, effectScope, nextTick, ref, type EffectScope } from 'vue'
 
 import { ApiError } from '../../api/client'
 import { fetchVaultItems } from '../../vaultQueries'
-import { storeBlocker, storeLabel, useNewCredentialStore } from '../useNewCredentialStore'
+import { storeBlocker, storeLabel } from '../../vault'
+import { useNewCredentialStore } from '../useNewCredentialStore'
 
 // 接口换成假的，别的都是真的：新建凭据、转存与保存前处理都靠它说明写到哪里
 const fakes = vi.hoisted(() => ({
@@ -111,13 +112,63 @@ describe('新建凭据的去处', () => {
 })
 
 describe('列条目之后', () => {
-  it('凭据列表、详情与待处理的条数失效：服务端可能清掉了需要轮换、版本号加一', async () => {
+  const CID = '00000000-0000-4000-8000-0000000000c1'
+  const bound = (revisionDate: string) => ({
+    ...itemList(false),
+    items: [
+      {
+        id: 'item-1',
+        organizationId: 'o1',
+        collectionIds: ['c1'],
+        name: 'NAS',
+        type: 'login',
+        fields: [],
+        revisionDate,
+        credential: { id: CID, identifier: 'nas' },
+      },
+      {
+        id: 'item-2',
+        organizationId: 'o1',
+        collectionIds: ['c1'],
+        name: '没起标识',
+        type: 'login',
+        fields: [],
+        revisionDate,
+        credential: null,
+      },
+    ],
+  })
+
+  it('条目的修改时间和缓存里的 valueChangedAt 一样时什么都不失效：几处一起读不会把凭据重读 N 遍', async () => {
+    client.setQueryData(['credential', 's1', CID], {
+      id: CID,
+      valueChangedAt: '2026-11-01T00:00:00Z',
+    })
+    fakes.api.vaultItems.mockResolvedValue(bound('2026-11-01T00:00:00.000Z'))
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    await fetchVaultItems(client, 's1', conn().id)
+    expect(invalidate).not.toHaveBeenCalled()
+  })
+
+  it('对不上的（服务端可能清掉了需要轮换、版本号加一）：凭据列表、那一条的详情与待处理的条数失效', async () => {
+    client.setQueryData(['credentials', 's1'], {
+      items: [{ id: CID, valueChangedAt: '2026-11-01T00:00:00Z' }],
+      truncated: false,
+    })
+    fakes.api.vaultItems.mockResolvedValue(bound('2026-11-05T00:00:00Z'))
     const invalidate = vi.spyOn(client, 'invalidateQueries')
     await fetchVaultItems(client, 's1', conn().id)
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credentials', 's1'] })
-    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credential', 's1'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credential', 's1', CID] })
     expect(invalidate).toHaveBeenCalledWith({ queryKey: ['inbox-counts', 's1'] })
     // 不反过来让条目列表失效，不会循环
     expect(invalidate).not.toHaveBeenCalledWith({ queryKey: ['vault-items', 's1'] })
+  })
+
+  it('那条凭据还没缓存时当作可能改了', async () => {
+    fakes.api.vaultItems.mockResolvedValue(bound('2026-11-01T00:00:00Z'))
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    await fetchVaultItems(client, 's1', conn().id)
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credential', 's1', CID] })
   })
 })

@@ -236,12 +236,23 @@ export function mergeReloaded(
   const mine = current.form
   const pick = <K extends keyof typeof base>(k: K): (typeof base)[K] =>
     sameFields(mine[k], base[k]) ? theirs[k] : mine[k]
+  // 限定应用的开关与列表是一个整体：分开合并时，一边改了列表、另一边取消了限定，合起来就成了不限定
+  const scope = (s: { restrict: boolean; appIds: string[] }) => ({
+    restrict: s.restrict,
+    appIds: s.restrict ? [...s.appIds].sort() : [],
+  })
+  const [mineScope, baseScope, theirScope] = [scope(mine), scope(base), scope(theirs)]
+  let restriction = mineScope
+  if (sameFields(mineScope, baseScope)) restriction = theirScope
+  else if (!sameFields(theirScope, baseScope) && !sameFields(theirScope, mineScope)) {
+    conflicts.push('限定应用在别处也修改过，保存时以表单中的为准，请核对')
+  }
   const form: CredentialFormState = {
     ...mine,
     name: pick('name'),
     description: pick('description'),
-    restrict: pick('restrict'),
-    appIds: pick('appIds'),
+    restrict: restriction.restrict,
+    appIds: restriction === mineScope ? [...mine.appIds] : [...theirs.appIds],
     expires: pick('expires'),
     needsRotation: pick('needsRotation'),
   }
@@ -255,7 +266,9 @@ export function mergeReloaded(
         if (row.value || row.removed) conflicts.push(`字段 ${row.name} 已在别处删除`)
         continue
       }
-      if (!row.existing && freshNames.has(row.name) && row.name) {
+      // 新加的行和别处新加的字段同名：填了值就改成修改那个字段；值是空的什么都不会发，原样留着（名字还能改），
+      // 别处加的字段照常列出来，同名由「字段名不能重复」提示
+      if (!row.existing && freshNames.has(row.name) && row.name && row.value) {
         conflicts.push(`字段 ${row.name} 已在别处添加，保存时将改为填写的值`)
         valueRows.push({ ...row, existing: true })
         continue
@@ -263,7 +276,7 @@ export function mergeReloaded(
       valueRows.push(row)
     }
     for (const f of fresh.fields) {
-      if (!valueRows.some((r) => r.name === f.name)) {
+      if (!valueRows.some((r) => r.name === f.name && r.existing)) {
         valueRows.push({ key: key(), name: f.name, value: '', existing: true, removed: false })
       }
     }
@@ -273,18 +286,21 @@ export function mergeReloaded(
   let vaultValues: VaultValueRow[] = []
   if (fresh.source === 'vault') {
     const mineFields = vaultFields(current.vaultRows)
+    const baseFields = originFields(before)
     const freshFields = originFields(fresh)
-    if (sameFields(mineFields, originFields(before))) {
+    if (sameFields(mineFields, baseFields)) {
       vaultRows = freshFields.map((f) => ({ key: key(), ...f }))
-    } else if (!sameFields(freshFields, originFields(before))) {
+    } else if (!sameFields(freshFields, baseFields) && !sameFields(freshFields, mineFields)) {
       conflicts.push('字段对应在别处也修改过，保存时以表单中的为准，请核对')
     }
-    const typed = new Map(current.vaultValues.map((r) => [r.name, r.value] as const))
-    vaultValues = freshFields.map((f) => ({ ...f, value: typed.get(f.name) ?? '' }))
-    for (const [name, value] of typed) {
-      if (value && !freshFields.some((f) => f.name === name)) {
-        conflicts.push(`字段 ${name} 已在别处删除，填写的值未保留`)
-      }
+    // 填的值写回的是条目字段：按条目字段对到新的一版。同一个条目字段在别处改了名，按改名带过去；
+    // 这个条目字段在新的一版里不再对应任何字段（例如 password 改成对应别的条目字段），不带过去，报冲突
+    vaultValues = freshFields.map((f) => ({ ...f, value: '' }))
+    for (const row of current.vaultValues) {
+      if (!row.value) continue
+      const target = vaultValues.find((f) => f.itemField === row.itemField)
+      if (target) target.value = row.value
+      else conflicts.push(`字段 ${row.name} 的对应已在别处修改，填写的值未保留`)
     }
   }
 

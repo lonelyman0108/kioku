@@ -32,6 +32,7 @@ const {
   candidates,
   shown,
   failure,
+  failureDetail,
   orphan,
   store,
   storeIssue,
@@ -240,6 +241,7 @@ const candidateGroup = useId()
         </NoteLine>
         <NoteLine v-if="failure" tone="error">
           {{ failure }}
+          <template v-if="failureDetail" #detail>{{ failureDetail }}</template>
           <template v-if="canReload" #actions>
             <UButton size="sm" color="primary" variant="outline" @click="load">重新读取</UButton>
           </template>

@@ -334,6 +334,22 @@ describe('提交', () => {
     expect(convert.canSubmit.value).toBe(false)
   })
 
+  it('错误体带 reason 时按它给下一步：集合只读不给重新读取，条目在别处改过给', async () => {
+    const convert = await shown()
+    fakes.api.convertToCredential.mockRejectedValue(
+      new ApiError(409, '集合只读或不可用', { error: '集合只读或不可用', reason: 'read_only' }),
+    )
+    await convert.submit()
+    expect(convert.canReload.value).toBe(false)
+    expect(convert.failureDetail.value).toContain('更改去处')
+    fakes.api.convertToCredential.mockRejectedValue(
+      new ApiError(409, '条目已在别处修改', { error: '条目已在别处修改', reason: 'item_conflict' }),
+    )
+    await convert.submit()
+    expect(convert.canReload.value).toBe(true)
+    expect(convert.failureDetail.value).toBe('重新读取后再保存。')
+  })
+
   it('到期时间的输入框填了一半：值是空的，照样不能提交', async () => {
     const convert = await shown()
     convert.form.expiresBad = true

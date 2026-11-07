@@ -33,8 +33,8 @@ import {
 import { saveFlags, type GateOutcome, type PlaintextSpot, type SpotChoice } from '../plaintextSave'
 import { clipText } from '../text'
 import { fromLocalInput } from '../time'
-import { optionalExpiresProblem, orphanVaultItem } from '../vault'
-import { storeBlocker, useNewCredentialStore } from './useNewCredentialStore'
+import { optionalExpiresProblem, orphanVaultItem, storeBlocker, writeFailureNext } from '../vault'
+import { useNewCredentialStore } from './useNewCredentialStore'
 
 // 保存记忆之前逐处处理新增的疑似明文：转存为凭据或不是凭据。转存的先建好凭据，再把正文里的值换成占位符，
 // 最后才保存，明文不会先进历史。对话框只管长相，规则都在这里
@@ -103,6 +103,8 @@ export function usePlaintextSave(
   const failure = ref<string | null>(null)
   // 新建时写进了密码库、凭据却没建成：条目留在集合里
   const orphan = ref<OrphanVaultItem | null>(null)
+  // 失败之后的下一步说明（集合只读、值太长），见 vault.ts 的 writeFailureNext
+  const failureDetail = ref<string | null>(null)
   const stored = ref<StoredCredential[]>([])
 
   // 新建的凭据写到哪里，读不到时不能新建
@@ -141,6 +143,7 @@ export function usePlaintextSave(
       const id = ++runId
       busy.value = false
       failure.value = null
+      failureDetail.value = null
       orphan.value = null
       stored.value = []
       matching.value = false
@@ -329,6 +332,7 @@ export function usePlaintextSave(
     const sid = spaceId.value
     busy.value = true
     failure.value = null
+    failureDetail.value = null
     orphan.value = null
     let createdAny = false
     try {
@@ -385,6 +389,7 @@ export function usePlaintextSave(
       if (left) void queryClient.invalidateQueries({ queryKey: ['vault-items', sid] })
       if (id !== runId) return
       failure.value = err instanceof ApiError ? err.message : '新建凭据失败'
+      failureDetail.value = writeFailureNext(err).detail
       orphan.value = left
     } finally {
       if (createdAny) {
@@ -425,6 +430,7 @@ export function usePlaintextSave(
     lockedItems,
     busy,
     failure,
+    failureDetail,
     orphan,
     stored,
     store: newStore.store,

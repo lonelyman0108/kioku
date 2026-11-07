@@ -1,6 +1,6 @@
 <script setup lang="ts">
 import { CREDENTIAL_EXPIRING_DAYS } from '@kioku/contracts'
-import { useId } from 'vue'
+import { nextTick, useId, watch } from 'vue'
 
 import {
   itemKey,
@@ -8,11 +8,12 @@ import {
   type NewCredentialFields,
   type UnmappedVaultField,
 } from '../plaintext'
-import { storeLabel } from '../composables/useNewCredentialStore'
 import {
   CREDENTIAL_URL_HINT,
+  expiresElementBad,
   expiresInputBad,
   itemFieldPhrase,
+  storeLabel,
   type NewCredentialStore,
 } from '../vault'
 import Hint from './Hint.vue'
@@ -23,7 +24,7 @@ import Hint from './Hint.vue'
 // locked：已经建好的不能再改（保存前处理中途失败之后），freshLocked 管新建的凭据，lockedItems 按条目（itemKey）。
 // 条目的标识（vaultIdentifiers，按 itemKey）与新建凭据的几项（fresh）归调用方所有，这里只读，
 // 改了什么经 vaultIdentifier、freshField、freshExpiresBad 几个事件交给调用方去写
-withDefaults(
+const props = withDefaults(
   defineProps<{
     destinations: ConvertDestination[]
     unmapped: UnmappedVaultField[]
@@ -51,6 +52,20 @@ const emit = defineEmits<{
 }>()
 const selected = defineModel<string>({ required: true })
 const group = useId()
+
+// 到期时间的输入框换了一个（选别的去处再选回来会卸载再挂载）或者值被程序改了（重置、重新打开）：
+// 「填了一半」按输入框现在的 validity 重新判断，不留着上一个输入框的状态
+let expiresEl: HTMLInputElement | null = null
+function setExpiresInput(component: unknown) {
+  const el = (component as { inputRef?: HTMLInputElement } | null)?.inputRef ?? null
+  if (el === expiresEl) return
+  expiresEl = el
+  emit('freshExpiresBad', expiresElementBad(el))
+}
+watch(
+  () => props.fresh.expires,
+  () => void nextTick(() => emit('freshExpiresBad', expiresElementBad(expiresEl))),
+)
 </script>
 
 <template>
@@ -138,6 +153,7 @@ const group = useId()
               </Hint></template
             >
             <UInput
+              :ref="setExpiresInput"
               :model-value="fresh.expires"
               type="datetime-local"
               class="w-full"

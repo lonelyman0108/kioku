@@ -50,6 +50,7 @@ const {
   unreadableCredentials,
   busy,
   failure,
+  failureDetail,
   orphan,
   store,
   storeIssue,
@@ -168,7 +169,9 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
         </NoteLine>
         <NoteLine v-if="failure" tone="error" flush>
           {{ failure }}
-          <template v-if="!orphanText" #detail>已新建的凭据保留，再次保存不会重复新建。</template>
+          <template v-if="failureDetail || !orphanText" #detail>{{
+            failureDetail ?? '已新建的凭据保留，再次保存不会重复新建。'
+          }}</template>
         </NoteLine>
       </div>
     </template>

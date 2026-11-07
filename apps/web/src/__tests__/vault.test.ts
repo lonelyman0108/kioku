@@ -292,15 +292,11 @@ describe('界面用上了这些规则', () => {
     expect(credentialForm).toContain('vaultCredentialDraft(item.item, props.identifiers)')
   })
 
-  it('重新检查失败时按错误提示，只重读连接列表；成功时连接、条目、凭据与待处理的条数都重读', () => {
+  it('重新检查失败时按错误提示，只重读连接列表；成功时连接与条目重读，凭据由条目列表按修改时间判断', () => {
     expect(checkRefreshKeys('s1', false)).toEqual([['vault-connections', 's1']])
-    // 服务端可能看到条目改过，清掉需要轮换、版本号加一
     expect(checkRefreshKeys('s1', true)).toEqual([
       ['vault-connections', 's1'],
       ['vault-items', 's1'],
-      ['credentials', 's1'],
-      ['credential', 's1'],
-      ['inbox-counts', 's1'],
     ])
     expect(vaultPanel).toContain('toast.add(checkNotice({ error: err }))')
     expect(vaultPanel).toMatch(

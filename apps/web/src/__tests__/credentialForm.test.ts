@@ -319,6 +319,79 @@ describe('409 之后重新读取', () => {
     renamed.vaultValues[0]!.value = 'admin'
     const merged = mergeReloaded(renamed, before, theirs, key)
     expect(merged.conflicts).toContain('字段对应在别处也修改过，保存时以表单中的为准，请核对')
-    expect(merged.conflicts).toContain('字段 username 已在别处删除，填写的值未保留')
+    expect(merged.conflicts).toContain('字段 username 的对应已在别处修改，填写的值未保留')
+  })
+
+  it('密码库的：别处把 password 改成对应别的条目字段，填的新密码不带过去，报冲突', () => {
+    const before = vaultCredential()
+    const mine = edit(before)
+    mine.vaultValues[1]!.value = 'new-pass'
+    const fresh = {
+      ...before,
+      version: 4,
+      fields: [
+        { name: 'username', itemField: 'login.username' },
+        { name: 'password', itemField: 'login.totp' },
+      ],
+    }
+    const { input: merged, conflicts } = mergeReloaded(mine, before, fresh, key)
+    expect(conflicts).toEqual(['字段 password 的对应已在别处修改，填写的值未保留'])
+    expect(updateBody(merged)).not.toHaveProperty('values')
+  })
+
+  it('密码库的：同一个条目字段在别处改了名，按改名把值带过去；两边改成同一个对应时不报冲突', () => {
+    const before = vaultCredential()
+    const mine = edit(before)
+    mine.vaultValues[1]!.value = 'new-pass'
+    const fresh = {
+      ...before,
+      version: 4,
+      fields: [
+        { name: 'username', itemField: 'login.username' },
+        { name: 'pass', itemField: 'login.password' },
+        { name: 'totp', itemField: 'login.totp' },
+      ],
+    }
+    const renamed = mergeReloaded(mine, before, fresh, key)
+    expect(renamed.conflicts).toEqual([])
+    expect(updateBody(renamed.input).values).toEqual({ pass: 'new-pass' })
+
+    const same = edit(before)
+    same.vaultRows[1]!.name = 'pass'
+    expect(mergeReloaded(same, before, fresh, key).conflicts).toEqual([])
+  })
+
+  it('限定应用是一个整体：一边改了列表、另一边取消了限定，报冲突，不悄悄变成不限定', () => {
+    const before = credential({ appIds: ['00000000-0000-4000-8000-0000000000a1'] })
+    const mine = edit(before)
+    mine.form.appIds = ['00000000-0000-4000-8000-0000000000a2']
+    const fresh = { ...before, version: 4, appIds: null }
+    const { input: merged, conflicts } = mergeReloaded(mine, before, fresh, key)
+    expect(conflicts).toEqual(['限定应用在别处也修改过，保存时以表单中的为准，请核对'])
+    expect(merged.form.restrict).toBe(true)
+    expect(merged.form.appIds).toEqual(['00000000-0000-4000-8000-0000000000a2'])
+    // 只有一边动了：取动了的那边
+    const untouched = mergeReloaded(edit(before), before, fresh, key)
+    expect(untouched.conflicts).toEqual([])
+    expect(untouched.input.form.restrict).toBe(false)
+  })
+
+  it('托管的：空的新行和别处新加的字段同名，不报「将改为填写的值」，名字照样能改', () => {
+    const before = credential()
+    const mine = edit(before)
+    mine.valueRows.push({ key: 9, name: 'pin', value: '', existing: false, removed: false })
+    const fresh = {
+      ...before,
+      version: 4,
+      fields: [
+        { name: 'password', itemField: null },
+        { name: 'pin', itemField: null },
+      ],
+    }
+    const { input: merged, conflicts } = mergeReloaded(mine, before, fresh, key)
+    expect(conflicts).toEqual([])
+    const pins = merged.valueRows.filter((r) => r.name === 'pin')
+    expect(pins.map((r) => r.existing).sort()).toEqual([false, true])
+    expect(formProblem(merged)).toBe('字段名不能重复')
   })
 })

@@ -34,9 +34,13 @@ import {
   optionalExpiresProblem,
   orphanVaultItem,
   storeName,
+  expiresElementBad,
+  staleCredentialIds,
   writableVaultField,
+  writeFailureNext,
   type ExpiresField,
 } from '../vault'
+import picker from '../components/ConvertDestinationPicker.vue?raw'
 
 const conn = (over: Partial<VaultConnection> = {}): VaultConnection => ({
   id: '00000000-0000-4000-8000-000000000001',
@@ -354,5 +358,91 @@ describe('写回密码库', () => {
   it('新建的结果按 storedIn 说明写到了哪里', () => {
     expect(credentialForm).toContain('stored = storeName(storedIn)')
     expect(saveModal).toContain('storeName(s.storedIn)')
+  })
+})
+
+describe('写入失败的原因', () => {
+  const fail = (reason?: string, status = 409) =>
+    new ApiError(status, '服务端的文字', { error: '服务端的文字', ...(reason ? { reason } : {}) })
+
+  it('version 与 item_conflict 给重新读取；read_only、value_too_long 说明该改什么，不给重新读取', () => {
+    expect(writeFailureNext(fail('version')).reload).toBe(true)
+    expect(writeFailureNext(fail('item_conflict')).reload).toBe(true)
+    const readOnly = writeFailureNext(fail('read_only'))
+    expect(readOnly.reload).toBe(false)
+    expect(readOnly.detail).toContain('更改去处')
+    const tooLong = writeFailureNext(fail('value_too_long', 400))
+    expect(tooLong.reload).toBe(false)
+    expect(tooLong.detail).toContain('缩短')
+    expect(writeFailureNext(fail())).toEqual({ reload: false, detail: null })
+    expect(writeFailureNext(new Error('x'))).toEqual({ reload: false, detail: null })
+  })
+
+  it('修改凭据：只在 reason 要重新读取时给重新读取，别的显示下一步', () => {
+    expect(credentialForm).toContain('const next = writeFailureNext(err)')
+    expect(credentialForm).toMatch(/if \(before && next\.reload\)/)
+    expect(credentialForm).not.toContain('err.status === 409 && before')
+    for (const source of [credentialForm, convertModal, saveModal]) {
+      expect(source).toContain('failureDetail')
+    }
+  })
+})
+
+describe('密码库凭据的基准版本', () => {
+  it('先等条目列表读完再读凭据作为基准；条目列表之后刷新时再读一次，版本变了合进表单', () => {
+    expect(credentialForm).toContain("'正在读取最新的一版'")
+    expect(credentialForm).toMatch(/watch\(\s*\(\) => \[open\.value, items\.dataUpdatedAt\.value/)
+    expect(credentialForm).toMatch(
+      /if \(fresh\.version !== origin\.value\.version\) applyFresh\(origin\.value, fresh/,
+    )
+    // 重新读取：条目列表在前，凭据在后
+    const reload = credentialForm.slice(credentialForm.indexOf('async function reload'))
+    expect(reload.indexOf('fetchVaultItems(queryClient, spaceId, conn.id)')).toBeGreaterThan(0)
+    expect(reload.indexOf('fetchVaultItems(queryClient, spaceId, conn.id)')).toBeLessThan(
+      reload.indexOf('api.credential(spaceId, before.id)'),
+    )
+  })
+})
+
+describe('读条目之后只让可能改了的凭据失效', () => {
+  const item = (revisionDate: string, id: string | null) => ({
+    revisionDate,
+    credential: id ? { id, identifier: 'x' } : null,
+  })
+
+  it('修改时间和缓存的 valueChangedAt 相同（写法不同也算）时不算；对不上或没缓存的算；没绑凭据的不看', () => {
+    const known: Record<string, string | null> = {
+      a: '2026-11-01T00:00:00Z',
+      b: '2026-11-01T00:00:00Z',
+      c: null,
+    }
+    expect(
+      staleCredentialIds(
+        [
+          item('2026-11-01T00:00:00.000Z', 'a'),
+          item('2026-11-02T00:00:00Z', 'b'),
+          item('2026-11-01T00:00:00Z', 'c'),
+          item('2026-11-01T00:00:00Z', 'd'),
+          item('2026-11-01T00:00:00Z', null),
+        ],
+        (id) => known[id],
+      ),
+    ).toEqual(['b', 'c', 'd'])
+  })
+})
+
+describe('到期时间的输入框换了一个', () => {
+  it('按新输入框的 validity 重新判断，没有输入框时不算填了一半', () => {
+    expect(expiresElementBad(null)).toBe(false)
+    expect(expiresElementBad({ validity: { badInput: false } })).toBe(false)
+    expect(expiresElementBad({ validity: { badInput: true } })).toBe(true)
+  })
+
+  it('挂载、卸载与程序改值时都重新报一次，不留着上一个输入框的状态', () => {
+    expect(picker).toContain(':ref="setExpiresInput"')
+    expect(picker).toMatch(
+      /function setExpiresInput[\s\S]*?emit\('freshExpiresBad', expiresElementBad\(el\)\)/,
+    )
+    expect(picker).toMatch(/\(\) => props\.fresh\.expires,[\s\S]*?expiresElementBad\(expiresEl\)/)
   })
 })

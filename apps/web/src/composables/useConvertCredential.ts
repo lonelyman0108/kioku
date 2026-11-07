@@ -31,8 +31,14 @@ import {
 } from '../plaintext'
 import { placeholderOf } from '../placeholders'
 import { fromLocalInput } from '../time'
-import { optionalExpiresProblem, orphanVaultItem } from '../vault'
-import { storeBlocker, useNewCredentialStore } from './useNewCredentialStore'
+import {
+  optionalExpiresProblem,
+  orphanVaultItem,
+  hasWriteReason,
+  storeBlocker,
+  writeFailureNext,
+} from '../vault'
+import { useNewCredentialStore } from './useNewCredentialStore'
 import { refreshAfterPlaintext } from './usePlaintextActions'
 
 // 转存为凭据的状态和规则，对话框只管长相。规则只认得出值从哪里开始，结尾是猜的，所以值默认遮盖，
@@ -79,6 +85,8 @@ export function useConvertCredential(
   const result = ref<ConvertedToCredential | null>(null)
   // 新建时写进了密码库、之后的事务却失败了：条目留在集合里（CredentialWriteError.vaultItem）
   const orphan = ref<OrphanVaultItem | null>(null)
+  // 失败之后的下一步说明（集合只读、值太长），见 vault.ts 的 writeFailureNext
+  const failureDetail = ref<string | null>(null)
 
   // 每次读取一个序号：关掉或者换了一条之后，晚到的读取结果与匹配结果不算
   let loadId = 0
@@ -202,6 +210,7 @@ export function useConvertCredential(
     candidates.value = []
     result.value = null
     failure.value = null
+    failureDetail.value = null
     orphan.value = null
     canReload.value = false
     loadFailure.value = null
@@ -359,6 +368,7 @@ export function useConvertCredential(
     const seen = memory.value!
     submitting.value = true
     failure.value = null
+    failureDetail.value = null
     orphan.value = null
     canReload.value = false
     try {
@@ -385,7 +395,14 @@ export function useConvertCredential(
       if (id !== submitId) return
       failure.value = err instanceof ApiError ? err.message : '转存失败'
       orphan.value = left
-      // 版本冲突和标识冲突都是 409：读一次比版本，不看文字。读到了且版本没变才不给重新读取；
+      // 错误体带 reason 时按它给下一步：version、item_conflict 重新读取，read_only、value_too_long 说明该改什么
+      const next = writeFailureNext(err)
+      failureDetail.value = next.detail
+      if (hasWriteReason(err)) {
+        canReload.value = next.reload
+        return
+      }
+      // 不带原因的 409（例如标识冲突）：读一次比版本，不看文字。读到了且版本没变才不给重新读取；
       // 读取失败时分不清，留着入口，不然提示让人重新读取却没有按钮，再提交一直 409
       if (err instanceof ApiError && err.status === 409) {
         const latest = await readMemory(sid, seen.uri).catch(() => null)
@@ -407,6 +424,7 @@ export function useConvertCredential(
     candidates,
     shown,
     failure,
+    failureDetail,
     orphan,
     store: newStore.store,
     storeIssue: newStore.issue,

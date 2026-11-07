@@ -13,11 +13,7 @@ import { computed, reactive, ref, toRef, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
-import {
-  storeBlocker,
-  storeLabel,
-  useNewCredentialStore,
-} from '../composables/useNewCredentialStore'
+import { useNewCredentialStore } from '../composables/useNewCredentialStore'
 import { useSession } from '../composables/useSession'
 import {
   createBody,
@@ -42,9 +38,12 @@ import {
   itemsAvailable,
   orphanNotice,
   orphanVaultItem,
+  storeBlocker,
+  storeLabel,
   storeName,
   vaultCredentialDraft,
   writableVaultField,
+  writeFailureNext,
 } from '../vault'
 import { fetchVaultItems } from '../vaultQueries'
 import Hint from './Hint.vue'
@@ -92,8 +91,11 @@ const vaultValues = ref<VaultValueRow[]>([])
 // 重新读取之后和新的一版合不起来的地方
 const failure = ref<string | null>(null)
 const conflict = ref(false)
+// 失败之后的下一步（集合只读、值太长时说明该改什么），见 vault.ts 的 writeFailureNext
+const failureDetail = ref<string | null>(null)
 const orphan = ref<OrphanVaultItem | null>(null)
-const mergeConflicts = ref<string[]>([])
+// 按新读到的一版合进表单之后的提示：title 说发生了什么，conflicts 是合不起来的地方
+const mergeNote = ref<{ title: string; conflicts: string[] } | null>(null)
 
 const valueRow = (name = '', existing = false): ValueRow => ({
   key: nextKey++,
@@ -161,7 +163,8 @@ function fill(c: ConsoleCredential | null) {
   failure.value = null
   conflict.value = false
   orphan.value = null
-  mergeConflicts.value = []
+  mergeNote.value = null
+  baselineDone.value = false
 }
 
 watch(open, (isOpen) => {
@@ -185,6 +188,55 @@ const items = useQuery({
   queryFn: ({ queryKey: [, sid, id] }) => fetchVaultItems(queryClient, sid, id!),
   enabled: computed(() => open.value && !!connection.value && itemsAvailable(connection.value)),
 })
+
+// 密码库凭据的基准版本：列条目时服务端可能看到条目改过、把版本号加一，打开时手里的那一版就旧了，第一次保存必然 409。
+// 所以先等条目列表读完，再读一次凭据作为基准；之后条目列表再刷新（别处让它失效、重新检查），也再读一次，
+// 版本变了就按 mergeReloaded 合进表单，表单里的改动留着并提示
+const syncsWithItems = computed(
+  () =>
+    origin.value?.source === 'vault' &&
+    !!connection.value &&
+    itemsAvailable(connection.value) &&
+    !items.isError.value,
+)
+const baselineDone = ref(false)
+// 基准还没定下来时不能保存：连接列表在读，或者要等条目列表与凭据
+const baselinePending = computed(
+  () =>
+    origin.value?.source === 'vault' &&
+    (connections.isPending.value || (syncsWithItems.value && !baselineDone.value)),
+)
+let syncId = 0
+async function rebase(title: string) {
+  const before = origin.value
+  if (!before || !open.value) return
+  const id = ++syncId
+  const spaceId = props.spaceId
+  const fresh = await api.credential(spaceId, before.id).catch(() => null)
+  if (id !== syncId || !open.value || origin.value?.id !== before.id) return
+  baselineDone.value = true
+  if (!fresh) return
+  queryClient.setQueryData(['credential', spaceId, fresh.id], fresh)
+  if (fresh.version !== origin.value.version) applyFresh(origin.value, fresh, title)
+}
+watch(
+  () => [open.value, items.dataUpdatedAt.value, syncsWithItems.value] as const,
+  ([isOpen, updatedAt, syncs]) => {
+    if (isOpen && syncs && updatedAt && !saving.value)
+      void rebase('凭据已在别处更新，表单中的改动已保留')
+  },
+)
+
+// 新读到的一版合进表单（credentialForm.ts 的 mergeReloaded）
+function applyFresh(before: ConsoleCredential, fresh: ConsoleCredential, title: string) {
+  const merged = mergeReloaded(input(), before, fresh, () => nextKey++)
+  mode.value = merged.input.mode
+  Object.assign(form, merged.input.form)
+  valueRows.value = merged.input.valueRows
+  vaultRows.value = merged.input.vaultRows
+  vaultValues.value = merged.input.vaultValues
+  mergeNote.value = { title, conflicts: merged.conflicts }
+}
 // 新建的值写到哪里；去处用不了时提醒（服务端整次失败，不退回托管），读不到时不能新建
 const {
   store,
@@ -233,6 +285,7 @@ const input = (): CredentialFormInput => ({
 const problem = computed(
   () =>
     (isNew.value ? storeBlocker({ store: store.value, failed: storeFailed.value }) : null) ??
+    (baselinePending.value ? '正在读取最新的一版' : null) ??
     formProblem(input()),
 )
 
@@ -251,6 +304,7 @@ async function submit() {
   if (saving.value || problem.value) return
   saving.value = true
   failure.value = null
+  failureDetail.value = null
   conflict.value = false
   orphan.value = null
   const spaceId = props.spaceId
@@ -278,10 +332,13 @@ async function submit() {
   } catch (err) {
     failure.value = err instanceof ApiError ? err.message : '保存失败'
     orphan.value = orphanVaultItem(err)
+    const next = writeFailureNext(err)
+    failureDetail.value = next.detail
     // 留下的条目出现在条目列表里，可以起标识
     if (orphan.value) void queryClient.invalidateQueries({ queryKey: ['vault-items', spaceId] })
-    // 版本冲突、条目在别处改过：重新读取，看过新的那一版再改
-    if (err instanceof ApiError && err.status === 409 && before) {
+    // 版本冲突、条目在别处改过（reason 为 version、item_conflict）：重新读取，看过新的那一版再改。
+    // 集合只读、值太长重新读取没有用，只说明该改什么
+    if (before && next.reload) {
       conflict.value = true
       emit('conflict')
     }
@@ -290,28 +347,31 @@ async function submit() {
   }
 }
 
-// 重新读取：只换掉服务端的那一份，表单里的改动都留着，和新的一版合起来（credentialForm.ts 的 mergeReloaded）；
-// 合不起来的逐条提示。条目的修改时间也变了，条目列表一起重读
+// 重新读取：只换掉服务端的那一份，表单里的改动都留着，和新的一版合起来；合不起来的逐条提示。
+// 密码库的先重读条目列表（列条目时服务端可能再把版本号加一），读完再读凭据，免得读到的那一版马上又旧了
 const reloading = ref(false)
 async function reload() {
   const before = origin.value
   if (!before || reloading.value) return
   const spaceId = props.spaceId
+  const conn = connection.value
   reloading.value = true
+  syncId++
   try {
+    if (syncsWithItems.value && conn) {
+      await queryClient.fetchQuery({
+        queryKey: ['vault-items', spaceId, conn.id],
+        queryFn: () => fetchVaultItems(queryClient, spaceId, conn.id),
+        staleTime: 0,
+      })
+    }
     const fresh = await api.credential(spaceId, before.id)
     queryClient.setQueryData(['credential', spaceId, fresh.id], fresh)
-    void queryClient.invalidateQueries({ queryKey: ['vault-items', spaceId] })
     void invalidateInboxCounts(queryClient, spaceId)
     if (!open.value || origin.value?.id !== before.id) return
-    const merged = mergeReloaded(input(), before, fresh, () => nextKey++)
-    mode.value = merged.input.mode
-    Object.assign(form, merged.input.form)
-    valueRows.value = merged.input.valueRows
-    vaultRows.value = merged.input.vaultRows
-    vaultValues.value = merged.input.vaultValues
-    mergeConflicts.value = merged.conflicts
+    applyFresh(origin.value, fresh, '已重新读取')
     failure.value = null
+    failureDetail.value = null
     conflict.value = false
   } catch (err) {
     failure.value = err instanceof ApiError ? err.message : '读取失败'
@@ -560,9 +620,14 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
           </div>
         </UFormField>
 
-        <NoteLine v-if="mergeConflicts.length" tone="warning">
-          已重新读取，以下改动需要核对
-          <template #detail>{{ mergeConflicts.join('；') }}</template>
+        <NoteLine
+          v-if="mergeNote && (mergeNote.conflicts.length || mergeNote.title !== '已重新读取')"
+          tone="warning"
+        >
+          {{ mergeNote.title }}
+          <template v-if="mergeNote.conflicts.length" #detail
+            >需要核对：{{ mergeNote.conflicts.join('；') }}</template
+          >
         </NoteLine>
         <!-- 留下的条目与失败的原因都要显示：只看到条目的提示，不知道为什么失败，再提交又多建一个 -->
         <NoteLine v-if="orphanText" tone="warning">
@@ -576,7 +641,9 @@ const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : n
         </NoteLine>
         <NoteLine v-if="failure" tone="error">
           {{ failure }}
-          <template v-if="conflict" #detail>重新读取后再保存，表单中的改动保留。</template>
+          <template v-if="conflict || failureDetail" #detail>{{
+            conflict ? '重新读取后再保存，表单中的改动保留。' : failureDetail
+          }}</template>
           <template v-if="conflict" #actions>
             <UButton
               size="sm"

@@ -2,13 +2,7 @@ import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, type Ref } from 'vue'
 
 import { api } from '../api/endpoints'
-import {
-  destinationProblem,
-  itemsAvailable,
-  newCredentialStore,
-  storeName,
-  type NewCredentialStore,
-} from '../vault'
+import { destinationProblem, itemsAvailable, newCredentialStore } from '../vault'
 import { fetchVaultItems } from '../vaultQueries'
 
 // 新建的凭据写到哪里：新建凭据、转存与保存前处理共用。
@@ -40,16 +34,4 @@ export function useNewCredentialStore(spaceId: Ref<string>, enabled: Ref<boolean
   )
   const failed = computed(() => connections.isError.value && !connections.data.value)
   return { store, issue, failed }
-}
-
-// 新建凭据的去处还不能确定时为什么不能提交：读取失败、还在读
-export function storeBlocker(state: { store: unknown; failed: boolean }): string | null {
-  if (state.failed) return '去处读取失败'
-  return state.store === null ? '正在读取去处' : null
-}
-
-// 「写到」后面的说法：读取失败时明说，还在读时是省略号
-export function storeLabel(store: NewCredentialStore | null, failed: boolean): string {
-  if (failed) return '去处读取失败'
-  return store ? storeName(store) : '…'
 }
