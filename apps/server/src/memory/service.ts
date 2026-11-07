@@ -1654,6 +1654,62 @@ export class MemoryService {
     })
   }
 
+  // 转存之前对记忆的检查：版本、能不能改、是不是机密、能不能放占位符、正文里有没有这段值、
+  // 坐标与触发场景这些明文里有没有、换完之后长度。转存的事务里查一次；设了去处的新建要先写进密码库，
+  // 写之前另在一个短事务里先查一遍（checkConvertible），免得每次失败都在集合里留一个装着值的条目
+  private async convertChecks(
+    tx: Tx,
+    row: MemoryRow,
+    input: Pick<ConvertToCredentialRequest, 'expectedVersion' | 'value'> & {
+      identifier: string
+      field: string
+    },
+  ) {
+    if (row.version !== input.expectedVersion) {
+      throw versionConflict(`版本已变化：当前是 ${row.version}，请先重新读取`)
+    }
+    this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
+    if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)
+    if (!placeholderAllowed(row.layer, row.sensitivity)) {
+      throw new MemoryError(400, CONVERT_SCOPE_TEXT)
+    }
+    const placeholder = `{{cred:${input.identifier}#${input.field}}}`
+    const { text: content, replaced } = replaceOutsidePlaceholders(
+      row.content,
+      input.value,
+      placeholder,
+    )
+    if (!replaced) throw new MemoryError(400, CONVERT_NOT_FOUND)
+    const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
+    const elsewhere = [
+      formatUri(row.domain!, row.path!),
+      row.title ?? '',
+      row.disclosure ?? '',
+      ...glossary,
+    ]
+    if (elsewhere.some((text) => text.includes(input.value))) {
+      throw new MemoryError(400, CONVERT_ELSEWHERE)
+    }
+    if (!UpdateMemoryRequest.shape.content.safeParse(content).success) {
+      throw new MemoryError(400, CONVERT_TOO_LONG)
+    }
+    return { content, replaced, placeholder, glossary }
+  }
+
+  // 转存写进密码库之前先查一遍记忆（不锁、不写）：规则和转存的事务里同一份（convertChecks），
+  // 事务里照旧再查，以防这之间被改
+  async checkConvertible(
+    input: Pick<ConvertToCredentialRequest, 'memoryId' | 'expectedVersion' | 'value'> & {
+      identifier: string
+      field: string
+    },
+  ): Promise<void> {
+    await this.run(async (tx, personaIds) => {
+      const row = await this.readableById(tx, input.memoryId, personaIds, false)
+      await this.convertChecks(tx, row, input)
+    })
+  }
+
   // 把正文里的一段明文转存成凭据，全部在一个事务里：credential.create 建好凭据或锁住已有的那条（标识冲突、
   // 权限不够、核对之后凭据变了时抛错，什么都不留下），返回凭据 id；正文里这段值换成 {{cred:<identifier>#<field>}}（照常过写入检查、版本加一、记一条事件），再把这个值从历史里拿掉。
   // 全文检索是生成列，跟着新正文变；向量由旧正文生成，在同一个事务里删掉，提交后重新排队生成。
@@ -1679,34 +1735,7 @@ export class MemoryService {
       // 要扫一遍这个空间的记忆，放在拿锁之前，别的写入不用等它；只是提示用的数字，差一点不要紧
       const otherMemories = await this.othersWithValue(tx, input.memoryId, input.value)
       const row = await this.readableById(tx, input.memoryId, personaIds, true)
-      if (row.version !== input.expectedVersion) {
-        throw versionConflict(`版本已变化：当前是 ${row.version}，请先重新读取`)
-      }
-      this.assertModifiable(row, `无权修改${LAYER_NAMES[row.layer]}的记忆`)
-      if (row.content === null) throw new MemoryError(400, CONVERT_SECRET)
-      if (!placeholderAllowed(row.layer, row.sensitivity)) {
-        throw new MemoryError(400, CONVERT_SCOPE_TEXT)
-      }
-      const placeholder = `{{cred:${input.identifier}#${input.field}}}`
-      const { text: content, replaced } = replaceOutsidePlaceholders(
-        row.content,
-        input.value,
-        placeholder,
-      )
-      if (!replaced) throw new MemoryError(400, CONVERT_NOT_FOUND)
-      const glossary = (await this.glossaryOf(tx, [row.id])).get(row.id) ?? []
-      const elsewhere = [
-        formatUri(row.domain!, row.path!),
-        row.title ?? '',
-        row.disclosure ?? '',
-        ...glossary,
-      ]
-      if (elsewhere.some((text) => text.includes(input.value))) {
-        throw new MemoryError(400, CONVERT_ELSEWHERE)
-      }
-      if (!UpdateMemoryRequest.shape.content.safeParse(content).success) {
-        throw new MemoryError(400, CONVERT_TOO_LONG)
-      }
+      const { content, replaced, placeholder, glossary } = await this.convertChecks(tx, row, input)
       const credentialId = await credential.create(tx)
       const memory = await this.applyUpdate(
         tx,

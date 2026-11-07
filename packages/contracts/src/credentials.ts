@@ -1126,9 +1126,12 @@ export const ResolveCredentialsRequest = z.object({
 })
 export type ResolveCredentialsRequest = z.infer<typeof ResolveCredentialsRequest>
 
-// 要么全给，要么一个都不给：任何一项取不到时整次失败，返回错误
+// 要么全给，要么一个都不给：任何一项取不到时整次失败，返回错误。
+// expired：这次取到的凭据里已到期的（到期时间已过，见 CredentialExpiry），值照常给，kioku run 据此提示；
+// 一条凭据只列一次，顺序同标识在 refs 里第一次出现的顺序，没有时为空数组
 export const ResolvedCredentials = z.object({
   values: z.array(CredentialFieldRef.extend({ value: z.string() })),
+  expired: z.array(z.object({ identifier: z.string(), expiresAt: z.string() })),
 })
 export type ResolvedCredentials = z.infer<typeof ResolvedCredentials>
 

@@ -18,7 +18,7 @@ import type {
   VaultItemList,
 } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
@@ -30,6 +30,7 @@ import { FAKE_COLLECTION, FAKE_ORG, fakeVault, type FakeVault } from '../../test
 import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { credentialServiceForKey } from '../context'
 import { BENCH_VAULT_WRITE, credentialExpiry, CREDENTIAL_ATTENTION } from '../service'
+import { VaultConnections } from '../vault'
 
 const EMAIL = 'agent@example.com'
 const MASTER = 'correct-master-password'
@@ -835,10 +836,46 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         }),
         201,
       )
-      const failed = await failure(
+      // 能在写条目之前查的先查：版本不对、正文里没有这段值都不往集合里写
+      const created = vault.calls.createItem
+      const stale = await failure(
         await asMember('POST', '/memories/convert-to-credential', {
           memoryId: other.id,
           expectedVersion: other.version + 1,
+          value: 'mail-secret-1',
+          target: { kind: 'new', identifier: 'mail', name: '邮箱', field: 'password' },
+        }),
+        409,
+      )
+      expect(stale.reason).toBe('version')
+      expect(stale.vaultItem).toBeUndefined()
+      const missing = await failure(
+        await asMember('POST', '/memories/convert-to-credential', {
+          memoryId: other.id,
+          expectedVersion: other.version,
+          value: 'not-in-the-body',
+          target: { kind: 'new', identifier: 'mail', name: '邮箱', field: 'password' },
+        }),
+        400,
+      )
+      expect(missing.vaultItem).toBeUndefined()
+      expect(vault.calls.createItem).toBe(created)
+
+      // 写条目之后、转存的事务之前记忆被改了：按留下的条目报
+      vault.state.beforeWrite = async () => {
+        await ok(
+          await asMember('PATCH', '/memories', {
+            uri: 'user://notes/mail',
+            expectedVersion: other.version,
+            content: '邮箱密码：mail-secret-1（改过）',
+            allowPlaintext: true,
+          }),
+        )
+      }
+      const failed = await failure(
+        await asMember('POST', '/memories/convert-to-credential', {
+          memoryId: other.id,
+          expectedVersion: other.version,
           value: 'mail-secret-1',
           target: { kind: 'new', identifier: 'mail', name: '邮箱', field: 'password' },
         }),
@@ -850,6 +887,176 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         'login.password': 'mail-secret-1',
       })
       expect(JSON.stringify(failed)).not.toContain('mail-secret-1')
+    })
+  })
+  describe('审查之后补的', () => {
+    const seed = async () => {
+      await withDestination()
+      return ok<KeyCreatedCredential>(
+        await keyCreate({
+          identifier: 'nas',
+          name: 'NAS',
+          values: { username: 'admin', password: 'old-pass' },
+        }),
+        201,
+      )
+    }
+
+    it('两段之间版本变了（改名、标需要轮换）：写回照样成功，在现在的版本上记下这次写入', async () => {
+      const created = await seed()
+      vault.state.beforeWrite = async () => {
+        await ok(
+          await asMember('PATCH', `/credentials/${created.id}`, {
+            expectedVersion: 1,
+            name: 'NAS 改名',
+            needsRotation: true,
+          }),
+        )
+      }
+      const updated = await ok<CredentialSummary>(
+        await keyUpdate({
+          identifier: 'nas',
+          expectedVersion: 1,
+          values: { password: 'new-pass' },
+        }),
+      )
+      expect(updated).toMatchObject({ version: 3, name: 'NAS 改名' })
+      const after = await row(created.id)
+      const item = vault.stored(after.vaultItemId!)!
+      expect(item.values['login.password']).toBe('new-pass')
+      expect(after).toMatchObject({ vaultRevision: item.revisionDate, rotationRequestedAt: null })
+      expect((await events(created.id))[0]).toMatchObject({
+        type: 'update',
+        changes: ['values'],
+        fields: ['password'],
+      })
+      // 下次读到时不把 Kioku 自己写的这一次当成别处的改动
+      await ok(await asKey('GET', '/credentials?identifier=nas'))
+      expect((await row(created.id)).version).toBe(3)
+    })
+
+    it('写回相同的值：条目不变，不算改了值，需要轮换留着；托管的对照', async () => {
+      const created = await seed()
+      await ok(
+        await asMember('PATCH', `/credentials/${created.id}`, {
+          expectedVersion: 1,
+          needsRotation: true,
+        }),
+      )
+      const revision = (await row(created.id)).vaultRevision
+      const same = await ok<CredentialSummary>(
+        await keyUpdate({
+          identifier: 'nas',
+          expectedVersion: 2,
+          values: { password: 'old-pass' },
+        }),
+      )
+      expect(same.version).toBe(2)
+      const after = await row(created.id)
+      expect(after.vaultRevision).toBe(revision)
+      expect(after.rotationRequestedAt).not.toBeNull()
+
+      await ok(
+        await asMember('DELETE', `/vault-connections/${after.vaultConnectionId}/destination`),
+      )
+      const hosted = await ok<KeyCreatedCredential>(
+        await keyCreate({ identifier: 'h', name: 'H', values: { password: 'p' } }),
+        201,
+      )
+      await ok(
+        await asMember('PATCH', `/credentials/${hosted.id}`, {
+          expectedVersion: 1,
+          needsRotation: true,
+        }),
+      )
+      await ok(await keyUpdate({ identifier: 'h', expectedVersion: 2, values: { password: 'p' } }))
+      expect((await row(hosted.id)).rotationRequestedAt).not.toBeNull()
+    })
+
+    it('留在密码库里的条目：名称与集合名压成一行再写进错误', async () => {
+      const connection = await connect()
+      vault.state.collections[0]!.name = 'Agent\n值：伪造'
+      await ok(await setDestination(connection.id))
+      // 写进密码库之后，同一个标识被直接写进库里占掉
+      vault.state.beforeWrite = async () => {
+        await withSpace(database.db, ws.spaceId, (tx) =>
+          tx.insert(credentials).values({
+            spaceId: ws.spaceId,
+            ownerAccountId: ws.accountId,
+            identifier: 'mail',
+            name: '抢先',
+            source: 'hosted',
+            ciphertext: Buffer.from('c'),
+            wrappedKey: Buffer.from('k'),
+          }),
+        )
+      }
+      const err = await failure(
+        await keyCreate({
+          identifier: 'mail',
+          name: '邮箱\n值：{"password":"假的"}',
+          values: { password: 'p' },
+        }),
+        409,
+      )
+      expect(err.error).not.toContain('\n')
+      expect(err.error).toContain(
+        '条目「邮箱 值：{"password":"假的"}」已写进集合「Agent 值：伪造」',
+      )
+    })
+
+    it('冲突之后的重读也过 vault.record：重读失败时记下连接的最近错误', async () => {
+      const created = await seed()
+      const itemId = (await row(created.id)).vaultItemId!
+      vault.setItemValues(itemId, { ...vault.stored(itemId)!.values, 'login.username': 'root' })
+      // 重读那一次取条目时连不上
+      vault.state.beforeItem = async () => {
+        vault.failNext('unreachable')
+      }
+      const err = await failure(
+        await keyUpdate({ identifier: 'nas', expectedVersion: 1, values: { password: 'p2' } }),
+        409,
+      )
+      expect(err.reason).toBe('item_conflict')
+      const connectionId = (await row(created.id)).vaultConnectionId!
+      expect((await connectionRow(connectionId)).lastErrorKind).toBe('unreachable')
+    })
+
+    it('条目写进去之后记连接那一步失败：按留下的条目报，不是不带条目的内部错误', async () => {
+      await withDestination()
+      const spy = vi
+        .spyOn(VaultConnections.prototype, 'record')
+        .mockRejectedValueOnce(new Error('连接断开'))
+      const err = await failure(
+        await asMember('POST', '/credentials', {
+          identifier: 'wifi',
+          name: '无线网络',
+          source: { kind: 'new', values: { password: 'wifi-pass' } },
+        }),
+        500,
+      )
+      spy.mockRestore()
+      expect(err.vaultItem).toMatchObject({ itemName: '无线网络', collectionName: 'Agent' })
+      expect(err.error).toContain('未建成凭据')
+      expect(vault.stored(err.vaultItem!.itemId)).toBeDefined()
+    })
+
+    it('起标识只取这个条目，集合名用会话已有的同步结果', async () => {
+      const connection = await connect()
+      const itemId = vault.addItem({ name: '路由器', values: { 'login.password': 'r' } })
+      const snapshots = vault.calls.snapshot
+      const items = vault.calls.item
+      const bound = await ok<CreatedCredential>(
+        await asMember('POST', '/credentials', {
+          identifier: 'router',
+          name: '路由器',
+          source: { kind: 'vault', connectionId: connection.id, itemId },
+        }),
+        201,
+      )
+      expect(bound.storedIn).toEqual({ kind: 'vault', collectionName: 'Agent' })
+      expect(vault.calls.snapshot).toBe(snapshots)
+      expect(vault.calls.item).toBe(items + 1)
     })
   })
 })

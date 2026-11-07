@@ -388,6 +388,16 @@ function consoleOnlyRoutes(deps: Deps) {
       )
       const body = c.req.valid('json')
       // 去处在事务外准备好：credential 与 vault 要先向密码库核对值，不在事务里请求外部服务
+      // 新建的去处可能先写进密码库：写之前先按看到的版本查一遍记忆，查不过就不留下条目。
+      // 权限照旧先于记忆检查：不是空间所有者一律 403，不论记忆读不读得到
+      if (body.target.kind === 'new') {
+        credentials.requireManage()
+        await service.checkConvertible({
+          ...body,
+          identifier: body.target.identifier,
+          field: body.target.field,
+        })
+      }
       const sink = await credentials.convertTarget(body.target, body.value)
       // 新建的写进了密码库、转存的事务却失败时，错误带上留在集合里的条目
       const { memory, ...outcome } = await service
