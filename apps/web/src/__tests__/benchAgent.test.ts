@@ -32,7 +32,6 @@ import {
   argumentsText,
   blockingDivergence,
   callOpen,
-  clipText,
   consentNeeded,
   consentText,
   contentText,
@@ -54,6 +53,7 @@ import {
   type AgentConversation,
   type AgentIO,
 } from '../benchAgent'
+import { clipText } from '../text'
 import { plaintextIn } from '../benchScenarios'
 import { NOT_API_FAILURE, type RunOutcome } from '../benchSession'
 

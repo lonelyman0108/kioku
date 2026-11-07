@@ -3,11 +3,13 @@ import type { z } from 'zod'
 
 import { URI_FORMAT_HINT } from '../labels'
 
-// 后端返回的业务错误统一是 { error }；这里把状态码和提示一起带出来，页面按状态码决定怎么处理
+// 后端返回的业务错误统一是 { error }；这里把状态码和提示一起带出来，页面按状态码决定怎么处理。
+// payload 是原样的错误体，有的错误另带字段（记忆写入的 MemoryWriteError 带疑似明文的位置），由调用方按契约解析
 export class ApiError extends Error {
   constructor(
     readonly status: number,
     message: string,
+    readonly payload: unknown = null,
   ) {
     super(message)
   }
@@ -100,7 +102,11 @@ async function send(method: string, path: string, options: RequestOptions<unknow
   if (!res.ok) {
     if (res.status === 401 && !SESSION_PATHS.includes(path)) onUnauthorized?.()
     const payload = (await res.json().catch(() => null)) as { error?: string } | null
-    throw new ApiError(res.status, consoleMessage(payload?.error ?? `请求失败：HTTP ${res.status}`))
+    throw new ApiError(
+      res.status,
+      consoleMessage(payload?.error ?? `请求失败：HTTP ${res.status}`),
+      payload,
+    )
   }
   return res
 }

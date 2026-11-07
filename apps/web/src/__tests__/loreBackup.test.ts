@@ -3,6 +3,7 @@ import {
   LORE_UPLOAD_MAX_BYTES,
   LoreBackupUpload,
   type LoreImportPlan,
+  type LorePlaintextSpot,
   type LorePlanNode,
 } from '@kioku/contracts'
 import { describe, expect, it, vi } from 'vitest'
@@ -19,17 +20,25 @@ import {
   LoreFileError,
   matchesFilter,
   planBlocker,
+  planUnmatchedNote,
+  keptTargets,
+  plaintextAllConverted,
+  plaintextKey,
+  pruneUnconverted,
   readLoreBackup,
   replanAfterFailure,
   secretSelectable,
   selectionEffects,
   selectionOf,
   sourceTabs,
+  spotFingerprint,
+  spotState,
   staleNotice,
   syncGroups,
   targetTitle,
   tokenInClear,
   trimLoreBackup,
+  type Unconverted,
 } from '../loreBackup'
 
 const at = '2026-01-01T00:00:00.000Z'
@@ -164,6 +173,7 @@ const planNode = (uuid: string, extra: Partial<LorePlanNode> = {}): LorePlanNode
   targets: [target()],
   credentialRefs: [],
   credentialHints: { path: false, content: false, extras: false },
+  plaintext: [],
   ...extra,
 })
 const planOf = (
@@ -177,6 +187,7 @@ const planOf = (
   previousVersions: 0,
   fingerprint: 'f',
   secretAvailable: true,
+  credentialMatch: null,
   persona: { slug: 'default', name: '默认人格', exists: true, imported: [] },
   apps: [],
   appsGivenPersona: [],
@@ -220,6 +231,7 @@ describe('勾选', () => {
     ).toEqual({
       secretUris: ['infra://a', 'infra://new_name'],
       excludeUris: ['infra://both', 'infra://old'],
+      convertPlaintext: [],
     })
   })
 
@@ -234,6 +246,247 @@ describe('勾选', () => {
     expect(secretSelectable(mixed)).toBe(true)
     expect(excludeLabel(mixed)).toBe('不导入')
     expect(excludeLabel(planNode('n'))).toBe('不导入')
+  })
+})
+
+describe('疑似明文换成占位符', () => {
+  const credential = {
+    id: '00000000-0000-4000-8000-000000000001',
+    identifier: 'gh',
+    name: 'GitHub',
+    field: 'token',
+  }
+  const spot = (index: number, matched = true, extra: Partial<LorePlaintextSpot> = {}) => ({
+    index,
+    line: index + 1,
+    kind: 'github' as const,
+    credential: matched ? credential : null,
+    ...extra,
+  })
+  const none = new Set<string>()
+  const noUnconverted: Unconverted = new Map()
+  const node = (uuid: string, extra: Partial<LorePlanNode> = {}) =>
+    planNode(uuid, { plaintext: [spot(0), spot(1, false)], ...extra })
+  const untick = (n: LorePlanNode, s: LorePlaintextSpot): Unconverted =>
+    new Map([[plaintextKey(n, s), spotFingerprint(s)]])
+
+  it('默认勾上对上凭据的那几处，取消勾选的不发；对不上的不发', () => {
+    const a = node('a')
+    const b = node('b', { plaintext: [spot(0), spot(2)] })
+    const plan = planOf([a, b])
+    expect(selectionOf(plan, none, none).convertPlaintext).toEqual([
+      { source: 'infra://a', index: 0, credentialId: credential.id, field: credential.field },
+      { source: 'infra://b', index: 0, credentialId: credential.id, field: credential.field },
+      { source: 'infra://b', index: 2, credentialId: credential.id, field: credential.field },
+    ])
+    expect(selectionOf(plan, none, none, untick(b, spot(2))).convertPlaintext).toEqual([
+      { source: 'infra://a', index: 0, credentialId: credential.id, field: credential.field },
+      { source: 'infra://b', index: 0, credentialId: credential.id, field: credential.field },
+    ])
+  })
+
+  it('取消勾选连同特征记：重出计划后序号指到另一处时不算，回到默认勾上', () => {
+    const before = node('a', { plaintext: [spot(0)] })
+    const unticked = untick(before, spot(0))
+    // 重出的计划里第 0 处换成了别的一行、别的凭据
+    const moved = spot(0, true, { line: 9, credential: { ...credential, field: 'password' } })
+    const after = node('a', { plaintext: [moved] })
+    const plan = planOf([after])
+    expect(selectionOf(plan, none, none, unticked).convertPlaintext).toEqual([
+      { source: 'infra://a', index: 0, credentialId: credential.id, field: 'password' },
+    ])
+    expect(pruneUnconverted(plan, unticked).size).toBe(0)
+    // 特征没变的照旧不转
+    const same = planOf([before])
+    expect(selectionOf(same, none, none, unticked).convertPlaintext).toEqual([])
+    expect(pruneUnconverted(same, unticked)).toEqual(unticked)
+  })
+
+  const importedTarget = (uri: string, current: string | null = uri) =>
+    target({ uri, state: 'imported', current: [{ uri: current, secret: false }] })
+  const updateOf = (n: LorePlanNode, uri: string) => ({
+    source: n.uri,
+    uri,
+    title: 't',
+    state: 'update' as const,
+    changes: ['content' as const],
+  })
+
+  it('不导入的、这次不写的、只同步已导入目标的、新建目标都放不进占位符的不发，并标出原因', () => {
+    const excluded = node('ex')
+    const unwritten = node('old', { targets: [importedTarget('user://infra/a')] })
+    const synced = node('sync', { targets: [importedTarget('user://infra/s')] })
+    const shared = node('core', { targets: [target({ layer: 'core', sensitivity: 'internal' })] })
+    const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
+    const plan = planOf([excluded, unwritten, synced, shared, internal], {
+      items: [updateOf(synced, 'user://infra/s')],
+    })
+    const out = new Set(['ex'])
+    expect(selectionOf(plan, none, out).convertPlaintext).toEqual([])
+    expect(spotState(plan, excluded, spot(0), none, out)).toBe('excluded')
+    expect(spotState(plan, unwritten, spot(0), none, out)).toBe('unwritten')
+    expect(spotState(plan, synced, spot(0), none, out)).toBe('synced')
+    expect(spotState(plan, shared, spot(0), none, out)).toBe('blocked')
+    expect(spotState(plan, internal, spot(0), none, out)).toBe('blocked')
+    expect(spotState(plan, internal, spot(1, false), none, out)).toBe('unmatched')
+  })
+
+  it('有一个新建的目标放得进就能换；放不进的新建目标与同步的目标照原样写，数得出几个', () => {
+    const mixed = node('mixed', {
+      targets: [
+        target({ layer: 'core', sensitivity: 'internal' }),
+        target({ uri: 'user://infra/b' }),
+        importedTarget('user://infra/c'),
+        // 这次不同步的已导入目标不写，不算照原样写
+        importedTarget('user://infra/d'),
+      ],
+    })
+    const plan = planOf([mixed], { items: [updateOf(mixed, 'user://infra/c')] })
+    expect(spotState(plan, mixed, spot(0), none, none)).toBe('convertible')
+    expect(keptTargets(plan, mixed, none).map((t) => t.uri)).toEqual([
+      'user://infra/a',
+      'user://infra/c',
+    ])
+    const clean = node('clean', { targets: [target()] })
+    expect(keptTargets(planOf([clean]), clean, none)).toEqual([])
+  })
+
+  it('标了机密的按机密算：本人的内部记忆标机密之后能换，也不再算照原样写', () => {
+    const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
+    const plan = planOf([internal])
+    const secret = new Set(['internal'])
+    expect(spotState(plan, internal, spot(0), secret, none)).toBe('convertible')
+    expect(keptTargets(plan, internal, secret)).toEqual([])
+    expect(selectionOf(plan, secret, none).convertPlaintext).toEqual([
+      {
+        source: 'infra://internal',
+        index: 0,
+        credentialId: credential.id,
+        field: credential.field,
+      },
+    ])
+  })
+
+  it('每个要写的目标的每一处都写成占位符才算全部转存；有照原样写的目标就照常提醒', () => {
+    const all = node('all', { plaintext: [spot(0)] })
+    const plan = planOf([all])
+    expect(plaintextAllConverted(plan, all, none, none, noUnconverted)).toBe(true)
+    expect(plaintextAllConverted(plan, all, none, none, untick(all, spot(0)))).toBe(false)
+    const mixed = node('mixed')
+    expect(plaintextAllConverted(planOf([mixed]), mixed, none, none, noUnconverted)).toBe(false)
+    const empty = node('empty', { plaintext: [] })
+    expect(plaintextAllConverted(planOf([empty]), empty, none, none, noUnconverted)).toBe(false)
+    // 另一个新建目标放不进占位符
+    const blocked = node('blocked', {
+      plaintext: [spot(0)],
+      targets: [target(), target({ uri: 'core://x', layer: 'core', sensitivity: 'internal' })],
+    })
+    expect(plaintextAllConverted(planOf([blocked]), blocked, none, none, noUnconverted)).toBe(false)
+    // 同时同步一个已导入的目标
+    const synced = node('synced', {
+      plaintext: [spot(0)],
+      targets: [target(), importedTarget('user://infra/s')],
+    })
+    const syncPlan = planOf([synced], { items: [updateOf(synced, 'user://infra/s')] })
+    expect(plaintextAllConverted(syncPlan, synced, none, none, noUnconverted)).toBe(false)
+  })
+
+  it('照原样写、同步与这次不写入分开说；指向记忆详情只在那条记忆还在时', () => {
+    const template = descriptor.template!.content
+    expect(template).toContain('另有 {{ keptCount(node) }} 条记忆保留明文')
+    expect(template).not.toContain('写入位置')
+    expect(template).toMatch(/plaintextState\(node, spot\) === 'synced'/)
+    expect(template).toMatch(/plaintextState\(node, spot\) === 'unwritten'[^]*?本次不写入/)
+    expect(template).toContain('<Hint v-if="syncedStillThere(node)">')
+    const script = descriptor.scriptSetup!.content
+    expect(script).toMatch(/syncedStillThere[^]*?c\.uri !== null/)
+  })
+
+  it('信任提示的凭据算上这次换成占位符的那几处；取消勾选、不导入的不算', () => {
+    const a = node('a', { credentialRefs: ['nas'] })
+    const plan = planOf([a])
+    expect(selectionEffects(plan, none, none).credentialRefs).toEqual(['gh', 'nas'])
+    expect(selectionEffects(plan, none, none, untick(a, spot(0))).credentialRefs).toEqual(['nas'])
+    expect(selectionEffects(plan, none, new Set(['a'])).credentialRefs).toEqual([])
+  })
+
+  it('勾选框不是提交按钮，换成占位符的勾选进写入请求与信任提示', () => {
+    const script = descriptor.scriptSetup!.content
+    expect(script).toContain(
+      'selectionOf(seen, secretIds.value, excludedIds.value, unconvertedIds.value)',
+    )
+    expect(script).toContain(
+      'selectionEffects(plan.value, secretIds.value, excludedIds.value, unconvertedIds.value)',
+    )
+    expect(script).toContain('pruneUnconverted(next, unconvertedIds.value)')
+    const checkbox = elements.find(
+      (el) =>
+        el.tag === 'UCheckbox' &&
+        el.props?.some((p) => p.name === 'label' && p.value?.content === '写成占位符'),
+    )!
+    expect(checkbox.props?.some((p) => p.name === 'type')).toBe(false)
+    // 换了来源要清掉
+    const clear = /const clearSelection = \(\) => \{[^}]*\}/.exec(script)![0]
+    expect(clear).toContain('unconvertedIds.value = new Map()')
+  })
+})
+
+describe('跟上契约', () => {
+  it('计划里没比对的连接与凭据说一句，原因放提示层；没做比对时不说', () => {
+    expect(planUnmatchedNote(planOf([]))).toBeNull()
+    expect(
+      planUnmatchedNote({
+        credentialMatch: { unavailableConnections: 0, unreadableCredentials: 0 },
+      }),
+    ).toBeNull()
+    expect(
+      planUnmatchedNote({
+        credentialMatch: { unavailableConnections: 2, unreadableCredentials: 1 },
+      }),
+    ).toBe('2 个密码库连接不可用、1 条凭据无法获取值，未比对')
+    expect(loreImportSource).toContain(
+      '{{ planUnmatchedNote(plan) }}<Hint>{{ UNMATCHED_HINT }}</Hint>',
+    )
+  })
+
+  it('结果列出换了占位符的条数与照原样写的目标及原因；照原样写不算没做成', () => {
+    expect(loreImportSource).toContain('result.plaintextConverted.length')
+    expect(loreImportSource).toMatch(/v-for="f in result\.plaintextKept"[^]*?\{\{ f\.reason \}\}/)
+    expect(
+      importProblems({
+        failed: [],
+        secretAlreadyImported: [],
+        sync: { failed: [] },
+      }),
+    ).toBe(false)
+  })
+
+  it('同步里跳过与无法读取的标题概括，原因各条显示', () => {
+    const plan = planOf([], {
+      items: [
+        {
+          source: 'a',
+          uri: 'user://a',
+          title: 'a',
+          state: 'skipped',
+          changes: [],
+          reason: '密码库不可用',
+        },
+        {
+          source: 'b',
+          uri: 'user://b',
+          title: 'b',
+          state: 'unreadable',
+          changes: [],
+          reason: '没有主密钥',
+        },
+      ],
+    })
+    const { groups } = syncGroups(plan)
+    expect(groups.map((g) => [g.heading, g.lines[0]!.detail])).toEqual([
+      ['本次未同步（原因见各条）', '密码库不可用'],
+      ['无法同步（原因见各条）', '没有主密钥'],
+    ])
   })
 })
 

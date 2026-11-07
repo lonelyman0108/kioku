@@ -22,6 +22,7 @@ import {
   ConvertedToCredential,
   CredentialEventList,
   CredentialReferenceList,
+  CredentialValueMatches,
   CredentialValues,
   CreatedKey,
   DeletedCredentialList,
@@ -85,7 +86,8 @@ import {
   type ConnectVaultRequest,
   type CreateCredentialRequest,
   type CreateKeyRequest,
-  type CreateMemoryRequest,
+  type ConsoleCreateMemoryRequest,
+  type MatchCredentialValuesRequest,
   type CreatePersonaRequest,
   type GroupPersonaRules,
   type LoreImportApplyRequest,
@@ -107,7 +109,7 @@ import {
   type UpdateEmbeddingSettings,
   type UpdateExtractionSettings,
   type ExtractionBudget,
-  type UpdateMemoryRequest,
+  type ConsoleUpdateMemoryRequest,
   type UpdatePersonaRequest,
   type UpdateSubjectRequest,
 } from '@kioku/contracts'
@@ -225,9 +227,9 @@ export const api = {
     }),
   createMemory: (
     spaceId: string,
-    body: Partial<CreateMemoryRequest> & Pick<CreateMemoryRequest, 'uri' | 'content'>,
+    body: Partial<ConsoleCreateMemoryRequest> & Pick<ConsoleCreateMemoryRequest, 'uri' | 'content'>,
   ) => request('POST', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
-  updateMemory: (spaceId: string, body: UpdateMemoryRequest) =>
+  updateMemory: (spaceId: string, body: ConsoleUpdateMemoryRequest) =>
     request('PATCH', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
   deleteMemory: (spaceId: string, uri: string, expected: { id: string; version: number }) =>
     request('DELETE', `/spaces/${spaceId}/memories`, {
@@ -284,6 +286,12 @@ export const api = {
 
   credentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
+  // 按值查找同值的凭据与密码库条目：值只在请求体里，结果不进缓存
+  matchCredentialValues: (spaceId: string, body: MatchCredentialValuesRequest) =>
+    request('POST', `/spaces/${spaceId}/credentials/match`, {
+      body,
+      schema: CredentialValueMatches,
+    }),
   deletedCredentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials/deleted`, { schema: DeletedCredentialList }),
   credential: (spaceId: string, id: string) =>

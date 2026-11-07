@@ -4,11 +4,17 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, effectScope, nextTick, ref, type EffectScope } from 'vue'
 
 import { ApiError } from '../../api/client'
+import { itemKey } from '../../plaintext'
 import { useConvertCredential } from '../useConvertCredential'
 
 // 接口换成假的，别的都是真的：vue 的响应式、vue-query 的缓存。对话框只管长相，能不能提交都在这里定
 const fakes = vi.hoisted(() => ({
-  api: { memory: vi.fn(), credentials: vi.fn(), convertToCredential: vi.fn() },
+  api: {
+    memory: vi.fn(),
+    credentials: vi.fn(),
+    convertToCredential: vi.fn(),
+    matchCredentialValues: vi.fn(),
+  },
 }))
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
 
@@ -75,6 +81,12 @@ beforeEach(() => {
   fakes.api.memory.mockReset()
   fakes.api.credentials.mockReset().mockResolvedValue({ items: [], truncated: false })
   fakes.api.convertToCredential.mockReset()
+  fakes.api.matchCredentialValues
+    .mockReset()
+    .mockImplementation(async (_sid: string, body: { values: string[] }) => ({
+      items: body.values.map(() => ({ credentials: [], vaultItems: [] })),
+      unavailableConnections: 0,
+    }))
   onConverted.mockReset()
 })
 afterEach(() => {
@@ -107,6 +119,10 @@ describe('读到记忆之后', () => {
     expect(convert.canSubmit.value).toBe(false)
     convert.shown.value = true
     await nextTick()
+    // 改过的值要等按值查找回来
+    expect(convert.problem.value).toBe('正在查找同值的凭据')
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    await settle()
     expect(convert.canSubmit.value).toBe(true)
   })
 
@@ -265,9 +281,7 @@ describe('提交', () => {
       memoryId: memory().id,
       expectedVersion: 1,
       value: 'hunter2-not-real',
-      identifier: 'nas',
-      name: 'NAS',
-      field: 'password',
+      target: { kind: 'hosted', identifier: 'nas', name: 'NAS', field: 'password' },
     })
     expect(convert.form.value).toBe('')
     expect(convert.result.value).toEqual(done)
@@ -415,7 +429,8 @@ describe('提交没回来就被重置', () => {
     fakes.api.memory.mockResolvedValue(memory())
     await convert.load()
     convert.shown.value = true
-    await nextTick()
+    // 等按值查找回来才能提交
+    await settle()
     fakes.api.convertToCredential.mockReturnValue(new Promise(() => {}))
     void convert.submit()
     await nextTick()
@@ -424,5 +439,216 @@ describe('提交没回来就被重置', () => {
     await submitted
     expect(convert.submitting.value).toBe(true)
     expect(convert.failure.value).toBeNull()
+  })
+})
+
+describe('转存的去处', () => {
+  const credential = {
+    id: '00000000-0000-4000-8000-0000000000c1',
+    identifier: 'nas-admin',
+    name: 'NAS 管理',
+    field: 'password',
+  }
+  const item = {
+    connectionId: '00000000-0000-4000-8000-0000000000a1',
+    itemId: 'item-1',
+    itemName: 'NAS',
+    itemField: 'login.password',
+    credential: null,
+  }
+  const matchWith = (match: { credentials: unknown[]; vaultItems: unknown[] }) =>
+    fakes.api.matchCredentialValues.mockImplementation(
+      async (_sid: string, body: { values: string[] }) => ({
+        items: body.values.map(() => match),
+        unavailableConnections: 1,
+        unreadableCredentials: 2,
+      }),
+    )
+
+  it('打开时按值查找，只发合规的值；结果不进查询的缓存', async () => {
+    const convert = await shown({ content: '密码：hunter2-not-real\ntoken=abc' })
+    await settle()
+    expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('s1', {
+      values: ['hunter2-not-real'],
+    })
+    expect(
+      client
+        .getQueryCache()
+        .getAll()
+        .map((q) => q.queryKey[0]),
+    ).not.toContain('credential-match')
+    expect(convert.unavailableConnections.value).toBe(0)
+  })
+
+  it('默认选第一个对上的：已有凭据排在条目前面，发 credential', async () => {
+    matchWith({ credentials: [credential], vaultItems: [item] })
+    const convert = await shown()
+    await settle()
+    expect(convert.choices.value.destinations.map((d) => d.kind)).toEqual([
+      'credential',
+      'vault',
+      'hosted',
+    ])
+    expect(convert.selected.value.kind).toBe('credential')
+    expect(convert.placeholder.value).toBe('{{cred:nas-admin#password}}')
+    expect(convert.unavailableConnections.value).toBe(1)
+    expect(convert.unreadableCredentials.value).toBe(2)
+    fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
+    await convert.submit()
+    expect(fakes.api.convertToCredential.mock.calls[0]![1].target).toEqual({
+      kind: 'credential',
+      credentialId: credential.id,
+      field: 'password',
+    })
+  })
+
+  it('选尚未起标识的条目：在这里起标识，建议按条目名称，发 vault', async () => {
+    matchWith({ credentials: [], vaultItems: [item] })
+    fakes.api.credentials.mockResolvedValue({ items: [{ identifier: 'nas' }], truncated: false })
+    const convert = await shown()
+    await settle()
+    expect(convert.selected.value.kind).toBe('vault')
+    const key = itemKey(item)
+    expect(convert.vaultIdentifiers[key]).toBe('nas-2')
+    convert.vaultIdentifiers[key] = 'nas-box'
+    await nextTick()
+    expect(convert.placeholder.value).toBe('{{cred:nas-box#password}}')
+    fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
+    await convert.submit()
+    expect(fakes.api.convertToCredential.mock.calls[0]![1].target).toEqual({
+      kind: 'vault',
+      connectionId: item.connectionId,
+      itemId: 'item-1',
+      itemField: 'login.password',
+      identifier: 'nas-box',
+    })
+  })
+
+  it('手动选过的去处不随匹配结果换；选新建托管凭据发 hosted', async () => {
+    matchWith({ credentials: [credential], vaultItems: [] })
+    const convert = await shown()
+    await settle()
+    convert.choose('hosted')
+    await nextTick()
+    expect(convert.selected.value.kind).toBe('hosted')
+    fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
+    await convert.submit()
+    expect(fakes.api.convertToCredential.mock.calls[0]![1].target.kind).toBe('hosted')
+  })
+
+  it('起了标识却没对应这个字段的条目只列出来，不能选', async () => {
+    matchWith({
+      credentials: [],
+      vaultItems: [{ ...item, credential: { id: credential.id, identifier: 'nas' } }],
+    })
+    const convert = await shown()
+    await settle()
+    expect(convert.choices.value.destinations.map((d) => d.kind)).toEqual(['hosted'])
+    expect(convert.choices.value.unmapped).toEqual([
+      { itemName: 'NAS', itemField: 'login.password', identifier: 'nas' },
+    ])
+  })
+
+  it('还在查时不能提交：默认的去处可能还会变', async () => {
+    const pending = deferred<unknown>()
+    fakes.api.matchCredentialValues.mockReturnValue(pending.promise)
+    const convert = await shown()
+    expect(convert.problem.value).toBe('正在查找同值的凭据')
+    expect(convert.canSubmit.value).toBe(false)
+    pending.resolve({ items: [{ credentials: [], vaultItems: [] }], unavailableConnections: 0 })
+    await settle()
+    expect(convert.canSubmit.value).toBe(true)
+  })
+
+  it('查不了时照样能新建托管凭据，说明查找失败', async () => {
+    fakes.api.matchCredentialValues.mockRejectedValue(new ApiError(502, '密码库无法连接'))
+    const convert = await shown()
+    await settle()
+    expect(convert.matchFailure.value).toBe('密码库无法连接')
+    expect(convert.selected.value.kind).toBe('hosted')
+    expect(convert.canSubmit.value).toBe(true)
+  })
+
+  it('值改了之后停一会儿再查新的值', async () => {
+    vi.useFakeTimers()
+    try {
+      const convert = await shown()
+      await vi.runAllTimersAsync()
+      fakes.api.matchCredentialValues.mockClear()
+      convert.form.value = 'hunter2-not'
+      await nextTick()
+      expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
+      await vi.advanceTimersByTimeAsync(500)
+      expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('s1', {
+        values: ['hunter2-not'],
+      })
+    } finally {
+      vi.useRealTimers()
+    }
+  })
+
+  it('服务端核对值不一致（400）或条目已有凭据（409）照现有的错误提示显示', async () => {
+    matchWith({ credentials: [], vaultItems: [item] })
+    const convert = await shown()
+    await settle()
+    fakes.api.convertToCredential.mockRejectedValue(
+      new ApiError(400, '条目字段的值与要转存的值不一致'),
+    )
+    await convert.submit()
+    expect(convert.failure.value).toBe('条目字段的值与要转存的值不一致')
+    fakes.api.convertToCredential.mockRejectedValue(new ApiError(409, '这个条目已有凭据'))
+    await convert.submit()
+    await settle()
+    expect(convert.failure.value).toBe('这个条目已有凭据')
+    expect(convert.canReload.value).toBe(false)
+  })
+
+  it('重新读取时进行中的查找作废：恢复回来的手输值重新查一次，不会一直等着', async () => {
+    const convert = await shown({ content: '密码：hunter2-not-real-x' })
+    await settle()
+    // 手输一个新值，查找发出去还没回来
+    const stale = deferred<unknown>()
+    fakes.api.matchCredentialValues.mockReturnValueOnce(stale.promise)
+    convert.form.value = 'hunter2-not-real'
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    expect(convert.matchingValue.value).toBe(true)
+    // 重新读取：值还在正文里，留下
+    fakes.api.memory.mockResolvedValue(memory({ version: 2, content: '密码：hunter2-not-real-x' }))
+    await convert.load()
+    await settle()
+    expect(convert.form.value).toBe('hunter2-not-real')
+    stale.resolve({ items: [{ credentials: [], vaultItems: [] }], unavailableConnections: 0 })
+    await settle()
+    expect(convert.matchingValue.value).toBe(false)
+    expect(fakes.api.matchCredentialValues).toHaveBeenLastCalledWith('s1', {
+      values: ['hunter2-not-real'],
+    })
+  })
+
+  it('没发请求的查找不清掉之前的失败说明与不可用连接数', async () => {
+    fakes.api.matchCredentialValues.mockRejectedValueOnce(new ApiError(502, '密码库无法连接'))
+    const convert = await shown()
+    await settle()
+    expect(convert.matchFailure.value).toBe('密码库无法连接')
+    // 改成通不过转存规则的值：不发请求
+    fakes.api.matchCredentialValues.mockClear()
+    convert.form.value = 'abc'
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    await settle()
+    expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
+    expect(convert.matchFailure.value).toBe('密码库无法连接')
+  })
+
+  it('重新读取时查过的结果都不算：条目刚被别处起了标识，去处跟着换成已有凭据', async () => {
+    matchWith({ credentials: [], vaultItems: [item] })
+    const convert = await shown()
+    await settle()
+    expect(convert.selected.value.kind).toBe('vault')
+    // 提交 409：条目已经有凭据；重新读取后再查，这次对上的是那条凭据
+    matchWith({ credentials: [credential], vaultItems: [] })
+    fakes.api.memory.mockResolvedValue(memory({ version: 2 }))
+    await convert.load()
+    await settle()
+    expect(convert.selected.value.kind).toBe('credential')
   })
 })

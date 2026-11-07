@@ -5,11 +5,12 @@ import {
   type ConsoleMemoryView,
   type ConvertedToCredential,
 } from '@kioku/contracts'
-import { toRef, useId, watch } from 'vue'
+import { computed, toRef, useId, watch } from 'vue'
 
 import { useConvertCredential } from '../composables/useConvertCredential'
-import { convertSummary } from '../plaintext'
+import { convertSummary, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
 import { memoryRoute } from '../routes'
+import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
@@ -33,6 +34,15 @@ const {
   canReload,
   submitting,
   result,
+  matchFailure,
+  unavailableConnections,
+  unreadableCredentials,
+  matchingValue,
+  choices,
+  destination,
+  selected,
+  vaultIdentifiers,
+  choose,
   blocked,
   replaced,
   context,
@@ -63,6 +73,13 @@ watch(
 function close() {
   if (!submitting.value) open.value = false
 }
+
+const unmatched = computed(() =>
+  unmatchedNote({
+    unavailableConnections: unavailableConnections.value,
+    unreadableCredentials: unreadableCredentials.value,
+  }),
+)
 
 const valueInput = useId()
 const candidateGroup = useId()
@@ -176,20 +193,33 @@ const candidateGroup = useId()
           </p>
         </div>
 
-        <div class="convert-fields">
-          <UFormField label="凭据标识">
-            <UInput v-model="form.identifier" class="w-full font-mono" autocomplete="off" />
-          </UFormField>
-          <UFormField label="名称">
-            <UInput v-model="form.name" class="w-full" autocomplete="off" />
-          </UFormField>
-          <UFormField label="字段名">
-            <UInput v-model="form.field" class="w-full font-mono" autocomplete="off" />
-          </UFormField>
+        <div>
+          <p class="convert-label">转存到</p>
+          <p v-if="matchingValue" class="value-note">正在查找同值的凭据……</p>
+          <NoteLine v-else-if="matchFailure" tone="warning" flush>
+            {{ matchFailure }}
+            <template #detail>仍可新建托管凭据。</template>
+          </NoteLine>
+          <p v-else-if="unmatched" class="value-note">
+            {{ unmatched }}<Hint>{{ UNMATCHED_HINT }}</Hint>
+          </p>
+          <ConvertDestinationPicker
+            :model-value="destination"
+            :destinations="choices.destinations"
+            :unmapped="choices.unmapped"
+            :vault-identifiers="vaultIdentifiers"
+            :hosted="form"
+            @update:model-value="choose"
+            @vault-identifier="(key, identifier) => (vaultIdentifiers[key] = identifier)"
+            @hosted-field="(field, value) => (form[field] = value)"
+          />
         </div>
 
         <p v-if="placeholder && replaced" class="convert-effect">
-          正文中 {{ replaced }} 处将换成 <code>{{ placeholder }}</code>
+          正文中 {{ replaced }} 处将换成 <code>{{ placeholder }}</code
+          ><template v-if="selected.kind !== 'hosted'">
+            <Hint>转存前核对这个字段现在的值与正文中的一致，不一致时不转存。</Hint>
+          </template>
         </p>
 
         <NoteLine v-if="failure" tone="error">
@@ -293,11 +323,6 @@ const candidateGroup = useId()
   background: var(--strata-selected);
   color: var(--strata-on-selected);
 }
-.convert-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
 .convert-effect {
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
@@ -323,10 +348,5 @@ const candidateGroup = useId()
   flex: 1 1 12em;
   font-size: 14px;
   color: var(--ui-text-muted);
-}
-@media (max-width: 640px) {
-  .convert-fields {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 </style>

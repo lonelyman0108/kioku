@@ -38,6 +38,16 @@ import {
 } from '../memoryDetail'
 import { placeholderOf } from '../placeholders'
 import {
+  addedSpots,
+  afterGate,
+  plaintextRejection,
+  spotsAfterRejection,
+  type PlaintextSpot,
+  type SaveFlags,
+} from '../plaintextSave'
+import { canManageCredentials } from '../vault'
+import type { PlaintextSaveRequest, PlaintextSaveResult } from '../composables/usePlaintextSave'
+import {
   hiddenAgain,
   revealedAfterWrite,
   stillRevealed,
@@ -59,6 +69,7 @@ import Hint from './Hint.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
+import PlaintextSaveModal from './PlaintextSaveModal.vue'
 import NoteLine from './strata/NoteLine.vue'
 import CoordinateLine from './strata/CoordinateLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -398,54 +409,104 @@ function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 }
 
-// 保存前看正文像不像有明文凭据：改了正文、或从 secret 降级时提醒。降级之后正文会进历史、全文检索和向量，
-// 服务端会拒绝带着明文降级，确认之后才带上 allowPlaintext 强制（只有空间 owner 能改 secret，也就只有他会走到这里）
-const plaintextWarning = ref<{ downgrade: boolean } | null>(null)
+// 从 secret 降级时看整段正文像不像有明文凭据：降级之后正文会进历史、全文检索和向量。
+// 服务端会拒绝带着明文降级，确认之后才带上 allowPlaintext 强制。强制降级只给空间 owner（只有他能改 secret，
+// 也就只有他会走到这里）；同一个标记用在照样保存上时，能改这条记忆的成员都能带
+const downgradeWarning = ref(false)
 // 写成一整句：模板里中文换行会多出一个空格
 const PLAINTEXT_DOWNGRADE_TEXT =
   '降级后，正文将写入历史、全文索引和向量，无法撤回。请先将凭据转存，并确认正文不含密码或令牌。'
-const PLAINTEXT_TEXT = '正文疑似包含密码或令牌（例如「密码：…」）。建议转存为凭据，正文改用占位符。'
+// 别的保存：正文里有这次新增的疑似明文时，先逐处选转存为凭据或不是凭据（PlaintextSaveModal），
+// 判断和服务端拒绝写入是同一个（addedPlaintextCredentials）。结果是 secret 时正文加密，不用处理
+const plaintextGate = ref<PlaintextSaveRequest | null>(null)
+// 转存为凭据只看 canManageCredentials；照样保存给能改这条记忆的成员
+const canConvert = computed(() => canManageCredentials(permissions.role.value))
+const canSaveAnyway = computed(() => !readOnly.value)
+
+// 本地就能判断的问题：标题、有效期。开逐处处理的弹窗之前先查，免得转存建了凭据、改了正文才停下
+function formProblem(values: { title: string; validTo: string }, m: ConsoleMemoryView) {
+  const title = MemoryTitle.safeParse(values.title)
+  if (values.title !== m.title && !title.success) {
+    return title.error.issues[0]?.message ?? '标题格式错误'
+  }
+  if (values.validTo === validToInput(m) || !values.validTo) return null
+  if (!fromLocalInput(values.validTo)) return '有效期的日期和时间不完整'
+  // 编辑得久了，开始编辑时能选的最早时间现在可能已经太近；没改的有效到原样不发，不用查
+  if (validToTooSoon(values.validTo)) {
+    minValidTo.value = earliestValidTo()
+    return '有效期须晚于当前时间至少一分钟'
+  }
+  return null
+}
+function gateFor(m: ConsoleMemoryView, content: string, spots: PlaintextSpot[], rejected: boolean) {
+  return {
+    content,
+    uri: m.uri,
+    title: form.title,
+    layer: m.layer,
+    sensitivity: form.sensitivity,
+    spots,
+    rejected,
+  }
+}
 function requestSave() {
   const m = base.value
   if (!m || saving.value) return
-  const downgrade = m.sensitivity === 'secret' && form.sensitivity !== 'secret'
-  const contentChanged = form.content !== (m.content ?? '')
-  if ((downgrade || contentChanged) && PLAINTEXT_CREDENTIAL.test(form.content)) {
-    plaintextWarning.value = { downgrade }
+  const problem = formProblem(form, m)
+  if (problem) {
+    toast.add({ title: problem, color: 'error' })
     return
+  }
+  const downgrade = m.sensitivity === 'secret' && form.sensitivity !== 'secret'
+  if (downgrade) {
+    if (PLAINTEXT_CREDENTIAL.test(form.content)) {
+      downgradeWarning.value = true
+      return
+    }
+  } else if (form.sensitivity !== 'secret' && form.content !== (m.content ?? '')) {
+    const spots = addedSpots(m.content, form.content)
+    if (spots.length) {
+      plaintextGate.value = gateFor(m, form.content, spots, false)
+      return
+    }
   }
   void save()
 }
-function confirmPlaintext() {
+function confirmDowngrade() {
   // 确认框关闭的动画期间再点一次：已经在保存了，不再发第二个请求
-  const warning = plaintextWarning.value
-  if (!warning || saving.value) return
-  plaintextWarning.value = null
-  void save(warning.downgrade)
+  if (!downgradeWarning.value || saving.value) return
+  downgradeWarning.value = false
+  void save({ allowPlaintext: true })
+}
+// 逐处处理完：转存的已经建好凭据、正文里的值换成了占位符，换过的正文放回表单再保存。
+// 结果只能用在算出它的那份正文上，这期间正文变了就按现在的正文接着算（afterGate）
+function onGateProceed(result: PlaintextSaveResult) {
+  const m = base.value
+  if (!m) return
+  const next = afterGate(m.content, form.content, result)
+  if (next.kind === 'reopen') {
+    // 转存了的值已经换进现在的正文：放回表单，只把新出现的几处再给人看
+    form.content = next.content
+    plaintextGate.value = { ...gateFor(m, next.content, next.spots, false), ignored: next.ignored }
+    return
+  }
+  form.content = next.content
+  void save(next.flags)
 }
 
-async function save(allowPlaintext = false) {
+async function save(flags: SaveFlags = {}) {
   const m = base.value
   if (!m || saving.value) return
   // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
   const sent = { ...form, glossary: [...form.glossary] }
-  const title = MemoryTitle.safeParse(sent.title)
-  if (sent.title !== m.title && !title.success) {
-    toast.add({ title: title.error.issues[0]?.message ?? '标题格式错误', color: 'error' })
+  const problem = formProblem(sent, m)
+  if (problem) {
+    toast.add({ title: problem, color: 'error' })
     return
   }
+  const title = MemoryTitle.safeParse(sent.title)
   const validToChanged = sent.validTo !== validToInput(m)
   const validTo = sent.validTo ? fromLocalInput(sent.validTo) : null
-  if (validToChanged && sent.validTo && !validTo) {
-    toast.add({ title: '有效期的日期和时间不完整', color: 'error' })
-    return
-  }
-  // 编辑得久了，开始编辑时能选的最早时间现在可能已经太近；没改的有效到原样不发，不用查
-  if (validToChanged && validTo && validToTooSoon(sent.validTo)) {
-    minValidTo.value = earliestValidTo()
-    toast.add({ title: '有效期须晚于当前时间至少一分钟', color: 'error' })
-    return
-  }
   saving.value = true
   try {
     const next = await api.updateMemory(props.spaceId, {
@@ -465,7 +526,7 @@ async function save(allowPlaintext = false) {
       glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
       // 只在改了的时候发：输入框只到分钟，原样发回去会抹掉原来的秒
       ...(validToChanged ? { validTo } : {}),
-      ...(allowPlaintext ? { allowPlaintext: true } : {}),
+      ...flags,
     })
     // 正在进行的重新拉取可能带回保存之前的版本，先取消，再把保存结果写进缓存
     await queryClient.cancelQueries({ queryKey: queryKey.value })
@@ -486,6 +547,14 @@ async function save(allowPlaintext = false) {
     void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
     emit('changed', next, m)
   } catch (err) {
+    // 服务端检出了新增的疑似明文（两边判断有出入时）：照样逐处处理
+    // 请求期间又改过正文时按现在的正文重算，没有新增的就照常报错
+    const findings = plaintextRejection(err)
+    const gate = findings && spotsAfterRejection(m.content, sent.content, form.content, findings)
+    if (gate) {
+      plaintextGate.value = gateFor(m, gate.content, gate.spots, true)
+      return
+    }
     failed(err, '保存失败')
     // 版本冲突时立刻重新拉取，好显示「载入新版本」
     if (err instanceof ApiError && err.status === 409) void memory.refetch()
@@ -1072,36 +1141,33 @@ const properties = computed<Property[][]>(() => {
       </UModal>
 
       <UModal
-        :open="plaintextWarning !== null"
-        :title="
-          plaintextWarning?.downgrade
-            ? '正文疑似包含明文凭据，仍要降级？'
-            : '正文疑似包含明文凭据，仍要保存？'
-        "
-        @update:open="(v) => !v && (plaintextWarning = null)"
+        :open="downgradeWarning"
+        title="正文疑似包含明文凭据，仍要降级？"
+        @update:open="(v) => !v && (downgradeWarning = false)"
       >
         <template #body>
           <p class="text-sm">
-            {{ plaintextWarning?.downgrade ? PLAINTEXT_DOWNGRADE_TEXT : PLAINTEXT_TEXT
-            }}<Hint v-if="plaintextWarning?.downgrade">
-              检测规则可能误判。确认正文不含明文后，可继续降级。
-            </Hint>
+            {{ PLAINTEXT_DOWNGRADE_TEXT
+            }}<Hint>检测规则可能误判。确认正文不含明文后，可继续降级。</Hint>
           </p>
         </template>
         <template #footer>
           <div class="flex w-full justify-end gap-2">
-            <UButton color="neutral" variant="ghost" @click="plaintextWarning = null">
+            <UButton color="neutral" variant="ghost" @click="downgradeWarning = false">
               返回修改
             </UButton>
-            <UButton
-              :color="plaintextWarning?.downgrade ? 'error' : 'primary'"
-              @click="confirmPlaintext"
-            >
-              {{ plaintextWarning?.downgrade ? '确认不含明文并降级' : '仍然保存' }}
-            </UButton>
+            <UButton color="error" @click="confirmDowngrade">确认不含明文并降级</UButton>
           </div>
         </template>
       </UModal>
+
+      <PlaintextSaveModal
+        v-model:request="plaintextGate"
+        :space-id="spaceId"
+        :can-convert="canConvert"
+        :can-save-anyway="canSaveAnyway"
+        @proceed="onGateProceed"
+      />
 
       <UModal
         :open="deleting !== null"
