@@ -19,12 +19,15 @@ import {
   LoreFileError,
   matchesFilter,
   planBlocker,
+  plaintextAllConverted,
+  plaintextKey,
   readLoreBackup,
   replanAfterFailure,
   secretSelectable,
   selectionEffects,
   selectionOf,
   sourceTabs,
+  spotState,
   staleNotice,
   syncGroups,
   targetTitle,
@@ -164,6 +167,7 @@ const planNode = (uuid: string, extra: Partial<LorePlanNode> = {}): LorePlanNode
   targets: [target()],
   credentialRefs: [],
   credentialHints: { path: false, content: false, extras: false },
+  plaintext: [],
   ...extra,
 })
 const planOf = (
@@ -220,6 +224,7 @@ describe('勾选', () => {
     ).toEqual({
       secretUris: ['infra://a', 'infra://new_name'],
       excludeUris: ['infra://both', 'infra://old'],
+      convertPlaintext: [],
     })
   })
 
@@ -234,6 +239,117 @@ describe('勾选', () => {
     expect(secretSelectable(mixed)).toBe(true)
     expect(excludeLabel(mixed)).toBe('不导入')
     expect(excludeLabel(planNode('n'))).toBe('不导入')
+  })
+})
+
+describe('疑似明文换成占位符', () => {
+  const credential = {
+    id: '00000000-0000-4000-8000-000000000001',
+    identifier: 'gh',
+    name: 'GitHub',
+    field: 'token',
+  }
+  const spot = (index: number, matched = true) => ({
+    index,
+    line: index + 1,
+    kind: 'github' as const,
+    credential: matched ? credential : null,
+  })
+  const none = new Set<string>()
+  const node = (uuid: string, extra: Partial<LorePlanNode> = {}) =>
+    planNode(uuid, { plaintext: [spot(0), spot(1, false)], ...extra })
+
+  it('默认勾上对上凭据的那几处，取消勾选的不发；对不上的不发', () => {
+    const a = node('a')
+    const b = node('b', { plaintext: [spot(0), spot(2)] })
+    const plan = planOf([a, b])
+    expect(selectionOf(plan, none, none).convertPlaintext).toEqual([
+      { source: 'infra://a', index: 0 },
+      { source: 'infra://b', index: 0 },
+      { source: 'infra://b', index: 2 },
+    ])
+    const unticked = new Set([plaintextKey(b, spot(2))])
+    expect(selectionOf(plan, none, none, unticked).convertPlaintext).toEqual([
+      { source: 'infra://a', index: 0 },
+      { source: 'infra://b', index: 0 },
+    ])
+  })
+
+  it('不导入的、这次不写的、写入目标放不进占位符的都不发，并标出原因', () => {
+    const excluded = node('ex')
+    const unwritten = node('old', {
+      targets: [target({ state: 'imported', current: [{ uri: 'user://infra/a', secret: false }] })],
+    })
+    const shared = node('core', { targets: [target({ layer: 'core', sensitivity: 'internal' })] })
+    const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
+    const plan = planOf([excluded, unwritten, shared, internal])
+    const out = new Set(['ex'])
+    expect(selectionOf(plan, none, out).convertPlaintext).toEqual([])
+    expect(spotState(plan, excluded, spot(0), none, out)).toBe('excluded')
+    expect(spotState(plan, unwritten, spot(0), none, out)).toBe('unwritten')
+    expect(spotState(plan, shared, spot(0), none, out)).toBe('blocked')
+    expect(spotState(plan, internal, spot(0), none, out)).toBe('blocked')
+    expect(spotState(plan, internal, spot(1, false), none, out)).toBe('unmatched')
+  })
+
+  it('标了机密的按机密算：本人的内部记忆标机密之后能换', () => {
+    const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
+    const plan = planOf([internal])
+    expect(spotState(plan, internal, spot(0), new Set(['internal']), none)).toBe('convertible')
+    expect(selectionOf(plan, new Set(['internal']), none).convertPlaintext).toEqual([
+      { source: 'infra://internal', index: 0 },
+    ])
+  })
+
+  it('要同步更新的目标照常能换；看那条现在是不是机密', () => {
+    const imported = target({
+      uri: 'user://infra/u',
+      state: 'imported',
+      sensitivity: 'internal',
+      current: [{ uri: 'user://infra/u', secret: true }],
+    })
+    const updated = node('u', { uri: 'infra://u', targets: [imported] })
+    const plan = planOf([updated], {
+      items: [
+        {
+          source: 'infra://u',
+          uri: 'user://infra/u',
+          title: 'u',
+          state: 'update',
+          changes: ['content'],
+        },
+      ],
+    })
+    expect(spotState(plan, updated, spot(0), none, none)).toBe('convertible')
+  })
+
+  it('都换成占位符时不再提醒标机密；有一处不换就照常提醒', () => {
+    const all = node('all', { plaintext: [spot(0)] })
+    const plan = planOf([all])
+    expect(plaintextAllConverted(plan, all, none, none, none)).toBe(true)
+    expect(
+      plaintextAllConverted(plan, all, none, none, new Set([plaintextKey(all, spot(0))])),
+    ).toBe(false)
+    const mixed = node('mixed')
+    expect(plaintextAllConverted(planOf([mixed]), mixed, none, none, none)).toBe(false)
+    const empty = node('empty', { plaintext: [] })
+    expect(plaintextAllConverted(planOf([empty]), empty, none, none, none)).toBe(false)
+  })
+
+  it('勾选框不是提交按钮，换成占位符的勾选进写入请求', () => {
+    const script = descriptor.scriptSetup!.content
+    expect(script).toContain(
+      'selectionOf(seen, secretIds.value, excludedIds.value, unconvertedIds.value)',
+    )
+    const checkbox = elements.find(
+      (el) =>
+        el.tag === 'UCheckbox' &&
+        el.props?.some((p) => p.name === 'label' && p.value?.content === '写成占位符'),
+    )!
+    expect(checkbox.props?.some((p) => p.name === 'type')).toBe(false)
+    // 换了来源要清掉
+    const clear = /const clearSelection = \(\) => \{[^}]*\}/.exec(script)![0]
+    expect(clear).toContain('unconvertedIds.value = new Set()')
   })
 })
 

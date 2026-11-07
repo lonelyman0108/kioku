@@ -1,30 +1,41 @@
 import {
+  ConvertibleValue,
   ConvertToCredentialRequest,
+  CREDENTIAL_MATCH_MAX,
   placeholderAllowed,
   type ConsoleMemoryView,
   type ConvertedToCredential,
+  type ConvertTarget,
+  type CredentialValueMatch,
 } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
-import { computed, reactive, ref, watch, type Ref } from 'vue'
+import { computed, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
 
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import {
+  convertDestinations,
   convertLeftovers,
+  HOSTED_DESTINATION,
   occurrences,
   plaintextCandidates,
   suggestIdentifier,
   suggestName,
   valueContext,
+  vaultFieldName,
+  type ConvertDestination,
   type PlaintextCandidate,
 } from '../plaintext'
 import { placeholderOf } from '../placeholders'
+import { suggestIdentifier as suggestItemIdentifier } from '../vault'
 import { refreshAfterPlaintext } from './usePlaintextActions'
 
 // 转存为凭据的状态和规则，对话框只管长相。规则只认得出值从哪里开始，结尾是猜的，所以值默认遮盖，
 // 但要显示过、核对过当前的值才能提交；显示之后还能改。
 // 读这条记忆时记下版本，提交带上它：值是这时看到的，期间被改过就由服务端拒绝。
-// 值只留在这里，提交成功或者关上就清掉
+// 值只留在这里，提交成功或者关上就清掉。
+// 去处：先按值查同值的凭据与密码库条目，默认选第一个对上的（已有凭据、还没起标识的条目），都没有时新建托管凭据。
+// 按值查找的结果也只在这里，不进查询的缓存
 export function useConvertCredential(
   spaceId: Ref<string>,
   uri: Ref<string | null>,
@@ -46,11 +57,67 @@ export function useConvertCredential(
   const submitting = ref(false)
   const result = ref<ConvertedToCredential | null>(null)
 
+  // 每次读取一个序号：关掉或者换了一条之后，晚到的读取结果与匹配结果不算
+  let loadId = 0
+
+  // 按值查找：值到结果；正在查的值；查不了时的说明；读不了的连接数
+  const matches = ref(new Map<string, CredentialValueMatch>())
+  const pendingValues = ref(new Set<string>())
+  const matchFailure = ref<string | null>(null)
+  const unavailableConnections = ref(0)
+  // 选中的去处（ConvertDestination 的 key）。手动选过就不再跟着匹配结果换默认的
+  const destination = ref<string>(HOSTED_DESTINATION.key)
+  const destinationTouched = ref(false)
+  // 给条目起的标识，按条目记
+  const vaultIdentifiers = reactive<Record<string, string>>({})
+  const existingIdentifiers = ref<string[]>([])
+
   function pick(candidate: PlaintextCandidate | undefined) {
     form.value = candidate?.value ?? ''
     form.field = candidate?.field ?? 'password'
     shown.value = false
     checkedValue.value = null
+    destinationTouched.value = false
+  }
+
+  const itemKey = (d: { connectionId: string; itemId: string }) => `${d.connectionId}/${d.itemId}`
+
+  // 一次最多查 CREDENTIAL_MATCH_MAX 个值；不合转存规则的值不查（服务端会整批拒绝）
+  async function matchValues(values: string[]) {
+    const id = loadId
+    const sid = spaceId.value
+    const wanted = [
+      ...new Set(
+        values.filter(
+          (v) =>
+            ConvertibleValue.safeParse(v).success &&
+            !matches.value.has(v) &&
+            !pendingValues.value.has(v),
+        ),
+      ),
+    ].slice(0, CREDENTIAL_MATCH_MAX)
+    if (!wanted.length) return
+    pendingValues.value = new Set([...pendingValues.value, ...wanted])
+    try {
+      const found = await api.matchCredentialValues(sid, { values: wanted })
+      if (id !== loadId) return
+      const next = new Map(matches.value)
+      wanted.forEach((v, i) => {
+        const match = found.items[i]
+        if (match) next.set(v, match)
+      })
+      matches.value = next
+      unavailableConnections.value = found.unavailableConnections
+      matchFailure.value = null
+    } catch (err) {
+      if (id === loadId) matchFailure.value = readFailure(err, '查找同值的凭据失败')
+    } finally {
+      if (id === loadId) {
+        const rest = new Set(pendingValues.value)
+        for (const v of wanted) rest.delete(v)
+        pendingValues.value = rest
+      }
+    }
   }
 
   const readMemory = (sid: string, target: string) =>
@@ -64,9 +131,8 @@ export function useConvertCredential(
   const scopeBlocked = (view: Pick<ConsoleMemoryView, 'layer' | 'sensitivity'>) =>
     !placeholderAllowed(view.layer, view.sensitivity)
 
-  // 每次读取一个序号：关掉或者换了一条之后，晚到的结果不算。已经读到过时是重新读取：
+  // 已经读到过时是重新读取：
   // 填好的留着；值在新的正文里还有就连同字段名留下，没有了就重新猜；都要再核对一次
-  let loadId = 0
   async function load() {
     const target = uri.value
     if (!target) return
@@ -77,6 +143,8 @@ export function useConvertCredential(
     loadFailure.value = null
     failure.value = null
     canReload.value = false
+    // 上一次读取发出的匹配作废了（见 matchValues 的序号），没回来的要重查
+    pendingValues.value = new Set()
     try {
       const [view, existing] = await Promise.all([
         readMemory(sid, target),
@@ -100,15 +168,13 @@ export function useConvertCredential(
       }
       candidates.value = plaintextCandidates(view.content ?? '')
       pick(candidates.value[0])
+      existingIdentifiers.value = (existing?.items ?? []).map((c) => c.identifier)
+      void matchValues(candidates.value.map((c) => c.value))
       if (previous) {
         if (occurrences(view.content ?? '', previous.value)) Object.assign(form, previous)
         return
       }
-      form.identifier = suggestIdentifier(
-        view.uri,
-        form.field,
-        (existing?.items ?? []).map((c) => c.identifier),
-      )
+      form.identifier = suggestIdentifier(view.uri, form.field, existingIdentifiers.value)
       form.name = suggestName(view)
     } catch (err) {
       if (id === loadId) loadFailure.value = readFailure(err)
@@ -131,6 +197,14 @@ export function useConvertCredential(
     Object.assign(form, { value: '', field: 'password', identifier: '', name: '' })
     shown.value = false
     checkedValue.value = null
+    matches.value = new Map()
+    pendingValues.value = new Set()
+    matchFailure.value = null
+    unavailableConnections.value = 0
+    destination.value = HOSTED_DESTINATION.key
+    destinationTouched.value = false
+    existingIdentifiers.value = []
+    for (const key of Object.keys(vaultIdentifiers)) delete vaultIdentifiers[key]
   }
 
   // 显示着的值才算核对过
@@ -138,21 +212,92 @@ export function useConvertCredential(
     if (shown.value) checkedValue.value = form.value
   })
 
+  // 值改过之后再查一次：停下来一会儿才查，免得每敲一个字发一次
+  let matchTimer: ReturnType<typeof setTimeout> | null = null
+  watch(
+    () => form.value,
+    (value) => {
+      if (matchTimer) clearTimeout(matchTimer)
+      if (!memory.value || !value || matches.value.has(value)) return
+      matchTimer = setTimeout(() => void matchValues([value]), 400)
+    },
+  )
+  onScopeDispose(() => {
+    if (matchTimer) clearTimeout(matchTimer)
+  })
+
+  const choices = computed(() => convertDestinations(matches.value.get(form.value)))
+  const matchingValue = computed(
+    () =>
+      pendingValues.value.has(form.value) ||
+      (!!form.value &&
+        !matches.value.has(form.value) &&
+        !matchFailure.value &&
+        ConvertibleValue.safeParse(form.value).success),
+  )
+  const selected = computed<ConvertDestination>(
+    () => choices.value.destinations.find((d) => d.key === destination.value) ?? HOSTED_DESTINATION,
+  )
+  // 匹配结果到了、或者换了值：没手动选过就换成第一个对上的；选过的去处没有了也换
+  watch(
+    () => choices.value.destinations,
+    (list) => {
+      if (!destinationTouched.value || !list.some((d) => d.key === destination.value)) {
+        destination.value = list[0]!.key
+        destinationTouched.value = false
+      }
+      for (const d of list) {
+        if (d.kind !== 'vault' || vaultIdentifiers[itemKey(d)] !== undefined) continue
+        vaultIdentifiers[itemKey(d)] = suggestItemIdentifier(d.itemName, existingIdentifiers.value)
+      }
+    },
+  )
+  function choose(key: string) {
+    destination.value = key
+    destinationTouched.value = true
+  }
+
   const blocked = computed(() => !!memory.value && scopeBlocked(memory.value))
   const content = computed(() => memory.value?.content ?? '')
   const replaced = computed(() => occurrences(content.value, form.value))
   const context = computed(() => (shown.value ? valueContext(content.value, form.value) : null))
-  const placeholder = computed(() =>
-    form.identifier && form.field ? placeholderOf(form.identifier, form.field) : '',
-  )
+  const placeholder = computed(() => {
+    const d = selected.value
+    if (d.kind === 'credential') return placeholderOf(d.identifier, d.field)
+    if (d.kind === 'vault') {
+      const identifier = vaultIdentifiers[itemKey(d)]
+      return identifier ? placeholderOf(identifier, vaultFieldName(null, d.itemField)) : ''
+    }
+    return form.identifier && form.field ? placeholderOf(form.identifier, form.field) : ''
+  })
 
+  const target = computed<ConvertTarget>(() => {
+    const d = selected.value
+    if (d.kind === 'credential') {
+      return { kind: 'credential', credentialId: d.credentialId, field: d.field }
+    }
+    if (d.kind === 'vault') {
+      // 名称不给时服务端用条目的名称
+      return {
+        kind: 'vault',
+        connectionId: d.connectionId,
+        itemId: d.itemId,
+        itemField: d.itemField,
+        identifier: vaultIdentifiers[itemKey(d)] ?? '',
+      }
+    }
+    return {
+      kind: 'hosted',
+      identifier: form.identifier,
+      name: form.name.trim(),
+      field: form.field,
+    }
+  })
   const body = computed(() => ({
     memoryId: memory.value?.id ?? '',
     expectedVersion: memory.value?.version ?? 0,
     value: form.value,
-    identifier: form.identifier,
-    name: form.name.trim(),
-    field: form.field,
+    target: target.value,
   }))
   // 提交前在界面上能看出来的问题，服务端照样会检查。规则直接用接口的定义，提示与服务端一致
   const problem = computed<string | null>(() => {
@@ -161,6 +306,7 @@ export function useConvertCredential(
     if (!parsed.success) return parsed.error.issues[0]?.message ?? '填写内容有误'
     if (!replaced.value) return '正文中没有这段值'
     if (checkedValue.value !== form.value) return '请先显示并核对值'
+    if (matchingValue.value) return '正在查找同值的凭据'
     return null
   })
   // 重新读取进行中或者失败时，手里的是旧版本，表单也藏着：不能把看不见的值和旧版本发出去
@@ -188,8 +334,8 @@ export function useConvertCredential(
       const done = await api.convertToCredential(sid, body.value)
       // 服务端已经写了，对话框还在不在，那个空间的缓存都要刷新
       refreshAfterPlaintext(queryClient, sid, done.memory)
-      // 版本变了，涉及这条记忆的整理建议随之作废
-      for (const key of ['credentials', 'dream-suggestions']) {
+      // 版本变了，涉及这条记忆的整理建议随之作废；给条目起了标识，条目列表也变了
+      for (const key of ['credentials', 'dream-suggestions', 'vault-items']) {
         void queryClient.invalidateQueries({ queryKey: [key, sid] })
       }
       if (id !== submitId) return
@@ -229,6 +375,15 @@ export function useConvertCredential(
     canReload,
     submitting,
     result,
+    matchFailure,
+    unavailableConnections,
+    matchingValue,
+    choices,
+    destination,
+    selected,
+    vaultIdentifiers,
+    itemKey,
+    choose,
     blocked,
     replaced,
     context,

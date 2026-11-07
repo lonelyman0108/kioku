@@ -2,9 +2,11 @@ import {
   LORE_BACKUP_FORMAT,
   LORE_BACKUP_TABLES,
   LORE_UPLOAD_MAX_BYTES,
+  placeholderAllowed,
   type LoreBackupUpload,
   type LoreImportPlan,
   type LoreImportSource,
+  type LorePlaintextSpot,
   type LorePlanNode,
   type LorePlanTarget,
   type LoreSyncChange,
@@ -134,17 +136,95 @@ export function secretSelectable(node: LorePlanNode): boolean {
 export const excludeLabel = (node: LorePlanNode) => (hasNewTarget(node) ? '不导入' : '本次不同步')
 
 // 勾选按节点 uuid 记（重看计划时 URI 可能变了），发请求时换成现在的 URI。计划里已经没有的节点不发，
-// 不起作用的 secret 也不发；同时勾了 secret 和不导入时只算不导入
+// 不起作用的 secret 也不发；同时勾了 secret 和不导入时只算不导入。
+// 疑似明文换成占位符默认勾上，记的是取消勾选的那几处（plaintextKey）；只发能换的（spotState 为 convertible）
 export function selectionOf(
   plan: LoreImportPlan,
   secret: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
-): { secretUris: string[]; excludeUris: string[] } {
+  unconverted: ReadonlySet<string> = new Set(),
+): {
+  secretUris: string[]
+  excludeUris: string[]
+  convertPlaintext: { source: string; index: number }[]
+} {
   const excludeUris = plan.nodes.filter((n) => excluded.has(n.uuid)).map((n) => n.uri)
   const secretUris = plan.nodes
     .filter((n) => secret.has(n.uuid) && !excluded.has(n.uuid) && secretSelectable(n))
     .map((n) => n.uri)
-  return { secretUris, excludeUris }
+  const convertPlaintext = plan.nodes.flatMap((node) =>
+    node.plaintext
+      .filter(
+        (spot) =>
+          !unconverted.has(plaintextKey(node, spot)) &&
+          spotState(plan, node, spot, secret, excluded) === 'convertible',
+      )
+      .map((spot) => ({ source: node.uri, index: spot.index })),
+  )
+  return { secretUris, excludeUris, convertPlaintext }
+}
+
+// 疑似明文的一处按节点 uuid 与它在正文里的序号记
+export const plaintextKey = (
+  node: Pick<LorePlanNode, 'uuid'>,
+  spot: Pick<LorePlaintextSpot, 'index'>,
+) => `${node.uuid}#${spot.index}`
+
+const updateKey = (source: string, uri: string) => JSON.stringify([source, uri])
+const updatesOf = (plan: LoreImportPlan) =>
+  new Set(
+    plan.sync.items.filter((i) => i.state === 'update').map((i) => updateKey(i.source, i.uri)),
+  )
+
+// 这个节点这次会写的目标：新建的，或者有要更新的同步项。和 selectionEffects 同一个判断
+const writtenTargets = (node: LorePlanNode, updates: ReadonlySet<string>) =>
+  node.targets.filter((t) => t.state === 'new' || updates.has(updateKey(node.uri, t.uri)))
+
+// 一处疑似明文能不能换成占位符：
+// convertible 能换；unmatched 没有同值的凭据；excluded 这个节点本次不导入；unwritten 这次不写这个节点；
+// blocked 写入目标放不进占位符（不是本人，或敏感级低于私密：标了机密的按机密算，同步的看那条现在是不是机密）。
+// 放不进按节点的全部目标算：服务端对放不进的目标整个请求返回 400
+export type SpotState = 'convertible' | 'unmatched' | 'excluded' | 'unwritten' | 'blocked'
+
+export function spotState(
+  plan: LoreImportPlan,
+  node: LorePlanNode,
+  spot: LorePlaintextSpot,
+  secret: ReadonlySet<string>,
+  excluded: ReadonlySet<string>,
+): SpotState {
+  if (!spot.credential) return 'unmatched'
+  if (excluded.has(node.uuid)) return 'excluded'
+  if (!writtenTargets(node, updatesOf(plan)).length) return 'unwritten'
+  const sensitivity = (t: LorePlanTarget) =>
+    (
+      t.state === 'new'
+        ? secret.has(node.uuid) && secretSelectable(node)
+        : t.current.some((c) => c.secret)
+    )
+      ? 'secret'
+      : t.sensitivity
+  return node.targets.every((t) => placeholderAllowed(t.layer, sensitivity(t)))
+    ? 'convertible'
+    : 'blocked'
+}
+
+// 正文的疑似明文是不是这次都会换成占位符：都换了就不再提醒标机密
+export function plaintextAllConverted(
+  plan: LoreImportPlan,
+  node: LorePlanNode,
+  secret: ReadonlySet<string>,
+  excluded: ReadonlySet<string>,
+  unconverted: ReadonlySet<string>,
+): boolean {
+  return (
+    node.plaintext.length > 0 &&
+    node.plaintext.every(
+      (spot) =>
+        !unconverted.has(plaintextKey(node, spot)) &&
+        spotState(plan, node, spot, secret, excluded) === 'convertible',
+    )
+  )
 }
 
 // 勾选之后这次到底会动什么。计划是不带勾选的基准计划，服务端执行时按勾选重算，勾选只让写入变少，这里要和它算的一样
@@ -175,10 +255,7 @@ export function selectionEffects(
   secret: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
 ): SelectionEffects {
-  const updateKey = (source: string, uri: string) => JSON.stringify([source, uri])
-  const updates = new Set(
-    plan.sync.items.filter((i) => i.state === 'update').map((i) => updateKey(i.source, i.uri)),
-  )
+  const updates = updatesOf(plan)
   const kept = plan.nodes.filter((n) => !excluded.has(n.uuid))
   const boot = new Set<LorePlanTarget>()
   const refs = new Set<string>()
@@ -186,9 +263,7 @@ export function selectionEffects(
   let update = 0
   let bootNodes = 0
   for (const node of kept) {
-    const written = node.targets.filter(
-      (t) => t.state === 'new' || updates.has(updateKey(node.uri, t.uri)),
-    )
+    const written = writtenTargets(node, updates)
     if (!written.length) continue
     create += written.filter((t) => t.state === 'new').length
     update += written.filter((t) => t.state !== 'new').length

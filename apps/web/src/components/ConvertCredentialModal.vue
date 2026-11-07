@@ -10,6 +10,7 @@ import { toRef, useId, watch } from 'vue'
 import { useConvertCredential } from '../composables/useConvertCredential'
 import { convertSummary } from '../plaintext'
 import { memoryRoute } from '../routes'
+import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
@@ -33,6 +34,15 @@ const {
   canReload,
   submitting,
   result,
+  matchFailure,
+  unavailableConnections,
+  matchingValue,
+  choices,
+  destination,
+  selected,
+  vaultIdentifiers,
+  itemKey,
+  choose,
   blocked,
   replaced,
   context,
@@ -176,20 +186,58 @@ const candidateGroup = useId()
           </p>
         </div>
 
-        <div class="convert-fields">
-          <UFormField label="凭据标识">
-            <UInput v-model="form.identifier" class="w-full font-mono" autocomplete="off" />
-          </UFormField>
-          <UFormField label="名称">
-            <UInput v-model="form.name" class="w-full" autocomplete="off" />
-          </UFormField>
-          <UFormField label="字段名">
-            <UInput v-model="form.field" class="w-full font-mono" autocomplete="off" />
-          </UFormField>
+        <div>
+          <p class="convert-label">转存到</p>
+          <p v-if="matchingValue" class="value-note">正在查找同值的凭据……</p>
+          <NoteLine v-else-if="matchFailure" tone="warning" flush>
+            {{ matchFailure }}
+            <template #detail>仍可新建托管凭据。</template>
+          </NoteLine>
+          <p v-else-if="unavailableConnections" class="value-note">
+            {{ unavailableConnections }} 个密码库连接不可用，未比对<Hint>
+              连接恢复后重新打开可再次查找。
+            </Hint>
+          </p>
+          <ConvertDestinationPicker
+            :model-value="destination"
+            :destinations="choices.destinations"
+            :unmapped="choices.unmapped"
+            @update:model-value="choose"
+          >
+            <template #vault="{ destination: item }">
+              <UFormField
+                v-if="item.kind === 'vault'"
+                label="凭据标识"
+                help="名称取条目名称，字段对应按条目的字段"
+              >
+                <UInput
+                  v-model="vaultIdentifiers[itemKey(item)]"
+                  class="w-full font-mono"
+                  autocomplete="off"
+                />
+              </UFormField>
+            </template>
+            <template #hosted>
+              <div class="convert-fields">
+                <UFormField label="凭据标识">
+                  <UInput v-model="form.identifier" class="w-full font-mono" autocomplete="off" />
+                </UFormField>
+                <UFormField label="名称">
+                  <UInput v-model="form.name" class="w-full" autocomplete="off" />
+                </UFormField>
+                <UFormField label="字段名">
+                  <UInput v-model="form.field" class="w-full font-mono" autocomplete="off" />
+                </UFormField>
+              </div>
+            </template>
+          </ConvertDestinationPicker>
         </div>
 
         <p v-if="placeholder && replaced" class="convert-effect">
-          正文中 {{ replaced }} 处将换成 <code>{{ placeholder }}</code>
+          正文中 {{ replaced }} 处将换成 <code>{{ placeholder }}</code
+          ><template v-if="selected.kind !== 'hosted'">
+            <Hint>转存前核对这个字段现在的值与正文中的一致，不一致时不转存。</Hint>
+          </template>
         </p>
 
         <NoteLine v-if="failure" tone="error">

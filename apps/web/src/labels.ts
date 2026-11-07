@@ -230,3 +230,9 @@ export function restrictedAppsLabel(
     })
     .join('、')
 }
+
+// 保存记忆前对一处疑似明文的选择
+export const plaintextChoiceLabels = {
+  convert: '转存为凭据',
+  ignore: '不是凭据',
+} as const satisfies Record<'convert' | 'ignore', string>

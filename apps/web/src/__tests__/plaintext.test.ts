@@ -2,9 +2,14 @@ import type { ConvertedToCredential } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
+  convertDestinations,
   convertLeftovers,
   convertSummary,
+  HOSTED_DESTINATION,
   occurrences,
+  previewValue,
+  replaceValues,
+  vaultFieldName,
   plaintextCandidates,
   suggestIdentifier,
   suggestName,
@@ -111,14 +116,118 @@ describe('值在正文里的位置', () => {
 })
 
 describe('转存做了什么', () => {
-  const result = (scrubbedEvents: number) =>
-    ({ credential: { name: 'NAS' }, replaced: 2, scrubbedEvents }) as ConvertedToCredential
+  const result = (
+    scrubbedEvents: number,
+    extra: { created?: boolean; source?: 'hosted' | 'vault'; field?: string } = {},
+  ) =>
+    ({
+      credential: { name: 'NAS', identifier: 'nas', source: extra.source ?? 'hosted' },
+      created: extra.created ?? true,
+      field: extra.field ?? 'password',
+      replaced: 2,
+      scrubbedEvents,
+    }) as ConvertedToCredential
 
-  it('写新建的凭据和替换了几处，历史里替换过才说', () => {
-    expect(convertSummary(result(0))).toBe('已新建凭据「NAS」，正文中 2 处已换成占位符。')
-    expect(convertSummary(result(3))).toBe(
-      '已新建凭据「NAS」，正文中 2 处已换成占位符。历史中 3 个事件里的这个值也已替换。',
+  it('写新建的凭据、换成的占位符和替换了几处，历史里替换过才说', () => {
+    expect(convertSummary(result(0))).toBe(
+      '已新建凭据「NAS」，正文中 2 处已换成 {{cred:nas#password}}。',
     )
+    expect(convertSummary(result(3))).toBe(
+      '已新建凭据「NAS」，正文中 2 处已换成 {{cred:nas#password}}。历史中 3 个事件里的这个值也已替换。',
+    )
+  })
+
+  it('给条目起了标识与换成已有凭据分开说，字段名照结果', () => {
+    expect(convertSummary(result(0, { source: 'vault' }))).toBe(
+      '已给密码库条目起标识 nas，正文中 2 处已换成 {{cred:nas#password}}。',
+    )
+    expect(convertSummary(result(0, { created: false, field: 'token' }))).toBe(
+      '已换成凭据「NAS」的字段 token，正文中 2 处已换成 {{cred:nas#token}}。',
+    )
+  })
+})
+
+describe('预览只露头尾', () => {
+  it('长的露两个字符，短的露一个，太短的只给省略号；不切开表情符号', () => {
+    expect(previewValue('abcdefghijklmnopqrstuvwxyz')).toBe('ab…yz')
+    expect(previewValue('hunter22')).toBe('h…2')
+    expect(previewValue('abc')).toBe('…')
+    expect(previewValue('😀bcdefghijk😀')).toBe('😀b…k😀')
+  })
+})
+
+describe('转存的去处', () => {
+  const match = {
+    credentials: [{ id: 'c1', identifier: 'nas', name: 'NAS', field: 'password' }],
+    vaultItems: [
+      {
+        connectionId: 'conn-a',
+        itemId: 'i1',
+        itemName: '路由器',
+        itemField: 'login.password',
+        credential: null,
+      },
+      {
+        connectionId: 'conn-a',
+        itemId: 'i2',
+        itemName: '邮箱',
+        itemField: 'field:pin',
+        credential: { id: 'c2', identifier: 'mail' },
+      },
+    ],
+  }
+
+  it('顺序是已有凭据、尚未起标识的条目、新建托管凭据；起了标识却没对应字段的单独列出', () => {
+    const { destinations, unmapped } = convertDestinations(match)
+    expect(destinations.map((d) => d.kind)).toEqual(['credential', 'vault', 'hosted'])
+    expect(destinations[0]).toMatchObject({
+      credentialId: 'c1',
+      identifier: 'nas',
+      field: 'password',
+    })
+    expect(destinations[1]).toMatchObject({ itemId: 'i1', itemField: 'login.password' })
+    expect(unmapped).toEqual([{ itemName: '邮箱', itemField: 'field:pin', identifier: 'mail' }])
+    expect(new Set(destinations.map((d) => d.key)).size).toBe(3)
+  })
+
+  it('没有匹配结果时只有新建托管凭据', () => {
+    expect(convertDestinations(undefined).destinations).toEqual([HOSTED_DESTINATION])
+  })
+
+  it('条目字段在凭据里的名字和 defaultCredentialFields 一样', () => {
+    expect(vaultFieldName(null, 'login.password')).toBe('password')
+    expect(vaultFieldName(null, 'field:API Key')).toBe('api-key')
+    expect(vaultFieldName(['field:Token', 'field:token'], 'field:token')).toBe('token-2')
+  })
+})
+
+describe('把值换成占位符', () => {
+  const nas = '{{cred:nas#password}}'
+
+  it('出现几处换几处，已有的占位符里的不换', () => {
+    expect(
+      replaceValues('密码：hunter22，备用 hunter22 {{cred:hunter22#password}}', [
+        { value: 'hunter22', placeholder: nas },
+      ]),
+    ).toBe(`密码：${nas}，备用 ${nas} {{cred:hunter22#password}}`)
+  })
+
+  it('长的先换：短的值是长的一部分时不切开长的', () => {
+    expect(
+      replaceValues('a=abcd1234 b=abcd', [
+        { value: 'abcd', placeholder: '{{cred:x#a}}' },
+        { value: 'abcd1234', placeholder: '{{cred:y#b}}' },
+      ]),
+    ).toBe('a={{cred:y#b}} b={{cred:x#a}}')
+  })
+
+  it('换上的占位符里恰好有后面要换的值时不再换', () => {
+    expect(
+      replaceValues('token: nas1 密码：hunter22', [
+        { value: 'hunter22', placeholder: '{{cred:nas1#password}}' },
+        { value: 'nas1', placeholder: '{{cred:z#token}}' },
+      ]),
+    ).toBe('token: {{cred:z#token}} 密码：{{cred:nas1#password}}')
   })
 })
 

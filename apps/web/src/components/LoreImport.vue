@@ -3,11 +3,13 @@ import {
   LORE_DEFAULT_PERSONA,
   LORE_FILE_MAX_BYTES,
   LORE_UPLOAD_MAX_BYTES,
+  PLAINTEXT_KIND_NAMES,
   Slug,
   type LoreBackupUpload,
   type LoreImportPlan,
   type LoreImportResult,
   type LoreImportSource,
+  type LorePlaintextSpot,
   type LorePlanNode,
   type LorePlanTarget,
   type LoreTargetState,
@@ -27,12 +29,15 @@ import {
   matchesFilter,
   NODE_FILTERS,
   planBlocker,
+  plaintextAllConverted,
+  plaintextKey,
   readLoreBackup,
   replanAfterFailure,
   secretSelectable,
   selectionEffects,
   selectionOf,
   sourceTabs,
+  spotState,
   staleNotice,
   syncGroups,
   targetStateLabels,
@@ -72,12 +77,15 @@ const notice = ref<string | null>(null)
 // 勾选按节点 uuid 记：重看计划之后还在（409 或写到一半出错之后不用重新勾）
 const secretIds = ref(new Set<string>())
 const excludedIds = ref(new Set<string>())
+// 和已有凭据同值的疑似明文默认换成占位符，这里记取消勾选的（plaintextKey）
+const unconvertedIds = ref(new Set<string>())
 const confirmStale = ref(false)
 const filter = ref<NodeFilter>('all')
 
 const clearSelection = () => {
   secretIds.value = new Set()
   excludedIds.value = new Set()
+  unconvertedIds.value = new Set()
 }
 // 来源或人格变了，看过的计划就不算数了；换了来源连勾选一起清
 watch([sourceKind, file, url, token, personaSlug, personaName], () => {
@@ -190,7 +198,7 @@ async function applyPlan() {
       source: await currentSource(),
       persona: persona.value,
       fingerprint: seen.fingerprint,
-      ...selectionOf(seen, secretIds.value, excludedIds.value),
+      ...selectionOf(seen, secretIds.value, excludedIds.value, unconvertedIds.value),
       confirmStale: confirmStale.value,
     })
     if (forSpace === props.spaceId) {
@@ -232,6 +240,14 @@ const toggleSecret = (id: string, on: boolean | 'indeterminate') =>
   (secretIds.value = toggle(secretIds.value, id, on))
 const toggleExcluded = (id: string, on: boolean | 'indeterminate') =>
   (excludedIds.value = toggle(excludedIds.value, id, on))
+// 勾上是换成占位符，记的是取消勾选的
+const toggleConverted = (key: string, on: boolean | 'indeterminate') =>
+  (unconvertedIds.value = toggle(unconvertedIds.value, key, on !== true))
+const plaintextState = (node: LorePlanNode, spot: LorePlaintextSpot) =>
+  plan.value ? spotState(plan.value, node, spot, secretIds.value, excludedIds.value) : 'unwritten'
+const converting = (node: LorePlanNode, spot: LorePlaintextSpot) =>
+  plaintextState(node, spot) === 'convertible' &&
+  !unconvertedIds.value.has(plaintextKey(node, spot))
 
 const nodes = computed(() => plan.value?.nodes ?? [])
 const plannedBoot = computed(() =>
@@ -281,8 +297,21 @@ function currentNote(target: LorePlanTarget): string | null {
   return notes.length ? notes.join('；') : null
 }
 // 路径或正文像有凭据的提醒：已经全是 secret 的不用再说；导入过的这里标不了，要到记忆详情里改
+// 正文里的疑似明文这次都换成占位符时，只剩路径要提醒
 function credentialNote(node: LorePlanNode): string | null {
-  const { path, content } = node.credentialHints
+  const { path } = node.credentialHints
+  const content =
+    node.credentialHints.content &&
+    !(
+      plan.value &&
+      plaintextAllConverted(
+        plan.value,
+        node,
+        secretIds.value,
+        excludedIds.value,
+        unconvertedIds.value,
+      )
+    )
   if ((!path && !content) || node.targets.every((t) => secretNow(node, t))) return null
   const where = path ? '路径' : '正文'
   return secretSelectable(node)
@@ -634,6 +663,42 @@ const disclosureCut = computed(
               <p v-if="node.credentialRefs.length" class="text-muted">
                 引用凭据：{{ node.credentialRefs.join('、') }}
               </p>
+              <!-- 正文里的疑似明文：和已有凭据同值的可以换成占位符，默认勾上 -->
+              <ul v-if="node.plaintext.length" class="spots">
+                <li v-for="spot in node.plaintext" :key="spot.index" class="spot">
+                  <span class="text-muted">
+                    第 {{ spot.index + 1 }} 处 · 第 {{ spot.line }} 行 ·
+                    {{ PLAINTEXT_KIND_NAMES[spot.kind] }}
+                  </span>
+                  <template v-if="spot.credential">
+                    <span>
+                      与凭据「{{ spot.credential.name }}」<code class="uri"
+                        >{{ spot.credential.identifier }}#{{ spot.credential.field }}</code
+                      >同值
+                    </span>
+                    <UCheckbox
+                      size="sm"
+                      label="写成占位符"
+                      :model-value="converting(node, spot)"
+                      :disabled="plaintextState(node, spot) !== 'convertible'"
+                      @update:model-value="toggleConverted(plaintextKey(node, spot), $event)"
+                    />
+                    <span v-if="plaintextState(node, spot) === 'blocked'" class="text-warning">
+                      写入位置无法使用占位符<Hint>
+                        凭据占位符只能放在本人、敏感级不低于私密的记忆中。
+                      </Hint>
+                    </span>
+                    <span v-else-if="plaintextState(node, spot) === 'unwritten'" class="text-muted">
+                      本次不写入
+                    </span>
+                  </template>
+                  <span v-else class="text-muted">
+                    无同值的凭据<Hint>
+                      导入只匹配已有的凭据。密码库条目需先在凭据页起标识，再重新生成计划；也可以导入后在待处理中转存为凭据。
+                    </Hint>
+                  </span>
+                </li>
+              </ul>
               <p v-if="credentialNote(node)" class="text-warning">
                 {{ credentialNote(node) }}
               </p>
@@ -790,6 +855,16 @@ const disclosureCut = computed(
 summary {
   font-weight: 500;
   cursor: pointer;
+}
+.spots {
+  margin-top: 2px;
+  font-size: 13px;
+}
+.spot {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
 }
 .detail-list {
   margin-top: 4px;

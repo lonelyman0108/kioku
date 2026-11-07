@@ -38,6 +38,14 @@ import {
 } from '../memoryDetail'
 import { placeholderOf } from '../placeholders'
 import {
+  addedSpots,
+  plaintextRejection,
+  spotsFromFindings,
+  type PlaintextSpot,
+  type SaveFlags,
+} from '../plaintextSave'
+import type { PlaintextSaveRequest, PlaintextSaveResult } from '../composables/usePlaintextSave'
+import {
   hiddenAgain,
   revealedAfterWrite,
   stillRevealed,
@@ -59,6 +67,7 @@ import Hint from './Hint.vue'
 import MemoryContent from './MemoryContent.vue'
 import MemoryHistory from './MemoryHistory.vue'
 import MoveMemoryModal from './MoveMemoryModal.vue'
+import PlaintextSaveModal from './PlaintextSaveModal.vue'
 import NoteLine from './strata/NoteLine.vue'
 import CoordinateLine from './strata/CoordinateLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -398,33 +407,58 @@ function failed(err: unknown, fallback: string) {
   toast.add({ title: err instanceof ApiError ? err.message : fallback, color: 'error' })
 }
 
-// 保存前看正文像不像有明文凭据：改了正文、或从 secret 降级时提醒。降级之后正文会进历史、全文检索和向量，
+// 从 secret 降级时看整段正文像不像有明文凭据：降级之后正文会进历史、全文检索和向量。
 // 服务端会拒绝带着明文降级，确认之后才带上 allowPlaintext 强制（只有空间 owner 能改 secret，也就只有他会走到这里）
-const plaintextWarning = ref<{ downgrade: boolean } | null>(null)
+const downgradeWarning = ref(false)
 // 写成一整句：模板里中文换行会多出一个空格
 const PLAINTEXT_DOWNGRADE_TEXT =
   '降级后，正文将写入历史、全文索引和向量，无法撤回。请先将凭据转存，并确认正文不含密码或令牌。'
-const PLAINTEXT_TEXT = '正文疑似包含密码或令牌（例如「密码：…」）。建议转存为凭据，正文改用占位符。'
+// 别的保存：正文里有这次新增的疑似明文时，先逐处选转存为凭据或不是凭据（PlaintextSaveModal），
+// 判断和服务端拒绝写入是同一个（addedPlaintextCredentials）。结果是 secret 时正文加密，不用处理
+const plaintextGate = ref<PlaintextSaveRequest | null>(null)
+const isOwner = computed(() => permissions.role.value === 'owner')
+function gateFor(m: ConsoleMemoryView, content: string, spots: PlaintextSpot[], rejected: boolean) {
+  return {
+    content,
+    uri: m.uri,
+    title: form.title,
+    layer: m.layer,
+    sensitivity: form.sensitivity,
+    spots,
+    rejected,
+  }
+}
 function requestSave() {
   const m = base.value
   if (!m || saving.value) return
   const downgrade = m.sensitivity === 'secret' && form.sensitivity !== 'secret'
-  const contentChanged = form.content !== (m.content ?? '')
-  if ((downgrade || contentChanged) && PLAINTEXT_CREDENTIAL.test(form.content)) {
-    plaintextWarning.value = { downgrade }
-    return
+  if (downgrade) {
+    if (PLAINTEXT_CREDENTIAL.test(form.content)) {
+      downgradeWarning.value = true
+      return
+    }
+  } else if (form.sensitivity !== 'secret' && form.content !== (m.content ?? '')) {
+    const spots = addedSpots(m.content, form.content)
+    if (spots.length) {
+      plaintextGate.value = gateFor(m, form.content, spots, false)
+      return
+    }
   }
   void save()
 }
-function confirmPlaintext() {
+function confirmDowngrade() {
   // 确认框关闭的动画期间再点一次：已经在保存了，不再发第二个请求
-  const warning = plaintextWarning.value
-  if (!warning || saving.value) return
-  plaintextWarning.value = null
-  void save(warning.downgrade)
+  if (!downgradeWarning.value || saving.value) return
+  downgradeWarning.value = false
+  void save({ allowPlaintext: true })
+}
+// 逐处处理完：转存的已经建好凭据、正文里的值换成了占位符，换过的正文放回表单再保存
+function onGateProceed(result: PlaintextSaveResult) {
+  form.content = result.content
+  void save(result.flags)
 }
 
-async function save(allowPlaintext = false) {
+async function save(flags: SaveFlags = {}) {
   const m = base.value
   if (!m || saving.value) return
   // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
@@ -465,7 +499,7 @@ async function save(allowPlaintext = false) {
       glossaryRemove: m.glossary.filter((k) => !sent.glossary.includes(k)),
       // 只在改了的时候发：输入框只到分钟，原样发回去会抹掉原来的秒
       ...(validToChanged ? { validTo } : {}),
-      ...(allowPlaintext ? { allowPlaintext: true } : {}),
+      ...flags,
     })
     // 正在进行的重新拉取可能带回保存之前的版本，先取消，再把保存结果写进缓存
     await queryClient.cancelQueries({ queryKey: queryKey.value })
@@ -486,6 +520,18 @@ async function save(allowPlaintext = false) {
     void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
     emit('changed', next, m)
   } catch (err) {
+    // 服务端检出了新增的疑似明文（两边判断有出入时）：照样逐处处理
+    const findings = plaintextRejection(err)
+    if (findings) {
+      const local = addedSpots(m.content, sent.content)
+      plaintextGate.value = gateFor(
+        m,
+        sent.content,
+        local.length ? local : spotsFromFindings(sent.content, findings),
+        true,
+      )
+      return
+    }
     failed(err, '保存失败')
     // 版本冲突时立刻重新拉取，好显示「载入新版本」
     if (err instanceof ApiError && err.status === 409) void memory.refetch()
@@ -1072,36 +1118,32 @@ const properties = computed<Property[][]>(() => {
       </UModal>
 
       <UModal
-        :open="plaintextWarning !== null"
-        :title="
-          plaintextWarning?.downgrade
-            ? '正文疑似包含明文凭据，仍要降级？'
-            : '正文疑似包含明文凭据，仍要保存？'
-        "
-        @update:open="(v) => !v && (plaintextWarning = null)"
+        :open="downgradeWarning"
+        title="正文疑似包含明文凭据，仍要降级？"
+        @update:open="(v) => !v && (downgradeWarning = false)"
       >
         <template #body>
           <p class="text-sm">
-            {{ plaintextWarning?.downgrade ? PLAINTEXT_DOWNGRADE_TEXT : PLAINTEXT_TEXT
-            }}<Hint v-if="plaintextWarning?.downgrade">
-              检测规则可能误判。确认正文不含明文后，可继续降级。
-            </Hint>
+            {{ PLAINTEXT_DOWNGRADE_TEXT
+            }}<Hint>检测规则可能误判。确认正文不含明文后，可继续降级。</Hint>
           </p>
         </template>
         <template #footer>
           <div class="flex w-full justify-end gap-2">
-            <UButton color="neutral" variant="ghost" @click="plaintextWarning = null">
+            <UButton color="neutral" variant="ghost" @click="downgradeWarning = false">
               返回修改
             </UButton>
-            <UButton
-              :color="plaintextWarning?.downgrade ? 'error' : 'primary'"
-              @click="confirmPlaintext"
-            >
-              {{ plaintextWarning?.downgrade ? '确认不含明文并降级' : '仍然保存' }}
-            </UButton>
+            <UButton color="error" @click="confirmDowngrade">确认不含明文并降级</UButton>
           </div>
         </template>
       </UModal>
+
+      <PlaintextSaveModal
+        v-model:request="plaintextGate"
+        :space-id="spaceId"
+        :owner="isOwner"
+        @proceed="onGateProceed"
+      />
 
       <UModal
         :open="deleting !== null"

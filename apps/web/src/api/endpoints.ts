@@ -22,6 +22,7 @@ import {
   ConvertedToCredential,
   CredentialEventList,
   CredentialReferenceList,
+  CredentialValueMatches,
   CredentialValues,
   CreatedKey,
   DeletedCredentialList,
@@ -86,6 +87,7 @@ import {
   type CreateCredentialRequest,
   type CreateKeyRequest,
   type CreateMemoryRequest,
+  type MatchCredentialValuesRequest,
   type CreatePersonaRequest,
   type GroupPersonaRules,
   type LoreImportApplyRequest,
@@ -284,6 +286,12 @@ export const api = {
 
   credentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
+  // 按值查找同值的凭据与密码库条目：值只在请求体里，结果不进缓存
+  matchCredentialValues: (spaceId: string, body: MatchCredentialValuesRequest) =>
+    request('POST', `/spaces/${spaceId}/credentials/match`, {
+      body,
+      schema: CredentialValueMatches,
+    }),
   deletedCredentials: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/credentials/deleted`, { schema: DeletedCredentialList }),
   credential: (spaceId: string, id: string) =>

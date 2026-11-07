@@ -195,10 +195,11 @@ describe('记忆页取统计', () => {
 })
 
 // 回车的隐式提交会点默认按钮：单选在表单里时，方向键选完再按回车，提示还没看就提交了
+// 新建的 submit 带着放行标记的参数：点击事件不能传进去，所以写成 submit()
 describe.each([
-  ['移动或改层', moveMemoryModal, '确定'],
-  ['新建记忆', createMemoryModal, '创建'],
-])('%s的弹窗', (_name, source, label) => {
+  ['移动或改层', moveMemoryModal, '确定', 'submit'],
+  ['新建记忆', createMemoryModal, '创建', 'submit()'],
+])('%s的弹窗', (_name, source, label, call) => {
   const elements = elementsOf(template(source))
 
   it('没有表单，也没有提交按钮', () => {
@@ -209,7 +210,7 @@ describe.each([
 
   it('只有点按钮才提交', () => {
     const button = elements.find((el) => el.tag === 'UButton' && textOf(el) === label)!
-    expect(handler(button, 'click')).toBe('submit')
+    expect(handler(button, 'click')).toBe(call)
   })
 })
 
