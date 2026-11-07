@@ -132,6 +132,7 @@ export function decodeSync(json: unknown, userKey: SymmetricKey): SyncedState {
         id: requireStr(col, 'id'),
         organizationId,
         name: decryptText(requireStr(col, 'name'), key),
+        readOnly: prop(col, 'readOnly') === true,
       })
     } catch (err) {
       // 解不开的集合不列；它里面的条目照样按条目自己的情况算

@@ -1101,6 +1101,8 @@ export const VAULT_ERROR_KINDS = [
   'unsupported_two_factor',
   'reauth_required',
   'item_unavailable',
+  'read_only',
+  'item_conflict',
   'unsupported_format',
   'integrity',
   'unreachable',

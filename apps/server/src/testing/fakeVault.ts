@@ -107,7 +107,7 @@ export function fakeVault(): FakeVault {
   const snapshot = (email: string, userId: string): VaultSnapshot => ({
     account: { userId, email },
     organizations: state.organizations,
-    collections: [{ id: COLLECTION, organizationId: ORG, name: 'Agent' }],
+    collections: [{ id: COLLECTION, organizationId: ORG, name: 'Agent', readOnly: false }],
     personalItemCount: state.personalItemCount,
     items: [...items.values()].map(summary),
     unreadableItemCount: state.unreadableItemCount,
@@ -209,6 +209,13 @@ export function fakeVault(): FakeVault {
             ...summary(item),
             values: { ...item.values },
           }))
+        },
+        // 写入还没有模拟：用到写回的测试补上
+        createItem(): Promise<VaultItem> {
+          return Promise.reject(new VaultError('server_error', '模拟的密码库不支持写入'))
+        },
+        updateItem(): Promise<VaultItem> {
+          return Promise.reject(new VaultError('server_error', '模拟的密码库不支持写入'))
         },
       }
     },

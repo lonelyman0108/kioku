@@ -274,6 +274,15 @@ class Session implements VaultSession {
     return formatLogged(this.http, 'sync', () => decodeSyncItems(json, state))
   }
 
+  // 写入还没有实现：加密、放进集合、只改给了的字段，见 types.ts 的 VaultSession
+  createItem(): Promise<VaultItem> {
+    return Promise.reject(new VaultError('server_error', '暂不支持写入密码库'))
+  }
+
+  updateItem(): Promise<VaultItem> {
+    return Promise.reject(new VaultError('server_error', '暂不支持写入密码库'))
+  }
+
   async item(id: string): Promise<VaultItem> {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new VaultError('item_unavailable', '条目不可用')
