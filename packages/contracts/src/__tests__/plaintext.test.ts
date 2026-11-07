@@ -858,7 +858,7 @@ describe('不是值的写法后面要紧接值的结尾', () => {
       'os.getenv("X")abc',
       'getenv(x)y',
       "env('X')abc",
-      `\${${'a'.repeat(65)}}`,
+      `\${${'a'.repeat(129)}}`,
     ]) {
       expect(flagged(`password: ${value}`), value).toBe(true)
     }
@@ -972,18 +972,9 @@ describe('模板表达式、日期与行内代码', () => {
     }
   })
 
-  it('整段是日期的不算，后面跟着字的照样算', () => {
-    for (const value of [
-      '2026-10-27 写坏了',
-      '2026-10-27',
-      '2026-10-27T12:30',
-      '2026-10-27 12:30',
-      '2026-10-27T12:30:45，',
-    ]) {
-      expect(flagged(`token：${value}`), value).toBe(false)
-    }
-    for (const value of ['2026-10-27abc', '2026-10-27T12:30x', '2026-1-27', '20261027']) {
-      expect(flagged(`token：${value}`), value).toBe(true)
+  it('日期照样算：生日常被当作密码', () => {
+    for (const value of ['1990-05-12', '2026-10-27 写坏了', '2026-10-27T12:30']) {
+      expect(flagged(`密码：${value}`), value).toBe(true)
     }
   })
 
@@ -995,5 +986,140 @@ describe('模板表达式、日期与行内代码', () => {
     expect(values('password: pa"ss')).toEqual([{ value: 'pa"ss', field: 'password' }])
     expect(values('password: p"a"')).toEqual([{ value: 'p"a"', field: 'password' }])
     expect(values('password: `')).toEqual([{ value: '`', field: 'password' }])
+  })
+})
+
+describe('整体审查补的几类', () => {
+  const flagged = (text: string) => {
+    const found = findPlaintextCredentials(text)
+    expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(found.length > 0)
+    return found.length > 0
+  }
+  const added = (before: string | null, after: string) =>
+    addedPlaintextCredentials(before, after).map((m) => after.slice(m.start, m.end))
+
+  it('Markdown 加粗的标签：认出强调符后面的真值', () => {
+    expect(values('**Password:** OldPass111')).toEqual([{ value: 'OldPass111', field: 'password' }])
+    expect(values('**密码：** x1y2')).toEqual([{ value: 'x1y2', field: 'password' }])
+    expect(values('- **Token:** abc123')).toEqual([{ value: 'abc123', field: 'token' }])
+    expect(values('*Token:* abc123')).toEqual([{ value: 'abc123', field: 'token' }])
+    expect(values('__Password:__ abc123')).toEqual([{ value: 'abc123', field: 'password' }])
+    expect(values('**Password**: hunter2')).toEqual([{ value: 'hunter2', field: 'password' }])
+    // 值写在粗体里的照旧
+    expect(values('password: **hunter2**')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(flagged('**密码：** 见 1Password')).toBe(false)
+    expect(flagged('**Password:** {{cred:db#password}}')).toBe(false)
+    expect(flagged('**Password:** ***')).toBe(false)
+  })
+
+  it('Markdown 加粗的标签：编辑时新加或改了的算新增', () => {
+    expect(added('**Password:** OldPass111', '**Password:** NewPass222')).toEqual(['NewPass222'])
+    expect(added('说明', '说明\n**Password:** NewPass222')).toEqual(['NewPass222'])
+    expect(added('**Password:** OldPass111', '前言\n**Password:** OldPass111')).toEqual([])
+  })
+
+  it('引用里写着字面的值照样算，只认不带字面值的写法', () => {
+    for (const text of [
+      'password: ${DB_PASS:-Xk9mQ2vLp}',
+      'password = os.getenv("DB_PASSWORD", "Xk9mQ2vLp")',
+      "password: {{ vault_pw | default('Xk9mQ2vLp') }}",
+      'password: $(echo Xk9mQ2vLp)',
+      'password: $("cat /x")',
+      'password: os.environ[Xk9mQ2vLp]',
+      'password: getenv(Xk9mQ2vLp)',
+    ]) {
+      expect(flagged(text), text).toBe(true)
+    }
+    for (const text of [
+      'password: ${DB_PASS}',
+      'password = os.getenv("DB_PASSWORD")',
+      "password: os.environ['DB_PASSWORD']",
+      'password: process.env["DB_PASSWORD"]',
+      'password: {{ vault_pw | lower }}',
+      'password: {{ .Values.db.password }}',
+      'password: $(cat /run/secrets/db)',
+      'password: $(pass show infra/db)',
+      'password: $(op read op://vault/db/password)',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+  })
+
+  it('占位符要是整段值：后面还有字时，占位符之后的部分是值', () => {
+    expect(values('password: {{cred:db}}hunter2')).toEqual([
+      { value: 'hunter2', field: 'password' },
+    ])
+    expect(values('password: "{{cred:db}}hunter2"')).toEqual([
+      { value: 'hunter2', field: 'password' },
+    ])
+    for (const text of [
+      'password: {{cred:db#password}}',
+      'password: {{cred:a#user}}:{{cred:a#pass}}',
+      'password: "{{cred:db}}"',
+      'password: {{cred:db}}，别告诉别人',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+  })
+
+  it('类型名后面只能是 []、类型参数与收尾符号，最后接值的结尾', () => {
+    for (const value of [
+      'any=Gh7#kq!z',
+      'null,x9Kq',
+      'str[hunter2]',
+      'none)hunter2',
+      'int;hunter2',
+      'string|hunter2',
+    ]) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+    for (const text of [
+      'password: string[]',
+      'token: Optional<str>',
+      'token: Optional[str]',
+      'token: Dict[str, int]',
+      'password: string | null',
+      'login(password: string)',
+      'password: str = ""',
+      'password: string;',
+      'password?: string,',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+  })
+
+  it('收尾的引号后面还要接结尾', () => {
+    for (const text of [
+      'password = """hunter2"""',
+      "password = '''hunter2'''",
+      'password: xxx"hunter2"',
+    ]) {
+      expect(flagged(text), text).toBe(true)
+    }
+    for (const text of ['password: "xxxx"', 'password: ""', 'password: "",', 'password: "xxxx")']) {
+      expect(flagged(text), text).toBe(false)
+    }
+  })
+
+  it('注解里有中文才算原有的；没有中文的可能写着新的值', () => {
+    expect(added('password: hunter2', 'password: hunter2（旧）')).toEqual([])
+    expect(added('password: hunter2', 'password: hunter2（已作废）')).toEqual([])
+    expect(added('password: hunter2', 'password: hunter2（Xk9mQ2vLp）')).toEqual(['hunter2'])
+    expect(added('password: hunter2', 'password: hunter2（old）')).toEqual(['hunter2'])
+  })
+
+  it('去落单的引号与比较新增都是线性的', () => {
+    const cases: [string | null, string][] = [
+      [null, `${'password=a'.repeat(32_000)}\``],
+      ['token=a '.repeat(40_000), 'token=a '.repeat(40_000)],
+      ['token=a&b '.repeat(30_000), 'token=a\n'.repeat(30_000)],
+      [`password: ${'a&'.repeat(10_000)}`, `password: ${'a&'.repeat(10_000)}b`],
+    ]
+    for (const [before, after] of cases) {
+      const started = Date.now()
+      addedPlaintextCredentials(before, after)
+      findPlaintextCredentials(after)
+      expect(Date.now() - started, after.slice(0, 20)).toBeLessThan(1000)
+    }
   })
 })

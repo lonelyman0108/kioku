@@ -79,6 +79,43 @@ const SAMPLES = [
     '"  {{cred:a#b}}"',
     '"x {{cred:a#b}}"',
   ].map((v) => `password: ${v}`),
+  // Markdown 加粗的标签
+  '**Password:** OldPass111',
+  '**密码：** x1y2',
+  '- **Token:** abc123',
+  '**Password**: hunter2',
+  '**密码：** 见 1Password',
+  '**Password:** {{cred:db#password}}',
+  // 引用里写着字面的值
+  'password: ${DB_PASS:-Xk9mQ2vLp}',
+  'password = os.getenv("DB_PASSWORD", "Xk9mQ2vLp")',
+  "password: {{ vault_pw | default('Xk9mQ2vLp') }}",
+  'password: $(echo Xk9mQ2vLp)',
+  'password: ${DB_PASS}',
+  'password = os.getenv("DB_PASSWORD")',
+  'password: {{ vault_pw | lower }}',
+  'password: $(pass show infra/db)',
+  // 占位符要是整段值
+  'password: {{cred:db}}hunter2',
+  'password: "{{cred:db}}hunter2"',
+  'password: {{cred:a#user}}:{{cred:a#pass}}',
+  // 类型名后面
+  'password: any=Gh7#kq!z',
+  'password: null,x9Kq',
+  'password: str[hunter2]',
+  'password: none)hunter2',
+  'password: int;hunter2',
+  'password: string|hunter2',
+  'token: Optional[str]',
+  'token: Dict[str, int]',
+  'password: str = ""',
+  // 收尾的引号后面
+  'password = """hunter2"""',
+  "password = '''hunter2'''",
+  'password: xxx"hunter2"',
+  'password: "xxxx")',
+  // 日期照样算
+  '密码：1990-05-12',
   // 模板与 CI 表达式、日期、行内代码
   'GIT_CREDENTIALS=x-access-token:${{ secrets.token }}',
   'password: {{ vault_password }}',
