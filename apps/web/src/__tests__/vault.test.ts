@@ -44,6 +44,7 @@ const event = (over: Partial<CredentialEvent> = {}): CredentialEvent => ({
   reason: null,
   chatType: null,
   changes: [],
+  sinceValueChange: null,
   bench: null,
   ...over,
 })
@@ -104,6 +105,7 @@ describe('连接', () => {
     lastCheckedAt: null,
     disconnectedAt: null,
     credentialCount: 0,
+    destination: null,
     createdAt: '2026-11-07T00:00:00Z',
     updatedAt: '2026-11-07T00:00:00Z',
     ...over,
@@ -157,8 +159,8 @@ describe('连接', () => {
   it('集合按名字列出，列表里没有的不列', () => {
     const list = {
       collections: [
-        { id: 'c1', organizationId: 'o1', name: 'Agent' },
-        { id: 'c2', organizationId: 'o1', name: '运维' },
+        { id: 'c1', organizationId: 'o1', name: 'Agent', readOnly: false },
+        { id: 'c2', organizationId: 'o1', name: '运维', readOnly: true },
       ],
     }
     const item = {
@@ -290,12 +292,11 @@ describe('界面用上了这些规则', () => {
     expect(credentialForm).toContain('vaultCredentialDraft(item.item, props.identifiers)')
   })
 
-  it('重新检查失败时按错误提示，只重读连接列表；成功时连接、条目与凭据都重读', () => {
+  it('重新检查失败时按错误提示，只重读连接列表；成功时连接与条目重读，凭据由条目列表按修改时间判断', () => {
     expect(checkRefreshKeys('s1', false)).toEqual([['vault-connections', 's1']])
     expect(checkRefreshKeys('s1', true)).toEqual([
       ['vault-connections', 's1'],
       ['vault-items', 's1'],
-      ['credentials', 's1'],
     ])
     expect(vaultPanel).toContain('toast.add(checkNotice({ error: err }))')
     expect(vaultPanel).toMatch(

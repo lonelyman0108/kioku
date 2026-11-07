@@ -8,6 +8,8 @@ import {
   type ReconnectVaultRequest,
   type VaultConnection,
   type VaultConnectionList,
+  type VaultCheckResult,
+  type VaultCollection,
   type VaultConnectResult,
   type VaultDisabledReason,
   type VaultErrorKind,
@@ -17,7 +19,7 @@ import { and, asc, count, eq, inArray, isNotNull, isNull, lt, ne, or, sql } from
 
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
-import { withSpace, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, withSpace, type Db, type Tx } from '../db/client'
 import { credentials, vaultConnections } from '../db/schema'
 import { MemoryError } from '../memory/service'
 import { serverUrlProblem } from './bitwarden/http'
@@ -106,7 +108,8 @@ export function reasonStatus(reason: CredentialAccessReason): 400 | 409 | 502 {
   return reason === 'master_key' ? 400 : 409
 }
 
-// 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的
+// 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的。
+// 写入本身的错误（read_only、item_conflict、value_too_long）不在这里：它们说的是这次写入，不改连接的状态
 const CONNECTION_ERRORS = new Set<VaultErrorKind>([
   'unreachable',
   'server_error',
@@ -135,7 +138,11 @@ function loginFailure(err: unknown): never {
   }
 }
 
-const SYNC_ACTION_TEXT = { check: '重新检查失败：', items: '无法列出条目：' } as const
+const SYNC_ACTION_TEXT = {
+  check: '重新检查失败：',
+  items: '无法列出条目：',
+  destination: '无法设置去处：',
+} as const
 
 // 同步之后的错误，开头说是哪个动作。这次同步本身失败（failed，连接本身的问题）时按它说；
 // 否则停用、需要重新登录按连接的状态说，其余按最近的错误说
@@ -172,6 +179,8 @@ function syncFailure(
 interface CachedSession {
   ciphertext: Buffer
   session: VaultSession
+  // 这个会话最近一次同步读到的集合：起标识的响应要写集合的名称，有了就不再为它同步一次
+  collections?: VaultSnapshot['collections']
 }
 
 // 会话按连接缓存在进程里（访问令牌与组织密钥在会话的内存里），按客户端分开：测试里每个用例一个假客户端
@@ -269,6 +278,14 @@ export class VaultConnections {
       lastCheckedAt: row.lastCheckedAt?.toISOString() ?? null,
       disconnectedAt: row.disconnectedAt?.toISOString() ?? null,
       credentialCount,
+      destination:
+        row.defaultCollectionId && row.defaultOrganizationId && row.defaultCollectionName !== null
+          ? {
+              collectionId: row.defaultCollectionId,
+              organizationId: row.defaultOrganizationId,
+              collectionName: row.defaultCollectionName,
+            }
+          : null,
       createdAt: row.createdAt.toISOString(),
       updatedAt: row.updatedAt.toISOString(),
     }
@@ -394,7 +411,11 @@ export class VaultConnections {
         if (persist) await persist(next)
       },
       onSynced: async (snapshot) => {
-        if (entry) await this.synced(id, snapshot)
+        if (entry) {
+          await this.synced(id, snapshot)
+          // 违规检查通过之后再存：被拒的那份同步结果不进缓存
+          entry.collections = snapshot.collections
+        }
       },
     })
     const snapshot = await session.snapshot().catch(loginFailure)
@@ -447,7 +468,7 @@ export class VaultConnections {
             .returning()
       return { row: row!, view: await this.viewOf(tx, row!) }
     })
-    entry = { ciphertext: saved.row.ciphertext!, session }
+    entry = { ciphertext: saved.row.ciphertext!, session, collections: snapshot.collections }
     const cached = entry
     ENTRIES.set(session, cached)
     persist = (next) => this.saveSecrets(id, cached, next)
@@ -492,6 +513,11 @@ export class VaultConnections {
     throw new VaultDisabledError(violation)
   }
 
+  // 会话最近一次同步读到的集合；还没同步过（或不是缓存里的会话）时为 undefined
+  collectionsOf(session: VaultSession): VaultSnapshot['collections'] | undefined {
+    return ENTRIES.get(session)?.collections
+  }
+
   // 连接的会话：缓存里有、密文也没变就用它，否则解开密文新建一个。调用方先确认连接没有断开
   session(row: ConnectionRow): VaultSession {
     const ciphertext = row.ciphertext!
@@ -511,7 +537,10 @@ export class VaultConnections {
         deviceId: row.deviceId,
         secrets,
         onSecretsChanged: (next) => this.saveSecrets(row.id, entry, next),
-        onSynced: (snapshot) => this.synced(row.id, snapshot),
+        onSynced: async (snapshot) => {
+          await this.synced(row.id, snapshot)
+          entry.collections = snapshot.collections
+        },
       }),
     }
     ENTRIES.set(entry.session, entry)
@@ -599,6 +628,8 @@ export class VaultConnections {
       // 违规的连接也不会被恢复。判断与 onSynced 是同一个 snapshotViolation
       if (snapshot) {
         const violation = snapshotViolation(snapshot)
+        await observeRevisions(tx, row.id, snapshot.items)
+        await refreshDestinationName(tx, row, snapshot)
         await tx
           .update(vaultConnections)
           .set({
@@ -629,11 +660,80 @@ export class VaultConnections {
 
   // 这次同步本身失败（连不上、意外的响应、认不出的内容、校验不过）时记下最近的错误之后报错，停用的连接也一样；
   // 别的结果（停用、需要重新登录、条目不可用、别的请求刚换过令牌）照常返回连接
-  async check(id: string): Promise<VaultConnection> {
+  // 结果带上这次同步读到的集合（选去处用）；没同步成（需要重新登录）时为空
+  async check(id: string): Promise<VaultCheckResult> {
     const row = await this.run((tx) => this.own(tx, id))
-    const { row: updated, failed } = await this.sync(row)
+    const { snapshot, row: updated, failed } = await this.sync(row)
     if (failed) throw syncFailure('check', updated, failed)
-    return this.run((tx) => this.viewOf(tx, updated))
+    return {
+      connection: await this.run((tx) => this.viewOf(tx, updated)),
+      collections: snapshot ? collectionsOf(snapshot) : [],
+    }
+  }
+
+  // 设去处：连接要可用，先同步一次（事务外），集合要在这个账号读得到的集合里、不是只读。
+  // 写库时先清掉这个成员别的连接上的去处，再设这一个；并发时由唯一索引挡下（409）
+  async setDestination(id: string, collectionId: string): Promise<VaultConnectionList> {
+    const row = await this.run((tx) => this.own(tx, id))
+    if (row.status !== 'ok' || !row.ciphertext) {
+      throw new MemoryError(409, '密码库连接不可用，请先重新检查或重新登录')
+    }
+    const { snapshot, row: updated, failed } = await this.sync(row)
+    if (!snapshot || updated.status !== 'ok') throw syncFailure('destination', updated, failed)
+    const collection = snapshot.collections.find((c) => c.id === collectionId)
+    if (!collection) throw new MemoryError(400, '集合不存在或不可用')
+    if (collection.readOnly) throw new MemoryError(400, '集合只读，请选择可以编辑的集合')
+    try {
+      await this.run(async (tx) => {
+        await tx
+          .update(vaultConnections)
+          .set(NO_DESTINATION)
+          .where(
+            and(
+              eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId),
+              ne(vaultConnections.id, id),
+              isNotNull(vaultConnections.defaultCollectionId),
+            ),
+          )
+        await tx
+          .update(vaultConnections)
+          .set({
+            defaultCollectionId: collection.id,
+            defaultOrganizationId: collection.organizationId,
+            defaultCollectionName: collection.name,
+          })
+          .where(eq(vaultConnections.id, id))
+      })
+    } catch (err) {
+      if (isUniqueViolation(err, 'vault_connections_destination_idx')) {
+        throw new MemoryError(409, '另一个请求刚设了去处，请刷新后重试')
+      }
+      throw err
+    }
+    return this.list()
+  }
+
+  // 清除去处：没设也照常返回列表
+  async clearDestination(id: string): Promise<VaultConnectionList> {
+    await this.run(async (tx) => {
+      await this.own(tx, id)
+      await tx.update(vaultConnections).set(NO_DESTINATION).where(eq(vaultConnections.id, id))
+    })
+    return this.list()
+  }
+
+  // 成员的去处所在的连接（新建凭据用）：没设时为 undefined
+  async destination(tx: Tx): Promise<ConnectionRow | undefined> {
+    const [row] = await tx
+      .select()
+      .from(vaultConnections)
+      .where(
+        and(
+          eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId),
+          isNotNull(vaultConnections.defaultCollectionId),
+        ),
+      )
+    return row
   }
 
   // 列出连接读得到的条目，顺带同步一次。停用、需要重新登录或出错时说明原因
@@ -666,11 +766,7 @@ export class VaultConnections {
           credential: byItem.get(item.id) ?? null,
         })),
       unreadableCount: snapshot.unreadableItemCount,
-      collections: snapshot.collections.map((c) => ({
-        id: c.id,
-        organizationId: c.organizationId,
-        name: c.name,
-      })),
+      collections: collectionsOf(snapshot),
       organizations: snapshot.organizations.map((o) => ({ id: o.id, name: o.name })),
     }
   }
@@ -701,5 +797,117 @@ export class VaultConnections {
     // 提交之后才读到的取用看到已断开，会自己清掉（CredentialService 的 prepare）
     this.forget(id)
     return view
+  }
+}
+
+const NO_DESTINATION = {
+  defaultCollectionId: null,
+  defaultOrganizationId: null,
+  defaultCollectionName: null,
+} as const
+
+function collectionsOf(snapshot: VaultSnapshot): VaultCollection[] {
+  return [...snapshot.collections]
+    .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+    .map((c) => ({
+      id: c.id,
+      organizationId: c.organizationId,
+      name: c.name,
+      readOnly: c.readOnly,
+    }))
+}
+
+// 同步时集合改了名：去处跟着记新的名称。集合不见了的照旧留着，新建时按密码库的错误失败
+async function refreshDestinationName(
+  tx: Tx,
+  row: ConnectionRow,
+  snapshot: VaultSnapshot,
+): Promise<void> {
+  if (!row.defaultCollectionId) return
+  const collection = snapshot.collections.find((c) => c.id === row.defaultCollectionId)
+  if (!collection) return
+  await tx
+    .update(vaultConnections)
+    .set({ defaultCollectionName: collection.name })
+    .where(
+      and(
+        eq(vaultConnections.id, row.id),
+        eq(vaultConnections.defaultCollectionId, collection.id),
+        ne(vaultConnections.defaultCollectionName, collection.name),
+      ),
+    )
+}
+
+// 条目的修改时间原样记下；能解析成时间的也写进上次改值的时间
+const revisionTime = (revision: string): Date | null => {
+  const at = new Date(revision)
+  return Number.isNaN(at.getTime()) ? null : at
+}
+
+// 修改时间 next 比 prev 新吗：都能解析成时间时按时间比；解析不了的只要不相同就算新的
+export function isNewerRevision(next: string, prev: string): boolean {
+  if (next === prev) return false
+  const [a, b] = [revisionTime(next), revisionTime(prev)]
+  return a && b ? a > b : true
+}
+
+// Kioku 看到了条目现在的修改时间（取用、列条目、重新检查、按值比对、写回冲突之后）：和记下的不同就是值在别处改过，
+// 记下新的修改时间与上次改值的时间，版本号加一（带着旧版本号的修改返回 409，要先重新读取），清掉「需要轮换」。
+// 还没记下过修改时间的（刚起标识、迁移之前的）只记下，不算改过值。已删除的凭据不动，恢复之后下一次看到时再比
+export async function observeRevisions(
+  tx: Tx,
+  connectionId: string,
+  items: readonly { id: string; revisionDate: string }[],
+): Promise<void> {
+  if (!items.length) return
+  const bound = await tx
+    .select({
+      id: credentials.id,
+      itemId: credentials.vaultItemId,
+      seen: credentials.vaultRevision,
+    })
+    .from(credentials)
+    // 只读这几个条目对应的凭据：取用时只看到一个条目，完整同步时调用方传全部条目
+    .where(
+      and(
+        eq(credentials.vaultConnectionId, connectionId),
+        inArray(
+          credentials.vaultItemId,
+          items.map((i) => i.id),
+        ),
+        isNull(credentials.deletedAt),
+      ),
+    )
+  const revisions = new Map(items.map((i) => [i.id, i.revisionDate]))
+  // 按 id 排序加锁，和别的批量写入一样
+  for (const b of [...bound].sort((x, y) => x.id.localeCompare(y.id))) {
+    const revision = revisions.get(b.itemId!)
+    if (revision === undefined || revision === b.seen) continue
+    const changed = b.seen !== null
+    // 并发的读取可能晚一步带回更早的修改时间（别的请求已经记下了更新的）：不往回改
+    if (b.seen !== null && !isNewerRevision(revision, b.seen)) continue
+    await tx
+      .update(credentials)
+      .set({
+        vaultRevision: revision,
+        valueChangedAt: revisionTime(revision),
+        ...(changed
+          ? {
+              version: sql`${credentials.version} + 1`,
+              rotationRequestedAt: null,
+              updatedAt: new Date(),
+            }
+          : {}),
+      })
+      .where(
+        and(
+          eq(credentials.id, b.id),
+          isNull(credentials.deletedAt),
+          // 读到之后被别的请求记下了同一个或更新的修改时间：照它们的，不重复加版本
+          b.seen === null
+            ? isNull(credentials.vaultRevision)
+            : eq(credentials.vaultRevision, b.seen),
+        ),
+      )
   }
 }

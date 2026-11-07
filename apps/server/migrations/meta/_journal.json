@@ -15,6 +15,13 @@
       "when": 1794015415003,
       "tag": "0001_credential_vault",
       "breakpoints": true
+    },
+    {
+      "idx": 2,
+      "version": "7",
+      "when": 1794069192079,
+      "tag": "0002_credential_rotation",
+      "breakpoints": true
     }
   ]
 }

@@ -284,7 +284,6 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           email,
           vaultUserId: `user-${email}`,
           deviceId: randomUUID(),
-          defaultCollectionId: connected ? 'col-1' : null,
           ...(connected
             ? sealVaultSecrets(sourceKey, id, {
                 refreshToken: `refresh-token-of-${email}`,
@@ -321,11 +320,22 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const oldVault = await vaultConnection(alice.accountId, 'old@example.com', false)
     const bobVault = await vaultConnection(bob.accountId, 'bob@example.com', true)
 
-    await credential({
+    const nas = await credential({
       identifier: 'nas',
       name: 'NAS',
-      source: { kind: 'hosted', values: { password: 'nas-pass', user: 'admin' } },
+      source: { kind: 'new', values: { password: 'nas-pass', user: 'admin' } },
+      expiresAt: '2030-01-01T00:00:00.000Z',
     })
+    // 到期时间与需要轮换随文件走
+    await ok(
+      send(
+        source,
+        'PATCH',
+        `/v1/spaces/${spaceId}/credentials/${nas.id}`,
+        { expectedVersion: 1, needsRotation: true },
+        cookie,
+      ),
+    )
     const mail = await vaultCredential(alice.accountId, aliceVault, 'mail', {
       name: '邮箱',
       appIds: [agent.id],
@@ -333,8 +343,19 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     const gone = await credential({
       identifier: 'gone',
       name: '删掉的',
-      source: { kind: 'hosted', values: { token: 'gone-token' } },
+      source: { kind: 'new', values: { token: 'gone-token' } },
     })
+    // 建好托管的凭据之后再给 alice 连着的那个连接设去处（设了之后新建的会写进密码库）
+    await withSpace(database.db, spaceId, (tx) =>
+      tx
+        .update(vaultConnections)
+        .set({
+          defaultCollectionId: 'col-1',
+          defaultOrganizationId: 'org-1',
+          defaultCollectionName: 'Agent',
+        })
+        .where(eq(vaultConnections.id, aliceVault)),
+    )
     await ok(
       send(
         source,
@@ -352,7 +373,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       {
         identifier: 'nas',
         name: 'bob 的 NAS',
-        source: { kind: 'hosted', values: { password: 'bob-secret-token' } },
+        source: { kind: 'new', values: { password: 'bob-secret-token' } },
       },
       bobCookie,
     )
@@ -759,11 +780,22 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       // 凭据：托管的值用新的主密钥解得开；占位符照样解析到导入人的凭据；限定的应用换成新的，删掉的应用去掉
       const credentialList = await get<ConsoleCredentialList>('/credentials')
       const newNas = credentialList.items.find((c) => c.identifier === 'nas')!
-      expect(newNas).toMatchObject({ source: 'hosted', referenceCount: 1, appIds: null })
+      expect(newNas).toMatchObject({
+        source: 'hosted',
+        referenceCount: 1,
+        appIds: null,
+        expiresAt: '2030-01-01T00:00:00.000Z',
+        rotationRequestedAt: expect.any(String),
+      })
       const connectionList = await get<VaultConnectionList>('/vault-connections')
-      expect(connectionList.items.map((v) => [v.email, v.status]).sort()).toEqual([
-        ['alice@example.com', 'disconnected'],
-        ['old@example.com', 'disconnected'],
+      // 去处随连接走：连接是断开的，重新登录同一个账号就接着用
+      expect(connectionList.items.map((v) => [v.email, v.status, v.destination]).sort()).toEqual([
+        [
+          'alice@example.com',
+          'disconnected',
+          { collectionId: 'col-1', organizationId: 'org-1', collectionName: 'Agent' },
+        ],
+        ['old@example.com', 'disconnected', null],
       ])
       const newVault = connectionList.items.find((v) => v.email === 'alice@example.com')!
       expect(credentialList.items.find((c) => c.identifier === 'mail')).toMatchObject({
@@ -1170,79 +1202,91 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(new Set(events.map((e) => e.type))).toEqual(new Set(['import']))
   })
 
-  it('导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 4，凭据改版之前的 1、2、3 与更新的格式都拒收', async () => {
-    const alice = await bootstrap(source, 'alice')
-    const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
-    const cookie = { cookie: alice.cookie }
-    const mine = (spaceId: string, who = cookie) =>
-      ok<DreamMemberSettings>(send(source, 'GET', `/v1/spaces/${spaceId}/me/dream`, undefined, who))
-    await ok(
-      send(
-        source,
-        'PUT',
-        `/v1/spaces/${alice.spaceId}/me/dream`,
-        { includePrivate: false },
-        cookie,
-      ),
-    )
-    // 别的成员的设置不进文件，也不影响导出人那一项
-    await ok(
-      send(
-        source,
-        'PUT',
-        `/v1/spaces/${alice.spaceId}/me/dream`,
-        { includePrivate: true },
-        { cookie: bob.cookie },
-      ),
-    )
-    const file = await exportSpace(source, alice.spaceId, alice.cookie)
-    expect((await contents(file)).header.exporter).toEqual({
-      displayName: 'alice',
-      dreamPrivate: false,
-    })
-    expect(
-      (await ok<SpaceImportPreview>(inspectRequest(source, alice.cookie, file))).exporter,
-    ).toEqual({ displayName: 'alice', dreamPrivate: false })
-    const imported = await ok<SpaceImportResult>(importRequest(source, alice.cookie, file), 201)
-    expect(await mine(imported.spaceId)).toEqual({ includePrivate: false })
+  it(
+    '导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 5，之前的 1 到 4 与更新的格式都拒收',
+    { timeout: 30_000 },
+    async () => {
+      const alice = await bootstrap(source, 'alice')
+      const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
+      const cookie = { cookie: alice.cookie }
+      const mine = (spaceId: string, who = cookie) =>
+        ok<DreamMemberSettings>(
+          send(source, 'GET', `/v1/spaces/${spaceId}/me/dream`, undefined, who),
+        )
+      await ok(
+        send(
+          source,
+          'PUT',
+          `/v1/spaces/${alice.spaceId}/me/dream`,
+          { includePrivate: false },
+          cookie,
+        ),
+      )
+      // 别的成员的设置不进文件，也不影响导出人那一项
+      await ok(
+        send(
+          source,
+          'PUT',
+          `/v1/spaces/${alice.spaceId}/me/dream`,
+          { includePrivate: true },
+          { cookie: bob.cookie },
+        ),
+      )
+      const file = await exportSpace(source, alice.spaceId, alice.cookie)
+      expect((await contents(file)).header.exporter).toEqual({
+        displayName: 'alice',
+        dreamPrivate: false,
+      })
+      expect(
+        (await ok<SpaceImportPreview>(inspectRequest(source, alice.cookie, file))).exporter,
+      ).toEqual({ displayName: 'alice', dreamPrivate: false })
+      const imported = await ok<SpaceImportResult>(importRequest(source, alice.cookie, file), 201)
+      expect(await mine(imported.spaceId)).toEqual({ includePrivate: false })
 
-    // 打开之后再导出：文件里是开着的
-    await ok(
-      send(source, 'PUT', `/v1/spaces/${alice.spaceId}/me/dream`, { includePrivate: true }, cookie),
-    )
-    const reopened = await exportSpace(source, alice.spaceId, alice.cookie)
-    expect((await contents(reopened)).header.exporter.dreamPrivate).toBe(true)
-    const again = await ok<SpaceImportResult>(importRequest(source, alice.cookie, reopened), 201)
-    expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
+      // 打开之后再导出：文件里是开着的
+      await ok(
+        send(
+          source,
+          'PUT',
+          `/v1/spaces/${alice.spaceId}/me/dream`,
+          { includePrivate: true },
+          cookie,
+        ),
+      )
+      const reopened = await exportSpace(source, alice.spaceId, alice.cookie)
+      expect((await contents(reopened)).header.exporter.dreamPrivate).toBe(true)
+      const again = await ok<SpaceImportResult>(importRequest(source, alice.cookie, reopened), 201)
+      expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
 
-    // 文件里必须有这一项
-    expect((await contents(file)).header.version).toBe(4)
-    const missing = await importRequest(
-      source,
-      alice.cookie,
-      await craft([], { ...header(), exporter: { displayName: '漏了的人' } }),
-    )
-    expect(missing.status).toBe(400)
-    expect(((await missing.json()) as { error: string }).error).toContain(
-      '第 1 行 exporter.dreamPrivate',
-    )
-
-    // 记忆架构改版之前的格式（层、坐标与本人都不一样）、凭据改版之前的（凭据源）和认不得的更新的格式都拒收，
-    // 不悄悄丢掉或猜测内容
-    const before = await spaceCount()
-    for (const version of [1, 2, 3, 5]) {
-      const res = await inspectRequest(
+      // 文件里必须有这一项
+      expect((await contents(file)).header.version).toBe(5)
+      const missing = await importRequest(
         source,
         alice.cookie,
-        await craft([], { ...header(), version }),
+        await craft([], { ...header(), exporter: { displayName: '漏了的人' } }),
       )
-      expect(res.status).toBe(400)
-      expect(((await res.json()) as { error: string }).error).toBe(
-        `导出文件的格式版本是 ${version}，当前 Kioku 只支持 4。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+      expect(missing.status).toBe(400)
+      expect(((await missing.json()) as { error: string }).error).toContain(
+        '第 1 行 exporter.dreamPrivate',
       )
-    }
-    expect(await spaceCount()).toBe(before)
-  })
+
+      // 记忆架构改版之前的格式（层、坐标与本人都不一样）、凭据改版之前的（凭据源）和认不得的更新的格式都拒收，
+      // 不悄悄丢掉或猜测内容
+      const before = await spaceCount()
+      for (const version of [1, 2, 3, 4, 6]) {
+        const res = await inspectRequest(
+          source,
+          alice.cookie,
+          await craft([], { ...header(), version }),
+        )
+        expect(res.status).toBe(400)
+        expect(((await res.json()) as { error: string }).error).toBe(
+          `导出文件的格式版本是 ${version}，当前 Kioku 只支持 5。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+        )
+      }
+      expect(await spaceCount()).toBe(before)
+    },
+  )
 
   it('只有空间 owner 能导出，只有实例管理员能导入', async () => {
     const alice = await bootstrap(source, 'alice')
@@ -1690,7 +1734,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           serverUrl: 'https://vault.example.com',
           email: 'agent@example.com',
           vaultUserId: 'user-1',
-          defaultCollectionId: null,
+          destination: null,
           createdAt: now,
           updatedAt: now,
         },
@@ -1707,6 +1751,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
             fields: [{ name: 'password', itemField: 'field:pass\ud800word' }],
           },
           appIds: null,
+          expiresAt: null,
+          rotationRequestedAt: null,
           createdAt: now,
           updatedAt: now,
         },
@@ -1724,7 +1770,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       serverUrl,
       email,
       vaultUserId: 'user-1',
-      defaultCollectionId: null,
+      destination: null,
       createdAt: now,
       updatedAt: now,
     })
@@ -1763,7 +1809,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         serverUrl: 'https://vault.example.com',
         email: 'agent@example.com',
         vaultUserId: 'user-1',
-        defaultCollectionId: null,
+        destination: null,
         createdAt: now,
         updatedAt: now,
       },
@@ -1775,6 +1821,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         description: null,
         source: { kind: 'vault', connectionId: connection, itemId: 'item-1', fields },
         appIds: null,
+        expiresAt: null,
+        rotationRequestedAt: null,
         createdAt: now,
         updatedAt: now,
       },
@@ -1855,7 +1903,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           source,
           'POST',
           `/v1/spaces/${space}/credentials`,
-          { identifier: 'nas', name: 'NAS', source: { kind: 'hosted', values: { password: 'p' } } },
+          { identifier: 'nas', name: 'NAS', source: { kind: 'new', values: { password: 'p' } } },
           cookie,
         ),
         201,
@@ -2277,7 +2325,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         source,
         'POST',
         `/v1/spaces/${alice.spaceId}/credentials`,
-        { identifier: 'nas', name: 'NAS', source: { kind: 'hosted', values: { password: 'pw' } } },
+        { identifier: 'nas', name: 'NAS', source: { kind: 'new', values: { password: 'pw' } } },
         { cookie: alice.cookie },
       ),
       201,

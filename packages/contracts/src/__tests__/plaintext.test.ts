@@ -417,11 +417,11 @@ describe('规则只用 PostgreSQL 也认的写法', () => {
 })
 
 describe('转存为凭据的请求', () => {
-  const hosted = { kind: 'hosted', identifier: 'wifi', name: '无线网络', field: 'password' }
+  const created = { kind: 'new', identifier: 'wifi', name: '无线网络', field: 'password' }
   const base = {
     memoryId: '00000000-0000-4000-8000-000000000000',
     expectedVersion: 1,
-    target: hosted,
+    target: created,
   }
   const issue = (value: string) => {
     const parsed = ConvertToCredentialRequest.safeParse({ ...base, value })
@@ -430,17 +430,19 @@ describe('转存为凭据的请求', () => {
   const parsed = (target: Record<string, unknown>, value = 'hunter2') =>
     ConvertToCredentialRequest.safeParse({ ...base, value, target })
 
-  it('标识、名称、说明与字段名里不能有这个值：它们都是明文', () => {
+  it('标识、名称、说明、字段名与网址里不能有这个值：它们都是明文', () => {
     const value = 'hunter2'
-    expect(parsed(hosted).success).toBe(true)
-    expect(parsed({ ...hosted, description: null }).success).toBe(true)
+    expect(parsed(created).success).toBe(true)
+    expect(parsed({ ...created, description: null }).success).toBe(true)
+    expect(parsed({ ...created, url: 'https://wifi.example.com' }).success).toBe(true)
     for (const extra of [
       { identifier: 'hunter2-box' },
       { name: '密码 hunter2' },
       { description: '值是 hunter2' },
       { field: 'hunter2' },
+      { url: 'https://example.com/?p=hunter2' },
     ]) {
-      const result = parsed({ ...hosted, ...extra })
+      const result = parsed({ ...created, ...extra })
       expect(result.success, JSON.stringify(extra)).toBe(false)
       expect(result.error!.issues[0]!.message).not.toContain(value)
     }

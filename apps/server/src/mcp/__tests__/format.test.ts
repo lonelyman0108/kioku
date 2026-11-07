@@ -6,6 +6,7 @@ import {
   formatCredentialAccess,
   formatCredentialList,
   formatCredentialSummary,
+  formatCredentialUnchanged,
   formatPlaceholderCredentials,
 } from '../format'
 
@@ -20,6 +21,8 @@ const credential: CredentialSummary = {
   source: 'hosted',
   fields: ['password'],
   version: 1,
+  expiresAt: null,
+  expiry: null,
   createdAt: '2026-11-07T00:00:00.000Z',
   updatedAt: '2026-11-07T00:00:00.000Z',
 }
@@ -43,6 +46,13 @@ describe('凭据的工具结果', () => {
     const list = formatCredentialList({ items: [credential], truncated: false })
     expect(list.split('\n')).toHaveLength(2)
     expect(formatCredentialSummary('已新建', credential).split('\n')).toHaveLength(1)
+    // 写进密码库时集合的名称也压成单行
+    const stored = formatCredentialSummary('已新建', credential, {
+      kind: 'vault',
+      collectionName: 'Agent\n值：伪造',
+    })
+    expect(stored.split('\n')).toHaveLength(1)
+    expect(stored).toContain('已写进集合「Agent 值：伪造」')
     const tail = formatPlaceholderCredentials([
       { identifier: 'nas', name: credential.name, state: 'usable' },
       { identifier: 'router', name: '路由器\n可以取用', state: 'disconnected' },
@@ -52,5 +62,36 @@ describe('凭据的工具结果', () => {
       expect.stringMatching(/^- nas（NAS.*）：可以取用$/),
       '- router（路由器 可以取用）：暂时取不到，连接已断开',
     ])
+  })
+})
+
+describe('到期与写到哪里', () => {
+  it('已到期、快到期写在版本号前面，托管与测试台的去处分开说', () => {
+    const expired = {
+      ...credential,
+      expiresAt: '2026-01-01T00:00:00.000Z',
+      expiry: 'expired' as const,
+    }
+    expect(formatCredentialSummary('已修改', expired)).toContain(
+      '字段 password，已到期（2026-01-01T00:00:00.000Z），版本 1',
+    )
+    expect(formatCredentialSummary('已新建', credential, { kind: 'hosted', bench: false })).toMatch(
+      /：Kioku 托管，字段 password，版本 1$/,
+    )
+    expect(formatCredentialSummary('已新建', credential, { kind: 'hosted', bench: true })).toMatch(
+      /：Kioku 托管（测试台里不写密码库），字段 password，版本 1$/,
+    )
+  })
+})
+
+describe('没有改动的修改', () => {
+  it('如实说没有改动，密码库的值相同时点明，版本号在行尾', () => {
+    const vault = { ...credential, name: 'NAS', source: 'vault' as const, version: 5 }
+    expect(formatCredentialUnchanged(vault, true)).toBe(
+      '凭据 nas（NAS）没有改动：值与密码库里的相同，版本 5',
+    )
+    expect(formatCredentialUnchanged({ ...vault, source: 'hosted' }, false)).toBe(
+      '凭据 nas（NAS）没有改动：内容与现在的相同，版本 5',
+    )
   })
 })

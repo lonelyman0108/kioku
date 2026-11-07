@@ -13,13 +13,29 @@ import {
 } from '../credential/bitwarden/types'
 
 // 测试用的密码库客户端：账号、条目与组织都在内存里，能按需模拟各种 VaultError，
-// 每次新建的会话第一次调用时、以及每次 snapshot() 都同步一次（触发 onSynced），也能让会话换一次刷新令牌（触发 onSecretsChanged）
+// 每次新建的会话第一次调用时、以及每次 snapshot() 都同步一次（触发 onSynced），也能让会话换一次刷新令牌（触发 onSecretsChanged）。
+// 写入照真的客户端的约定：每次改动条目的修改时间往后走；目标集合只读或不在集合列表里报 read_only；
+// 修改时期望的修改时间对不上报 item_conflict；写不认识的字段（含 login.totp）报 unsupported_format；
+// 改密码与隐藏字段时旧值进条目的密码历史；值超过 maxValueLength 时报 value_too_long；值都没变时不改、修改时间不动
 
 export interface FakeVaultItem {
   id?: string
   name: string
   type?: VaultItemType
   values: Record<string, string>
+  collectionId?: string
+}
+
+// 条目在假密码库里的样子：修改时间、所在集合、网址与密码历史（被改掉的密码与隐藏字段的旧值）
+interface StoredItem {
+  id: string
+  name: string
+  type: VaultItemType
+  values: Record<string, string>
+  collectionId: string
+  revisionDate: string
+  uris: { uri: string; autofill: boolean }[]
+  history: { field: string; value: string }[]
 }
 
 interface FakeAccount {
@@ -33,7 +49,10 @@ export interface FakeVault {
   addAccount(email: string, password: string, twoFactor?: FakeAccount['twoFactor']): string
   addItem(item: FakeVaultItem): string
   removeItem(id: string): void
+  // 在别处（浏览器里）改了条目：值整个换掉，修改时间往后走
   setItemValues(id: string, values: Record<string, string>): void
+  // 条目现在的样子（核对写回用）
+  stored(id: string): StoredItem | undefined
   // 下一次会话调用（snapshot 或 item）以这个错误失败
   failNext(kind: VaultErrorKind): void
   // 下一次会话调用之前先同步一次（像换了访问令牌）
@@ -64,22 +83,59 @@ export interface FakeVault {
     revokeAfterRotate: boolean
     // 同步之后不交给 onSynced：模拟没有在 onSynced 里检查的客户端
     skipOnSynced: boolean
+    // 账号读得到的集合：readOnly 的写不进去
+    collections: { id: string; name: string; readOnly: boolean }[]
+    // 写入时单个值的长度上限：超了报 value_too_long；null 不限
+    maxValueLength: number | null
+    // 每次写入（createItem、updateItem）之前调用一次（用完就清掉）：测试用它模拟写入期间的并发
+    beforeWrite: (() => Promise<void>) | null
   }
-  calls: { login: number; snapshot: number; item: number; items: number; sessions: number }
+  calls: {
+    login: number
+    snapshot: number
+    item: number
+    items: number
+    sessions: number
+    createItem: number
+    updateItem: number
+  }
   // 每个会话最近一次用的刷新令牌
   refreshTokens: string[]
 }
 
-const ORG = 'org-1'
-const COLLECTION = 'col-1'
+export const FAKE_ORG = 'org-1'
+export const FAKE_COLLECTION = 'col-1'
+const ORG = FAKE_ORG
+const COLLECTION = FAKE_COLLECTION
+
+// 客户端写得进去的字段：用户名、密码、备注与自定义字段（写成隐藏字段）
+const writable = (ref: string) =>
+  ref === 'login.username' ||
+  ref === 'login.password' ||
+  ref === 'notes' ||
+  ref.startsWith('field:')
+// 改了值时旧值进密码历史的字段：密码与隐藏字段（同官方客户端）
+const historied = (ref: string) => ref === 'login.password' || ref.startsWith('field:')
+// 写入的错误种类里有客户端新加的 value_too_long
+const VALUE_TOO_LONG = 'value_too_long' as VaultErrorKind
 
 export function fakeVault(): FakeVault {
   const accounts = new Map<string, FakeAccount>()
-  const items = new Map<string, Required<FakeVaultItem>>()
+  const items = new Map<string, StoredItem>()
   let failure: VaultErrorKind | null = null
   let pendingSync = false
   let pendingRotate = false
-  const calls = { login: 0, snapshot: 0, item: 0, items: 0, sessions: 0 }
+  let clock = Date.parse('2026-11-01T00:00:00.000Z')
+  const nextRevision = () => new Date((clock += 1000)).toISOString()
+  const calls = {
+    login: 0,
+    snapshot: 0,
+    item: 0,
+    items: 0,
+    sessions: 0,
+    createItem: 0,
+    updateItem: 0,
+  }
   const refreshTokens: string[] = []
   const revoked = new Set<string>()
   const state: FakeVault['state'] = {
@@ -92,22 +148,25 @@ export function fakeVault(): FakeVault {
     beforeLogin: null,
     revokeAfterRotate: false,
     skipOnSynced: false,
+    collections: [{ id: COLLECTION, name: 'Agent', readOnly: false }],
+    maxValueLength: null,
+    beforeWrite: null,
   }
 
-  const summary = (item: Required<FakeVaultItem>) => ({
+  const summary = (item: StoredItem) => ({
     id: item.id,
     organizationId: ORG,
-    collectionIds: [COLLECTION],
+    collectionIds: [item.collectionId],
     name: item.name,
     type: item.type,
     fields: Object.keys(item.values).filter((k) => item.values[k] !== ''),
-    revisionDate: '2026-11-01T00:00:00.000Z',
+    revisionDate: item.revisionDate,
   })
 
   const snapshot = (email: string, userId: string): VaultSnapshot => ({
     account: { userId, email },
     organizations: state.organizations,
-    collections: [{ id: COLLECTION, organizationId: ORG, name: 'Agent' }],
+    collections: state.collections.map((c) => ({ ...c, organizationId: ORG })),
     personalItemCount: state.personalItemCount,
     items: [...items.values()].map(summary),
     unreadableItemCount: state.unreadableItemCount,
@@ -210,8 +269,71 @@ export function fakeVault(): FakeVault {
             values: { ...item.values },
           }))
         },
+        async createItem(input): Promise<VaultItem> {
+          calls.createItem++
+          await beforeWrite()
+          await prelude()
+          checkWrite(input.collectionId, input.values)
+          const id = randomUUID()
+          const item: StoredItem = {
+            id,
+            name: input.name,
+            type: input.type,
+            values: { ...input.values },
+            collectionId: input.collectionId,
+            revisionDate: nextRevision(),
+            uris: input.uris ? [...input.uris] : [],
+            history: [],
+          }
+          items.set(id, item)
+          return { ...summary(item), values: { ...item.values } }
+        },
+        async updateItem(id, changes, expectedRevisionDate): Promise<VaultItem> {
+          calls.updateItem++
+          await beforeWrite()
+          await prelude()
+          const item = items.get(id)
+          if (!item) throw new VaultError('item_unavailable', '条目不可用')
+          if (item.revisionDate !== expectedRevisionDate) {
+            throw new VaultError('item_conflict', '条目已在别处修改')
+          }
+          checkWrite(item.collectionId, changes.values ?? {})
+          // 和真的客户端一样，值都和原来相同时不发修改：原样返回，修改时间不变
+          const same =
+            Object.entries(changes.values ?? {}).every(([ref, v]) => item.values[ref] === v) &&
+            (changes.name === undefined || changes.name === item.name)
+          if (same) return { ...summary(item), values: { ...item.values } }
+          for (const [ref, value] of Object.entries(changes.values ?? {})) {
+            const old = item.values[ref]
+            if (historied(ref) && old !== undefined && old !== '' && old !== value) {
+              item.history.push({ field: ref, value: old })
+            }
+            item.values[ref] = value
+          }
+          if (changes.name !== undefined) item.name = changes.name
+          item.revisionDate = nextRevision()
+          return { ...summary(item), values: { ...item.values } }
+        },
       }
     },
+  }
+
+  async function beforeWrite() {
+    const hook = state.beforeWrite
+    state.beforeWrite = null
+    await hook?.()
+  }
+
+  // 写入前的检查，和真的客户端同一个顺序：集合能不能写、字段认不认得、值长不长
+  function checkWrite(collectionId: string, values: Record<string, string>) {
+    const collection = state.collections.find((c) => c.id === collectionId)
+    if (!collection || collection.readOnly) throw new VaultError('read_only', '集合只读或不可用')
+    for (const [ref, value] of Object.entries(values)) {
+      if (!writable(ref)) throw new VaultError('unsupported_format', '不支持写入这个字段')
+      if (state.maxValueLength !== null && value.length > state.maxValueLength) {
+        throw new VaultError(VALUE_TOO_LONG, '值超出密码库的长度上限')
+      }
+    }
   }
 
   return {
@@ -223,7 +345,16 @@ export function fakeVault(): FakeVault {
     },
     addItem(item) {
       const id = item.id ?? randomUUID()
-      items.set(id, { id, name: item.name, type: item.type ?? 'login', values: item.values })
+      items.set(id, {
+        id,
+        name: item.name,
+        type: item.type ?? 'login',
+        values: { ...item.values },
+        collectionId: item.collectionId ?? COLLECTION,
+        revisionDate: nextRevision(),
+        uris: [],
+        history: [],
+      })
       return id
     },
     removeItem(id) {
@@ -231,7 +362,13 @@ export function fakeVault(): FakeVault {
     },
     setItemValues(id, values) {
       const item = items.get(id)
-      if (item) item.values = values
+      if (item) {
+        item.values = { ...values }
+        item.revisionDate = nextRevision()
+      }
+    },
+    stored(id) {
+      return items.get(id)
     },
     failNext(kind) {
       failure = kind

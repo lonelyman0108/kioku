@@ -5,12 +5,14 @@ import { useRoute } from 'vue-router'
 
 import DreamSuggestions from '../components/DreamSuggestions.vue'
 import InboxBindings from '../components/InboxBindings.vue'
+import InboxCredentials from '../components/InboxCredentials.vue'
 import InboxPlaintext from '../components/InboxPlaintext.vue'
 import InboxReview from '../components/InboxReview.vue'
 import { useInboxCounts } from '../composables/useInboxCounts'
 import { useInboxTab } from '../composables/useInboxTab'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
+import { canManageCredentials } from '../vault'
 import {
   INBOX_TABS,
   actionableInboxCount,
@@ -26,6 +28,7 @@ const queryClient = useQueryClient()
 const { space } = useSession()
 const spaceId = computed(() => String(route.params.spaceId))
 const canAct = computed(() => space.value?.role === 'owner' || space.value?.role === 'editor')
+const canManageCredential = computed(() => canManageCredentials(space.value?.role))
 
 const counts = useInboxCounts(spaceId)
 // 标题的大数字和导航角标、概览同一个口径：当前账号能处理的。角色读到之前不知道口径，先写「–」
@@ -87,6 +90,11 @@ watch(tab, () => {
           <InboxReview v-else-if="tab === 'review'" :space-id="spaceId" :can-act="canAct" />
           <DreamSuggestions v-else-if="tab === 'dream'" :space-id="spaceId" :can-act="canAct" />
           <InboxPlaintext v-else-if="tab === 'plaintext'" :space-id="spaceId" />
+          <InboxCredentials
+            v-else-if="tab === 'credential'"
+            :space-id="spaceId"
+            :can-act="canManageCredential"
+          />
         </KeepAlive>
       </section>
     </div>
@@ -208,7 +216,8 @@ watch(tab, () => {
   .inbox-tab:nth-child(odd) {
     border-right: 1px solid var(--ui-border);
   }
-  .inbox-tab:nth-child(-n + 2) {
+  /* 两列排开，最后一行之外都有下边线 */
+  .inbox-tab:not(:nth-last-child(-n + 2):nth-child(odd), :last-child) {
     border-bottom: 1px solid var(--ui-border);
   }
   .inbox-tab b {

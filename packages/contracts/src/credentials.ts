@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { BenchMark, DeletionRetention, EventActor } from './console'
+import { BenchMark, DeletionRetention, EventActor, PageQuery } from './console'
 import { ConsoleMemoryView } from './memories'
 import { SENSITIVITIES, Sensitivity, type Layer } from './memory'
 
@@ -646,23 +646,78 @@ export function defaultCredentialFields(refs: readonly string[]): CredentialFiel
   })
 }
 
+// ---- 到期与轮换 ----
+
+// 到期前这么多天起算「快到期」，进待处理
+export const CREDENTIAL_EXPIRING_DAYS = 7
+
+// 到期的状态，按服务端读出时的时间算：expiring 还没到期、离到期不到 CREDENTIAL_EXPIRING_DAYS 天（含正好 7 天）；
+// expired 已过到期时间（到期时间那一刻起算已到期）。没设到期时间、或者离到期还远的为 null。
+// 到期之后照常能取（上游不一定真的失效），取用的结果里注明已到期。
+// 判断有 SQL（待处理的条数与列表的筛选）与 JS（视图里的这个字段）两份，服务端的一致性测试逐条比对
+export const CREDENTIAL_EXPIRY_STATES = ['expiring', 'expired'] as const
+export const CredentialExpiry = z.enum(CREDENTIAL_EXPIRY_STATES)
+export type CredentialExpiry = z.infer<typeof CredentialExpiry>
+
+// 到期时间：带时区的 ISO 时间。可以设成已经过去的时间（记下一个已经到期的令牌）；null 表示不到期
+export const CredentialExpiresAt = z.iso
+  .datetime({ offset: true, message: '到期时间格式不正确' })
+  .refine((v) => {
+    const year = new Date(v).getUTCFullYear()
+    return year >= 2000 && year <= 9999
+  }, '到期时间超出范围')
+  .nullable()
+
+// 写进密码库条目的网址，只收 http:// 与 https://，不带空白与控制字符。
+// 登录类的条目按主机加端口匹配自动填充（Bitwarden 的「主机」匹配）；令牌类的条目照样记下网址，但不参与匹配，
+// 免得令牌被填进登录框。没有去处、由 Kioku 托管时网址不保存（托管的凭据没有网址）
+export const CREDENTIAL_URL_MAX = 2000
+export const CredentialUrl = z
+  .string()
+  .trim()
+  .max(CREDENTIAL_URL_MAX, `网址最多 ${CREDENTIAL_URL_MAX} 个字符`)
+  .refine((v) => /^https?:\/\/[^\s/?#]+[^\s]*$/i.test(v), '网址要以 http:// 或 https:// 开头')
+  .refine((v) => !CONTROL_CHARS.test(v), '网址不能包含控制字符')
+
+// 写进密码库的新条目里，这两个字段名写成登录条目的用户名与密码；字段里有其中一个就是登录类，
+// 否则是令牌类。别的字段名一律写成隐藏的自定义字段（field:<字段名>），包括 totp：
+// 条目里的 TOTP 密钥（login.totp）不由 Kioku 写，名为 totp 的字段和托管的一样，取用时给原值
+export const VAULT_LOGIN_FIELD_NAMES = {
+  username: 'login.username',
+  password: 'login.password',
+} as const
+
+// 新建的凭据写到了哪里。hosted：Kioku 托管，没设去处，或者在测试台里（bench 为 true：测试台不写密码库，
+// 回滚模式撤不回外部服务里的写入）；vault：写成了去处集合里的新条目，collectionName 是写入时集合的名称。
+// 通过 Key 的响应也给它，所以不带连接与条目的 id（管理界面看 ConsoleCredential.vault）
+export const CredentialStoredIn = z.discriminatedUnion('kind', [
+  z.object({ kind: z.literal('hosted'), bench: z.boolean() }),
+  z.object({ kind: z.literal('vault'), collectionName: z.string() }),
+])
+export type CredentialStoredIn = z.infer<typeof CredentialStoredIn>
+
 const CredentialBase = z.object({
   id: z.uuid(),
   identifier: z.string(),
   name: z.string(),
   description: z.string().nullable(),
   source: CredentialSource,
+  // 每次修改加一。密码库的凭据在 Kioku 看到条目的修改时间变了时（取用、列条目、写回）也加一：
+  // 值在别处改过，带着旧版本号的修改返回 409，要先重新读取
   version: z.number().int(),
+  // 到期时间与到期的状态，见 CredentialExpiry
+  expiresAt: z.string().nullable(),
+  expiry: CredentialExpiry.nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
 
-// 凭据的概况：标识、名称、说明、字段名与来源，不含值，也不含密码库的条目。
+// 凭据的概况：标识、名称、说明、字段名、来源与到期，不含值，也不含密码库的条目。
 // 通过 Key 列出、新建、修改与取用时给的都是它。标识、名称、说明与字段名都是明文，不要把值写进这些地方
 export const CredentialSummary = CredentialBase.extend({ fields: z.array(z.string()) })
 export type CredentialSummary = z.infer<typeof CredentialSummary>
 
-// 管理界面看到的：字段对应、指向的密码库条目、限定给哪些应用、删除时间与引用数
+// 管理界面看到的：字段对应、指向的密码库条目、限定给哪些应用、删除时间、引用数、轮换与改值的时间
 export const ConsoleCredential = CredentialBase.extend({
   fields: z.array(CredentialField),
   // 密码库来源指向的连接与条目；托管的为 null。条目的名称与取不取得到值看连接的条目列表
@@ -672,8 +727,19 @@ export const ConsoleCredential = CredentialBase.extend({
   deletedAt: z.string().nullable(),
   // 正文里引用这个标识的有效记忆数（不含 secret 的）；大于 0 时删不掉
   referenceCount: z.number().int(),
+  // 标了「需要轮换」的时间；没标的为 null。只在管理界面标与清除，访问密钥改不了。
+  // 值改过就自动清掉：托管的是值变了的那次修改，密码库的是 Kioku 看到条目的修改时间变了（取用、列条目、写回时）
+  rotationRequestedAt: z.string().nullable(),
+  // 上次改值的时间：托管的是新建或最近一次改了值的修改；密码库的是 Kioku 最近看到的条目修改时间，
+  // 起标识以来还没读到过条目时为 null。凭据详情据此列出上次改值以来的取用（CredentialEventQuery）
+  valueChangedAt: z.string().nullable(),
 })
 export type ConsoleCredential = z.infer<typeof ConsoleCredential>
+
+// 新建的结果：凭据与它写到了哪里。给已有的条目起标识时也给 vault，collectionName 是条目所在的集合：
+// 条目在几个集合里时，是去处的那个集合优先，否则按名称排在最前的那个
+export const CreatedCredential = ConsoleCredential.extend({ storedIn: CredentialStoredIn })
+export type CreatedCredential = z.infer<typeof CreatedCredential>
 
 export const ConsoleCredentialList = z.object({
   items: z.array(ConsoleCredential),
@@ -681,6 +747,13 @@ export const ConsoleCredentialList = z.object({
   truncated: z.boolean(),
 })
 export type ConsoleCredentialList = z.infer<typeof ConsoleCredentialList>
+
+// 列出凭据的筛选。attention=true 只列待处理的「凭据」一类：没删除、快到期、已到期或标了需要轮换的，
+// 和 InboxCounts.credentials 同一个条件。只有凭据的所有者看得到自己的，和列表本身一样
+export const CredentialListQuery = z.object({
+  attention: z.enum(['true']).optional(),
+})
+export type CredentialListQuery = z.infer<typeof CredentialListQuery>
 
 // 已删除的凭据：过了保留期按删除时间永久清除，见 DeletionRetention
 export const DeletedCredentialList = ConsoleCredentialList.extend({ retention: DeletionRetention })
@@ -732,13 +805,26 @@ export const VaultCredentialSource = z.object({
   fields: VaultCredentialFields.optional(),
 })
 
-// 管理界面新建时的来源：托管的给出全部字段的值，密码库的给出连接、条目与（可选的）字段对应
+// 新建一条带值的凭据：成员设了去处（VaultConnection.destination）时写成去处集合里的新条目，凭据的来源是 vault；
+// 没设时由 Kioku 托管。请求里不选去处（每个成员最多一个，agent 不用知道往哪写）。
+// 写进密码库时字段按 VAULT_LOGIN_FIELD_NAMES 对应，条目名称取凭据的名称；url 见 CredentialUrl。
+// 去处所在的连接不可用（需要重新登录、已停用、已断开、无法连接）、集合只读或不见了时整次失败，不退回托管：
+// 值落在哪里由去处决定，悄悄换地方会让人以为它在密码库里。
+// 测试台里一律托管（CredentialStoredIn 的 bench）
+export const NewCredentialSource = z.object({
+  kind: z.literal('new'),
+  values: HostedCredentialValues,
+  url: CredentialUrl.optional(),
+})
+
+// 管理界面新建时的来源：new 给出全部字段的值（写到去处或托管），vault 给已有的条目起标识（连接、条目与可选的字段对应）
 export const CredentialSourceInput = z.discriminatedUnion('kind', [
-  HostedCredentialSource,
+  NewCredentialSource,
   VaultCredentialSource,
 ])
 export type CredentialSourceInput = z.infer<typeof CredentialSourceInput>
 
+// 响应是 CreatedCredential
 export const CreateCredentialRequest = z.object({
   identifier: CredentialIdentifier,
   name: CredentialName,
@@ -746,10 +832,20 @@ export const CreateCredentialRequest = z.object({
   source: CredentialSourceInput,
   // 只给哪些应用用，不填表示不限定。只能在管理界面设：通过 Key 新建的只给这个应用用
   appIds: AppIds.optional(),
+  expiresAt: CredentialExpiresAt.optional(),
 })
 export type CreateCredentialRequest = z.infer<typeof CreateCredentialRequest>
 
-// 来源不能改：values 只给托管的，fields 只给密码库的，给错了返回 400。要换条目就删掉，再用同一个标识新建
+// 来源不能改，要换条目就删掉，再用同一个标识新建。fields 只给密码库的，给托管的返回 400；
+// fields 与 values 不能在同一次修改里一起给（values 按哪一份字段对应写会说不清），一起给时返回 400。
+// values：托管的照常改 Kioku 里的值；密码库的写回原条目（要空间所有者，通过 Key 要凭据能力「管理」），规则见下：
+// - 只改给了的字段，别的字段与 Kioku 不认识的内容原样带回；改密码时旧密码进条目的密码历史；
+// - 只能改字段对应里已有的字段，不能删字段（值为 null）、不能改对应到 login.totp 的字段，违反时返回 400；
+// - 条目在别处改过（Kioku 最近看到的修改时间对不上）返回 409，说明要先重新读取，不覆盖；
+// - 条目所在的集合只读返回 409（和别的连接、条目状态的问题一样是 409，不用 403：403 留给 Kioku 自己的权限）；
+// - 测试台里返回 400，不写密码库。
+// 值变了就清掉「需要轮换」。什么都没改时（给的值与现在的相同、别的部分也没变；密码库的值相同时客户端不发修改）
+// 不升版本、不记事件：响应的 version 等于 expectedVersion，调用方据此知道没有改动
 export const UpdateCredentialRequest = z.object({
   // 界面上看到的版本号，期间被改过就返回 409
   expectedVersion: z.number().int(),
@@ -760,6 +856,10 @@ export const UpdateCredentialRequest = z.object({
   fields: VaultCredentialFields.optional(),
   // 只能在管理界面改：被诱导的 agent 不能给自己放宽
   appIds: AppIds.optional(),
+  // null 清掉到期时间
+  expiresAt: CredentialExpiresAt.optional(),
+  // 标或清除「需要轮换」，只能在管理界面改。已经标着时再标不改标记的时间
+  needsRotation: z.boolean().optional(),
 })
 export type UpdateCredentialRequest = z.infer<typeof UpdateCredentialRequest>
 
@@ -822,7 +922,10 @@ export const CredentialValueMatches = z.object({
 export type CredentialValueMatches = z.infer<typeof CredentialValueMatches>
 
 // 转存的去处。
-// hosted：新建一条 Kioku 托管的凭据，值存在 field 这个字段里。
+// new：新建一条凭据，值存在 field 这个字段里。和 NewCredentialSource 一样：设了去处时写成去处集合里的新条目
+// （field 是 username、password 时写成登录条目，别的写成隐藏的自定义字段），没设时由 Kioku 托管；
+// 去处不可用时整次失败，不退回托管。写进密码库在事务之前做完，之后的事务失败时条目留在密码库里，
+// 错误体带上它（CredentialWriteError.vaultItem），界面据此提示：可以在凭据页给它起标识，或者到密码库里删掉。
 // credential：换成当前账号一条已有凭据的 field 字段（托管或密码库来源都行）。
 // vault：给当前账号连接里还没起标识的条目起标识，换成 itemField 对应的字段。字段对应不给时按条目里现有的字段推出
 // （defaultCredentialFields），给了要包含 itemField；名称不给时用条目的名称。条目已经有凭据时返回 409，改用 credential。
@@ -830,11 +933,13 @@ export type CredentialValueMatches = z.infer<typeof CredentialValueMatches>
 // 转存会把值从历史里抹掉，绑错了就找不回来
 export const ConvertTarget = z.discriminatedUnion('kind', [
   z.object({
-    kind: z.literal('hosted'),
+    kind: z.literal('new'),
     identifier: CredentialIdentifier,
     name: CredentialName,
     description: CredentialDescription.optional(),
     field: CredentialFieldName,
+    url: CredentialUrl.optional(),
+    expiresAt: CredentialExpiresAt.optional(),
   }),
   z.object({
     kind: z.literal('credential'),
@@ -862,8 +967,14 @@ export type ConvertTarget = z.infer<typeof ConvertTarget>
 // 去处里写成明文的部分：标识、名称、说明与字段名（密码库的再加上条目字段）
 function convertTargetTexts(target: ConvertTarget): string[] {
   switch (target.kind) {
-    case 'hosted':
-      return [target.identifier, target.name, target.description ?? '', target.field]
+    case 'new':
+      return [
+        target.identifier,
+        target.name,
+        target.description ?? '',
+        target.field,
+        target.url ?? '',
+      ]
     case 'credential':
       return [target.field]
     case 'vault':
@@ -890,17 +1001,19 @@ export const ConvertToCredentialRequest = z
   // 用条目名称作名称时（vault 没给 name）由服务端再查一次
   .refine((r) => !convertTargetTexts(r.target).some((t) => t.includes(r.value)), {
     path: ['value'],
-    message: '标识、名称、说明与字段名不能包含要转存的值',
+    message: '标识、名称、说明、字段名与网址不能包含要转存的值',
   })
 export type ConvertToCredentialRequest = z.infer<typeof ConvertToCredentialRequest>
 
 // 转存的结果，不含值
 export const ConvertedToCredential = z.object({
   memory: ConsoleMemoryView,
-  // 正文里引用的凭据：新建的（hosted、vault）或已有的（credential）
+  // 正文里引用的凭据：新建的（new、vault）或已有的（credential）
   credential: ConsoleCredential,
   // 这次是不是新建了凭据
   created: z.boolean(),
+  // 去处是 new 时，新凭据写到了哪里；起标识与用已有凭据时为 null（值本来就在那里）
+  storedIn: CredentialStoredIn.nullable(),
   // 占位符里用的字段名：{{cred:<credential.identifier>#<field>}}
   field: z.string(),
   // 正文里换掉了几处
@@ -915,24 +1028,72 @@ export const ConvertedToCredential = z.object({
 })
 export type ConvertedToCredential = z.infer<typeof ConvertedToCredential>
 
-// 通过 Key 新建：只收托管的值，只给这个应用用
+// 通过 Key 新建（kioku_credential_save 与 REST）：只给这个应用用。写到哪里同 NewCredentialSource：
+// 设了去处写进密码库，没设由 Kioku 托管，请求里不选。响应是 KeyCreatedCredential
 export const KeyCreateCredentialRequest = z.object({
   identifier: CredentialIdentifier,
   name: CredentialName,
   description: CredentialDescription.optional(),
   values: HostedCredentialValues,
+  url: CredentialUrl.optional(),
+  expiresAt: CredentialExpiresAt.optional(),
 })
 export type KeyCreateCredentialRequest = z.infer<typeof KeyCreateCredentialRequest>
 
-// 通过 Key 修改：按标识找凭据，不能改字段对应与限定的应用；values 只对托管的凭据有效
+export const KeyCreatedCredential = CredentialSummary.extend({ storedIn: CredentialStoredIn })
+export type KeyCreatedCredential = z.infer<typeof KeyCreatedCredential>
+
+// 通过 Key 修改：按标识找凭据，不能改字段对应、限定的应用与「需要轮换」。
+// values 对托管的改 Kioku 里的值，对密码库的写回原条目，规则同 UpdateCredentialRequest（测试台里改密码库的值返回 400）。
+// 什么都没改时版本号不变，kioku_credential_save 据此回「没有改动」
 export const KeyUpdateCredentialRequest = z.object({
   identifier: CredentialIdentifier,
   expectedVersion: z.number().int(),
   name: CredentialName.optional(),
   description: CredentialDescription.optional(),
   values: HostedCredentialValuesUpdate.optional(),
+  // null 清掉到期时间
+  expiresAt: CredentialExpiresAt.optional(),
 })
 export type KeyUpdateCredentialRequest = z.infer<typeof KeyUpdateCredentialRequest>
+
+// 写进密码库之后，Kioku 自己的事务失败了（例如期间别的请求用掉了同一个标识）：条目已经在集合里，不撤回
+// （删条目又是一次外部写入，也可能失败）。新建与转存的错误体带上它，界面据此提示到凭据页给它起标识、或到密码库里删掉
+export const OrphanVaultItem = z.object({
+  connectionId: z.uuid(),
+  itemId: z.string(),
+  itemName: z.string(),
+  collectionName: z.string(),
+})
+export type OrphanVaultItem = z.infer<typeof OrphanVaultItem>
+
+// 写入（新建、修改、转存）失败的原因，界面据此给出不同的下一步：
+// version 读到之后被别的请求改过（凭据或记忆的版本号），重新读取再改；item_conflict 条目在别处改过，重新读取凭据再改；
+// read_only 集合只读或不可用，重新读取没有用，要改专用账号的权限或换去处；value_too_long 值超出密码库的长度上限（400），
+// 缩短值，或清除去处改由 Kioku 托管；deleted 写回的值已经写进密码库，凭据却在这期间被删了（409，
+// 写入照样记在被删的那一行，恢复之后状态是对的）。
+// 写回时值已经写进密码库、凭据却在这期间被别处改过的，也是 version：值记下了，名称、说明、到期时间、
+// 限定的应用、需要轮换这些别的改动没有保存，文字里说明。别的错误不带原因
+export const CREDENTIAL_WRITE_REASONS = [
+  'version',
+  'item_conflict',
+  'read_only',
+  'value_too_long',
+  'deleted',
+] as const
+export const CredentialWriteReason = z.enum(CREDENTIAL_WRITE_REASONS)
+export type CredentialWriteReason = z.infer<typeof CredentialWriteReason>
+
+// 凭据新建、修改与转存的错误体：error 之外，有上面的原因时带 reason（Key 的错误体也带）；
+// 管理界面里写进了密码库却没建成凭据时带 vaultItem。
+// 通过 Key 的错误体不带它（Key 的响应里没有连接与条目的 id），只在 error 的文字里写明集合与条目的名称、
+// 要所有者在管理界面给它起标识：agent 照原样重试会在集合里再建一个
+export const CredentialWriteError = z.object({
+  error: z.string(),
+  reason: CredentialWriteReason.optional(),
+  vaultItem: OrphanVaultItem.optional(),
+})
+export type CredentialWriteError = z.infer<typeof CredentialWriteError>
 
 // 取用时说明的用途，记进访问事件。只有空白的当作没给
 export const CREDENTIAL_PURPOSE_MAX = 200
@@ -971,9 +1132,12 @@ export const ResolveCredentialsRequest = z.object({
 })
 export type ResolveCredentialsRequest = z.infer<typeof ResolveCredentialsRequest>
 
-// 要么全给，要么一个都不给：任何一项取不到时整次失败，返回错误
+// 要么全给，要么一个都不给：任何一项取不到时整次失败，返回错误。
+// expired：这次取到的凭据里已到期的（到期时间已过，见 CredentialExpiry），值照常给，kioku run 据此提示；
+// 一条凭据只列一次，顺序同标识在 refs 里第一次出现的顺序，没有时为空数组
 export const ResolvedCredentials = z.object({
   values: z.array(CredentialFieldRef.extend({ value: z.string() })),
+  expired: z.array(z.object({ identifier: z.string(), expiresAt: z.string() })),
 })
 export type ResolvedCredentials = z.infer<typeof ResolvedCredentials>
 
@@ -1003,7 +1167,8 @@ export const CredentialValues = z.object({ values: z.record(z.string(), z.string
 export type CredentialValues = z.infer<typeof CredentialValues>
 
 // 通过 Key 取用一条凭据：概况、值与提醒。totp 给的是现算的验证码，不是条目里的密钥。
-// 测试台里取用一律不给值，values 为 null；真实的调用总有值，取不到时返回错误
+// 测试台里取用一律不给值，values 为 null；真实的调用总有值，取不到时返回错误。
+// 已到期的照常给值，credential.expiry 为 expired，notice 里注明
 export const CredentialAccess = z.object({
   credential: CredentialSummary,
   values: z.record(z.string(), z.string()).nullable(),
@@ -1045,7 +1210,9 @@ export const CREDENTIAL_ACCESS_REASONS = [
 export const CredentialAccessReason = z.enum(CREDENTIAL_ACCESS_REASONS)
 export type CredentialAccessReason = z.infer<typeof CredentialAccessReason>
 
-// 事件类型：create、update、delete、undelete、access（交出值、被拒或失败，包括管理界面查看与随空间导出）
+// 事件类型：create、update、delete、undelete、access（交出值、被拒或失败，包括管理界面查看与随空间导出）。
+// 访问事件记下这次取用时值的版本：托管的是凭据当时的值版本（最近一次改了值的那次修改的版本号），
+// 密码库的是读到的条目修改时间；被拒、失败没读到值的不记。这些只在服务端比较，视图里给出比较的结果 sinceValueChange
 export const CredentialEvent = z.object({
   id: z.number().int(),
   type: z.string(),
@@ -1062,8 +1229,13 @@ export const CredentialEvent = z.object({
   reason: CredentialAccessReason.nullable(),
   // 通过 Key 取用时的会话上下文（chatType，不带会话上下文的为 none）；管理界面里的与其他事件为 null
   chatType: z.string().nullable(),
-  // 修改了哪些部分：name、description、values、fields、appIds
+  // 修改了哪些部分：name、description、values、fields、appIds、expiresAt、needsRotation。
+  // 密码库凭据的 values 是写回了条目；Kioku 看到条目在别处改过不记事件（值不经过 Kioku）
   changes: z.array(z.string()),
+  // 访问事件交出的是不是现在的值：结果为 ok、记下的值版本等于凭据现在的（托管的值版本，或密码库的
+  // ConsoleCredential.valueChangedAt 对应的条目修改时间）时为 true，旧的值为 false；
+  // 被拒、失败、没记下值版本的与其他事件为 null。值可能泄露时据此看影响到哪些应用
+  sinceValueChange: z.boolean().nullable(),
   // 测试台写下的：真实客户端写的为 null
   bench: BenchMark.nullable(),
 })
@@ -1074,6 +1246,13 @@ export const CredentialEventList = z.object({
   nextCursor: z.string().nullable(),
 })
 export type CredentialEventList = z.infer<typeof CredentialEventList>
+
+// 访问记录的筛选：sinceValueChange=true 只列 sinceValueChange 为 true 的访问事件（上次改值以来交出的），
+// 不给时列全部事件。按 id 倒序翻页，cursor 和筛选一起换
+export const CredentialEventQuery = PageQuery.extend({
+  sinceValueChange: z.enum(['true']).optional(),
+})
+export type CredentialEventQuery = z.infer<typeof CredentialEventQuery>
 
 // ---- 密码库连接 ----
 
@@ -1101,6 +1280,10 @@ export const VAULT_ERROR_KINDS = [
   'unsupported_two_factor',
   'reauth_required',
   'item_unavailable',
+  'read_only',
+  'item_conflict',
+  // 写入时值加密之后超出密码库的长度上限（客户端发请求之前检查），只在写回时出现
+  'value_too_long',
   'unsupported_format',
   'integrity',
   'unreachable',
@@ -1118,6 +1301,31 @@ export const VAULT_ITEM_TYPES = ['login', 'note', 'card', 'identity', 'ssh_key']
 export const VaultItemType = z.enum(VAULT_ITEM_TYPES)
 export type VaultItemType = z.infer<typeof VaultItemType>
 
+// 账号读得到的一个集合。readOnly：这个账号在集合里只能看，不能新建或修改条目，不能设为去处
+export const VaultCollection = z.object({
+  id: z.string(),
+  organizationId: z.string(),
+  name: z.string(),
+  readOnly: z.boolean(),
+})
+export type VaultCollection = z.infer<typeof VaultCollection>
+
+// 集合的 id（Bitwarden 与 Vaultwarden 都是 uuid），写法同条目的 id
+export const VaultCollectionId = z
+  .string()
+  .regex(/^[0-9A-Za-z-]{1,64}$/, '集合 id 只能包含字母、数字与 -，最长 64 个字符')
+
+// 新凭据的去处：连接里的一个可以编辑的集合。每个成员最多一个，设在某一个连接上；
+// collectionName 是设定或最近一次同步时的名称（同步时跟着集合改名更新）。
+// 连接断开、停用或要重新登录时去处留着（重新登录同一个账号就接着用），这期间新建凭据整次失败，不退回托管；
+// 同步时发现集合不见了或变成只读也留着，新建时按 read_only、item_unavailable 失败，由人改设或清除
+export const VaultDestination = z.object({
+  collectionId: z.string(),
+  organizationId: z.string(),
+  collectionName: z.string(),
+})
+export type VaultDestination = z.infer<typeof VaultDestination>
+
 // 管理界面看到的连接：只给连接的所有者
 export const VaultConnection = z.object({
   id: z.uuid(),
@@ -1133,6 +1341,8 @@ export const VaultConnection = z.object({
   disconnectedAt: z.string().nullable(),
   // 指着它的有效凭据数
   credentialCount: z.number().int(),
+  // 新凭据的去处；没设在这个连接上的为 null。一个成员的连接里最多一个不为 null
+  destination: VaultDestination.nullable(),
   createdAt: z.string(),
   updatedAt: z.string(),
 })
@@ -1140,6 +1350,14 @@ export type VaultConnection = z.infer<typeof VaultConnection>
 
 export const VaultConnectionList = z.object({ items: z.array(VaultConnection) })
 export type VaultConnectionList = z.infer<typeof VaultConnectionList>
+
+// 设去处：PUT /spaces/{spaceId}/vault-connections/{connectionId}/destination，只给空间所有者。
+// 清除（DELETE）不请求密码库，连接在任何状态下都能清除；设置才要求连接可用。
+// 连接要可用；服务端先同步一次（不在事务里请求密码库），集合要在这个账号读得到的集合里、不是只读，
+// 不在时 400「集合不存在或不可用」，只读时 400「集合只读」。成功时同一个成员别的连接上的去处一起清掉，
+// 响应是这个成员的全部连接（VaultConnectionList）。清除：DELETE 同一个地址，没设也照常返回列表
+export const SetVaultDestinationRequest = z.object({ collectionId: VaultCollectionId })
+export type SetVaultDestinationRequest = z.infer<typeof SetVaultDestinationRequest>
 
 // 服务器地址：https:// 都收；http:// 只收本机回环地址（localhost、127.0.0.1、[::1]）与不带点的主机名
 // （例如 Docker Compose 的服务名 vaultwarden，流量不出 Docker 网络）。不带账号、查询参数与 #，末尾的 / 去掉。
@@ -1214,12 +1432,20 @@ export const VaultItemSummary = z.object({
 })
 export type VaultItemSummary = z.infer<typeof VaultItemSummary>
 
-// 条目列表，连同条目所在的集合与组织；回收站里的不算
+// 条目列表，连同这个账号读得到的集合（含没有条目的，带是否只读，选去处时用）与组织；回收站里的不算
 export const VaultItemList = z.object({
   items: z.array(VaultItemSummary),
   // 组织里解不开的条目数（格式不认识或校验不过），这些不在 items 里
   unreadableCount: z.number().int(),
-  collections: z.array(z.object({ id: z.string(), organizationId: z.string(), name: z.string() })),
+  collections: z.array(VaultCollection),
   organizations: z.array(z.object({ id: z.string(), name: z.string() })),
 })
 export type VaultItemList = z.infer<typeof VaultItemList>
+
+// 重新检查连接的结果：连接现在的状态，以及这次同步读到的集合（选去处时用）。
+// 同步失败时回 502（见 VaultConnection.lastError），停用的连接照样给出读到的集合
+export const VaultCheckResult = z.object({
+  connection: VaultConnection,
+  collections: z.array(VaultCollection),
+})
+export type VaultCheckResult = z.infer<typeof VaultCheckResult>

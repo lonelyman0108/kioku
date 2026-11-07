@@ -495,7 +495,7 @@ describe.skipIf(!testDatabaseUrl)('测试台的路由', () => {
           {
             identifier: 'router',
             name: '路由器',
-            source: { kind: 'hosted', values: { password: 'router-secret-value' } },
+            source: { kind: 'new', values: { password: 'router-secret-value' } },
           },
           { cookie: ws.cookie },
         ),

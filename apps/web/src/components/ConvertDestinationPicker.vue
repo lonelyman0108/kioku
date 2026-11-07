@@ -1,33 +1,71 @@
 <script setup lang="ts">
-import { useId } from 'vue'
+import { CREDENTIAL_EXPIRING_DAYS } from '@kioku/contracts'
+import { nextTick, useId, watch } from 'vue'
 
-import { itemKey, type ConvertDestination, type UnmappedVaultField } from '../plaintext'
-import { itemFieldPhrase } from '../vault'
+import {
+  itemKey,
+  type ConvertDestination,
+  type NewCredentialFields,
+  type UnmappedVaultField,
+} from '../plaintext'
+import {
+  CREDENTIAL_URL_HINT,
+  expiresElementBad,
+  expiresInputBad,
+  itemFieldPhrase,
+  storeLabel,
+  type NewCredentialStore,
+} from '../vault'
 import Hint from './Hint.vue'
 
-// 转存的去处：已有凭据、还没起标识的密码库条目、新建托管凭据，单选。选中条目时填它的标识，
-// 选中新建托管凭据时填标识、名称与字段名。起了标识却没对应这个字段的条目只列出来，不能选。
-// locked：已经建好的不能再改（保存前处理中途失败之后），hostedLocked 管托管凭据，lockedItems 按条目（itemKey）。
-// 条目的标识（vaultIdentifiers，按 itemKey）与托管凭据的三项（hosted）归调用方所有，这里只读，
-// 改了什么经 vaultIdentifier、hostedField 两个事件交给调用方去写
-export type HostedFields = { identifier: string; name: string; field: string }
-withDefaults(
+// 转存的去处：已有凭据、还没起标识的密码库条目、新建凭据，单选。选中条目时填它的标识，
+// 选中新建凭据时填标识、名称、字段名、网址与到期时间，并说明写到哪里（store：设了去处写进那个集合，
+// 没有时由 Kioku 托管；连接列表没读到时为 null，读取失败时 storeFailed）。起了标识却没对应这个字段的条目只列出来，不能选。
+// locked：已经建好的不能再改（保存前处理中途失败之后），freshLocked 管新建的凭据，lockedItems 按条目（itemKey）。
+// 条目的标识（vaultIdentifiers，按 itemKey）与新建凭据的几项（fresh）归调用方所有，这里只读，
+// 改了什么经 vaultIdentifier、freshField、freshExpiresBad 几个事件交给调用方去写
+const props = withDefaults(
   defineProps<{
     destinations: ConvertDestination[]
     unmapped: UnmappedVaultField[]
     vaultIdentifiers: Readonly<Record<string, string>>
-    hosted: Readonly<HostedFields>
-    hostedLocked?: boolean
+    fresh: Readonly<NewCredentialFields>
+    store: NewCredentialStore | null
+    storeFailed?: boolean
+    // 去处眼下用不了的原因（vault.ts 的 destinationProblem），新建会失败
+    storeIssue?: string | null
+    freshLocked?: boolean
     lockedItems?: ReadonlySet<string>
   }>(),
-  { hostedLocked: false, lockedItems: () => new Set<string>() },
+  {
+    storeFailed: false,
+    storeIssue: null,
+    freshLocked: false,
+    lockedItems: () => new Set<string>(),
+  },
 )
 const emit = defineEmits<{
   vaultIdentifier: [key: string, identifier: string]
-  hostedField: [field: keyof HostedFields, value: string]
+  freshField: [field: Exclude<keyof NewCredentialFields, 'expiresBad'>, value: string]
+  // 到期时间的输入框填了一半：这时值是空的，要另外报上去
+  freshExpiresBad: [bad: boolean]
 }>()
 const selected = defineModel<string>({ required: true })
 const group = useId()
+
+// 到期时间的输入框换了一个（选别的去处再选回来会卸载再挂载）或者值被程序改了（重置、重新打开）：
+// 「填了一半」按输入框现在的 validity 重新判断，不留着上一个输入框的状态
+let expiresEl: HTMLInputElement | null = null
+function setExpiresInput(component: unknown) {
+  const el = (component as { inputRef?: HTMLInputElement } | null)?.inputRef ?? null
+  if (el === expiresEl) return
+  expiresEl = el
+  emit('freshExpiresBad', expiresElementBad(el))
+}
+watch(
+  () => props.fresh.expires,
+  () => void nextTick(() => emit('freshExpiresBad', expiresElementBad(expiresEl))),
+)
 </script>
 
 <template>
@@ -47,7 +85,10 @@ const group = useId()
           密码库条目「{{ d.itemName }}」的{{ itemFieldPhrase(d.itemField) }}
           <span class="text-muted">尚未起标识</span>
         </span>
-        <span v-else>新建托管凭据</span>
+        <span v-else class="min-w-0">
+          新建凭据
+          <span class="text-muted">{{ storeLabel(store, storeFailed) }}</span>
+        </span>
       </label>
       <div v-if="selected === d.key && d.kind === 'vault'" class="destination-body">
         <UFormField label="凭据标识" help="名称取条目名称，字段对应按条目的字段">
@@ -60,34 +101,71 @@ const group = useId()
           />
         </UFormField>
       </div>
-      <div v-if="selected === d.key && d.kind === 'hosted'" class="destination-body hosted-fields">
-        <UFormField label="凭据标识">
-          <UInput
-            :model-value="hosted.identifier"
-            class="w-full font-mono"
-            autocomplete="off"
-            :disabled="hostedLocked"
-            @update:model-value="(v: string) => emit('hostedField', 'identifier', v)"
-          />
-        </UFormField>
-        <UFormField label="名称">
-          <UInput
-            :model-value="hosted.name"
-            class="w-full"
-            autocomplete="off"
-            :disabled="hostedLocked"
-            @update:model-value="(v: string) => emit('hostedField', 'name', v)"
-          />
-        </UFormField>
-        <UFormField label="字段名">
-          <UInput
-            :model-value="hosted.field"
-            class="w-full font-mono"
-            autocomplete="off"
-            :disabled="hostedLocked"
-            @update:model-value="(v: string) => emit('hostedField', 'field', v)"
-          />
-        </UFormField>
+      <div v-if="selected === d.key && d.kind === 'new'" class="destination-body">
+        <p v-if="storeIssue" class="destination-issue text-warning">{{ storeIssue }}</p>
+        <div class="fresh-fields">
+          <UFormField label="凭据标识">
+            <UInput
+              :model-value="fresh.identifier"
+              class="w-full font-mono"
+              autocomplete="off"
+              :disabled="freshLocked"
+              @update:model-value="(v: string) => emit('freshField', 'identifier', v)"
+            />
+          </UFormField>
+          <UFormField label="名称">
+            <UInput
+              :model-value="fresh.name"
+              class="w-full"
+              autocomplete="off"
+              :disabled="freshLocked"
+              @update:model-value="(v: string) => emit('freshField', 'name', v)"
+            />
+          </UFormField>
+          <UFormField label="字段名">
+            <UInput
+              :model-value="fresh.field"
+              class="w-full font-mono"
+              autocomplete="off"
+              :disabled="freshLocked"
+              @update:model-value="(v: string) => emit('freshField', 'field', v)"
+            />
+          </UFormField>
+        </div>
+        <div class="fresh-extra">
+          <UFormField>
+            <template #label
+              >网址<Hint>{{ CREDENTIAL_URL_HINT }}</Hint></template
+            >
+            <UInput
+              :model-value="fresh.url"
+              class="w-full font-mono"
+              placeholder="可选"
+              autocomplete="off"
+              :disabled="freshLocked"
+              @update:model-value="(v: string) => emit('freshField', 'url', v)"
+            />
+          </UFormField>
+          <UFormField>
+            <template #label
+              >到期时间<Hint>
+                可选；到期前 {{ CREDENTIAL_EXPIRING_DAYS }} 天起进入待处理，到期后照常可以取用。
+              </Hint></template
+            >
+            <UInput
+              :ref="setExpiresInput"
+              :model-value="fresh.expires"
+              type="datetime-local"
+              class="w-full"
+              aria-label="到期时间"
+              :disabled="freshLocked"
+              @update:model-value="(v: string) => emit('freshField', 'expires', v)"
+              @input="(e: Event) => emit('freshExpiresBad', expiresInputBad(e))"
+              @keyup="(e: Event) => emit('freshExpiresBad', expiresInputBad(e))"
+              @blur="(e: Event) => emit('freshExpiresBad', expiresInputBad(e))"
+            />
+          </UFormField>
+        </div>
       </div>
     </div>
     <p v-for="(u, i) in unmapped" :key="i" class="destination-unmapped">
@@ -125,13 +203,23 @@ const group = useId()
 .destination-body {
   margin: 6px 0 4px 22px;
 }
-.hosted-fields {
+.fresh-fields {
   display: grid;
   grid-template-columns: repeat(3, minmax(0, 1fr));
   gap: 8px;
 }
+.fresh-extra {
+  display: grid;
+  grid-template-columns: minmax(0, 2fr) minmax(0, 1fr);
+  gap: 8px;
+  margin-top: 8px;
+}
+.destination-issue {
+  margin-bottom: 6px;
+}
 @media (max-width: 640px) {
-  .hosted-fields {
+  .fresh-fields,
+  .fresh-extra {
     grid-template-columns: minmax(0, 1fr);
   }
 }

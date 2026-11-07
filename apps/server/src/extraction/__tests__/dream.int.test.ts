@@ -435,7 +435,7 @@ describe.skipIf(!testDatabaseUrl)('Dream 的整理', () => {
         await send('POST', '/credentials', {
           identifier: 'nas',
           name: 'NAS',
-          source: { kind: 'hosted', values: { password: 'nas-pass' } },
+          source: { kind: 'new', values: { password: 'nas-pass' } },
         })
       ).status,
     ).toBe(201)

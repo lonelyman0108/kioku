@@ -348,7 +348,7 @@ export const OverviewBackup = z.object({
 })
 export type OverviewBackup = z.infer<typeof OverviewBackup>
 
-// 待处理的四类各有多少条：导航角标与概览共用。每一类和对应的列表同一个条件，调用方看不到的不算
+// 待处理的五类各有多少条：导航角标与概览共用。每一类和对应的列表同一个条件，调用方看不到的不算
 export const InboxCounts = z.object({
   // 等查看者本人确认的账号绑定
   bindings: z.number().int(),
@@ -358,6 +358,9 @@ export const InboxCounts = z.object({
   dreamSuggestions: z.number().int(),
   // 正文疑似明文、提示没被忽略的记忆
   plaintext: z.number().int(),
+  // 查看者自己的凭据里没删除、快到期、已到期或标了需要轮换的（一条凭据只算一次），
+  // 和凭据列表的 attention 筛选同一个条件（CredentialListQuery）。别的成员的凭据不算，空间所有者也一样
+  credentials: z.number().int(),
   total: z.number().int(),
 })
 export type InboxCounts = z.infer<typeof InboxCounts>

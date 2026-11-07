@@ -11,7 +11,7 @@ import {
   convertDestinations,
   convertLeftovers,
   convertSummary,
-  HOSTED_DESTINATION,
+  NEW_DESTINATION,
   occurrences,
   previewValue,
   unmatchedNote,
@@ -125,30 +125,38 @@ describe('值在正文里的位置', () => {
 describe('转存做了什么', () => {
   const result = (
     scrubbedEvents: number,
-    extra: { created?: boolean; source?: 'hosted' | 'vault'; field?: string } = {},
+    extra: {
+      created?: boolean
+      storedIn?: ConvertedToCredential['storedIn']
+      field?: string
+    } = {},
   ) =>
     ({
-      credential: { name: 'NAS', identifier: 'nas', source: extra.source ?? 'hosted' },
+      credential: { name: 'NAS', identifier: 'nas' },
       created: extra.created ?? true,
+      storedIn: 'storedIn' in extra ? extra.storedIn : { kind: 'hosted', bench: false },
       field: extra.field ?? 'password',
       replaced: 2,
       scrubbedEvents,
     }) as ConvertedToCredential
 
-  it('写新建的凭据、换成的占位符和替换了几处，历史里替换过才说', () => {
+  it('写新建的凭据与写到了哪里、换成的占位符和替换了几处，历史里替换过才说', () => {
     expect(convertSummary(result(0))).toBe(
-      '已新建凭据「NAS」，正文中 2 处已换成 {{cred:nas#password}}。',
+      '已新建凭据「NAS」（Kioku 托管），正文中 2 处已换成 {{cred:nas#password}}。',
     )
     expect(convertSummary(result(3))).toBe(
-      '已新建凭据「NAS」，正文中 2 处已换成 {{cred:nas#password}}。历史中 3 个事件里的这个值也已替换。',
+      '已新建凭据「NAS」（Kioku 托管），正文中 2 处已换成 {{cred:nas#password}}。历史中 3 个事件里的这个值也已替换。',
     )
+    expect(
+      convertSummary(result(0, { storedIn: { kind: 'vault', collectionName: 'Agent' } })),
+    ).toBe('已新建凭据「NAS」（密码库集合「Agent」），正文中 2 处已换成 {{cred:nas#password}}。')
   })
 
   it('给条目起了标识与换成已有凭据分开说，字段名照结果', () => {
-    expect(convertSummary(result(0, { source: 'vault' }))).toBe(
+    expect(convertSummary(result(0, { storedIn: null }))).toBe(
       '已给密码库条目起标识 nas，正文中 2 处已换成 {{cred:nas#password}}。',
     )
-    expect(convertSummary(result(0, { created: false, field: 'token' }))).toBe(
+    expect(convertSummary(result(0, { created: false, storedIn: null, field: 'token' }))).toBe(
       '已换成凭据「NAS」的字段 token，正文中 2 处已换成 {{cred:nas#token}}。',
     )
   })
@@ -186,7 +194,7 @@ describe('转存的去处', () => {
 
   it('顺序是已有凭据、尚未起标识的条目、新建托管凭据；起了标识却没对应字段的单独列出', () => {
     const { destinations, unmapped } = convertDestinations(match)
-    expect(destinations.map((d) => d.kind)).toEqual(['credential', 'vault', 'hosted'])
+    expect(destinations.map((d) => d.kind)).toEqual(['credential', 'vault', 'new'])
     expect(destinations[0]).toMatchObject({
       credentialId: 'c1',
       identifier: 'nas',
@@ -198,7 +206,7 @@ describe('转存的去处', () => {
   })
 
   it('没有匹配结果时只有新建托管凭据', () => {
-    expect(convertDestinations(undefined).destinations).toEqual([HOSTED_DESTINATION])
+    expect(convertDestinations(undefined).destinations).toEqual([NEW_DESTINATION])
   })
 
   it('条目字段在凭据里的名字和 defaultCredentialFields 一样', () => {
@@ -266,13 +274,15 @@ describe('转存之后还要告诉人的', () => {
 })
 
 describe('共用的去处组件与清理', () => {
-  it('条目标识与托管凭据的三项由调用方所有：组件只读，改动经事件交回', () => {
-    expect(pickerSource).not.toMatch(/defineModel<[^>]*>\('(vaultIdentifiers|hosted)'/)
+  it('条目标识与新建凭据的几项由调用方所有：组件只读，改动经事件交回', () => {
+    expect(pickerSource).not.toMatch(/defineModel<[^>]*>\('(vaultIdentifiers|fresh)'/)
     expect(pickerSource).toContain("emit('vaultIdentifier'")
-    expect(pickerSource).toContain("emit('hostedField'")
+    expect(pickerSource).toContain("emit('freshField'")
     for (const caller of [convertModalSource, saveModalSource]) {
       expect(caller).toContain('@vault-identifier=')
-      expect(caller).toContain('@hosted-field=')
+      expect(caller).toContain('@fresh-field=')
+      // 新建凭据的选项说明写到哪里
+      expect(caller).toContain(':store="store"')
     }
   })
 

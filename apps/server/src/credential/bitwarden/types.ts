@@ -60,7 +60,8 @@ export interface VaultSnapshot {
     role: VaultOrganizationRole
     allCollections: boolean
   }[]
-  collections: { id: string; organizationId: string; name: string }[]
+  // readOnly：这个账号在集合里只能看，不能新建或修改条目（写回的去处要选可以编辑的）
+  collections: { id: string; organizationId: string; name: string; readOnly: boolean }[]
   // 不属于组织的条目数
   personalItemCount: number
   // 只含组织里解得开的条目
@@ -72,6 +73,25 @@ export interface VaultSnapshot {
 export interface VaultItem extends VaultItemSummary {
   // 解开的值。login.totp 是条目里的密钥（otpauth:// 地址或 base32），验证码由 totpCode 现算
   values: Record<VaultFieldRef, string>
+}
+
+// 新建的条目：放进一个集合。values 的写法同 VaultItem.values：login.username、login.password、notes 照常写，
+// 自定义字段（field:<名字>）写成隐藏字段；login.totp 不收。uris 只给登录类：autofill 为 true 时按主机加端口匹配
+// （浏览器自动填充），false 时不参与匹配（令牌这类值，免得被填进登录框）
+export interface VaultNewItem {
+  organizationId: string
+  collectionId: string
+  type: 'login' | 'note'
+  name: string
+  values: Record<VaultFieldRef, string>
+  uris?: { uri: string; autofill: boolean }[]
+}
+
+// 修改条目：只改给了的字段，别的字段的密文原样带回，Kioku 不认识的内容（例如通行密钥）不丢。
+// 改了 login.password 时，旧密码照官方客户端的做法记进条目的密码历史。values 里没有的字段不动
+export interface VaultItemChanges {
+  name?: string
+  values?: Record<VaultFieldRef, string>
 }
 
 export interface VaultSessionInput {
@@ -93,6 +113,16 @@ export interface VaultSession {
   // 同步一次（照样交给 onSynced），解开所有读得到的组织条目的值：按值比对时用。解不开的条目跳过，
   // 个数照 VaultSnapshot.unreadableItemCount 算
   items(): Promise<VaultItem[]>
+  // 在集合里新建一个条目，返回解开的新条目。集合只读时抛 read_only
+  createItem(item: VaultNewItem): Promise<VaultItem>
+  // 修改条目，返回改后的条目。expectedRevisionDate 是读到条目时的修改时间：期间别处改过就抛 item_conflict，
+  // 不覆盖；条目所在的集合都只读时抛 read_only；不存在、看不到时抛 item_unavailable。
+  // 值都和现在相同时不发修改，原样返回，修改时间不变：凭据服务按修改时间变没变判断是不是改了值
+  updateItem(
+    id: string,
+    changes: VaultItemChanges,
+    expectedRevisionDate: string,
+  ): Promise<VaultItem>
 }
 
 export interface VaultClient {
@@ -109,6 +139,12 @@ export type VaultErrorKind =
   // 刷新令牌失效：改了主密码、在设备列表里注销了 Kioku
   | 'reauth_required'
   | 'item_unavailable'
+  // 集合只读：专用账号没有这个集合的编辑权限
+  | 'read_only'
+  // 修改时条目已在别处改过（修改时间和读到时不同）
+  | 'item_conflict'
+  // 写入的值加密之后超出服务端的长度上限：错误文字只说哪一类字段
+  | 'value_too_long'
   // 不认识的加密格式或 KDF
   | 'unsupported_format'
   // MAC 校验失败

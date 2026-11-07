@@ -157,7 +157,7 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
       await send('POST', '/credentials', {
         identifier: 'wifi',
         name: '无线网络',
-        source: { kind: 'hosted', values: { password: value } },
+        source: { kind: 'new', values: { password: value } },
       }),
       201,
     )
@@ -335,7 +335,7 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
       await send('POST', '/credentials', {
         identifier: 'door',
         name: '门禁',
-        source: { kind: 'hosted', values: { code: '7' } },
+        source: { kind: 'new', values: { code: '7' } },
       }),
       201,
     )
@@ -364,7 +364,7 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
       await send('POST', '/credentials', {
         identifier: 'wifi-b',
         name: '无线网络备份',
-        source: { kind: 'hosted', values: { password: WIFI } },
+        source: { kind: 'new', values: { password: WIFI } },
       }),
       201,
     )
@@ -524,7 +524,7 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
       await send('POST', '/credentials', {
         identifier: 'wifi-b',
         name: '无线网络备份',
-        source: { kind: 'hosted', values: { password: WIFI } },
+        source: { kind: 'new', values: { password: WIFI } },
       }),
       201,
     )

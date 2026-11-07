@@ -121,7 +121,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       {
         identifier: 'nas',
         name: 'NAS',
-        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+        source: { kind: 'new', values: { password: 'nas-pass' } },
       },
       { cookie: ws.cookie },
     )
@@ -258,7 +258,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
         app,
         'POST',
         `/v1/spaces/${ws.spaceId}/credentials`,
-        { identifier, name: identifier, source: { kind: 'hosted', values: { password: 'p' } } },
+        { identifier, name: identifier, source: { kind: 'new', values: { password: 'p' } } },
         { cookie: ws.cookie },
       )
       expect(res.status).toBe(201)
@@ -395,7 +395,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
           appWith(rotating),
           'PATCH',
           `/v1/spaces/${ws.spaceId}/credentials/${credentialId}`,
-          { expectedVersion: 1, name: 'NAS 2', source: { kind: 'hosted', values: {} } },
+          { expectedVersion: 1, name: 'NAS 2', source: { kind: 'new', values: {} } },
           { cookie: ws.cookie },
         ),
       async (tx) => {

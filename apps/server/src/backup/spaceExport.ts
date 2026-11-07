@@ -85,7 +85,8 @@ export async function exportSpace(
   stopIfGone(signal)
   const createdAt = new Date().toISOString()
   // 导出了哪些凭据、各带了哪些字段，解密了哪些 secret 记忆：读完之后记访问事件
-  const exported = new Map<string, string[]>()
+  // 带走了托管值的凭据：字段与当时的值版本，记访问事件用
+  const exported = new Map<string, { fields: string[]; valueVersion: number }>()
   const secrets: string[] = []
   let spaceName = ''
   let file: Buffer<ArrayBuffer>
@@ -152,12 +153,12 @@ export async function exportSpace(
     await withSpace(db, options.spaceId, async (tx) => {
       if (exported.size) {
         await tx.insert(credentialEvents).values(
-          [...exported].map(([credentialId, fields]) => ({
+          [...exported].map(([credentialId, { fields, valueVersion }]) => ({
             spaceId: options.spaceId,
             credentialId,
             eventType: 'access',
             actorAccountId: options.accountId,
-            context: { via: 'space_export', fields, result: 'ok' },
+            context: { via: 'space_export', fields, result: 'ok', valueVersion },
           })),
         )
       }
@@ -225,7 +226,7 @@ interface LinesContext {
   header: SpaceExportHeader
   accountId: string
   masterKey: MasterKey | null
-  exported: Map<string, string[]>
+  exported: Map<string, { fields: string[]; valueVersion: number }>
   // 解密带走的 secret 记忆的 id
   secrets: string[]
   signal: AbortSignal | undefined
@@ -354,7 +355,14 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
         serverUrl: v.serverUrl,
         email: v.email,
         vaultUserId: v.vaultUserId,
-        defaultCollectionId: v.defaultCollectionId,
+        destination:
+          v.defaultCollectionId && v.defaultOrganizationId && v.defaultCollectionName !== null
+            ? {
+                collectionId: v.defaultCollectionId,
+                organizationId: v.defaultOrganizationId,
+                collectionName: v.defaultCollectionName,
+              }
+            : null,
         createdAt: v.createdAt.toISOString(),
         updatedAt: v.updatedAt.toISOString(),
       }),
@@ -363,7 +371,12 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
   yield credentialRows
     .map((c) => {
       const text = record(`凭据 ${c.identifier} `, credentialRecord(c, ctx.masterKey))
-      if (c.source === 'hosted') ctx.exported.set(c.id, c.fields.map((f) => f.name).sort())
+      if (c.source === 'hosted') {
+        ctx.exported.set(c.id, {
+          fields: c.fields.map((f) => f.name).sort(),
+          valueVersion: c.valueVersion,
+        })
+      }
       return text
     })
     .join('')
@@ -487,6 +500,8 @@ function credentialRecord(
     description: row.description,
     source,
     appIds: row.appIds,
+    expiresAt: row.expiresAt?.toISOString() ?? null,
+    rotationRequestedAt: row.rotationRequestedAt?.toISOString() ?? null,
     createdAt: row.createdAt.toISOString(),
     updatedAt: row.updatedAt.toISOString(),
   }
