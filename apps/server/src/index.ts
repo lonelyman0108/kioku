@@ -2,7 +2,7 @@ import { serve } from '@hono/node-server'
 
 import { createApp } from './app'
 import { loadConfig } from './config'
-import { unavailableVaultClient } from './credential/vaultClient'
+import { createVaultClient } from './credential/bitwarden/client'
 import { prepareMasterKey } from './crypto/rotation'
 import { assertRuntimeRole, connect } from './db/client'
 import { runMigrations } from './db/migrate'
@@ -36,7 +36,7 @@ const app = createApp({
   trustedProxies: config.trustedProxies,
   webDir: config.webDir,
   jobs,
-  vault: unavailableVaultClient(),
+  vault: createVaultClient(),
 })
 
 const server = serve({ fetch: app.fetch, port: config.port }, (info) => {

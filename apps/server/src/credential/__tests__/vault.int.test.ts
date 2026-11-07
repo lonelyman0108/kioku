@@ -24,7 +24,7 @@ import { fakeVault, type FakeVault } from '../../testing/fakeVault'
 import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { credentialServiceForKey } from '../context'
 import { hasCachedSession, sealVaultSecrets, VaultConnections } from '../vault'
-import { totpCode } from '../totp'
+import { totpCode } from '../bitwarden/totp'
 
 const EMAIL = 'agent@example.com'
 const MASTER = 'correct-master-password'

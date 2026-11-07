@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
-import { TotpFormatError, totpCode } from '../totp'
+import { totpCode } from '../totp'
+import { VaultError } from '../types'
 
 // RFC 6238 附录 B 的测试向量：密钥是 ASCII 的 12345678901234567890（SHA-1）
 const SECRET = 'GEZDGNBVGY3TQOJQGEZDGNBVGY3TQOJQ' // gitleaks:allow
@@ -19,10 +20,8 @@ describe('TOTP 验证码', () => {
 
   it('认不出的写法明确报错，不猜', () => {
     for (const secret of ['steam://ABC', 'otpauth://hotp/x?secret=ABC', 'not base32!', '']) {
-      expect(() => totpCode(secret), secret).toThrow(TotpFormatError)
+      expect(() => totpCode(secret, 0), secret).toThrow(VaultError)
     }
-    expect(() => totpCode(`otpauth://totp/x?secret=${SECRET}&algorithm=MD5`)).toThrow(
-      TotpFormatError,
-    )
+    expect(() => totpCode(`otpauth://totp/x?secret=${SECRET}&algorithm=MD5`, 0)).toThrow(VaultError)
   })
 })

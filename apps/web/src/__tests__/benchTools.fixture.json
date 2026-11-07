@@ -17,7 +17,6 @@
     "name": "kioku_search",
     "description": "按语义、全文和关键词搜索记忆，返回候选的坐标（URI）、标题与线索；需要正文时再用 kioku_get。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "query": {
@@ -33,7 +32,8 @@
           "maximum": 30
         }
       },
-      "required": ["query"]
+      "required": ["query"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "annotations": {
       "readOnlyHint": true
@@ -46,7 +46,6 @@
     "name": "kioku_get",
     "description": "按坐标（URI）读取一条记忆的标题与完整正文。召回结果只是候选，引用之前先用它读正文。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "uri": {
@@ -55,7 +54,8 @@
           "description": "记忆的坐标（URI），例如 core://agent"
         }
       },
-      "required": ["uri"]
+      "required": ["uri"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "annotations": {
       "readOnlyHint": true
@@ -68,14 +68,14 @@
     "name": "kioku_list",
     "description": "浏览记忆的目录：不带参数列出有记忆的开头（core://、user://、persona://、app://）；给开头（如 core）或坐标（URI）时列出它下面的直接子节点，persona://<人格标识> 与 app://<应用标识> 列这个人格、应用下的第一级。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "of": {
           "description": "开头（core、user、persona、app）或坐标（URI），例如 user://projects",
           "type": "string"
         }
-      }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "annotations": {
       "readOnlyHint": true
@@ -88,7 +88,6 @@
     "name": "kioku_create",
     "description": "新建一条长期记忆。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。坐标（URI）只能用这四种开头：core:// 放通用的记忆，所有应用都用得到（例如 core://agent）；user:// 放本人的习惯、偏好与私人事务（例如 user://preferences/reply_style）；persona://<人格标识>/ 放某个人格的设定（例如 persona://default/soul）；app://<应用标识>/ 放某个应用独有的内容（例如 app://claudecode/agent）。开头之后是可省略的位置与最后一段标识，用 / 分隔，每段只用小写字母、数字、_ 或 -。坐标的开头决定这条记忆归谁、谁读得到：人格与应用的记忆只能写本应用当前的人格与本应用；user:// 下的只有本人的 agent 读得到，不能设为 public。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "uri": {
@@ -144,7 +143,8 @@
           "pattern": "^(?:(?:\\d\\d[2468][048]|\\d\\d[13579][26]|\\d\\d0[48]|[02468][048]00|[13579][26]00)-02-29|\\d{4}-(?:(?:0[13578]|1[02])-(?:0[1-9]|[12]\\d|3[01])|(?:0[469]|11)-(?:0[1-9]|[12]\\d|30)|(?:02)-(?:0[1-9]|1\\d|2[0-8])))T(?:(?:[01]\\d|2[0-3]):[0-5]\\d:[0-5]\\d(?:\\.\\d+)?(?:Z|([+-](?:[01]\\d|2[0-3]):[0-5]\\d)))$"
         }
       },
-      "required": ["uri", "content"]
+      "required": ["uri", "content"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -154,7 +154,6 @@
     "name": "kioku_update",
     "description": "修改已有记忆。改之前先用 kioku_get 读正文；带上 expected_version 防止覆盖别人的修改。改标题不改坐标；要换位置、标识或归属（坐标的开头）用 kioku_move。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "uri": {
@@ -235,7 +234,8 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["uri"]
+      "required": ["uri"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -245,7 +245,6 @@
     "name": "kioku_delete",
     "description": "删除一条记忆。历史事件会保留，必要时可以恢复。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "uri": {
@@ -254,7 +253,8 @@
           "description": "要删除的记忆的坐标（URI）"
         }
       },
-      "required": ["uri"]
+      "required": ["uri"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "annotations": {
       "destructiveHint": true
@@ -267,7 +267,6 @@
     "name": "kioku_move",
     "description": "修改记忆的坐标（URI）：换最后一段是改标识，换中间各级是挪位置，换开头就是改归属（例如从 core:// 移到 app://<应用>/）。共享的归属（core://、persona://、app://）与本人（user://）之间不能通过访问密钥移动：这会改变谁读得到它，要在管理界面里由人来移。标题不变；只有标识变了、标题又就是原来的标识时，按新坐标重新取：正文有 # 标题取它，没有就用新的标识。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "from": {
@@ -281,7 +280,8 @@
           "description": "新的坐标（URI）"
         }
       },
-      "required": ["from", "to"]
+      "required": ["from", "to"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -289,9 +289,8 @@
   },
   {
     "name": "kioku_credential",
-    "description": "取用凭据。记忆正文里的 {{cred:<标识>}} 与 {{cred:<标识>#<字段>}} 是凭据占位符：给标识时，Kioku 托管的返回值，外部凭据源的返回凭据源、条目位置和取法，取到时记一条访问事件；不给标识时列出看得到的凭据与凭据源。用到时才取，不要把值写回记忆，也不要显示在回复里。",
+    "description": "取用凭据。记忆正文里的 {{cred:<标识>}} 与 {{cred:<标识>#<字段>}} 是凭据占位符：给标识时返回值（totp 字段给当前的验证码），每次取用都记一条访问事件；不给标识时列出可取用的凭据，只有说明，不含值。用到时才取，不要把值写回记忆，也不要显示在回复里。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "identifier": {
@@ -303,8 +302,13 @@
           "description": "只取一个字段，例如 password；不填取全部字段",
           "type": "string",
           "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
+        },
+        "purpose": {
+          "description": "这次取用是为了什么，记进访问事件，最多 200 个字",
+          "type": "string"
         }
-      }
+      },
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -312,9 +316,8 @@
   },
   {
     "name": "kioku_credential_save",
-    "description": "新建或修改凭据（要能读写本人（user://）、secret 级的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。值由 Kioku 托管时给 values；值在外部密码管理器里时给 provider_id、location 与 fields，Kioku 只记条目位置、不存值。说明里不要写值。",
+    "description": "新建或修改 Kioku 托管的凭据（要凭据能力为「管理」的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。密码库里的凭据只能改名称与说明，值到密码库里改。说明里不要写值。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "identifier": {
@@ -331,7 +334,7 @@
           "type": ["string", "null"]
         },
         "values": {
-          "description": "Kioku 托管的值，字段名 → 值；修改时只给要改的字段，值为 null 表示删掉这个字段",
+          "description": "值，字段名 → 值；新建时必填。修改时只给要改的字段，值为 null 表示删掉这个字段",
           "type": "object",
           "propertyNames": {
             "type": "string",
@@ -341,31 +344,6 @@
             "type": ["string", "null"]
           }
         },
-        "provider_id": {
-          "description": "外部凭据源的 id，用不带参数的 kioku_credential 列出",
-          "type": "string"
-        },
-        "location": {
-          "description": "外部条目的位置：条目名、id 或路径",
-          "type": "string"
-        },
-        "fields": {
-          "description": "外部来源的字段对应：占位符里的字段名 → 条目里的字段",
-          "type": "array",
-          "items": {
-            "type": "object",
-            "properties": {
-              "name": {
-                "type": "string",
-                "pattern": "^[a-z0-9][a-z0-9_-]{0,63}$"
-              },
-              "source_field": {
-                "type": "string"
-              }
-            },
-            "required": ["name", "source_field"]
-          }
-        },
         "expected_version": {
           "description": "修改时必填：读取时看到的版本号",
           "type": "integer",
@@ -373,7 +351,8 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["identifier"]
+      "required": ["identifier"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "execution": {
       "taskSupport": "forbidden"
@@ -381,9 +360,8 @@
   },
   {
     "name": "kioku_credential_delete",
-    "description": "删除凭据（软删除，主人可以在管理界面恢复）。",
+    "description": "删除凭据（软删除，所有者可以在管理界面恢复）。密码库里的条目不受影响。",
     "inputSchema": {
-      "$schema": "http://json-schema.org/draft-07/schema#",
       "type": "object",
       "properties": {
         "identifier": {
@@ -397,7 +375,8 @@
           "maximum": 9007199254740991
         }
       },
-      "required": ["identifier"]
+      "required": ["identifier"],
+      "$schema": "http://json-schema.org/draft-07/schema#"
     },
     "annotations": {
       "destructiveHint": true

@@ -43,7 +43,7 @@ import { benchMarkReader, MemoryError } from '../memory/service'
 import { formatUri } from '../memory/uri'
 import { VaultError, type VaultClient, type VaultItem, type VaultSession } from './bitwarden/types'
 import { CREDENTIAL_NOTICE } from './methods'
-import { TotpFormatError, totpCode } from './totp'
+import { totpCode } from './bitwarden/totp'
 import {
   VaultConnections,
   reasonStatus,
@@ -146,7 +146,7 @@ export function itemValues(
       try {
         values[f.name] = totpCode(value, now)
       } catch (err) {
-        if (err instanceof TotpFormatError) return 'vault_error'
+        if (err instanceof VaultError && err.kind === 'unsupported_format') return 'vault_error'
         throw err
       }
     } else {
