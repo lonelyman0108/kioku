@@ -142,6 +142,8 @@ export type VaultErrorKind =
   | 'read_only'
   // 修改时条目已在别处改过（修改时间和读到时不同）
   | 'item_conflict'
+  // 写入的值加密之后超出服务端的长度上限：错误文字只说哪一类字段
+  | 'value_too_long'
   // 不认识的加密格式或 KDF
   | 'unsupported_format'
   // MAC 校验失败

@@ -2,13 +2,8 @@ import { createHash } from 'node:crypto'
 
 import { decryptBytes, decryptText, encryptText, splitKey, type SymmetricKey } from './crypto'
 import { prop, str } from './http'
-import {
-  VaultError,
-  type VaultFieldRef,
-  type VaultItemChanges,
-  type VaultItemType,
-  type VaultNewItem,
-} from './types'
+import { VaultError, type VaultFieldRef, type VaultItemType, type VaultNewItem } from './types'
+import { isEnc, namedFields } from './vault'
 
 // 新建与修改条目的请求体。值都加密成 EncString 类型 2。新条目不生成条目密钥，用组织密钥加密（官方客户端只在服务端
 // 打开 cipher-key-encryption 时才生成，服务端都不要求）。修改从取到的原始条目复制，只换给了的字段的密文，
@@ -16,75 +11,115 @@ import {
 
 const LOGIN = 1
 const NOTE = 2
-// 自定义字段的类型：0 文本、1 隐藏、2 布尔、3 关联（没有值，指向登录里的用户名或密码）
 const HIDDEN_FIELD = 1
-const LINKED_FIELD = 3
 // 网址的匹配方式：1 主机加端口，5 不匹配
 const MATCH_HOST = 1
 const MATCH_NEVER = 5
 // 官方客户端的密码历史最多留 5 条
 const HISTORY_LIMIT = 5
 
-type WriteRef =
+type WriteTarget =
   | { kind: 'login.username' }
   | { kind: 'login.password' }
   | { kind: 'notes' }
   | { kind: 'field'; name: string }
 
+export interface WriteValue {
+  target: WriteTarget
+  value: string
+}
+
 const unsupportedField = () => new VaultError('unsupported_format', '不支持写入这个字段')
 
-// 写入能用的字段：login.totp 不收（验证码的密钥不由 Kioku 写），登录里的字段只给登录类
-export function writeRef(ref: VaultFieldRef, type: VaultItemType | null): WriteRef {
-  if (ref === 'notes') return { kind: 'notes' }
-  if (ref === 'login.username' || ref === 'login.password') {
-    if (type !== null && type !== 'login') throw unsupportedField()
-    return { kind: ref }
-  }
+function writeTarget(ref: VaultFieldRef): WriteTarget {
+  if (ref === 'notes' || ref === 'login.username' || ref === 'login.password') return { kind: ref }
   if (ref.startsWith('field:') && ref.length > 'field:'.length) {
     return { kind: 'field', name: ref.slice('field:'.length) }
   }
+  // login.totp 不收：验证码的密钥不由 Kioku 写
   throw unsupportedField()
 }
 
-// 写入之前就检查：发请求之前报错，不留下写了一半的条目
-export function checkNewItem(item: VaultNewItem): void {
-  for (const ref of Object.keys(item.values)) writeRef(ref, item.type)
+// 登录里的字段只给登录类；条目的类型不知道时（修改，取到条目之前）为 null，取到之后再查一次
+export function checkType(values: WriteValue[], type: VaultItemType | null): void {
+  if (type === null || type === 'login') return
+  if (
+    values.some((v) => v.target.kind === 'login.username' || v.target.kind === 'login.password')
+  ) {
+    throw unsupportedField()
+  }
+}
+
+// 在入口解析一次要写的字段：写法不对时在发请求之前报错，不留下写了一半的条目
+export function writeValues(
+  values: Record<VaultFieldRef, string>,
+  type: VaultItemType | null,
+): WriteValue[] {
+  const parsed = Object.entries(values).map(([ref, value]) => ({ target: writeTarget(ref), value }))
+  checkType(parsed, type)
+  return parsed
+}
+
+export function checkNewItem(item: VaultNewItem): WriteValue[] {
+  const values = writeValues(item.values, item.type)
   if (item.type !== 'login' && item.uris?.length) throw unsupportedField()
+  return values
 }
 
-export function checkChanges(changes: VaultItemChanges, type: VaultItemType | null): void {
-  for (const ref of Object.keys(changes.values ?? {})) writeRef(ref, type)
+// 服务端按密文的字符数限长，超了回 400。官方服务：名称、用户名、自定义字段名 1000，密码、自定义字段值、
+// 密码历史 5000，备注、网址 10000；Vaultwarden 只限备注 10000。发请求之前按官方服务的上限查
+type Limited =
+  'name' | 'username' | 'password' | 'notes' | 'fieldName' | 'fieldValue' | 'uri' | 'history'
+
+const LIMITS: Record<Limited, { max: number; label: string }> = {
+  name: { max: 1000, label: '名称' },
+  username: { max: 1000, label: '用户名' },
+  password: { max: 5000, label: '密码' },
+  notes: { max: 10000, label: '备注' },
+  fieldName: { max: 1000, label: '自定义字段名' },
+  fieldValue: { max: 5000, label: '自定义字段的值' },
+  uri: { max: 10000, label: '网址' },
+  history: { max: 5000, label: '密码历史（隐藏字段的旧值）' },
 }
 
-const enc = (value: string, key: SymmetricKey) => encryptText(value, key)
+function enc(value: string, key: SymmetricKey, what: Limited): string {
+  const out = encryptText(value, key)
+  const { max, label } = LIMITS[what]
+  if (out.length > max) throw new VaultError('value_too_long', `${label}超出密码库的长度上限`)
+  return out
+}
 
 // 网址的校验和：网址的 SHA-256 写成 base64 再加密。官方客户端解开带条目密钥的条目时按它核对网址
 function uriEntry(uri: string, autofill: boolean, key: SymmetricKey) {
   const checksum = createHash('sha256').update(uri, 'utf8').digest('base64')
   return {
-    uri: enc(uri, key),
-    uriChecksum: enc(checksum, key),
+    uri: enc(uri, key, 'uri'),
+    uriChecksum: enc(checksum, key, 'uri'),
     match: autofill ? MATCH_HOST : MATCH_NEVER,
   }
 }
 
-// POST /ciphers/create 的请求体：放进组织与一个集合。encryptedFor 是写入的账号（Vaultwarden 要求，官方服务核对它）
-export function newCipherBody(item: VaultNewItem, orgKey: SymmetricKey, userId: string) {
-  checkNewItem(item)
+// POST /ciphers/create 的请求体：放进组织与一个集合。encryptedFor 是写入的账号（Vaultwarden 要求，官方服务核对它）。
+// values 是 checkNewItem 解析过的
+export function newCipherBody(
+  item: VaultNewItem,
+  values: WriteValue[],
+  orgKey: SymmetricKey,
+  userId: string,
+) {
   let username: string | null = null
   let password: string | null = null
   let notes: string | null = null
   const fields: { type: number; name: string; value: string; linkedId: null }[] = []
-  for (const [ref, value] of Object.entries(item.values)) {
-    const target = writeRef(ref, item.type)
-    if (target.kind === 'login.username') username = enc(value, orgKey)
-    else if (target.kind === 'login.password') password = enc(value, orgKey)
-    else if (target.kind === 'notes') notes = enc(value, orgKey)
+  for (const { target, value } of values) {
+    if (target.kind === 'login.username') username = enc(value, orgKey, 'username')
+    else if (target.kind === 'login.password') password = enc(value, orgKey, 'password')
+    else if (target.kind === 'notes') notes = enc(value, orgKey, 'notes')
     else {
       fields.push({
         type: HIDDEN_FIELD,
-        name: enc(target.name, orgKey),
-        value: enc(value, orgKey),
+        name: enc(target.name, orgKey, 'fieldName'),
+        value: enc(value, orgKey, 'fieldValue'),
         linkedId: null,
       })
     }
@@ -97,7 +132,7 @@ export function newCipherBody(item: VaultNewItem, orgKey: SymmetricKey, userId: 
       folderId: null,
       encryptedFor: userId,
       key: null,
-      name: enc(item.name, orgKey),
+      name: enc(item.name, orgKey, 'name'),
       notes,
       favorite: false,
       reprompt: 0,
@@ -123,8 +158,6 @@ type Json = Record<string, unknown>
 
 const isObject = (value: unknown): value is Json =>
   typeof value === 'object' && value !== null && !Array.isArray(value)
-
-const isEnc = (value: unknown): value is string => typeof value === 'string' && value !== ''
 
 // 写回原来的键：旧版 Vaultwarden 的 PascalCase 响应里没有 camelCase 的键时写到 PascalCase 上，不并存两份
 function setProp(obj: Json, name: string, value: unknown): void {
@@ -156,86 +189,92 @@ function childArray(obj: Json, name: string): unknown[] {
   return created
 }
 
-const fieldType = (field: Json) => Number(prop(field, 'type'))
-
 export interface UpdateInput {
   // GET /ciphers/{id} 的响应，已经由 decodeItem 解开核对过
   raw: unknown
-  type: VaultItemType
-  changes: VaultItemChanges
+  name: string | undefined
+  // updateItem 入口解析过、按条目类型查过的
+  values: WriteValue[]
   orgKey: SymmetricKey
   userId: string
   // 记进密码历史的时间
   now: string
 }
 
-// PUT /ciphers/{id} 的请求体。值和原来一样的字段不换密文。
-// 密码历史照官方客户端：改了登录密码时旧密码（原来的密文）记进去，改了隐藏字段时记「名字: 旧值」，新的在前、最多 5 条；
-// 旧值是空的不记。附件不带：响应里的附件是数组，请求里是按 id 的对象，官方服务认不出数组；不带时服务端两边都不动附件
-export function updatedCipherBody(input: UpdateInput): Json {
-  const { type, changes, orgKey, userId, now } = input
-  checkChanges(changes, type)
+// PUT /ciphers/{id} 的请求体；什么都没变时为 null，不发请求（发了服务端照样改修改时间，别处正在改的会因此冲突）。
+// 值和原来一样的字段不换密文。密码历史照官方客户端：改了登录密码时旧密码（原来的密文）记进去，改了隐藏字段时记
+// 「名字: 旧值」，都插在最前面（先旧密码，再按字段在条目里的顺序逐个插），最多 5 条；旧值是空的不记。
+// 附件不带：响应里的附件是数组，请求里是按 id 的对象，官方服务认不出数组；不带时服务端两边都不动附件
+export function updatedCipherBody(input: UpdateInput): Json | null {
+  const { orgKey, userId, now } = input
   if (!isObject(input.raw)) throw unsupportedField()
   const body = structuredClone(input.raw)
   const itemKeyEnc = str(body, 'key')
   const key = itemKeyEnc ? splitKey(decryptBytes(itemKeyEnc, orgKey)) : orgKey
   const decrypt = (value: unknown) => (isEnc(value) ? decryptText(value, key) : null)
+  let changed = false
 
-  if (changes.name !== undefined && decrypt(prop(body, 'name')) !== changes.name) {
-    setProp(body, 'name', enc(changes.name, key))
+  if (input.name !== undefined && decrypt(prop(body, 'name')) !== input.name) {
+    setProp(body, 'name', enc(input.name, key, 'name'))
+    changed = true
   }
 
+  // 字段名在循环之前解开一次
+  const named = namedFields(prop(body, 'fields'), key)
   let passwordEntry: Json | null = null
-  const fieldEntries: Json[] = []
-  for (const [ref, value] of Object.entries(changes.values ?? {})) {
-    const target = writeRef(ref, type)
+  const fieldEntries: { index: number; entry: Json }[] = []
+  for (const { target, value } of input.values) {
     if (target.kind === 'notes') {
-      if (decrypt(prop(body, 'notes')) !== value) setProp(body, 'notes', enc(value, key))
-      continue
-    }
-    if (target.kind === 'login.username') {
+      if (decrypt(prop(body, 'notes')) === value) continue
+      setProp(body, 'notes', enc(value, key, 'notes'))
+    } else if (target.kind === 'login.username') {
       const login = childObject(body, 'login')
-      if (decrypt(prop(login, 'username')) !== value) setProp(login, 'username', enc(value, key))
-      continue
-    }
-    if (target.kind === 'login.password') {
+      if (decrypt(prop(login, 'username')) === value) continue
+      setProp(login, 'username', enc(value, key, 'username'))
+    } else if (target.kind === 'login.password') {
       const login = childObject(body, 'login')
       const old = prop(login, 'password')
       const oldPlain = decrypt(old)
       if (oldPlain === value) continue
-      setProp(login, 'password', enc(value, key))
+      setProp(login, 'password', enc(value, key, 'password'))
       if (oldPlain) {
         passwordEntry = { password: old, lastUsedDate: now }
         setProp(login, 'passwordRevisionDate', now)
       }
-      continue
+    } else {
+      const found = named.get(target.name)
+      if (!found) {
+        const field = {
+          type: HIDDEN_FIELD,
+          name: enc(target.name, key, 'fieldName'),
+          value: enc(value, key, 'fieldValue'),
+          linkedId: null,
+        }
+        childArray(body, 'fields').push(field)
+      } else {
+        const oldPlain = decrypt(prop(found.field, 'value'))
+        if (oldPlain === value) continue
+        setProp(found.field, 'value', enc(value, key, 'fieldValue'))
+        if (Number(prop(found.field, 'type')) === HIDDEN_FIELD && oldPlain) {
+          fieldEntries.push({
+            index: found.index,
+            entry: {
+              password: enc(`${target.name}: ${oldPlain}`, key, 'history'),
+              lastUsedDate: now,
+            },
+          })
+        }
+      }
     }
-    const fields = childArray(body, 'fields')
-    const named = fields.filter(
-      (f): f is Json => isObject(f) && decrypt(prop(f, 'name')) === target.name,
-    )
-    // 和读取时一样认第一个有值的同名字段；都没有值时取第一个不是关联字段的
-    const field =
-      named.find((f) => isEnc(prop(f, 'value'))) ?? named.find((f) => fieldType(f) !== LINKED_FIELD)
-    if (!field) {
-      fields.push({
-        type: HIDDEN_FIELD,
-        name: enc(target.name, key),
-        value: enc(value, key),
-        linkedId: null,
-      })
-      continue
-    }
-    const oldPlain = decrypt(prop(field, 'value'))
-    if (oldPlain === value) continue
-    setProp(field, 'value', enc(value, key))
-    if (fieldType(field) === HIDDEN_FIELD && oldPlain) {
-      fieldEntries.push({ password: enc(`${target.name}: ${oldPlain}`, key), lastUsedDate: now })
-    }
+    changed = true
   }
+  if (!changed) return null
 
-  // 官方客户端先插旧密码，再逐个插隐藏字段，都插在最前面
-  const added = [...fieldEntries.reverse(), ...(passwordEntry ? [passwordEntry] : [])]
+  // 逐个插在最前面：条目里靠后的字段最后插，排在最前
+  const added = [
+    ...fieldEntries.sort((a, b) => b.index - a.index).map((f) => f.entry),
+    ...(passwordEntry ? [passwordEntry] : []),
+  ]
   if (added.length) {
     const existing = prop(body, 'passwordHistory')
     const history = [...added, ...(Array.isArray(existing) ? existing : [])]

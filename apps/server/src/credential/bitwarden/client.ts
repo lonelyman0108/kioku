@@ -11,6 +11,7 @@ import {
 import { loggableError } from '../../db/client'
 import {
   badResponse,
+  CLIENT_NAME,
   formatLogged,
   prop,
   requireStr,
@@ -38,7 +39,7 @@ import {
   type VaultTwoFactorProvider,
 } from './types'
 import { decodeItem, decodeSync, decodeSyncItems, type SyncedState } from './vault'
-import { checkChanges, checkNewItem, newCipherBody, updatedCipherBody } from './write'
+import { checkNewItem, checkType, newCipherBody, updatedCipherBody, writeValues } from './write'
 
 export type { VaultDiagnostic } from './http'
 
@@ -55,7 +56,7 @@ export interface VaultClientOptions {
 const defaultLog = (diagnostic: VaultDiagnostic) => console.warn('密码库请求', diagnostic)
 
 // 身份服务认的客户端：client_id 与设备类型照官方命令行（LinuxCLI），设备名写 Kioku
-const CLIENT_ID = 'cli'
+const CLIENT_ID = CLIENT_NAME
 const DEVICE_TYPE = '25'
 const DEVICE_NAME = 'Kioku'
 const SCOPE = 'api offline_access'
@@ -227,16 +228,23 @@ const reauth = () => new VaultError('reauth_required', '密码库的登录已失
 
 const readOnly = () => new VaultError('read_only', '集合只读：专用账号没有这个集合的编辑权限')
 const conflict = () => new VaultError('item_conflict', '条目已在别处修改过，请重新读取后再改')
-const COLLECTION_UNAVAILABLE = '集合不可用：专用账号不在这个集合里，或者无法解开它'
+// 集合不在同步里（被删了、账号被移出了，或者解不开）：种类照样是 read_only，文字不让人去改权限
+const collectionUnavailable = () =>
+  new VaultError('read_only', '集合不可用：集合已被删除、专用账号不在这个集合里，或者无法解开它')
 
 const JSON_BODY = { 'content-type': 'application/json; charset=utf-8' }
 
 // 写入被拒时服务端的说明。Vaultwarden：Cipher is not write accessible、No rights to modify the collection、
-// You don't have permission to ...、Invalid collection ID provided、The client copy of this cipher is out of date、
-// Cipher doesn't exist；官方服务：You do not have permissions to edit this、The cipher you are updating is out of date
-const READ_ONLY_MESSAGE = /not write accessible|no rights to modify|permission|invalid collection/i
+// You don't have permission to ...、Invalid collection ID provided（集合被删了，或者账号被移出了集合）、
+// The client copy of this cipher is out of date、Cipher doesn't exist；官方服务：You do not have permissions to edit this、
+// The cipher you are updating is out of date、Cannot edit item. Update to the latest version of Bitwarden and try again
+const READ_ONLY_MESSAGE = /not write accessible|no rights to modify|permission/i
+const COLLECTION_GONE_MESSAGE = /invalid collection/i
 const CONFLICT_MESSAGE = /out of date/i
 const MISSING_MESSAGE = /doesn't exist|does not exist|not found/i
+const CLIENT_TOO_OLD_MESSAGE = /update to the latest version/i
+const CLIENT_TOO_OLD =
+  '密码库拒绝修改这个条目：带通行密钥或条目密钥的条目要求更新的客户端版本，Kioku 需要升级'
 
 function checkId(id: string): void {
   if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
@@ -269,6 +277,8 @@ class Session implements VaultSession {
   private pending: Promise<Refreshed> | null = null
   // 正在进行的保存刷新令牌
   private saving: Promise<void> | null = null
+  // 这个会话新建的条目所在的集合，按条目 id：下一次同步之前取它们时用
+  private readonly createdCollections = new Map<string, string[]>()
 
   constructor(
     private readonly http: HttpOptions,
@@ -304,12 +314,12 @@ class Session implements VaultSession {
     const { json, state } = await this.withAccess((access, fresh) =>
       this.fetchCipher(access, fresh, id),
     )
-    return this.decoded(json, state, [])
+    return this.decoded(json, state)
   }
 
   async createItem(input: VaultNewItem): Promise<VaultItem> {
     // 字段不对时在发请求之前报错
-    checkNewItem(input)
+    const values = checkNewItem(input)
     await this.saveRefreshToken()
     return this.withAccess(async (access, fresh) => {
       let state = access.state
@@ -318,18 +328,19 @@ class Session implements VaultSession {
           (c) => c.id === input.collectionId && c.organizationId === input.organizationId,
         )
       let collection = find(state)
-      // 上次同步之后才分到的集合：重新同步一次。刚换令牌时已经同步过，不再同步第二次
-      if (!collection && !fresh) {
+      // 缓存里没有这个集合（上次同步之后才分到的），或者缓存说只读（之后可能改成了可以编辑）：重新同步一次再看。
+      // 刚换令牌时已经同步过，不再同步第二次
+      if ((!collection || collection.readOnly) && !fresh) {
         const synced = await this.sync(access)
         if (!synced) return null
         state = synced.state
         collection = find(state)
       }
-      if (!collection) throw new VaultError('read_only', COLLECTION_UNAVAILABLE)
+      if (!collection) throw collectionUnavailable()
       if (collection.readOnly) throw readOnly()
-      const orgKey = state.orgKeys.get(input.organizationId)
-      if (!orgKey) throw new VaultError('read_only', COLLECTION_UNAVAILABLE)
-      const body = newCipherBody(input, orgKey, state.snapshot.account.userId)
+      // 同步只列出解得开的集合，组织密钥一定在
+      const orgKey = state.orgKeys.get(input.organizationId)!
+      const body = newCipherBody(input, values, orgKey, state.snapshot.account.userId)
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/create`, {
         method: 'POST',
         headers: { authorization: `Bearer ${access.token}`, ...JSON_BODY },
@@ -337,7 +348,11 @@ class Session implements VaultSession {
       })
       if (res.status === 401) return null
       if (res.status !== 200) throw this.writeRejected(res, 'cipher_create')
-      return this.decoded(res.json, state, [input.collectionId])
+      const item = this.decoded(res.json, state)
+      if (item.collectionIds.length === 0) item.collectionIds = [input.collectionId]
+      // 下一次同步之前取这个条目时，Vaultwarden 的单个条目不带集合，同步的缓存里也还没有它
+      this.createdCollections.set(item.id, item.collectionIds)
+      return item
     })
   }
 
@@ -348,35 +363,29 @@ class Session implements VaultSession {
   ): Promise<VaultItem> {
     checkId(id)
     // 类型要取到条目才知道，这里先查字段的写法
-    checkChanges(changes, null)
+    const values = writeValues(changes.values ?? {}, null)
     await this.saveRefreshToken()
     return this.withAccess(async (access, fresh) => {
       const fetched = await this.fetchCipher(access, fresh, id)
       if (!fetched) return null
       const { json, state } = fetched
-      const current = this.decoded(json, state, [])
+      const current = this.decoded(json, state)
       if (current.revisionDate !== expectedRevisionDate) throw conflict()
-      // 服务端给的 edit 为 false，或者条目所在的集合都只读：改不了
-      const collections = current.collectionIds.map((cid) =>
-        state.snapshot.collections.find((c) => c.id === cid),
-      )
-      if (
-        prop(json, 'edit') === false ||
-        (collections.length > 0 && collections.every((c) => c?.readOnly === true))
-      ) {
-        throw readOnly()
-      }
+      checkType(values, current.type)
+      if (!this.editable(json, current, state)) throw readOnly()
       const body = formatLogged(this.http, 'cipher', () =>
         updatedCipherBody({
           raw: json,
-          type: current.type,
-          changes,
+          name: changes.name,
+          values,
           // decodeItem 解开了，组织密钥一定在
           orgKey: state.orgKeys.get(current.organizationId)!,
           userId: state.snapshot.account.userId,
           now: new Date(this.now()).toISOString(),
         }),
       )
+      // 什么都没变：不发修改，免得服务端改了修改时间
+      if (!body) return current
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
         method: 'PUT',
         headers: { authorization: `Bearer ${access.token}`, ...JSON_BODY },
@@ -385,8 +394,21 @@ class Session implements VaultSession {
       if (res.status === 401) return null
       if (res.status !== 200) throw this.writeRejected(res, 'cipher_update')
       // 修改不动集合：响应里没有集合时用原来的
-      return this.decoded(res.json, state, current.collectionIds)
+      const item = this.decoded(res.json, state)
+      if (item.collectionIds.length === 0) item.collectionIds = current.collectionIds
+      return item
     })
+  }
+
+  // 能不能改：以刚取到的条目的 edit 为准（缓存的集合权限可能过时）；服务端没给 edit 时看缓存里条目所在的集合，
+  // 都只读才算改不了。不知道条目在哪些集合时不据此判断，交给服务端
+  private editable(json: unknown, item: VaultItem, state: SyncedState): boolean {
+    const edit = prop(json, 'edit')
+    if (typeof edit === 'boolean') return edit
+    const collections = item.collectionIds.map((cid) =>
+      state.snapshot.collections.find((c) => c.id === cid),
+    )
+    return collections.length === 0 || !collections.every((c) => c?.readOnly === true)
   }
 
   // 取一个条目的原始响应；为没见过的组织重新同步。401 返回 null
@@ -420,12 +442,14 @@ class Session implements VaultSession {
     return { json: res.json, state: access.state }
   }
 
-  // 解开条目。Vaultwarden 给非管理员的单个条目不带集合：用同步时的，同步里也没有时用 fallback
-  private decoded(json: unknown, state: SyncedState, fallback: string[]): VaultItem {
+  // 解开条目。Vaultwarden 给非管理员的单个条目不带集合：用同步时的；同步里还没有的（这个会话刚建的）用建时记下的
+  private decoded(json: unknown, state: SyncedState): VaultItem {
     const item = formatLogged(this.http, 'cipher', () => decodeItem(json, state))
     if (item.collectionIds.length === 0) {
       const synced = state.snapshot.items.find((i) => i.id === item.id)?.collectionIds ?? []
-      item.collectionIds = synced.length ? synced : [...fallback]
+      item.collectionIds = [
+        ...(synced.length ? synced : (this.createdCollections.get(item.id) ?? [])),
+      ]
     }
     return item
   }
@@ -433,20 +457,26 @@ class Session implements VaultSession {
   // 写入被拒。按服务端的说明分出只读与冲突；说明只用来分类，不进错误与日志
   private writeRejected(res: HttpResponse, endpoint: string): VaultError {
     const message = str(res.json, 'message') ?? ''
-    if (res.status === 400 && CONFLICT_MESSAGE.test(message)) {
-      this.http.log({ what: 'rejected', status: res.status, endpoint, problem: 'conflict' })
-      return conflict()
+    const rejected = (problem: string, err: VaultError) => {
+      this.http.log({ what: 'rejected', status: res.status, endpoint, problem })
+      return err
+    }
+    if (res.status === 400 && CONFLICT_MESSAGE.test(message))
+      return rejected('conflict', conflict())
+    if (res.status === 400 && CLIENT_TOO_OLD_MESSAGE.test(message)) {
+      return rejected('client_version', new VaultError('server_error', CLIENT_TOO_OLD))
+    }
+    if (res.status === 400 && COLLECTION_GONE_MESSAGE.test(message)) {
+      return rejected('collection', collectionUnavailable())
     }
     if (res.status === 403 || (res.status === 400 && READ_ONLY_MESSAGE.test(message))) {
-      this.http.log({ what: 'rejected', status: res.status, endpoint, problem: 'read_only' })
-      return readOnly()
+      return rejected('read_only', readOnly())
     }
     if (
       endpoint === 'cipher_update' &&
       (res.status === 404 || (res.status === 400 && MISSING_MESSAGE.test(message)))
     ) {
-      this.http.log({ what: 'rejected', status: res.status, endpoint, problem: 'missing' })
-      return new VaultError('item_unavailable', '条目不可用')
+      return rejected('missing', new VaultError('item_unavailable', '条目不可用'))
     }
     return unexpectedStatus(this.http, res.status)
   }

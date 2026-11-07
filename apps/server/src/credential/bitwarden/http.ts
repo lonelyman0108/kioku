@@ -149,6 +149,12 @@ async function readBody(http: HttpOptions, res: Response, signal: AbortSignal): 
   }
 }
 
+// 每个请求都带上客户端的名字与版本。官方服务修改带通行密钥或条目密钥的条目时，没有这两个头或版本太旧就拒绝
+// （Cannot edit item. Update to the latest version）；Vaultwarden 按版本决定同步里给不给 SSH 密钥条目。
+// 名字和登录用的 client_id 一致，版本是测试里对照的官方 bw 命令行的版本
+export const CLIENT_NAME = 'cli'
+export const CLIENT_VERSION = '2026.10.0'
+
 export async function vaultRequest(
   http: HttpOptions,
   url: string,
@@ -160,7 +166,12 @@ export async function vaultRequest(
   try {
     res = await http.fetch(url, {
       method: init.method,
-      headers: { accept: 'application/json', ...init.headers },
+      headers: {
+        accept: 'application/json',
+        'bitwarden-client-name': CLIENT_NAME,
+        'bitwarden-client-version': CLIENT_VERSION,
+        ...init.headers,
+      },
       ...(init.body === undefined ? {} : { body: init.body }),
       redirect: 'manual',
       signal,

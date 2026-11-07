@@ -332,6 +332,53 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
     expect((await fresh.snapshot()).items).toHaveLength(count)
   }, 60_000)
 
+  it('同一账号一个集合可以编辑、一个只能查看；改成可以编辑之后，不等令牌刷新就能写', async () => {
+    const account = await registerAccount(url, `mixed-${randomUUID().slice(0, 8)}@example.com`, {
+      kind: 'pbkdf2',
+      iterations: 600_000,
+    })
+    const { agentCollection: agent, otherCollection: other } = seed
+    await addMember(url, seed.member, seed.org, account, 2, [agent, other], { writable: [agent] })
+    const logs: VaultDiagnostic[] = []
+    const session = await sessionFor(account, (d) => logs.push(d))
+    const snapshot = await session.snapshot()
+    expect(new Map(snapshot.collections.map((c) => [c.id, c.readOnly]))).toEqual(
+      new Map([
+        [agent, false],
+        [other, true],
+      ]),
+    )
+    const note = (collectionId: string) =>
+      session.createItem({
+        organizationId: seed.org.id,
+        collectionId,
+        type: 'note',
+        name: 'mixed',
+        values: { notes: 'x' },
+      })
+    expect((await note(agent)).collectionIds).toEqual([agent])
+    expect(await kindOf(note(other))).toBe('read_only')
+    const hidden = await session.item(seed.items.hidden)
+    expect(hidden.collectionIds).toEqual([other])
+    expect(
+      await kindOf(session.updateItem(hidden.id, { values: { notes: 'x' } }, hidden.revisionDate)),
+    ).toBe('read_only')
+    // 都是发请求之前拦下的
+    expect(logs).toEqual([])
+
+    await setMemberCollections(url, seed.member, seed.org, account, [agent, other], false)
+    // 同一个会话，缓存里 Private 还是只读：修改以刚取到的 edit 为准，新建先重新同步
+    const updated = await session.updateItem(
+      hidden.id,
+      { values: { notes: 'now writable' } },
+      hidden.revisionDate,
+    )
+    expect(updated.values.notes).toBe('now writable')
+    expect((await bwGet(hidden.id)).notes).toBe('now writable')
+    expect((await note(other)).collectionIds).toEqual([other])
+    expect(logs).toEqual([])
+  }, 90_000)
+
   it('有条目密钥的条目：用条目密钥加密，bw 读回正确', async () => {
     const id = seed.items.itemKey
     const stored = await raw(id)

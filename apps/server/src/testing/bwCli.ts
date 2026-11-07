@@ -125,12 +125,12 @@ export async function startBw(upstream: string, cipherKeys = false): Promise<BwC
     NODE_EXTRA_CA_CERTS: proxy.caFile,
     BW_NOINTERACTION: 'true',
   }
-  const run = (args: string[], input?: string) =>
+  const run = (args: string[], input?: string, extraEnv: Record<string, string> = {}) =>
     new Promise<string>((resolve, reject) => {
       const child = execFile(
         'bw',
         [...args, ...(session ? ['--session', session] : [])],
-        { env, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 },
+        { env: { ...env, ...extraEnv }, timeout: 60_000, maxBuffer: 16 * 1024 * 1024 },
         (err, stdout, stderr) => {
           if (err) reject(new Error(`bw ${args[0]} 失败：${stderr || stdout}`))
           else resolve(stdout)
@@ -144,7 +144,12 @@ export async function startBw(upstream: string, cipherKeys = false): Promise<BwC
     run,
     async login(email, password) {
       session = null
-      session = (await run(['login', email, password, '--raw'])).trim()
+      // 主密码经环境变量给：随机生成的密码可能以 - 开头，写在参数里会被当成选项
+      session = (
+        await run(['login', email, '--passwordenv', 'BW_TEST_PASSWORD', '--raw'], undefined, {
+          BW_TEST_PASSWORD: password,
+        })
+      ).trim()
       await run(['sync'])
     },
     async close() {

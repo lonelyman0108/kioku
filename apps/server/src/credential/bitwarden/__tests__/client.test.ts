@@ -6,7 +6,7 @@ import { describe, expect, it, vi } from 'vitest'
 
 import { createVaultClient, type VaultClientOptions } from '../client'
 import { decryptBytes, decryptText, encryptText, splitKey, type SymmetricKey } from '../crypto'
-import { vaultEndpoints } from '../http'
+import { CLIENT_VERSION, vaultEndpoints } from '../http'
 import {
   VaultError,
   type VaultLoginInput,
@@ -1195,6 +1195,12 @@ describe('写入', () => {
     ],
   }
   const createdLoginPath = `/api/ciphers/${fixture.items.createdLogin}`
+  // 服务端没给 edit 的条目
+  const omitEdit = (body: Body) => {
+    const copy: Record<string, unknown> = { ...body }
+    delete copy.edit
+    return copy
+  }
   const withGet =
     (raw: unknown, path = createdLoginPath): Override =>
     (call) =>
@@ -1388,7 +1394,28 @@ describe('写入', () => {
     expect(strip(sent)).toEqual(strip(raw))
   })
 
-  it('值没变的字段不换密文，也不记历史', async () => {
+  it('什么都没变时不发修改，返回现在的条目', async () => {
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const { session, calls } = writer('writer.update')
+    const current = await session.item(fixture.items.createdLogin)
+    for (const changes of [
+      {
+        name: 'kioku login',
+        values: {
+          'login.password': fixture.writes.createLogin['login.password']!,
+          'login.username': fixture.writes.createLogin['login.username']!,
+        },
+      },
+      {},
+      { values: {} },
+    ]) {
+      const item = await session.updateItem(fixture.items.createdLogin, changes, raw.revisionDate)
+      expect(item).toEqual(current)
+    }
+    expect(writeCalls(calls)).toHaveLength(0)
+  })
+
+  it('改了一项时，值没变的别的字段不换密文，也不记历史', async () => {
     const raw = recorded('writer.update', 'GET', createdLoginPath)
     const { session, calls } = writer('writer.update')
     await session.updateItem(
@@ -1398,11 +1425,13 @@ describe('写入', () => {
         values: {
           'login.password': fixture.writes.createLogin['login.password']!,
           'login.username': fixture.writes.createLogin['login.username']!,
+          notes: 'changed',
         },
       },
       raw.revisionDate,
     )
     const sent = sentBody(calls, 'PUT')
+    expect(dec(sent.notes)).toBe('changed')
     expect(sent.name).toBe(raw.name)
     expect(sent.login.password).toBe(raw.login.password)
     expect(sent.login.username).toBe(raw.login.username)
@@ -1464,6 +1493,66 @@ describe('写入', () => {
     expect(history.map((h) => dec(h.password))).toEqual(['api token: old-token'])
   })
 
+  it('几个隐藏字段改了时，按字段在条目里的顺序逐个插到最前面（同官方客户端），旧密码在它们后面', async () => {
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const e = (v: string) => encryptText(v, orgKey)
+    raw.fields = [
+      { type: 1, name: e('a'), value: e('old-a'), linkedId: null },
+      { type: 1, name: e('b'), value: e('old-b'), linkedId: null },
+    ]
+    const { session, calls } = writer('writer.update', { override: withGet(raw) })
+    await session.updateItem(
+      fixture.items.createdLogin,
+      { values: { 'field:b': 'new-b', 'login.password': 'new-password', 'field:a': 'new-a' } },
+      raw.revisionDate,
+    )
+    const history = sentBody(calls, 'PUT').passwordHistory!
+    expect(history.map((h) => dec(h.password))).toEqual([
+      'b: old-b',
+      'a: old-a',
+      fixture.writes.createLogin['login.password'],
+    ])
+  })
+
+  it('加密之后超出服务端的长度上限：发请求之前报 value_too_long，文字不带值', async () => {
+    const { session, calls } = writer('writer.update')
+    const long = (n: number) => 'x'.repeat(n)
+    const cases: [Partial<VaultNewItem>, string][] = [
+      [{ name: long(700) }, '名称'],
+      [{ values: { 'login.username': long(700) } }, '用户名'],
+      [{ values: { 'login.password': long(3700) } }, '密码'],
+      [{ values: { notes: long(7500) } }, '备注'],
+      [{ values: { 'field:token': long(3700) } }, '自定义字段的值'],
+      [{ values: { [`field:${long(700)}`]: 'v' } }, '自定义字段名'],
+      [{ uris: [{ uri: long(7500), autofill: true }] }, '网址'],
+    ]
+    for (const [change, label] of cases) {
+      const err = await errorOf(session.createItem({ ...loginItem, ...change }))
+      expect(err.kind).toBe('value_too_long')
+      expect(err.message).toContain(label)
+      expect(err.message).not.toContain('xxxx')
+    }
+    // 不到上限的照常
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    expect(
+      await kindOf(
+        session.updateItem(
+          fixture.items.createdLogin,
+          { values: { notes: long(7500) } },
+          raw.revisionDate,
+        ),
+      ),
+    ).toBe('value_too_long')
+    expect(writeCalls(calls)).toHaveLength(0)
+    const ok = await session.updateItem(
+      fixture.items.createdLogin,
+      { values: { notes: long(7000) } },
+      raw.revisionDate,
+    )
+    expect(ok.id).toBe(fixture.items.createdLogin)
+    expect(writeCalls(calls)).toHaveLength(1)
+  })
+
   it('有条目密钥的条目用条目密钥加密，条目密钥原样带回', async () => {
     const path = `/api/ciphers/${fixture.items.itemKey}`
     const raw = recorded('writer.updateItemKey', 'GET', path)
@@ -1500,11 +1589,13 @@ describe('写入', () => {
     const notEditable = writer('writer.update', { override: withGet({ ...raw, edit: false }) })
     const readOnlySync = syncBody('writer') as unknown as { collections: { readOnly: boolean }[] }
     for (const c of readOnlySync.collections) c.readOnly = true
+    // 服务端没给 edit 时才看缓存里的集合
+    const withoutEdit = omitEdit(raw)
     const readOnlyCollections = writer('writer.update', {
       override: (call) =>
         call.url.pathname === '/api/sync'
           ? json(200, readOnlySync)
-          : withGet({ ...raw, edit: true })(call, undefined),
+          : withGet(withoutEdit)(call, undefined),
     })
     for (const { session, calls } of [notEditable, readOnlyCollections]) {
       expect(
@@ -1531,6 +1622,127 @@ describe('写入', () => {
       ),
     ).toBe('read_only')
     expect(writeCalls(viewer.calls)).toHaveLength(0)
+  })
+
+  it('缓存说只读、刚取到的条目 edit 为 true：照常修改；不知道条目在哪些集合时不据缓存判只读', async () => {
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const readOnlySync = syncBody('writer') as unknown as {
+      collections: { readOnly: boolean }[]
+      ciphers: { id: string }[]
+    }
+    for (const c of readOnlySync.collections) c.readOnly = true
+    const withoutEdit = omitEdit(raw)
+    for (const got of [
+      { ...raw, edit: true },
+      { ...withoutEdit, collectionIds: [] },
+    ]) {
+      const { session, calls } = writer('writer.update', {
+        override: (call) =>
+          call.url.pathname === '/api/sync'
+            ? json(200, readOnlySync)
+            : withGet(got)(call, undefined),
+      })
+      expect((await session.snapshot()).collections.every((c) => c.readOnly)).toBe(true)
+      const item = await session.updateItem(
+        fixture.items.createdLogin,
+        { values: fixture.writes.update },
+        raw.revisionDate,
+      )
+      expect(item.values['login.password']).toBe(fixture.writes.update['login.password'])
+      expect(writeCalls(calls)).toHaveLength(1)
+    }
+  })
+
+  it('缓存说集合只读时，新建先重新同步一次：已经改成可以编辑就照常新建', async () => {
+    const readOnlySync = syncBody('writer') as unknown as { collections: { readOnly: boolean }[] }
+    for (const c of readOnlySync.collections) c.readOnly = true
+    let syncs = 0
+    const { session, calls } = writer('writer.createLogin', {
+      override: (call) => {
+        if (call.url.pathname !== '/api/sync') return undefined
+        syncs++
+        return syncs === 1 ? json(200, readOnlySync) : undefined
+      },
+    })
+    await session.snapshot()
+    expect((await session.createItem(loginItem)).id).toBe(fixture.items.createdLogin)
+    expect(syncs).toBe(2)
+    expect(writeCalls(calls)).toHaveLength(1)
+    // 重新同步之后还是只读：不发请求
+    const still = writer('writer.createLogin', {
+      override: (call) => (call.url.pathname === '/api/sync' ? json(200, readOnlySync) : undefined),
+    })
+    await still.session.snapshot()
+    expect(await kindOf(still.session.createItem(loginItem))).toBe('read_only')
+    expect(writeCalls(still.calls)).toHaveLength(0)
+  })
+
+  it('新建之后马上取、马上改：单个条目与同步都不带集合时，用新建时记下的集合', async () => {
+    const created = recorded('writer.createLogin', 'POST', '/api/ciphers/create')
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const withoutEdit = omitEdit(raw)
+    const { session, calls } = writer('writer.createLogin', {
+      scenarios: ['writer.session', 'writer.createLogin', 'writer.update'],
+      override: (call) => {
+        if (call.url.pathname === '/api/ciphers/create') {
+          return json(200, { ...created, collectionIds: [] })
+        }
+        if (call.init.method === 'PUT') {
+          return json(200, {
+            ...recorded('writer.update', 'PUT', createdLoginPath),
+            collectionIds: [],
+          })
+        }
+        return withGet({ ...withoutEdit, collectionIds: [] })(call, undefined)
+      },
+    })
+    const item = await session.createItem(loginItem)
+    expect(item.collectionIds).toEqual([fixture.collections.agent])
+    expect((await session.item(item.id)).collectionIds).toEqual([fixture.collections.agent])
+    const updated = await session.updateItem(
+      item.id,
+      { values: fixture.writes.update },
+      raw.revisionDate,
+    )
+    expect(updated.collectionIds).toEqual([fixture.collections.agent])
+    expect(writeCalls(calls)).toHaveLength(2)
+  })
+
+  it('每个请求都带客户端的名字与版本；官方服务嫌版本旧时报说得清的错误', async () => {
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const { session, calls } = writer('writer.update', {
+      override: (call) =>
+        call.init.method === 'PUT'
+          ? json(400, {
+              message: 'Cannot edit item. Update to the latest version of Bitwarden and try again.',
+            })
+          : undefined,
+    })
+    const err = await errorOf(
+      session.updateItem(fixture.items.createdLogin, { values: { notes: 'x' } }, raw.revisionDate),
+    )
+    expect(err.kind).toBe('server_error')
+    expect(err.message).toContain('客户端版本')
+    expect(err.message).not.toContain('Cannot edit')
+    expect(calls.length).toBeGreaterThan(2)
+    for (const call of calls) {
+      const headers = call.init.headers as Record<string, string>
+      expect(headers['bitwarden-client-name']).toBe('cli')
+      expect(headers['bitwarden-client-version']).toBe(CLIENT_VERSION)
+    }
+  })
+
+  it('集合被删、账号被移出集合（Invalid collection ID）：种类是 read_only，文字说集合不可用', async () => {
+    const { session } = writer('writer.createLogin', {
+      override: (call) =>
+        call.url.pathname === '/api/ciphers/create'
+          ? json(400, { message: 'Invalid collection ID provided' })
+          : undefined,
+    })
+    const err = await errorOf(session.createItem(loginItem))
+    expect(err.kind).toBe('read_only')
+    expect(err.message).toContain('集合不可用')
+    expect(err.message).not.toContain('只读')
   })
 
   it('服务端拒绝写入：Vaultwarden 与官方服务的说法分别映射成 read_only、item_conflict、item_unavailable；说明不进错误与日志', async () => {
