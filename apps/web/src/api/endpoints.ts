@@ -20,6 +20,7 @@ import {
   ConversationDetail,
   ConversationList,
   ConvertedToCredential,
+  CreatedCredential,
   CredentialEventList,
   CredentialReferenceList,
   CredentialValueMatches,
@@ -72,6 +73,7 @@ import {
   SubjectDetail,
   SubjectInfo,
   SubjectList,
+  VaultCheckResult,
   VaultConnectResult,
   VaultConnection,
   VaultConnectionList,
@@ -85,6 +87,7 @@ import {
   type CreateAppRequest,
   type ConnectVaultRequest,
   type CreateCredentialRequest,
+  type CredentialListQuery,
   type CreateKeyRequest,
   type ConsoleCreateMemoryRequest,
   type MatchCredentialValuesRequest,
@@ -105,6 +108,7 @@ import {
   type UpdateAppRequest,
   type UpdateBackupSettings,
   type ReconnectVaultRequest,
+  type SetVaultDestinationRequest,
   type UpdateCredentialRequest,
   type UpdateEmbeddingSettings,
   type UpdateExtractionSettings,
@@ -284,8 +288,12 @@ export const api = {
       schema: ConvertedToCredential,
     }),
 
-  credentials: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/credentials`, { schema: ConsoleCredentialList }),
+  // attention：只列待处理的「凭据」一类（快到期、已到期、需要轮换），和条数同一个条件
+  credentials: (spaceId: string, query: CredentialListQuery = {}) =>
+    request('GET', `/spaces/${spaceId}/credentials`, {
+      query: { attention: query.attention },
+      schema: ConsoleCredentialList,
+    }),
   // 按值查找同值的凭据与密码库条目：值只在请求体里，结果不进缓存
   matchCredentialValues: (spaceId: string, body: MatchCredentialValuesRequest) =>
     request('POST', `/spaces/${spaceId}/credentials/match`, {
@@ -297,7 +305,7 @@ export const api = {
   credential: (spaceId: string, id: string) =>
     request('GET', `/spaces/${spaceId}/credentials/${id}`, { schema: ConsoleCredential }),
   createCredential: (spaceId: string, body: CreateCredentialRequest) =>
-    request('POST', `/spaces/${spaceId}/credentials`, { body, schema: ConsoleCredential }),
+    request('POST', `/spaces/${spaceId}/credentials`, { body, schema: CreatedCredential }),
   updateCredential: (spaceId: string, id: string, body: UpdateCredentialRequest) =>
     request('PATCH', `/spaces/${spaceId}/credentials/${id}`, { body, schema: ConsoleCredential }),
   deleteCredential: (spaceId: string, id: string, expectedVersion: number) =>
@@ -308,9 +316,10 @@ export const api = {
     }),
   revealCredential: (spaceId: string, id: string) =>
     request('POST', `/spaces/${spaceId}/credentials/${id}/reveal`, { schema: CredentialValues }),
-  credentialEvents: (spaceId: string, id: string, cursor?: string) =>
+  // sinceValueChange：只列上次改值以来交出值的访问事件
+  credentialEvents: (spaceId: string, id: string, cursor?: string, sinceValueChange = false) =>
     request('GET', `/spaces/${spaceId}/credentials/${id}/events`, {
-      query: { cursor },
+      query: { cursor, sinceValueChange: sinceValueChange ? 'true' : undefined },
       schema: CredentialEventList,
     }),
   credentialReferences: (spaceId: string, id: string) =>
@@ -329,7 +338,7 @@ export const api = {
     }),
   checkVault: (spaceId: string, id: string) =>
     request('POST', `/spaces/${spaceId}/vault-connections/${id}/check`, {
-      schema: VaultConnection,
+      schema: VaultCheckResult,
     }),
   disconnectVault: (spaceId: string, id: string) =>
     request('POST', `/spaces/${spaceId}/vault-connections/${id}/disconnect`, {
@@ -337,6 +346,16 @@ export const api = {
     }),
   vaultItems: (spaceId: string, id: string) =>
     request('GET', `/spaces/${spaceId}/vault-connections/${id}/items`, { schema: VaultItemList }),
+  // 新凭据的去处：设在一个连接上，同一个成员别的连接上的去处一起清掉；响应是这个成员的全部连接
+  setVaultDestination: (spaceId: string, id: string, body: SetVaultDestinationRequest) =>
+    request('PUT', `/spaces/${spaceId}/vault-connections/${id}/destination`, {
+      body,
+      schema: VaultConnectionList,
+    }),
+  clearVaultDestination: (spaceId: string, id: string) =>
+    request('DELETE', `/spaces/${spaceId}/vault-connections/${id}/destination`, {
+      schema: VaultConnectionList,
+    }),
 
   overview: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/overview`, { schema: SpaceOverview }),

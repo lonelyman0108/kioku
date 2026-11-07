@@ -93,7 +93,7 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
     identifier,
     name: '文件服务器',
     description: '管理后台的登录账号',
-    source: { kind: 'hosted', values: { username: 'alice', password: PASSWORD, ...values } },
+    source: { kind: 'new', values: { username: 'alice', password: PASSWORD, ...values } },
   })
   const createCredential = async (body: unknown, cookie = ws.cookie) =>
     ok<ConsoleCredential>(await asMember('POST', '/credentials', body, cookie), 201)
@@ -573,6 +573,16 @@ describe.skipIf(!testDatabaseUrl)('凭据', () => {
         values: { password: null, token: 'tok' },
       })
       expect(updated.text).toBe('已修改凭据 mail（邮箱）：Kioku 托管，字段 token，版本 2')
+      // 同样的值再存一次：什么都没改，如实说没有改动，版本号不变
+      const unchanged = await callTool(key, 'kioku_credential_save', {
+        identifier: 'mail',
+        expected_version: 2,
+        values: { token: 'tok' },
+      })
+      expect(unchanged).toEqual({
+        text: '凭据 mail（邮箱）没有改动：内容与现在的相同，版本 2',
+        isError: false,
+      })
       expect((await callTool(key, 'kioku_credential_delete', { identifier: 'mail' })).text).toBe(
         '已删除凭据 mail',
       )

@@ -5,6 +5,12 @@ export function unavailableVaultClient(): VaultClient {
   const fail = () => Promise.reject(new VaultError('unreachable', '未配置密码库客户端'))
   return {
     login: fail,
-    session: () => ({ snapshot: fail, item: fail, items: fail }),
+    session: () => ({
+      snapshot: fail,
+      item: fail,
+      items: fail,
+      createItem: fail,
+      updateItem: fail,
+    }),
   }
 }

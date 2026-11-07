@@ -81,7 +81,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
   const hostedCredential = (identifier: string, appIds?: string[]) => ({
     identifier,
     name: '文件服务器',
-    source: { kind: 'hosted', values: { username: 'alice', password: PASSWORD } },
+    source: { kind: 'new', values: { username: 'alice', password: PASSWORD } },
     ...(appIds ? { appIds } : {}),
   })
   async function credential(body: unknown, cookie = ws.cookie) {
@@ -575,7 +575,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       const hidden = await credential({
         identifier: 'hidden',
         name: '只给 A',
-        source: { kind: 'hosted', values: { password: 'only-for-a' } },
+        source: { kind: 'new', values: { password: 'only-for-a' } },
         appIds: [appA.id],
       })
       await ok(

@@ -7,7 +7,16 @@ import { VaultError } from './types'
 // 内部日志里记的细节：哪一类问题，加上状态码、连接错误的代码，或者哪个接口的响应缺了什么（只有字段名，不带正文）。
 // error 是 onSecretsChanged 抛的错误经 loggableError 处理之后的样子
 export interface VaultDiagnostic {
-  what: 'connect' | 'timeout' | 'redirect' | 'status' | 'too_large' | 'format' | 'secrets_not_saved'
+  what:
+    | 'connect'
+    | 'timeout'
+    | 'redirect'
+    | 'status'
+    | 'too_large'
+    | 'format'
+    | 'secrets_not_saved'
+    | 'rejected'
+    | 'history_skipped'
   status?: number
   code?: string
   endpoint?: string
@@ -141,10 +150,16 @@ async function readBody(http: HttpOptions, res: Response, signal: AbortSignal): 
   }
 }
 
+// 每个请求都带上客户端的名字与版本。官方服务修改带通行密钥或条目密钥的条目时，没有这两个头或版本太旧就拒绝
+// （Cannot edit item. Update to the latest version）；Vaultwarden 按版本决定同步里给不给 SSH 密钥条目。
+// 名字和登录用的 client_id 一致，版本是测试里对照的官方 bw 命令行的版本
+export const CLIENT_NAME = 'cli'
+export const CLIENT_VERSION = '2026.10.0'
+
 export async function vaultRequest(
   http: HttpOptions,
   url: string,
-  init: { method: 'GET' | 'POST'; headers?: Record<string, string>; body?: string },
+  init: { method: 'GET' | 'POST' | 'PUT'; headers?: Record<string, string>; body?: string },
 ): Promise<HttpResponse> {
   // 计时覆盖读正文：服务器发完响应头之后不再发正文，也按超时算
   const signal = AbortSignal.timeout(http.timeoutMs)
@@ -152,7 +167,12 @@ export async function vaultRequest(
   try {
     res = await http.fetch(url, {
       method: init.method,
-      headers: { accept: 'application/json', ...init.headers },
+      headers: {
+        accept: 'application/json',
+        'bitwarden-client-name': CLIENT_NAME,
+        'bitwarden-client-version': CLIENT_VERSION,
+        ...init.headers,
+      },
       ...(init.body === undefined ? {} : { body: init.body }),
       redirect: 'manual',
       signal,

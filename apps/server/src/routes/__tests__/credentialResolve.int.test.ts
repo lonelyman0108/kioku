@@ -101,7 +101,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
       await asMember('POST', '/credentials', {
         identifier,
         name: '文件服务器',
-        source: { kind: 'hosted', values: { username: 'alice', password: HOSTED_PASSWORD } },
+        source: { kind: 'new', values: { username: 'alice', password: HOSTED_PASSWORD } },
       }),
       201,
     )
@@ -176,6 +176,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
         { identifier: 'file-server', field: 'username', value: 'alice' },
         { identifier: 'router', field: 'pin', value: '2468' },
       ],
+      expired: [],
     })
     expect(vault.calls.item - before).toBe(1)
 
@@ -192,6 +193,35 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
     expect(await accessEvents(fileServer.id)).toEqual([
       { ...event, fields: ['password', 'username'] },
     ])
+  })
+
+  it('已到期的照常给值，响应里列出是哪几条，一条只列一次', async () => {
+    const expiresAt = new Date(Date.now() - 86_400_000).toISOString()
+    await ok(
+      await asMember('POST', '/credentials', {
+        identifier: 'old',
+        name: '过期的',
+        source: { kind: 'new', values: { a: 'x', b: 'y' } },
+        expiresAt,
+      }),
+      201,
+    )
+    await hosted()
+    const res = await resolve({
+      refs: [
+        { identifier: 'file-server', field: 'password' },
+        { identifier: 'old', field: 'a' },
+        { identifier: 'old', field: 'b' },
+      ],
+    })
+    expect(await ok<ResolvedCredentials>(res)).toMatchObject({
+      values: [
+        { identifier: 'file-server', field: 'password', value: HOSTED_PASSWORD },
+        { identifier: 'old', field: 'a', value: 'x' },
+        { identifier: 'old', field: 'b', value: 'y' },
+      ],
+      expired: [{ identifier: 'old', expiresAt }],
+    })
   })
 
   it('一项不存在、没有这个字段或没有权限时整次失败：不返回值，也不向密码库请求', async () => {
@@ -615,6 +645,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
         { identifier: 'file-server', field: 'password', value: HOSTED_PASSWORD },
         { identifier: 'file-server', field: 'username', value: 'alice' },
       ],
+      expired: [],
     })
     expect((await accessEvents(fileServer.id)).map((e) => e.fields)).toEqual([
       ['password', 'username'],

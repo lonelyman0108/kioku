@@ -388,17 +388,26 @@ function consoleOnlyRoutes(deps: Deps) {
       )
       const body = c.req.valid('json')
       // 去处在事务外准备好：credential 与 vault 要先向密码库核对值，不在事务里请求外部服务
-      const sink = await credentials.convertTarget(body.target, body.value)
-      const { memory, ...outcome } = await service.convertToCredential(
-        { ...body, identifier: sink.identifier, field: sink.field },
-        { create: sink.apply, view: (tx, id) => credentials.viewIn(tx, id) },
+      // 新建的写进密码库之前，先按看到的版本查一遍记忆（只在写条目之前调用），查不过就不留下条目
+      const sink = await credentials.convertTarget(body.target, body.value, (placeholder) =>
+        service.checkConvertible({ ...body, ...placeholder }),
       )
+      // 新建的写进了密码库、转存的事务却失败时，错误带上留在集合里的条目
+      const { memory, ...outcome } = await service
+        .convertToCredential(
+          { ...body, identifier: sink.identifier, field: sink.field },
+          { create: sink.apply, view: (tx, id) => credentials.viewIn(tx, id) },
+        )
+        .catch((err: unknown) => {
+          throw credentials.orphanedConvert(err, sink)
+        })
       // 已经提交了，这里不再做会失败的事。管理界面的服务给出的就是 ConsoleMemoryView（见 ConsoleView）
       return c.json(
         {
           memory: memory as ConsoleMemoryView,
           ...outcome,
           created: sink.created,
+          storedIn: sink.storedIn,
           field: sink.field,
         },
         200,

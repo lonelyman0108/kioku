@@ -21,6 +21,7 @@ const connection = (over: Partial<VaultConnection> = {}): VaultConnection => ({
   lastCheckedAt: null,
   disconnectedAt: null,
   credentialCount: 0,
+  destination: null,
   createdAt: '2026-11-07T00:00:00Z',
   updatedAt: '2026-11-07T00:00:00Z',
   ...over,

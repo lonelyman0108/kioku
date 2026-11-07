@@ -132,6 +132,7 @@ export function decodeSync(json: unknown, userKey: SymmetricKey): SyncedState {
         id: requireStr(col, 'id'),
         organizationId,
         name: decryptText(requireStr(col, 'name'), key),
+        readOnly: prop(col, 'readOnly') === true,
       })
     } catch (err) {
       // 解不开的集合不列；它里面的条目照样按条目自己的情况算
@@ -177,7 +178,37 @@ export function decodeSync(json: unknown, userKey: SymmetricKey): SyncedState {
   }
 }
 
-const isEnc = (value: unknown): value is string => typeof value === 'string' && value !== ''
+export const isEnc = (value: unknown): value is string => typeof value === 'string' && value !== ''
+
+// 自定义字段的类型里的关联字段（3）：没有值，指向登录里的用户名或密码
+const LINKED_FIELD = 3
+
+export interface NamedField {
+  name: string
+  // 在条目的 fields 里的位置
+  index: number
+  field: Record<string, unknown>
+}
+
+// 自定义字段按解开的名字对照，field:<名字> 指向哪一个只在这里定：同名的指向第一个有值的，都没有值时指向第一个
+// 不是关联字段的（修改时往它里面写）。读取与修改共用，读到的和改的才是同一个字段。名字没加密的字段不算
+export function namedFields(fields: unknown, key: SymmetricKey): Map<string, NamedField> {
+  const named = new Map<string, NamedField>()
+  list(fields).forEach((field, index) => {
+    if (!field || typeof field !== 'object' || Array.isArray(field)) return
+    const record = field as Record<string, unknown>
+    const encName = prop(record, 'name')
+    if (!isEnc(encName)) return
+    const name = decryptText(encName, key)
+    const current = named.get(name)
+    const hasValue = isEnc(prop(record, 'value'))
+    if (current && isEnc(prop(current.field, 'value'))) return
+    if (current && !hasValue) return
+    if (!hasValue && Number(prop(record, 'type')) === LINKED_FIELD) return
+    named.set(name, { name, index, field: record })
+  })
+  return named
+}
 
 // 解一个组织里的条目。withValues 为 false 时只解名称与字段名。
 // 卡片、身份、SSH 密钥的专有字段不解，这几类只有备注与自定义字段
@@ -208,11 +239,10 @@ function decodeCipher(
     add('login.totp', prop(login, 'totp'))
   }
   add('notes', prop(cipher, 'notes'))
-  for (const field of list(prop(cipher, 'fields'))) {
-    const name = prop(field, 'name')
-    if (!isEnc(name)) continue
-    add(`field:${decryptText(name, key)}`, prop(field, 'value'))
-  }
+  const named = [...namedFields(prop(cipher, 'fields'), key).values()].sort(
+    (a, b) => a.index - b.index,
+  )
+  for (const { name, field } of named) add(`field:${name}`, prop(field, 'value'))
 
   const summary: VaultItemSummary = {
     id: requireStr(cipher, 'id'),

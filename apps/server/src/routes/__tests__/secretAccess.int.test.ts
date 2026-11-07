@@ -425,7 +425,7 @@ describe.skipIf(!testDatabaseUrl)('查看机密留痕', () => {
       const credential = await send('POST', '/credentials', {
         identifier: 'nas',
         name: 'NAS',
-        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+        source: { kind: 'new', values: { password: 'nas-pass' } },
       })
       expect(credential.status).toBe(201)
       await legacy(m, '旧数据 {{cred:nas#missing-field}}')

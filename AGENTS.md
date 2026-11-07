@@ -51,7 +51,7 @@
 
 - workspace 包以 TS 源码互相引用（`exports` 指向 `src/`），后端用 tsdown 打包时一并打进产物。原因：省掉各包单独构建的步骤。
 - 依赖版本写死、不加 `^`。pnpm 默认拒绝发布不足一天的新版本，遇到时换前一个版本，不要加 `minimumReleaseAgeExclude`。原因：给被投毒的包留出被发现的时间。
-- `sdks/python` 由服务端的 OpenAPI 生成：改了应用调用的接口（Key 鉴权的生命周期、召回、启动加载、记忆、whoami）或它们用到的契约后，跑 `sdks/python/generate.sh`，生成的改动一起提交；门禁会重新生成并比对。合并之后到插件仓库 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins) 用 `scripts/sync-client.sh` 同步一份给 AstrBot 插件。原因：AstrBot 插件用它，接口变了 SDK 没跟上时要到运行时才出错。插件（Claude Code、AstrBot）都在那个仓库里，改生命周期事件的输出格式时要同步看那边的钩子。
+- `sdks/python` 由服务端的 OpenAPI 生成：改了应用调用的接口（Key 鉴权的生命周期、召回、启动加载、记忆、whoami）或它们用到的契约后，跑 `sdks/python/generate.sh`，生成的改动一起提交；门禁会重新生成并比对。合并之后到插件仓库 [kioku-plugins](https://github.com/lonelyman0108/kioku-plugins) 用 `scripts/sync-client.sh` 同步一份给 AstrBot 插件。原因：AstrBot 插件用它，接口变了 SDK 没跟上时要到运行时才出错。插件（Claude Code、AstrBot）都在那个仓库里，改生命周期事件的输出格式时要同步看那边的钩子。取值接口（`POST /v1/credentials/resolve`）不进 SDK，Claude Code 插件的 `kioku run` 自己解析它的响应（`lib/kioku.mjs`），改它的响应（例如 `expired`）要在插件仓库同步改。
 - 管理界面的 `typecheck` 先跑一次 `vite build`：Nuxt UI 的 Vite 插件在构建时才生成 `auto-imports.d.ts`、`components.d.ts`，没有它们 vue-tsc 会报找不到组件。
 
 ## 管理界面的设计与文案
@@ -144,11 +144,40 @@
 - 给模型看的文字里，凭据与连接的明文字段（标识、名称、说明、字段名、条目名称）都要经 `inlineText` 压成单行：有管理能力的 agent 能写说明，多行能伪造「值：」与指令。
 - 密码库客户端（`credential/bitwarden/`）的错误文字只写类别（无法连接、超时、意外的响应），errno、状态码与哪个接口只进 `log`，响应正文哪里都不放：服务器地址由成员填，可能指向内网。服务器给的键（两步验证方式、条目类型、角色）用 `Map` 或 `Object.hasOwn` 查。服务器地址的规则有两份：契约的 `VaultServerUrl`（按写法）和客户端的 `serverUrlProblem`（按写下的主机名，不用 URL 规范化之后的：全是数字的主机名会被换成 IPv4 地址），改一边要改另一边；登录之前服务端先用 `serverUrlProblem` 查，地址的问题回 400，不说成连不上。密钥派生的参数有上限（Argon2id 内存不超过 256 MiB），整个进程排队一次一个；Argon2id 在主线程上跑，登录时会短暂阻塞事件循环。
 - 密码库的测试：`Deps.vault` 不传时按连不上处理（`credential/vaultClient.ts`），服务的测试用 `testing/fakeVault.ts`。客户端的固定数据从本地 Vaultwarden 录下（`testing/recordVaultFixtures.ts`），里面的令牌与密码是测试数据，由 `.gitleaks.toml` 放过；真连的集成测试按 `KIOKU_TEST_VAULTWARDEN_URL` 开关，CI 不设不算失败。官方 bw CLI 只走 https，测试经本地 TLS 代理（`testing/bwCli.ts`）连容器；测试用的 Vaultwarden 要放宽 `LOGIN_*`、`UNAUTHENTICATED_*` 的限流，同一个 30 秒窗口的 TOTP 不能重用（`nextTotp`）。
-- 管理界面里密码库连接的主密码只放在 `useVaultLogin` 的局部状态里，连上、失败、返回、关掉都清空（只有等验证码那一步留着），不进 query 缓存、地址或本地存储；查看到的凭据值同样不进缓存。条目列表、详情里的条目名称和修改表单共用查询键 `['vault-items', spaceId, connectionId]`，只在连接可用时读，改了连接或凭据用 `refreshLists` 一起失效。界面上凭据与连接的权限只有 `vault.ts` 的 `canManageCredentials` 一处；签发时的凭据能力预览（`issuedCredentialCapability`）只给签发表单，签发之后看 `keyMatrix` 的 `credentials`。
+- 密码库客户端的写入（`credential/bitwarden/write.ts`）：修改照搬条目的原始 JSON，只换给了的字段，其余密文原样带回。要去掉响应里的 `attachments` 数组（官方服务端要的是映射，不带时两个服务端都不动附件），留着 `archivedDate`、`folderId`、`key`（缺了 Vaultwarden 会取消归档、丢掉文件夹，丢了 `key` 条目就解不开）；Vaultwarden 1.37 每次写都要 `encryptedFor`。同名的自定义字段读和写都经 `vault.ts` 的 `namedFields` 取，否则改的是另一个字段。原因：通行密钥这类 Kioku 不认识的内容不能在写回时丢掉。
+- 密码库客户端判断写入能不能做、写成没有：
+  - **冲突**：Vaultwarden 只在库里的修改时间比 `lastKnownRevisionDate` 新 1 秒以上时才拒绝，客户端自己拿刚读到的 `revisionDate` 和期望的比是主要的防线，不能删；录下的冲突用例因此用很旧的时间。
+  - **只读**：以刚取到的条目的 `edit` 为准，缓存的集合权限只作后备，上次同步超过 60 秒才重新同步。
+  - **拒绝的分类**：服务端的拒绝按消息文字分类（`client.ts` 的 `READ_ONLY_MESSAGE` 等），消息只用来分类，不进错误与日志；升级 Vaultwarden 或核对官方服务时要复查。
+  - **长度上限**：按服务器类型定，从 `/api/config` 认出 Vaultwarden 只限备注，别的按官方的上限；会话里缓存。
+  - **修改时间**：一律按 1 秒的容差比（contracts 的 `sameRevision`、`isNewerRevision`），不原样比：Vaultwarden 用 MySQL 时存成整秒，写入的响应却带小数秒，原样比的话下一次写回就判成冲突。客户端判断冲突、服务端判断值在别处改过、管理界面判断凭据的缓存过期都用它。不要为了对上整秒在写入之后再读一次：两次请求之间别人的改动会被当成自己的写入记下，之后写回就盖掉它。值改没改看 `updateItem` 返回的 `changed`，不按修改时间推断：1 秒之内的两次写入分不出来。
+  - **客户端版本头**：所有请求带 `Bitwarden-Client-Name` 与 `Bitwarden-Client-Version`，官方服务端缺了会拒绝修改带条目密钥或通行密钥的条目。`http.ts` 的 `CLIENT_VERSION` 要和测试用的 bw CLI 版本一起升。带上版本头之后，Vaultwarden 在同步里给出 SSH 密钥条目，个人的那些按专用账号的规则算个人条目。
+  - 流程编号检查会把测试数据里「大写字母、连字符加数字」的曲线名当成编号，测试里写成 `prime256v1` 这种。
+- 凭据的新建（`kioku_credential_save`、管理界面、转存的「新建」）有去处时分三段写进密码库：
+  - 先在短事务里查标识与去处；转存还要先按记忆的版本查一遍转存的规则。
+  - 再在事务外 `createItem`。
+  - 最后在短事务里建凭据。条目写进去之后任何一步失败，条目都留在集合里，错误体带 `vaultItem`（只给管理界面，访问密钥只在文字里写明，条目与集合名经 `inlineText`）。不能先写条目、后查别的：查不过就会在集合里多留一个装着值的条目。
+- 写回密码库条目时，期望的修改时间是 Kioku 最近看到的 `vault_revision`。
+  - Kioku 每次看到条目的修改时间晚了 1 秒以上，都把版本号加一、清掉「需要轮换」（`observeRevisions`），所以新加读条目的路径要调它。更早的不记：并发的读取可能晚一步带回旧的修改时间。
+  - 写回成功之后的第三段不能再因版本失败：值已经在密码库里了，要在当前版本上记下这次写入。
+  - 写回时客户端没发修改（`changed` 为 false，值都相同）不算改了值，不清「需要轮换」。
+  - 写入本身的错误不改连接的状态：`read_only`、`item_conflict`、`value_too_long` 靠 `CONNECTION_ERRORS` 里没有它们；字段和条目的类型对不上抛的是 `VaultFieldError`，kind 也是 `unsupported_format`，回 400，靠 `writeOutcome` 不记进连接。别的 `unsupported_format`（解不开的密文、缺组织密钥）照常是连接的问题。写回的规则检查要在调客户端之前做完。
+  - 锁的顺序：先连接、再这个连接下的凭据（按凭据 id），凭据只在锁着它的连接时才锁。`vault.record` 不管要不要改连接这一行都先锁住它；一个事务要动几个连接（`kioku run` 跨连接取值、按值比对）时，先用 `vault.lock` 按 id 一次锁全。新加锁凭据的路径也要先锁连接，否则和同步互相等待成死锁。
+  - 取用给 agent 的版本号要和交出的值是同一个状态：用 `settle` 的事务里记下修改时间之后读到的那一行，不要事后另开事务再读。
+- 凭据的到期判断有两份：JS 的 `credentialExpiry`、SQL 的 `CREDENTIAL_ATTENTION`，改一边要改另一边，用例逐条比对（含正好 7 天的边界）。每个成员最多一个去处，由唯一索引 `vault_connections_destination_idx` 兜底。测试台不写密码库（回滚撤不回外部服务里的写入）：经 `CredentialContext.bench` 一律按托管新建、拒绝改密码库凭据的值，不碰 `deps.vault`。测试台的工具结果靠「版本 」取到行尾，新加进结果的文字要放在版本号前面。
+- 管理界面里密码库连接的主密码只放在 `useVaultLogin` 的局部状态里，连上、失败、返回、关掉都清空（只有等验证码那一步留着），不进 query 缓存、地址或本地存储；查看到的凭据值同样不进缓存。条目列表、详情里的条目名称和修改表单共用查询键 `['vault-items', spaceId, connectionId]`，只在连接可用时读，改了连接或凭据用 `refreshLists` 一起失效。
+- 管理界面里凭据相关的查询：
+  - **读条目**：所有 vault-items 查询都经 `vaultQueries.ts` 的 `fetchVaultItems`。它在条目的修改时间和缓存里那条凭据的 `valueChangedAt` 对不上时，让凭据与待处理条数失效。直接调 `api.vaultItems` 会漏掉这一步：服务端读条目时可能加了版本号、清了「需要轮换」。
+  - **待处理的凭据列表**：查询键 `['credentials', sid, { attention: true }]` 有意和凭据列表共用前缀；改到期、轮换、值与删除，都要让待处理条数一起失效（`refreshLists`）。
+  - **去处**：设置与清除返回成员的整份连接列表，用 `setQueryData` 整个换掉，不要只改一个连接，否则别的连接上留着已经清掉的去处。
+  - **写到哪里**：新建凭据会写到哪里，一律用 `useNewCredentialStore` 与 `vault.ts` 的 `storeName`、`storeLabel`、`storeBlocker`，新加新建凭据的地方也用它们。
+  - **修改表单的基准**：等 vault-items 读完再读凭据作为基准，之后再变就用 `mergeReloaded` 三方合并进表单，保留用户的改动。
+  - **到期时间**：`datetime-local` 没填完时值是空字符串，所以「不到期」是单独的按钮，没填完要看 `validity.badInput`。
+  - **说法**：密码库错误的说法只在契约的 `VAULT_ERROR_KIND_NAMES`。界面上凭据与连接的权限只有 `vault.ts` 的 `canManageCredentials` 一处；签发时的凭据能力预览（`issuedCredentialCapability`）只给签发表单，签发之后看 `keyMatrix` 的 `credentials`。
 - 路由和测试台共用的处理函数（`lifecycle/handlers.ts`）不在里面新建 scope，由调用方传入，否则测试台关不掉 `record`。路由要显式只取 `LifecycleResponse` 的字段：`c.json` 不会按 schema 剥掉多余字段，`session` 不能加进 `LifecycleResponse`，加了要重新生成 SDK。
 - 新路由如果引用 Key 鉴权接口的命名组件（`TurnEndEvent`、`SessionContext` 等），要挂在这些路由后面（测试台路由挂在最后）。原因：OpenAPI 的组件按第一次用到的顺序排，挂早了 `sdks/python/generate.sh --check` 会失败，哪怕接口没变。
 - 新加 MCP 工具要写进 contracts 的 `BENCH_READ_TOOLS` 或 `BENCH_WRITE_TOOLS`：命令行握手按这份名单严格核对，`mayWrite` 对不认识的工具按写算。内置场景的 `capture` 与断言依赖工具结果的文字（「版本: 」「URI: 」等），`bench/executor.ts` 也按这些行与 `formatRecallBlock` 解析 URI 列表，改 `mcp/format.ts` 的文字要同步改，门禁里的矩阵会报。测试台步骤的说明与断言文字只展开 `${run}`、`${expires}`，新增命令行默认打印的文字时也不能展开 `capture` 的变量：它可能取到凭据的值。内置预设写记忆要带 `valid_to: EXPIRES`；`${run}`、`${expires}` 是保留的变量名。
-- contracts 里的 `isReplayStep`、`mayWrite`、`findPlaintextCredentials` 与 `addedPlaintextCredentials`、`placeholderAllowed`（连同说明 `CONVERT_SCOPE_TEXT`）、`sensitivityAllowed` 与 `DEFAULT_SENSITIVITY`（各归属能用的敏感级与默认敏感级）、`defaultCredentialFields` 与 `isVaultFieldRef`（密码库条目的字段怎么对到凭据的字段）和 `names.ts`（归属、敏感级、凭据能力、密码库连接状态、取用结果与原因的中文名）是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定和用词。
+- contracts 里的 `isReplayStep`、`mayWrite`、`findPlaintextCredentials` 与 `addedPlaintextCredentials`、`placeholderAllowed`（连同说明 `CONVERT_SCOPE_TEXT`）、`sensitivityAllowed` 与 `DEFAULT_SENSITIVITY`（各归属能用的敏感级与默认敏感级）、`defaultCredentialFields` 与 `isVaultFieldRef`（密码库条目的字段怎么对到凭据的字段）、`sameRevision` 与 `isNewerRevision`（条目修改时间的 1 秒容差）和 `names.ts`（归属、敏感级、凭据能力、密码库连接状态、取用结果与原因的中文名）是「只放 zod 与类型」的例外：服务端、命令行和管理界面要同一份判定和用词。
 - 读实例设置的函数（`loadExtractionConfig` 这类）既读库又解密，不要 catch 全部再回 `err.message`：读库出错也会被接住，drizzle 的错误信息带 SQL 与全部参数。用 `settings/endpoint.ts` 的 `unlocked`：只认 `ApiKeyLockedError`，其余重新抛给 `onError`。测读设置出错用 `testing/db.ts` 的 `settingsQueryFails`。
 - 带 API Key 的 `fetch` 不要把 `err.message` 给调用方或写进日志，也不要放进 `cause`（日志也打印）：API Key 中间有换行时，undici 的 Headers 报错会带上整个 Authorization 值，`signal` 已经取消时也先报这个，用 `fetchFailure` 只取错误类别；响应解析失败的文字可能带响应开头（可能回显 API Key），用 `upstreamJson`。上游写进报错的 API Key 用 `withoutKey`，先换再截断：`fetch` 会去掉结尾的空白，上游见到的 API Key 和保存的写法可能不同。保存时已经 `trim` 并拒绝控制字符，但存量 API Key 不迁移，这两处不能当多余的删掉。
 - 模型代理返回的 `message.tool_calls` 不是严格原样：id 可能是生成的，不是对象的项会被去掉，`arguments` 只放合法的 JSON 对象（原文在 `rawArguments`，只给界面显示）。`tool` 消息的 `tool_call_id` 要用 `toolCalls[i].id`，两者一一对应。
