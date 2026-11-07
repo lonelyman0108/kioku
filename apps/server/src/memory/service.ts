@@ -8,7 +8,10 @@ import {
   DEFAULT_SENSITIVITY,
   LAYER_NAMES,
   NAMESPACED_LAYERS,
-  PLAINTEXT_CREDENTIAL,
+  addedPlaintextCredentials,
+  findPlaintextCredentials,
+  PLAINTEXT_CREDENTIAL_PARTS,
+  PLAINTEXT_KIND_NAMES,
   PLAINTEXT_MASK,
   SENSITIVITIES,
   sensitivityAllowed,
@@ -22,6 +25,7 @@ import type {
   BenchChanges,
   BenchMark,
   ConsoleMemoryView,
+  ConsoleUpdateMemoryRequest,
   ConvertToCredentialRequest,
   CreateMemoryRequest,
   DeletedMemoryList,
@@ -44,6 +48,8 @@ import type {
   MoveMemoryRequest,
   NeverRecalledMemory,
   PageQuery,
+  PlaintextCredentialMatch,
+  PlaintextFinding,
   PlaintextIgnoreRequest,
   Provenance,
   RecalledMemory,
@@ -158,6 +164,8 @@ export class MemoryError extends Error {
   constructor(
     readonly status: 400 | 403 | 404 | 409 | 429 | 502,
     message: string,
+    // 正文里有新增的疑似明文被拒时的每一处（行号与类别，不带值），进错误体的 plaintext（MemoryWriteError）
+    readonly plaintext?: PlaintextFinding[],
   ) {
     super(message)
   }
@@ -189,6 +197,8 @@ export interface MemoryContext {
   secretRead?: 'explicit' | 'audited'
   // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
   eventContext?: Record<string, unknown>
+  // 管理界面里的空间 owner：能带着疑似明文照样写入（allowPlaintext）
+  spaceOwner?: boolean
 }
 
 // 读到 secret 的正文经由哪里，记在访问事件的 context 里
@@ -217,7 +227,38 @@ export interface MemoryStats {
 type MemoryRow = typeof memories.$inferSelect
 
 // 修改时可以改的字段（URI 与 expectedId 由调用方先核对）
-type UpdateFields = Omit<UpdateMemoryRequest, 'uri' | 'expectedId'>
+// 放行疑似明文的标记：Key 的请求只有 plaintextOk，管理界面的只有另外两个（由各自的 schema 去掉给错一边的），
+// 服务层两边都收，checkPlaintextFlags 再挡一次内部调用
+type PlaintextFlags = Pick<UpdateMemoryRequest, 'plaintextOk'> &
+  Pick<ConsoleUpdateMemoryRequest, 'ignorePlaintext' | 'allowPlaintext'>
+type UpdateFields = Omit<UpdateMemoryRequest, 'uri' | 'expectedId'> & PlaintextFlags
+// 新建与修改的请求：Key 与管理界面的合在一起
+export type CreateInput = CreateMemoryRequest & PlaintextFlags
+export type UpdateInput = UpdateMemoryRequest & PlaintextFlags
+
+// ignorePlaintext：写入后的正文记为「已忽略」，和忽略明文提示的效果相同。结果是 secret 或正文不像明文时不记；
+// 写入之前的正文里已有没处理的疑似明文时也不记（pendingBefore）：哈希管的是整段正文，记下就替旧的那几处做了决定，
+// 这次只放行写入，记忆照旧留在待处理
+function ignoresPlaintext(
+  input: PlaintextFlags,
+  content: string,
+  sensitivity: Sensitivity,
+  pendingBefore: boolean,
+) {
+  return (
+    !!input.ignorePlaintext &&
+    !pendingBefore &&
+    sensitivity !== 'secret' &&
+    looksLikePlaintextCredential(content)
+  )
+}
+
+// 写入之后正文里还有原来就有、没处理过的疑似明文（不是这次新增的，记忆也没被忽略）的结果。
+// MCP 的结果按它提醒：plaintext_ok 只确认了这次新增的几处
+const UNTOUCHED_PLAINTEXT = new WeakSet<MemoryView>()
+export function hasUntouchedPlaintext(view: MemoryView): boolean {
+  return UNTOUCHED_PLAINTEXT.has(view)
+}
 
 // 一条记忆属于谁：归属，以及按归属填的所有者、人格或应用
 type Ownership = Pick<MemoryRow, 'layer' | 'ownerAccountId' | 'personaId' | 'appId'>
@@ -245,6 +286,34 @@ const USER_PUBLIC =
   '本人（user://）的记忆不设公开（public）：本人的记忆到不了群聊与陌生人私聊。请改用内部（internal）或更高的敏感级；要在群里用的内容写进人格（persona://）或通用（core://）。'
 const PLAINTEXT_DOWNGRADE =
   '正文疑似含明文密码或令牌。从机密（secret）降级后，这些内容会进入历史、全文检索和向量，且无法收回。请先把值换成凭据占位符，再降级。'
+// 从机密降级时的强制只给空间所有者
+const PLAINTEXT_DOWNGRADE_OWNER =
+  '正文疑似含明文密码或令牌，从机密（secret）降级需要空间所有者确认。请先把值换成凭据占位符，再降级。'
+// 写入时放行疑似明文的标记各自只给一边（见 contracts 的 CreateMemoryRequest）。路由的 schema 已经去掉了
+// 给错一边的标记，这几句只在内部调用传错时出现
+const PLAINTEXT_ALLOW_KEY = '通过 Key 无法强制降级，请在管理界面由空间所有者确认'
+const PLAINTEXT_IGNORE_KEY =
+  '通过 Key 无法忽略明文提示。确实不是凭据时带上 plaintextOk（MCP 工具的参数为 plaintext_ok）'
+const PLAINTEXT_OK_CONSOLE =
+  'plaintextOk 只用于访问密钥的写入，管理界面使用 ignorePlaintext 或 allowPlaintext'
+// 被拒时最多逐处列出这么多处，其余的只报个数（错误体的 plaintext 里照样是全部）
+const PLAINTEXT_LISTED = 10
+
+// 正文里有新增的疑似明文时拒绝写入的说明：第几行、哪一类，不带值，也不说和哪条已有的凭据同值
+// （否则写入就成了猜值的工具）。访问密钥与管理界面的下一步不同
+function plaintextRejection(found: readonly PlaintextCredentialMatch[], viaKey: boolean): string {
+  const spots = found
+    .slice(0, PLAINTEXT_LISTED)
+    .map((m) => `第 ${m.line} 行（${PLAINTEXT_KIND_NAMES[m.kind]}）`)
+    .join('、')
+  const more = found.length > PLAINTEXT_LISTED ? `等 ${found.length} 处` : ''
+  const head = `正文里有新增的疑似明文凭据：${spots}${more}。`
+  return viaKey
+    ? `${head}凭据请先用 kioku_credential_save 存起来，正文里写成 {{cred:<标识>#<字段>}} 占位符；` +
+        '确实不是凭据时带上 plaintext_ok（REST 为 plaintextOk）再写，这条记忆会进待处理，由人看过'
+    : `${head}请逐处转存为凭据或标为不是凭据，也可以照样保存，这条记忆会进待处理`
+}
+
 // 打码时拒绝的写入（见 MemoryContext.maskSecret）
 const MASKED_DOWNGRADE = '测试台无法更改机密（secret）记忆的敏感级，请到记忆页修改'
 const MASKED_CONTENT = '测试台无法读取机密（secret）记忆的原文，也无法修改正文，请到记忆页修改'
@@ -446,6 +515,8 @@ export interface CreateMeta {
   requireAppOwner?: string
   // 来源：不给时是这次写入的来源；按 Dream 的建议执行时记为主人
   provenance?: Provenance
+  // 写入前拦截新增的疑似明文（见 checkAddedPlaintext）。不给时拦；导入工具传 false，它在计划里另外处理
+  plaintextGate?: boolean
 }
 
 // 导入工具按来源系统同步已导入的记忆时用：事件记成 sync 并带上出处
@@ -454,6 +525,8 @@ export interface UpdateMeta {
   eventContext?: Record<string, unknown>
   requireAppOwner?: string
   via?: SecretVia
+  // 同 CreateMeta.plaintextGate：导入工具的同步传 false
+  plaintextGate?: boolean
 }
 
 function parse(uri: string): ParsedUri {
@@ -1017,8 +1090,41 @@ export class MemoryService {
     })
   }
 
-  async create(input: CreateMemoryRequest, meta: CreateMeta = {}): Promise<MemoryView> {
-    return this.write((tx, _personaIds, released) => this.insertCurated(tx, input, meta, released))
+  async create(input: CreateInput, meta: CreateMeta = {}): Promise<MemoryView> {
+    const gated = { ...meta, plaintextGate: meta.plaintextGate ?? true }
+    return this.write((tx, _personaIds, released) => this.insertCurated(tx, input, gated, released))
+  }
+
+  // 放行疑似明文的标记各自只给一边：plaintextOk 给 Key，ignorePlaintext 与 allowPlaintext 给管理界面，
+  // 能改这条记忆的成员都能用（从机密强制降级另外只给空间 owner，见 applyUpdate）。
+  // 规则会误判，留一个由人确认的出口；被诱导的 agent 不能自己忽略
+  private checkPlaintextFlags(input: PlaintextFlags): void {
+    if (this.viaKey) {
+      if (input.allowPlaintext) throw new MemoryError(403, PLAINTEXT_ALLOW_KEY)
+      if (input.ignorePlaintext) throw new MemoryError(403, PLAINTEXT_IGNORE_KEY)
+      return
+    }
+    if (input.plaintextOk) throw new MemoryError(400, PLAINTEXT_OK_CONSOLE)
+  }
+
+  // 写入前拦截：正文里有这次新增的疑似明文（写入之前的正文里没有检出过的值，见 addedPlaintextCredentials）时拒绝，
+  // 明文一旦写进去就进了历史、全文检索与向量。结果是 secret 的不拦：正文加密，不进这几处。
+  // 三个标记都放行：plaintextOk 与 allowPlaintext 照常写入、进待处理，ignorePlaintext 见 ignoresPlaintext
+  private checkAddedPlaintext(
+    input: PlaintextFlags,
+    before: string | null,
+    after: string,
+    sensitivity: Sensitivity,
+  ): void {
+    if (sensitivity === 'secret') return
+    if (input.plaintextOk || input.ignorePlaintext || input.allowPlaintext) return
+    const added = addedPlaintextCredentials(before, after)
+    if (!added.length) return
+    throw new MemoryError(
+      400,
+      plaintextRejection(added, this.viaKey),
+      added.map(({ line, kind }) => ({ line, kind })),
+    )
   }
 
   // 打码时读到的是占位文字，照抄进正文的话写下的就不是真实内容（见 MemoryContext.maskSecret）
@@ -1031,7 +1137,7 @@ export class MemoryService {
   // 新建一条记下的记忆，在调用方的事务里：检查权限与凭据占位符、让出挡着坐标的过期记录、记一条事件
   private async insertCurated(
     tx: Tx,
-    input: CreateMemoryRequest,
+    input: CreateInput,
     meta: CreateMeta,
     released: string[],
   ): Promise<MemoryView> {
@@ -1054,15 +1160,24 @@ export class MemoryService {
       await assertAppOwner(tx, ownership.appId, meta.requireAppOwner)
     }
     this.rejectMaskedText(input.content)
+    this.checkPlaintextFlags(input)
+    if (meta.plaintextGate) this.checkAddedPlaintext(input, null, input.content, sensitivity)
     checkOutsideContent(input.disclosure, input.glossary, input.title)
     await this.checkCredentialRefs(tx, { ...ownership, sensitivity, content: input.content }, null)
     await this.claimUri(tx, parsed, ownership, released)
 
     const id = randomUUID()
+    const ignored = ignoresPlaintext(input, input.content, sensitivity, false)
     const body =
       sensitivity === 'secret'
         ? { content: null, ...this.seal(input.content, id) }
-        : { content: input.content, ciphertext: null, wrappedKey: null, keyId: null }
+        : {
+            content: input.content,
+            ciphertext: null,
+            wrappedKey: null,
+            keyId: null,
+            ...(ignored ? { plaintextIgnoredHash: contentHash(input.content) } : {}),
+          }
     const [row] = await tx
       .insert(memories)
       .values({
@@ -1099,6 +1214,7 @@ export class MemoryService {
       snapshot(row!, glossary),
       meta.eventContext,
     )
+    if (ignored) await this.ignoredEvent(tx, row!, glossary)
     // 正文是调用方刚写的
     return this.toView(tx, row!, glossary, null)
   }
@@ -1214,7 +1330,7 @@ export class MemoryService {
     return sealMemoryContent(this.ctx.masterKey, id, plaintext)
   }
 
-  async update(input: UpdateMemoryRequest, meta: UpdateMeta = {}): Promise<MemoryView> {
+  async update(input: UpdateInput, meta: UpdateMeta = {}): Promise<MemoryView> {
     const parsed = parse(input.uri)
     return this.write(async (tx, personaIds, released) => {
       const before = await this.findReadable(tx, parsed, personaIds)
@@ -1225,6 +1341,7 @@ export class MemoryService {
       }
       return this.applyUpdate(tx, before, input, {
         released,
+        plaintextGate: meta.plaintextGate ?? true,
         ...(meta.eventType ? { eventType: meta.eventType } : {}),
         ...(meta.eventContext ? { eventContext: meta.eventContext } : {}),
         ...(meta.via ? { via: meta.via } : {}),
@@ -1245,6 +1362,8 @@ export class MemoryService {
       released?: string[]
       // 恢复到某一版：正文换成那一版的，那一版与现在同一归属（见 restore）
       existingRefs?: boolean
+      // 拦下新增的疑似明文（见 checkAddedPlaintext）：只有 update 打开，恢复、执行整理建议、转存都不拦
+      plaintextGate?: boolean
       // 来源改成这个：按 Dream 的建议合并时记为主人，正文是成员确认过的（见 applySuggestion）
       provenance?: Provenance
       // 响应带着解密出来的正文时经由哪里，记在访问事件里（见 toView）
@@ -1254,10 +1373,7 @@ export class MemoryService {
     if (input.expectedVersion !== undefined && input.expectedVersion !== before.version) {
       throw new MemoryError(409, `版本已变化：当前是 ${before.version}，请先重新读取`)
     }
-    // 规则会误判，留一个由人确认的出口；被诱导的 agent 不能自己确认
-    if (input.allowPlaintext && this.viaKey) {
-      throw new MemoryError(403, '通过 Key 无法强制降级，请在管理界面由空间所有者确认')
-    }
+    this.checkPlaintextFlags(input)
     const sensitivity = input.sensitivity ?? before.sensitivity
     checkSensitivity(before.layer, sensitivity)
     for (const s of new Set([before.sensitivity, sensitivity])) {
@@ -1300,15 +1416,29 @@ export class MemoryService {
       },
       before.sensitivity === 'secret' && input.content === undefined,
     )
-    // 降级之后正文会进历史快照、全文检索和向量，带着明文降级就收不回来了
+    // 降级之后正文会进历史快照、全文检索和向量，带着明文降级就收不回来了。强制降级只给空间 owner
     if (
       before.sensitivity === 'secret' &&
       sensitivity !== 'secret' &&
-      !input.allowPlaintext &&
+      !(input.allowPlaintext && this.ctx.spaceOwner) &&
       looksLikePlaintextCredential(plaintext)
     ) {
-      throw new MemoryError(400, PLAINTEXT_DOWNGRADE)
+      throw new MemoryError(
+        400,
+        input.allowPlaintext ? PLAINTEXT_DOWNGRADE_OWNER : PLAINTEXT_DOWNGRADE,
+      )
     }
+    // 正文没改就不查：已有的疑似明文不挡修改
+    const beforeContent = this.contentOf(before)
+    if (meta.plaintextGate && input.content !== undefined) {
+      this.checkAddedPlaintext(input, beforeContent, input.content, sensitivity)
+    }
+    // 写入之前就在待处理里的疑似明文（明文的正文像明文，提示没被忽略）
+    const pendingBefore =
+      before.content !== null &&
+      looksLikePlaintextCredential(before.content) &&
+      !plaintextIgnored(before)
+    const ignored = ignoresPlaintext(input, plaintext, sensitivity, pendingBefore)
     const body =
       sensitivity === 'secret'
         ? { content: null, plaintextIgnoredHash: null, ...this.seal(plaintext, before.id) }
@@ -1333,8 +1463,13 @@ export class MemoryService {
       .update(memories)
       .set({
         ...body,
-        // 正文变了，忽略时记下的哈希就没用了；留着的话，它是含旧值的正文的 SHA-256，能离线猜解
-        ...(plaintext !== before.content ? { plaintextIgnoredHash: null } : {}),
+        // 正文变了，忽略时记下的哈希就没用了；留着的话，它是含旧值的正文的 SHA-256，能离线猜解。
+        // 这次带着 ignorePlaintext 时记下新正文的
+        ...(ignored
+          ? { plaintextIgnoredHash: contentHash(plaintext) }
+          : plaintext !== before.content
+            ? { plaintextIgnoredHash: null }
+            : {}),
         sensitivity,
         title: headings && title !== null ? withoutHeading(title, before.path!, headings) : title,
         ...(meta.provenance ? { provenance: meta.provenance } : {}),
@@ -1387,6 +1522,15 @@ export class MemoryService {
       snapshot(row, glossary),
       meta.eventContext,
     )
+    // 原来已经忽略了同一段正文时不再记一条
+    if (ignored && !(plaintext === before.content && plaintextIgnored(before))) {
+      await this.ignoredEvent(tx, row, glossary)
+    }
+    const untouched =
+      sensitivity !== 'secret' &&
+      !plaintextIgnored(row) &&
+      beforeContent !== null &&
+      hasExistingPlaintext(beforeContent, plaintext)
     // 改成 secret 之后，历史事件里不能再留着明文
     if (becameSecret) {
       await this.scrubHistory(tx, before.id, headings!)
@@ -1395,7 +1539,9 @@ export class MemoryService {
     }
     // 没带正文的修改，响应里的正文是解密出来的原文，也算读到；带了正文的是调用方自己刚写的
     const read = before.sensitivity === 'secret' && input.content === undefined
-    return this.toView(tx, row, glossary, read ? (meta.via ?? 'rest') : null)
+    const view = await this.toView(tx, row, glossary, read ? (meta.via ?? 'rest') : null)
+    if (untouched) UNTOUCHED_PLAINTEXT.add(view)
+    return view
   }
 
   // 这条记忆历史快照里的各版正文：改成机密之前，标题可能取自其中任何一版的 # 标题（修改正文不重新取标题）
@@ -1441,6 +1587,17 @@ export class MemoryService {
     return this.setPlaintextIgnored(input, true)
   }
 
+  // 保存时带着 ignorePlaintext：和忽略明文提示记同样的事件，快照不带正文
+  private async ignoredEvent(tx: Tx, row: MemoryRow, glossary: string[]): Promise<void> {
+    await this.event(
+      tx,
+      row.id,
+      'ignore_plaintext',
+      { ...snapshot(row, glossary), content: null },
+      null,
+    )
+  }
+
   async unignorePlaintext(input: PlaintextIgnoreRequest): Promise<MemoryView> {
     return this.setPlaintextIgnored(input, false)
   }
@@ -1481,16 +1638,17 @@ export class MemoryService {
     })
   }
 
-  // 把正文里的一段明文转存成凭据，全部在一个事务里：credential.create 建好凭据（标识冲突、权限不够时抛错，
-  // 什么都不留下），正文里这段值换成占位符（照常过写入检查、版本加一、记一条事件），再把这个值从历史里拿掉。
+  // 把正文里的一段明文转存成凭据，全部在一个事务里：credential.create 建好凭据或锁住已有的那条（标识冲突、
+  // 权限不够、核对之后凭据变了时抛错，什么都不留下），返回凭据 id；正文里这段值换成 {{cred:<identifier>#<field>}}（照常过写入检查、版本加一、记一条事件），再把这个值从历史里拿掉。
   // 全文检索是生成列，跟着新正文变；向量由旧正文生成，在同一个事务里删掉，提交后重新排队生成。
   // credential.view 也在事务里读给响应用的凭据：引用已经写进索引，数得对；读失败时整个回滚，调用方重试不会撞上 409。
   // 提交之后不再做会失败的事：否则报错了数据却已经改了
   async convertToCredential<T>(
-    input: Pick<
-      ConvertToCredentialRequest,
-      'memoryId' | 'expectedVersion' | 'value' | 'identifier' | 'field'
-    >,
+    // 占位符里的标识与字段名由调用方按转存的去处给出
+    input: Pick<ConvertToCredentialRequest, 'memoryId' | 'expectedVersion' | 'value'> & {
+      identifier: string
+      field: string
+    },
     credential: { create: (tx: Tx) => Promise<string>; view: (tx: Tx, id: string) => Promise<T> },
   ): Promise<{
     memory: MemoryView
@@ -3460,8 +3618,15 @@ function neverRecalled(recall: RecallWindow): SQL {
 }
 
 // 正文像有明文密码或 Token：与界面、导入工具同一条规则（PLAINTEXT_CREDENTIAL），PostgreSQL 的正则照原样能用，
-// ~* 不区分大小写，对应它的 i 标记。secret 的正文是密文（content 为空），结果为 NULL，不算
-const PLAINTEXT_MATCH = sql`(${memories.content} ~* ${PLAINTEXT_CREDENTIAL.source})`
+// ~* 不区分大小写，对应它的 i 标记。规则拆成几条用 or 连起来（见 PLAINTEXT_CREDENTIAL_PARTS），合起来是同一条。
+// secret 的正文是密文（content 为空），结果为 NULL，不算
+export function plaintextMatch(text: SQLWrapper): SQL {
+  return sql`(${sql.join(
+    PLAINTEXT_CREDENTIAL_PARTS.map((part) => sql`${text} ~* ${part}`),
+    sql` or `,
+  )})`
+}
+const PLAINTEXT_MATCH = plaintextMatch(memories.content)
 // 提示被忽略了：存着的哈希和现在的正文对得上。判断只看这个比较，applyUpdate 在正文变化时清掉哈希只是不留着它。
 // 没有哈希的行不算哈希（case 里不会执行），开销只落在忽略过的那几条上
 const IGNORED_NOW = sql`(case when ${memories.plaintextIgnoredHash} is null then false
@@ -3471,6 +3636,14 @@ const PLAINTEXT_IGNORED = sql`(${PLAINTEXT_MATCH} and ${IGNORED_NOW})`
 
 // 和上面 SQL 里的哈希相同的算法，忽略时写进去、读的时候比对
 const contentHash = (content: string) => createHash('sha256').update(content, 'utf8').digest('hex')
+
+// after 里检出的疑似明文有没有原来（before）就检出过的值：不是这次新增的
+function hasExistingPlaintext(before: string, after: string): boolean {
+  const found = findPlaintextCredentials(after)
+  if (!found.length) return false
+  const added = new Set(addedPlaintextCredentials(before, after).map((m) => m.start))
+  return found.some((m) => !added.has(m.start))
+}
 
 // PLAINTEXT_IGNORED 的 JS 版本，给读到的那一行用
 function plaintextIgnored(row: Pick<MemoryRow, 'content' | 'plaintextIgnoredHash'>): boolean {

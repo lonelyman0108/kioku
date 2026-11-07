@@ -660,6 +660,71 @@ describe('取条目', () => {
   })
 })
 
+describe('取全部条目', () => {
+  const syncCalls = (calls: Call[]) => calls.filter((c) => c.url.pathname === '/api/sync')
+
+  it('一次同步解开全部读得到的条目，和逐个取的值一样；交给 onSynced；刚换令牌时不再同步第二次', async () => {
+    const onSynced = vi.fn<(snapshot: VaultSnapshot) => Promise<void>>(async () => {})
+    const { session, calls } = sessionOf('dedicated', dedicatedSecrets, { onSynced })
+    const items = await session.items()
+    expect(syncCalls(calls)).toHaveLength(1)
+    expect(calls.some((c) => c.url.pathname.startsWith('/api/ciphers/'))).toBe(false)
+    expect(onSynced).toHaveBeenCalledTimes(1)
+    const byId = new Map(items.map((i) => [i.id, i]))
+    const { items: ids } = fixture
+    expect([...byId.keys()].sort()).toEqual(
+      [ids.login, ids.note, ids.itemKey, ids.bw, ids.bwItemKey].sort(),
+    )
+    for (const name of ['login', 'note', 'itemKey', 'bw', 'bwItemKey'] as const) {
+      expect(byId.get(ids[name])!.values).toEqual(fixture.values[name])
+      expect(byId.get(ids[name])!.collectionIds).toEqual([fixture.collections.agent])
+    }
+    // 令牌还有效：再取时同步一次，同样交给 onSynced
+    await session.items()
+    expect(syncCalls(calls)).toHaveLength(2)
+    expect(onSynced).toHaveBeenCalledTimes(2)
+  })
+
+  it('同时发起的 snapshot() 与 items() 共用一次换令牌与同步；原始响应不留在会话上', async () => {
+    const { session, calls } = sessionOf('dedicated', dedicatedSecrets)
+    const [, items] = await Promise.all([
+      session.snapshot(),
+      session.items(),
+      session.item(fixture.items.login),
+    ])
+    expect(items).toHaveLength(5)
+    expect(syncCalls(calls)).toHaveLength(1)
+    // 会话里只有令牌与同步的结果，没有哪里还引用着那份原始响应
+    const access = (session as unknown as { access: Record<string, unknown> }).access
+    expect(Object.keys(access).sort()).toEqual(['expiresAt', 'state', 'token'])
+    expect(Object.keys(session).filter((k) => /raw/i.test(k))).toEqual([])
+  })
+
+  it('解不开的条目跳过，别的照常', async () => {
+    const body = syncBody('dedicated')
+    const login = body.ciphers.find((x) => x.id === fixture.items.login)!
+    login.name = tamperMac(login.name)
+    const { session } = sessionOf(
+      'dedicated',
+      dedicatedSecrets,
+      {},
+      { override: (call) => (call.url.pathname === '/api/sync' ? json(200, body) : undefined) },
+    )
+    const items = await session.items()
+    expect(items.map((i) => i.id)).not.toContain(fixture.items.login)
+    expect(items).toHaveLength(4)
+  })
+
+  it('onSynced 抛错时以同样的错误失败，不给值', async () => {
+    const { session } = sessionOf('dedicated', dedicatedSecrets, {
+      onSynced: async () => {
+        throw new VaultError('server_error', '拒绝')
+      },
+    })
+    expect(await kindOf(session.items())).toBe('server_error')
+  })
+})
+
 describe('会话', () => {
   it('同时发起的调用只换一次令牌、同步一次，onSynced 调用一次', async () => {
     const onSynced = vi.fn<(snapshot: VaultSnapshot) => Promise<void>>(async () => {})

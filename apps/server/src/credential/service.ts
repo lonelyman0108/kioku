@@ -1,12 +1,14 @@
 import { randomUUID } from 'node:crypto'
 
 import {
+  ConvertibleValue,
   CREDENTIAL_ACCESS_REASON_NAMES,
   defaultCredentialFields,
   MAX_CREDENTIAL_FIELDS,
   VAULT_DISABLED_REASON_NAMES,
   type ConsoleCredential,
   type ConsoleCredentialList,
+  type ConvertTarget,
   type CreateCredentialRequest,
   type CredentialAccess,
   type CredentialAccessReason,
@@ -16,6 +18,7 @@ import {
   type CredentialFieldRef,
   type CredentialReferenceList,
   type CredentialSummary,
+  type CredentialValueMatches,
   type CredentialValues,
   type KeyCreateCredentialRequest,
   type KeyCredentialList,
@@ -236,6 +239,14 @@ type Prepared =
 
 // 第二段向密码库取条目的结果，第三段按它记访问事件、更新连接。
 // unexpected 不是密码库报的错（解不开重读的密文、保存新令牌时的数据库错误等），记一条失败后原样抛出
+interface VaultCall<T> {
+  connection: ConnectionRow
+  used: VaultSession
+  outcome: VaultOutcome | null
+  value: T | undefined
+  error: unknown
+}
+
 interface Fetched {
   connection: ConnectionRow
   // 这次真正用的会话：重试时换成新建的那个，record 按它判断要删哪个缓存
@@ -707,25 +718,20 @@ export class CredentialService {
     return result
   }
 
-  // 第二段：在事务外向密码库取条目，取出要的字段。不抛错，结果交给 settle 记下
-  private async fetchItem(
-    row: CredentialRow,
-    fields: CredentialField[],
-    prepared: Extract<Prepared, { kind: 'vault' }>,
-  ): Promise<Fetched> {
-    let outcome: VaultOutcome | null
-    let result: Record<string, string> | CredentialAccessReason
-    let missing: string | undefined
-    let unexpected: unknown = null
+  // 在事务外向密码库请求一次（取条目、取全部条目）。刷新令牌失效之前先重读一次：别的进程可能刚换过令牌（密文变了），
+  // 用新的建会话再试一次，还是失败才算需要重新登录。不抛错：结果、这次真正用的会话与对连接的结论交给调用方，
+  // 调用方都要接着在事务里 vault.record。error 为 null 表示成功
+  private async vaultCall<T>(
+    prepared: PreparedSession,
+    fn: (session: VaultSession) => Promise<T>,
+  ): Promise<VaultCall<T>> {
     let connection = prepared.connection
     let used = prepared.session
     try {
-      let item: VaultItem
+      let value: T
       try {
-        item = await prepared.session.item(row.vaultItemId!)
+        value = await fn(used)
       } catch (err) {
-        // 刷新令牌失效之前先重读一次：别的进程可能刚换过令牌（密文变了），用新的建会话再试一次，
-        // 还是失败才算需要重新登录
         if (!(err instanceof VaultError) || err.kind !== 'reauth_required') throw err
         const fresh = await this.run((tx) => this.vault.load(tx, connection.id))
         if (
@@ -737,34 +743,58 @@ export class CredentialService {
           throw err
         }
         connection = fresh
-        let session: VaultSession
         try {
-          session = this.vault.session(fresh)
+          used = this.vault.session(fresh)
         } catch (openErr) {
           throw new SecretsUnreadable(openErr)
         }
-        used = session
-        item = await session.item(row.vaultItemId!)
+        value = await fn(used)
       }
-      outcome = { kind: 'ok' }
-      result = itemValues(item, fields)
-      if (result === 'field_missing') {
-        missing = fields.find((f) => itemValues(item, [f]) === 'field_missing')?.name
-      }
+      return { connection, used, outcome: { kind: 'ok' }, value, error: null }
     } catch (err) {
-      if (err instanceof VaultDisabledError) {
-        outcome = { kind: 'disabled' }
-        result = 'disabled'
-      } else if (err instanceof VaultError) {
-        outcome = { kind: 'error', error: err.kind }
-        result = vaultReason(err.kind)
-      } else {
-        // 和 prepare 里解不开令牌一样记成主密钥的问题；别的意外（数据库错误等）记成 Kioku 内部出错，
-        // 不说成密码库的问题。连接的状态不改
-        outcome = null
-        result = err instanceof SecretsUnreadable ? 'master_key' : 'internal_error'
-        unexpected = err
+      // 不是密码库报的错（解不开重读的密文、数据库错误等）不改连接的状态
+      const outcome: VaultOutcome | null =
+        err instanceof VaultDisabledError
+          ? { kind: 'disabled' }
+          : err instanceof VaultError
+            ? { kind: 'error', error: err.kind }
+            : null
+      return { connection, used, outcome, value: undefined, error: err }
+    }
+  }
+
+  // 第二段：在事务外向密码库取条目，取出要的字段。不抛错，结果交给 settle 记下
+  private async fetchItem(
+    row: CredentialRow,
+    fields: CredentialField[],
+    prepared: Extract<Prepared, { kind: 'vault' }>,
+  ): Promise<Fetched> {
+    const call = await this.vaultCall(prepared, (session) => session.item(row.vaultItemId!))
+    const { connection, used, outcome } = call
+    let result: Record<string, string> | CredentialAccessReason
+    let missing: string | undefined
+    let unexpected: unknown = null
+    const err = call.error
+    if (err === null) {
+      const item = call.value!
+      try {
+        result = itemValues(item, fields)
+        if (result === 'field_missing') {
+          missing = fields.find((f) => itemValues(item, [f]) === 'field_missing')?.name
+        }
+      } catch (valueErr) {
+        result = 'internal_error'
+        unexpected = valueErr
       }
+    } else if (err instanceof VaultDisabledError) {
+      result = 'disabled'
+    } else if (err instanceof VaultError) {
+      result = vaultReason(err.kind)
+    } else {
+      // 和 prepare 里解不开令牌一样记成主密钥的问题；别的意外（数据库错误等）记成 Kioku 内部出错，
+      // 不说成密码库的问题。连接的状态不改
+      result = err instanceof SecretsUnreadable ? 'master_key' : 'internal_error'
+      unexpected = err
     }
     return { connection, used, outcome, result, ...(missing ? { missing } : {}), unexpected }
   }
@@ -836,7 +866,6 @@ export class CredentialService {
     this.requireManage()
     // 在管理界面新建的默认不限定应用，由所有者决定
     const appIds = input.appIds ? [...new Set(input.appIds)].sort() : null
-    const conflict = `标识已被占用或不可用：${input.identifier}`
     const { source } = input
     if (source.kind === 'hosted') {
       return this.run(
@@ -845,10 +874,10 @@ export class CredentialService {
             tx,
             await this.insertHosted(tx, { ...input, values: source.values }, appIds),
           ),
-        conflict,
+        `标识已被占用或不可用：${input.identifier}`,
       )
     }
-    // 给密码库的条目起标识：先向密码库取这个条目，确认读得到、字段对得上，再写库
+    // 给密码库的条目起标识（两个唯一索引的冲突由 insertVault 转成 409）：先向密码库取这个条目，确认读得到、字段对得上，再写库
     const connection = await this.run((tx) => this.vault.load(tx, source.connectionId))
     if (!connection) throw new MemoryError(404, '密码库连接不存在')
     if (connection.status !== 'ok') {
@@ -880,28 +909,23 @@ export class CredentialService {
     const missing = fields.find((f) => !item.fields.includes(f.itemField!))
     if (missing) throw new MemoryError(400, `条目里没有字段 ${missing.itemField}`)
     return this.run(async (tx) => {
-      const id = randomUUID()
-      const [row] = await tx
-        .insert(credentials)
-        .values({
-          id,
-          spaceId: this.ctx.spaceId,
-          ownerAccountId: this.owner,
+      const id = await this.insertVault(
+        tx,
+        {
           identifier: input.identifier,
           name: input.name,
           description: input.description ?? null,
-          source: 'vault',
-          vaultConnectionId: connection.id,
-          vaultItemId: source.itemId,
+          connectionId: connection.id,
+          itemId: source.itemId,
           fields,
-          appIds,
-        })
-        .returning()
-      await this.event(tx, id, 'create')
+        },
+        appIds,
+        ITEM_BOUND_CREATE,
+      )
       // 刚才那次取条目是成功的：和插入放在一个事务里更新连接
       await this.vault.record(tx, connection, { kind: 'ok' })
-      return this.consoleViewOf(tx, row!)
-    }, conflict)
+      return this.consoleViewOf(tx, await this.ownById(tx, id))
+    })
   }
 
   // 在调用方的事务里新建一条托管的凭据，返回 id（转存为凭据：和改记忆放在一个事务里）。
@@ -920,6 +944,410 @@ export class CredentialService {
       }
       throw err
     }
+  }
+
+  // ---- 按值比对（管理界面：按值查找、转存、Lore 导入）----
+
+  // 当前账号的有效凭据与密码库条目现在的值，只在服务端里比对，不交给调用方，也不记访问事件（没有把值交给谁）。
+  // 第一段在事务里读凭据与连接、解开托管的值、准备会话；第二段在事务外向密码库取全部条目；
+  // 第三段另开事务按结果更新连接（vault.record）。scope 为 all 时取每个可用的连接，bound 只取有凭据指着的
+  private async collectValues(scope: 'all' | 'bound'): Promise<CollectedValues> {
+    this.requireManage()
+    const sessions: PreparedSession[] = []
+    const { rows, hosted, unavailable, unreadable } = await this.run(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(credentials)
+        .where(and(eq(credentials.ownerAccountId, this.owner), isNull(credentials.deletedAt)))
+        .orderBy(asc(credentials.identifier))
+      const hosted = new Map<string, Record<string, string>>()
+      // 读不到值的托管凭据（没配主密钥、解不开）不比，数出来交给调用方：不说的话会被当成没有同值的
+      let unreadable = 0
+      for (const row of rows) {
+        if (row.source !== 'hosted') continue
+        if (!this.ctx.masterKey) {
+          unreadable++
+          continue
+        }
+        try {
+          hosted.set(row.id, this.open(row))
+        } catch (err) {
+          unreadable++
+          if (!(err instanceof MemoryError)) logInternalError('按值比对时托管的凭据解不开', err)
+        }
+      }
+      const bound = new Set(rows.flatMap((r) => (r.vaultConnectionId ? [r.vaultConnectionId] : [])))
+      const connections = await tx
+        .select()
+        .from(vaultConnections)
+        .where(eq(vaultConnections.ownerAccountId, this.owner))
+        .orderBy(asc(vaultConnections.createdAt), asc(vaultConnections.id))
+      let unavailable = 0
+      for (const connection of connections) {
+        // 断开了又没有凭据指着的连接已经不用了，不算读不了
+        const relevant =
+          scope === 'all'
+            ? connection.status !== 'disconnected' || bound.has(connection.id)
+            : bound.has(connection.id)
+        if (!relevant) continue
+        if (connection.status !== 'ok' || !connection.ciphertext || !this.ctx.masterKey) {
+          if (connection.status !== 'ok' || !connection.ciphertext) this.vault.forget(connection.id)
+          unavailable++
+          continue
+        }
+        try {
+          sessions.push({ connection, session: this.vault.session(connection) })
+        } catch (err) {
+          if (err instanceof MemoryError) throw err
+          unavailable++
+        }
+      }
+      return { rows, hosted, unavailable, unreadable }
+    }).catch(this.releasingOnError(sessions))
+
+    // 各连接并行取：vaultCall 不抛错，一个失败不影响别的，每个会话下面都照样 record
+    const calls = await Promise.all(
+      sessions.map((prepared) => this.vaultCall(prepared, (session) => session.items())),
+    )
+    const touched = calls.map((c) => ({ connection: c.connection, session: c.used }))
+    await this.run(async (tx) => {
+      for (const call of calls)
+        await this.vault.record(tx, call.connection, call.outcome, call.used)
+    }).catch(this.releasingOnError(touched))
+    // 不是密码库报的错（数据库错误等）照常抛出，连接已经在上面确认过
+    const unexpected = calls.find(
+      (c) =>
+        c.error !== null &&
+        !(c.error instanceof VaultError || c.error instanceof VaultDisabledError) &&
+        !(c.error instanceof SecretsUnreadable),
+    )
+    if (unexpected) throw unexpected.error
+    const items = new Map<string, VaultItem[]>()
+    for (const [i, call] of calls.entries()) {
+      if (call.error === null)
+        items.set(sessions[i]!.connection.id, [...call.value!].sort(byItemName))
+    }
+    return {
+      rows,
+      hosted,
+      items,
+      unavailableConnections: unavailable + calls.length - items.size,
+      unreadableCredentials: unreadable,
+    }
+  }
+
+  // 按值查找：每个值和当前账号的托管凭据、可用的密码库连接里的条目逐个字段比，按字面比较。
+  // TOTP 的密钥不参与：凭据的 totp 字段给的是验证码，绑过去意思就变了
+  async matchValues(values: string[]): Promise<CredentialValueMatches> {
+    const collected = await this.collectValues('all')
+    const boundItem = new Map<string, CredentialRow>()
+    for (const row of collected.rows) {
+      if (row.source === 'vault') boundItem.set(`${row.vaultConnectionId}/${row.vaultItemId}`, row)
+    }
+    const entries = credentialEntries(collected)
+    // 条目在 collectValues 里排好了，字段在这里排一次，不随每个值重排
+    const fieldsOf = new Map<VaultItem, [string, string][]>()
+    for (const items of collected.items.values()) {
+      for (const item of items) {
+        fieldsOf.set(
+          item,
+          Object.entries(item.values).sort(([a], [b]) => a.localeCompare(b)),
+        )
+      }
+    }
+    return {
+      items: values.map((value) => {
+        const matched = entries.filter((e) => e.value === value)
+        const vaultItems: CredentialValueMatches['items'][number]['vaultItems'] = []
+        for (const [connectionId, items] of collected.items) {
+          for (const item of items) {
+            const bound = boundItem.get(`${connectionId}/${item.id}`)
+            for (const [itemField, itemValue] of fieldsOf.get(item)!) {
+              if (itemField === TOTP_FIELD || itemValue !== value) continue
+              // 已经对应到凭据字段的只列在 credentials 里
+              if (bound?.fields.some((f) => f.itemField === itemField)) continue
+              vaultItems.push({
+                connectionId,
+                itemId: item.id,
+                itemName: item.name,
+                itemField,
+                credential: bound ? { id: bound.id, identifier: bound.identifier } : null,
+              })
+            }
+          }
+        }
+        return {
+          credentials: matched.map(({ id, identifier, name, field }) => ({
+            id,
+            identifier,
+            name,
+            field,
+          })),
+          vaultItems,
+        }
+      }),
+      unavailableConnections: collected.unavailableConnections,
+      unreadableCredentials: collected.unreadableCredentials,
+    }
+  }
+
+  // 当前账号有效凭据各字段现在的值（Lore 导入用）：托管的解开，密码库的只取有凭据指着的连接。
+  // 只留能用来按值替换的值（ConvertibleValue：太短的会换掉正文里别的内容），不能用的列进 unconvertible。
+  // 读不到值的凭据列进 unresolved（原因见 UnresolvedReason）。条目读到了、字段空了或没了的不算读不到：
+  // 和凭据删了一样，是这个字段现在没有值
+  async knownValues(): Promise<KnownCredentialValues> {
+    const collected = await this.collectValues('bound')
+    const all = credentialEntries(collected)
+    const unresolved = new Map<string, UnresolvedReason>()
+    for (const row of collected.rows) {
+      if (!this.ctx.masterKey) unresolved.set(row.identifier, 'master_key')
+      else if (row.source === 'hosted') {
+        if (!collected.hosted.has(row.id)) unresolved.set(row.identifier, 'hosted')
+      } else if (
+        !collected.items.get(row.vaultConnectionId!)?.some((i) => i.id === row.vaultItemId)
+      ) {
+        unresolved.set(row.identifier, 'vault')
+      }
+    }
+    return {
+      entries: all.filter((e) => isConvertibleValue(e.value)),
+      unconvertible: new Set(
+        all.filter((e) => !isConvertibleValue(e.value)).map((e) => `${e.identifier}#${e.field}`),
+      ),
+      unresolved,
+      unavailableConnections: collected.unavailableConnections,
+      unreadableCredentials: collected.unreadableCredentials,
+    }
+  }
+
+  // 转存的去处（memory 服务的 convertToCredential 用）：credential 与 vault 先在事务外核对这个字段现在的值
+  // 确实等于 value，不等时 400（文字不带值）；核对时取条目用的会话照常 vault.record。
+  // 返回占位符要用的标识与字段，以及在转存的事务里要做的一步：hosted 与 vault 建凭据，credential 锁住那条凭据
+  async convertTarget(target: ConvertTarget, value: string): Promise<ConvertSink> {
+    this.requireManage()
+    switch (target.kind) {
+      case 'hosted':
+        return {
+          identifier: target.identifier,
+          field: target.field,
+          created: true,
+          apply: (tx) =>
+            this.createHostedIn(tx, {
+              identifier: target.identifier,
+              name: target.name,
+              ...(target.description !== undefined ? { description: target.description } : {}),
+              values: { [target.field]: value },
+            }),
+        }
+      case 'credential':
+        return this.existingTarget(target.credentialId, target.field, value)
+      case 'vault':
+        return this.vaultTarget(target, value)
+    }
+  }
+
+  private async existingTarget(
+    credentialId: string,
+    fieldName: string,
+    value: string,
+  ): Promise<ConvertSink> {
+    const sessions: PreparedSession[] = []
+    const first = await this.run(async (tx) => {
+      const row = await this.ownById(tx, credentialId)
+      if (row.deletedAt) throw new MemoryError(409, '这条凭据已删除。请先恢复，再转存。')
+      const field = row.fields.find((f) => f.name === fieldName)
+      if (!field) throw new MemoryError(400, `凭据 ${row.identifier} 没有字段 ${fieldName}`)
+      if (field.itemField === TOTP_FIELD) throw new MemoryError(400, CONVERT_TOTP)
+      if (row.identifier.includes(value)) throw new MemoryError(400, CONVERT_TEXT_HAS_VALUE)
+      if (row.source === 'hosted') return { row, field, actual: this.open(row)[field.name] }
+      const connection = await this.usableConnection(tx, row.vaultConnectionId!)
+      const prepared = { connection, session: this.openSession(connection) }
+      sessions.push(prepared)
+      return { row, field, prepared }
+    }).catch(this.releasingOnError(sessions))
+    const { row, field } = first
+    const actual =
+      'prepared' in first
+        ? (await this.readVaultItem(first.prepared, row.vaultItemId!)).values[field.itemField!]
+        : first.actual
+    if (actual !== value) throw new MemoryError(400, CONVERT_MISMATCH)
+    return {
+      identifier: row.identifier,
+      field: field.name,
+      created: false,
+      // 锁住这条凭据，确认核对之后没有被改过或删掉：转存的事务提交之前也删不掉它（删除要先锁住、再数引用）
+      apply: async (tx) => {
+        const [locked] = await tx
+          .select({ id: credentials.id })
+          .from(credentials)
+          .where(
+            and(
+              eq(credentials.id, row.id),
+              eq(credentials.version, row.version),
+              isNull(credentials.deletedAt),
+            ),
+          )
+          .for('share')
+        if (!locked) throw new MemoryError(409, '凭据在核对之后被修改或删除，请重新转存')
+        return row.id
+      },
+    }
+  }
+
+  private async vaultTarget(
+    target: Extract<ConvertTarget, { kind: 'vault' }>,
+    value: string,
+  ): Promise<ConvertSink> {
+    if (target.itemField === TOTP_FIELD) throw new MemoryError(400, CONVERT_TOTP)
+    const sessions: PreparedSession[] = []
+    const prepared = await this.run(async (tx) => {
+      const connection = await this.usableConnection(tx, target.connectionId)
+      const [bound] = await tx
+        .select({ identifier: credentials.identifier })
+        .from(credentials)
+        .where(
+          and(
+            eq(credentials.vaultConnectionId, connection.id),
+            eq(credentials.vaultItemId, target.itemId),
+            isNull(credentials.deletedAt),
+          ),
+        )
+      if (bound) throw new MemoryError(409, `${ITEM_BOUND}（${bound.identifier}）`)
+      const p = { connection, session: this.openSession(connection) }
+      sessions.push(p)
+      return p
+    }).catch(this.releasingOnError(sessions))
+    const item = await this.readVaultItem(prepared, target.itemId)
+    if (!item.fields.includes(target.itemField)) {
+      throw new MemoryError(400, `条目里没有字段 ${target.itemField}`)
+    }
+    const fields = target.fields ?? defaultCredentialFields(item.fields)
+    if (fields.length > MAX_CREDENTIAL_FIELDS) {
+      throw new MemoryError(
+        400,
+        `条目里的字段超过 ${MAX_CREDENTIAL_FIELDS} 个，请给出字段对应，只选要用的字段`,
+      )
+    }
+    const missing = fields.find((f) => !item.fields.includes(f.itemField!))
+    if (missing) throw new MemoryError(400, `条目里没有字段 ${missing.itemField}`)
+    const mapped = fields.find((f) => f.itemField === target.itemField)
+    if (!mapped) {
+      throw new MemoryError(400, `按条目推出的字段对应里没有 ${target.itemField}，请给出字段对应`)
+    }
+    if (item.values[target.itemField] !== value) throw new MemoryError(400, CONVERT_MISMATCH)
+    // 名称不给时用条目的名称，截到名称的上限；它和推出的字段名都没经过请求的校验，这里再查一次
+    const name = target.name ?? Array.from(item.name.trim()).slice(0, 100).join('')
+    if (!name) throw new MemoryError(400, '条目没有名称，请填写凭据的名称')
+    if ([name, ...fields.map((f) => f.name)].some((t) => t.includes(value))) {
+      throw new MemoryError(400, CONVERT_TEXT_HAS_VALUE)
+    }
+    return {
+      identifier: target.identifier,
+      field: mapped.name,
+      created: true,
+      apply: (tx) =>
+        this.insertVault(
+          tx,
+          {
+            identifier: target.identifier,
+            name,
+            description: target.description ?? null,
+            connectionId: prepared.connection.id,
+            itemId: target.itemId,
+            fields,
+          },
+          null,
+          ITEM_BOUND,
+        ),
+    }
+  }
+
+  // 转存时要用的连接：自己的、可用的
+  private async usableConnection(tx: Tx, id: string): Promise<ConnectionRow> {
+    const connection = await this.vault.load(tx, id)
+    if (!connection) throw new MemoryError(404, '密码库连接不存在')
+    if (connection.status !== 'ok' || !connection.ciphertext) {
+      this.vault.forget(id)
+      throw new MemoryError(409, '密码库连接不可用，请先在密码库里重新检查或重新登录')
+    }
+    return connection
+  }
+
+  private openSession(connection: ConnectionRow): VaultSession {
+    try {
+      return this.vault.session(connection)
+    } catch (err) {
+      if (err instanceof MemoryError) throw err
+      throw new MemoryError(400, `无法读取这个条目：${CREDENTIAL_ACCESS_REASON_NAMES.master_key}`)
+    }
+  }
+
+  // 在事务外取一个条目，再另开事务按结果更新连接。取不到时说明原因，不带值
+  private async readVaultItem(prepared: PreparedSession, itemId: string): Promise<VaultItem> {
+    const call = await this.vaultCall(prepared, (session) => session.item(itemId))
+    await this.run((tx) => this.vault.record(tx, call.connection, call.outcome, call.used)).catch(
+      this.releasingOnError([{ connection: call.connection, session: call.used }]),
+    )
+    const err = call.error
+    if (err === null) return call.value!
+    if (err instanceof VaultDisabledError) {
+      throw new MemoryError(409, `密码库连接已停用：${VAULT_DISABLED_REASON_NAMES[err.reason]}`)
+    }
+    const reason =
+      err instanceof VaultError
+        ? vaultReason(err.kind)
+        : err instanceof SecretsUnreadable
+          ? 'master_key'
+          : null
+    if (!reason) throw err
+    throw new MemoryError(
+      reasonStatus(reason),
+      `无法读取这个条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}`,
+    )
+  }
+
+  // 给密码库的条目起标识（新建与转存共用）。标识冲突与同一个条目已有凭据都转成 409：
+  // 在转存的事务里出错时，调用方的事务随这个错误整个回滚
+  private async insertVault(
+    tx: Tx,
+    input: {
+      identifier: string
+      name: string
+      description: string | null
+      connectionId: string
+      itemId: string
+      fields: CredentialField[]
+    },
+    appIds: string[] | null,
+    // 同一个条目已有有效凭据时的说法：新建与转存给的下一步不同
+    boundText: string,
+  ): Promise<string> {
+    const id = randomUUID()
+    try {
+      await tx.insert(credentials).values({
+        id,
+        spaceId: this.ctx.spaceId,
+        ownerAccountId: this.owner,
+        identifier: input.identifier,
+        name: input.name,
+        description: input.description,
+        source: 'vault',
+        vaultConnectionId: input.connectionId,
+        vaultItemId: input.itemId,
+        fields: input.fields,
+        appIds,
+      })
+    } catch (err) {
+      if (isUniqueViolation(err, 'credentials_identifier_live_idx')) {
+        throw new MemoryError(409, `标识已被占用或不可用：${input.identifier}`)
+      }
+      if (isUniqueViolation(err, 'credentials_vault_item_live_idx')) {
+        throw new MemoryError(409, boundText)
+      }
+      throw err
+    }
+    await this.event(tx, id, 'create')
+    return id
   }
 
   // 在调用方的事务里读一条自己的凭据：引用的条数要算上这个事务刚写的
@@ -1440,6 +1868,92 @@ export class CredentialService {
 }
 
 const FALLBACK_CLIENT = unavailableVaultClient()
+
+// 条目里 TOTP 的密钥：凭据的 totp 字段给的是现算的验证码，不是密钥本身，按值比对与转存都不用它
+const TOTP_FIELD = 'login.totp'
+const CONVERT_TOTP = '验证码字段给出的是现算的验证码，不是条目里的密钥，不能用来转存'
+const CONVERT_MISMATCH = '所选字段现在的值与要转存的值不同，未做任何修改。请确认选对了凭据与字段'
+const CONVERT_TEXT_HAS_VALUE = '标识、名称、说明与字段名不能包含要转存的值'
+const ITEM_BOUND = '这个条目已经起过标识，请改用这条凭据转存'
+const ITEM_BOUND_CREATE = '这个条目已经起过标识，一个条目只对应一条有效凭据'
+
+interface CollectedValues {
+  // 当前账号的有效凭据，按标识排序
+  rows: CredentialRow[]
+  // 解开了的托管凭据：凭据 id → 各字段的值
+  hosted: Map<string, Record<string, string>>
+  // 取到了条目的连接：连接 id → 全部条目
+  items: Map<string, VaultItem[]>
+  unavailableConnections: number
+  // 读不到值的托管凭据条数
+  unreadableCredentials: number
+}
+
+// 托管的这条解开了（只是声明的字段没有存值，不算读不到）
+// 读不到值的原因：master_key 是没配主密钥（托管的解不开、密码库的连接都打不开），hosted 是托管的解不开，
+// vault 是密码库的连接或条目不可用
+export type UnresolvedReason = 'master_key' | 'hosted' | 'vault'
+
+// 能按值替换的值：和转存的请求同一个规则（ConvertibleValue）
+export const isConvertibleValue = (value: string) => ConvertibleValue.safeParse(value).success
+
+// 一条凭据的一个字段现在的值。只在服务端里比对用
+export interface CredentialValueEntry {
+  id: string
+  identifier: string
+  name: string
+  field: string
+  value: string
+}
+
+export interface KnownCredentialValues {
+  // 按标识、字段排序：同一个值对上几条时取第一条。只有满足 ConvertibleValue 的值
+  entries: CredentialValueEntry[]
+  // 值读到了、却不能用来按值替换的字段（标识#字段）
+  unconvertible: ReadonlySet<string>
+  // 读不到值的凭据：标识 → 原因
+  unresolved: ReadonlyMap<string, UnresolvedReason>
+  unavailableConnections: number
+  unreadableCredentials: number
+}
+
+// 转存的去处准备好了：占位符写成 {{cred:<identifier>#<field>}}，apply 在转存的事务里执行，返回凭据 id
+export interface ConvertSink {
+  identifier: string
+  field: string
+  created: boolean
+  apply: (tx: Tx) => Promise<string>
+}
+
+// 各凭据字段现在的值：托管的取解开的，密码库的按字段对应取条目里的；TOTP 的密钥不算。读不到的不列
+function credentialEntries(collected: CollectedValues): CredentialValueEntry[] {
+  const entries: CredentialValueEntry[] = []
+  for (const row of collected.rows) {
+    const base = { id: row.id, identifier: row.identifier, name: row.name }
+    if (row.source === 'hosted') {
+      const values = collected.hosted.get(row.id)
+      if (!values) continue
+      for (const f of row.fields) {
+        const value = values[f.name]
+        if (value !== undefined) entries.push({ ...base, field: f.name, value })
+      }
+      continue
+    }
+    const item = collected.items.get(row.vaultConnectionId!)?.find((i) => i.id === row.vaultItemId)
+    if (!item) continue
+    for (const f of row.fields) {
+      const value = f.itemField ? item.values[f.itemField] : undefined
+      if (f.itemField === TOTP_FIELD || value === undefined || value === '') continue
+      entries.push({ ...base, field: f.name, value })
+    }
+  }
+  return entries.sort(
+    (a, b) => a.identifier.localeCompare(b.identifier) || a.field.localeCompare(b.field),
+  )
+}
+
+const byItemName = (a: VaultItem, b: VaultItem) =>
+  a.name.localeCompare(b.name) || a.id.localeCompare(b.id)
 
 // 重读的密文解不开：记成主密钥的问题
 class SecretsUnreadable extends Error {

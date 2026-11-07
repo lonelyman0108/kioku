@@ -1,10 +1,12 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
   ActivityList,
+  ConsoleCreateMemoryRequest,
   ConsoleMemoryChildren,
   ConsoleMemoryView,
   ConsoleSearchRequest,
   ConsoleSearchResponse,
+  ConsoleUpdateMemoryRequest,
   ConvertedToCredential,
   ConvertToCredentialRequest,
   CreateMemoryRequest,
@@ -19,6 +21,7 @@ import {
   MemoryListQuery,
   MemoryUri,
   MemoryView,
+  MemoryWriteError,
   MoveMemoryRequest,
   PageQuery,
   PlaintextIgnoreRequest,
@@ -36,7 +39,7 @@ import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { withDeletionRetention } from '../jobs/retention'
 import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
-import type { MemoryService } from '../memory/service'
+import type { CreateInput, MemoryService, UpdateInput } from '../memory/service'
 
 // 快速跳转最多列出的直接命中数
 const MATCH_LIMIT = 10
@@ -48,12 +51,21 @@ const DeleteQuery = UriQuery.extend({
   expectedId: z.uuid().optional(),
   expectedVersion: z.coerce.number().int().optional(),
 })
+
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
   401: jsonResponse('未登录或凭据无效', ErrorResponse),
   403: jsonResponse('没有权限', ErrorResponse),
   404: jsonResponse('不存在或不可见', ErrorResponse),
   409: jsonResponse('冲突', ErrorResponse),
+}
+// 新建与修改：正文里有新增的疑似明文被拒时，400 的错误体带上每一处的行号与类别
+const writeErrors = {
+  ...errors,
+  400: jsonResponse(
+    '请求不合法，或正文里有新增的疑似明文凭据（plaintext 列出每一处）',
+    MemoryWriteError,
+  ),
 }
 
 // 管理界面的响应多两个字段（ConsoleMemoryView），由服务按 MemoryContext.secretRead 给出。
@@ -70,6 +82,9 @@ interface RouteSet {
   // 响应里的记忆与子节点
   view: z.ZodType<MemoryView>
   children: z.ZodType<MemoryChildren>
+  // 新建与修改的请求：Key 的只有 plaintextOk，管理界面的只有 ignorePlaintext 与 allowPlaintext（见 contracts）
+  createBody: z.ZodType<CreateInput>
+  updateBody: z.ZodType<UpdateInput>
   resolve: (c: Context<AppEnv>) => Promise<MemoryService>
 }
 
@@ -102,8 +117,8 @@ function memoryRouteSet(set: RouteSet) {
     method: 'post',
     path: base,
     summary: '新建记忆，坐标的开头决定归属；带 validTo 时到期后不再召回、不进 boot',
-    request: { params, body: jsonBody(CreateMemoryRequest) },
-    responses: { 201: jsonResponse('已创建', view), ...errors },
+    request: { params, body: jsonBody(set.createBody) },
+    responses: { 201: jsonResponse('已创建', view), ...writeErrors },
   })
   const update = createRoute({
     ...common,
@@ -111,8 +126,8 @@ function memoryRouteSet(set: RouteSet) {
     path: base,
     summary:
       '修改记忆的标题、正文、敏感级、priority、disclosure、glossary 或有效期；换坐标或归属用 move',
-    request: { params, body: jsonBody(UpdateMemoryRequest) },
-    responses: { 200: jsonResponse('已修改', view), ...errors },
+    request: { params, body: jsonBody(set.updateBody) },
+    responses: { 200: jsonResponse('已修改', view), ...writeErrors },
   })
   const remove = createRoute({
     ...common,
@@ -160,6 +175,8 @@ export function memoryRoutes(deps: Deps) {
       security: [{ bearer: [] }],
       view: MemoryView,
       children: MemoryChildren,
+      createBody: CreateMemoryRequest,
+      updateBody: UpdateMemoryRequest,
       resolve: async (c) => memoryServiceForKey(deps, c.get('key')),
     }),
   )
@@ -173,6 +190,8 @@ export function memoryRoutes(deps: Deps) {
       security: undefined,
       view: ConsoleView,
       children: ConsoleChildren,
+      createBody: ConsoleCreateMemoryRequest,
+      updateBody: ConsoleUpdateMemoryRequest,
       resolve: async (c) => {
         const { service } = await consoleMember(deps, c)
         return service
@@ -284,7 +303,7 @@ function consoleOnlyRoutes(deps: Deps) {
     path: '/spaces/{spaceId}/memories/convert-to-credential',
     tags: ['console'],
     summary:
-      '把正文里的一段明文转存成托管的凭据：一个事务里建凭据、把值换成占位符、从历史快照里拿掉这个值、删掉旧向量。响应不带值',
+      '把正文里的一段明文转存成凭据（只有空间 owner）：新建托管的、换成已有凭据的字段，或给密码库的条目起标识。后两种先在事务外核对这个字段现在的值，不等时 400。然后一个事务里建凭据、把值换成占位符、从历史快照里拿掉这个值、删掉旧向量。响应不带值',
     request: { params, body: jsonBody(ConvertToCredentialRequest) },
     responses: { 200: jsonResponse('转存的结果', ConvertedToCredential), ...errors },
   })
@@ -367,19 +386,23 @@ function consoleOnlyRoutes(deps: Deps) {
         spaceId,
         c.get('console').accountId,
       )
-      const { identifier, name, description, field, value } = c.req.valid('json')
-      const { memory, ...outcome } = await service.convertToCredential(c.req.valid('json'), {
-        create: (tx) =>
-          credentials.createHostedIn(tx, {
-            identifier,
-            name,
-            ...(description !== undefined ? { description } : {}),
-            values: { [field]: value },
-          }),
-        view: (tx, id) => credentials.viewIn(tx, id),
-      })
+      const body = c.req.valid('json')
+      // 去处在事务外准备好：credential 与 vault 要先向密码库核对值，不在事务里请求外部服务
+      const sink = await credentials.convertTarget(body.target, body.value)
+      const { memory, ...outcome } = await service.convertToCredential(
+        { ...body, identifier: sink.identifier, field: sink.field },
+        { create: sink.apply, view: (tx, id) => credentials.viewIn(tx, id) },
+      )
       // 已经提交了，这里不再做会失败的事。管理界面的服务给出的就是 ConsoleMemoryView（见 ConsoleView）
-      return c.json({ memory: memory as ConsoleMemoryView, ...outcome }, 200)
+      return c.json(
+        {
+          memory: memory as ConsoleMemoryView,
+          ...outcome,
+          created: sink.created,
+          field: sink.field,
+        },
+        200,
+      )
     })
     .openapi(glossary, async (c) => {
       const { service } = await consoleMember(deps, c)

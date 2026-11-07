@@ -90,6 +90,9 @@ export interface VaultSession {
   snapshot(): Promise<VaultSnapshot>
   // 按 id 取一个条目并解开。不存在、被删、移出集合或看不到时抛 item_unavailable
   item(id: string): Promise<VaultItem>
+  // 同步一次（照样交给 onSynced），解开所有读得到的组织条目的值：按值比对时用。解不开的条目跳过，
+  // 个数照 VaultSnapshot.unreadableItemCount 算
+  items(): Promise<VaultItem[]>
 }
 
 export interface VaultClient {

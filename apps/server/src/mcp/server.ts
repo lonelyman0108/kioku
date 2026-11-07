@@ -22,7 +22,7 @@ import type { CredentialService } from '../credential/service'
 import { logInternalError } from '../db/client'
 import type { RecallScope } from '../lifecycle/scope'
 import { GUIDANCE } from '../lifecycle/lifecycle'
-import { MemoryError, type MemoryService } from '../memory/service'
+import { hasUntouchedPlaintext, MemoryError, type MemoryService } from '../memory/service'
 import { formatBootBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
 import { VERSION } from '../version'
@@ -71,13 +71,26 @@ const VALID_TO_HELP =
   '有效到：ISO 8601，要带时区（例如 2026-12-31T23:59:00+08:00），要比现在晚至少一分钟。' +
   '只在一段时间内成立的事（临时安排、截止日期）才填，到期后不再召回、不进 boot，不填就一直有效'
 
-// 写入的正文像有明文密码或 Token 时，在结果后面提醒换成占位符（规则与导入工具的提醒相同）
-function withPlaintextReminder(view: MemoryView): string {
+// 写入的正文像有明文密码或 Token 时，在结果后面提醒换成占位符（规则与导入工具的提醒相同）。
+// 新增的疑似明文在写入前就被拒了，能写进来的是原来就有的、结果是 secret 的，或者带了 plaintext_ok 的。
+// plaintext_ok 只确认了这次新增的几处：正文里原来就有、没处理过的照常提醒（见 hasUntouchedPlaintext）
+function withPlaintextReminder(view: MemoryView, plaintextOk: boolean | undefined): string {
   const text = formatMemory(view)
-  return view.content && looksLikePlaintextCredential(view.content)
-    ? `${text}\n\n${PLAINTEXT_REMINDER}`
-    : text
+  const remind = plaintextOk
+    ? hasUntouchedPlaintext(view)
+    : !!view.content && looksLikePlaintextCredential(view.content)
+  return remind ? `${text}\n\n${PLAINTEXT_REMINDER}` : text
 }
+
+// 新建与修改的 plaintext_ok 参数
+const PLAINTEXT_OK_HELP =
+  '正文里新增的疑似明文（密码、令牌这类）确实不是凭据时设为 true：照常写入，这条记忆进待处理由人看过。' +
+  '是凭据时不要设，先用 kioku_credential_save 存值，正文写占位符'
+
+// 新建与修改的工具说明里共用的一段
+const PLAINTEXT_TOOL_HELP =
+  '正文里不要写明文的密码、令牌与密钥：先用 kioku_credential_save 存起来，正文里写 {{cred:<标识>#<字段>}} 占位符。' +
+  '正文里有新增的疑似明文时写入会被拒，错误里指出第几行、哪一类；确实不是凭据（例如示例、已经作废的值）时带上 plaintext_ok 再写。'
 
 export function buildMcpServer(
   memory: MemoryService,
@@ -169,7 +182,8 @@ export function buildMcpServer(
       description:
         '新建一条长期记忆。正文要自带背景（为什么、在什么条件下），disclosure 写清楚什么场景下该想起它。' +
         `${URI_FORMAT_MESSAGE}。坐标的开头决定这条记忆归谁、谁读得到：人格与应用的记忆只能写本应用当前的人格与本应用；` +
-        'user:// 下的只有本人的 agent 读得到，不能设为 public。',
+        'user:// 下的只有本人的 agent 读得到，不能设为 public。' +
+        PLAINTEXT_TOOL_HELP,
       inputSchema: {
         // 长度与数量限制和 REST 共用 contracts 里的定义
         uri: MemoryUri.describe('新记忆的坐标（URI），开头决定归属'),
@@ -182,6 +196,7 @@ export function buildMcpServer(
           '敏感级：public / internal / private / secret。不填时按归属取默认值，user:// 下默认 private、不能是 public',
         ),
         valid_to: CreateMemoryRequest.shape.validTo.describe(VALID_TO_HELP),
+        plaintext_ok: z.boolean().optional().describe(PLAINTEXT_OK_HELP),
       },
     },
     (args) =>
@@ -196,7 +211,9 @@ export function buildMcpServer(
             ...(args.disclosure ? { disclosure: args.disclosure } : {}),
             ...(args.sensitivity ? { sensitivity: args.sensitivity } : {}),
             ...(args.valid_to ? { validTo: args.valid_to } : {}),
+            ...(args.plaintext_ok ? { plaintextOk: true } : {}),
           }),
+          args.plaintext_ok,
         ),
       ),
   )
@@ -206,7 +223,9 @@ export function buildMcpServer(
     {
       description:
         '修改已有记忆。改之前先用 kioku_get 读正文；带上 expected_version 防止覆盖别人的修改。' +
-        '改标题不改坐标；要换位置、标识或归属（坐标的开头）用 kioku_move。',
+        '改标题不改坐标；要换位置、标识或归属（坐标的开头）用 kioku_move。' +
+        PLAINTEXT_TOOL_HELP +
+        '原来就有的疑似明文不挡修改。',
       inputSchema: {
         uri: MemoryUri.describe('要修改的记忆的坐标（URI）'),
         title: UpdateMemoryRequest.shape.title.describe(TITLE_HELP),
@@ -222,6 +241,7 @@ export function buildMcpServer(
           `${VALID_TO_HELP}；填 null 清掉，一直有效`,
         ),
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),
+        plaintext_ok: z.boolean().optional().describe(PLAINTEXT_OK_HELP),
       },
     },
     (args) =>
@@ -241,9 +261,11 @@ export function buildMcpServer(
               ...(args.expected_version !== undefined
                 ? { expectedVersion: args.expected_version }
                 : {}),
+              ...(args.plaintext_ok ? { plaintextOk: true } : {}),
             },
             { via: 'kioku_update' },
           ),
+          args.plaintext_ok,
         ),
       ),
   )

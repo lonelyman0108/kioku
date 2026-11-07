@@ -14,7 +14,12 @@ import {
 } from '../credentials'
 import { ErrorResponse } from '../auth'
 import { LoreImportApplyRequest, LorePlaintextSpot, LorePlanNode } from '../lore'
-import { CreateMemoryRequest, UpdateMemoryRequest } from '../memories'
+import {
+  ConsoleCreateMemoryRequest,
+  ConsoleUpdateMemoryRequest,
+  CreateMemoryRequest,
+  UpdateMemoryRequest,
+} from '../memories'
 import { LAYERS, SENSITIVITIES } from '../memory'
 import { PLAINTEXT_KIND_NAMES } from '../names'
 
@@ -104,10 +109,21 @@ describe('正文里疑似明文的位置', () => {
     expect(values('密码：😀')).toEqual([{ value: '😀', field: 'password' }])
   })
 
-  it('一个值里又像一处时不重复算', () => {
+  it('值到 & 为止，查询串里的下一项另算一处；值里又像一处时不重复算', () => {
     expect(values('password=abc&token=def')).toEqual([
-      { value: 'abc&token=def', field: 'password' },
+      { value: 'abc', field: 'password' },
+      { value: 'def', field: 'token' },
     ])
+    expect(values('password=abc,token=def')).toEqual([
+      { value: 'abc,token=def', field: 'password' },
+    ])
+  })
+
+  it('值到全角的左括号、左引号为止', () => {
+    expect(values('密码：hunter2（旧）')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('密码：hunter2【已换】')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('密码：hunter2「备注」')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('密码：hunter2“x”')).toEqual([{ value: 'hunter2', field: 'password' }])
   })
 
   it('字段名都能直接用作凭据的字段', () => {
@@ -185,9 +201,19 @@ describe('正文里疑似明文的位置', () => {
       expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(false)
       expect(findPlaintextCredentials(text), text).toEqual([])
     }
-    // 引号里除了占位符还有别的：还是要看一眼
-    expect(PLAINTEXT_CREDENTIAL.test('密码："abc{{cred:x}}"')).toBe(true)
-    expect(findPlaintextCredentials('密码："abc{{cred:x}}"')).toEqual([])
+    // 引号里除了占位符还有别的：值到占位符为止，照常报出来，和不写在引号里一样
+    for (const text of [
+      '密码："abc{{cred:x}}"',
+      '密码："abc {{cred:x}}"',
+      '密码：abc{{cred:x}}',
+      '密码："hunter2{{cred:x#y}}"',
+    ]) {
+      expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(true)
+      expect(
+        findPlaintextCredentials(text).map((m) => text.slice(m.start, m.end)),
+        text,
+      ).toEqual([text.includes('hunter2') ? 'hunter2' : 'abc'])
+    }
   })
 })
 
@@ -275,12 +301,17 @@ describe('已知格式的令牌', () => {
     }
   })
 
-  it('「token: 」后面跟着令牌时只算一处，按写法算', () => {
-    const text = `token: ${TOKEN_SAMPLES.github}`
-    const found = findPlaintextCredentials(text)
-    expect(found.map((m) => [text.slice(m.start, m.end), m.kind])).toEqual([
-      [TOKEN_SAMPLES.github, 'label'],
-    ])
+  it('写法后面的值是令牌时只算一处，按令牌算，值是整个令牌', () => {
+    for (const [name, token] of Object.entries(TOKEN_SAMPLES)) {
+      for (const text of [`token: ${token}`, `secret = "${token}"`, `密码：\n${token}`]) {
+        const found = findPlaintextCredentials(text)
+        expect(found.length, `${name}: ${text}`).toBe(1)
+        expect(text.slice(found[0]!.start, found[0]!.end), name).toBe(
+          name === 'pgpKey' ? token.trimEnd() : token,
+        )
+        expect(found[0]!.kind, name).toBe(FIELDS[name]![0])
+      }
+    }
   })
 
   it('私钥块到 END 那一行为止，后面的字不算', () => {
@@ -516,15 +547,23 @@ describe('占位符能放在哪里', () => {
 describe('写入时放行的标记与拒绝时的错误', () => {
   const create = { uri: 'user://notes/wifi', content: '密码：hunter2' }
 
-  it('新建与修改都收三个标记', () => {
-    for (const flags of [
-      { plaintextOk: true },
-      { ignorePlaintext: true },
-      { allowPlaintext: true },
-    ]) {
-      expect(CreateMemoryRequest.parse({ ...create, ...flags })).toMatchObject(flags)
-      expect(UpdateMemoryRequest.parse({ uri: create.uri, ...flags })).toMatchObject(flags)
-    }
+  it('Key 的请求只收 plaintextOk，管理界面的只收另外两个；给错一边的去掉', () => {
+    const all = { plaintextOk: true, ignorePlaintext: true, allowPlaintext: true }
+    expect(CreateMemoryRequest.parse({ ...create, ...all })).toMatchObject({ plaintextOk: true })
+    expect(CreateMemoryRequest.parse({ ...create, ...all })).not.toHaveProperty('ignorePlaintext')
+    expect(CreateMemoryRequest.parse({ ...create, ...all })).not.toHaveProperty('allowPlaintext')
+    expect(UpdateMemoryRequest.parse({ uri: create.uri, ...all })).toEqual({
+      uri: create.uri,
+      plaintextOk: true,
+    })
+    const console = ConsoleCreateMemoryRequest.parse({ ...create, ...all })
+    expect(console).toMatchObject({ ignorePlaintext: true, allowPlaintext: true })
+    expect(console).not.toHaveProperty('plaintextOk')
+    expect(ConsoleUpdateMemoryRequest.parse({ uri: create.uri, ...all })).toEqual({
+      uri: create.uri,
+      ignorePlaintext: true,
+      allowPlaintext: true,
+    })
   })
 
   it('错误体兼容只有 error 的写法，plaintext 只有行号与类别', () => {
@@ -567,5 +606,213 @@ describe('Lore 导入里的疑似明文', () => {
     )
     const negative = { ...base, convertPlaintext: [{ source: 'x', index: -1 }] }
     expect(LoreImportApplyRequest.safeParse(negative).success).toBe(false)
+  })
+})
+
+describe('「密码：…」后面不是值的写法', () => {
+  const flagged = (text: string) => {
+    const found = findPlaintextCredentials(text)
+    expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(found.length > 0)
+    return found.length > 0
+  }
+
+  it('类型名不算，后面紧接字母、数字或 _ 的照样算', () => {
+    for (const type of [
+      'string',
+      'str',
+      'number',
+      'int',
+      'integer',
+      'float',
+      'bool',
+      'boolean',
+      'bytes',
+      'null',
+      'None',
+      'nil',
+      'undefined',
+      'any',
+      'unknown',
+      'object',
+      'Optional[str]',
+      'SecretStr',
+      'string | null',
+      'string;',
+      'String,',
+      '"string"',
+    ]) {
+      expect(flagged(`password: ${type}`), type).toBe(false)
+    }
+    for (const value of ['string123', 'stringent', 'str0ng', 'nullable', 'any_key', 'int3ger']) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+  })
+
+  it('变量与环境变量的引用不算', () => {
+    for (const ref of [
+      '$DB_PASSWORD',
+      '${DB_PASSWORD}',
+      '$(cat /run/secrets/db)',
+      '%DB_PASSWORD%',
+      'process.env.API_KEY',
+      'os.environ["API_KEY"]',
+      "os.getenv('API_KEY')",
+      'getenv("API_KEY")',
+      "env('API_KEY')",
+      '"${DB_PASSWORD}"',
+    ]) {
+      expect(flagged(`password: ${ref}`), ref).toBe(false)
+      expect(flagged(`apiKey: ${ref}`), ref).toBe(false)
+    }
+    // 不像变量的照样算
+    for (const value of ['$100abc', '%abc', 'process.envy', 'environ', 'myenv(x)']) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+  })
+
+  it('同一行里的尖括号占位不算，太长或跨行的照样算', () => {
+    expect(flagged('password: <你的密码>')).toBe(false)
+    expect(flagged('token = <TOKEN>')).toBe(false)
+    expect(flagged('password: "<redacted>"')).toBe(false)
+    expect(flagged(`password: <${'a'.repeat(65)}>`)).toBe(true)
+    expect(flagged('password: <abc\ndef>')).toBe(true)
+    expect(flagged('password: <abc')).toBe(true)
+  })
+
+  it('空的引号不算，引号里有字的照样算', () => {
+    expect(flagged('password: ""')).toBe(false)
+    expect(flagged("password: ''")).toBe(false)
+    expect(flagged('"password": ""')).toBe(false)
+    expect(flagged('password: "a"')).toBe(true)
+  })
+
+  it('整段都是遮盖的不算：*、x、.、… 连续 3 个以上，紧接着就是值的结尾', () => {
+    for (const mask of [
+      '***',
+      '********',
+      'xxxx',
+      'XXXXXXXX',
+      '...',
+      '………',
+      '**xxxx**',
+      '"xxxx"',
+    ]) {
+      expect(flagged(`password: ${mask}`), mask).toBe(false)
+      expect(flagged(`password: ${mask}，别告诉别人`), mask).toBe(false)
+    }
+    for (const value of [
+      'xx',
+      'xxxxy',
+      'xxx1',
+      '....a',
+      '****x',
+      '*****x',
+      '…a',
+      '***hunter2***',
+    ]) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+  })
+
+  it('代码表达式照样算：确实不是凭据时由写入方确认', () => {
+    expect(flagged('password: config.password')).toBe(true)
+    expect(flagged('token = getToken()')).toBe(true)
+  })
+})
+
+describe('补上的写法', () => {
+  it('JSON 与字典的键：标签和冒号之间隔着收尾的引号', () => {
+    expect(values('{"password": "hunter2"}')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values("{'token': 'abc123'}")).toEqual([{ value: 'abc123', field: 'token' }])
+    expect(values('"api_key":"xyz"')).toEqual([{ value: 'xyz', field: 'api_key' }])
+  })
+
+  it('SECRET_KEY、AWS_SECRET_ACCESS_KEY 与 passphrase', () => {
+    expect(values("SECRET_KEY = 'django-insecure-abc'")).toEqual([
+      { value: 'django-insecure-abc', field: 'secret' },
+    ])
+    expect(values('AWS_SECRET_ACCESS_KEY=example-value')).toEqual([
+      { value: 'example-value', field: 'secret' },
+    ])
+    expect(values('secret-key: s3cret')).toEqual([{ value: 's3cret', field: 'secret' }])
+    expect(values('passphrase: correct horse')).toEqual([{ value: 'correct', field: 'password' }])
+  })
+
+  it('Stripe 的私钥与受限密钥算 sk 一类，公开的 pk_ 不算', () => {
+    for (const prefix of ['sk_live_', 'sk_test_', 'rk_live_', 'rk_test_']) {
+      const key = join(prefix, run(24))
+      const found = findPlaintextCredentials(`STRIPE=${key}`)
+      expect(
+        found.map((m) => m.kind),
+        prefix,
+      ).toEqual(['sk'])
+    }
+    expect(PLAINTEXT_CREDENTIAL.test(join('pk_live_', run(24)))).toBe(false)
+    expect(PLAINTEXT_CREDENTIAL.test(join('sk_prod_', run(24)))).toBe(false)
+  })
+
+  it('不该报的：token_count、secrets: 下面接嵌套的键', () => {
+    for (const text of [
+      'token_count: 5',
+      'max_tokens: 1024',
+      'secrets:\n  db:\n    host: 127.0.0.1',
+      'tokenizer: bpe',
+      'secretary: 张三',
+    ]) {
+      expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(false)
+    }
+  })
+})
+
+describe('私钥块的结尾', () => {
+  const header = join('-----BEGIN RSA ', 'PRIVATE KEY-----')
+  const footer = join('-----END RSA ', 'PRIVATE KEY-----')
+
+  it('没有 END 时到最后一个整行都是 base64 的行，后面的散文不算', () => {
+    const block = `${header}\n${run(64)}\n${run(64)}`
+    const text = `${block}\n这是一段说明，后面还有 ${footer} 字样\nmore text`
+    const found = findPlaintextCredentials(text)
+    expect(found.map((m) => text.slice(m.start, m.end))).toEqual([block])
+    // 空行也停
+    const gap = `${block}\n\n${run(64)}`
+    expect(findPlaintextCredentials(gap).map((m) => gap.slice(m.start, m.end))).toEqual([block])
+  })
+
+  it('截断的块后面再跟一个完整的块：各算一处，前一块不吞掉后一块', () => {
+    const truncated = `${header}\n${run(64)}`
+    const complete = `${header}\n${run(64)}\n${run(20)}==\n${footer}`
+    const text = `${truncated}\n${complete}`
+    expect(findPlaintextCredentials(text).map((m) => text.slice(m.start, m.end))).toEqual([
+      truncated,
+      complete,
+    ])
+  })
+})
+
+describe('不切子串：长正文、很多处时也是线性的', () => {
+  it('20 万字的 token=a 与几千个令牌都在 1 秒内', () => {
+    const inputs = [
+      'token=a '.repeat(25_000),
+      Array.from({ length: 5000 }, () => join('gh', 'p_', run(36))).join(' '),
+      'token="a '.repeat(20_000),
+      'token=token='.repeat(15_000),
+      `${'password=“a'.repeat(15_000)}`,
+      Array.from({ length: 5000 }, () => `token: ${join('gh', 'p_', run(36))}`).join(' '),
+    ]
+    for (const text of inputs) {
+      const started = Date.now()
+      findPlaintextCredentials(text)
+      findPlaintextCredentials(text, { overlapping: true })
+      expect(Date.now() - started, text.slice(0, 20)).toBeLessThan(1000)
+    }
+  })
+})
+
+describe('新增按值比，值的结尾猜得准', () => {
+  it('值后面加了括号里的备注、查询串拆成两行，都不算新增', () => {
+    expect(addedPlaintextCredentials('密码：hunter2', '密码：hunter2（旧）')).toEqual([])
+    expect(addedPlaintextCredentials('token=abc&password=xyz', 'token=abc\npassword=xyz')).toEqual(
+      [],
+    )
   })
 })

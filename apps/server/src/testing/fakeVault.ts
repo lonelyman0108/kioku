@@ -54,7 +54,7 @@ export interface FakeVault {
     }[]
     unreadableItemCount: number
     loginFailure: VaultErrorKind | null
-    // 每次取条目之前调用一次（用完就清掉），测试用它在取用的第二段里模拟别的进程
+    // 每次取条目（item 与 items）之前调用一次（用完就清掉），测试用它在取用的第二段里模拟别的进程
     beforeItem: (() => Promise<void>) | null
     // 每次同步之前调用一次（用完就清掉），和 beforeItem 一样
     beforeSnapshot: (() => Promise<void>) | null
@@ -65,7 +65,7 @@ export interface FakeVault {
     // 同步之后不交给 onSynced：模拟没有在 onSynced 里检查的客户端
     skipOnSynced: boolean
   }
-  calls: { login: number; snapshot: number; item: number; sessions: number }
+  calls: { login: number; snapshot: number; item: number; items: number; sessions: number }
   // 每个会话最近一次用的刷新令牌
   refreshTokens: string[]
 }
@@ -79,7 +79,7 @@ export function fakeVault(): FakeVault {
   let failure: VaultErrorKind | null = null
   let pendingSync = false
   let pendingRotate = false
-  const calls = { login: 0, snapshot: 0, item: 0, sessions: 0 }
+  const calls = { login: 0, snapshot: 0, item: 0, items: 0, sessions: 0 }
   const refreshTokens: string[] = []
   const revoked = new Set<string>()
   const state: FakeVault['state'] = {
@@ -197,6 +197,18 @@ export function fakeVault(): FakeVault {
           const item = items.get(id)
           if (!item) throw new VaultError('item_unavailable', '条目不可用')
           return { ...summary(item), values: { ...item.values } }
+        },
+        // 和真的客户端一样同步一次（交给 onSynced），给出全部条目的值
+        async items(): Promise<VaultItem[]> {
+          calls.items++
+          const hook = state.beforeItem
+          state.beforeItem = null
+          await hook?.()
+          await prelude(true)
+          return [...items.values()].map((item) => ({
+            ...summary(item),
+            values: { ...item.values },
+          }))
         },
       }
     },
