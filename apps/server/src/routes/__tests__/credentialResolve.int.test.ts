@@ -7,13 +7,22 @@ import type {
   ResolvedCredentials,
   VaultConnection,
 } from '@kioku/contracts'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { eq } from 'drizzle-orm'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
-import type { Database } from '../../db/client'
+import { principalForKeyId } from '../../auth/middleware'
+import { defaultSession } from '../../access/session'
+import { credentialServiceForKey } from '../../credential/context'
+import { VaultConnections } from '../../credential/vault'
+import { withSpace, type Database } from '../../db/client'
+import { credentials } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
+import type { Deps } from '../../http/env'
+import { MemoryError } from '../../memory/service'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeVault, type FakeVault } from '../../testing/fakeVault'
+import { hasCachedSession } from '../../testing/vaultCache'
 import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 const HOSTED_PASSWORD = 'pw-correct-horse-staple'
@@ -34,6 +43,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
   let vault: FakeVault
   let routerItem: string
   let key: string
+  let deps: Deps
 
   beforeAll(async () => {
     database = await openTestDatabase()
@@ -46,14 +56,16 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
     vault = fakeVault()
     vault.addAccount('agent@example.com', 'master-pw')
     routerItem = vault.addItem({ name: '路由器', values: ROUTER_VALUES })
-    app = createApp({
+    vault.addAccount('second@example.com', 'master-pw')
+    deps = {
       db: database.db,
       cookieSecure: false,
       masterKey: randomBytes(32),
       embedder: staticEmbedderSource(null),
       jobs: null,
       vault: vault.client,
-    })
+    }
+    app = createApp(deps)
     ws = await bootstrap(app)
     key = await keyFor()
   })
@@ -92,25 +104,28 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
       }),
       201,
     )
-  const connect = async () =>
+  afterEach(() => {
+    vi.restoreAllMocks()
+  })
+  const connect = async (email = 'agent@example.com') =>
     (
       await ok<{ kind: 'connected'; connection: VaultConnection }>(
         await asMember('POST', '/vault-connections', {
           serverUrl: 'https://vault.example.com',
-          email: 'agent@example.com',
+          email,
           masterPassword: 'master-pw',
         }),
       )
     ).connection
-  const router = async (connectionId: string) =>
+  const router = async (connectionId: string, identifier = 'router', itemId = routerItem) =>
     ok<ConsoleCredential>(
       await asMember('POST', '/credentials', {
-        identifier: 'router',
+        identifier,
         name: '路由器',
         source: {
           kind: 'vault',
           connectionId,
-          itemId: routerItem,
+          itemId,
           fields: [
             { name: 'username', itemField: 'login.username' },
             { name: 'password', itemField: 'login.password' },
@@ -286,7 +301,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
         }),
         409,
       ),
-    ).toBe('取不到 router#username 的值：连接已断开')
+    ).toBe('取不到 router 的值：连接已断开')
     expect(vault.calls.item).toBe(before)
     expect(await accessEvents(routerCred.id)).toEqual([
       {
@@ -319,7 +334,7 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
         }),
         409,
       ),
-    ).toMatch(/^取不到 router#otp 的值：/)
+    ).toBe('取不到 router#otp 的值：条目里没有这个字段')
 
     vault.failNext('unreachable')
     expect(
@@ -332,12 +347,12 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
         }),
         502,
       ),
-    ).toMatch(/^取不到 router#password 的值：/)
+    ).toMatch(/^取不到 router 的值：密码库无法连接/)
 
     vault.removeItem(routerItem)
     expect(
       await errorOf(await resolve({ refs: [{ identifier: 'router', field: 'password' }] }), 409),
-    ).toMatch(/^取不到 router#password 的值：/)
+    ).toMatch(/^取不到 router 的值：/)
 
     expect((await accessEvents(routerCred.id)).map((e) => [e.result, e.reason, e.fields])).toEqual([
       ['failed', 'item_unavailable', ['password']],
@@ -346,6 +361,127 @@ describe.skipIf(!testDatabaseUrl)('kioku run 的取值接口', () => {
     ])
     // 密码库那条取不到，托管的值就不交出，也不记
     expect(await accessEvents(fileServer.id)).toEqual([])
+  })
+
+  it('托管的凭据声明了字段却没有存值：按条目里缺字段算失败、记一条失败；没声明的照旧 404、不记', async () => {
+    const fileServer = await hosted()
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(credentials)
+        .set({ fields: [...fileServer.fields, { name: 'pin', itemField: null }] })
+        .where(eq(credentials.id, fileServer.id)),
+    )
+    expect(
+      await errorOf(
+        await resolve({
+          refs: [
+            { identifier: 'file-server', field: 'password' },
+            { identifier: 'file-server', field: 'pin' },
+          ],
+          purpose: '登录',
+        }),
+        409,
+      ),
+    ).toBe('取不到 file-server#pin 的值：条目里没有这个字段')
+    // use 也一样：取全部字段时整条失败，不给缺了值的那部分
+    const use = (query: string) => send('GET', `/v1/credentials?${query}`, undefined, bearer(key))
+    expect(await errorOf(await use('identifier=file-server'), 409)).toBe(
+      '取不到 file-server 的值：条目里没有这个字段',
+    )
+    expect(await errorOf(await use('identifier=file-server&field=pin'), 409)).toBe(
+      '取不到 file-server 的值：条目里没有这个字段',
+    )
+    expect(await errorOf(await use('identifier=file-server&field=nope'), 404)).toBe(
+      '凭据 file-server 没有字段 nope',
+    )
+    expect(
+      await errorOf(await resolve({ refs: [{ identifier: 'file-server', field: 'nope' }] }), 404),
+    ).toBe('file-server#nope：凭据没有这个字段')
+    expect(
+      (await accessEvents(fileServer.id)).map((e) => [e.via, e.result, e.reason, e.fields]),
+    ).toEqual([
+      ['rest', 'failed', 'field_missing', ['pin']],
+      ['rest', 'failed', 'field_missing', ['password', 'username', 'pin']],
+      ['run', 'failed', 'field_missing', ['password', 'pin']],
+    ])
+  })
+
+  // 准备时读到可用，读完之后断开提交，会话这才放回缓存（并发的断开与取用交错）
+  const disconnectAfterLoad = (connectionId: string) => {
+    const load = VaultConnections.prototype.load
+    let raced = false
+    vi.spyOn(VaultConnections.prototype, 'load').mockImplementation(async function (
+      this: VaultConnections,
+      tx,
+      id,
+    ) {
+      const row = await load.call(this, tx, id)
+      if (id === connectionId && !raced) {
+        raced = true
+        await ok(await asMember('POST', `/vault-connections/${connectionId}/disconnect`))
+      }
+      return row
+    })
+  }
+
+  it('前面的密码库凭据取不到时，后面准备过、没轮到取的也确认连接状态：断开了就清掉缓存里的会话', async () => {
+    const first = await connect()
+    const second = await connect('second@example.com')
+    await router(first.id)
+    const otherItem = vault.addItem({ name: '交换机', values: ROUTER_VALUES })
+    await router(second.id, 'switch', otherItem)
+    vault.removeItem(routerItem)
+    disconnectAfterLoad(second.id)
+
+    expect(
+      await errorOf(
+        await resolve({
+          refs: [
+            { identifier: 'router', field: 'password' },
+            { identifier: 'switch', field: 'password' },
+          ],
+        }),
+        409,
+      ),
+    ).toMatch(/^取不到 router 的值：/)
+    expect(hasCachedSession(vault.client, second.id)).toBe(false)
+  })
+
+  it('第一段里后面那条准备失败时，前面准备好的密码库凭据也确认连接状态', async () => {
+    const first = await connect()
+    const second = await connect('second@example.com')
+    await router(first.id)
+    const otherItem = vault.addItem({ name: '交换机', values: ROUTER_VALUES })
+    await router(second.id, 'switch', otherItem)
+    await ok(await asMember('POST', `/vault-connections/${first.id}/disconnect`))
+    disconnectAfterLoad(second.id)
+
+    expect(
+      await errorOf(
+        await resolve({
+          refs: [
+            { identifier: 'switch', field: 'password' },
+            { identifier: 'router', field: 'password' },
+          ],
+        }),
+        409,
+      ),
+    ).toBe('取不到 router 的值：连接已断开')
+    expect(hasCachedSession(vault.client, second.id)).toBe(false)
+  })
+
+  it('测试台里不能用：回 400，不给值', async () => {
+    await hosted()
+    const created = await ws.createKey((await ws.createApp('bench')).id, FULL_SCOPES)
+    const principal = (await principalForKeyId(database.db, created.id))!
+    const service = credentialServiceForKey(deps, principal, defaultSession(principal), {
+      bench: true,
+    })
+    const err = await service
+      .resolve([{ identifier: 'file-server', field: 'password' }], 'run')
+      .catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(MemoryError)
+    expect(err).toMatchObject({ status: 400, message: '测试台不支持 kioku run 的取值接口' })
   })
 
   it('refs 为空、超过 32 项或重复时回 400', async () => {
