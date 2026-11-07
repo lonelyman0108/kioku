@@ -109,7 +109,8 @@ export function reasonStatus(reason: CredentialAccessReason): 400 | 409 | 502 {
 }
 
 // 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的。
-// 写入本身的错误（read_only、item_conflict、value_too_long）不在这里：它们说的是这次写入，不改连接的状态
+// 写入本身的错误（read_only、item_conflict、value_too_long）不在这里：它们说的是这次写入，不改连接的状态。
+// 写入时的 unsupported_format（字段和条目的类型不符）也是写入本身的错误，写回那边先把它换掉（writeOutcome）
 const CONNECTION_ERRORS = new Set<VaultErrorKind>([
   'unreachable',
   'server_error',
@@ -626,10 +627,10 @@ export class VaultConnections {
     const updated = await this.run(async (tx) => {
       // 拿到快照之后自己再查一遍，不只靠客户端在 onSynced 里抛错：换一个客户端、或者 snapshot() 走了别的路径，
       // 违规的连接也不会被恢复。判断与 onSynced 是同一个 snapshotViolation
+      // 锁的顺序：先连接、再凭据（凭据按 id）。取用、写回与按值比对都是 record 先改连接、再看修改时间，
+      // 这里也先改连接这一行，再 observeRevisions，否则两边并发会互相等待成死锁
       if (snapshot) {
         const violation = snapshotViolation(snapshot)
-        await observeRevisions(tx, row.id, snapshot.items)
-        await refreshDestinationName(tx, row, snapshot)
         await tx
           .update(vaultConnections)
           .set({
@@ -641,6 +642,8 @@ export class VaultConnections {
             updatedAt: new Date(),
           })
           .where(and(eq(vaultConnections.id, row.id), ne(vaultConnections.status, 'disconnected')))
+        await refreshDestinationName(tx, row, snapshot)
+        await observeRevisions(tx, row.id, snapshot.items)
         if (violation) this.forget(row.id)
       } else if (outcome.kind === 'disabled') {
         await tx
@@ -854,10 +857,15 @@ export function isNewerRevision(next: string, prev: string): boolean {
 // Kioku 看到了条目现在的修改时间（取用、列条目、重新检查、按值比对、写回冲突之后）：和记下的不同就是值在别处改过，
 // 记下新的修改时间与上次改值的时间，版本号加一（带着旧版本号的修改返回 409，要先重新读取），清掉「需要轮换」。
 // 还没记下过修改时间的（刚起标识、迁移之前的）只记下，不算改过值。已删除的凭据不动，恢复之后下一次看到时再比
+// fresh：这个修改时间是刚从服务器读到的、以它为准（写回冲突之后的重读）：和记下的不同就记，不管新旧。
+// Vaultwarden 用 MySQL 时存下的修改时间去掉了小数秒，比写入响应里的「旧」，按新旧比会永远记不下。
+// 别的观察路径照旧不往回改：并发的读取可能晚一步带回更早的修改时间。
+// 锁的顺序：调用方先锁连接（vault.record、sync 里改连接那一行），这里再按凭据 id 锁凭据
 export async function observeRevisions(
   tx: Tx,
   connectionId: string,
   items: readonly { id: string; revisionDate: string }[],
+  options: { fresh?: boolean } = {},
 ): Promise<void> {
   if (!items.length) return
   const bound = await tx
@@ -885,7 +893,7 @@ export async function observeRevisions(
     if (revision === undefined || revision === b.seen) continue
     const changed = b.seen !== null
     // 并发的读取可能晚一步带回更早的修改时间（别的请求已经记下了更新的）：不往回改
-    if (b.seen !== null && !isNewerRevision(revision, b.seen)) continue
+    if (!options.fresh && b.seen !== null && !isNewerRevision(revision, b.seen)) continue
     await tx
       .update(credentials)
       .set({

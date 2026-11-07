@@ -273,7 +273,7 @@ export function fakeVault(): FakeVault {
           calls.createItem++
           await beforeWrite()
           await prelude()
-          checkWrite(input.collectionId, input.values)
+          checkWrite(input.collectionId, input.values, input.type)
           const id = randomUUID()
           const item: StoredItem = {
             id,
@@ -297,7 +297,7 @@ export function fakeVault(): FakeVault {
           if (item.revisionDate !== expectedRevisionDate) {
             throw new VaultError('item_conflict', '条目已在别处修改')
           }
-          checkWrite(item.collectionId, changes.values ?? {})
+          checkWrite(item.collectionId, changes.values ?? {}, item.type)
           // 和真的客户端一样，值都和原来相同时不发修改：原样返回，修改时间不变
           const same =
             Object.entries(changes.values ?? {}).every(([ref, v]) => item.values[ref] === v) &&
@@ -325,11 +325,14 @@ export function fakeVault(): FakeVault {
   }
 
   // 写入前的检查，和真的客户端同一个顺序：集合能不能写、字段认不认得、值长不长
-  function checkWrite(collectionId: string, values: Record<string, string>) {
+  // 登录条目才有 login.* 字段：往别的类型里写用户名、密码时，和不认识的字段一样报 unsupported_format
+  function checkWrite(collectionId: string, values: Record<string, string>, type: VaultItemType) {
     const collection = state.collections.find((c) => c.id === collectionId)
     if (!collection || collection.readOnly) throw new VaultError('read_only', '集合只读或不可用')
     for (const [ref, value] of Object.entries(values)) {
-      if (!writable(ref)) throw new VaultError('unsupported_format', '不支持写入这个字段')
+      if (!writable(ref) || (ref.startsWith('login.') && type !== 'login')) {
+        throw new VaultError('unsupported_format', '不支持写入这个字段')
+      }
       if (state.maxValueLength !== null && value.length > state.maxValueLength) {
         throw new VaultError(VALUE_TOO_LONG, '值超出密码库的长度上限')
       }
