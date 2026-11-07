@@ -154,7 +154,7 @@ export function resolveAccess(
 }
 
 // Key 的有效上限还要受应用主人「当前」角色约束：签发之后主人被降级，Key 也随之降级，
-// 与签发规则一致：admin 与 secret 只属于空间 owner，viewer 只读
+// 与签发规则一致：admin、secret 与凭据能力（取用、管理）只属于空间 owner，viewer 只读
 export function clampScopesToRole(scopes: KeyScopes, role: MemberRole): KeyScopes {
   if (role === 'owner') return scopes
   return {
@@ -162,6 +162,7 @@ export function clampScopesToRole(scopes: KeyScopes, role: MemberRole): KeyScope
     writeLayers: role === 'viewer' ? [] : scopes.writeLayers,
     maxSensitivity: minSensitivity(scopes.maxSensitivity, 'private'),
     admin: false,
+    credentials: 'none',
   }
 }
 

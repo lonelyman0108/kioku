@@ -8,6 +8,7 @@ const full: KeyScopes = {
   writeLayers: [...LAYERS],
   maxSensitivity: 'secret',
   admin: true,
+  credentials: 'manage',
 }
 
 describe('Key 上限随主人当前角色收紧', () => {
@@ -15,11 +16,12 @@ describe('Key 上限随主人当前角色收紧', () => {
     expect(clampScopesToRole(full, 'owner')).toEqual(full)
   })
 
-  it('editor 失去 admin 与 secret', () => {
+  it('editor 失去 admin、secret 与凭据能力', () => {
     expect(clampScopesToRole(full, 'editor')).toEqual({
       ...full,
       maxSensitivity: 'private',
       admin: false,
+      credentials: 'none',
     })
   })
 
@@ -29,6 +31,7 @@ describe('Key 上限随主人当前角色收紧', () => {
       writeLayers: [],
       maxSensitivity: 'private',
       admin: false,
+      credentials: 'none',
     })
   })
 

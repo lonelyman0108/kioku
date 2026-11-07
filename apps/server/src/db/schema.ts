@@ -1,6 +1,5 @@
 import {
   CONVERSATION_KINDS,
-  CREDENTIAL_PROVIDER_KINDS,
   CURATED_LAYERS,
   DEFAULT_EXTRACTION_DAILY_WRITES,
   DEFAULT_EXTRACTION_MONTHLY_TOKENS,
@@ -11,6 +10,9 @@ import {
   PROVENANCES,
   SENSITIVITIES,
   SUBJECT_KINDS,
+  VAULT_CONNECTION_STATUSES,
+  VAULT_DISABLED_REASONS,
+  VAULT_ERROR_KINDS,
   type CredentialField,
   type KeyScopes,
 } from '@kioku/contracts'
@@ -58,8 +60,10 @@ export const provenance = pgEnum('provenance', PROVENANCES)
 export const memoryForm = pgEnum('memory_form', MEMORY_FORMS)
 export const memberRole = pgEnum('member_role', MEMBER_ROLES)
 export const subjectKind = pgEnum('subject_kind', SUBJECT_KINDS)
-export const credentialProviderKind = pgEnum('credential_provider_kind', CREDENTIAL_PROVIDER_KINDS)
 export const credentialSource = pgEnum('credential_source', CREDENTIAL_SOURCES)
+export const vaultConnectionStatus = pgEnum('vault_connection_status', VAULT_CONNECTION_STATUSES)
+export const vaultDisabledReason = pgEnum('vault_disabled_reason', VAULT_DISABLED_REASONS)
+export const vaultErrorKind = pgEnum('vault_error_kind', VAULT_ERROR_KINDS)
 export const conversationKind = pgEnum('conversation_kind', CONVERSATION_KINDS)
 
 // ---- 身份表 ----
@@ -537,10 +541,11 @@ export const memoryEvents = pgTable(
   (t) => [index().on(t.spaceId, t.createdAt), index().on(t.memoryId, t.createdAt)],
 )
 
-// 凭据源：成员自己的密码管理器（或别的取值方式）以及给 agent 看的使用说明。和凭据一样归某个成员，
-// 只有他本人看得到、用得上：使用说明会下发给他的 agent，不能让别人改。软删除，绑定它的凭据仍指向它
-export const credentialProviders = pgTable(
-  'credential_providers',
+// 密码库连接：成员连接的 Bitwarden 兼容账号。和凭据一样归某个成员，只有他本人看得到、用得上。
+// 刷新令牌与账户密钥整体加密保存，aad 绑定连接 id，主密码不保存；断开时清掉密文，这一行留着，
+// 凭据（含已删除的）照样指着它，重新登录同一个账号就恢复
+export const vaultConnections = pgTable(
+  'vault_connections',
   {
     id: uuid().primaryKey().defaultRandom(),
     spaceId: uuid()
@@ -549,18 +554,64 @@ export const credentialProviders = pgTable(
     ownerAccountId: uuid()
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
-    kind: credentialProviderKind().notNull(),
-    name: text().notNull(),
-    instructions: text().notNull().default(''),
+    // 末尾不带 /
+    serverUrl: text().notNull(),
+    email: text().notNull(),
+    // 密码库里的账号 id：重新登录时据此认出是不是同一个账号
+    vaultUserId: text().notNull(),
+    // Kioku 为这个连接生成的设备 id，重新登录沿用，密码库的设备列表里按它认出 Kioku
+    deviceId: uuid().notNull(),
+    // 刷新令牌与账户密钥（见 credential/bitwarden/types.ts 的 VaultSecrets）；断开时置空
+    ciphertext: bytea(),
+    wrappedKey: bytea(),
+    // 包装数据密钥用的主密钥的标识，同记忆的 keyId
+    keyId: text(),
+    status: vaultConnectionStatus().notNull().default('ok'),
+    disabledReason: vaultDisabledReason(),
+    // 最近一次和服务器通信失败的原因与时间，之后成功一次就清掉
+    lastErrorKind: vaultErrorKind(),
+    lastErrorAt: timestamp({ withTimezone: true }),
+    // 最近一次成功同步的时间
+    lastCheckedAt: timestamp({ withTimezone: true }),
+    // 写回时新凭据的去处：组织里的一个集合
+    defaultCollectionId: text(),
+    disconnectedAt: timestamp({ withTimezone: true }),
     createdAt: createdAt(),
     updatedAt: updatedAt(),
-    deletedAt: timestamp({ withTimezone: true }),
   },
-  (t) => [index().on(t.spaceId, t.ownerAccountId), unique().on(t.spaceId, t.ownerAccountId, t.id)],
+  (t) => [
+    index().on(t.spaceId, t.ownerAccountId),
+    unique().on(t.spaceId, t.ownerAccountId, t.id),
+    // 同一个成员连同一个账号只有一个连接：再连一次就是重新登录
+    uniqueIndex('vault_connections_account_idx').on(
+      t.spaceId,
+      t.ownerAccountId,
+      t.serverUrl,
+      t.vaultUserId,
+    ),
+    // 轮换主密钥时按主密钥的标识找连接
+    index('vault_connections_key_id_idx')
+      .on(t.spaceId, t.keyId)
+      .where(sql`${t.wrappedKey} is not null`),
+    check(
+      'vault_connections_secrets_shape',
+      sql`(${t.ciphertext} is null) = (${t.wrappedKey} is null)
+        and (${t.ciphertext} is null) = (${t.status} = 'disconnected')
+        and (${t.disconnectedAt} is null) = (${t.status} <> 'disconnected')`,
+    ),
+    check(
+      'vault_connections_disabled_reason',
+      sql`(${t.disabledReason} is null) = (${t.status} <> 'disabled')`,
+    ),
+    check(
+      'vault_connections_last_error',
+      sql`(${t.lastErrorKind} is null) = (${t.lastErrorAt} is null)`,
+    ),
+  ],
 )
 
 // 凭据：归某个成员，记忆正文用 {{cred:<标识>}} 引用。值要么由 Kioku 加密保存（hosted），
-// 要么在外部凭据源里、这里只存条目位置（external）。软删除，可以恢复
+// 要么在成员连接的密码库里、这里只记连接与条目的 id（vault）。软删除，可以恢复
 export const credentials = pgTable(
   'credentials',
   {
@@ -576,10 +627,10 @@ export const credentials = pgTable(
     name: text().notNull(),
     description: text(),
     source: credentialSource().notNull(),
-    providerId: uuid(),
-    // 外部来源的条目位置
-    location: text(),
-    // 字段名，外部来源再加上条目里对应的字段；托管的值不在这里
+    // 密码库来源指向的连接与条目
+    vaultConnectionId: uuid(),
+    vaultItemId: text(),
+    // 字段名，密码库来源再加上条目里对应的字段；托管的值不在这里
     fields: jsonb().$type<CredentialField[]>().notNull().default([]),
     // 托管的值：各字段的值整体加密，aad 绑定凭据 id（见 credential/service.ts）
     ciphertext: bytea(),
@@ -598,35 +649,37 @@ export const credentials = pgTable(
     uniqueIndex('credentials_identifier_live_idx')
       .on(t.spaceId, t.ownerAccountId, t.identifier)
       .where(sql`${t.deletedAt} is null`),
-    unique().on(t.spaceId, t.id),
-    // 数凭据源上绑着几条有效的凭据（凭据源列表、删除凭据源时）
-    index('credentials_provider_live_idx')
-      .on(t.providerId)
+    // 一个条目只起一个标识
+    uniqueIndex('credentials_vault_item_live_idx')
+      .on(t.vaultConnectionId, t.vaultItemId)
       .where(sql`${t.deletedAt} is null`),
+    // 数连接上指着几条凭据、清理时找没有凭据（含已删除的）指着的连接
+    index('credentials_vault_connection_idx').on(t.vaultConnectionId),
+    unique().on(t.spaceId, t.id),
     // 轮换主密钥时按主密钥的标识找托管的凭据
     index('credentials_key_id_idx')
       .on(t.spaceId, t.keyId)
       .where(sql`${t.wrappedKey} is not null`),
-    // 凭据源必须是同一个成员的：外键带上主人。自动生成的约束名超过 PostgreSQL 的 63 字符上限，这里起短名
+    // 连接必须是同一个成员的：外键带上所有者。自动生成的约束名超过 PostgreSQL 的 63 字符上限，这里起短名
     foreignKey({
-      name: 'credentials_provider_fk',
-      columns: [t.spaceId, t.ownerAccountId, t.providerId],
+      name: 'credentials_vault_connection_fk',
+      columns: [t.spaceId, t.ownerAccountId, t.vaultConnectionId],
       foreignColumns: [
-        credentialProviders.spaceId,
-        credentialProviders.ownerAccountId,
-        credentialProviders.id,
+        vaultConnections.spaceId,
+        vaultConnections.ownerAccountId,
+        vaultConnections.id,
       ],
     }),
     check(
       'credentials_source_shape',
       sql`case when ${t.source} = 'hosted'
-        then ${t.ciphertext} is not null and ${t.wrappedKey} is not null and ${t.providerId} is null and ${t.location} is null
-        else ${t.ciphertext} is null and ${t.wrappedKey} is null and ${t.providerId} is not null and ${t.location} is not null end`,
+        then ${t.ciphertext} is not null and ${t.wrappedKey} is not null and ${t.vaultConnectionId} is null and ${t.vaultItemId} is null
+        else ${t.ciphertext} is null and ${t.wrappedKey} is null and ${t.vaultConnectionId} is not null and ${t.vaultItemId} is not null end`,
     ),
   ],
 )
 
-// 凭据的事件：新建、修改、删除、撤销删除与取用。只有凭据的主人看得到，不进空间的活动记录；不含任何值
+// 凭据的事件：新建、修改、删除、撤销删除与取用（交出值、被拒或失败）。只有凭据的所有者看得到，不进空间的变更记录；不含任何值
 export const credentialEvents = pgTable(
   'credential_events',
   {
@@ -638,7 +691,7 @@ export const credentialEvents = pgTable(
     eventType: text().notNull(),
     actorKeyId: uuid(),
     actorAccountId: uuid(),
-    // 取用经由哪里、取了哪些字段，修改了哪些部分
+    // 取用经由哪里、取了哪些字段、用途、结果与原因、会话上下文，修改了哪些部分
     context: jsonb().$type<Record<string, unknown>>().notNull().default({}),
     createdAt: createdAt(),
   },
@@ -1118,7 +1171,7 @@ export const RLS_TABLES = [
   'memory_embeddings',
   'memory_glossary',
   'memory_events',
-  'credential_providers',
+  'vault_connections',
   'credentials',
   'credential_events',
   'memory_credential_refs',

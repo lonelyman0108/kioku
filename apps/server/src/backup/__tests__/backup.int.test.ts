@@ -11,11 +11,14 @@ import { readMigrationFiles } from 'drizzle-orm/migrator'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
+import { encryptSecret } from '../../crypto/envelope'
+import { encryptionKey } from '../../crypto/keyring'
 import { prepareMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { lastMigration, pendingMigrations, runMigrations } from '../../db/migrate'
 import {
   conversations,
+  credentials,
   dreamMarks,
   dreamRuns,
   dreamSuggestions,
@@ -27,6 +30,7 @@ import {
   spaces,
   subjectBindings,
   subjects,
+  vaultConnections,
 } from '../../db/schema'
 import { backfillJob } from '../../embedding/jobs'
 import { staticEmbedderSource } from '../../embedding/source'
@@ -109,7 +113,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   const inSpace = <T>(fn: (tx: Tx) => Promise<T>) => withSpace(database.db, ws.spaceId, fn)
 
   // 每张进备份的表都写上数据：成员（有一个关掉了 Dream 整理本人的记忆）、继承的人格、两个应用与 Key、
-  // 各种记忆（secret、带关键词与凭据引用、改过的、删掉的）、凭据源与托管的凭据、召回记录与命中、群聊里认出的联系人、
+  // 各种记忆（secret、带关键词与凭据引用、改过的、删掉的）、密码库连接、托管与密码库的凭据、召回记录与命中、群聊里认出的联系人、
   // 按群换人格、群聊与不带会话上下文的会话（挂着会话摘要与听到的事实）、召回统计、抽取记录、等确认的绑定、
   // 嵌入接口与抽取模型的设置，以及（不进备份的）向量
   async function seed() {
@@ -143,13 +147,6 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     const bot = await ws.createApp('qq-bot', { name: '群聊 bot', runtimeFamily: 'astrbot' })
     const botKey = await ws.issueKey(bot.id)
 
-    const provider = await send(
-      'POST',
-      `/v1/spaces/${ws.spaceId}/credential-providers`,
-      { kind: 'bitwarden', name: 'Vaultwarden', instructions: '用 bw get 取' },
-      cookie,
-    )
-    expect(provider.status).toBe(201)
     const credential = await send(
       'POST',
       `/v1/spaces/${ws.spaceId}/credentials`,
@@ -346,6 +343,38 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       await tx
         .insert(dreamMarks)
         .values({ spaceId: ws.spaceId, memoryId: nas.id, version: nas.version })
+      // 密码库连接（令牌与账户密钥加密保存）与给它的一个条目起的标识
+      const connectionId = randomUUID()
+      const { key: dataKey, id: keyId } = encryptionKey(masterKey)
+      await tx.insert(vaultConnections).values({
+        id: connectionId,
+        spaceId: ws.spaceId,
+        ownerAccountId: ws.accountId,
+        serverUrl: 'https://vault.example.com',
+        email: 'agent@example.com',
+        vaultUserId: randomUUID(),
+        deviceId: randomUUID(),
+        ...encryptSecret(
+          dataKey,
+          JSON.stringify({ refreshToken: 'r', userKey: randomBytes(64).toString('base64') }),
+          `vault-connection:${connectionId}`,
+        ),
+        keyId,
+        lastCheckedAt: new Date(),
+      })
+      await tx.insert(credentials).values({
+        spaceId: ws.spaceId,
+        ownerAccountId: ws.accountId,
+        identifier: 'file-server',
+        name: '文件服务器',
+        source: 'vault',
+        vaultConnectionId: connectionId,
+        vaultItemId: randomUUID(),
+        fields: [
+          { name: 'username', itemField: 'login.username' },
+          { name: 'password', itemField: 'login.password' },
+        ],
+      })
     })
 
     for (const [path, body] of [

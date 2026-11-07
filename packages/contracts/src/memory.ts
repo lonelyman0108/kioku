@@ -85,11 +85,18 @@ export const SUBJECT_KINDS = ['person', 'group'] as const
 export const SubjectKind = z.enum(SUBJECT_KINDS)
 export type SubjectKind = z.infer<typeof SubjectKind>
 
+// 访问密钥的凭据能力：none 不可用；use 能列出凭据（不含值）、取值；manage 在此之上还能新建、修改、删除凭据。
+// 取用与管理都还要能读本人、最高敏感级至少私密，管理还要能写本人。只有空间所有者的应用能有取用与管理
+export const CREDENTIAL_CAPABILITIES = ['none', 'use', 'manage'] as const
+export const CredentialCapability = z.enum(CREDENTIAL_CAPABILITIES)
+export type CredentialCapability = z.infer<typeof CredentialCapability>
+
 // API Key 的授权上限；会话上下文和应用配置只能在它之内继续收紧
 export const KeyScopes = z.object({
   readLayers: z.array(Layer),
   writeLayers: z.array(Layer),
   maxSensitivity: Sensitivity,
   admin: z.boolean(),
+  credentials: CredentialCapability.default('none'),
 })
 export type KeyScopes = z.infer<typeof KeyScopes>

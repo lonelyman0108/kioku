@@ -161,7 +161,6 @@ export const RetentionCounts = z.object({
   extractionRuns: z.number().int(),
   credentialEvents: z.number().int(),
   deletedCredentials: z.number().int(),
-  deletedProviders: z.number().int(),
   // 以下几类是后来加的，带默认值：之前记下的清理结果里没有它们，读出来当作 0
   dreamRuns: z.number().int().default(0),
   // Dream 的建议：处理过的（执行或拒绝的）、没处理但已经作废的，涉及的记忆改过、删掉或过期之后清掉
@@ -170,6 +169,8 @@ export const RetentionCounts = z.object({
   subjectBindings: z.number().int().default(0),
   // 读到 secret 正文的访问事件：和凭据的访问记录一样按时间清
   accessEvents: z.number().int().default(0),
+  // 断开超过保留期、也没有凭据（含已删除的）指着的密码库连接
+  vaultConnections: z.number().int().default(0),
 })
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 
