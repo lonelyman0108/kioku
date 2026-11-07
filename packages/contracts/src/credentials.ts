@@ -1103,6 +1103,7 @@ export const VAULT_ERROR_KINDS = [
   'item_unavailable',
   'read_only',
   'item_conflict',
+  'value_too_long',
   'unsupported_format',
   'integrity',
   'unreachable',

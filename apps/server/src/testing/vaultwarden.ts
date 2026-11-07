@@ -226,7 +226,34 @@ export async function createOrganization(
   return { id: org.id, key, collections }
 }
 
-// 邀请已注册的账号并确认，只分配给定的集合。没配 SMTP 时已注册的账号受邀即为已接受
+const collectionAccess = (collectionIds: string[], readOnly: boolean, writable: string[]) =>
+  collectionIds.map((id) => ({
+    id,
+    readOnly: readOnly && !writable.includes(id),
+    hidePasswords: false,
+    manage: false,
+  }))
+
+async function orgUserId(
+  base: string,
+  owner: SeedAccount,
+  org: SeedOrg,
+  member: SeedAccount,
+): Promise<string> {
+  const users = (await call(
+    base,
+    'GET',
+    `/api/organizations/${org.id}/users`,
+    undefined,
+    owner.accessToken,
+  )) as { data: { id: string; email: string; userId: string }[] }
+  const orgUser = users.data.find((u) => u.email === member.email.toLowerCase())
+  if (!orgUser) throw new Error('受邀的成员不在组织里')
+  return orgUser.id
+}
+
+// 邀请已注册的账号并确认，只分配给定的集合。没配 SMTP 时已注册的账号受邀即为已接受。
+// readOnly 是这些集合默认的「可以查看」，writable 里的集合例外，可以编辑
 export async function addMember(
   base: string,
   owner: SeedAccount,
@@ -234,7 +261,11 @@ export async function addMember(
   member: SeedAccount,
   type: number,
   collectionIds: string[],
-  { readOnly = true, accessAll = false }: { readOnly?: boolean; accessAll?: boolean } = {},
+  {
+    readOnly = true,
+    accessAll = false,
+    writable = [],
+  }: { readOnly?: boolean; accessAll?: boolean; writable?: string[] } = {},
 ): Promise<void> {
   await call(
     base,
@@ -246,24 +277,11 @@ export async function addMember(
       accessAll,
       groups: [],
       permissions: {},
-      collections: collectionIds.map((id) => ({
-        id,
-        readOnly,
-        hidePasswords: false,
-        manage: false,
-      })),
+      collections: collectionAccess(collectionIds, readOnly, writable),
     },
     owner.accessToken,
   )
-  const users = (await call(
-    base,
-    'GET',
-    `/api/organizations/${org.id}/users`,
-    undefined,
-    owner.accessToken,
-  )) as { data: { id: string; email: string; userId: string }[] }
-  const orgUser = users.data.find((u) => u.email === member.email.toLowerCase())
-  if (!orgUser) throw new Error('受邀的成员不在组织里')
+  const id = await orgUserId(base, owner, org, member)
   const { publicKey } = (await call(
     base,
     'GET',
@@ -274,9 +292,57 @@ export async function addMember(
   await call(
     base,
     'POST',
-    `/api/organizations/${org.id}/users/${orgUser.id}/confirm`,
+    `/api/organizations/${org.id}/users/${id}/confirm`,
     { key: encryptRsa(joinKey(org.key), Buffer.from(publicKey, 'base64'), 'sha1') },
     owner.accessToken,
+  )
+}
+
+// 改成员在集合里的权限（普通成员）：会话里缓存的同步结果因此过时，用来测服务端拒绝写入
+export async function setMemberCollections(
+  base: string,
+  owner: SeedAccount,
+  org: SeedOrg,
+  member: SeedAccount,
+  collectionIds: string[],
+  readOnly: boolean,
+): Promise<void> {
+  const id = await orgUserId(base, owner, org, member)
+  await call(
+    base,
+    'PUT',
+    `/api/organizations/${org.id}/users/${id}`,
+    {
+      type: 2,
+      accessAll: false,
+      groups: [],
+      permissions: {},
+      collections: collectionAccess(collectionIds, readOnly, []),
+    },
+    owner.accessToken,
+  )
+}
+
+// 直接读服务端存的条目（原始 JSON，值还是密文）
+export async function rawCipher(base: string, account: SeedAccount, id: string): Promise<unknown> {
+  return call(base, 'GET', `/api/ciphers/${id}`, undefined, account.accessToken)
+}
+
+// 把条目改成给定的原始 JSON（请求体照官方客户端：带 encryptedFor 与 lastKnownRevisionDate，不带附件数组）
+export async function putRawCipher(
+  base: string,
+  account: SeedAccount,
+  id: string,
+  body: Record<string, unknown>,
+): Promise<unknown> {
+  const rest: Record<string, unknown> = { ...body }
+  delete rest.attachments
+  return call(
+    base,
+    'PUT',
+    `/api/ciphers/${id}`,
+    { ...rest, encryptedFor: account.userId, lastKnownRevisionDate: body.revisionDate },
+    account.accessToken,
   )
 }
 
@@ -405,6 +471,8 @@ export interface Seeded {
   base: string
   member: SeedAccount
   dedicated: SeedAccount
+  // 写入用的专用账号：Agent 集合可以编辑（dedicated 只能查看）
+  writer: SeedAccount
   twoFactor: SeedAccount & { totpSecret: string }
   org: SeedOrg
   // 专用账号读得到的集合
@@ -428,12 +496,13 @@ export interface Seeded {
 
 export const LOGIN_TOTP = 'otpauth://totp/Example:agent?secret=JBSWY3DPEHPK3PXP&issuer=Example'
 
-// 造一整套：成员本人（Argon2id，组织所有者）、专用账号（PBKDF2，组织里的普通成员，只分到 Agent 集合，另有两个个人条目）、
-// 开了验证器两步验证的第三个账号。邮箱带随机后缀，同一个实例上可以反复造
+// 造一整套：成员本人（Argon2id，组织所有者）、专用账号（PBKDF2，组织里的普通成员，只分到 Agent 集合、只能查看，另有两个个人条目）、
+// 写入用的专用账号（PBKDF2，Agent 集合可以编辑）、开了验证器两步验证的账号。邮箱带随机后缀，同一个实例上可以反复造
 export async function seedVaultwarden(base: string): Promise<Seeded> {
   const tag = randomBytes(4).toString('hex')
   const member = await registerAccount(base, `member-${tag}@example.com`, ARGON2)
   const dedicated = await registerAccount(base, `agent-${tag}@example.com`, PBKDF2)
+  const writer = await registerAccount(base, `writer-${tag}@example.com`, PBKDF2)
   const twoFactorAccount = await registerAccount(base, `mfa-${tag}@example.com`, PBKDF2)
   const totpSecret = await enableAuthenticator(base, twoFactorAccount)
 
@@ -441,6 +510,7 @@ export async function seedVaultwarden(base: string): Promise<Seeded> {
   const agentCollection = org.collections.Agent!
   const otherCollection = org.collections.Private!
   await addMember(base, member, org, dedicated, 2, [agentCollection])
+  await addMember(base, member, org, writer, 2, [agentCollection], { readOnly: false })
 
   const login = {
     name: 'file-server',
@@ -499,6 +569,7 @@ export async function seedVaultwarden(base: string): Promise<Seeded> {
     base,
     member,
     dedicated,
+    writer,
     twoFactor: { ...twoFactorAccount, totpSecret },
     org,
     agentCollection,

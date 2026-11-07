@@ -73,17 +73,24 @@ async function main(base: string): Promise<void> {
 
   const exchanges: RecordedExchange[] = []
   let scenario = ''
+  // 改写服务端的响应再交给客户端（录下的是改写之后的）：让客户端以为可以写、以为没过期，录下服务端自己的拒绝
+  let tamper: ((method: string, path: string, body: unknown) => unknown) | null = null
   const client = createVaultClient({
     fetch: async (input, init) => {
-      const res = await fetch(input, init)
+      const original = await fetch(input, init)
       const url = new URL(String(input))
-      const text = await res.clone().text()
+      const text = await original.text()
       let body: unknown = text
       try {
         body = JSON.parse(text)
       } catch {
         // 保留原文
       }
+      if (tamper) body = tamper(init?.method ?? 'GET', url.pathname, body)
+      const res = new Response(typeof body === 'string' ? body : JSON.stringify(body), {
+        status: original.status,
+        headers: original.headers,
+      })
       exchanges.push({
         scenario,
         method: init?.method ?? 'GET',
@@ -114,6 +121,7 @@ async function main(base: string): Promise<void> {
       deviceId: randomUUID(),
     },
     member: { email: seed.member.email, password: seed.member.password, deviceId: randomUUID() },
+    writer: { email: seed.writer.email, password: seed.writer.password, deviceId: randomUUID() },
     twoFactor: {
       email: seed.twoFactor.email,
       password: seed.twoFactor.password,
@@ -153,6 +161,99 @@ async function main(base: string): Promise<void> {
     ]
     for (const id of ids) await session.item(id).catch(() => {})
   }
+
+  // 写入：可以编辑的专用账号新建、修改；只能查看的专用账号被服务端拒绝；拿过期的修改时间改，被服务端拒绝
+  scenario = 'writer.login'
+  const writerLogin = await client.login(input(accounts.writer))
+  if (writerLogin.kind !== 'ok') throw new Error('writer 登录失败')
+  scenario = 'writer.session'
+  const writer = client.session({
+    serverUrl: base,
+    deviceId: accounts.writer.deviceId,
+    secrets: writerLogin.secrets,
+  })
+  await writer.snapshot()
+  const writeValues = {
+    createLogin: { 'login.username': 'agent', 'login.password': randomUUID() },
+    createNote: { notes: 'token notes', 'field:token': randomUUID() },
+    update: { 'login.password': randomUUID() },
+    updateItemKey: { 'login.password': randomUUID() },
+  }
+  scenario = 'writer.createLogin'
+  const createdLogin = await writer.createItem({
+    organizationId: seed.org.id,
+    collectionId: seed.agentCollection,
+    type: 'login',
+    name: 'kioku login',
+    values: writeValues.createLogin,
+    uris: [
+      { uri: 'https://files.example.com:8443', autofill: true },
+      { uri: 'https://api.example.com', autofill: false },
+    ],
+  })
+  scenario = 'writer.createNote'
+  const createdNote = await writer.createItem({
+    organizationId: seed.org.id,
+    collectionId: seed.agentCollection,
+    type: 'note',
+    name: 'kioku note',
+    values: writeValues.createNote,
+  })
+  scenario = 'writer.update'
+  await writer.updateItem(
+    createdLogin.id,
+    { values: writeValues.update },
+    createdLogin.revisionDate,
+  )
+  scenario = 'writer.updateItemKey'
+  const keyed = await writer.item(seed.items.itemKey)
+  await writer.updateItem(
+    seed.items.itemKey,
+    { values: writeValues.updateItemKey },
+    keyed.revisionDate,
+  )
+  // Vaultwarden 只在服务端的修改时间比请求里的晚一秒以上时才拒绝，所以拿一个很早的时间
+  const stale = '2020-01-01T00:00:00.000000Z'
+  scenario = 'writer.conflict'
+  tamper = (method, path, body) =>
+    method === 'GET' && path === `/api/ciphers/${createdLogin.id}`
+      ? { ...(body as object), revisionDate: stale }
+      : body
+  await expectFail(writer.updateItem(createdLogin.id, { values: { 'login.password': 'x' } }, stale))
+  tamper = null
+
+  scenario = 'dedicated.readOnly'
+  tamper = (method, path, body) => {
+    if (path === '/api/sync') {
+      const sync = structuredClone(body) as { collections: { readOnly: boolean }[] }
+      for (const c of sync.collections) c.readOnly = false
+      return sync
+    }
+    if (method === 'GET' && path.startsWith('/api/ciphers/'))
+      return { ...(body as object), edit: true }
+    return body
+  }
+  const viewerLogin = await client.login(input(accounts.dedicated))
+  if (viewerLogin.kind !== 'ok') throw new Error('dedicated 登录失败')
+  const viewer = client.session({
+    serverUrl: base,
+    deviceId: accounts.dedicated.deviceId,
+    secrets: viewerLogin.secrets,
+  })
+  await expectFail(
+    viewer.createItem({
+      organizationId: seed.org.id,
+      collectionId: seed.agentCollection,
+      type: 'note',
+      name: 'not allowed',
+      values: { notes: 'x' },
+    }),
+  )
+  const viewed = await viewer.item(seed.items.login)
+  await expectFail(
+    viewer.updateItem(seed.items.login, { values: { notes: 'x' } }, viewed.revisionDate),
+  )
+  tamper = null
 
   scenario = 'twoFactor.required'
   await client.login(input(accounts.twoFactor))
@@ -200,6 +301,8 @@ async function main(base: string): Promise<void> {
       trashed: seed.items.trashed,
       personal: seed.items.personal,
       missing,
+      createdLogin: createdLogin.id,
+      createdNote: createdNote.id,
     },
     values: {
       login: seed.values.login,
@@ -208,6 +311,7 @@ async function main(base: string): Promise<void> {
       bw: bwItems.bw!.values,
       bwItemKey: bwItems.bwItemKey!.values,
     },
+    writes: writeValues,
     exchanges,
   }
   // Vaultwarden 的报错文字里带请求方的地址（容器网络的网关），换成 127.0.0.1，仓库里不留内网地址

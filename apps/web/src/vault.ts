@@ -67,6 +67,7 @@ export const vaultErrorLabels: Record<VaultErrorKind, string> = {
   item_unavailable: '条目不可用',
   read_only: '集合只读',
   item_conflict: '条目已在别处修改',
+  value_too_long: '值超出长度上限',
   unsupported_format: '无法识别的加密格式',
   integrity: '内容校验失败',
   unreachable: '无法连接服务器',
