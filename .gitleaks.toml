@@ -1,0 +1,7 @@
+# gitleaks 的本仓配置：默认规则之外，放过下面这些测试数据
+[extend]
+useDefault = true
+
+[allowlist]
+description = "从本地测试用 Vaultwarden 录下的响应，账号、密码与令牌都是随机生成的测试数据（src/testing/recordVaultFixtures.ts）"
+paths = ['''^apps/server/src/credential/bitwarden/__tests__/fixtures/[^/]+\.json$''']
