@@ -1082,12 +1082,14 @@ export async function applyImport(
     }
     const { converted } = item
     try {
-      // 换过占位符的在导入事件里记下换成了哪几条凭据的哪个字段：同步时按它们现在的值把 Lore 正文里的明文换掉再比（见 planSync）
+      // 疑似明文在计划里处理（标成机密或换成占位符），这里不再拦。换过占位符的在导入事件里记下换成了哪几条凭据的
+      // 哪个字段：同步时按它们现在的值把 Lore 正文里的明文换掉再比（见 planSync）
       await service.create(
         converted
           ? { ...item.request, content: converted.content, title: converted.title }
           : item.request,
         {
+          plaintextGate: false,
           eventType: 'import',
           eventContext: converted
             ? { ...item.context, [CONVERTED_KEY]: converted.refs }
@@ -1628,6 +1630,7 @@ export async function applySync(target: ImportTarget, sync: SyncPlan): Promise<S
     try {
       // 计划之后有人改过、或者同一个 URI 上换了一条记忆，按 expectedId 与 expectedVersion 拒绝
       await service.update(item.request, {
+        plaintextGate: false,
         eventType: 'sync',
         eventContext: { ...item.context, changes: item.changes },
         requireAppOwner: target.accountId,

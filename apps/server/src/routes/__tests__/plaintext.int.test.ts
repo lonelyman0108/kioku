@@ -5,31 +5,70 @@ import { sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
+import { plaintextMatch } from '../../memory/service'
 import type { Database } from '../../db/client'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { TOKEN_SAMPLES } from '../../testing/plaintext'
 
-// 令牌样例在运行时拼出来：仓库里不出现完整的令牌写法，免得被托管平台的密钥扫描拦下
 const join = (...parts: string[]) => parts.join('')
 const run = (n: number) => 'aB3dE5gH7jK9mN1pQ2rS4tU6vW8xY0zC'.repeat(4).slice(0, n)
-const TOKENS = [
-  join('sk', '-', run(48)),
-  join('sk', '-proj-', run(20), '_', run(40)),
-  join('sk', '-ant-api03-', run(40), '-', run(40)),
-  join('gh', 'p_', run(36)),
-  join('github', '_pat_', run(22), '_', run(59)),
-  join('gl', 'pat-', run(20)),
-  join('xo', 'xb-', '1234567890-', run(24)),
-  join('AK', 'IA', run(16).toUpperCase()),
-  join('ey', 'J', run(30), '.', 'ey', 'J', run(40), '.', run(43)),
-  join('-----BEGIN RSA ', 'PRIVATE KEY-----\n', run(64)),
-  join('-----BEGIN PGP ', 'PRIVATE KEY BLOCK-----\n\n', run(64)),
-  join('kio', 'ku_', run(12), '_', run(40)),
-]
+const TOKENS = TOKEN_SAMPLES.map((t) => t.token)
 
 // 界面、导入工具与概览统计用的是同一条规则：JS 里直接用正则，数据库里把它的 source 交给 ~*
 const SAMPLES = [
+  // 「密码：…」后面不是值的：类型名、变量引用、尖括号占位、空的引号、整段遮盖；紧挨着的真值照样算
+  ...[
+    'string',
+    'Optional[str]',
+    'SecretStr',
+    'None',
+    'string123',
+    'nullable',
+    '$DB_PASSWORD',
+    '${DB_PASSWORD}',
+    '$(cat x)',
+    '%DB_PASSWORD%',
+    'process.env.API_KEY',
+    'os.environ["X"]',
+    "os.getenv('X')",
+    'getenv("X")',
+    "env('X')",
+    '$100abc',
+    '<你的密码>',
+    `<${'a'.repeat(65)}>`,
+    '<abc',
+    '""',
+    "''",
+    '"a"',
+    '********',
+    'xxxx',
+    'XXXXXXXX',
+    '...',
+    '………',
+    '**xxxx**',
+    '**xxxx**，后面',
+    'xxxxy',
+    '*****x',
+    '…a',
+    'config.password',
+  ].map((v) => `password: ${v}`),
+  // JSON 与字典的键、SECRET_KEY、passphrase；不该报的键
+  '{"password": "hunter2"}',
+  "{'token': 'abc123'}",
+  "SECRET_KEY = 'django-insecure-abc'",
+  'AWS_SECRET_ACCESS_KEY=example-value',
+  'passphrase: correct horse',
+  'token_count: 5',
+  'secrets:\n  db:\n    host: 127.0.0.1',
+  // Stripe：私钥与受限密钥算，公开的不算
+  join('sk_live_', run(24)),
+  join('rk_test_', run(24)),
+  join('pk_live_', run(24)),
+  // 值到左括号、左引号或 & 为止
+  '密码：hunter2（旧）',
+  'token=abc&password=xyz',
   // 已知格式的令牌：单独写、写在句子里、大小写换过
   ...TOKENS,
   ...TOKENS.map((t) => `前面 ${t} 后面`),
@@ -133,7 +172,7 @@ describe.skipIf(!testDatabaseUrl)('明文凭据提醒', () => {
   const create = async (body: Record<string, unknown>) => {
     const res = await app.request(
       `${space()}/memories`,
-      jsonRequest('POST', body, { cookie: ws.cookie }),
+      jsonRequest('POST', { ...body, allowPlaintext: true }, { cookie: ws.cookie }),
     )
     expect(res.status).toBe(201)
   }
@@ -144,14 +183,15 @@ describe.skipIf(!testDatabaseUrl)('明文凭据提醒', () => {
   }
 
   it('数据库里的判断与 JS 的规则一致', async () => {
-    const rows = await database.db.execute<{ s: string; hit: boolean }>(sql`
-      select s, s ~* ${PLAINTEXT_CREDENTIAL.source} as hit
+    const rows = await database.db.execute<{ s: string; hit: boolean; whole: boolean }>(sql`
+      select s, ${plaintextMatch(sql.raw('s'))} as hit, s ~* ${PLAINTEXT_CREDENTIAL.source} as whole
       from (values ${sql.join(
         SAMPLES.map((s) => sql`(${s}::text)`),
         sql`, `,
       )}) as t(s)`)
-    expect(rows.map((r) => [r.s, r.hit])).toEqual(
-      SAMPLES.map((s) => [s, PLAINTEXT_CREDENTIAL.test(s)]),
+    // 服务端用的是拆开的几条（plaintextMatch），合起来的一整条也要一样
+    expect(rows.map((r) => [r.s, r.hit, r.whole])).toEqual(
+      SAMPLES.map((s) => [s, PLAINTEXT_CREDENTIAL.test(s), PLAINTEXT_CREDENTIAL.test(s)]),
     )
   })
 

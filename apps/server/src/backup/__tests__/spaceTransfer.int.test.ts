@@ -1118,7 +1118,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         source,
         'POST',
         `${space}/memories`,
-        { uri: 'user://notes/api', content: 'token = abc' },
+        { uri: 'user://notes/api', content: 'token = abc', allowPlaintext: true },
         cookie,
       ),
       201,

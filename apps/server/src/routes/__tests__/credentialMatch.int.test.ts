@@ -335,8 +335,9 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
 
   describe('转存的去处', () => {
     const NOTE = (value: string) => `路由器的管理密码：${value}，备用写法 ${value}`
+    // 正文带着要转存的明文：照样保存（写入前拦截放行，进待处理）
     const remember = async (content: string, uri = 'user://notes/router') =>
-      ok<MemoryView>(await send('POST', '/memories', { uri, content }), 201)
+      ok<MemoryView>(await send('POST', '/memories', { uri, content, allowPlaintext: true }), 201)
     const convert = (m: MemoryView, value: string, target: Record<string, unknown>) =>
       send('POST', '/memories/convert-to-credential', {
         memoryId: m.id,

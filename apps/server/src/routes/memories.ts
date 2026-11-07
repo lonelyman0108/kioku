@@ -1,10 +1,12 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
   ActivityList,
+  ConsoleCreateMemoryRequest,
   ConsoleMemoryChildren,
   ConsoleMemoryView,
   ConsoleSearchRequest,
   ConsoleSearchResponse,
+  ConsoleUpdateMemoryRequest,
   ConvertedToCredential,
   ConvertToCredentialRequest,
   CreateMemoryRequest,
@@ -19,6 +21,7 @@ import {
   MemoryListQuery,
   MemoryUri,
   MemoryView,
+  MemoryWriteError,
   MoveMemoryRequest,
   PageQuery,
   PlaintextIgnoreRequest,
@@ -36,7 +39,7 @@ import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { withDeletionRetention } from '../jobs/retention'
 import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
-import type { MemoryService } from '../memory/service'
+import type { CreateInput, MemoryService, UpdateInput } from '../memory/service'
 
 // 快速跳转最多列出的直接命中数
 const MATCH_LIMIT = 10
@@ -48,12 +51,21 @@ const DeleteQuery = UriQuery.extend({
   expectedId: z.uuid().optional(),
   expectedVersion: z.coerce.number().int().optional(),
 })
+
 const errors = {
   400: jsonResponse('请求不合法', ErrorResponse),
   401: jsonResponse('未登录或凭据无效', ErrorResponse),
   403: jsonResponse('没有权限', ErrorResponse),
   404: jsonResponse('不存在或不可见', ErrorResponse),
   409: jsonResponse('冲突', ErrorResponse),
+}
+// 新建与修改：正文里有新增的疑似明文被拒时，400 的错误体带上每一处的行号与类别
+const writeErrors = {
+  ...errors,
+  400: jsonResponse(
+    '请求不合法，或正文里有新增的疑似明文凭据（plaintext 列出每一处）',
+    MemoryWriteError,
+  ),
 }
 
 // 管理界面的响应多两个字段（ConsoleMemoryView），由服务按 MemoryContext.secretRead 给出。
@@ -70,6 +82,9 @@ interface RouteSet {
   // 响应里的记忆与子节点
   view: z.ZodType<MemoryView>
   children: z.ZodType<MemoryChildren>
+  // 新建与修改的请求：Key 的只有 plaintextOk，管理界面的只有 ignorePlaintext 与 allowPlaintext（见 contracts）
+  createBody: z.ZodType<CreateInput>
+  updateBody: z.ZodType<UpdateInput>
   resolve: (c: Context<AppEnv>) => Promise<MemoryService>
 }
 
@@ -102,8 +117,8 @@ function memoryRouteSet(set: RouteSet) {
     method: 'post',
     path: base,
     summary: '新建记忆，坐标的开头决定归属；带 validTo 时到期后不再召回、不进 boot',
-    request: { params, body: jsonBody(CreateMemoryRequest) },
-    responses: { 201: jsonResponse('已创建', view), ...errors },
+    request: { params, body: jsonBody(set.createBody) },
+    responses: { 201: jsonResponse('已创建', view), ...writeErrors },
   })
   const update = createRoute({
     ...common,
@@ -111,8 +126,8 @@ function memoryRouteSet(set: RouteSet) {
     path: base,
     summary:
       '修改记忆的标题、正文、敏感级、priority、disclosure、glossary 或有效期；换坐标或归属用 move',
-    request: { params, body: jsonBody(UpdateMemoryRequest) },
-    responses: { 200: jsonResponse('已修改', view), ...errors },
+    request: { params, body: jsonBody(set.updateBody) },
+    responses: { 200: jsonResponse('已修改', view), ...writeErrors },
   })
   const remove = createRoute({
     ...common,
@@ -160,6 +175,8 @@ export function memoryRoutes(deps: Deps) {
       security: [{ bearer: [] }],
       view: MemoryView,
       children: MemoryChildren,
+      createBody: CreateMemoryRequest,
+      updateBody: UpdateMemoryRequest,
       resolve: async (c) => memoryServiceForKey(deps, c.get('key')),
     }),
   )
@@ -173,6 +190,8 @@ export function memoryRoutes(deps: Deps) {
       security: undefined,
       view: ConsoleView,
       children: ConsoleChildren,
+      createBody: ConsoleCreateMemoryRequest,
+      updateBody: ConsoleUpdateMemoryRequest,
       resolve: async (c) => {
         const { service } = await consoleMember(deps, c)
         return service

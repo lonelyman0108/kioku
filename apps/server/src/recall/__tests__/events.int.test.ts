@@ -123,7 +123,7 @@ describe.skipIf(!testDatabaseUrl)('召回事件', () => {
 
   it('整段先打码再截断：打码让文字变短时，后面的内容挪进来也认得出', () => {
     const key = 'sk-ABCDEFGHIJKLMNOPQRSTUV'
-    const stored = storedQuery(`密码：${'x'.repeat(780)}\n${key} 调接口`, undefined)!
+    const stored = storedQuery(`密码：${'a'.repeat(780)}\n${key} 调接口`, undefined)!
     expect(stored).toBe('密码：***\n***')
     expect(storedQuery('kioku', false)).toBeNull()
   })

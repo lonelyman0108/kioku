@@ -328,6 +328,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       ),
     ).toContain('正文疑似含明文密码或令牌')
     const key = await ws.issueKey((await ws.createApp('agent')).id, FULL_SCOPES)
+    // Key 的请求里没有 allowPlaintext（schema 去掉了），照常按降级规则拒绝
     expect(
       await errorOf(
         await asKey('PATCH', '/memories', key, {
@@ -335,9 +336,9 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
           sensitivity: 'private',
           allowPlaintext: true,
         }),
-        403,
+        400,
       ),
-    ).toContain('无法强制降级')
+    ).toContain('正文疑似含明文密码或令牌')
     // 迁移的做法：换成占位符与降级一次完成
     const migrated = await ok<MemoryView>(
       await asKey('PATCH', '/memories', key, {
@@ -603,13 +604,17 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       )
     })
 
-    it('写入的正文像有明文凭据时提醒换成占位符；使用指引里有凭据占位符的说明', async () => {
+    it('正文里原来就有疑似明文时，写入结果提醒换成占位符；使用指引里有凭据占位符的说明', async () => {
       const key = await ws.issueKey((await ws.createApp('agent')).id, FULL_SCOPES)
+      // 带了 plaintext_ok 就是确认过不是凭据，不提醒
       const created = await callTool(key, 'kioku_create', {
         uri: 'user://notes/wifi',
         content: '访客网络密码：guest-1234',
+        plaintext_ok: true,
       })
-      expect(created).toContain('提醒：正文像有明文密码或 Token')
+      expect(created).not.toContain('提醒')
+      const updated = await callTool(key, 'kioku_update', { uri: 'user://notes/wifi', priority: 1 })
+      expect(updated).toContain('提醒：正文像有明文密码或 Token')
       const clean = await callTool(key, 'kioku_create', {
         uri: 'user://notes/wifi2',
         content: '访客网络密码 {{cred:file-server#password}}',
