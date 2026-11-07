@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import {
   InboxCounts,
+  type ConsoleCredentialList,
   type DreamSuggestionList,
   type MemoryList,
   type MemoryView,
@@ -12,7 +13,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
-import { dreamSuggestions, memories, subjectBindings, subjects } from '../../db/schema'
+import { credentials, dreamSuggestions, memories, subjectBindings, subjects } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import {
   openTestDatabase,
@@ -136,7 +137,7 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     })
   }
 
-  // 四类都有：共享的、只有某个成员看得到的，以及对应的列表里不该出现的
+  // 五类都有：共享的、只有某个成员看得到的，以及对应的列表里不该出现的
   async function seed() {
     // 疑似明文：共享的一条、alice 与 eve 私人层各一条；secret 的正文是密文不算，没写明文的不算
     await remember({ uri: 'core://kb/api', content: 'token = abc123' })
@@ -176,29 +177,60 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
     await binding(ws.accountId, {}, editor.accountId)
     await binding(ws.accountId, { status: 'cancelled', decidedAt: new Date() })
     await binding(editor.accountId)
+
+    // 凭据：只算各成员自己的。alice 的快到期、已到期、需要轮换各一条；离到期还远的、没设到期的、删掉的不算
+    const day = 86_400_000
+    const credential = (identifier: string, owner: string, extra = {}) => ({
+      spaceId: ws.spaceId,
+      ownerAccountId: owner,
+      identifier,
+      name: identifier,
+      source: 'hosted' as const,
+      fields: [{ name: 'password', itemField: null }],
+      ciphertext: Buffer.from('c'),
+      wrappedKey: Buffer.from('k'),
+      ...extra,
+    })
+    await inSpace((tx) =>
+      tx.insert(credentials).values([
+        credential('soon', ws.accountId, { expiresAt: new Date(Date.now() + 3 * day) }),
+        credential('gone', ws.accountId, { expiresAt: new Date(Date.now() - day) }),
+        credential('leak', ws.accountId, { rotationRequestedAt: new Date() }),
+        credential('far', ws.accountId, { expiresAt: new Date(Date.now() + 30 * day) }),
+        credential('plain', ws.accountId),
+        credential('removed', ws.accountId, {
+          expiresAt: new Date(Date.now() - day),
+          deletedAt: new Date(),
+        }),
+        credential('eve-gone', editor.accountId, { expiresAt: new Date(Date.now() - day) }),
+      ]),
+    )
   }
 
-  it('四类各按对应列表的条件数，合计是四类之和；调用方看不到的不算', async () => {
+  it('五类各按对应列表的条件数，合计是五类之和；调用方看不到的不算', async () => {
     await seed()
     expect(await counts()).toEqual({
       bindings: 1,
       review: 2,
       dreamSuggestions: 2,
       plaintext: 2,
-      total: 7,
+      credentials: 3,
+      total: 10,
     })
     expect(await counts(editor.cookie)).toEqual({
       bindings: 1,
       review: 2,
       dreamSuggestions: 1,
       plaintext: 2,
-      total: 6,
+      credentials: 1,
+      total: 7,
     })
     expect(await counts(viewer.cookie)).toEqual({
       bindings: 0,
       review: 2,
       dreamSuggestions: 1,
       plaintext: 1,
+      credentials: 0,
       total: 4,
     })
   })
@@ -219,6 +251,13 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
         inbox.plaintext,
       )
     }
+    // 凭据一类和凭据列表的 attention 筛选同一个条件（列表只给能管理凭据的空间所有者）
+    const attention = await get<ConsoleCredentialList>('/credentials?attention=true')
+    expect(attention.items.map((c) => [c.identifier, c.expiry, !!c.rotationRequestedAt])).toEqual([
+      ['gone', 'expired', false],
+      ['leak', null, true],
+      ['soon', 'expiring', false],
+    ])
   })
 
   it('概览单独给出来自对话的条数：按层与敏感级分组，读权限和别处一样；counts 与 total 只算策展记忆', async () => {
@@ -272,7 +311,14 @@ describe.skipIf(!testDatabaseUrl)('待处理总数', () => {
 
   it('空空间全是 0，只有条数，不带内容', async () => {
     const empty = await counts()
-    expect(empty).toEqual({ bindings: 0, review: 0, dreamSuggestions: 0, plaintext: 0, total: 0 })
+    expect(empty).toEqual({
+      bindings: 0,
+      review: 0,
+      dreamSuggestions: 0,
+      plaintext: 0,
+      credentials: 0,
+      total: 0,
+    })
     expect(InboxCounts.strict().safeParse(empty).success).toBe(true)
     const overview = await get<SpaceOverview>('/overview')
     expect(overview.extractedCounts).toEqual([])

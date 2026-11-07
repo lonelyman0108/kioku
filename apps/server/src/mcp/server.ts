@@ -333,9 +333,12 @@ export function buildMcpServer(
     'kioku_credential_save',
     {
       description:
-        '新建或修改 Kioku 托管的凭据（要凭据能力为「管理」的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
+        '新建或修改凭据（要凭据能力为「管理」的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
+        '所有者设了密码库的去处时写进密码库，没设时由 Kioku 托管，结果里写明存在哪里。' +
+        '有 username 或 password 字段的是登录类，url 用于浏览器自动填充；别的字段存成隐藏字段。' +
         '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。' +
-        '密码库里的凭据只能改名称与说明，值到密码库里改。说明里不要写值。',
+        '密码库里的凭据改值时写回原条目，只改给了的字段，不能删字段；条目在别处改过时会报错，先重新列出凭据拿到新的版本号再改。' +
+        '说明里不要写值。',
       inputSchema: {
         identifier: CredentialIdentifier.describe(
           '凭据的标识，创建后不能改；记忆里用 {{cred:<标识>#<字段>}} 引用',
@@ -348,6 +351,15 @@ export function buildMcpServer(
           .describe(
             '值，字段名 → 值；新建时必填。修改时只给要改的字段，值为 null 表示删掉这个字段',
           ),
+        url: z
+          .string()
+          .optional()
+          .describe('新建时可选：用到这条凭据的网址（http 或 https），写进密码库的条目'),
+        expires_at: z
+          .string()
+          .nullable()
+          .optional()
+          .describe('到期时间，带时区的 ISO 时间，例如 2027-01-01T00:00:00Z；修改时给 null 清掉'),
         expected_version: z.number().int().optional().describe('修改时必填：读取时看到的版本号'),
       },
     },
@@ -359,8 +371,11 @@ export function buildMcpServer(
             name: args.name,
             description: args.description,
             values: args.values,
+            url: args.url,
+            expiresAt: args.expires_at,
           })
-          return formatCredentialSummary('已新建', await credentials.keyCreate(input))
+          const created = await credentials.keyCreate(input)
+          return formatCredentialSummary('已新建', created, created.storedIn)
         }
         const { identifier, ...input } = parse(KeyUpdateCredentialRequest, {
           identifier: args.identifier,
@@ -368,6 +383,7 @@ export function buildMcpServer(
           name: args.name,
           description: args.description,
           values: args.values,
+          expiresAt: args.expires_at,
         })
         return formatCredentialSummary('已修改', await credentials.keyUpdate(identifier, input))
       }),

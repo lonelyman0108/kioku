@@ -27,10 +27,10 @@ import { z } from 'zod'
 // 会话与会话摘要不导出，联系人的事实不带听到它的会话。
 // 导出时每条记录先按这里的定义检查一遍，写得出来的就一定导入得了
 export const SPACE_EXPORT_FORMAT = 'kioku-space-export'
-// 文件格式的版本，导出时写这个，导入也只认它。4 是凭据改版之后的格式（密码库连接，凭据来源只剩托管与密码库）；
-// 3 带着旧的凭据源，1、2 是记忆架构改版之前按七层写的，都不再能导入；更新的版本同样拒收，旧版本遇到 4 也拒收，
-// 不会悄悄丢掉不认识的内容
-export const SPACE_EXPORT_VERSION = 4
+// 文件格式的版本，导出时写这个，导入也只认它。5 在 4 之上加了凭据的到期与需要轮换、密码库连接的去处；
+// 4 是凭据改版之后的格式（密码库连接，凭据来源只剩托管与密码库），3 带着旧的凭据源，1、2 是记忆架构改版之前按七层写的，
+// 都不再能导入；更新的版本同样拒收，旧版本遇到 5 也拒收，不会悄悄丢掉不认识的内容
+export const SPACE_EXPORT_VERSION = 5
 
 // 压缩前的正文最多这么大：导出时超出就拒绝，导入时解压超出就停下（挡住压缩炸弹）
 export const SPACE_EXPORT_MAX_PLAIN_BYTES = 128 * 1024 * 1024
@@ -151,7 +151,14 @@ export const VaultConnectionRecord = z.object({
   serverUrl: Text.pipe(VaultServerUrl),
   email: Text.pipe(VaultEmail),
   vaultUserId: Text.min(1).max(100),
-  defaultCollectionId: Text.max(100).nullable(),
+  // 新凭据的去处：集合连同组织与名称。导出人的连接里最多一个
+  destination: z
+    .object({
+      collectionId: Text.min(1).max(100),
+      organizationId: Text.min(1).max(100),
+      collectionName: Text.max(1000),
+    })
+    .nullable(),
   createdAt: Time,
   updatedAt: Time,
 })
@@ -178,6 +185,9 @@ export const CredentialRecord = z.object({
     }),
   // 只给这些应用用；null 表示不限定。导出里没有的应用（已经删掉的）导入时去掉
   appIds: z.array(Id).max(100).nullable(),
+  expiresAt: Time.nullable(),
+  // 标了「需要轮换」的时间
+  rotationRequestedAt: Time.nullable(),
   createdAt: Time,
   updatedAt: Time,
 })

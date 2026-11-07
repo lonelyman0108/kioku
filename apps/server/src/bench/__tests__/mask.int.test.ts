@@ -363,7 +363,7 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       asOwner<ConsoleCredential>('POST', '/credentials', {
         identifier: 'nas',
         name: 'NAS',
-        source: { kind: 'hosted', values: { username: 'alice', password: HOSTED_VALUE } },
+        source: { kind: 'new', values: { username: 'alice', password: HOSTED_VALUE } },
       })
 
     it('取用（托管的）：不解密、不给值、不记访问，只列字段名', async () => {

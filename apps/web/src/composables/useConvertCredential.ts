@@ -6,6 +6,7 @@ import {
   type ConvertedToCredential,
   type ConvertTarget,
   type CredentialValueMatch,
+  type OrphanVaultItem,
 } from '@kioku/contracts'
 import { useQueryClient } from '@tanstack/vue-query'
 import { computed, onScopeDispose, reactive, ref, watch, type Ref } from 'vue'
@@ -15,9 +16,9 @@ import { api } from '../api/endpoints'
 import {
   convertDestinations,
   convertLeftovers,
-  HOSTED_DESTINATION,
   itemKey,
   matchByValue,
+  NEW_DESTINATION,
   occurrences,
   plaintextCandidates,
   suggestIdentifier,
@@ -29,13 +30,23 @@ import {
   type PlaintextCandidate,
 } from '../plaintext'
 import { placeholderOf } from '../placeholders'
+import { fromLocalInput } from '../time'
+import {
+  optionalExpiresProblem,
+  orphanVaultItem,
+  hasWriteReason,
+  storeBlocker,
+  writeFailureNext,
+} from '../vault'
+import { useNewCredentialStore } from './useNewCredentialStore'
 import { refreshAfterPlaintext } from './usePlaintextActions'
 
 // 转存为凭据的状态和规则，对话框只管长相。规则只认得出值从哪里开始，结尾是猜的，所以值默认遮盖，
 // 但要显示过、核对过当前的值才能提交；显示之后还能改。
 // 读这条记忆时记下版本，提交带上它：值是这时看到的，期间被改过就由服务端拒绝。
 // 值只留在这里，提交成功或者关上就清掉。
-// 去处：先按值查同值的凭据与密码库条目，默认选第一个对上的（已有凭据、还没起标识的条目），都没有时新建托管凭据。
+// 去处：先按值查同值的凭据与密码库条目，默认选第一个对上的（已有凭据、还没起标识的条目），都没有时新建凭据
+// （设了去处写进密码库，没有时由 Kioku 托管）。
 // 按值查找的结果也只在这里，不进查询的缓存
 export function useConvertCredential(
   spaceId: Ref<string>,
@@ -47,7 +58,22 @@ export function useConvertCredential(
   const memory = ref<ConsoleMemoryView | null>(null)
   const loading = ref(false)
   const loadFailure = ref<string | null>(null)
-  const form = reactive({ value: '', field: 'password', identifier: '', name: '' })
+  // url 与 expires 只给新建凭据；expires 是 datetime-local 的本地时间，空的是不到期，
+  // expiresBad 是输入框填了一半（这时 expires 也是空的）
+  const form = reactive({
+    value: '',
+    field: 'password',
+    identifier: '',
+    name: '',
+    url: '',
+    expires: '',
+    expiresBad: false,
+  })
+  // 新建的凭据写到哪里，读不到时不能新建
+  const newStore = useNewCredentialStore(
+    spaceId,
+    computed(() => uri.value !== null),
+  )
   const candidates = ref<PlaintextCandidate[]>([])
   // 当前显示着值吗。核对过的那个值记在 checkedValue：隐藏之后改过，要再显示一次才算核对过
   const shown = ref(false)
@@ -57,6 +83,10 @@ export function useConvertCredential(
   const canReload = ref(false)
   const submitting = ref(false)
   const result = ref<ConvertedToCredential | null>(null)
+  // 新建时写进了密码库、之后的事务却失败了：条目留在集合里（CredentialWriteError.vaultItem）
+  const orphan = ref<OrphanVaultItem | null>(null)
+  // 失败之后的下一步说明（集合只读、值太长），见 vault.ts 的 writeFailureNext
+  const failureDetail = ref<string | null>(null)
 
   // 每次读取一个序号：关掉或者换了一条之后，晚到的读取结果与匹配结果不算
   let loadId = 0
@@ -68,7 +98,7 @@ export function useConvertCredential(
   const unavailableConnections = ref(0)
   const unreadableCredentials = ref(0)
   // 选中的去处（ConvertDestination 的 key）。手动选过就不再跟着匹配结果换默认的
-  const destination = ref<string>(HOSTED_DESTINATION.key)
+  const destination = ref<string>(NEW_DESTINATION.key)
   const destinationTouched = ref(false)
   // 给条目起的标识，按条目记
   const vaultIdentifiers = reactive<Record<string, string>>({})
@@ -180,9 +210,19 @@ export function useConvertCredential(
     candidates.value = []
     result.value = null
     failure.value = null
+    failureDetail.value = null
+    orphan.value = null
     canReload.value = false
     loadFailure.value = null
-    Object.assign(form, { value: '', field: 'password', identifier: '', name: '' })
+    Object.assign(form, {
+      value: '',
+      field: 'password',
+      identifier: '',
+      name: '',
+      url: '',
+      expires: '',
+      expiresBad: false,
+    })
     shown.value = false
     checkedValue.value = null
     matches.value = new Map()
@@ -190,7 +230,7 @@ export function useConvertCredential(
     matchFailure.value = null
     unavailableConnections.value = 0
     unreadableCredentials.value = 0
-    destination.value = HOSTED_DESTINATION.key
+    destination.value = NEW_DESTINATION.key
     destinationTouched.value = false
     existingIdentifiers.value = []
     for (const key of Object.keys(vaultIdentifiers)) delete vaultIdentifiers[key]
@@ -225,7 +265,7 @@ export function useConvertCredential(
         ConvertibleValue.safeParse(form.value).success),
   )
   const selected = computed<ConvertDestination>(
-    () => choices.value.destinations.find((d) => d.key === destination.value) ?? HOSTED_DESTINATION,
+    () => choices.value.destinations.find((d) => d.key === destination.value) ?? NEW_DESTINATION,
   )
   // 匹配结果到了、或者换了值：没手动选过就换成第一个对上的；选过的去处没有了也换
   watch(
@@ -272,11 +312,15 @@ export function useConvertCredential(
         identifier: vaultIdentifiers[itemKey(d)] ?? '',
       }
     }
+    const url = form.url.trim()
+    const expiresAt = form.expires && !form.expiresBad ? fromLocalInput(form.expires) : null
     return {
-      kind: 'hosted',
+      kind: 'new',
       identifier: form.identifier,
       name: form.name.trim(),
       field: form.field,
+      ...(url ? { url } : {}),
+      ...(expiresAt ? { expiresAt } : {}),
     }
   })
   const body = computed(() => ({
@@ -288,6 +332,15 @@ export function useConvertCredential(
   // 提交前在界面上能看出来的问题，服务端照样会检查。规则直接用接口的定义，提示与服务端一致
   const problem = computed<string | null>(() => {
     if (!memory.value || blocked.value) return null
+    if (selected.value.kind === 'new') {
+      const blocker = storeBlocker({
+        store: newStore.store.value,
+        failed: newStore.failed.value,
+      })
+      if (blocker) return blocker
+      const expires = optionalExpiresProblem(form.expires, form.expiresBad)
+      if (expires) return expires
+    }
     const parsed = ConvertToCredentialRequest.safeParse(body.value)
     if (!parsed.success) return parsed.error.issues[0]?.message ?? '填写内容有误'
     if (!replaced.value) return '正文中没有这段值'
@@ -315,6 +368,8 @@ export function useConvertCredential(
     const seen = memory.value!
     submitting.value = true
     failure.value = null
+    failureDetail.value = null
+    orphan.value = null
     canReload.value = false
     try {
       const done = await api.convertToCredential(sid, body.value)
@@ -334,9 +389,20 @@ export function useConvertCredential(
       if (err instanceof ApiError && (err.status === 404 || err.status === 409)) {
         refreshAfterPlaintext(queryClient, sid)
       }
+      // 留下的条目出现在条目列表里，可以起标识
+      const left = orphanVaultItem(err)
+      if (left) void queryClient.invalidateQueries({ queryKey: ['vault-items', sid] })
       if (id !== submitId) return
       failure.value = err instanceof ApiError ? err.message : '转存失败'
-      // 版本冲突和标识冲突都是 409：读一次比版本，不看文字。读到了且版本没变才不给重新读取；
+      orphan.value = left
+      // 错误体带 reason 时按它给下一步：version、item_conflict 重新读取，read_only、value_too_long 说明该改什么
+      const next = writeFailureNext(err)
+      failureDetail.value = next.detail
+      if (hasWriteReason(err)) {
+        canReload.value = next.reload
+        return
+      }
+      // 不带原因的 409（例如标识冲突）：读一次比版本，不看文字。读到了且版本没变才不给重新读取；
       // 读取失败时分不清，留着入口，不然提示让人重新读取却没有按钮，再提交一直 409
       if (err instanceof ApiError && err.status === 409) {
         const latest = await readMemory(sid, seen.uri).catch(() => null)
@@ -358,6 +424,11 @@ export function useConvertCredential(
     candidates,
     shown,
     failure,
+    failureDetail,
+    orphan,
+    store: newStore.store,
+    storeIssue: newStore.issue,
+    storeFailed: newStore.failed,
     canReload,
     submitting,
     result,

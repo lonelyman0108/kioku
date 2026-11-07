@@ -153,7 +153,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
       {
         identifier: 'nas',
         name: 'NAS',
-        source: { kind: 'hosted', values: { password: 'nas-pass' } },
+        source: { kind: 'new', values: { password: 'nas-pass' } },
       },
       cookie,
     )

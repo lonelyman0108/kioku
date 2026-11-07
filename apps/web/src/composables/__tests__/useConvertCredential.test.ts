@@ -14,6 +14,8 @@ const fakes = vi.hoisted(() => ({
     credentials: vi.fn(),
     convertToCredential: vi.fn(),
     matchCredentialValues: vi.fn(),
+    vaultConnections: vi.fn(),
+    vaultItems: vi.fn(),
   },
 }))
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
@@ -77,6 +79,9 @@ function deferred<T>() {
 }
 
 beforeEach(() => {
+  // 新建凭据的去处：默认没设，由 Kioku 托管
+  fakes.api.vaultConnections.mockReset().mockResolvedValue({ items: [] })
+  fakes.api.vaultItems.mockReset()
   client = new QueryClient({ defaultOptions: { queries: { retry: false } } })
   fakes.api.memory.mockReset()
   fakes.api.credentials.mockReset().mockResolvedValue({ items: [], truncated: false })
@@ -281,7 +286,7 @@ describe('提交', () => {
       memoryId: memory().id,
       expectedVersion: 1,
       value: 'hunter2-not-real',
-      target: { kind: 'hosted', identifier: 'nas', name: 'NAS', field: 'password' },
+      target: { kind: 'new', identifier: 'nas', name: 'NAS', field: 'password' },
     })
     expect(convert.form.value).toBe('')
     expect(convert.result.value).toEqual(done)
@@ -294,7 +299,82 @@ describe('提交', () => {
     fakes.api.convertToCredential.mockRejectedValue(new ApiError(400, '服务端的文字'))
     await convert.submit()
     expect(convert.failure.value).toBe('服务端的文字')
+    expect(convert.orphan.value).toBeNull()
     expect(convert.result.value).toBeNull()
+  })
+
+  it('新建凭据带上网址与到期时间，填了才发；到期时间不完整时不能提交', async () => {
+    const convert = await shown()
+    convert.form.url = ' https://nas.example.com '
+    convert.form.expires = '2026-12-01'
+    await nextTick()
+    expect(convert.problem.value).toBe('请填写完整的到期时间')
+    convert.form.expires = '2026-12-01T08:00'
+    await nextTick()
+    expect(convert.problem.value).toBeNull()
+    fakes.api.convertToCredential.mockResolvedValue(done)
+    await convert.submit()
+    expect(fakes.api.convertToCredential.mock.calls[0]![1].target).toEqual({
+      kind: 'new',
+      identifier: 'nas',
+      name: 'NAS',
+      field: 'password',
+      url: 'https://nas.example.com',
+      expiresAt: new Date('2026-12-01T08:00').toISOString(),
+    })
+  })
+
+  it('去处读取失败时不能新建：不知道值会写进密码库还是托管；别的去处照常', async () => {
+    fakes.api.vaultConnections.mockRejectedValue(new ApiError(500, '服务器错误'))
+    const convert = await shown()
+    await settle()
+    expect(convert.storeFailed.value).toBe(true)
+    expect(convert.selected.value.kind).toBe('new')
+    expect(convert.problem.value).toBe('去处读取失败')
+    expect(convert.canSubmit.value).toBe(false)
+  })
+
+  it('错误体带 reason 时按它给下一步：集合只读不给重新读取，条目在别处改过给', async () => {
+    const convert = await shown()
+    fakes.api.convertToCredential.mockRejectedValue(
+      new ApiError(409, '集合只读或不可用', { error: '集合只读或不可用', reason: 'read_only' }),
+    )
+    await convert.submit()
+    expect(convert.canReload.value).toBe(false)
+    expect(convert.failureDetail.value).toContain('更改去处')
+    fakes.api.convertToCredential.mockRejectedValue(
+      new ApiError(409, '条目已在别处修改', { error: '条目已在别处修改', reason: 'item_conflict' }),
+    )
+    await convert.submit()
+    expect(convert.canReload.value).toBe(true)
+    expect(convert.failureDetail.value).toBe('重新读取后再保存。')
+  })
+
+  it('到期时间的输入框填了一半：值是空的，照样不能提交', async () => {
+    const convert = await shown()
+    convert.form.expiresBad = true
+    await nextTick()
+    expect(convert.problem.value).toBe('请填写完整的到期时间')
+  })
+
+  it('写进了密码库却没建成凭据：记下留下的条目，条目列表重读', async () => {
+    const convert = await shown()
+    const vaultItem = {
+      connectionId: '00000000-0000-4000-8000-0000000000a1',
+      itemId: 'item-9',
+      itemName: 'NAS',
+      collectionName: 'Agent',
+    }
+    fakes.api.convertToCredential.mockRejectedValue(
+      new ApiError(409, '标识已被占用', { error: '标识已被占用', vaultItem }),
+    )
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    await convert.submit()
+    expect(convert.failure.value).toBe('标识已被占用')
+    expect(convert.orphan.value).toEqual(vaultItem)
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['vault-items', 's1'] })
+    convert.reset()
+    expect(convert.orphan.value).toBeNull()
   })
 
   it('400 不给重新读取：重读解决不了，哪怕这时版本也变了', async () => {
@@ -487,7 +567,7 @@ describe('转存的去处', () => {
     expect(convert.choices.value.destinations.map((d) => d.kind)).toEqual([
       'credential',
       'vault',
-      'hosted',
+      'new',
     ])
     expect(convert.selected.value.kind).toBe('credential')
     expect(convert.placeholder.value).toBe('{{cred:nas-admin#password}}')
@@ -524,16 +604,16 @@ describe('转存的去处', () => {
     })
   })
 
-  it('手动选过的去处不随匹配结果换；选新建托管凭据发 hosted', async () => {
+  it('手动选过的去处不随匹配结果换；选新建凭据发 new', async () => {
     matchWith({ credentials: [credential], vaultItems: [] })
     const convert = await shown()
     await settle()
-    convert.choose('hosted')
+    convert.choose('new')
     await nextTick()
-    expect(convert.selected.value.kind).toBe('hosted')
+    expect(convert.selected.value.kind).toBe('new')
     fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
     await convert.submit()
-    expect(fakes.api.convertToCredential.mock.calls[0]![1].target.kind).toBe('hosted')
+    expect(fakes.api.convertToCredential.mock.calls[0]![1].target.kind).toBe('new')
   })
 
   it('起了标识却没对应这个字段的条目只列出来，不能选', async () => {
@@ -543,7 +623,7 @@ describe('转存的去处', () => {
     })
     const convert = await shown()
     await settle()
-    expect(convert.choices.value.destinations.map((d) => d.kind)).toEqual(['hosted'])
+    expect(convert.choices.value.destinations.map((d) => d.kind)).toEqual(['new'])
     expect(convert.choices.value.unmapped).toEqual([
       { itemName: 'NAS', itemField: 'login.password', identifier: 'nas' },
     ])
@@ -560,12 +640,12 @@ describe('转存的去处', () => {
     expect(convert.canSubmit.value).toBe(true)
   })
 
-  it('查不了时照样能新建托管凭据，说明查找失败', async () => {
+  it('查不了时照样能新建凭据，说明查找失败', async () => {
     fakes.api.matchCredentialValues.mockRejectedValue(new ApiError(502, '密码库无法连接'))
     const convert = await shown()
     await settle()
     expect(convert.matchFailure.value).toBe('密码库无法连接')
-    expect(convert.selected.value.kind).toBe('hosted')
+    expect(convert.selected.value.kind).toBe('new')
     expect(convert.canSubmit.value).toBe(true)
   })
 

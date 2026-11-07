@@ -1075,7 +1075,7 @@ describe.skipIf(!testDatabaseUrl)('模型代理', () => {
           {
             identifier: 'nas',
             name: 'NAS',
-            source: { kind: 'hosted', values: { username: 'alice', password: HOSTED_VALUE } },
+            source: { kind: 'new', values: { username: 'alice', password: HOSTED_VALUE } },
           },
           { cookie: ws.cookie },
         ),

@@ -175,7 +175,13 @@ describe('待处理', () => {
     const keep = elements.find((el) => el.tag === 'KeepAlive')!
     expect(keep.props ?? []).toEqual([])
     const panels = (keep.children ?? []).filter((c) => c.type === ELEMENT).map((c) => c.tag)
-    expect(panels).toEqual(['InboxBindings', 'InboxReview', 'DreamSuggestions', 'InboxPlaintext'])
+    expect(panels).toEqual([
+      'InboxBindings',
+      'InboxReview',
+      'DreamSuggestions',
+      'InboxPlaintext',
+      'InboxCredentials',
+    ])
   })
 
   it('账号绑定：确认的说明和二次确认的后果还在', () => {

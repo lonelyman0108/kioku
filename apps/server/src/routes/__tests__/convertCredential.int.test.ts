@@ -131,7 +131,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
         expectedVersion: m.version,
         value: VALUE,
         target: {
-          kind: 'hosted',
+          kind: 'new',
           identifier: 'wifi',
           name: '无线网络',
           field: 'password',
@@ -333,7 +333,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
           await send('POST', '/credentials', {
             identifier,
             name: identifier,
-            source: { kind: 'hosted', values: { password: 'other' } },
+            source: { kind: 'new', values: { password: 'other' } },
           })
         ).status,
       ).toBe(201)
@@ -457,7 +457,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
         await send('POST', '/credentials', {
           identifier: value,
           name: '同名的',
-          source: { kind: 'hosted', values: { password: 'other' } },
+          source: { kind: 'new', values: { password: 'other' } },
         })
       ).status,
     ).toBe(201)
@@ -468,7 +468,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
         await send('POST', '/credentials', {
           identifier: 'foo',
           name: '另一条',
-          source: { kind: 'hosted', values: { password: 'other' } },
+          source: { kind: 'new', values: { password: 'other' } },
         })
       ).status,
     ).toBe(201)
@@ -711,7 +711,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       const taken = await send('POST', '/credentials', {
         identifier: 'wifi',
         name: '已有的',
-        source: { kind: 'hosted', values: { password: 'other' } },
+        source: { kind: 'new', values: { password: 'other' } },
       })
       expect(taken.status).toBe(201)
       const res = await convert(m)
@@ -786,7 +786,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
             memoryId: m.id,
             expectedVersion: m.version,
             value: VALUE,
-            target: { kind: 'hosted', identifier: 'wifi', name: '无线网络', field: 'password' },
+            target: { kind: 'new', identifier: 'wifi', name: '无线网络', field: 'password' },
           },
           { cookie: ws.cookie },
         ),
