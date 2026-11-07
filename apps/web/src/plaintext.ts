@@ -10,7 +10,7 @@ import {
 } from '@kioku/contracts'
 
 import { placeholderOf } from './placeholders'
-import { suggestIdentifier as suggestItemIdentifier } from './vault'
+import { storedInName, suggestIdentifier as suggestItemIdentifier } from './vault'
 
 // 转存为凭据的对话框：猜出来的值、建议的标识、值在正文里的位置和次数
 
@@ -105,14 +105,15 @@ export function valueContext(content: string, value: string): ValueContext | nul
   return null
 }
 
-// 转存做了什么：一整句，模板里中文换行会多出空格。新建的分托管与给密码库条目起标识，换成已有凭据的另说
+// 转存做了什么：一整句，模板里中文换行会多出空格。新建的说明写到了哪里（storedIn），
+// 给密码库条目起标识与换成已有凭据的另说
 export function convertSummary(result: ConvertedToCredential): string {
   const { credential } = result
   const what = !result.created
     ? `已换成凭据「${credential.name}」的字段 ${result.field}`
-    : credential.source === 'vault'
-      ? `已给密码库条目起标识 ${credential.identifier}`
-      : `已新建凭据「${credential.name}」`
+    : result.storedIn
+      ? `已新建凭据「${credential.name}」（${storedInName(result.storedIn)}）`
+      : `已给密码库条目起标识 ${credential.identifier}`
   const placeholder = placeholderOf(credential.identifier, result.field)
   const done = `${what}，正文中 ${result.replaced} 处已换成 ${placeholder}。`
   return result.scrubbedEvents
@@ -153,7 +154,7 @@ export function previewValue(value: string): string {
   return `${chars.slice(0, keep).join('')}…${chars.slice(-keep).join('')}`
 }
 
-// 转存的去处：已有凭据的一个字段、还没起标识的密码库条目的一个字段、新建托管凭据。
+// 转存的去处：已有凭据的一个字段、还没起标识的密码库条目的一个字段、新建凭据（写到去处或由 Kioku 托管）。
 // key 用来做单选的值，同一个值的去处里不重复
 export type ConvertDestination =
   | {
@@ -172,7 +173,7 @@ export type ConvertDestination =
       itemName: string
       itemField: string
     }
-  | { kind: 'hosted'; key: 'hosted' }
+  | { kind: 'new'; key: 'new' }
 
 // 起了标识、这个字段却没有对应到凭据字段的条目：不能直接用，要先在凭据里加上字段对应
 export interface UnmappedVaultField {
@@ -181,7 +182,16 @@ export interface UnmappedVaultField {
   identifier: string
 }
 
-export const HOSTED_DESTINATION: ConvertDestination = { kind: 'hosted', key: 'hosted' }
+export const NEW_DESTINATION: ConvertDestination = { kind: 'new', key: 'new' }
+
+// 新建凭据时填的：标识、名称、字段名，写进密码库时的网址，到期时间（datetime-local 的本地时间）
+export interface NewCredentialFields {
+  identifier: string
+  name: string
+  field: string
+  url: string
+  expires: string
+}
 
 // 密码库的一个条目：同一个条目的几个字段共用一条凭据，起标识按条目记
 export const itemKey = (d: { connectionId: string; itemId: string }) =>
@@ -252,8 +262,8 @@ export function suggestItemIdentifiers(
   }
 }
 
-// 按值匹配的结果换成可选的去处，顺序就是默认的先后：已有凭据、还没起标识的条目、新建托管凭据。
-// 没有匹配结果（还没查、查不了）时只有新建托管凭据
+// 按值匹配的结果换成可选的去处，顺序就是默认的先后：已有凭据、还没起标识的条目、新建凭据。
+// 没有匹配结果（还没查、查不了）时只有新建凭据
 export function convertDestinations(match: CredentialValueMatch | undefined): {
   destinations: ConvertDestination[]
   unmapped: UnmappedVaultField[]
@@ -288,7 +298,7 @@ export function convertDestinations(match: CredentialValueMatch | undefined): {
       itemField: item.itemField,
     })
   }
-  destinations.push(HOSTED_DESTINATION)
+  destinations.push(NEW_DESTINATION)
   return { destinations, unmapped }
 }
 

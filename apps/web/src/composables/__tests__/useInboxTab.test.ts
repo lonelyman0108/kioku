@@ -19,10 +19,22 @@ vi.mock('vue-router', () => ({
 vi.mock('../../api/endpoints', () => ({ api: fakes.api }))
 
 const counts = (over: Partial<InboxCounts> = {}): InboxCounts => {
-  const merged = { bindings: 0, review: 0, dreamSuggestions: 0, plaintext: 0, ...over }
+  const merged = {
+    bindings: 0,
+    review: 0,
+    dreamSuggestions: 0,
+    plaintext: 0,
+    credentials: 0,
+    ...over,
+  }
   return {
     ...merged,
-    total: merged.bindings + merged.review + merged.dreamSuggestions + merged.plaintext,
+    total:
+      merged.bindings +
+      merged.review +
+      merged.dreamSuggestions +
+      merged.plaintext +
+      merged.credentials,
   }
 }
 

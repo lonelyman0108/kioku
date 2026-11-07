@@ -5,11 +5,14 @@ import {
   type ConsoleMemoryView,
   type ConvertedToCredential,
 } from '@kioku/contracts'
+import { useQuery } from '@tanstack/vue-query'
 import { computed, toRef, useId, watch } from 'vue'
 
+import { api } from '../api/endpoints'
 import { useConvertCredential } from '../composables/useConvertCredential'
 import { convertSummary, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
 import { memoryRoute } from '../routes'
+import { destinationProblem, newCredentialStore, orphanNotice } from '../vault'
 import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -31,6 +34,7 @@ const {
   candidates,
   shown,
   failure,
+  orphan,
   canReload,
   submitting,
   result,
@@ -80,6 +84,18 @@ const unmatched = computed(() =>
     unreadableCredentials: unreadableCredentials.value,
   }),
 )
+
+// 新建的凭据写到哪里：和凭据页同一个连接列表
+const connections = useQuery({
+  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
+  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
+  enabled: open,
+})
+const store = computed(() => newCredentialStore(connections.data.value?.items))
+const storeIssue = computed(() =>
+  store.value?.kind === 'vault' ? destinationProblem(store.value.connection) : null,
+)
+const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : null))
 
 const valueInput = useId()
 const candidateGroup = useId()
@@ -198,7 +214,7 @@ const candidateGroup = useId()
           <p v-if="matchingValue" class="value-note">正在查找同值的凭据……</p>
           <NoteLine v-else-if="matchFailure" tone="warning" flush>
             {{ matchFailure }}
-            <template #detail>仍可新建托管凭据。</template>
+            <template #detail>仍可新建凭据。</template>
           </NoteLine>
           <p v-else-if="unmatched" class="value-note">
             {{ unmatched }}<Hint>{{ UNMATCHED_HINT }}</Hint>
@@ -208,21 +224,27 @@ const candidateGroup = useId()
             :destinations="choices.destinations"
             :unmapped="choices.unmapped"
             :vault-identifiers="vaultIdentifiers"
-            :hosted="form"
+            :fresh="form"
+            :store="store"
+            :store-issue="storeIssue"
             @update:model-value="choose"
             @vault-identifier="(key, identifier) => (vaultIdentifiers[key] = identifier)"
-            @hosted-field="(field, value) => (form[field] = value)"
+            @fresh-field="(field, value) => (form[field] = value)"
           />
         </div>
 
         <p v-if="placeholder && replaced" class="convert-effect">
           正文中 {{ replaced }} 处将换成 <code>{{ placeholder }}</code
-          ><template v-if="selected.kind !== 'hosted'">
+          ><template v-if="selected.kind !== 'new'">
             <Hint>转存前核对这个字段现在的值与正文中的一致，不一致时不转存。</Hint>
           </template>
         </p>
 
-        <NoteLine v-if="failure" tone="error">
+        <NoteLine v-if="orphanText" tone="warning">
+          {{ orphanText.title }}
+          <template #detail>{{ orphanText.detail }}</template>
+        </NoteLine>
+        <NoteLine v-else-if="failure" tone="error">
           {{ failure }}
           <template v-if="canReload" #actions>
             <UButton size="sm" color="primary" variant="outline" @click="load">重新读取</UButton>

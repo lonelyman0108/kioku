@@ -1,5 +1,7 @@
 import {
   CREDENTIAL_CAPABILITY_NAMES,
+  CREDENTIAL_HOSTED_NAME,
+  CREDENTIAL_ROTATION_NAME,
   LAYER_NAMES,
   SENSITIVITY_NAMES,
   type AccessContext,
@@ -181,7 +183,7 @@ export const changeLabels: Record<string, string> = {
 }
 
 export const credentialSourceLabels: Record<CredentialSource, string> = {
-  hosted: 'Kioku 托管',
+  hosted: CREDENTIAL_HOSTED_NAME,
   vault: '密码库',
 }
 
@@ -210,6 +212,8 @@ export const credentialChangeLabels: Record<string, string> = {
   values: '值',
   fields: '字段对应',
   appIds: '限定的应用',
+  expiresAt: '到期时间',
+  needsRotation: CREDENTIAL_ROTATION_NAME,
 }
 
 // 凭据限定给哪些应用，显示成名字。应用列表还没读出来时不下结论；不是自己的应用标出来：

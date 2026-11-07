@@ -1,6 +1,12 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { AppInfo, ConsoleCredential, CredentialEvent } from '@kioku/contracts'
+import {
+  CREDENTIAL_EXPIRY_NAMES,
+  CREDENTIAL_ROTATION_NAME,
+  type AppInfo,
+  type ConsoleCredential,
+  type CredentialEvent,
+} from '@kioku/contracts'
 import { useInfiniteQuery, useQuery } from '@tanstack/vue-query'
 import { computed, onBeforeUnmount, ref, watch } from 'vue'
 
@@ -21,6 +27,7 @@ import { formatRelative, formatTime } from '../time'
 import {
   connectionStatusText,
   credentialEventParts,
+  credentialFlags,
   itemFieldLabel,
   itemsAvailable,
 } from '../vault'
@@ -53,10 +60,26 @@ const references = useQuery({
   queryKey: computed(() => ['credential-references', props.spaceId, c.value.id] as const),
   queryFn: ({ queryKey: [, spaceId, id] }) => api.credentialReferences(spaceId, id),
 })
+// 记录可以只看上次改值以来的取用：值可能泄露时，据此看影响到哪些应用。换了凭据回到全部
+const sinceChange = ref(false)
+watch(
+  () => c.value.id,
+  () => (sinceChange.value = false),
+)
+const eventFilters = [
+  { label: '全部', value: 'all' },
+  { label: '上次改值以来的取用', value: 'since' },
+]
+const eventFilter = computed({
+  get: () => (sinceChange.value ? 'since' : 'all'),
+  set: (v: string) => (sinceChange.value = v === 'since'),
+})
 const events = useInfiniteQuery({
-  queryKey: computed(() => ['credential-events', props.spaceId, c.value.id] as const),
-  queryFn: ({ pageParam, queryKey: [, spaceId, id] }) =>
-    api.credentialEvents(spaceId, id, pageParam),
+  queryKey: computed(
+    () => ['credential-events', props.spaceId, c.value.id, { since: sinceChange.value }] as const,
+  ),
+  queryFn: ({ pageParam, queryKey: [, spaceId, id, f] }) =>
+    api.credentialEvents(spaceId, id, pageParam, f.since),
   initialPageParam: undefined as string | undefined,
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
@@ -128,6 +151,7 @@ async function reveal() {
       <p class="detail-source">
         {{ credentialSourceLabels[c.source] }}
         <span v-if="c.deletedAt">已删除</span>
+        <span v-for="flag in credentialFlags(c)" :key="flag" class="detail-flag">{{ flag }}</span>
       </p>
       <p v-if="c.description" class="detail-description">{{ c.description }}</p>
       <div class="detail-actions">
@@ -200,6 +224,55 @@ async function reveal() {
       <p v-else class="section-note">
         值由 Kioku 使用主密钥加密保存，仅在显式查看或 Agent 显式取用时解密。
       </p>
+    </section>
+
+    <section>
+      <SectionHeading title="到期与轮换" :level="3" />
+      <PropertyList
+        class="pt-2"
+        :groups="[
+          [
+            { key: 'expires', label: '到期时间' },
+            { key: 'rotation', label: CREDENTIAL_ROTATION_NAME },
+            { key: 'changed', label: '上次改值' },
+          ],
+        ]"
+      >
+        <template #expires>
+          <template v-if="c.expiresAt">
+            <time :datetime="c.expiresAt">{{ formatTime(c.expiresAt) }}</time>
+            <span v-if="c.expiry" class="detail-flag ml-2">{{
+              CREDENTIAL_EXPIRY_NAMES[c.expiry]
+            }}</span>
+          </template>
+          <span v-else class="text-muted">不到期</span>
+        </template>
+        <template #rotation>
+          <template v-if="c.rotationRequestedAt">
+            已标记
+            <time
+              class="text-muted"
+              :datetime="c.rotationRequestedAt"
+              :title="formatTime(c.rotationRequestedAt)"
+            >
+              {{ formatRelative(c.rotationRequestedAt) }}
+            </time>
+          </template>
+          <span v-else class="text-muted">未标记</span>
+        </template>
+        <template #changed>
+          <time
+            v-if="c.valueChangedAt"
+            :datetime="c.valueChangedAt"
+            :title="formatTime(c.valueChangedAt)"
+          >
+            {{ formatRelative(c.valueChangedAt) }}
+          </time>
+          <span v-else class="text-muted"
+            >暂无<Hint>起标识以来尚未从密码库读取到这个条目。</Hint></span
+          >
+        </template>
+      </PropertyList>
     </section>
 
     <section>
@@ -307,12 +380,18 @@ async function reveal() {
         </template>
       </SectionHeading>
       <p class="section-note">记录新建、修改、删除与每次取用。</p>
+      <div v-if="c.valueChangedAt" class="pt-2">
+        <UTabs v-model="eventFilter" :items="eventFilters" :content="false" size="sm" />
+      </div>
       <ReadFailureNote
         v-if="events.isError.value && !events.isFetchNextPageError.value"
         :query="events"
         size="xs"
       />
       <USkeleton v-if="events.isPending.value" class="h-8 w-full" />
+      <p v-else-if="!eventItems.length && sinceChange" class="section-empty">
+        上次改值以来暂无取用
+      </p>
       <ol v-else>
         <li v-for="e in eventItems" :key="e.id" class="event-row">
           <span class="event-type">{{ credentialEventLabels[e.type]?.label ?? e.type }}</span>
@@ -495,6 +574,14 @@ async function reveal() {
   gap: 2px 8px;
   line-height: 1.6;
   color: var(--ui-text-muted);
+}
+.detail-flag {
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 12px;
+  line-height: 18px;
+  white-space: nowrap;
+  color: var(--ui-text-toned);
 }
 .bench-flag {
   padding: 0 5px;

@@ -1,16 +1,19 @@
 import type { InboxCounts } from '@kioku/contracts'
-import { describe, expect, it } from 'vitest'
+import { QueryClient } from '@tanstack/vue-query'
+import { describe, expect, it, vi } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
 import dreamSuggestions from '../components/DreamSuggestions.vue?raw'
 import {
   INBOX_TABS,
   actionableInboxCount,
+  attentionCredentialsKey,
   inboxCountsKey,
   inboxTabActionable,
   inboxTabCount,
   inboxTabLabels,
   legacyReviewTab,
+  refreshInbox,
   resolveInboxTab,
 } from '../inbox'
 import inboxPage from '../pages/InboxPage.vue?raw'
@@ -20,6 +23,7 @@ const counts = (over: Partial<InboxCounts> = {}): InboxCounts => ({
   review: 0,
   dreamSuggestions: 0,
   plaintext: 0,
+  credentials: 0,
   total: 0,
   ...over,
 })
@@ -69,10 +73,16 @@ describe('旧地址', () => {
   })
 })
 
-describe('四类', () => {
+describe('五类', () => {
   it('每一类的条数取对字段，名字都有', () => {
-    const all = counts({ bindings: 1, review: 2, dreamSuggestions: 3, plaintext: 4 })
-    expect(INBOX_TABS.map((t) => inboxTabCount(all, t))).toEqual([1, 2, 3, 4])
+    const all = counts({
+      bindings: 1,
+      review: 2,
+      dreamSuggestions: 3,
+      plaintext: 4,
+      credentials: 5,
+    })
+    expect(INBOX_TABS.map((t) => inboxTabCount(all, t))).toEqual([1, 2, 3, 4, 5])
     for (const t of INBOX_TABS) expect(inboxTabLabels[t]).toBeTruthy()
   })
 
@@ -107,13 +117,20 @@ describe('待处理页', () => {
     expect(inboxTabCount(viewer, 'review')).toBe(7)
   })
 
-  it('能处理的分类：查看者只有账号绑定；和总数同一个口径', () => {
+  it('能处理的分类：查看者只有账号绑定，凭据只有空间所有者；和总数同一个口径', () => {
     for (const tab of INBOX_TABS) {
       expect(inboxTabActionable(tab, 'owner')).toBe(true)
-      expect(inboxTabActionable(tab, 'editor')).toBe(true)
+      expect(inboxTabActionable(tab, 'editor')).toBe(tab !== 'credential')
       expect(inboxTabActionable(tab, 'viewer')).toBe(tab === 'binding')
     }
-    const all = counts({ bindings: 1, review: 2, dreamSuggestions: 3, plaintext: 4, total: 10 })
+    const all = counts({
+      bindings: 1,
+      review: 2,
+      dreamSuggestions: 3,
+      plaintext: 4,
+      credentials: 5,
+      total: 15,
+    })
     for (const role of ['owner', 'editor', 'viewer'] as const) {
       const sum = INBOX_TABS.filter((t) => inboxTabActionable(t, role))
         .map((t) => inboxTabCount(all, t))
@@ -133,5 +150,27 @@ describe('待处理页', () => {
     const dialog = /<UModal[^]*?<\/UModal>/.exec(dreamSuggestions)![0]
     const confirm = dialog.match(/<UButton[^>]*>/g)!.find((b) => b.includes('apply(confirming)'))!
     expect(confirm).not.toContain('variant=')
+  })
+})
+
+describe('凭据一类', () => {
+  it('只有空间所有者算进角标：凭据只有空间所有者改得了', () => {
+    const only = counts({ credentials: 2, total: 2 })
+    expect(actionableInboxCount(only, 'owner')).toBe(2)
+    expect(actionableInboxCount(only, 'editor')).toBe(0)
+    expect(actionableInboxCount(only, 'viewer')).toBe(0)
+    expect(inboxTabLabels.credential).toBe('凭据')
+  })
+
+  it('列表的缓存键和凭据列表同一个前缀：凭据页让 credentials 失效时一起重取', () => {
+    expect(attentionCredentialsKey('s1').slice(0, 2)).toEqual(['credentials', 's1'])
+  })
+
+  it('手动刷新时凭据的列表一起重取', async () => {
+    const client = new QueryClient()
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    await refreshInbox(client, 's1')
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['credentials', 's1'] })
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['inbox-counts', 's1'] })
   })
 })

@@ -1,8 +1,12 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { VaultConnection, VaultItemSummary } from '@kioku/contracts'
+import {
+  VAULT_ERROR_KIND_NAMES,
+  type VaultConnection,
+  type VaultItemSummary,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref, watch } from 'vue'
+import { computed, ref, useId, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -12,11 +16,12 @@ import {
   checkRefreshKeys,
   collectionNames,
   connectionStatusText,
+  destinationChoices,
+  destinationProblem,
   disabledAdvice,
   disconnectNotice,
   itemFieldLabel,
   itemsAvailable,
-  vaultErrorLabels,
   vaultItemTypeLabels,
 } from '../vault'
 import Hint from './Hint.vue'
@@ -63,7 +68,7 @@ async function check() {
   busy.value = true
   let succeeded = false
   try {
-    toast.add(checkNotice({ connection: await api.checkVault(sid, c.value.id) }))
+    toast.add(checkNotice(await api.checkVault(sid, c.value.id)))
     succeeded = true
   } catch (err) {
     toast.add(checkNotice({ error: err }))
@@ -93,6 +98,40 @@ async function disconnect() {
     await refresh(sid)
   }
 }
+
+// 新凭据的去处：从这个账号的集合里选，只读的不能选。设好之后同一个成员别的连接上的去处被清掉，
+// 响应就是这个成员的全部连接，直接换掉列表
+const destinationIssue = computed(() => destinationProblem(c.value, items.data.value?.collections))
+const choices = computed(() => destinationChoices(items.data.value?.collections ?? []))
+const choosingDestination = ref(false)
+const chosen = ref<string | null>(null)
+const destinationGroup = useId()
+function openDestination() {
+  const current = c.value.destination?.collectionId ?? null
+  chosen.value = choices.value.some((x) => x.id === current && !x.disabled) ? current : null
+  choosingDestination.value = true
+}
+async function saveDestination(collectionId: string | null) {
+  if (busy.value) return
+  const sid = props.spaceId
+  busy.value = true
+  try {
+    const list = collectionId
+      ? await api.setVaultDestination(sid, c.value.id, { collectionId })
+      : await api.clearVaultDestination(sid, c.value.id)
+    queryClient.setQueryData(['vault-connections', sid], list)
+    choosingDestination.value = false
+    toast.add({ title: collectionId ? '已设为去处' : '已清除去处', color: 'success' })
+  } catch (err) {
+    toast.add({ title: err instanceof ApiError ? err.message : '保存失败', color: 'error' })
+    void queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] })
+  } finally {
+    busy.value = false
+  }
+}
+const canChooseDestination = computed(
+  () => props.canManage && itemsAvailable(c.value) && !!items.data.value,
+)
 
 const itemRows = computed(() => {
   const list = items.data.value
@@ -156,7 +195,7 @@ const itemRows = computed(() => {
       </span>
     </p>
     <p v-if="c.lastError" class="conn-error">
-      最近一次错误：{{ vaultErrorLabels[c.lastError.kind] }}，
+      最近一次错误：{{ VAULT_ERROR_KIND_NAMES[c.lastError.kind] }}，
       <time :datetime="c.lastError.at" :title="formatTime(c.lastError.at)">
         {{ formatRelative(c.lastError.at) }}
       </time>
@@ -167,6 +206,41 @@ const itemRows = computed(() => {
     <p v-else-if="c.status === 'reauth_required'" class="conn-error">
       登录已失效（例如主密码已修改），重新登录后恢复。
     </p>
+
+    <div v-if="c.destination || canChooseDestination" class="conn-destination">
+      <span class="destination-label"
+        >去处<Hint>
+          新建的凭据写进这个集合，未设时由 Kioku
+          托管。当前账号只能设一个去处，设在这里时其他连接上的去处一并清除。
+        </Hint></span
+      >
+      <span v-if="c.destination" class="destination-name"
+        >集合「{{ c.destination.collectionName }}」</span
+      >
+      <span v-else class="row-muted">未设</span>
+      <span v-if="canManage" class="destination-actions">
+        <UButton
+          v-if="canChooseDestination"
+          size="xs"
+          color="neutral"
+          variant="outline"
+          @click="openDestination"
+        >
+          {{ c.destination ? '更改' : '设为去处' }}
+        </UButton>
+        <UButton
+          v-if="c.destination"
+          size="xs"
+          color="neutral"
+          variant="ghost"
+          :loading="busy && !choosingDestination"
+          @click="saveDestination(null)"
+        >
+          清除
+        </UButton>
+      </span>
+    </div>
+    <p v-if="destinationIssue" class="conn-error text-warning">{{ destinationIssue }}</p>
 
     <template v-if="canManage && itemsAvailable(c)">
       <div v-if="items.isError.value" class="pt-2">
@@ -223,6 +297,45 @@ const itemRows = computed(() => {
       </template>
       <p v-else-if="items.data.value" class="empty">暂无条目</p>
     </template>
+
+    <UModal v-model:open="choosingDestination" title="新凭据的去处">
+      <template #body>
+        <p class="text-sm text-muted">
+          新建的凭据写进选中的集合。<Hint>
+            只读的集合无法新建条目，专用账号需要这个集合的编辑权限。
+          </Hint>
+        </p>
+        <div class="destination-choices" role="radiogroup" aria-label="集合">
+          <label
+            v-for="x in choices"
+            :key="x.id"
+            class="destination-choice"
+            :class="{ 'is-disabled': x.disabled }"
+          >
+            <input
+              type="radio"
+              :name="destinationGroup"
+              :checked="chosen === x.id"
+              :disabled="x.disabled"
+              @change="chosen = x.id"
+            />
+            <span>{{ x.name }}</span>
+            <span v-if="x.disabled" class="row-muted">只读</span>
+          </label>
+          <p v-if="!choices.length" class="row-muted">暂无集合</p>
+        </div>
+      </template>
+      <template #footer>
+        <div class="flex w-full justify-end gap-2">
+          <UButton color="neutral" variant="ghost" @click="choosingDestination = false">
+            取消
+          </UButton>
+          <UButton :loading="busy" :disabled="!chosen" @click="saveDestination(chosen)">
+            设为去处
+          </UButton>
+        </div>
+      </template>
+    </UModal>
 
     <UModal v-model:open="confirmingDisconnect" :title="`断开密码库 ${c.email}？`">
       <template #body>
@@ -294,6 +407,47 @@ const itemRows = computed(() => {
 .conn-error {
   margin-top: 2px;
   line-height: 1.6;
+  color: var(--ui-text-muted);
+}
+.conn-destination {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 2px 10px;
+  margin-top: 4px;
+  line-height: 1.6;
+}
+.destination-label {
+  color: var(--ui-text-muted);
+}
+.destination-name {
+  font-weight: 500;
+  overflow-wrap: anywhere;
+}
+.destination-actions {
+  display: inline-flex;
+  gap: 4px;
+}
+.destination-choices {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  margin-top: 10px;
+  font-size: 14px;
+}
+.destination-choice {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  cursor: pointer;
+  overflow-wrap: anywhere;
+}
+.destination-choice input {
+  flex: none;
+  accent-color: var(--ui-text-highlighted);
+}
+.destination-choice.is-disabled {
+  cursor: default;
   color: var(--ui-text-muted);
 }
 .item-grid {

@@ -1,25 +1,34 @@
 import {
   CREDENTIAL_ACCESS_REASON_NAMES,
   CREDENTIAL_ACCESS_RESULT_NAMES,
+  CREDENTIAL_EXPIRY_NAMES,
+  CREDENTIAL_HOSTED_NAME,
   CREDENTIAL_NAME_PATTERN,
+  CREDENTIAL_ROTATION_NAME,
+  CredentialWriteError,
   defaultCredentialFields,
   VAULT_CONNECTION_STATUS_NAMES,
   VAULT_CUSTOM_FIELD_PREFIX,
   VAULT_DISABLED_REASON_NAMES,
+  VAULT_LOGIN_FIELD_NAMES,
+  type ConsoleCredential,
   type CredentialEvent,
   type CredentialField,
+  type CredentialStoredIn,
   type MemberRole,
+  type OrphanVaultItem,
+  type VaultCollection,
   type VaultConnection,
   type VaultDisabledReason,
-  type VaultErrorKind,
   type VaultItemList,
   type VaultItemSummary,
   type VaultItemType,
 } from '@kioku/contracts'
 
-import { readFailure } from './api/client'
+import { ApiError, readFailure } from './api/client'
 import { accessContextLabels, credentialChangeLabels, credentialViaLabels } from './labels'
 import { clipText } from './text'
+import { formatShort, fromLocalInput, toLocalInput } from './time'
 
 // 凭据页的说法和计算：密码库连接、条目与凭据的访问记录
 
@@ -56,21 +65,6 @@ export const vaultItemTypeLabels: Record<VaultItemType, string> = {
   card: '支付卡',
   identity: '身份',
   ssh_key: 'SSH 密钥',
-}
-
-// 最近一次和服务器通信失败的原因
-export const vaultErrorLabels: Record<VaultErrorKind, string> = {
-  invalid_credentials: '邮箱或主密码错误',
-  two_factor_invalid: '验证码错误',
-  unsupported_two_factor: '不支持此两步验证方式',
-  reauth_required: '登录已失效',
-  item_unavailable: '条目不可用',
-  read_only: '集合只读',
-  item_conflict: '条目已在别处修改',
-  unsupported_format: '无法识别的加密格式',
-  integrity: '内容校验失败',
-  unreachable: '无法连接服务器',
-  server_error: '服务器返回错误',
 }
 
 // 连接状态的一句话：已停用的带上原因
@@ -176,3 +170,132 @@ export function vaultCredentialDraft(
     fields: defaultCredentialFields(item.fields),
   }
 }
+
+// ---- 新凭据的去处 ----
+
+// 设了去处的连接：每个成员最多一个
+export function destinationConnection(
+  connections: readonly VaultConnection[] | undefined,
+): VaultConnection | null {
+  return connections?.find((c) => c.destination !== null) ?? null
+}
+
+// 新建的凭据（新建、转存、保存前处理里的新建）写到哪里：有去处写进那个集合，没有时由 Kioku 托管。
+// 连接列表还没读到时为 null，不下结论
+export type NewCredentialStore =
+  { kind: 'vault'; connection: VaultConnection; collectionName: string } | { kind: 'hosted' }
+
+export function newCredentialStore(
+  connections: readonly VaultConnection[] | undefined,
+): NewCredentialStore | null {
+  if (!connections) return null
+  const c = destinationConnection(connections)
+  return c?.destination
+    ? { kind: 'vault', connection: c, collectionName: c.destination.collectionName }
+    : { kind: 'hosted' }
+}
+
+// 写到哪里的名字：密码库的写集合，托管的写「Kioku 托管」。新建之前的去处与新建之后的结果（storedIn）共用
+export function storeName(
+  store: { kind: 'hosted' } | { kind: 'vault'; collectionName: string },
+): string {
+  return store.kind === 'vault' ? `密码库集合「${store.collectionName}」` : CREDENTIAL_HOSTED_NAME
+}
+
+export const storedInName = (storedIn: CredentialStoredIn) => storeName(storedIn)
+
+// 去处眼下用不了的原因：连接不可用，或者读到的集合里没有它、它变成了只读。用得了时为 null。
+// collections 是最近一次同步读到的集合，没读到时只看连接的状态
+export function destinationProblem(
+  connection: Pick<VaultConnection, 'status' | 'disabledReason' | 'destination'>,
+  collections?: readonly VaultCollection[],
+): string | null {
+  if (!connection.destination) return null
+  if (connection.status !== 'ok') {
+    return `连接${connectionStatusText(connection)}，恢复前新建凭据将失败`
+  }
+  if (!collections) return null
+  const found = collections.find((x) => x.id === connection.destination!.collectionId)
+  if (!found) return '集合不可用，新建凭据将失败，请更改或清除去处'
+  if (found.readOnly) return '集合只读，新建凭据将失败，请更改或清除去处'
+  return null
+}
+
+// 选去处时的集合：按名称排，只读的列出来但不能选
+export function destinationChoices(collections: readonly VaultCollection[]) {
+  return [...collections]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((x) => ({ id: x.id, name: x.name, disabled: x.readOnly }))
+}
+
+// 写进了密码库、凭据却没建成时留下的条目（CredentialWriteError.vaultItem），别的错误为 null
+export function orphanVaultItem(err: unknown): OrphanVaultItem | null {
+  if (!(err instanceof ApiError)) return null
+  const parsed = CredentialWriteError.safeParse(err.payload)
+  return parsed.success ? (parsed.data.vaultItem ?? null) : null
+}
+
+// 留下的条目怎么说：结果、影响、动作
+export function orphanNotice(item: Pick<OrphanVaultItem, 'itemName' | 'collectionName'>): {
+  title: string
+  detail: string
+} {
+  return {
+    title: `条目「${item.itemName}」已写进集合「${item.collectionName}」，凭据未建成`,
+    detail:
+      '可在「密码库」分页给这个条目起标识，或在密码库中删除它。直接重试会在集合中另建一个条目。',
+  }
+}
+
+// 写进密码库时是不是登录类：有 username 或 password 字段的写成登录条目，网址用于自动填充；别的写成隐藏字段
+export const isLoginFields = (names: readonly string[]) =>
+  names.some((n) => n in VAULT_LOGIN_FIELD_NAMES)
+
+// 网址的说明，放提示层
+export const CREDENTIAL_URL_HINT =
+  '写进密码库时，含 username 或 password 字段的条目按网址的主机与端口自动填充，其余条目只记下网址。Kioku 托管时不保存网址。'
+
+// ---- 到期与轮换 ----
+
+// 凭据要处理的标记：快到期或已到期、需要轮换。待处理、列表与详情共用
+export function credentialFlags(
+  c: Pick<ConsoleCredential, 'expiry' | 'rotationRequestedAt'>,
+): string[] {
+  const flags: string[] = []
+  if (c.expiry) flags.push(CREDENTIAL_EXPIRY_NAMES[c.expiry])
+  if (c.rotationRequestedAt) flags.push(CREDENTIAL_ROTATION_NAME)
+  return flags
+}
+
+// 待处理里一条凭据的说明：什么时候到期、什么时候标了需要轮换
+export function attentionNotes(
+  c: Pick<ConsoleCredential, 'expiresAt' | 'expiry' | 'rotationRequestedAt'>,
+  now: Date = new Date(),
+): string[] {
+  const notes: string[] = []
+  if (c.expiresAt && c.expiry === 'expiring') notes.push(`${formatShort(c.expiresAt, now)} 到期`)
+  if (c.expiresAt && c.expiry === 'expired') notes.push(`${formatShort(c.expiresAt, now)} 已到期`)
+  if (c.rotationRequestedAt) {
+    notes.push(`${formatShort(c.rotationRequestedAt, now)} 标记${CREDENTIAL_ROTATION_NAME}`)
+  }
+  return notes
+}
+
+// 到期时间的输入框：datetime-local 的本地时间，没设时为空
+export const expiresInput = (expiresAt: string | null) => (expiresAt ? toLocalInput(expiresAt) : '')
+
+// 到期时间要发什么：没改为 undefined，清空为 null，否则是带时区的 ISO 时间。
+// 输入框只到分钟，按分钟比较，打开表单什么都没改时不发；填得不完整也不发，由 expiresProblem 拦下
+export function expiresChange(before: string | null, input: string): string | null | undefined {
+  if (input === expiresInput(before)) return undefined
+  if (!input) return null
+  return fromLocalInput(input) ?? undefined
+}
+
+// 填了却不是完整的日期与时间
+export const expiresProblem = (input: string) =>
+  input && !fromLocalInput(input) ? '请填写完整的到期时间' : null
+
+// 密码库凭据的值写回原条目时，对应到 TOTP 密钥的字段不能改（取用时给的是现算的验证码）
+export const writableVaultField = (field: Pick<CredentialField, 'itemField'>) =>
+  field.itemField !== 'login.totp'

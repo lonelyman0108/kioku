@@ -1,6 +1,10 @@
 <script setup lang="ts">
+import { useToast } from '@nuxt/ui/composables'
 import { PLAINTEXT_KIND_NAMES } from '@kioku/contracts'
+import { useQuery } from '@tanstack/vue-query'
 import { computed, toRef, useId } from 'vue'
+
+import { api } from '../api/endpoints'
 
 import {
   usePlaintextSave,
@@ -10,6 +14,7 @@ import {
 import { plaintextChoiceLabels } from '../labels'
 import { previewValue, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
 import { linesText } from '../plaintextSave'
+import { destinationProblem, newCredentialStore, orphanNotice, storedInName } from '../vault'
 import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -21,15 +26,34 @@ const props = defineProps<{ spaceId: string; canConvert: boolean; canSaveAnyway:
 const request = defineModel<PlaintextSaveRequest | null>('request', { required: true })
 const emit = defineEmits<{ proceed: [result: PlaintextSaveResult] }>()
 
+const toast = useToast()
 const save = usePlaintextSave(
   toRef(props, 'spaceId'),
   request,
   toRef(props, 'canConvert'),
   toRef(props, 'canSaveAnyway'),
   (result) => {
+    // 这次新建的凭据写到了哪里；保存记忆的结果由调用方另外提示
+    for (const s of save.stored.value) {
+      toast.add({
+        title: `已新建凭据 ${s.identifier}`,
+        description: `写到：${storedInName(s.storedIn)}`,
+        color: 'success',
+      })
+    }
     request.value = null
     emit('proceed', result)
   },
+)
+// 新建的凭据写到哪里：和凭据页同一个连接列表
+const connections = useQuery({
+  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
+  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
+  enabled: computed(() => request.value !== null && props.canConvert),
+})
+const store = computed(() => newCredentialStore(connections.data.value?.items))
+const storeIssue = computed(() =>
+  store.value?.kind === 'vault' ? destinationProblem(store.value.connection) : null,
 )
 const {
   rows,
@@ -39,9 +63,11 @@ const {
   unreadableCredentials,
   busy,
   failure,
+  orphan,
   problem,
   ready,
 } = save
+const orphanText = computed(() => (orphan.value ? orphanNotice(orphan.value) : null))
 const unmatched = computed(() =>
   unmatchedNote({
     unavailableConnections: unavailableConnections.value,
@@ -78,7 +104,7 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
         <p v-if="matching" class="text-muted">正在查找同值的凭据……</p>
         <NoteLine v-else-if="matchFailure" tone="warning" flush>
           {{ matchFailure }}
-          <template #detail>仍可新建托管凭据。</template>
+          <template #detail>仍可新建凭据。</template>
         </NoteLine>
         <p v-else-if="unmatched && anyConvertible" class="text-muted">
           {{ unmatched }}<Hint>{{ UNMATCHED_HINT }}</Hint>
@@ -128,11 +154,13 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
                 :destinations="save.destinationsOf(row).destinations"
                 :unmapped="save.destinationsOf(row).unmapped"
                 :vault-identifiers="save.vaultIdentifiers"
-                :hosted="row.hosted"
-                :hosted-locked="row.created"
+                :fresh="row.fresh"
+                :store="store"
+                :store-issue="storeIssue"
+                :fresh-locked="row.created"
                 :locked-items="save.lockedItems.value"
                 @vault-identifier="(key, identifier) => (save.vaultIdentifiers[key] = identifier)"
-                @hosted-field="(field, value) => (row.hosted[field] = value)"
+                @fresh-field="(field, value) => (row.fresh[field] = value)"
               />
               <p class="spot-effect">
                 将换成 <code>{{ save.placeholderFor(row) }}</code>
@@ -141,7 +169,11 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
           </li>
         </ul>
 
-        <NoteLine v-if="failure" tone="error" flush>
+        <NoteLine v-if="orphanText" tone="warning" flush>
+          {{ orphanText.title }}
+          <template #detail>{{ orphanText.detail }}</template>
+        </NoteLine>
+        <NoteLine v-else-if="failure" tone="error" flush>
           {{ failure }}
           <template #detail>已新建的凭据保留，再次保存不会重复新建。</template>
         </NoteLine>

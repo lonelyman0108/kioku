@@ -44,6 +44,7 @@ const event = (over: Partial<CredentialEvent> = {}): CredentialEvent => ({
   reason: null,
   chatType: null,
   changes: [],
+  sinceValueChange: null,
   bench: null,
   ...over,
 })
@@ -104,6 +105,7 @@ describe('连接', () => {
     lastCheckedAt: null,
     disconnectedAt: null,
     credentialCount: 0,
+    destination: null,
     createdAt: '2026-11-07T00:00:00Z',
     updatedAt: '2026-11-07T00:00:00Z',
     ...over,
@@ -157,8 +159,8 @@ describe('连接', () => {
   it('集合按名字列出，列表里没有的不列', () => {
     const list = {
       collections: [
-        { id: 'c1', organizationId: 'o1', name: 'Agent' },
-        { id: 'c2', organizationId: 'o1', name: '运维' },
+        { id: 'c1', organizationId: 'o1', name: 'Agent', readOnly: false },
+        { id: 'c2', organizationId: 'o1', name: '运维', readOnly: true },
       ],
     }
     const item = {

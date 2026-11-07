@@ -1,9 +1,11 @@
 import type { InboxCounts, MemberRole } from '@kioku/contracts'
 import type { QueryClient } from '@tanstack/vue-query'
 
-// 待处理的四类：分类的名字、条数，地址里选的是哪一类
+import { canManageCredentials } from './vault'
 
-export const INBOX_TABS = ['binding', 'review', 'dream', 'plaintext'] as const
+// 待处理的五类：分类的名字、条数，地址里选的是哪一类
+
+export const INBOX_TABS = ['binding', 'review', 'dream', 'plaintext', 'credential'] as const
 export type InboxTab = (typeof INBOX_TABS)[number]
 
 export const inboxTabLabels: Record<InboxTab, string> = {
@@ -11,6 +13,7 @@ export const inboxTabLabels: Record<InboxTab, string> = {
   review: '待确认内容',
   dream: '整理建议',
   plaintext: '疑似明文凭据',
+  credential: '凭据',
 }
 
 export const inboxTabCount = (counts: InboxCounts, tab: InboxTab): number =>
@@ -19,11 +22,15 @@ export const inboxTabCount = (counts: InboxCounts, tab: InboxTab): number =>
     review: counts.review,
     dream: counts.dreamSuggestions,
     plaintext: counts.plaintext,
+    credential: counts.credentials,
   })[tab]
 
-// 当前账号动得了手的分类：查看者只能拒绝等本人确认的账号绑定，别的几类动不了
-export const inboxTabActionable = (tab: InboxTab, role: MemberRole): boolean =>
-  role !== 'viewer' || tab === 'binding'
+// 当前账号动得了手的分类：查看者只能拒绝等本人确认的账号绑定，别的几类动不了；
+// 凭据只有空间所有者改得了（vault.ts 的 canManageCredentials），条数也只算当前账号自己的
+export const inboxTabActionable = (tab: InboxTab, role: MemberRole): boolean => {
+  if (tab === 'credential') return canManageCredentials(role)
+  return role !== 'viewer' || tab === 'binding'
+}
 
 // 红色角标和「N 项待处理」的数字：动得了手的几类加起来。算进动不了的，这个数字永远消不掉
 export const actionableInboxCount = (counts: InboxCounts, role: MemberRole): number =>
@@ -57,11 +64,21 @@ export const inboxCountsKey = (spaceId: string) => ['inbox-counts', spaceId] as 
 export const invalidateInboxCounts = (queryClient: QueryClient, spaceId: string) =>
   queryClient.invalidateQueries({ queryKey: inboxCountsKey(spaceId) })
 
-// 手动刷新：四类的列表和条数一起重取
+// 待处理里「凭据」一类的列表：和凭据列表同一个前缀，凭据页的刷新清单让 ['credentials', spaceId] 失效时一起重取
+export const attentionCredentialsKey = (spaceId: string) =>
+  ['credentials', spaceId, { attention: true }] as const
+
+// 手动刷新：各类的列表和条数一起重取
 export function refreshInbox(queryClient: QueryClient, spaceId: string) {
   return Promise.all(
-    ['inbox-counts', 'overview', 'review', 'dream-suggestions', 'dream-runs', 'memory-list'].map(
-      (key) => queryClient.invalidateQueries({ queryKey: [key, spaceId] }),
-    ),
+    [
+      'inbox-counts',
+      'overview',
+      'review',
+      'dream-suggestions',
+      'dream-runs',
+      'memory-list',
+      'credentials',
+    ].map((key) => queryClient.invalidateQueries({ queryKey: [key, spaceId] })),
   )
 }

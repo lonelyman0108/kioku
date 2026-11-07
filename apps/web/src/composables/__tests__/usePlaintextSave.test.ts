@@ -99,7 +99,11 @@ beforeEach(() => {
     items: [{ identifier: 'infra-nas' }],
     truncated: false,
   })
-  fakes.api.createCredential.mockReset()
+  fakes.api.createCredential
+    .mockReset()
+    .mockImplementation(async (_sid: string, body: { identifier: string }) =>
+      created({ identifier: body.identifier, storedIn: { kind: 'hosted', bench: false } } as never),
+    )
   matchBy()
   proceeded.mockReset()
 })
@@ -126,11 +130,11 @@ describe('打开时', () => {
 
   it('新建托管凭据的标识按坐标建议，避开已有的与这次别处建议过的', async () => {
     const { save } = await start()
-    expect(save.rows.value.map((r) => r.hosted.identifier)).toEqual([
+    expect(save.rows.value.map((r) => r.fresh.identifier)).toEqual([
       'infra-nas-password',
       'infra-nas-token',
     ])
-    expect(save.rows.value[0]!.hosted.name).toBe('家里的 NAS')
+    expect(save.rows.value[0]!.fresh.name).toBe('家里的 NAS')
   })
 
   it('不能管理凭据的成员不能转存、不查同值的凭据；能改这条记忆就能照样保存', async () => {
@@ -196,7 +200,7 @@ describe('保存', () => {
     expect(fakes.api.createCredential).toHaveBeenCalledWith('s1', {
       identifier: 'infra-nas-token',
       name: '家里的 NAS',
-      source: { kind: 'hosted', values: { token: 'abcd1234' } },
+      source: { kind: 'new', values: { token: 'abcd1234' } },
     })
     expect(proceeded).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -221,6 +225,64 @@ describe('保存', () => {
     ])
     expect(result.content).toContain('token=abcd1234')
     expect(result.content).not.toContain('密码：hunter22')
+  })
+
+  it('新建的凭据带上网址与到期时间，记下写到了哪里，待处理的条数失效', async () => {
+    fakes.api.createCredential.mockImplementation(async (_sid, body) =>
+      created({
+        identifier: body.identifier,
+        storedIn: { kind: 'vault', collectionName: 'Agent' },
+      } as never),
+    )
+    const invalidate = vi.spyOn(client, 'invalidateQueries')
+    const { save } = await start()
+    const token = save.rows.value[1]!
+    token.choice = 'convert'
+    token.fresh.url = 'https://nas.example.com'
+    token.fresh.expires = '2026-12'
+    await nextTick()
+    expect(save.rowProblem(token)).toBe('请填写完整的到期时间')
+    token.fresh.expires = '2026-12-01T08:00'
+    await nextTick()
+    expect(save.rowProblem(token)).toBeNull()
+    await save.proceed()
+    expect(fakes.api.createCredential).toHaveBeenCalledWith('s1', {
+      identifier: 'infra-nas-token',
+      name: '家里的 NAS',
+      source: { kind: 'new', values: { token: 'abcd1234' }, url: 'https://nas.example.com' },
+      expiresAt: new Date('2026-12-01T08:00').toISOString(),
+    })
+    expect(save.stored.value).toEqual([
+      { identifier: 'infra-nas-token', storedIn: { kind: 'vault', collectionName: 'Agent' } },
+    ])
+    expect(invalidate).toHaveBeenCalledWith({ queryKey: ['inbox-counts', 's1'] })
+  })
+
+  it('网址里有要转存的值时不能保存：网址写进条目，是明文', async () => {
+    const { save } = await start()
+    const token = save.rows.value[1]!
+    token.choice = 'convert'
+    token.fresh.url = 'https://abcd1234.example.com'
+    await nextTick()
+    expect(save.rowProblem(token)).toBe('标识、名称、字段名与网址不能包含要转存的值')
+  })
+
+  it('写进了密码库却没建成凭据：记下留下的条目，不交给调用方保存', async () => {
+    const vaultItem = {
+      connectionId: '00000000-0000-4000-8000-0000000000a1',
+      itemId: 'item-9',
+      itemName: '家里的 NAS',
+      collectionName: 'Agent',
+    }
+    fakes.api.createCredential.mockRejectedValue(
+      new ApiError(409, '标识已被占用', { error: '标识已被占用', vaultItem }),
+    )
+    const { save } = await start()
+    save.rows.value[1]!.choice = 'convert'
+    await save.proceed()
+    expect(save.failure.value).toBe('标识已被占用')
+    expect(save.orphan.value).toEqual(vaultItem)
+    expect(proceeded).not.toHaveBeenCalled()
   })
 
   it('照样保存：正文原样，带 allowPlaintext', async () => {
@@ -272,7 +334,7 @@ describe('保存', () => {
     expect(save.failure.value).toBe('标识已被占用或不可用')
     expect(proceeded).not.toHaveBeenCalled()
     expect(save.rows.value[0]!.created).toBe(true)
-    save.rows.value[1]!.hosted.identifier = 'other'
+    save.rows.value[1]!.fresh.identifier = 'other'
     fakes.api.createCredential.mockResolvedValueOnce(created({ identifier: 'other' }))
     await save.proceed()
     expect(fakes.api.createCredential).toHaveBeenCalledTimes(3)
@@ -286,16 +348,16 @@ describe('保存', () => {
     const [a, b] = save.rows.value
     a!.choice = 'convert'
     b!.choice = 'convert'
-    a!.hosted.identifier = 'infra-nas'
+    a!.fresh.identifier = 'infra-nas'
     await nextTick()
     expect(save.problem.value).toBe('标识已被占用')
-    a!.hosted.identifier = 'same'
-    b!.hosted.identifier = 'same'
+    a!.fresh.identifier = 'same'
+    b!.fresh.identifier = 'same'
     await nextTick()
     expect(save.problem.value).toBe('标识重复')
-    b!.hosted.identifier = 'qwerty99-box'
+    b!.fresh.identifier = 'qwerty99-box'
     await nextTick()
-    expect(save.problem.value).toBe('标识、名称与字段名不能包含要转存的值')
+    expect(save.problem.value).toBe('标识、名称、字段名与网址不能包含要转存的值')
   })
 
   it('换了一次保存：晚到的匹配结果不算', async () => {
@@ -338,7 +400,7 @@ describe('给条目起标识', () => {
     token.choice = 'convert'
     save.vaultIdentifiers[itemKey(item)] = 'router'
     await nextTick()
-    expect(save.rowProblem(token)).toBe('标识、名称与字段名不能包含要转存的值')
+    expect(save.rowProblem(token)).toBe('标识、名称、字段名与网址不能包含要转存的值')
   })
 })
 

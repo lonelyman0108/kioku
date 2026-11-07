@@ -16,10 +16,11 @@ import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import { useNow } from '../composables/useNow'
 import { useSession } from '../composables/useSession'
+import { invalidateInboxCounts } from '../inbox'
 import { credentialSourceLabels, restrictedAppsLabel } from '../labels'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime } from '../time'
-import { canManageCredentials } from '../vault'
+import { canManageCredentials, credentialFlags } from '../vault'
 
 const route = useRoute()
 const router = useRouter()
@@ -130,6 +131,8 @@ async function refreshLists(sid: string) {
     queryClient.invalidateQueries({ queryKey: ['credentials-deleted', sid] }),
     queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] }),
     queryClient.invalidateQueries({ queryKey: ['vault-items', sid] }),
+    // 到期时间、需要轮换与删除都会改变待处理的「凭据」一类
+    invalidateInboxCounts(queryClient, sid),
   ])
 }
 
@@ -212,7 +215,7 @@ async function undelete(c: ConsoleCredential) {
         <code v-pre class="font-mono text-[13px]">{{cred:file-server#password}}</code
         >。<Hint>
           Agent 用到时向 Kioku 取值。值由 Kioku
-          加密保存，或保留在连接的密码库中、取用时获取。凭据与密码库连接仅所有者可见。<template
+          加密保存，或保留在连接的密码库中、取用时获取；设了去处时，新建的凭据写进密码库。凭据与密码库连接仅所有者可见。<template
             v-if="!canManage"
             >管理凭据、连接密码库与查看值需要空间所有者权限。</template
           >
@@ -274,7 +277,12 @@ async function undelete(c: ConsoleCredential) {
             <ul>
               <li v-for="c in credentials.data.value.items" :key="c.id">
                 <button type="button" class="ledger-row credential-grid" @click="selectedId = c.id">
-                  <span class="row-name">{{ c.name }}</span>
+                  <span class="row-name">
+                    {{ c.name }}
+                    <span v-for="flag in credentialFlags(c)" :key="flag" class="row-flag">{{
+                      flag
+                    }}</span>
+                  </span>
                   <span class="row-code">{{ c.identifier }}</span>
                   <span class="row-source" data-label="来源">{{ sourceOf(c) }}</span>
                   <span class="row-fields" data-label="字段">
@@ -438,6 +446,7 @@ async function undelete(c: ConsoleCredential) {
     :identifiers="identifiers"
     @saved="onSaved"
     @conflict="onConflict"
+    @open-vault="tab = 'vault'"
   />
   <VaultLoginModal
     v-model:open="loginOpen"
@@ -551,6 +560,16 @@ button.row-name::after {
 .row-purge {
   position: relative;
   z-index: 1;
+}
+.row-flag {
+  margin-left: 6px;
+  padding: 0 5px;
+  border: 1px solid var(--ui-border-accented);
+  font-size: 12px;
+  font-weight: 400;
+  line-height: 18px;
+  white-space: nowrap;
+  color: var(--ui-text-toned);
 }
 .row-code {
   font-family: var(--font-mono);

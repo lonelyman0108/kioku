@@ -14,7 +14,7 @@ import StrataColumn from '../components/strata/StrataColumn.vue'
 import { columnSize, tallyCounts, type StrataSelection } from '../components/strata/strata'
 import { useSession } from '../composables/useSession'
 import { useViewport } from '../composables/useViewport'
-import { actionableInboxCount } from '../inbox'
+import { actionableInboxCount, inboxTabActionable, inboxTabLabels } from '../inbox'
 import { bindingNote, budgetWarning, splitNote, strataTarget } from '../overview'
 import { instanceSettingsRoute, spaceSettingsRoute } from '../settingsSections'
 import { formatRelative, formatTime } from '../time'
@@ -57,14 +57,14 @@ function openStrata(selection: StrataSelection) {
   void router.push(strataTarget(spaceId.value, selection))
 }
 
-// 查看者处理不了后三类：数字不算进「待处理」，不标红，操作只是查看。记忆健康里的补全也一样
+// 查看者处理不了后三类，凭据只有空间所有者处理得了：数字不算进「待处理」，不标红，操作只是查看。记忆健康里的补全也一样
 const role = computed(() => space.value?.role ?? 'viewer')
 const canAct = computed(() => role.value !== 'viewer')
 const pendingTotal = computed(() =>
   data.value ? actionableInboxCount(data.value.inbox, role.value) : 0,
 )
 
-// 待处理的另外三类，都到待处理页处理
+// 待处理的另外四类，都到待处理页处理
 const pending = computed(() => {
   const inbox = data.value?.inbox
   if (!inbox) return []
@@ -93,6 +93,14 @@ const pending = computed(() => {
       action: canAct.value ? '逐条处理' : '查看',
       hot: false,
       to: { name: 'inbox', params, query: { tab: 'plaintext' } },
+    },
+    {
+      title: inboxTabLabels.credential,
+      count: inbox.credentials,
+      note: '快到期、已到期或需要轮换',
+      action: inboxTabActionable('credential', role.value) ? '去处理' : '查看',
+      hot: false,
+      to: { name: 'inbox', params, query: { tab: 'credential' } },
     },
   ]
 })
