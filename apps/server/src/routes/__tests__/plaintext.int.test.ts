@@ -79,6 +79,20 @@ const SAMPLES = [
     '"  {{cred:a#b}}"',
     '"x {{cred:a#b}}"',
   ].map((v) => `password: ${v}`),
+  // 单个强调符写在冒号外面
+  '*Password*: hunter2',
+  '_Password_: hunter2',
+  // 引号里占位符后面隔着空格还有字
+  'password: "{{cred:a}} hunter2"',
+  'password: "{{cred:a}} "',
+  'password: “{{cred:a}}”',
+  'password: {{cred:a}} hunter2',
+  // 容器与一层嵌套的泛型
+  'password: List[Dict[str, int]]',
+  'token: Map<string, string>',
+  'token: Partial<Record<string, string>>',
+  'password: Map<hunter2>',
+  'password: List[Dict[hunter2]]',
   // Markdown 加粗的标签
   '**Password:** OldPass111',
   '**密码：** x1y2',
