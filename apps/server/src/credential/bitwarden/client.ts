@@ -39,7 +39,16 @@ import {
   type VaultTwoFactorProvider,
 } from './types'
 import { decodeItem, decodeSync, decodeSyncItems, type SyncedState } from './vault'
-import { checkNewItem, checkType, newCipherBody, updatedCipherBody, writeValues } from './write'
+import {
+  checkNewItem,
+  checkType,
+  newCipherBody,
+  OFFICIAL_LIMITS,
+  updatedCipherBody,
+  VAULTWARDEN_LIMITS,
+  writeValues,
+  type LengthLimits,
+} from './write'
 
 export type { VaultDiagnostic } from './http'
 
@@ -63,6 +72,10 @@ const SCOPE = 'api offline_access'
 
 // 访问令牌提前这么久当作过期，免得请求发出去时刚好过期
 const EXPIRY_MARGIN_MS = 60_000
+
+// 缓存说集合只读时，上次同步超过这么久才重新同步再看（权限可能改过）；不到就直接按只读报，
+// agent 循环重试时不会每次都下载整个密码库
+const READ_ONLY_RESYNC_MS = 60_000
 
 // 两步验证的方式里只认验证器应用（0）
 const AUTHENTICATOR = '0'
@@ -277,8 +290,12 @@ class Session implements VaultSession {
   private pending: Promise<Refreshed> | null = null
   // 正在进行的保存刷新令牌
   private saving: Promise<void> | null = null
-  // 这个会话新建的条目所在的集合，按条目 id：下一次同步之前取它们时用
+  // 这个会话新建的条目所在的集合，按条目 id：下一次同步之前取它们时用，每次同步之后清空，以同步结果为准
   private readonly createdCollections = new Map<string, string[]>()
+  // 上次同步成功的时间（毫秒）
+  private syncedAt = 0
+  // 服务器的长度上限，第一次写入时按 /api/config 认出服务器之后记下
+  private limits: LengthLimits | null = null
 
   constructor(
     private readonly http: HttpOptions,
@@ -328,9 +345,9 @@ class Session implements VaultSession {
           (c) => c.id === input.collectionId && c.organizationId === input.organizationId,
         )
       let collection = find(state)
-      // 缓存里没有这个集合（上次同步之后才分到的），或者缓存说只读（之后可能改成了可以编辑）：重新同步一次再看。
-      // 刚换令牌时已经同步过，不再同步第二次
-      if ((!collection || collection.readOnly) && !fresh) {
+      // 缓存里没有这个集合（上次同步之后才分到的），或者缓存说只读且上次同步已经过了一阵（之后可能改成了可以编辑）：
+      // 重新同步一次再看。刚换令牌时已经同步过，不再同步第二次
+      if (!fresh && (!collection || (collection.readOnly && this.syncStale()))) {
         const synced = await this.sync(access)
         if (!synced) return null
         state = synced.state
@@ -340,7 +357,13 @@ class Session implements VaultSession {
       if (collection.readOnly) throw readOnly()
       // 同步只列出解得开的集合，组织密钥一定在
       const orgKey = state.orgKeys.get(input.organizationId)!
-      const body = newCipherBody(input, values, orgKey, state.snapshot.account.userId)
+      const body = newCipherBody(
+        input,
+        values,
+        orgKey,
+        state.snapshot.account.userId,
+        await this.lengthLimits(),
+      )
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/create`, {
         method: 'POST',
         headers: { authorization: `Bearer ${access.token}`, ...JSON_BODY },
@@ -368,11 +391,22 @@ class Session implements VaultSession {
     return this.withAccess(async (access, fresh) => {
       const fetched = await this.fetchCipher(access, fresh, id)
       if (!fetched) return null
-      const { json, state } = fetched
-      const current = this.decoded(json, state)
+      const { json } = fetched
+      let { state } = fetched
+      let current = this.decoded(json, state)
       if (current.revisionDate !== expectedRevisionDate) throw conflict()
       checkType(values, current.type)
+      // 只按缓存的集合判成只读（服务端没给 edit）时，和新建一样，上次同步过了一阵就重新同步一次再看
+      if (!this.editable(json, current, state) && typeof prop(json, 'edit') !== 'boolean') {
+        if (!fresh && this.syncStale()) {
+          const synced = await this.sync(access)
+          if (!synced) return null
+          state = synced.state
+          current = this.decoded(json, state)
+        }
+      }
       if (!this.editable(json, current, state)) throw readOnly()
+      const limits = await this.lengthLimits()
       const body = formatLogged(this.http, 'cipher', () =>
         updatedCipherBody({
           raw: json,
@@ -382,6 +416,9 @@ class Session implements VaultSession {
           orgKey: state.orgKeys.get(current.organizationId)!,
           userId: state.snapshot.account.userId,
           now: new Date(this.now()).toISOString(),
+          limits,
+          onHistorySkipped: () =>
+            this.http.log({ what: 'history_skipped', endpoint: 'cipher_update' }),
         }),
       )
       // 什么都没变：不发修改，免得服务端改了修改时间
@@ -398,6 +435,30 @@ class Session implements VaultSession {
       if (item.collectionIds.length === 0) item.collectionIds = current.collectionIds
       return item
     })
+  }
+
+  private syncStale(): boolean {
+    return this.now() - this.syncedAt > READ_ONLY_RESYNC_MS
+  }
+
+  // 按服务器定长度上限：/api/config 里 server 的名字是 Vaultwarden 时只查备注，官方服务（server 为空）与认不出的
+  // 按官方的上限。读到了才记下；读不到时这一次按官方的上限，下次再读
+  private async lengthLimits(): Promise<LengthLimits> {
+    if (this.limits) return this.limits
+    let res: HttpResponse
+    try {
+      res = await vaultRequest(this.http, `${this.endpoints.api}/config`, { method: 'GET' })
+    } catch (err) {
+      if (err instanceof VaultError) return OFFICIAL_LIMITS
+      throw err
+    }
+    if (res.status !== 200) {
+      this.http.log({ what: 'status', status: res.status, endpoint: 'config' })
+      return OFFICIAL_LIMITS
+    }
+    const name = str(prop(res.json, 'server'), 'name')
+    this.limits = name?.toLowerCase() === 'vaultwarden' ? VAULTWARDEN_LIMITS : OFFICIAL_LIMITS
+    return this.limits
   }
 
   // 能不能改：以刚取到的条目的 edit 为准（缓存的集合权限可能过时）；服务端没给 edit 时看缓存里条目所在的集合，
@@ -587,6 +648,9 @@ class Session implements VaultSession {
     if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
     const state = formatLogged(this.http, 'sync', () => decodeSync(res.json, this.userKey))
     await this.input.onSynced?.(state.snapshot)
+    this.syncedAt = this.now()
+    // 新建时记下的集合不再用：同步里有这些条目现在所在的集合（被移走的也是新的）
+    this.createdCollections.clear()
     return { json: res.json, state }
   }
 }

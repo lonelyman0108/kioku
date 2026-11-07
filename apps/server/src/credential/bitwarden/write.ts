@@ -67,34 +67,56 @@ export function checkNewItem(item: VaultNewItem): WriteValue[] {
 }
 
 // 服务端按密文的字符数限长，超了回 400。官方服务：名称、用户名、自定义字段名 1000，密码、自定义字段值、
-// 密码历史 5000，备注、网址 10000；Vaultwarden 只限备注 10000。发请求之前按官方服务的上限查
+// 密码历史 5000，备注、网址 10000；Vaultwarden 只限备注 10000（私钥、长的令牌写得进去）。
+// 发请求之前按服务器的上限查：会话认出是 Vaultwarden 时用 VAULTWARDEN_LIMITS，官方服务与认不出的用 OFFICIAL_LIMITS
 type Limited =
   'name' | 'username' | 'password' | 'notes' | 'fieldName' | 'fieldValue' | 'uri' | 'history'
 
-const LIMITS: Record<Limited, { max: number; label: string }> = {
-  name: { max: 1000, label: '名称' },
-  username: { max: 1000, label: '用户名' },
-  password: { max: 5000, label: '密码' },
-  notes: { max: 10000, label: '备注' },
-  fieldName: { max: 1000, label: '自定义字段名' },
-  fieldValue: { max: 5000, label: '自定义字段的值' },
-  uri: { max: 10000, label: '网址' },
-  history: { max: 5000, label: '密码历史（隐藏字段的旧值）' },
+export type LengthLimits = Partial<Record<Limited, number>>
+
+export const OFFICIAL_LIMITS: LengthLimits = {
+  name: 1000,
+  username: 1000,
+  password: 5000,
+  notes: 10000,
+  fieldName: 1000,
+  fieldValue: 5000,
+  uri: 10000,
+  history: 5000,
 }
 
-function enc(value: string, key: SymmetricKey, what: Limited): string {
+export const VAULTWARDEN_LIMITS: LengthLimits = { notes: 10000 }
+
+const LABELS: Record<Limited, string> = {
+  name: '名称',
+  username: '用户名',
+  password: '密码',
+  notes: '备注',
+  fieldName: '自定义字段名',
+  fieldValue: '自定义字段的值',
+  uri: '网址',
+  history: '密码历史',
+}
+
+// 加密并按上限查；超了返回 null
+function encWithin(value: string, key: SymmetricKey, what: Limited, limits: LengthLimits) {
   const out = encryptText(value, key)
-  const { max, label } = LIMITS[what]
-  if (out.length > max) throw new VaultError('value_too_long', `${label}超出密码库的长度上限`)
+  const max = limits[what]
+  return max !== undefined && out.length > max ? null : out
+}
+
+function encLimited(value: string, key: SymmetricKey, what: Limited, limits: LengthLimits): string {
+  const out = encWithin(value, key, what, limits)
+  if (out === null) throw new VaultError('value_too_long', `${LABELS[what]}超出密码库的长度上限`)
   return out
 }
 
 // 网址的校验和：网址的 SHA-256 写成 base64 再加密。官方客户端解开带条目密钥的条目时按它核对网址
-function uriEntry(uri: string, autofill: boolean, key: SymmetricKey) {
+function uriEntry(uri: string, autofill: boolean, key: SymmetricKey, limits: LengthLimits) {
   const checksum = createHash('sha256').update(uri, 'utf8').digest('base64')
   return {
-    uri: enc(uri, key, 'uri'),
-    uriChecksum: enc(checksum, key, 'uri'),
+    uri: encLimited(uri, key, 'uri', limits),
+    uriChecksum: encLimited(checksum, key, 'uri', limits),
     match: autofill ? MATCH_HOST : MATCH_NEVER,
   }
 }
@@ -106,20 +128,22 @@ export function newCipherBody(
   values: WriteValue[],
   orgKey: SymmetricKey,
   userId: string,
+  limits: LengthLimits,
 ) {
+  const enc = (value: string, what: Limited) => encLimited(value, orgKey, what, limits)
   let username: string | null = null
   let password: string | null = null
   let notes: string | null = null
   const fields: { type: number; name: string; value: string; linkedId: null }[] = []
   for (const { target, value } of values) {
-    if (target.kind === 'login.username') username = enc(value, orgKey, 'username')
-    else if (target.kind === 'login.password') password = enc(value, orgKey, 'password')
-    else if (target.kind === 'notes') notes = enc(value, orgKey, 'notes')
+    if (target.kind === 'login.username') username = enc(value, 'username')
+    else if (target.kind === 'login.password') password = enc(value, 'password')
+    else if (target.kind === 'notes') notes = enc(value, 'notes')
     else {
       fields.push({
         type: HIDDEN_FIELD,
-        name: enc(target.name, orgKey, 'fieldName'),
-        value: enc(value, orgKey, 'fieldValue'),
+        name: enc(target.name, 'fieldName'),
+        value: enc(value, 'fieldValue'),
         linkedId: null,
       })
     }
@@ -132,7 +156,7 @@ export function newCipherBody(
       folderId: null,
       encryptedFor: userId,
       key: null,
-      name: enc(item.name, orgKey, 'name'),
+      name: enc(item.name, 'name'),
       notes,
       favorite: false,
       reprompt: 0,
@@ -144,7 +168,7 @@ export function newCipherBody(
             username,
             password,
             totp: null,
-            uris: (item.uris ?? []).map((u) => uriEntry(u.uri, u.autofill, orgKey)),
+            uris: (item.uris ?? []).map((u) => uriEntry(u.uri, u.autofill, orgKey, limits)),
             passwordRevisionDate: null,
           }
         : null,
@@ -199,23 +223,28 @@ export interface UpdateInput {
   userId: string
   // 记进密码历史的时间
   now: string
+  limits: LengthLimits
+  // 隐藏字段的旧值记进历史会超长时不记这一条，修改照常；调用方记日志（不带值）
+  onHistorySkipped: () => void
 }
 
 // PUT /ciphers/{id} 的请求体；什么都没变时为 null，不发请求（发了服务端照样改修改时间，别处正在改的会因此冲突）。
 // 值和原来一样的字段不换密文。密码历史照官方客户端：改了登录密码时旧密码（原来的密文）记进去，改了隐藏字段时记
-// 「名字: 旧值」，都插在最前面（先旧密码，再按字段在条目里的顺序逐个插），最多 5 条；旧值是空的不记。
+// 「名字: 旧值」，都插在最前面（先旧密码，再按字段在条目里的顺序逐个插），最多 5 条；旧值是空的不记，
+// 「名字: 旧值」加密后超出上限的也不记（旧值接近上限的隐藏字段照样能改）。
 // 附件不带：响应里的附件是数组，请求里是按 id 的对象，官方服务认不出数组；不带时服务端两边都不动附件
 export function updatedCipherBody(input: UpdateInput): Json | null {
-  const { orgKey, userId, now } = input
+  const { orgKey, userId, now, limits } = input
   if (!isObject(input.raw)) throw unsupportedField()
   const body = structuredClone(input.raw)
   const itemKeyEnc = str(body, 'key')
   const key = itemKeyEnc ? splitKey(decryptBytes(itemKeyEnc, orgKey)) : orgKey
   const decrypt = (value: unknown) => (isEnc(value) ? decryptText(value, key) : null)
+  const enc = (value: string, what: Limited) => encLimited(value, key, what, limits)
   let changed = false
 
   if (input.name !== undefined && decrypt(prop(body, 'name')) !== input.name) {
-    setProp(body, 'name', enc(input.name, key, 'name'))
+    setProp(body, 'name', enc(input.name, 'name'))
     changed = true
   }
 
@@ -226,17 +255,17 @@ export function updatedCipherBody(input: UpdateInput): Json | null {
   for (const { target, value } of input.values) {
     if (target.kind === 'notes') {
       if (decrypt(prop(body, 'notes')) === value) continue
-      setProp(body, 'notes', enc(value, key, 'notes'))
+      setProp(body, 'notes', enc(value, 'notes'))
     } else if (target.kind === 'login.username') {
       const login = childObject(body, 'login')
       if (decrypt(prop(login, 'username')) === value) continue
-      setProp(login, 'username', enc(value, key, 'username'))
+      setProp(login, 'username', enc(value, 'username'))
     } else if (target.kind === 'login.password') {
       const login = childObject(body, 'login')
       const old = prop(login, 'password')
       const oldPlain = decrypt(old)
       if (oldPlain === value) continue
-      setProp(login, 'password', enc(value, key, 'password'))
+      setProp(login, 'password', enc(value, 'password'))
       if (oldPlain) {
         passwordEntry = { password: old, lastUsedDate: now }
         setProp(login, 'passwordRevisionDate', now)
@@ -246,23 +275,20 @@ export function updatedCipherBody(input: UpdateInput): Json | null {
       if (!found) {
         const field = {
           type: HIDDEN_FIELD,
-          name: enc(target.name, key, 'fieldName'),
-          value: enc(value, key, 'fieldValue'),
+          name: enc(target.name, 'fieldName'),
+          value: enc(value, 'fieldValue'),
           linkedId: null,
         }
         childArray(body, 'fields').push(field)
       } else {
         const oldPlain = decrypt(prop(found.field, 'value'))
         if (oldPlain === value) continue
-        setProp(found.field, 'value', enc(value, key, 'fieldValue'))
+        setProp(found.field, 'value', enc(value, 'fieldValue'))
         if (Number(prop(found.field, 'type')) === HIDDEN_FIELD && oldPlain) {
-          fieldEntries.push({
-            index: found.index,
-            entry: {
-              password: enc(`${target.name}: ${oldPlain}`, key, 'history'),
-              lastUsedDate: now,
-            },
-          })
+          const entry = encWithin(`${target.name}: ${oldPlain}`, key, 'history', limits)
+          if (entry === null) input.onHistorySkipped()
+          else
+            fieldEntries.push({ index: found.index, entry: { password: entry, lastUsedDate: now } })
         }
       }
     }

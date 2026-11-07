@@ -67,8 +67,10 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
   const sessionFor = async (
     account: SeedAccount,
     log?: (diagnostic: VaultDiagnostic) => void,
+    now?: () => number,
   ): Promise<VaultSession> => {
-    const c = log ? createVaultClient({ log }) : client
+    const c =
+      log || now ? createVaultClient({ ...(log ? { log } : {}), ...(now ? { now } : {}) }) : client
     const result = await c.login({
       serverUrl: url,
       email: account.email,
@@ -149,6 +151,34 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
     expect(item.secureNote).toEqual({ type: 0 })
     expect(item.notes).toBe('令牌说明')
     expect(item.fields).toEqual([expect.objectContaining({ name: 'token', value: token, type: 1 })])
+  }, 60_000)
+
+  it('Vaultwarden 只限备注：4KB 的私钥与长令牌写得进去，bw 读得出；备注超长报 value_too_long', async () => {
+    const privateKey = `-----BEGIN PRIVATE KEY-----\n${'A'.repeat(4096)}\n-----END PRIVATE KEY-----`
+    const token = 'j'.repeat(6000)
+    const created = await writer.createItem({
+      organizationId: seed.org.id,
+      collectionId: seed.agentCollection,
+      type: 'note',
+      name: 'long values',
+      values: { 'field:private key': privateKey, 'field:token': token },
+    })
+    const item = await bwGet(created.id)
+    expect(new Map(item.fields!.map((f) => [f.name, f.value]))).toEqual(
+      new Map([
+        ['private key', privateKey],
+        ['token', token],
+      ]),
+    )
+    expect(
+      await kindOf(
+        writer.updateItem(
+          created.id,
+          { values: { notes: 'n'.repeat(8000) } },
+          created.revisionDate,
+        ),
+      ),
+    ).toBe('value_too_long')
   }, 60_000)
 
   it('改密码：bw 读回新密码，旧密码进密码历史（新的在前）', async () => {
@@ -340,7 +370,12 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
     const { agentCollection: agent, otherCollection: other } = seed
     await addMember(url, seed.member, seed.org, account, 2, [agent, other], { writable: [agent] })
     const logs: VaultDiagnostic[] = []
-    const session = await sessionFor(account, (d) => logs.push(d))
+    let offset = 0
+    const session = await sessionFor(
+      account,
+      (d) => logs.push(d),
+      () => Date.now() + offset,
+    )
     const snapshot = await session.snapshot()
     expect(new Map(snapshot.collections.map((c) => [c.id, c.readOnly]))).toEqual(
       new Map([
@@ -375,6 +410,9 @@ describe.skipIf(!base || !bwAvailable())('Vaultwarden 写入', () => {
     )
     expect(updated.values.notes).toBe('now writable')
     expect((await bwGet(hidden.id)).notes).toBe('now writable')
+    // 新建：上次同步不到 60 秒时照缓存按只读报，过了才重新同步
+    expect(await kindOf(note(other))).toBe('read_only')
+    offset = 61_000
     expect((await note(other)).collectionIds).toEqual([other])
     expect(logs).toEqual([])
   }, 90_000)

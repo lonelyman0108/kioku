@@ -80,7 +80,7 @@ function replay(scenarios: string[], override?: Override) {
     calls.push(call)
     const recorded = fixture.exchanges.find(
       (e) =>
-        scenarios.includes(e.scenario) &&
+        (scenarios.includes(e.scenario) || e.path === '/api/config') &&
         e.method === (init.method ?? 'GET') &&
         e.path === url.pathname &&
         (e.form?.grant_type ?? null) === (form?.grant_type ?? null),
@@ -1514,8 +1514,14 @@ describe('写入', () => {
     ])
   })
 
-  it('加密之后超出服务端的长度上限：发请求之前报 value_too_long，文字不带值', async () => {
-    const { session, calls } = writer('writer.update')
+  // 官方服务的 /api/config 里 server 为空
+  const officialConfig: Override = (call) =>
+    call.url.pathname === '/api/config'
+      ? json(200, { server: null, version: '2026.10.0' })
+      : undefined
+
+  it('官方服务：加密之后超出长度上限时发请求之前报 value_too_long，文字不带值', async () => {
+    const { session, calls } = writer('writer.update', { override: officialConfig })
     const long = (n: number) => 'x'.repeat(n)
     const cases: [Partial<VaultNewItem>, string][] = [
       [{ name: long(700) }, '名称'],
@@ -1551,6 +1557,68 @@ describe('写入', () => {
     )
     expect(ok.id).toBe(fixture.items.createdLogin)
     expect(writeCalls(calls)).toHaveLength(1)
+  })
+
+  it('Vaultwarden 只限备注：长的密码、令牌与名称照常写；服务器配置只读一次；读不到时按官方的上限', async () => {
+    const long = (n: number) => 'x'.repeat(n)
+    const { session, calls } = writer('writer.createLogin')
+    for (const change of [
+      { name: long(3000) },
+      { values: { 'login.password': long(6000) } },
+      { values: { 'field:private key': long(6000) } },
+    ]) {
+      expect((await session.createItem({ ...loginItem, ...change })).id).toBe(
+        fixture.items.createdLogin,
+      )
+    }
+    expect(await kindOf(session.createItem({ ...loginItem, values: { notes: long(7500) } }))).toBe(
+      'value_too_long',
+    )
+    expect(writeCalls(calls)).toHaveLength(3)
+    expect(calls.filter((c) => c.url.pathname === '/api/config')).toHaveLength(1)
+
+    // 读不到配置：这一次按官方的上限，下次再读
+    let configs = 0
+    const failing = writer('writer.createLogin', {
+      override: (call) =>
+        call.url.pathname === '/api/config' && ++configs === 1 ? json(500, {}) : undefined,
+    })
+    const password = { ...loginItem, values: { 'login.password': long(6000) } }
+    expect(await kindOf(failing.session.createItem(password))).toBe('value_too_long')
+    expect((await failing.session.createItem(password)).id).toBe(fixture.items.createdLogin)
+    expect(configs).toBe(2)
+  })
+
+  it('隐藏字段的旧值记进历史会超长时：不记这一条，修改照常，日志不带值', async () => {
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const old = 'o'.repeat(3700)
+    raw.fields = [
+      {
+        type: 1,
+        name: encryptText('api token', orgKey),
+        value: encryptText(old, orgKey),
+        linkedId: null,
+      },
+    ]
+    const log = vi.fn()
+    const { session, calls } = writer('writer.update', {
+      log,
+      override: (call, recordedExchange) =>
+        officialConfig(call, recordedExchange) ?? withGet(raw)(call, recordedExchange),
+    })
+    await session.updateItem(
+      fixture.items.createdLogin,
+      { values: { 'field:api token': 'new-token', 'login.password': 'new-password' } },
+      raw.revisionDate,
+    )
+    const sent = sentBody(calls, 'PUT')
+    expect(dec(sent.fields![0]!.value)).toBe('new-token')
+    // 旧密码照样记，隐藏字段的那条不记
+    expect(sent.passwordHistory).toEqual([
+      { password: raw.login.password, lastUsedDate: new Date(NOW).toISOString() },
+    ])
+    expect(log).toHaveBeenCalledWith({ what: 'history_skipped', endpoint: 'cipher_update' })
+    expect(JSON.stringify(log.mock.calls)).not.toContain('ooo')
   })
 
   it('有条目密钥的条目用条目密钥加密，条目密钥原样带回', async () => {
@@ -1657,7 +1725,9 @@ describe('写入', () => {
     const readOnlySync = syncBody('writer') as unknown as { collections: { readOnly: boolean }[] }
     for (const c of readOnlySync.collections) c.readOnly = true
     let syncs = 0
+    let clock = NOW
     const { session, calls } = writer('writer.createLogin', {
+      now: () => clock,
       override: (call) => {
         if (call.url.pathname !== '/api/sync') return undefined
         syncs++
@@ -1665,16 +1735,80 @@ describe('写入', () => {
       },
     })
     await session.snapshot()
+    // 上次同步不到 60 秒：直接按只读报，不重新同步（agent 循环重试时不会每次都下载整个密码库）
+    clock += 30_000
+    expect(await kindOf(session.createItem(loginItem))).toBe('read_only')
+    expect(syncs).toBe(1)
+    clock += 31_000
     expect((await session.createItem(loginItem)).id).toBe(fixture.items.createdLogin)
     expect(syncs).toBe(2)
     expect(writeCalls(calls)).toHaveLength(1)
     // 重新同步之后还是只读：不发请求
+    let stillClock = NOW
     const still = writer('writer.createLogin', {
+      now: () => stillClock,
       override: (call) => (call.url.pathname === '/api/sync' ? json(200, readOnlySync) : undefined),
     })
     await still.session.snapshot()
+    stillClock += 61_000
     expect(await kindOf(still.session.createItem(loginItem))).toBe('read_only')
     expect(writeCalls(still.calls)).toHaveLength(0)
+  })
+
+  it('服务端不给 edit、缓存说只读：上次同步过了 60 秒就重新同步一次再判断', async () => {
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const readOnlySync = syncBody('writer') as unknown as { collections: { readOnly: boolean }[] }
+    for (const c of readOnlySync.collections) c.readOnly = true
+    let syncs = 0
+    let clock = NOW
+    const { session, calls } = writer('writer.update', {
+      now: () => clock,
+      override: (call) => {
+        if (call.url.pathname === '/api/sync') {
+          syncs++
+          return syncs === 1 ? json(200, readOnlySync) : undefined
+        }
+        return withGet(omitEdit(raw))(call, undefined)
+      },
+    })
+    await session.snapshot()
+    const change = { values: fixture.writes.update }
+    expect(
+      await kindOf(session.updateItem(fixture.items.createdLogin, change, raw.revisionDate)),
+    ).toBe('read_only')
+    expect(syncs).toBe(1)
+    clock += 61_000
+    const item = await session.updateItem(fixture.items.createdLogin, change, raw.revisionDate)
+    expect(item.values['login.password']).toBe(fixture.writes.update['login.password'])
+    expect(syncs).toBe(2)
+    expect(writeCalls(calls)).toHaveLength(1)
+  })
+
+  it('新建时记下的集合在下一次同步之后不再用：条目被移到别的集合时报新的集合', async () => {
+    const created = recorded('writer.createLogin', 'POST', '/api/ciphers/create')
+    const raw = recorded('writer.update', 'GET', createdLoginPath)
+    const moved = syncBody('writer') as unknown as { ciphers: unknown[] }
+    moved.ciphers.push({ ...created, collectionIds: [fixture.collections.other] })
+    let synced = false
+    const { session } = writer('writer.createLogin', {
+      scenarios: ['writer.session', 'writer.createLogin', 'writer.update'],
+      override: (call) => {
+        if (call.url.pathname === '/api/ciphers/create') {
+          return json(200, { ...created, collectionIds: [] })
+        }
+        if (call.url.pathname === '/api/sync' && synced) return json(200, moved)
+        return withGet({ ...omitEdit(raw), collectionIds: [] })(call, undefined)
+      },
+    })
+    const item = await session.createItem(loginItem)
+    expect((await session.item(item.id)).collectionIds).toEqual([fixture.collections.agent])
+    synced = true
+    await session.snapshot()
+    expect((await session.item(item.id)).collectionIds).toEqual([fixture.collections.other])
+    // 同步里也没有它（别处删了又看不到了）：不再报新建时的集合
+    synced = false
+    await session.snapshot()
+    expect((await session.item(item.id)).collectionIds).toEqual([])
   })
 
   it('新建之后马上取、马上改：单个条目与同步都不带集合时，用新建时记下的集合', async () => {
