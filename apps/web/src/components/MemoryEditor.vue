@@ -39,11 +39,13 @@ import {
 import { placeholderOf } from '../placeholders'
 import {
   addedSpots,
+  afterGate,
   plaintextRejection,
-  spotsFromFindings,
+  spotsAfterRejection,
   type PlaintextSpot,
   type SaveFlags,
 } from '../plaintextSave'
+import { canManageCredentials } from '../vault'
 import type { PlaintextSaveRequest, PlaintextSaveResult } from '../composables/usePlaintextSave'
 import {
   hiddenAgain,
@@ -416,7 +418,25 @@ const PLAINTEXT_DOWNGRADE_TEXT =
 // 别的保存：正文里有这次新增的疑似明文时，先逐处选转存为凭据或不是凭据（PlaintextSaveModal），
 // 判断和服务端拒绝写入是同一个（addedPlaintextCredentials）。结果是 secret 时正文加密，不用处理
 const plaintextGate = ref<PlaintextSaveRequest | null>(null)
-const isOwner = computed(() => permissions.role.value === 'owner')
+// 转存为凭据只看 canManageCredentials；照样保存给能改这条记忆的成员
+const canConvert = computed(() => canManageCredentials(permissions.role.value))
+const canSaveAnyway = computed(() => !readOnly.value)
+
+// 本地就能判断的问题：标题、有效期。开逐处处理的弹窗之前先查，免得转存建了凭据、改了正文才停下
+function formProblem(values: { title: string; validTo: string }, m: ConsoleMemoryView) {
+  const title = MemoryTitle.safeParse(values.title)
+  if (values.title !== m.title && !title.success) {
+    return title.error.issues[0]?.message ?? '标题格式错误'
+  }
+  if (values.validTo === validToInput(m) || !values.validTo) return null
+  if (!fromLocalInput(values.validTo)) return '有效期的日期和时间不完整'
+  // 编辑得久了，开始编辑时能选的最早时间现在可能已经太近；没改的有效到原样不发，不用查
+  if (validToTooSoon(values.validTo)) {
+    minValidTo.value = earliestValidTo()
+    return '有效期须晚于当前时间至少一分钟'
+  }
+  return null
+}
 function gateFor(m: ConsoleMemoryView, content: string, spots: PlaintextSpot[], rejected: boolean) {
   return {
     content,
@@ -431,6 +451,11 @@ function gateFor(m: ConsoleMemoryView, content: string, spots: PlaintextSpot[], 
 function requestSave() {
   const m = base.value
   if (!m || saving.value) return
+  const problem = formProblem(form, m)
+  if (problem) {
+    toast.add({ title: problem, color: 'error' })
+    return
+  }
   const downgrade = m.sensitivity === 'secret' && form.sensitivity !== 'secret'
   if (downgrade) {
     if (PLAINTEXT_CREDENTIAL.test(form.content)) {
@@ -452,10 +477,18 @@ function confirmDowngrade() {
   downgradeWarning.value = false
   void save({ allowPlaintext: true })
 }
-// 逐处处理完：转存的已经建好凭据、正文里的值换成了占位符，换过的正文放回表单再保存
+// 逐处处理完：转存的已经建好凭据、正文里的值换成了占位符，换过的正文放回表单再保存。
+// 结果只能用在算出它的那份正文上，这期间正文变了就按现在的重算（afterGate）
 function onGateProceed(result: PlaintextSaveResult) {
-  form.content = result.content
-  void save(result.flags)
+  const m = base.value
+  if (!m) return
+  const next = afterGate(m.content, form.content, result)
+  if (next.kind === 'reopen') {
+    plaintextGate.value = gateFor(m, form.content, next.spots, false)
+    return
+  }
+  form.content = next.content
+  void save(next.flags)
 }
 
 async function save(flags: SaveFlags = {}) {
@@ -463,23 +496,14 @@ async function save(flags: SaveFlags = {}) {
   if (!m || saving.value) return
   // 记下这次提交的值：请求期间又改过的字段，保存之后保留新改的内容
   const sent = { ...form, glossary: [...form.glossary] }
-  const title = MemoryTitle.safeParse(sent.title)
-  if (sent.title !== m.title && !title.success) {
-    toast.add({ title: title.error.issues[0]?.message ?? '标题格式错误', color: 'error' })
+  const problem = formProblem(sent, m)
+  if (problem) {
+    toast.add({ title: problem, color: 'error' })
     return
   }
+  const title = MemoryTitle.safeParse(sent.title)
   const validToChanged = sent.validTo !== validToInput(m)
   const validTo = sent.validTo ? fromLocalInput(sent.validTo) : null
-  if (validToChanged && sent.validTo && !validTo) {
-    toast.add({ title: '有效期的日期和时间不完整', color: 'error' })
-    return
-  }
-  // 编辑得久了，开始编辑时能选的最早时间现在可能已经太近；没改的有效到原样不发，不用查
-  if (validToChanged && validTo && validToTooSoon(sent.validTo)) {
-    minValidTo.value = earliestValidTo()
-    toast.add({ title: '有效期须晚于当前时间至少一分钟', color: 'error' })
-    return
-  }
   saving.value = true
   try {
     const next = await api.updateMemory(props.spaceId, {
@@ -521,15 +545,11 @@ async function save(flags: SaveFlags = {}) {
     emit('changed', next, m)
   } catch (err) {
     // 服务端检出了新增的疑似明文（两边判断有出入时）：照样逐处处理
+    // 请求期间又改过正文时按现在的正文重算，没有新增的就照常报错
     const findings = plaintextRejection(err)
-    if (findings) {
-      const local = addedSpots(m.content, sent.content)
-      plaintextGate.value = gateFor(
-        m,
-        sent.content,
-        local.length ? local : spotsFromFindings(sent.content, findings),
-        true,
-      )
+    const gate = findings && spotsAfterRejection(m.content, sent.content, form.content, findings)
+    if (gate) {
+      plaintextGate.value = gateFor(m, gate.content, gate.spots, true)
       return
     }
     failed(err, '保存失败')
@@ -1141,7 +1161,8 @@ const properties = computed<Property[][]>(() => {
       <PlaintextSaveModal
         v-model:request="plaintextGate"
         :space-id="spaceId"
-        :owner="isOwner"
+        :can-convert="canConvert"
+        :can-save-anyway="canSaveAnyway"
         @proceed="onGateProceed"
       />
 

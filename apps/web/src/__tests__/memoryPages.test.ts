@@ -310,3 +310,32 @@ describe('概览', () => {
     expect(overviewPage).toContain('void router.push(strataTarget(spaceId.value, selection))')
   })
 })
+
+describe('保存前逐处处理疑似明文', () => {
+  const editor = memoryEditor
+  it('标题、有效期这类本地就能判断的先查，再开弹窗', () => {
+    const request = /function requestSave\(\) \{[\s\S]*?\n\}/.exec(editor)![0]
+    expect(request.indexOf('formProblem(form, m)')).toBeGreaterThan(-1)
+    expect(request.indexOf('formProblem(form, m)')).toBeLessThan(request.indexOf('addedSpots('))
+    const submit = /async function submit\(flags\?: SaveFlags\) \{[\s\S]*?\n\}/.exec(
+      createMemoryModal,
+    )![0]
+    expect(submit.indexOf('validToTooSoon')).toBeLessThan(submit.indexOf('addedSpots('))
+  })
+
+  it('转存只看 canManageCredentials，照样保存给能改的成员，两个属性分开', () => {
+    for (const source of [editor, createMemoryModal]) {
+      expect(source).toContain('canManageCredentials(')
+      expect(source).toContain(':can-convert="canConvert"')
+      expect(source).toMatch(/:can-save-anyway="/)
+      expect(source).not.toContain(':owner=')
+    }
+  })
+
+  it('被拒与弹窗的结果都按现在的正文判断', () => {
+    for (const source of [editor, createMemoryModal]) {
+      expect(source).toContain('spotsAfterRejection(')
+      expect(source).toContain('afterGate(')
+    }
+  })
+})

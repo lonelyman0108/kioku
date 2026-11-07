@@ -3,9 +3,11 @@ import { describe, expect, it } from 'vitest'
 import { ApiError } from '../api/client'
 import {
   addedSpots,
+  afterGate,
   linesText,
   plaintextRejection,
   saveFlags,
+  spotsAfterRejection,
   spotsFromFindings,
 } from '../plaintextSave'
 
@@ -64,5 +66,64 @@ describe('保存时的标记', () => {
 
   it('行号按先后写', () => {
     expect(linesText([5, 2])).toBe('第 2、5 行')
+  })
+})
+
+describe('服务端拒绝之后开哪一份弹窗', () => {
+  it('正文还是发出去的那份：以服务端为准，本地没认出新增的也列出来', () => {
+    // 原来就有 hunter22：本地按值比不算新增，服务端说第 1 行是新增的
+    const before = '旧的 hunter22'
+    const sent = '密码：hunter22\ntoken=abcd1234'
+    const gate = spotsAfterRejection(before, sent, sent, [
+      { line: 1, kind: 'label' },
+      { line: 2, kind: 'label' },
+    ])
+    expect(gate!.content).toBe(sent)
+    expect(gate!.spots.map((s) => s.value)).toEqual(['hunter22', 'abcd1234'])
+  })
+
+  it('请求期间又改过正文：按现在的正文重算，不用发出去的那份', () => {
+    const sent = '密码：hunter22'
+    const current = '密码：hunter22\n又打了几个字 token=abcd1234'
+    const gate = spotsAfterRejection(null, sent, current, [{ line: 1, kind: 'label' }])
+    expect(gate!.content).toBe(current)
+    expect(gate!.spots.map((s) => s.value)).toEqual(['hunter22', 'abcd1234'])
+  })
+
+  it('改过之后没有新增的：不开弹窗', () => {
+    expect(
+      spotsAfterRejection(null, '密码：hunter22', '删掉了', [{ line: 1, kind: 'label' }]),
+    ).toBe(null)
+  })
+})
+
+describe('弹窗处理完之后', () => {
+  const result = {
+    source: '密码：hunter22',
+    content: '密码：{{cred:a#password}}',
+    flags: { ignorePlaintext: true } as const,
+  }
+
+  it('结果是按现在的正文算的：用它', () => {
+    expect(afterGate(null, '密码：hunter22', result)).toEqual({
+      kind: 'save',
+      content: result.content,
+      flags: result.flags,
+    })
+  })
+
+  it('这期间正文变了：不丢新打的字，按现在的正文重算', () => {
+    const current = '密码：hunter22\n新打的字 token=abcd1234'
+    const next = afterGate(null, current, result)
+    expect(next.kind).toBe('reopen')
+    expect(next.kind === 'reopen' && next.spots.map((s) => s.value)).toEqual([
+      'hunter22',
+      'abcd1234',
+    ])
+    expect(afterGate(null, '没有明文了', result)).toEqual({
+      kind: 'save',
+      content: '没有明文了',
+      flags: {},
+    })
   })
 })

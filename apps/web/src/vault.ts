@@ -19,6 +19,7 @@ import {
 
 import { readFailure } from './api/client'
 import { accessContextLabels, credentialChangeLabels, credentialViaLabels } from './labels'
+import { clipText } from './text'
 
 // 凭据页的说法和计算：密码库连接、条目与凭据的访问记录
 
@@ -162,7 +163,7 @@ export function vaultCredentialDraft(
 ): { identifier: string; name: string; fields: CredentialField[] } {
   return {
     identifier: suggestIdentifier(item.name, identifiers),
-    name: item.name.trim().slice(0, 100),
+    name: clipText(item.name.trim(), 100),
     fields: defaultCredentialFields(item.fields),
   }
 }

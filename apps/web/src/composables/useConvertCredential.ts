@@ -1,7 +1,6 @@
 import {
   ConvertibleValue,
   ConvertToCredentialRequest,
-  CREDENTIAL_MATCH_MAX,
   placeholderAllowed,
   type ConsoleMemoryView,
   type ConvertedToCredential,
@@ -17,9 +16,12 @@ import {
   convertDestinations,
   convertLeftovers,
   HOSTED_DESTINATION,
+  itemKey,
+  matchByValue,
   occurrences,
   plaintextCandidates,
   suggestIdentifier,
+  suggestItemIdentifiers,
   suggestName,
   valueContext,
   vaultFieldName,
@@ -27,7 +29,6 @@ import {
   type PlaintextCandidate,
 } from '../plaintext'
 import { placeholderOf } from '../placeholders'
-import { suggestIdentifier as suggestItemIdentifier } from '../vault'
 import { refreshAfterPlaintext } from './usePlaintextActions'
 
 // 转存为凭据的状态和规则，对话框只管长相。规则只认得出值从哪里开始，结尾是猜的，所以值默认遮盖，
@@ -80,44 +81,24 @@ export function useConvertCredential(
     destinationTouched.value = false
   }
 
-  const itemKey = (d: { connectionId: string; itemId: string }) => `${d.connectionId}/${d.itemId}`
-
-  // 一次最多查 CREDENTIAL_MATCH_MAX 个值；不合转存规则的值不查（服务端会整批拒绝）
+  // 查还没查过、也不在查的值。结果按发出时的读取序号认：重新读取之后晚到的不算，
+  // 重新读取时 pendingValues 清空，由 load 把要用的值再查一次
   async function matchValues(values: string[]) {
     const id = loadId
     const sid = spaceId.value
-    const wanted = [
-      ...new Set(
-        values.filter(
-          (v) =>
-            ConvertibleValue.safeParse(v).success &&
-            !matches.value.has(v) &&
-            !pendingValues.value.has(v),
-        ),
-      ),
-    ].slice(0, CREDENTIAL_MATCH_MAX)
+    const wanted = values.filter((v) => !matches.value.has(v) && !pendingValues.value.has(v))
     if (!wanted.length) return
     pendingValues.value = new Set([...pendingValues.value, ...wanted])
-    try {
-      const found = await api.matchCredentialValues(sid, { values: wanted })
-      if (id !== loadId) return
-      const next = new Map(matches.value)
-      wanted.forEach((v, i) => {
-        const match = found.items[i]
-        if (match) next.set(v, match)
-      })
-      matches.value = next
-      unavailableConnections.value = found.unavailableConnections
-      matchFailure.value = null
-    } catch (err) {
-      if (id === loadId) matchFailure.value = readFailure(err, '查找同值的凭据失败')
-    } finally {
-      if (id === loadId) {
-        const rest = new Set(pendingValues.value)
-        for (const v of wanted) rest.delete(v)
-        pendingValues.value = rest
-      }
-    }
+    const found = await matchByValue(wanted, (chunk) =>
+      api.matchCredentialValues(sid, { values: chunk }),
+    )
+    if (id !== loadId) return
+    matches.value = new Map([...matches.value, ...found.matches])
+    unavailableConnections.value = found.unavailableConnections
+    matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
+    const rest = new Set(pendingValues.value)
+    for (const v of wanted) rest.delete(v)
+    pendingValues.value = rest
   }
 
   const readMemory = (sid: string, target: string) =>
@@ -172,6 +153,8 @@ export function useConvertCredential(
       void matchValues(candidates.value.map((c) => c.value))
       if (previous) {
         if (occurrences(view.content ?? '', previous.value)) Object.assign(form, previous)
+        // 恢复回来的值可能是手输的：上一次读取时发出的查找已经作废，这里再查一次
+        void matchValues([form.value])
         return
       }
       form.identifier = suggestIdentifier(view.uri, form.field, existingIdentifiers.value)
@@ -246,10 +229,7 @@ export function useConvertCredential(
         destination.value = list[0]!.key
         destinationTouched.value = false
       }
-      for (const d of list) {
-        if (d.kind !== 'vault' || vaultIdentifiers[itemKey(d)] !== undefined) continue
-        vaultIdentifiers[itemKey(d)] = suggestItemIdentifier(d.itemName, existingIdentifiers.value)
-      }
+      suggestItemIdentifiers(list, vaultIdentifiers, [...existingIdentifiers.value])
     },
   )
   function choose(key: string) {

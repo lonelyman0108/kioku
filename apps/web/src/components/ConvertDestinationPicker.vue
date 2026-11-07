@@ -1,14 +1,30 @@
 <script setup lang="ts">
 import { useId } from 'vue'
 
-import type { ConvertDestination, UnmappedVaultField } from '../plaintext'
+import { itemKey, type ConvertDestination, type UnmappedVaultField } from '../plaintext'
 import { itemFieldLabel } from '../vault'
 import Hint from './Hint.vue'
 
-// 转存的去处：已有凭据、还没起标识的密码库条目、新建托管凭据，单选。选中项下面放它要填的内容（插槽）。
-// 起了标识却没对应这个字段的条目只列出来，不能选
-defineProps<{ destinations: ConvertDestination[]; unmapped: UnmappedVaultField[] }>()
+// 转存的去处：已有凭据、还没起标识的密码库条目、新建托管凭据，单选。选中条目时填它的标识，
+// 选中新建托管凭据时填标识、名称与字段名。起了标识却没对应这个字段的条目只列出来，不能选。
+// locked：已经建好的不能再改（保存前处理中途失败之后），hostedLocked 管托管凭据，lockedItems 按条目（itemKey）
+withDefaults(
+  defineProps<{
+    destinations: ConvertDestination[]
+    unmapped: UnmappedVaultField[]
+    hostedLocked?: boolean
+    lockedItems?: ReadonlySet<string>
+  }>(),
+  { hostedLocked: false, lockedItems: () => new Set<string>() },
+)
 const selected = defineModel<string>({ required: true })
+// 按条目记的标识与新建托管凭据的三项：父组件给的对象，这里直接改它的字段
+const vaultIdentifiers = defineModel<Record<string, string>>('vaultIdentifiers', {
+  required: true,
+})
+const hosted = defineModel<{ identifier: string; name: string; field: string }>('hosted', {
+  required: true,
+})
 const group = useId()
 </script>
 
@@ -31,14 +47,41 @@ const group = useId()
         </span>
         <span v-else>新建托管凭据</span>
       </label>
-      <div v-if="selected === d.key && d.kind === 'vault' && $slots.vault" class="destination-body">
-        <slot name="vault" :destination="d" />
+      <div v-if="selected === d.key && d.kind === 'vault'" class="destination-body">
+        <UFormField label="凭据标识" help="名称取条目名称，字段对应按条目的字段">
+          <UInput
+            v-model="vaultIdentifiers[itemKey(d)]"
+            class="w-full font-mono"
+            autocomplete="off"
+            :disabled="lockedItems.has(itemKey(d))"
+          />
+        </UFormField>
       </div>
-      <div
-        v-if="selected === d.key && d.kind === 'hosted' && $slots.hosted"
-        class="destination-body"
-      >
-        <slot name="hosted" />
+      <div v-if="selected === d.key && d.kind === 'hosted'" class="destination-body hosted-fields">
+        <UFormField label="凭据标识">
+          <UInput
+            v-model="hosted.identifier"
+            class="w-full font-mono"
+            autocomplete="off"
+            :disabled="hostedLocked"
+          />
+        </UFormField>
+        <UFormField label="名称">
+          <UInput
+            v-model="hosted.name"
+            class="w-full"
+            autocomplete="off"
+            :disabled="hostedLocked"
+          />
+        </UFormField>
+        <UFormField label="字段名">
+          <UInput
+            v-model="hosted.field"
+            class="w-full font-mono"
+            autocomplete="off"
+            :disabled="hostedLocked"
+          />
+        </UFormField>
       </div>
     </div>
     <p v-for="(u, i) in unmapped" :key="i" class="destination-unmapped">
@@ -75,6 +118,16 @@ const group = useId()
 }
 .destination-body {
   margin: 6px 0 4px 22px;
+}
+.hosted-fields {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 8px;
+}
+@media (max-width: 640px) {
+  .hosted-fields {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 .destination-unmapped {
   padding-left: 22px;

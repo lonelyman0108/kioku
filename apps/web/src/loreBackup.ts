@@ -137,12 +137,12 @@ export const excludeLabel = (node: LorePlanNode) => (hasNewTarget(node) ? '不�
 
 // 勾选按节点 uuid 记（重看计划时 URI 可能变了），发请求时换成现在的 URI。计划里已经没有的节点不发，
 // 不起作用的 secret 也不发；同时勾了 secret 和不导入时只算不导入。
-// 疑似明文换成占位符默认勾上，记的是取消勾选的那几处（plaintextKey）；只发能换的（spotState 为 convertible）
+// 疑似明文换成占位符默认勾上，记的是取消勾选的那几处（Unconverted）；只发会换的（spotConverts）
 export function selectionOf(
   plan: LoreImportPlan,
   secret: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
-  unconverted: ReadonlySet<string> = new Set(),
+  unconverted: Unconverted = new Map(),
 ): {
   secretUris: string[]
   excludeUris: string[]
@@ -154,21 +154,47 @@ export function selectionOf(
     .map((n) => n.uri)
   const convertPlaintext = plan.nodes.flatMap((node) =>
     node.plaintext
-      .filter(
-        (spot) =>
-          !unconverted.has(plaintextKey(node, spot)) &&
-          spotState(plan, node, spot, secret, excluded) === 'convertible',
-      )
+      .filter((spot) => spotConverts(node, spot, secret, excluded, unconverted))
       .map((spot) => ({ source: node.uri, index: spot.index })),
   )
   return { secretUris, excludeUris, convertPlaintext }
 }
 
-// 疑似明文的一处按节点 uuid 与它在正文里的序号记
+// 取消勾选的那几处：键是节点 uuid 与这一处的序号（plaintextKey），值是这一处的特征（spotFingerprint）。
+// 重出计划之后序号可能指到另一处上，特征对不上的选择不算，回到默认勾上（pruneUnconverted 顺手去掉）
+export type Unconverted = ReadonlyMap<string, string>
+
 export const plaintextKey = (
   node: Pick<LorePlanNode, 'uuid'>,
   spot: Pick<LorePlaintextSpot, 'index'>,
 ) => `${node.uuid}#${spot.index}`
+
+// 一处的特征：行号、类别、对上的凭据与字段
+export const spotFingerprint = (spot: LorePlaintextSpot) =>
+  JSON.stringify([
+    spot.line,
+    spot.kind,
+    spot.credential?.id ?? null,
+    spot.credential?.field ?? null,
+  ])
+
+export const isUnconverted = (
+  unconverted: Unconverted,
+  node: LorePlanNode,
+  spot: LorePlaintextSpot,
+) => unconverted.get(plaintextKey(node, spot)) === spotFingerprint(spot)
+
+// 新的计划里还对得上的选择
+export function pruneUnconverted(plan: LoreImportPlan, unconverted: Unconverted): Unconverted {
+  const kept = new Map<string, string>()
+  for (const node of plan.nodes) {
+    for (const spot of node.plaintext) {
+      if (isUnconverted(unconverted, node, spot))
+        kept.set(plaintextKey(node, spot), spotFingerprint(spot))
+    }
+  }
+  return kept
+}
 
 const updateKey = (source: string, uri: string) => JSON.stringify([source, uri])
 const updatesOf = (plan: LoreImportPlan) =>
@@ -180,14 +206,18 @@ const updatesOf = (plan: LoreImportPlan) =>
 const writtenTargets = (node: LorePlanNode, updates: ReadonlySet<string>) =>
   node.targets.filter((t) => t.state === 'new' || updates.has(updateKey(node.uri, t.uri)))
 
-// 一处疑似明文能不能换成占位符：
-// convertible 能换；unmatched 没有同值的凭据；excluded 这个节点本次不导入；unwritten 这次不写这个节点；
-// blocked 写入目标放不进占位符（不是本人，或敏感级低于私密：标了机密的按机密算，同步的看那条现在是不是机密）。
-// 放不进按节点的全部目标算：服务端对放不进的目标整个请求返回 400
-export type SpotState = 'convertible' | 'unmatched' | 'excluded' | 'unwritten' | 'blocked'
+// 写进去之后是不是机密：新建的看这次勾没勾 secret；同步不改敏感级，要更新的看这个 URI 上的记忆现在是不是 secret。
+// 启动加载与占位符放不放得进都按它算
+const targetSecret = (node: LorePlanNode, t: LorePlanTarget, secret: ReadonlySet<string>) =>
+  t.state === 'new' ? secret.has(node.uuid) : t.current.some((c) => c.uri === t.uri && c.secret)
+
+// 一处疑似明文能不能换成占位符。服务端只给新建的目标换，已导入的目标照原样写、给出原因：
+// convertible 对上了凭据，节点至少有一个新建的目标放得进占位符（本人、至少私密，标了机密的按机密算）；
+// unmatched 没有同值的凭据；excluded 这个节点本次不导入；imported 没有新建的目标；
+// blocked 新建的目标都放不进占位符
+export type SpotState = 'convertible' | 'unmatched' | 'excluded' | 'imported' | 'blocked'
 
 export function spotState(
-  plan: LoreImportPlan,
   node: LorePlanNode,
   spot: LorePlaintextSpot,
   secret: ReadonlySet<string>,
@@ -195,35 +225,36 @@ export function spotState(
 ): SpotState {
   if (!spot.credential) return 'unmatched'
   if (excluded.has(node.uuid)) return 'excluded'
-  if (!writtenTargets(node, updatesOf(plan)).length) return 'unwritten'
-  const sensitivity = (t: LorePlanTarget) =>
-    (
-      t.state === 'new'
-        ? secret.has(node.uuid) && secretSelectable(node)
-        : t.current.some((c) => c.secret)
-    )
-      ? 'secret'
-      : t.sensitivity
-  return node.targets.every((t) => placeholderAllowed(t.layer, sensitivity(t)))
+  const fresh = node.targets.filter((t) => t.state === 'new')
+  if (!fresh.length) return 'imported'
+  return fresh.some((t) =>
+    placeholderAllowed(t.layer, targetSecret(node, t, secret) ? 'secret' : t.sensitivity),
+  )
     ? 'convertible'
     : 'blocked'
 }
 
+// 这一处这次会不会换成占位符：能换，也没有取消勾选
+export const spotConverts = (
+  node: LorePlanNode,
+  spot: LorePlaintextSpot,
+  secret: ReadonlySet<string>,
+  excluded: ReadonlySet<string>,
+  unconverted: Unconverted,
+) =>
+  spotState(node, spot, secret, excluded) === 'convertible' &&
+  !isUnconverted(unconverted, node, spot)
+
 // 正文的疑似明文是不是这次都会换成占位符：都换了就不再提醒标机密
 export function plaintextAllConverted(
-  plan: LoreImportPlan,
   node: LorePlanNode,
   secret: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
-  unconverted: ReadonlySet<string>,
+  unconverted: Unconverted,
 ): boolean {
   return (
     node.plaintext.length > 0 &&
-    node.plaintext.every(
-      (spot) =>
-        !unconverted.has(plaintextKey(node, spot)) &&
-        spotState(plan, node, spot, secret, excluded) === 'convertible',
-    )
+    node.plaintext.every((spot) => spotConverts(node, spot, secret, excluded, unconverted))
   )
 }
 
@@ -236,7 +267,7 @@ export interface SelectionEffects {
   // 这次会写、写进去之后会进启动上下文的目标（就是计划里的那些对象）：secret 不进。数量与徽章都看它
   boot: ReadonlySet<LorePlanTarget>
   bootNodes: number
-  // 这次会写的节点的正文引用的凭据
+  // 这次会写的节点的正文引用的凭据，连同这次换成占位符的那几处对上的凭据
   credentialRefs: string[]
   // 没勾掉的节点里还有没有要新建的人格层目标（已导入的、换了路径的都不算）。有才会在人格不存在时新建；
   // 没有时已有的人格照常用，不存在就没有人格可用：不设默认人格，新建的应用默认人格为空
@@ -254,6 +285,7 @@ export function selectionEffects(
   plan: LoreImportPlan,
   secret: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
+  unconverted: Unconverted = new Map(),
 ): SelectionEffects {
   const updates = updatesOf(plan)
   const kept = plan.nodes.filter((n) => !excluded.has(n.uuid))
@@ -268,14 +300,13 @@ export function selectionEffects(
     create += written.filter((t) => t.state === 'new').length
     update += written.filter((t) => t.state !== 'new').length
     for (const ref of node.credentialRefs) refs.add(ref)
-    // 新建的看这次勾没勾 secret；同步不改敏感级，要更新的看这个 URI 上的记忆现在是不是 secret
-    const entering = written.filter(
-      (t) =>
-        t.boot &&
-        !(t.state === 'new'
-          ? secret.has(node.uuid)
-          : t.current.some((c) => c.uri === t.uri && c.secret)),
-    )
+    for (const spot of node.plaintext) {
+      if (spot.credential && spotConverts(node, spot, secret, excluded, unconverted)) {
+        refs.add(spot.credential.identifier)
+      }
+    }
+    // secret 不进启动加载
+    const entering = written.filter((t) => t.boot && !targetSecret(node, t, secret))
     for (const target of entering) boot.add(target)
     if (entering.length) bootNodes++
   }

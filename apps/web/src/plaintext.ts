@@ -1,12 +1,16 @@
 import {
+  ConvertibleValue,
+  CREDENTIAL_MATCH_MAX,
   CREDENTIAL_PLACEHOLDER,
   defaultCredentialFields,
   findPlaintextCredentials,
   type ConvertedToCredential,
   type CredentialValueMatch,
+  type CredentialValueMatches,
 } from '@kioku/contracts'
 
 import { placeholderOf } from './placeholders'
+import { suggestIdentifier as suggestItemIdentifier } from './vault'
 
 // 转存为凭据的对话框：猜出来的值、建议的标识、值在正文里的位置和次数
 
@@ -178,6 +182,63 @@ export interface UnmappedVaultField {
 }
 
 export const HOSTED_DESTINATION: ConvertDestination = { kind: 'hosted', key: 'hosted' }
+
+// 密码库的一个条目：同一个条目的几个字段共用一条凭据，起标识按条目记
+export const itemKey = (d: { connectionId: string; itemId: string }) =>
+  `${d.connectionId}/${d.itemId}`
+
+// 按值查找的结果：值到匹配；读不了的连接数；查不了时的错误（有一批失败就给）
+export interface ValueMatchResult {
+  matches: Map<string, CredentialValueMatch>
+  unavailableConnections: number
+  failure: unknown
+}
+
+// 按值查找同值的凭据与条目：不合转存规则的值不查（服务端会整批拒绝），重复的只查一次，
+// 一次最多 CREDENTIAL_MATCH_MAX 个，多了分批；结果按请求的顺序对回值。request 是接口调用
+export async function matchByValue(
+  values: readonly string[],
+  request: (values: string[]) => Promise<CredentialValueMatches>,
+): Promise<ValueMatchResult> {
+  const wanted = [...new Set(values.filter((v) => ConvertibleValue.safeParse(v).success))]
+  const result: ValueMatchResult = { matches: new Map(), unavailableConnections: 0, failure: null }
+  const chunks: string[][] = []
+  for (let i = 0; i < wanted.length; i += CREDENTIAL_MATCH_MAX) {
+    chunks.push(wanted.slice(i, i + CREDENTIAL_MATCH_MAX))
+  }
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      try {
+        const found = await request(chunk)
+        chunk.forEach((value, i) => {
+          const match = found.items[i]
+          if (match) result.matches.set(value, match)
+        })
+        result.unavailableConnections = Math.max(
+          result.unavailableConnections,
+          found.unavailableConnections,
+        )
+      } catch (err) {
+        result.failure = err
+      }
+    }),
+  )
+  return result
+}
+
+// 给还没起标识的条目建议标识：按条目名称，避开 taken，建议过的条目不再改；建议出的标识加进 taken
+export function suggestItemIdentifiers(
+  destinations: readonly ConvertDestination[],
+  identifiers: Record<string, string>,
+  taken: string[],
+): void {
+  for (const d of destinations) {
+    if (d.kind !== 'vault' || identifiers[itemKey(d)] !== undefined) continue
+    const identifier = suggestItemIdentifier(d.itemName, taken)
+    identifiers[itemKey(d)] = identifier
+    taken.push(identifier)
+  }
+}
 
 // 按值匹配的结果换成可选的去处，顺序就是默认的先后：已有凭据、还没起标识的条目、新建托管凭据。
 // 没有匹配结果（还没查、查不了）时只有新建托管凭据

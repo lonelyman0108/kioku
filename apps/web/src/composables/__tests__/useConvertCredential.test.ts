@@ -428,7 +428,8 @@ describe('提交没回来就被重置', () => {
     fakes.api.memory.mockResolvedValue(memory())
     await convert.load()
     convert.shown.value = true
-    await nextTick()
+    // 等按值查找回来才能提交
+    await settle()
     fakes.api.convertToCredential.mockReturnValue(new Promise(() => {}))
     void convert.submit()
     await nextTick()
@@ -597,5 +598,27 @@ describe('转存的去处', () => {
     await settle()
     expect(convert.failure.value).toBe('这个条目已有凭据')
     expect(convert.canReload.value).toBe(false)
+  })
+
+  it('重新读取时进行中的查找作废：恢复回来的手输值重新查一次，不会一直等着', async () => {
+    const convert = await shown({ content: '密码：hunter2-not-real-x' })
+    await settle()
+    // 手输一个新值，查找发出去还没回来
+    const stale = deferred<unknown>()
+    fakes.api.matchCredentialValues.mockReturnValueOnce(stale.promise)
+    convert.form.value = 'hunter2-not-real'
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    expect(convert.matchingValue.value).toBe(true)
+    // 重新读取：值还在正文里，留下
+    fakes.api.memory.mockResolvedValue(memory({ version: 2, content: '密码：hunter2-not-real-x' }))
+    await convert.load()
+    await settle()
+    expect(convert.form.value).toBe('hunter2-not-real')
+    stale.resolve({ items: [{ credentials: [], vaultItems: [] }], unavailableConnections: 0 })
+    await settle()
+    expect(convert.matchingValue.value).toBe(false)
+    expect(fakes.api.matchCredentialValues).toHaveBeenLastCalledWith('s1', {
+      values: ['hunter2-not-real'],
+    })
   })
 })

@@ -41,7 +41,6 @@ const {
   destination,
   selected,
   vaultIdentifiers,
-  itemKey,
   choose,
   blocked,
   replaced,
@@ -202,35 +201,10 @@ const candidateGroup = useId()
             :model-value="destination"
             :destinations="choices.destinations"
             :unmapped="choices.unmapped"
+            :vault-identifiers="vaultIdentifiers"
+            :hosted="form"
             @update:model-value="choose"
-          >
-            <template #vault="{ destination: item }">
-              <UFormField
-                v-if="item.kind === 'vault'"
-                label="凭据标识"
-                help="名称取条目名称，字段对应按条目的字段"
-              >
-                <UInput
-                  v-model="vaultIdentifiers[itemKey(item)]"
-                  class="w-full font-mono"
-                  autocomplete="off"
-                />
-              </UFormField>
-            </template>
-            <template #hosted>
-              <div class="convert-fields">
-                <UFormField label="凭据标识">
-                  <UInput v-model="form.identifier" class="w-full font-mono" autocomplete="off" />
-                </UFormField>
-                <UFormField label="名称">
-                  <UInput v-model="form.name" class="w-full" autocomplete="off" />
-                </UFormField>
-                <UFormField label="字段名">
-                  <UInput v-model="form.field" class="w-full font-mono" autocomplete="off" />
-                </UFormField>
-              </div>
-            </template>
-          </ConvertDestinationPicker>
+          />
         </div>
 
         <p v-if="placeholder && replaced" class="convert-effect">
@@ -341,11 +315,6 @@ const candidateGroup = useId()
   background: var(--strata-selected);
   color: var(--strata-on-selected);
 }
-.convert-fields {
-  display: grid;
-  grid-template-columns: repeat(2, minmax(0, 1fr));
-  gap: 12px;
-}
 .convert-effect {
   color: var(--ui-text-muted);
   overflow-wrap: anywhere;
@@ -371,10 +340,5 @@ const candidateGroup = useId()
   flex: 1 1 12em;
   font-size: 14px;
   color: var(--ui-text-muted);
-}
-@media (max-width: 640px) {
-  .convert-fields {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 </style>

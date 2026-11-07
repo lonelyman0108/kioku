@@ -58,13 +58,19 @@ async function settle() {
   }
 }
 
-async function start(over: Partial<PlaintextSaveRequest> = {}, owner = true) {
+async function start(
+  over: Partial<PlaintextSaveRequest> = {},
+  canConvert = true,
+  canSaveAnyway = true,
+) {
   const vueApp = createApp({})
   vueApp.use(VueQueryPlugin, { queryClient: client })
   scope = effectScope()
   const request = ref<PlaintextSaveRequest | null>(requestOf(over))
   const save = vueApp.runWithContext(() =>
-    scope.run(() => usePlaintextSave(ref('s1'), request, ref(owner), proceeded))!,
+    scope.run(() =>
+      usePlaintextSave(ref('s1'), request, ref(canConvert), ref(canSaveAnyway), proceeded),
+    )!,
   )
   await settle()
   return { save, request }
@@ -123,8 +129,19 @@ describe('打开时', () => {
     expect(save.rows.value[0]!.hosted.name).toBe('家里的 NAS')
   })
 
-  it('非空间所有者只能选不是凭据：不查同值的凭据', async () => {
+  it('不能管理凭据的成员不能转存、不查同值的凭据；能改这条记忆就能照样保存', async () => {
     const { save } = await start({}, false)
+    expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
+    save.saveAnyway()
+    expect(proceeded).toHaveBeenCalledWith({
+      source: CONTENT,
+      content: CONTENT,
+      flags: { allowPlaintext: true },
+    })
+  })
+
+  it('不能照样保存时只能逐处选不是凭据', async () => {
+    const { save } = await start({}, false, false)
     expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
     for (const row of save.rows.value) {
       expect(save.convertBlocker(row)).toBe('仅空间所有者可转存为凭据')
@@ -136,7 +153,11 @@ describe('打开时', () => {
     save.saveAnyway()
     expect(proceeded).not.toHaveBeenCalled()
     await save.proceed()
-    expect(proceeded).toHaveBeenCalledWith({ content: CONTENT, flags: { ignorePlaintext: true } })
+    expect(proceeded).toHaveBeenCalledWith({
+      source: CONTENT,
+      content: CONTENT,
+      flags: { ignorePlaintext: true },
+    })
   })
 
   it('占位符放不进保存之后的记忆时不能转存，也不查', async () => {
@@ -170,6 +191,7 @@ describe('保存', () => {
       source: { kind: 'hosted', values: { token: 'abcd1234' } },
     })
     expect(proceeded).toHaveBeenCalledWith({
+      source: CONTENT,
       content:
         '密码：{{cred:router#password}}\ntoken={{cred:infra-nas-token#token}}\n备用 {{cred:router#password}}，{{cred:hunter22#password}}',
       flags: {},
@@ -190,7 +212,11 @@ describe('保存', () => {
   it('照样保存：正文原样，带 allowPlaintext', async () => {
     const { save } = await start()
     save.saveAnyway()
-    expect(proceeded).toHaveBeenCalledWith({ content: CONTENT, flags: { allowPlaintext: true } })
+    expect(proceeded).toHaveBeenCalledWith({
+      source: CONTENT,
+      content: CONTENT,
+      flags: { allowPlaintext: true },
+    })
   })
 
   it('尚未起标识的条目：在这里起标识（字段按条目推出），用建好的字段名', async () => {
@@ -266,5 +292,36 @@ describe('保存', () => {
     resolve({ items: [{ credentials: [credential], vaultItems: [] }], unavailableConnections: 0 })
     await settle()
     expect(save.rows.value.map((r) => r.spot.value)).toEqual(['other-pass'])
+  })
+})
+
+describe('给条目起标识', () => {
+  const longName = `${'名'.repeat(99)}😀尾`
+
+  it('名称取条目名称，截到 100 个码元时不切开代理对', async () => {
+    matchBy({ abcd1234: { credentials: [], vaultItems: [{ ...item, itemName: longName }] } })
+    fakes.api.createCredential.mockResolvedValue(
+      created({ identifier: 'x', fields: [{ name: 'password', itemField: 'login.password' }] }),
+    )
+    const { save } = await start()
+    const token = save.rows.value[1]!
+    token.choice = 'convert'
+    save.vaultIdentifiers[save.itemKey(item)] = 'nas'
+    await save.proceed()
+    const name = fakes.api.createCredential.mock.calls[0]![1].name as string
+    expect(name).toBe('名'.repeat(99))
+    expect(name).not.toMatch(/[\uD800-\uDBFF]$/)
+  })
+
+  it('条目名称里有要转存的值时不能保存：名称和标识一样是明文', async () => {
+    matchBy({
+      abcd1234: { credentials: [], vaultItems: [{ ...item, itemName: '路由器 abcd1234' }] },
+    })
+    const { save } = await start()
+    const token = save.rows.value[1]!
+    token.choice = 'convert'
+    save.vaultIdentifiers[save.itemKey(item)] = 'router'
+    await nextTick()
+    expect(save.rowProblem(token)).toBe('标识、名称与字段名不能包含要转存的值')
   })
 })

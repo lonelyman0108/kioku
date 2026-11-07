@@ -79,3 +79,34 @@ export function saveFlags(choices: readonly SpotChoice[], allow = false): SaveFl
 // 第几行，几处合在一起时写「第 2、5 行」
 export const linesText = (lines: readonly number[]) =>
   `第 ${[...lines].sort((a, b) => a - b).join('、')} 行`
+
+// 保存被服务端拒绝之后打开哪一份弹窗。正文还是发出去的那份时以服务端为准：本地也认得出的照用，
+// 服务端有、本地认不出值的也列出来（spotsFromFindings）。请求期间又改过正文时按现在的正文重算，
+// 弹窗的结果只能用在算出它的那份正文上；现在的正文没有新增的就不开弹窗，返回 null
+export function spotsAfterRejection(
+  before: string | null,
+  sent: string,
+  current: string,
+  findings: readonly PlaintextFinding[],
+): { content: string; spots: PlaintextSpot[] } | null {
+  if (current === sent) return { content: sent, spots: spotsFromFindings(sent, findings) }
+  const spots = addedSpots(before, current)
+  return spots.length ? { content: current, spots } : null
+}
+
+// 弹窗处理完之后怎么保存：结果是按现在的正文算的就用它；正文在这期间变了，按现在的正文重算，
+// 还有新增的就再开一次弹窗，没有了照常保存（不带标记：标记是给算出它的那份正文的）
+export type AfterGate =
+  { kind: 'save'; content: string; flags: SaveFlags } | { kind: 'reopen'; spots: PlaintextSpot[] }
+
+export function afterGate(
+  before: string | null,
+  current: string,
+  result: { source: string; content: string; flags: SaveFlags },
+): AfterGate {
+  if (result.source === current) {
+    return { kind: 'save', content: result.content, flags: result.flags }
+  }
+  const spots = addedSpots(before, current)
+  return spots.length ? { kind: 'reopen', spots } : { kind: 'save', content: current, flags: {} }
+}

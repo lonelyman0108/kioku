@@ -21,10 +21,12 @@ import {
   type CoordinateDraft,
 } from '../coordinates'
 import { sensitivityLabels } from '../labels'
+import { canManageCredentials } from '../vault'
 import {
   addedSpots,
+  afterGate,
   plaintextRejection,
-  spotsFromFindings,
+  spotsAfterRejection,
   type PlaintextSpot,
   type SaveFlags,
 } from '../plaintextSave'
@@ -42,7 +44,7 @@ const props = defineProps<{ spaceId: string; from: string }>()
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ created: [uri: string] }>()
 
-const { apps, role, sensitivities, canWriteUri } = useMemoryPermissions(
+const { apps, role, canWrite, sensitivities, canWriteUri } = useMemoryPermissions(
   computed(() => props.spaceId),
 )
 const personas = useQuery({
@@ -141,23 +143,25 @@ const gateFor = (target: string, content: string, spots: PlaintextSpot[], reject
   spots,
   rejected,
 })
-// 逐处处理完：换过的正文放回表单再创建
+// 逐处处理完：换过的正文放回表单再创建。这期间正文变了就按现在的重算（afterGate）
 function onGateProceed(result: PlaintextSaveResult) {
-  form.content = result.content
-  void submit(result.flags)
+  const target = uri.value
+  const next = afterGate(null, form.content, result)
+  if (next.kind === 'reopen') {
+    if (target) plaintextGate.value = gateFor(target, form.content, next.spots, false)
+    return
+  }
+  form.content = next.content
+  void submit(next.flags)
 }
+// 转存为凭据只看 canManageCredentials；照样保存给能写记忆的成员
+const canConvert = computed(() => canManageCredentials(role.value))
 
 // 不带标记时先查这次新增的疑似明文（新建时全算），和服务端拒绝写入是同一个判断；机密的正文加密，不用处理
 async function submit(flags?: SaveFlags) {
   const target = uri.value
   if (!ready.value || !target || !title.value.success || saving.value) return
-  if (!flags && form.sensitivity !== 'secret') {
-    const spots = addedSpots(null, form.content)
-    if (spots.length) {
-      plaintextGate.value = gateFor(target, form.content, spots, false)
-      return
-    }
-  }
+  // 本地就能判断的先查：免得转存建了凭据、改了正文才因为有效期停下
   const validTo = form.validTo ? fromLocalInput(form.validTo) : null
   if (form.validTo && !validTo) {
     error.value = '有效期的日期和时间不完整'
@@ -168,6 +172,13 @@ async function submit(flags?: SaveFlags) {
     minValidTo.value = earliestValidTo()
     error.value = '有效期须晚于当前时间至少一分钟'
     return
+  }
+  if (!flags && form.sensitivity !== 'secret') {
+    const spots = addedSpots(null, form.content)
+    if (spots.length) {
+      plaintextGate.value = gateFor(target, form.content, spots, false)
+      return
+    }
   }
   const content = form.content
   saving.value = true
@@ -186,15 +197,11 @@ async function submit(flags?: SaveFlags) {
     emit('created', created.uri)
   } catch (err) {
     // 服务端检出了新增的疑似明文（两边判断有出入时）：照样逐处处理
+    // 请求期间又改过正文时按现在的正文重算，没有新增的就照常报错
     const findings = plaintextRejection(err)
-    if (findings) {
-      const local = addedSpots(null, content)
-      plaintextGate.value = gateFor(
-        target,
-        content,
-        local.length ? local : spotsFromFindings(content, findings),
-        true,
-      )
+    const gate = findings && spotsAfterRejection(null, content, form.content, findings)
+    if (gate) {
+      plaintextGate.value = gateFor(target, gate.content, gate.spots, true)
       return
     }
     error.value = err instanceof ApiError ? err.message : '创建失败'
@@ -267,7 +274,8 @@ async function submit(flags?: SaveFlags) {
       <PlaintextSaveModal
         v-model:request="plaintextGate"
         :space-id="spaceId"
-        :owner="role === 'owner'"
+        :can-convert="canConvert"
+        :can-save-anyway="canWrite"
         @proceed="onGateProceed"
       />
     </template>

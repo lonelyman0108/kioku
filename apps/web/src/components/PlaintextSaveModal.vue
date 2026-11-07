@@ -16,14 +16,21 @@ import NoteLine from './strata/NoteLine.vue'
 
 // 保存记忆之前逐处处理新增的疑似明文，状态和规则在 usePlaintextSave。
 // 没有表单：单选在表单里时回车会隐式提交，没选完就保存了。只有点按钮才继续
-const props = defineProps<{ spaceId: string; owner: boolean }>()
+// canConvert：能不能转存为凭据；canSaveAnyway：能不能照样保存
+const props = defineProps<{ spaceId: string; canConvert: boolean; canSaveAnyway: boolean }>()
 const request = defineModel<PlaintextSaveRequest | null>('request', { required: true })
 const emit = defineEmits<{ proceed: [result: PlaintextSaveResult] }>()
 
-const save = usePlaintextSave(toRef(props, 'spaceId'), request, toRef(props, 'owner'), (result) => {
-  request.value = null
-  emit('proceed', result)
-})
+const save = usePlaintextSave(
+  toRef(props, 'spaceId'),
+  request,
+  toRef(props, 'canConvert'),
+  toRef(props, 'canSaveAnyway'),
+  (result) => {
+    request.value = null
+    emit('proceed', result)
+  },
+)
 const { rows, matching, matchFailure, unavailableConnections, busy, failure, problem, ready } = save
 
 function close() {
@@ -106,50 +113,11 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
                 v-model="row.destination"
                 :destinations="save.destinationsOf(row).destinations"
                 :unmapped="save.destinationsOf(row).unmapped"
-              >
-                <template #vault="{ destination }">
-                  <UFormField
-                    v-if="destination.kind === 'vault'"
-                    label="凭据标识"
-                    help="名称取条目名称，字段对应按条目的字段"
-                  >
-                    <UInput
-                      v-model="save.vaultIdentifiers[save.itemKey(destination)]"
-                      class="w-full font-mono"
-                      autocomplete="off"
-                      :disabled="save.createdVault.value.has(save.itemKey(destination))"
-                    />
-                  </UFormField>
-                </template>
-                <template #hosted>
-                  <div class="hosted-fields">
-                    <UFormField label="凭据标识">
-                      <UInput
-                        v-model="row.hosted.identifier"
-                        class="w-full font-mono"
-                        autocomplete="off"
-                        :disabled="row.created"
-                      />
-                    </UFormField>
-                    <UFormField label="名称">
-                      <UInput
-                        v-model="row.hosted.name"
-                        class="w-full"
-                        autocomplete="off"
-                        :disabled="row.created"
-                      />
-                    </UFormField>
-                    <UFormField label="字段名">
-                      <UInput
-                        v-model="row.hosted.field"
-                        class="w-full font-mono"
-                        autocomplete="off"
-                        :disabled="row.created"
-                      />
-                    </UFormField>
-                  </div>
-                </template>
-              </ConvertDestinationPicker>
+                :vault-identifiers="save.vaultIdentifiers"
+                :hosted="row.hosted"
+                :hosted-locked="row.created"
+                :locked-items="save.lockedItems.value"
+              />
               <p class="spot-effect">
                 将换成 <code>{{ save.placeholderFor(row) }}</code>
               </p>
@@ -168,7 +136,7 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
         <span class="gate-problem">{{ matching ? '' : problem }}</span>
         <UButton color="neutral" variant="ghost" :disabled="busy" @click="close">取消</UButton>
         <UTooltip
-          v-if="owner"
+          v-if="canSaveAnyway"
           text="正文原样保存，明文写入历史，这条记忆进待处理"
           :content="{ side: 'top' }"
         >
@@ -239,11 +207,6 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
 .spot-effect code {
   color: var(--ui-text);
 }
-.hosted-fields {
-  display: grid;
-  grid-template-columns: repeat(3, minmax(0, 1fr));
-  gap: 8px;
-}
 .gate-footer {
   display: flex;
   flex-wrap: wrap;
@@ -256,10 +219,5 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
   flex: 1 1 12em;
   font-size: 14px;
   color: var(--ui-text-muted);
-}
-@media (max-width: 640px) {
-  .hosted-fields {
-    grid-template-columns: minmax(0, 1fr);
-  }
 }
 </style>

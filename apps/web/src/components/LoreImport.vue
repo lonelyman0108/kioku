@@ -31,6 +31,9 @@ import {
   planBlocker,
   plaintextAllConverted,
   plaintextKey,
+  pruneUnconverted,
+  spotConverts,
+  spotFingerprint,
   readLoreBackup,
   replanAfterFailure,
   secretSelectable,
@@ -45,6 +48,7 @@ import {
   tokenInClear,
   type ApplyFailure,
   type NodeFilter,
+  type Unconverted,
 } from '../loreBackup'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
@@ -77,15 +81,15 @@ const notice = ref<string | null>(null)
 // 勾选按节点 uuid 记：重看计划之后还在（409 或写到一半出错之后不用重新勾）
 const secretIds = ref(new Set<string>())
 const excludedIds = ref(new Set<string>())
-// 和已有凭据同值的疑似明文默认换成占位符，这里记取消勾选的（plaintextKey）
-const unconvertedIds = ref(new Set<string>())
+// 和已有凭据同值的疑似明文默认换成占位符，这里记取消勾选的，连同那一处的特征（见 Unconverted）
+const unconvertedIds = ref<Unconverted>(new Map())
 const confirmStale = ref(false)
 const filter = ref<NodeFilter>('all')
 
 const clearSelection = () => {
   secretIds.value = new Set()
   excludedIds.value = new Set()
-  unconvertedIds.value = new Set()
+  unconvertedIds.value = new Map()
 }
 // 来源或人格变了，看过的计划就不算数了；换了来源连勾选一起清
 watch([sourceKind, file, url, token, personaSlug, personaName], () => {
@@ -161,6 +165,8 @@ async function showPlan(): Promise<boolean> {
     })
     if (forSpace !== props.spaceId) return false
     plan.value = next
+    // 重出的计划里序号可能指到另一处上：特征对不上的选择丢掉
+    unconvertedIds.value = pruneUnconverted(next, unconvertedIds.value)
     confirmStale.value = false
     return true
   } catch (err) {
@@ -241,13 +247,20 @@ const toggleSecret = (id: string, on: boolean | 'indeterminate') =>
 const toggleExcluded = (id: string, on: boolean | 'indeterminate') =>
   (excludedIds.value = toggle(excludedIds.value, id, on))
 // 勾上是换成占位符，记的是取消勾选的
-const toggleConverted = (key: string, on: boolean | 'indeterminate') =>
-  (unconvertedIds.value = toggle(unconvertedIds.value, key, on !== true))
+function toggleConverted(
+  node: LorePlanNode,
+  spot: LorePlaintextSpot,
+  on: boolean | 'indeterminate',
+) {
+  const next = new Map(unconvertedIds.value)
+  if (on === true) next.delete(plaintextKey(node, spot))
+  else next.set(plaintextKey(node, spot), spotFingerprint(spot))
+  unconvertedIds.value = next
+}
 const plaintextState = (node: LorePlanNode, spot: LorePlaintextSpot) =>
-  plan.value ? spotState(plan.value, node, spot, secretIds.value, excludedIds.value) : 'unwritten'
+  spotState(node, spot, secretIds.value, excludedIds.value)
 const converting = (node: LorePlanNode, spot: LorePlaintextSpot) =>
-  plaintextState(node, spot) === 'convertible' &&
-  !unconvertedIds.value.has(plaintextKey(node, spot))
+  spotConverts(node, spot, secretIds.value, excludedIds.value, unconvertedIds.value)
 
 const nodes = computed(() => plan.value?.nodes ?? [])
 const plannedBoot = computed(() =>
@@ -265,7 +278,9 @@ const filterItems = computed(() =>
 const sync = computed(() => (plan.value ? syncGroups(plan.value) : null))
 // 勾选之后这次到底会动什么
 const effects = computed(
-  () => plan.value && selectionEffects(plan.value, secretIds.value, excludedIds.value),
+  () =>
+    plan.value &&
+    selectionEffects(plan.value, secretIds.value, excludedIds.value, unconvertedIds.value),
 )
 const stale = computed(() => plan.value && effects.value && staleNotice(plan.value, effects.value))
 const confirmMissing = computed(() => stale.value === 'confirm' && !confirmStale.value)
@@ -302,16 +317,7 @@ function credentialNote(node: LorePlanNode): string | null {
   const { path } = node.credentialHints
   const content =
     node.credentialHints.content &&
-    !(
-      plan.value &&
-      plaintextAllConverted(
-        plan.value,
-        node,
-        secretIds.value,
-        excludedIds.value,
-        unconvertedIds.value,
-      )
-    )
+    !plaintextAllConverted(node, secretIds.value, excludedIds.value, unconvertedIds.value)
   if ((!path && !content) || node.targets.every((t) => secretNow(node, t))) return null
   const where = path ? '路径' : '正文'
   return secretSelectable(node)
@@ -681,15 +687,17 @@ const disclosureCut = computed(
                       label="写成占位符"
                       :model-value="converting(node, spot)"
                       :disabled="plaintextState(node, spot) !== 'convertible'"
-                      @update:model-value="toggleConverted(plaintextKey(node, spot), $event)"
+                      @update:model-value="toggleConverted(node, spot, $event)"
                     />
                     <span v-if="plaintextState(node, spot) === 'blocked'" class="text-warning">
                       写入位置无法使用占位符<Hint>
                         凭据占位符只能放在本人、敏感级不低于私密的记忆中。
                       </Hint>
                     </span>
-                    <span v-else-if="plaintextState(node, spot) === 'unwritten'" class="text-muted">
-                      本次不写入
+                    <span v-else-if="plaintextState(node, spot) === 'imported'" class="text-muted">
+                      已导入，不转存<Hint>
+                        已导入的记忆按原样同步；可在记忆详情或待处理中转存为凭据。
+                      </Hint>
                     </span>
                   </template>
                   <span v-else class="text-muted">

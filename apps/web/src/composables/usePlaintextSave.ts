@@ -1,7 +1,6 @@
 import {
   CONVERT_SCOPE_TEXT,
   ConvertibleValue,
-  CREDENTIAL_MATCH_MAX,
   CreateCredentialRequest,
   placeholderAllowed,
   type ConsoleCredential,
@@ -18,14 +17,17 @@ import { placeholderOf } from '../placeholders'
 import {
   convertDestinations,
   HOSTED_DESTINATION,
+  itemKey,
+  matchByValue,
   replaceValues,
   suggestIdentifier,
+  suggestItemIdentifiers,
   suggestName,
   vaultFieldName,
   type ConvertDestination,
 } from '../plaintext'
 import { saveFlags, type PlaintextSpot, type SaveFlags, type SpotChoice } from '../plaintextSave'
-import { suggestIdentifier as suggestItemIdentifier } from '../vault'
+import { clipText } from '../text'
 
 // 保存记忆之前逐处处理新增的疑似明文：转存为凭据或不是凭据。转存的先建好凭据，再把正文里的值换成占位符，
 // 最后才保存，明文不会先进历史。对话框只管长相，规则都在这里
@@ -42,7 +44,9 @@ export interface PlaintextSaveRequest {
   rejected: boolean
 }
 
+// content 是处理过的正文，source 是算出它的那份正文：调用方的正文这时已经不是 source 时不能直接用
 export interface PlaintextSaveResult {
+  source: string
   content: string
   flags: SaveFlags
 }
@@ -58,15 +62,16 @@ export interface SpotRow {
   created: boolean
 }
 
-const itemKey = (d: { connectionId: string; itemId: string }) => `${d.connectionId}/${d.itemId}`
-
 // 去处里写成明文的部分不能含这个值，和转存的接口同一条规则
 const TEXTS_HAVE_VALUE = '标识、名称与字段名不能包含要转存的值'
 
+// canConvert：能不能转存为凭据（vault.ts 的 canManageCredentials）；
+// canSaveAnyway：能不能照样保存（allowPlaintext），能改这条记忆的成员都可以
 export function usePlaintextSave(
   spaceId: Ref<string>,
   request: Ref<PlaintextSaveRequest | null>,
-  owner: Ref<boolean>,
+  canConvert: Ref<boolean>,
+  canSaveAnyway: Ref<boolean>,
   onProceed: (result: PlaintextSaveResult) => void,
 ) {
   const queryClient = useQueryClient()
@@ -91,7 +96,7 @@ export function usePlaintextSave(
 
   // 这一处为什么不能转存，能转存时是 null
   function convertBlocker(row: SpotRow): string | null {
-    if (!owner.value) return '仅空间所有者可转存为凭据'
+    if (!canConvert.value) return '仅空间所有者可转存为凭据'
     if (!scopeAllowed.value) return CONVERT_SCOPE_TEXT
     if (row.spot.value === null) return '无法定位这一处的值'
     const parsed = ConvertibleValue.safeParse(row.spot.value)
@@ -139,15 +144,11 @@ export function usePlaintextSave(
 
   // 查已有的标识与同值的凭据。查不了也能转存成新建的托管凭据
   async function prepare(id: number, req: PlaintextSaveRequest) {
-    if (!owner.value || !scopeAllowed.value) return
+    if (!canConvert.value || !scopeAllowed.value) return
     const sid = spaceId.value
-    const values = [
-      ...new Set(
-        rows.value.flatMap((r) =>
-          r.spot.value && !convertBlocker(r) ? [r.spot.value] : ([] as string[]),
-        ),
-      ),
-    ]
+    const values = rows.value.flatMap((r) =>
+      r.spot.value && !convertBlocker(r) ? [r.spot.value] : [],
+    )
     matching.value = true
     const existing = queryClient
       .fetchQuery({
@@ -157,44 +158,20 @@ export function usePlaintextSave(
       })
       .then((list) => list.items.map((c) => c.identifier))
       .catch(() => [] as string[])
-    const chunks: string[][] = []
-    for (let i = 0; i < values.length; i += CREDENTIAL_MATCH_MAX) {
-      chunks.push(values.slice(i, i + CREDENTIAL_MATCH_MAX))
-    }
-    const found = new Map<string, CredentialValueMatch>()
-    let unavailable = 0
-    let failed: string | null = null
-    await Promise.all(
-      chunks.map(async (chunk) => {
-        try {
-          const result = await api.matchCredentialValues(sid, { values: chunk })
-          chunk.forEach((value, i) => {
-            const match = result.items[i]
-            if (match) found.set(value, match)
-          })
-          unavailable = Math.max(unavailable, result.unavailableConnections)
-        } catch (err) {
-          failed = readFailure(err, '查找同值的凭据失败')
-        }
-      }),
+    const found = await matchByValue(values, (chunk) =>
+      api.matchCredentialValues(sid, { values: chunk }),
     )
     const identifiers = await existing
     if (id !== runId) return
     matching.value = false
-    matches.value = found
-    matchFailure.value = failed
-    unavailableConnections.value = unavailable
+    matches.value = found.matches
+    matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
+    unavailableConnections.value = found.unavailableConnections
     taken.value = identifiers
     // 建议的标识避开已有的，也避开这次别处建议过的
     const suggested = [...identifiers]
     for (const row of rows.value) {
-      const { destinations } = destinationsOf(row)
-      for (const d of destinations) {
-        if (d.kind !== 'vault' || vaultIdentifiers[itemKey(d)] !== undefined) continue
-        const identifier = suggestItemIdentifier(d.itemName, suggested)
-        vaultIdentifiers[itemKey(d)] = identifier
-        suggested.push(identifier)
-      }
+      suggestItemIdentifiers(destinationsOf(row).destinations, vaultIdentifiers, suggested)
     }
     for (const row of rows.value) {
       row.hosted.identifier = suggestIdentifier(req.uri, row.spot.field, suggested)
@@ -242,7 +219,7 @@ export function usePlaintextSave(
     const identifier = vaultIdentifiers[itemKey(d)] ?? ''
     return {
       identifier,
-      name: d.itemName.trim().slice(0, 100) || identifier,
+      name: clipText(d.itemName.trim(), 100) || identifier,
       source: { kind: 'vault' as const, connectionId: d.connectionId, itemId: d.itemId },
     }
   }
@@ -261,7 +238,8 @@ export function usePlaintextSave(
       const body = vaultBody(d)
       const parsed = CreateCredentialRequest.safeParse(body)
       if (!parsed.success) return parsed.error.issues[0]?.message ?? '填写内容有误'
-      if (body.identifier.includes(value)) return TEXTS_HAVE_VALUE
+      // 名称取条目名称，和标识一样是明文
+      if ([body.identifier, body.name].some((t) => t.includes(value))) return TEXTS_HAVE_VALUE
       return identifierProblem(body.identifier)
     }
     if (row.created) return null
@@ -341,7 +319,11 @@ export function usePlaintextSave(
         }
       }
       const choices = rows.value.map((r) => r.choice!)
-      onProceed({ content: replaceValues(req.content, replacements), flags: saveFlags(choices) })
+      onProceed({
+        source: req.content,
+        content: replaceValues(req.content, replacements),
+        flags: saveFlags(choices),
+      })
     } catch (err) {
       if (id !== runId) return
       failure.value = err instanceof ApiError ? err.message : '新建凭据失败'
@@ -355,12 +337,15 @@ export function usePlaintextSave(
     }
   }
 
-  // 照样保存：只给空间所有者，正文不改，这条记忆进待处理
+  // 照样保存：正文不改，这条记忆进待处理
   function saveAnyway() {
     const req = request.value
-    if (!req || !owner.value || busy.value) return
-    onProceed({ content: req.content, flags: saveFlags([], true) })
+    if (!req || !canSaveAnyway.value || busy.value) return
+    onProceed({ source: req.content, content: req.content, flags: saveFlags([], true) })
   }
+
+  // 已经起好标识的条目，不能再改标识
+  const lockedItems = computed(() => new Set(createdVault.value.keys()))
 
   return {
     rows,
@@ -369,6 +354,7 @@ export function usePlaintextSave(
     unavailableConnections,
     vaultIdentifiers,
     createdVault,
+    lockedItems,
     busy,
     failure,
     problem,
