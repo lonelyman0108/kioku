@@ -56,6 +56,8 @@ export interface FakeVault {
     loginFailure: VaultErrorKind | null
     // 每次取条目之前调用一次（用完就清掉），测试用它在取用的第二段里模拟别的进程
     beforeItem: (() => Promise<void>) | null
+    // 每次同步之前调用一次（用完就清掉），和 beforeItem 一样
+    beforeSnapshot: (() => Promise<void>) | null
     // 登录前等它（用完就清掉），测试用它让一次登录停在半路
     beforeLogin: Promise<void> | null
     // 换过刷新令牌之后，新的这个马上失效：同一次调用里先换令牌、后报 reauth_required
@@ -86,6 +88,7 @@ export function fakeVault(): FakeVault {
     unreadableItemCount: 0,
     loginFailure: null,
     beforeItem: null,
+    beforeSnapshot: null,
     beforeLogin: null,
     revokeAfterRotate: false,
     skipOnSynced: false,
@@ -179,6 +182,9 @@ export function fakeVault(): FakeVault {
       return {
         async snapshot() {
           calls.snapshot++
+          const hook = state.beforeSnapshot
+          state.beforeSnapshot = null
+          await hook?.()
           await prelude(true)
           return snapshot(email, userId)
         },
