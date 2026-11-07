@@ -4,11 +4,15 @@ import { VaultError } from './types'
 // 不以任何形式（错误信息、cause、日志）透出去。给调用方的错误文字只写类别（无法连接、超时、意外的响应），
 // 不写错误代码与状态码，否则能拿服务器地址探测内网的端口；这些细节只交给 log，log 也不带响应正文
 
-// 内部日志里记的细节：哪一类问题，加上状态码或连接错误的代码
+// 内部日志里记的细节：哪一类问题，加上状态码、连接错误的代码，或者哪个接口的响应缺了什么（只有字段名，不带正文）。
+// error 是 onSecretsChanged 抛的错误经 loggableError 处理之后的样子
 export interface VaultDiagnostic {
-  what: 'connect' | 'timeout' | 'redirect' | 'status' | 'too_large' | 'secrets_not_saved'
+  what: 'connect' | 'timeout' | 'redirect' | 'status' | 'too_large' | 'format' | 'secrets_not_saved'
   status?: number
   code?: string
+  endpoint?: string
+  problem?: string
+  error?: unknown
 }
 
 export interface HttpOptions {
@@ -43,8 +47,15 @@ const OFFICIAL = new Map<string, VaultEndpoints>([
   ],
 ])
 
-// 只有本机回环地址能用 http（测试与装在同一台机器上的密码库）：令牌与密文不能明文过网络
+// http 只给两种地址：本机回环地址（测试与装在同一台机器上的密码库），和不带点的单段主机名
+// （同一个 Docker 网络里的服务名，例如 vaultwarden）。别的地址要 https：令牌与密文不能明文过网络
 const LOOPBACK = new Set(['localhost', '127.0.0.1', '[::1]'])
+
+function plainHttpAllowed(hostname: string): boolean {
+  if (LOOPBACK.has(hostname)) return true
+  // IPv6 地址写在方括号里、也不带点，不算服务名
+  return hostname !== '' && !hostname.includes('.') && !hostname.startsWith('[')
+}
 
 export function vaultEndpoints(serverUrl: string): VaultEndpoints {
   let url: URL
@@ -56,8 +67,11 @@ export function vaultEndpoints(serverUrl: string): VaultEndpoints {
   if ((url.protocol !== 'http:' && url.protocol !== 'https:') || url.username || url.password) {
     throw new VaultError('unreachable', '服务器地址无效')
   }
-  if (url.protocol === 'http:' && !LOOPBACK.has(url.hostname)) {
-    throw new VaultError('unreachable', '服务器地址须使用 https，只有本机地址可以用 http')
+  if (url.protocol === 'http:' && !plainHttpAllowed(url.hostname)) {
+    throw new VaultError(
+      'unreachable',
+      '服务器地址须使用 https；本机地址与同一个 Docker 网络里的服务名（不带点的主机名）可以用 http',
+    )
   }
   const official = url.protocol === 'https:' && !url.port ? OFFICIAL.get(url.hostname) : undefined
   if (official) return official
@@ -156,7 +170,25 @@ export function unexpectedStatus(http: HttpOptions, status: number): VaultError 
   return new VaultError('server_error', UNEXPECTED)
 }
 
-export const badResponse = () => new VaultError('server_error', UNEXPECTED)
+// 响应缺字段或格式不对。problem 只写哪个字段、哪类问题，不带正文；在请求所在的地方经 formatLogged 记进日志
+export class VaultFormatError extends VaultError {
+  constructor(readonly problem: string) {
+    super('server_error', UNEXPECTED)
+  }
+}
+
+export const badResponse = (problem: string) => new VaultFormatError(problem)
+
+// 解析某个接口的响应：格式不对时记下接口与问题，再照样抛出
+export function formatLogged<T>(http: HttpOptions, endpoint: string, parse: () => T): T {
+  try {
+    return parse()
+  } catch (err) {
+    if (err instanceof VaultFormatError)
+      http.log({ what: 'format', endpoint, problem: err.problem })
+    throw err
+  }
+}
 
 // 字段名大小写：Bitwarden 的接口是 camelCase，旧版 Vaultwarden 有 PascalCase 的，两种都认
 export function prop(obj: unknown, name: string): unknown {
@@ -174,6 +206,6 @@ export function str(obj: unknown, name: string): string | undefined {
 
 export function requireStr(obj: unknown, name: string): string {
   const value = str(obj, name)
-  if (value === undefined) throw badResponse()
+  if (value === undefined) throw badResponse(`missing ${name}`)
   return value
 }

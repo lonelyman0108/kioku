@@ -8,8 +8,10 @@ import {
   stretchMasterKey,
   type SymmetricKey,
 } from './crypto'
+import { loggableError } from '../../db/client'
 import {
   badResponse,
+  formatLogged,
   prop,
   requireStr,
   str,
@@ -61,6 +63,7 @@ const EXPIRY_MARGIN_MS = 60_000
 // 两步验证的方式里只认验证器应用（0）
 const AUTHENTICATOR = '0'
 const NEEDS_AUTHENTICATOR = '密码库要求的两步验证方式不受支持：专用账号请改用验证器应用做两步验证'
+const NEW_DEVICE = '官方服务要求验证新设备：给专用账号开启验证器应用的两步验证后再连接'
 
 const formBody = (fields: Record<string, string>) => new URLSearchParams(fields).toString()
 
@@ -74,7 +77,7 @@ function accountOf(accessToken: string): VaultAccount {
     ) as unknown
     return { userId: requireStr(payload, 'sub'), email: requireStr(payload, 'email') }
   } catch {
-    throw badResponse()
+    throw badResponse('access token payload')
   }
 }
 
@@ -122,14 +125,16 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
       body: JSON.stringify({ email }),
     })
     if (pre.status !== 200) throw unexpectedStatus(http, pre.status)
-    const settings = prop(pre.json, 'kdfSettings')
-    const kdfType = prop(pre.json, 'kdf') ?? prop(settings, 'kdfType')
-    if (kdfType === undefined) throw badResponse()
-    const kdf = kdfParams({
-      kdf: kdfType,
-      iterations: prop(pre.json, 'kdfIterations') ?? prop(settings, 'iterations'),
-      memory: prop(pre.json, 'kdfMemory') ?? prop(settings, 'memory'),
-      parallelism: prop(pre.json, 'kdfParallelism') ?? prop(settings, 'parallelism'),
+    const kdf = formatLogged(http, 'prelogin', () => {
+      const settings = prop(pre.json, 'kdfSettings')
+      const kdfType = prop(pre.json, 'kdf') ?? prop(settings, 'kdfType')
+      if (kdfType === undefined) throw badResponse('missing kdf')
+      return kdfParams({
+        kdf: kdfType,
+        iterations: prop(pre.json, 'kdfIterations') ?? prop(settings, 'iterations'),
+        memory: prop(pre.json, 'kdfMemory') ?? prop(settings, 'memory'),
+        parallelism: prop(pre.json, 'kdfParallelism') ?? prop(settings, 'parallelism'),
+      })
     })
     // 新版服务端在预登录里给出盐；没有时盐就是规范化的邮箱
     const salt = str(pre.json, 'salt') || email
@@ -177,7 +182,7 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
       }
       // 官方服务对没开两步验证的账号在新设备上另要邮件里的验证码（新设备验证），这里不支持
       if (/new device/i.test(`${str(res.json, 'error_description')} ${str(res.json, 'message')}`)) {
-        throw new VaultError('unsupported_two_factor', NEEDS_AUTHENTICATOR)
+        throw new VaultError('unsupported_two_factor', NEW_DEVICE)
       }
       // 其余的 400 都是凭据不对：官方服务回 invalid_grant，Vaultwarden 的 error 是空的、只在 message 里说明。
       // 带着验证码时主密码已经在上一步验过，验证码不对 Vaultwarden 也不再带 TwoFactorProviders
@@ -189,20 +194,23 @@ export function createVaultClient(options: VaultClientOptions = {}): VaultClient
     }
     if (res.status !== 200) throw unexpectedStatus(http, res.status)
 
-    const grant = tokenGrant(res.json, now())
-    if (!grant.refreshToken) throw badResponse()
-    const encUserKey = str(res.json, 'key')
-    if (!encUserKey) throw badResponse()
+    const { refreshToken, encUserKey, account } = formatLogged(http, 'token', () => {
+      const grant = tokenGrant(res.json, now())
+      if (!grant.refreshToken) throw badResponse('missing refresh_token')
+      const encUserKey = str(res.json, 'key')
+      if (!encUserKey) throw badResponse('missing key')
+      return {
+        refreshToken: grant.refreshToken,
+        encUserKey,
+        account: accountOf(grant.accessToken),
+      }
+    })
     const userKey = decryptBytes(encUserKey, stretched)
     stretched.encKey.fill(0)
     stretched.macKey.fill(0)
     // 账户密钥必须是 64 字节（加密、MAC 各一半），旧格式的 32 字节报 unsupported_format
     splitKey(userKey)
-    return {
-      kind: 'ok',
-      secrets: { refreshToken: grant.refreshToken, userKey },
-      account: accountOf(grant.accessToken),
-    }
+    return { kind: 'ok', secrets: { refreshToken, userKey }, account }
   }
 
   function session(input: VaultSessionInput): VaultSession {
@@ -230,6 +238,8 @@ class Session implements VaultSession {
   private access: Access | null = null
   // 正在进行的换令牌与同步：同时发起的调用共用这一次
   private pending: Promise<Access> | null = null
+  // 正在进行的保存刷新令牌
+  private saving: Promise<void> | null = null
 
   constructor(
     private readonly http: HttpOptions,
@@ -243,6 +253,7 @@ class Session implements VaultSession {
   }
 
   async snapshot(): Promise<VaultSnapshot> {
+    await this.saveRefreshToken()
     const fresh = await this.ensureAccess()
     if (fresh.synced) return fresh.access.state.snapshot
     return (await this.withAccess((access) => this.sync(access))).snapshot
@@ -252,8 +263,9 @@ class Session implements VaultSession {
     if (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(id)) {
       throw new VaultError('item_unavailable', '条目不可用')
     }
+    await this.saveRefreshToken()
     // 取条目与为它重新同步都在同一个令牌下做：哪一步遇到 401，都换一次令牌从头再来
-    const { json, state } = await this.withAccess(async (access) => {
+    const { json, state } = await this.withAccess(async (access, fresh) => {
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
         method: 'GET',
         headers: { authorization: `Bearer ${access.token}` },
@@ -265,15 +277,20 @@ class Session implements VaultSession {
       }
       if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
       const orgId = str(res.json, 'organizationId')
-      // 上次同步之后才加入的组织：重新同步一次取它的密钥
-      if (orgId && !access.state.orgKeys.has(orgId) && !access.state.orgKeyErrors.has(orgId)) {
+      // 上次同步之后才加入的组织：重新同步一次取它的密钥。刚换令牌时已经同步过，不再同步第二次，按不可用处理
+      if (
+        !fresh &&
+        orgId &&
+        !access.state.orgKeys.has(orgId) &&
+        !access.state.orgKeyErrors.has(orgId)
+      ) {
         const synced = await this.sync(access)
         if (!synced) return null
         return { json: res.json, state: synced }
       }
       return { json: res.json, state: access.state }
     })
-    const item = decodeItem(json, state)
+    const item = formatLogged(this.http, 'cipher', () => decodeItem(json, state))
     // Vaultwarden 给非管理员的单个条目不带集合，用同步时的
     if (item.collectionIds.length === 0) {
       item.collectionIds = state.snapshot.items.find((i) => i.id === id)?.collectionIds ?? []
@@ -282,13 +299,16 @@ class Session implements VaultSession {
   }
 
   // 带着访问令牌执行；令牌被服务端拒绝（401，fn 返回 null）时换一次令牌再试
-  private async withAccess<T>(fn: (access: Access) => Promise<T | null>): Promise<T> {
+  // fresh 为真表示这个令牌是这次调用刚换的，已经同步过
+  private async withAccess<T>(
+    fn: (access: Access, fresh: boolean) => Promise<T | null>,
+  ): Promise<T> {
     const first = await this.ensureAccess()
-    const result = await fn(first.access)
+    const result = await fn(first.access, first.synced)
     if (result !== null) return result
     if (this.access === first.access) this.access = null
     const second = await this.ensureAccess()
-    const retry = await fn(second.access)
+    const retry = await fn(second.access, second.synced)
     if (retry === null) throw reauth()
     return retry
   }
@@ -320,7 +340,7 @@ class Session implements VaultSession {
       throw reauth()
     }
     if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
-    const grant = tokenGrant(res.json, this.now())
+    const grant = formatLogged(this.http, 'token', () => tokenGrant(res.json, this.now()))
     // 旧的刷新令牌可能已经作废，马上换成新的
     if (grant.refreshToken) this.refreshToken = grant.refreshToken
     await this.saveRefreshToken()
@@ -333,18 +353,25 @@ class Session implements VaultSession {
     return access
   }
 
-  // 当前的刷新令牌和保存成功的不同时交给 onSecretsChanged。它失败了不影响这次调用：会话接着用新的，下次换令牌再试
+  // 当前的刷新令牌和保存成功的不同时交给 onSecretsChanged：换令牌之后，以及每次 item()、snapshot() 开始时。
+  // 它失败了不影响这次调用：会话接着用新的，记下原因，下一次调用再试。同时来的几次调用共用一次保存
   private async saveRefreshToken(): Promise<void> {
+    while (this.saving) await this.saving
     const token = this.refreshToken
-    if (token === this.savedRefreshToken || !this.input.onSecretsChanged) return
+    const save = this.input.onSecretsChanged
+    if (token === this.savedRefreshToken || !save) return
+    this.saving = (async () => {
+      try {
+        await save({ refreshToken: token, userKey: this.input.secrets.userKey })
+        this.savedRefreshToken = token
+      } catch (err) {
+        this.http.log({ what: 'secrets_not_saved', error: loggableError(err) })
+      }
+    })()
     try {
-      await this.input.onSecretsChanged({
-        refreshToken: token,
-        userKey: this.input.secrets.userKey,
-      })
-      this.savedRefreshToken = token
-    } catch {
-      this.http.log({ what: 'secrets_not_saved' })
+      await this.saving
+    } finally {
+      this.saving = null
     }
   }
 
@@ -370,7 +397,7 @@ class Session implements VaultSession {
     })
     if (res.status === 401) return null
     if (res.status !== 200) throw unexpectedStatus(this.http, res.status)
-    const state = decodeSync(res.json, this.userKey)
+    const state = formatLogged(this.http, 'sync', () => decodeSync(res.json, this.userKey))
     await this.input.onSynced?.(state.snapshot)
     return state
   }

@@ -42,20 +42,26 @@ const list = (value: unknown): unknown[] => (Array.isArray(value) ? value : [])
 function role(type: unknown): VaultOrganizationRole {
   const known = ROLES.get(type)
   // 不认识的角色不能当作普通成员：凭据服务按角色拒绝连接
-  if (!known) throw badResponse()
+  if (!known) throw badResponse('unknown organization role')
   return known
 }
 
-// 看得到组织里全部的集合：所有者、管理员；旧版的「访问全部集合」（accessAll）；
-// 自定义角色能编辑或删除任何集合的，在官方服务上也看得到全部集合
+// 自定义角色里这几项权限等于看得到全部集合：编辑、删除任何集合；导出能拿到整个组织；管理成员、群组能给自己加权限
+const ALL_COLLECTION_PERMISSIONS = [
+  'accessImportExport',
+  'editAnyCollection',
+  'deleteAnyCollection',
+  'manageGroups',
+  'manageUsers',
+]
+
+// 看得到组织里全部的集合：所有者、管理员；旧版的「访问全部集合」（accessAll，profile 里有这一项时）；上面那几项权限。
+// Vaultwarden 的 access_all（直接设的或经群组给的）不在 profile 里，这里看不到
 function allCollections(org: unknown, orgRole: VaultOrganizationRole): boolean {
   if (orgRole === 'owner' || orgRole === 'admin') return true
   if (prop(org, 'accessAll') === true) return true
   const permissions = prop(org, 'permissions')
-  return (
-    prop(permissions, 'editAnyCollection') === true ||
-    prop(permissions, 'deleteAnyCollection') === true
-  )
+  return ALL_COLLECTION_PERMISSIONS.some((name) => prop(permissions, name) === true)
 }
 
 // 解开一个条目或集合时出的错：格式不认识、校验不过、缺字段，都只让这一个不可读
@@ -103,7 +109,11 @@ export function decodeSync(json: unknown, userKey: SymmetricKey): SyncedState {
       orgKeyErrors.set(id, privateKeyError)
       continue
     }
-    if (!privateKey) continue
+    // 组织有密钥、profile 却没有私钥：解不开，记下来，取这个组织的条目时不再反复重新同步
+    if (!privateKey) {
+      orgKeyErrors.set(id, new VaultError('unsupported_format', '缺少账户私钥，无法解开组织密钥'))
+      continue
+    }
     try {
       orgKeys.set(id, splitKey(decryptRsa(key, privateKey)))
     } catch (err) {
@@ -176,7 +186,9 @@ function decodeCipher(
   orgKey: SymmetricKey,
   withValues: boolean,
 ): { summary: VaultItemSummary; values: Record<VaultFieldRef, string> } {
-  const type = TYPES.get(prop(cipher, 'type'))
+  // 有的服务端把类型写成整数形式的字符串（"1"）；别的字符串照样认不出
+  const raw = prop(cipher, 'type')
+  const type = TYPES.get(typeof raw === 'string' && /^\d{1,3}$/.test(raw) ? Number(raw) : raw)
   if (!type) throw new VaultError('unsupported_format', '不支持的条目类型')
   // 条目自己的密钥：有的话条目里的内容都用它加密，它本身用组织密钥加密
   const itemKeyEnc = str(cipher, 'key')

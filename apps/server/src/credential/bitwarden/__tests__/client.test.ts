@@ -1,5 +1,6 @@
 import { readFileSync } from 'node:fs'
 
+import { DrizzleQueryError } from 'drizzle-orm'
 import { describe, expect, it, vi } from 'vitest'
 
 import { createVaultClient, type VaultClientOptions } from '../client'
@@ -247,7 +248,7 @@ describe('登录', () => {
     )
     const err = await errorOf(createVaultClient({ fetch }).login(loginInput('dedicated')))
     expect(err.kind).toBe('unsupported_two_factor')
-    expect(err.message).toContain('验证器')
+    expect(err.message).toBe('官方服务要求验证新设备：给专用账号开启验证器应用的两步验证后再连接')
   })
 
   it('KDF 参数超出范围报 unsupported_format，不发登录请求', async () => {
@@ -267,12 +268,14 @@ describe('登录', () => {
     }
   })
 
-  it('http 只收本机回环地址，别的在发请求之前报错', async () => {
+  it('http 只收本机回环地址与不带点的服务名，别的在发请求之前报错', async () => {
     const { fetch, calls } = replay(['dedicated.login'])
     for (const serverUrl of [
       'http://vault.example.com',
       'http://10.0.0.1:8080',
       'http://vault.bitwarden.com',
+      'http://[fd00::1]:8080',
+      'http://vaultwarden.',
     ]) {
       expect(
         await kindOf(createVaultClient({ fetch }).login({ ...loginInput('dedicated'), serverUrl })),
@@ -283,10 +286,18 @@ describe('登录', () => {
           deviceId: fixture.accounts.dedicated.deviceId,
           secrets: dedicatedSecrets,
         }),
-      ).toThrow(VaultError)
+      ).toThrow(
+        '服务器地址须使用 https；本机地址与同一个 Docker 网络里的服务名（不带点的主机名）可以用 http',
+      )
     }
     expect(calls).toHaveLength(0)
-    for (const host of ['http://localhost:8080', 'http://127.0.0.1', 'http://[::1]:18081']) {
+    for (const host of [
+      'http://localhost:8080',
+      'http://127.0.0.1',
+      'http://[::1]:18081',
+      'http://vaultwarden',
+      'http://vault-server:8080',
+    ]) {
       expect(vaultEndpoints(host).api).toBe(`${host}/api`)
     }
   })
@@ -411,6 +422,9 @@ describe('同步', () => {
         (org) => (org.accessAll = true),
         (org) => (org.permissions.editAnyCollection = true),
         (org) => (org.permissions.deleteAnyCollection = true),
+        (org) => (org.permissions.accessImportExport = true),
+        (org) => (org.permissions.manageGroups = true),
+        (org) => (org.permissions.manageUsers = true),
         (org) => (org.type = 1),
       ]
     for (const mutate of mutations) {
@@ -432,6 +446,8 @@ describe('同步', () => {
       (b) => delete login(b).revisionDate,
       (b) => (login(b).type = 99),
       (b) => (login(b).type = 'constructor'),
+      (b) => (login(b).type = '__proto__'),
+      (b) => (login(b).type = '1.0'),
     ]
     for (const mutate of cases) {
       const body = syncBody('dedicated')
@@ -451,6 +467,51 @@ describe('同步', () => {
     const snapshot = await session.snapshot()
     expect(snapshot.collections).toEqual([])
     expect(snapshot.items).toHaveLength(5)
+  })
+
+  it('条目类型写成整数形式的字符串也认', async () => {
+    const body = syncBody('dedicated')
+    for (const c of body.ciphers) c.type = String(c.type)
+    const { session } = sessionOf('dedicated', dedicatedSecrets, {}, withSync(body))
+    const snapshot = await session.snapshot()
+    expect(snapshot.unreadableItemCount).toBe(0)
+    expect(snapshot.items.find((i) => i.id === fixture.items.login)?.type).toBe('login')
+  })
+
+  it('组织有密钥、profile 没有私钥：条目都算解不开，取条目报 unsupported_format，不反复重新同步', async () => {
+    const body = syncBody('dedicated')
+    delete (body.profile as { privateKey?: string }).privateKey
+    const { session, calls } = sessionOf('dedicated', dedicatedSecrets, {}, withSync(body))
+    const snapshot = await session.snapshot()
+    expect(snapshot.items).toEqual([])
+    expect(snapshot.unreadableItemCount).toBe(5)
+    for (let i = 0; i < 3; i++) {
+      expect(await kindOf(session.item(fixture.items.login))).toBe('unsupported_format')
+    }
+    expect(calls.filter((c) => c.url.pathname === '/api/sync')).toHaveLength(1)
+  })
+
+  it('响应格式不对时内部日志记下接口与缺的字段，不带正文', async () => {
+    const body = syncBody('dedicated') as unknown as { profile: Record<string, unknown> }
+    delete body.profile.email
+    const log = vi.fn()
+    const { session } = sessionOf('dedicated', dedicatedSecrets, {}, { ...withSync(body), log })
+    const err = await errorOf(session.snapshot())
+    expect(err.kind).toBe('server_error')
+    expect(err.message).toBe('密码库返回了意外的响应')
+    expect(log).toHaveBeenCalledWith({ what: 'format', endpoint: 'sync', problem: 'missing email' })
+
+    const prelogin = vi.fn()
+    const { fetch } = replay(['dedicated.login'], (call) =>
+      call.url.pathname.endsWith('/prelogin') ? json(200, { salt: 'RESPONSE-BODY' }) : undefined,
+    )
+    await errorOf(createVaultClient({ fetch, log: prelogin }).login(loginInput('dedicated')))
+    expect(prelogin).toHaveBeenCalledWith({
+      what: 'format',
+      endpoint: 'prelogin',
+      problem: 'missing kdf',
+    })
+    expect(JSON.stringify(prelogin.mock.calls)).not.toContain('RESPONSE-BODY')
   })
 
   it('组织密钥解不开时这个组织的条目都算解不开，取其中的条目报同样的错误', async () => {
@@ -536,7 +597,7 @@ describe('取条目', () => {
     }
   })
 
-  it('没见过的组织：重新同步一次，结果交给 onSynced；重新同步遇到 401 时换令牌再试', async () => {
+  it('没见过的组织：刚换令牌时不再同步第二次；之后的调用重新同步一次，遇到 401 时换令牌再试', async () => {
     const withoutOrg = syncBody('dedicated')
     withoutOrg.profile.organizations = []
     let syncs = 0
@@ -555,6 +616,10 @@ describe('取条目', () => {
         },
       },
     )
+    // 这次调用刚换令牌、同步过，组织不在里面：按不可用处理，不同步第二次
+    expect(await kindOf(session.item(fixture.items.login))).toBe('item_unavailable')
+    expect(syncs).toBe(1)
+    // 下一次调用的令牌是旧的：为没见过的组织重新同步，遇到 401 换令牌再试
     expect((await session.item(fixture.items.login)).values).toEqual(fixture.values.login)
     expect(tokenCalls(calls)).toHaveLength(2)
     expect(syncs).toBe(3)
@@ -584,7 +649,9 @@ describe('取条目', () => {
         },
       },
     )
+    expect(await kindOf(session.item(fixture.items.login))).toBe('item_unavailable')
     await expect(session.item(fixture.items.login)).rejects.toBe(refusal)
+    expect(syncs).toBe(2)
   })
 })
 
@@ -716,12 +783,17 @@ describe('会话', () => {
     expect(onSynced).toHaveBeenCalledTimes(3)
   })
 
-  it('onSecretsChanged 抛错不影响调用：会话接着用新的，下次换令牌再保存', async () => {
+  it('onSecretsChanged 抛错不影响调用：会话接着用新的，记下原因，下一次调用开始时再保存', async () => {
     let now = 1_000_000
-    // 服务端第一次换出新令牌，之后几次都给同一个
-    const failure = new Error('保存失败')
+    // 服务端每次都给同一个新令牌
+    const failure = Object.assign(
+      new Error('insert into vault_connections values ($1) params: secret'),
+      {
+        code: '57P01',
+      },
+    )
     const onSecretsChanged = vi.fn<(secrets: VaultSecrets) => Promise<void>>(async () => {
-      if (onSecretsChanged.mock.calls.length === 1) throw failure
+      if (onSecretsChanged.mock.calls.length <= 2) throw failure
     })
     const log = vi.fn()
     const { session, calls } = sessionOf(
@@ -738,16 +810,76 @@ describe('会话', () => {
       },
     )
     expect((await session.snapshot()).items).toHaveLength(5)
-    expect(log).toHaveBeenCalledWith({ what: 'secrets_not_saved' })
-    now += 3 * 60 * 60 * 1000
+    // 日志带上原因（经 loggableError 处理过的错误）
+    expect(log).toHaveBeenCalledWith({ what: 'secrets_not_saved', error: failure })
+    // 令牌还没过期：snapshot() 与 item() 开始时都再保存一次，不用等换令牌（第二次仍失败，第三次成功）
     await session.snapshot()
-    // 用的是新令牌；服务端给的和已保存的（旧的）不同，再交给 onSecretsChanged
-    expect(tokenCalls(calls)[1]!.form!.refresh_token).toBe('rotated')
     expect(onSecretsChanged).toHaveBeenCalledTimes(2)
-    expect(onSecretsChanged.mock.calls[1]![0].refreshToken).toBe('rotated')
-    // 保存成功之后，同一个令牌不再交给它
+    await session.item(fixture.items.login)
+    expect(tokenCalls(calls)).toHaveLength(1)
+    expect(onSecretsChanged).toHaveBeenCalledTimes(3)
+    expect(onSecretsChanged.mock.calls[2]![0].refreshToken).toBe('rotated')
+    // 保存成功之后，同一个令牌不再交给它，换令牌时用的是新的
+    await session.snapshot()
     now += 3 * 60 * 60 * 1000
     await session.snapshot()
+    expect(tokenCalls(calls)[1]!.form!.refresh_token).toBe('rotated')
+    expect(onSecretsChanged).toHaveBeenCalledTimes(3)
+  })
+
+  it('保存失败的原因是数据库错误时，日志里不带 SQL 与参数', async () => {
+    const cause = Object.assign(new Error('terminating connection'), { code: '57P01' })
+    const failure = new DrizzleQueryError(
+      'update vault_connections set token = $1',
+      ['rotated'],
+      cause,
+    )
+    const log = vi.fn()
+    const { session } = sessionOf(
+      'dedicated',
+      dedicatedSecrets,
+      {
+        onSecretsChanged: async () => {
+          throw failure
+        },
+      },
+      {
+        log,
+        override: (call, recorded) => {
+          if (call.form?.grant_type !== 'refresh_token' || !recorded) return undefined
+          return json(200, { ...(recorded.body as object), refresh_token: 'rotated' })
+        },
+      },
+    )
+    await session.snapshot()
+    const entry = log.mock.calls.find((c) => c[0].what === 'secrets_not_saved')![0]
+    expect(entry.error).toMatchObject({ code: '57P01' })
+    expect(JSON.stringify(entry)).not.toContain('update vault_connections')
+    expect(JSON.stringify(entry)).not.toContain('rotated')
+  })
+
+  it('同时来的几次调用只保存一次', async () => {
+    let release = () => {}
+    const onSecretsChanged = vi.fn<(secrets: VaultSecrets) => Promise<void>>(async () => {
+      if (onSecretsChanged.mock.calls.length === 1) throw new Error('第一次失败')
+      await new Promise<void>((resolve) => (release = resolve))
+    })
+    const { session } = sessionOf(
+      'dedicated',
+      dedicatedSecrets,
+      { onSecretsChanged },
+      {
+        override: (call, recorded) => {
+          if (call.form?.grant_type !== 'refresh_token' || !recorded) return undefined
+          return json(200, { ...(recorded.body as object), refresh_token: 'rotated' })
+        },
+      },
+    )
+    await session.snapshot()
+    const both = Promise.all([session.snapshot(), session.item(fixture.items.note)])
+    await new Promise((resolve) => setTimeout(resolve, 10))
+    release()
+    await both
     expect(onSecretsChanged).toHaveBeenCalledTimes(2)
   })
 })
