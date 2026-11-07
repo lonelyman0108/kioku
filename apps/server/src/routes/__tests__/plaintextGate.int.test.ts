@@ -472,6 +472,27 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
       )
     })
 
+    it('ignorePlaintext：旧的疑似明文这次都删掉了的照常记忽略，不留在待处理', async () => {
+      const m = await ok(
+        await viaConsole('POST', {
+          uri: 'user://notes/router',
+          content: '路由器\n管理员密码：hunter2',
+          allowPlaintext: true,
+        }),
+        201,
+      )
+      expect(await inbox()).toBe(1)
+      const edited = await ok(
+        await viaConsole('PATCH', {
+          uri: m.uri,
+          content: '路由器\n管理员密码：见团队的密码库\ntoken = example',
+          ignorePlaintext: true,
+        }),
+      )
+      expect(edited.plaintextIgnored).toBe(true)
+      expect(await inbox()).toBe(0)
+    })
+
     it('ignorePlaintext：写入之前已有没处理的疑似明文时只放行写入，不记忽略，改完仍在待处理', async () => {
       const m = await ok(
         await viaConsole('POST', {

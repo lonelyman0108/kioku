@@ -48,8 +48,6 @@ const PLAINTEXT_LABELS =
   'password|passwd|passphrase|密码|口令|token|api[_ -]?key|secret[_ -]?(?:access[_ -]?)?key|secret'
 // 值外面常见的引号、反引号与粗体：占位符写在里面也算占位符。打码时连同值外面的这些一起盖
 export const PLAINTEXT_QUOTES = '"\'`“‘「『*'
-// 标签后面可以先有一个收尾的引号再接冒号：JSON 与字典的键（"password": …、'token': …）
-const LABEL_CLOSERS = '"\'`'
 // 值到这里结束：中文标点与收尾的引号。英文标点常出现在密码里，不算
 const VALUE_STOPS = '，。；、！？）】」』》”’'
 // 值到这里也结束，但不算遮盖符的结尾：左括号、左引号（「hunter2（旧）」）与 &（查询串里的下一项）
@@ -57,26 +55,48 @@ const VALUE_BREAKS = '（【《「『“‘&'
 // 中日韩文字：假名、汉字（含扩展 A 与兼容汉字）、谚文音节。只列 BMP 里的：JS 的规则不带 u 标记，
 // 补充平面的字是两个代理项，PostgreSQL 按码点算，写进来两边会判断得不一样
 const CJK = '\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uac00-\\ud7af\\uf900-\\ufaff'
+// 写在引号里的键（JSON 与字典："db_password": …、'api_key': …）：标签后面可以先有一个收尾的引号再接冒号，
+// 只要标签前面有开头的引号，中间只隔着字母、数字、_、- 或中文（lookbehind 不定长，JS 与 PostgreSQL 都认）。
+// 普通文字里的 the token": abc 不算
+const QUOTED_KEY_CLOSER = `(?:(?<=["'\`][A-Za-z0-9_${CJK}-]{0,40})["'\`])?`
 // 值前面可以先有这些再接中文：引号、粗体与左括号
 const CJK_LEADS = `${PLAINTEXT_QUOTES}（【《\\(\\[`
 // 盖掉明文之后留下的遮盖符（转存时的历史快照、会话摘要的打码）：盖过的不再算明文
 export const PLAINTEXT_MASK = '***'
-// 值到这里就是结尾：空白、行尾、收尾的引号、粗体或中文标点；英文的逗号、句号这些算句子的标点，后面还要是空白或行尾
+// 值到这里就是结尾：空白、行尾、收尾的引号、粗体或中文标点；英文的逗号、句号这些算句子的标点，后面还要是空白或行尾。
+// 下面几种「不是值」的写法后面都要紧接着它，否则后面跟着的就是真值（<b>hunter2、""hunter2、${x}abc）
 const VALUE_ENDS_HERE = `(?:[,.;:]*(?:[${SPACE}]|$)|["'\`${VALUE_STOPS}]|\\*\\*(?![^${SPACE}${VALUE_STOPS},.;:]))`
 // 整段都是遮盖：***、********、xxxx、...、………，紧接着就是值的结尾。
 // 所以 ***hunter2***、***x、xxxxy 照样算明文：真密码可能这样开头，不能借遮盖符躲过提醒和拦截
 const WHOLE_MASK = `(?:\\*{3,}|x{3,}|\\.{3,}|…{3,})${VALUE_ENDS_HERE}`
-// 代码笔记里写的不是值：类型名（password: string、token: Optional[str]），后面不能紧接字母、数字或 _（string123 照样算）
+// 代码笔记里写的不是值：类型名（password: string、token: Optional[str]、(password: string)）。
+// 后面要紧接值的结尾，或者代码里常跟在类型后面的符号（) ] [ } | = ? < > , ;）：string123、Str#1234、none!23 照样算
 const TYPE_NAMES =
-  '(?:string|str|number|int|integer|float|bool|boolean|bytes|null|none|nil|undefined|any|unknown|object|optional|secretstr)(?![A-Za-z0-9_])'
-// 变量与环境变量的引用：$NAME、${NAME}、$(…)、%NAME%、process.env.、os.environ、os.getenv(、getenv(、env(
+  '(?:string|str|number|int|integer|float|bool|boolean|bytes|null|none|nil|undefined|any|unknown|object|optional|secretstr)' +
+  `(?:${VALUE_ENDS_HERE}|[\\)\\]\\[}|=?<>,;])`
+// 一行之内的一段：引用里的名字与参数
+const IN_LINE = (max: number, closer: string) => `[^${closer}\\n\\r\\u2028\\u2029]{1,${max}}`
+// 变量与环境变量的引用，都要是整段值：$NAME、${…}（不超过 64 个字）、$(…)（不超过 128 个字）、%NAME%、
+// process.env.NAME、process.env[…]、os.environ[…]、os.getenv(…)、getenv(…)、env(…)。
+// 后面可以先有几个收尾的括号与 , ;（f(os.getenv("X"))、{ key: $X },），再接值的结尾。
+// 已知的限制：$ 后面全是字母、数字或 _ 的整段值（$ecretPass1）也按变量算：规则不分大小写，
+// 分不出 $DB_PASS 和这种密码，而 shell 片段里的 $VAR 很常见
 const VARIABLE_REFS =
-  '(?:\\$[A-Za-z_{\\(]|%[A-Za-z_][A-Za-z0-9_]*%|process\\.env\\.|os\\.environ|os\\.getenv\\(|getenv\\(|env\\()'
-// 尖括号占位（<你的密码>）：同一行内、不超过 64 个字
-const ANGLE_PLACEHOLDER = '<[^<>\\n\\r\\u2028\\u2029]{1,64}>'
-// 「密码：…」后面不是值的几种：凭据占位符、整段遮盖、类型名、变量引用、尖括号占位、空的引号。
-// 前面可以先有引号与粗体（占位符写在引号里也算占位符）
-const NOT_A_VALUE = `\\{\\{cred:|${WHOLE_MASK}|${TYPE_NAMES}|${VARIABLE_REFS}|${ANGLE_PLACEHOLDER}|""|''`
+  '(?:\\$[A-Za-z_][A-Za-z0-9_]*' +
+  `|\\$\\{${IN_LINE(64, '{}')}\\}` +
+  `|\\$\\(${IN_LINE(128, '\\(\\)')}\\)` +
+  '|%[A-Za-z_][A-Za-z0-9_]*%' +
+  '|process\\.env\\.[A-Za-z_][A-Za-z0-9_]*' +
+  `|(?:process\\.env|os\\.environ)\\[${IN_LINE(128, '\\[\\]')}\\]` +
+  `|(?:os\\.getenv|getenv|env)\\(${IN_LINE(128, '\\(\\)')}\\)` +
+  `)[\\)\\]},;]{0,8}${VALUE_ENDS_HERE}`
+// 尖括号占位（<你的密码>）：同一行内、不超过 64 个字，整段就是它
+const ANGLE_PLACEHOLDER = `<${IN_LINE(64, '<>')}>${VALUE_ENDS_HERE}`
+// 「密码：…」后面不是值的几种：凭据占位符、整段遮盖、类型名、变量引用、尖括号占位、空的引号（里面只有空白的也算）。
+// 前面可以先有引号与粗体（占位符写在引号里也算占位符），占位符前面还可以有空白
+const NOT_A_VALUE =
+  `[${SPACE}]*\\{\\{cred:|${WHOLE_MASK}|${TYPE_NAMES}|${VARIABLE_REFS}|${ANGLE_PLACEHOLDER}` +
+  `|(?:"[${SPACE}]*"|'[${SPACE}]*')${VALUE_ENDS_HERE}`
 
 // 疑似明文的类别：label 是「密码：…」「token = …」这类写法，其余是有固定前缀或结构的令牌
 export const PLAINTEXT_KINDS = [
@@ -98,7 +118,7 @@ type TokenKind = Exclude<PlaintextKind, 'label'>
 // 值以中文开头的不算（「密码：见 Vaultwarden 条目」），前面隔着引号、粗体或左括号也一样。
 // 代码表达式（config.password、getToken()）照样算，确实不是凭据时由写入方确认
 const LABEL_RULE =
-  `(?:${PLAINTEXT_LABELS})[${LABEL_CLOSERS}]?[${SPACE}]*[:：=][${SPACE}]*` +
+  `(?:${PLAINTEXT_LABELS})${QUOTED_KEY_CLOSER}[${SPACE}]*[:：=][${SPACE}]*` +
   `(?![${PLAINTEXT_QUOTES}]*(?:${NOT_A_VALUE}))(?![${CJK_LEADS}]*[${CJK}])[^${SPACE}]`
 
 // 令牌前后不能紧挨着字母、数字、_ 与 -：task-…、my_ghp_… 这类是别的词的一部分
@@ -179,6 +199,9 @@ const WRAPPED_VALUE_MAX = 1024
 const LINE_BREAK = /[\n\r\u2028\u2029]/g
 // 值到这里结束：空白、中文标点、左括号与左引号、&、占位符
 const VALUE_END = new RegExp(`[${SPACE}${VALUE_STOPS}${VALUE_BREAKS}]|\\{\\{cred:`, 'g')
+// 延伸的值到这里结束：和 VALUE_END 一样，只是不看 VALUE_BREAKS（比较新增时用，见 addedPlaintextCredentials）
+const EXTENDED_END = new RegExp(`[${SPACE}${VALUE_STOPS}]|\\{\\{cred:`, 'g')
+const PLACEHOLDER_START = /\{\{cred:/g
 // 令牌后面紧跟着的连字符与下划线也是值的一部分
 const TOKEN_TAIL = /[A-Za-z0-9_-]*/y
 // 私钥块的结尾：从正文开头起只经过 base64 字符与空白就能到达的 END 行
@@ -223,6 +246,8 @@ function forwardSearch(text: string, pattern: RegExp): (from: number) => number 
 // 一段正文的扫描：值的结尾、收尾的符号与行尾都按先后往后找
 function scanner(text: string) {
   const valueEnd = forwardSearch(text, new RegExp(VALUE_END.source, 'g'))
+  const extendedEnd = forwardSearch(text, new RegExp(EXTENDED_END.source, 'g'))
+  const placeholderAt = forwardSearch(text, new RegExp(PLACEHOLDER_START.source, 'g'))
   const lineEnd = forwardSearch(text, new RegExp(LINE_BREAK.source, 'g'))
   const closers = new Map<string, (from: number) => number>()
   const closerAt = (close: string, from: number) => {
@@ -235,8 +260,17 @@ function scanner(text: string) {
     return find(from)
   }
 
-  // 紧接在规则认出的第一个字之后，值到哪里结束
-  const labelValue = (first: number): { start: number; end: number } => {
+  // 结尾的逗号、句号是句子的标点；感叹号、问号常是密码的一部分，留着
+  const trimSentence = (first: number, end: number) => {
+    while (end > first + 1 && ',.;:'.includes(text[end - 1]!)) end--
+    return Math.max(end, first + 1)
+  }
+
+  // 紧接在规则认出的第一个字之后，值到哪里结束。extendedEnd 是延伸的值的结尾：写在符号里的与 end 相同，
+  // 不写在符号里的不在左括号、左引号与 & 处停。不是值时（符号里只有空白与占位符）为 null
+  const labelValue = (
+    first: number,
+  ): { start: number; end: number; extendedEnd: number } | null => {
     const line = lineEnd(first)
     for (const [open, close] of VALUE_WRAPPERS) {
       if (!text.startsWith(open, first)) continue
@@ -244,15 +278,17 @@ function scanner(text: string) {
       const end = closerAt(close, start)
       if (end <= start || end >= line || end - start > WRAPPED_VALUE_MAX) continue
       // 值里有占位符时到占位符为止，和不写在符号里一样（去掉结尾的空白）
-      const placeholder = text.indexOf(CREDENTIAL_PLACEHOLDER_START, start)
-      let stop = placeholder !== -1 && placeholder < end ? placeholder : end
+      const placeholder = placeholderAt(start)
+      let stop = placeholder < end ? placeholder : end
       while (stop > start && /\s/.test(text[stop - 1]!)) stop--
-      if (stop > start) return { start, end: stop }
+      if (stop === start) return null
+      return { start, end: stop, extendedEnd: stop }
     }
-    let end = valueEnd(first)
-    // 结尾的逗号、句号是句子的标点；感叹号、问号常是密码的一部分，留着
-    while (end > first + 1 && ',.;:'.includes(text[end - 1]!)) end--
-    return { start: first, end: Math.max(end, first + 1) }
+    return {
+      start: first,
+      end: trimSentence(first, valueEnd(first)),
+      extendedEnd: trimSentence(first, extendedEnd(first)),
+    }
   }
 
   // 令牌从 start 起，整串都是值
@@ -277,7 +313,7 @@ function scanner(text: string) {
       TOKEN_TAIL.lastIndex = end
       end += TOKEN_TAIL.exec(text)![0].length
     }
-    return { start, end }
+    return { start, end, extendedEnd: end }
   }
 
   return { labelValue, tokenValue, lineEnd }
@@ -303,17 +339,40 @@ export function findPlaintextCredentials(
   text: string,
   options: { overlapping?: boolean } = {},
 ): PlaintextCredentialMatch[] {
-  const found: PlaintextCredentialMatch[] = []
+  return scanPlaintext(text, options).map(publicMatch)
+}
+
+type ScannedMatch = PlaintextCredentialMatch & { extendedEnd: number }
+
+// 对外只给 PlaintextCredentialMatch 的字段，延伸的值的结尾只在比较新增时用
+const publicMatch = ({
+  start,
+  end,
+  line,
+  kind,
+  field,
+}: ScannedMatch): PlaintextCredentialMatch => ({
+  start,
+  end,
+  line,
+  kind,
+  field,
+})
+
+function scanPlaintext(text: string, options: { overlapping?: boolean }): ScannedMatch[] {
+  const found: ScannedMatch[] = []
   const lineAt = lineCounter(text)
   const scan = scanner(text)
   let last = 0
   for (const m of text.matchAll(PLAINTEXT_ALL)) {
     const label = PLAINTEXT_LABEL.exec(m[0])?.[0]
-    let span: { start: number; end: number }
+    let span: { start: number; end: number; extendedEnd: number }
     let kind: PlaintextKind
     if (label) {
       kind = 'label'
-      span = scan.labelValue(m.index + m[0].length - 1)
+      const value = scan.labelValue(m.index + m[0].length - 1)
+      if (!value) continue
+      span = value
       // 写法后面的值本身是已知格式的令牌（token: ghp_…、secret: -----BEGIN …）：按令牌算，
       // 值取整个令牌（私钥块跨好几行，按写法只取得到第一段）。前面的引号与粗体不算令牌的一部分
       let at = span.start
@@ -345,18 +404,41 @@ export function findPlaintextCredentials(
   return found
 }
 
-// 这次写入新增的疑似明文：after 里检出的值在 before 里没有检出过的（按值的原文比，不看位置与类别）。
-// before 为 null 表示新建。服务端拒绝写入与管理界面保存前的逐处处理都按它判断，两边才一致
+// 后面加注解的开头：全角的左括号与左引号（「hunter2（旧）」）。& 不算，hunter2&NEW 是另一个值
+const ANNOTATION_OPENERS = '（【《「『“‘'
+
+// 这次写入新增的疑似明文：after 里检出的一处，满足下面任一条就是原来就有的，否则算新增。
+// 比较用延伸的值（不在左括号、左引号与 & 处停，见 labelValue），不用截断的值：截断会把 hunter2&old 与
+// hunter2&NEWSECRET 都截成 hunter2。
+// (a) 延伸的值和 before 里某一处的延伸值相同；
+// (b) 延伸的值是 before 里某一处的延伸值，后面再接注解（ANNOTATION_OPENERS 开头的文字）；
+// (c) before 里某一处的延伸值，以这一处的延伸值加一个 VALUE_BREAKS 的字开头：拆开或截短
+//     （token=abc&password=xyz 拆成两行）。
+// before 为 null 表示新建。服务端拒绝写入与管理界面保存前的逐处处理都按它判断，两边才一致；
+// 报出来的每一处仍是截断的值（显示与转存用）
 export function addedPlaintextCredentials(
   before: string | null,
   after: string,
 ): PlaintextCredentialMatch[] {
-  const existing = new Set(
+  const existing =
     before === null
       ? []
-      : findPlaintextCredentials(before).map((m) => before.slice(m.start, m.end)),
-  )
-  return findPlaintextCredentials(after).filter((m) => !existing.has(after.slice(m.start, m.end)))
+      : scanPlaintext(before, {}).map((m) => before.slice(m.start, m.extendedEnd))
+  const exact = new Set(existing)
+  const isExisting = (value: string) =>
+    exact.has(value) ||
+    existing.some(
+      (old) =>
+        (value.length > old.length + 1 &&
+          value.startsWith(old) &&
+          ANNOTATION_OPENERS.includes(value[old.length]!)) ||
+        (old.length > value.length &&
+          old.startsWith(value) &&
+          VALUE_BREAKS.includes(old[value.length]!)),
+    )
+  return scanPlaintext(after, {})
+    .filter((m) => !isExisting(after.slice(m.start, m.extendedEnd)))
+    .map(publicMatch)
 }
 
 // 写入被拒时指出的一处：只有行号与类别，不带值

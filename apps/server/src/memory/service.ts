@@ -197,7 +197,8 @@ export interface MemoryContext {
   secretRead?: 'explicit' | 'audited'
   // 这次写下的事件都带上这些 context：测试台的标记（bench: { account, run }）
   eventContext?: Record<string, unknown>
-  // 管理界面里的空间 owner：能带着疑似明文照样写入（allowPlaintext）
+  // 管理界面里的空间 owner：从 secret 降级时能带着疑似明文强制降级（allowPlaintext）。
+  // 照样写入（allowPlaintext 放行写入拦截）给能改这条记忆的成员，不看它
   spaceOwner?: boolean
 }
 
@@ -237,8 +238,9 @@ export type CreateInput = CreateMemoryRequest & PlaintextFlags
 export type UpdateInput = UpdateMemoryRequest & PlaintextFlags
 
 // ignorePlaintext：写入后的正文记为「已忽略」，和忽略明文提示的效果相同。结果是 secret 或正文不像明文时不记；
-// 写入之前的正文里已有没处理的疑似明文时也不记（pendingBefore）：哈希管的是整段正文，记下就替旧的那几处做了决定，
-// 这次只放行写入，记忆照旧留在待处理
+// 写入之前的正文里已有没处理的疑似明文、而且其中有的在新正文里还在时也不记（pendingBefore）：
+// 哈希管的是整段正文，记下就替旧的那几处做了决定，这次只放行写入，记忆照旧留在待处理。
+// 旧的那几处这次都删掉了的照常记
 function ignoresPlaintext(
   input: PlaintextFlags,
   content: string,
@@ -289,8 +291,8 @@ const PLAINTEXT_DOWNGRADE =
 // 从机密降级时的强制只给空间所有者
 const PLAINTEXT_DOWNGRADE_OWNER =
   '正文疑似含明文密码或令牌，从机密（secret）降级需要空间所有者确认。请先把值换成凭据占位符，再降级。'
-// 写入时放行疑似明文的标记各自只给一边（见 contracts 的 CreateMemoryRequest）。路由的 schema 已经去掉了
-// 给错一边的标记，这几句只在内部调用传错时出现
+// 写入时放行疑似明文的标记各自只给一边（见 contracts 的 CreateMemoryRequest）。经 HTTP 走不到这几句：
+// 两边路由的 schema 已经去掉了给错一边的标记。留着挡内部调用（直接调服务时传错了标记）
 const PLAINTEXT_ALLOW_KEY = '通过 Key 无法强制降级，请在管理界面由空间所有者确认'
 const PLAINTEXT_IGNORE_KEY =
   '通过 Key 无法忽略明文提示。确实不是凭据时带上 plaintextOk（MCP 工具的参数为 plaintext_ok）'
@@ -1097,7 +1099,8 @@ export class MemoryService {
 
   // 放行疑似明文的标记各自只给一边：plaintextOk 给 Key，ignorePlaintext 与 allowPlaintext 给管理界面，
   // 能改这条记忆的成员都能用（从机密强制降级另外只给空间 owner，见 applyUpdate）。
-  // 规则会误判，留一个由人确认的出口；被诱导的 agent 不能自己忽略
+  // 规则会误判，留一个由人确认的出口；被诱导的 agent 不能自己忽略。
+  // 经 HTTP 时 schema 已经去掉了给错一边的标记，这里只挡内部调用
   private checkPlaintextFlags(input: PlaintextFlags): void {
     if (this.viaKey) {
       if (input.allowPlaintext) throw new MemoryError(403, PLAINTEXT_ALLOW_KEY)
@@ -1433,11 +1436,14 @@ export class MemoryService {
     if (meta.plaintextGate && input.content !== undefined) {
       this.checkAddedPlaintext(input, beforeContent, input.content, sensitivity)
     }
-    // 写入之前就在待处理里的疑似明文（明文的正文像明文，提示没被忽略）
+    // 写入之前就在待处理里的疑似明文（明文的正文像明文，提示没被忽略），其中有的在新正文里还在。
+    // 只有带着 ignorePlaintext 时用得上，不带时不算
     const pendingBefore =
+      !!input.ignorePlaintext &&
       before.content !== null &&
       looksLikePlaintextCredential(before.content) &&
-      !plaintextIgnored(before)
+      !plaintextIgnored(before) &&
+      hasExistingPlaintext(before.content, plaintext)
     const ignored = ignoresPlaintext(input, plaintext, sensitivity, pendingBefore)
     const body =
       sensitivity === 'secret'
@@ -1526,7 +1532,9 @@ export class MemoryService {
     if (ignored && !(plaintext === before.content && plaintextIgnored(before))) {
       await this.ignoredEvent(tx, row, glossary)
     }
+    // 只有带 plaintext_ok 的 MCP 调用用得上（见 hasUntouchedPlaintext），别的修改不算
     const untouched =
+      !!input.plaintextOk &&
       sensitivity !== 'secret' &&
       !plaintextIgnored(row) &&
       beforeContent !== null &&
