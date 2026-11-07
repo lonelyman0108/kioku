@@ -181,6 +181,7 @@ describe.skipIf(!testDatabaseUrl)('SQL 过滤与 canRead 一致', () => {
     writeLayers: [...LAYERS],
     maxSensitivity: 'secret',
     admin: false,
+    credentials: 'none',
   }
   const cases: [string, KeyScopes, SessionContext][] = [
     ['无上下文 · 全权限', full, {}],

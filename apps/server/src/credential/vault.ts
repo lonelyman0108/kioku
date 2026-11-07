@@ -1,0 +1,646 @@
+import { createHash, randomUUID } from 'node:crypto'
+
+import {
+  CREDENTIAL_ACCESS_REASON_NAMES,
+  VAULT_DISABLED_REASON_NAMES,
+  type ConnectVaultRequest,
+  type CredentialAccessReason,
+  type ReconnectVaultRequest,
+  type VaultConnection,
+  type VaultConnectionList,
+  type VaultConnectResult,
+  type VaultDisabledReason,
+  type VaultErrorKind,
+  type VaultItemList,
+} from '@kioku/contracts'
+import { and, asc, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
+
+import { decryptSecret, encryptSecret } from '../crypto/envelope'
+import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
+import { withSpace, type Db, type Tx } from '../db/client'
+import { credentials, vaultConnections } from '../db/schema'
+import { MemoryError } from '../memory/service'
+import {
+  VaultError,
+  type VaultClient,
+  type VaultLoginInput,
+  type VaultSecrets,
+  type VaultSession,
+  type VaultSnapshot,
+} from './bitwarden/types'
+
+export type ConnectionRow = typeof vaultConnections.$inferSelect
+
+// 刷新令牌与账户密钥整体加密，aad 绑定连接 id：把一个连接的密文挪到别的连接上会解密失败
+export const vaultAad = (id: string) => `vault-connection:${id}`
+
+export function sealVaultSecrets(
+  masterKey: MasterKey,
+  id: string,
+  secrets: VaultSecrets,
+): { ciphertext: Buffer; wrappedKey: Buffer; keyId: string } {
+  const { key, id: keyId } = encryptionKey(masterKey)
+  const text = JSON.stringify({
+    refreshToken: secrets.refreshToken,
+    userKey: secrets.userKey.toString('base64'),
+  })
+  return { ...encryptSecret(key, text, vaultAad(id)), keyId }
+}
+
+export function openVaultSecrets(
+  masterKey: MasterKey,
+  row: { id: string; ciphertext: Buffer; wrappedKey: Buffer; keyId: string | null },
+): VaultSecrets {
+  const text = decryptSecret(
+    decryptionKey(masterKey, row.keyId),
+    { ciphertext: row.ciphertext, wrappedKey: row.wrappedKey },
+    vaultAad(row.id),
+  )
+  const parsed = JSON.parse(text) as { refreshToken: string; userKey: string }
+  return { refreshToken: parsed.refreshToken, userKey: Buffer.from(parsed.userKey, 'base64') }
+}
+
+// 专用账号的检查：有不属于组织的条目，或在某个组织里看得到全部集合时不能用。看全部集合的不只是所有者、管理员，
+// Vaultwarden 还有开了「访问全部集合」的普通成员，所以以 allCollections 为准，角色只作兜底
+export function snapshotViolation(snapshot: VaultSnapshot): VaultDisabledReason | null {
+  if (snapshot.personalItemCount > 0) return 'personal_items'
+  if (
+    snapshot.organizations.some((o) => o.allCollections || o.role === 'owner' || o.role === 'admin')
+  ) {
+    return 'organization_role'
+  }
+  return null
+}
+
+const VIOLATION_TEXT: Record<VaultDisabledReason, string> = {
+  personal_items:
+    '这个账号里有不属于组织的条目（个人条目）。Kioku 只接专用账号：请把要给 agent 用的条目移进组织的集合，个人条目清空后再连接。',
+  organization_role:
+    '这个账号在组织里看得到全部集合（所有者、管理员，或开了「访问全部集合」）。Kioku 只接专用账号：请把它的角色改成用户、关掉「访问全部集合」，只分配给 agent 用的集合。',
+}
+
+// 同步时发现违规、连接刚被停用：这次调用以「连接已停用」失败
+export class VaultDisabledError extends Error {
+  constructor(readonly reason: VaultDisabledReason) {
+    super(VAULT_DISABLED_REASON_NAMES[reason])
+    this.name = 'VaultDisabledError'
+  }
+}
+
+// 密码库的错误对应的取用原因
+export function vaultReason(kind: VaultErrorKind): CredentialAccessReason {
+  switch (kind) {
+    case 'reauth_required':
+    case 'item_unavailable':
+    case 'unreachable':
+      return kind
+    default:
+      return 'vault_error'
+  }
+}
+
+// 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的
+const CONNECTION_ERRORS = new Set<VaultErrorKind>([
+  'unreachable',
+  'server_error',
+  'unsupported_format',
+  'integrity',
+])
+
+// 一次和密码库通信的结果，按它更新连接：成功（或只是条目不可用）清掉最近的错误并记下检查时间；
+// 刷新令牌失效改成需要重新登录；连不上与认不出的内容记进最近的错误，状态不变
+export type VaultOutcome =
+  { kind: 'ok' } | { kind: 'disabled' } | { kind: 'error'; error: VaultErrorKind }
+
+function loginFailure(err: unknown): never {
+  if (!(err instanceof VaultError)) throw err
+  switch (err.kind) {
+    case 'invalid_credentials':
+      throw new MemoryError(400, '邮箱或主密码不正确')
+    case 'two_factor_invalid':
+      throw new MemoryError(400, '两步验证码不正确或已过期')
+    case 'unsupported_two_factor':
+      throw new MemoryError(400, '账号的两步验证方式不受支持：只支持验证器应用与邮件验证码')
+    case 'unreachable':
+      throw new MemoryError(502, '密码库无法连接，请检查服务器地址后重试')
+    default:
+      throw new MemoryError(502, '密码库返回的内容无法识别')
+  }
+}
+
+// 密文的指纹：会话缓存按它认出连接是不是被重新登录、断开过
+const stampOf = (ciphertext: Buffer) => createHash('sha256').update(ciphertext).digest('hex')
+
+interface CachedSession {
+  stamp: string
+  ciphertext: Buffer
+  session: VaultSession
+}
+
+// 会话按连接缓存在进程里（访问令牌与组织密钥在会话的内存里），按客户端分开：测试里每个用例一个假客户端
+const SESSIONS = new WeakMap<VaultClient, Map<string, CachedSession>>()
+
+// 正在连接或重新登录的成员（空间 + 成员）。密钥派生可能很慢、在进程里排队一次只跑一个，
+// 同一个成员重复提交会排出很长的队，所以同时只收一个，后来的直接 409。只记在内存里，请求结束就释放
+const LOGINS_IN_FLIGHT = new Set<string>()
+
+function sessionsOf(client: VaultClient): Map<string, CachedSession> {
+  let map = SESSIONS.get(client)
+  if (!map) {
+    map = new Map()
+    SESSIONS.set(client, map)
+  }
+  return map
+}
+
+export interface VaultContext {
+  db: Db
+  spaceId: string
+  ownerAccountId: string
+  masterKey: MasterKey | null
+  client: VaultClient
+}
+
+// 一个成员的密码库连接。权限由调用方（CredentialService）先判断，这里只按所有者找连接，别人的和不存在一样是 404。
+// 不在事务里请求密码库：先在短事务里读，事务外请求，再开短事务写结果
+export class VaultConnections {
+  constructor(private readonly ctx: VaultContext) {}
+
+  private run<T>(fn: (tx: Tx) => Promise<T>): Promise<T> {
+    return withSpace(this.ctx.db, this.ctx.spaceId, fn)
+  }
+
+  private get cache(): Map<string, CachedSession> {
+    return sessionsOf(this.ctx.client)
+  }
+
+  private requireMasterKey(): MasterKey {
+    if (!this.ctx.masterKey) {
+      throw new MemoryError(400, '服务端未配置 KIOKU_MASTER_KEY，无法连接密码库')
+    }
+    return this.ctx.masterKey
+  }
+
+  private async own(tx: Tx, id: string): Promise<ConnectionRow> {
+    const [row] = await tx
+      .select()
+      .from(vaultConnections)
+      .where(
+        and(
+          eq(vaultConnections.id, id),
+          eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId),
+        ),
+      )
+    if (!row) throw new MemoryError(404, '密码库连接不存在')
+    return row
+  }
+
+  // 按 id 读一个连接（含密文），取用凭据时用
+  async load(tx: Tx, id: string): Promise<ConnectionRow | undefined> {
+    const [row] = await tx
+      .select()
+      .from(vaultConnections)
+      .where(
+        and(
+          eq(vaultConnections.id, id),
+          eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId),
+        ),
+      )
+    return row
+  }
+
+  private async counts(tx: Tx, ids: string[]): Promise<Map<string, number>> {
+    if (!ids.length) return new Map()
+    const rows = await tx
+      .select({ id: credentials.vaultConnectionId, n: count() })
+      .from(credentials)
+      .where(and(inArray(credentials.vaultConnectionId, ids), isNull(credentials.deletedAt)))
+      .groupBy(credentials.vaultConnectionId)
+    return new Map(rows.map((r) => [r.id!, r.n]))
+  }
+
+  private view(row: ConnectionRow, credentialCount: number): VaultConnection {
+    return {
+      id: row.id,
+      serverUrl: row.serverUrl,
+      email: row.email,
+      status: row.status,
+      disabledReason: row.disabledReason,
+      lastError:
+        row.lastErrorKind && row.lastErrorAt
+          ? { kind: row.lastErrorKind, at: row.lastErrorAt.toISOString() }
+          : null,
+      lastCheckedAt: row.lastCheckedAt?.toISOString() ?? null,
+      disconnectedAt: row.disconnectedAt?.toISOString() ?? null,
+      credentialCount,
+      createdAt: row.createdAt.toISOString(),
+      updatedAt: row.updatedAt.toISOString(),
+    }
+  }
+
+  private async viewOf(tx: Tx, row: ConnectionRow): Promise<VaultConnection> {
+    return this.view(row, (await this.counts(tx, [row.id])).get(row.id) ?? 0)
+  }
+
+  async list(): Promise<VaultConnectionList> {
+    return this.run(async (tx) => {
+      const rows = await tx
+        .select()
+        .from(vaultConnections)
+        .where(eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId))
+        .orderBy(asc(vaultConnections.createdAt), asc(vaultConnections.id))
+      const counts = await this.counts(
+        tx,
+        rows.map((r) => r.id),
+      )
+      return { items: rows.map((r) => this.view(r, counts.get(r.id) ?? 0)) }
+    })
+  }
+
+  // 连接一个账号。同一个账号（同一服务器上的账号 id）已经有连接时（包括已断开的）复用那一行
+  private async exclusive<T>(fn: () => Promise<T>): Promise<T> {
+    const key = `${this.ctx.spaceId}/${this.ctx.ownerAccountId}`
+    if (LOGINS_IN_FLIGHT.has(key)) {
+      throw new MemoryError(409, '正在处理上一次的连接请求，请等它结束后再试')
+    }
+    LOGINS_IN_FLIGHT.add(key)
+    try {
+      return await fn()
+    } finally {
+      LOGINS_IN_FLIGHT.delete(key)
+    }
+  }
+
+  async connect(input: ConnectVaultRequest): Promise<VaultConnectResult> {
+    return this.exclusive(() => this.connectOnce(input))
+  }
+
+  async reconnect(id: string, input: ReconnectVaultRequest): Promise<VaultConnectResult> {
+    return this.exclusive(() => this.reconnectOnce(id, input))
+  }
+
+  private async connectOnce(input: ConnectVaultRequest): Promise<VaultConnectResult> {
+    this.requireMasterKey()
+    // 同一个邮箱连过就沿用设备 id，密码库的设备列表里不会多出一台 Kioku
+    const [known] = await this.run((tx) =>
+      tx
+        .select({ deviceId: vaultConnections.deviceId })
+        .from(vaultConnections)
+        .where(
+          and(
+            eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId),
+            eq(vaultConnections.serverUrl, input.serverUrl),
+            sql`lower(${vaultConnections.email}) = lower(${input.email})`,
+          ),
+        )
+        .limit(1),
+    )
+    return this.login(
+      {
+        serverUrl: input.serverUrl,
+        email: input.email,
+        masterPassword: input.masterPassword,
+        deviceId: known?.deviceId ?? randomUUID(),
+        ...(input.twoFactor ? { twoFactor: input.twoFactor } : {}),
+      },
+      null,
+    )
+  }
+
+  // 重新登录：服务器与账号不变，登录到别的账号时拒绝
+  private async reconnectOnce(
+    id: string,
+    input: ReconnectVaultRequest,
+  ): Promise<VaultConnectResult> {
+    this.requireMasterKey()
+    const row = await this.run((tx) => this.own(tx, id))
+    return this.login(
+      {
+        serverUrl: row.serverUrl,
+        email: input.email ?? row.email,
+        masterPassword: input.masterPassword,
+        deviceId: row.deviceId,
+        ...(input.twoFactor ? { twoFactor: input.twoFactor } : {}),
+      },
+      row,
+    )
+  }
+
+  private async login(
+    input: VaultLoginInput,
+    expected: ConnectionRow | null,
+  ): Promise<VaultConnectResult> {
+    const masterKey = this.requireMasterKey()
+    const result = await this.ctx.client.login(input).catch(loginFailure)
+    if (result.kind === 'two_factor_required') {
+      return { kind: 'two_factor_required', providers: result.providers }
+    }
+    if (expected && result.account.userId !== expected.vaultUserId) {
+      throw new MemoryError(
+        409,
+        '登录的账号与这个连接不同。要连接别的账号，请新建连接，再给条目起标识。',
+      )
+    }
+    let id = expected?.id ?? ''
+    // 保存之前会话换了刷新令牌的话，存新的；保存之后由 persist 写库
+    let secrets = result.secrets
+    let persist: ((next: VaultSecrets) => Promise<void>) | null = null
+    let entry: CachedSession | null = null
+    const session = this.ctx.client.session({
+      serverUrl: input.serverUrl,
+      deviceId: input.deviceId,
+      secrets,
+      onSecretsChanged: async (next) => {
+        secrets = next
+        if (persist) await persist(next)
+      },
+      onSynced: async (snapshot) => {
+        if (entry) await this.synced(id, snapshot)
+      },
+    })
+    const snapshot = await session.snapshot().catch(loginFailure)
+    const violation = snapshotViolation(snapshot)
+    if (violation) throw new MemoryError(400, VIOLATION_TEXT[violation])
+
+    const saved = await this.run(async (tx) => {
+      const [same] = await tx
+        .select()
+        .from(vaultConnections)
+        .where(
+          and(
+            eq(vaultConnections.ownerAccountId, this.ctx.ownerAccountId),
+            eq(vaultConnections.serverUrl, input.serverUrl),
+            eq(vaultConnections.vaultUserId, result.account.userId),
+          ),
+        )
+        .for('update')
+      id = same?.id ?? randomUUID()
+      const now = new Date()
+      const columns = {
+        email: result.account.email,
+        deviceId: input.deviceId,
+        ...sealVaultSecrets(masterKey, id, secrets),
+        status: 'ok' as const,
+        disabledReason: null,
+        lastErrorKind: null,
+        lastErrorAt: null,
+        lastCheckedAt: now,
+        disconnectedAt: null,
+        updatedAt: now,
+      }
+      const [row] = same
+        ? await tx
+            .update(vaultConnections)
+            .set(columns)
+            .where(eq(vaultConnections.id, id))
+            .returning()
+        : await tx
+            .insert(vaultConnections)
+            .values({
+              id,
+              spaceId: this.ctx.spaceId,
+              ownerAccountId: this.ctx.ownerAccountId,
+              serverUrl: input.serverUrl,
+              vaultUserId: result.account.userId,
+              ...columns,
+            })
+            .returning()
+      return { row: row!, view: await this.viewOf(tx, row!) }
+    })
+    entry = { stamp: stampOf(saved.row.ciphertext!), ciphertext: saved.row.ciphertext!, session }
+    const cached = entry
+    persist = (next) => this.saveSecrets(id, cached, next)
+    this.cache.set(id, cached)
+    return { kind: 'connected', connection: saved.view }
+  }
+
+  // 会话换了刷新令牌：密文没被别的请求换掉（重新登录、断开）时才写，写了就跟着更新缓存的指纹
+  private async saveSecrets(id: string, entry: CachedSession, next: VaultSecrets): Promise<void> {
+    const masterKey = this.requireMasterKey()
+    const sealed = sealVaultSecrets(masterKey, id, next)
+    const [row] = await this.run((tx) =>
+      tx
+        .update(vaultConnections)
+        .set({ ...sealed, updatedAt: new Date() })
+        .where(
+          and(
+            eq(vaultConnections.id, id),
+            eq(vaultConnections.ciphertext, entry.ciphertext),
+            ne(vaultConnections.status, 'disconnected'),
+          ),
+        )
+        .returning({ ciphertext: vaultConnections.ciphertext }),
+    )
+    if (row?.ciphertext) {
+      entry.ciphertext = row.ciphertext
+      entry.stamp = stampOf(row.ciphertext)
+    } else if (this.cache.get(id) === entry) {
+      this.cache.delete(id)
+    }
+  }
+
+  // 每次换到新的访问令牌之后的同步：违规就停用连接，这次调用以「连接已停用」失败。恢复只在 check 与列出条目时做
+  private async synced(id: string, snapshot: VaultSnapshot): Promise<void> {
+    const violation = snapshotViolation(snapshot)
+    if (!violation) return
+    await this.run((tx) =>
+      tx
+        .update(vaultConnections)
+        .set({ status: 'disabled', disabledReason: violation, updatedAt: new Date() })
+        .where(and(eq(vaultConnections.id, id), ne(vaultConnections.status, 'disconnected'))),
+    )
+    throw new VaultDisabledError(violation)
+  }
+
+  // 连接的会话：缓存里有、密文也没变就用它，否则解开密文新建一个。调用方先确认连接没有断开
+  session(row: ConnectionRow): VaultSession {
+    const ciphertext = row.ciphertext!
+    const stamp = stampOf(ciphertext)
+    const cached = this.cache.get(row.id)
+    if (cached && cached.stamp === stamp) return cached.session
+    const masterKey = this.requireMasterKey()
+    const secrets = openVaultSecrets(masterKey, {
+      id: row.id,
+      ciphertext,
+      wrappedKey: row.wrappedKey!,
+      keyId: row.keyId,
+    })
+    const entry: CachedSession = {
+      stamp,
+      ciphertext,
+      session: this.ctx.client.session({
+        serverUrl: row.serverUrl,
+        deviceId: row.deviceId,
+        secrets,
+        onSecretsChanged: (next) => this.saveSecrets(row.id, entry, next),
+        onSynced: (snapshot) => this.synced(row.id, snapshot),
+      }),
+    }
+    this.cache.set(row.id, entry)
+    return entry.session
+  }
+
+  // 按一次通信的结果更新连接，在调用方的事务里。ciphertext 是开始时的密文：期间重新登录过就不改状态
+  async record(tx: Tx, row: ConnectionRow, outcome: VaultOutcome): Promise<void> {
+    const now = new Date()
+    const live = and(eq(vaultConnections.id, row.id), ne(vaultConnections.status, 'disconnected'))
+    if (outcome.kind === 'disabled') return
+    if (outcome.kind === 'ok' || outcome.error === 'item_unavailable') {
+      await tx
+        .update(vaultConnections)
+        .set({ lastErrorKind: null, lastErrorAt: null, lastCheckedAt: now })
+        .where(live)
+      return
+    }
+    if (outcome.error === 'reauth_required') {
+      this.cache.delete(row.id)
+      await tx
+        .update(vaultConnections)
+        .set({ status: 'reauth_required', disabledReason: null, updatedAt: now })
+        .where(
+          and(live, row.ciphertext ? eq(vaultConnections.ciphertext, row.ciphertext) : undefined),
+        )
+      return
+    }
+    if (CONNECTION_ERRORS.has(outcome.error)) {
+      await tx
+        .update(vaultConnections)
+        .set({ lastErrorKind: outcome.error, lastErrorAt: now })
+        .where(live)
+    }
+  }
+
+  // 同步一次：停用的原因消失了就恢复成可用，没消失就照旧停用。连接出错时更新状态、照样返回连接
+  private async sync(
+    row: ConnectionRow,
+  ): Promise<{ snapshot: VaultSnapshot | null; row: ConnectionRow }> {
+    if (row.status === 'disconnected') {
+      throw new MemoryError(409, '连接已断开，请重新登录')
+    }
+    // 刷新令牌已经失效，同步也是同样的结果，不再请求密码库
+    if (row.status === 'reauth_required') return { snapshot: null, row }
+    let snapshot: VaultSnapshot | null = null
+    let outcome: VaultOutcome
+    try {
+      snapshot = await this.session(row).snapshot()
+      outcome = { kind: 'ok' }
+    } catch (err) {
+      if (err instanceof VaultDisabledError) outcome = { kind: 'disabled' }
+      else if (err instanceof VaultError) outcome = { kind: 'error', error: err.kind }
+      else throw err
+    }
+    const updated = await this.run(async (tx) => {
+      if (snapshot) {
+        const violation = snapshotViolation(snapshot)
+        await tx
+          .update(vaultConnections)
+          .set({
+            status: violation ? 'disabled' : 'ok',
+            disabledReason: violation,
+            lastErrorKind: null,
+            lastErrorAt: null,
+            lastCheckedAt: new Date(),
+            updatedAt: new Date(),
+          })
+          .where(and(eq(vaultConnections.id, row.id), ne(vaultConnections.status, 'disconnected')))
+      } else if (outcome.kind === 'disabled') {
+        await tx
+          .update(vaultConnections)
+          .set({ lastErrorKind: null, lastErrorAt: null, lastCheckedAt: new Date() })
+          .where(eq(vaultConnections.id, row.id))
+      } else {
+        await this.record(tx, row, outcome)
+      }
+      return this.own(tx, row.id)
+    })
+    return { snapshot, row: updated }
+  }
+
+  async check(id: string): Promise<VaultConnection> {
+    const row = await this.run((tx) => this.own(tx, id))
+    const { row: updated } = await this.sync(row)
+    return this.run((tx) => this.viewOf(tx, updated))
+  }
+
+  // 列出连接读得到的条目，顺带同步一次。停用、需要重新登录或出错时说明原因
+  async items(id: string): Promise<VaultItemList> {
+    const row = await this.run((tx) => this.own(tx, id))
+    const { snapshot, row: updated } = await this.sync(row)
+    if (!snapshot || updated.status !== 'ok') {
+      const reason: CredentialAccessReason =
+        updated.status === 'disabled'
+          ? 'disabled'
+          : updated.status === 'reauth_required'
+            ? 'reauth_required'
+            : updated.lastErrorKind === 'unreachable'
+              ? 'unreachable'
+              : 'vault_error'
+      const detail =
+        updated.disabledReason !== null
+          ? `：${VAULT_DISABLED_REASON_NAMES[updated.disabledReason]}`
+          : reason === 'reauth_required'
+            ? '，请重新登录'
+            : ''
+      throw new MemoryError(
+        reason === 'unreachable' || reason === 'vault_error' ? 502 : 409,
+        `无法列出条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail}`,
+      )
+    }
+    const bound = await this.run((tx) =>
+      tx
+        .select({
+          id: credentials.id,
+          identifier: credentials.identifier,
+          itemId: credentials.vaultItemId,
+        })
+        .from(credentials)
+        .where(and(eq(credentials.vaultConnectionId, id), isNull(credentials.deletedAt))),
+    )
+    const byItem = new Map(bound.map((b) => [b.itemId!, { id: b.id, identifier: b.identifier }]))
+    return {
+      items: [...snapshot.items]
+        .sort((a, b) => a.name.localeCompare(b.name) || a.id.localeCompare(b.id))
+        .map((item) => ({
+          id: item.id,
+          organizationId: item.organizationId,
+          collectionIds: item.collectionIds,
+          name: item.name,
+          type: item.type,
+          fields: item.fields,
+          revisionDate: item.revisionDate,
+          credential: byItem.get(item.id) ?? null,
+        })),
+      unreadableCount: snapshot.unreadableItemCount,
+      collections: snapshot.collections.map((c) => ({
+        id: c.id,
+        organizationId: c.organizationId,
+        name: c.name,
+      })),
+      organizations: snapshot.organizations.map((o) => ({ id: o.id, name: o.name })),
+    }
+  }
+
+  // 断开：立即清掉令牌与密钥，这一行与指着它的凭据留着。要让 Kioku 手里的旧令牌立即失效，在密码库的设备列表里注销它
+  async disconnect(id: string): Promise<VaultConnection> {
+    this.cache.delete(id)
+    return this.run(async (tx) => {
+      const row = await this.own(tx, id)
+      if (row.status === 'disconnected') return this.viewOf(tx, row)
+      const now = new Date()
+      const [updated] = await tx
+        .update(vaultConnections)
+        .set({
+          ciphertext: null,
+          wrappedKey: null,
+          keyId: null,
+          status: 'disconnected',
+          disabledReason: null,
+          disconnectedAt: now,
+          updatedAt: now,
+        })
+        .where(eq(vaultConnections.id, id))
+        .returning()
+      return this.viewOf(tx, updated!)
+    })
+  }
+}

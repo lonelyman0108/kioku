@@ -3,22 +3,30 @@ import { and, asc, count, eq, gt, isNotNull, isNull, notInArray, sql } from 'dri
 
 import { BACKUP_LABEL, mapBackupKey, sealedBackupKey } from '../backup/settings'
 import { credentialAad } from '../credential/service'
+import { vaultAad } from '../credential/vault'
 import { eachSpace, withSpace, type Db } from '../db/client'
-import { credentials, memories, settings, spaces } from '../db/schema'
+import { credentials, memories, settings, spaces, vaultConnections } from '../db/schema'
 import { mapEmbeddingKeys, sealedEmbeddingKeys } from '../embedding/settings'
 import { EXTRACTION_ENDPOINT, sealedExtractionKey } from '../extraction/settings'
 import { mapEndpointKey, type SealedJson } from '../settings/endpoint'
 import { canUnwrap, rewrapKey, type Sealed } from './envelope'
 import { keyIdOf, keyringOf, type Keyring, type MasterKey } from './keyring'
 
-// 主密钥的准备与轮换。加密的数据有三处：secret 记忆、托管的凭据值、实例设置里的接口 Key，
+// 主密钥的准备与轮换。加密的数据有四处：secret 记忆、托管的凭据值、密码库连接的令牌与账户密钥、实例设置里的接口 Key，
 // 都是信封加密：正文用各自的数据密钥加密，数据密钥再由主密钥包装，旁边记着主密钥的标识。
 // 轮换只换数据密钥的包装，正文的密文不动
 
-// 记忆与凭据：加密的行、aad 怎么算。查询都带上 wrapped_key 不为空：key_id 的索引只建在加密的行上
+// 记忆、凭据与密码库连接：加密的行、aad 怎么算。查询都带上 wrapped_key 不为空：key_id 的索引只建在加密的行上。
+// 已软删除的凭据、断开之外的连接都在里面（断开的没有密文）
 const TABLES = [
   { field: 'memories', label: '机密记忆', table: memories, aad: (id: string) => id },
   { field: 'credentials', label: '托管的凭据', table: credentials, aad: credentialAad },
+  {
+    field: 'vaultConnections',
+    label: '密码库连接',
+    table: vaultConnections,
+    aad: vaultAad,
+  },
 ] as const
 
 // 实例设置里加密保存的接口 Key：怎么读出（不解密）、怎么逐个改写（change 原样返回就不写回）。
@@ -264,7 +272,8 @@ export async function rotateMasterKey(
     )
   }
   const { remaining } = await masterKeyStatus(db, masterKey)
-  const left = remaining.memories + remaining.credentials + remaining.settings
+  const left =
+    remaining.memories + remaining.credentials + remaining.vaultConnections + remaining.settings
   if (!left) await clearMasterKeyError(db)
   return { rewrapped, remaining: left }
 }
@@ -275,7 +284,7 @@ export async function masterKeyStatus(
 ): Promise<MasterKeyStatus> {
   const ring = masterKey ? keyringOf(masterKey) : null
   const previousId = ring?.previous ? keyIdOf(ring.previous) : null
-  const remaining = { memories: 0, credentials: 0, settings: 0 }
+  const remaining = { memories: 0, credentials: 0, vaultConnections: 0, settings: 0 }
   let lastError: MasterKeyStatus['lastError'] = null
   if (previousId) {
     // 几个空间同时数，和实例的向量覆盖率一样（eachSpace）：轮换时卡片会一直刷新进度

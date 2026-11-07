@@ -39,7 +39,7 @@ export const VAULT_CONNECTION_STATUS_NAMES: Record<VaultConnectionStatus, string
 
 export const VAULT_DISABLED_REASON_NAMES: Record<VaultDisabledReason, string> = {
   personal_items: '有个人条目',
-  organization_role: '组织角色为所有者或管理员',
+  organization_role: '组织里看得到全部集合',
 }
 
 export const CREDENTIAL_ACCESS_RESULT_NAMES: Record<CredentialAccessResult, string> = {

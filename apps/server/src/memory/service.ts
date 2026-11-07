@@ -85,7 +85,7 @@ import type { PgUpdateSetSource } from 'drizzle-orm/pg-core'
 import {
   canRead,
   canModify,
-  canReadCredential,
+  canUseCredential,
   canWrite,
   canWriteApp,
   canWritePersona,
@@ -156,7 +156,7 @@ import {
 
 export class MemoryError extends Error {
   constructor(
-    readonly status: 400 | 403 | 404 | 409 | 429,
+    readonly status: 400 | 403 | 404 | 409 | 429 | 502,
     message: string,
   ) {
     super(message)
@@ -907,7 +907,7 @@ export class MemoryService {
       .for('share')
     for (const identifier of identifiers) {
       const row = rows.find((r) => r.identifier === identifier)
-      if (!row || !canReadCredential(this.ctx.access, row)) {
+      if (!row || !canUseCredential(this.ctx.access, row)) {
         throw new MemoryError(
           400,
           decrypted ? '正文引用的凭据不存在或不可用' : `凭据不存在或不可用：${identifier}`,
