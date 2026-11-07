@@ -93,6 +93,28 @@ describe('服务器地址', () => {
       expect(VaultServerUrl.safeParse(url).success, url).toBe(false)
     }
   })
+
+  it('不带点的主机名全是数字或十六进制时不收 http：URL 会把它规范成 IPv4 地址', () => {
+    for (const url of [
+      'http://3232235777',
+      'http://3232235777:8080/',
+      'http://2130706433',
+      'http://0300',
+      'http://0xc0a80101',
+      'http://0X7F000001/vw',
+    ]) {
+      expect(VaultServerUrl.safeParse(url).success, url).toBe(false)
+    }
+    // 只是带数字的服务名照收
+    for (const url of [
+      'http://vault2',
+      'http://2fa-vault',
+      'http://0xvault',
+      'https://3232235777',
+    ]) {
+      expect(VaultServerUrl.safeParse(url).success, url).toBe(true)
+    }
+  })
 })
 
 describe('取用的用途', () => {
