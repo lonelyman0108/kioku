@@ -615,9 +615,10 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
         content: '访客网络密码 {{cred:file-server#password}}',
       })
       expect(clean).not.toContain('提醒')
-      expect(await callTool(key, 'kioku_boot', {})).toContain(
-        '凭据占位符：只在当前任务确实要用时才用 kioku_credential 取值',
-      )
+      const boot = await callTool(key, 'kioku_boot', {})
+      expect(boot).toContain('凭据占位符，只在当前任务确实要用时才取值，并写明用途')
+      expect(boot).toContain("`kioku run --purpose '<用途>' -e 变量=<标识>#<字段> -- 命令`")
+      expect(boot).toContain('没有时才用 kioku_credential（purpose 写用途）')
     })
   })
 })

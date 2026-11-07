@@ -13,12 +13,14 @@ import {
   type CredentialAccessResult,
   type CredentialEventList,
   type CredentialField,
+  type CredentialFieldRef,
   type CredentialReferenceList,
   type CredentialSummary,
   type CredentialValues,
   type KeyCreateCredentialRequest,
   type KeyCredentialList,
   type PageQuery,
+  type ResolvedCredentials,
   type UpdateCredentialRequest,
 } from '@kioku/contracts'
 import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, ne, sql } from 'drizzle-orm'
@@ -74,7 +76,7 @@ export interface CredentialContext {
 const MASKED_TEXT_WRITTEN = '值含测试台的占位文字，并非真实内容。如需修改，请到凭据页操作。'
 
 // 取用经由哪里，记在访问事件里
-export type CredentialVia = 'kioku_credential' | 'rest' | 'console' | 'space_export'
+export type CredentialVia = 'kioku_credential' | 'rest' | 'run' | 'console' | 'space_export'
 
 // kioku_get 末尾列出的一条凭据：只说能不能取用，不给值，也不记访问
 export interface PlaceholderCredential {
@@ -199,6 +201,24 @@ function failureError(
   return new MemoryError(reasonStatus(reason), text)
 }
 
+// 一次取几个字段时，错误写出是哪一项（标识#字段），不带任何值
+const refText = (ref: CredentialFieldRef) => `${ref.identifier}#${ref.field}`
+// 取不到值时写在哪：某个字段缺失时写「标识#字段」，整条凭据的失败只写标识
+const failedAt = (identifier: string, field: string | undefined) =>
+  field ? `${identifier}#${field}` : identifier
+
+// 准备过的一个密码库会话
+type PreparedSession = { connection: ConnectionRow; session: VaultSession }
+const refError = (ref: CredentialFieldRef, err: MemoryError) =>
+  new MemoryError(err.status, `${refText(ref)}：${err.message}`)
+
+// 取用前对一条凭据的检查：通过时给出要取的字段；被拒（app 的说法和不存在一样）、不存在、没有这个字段
+type UseCheck =
+  | { kind: 'ok'; row: CredentialRow; fields: CredentialField[] }
+  | { kind: 'denied'; reason: CredentialAccessReason }
+  | { kind: 'not_found' }
+  | { kind: 'no_field'; field: string }
+
 interface AccessRecord {
   via: CredentialVia
   fields: string[]
@@ -211,7 +231,21 @@ interface AccessRecord {
 type Prepared =
   | { kind: 'values'; values: Record<string, string> | null }
   | { kind: 'vault'; connection: ConnectionRow; session: VaultSession }
-  | { kind: 'error'; error: MemoryError }
+  // 失败：错误的文字由抛出的地方组装；field 是引起失败的字段（缺值的那个），整条凭据的失败没有
+  | { kind: 'error'; reason: CredentialAccessReason; detail?: string; field?: string }
+
+// 第二段向密码库取条目的结果，第三段按它记访问事件、更新连接。
+// unexpected 不是密码库报的错（解不开重读的密文、保存新令牌时的数据库错误等），记一条失败后原样抛出
+interface Fetched {
+  connection: ConnectionRow
+  // 这次真正用的会话：重试时换成新建的那个，record 按它判断要删哪个缓存
+  used: VaultSession
+  outcome: VaultOutcome | null
+  result: Record<string, string> | CredentialAccessReason
+  // result 为 field_missing 时，条目里缺的是哪个字段
+  missing?: string
+  unexpected: unknown
+}
 
 export class CredentialService {
   readonly vault: VaultConnections
@@ -586,13 +620,19 @@ export class CredentialService {
     fields: CredentialField[],
     via: CredentialVia,
     purpose: string | undefined,
+    // 托管的先不记交出：一次取几条时，后面的取不到就一个都不给，交出由调用方在最后记
+    deferOk = false,
   ): Promise<Prepared> {
     const names = fields.map((f) => f.name)
     const record = (result: CredentialAccessResult, reason: CredentialAccessReason | null) =>
       this.accessEvent(tx, row.id, { via, fields: names, purpose, result, reason })
-    const fail = async (reason: CredentialAccessReason, detail?: string): Promise<Prepared> => {
+    const fail = async (
+      reason: CredentialAccessReason,
+      detail?: string,
+      field?: string,
+    ): Promise<Prepared> => {
       await record('failed', reason)
-      return { kind: 'error', error: failureError(reason, row.identifier, detail) }
+      return { kind: 'error', reason, ...(detail ? { detail } : {}), ...(field ? { field } : {}) }
     }
     if (this.ctx.bench) return { kind: 'values', values: null }
     if (row.source === 'hosted') {
@@ -604,11 +644,11 @@ export class CredentialService {
         if (err instanceof MemoryError) throw err
         return fail('master_key')
       }
-      await record('ok', null)
-      return {
-        kind: 'values',
-        values: Object.fromEntries(names.flatMap((n) => (n in all ? [[n, all[n]!]] : []))),
-      }
+      // 声明了字段却没有存值：和密码库的条目里缺字段一样算失败
+      const lost = names.find((n) => all[n] === undefined)
+      if (lost !== undefined) return fail('field_missing', undefined, lost)
+      if (!deferOk) await record('ok', null)
+      return { kind: 'values', values: Object.fromEntries(names.map((n) => [n, all[n]!])) }
     }
     const connection = await this.vault.load(tx, row.vaultConnectionId!)
     // 连接不能用了（断开、需要重新登录、停用、被保留期删掉）：缓存里这个连接的会话一并删掉。
@@ -646,14 +686,38 @@ export class CredentialService {
     purpose: string | undefined,
     prepared: Prepared,
   ): Promise<Record<string, string> | null> {
-    if (prepared.kind === 'error') throw prepared.error
+    if (prepared.kind === 'error') {
+      throw failureError(prepared.reason, failedAt(row.identifier, prepared.field), prepared.detail)
+    }
     if (prepared.kind === 'values') return prepared.values
+    const fetched = await this.fetchItem(row, fields, prepared)
+    const { result } = fetched
+    const where = failedAt(row.identifier, fetched.missing)
+    if (fetched.unexpected !== null) {
+      // 记失败本身也可能出错（例如数据库连不上）：记进日志，抛出原来的错误
+      await this.run((tx) => this.settle(tx, row, fields, via, purpose, fetched)).catch(
+        (err: unknown) => logInternalError('凭据取用失败之后记访问事件出错', err),
+      )
+      // 解不开令牌和 prepare 里一样给出「主密钥不可用」；别的意外原样抛出，按内部错误处理
+      if (result === 'master_key') throw failureError(result, where)
+      throw fetched.unexpected
+    }
+    await this.run((tx) => this.settle(tx, row, fields, via, purpose, fetched))
+    if (typeof result === 'string') throw failureError(result, where)
+    return result
+  }
+
+  // 第二段：在事务外向密码库取条目，取出要的字段。不抛错，结果交给 settle 记下
+  private async fetchItem(
+    row: CredentialRow,
+    fields: CredentialField[],
+    prepared: Extract<Prepared, { kind: 'vault' }>,
+  ): Promise<Fetched> {
     let outcome: VaultOutcome | null
     let result: Record<string, string> | CredentialAccessReason
-    // 不是密码库报的错（解不开重读的密文、保存新令牌或停用连接时的数据库错误）：也记一条失败，再原样抛出
+    let missing: string | undefined
     let unexpected: unknown = null
     let connection = prepared.connection
-    // 这次真正用的会话：重试时换成新建的那个，record 按它判断要删哪个缓存
     let used = prepared.session
     try {
       let item: VaultItem
@@ -684,6 +748,9 @@ export class CredentialService {
       }
       outcome = { kind: 'ok' }
       result = itemValues(item, fields)
+      if (result === 'field_missing') {
+        missing = fields.find((f) => itemValues(item, [f]) === 'field_missing')?.name
+      }
     } catch (err) {
       if (err instanceof VaultDisabledError) {
         outcome = { kind: 'disabled' }
@@ -699,32 +766,30 @@ export class CredentialService {
         unexpected = err
       }
     }
-    const names = fields.map((f) => f.name)
-    const finish = (tx: Tx) =>
-      this.accessEvent(tx, row.id, {
-        via,
-        fields: names,
-        purpose,
-        result: typeof result === 'string' ? 'failed' : 'ok',
-        reason: typeof result === 'string' ? result : null,
-      })
-    if (unexpected !== null) {
-      // 记失败本身也可能出错（例如数据库连不上）：记进日志，抛出原来的错误。
-      // 照样确认连接还能不能用，不能用就把缓存里的会话删掉
-      await this.run(async (tx) => {
-        await this.vault.record(tx, connection, null, used)
-        await finish(tx)
-      }).catch((err: unknown) => logInternalError('凭据取用失败之后记访问事件出错', err))
-      // 解不开令牌和 prepare 里一样给出「主密钥不可用」；别的意外原样抛出，按内部错误处理
-      if (result === 'master_key') throw failureError(result, row.identifier)
-      throw unexpected
-    }
-    await this.run(async (tx) => {
-      await this.vault.record(tx, connection, outcome, used)
-      await finish(tx)
+    return { connection, used, outcome, result, ...(missing ? { missing } : {}), unexpected }
+  }
+
+  // 第三段：按取条目的结果更新连接，记一条访问事件（record 为 false 时只更新连接）。
+  // 出了意外的照样确认连接还能不能用，不能用就把缓存里的会话删掉
+  private async settle(
+    tx: Tx,
+    row: CredentialRow,
+    fields: CredentialField[],
+    via: CredentialVia,
+    purpose: string | undefined,
+    fetched: Fetched,
+    record = true,
+  ): Promise<void> {
+    await this.vault.record(tx, fetched.connection, fetched.outcome, fetched.used)
+    if (!record) return
+    const failed = typeof fetched.result === 'string'
+    await this.accessEvent(tx, row.id, {
+      via,
+      fields: fields.map((f) => f.name),
+      purpose,
+      result: failed ? 'failed' : 'ok',
+      reason: failed ? (fetched.result as CredentialAccessReason) : null,
     })
-    if (typeof result === 'string') throw failureError(result, row.identifier)
-    return result
   }
 
   // ---- 管理界面 ----
@@ -945,11 +1010,14 @@ export class CredentialService {
   // 管理界面查看值：托管的与密码库的都给（totp 给验证码），记一条访问事件。和 secret 一样，目前要求是空间 owner
   async reveal(id: string): Promise<CredentialValues> {
     this.requireManage()
+    const sessions: PreparedSession[] = []
     const { row, prepared } = await this.run(async (tx) => {
       const row = await this.ownById(tx, id)
       if (row.deletedAt) throw new MemoryError(409, '这条凭据已删除。请先恢复，再查看。')
-      return { row, prepared: await this.prepare(tx, row, row.fields, 'console', undefined) }
-    })
+      const prepared = await this.prepare(tx, row, row.fields, 'console', undefined)
+      if (prepared.kind === 'vault') sessions.push(prepared)
+      return { row, prepared }
+    }).catch(this.releasingOnError(sessions))
     return { values: (await this.deliver(row, row.fields, 'console', undefined, prepared)) ?? {} }
   }
 
@@ -1037,6 +1105,41 @@ export class CredentialService {
     })
   }
 
+  // 取用前检查一条凭据（use 与 resolve 共用）：能力、范围、会话上下文与限定的应用，存不存在，有没有这些字段。
+  // 凭据存在、取用被拒的记一条被拒；不存在的没有可记的地方，没有这个字段的不记。fieldNames 为 null 时取全部字段
+  private async checkUse(
+    tx: Tx,
+    row: CredentialRow | undefined,
+    fieldNames: string[] | null,
+    via: CredentialVia,
+    purpose: string | undefined,
+  ): Promise<UseCheck> {
+    // 同一个字段要了几次（kioku run 里几个变量取同一个字段）只算一次
+    fieldNames = fieldNames && [...new Set(fieldNames)]
+    const denial = credentialDenial(this.ctx.access, row ?? { appIds: null }, 'use')
+    if (denial) {
+      if (row) {
+        await this.accessEvent(tx, row.id, {
+          via,
+          fields: fieldNames ?? row.fields.map((f) => f.name),
+          purpose,
+          result: 'denied',
+          reason: denial,
+        })
+      }
+      return { kind: 'denied', reason: denial }
+    }
+    if (!row) return { kind: 'not_found' }
+    if (!fieldNames) return { kind: 'ok', row, fields: row.fields }
+    const fields: CredentialField[] = []
+    for (const name of fieldNames) {
+      const field = row.fields.find((f) => f.name === name)
+      if (!field) return { kind: 'no_field', field: name }
+      fields.push(field)
+    }
+    return { kind: 'ok', row, fields }
+  }
+
   // 取用一条凭据：给值（测试台里为 null）与提醒。交出值、被拒或失败时各记一条访问事件
   async use(
     identifier: string,
@@ -1044,35 +1147,232 @@ export class CredentialService {
     via: CredentialVia,
     purpose?: string,
   ): Promise<CredentialAccess> {
+    const sessions: PreparedSession[] = []
     const first = await this.run(async (tx) => {
-      const row = await this.liveByIdentifier(tx, identifier)
-      const denial = credentialDenial(this.ctx.access, row ?? { appIds: null }, 'use')
-      if (denial) {
-        // 凭据存在、取用被拒的也记；不存在的没有可记的地方。说法不看存不存在
-        if (row) {
-          await this.accessEvent(tx, row.id, {
-            via,
-            fields: field ? [field] : row.fields.map((f) => f.name),
-            purpose,
-            result: 'denied',
-            reason: denial,
-          })
-        }
-        return { error: denialError(denial, 'use', identifier) }
+      const check = await this.checkUse(
+        tx,
+        await this.liveByIdentifier(tx, identifier),
+        field ? [field] : null,
+        via,
+        purpose,
+      )
+      // 说法不看存不存在
+      switch (check.kind) {
+        case 'denied':
+          return { error: denialError(check.reason, 'use', identifier) }
+        case 'not_found':
+          return { error: new MemoryError(404, `凭据不存在：${identifier}`) }
+        case 'no_field':
+          return { error: new MemoryError(404, `凭据 ${identifier} 没有字段 ${check.field}`) }
       }
-      if (!row) return { error: new MemoryError(404, `凭据不存在：${identifier}`) }
-      const fields = field ? row.fields.filter((f) => f.name === field) : row.fields
-      if (field && !fields.length) {
-        return { error: new MemoryError(404, `凭据 ${identifier} 没有字段 ${field}`) }
-      }
-      return { row, fields, prepared: await this.prepare(tx, row, fields, via, purpose) }
-    })
+      const { row, fields } = check
+      const prepared = await this.prepare(tx, row, fields, via, purpose)
+      if (prepared.kind === 'vault') sessions.push(prepared)
+      return { row, fields, prepared }
+    }).catch(this.releasingOnError(sessions))
     if ('error' in first) throw first.error
     const values = await this.deliver(first.row, first.fields, via, purpose, first.prepared)
     return {
       credential: this.summary(first.row),
       values,
       notice: CREDENTIAL_NOTICE,
+    }
+  }
+
+  // 准备过的密码库凭据都要经过 vault.record（没有取条目的传 null，只确认连接还能不能用）：
+  // 断开与准备交错时，会话可能在断开提交之后才放回缓存，靠它清掉。出错只记日志，不盖过原来的错误
+  // 同一个连接加同一个会话只确认一次
+  private async recordSessions(tx: Tx, sessions: PreparedSession[]): Promise<void> {
+    const seen = new Map<string, Set<VaultSession>>()
+    for (const { connection, session } of sessions) {
+      const done = seen.get(connection.id) ?? new Set<VaultSession>()
+      if (done.has(session)) continue
+      done.add(session)
+      seen.set(connection.id, done)
+      await this.vault.record(tx, connection, null, session)
+    }
+  }
+
+  private async releaseSessions(sessions: PreparedSession[]): Promise<void> {
+    if (!sessions.length) return
+    await this.run((tx) => this.recordSessions(tx, sessions)).catch((err: unknown) =>
+      logInternalError('凭据取用失败之后确认连接状态出错', err),
+    )
+  }
+
+  // 事务失败回滚时，里面的 vault.record 也跟着回滚了：另开一个事务放掉会话，再抛出原来的错误
+  private releasingOnError(sessions: PreparedSession[]) {
+    return async (err: unknown): Promise<never> => {
+      await this.releaseSessions(sessions)
+      throw err
+    }
+  }
+
+  // kioku run 一次取几个字段，要么全给，要么一个都不给。第一段在一个事务里做完全部的权限与存在性检查，
+  // 都通过了才解开托管的值、确认连接可用；第二段向密码库取条目，同一条凭据只取一次；
+  // 第三段在一个事务里给每条凭据记一条交出（字段合在一起）。被拒与失败的照 use 记，没轮到的不记。
+  // 整条凭据的失败（连接断开、密码库连不上等）只写标识，某个字段缺值时写「标识#字段」
+  async resolve(
+    refs: CredentialFieldRef[],
+    via: CredentialVia,
+    purpose?: string,
+  ): Promise<ResolvedCredentials> {
+    // 测试台里取用不给值，这个接口不在测试台里
+    if (this.ctx.bench) throw new MemoryError(400, '测试台不支持 kioku run 的取值接口')
+    // 按凭据分组，组的顺序是标识第一次出现的顺序；index 是这一项在 refs 里的位置
+    const groups = new Map<string, { ref: CredentialFieldRef; index: number }[]>()
+    refs.forEach((ref, index) => {
+      const group = groups.get(ref.identifier)
+      if (group) group.push({ ref, index })
+      else groups.set(ref.identifier, [{ ref, index }])
+    })
+    type Planned = { row: CredentialRow; fields: CredentialField[] }
+    // 第一段里准备好的密码库会话：没走完的也要 releaseSessions
+    const sessions: PreparedSession[] = []
+
+    const first = await this.run(async (tx) => {
+      const rows = new Map(
+        (
+          await tx
+            .select()
+            .from(credentials)
+            .where(
+              and(
+                eq(credentials.ownerAccountId, this.owner),
+                inArray(credentials.identifier, [...groups.keys()]),
+                isNull(credentials.deletedAt),
+              ),
+            )
+        ).map((r) => [r.identifier, r]),
+      )
+      // 报 refs 里最靠前的那一项
+      let worst: { index: number; error: MemoryError } | undefined
+      const fail = (index: number, error: MemoryError) => {
+        if (!worst || index < worst.index) worst = { index, error }
+      }
+      const planned: Planned[] = []
+      for (const [identifier, group] of groups) {
+        const head = group[0]!
+        const check = await this.checkUse(
+          tx,
+          rows.get(identifier),
+          group.map((g) => g.ref.field),
+          via,
+          purpose,
+        )
+        switch (check.kind) {
+          case 'denied':
+            fail(
+              head.index,
+              check.reason === 'app'
+                ? new MemoryError(404, `${refText(head.ref)}：凭据不存在`)
+                : refError(head.ref, denialError(check.reason, 'use', identifier)),
+            )
+            break
+          case 'not_found':
+            fail(head.index, new MemoryError(404, `${refText(head.ref)}：凭据不存在`))
+            break
+          case 'no_field': {
+            const missing = group.find((g) => g.ref.field === check.field)!
+            fail(missing.index, new MemoryError(404, `${refText(missing.ref)}：凭据没有这个字段`))
+            break
+          }
+          default:
+            planned.push({ row: check.row, fields: check.fields })
+        }
+      }
+      if (worst) return { error: worst.error }
+
+      // 都通过了：托管的解开（先不记交出），密码库的确认连接可用。失败的那条已记好事件
+      const prepared: Prepared[] = []
+      for (const { row, fields } of planned) {
+        const p = await this.prepare(tx, row, fields, via, purpose, true)
+        if (p.kind === 'error') {
+          return { error: failureError(p.reason, failedAt(row.identifier, p.field), p.detail) }
+        }
+        if (p.kind === 'vault') sessions.push(p)
+        prepared.push(p)
+      }
+      return { planned, prepared }
+    }).catch(this.releasingOnError(sessions))
+    if ('error' in first) {
+      await this.releaseSessions(sessions)
+      throw first.error
+    }
+    const { planned, prepared } = first
+
+    // 第二段：依次向密码库取条目，取不到就停
+    const fetched = new Map<number, Fetched>()
+    let failed: number | null = null
+    for (const [i, p] of prepared.entries()) {
+      if (p.kind !== 'vault') continue
+      const f = await this.fetchItem(planned[i]!.row, planned[i]!.fields, p)
+      fetched.set(i, f)
+      if (typeof f.result === 'string') {
+        failed = i
+        break
+      }
+    }
+    // 没轮到取条目的会话；取过的用这次真正用的会话（重试时换过）
+    const unfetched: PreparedSession[] = prepared.flatMap((p, i) =>
+      p.kind === 'vault' && !fetched.has(i) ? [p] : [],
+    )
+    const touched: PreparedSession[] = [
+      ...[...fetched.values()].map((f) => ({ connection: f.connection, session: f.used })),
+      ...unfetched,
+    ]
+    // 取过的都更新连接。有取不到的时只给它记失败，取到了却没交出的不记；没轮到取的只确认连接状态
+    const settleFetched = async (tx: Tx) => {
+      for (const [i, f] of fetched) {
+        const { row, fields } = planned[i]!
+        await this.settle(tx, row, fields, via, purpose, f, failed === null || i === failed)
+      }
+      await this.recordSessions(tx, unfetched)
+    }
+    if (failed !== null) {
+      const f = fetched.get(failed)!
+      const { row } = planned[failed]!
+      const reason = f.result as CredentialAccessReason
+      const where = failedAt(row.identifier, f.missing)
+      if (f.unexpected !== null) {
+        await this.run(settleFetched).catch(async (err: unknown) => {
+          logInternalError('凭据取用失败之后记访问事件出错', err)
+          await this.releaseSessions(touched)
+        })
+        if (reason === 'master_key') throw failureError(reason, where)
+        throw f.unexpected
+      }
+      await this.run(settleFetched).catch(this.releasingOnError(touched))
+      throw failureError(reason, where)
+    }
+
+    // 第三段：都取到了，一起记交出（密码库的在 settleFetched 里记）。失败回滚时另开事务放掉会话
+    await this.run(async (tx) => {
+      await settleFetched(tx)
+      for (const [i, { row, fields }] of planned.entries()) {
+        if (fetched.has(i)) continue
+        await this.accessEvent(tx, row.id, {
+          via,
+          fields: fields.map((f) => f.name),
+          purpose,
+          result: 'ok',
+          reason: null,
+        })
+      }
+    }).catch(this.releasingOnError(touched))
+    const values = new Map<string, Record<string, string>>()
+    for (const [i, { row }] of planned.entries()) {
+      const p = prepared[i]!
+      const got =
+        p.kind === 'values' ? p.values : (fetched.get(i)!.result as Record<string, string>)
+      values.set(row.identifier, got ?? {})
+    }
+    return {
+      values: refs.map((ref) => ({
+        identifier: ref.identifier,
+        field: ref.field,
+        value: values.get(ref.identifier)![ref.field]!,
+      })),
     }
   }
 

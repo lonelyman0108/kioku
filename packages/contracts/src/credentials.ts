@@ -421,6 +421,33 @@ export const CredentialIdentifierQuery = z.object({
   purpose: CredentialPurpose.optional(),
 })
 
+// kioku run 一次取几个字段：每项是一条凭据的一个字段，顺序就是返回的顺序
+export const CREDENTIAL_RESOLVE_MAX = 32
+export const CredentialFieldRef = z.object({
+  identifier: CredentialIdentifier,
+  field: CredentialFieldName,
+})
+export type CredentialFieldRef = z.infer<typeof CredentialFieldRef>
+
+export const ResolveCredentialsRequest = z.object({
+  refs: z
+    .array(CredentialFieldRef)
+    .min(1, '至少需要一项')
+    .max(CREDENTIAL_RESOLVE_MAX, `一次最多 ${CREDENTIAL_RESOLVE_MAX} 项`)
+    .refine(
+      (refs) => new Set(refs.map((r) => `${r.identifier}#${r.field}`)).size === refs.length,
+      '同一个标识与字段不能重复',
+    ),
+  purpose: CredentialPurpose.optional(),
+})
+export type ResolveCredentialsRequest = z.infer<typeof ResolveCredentialsRequest>
+
+// 要么全给，要么一个都不给：任何一项取不到时整次失败，返回错误
+export const ResolvedCredentials = z.object({
+  values: z.array(CredentialFieldRef.extend({ value: z.string() })),
+})
+export type ResolvedCredentials = z.infer<typeof ResolvedCredentials>
+
 export const KeyDeleteCredentialQuery = z.object({
   identifier: CredentialIdentifier,
   expectedVersion: z.coerce.number().int().optional(),
