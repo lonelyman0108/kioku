@@ -109,6 +109,13 @@ export function formatCredentialSummary(
   return `${verb}凭据 ${credentialHead(c)}：${sourceLabel(c)}${stored ? storedText(stored) : ''}，字段 ${fieldList(c)}${expiryText(c)}，版本 ${c.version}`
 }
 
+// 修改的请求什么都没改（值与现在的相同、别的部分也没变）：版本号不变，如实说没有改动。
+// 密码库的值相同时客户端不发修改；「版本 」照旧在行尾
+export function formatCredentialUnchanged(c: CredentialSummary, valuesGiven: boolean): string {
+  const why = valuesGiven && c.source === 'vault' ? '值与密码库里的相同' : '内容与现在的相同'
+  return `凭据 ${credentialHead(c)}没有改动：${why}，版本 ${c.version}`
+}
+
 export const PLAINTEXT_REMINDER =
   '提醒：正文像有明文密码或 Token。凭据用 kioku_credential_save 存起来，正文里换成 {{cred:<标识>#<字段>}} 占位符。'
 

@@ -116,7 +116,8 @@ export interface VaultSession {
   // 在集合里新建一个条目，返回解开的新条目。集合只读时抛 read_only
   createItem(item: VaultNewItem): Promise<VaultItem>
   // 修改条目，返回改后的条目。expectedRevisionDate 是读到条目时的修改时间：期间别处改过就抛 item_conflict，
-  // 不覆盖；条目所在的集合都只读时抛 read_only；不存在、看不到时抛 item_unavailable
+  // 不覆盖；条目所在的集合都只读时抛 read_only；不存在、看不到时抛 item_unavailable。
+  // 值都和现在相同时不发修改，原样返回，修改时间不变：凭据服务按修改时间变没变判断是不是改了值
   updateItem(
     id: string,
     changes: VaultItemChanges,

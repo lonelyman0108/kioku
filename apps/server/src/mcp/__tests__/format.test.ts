@@ -6,6 +6,7 @@ import {
   formatCredentialAccess,
   formatCredentialList,
   formatCredentialSummary,
+  formatCredentialUnchanged,
   formatPlaceholderCredentials,
 } from '../format'
 
@@ -79,6 +80,18 @@ describe('到期与写到哪里', () => {
     )
     expect(formatCredentialSummary('已新建', credential, { kind: 'hosted', bench: true })).toMatch(
       /：Kioku 托管（测试台里不写密码库），字段 password，版本 1$/,
+    )
+  })
+})
+
+describe('没有改动的修改', () => {
+  it('如实说没有改动，密码库的值相同时点明，版本号在行尾', () => {
+    const vault = { ...credential, name: 'NAS', source: 'vault' as const, version: 5 }
+    expect(formatCredentialUnchanged(vault, true)).toBe(
+      '凭据 nas（NAS）没有改动：值与密码库里的相同，版本 5',
+    )
+    expect(formatCredentialUnchanged({ ...vault, source: 'hosted' }, false)).toBe(
+      '凭据 nas（NAS）没有改动：内容与现在的相同，版本 5',
     )
   })
 })

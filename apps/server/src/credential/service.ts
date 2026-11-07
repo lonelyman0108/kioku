@@ -81,6 +81,7 @@ import {
 import { CREDENTIAL_NOTICE } from './methods'
 import { totpCode } from './bitwarden/totp'
 import {
+  isNewerRevision,
   observeRevisions,
   VaultConnections,
   reasonStatus,
@@ -605,7 +606,7 @@ export class CredentialService {
     tx: Tx,
     before: CredentialRow,
     input: ModifyInput,
-    written?: { item: VaultItem; fields: string[]; expected: string },
+    written?: Written,
   ): Promise<CredentialRow> {
     this.checkModify(before, input)
     const hasValues = input.values !== undefined && Object.keys(input.values).length > 0
@@ -663,9 +664,7 @@ export class CredentialService {
     // 写回之后条目的修改时间没变：值都和原来相同，客户端没发修改，不算改了值（不清需要轮换）
     if (written && written.item.revisionDate !== written.expected) {
       changedValues = written.fields
-      set.vaultRevision = written.item.revisionDate
-      const at = new Date(written.item.revisionDate)
-      set.valueChangedAt = Number.isNaN(at.getTime()) ? new Date() : at
+      Object.assign(set, writtenRevision(before, written))
       set.rotationRequestedAt = null
       changes.push('values')
     }
@@ -1033,9 +1032,13 @@ export class CredentialService {
     try {
       const session = this.vault.session(connection)
       item = await session.item(source.itemId)
-      // 集合的名称取会话最近一次同步读到的（取条目时新会话会先同步一次），没有时再同步一次
+      // 集合的名称取会话最近一次同步读到的（取条目时新会话会先同步一次）；没有，或者条目所在的集合
+      // 有缓存里没有的（条目刚被移进新建的集合）时再同步一次
+      const cached = this.vault.collectionsOf(session)
       const collections =
-        this.vault.collectionsOf(session) ?? (await session.snapshot()).collections
+        cached && item.collectionIds.every((id) => cached.some((c) => c.id === id))
+          ? cached
+          : (await session.snapshot()).collections
       collectionName = itemCollectionName(item.collectionIds, collections, connection)
     } catch (err) {
       if (err instanceof VaultDisabledError) {
@@ -1125,7 +1128,11 @@ export class CredentialService {
   // 新凭据写到哪里：测试台与没设去处的托管；设了去处的，三段写进密码库：
   // 短事务读去处与连接、检查标识没被占用、准备会话 → 事务外新建条目 → 短事务按结果更新连接。
   // 返回在建凭据的事务里要做的一步。去处不可用时整次失败，不退回托管
-  private async planNew(input: NewCredentialInput): Promise<NewPlan> {
+  // beforeWrite：解析出密码库的去处之后、写条目之前调用（转存用它先查记忆），托管时不调用
+  private async planNew(
+    input: NewCredentialInput,
+    beforeWrite?: () => Promise<void>,
+  ): Promise<NewPlan> {
     this.requireManage()
     this.rejectMaskedText(input.values)
     if (this.ctx.bench) return { kind: 'hosted', bench: true }
@@ -1154,6 +1161,7 @@ export class CredentialService {
     }).catch(this.releasingOnError(sessions))
     if (!first) return { kind: 'hosted', bench: false }
     const { connection } = first
+    if (beforeWrite) await beforeWrite().catch(this.releasingOnError([first]))
     const { item: newItem, fields } = newVaultItem(connection, input)
     const call = await this.vaultCall(first, (session) => session.createItem(newItem))
     const touched = [{ connection: call.connection, session: call.used }]
@@ -1269,39 +1277,79 @@ export class CredentialService {
       { connection: call.connection, session: call.used },
       ...(reread ? [{ connection: reread.connection, session: reread.used }] : []),
     ]
-    const row = await this.run(async (tx) => {
+    const outcome = await this.run(async (tx) => {
       // 写入本身的错误（只读、冲突、值太长）不在 CONNECTION_ERRORS 里，record 不改连接
       await this.vault.record(tx, call.connection, call.outcome, call.used)
+      // 为了期望的修改时间第一次读到的条目：照「第一次看到」的规则记下，写入成不成功都记，下次不用再读
+      if (before.vaultRevision === null && expected !== null) {
+        await observeRevisions(tx, call.connection.id, [{ id: itemId, revisionDate: expected }])
+      }
       if (reread) {
         await this.vault.record(tx, reread.connection, reread.outcome, reread.used)
         if (reread.error === null) await observeRevisions(tx, call.connection.id, [reread.value!])
       }
       if (call.error !== null) return null
-      return this.recordWriteBack(tx, before.id, input, {
+      return this.recordWriteBack(tx, before, input, {
         item: call.value!,
         fields: changes.names,
         expected: expected!,
       })
     }).catch(this.releasingOnError(touched))
-    if (!row) throw writeFailure(call.error, 'update')
-    return row
+    if (!outcome) throw writeFailure(call.error, 'update')
+    if (outcome.error) throw outcome.error
+    return outcome.row
   }
 
-  // 写回已经落进密码库：不能再因为版本失败。锁住这一行重读，在现在的版本上记下这次写入
-  // （两段之间并发的取用、改名、标轮换都可能让版本变了），名称这些别的改动一起照这次请求改
+  // 写回已经落进密码库：值不能再因为版本失败。锁住这一行重读：
+  // - 版本从第一段起没变、也没被删：照这次请求整个改（值与名称这些别的改动）；
+  // - 版本变过（两段之间别人改了名、收窄了限定的应用、标了轮换，或者取用看到了新的修改时间）：
+  //   只记下写进去的值，别的改动不保存，提交之后返回 409（reason: version），免得盖掉别人的改动；
+  // - 凭据在这期间被删了：照样在那一行记下这次写入（恢复之后状态才对），返回 409（reason: deleted）。
+  // 错误要在事务提交之后再抛，所以这里返回它，不在事务里抛
   private async recordWriteBack(
     tx: Tx,
-    id: string,
+    before: CredentialRow,
     input: ModifyInput,
-    written: { item: VaultItem; fields: string[]; expected: string },
-  ): Promise<CredentialRow> {
+    written: Written,
+  ): Promise<{ row: CredentialRow; error?: MemoryError }> {
     const [current] = await tx
       .select()
       .from(credentials)
-      .where(eq(credentials.id, id))
+      .where(eq(credentials.id, before.id))
       .for('update')
-    if (!current) throw new MemoryError(409, '凭据刚被其他请求删除')
-    return this.modify(tx, current, { ...input, expectedVersion: current.version }, written)
+    if (!current) return { row: before, error: new MemoryError(409, WRITTEN_BUT_GONE) }
+    if (!current.deletedAt && current.version === before.version) {
+      return { row: await this.modify(tx, current, input, written) }
+    }
+    const row = await this.recordWrittenValues(tx, current, written)
+    return current.deletedAt
+      ? {
+          row,
+          error: new MemoryError(409, WRITTEN_BUT_DELETED, undefined, { reason: 'deleted' }),
+        }
+      : { row, error: versionConflict(WRITTEN_BUT_STALE) }
+  }
+
+  // 只记下写回的值（别的改动不动）：版本加一、清掉需要轮换、记一条 values 事件，修改时间照不往回改的规则。
+  // 已删除的行也记。值都和原来相同（修改时间没变）时什么都不记
+  private async recordWrittenValues(
+    tx: Tx,
+    current: CredentialRow,
+    written: Written,
+  ): Promise<CredentialRow> {
+    if (written.item.revisionDate === written.expected) return current
+    const [row] = await tx
+      .update(credentials)
+      .set({
+        ...writtenRevision(current, written),
+        rotationRequestedAt: null,
+        version: sql`${credentials.version} + 1`,
+        updatedAt: new Date(),
+      })
+      .where(eq(credentials.id, current.id))
+      .returning()
+    await this.event(tx, current.id, 'update', { changes: ['values'], fields: written.fields })
+    return row!
   }
 
   // ---- 按值比对（管理界面：按值查找、转存、Lore 导入）----
@@ -1482,12 +1530,21 @@ export class CredentialService {
 
   // 转存的去处（memory 服务的 convertToCredential 用）：credential 与 vault 先在事务外核对这个字段现在的值
   // 确实等于 value，不等时 400（文字不带值）；核对时取条目用的会话照常 vault.record。
-  // 返回占位符要用的标识与字段，以及在转存的事务里要做的一步：hosted 与 vault 建凭据，credential 锁住那条凭据
-  async convertTarget(target: ConvertTarget, value: string): Promise<ConvertSink> {
+  // 返回占位符要用的标识与字段，以及在转存的事务里要做的一步：hosted 与 vault 建凭据，credential 锁住那条凭据。
+  // precheck：新建要写进密码库时，写条目之前调用它先查一遍记忆，查不过就不留下条目
+  async convertTarget(
+    target: ConvertTarget,
+    value: string,
+    precheck?: (placeholder: { identifier: string; field: string }) => Promise<void>,
+  ): Promise<ConvertSink> {
     this.requireManage()
     switch (target.kind) {
       case 'new':
-        return this.newTarget(target, value)
+        return this.newTarget(
+          target,
+          value,
+          precheck && (() => precheck({ identifier: target.identifier, field: target.field })),
+        )
       case 'credential':
         return this.existingTarget(target.credentialId, target.field, value)
       case 'vault':
@@ -1500,6 +1557,7 @@ export class CredentialService {
   private async newTarget(
     target: Extract<ConvertTarget, { kind: 'new' }>,
     value: string,
+    beforeWrite?: () => Promise<void>,
   ): Promise<ConvertSink> {
     const input: NewCredentialInput = {
       identifier: target.identifier,
@@ -1509,7 +1567,7 @@ export class CredentialService {
       url: target.url,
       expiresAt: target.expiresAt,
     }
-    const plan = await this.planNew(input)
+    const plan = await this.planNew(input, beforeWrite)
     const base = { identifier: target.identifier, field: target.field, created: true }
     if (plan.kind === 'hosted') {
       return {
@@ -2594,3 +2652,20 @@ function itemCollectionName(
   const preferred = names.find((c) => c.id === connection.defaultCollectionId)
   return (preferred ?? [...names].sort((a, b) => a.name.localeCompare(b.name))[0])?.name ?? ''
 }
+
+// 写回的结果：写回之后的条目、改了的字段与发给密码库的期望修改时间
+type Written = { item: VaultItem; fields: string[]; expected: string }
+
+// 写回之后要记下的修改时间：和 observeRevisions 一样不往回改，库里已经是更新的（并发的取用看到了别处的又一次修改）就不动
+function writtenRevision(
+  current: Pick<CredentialRow, 'vaultRevision'>,
+  written: Written,
+): { vaultRevision?: string; valueChangedAt?: Date } {
+  const revision = written.item.revisionDate
+  if (current.vaultRevision !== null && !isNewerRevision(revision, current.vaultRevision)) return {}
+  return { vaultRevision: revision, valueChangedAt: revisionDate(revision) ?? new Date() }
+}
+
+const WRITTEN_BUT_STALE = '值已写进密码库，其余改动因凭据已在别处修改而没有保存，请重新读取后再改'
+const WRITTEN_BUT_DELETED = '值已写进密码库，但凭据在此期间被删除'
+const WRITTEN_BUT_GONE = '值已写进密码库，但凭据在此期间被永久清除'

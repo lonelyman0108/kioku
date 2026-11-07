@@ -31,6 +31,7 @@ import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../
 import { credentialServiceForKey } from '../context'
 import { BENCH_VAULT_WRITE, credentialExpiry, CREDENTIAL_ATTENTION } from '../service'
 import { VaultConnections } from '../vault'
+import { MemoryService } from '../../memory/service'
 
 const EMAIL = 'agent@example.com'
 const MASTER = 'correct-master-password'
@@ -902,7 +903,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       )
     }
 
-    it('两段之间版本变了（改名、标需要轮换）：写回照样成功，在现在的版本上记下这次写入', async () => {
+    it('两段之间版本变了（改名、标需要轮换）：值照样记下，别的改动不保存，返回 409', async () => {
       const created = await seed()
       vault.state.beforeWrite = async () => {
         await ok(
@@ -913,18 +914,28 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
           }),
         )
       }
-      const updated = await ok<CredentialSummary>(
+      const err = await failure(
         await keyUpdate({
           identifier: 'nas',
           expectedVersion: 1,
+          name: '这次请求的名称',
           values: { password: 'new-pass' },
         }),
+        409,
       )
-      expect(updated).toMatchObject({ version: 3, name: 'NAS 改名' })
+      expect(err).toEqual({
+        error: '值已写进密码库，其余改动因凭据已在别处修改而没有保存，请重新读取后再改',
+        reason: 'version',
+      })
       const after = await row(created.id)
       const item = vault.stored(after.vaultItemId!)!
       expect(item.values['login.password']).toBe('new-pass')
-      expect(after).toMatchObject({ vaultRevision: item.revisionDate, rotationRequestedAt: null })
+      expect(after).toMatchObject({
+        version: 3,
+        name: 'NAS 改名',
+        vaultRevision: item.revisionDate,
+        rotationRequestedAt: null,
+      })
       expect((await events(created.id))[0]).toMatchObject({
         type: 'update',
         changes: ['values'],
@@ -933,6 +944,162 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       // 下次读到时不把 Kioku 自己写的这一次当成别处的改动
       await ok(await asKey('GET', '/credentials?identifier=nas'))
       expect((await row(created.id)).version).toBe(3)
+    })
+
+    it('两段之间别人收窄了限定的应用：限定还在，值记下了，返回 409', async () => {
+      await withDestination()
+      const created = await ok<CreatedCredential>(
+        await asMember('POST', '/credentials', {
+          identifier: 'nas',
+          name: 'NAS',
+          source: { kind: 'new', values: { password: 'old-pass' } },
+        }),
+        201,
+      )
+      expect(created.appIds).toBeNull()
+      vault.state.beforeWrite = async () => {
+        await ok(
+          await asMember('PATCH', `/credentials/${created.id}`, {
+            expectedVersion: 1,
+            appIds: [appId],
+          }),
+        )
+      }
+      const err = await failure(
+        await asMember('PATCH', `/credentials/${created.id}`, {
+          expectedVersion: 1,
+          appIds: null,
+          values: { password: 'new-pass' },
+        }),
+        409,
+      )
+      expect(err.reason).toBe('version')
+      const after = await row(created.id)
+      expect(after.appIds).toEqual([appId])
+      expect(vault.stored(after.vaultItemId!)!.values['login.password']).toBe('new-pass')
+      expect(after.vaultRevision).toBe(vault.stored(after.vaultItemId!)!.revisionDate)
+      expect((await events(created.id))[0]).toMatchObject({ type: 'update', changes: ['values'] })
+    })
+
+    it('两段之间凭据被删了：照样在那一行记下写入，返回 409 说明值已写进密码库', async () => {
+      const created = await seed()
+      vault.state.beforeWrite = async () => {
+        await expect(
+          asMember('DELETE', `/credentials/${created.id}?expectedVersion=1`),
+        ).resolves.toMatchObject({ status: 204 })
+      }
+      const err = await failure(
+        await keyUpdate({
+          identifier: 'nas',
+          expectedVersion: 1,
+          values: { password: 'new-pass' },
+        }),
+        409,
+      )
+      expect(err).toEqual({ error: '值已写进密码库，但凭据在此期间被删除', reason: 'deleted' })
+      const after = await row(created.id)
+      expect(after.deletedAt).not.toBeNull()
+      expect(after.vaultRevision).toBe(vault.stored(after.vaultItemId!)!.revisionDate)
+      expect((await events(created.id))[0]).toMatchObject({ type: 'update', changes: ['values'] })
+    })
+
+    it('写回不把修改时间往回改：库里已经记下了更新的，就不动', async () => {
+      const created = await seed()
+      const later = '2099-01-01T00:00:00.000Z'
+      // 记写回结果之前，并发的取用已经记下了别处又一次修改的时间
+      const original = VaultConnections.prototype.record
+      const spy = vi
+        .spyOn(VaultConnections.prototype, 'record')
+        .mockImplementationOnce(async function (this: VaultConnections, tx, ...rest) {
+          await tx
+            .update(credentials)
+            .set({ vaultRevision: later })
+            .where(eq(credentials.id, created.id))
+          return original.call(this, tx, ...rest)
+        })
+      await ok(
+        await keyUpdate({
+          identifier: 'nas',
+          expectedVersion: 1,
+          values: { password: 'new-pass' },
+        }),
+      )
+      spy.mockRestore()
+      expect((await row(created.id)).vaultRevision).toBe(later)
+    })
+
+    it('修改时间第一次读到就存下：写入成不成功都记，下次不用再读', async () => {
+      const created = await seed()
+      const itemId = (await row(created.id)).vaultItemId!
+      const clear = () =>
+        withSpace(database.db, ws.spaceId, (tx) =>
+          tx.update(credentials).set({ vaultRevision: null }).where(eq(credentials.id, created.id)),
+        )
+      // 值相同：客户端不发修改，读到的修改时间照样记下，版本不变
+      await clear()
+      await ok(
+        await keyUpdate({
+          identifier: 'nas',
+          expectedVersion: 1,
+          values: { password: 'old-pass' },
+        }),
+      )
+      expect(await row(created.id)).toMatchObject({
+        vaultRevision: vault.stored(itemId)!.revisionDate,
+        version: 1,
+      })
+      // 写入失败（集合只读）也记
+      await clear()
+      vault.state.collections[0]!.readOnly = true
+      await failure(
+        await keyUpdate({ identifier: 'nas', expectedVersion: 1, values: { password: 'x' } }),
+        409,
+      )
+      expect((await row(created.id)).vaultRevision).toBe(vault.stored(itemId)!.revisionDate)
+    })
+
+    it('起标识时条目所在的集合不在缓存里：再同步一次取名称', async () => {
+      const connection = await connect()
+      vault.state.collections.push({ id: 'col-new', name: '新集合', readOnly: false })
+      const itemId = vault.addItem({
+        name: '路由器',
+        values: { 'login.password': 'r' },
+        collectionId: 'col-new',
+      })
+      const snapshots = vault.calls.snapshot
+      const bound = await ok<CreatedCredential>(
+        await asMember('POST', '/credentials', {
+          identifier: 'router',
+          name: '路由器',
+          source: { kind: 'vault', connectionId: connection.id, itemId },
+        }),
+        201,
+      )
+      expect(bound.storedIn).toEqual({ kind: 'vault', collectionName: '新集合' })
+      expect(vault.calls.snapshot).toBe(snapshots + 1)
+    })
+
+    it('转存托管时不先查记忆：预检查只在写进密码库之前跑', async () => {
+      const spy = vi.spyOn(MemoryService.prototype, 'checkConvertible')
+      const m = await ok<MemoryView>(
+        await asMember('POST', '/memories', {
+          uri: 'user://notes/wifi',
+          content: '无线密码：wifi-pass-1',
+          sensitivity: 'private',
+          allowPlaintext: true,
+        }),
+        201,
+      )
+      await ok(
+        await asMember('POST', '/memories/convert-to-credential', {
+          memoryId: m.id,
+          expectedVersion: m.version,
+          value: 'wifi-pass-1',
+          target: { kind: 'new', identifier: 'wifi', name: '无线网络', field: 'password' },
+        }),
+      )
+      expect(spy).not.toHaveBeenCalled()
+      spy.mockRestore()
     })
 
     it('写回相同的值：条目不变，不算改了值，需要轮换留着；托管的对照', async () => {
@@ -952,6 +1119,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         }),
       )
       expect(same.version).toBe(2)
+      // REST 的响应版本号不变，就是没有改动；事件也不记
+      expect((await events(created.id))[0]!.changes).toEqual(['needsRotation'])
       const after = await row(created.id)
       expect(after.vaultRevision).toBe(revision)
       expect(after.rotationRequestedAt).not.toBeNull()

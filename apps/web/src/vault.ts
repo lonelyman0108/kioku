@@ -239,6 +239,12 @@ export function writeFailureNext(err: unknown): WriteFailureNext {
         reload: false,
         detail: '值超出密码库的长度上限。可以缩短值，或清除去处改由 Kioku 托管。',
       }
+    // 值已写进密码库，凭据却在这期间被删除：服务端已在被删的凭据上记下这次写入
+    case 'deleted':
+      return {
+        reload: false,
+        detail: '值已写进密码库，凭据在此期间被删除。可在「已删除」中恢复这条凭据。',
+      }
     default:
       return { reload: false, detail: null }
   }

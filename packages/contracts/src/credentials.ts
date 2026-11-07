@@ -844,7 +844,8 @@ export type CreateCredentialRequest = z.infer<typeof CreateCredentialRequest>
 // - 条目在别处改过（Kioku 最近看到的修改时间对不上）返回 409，说明要先重新读取，不覆盖；
 // - 条目所在的集合只读返回 409（和别的连接、条目状态的问题一样是 409，不用 403：403 留给 Kioku 自己的权限）；
 // - 测试台里返回 400，不写密码库。
-// 值变了就清掉「需要轮换」
+// 值变了就清掉「需要轮换」。什么都没改时（给的值与现在的相同、别的部分也没变；密码库的值相同时客户端不发修改）
+// 不升版本、不记事件：响应的 version 等于 expectedVersion，调用方据此知道没有改动
 export const UpdateCredentialRequest = z.object({
   // 界面上看到的版本号，期间被改过就返回 409
   expectedVersion: z.number().int(),
@@ -1043,7 +1044,8 @@ export const KeyCreatedCredential = CredentialSummary.extend({ storedIn: Credent
 export type KeyCreatedCredential = z.infer<typeof KeyCreatedCredential>
 
 // 通过 Key 修改：按标识找凭据，不能改字段对应、限定的应用与「需要轮换」。
-// values 对托管的改 Kioku 里的值，对密码库的写回原条目，规则同 UpdateCredentialRequest（测试台里改密码库的值返回 400）
+// values 对托管的改 Kioku 里的值，对密码库的写回原条目，规则同 UpdateCredentialRequest（测试台里改密码库的值返回 400）。
+// 什么都没改时版本号不变，kioku_credential_save 据此回「没有改动」
 export const KeyUpdateCredentialRequest = z.object({
   identifier: CredentialIdentifier,
   expectedVersion: z.number().int(),
@@ -1068,12 +1070,16 @@ export type OrphanVaultItem = z.infer<typeof OrphanVaultItem>
 // 写入（新建、修改、转存）失败的原因，界面据此给出不同的下一步：
 // version 读到之后被别的请求改过（凭据或记忆的版本号），重新读取再改；item_conflict 条目在别处改过，重新读取凭据再改；
 // read_only 集合只读或不可用，重新读取没有用，要改专用账号的权限或换去处；value_too_long 值超出密码库的长度上限（400），
-// 缩短值，或清除去处改由 Kioku 托管。别的错误不带原因
+// 缩短值，或清除去处改由 Kioku 托管；deleted 写回的值已经写进密码库，凭据却在这期间被删了（409，
+// 写入照样记在被删的那一行，恢复之后状态是对的）。
+// 写回时值已经写进密码库、凭据却在这期间被别处改过的，也是 version：值记下了，名称、说明、到期时间、
+// 限定的应用、需要轮换这些别的改动没有保存，文字里说明。别的错误不带原因
 export const CREDENTIAL_WRITE_REASONS = [
   'version',
   'item_conflict',
   'read_only',
   'value_too_long',
+  'deleted',
 ] as const
 export const CredentialWriteReason = z.enum(CREDENTIAL_WRITE_REASONS)
 export type CredentialWriteReason = z.infer<typeof CredentialWriteReason>

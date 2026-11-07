@@ -349,7 +349,7 @@ function keyCredentialRoutes(deps: Deps) {
     method: 'patch',
     path: '/credentials',
     summary:
-      '按标识修改凭据；不能改限定的应用与需要轮换。密码库的凭据改值时写回原条目，只改给了的字段；条目在别处改过时 409，要先重新读取',
+      '按标识修改凭据；不能改限定的应用与需要轮换。密码库的凭据改值时写回原条目，只改给了的字段；条目在别处改过时 409，要先重新读取。什么都没改时（值与现在的相同）版本号不变',
     request: { body: jsonBody(KeyUpdateCredentialRequest) },
     responses: { 200: jsonResponse('已修改', CredentialSummary), ...errors },
   })

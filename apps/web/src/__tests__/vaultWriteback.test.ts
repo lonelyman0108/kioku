@@ -374,6 +374,10 @@ describe('写入失败的原因', () => {
     const tooLong = writeFailureNext(fail('value_too_long', 400))
     expect(tooLong.reload).toBe(false)
     expect(tooLong.detail).toContain('缩短')
+    // 值已写进密码库、凭据却被删了：不给重新读取，指向「已删除」
+    const deleted = writeFailureNext(fail('deleted'))
+    expect(deleted.reload).toBe(false)
+    expect(deleted.detail).toContain('已删除')
     expect(writeFailureNext(fail())).toEqual({ reload: false, detail: null })
     expect(writeFailureNext(new Error('x'))).toEqual({ reload: false, detail: null })
   })
