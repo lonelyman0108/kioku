@@ -18,6 +18,8 @@ import {
   KeyUpdateCredentialRequest,
   PageQuery,
   ReconnectVaultRequest,
+  ResolveCredentialsRequest,
+  ResolvedCredentials,
   UpdateCredentialRequest,
   VaultConnection,
   VaultConnectionList,
@@ -303,6 +305,15 @@ function keyCredentialRoutes(deps: Deps) {
     request: { query: KeyDeleteCredentialQuery },
     responses: { 204: { description: '已删除' }, ...errors },
   })
+  const resolve = createRoute({
+    ...common,
+    method: 'post',
+    path: '/credentials/resolve',
+    summary:
+      'kioku run 用：一次取几条凭据的字段，要么全给，要么一个都不给；每条凭据记一条访问事件，经由 run',
+    request: { body: jsonBody(ResolveCredentialsRequest) },
+    responses: { 200: jsonResponse('值，顺序和 refs 一样', ResolvedCredentials), ...errors },
+  })
 
   const app = router()
   // '/credentials/*' 同时匹配 /credentials 本身；再单独注册 '/credentials' 会让鉴权执行两次
@@ -325,5 +336,11 @@ function keyCredentialRoutes(deps: Deps) {
       const { identifier, expectedVersion } = c.req.valid('query')
       await service(c).keyDelete(identifier, expectedVersion)
       return c.body(null, 204)
+    })
+    .openapi(resolve, async (c) => {
+      const { refs, purpose } = c.req.valid('json')
+      const result = await service(c).resolve(refs, 'run', purpose)
+      noStore(c)
+      return c.json(result, 200)
     })
 }
