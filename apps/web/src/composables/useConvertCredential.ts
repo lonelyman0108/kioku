@@ -396,7 +396,7 @@ export function useConvertCredential(
       failure.value = err instanceof ApiError ? err.message : '转存失败'
       orphan.value = left
       // 错误体带 reason 时按它给下一步：version、item_conflict 重新读取，read_only、value_too_long 说明该改什么
-      const next = writeFailureNext(err)
+      const next = writeFailureNext(err, 'create')
       failureDetail.value = next.detail
       if (hasWriteReason(err)) {
         canReload.value = next.reload

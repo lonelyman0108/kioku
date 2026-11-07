@@ -222,7 +222,11 @@ export interface WriteFailureNext {
   reload: boolean
   detail: string | null
 }
-export function writeFailureNext(err: unknown): WriteFailureNext {
+// action：create 是新建（新建凭据、转存、保存前处理里的新建），值写到去处，可以改去处或清除去处改由 Kioku 托管；
+// update 是修改已有的密码库凭据，值写回原条目，和去处无关，只能给条目所在的集合编辑权限或缩短值
+export type WriteAction = 'create' | 'update'
+
+export function writeFailureNext(err: unknown, action: WriteAction): WriteFailureNext {
   const reason =
     err instanceof ApiError ? CredentialWriteError.safeParse(err.payload).data?.reason : undefined
   switch (reason) {
@@ -232,12 +236,18 @@ export function writeFailureNext(err: unknown): WriteFailureNext {
     case 'read_only':
       return {
         reload: false,
-        detail: '集合只读或不可用。可在「密码库」分页更改去处，或给专用账号这个集合的编辑权限。',
+        detail:
+          action === 'update'
+            ? '条目所在的集合只读或不可用。请给专用账号这个集合的编辑权限。'
+            : '集合只读或不可用。可在「密码库」分页更改去处，或给专用账号这个集合的编辑权限。',
       }
     case 'value_too_long':
       return {
         reload: false,
-        detail: '值超出密码库的长度上限。可以缩短值，或清除去处改由 Kioku 托管。',
+        detail:
+          action === 'update'
+            ? '值超出密码库的长度上限，请缩短。'
+            : '值超出密码库的长度上限。可以缩短值，或清除去处改由 Kioku 托管。',
       }
     // 值已写进密码库，凭据却在这期间被删除：服务端已在被删的凭据上记下这次写入
     case 'deleted':
