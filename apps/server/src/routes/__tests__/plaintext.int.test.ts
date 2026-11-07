@@ -79,6 +79,16 @@ const SAMPLES = [
     '"  {{cred:a#b}}"',
     '"x {{cred:a#b}}"',
   ].map((v) => `password: ${v}`),
+  // 模板与 CI 表达式、日期、行内代码
+  'GIT_CREDENTIALS=x-access-token:${{ secrets.token }}',
+  'password: {{ vault_password }}',
+  'password: "{{ vault_pw }}"',
+  'password: {{ x }}abc',
+  'token: ${{ x }}abc',
+  'token：2026-10-27 写坏了',
+  'token：2026-10-27T12:30:45',
+  'token：2026-10-27abc',
+  '`api_key: xxxx/yyyyy`',
   // 写在引号里的键才认收尾的引号
   '{"db_password": "x1"}',
   "{'api_key': 'x1'}",

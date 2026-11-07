@@ -92,10 +92,18 @@ const VARIABLE_REFS =
   `)[\\)\\]},;]{0,8}${VALUE_ENDS_HERE}`
 // 尖括号占位（<你的密码>）：同一行内、不超过 64 个字，整段就是它
 const ANGLE_PLACEHOLDER = `<${IN_LINE(64, '<>')}>${VALUE_ENDS_HERE}`
-// 「密码：…」后面不是值的几种：凭据占位符、整段遮盖、类型名、变量引用、尖括号占位、空的引号（里面只有空白的也算）。
+// 模板与 CI 表达式（${{ secrets.token }}、Ansible、Helm、Jinja、Go 模板的 {{ vault_password }}）：
+// 同一行内、中间最多 128 个字，整段就是它
+const TEMPLATE_EXPRESSION = `\\$?\\{\\{${IN_LINE(128, '{}')}\\}\\}${VALUE_ENDS_HERE}`
+// 日期（token：2026-10-27 写坏了）：YYYY-MM-DD，可以带 THH:MM 或空格加 HH:MM，再带 :SS，整段就是它
+const DATE_VALUE =
+  '[0-9]{4}-[0-9]{2}-[0-9]{2}(?:[T ][0-9]{2}:[0-9]{2}(?::[0-9]{2})?)?' + VALUE_ENDS_HERE
+// 「密码：…」后面不是值的几种：凭据占位符、整段遮盖、类型名、变量引用、尖括号占位、模板表达式、日期、
+// 空的引号（里面只有空白的也算）。
 // 前面可以先有引号与粗体（占位符写在引号里也算占位符），占位符前面还可以有空白
 const NOT_A_VALUE =
   `[${SPACE}]*\\{\\{cred:|${WHOLE_MASK}|${TYPE_NAMES}|${VARIABLE_REFS}|${ANGLE_PLACEHOLDER}` +
+  `|${TEMPLATE_EXPRESSION}|${DATE_VALUE}` +
   `|(?:"[${SPACE}]*"|'[${SPACE}]*')${VALUE_ENDS_HERE}`
 
 // 疑似明文的类别：label 是「密码：…」「token = …」这类写法，其余是有固定前缀或结构的令牌
@@ -194,6 +202,17 @@ const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
   ['「', '」'],
   ['『', '』'],
 ]
+// 不写在符号里的值结尾可能带着的收尾符号与配对的开头
+const UNPAIRED_CLOSERS: readonly (readonly [string, string])[] = [
+  ['**', '**'],
+  ['`', '`'],
+  ['"', '"'],
+  ["'", "'"],
+  ['“', '”'],
+  ['‘', '’'],
+  ['「', '」'],
+  ['『', '』'],
+]
 // 写在符号里的值最长这么多个字符，再长就按没写在符号里算：找收尾的符号不往后扫太远
 const WRAPPED_VALUE_MAX = 1024
 const LINE_BREAK = /[\n\r\u2028\u2029]/g
@@ -265,6 +284,17 @@ function scanner(text: string) {
     while (end > first + 1 && ',.;:'.includes(text[end - 1]!)) end--
     return Math.max(end, first + 1)
   }
+  // 结尾是落单的收尾引号或粗体（写法写在行内代码里：`api_key: abc`）：值里没有和它配对的开头时去掉，
+  // 再去掉它前面句子的标点。只改值的范围，认不认得出不变
+  const trimCloser = (first: number, end: number) => {
+    const value = text.slice(first, end)
+    for (const [open, close] of UNPAIRED_CLOSERS) {
+      if (value.length <= close.length || !value.endsWith(close)) continue
+      if (value.slice(0, -close.length).includes(open)) continue
+      return trimSentence(first, end - close.length)
+    }
+    return end
+  }
 
   // 紧接在规则认出的第一个字之后，值到哪里结束。extendedEnd 是延伸的值的结尾：写在符号里的与 end 相同，
   // 不写在符号里的不在左括号、左引号与 & 处停。不是值时（符号里只有空白与占位符）为 null
@@ -286,8 +316,8 @@ function scanner(text: string) {
     }
     return {
       start: first,
-      end: trimSentence(first, valueEnd(first)),
-      extendedEnd: trimSentence(first, extendedEnd(first)),
+      end: trimCloser(first, trimSentence(first, valueEnd(first))),
+      extendedEnd: trimCloser(first, trimSentence(first, extendedEnd(first))),
     }
   }
 

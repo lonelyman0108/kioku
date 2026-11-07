@@ -941,3 +941,59 @@ describe('新增按延伸的值比', () => {
     expect(added('密码：hunter2', '密码：hunter3（旧）')).toEqual(['hunter3'])
   })
 })
+
+describe('模板表达式、日期与行内代码', () => {
+  const flagged = (text: string) => {
+    const found = findPlaintextCredentials(text)
+    expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(found.length > 0)
+    return found.length > 0
+  }
+
+  it('整段是模板或 CI 表达式的不算，写在引号里也一样；后面跟着字的照样算', () => {
+    for (const text of [
+      'GIT_CREDENTIALS=x-access-token:${{ secrets.token }}',
+      'password: {{ vault_password }}',
+      'password: "{{ vault_pw }}"',
+      "token: '${{ secrets.GH_TOKEN }}'",
+      'password: {{ .Values.db.password }}',
+      'password: {{vault_password}},',
+      // 凭据占位符本来就不算
+      'password: {{cred:db#password}}',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+    for (const text of [
+      'password: {{ x }}abc',
+      'token: ${{ x }}abc',
+      `password: {{ ${'a'.repeat(129)} }}`,
+      'password: {{ x\n}}',
+    ]) {
+      expect(flagged(text), text).toBe(true)
+    }
+  })
+
+  it('整段是日期的不算，后面跟着字的照样算', () => {
+    for (const value of [
+      '2026-10-27 写坏了',
+      '2026-10-27',
+      '2026-10-27T12:30',
+      '2026-10-27 12:30',
+      '2026-10-27T12:30:45，',
+    ]) {
+      expect(flagged(`token：${value}`), value).toBe(false)
+    }
+    for (const value of ['2026-10-27abc', '2026-10-27T12:30x', '2026-1-27', '20261027']) {
+      expect(flagged(`token：${value}`), value).toBe(true)
+    }
+  })
+
+  it('写在行内代码里：值去掉落单的收尾引号，配对的不动', () => {
+    expect(values('`password: hunter2`')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('`api_key: xxxx/yyyyy`')).toEqual([{ value: 'xxxx/yyyyy', field: 'api_key' }])
+    expect(values('**password: hunter2**')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('"password: hunter2."')).toEqual([{ value: 'hunter2', field: 'password' }])
+    expect(values('password: pa"ss')).toEqual([{ value: 'pa"ss', field: 'password' }])
+    expect(values('password: p"a"')).toEqual([{ value: 'p"a"', field: 'password' }])
+    expect(values('password: `')).toEqual([{ value: '`', field: 'password' }])
+  })
+})
