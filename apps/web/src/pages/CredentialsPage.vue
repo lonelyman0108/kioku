@@ -30,9 +30,23 @@ const spaceId = computed(() => String(route.params.spaceId))
 // 凭据与密码库连接的操作都只给空间所有者，别的成员只看列表
 const canManage = computed(() => canManageCredentials(space.value?.role))
 
-// 凭据、密码库与已删除的凭据三个分页
+// 凭据、密码库与已删除的凭据三个分页。选的是哪一页记在地址里（tab），刷新之后还在这一页
 type Tab = 'credentials' | 'vault' | 'deleted'
-const tab = ref<Tab>('credentials')
+const TABS: readonly Tab[] = ['credentials', 'vault', 'deleted']
+const tab = computed<Tab>({
+  get: () => {
+    const value = route.query.tab
+    return typeof value === 'string' && (TABS as readonly string[]).includes(value)
+      ? (value as Tab)
+      : 'credentials'
+  },
+  set: (value) => {
+    const query = { ...route.query }
+    if (value === 'credentials') delete query.tab
+    else query.tab = value
+    void router.replace({ query })
+  },
+})
 const tabItems = [
   { label: '凭据', value: 'credentials' },
   { label: '密码库', value: 'vault' },

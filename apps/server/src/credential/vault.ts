@@ -74,9 +74,9 @@ export function snapshotViolation(snapshot: VaultSnapshot): VaultDisabledReason 
 
 const VIOLATION_TEXT: Record<VaultDisabledReason, string> = {
   personal_items:
-    '这个账号里有不属于组织的条目（个人条目）。Kioku 只接专用账号：请把要给 agent 用的条目移进组织的集合，个人条目清空后再连接。',
+    '账号中有个人条目（不属于组织的条目）。Kioku 只接受专用账号：将要给 Agent 用的条目移进组织的集合、清空个人条目后再连接。',
   organization_role:
-    '这个账号在组织里可访问全部集合（所有者、管理员，或开了「访问全部集合」）。Kioku 只接专用账号：请把它的角色改成用户、关掉「访问全部集合」，只分配给 agent 用的集合。',
+    '账号在组织中可访问全部集合（所有者、管理员，或开了「访问全部集合」）。Kioku 只接受专用账号：将它的角色改为用户、关掉「访问全部集合」，只分配给 Agent 用的集合。',
 }
 
 // 同步时发现违规、连接刚被停用：这次调用以「连接已停用」失败

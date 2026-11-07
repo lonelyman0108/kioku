@@ -114,7 +114,7 @@ docker compose -f docker-compose.example.yml exec -T db pg_restore -U postgres -
 | 名称 | 默认值 | 说明 |
 |---|---|---|
 | `DATABASE_URL` | 必填 | PostgreSQL 连接串。角色不能是超级用户或带 `BYPASSRLS`，否则拒绝启动 |
-| `KIOKU_MASTER_KEY` | 空 | 32 字节随机数的 base64（`openssl rand -base64 32`）。用来加密机密级记忆、Kioku 托管的凭据值，以及实例设置里嵌入接口与抽取模型的 API Key，不设置时这几项都不能用 |
+| `KIOKU_MASTER_KEY` | 空 | 32 字节随机数的 base64（`openssl rand -base64 32`）。用来加密机密级记忆、Kioku 托管的凭据值、密码库连接保存的令牌与密钥，以及实例设置里嵌入接口与抽取模型的 API Key，不设置时这几项都不能用 |
 | `KIOKU_MASTER_KEY_PREVIOUS` | 空 | 只在轮换主密钥期间配：旧的主密钥，见上面的「轮换主密钥」 |
 | `KIOKU_COOKIE_SECURE` | `true` | 登录 Cookie 是否只走 HTTPS。浏览器在 localhost 上也接受；用局域网 HTTP 地址访问时设为 `false` |
 | `KIOKU_TRUSTED_PROXIES` | `0` | 前面有几层受信任的反向代理。按层数从 `X-Forwarded-For` 右边取客户端地址；没有代理时保持 `0`，否则地址可以伪造 |

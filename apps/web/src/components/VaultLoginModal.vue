@@ -1,7 +1,7 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
 import type { VaultConnection } from '@kioku/contracts'
-import { computed, toRef, watch } from 'vue'
+import { computed, nextTick, ref, toRef, watch } from 'vue'
 
 import { useVaultLogin } from '../composables/useVaultLogin'
 import Hint from './Hint.vue'
@@ -24,8 +24,21 @@ const { form, step, provider, submitting, failure, problem, reset, back, submit 
   },
 )
 
+// 页脚的提示说明「连接」为什么点不了：刚打开的空表单不提示，有失败原因时只显示失败原因
+const edited = ref(false)
+watch(form, () => (edited.value = true), { deep: true })
+const hint = computed(() => (edited.value && !failure.value ? problem.value : null))
+
 // 打开时按要连的那一个重新填；关掉时清掉主密码与验证码
-watch(open, () => reset(), { immediate: true })
+watch(
+  open,
+  async () => {
+    reset()
+    await nextTick()
+    edited.value = false
+  },
+  { immediate: true },
+)
 
 const reconnecting = computed(() => props.connection !== null)
 </script>
@@ -89,7 +102,7 @@ const reconnecting = computed(() => props.connection !== null)
     </template>
     <template #footer>
       <div class="flex w-full items-center justify-end gap-2">
-        <span v-if="problem" class="mr-auto text-sm text-muted">{{ problem }}</span>
+        <span v-if="hint" class="mr-auto text-sm text-muted">{{ hint }}</span>
         <UButton v-if="step === 'two_factor'" color="neutral" variant="ghost" @click="back">
           上一步
         </UButton>

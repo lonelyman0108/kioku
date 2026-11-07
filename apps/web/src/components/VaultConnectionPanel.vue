@@ -110,7 +110,7 @@ const itemRows = computed(() => {
       </div>
       <div v-if="canManage" class="conn-actions">
         <UButton
-          v-if="c.status !== 'ok'"
+          v-if="c.status === 'reauth_required' || c.status === 'disconnected'"
           size="xs"
           color="primary"
           variant="outline"

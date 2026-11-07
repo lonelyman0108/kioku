@@ -324,11 +324,18 @@ describe('改版之后的约束', () => {
 })
 
 describe('凭据的弹窗', () => {
+  // 连接密码库的提示叫 hint：刚打开的空表单不提示，有失败原因时只显示失败原因
   it.each([
-    ['新建凭据', credentialFormModal],
-    ['连接密码库', vaultLoginModal],
-  ])('%s：底部「为什么不能提交」的提示是 14px 的正文', (name, source) => {
-    expect(source, name).toContain('<span v-if="problem" class="mr-auto text-sm text-muted">')
-    expect(source, name).not.toContain('text-xs text-muted">{{ problem }}')
+    ['新建凭据', credentialFormModal, 'problem'],
+    ['连接密码库', vaultLoginModal, 'hint'],
+  ])('%s：底部「为什么不能提交」的提示是 14px 的正文', (name, source, variable) => {
+    expect(source, name).toContain(`<span v-if="${variable}" class="mr-auto text-sm text-muted">`)
+    expect(source, name).not.toContain(`text-xs text-muted">{{ ${variable} }}`)
+  })
+
+  it('连接密码库：空表单不提示，有失败原因时不再叠一条提示', () => {
+    expect(vaultLoginModal).toContain(
+      'const hint = computed(() => (edited.value && !failure.value ? problem.value : null))',
+    )
   })
 })

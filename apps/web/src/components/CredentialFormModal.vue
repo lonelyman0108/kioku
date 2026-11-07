@@ -402,7 +402,7 @@ const title = computed(() => {
         <span v-if="problem" class="mr-auto text-sm text-muted">{{ problem }}</span>
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
         <UButton type="submit" form="credential-form" :loading="saving" :disabled="!!problem">
-          {{ editing ? '保存' : '新建' }}
+          {{ editing ? '保存' : target ? '起标识' : '新建' }}
         </UButton>
       </div>
     </template>
