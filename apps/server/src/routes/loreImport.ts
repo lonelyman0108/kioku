@@ -16,7 +16,7 @@ import { bodyLimit } from 'hono/body-limit'
 import { isInstanceAdmin, memberRole } from '../auth/middleware'
 import { withTransferSlot } from '../backup/transferGate'
 import { credentialServiceForConsole } from '../credential/context'
-import { placeholderIdentifiers } from '../credential/placeholders'
+import { looksLikePlaintextCredential, placeholderIdentifiers } from '../credential/placeholders'
 import { isConvertibleValue, type KnownCredentialValues } from '../credential/service'
 import { pgCauseCode, pgErrorCode } from '../db/client'
 import type { AppEnv, Deps } from '../http/env'
@@ -129,7 +129,8 @@ async function knownValues(
   accountId: string,
   snapshot: LoreSnapshot,
 ): Promise<KnownCredentialValues | null> {
-  const spotted = snapshot.nodes.some((n) => plaintextSpots(n.content, null).length > 0)
+  // 只要判断有没有：用同一条规则的布尔版本，不在这里把每处都找出来（spotsOf 才逐处扫，每个节点扫一次）
+  const spotted = snapshot.nodes.some((n) => looksLikePlaintextCredential(n.content ?? ''))
   if (!spotted && !(await hasConvertedImports(deps.db, spaceId))) return null
   return (await credentialServiceForConsole(deps, spaceId, accountId)).knownValues()
 }
