@@ -32,6 +32,7 @@ import {
   type BenchSession,
   type RunOutcome,
 } from './benchSession'
+import { clipText } from './text'
 
 // 测试台的模型对话：一条用户消息的循环、这次对话的状态、发给模型的历史、怎么显示、存成场景。
 // 循环由浏览器驱动，一次请求只调一次模型，模型要调工具时走运行接口；请求都是注入的，这里不碰 Vue 和网络。
@@ -138,13 +139,6 @@ const reasoningOf = (message: BenchAgentMessage): string | null => {
 // OpenAI 的 refusal 字段：模型拒绝回答时 content 是 null，原因写在这里
 const refusalOf = ({ refusal }: BenchAgentMessage): string | null =>
   typeof refusal === 'string' && refusal.trim() ? refusal : null
-
-// 按 UTF-16 码元截断，和契约的 max 同一个数法。不切开代理对：落单的代理项不是合法的文字
-export function clipText(text: string, limit: number): string {
-  if (text.length <= limit) return text
-  const last = text.charCodeAt(limit - 1)
-  return text.slice(0, last >= 0xd800 && last <= 0xdbff ? limit - 1 : limit)
-}
 
 export interface AgentUsage {
   promptTokens: number

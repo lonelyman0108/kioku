@@ -195,10 +195,11 @@ describe('记忆页取统计', () => {
 })
 
 // 回车的隐式提交会点默认按钮：单选在表单里时，方向键选完再按回车，提示还没看就提交了
+// 新建的 submit 带着放行标记的参数：点击事件不能传进去，所以写成 submit()
 describe.each([
-  ['移动或改层', moveMemoryModal, '确定'],
-  ['新建记忆', createMemoryModal, '创建'],
-])('%s的弹窗', (_name, source, label) => {
+  ['移动或改层', moveMemoryModal, '确定', 'submit'],
+  ['新建记忆', createMemoryModal, '创建', 'submit()'],
+])('%s的弹窗', (_name, source, label, call) => {
   const elements = elementsOf(template(source))
 
   it('没有表单，也没有提交按钮', () => {
@@ -209,7 +210,7 @@ describe.each([
 
   it('只有点按钮才提交', () => {
     const button = elements.find((el) => el.tag === 'UButton' && textOf(el) === label)!
-    expect(handler(button, 'click')).toBe('submit')
+    expect(handler(button, 'click')).toBe(call)
   })
 })
 
@@ -307,5 +308,34 @@ describe('概览', () => {
 
   it('点地层柱去哪里由 strataTarget 定：一行去根或对话的分页，一格去列表', () => {
     expect(overviewPage).toContain('void router.push(strataTarget(spaceId.value, selection))')
+  })
+})
+
+describe('保存前逐处处理疑似明文', () => {
+  const editor = memoryEditor
+  it('标题、有效期这类本地就能判断的先查，再开弹窗', () => {
+    const request = /function requestSave\(\) \{[\s\S]*?\n\}/.exec(editor)![0]
+    expect(request.indexOf('formProblem(form, m)')).toBeGreaterThan(-1)
+    expect(request.indexOf('formProblem(form, m)')).toBeLessThan(request.indexOf('addedSpots('))
+    const submit = /async function submit\(flags\?: SaveFlags\) \{[\s\S]*?\n\}/.exec(
+      createMemoryModal,
+    )![0]
+    expect(submit.indexOf('validToTooSoon')).toBeLessThan(submit.indexOf('addedSpots('))
+  })
+
+  it('转存只看 canManageCredentials，照样保存给能改的成员，两个属性分开', () => {
+    for (const source of [editor, createMemoryModal]) {
+      expect(source).toContain('canManageCredentials(')
+      expect(source).toContain(':can-convert="canConvert"')
+      expect(source).toMatch(/:can-save-anyway="/)
+      expect(source).not.toContain(':owner=')
+    }
+  })
+
+  it('被拒与弹窗的结果都按现在的正文判断', () => {
+    for (const source of [editor, createMemoryModal]) {
+      expect(source).toContain('spotsAfterRejection(')
+      expect(source).toContain('afterGate(')
+    }
   })
 })

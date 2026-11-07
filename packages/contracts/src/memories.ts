@@ -114,6 +114,31 @@ export const MemorySummary = z
   .meta({ id: 'MemorySummary' })
 export type MemorySummary = z.infer<typeof MemorySummary>
 
+// 正文里有这次新增的疑似明文（规则见 contracts 的 PLAINTEXT_CREDENTIAL，「新增」见 addedPlaintextCredentials）时，
+// 写入默认被拒（400，MemoryWriteError 带上行号与类别）；写入后是 secret 的不拦。放行的标记两边各有各的：
+// Key 的请求只有 plaintextOk，管理界面的请求（ConsoleCreateMemoryRequest、ConsoleUpdateMemoryRequest）只有
+// ignorePlaintext 与 allowPlaintext。给错一边的标记由 schema 去掉
+const KeyPlaintextFlags = {
+  // 确认不是凭据，照常写入；这条记忆进待处理的「疑似明文凭据」，由人看过之后忽略或转存。
+  // 只放行新增的疑似明文，不放行从 secret 降级
+  plaintextOk: z
+    .boolean()
+    .optional()
+    .describe(
+      '正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符',
+    ),
+}
+
+const ConsolePlaintextFlags = {
+  // 确认不是凭据：照常写入，同时把写入后的正文记为「已忽略」（和忽略明文提示的效果相同，管整段正文），不进待处理。
+  // 写入之前的正文里已有没处理的疑似明文时只放行写入，不记忽略：旧的那几处还要有人处理。
+  // 结果是 secret 或正文没有疑似明文时也不记
+  ignorePlaintext: z.boolean().optional(),
+  // 不处理疑似明文，照样写入，这条记忆进待处理（由空间 owner 转存）。能改这条记忆的成员都能用。
+  // 从 secret 降级时正文还像有明文凭据，确认没有、仍要降级，也用它：这一处只给空间 owner
+  allowPlaintext: z.boolean().optional(),
+}
+
 // 归属由坐标的开头决定，不另外传
 export const CreateMemoryRequest = z
   .object({
@@ -130,9 +155,16 @@ export const CreateMemoryRequest = z
     validTo: ValidTo.optional().describe(
       `有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；不填就一直有效`,
     ),
+    ...KeyPlaintextFlags,
   })
   .meta({ id: 'CreateMemoryRequest' })
 export type CreateMemoryRequest = z.infer<typeof CreateMemoryRequest>
+
+// 管理界面的新建：没有 plaintextOk，多 ignorePlaintext 与 allowPlaintext
+export const ConsoleCreateMemoryRequest = CreateMemoryRequest.omit({ plaintextOk: true }).extend(
+  ConsolePlaintextFlags,
+)
+export type ConsoleCreateMemoryRequest = z.infer<typeof ConsoleCreateMemoryRequest>
 
 export const UpdateMemoryRequest = z
   .object({
@@ -153,11 +185,16 @@ export const UpdateMemoryRequest = z
     validTo: ValidTo.nullable()
       .optional()
       .describe(`有效到：${VALID_TO_FORMAT}。到期后不再召回、不进 boot；填 null 清掉，一直有效`),
-    // 从 secret 降级时正文还像有明文凭据，确认没有、仍要降级。只有管理界面里的空间 owner 能用，Key 不行
-    allowPlaintext: z.boolean().optional(),
+    ...KeyPlaintextFlags,
   })
   .meta({ id: 'UpdateMemoryRequest' })
 export type UpdateMemoryRequest = z.infer<typeof UpdateMemoryRequest>
+
+// 管理界面的修改：同 ConsoleCreateMemoryRequest
+export const ConsoleUpdateMemoryRequest = UpdateMemoryRequest.omit({ plaintextOk: true }).extend(
+  ConsolePlaintextFlags,
+)
+export type ConsoleUpdateMemoryRequest = z.infer<typeof ConsoleUpdateMemoryRequest>
 
 // 移动改的是坐标：换开头就是改归属，换最后一段就是改标识。标题不变，只有标题就是原来的标识时按新坐标重新取
 export const MoveMemoryRequest = z

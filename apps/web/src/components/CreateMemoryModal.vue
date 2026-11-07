@@ -21,9 +21,20 @@ import {
   type CoordinateDraft,
 } from '../coordinates'
 import { sensitivityLabels } from '../labels'
+import { canManageCredentials } from '../vault'
+import {
+  addedSpots,
+  afterGate,
+  plaintextRejection,
+  spotsAfterRejection,
+  type PlaintextSpot,
+  type SaveFlags,
+} from '../plaintextSave'
+import type { PlaintextSaveRequest, PlaintextSaveResult } from '../composables/usePlaintextSave'
 import { earliestValidTo, fromLocalInput, validToTooSoon } from '../time'
 import CoordinateFields from './CoordinateFields.vue'
 import Hint from './Hint.vue'
+import PlaintextSaveModal from './PlaintextSaveModal.vue'
 import NoteLine from './strata/NoteLine.vue'
 import SwatchOptions from './strata/SwatchOptions.vue'
 
@@ -33,7 +44,9 @@ const props = defineProps<{ spaceId: string; from: string }>()
 const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ created: [uri: string] }>()
 
-const { apps, sensitivities, canWriteUri } = useMemoryPermissions(computed(() => props.spaceId))
+const { apps, role, canWrite, sensitivities, canWriteUri } = useMemoryPermissions(
+  computed(() => props.spaceId),
+)
 const personas = useQuery({
   queryKey: computed(() => ['personas', props.spaceId]),
   queryFn: () => api.personas(props.spaceId),
@@ -65,7 +78,10 @@ const saving = ref(false)
 const minValidTo = ref('')
 
 watch(open, (value) => {
-  if (!value) return
+  if (!value) {
+    plaintextGate.value = null
+    return
+  }
   draft.value = { ...emptyDraft(), ...draftFromKey(props.from) }
   Object.assign(form, {
     title: '',
@@ -115,12 +131,44 @@ const problem = computed(() => {
 const ready = computed(
   () => title.value.success && !draftProblem(effective.value) && !!form.content.trim(),
 )
-// 正文疑似有明文密码或令牌时提醒换成凭据占位符；只是提醒，照样能创建
+// 正文疑似有明文密码或令牌时先提醒；创建时逐处选转存为凭据或不是凭据（PlaintextSaveModal）
 const looksPlaintext = computed(() => PLAINTEXT_CREDENTIAL.test(form.content))
-
-async function submit() {
+const plaintextGate = ref<PlaintextSaveRequest | null>(null)
+const gateFor = (target: string, content: string, spots: PlaintextSpot[], rejected: boolean) => ({
+  content,
+  uri: target,
+  title: form.title,
+  layer: draft.value.layer,
+  sensitivity: form.sensitivity,
+  spots,
+  rejected,
+})
+// 逐处处理完：换过的正文放回表单再创建。这期间正文变了就按现在的重算（afterGate）
+function onGateProceed(result: PlaintextSaveResult) {
   const target = uri.value
-  if (!ready.value || !target || !title.value.success) return
+  const next = afterGate(null, form.content, result)
+  if (next.kind === 'reopen') {
+    // 转存了的值已经换进现在的正文：放回表单，只把新出现的几处再给人看
+    form.content = next.content
+    if (target) {
+      plaintextGate.value = {
+        ...gateFor(target, next.content, next.spots, false),
+        ignored: next.ignored,
+      }
+    }
+    return
+  }
+  form.content = next.content
+  void submit(next.flags)
+}
+// 转存为凭据只看 canManageCredentials；照样保存给能写记忆的成员
+const canConvert = computed(() => canManageCredentials(role.value))
+
+// 不带标记时先查这次新增的疑似明文（新建时全算），和服务端拒绝写入是同一个判断；机密的正文加密，不用处理
+async function submit(flags?: SaveFlags) {
+  const target = uri.value
+  if (!ready.value || !target || !title.value.success || saving.value) return
+  // 本地就能判断的先查：免得转存建了凭据、改了正文才因为有效期停下
   const validTo = form.validTo ? fromLocalInput(form.validTo) : null
   if (form.validTo && !validTo) {
     error.value = '有效期的日期和时间不完整'
@@ -132,20 +180,37 @@ async function submit() {
     error.value = '有效期须晚于当前时间至少一分钟'
     return
   }
+  if (!flags && form.sensitivity !== 'secret') {
+    const spots = addedSpots(null, form.content)
+    if (spots.length) {
+      plaintextGate.value = gateFor(target, form.content, spots, false)
+      return
+    }
+  }
+  const content = form.content
   saving.value = true
   error.value = null
   try {
     const created = await api.createMemory(props.spaceId, {
       uri: target,
       title: title.value.data,
-      content: form.content,
+      content,
       sensitivity: form.sensitivity,
       ...(form.disclosure.trim() ? { disclosure: form.disclosure.trim() } : {}),
       ...(validTo ? { validTo } : {}),
+      ...flags,
     })
     open.value = false
     emit('created', created.uri)
   } catch (err) {
+    // 服务端检出了新增的疑似明文（两边判断有出入时）：照样逐处处理
+    // 请求期间又改过正文时按现在的正文重算，没有新增的就照常报错
+    const findings = plaintextRejection(err)
+    const gate = findings && spotsAfterRejection(null, content, form.content, findings)
+    if (gate) {
+      plaintextGate.value = gateFor(target, gate.content, gate.spots, true)
+      return
+    }
     error.value = err instanceof ApiError ? err.message : '创建失败'
   } finally {
     saving.value = false
@@ -181,10 +246,9 @@ async function submit() {
           <UTextarea v-model="form.content" :rows="8" autoresize class="w-full font-mono" />
         </UFormField>
         <NoteLine v-if="looksPlaintext" tone="error">
-          正文疑似包含明文凭据
-          <template #detail>
-            建议转存为凭据（「凭据」页），正文改用占位符；创建后可在编辑器中插入引用。
-          </template>
+          正文疑似包含明文凭据<Hint>
+            创建前逐处选择转存为凭据或不是凭据；转存后正文中的值换成占位符，历史中不留明文。
+          </Hint>
         </NoteLine>
         <UFormField label="触发场景" help="什么场景下应该想起这条记忆">
           <UInput v-model="form.disclosure" class="w-full" />
@@ -211,8 +275,16 @@ async function submit() {
     <template #footer>
       <div class="flex w-full justify-end gap-2">
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
-        <UButton :loading="saving" :disabled="!ready" @click="submit">创建</UButton>
+        <UButton :loading="saving" :disabled="!ready" @click="submit()">创建</UButton>
       </div>
+      <!-- 逐处处理疑似明文：叠在新建的对话框上面 -->
+      <PlaintextSaveModal
+        v-model:request="plaintextGate"
+        :space-id="spaceId"
+        :can-convert="canConvert"
+        :can-save-anyway="canWrite"
+        @proceed="onGateProceed"
+      />
     </template>
   </UModal>
 </template>

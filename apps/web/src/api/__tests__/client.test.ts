@@ -171,7 +171,29 @@ describe('API 客户端', () => {
       'fetch',
       vi.fn(async () => Response.json({ error: '记忆不存在' }, { status: 404 })),
     )
-    await expect(request('GET', '/x')).rejects.toEqual(new ApiError(404, '记忆不存在'))
+    await expect(request('GET', '/x')).rejects.toEqual(
+      new ApiError(404, '记忆不存在', { error: '记忆不存在' }),
+    )
+  })
+
+  it('错误体原样带在 payload 里：记忆写入被拒时另带疑似明文的位置', async () => {
+    const body = { error: '正文第 2 行疑似明文', plaintext: [{ line: 2, kind: 'label' }] }
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => Response.json(body, { status: 400 })),
+    )
+    const err = await request('POST', '/x').catch((e: unknown) => e)
+    expect(err).toBeInstanceOf(ApiError)
+    expect((err as ApiError).payload).toEqual(body)
+  })
+
+  it('错误体不是 JSON 时 payload 为 null', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn(async () => new Response('oops', { status: 502 })),
+    )
+    const err = (await request('GET', '/x').catch((e: unknown) => e)) as ApiError
+    expect([err.status, err.payload]).toEqual([502, null])
   })
 
   it('坐标格式的报错是写给接口与 MCP 的：界面上换成只说格式的那句，去掉字段路径', async () => {
@@ -184,7 +206,9 @@ describe('API 客户端', () => {
         'fetch',
         vi.fn(async () => Response.json({ error }, { status: 400 })),
       )
-      await expect(request('POST', '/x')).rejects.toEqual(new ApiError(400, URI_FORMAT_HINT))
+      await expect(request('POST', '/x')).rejects.toEqual(
+        new ApiError(400, URI_FORMAT_HINT, { error }),
+      )
     }
     expect(URI_FORMAT_HINT).toContain('坐标只能以 core://、user://')
     expect(URI_FORMAT_HINT).not.toMatch(/domain|path|URI|分区/)
@@ -229,7 +253,7 @@ describe('API 客户端', () => {
       vi.fn(async () => Response.json({ error: '仅空间所有者可导出空间' }, { status: 403 })),
     )
     await expect(download('POST', '/spaces/s/export')).rejects.toEqual(
-      new ApiError(403, '仅空间所有者可导出空间'),
+      new ApiError(403, '仅空间所有者可导出空间', { error: '仅空间所有者可导出空间' }),
     )
   })
 

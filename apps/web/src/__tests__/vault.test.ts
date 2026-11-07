@@ -26,6 +26,7 @@ import {
   credentialEventParts,
   disconnectNotice,
   itemFieldLabel,
+  itemFieldPhrase,
   itemsAvailable,
   suggestIdentifier,
   vaultCredentialDraft,
@@ -54,6 +55,11 @@ describe('条目字段的显示名', () => {
     expect(itemFieldLabel('login.totp')).toBe('TOTP')
     expect(itemFieldLabel('notes')).toBe('备注')
     expect(itemFieldLabel('field:API Token')).toBe('API Token')
+  })
+
+  it('接在「条目「…」的」后面时，自定义字段加上「字段「…」」', () => {
+    expect(itemFieldPhrase('login.password')).toBe('密码')
+    expect(itemFieldPhrase('field:Root Password')).toBe('字段「Root Password」')
   })
 })
 

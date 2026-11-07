@@ -43,35 +43,184 @@ export const CONVERT_SCOPE_TEXT =
 const SPACE =
   ' \\t\\n\\v\\f\\r\\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff'
 
-const PLAINTEXT_LABELS = 'password|passwd|密码|口令|token|api[_ -]?key|secret'
-// 值外面常见的引号、反引号与粗体：占位符写在里面也算占位符
-const PLAINTEXT_QUOTES = '"\'`“‘「『*'
+// 写法里的标签。secret 后面跟着 key、access key 的（SECRET_KEY、AWS_SECRET_ACCESS_KEY）单列一项：标签和冒号之间只能隔着空白
+const PLAINTEXT_LABELS =
+  'password|passwd|passphrase|密码|口令|token|api[_ -]?key|secret[_ -]?(?:access[_ -]?)?key|secret'
+// 值外面常见的引号、反引号与粗体：占位符写在里面也算占位符。打码时连同值外面的这些一起盖
+export const PLAINTEXT_QUOTES = '"\'`“‘「『*'
 // 值到这里结束：中文标点与收尾的引号。英文标点常出现在密码里，不算
 const VALUE_STOPS = '，。；、！？）】」』》”’'
+// 值到这里也结束，但不算遮盖符的结尾：左括号、左引号（「hunter2（旧）」）与 &（查询串里的下一项）
+const VALUE_BREAKS = '（【《「『“‘&'
+// 中日韩文字：假名、汉字（含扩展 A 与兼容汉字）、谚文音节。只列 BMP 里的：JS 的规则不带 u 标记，
+// 补充平面的字是两个代理项，PostgreSQL 按码点算，写进来两边会判断得不一样
+const CJK = '\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uac00-\\ud7af\\uf900-\\ufaff'
+// 写在引号里的键（JSON 与字典："db_password": …、'api_key': …）：标签后面可以先有一个收尾的引号再接冒号，
+// 只要标签前面有开头的引号，中间只隔着字母、数字、_、- 或中文（lookbehind 不定长，JS 与 PostgreSQL 都认）。
+// 普通文字里的 the token": abc 不算
+const QUOTED_KEY_CLOSER = `(?:(?<=["'\`][A-Za-z0-9_${CJK}-]{0,40})["'\`])?`
+// 值前面可以先有这些再接中文：引号、粗体与左括号
+const CJK_LEADS = `${PLAINTEXT_QUOTES}（【《\\(\\[`
 // 盖掉明文之后留下的遮盖符（转存时的历史快照、会话摘要的打码）：盖过的不再算明文
 export const PLAINTEXT_MASK = '***'
-// 遮盖符要整段就是它：后面是空白、行尾、收尾的引号或中文标点；英文的逗号、句号这些算句子的标点，后面还要是空白或行尾。
-// 所以 ***hunter2***、***x 照样算明文：真密码可能这样开头，不能借遮盖符躲过提醒和降级拦截
-const WHOLE_MASK = `\\*\\*\\*(?:[,.;:]*(?:[${SPACE}]|$)|["'\`${VALUE_STOPS}])`
+// 值到这里就是结尾：空白、行尾、收尾的引号、粗体或中文标点；英文的逗号、句号这些算句子的标点，后面还要是空白或行尾。
+// 下面几种「不是值」的写法后面都要紧接着它，否则后面跟着的就是真值（<b>hunter2、""hunter2、${x}abc）
+// 收尾的英文引号后面还要接空白、行尾、中文标点或英文的收尾符号：xxx"hunter2"、"""hunter2""" 里的引号不是结尾
+const VALUE_ENDS_HERE =
+  `(?:[,.;:]*(?:[${SPACE}]|$)|[${VALUE_STOPS}]` +
+  `|["'\`](?=[${SPACE}${VALUE_STOPS},.;:\\)\\]}>]|$)` +
+  `|\\*\\*(?![^${SPACE}${VALUE_STOPS},.;:]))`
+// 整段都是遮盖：***、********、xxxx、...、………，紧接着就是值的结尾。
+// 所以 ***hunter2***、***x、xxxxy 照样算明文：真密码可能这样开头，不能借遮盖符躲过提醒和拦截
+const WHOLE_MASK = `(?:\\*{3,}|x{3,}|\\.{3,}|…{3,})${VALUE_ENDS_HERE}`
+// 代码笔记里写的不是值：类型名（password: string、token: Optional[str]、(password: string)）。
+// 后面可以先有 []，或者方括号、尖括号里的类型参数（只能是类型名，可以再嵌一层：List[Dict[str, int]]、
+// Map<string, string>），再接一串收尾符号 ) ] } > , ;，最后都要接值的结尾：
+// string123、Str#1234、none!23、any=x、str[hunter2]、Map<hunter2>、none)hunter2 照样算
+const TYPE_WORDS =
+  '(?:string|str|number|int|integer|float|bool|boolean|bytes|null|none|nil|undefined|void|any|unknown|object' +
+  '|optional|secretstr|list|dict|map|record|array|set|promise|partial|readonly|tuple|sequence|mapping|iterable)'
+// 类型参数：类型名，后面可以再带一层方括号或尖括号里的类型名
+const TYPE_ARGS = (inner: string) => `[\\[<]${inner}(?:[ ,|]{1,3}${inner}){0,4}[\\]>]`
+const TYPE_ARG = `${TYPE_WORDS}(?:${TYPE_ARGS(TYPE_WORDS)})?`
+const TYPE_NAMES =
+  TYPE_WORDS + `(?:\\[\\]|${TYPE_ARGS(TYPE_ARG)})?` + `[\\)\\]}>,;]{0,8}${VALUE_ENDS_HERE}`
+// 一行之内的一段：引用里的名字与参数
+const IN_LINE = (max: number, closer: string) => `[^${closer}\\n\\r\\u2028\\u2029]{1,${max}}`
+// 变量名，与写在引号里的变量名（getenv("DB_PASSWORD")、os.environ['X']）
+const VARIABLE_NAME = '[A-Za-z_][A-Za-z0-9_]{0,127}'
+const QUOTED_NAME = `(?:"[A-Za-z_][A-Za-z0-9_.-]{0,127}"|'[A-Za-z_][A-Za-z0-9_.-]{0,127}')`
+// 变量与环境变量的引用，都要是整段值，里面不能写着字面的值（${X:-默认值}、getenv("X", "默认值")、$(echo 值) 都算明文）：
+// $NAME、${NAME}、%NAME%、process.env.NAME、process.env["NAME"]、os.environ["NAME"]、
+// os.getenv("NAME")、getenv("NAME")、env("NAME")，以及读文件或密码库的 $(…)：里面要有 /、不带引号，最多 128 个字
+// （$(cat /run/secrets/db)、$(pass show a/b)、$(op read op://…)）。
+// 后面可以先有几个收尾的括号与 , ;（f(os.getenv("X"))、{ key: $X },），再接值的结尾。
+// 已知的限制：$ 后面全是字母、数字或 _ 的整段值（$ecretPass1）也按变量算：规则不分大小写，
+// 分不出 $DB_PASS 和这种密码，而 shell 片段里的 $VAR 很常见。$(…) 里写着路径的命令整段按不是值算，
+// 命令参数里夹着的明文认不出（$(curl 带着账号密码的参数 …)）。
+// 带字面值的引用与模板（$(echo x)、getenv("X", "x")）会报出来，但值的结尾按空白与引号猜，转存前要人看过
+const COMMAND_PART = `[^\\(\\)"'\`\\n\\r\\u2028\\u2029]{0,64}`
+const VARIABLE_REFS =
+  `(?:\\$${VARIABLE_NAME}` +
+  `|\\$\\{${VARIABLE_NAME}\\}` +
+  `|\\$\\(${COMMAND_PART}/${COMMAND_PART}\\)` +
+  `|%${VARIABLE_NAME}%` +
+  `|process\\.env\\.${VARIABLE_NAME}` +
+  `|(?:process\\.env|os\\.environ)\\[${QUOTED_NAME}\\]` +
+  `|(?:os\\.getenv|getenv|env)\\(${QUOTED_NAME}\\)` +
+  `)[\\)\\]},;]{0,8}${VALUE_ENDS_HERE}`
+// 尖括号占位（<你的密码>）：同一行内、不超过 64 个字，整段就是它
+const ANGLE_PLACEHOLDER = `<${IN_LINE(64, '<>')}>${VALUE_ENDS_HERE}`
+// 模板与 CI 表达式（${{ secrets.token }}、Ansible、Helm、Jinja、Go 模板的 {{ vault_password }}）：
+// 里面只能有字母、数字、_、.、空格与不带参数的过滤器 |，最多 128 个字，整段就是它。
+// 带引号或括号的（{{ x | default('值') }}）可能写着字面的值，照样算
+const TEMPLATE_EXPRESSION = `\\$?\\{\\{[A-Za-z0-9_. |]{1,128}\\}\\}${VALUE_ENDS_HERE}`
+// 一个或几个连着写的凭据占位符（{{cred:a#user}}:{{cred:a#pass}}），中间隔着不超过 3 个分隔符。
+// 规则不分大小写，大写的假占位符 {{CRED:…}} 也按占位符排除（写入时由占位符的格式检查拒绝）
+const ONE_PLACEHOLDER = CREDENTIAL_PLACEHOLDER.source.replace(/\((?!\?)/g, '(?:')
+const PLACEHOLDER_RUN = `${ONE_PLACEHOLDER}(?:[:@/,;=&|-]{0,3}${ONE_PLACEHOLDER}){0,8}`
+// 值就是占位符：不写在引号里的（可以带粗体）后面接值的结尾；写在引号里的，引号里的值是整段内容
+// （口令短语可以有空格），所以占位符后面只能有空白，再紧接收尾的引号："{{cred:a}} hunter2" 照样算
+const PLACEHOLDER_VALUE =
+  `\\*{0,3}[${SPACE}]*${PLACEHOLDER_RUN}${VALUE_ENDS_HERE}` +
+  `|["'\`“‘「『][${SPACE}]*${PLACEHOLDER_RUN}[${SPACE}]*["'\`”’」』]`
+// 「密码：…」后面不是值的几种：凭据占位符、整段遮盖、类型名、变量引用、尖括号占位、模板表达式、
+// 空的引号（里面只有空白的也算），都要是整段值（后面紧接值的结尾）：{{cred:db}}hunter2 照样算。
+// 前面可以先有引号与粗体。占位符另见 PLACEHOLDER_VALUE
+const NOT_A_VALUE =
+  `${WHOLE_MASK}|${TYPE_NAMES}|${VARIABLE_REFS}|${ANGLE_PLACEHOLDER}|${TEMPLATE_EXPRESSION}` +
+  `|(?:"[${SPACE}]*"|'[${SPACE}]*')${VALUE_ENDS_HERE}`
 
-// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符或整段遮盖符的不算，
-// 这两样写在引号里也不算），或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
-// （管理界面里由空间 owner 确认后可以强制）
-export const PLAINTEXT_CREDENTIAL = new RegExp(
-  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*(?![${PLAINTEXT_QUOTES}]*(?:\\{\\{cred:|${WHOLE_MASK}))[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
-  'i',
-)
+// 疑似明文的类别：label 是「密码：…」「token = …」这类写法，其余是有固定前缀或结构的令牌
+export const PLAINTEXT_KINDS = [
+  'label',
+  'sk',
+  'github',
+  'gitlab',
+  'slack',
+  'aws',
+  'jwt',
+  'private_key',
+  'kioku',
+] as const
+export const PlaintextKind = z.enum(PLAINTEXT_KINDS)
+export type PlaintextKind = z.infer<typeof PlaintextKind>
+type TokenKind = Exclude<PlaintextKind, 'label'>
 
-// 正文里疑似明文的一处：值在 [start, end) 这一段（JS 字符串的下标），field 是建议用的字段名。
-// 规则只认得出值从哪里开始，到哪里结束是猜的，要让人看过再转存
+// 「密码：…」这类写法：值写在下一行的也算；后面不是值的（见 NOT_A_VALUE）不算；
+// 值以中文开头的不算（「密码：见 Vaultwarden 条目」），前面隔着引号、粗体或左括号也一样。
+// 代码表达式（config.password、getToken()）照样算，确实不是凭据时由写入方确认
+// 写法写在 Markdown 的强调里：冒号在强调里（**Password:** x、- **Token:** x）时，冒号后面先有收尾的强调符
+// 再接空白；冒号在强调外（**Password**: x、*Password*: x、_Password_: x）时，标签后面先有收尾的强调符。下面的排除都从跳过这些符号之后算：
+// 值不能就是「强调符加空白」，不然不跳过强调符的那条路会把它当成值的第一个字，绕开排除
+const EMPHASIS_AFTER_COLON = `(?:(?:\\*\\*|__|\\*)(?=[${SPACE}]))?`
+const EMPHASIS_BEFORE_COLON = '(?:\\*\\*|__|\\*|_)?'
+const LABEL_RULE =
+  `(?:${PLAINTEXT_LABELS})${QUOTED_KEY_CLOSER}${EMPHASIS_BEFORE_COLON}[${SPACE}]*[:：=]` +
+  `${EMPHASIS_AFTER_COLON}[${SPACE}]*(?!(?:\\*\\*|__|\\*)[${SPACE}])` +
+  `(?!${PLACEHOLDER_VALUE})(?![${PLAINTEXT_QUOTES}]*(?:${NOT_A_VALUE}))(?![${CJK_LEADS}]*[${CJK}])[^${SPACE}]`
+
+// 令牌前后不能紧挨着字母、数字、_ 与 -：task-…、my_ghp_… 这类是别的词的一部分
+const TOKEN_START = '(?<![A-Za-z0-9_-])'
+const TOKEN_END = '(?![A-Za-z0-9_-])'
+// 已知格式的令牌。规则不区分大小写（PostgreSQL 用 ~*），前缀的大小写不作数，靠长度与结构压低误报
+const TOKEN_RULES: Record<TokenKind, string> = {
+  // OpenAI、Anthropic、DeepSeek 这类：sk- 之后可以先有几段带连字符的前缀（sk-proj-、sk-ant-api03-），
+  // 要有一段至少 16 个字母与数字连着。sk-learn 这类短词不算。
+  // Stripe 的私钥与受限密钥（sk_live_、sk_test_、rk_live_、rk_test_）也算这一类；公开的 pk_ 不算
+  sk:
+    `${TOKEN_START}(?:sk-(?:[A-Za-z0-9]+[-_]){0,8}[A-Za-z0-9]{16,}` +
+    `|(?:sk|rk)_(?:live|test)_[A-Za-z0-9]{16,})`,
+  // GitHub：ghp_、gho_、ghu_、ghs_、ghr_ 加 36 位，细粒度的 github_pat_ 加 82 位（这里放宽到 40 位）
+  github: `${TOKEN_START}(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})`,
+  // GitLab 个人访问令牌：glpat- 加 20 位
+  gitlab: `${TOKEN_START}glpat-[A-Za-z0-9_-]{20,}`,
+  // Slack：xoxb-、xoxa-、xoxp-、xoxr-、xoxs- 加数字与字母的几段
+  slack: `${TOKEN_START}xox[baprs]-[A-Za-z0-9-]{20,}`,
+  // AWS 长期访问密钥的 ID：AKIA 加 16 位。临时的 ASIA 不收：不区分大小写时 Asia 开头的长词会被误报
+  aws: `${TOKEN_START}AKIA[A-Z0-9]{16}${TOKEN_END}`,
+  // JWT：三段 base64url，前两段是 JSON（eyJ 开头）
+  jwt: `${TOKEN_START}eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}`,
+  // 私钥块：BEGIN … PRIVATE KEY（PGP 的带 BLOCK）的开头一行，后面要跟着正文。只写了开头一行的不算，
+  // 文档里常提到这种写法；旧式加密的 PEM（下一行是 Proc-Type:）也不算，它的正文本来就加了密
+  private_key: `-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----[${SPACE}]*[A-Za-z0-9+/=]{16,}`,
+  // Kioku 自己的访问密钥：kioku_<12 位前缀>_<40 位密钥>（服务端 auth/keys.ts）。只有前缀的不算
+  kioku: `${TOKEN_START}kioku_[A-Za-z0-9]{12}_[A-Za-z0-9]{40}${TOKEN_END}`,
+}
+const TOKEN_KINDS = Object.keys(TOKEN_RULES) as TokenKind[]
+
+// 正文像有明文密码或 Token：上面两类规则合在一起。启发式规则，宁可多报：用来提醒、拦下新写进来的明文，
+// 以及挡住带着明文从 secret 降级（管理界面里由空间 owner 确认后可以强制）。
+// 服务端把 source 原样交给 PostgreSQL（~*），所以只用两边都认的写法：(?:…)、(?=…)、(?!…)、(?<!…)、
+// 方括号与 \uXXXX；不用 \b、\d、\w、\s（PostgreSQL 的 \b 是退格，\s 随 locale 变）、命名分组与 u 标记，
+// 重复次数不超过 255。不加捕获分组：类别在 JS 里按开头另认
+// SQL 里拆成两条（写法一条、令牌一条）再用 or 连起来：PostgreSQL 对一整条大的多选匹配得慢，
+// 两万条记忆的正文拆开后快一倍以上。合起来就是 PLAINTEXT_CREDENTIAL
+export const PLAINTEXT_CREDENTIAL_PARTS: readonly string[] = [
+  LABEL_RULE,
+  TOKEN_KINDS.map((kind) => TOKEN_RULES[kind]).join('|'),
+]
+export const PLAINTEXT_CREDENTIAL = new RegExp(PLAINTEXT_CREDENTIAL_PARTS.join('|'), 'i')
+
+// 正文里疑似明文的一处：值在 [start, end) 这一段（JS 字符串的下标），line 是 start 所在的行（从 1 起，按 \n 分行），
+// kind 是类别，field 是建议用的字段名。规则只认得出值从哪里开始，「密码：…」的值到哪里结束是猜的，要让人看过再转存
 export interface PlaintextCredentialMatch {
   start: number
   end: number
+  line: number
+  kind: PlaintextKind
   field: string
 }
 
 const PLAINTEXT_ALL = new RegExp(PLAINTEXT_CREDENTIAL.source, 'gi')
 const PLAINTEXT_LABEL = new RegExp(`^(?:${PLAINTEXT_LABELS})`, 'i')
+// 在指定位置开始匹配（y 标记），不切出子串：正文很长、匹配很多时切子串是平方级的
+const TOKEN_AT = TOKEN_KINDS.map(
+  (kind) => [kind, new RegExp(`(?:${TOKEN_RULES[kind]})`, 'iy')] as const,
+)
+const TOKEN_ANCHORED = TOKEN_KINDS.map(
+  (kind) => [kind, new RegExp(`^(?:${TOKEN_RULES[kind]})`, 'i')] as const,
+)
 // 值写在这些符号里时取里面的部分
 const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
   ['***', '***'],
@@ -84,57 +233,329 @@ const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
   ['「', '」'],
   ['『', '』'],
 ]
-// 值到这里结束：空白、中文标点、占位符
-const VALUE_END = new RegExp(`[${SPACE}${VALUE_STOPS}]|\\{\\{cred:`)
+// 不写在符号里的值结尾可能带着的收尾符号与配对的开头
+const UNPAIRED_CLOSERS: readonly (readonly [string, string])[] = [
+  ['**', '**'],
+  ['`', '`'],
+  ['"', '"'],
+  ["'", "'"],
+  ['“', '”'],
+  ['‘', '’'],
+  ['「', '」'],
+  ['『', '』'],
+]
+// 写在符号里的值最长这么多个字符，再长就按没写在符号里算：找收尾的符号不往后扫太远
+const WRAPPED_VALUE_MAX = 1024
+// 不写在符号里的值也最长这么多个字符：比较新增时要按值查表、去掉落单的引号时要往回找配对的开头。
+// 更长的值只比较前 1024 个字，转存也只取这么多
+const VALUE_MAX = 1024
+const LINE_BREAK = /[\n\r\u2028\u2029]/g
+// 值到这里结束：空白、中文标点、左括号与左引号、&、占位符
+const VALUE_END = new RegExp(`[${SPACE}${VALUE_STOPS}${VALUE_BREAKS}]|\\{\\{cred:`, 'g')
+// 延伸的值到这里结束：和 VALUE_END 一样，只是不看 VALUE_BREAKS（比较新增时用，见 addedPlaintextCredentials）
+const EXTENDED_END = new RegExp(`[${SPACE}${VALUE_STOPS}]|\\{\\{cred:`, 'g')
+const PLACEHOLDER_START = /\{\{cred:/g
+const PLACEHOLDER_AT = new RegExp(CREDENTIAL_PLACEHOLDER.source, 'y')
+// 令牌后面紧跟着的连字符与下划线也是值的一部分
+const TOKEN_TAIL = /[A-Za-z0-9_-]*/y
+// 私钥块的结尾：从正文开头起只经过 base64 字符与空白就能到达的 END 行
+const PRIVATE_KEY_END = /[A-Za-z0-9+/=\s]*?-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----/iy
+// 没有 END 行时：这一行剩下的 base64 字符，再加上之后整行都是 base64 字符的各行
+const BASE64_RUN = /[A-Za-z0-9+/=]*/y
+const BASE64_LINE = /\r?\n[A-Za-z0-9+/=]+(?=\r?\n|$)/y
+
+const TOKEN_FIELDS: Record<TokenKind, string> = {
+  sk: 'api_key',
+  github: 'token',
+  gitlab: 'token',
+  slack: 'token',
+  aws: 'access_key_id',
+  jwt: 'token',
+  private_key: 'private_key',
+  kioku: 'api_key',
+}
 
 function plaintextField(label: string): string {
   const word = label.toLowerCase()
-  if (word === 'token' || word === 'secret') return word
+  if (word.startsWith('secret')) return 'secret'
+  if (word === 'token') return 'token'
   return word.startsWith('api') ? 'api_key' : 'password'
 }
 
-// 紧接在规则认出的第一个字之后，值到哪里结束
-function plaintextValue(text: string, first: number): { start: number; end: number } {
-  for (const [open, close] of VALUE_WRAPPERS) {
-    if (!text.startsWith(open, first)) continue
-    const start = first + open.length
-    const end = text.indexOf(close, start)
-    const body = end > start ? text.slice(start, end) : ''
-    if (body && !/[\n\r\u2028\u2029]/.test(body)) return { start, end }
+// 往后找下一处的位置。只在问的位置不比上一次早时复用上一次的结果：上一次从 from 找到 at，
+// from 与 at 之间没有，问 [from, at] 里的位置答案还是 at。按先后问时整段只扫一遍
+function forwardSearch(text: string, pattern: RegExp): (from: number) => number {
+  let searchedFrom = -1
+  let found = -1
+  return (from) => {
+    if (searchedFrom !== -1 && from >= searchedFrom && from <= found) return found
+    pattern.lastIndex = from
+    const m = pattern.exec(text)
+    searchedFrom = from
+    found = m ? m.index : text.length
+    return found
   }
-  const stop = text.slice(first).search(VALUE_END)
-  let end = stop === -1 ? text.length : first + stop
-  // 结尾的逗号、句号是句子的标点；感叹号、问号常是密码的一部分，留着
-  while (end > first + 1 && ',.;:'.includes(text[end - 1]!)) end--
-  return { start: first, end: Math.max(end, first + 1) }
 }
 
-// 和 PLAINTEXT_CREDENTIAL 同一条规则，找出每一处的位置与字段名
-export function findPlaintextCredentials(text: string): PlaintextCredentialMatch[] {
-  const found: PlaintextCredentialMatch[] = []
+// 一段正文的扫描：值的结尾、收尾的符号与行尾都按先后往后找
+function scanner(text: string) {
+  const valueEnd = forwardSearch(text, new RegExp(VALUE_END.source, 'g'))
+  const extendedEnd = forwardSearch(text, new RegExp(EXTENDED_END.source, 'g'))
+  const placeholderAt = forwardSearch(text, new RegExp(PLACEHOLDER_START.source, 'g'))
+  const lineEnd = forwardSearch(text, new RegExp(LINE_BREAK.source, 'g'))
+  const closers = new Map<string, (from: number) => number>()
+  const closerAt = (close: string, from: number) => {
+    let find = closers.get(close)
+    if (!find) {
+      const escaped = close.replace(/[*]/g, '\\*')
+      find = forwardSearch(text, new RegExp(escaped, 'g'))
+      closers.set(close, find)
+    }
+    return find(from)
+  }
+
+  // 结尾的逗号、句号是句子的标点；感叹号、问号常是密码的一部分，留着
+  const trimSentence = (first: number, end: number) => {
+    while (end > first + 1 && ',.;:'.includes(text[end - 1]!)) end--
+    return Math.max(end, first + 1)
+  }
+  // 结尾是落单的收尾引号或粗体（写法写在行内代码里：`api_key: abc`）：值里没有和它配对的开头时去掉，
+  // 再去掉它前面句子的标点。只改值的范围，认不认得出不变
+  const trimCloser = (first: number, end: number) => {
+    for (const [open, close] of UNPAIRED_CLOSERS) {
+      const at = end - close.length
+      if (at <= first || !text.startsWith(close, at)) continue
+      // 配对的开头在 [first, at) 里：按先后往后找，不切子串
+      if (closerAt(open, first) < at) continue
+      return trimSentence(first, at)
+    }
+    return end
+  }
+
+  // 从 at 起跳过连着的占位符
+  const skipPlaceholders = (at: number) => {
+    for (;;) {
+      PLACEHOLDER_AT.lastIndex = at
+      const placeholder = PLACEHOLDER_AT.exec(text)
+      if (!placeholder) return at
+      at += placeholder[0].length
+    }
+  }
+
+  // 紧接在规则认出的第一个字之后，值到哪里结束。extendedEnd 是延伸的值的结尾：写在符号里的与 end 相同，
+  // 不写在符号里的不在左括号、左引号与 & 处停。不是值时（符号里只有空白与占位符）为 null
+  const labelValue = (
+    first: number,
+  ): { start: number; end: number; extendedEnd: number } | null => {
+    const line = lineEnd(first)
+    for (const [open, close] of VALUE_WRAPPERS) {
+      if (!text.startsWith(open, first)) continue
+      const start = first + open.length
+      const end = closerAt(close, start)
+      if (end <= start || end >= line || end - start > WRAPPED_VALUE_MAX) continue
+      // 开头的占位符与它后面的空白不算值（"{{cred:db}} hunter2" 的值是 hunter2）；值里再有占位符时到占位符为止，
+      // 和不写在符号里一样（去掉结尾的空白）
+      let valueStart = skipPlaceholders(start)
+      if (valueStart > start) {
+        while (valueStart < end && /\s/.test(text[valueStart]!)) valueStart++
+      }
+      if (valueStart >= end) return null
+      const placeholder = placeholderAt(valueStart)
+      let stop = placeholder < end ? placeholder : end
+      while (stop > valueStart && /\s/.test(text[stop - 1]!)) stop--
+      if (stop === valueStart) return null
+      return { start: valueStart, end: stop, extendedEnd: stop }
+    }
+    // 值以占位符开头、后面还有字（{{cred:db}}hunter2）：占位符之后的部分是值
+    const at = skipPlaceholders(first)
+    if (at > first && (at >= line || valueEnd(at) === at)) return null
+    const capped = (end: number) => Math.min(end, at + VALUE_MAX)
+    return {
+      start: at,
+      end: trimCloser(at, trimSentence(at, capped(valueEnd(at)))),
+      extendedEnd: trimCloser(at, trimSentence(at, capped(extendedEnd(at)))),
+    }
+  }
+
+  // 令牌从 start 起，整串都是值
+  const tokenValue = (kind: TokenKind, start: number, matched: number) => {
+    let end = start + matched
+    if (kind === 'private_key') {
+      PRIVATE_KEY_END.lastIndex = end
+      const close = PRIVATE_KEY_END.exec(text)
+      if (close) {
+        end += close[0].length
+      } else {
+        BASE64_RUN.lastIndex = end
+        end += BASE64_RUN.exec(text)![0].length
+        for (;;) {
+          BASE64_LINE.lastIndex = end
+          const line = BASE64_LINE.exec(text)
+          if (!line) break
+          end += line[0].length
+        }
+      }
+    } else if (kind !== 'aws' && kind !== 'kioku') {
+      TOKEN_TAIL.lastIndex = end
+      end += TOKEN_TAIL.exec(text)![0].length
+    }
+    return { start, end, extendedEnd: end }
+  }
+
+  return { labelValue, tokenValue, lineEnd }
+}
+
+// 按先后数行号：每一处都接着上一处往后数，整段只扫一遍
+function lineCounter(text: string): (index: number) => number {
+  let line = 1
+  let next = text.indexOf('\n')
+  return (index) => {
+    while (next !== -1 && next < index) {
+      line++
+      next = text.indexOf('\n', next + 1)
+    }
+    return line
+  }
+}
+
+// 和 PLAINTEXT_CREDENTIAL 同一条规则，找出每一处的位置、类别与字段名。
+// 一处的值里又像一处时（例如 secret: x-----BEGIN …）不重复算；overlapping 为 true 时也列出这些，
+// 按开头的先后排，可能和前一处重叠：打码要把它们也盖住
+export function findPlaintextCredentials(
+  text: string,
+  options: { overlapping?: boolean } = {},
+): PlaintextCredentialMatch[] {
+  return scanPlaintext(text, options).map(publicMatch)
+}
+
+type ScannedMatch = PlaintextCredentialMatch & { extendedEnd: number }
+
+// 对外只给 PlaintextCredentialMatch 的字段，延伸的值的结尾只在比较新增时用
+const publicMatch = ({
+  start,
+  end,
+  line,
+  kind,
+  field,
+}: ScannedMatch): PlaintextCredentialMatch => ({
+  start,
+  end,
+  line,
+  kind,
+  field,
+})
+
+function scanPlaintext(text: string, options: { overlapping?: boolean }): ScannedMatch[] {
+  const found: ScannedMatch[] = []
+  const lineAt = lineCounter(text)
+  const scan = scanner(text)
   let last = 0
   for (const m of text.matchAll(PLAINTEXT_ALL)) {
     const label = PLAINTEXT_LABEL.exec(m[0])?.[0]
-    let span: { start: number; end: number }
+    let span: { start: number; end: number; extendedEnd: number }
+    let kind: PlaintextKind
     if (label) {
-      span = plaintextValue(text, m.index + m[0].length - 1)
+      kind = 'label'
+      const value = scan.labelValue(m.index + m[0].length - 1)
+      if (!value) continue
+      span = value
+      // 写法后面的值本身是已知格式的令牌（token: ghp_…、secret: -----BEGIN …）：按令牌算，
+      // 值取整个令牌（私钥块跨好几行，按写法只取得到第一段）。前面的引号与粗体不算令牌的一部分
+      let at = span.start
+      while (at < text.length && PLAINTEXT_QUOTES.includes(text[at]!)) at++
+      for (const [token, rule] of TOKEN_AT) {
+        rule.lastIndex = at
+        const hit = rule.exec(text)
+        if (!hit) continue
+        kind = token
+        span = scan.tokenValue(token, at, hit[0].length)
+        break
+      }
     } else {
-      // sk- 串可能带着连字符或下划线接着往后写，整串都是值
-      const tail = /^[A-Za-z0-9_-]*/.exec(text.slice(m.index + m[0].length))![0]
-      span = { start: m.index, end: m.index + m[0].length + tail.length }
+      // 各类的开头互不相同，按开头认出是哪一类
+      const token = TOKEN_ANCHORED.find(([, rule]) => rule.test(m[0]))![0]
+      kind = token
+      span = scan.tokenValue(token, m.index, m[0].length)
     }
-    // 上一处的值里又像一处（例如 a=1&token=2）：不重复算
-    if (
-      span.start < last ||
-      text.slice(span.start, span.end).includes(CREDENTIAL_PLACEHOLDER_START)
-    ) {
-      continue
-    }
-    found.push({ ...span, field: label ? plaintextField(label) : 'api_key' })
-    last = span.end
+    const overlaps = span.start < last
+    if (overlaps && !options.overlapping) continue
+    found.push({
+      ...span,
+      line: lineAt(span.start),
+      kind,
+      field: kind === 'label' ? plaintextField(label!) : TOKEN_FIELDS[kind],
+    })
+    last = Math.max(last, span.end)
   }
   return found
 }
+
+// 后面加注解的开头：全角的左括号与左引号（「hunter2（旧）」）。& 不算，hunter2&NEW 是另一个值
+const ANNOTATION_OPENERS = '（【《「『“‘'
+const ASCII_ALNUM = /[A-Za-z0-9]/
+
+// 这次写入新增的疑似明文：after 里检出的一处，满足下面任一条就是原来就有的，否则算新增。
+// 比较用延伸的值（不在左括号、左引号与 & 处停，见 labelValue），不用截断的值：截断会把 hunter2&old 与
+// hunter2&NEWSECRET 都截成 hunter2。
+// (a) 延伸的值和 before 里某一处的延伸值相同；
+// (b) 延伸的值在第一个 ANNOTATION_OPENERS 处截开，前面是 before 里某一处的延伸值，后面的注解里没有 ASCII 字母
+//     或数字（hunter2（旧）、hunter2（已作废））。带字母或数字的（（新密码Xk9mQ2vLp）、（old）、（2024 年改的））
+//     可能写着新的值，算新增；
+// (c) before 里某一处的延伸值，以这一处的延伸值加一个 VALUE_BREAKS 的字开头：拆开或截短
+//     （token=abc&password=xyz 拆成两行）。
+// 都按查表与二分做，不两两比：正文很长、很多处时也是线性对数的。
+// before 为 null 表示新建。服务端拒绝写入与管理界面保存前的逐处处理都按它判断，两边才一致；
+// 报出来的每一处仍是截断的值（显示与转存用）
+export function addedPlaintextCredentials(
+  before: string | null,
+  after: string,
+): PlaintextCredentialMatch[] {
+  const existing =
+    before === null
+      ? []
+      : scanPlaintext(before, {}).map((m) => before.slice(m.start, m.extendedEnd))
+  const exact = new Set(existing)
+  const sorted = [...exact].sort()
+  // sorted 里有没有以 prefix 开头的
+  const hasPrefix = (prefix: string) => {
+    let lo = 0
+    let hi = sorted.length
+    while (lo < hi) {
+      const mid = (lo + hi) >> 1
+      if (sorted[mid]! < prefix) lo = mid + 1
+      else hi = mid
+    }
+    return lo < sorted.length && sorted[lo]!.startsWith(prefix)
+  }
+  const annotated = (value: string) => {
+    let cut = -1
+    for (let i = 0; i < value.length; i++) {
+      if (ANNOTATION_OPENERS.includes(value[i]!)) {
+        cut = i
+        break
+      }
+    }
+    return cut > 0 && exact.has(value.slice(0, cut)) && !ASCII_ALNUM.test(value.slice(cut + 1))
+  }
+  const isExisting = (value: string) =>
+    exact.has(value) || annotated(value) || [...VALUE_BREAKS].some((c) => hasPrefix(value + c))
+  return scanPlaintext(after, {})
+    .filter((m) => !isExisting(after.slice(m.start, m.extendedEnd)))
+    .map(publicMatch)
+}
+
+// 写入被拒时指出的一处：只有行号与类别，不带值
+export const PlaintextFinding = z
+  .object({ line: z.number().int(), kind: PlaintextKind })
+  .meta({ id: 'PlaintextFinding' })
+export type PlaintextFinding = z.infer<typeof PlaintextFinding>
+
+// 记忆写入的错误：和 ErrorResponse 一样有 error；正文里有新增的疑似明文被拒时（400）再带上 plaintext，
+// 按在正文里的先后排列。别的错误没有这一项
+export const MemoryWriteError = z
+  .object({ error: z.string(), plaintext: z.array(PlaintextFinding).optional() })
+  .meta({ id: 'MemoryWriteError' })
+export type MemoryWriteError = z.infer<typeof MemoryWriteError>
 
 // 凭据的来源：hosted 是值由 Kioku 加密保存；vault 是值在成员连接的密码库里，Kioku 只记连接与条目的 id
 export const CREDENTIAL_SOURCES = ['hosted', 'vault'] as const
@@ -344,36 +765,144 @@ export type UpdateCredentialRequest = z.infer<typeof UpdateCredentialRequest>
 
 export const CONVERT_VALUE_MIN_LENGTH = 4
 
-// 把记忆正文里的一段明文转存成一条 Kioku 托管的凭据：只给管理界面。expectedVersion 是看到这段值时的版本，
-// 期间被改过就返回 409。正文里这段值出现几处换几处，历史快照里的也一起换掉，所以太短的不收：
-// 只有几个字符时换掉的多半是别的内容
-export const ConvertToCredentialRequest = z
-  .object({
-    memoryId: z.uuid(),
-    expectedVersion: z.number().int(),
-    value: CredentialValue.min(
-      CONVERT_VALUE_MIN_LENGTH,
-      `要转存的值至少 ${CONVERT_VALUE_MIN_LENGTH} 个字符，更短的值请手动新建凭据`,
-    )
-      .refine((v) => v === v.trim(), '要转存的值前后不能有空白')
-      .refine((v) => !/\p{Cs}/u.test(v), '要转存的值含不完整的字符')
-      .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值不能含凭据占位符'),
+// 要转存或按值查找的一段明文。正文里这段值出现几处换几处，历史快照里的也一起换掉，所以太短的不收：
+// 只有几个字符时换掉的多半是别的内容。报错都不带值
+export const ConvertibleValue = CredentialValue.min(
+  CONVERT_VALUE_MIN_LENGTH,
+  `要转存的值至少 ${CONVERT_VALUE_MIN_LENGTH} 个字符，更短的值请手动新建凭据`,
+)
+  .refine((v) => v === v.trim(), '要转存的值前后不能有空白')
+  .refine((v) => !/\p{Cs}/u.test(v), '要转存的值含不完整的字符')
+  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值不能含凭据占位符')
+
+// 按值查找同值的凭据与密码库条目：只给管理界面的空间 owner，一次最多 20 个值
+export const CREDENTIAL_MATCH_MAX = 20
+export const MatchCredentialValuesRequest = z.object({
+  values: z
+    .array(ConvertibleValue)
+    .min(1, '至少需要一个值')
+    .max(CREDENTIAL_MATCH_MAX, `一次最多 ${CREDENTIAL_MATCH_MAX} 个值`),
+})
+export type MatchCredentialValuesRequest = z.infer<typeof MatchCredentialValuesRequest>
+
+// 一个值对上的地方，按字面比较（不去空白、不分大小写以外的任何归一化）。
+// credentials：当前账号的有效凭据里同值的字段，托管的与密码库来源的都算，可以直接写成 {{cred:<标识>#<字段>}}。
+// vaultItems：当前账号连接读得到的条目里同值、但还不能直接引用的字段：条目还没起标识（credential 为 null），
+// 或者起了标识、这个字段却没有对应到凭据的字段（credential 给出那条凭据，要先在凭据里加上字段对应）。
+// 已经对应到凭据字段的条目字段只列在 credentials 里，不重复列
+export const CredentialValueMatch = z.object({
+  credentials: z.array(
+    z.object({
+      id: z.uuid(),
+      identifier: z.string(),
+      name: z.string(),
+      field: z.string(),
+    }),
+  ),
+  vaultItems: z.array(
+    z.object({
+      connectionId: z.uuid(),
+      itemId: z.string(),
+      itemName: z.string(),
+      itemField: z.string(),
+      credential: z.object({ id: z.uuid(), identifier: z.string() }).nullable(),
+    }),
+  ),
+})
+export type CredentialValueMatch = z.infer<typeof CredentialValueMatch>
+
+export const CredentialValueMatches = z.object({
+  // 和请求的 values 一一对应
+  items: z.array(CredentialValueMatch),
+  // 这次读不了的连接数（不可用、需要重新登录、无法连接等）：它们的条目和指着它们的凭据都没比，对不上不等于没有
+  unavailableConnections: z.number().int(),
+  // 读不到值的托管凭据条数（没配主密钥、解不开）：这些也没比，对不上不等于没有
+  unreadableCredentials: z.number().int(),
+})
+export type CredentialValueMatches = z.infer<typeof CredentialValueMatches>
+
+// 转存的去处。
+// hosted：新建一条 Kioku 托管的凭据，值存在 field 这个字段里。
+// credential：换成当前账号一条已有凭据的 field 字段（托管或密码库来源都行）。
+// vault：给当前账号连接里还没起标识的条目起标识，换成 itemField 对应的字段。字段对应不给时按条目里现有的字段推出
+// （defaultCredentialFields），给了要包含 itemField；名称不给时用条目的名称。条目已经有凭据时返回 409，改用 credential。
+// credential 与 vault 由服务端核对这个字段现在的值确实等于 value，不等时返回 400（文字不带值）：
+// 转存会把值从历史里抹掉，绑错了就找不回来
+export const ConvertTarget = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('hosted'),
     identifier: CredentialIdentifier,
     name: CredentialName,
     description: CredentialDescription.optional(),
     field: CredentialFieldName,
+  }),
+  z.object({
+    kind: z.literal('credential'),
+    credentialId: z.uuid(),
+    field: CredentialFieldName,
+  }),
+  z
+    .object({
+      kind: z.literal('vault'),
+      connectionId: z.uuid(),
+      itemId: VaultItemId,
+      itemField: VaultFieldRef,
+      identifier: CredentialIdentifier,
+      name: CredentialName.optional(),
+      description: CredentialDescription.optional(),
+      fields: VaultCredentialFields.optional(),
+    })
+    .refine((t) => !t.fields || t.fields.some((f) => f.itemField === t.itemField), {
+      path: ['fields'],
+      message: '字段对应里要有要转存的条目字段',
+    }),
+])
+export type ConvertTarget = z.infer<typeof ConvertTarget>
+
+// 去处里写成明文的部分：标识、名称、说明与字段名（密码库的再加上条目字段）
+function convertTargetTexts(target: ConvertTarget): string[] {
+  switch (target.kind) {
+    case 'hosted':
+      return [target.identifier, target.name, target.description ?? '', target.field]
+    case 'credential':
+      return [target.field]
+    case 'vault':
+      return [
+        target.identifier,
+        target.name ?? '',
+        target.description ?? '',
+        target.itemField,
+        ...(target.fields ?? []).flatMap((f) => [f.name, f.itemField]),
+      ]
+  }
+}
+
+// 把记忆正文里的一段明文换成凭据占位符：只给管理界面的空间 owner。expectedVersion 是看到这段值时的版本，
+// 期间被改过就返回 409。去处见 ConvertTarget
+export const ConvertToCredentialRequest = z
+  .object({
+    memoryId: z.uuid(),
+    expectedVersion: z.number().int(),
+    value: ConvertibleValue,
+    target: ConvertTarget,
   })
-  // 标识、名称、说明与字段名都是明文，占位符里还带着标识和字段名：写进去就白转存了
-  .refine(
-    (r) => ![r.identifier, r.name, r.description ?? '', r.field].some((t) => t.includes(r.value)),
-    { path: ['value'], message: '标识、名称、说明与字段名不能包含要转存的值' },
-  )
+  // 去处里的这些都是明文，占位符里还带着标识和字段名：写进去就白转存了。
+  // 用条目名称作名称时（vault 没给 name）由服务端再查一次
+  .refine((r) => !convertTargetTexts(r.target).some((t) => t.includes(r.value)), {
+    path: ['value'],
+    message: '标识、名称、说明与字段名不能包含要转存的值',
+  })
 export type ConvertToCredentialRequest = z.infer<typeof ConvertToCredentialRequest>
 
 // 转存的结果，不含值
 export const ConvertedToCredential = z.object({
   memory: ConsoleMemoryView,
+  // 正文里引用的凭据：新建的（hosted、vault）或已有的（credential）
   credential: ConsoleCredential,
+  // 这次是不是新建了凭据
+  created: z.boolean(),
+  // 占位符里用的字段名：{{cred:<credential.identifier>#<field>}}
+  field: z.string(),
   // 正文里换掉了几处
   replaced: z.number().int(),
   // 历史里改写了几个事件的快照

@@ -9,6 +9,7 @@ import {
   CredentialIdentifierQuery,
   CredentialReferenceList,
   CredentialSummary,
+  CredentialValueMatches,
   CredentialValues,
   DeletedCredentialList,
   ErrorResponse,
@@ -16,6 +17,7 @@ import {
   KeyCredentialList,
   KeyDeleteCredentialQuery,
   KeyUpdateCredentialRequest,
+  MatchCredentialValuesRequest,
   PageQuery,
   ReconnectVaultRequest,
   ResolveCredentialsRequest,
@@ -85,6 +87,15 @@ function consoleCredentialRoutes(deps: Deps) {
     summary: '新建凭据：值由 Kioku 加密保存，或给连接的密码库里的条目起标识',
     request: { params: SpaceParams, body: jsonBody(CreateCredentialRequest) },
     responses: { 201: jsonResponse('已创建', ConsoleCredential), ...errors },
+  })
+  const match = createRoute({
+    ...common,
+    method: 'post',
+    path: `${base}/match`,
+    summary:
+      '按值查找同值的凭据与密码库条目（只有空间 owner）：托管的解开比，密码库取每个可用连接的全部条目逐个字段比（TOTP 的密钥不比）。不记访问事件，响应不带值',
+    request: { params: SpaceParams, body: jsonBody(MatchCredentialValuesRequest) },
+    responses: { 200: jsonResponse('每个值对上的地方', CredentialValueMatches), ...errors },
   })
   const get = createRoute({
     ...common,
@@ -215,6 +226,11 @@ function consoleCredentialRoutes(deps: Deps) {
       c.json(await withRetention(c, (await service(c)).listDeleted()), 200),
     )
     .openapi(create, async (c) => c.json(await (await service(c)).create(c.req.valid('json')), 201))
+    .openapi(match, async (c) => {
+      const matches = await (await service(c)).matchValues(c.req.valid('json').values)
+      noStore(c)
+      return c.json(matches, 200)
+    })
     .openapi(get, async (c) =>
       c.json(await (await service(c)).get(c.req.valid('param').credentialId), 200),
     )

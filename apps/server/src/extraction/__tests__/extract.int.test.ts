@@ -26,6 +26,7 @@ import { EPISODE_TTL_DAYS, NO_USABLE_KEY } from '../extract'
 import type { ChatMessage, ChatModel } from '../provider'
 import { saveExtractionConfig } from '../settings'
 import { processSession } from '../worker'
+import { TOKEN_SAMPLES } from '../../testing/plaintext'
 
 // 假的抽取模型：记下收到的消息，按给定的内容回答
 function fakeModel(reply: string | ((messages: ChatMessage[]) => Promise<string> | string)) {
@@ -276,6 +277,23 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     expect(rows.map((r) => r.layer)).toEqual(['episode'])
     expect(rows[0]!.content).toBe('聊到了路由器，密码：***')
     expect((await runs())[0]).toMatchObject({ added: 0, dropped: 7, summarized: true })
+  })
+
+  it('已知格式的令牌：事实丢掉，会话摘要里整个盖掉', async () => {
+    await say(inGroup(), '把几个令牌发给你')
+    const tokens = TOKEN_SAMPLES.filter((t) => !t.token.includes('\n'))
+    await extract(
+      fakeModel(
+        JSON.stringify({
+          facts: tokens.map((t) => ({ subject: 'M1', op: 'add', content: `用的是 ${t.token}` })),
+          summary: tokens.map((t) => `${t.name} 是 ${t.token}`).join('；'),
+        }),
+      ).model,
+    )
+    const rows = await extracted()
+    expect(rows.map((r) => r.layer)).toEqual(['episode'])
+    for (const { token } of tokens) expect(rows[0]!.content).not.toContain(token.slice(4, 20))
+    expect((await runs())[0]).toMatchObject({ added: 0, dropped: tokens.length, summarized: true })
   })
 
   it('要推翻的事实不属于这个对象时当作新的事实，不改别人的', async () => {

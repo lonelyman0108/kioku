@@ -39,6 +39,7 @@ import {
 import { MemoryService } from '../../memory/service'
 import { fakeEmbedder } from '../../testing/fakeEmbedder'
 import { addMember, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
+import { setPlaintextContent } from '../../testing/plaintext'
 
 const VALUE = 'hunter2-Very-Secret'
 const BODY = `访客网络的密码：${VALUE}，别告诉别人。备用写法 ${VALUE}`
@@ -92,33 +93,55 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     if (res.status !== status) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return (await res.json()) as T
   }
-  const remember = async (body: Record<string, unknown>, cookie = ws.cookie) =>
-    ok<MemoryView>(await send('POST', '/memories', body, cookie), 201)
+  // 空间 owner 带着疑似明文照样保存；别的成员先写一段普通的正文，再直接改成要的正文
+  const remember = async (body: Record<string, unknown>, cookie = ws.cookie) => {
+    if (cookie === ws.cookie) {
+      return ok<MemoryView>(
+        await send('POST', '/memories', { ...body, allowPlaintext: true }, cookie),
+        201,
+      )
+    }
+    const view = await ok<MemoryView>(
+      await send('POST', '/memories', { ...body, content: '待改的正文' }, cookie),
+      201,
+    )
+    await setPlaintextContent(database.db, ws.spaceId, view.id, body.content as string)
+    return { ...view, content: body.content as string }
+  }
   const edit = async (body: Record<string, unknown>) =>
-    ok<MemoryView>(await send('PATCH', '/memories', body))
+    ok<MemoryView>(await send('PATCH', '/memories', { ...body, allowPlaintext: true }))
   const move = async (from: string, to: string) =>
     ok<MemoryView>(await send('POST', '/memories/move', { from, to }))
   const seedNote = (extra: Record<string, unknown> = {}) =>
     remember({ uri: 'user://notes/wifi', content: BODY, ...extra })
+  // extra 里的标识、名称、说明与字段名放进托管的去处，别的放在请求上
+  const TARGET_KEYS = new Set(['identifier', 'name', 'description', 'field'])
   const convert = (
     m: { id: string; version: number },
     extra: Record<string, unknown> = {},
     cookie = ws.cookie,
-  ) =>
-    send(
+  ) => {
+    const pick = (inTarget: boolean) =>
+      Object.fromEntries(Object.entries(extra).filter(([k]) => TARGET_KEYS.has(k) === inTarget))
+    return send(
       'POST',
       '/memories/convert-to-credential',
       {
         memoryId: m.id,
         expectedVersion: m.version,
         value: VALUE,
-        identifier: 'wifi',
-        name: '无线网络',
-        field: 'password',
-        ...extra,
+        target: {
+          kind: 'hosted',
+          identifier: 'wifi',
+          name: '无线网络',
+          field: 'password',
+          ...pick(true),
+        },
+        ...pick(false),
       },
       cookie,
     )
+  }
   const converted = async (m: { id: string; version: number }, extra = {}) =>
     ConvertedToCredential.parse(await ok(await convert(m, extra)))
   const rowOf = async (id: string) =>
@@ -737,9 +760,10 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       expect(((await res.json()) as { error: string }).error).toContain('空间所有者')
       expect((await rowOf(hers.id)).content).toBe(BODY)
 
+      // 去处先于记忆检查：不是空间所有者一律 403，不论记忆读不读得到
       const mine = await seedNote()
-      expect((await convert(mine, {}, editor.cookie)).status).toBe(404)
-      expect((await convert(mine, {}, viewer.cookie)).status).toBe(404)
+      expect((await convert(mine, {}, editor.cookie)).status).toBe(403)
+      expect((await convert(mine, {}, viewer.cookie)).status).toBe(403)
       const shared = await remember({ uri: 'core://kb/faq', content: BODY })
       expect((await convert(shared, {}, viewer.cookie)).status).toBe(403)
       expect(await credentialCount()).toBe(0)
@@ -762,9 +786,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
             memoryId: m.id,
             expectedVersion: m.version,
             value: VALUE,
-            identifier: 'wifi',
-            name: '无线网络',
-            field: 'password',
+            target: { kind: 'hosted', identifier: 'wifi', name: '无线网络', field: 'password' },
           },
           { cookie: ws.cookie },
         ),

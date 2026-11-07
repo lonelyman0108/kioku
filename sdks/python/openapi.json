@@ -443,6 +443,49 @@
           "childCount"
         ]
       },
+      "MemoryWriteError": {
+        "type": "object",
+        "properties": {
+          "error": {
+            "type": "string"
+          },
+          "plaintext": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/PlaintextFinding"
+            }
+          }
+        },
+        "required": [
+          "error"
+        ]
+      },
+      "PlaintextFinding": {
+        "type": "object",
+        "properties": {
+          "line": {
+            "type": "integer"
+          },
+          "kind": {
+            "type": "string",
+            "enum": [
+              "label",
+              "sk",
+              "github",
+              "gitlab",
+              "slack",
+              "aws",
+              "jwt",
+              "private_key",
+              "kioku"
+            ]
+          }
+        },
+        "required": [
+          "line",
+          "kind"
+        ]
+      },
       "CreateMemoryRequest": {
         "type": "object",
         "properties": {
@@ -494,6 +537,10 @@
             "type": "string",
             "format": "date-time",
             "description": "有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；不填就一直有效"
+          },
+          "plaintextOk": {
+            "type": "boolean",
+            "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符"
           }
         },
         "required": [
@@ -573,8 +620,9 @@
             "format": "date-time",
             "description": "有效到：ISO 8601 的时间，要带时区（例如 2026-12-31T23:59:00+08:00 或 2026-12-31T15:59:00Z），不带时区的会被拒绝；要比现在晚至少一分钟。到期后不再召回、不进 boot；填 null 清掉，一直有效"
           },
-          "allowPlaintext": {
-            "type": "boolean"
+          "plaintextOk": {
+            "type": "boolean",
+            "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符"
           }
         },
         "required": [
@@ -1186,11 +1234,11 @@
             }
           },
           "400": {
-            "description": "请求不合法",
+            "description": "请求不合法，或正文里有新增的疑似明文凭据（plaintext 列出每一处）",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/MemoryWriteError"
                 }
               }
             }
@@ -1269,11 +1317,11 @@
             }
           },
           "400": {
-            "description": "请求不合法",
+            "description": "请求不合法，或正文里有新增的疑似明文凭据（plaintext 列出每一处）",
             "content": {
               "application/json": {
                 "schema": {
-                  "$ref": "#/components/schemas/ErrorResponse"
+                  "$ref": "#/components/schemas/MemoryWriteError"
                 }
               }
             }

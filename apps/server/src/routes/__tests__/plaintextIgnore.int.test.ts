@@ -74,10 +74,15 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
     if (res.status !== status) throw new Error(`HTTP ${res.status}: ${await res.text()}`)
     return (await res.json()) as T
   }
+  // 都由空间 owner 写，带着疑似明文照样保存
   const remember = async (body: Record<string, unknown>, cookie = ws.cookie) =>
-    ConsoleMemoryView.parse(await ok(await send('POST', '/memories', body, cookie), 201))
+    ConsoleMemoryView.parse(
+      await ok(await send('POST', '/memories', { ...body, allowPlaintext: true }, cookie), 201),
+    )
   const edit = async (body: Record<string, unknown>) =>
-    ConsoleMemoryView.parse(await ok(await send('PATCH', '/memories', body)))
+    ConsoleMemoryView.parse(
+      await ok(await send('PATCH', '/memories', { ...body, allowPlaintext: true })),
+    )
   const ignore = (m: { id: string; version: number }, cookie = ws.cookie) =>
     send(
       'POST',
@@ -207,7 +212,7 @@ describe.skipIf(!testDatabaseUrl)('疑似明文的忽略', () => {
       const key = await ws.issueKey((await ws.createApp('agent')).id)
       const res = await app.request(
         '/v1/memories',
-        jsonRequest('PATCH', { uri: m.uri, content: SECOND }, bearer(key)),
+        jsonRequest('PATCH', { uri: m.uri, content: SECOND, plaintextOk: true }, bearer(key)),
       )
       expect(res.status).toBe(200)
       expect((await suspects()).list).toEqual([m.uri])

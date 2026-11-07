@@ -1,8 +1,16 @@
 import {
+  ConvertibleValue,
+  CREDENTIAL_MATCH_MAX,
   CREDENTIAL_PLACEHOLDER,
+  defaultCredentialFields,
   findPlaintextCredentials,
   type ConvertedToCredential,
+  type CredentialValueMatch,
+  type CredentialValueMatches,
 } from '@kioku/contracts'
+
+import { placeholderOf } from './placeholders'
+import { suggestIdentifier as suggestItemIdentifier } from './vault'
 
 // 转存为凭据的对话框：猜出来的值、建议的标识、值在正文里的位置和次数
 
@@ -97,9 +105,16 @@ export function valueContext(content: string, value: string): ValueContext | nul
   return null
 }
 
-// 转存做了什么：一整句，模板里中文换行会多出空格
+// 转存做了什么：一整句，模板里中文换行会多出空格。新建的分托管与给密码库条目起标识，换成已有凭据的另说
 export function convertSummary(result: ConvertedToCredential): string {
-  const done = `已新建凭据「${result.credential.name}」，正文中 ${result.replaced} 处已换成占位符。`
+  const { credential } = result
+  const what = !result.created
+    ? `已换成凭据「${credential.name}」的字段 ${result.field}`
+    : credential.source === 'vault'
+      ? `已给密码库条目起标识 ${credential.identifier}`
+      : `已新建凭据「${credential.name}」`
+  const placeholder = placeholderOf(credential.identifier, result.field)
+  const done = `${what}，正文中 ${result.replaced} 处已换成 ${placeholder}。`
   return result.scrubbedEvents
     ? `${done}历史中 ${result.scrubbedEvents} 个事件里的这个值也已替换。`
     : done
@@ -128,3 +143,196 @@ export function convertLeftovers(result: ConvertedToCredential): ConvertLeftover
   }
   return leftovers
 }
+
+// 只露头尾的预览，例如 ab…yz：核对是哪一处用，不整段显示。按字符算（不切开表情符号），
+// 短的少露一些，太短的只给省略号
+export function previewValue(value: string): string {
+  const chars = [...value]
+  if (chars.length < 4) return '…'
+  const keep = chars.length >= 12 ? 2 : 1
+  return `${chars.slice(0, keep).join('')}…${chars.slice(-keep).join('')}`
+}
+
+// 转存的去处：已有凭据的一个字段、还没起标识的密码库条目的一个字段、新建托管凭据。
+// key 用来做单选的值，同一个值的去处里不重复
+export type ConvertDestination =
+  | {
+      kind: 'credential'
+      key: string
+      credentialId: string
+      identifier: string
+      name: string
+      field: string
+    }
+  | {
+      kind: 'vault'
+      key: string
+      connectionId: string
+      itemId: string
+      itemName: string
+      itemField: string
+    }
+  | { kind: 'hosted'; key: 'hosted' }
+
+// 起了标识、这个字段却没有对应到凭据字段的条目：不能直接用，要先在凭据里加上字段对应
+export interface UnmappedVaultField {
+  itemName: string
+  itemField: string
+  identifier: string
+}
+
+export const HOSTED_DESTINATION: ConvertDestination = { kind: 'hosted', key: 'hosted' }
+
+// 密码库的一个条目：同一个条目的几个字段共用一条凭据，起标识按条目记
+export const itemKey = (d: { connectionId: string; itemId: string }) =>
+  `${d.connectionId}/${d.itemId}`
+
+// 按值查找的结果：值到匹配；读不了的连接数、读不到值的托管凭据数（这些都没比）；查不了时的错误（有一批失败就给）
+export interface ValueMatchResult {
+  matches: Map<string, CredentialValueMatch>
+  unavailableConnections: number
+  unreadableCredentials: number
+  failure: unknown
+}
+
+// 按值查找同值的凭据与条目：不合转存规则的值不查（服务端会整批拒绝），重复的只查一次，
+// 一次最多 CREDENTIAL_MATCH_MAX 个，多了分批；结果按请求的顺序对回值。request 是接口调用。
+// 一个值都不用查时不发请求，返回 null：调用方手里的失败说明与不可用连接数不该被这次清掉
+export async function matchByValue(
+  values: readonly string[],
+  request: (values: string[]) => Promise<CredentialValueMatches>,
+): Promise<ValueMatchResult | null> {
+  const wanted = [...new Set(values.filter((v) => ConvertibleValue.safeParse(v).success))]
+  if (!wanted.length) return null
+  const result: ValueMatchResult = {
+    matches: new Map(),
+    unavailableConnections: 0,
+    unreadableCredentials: 0,
+    failure: null,
+  }
+  const chunks: string[][] = []
+  for (let i = 0; i < wanted.length; i += CREDENTIAL_MATCH_MAX) {
+    chunks.push(wanted.slice(i, i + CREDENTIAL_MATCH_MAX))
+  }
+  await Promise.all(
+    chunks.map(async (chunk) => {
+      try {
+        const found = await request(chunk)
+        chunk.forEach((value, i) => {
+          const match = found.items[i]
+          if (match) result.matches.set(value, match)
+        })
+        result.unavailableConnections = Math.max(
+          result.unavailableConnections,
+          found.unavailableConnections,
+        )
+        result.unreadableCredentials = Math.max(
+          result.unreadableCredentials,
+          found.unreadableCredentials,
+        )
+      } catch (err) {
+        result.failure = err
+      }
+    }),
+  )
+  return result
+}
+
+// 给还没起标识的条目建议标识：按条目名称，避开 taken，建议过的条目不再改；建议出的标识加进 taken
+export function suggestItemIdentifiers(
+  destinations: readonly ConvertDestination[],
+  identifiers: Record<string, string>,
+  taken: string[],
+): void {
+  for (const d of destinations) {
+    if (d.kind !== 'vault' || identifiers[itemKey(d)] !== undefined) continue
+    const identifier = suggestItemIdentifier(d.itemName, taken)
+    identifiers[itemKey(d)] = identifier
+    taken.push(identifier)
+  }
+}
+
+// 按值匹配的结果换成可选的去处，顺序就是默认的先后：已有凭据、还没起标识的条目、新建托管凭据。
+// 没有匹配结果（还没查、查不了）时只有新建托管凭据
+export function convertDestinations(match: CredentialValueMatch | undefined): {
+  destinations: ConvertDestination[]
+  unmapped: UnmappedVaultField[]
+} {
+  const destinations: ConvertDestination[] = []
+  const unmapped: UnmappedVaultField[] = []
+  for (const c of match?.credentials ?? []) {
+    destinations.push({
+      kind: 'credential',
+      key: `credential:${c.id}#${c.field}`,
+      credentialId: c.id,
+      identifier: c.identifier,
+      name: c.name,
+      field: c.field,
+    })
+  }
+  for (const item of match?.vaultItems ?? []) {
+    if (item.credential) {
+      unmapped.push({
+        itemName: item.itemName,
+        itemField: item.itemField,
+        identifier: item.credential.identifier,
+      })
+      continue
+    }
+    destinations.push({
+      kind: 'vault',
+      key: `vault:${item.connectionId}/${item.itemId}#${item.itemField}`,
+      connectionId: item.connectionId,
+      itemId: item.itemId,
+      itemName: item.itemName,
+      itemField: item.itemField,
+    })
+  }
+  destinations.push(HOSTED_DESTINATION)
+  return { destinations, unmapped }
+}
+
+// 给条目起标识之后这个条目字段在凭据里叫什么：和服务端没给字段对应时推出的一样（defaultCredentialFields）。
+// 条目的字段列表读不到时只按这一个字段推，固定字段的名字是准的，自定义字段重名时以服务端的结果为准
+export function vaultFieldName(itemFields: readonly string[] | null, itemField: string): string {
+  const fields = defaultCredentialFields(itemFields?.includes(itemField) ? itemFields : [itemField])
+  return fields.find((f) => f.itemField === itemField)?.name ?? 'field'
+}
+
+// 把正文里的这几段值换成占位符：出现几处换几处，已有的占位符里的不换，和服务端转存时一个规则。
+// 长的先换：短的值恰好是长的值的一部分时，长的那段先成了占位符，短的不会把它切开
+export function replaceValues(
+  content: string,
+  replacements: readonly { value: string; placeholder: string }[],
+): string {
+  let text = content
+  const ordered = [...replacements].sort((a, b) => b.value.length - a.value.length)
+  for (const { value, placeholder } of ordered) {
+    if (!value) continue
+    text = outsidePlaceholders(text)
+      .map((part, i, parts) => {
+        const replaced = part.text.split(value).join(placeholder)
+        const next = parts[i + 1]
+        // 两段之间是原来的占位符，原样放回
+        return next ? replaced + text.slice(part.start + part.text.length, next.start) : replaced
+      })
+      .join('')
+  }
+  return text
+}
+
+// 按值查找时有几样没比：读不了的密码库连接、读不到值的托管凭据。都没有时为 null。对不上不等于没有同值的凭据
+export function unmatchedNote(counts: {
+  unavailableConnections: number
+  unreadableCredentials: number
+}): string | null {
+  const parts = [
+    counts.unavailableConnections ? `${counts.unavailableConnections} 个密码库连接不可用` : '',
+    counts.unreadableCredentials ? `${counts.unreadableCredentials} 条凭据无法获取值` : '',
+  ].filter(Boolean)
+  return parts.length ? `${parts.join('、')}，未比对` : null
+}
+
+// 没比对的说明，放提示层
+export const UNMATCHED_HINT =
+  '密码库连接恢复后可重新比对；托管凭据无法获取值时（未配置主密钥或无法解密）不参与比对。其中可能有同值的凭据。'

@@ -19,6 +19,7 @@ import {
 
 import { readFailure } from './api/client'
 import { accessContextLabels, credentialChangeLabels, credentialViaLabels } from './labels'
+import { clipText } from './text'
 
 // 凭据页的说法和计算：密码库连接、条目与凭据的访问记录
 
@@ -40,6 +41,13 @@ export function itemFieldLabel(ref: string): string {
   return ref.startsWith(VAULT_CUSTOM_FIELD_PREFIX)
     ? ref.slice(VAULT_CUSTOM_FIELD_PREFIX.length)
     : ref
+}
+
+// 接在「条目「…」的」后面的说法：自定义字段名是用户起的（多是英文），加上「字段「…」」才读得通
+export function itemFieldPhrase(ref: string): string {
+  return ref.startsWith(VAULT_CUSTOM_FIELD_PREFIX)
+    ? `字段「${itemFieldLabel(ref)}」`
+    : itemFieldLabel(ref)
 }
 
 export const vaultItemTypeLabels: Record<VaultItemType, string> = {
@@ -162,7 +170,7 @@ export function vaultCredentialDraft(
 ): { identifier: string; name: string; fields: CredentialField[] } {
   return {
     identifier: suggestIdentifier(item.name, identifiers),
-    name: item.name.trim().slice(0, 100),
+    name: clipText(item.name.trim(), 100),
     fields: defaultCredentialFields(item.fields),
   }
 }
