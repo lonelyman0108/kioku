@@ -328,6 +328,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       ),
     ).toContain('正文疑似含明文密码或令牌')
     const key = await ws.issueKey((await ws.createApp('agent')).id, FULL_SCOPES)
+    // Key 的请求里没有 allowPlaintext（schema 去掉了），照常按降级规则拒绝
     expect(
       await errorOf(
         await asKey('PATCH', '/memories', key, {
@@ -335,9 +336,9 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
           sensitivity: 'private',
           allowPlaintext: true,
         }),
-        403,
+        400,
       ),
-    ).toContain('无法强制降级')
+    ).toContain('正文疑似含明文密码或令牌')
     // 迁移的做法：换成占位符与降级一次完成
     const migrated = await ok<MemoryView>(
       await asKey('PATCH', '/memories', key, {

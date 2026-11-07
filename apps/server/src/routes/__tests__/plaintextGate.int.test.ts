@@ -11,6 +11,9 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../app'
 import type { Database } from '../../db/client'
 import { staticEmbedderSource } from '../../embedding/source'
+import type { Deps } from '../../http/env'
+import { memoryServiceForConsole } from '../../memory/context'
+import { MemoryService, type MemoryContext } from '../../memory/service'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { sampleToken, TOKEN_SAMPLES } from '../../testing/plaintext'
@@ -20,13 +23,21 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
   let app: ReturnType<typeof createApp>
   let ws: Workspace
   let key: string
+  const masterKey = randomBytes(32)
+  const deps = () =>
+    ({
+      db: database.db,
+      masterKey,
+      jobs: null,
+      embedder: staticEmbedderSource(null),
+    }) as unknown as Deps
 
   beforeAll(async () => {
     database = await openTestDatabase()
     app = createApp({
       db: database.db,
       cookieSecure: false,
-      masterKey: randomBytes(32),
+      masterKey,
       embedder: staticEmbedderSource(null),
       jobs: null,
     })
@@ -222,7 +233,7 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
       expect(await inbox()).toBe(0)
     })
 
-    it('ignorePlaintext 与 allowPlaintext 只给管理界面', async () => {
+    it('ignorePlaintext 与 allowPlaintext 只给管理界面：Key 的请求里去掉，照样拦', async () => {
       await ok(await viaKey('POST', { uri: 'user://notes/x', content: '普通的说明' }), 201)
       for (const flag of ['ignorePlaintext', 'allowPlaintext']) {
         const create = await viaKey('POST', {
@@ -230,10 +241,16 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
           content: '密码：hunter2',
           [flag]: true,
         })
-        expect(create.status, flag).toBe(403)
-        const update = await viaKey('PATCH', { uri: 'user://notes/x', [flag]: true })
-        expect(update.status, flag).toBe(403)
+        expect((await rejected(create)).plaintext, flag).toEqual([{ line: 1, kind: 'label' }])
+        const update = await viaKey('PATCH', {
+          uri: 'user://notes/x',
+          content: '密码：hunter2',
+          [flag]: true,
+        })
+        expect((await rejected(update)).plaintext, flag).toEqual([{ line: 1, kind: 'label' }])
       }
+      // 不带疑似明文的修改照常写入：标记去掉了，不报错
+      await ok(await viaKey('PATCH', { uri: 'user://notes/x', priority: 1, allowPlaintext: true }))
     })
 
     it('MCP：被拒时工具报错，说明第几行、哪一类；带 plaintext_ok 照常写入，结果里不再提醒', async () => {
@@ -263,10 +280,20 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
         plaintext_ok: true,
       })
       expect(allowed.isError).toBe(false)
+      // 只有新增的这几处被确认了：正文里原来就有的照常提醒
+      expect(allowed.text).toContain('提醒')
       // 已有的疑似明文：只改元数据照常写入，结果里提醒换成占位符
       const meta = await callTool('kioku_update', { uri: 'user://notes/deploy', priority: 1 })
       expect(meta.isError).toBe(false)
       expect(meta.text).toContain('提醒')
+      // 原来的那几处都换掉了、只剩这次新增的：带 plaintext_ok 不再提醒
+      const replaced = await callTool('kioku_update', {
+        uri: 'user://notes/deploy',
+        content: '示例：password = 见团队的密码库\ntoken = other',
+        plaintext_ok: true,
+      })
+      expect(replaced.isError).toBe(false)
+      expect(replaced.text).not.toContain('提醒')
     })
   })
 
@@ -280,7 +307,7 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
       expect(err.error).not.toContain('plaintext_ok')
     })
 
-    it('allowPlaintext：空间所有者照样保存，进待处理；新建与修改都行', async () => {
+    it('allowPlaintext：照样保存，进待处理；新建与修改都行', async () => {
       await ok(
         await viaConsole('POST', {
           uri: 'user://notes/wifi',
@@ -300,26 +327,59 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
       expect(await inbox()).toBe(1)
     })
 
-    it('allowPlaintext：不是空间所有者时 403，什么都没写', async () => {
+    it('allowPlaintext：能改这条记忆的编辑者也能照样保存，进待处理由空间所有者转存', async () => {
       const editor = await addMember(database.db, ws.spaceId, 'bob', 'editor')
-      const res = await viaConsole(
-        'POST',
-        { uri: 'core://wifi', content: '密码：hunter2', allowPlaintext: true },
-        editor.cookie,
-      )
-      expect(res.status).toBe(403)
-      expect((await consoleGet('/memories?uri=core%3A%2F%2Fwifi')).status).toBe(404)
-      // 修改也一样，即便这次的正文里没有疑似明文
       await ok(
-        await viaConsole('POST', { uri: 'core://notes', content: '普通的说明' }, editor.cookie),
+        await viaConsole(
+          'POST',
+          { uri: 'core://wifi', content: '密码：hunter2', allowPlaintext: true },
+          editor.cookie,
+        ),
         201,
       )
-      const patch = await viaConsole(
-        'PATCH',
-        { uri: 'core://notes', priority: 1, allowPlaintext: true },
-        editor.cookie,
+      await ok(
+        await viaConsole(
+          'PATCH',
+          { uri: 'core://wifi', content: '密码：hunter2\ntoken = abc', allowPlaintext: true },
+          editor.cookie,
+        ),
       )
-      expect(patch.status).toBe(403)
+      expect(await inbox()).toBe(1)
+      // 查看者写不了，带着标记也一样
+      const viewer = await addMember(database.db, ws.spaceId, 'carol', 'viewer')
+      const res = await viaConsole(
+        'POST',
+        { uri: 'core://other', content: '密码：hunter2', allowPlaintext: true },
+        viewer.cookie,
+      )
+      expect(res.status).toBe(403)
+    })
+
+    it('从机密强制降级只给空间所有者：不是空间所有者带着 allowPlaintext 也拒绝，说明要空间所有者确认', async () => {
+      await ok(
+        await viaConsole('POST', {
+          uri: 'user://notes/locked',
+          content: '密码：hunter2',
+          sensitivity: 'secret',
+        }),
+        201,
+      )
+      // 编辑者改不了机密，走不到这一步：服务层按 spaceOwner 判断，这里换掉它直接测
+      const owner = await memoryServiceForConsole(deps(), ws.spaceId, ws.accountId, 'owner')
+      const notOwner = new MemoryService({
+        ...(owner as unknown as { ctx: MemoryContext }).ctx,
+        spaceOwner: false,
+      })
+      await expect(
+        notOwner.update({
+          uri: 'user://notes/locked',
+          sensitivity: 'private',
+          allowPlaintext: true,
+        }),
+      ).rejects.toThrow('需要空间所有者确认')
+      await expect(
+        owner.update({ uri: 'user://notes/locked', sensitivity: 'private', allowPlaintext: true }),
+      ).resolves.toMatchObject({ sensitivity: 'private' })
     })
 
     it('ignorePlaintext：编辑者也能用，保存时记为已忽略，不进待处理，历史里有一条忽略', async () => {
@@ -393,14 +453,70 @@ describe.skipIf(!testDatabaseUrl)('写入前拦截新增的疑似明文', () => 
       )
     })
 
-    it('plaintextOk 只给 Key：管理界面带上时 400', async () => {
-      const res = await viaConsole('POST', {
-        uri: 'user://notes/x',
-        content: '普通的说明',
-        plaintextOk: true,
-      })
-      expect(res.status).toBe(400)
-      expect(((await res.json()) as { error: string }).error).toContain('plaintextOk')
+    it('plaintextOk 只给 Key：管理界面的请求里去掉，照样拦', async () => {
+      const err = await rejected(
+        await viaConsole('POST', {
+          uri: 'user://notes/x',
+          content: '密码：hunter2',
+          plaintextOk: true,
+        }),
+      )
+      expect(err.plaintext).toEqual([{ line: 1, kind: 'label' }])
+      await ok(
+        await viaConsole('POST', {
+          uri: 'user://notes/y',
+          content: '普通的说明',
+          plaintextOk: true,
+        }),
+        201,
+      )
+    })
+
+    it('ignorePlaintext：写入之前已有没处理的疑似明文时只放行写入，不记忽略，改完仍在待处理', async () => {
+      const m = await ok(
+        await viaConsole('POST', {
+          uri: 'user://notes/router',
+          content: '路由器\n管理员密码：hunter2',
+          allowPlaintext: true,
+        }),
+        201,
+      )
+      expect(await inbox()).toBe(1)
+      // 改了别处，再新增一处，带着「不是凭据」：放行写入，旧的那处还没人处理
+      const edited = await ok(
+        await viaConsole('PATCH', {
+          uri: m.uri,
+          content: '路由器在客厅\n管理员密码：hunter2\ntoken = example',
+          ignorePlaintext: true,
+        }),
+      )
+      expect(edited.plaintextIgnored).toBe(false)
+      expect(await inbox()).toBe(1)
+      const history = (await (
+        await consoleGet(`/memories/history?id=${m.id}`)
+      ).json()) as MemoryHistory
+      expect(history.events.map((e) => e.type)).toEqual(['create', 'update'])
+      // 之前已忽略的：照常记
+      await ok(
+        await app.request(
+          `/v1/spaces/${ws.spaceId}/memories/ignore-plaintext`,
+          jsonRequest(
+            'POST',
+            { memoryId: m.id, expectedVersion: edited.version },
+            { cookie: ws.cookie },
+          ),
+        ),
+      )
+      expect(await inbox()).toBe(0)
+      const again = await ok(
+        await viaConsole('PATCH', {
+          uri: m.uri,
+          content: '路由器在客厅\n管理员密码：hunter2\ntoken = example\nsecret = sample',
+          ignorePlaintext: true,
+        }),
+      )
+      expect(again.plaintextIgnored).toBe(true)
+      expect(await inbox()).toBe(0)
     })
   })
 })

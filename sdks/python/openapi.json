@@ -541,14 +541,6 @@
           "plaintextOk": {
             "type": "boolean",
             "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符"
-          },
-          "ignorePlaintext": {
-            "type": "boolean",
-            "description": "只给管理界面"
-          },
-          "allowPlaintext": {
-            "type": "boolean",
-            "description": "只给管理界面的空间所有者"
           }
         },
         "required": [
@@ -631,14 +623,6 @@
           "plaintextOk": {
             "type": "boolean",
             "description": "正文里新增的疑似明文确实不是凭据时设为 true：照常写入，这条记忆进待处理。是凭据时先存成凭据，正文写占位符"
-          },
-          "ignorePlaintext": {
-            "type": "boolean",
-            "description": "只给管理界面"
-          },
-          "allowPlaintext": {
-            "type": "boolean",
-            "description": "只给管理界面的空间所有者"
           }
         },
         "required": [

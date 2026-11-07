@@ -22,7 +22,7 @@ import type { CredentialService } from '../credential/service'
 import { logInternalError } from '../db/client'
 import type { RecallScope } from '../lifecycle/scope'
 import { GUIDANCE } from '../lifecycle/lifecycle'
-import { MemoryError, type MemoryService } from '../memory/service'
+import { hasUntouchedPlaintext, MemoryError, type MemoryService } from '../memory/service'
 import { formatBootBlock } from '../recall/boot'
 import { formatRecallBlock } from '../recall/recall'
 import { VERSION } from '../version'
@@ -72,13 +72,14 @@ const VALID_TO_HELP =
   '只在一段时间内成立的事（临时安排、截止日期）才填，到期后不再召回、不进 boot，不填就一直有效'
 
 // 写入的正文像有明文密码或 Token 时，在结果后面提醒换成占位符（规则与导入工具的提醒相同）。
-// 新增的疑似明文在写入前就被拒了，能写进来的是原来就有的、结果是 secret 的，或者带了 plaintext_ok 的；
-// 带了 plaintext_ok 就是确认过不是凭据，不再提醒
+// 新增的疑似明文在写入前就被拒了，能写进来的是原来就有的、结果是 secret 的，或者带了 plaintext_ok 的。
+// plaintext_ok 只确认了这次新增的几处：正文里原来就有、没处理过的照常提醒（见 hasUntouchedPlaintext）
 function withPlaintextReminder(view: MemoryView, plaintextOk: boolean | undefined): string {
   const text = formatMemory(view)
-  return !plaintextOk && view.content && looksLikePlaintextCredential(view.content)
-    ? `${text}\n\n${PLAINTEXT_REMINDER}`
-    : text
+  const remind = plaintextOk
+    ? hasUntouchedPlaintext(view)
+    : !!view.content && looksLikePlaintextCredential(view.content)
+  return remind ? `${text}\n\n${PLAINTEXT_REMINDER}` : text
 }
 
 // 新建与修改的 plaintext_ok 参数
