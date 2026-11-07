@@ -16,7 +16,7 @@ import {
 // 每次新建的会话第一次调用时、以及每次 snapshot() 都同步一次（触发 onSynced），也能让会话换一次刷新令牌（触发 onSecretsChanged）。
 // 写入照真的客户端的约定：每次改动条目的修改时间往后走；目标集合只读或不在集合列表里报 read_only；
 // 修改时期望的修改时间对不上报 item_conflict；写不认识的字段（含 login.totp）报 unsupported_format；
-// 改密码与隐藏字段时旧值进条目的密码历史；值超过 maxValueLength 时报 value_too_long
+// 改密码与隐藏字段时旧值进条目的密码历史；值超过 maxValueLength 时报 value_too_long；值都没变时不改、修改时间不动
 
 export interface FakeVaultItem {
   id?: string
@@ -298,6 +298,11 @@ export function fakeVault(): FakeVault {
             throw new VaultError('item_conflict', '条目已在别处修改')
           }
           checkWrite(item.collectionId, changes.values ?? {})
+          // 和真的客户端一样，值都和原来相同时不发修改：原样返回，修改时间不变
+          const same =
+            Object.entries(changes.values ?? {}).every(([ref, v]) => item.values[ref] === v) &&
+            (changes.name === undefined || changes.name === item.name)
+          if (same) return { ...summary(item), values: { ...item.values } }
           for (const [ref, value] of Object.entries(changes.values ?? {})) {
             const old = item.values[ref]
             if (historied(ref) && old !== undefined && old !== '' && old !== value) {

@@ -69,6 +69,7 @@ import { STILL_VALID } from '../memory/filter'
 import { hasMaskedText } from '../memory/masked'
 import { benchMarkReader, MemoryError, versionConflict } from '../memory/service'
 import { formatUri } from '../memory/uri'
+import { inlineText } from '../recall/text'
 import {
   VaultError,
   type VaultClient,
@@ -598,12 +599,13 @@ export class CredentialService {
     }
   }
 
-  // 改凭据这一行。托管的 values 在这里加密；密码库的 values 已经写回了条目，written 是写回之后的条目
+  // 改凭据这一行。托管的 values 在这里加密；密码库的 values 已经写回了条目，written 是写回之后的条目、
+  // 改了的字段与发给密码库的期望修改时间
   private async modify(
     tx: Tx,
     before: CredentialRow,
     input: ModifyInput,
-    written?: { item: VaultItem; fields: string[] },
+    written?: { item: VaultItem; fields: string[]; expected: string },
   ): Promise<CredentialRow> {
     this.checkModify(before, input)
     const hasValues = input.values !== undefined && Object.keys(input.values).length > 0
@@ -658,7 +660,8 @@ export class CredentialService {
       set.valueChangedAt = new Date()
       set.rotationRequestedAt = null
     }
-    if (written) {
+    // 写回之后条目的修改时间没变：值都和原来相同，客户端没发修改，不算改了值（不清需要轮换）
+    if (written && written.item.revisionDate !== written.expected) {
       changedValues = written.fields
       set.vaultRevision = written.item.revisionDate
       const at = new Date(written.item.revisionDate)
@@ -1025,14 +1028,15 @@ export class CredentialService {
     if (connection.status !== 'ok') {
       throw new MemoryError(409, '密码库连接不可用，请先在密码库里重新检查或重新登录')
     }
-    let item: VaultSnapshot['items'][number]
+    let item: VaultItem
     let collectionName: string
     try {
-      const snapshot = await this.vault.session(connection).snapshot()
-      const found = snapshot.items.find((i) => i.id === source.itemId)
-      if (!found) throw new VaultError('item_unavailable', '条目不可用')
-      item = found
-      collectionName = itemCollectionName(found.collectionIds, snapshot, connection)
+      const session = this.vault.session(connection)
+      item = await session.item(source.itemId)
+      // 集合的名称取会话最近一次同步读到的（取条目时新会话会先同步一次），没有时再同步一次
+      const collections =
+        this.vault.collectionsOf(session) ?? (await session.snapshot()).collections
+      collectionName = itemCollectionName(item.collectionIds, collections, connection)
     } catch (err) {
       if (err instanceof VaultDisabledError) {
         throw new MemoryError(409, `密码库连接已停用：${VAULT_DISABLED_REASON_NAMES[err.reason]}`)
@@ -1135,9 +1139,7 @@ export class CredentialService {
       if (!connection) return null
       const problem = destinationProblem(connection)
       if (problem) {
-        if (connection.status !== 'ok' || !connection.ciphertext) {
-          this.vault.forget(connection.id)
-        }
+        this.vault.forget(connection.id)
         throw new MemoryError(problem.status, `${DESTINATION_UNAVAILABLE}${problem.text}`)
       }
       if (!this.ctx.masterKey) {
@@ -1154,21 +1156,32 @@ export class CredentialService {
     const { connection } = first
     const { item: newItem, fields } = newVaultItem(connection, input)
     const call = await this.vaultCall(first, (session) => session.createItem(newItem))
-    await this.run((tx) => this.vault.record(tx, call.connection, call.outcome, call.used)).catch(
-      this.releasingOnError([{ connection: call.connection, session: call.used }]),
-    )
-    if (call.error !== null) throw writeFailure(call.error, 'create')
+    const touched = [{ connection: call.connection, session: call.used }]
+    const record = () =>
+      this.run((tx) => this.vault.record(tx, call.connection, call.outcome, call.used))
+    if (call.error !== null) {
+      await record().catch(this.releasingOnError(touched))
+      throw writeFailure(call.error, 'create')
+    }
     const item = call.value!
     const collectionName = connection.defaultCollectionName!
+    const orphan: OrphanVaultItem = {
+      connectionId: connection.id,
+      itemId: item.id,
+      itemName: item.name,
+      collectionName,
+    }
+    // 条目已经写进去了：之后哪一步失败都按留下的条目报，免得调用方重试又建一个
+    try {
+      await record()
+    } catch (err) {
+      await this.releaseSessions(touched)
+      throw this.orphaned(err, orphan)
+    }
     return {
       kind: 'vault',
       storedIn: { kind: 'vault', collectionName },
-      orphan: {
-        connectionId: connection.id,
-        itemId: item.id,
-        itemName: item.name,
-        collectionName,
-      },
+      orphan,
       insert: (tx, appIds, boundText) =>
         this.insertVault(
           tx,
@@ -1198,7 +1211,8 @@ export class CredentialService {
     const reason = err instanceof MemoryError ? err.write?.reason : undefined
     return new MemoryError(
       status,
-      `${text}。条目「${orphan.itemName}」已写进集合「${orphan.collectionName}」，未建成凭据：` +
+      // 条目与集合的名称是密码库里的明文，经 MCP 会交给模型：压成单行
+      `${text}。条目「${inlineText(orphan.itemName)}」已写进集合「${inlineText(orphan.collectionName)}」，未建成凭据：` +
         (this.viaKey
           ? '请所有者在管理界面给它起标识，或到密码库里删除，不要原样重试。'
           : '可以在凭据页给它起标识，或到密码库里删除。'),
@@ -1237,29 +1251,57 @@ export class CredentialService {
     }).catch(this.releasingOnError(sessions))
     const { before, changes, prepared } = first
     const itemId = before.vaultItemId!
+    // 发给密码库的期望修改时间：值有没有真的改，按写回之后的修改时间和它比
+    let expected = before.vaultRevision
     const call = await this.vaultCall(prepared, async (session) => {
-      const expected = before.vaultRevision ?? (await session.item(itemId)).revisionDate
+      expected ??= (await session.item(itemId)).revisionDate
       return session.updateItem(itemId, { values: changes.values }, expected)
     })
-    // 冲突：读一次条目现在的修改时间，记下来之后调用方重新读取就能接着改
-    let current: VaultItem | null = null
-    if (call.error instanceof VaultError && call.error.kind === 'item_conflict') {
-      const read = await this.vaultCall(
-        { connection: call.connection, session: call.used },
-        (session) => session.item(itemId),
-      )
-      if (read.error === null) current = read.value!
-    }
-    const touched = [{ connection: call.connection, session: call.used }]
+    // 冲突：读一次条目现在的修改时间，记下来之后调用方重新读取就能接着改。
+    // 这次重读也是一次通信（可能换了会话），和写入一样交给 vault.record
+    const reread =
+      call.error instanceof VaultError && call.error.kind === 'item_conflict'
+        ? await this.vaultCall({ connection: call.connection, session: call.used }, (session) =>
+            session.item(itemId),
+          )
+        : null
+    const touched = [
+      { connection: call.connection, session: call.used },
+      ...(reread ? [{ connection: reread.connection, session: reread.used }] : []),
+    ]
     const row = await this.run(async (tx) => {
-      // 写入的错误（只读、冲突、值太长）不是连接本身的问题，不改连接的状态
-      await this.vault.record(tx, call.connection, writeOutcome(call.outcome), call.used)
-      if (current) await observeRevisions(tx, call.connection.id, [current])
+      // 写入本身的错误（只读、冲突、值太长）不在 CONNECTION_ERRORS 里，record 不改连接
+      await this.vault.record(tx, call.connection, call.outcome, call.used)
+      if (reread) {
+        await this.vault.record(tx, reread.connection, reread.outcome, reread.used)
+        if (reread.error === null) await observeRevisions(tx, call.connection.id, [reread.value!])
+      }
       if (call.error !== null) return null
-      return this.modify(tx, before, input, { item: call.value!, fields: changes.names })
+      return this.recordWriteBack(tx, before.id, input, {
+        item: call.value!,
+        fields: changes.names,
+        expected: expected!,
+      })
     }).catch(this.releasingOnError(touched))
     if (!row) throw writeFailure(call.error, 'update')
     return row
+  }
+
+  // 写回已经落进密码库：不能再因为版本失败。锁住这一行重读，在现在的版本上记下这次写入
+  // （两段之间并发的取用、改名、标轮换都可能让版本变了），名称这些别的改动一起照这次请求改
+  private async recordWriteBack(
+    tx: Tx,
+    id: string,
+    input: ModifyInput,
+    written: { item: VaultItem; fields: string[]; expected: string },
+  ): Promise<CredentialRow> {
+    const [current] = await tx
+      .select()
+      .from(credentials)
+      .where(eq(credentials.id, id))
+      .for('update')
+    if (!current) throw new MemoryError(409, '凭据刚被其他请求删除')
+    return this.modify(tx, current, { ...input, expectedVersion: current.version }, written)
   }
 
   // ---- 按值比对（管理界面：按值查找、转存、Lore 导入）----
@@ -2182,12 +2224,19 @@ export class CredentialService {
         p.kind === 'values' ? p.values : (fetched.get(i)!.result as Record<string, string>)
       values.set(row.identifier, got ?? {})
     }
+    const now = Date.now()
     return {
       values: refs.map((ref) => ({
         identifier: ref.identifier,
         field: ref.field,
         value: values.get(ref.identifier)![ref.field]!,
       })),
+      // 已到期的照常给值，注明是哪几条（planned 的顺序就是标识第一次出现的顺序）
+      expired: planned.flatMap(({ row }) =>
+        credentialExpiry(row.expiresAt, now) === 'expired'
+          ? [{ identifier: row.identifier, expiresAt: row.expiresAt!.toISOString() }]
+          : [],
+      ),
     }
   }
 
@@ -2452,13 +2501,6 @@ export function vaultChanges(
   return { values: out, names: names.sort() }
 }
 
-// 只说这次写入、不说连接本身的错误：只读、冲突与值太长不改连接的状态，也不记进最近的错误
-const WRITE_ONLY_ERRORS = new Set<string>(['read_only', 'item_conflict', 'value_too_long'])
-function writeOutcome(outcome: VaultOutcome | null): VaultOutcome | null {
-  if (outcome?.kind === 'error' && WRITE_ONLY_ERRORS.has(outcome.error)) return null
-  return outcome
-}
-
 // 写进密码库失败的说法，不带值：新建（去处的集合）与写回（原条目）的开头不同
 export function writeFailure(err: unknown, action: 'create' | 'update'): unknown {
   const head = action === 'create' ? '无法写进新凭据的去处：' : '无法写回密码库：'
@@ -2545,10 +2587,10 @@ function expiredNotice(row: CredentialRow): string {
 // 条目所在集合的名称（起标识的响应用）：在几个集合里时，去处的那个集合优先，否则按名称排在最前的那个
 function itemCollectionName(
   collectionIds: readonly string[],
-  snapshot: Pick<VaultSnapshot, 'collections'>,
+  collections: VaultSnapshot['collections'],
   connection: Pick<ConnectionRow, 'defaultCollectionId'>,
 ): string {
-  const names = snapshot.collections.filter((c) => collectionIds.includes(c.id))
+  const names = collections.filter((c) => collectionIds.includes(c.id))
   const preferred = names.find((c) => c.id === connection.defaultCollectionId)
   return (preferred ?? [...names].sort((a, b) => a.name.localeCompare(b.name))[0])?.name ?? ''
 }

@@ -108,7 +108,8 @@ export function reasonStatus(reason: CredentialAccessReason): 400 | 409 | 502 {
   return reason === 'master_key' ? 400 : 409
 }
 
-// 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的
+// 这几种是连接本身的问题，记进连接的最近错误；条目不可用说明通信是好的。
+// 写入本身的错误（read_only、item_conflict、value_too_long）不在这里：它们说的是这次写入，不改连接的状态
 const CONNECTION_ERRORS = new Set<VaultErrorKind>([
   'unreachable',
   'server_error',
@@ -178,6 +179,8 @@ function syncFailure(
 interface CachedSession {
   ciphertext: Buffer
   session: VaultSession
+  // 这个会话最近一次同步读到的集合：起标识的响应要写集合的名称，有了就不再为它同步一次
+  collections?: VaultSnapshot['collections']
 }
 
 // 会话按连接缓存在进程里（访问令牌与组织密钥在会话的内存里），按客户端分开：测试里每个用例一个假客户端
@@ -408,7 +411,10 @@ export class VaultConnections {
         if (persist) await persist(next)
       },
       onSynced: async (snapshot) => {
-        if (entry) await this.synced(id, snapshot)
+        if (entry) {
+          entry.collections = snapshot.collections
+          await this.synced(id, snapshot)
+        }
       },
     })
     const snapshot = await session.snapshot().catch(loginFailure)
@@ -461,7 +467,7 @@ export class VaultConnections {
             .returning()
       return { row: row!, view: await this.viewOf(tx, row!) }
     })
-    entry = { ciphertext: saved.row.ciphertext!, session }
+    entry = { ciphertext: saved.row.ciphertext!, session, collections: snapshot.collections }
     const cached = entry
     ENTRIES.set(session, cached)
     persist = (next) => this.saveSecrets(id, cached, next)
@@ -506,6 +512,11 @@ export class VaultConnections {
     throw new VaultDisabledError(violation)
   }
 
+  // 会话最近一次同步读到的集合；还没同步过（或不是缓存里的会话）时为 undefined
+  collectionsOf(session: VaultSession): VaultSnapshot['collections'] | undefined {
+    return ENTRIES.get(session)?.collections
+  }
+
   // 连接的会话：缓存里有、密文也没变就用它，否则解开密文新建一个。调用方先确认连接没有断开
   session(row: ConnectionRow): VaultSession {
     const ciphertext = row.ciphertext!
@@ -525,7 +536,10 @@ export class VaultConnections {
         deviceId: row.deviceId,
         secrets,
         onSecretsChanged: (next) => this.saveSecrets(row.id, entry, next),
-        onSynced: (snapshot) => this.synced(row.id, snapshot),
+        onSynced: (snapshot) => {
+          entry.collections = snapshot.collections
+          return this.synced(row.id, snapshot)
+        },
       }),
     }
     ENTRIES.set(entry.session, entry)
@@ -845,7 +859,17 @@ export async function observeRevisions(
       seen: credentials.vaultRevision,
     })
     .from(credentials)
-    .where(and(eq(credentials.vaultConnectionId, connectionId), isNull(credentials.deletedAt)))
+    // 只读这几个条目对应的凭据：取用时只看到一个条目，完整同步时调用方传全部条目
+    .where(
+      and(
+        eq(credentials.vaultConnectionId, connectionId),
+        inArray(
+          credentials.vaultItemId,
+          items.map((i) => i.id),
+        ),
+        isNull(credentials.deletedAt),
+      ),
+    )
   const revisions = new Map(items.map((i) => [i.id, i.revisionDate]))
   // 按 id 排序加锁，和别的批量写入一样
   for (const b of [...bound].sort((x, y) => x.id.localeCompare(y.id))) {

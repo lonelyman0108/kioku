@@ -410,8 +410,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     expect(
       (await ok<CredentialAccess>(await use('identifier=router&field=password'))).values,
     ).toEqual({ password: 'changed-pw' })
-    // 起标识用的是同步（要写明条目所在的集合），之后每次取用各取一次条目
-    expect(vault.calls.item).toBe(2)
+    expect(vault.calls.item).toBe(3)
 
     const revealed = await ok<CredentialValues>(
       await asMember('POST', `/credentials/${created.id}/reveal`),
