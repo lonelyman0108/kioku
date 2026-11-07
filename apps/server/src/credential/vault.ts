@@ -142,15 +142,12 @@ interface CachedSession {
 
 // 会话按连接缓存在进程里（访问令牌与组织密钥在会话的内存里），按客户端分开：测试里每个用例一个假客户端
 const SESSIONS = new WeakMap<VaultClient, Map<string, CachedSession>>()
+// 会话对象对应的缓存项：record 按这次用的会话判断要不要删，会话保存过新令牌时也拿得到最新的密文
+const ENTRIES = new WeakMap<VaultSession, CachedSession>()
 
 // 正在连接或重新登录的成员（空间 + 成员）。密钥派生可能很慢、在进程里排队一次只跑一个，
 // 同一个成员重复提交会排出很长的队，所以同时只收一个，后来的直接 409。只记在内存里，请求结束就释放
 const LOGINS_IN_FLIGHT = new Set<string>()
-
-// 测试用：这个客户端的缓存里有没有这个连接的会话
-export function hasCachedSession(client: VaultClient, connectionId: string): boolean {
-  return sessionsOf(client).has(connectionId)
-}
 
 function sessionsOf(client: VaultClient): Map<string, CachedSession> {
   let map = SESSIONS.get(client)
@@ -381,6 +378,7 @@ export class VaultConnections {
         .for('update')
       id = same?.id ?? randomUUID()
       const now = new Date()
+      // 最近检查时间和节流的比较（record）用同一个时钟：数据库的 now()
       const columns = {
         email: result.account.email,
         deviceId: input.deviceId,
@@ -389,7 +387,7 @@ export class VaultConnections {
         disabledReason: null,
         lastErrorKind: null,
         lastErrorAt: null,
-        lastCheckedAt: now,
+        lastCheckedAt: sql`now()`,
         disconnectedAt: null,
         updatedAt: now,
       }
@@ -414,6 +412,7 @@ export class VaultConnections {
     })
     entry = { ciphertext: saved.row.ciphertext!, session }
     const cached = entry
+    ENTRIES.set(session, cached)
     persist = (next) => this.saveSecrets(id, cached, next)
     this.cache.set(id, cached)
     return { kind: 'connected', connection: saved.view }
@@ -478,20 +477,33 @@ export class VaultConnections {
         onSynced: (snapshot) => this.synced(row.id, snapshot),
       }),
     }
+    ENTRIES.set(entry.session, entry)
     this.cache.set(row.id, entry)
     return entry.session
   }
 
-  // 按一次通信的结果更新连接，在调用方的事务里。ciphertext 是开始时的密文：期间重新登录过就不改状态
-  async record(tx: Tx, row: ConnectionRow, outcome: VaultOutcome): Promise<void> {
-    const now = new Date()
+  // 按一次通信的结果更新连接，在调用方的事务里，取用的每一次第一段（prepare）之后都跟着它。
+  // session 是这次用的会话：刷新令牌失效时只删它（所有者可能刚重新登录，缓存里已经是新的），
+  // 改状态的条件用它最近一次保存的密文（这次调用里换过令牌时，和开始时读到的不同）。
+  // 最后确认这一行现在还能不能用：断开、停用、需要重新登录或被删掉了，就把缓存里的会话删掉。
+  // 并发的取用在断开提交之前读到可用、提交之后才建会话放回缓存的，在这里清掉。outcome 为 null 表示不改连接
+  async record(
+    tx: Tx,
+    row: ConnectionRow,
+    outcome: VaultOutcome | null,
+    session?: VaultSession,
+  ): Promise<void> {
     const live = and(eq(vaultConnections.id, row.id), ne(vaultConnections.status, 'disconnected'))
-    if (outcome.kind === 'disabled') return
-    if (outcome.kind === 'ok' || outcome.error === 'item_unavailable') {
-      // 每次取用都成功的话不必每次都写这一行：有最近的错误要清，或者上次检查已经过了一分钟才写
+    const entry = session ? ENTRIES.get(session) : undefined
+    if (
+      outcome?.kind === 'ok' ||
+      (outcome?.kind === 'error' && outcome.error === 'item_unavailable')
+    ) {
+      // 每次取用都成功的话不必每次都写这一行：有最近的错误要清，或者上次检查已经过了一分钟才写。
+      // 写入与比较都用数据库的时钟
       await tx
         .update(vaultConnections)
-        .set({ lastErrorKind: null, lastErrorAt: null, lastCheckedAt: now })
+        .set({ lastErrorKind: null, lastErrorAt: null, lastCheckedAt: sql`now()` })
         .where(
           and(
             live,
@@ -502,28 +514,24 @@ export class VaultConnections {
             ),
           ),
         )
-      return
-    }
-    if (outcome.error === 'reauth_required') {
-      // 只删用这份密文建的会话：所有者可能刚重新登录，缓存里已经是新的
-      const cached = this.cache.get(row.id)
-      if (cached && row.ciphertext && cached.ciphertext.equals(row.ciphertext)) {
-        this.cache.delete(row.id)
-      }
+    } else if (outcome?.kind === 'error' && outcome.error === 'reauth_required') {
+      if (entry ? this.cache.get(row.id) === entry : false) this.cache.delete(row.id)
+      const used = entry?.ciphertext ?? row.ciphertext
       await tx
         .update(vaultConnections)
-        .set({ status: 'reauth_required', disabledReason: null, updatedAt: now })
-        .where(
-          and(live, row.ciphertext ? eq(vaultConnections.ciphertext, row.ciphertext) : undefined),
-        )
-      return
-    }
-    if (CONNECTION_ERRORS.has(outcome.error)) {
+        .set({ status: 'reauth_required', disabledReason: null, updatedAt: new Date() })
+        .where(and(live, used ? eq(vaultConnections.ciphertext, used) : undefined))
+    } else if (outcome?.kind === 'error' && CONNECTION_ERRORS.has(outcome.error)) {
       await tx
         .update(vaultConnections)
-        .set({ lastErrorKind: outcome.error, lastErrorAt: now })
+        .set({ lastErrorKind: outcome.error, lastErrorAt: sql`now()` })
         .where(live)
     }
+    const [now] = await tx
+      .select({ status: vaultConnections.status, ciphertext: vaultConnections.ciphertext })
+      .from(vaultConnections)
+      .where(eq(vaultConnections.id, row.id))
+    if (!now || now.status !== 'ok' || !now.ciphertext) this.forget(row.id)
   }
 
   // 同步一次：停用的原因消失了就恢复成可用，没消失就照旧停用。连接出错时更新状态、照样返回连接
@@ -537,8 +545,9 @@ export class VaultConnections {
     if (row.status === 'reauth_required') return { snapshot: null, row }
     let snapshot: VaultSnapshot | null = null
     let outcome: VaultOutcome
+    const session = this.session(row)
     try {
-      snapshot = await this.session(row).snapshot()
+      snapshot = await session.snapshot()
       outcome = { kind: 'ok' }
     } catch (err) {
       if (err instanceof VaultDisabledError) outcome = { kind: 'disabled' }
@@ -546,26 +555,30 @@ export class VaultConnections {
       else throw err
     }
     const updated = await this.run(async (tx) => {
-      // 违规的话 onSynced 已经停用了连接并抛错（每次同步都调），能拿到快照就是干净的，停用的恢复成可用
+      // 拿到快照之后自己再查一遍，不只靠客户端在 onSynced 里抛错：换一个客户端、或者 snapshot() 走了别的路径，
+      // 违规的连接也不会被恢复。判断与 onSynced 是同一个 snapshotViolation
       if (snapshot) {
+        const violation = snapshotViolation(snapshot)
         await tx
           .update(vaultConnections)
           .set({
-            status: 'ok',
-            disabledReason: null,
+            status: violation ? 'disabled' : 'ok',
+            disabledReason: violation,
             lastErrorKind: null,
             lastErrorAt: null,
-            lastCheckedAt: new Date(),
+            lastCheckedAt: sql`now()`,
             updatedAt: new Date(),
           })
           .where(and(eq(vaultConnections.id, row.id), ne(vaultConnections.status, 'disconnected')))
+        if (violation) this.forget(row.id)
       } else if (outcome.kind === 'disabled') {
         await tx
           .update(vaultConnections)
-          .set({ lastErrorKind: null, lastErrorAt: null, lastCheckedAt: new Date() })
+          .set({ lastErrorKind: null, lastErrorAt: null, lastCheckedAt: sql`now()` })
           .where(eq(vaultConnections.id, row.id))
+        this.forget(row.id)
       } else {
-        await this.record(tx, row, outcome)
+        await this.record(tx, row, outcome, session)
       }
       return this.own(tx, row.id)
     })

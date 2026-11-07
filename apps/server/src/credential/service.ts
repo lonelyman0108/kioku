@@ -26,7 +26,7 @@ import { and, asc, count, desc, eq, inArray, isNotNull, isNull, lt, ne, sql } fr
 import { canUseCredential, credentialDenial, type Access } from '../access/access'
 import { decryptSecret, encryptSecret } from '../crypto/envelope'
 import { decryptionKey, encryptionKey, type MasterKey } from '../crypto/keyring'
-import { isUniqueViolation, withSpace, type Db, type Tx } from '../db/client'
+import { isUniqueViolation, logInternalError, withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
   apiKeys,
@@ -79,8 +79,9 @@ export type CredentialVia = 'kioku_credential' | 'rest' | 'console' | 'space_exp
 // kioku_get 末尾列出的一条凭据：只说能不能取用，不给值，也不记访问
 export interface PlaceholderCredential {
   identifier: string
-  // usable 能取用；unavailable 无权查看或不存在；其余是密码库连接的状态（取用时会以它失败）
-  state: 'usable' | 'unavailable' | 'disconnected' | 'reauth_required' | 'disabled'
+  // usable 能取用；unavailable 无权查看或不存在；其余是取用时会以它失败的原因：
+  // 没配主密钥（托管的与密码库的都解不开），或者密码库连接的状态
+  state: 'usable' | 'unavailable' | 'master_key' | 'disconnected' | 'reauth_required' | 'disabled'
   // 看得到这条凭据时给名称
   name: string | null
 }
@@ -652,6 +653,8 @@ export class CredentialService {
     // 不是密码库报的错（解不开重读的密文、保存新令牌或停用连接时的数据库错误）：也记一条失败，再原样抛出
     let unexpected: unknown = null
     let connection = prepared.connection
+    // 这次真正用的会话：重试时换成新建的那个，record 按它判断要删哪个缓存
+    let used = prepared.session
     try {
       let item: VaultItem
       try {
@@ -676,6 +679,7 @@ export class CredentialService {
         } catch (openErr) {
           throw new SecretsUnreadable(openErr)
         }
+        used = session
         item = await session.item(row.vaultItemId!)
       }
       outcome = { kind: 'ok' }
@@ -688,9 +692,10 @@ export class CredentialService {
         outcome = { kind: 'error', error: err.kind }
         result = vaultReason(err.kind)
       } else {
-        // 和 prepare 里解不开令牌一样记成主密钥的问题；别的意外记成密码库出错。连接的状态不动
+        // 和 prepare 里解不开令牌一样记成主密钥的问题；别的意外（数据库错误等）记成 Kioku 内部出错，
+        // 不说成密码库的问题。连接的状态不改
         outcome = null
-        result = err instanceof SecretsUnreadable ? 'master_key' : 'vault_error'
+        result = err instanceof SecretsUnreadable ? 'master_key' : 'internal_error'
         unexpected = err
       }
     }
@@ -704,14 +709,18 @@ export class CredentialService {
         reason: typeof result === 'string' ? result : null,
       })
     if (unexpected !== null) {
-      // 记失败本身也可能出错（例如数据库连不上）：那时抛出原来的错误
-      await this.run(finish).catch(() => {})
+      // 记失败本身也可能出错（例如数据库连不上）：记进日志，抛出原来的错误。
+      // 照样确认连接还能不能用，不能用就把缓存里的会话删掉
+      await this.run(async (tx) => {
+        await this.vault.record(tx, connection, null, used)
+        await finish(tx)
+      }).catch((err: unknown) => logInternalError('凭据取用失败之后记访问事件出错', err))
       // 解不开令牌和 prepare 里一样给出「主密钥不可用」；别的意外原样抛出，按内部错误处理
       if (result === 'master_key') throw failureError(result, row.identifier)
       throw unexpected
     }
     await this.run(async (tx) => {
-      if (outcome) await this.vault.record(tx, connection, outcome)
+      await this.vault.record(tx, connection, outcome, used)
       await finish(tx)
     })
     if (typeof result === 'string') throw failureError(result, row.identifier)
@@ -1096,7 +1105,8 @@ export class CredentialService {
       const found = rows.find((r) => r.row.identifier === identifier)
       if (!found || !canUseCredential(this.ctx.access, found.row)) return unavailable(identifier)
       const status = found.row.source === 'vault' ? (found.status ?? 'disconnected') : 'ok'
-      return { identifier, state: status === 'ok' ? 'usable' : status, name: found.row.name }
+      const state = !this.ctx.masterKey ? 'master_key' : status === 'ok' ? 'usable' : status
+      return { identifier, state, name: found.row.name }
     })
   }
 

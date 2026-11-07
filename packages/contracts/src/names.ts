@@ -62,4 +62,5 @@ export const CREDENTIAL_ACCESS_REASON_NAMES: Record<CredentialAccessReason, stri
   unreachable: '密码库无法连接',
   vault_error: '密码库返回的内容无法解开',
   master_key: '主密钥不可用',
+  internal_error: 'Kioku 内部出错',
 }
