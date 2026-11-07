@@ -1481,16 +1481,16 @@ export class MemoryService {
     })
   }
 
-  // 把正文里的一段明文转存成凭据，全部在一个事务里：credential.create 建好凭据（标识冲突、权限不够时抛错，
-  // 什么都不留下），正文里这段值换成占位符（照常过写入检查、版本加一、记一条事件），再把这个值从历史里拿掉。
+  // 把正文里的一段明文转存成凭据，全部在一个事务里：credential.create 建好凭据或锁住已有的那条（标识冲突、
+  // 权限不够、核对之后凭据变了时抛错，什么都不留下），返回凭据 id；正文里这段值换成 {{cred:<identifier>#<field>}}（照常过写入检查、版本加一、记一条事件），再把这个值从历史里拿掉。
   // 全文检索是生成列，跟着新正文变；向量由旧正文生成，在同一个事务里删掉，提交后重新排队生成。
   // credential.view 也在事务里读给响应用的凭据：引用已经写进索引，数得对；读失败时整个回滚，调用方重试不会撞上 409。
   // 提交之后不再做会失败的事：否则报错了数据却已经改了
   async convertToCredential<T>(
-    input: Pick<
-      ConvertToCredentialRequest,
-      'memoryId' | 'expectedVersion' | 'value' | 'identifier' | 'field'
-    >,
+    input: Pick<ConvertToCredentialRequest, 'memoryId' | 'expectedVersion' | 'value'> & {
+      identifier: string
+      field: string
+    },
     credential: { create: (tx: Tx) => Promise<string>; view: (tx: Tx, id: string) => Promise<T> },
   ): Promise<{
     memory: MemoryView

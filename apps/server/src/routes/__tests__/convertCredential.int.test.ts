@@ -100,25 +100,34 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
     ok<MemoryView>(await send('POST', '/memories/move', { from, to }))
   const seedNote = (extra: Record<string, unknown> = {}) =>
     remember({ uri: 'user://notes/wifi', content: BODY, ...extra })
+  // extra 里的标识、名称、说明与字段名放进托管的去处，别的放在请求上
+  const TARGET_KEYS = new Set(['identifier', 'name', 'description', 'field'])
   const convert = (
     m: { id: string; version: number },
     extra: Record<string, unknown> = {},
     cookie = ws.cookie,
-  ) =>
-    send(
+  ) => {
+    const pick = (inTarget: boolean) =>
+      Object.fromEntries(Object.entries(extra).filter(([k]) => TARGET_KEYS.has(k) === inTarget))
+    return send(
       'POST',
       '/memories/convert-to-credential',
       {
         memoryId: m.id,
         expectedVersion: m.version,
         value: VALUE,
-        identifier: 'wifi',
-        name: '无线网络',
-        field: 'password',
-        ...extra,
+        target: {
+          kind: 'hosted',
+          identifier: 'wifi',
+          name: '无线网络',
+          field: 'password',
+          ...pick(true),
+        },
+        ...pick(false),
       },
       cookie,
     )
+  }
   const converted = async (m: { id: string; version: number }, extra = {}) =>
     ConvertedToCredential.parse(await ok(await convert(m, extra)))
   const rowOf = async (id: string) =>
@@ -737,9 +746,10 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       expect(((await res.json()) as { error: string }).error).toContain('空间所有者')
       expect((await rowOf(hers.id)).content).toBe(BODY)
 
+      // 去处先于记忆检查：不是空间所有者一律 403，不论记忆读不读得到
       const mine = await seedNote()
-      expect((await convert(mine, {}, editor.cookie)).status).toBe(404)
-      expect((await convert(mine, {}, viewer.cookie)).status).toBe(404)
+      expect((await convert(mine, {}, editor.cookie)).status).toBe(403)
+      expect((await convert(mine, {}, viewer.cookie)).status).toBe(403)
       const shared = await remember({ uri: 'core://kb/faq', content: BODY })
       expect((await convert(shared, {}, viewer.cookie)).status).toBe(403)
       expect(await credentialCount()).toBe(0)
@@ -762,9 +772,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
             memoryId: m.id,
             expectedVersion: m.version,
             value: VALUE,
-            identifier: 'wifi',
-            name: '无线网络',
-            field: 'password',
+            target: { kind: 'hosted', identifier: 'wifi', name: '无线网络', field: 'password' },
           },
           { cookie: ws.cookie },
         ),

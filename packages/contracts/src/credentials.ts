@@ -48,30 +48,90 @@ const PLAINTEXT_LABELS = 'password|passwd|密码|口令|token|api[_ -]?key|secre
 const PLAINTEXT_QUOTES = '"\'`“‘「『*'
 // 值到这里结束：中文标点与收尾的引号。英文标点常出现在密码里，不算
 const VALUE_STOPS = '，。；、！？）】」』》”’'
+// 中日韩文字：假名、汉字（含扩展 A 与兼容汉字）、谚文音节。只列 BMP 里的：JS 的规则不带 u 标记，
+// 补充平面的字是两个代理项，PostgreSQL 按码点算，写进来两边会判断得不一样
+const CJK = '\\u3040-\\u30ff\\u3400-\\u4dbf\\u4e00-\\u9fff\\uac00-\\ud7af\\uf900-\\ufaff'
+// 值前面可以先有这些再接中文：引号、粗体与左括号
+const CJK_LEADS = `${PLAINTEXT_QUOTES}（【《\\(\\[`
 // 盖掉明文之后留下的遮盖符（转存时的历史快照、会话摘要的打码）：盖过的不再算明文
 export const PLAINTEXT_MASK = '***'
 // 遮盖符要整段就是它：后面是空白、行尾、收尾的引号或中文标点；英文的逗号、句号这些算句子的标点，后面还要是空白或行尾。
 // 所以 ***hunter2***、***x 照样算明文：真密码可能这样开头，不能借遮盖符躲过提醒和降级拦截
 const WHOLE_MASK = `\\*\\*\\*(?:[,.;:]*(?:[${SPACE}]|$)|["'\`${VALUE_STOPS}])`
 
-// 正文像有明文密码或 Token：「密码：…」「token = …」这类写法（值写在下一行的也算，后面跟着占位符或整段遮盖符的不算，
-// 这两样写在引号里也不算），或者 sk- 开头的长串。启发式规则，宁可多报：只用来提醒，以及挡住带着明文从 secret 降级
-// （管理界面里由空间 owner 确认后可以强制）
+// 疑似明文的类别：label 是「密码：…」「token = …」这类写法，其余是有固定前缀或结构的令牌
+export const PLAINTEXT_KINDS = [
+  'label',
+  'sk',
+  'github',
+  'gitlab',
+  'slack',
+  'aws',
+  'jwt',
+  'private_key',
+  'kioku',
+] as const
+export const PlaintextKind = z.enum(PLAINTEXT_KINDS)
+export type PlaintextKind = z.infer<typeof PlaintextKind>
+type TokenKind = Exclude<PlaintextKind, 'label'>
+
+// 「密码：…」这类写法：值写在下一行的也算；后面跟着占位符或整段遮盖符的不算，这两样写在引号里也不算；
+// 值以中文开头的不算（「密码：见 Vaultwarden 条目」），前面隔着引号、粗体或左括号也一样
+const LABEL_RULE =
+  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*` +
+  `(?![${PLAINTEXT_QUOTES}]*(?:\\{\\{cred:|${WHOLE_MASK}))(?![${CJK_LEADS}]*[${CJK}])[^${SPACE}]`
+
+// 令牌前后不能紧挨着字母、数字、_ 与 -：task-…、my_ghp_… 这类是别的词的一部分
+const TOKEN_START = '(?<![A-Za-z0-9_-])'
+const TOKEN_END = '(?![A-Za-z0-9_-])'
+// 已知格式的令牌。规则不区分大小写（PostgreSQL 用 ~*），前缀的大小写不作数，靠长度与结构压低误报
+const TOKEN_RULES: Record<TokenKind, string> = {
+  // OpenAI、Anthropic、DeepSeek 这类：sk- 之后可以先有几段带连字符的前缀（sk-proj-、sk-ant-api03-），
+  // 要有一段至少 16 个字母与数字连着。sk-learn 这类短词不算
+  sk: `${TOKEN_START}sk-(?:[A-Za-z0-9]+[-_]){0,8}[A-Za-z0-9]{16,}`,
+  // GitHub：ghp_、gho_、ghu_、ghs_、ghr_ 加 36 位，细粒度的 github_pat_ 加 82 位（这里放宽到 40 位）
+  github: `${TOKEN_START}(?:gh[pousr]_[A-Za-z0-9]{36,}|github_pat_[A-Za-z0-9_]{40,})`,
+  // GitLab 个人访问令牌：glpat- 加 20 位
+  gitlab: `${TOKEN_START}glpat-[A-Za-z0-9_-]{20,}`,
+  // Slack：xoxb-、xoxa-、xoxp-、xoxr-、xoxs- 加数字与字母的几段
+  slack: `${TOKEN_START}xox[baprs]-[A-Za-z0-9-]{20,}`,
+  // AWS 长期访问密钥的 ID：AKIA 加 16 位。临时的 ASIA 不收：不区分大小写时 Asia 开头的长词会被误报
+  aws: `${TOKEN_START}AKIA[A-Z0-9]{16}${TOKEN_END}`,
+  // JWT：三段 base64url，前两段是 JSON（eyJ 开头）
+  jwt: `${TOKEN_START}eyJ[A-Za-z0-9_-]{10,}\\.eyJ[A-Za-z0-9_-]{10,}\\.[A-Za-z0-9_-]{10,}`,
+  // 私钥块：BEGIN … PRIVATE KEY（PGP 的带 BLOCK）的开头一行，后面要跟着正文。只写了开头一行的不算，
+  // 文档里常提到这种写法；旧式加密的 PEM（下一行是 Proc-Type:）也不算，它的正文本来就加了密
+  private_key: `-----BEGIN [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----[${SPACE}]*[A-Za-z0-9+/=]{16,}`,
+  // Kioku 自己的访问密钥：kioku_<12 位前缀>_<40 位密钥>（服务端 auth/keys.ts）。只有前缀的不算
+  kioku: `${TOKEN_START}kioku_[A-Za-z0-9]{12}_[A-Za-z0-9]{40}${TOKEN_END}`,
+}
+const TOKEN_KINDS = Object.keys(TOKEN_RULES) as TokenKind[]
+
+// 正文像有明文密码或 Token：上面两类规则合在一起。启发式规则，宁可多报：用来提醒、拦下新写进来的明文，
+// 以及挡住带着明文从 secret 降级（管理界面里由空间 owner 确认后可以强制）。
+// 服务端把 source 原样交给 PostgreSQL（~*），所以只用两边都认的写法：(?:…)、(?=…)、(?!…)、(?<!…)、
+// 方括号与 \uXXXX；不用 \b、\d、\w、\s（PostgreSQL 的 \b 是退格，\s 随 locale 变）、命名分组与 u 标记，
+// 重复次数不超过 255。不加捕获分组：类别在 JS 里按开头另认
 export const PLAINTEXT_CREDENTIAL = new RegExp(
-  `(?:${PLAINTEXT_LABELS})[${SPACE}]*[:：=][${SPACE}]*(?![${PLAINTEXT_QUOTES}]*(?:\\{\\{cred:|${WHOLE_MASK}))[^${SPACE}]|sk-[A-Za-z0-9]{16,}`,
+  [LABEL_RULE, ...TOKEN_KINDS.map((kind) => TOKEN_RULES[kind])].join('|'),
   'i',
 )
 
-// 正文里疑似明文的一处：值在 [start, end) 这一段（JS 字符串的下标），field 是建议用的字段名。
-// 规则只认得出值从哪里开始，到哪里结束是猜的，要让人看过再转存
+// 正文里疑似明文的一处：值在 [start, end) 这一段（JS 字符串的下标），line 是 start 所在的行（从 1 起，按 \n 分行），
+// kind 是类别，field 是建议用的字段名。规则只认得出值从哪里开始，「密码：…」的值到哪里结束是猜的，要让人看过再转存
 export interface PlaintextCredentialMatch {
   start: number
   end: number
+  line: number
+  kind: PlaintextKind
   field: string
 }
 
 const PLAINTEXT_ALL = new RegExp(PLAINTEXT_CREDENTIAL.source, 'gi')
 const PLAINTEXT_LABEL = new RegExp(`^(?:${PLAINTEXT_LABELS})`, 'i')
+const TOKEN_ANCHORED = TOKEN_KINDS.map(
+  (kind) => [kind, new RegExp(`^(?:${TOKEN_RULES[kind]})`, 'i')] as const,
+)
 // 值写在这些符号里时取里面的部分
 const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
   ['***', '***'],
@@ -86,6 +146,22 @@ const VALUE_WRAPPERS: readonly (readonly [string, string])[] = [
 ]
 // 值到这里结束：空白、中文标点、占位符
 const VALUE_END = new RegExp(`[${SPACE}${VALUE_STOPS}]|\\{\\{cred:`)
+// 令牌后面紧跟着的连字符与下划线也是值的一部分
+const TOKEN_TAIL = /^[A-Za-z0-9_-]*/
+// 私钥块到 END 那一行为止；没有 END 时到正文的最后一个 base64 字符
+const PRIVATE_KEY_END = /-----END [A-Z0-9 ]{0,40}PRIVATE KEY(?: BLOCK)?-----/i
+const PRIVATE_KEY_BODY = /^[A-Za-z0-9+/=\s]*/
+
+const TOKEN_FIELDS: Record<TokenKind, string> = {
+  sk: 'api_key',
+  github: 'token',
+  gitlab: 'token',
+  slack: 'token',
+  aws: 'access_key_id',
+  jwt: 'token',
+  private_key: 'private_key',
+  kioku: 'api_key',
+}
 
 function plaintextField(label: string): string {
   const word = label.toLowerCase()
@@ -109,19 +185,54 @@ function plaintextValue(text: string, first: number): { start: number; end: numb
   return { start: first, end: Math.max(end, first + 1) }
 }
 
-// 和 PLAINTEXT_CREDENTIAL 同一条规则，找出每一处的位置与字段名
+// 令牌从匹配的开头起，整串都是值
+function tokenValue(
+  text: string,
+  kind: TokenKind,
+  start: number,
+  matched: number,
+): { start: number; end: number } {
+  let end = start + matched
+  if (kind === 'private_key') {
+    const rest = text.slice(end)
+    const close = PRIVATE_KEY_END.exec(rest)
+    end += close ? close.index + close[0].length : PRIVATE_KEY_BODY.exec(rest)![0].trimEnd().length
+  } else if (kind !== 'aws' && kind !== 'kioku') {
+    end += TOKEN_TAIL.exec(text.slice(end))![0].length
+  }
+  return { start, end }
+}
+
+// 按先后数行号：每一处都接着上一处往后数，整段只扫一遍
+function lineCounter(text: string): (index: number) => number {
+  let line = 1
+  let next = text.indexOf('\n')
+  return (index) => {
+    while (next !== -1 && next < index) {
+      line++
+      next = text.indexOf('\n', next + 1)
+    }
+    return line
+  }
+}
+
+// 和 PLAINTEXT_CREDENTIAL 同一条规则，找出每一处的位置、类别与字段名
 export function findPlaintextCredentials(text: string): PlaintextCredentialMatch[] {
   const found: PlaintextCredentialMatch[] = []
+  const lineAt = lineCounter(text)
   let last = 0
   for (const m of text.matchAll(PLAINTEXT_ALL)) {
     const label = PLAINTEXT_LABEL.exec(m[0])?.[0]
     let span: { start: number; end: number }
+    let kind: PlaintextKind
     if (label) {
+      kind = 'label'
       span = plaintextValue(text, m.index + m[0].length - 1)
     } else {
-      // sk- 串可能带着连字符或下划线接着往后写，整串都是值
-      const tail = /^[A-Za-z0-9_-]*/.exec(text.slice(m.index + m[0].length))![0]
-      span = { start: m.index, end: m.index + m[0].length + tail.length }
+      // 各类的开头互不相同，按开头认出是哪一类
+      const token = TOKEN_ANCHORED.find(([, rule]) => rule.test(m[0]))![0]
+      kind = token
+      span = tokenValue(text, token, m.index, m[0].length)
     }
     // 上一处的值里又像一处（例如 a=1&token=2）：不重复算
     if (
@@ -130,11 +241,43 @@ export function findPlaintextCredentials(text: string): PlaintextCredentialMatch
     ) {
       continue
     }
-    found.push({ ...span, field: label ? plaintextField(label) : 'api_key' })
+    found.push({
+      ...span,
+      line: lineAt(span.start),
+      kind,
+      field: kind === 'label' ? plaintextField(label!) : TOKEN_FIELDS[kind],
+    })
     last = span.end
   }
   return found
 }
+
+// 这次写入新增的疑似明文：after 里检出的值在 before 里没有检出过的（按值的原文比，不看位置与类别）。
+// before 为 null 表示新建。服务端拒绝写入与管理界面保存前的逐处处理都按它判断，两边才一致
+export function addedPlaintextCredentials(
+  before: string | null,
+  after: string,
+): PlaintextCredentialMatch[] {
+  const existing = new Set(
+    before === null
+      ? []
+      : findPlaintextCredentials(before).map((m) => before.slice(m.start, m.end)),
+  )
+  return findPlaintextCredentials(after).filter((m) => !existing.has(after.slice(m.start, m.end)))
+}
+
+// 写入被拒时指出的一处：只有行号与类别，不带值
+export const PlaintextFinding = z
+  .object({ line: z.number().int(), kind: PlaintextKind })
+  .meta({ id: 'PlaintextFinding' })
+export type PlaintextFinding = z.infer<typeof PlaintextFinding>
+
+// 记忆写入的错误：和 ErrorResponse 一样有 error；正文里有新增的疑似明文被拒时（400）再带上 plaintext，
+// 按在正文里的先后排列。别的错误没有这一项
+export const MemoryWriteError = z
+  .object({ error: z.string(), plaintext: z.array(PlaintextFinding).optional() })
+  .meta({ id: 'MemoryWriteError' })
+export type MemoryWriteError = z.infer<typeof MemoryWriteError>
 
 // 凭据的来源：hosted 是值由 Kioku 加密保存；vault 是值在成员连接的密码库里，Kioku 只记连接与条目的 id
 export const CREDENTIAL_SOURCES = ['hosted', 'vault'] as const
@@ -344,36 +487,144 @@ export type UpdateCredentialRequest = z.infer<typeof UpdateCredentialRequest>
 
 export const CONVERT_VALUE_MIN_LENGTH = 4
 
-// 把记忆正文里的一段明文转存成一条 Kioku 托管的凭据：只给管理界面。expectedVersion 是看到这段值时的版本，
-// 期间被改过就返回 409。正文里这段值出现几处换几处，历史快照里的也一起换掉，所以太短的不收：
-// 只有几个字符时换掉的多半是别的内容
-export const ConvertToCredentialRequest = z
-  .object({
-    memoryId: z.uuid(),
-    expectedVersion: z.number().int(),
-    value: CredentialValue.min(
-      CONVERT_VALUE_MIN_LENGTH,
-      `要转存的值至少 ${CONVERT_VALUE_MIN_LENGTH} 个字符，更短的值请手动新建凭据`,
-    )
-      .refine((v) => v === v.trim(), '要转存的值前后不能有空白')
-      .refine((v) => !/\p{Cs}/u.test(v), '要转存的值含不完整的字符')
-      .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值不能含凭据占位符'),
+// 要转存或按值查找的一段明文。正文里这段值出现几处换几处，历史快照里的也一起换掉，所以太短的不收：
+// 只有几个字符时换掉的多半是别的内容。报错都不带值
+export const ConvertibleValue = CredentialValue.min(
+  CONVERT_VALUE_MIN_LENGTH,
+  `要转存的值至少 ${CONVERT_VALUE_MIN_LENGTH} 个字符，更短的值请手动新建凭据`,
+)
+  .refine((v) => v === v.trim(), '要转存的值前后不能有空白')
+  .refine((v) => !/\p{Cs}/u.test(v), '要转存的值含不完整的字符')
+  .refine((v) => !v.includes(CREDENTIAL_PLACEHOLDER_START), '要转存的值不能含凭据占位符')
+
+// 按值查找同值的凭据与密码库条目：只给管理界面的空间 owner，一次最多 20 个值
+export const CREDENTIAL_MATCH_MAX = 20
+export const MatchCredentialValuesRequest = z.object({
+  values: z
+    .array(ConvertibleValue)
+    .min(1, '至少需要一个值')
+    .max(CREDENTIAL_MATCH_MAX, `一次最多 ${CREDENTIAL_MATCH_MAX} 个值`),
+})
+export type MatchCredentialValuesRequest = z.infer<typeof MatchCredentialValuesRequest>
+
+// 一个值对上的地方，按字面比较（不去空白、不分大小写以外的任何归一化）。
+// credentials：当前账号的有效凭据里同值的字段，托管的与密码库来源的都算，可以直接写成 {{cred:<标识>#<字段>}}。
+// vaultItems：当前账号连接读得到的条目里同值、但还不能直接引用的字段：条目还没起标识（credential 为 null），
+// 或者起了标识、这个字段却没有对应到凭据的字段（credential 给出那条凭据，要先在凭据里加上字段对应）。
+// 已经对应到凭据字段的条目字段只列在 credentials 里，不重复列
+export const CredentialValueMatch = z.object({
+  credentials: z.array(
+    z.object({
+      id: z.uuid(),
+      identifier: z.string(),
+      name: z.string(),
+      field: z.string(),
+    }),
+  ),
+  vaultItems: z.array(
+    z.object({
+      connectionId: z.uuid(),
+      itemId: z.string(),
+      itemName: z.string(),
+      itemField: z.string(),
+      credential: z.object({ id: z.uuid(), identifier: z.string() }).nullable(),
+    }),
+  ),
+})
+export type CredentialValueMatch = z.infer<typeof CredentialValueMatch>
+
+export const CredentialValueMatches = z.object({
+  // 和请求的 values 一一对应
+  items: z.array(CredentialValueMatch),
+  // 这次读不了的连接数（不可用、需要重新登录、无法连接等）：它们的条目和指着它们的凭据都没比，对不上不等于没有
+  unavailableConnections: z.number().int(),
+  // 读不到值的托管凭据条数（没配主密钥、解不开）：这些也没比，对不上不等于没有
+  unreadableCredentials: z.number().int(),
+})
+export type CredentialValueMatches = z.infer<typeof CredentialValueMatches>
+
+// 转存的去处。
+// hosted：新建一条 Kioku 托管的凭据，值存在 field 这个字段里。
+// credential：换成当前账号一条已有凭据的 field 字段（托管或密码库来源都行）。
+// vault：给当前账号连接里还没起标识的条目起标识，换成 itemField 对应的字段。字段对应不给时按条目里现有的字段推出
+// （defaultCredentialFields），给了要包含 itemField；名称不给时用条目的名称。条目已经有凭据时返回 409，改用 credential。
+// credential 与 vault 由服务端核对这个字段现在的值确实等于 value，不等时返回 400（文字不带值）：
+// 转存会把值从历史里抹掉，绑错了就找不回来
+export const ConvertTarget = z.discriminatedUnion('kind', [
+  z.object({
+    kind: z.literal('hosted'),
     identifier: CredentialIdentifier,
     name: CredentialName,
     description: CredentialDescription.optional(),
     field: CredentialFieldName,
+  }),
+  z.object({
+    kind: z.literal('credential'),
+    credentialId: z.uuid(),
+    field: CredentialFieldName,
+  }),
+  z
+    .object({
+      kind: z.literal('vault'),
+      connectionId: z.uuid(),
+      itemId: VaultItemId,
+      itemField: VaultFieldRef,
+      identifier: CredentialIdentifier,
+      name: CredentialName.optional(),
+      description: CredentialDescription.optional(),
+      fields: VaultCredentialFields.optional(),
+    })
+    .refine((t) => !t.fields || t.fields.some((f) => f.itemField === t.itemField), {
+      path: ['fields'],
+      message: '字段对应里要有要转存的条目字段',
+    }),
+])
+export type ConvertTarget = z.infer<typeof ConvertTarget>
+
+// 去处里写成明文的部分：标识、名称、说明与字段名（密码库的再加上条目字段）
+function convertTargetTexts(target: ConvertTarget): string[] {
+  switch (target.kind) {
+    case 'hosted':
+      return [target.identifier, target.name, target.description ?? '', target.field]
+    case 'credential':
+      return [target.field]
+    case 'vault':
+      return [
+        target.identifier,
+        target.name ?? '',
+        target.description ?? '',
+        target.itemField,
+        ...(target.fields ?? []).flatMap((f) => [f.name, f.itemField]),
+      ]
+  }
+}
+
+// 把记忆正文里的一段明文换成凭据占位符：只给管理界面的空间 owner。expectedVersion 是看到这段值时的版本，
+// 期间被改过就返回 409。去处见 ConvertTarget
+export const ConvertToCredentialRequest = z
+  .object({
+    memoryId: z.uuid(),
+    expectedVersion: z.number().int(),
+    value: ConvertibleValue,
+    target: ConvertTarget,
   })
-  // 标识、名称、说明与字段名都是明文，占位符里还带着标识和字段名：写进去就白转存了
-  .refine(
-    (r) => ![r.identifier, r.name, r.description ?? '', r.field].some((t) => t.includes(r.value)),
-    { path: ['value'], message: '标识、名称、说明与字段名不能包含要转存的值' },
-  )
+  // 去处里的这些都是明文，占位符里还带着标识和字段名：写进去就白转存了。
+  // 用条目名称作名称时（vault 没给 name）由服务端再查一次
+  .refine((r) => !convertTargetTexts(r.target).some((t) => t.includes(r.value)), {
+    path: ['value'],
+    message: '标识、名称、说明与字段名不能包含要转存的值',
+  })
 export type ConvertToCredentialRequest = z.infer<typeof ConvertToCredentialRequest>
 
 // 转存的结果，不含值
 export const ConvertedToCredential = z.object({
   memory: ConsoleMemoryView,
+  // 正文里引用的凭据：新建的（hosted、vault）或已有的（credential）
   credential: ConsoleCredential,
+  // 这次是不是新建了凭据
+  created: z.boolean(),
+  // 占位符里用的字段名：{{cred:<credential.identifier>#<field>}}
+  field: z.string(),
   // 正文里换掉了几处
   replaced: z.number().int(),
   // 历史里改写了几个事件的快照

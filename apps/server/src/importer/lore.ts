@@ -3,6 +3,7 @@ import { createHash } from 'node:crypto'
 import {
   CreateMemoryRequest,
   DEFAULT_SENSITIVITY,
+  findPlaintextCredentials,
   LAYER_NAMES,
   SENSITIVITY_NAMES,
   RUNTIME_FAMILIES,
@@ -11,6 +12,7 @@ import {
   type LoreSyncChange,
   type LoreTargetState,
   type LoreWarningKind,
+  type PlaintextKind,
   type RuntimeFamily,
   type Sensitivity,
   type UpdateMemoryRequest,
@@ -23,8 +25,10 @@ import {
   looksLikePlaintextCredential,
   mentionsPlaceholder,
   placeholderAllowed,
+  replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
+import type { KnownCredentialValues } from '../credential/service'
 import { decryptSecret } from '../crypto/envelope'
 import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { sealedSettingsKeys } from '../crypto/rotation'
@@ -165,7 +169,55 @@ export interface ImportOptions {
   quoteMalformed?: boolean
   // URI 已被空间里别的记忆占用的写入目标（去重键，见 occupiedTargets），计划里列为不导入
   occupied?: ReadonlySet<string>
+  // 勾选了要换成占位符的疑似明文：节点 uuid → 这几处（见 PlaintextConversion）。只用于新建的目标，见 PlannedMemory.converted
+  convert?: ReadonlyMap<string, PlaintextConversion[]>
 }
+
+// 节点正文里的一处疑似明文（findPlaintextCredentials 的第 index 处）和对上的凭据：值等于这条凭据这个字段现在的值。
+// value 只在服务端里用，不进计划视图
+export interface PlaintextSpot {
+  index: number
+  line: number
+  kind: PlaintextKind
+  value: string
+  credential: { id: string; identifier: string; name: string; field: string } | null
+}
+
+// 正文里的疑似明文，按值和已有的凭据比（known 为 null 时都对不上）。同一个值对上几条时取标识、字段排在前面的那条。
+// known.entries 里只有满足 ConvertibleValue 的值（见 knownValues），不满足的这一处自然对不上
+export function plaintextSpots(
+  content: string | null,
+  known: KnownCredentialValues | null,
+): PlaintextSpot[] {
+  const text = content ?? ''
+  return findPlaintextCredentials(text).map((m, index) => {
+    const value = text.slice(m.start, m.end)
+    const entry = known?.entries.find((e) => e.value === value)
+    return {
+      index,
+      line: m.line,
+      kind: m.kind,
+      value,
+      credential: entry
+        ? { id: entry.id, identifier: entry.identifier, name: entry.name, field: entry.field }
+        : null,
+    }
+  })
+}
+
+// 写入时要换的一处：credential 为 null 时照原样写，problem 说明原因：
+// stale 是核对时计划里那条凭据这个字段的值已经不等于这一处（改过值、删了），unconvertible 是值不满足 ConvertibleValue
+export type PlaintextConversion = { line: number; value: string } & (
+  | { credential: { identifier: string; field: string }; problem?: undefined }
+  | { credential: null; problem: 'stale' | 'unconvertible' }
+)
+
+// 一处疑似明文换成的占位符，事件里记的也是这一对
+export interface ConvertedRef {
+  identifier: string
+  field: string
+}
+const placeholderOf = (ref: ConvertedRef) => `{{cred:${ref.identifier}#${ref.field}}}`
 
 export interface ExistingApp {
   slug: string
@@ -187,6 +239,11 @@ export interface PlannedMemory {
   // 同一个 Lore 节点写到同一个目标（应用）只导入一次，不论之后在 Kioku 里被删除还是移动
   importKey: string
   context: Record<string, unknown>
+  // 勾选了换成占位符、这个目标放得进时：新建它时写的正文与标题，和换成了哪几条凭据的哪个字段（记进导入事件，不记值）。
+  // 只用于新建：预览、指纹与同步照旧看 request（Lore 的原文），所以勾选不改变计划里别的东西
+  converted?: { content: string; title: string; refs: ConvertedRef[] }
+  // 勾选了却照原样写的几处的原因（放不进占位符、凭据对不上了等），新建这个目标时记进结果，不含正文与值
+  plaintextKept?: string[]
 }
 
 export interface ImportPlan {
@@ -485,6 +542,7 @@ export function planImport(
         skip(`${target.uri} 已被其他记忆占用`)
         continue
       }
+      const conversions = options.convert?.get(node.uuid)
       plan.memories.push({
         source: node.uri,
         request: request.data,
@@ -492,6 +550,9 @@ export function planImport(
         updatedAt: node.updatedAt,
         importKey,
         context,
+        ...(conversions?.length
+          ? convertTarget(request.data, target.layer, sensitivity, conversions)
+          : {}),
       })
     }
   }
@@ -509,6 +570,92 @@ export function planImport(
       (!nothingLeft && !ticked.has(m.runtime) && m.apps.every((a) => !a.create)),
   )
   return plan
+}
+
+// 值不能按值替换时的说法：和 ConvertibleValue 的规则对应（长度、前后空白、落单的代理项与占位符的开头）
+const UNCONVERTIBLE = '值无法转存（太短或太长、前后有空白，或含无法使用的字符）'
+
+// 一个写入目标按勾选换占位符：放得进的换掉（这个值在正文里出现几处换几处，占位符里的不算），放不进的照原样写、说明原因。
+// 规则和转存为凭据相同：目标要在本人、敏感级不低于私密（标了机密的按机密算）；值也出现在坐标、标题、触发场景或关键词里时
+// 不换（那里放不了占位符，换了正文也还留着明文）；换完正文要还在长度上限之内。
+// 照原样写的原因按写下去的正文判断：同一个值勾了几处，有一处换掉了，正文里（占位符以外）就不再有它，别的几处不算照原样写
+function convertTarget(
+  request: CreateMemoryRequest,
+  layer: CuratedLayer,
+  sensitivity: Sensitivity,
+  conversions: PlaintextConversion[],
+): Pick<PlannedMemory, 'converted' | 'plaintextKept'> {
+  const reasons: { list: PlaintextConversion[]; text: (lines: string) => string }[] = []
+  const keep = (list: PlaintextConversion[], text: (lines: string) => string) => {
+    if (list.length) reasons.push({ list, text })
+  }
+  keep(
+    conversions.filter((c) => c.problem === 'stale'),
+    (lines) =>
+      `正文第 ${lines} 行的疑似明文与计划中的凭据已对不上（凭据可能刚修改或删除），照原样写入，可在待处理中转存`,
+  )
+  keep(
+    conversions.filter((c) => c.problem === 'unconvertible'),
+    (lines) => `正文第 ${lines} 行的${UNCONVERTIBLE}，照原样写入`,
+  )
+  let usable = conversions.filter((c) => c.credential)
+  if (usable.length && !placeholderAllowed(layer, sensitivity)) {
+    keep(
+      usable,
+      (lines) =>
+        `${request.uri} 是${LAYER_NAMES[layer]} · ${SENSITIVITY_NAMES[sensitivity]}，凭据占位符只能放在本人、敏感级不低于私密的记忆中：正文第 ${lines} 行的疑似明文照原样写入`,
+    )
+    usable = []
+  }
+  const elsewhere = [
+    request.uri,
+    request.title ?? '',
+    request.disclosure ?? '',
+    ...request.glossary,
+  ]
+  const clash = usable.filter(
+    (c) =>
+      elsewhere.some((t) => t.includes(c.value)) || placeholderOf(c.credential!).includes(c.value),
+  )
+  keep(
+    clash,
+    (lines) =>
+      `正文第 ${lines} 行的值也出现在坐标、标题、触发场景或关键词中（这些位置不能写占位符），照原样写入`,
+  )
+  usable = usable.filter((c) => !clash.includes(c))
+
+  let converted: PlannedMemory['converted']
+  if (usable.length) {
+    // 长的先换：一个值是另一个值的一部分时，先换短的会把长的拆开
+    let content = request.content
+    const refs = new Map<string, ConvertedRef>()
+    for (const c of [...usable].sort((a, b) => b.value.length - a.value.length)) {
+      const swapped = replaceOutsidePlaceholders(content, c.value, placeholderOf(c.credential!))
+      content = swapped.text
+      if (swapped.replaced) refs.set(placeholderOf(c.credential!), c.credential!)
+    }
+    const title = loreTitle(content, request.uri, sensitivity === 'secret')
+    if (CreateMemoryRequest.safeParse({ ...request, content, title }).success) {
+      converted = { content, title, refs: [...refs.values()] }
+    } else {
+      keep(
+        usable,
+        (lines) => `换成占位符后正文超出长度上限：正文第 ${lines} 行的疑似明文照原样写入`,
+      )
+    }
+  }
+  const written = converted?.content ?? request.content
+  const remains = (c: PlaintextConversion) =>
+    replaceOutsidePlaceholders(written, c.value, '').replaced > 0
+  const kept = reasons.flatMap(({ list, text }) => {
+    const left = list.filter(remains)
+    if (!left.length) return []
+    return [text([...new Set(left.map((c) => c.line))].sort((a, b) => a - b).join('、'))]
+  })
+  return {
+    ...(converted ? { converted } : {}),
+    ...(kept.length ? { plaintextKept: kept } : {}),
+  }
 }
 
 // 关键词与接口写入的规则一致：至少两个字、最长 64 字、每条最多 32 个；超出时保留较长、较具体的
@@ -670,6 +817,10 @@ export interface ImportResult {
   // （在 Kioku 里删除了的为 null）
   movedInLore: { uri: string; current: string | null }[]
   failed: { uri: string; reason: string }[]
+  // 勾选了换成占位符、新建时换了的目标
+  plaintextConverted: string[]
+  // 勾选了却照原样写的（放不进占位符、凭据对不上了、之前已导入过等），原因不含正文与值
+  plaintextKept: { uri: string; reason: string }[]
 }
 
 // 写入时这个应用的默认人格怎么处理：不属于导入者的不往里写；这次没有人格可用的不动；还没有默认人格的设成导入的人格；
@@ -818,6 +969,8 @@ export async function applyImport(
     occupied: [],
     movedInLore: [],
     failed: [],
+    plaintextConverted: [],
+    plaintextKept: [],
   }
   // 执行时发现不属于导入者的应用（计划之后被别人抢先建了同名应用、或被转走），不往里写。
   // 写入期间才被转走的，由每次写入时同一个事务里的归属核对拦下（requireAppOwner）
@@ -908,6 +1061,12 @@ export async function applyImport(
     }
     if (state !== 'new') {
       result.previouslyImported.push(item.request.uri)
+      if (item.converted || item.plaintextKept) {
+        result.plaintextKept.push({
+          uri: item.request.uri,
+          reason: '之前已导入过，这次不改它的正文：疑似明文可在待处理中转存',
+        })
+      }
       // 这次要求 secret、对应的记忆现在却是明文的才提醒；已经是 secret 或已经删除的照常跳过。
       // 一个键对应多条时每条明文都提醒，不看先后；导入后移动过的，旧 URI 上可能已经是别的记忆，提醒里要给出它现在的位置
       if (item.request.sensitivity === 'secret') {
@@ -921,15 +1080,28 @@ export async function applyImport(
       }
       continue
     }
+    const { converted } = item
     try {
-      await service.create(item.request, {
-        eventType: 'import',
-        eventContext: item.context,
-        createdAt: item.createdAt,
-        updatedAt: item.updatedAt,
-        requireAppOwner: accountId,
-      })
+      // 换过占位符的在导入事件里记下换成了哪几条凭据的哪个字段：同步时按它们现在的值把 Lore 正文里的明文换掉再比（见 planSync）
+      await service.create(
+        converted
+          ? { ...item.request, content: converted.content, title: converted.title }
+          : item.request,
+        {
+          eventType: 'import',
+          eventContext: converted
+            ? { ...item.context, [CONVERTED_KEY]: converted.refs }
+            : item.context,
+          createdAt: item.createdAt,
+          updatedAt: item.updatedAt,
+          requireAppOwner: accountId,
+        },
+      )
       result.created.push(item.request.uri)
+      if (converted) result.plaintextConverted.push(item.request.uri)
+      for (const reason of item.plaintextKept ?? []) {
+        result.plaintextKept.push({ uri: item.request.uri, reason })
+      }
     } catch (err) {
       if (err instanceof MemoryError) {
         if (err.status === 409) result.occupied.push(item.request.uri)
@@ -1112,12 +1284,66 @@ export interface SyncPlan {
   goneFromLore: string[]
 }
 
-// 只读：算出同步要做什么，打印给人确认；执行时再按版本号核对一次
+// 导入、同步事件的 context 里记下的换过的占位符（ConvertedRef 的数组），不记值
+export const CONVERTED_KEY = 'plaintextCredentials'
+
+// 换过占位符的记忆，Kioku 的正文和 Lore 的不一样了：比较之前把 Lore 正文里这些凭据现在的值换成同样的占位符。
+// 规则是严格的：每一次记录过的转存，只要 Kioku 的正文里现在还有这个占位符，Lore 的正文里就要找得到这条凭据现在的值
+// （或者已经写着这个占位符），找不到（missing）就不比。不靠疑似明文的规则猜：Lore 里的旧值换了写法认不出时，
+// 照字面比会把旧明文写回去。Kioku 里已经没有这个占位符的转存不再管。
+// 读不到值的（凭据删了、密码库不可用、值不能按值替换，或者调用方没给 known，例如命令行）为 unknown，也不比
+type ProtectedContent =
+  { kind: 'ok'; content: string } | { kind: 'unknown' | 'missing'; ref: ConvertedRef }
+function protectLoreContent(
+  content: string,
+  current: string,
+  refs: ConvertedRef[],
+  known: KnownCredentialValues | null,
+): ProtectedContent {
+  const live = refs.filter((ref) => current.includes(placeholderOf(ref)))
+  const values: { ref: ConvertedRef; value: string }[] = []
+  for (const ref of live) {
+    const value = known?.entries.find(
+      (e) => e.identifier === ref.identifier && e.field === ref.field,
+    )?.value
+    if (value === undefined) return { kind: 'unknown', ref }
+    values.push({ ref, value })
+  }
+  let text = content
+  // 长的先换：一个值是另一个值的一部分时，先换短的会把长的拆开
+  for (const { ref, value } of [...values].sort((a, b) => b.value.length - a.value.length)) {
+    const swapped = replaceOutsidePlaceholders(text, value, placeholderOf(ref))
+    if (!swapped.replaced && !text.includes(placeholderOf(ref))) return { kind: 'missing', ref }
+    text = swapped.text
+  }
+  return { kind: 'ok', content: text }
+}
+
+// 读不到这条凭据的值时怎么说：命令行不给 known；值读到了却不能按值替换；读不到（解不开、密码库不可用）；不在了
+function unknownReason(ref: ConvertedRef, known: KnownCredentialValues | null | undefined): string {
+  const at = `${ref.identifier}#${ref.field}`
+  const head = `导入时已换成 ${at} 的占位符`
+  if (known === undefined) return `${head}，命令行无法核对凭据的值：请在管理界面同步`
+  if (known === null) return `${head}，这次没有读取凭据的值：请重新查看计划`
+  if (known.unconvertible.has(at)) {
+    return `${head}，这条凭据现在的${UNCONVERTIBLE}，无法按值核对，这次不同步`
+  }
+  const source = known.unresolved.get(ref.identifier)
+  if (source === 'master_key') return `${head}，服务端未配置主密钥，无法读取凭据的值，这次不同步`
+  if (source === 'vault') return `${head}，密码库连接或条目暂时不可用，这次不同步`
+  if (source === 'hosted') return `${head}，这条凭据的值无法解密，这次不同步`
+  return `${head}，这条凭据已删除或没有这个字段，这次不同步`
+}
+
+// 只读：算出同步要做什么，打印给人确认；执行时再按版本号核对一次。
+// known 是导入人的凭据现在的值（见 protectLoreContent），由调用方在事务外取好：这里在出计划的快照里，不能请求密码库。
+// 命令行不传：换过占位符的记忆在命令行里不同步
 export async function planSync(
   target: ImportTarget,
   plan: ImportPlan,
   snapshot: LoreSnapshot,
   done: ImportRecords,
+  known?: KnownCredentialValues | null,
 ): Promise<SyncPlan> {
   const all = [...done.values()].flat()
   const live = all.filter((m) => m.state !== 'deleted' && m.memoryId)
@@ -1144,6 +1370,36 @@ export async function planSync(
       )
     : []
   const writtenVersion = new Map(written.map((w) => [w.memoryId, w.version]))
+  // 导入、同步时换过的占位符，各事件的并起来
+  const convertedRows = live.length
+    ? await withSpace(target.db, target.spaceId, (tx) =>
+        tx
+          .select({
+            memoryId: memoryEvents.memoryId,
+            refs: sql<unknown>`${memoryEvents.context}->${CONVERTED_KEY}::text`,
+          })
+          .from(memoryEvents)
+          .where(
+            and(
+              inArray(
+                memoryEvents.memoryId,
+                live.map((m) => m.memoryId!),
+              ),
+              inArray(memoryEvents.eventType, ['import', 'sync']),
+              sql`${memoryEvents.context}->>'source' = 'lore'`,
+              sql`${memoryEvents.context}->${CONVERTED_KEY}::text is not null`,
+            ),
+          ),
+      )
+    : []
+  const convertedOf = new Map<string, ConvertedRef[]>()
+  for (const row of convertedRows) {
+    const refs = new Map(
+      (convertedOf.get(row.memoryId!) ?? []).map((r) => [placeholderOf(r), r] as const),
+    )
+    for (const ref of convertedRefs(row.refs)) refs.set(placeholderOf(ref), ref)
+    convertedOf.set(row.memoryId!, [...refs.values()])
+  }
   const untouched = (m: ImportedMemory) =>
     m.version !== null && writtenVersion.get(m.memoryId) === m.version
 
@@ -1209,19 +1465,50 @@ export async function planSync(
         continue
       }
       const want = item.request
+      const refs = convertedOf.get(m.memoryId!) ?? []
+      let wantContent = want.content
+      if (refs.length) {
+        const prepared = protectLoreContent(
+          want.content,
+          current.content ?? '',
+          refs,
+          known ?? null,
+        )
+        if (prepared.kind !== 'ok') {
+          const at = `${prepared.ref.identifier}#${prepared.ref.field}`
+          report(
+            m,
+            prepared.kind === 'missing'
+              ? {
+                  source,
+                  uri: m.uri,
+                  state: 'skipped',
+                  reason: `导入时已换成 ${at} 的占位符，Lore 的正文里找不到这条凭据现在的值：值换过的，请把 Lore 里的值换成这个占位符；Lore 里删掉了这一处的，在 Kioku 里同样删掉这个占位符，改过之后这条记忆不再随 Lore 同步`,
+                }
+              : {
+                  source,
+                  uri: m.uri,
+                  state: 'unreadable',
+                  reason: unknownReason(prepared.ref, known),
+                },
+          )
+          continue
+        }
+        wantContent = prepared.content
+      }
       const request: UpdateMemoryRequest = {
         uri: m.uri,
         expectedId: current.id,
         expectedVersion: current.version,
       }
       const changes: SyncItem['changes'] = []
-      if (current.content !== want.content) {
-        request.content = want.content
+      if (current.content !== wantContent) {
+        request.content = wantContent
         changes.push('content')
       }
       // 没人改过的记忆的标题就是导入工具按当时的正文取的：同一个取法按现在的正文再取一次，不同就改。
       // 在 Kioku 里改过标题的版本号已经变了，走不到这里；机密的标题本来就只用标识
-      const title = loreTitle(want.content, m.uri, m.state === 'secret')
+      const title = loreTitle(wantContent, m.uri, m.state === 'secret')
       if (current.title !== title) {
         request.title = title
         changes.push('title')
@@ -1245,7 +1532,16 @@ export async function planSync(
       report(
         m,
         changes.length
-          ? { source, uri: m.uri, title, state: 'update', changes, request, context: item.context }
+          ? {
+              source,
+              uri: m.uri,
+              title,
+              state: 'update',
+              changes,
+              request,
+              // 换过的占位符接着记进同步事件
+              context: refs.length ? { ...item.context, [CONVERTED_KEY]: refs } : item.context,
+            }
           : { source, uri: m.uri, title, state: 'current' },
       )
     }
@@ -1288,6 +1584,35 @@ export async function planSync(
     )
   }
   return sync
+}
+
+// 事件里记下的占位符：只认标识与字段都是字符串的项
+function convertedRefs(raw: unknown): ConvertedRef[] {
+  if (!Array.isArray(raw)) return []
+  return raw.flatMap((r: unknown) => {
+    const ref = r as { identifier?: unknown; field?: unknown } | null
+    return typeof ref?.identifier === 'string' && typeof ref.field === 'string'
+      ? [{ identifier: ref.identifier, field: ref.field }]
+      : []
+  })
+}
+
+// 这个空间里有没有换过占位符的导入：有的话出计划之前要先取好凭据的值（同步要用，见 planSync）
+export async function hasConvertedImports(db: Db, spaceId: string): Promise<boolean> {
+  const [row] = await withSpace(db, spaceId, (tx) =>
+    tx
+      .select({ id: memoryEvents.id })
+      .from(memoryEvents)
+      .where(
+        and(
+          inArray(memoryEvents.eventType, ['import', 'sync']),
+          sql`${memoryEvents.context}->>'source' = 'lore'`,
+          sql`${memoryEvents.context}->${CONVERTED_KEY}::text is not null`,
+        ),
+      )
+      .limit(1),
+  )
+  return Boolean(row)
 }
 
 export interface SyncResult {

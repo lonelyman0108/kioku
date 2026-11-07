@@ -194,7 +194,7 @@ describe('Lore 导入计划', () => {
       snapshot(
         node('core://notes/router', { aliases: ['infra://router/credentials'] }),
         node('infra://nas', { keywords: ['token: abcdef'] }),
-        node('infra://keystore', { disclosure: '要用 password: 时' }),
+        node('infra://keystore', { disclosure: '要用 password: hunter 时' }),
       ),
       [],
       { ...options, secretUris: new Set(['infra://keystore']) },
