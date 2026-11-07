@@ -41,6 +41,7 @@ describe('Key 的权限', () => {
     writeLayers: ['user'],
     maxSensitivity: 'private',
     admin: false,
+    credentials: 'none' as const,
   }
 
   it('一句话说完，跨人格写入才提', () => {

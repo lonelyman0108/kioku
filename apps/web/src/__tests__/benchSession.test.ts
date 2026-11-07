@@ -43,6 +43,7 @@ const scopes: KeyScopes = {
   writeLayers: ['user'],
   maxSensitivity: 'private',
   admin: false,
+  credentials: 'none' as const,
 }
 const whoami = { scopes } as WhoAmI
 

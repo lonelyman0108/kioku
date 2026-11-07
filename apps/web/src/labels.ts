@@ -1,11 +1,11 @@
 import {
+  CREDENTIAL_CAPABILITY_NAMES,
   LAYER_NAMES,
   SENSITIVITY_NAMES,
   type AccessContext,
   type ActivityItem,
   type AppInfo,
   type BenchMark,
-  type CredentialProviderKind,
   type CredentialSource,
   type EventActor,
   type KeyAccessMatrix,
@@ -26,9 +26,12 @@ export const sensitivityLabels = SENSITIVITY_NAMES
 // Key 的 admin 在界面上不叫 admin，免得被当成空间管理员
 export const ADMIN_SCOPE_LABEL = '跨人格 / 应用写入'
 
+// 访问密钥的凭据能力：不可用、取用、管理
+export const credentialCapabilityLabels = CREDENTIAL_CAPABILITY_NAMES
+
 // 一个 Key 的权限，一句话说完
 export const scopesSummary = (s: KeyScopes) =>
-  `可读 ${s.readLayers.length} 类归属，可写 ${s.writeLayers.length} 类，最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? `，${ADMIN_SCOPE_LABEL}` : ''}`
+  `可读 ${s.readLayers.length} 类归属，可写 ${s.writeLayers.length} 类，最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? `，${ADMIN_SCOPE_LABEL}` : ''}${s.credentials !== 'none' ? `，凭据${credentialCapabilityLabels[s.credentials]}` : ''}`
 
 export const accessContextLabels: Record<AccessContext, string> = {
   none: '无上下文（本机 Agent）',
@@ -177,19 +180,12 @@ export const changeLabels: Record<string, string> = {
   validTo: '有效期',
 }
 
-export const providerKindLabels: Record<CredentialProviderKind, string> = {
-  bitwarden: 'Bitwarden',
-  '1password': '1Password',
-  env: '环境变量',
-  other: '其他',
-}
-
 export const credentialSourceLabels: Record<CredentialSource, string> = {
   hosted: 'Kioku 托管',
-  external: '外部凭据源',
+  vault: '密码库',
 }
 
-// 凭据事件：只有凭据的主人看得到，不进空间的活动记录
+// 凭据事件：只有凭据的所有者看得到，不进空间的变更记录
 export const credentialEventLabels: Record<string, { label: string; icon: string }> = {
   create: { label: '新建', icon: icons.add },
   import: { label: '从导出文件导入', icon: icons.imported },
@@ -202,25 +198,22 @@ export const credentialEventLabels: Record<string, { label: string; icon: string
 // 取用经由哪里
 export const credentialViaLabels: Record<string, string> = {
   console: '在管理界面查看',
-  export: '随空间导出',
+  space_export: '随空间导出',
   kioku_credential: '通过 kioku_credential',
-  kioku_get: '读取记忆时列出（kioku_get）',
+  run: '通过 kioku run',
   rest: '通过 REST 接口',
 }
 
 export const credentialChangeLabels: Record<string, string> = {
   name: '名称',
   description: '说明',
-  source: '来源',
-  provider: '凭据源',
-  location: '条目位置',
-  fields: '字段',
   values: '值',
+  fields: '字段对应',
   appIds: '限定的应用',
 }
 
 // 凭据限定给哪些应用，显示成名字。应用列表还没读出来时不下结论；不是自己的应用标出来：
-// Key 按应用主人取凭据，别人的应用的 Key 用不了你的凭据
+// Key 按应用所有者取凭据，别人的应用的 Key 取不到这些凭据
 export function restrictedAppsLabel(
   appIds: readonly string[] | null,
   apps: readonly AppInfo[] | undefined,

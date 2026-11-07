@@ -512,6 +512,7 @@ describe('查询', () => {
       writeLayers: [],
       maxSensitivity: 'internal' as const,
       admin: false,
+      credentials: 'none' as const,
     }
     const key = { id: 'k1', effectiveScopes: scopes }
     const seeded = () => {
