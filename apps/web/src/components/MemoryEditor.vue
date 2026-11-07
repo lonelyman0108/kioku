@@ -410,7 +410,8 @@ function failed(err: unknown, fallback: string) {
 }
 
 // 从 secret 降级时看整段正文像不像有明文凭据：降级之后正文会进历史、全文检索和向量。
-// 服务端会拒绝带着明文降级，确认之后才带上 allowPlaintext 强制（只有空间 owner 能改 secret，也就只有他会走到这里）
+// 服务端会拒绝带着明文降级，确认之后才带上 allowPlaintext 强制。强制降级只给空间 owner（只有他能改 secret，
+// 也就只有他会走到这里）；同一个标记用在照样保存上时，能改这条记忆的成员都能带
 const downgradeWarning = ref(false)
 // 写成一整句：模板里中文换行会多出一个空格
 const PLAINTEXT_DOWNGRADE_TEXT =

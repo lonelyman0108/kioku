@@ -79,6 +79,7 @@ export function usePlaintextSave(
   const matching = ref(false)
   const matchFailure = ref<string | null>(null)
   const unavailableConnections = ref(0)
+  const unreadableCredentials = ref(0)
   // 已有凭据的标识：新建的不能和它们重复
   const taken = ref<string[]>([])
   // 给条目起的标识，按条目记：同一个条目的几个字段共用一条凭据
@@ -122,6 +123,7 @@ export function usePlaintextSave(
       matches.value = new Map()
       matchFailure.value = null
       unavailableConnections.value = 0
+      unreadableCredentials.value = 0
       createdVault.value = new Map()
       for (const key of Object.keys(vaultIdentifiers)) delete vaultIdentifiers[key]
       if (!req) {
@@ -166,6 +168,7 @@ export function usePlaintextSave(
       matches.value = found.matches
       matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
       unavailableConnections.value = found.unavailableConnections
+      unreadableCredentials.value = found.unreadableCredentials
     }
     taken.value = identifiers
     // 建议的标识避开已有的，也避开这次别处建议过的
@@ -364,6 +367,7 @@ export function usePlaintextSave(
     matching,
     matchFailure,
     unavailableConnections,
+    unreadableCredentials,
     vaultIdentifiers,
     createdVault,
     lockedItems,

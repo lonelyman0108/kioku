@@ -86,7 +86,7 @@ import {
   type ConnectVaultRequest,
   type CreateCredentialRequest,
   type CreateKeyRequest,
-  type CreateMemoryRequest,
+  type ConsoleCreateMemoryRequest,
   type MatchCredentialValuesRequest,
   type CreatePersonaRequest,
   type GroupPersonaRules,
@@ -109,7 +109,7 @@ import {
   type UpdateEmbeddingSettings,
   type UpdateExtractionSettings,
   type ExtractionBudget,
-  type UpdateMemoryRequest,
+  type ConsoleUpdateMemoryRequest,
   type UpdatePersonaRequest,
   type UpdateSubjectRequest,
 } from '@kioku/contracts'
@@ -227,9 +227,9 @@ export const api = {
     }),
   createMemory: (
     spaceId: string,
-    body: Partial<CreateMemoryRequest> & Pick<CreateMemoryRequest, 'uri' | 'content'>,
+    body: Partial<ConsoleCreateMemoryRequest> & Pick<ConsoleCreateMemoryRequest, 'uri' | 'content'>,
   ) => request('POST', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
-  updateMemory: (spaceId: string, body: UpdateMemoryRequest) =>
+  updateMemory: (spaceId: string, body: ConsoleUpdateMemoryRequest) =>
     request('PATCH', `/spaces/${spaceId}/memories`, { body, schema: ConsoleMemoryView }),
   deleteMemory: (spaceId: string, uri: string, expected: { id: string; version: number }) =>
     request('DELETE', `/spaces/${spaceId}/memories`, {

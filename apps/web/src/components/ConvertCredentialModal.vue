@@ -5,10 +5,10 @@ import {
   type ConsoleMemoryView,
   type ConvertedToCredential,
 } from '@kioku/contracts'
-import { toRef, useId, watch } from 'vue'
+import { computed, toRef, useId, watch } from 'vue'
 
 import { useConvertCredential } from '../composables/useConvertCredential'
-import { convertSummary } from '../plaintext'
+import { convertSummary, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
 import { memoryRoute } from '../routes'
 import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
@@ -36,6 +36,7 @@ const {
   result,
   matchFailure,
   unavailableConnections,
+  unreadableCredentials,
   matchingValue,
   choices,
   destination,
@@ -72,6 +73,13 @@ watch(
 function close() {
   if (!submitting.value) open.value = false
 }
+
+const unmatched = computed(() =>
+  unmatchedNote({
+    unavailableConnections: unavailableConnections.value,
+    unreadableCredentials: unreadableCredentials.value,
+  }),
+)
 
 const valueInput = useId()
 const candidateGroup = useId()
@@ -192,10 +200,8 @@ const candidateGroup = useId()
             {{ matchFailure }}
             <template #detail>仍可新建托管凭据。</template>
           </NoteLine>
-          <p v-else-if="unavailableConnections" class="value-note">
-            {{ unavailableConnections }} 个密码库连接不可用，未比对<Hint>
-              连接恢复后重新打开可再次查找。
-            </Hint>
+          <p v-else-if="unmatched" class="value-note">
+            {{ unmatched }}<Hint>{{ UNMATCHED_HINT }}</Hint>
           </p>
           <ConvertDestinationPicker
             :model-value="destination"

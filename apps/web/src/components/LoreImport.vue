@@ -29,6 +29,7 @@ import {
   matchesFilter,
   NODE_FILTERS,
   planBlocker,
+  planUnmatchedNote,
   plaintextAllConverted,
   plaintextKey,
   keptTargets,
@@ -51,6 +52,7 @@ import {
   type NodeFilter,
   type Unconverted,
 } from '../loreBackup'
+import { UNMATCHED_HINT } from '../plaintext'
 import { formatTime } from '../time'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -402,6 +404,9 @@ const disclosureCut = computed(
           {{ result.previouslyImported.length }} 条（含导入后在 Kioku 中删除或移动的）
         </li>
         <li>按 Lore 同步 {{ result.sync.updated.length }} 条</li>
+        <li v-if="result.plaintextConverted.length">
+          疑似明文换成凭据占位符 {{ result.plaintextConverted.length }} 条
+        </li>
         <li>向量在后台生成</li>
       </ul>
       <ul
@@ -410,7 +415,8 @@ const disclosureCut = computed(
           result.movedInLore.length ||
           result.secretAlreadyImported.length ||
           result.failed.length ||
-          result.sync.failed.length
+          result.sync.failed.length ||
+          result.plaintextKept.length
         "
         class="space-y-1 break-all"
       >
@@ -441,6 +447,10 @@ const disclosureCut = computed(
         <li v-for="f in result.sync.failed" :key="`sync-${f.uri}`" class="text-error">
           同步失败 <code class="uri">{{ f.uri }}</code
           >：{{ f.reason }}
+        </li>
+        <li v-for="f in result.plaintextKept" :key="`kept-${f.uri}`" class="text-warning">
+          保留明文 <code class="uri">{{ f.uri }}</code
+          >：{{ f.reason }}<Hint>勾选了写成占位符，但照原样写入。可在待处理中转存为凭据。</Hint>
         </li>
       </ul>
       <div class="flex flex-wrap gap-2 pt-1">
@@ -578,6 +588,9 @@ const disclosureCut = computed(
         <NoteLine v-if="!plan.secretAvailable" tone="warning">
           当前实例未配置主密钥，无法标记机密。请配置 KIOKU_MASTER_KEY 后再导入机密节点。
         </NoteLine>
+        <p v-if="planUnmatchedNote(plan)" class="text-muted">
+          疑似明文：{{ planUnmatchedNote(plan) }}<Hint>{{ UNMATCHED_HINT }}</Hint>
+        </p>
 
         <section>
           <SectionHeading title="人格与应用" :level="4" />
@@ -708,7 +721,7 @@ const disclosureCut = computed(
                       @update:model-value="toggleConverted(node, spot, $event)"
                     />
                     <span v-if="plaintextState(node, spot) === 'blocked'" class="text-warning">
-                      写入位置无法使用占位符<Hint>
+                      无法写成占位符<Hint>
                         凭据占位符只能放在本人、敏感级不低于私密的记忆中。
                       </Hint>
                     </span>
@@ -716,8 +729,8 @@ const disclosureCut = computed(
                       v-else-if="converting(node, spot) && keptCount(node)"
                       class="text-warning"
                     >
-                      另有 {{ keptCount(node) }} 个写入位置保留明文<Hint>
-                        这些位置放不进凭据占位符，或是同步已导入的记忆，正文照原样写入。
+                      另有 {{ keptCount(node) }} 条记忆保留明文<Hint>
+                        这些记忆放不进凭据占位符，或是已导入、这次同步的记忆，正文照原样写入。
                       </Hint>
                     </span>
                     <span v-else-if="plaintextState(node, spot) === 'synced'" class="text-muted">

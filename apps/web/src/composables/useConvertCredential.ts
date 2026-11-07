@@ -66,6 +66,7 @@ export function useConvertCredential(
   const pendingValues = ref(new Set<string>())
   const matchFailure = ref<string | null>(null)
   const unavailableConnections = ref(0)
+  const unreadableCredentials = ref(0)
   // 选中的去处（ConvertDestination 的 key）。手动选过就不再跟着匹配结果换默认的
   const destination = ref<string>(HOSTED_DESTINATION.key)
   const destinationTouched = ref(false)
@@ -99,6 +100,7 @@ export function useConvertCredential(
     if (!found) return
     matches.value = new Map([...matches.value, ...found.matches])
     unavailableConnections.value = found.unavailableConnections
+    unreadableCredentials.value = found.unreadableCredentials
     matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
   }
 
@@ -187,6 +189,7 @@ export function useConvertCredential(
     pendingValues.value = new Set()
     matchFailure.value = null
     unavailableConnections.value = 0
+    unreadableCredentials.value = 0
     destination.value = HOSTED_DESTINATION.key
     destinationTouched.value = false
     existingIdentifiers.value = []
@@ -360,6 +363,7 @@ export function useConvertCredential(
     result,
     matchFailure,
     unavailableConnections,
+    unreadableCredentials,
     matchingValue,
     choices,
     destination,

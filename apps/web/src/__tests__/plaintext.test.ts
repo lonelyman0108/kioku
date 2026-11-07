@@ -14,6 +14,7 @@ import {
   HOSTED_DESTINATION,
   occurrences,
   previewValue,
+  unmatchedNote,
   replaceValues,
   vaultFieldName,
   plaintextCandidates,
@@ -279,5 +280,23 @@ describe('共用的去处组件与清理', () => {
     expect(benchAgentSource).not.toMatch(/export \{ clipText \}/)
     const returned = /return \{([^}]*)\}\s*\}\s*$/.exec(convertSource)![1]!
     expect(returned).not.toContain('itemKey')
+  })
+})
+
+describe('没比对的说明', () => {
+  it('不可用的连接与读不到值的托管凭据都说，都没有时不说', () => {
+    expect(unmatchedNote({ unavailableConnections: 0, unreadableCredentials: 0 })).toBeNull()
+    expect(unmatchedNote({ unavailableConnections: 1, unreadableCredentials: 0 })).toBe(
+      '1 个密码库连接不可用，未比对',
+    )
+    expect(unmatchedNote({ unavailableConnections: 0, unreadableCredentials: 2 })).toBe(
+      '2 条凭据无法获取值，未比对',
+    )
+  })
+
+  it('两个对话框都用它', () => {
+    for (const source of [convertModalSource, saveModalSource]) {
+      expect(source).toContain('unreadableCredentials: unreadableCredentials.value')
+    }
   })
 })

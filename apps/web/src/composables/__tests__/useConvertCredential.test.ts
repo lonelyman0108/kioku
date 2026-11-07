@@ -461,6 +461,7 @@ describe('转存的去处', () => {
       async (_sid: string, body: { values: string[] }) => ({
         items: body.values.map(() => match),
         unavailableConnections: 1,
+        unreadableCredentials: 2,
       }),
     )
 
@@ -491,6 +492,7 @@ describe('转存的去处', () => {
     expect(convert.selected.value.kind).toBe('credential')
     expect(convert.placeholder.value).toBe('{{cred:nas-admin#password}}')
     expect(convert.unavailableConnections.value).toBe(1)
+    expect(convert.unreadableCredentials.value).toBe(2)
     fakes.api.convertToCredential.mockResolvedValue({ memory: memory({ version: 2 }) })
     await convert.submit()
     expect(fakes.api.convertToCredential.mock.calls[0]![1].target).toEqual({

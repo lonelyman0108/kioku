@@ -85,6 +85,7 @@ function matchBy(others: Record<string, unknown> = {}) {
         v === 'hunter22' ? { credentials: [credential], vaultItems: [] } : (others[v] ?? NONE),
       ),
       unavailableConnections: 0,
+      unreadableCredentials: 3,
     }),
   )
 }
@@ -117,6 +118,8 @@ describe('打开时', () => {
     expect(fakes.api.matchCredentialValues).toHaveBeenCalledWith('s1', {
       values: ['hunter22', 'abcd1234'],
     })
+    // 读不到值的托管凭据没比，和不可用的连接一样要说
+    expect(save.unreadableCredentials.value).toBe(3)
     expect(save.problem.value).toBe('请选择转存为凭据或不是凭据')
     expect(save.ready.value).toBe(false)
   })

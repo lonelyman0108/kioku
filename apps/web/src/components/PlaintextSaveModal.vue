@@ -8,7 +8,7 @@ import {
   type PlaintextSaveResult,
 } from '../composables/usePlaintextSave'
 import { plaintextChoiceLabels } from '../labels'
-import { previewValue } from '../plaintext'
+import { previewValue, UNMATCHED_HINT, unmatchedNote } from '../plaintext'
 import { linesText } from '../plaintextSave'
 import ConvertDestinationPicker from './ConvertDestinationPicker.vue'
 import Hint from './Hint.vue'
@@ -31,7 +31,23 @@ const save = usePlaintextSave(
     emit('proceed', result)
   },
 )
-const { rows, matching, matchFailure, unavailableConnections, busy, failure, problem, ready } = save
+const {
+  rows,
+  matching,
+  matchFailure,
+  unavailableConnections,
+  unreadableCredentials,
+  busy,
+  failure,
+  problem,
+  ready,
+} = save
+const unmatched = computed(() =>
+  unmatchedNote({
+    unavailableConnections: unavailableConnections.value,
+    unreadableCredentials: unreadableCredentials.value,
+  }),
+)
 
 function close() {
   if (!busy.value) request.value = null
@@ -64,10 +80,8 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
           {{ matchFailure }}
           <template #detail>仍可新建托管凭据。</template>
         </NoteLine>
-        <p v-else-if="unavailableConnections && anyConvertible" class="text-muted">
-          {{ unavailableConnections }} 个密码库连接不可用，未比对<Hint>
-            连接恢复后重新保存可再次查找。
-          </Hint>
+        <p v-else-if="unmatched && anyConvertible" class="text-muted">
+          {{ unmatched }}<Hint>{{ UNMATCHED_HINT }}</Hint>
         </p>
 
         <ul class="spots">

@@ -18,6 +18,7 @@ import {
 import { ApiError } from './api/client'
 import { formatBytes } from './backup'
 import { identifierOf } from './coordinates'
+import { unmatchedNote } from './plaintext'
 
 // 从 Lore 导入时界面用的纯逻辑：裁剪导出文件、表单能不能看计划、勾选换算成请求、勾选之后这次写什么、计划的分组、执行失败的说明
 
@@ -146,16 +147,26 @@ export function selectionOf(
 ): {
   secretUris: string[]
   excludeUris: string[]
-  convertPlaintext: { source: string; index: number }[]
+  convertPlaintext: { source: string; index: number; credentialId: string; field: string }[]
 } {
   const excludeUris = plan.nodes.filter((n) => excluded.has(n.uuid)).map((n) => n.uri)
   const secretUris = plan.nodes
     .filter((n) => secret.has(n.uuid) && !excluded.has(n.uuid) && secretSelectable(n))
     .map((n) => n.uri)
   const convertPlaintext = plan.nodes.flatMap((node) =>
-    node.plaintext
-      .filter((spot) => spotConverts(plan, node, spot, secret, excluded, unconverted))
-      .map((spot) => ({ source: node.uri, index: spot.index })),
+    node.plaintext.flatMap((spot) =>
+      spot.credential && spotConverts(plan, node, spot, secret, excluded, unconverted)
+        ? [
+            // 凭据照抄计划里这一处的：服务端核对的就是它
+            {
+              source: node.uri,
+              index: spot.index,
+              credentialId: spot.credential.id,
+              field: spot.credential.field,
+            },
+          ]
+        : [],
+    ),
   )
   return { secretUris, excludeUris, convertPlaintext }
 }
@@ -406,9 +417,9 @@ const SYNC_HEADINGS: Record<Exclude<LoreSyncState, 'current'>, string> = {
   moved:
     'Lore 中路径已变更，不同步：移动可能改变归属与可见范围，需手动移动（移动后此记忆只能手动更新）',
   deleted: '已在 Kioku 中删除，不同步',
-  skipped: '本次计划不导入此节点，未同步',
+  skipped: '本次未同步（原因见各条）',
   unmapped: '本次计划未映射到此节点（例如更换了人格，或对应的应用已不存在），未同步',
-  unreadable: '无法读取，未同步',
+  unreadable: '无法同步（原因见各条）',
 }
 
 // 要更新的写要改的几项，不导入的与无法读取的写原因
@@ -479,7 +490,8 @@ export function matchesFilter(
   }
 }
 
-// 结果算不算全部做成：有失败的、这次要 secret 却还是明文的，都不能显示成成功
+// 结果算不算全部做成：有失败的、这次要 secret 却还是明文的，都不能显示成成功。
+// 勾了换占位符却照原样写的（plaintextKept）已经写进去了，重看计划也换不了，只列出来，不算没做成
 export function importProblems(result: {
   failed: unknown[]
   secretAlreadyImported: unknown[]
@@ -536,3 +548,7 @@ export async function replanAfterFailure(
   show(applyFailureNotice(failure, 'replanning'))
   show(applyFailureNotice(failure, (await replan()) ? 'replanned' : 'failed'))
 }
+
+// 计划里有几处没和凭据比对：读不了的密码库连接、读不到值的托管凭据。都没有、或者没做比对时为 null
+export const planUnmatchedNote = (plan: Pick<LoreImportPlan, 'credentialMatch'>) =>
+  plan.credentialMatch ? unmatchedNote(plan.credentialMatch) : null

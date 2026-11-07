@@ -187,10 +187,11 @@ export const HOSTED_DESTINATION: ConvertDestination = { kind: 'hosted', key: 'ho
 export const itemKey = (d: { connectionId: string; itemId: string }) =>
   `${d.connectionId}/${d.itemId}`
 
-// 按值查找的结果：值到匹配；读不了的连接数；查不了时的错误（有一批失败就给）
+// 按值查找的结果：值到匹配；读不了的连接数、读不到值的托管凭据数（这些都没比）；查不了时的错误（有一批失败就给）
 export interface ValueMatchResult {
   matches: Map<string, CredentialValueMatch>
   unavailableConnections: number
+  unreadableCredentials: number
   failure: unknown
 }
 
@@ -203,7 +204,12 @@ export async function matchByValue(
 ): Promise<ValueMatchResult | null> {
   const wanted = [...new Set(values.filter((v) => ConvertibleValue.safeParse(v).success))]
   if (!wanted.length) return null
-  const result: ValueMatchResult = { matches: new Map(), unavailableConnections: 0, failure: null }
+  const result: ValueMatchResult = {
+    matches: new Map(),
+    unavailableConnections: 0,
+    unreadableCredentials: 0,
+    failure: null,
+  }
   const chunks: string[][] = []
   for (let i = 0; i < wanted.length; i += CREDENTIAL_MATCH_MAX) {
     chunks.push(wanted.slice(i, i + CREDENTIAL_MATCH_MAX))
@@ -219,6 +225,10 @@ export async function matchByValue(
         result.unavailableConnections = Math.max(
           result.unavailableConnections,
           found.unavailableConnections,
+        )
+        result.unreadableCredentials = Math.max(
+          result.unreadableCredentials,
+          found.unreadableCredentials,
         )
       } catch (err) {
         result.failure = err
@@ -310,3 +320,19 @@ export function replaceValues(
   }
   return text
 }
+
+// 按值查找时有几样没比：读不了的密码库连接、读不到值的托管凭据。都没有时为 null。对不上不等于没有同值的凭据
+export function unmatchedNote(counts: {
+  unavailableConnections: number
+  unreadableCredentials: number
+}): string | null {
+  const parts = [
+    counts.unavailableConnections ? `${counts.unavailableConnections} 个密码库连接不可用` : '',
+    counts.unreadableCredentials ? `${counts.unreadableCredentials} 条凭据无法获取值` : '',
+  ].filter(Boolean)
+  return parts.length ? `${parts.join('、')}，未比对` : null
+}
+
+// 没比对的说明，放提示层
+export const UNMATCHED_HINT =
+  '密码库连接恢复后可再次查找；托管凭据无法获取值时（未配置主密钥或无法解密）不参与比对。这些里可能有同值的凭据。'

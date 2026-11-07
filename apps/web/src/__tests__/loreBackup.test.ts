@@ -20,6 +20,7 @@ import {
   LoreFileError,
   matchesFilter,
   planBlocker,
+  planUnmatchedNote,
   keptTargets,
   plaintextAllConverted,
   plaintextKey,
@@ -186,6 +187,7 @@ const planOf = (
   previousVersions: 0,
   fingerprint: 'f',
   secretAvailable: true,
+  credentialMatch: null,
   persona: { slug: 'default', name: '默认人格', exists: true, imported: [] },
   apps: [],
   appsGivenPersona: [],
@@ -273,13 +275,13 @@ describe('疑似明文换成占位符', () => {
     const b = node('b', { plaintext: [spot(0), spot(2)] })
     const plan = planOf([a, b])
     expect(selectionOf(plan, none, none).convertPlaintext).toEqual([
-      { source: 'infra://a', index: 0 },
-      { source: 'infra://b', index: 0 },
-      { source: 'infra://b', index: 2 },
+      { source: 'infra://a', index: 0, credentialId: credential.id, field: credential.field },
+      { source: 'infra://b', index: 0, credentialId: credential.id, field: credential.field },
+      { source: 'infra://b', index: 2, credentialId: credential.id, field: credential.field },
     ])
     expect(selectionOf(plan, none, none, untick(b, spot(2))).convertPlaintext).toEqual([
-      { source: 'infra://a', index: 0 },
-      { source: 'infra://b', index: 0 },
+      { source: 'infra://a', index: 0, credentialId: credential.id, field: credential.field },
+      { source: 'infra://b', index: 0, credentialId: credential.id, field: credential.field },
     ])
   })
 
@@ -291,7 +293,7 @@ describe('疑似明文换成占位符', () => {
     const after = node('a', { plaintext: [moved] })
     const plan = planOf([after])
     expect(selectionOf(plan, none, none, unticked).convertPlaintext).toEqual([
-      { source: 'infra://a', index: 0 },
+      { source: 'infra://a', index: 0, credentialId: credential.id, field: 'password' },
     ])
     expect(pruneUnconverted(plan, unticked).size).toBe(0)
     // 特征没变的照旧不转
@@ -356,7 +358,12 @@ describe('疑似明文换成占位符', () => {
     expect(spotState(plan, internal, spot(0), secret, none)).toBe('convertible')
     expect(keptTargets(plan, internal, secret)).toEqual([])
     expect(selectionOf(plan, secret, none).convertPlaintext).toEqual([
-      { source: 'infra://internal', index: 0 },
+      {
+        source: 'infra://internal',
+        index: 0,
+        credentialId: credential.id,
+        field: credential.field,
+      },
     ])
   })
 
@@ -386,7 +393,8 @@ describe('疑似明文换成占位符', () => {
 
   it('照原样写、同步与这次不写入分开说；指向记忆详情只在那条记忆还在时', () => {
     const template = descriptor.template!.content
-    expect(template).toContain('另有 {{ keptCount(node) }} 个写入位置保留明文')
+    expect(template).toContain('另有 {{ keptCount(node) }} 条记忆保留明文')
+    expect(template).not.toContain('写入位置')
     expect(template).toMatch(/plaintextState\(node, spot\) === 'synced'/)
     expect(template).toMatch(/plaintextState\(node, spot\) === 'unwritten'[^]*?本次不写入/)
     expect(template).toContain('<Hint v-if="syncedStillThere(node)">')
@@ -420,6 +428,65 @@ describe('疑似明文换成占位符', () => {
     // 换了来源要清掉
     const clear = /const clearSelection = \(\) => \{[^}]*\}/.exec(script)![0]
     expect(clear).toContain('unconvertedIds.value = new Map()')
+  })
+})
+
+describe('跟上契约', () => {
+  it('计划里没比对的连接与凭据说一句，原因放提示层；没做比对时不说', () => {
+    expect(planUnmatchedNote(planOf([]))).toBeNull()
+    expect(
+      planUnmatchedNote({
+        credentialMatch: { unavailableConnections: 0, unreadableCredentials: 0 },
+      }),
+    ).toBeNull()
+    expect(
+      planUnmatchedNote({
+        credentialMatch: { unavailableConnections: 2, unreadableCredentials: 1 },
+      }),
+    ).toBe('2 个密码库连接不可用、1 条凭据无法获取值，未比对')
+    expect(loreImportSource).toContain(
+      '{{ planUnmatchedNote(plan) }}<Hint>{{ UNMATCHED_HINT }}</Hint>',
+    )
+  })
+
+  it('结果列出换了占位符的条数与照原样写的目标及原因；照原样写不算没做成', () => {
+    expect(loreImportSource).toContain('result.plaintextConverted.length')
+    expect(loreImportSource).toMatch(/v-for="f in result\.plaintextKept"[^]*?\{\{ f\.reason \}\}/)
+    expect(
+      importProblems({
+        failed: [],
+        secretAlreadyImported: [],
+        sync: { failed: [] },
+      }),
+    ).toBe(false)
+  })
+
+  it('同步里跳过与无法读取的标题概括，原因各条显示', () => {
+    const plan = planOf([], {
+      items: [
+        {
+          source: 'a',
+          uri: 'user://a',
+          title: 'a',
+          state: 'skipped',
+          changes: [],
+          reason: '密码库不可用',
+        },
+        {
+          source: 'b',
+          uri: 'user://b',
+          title: 'b',
+          state: 'unreadable',
+          changes: [],
+          reason: '没有主密钥',
+        },
+      ],
+    })
+    const { groups } = syncGroups(plan)
+    expect(groups.map((g) => [g.heading, g.lines[0]!.detail])).toEqual([
+      ['本次未同步（原因见各条）', '密码库不可用'],
+      ['无法同步（原因见各条）', '没有主密钥'],
+    ])
   })
 })
 
