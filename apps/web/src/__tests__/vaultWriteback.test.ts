@@ -390,7 +390,7 @@ describe('写入失败的原因', () => {
 
 describe('密码库凭据的基准版本', () => {
   it('先等条目列表读完再读凭据作为基准；条目列表之后刷新时再读一次，版本变了合进表单', () => {
-    expect(credentialForm).toContain("'正在读取最新的一版'")
+    expect(credentialForm).toContain("'正在读取最新版本'")
     expect(credentialForm).toMatch(/watch\(\s*\(\) => \[open\.value, items\.dataUpdatedAt\.value/)
     expect(credentialForm).toMatch(
       /if \(fresh\.version !== origin\.value\.version\) applyFresh\(origin\.value, fresh/,

@@ -285,7 +285,7 @@ const input = (): CredentialFormInput => ({
 const problem = computed(
   () =>
     (isNew.value ? storeBlocker({ store: store.value, failed: storeFailed.value }) : null) ??
-    (baselinePending.value ? '正在读取最新的一版' : null) ??
+    (baselinePending.value ? '正在读取最新版本' : null) ??
     formProblem(input()),
 )
 
