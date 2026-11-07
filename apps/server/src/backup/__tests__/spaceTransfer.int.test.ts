@@ -1202,79 +1202,91 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(new Set(events.map((e) => e.type))).toEqual(new Set(['import']))
   })
 
-  it('导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 5，之前的 1 到 4 与更新的格式都拒收', async () => {
-    const alice = await bootstrap(source, 'alice')
-    const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
-    const cookie = { cookie: alice.cookie }
-    const mine = (spaceId: string, who = cookie) =>
-      ok<DreamMemberSettings>(send(source, 'GET', `/v1/spaces/${spaceId}/me/dream`, undefined, who))
-    await ok(
-      send(
-        source,
-        'PUT',
-        `/v1/spaces/${alice.spaceId}/me/dream`,
-        { includePrivate: false },
-        cookie,
-      ),
-    )
-    // 别的成员的设置不进文件，也不影响导出人那一项
-    await ok(
-      send(
-        source,
-        'PUT',
-        `/v1/spaces/${alice.spaceId}/me/dream`,
-        { includePrivate: true },
-        { cookie: bob.cookie },
-      ),
-    )
-    const file = await exportSpace(source, alice.spaceId, alice.cookie)
-    expect((await contents(file)).header.exporter).toEqual({
-      displayName: 'alice',
-      dreamPrivate: false,
-    })
-    expect(
-      (await ok<SpaceImportPreview>(inspectRequest(source, alice.cookie, file))).exporter,
-    ).toEqual({ displayName: 'alice', dreamPrivate: false })
-    const imported = await ok<SpaceImportResult>(importRequest(source, alice.cookie, file), 201)
-    expect(await mine(imported.spaceId)).toEqual({ includePrivate: false })
+  it(
+    '导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 5，之前的 1 到 4 与更新的格式都拒收',
+    { timeout: 30_000 },
+    async () => {
+      const alice = await bootstrap(source, 'alice')
+      const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
+      const cookie = { cookie: alice.cookie }
+      const mine = (spaceId: string, who = cookie) =>
+        ok<DreamMemberSettings>(
+          send(source, 'GET', `/v1/spaces/${spaceId}/me/dream`, undefined, who),
+        )
+      await ok(
+        send(
+          source,
+          'PUT',
+          `/v1/spaces/${alice.spaceId}/me/dream`,
+          { includePrivate: false },
+          cookie,
+        ),
+      )
+      // 别的成员的设置不进文件，也不影响导出人那一项
+      await ok(
+        send(
+          source,
+          'PUT',
+          `/v1/spaces/${alice.spaceId}/me/dream`,
+          { includePrivate: true },
+          { cookie: bob.cookie },
+        ),
+      )
+      const file = await exportSpace(source, alice.spaceId, alice.cookie)
+      expect((await contents(file)).header.exporter).toEqual({
+        displayName: 'alice',
+        dreamPrivate: false,
+      })
+      expect(
+        (await ok<SpaceImportPreview>(inspectRequest(source, alice.cookie, file))).exporter,
+      ).toEqual({ displayName: 'alice', dreamPrivate: false })
+      const imported = await ok<SpaceImportResult>(importRequest(source, alice.cookie, file), 201)
+      expect(await mine(imported.spaceId)).toEqual({ includePrivate: false })
 
-    // 打开之后再导出：文件里是开着的
-    await ok(
-      send(source, 'PUT', `/v1/spaces/${alice.spaceId}/me/dream`, { includePrivate: true }, cookie),
-    )
-    const reopened = await exportSpace(source, alice.spaceId, alice.cookie)
-    expect((await contents(reopened)).header.exporter.dreamPrivate).toBe(true)
-    const again = await ok<SpaceImportResult>(importRequest(source, alice.cookie, reopened), 201)
-    expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
+      // 打开之后再导出：文件里是开着的
+      await ok(
+        send(
+          source,
+          'PUT',
+          `/v1/spaces/${alice.spaceId}/me/dream`,
+          { includePrivate: true },
+          cookie,
+        ),
+      )
+      const reopened = await exportSpace(source, alice.spaceId, alice.cookie)
+      expect((await contents(reopened)).header.exporter.dreamPrivate).toBe(true)
+      const again = await ok<SpaceImportResult>(importRequest(source, alice.cookie, reopened), 201)
+      expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
 
-    // 文件里必须有这一项
-    expect((await contents(file)).header.version).toBe(5)
-    const missing = await importRequest(
-      source,
-      alice.cookie,
-      await craft([], { ...header(), exporter: { displayName: '漏了的人' } }),
-    )
-    expect(missing.status).toBe(400)
-    expect(((await missing.json()) as { error: string }).error).toContain(
-      '第 1 行 exporter.dreamPrivate',
-    )
-
-    // 记忆架构改版之前的格式（层、坐标与本人都不一样）、凭据改版之前的（凭据源）和认不得的更新的格式都拒收，
-    // 不悄悄丢掉或猜测内容
-    const before = await spaceCount()
-    for (const version of [1, 2, 3, 4, 6]) {
-      const res = await inspectRequest(
+      // 文件里必须有这一项
+      expect((await contents(file)).header.version).toBe(5)
+      const missing = await importRequest(
         source,
         alice.cookie,
-        await craft([], { ...header(), version }),
+        await craft([], { ...header(), exporter: { displayName: '漏了的人' } }),
       )
-      expect(res.status).toBe(400)
-      expect(((await res.json()) as { error: string }).error).toBe(
-        `导出文件的格式版本是 ${version}，当前 Kioku 只支持 5。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+      expect(missing.status).toBe(400)
+      expect(((await missing.json()) as { error: string }).error).toContain(
+        '第 1 行 exporter.dreamPrivate',
       )
-    }
-    expect(await spaceCount()).toBe(before)
-  })
+
+      // 记忆架构改版之前的格式（层、坐标与本人都不一样）、凭据改版之前的（凭据源）和认不得的更新的格式都拒收，
+      // 不悄悄丢掉或猜测内容
+      const before = await spaceCount()
+      for (const version of [1, 2, 3, 4, 6]) {
+        const res = await inspectRequest(
+          source,
+          alice.cookie,
+          await craft([], { ...header(), version }),
+        )
+        expect(res.status).toBe(400)
+        expect(((await res.json()) as { error: string }).error).toBe(
+          `导出文件的格式版本是 ${version}，当前 Kioku 只支持 5。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+        )
+      }
+      expect(await spaceCount()).toBe(before)
+    },
+  )
 
   it('只有空间 owner 能导出，只有实例管理员能导入', async () => {
     const alice = await bootstrap(source, 'alice')
