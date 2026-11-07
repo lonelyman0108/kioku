@@ -17,6 +17,7 @@ export interface VaultDiagnostic {
     | 'secrets_not_saved'
     | 'rejected'
     | 'history_skipped'
+    | 'reread_failed'
   status?: number
   code?: string
   endpoint?: string

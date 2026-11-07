@@ -375,7 +375,7 @@ class Session implements VaultSession {
       if (item.collectionIds.length === 0) item.collectionIds = [input.collectionId]
       // 下一次同步之前取这个条目时，Vaultwarden 的单个条目不带集合，同步的缓存里也还没有它
       this.createdCollections.set(item.id, item.collectionIds)
-      return item
+      return this.reread(access, item)
     })
   }
 
@@ -433,8 +433,42 @@ class Session implements VaultSession {
       // 修改不动集合：响应里没有集合时用原来的
       const item = this.decoded(res.json, state)
       if (item.collectionIds.length === 0) item.collectionIds = current.collectionIds
-      return item
+      return this.reread(access, item)
     })
+  }
+
+  // 写入成功之后再取一次条目，返回库里存下的那一份：Vaultwarden 用 MySQL 时修改时间存成整秒，写入响应里的
+  // revisionDate 却带着小数，之后同步与取条目给的是整秒的，拿写入响应的那个去改就会被判成冲突。
+  // 集合照写入时的。取不到（连不上、意外的状态、解不开）时退回写入响应的那一份，日志记一条（不带值）；
+  // 401 时换一次令牌再取
+  private async reread(access: Access, written: VaultItem): Promise<VaultItem> {
+    let current = access
+    for (let attempt = 0; attempt < 2; attempt++) {
+      try {
+        const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${written.id}`, {
+          method: 'GET',
+          headers: { authorization: `Bearer ${current.token}` },
+        })
+        if (res.status === 401 && attempt === 0) {
+          if (this.access === current) this.access = null
+          current = (await this.ensureAccess()).access
+          continue
+        }
+        if (res.status !== 200) {
+          this.http.log({ what: 'reread_failed', status: res.status, endpoint: 'cipher' })
+          return written
+        }
+        const item = this.decoded(res.json, current.state)
+        if (item.collectionIds.length === 0) item.collectionIds = written.collectionIds
+        return item
+      } catch (err) {
+        if (!(err instanceof VaultError)) throw err
+        this.http.log({ what: 'reread_failed', endpoint: 'cipher', problem: err.kind })
+        return written
+      }
+    }
+    this.http.log({ what: 'reread_failed', status: 401, endpoint: 'cipher' })
+    return written
   }
 
   private syncStale(): boolean {
