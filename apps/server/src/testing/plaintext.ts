@@ -44,8 +44,8 @@ export const TOKEN_SAMPLES: { name: string; kind: PlaintextKind; token: string }
 export const sampleToken = (kind: PlaintextKind): string =>
   TOKEN_SAMPLES.find((s) => s.kind === kind)!.token
 
-// 直接把正文改成疑似明文：写入检查会拦下新增的疑似明文，只有空间 owner 能带着它保存（allowPlaintext），
-// 别的成员的记忆里要有疑似明文时用它。不经服务层，不记事件、不加版本
+// 直接把正文改成疑似明文：写入检查会拦下新增的疑似明文，要绕开它铺数据（例如别的成员的记忆、
+// 不想多出 allowPlaintext 的写入记录）时用它。不经服务层，不记事件、不加版本
 export async function setPlaintextContent(
   db: Db,
   spaceId: string,

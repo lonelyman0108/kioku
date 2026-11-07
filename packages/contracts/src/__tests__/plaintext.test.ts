@@ -798,6 +798,8 @@ describe('不切子串：长正文、很多处时也是线性的', () => {
       'token=token='.repeat(15_000),
       `${'password=“a'.repeat(15_000)}`,
       Array.from({ length: 5000 }, () => `token: ${join('gh', 'p_', run(36))}`).join(' '),
+      // 引号里的值：找占位符不往后扫到底
+      'password:"a"'.repeat(170_000),
     ]
     for (const text of inputs) {
       const started = Date.now()
@@ -814,5 +816,128 @@ describe('新增按值比，值的结尾猜得准', () => {
     expect(addedPlaintextCredentials('token=abc&password=xyz', 'token=abc\npassword=xyz')).toEqual(
       [],
     )
+  })
+})
+
+describe('不是值的写法后面要紧接值的结尾', () => {
+  const flagged = (text: string) => {
+    const found = findPlaintextCredentials(text)
+    expect(PLAINTEXT_CREDENTIAL.test(text), text).toBe(found.length > 0)
+    return found.length > 0
+  }
+
+  it('变量引用要是整段值，后面跟着字的照样算', () => {
+    for (const value of [
+      '$DB_PASSWORD',
+      '${DB_PASSWORD}',
+      '$(cat /run/secrets/db)',
+      '%DB_PASSWORD%',
+      'process.env.API_KEY',
+      'process.env["API_KEY"]',
+      "os.environ['API_KEY']",
+      "os.getenv('API_KEY')",
+      'getenv("API_KEY")',
+      "env('API_KEY')",
+      "env('API_KEY'))",
+      'process.env.API_KEY,',
+      '"${DB_PASSWORD}"',
+      // 已知的限制：$ 后面全是字母、数字或 _ 的整段值按变量算
+      '$ecretPass1',
+    ]) {
+      expect(flagged(`password: ${value}`), value).toBe(false)
+    }
+    for (const value of [
+      '${x}abc',
+      '$(cmd)x',
+      '%X%y',
+      '$X-abc',
+      '$X;abc',
+      'process.env.X+y',
+      'process.env["X"]abc',
+      "os.environ['X']abc",
+      'os.getenv("X")abc',
+      'getenv(x)y',
+      "env('X')abc",
+      `\${${'a'.repeat(65)}}`,
+    ]) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+  })
+
+  it('尖括号占位与空的引号要是整段值', () => {
+    for (const value of [
+      '<你的密码>',
+      '<TOKEN>',
+      '"<redacted>"',
+      '<x>，',
+      '""',
+      "''",
+      '"",',
+      '"  "',
+    ]) {
+      expect(flagged(`password: ${value}`), value).toBe(false)
+    }
+    for (const value of ['<b>hunter2</b>', '<x>hunter2', '""hunter2', "''x"]) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+  })
+
+  it('类型名后面可以是值的结尾或代码里常跟着的符号，别的照样算', () => {
+    for (const text of [
+      'password: string[]',
+      'token: Optional<str>',
+      'password: string | null',
+      'login(password: string)',
+      'password: string;',
+      'password: str = None',
+      'password?: string,',
+      '{ password: string }',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+    for (const value of ['none!23', 'any-key-2024abc', 'Str#1234', 'string123', 'null.x']) {
+      expect(flagged(`password: ${value}`), value).toBe(true)
+    }
+  })
+
+  it('引号里只有空白与占位符的不是值', () => {
+    for (const text of [
+      'password: "  {{cred:a#b}}"',
+      'password: "{{cred:a#b}}"',
+      'password:   {{cred:a#b}}',
+    ]) {
+      expect(flagged(text), text).toBe(false)
+    }
+    expect(flagged('password: "x {{cred:a#b}}"')).toBe(true)
+  })
+})
+
+describe('写在引号里的键', () => {
+  it('标签前面有开头的引号才认收尾的引号', () => {
+    expect(values('{"db_password": "x1"}')).toEqual([{ value: 'x1', field: 'password' }])
+    expect(values("{'api_key': 'x1'}")).toEqual([{ value: 'x1', field: 'api_key' }])
+    expect(values('"密码": "x1"')).toEqual([{ value: 'x1', field: 'password' }])
+    expect(PLAINTEXT_CREDENTIAL.test('the token": abc')).toBe(false)
+    expect(PLAINTEXT_CREDENTIAL.test("the password' = abc")).toBe(false)
+    expect(PLAINTEXT_CREDENTIAL.test('"a b password": abc')).toBe(false)
+  })
+})
+
+describe('新增按延伸的值比', () => {
+  const added = (before: string | null, after: string) =>
+    addedPlaintextCredentials(before, after).map((m) => after.slice(m.start, m.end))
+
+  it('截到 & 的值相同、& 后面不同的算新增', () => {
+    expect(added('password: hunter2&old', 'password: hunter2&NEWSECRET')).toEqual(['hunter2'])
+    expect(added('password: hunter2', 'password: hunter2&NEW')).toEqual(['hunter2'])
+  })
+
+  it('后面加注解、拆开、截短的不算', () => {
+    expect(added('密码：hunter2', '密码：hunter2（旧）')).toEqual([])
+    expect(added('密码：hunter2', '密码：hunter2【已换】')).toEqual([])
+    expect(added('token=abc&password=xyz', 'token=abc\npassword=xyz')).toEqual([])
+    expect(added('password: hunter2&old', 'password: hunter2')).toEqual([])
+    // 注解之后又改了值本身的照样算
+    expect(added('密码：hunter2', '密码：hunter3（旧）')).toEqual(['hunter3'])
   })
 })
