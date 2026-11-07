@@ -9,6 +9,7 @@ import { api } from '../api/endpoints'
 import { formatRelative, formatTime } from '../time'
 import {
   checkNotice,
+  checkRefreshKeys,
   collectionNames,
   connectionStatusText,
   disabledAdvice,
@@ -60,14 +61,19 @@ async function check() {
   if (busy.value) return
   const sid = props.spaceId
   busy.value = true
-  // 失败时服务端已经记下最近的错误：不管成败都重读连接，状态与最近的错误跟上
+  let succeeded = false
   try {
     toast.add(checkNotice({ connection: await api.checkVault(sid, c.value.id) }))
+    succeeded = true
   } catch (err) {
     toast.add(checkNotice({ error: err }))
   } finally {
     busy.value = false
-    await refresh(sid)
+    await Promise.all(
+      checkRefreshKeys(sid, succeeded).map((queryKey) =>
+        queryClient.invalidateQueries({ queryKey }),
+      ),
+    )
   }
 }
 

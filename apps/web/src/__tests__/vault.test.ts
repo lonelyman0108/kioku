@@ -20,6 +20,7 @@ import { ApiError } from '../api/client'
 import {
   canManageCredentials,
   checkNotice,
+  checkRefreshKeys,
   collectionNames,
   connectionStatusText,
   credentialEventParts,
@@ -283,11 +284,16 @@ describe('界面用上了这些规则', () => {
     expect(credentialForm).toContain('vaultCredentialDraft(item.item, props.identifiers)')
   })
 
-  it('重新检查失败时按错误提示，成败都重读连接列表', () => {
+  it('重新检查失败时按错误提示，只重读连接列表；成功时连接、条目与凭据都重读', () => {
+    expect(checkRefreshKeys('s1', false)).toEqual([['vault-connections', 's1']])
+    expect(checkRefreshKeys('s1', true)).toEqual([
+      ['vault-connections', 's1'],
+      ['vault-items', 's1'],
+      ['credentials', 's1'],
+    ])
     expect(vaultPanel).toContain('toast.add(checkNotice({ error: err }))')
-    expect(vaultPanel).toMatch(/finally \{\s+busy\.value = false\s+await refresh\(sid\)/)
-    expect(vaultPanel).toContain(
-      "queryClient.invalidateQueries({ queryKey: ['vault-connections', sid] })",
+    expect(vaultPanel).toMatch(
+      /finally \{\s+busy\.value = false\s+await Promise\.all\(\s+checkRefreshKeys\(sid, succeeded\)/,
     )
   })
 
@@ -315,6 +321,9 @@ describe('界面用上了这些规则', () => {
       3,
     )
     expect(remainingTotal(undefined)).toBe(0)
+    // 按清单加，不是把对象里的数都加起来：清单之外的字段不算
+    const extra = { memories: 1, credentials: 0, vaultConnections: 0, settings: 0, other: 100 }
+    expect(remainingTotal(extra)).toBe(1)
     expect(settingsPage.match(/remainingTotal\(/g)).toHaveLength(2)
     expect(settingsPage).not.toContain('.memories +')
   })

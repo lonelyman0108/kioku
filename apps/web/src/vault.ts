@@ -85,6 +85,15 @@ export function checkNotice(
     : { title: connectionStatusText(c), color: 'warning' }
 }
 
+// 重新检查之后要重读的查询。失败时服务端已经记下最近的错误，只重读连接；条目不重读：
+// 列条目会对着连不上的密码库再同步一次，失败了还会自动重试
+export function checkRefreshKeys(spaceId: string, succeeded: boolean): string[][] {
+  const connections = ['vault-connections', spaceId]
+  return succeeded
+    ? [connections, ['vault-items', spaceId], ['credentials', spaceId]]
+    : [connections]
+}
+
 // 停用之后怎么恢复：处理掉原因，再重新检查
 export const disabledAdvice: Record<VaultDisabledReason, string> = {
   personal_items: '将个人条目移进组织或删除后，重新检查即可恢复。',
