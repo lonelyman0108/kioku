@@ -600,12 +600,28 @@ describe('Lore 导入里的疑似明文', () => {
       fingerprint: 'f',
     }
     expect(LoreImportApplyRequest.parse(base).convertPlaintext).toEqual([])
-    const convertPlaintext = [{ source: 'core://agent', index: 1 }]
+    // 每一处带上计划里对上的凭据：写入时只核对这一条
+    const spot = {
+      source: 'core://agent',
+      index: 1,
+      credentialId: '00000000-0000-4000-8000-000000000001',
+      field: 'password',
+    }
+    const convertPlaintext = [spot]
     expect(LoreImportApplyRequest.parse({ ...base, convertPlaintext }).convertPlaintext).toEqual(
       convertPlaintext,
     )
-    const negative = { ...base, convertPlaintext: [{ source: 'x', index: -1 }] }
-    expect(LoreImportApplyRequest.safeParse(negative).success).toBe(false)
+    for (const bad of [
+      { ...spot, index: -1 },
+      { source: spot.source, index: 1 },
+      { ...spot, credentialId: 'x' },
+      { ...spot, field: 'Password ' },
+    ]) {
+      expect(
+        LoreImportApplyRequest.safeParse({ ...base, convertPlaintext: [bad] }).success,
+        JSON.stringify(bad),
+      ).toBe(false)
+    }
   })
 })
 
