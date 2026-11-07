@@ -455,27 +455,82 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     ])
   })
 
-  it('重新检查连不上或返回的内容无法识别时记下最近的错误，回 502，文字和列出条目时一样', async () => {
+  it('重新检查这次同步失败时记下最近的错误，回 502，说明和列出条目时只有开头不同', async () => {
     const connection = await connected()
     const check = () => asMember('POST', `/vault-connections/${connection.id}/check`)
     const items = () => asMember('GET', `/vault-connections/${connection.id}/items`)
 
+    for (const kind of [
+      'unreachable',
+      'server_error',
+      'unsupported_format',
+      'integrity',
+    ] as const) {
+      vault.failNext(kind)
+      const checkText = await errorOf(await check(), 502)
+      expect(checkText.startsWith('重新检查失败：'), checkText).toBe(true)
+      expect((await connectionRow(connection.id)).lastErrorKind).toBe(kind)
+      vault.failNext(kind)
+      expect(await errorOf(await items(), 502)).toBe(
+        checkText.replace('重新检查失败：', '无法列出条目：'),
+      )
+    }
     vault.failNext('unreachable')
-    const checkText = await errorOf(await check(), 502)
-    expect(checkText).toBe('无法列出条目：密码库无法连接')
-    expect((await connectionRow(connection.id)).lastErrorKind).toBe('unreachable')
-    vault.failNext('unreachable')
-    expect(await errorOf(await items(), 502)).toBe(checkText)
-
-    vault.failNext('unsupported_format')
-    const formatText = await errorOf(await check(), 502)
-    expect((await connectionRow(connection.id)).lastErrorKind).toBe('unsupported_format')
-    vault.failNext('unsupported_format')
-    expect(await errorOf(await items(), 502)).toBe(formatText)
+    expect(await errorOf(await check(), 502)).toBe('重新检查失败：密码库无法连接')
 
     // 状态没变，成功一次就清掉最近的错误
     expect(await ok<VaultConnection>(await check())).toMatchObject({
       status: 'ok',
+      lastError: null,
+    })
+  })
+
+  it('重新检查时条目不可用、别的请求刚换过令牌都不算同步失败，照常返回连接', async () => {
+    const connection = await connected()
+    const check = () => asMember('POST', `/vault-connections/${connection.id}/check`)
+
+    vault.failNext('item_unavailable')
+    expect(await ok<VaultConnection>(await check())).toMatchObject({
+      status: 'ok',
+      lastError: null,
+    })
+
+    // 同步之前另一个请求换了令牌：这次用的旧令牌失效，库里的密文已经不同，状态不改
+    await ok(await check())
+    const old = vault.refreshTokens.at(-1)!
+    vault.state.beforeSnapshot = async () => {
+      vault.revokeToken(old)
+      const sealed = sealVaultSecrets(masterKey, connection.id, vault.issueSecrets(EMAIL))
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.update(vaultConnections).set(sealed).where(eq(vaultConnections.id, connection.id)),
+      )
+    }
+    expect(await ok<VaultConnection>(await check())).toMatchObject({
+      status: 'ok',
+      lastError: null,
+    })
+    expect((await connectionRow(connection.id)).status).toBe('ok')
+  })
+
+  it('停用的连接重新检查时同步失败同样回 502；同步成功但仍然违规时照旧返回连接', async () => {
+    const connection = await connected()
+    const check = () => asMember('POST', `/vault-connections/${connection.id}/check`)
+    vault.state.personalItemCount = 1
+    expect(await ok<VaultConnection>(await check())).toMatchObject({
+      status: 'disabled',
+      disabledReason: 'personal_items',
+    })
+
+    vault.failNext('unreachable')
+    expect(await errorOf(await check(), 502)).toBe('重新检查失败：密码库无法连接')
+    expect(await connectionRow(connection.id)).toMatchObject({
+      status: 'disabled',
+      lastErrorKind: 'unreachable',
+    })
+
+    expect(await ok<VaultConnection>(await check())).toMatchObject({
+      status: 'disabled',
+      disabledReason: 'personal_items',
       lastError: null,
     })
   })

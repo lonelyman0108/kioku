@@ -28,14 +28,16 @@ export function useVaultLogin(
   // 每次提交一个序号：关掉、返回之后迟到的结果不碰这时的状态
   let submitId = 0
 
-  // 当前这一步输入过没有：重置、换步骤、失败时清掉。这里自己改表单（清空主密码、填回原来的地址）不算输入，
-  // 所以表单的改动同步地看，自己改的时候先把 quiet 打开
+  // 当前这一步输入过没有：重置、上一步、开始提交时清掉。这里自己改表单（清空主密码、填回原来的地址）不算输入，
+  // 所以表单的改动同步地看，自己改的时候先把 quiet 打开。用户改了表单，旧的失败原因也不再显示
   const touched = ref(false)
   let quiet = false
   watch(
     form,
     () => {
-      if (!quiet) touched.value = true
+      if (quiet) return
+      touched.value = true
+      failure.value = null
     },
     { deep: true, flush: 'sync' },
   )
@@ -109,8 +111,8 @@ export function useVaultLogin(
     return parsed.success ? null : (parsed.error.issues[0]?.message ?? '填写内容有误')
   })
 
-  // 页脚说明「连接」为什么点不了：当前这一步输入过之后才显示。有失败原因、失败之后还没改过表单时只显示失败原因
-  const hint = computed(() => (touched.value ? problem.value : null))
+  // 页脚说明「连接」为什么点不了：当前这一步输入过之后才显示。有失败原因时只显示失败原因，用户一改表单它就清掉
+  const hint = computed(() => (touched.value && !failure.value ? problem.value : null))
 
   async function submit() {
     if (submitting.value || problem.value) return
@@ -120,6 +122,8 @@ export function useVaultLogin(
     const request = body()
     submitting.value = true
     failure.value = null
+    // 在这里清，不等请求回来：请求期间的输入照样算输入过
+    touched.value = false
     try {
       const result = c
         ? await api.reconnectVault(sid, c.id, request as ReconnectVaultRequest)
@@ -134,7 +138,6 @@ export function useVaultLogin(
           quietly(() => (form.masterPassword = ''))
           failure.value = '不支持此账号的两步验证方式，请为专用账号改用验证器应用'
         }
-        touched.value = false
         return
       }
       quietly(() => Object.assign(form, { masterPassword: '', code: '' }))
@@ -145,7 +148,6 @@ export function useVaultLogin(
       // 主密码清掉了，验证码这一步也接不下去，回到第一步重新填
       step.value = 'login'
       failure.value = err instanceof ApiError ? err.message : '连接失败'
-      touched.value = false
     } finally {
       if (id === submitId) submitting.value = false
     }

@@ -207,7 +207,7 @@ describe('页脚的提示', () => {
     expect(login.hint.value).toBeNull()
   })
 
-  it('失败之后只显示失败原因；改过表单之后提示照常显示', async () => {
+  it('失败之后只显示失败原因；用户改过表单就清掉失败原因，只显示新的提示', async () => {
     fakes.api.connectVault.mockRejectedValueOnce(new ApiError(400, '邮箱或主密码不正确'))
     const login = start()
     fill(login)
@@ -219,7 +219,49 @@ describe('页脚的提示', () => {
     login.form.email = 'not-an-email'
     expect(login.hint.value).not.toBeNull()
     expect(login.hint.value).toBe(login.problem.value)
+    expect(login.failure.value).toBeNull()
+  })
+
+  it('失败时自己清空主密码不算改表单，失败原因留着', async () => {
+    fakes.api.connectVault.mockRejectedValueOnce(new ApiError(400, '邮箱或主密码不正确'))
+    const login = start()
+    fill(login)
+    await login.submit()
+    expect(login.form.masterPassword).toBe('')
     expect(login.failure.value).toBe('邮箱或主密码不正确')
+  })
+
+  it('请求期间的输入算输入过：结果回来之后照样提示', async () => {
+    let resolve!: (v: unknown) => void
+    fakes.api.connectVault.mockReturnValueOnce(new Promise((r) => (resolve = r)))
+    const login = start()
+    fill(login)
+    const pending = login.submit()
+    // 开始提交时清掉了
+    expect(login.hint.value).toBeNull()
+    login.form.code = '1'
+    login.form.code = ''
+    resolve({ kind: 'two_factor_required', providers: ['authenticator'] })
+    await pending
+    expect(login.step.value).toBe('two_factor')
+    expect(login.hint.value).toBe('验证码不能为空')
+  })
+
+  it('请求期间输入过、请求又失败时：只显示失败原因，再改一次才显示提示', async () => {
+    let reject!: (e: unknown) => void
+    fakes.api.connectVault.mockReturnValueOnce(new Promise((_, r) => (reject = r)))
+    const login = start()
+    fill(login)
+    const pending = login.submit()
+    login.form.email = 'not-an-email'
+    reject(new ApiError(400, '邮箱或主密码不正确'))
+    await pending
+    expect(login.failure.value).toBe('邮箱或主密码不正确')
+    expect(login.hint.value).toBeNull()
+    login.form.email = 'still-not-an-email'
+    expect(login.failure.value).toBeNull()
+    expect(login.hint.value).toBe(login.problem.value)
+    expect(login.hint.value).not.toBeNull()
   })
 
   it('重置之后不提示', () => {

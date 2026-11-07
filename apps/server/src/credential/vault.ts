@@ -135,25 +135,36 @@ function loginFailure(err: unknown): never {
   }
 }
 
-// 同步之后拿不到条目时的错误：停用、需要重新登录按连接的状态说，其余按最近的错误说
-function syncFailure(row: ConnectionRow): MemoryError {
-  const reason: CredentialAccessReason =
-    row.status === 'disabled'
+const SYNC_ACTION_TEXT = { check: '重新检查失败：', items: '无法列出条目：' } as const
+
+// 同步之后的错误，开头说是哪个动作。这次同步本身失败（failed，连接本身的问题）时按它说；
+// 否则停用、需要重新登录按连接的状态说，其余按最近的错误说
+function syncFailure(
+  action: keyof typeof SYNC_ACTION_TEXT,
+  row: ConnectionRow,
+  failed: VaultErrorKind | null,
+): MemoryError {
+  const reason: CredentialAccessReason = failed
+    ? failed === 'unreachable'
+      ? 'unreachable'
+      : 'vault_error'
+    : row.status === 'disabled'
       ? 'disabled'
       : row.status === 'reauth_required'
         ? 'reauth_required'
         : row.lastErrorKind === 'unreachable'
           ? 'unreachable'
           : 'vault_error'
-  const detail =
-    row.disabledReason !== null
+  const detail = failed
+    ? ''
+    : row.disabledReason !== null
       ? `：${VAULT_DISABLED_REASON_NAMES[row.disabledReason]}`
       : reason === 'reauth_required'
         ? '，请重新登录'
         : ''
   return new MemoryError(
     reasonStatus(reason),
-    `无法列出条目：${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail}`,
+    `${SYNC_ACTION_TEXT[action]}${CREDENTIAL_ACCESS_REASON_NAMES[reason]}${detail}`,
   )
 }
 
@@ -560,15 +571,18 @@ export class VaultConnections {
     if (!now || now.status !== 'ok' || !now.ciphertext) this.forget(row.id)
   }
 
-  // 同步一次：停用的原因消失了就恢复成可用，没消失就照旧停用。连接出错时更新状态，快照为 null
-  private async sync(
-    row: ConnectionRow,
-  ): Promise<{ snapshot: VaultSnapshot | null; row: ConnectionRow }> {
+  // 同步一次：停用的原因消失了就恢复成可用，没消失就照旧停用。出错时更新状态，快照为 null；
+  // failed 是这次同步本身失败的原因（连接本身的问题，已记进最近的错误），别的情况为 null
+  private async sync(row: ConnectionRow): Promise<{
+    snapshot: VaultSnapshot | null
+    row: ConnectionRow
+    failed: VaultErrorKind | null
+  }> {
     if (row.status === 'disconnected') {
       throw new MemoryError(409, '连接已断开，请重新登录')
     }
     // 刷新令牌已经失效，同步也是同样的结果，不再请求密码库
-    if (row.status === 'reauth_required') return { snapshot: null, row }
+    if (row.status === 'reauth_required') return { snapshot: null, row, failed: null }
     let snapshot: VaultSnapshot | null = null
     let outcome: VaultOutcome
     const session = this.session(row)
@@ -608,23 +622,25 @@ export class VaultConnections {
       }
       return this.own(tx, row.id)
     })
-    return { snapshot, row: updated }
+    const failed =
+      outcome.kind === 'error' && CONNECTION_ERRORS.has(outcome.error) ? outcome.error : null
+    return { snapshot, row: updated, failed }
   }
 
-  // 同步失败（连不上、认不出的内容）时记下最近的错误之后报错，和列出条目连不上时同一句；
-  // 停用与需要重新登录是连接的状态，照常返回连接
+  // 这次同步本身失败（连不上、意外的响应、认不出的内容、校验不过）时记下最近的错误之后报错，停用的连接也一样；
+  // 别的结果（停用、需要重新登录、条目不可用、别的请求刚换过令牌）照常返回连接
   async check(id: string): Promise<VaultConnection> {
     const row = await this.run((tx) => this.own(tx, id))
-    const { snapshot, row: updated } = await this.sync(row)
-    if (!snapshot && updated.status === 'ok') throw syncFailure(updated)
+    const { row: updated, failed } = await this.sync(row)
+    if (failed) throw syncFailure('check', updated, failed)
     return this.run((tx) => this.viewOf(tx, updated))
   }
 
   // 列出连接读得到的条目，顺带同步一次。停用、需要重新登录或出错时说明原因
   async items(id: string): Promise<VaultItemList> {
     const row = await this.run((tx) => this.own(tx, id))
-    const { snapshot, row: updated } = await this.sync(row)
-    if (!snapshot || updated.status !== 'ok') throw syncFailure(updated)
+    const { snapshot, row: updated, failed } = await this.sync(row)
+    if (!snapshot || updated.status !== 'ok') throw syncFailure('items', updated, failed)
     const bound = await this.run((tx) =>
       tx
         .select({
