@@ -469,7 +469,8 @@ export type CredentialAccessResult = z.infer<typeof CredentialAccessResult>
 // 被拒与失败的原因。被拒：capability 凭据能力不够；scope 访问密钥读不到本人的私密记忆；
 // context 会话上下文不允许；app 限定给了别的应用。失败：item_unavailable 条目不可用（被删、移出集合）；
 // field_missing 条目里没有这个字段；reauth_required 需要重新登录；disabled 连接已停用；disconnected 连接已断开；
-// unreachable 密码库无法连接；vault_error 密码库返回的内容认不出或校验不过；master_key 主密钥不可用
+// unreachable 密码库无法连接；vault_error 密码库返回的内容认不出或校验不过；master_key 主密钥不可用；
+// internal_error Kioku 自己出错（数据库错误这类不是密码库的问题）
 export const CREDENTIAL_ACCESS_REASONS = [
   'capability',
   'scope',
@@ -483,6 +484,7 @@ export const CREDENTIAL_ACCESS_REASONS = [
   'unreachable',
   'vault_error',
   'master_key',
+  'internal_error',
 ] as const
 export const CredentialAccessReason = z.enum(CREDENTIAL_ACCESS_REASONS)
 export type CredentialAccessReason = z.infer<typeof CredentialAccessReason>

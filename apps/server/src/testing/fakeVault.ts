@@ -58,6 +58,10 @@ export interface FakeVault {
     beforeItem: (() => Promise<void>) | null
     // 登录前等它（用完就清掉），测试用它让一次登录停在半路
     beforeLogin: Promise<void> | null
+    // 换过刷新令牌之后，新的这个马上失效：同一次调用里先换令牌、后报 reauth_required
+    revokeAfterRotate: boolean
+    // 同步之后不交给 onSynced：模拟没有在 onSynced 里检查的客户端
+    skipOnSynced: boolean
   }
   calls: { login: number; snapshot: number; item: number; sessions: number }
   // 每个会话最近一次用的刷新令牌
@@ -83,6 +87,8 @@ export function fakeVault(): FakeVault {
     loginFailure: null,
     beforeItem: null,
     beforeLogin: null,
+    revokeAfterRotate: false,
+    skipOnSynced: false,
   }
 
   const summary = (item: Required<FakeVaultItem>) => ({
@@ -158,11 +164,16 @@ export function fakeVault(): FakeVault {
           secrets = secretsFor(email)
           refreshTokens.push(secrets.refreshToken)
           await input.onSecretsChanged?.(secrets)
+          if (state.revokeAfterRotate) {
+            state.revokeAfterRotate = false
+            revoked.add(secrets.refreshToken)
+            throw new VaultError('reauth_required', '刷新令牌已失效')
+          }
         }
         if (!synced || pendingSync || forSnapshot) {
           synced = true
           pendingSync = false
-          await input.onSynced?.(snapshot(email, userId))
+          if (!state.skipOnSynced) await input.onSynced?.(snapshot(email, userId))
         }
       }
       return {

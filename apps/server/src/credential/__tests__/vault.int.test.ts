@@ -12,7 +12,7 @@ import type {
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
-import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
+import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
@@ -21,9 +21,11 @@ import { vaultConnections } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { fakeVault, type FakeVault } from '../../testing/fakeVault'
+import { hasCachedSession } from '../../testing/vaultCache'
 import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { credentialServiceForKey } from '../context'
-import { hasCachedSession, sealVaultSecrets, VaultConnections } from '../vault'
+import { CredentialService } from '../service'
+import { sealVaultSecrets, VaultConnections } from '../vault'
 import { totpCode } from '../bitwarden/totp'
 
 const EMAIL = 'agent@example.com'
@@ -720,7 +722,7 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     expect((await accessEvents(created.id)).map((e) => [e.result, e.reason])).toEqual([
       ['failed', 'master_key'],
       ['ok', null],
-      ['failed', 'vault_error'],
+      ['failed', 'internal_error'],
     ])
   })
 
@@ -780,5 +782,122 @@ describe.skipIf(!testDatabaseUrl)('密码库连接与密码库的凭据', () => 
     expect((await use('identifier=router')).status).toBe(502)
     await ok(await use('identifier=router'))
     expect((await connectionRow(connection.id)).lastErrorKind).toBeNull()
+  })
+
+  it('第三段确认连接现在的状态：读到可用、断开提交、建会话放回缓存之后，记录时把它删掉', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    await ok(await use('identifier=router'))
+    const stale = await connectionRow(connection.id)
+    await ok(await asMember('POST', `/vault-connections/${connection.id}/disconnect`))
+    const session = connectionsOf().session(stale)
+    expect(hasCachedSession(vault.client, connection.id)).toBe(true)
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      connectionsOf().record(tx, stale, { kind: 'ok' }, session),
+    )
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
+  })
+
+  it('没配主密钥时 kioku_get 末尾不写可以取用：托管的与密码库的都说主密钥不可用', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    await ok(
+      await asMember('POST', '/credentials', {
+        identifier: 'nas',
+        name: 'NAS',
+        source: { kind: 'hosted', values: { password: 'pw' } },
+      }),
+      201,
+    )
+    const service = credentialServiceForKey(
+      {
+        db: database.db,
+        cookieSecure: false,
+        masterKey: null,
+        embedder: staticEmbedderSource(null),
+        jobs: null,
+        vault: vault.client,
+      },
+      (await principalForKeyId(database.db, keyId))!,
+    )
+    expect((await service.forPlaceholders(['router', 'nas'])).map((c) => c.state)).toEqual([
+      'master_key',
+      'master_key',
+    ])
+  })
+
+  it('同步之后自己再查一遍违规：客户端没在 onSynced 里抛错，违规的连接也会停用、不会恢复', async () => {
+    const connection = await connected()
+    vault.state.skipOnSynced = true
+    vault.state.personalItemCount = 1
+    expect(
+      await ok<VaultConnection>(
+        await asMember('POST', `/vault-connections/${connection.id}/check`),
+      ),
+    ).toMatchObject({ status: 'disabled', disabledReason: 'personal_items' })
+    expect(
+      await errorOf(await asMember('GET', `/vault-connections/${connection.id}/items`), 409),
+    ).toContain('连接已停用')
+    vault.state.personalItemCount = 0
+    expect(
+      await ok<VaultConnection>(
+        await asMember('POST', `/vault-connections/${connection.id}/check`),
+      ),
+    ).toMatchObject({ status: 'ok' })
+  })
+
+  it('记失败本身出错时记进日志，不悄悄吞掉，照样抛出原来的错误', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    vault.state.beforeItem = () => Promise.reject(new Error('模拟的意外错误'))
+    const logged = vi.spyOn(console, 'error').mockImplementation(() => {})
+    const events = vi
+      .spyOn(
+        CredentialService.prototype as unknown as { accessEvent: () => Promise<void> },
+        'accessEvent',
+      )
+      .mockRejectedValue(new Error('记不进去'))
+    try {
+      expect((await use('identifier=router')).status).toBe(500)
+      expect(logged.mock.calls.map((c) => c[0])).toContain('凭据取用失败之后记访问事件出错')
+    } finally {
+      events.mockRestore()
+      logged.mockRestore()
+    }
+  })
+
+  it('最近检查时间按数据库的时钟写：应用的时钟快了，节流照样按数据库的时间算', async () => {
+    const connection = await connected()
+    await identify(connection.id, vault.addItem({ name: '路由器', values: routerValues }))
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .update(vaultConnections)
+        .set({ lastCheckedAt: sql`now() - interval '2 minutes'` })
+        .where(eq(vaultConnections.id, connection.id)),
+    )
+    vi.useFakeTimers({ toFake: ['Date'], now: Date.now() + 10 * 60_000 })
+    try {
+      await ok(await use('identifier=router'))
+    } finally {
+      vi.useRealTimers()
+    }
+    const [{ lag }] = (await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.execute(
+        sql`select extract(epoch from now() - last_checked_at)::float8 as lag from vault_connections where id = ${connection.id}`,
+      ),
+    )) as unknown as [{ lag: number }]
+    // 用应用的时间写的话会在十分钟之后，下一分钟里都不会再写
+    expect(Math.abs(lag)).toBeLessThan(30)
+  })
+
+  it('同一次调用里先换令牌、后报刷新令牌失效：按这次用的会话删缓存，状态改成需要重新登录', async () => {
+    const connection = await connected()
+    vault.rotateSecrets()
+    vault.state.revokeAfterRotate = true
+    const checked = await ok<VaultConnection>(
+      await asMember('POST', `/vault-connections/${connection.id}/check`),
+    )
+    expect(checked.status).toBe('reauth_required')
+    expect(hasCachedSession(vault.client, connection.id)).toBe(false)
   })
 })
