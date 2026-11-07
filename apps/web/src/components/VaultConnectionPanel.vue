@@ -8,6 +8,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { formatRelative, formatTime } from '../time'
 import {
+  checkNotice,
   collectionNames,
   connectionStatusText,
   disabledAdvice,
@@ -59,14 +60,11 @@ async function check() {
   if (busy.value) return
   const sid = props.spaceId
   busy.value = true
+  // 失败时服务端已经记下最近的错误：不管成败都重读连接，状态与最近的错误跟上
   try {
-    const next = await api.checkVault(sid, c.value.id)
-    toast.add({
-      title: next.status === 'ok' ? '连接可用' : connectionStatusText(next),
-      color: next.status === 'ok' ? 'success' : 'warning',
-    })
+    toast.add(checkNotice({ connection: await api.checkVault(sid, c.value.id) }))
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '检查失败', color: 'error' })
+    toast.add(checkNotice({ error: err }))
   } finally {
     busy.value = false
     await refresh(sid)

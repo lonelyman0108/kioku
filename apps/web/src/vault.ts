@@ -17,6 +17,7 @@ import {
   type VaultItemType,
 } from '@kioku/contracts'
 
+import { readFailure } from './api/client'
 import { accessContextLabels, credentialChangeLabels, credentialViaLabels } from './labels'
 
 // 凭据页的说法和计算：密码库连接、条目与凭据的访问记录
@@ -71,6 +72,17 @@ export function connectionStatusText(
     return `${name}：${VAULT_DISABLED_REASON_NAMES[connection.disabledReason]}`
   }
   return name
+}
+
+// 重新检查的提示：可用、连接现在的状态，或者服务端的错误（连不上、返回的内容无法识别时回 502）
+export function checkNotice(
+  outcome: { connection: Pick<VaultConnection, 'status' | 'disabledReason'> } | { error: unknown },
+): { title: string; color: 'success' | 'warning' | 'error' } {
+  if ('error' in outcome) return { title: readFailure(outcome.error, '检查失败'), color: 'error' }
+  const c = outcome.connection
+  return c.status === 'ok'
+    ? { title: '连接可用', color: 'success' }
+    : { title: connectionStatusText(c), color: 'warning' }
 }
 
 // 停用之后怎么恢复：处理掉原因，再重新检查

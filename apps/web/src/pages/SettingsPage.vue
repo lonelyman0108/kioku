@@ -16,6 +16,7 @@ import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import PropertyList from '../components/strata/PropertyList.vue'
 import SettingsBlock from '../components/strata/SettingsBlock.vue'
 import SettingsFrame from '../components/strata/SettingsFrame.vue'
+import { remainingTotal } from '../masterKey'
 import { INSTANCE_SECTIONS } from '../settingsSections'
 
 const toast = useToast()
@@ -27,19 +28,10 @@ const masterKey = useQuery({
   queryFn: api.masterKeyStatus,
   refetchInterval: (query) => {
     const data = query.state.data
-    const left = data
-      ? data.remaining.memories +
-        data.remaining.credentials +
-        data.remaining.vaultConnections +
-        data.remaining.settings
-      : 0
-    return left > 0 && !data?.lastError ? 5_000 : false
+    return remainingTotal(data?.remaining) > 0 && !data?.lastError ? 5_000 : false
   },
 })
-const remaining = computed(() => {
-  const r = masterKey.data.value?.remaining
-  return r ? r.memories + r.credentials + r.vaultConnections + r.settings : 0
-})
+const remaining = computed(() => remainingTotal(masterKey.data.value?.remaining))
 
 // 召回事件明细的保留天数：更早的明细在下一次清理时并入每条记忆的累计次数后删除
 const recallSettings = useQuery({ queryKey: ['settings', 'recall'], queryFn: api.recallSettings })

@@ -333,9 +333,9 @@ describe('凭据的弹窗', () => {
     expect(source, name).not.toContain(`text-xs text-muted">{{ ${variable} }}`)
   })
 
-  it('连接密码库：空表单不提示，有失败原因时不再叠一条提示', () => {
-    expect(vaultLoginModal).toContain(
-      'const hint = computed(() => (edited.value && !failure.value ? problem.value : null))',
-    )
+  it('连接密码库：什么时候提示由 useVaultLogin 决定，弹窗只负责显示', () => {
+    expect(vaultLoginModal).toMatch(/const \{[^}]*\bhint\b[^}]*\} =\s*useVaultLogin\(/)
+    expect(vaultLoginModal).not.toContain('const hint')
+    expect(vaultLoginModal).not.toContain('edited')
   })
 })
