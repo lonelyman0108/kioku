@@ -154,7 +154,7 @@ export function selectionOf(
     .map((n) => n.uri)
   const convertPlaintext = plan.nodes.flatMap((node) =>
     node.plaintext
-      .filter((spot) => spotConverts(node, spot, secret, excluded, unconverted))
+      .filter((spot) => spotConverts(plan, node, spot, secret, excluded, unconverted))
       .map((spot) => ({ source: node.uri, index: spot.index })),
   )
   return { secretUris, excludeUris, convertPlaintext }
@@ -211,13 +211,21 @@ const writtenTargets = (node: LorePlanNode, updates: ReadonlySet<string>) =>
 const targetSecret = (node: LorePlanNode, t: LorePlanTarget, secret: ReadonlySet<string>) =>
   t.state === 'new' ? secret.has(node.uuid) : t.current.some((c) => c.uri === t.uri && c.secret)
 
-// 一处疑似明文能不能换成占位符。服务端只给新建的目标换，已导入的目标照原样写、给出原因：
-// convertible 对上了凭据，节点至少有一个新建的目标放得进占位符（本人、至少私密，标了机密的按机密算）；
-// unmatched 没有同值的凭据；excluded 这个节点本次不导入；imported 没有新建的目标；
-// blocked 新建的目标都放不进占位符
-export type SpotState = 'convertible' | 'unmatched' | 'excluded' | 'imported' | 'blocked'
+// 新建的目标放不放得进占位符：本人、至少私密，标了机密的按机密算
+const freshAllowed = (node: LorePlanNode, t: LorePlanTarget, secret: ReadonlySet<string>) =>
+  t.state === 'new' &&
+  placeholderAllowed(t.layer, targetSecret(node, t, secret) ? 'secret' : t.sensitivity)
+
+// 一处疑似明文能不能换成占位符。服务端只给新建的、放得进占位符的目标换，同一节点别的写入目标
+// （放不进的新建目标、这次同步的已导入目标）照原样写，原因进结果：
+// convertible 对上了凭据，节点至少有一个新建的目标放得进（别的目标照原样写的个数见 keptTargets）；
+// unmatched 没有同值的凭据；excluded 这个节点本次不导入；unwritten 这次不写这个节点；
+// synced 只同步已导入的目标，照原样写；blocked 新建的目标都放不进占位符
+export type SpotState =
+  'convertible' | 'unmatched' | 'excluded' | 'unwritten' | 'synced' | 'blocked'
 
 export function spotState(
+  plan: LoreImportPlan,
   node: LorePlanNode,
   spot: LorePlaintextSpot,
   secret: ReadonlySet<string>,
@@ -225,28 +233,37 @@ export function spotState(
 ): SpotState {
   if (!spot.credential) return 'unmatched'
   if (excluded.has(node.uuid)) return 'excluded'
-  const fresh = node.targets.filter((t) => t.state === 'new')
-  if (!fresh.length) return 'imported'
-  return fresh.some((t) =>
-    placeholderAllowed(t.layer, targetSecret(node, t, secret) ? 'secret' : t.sensitivity),
-  )
-    ? 'convertible'
-    : 'blocked'
+  const written = writtenTargets(node, updatesOf(plan))
+  if (!written.length) return 'unwritten'
+  if (!written.some((t) => t.state === 'new')) return 'synced'
+  return written.some((t) => freshAllowed(node, t, secret)) ? 'convertible' : 'blocked'
 }
 
-// 这一处这次会不会换成占位符：能换，也没有取消勾选
+// 这次要写、却照原样写明文的目标：放不进占位符的新建目标，与这次同步的已导入目标
+export function keptTargets(
+  plan: LoreImportPlan,
+  node: LorePlanNode,
+  secret: ReadonlySet<string>,
+): LorePlanTarget[] {
+  return writtenTargets(node, updatesOf(plan)).filter((t) => !freshAllowed(node, t, secret))
+}
+
+// 这一处这次会不会换成占位符（至少在一个目标里）：能换，也没有取消勾选
 export const spotConverts = (
+  plan: LoreImportPlan,
   node: LorePlanNode,
   spot: LorePlaintextSpot,
   secret: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
   unconverted: Unconverted,
 ) =>
-  spotState(node, spot, secret, excluded) === 'convertible' &&
+  spotState(plan, node, spot, secret, excluded) === 'convertible' &&
   !isUnconverted(unconverted, node, spot)
 
-// 正文的疑似明文是不是这次都会换成占位符：都换了就不再提醒标机密
+// 正文的疑似明文是不是这次全部写成占位符：每一处都换，而且这次要写的每个目标都放得进（没有照原样写的）。
+// 全部换了才不再提醒标机密
 export function plaintextAllConverted(
+  plan: LoreImportPlan,
   node: LorePlanNode,
   secret: ReadonlySet<string>,
   excluded: ReadonlySet<string>,
@@ -254,7 +271,8 @@ export function plaintextAllConverted(
 ): boolean {
   return (
     node.plaintext.length > 0 &&
-    node.plaintext.every((spot) => spotConverts(node, spot, secret, excluded, unconverted))
+    keptTargets(plan, node, secret).length === 0 &&
+    node.plaintext.every((spot) => spotConverts(plan, node, spot, secret, excluded, unconverted))
   )
 }
 
@@ -301,7 +319,7 @@ export function selectionEffects(
     update += written.filter((t) => t.state !== 'new').length
     for (const ref of node.credentialRefs) refs.add(ref)
     for (const spot of node.plaintext) {
-      if (spot.credential && spotConverts(node, spot, secret, excluded, unconverted)) {
+      if (spot.credential && spotConverts(plan, node, spot, secret, excluded, unconverted)) {
         refs.add(spot.credential.identifier)
       }
     }

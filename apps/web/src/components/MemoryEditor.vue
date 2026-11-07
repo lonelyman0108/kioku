@@ -478,13 +478,15 @@ function confirmDowngrade() {
   void save({ allowPlaintext: true })
 }
 // 逐处处理完：转存的已经建好凭据、正文里的值换成了占位符，换过的正文放回表单再保存。
-// 结果只能用在算出它的那份正文上，这期间正文变了就按现在的重算（afterGate）
+// 结果只能用在算出它的那份正文上，这期间正文变了就按现在的正文接着算（afterGate）
 function onGateProceed(result: PlaintextSaveResult) {
   const m = base.value
   if (!m) return
   const next = afterGate(m.content, form.content, result)
   if (next.kind === 'reopen') {
-    plaintextGate.value = gateFor(m, form.content, next.spots, false)
+    // 转存了的值已经换进现在的正文：放回表单，只把新出现的几处再给人看
+    form.content = next.content
+    plaintextGate.value = { ...gateFor(m, next.content, next.spots, false), ignored: next.ignored }
     return
   }
   form.content = next.content

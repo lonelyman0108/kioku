@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest'
 
 import { ApiError } from '../api/client'
+import plaintextSaveSource from '../plaintextSave.ts?raw'
 import {
   addedSpots,
   afterGate,
@@ -70,16 +71,27 @@ describe('保存时的标记', () => {
 })
 
 describe('服务端拒绝之后开哪一份弹窗', () => {
-  it('正文还是发出去的那份：以服务端为准，本地没认出新增的也列出来', () => {
+  it('正文还是发出去的那份：本地新增的对上服务端报的就用本地的，同一行上原有的值不列', () => {
+    // 第 1 行原来就有 oldpass1，这次加了 newpass2；服务端报第 1 行
+    const before = 'password=oldpass1'
+    const sent = 'password=oldpass1 token=newpass2'
+    const gate = spotsAfterRejection(before, sent, sent, [{ line: 1, kind: 'label' }])
+    expect(gate!.content).toBe(sent)
+    expect(gate!.spots.map((s) => s.value)).toEqual(['newpass2'])
+  })
+
+  it('服务端报了、本地这一行这一类没有新增时（两边不一致），退回列出这一行这一类的全部', () => {
     // 原来就有 hunter22：本地按值比不算新增，服务端说第 1 行是新增的
-    const before = '旧的 hunter22'
+    const before = 'password: hunter22'
     const sent = '密码：hunter22\ntoken=abcd1234'
     const gate = spotsAfterRejection(before, sent, sent, [
       { line: 1, kind: 'label' },
       { line: 2, kind: 'label' },
     ])
-    expect(gate!.content).toBe(sent)
-    expect(gate!.spots.map((s) => s.value)).toEqual(['hunter22', 'abcd1234'])
+    expect(gate!.spots.map((s) => s.value)).toEqual(['abcd1234', 'hunter22'])
+    // 本地认不出值的也列出来
+    const missing = spotsAfterRejection(null, sent, sent, [{ line: 2, kind: 'github' }])
+    expect(missing!.spots).toEqual([{ value: null, lines: [2], kind: 'github', field: 'password' }])
   })
 
   it('请求期间又改过正文：按现在的正文重算，不用发出去的那份', () => {
@@ -98,32 +110,70 @@ describe('服务端拒绝之后开哪一份弹窗', () => {
 })
 
 describe('弹窗处理完之后', () => {
+  const placeholder = '{{cred:a#password}}'
   const result = {
-    source: '密码：hunter22',
-    content: '密码：{{cred:a#password}}',
+    source: '密码：hunter22\ntoken=abcd1234',
+    content: `密码：${placeholder}\ntoken=abcd1234`,
     flags: { ignorePlaintext: true } as const,
+    replacements: [{ value: 'hunter22', placeholder }],
+    ignored: ['abcd1234'],
   }
 
   it('结果是按现在的正文算的：用它', () => {
-    expect(afterGate(null, '密码：hunter22', result)).toEqual({
+    expect(afterGate(null, result.source, result)).toEqual({
       kind: 'save',
       content: result.content,
       flags: result.flags,
     })
   })
 
-  it('这期间正文变了：不丢新打的字，按现在的正文重算', () => {
-    const current = '密码：hunter22\n新打的字 token=abcd1234'
-    const next = afterGate(null, current, result)
-    expect(next.kind).toBe('reopen')
-    expect(next.kind === 'reopen' && next.spots.map((s) => s.value)).toEqual([
-      'hunter22',
-      'abcd1234',
-    ])
-    expect(afterGate(null, '没有明文了', result)).toEqual({
+  it('正文变了、没有新出现的：已转存的换进现在的正文，标过不是凭据的照旧，直接保存', () => {
+    const current =
+      '前面新打的字\n密码：hunter22\ntoken=abcd1234\n备用 hunter22 {{cred:hunter22#x}}'
+    expect(afterGate(null, current, result)).toEqual({
       kind: 'save',
-      content: '没有明文了',
+      content: `前面新打的字\n密码：${placeholder}\ntoken=abcd1234\n备用 ${placeholder} {{cred:hunter22#x}}`,
+      flags: { ignorePlaintext: true },
+    })
+  })
+
+  it('正文变了、有新出现的：只把新出现的再给人看，标过不是凭据的带过去', () => {
+    const current = '密码：hunter22\ntoken=abcd1234\n新的 password: qwerty99'
+    const next = afterGate(null, current, result)
+    expect(next).toEqual({
+      kind: 'reopen',
+      content: `密码：${placeholder}\ntoken=abcd1234\n新的 password: qwerty99`,
+      spots: [{ value: 'qwerty99', lines: [3], kind: 'label', field: 'password' }],
+      ignored: ['abcd1234'],
+    })
+  })
+
+  it('标过不是凭据的值被删掉了：不再带 ignorePlaintext', () => {
+    expect(afterGate(null, '密码：hunter22', result)).toEqual({
+      kind: 'save',
+      content: `密码：${placeholder}`,
       flags: {},
     })
+  })
+
+  it('照样保存的结果不看正文变没变', () => {
+    const allow = {
+      ...result,
+      flags: { allowPlaintext: true } as const,
+      replacements: [],
+      ignored: [],
+    }
+    expect(afterGate(null, '改过了 token=zzzz9999', allow)).toEqual({
+      kind: 'save',
+      content: '改过了 token=zzzz9999',
+      flags: { allowPlaintext: true },
+    })
+  })
+})
+
+describe('保存时的标记的说明', () => {
+  it('照样保存按现在的规则写：能改这条记忆的成员都可以', () => {
+    expect(plaintextSaveSource).not.toContain('照样保存（只给空间所有者）')
+    expect(plaintextSaveSource).toContain('能改这条记忆的成员都可以')
   })
 })

@@ -195,12 +195,14 @@ export interface ValueMatchResult {
 }
 
 // 按值查找同值的凭据与条目：不合转存规则的值不查（服务端会整批拒绝），重复的只查一次，
-// 一次最多 CREDENTIAL_MATCH_MAX 个，多了分批；结果按请求的顺序对回值。request 是接口调用
+// 一次最多 CREDENTIAL_MATCH_MAX 个，多了分批；结果按请求的顺序对回值。request 是接口调用。
+// 一个值都不用查时不发请求，返回 null：调用方手里的失败说明与不可用连接数不该被这次清掉
 export async function matchByValue(
   values: readonly string[],
   request: (values: string[]) => Promise<CredentialValueMatches>,
-): Promise<ValueMatchResult> {
+): Promise<ValueMatchResult | null> {
   const wanted = [...new Set(values.filter((v) => ConvertibleValue.safeParse(v).success))]
+  if (!wanted.length) return null
   const result: ValueMatchResult = { matches: new Map(), unavailableConnections: 0, failure: null }
   const chunks: string[][] = []
   for (let i = 0; i < wanted.length; i += CREDENTIAL_MATCH_MAX) {

@@ -93,12 +93,13 @@ export function useConvertCredential(
       api.matchCredentialValues(sid, { values: chunk }),
     )
     if (id !== loadId) return
-    matches.value = new Map([...matches.value, ...found.matches])
-    unavailableConnections.value = found.unavailableConnections
-    matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
     const rest = new Set(pendingValues.value)
     for (const v of wanted) rest.delete(v)
     pendingValues.value = rest
+    if (!found) return
+    matches.value = new Map([...matches.value, ...found.matches])
+    unavailableConnections.value = found.unavailableConnections
+    matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
   }
 
   const readMemory = (sid: string, target: string) =>
@@ -124,8 +125,10 @@ export function useConvertCredential(
     loadFailure.value = null
     failure.value = null
     canReload.value = false
-    // 上一次读取发出的匹配作废了（见 matchValues 的序号），没回来的要重查
+    // 重新读取（例如 409 之后）时去处可能变了（条目刚被别处起了标识）：查过的结果都不算，重新查；
+    // 上一次读取发出的匹配也作废了（见 matchValues 的序号）
     pendingValues.value = new Set()
+    matches.value = new Map()
     try {
       const [view, existing] = await Promise.all([
         readMemory(sid, target),
@@ -362,7 +365,6 @@ export function useConvertCredential(
     destination,
     selected,
     vaultIdentifiers,
-    itemKey,
     choose,
     blocked,
     replaced,

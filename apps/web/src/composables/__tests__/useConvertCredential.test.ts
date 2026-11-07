@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, effectScope, nextTick, ref, type EffectScope } from 'vue'
 
 import { ApiError } from '../../api/client'
+import { itemKey } from '../../plaintext'
 import { useConvertCredential } from '../useConvertCredential'
 
 // 接口换成假的，别的都是真的：vue 的响应式、vue-query 的缓存。对话框只管长相，能不能提交都在这里定
@@ -505,7 +506,7 @@ describe('转存的去处', () => {
     const convert = await shown()
     await settle()
     expect(convert.selected.value.kind).toBe('vault')
-    const key = convert.itemKey(item)
+    const key = itemKey(item)
     expect(convert.vaultIdentifiers[key]).toBe('nas-2')
     convert.vaultIdentifiers[key] = 'nas-box'
     await nextTick()
@@ -620,5 +621,32 @@ describe('转存的去处', () => {
     expect(fakes.api.matchCredentialValues).toHaveBeenLastCalledWith('s1', {
       values: ['hunter2-not-real'],
     })
+  })
+
+  it('没发请求的查找不清掉之前的失败说明与不可用连接数', async () => {
+    fakes.api.matchCredentialValues.mockRejectedValueOnce(new ApiError(502, '密码库无法连接'))
+    const convert = await shown()
+    await settle()
+    expect(convert.matchFailure.value).toBe('密码库无法连接')
+    // 改成通不过转存规则的值：不发请求
+    fakes.api.matchCredentialValues.mockClear()
+    convert.form.value = 'abc'
+    await new Promise((resolve) => setTimeout(resolve, 450))
+    await settle()
+    expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
+    expect(convert.matchFailure.value).toBe('密码库无法连接')
+  })
+
+  it('重新读取时查过的结果都不算：条目刚被别处起了标识，去处跟着换成已有凭据', async () => {
+    matchWith({ credentials: [], vaultItems: [item] })
+    const convert = await shown()
+    await settle()
+    expect(convert.selected.value.kind).toBe('vault')
+    // 提交 409：条目已经有凭据；重新读取后再查，这次对上的是那条凭据
+    matchWith({ credentials: [credential], vaultItems: [] })
+    fakes.api.memory.mockResolvedValue(memory({ version: 2 }))
+    await convert.load()
+    await settle()
+    expect(convert.selected.value.kind).toBe('credential')
   })
 })

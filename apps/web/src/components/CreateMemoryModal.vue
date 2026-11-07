@@ -148,7 +148,14 @@ function onGateProceed(result: PlaintextSaveResult) {
   const target = uri.value
   const next = afterGate(null, form.content, result)
   if (next.kind === 'reopen') {
-    if (target) plaintextGate.value = gateFor(target, form.content, next.spots, false)
+    // 转存了的值已经换进现在的正文：放回表单，只把新出现的几处再给人看
+    form.content = next.content
+    if (target) {
+      plaintextGate.value = {
+        ...gateFor(target, next.content, next.spots, false),
+        ignored: next.ignored,
+      }
+    }
     return
   }
   form.content = next.content

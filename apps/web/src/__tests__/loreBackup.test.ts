@@ -20,6 +20,7 @@ import {
   LoreFileError,
   matchesFilter,
   planBlocker,
+  keptTargets,
   plaintextAllConverted,
   plaintextKey,
   pruneUnconverted,
@@ -299,51 +300,98 @@ describe('疑似明文换成占位符', () => {
     expect(pruneUnconverted(same, unticked)).toEqual(unticked)
   })
 
-  it('不导入的、只有已导入目标的、新建目标都放不进占位符的不发，并标出原因', () => {
-    const excluded = node('ex')
-    const imported = node('old', {
-      targets: [target({ state: 'imported', current: [{ uri: 'user://infra/a', secret: false }] })],
-    })
-    const shared = node('core', { targets: [target({ layer: 'core', sensitivity: 'internal' })] })
-    const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
-    const plan = planOf([excluded, imported, shared, internal])
-    const out = new Set(['ex'])
-    expect(selectionOf(plan, none, out).convertPlaintext).toEqual([])
-    expect(spotState(excluded, spot(0), none, out)).toBe('excluded')
-    expect(spotState(imported, spot(0), none, out)).toBe('imported')
-    expect(spotState(shared, spot(0), none, out)).toBe('blocked')
-    expect(spotState(internal, spot(0), none, out)).toBe('blocked')
-    expect(spotState(internal, spot(1, false), none, out)).toBe('unmatched')
+  const importedTarget = (uri: string, current: string | null = uri) =>
+    target({ uri, state: 'imported', current: [{ uri: current, secret: false }] })
+  const updateOf = (n: LorePlanNode, uri: string) => ({
+    source: n.uri,
+    uri,
+    title: 't',
+    state: 'update' as const,
+    changes: ['content' as const],
   })
 
-  it('有一个新建的目标放得进就能换；已导入的目标不挡', () => {
+  it('不导入的、这次不写的、只同步已导入目标的、新建目标都放不进占位符的不发，并标出原因', () => {
+    const excluded = node('ex')
+    const unwritten = node('old', { targets: [importedTarget('user://infra/a')] })
+    const synced = node('sync', { targets: [importedTarget('user://infra/s')] })
+    const shared = node('core', { targets: [target({ layer: 'core', sensitivity: 'internal' })] })
+    const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
+    const plan = planOf([excluded, unwritten, synced, shared, internal], {
+      items: [updateOf(synced, 'user://infra/s')],
+    })
+    const out = new Set(['ex'])
+    expect(selectionOf(plan, none, out).convertPlaintext).toEqual([])
+    expect(spotState(plan, excluded, spot(0), none, out)).toBe('excluded')
+    expect(spotState(plan, unwritten, spot(0), none, out)).toBe('unwritten')
+    expect(spotState(plan, synced, spot(0), none, out)).toBe('synced')
+    expect(spotState(plan, shared, spot(0), none, out)).toBe('blocked')
+    expect(spotState(plan, internal, spot(0), none, out)).toBe('blocked')
+    expect(spotState(plan, internal, spot(1, false), none, out)).toBe('unmatched')
+  })
+
+  it('有一个新建的目标放得进就能换；放不进的新建目标与同步的目标照原样写，数得出几个', () => {
     const mixed = node('mixed', {
       targets: [
         target({ layer: 'core', sensitivity: 'internal' }),
         target({ uri: 'user://infra/b' }),
-        target({ uri: 'core://x', state: 'imported', layer: 'core', sensitivity: 'public' }),
+        importedTarget('user://infra/c'),
+        // 这次不同步的已导入目标不写，不算照原样写
+        importedTarget('user://infra/d'),
       ],
     })
-    expect(spotState(mixed, spot(0), none, none)).toBe('convertible')
+    const plan = planOf([mixed], { items: [updateOf(mixed, 'user://infra/c')] })
+    expect(spotState(plan, mixed, spot(0), none, none)).toBe('convertible')
+    expect(keptTargets(plan, mixed, none).map((t) => t.uri)).toEqual([
+      'user://infra/a',
+      'user://infra/c',
+    ])
+    const clean = node('clean', { targets: [target()] })
+    expect(keptTargets(planOf([clean]), clean, none)).toEqual([])
   })
 
-  it('标了机密的按机密算：本人的内部记忆标机密之后能换', () => {
+  it('标了机密的按机密算：本人的内部记忆标机密之后能换，也不再算照原样写', () => {
     const internal = node('internal', { targets: [target({ sensitivity: 'internal' })] })
     const plan = planOf([internal])
-    expect(spotState(internal, spot(0), new Set(['internal']), none)).toBe('convertible')
-    expect(selectionOf(plan, new Set(['internal']), none).convertPlaintext).toEqual([
+    const secret = new Set(['internal'])
+    expect(spotState(plan, internal, spot(0), secret, none)).toBe('convertible')
+    expect(keptTargets(plan, internal, secret)).toEqual([])
+    expect(selectionOf(plan, secret, none).convertPlaintext).toEqual([
       { source: 'infra://internal', index: 0 },
     ])
   })
 
-  it('都换成占位符时不再提醒标机密；有一处不换就照常提醒', () => {
+  it('每个要写的目标的每一处都写成占位符才算全部转存；有照原样写的目标就照常提醒', () => {
     const all = node('all', { plaintext: [spot(0)] })
-    expect(plaintextAllConverted(all, none, none, noUnconverted)).toBe(true)
-    expect(plaintextAllConverted(all, none, none, untick(all, spot(0)))).toBe(false)
-    expect(plaintextAllConverted(node('mixed'), none, none, noUnconverted)).toBe(false)
-    expect(plaintextAllConverted(node('empty', { plaintext: [] }), none, none, noUnconverted)).toBe(
-      false,
-    )
+    const plan = planOf([all])
+    expect(plaintextAllConverted(plan, all, none, none, noUnconverted)).toBe(true)
+    expect(plaintextAllConverted(plan, all, none, none, untick(all, spot(0)))).toBe(false)
+    const mixed = node('mixed')
+    expect(plaintextAllConverted(planOf([mixed]), mixed, none, none, noUnconverted)).toBe(false)
+    const empty = node('empty', { plaintext: [] })
+    expect(plaintextAllConverted(planOf([empty]), empty, none, none, noUnconverted)).toBe(false)
+    // 另一个新建目标放不进占位符
+    const blocked = node('blocked', {
+      plaintext: [spot(0)],
+      targets: [target(), target({ uri: 'core://x', layer: 'core', sensitivity: 'internal' })],
+    })
+    expect(plaintextAllConverted(planOf([blocked]), blocked, none, none, noUnconverted)).toBe(false)
+    // 同时同步一个已导入的目标
+    const synced = node('synced', {
+      plaintext: [spot(0)],
+      targets: [target(), importedTarget('user://infra/s')],
+    })
+    const syncPlan = planOf([synced], { items: [updateOf(synced, 'user://infra/s')] })
+    expect(plaintextAllConverted(syncPlan, synced, none, none, noUnconverted)).toBe(false)
+  })
+
+  it('照原样写、同步与这次不写入分开说；指向记忆详情只在那条记忆还在时', () => {
+    const template = descriptor.template!.content
+    expect(template).toContain('另有 {{ keptCount(node) }} 个写入位置保留明文')
+    expect(template).toMatch(/plaintextState\(node, spot\) === 'synced'/)
+    expect(template).toMatch(/plaintextState\(node, spot\) === 'unwritten'[^]*?本次不写入/)
+    expect(template).toContain('<Hint v-if="syncedStillThere(node)">')
+    const script = descriptor.scriptSetup!.content
+    expect(script).toMatch(/syncedStillThere[^]*?c\.uri !== null/)
   })
 
   it('信任提示的凭据算上这次换成占位符的那几处；取消勾选、不导入的不算', () => {

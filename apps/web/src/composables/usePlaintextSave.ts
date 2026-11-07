@@ -26,7 +26,7 @@ import {
   vaultFieldName,
   type ConvertDestination,
 } from '../plaintext'
-import { saveFlags, type PlaintextSpot, type SaveFlags, type SpotChoice } from '../plaintextSave'
+import { saveFlags, type GateOutcome, type PlaintextSpot, type SpotChoice } from '../plaintextSave'
 import { clipText } from '../text'
 
 // 保存记忆之前逐处处理新增的疑似明文：转存为凭据或不是凭据。转存的先建好凭据，再把正文里的值换成占位符，
@@ -42,14 +42,12 @@ export interface PlaintextSaveRequest {
   spots: PlaintextSpot[]
   // 服务端拒绝之后才打开的：界面上的判断和服务端有出入
   rejected: boolean
+  // 上一次弹窗里标了不是凭据、这份正文里还在的值（见 afterGate）：不再列出，保存时照旧带 ignorePlaintext
+  ignored?: string[]
 }
 
-// content 是处理过的正文，source 是算出它的那份正文：调用方的正文这时已经不是 source 时不能直接用
-export interface PlaintextSaveResult {
-  source: string
-  content: string
-  flags: SaveFlags
-}
+// 见 plaintextSave.ts 的 GateOutcome：调用方的正文这时已经不是 source 时，交给 afterGate 处理
+export type PlaintextSaveResult = GateOutcome
 
 export interface SpotRow {
   spot: PlaintextSpot
@@ -164,9 +162,11 @@ export function usePlaintextSave(
     const identifiers = await existing
     if (id !== runId) return
     matching.value = false
-    matches.value = found.matches
-    matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
-    unavailableConnections.value = found.unavailableConnections
+    if (found) {
+      matches.value = found.matches
+      matchFailure.value = found.failure ? readFailure(found.failure, '查找同值的凭据失败') : null
+      unavailableConnections.value = found.unavailableConnections
+    }
     taken.value = identifiers
     // 建议的标识避开已有的，也避开这次别处建议过的
     const suggested = [...identifiers]
@@ -318,11 +318,17 @@ export function usePlaintextSave(
           replacements.push({ value: row.spot.value!, placeholder: placeholderFor(row) })
         }
       }
+      const ignored = [
+        ...(req.ignored ?? []),
+        ...rows.value.flatMap((r) => (r.choice === 'ignore' && r.spot.value ? [r.spot.value] : [])),
+      ]
       const choices = rows.value.map((r) => r.choice!)
       onProceed({
         source: req.content,
         content: replaceValues(req.content, replacements),
-        flags: saveFlags(choices),
+        flags: saveFlags(ignored.length ? [...choices, 'ignore'] : choices),
+        replacements,
+        ignored,
       })
     } catch (err) {
       if (id !== runId) return
@@ -341,7 +347,13 @@ export function usePlaintextSave(
   function saveAnyway() {
     const req = request.value
     if (!req || !canSaveAnyway.value || busy.value) return
-    onProceed({ source: req.content, content: req.content, flags: saveFlags([], true) })
+    onProceed({
+      source: req.content,
+      content: req.content,
+      flags: saveFlags([], true),
+      replacements: [],
+      ignored: [],
+    })
   }
 
   // 已经起好标识的条目，不能再改标识
@@ -364,7 +376,6 @@ export function usePlaintextSave(
     selectedOf,
     rowProblem,
     placeholderFor,
-    itemKey,
     proceed,
     saveAnyway,
   }

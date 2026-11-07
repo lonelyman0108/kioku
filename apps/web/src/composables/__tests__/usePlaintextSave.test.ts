@@ -4,6 +4,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { createApp, effectScope, nextTick, ref, type EffectScope } from 'vue'
 
 import { ApiError } from '../../api/client'
+import { itemKey } from '../../plaintext'
 import { addedSpots } from '../../plaintextSave'
 import {
   usePlaintextSave,
@@ -133,11 +134,13 @@ describe('打开时', () => {
     const { save } = await start({}, false)
     expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
     save.saveAnyway()
-    expect(proceeded).toHaveBeenCalledWith({
-      source: CONTENT,
-      content: CONTENT,
-      flags: { allowPlaintext: true },
-    })
+    expect(proceeded).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: CONTENT,
+        content: CONTENT,
+        flags: { allowPlaintext: true },
+      }),
+    )
   })
 
   it('不能照样保存时只能逐处选不是凭据', async () => {
@@ -153,11 +156,13 @@ describe('打开时', () => {
     save.saveAnyway()
     expect(proceeded).not.toHaveBeenCalled()
     await save.proceed()
-    expect(proceeded).toHaveBeenCalledWith({
-      source: CONTENT,
-      content: CONTENT,
-      flags: { ignorePlaintext: true },
-    })
+    expect(proceeded).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: CONTENT,
+        content: CONTENT,
+        flags: { ignorePlaintext: true },
+      }),
+    )
   })
 
   it('占位符放不进保存之后的记忆时不能转存，也不查', async () => {
@@ -190,12 +195,14 @@ describe('保存', () => {
       name: '家里的 NAS',
       source: { kind: 'hosted', values: { token: 'abcd1234' } },
     })
-    expect(proceeded).toHaveBeenCalledWith({
-      source: CONTENT,
-      content:
-        '密码：{{cred:router#password}}\ntoken={{cred:infra-nas-token#token}}\n备用 {{cred:router#password}}，{{cred:hunter22#password}}',
-      flags: {},
-    })
+    expect(proceeded).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: CONTENT,
+        content:
+          '密码：{{cred:router#password}}\ntoken={{cred:infra-nas-token#token}}\n备用 {{cred:router#password}}，{{cred:hunter22#password}}',
+        flags: {},
+      }),
+    )
   })
 
   it('有不是凭据的：转存的照样换，带 ignorePlaintext', async () => {
@@ -205,6 +212,10 @@ describe('保存', () => {
     expect(fakes.api.createCredential).not.toHaveBeenCalled()
     const result = proceeded.mock.calls[0]![0]
     expect(result.flags).toEqual({ ignorePlaintext: true })
+    expect(result.ignored).toEqual(['abcd1234'])
+    expect(result.replacements).toEqual([
+      { value: 'hunter22', placeholder: '{{cred:router#password}}' },
+    ])
     expect(result.content).toContain('token=abcd1234')
     expect(result.content).not.toContain('密码：hunter22')
   })
@@ -212,11 +223,13 @@ describe('保存', () => {
   it('照样保存：正文原样，带 allowPlaintext', async () => {
     const { save } = await start()
     save.saveAnyway()
-    expect(proceeded).toHaveBeenCalledWith({
-      source: CONTENT,
-      content: CONTENT,
-      flags: { allowPlaintext: true },
-    })
+    expect(proceeded).toHaveBeenCalledWith(
+      expect.objectContaining({
+        source: CONTENT,
+        content: CONTENT,
+        flags: { allowPlaintext: true },
+      }),
+    )
   })
 
   it('尚未起标识的条目：在这里起标识（字段按条目推出），用建好的字段名', async () => {
@@ -235,7 +248,7 @@ describe('保存', () => {
     token.choice = 'convert'
     await nextTick()
     expect(save.selectedOf(token).kind).toBe('vault')
-    expect(save.vaultIdentifiers[save.itemKey(item)]).toBe('nas')
+    expect(save.vaultIdentifiers[itemKey(item)]).toBe('nas')
     expect(save.placeholderFor(token)).toBe('{{cred:nas#password}}')
     await save.proceed()
     expect(fakes.api.createCredential).toHaveBeenCalledWith('s1', {
@@ -306,7 +319,7 @@ describe('给条目起标识', () => {
     const { save } = await start()
     const token = save.rows.value[1]!
     token.choice = 'convert'
-    save.vaultIdentifiers[save.itemKey(item)] = 'nas'
+    save.vaultIdentifiers[itemKey(item)] = 'nas'
     await save.proceed()
     const name = fakes.api.createCredential.mock.calls[0]![1].name as string
     expect(name).toBe('名'.repeat(99))
@@ -320,8 +333,29 @@ describe('给条目起标识', () => {
     const { save } = await start()
     const token = save.rows.value[1]!
     token.choice = 'convert'
-    save.vaultIdentifiers[save.itemKey(item)] = 'router'
+    save.vaultIdentifiers[itemKey(item)] = 'router'
     await nextTick()
     expect(save.rowProblem(token)).toBe('标识、名称与字段名不能包含要转存的值')
+  })
+})
+
+describe('再开一次的弹窗', () => {
+  it('上一次标过不是凭据的带过来：不再列出，保存时照旧带 ignorePlaintext 并交回', async () => {
+    const { save } = await start({
+      content: '密码：qwerty99',
+      ignored: ['abcd1234'],
+    })
+    save.rows.value[0]!.choice = 'convert'
+    await save.proceed()
+    expect(proceeded.mock.calls[0]![0]).toMatchObject({
+      content: '密码：{{cred:infra-nas-password#password}}',
+      flags: { ignorePlaintext: true },
+      ignored: ['abcd1234'],
+    })
+  })
+
+  it('一个值都不用查（都通不过转存的规则）时不发请求', async () => {
+    await start({ content: '密码：abc' })
+    expect(fakes.api.matchCredentialValues).not.toHaveBeenCalled()
   })
 })

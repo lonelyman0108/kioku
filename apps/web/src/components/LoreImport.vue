@@ -31,6 +31,7 @@ import {
   planBlocker,
   plaintextAllConverted,
   plaintextKey,
+  keptTargets,
   pruneUnconverted,
   spotConverts,
   spotFingerprint,
@@ -258,9 +259,17 @@ function toggleConverted(
   unconvertedIds.value = next
 }
 const plaintextState = (node: LorePlanNode, spot: LorePlaintextSpot) =>
-  spotState(node, spot, secretIds.value, excludedIds.value)
+  plan.value ? spotState(plan.value, node, spot, secretIds.value, excludedIds.value) : 'unwritten'
 const converting = (node: LorePlanNode, spot: LorePlaintextSpot) =>
-  spotConverts(node, spot, secretIds.value, excludedIds.value, unconvertedIds.value)
+  !!plan.value &&
+  spotConverts(plan.value, node, spot, secretIds.value, excludedIds.value, unconvertedIds.value)
+// 这一处换成占位符时，同一节点里照原样写明文的目标有几个
+const keptCount = (node: LorePlanNode) =>
+  plan.value ? keptTargets(plan.value, node, secretIds.value).length : 0
+// 这次同步的已导入记忆还在 Kioku 里：才能指向记忆详情
+const syncedStillThere = (node: LorePlanNode) =>
+  !!plan.value &&
+  keptTargets(plan.value, node, secretIds.value).some((t) => t.current.some((c) => c.uri !== null))
 
 const nodes = computed(() => plan.value?.nodes ?? [])
 const plannedBoot = computed(() =>
@@ -317,7 +326,16 @@ function credentialNote(node: LorePlanNode): string | null {
   const { path } = node.credentialHints
   const content =
     node.credentialHints.content &&
-    !plaintextAllConverted(node, secretIds.value, excludedIds.value, unconvertedIds.value)
+    !(
+      plan.value &&
+      plaintextAllConverted(
+        plan.value,
+        node,
+        secretIds.value,
+        excludedIds.value,
+        unconvertedIds.value,
+      )
+    )
   if ((!path && !content) || node.targets.every((t) => secretNow(node, t))) return null
   const where = path ? '路径' : '正文'
   return secretSelectable(node)
@@ -694,10 +712,21 @@ const disclosureCut = computed(
                         凭据占位符只能放在本人、敏感级不低于私密的记忆中。
                       </Hint>
                     </span>
-                    <span v-else-if="plaintextState(node, spot) === 'imported'" class="text-muted">
-                      已导入，不转存<Hint>
-                        已导入的记忆按原样同步；可在记忆详情或待处理中转存为凭据。
+                    <span
+                      v-else-if="converting(node, spot) && keptCount(node)"
+                      class="text-warning"
+                    >
+                      另有 {{ keptCount(node) }} 个写入位置保留明文<Hint>
+                        这些位置放不进凭据占位符，或是同步已导入的记忆，正文照原样写入。
                       </Hint>
+                    </span>
+                    <span v-else-if="plaintextState(node, spot) === 'synced'" class="text-muted">
+                      已导入，按原样同步<Hint v-if="syncedStillThere(node)">
+                        同步后可在记忆详情或待处理中转存为凭据。
+                      </Hint>
+                    </span>
+                    <span v-else-if="plaintextState(node, spot) === 'unwritten'" class="text-muted">
+                      本次不写入
                     </span>
                   </template>
                   <span v-else class="text-muted">

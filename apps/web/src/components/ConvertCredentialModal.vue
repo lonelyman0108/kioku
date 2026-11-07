@@ -204,6 +204,8 @@ const candidateGroup = useId()
             :vault-identifiers="vaultIdentifiers"
             :hosted="form"
             @update:model-value="choose"
+            @vault-identifier="(key, identifier) => (vaultIdentifiers[key] = identifier)"
+            @hosted-field="(field, value) => (form[field] = value)"
           />
         </div>
 

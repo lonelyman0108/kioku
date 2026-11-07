@@ -117,6 +117,8 @@ const anyConvertible = computed(() => rows.value.some((row) => !save.convertBloc
                 :hosted="row.hosted"
                 :hosted-locked="row.created"
                 :locked-items="save.lockedItems.value"
+                @vault-identifier="(key, identifier) => (save.vaultIdentifiers[key] = identifier)"
+                @hosted-field="(field, value) => (row.hosted[field] = value)"
               />
               <p class="spot-effect">
                 将换成 <code>{{ save.placeholderFor(row) }}</code>

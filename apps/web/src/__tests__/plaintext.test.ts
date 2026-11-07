@@ -1,6 +1,12 @@
 import type { ConvertedToCredential } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
+import benchAgentSource from '../benchAgent.ts?raw'
+import convertModalSource from '../components/ConvertCredentialModal.vue?raw'
+import pickerSource from '../components/ConvertDestinationPicker.vue?raw'
+import saveModalSource from '../components/PlaintextSaveModal.vue?raw'
+import convertSource from '../composables/useConvertCredential.ts?raw'
+
 import {
   convertDestinations,
   convertLeftovers,
@@ -255,5 +261,23 @@ describe('转存之后还要告诉人的', () => {
 
   it('两样都有时都说', () => {
     expect(convertLeftovers(result(1, 1))).toHaveLength(2)
+  })
+})
+
+describe('共用的去处组件与清理', () => {
+  it('条目标识与托管凭据的三项由调用方所有：组件只读，改动经事件交回', () => {
+    expect(pickerSource).not.toMatch(/defineModel<[^>]*>\('(vaultIdentifiers|hosted)'/)
+    expect(pickerSource).toContain("emit('vaultIdentifier'")
+    expect(pickerSource).toContain("emit('hostedField'")
+    for (const caller of [convertModalSource, saveModalSource]) {
+      expect(caller).toContain('@vault-identifier=')
+      expect(caller).toContain('@hosted-field=')
+    }
+  })
+
+  it('测试台不再为测试转出 clipText；转存对话框不再返回用不上的 itemKey', () => {
+    expect(benchAgentSource).not.toMatch(/export \{ clipText \}/)
+    const returned = /return \{([^}]*)\}\s*\}\s*$/.exec(convertSource)![1]!
+    expect(returned).not.toContain('itemKey')
   })
 })
