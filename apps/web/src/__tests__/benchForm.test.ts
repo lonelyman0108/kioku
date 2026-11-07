@@ -23,7 +23,7 @@ import {
 } from '../benchForm'
 import toolList from './benchTools.fixture.json'
 
-// 真实的 tools/list 的快照：可空的 anyOf、type 数组、record、对象数组都在里面
+// 真实的 tools/list 的快照：可空的 anyOf、type 数组、record 都在里面；对象数组现在没有工具用，用自造的 schema 测
 const { tools } = BenchToolList.parse({ tools: toolList })
 const targets = callTargets(tools)
 const targetOf = (id: string) => targets.find((t) => t.id === id)!
@@ -172,9 +172,18 @@ describe('按 inputSchema 生成表单', () => {
       kind: 'json',
       placeholder: '{"字段名":""}',
     })
-    expect(fieldOf('kioku_credential_save', 'fields').placeholder).toBe(
-      '[{"name":"","source_field":""}]',
-    )
+    const [rows] = fieldsOf({
+      properties: {
+        rows: {
+          type: 'array',
+          items: {
+            type: 'object',
+            properties: { name: { type: 'string' }, source_field: { type: 'string' } },
+          },
+        },
+      },
+    })!
+    expect(rows).toMatchObject({ kind: 'json', placeholder: '[{"name":"","source_field":""}]' })
   })
 
   it('布尔与说不清的类型', () => {

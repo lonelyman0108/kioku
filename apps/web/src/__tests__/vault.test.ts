@@ -108,7 +108,7 @@ describe('连接', () => {
     ).toBe('已停用：有个人条目')
     expect(
       connectionStatusText(conn({ status: 'disabled', disabledReason: 'organization_role' })),
-    ).toBe('已停用：组织里看得到全部集合')
+    ).toBe('已停用：组织里可访问全部集合')
   })
 
   it('只有可用的连接列条目', () => {
