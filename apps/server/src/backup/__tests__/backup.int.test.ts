@@ -180,7 +180,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     // 忽略过明文提示的：哈希在记忆表上，要跟着恢复
     const dismissed = await write('POST', {
       uri: 'user://home/dismissed',
-      content: 'token = 分词器的说明',
+      content: 'token = tokenizer-notes',
     })
     expect(
       (

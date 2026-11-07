@@ -28,6 +28,7 @@ const ROUTER_PW = 'router-pw-9fK2-long'
 const NAS_PW = 'nas-secret-77Qx'
 const API_TOKEN = 'api-value-123-abc'
 const TOTP_SECRET = 'JBSWY3DPEHPK3PXP'
+const NAS_TOTP = 'KRSXG5CTMVRXEZLU'
 const HOSTED_PW = 'hosted-pw-correct-horse'
 
 describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
@@ -47,7 +48,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
   })
   const nasItem = vault.addItem({
     name: 'NAS',
-    values: { 'login.username': 'nas-admin', 'login.password': NAS_PW },
+    values: { 'login.username': 'nas-admin', 'login.password': NAS_PW, 'login.totp': NAS_TOTP },
   })
 
   beforeAll(async () => {
@@ -163,7 +164,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       const connection = await connect()
       const router = await bindRouter(connection.id)
       const before = vault.calls.items
-      const res = await matched([ROUTER_PW, NAS_PW, API_TOKEN, TOTP_SECRET])
+      const res = await matched([ROUTER_PW, NAS_PW, API_TOKEN, TOTP_SECRET, NAS_TOTP])
       // 一个连接一次同步取全部条目，不逐个取
       expect(vault.calls.items).toBe(before + 1)
       expect(res.items[0]).toEqual({
@@ -194,7 +195,9 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
           },
         ],
       })
+      // TOTP 的密钥：已对应的（路由器）与没起标识的（NAS）都不比
       expect(res.items[3]).toEqual({ credentials: [], vaultItems: [] })
+      expect(res.items[4]).toEqual({ credentials: [], vaultItems: [] })
       expect(res.unavailableConnections).toBe(0)
       expect(await accessEvents()).toBe(0)
     })
@@ -415,6 +418,7 @@ describe.skipIf(!testDatabaseUrl)('按值查找与转存的去处', () => {
       expect(res.credential.fields).toEqual([
         { name: 'username', itemField: 'login.username' },
         { name: 'password', itemField: 'login.password' },
+        { name: 'totp', itemField: 'login.totp' },
       ])
       expect((await rowOf(m.id)).content).toBe(NOTE('{{cred:nas#password}}'))
       expect(JSON.stringify(res)).not.toContain(NAS_PW)
