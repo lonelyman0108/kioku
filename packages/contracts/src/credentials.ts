@@ -1443,7 +1443,7 @@ export const VaultItemList = z.object({
 export type VaultItemList = z.infer<typeof VaultItemList>
 
 // 重新检查连接的结果：连接现在的状态，以及这次同步读到的集合（选去处时用）。
-// 同步失败时回 502（见 VaultConnection.lastError），停用的连接照样给出读到的集合
+// 同步失败时回 502（见 VaultConnection.lastError）；连接停用（同步时发现违规）或需要重新登录时，collections 为空
 export const VaultCheckResult = z.object({
   connection: VaultConnection,
   collections: z.array(VaultCollection),

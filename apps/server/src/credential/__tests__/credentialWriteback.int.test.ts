@@ -18,7 +18,7 @@ import type {
   VaultItemList,
 } from '@kioku/contracts'
 import { eq } from 'drizzle-orm'
-import { afterAll, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
+import { afterAll, afterEach, beforeAll, beforeEach, describe, expect, it, vi } from 'vitest'
 
 import { createApp } from '../../app'
 import { principalForKeyId } from '../../auth/middleware'
@@ -30,7 +30,7 @@ import { FAKE_COLLECTION, FAKE_ORG, fakeVault, type FakeVault } from '../../test
 import { bearer, bootstrap, FULL_SCOPES, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { credentialServiceForKey } from '../context'
 import { BENCH_VAULT_WRITE, credentialExpiry, CREDENTIAL_ATTENTION } from '../service'
-import { VaultConnections } from '../vault'
+import { observeRevisions, VaultConnections } from '../vault'
 import { MemoryService } from '../../memory/service'
 
 const EMAIL = 'agent@example.com'
@@ -53,6 +53,10 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
   })
   afterAll(async () => {
     await database?.close()
+  })
+  // 用例里替换的 record 等，失败时也要还原，免得带到下一个用例
+  afterEach(() => {
+    vi.restoreAllMocks()
   })
   beforeEach(async () => {
     await resetDatabase(database)
@@ -421,7 +425,8 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
         collectionName: 'Agent',
       })
       expect(vault.stored(consoleError.vaultItem!.itemId)).toBeDefined()
-      expect(consoleError.error).toContain('未建成凭据')
+      // 管理界面的错误体带着条目，文字只说为什么失败，界面自己说明条目留在哪里
+      expect(consoleError.error).toBe('标识已被占用或不可用：wifi')
 
       vault.state.beforeWrite = race('mail')
       const keyError = await failure(
@@ -1206,7 +1211,7 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       )
       spy.mockRestore()
       expect(err.vaultItem).toMatchObject({ itemName: '无线网络', collectionName: 'Agent' })
-      expect(err.error).toContain('未建成凭据')
+      expect(err.error).toBe('服务内部错误')
       expect(vault.stored(err.vaultItem!.itemId)).toBeDefined()
     })
 
@@ -1226,6 +1231,254 @@ describe.skipIf(!testDatabaseUrl)('写回密码库、到期与轮换', () => {
       expect(bound.storedIn).toEqual({ kind: 'vault', collectionName: 'Agent' })
       expect(vault.calls.snapshot).toBe(snapshots)
       expect(vault.calls.item).toBe(items + 1)
+    })
+  })
+  describe('整体审查之后补的', () => {
+    const seed = async () => {
+      await withDestination()
+      return ok<KeyCreatedCredential>(
+        await keyCreate({
+          identifier: 'nas',
+          name: 'NAS',
+          values: { username: 'admin', password: 'old-pass' },
+        }),
+        201,
+      )
+    }
+
+    it('冲突之后重读到的修改时间不管新旧都记下：服务器存下的比写入响应「旧」时，重新读取后照样能改', async () => {
+      const created = await seed()
+      const stored = (await row(created.id)).vaultRevision!
+      // 像 MySQL 去掉小数秒那样：Kioku 记下的比服务器存下的晚
+      const later = new Date(Date.parse(stored) + 500).toISOString()
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.update(credentials).set({ vaultRevision: later }).where(eq(credentials.id, created.id)),
+      )
+      const conflict = await failure(
+        await keyUpdate({ identifier: 'nas', expectedVersion: 1, values: { password: 'p2' } }),
+        409,
+      )
+      expect(conflict.reason).toBe('item_conflict')
+      expect(await row(created.id)).toMatchObject({ vaultRevision: stored, version: 2 })
+      await ok(
+        await keyUpdate({ identifier: 'nas', expectedVersion: 2, values: { password: 'p2' } }),
+      )
+    })
+
+    it('取用停在记连接之后时同步插进来：同步先等连接、不先占凭据，两边都能做完', async () => {
+      const connection = await connect()
+      const itemId = vault.addItem({ name: 'r', values: { 'login.password': 'r1' } })
+      await ok(
+        await asMember('POST', '/credentials', {
+          identifier: 'router',
+          name: '路由器',
+          source: { kind: 'vault', connectionId: connection.id, itemId },
+        }),
+        201,
+      )
+      // 取用的第三段每次都要改连接这一行（最近检查已经过了一分钟），条目也改过，两边都要改凭据这一行
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(vaultConnections)
+          .set({ lastCheckedAt: new Date(Date.now() - 3_600_000) })
+          .where(eq(vaultConnections.id, connection.id)),
+      )
+      vault.setItemValues(itemId, { 'login.password': 'r2' })
+      let reached!: () => void
+      const atGate = new Promise<void>((resolve) => (reached = resolve))
+      let release!: () => void
+      const gate = new Promise<void>((resolve) => (release = resolve))
+      const original = VaultConnections.prototype.record
+      // 取用记下连接之后停住：它占着连接这一行，还没去改凭据
+      vi.spyOn(VaultConnections.prototype, 'record').mockImplementationOnce(async function (
+        this: VaultConnections,
+        ...args
+      ) {
+        await original.apply(this, args)
+        reached()
+        await gate
+      })
+      const use = asKey('GET', '/credentials?identifier=router')
+      await atGate
+      const items = asMember('GET', `/vault-connections/${connection.id}/items`)
+      // 让同步走到等锁那一步，再放开取用
+      await new Promise((resolve) => setTimeout(resolve, 300))
+      release()
+      const [used, listed] = await Promise.all([use, items])
+      expect([used.status, listed.status]).toEqual([200, 200])
+    })
+
+    it('列条目与取用并发：先锁连接、再锁凭据，不会互相等待成死锁', async () => {
+      const connection = await connect()
+      const ids = ['a', 'b', 'c'].map((n) =>
+        vault.addItem({ name: n, values: { 'login.password': `${n}-1` } }),
+      )
+      for (const [i, itemId] of ids.entries()) {
+        await ok(
+          await asMember('POST', '/credentials', {
+            identifier: `c${i}`,
+            name: `c${i}`,
+            source: { kind: 'vault', connectionId: connection.id, itemId },
+          }),
+          201,
+        )
+      }
+      for (let round = 0; round < 5; round++) {
+        for (const itemId of ids) vault.setItemValues(itemId, { 'login.password': `v${round}` })
+        const results = await Promise.all([
+          asMember('GET', `/vault-connections/${connection.id}/items`),
+          asKey('GET', '/credentials?identifier=c0'),
+          asKey('GET', '/credentials?identifier=c1'),
+          asMember('GET', `/vault-connections/${connection.id}/items`),
+          asKey('GET', '/credentials?identifier=c2'),
+        ])
+        expect(results.map((r) => r.status)).toEqual([200, 200, 200, 200, 200])
+      }
+    })
+
+    it('并发的读取先看到了自己写入的修改时间：照常整个改，不再加版本，也不报 409', async () => {
+      const created = await seed()
+      const itemId = (await row(created.id)).vaultItemId!
+      const connectionId = (await row(created.id)).vaultConnectionId!
+      const original = VaultConnections.prototype.record
+      // 记写回结果之前，并发的读取看到了这次写入之后的条目
+      const spy = vi
+        .spyOn(VaultConnections.prototype, 'record')
+        .mockImplementationOnce(async function (this: VaultConnections, tx, ...rest) {
+          await original.call(this, tx, ...rest)
+          await observeRevisions(tx, connectionId, [
+            { id: itemId, revisionDate: vault.stored(itemId)!.revisionDate },
+          ])
+        })
+      const updated = await ok<CredentialSummary>(
+        await keyUpdate({
+          identifier: 'nas',
+          expectedVersion: 1,
+          name: 'NAS 新名',
+          values: { password: 'new-pass' },
+        }),
+      )
+      spy.mockRestore()
+      expect(updated).toMatchObject({ version: 2, name: 'NAS 新名' })
+      expect((await events(created.id))[0]).toMatchObject({
+        type: 'update',
+        changes: ['name', 'values'],
+      })
+    })
+
+    it('kioku run 一次取几条时按凭据 id 的顺序记下，不按调用方给的顺序', async () => {
+      const first = await connect()
+      const second = await connect('second@example.com')
+      const a = vault.addItem({ name: 'a', values: { 'login.password': 'a' } })
+      const b = vault.addItem({ name: 'b', values: { 'login.password': 'b' } })
+      const ca = await ok<CreatedCredential>(
+        await asMember('POST', '/credentials', {
+          identifier: 'a',
+          name: 'a',
+          source: { kind: 'vault', connectionId: first.id, itemId: a },
+        }),
+        201,
+      )
+      const cb = await ok<CreatedCredential>(
+        await asMember('POST', '/credentials', {
+          identifier: 'b',
+          name: 'b',
+          source: { kind: 'vault', connectionId: second.id, itemId: b },
+        }),
+        201,
+      )
+      const order: string[] = []
+      const original = VaultConnections.prototype.record
+      const spy = vi.spyOn(VaultConnections.prototype, 'record').mockImplementation(async function (
+        this: VaultConnections,
+        tx,
+        connection,
+        ...rest
+      ) {
+        order.push(connection.id)
+        return original.call(this, tx, connection, ...rest)
+      })
+      const expected = [ca, cb]
+        .sort((x, y) => x.id.localeCompare(y.id))
+        .map((c) => (c.id === ca.id ? first.id : second.id))
+      for (const refs of [
+        ['a', 'b'],
+        ['b', 'a'],
+      ]) {
+        order.length = 0
+        await ok(
+          await asKey('POST', '/credentials/resolve', {
+            refs: refs.map((identifier) => ({ identifier, field: 'password' })),
+          }),
+        )
+        expect(order).toEqual(expected)
+      }
+      spy.mockRestore()
+    })
+
+    it('kioku_credential 给的版本号是记下修改时间之后的，拿着它就能存', async () => {
+      const connection = await connect()
+      const itemId = vault.addItem({ name: 'r', values: { 'login.password': 'r1' } })
+      await ok(
+        await asMember('POST', '/credentials', {
+          identifier: 'router',
+          name: '路由器',
+          source: { kind: 'vault', connectionId: connection.id, itemId },
+        }),
+        201,
+      )
+      vault.setItemValues(itemId, { 'login.password': 'r2' })
+      const used = await ok<CredentialAccess>(await asKey('GET', '/credentials?identifier=router'))
+      expect(used.credential.version).toBe(2)
+      await ok(
+        await keyUpdate({
+          identifier: 'router',
+          expectedVersion: used.credential.version,
+          name: '路由器 2',
+        }),
+      )
+    })
+
+    it('字段对应按条目的类型核对；写回时客户端仍报类型不符的，按写入的错误 400、不改连接', async () => {
+      const connection = await connect()
+      const itemId = vault.addItem({ name: '笔记', type: 'note', values: { notes: 'n' } })
+      const bound = await ok<CreatedCredential>(
+        await asMember('POST', '/credentials', {
+          identifier: 'note',
+          name: '笔记',
+          source: { kind: 'vault', connectionId: connection.id, itemId },
+        }),
+        201,
+      )
+      expect(
+        (
+          await failure(
+            await asMember('PATCH', `/credentials/${bound.id}`, {
+              expectedVersion: 1,
+              fields: [{ name: 'password', itemField: 'login.password' }],
+            }),
+            400,
+          )
+        ).error,
+      ).toContain('只在登录条目里有')
+      // 绕过核对直接写进库：写回时客户端拒绝
+      await withSpace(database.db, ws.spaceId, (tx) =>
+        tx
+          .update(credentials)
+          .set({ fields: [{ name: 'password', itemField: 'login.password' }] })
+          .where(eq(credentials.id, bound.id)),
+      )
+      const err = await failure(
+        await keyUpdate({ identifier: 'note', expectedVersion: 1, values: { password: 'x' } }),
+        400,
+      )
+      expect(err.error).toBe(
+        '无法写回密码库：字段对应和条目的类型不符，请改字段对应，或到密码库里修改',
+      )
+      expect(await connectionRow(connection.id)).toMatchObject({
+        status: 'ok',
+        lastErrorKind: null,
+      })
     })
   })
 })

@@ -133,7 +133,8 @@ type CredentialChange =
 const DAY_MS = 24 * 60 * 60 * 1000
 
 // 到期的状态（CredentialExpiry）：到期时间那一刻起算已到期，离到期不到 7 天（含正好 7 天）算快到期。
-// SQL 的一份是 CREDENTIAL_ATTENTION 里的到期部分，两边由 credentialExpiry.int.test.ts 比对
+// SQL 的一份是 CREDENTIAL_ATTENTION 里的到期部分，两边由 credentialWriteback.int.test.ts 比对。
+// 两边都按固定的 7×24 小时算：SQL 写成小时数，不用按会话时区的日历加的 '7 days'（跨夏令时会差一小时）
 export function credentialExpiry(expiresAt: Date | null, now: number): CredentialExpiry | null {
   if (!expiresAt) return null
   const left = expiresAt.getTime() - now
@@ -142,7 +143,7 @@ export function credentialExpiry(expiresAt: Date | null, now: number): Credentia
 }
 
 // 待处理的「凭据」一类：快到期、已到期或标了需要轮换。调用方另外限定所有者与没删除
-export const CREDENTIAL_ATTENTION: SQL = sql`(${credentials.rotationRequestedAt} is not null or ${credentials.expiresAt} <= now() + interval '${sql.raw(String(CREDENTIAL_EXPIRING_DAYS))} days')`
+export const CREDENTIAL_ATTENTION: SQL = sql`(${credentials.rotationRequestedAt} is not null or ${credentials.expiresAt} <= now() + interval '${sql.raw(String(CREDENTIAL_EXPIRING_DAYS * 24))} hours')`
 
 // 交出值时记下的值版本：托管的是值版本号，密码库的是读到的条目修改时间
 type ValueRevision = { valueVersion: number } | { itemRevision: string }
@@ -480,6 +481,11 @@ export class CredentialService {
     return row
   }
 
+  private async byId(tx: Tx, id: string): Promise<CredentialRow | undefined> {
+    const [row] = await tx.select().from(credentials).where(eq(credentials.id, id))
+    return row
+  }
+
   private async liveByIdentifier(tx: Tx, identifier: string): Promise<CredentialRow | undefined> {
     const [row] = await tx
       .select()
@@ -672,7 +678,12 @@ export class CredentialService {
     if (!changes.length) return before
     const [row] = await tx
       .update(credentials)
-      .set({ ...set, version: sql`${credentials.version} + 1`, updatedAt: new Date() })
+      .set({
+        ...set,
+        // 写回的值已经被并发的读取当作一次改值、加过版本（见 recordWriteBack）：不再加
+        ...(written?.counted ? {} : { version: sql`${credentials.version} + 1` }),
+        updatedAt: new Date(),
+      })
       .where(
         and(
           eq(credentials.id, before.id),
@@ -1219,11 +1230,12 @@ export class CredentialService {
     const reason = err instanceof MemoryError ? err.write?.reason : undefined
     return new MemoryError(
       status,
-      // 条目与集合的名称是密码库里的明文，经 MCP 会交给模型：压成单行
-      `${text}。条目「${inlineText(orphan.itemName)}」已写进集合「${inlineText(orphan.collectionName)}」，未建成凭据：` +
-        (this.viaKey
-          ? '请所有者在管理界面给它起标识，或到密码库里删除，不要原样重试。'
-          : '可以在凭据页给它起标识，或到密码库里删除。'),
+      // 管理界面的错误体带着 vaultItem，界面自己说明条目留在哪里、怎么处理，这里只说为什么失败；
+      // Key 的没有 vaultItem，写在文字里。条目与集合的名称是密码库里的明文，经 MCP 会交给模型：压成单行
+      this.viaKey
+        ? `${text}。条目「${inlineText(orphan.itemName)}」已写进集合「${inlineText(orphan.collectionName)}」，未建成凭据：` +
+            '请所有者在管理界面给它起标识，或到密码库里删除，不要原样重试。'
+        : text,
       undefined,
       {
         ...(reason ? { reason } : {}),
@@ -1278,15 +1290,19 @@ export class CredentialService {
       ...(reread ? [{ connection: reread.connection, session: reread.used }] : []),
     ]
     const outcome = await this.run(async (tx) => {
-      // 写入本身的错误（只读、冲突、值太长）不在 CONNECTION_ERRORS 里，record 不改连接
-      await this.vault.record(tx, call.connection, call.outcome, call.used)
+      // 写入本身的错误（只读、冲突、值太长）不在 CONNECTION_ERRORS 里，record 不改连接；
+      // 写入时的 unsupported_format 是字段和条目的类型不符，也不改连接
+      await this.vault.record(tx, call.connection, writeOutcome(call.outcome), call.used)
       // 为了期望的修改时间第一次读到的条目：照「第一次看到」的规则记下，写入成不成功都记，下次不用再读
       if (before.vaultRevision === null && expected !== null) {
         await observeRevisions(tx, call.connection.id, [{ id: itemId, revisionDate: expected }])
       }
       if (reread) {
         await this.vault.record(tx, reread.connection, reread.outcome, reread.used)
-        if (reread.error === null) await observeRevisions(tx, call.connection.id, [reread.value!])
+        // 刚从服务器读到的，以它为准：不管新旧都记下（见 observeRevisions 的 fresh）
+        if (reread.error === null) {
+          await observeRevisions(tx, call.connection.id, [reread.value!], { fresh: true })
+        }
       }
       if (call.error !== null) return null
       return this.recordWriteBack(tx, before, input, {
@@ -1298,6 +1314,39 @@ export class CredentialService {
     if (!outcome) throw writeFailure(call.error, 'update')
     if (outcome.error) throw outcome.error
     return outcome.row
+  }
+
+  // 改字段对应之前按条目的类型核对：login.* 只能对应到登录条目（别的类型没有用户名、密码与 TOTP），
+  // 否则之后写回时客户端会拒绝。连接可用时读一次条目（事务外，结果照常 vault.record）；
+  // 连接不可用、读不到条目时不拦，取用与写回时照常按条目的状态报
+  private async checkFieldTypes(
+    before: CredentialRow,
+    fields: readonly CredentialField[],
+  ): Promise<void> {
+    if (!this.ctx.masterKey || this.ctx.bench) return
+    const sessions: PreparedSession[] = []
+    const prepared = await this.run(async (tx) => {
+      const connection = await this.vault.load(tx, before.vaultConnectionId!)
+      if (!connection || connection.status !== 'ok' || !connection.ciphertext) return null
+      const p = { connection, session: this.openSession(connection) }
+      sessions.push(p)
+      return p
+    }).catch(this.releasingOnError(sessions))
+    if (!prepared) return
+    const call = await this.vaultCall(prepared, (session) => session.item(before.vaultItemId!))
+    // 只核对类型，不记修改时间：记下变了的修改时间会让版本加一，这次修改就因为版本 409 了
+    await this.run((tx) => this.vault.record(tx, call.connection, call.outcome, call.used)).catch(
+      this.releasingOnError([{ connection: call.connection, session: call.used }]),
+    )
+    if (call.error !== null) return
+    const item = call.value!
+    const wrong = fields.find((f) => f.itemField?.startsWith('login.') && item.type !== 'login')
+    if (wrong) {
+      throw new MemoryError(
+        400,
+        `字段 ${wrong.name} 对应的 ${wrong.itemField} 只在登录条目里有，这个条目不是登录条目`,
+      )
+    }
   }
 
   // 写回已经落进密码库：值不能再因为版本失败。锁住这一行重读：
@@ -1320,6 +1369,23 @@ export class CredentialService {
     if (!current) return { row: before, error: new MemoryError(409, WRITTEN_BUT_GONE) }
     if (!current.deletedAt && current.version === before.version) {
       return { row: await this.modify(tx, current, input, written) }
+    }
+    // 版本只多了一次、记下的修改时间正是这次写入的：是并发的读取（界面重读条目、agent 取用）先看到了
+    // 自己的写入，不是别人的改动。照常整个改，不再加版本，也不报 409
+    if (
+      !current.deletedAt &&
+      current.version === before.version + 1 &&
+      current.vaultRevision === written.item.revisionDate &&
+      written.item.revisionDate !== written.expected
+    ) {
+      return {
+        row: await this.modify(
+          tx,
+          current,
+          { ...input, expectedVersion: current.version },
+          { ...written, counted: true },
+        ),
+      }
     }
     const row = await this.recordWrittenValues(tx, current, written)
     return current.deletedAt
@@ -1833,6 +1899,10 @@ export class CredentialService {
       const before = await this.run(find)
       if (before.source === 'vault') return this.writeBack(find, { ...input, values })
     }
+    if (input.fields !== undefined && input.values === undefined) {
+      const before = await this.run(find)
+      if (before.source === 'vault') await this.checkFieldTypes(before, input.fields)
+    }
     return this.run(async (tx) => {
       const before = await find(tx)
       // 读到时还是托管、现在却是密码库的不会发生（来源不能改），这里照样拦下
@@ -2086,10 +2156,16 @@ export class CredentialService {
     }).catch(this.releasingOnError(sessions))
     if ('error' in first) throw first.error
     const values = await this.deliver(first.row, first.fields, via, purpose, first.prepared)
+    // 取条目之后记下的修改时间可能刚让版本加了一（值在别处改过）：给 agent 的版本号用记下之后的，
+    // 否则它拿着旧版本号去存，第一次必然 409。测试台不取条目，版本不会变
+    const row =
+      first.prepared.kind === 'vault'
+        ? ((await this.run((tx) => this.byId(tx, first.row.id))) ?? first.row)
+        : first.row
     return {
-      credential: this.summary(first.row),
+      credential: this.summary(row),
       values,
-      notice: expiredNotice(first.row) + CREDENTIAL_NOTICE,
+      notice: expiredNotice(row) + CREDENTIAL_NOTICE,
     }
   }
 
@@ -2236,8 +2312,13 @@ export class CredentialService {
       ...unfetched,
     ]
     // 取过的都更新连接。有取不到的时只给它记失败，取到了却没交出的不记；没轮到取的只确认连接状态
+    // 按凭据 id 的顺序 settle：一个事务里锁凭据行的顺序不由调用方给的 refs 决定，
+    // 两个 kioku run 一个给 [a, b]、一个给 [b, a] 时才不会互相等待成死锁
     const settleFetched = async (tx: Tx) => {
-      for (const [i, f] of fetched) {
+      const ordered = [...fetched].sort(([a], [b]) =>
+        planned[a]!.row.id.localeCompare(planned[b]!.row.id),
+      )
+      for (const [i, f] of ordered) {
         const { row, fields } = planned[i]!
         await this.settle(tx, row, fields, via, purpose, f, failed === null || i === failed)
       }
@@ -2585,6 +2666,8 @@ export function writeFailure(err: unknown, action: 'create' | 'update'): unknown
         undefined,
         { reason: 'read_only' },
       )
+    case 'unsupported_format':
+      return new MemoryError(400, `${head}${FIELD_TYPE_MISMATCH}`)
     case 'value_too_long':
       return new MemoryError(
         400,
@@ -2597,6 +2680,12 @@ export function writeFailure(err: unknown, action: 'create' | 'update'): unknown
   }
   const reason = vaultReason(err.kind)
   return new MemoryError(reasonStatus(reason), `${head}${CREDENTIAL_ACCESS_REASON_NAMES[reason]}`)
+}
+
+// 写入时客户端报 unsupported_format：要写的字段和条目的类型不符（例如往安全笔记里写密码），是这次写入的问题，
+// 不是连接认不出密码库的内容，不记进连接的最近错误
+function writeOutcome(outcome: VaultOutcome | null): VaultOutcome | null {
+  return outcome?.kind === 'error' && outcome.error === 'unsupported_format' ? null : outcome
 }
 
 const revisionDate = (revision: string): Date | null => {
@@ -2653,8 +2742,9 @@ function itemCollectionName(
   return (preferred ?? [...names].sort((a, b) => a.name.localeCompare(b.name))[0])?.name ?? ''
 }
 
-// 写回的结果：写回之后的条目、改了的字段与发给密码库的期望修改时间
-type Written = { item: VaultItem; fields: string[]; expected: string }
+// 写回的结果：写回之后的条目、改了的字段与发给密码库的期望修改时间。
+// counted：并发的读取已经看到这次写入的修改时间、为它加过版本，记下时不再加
+type Written = { item: VaultItem; fields: string[]; expected: string; counted?: boolean }
 
 // 写回之后要记下的修改时间：和 observeRevisions 一样不往回改，库里已经是更新的（并发的取用看到了别处的又一次修改）就不动
 function writtenRevision(
@@ -2669,3 +2759,5 @@ function writtenRevision(
 const WRITTEN_BUT_STALE = '值已写进密码库，其余改动因凭据已在别处修改而没有保存，请重新读取后再改'
 const WRITTEN_BUT_DELETED = '值已写进密码库，但凭据在此期间被删除'
 const WRITTEN_BUT_GONE = '值已写进密码库，但凭据在此期间被永久清除'
+
+const FIELD_TYPE_MISMATCH = '字段对应和条目的类型不符，请改字段对应，或到密码库里修改'
