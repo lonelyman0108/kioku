@@ -157,7 +157,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       description: '访客用',
       source: 'hosted',
       appIds: null,
-      fields: [{ name: 'password', sourceField: null }],
+      fields: [{ name: 'password', itemField: null }],
       // 提交之后读的：这条记忆的引用已经算上了
       referenceCount: 1,
     })
@@ -734,7 +734,7 @@ describe.skipIf(!testDatabaseUrl)('转存为凭据', () => {
       const hers = await remember({ uri: 'user://notes/eve', content: BODY }, editor.cookie)
       const res = await convert(hers, {}, editor.cookie)
       expect(res.status).toBe(403)
-      expect(((await res.json()) as { error: string }).error).toContain('机密')
+      expect(((await res.json()) as { error: string }).error).toContain('空间所有者')
       expect((await rowOf(hers.id)).content).toBe(BODY)
 
       const mine = await seedNote()

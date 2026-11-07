@@ -14,13 +14,14 @@ import memoryListView from '../components/MemoryListView.vue?raw'
 import memoryRootPanel from '../components/MemoryRootPanel.vue?raw'
 import personaDetail from '../components/PersonaDetail.vue?raw'
 import personaPanel from '../components/PersonaPanel.vue?raw'
-import providerFormModal from '../components/ProviderFormModal.vue?raw'
 import MemoryRow from '../components/strata/MemoryRow.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import activityPage from '../pages/ActivityPage.vue?raw'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
 import subjectsPage from '../components/ContactList.vue?raw'
 import subjectDetailPage from '../pages/ContactDetailPage.vue?raw'
+import vaultConnectionPanel from '../components/VaultConnectionPanel.vue?raw'
+import vaultLoginModal from '../components/VaultLoginModal.vue?raw'
 
 // 人格、联系人、凭据、变更记录。长相改过，确认框的后果和值不进缓存这些约束不能跟着丢
 
@@ -290,25 +291,51 @@ describe('改版之后的约束', () => {
 
   it('凭据：删除与恢复的说明都在', () => {
     expect(credentialsPage).toContain('引用它的占位符将无法取值')
-    expect(credentialsPage).toContain('曾绑定它的已删除凭据恢复后需重新绑定')
-    expect(credentialsPage).toContain('已删除的凭据源无法恢复')
     expect(credentialsPage).toContain('deletionNotice(retention)')
+  })
+
+  it('密码库：断开要确认，确认框写明后果；断开按钮是唯一的砖红', () => {
+    expect(vaultConnectionPanel).toContain('<p class="text-sm">{{ disconnectNotice(c) }}</p>')
+    expect(vaultConnectionPanel).toContain('@click="confirmingDisconnect = true"')
+    expect(vaultConnectionPanel).toContain(
+      '<UButton color="error" :loading="busy" @click="disconnect">',
+    )
+    expect(vaultConnectionPanel.match(/color="error"/g)).toHaveLength(2)
+  })
+
+  it('密码库：条目列表只在可用的连接上读，起了标识的跳到凭据', () => {
+    expect(vaultConnectionPanel).toContain(
+      'enabled: computed(() => props.canManage && itemsAvailable(c.value))',
+    )
+    expect(vaultConnectionPanel).toContain(
+      '@click="emit(\'open-credential\', row.item.credential.id)"',
+    )
+    expect(vaultConnectionPanel).toContain('@click="emit(\'name-item\', row.item)"')
+  })
+
+  it('连接密码库：主密码输入框不让浏览器记住，专用账号的说明放在提示层', () => {
+    expect(vaultLoginModal).toMatch(
+      /v-model="form\.masterPassword"[^>]*type="password"\s+autocomplete="off"/,
+    )
+    expect(vaultLoginModal).toContain('仅接受专用账号。<Hint>')
+    expect(vaultLoginModal).not.toContain('localStorage')
+    expect(vaultLoginModal).not.toContain('useQuery')
   })
 })
 
 describe('凭据的弹窗', () => {
-  it('禁用的「外部凭据源」只淡化圆钮和名称，下面不能选的原因用正常的次要文字色', () => {
-    const external = /label: '外部凭据源',[^]*?\n {2}\},/.exec(credentialFormModal)![0]
-    expect(external).toContain('disabled: !props.providers.length')
-    expect(external).toContain("item: 'opacity-100'")
-    expect(external).not.toMatch(/description: '[^']*opacity/)
+  // 连接密码库的提示叫 hint：刚打开的空表单不提示，有失败原因时只显示失败原因
+  it.each([
+    ['新建凭据', credentialFormModal, 'problem'],
+    ['连接密码库', vaultLoginModal, 'hint'],
+  ])('%s：底部「为什么不能提交」的提示是 14px 的正文', (name, source, variable) => {
+    expect(source, name).toContain(`<span v-if="${variable}" class="mr-auto text-sm text-muted">`)
+    expect(source, name).not.toContain(`text-xs text-muted">{{ ${variable} }}`)
   })
 
-  it.each([
-    ['新建凭据', credentialFormModal],
-    ['凭据源', providerFormModal],
-  ])('%s：底部「为什么不能提交」的提示是 14px 的正文', (name, source) => {
-    expect(source, name).toContain('<span v-if="problem" class="mr-auto text-sm text-muted">')
-    expect(source, name).not.toContain('text-xs text-muted">{{ problem }}')
+  it('连接密码库：什么时候提示由 useVaultLogin 决定，弹窗只负责显示', () => {
+    expect(vaultLoginModal).toMatch(/const \{[^}]*\bhint\b[^}]*\} =\s*useVaultLogin\(/)
+    expect(vaultLoginModal).not.toContain('const hint')
+    expect(vaultLoginModal).not.toContain('edited')
   })
 })

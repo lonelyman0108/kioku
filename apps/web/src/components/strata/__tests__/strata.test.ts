@@ -667,6 +667,7 @@ describe('Key 的签发范围换算成格子', () => {
     writeLayers: ['user', 'subject'],
     maxSensitivity: 'internal',
     admin: false,
+    credentials: 'none' as const,
   }
   const at = (rows: ReturnType<typeof issuedScopeRows>, layer: Layer, sensitivity: string) =>
     rows.find((r) => r.layer === layer)!.cells.find((c) => c.sensitivity === sensitivity)!
@@ -735,6 +736,7 @@ describe('岩芯', () => {
     writeLayers: ['user'],
     maxSensitivity: 'private',
     admin: false,
+    credentials: 'none' as const,
   }
 
   it('四列铺满宽度，六条带铺满高度，一共 24 格', () => {

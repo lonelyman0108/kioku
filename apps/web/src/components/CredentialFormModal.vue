@@ -7,25 +7,28 @@ import {
   UpdateCredentialRequest,
   type AppInfo,
   type ConsoleCredential,
-  type CredentialProvider,
-  type CredentialSource,
-  type CredentialSourceUpdate,
+  type VaultItemSummary,
 } from '@kioku/contracts'
+import { useQuery } from '@tanstack/vue-query'
 import { computed, reactive, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { useSession } from '../composables/useSession'
 import { icons } from '../icons'
-import { providerKindLabels } from '../labels'
+import { itemFieldLabel, itemsAvailable, vaultCredentialDraft } from '../vault'
 import Hint from './Hint.vue'
 
-// 新建与修改共用。修改时打开的那一刻记下这一版：提交用它的版本号，期间别处改过就返回冲突
+// 新建托管凭据、给密码库条目起标识、修改两种凭据共用。修改时打开的那一刻记下这一版：
+// 提交用它的版本号，期间别处改过就返回冲突。来源不能改：托管的改值，密码库的改字段对应
 const props = defineProps<{
   spaceId: string
   credential: ConsoleCredential | null
-  providers: CredentialProvider[]
+  // 起标识时的条目与它所在的连接；新建托管凭据与修改时为 null
+  vaultItem: { connectionId: string; item: VaultItemSummary } | null
   apps: AppInfo[]
+  // 已有的标识，起标识时建议的标识避开它们
+  identifiers: readonly string[]
 }>()
 const open = defineModel<boolean>('open', { required: true })
 // 事件带上提交时的空间：保存期间切换了空间，页面不能把结果写进新空间
@@ -43,26 +46,25 @@ interface HostedRow {
   existing: boolean
   removed: boolean
 }
-interface ExternalRow {
+// 密码库的一行：凭据里的字段名对应条目里的哪个字段
+interface VaultRow {
   key: number
   name: string
-  sourceField: string
+  itemField: string
 }
 
 let nextKey = 0
 const origin = ref<ConsoleCredential | null>(null)
+const target = ref<{ connectionId: string; item: VaultItemSummary } | null>(null)
 const form = reactive({
   identifier: '',
   name: '',
   description: '',
-  kind: 'hosted' as CredentialSource,
-  providerId: undefined as string | undefined,
-  location: '',
   restrict: false,
   appIds: [] as string[],
 })
 const hostedRows = ref<HostedRow[]>([])
-const externalRows = ref<ExternalRow[]>([])
+const vaultRows = ref<VaultRow[]>([])
 
 const hostedRow = (name = '', existing = false): HostedRow => ({
   key: nextKey++,
@@ -71,30 +73,32 @@ const hostedRow = (name = '', existing = false): HostedRow => ({
   existing,
   removed: false,
 })
-const externalRow = (name = '', sourceField = ''): ExternalRow => ({
+const vaultRow = (name: string, itemField: string): VaultRow => ({
   key: nextKey++,
   name,
-  sourceField,
+  itemField,
 })
 
+const editing = computed(() => origin.value !== null)
+const isVault = computed(() =>
+  origin.value ? origin.value.source === 'vault' : target.value !== null,
+)
+
 watch(open, (isOpen) => {
-  if (!isOpen) return
+  if (!isOpen) {
+    // 关掉时清掉填过的值
+    for (const row of hostedRows.value) row.value = ''
+    return
+  }
   const c = props.credential
+  const item = c ? null : props.vaultItem
+  const draft = item ? vaultCredentialDraft(item.item, props.identifiers) : null
   origin.value = c
+  target.value = item
   Object.assign(form, {
-    identifier: c?.identifier ?? '',
-    name: c?.name ?? '',
+    identifier: draft?.identifier ?? '',
+    name: c?.name ?? draft?.name ?? '',
     description: c?.description ?? '',
-    kind: c?.source ?? 'hosted',
-    // 新建时只有一个凭据源就直接选上它
-    providerId: c
-      ? c.provider && !c.provider.deleted
-        ? c.provider.id
-        : undefined
-      : props.providers.length === 1
-        ? props.providers[0]!.id
-        : undefined,
-    location: c?.location ?? '',
     restrict: c?.appIds != null,
     appIds: c?.appIds ?? [],
   })
@@ -102,24 +106,43 @@ watch(open, (isOpen) => {
     c?.source === 'hosted'
       ? c.fields.map((f) => hostedRow(f.name, true))
       : [hostedRow('username'), hostedRow('password')]
-  externalRows.value =
-    c?.source === 'external'
-      ? c.fields.map((f) => externalRow(f.name, f.sourceField ?? ''))
-      : [externalRow('password', 'password')]
+  // 起标识时按条目里的字段预填，和服务端没给字段对应时推出的一样
+  vaultRows.value = c
+    ? c.fields.flatMap((f) => (f.itemField ? [vaultRow(f.name, f.itemField)] : []))
+    : (draft?.fields ?? []).map((f) => vaultRow(f.name, f.itemField!))
 })
 
-const editing = computed(() => origin.value !== null)
-// 修改时只改来源的类型（托管 ↔ 外部）也算：从外部改成托管要填全部字段的值
-const switchingToHosted = computed(
-  () => editing.value && origin.value?.source !== 'hosted' && form.kind === 'hosted',
+// 修改密码库凭据时，可选的条目字段从连接的条目列表里取；和凭据页、详情同一个查询，只有可用的连接列得出条目
+const editingConnection = computed(() => origin.value?.vault?.connectionId ?? null)
+const connections = useQuery({
+  queryKey: computed(() => ['vault-connections', props.spaceId] as const),
+  queryFn: ({ queryKey: [, sid] }) => api.vaultConnections(sid),
+  enabled: computed(() => open.value && editingConnection.value !== null),
+})
+const connection = computed(
+  () => connections.data.value?.items.find((x) => x.id === editingConnection.value) ?? null,
 )
-const providerItems = computed(() =>
-  props.providers.map((p) => ({
-    label: `${p.name}（${providerKindLabels[p.kind]}）`,
-    value: p.id,
-  })),
+const items = useQuery({
+  queryKey: computed(() => ['vault-items', props.spaceId, editingConnection.value] as const),
+  queryFn: ({ queryKey: [, sid, id] }) => api.vaultItems(sid, id!),
+  enabled: computed(() => open.value && !!connection.value && itemsAvailable(connection.value)),
+})
+const itemFields = computed<string[]>(() => {
+  if (target.value) return target.value.item.fields
+  const itemId = origin.value?.vault?.itemId
+  const found = items.data.value?.items.find((i) => i.id === itemId)
+  // 条目读不到时（连接不可用、条目不可用、列表读取失败）只能在已有的对应里改
+  const known = found?.fields ?? []
+  const current = vaultRows.value.map((r) => r.itemField)
+  return [...new Set([...known, ...current])]
+})
+const itemFieldItems = computed(() =>
+  itemFields.value.map((f) => ({ label: itemFieldLabel(f), value: f })),
 )
-// 只列出自己是主人的应用：Key 按应用主人取凭据，别人的应用的 Key 用不了你的凭据。
+const unusedItemField = () =>
+  itemFields.value.find((f) => !vaultRows.value.some((r) => r.itemField === f))
+
+// 只列出自己是所有者的应用：访问密钥按应用所有者取凭据，别人的应用的访问密钥取不到这些凭据。
 // 已经限定了的照样列出来，免得改别的地方时被悄悄去掉
 const { me } = useSession()
 const appItems = computed(() =>
@@ -131,21 +154,6 @@ const appItems = computed(() =>
       value: a.id,
     })),
 )
-const sourceItems = computed(() => [
-  { label: 'Kioku 托管', description: '值由 Kioku 使用主密钥加密保存', value: 'hosted' },
-  {
-    label: '外部凭据源',
-    description: props.providers.length
-      ? '值保留在密码管理器中，Kioku 仅记录条目位置，由 Agent 在本机获取'
-      : '请先在「凭据源」中添加密码管理器',
-    value: 'external',
-    disabled: !props.providers.length,
-    // 禁用的选项默认整项变淡，说明里写的是不能选的原因，要看得清：只淡化圆钮和名称，说明用正常的次要文字色
-    ui: props.providers.length
-      ? undefined
-      : { item: 'opacity-100', base: 'opacity-75', label: 'text-dimmed' },
-  },
-])
 
 const validName = (name: string) => CREDENTIAL_NAME_PATTERN.test(name)
 const liveHosted = computed(() => hostedRows.value.filter((r) => !r.removed))
@@ -155,7 +163,7 @@ const problem = computed<string | null>(() => {
     return '标识只能包含小写字母、数字、_ 和 -，且以字母或数字开头'
   }
   if (!form.name.trim()) return '名称不能为空'
-  const rows = form.kind === 'hosted' ? liveHosted.value : externalRows.value
+  const rows = isVault.value ? vaultRows.value : liveHosted.value
   if (!rows.length) return '至少需要一个字段'
   // 修改托管的只发改了的字段，合并之后的总数要在这里看
   if (rows.length > MAX_CREDENTIAL_FIELDS) return `一条凭据最多 ${MAX_CREDENTIAL_FIELDS} 个字段`
@@ -163,16 +171,11 @@ const problem = computed<string | null>(() => {
   if (names.some((n) => !validName(n)))
     return '字段名只能包含小写字母、数字、_ 和 -，且以字母或数字开头'
   if (new Set(names).size !== names.length) return '字段名不能重复'
-  if (form.kind === 'hosted') {
-    const needsValue = liveHosted.value.filter((r) => !r.existing || switchingToHosted.value)
-    if (needsValue.some((r) => !r.value)) return '请填写新字段的值'
-  } else {
-    if (!form.providerId) return '请选择凭据源'
-    if (!form.location.trim()) return '请填写条目位置'
-    if (externalRows.value.some((r) => !r.sourceField.trim())) return '请填写每个字段对应的条目字段'
+  if (!isVault.value && liveHosted.value.some((r) => !r.existing && !r.value)) {
+    return '请填写新字段的值'
   }
   if (form.restrict && !form.appIds.length) return '限定应用时至少选择一个'
-  // 其余规则（长度、条目位置里不能有的字符等）直接用接口的定义检查，提示与服务端一致
+  // 其余规则（长度等）直接用接口的定义检查，提示与服务端一致
   const result = editing.value
     ? UpdateCredentialRequest.safeParse(updateBody())
     : CreateCredentialRequest.safeParse(createBody())
@@ -184,66 +187,59 @@ function removeHostedRow(row: HostedRow) {
   if (row.existing) row.removed = !row.removed
   else hostedRows.value.splice(hostedRows.value.indexOf(row), 1)
 }
-
-// 修改时要发的来源：没改就不发
-function sourceChange(): CredentialSourceUpdate | undefined {
-  const before = origin.value
-  if (form.kind === 'hosted') {
-    const values: Record<string, string | null> = {}
-    for (const row of hostedRows.value) {
-      if (row.existing && row.removed && !switchingToHosted.value) values[row.name] = null
-      else if (!row.removed && row.value) values[row.name] = row.value
-    }
-    if (!switchingToHosted.value && !Object.keys(values).length) return undefined
-    return { kind: 'hosted', values }
-  }
-  const fields = externalFields()
-  const same =
-    before?.source === 'external' &&
-    before.provider?.id === form.providerId &&
-    before.location === form.location.trim() &&
-    JSON.stringify(before.fields) === JSON.stringify(fields)
-  return same
-    ? undefined
-    : { kind: 'external', providerId: form.providerId!, location: form.location.trim(), fields }
+function addVaultRow() {
+  const field = unusedItemField()
+  if (field) vaultRows.value.push(vaultRow('', field))
 }
 
-const saving = ref(false)
-const externalFields = () =>
-  externalRows.value.map((r) => ({ name: r.name, sourceField: r.sourceField.trim() }))
+const vaultFields = () => vaultRows.value.map((r) => ({ name: r.name, itemField: r.itemField }))
+
+// 修改托管的值：只发改了的字段，删掉的为 null
+function hostedChanges(): Record<string, string | null> | undefined {
+  const values: Record<string, string | null> = {}
+  for (const row of hostedRows.value) {
+    if (row.existing && row.removed) values[row.name] = null
+    else if (!row.removed && row.value) values[row.name] = row.value
+  }
+  return Object.keys(values).length ? values : undefined
+}
+// 修改密码库的字段对应：整个替换，没改就不发
+function vaultChanges() {
+  const fields = vaultFields()
+  const before = (origin.value?.fields ?? []).map((f) => ({ name: f.name, itemField: f.itemField }))
+  return JSON.stringify(before) === JSON.stringify(fields) ? undefined : fields
+}
 
 function createBody(): CreateCredentialRequest {
+  const t = target.value
   return {
     identifier: form.identifier,
     name: form.name.trim(),
     description: form.description.trim() || null,
     appIds: form.restrict ? [...form.appIds] : null,
-    source:
-      form.kind === 'hosted'
-        ? {
-            kind: 'hosted',
-            values: Object.fromEntries(liveHosted.value.map((r) => [r.name, r.value])),
-          }
-        : {
-            kind: 'external',
-            providerId: form.providerId ?? '',
-            location: form.location.trim(),
-            fields: externalFields(),
-          },
+    source: t
+      ? { kind: 'vault', connectionId: t.connectionId, itemId: t.item.id, fields: vaultFields() }
+      : {
+          kind: 'hosted',
+          values: Object.fromEntries(liveHosted.value.map((r) => [r.name, r.value])),
+        },
   }
 }
 
 function updateBody(): UpdateCredentialRequest {
-  const source = sourceChange()
+  const values = isVault.value ? undefined : hostedChanges()
+  const fields = isVault.value ? vaultChanges() : undefined
   return {
     expectedVersion: origin.value?.version ?? 0,
     name: form.name.trim(),
     description: form.description.trim() || null,
     appIds: form.restrict ? [...form.appIds] : null,
-    ...(source ? { source } : {}),
+    ...(values ? { values } : {}),
+    ...(fields ? { fields } : {}),
   }
 }
 
+const saving = ref(false)
 async function submit() {
   if (saving.value || problem.value) return
   saving.value = true
@@ -270,18 +266,14 @@ async function submit() {
   }
 }
 
-// 关掉时清掉填过的值
-watch(open, (isOpen) => {
-  if (!isOpen) for (const row of hostedRows.value) row.value = ''
+const title = computed(() => {
+  if (origin.value) return `修改凭据 ${origin.value.identifier}`
+  return target.value ? `起标识：${target.value.item.name}` : '新建凭据'
 })
 </script>
 
 <template>
-  <UModal
-    v-model:open="open"
-    :title="editing ? `修改凭据 ${origin?.identifier}` : '新建凭据'"
-    :ui="{ content: 'max-w-2xl' }"
-  >
+  <UModal v-model:open="open" :title="title" :ui="{ content: 'max-w-2xl' }">
     <template #body>
       <form id="credential-form" class="space-y-4" @submit.prevent="submit">
         <UFormField
@@ -297,108 +289,100 @@ watch(open, (isOpen) => {
         <UFormField label="说明" help="填写用途与使用场景；内容会发送给 Agent，请勿写入凭据的值。">
           <UTextarea v-model="form.description" :rows="2" autoresize class="w-full" />
         </UFormField>
-        <UFormField label="来源">
-          <URadioGroup v-model="form.kind" :items="sourceItems" />
+
+        <UFormField
+          v-if="!isVault"
+          label="字段"
+          :help="
+            editing
+              ? '已有字段的值留空表示不修改；值仅在提交时发送到服务端，此处不再显示。'
+              : '值由 Kioku 使用主密钥加密保存，仅在提交时发送到服务端，此处不再显示。'
+          "
+        >
+          <div class="space-y-2">
+            <div
+              v-for="row in hostedRows"
+              :key="row.key"
+              class="flex items-center gap-2"
+              :class="row.removed ? 'opacity-50' : ''"
+            >
+              <UInput
+                v-model="row.name"
+                :disabled="row.existing"
+                class="w-40 font-mono"
+                placeholder="字段名"
+                aria-label="字段名"
+              />
+              <UInput
+                v-model="row.value"
+                type="password"
+                autocomplete="new-password"
+                :disabled="row.removed"
+                class="min-w-0 flex-1"
+                :placeholder="row.existing ? '留空表示不修改' : '值'"
+                :aria-label="`${row.name || '新字段'}的值`"
+              />
+              <UButton
+                :icon="row.removed ? icons.undelete : icons.remove"
+                color="neutral"
+                variant="ghost"
+                :aria-label="row.removed ? '保留此字段' : '删除此字段'"
+                @click="removeHostedRow(row)"
+              />
+            </div>
+            <UButton
+              :icon="icons.add"
+              size="xs"
+              color="neutral"
+              variant="subtle"
+              @click="hostedRows.push(hostedRow())"
+            >
+              添加字段
+            </UButton>
+          </div>
         </UFormField>
 
-        <template v-if="form.kind === 'hosted'">
-          <UFormField
-            label="字段"
-            :help="
-              editing && !switchingToHosted
-                ? '已有字段的值留空表示不修改；值仅在提交时发送到服务端，此处不再显示。'
-                : '值仅在提交时发送到服务端，此处不再显示。'
-            "
-          >
-            <div class="space-y-2">
-              <div
-                v-for="row in hostedRows"
-                :key="row.key"
-                class="flex items-center gap-2"
-                :class="row.removed ? 'opacity-50' : ''"
-              >
-                <UInput
-                  v-model="row.name"
-                  :disabled="row.existing && !switchingToHosted"
-                  class="w-40 font-mono"
-                  placeholder="字段名"
-                  aria-label="字段名"
-                />
-                <UInput
-                  v-model="row.value"
-                  type="password"
-                  autocomplete="new-password"
-                  :disabled="row.removed"
-                  class="min-w-0 flex-1"
-                  :placeholder="row.existing && !switchingToHosted ? '留空表示不修改' : '值'"
-                  :aria-label="`${row.name || '新字段'}的值`"
-                />
-                <UButton
-                  :icon="row.removed ? icons.undelete : icons.remove"
-                  color="neutral"
-                  variant="ghost"
-                  :aria-label="row.removed ? '保留此字段' : '删除此字段'"
-                  @click="removeHostedRow(row)"
-                />
-              </div>
+        <UFormField v-else label="字段对应">
+          <template #help>
+            左侧为占位符中的字段名，右侧为条目中的字段。
+            <Hint>
+              值保留在密码库中，每次取用时向密码库获取。TOTP 字段取用时给出当前的验证码。
+            </Hint>
+          </template>
+          <div class="space-y-2">
+            <div v-for="row in vaultRows" :key="row.key" class="flex items-center gap-2">
+              <UInput
+                v-model="row.name"
+                class="w-40 font-mono"
+                placeholder="字段名"
+                aria-label="字段名"
+              />
+              <USelect
+                v-model="row.itemField"
+                :items="itemFieldItems"
+                class="min-w-0 flex-1"
+                :aria-label="`${row.name || '新字段'}对应的条目字段`"
+              />
               <UButton
-                :icon="icons.add"
-                size="xs"
+                :icon="icons.remove"
                 color="neutral"
-                variant="subtle"
-                @click="hostedRows.push(hostedRow())"
-              >
-                添加字段
-              </UButton>
+                variant="ghost"
+                aria-label="删除此字段"
+                @click="vaultRows.splice(vaultRows.indexOf(row), 1)"
+              />
             </div>
-          </UFormField>
-        </template>
-
-        <template v-else>
-          <UFormField label="凭据源">
-            <USelect v-model="form.providerId" :items="providerItems" class="w-full" />
-          </UFormField>
-          <UFormField
-            label="条目位置"
-            help="密码管理器中的条目名、ID 或路径，例如 file-server admin"
-          >
-            <UInput v-model="form.location" class="w-full" />
-          </UFormField>
-          <UFormField label="字段对应" help="左侧为占位符中的字段名，右侧为条目中对应的字段">
-            <div class="space-y-2">
-              <div v-for="row in externalRows" :key="row.key" class="flex items-center gap-2">
-                <UInput
-                  v-model="row.name"
-                  class="w-40 font-mono"
-                  placeholder="字段名"
-                  aria-label="字段名"
-                />
-                <UInput
-                  v-model="row.sourceField"
-                  class="min-w-0 flex-1"
-                  placeholder="条目字段，例如 password"
-                  :aria-label="`${row.name || '新字段'}对应的条目字段`"
-                />
-                <UButton
-                  :icon="icons.remove"
-                  color="neutral"
-                  variant="ghost"
-                  aria-label="删除此字段"
-                  @click="externalRows.splice(externalRows.indexOf(row), 1)"
-                />
-              </div>
-              <UButton
-                :icon="icons.add"
-                size="xs"
-                color="neutral"
-                variant="subtle"
-                @click="externalRows.push(externalRow())"
-              >
-                添加字段
-              </UButton>
-            </div>
-          </UFormField>
-        </template>
+            <UButton
+              v-if="unusedItemField()"
+              :icon="icons.add"
+              size="xs"
+              color="neutral"
+              variant="subtle"
+              @click="addVaultRow"
+            >
+              添加字段
+            </UButton>
+          </div>
+        </UFormField>
 
         <UFormField label="限定应用">
           <template #help>
@@ -426,7 +410,7 @@ watch(open, (isOpen) => {
         <span v-if="problem" class="mr-auto text-sm text-muted">{{ problem }}</span>
         <UButton color="neutral" variant="ghost" @click="open = false">取消</UButton>
         <UButton type="submit" form="credential-form" :loading="saving" :disabled="!!problem">
-          {{ editing ? '保存' : '新建' }}
+          {{ editing ? '保存' : target ? '起标识' : '新建' }}
         </UButton>
       </div>
     </template>

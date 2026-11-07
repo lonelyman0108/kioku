@@ -8,6 +8,7 @@ const scopes = (over: Partial<KeyScopes> = {}): KeyScopes => ({
   writeLayers: ['core'],
   maxSensitivity: 'internal',
   admin: false,
+  credentials: 'none' as const,
   ...over,
 })
 const key = (over: Partial<KeyInfo> = {}): KeyInfo => ({

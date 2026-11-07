@@ -1,11 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 
-import type {
-  ActivityList,
-  ConsoleCredential,
-  CredentialEventList,
-  CredentialProvider,
-} from '@kioku/contracts'
+import type { ActivityList, ConsoleCredential } from '@kioku/contracts'
 import { and, asc, eq } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
@@ -19,15 +14,13 @@ import { staticEmbedderSource } from '../../embedding/source'
 import type { Deps, KeyPrincipal } from '../../http/env'
 import { handleMcpRequest } from '../../mcp/server'
 import { memoryServiceForKey, recallScopeForKey } from '../../memory/context'
-import { MASKED_BINDING, MASKED_HOSTED_PREFIX, MASKED_SECRET_CONTENT } from '../../memory/masked'
+import { MASKED_CREDENTIAL_VALUES, MASKED_SECRET_CONTENT } from '../../memory/masked'
 import { sealMemoryContent } from '../../memory/service'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 
 const SECRET_BODY = '保险柜的位置在书房第三层'
 const HOSTED_VALUE = 'hunter2-hosted-value'
-const LOCATION = 'router admin login'
-const INSTRUCTIONS = '在工作站上用 bw，先 bw unlock'
 
 describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服务', () => {
   let database: Database
@@ -88,20 +81,19 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
     }
     return { text: body.result.content[0]!.text, isError: body.result.isError === true }
   }
-  // 测试台的调用：打码、事件带标记。mask 是凭据的那一档：回滚模式 all，真实模式 hosted
+  // 测试台的调用：打码、事件带标记。凭据两种模式一样：取用一律不给值、不记访问
   const mark = () => ({ bench: { account: ws.accountId, run: 'run-1' } })
-  const masked = (
-    name: string,
-    args: Record<string, unknown> = {},
-    mask: 'hosted' | 'all' = 'all',
-  ) =>
+  const masked = (name: string, args: Record<string, unknown> = {}) =>
     handleMcpRequest(
       memoryServiceForKey(deps, key, defaultSession(key), {
         maskSecret: true,
         eventContext: mark(),
       }),
       recallScopeForKey(deps, key),
-      credentialServiceForKey(deps, key, defaultSession(key), { mask, eventContext: mark() }),
+      credentialServiceForKey(deps, key, defaultSession(key), {
+        bench: true,
+        eventContext: mark(),
+      }),
       rpc(name, args),
     ).then(parse)
   // 真实的 /v1/mcp：对照，也用来核对数据没有被打码的文字写坏
@@ -262,7 +254,7 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect((await real('kioku_get', { uri: 'user://notes/copy' })).isError).toBe(true)
 
       await real('kioku_create', { uri: 'user://notes/plain', content: '普通正文' })
-      for (const placeholder of [MASKED_SECRET_CONTENT, MASKED_BINDING, MASKED_HOSTED_PREFIX]) {
+      for (const placeholder of [MASKED_SECRET_CONTENT, MASKED_CREDENTIAL_VALUES]) {
         const updated = await masked('kioku_update', {
           uri: 'user://notes/plain',
           content: `前面的话 ${placeholder} 后面的话`,
@@ -286,7 +278,7 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
       expect(created.isError).toBe(false)
       const updated = await real('kioku_update', {
         uri: 'user://notes/about-mask',
-        content: MASKED_HOSTED_PREFIX,
+        content: MASKED_CREDENTIAL_VALUES,
       })
       expect(updated.isError).toBe(false)
     })
@@ -373,169 +365,75 @@ describe.skipIf(!testDatabaseUrl)('打码：secret 正文与凭据值不出服�
         name: 'NAS',
         source: { kind: 'hosted', values: { username: 'alice', password: HOSTED_VALUE } },
       })
-    const seedExternal = async () => {
-      const provider = await asOwner<CredentialProvider>('POST', '/credential-providers', {
-        kind: 'bitwarden',
-        name: '密码库',
-        instructions: INSTRUCTIONS,
-      })
-      return asOwner<ConsoleCredential>('POST', '/credentials', {
-        identifier: 'router',
-        name: '路由器',
-        source: {
-          kind: 'external',
-          providerId: provider.id,
-          location: LOCATION,
-          fields: [{ name: 'password', sourceField: 'password' }],
-        },
-      })
-    }
 
-    it.each(['hosted', 'all'] as const)(
-      '取托管的值（%s）：不解密、不记访问，只列字段名',
-      async (mask) => {
-        const credential = await seedHosted()
-        const got = await masked('kioku_credential', { identifier: 'nas' }, mask)
-        expect(got.isError).toBe(false)
-        expect(got.text).not.toContain(HOSTED_VALUE)
-        expect(got.text).toContain('password、username')
-        expect(await accessEvents(credential.id)).toHaveLength(0)
-        // 只取一个字段时只列这个字段
-        const one = await masked('kioku_credential', { identifier: 'nas', field: 'password' }, mask)
-        expect(one.text).toContain('字段：password。')
-        // 真实接口照常给值、记访问
-        expect((await real('kioku_credential', { identifier: 'nas' })).text).toContain(HOSTED_VALUE)
-        expect(await accessEvents(credential.id)).toHaveLength(1)
-      },
-    )
-
-    it('外部绑定，回滚模式：条目位置、取法与使用说明都换成占位文字，也不记访问', async () => {
-      const credential = await seedExternal()
-      const got = await masked('kioku_credential', { identifier: 'router' }, 'all')
+    it('取用（托管的）：不解密、不给值、不记访问，只列字段名', async () => {
+      const credential = await seedHosted()
+      const got = await masked('kioku_credential', { identifier: 'nas', purpose: '测试' })
       expect(got.isError).toBe(false)
-      expect(got.text).toContain('密码库')
-      for (const hidden of [LOCATION, INSTRUCTIONS, 'bw get item']) {
-        expect(got.text).not.toContain(hidden)
-      }
+      expect(got.text).not.toContain(HOSTED_VALUE)
+      expect(got.text).toContain('字段 password、username')
+      expect(got.text).toContain(`值：${MASKED_CREDENTIAL_VALUES}`)
       expect(await accessEvents(credential.id)).toHaveLength(0)
+      // 真实接口照常给值、记访问
+      expect((await real('kioku_credential', { identifier: 'nas' })).text).toContain(HOSTED_VALUE)
+      expect(await accessEvents(credential.id)).toHaveLength(1)
     })
 
-    it('外部绑定，真实模式：照常返回，访问记录带标记，凭据页的访问记录显示操作的账号', async () => {
-      const credential = await seedExternal()
-      const got = await masked('kioku_credential', { identifier: 'router' }, 'hosted')
-      expect(got.text).toContain(LOCATION)
-      expect(got.text).toContain(INSTRUCTIONS)
-      expect(got.text).toContain('bw get item')
-      const [event] = await accessEvents(credential.id)
-      expect(event!.context).toEqual({
-        bench: { account: ws.accountId, run: 'run-1' },
-        via: 'kioku_credential',
-        fields: ['password'],
+    it('值里有占位文字时拒绝：新建与修改都不写入，真实的值不变', async () => {
+      await seedHosted()
+      const copied = (await masked('kioku_credential', { identifier: 'nas' })).text
+      expect(copied).toContain(MASKED_CREDENTIAL_VALUES)
+      const updated = await masked('kioku_credential_save', {
+        identifier: 'nas',
+        expected_version: 1,
+        values: { password: copied },
       })
-      const listed = await asOwner<CredentialEventList>(
-        'GET',
-        `/credentials/${credential.id}/events`,
-      )
-      const access = listed.items.find((e) => e.type === 'access')!
-      expect(access.bench).toEqual({ accountName: 'alice', run: 'run-1' })
-      expect(access.via).toBe('kioku_credential')
-      // 新建这条凭据的是管理界面，不带标记
-      expect(listed.items.find((e) => e.type === 'create')!.bench).toBeNull()
+      expect(updated.isError).toBe(true)
+      expect(updated.text).toContain('占位文字')
+      const created = await masked('kioku_credential_save', {
+        identifier: 'copied',
+        name: '抄的',
+        values: { password: MASKED_SECRET_CONTENT },
+      })
+      expect(created.isError).toBe(true)
+      expect(created.text).toContain('占位文字')
+
+      const after = await real('kioku_credential', { identifier: 'nas' })
+      expect(after.text).toContain(HOSTED_VALUE)
+      expect(after.text).toContain('版本 1')
+      expect((await real('kioku_credential', { identifier: 'copied' })).isError).toBe(true)
+      // 改别的字段不受影响，事件带标记
+      const renamed = await masked('kioku_credential_save', {
+        identifier: 'nas',
+        expected_version: 1,
+        name: '新名字',
+      })
+      expect(renamed.isError).toBe(false)
     })
-
-    it.each(['hosted', 'all'] as const)(
-      '值里有占位文字时拒绝（%s）：新建与修改都不写入，真实的值不变',
-      async (mask) => {
-        await seedHosted()
-        const copied = (await masked('kioku_credential', { identifier: 'nas' }, mask)).text
-        expect(copied).toContain(MASKED_HOSTED_PREFIX)
-        const updated = await masked(
-          'kioku_credential_save',
-          { identifier: 'nas', expected_version: 1, values: { password: copied } },
-          mask,
-        )
-        expect(updated.isError).toBe(true)
-        expect(updated.text).toContain('占位文字')
-        const created = await masked(
-          'kioku_credential_save',
-          { identifier: 'copied', name: '抄的', values: { password: MASKED_SECRET_CONTENT } },
-          mask,
-        )
-        expect(created.isError).toBe(true)
-        expect(created.text).toContain('占位文字')
-
-        const after = await real('kioku_credential', { identifier: 'nas' })
-        expect(after.text).toContain(HOSTED_VALUE)
-        expect(after.text).toContain('版本 1')
-        expect((await real('kioku_credential', { identifier: 'copied' })).isError).toBe(true)
-        // 改别的字段不受影响
-        const renamed = await masked(
-          'kioku_credential_save',
-          { identifier: 'nas', expected_version: 1, name: '新名字' },
-          mask,
-        )
-        expect(renamed.isError).toBe(false)
-      },
-    )
-
-    it.each(['hosted', 'all'] as const)(
-      '条目位置与来源字段里有占位文字时拒绝（%s）：真实的绑定不变',
-      async (mask) => {
-        const credential = await seedExternal()
-        const binding = { identifier: 'router', provider_id: credential.provider!.id }
-        const fields = [{ name: 'password', source_field: 'password' }]
-        for (const args of [
-          { location: `条目 ${MASKED_BINDING}`, fields },
-          { location: LOCATION, fields: [{ name: 'password', source_field: MASKED_BINDING }] },
-        ]) {
-          const saved = await masked(
-            'kioku_credential_save',
-            { ...binding, expected_version: 1, ...args },
-            mask,
-          )
-          expect(saved.isError).toBe(true)
-          expect(saved.text).toContain('占位文字')
-        }
-        const after = await real('kioku_credential', { identifier: 'router' })
-        expect(after.text).toContain(`条目：${JSON.stringify(LOCATION)}`)
-        expect(after.text).toContain('版本 1')
-      },
-    )
 
     it('真实接口不受影响：值里可以写到占位文字', async () => {
       const saved = await real('kioku_credential_save', {
         identifier: 'odd',
         name: '奇怪的值',
-        values: { note: MASKED_HOSTED_PREFIX },
+        values: { note: MASKED_CREDENTIAL_VALUES },
       })
       expect(saved.isError).toBe(false)
       expect((await real('kioku_credential', { identifier: 'odd' })).text).toContain(
-        MASKED_HOSTED_PREFIX,
+        MASKED_CREDENTIAL_VALUES,
       )
     })
 
-    it.each([
-      ['all', false],
-      ['hosted', true],
-    ] as const)(
-      'kioku_get 末尾的凭据列表（%s）：外部绑定按模式打码，托管的值不给',
-      async (mask, shown) => {
-        const external = await seedExternal()
-        const hosted = await seedHosted()
-        await real('kioku_create', {
-          uri: 'user://notes/login',
-          content: '路由器 {{cred:router#password}}，NAS {{cred:nas#password}}',
-        })
-        const got = await masked('kioku_get', { uri: 'user://notes/login' }, mask)
-        expect(got.text).toContain('正文里引用的凭据')
-        expect(got.text).not.toContain(HOSTED_VALUE)
-        for (const text of [LOCATION, INSTRUCTIONS, 'bw get item']) {
-          expect(got.text.includes(text)).toBe(shown)
-        }
-        expect(await accessEvents(external.id)).toHaveLength(shown ? 1 : 0)
-        expect(await accessEvents(hosted.id)).toHaveLength(0)
-      },
-    )
+    it('kioku_get 末尾的凭据列表：只说能不能取用，不给值，也不记访问', async () => {
+      const hosted = await seedHosted()
+      await real('kioku_create', {
+        uri: 'user://notes/login',
+        content: 'NAS {{cred:nas#password}}',
+      })
+      const got = await masked('kioku_get', { uri: 'user://notes/login' })
+      expect(got.text).toContain('- nas（NAS）：可以取用')
+      expect(got.text).not.toContain(HOSTED_VALUE)
+      expect(await accessEvents(hosted.id)).toHaveLength(0)
+    })
   })
 
   describe('事件的标记', () => {

@@ -1,5 +1,7 @@
 import {
   BenchReplayStep,
+  CREDENTIAL_CAPABILITIES,
+  CREDENTIAL_CAPABILITY_NAMES,
   isReplayStep,
   SENSITIVITIES,
   type BenchAssertion,
@@ -107,6 +109,14 @@ export function unmetRequirement(requires: BenchRequires, scopes: KeyScopes): st
   const needed = requires.maxSensitivity
   if (needed && SENSITIVITIES.indexOf(scopes.maxSensitivity) < SENSITIVITIES.indexOf(needed)) {
     return `当前访问密钥的敏感级上限低于${sensitivityWithValue(needed)}`
+  }
+  const capability = requires.credentials
+  if (
+    capability &&
+    CREDENTIAL_CAPABILITIES.indexOf(scopes.credentials) <
+      CREDENTIAL_CAPABILITIES.indexOf(capability)
+  ) {
+    return `当前访问密钥的凭据能力低于「${CREDENTIAL_CAPABILITY_NAMES[capability]}」`
   }
   return null
 }

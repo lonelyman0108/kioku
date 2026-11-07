@@ -29,6 +29,7 @@ const keyInfo = (over: Partial<KeyInfo> = {}): KeyInfo => {
     writeLayers: [...LAYERS],
     maxSensitivity: 'private' as const,
     admin: false,
+    credentials: 'none' as const,
   }
   return {
     id: KEY,
@@ -48,6 +49,7 @@ const matrix: KeyAccessMatrix = {
   contexts: ACCESS_CONTEXTS.map((context, i) => ({
     context,
     originScope: (['any', 'app', 'direct', 'group', 'app'] as const)[i]!,
+    credentials: context === 'none' ? ('use' as const) : ('none' as const),
     rows: LAYERS.map((layer) => ({
       layer,
       cells: SENSITIVITIES.map((sensitivity) => ({
@@ -120,6 +122,7 @@ describe('权限范围', () => {
         writeLayers: [],
         maxSensitivity: 'private',
         admin: false,
+        credentials: 'none' as const,
       },
     })
     expect(await render('none', narrowed)).toContain('已按所有者当前角色收紧')

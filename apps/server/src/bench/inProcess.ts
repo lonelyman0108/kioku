@@ -82,7 +82,7 @@ export function inProcessExecutor(
   const session = defaultSession(key)
   const memory = memoryServiceForKey(deps, key, session, { maskSecret: true, eventContext })
   const credentials = credentialServiceForKey(deps, key, session, {
-    mask: rollback ? 'all' : 'hosted',
+    bench: true,
     eventContext,
   })
   const scopeFor: ScopeFor = (s) => ({ ...recallScopeForKey(deps, key, s), record: () => {} })

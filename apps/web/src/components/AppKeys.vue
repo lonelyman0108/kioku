@@ -1,6 +1,13 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { SENSITIVITIES, type CreatedKey, type KeyInfo, type KeyScopes } from '@kioku/contracts'
+import {
+  CREDENTIAL_CAPABILITIES,
+  SENSITIVITIES,
+  type CreatedKey,
+  type CredentialCapability,
+  type KeyInfo,
+  type KeyScopes,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, reactive, ref, toRef, watch } from 'vue'
 
@@ -10,9 +17,16 @@ import { effectiveNote } from '../apps'
 import { useCopy } from '../composables/useCopy'
 import { useKeyMatrices } from '../composables/useKeyMatrices'
 import { icons } from '../icons'
-import { ADMIN_SCOPE_LABEL, layerLabels, scopesSummary, sensitivityLabels } from '../labels'
+import {
+  ADMIN_SCOPE_LABEL,
+  credentialCapabilityLabels,
+  layerLabels,
+  scopesSummary,
+  sensitivityLabels,
+} from '../labels'
 import { formatRelative, formatShort, formatTime } from '../time'
-import { keyPresets } from './keyPresets'
+import Hint from './Hint.vue'
+import { allowedCredentialCapability, issuedCredentialCapability, keyPresets } from './keyPresets'
 import NoteLine from './strata/NoteLine.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 import StrataCore from './strata/StrataCore.vue'
@@ -59,6 +73,14 @@ const form = reactive({
   advanced: false,
   scopes: { ...keyPresets[0]!.scopes } as KeyScopes,
 })
+// 不是空间所有者时打开表单就收紧：预设里的「取用」不能带过去
+watch(
+  () => props.isSpaceOwner,
+  (owner) => {
+    form.scopes.credentials = allowedCredentialCapability(form.scopes.credentials, owner)
+  },
+  { immediate: true },
+)
 // 和岩芯同一个顺序：会话在上，通用在下
 const layerItems = STACK.map((l) => ({ label: layerLabels[l], value: l }))
 // 编辑者无法签发机密级和跨人格写入的 Key，选项里也不给
@@ -69,15 +91,38 @@ const sensitivityItems = computed(() =>
   })),
 )
 
-function pickPreset(id: string) {
+// 凭据能力只有空间所有者能选取用与管理；别的成员的选项里只有不可用可选
+const credentialItems = computed(() =>
+  CREDENTIAL_CAPABILITIES.map((c) => ({
+    label: credentialCapabilityLabels[c],
+    description: credentialHelp[c],
+    value: c,
+    disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c,
+  })),
+)
+const credentialHelp: Record<CredentialCapability, string> = {
+  none: '不能列出与取用凭据',
+  use: '列出凭据并取值',
+  manage: '另可新建、修改、删除凭据',
+}
+// 按签发范围实际能用到的凭据能力，和所选的不同时提示
+const credentialShortfall = computed(() => {
+  const actual = issuedCredentialCapability(form.scopes)
+  return actual === form.scopes.credentials ? null : actual
+})
+
+// keepCredentials：关掉「逐项调整」时只回到预设的归属与敏感级，凭据能力不在逐项调整里，留着所选的
+function pickPreset(id: string, keepCredentials = false) {
   form.preset = id
   const preset = keyPresets.find((p) => p.id === id)
-  if (preset)
-    form.scopes = {
-      ...preset.scopes,
-      readLayers: [...preset.scopes.readLayers],
-      writeLayers: [...preset.scopes.writeLayers],
-    }
+  if (!preset) return
+  const credentials = keepCredentials ? form.scopes.credentials : preset.scopes.credentials
+  form.scopes = {
+    ...preset.scopes,
+    readLayers: [...preset.scopes.readLayers],
+    writeLayers: [...preset.scopes.writeLayers],
+    credentials: allowedCredentialCapability(credentials, props.isSpaceOwner),
+  }
 }
 
 // 签发中不接受第二次提交：连点两次会签出两个 Key，只有后一个的明文被展示
@@ -104,7 +149,7 @@ async function issue() {
 watch(
   () => form.advanced,
   (on) => {
-    if (!on) pickPreset(form.preset)
+    if (!on) pickPreset(form.preset, true)
   },
 )
 
@@ -252,6 +297,20 @@ async function revoke() {
                 <USwitch v-model="form.advanced" label="逐项调整" />
               </div>
             </UFormField>
+            <UFormField label="凭据能力">
+              <template #help>
+                <template v-if="!isSpaceOwner">仅空间所有者的应用可以取用或管理凭据。</template>
+                <Hint>
+                  取用与管理都需要可读本人、最高敏感级不低于私密，管理还需要可写本人。带会话上下文时（群聊、私聊、定时任务）凭据一律不可用。
+                </Hint>
+              </template>
+              <URadioGroup v-model="form.scopes.credentials" :items="credentialItems" />
+            </UFormField>
+            <NoteLine v-if="credentialShortfall" tone="warning">
+              按当前签发范围，凭据能力实际为「{{
+                credentialCapabilityLabels[credentialShortfall]
+              }}」
+            </NoteLine>
             <template v-if="form.advanced">
               <UFormField label="可读归属">
                 <USelect

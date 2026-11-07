@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { WhoAmI } from './auth'
-import { Layer, Sensitivity, SubjectKind } from './memory'
+import { CredentialCapability, Layer, Sensitivity, SubjectKind } from './memory'
 import { SessionExtra, TurnEndEvent } from './recall'
 
 // 测试台：不接真实客户端，按一把 Key 模拟接入方调用 Kioku，步骤的结果和真实接入方收到的一样。
@@ -57,11 +57,12 @@ export const CaptureName = z
 export const BenchCapture = z.record(CaptureName, z.string().min(1).max(200))
 export type BenchCapture = z.infer<typeof BenchCapture>
 
-// requires：这一步要的归属与最高敏感级，运行前按 whoami 判断，不满足的步骤记「跳过」，不算失败
+// requires：这一步要的归属、最高敏感级与凭据能力，运行前按 whoami 判断，不满足的步骤记「跳过」，不算失败
 export const BenchRequires = z.strictObject({
   readLayers: z.array(Layer).optional(),
   writeLayers: z.array(Layer).optional(),
   maxSensitivity: Sensitivity.optional(),
+  credentials: CredentialCapability.optional(),
 })
 export type BenchRequires = z.infer<typeof BenchRequires>
 
@@ -407,7 +408,6 @@ export function isReplayStep(step: BenchStep | BenchReplayStep): boolean {
 
 // 这一步可能写库（命令行没有回滚，要加 --allow-writes）：重放的那些，取值的 kioku_credential（记访问事件），
 // 不认识的工具（按写算），以及带私聊、群聊、频道上下文的生命周期事件与 /recall。
-// kioku_get 可能给外部凭据记访问事件，只在说明里写明，不算写：否则读一条记忆也要加参数。
 // 只看传入的步骤：event、chatType 写成变量时展开之前判不出来，命令行执行时按展开后的步骤再判一次
 export function mayWrite(step: BenchStep): boolean {
   if (isReplayStep(step)) return true

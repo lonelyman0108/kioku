@@ -499,7 +499,7 @@ describe.skipIf(!testDatabaseUrl)('验证码自助绑定', () => {
       `/v1/spaces/${ws.spaceId}/apps/${bobApp}/keys`,
       jsonRequest(
         'POST',
-        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private' } },
+        { name: 'k', scopes: { ...FULL_SCOPES, maxSensitivity: 'private', credentials: 'none' } },
         { cookie: bob.cookie },
       ),
     )

@@ -1,8 +1,6 @@
 import {
   AppConfig,
   CredentialIdentifier,
-  CredentialProviderKind,
-  ExternalCredentialSource,
   ExtractionBudget,
   HostedCredentialSource,
   Layer,
@@ -14,20 +12,25 @@ import {
   Sensitivity,
   Slug,
   SubjectKind,
+  VaultCredentialFields,
+  VaultEmail,
+  VaultItemId,
+  VaultServerUrl,
 } from '@kioku/contracts'
 import { z } from 'zod'
 
 // 空间导出文件解密、解压后的正文：JSON Lines，第一行是文件头，之后每行一条记录，type 说明是什么。
 // 记录里的 id 是导出时的 id，只用来在文件里互相指认（人格的继承、应用的默认人格、记忆挂的人格、应用与联系人、
-// 按群换人格、凭据绑的凭据源与限定的应用）；导入时全部重新生成。归属成员的东西（本人的记忆、凭据、凭据源）
+// 按群换人格、凭据指向的密码库连接与限定的应用）；导入时全部重新生成。归属成员的东西（本人的记忆、凭据、密码库连接）
 // 只有导出人自己的，不记是谁的：导入后全部归导入人。
 // 记忆按导出时的样子写出（secret 是明文，整个文件另用口令加密），不含历史、向量与召回统计；
 // 会话与会话摘要不导出，联系人的事实不带听到它的会话。
 // 导出时每条记录先按这里的定义检查一遍，写得出来的就一定导入得了
 export const SPACE_EXPORT_FORMAT = 'kioku-space-export'
-// 文件格式的版本，导出时写这个，导入也只认它。3 是记忆架构改版之后的格式（归属、坐标与标题），
-// 之前的文件按七层写，不再能导入；更新的版本同样拒收，旧版本遇到 3 也拒收，不会悄悄丢掉不认识的内容
-export const SPACE_EXPORT_VERSION = 3
+// 文件格式的版本，导出时写这个，导入也只认它。4 是凭据改版之后的格式（密码库连接，凭据来源只剩托管与密码库）；
+// 3 带着旧的凭据源，1、2 是记忆架构改版之前按七层写的，都不再能导入；更新的版本同样拒收，旧版本遇到 4 也拒收，
+// 不会悄悄丢掉不认识的内容
+export const SPACE_EXPORT_VERSION = 4
 
 // 压缩前的正文最多这么大：导出时超出就拒绝，导入时解压超出就停下（挡住压缩炸弹）
 export const SPACE_EXPORT_MAX_PLAIN_BYTES = 128 * 1024 * 1024
@@ -140,20 +143,26 @@ export const GroupPersonaRecord = z.object({
   createdAt: Time,
 })
 
-export const ProviderRecord = z.object({
-  type: z.literal('provider'),
+// 密码库连接：不带令牌与账户密钥，导入后是断开的，要重新登录。账号 id 留着，重新登录时据此认出是同一个账号
+export const VaultConnectionRecord = z.object({
+  type: z.literal('vault_connection'),
   id: Id,
-  kind: CredentialProviderKind,
-  name: Text.min(1).max(100),
-  instructions: Text.max(4000),
-  // 已删除的凭据源只在还有导出的凭据绑着它时导出（恢复删除的凭据之后可能这样），导入后照样是已删除
-  deletedAt: Time.nullable(),
+  // 和连接接口同一个规则：只收 https（本机与不带点的主机名可以是 http），末尾的 / 去掉
+  serverUrl: Text.pipe(VaultServerUrl),
+  email: Text.pipe(VaultEmail),
+  vaultUserId: Text.min(1).max(100),
+  defaultCollectionId: Text.max(100).nullable(),
   createdAt: Time,
   updatedAt: Time,
 })
 
-// 来源和新建凭据的接口同一个形状，用同一份定义检查：托管的带着字段值（明文，整个文件另用口令加密），
-// 外部的带着条目位置与字段对应（条目位置与来源字段会代入给 agent 的取值命令）
+// 托管的带着字段值（明文，整个文件另用口令加密）；密码库的带着连接、条目 id 与字段对应
+const VaultCredentialRecordSource = z.object({
+  kind: z.literal('vault'),
+  connectionId: Id,
+  itemId: VaultItemId,
+  fields: VaultCredentialFields,
+})
 
 export const CredentialRecord = z.object({
   type: z.literal('credential'),
@@ -161,11 +170,11 @@ export const CredentialRecord = z.object({
   identifier: CredentialIdentifier,
   name: Text.min(1).max(100),
   description: Text.max(2000).nullable(),
-  // 外部的条目位置与字段对应照原样写进库；托管的值加密之后才存，不受上面那一条限制
+  // 密码库的字段对应照原样写进库；托管的值加密之后才存，不受上面那一条限制
   source: z
-    .discriminatedUnion('kind', [HostedCredentialSource, ExternalCredentialSource])
+    .discriminatedUnion('kind', [HostedCredentialSource, VaultCredentialRecordSource])
     .superRefine((source, ctx) => {
-      if (source.kind === 'external') allStorable(source, ctx)
+      if (source.kind === 'vault') allStorable(source, ctx)
     }),
   // 只给这些应用用；null 表示不限定。导出里没有的应用（已经删掉的）导入时去掉
   appIds: z.array(Id).max(100).nullable(),
@@ -208,7 +217,7 @@ export const SpaceExportRecord = z.discriminatedUnion('type', [
   SubjectRecord,
   IdentityRecord,
   GroupPersonaRecord,
-  ProviderRecord,
+  VaultConnectionRecord,
   CredentialRecord,
   MemoryRecord,
 ])
@@ -218,6 +227,6 @@ export type AppRecord = z.infer<typeof AppRecord>
 export type SubjectRecord = z.infer<typeof SubjectRecord>
 export type IdentityRecord = z.infer<typeof IdentityRecord>
 export type GroupPersonaRecord = z.infer<typeof GroupPersonaRecord>
-export type ProviderRecord = z.infer<typeof ProviderRecord>
+export type VaultConnectionRecord = z.infer<typeof VaultConnectionRecord>
 export type CredentialRecord = z.infer<typeof CredentialRecord>
 export type MemoryRecord = z.infer<typeof MemoryRecord>

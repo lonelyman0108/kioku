@@ -7,7 +7,12 @@ import { readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { KEY_MATRIX_STALE_TIME, keyMatrixKey } from '../appQueries'
 import { isNarrowed } from '../apps'
-import { accessContextLabels, accessContextShortLabels, originScopeLabels } from '../labels'
+import {
+  accessContextLabels,
+  accessContextShortLabels,
+  credentialCapabilityLabels,
+  originScopeLabels,
+} from '../labels'
 import Hint from './Hint.vue'
 import AccessMatrix from './strata/AccessMatrix.vue'
 import NoteLine from './strata/NoteLine.vue'
@@ -74,6 +79,12 @@ const groupName = useId()
       </div>
       <AccessMatrix :rows="current.rows" />
       <p class="origin">{{ originScopeLabels[current.originScope] }}</p>
+      <p class="origin">
+        凭据能力：<b class="capability">{{ credentialCapabilityLabels[current.credentials] }}</b>
+        <Hint>
+          取用与管理需要可读本人的私密记忆，带会话上下文时一律不可用。不是空间所有者时一律不可用。
+        </Hint>
+      </p>
     </template>
   </section>
 </template>
@@ -137,6 +148,15 @@ const groupName = useId()
 }
 .origin {
   margin-top: 8px;
+}
+.origin + .origin {
+  margin-top: 2px;
+}
+.capability {
+  font-weight: 500;
+  color: var(--ui-text);
+}
+.origin {
   font-size: 13px;
   color: var(--ui-text-muted);
 }

@@ -130,6 +130,15 @@
               },
               "admin": {
                 "type": "boolean"
+              },
+              "credentials": {
+                "type": "string",
+                "enum": [
+                  "none",
+                  "use",
+                  "manage"
+                ],
+                "default": "none"
               }
             },
             "required": [

@@ -7,16 +7,23 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
-import { credentials, memories, settings } from '../../db/schema'
+import { credentials, memories, settings, vaultConnections } from '../../db/schema'
 import { loadEmbeddingSetups } from '../../embedding/settings'
 import { staticEmbedderSource } from '../../embedding/source'
 import { loadExtractionConfig } from '../../extraction/settings'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../../testing/fixtures'
 import { credentialAad } from '../../credential/service'
+import { openVaultSecrets, sealVaultSecrets } from '../../credential/vault'
 import { rewrapKey } from '../envelope'
 import { keyIdOf, type MasterKey } from '../keyring'
-import { checkMasterKey, masterKeyStatus, prepareMasterKey, rotateMasterKey } from '../rotation'
+import {
+  checkMasterKey,
+  masterKeyStatus,
+  prepareMasterKey,
+  rotateMasterKey,
+  rotationPass,
+} from '../rotation'
 
 describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
   let database: Database
@@ -135,11 +142,28 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     ] as const) {
       expect((await send(app, 'PUT', path, body, { cookie: ws.cookie })).status).toBe(200)
     }
-    return { credentialId }
+    // 密码库连接保存的令牌与账户密钥，和托管的值一样要换包装
+    const connectionId = crypto.randomUUID()
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(vaultConnections).values({
+        id: connectionId,
+        spaceId: ws.spaceId,
+        ownerAccountId: ws.accountId,
+        serverUrl: 'https://vault.example.com',
+        email: 'agent@example.com',
+        vaultUserId: 'user-1',
+        deviceId: crypto.randomUUID(),
+        ...sealVaultSecrets(oldKey, connectionId, {
+          refreshToken: 'refresh-token',
+          userKey: Buffer.alloc(64, 7),
+        }),
+      }),
+    )
+    return { credentialId, connectionId }
   }
 
   it('轮换全过程：补标识、旧的那把没配时拒绝启动、换完之后只配新的也都解得开', async () => {
-    const { credentialId } = await seed()
+    const { credentialId, connectionId } = await seed()
     expect(await keyIds()).toEqual([
       { keyId: keyIdOf(oldKey) },
       { keyId: keyIdOf(oldKey) },
@@ -160,7 +184,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
 
     // 配错了主密钥、或者没配：拒绝启动
     await expect(prepareMasterKey(database.db, newKey)).rejects.toThrow(
-      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中加密保存的密钥 2 条解不开/,
+      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、密码库连接 1 条、实例设置中加密保存的密钥 2 条解不开/,
     )
     await expect(prepareMasterKey(database.db, null)).rejects.toThrow('没有配置 KIOKU_MASTER_KEY')
 
@@ -175,17 +199,18 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       configured: true,
       currentId: keyIdOf(newKey),
       previousId: keyIdOf(oldKey),
-      remaining: { memories: 2, credentials: 1, settings: 2 },
+      remaining: { memories: 2, credentials: 1, vaultConnections: 1, settings: 2 },
       lastError: null,
     })
     // 轮换期间新写下的用新密钥
     expect(await read(appWith(rotating), 'user://home/wifi')).toBe('无线密码 hunter2')
     await secret(appWith(rotating), 'user://home/new', '轮换时写下的')
 
-    expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 5, remaining: 0 })
+    expect(await rotateMasterKey(database.db, rotating)).toEqual({ rewrapped: 6, remaining: 0 })
     expect((await masterKeyStatus(database.db, rotating)).remaining).toEqual({
       memories: 0,
       credentials: 0,
+      vaultConnections: 0,
       settings: 0,
     })
 
@@ -210,6 +235,18 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       tx.select().from(memories).where(eq(memories.path, 'home/old')),
     )
     expect(deleted[0]?.keyId).toBe(keyIdOf(newKey))
+    const [connection] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.select().from(vaultConnections).where(eq(vaultConnections.id, connectionId)),
+    )
+    expect(connection!.keyId).toBe(keyIdOf(newKey))
+    expect(
+      openVaultSecrets(newKey, {
+        id: connectionId,
+        ciphertext: connection!.ciphertext!,
+        wrappedKey: connection!.wrappedKey!,
+        keyId: connection!.keyId,
+      }).refreshToken,
+    ).toBe('refresh-token')
   })
 
   it('别的事务只是往这一行上挂记录（外键检查加的 KEY SHARE）时照常换；锁着要改的行这次跳过，之后再换', async () => {
@@ -309,7 +346,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       .where(eq(settings.key, 'extraction'))
     expect(JSON.stringify(extraction?.value)).not.toContain('keyId')
     await expect(checkMasterKey(database.db, newKey)).rejects.toThrow(
-      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、实例设置中加密保存的密钥 2 条解不开/,
+      /主密钥对不上：机密记忆 2 条、托管的凭据 1 条、密码库连接 1 条、实例设置中加密保存的密钥 2 条解不开/,
     )
   })
 
@@ -410,6 +447,34 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
     expect((await loadExtractionConfig(database.db, newKey))?.apiKey).toBe('sk-extract')
   })
 
+  it('轮换任务：只剩密码库连接还用旧主密钥时也接着换，换完再来一次什么都不做', async () => {
+    const connectionId = crypto.randomUUID()
+    await withSpace(database.db, ws.spaceId, (tx) =>
+      tx.insert(vaultConnections).values({
+        id: connectionId,
+        spaceId: ws.spaceId,
+        ownerAccountId: ws.accountId,
+        serverUrl: 'https://vault.example.com',
+        email: 'agent@example.com',
+        vaultUserId: 'user-1',
+        deviceId: crypto.randomUUID(),
+        ...sealVaultSecrets(oldKey, connectionId, {
+          refreshToken: 'refresh-token',
+          userKey: Buffer.alloc(64, 7),
+        }),
+      }),
+    )
+    expect((await masterKeyStatus(database.db, rotating)).remaining).toEqual({
+      memories: 0,
+      credentials: 0,
+      vaultConnections: 1,
+      settings: 0,
+    })
+    expect(await rotationPass(database.db, rotating)).toEqual({ rewrapped: 1, remaining: 0 })
+    expect((await masterKeyStatus(database.db, rotating)).remaining.vaultConnections).toBe(0)
+    expect(await rotationPass(database.db, rotating)).toBeNull()
+  })
+
   it('主密钥状态只给实例管理员', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     const app = appWith(oldKey)
@@ -425,7 +490,7 @@ describe.skipIf(!testDatabaseUrl)('主密钥的准备与轮换', () => {
       configured: true,
       currentId: keyIdOf(oldKey),
       previousId: null,
-      remaining: { memories: 0, credentials: 0, settings: 0 },
+      remaining: { memories: 0, credentials: 0, vaultConnections: 0, settings: 0 },
       lastError: null,
     })
   })

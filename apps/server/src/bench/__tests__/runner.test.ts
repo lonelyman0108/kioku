@@ -33,6 +33,7 @@ const FULL: KeyScopes = {
   writeLayers: [...LAYERS],
   maxSensitivity: 'secret',
   admin: false,
+  credentials: 'manage',
 }
 const READONLY: KeyScopes = { ...FULL, writeLayers: [], maxSensitivity: 'private' }
 

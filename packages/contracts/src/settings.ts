@@ -126,6 +126,8 @@ export const MasterKeyStatus = z.object({
   remaining: z.object({
     memories: z.number().int(),
     credentials: z.number().int(),
+    // 密码库连接保存的令牌与账户密钥
+    vaultConnections: z.number().int(),
     settings: z.number().int(),
   }),
   // 轮换出的错（例如有记录用旧主密钥也解不开）；换完之后清掉
@@ -141,7 +143,7 @@ export const RecallSettings = z.object({
 export type RecallSettings = z.infer<typeof RecallSettings>
 
 // 保留期：删掉的记忆（连同历史、向量、关键词、凭据引用与召回统计）、被推翻的抽取事实、过期的会话摘要，
-// 以及抽取记录、凭据事件、已删除的凭据与凭据源、Dream 的运行记录与处理过的建议、处理完的绑定记录，
+// 以及抽取记录、凭据事件、已删除的凭据、断开的密码库连接、Dream 的运行记录与处理过的建议、处理完的绑定记录，
 // 过了这么多天由每天一次的清理硬删除。和召回事件明细的保留天数是两回事
 export const DEFAULT_RETENTION_DAYS = 30
 export const RetentionSettings = z.object({
@@ -161,7 +163,6 @@ export const RetentionCounts = z.object({
   extractionRuns: z.number().int(),
   credentialEvents: z.number().int(),
   deletedCredentials: z.number().int(),
-  deletedProviders: z.number().int(),
   // 以下几类是后来加的，带默认值：之前记下的清理结果里没有它们，读出来当作 0
   dreamRuns: z.number().int().default(0),
   // Dream 的建议：处理过的（执行或拒绝的）、没处理但已经作废的，涉及的记忆改过、删掉或过期之后清掉
@@ -170,6 +171,8 @@ export const RetentionCounts = z.object({
   subjectBindings: z.number().int().default(0),
   // 读到 secret 正文的访问事件：和凭据的访问记录一样按时间清
   accessEvents: z.number().int().default(0),
+  // 断开超过保留期、也没有凭据（含已删除的）指着的密码库连接
+  vaultConnections: z.number().int().default(0),
 })
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 

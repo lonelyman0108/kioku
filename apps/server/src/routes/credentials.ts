@@ -2,25 +2,27 @@ import { createRoute, z } from '@hono/zod-openapi'
 import {
   ConsoleCredential,
   ConsoleCredentialList,
-  CreateCredentialProviderRequest,
+  ConnectVaultRequest,
   CreateCredentialRequest,
   CredentialAccess,
   CredentialEventList,
   CredentialIdentifierQuery,
-  CredentialProvider,
   CredentialReferenceList,
   CredentialSummary,
   CredentialValues,
   DeletedCredentialList,
-  DeletedCredentialProviderList,
   ErrorResponse,
   KeyCreateCredentialRequest,
   KeyCredentialList,
   KeyDeleteCredentialQuery,
   KeyUpdateCredentialRequest,
   PageQuery,
-  UpdateCredentialProviderRequest,
+  ReconnectVaultRequest,
   UpdateCredentialRequest,
+  VaultConnection,
+  VaultConnectionList,
+  VaultConnectResult,
+  VaultItemList,
 } from '@kioku/contracts'
 import type { Context } from 'hono'
 
@@ -36,11 +38,12 @@ const errors = {
   403: jsonResponse('没有权限', ErrorResponse),
   404: jsonResponse('不存在或不可见', ErrorResponse),
   409: jsonResponse('冲突', ErrorResponse),
+  502: jsonResponse('密码库无法连接或返回的内容无法识别', ErrorResponse),
 }
 
 const SpaceParams = z.object({ spaceId: z.uuid() })
 const CredentialParams = SpaceParams.extend({ credentialId: z.uuid() })
-const ProviderParams = SpaceParams.extend({ providerId: z.uuid() })
+const ConnectionParams = SpaceParams.extend({ connectionId: z.uuid() })
 const VersionQuery = z.object({ expectedVersion: z.coerce.number().int().optional() })
 
 // 带着值的响应不让浏览器和代理缓存
@@ -77,7 +80,7 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'post',
     path: base,
-    summary: '新建凭据：值由 Kioku 加密保存，或绑定到外部凭据源里的条目',
+    summary: '新建凭据：值由 Kioku 加密保存，或给连接的密码库里的条目起标识',
     request: { params: SpaceParams, body: jsonBody(CreateCredentialRequest) },
     responses: { 201: jsonResponse('已创建', ConsoleCredential), ...errors },
   })
@@ -85,7 +88,7 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'get',
     path: `${base}/{credentialId}`,
-    summary: '读取一条凭据的说明与绑定（不含值）',
+    summary: '读取一条凭据的说明、字段与来源（不含值）',
     request: { params: CredentialParams },
     responses: { 200: jsonResponse('凭据', ConsoleCredential), ...errors },
   })
@@ -93,7 +96,7 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'patch',
     path: `${base}/{credentialId}`,
-    summary: '修改凭据的名称、说明、来源、托管的值或限定的应用',
+    summary: '修改凭据的名称、说明、限定的应用，托管的值或密码库的字段对应；来源不能改',
     request: { params: CredentialParams, body: jsonBody(UpdateCredentialRequest) },
     responses: { 200: jsonResponse('已修改', ConsoleCredential), ...errors },
   })
@@ -109,7 +112,7 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'post',
     path: `${base}/{credentialId}/undelete`,
-    summary: '撤销删除；同一个标识已经有有效的凭据时不能恢复',
+    summary: '撤销删除；同一个标识或同一个条目已经有有效的凭据时不能恢复',
     request: { params: CredentialParams },
     responses: { 200: jsonResponse('恢复后的凭据', ConsoleCredential), ...errors },
   })
@@ -117,7 +120,7 @@ function consoleCredentialRoutes(deps: Deps) {
     ...common,
     method: 'post',
     path: `${base}/{credentialId}/reveal`,
-    summary: '查看托管的值，记一条访问事件',
+    summary: '查看值（托管的与密码库的，totp 给验证码），记一条访问事件',
     request: { params: CredentialParams },
     responses: { 200: jsonResponse('值', CredentialValues), ...errors },
   })
@@ -137,52 +140,68 @@ function consoleCredentialRoutes(deps: Deps) {
     request: { params: CredentialParams },
     responses: { 200: jsonResponse('引用它的记忆', CredentialReferenceList), ...errors },
   })
-  const providers = createRoute({
-    ...common,
+  const connBase = '/spaces/{spaceId}/vault-connections'
+  const connCommon = { tags: ['vault-connections'] }
+  const connections = createRoute({
+    ...connCommon,
     method: 'get',
-    path: '/spaces/{spaceId}/credential-providers',
-    summary: '列出自己的凭据源',
+    path: connBase,
+    summary: '列出自己的密码库连接',
     request: { params: SpaceParams },
-    responses: { 200: jsonResponse('凭据源', z.array(CredentialProvider)), ...errors },
+    responses: { 200: jsonResponse('连接', VaultConnectionList), ...errors },
   })
-  const deletedProviders = createRoute({
-    ...common,
-    method: 'get',
-    path: '/spaces/{spaceId}/credential-providers/deleted',
-    summary: '列出自己已删除的凭据源（不能恢复），最近删除的在前，带上什么时候永久清除',
-    request: { params: SpaceParams },
-    responses: {
-      200: jsonResponse('已删除的凭据源', DeletedCredentialProviderList),
-      ...errors,
-    },
-  })
-  const createProvider = createRoute({
-    ...common,
+  const connect = createRoute({
+    ...connCommon,
     method: 'post',
-    path: '/spaces/{spaceId}/credential-providers',
-    summary: '新建凭据源：类型与给 agent 看的使用说明',
-    request: { params: SpaceParams, body: jsonBody(CreateCredentialProviderRequest) },
-    responses: { 201: jsonResponse('已创建', CredentialProvider), ...errors },
+    path: connBase,
+    summary: '连接密码库：用主密码登录，保存刷新令牌与账户密钥（不保存主密码）；只接专用账号',
+    request: { params: SpaceParams, body: jsonBody(ConnectVaultRequest) },
+    responses: { 200: jsonResponse('连接的结果', VaultConnectResult), ...errors },
   })
-  const updateProvider = createRoute({
-    ...common,
-    method: 'patch',
-    path: '/spaces/{spaceId}/credential-providers/{providerId}',
-    summary: '修改凭据源',
-    request: { params: ProviderParams, body: jsonBody(UpdateCredentialProviderRequest) },
-    responses: { 200: jsonResponse('已修改', CredentialProvider), ...errors },
+  const reconnect = createRoute({
+    ...connCommon,
+    method: 'post',
+    path: `${connBase}/{connectionId}/reconnect`,
+    summary: '重新登录同一个账号',
+    request: { params: ConnectionParams, body: jsonBody(ReconnectVaultRequest) },
+    responses: { 200: jsonResponse('连接的结果', VaultConnectResult), ...errors },
   })
-  const removeProvider = createRoute({
-    ...common,
-    method: 'delete',
-    path: '/spaces/{spaceId}/credential-providers/{providerId}',
-    summary: '删除凭据源；还有有效的凭据绑定它时不能删',
-    request: { params: ProviderParams },
-    responses: { 204: { description: '已删除' }, ...errors },
+  const check = createRoute({
+    ...connCommon,
+    method: 'post',
+    path: `${connBase}/{connectionId}/check`,
+    summary:
+      '重新同步一次：停用的原因已经消失就恢复成可用；连不上或返回的内容无法识别时记下最近的错误，回 502',
+    request: { params: ConnectionParams },
+    responses: { 200: jsonResponse('连接', VaultConnection), ...errors },
+  })
+  const disconnect = createRoute({
+    ...connCommon,
+    method: 'post',
+    path: `${connBase}/{connectionId}/disconnect`,
+    summary: '断开：立即清掉保存的令牌与密钥，连接与凭据留着',
+    request: { params: ConnectionParams },
+    responses: { 200: jsonResponse('连接', VaultConnection), ...errors },
+  })
+  const items = createRoute({
+    ...connCommon,
+    method: 'get',
+    path: `${connBase}/{connectionId}/items`,
+    summary: '列出连接读得到的条目（不含值），顺带同步一次',
+    request: { params: ConnectionParams },
+    responses: { 200: jsonResponse('条目', VaultItemList), ...errors },
   })
 
   const service = (c: Context<AppEnv>) =>
     credentialServiceForConsole(deps, c.req.param('spaceId')!, c.get('console').accountId)
+  // 密码库连接：列出要凭据能力「取用」，其余要「管理」（目前只有空间 owner）
+  const vault = async (c: Context<AppEnv>, manage = true) => {
+    const s = await service(c)
+    if (manage) s.requireManage()
+    else s.requireUse()
+    return s.vault
+  }
+  const connectionId = (c: Context<AppEnv>) => c.req.param('connectionId')!
   // 已删除的列表带上保留期：保留天数与是否暂停对谁都一样，暂停到什么时候只给实例管理员
   const withRetention = <T extends object>(c: Context<AppEnv>, list: Promise<T>) =>
     withDeletionRetention(deps.db, list, isInstanceAdmin(deps.db, c.get('console').accountId))
@@ -225,35 +244,31 @@ function consoleCredentialRoutes(deps: Deps) {
     .openapi(references, async (c) =>
       c.json(await (await service(c)).references(c.req.valid('param').credentialId), 200),
     )
-    .openapi(providers, async (c) => c.json(await (await service(c)).providers(), 200))
-    .openapi(deletedProviders, async (c) =>
-      c.json(await withRetention(c, (await service(c)).deletedProviders()), 200),
+    .openapi(connections, async (c) => c.json(await (await vault(c, false)).list(), 200))
+    .openapi(connect, async (c) => c.json(await (await vault(c)).connect(c.req.valid('json')), 200))
+    .openapi(reconnect, async (c) =>
+      c.json(await (await vault(c)).reconnect(connectionId(c), c.req.valid('json')), 200),
     )
-    .openapi(createProvider, async (c) =>
-      c.json(await (await service(c)).createProvider(c.req.valid('json')), 201),
+    .openapi(check, async (c) => c.json(await (await vault(c)).check(connectionId(c)), 200))
+    .openapi(disconnect, async (c) =>
+      c.json(await (await vault(c)).disconnect(connectionId(c)), 200),
     )
-    .openapi(updateProvider, async (c) =>
-      c.json(
-        await (
-          await service(c)
-        ).updateProvider(c.req.valid('param').providerId, c.req.valid('json')),
-        200,
-      ),
-    )
-    .openapi(removeProvider, async (c) => {
-      await (await service(c)).deleteProvider(c.req.valid('param').providerId)
-      return c.body(null, 204)
+    .openapi(items, async (c) => {
+      const list = await (await vault(c)).items(connectionId(c))
+      noStore(c)
+      return c.json(list, 200)
     })
 }
 
-// 接入方：按标识访问应用所有者的凭据，权限按 Key 算：读说明同本人的私密记忆，取托管的值与管理凭据要 secret 级
+// 接入方：按标识访问应用所有者的凭据，权限按 Key 的凭据能力算：取用要「取用」，新建、修改、删除要「管理」
 function keyCredentialRoutes(deps: Deps) {
   const common = { tags: ['credentials'], security: [{ bearer: [] }] }
   const use = createRoute({
     ...common,
     method: 'get',
     path: '/credentials',
-    summary: '取用一条凭据：托管的给值，外部的给凭据源、条目位置与取法；记一条访问事件',
+    summary:
+      '取用一条凭据：给值（totp 给验证码），可以带一句用途；交出值、被拒或失败都记一条访问事件',
     request: { query: CredentialIdentifierQuery },
     responses: { 200: jsonResponse('凭据', CredentialAccess), ...errors },
   })
@@ -261,14 +276,14 @@ function keyCredentialRoutes(deps: Deps) {
     ...common,
     method: 'get',
     path: '/credentials/list',
-    summary: '列出这把 Key 看得到的凭据与凭据源（不含值与外部条目的位置）',
+    summary: '列出这把 Key 能取用的凭据（不含值）',
     responses: { 200: jsonResponse('凭据', KeyCredentialList), ...errors },
   })
   const create = createRoute({
     ...common,
     method: 'post',
     path: '/credentials',
-    summary: '新建凭据，只给这个应用用；要能读写本人（user://）、secret 级的访问密钥',
+    summary: '新建 Kioku 托管的凭据，只给这个应用用；要凭据能力为「管理」的访问密钥',
     request: { body: jsonBody(KeyCreateCredentialRequest) },
     responses: { 201: jsonResponse('已创建', CredentialSummary), ...errors },
   })
@@ -276,7 +291,7 @@ function keyCredentialRoutes(deps: Deps) {
     ...common,
     method: 'patch',
     path: '/credentials',
-    summary: '按标识修改凭据；不能改限定的应用',
+    summary: '按标识修改凭据；不能改限定的应用，密码库的凭据只能改名称与说明',
     request: { body: jsonBody(KeyUpdateCredentialRequest) },
     responses: { 200: jsonResponse('已修改', CredentialSummary), ...errors },
   })
@@ -296,8 +311,8 @@ function keyCredentialRoutes(deps: Deps) {
   return app
     .openapi(list, async (c) => c.json(await service(c).keyList(), 200))
     .openapi(use, async (c) => {
-      const { identifier, field } = c.req.valid('query')
-      const result = await service(c).use(identifier, field, 'rest')
+      const { identifier, field, purpose } = c.req.valid('query')
+      const result = await service(c).use(identifier, field, 'rest', purpose)
       noStore(c)
       return c.json(result, 200)
     })

@@ -12,6 +12,8 @@ export default tseslint.config(
       '**/coverage/**',
       'apps/web/auto-imports.d.ts',
       'apps/web/components.d.ts',
+      // Claude Code 把 worktree 放在仓库目录里，别的 worktree 的文件不归这份检查
+      '.claude/worktrees/**',
     ],
   },
   js.configs.recommended,

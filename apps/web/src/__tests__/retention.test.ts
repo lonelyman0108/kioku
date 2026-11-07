@@ -6,7 +6,6 @@ import {
   daysUntilPurge,
   deletionNotice,
   pauseText,
-  providerPurgeNote,
   purgeAt,
   purgeNote,
   releasedNotice,
@@ -26,7 +25,7 @@ const zero: RetentionCounts = {
   credentialEvents: 0,
   accessEvents: 0,
   deletedCredentials: 0,
-  deletedProviders: 0,
+  vaultConnections: 0,
   subjectBindings: 0,
 }
 
@@ -37,11 +36,11 @@ describe('保留期清理的结果', () => {
   })
 
   it('只列删了东西的几类，按固定的顺序', () => {
-    const counts = { ...zero, deletedProviders: 1, deletedMemories: 12, credentialEvents: 3 }
+    const counts = { ...zero, vaultConnections: 1, deletedMemories: 12, credentialEvents: 3 }
     expect(retentionSummary(counts)).toEqual([
       { label: '已删除的记忆', count: 12 },
       { label: '凭据事件', count: 3 },
-      { label: '已删除的凭据源', count: 1 },
+      { label: '已断开的密码库连接', count: 1 },
     ])
     expect(retentionTotal(counts)).toBe(16)
   })
@@ -148,38 +147,6 @@ describe('已删除的记忆什么时候永久清除', () => {
     })
     expect(purgeNote(ago(10), pausedOnly, now)).toEqual({
       text: '至少 20 天后永久清除',
-      soon: false,
-    })
-  })
-
-  it('已删除的凭据源：还有没删除的凭据指着时不说几天；否则从保留期的起点算，规则和别的已删除记录一样', () => {
-    expect(providerPurgeNote({ retentionFrom: null }, normal, now)).toEqual({
-      text: '仍有凭据绑定，暂不清除',
-      soon: false,
-    })
-    expect(providerPurgeNote({ retentionFrom: null }, pausedUntil(later(12)), now)).toEqual({
-      text: '仍有凭据绑定，暂不清除',
-      soon: false,
-    })
-    // 起点是指着它的已删除凭据里最晚的删除时间时，照样按它算
-    expect(providerPurgeNote({ retentionFrom: ago(10) }, normal, now)).toEqual({
-      text: '约 20 天后永久清除',
-      soon: false,
-    })
-    expect(providerPurgeNote({ retentionFrom: ago(28) }, normal, now)).toEqual({
-      text: '约 2 天后永久清除',
-      soon: true,
-    })
-    expect(providerPurgeNote({ retentionFrom: ago(45) }, normal, now)).toEqual({
-      text: '即将永久清除',
-      soon: true,
-    })
-    expect(providerPurgeNote({ retentionFrom: ago(45) }, pausedUntil(later(12)), now)).toEqual({
-      text: '约 12 天后永久清除',
-      soon: false,
-    })
-    expect(providerPurgeNote({ retentionFrom: ago(45) }, pausedOnly, now)).toEqual({
-      text: '暂停结束后清除',
       soon: false,
     })
   })

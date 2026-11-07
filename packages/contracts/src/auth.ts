@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { KeyScopes, Layer, MemberRole, Sensitivity } from './memory'
+import { CredentialCapability, KeyScopes, Layer, MemberRole, Sensitivity } from './memory'
 
 export const Username = z
   .string()
@@ -230,6 +230,8 @@ export const KeyAccessMatrix = z.object({
       // 读得到哪些来源作用域写下的记忆：any 不限；app 只含全局与本应用写下的；
       // group、direct 再加上本群、与此人的对话里写下的
       originScope: z.enum(['any', 'app', 'group', 'direct']),
+      // 这个会话上下文下实际的凭据能力：要能读本人的私密记忆，所以只有不带会话上下文时可能不是 none
+      credentials: CredentialCapability,
     }),
   ),
 })
