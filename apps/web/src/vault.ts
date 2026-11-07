@@ -43,6 +43,13 @@ export function itemFieldLabel(ref: string): string {
     : ref
 }
 
+// 接在「条目「…」的」后面的说法：自定义字段名是用户起的（多是英文），加上「字段「…」」才读得通
+export function itemFieldPhrase(ref: string): string {
+  return ref.startsWith(VAULT_CUSTOM_FIELD_PREFIX)
+    ? `字段「${itemFieldLabel(ref)}」`
+    : itemFieldLabel(ref)
+}
+
 export const vaultItemTypeLabels: Record<VaultItemType, string> = {
   login: '登录',
   note: '安全笔记',

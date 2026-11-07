@@ -2,7 +2,7 @@
 import { useId } from 'vue'
 
 import { itemKey, type ConvertDestination, type UnmappedVaultField } from '../plaintext'
-import { itemFieldLabel } from '../vault'
+import { itemFieldPhrase } from '../vault'
 import Hint from './Hint.vue'
 
 // 转存的去处：已有凭据、还没起标识的密码库条目、新建托管凭据，单选。选中条目时填它的标识，
@@ -44,7 +44,7 @@ const group = useId()
           凭据「{{ d.name }}」<code class="destination-ref">{{ d.identifier }}#{{ d.field }}</code>
         </span>
         <span v-else-if="d.kind === 'vault'" class="min-w-0">
-          密码库条目「{{ d.itemName }}」的{{ itemFieldLabel(d.itemField) }}
+          密码库条目「{{ d.itemName }}」的{{ itemFieldPhrase(d.itemField) }}
           <span class="text-muted">尚未起标识</span>
         </span>
         <span v-else>新建托管凭据</span>
@@ -91,7 +91,7 @@ const group = useId()
       </div>
     </div>
     <p v-for="(u, i) in unmapped" :key="i" class="destination-unmapped">
-      条目「{{ u.itemName }}」的{{ itemFieldLabel(u.itemField) }}同值，凭据
+      条目「{{ u.itemName }}」的{{ itemFieldPhrase(u.itemField) }}同值，凭据
       <code>{{ u.identifier }}</code> 中暂无这个字段<Hint>
         在凭据页给这条凭据添加这个字段的对应后可选。
       </Hint>
