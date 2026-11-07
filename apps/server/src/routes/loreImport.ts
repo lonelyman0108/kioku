@@ -145,12 +145,21 @@ function spotsOf(
 // 要换成占位符的几处：按 Lore 的 URI（别名也算）找到节点，按 index 找到那一处，对不上节点或那一处时 400
 // （调用方先比过指纹，来源变了的已经是 409）。只核对计划里显示的那条凭据（credentialId 与 field）这个字段现在的值
 // （known 是写入之前刚取的）：还等于这一处的值才换成它的占位符，否则照原样写，不改去换成别的同值凭据，见 PlaintextConversion
-function conversionsOf(
+export function conversionsOf(
   snapshot: LoreSnapshot,
   known: KnownCredentialValues | null,
   wanted: { source: string; index: number; credentialId: string; field: string }[],
 ): Map<string, PlaintextConversion[]> {
-  const spots = spotsOf(snapshot, null)
+  // 只扫点到的节点，同一个节点扫一次：这一段在计划快照里、占着导入导出的名额
+  const spots = new Map<string, PlaintextSpot[]>()
+  const spotsIn = (node: LoreSnapshot['nodes'][number]) => {
+    let found = spots.get(node.uuid)
+    if (!found) {
+      found = plaintextSpots(node.content, null)
+      spots.set(node.uuid, found)
+    }
+    return found
+  }
   const nodeByUri = new Map<string, LoreSnapshot['nodes'][number]>()
   for (const node of snapshot.nodes) {
     nodeByUri.set(node.uri, node)
@@ -160,7 +169,7 @@ function conversionsOf(
   const problems: string[] = []
   for (const { source, index, credentialId, field } of wanted) {
     const node = nodeByUri.get(source)
-    const spot = node ? spots.get(node.uuid)?.[index] : undefined
+    const spot = node ? spotsIn(node)[index] : undefined
     if (!node) {
       problems.push(`要换成占位符的 ${source} 在 Lore 中不存在`)
       continue

@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { Slug } from './auth'
-import { PlaintextKind } from './credentials'
+import { CredentialFieldName, PlaintextKind } from './credentials'
 import { Layer, Sensitivity } from './memory'
 
 // 从 Lore 导入（管理界面）：映射、去重与同步的规则和命令行是同一份，数据来源换成 Lore 的导出。
@@ -95,16 +95,17 @@ export const LoreImportApplyRequest = LoreImportPlanRequest.extend({
   // 再按 source 与 index 找那一处，对不上时 400。写入之前服务端重新取这条凭据这个字段的值，只核对它：
   // 还等于这一处的值就把这个值在正文里出现几处换几处，写成 {{cred:<标识>#<字段>}}；不等（改过值、删了）就照原样写，
   // 不改去换成别的同值凭据。只改新建的目标：之前已导入的、写入目标放不进占位符的（见 placeholderAllowed，
-  // 标了 secret 的按机密算）、值也出现在坐标、标题、触发场景或关键词里的、值不满足 ConvertibleValue 的、
-  // 核对时对不上的，都照原样写，原因列进结果的 plaintextKept。勾选不改变计划的指纹、同步与新旧的判断。
-  // 同时在 excludeUris 里的以那边为准
+  // 标了 secret 的按机密算）、值也出现在坐标、标题、触发场景或关键词里的、值无法转存的（不满足 ConvertibleValue：
+  // 太短或太长、前后有空白，或含无法使用的字符）、核对时对不上的，都照原样写，原因列进结果的 plaintextKept。
+  // 是否照原样写按写下去的正文算：同一个值勾了几处、有一处换掉了的，正文里已经没有它，别的几处不再列。
+  // field 的格式不对时 400。勾选不改变计划的指纹、同步与新旧的判断。同时在 excludeUris 里的以那边为准
   convertPlaintext: z
     .array(
       z.object({
         source: z.string().max(2048),
         index: z.number().int().min(0),
         credentialId: z.uuid(),
-        field: z.string().max(64),
+        field: CredentialFieldName,
       }),
     )
     .max(100_000)
@@ -135,7 +136,7 @@ export type LorePlanTarget = z.infer<typeof LorePlanTarget>
 // 节点正文里的一处疑似明文：只有位置、类别与对上的凭据，不含正文与值。
 // index 是 findPlaintextCredentials(正文) 结果里的第几处（从 0 起），line 是它所在的行。
 // credential 是导入人的有效凭据里和这处同值的字段（托管的，与密码库里已对应到字段的），对不上时为 null；
-// 这一处的值不满足 ConvertibleValue（太短、前后有空白、有落单的代理项）时也为 null，不能勾。
+// 这一处的值无法转存（不满足 ConvertibleValue：太短或太长、前后有空白，或含无法使用的字符）时也为 null，不能勾。
 // 只比已有的凭据，导入时不起新的标识：密码库里还没起标识的条目要先在凭据页起好
 export const LorePlaintextSpot = z.object({
   index: z.number().int(),

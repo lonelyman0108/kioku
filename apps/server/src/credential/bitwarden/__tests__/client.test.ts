@@ -685,18 +685,19 @@ describe('取全部条目', () => {
     expect(onSynced).toHaveBeenCalledTimes(2)
   })
 
-  it('换令牌时的同步响应只留给紧接着的 items()：snapshot() 与 item() 拿到令牌后就丢掉', async () => {
-    const rawOf = (session: unknown) =>
-      (session as { access: { raw: unknown } | null }).access?.raw ?? null
-    for (const first of [
-      (s: ReturnType<typeof sessionOf>['session']) => s.snapshot(),
-      (s: ReturnType<typeof sessionOf>['session']) => s.item(fixture.items.login),
-      (s: ReturnType<typeof sessionOf>['session']) => s.items(),
-    ]) {
-      const { session } = sessionOf('dedicated', dedicatedSecrets)
-      await first(session)
-      expect(rawOf(session)).toBeNull()
-    }
+  it('同时发起的 snapshot() 与 items() 共用一次换令牌与同步；原始响应不留在会话上', async () => {
+    const { session, calls } = sessionOf('dedicated', dedicatedSecrets)
+    const [, items] = await Promise.all([
+      session.snapshot(),
+      session.items(),
+      session.item(fixture.items.login),
+    ])
+    expect(items).toHaveLength(5)
+    expect(syncCalls(calls)).toHaveLength(1)
+    // 会话里只有令牌与同步的结果，没有哪里还引用着那份原始响应
+    const access = (session as unknown as { access: Record<string, unknown> }).access
+    expect(Object.keys(access).sort()).toEqual(['expiresAt', 'state', 'token'])
+    expect(Object.keys(session).filter((k) => /raw/i.test(k))).toEqual([])
   })
 
   it('解不开的条目跳过，别的照常', async () => {

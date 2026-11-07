@@ -28,7 +28,7 @@ import {
   replaceOutsidePlaceholders,
   scanPlaceholders,
 } from '../credential/placeholders'
-import { isConvertibleValue, type KnownCredentialValues } from '../credential/service'
+import type { KnownCredentialValues } from '../credential/service'
 import { decryptSecret } from '../crypto/envelope'
 import { decryptionKey, type MasterKey } from '../crypto/keyring'
 import { sealedSettingsKeys } from '../crypto/rotation'
@@ -184,7 +184,7 @@ export interface PlaintextSpot {
 }
 
 // 正文里的疑似明文，按值和已有的凭据比（known 为 null 时都对不上）。同一个值对上几条时取标识、字段排在前面的那条。
-// 值不满足 ConvertibleValue 的（太短、前后有空白等）不比：按值替换会换掉正文里别的内容
+// known.entries 里只有满足 ConvertibleValue 的值（见 knownValues），不满足的这一处自然对不上
 export function plaintextSpots(
   content: string | null,
   known: KnownCredentialValues | null,
@@ -192,9 +192,7 @@ export function plaintextSpots(
   const text = content ?? ''
   return findPlaintextCredentials(text).map((m, index) => {
     const value = text.slice(m.start, m.end)
-    const entry = isConvertibleValue(value)
-      ? known?.entries.find((e) => e.value === value)
-      : undefined
+    const entry = known?.entries.find((e) => e.value === value)
     return {
       index,
       line: m.line,
@@ -574,32 +572,38 @@ export function planImport(
   return plan
 }
 
+// 值不能按值替换时的说法：和 ConvertibleValue 的规则对应（长度、前后空白、落单的代理项与占位符的开头）
+const UNCONVERTIBLE = '值无法转存（太短或太长、前后有空白，或含无法使用的字符）'
+
 // 一个写入目标按勾选换占位符：放得进的换掉（这个值在正文里出现几处换几处，占位符里的不算），放不进的照原样写、说明原因。
 // 规则和转存为凭据相同：目标要在本人、敏感级不低于私密（标了机密的按机密算）；值也出现在坐标、标题、触发场景或关键词里时
-// 不换（那里放不了占位符，换了正文也还留着明文）；换完正文要还在长度上限之内
+// 不换（那里放不了占位符，换了正文也还留着明文）；换完正文要还在长度上限之内。
+// 照原样写的原因按写下去的正文判断：同一个值勾了几处，有一处换掉了，正文里（占位符以外）就不再有它，别的几处不算照原样写
 function convertTarget(
   request: CreateMemoryRequest,
   layer: CuratedLayer,
   sensitivity: Sensitivity,
   conversions: PlaintextConversion[],
 ): Pick<PlannedMemory, 'converted' | 'plaintextKept'> {
-  const kept: string[] = []
-  const lines = (list: PlaintextConversion[]) =>
-    [...new Set(list.map((c) => c.line))].sort((a, b) => a - b).join('、')
-  const stale = conversions.filter((c) => c.problem === 'stale')
-  if (stale.length) {
-    kept.push(
-      `正文第 ${lines(stale)} 行的疑似明文与计划中的凭据已对不上（凭据可能刚修改或删除），照原样写入，可在待处理中转存`,
-    )
+  const reasons: { list: PlaintextConversion[]; text: (lines: string) => string }[] = []
+  const keep = (list: PlaintextConversion[], text: (lines: string) => string) => {
+    if (list.length) reasons.push({ list, text })
   }
-  const short = conversions.filter((c) => c.problem === 'unconvertible')
-  if (short.length) {
-    kept.push(`正文第 ${lines(short)} 行的值太短或前后有空白，按值替换会改到别的内容，照原样写入`)
-  }
+  keep(
+    conversions.filter((c) => c.problem === 'stale'),
+    (lines) =>
+      `正文第 ${lines} 行的疑似明文与计划中的凭据已对不上（凭据可能刚修改或删除），照原样写入，可在待处理中转存`,
+  )
+  keep(
+    conversions.filter((c) => c.problem === 'unconvertible'),
+    (lines) => `正文第 ${lines} 行的${UNCONVERTIBLE}，照原样写入`,
+  )
   let usable = conversions.filter((c) => c.credential)
   if (usable.length && !placeholderAllowed(layer, sensitivity)) {
-    kept.push(
-      `${request.uri} 是${LAYER_NAMES[layer]} · ${SENSITIVITY_NAMES[sensitivity]}，凭据占位符只能放在本人、敏感级不低于私密的记忆中：正文第 ${lines(usable)} 行的疑似明文照原样写入`,
+    keep(
+      usable,
+      (lines) =>
+        `${request.uri} 是${LAYER_NAMES[layer]} · ${SENSITIVITY_NAMES[sensitivity]}，凭据占位符只能放在本人、敏感级不低于私密的记忆中：正文第 ${lines} 行的疑似明文照原样写入`,
     )
     usable = []
   }
@@ -613,28 +617,43 @@ function convertTarget(
     (c) =>
       elsewhere.some((t) => t.includes(c.value)) || placeholderOf(c.credential!).includes(c.value),
   )
-  if (clash.length) {
-    kept.push(
-      `正文第 ${lines(clash)} 行的值也出现在坐标、标题、触发场景或关键词中（这些位置不能写占位符），照原样写入`,
-    )
-    usable = usable.filter((c) => !clash.includes(c))
+  keep(
+    clash,
+    (lines) =>
+      `正文第 ${lines} 行的值也出现在坐标、标题、触发场景或关键词中（这些位置不能写占位符），照原样写入`,
+  )
+  usable = usable.filter((c) => !clash.includes(c))
+
+  let converted: PlannedMemory['converted']
+  if (usable.length) {
+    // 长的先换：一个值是另一个值的一部分时，先换短的会把长的拆开
+    let content = request.content
+    const refs = new Map<string, ConvertedRef>()
+    for (const c of [...usable].sort((a, b) => b.value.length - a.value.length)) {
+      const swapped = replaceOutsidePlaceholders(content, c.value, placeholderOf(c.credential!))
+      content = swapped.text
+      if (swapped.replaced) refs.set(placeholderOf(c.credential!), c.credential!)
+    }
+    const title = loreTitle(content, request.uri, sensitivity === 'secret')
+    if (CreateMemoryRequest.safeParse({ ...request, content, title }).success) {
+      converted = { content, title, refs: [...refs.values()] }
+    } else {
+      keep(
+        usable,
+        (lines) => `换成占位符后正文超出长度上限：正文第 ${lines} 行的疑似明文照原样写入`,
+      )
+    }
   }
-  if (!usable.length) return kept.length ? { plaintextKept: kept } : {}
-  // 长的先换：一个值是另一个值的一部分时，先换短的会把长的拆开
-  let content = request.content
-  const refs = new Map<string, ConvertedRef>()
-  for (const c of [...usable].sort((a, b) => b.value.length - a.value.length)) {
-    const swapped = replaceOutsidePlaceholders(content, c.value, placeholderOf(c.credential!))
-    content = swapped.text
-    if (swapped.replaced) refs.set(placeholderOf(c.credential!), c.credential!)
-  }
-  const title = loreTitle(content, request.uri, sensitivity === 'secret')
-  if (!CreateMemoryRequest.safeParse({ ...request, content, title }).success) {
-    kept.push(`换成占位符后正文超出长度上限：正文第 ${lines(usable)} 行的疑似明文照原样写入`)
-    return { plaintextKept: kept }
-  }
+  const written = converted?.content ?? request.content
+  const remains = (c: PlaintextConversion) =>
+    replaceOutsidePlaceholders(written, c.value, '').replaced > 0
+  const kept = reasons.flatMap(({ list, text }) => {
+    const left = list.filter(remains)
+    if (!left.length) return []
+    return [text([...new Set(left.map((c) => c.line))].sort((a, b) => a - b).join('、'))]
+  })
   return {
-    converted: { content, title, refs: [...refs.values()] },
+    ...(converted ? { converted } : {}),
     ...(kept.length ? { plaintextKept: kept } : {}),
   }
 }
@@ -1287,7 +1306,7 @@ function protectLoreContent(
     const value = known?.entries.find(
       (e) => e.identifier === ref.identifier && e.field === ref.field,
     )?.value
-    if (value === undefined || !isConvertibleValue(value)) return { kind: 'unknown', ref }
+    if (value === undefined) return { kind: 'unknown', ref }
     values.push({ ref, value })
   }
   let text = content
@@ -1307,9 +1326,10 @@ function unknownReason(ref: ConvertedRef, known: KnownCredentialValues | null | 
   if (known === undefined) return `${head}，命令行无法核对凭据的值：请在管理界面同步`
   if (known === null) return `${head}，这次没有读取凭据的值：请重新查看计划`
   if (known.unconvertible.has(at)) {
-    return `${head}，这条凭据现在的值太短或前后有空白，无法按值核对，这次不同步`
+    return `${head}，这条凭据现在的${UNCONVERTIBLE}，无法按值核对，这次不同步`
   }
   const source = known.unresolved.get(ref.identifier)
+  if (source === 'master_key') return `${head}，服务端未配置主密钥，无法读取凭据的值，这次不同步`
   if (source === 'vault') return `${head}，密码库连接或条目暂时不可用，这次不同步`
   if (source === 'hosted') return `${head}，这条凭据的值无法解密，这次不同步`
   return `${head}，这条凭据已删除或没有这个字段，这次不同步`
@@ -1463,7 +1483,7 @@ export async function planSync(
                   source,
                   uri: m.uri,
                   state: 'skipped',
-                  reason: `导入时已换成 ${at} 的占位符，Lore 的正文里找不到这条凭据现在的值：值换过的，请把 Lore 里的值换成这个占位符；Lore 里删掉了这一处的，请先在 Kioku 里删掉这个占位符`,
+                  reason: `导入时已换成 ${at} 的占位符，Lore 的正文里找不到这条凭据现在的值：值换过的，请把 Lore 里的值换成这个占位符；Lore 里删掉了这一处的，在 Kioku 里同样删掉这个占位符，改过之后这条记忆不再随 Lore 同步`,
                 }
               : {
                   source,

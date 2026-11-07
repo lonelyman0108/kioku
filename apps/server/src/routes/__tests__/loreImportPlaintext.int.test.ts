@@ -438,7 +438,7 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
     expect(item.state).toBe('skipped')
     expect(item.reason).toContain('wifi#password')
     expect(item.reason).toContain('请把 Lore 里的值换成这个占位符')
-    expect(item.reason).toContain('请先在 Kioku 里删掉这个占位符')
+    expect(item.reason).toContain('在 Kioku 里同样删掉这个占位符，改过之后这条记忆不再随 Lore 同步')
     await applyOf(source, plan)
     expect(await contentOf('user://infra/wifi')).toBe(wifiBody('{{cred:wifi#password}}'))
 
@@ -467,7 +467,7 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
     await editLore('infra://wifi', '# 无线网络\n访客网络见门口\ntoken = other-token-xyz')
     const item = syncOf(await planOf(await fileSource()), 'user://infra/wifi')
     expect(item.state).toBe('skipped')
-    expect(item.reason).toContain('请先在 Kioku 里删掉这个占位符')
+    expect(item.reason).toContain('在 Kioku 里同样删掉这个占位符，改过之后这条记忆不再随 Lore 同步')
   })
 
   it('凭据现在的值太短时不按值替换，按读不到值不同步', async () => {
@@ -499,6 +499,83 @@ describe.skipIf(!testDatabaseUrl)('Lore 导入里的疑似明文', () => {
     expect(syncOf(later, 'user://infra/vpn').reason).toContain('密码库连接或条目暂时不可用')
     await applyOf(source, later)
     expect(await contentOf('user://infra/vpn')).toBe('vpn password: {{cred:router#password}}')
+  })
+
+  it('同一个值勾了两处、一处核对不上：另一处已经把它全换掉，不再报照原样写', async () => {
+    await hostedWifi()
+    const backup = await ok<ConsoleCredential>(
+      await send('POST', '/credentials', {
+        identifier: 'wifi-b',
+        name: '无线网络备份',
+        source: { kind: 'hosted', values: { password: WIFI } },
+      }),
+      201,
+    )
+    await seed('infra://twice', `密码：${WIFI}\n备用密码：${WIFI}`)
+    const source = await fileSource()
+    const plan = await planOf(source)
+    // 第二处带的凭据核对时已经改了值
+    await ok(
+      await send('PATCH', `/credentials/${backup.id}`, {
+        expectedVersion: backup.version,
+        values: { password: 'changed-value-000' },
+      }),
+    )
+    const result = await applyOf(source, plan, {
+      convertPlaintext: [
+        spotOf(plan, 'infra://twice', 0),
+        { source: 'infra://twice', index: 1, credentialId: backup.id, field: 'password' },
+      ],
+    })
+    expect(await contentOf('user://infra/twice')).toBe(
+      '密码：{{cred:wifi#password}}\n备用密码：{{cred:wifi#password}}',
+    )
+    expect(result.plaintextConverted).toEqual(['user://infra/twice'])
+    expect(result.plaintextKept).toEqual([])
+  })
+
+  it('没配主密钥时同步的原因说主密钥，不说成密码库不可用', async () => {
+    await hostedWifi()
+    await importConverted()
+    await editLore('infra://wifi', wifiBody(WIFI, '\n只给访客用'))
+    const noKey = createApp({
+      db: database.db,
+      cookieSecure: false,
+      masterKey: null,
+      embedder: staticEmbedderSource(null),
+      jobs: null,
+      vault: vault.client,
+    })
+    const res = await noKey.request(
+      `/v1/spaces/${ws.spaceId}/lore-import/plan`,
+      jsonRequest('POST', { source: await fileSource() }, { cookie: ws.cookie }),
+    )
+    const item = syncOf(LoreImportPlan.parse(await ok(res)), 'user://infra/wifi')
+    expect(item).toMatchObject({ state: 'unreadable', reason: expect.stringContaining('主密钥') })
+  })
+
+  it('条目读到了、对应的字段没了：说已删除或没有这个字段，不说成密码库不可用', async () => {
+    await connectRouter()
+    await seed('infra://vpn', `vpn password: ${ROUTER}`)
+    const first = await fileSource()
+    const plan = await planOf(first)
+    await applyOf(first, plan, { convertPlaintext: [spotOf(plan, 'infra://vpn')] })
+    vault.setItemValues(routerItem, {})
+    await editLore('infra://vpn', `vpn password: ${ROUTER}\n改过`)
+    const item = syncOf(await planOf(await fileSource()), 'user://infra/vpn')
+    expect(item.state).toBe('unreadable')
+    expect(item.reason).toContain('已删除或没有这个字段')
+  })
+
+  it('field 的格式不对时 400', async () => {
+    const source = await fileSource()
+    const plan = await planOf(source)
+    const res = await applyRaw(source, plan, {
+      convertPlaintext: [
+        { source: 'infra://wifi', index: 0, credentialId: OTHER_ID, field: 'Bad Field' },
+      ],
+    })
+    expect(res.status).toBe(400)
   })
 
   it('命令行同步（不给凭据的值）不动换过占位符的记忆', async () => {

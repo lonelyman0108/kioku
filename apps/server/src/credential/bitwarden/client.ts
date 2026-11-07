@@ -226,9 +226,12 @@ interface Access {
   expiresAt: number
   // 最近一次同步的结果，再同步时换掉
   state: SyncedState
-  // 换令牌时那次同步的原始响应（条目的值还是密文）：紧接着的 items() 直接用它，不再同步第二次。
-  // 只有 items() 用得上：它用过、snapshot() 与 item() 拿到这个令牌、或者这个令牌再被用到时都丢掉，
-  // 缓存着的会话不长期带着整个密码库的一份密文
+}
+
+// 换到的令牌，和换令牌时那次同步的原始响应（条目的值还是密文）。原始响应不挂在会话上，只随这次换令牌的结果
+// 交给等着它的调用：items() 直接用它，不再同步第二次；别的调用不理，用完就没人引用它
+interface Refreshed {
+  access: Access
   raw: unknown
 }
 
@@ -240,7 +243,7 @@ class Session implements VaultSession {
   private readonly userKey: SymmetricKey
   private access: Access | null = null
   // 正在进行的换令牌与同步：同时发起的调用共用这一次
-  private pending: Promise<Access> | null = null
+  private pending: Promise<Refreshed> | null = null
   // 正在进行的保存刷新令牌
   private saving: Promise<void> | null = null
 
@@ -258,19 +261,14 @@ class Session implements VaultSession {
   async snapshot(): Promise<VaultSnapshot> {
     await this.saveRefreshToken()
     const fresh = await this.ensureAccess()
-    fresh.access.raw = null
     if (fresh.synced) return fresh.access.state.snapshot
     return (await this.withAccess((access) => this.sync(access))).state.snapshot
   }
 
   async items(): Promise<VaultItem[]> {
     await this.saveRefreshToken()
-    const { json, state } = await this.withAccess(async (access, fresh) => {
-      if (fresh && access.raw !== null) {
-        const json = access.raw
-        access.raw = null
-        return { json, state: access.state }
-      }
+    const { json, state } = await this.withAccess(async (access, fresh, raw) => {
+      if (fresh && raw !== undefined) return { json: raw, state: access.state }
       return this.sync(access)
     })
     return formatLogged(this.http, 'sync', () => decodeSyncItems(json, state))
@@ -283,7 +281,6 @@ class Session implements VaultSession {
     await this.saveRefreshToken()
     // 取条目与为它重新同步都在同一个令牌下做：哪一步遇到 401，都换一次令牌从头再来
     const { json, state } = await this.withAccess(async (access, fresh) => {
-      access.raw = null
       const res = await vaultRequest(this.http, `${this.endpoints.api}/ciphers/${id}`, {
         method: 'GET',
         headers: { authorization: `Bearer ${access.token}` },
@@ -317,34 +314,34 @@ class Session implements VaultSession {
   }
 
   // 带着访问令牌执行；令牌被服务端拒绝（401，fn 返回 null）时换一次令牌再试
-  // fresh 为真表示这个令牌是这次调用刚换的，已经同步过
+  // fresh 为真表示这个令牌是这次调用刚换的，已经同步过，raw 是那次同步的原始响应
   private async withAccess<T>(
-    fn: (access: Access, fresh: boolean) => Promise<T | null>,
+    fn: (access: Access, fresh: boolean, raw: unknown) => Promise<T | null>,
   ): Promise<T> {
     const first = await this.ensureAccess()
-    const result = await fn(first.access, first.synced)
+    const result = await fn(first.access, first.synced, first.raw)
     if (result !== null) return result
     if (this.access === first.access) this.access = null
     const second = await this.ensureAccess()
-    const retry = await fn(second.access, second.synced)
+    const retry = await fn(second.access, second.synced, second.raw)
     if (retry === null) throw reauth()
     return retry
   }
 
-  private async ensureAccess(): Promise<{ access: Access; synced: boolean }> {
+  private async ensureAccess(): Promise<{ access: Access; synced: boolean; raw?: unknown }> {
     const current = this.access
     if (current && current.expiresAt - EXPIRY_MARGIN_MS > this.now()) {
-      current.raw = null
       return { access: current, synced: false }
     }
     this.pending ??= this.refresh().finally(() => {
       this.pending = null
     })
-    return { access: await this.pending, synced: true }
+    const { access, raw } = await this.pending
+    return { access, synced: true, raw }
   }
 
   // 换访问令牌、同步、交给 onSynced。任何一步失败都不留访问令牌，下一次调用从头再来，onSynced 的检查不会被跳过
-  private async refresh(): Promise<Access> {
+  private async refresh(): Promise<Refreshed> {
     this.access = null
     const res = await vaultRequest(this.http, `${this.endpoints.identity}/connect/token`, {
       method: 'POST',
@@ -371,10 +368,9 @@ class Session implements VaultSession {
       token: grant.accessToken,
       expiresAt: grant.expiresAt,
       state: synced.state,
-      raw: synced.json,
     }
     this.access = access
-    return access
+    return { access, raw: synced.json }
   }
 
   // 当前的刷新令牌和保存成功的不同时交给 onSecretsChanged：换令牌之后，以及每次 item()、snapshot() 开始时。

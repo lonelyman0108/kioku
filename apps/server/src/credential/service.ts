@@ -866,7 +866,6 @@ export class CredentialService {
     this.requireManage()
     // 在管理界面新建的默认不限定应用，由所有者决定
     const appIds = input.appIds ? [...new Set(input.appIds)].sort() : null
-    const conflict = `标识已被占用或不可用：${input.identifier}`
     const { source } = input
     if (source.kind === 'hosted') {
       return this.run(
@@ -875,10 +874,10 @@ export class CredentialService {
             tx,
             await this.insertHosted(tx, { ...input, values: source.values }, appIds),
           ),
-        conflict,
+        `标识已被占用或不可用：${input.identifier}`,
       )
     }
-    // 给密码库的条目起标识：先向密码库取这个条目，确认读得到、字段对得上，再写库
+    // 给密码库的条目起标识（两个唯一索引的冲突由 insertVault 转成 409）：先向密码库取这个条目，确认读得到、字段对得上，再写库
     const connection = await this.run((tx) => this.vault.load(tx, source.connectionId))
     if (!connection) throw new MemoryError(404, '密码库连接不存在')
     if (connection.status !== 'ok') {
@@ -926,7 +925,7 @@ export class CredentialService {
       // 刚才那次取条目是成功的：和插入放在一个事务里更新连接
       await this.vault.record(tx, connection, { kind: 'ok' })
       return this.consoleViewOf(tx, await this.ownById(tx, id))
-    }, conflict)
+    })
   }
 
   // 在调用方的事务里新建一条托管的凭据，返回 id（转存为凭据：和改记忆放在一个事务里）。
@@ -1094,15 +1093,21 @@ export class CredentialService {
 
   // 当前账号有效凭据各字段现在的值（Lore 导入用）：托管的解开，密码库的只取有凭据指着的连接。
   // 只留能用来按值替换的值（ConvertibleValue：太短的会换掉正文里别的内容），不能用的列进 unconvertible。
-  // 读不到值的凭据列进 unresolved：hosted 是解不开，vault 是连接或条目不可用
+  // 读不到值的凭据列进 unresolved（原因见 UnresolvedReason）。条目读到了、字段空了或没了的不算读不到：
+  // 和凭据删了一样，是这个字段现在没有值
   async knownValues(): Promise<KnownCredentialValues> {
     const collected = await this.collectValues('bound')
     const all = credentialEntries(collected)
-    const read = new Set(all.map((e) => e.id))
-    const unresolved = new Map<string, 'hosted' | 'vault'>()
+    const unresolved = new Map<string, UnresolvedReason>()
     for (const row of collected.rows) {
-      if (!read.has(row.id) && !hostedRead(collected, row))
-        unresolved.set(row.identifier, row.source)
+      if (!this.ctx.masterKey) unresolved.set(row.identifier, 'master_key')
+      else if (row.source === 'hosted') {
+        if (!collected.hosted.has(row.id)) unresolved.set(row.identifier, 'hosted')
+      } else if (
+        !collected.items.get(row.vaultConnectionId!)?.some((i) => i.id === row.vaultItemId)
+      ) {
+        unresolved.set(row.identifier, 'vault')
+      }
     }
     return {
       entries: all.filter((e) => isConvertibleValue(e.value)),
@@ -1885,8 +1890,9 @@ interface CollectedValues {
 }
 
 // 托管的这条解开了（只是声明的字段没有存值，不算读不到）
-const hostedRead = (collected: CollectedValues, row: CredentialRow) =>
-  row.source === 'hosted' && collected.hosted.has(row.id)
+// 读不到值的原因：master_key 是没配主密钥（托管的解不开、密码库的连接都打不开），hosted 是托管的解不开，
+// vault 是密码库的连接或条目不可用
+export type UnresolvedReason = 'master_key' | 'hosted' | 'vault'
 
 // 能按值替换的值：和转存的请求同一个规则（ConvertibleValue）
 export const isConvertibleValue = (value: string) => ConvertibleValue.safeParse(value).success
@@ -1905,8 +1911,8 @@ export interface KnownCredentialValues {
   entries: CredentialValueEntry[]
   // 值读到了、却不能用来按值替换的字段（标识#字段）
   unconvertible: ReadonlySet<string>
-  // 读不到值的凭据：标识 → 来源（hosted 解不开，vault 连接或条目不可用）
-  unresolved: ReadonlyMap<string, 'hosted' | 'vault'>
+  // 读不到值的凭据：标识 → 原因
+  unresolved: ReadonlyMap<string, UnresolvedReason>
   unavailableConnections: number
   unreadableCredentials: number
 }
