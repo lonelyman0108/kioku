@@ -293,7 +293,7 @@ async function undelete(c: ConsoleCredential) {
           <p class="deleted-note">
             连接密码库后，给条目起标识，条目即成为凭据。<Hint>
               <span class="block">
-                仅接受专用账号：账号中有个人条目，或在组织中是所有者、管理员时，连接被拒绝；连接后出现这些情况，连接停用。
+                仅接受专用账号：账号中有个人条目，或在组织中可访问全部集合（所有者、管理员等）时，无法连接；连接后出现这些情况，连接停用，清除后重新检查即可恢复。
               </span>
               <span class="mt-1 block">
                 为 Kioku 单独注册一个账号，加入一个组织，只分配一个集合，把要给 Agent

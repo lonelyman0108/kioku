@@ -50,7 +50,7 @@ describe('连接密码库', () => {
   it('没填全时不能提交，提示用接口的说法', () => {
     const login = start()
     expect(login.problem.value).toBe(
-      '服务器地址要以 http:// 或 https:// 开头，不带账号、查询参数与 #',
+      '服务器地址要以 https:// 开头（本机地址与不带点的主机名可以用 http://），不带账号、查询参数与 #',
     )
     fill(login)
     expect(login.problem.value).toBeNull()
@@ -71,21 +71,20 @@ describe('连接密码库', () => {
     expect(onConnected).toHaveBeenCalledWith(conn, 's1')
   })
 
-  it('要两步验证：选方式、填验证码，带着同一份主密码再交一次，交完清空', async () => {
+  it('要两步验证：只填验证码，带着同一份主密码再交一次，交完清空', async () => {
     fakes.api.connectVault.mockResolvedValueOnce({
       kind: 'two_factor_required',
-      providers: ['email', 'authenticator'],
+      providers: ['authenticator'],
     })
     const login = start()
     fill(login)
     await login.submit()
     expect(login.step.value).toBe('two_factor')
-    expect(login.provider.value).toBe('email')
+    expect(login.provider.value).toBe('authenticator')
     // 第二次提交还要用，先留着
     expect(login.form.masterPassword).toBe('not-a-real-password')
     expect(login.problem.value).toBe('验证码不能为空')
 
-    login.provider.value = 'authenticator'
     login.form.code = '123456'
     await nextTick()
     expect(login.problem.value).toBeNull()
@@ -143,8 +142,8 @@ describe('连接密码库', () => {
     fill(login)
     await login.submit()
     expect(login.form.masterPassword).toBe('')
-    expect(login.failure.value).toContain('均不受支持')
-    expect(login.problem.value).toBe('请选择验证方式')
+    expect(login.failure.value).toBe('不支持此账号的两步验证方式，请为专用账号改用验证器应用')
+    expect(login.problem.value).toBe('不支持此账号的两步验证方式')
   })
 
   it('关掉之后迟到的结果不碰这时的状态', async () => {
@@ -154,7 +153,7 @@ describe('连接密码库', () => {
     fill(login)
     const pending = login.submit()
     login.reset()
-    resolve({ kind: 'two_factor_required', providers: ['email'] })
+    resolve({ kind: 'two_factor_required', providers: ['authenticator'] })
     await pending
     expect(login.step.value).toBe('login')
     expect(login.submitting.value).toBe(false)

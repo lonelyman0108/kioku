@@ -101,9 +101,9 @@ const credentialItems = computed(() =>
   })),
 )
 const credentialHelp: Record<CredentialCapability, string> = {
-  none: '无法列出与取用凭据',
-  use: '列出凭据的说明并取值',
-  manage: '取用之外，还能新建、修改、删除凭据',
+  none: '不能列出与取用凭据',
+  use: '列出凭据并取值',
+  manage: '另可新建、修改、删除凭据',
 }
 // 按签发范围实际能用到的凭据能力，和所选的不同时提示
 const credentialShortfall = computed(() => {

@@ -5,6 +5,9 @@ import appKeys from '../components/AppKeys.vue?raw'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
 import credentialForm from '../components/CredentialFormModal.vue?raw'
 import keyMatrix from '../components/KeyMatrix.vue?raw'
+import vaultPanel from '../components/VaultConnectionPanel.vue?raw'
+import vaultLogin from '../components/VaultLoginModal.vue?raw'
+import settingsPage from '../pages/SettingsPage.vue?raw'
 import {
   allowedCredentialCapability,
   issuedCredentialCapability,
@@ -105,7 +108,7 @@ describe('连接', () => {
     ).toBe('已停用：有个人条目')
     expect(
       connectionStatusText(conn({ status: 'disabled', disabledReason: 'organization_role' })),
-    ).toBe('已停用：组织角色为所有者或管理员')
+    ).toBe('已停用：组织里看得到全部集合')
   })
 
   it('只有可用的连接列条目', () => {
@@ -257,6 +260,17 @@ describe('界面用上了这些规则', () => {
 
   it('起标识的表单按 vaultCredentialDraft 预填', () => {
     expect(credentialForm).toContain('vaultCredentialDraft(item.item, props.identifiers)')
+  })
+
+  it('两步验证只填验证码，不选方式；解不开的条目数写在条目表上方', () => {
+    expect(vaultLogin).not.toContain('URadioGroup')
+    expect(vaultLogin).not.toContain('邮件')
+    expect(vaultPanel).toContain('{{ items.data.value.unreadableCount }} 个条目无法解开<Hint>')
+  })
+
+  it('主密钥剩余的总数算上密码库连接', () => {
+    expect(settingsPage).toContain('r.memories + r.credentials + r.vaultConnections + r.settings')
+    expect(settingsPage).toContain('data.remaining.vaultConnections +')
   })
 
   it('查看的值只放在详情组件里，不进查询缓存', () => {

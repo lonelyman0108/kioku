@@ -4,7 +4,6 @@ import type { VaultConnection } from '@kioku/contracts'
 import { computed, toRef, watch } from 'vue'
 
 import { useVaultLogin } from '../composables/useVaultLogin'
-import { twoFactorLabels } from '../vault'
 import Hint from './Hint.vue'
 import NoteLine from './strata/NoteLine.vue'
 
@@ -15,20 +14,20 @@ const open = defineModel<boolean>('open', { required: true })
 const emit = defineEmits<{ connected: [connection: VaultConnection, spaceId: string] }>()
 const toast = useToast()
 
-const { form, step, providers, provider, submitting, failure, problem, reset, back, submit } =
-  useVaultLogin(toRef(props, 'spaceId'), toRef(props, 'connection'), (connection, sid) => {
+const { form, step, provider, submitting, failure, problem, reset, back, submit } = useVaultLogin(
+  toRef(props, 'spaceId'),
+  toRef(props, 'connection'),
+  (connection, sid) => {
     open.value = false
     toast.add({ title: props.connection ? '已重新登录' : '已连接密码库', color: 'success' })
     emit('connected', connection, sid)
-  })
+  },
+)
 
 // 打开时按要连的那一个重新填；关掉时清掉主密码与验证码
 watch(open, () => reset(), { immediate: true })
 
 const reconnecting = computed(() => props.connection !== null)
-const providerItems = computed(() =>
-  providers.value.map((p) => ({ label: twoFactorLabels[p], value: p })),
-)
 </script>
 
 <template>
@@ -39,7 +38,7 @@ const providerItems = computed(() =>
           <p v-if="!reconnecting" class="text-sm text-muted">
             仅接受专用账号。<Hint>
               <span class="block">
-                账号中有个人条目，或在组织中是所有者、管理员时，连接被拒绝；连接后出现这些情况，连接停用，清除后恢复。
+                账号中有个人条目，或在组织中可访问全部集合（所有者、管理员等）时，无法连接；连接后出现这些情况，连接停用，清除后重新检查即可恢复。
               </span>
               <span class="mt-1 block">
                 原因：Kioku 保存着能解开此账号的密钥，泄露时损失应仅限分配给 Agent 的条目。
@@ -53,7 +52,7 @@ const providerItems = computed(() =>
           </p>
           <UFormField
             label="服务器地址"
-            help="Bitwarden 官方服务或兼容的自建服务端，例如 https://vault.example.com"
+            help="Bitwarden 官方服务或兼容的自建服务端，以 https:// 开头；本机地址与不带点的主机名（例如 http://vaultwarden）可以用 http://"
           >
             <UInput
               v-model="form.serverUrl"
@@ -76,14 +75,7 @@ const providerItems = computed(() =>
         </template>
         <template v-else>
           <p class="text-sm">此账号已开启两步验证。</p>
-          <UFormField v-if="providerItems.length" label="验证方式">
-            <URadioGroup v-model="provider" :items="providerItems" />
-          </UFormField>
-          <UFormField
-            v-if="providerItems.length"
-            label="验证码"
-            :help="provider === 'email' ? '验证码已发送到账号邮箱。' : undefined"
-          >
+          <UFormField v-if="provider" label="验证码">
             <UInput
               v-model="form.code"
               class="w-full font-mono"

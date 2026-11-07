@@ -149,7 +149,7 @@ async function importSpace() {
                 preview.counts.credentials
               }}
               条凭据与
-              {{ preview.counts.providers }} 个密码库连接，以及标记为导出人本人的
+              {{ preview.counts.vaultConnections }} 个密码库连接，以及标记为导出人本人的
               {{ preview.counts.linkedSubjects }}
               个联系人均归当前账号所有；其中符合条件的本人记忆将进入当前账号 Agent
               的启动加载。仅导入本人导出、或导出人同意移交的文件。

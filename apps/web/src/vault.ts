@@ -15,7 +15,6 @@ import {
   type VaultItemList,
   type VaultItemSummary,
   type VaultItemType,
-  type VaultTwoFactorProvider,
 } from '@kioku/contracts'
 
 import { accessContextLabels, credentialChangeLabels, credentialViaLabels } from './labels'
@@ -50,11 +49,6 @@ export const vaultItemTypeLabels: Record<VaultItemType, string> = {
   ssh_key: 'SSH 密钥',
 }
 
-export const twoFactorLabels: Record<VaultTwoFactorProvider, string> = {
-  authenticator: '验证器应用',
-  email: '邮件验证码',
-}
-
 // 最近一次和服务器通信失败的原因
 export const vaultErrorLabels: Record<VaultErrorKind, string> = {
   invalid_credentials: '邮箱或主密码错误',
@@ -82,7 +76,7 @@ export function connectionStatusText(
 // 停用之后怎么恢复：处理掉原因，再重新检查
 export const disabledAdvice: Record<VaultDisabledReason, string> = {
   personal_items: '将个人条目移进组织或删除后，重新检查即可恢复。',
-  organization_role: '将此账号在组织中的角色改为普通成员后，重新检查即可恢复。',
+  organization_role: '将此账号在组织中改为普通成员、只分配需要的集合后，重新检查即可恢复。',
 }
 
 // 只有可用的连接列得出条目；停用、要重新登录、断开的都要先处理

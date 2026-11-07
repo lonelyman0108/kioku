@@ -9,7 +9,8 @@ import { computed, reactive, ref, type Ref } from 'vue'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 
-// 连接与重新登录密码库：先交服务器地址、邮箱与主密码；服务器要两步验证时再选方式、填验证码，带着同一份主密码再交一次。
+// 连接与重新登录密码库：先交服务器地址、邮箱与主密码；服务器要两步验证时再填验证码（只支持验证器应用），
+// 带着同一份主密码再交一次。
 // 主密码只在这里的局部状态里，不进查询缓存、地址或本地存储：连上、失败、返回上一步或关掉都立即清空；
 // 只有等验证码的那一步留着它，第二次提交还要用
 export function useVaultLogin(
@@ -20,7 +21,7 @@ export function useVaultLogin(
 ) {
   const form = reactive({ serverUrl: '', email: '', masterPassword: '', code: '' })
   const step = ref<'login' | 'two_factor'>('login')
-  const providers = ref<VaultTwoFactorProvider[]>([])
+  // 服务器给的可用方式里第一个；只支持验证器应用，界面上不让选
   const provider = ref<VaultTwoFactorProvider | undefined>(undefined)
   const submitting = ref(false)
   const failure = ref<string | null>(null)
@@ -38,7 +39,6 @@ export function useVaultLogin(
       code: '',
     })
     step.value = 'login'
-    providers.value = []
     provider.value = undefined
     submitting.value = false
     failure.value = null
@@ -79,7 +79,7 @@ export function useVaultLogin(
 
   // 提交前在界面上能看出来的问题，规则用接口的定义，提示与服务端一致
   const problem = computed<string | null>(() => {
-    if (step.value === 'two_factor' && !provider.value) return '请选择验证方式'
+    if (step.value === 'two_factor' && !provider.value) return '不支持此账号的两步验证方式'
     const parsed = target.value
       ? ReconnectVaultRequest.safeParse(body())
       : ConnectVaultRequest.safeParse(body())
@@ -102,12 +102,11 @@ export function useVaultLogin(
       if (result.kind === 'two_factor_required') {
         // 主密码留到第二次提交
         step.value = 'two_factor'
-        providers.value = result.providers
         provider.value = result.providers[0]
         form.code = ''
-        if (!result.providers.length) {
+        if (!provider.value) {
           form.masterPassword = ''
-          failure.value = '此账号的两步验证方式均不受支持，请启用验证器应用或邮件验证码'
+          failure.value = '不支持此账号的两步验证方式，请为专用账号改用验证器应用'
         }
         return
       }
@@ -126,5 +125,5 @@ export function useVaultLogin(
     }
   }
 
-  return { form, step, providers, provider, submitting, failure, problem, reset, back, submit }
+  return { form, step, provider, submitting, failure, problem, reset, back, submit }
 }

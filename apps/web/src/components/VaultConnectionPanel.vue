@@ -2,7 +2,7 @@
 import { useToast } from '@nuxt/ui/composables'
 import type { VaultConnection, VaultItemSummary } from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
@@ -17,6 +17,7 @@ import {
   vaultErrorLabels,
   vaultItemTypeLabels,
 } from '../vault'
+import Hint from './Hint.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 
 // 一个密码库连接：状态与操作，以及它读得到的条目（名称、类型、字段与所在集合，不含值）
@@ -35,6 +36,14 @@ const items = useQuery({
   queryFn: ({ queryKey: [, sid, id] }) => api.vaultItems(sid, id),
   enabled: computed(() => props.canManage && itemsAvailable(c.value)),
 })
+// 列条目时服务端会同步一次：连不上记进最近的错误，出现个人条目这类情况连接停用。读取失败时重读连接，状态跟上
+watch(
+  () => items.isError.value,
+  (failed) => {
+    if (failed)
+      void queryClient.invalidateQueries({ queryKey: ['vault-connections', props.spaceId] })
+  },
+)
 
 // 状态变了，条目与指向它的凭据也跟着变
 async function refresh(sid: string) {
@@ -159,6 +168,11 @@ const itemRows = computed(() => {
       <div v-if="items.isError.value" class="pt-2">
         <ReadFailureNote :query="items" size="xs" />
       </div>
+      <p v-if="items.data.value?.unreadableCount" class="conn-error">
+        {{ items.data.value.unreadableCount }} 个条目无法解开<Hint>
+          加密格式无法识别或内容校验失败，这些条目不在列表中，也无法起标识。
+        </Hint>
+      </p>
       <div v-if="items.isPending.value" class="space-y-2 pt-3">
         <USkeleton v-for="n in 3" :key="n" class="h-9 w-full" />
       </div>
