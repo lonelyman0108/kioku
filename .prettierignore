@@ -7,3 +7,5 @@ apps/web/components.d.ts
 # Python 的虚拟环境，以及由 sdks/python/generate.sh 生成的 OpenAPI 文档
 .venv/
 sdks/python/openapi.json
+# Claude Code 的 worktree 放在仓库目录里（git 靠全局忽略跳过它们，prettier 不读那份）
+.claude/worktrees/
