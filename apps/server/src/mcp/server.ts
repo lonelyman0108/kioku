@@ -1,9 +1,11 @@
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { WebStandardStreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/webStandardStreamableHttp.js'
 import {
+  CREDENTIAL_PURPOSE_MAX,
   CreateMemoryRequest,
   CredentialFieldName,
   CredentialIdentifier,
+  CredentialIdentifierQuery,
   KeyCreateCredentialRequest,
   KeyUpdateCredentialRequest,
   MemoryUri,
@@ -77,33 +79,6 @@ function withPlaintextReminder(view: MemoryView): string {
     : text
 }
 
-interface CredentialSourceArgs {
-  values?: Record<string, string | null> | undefined
-  provider_id?: string | undefined
-  location?: string | undefined
-  fields?: { name: string; source_field: string }[] | undefined
-}
-
-// 托管的给 values，外部的给 provider_id、location 与 fields；都没给表示不改来源
-function sourceFromArgs(args: CredentialSourceArgs) {
-  const external =
-    args.provider_id !== undefined || args.location !== undefined || args.fields !== undefined
-  if (args.values !== undefined && external) {
-    throw new MemoryError(
-      400,
-      'values（Kioku 托管）与 provider_id、location、fields（外部凭据源）只能给一种',
-    )
-  }
-  if (args.values !== undefined) return { kind: 'hosted' as const, values: args.values }
-  if (!external) return undefined
-  return {
-    kind: 'external' as const,
-    providerId: args.provider_id,
-    location: args.location,
-    fields: args.fields?.map((f) => ({ name: f.name, sourceField: f.source_field })),
-  }
-}
-
 export function buildMcpServer(
   memory: MemoryService,
   scope: RecallScope,
@@ -157,7 +132,7 @@ export function buildMcpServer(
         const found =
           view.layer === 'user'
             ? await credentials.forPlaceholders(identifiers)
-            : identifiers.map((identifier) => ({ identifier, available: false as const }))
+            : identifiers.map((identifier) => ({ identifier, usable: false, name: null }))
         return `${formatMemory(view)}\n\n${formatPlaceholderCredentials(found)}`
       }),
   )
@@ -302,8 +277,8 @@ export function buildMcpServer(
     'kioku_credential',
     {
       description:
-        '取用凭据。记忆正文里的 {{cred:<标识>}} 与 {{cred:<标识>#<字段>}} 是凭据占位符：给标识时，' +
-        'Kioku 托管的返回值，外部凭据源的返回凭据源、条目位置和取法，取到时记一条访问事件；不给标识时列出看得到的凭据与凭据源。' +
+        '取用凭据。记忆正文里的 {{cred:<标识>}} 与 {{cred:<标识>#<字段>}} 是凭据占位符：给标识时返回值（totp 字段给当前的验证码），' +
+        '每次取用都记一条访问事件；不给标识时列出可取用的凭据，只有说明，不含值。' +
         '用到时才取，不要把值写回记忆，也不要显示在回复里。',
       inputSchema: {
         identifier: CredentialIdentifier.optional().describe(
@@ -312,23 +287,29 @@ export function buildMcpServer(
         field: CredentialFieldName.optional().describe(
           '只取一个字段，例如 password；不填取全部字段',
         ),
+        purpose: z
+          .string()
+          .optional()
+          .describe(`这次取用是为了什么，记进访问事件，最多 ${CREDENTIAL_PURPOSE_MAX} 个字`),
       },
     },
-    ({ identifier, field }) =>
-      tool(async () =>
-        identifier
-          ? formatCredentialAccess(await credentials.use(identifier, field, 'kioku_credential'))
-          : formatCredentialList(await credentials.keyList()),
-      ),
+    ({ identifier, field, purpose }) =>
+      tool(async () => {
+        if (!identifier) return formatCredentialList(await credentials.keyList())
+        const query = parse(CredentialIdentifierQuery, { identifier, field, purpose })
+        return formatCredentialAccess(
+          await credentials.use(query.identifier, query.field, 'kioku_credential', query.purpose),
+        )
+      }),
   )
 
   server.registerTool(
     'kioku_credential_save',
     {
       description:
-        '新建或修改凭据（要能读写本人（user://）、secret 级的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
-        '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。值由 Kioku 托管时给 values；值在外部密码管理器里时给 provider_id、location 与 fields，' +
-        'Kioku 只记条目位置、不存值。说明里不要写值。',
+        '新建或修改 Kioku 托管的凭据（要凭据能力为「管理」的访问密钥）。不给 expected_version 就是新建，新建的凭据只给这个应用用；' +
+        '修改时先用不带参数的 kioku_credential 列出凭据，看它的版本号（不用取值）；版本号不对时，错误里会给出现在的版本号。' +
+        '密码库里的凭据只能改名称与说明，值到密码库里改。说明里不要写值。',
       inputSchema: {
         identifier: CredentialIdentifier.describe(
           '凭据的标识，创建后不能改；记忆里用 {{cred:<标识>#<字段>}} 引用',
@@ -339,29 +320,19 @@ export function buildMcpServer(
           .record(CredentialFieldName, z.string().nullable())
           .optional()
           .describe(
-            'Kioku 托管的值，字段名 → 值；修改时只给要改的字段，值为 null 表示删掉这个字段',
+            '值，字段名 → 值；新建时必填。修改时只给要改的字段，值为 null 表示删掉这个字段',
           ),
-        provider_id: z
-          .string()
-          .optional()
-          .describe('外部凭据源的 id，用不带参数的 kioku_credential 列出'),
-        location: z.string().optional().describe('外部条目的位置：条目名、id 或路径'),
-        fields: z
-          .array(z.object({ name: CredentialFieldName, source_field: z.string() }))
-          .optional()
-          .describe('外部来源的字段对应：占位符里的字段名 → 条目里的字段'),
         expected_version: z.number().int().optional().describe('修改时必填：读取时看到的版本号'),
       },
     },
     (args) =>
       tool(async () => {
-        const source = sourceFromArgs(args)
         if (args.expected_version === undefined) {
           const input = parse(KeyCreateCredentialRequest, {
             identifier: args.identifier,
             name: args.name,
             description: args.description,
-            source,
+            values: args.values,
           })
           return formatCredentialSummary('已新建', await credentials.keyCreate(input))
         }
@@ -370,7 +341,7 @@ export function buildMcpServer(
           expectedVersion: args.expected_version,
           name: args.name,
           description: args.description,
-          source,
+          values: args.values,
         })
         return formatCredentialSummary('已修改', await credentials.keyUpdate(identifier, input))
       }),
@@ -379,7 +350,7 @@ export function buildMcpServer(
   server.registerTool(
     'kioku_credential_delete',
     {
-      description: '删除凭据（软删除，主人可以在管理界面恢复）。',
+      description: '删除凭据（软删除，所有者可以在管理界面恢复）。密码库里的条目不受影响。',
       inputSchema: {
         identifier: CredentialIdentifier,
         expected_version: z.number().int().optional().describe('读取时看到的版本号'),

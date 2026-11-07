@@ -36,24 +36,28 @@ const KEYS: Record<string, KeyScopes> = {
     writeLayers: [...LAYERS],
     maxSensitivity: 'secret',
     admin: false,
+    credentials: 'manage',
   },
   agent: {
     readLayers: [...LAYERS],
     writeLayers: [...LAYERS],
     maxSensitivity: 'private',
     admin: false,
+    credentials: 'none',
   },
   bot: {
     readLayers: SHARED,
     writeLayers: ['subject', 'episode'],
     maxSensitivity: 'public',
     admin: false,
+    credentials: 'none',
   },
   readonly: {
     readLayers: [...LAYERS],
     writeLayers: [],
     maxSensitivity: 'private',
     admin: false,
+    credentials: 'none',
   },
 }
 

@@ -25,6 +25,7 @@ import type {
   SpaceOverview,
   SubjectDetail,
   SubjectList,
+  VaultConnectionList,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
@@ -34,13 +35,16 @@ import { createApp } from '../../app'
 import { decryptSecret } from '../../crypto/envelope'
 import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
+import { sealVaultSecrets } from '../../credential/vault'
 import {
   credentialEvents,
+  credentials,
   memories,
   memoryEvents,
   settings,
   spaces,
   subjects,
+  vaultConnections,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
@@ -236,7 +240,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
 
   // 源空间：两个成员（bob 也是 owner，有自己的 secret 与托管的凭据）、继承的人格、三个应用（一个是 bob 的）、
   // 群聊里认出的对象与按群换人格、各层的记忆（secret、带凭据占位符与关键词、bob 的私人层与画像、删掉的、过期的）、
-  // 抽取的事实与会话摘要、两个成员各自的凭据与凭据源、召回记录与 Key
+  // 抽取的事实与会话摘要、两个成员各自的凭据与密码库连接、召回记录与 Key
   async function seed() {
     const alice = await bootstrap(source, 'alice')
     const cookie = { cookie: alice.cookie }
@@ -268,38 +272,62 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       ok<MemoryView>(send(source, 'POST', `/v1/spaces/${spaceId}/memories`, body, who), 201)
     const credential = (body: object, who = cookie) =>
       ok<{ id: string }>(send(source, 'POST', `/v1/spaces/${spaceId}/credentials`, body, who), 201)
-    const provider = (body: object, who = cookie) =>
-      ok<{ id: string }>(
-        send(source, 'POST', `/v1/spaces/${spaceId}/credential-providers`, body, who),
-        201,
-      )
+    // 密码库连接直接写库（不用真的登录）：alice 一个连着的、一个断开的，bob 一个
+    const vaultConnection = (owner: string, email: string, connected: boolean) =>
+      withSpace(database.db, spaceId, async (tx) => {
+        const id = randomUUID()
+        await tx.insert(vaultConnections).values({
+          id,
+          spaceId,
+          ownerAccountId: owner,
+          serverUrl: 'https://vault.example.com',
+          email,
+          vaultUserId: `user-${email}`,
+          deviceId: randomUUID(),
+          defaultCollectionId: connected ? 'col-1' : null,
+          ...(connected
+            ? sealVaultSecrets(sourceKey, id, {
+                refreshToken: `refresh-token-of-${email}`,
+                userKey: randomBytes(64),
+              })
+            : { status: 'disconnected' as const, disconnectedAt: new Date() }),
+        })
+        return id
+      })
+    const vaultCredential = (
+      owner: string,
+      connectionId: string,
+      identifier: string,
+      extra: Partial<typeof credentials.$inferInsert> = {},
+    ) =>
+      withSpace(database.db, spaceId, async (tx) => {
+        const [row] = await tx
+          .insert(credentials)
+          .values({
+            spaceId,
+            ownerAccountId: owner,
+            identifier,
+            name: identifier,
+            source: 'vault',
+            vaultConnectionId: connectionId,
+            vaultItemId: `item-${identifier}`,
+            fields: [{ name: 'password', itemField: 'login.password' }],
+            ...extra,
+          })
+          .returning({ id: credentials.id })
+        return row!
+      })
+    const aliceVault = await vaultConnection(alice.accountId, 'alice@example.com', true)
+    const oldVault = await vaultConnection(alice.accountId, 'old@example.com', false)
+    const bobVault = await vaultConnection(bob.accountId, 'bob@example.com', true)
 
-    const vault = await provider({ kind: 'bitwarden', name: 'Vaultwarden', instructions: 'bw get' })
-    const oldProvider = await provider({ kind: 'other', name: '旧的密码本' })
-    await ok(
-      send(
-        source,
-        'DELETE',
-        `/v1/spaces/${spaceId}/credential-providers/${oldProvider.id}`,
-        undefined,
-        cookie,
-      ),
-      204,
-    )
     await credential({
       identifier: 'nas',
       name: 'NAS',
       source: { kind: 'hosted', values: { password: 'nas-pass', user: 'admin' } },
     })
-    const mail = await credential({
-      identifier: 'mail',
+    const mail = await vaultCredential(alice.accountId, aliceVault, 'mail', {
       name: '邮箱',
-      source: {
-        kind: 'external',
-        providerId: vault.id,
-        location: 'mail-item',
-        fields: [{ name: 'password', sourceField: 'password' }],
-      },
       appIds: [agent.id],
     })
     const gone = await credential({
@@ -317,45 +345,9 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       ),
       204,
     )
-    // 还绑着已删除的凭据源的凭据（先删凭据、再删凭据源、再恢复凭据）：凭据源跟着带过去，照样是已删除
-    const replaced = await provider({ kind: '1password', name: '换掉的密码本' })
-    const legacy = await credential({
-      identifier: 'legacy',
-      name: '旧的绑定',
-      source: {
-        kind: 'external',
-        providerId: replaced.id,
-        location: 'old-item',
-        fields: [{ name: 'password', sourceField: 'password' }],
-      },
-    })
-    const credentialPath = `/v1/spaces/${spaceId}/credentials/${legacy.id}`
-    await ok(send(source, 'DELETE', `${credentialPath}?expectedVersion=1`, undefined, cookie), 204)
-    await ok(
-      send(
-        source,
-        'DELETE',
-        `/v1/spaces/${spaceId}/credential-providers/${replaced.id}`,
-        undefined,
-        cookie,
-      ),
-      204,
-    )
-    await ok(send(source, 'POST', `${credentialPath}/undelete`, undefined, cookie))
-    const bobVault = await provider({ kind: 'env', name: 'bob 的环境变量' }, bobCookie)
-    await credential(
-      {
-        identifier: 'bob-mail',
-        name: 'bob 的邮箱',
-        source: {
-          kind: 'external',
-          providerId: bobVault.id,
-          location: 'BOB_MAIL',
-          fields: [{ name: 'password', sourceField: 'password' }],
-        },
-      },
-      bobCookie,
-    )
+    // 指着断开的连接的凭据：连接跟着带过去，导入后照样是断开的
+    await vaultCredential(alice.accountId, oldVault, 'legacy')
+    await vaultCredential(bob.accountId, bobVault, 'bob-mail', { vaultItemId: 'BOB_MAIL' })
     await credential(
       {
         identifier: 'nas',
@@ -507,12 +499,6 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         sql`update credentials set app_ids = array[${agent.id}::uuid, ${randomUUID()}::uuid] where id = ${mail.id}`,
       ),
     )
-    // 字段没有来源字段（取值时按字段名取）：导出时写成字段名，和新建凭据的接口一样，导入后取法不变
-    await withSpace(database.db, spaceId, (tx) =>
-      tx.execute(
-        sql`update credentials set fields = '[{"name":"password","sourceField":null}]'::jsonb where id = ${mail.id}`,
-      ),
-    )
     return { alice, bob, spaceId, agentKey, botKey, orphanGroup }
   }
 
@@ -566,17 +552,20 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         kind: 'hosted',
         values: { password: 'nas-pass', user: 'admin' },
       })
-      expect(parsed.credentials.find((c) => c.identifier === 'mail')!.source).toMatchObject({
-        kind: 'external',
-        fields: [{ name: 'password', sourceField: 'password' }],
+      expect(parsed.credentials.find((c) => c.identifier === 'mail')!.source).toEqual({
+        kind: 'vault',
+        connectionId: expect.any(String),
+        itemId: 'item-mail',
+        fields: [{ name: 'password', itemField: 'login.password' }],
       })
       // 文件里记着导出人是谁
       expect(parsed.header.exporter).toEqual({ displayName: 'alice', dreamPrivate: true })
-      // 没有凭据绑着的已删除凭据源（旧的密码本）与 bob 的凭据源都不在
-      expect(parsed.providers.map((p) => [p.name, p.deletedAt !== null])).toEqual([
-        ['Vaultwarden', false],
-        ['换掉的密码本', true],
+      // 只有 alice 的连接，不带令牌与密钥；bob 的不在
+      expect(parsed.vaultConnections.map((v) => v.email).sort()).toEqual([
+        'alice@example.com',
+        'old@example.com',
       ])
+      expect(parsed.vaultConnections[0]).not.toHaveProperty('ciphertext')
       expect(parsed.apps.map((a) => a.slug).sort()).toEqual(['agent', 'bob-app', 'qq-bot'])
       expect(parsed.subjects.map((s) => [s.displayName, s.linkedToExporter]).sort()).toEqual([
         ['小明', true],
@@ -594,10 +583,11 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         'bob-secret-token',
         'BOB_MAIL',
         'gone-token',
+        'refresh-token-of-',
       ]) {
         expect(plain).not.toContain(text)
       }
-      // 托管的值与外部的绑定随文件带走了：给凭据的主人记一条导出的访问事件
+      // 托管的值随文件带走了：给凭据的所有者记一条导出的访问事件；密码库的只带条目 id，不记
       const sourceCredentials = await ok<ConsoleCredentialList>(
         send(source, 'GET', `/v1/spaces/${spaceId}/credentials`, undefined, {
           cookie: alice.cookie,
@@ -609,7 +599,17 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           cookie: alice.cookie,
         }),
       )
-      expect(events.items[0]).toMatchObject({ type: 'access', via: 'export' })
+      expect(events.items[0]).toMatchObject({ type: 'access', via: 'space_export', result: 'ok' })
+      const mailEvents = await ok<CredentialEventList>(
+        send(
+          source,
+          'GET',
+          `/v1/spaces/${spaceId}/credentials/${sourceCredentials.items.find((c) => c.identifier === 'mail')!.id}/events`,
+          undefined,
+          { cookie: alice.cookie },
+        ),
+      )
+      expect(mailEvents.items.filter((e) => e.type === 'access')).toEqual([])
 
       // 换成另一个实例：库清空，主密钥也换了一把
       await resetDatabase(database)
@@ -629,7 +629,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         userMemories: 4,
         secrets: 1,
         credentials: 3,
-        providers: 2,
+        vaultConnections: 2,
       }
       const spacesBefore = await spaceCount()
       const preview = await ok<SpaceImportPreview>(inspectRequest(target, carol.cookie, file))
@@ -760,16 +760,17 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       const credentialList = await get<ConsoleCredentialList>('/credentials')
       const newNas = credentialList.items.find((c) => c.identifier === 'nas')!
       expect(newNas).toMatchObject({ source: 'hosted', referenceCount: 1, appIds: null })
+      const connectionList = await get<VaultConnectionList>('/vault-connections')
+      expect(connectionList.items.map((v) => [v.email, v.status]).sort()).toEqual([
+        ['alice@example.com', 'disconnected'],
+        ['old@example.com', 'disconnected'],
+      ])
+      const newVault = connectionList.items.find((v) => v.email === 'alice@example.com')!
       expect(credentialList.items.find((c) => c.identifier === 'mail')).toMatchObject({
-        source: 'external',
-        location: 'mail-item',
-        fields: [{ name: 'password', sourceField: 'password' }],
-        provider: { name: 'Vaultwarden', deleted: false },
+        source: 'vault',
+        vault: { connectionId: newVault.id, itemId: 'item-mail' },
+        fields: [{ name: 'password', itemField: 'login.password' }],
         appIds: [app('agent').id],
-      })
-      expect(credentialList.items.find((c) => c.identifier === 'legacy')!.provider).toMatchObject({
-        name: '换掉的密码本',
-        deleted: true,
       })
       const revealed = await ok<CredentialValues>(
         send(
@@ -1034,7 +1035,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         memories: 0,
         secrets: 0,
         credentials: 0,
-        providers: 0,
+        vaultConnections: 0,
       },
     })
   })
@@ -1169,7 +1170,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(new Set(events.map((e) => e.type))).toEqual(new Set(['import']))
   })
 
-  it('导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 3，改版之前的 1、2 与更新的格式都拒收', async () => {
+  it('导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 4，凭据改版之前的 1、2、3 与更新的格式都拒收', async () => {
     const alice = await bootstrap(source, 'alice')
     const bob = await addMember(database.db, alice.spaceId, 'bob', 'editor')
     const cookie = { cookie: alice.cookie }
@@ -1215,7 +1216,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
 
     // 文件里必须有这一项
-    expect((await contents(file)).header.version).toBe(3)
+    expect((await contents(file)).header.version).toBe(4)
     const missing = await importRequest(
       source,
       alice.cookie,
@@ -1226,9 +1227,10 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       '第 1 行 exporter.dreamPrivate',
     )
 
-    // 记忆架构改版之前的格式（层、坐标与本人都不一样）和认不得的更新的格式都拒收，不悄悄丢掉或猜测内容
+    // 记忆架构改版之前的格式（层、坐标与本人都不一样）、凭据改版之前的（凭据源）和认不得的更新的格式都拒收，
+    // 不悄悄丢掉或猜测内容
     const before = await spaceCount()
-    for (const version of [1, 2, 4]) {
+    for (const version of [1, 2, 3, 5]) {
       const res = await inspectRequest(
         source,
         alice.cookie,
@@ -1236,7 +1238,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       )
       expect(res.status).toBe(400)
       expect(((await res.json()) as { error: string }).error).toBe(
-        `导出文件的格式版本是 ${version}，当前 Kioku 只支持 3。版本 1、2 是记忆架构改版之前的格式，无法导入；更新的版本请升级 Kioku 后再导入。`,
+        `导出文件的格式版本是 ${version}，当前 Kioku 只支持 4。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，都无法导入；更新的版本请升级 Kioku 后再导入。`,
       )
     }
     expect(await spaceCount()).toBe(before)
@@ -1678,17 +1680,17 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       '第 2 行 glossary.1',
     )
     await rejected([curated('user://home/a', { disclosure: '有\u0000的' })], '第 2 行 disclosure')
-    // 外部凭据的条目位置用的是接口的定义，也一样查
-    const provider = randomUUID()
+    // 密码库连接与凭据里的文字也一样查
+    const connection = randomUUID()
     await rejected(
       [
         {
-          type: 'provider',
-          id: provider,
-          kind: 'bitwarden',
-          name: 'Vaultwarden',
-          instructions: '',
-          deletedAt: null,
+          type: 'vault_connection',
+          id: connection,
+          serverUrl: 'https://vault.example.com',
+          email: 'agent@example.com',
+          vaultUserId: 'user-1',
+          defaultCollectionId: null,
           createdAt: now,
           updatedAt: now,
         },
@@ -1699,34 +1701,33 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
           name: '邮箱',
           description: null,
           source: {
-            kind: 'external',
-            providerId: provider,
-            location: 'mail\ud800item',
-            fields: [{ name: 'password', sourceField: 'password' }],
+            kind: 'vault',
+            connectionId: connection,
+            itemId: 'item-1',
+            fields: [{ name: 'password', itemField: 'field:pass\ud800word' }],
           },
           appIds: null,
           createdAt: now,
           updatedAt: now,
         },
       ],
-      '第 3 行 source.location',
+      '第 3 行 source.fields.0.itemField',
     )
     expect(await spaceCount()).toBe(before)
   })
 
-  it('外部凭据没有字段、或者字段重名：导入时被拒，导出时也被拒', async () => {
+  it('密码库凭据没有字段、或者字段重名：导入时被拒，导出时也被拒', async () => {
     const alice = await bootstrap(source, 'alice')
-    const cookie = { cookie: alice.cookie }
     const space = alice.spaceId
-    const provider = randomUUID()
-    const external = (fields: { name: string; sourceField: string }[]): SpaceExportRecord[] => [
+    const connection = randomUUID()
+    const external = (fields: { name: string; itemField: string }[]): SpaceExportRecord[] => [
       {
-        type: 'provider',
-        id: provider,
-        kind: 'bitwarden',
-        name: 'Vaultwarden',
-        instructions: '',
-        deletedAt: null,
+        type: 'vault_connection',
+        id: connection,
+        serverUrl: 'https://vault.example.com',
+        email: 'agent@example.com',
+        vaultUserId: 'user-1',
+        defaultCollectionId: null,
         createdAt: now,
         updatedAt: now,
       },
@@ -1736,7 +1737,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         identifier: 'mail',
         name: '邮箱',
         description: null,
-        source: { kind: 'external', providerId: provider, location: 'mail-item', fields },
+        source: { kind: 'vault', connectionId: connection, itemId: 'item-1', fields },
         appIds: null,
         createdAt: now,
         updatedAt: now,
@@ -1747,8 +1748,8 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       [[], '第 3 行 source.fields：至少需要一个字段'],
       [
         [
-          { name: 'password', sourceField: 'a' },
-          { name: 'password', sourceField: 'b' },
+          { name: 'password', itemField: 'login.password' },
+          { name: 'password', itemField: 'notes' },
         ],
         '第 3 行 source.fields：字段名不能重复',
       ],
@@ -1759,39 +1760,34 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     }
     expect(await spaceCount()).toBe(before)
 
-    const vault = await ok<{ id: string }>(
-      send(
-        source,
-        'POST',
-        `/v1/spaces/${space}/credential-providers`,
-        { kind: 'bitwarden', name: 'Vaultwarden' },
-        cookie,
-      ),
-      201,
-    )
-    await ok(
-      send(
-        source,
-        'POST',
-        `/v1/spaces/${space}/credentials`,
-        {
-          identifier: 'mail',
-          name: '邮箱',
-          source: {
-            kind: 'external',
-            providerId: vault.id,
-            location: 'mail-item',
-            fields: [{ name: 'password', sourceField: 'password' }],
-          },
-        },
-        cookie,
-      ),
-      201,
-    )
+    const connectionId = randomUUID()
+    await withSpace(database.db, space, async (tx) => {
+      await tx.insert(vaultConnections).values({
+        id: connectionId,
+        spaceId: space,
+        ownerAccountId: alice.accountId,
+        serverUrl: 'https://vault.example.com',
+        email: 'agent@example.com',
+        vaultUserId: 'user-1',
+        deviceId: randomUUID(),
+        status: 'disconnected',
+        disconnectedAt: new Date(),
+      })
+      await tx.insert(credentials).values({
+        spaceId: space,
+        ownerAccountId: alice.accountId,
+        identifier: 'mail',
+        name: '邮箱',
+        source: 'vault',
+        vaultConnectionId: connectionId,
+        vaultItemId: 'item-1',
+        fields: [{ name: 'password', itemField: 'login.password' }],
+      })
+    })
     for (const [fields, message] of [
       ['[]', '凭据 mail 导出后无法导入（source.fields：至少需要一个字段）'],
       [
-        '[{"name":"password","sourceField":"a"},{"name":"password","sourceField":"b"}]',
+        '[{"name":"password","itemField":"login.password"},{"name":"password","itemField":"notes"}]',
         '凭据 mail 导出后无法导入（source.fields：字段名不能重复）',
       ],
     ] as const) {
@@ -1846,38 +1842,32 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       await failing('机密记忆 user://home/wifi 无法解密')
       await inSpace(sql`update memories set deleted_at = now()`)
 
-      // 规则收紧之前存下的条目位置（带分号）：导出了也导入不了，导出时就点名
-      const vault = await ok<{ id: string }>(
-        send(
-          source,
-          'POST',
-          `/v1/spaces/${space}/credential-providers`,
-          { kind: 'bitwarden', name: 'Vaultwarden' },
-          cookie,
-        ),
-        201,
-      )
-      await ok(
-        send(
-          source,
-          'POST',
-          `/v1/spaces/${space}/credentials`,
-          {
-            identifier: 'mail',
-            name: '邮箱',
-            source: {
-              kind: 'external',
-              providerId: vault.id,
-              location: 'mail-item',
-              fields: [{ name: 'password', sourceField: 'password' }],
-            },
-          },
-          cookie,
-        ),
-        201,
-      )
-      await inSpace(sql`update credentials set location = 'mail;item' where identifier = 'mail'`)
-      await failing('凭据 mail 导出后无法导入（source.location：')
+      // 库里存着认不出的条目字段：导出了也导入不了，导出时就点名
+      const connectionId = randomUUID()
+      await withSpace(database.db, space, async (tx) => {
+        await tx.insert(vaultConnections).values({
+          id: connectionId,
+          spaceId: space,
+          ownerAccountId: alice.accountId,
+          serverUrl: 'https://vault.example.com',
+          email: 'agent@example.com',
+          vaultUserId: 'user-1',
+          deviceId: randomUUID(),
+          status: 'disconnected',
+          disconnectedAt: new Date(),
+        })
+        await tx.insert(credentials).values({
+          spaceId: space,
+          ownerAccountId: alice.accountId,
+          identifier: 'mail',
+          name: '邮箱',
+          source: 'vault',
+          vaultConnectionId: connectionId,
+          vaultItemId: 'item-1',
+          fields: [{ name: 'password', itemField: 'login.uris' }],
+        })
+      })
+      await failing('凭据 mail 导出后无法导入（source.fields.0.itemField：')
       // 导出没做成：不记导出的访问事件
       const [row] = await inSpace(
         sql`select count(*)::int as n from credential_events where event_type = 'access'`,

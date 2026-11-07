@@ -24,7 +24,6 @@ import {
   appGroupPersonas,
   apps,
   credentialEvents,
-  credentialProviders,
   credentials,
   memories,
   memoryCredentialRefs,
@@ -35,6 +34,7 @@ import {
   spaces,
   subjectIdentities,
   subjects,
+  vaultConnections,
 } from '../db/schema'
 import { MAX_PERSONA_DEPTH } from '../memory/personas'
 import {
@@ -58,13 +58,13 @@ import {
   type IdentityRecord,
   type MemoryRecord,
   type PersonaRecord,
-  type ProviderRecord,
   type SubjectRecord,
+  type VaultConnectionRecord,
 } from './spaceRecords'
 
 // 把空间的导出文件导入成这个实例里的一个新空间，导入人是新空间的 owner。全部在一个事务里写：
 // 失败时什么都不留下，新空间也不会出现。id 全部重新生成，文件里的互相指认按新 id 对上；
-// 导出人的本人记忆、凭据与凭据源归导入人，对象上「这是我」的标记也换成导入人
+// 导出人的本人记忆、凭据与密码库连接归导入人（连接是断开的，要重新登录），对象上「这是我」的标记也换成导入人
 // （本人的记忆会进导入人的 agent 的启动加载，所以导入之前先用 inspectSpaceImport 告诉他文件是谁导出的、有多少）。
 // secret 记忆与托管的凭据值用这个实例的主密钥重新加密（新的数据密钥，aad 绑新的 id）；
 // 没配主密钥而文件里有这两样时拒绝导入，不悄悄丢掉。
@@ -81,7 +81,7 @@ export interface ParsedSpaceExport {
   subjects: Lined<SubjectRecord>[]
   identities: Lined<IdentityRecord>[]
   groupPersonas: Lined<GroupPersonaRecord>[]
-  providers: Lined<ProviderRecord>[]
+  vaultConnections: Lined<VaultConnectionRecord>[]
   credentials: Lined<CredentialRecord>[]
   memories: Lined<MemoryRecord>[]
 }
@@ -120,7 +120,7 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   if (!header) {
     throw new MemoryError(
       400,
-      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，无法导入；更新的版本请升级 Kioku 后再导入。`,
+      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，都无法导入；更新的版本请升级 Kioku 后再导入。`,
     )
   }
   const result: ParsedSpaceExport = {
@@ -130,7 +130,7 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
     subjects: [],
     identities: [],
     groupPersonas: [],
-    providers: [],
+    vaultConnections: [],
     credentials: [],
     memories: [],
   }
@@ -148,8 +148,8 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
         return void result.identities.push({ ...record, line })
       case 'groupPersona':
         return void result.groupPersonas.push({ ...record, line })
-      case 'provider':
-        return void result.providers.push({ ...record, line })
+      case 'vault_connection':
+        return void result.vaultConnections.push({ ...record, line })
       case 'credential':
         return void result.credentials.push({ ...record, line })
       case 'memory':
@@ -225,12 +225,18 @@ export function checkSpaceExport(x: ParsedSpaceExport): void {
     }
   }
   distinct(x.groupPersonas, (r) => `${r.appId}/${r.subjectId}`, '按群换人格的规则')
-  const providerById = byId(x.providers, '凭据源')
+  const connectionById = byId(x.vaultConnections, '密码库连接')
+  distinct(x.vaultConnections, (v) => `${v.serverUrl}/${v.vaultUserId}`, '密码库连接的账号')
   byId(x.credentials, '凭据')
   distinct(x.credentials, (c) => c.identifier, '凭据的标识')
+  distinct(
+    x.credentials.filter((c) => c.source.kind === 'vault'),
+    (c) => (c.source.kind === 'vault' ? `${c.source.connectionId}/${c.source.itemId}` : ''),
+    '密码库凭据指向的条目',
+  )
   for (const c of x.credentials) {
-    if (c.source.kind === 'external' && !providerById.has(c.source.providerId)) {
-      throw invalid(`第 ${c.line} 行凭据 ${c.identifier} 绑定的凭据源不在文件中`)
+    if (c.source.kind === 'vault' && !connectionById.has(c.source.connectionId)) {
+      throw invalid(`第 ${c.line} 行凭据 ${c.identifier} 指向的密码库连接不在文件中`)
     }
   }
 
@@ -309,7 +315,7 @@ function countsOf(x: ParsedSpaceExport): SpaceImportCounts {
     userMemories: layer('user'),
     secrets: x.memories.filter((m) => m.sensitivity === 'secret').length,
     credentials: x.credentials.length,
-    providers: x.providers.length,
+    vaultConnections: x.vaultConnections.length,
   }
 }
 
@@ -455,7 +461,7 @@ async function writeSpace(
   const personaIds = new Map(x.personas.map((p) => [p.id, randomUUID()]))
   const appIds = new Map(x.apps.map((a) => [a.id, randomUUID()]))
   const subjectIds = new Map(x.subjects.map((s) => [s.id, randomUUID()]))
-  const providerIds = new Map(x.providers.map((p) => [p.id, randomUUID()]))
+  const connectionIds = new Map(x.vaultConnections.map((v) => [v.id, randomUUID()]))
   const mapped = (map: Map<string, string>, id: string | null) =>
     id === null ? null : map.get(id)!
 
@@ -534,19 +540,24 @@ async function writeSpace(
     )
   }
 
-  if (x.providers.length) {
-    step('凭据源', x.providers)
-    await tx.insert(credentialProviders).values(
-      x.providers.map((p) => ({
-        id: providerIds.get(p.id)!,
+  if (x.vaultConnections.length) {
+    step('密码库连接', x.vaultConnections)
+    // 不带令牌与密钥：导入后是断开的，在凭据页重新登录同一个账号就恢复。设备 id 重新生成，这个实例是另一台设备
+    const now = new Date()
+    await tx.insert(vaultConnections).values(
+      x.vaultConnections.map((v) => ({
+        id: connectionIds.get(v.id)!,
         spaceId,
         ownerAccountId: accountId,
-        kind: p.kind,
-        name: p.name,
-        instructions: p.instructions,
-        deletedAt: optionalTime(p.deletedAt),
-        createdAt: time(p.createdAt),
-        updatedAt: time(p.updatedAt),
+        serverUrl: v.serverUrl,
+        email: v.email,
+        vaultUserId: v.vaultUserId,
+        deviceId: randomUUID(),
+        status: 'disconnected' as const,
+        defaultCollectionId: v.defaultCollectionId,
+        disconnectedAt: now,
+        createdAt: time(v.createdAt),
+        updatedAt: time(v.updatedAt),
       })),
     )
   }
@@ -563,12 +574,12 @@ async function writeSpace(
       createdAt: time(c.createdAt),
       updatedAt: time(c.updatedAt),
     }
-    if (c.source.kind === 'external') {
+    if (c.source.kind === 'vault') {
       return {
         ...common,
-        source: 'external' as const,
-        providerId: providerIds.get(c.source.providerId)!,
-        location: c.source.location,
+        source: 'vault' as const,
+        vaultConnectionId: connectionIds.get(c.source.connectionId)!,
+        vaultItemId: c.source.itemId,
         fields: c.source.fields,
       }
     }
@@ -578,7 +589,7 @@ async function writeSpace(
     return {
       ...common,
       source: 'hosted' as const,
-      fields: names.map((name) => ({ name, sourceField: null })),
+      fields: names.map((name) => ({ name, itemField: null })),
       ...sealCredentialValues(
         masterKey!,
         id,

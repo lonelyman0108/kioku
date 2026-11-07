@@ -6,10 +6,10 @@ import {
   canManageCredentials,
   canModify,
   canRead,
-  canReadCredential,
-  canRevealCredential,
+  canUseCredential,
   canWrite,
   consoleAccess,
+  credentialDenial,
   readDenial,
   resolveAccess,
   type MemoryFacts,
@@ -22,6 +22,7 @@ const fullKey: KeyScopes = {
   writeLayers: [...LAYERS],
   maxSensitivity: 'private',
   admin: false,
+  credentials: 'none',
 }
 
 const memory = (over: Partial<MemoryFacts> = {}): MemoryFacts => ({
@@ -273,84 +274,85 @@ describe('人格的记忆的写入', () => {
 })
 
 describe('凭据', () => {
-  const secretKey: KeyScopes = { ...fullKey, maxSensitivity: 'secret' }
-  const own = { ownerAccountId: OWNER, appIds: null }
+  const useKey: KeyScopes = { ...fullKey, credentials: 'use' }
+  const manageKey: KeyScopes = { ...fullKey, credentials: 'manage' }
+  const own = { appIds: null }
 
-  it('和本人的私密记忆一样：读说明要能读本人、至少 private 级，取托管的值还要 secret 级', () => {
-    const privateLevel = resolveAccess(fullKey, app)
-    expect(canReadCredential(privateLevel, own)).toBe(true)
-    expect(canRevealCredential(privateLevel, own)).toBe(false)
-    const secretLevel = resolveAccess(secretKey, app)
-    expect(canRevealCredential(secretLevel, own)).toBe(true)
-    const internalOnly = resolveAccess({ ...secretKey, maxSensitivity: 'internal' }, app)
-    expect(canReadCredential(internalOnly, own)).toBe(false)
-    const noPrivate = resolveAccess(
-      { ...secretKey, readLayers: LAYERS.filter((l) => l !== 'user') },
-      app,
-    )
-    expect(canReadCredential(noPrivate, own)).toBe(false)
-    expect(canRevealCredential(noPrivate, own)).toBe(false)
+  it('取用要凭据能力至少是取用，并能读本人、至少 private 级；不再借用 secret 级', () => {
+    expect(canUseCredential(resolveAccess(useKey, app), own)).toBe(true)
+    expect(credentialDenial(resolveAccess(fullKey, app), own, 'use')).toBe('capability')
+    expect(
+      credentialDenial(resolveAccess({ ...fullKey, maxSensitivity: 'secret' }, app), own, 'use'),
+    ).toBe('capability')
+    expect(
+      credentialDenial(resolveAccess({ ...useKey, maxSensitivity: 'internal' }, app), own, 'use'),
+    ).toBe('scope')
+    expect(
+      credentialDenial(
+        resolveAccess({ ...useKey, readLayers: LAYERS.filter((l) => l !== 'user') }, app),
+        own,
+        'use',
+      ),
+    ).toBe('scope')
   })
 
-  it('只看得到这次访问代表的成员自己的凭据', () => {
-    const access = resolveAccess(secretKey, app)
-    expect(canReadCredential(access, { ...own, ownerAccountId: 'someone-else' })).toBe(false)
-  })
-
-  it('群聊、私聊（包括开启后的本人私聊）、定时任务与子 agent 都看不到凭据', () => {
+  it('群聊、私聊（包括开启后的本人私聊）、定时任务与子 agent 都用不了凭据', () => {
     const contexts = [
-      resolveAccess(secretKey, app, { chatType: 'group', groupSubjectId: 'g1' }),
+      resolveAccess(manageKey, app, { chatType: 'group', groupSubjectId: 'g1' }),
       resolveAccess(
-        secretKey,
+        manageKey,
         { ...app, elevateOwnerDirect: 'internal' },
         { chatType: 'direct', senderSubjectId: 's1', senderIsOwner: true },
       ),
-      resolveAccess(secretKey, app, { chatType: 'cron' }),
-      resolveAccess(secretKey, app, { chatType: 'subagent' }),
+      resolveAccess(manageKey, app, { chatType: 'cron' }),
+      resolveAccess(manageKey, app, { chatType: 'subagent' }),
     ]
     for (const access of contexts) {
-      expect(canReadCredential(access, own)).toBe(false)
+      expect(credentialDenial(access, own, 'use')).toBe('context')
       expect(canManageCredentials(access)).toBe(false)
     }
   })
 
   it('限定了应用的只给那些应用用，跨人格 / 应用写入的 Key 也不放宽；管理界面不受限', () => {
-    const limited = { ...own, appIds: ['app-2'] }
-    expect(canReadCredential(resolveAccess(secretKey, app), limited)).toBe(false)
-    expect(canReadCredential(resolveAccess({ ...secretKey, admin: true }, app), limited)).toBe(
-      false,
-    )
-    expect(canReadCredential(resolveAccess(secretKey, { ...app, appId: 'app-2' }), limited)).toBe(
-      true,
-    )
-    expect(canReadCredential(consoleAccess('owner', OWNER), limited)).toBe(true)
+    const limited = { appIds: ['app-2'] }
+    expect(credentialDenial(resolveAccess(useKey, app), limited, 'use')).toBe('app')
+    expect(canUseCredential(resolveAccess({ ...useKey, admin: true }, app), limited)).toBe(false)
+    expect(canUseCredential(resolveAccess(useKey, { ...app, appId: 'app-2' }), limited)).toBe(true)
+    expect(canUseCredential(consoleAccess('owner', OWNER), limited)).toBe(true)
   })
 
-  it('管理凭据要能读写本人并且是 secret 级：只读、只写或 private 级的 Key 都不行', () => {
-    expect(canManageCredentials(resolveAccess(secretKey, app))).toBe(true)
-    expect(canManageCredentials(resolveAccess(fullKey, app))).toBe(false)
+  it('管理要凭据能力是管理，并能读写本人', () => {
+    expect(canManageCredentials(resolveAccess(manageKey, app))).toBe(true)
+    expect(credentialDenial(resolveAccess(useKey, app), own, 'manage')).toBe('capability')
     expect(
-      canManageCredentials(
-        resolveAccess({ ...secretKey, writeLayers: LAYERS.filter((l) => l !== 'user') }, app),
+      credentialDenial(
+        resolveAccess({ ...manageKey, writeLayers: LAYERS.filter((l) => l !== 'user') }, app),
+        own,
+        'manage',
       ),
-    ).toBe(false)
-    expect(
-      canManageCredentials(
-        resolveAccess({ ...secretKey, readLayers: LAYERS.filter((l) => l !== 'user') }, app),
-      ),
-    ).toBe(false)
+    ).toBe('scope')
   })
 
-  it('管理界面里只有空间 owner 能管理凭据、查看托管的值；editor 与 viewer 只能看自己凭据的说明', () => {
+  it('管理界面里只有空间 owner 能管理凭据；editor 与 viewer 只能看自己的', () => {
     for (const role of ['editor', 'viewer'] as const) {
       const access = consoleAccess(role, OWNER)
-      expect(canReadCredential(access, own)).toBe(true)
-      expect(canRevealCredential(access, own)).toBe(false)
+      expect(canUseCredential(access, own)).toBe(true)
       expect(canManageCredentials(access)).toBe(false)
     }
-    const owner = consoleAccess('owner', OWNER)
-    expect(canRevealCredential(owner, own)).toBe(true)
-    expect(canManageCredentials(owner)).toBe(true)
+    expect(canManageCredentials(consoleAccess('owner', OWNER))).toBe(true)
+  })
+
+  it('权限范围给出每个会话上下文下实际的凭据能力', () => {
+    const matrix = accessMatrix(manageKey, app)
+    expect(Object.fromEntries(matrix.contexts.map((c) => [c.context, c.credentials]))).toEqual({
+      none: 'manage',
+      direct: 'none',
+      owner_direct: 'none',
+      group: 'none',
+      cron: 'none',
+    })
+    const readOnly = accessMatrix({ ...manageKey, writeLayers: [] }, app)
+    expect(readOnly.contexts.find((c) => c.context === 'none')!.credentials).toBe('use')
   })
 })
 

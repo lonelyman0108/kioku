@@ -35,7 +35,7 @@ export const SpaceImportForm = SpaceImportInspectForm.extend({
 })
 export type SpaceImportForm = z.infer<typeof SpaceImportForm>
 
-// 文件里有多少。导出人的本人记忆（userMemories）、凭据、凭据源与标记成他本人的联系人（linkedSubjects）
+// 文件里有多少。导出人的本人记忆（userMemories）、凭据、密码库连接与标记成他本人的联系人（linkedSubjects）
 // 导入后都归导入人；secrets 是其中要用这个实例的主密钥重新加密的 secret 记忆
 export const SpaceImportCounts = z.object({
   personas: z.number().int(),
@@ -46,7 +46,8 @@ export const SpaceImportCounts = z.object({
   userMemories: z.number().int(),
   secrets: z.number().int(),
   credentials: z.number().int(),
-  providers: z.number().int(),
+  // 密码库连接不带令牌与密钥，导入后是断开的，要重新登录
+  vaultConnections: z.number().int(),
 })
 export type SpaceImportCounts = z.infer<typeof SpaceImportCounts>
 

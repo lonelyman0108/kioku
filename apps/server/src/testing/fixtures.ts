@@ -1,4 +1,5 @@
-import { LAYERS, type CreatedKey, type KeyScopes, type Me } from '@kioku/contracts'
+import { KeyScopes, LAYERS, type CreatedKey, type Me } from '@kioku/contracts'
+import type { z } from 'zod'
 
 import { createSession } from '../auth/session'
 import type { createApp } from '../app'
@@ -6,12 +7,15 @@ import type { Db } from '../db/client'
 import { accounts, spaceMembers } from '../db/schema'
 
 type App = ReturnType<typeof createApp>
+// 签发时的上限：凭据能力不给就是不可用
+type KeyScopesInput = z.input<typeof KeyScopes>
 
 export const FULL_SCOPES: KeyScopes = {
   readLayers: [...LAYERS],
   writeLayers: [...LAYERS],
   maxSensitivity: 'secret',
   admin: false,
+  credentials: 'manage',
 }
 
 // 模拟浏览器的同源请求
@@ -36,9 +40,9 @@ export interface Workspace {
   accountId: string
   createApp: (slug: string, extra?: Record<string, unknown>) => Promise<{ id: string }>
   createPersona: (slug: string, extendsId?: string) => Promise<{ id: string }>
-  issueKey: (appId: string, scopes?: KeyScopes) => Promise<string>
+  issueKey: (appId: string, scopes?: KeyScopesInput) => Promise<string>
   // 要 Key 的 id 时用它（测试台按 id 模拟）；key 是明文
-  createKey: (appId: string, scopes?: KeyScopes) => Promise<CreatedKey>
+  createKey: (appId: string, scopes?: KeyScopesInput) => Promise<CreatedKey>
 }
 
 // 初始化一个账号和空间，返回在其中建应用、人格、签发 Key 的快捷方法
@@ -56,7 +60,7 @@ export async function bootstrap(app: App, username = 'alice'): Promise<Workspace
   const me = await expectOk<Me>(res)
   const spaceId = me.spaces[0]!.id
   const withCookie = { cookie }
-  const createKey = async (appId: string, scopes: KeyScopes = FULL_SCOPES) =>
+  const createKey = async (appId: string, scopes: KeyScopesInput = FULL_SCOPES) =>
     expectOk<CreatedKey>(
       await app.request(
         `/v1/spaces/${spaceId}/apps/${appId}/keys`,

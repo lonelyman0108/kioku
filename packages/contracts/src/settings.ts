@@ -126,6 +126,8 @@ export const MasterKeyStatus = z.object({
   remaining: z.object({
     memories: z.number().int(),
     credentials: z.number().int(),
+    // 密码库连接保存的令牌与账户密钥
+    vaultConnections: z.number().int(),
     settings: z.number().int(),
   }),
   // 轮换出的错（例如有记录用旧主密钥也解不开）；换完之后清掉
@@ -141,7 +143,7 @@ export const RecallSettings = z.object({
 export type RecallSettings = z.infer<typeof RecallSettings>
 
 // 保留期：删掉的记忆（连同历史、向量、关键词、凭据引用与召回统计）、被推翻的抽取事实、过期的会话摘要，
-// 以及抽取记录、凭据事件、已删除的凭据与凭据源、Dream 的运行记录与处理过的建议、处理完的绑定记录，
+// 以及抽取记录、凭据事件、已删除的凭据、断开的密码库连接、Dream 的运行记录与处理过的建议、处理完的绑定记录，
 // 过了这么多天由每天一次的清理硬删除。和召回事件明细的保留天数是两回事
 export const DEFAULT_RETENTION_DAYS = 30
 export const RetentionSettings = z.object({

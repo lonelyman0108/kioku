@@ -2,9 +2,6 @@ import { randomBytes, randomUUID } from 'node:crypto'
 
 import type {
   ConsoleCredential,
-  CredentialProvider,
-  DeletedCredentialList,
-  DeletedCredentialProviderList,
   DeletionRetention,
   ExpiredMemoryList,
   MemoryHistory,
@@ -21,7 +18,6 @@ import { withSpace, type Database, type Tx } from '../../db/client'
 import {
   accounts,
   credentialEvents,
-  credentialProviders,
   credentials,
   dreamRuns,
   dreamSuggestions,
@@ -38,6 +34,7 @@ import {
   spaces,
   subjectBindings,
   subjects,
+  vaultConnections,
 } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import {
@@ -65,8 +62,8 @@ const ZERO: RetentionCounts = {
   credentialEvents: 0,
   accessEvents: 0,
   deletedCredentials: 0,
-  deletedProviders: 0,
   subjectBindings: 0,
+  vaultConnections: 0,
 }
 
 describe.skipIf(!testDatabaseUrl)('保留期', () => {
@@ -738,26 +735,48 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(left.map((s) => s.reason).sort()).toEqual(['第 1 条', '第 2 条', '第 3 条', '第 4 条'])
   })
 
-  it('已删除的凭据与凭据源过了保留期删掉；还有凭据指着的凭据源留着，保留期里已删除的凭据也算', async () => {
-    const provider = async (name: string) =>
-      ok<CredentialProvider>(
-        await send('POST', '/credential-providers', { kind: 'bitwarden', name }),
-        201,
-      )
-    const external = async (identifier: string, providerId: string) =>
-      ok<ConsoleCredential>(
-        await send('POST', '/credentials', {
-          identifier,
-          name: identifier,
-          source: {
-            kind: 'external',
-            providerId,
-            location: `${identifier} item`,
-            fields: [{ name: 'password', sourceField: 'password' }],
-          },
-        }),
-        201,
-      )
+  it('已删除的凭据过了保留期删掉；断开超过保留期、也没有凭据指着的密码库连接一起删掉', async () => {
+    // 直接写连接：断开的没有密文，不用真的登录
+    const connection = (email: string, disconnectedDays: number | null) =>
+      inSpace(async (tx) => {
+        const [row] = await tx
+          .insert(vaultConnections)
+          .values({
+            spaceId: ws.spaceId,
+            ownerAccountId: ws.accountId,
+            serverUrl: 'https://vault.example.com',
+            email,
+            vaultUserId: email,
+            deviceId: crypto.randomUUID(),
+            ...(disconnectedDays === null
+              ? { ciphertext: Buffer.from('c'), wrappedKey: Buffer.from('k') }
+              : { status: 'disconnected' as const, disconnectedAt: ago(disconnectedDays) }),
+          })
+          .returning({ id: vaultConnections.id })
+        return row!.id
+      })
+    const vaultCredential = (
+      identifier: string,
+      connectionId: string,
+      deletedDays: number | null,
+    ) =>
+      inSpace(async (tx) => {
+        const [row] = await tx
+          .insert(credentials)
+          .values({
+            spaceId: ws.spaceId,
+            ownerAccountId: ws.accountId,
+            identifier,
+            name: identifier,
+            source: 'vault',
+            vaultConnectionId: connectionId,
+            vaultItemId: crypto.randomUUID(),
+            fields: [{ name: 'password', itemField: 'login.password' }],
+            deletedAt: deletedDays === null ? null : ago(deletedDays),
+          })
+          .returning({ id: credentials.id })
+        return row!.id
+      })
     const hosted = async (identifier: string) =>
       ok<ConsoleCredential>(
         await send('POST', '/credentials', {
@@ -769,28 +788,21 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
       )
     const removeCredential = async (id: string) =>
       ok(await send('DELETE', `/credentials/${id}`), 204)
-    const removeProvider = async (id: string) =>
-      ok(await send('DELETE', `/credential-providers/${id}`), 204)
 
-    // 没有凭据指着的凭据源
-    const lonely = await provider('没人用的')
-    await removeProvider(lonely.id)
-    // 凭据删掉、凭据源删掉之后又把凭据恢复了：凭据还在用，显示「凭据源已删除」
-    const revived = await provider('凭据恢复了的')
-    const router = await external('router', revived.id)
-    await removeCredential(router.id)
-    await removeProvider(revived.id)
-    await ok(await send('POST', `/credentials/${router.id}/undelete`))
-    // 凭据最近才删：还能恢复，凭据源也留着
-    const pending = await provider('凭据刚删的')
-    const nas = await external('nas', pending.id)
-    await removeCredential(nas.id)
-    await removeProvider(pending.id)
-    // 凭据与凭据源都早就删了：一起删掉
-    const gone = await provider('都删了很久的')
-    const wifi = await external('wifi', gone.id)
-    await removeCredential(wifi.id)
-    await removeProvider(gone.id)
+    // 断开很久、没有凭据指着：删掉
+    const lonely = await connection('lonely@example.com', 40)
+    // 断开很久，还有有效的凭据指着：留着
+    const used = await connection('used@example.com', 40)
+    const router = await vaultCredential('router', used, null)
+    // 断开很久，指着它的凭据最近才删（还能恢复）：留着
+    const pending = await connection('pending@example.com', 40)
+    const nas = await vaultCredential('nas', pending, 10)
+    // 断开很久，指着它的凭据也早就删了：凭据先删，连接随之删掉
+    const gone = await connection('gone@example.com', 40)
+    const wifi = await vaultCredential('wifi', gone, 40)
+    // 最近才断开、还连着的：留着
+    const recent = await connection('recent@example.com', 10)
+    const live = await connection('live@example.com', null)
     const oldHosted = await hosted('old-hosted')
     await removeCredential(oldHosted.id)
     const newHosted = await hosted('new-hosted')
@@ -801,70 +813,26 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
           .update(credentials)
           .set({ deletedAt: ago(days) })
           .where(eq(credentials.id, id))
-      const setProvider = (id: string, days: number) =>
-        tx
-          .update(credentialProviders)
-          .set({ deletedAt: ago(days) })
-          .where(eq(credentialProviders.id, id))
-      for (const p of [lonely, revived, pending, gone]) await setProvider(p.id, 40)
-      await setCredential(nas.id, 10)
-      await setCredential(wifi.id, 40)
       await setCredential(oldHosted.id, 31)
       await setCredential(newHosted.id, 29)
     })
 
-    // 已删除的列表给出保留期从什么时候算起，和清理的规则一致：凭据按删除时间；凭据源按自己与指着它的
-    // 已删除凭据里晚的那个，还有没删除的凭据指着时为 null（不会清除）
-    const deletedCredentials = await ok<DeletedCredentialList>(
-      await send('GET', '/credentials/deleted'),
-    )
-    const deletedProviders = await ok<DeletedCredentialProviderList>(
-      await send('GET', '/credential-providers/deleted'),
-    )
-    const stored = await inSpace(async (tx) => [
-      ...(await tx.select().from(credentials)),
-      ...(await tx.select().from(credentialProviders)),
-    ])
-    const deletedAt = (id: string) => stored.find((r) => r.id === id)!.deletedAt!.toISOString()
-    expect(
-      Object.fromEntries(deletedProviders.items.map((p) => [p.id, [p.deletedAt, p.retentionFrom]])),
-    ).toEqual({
-      [lonely.id]: [deletedAt(lonely.id), deletedAt(lonely.id)],
-      // 凭据恢复了、没改绑：不会清除
-      [revived.id]: [deletedAt(revived.id), null],
-      // 指着它的凭据删得比它晚：等那条凭据到期
-      [pending.id]: [deletedAt(pending.id), deletedAt(nas.id)],
-      [gone.id]: [deletedAt(gone.id), [deletedAt(gone.id), deletedAt(wifi.id)].sort().at(-1)],
-    })
-    // 按 30 天推算哪些到期，和下面真去清理的结果一样
-    const due = (from: string | null) => from !== null && new Date(from) < ago(30)
-    const kept = {
-      credentials: [
-        router.id,
-        ...deletedCredentials.items.filter((c) => !due(c.deletedAt)).map((c) => c.id),
-      ].sort(),
-      providers: deletedProviders.items
-        .filter((p) => !due(p.retentionFrom))
-        .map((p) => p.id)
-        .sort(),
-    }
-
     const { counts, errors } = await purge()
     expect(errors).toEqual([])
-    expect(counts).toEqual({ ...ZERO, deletedCredentials: 2, deletedProviders: 2 })
+    expect(counts).toEqual({ ...ZERO, deletedCredentials: 2, vaultConnections: 2 })
     const left = await inSpace(async (tx) => ({
       credentials: await tx.select({ id: credentials.id }).from(credentials),
-      providers: await tx.select({ id: credentialProviders.id }).from(credentialProviders),
+      connections: await tx.select({ id: vaultConnections.id }).from(vaultConnections),
       // 删掉的凭据的事件随凭据一起删掉
       events: await tx.selectDistinct({ id: credentialEvents.credentialId }).from(credentialEvents),
     }))
     const ids = (rows: { id: string }[]) => rows.map((r) => r.id).sort()
-    expect(ids(left.credentials)).toEqual([router.id, nas.id, newHosted.id].sort())
-    expect(ids(left.providers)).toEqual([revived.id, pending.id].sort())
-    expect({ credentials: ids(left.credentials), providers: ids(left.providers) }).toEqual(kept)
-    expect(ids(left.events)).toEqual([router.id, nas.id, newHosted.id].sort())
-    const view = await ok<ConsoleCredential>(await send('GET', `/credentials/${router.id}`))
-    expect(view.provider).toMatchObject({ id: revived.id, deleted: true })
+    expect(ids(left.credentials)).toEqual([router, nas, newHosted.id].sort())
+    expect(ids(left.connections)).toEqual([used, pending, recent, live].sort())
+    expect(ids(left.connections)).not.toContain(lonely)
+    expect(ids(left.connections)).not.toContain(gone)
+    expect(ids(left.credentials)).not.toContain(wifi)
+    expect(ids(left.events)).toEqual([newHosted.id])
   })
 
   it('处理完的绑定记录过了保留期删掉：合并、确认、拒绝、作废的按处理的时间，过期没处理的按期限；还在等确认的留着', async () => {
@@ -1304,15 +1272,10 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
 
   it('已删除的列表带上保留天数与是否在暂停；暂停到什么时候只给实例管理员，和实例设置里的是同一个', async () => {
     const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
-    // 会被永久清除的几个列表（已删除的记忆、凭据、凭据源，已过期里让出了 URI 的）带的都是同一个
+    // 会被永久清除的几个列表（已删除的记忆、凭据，已过期里让出了 URI 的）带的都是同一个
     const retention = async (cookie: string) => {
       const lists = await Promise.all(
-        [
-          '/memories/deleted',
-          '/memories/expired',
-          '/credentials/deleted',
-          '/credential-providers/deleted',
-        ].map(async (path) =>
+        ['/memories/deleted', '/memories/expired', '/credentials/deleted'].map(async (path) =>
           ok<{ retention: DeletionRetention }>(await send('GET', path, undefined, cookie)),
         ),
       )

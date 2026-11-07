@@ -1,5 +1,5 @@
 import { AppConfig, SPACE_EXPORT_MAX_BYTES, type RuntimeFamily } from '@kioku/contracts'
-import { and, asc, eq, gt, inArray, isNull, ne, or, type SQL } from 'drizzle-orm'
+import { and, asc, eq, gt, inArray, isNull, ne, type SQL } from 'drizzle-orm'
 import type { z } from 'zod'
 
 import { consoleAccess } from '../access/access'
@@ -11,7 +11,6 @@ import {
   appGroupPersonas,
   apps,
   credentialEvents,
-  credentialProviders,
   credentials,
   memories,
   memoryEvents,
@@ -21,6 +20,7 @@ import {
   spaces,
   subjectIdentities,
   subjects,
+  vaultConnections,
 } from '../db/schema'
 import { readableConditions } from '../memory/filter'
 import {
@@ -47,7 +47,7 @@ import {
 
 // 按空间导出：只导出导出人读得到的。导出人是空间 owner（路由检查），按他在管理界面里的权限读：
 // 共享的归属（通用、人格、应用）、联系人的事实、人格、应用、对象与按群换人格，加上他自己的本人记忆、
-// 他自己的凭据与凭据源，以及他让不让 Dream 整理本人记忆；别的成员的本人记忆、凭据与设置都不导出。
+// 他自己的凭据与密码库连接（不带令牌与密钥），以及他让不让 Dream 整理本人记忆；别的成员的本人记忆、凭据与设置都不导出。
 // 记忆按管理读取挑（和历史、已过期列表同一套规则）：已过期的策展记忆与被推翻的事实也带上，有效期原样写出，
 // 导入后照样在「已过期」与对象页的「被推翻的事实」里，能重新生效。
 // 不导出：Key、会话、召回事件与召回统计、对话缓冲、抽取记录、记忆与凭据的历史、向量；
@@ -146,7 +146,7 @@ export async function exportSpace(
   }
   // 文件做好时客户端已经断开：文件交不出去，也就不记访问事件
   stopIfGone(signal)
-  // 托管的值与外部的绑定都随文件带走了，和取用一样给凭据的主人记一条访问事件，事后查得到。
+  // 托管的值随文件带走了，和取用一样给凭据的所有者记一条访问事件，事后查得到；密码库的凭据只带条目 id，不算交出值。
   // secret 记忆的正文同样解密带走了，给这条记忆记一条访问事件（见 secretReadEvents）
   if (exported.size || secrets.length) {
     await withSpace(db, options.spaceId, async (tx) => {
@@ -157,7 +157,7 @@ export async function exportSpace(
             credentialId,
             eventType: 'access',
             actorAccountId: options.accountId,
-            context: { via: 'export', fields },
+            context: { via: 'space_export', fields, result: 'ok' },
           })),
         )
       }
@@ -334,49 +334,36 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
     )
     .join('')
 
-  // 凭据与凭据源只有导出人自己的；凭据只导出有效的。已删除的凭据源只在还有导出的凭据绑着它时带上
+  // 凭据与密码库连接只有导出人自己的；凭据只导出有效的。连接不带令牌与密钥，导入后是断开的，要重新登录
   next()
   const credentialRows = await tx
     .select()
     .from(credentials)
     .where(and(eq(credentials.ownerAccountId, accountId), isNull(credentials.deletedAt)))
     .orderBy(asc(credentials.createdAt), asc(credentials.id))
-  const boundProviders = [
-    ...new Set(credentialRows.flatMap((c) => (c.providerId ? [c.providerId] : []))),
-  ]
-  const providerRows = await tx
+  const connectionRows = await tx
     .select()
-    .from(credentialProviders)
-    .where(
-      and(
-        eq(credentialProviders.ownerAccountId, accountId),
-        boundProviders.length
-          ? or(
-              isNull(credentialProviders.deletedAt),
-              inArray(credentialProviders.id, boundProviders),
-            )
-          : isNull(credentialProviders.deletedAt),
-      ),
-    )
-    .orderBy(asc(credentialProviders.createdAt), asc(credentialProviders.id))
-  yield providerRows
-    .map((p) =>
-      record(`凭据源「${p.name}」`, {
-        type: 'provider',
-        id: p.id,
-        kind: p.kind,
-        name: p.name,
-        instructions: p.instructions,
-        deletedAt: iso(p.deletedAt),
-        createdAt: p.createdAt.toISOString(),
-        updatedAt: p.updatedAt.toISOString(),
+    .from(vaultConnections)
+    .where(eq(vaultConnections.ownerAccountId, accountId))
+    .orderBy(asc(vaultConnections.createdAt), asc(vaultConnections.id))
+  yield connectionRows
+    .map((v) =>
+      record(`密码库连接 ${v.email} `, {
+        type: 'vault_connection',
+        id: v.id,
+        serverUrl: v.serverUrl,
+        email: v.email,
+        vaultUserId: v.vaultUserId,
+        defaultCollectionId: v.defaultCollectionId,
+        createdAt: v.createdAt.toISOString(),
+        updatedAt: v.updatedAt.toISOString(),
       }),
     )
     .join('')
   yield credentialRows
     .map((c) => {
       const text = record(`凭据 ${c.identifier} `, credentialRecord(c, ctx.masterKey))
-      ctx.exported.set(c.id, c.fields.map((f) => f.name).sort())
+      if (c.source === 'hosted') ctx.exported.set(c.id, c.fields.map((f) => f.name).sort())
       return text
     })
     .join('')
@@ -486,11 +473,10 @@ function credentialRecord(
     }
   } else {
     source = {
-      kind: 'external',
-      providerId: row.providerId!,
-      location: row.location!,
-      // 没有来源字段的取值时按字段名取：导出时就写成字段名，和新建凭据的接口一样必填，导入后取法不变
-      fields: row.fields.map((f) => ({ name: f.name, sourceField: f.sourceField ?? f.name })),
+      kind: 'vault',
+      connectionId: row.vaultConnectionId!,
+      itemId: row.vaultItemId!,
+      fields: row.fields.map((f) => ({ name: f.name, itemField: f.itemField! })),
     }
   }
   return {

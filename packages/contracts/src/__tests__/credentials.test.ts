@@ -65,14 +65,26 @@ describe('密码库来源的字段', () => {
 })
 
 describe('服务器地址', () => {
-  it('收 http 与 https，去掉末尾的 /', () => {
+  it('收 https，本机回环地址与不带点的主机名也收 http；去掉末尾的 /', () => {
     expect(VaultServerUrl.parse(' https://vault.example.com/ ')).toBe('https://vault.example.com')
-    expect(VaultServerUrl.parse('http://127.0.0.1:8080/vw')).toBe('http://127.0.0.1:8080/vw')
+    for (const url of [
+      'http://127.0.0.1:8080/vw',
+      'http://localhost',
+      'http://[::1]:80/',
+      'http://vaultwarden',
+      'http://vaultwarden:8080/',
+    ]) {
+      expect(VaultServerUrl.safeParse(url).success, url).toBe(true)
+    }
   })
 
   it('不收别的协议、账号、查询参数与 #', () => {
     for (const url of [
       'ftp://vault.example.com',
+      'http://vault.example.com',
+      'http://127.0.0.1.example.com',
+      'http://localhost.example.com',
+      'http://192.168.1.2',
       'https://user:pw@vault.example.com',
       'https://vault.example.com/?a=1',
       'https://vault.example.com/#x',

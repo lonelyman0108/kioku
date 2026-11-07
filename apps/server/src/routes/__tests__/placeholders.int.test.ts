@@ -3,7 +3,6 @@ import { randomBytes } from 'node:crypto'
 import type {
   ConsoleCredential,
   CredentialEventList,
-  CredentialProvider,
   CredentialReferenceList,
   KeyScopes,
   MemoryHistory,
@@ -569,71 +568,38 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       return body.result.content[0]!.text
     }
 
-    it('末尾列出读者能取用的凭据怎么取；取不了的只标无权查看或不存在，不给凭据源与条目位置', async () => {
-      const provider = await ok<CredentialProvider>(
-        await asMember('POST', '/credential-providers', {
-          kind: 'bitwarden',
-          name: '密码库',
-          instructions: '在工作站上用 bw\n先 bw unlock',
-        }),
-        201,
-      )
-      const router = await credential({
-        identifier: 'router',
-        name: '路由器',
-        source: {
-          kind: 'external',
-          providerId: provider.id,
-          location: 'router admin',
-          fields: [{ name: 'password', sourceField: 'password' }],
-        },
-      })
+    it('末尾只列出引用的凭据能不能取用，不给值，也不记访问', async () => {
       const appA = await ws.createApp('app-a')
       const appB = await ws.createApp('app-b')
-      await credential({
+      const hidden = await credential({
         identifier: 'hidden',
         name: '只给 A',
-        source: {
-          kind: 'external',
-          providerId: provider.id,
-          location: 'secret place',
-          fields: [{ name: 'password', sourceField: 'password' }],
-        },
+        source: { kind: 'hosted', values: { password: 'only-for-a' } },
         appIds: [appA.id],
       })
       await ok(
         await createMemory({
           uri: 'user://notes/home',
-          content: `${WITH_REFS}；路由器 {{cred:router#password}}；另一个 {{cred:hidden}}`,
+          content: `${WITH_REFS}；另一个 {{cred:hidden}}`,
         }),
         201,
       )
       const keyB = await ws.issueKey(appB.id, FULL_SCOPES)
       const text = await callTool(keyB, 'kioku_get', { uri: 'user://notes/home' })
       expect(text).toContain('正文里引用的凭据')
-      expect(text).toContain(
-        '- file-server（文件服务器）：Kioku 托管\n  取法：值由 Kioku 托管，用 kioku_credential 取。',
-      )
-      // 取法与使用说明的续行缩进，带上凭据源的使用说明与取用提醒，和 kioku_credential 给的一样
-      expect(text).toContain(
-        '- router（路由器）：凭据源「密码库」（bitwarden），条目 "router admin"\n  取法：用 Bitwarden CLI 读出条目：bw get item \'router admin\'',
-      )
-      expect(text).toContain("\n  字段对应（占位符字段 → 条目里的字段）：password → 'password'")
-      expect(text).toContain('\n  凭据源的使用说明：在工作站上用 bw\n  先 bw unlock')
-      expect(text).toContain('不要把值写进记忆')
+      expect(text).toContain('- file-server（文件服务器）：可以取用')
       expect(text).toContain('- hidden：无权查看或不存在')
-      expect(text).not.toContain('secret place')
       expect(text).not.toContain(PASSWORD)
-
-      // 给出外部绑定的记一条访问事件
+      expect(text).not.toContain('only-for-a')
       const events = await ok<CredentialEventList>(
-        await asMember('GET', `/credentials/${router.id}/events`),
+        await asMember('GET', `/credentials/${hidden.id}/events`),
       )
-      expect(events.items[0]).toMatchObject({ type: 'access', via: 'kioku_get' })
+      expect(events.items.map((e) => e.type)).toEqual(['create'])
 
-      const privateLevel = await ws.issueKey(appA.id, { ...FULL_SCOPES, maxSensitivity: 'private' })
-      expect(await callTool(privateLevel, 'kioku_get', { uri: 'user://notes/home' })).toContain(
-        '- file-server（文件服务器）：Kioku 托管\n  取法：值由 Kioku 托管，这把 Key 不是 secret 级，取不到',
+      // 凭据能力是不可用的 Key 一条都取用不了
+      const noCredentials = await ws.issueKey(appA.id, { ...FULL_SCOPES, credentials: 'none' })
+      expect(await callTool(noCredentials, 'kioku_get', { uri: 'user://notes/home' })).toContain(
+        '- file-server：无权查看或不存在',
       )
     })
 
@@ -650,7 +616,7 @@ describe.skipIf(!testDatabaseUrl)('记忆里的凭据占位符', () => {
       })
       expect(clean).not.toContain('提醒')
       expect(await callTool(key, 'kioku_boot', {})).toContain(
-        '凭据占位符：用到时才用 kioku_credential 取值',
+        '凭据占位符：只在当前任务确实要用时才用 kioku_credential 取值',
       )
     })
   })

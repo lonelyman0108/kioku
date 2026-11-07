@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { WhoAmI } from './auth'
-import { Layer, Sensitivity, SubjectKind } from './memory'
+import { CredentialCapability, Layer, Sensitivity, SubjectKind } from './memory'
 import { SessionExtra, TurnEndEvent } from './recall'
 
 // 测试台：不接真实客户端，按一把 Key 模拟接入方调用 Kioku，步骤的结果和真实接入方收到的一样。
@@ -57,11 +57,12 @@ export const CaptureName = z
 export const BenchCapture = z.record(CaptureName, z.string().min(1).max(200))
 export type BenchCapture = z.infer<typeof BenchCapture>
 
-// requires：这一步要的归属与最高敏感级，运行前按 whoami 判断，不满足的步骤记「跳过」，不算失败
+// requires：这一步要的归属、最高敏感级与凭据能力，运行前按 whoami 判断，不满足的步骤记「跳过」，不算失败
 export const BenchRequires = z.strictObject({
   readLayers: z.array(Layer).optional(),
   writeLayers: z.array(Layer).optional(),
   maxSensitivity: Sensitivity.optional(),
+  credentials: CredentialCapability.optional(),
 })
 export type BenchRequires = z.infer<typeof BenchRequires>
 

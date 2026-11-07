@@ -531,7 +531,7 @@ export const VAULT_CONNECTION_STATUSES = [
 export const VaultConnectionStatus = z.enum(VAULT_CONNECTION_STATUSES)
 export type VaultConnectionStatus = z.infer<typeof VaultConnectionStatus>
 
-// 停用的原因：账号里有不属于组织的条目；在某个组织里是所有者或管理员（看得到全部集合）
+// 停用的原因：账号里有不属于组织的条目；在某个组织里看得到全部集合（所有者、管理员，或开了「访问全部集合」的成员）
 export const VAULT_DISABLED_REASONS = ['personal_items', 'organization_role'] as const
 export const VaultDisabledReason = z.enum(VAULT_DISABLED_REASONS)
 export type VaultDisabledReason = z.infer<typeof VaultDisabledReason>
@@ -551,8 +551,8 @@ export const VAULT_ERROR_KINDS = [
 export const VaultErrorKind = z.enum(VAULT_ERROR_KINDS)
 export type VaultErrorKind = z.infer<typeof VaultErrorKind>
 
-// 两步验证只支持验证器应用与邮件验证码
-export const VAULT_TWO_FACTOR_PROVIDERS = ['authenticator', 'email'] as const
+// 两步验证只支持验证器应用：邮件验证码要另外请求发送，几种方式并存时服务端不会自动发
+export const VAULT_TWO_FACTOR_PROVIDERS = ['authenticator'] as const
 export const VaultTwoFactorProvider = z.enum(VAULT_TWO_FACTOR_PROVIDERS)
 export type VaultTwoFactorProvider = z.infer<typeof VaultTwoFactorProvider>
 
@@ -583,16 +583,20 @@ export type VaultConnection = z.infer<typeof VaultConnection>
 export const VaultConnectionList = z.object({ items: z.array(VaultConnection) })
 export type VaultConnectionList = z.infer<typeof VaultConnectionList>
 
-// 服务器地址：http:// 或 https:// 开头，不带账号、查询参数与 #，末尾的 / 去掉。
+// 服务器地址：https:// 都收；http:// 只收本机回环地址（localhost、127.0.0.1、[::1]）与不带点的主机名
+// （例如 Docker Compose 的服务名 vaultwarden，流量不出 Docker 网络）。不带账号、查询参数与 #，末尾的 / 去掉。
+// 主密码与令牌都发到这里，所以别的地址不收明文的 http。
 // 契约不依赖 URL（浏览器与 Node 之外也要能用），按写法判断，服务端请求之前再用 URL 解析一次
-const SERVER_URL = /^https?:\/\/[^\s/?#@\\]+(?:\/[^\s?#\\]*)?$/i
+const SERVER_URL = /^https:\/\/[^\s/?#@\\]+(?:\/[^\s?#\\]*)?$/i
+const LOCAL_HTTP_URL =
+  /^http:\/\/(?:[a-z0-9-]+|127\.0\.0\.1|\[::1\])(?::\d{1,5})?(?:\/[^\s?#\\]*)?$/i
 export const VaultServerUrl = z
   .string()
   .trim()
   .max(500, '服务器地址最多 500 个字符')
   .refine(
-    (v) => SERVER_URL.test(v),
-    '服务器地址要以 http:// 或 https:// 开头，不带账号、查询参数与 #',
+    (v) => SERVER_URL.test(v) || LOCAL_HTTP_URL.test(v),
+    '服务器地址要以 https:// 开头（本机地址与不带点的主机名可以用 http://），不带账号、查询参数与 #',
   )
   .transform((v) => v.replace(/\/+$/, ''))
 
@@ -652,6 +656,8 @@ export type VaultItemSummary = z.infer<typeof VaultItemSummary>
 // 条目列表，连同条目所在的集合与组织；回收站里的不算
 export const VaultItemList = z.object({
   items: z.array(VaultItemSummary),
+  // 组织里解不开的条目数（格式不认识或校验不过），这些不在 items 里
+  unreadableCount: z.number().int(),
   collections: z.array(z.object({ id: z.string(), organizationId: z.string(), name: z.string() })),
   organizations: z.array(z.object({ id: z.string(), name: z.string() })),
 })
