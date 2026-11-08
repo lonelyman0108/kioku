@@ -18,6 +18,11 @@ export type FlagStatus =
   | 'expiring'
   | 'credentialExpired'
   | 'rotation'
+  | 'accountActive'
+  | 'pendingPassword'
+  | 'pendingReset'
+  | 'accountDisabled'
+  | 'currentDevice'
 
 // 每种状态的文字与图标。图标只作辅助，文字照样写全；同一个状态到处是同一个图标（未保存和保存条一致）。
 // 现在的调用处：已删除、快到期、已到期、需要轮换、测试台在凭据（列表、待处理、详情）；已过期在已删除的记忆；
@@ -34,6 +39,12 @@ export const FLAGS: Record<FlagStatus, { label: string; icon: string; warning?: 
   expiring: { label: CREDENTIAL_EXPIRY_NAMES.expiring, icon: icons.expired },
   credentialExpired: { label: CREDENTIAL_EXPIRY_NAMES.expired, icon: icons.credentialExpired },
   rotation: { label: CREDENTIAL_ROTATION_NAME, icon: icons.refresh },
+  // 实例的账号列表与登录设备
+  accountActive: { label: '正常', icon: icons.accountActive },
+  pendingPassword: { label: '待设置密码', icon: icons.pendingPassword, warning: true },
+  pendingReset: { label: '待重置密码', icon: icons.pendingPassword },
+  accountDisabled: { label: '已停用', icon: icons.accountDisabled },
+  currentDevice: { label: '当前设备', icon: icons.currentDevice },
 }
 
 // 凭据到期的两种状态

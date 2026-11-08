@@ -83,4 +83,14 @@ export const icons = {
   // 状态标签：已吊销的访问密钥、已到期的凭据（未保存用上面的 unsaved）
   revoked: 'i-lucide-ban',
   credentialExpired: 'i-lucide-calendar-x',
+  // 账号：账号与登录、实例的账号，账号的状态、设置密码链接、登录设备
+  accountLogin: 'i-lucide-key-square',
+  accounts: 'i-lucide-user-cog',
+  userPlus: 'i-lucide-user-plus',
+  accountActive: 'i-lucide-circle-check',
+  pendingPassword: 'i-lucide-clock',
+  accountDisabled: 'i-lucide-user-x',
+  passwordLink: 'i-lucide-link-2',
+  password: 'i-lucide-key-round',
+  currentDevice: 'i-lucide-monitor-smartphone',
 } as const

@@ -2,7 +2,7 @@
 import type { CommandPaletteItem, DropdownMenuItem } from '@nuxt/ui'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery } from '@tanstack/vue-query'
-import { computed, onBeforeUnmount, onMounted, ref, watch } from 'vue'
+import { computed, onBeforeUnmount, onMounted, provide, ref, watch } from 'vue'
 import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -15,6 +15,7 @@ import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPr
 import { useConsoleSearch } from '../composables/useConsoleSearch'
 import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
+import { LOGOUT } from '../composables/useLogout'
 import { forgetSpace, ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { actionableInboxCount } from '../inbox'
@@ -150,7 +151,7 @@ const accountNav = computed<NavItem[]>(() => [
   {
     label: '账号设置',
     icon: icons.account,
-    to: accountSettingsRoute(),
+    to: accountSettingsRoute('account'),
     routes: ['account-settings'],
   },
   ...(me.data.value?.isAdmin
@@ -253,6 +254,7 @@ async function logout() {
   queryClient.setQueryData(ME_KEY, null)
   await router.replace({ name: 'login' })
 }
+provide(LOGOUT, logout)
 </script>
 
 <template>

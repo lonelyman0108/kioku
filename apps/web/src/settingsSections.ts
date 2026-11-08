@@ -38,6 +38,13 @@ const lazy = (load: () => Promise<{ default: Component }>) => defineAsyncCompone
 export const SETTINGS_SECTIONS = [
   {
     group: 'account',
+    key: 'account',
+    label: '账号与登录',
+    icon: icons.accountLogin,
+    component: lazy(() => import('./components/AccountLoginSettings.vue')),
+  },
+  {
+    group: 'account',
     key: 'appearance',
     label: '外观',
     icon: icons.appearance,
@@ -56,6 +63,13 @@ export const SETTINGS_SECTIONS = [
     label: '导入与导出',
     icon: icons.transfer,
     component: lazy(() => import('./components/SpaceTransferSettings.vue')),
+  },
+  {
+    group: 'instance',
+    key: 'accounts',
+    label: '账号',
+    icon: icons.accounts,
+    component: lazy(() => import('./components/InstanceAccounts.vue')),
   },
   {
     group: 'instance',
