@@ -1,7 +1,7 @@
 import { z } from 'zod'
 
 import { UriPrefix } from './memories'
-import { Layer, Provenance, Sensitivity } from './memory'
+import { LAYERS, Layer, Provenance, Sensitivity } from './memory'
 import { RecallCandidate } from './recall'
 import { SubjectBinding } from './subjects'
 
@@ -266,6 +266,170 @@ export const ExpiredMemoryList = z.object({
 })
 export type ExpiredMemoryList = z.infer<typeof ExpiredMemoryList>
 
+// 变更记录里的事件类型：访问事件（access）不进变更记录，不在这里
+export const ACTIVITY_TYPES = [
+  'create',
+  'import',
+  'sync',
+  'update',
+  'move',
+  'delete',
+  'expire',
+  'restore',
+  'undelete',
+  'reactivate',
+  'confirm',
+  'convert_credential',
+  'ignore_plaintext',
+  'unignore_plaintext',
+] as const
+export const ActivityType = z.enum(ACTIVITY_TYPES)
+export type ActivityType = z.infer<typeof ActivityType>
+
+// 一次改动改了哪些字段
+export const ACTIVITY_FIELDS = [
+  'content',
+  'title',
+  'disclosure',
+  'priority',
+  'sensitivity',
+  'layer',
+  'uri',
+  'glossary',
+  'validTo',
+] as const
+export const ActivityField = z.enum(ACTIVITY_FIELDS)
+export type ActivityField = z.infer<typeof ActivityField>
+// 按改动的字段筛选时，none 指没有改动任何字段的事件（新建、删除、超出可见范围的等）
+export const ActivityFieldFilter = z.enum([...ACTIVITY_FIELDS, 'none'])
+export type ActivityFieldFilter = z.infer<typeof ActivityFieldFilter>
+
+// 操作者的标识，筛选与计数按它分组：成员 account:<账号 id>；通过访问密钥写入的按应用分组 app:<应用 id>
+// （访问密钥的名字只给应用所有者与空间所有者，所以不按访问密钥分）；测试台写下的 bench；
+// 访问密钥连同应用已经删除的，或者没有操作者的，记为 unknown
+const UUID_TEXT = '[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'
+export const ACTIVITY_ACTOR_PATTERN = new RegExp(
+  `^(?:account:${UUID_TEXT}|app:${UUID_TEXT}|bench|unknown)$`,
+)
+export const ActivityActorKey = z.string().regex(ACTIVITY_ACTOR_PATTERN, '操作者的写法不对')
+export type ActivityActorKey = z.infer<typeof ActivityActorKey>
+
+// 字段的前后值：标量字段给改前与改后；正文只给增删的行数，机密的（有一边看不到正文）两个都是 null；
+// 关键词给增删的词
+export const ActivityFieldChange = z.discriminatedUnion('field', [
+  z.object({
+    field: z.literal('content'),
+    added: z.number().int().nullable(),
+    removed: z.number().int().nullable(),
+  }),
+  z.object({
+    field: z.literal('glossary'),
+    added: z.array(z.string()),
+    removed: z.array(z.string()),
+  }),
+  z.object({ field: z.literal('priority'), before: z.number().int(), after: z.number().int() }),
+  z.object({ field: z.literal('layer'), before: Layer, after: Layer }),
+  z.object({ field: z.literal('sensitivity'), before: Sensitivity, after: Sensitivity }),
+  z.object({
+    field: z.enum(['title', 'disclosure', 'uri', 'validTo']),
+    before: z.string().nullable(),
+    after: z.string().nullable(),
+  }),
+])
+export type ActivityFieldChange = z.infer<typeof ActivityFieldChange>
+
+// 多个值的查询参数用逗号连起来写在一个参数里，例如 type=create,update
+const commaList = <T extends z.ZodType<unknown, string>>(item: T, max: number) =>
+  z
+    .string()
+    .max(max * 48)
+    .transform((value) => value.split(',').filter(Boolean))
+    .pipe(z.array(item).min(1).max(max))
+
+// 变更记录的跨度最多这么多天（按天计数要一天一行）
+export const ACTIVITY_MAX_SPAN_DAYS = 400
+
+// IANA 时区名，例如 Asia/Shanghai、Etc/GMT-8。浏览器给的名字，服务端按它把时间分到天里。
+// 只拒绝「+08」「UTC+8」这类裸偏移写法：PostgreSQL 按 POSIX 读它们，正负号和浏览器的意思相反。
+// IANA 的 Etc/GMT±N 在浏览器和 PostgreSQL 里是同一个意思（Etc/GMT+8 都是 UTC−8），照收。
+// 名字认不认得以 PostgreSQL 的时区库为准（pg_timezone_names），由服务端再查一次，不认识的回 400，
+// 错误体带 code（ACTIVITY_UNKNOWN_TIME_ZONE），界面据此退回 UTC
+const TIME_ZONE_REGION = /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$/
+export const TimeZoneName = z
+  .string()
+  .min(1)
+  .max(64)
+  .refine((tz) => tz === 'UTC' || TIME_ZONE_REGION.test(tz), '时区只收地区名，例如 Asia/Shanghai')
+export const ACTIVITY_UNKNOWN_TIME_ZONE = 'unknown_time_zone'
+
+// 变更记录的筛选，列表、按天计数与筛选计数共用。时间是不早于 from、早于 to；
+// 多个值的参数之间是「或」，各个参数之间是「且」。q 在列表显示的标题与坐标里按子串查找，不区分大小写
+const ACTIVITY_FILTER = {
+  from: z.iso.datetime({ offset: true }).optional(),
+  to: z.iso.datetime({ offset: true }).optional(),
+  actor: commaList(ActivityActorKey, 50).optional(),
+  // 不含这些操作者。操作者的全集随数据变，界面上取消勾选的写在这里；和 actor 可以同时给
+  exceptActor: commaList(ActivityActorKey, 50).optional(),
+  type: commaList(ActivityType, ACTIVITY_TYPES.length).optional(),
+  layer: commaList(Layer, LAYERS.length).optional(),
+  field: commaList(ActivityFieldFilter, ACTIVITY_FIELDS.length + 1).optional(),
+  q: z.string().trim().min(1).max(100).optional(),
+}
+
+function checkSpan(
+  v: { from?: string | undefined; to?: string | undefined },
+  ctx: z.RefinementCtx,
+) {
+  if (!v.from || !v.to) return
+  const span = Date.parse(v.to) - Date.parse(v.from)
+  if (span < 0) ctx.addIssue({ code: 'custom', path: ['to'], message: '结束时间不能早于开始时间' })
+  // 界面按本地日历截到 400 天，跨过夏令时回拨的 400 个本地日会多出一两个小时：服务端多留一天的余量
+  else if (span > (ACTIVITY_MAX_SPAN_DAYS + 1) * 86_400_000) {
+    ctx.addIssue({
+      code: 'custom',
+      path: ['to'],
+      message: `时间跨度最多 ${ACTIVITY_MAX_SPAN_DAYS} 天`,
+    })
+  }
+}
+
+export const ActivityFilter = z.object(ACTIVITY_FILTER).superRefine(checkSpan)
+export type ActivityFilter = z.infer<typeof ActivityFilter>
+
+export const ActivityQuery = z
+  .object({ ...ACTIVITY_FILTER, ...PageQuery.shape })
+  .superRefine(checkSpan)
+export type ActivityQuery = z.infer<typeof ActivityQuery>
+
+export const ActivityDaysQuery = z
+  .object({ ...ACTIVITY_FILTER, tz: TimeZoneName })
+  .superRefine(checkSpan)
+export type ActivityDaysQuery = z.infer<typeof ActivityDaysQuery>
+
+// 按天的条数，只列有改动的日子，按日期从早到晚；day 是这个时区里的日期（YYYY-MM-DD）
+export const ActivityDays = z.object({
+  days: z.array(z.object({ day: z.string(), count: z.number().int() })),
+})
+export type ActivityDays = z.infer<typeof ActivityDays>
+
+// 筛选计数：每一组在「除了这一组以外的全部筛选」下计算，只列条数不为零的值；total 是全部筛选下的总条数
+export const ActivityFacets = z.object({
+  total: z.number().int(),
+  actors: z.array(
+    z.object({
+      key: ActivityActorKey,
+      kind: z.enum(['account', 'app', 'bench', 'unknown']),
+      // 账号的显示名、应用名；测试台、未知的，以及已经删除的账号为 null
+      name: z.string().nullable(),
+      count: z.number().int(),
+    }),
+  ),
+  types: z.array(z.object({ type: ActivityType, count: z.number().int() })),
+  layers: z.array(z.object({ layer: Layer, count: z.number().int() })),
+  fields: z.array(z.object({ field: ActivityFieldFilter, count: z.number().int() })),
+})
+export type ActivityFacets = z.infer<typeof ActivityFacets>
+
 export const ActivityItem = z.object({
   id: z.number().int(),
   type: z.string(),
@@ -273,10 +437,19 @@ export const ActivityItem = z.object({
   // 记忆现在的坐标与标题；离开了你的可见范围的（left 为 true），是改动之前的
   uri: z.string(),
   title: z.string(),
+  // 记忆现在的归属与敏感级；离开的是改动之前的
+  layer: Layer,
+  sensitivity: Sensitivity,
   createdAt: z.string(),
   actor: EventActor,
-  // 这次改了哪些字段：content、title、disclosure、priority、sensitivity、layer、uri、glossary；离开的事件为空
+  actorKey: ActivityActorKey,
+  // 这次改了哪些字段（ACTIVITY_FIELDS）；离开的事件为空
   changes: z.array(z.string()),
+  // 各字段的前后值，和 changes 同一个顺序；离开的事件为空
+  fieldChanges: z.array(ActivityFieldChange),
+  // 改动前后的版本号，没有的一边为 null；离开的没有改后的
+  versionBefore: z.number().int().nullable(),
+  versionAfter: z.number().int().nullable(),
   // 见 HistoryEvent.left
   left: z.boolean(),
   // 记忆现在已经删除（包括过期后让出 URI 的）：那个 URI 上可能已经是别的记忆了。离开了可见范围的一律为 false
@@ -293,6 +466,20 @@ export const ActivityList = z.object({
   nextCursor: z.string().nullable(),
 })
 export type ActivityList = z.infer<typeof ActivityList>
+
+// 变更记录里的一条改动，带前后快照（详情里对比正文用）。可见性和列表、历史同一套规则：看不到的是 404，
+// 离开的没有改后的快照；机密的快照里没有正文
+export const ActivityEvent = z.object({
+  item: ActivityItem,
+  before: MemorySnapshot.nullable(),
+  after: MemorySnapshot.nullable(),
+})
+export type ActivityEvent = z.infer<typeof ActivityEvent>
+
+export const ActivityEventParams = z.object({
+  spaceId: z.uuid(),
+  eventId: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+})
 
 // 恢复到某个事件之后的那一版：只改正文、标题、disclosure、priority 与关键词。
 // expectedVersion 是界面上看到的当前版本号，期间被改过就返回 409

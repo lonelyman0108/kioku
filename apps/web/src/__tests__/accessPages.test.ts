@@ -730,8 +730,9 @@ describe('启动加载', () => {
 })
 
 describe('操作方', () => {
-  it('显示操作方用 ActorName：应用可以和成员同名，要带应用标记', () => {
-    expect(recentChange).toContain('<ActorName :actor="item.actor" />')
+  it('显示操作方带按类别的图标：应用可以和成员同名', () => {
+    expect(recentChange).toContain('activityActorIcons[actor.kind]')
+    expect(recentChange).toContain('const actor = computed(() => activityActor(props.item))')
   })
 })
 
