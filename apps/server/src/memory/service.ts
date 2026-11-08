@@ -12,6 +12,9 @@ import {
   findPlaintextCredentials,
   PLAINTEXT_CREDENTIAL_PARTS,
   PLAINTEXT_KIND_NAMES,
+  ActivityFieldFilter,
+  ActivityType,
+  Layer,
   PLAINTEXT_MASK,
   SENSITIVITIES,
   sensitivityAllowed,
@@ -20,6 +23,10 @@ import {
   URI_PREFIX_PATTERN,
 } from '@kioku/contracts'
 import type {
+  ActivityDays,
+  ActivityDaysQuery,
+  ActivityFacets,
+  ActivityFilter,
   ActivityItem,
   ActivityList,
   CredentialWriteReason,
@@ -36,7 +43,6 @@ import type {
   ExpiredMemoryList,
   GlossaryIndex,
   LayerCount,
-  Layer,
   MemoryChildren,
   MemoryHistory,
   MemoryList,
@@ -83,6 +89,7 @@ import {
   lt,
   lte,
   ne,
+  notInArray,
   or,
   sql,
   type SQL,
@@ -148,6 +155,14 @@ import {
   STILL_VALID,
   type MemoryColumns,
 } from './filter'
+import {
+  ACTOR_KEY,
+  changedFields,
+  changedFieldsSql,
+  fieldChanges,
+  text as snapshotText,
+  uriOf as snapshotUri,
+} from './activity'
 import { hasMaskedText } from './masked'
 import { layerWithValue, sensitivityWithValue } from './names'
 import { personaIdsBySlug, runInSpace } from './personas'
@@ -3080,51 +3095,258 @@ export class MemoryService {
     })
   }
 
-  // 空间的活动流，最新的在前。按时间排序走 (space_id, created_at) 索引，不必扫别的空间的事件；
-  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id。
-  // 访问事件不进活动：和凭据的访问记录一样，只有读得到这条 secret 的人在它的历史里看得到
-  async activity(query: PageQuery): Promise<ActivityList> {
-    const after = timeCursor(query.cursor, EVENT_ID)
-    return this.run(async (tx) => {
-      const rows = await this.eventRows(
-        tx,
+  // 变更记录的事件，列表、按天计数与筛选计数共用这一个子查询，看得到哪些事件只按这里的 vis 判断（见 eventVisibility），
+  // 计数和列表才对得上：多算一条就泄露了看不到的改动。vis 在子查询里每行只算一次（offset 0 不让子查询被展开到外层），
+  // 外层按它判断显示的归属、标题、坐标与改了哪些字段。按时间排序时（列表）走 (space_id, created_at) 索引，
+  // 外层的 limit 读够了就停。操作者与操作只看事件本身，能放进子查询的（列表、按天计数）先在里面筛掉，少算可见性。
+  // 只列策展记忆的事件；访问事件不进变更记录：和凭据的访问记录一样，只有读得到这条 secret 的人在它的历史里看得到
+  private activityEvents(
+    tx: Tx,
+    filter: Partial<ActivityFilter>,
+    options: { inner?: SQL | undefined; ordered?: boolean; eventFilters?: boolean } = {},
+  ) {
+    // Key 的名字和 Key 列表一样，只给应用所有者与空间所有者看，别人只看到应用名
+    const keyVisible = this.ctx.access.admin
+      ? sql`true`
+      : sql`${apps.ownerAccountId} = ${this.ctx.access.ownerAccountId}`
+    const eventFilters = options.eventFilters ?? true
+    const pattern = filter.q ? `%${escapeLike(filter.q)}%` : undefined
+    const query = tx
+      .select({
+        id: memoryEvents.id,
+        type: memoryEvents.eventType,
+        memoryId: memoryEvents.memoryId,
+        before: detoasted(memoryEvents.before).as('before'),
+        after: detoasted(memoryEvents.after).as('after'),
+        context: memoryEvents.context,
+        createdAt: memoryEvents.createdAt,
+        createdMicros: sql<string>`${microsOf(memoryEvents.createdAt)}::text`.as('created_micros'),
+        domain: memories.domain,
+        path: memories.path,
+        title: memories.title,
+        memLayer: sql<Layer>`${memories.layer}`.as('mem_layer'),
+        memSensitivity: sql<Sensitivity>`${memories.sensitivity}`.as('mem_sensitivity'),
+        memoryDeleted: sql<boolean>`(${memories.deletedAt} is not null)`.as('memory_deleted'),
+        memoryExpired: sql<boolean>`(not ${STILL_VALID})`.as('memory_expired'),
+        actorKey: sql<string>`${ACTOR_KEY}`.as('actor_key'),
+        accountName: sql<string | null>`${accounts.displayName}`.as('account_name'),
+        keyName: sql<string | null>`case when ${keyVisible} then ${apiKeys.name} end`.as(
+          'key_name',
+        ),
+        appName: sql<string | null>`${apps.name}`.as('app_name'),
+        vis: sql<boolean | null>`${this.eventVisibility(this.manageable())}`.as('vis'),
+      })
+      .from(memoryEvents)
+      .innerJoin(memories, eq(memories.id, memoryEvents.memoryId))
+      .leftJoin(accounts, eq(accounts.id, memoryEvents.actorAccountId))
+      .leftJoin(apiKeys, eq(apiKeys.id, memoryEvents.actorKeyId))
+      .leftJoin(apps, eq(apps.id, apiKeys.appId))
+      .where(
         and(
           ne(memoryEvents.eventType, ACCESS_EVENT),
-          after
-            ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
+          eq(memories.form, 'curated'),
+          filter.from ? sql`${memoryEvents.createdAt} >= ${filter.from}::timestamptz` : undefined,
+          filter.to ? sql`${memoryEvents.createdAt} < ${filter.to}::timestamptz` : undefined,
+          eventFilters && filter.type ? inArray(memoryEvents.eventType, filter.type) : undefined,
+          eventFilters && filter.actor ? inArray(ACTOR_KEY, filter.actor) : undefined,
+          eventFilters && filter.exceptActor
+            ? notInArray(ACTOR_KEY, filter.exceptActor)
             : undefined,
+          // 关键字先粗筛一遍，只读记忆的列与改前快照的标题、坐标，不算可见性；显示的是哪一边由外层按 vis 定
+          pattern
+            ? or(
+                ilike(memories.title, pattern),
+                ilike(sql`${memories.domain} || '://' || ${memories.path}`, pattern),
+                ilike(snapshotText(memoryEvents.before, 'title'), pattern),
+                ilike(snapshotUri(memoryEvents.before), pattern),
+              )
+            : undefined,
+          options.inner,
         ),
-        [desc(memoryEvents.createdAt), desc(memoryEvents.id)],
-        query.limit + 1,
       )
+    const sub = (
+      options.ordered
+        ? query.orderBy(desc(memoryEvents.createdAt), desc(memoryEvents.id)).offset(OFFSET_ZERO)
+        : query.offset(OFFSET_ZERO)
+    ).as('activity_events')
+    // 显示出来的样子：离开的（vis 为 true）是改动之前的
+    const shown = {
+      layer: sql<string>`(case when ${sub.vis} then ${sub.before} ->> 'layer' else ${sub.memLayer}::text end)`,
+      title: sql<
+        string | null
+      >`(case when ${sub.vis} then ${snapshotText(sub.before, 'title')} else ${sub.title} end)`,
+      uri: sql<string>`(case when ${sub.vis} then ${snapshotUri(sub.before)} else ${sub.domain} || '://' || ${sub.path} end)`,
+      fields: sql<
+        string[]
+      >`(case when ${sub.vis} is false then ${changedFieldsSql(sub.before, sub.after)} else '{}'::text[] end)`,
+    }
+    const conditions = {
+      visible: sql`(${sub.vis} is not null)`,
+      actor: and(
+        filter.actor ? inArray(sub.actorKey, filter.actor) : undefined,
+        filter.exceptActor ? notInArray(sub.actorKey, filter.exceptActor) : undefined,
+      ),
+      type: filter.type ? inArray(sub.type, filter.type) : undefined,
+      layer: filter.layer ? inArray(shown.layer, filter.layer) : undefined,
+      field: filter.field ? fieldCondition(shown.fields, filter.field) : undefined,
+      q: pattern ? or(ilike(shown.title, pattern), ilike(shown.uri, pattern)) : undefined,
+    }
+    return { sub, shown, conditions }
+  }
+
+  // 空间的变更记录，最新的在前，可以按时间、操作者、操作、归属、改动的字段与关键字筛选（见 ActivityFilter）。
+  // 同一个事务里的事件时间相同，再按 id 排。游标是上一页最后一条的时间与 id
+  async activity(query: Partial<ActivityFilter> & PageQuery): Promise<ActivityList> {
+    const after = timeCursor(query.cursor, EVENT_ID)
+    return this.run(async (tx) => {
+      const { sub, conditions } = this.activityEvents(tx, query, {
+        ordered: true,
+        inner: after
+          ? sql`(${memoryEvents.createdAt} < ${fromMicros(after[0])} or (${memoryEvents.createdAt} = ${fromMicros(after[0])} and ${memoryEvents.id} < ${after[1]}::bigint))`
+          : undefined,
+      })
+      const rows = await tx
+        .select()
+        .from(sub)
+        .where(and(...Object.values(conditions)))
+        .orderBy(desc(sub.createdAt), desc(sub.id))
+        .limit(query.limit + 1)
       const page = rows.slice(0, query.limit)
       const benchMark = await benchMarkReader(
         tx,
-        page.map((r) => r.event.context),
+        page.map((r) => r.context),
       )
       return {
-        items: page.map((r): ActivityItem => ({
-          id: r.event.id,
-          type: r.event.eventType,
-          memoryId: r.event.memoryId!,
-          // 离开了可见范围的，只给改前的坐标与标题：记忆现在的样子在别人那里
-          uri: r.left ? toSnapshot(r.event.before)!.uri : formatUri(r.domain!, r.path!),
-          title: (r.left ? toSnapshot(r.event.before)!.title : r.title) ?? '',
-          createdAt: r.event.createdAt.toISOString(),
-          actor: actorOf(r),
-          changes: r.left
-            ? []
-            : changedFields(toSnapshot(r.event.before), toSnapshot(r.event.after)),
-          left: r.left,
-          // 离开了可见范围的，不透露它在别人那里现在是什么状态
-          deleted: !r.left && r.memoryDeleted,
-          expired: !r.left && r.memoryExpired,
-          bench: benchMark(r.event.context),
-        })),
+        items: page.map((r): ActivityItem => {
+          const left = r.vis === true
+          const before = toSnapshot(r.before)
+          const afterSnap = left ? null : toSnapshot(r.after)
+          const changes = left ? [] : changedFields(before, afterSnap)
+          return {
+            id: r.id,
+            type: r.type,
+            memoryId: r.memoryId!,
+            // 离开了可见范围的，只给改前的坐标、标题与归属：记忆现在的样子在别人那里
+            uri: left ? before!.uri : formatUri(r.domain!, r.path!),
+            title: (left ? before!.title : r.title) ?? '',
+            layer: left ? before!.layer : r.memLayer,
+            sensitivity: left ? before!.sensitivity : r.memSensitivity,
+            createdAt: r.createdAt.toISOString(),
+            actor: actorOf(r),
+            actorKey: r.actorKey,
+            changes,
+            fieldChanges: before && afterSnap ? fieldChanges(before, afterSnap, changes) : [],
+            versionBefore: before?.version ?? null,
+            versionAfter: afterSnap?.version ?? null,
+            left,
+            // 离开了可见范围的，不透露它在别人那里现在是什么状态
+            deleted: !left && r.memoryDeleted,
+            expired: !left && r.memoryExpired,
+            bench: benchMark(r.context),
+          }
+        }),
         nextCursor:
           rows.length > query.limit && page.length
-            ? encodeTimeCursor(page.at(-1)!.createdMicros, String(page.at(-1)!.event.id))
+            ? encodeTimeCursor(page.at(-1)!.createdMicros, String(page.at(-1)!.id))
             : null,
+      }
+    })
+  }
+
+  // 变更记录按天的条数（日历与每天的柱条用）：和列表同一套筛选与可见性，按调用方给的时区分天
+  async activityDays(query: ActivityDaysQuery): Promise<ActivityDays> {
+    return this.run(async (tx) => {
+      const { sub, conditions } = this.activityEvents(tx, query)
+      const day = sql`((${sub.createdAt} at time zone ${query.tz}::text)::date)`
+      const rows = await tx
+        .select({
+          day: sql<string>`to_char(${day}, 'YYYY-MM-DD')`,
+          count: sql<number>`count(*)::int`,
+        })
+        .from(sub)
+        .where(and(...Object.values(conditions)))
+        // 时区是参数，两处各算一个参数，按位置分组排序
+        .groupBy(sql`1`)
+        .orderBy(sql`1`)
+      return { days: rows }
+    })
+  }
+
+  // 筛选计数：操作者、操作、归属、改动的字段各自的条数，每一组在除了它自己以外的全部筛选下计算。
+  // 可见性和列表是同一个子查询；每个事件的几项先算好放进 CTE，五组计数各读一遍，可见性每行只算一次
+  async activityFacets(filter: Partial<ActivityFilter>): Promise<ActivityFacets> {
+    return this.run(async (tx) => {
+      const { sub, shown, conditions } = this.activityEvents(tx, filter, { eventFilters: false })
+      const ok = (condition: SQL | undefined) => condition ?? sql`true`
+      const base = sql`select ${sub.actorKey} as actor_key, ${sub.type} as type, ${shown.layer} as layer,
+        ${shown.fields} as fields, ${ok(conditions.actor)} as actor_ok, ${ok(conditions.type)} as type_ok,
+        ${ok(conditions.layer)} as layer_ok, ${ok(conditions.field)} as field_ok
+        from ${sub} where ${and(conditions.visible, conditions.q)}`
+      const rows = (await tx.execute(sql`with base as materialized (${base})
+        select 'total' as g, null::text as k, count(*)::int as n from base
+          where actor_ok and type_ok and layer_ok and field_ok
+        union all select 'actor', actor_key, count(*)::int from base
+          where type_ok and layer_ok and field_ok group by actor_key
+        union all select 'type', type, count(*)::int from base
+          where actor_ok and layer_ok and field_ok group by type
+        union all select 'layer', layer, count(*)::int from base
+          where actor_ok and type_ok and field_ok group by layer
+        union all select 'field', f.k, count(*)::int from base
+          cross join lateral unnest(case when cardinality(fields) = 0 then array['none']::text[] else fields end) as f(k)
+          where actor_ok and type_ok and layer_ok group by f.k`)) as unknown as FacetRow[]
+      const group = (g: string) =>
+        rows.flatMap((r) =>
+          r.g === g && r.k !== null && r.n > 0 ? [{ key: r.k, count: r.n }] : [],
+        )
+      const actorRows = group('actor')
+      const ids = (prefix: string) =>
+        actorRows.flatMap((r) => (r.key.startsWith(prefix) ? [r.key.slice(prefix.length)] : []))
+      const accountIds = ids('account:')
+      const appIds = ids('app:')
+      const accountNames = accountIds.length
+        ? await tx
+            .select({ id: accounts.id, name: accounts.displayName })
+            .from(accounts)
+            .where(inArray(accounts.id, accountIds))
+        : []
+      const appNames = appIds.length
+        ? await tx
+            .select({ id: apps.id, name: apps.name })
+            .from(apps)
+            .where(inArray(apps.id, appIds))
+        : []
+      const names = new Map<string, string>([
+        ...accountNames.map((r) => [`account:${r.id}`, r.name] as const),
+        ...appNames.map((r) => [`app:${r.id}`, r.name] as const),
+      ])
+      return {
+        total: rows.find((r) => r.g === 'total')?.n ?? 0,
+        actors: byCount(
+          actorRows.map((r) => ({
+            key: r.key,
+            kind: actorKind(r.key),
+            name: names.get(r.key) ?? null,
+            count: r.count,
+          })),
+        ),
+        types: byCount(
+          group('type').flatMap((r) => {
+            const type = ActivityType.safeParse(r.key)
+            return type.success ? [{ type: type.data, count: r.count }] : []
+          }),
+        ),
+        layers: byCount(
+          group('layer').flatMap((r) => {
+            const layer = Layer.safeParse(r.key)
+            return layer.success ? [{ layer: layer.data, count: r.count }] : []
+          }),
+        ),
+        fields: byCount(
+          group('field').flatMap((r) => {
+            const field = ActivityFieldFilter.safeParse(r.key)
+            return field.success ? [{ field: field.data, count: r.count }] : []
+          }),
+        ),
       }
     })
   }
@@ -3381,6 +3603,41 @@ const DELETED_MICROS = microsOf(memories.deletedAt)
 // 事件 id 不超过 JS 能精确表示的整数
 const EVENT_ID = /^\d{1,15}$/
 
+// 子查询带上 offset 0，PostgreSQL 就不把它展开到外层，里面算出的列在外层引用几次都只算一次。
+// drizzle 遇到数字 0 不写 offset，所以写成 SQL
+const OFFSET_ZERO = sql`0` as unknown as number
+
+// 快照解压一次再往外层传：存着的快照是压缩过的，外层判断改了哪些字段要取二十多次，每取一次都要整个解压一次。
+// 和空对象连接得到的是解压后的副本（jsonb 的 || 遇到空对象原样返回另一边），不是对象的原样留着
+const detoasted = (snapshot: SQLWrapper) =>
+  sql<unknown>`(case when jsonb_typeof(${snapshot}) = 'object' then ${snapshot} || '{}'::jsonb else ${snapshot} end)`.mapWith(
+    memoryEvents.before,
+  )
+
+// 按改动的字段筛选：改了其中任何一个；none 是没有改动任何字段的
+function fieldCondition(fields: SQL<string[]>, wanted: readonly ActivityFieldFilter[]): SQL {
+  const named = wanted.filter((f) => f !== 'none')
+  const list = sql.join(
+    named.map((f) => sql`${f}::text`),
+    sql`, `,
+  )
+  return or(
+    named.length ? sql`(${fields} && array[${list}]::text[])` : undefined,
+    wanted.includes('none') ? sql`(cardinality(${fields}) = 0)` : undefined,
+  )!
+}
+
+// 筛选计数的一行：哪一组、哪个值、几条
+type FacetRow = { g: string; k: string | null; n: number }
+
+const byCount = <T extends { count: number }>(list: T[]) => list.sort((a, b) => b.count - a.count)
+
+function actorKind(key: string): ActivityFacets['actors'][number]['kind'] {
+  if (key.startsWith('account:')) return 'account'
+  if (key.startsWith('app:')) return 'app'
+  return key === 'bench' ? 'bench' : 'unknown'
+}
+
 // 事实被推翻了：推翻时设的 valid_to 已经过去；已经到期：expires_at 已经过去。都按数据库的时间（见 lockFact）
 const SUPERSEDED = sql<
   boolean | null
@@ -3608,24 +3865,6 @@ function toSnapshot(raw: unknown): MemorySnapshot | null {
     deleted: s.deletedAt != null,
     validTo: text('validTo'),
   }
-}
-
-// 前后两版之间改了哪些字段；正文两边都没有（secret）时看不出改没改，不算
-function changedFields(before: MemorySnapshot | null, after: MemorySnapshot | null): string[] {
-  if (!before || !after) return []
-  const changes: string[] = []
-  if (before.uri !== after.uri) changes.push('uri')
-  if (before.title !== after.title) changes.push('title')
-  if (before.layer !== after.layer) changes.push('layer')
-  if (before.sensitivity !== after.sensitivity) changes.push('sensitivity')
-  if (before.priority !== after.priority) changes.push('priority')
-  if (before.disclosure !== after.disclosure) changes.push('disclosure')
-  if (before.glossary.join('\n') !== after.glossary.join('\n')) changes.push('glossary')
-  if (before.content !== after.content && (before.content !== null || after.content !== null)) {
-    changes.push('content')
-  }
-  if (before.validTo !== after.validTo) changes.push('validTo')
-  return changes
 }
 
 // 坐标前缀本身与它下面各级（列表的位置筛选）。前缀已经按 URI_PREFIX_PATTERN 校验过；段里允许 _，LIKE 要转义
