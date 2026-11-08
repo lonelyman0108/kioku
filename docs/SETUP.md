@@ -71,6 +71,18 @@ gh api -X PATCH repos/{owner}/{repo} -F allow_squash_merge=true -F allow_merge_c
 |---|---|
 | `gh auth login` 的登录状态 | `scripts/pr.sh` 开 PR、预约合并 |
 
+## 本地测试环境
+
+CI 的测试库由 `scripts/ci/` 里的脚本自己起；本地跑完整测试时，下面这些要自己起。里面只有测试数据，没有真实凭据。
+
+| 用途 | 启动 | 环境变量 |
+|---|---|---|
+| 集成测试的数据库 | `docker compose -f docker-compose.dev.yml up -d --build` | `KIOKU_TEST_DATABASE_URL=postgres://kioku:kioku@localhost:55432/kioku`。没设时集成测试跳过；测试会清空整个库 |
+| 连真 Vaultwarden 的用例 | `docker compose -f docker-compose.dev.yml --profile vaultwarden up -d vaultwarden` | `KIOKU_TEST_VAULTWARDEN_URL=http://127.0.0.1:18081`。没设时这些用例跳过，CI 不设 |
+
+- 测试用的 Vaultwarden 版本写死在 `docker-compose.dev.yml`，放宽了登录限流，数据不落盘，测试每次新注册账号。
+- 密码库客户端的单元测试用录下的固定数据（`apps/server/src/credential/bitwarden/__tests__/fixtures/vaultwarden.json`）。换 Vaultwarden 版本或改了客户端的请求时重录：在 `apps/server` 下执行 `pnpm exec tsx src/testing/recordVaultFixtures.ts http://127.0.0.1:18081`。
+
 ## 重建步骤
 
 1. 从备份或任意 clone 恢复仓库并推送到新的 GitHub 仓库。
