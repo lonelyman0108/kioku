@@ -393,20 +393,20 @@ export const TUNING_DEFAULTS: TuningValues = {
   'dream.maxSuggestions': 20,
 }
 
-const RECALL_KEYS = [
+export const RECALL_KEYS = [
   'recall.limit',
   'recall.minScore',
   'recall.subjectFacts',
   'recall.chatInlineChars',
 ] as const
-const WEIGHT_KEYS = [
+export const WEIGHT_KEYS = [
   'recallWeights.semantic',
   'recallWeights.fulltext',
   'recallWeights.glossaryFirst',
   'recallWeights.glossaryMore',
   'recallWeights.priority',
 ] as const
-const BOOT_KEYS = [
+export const BOOT_KEYS = [
   'boot.charBudget',
   'boot.summaries.enabled',
   'boot.summaries.count',
@@ -415,12 +415,12 @@ const BOOT_KEYS = [
   'boot.related.enabled',
   'boot.related.count',
 ] as const
-const EXTRACTION_KEYS = [
+export const EXTRACTION_KEYS = [
   'extraction.batchTurns',
   'extraction.idleMinutes',
   'extraction.episodeTtlDays',
 ] as const
-const DREAM_KEYS = ['dream.maxCalls', 'dream.maxSuggestions'] as const
+export const DREAM_KEYS = ['dream.maxCalls', 'dream.maxSuggestions'] as const
 
 // 各级能覆盖的数值项
 export const APP_TUNING_KEYS = [...RECALL_KEYS, ...BOOT_KEYS] as const

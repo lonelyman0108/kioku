@@ -11,7 +11,7 @@ import {
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 
-import { withSpace, type Db } from '../db/client'
+import { eachSpace, withSpace, type Db } from '../db/client'
 import { apps, spaces } from '../db/schema'
 import { system as dreamSystem } from '../extraction/dreamPrompt'
 import { SUMMARY_SYSTEM, SYSTEM as EXTRACTION_SYSTEM } from '../extraction/prompt'
@@ -30,24 +30,24 @@ import {
 // 原样的 sql 片段不经过列的解码，jsonb 回来是文本：按 jsonb 列解码
 const appAdvanced = sql<unknown>`${apps.config} -> ${APP_ADVANCED_FIELD}::text`.mapWith(apps.config)
 
-// 实例：每项被几个空间、几个应用覆盖。应用是内容表，逐个空间读
+// 实例：每项被几个空间、几个应用覆盖。空间的覆盖一条语句读出；应用是内容表，经 eachSpace 几个空间同时数
 async function overriddenBy(db: Db): Promise<InstanceAdvancedView['overriddenBy']> {
   const counts = Object.fromEntries(TUNING_KEYS.map((k) => [k, { spaces: 0, apps: 0 }])) as Record<
     TuningKey,
     { spaces: number; apps: number }
   >
-  const all = await db.select({ id: spaces.id, advanced: spaces.advanced }).from(spaces)
+  const all = await db.select({ advanced: spaces.advanced }).from(spaces)
   for (const space of all) {
     const overrides = parseSpaceAdvanced(space.advanced)
     for (const key of SPACE_TUNING_KEYS) if (overrides[key] !== undefined) counts[key].spaces++
-    const rows = await withSpace(db, space.id, (tx) =>
-      tx.select({ advanced: appAdvanced }).from(apps),
-    )
+  }
+  await eachSpace(db, async (tx) => {
+    const rows = await tx.select({ advanced: appAdvanced }).from(apps)
     for (const row of rows) {
       const app = parseAppAdvanced(row.advanced)
       for (const key of APP_TUNING_KEYS) if (app[key] !== undefined) counts[key].apps++
     }
-  }
+  })
   return counts
 }
 

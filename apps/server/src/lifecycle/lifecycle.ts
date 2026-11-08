@@ -124,15 +124,19 @@ export async function sessionStart(
 ): Promise<SessionStart> {
   const limit = HOST_CONTEXT_LIMIT[runtimeFamily]
   const chat = CHAT_FAMILIES.has(runtimeFamily)
+  // 字数预算取设置与宿主上限里更小的；宿主上限里先减去指引（含补充）与给附加块留的字数。
+  // 设置在 boot 的事务里读，之后取的是同一份
+  const result = await scope.boot((current) =>
+    Math.min(
+      current.values['boot.charBudget'],
+      limit
+        ? Math.max(limit - guidanceFor(chat, current).length - CONTEXT_RESERVE, 1_000)
+        : Infinity,
+    ),
+  )
   const settings = await scope.settings()
   const { values } = settings
   const guidance = guidanceFor(chat, settings)
-  // 字数预算取设置与宿主上限里更小的；宿主上限里先减去指引（含补充）与给附加块留的字数
-  const budget = Math.min(
-    values['boot.charBudget'],
-    limit ? Math.max(limit - guidance.length - CONTEXT_RESERVE, 1_000) : Infinity,
-  )
-  const result = await scope.boot(budget)
   // 三块附带内容各自的条数；关掉的、条数为 0 的不取
   const count = (extra: 'summaries' | 'recent' | 'related') =>
     values[`boot.${extra}.enabled`] ? values[`boot.${extra}.count`] : 0
@@ -220,14 +224,9 @@ export async function handleLifecycle(
   }
 
   // 召回块之后跟着当前发言人与本群的事实（对象直连），只有带了会话上下文时才有。
-  // 先读设置：召回与对象直连并行时用同一份，不各读一次
-  const { values } = await scope.settings()
+  // 条数与最低分按设置，设置在召回自己的事务里读
   const [candidates, subjects] = await Promise.all([
-    scope.recall(input.prompt, {
-      limit: values['recall.limit'],
-      minScore: values['recall.minScore'],
-      semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
-    }),
+    scope.recall(input.prompt, { semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS }),
     scope.subjects(),
   ])
   scope.record('prompt.submit', input.prompt, candidates)

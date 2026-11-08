@@ -1,7 +1,7 @@
 import type { TuningValues } from '@kioku/contracts'
 import { and, arrayContains, asc, count, eq, exists, gt, inArray, or, sql } from 'drizzle-orm'
 
-import { loggableError, pgErrorCode, withSpace, type Tx } from '../db/client'
+import { loggableError, pgErrorCode, type Tx } from '../db/client'
 import {
   appGroupPersonas,
   conversations,
@@ -246,7 +246,8 @@ export async function enqueueMerged(
   let values: TuningValues | undefined
   for (const { appId, turns } of outcome.batches) {
     try {
-      values ??= (await withSpace(deps.db, spaceId, (tx) => loadSpaceSettings(tx, spaceId))).values
+      // 空间与实例设置不是内容表，不用 withSpace
+      values ??= (await loadSpaceSettings(deps.db, spaceId)).values
       await deps.jobs.enqueueExtraction(
         { spaceId, appId, scope: outcome.scope },
         extractionDelay(turns, values),

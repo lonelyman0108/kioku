@@ -109,9 +109,9 @@ export function buildMcpServer(
     },
     () =>
       tool(async () => {
-        // 调这个工具的是能调工具的客户端，用编码 Agent 的指引；先读设置，boot 用同一份
-        const guidance = guidanceFor(false, await scope.settings())
-        return formatBootBlock(await scope.boot(), guidance)
+        // 调这个工具的是能调工具的客户端，用编码 Agent 的指引；设置在 boot 的事务里读，之后取的是同一份
+        const result = await scope.boot()
+        return formatBootBlock(result, guidanceFor(false, await scope.settings()))
       }),
   )
 

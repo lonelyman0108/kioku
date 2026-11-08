@@ -304,11 +304,21 @@ describe('每轮输入的召回', () => {
       updatedAt: '2026-10-26T08:00:00Z',
     }
     const scopeFor = (layers: Parameters<typeof effectiveSettings>[0], chat = false) => {
-      const boot = vi.fn<RecallScope['boot']>(async () => ({
-        entries: [{ uri: 'core://agent', title: 'agent', layer: 'core', content: '规则' }],
-        omitted: [],
-        [OMITTED_TITLES]: [],
-      }))
+      // 和真的 scope 一样：给函数时按读到的设置算出字数预算，记下算出来的
+      const budgets: number[] = []
+      const boot = vi.fn<RecallScope['boot']>(async (budget) => {
+        const current = effectiveSettings(layers, chat)
+        budgets.push(
+          typeof budget === 'function'
+            ? budget(current)
+            : (budget ?? current.values['boot.charBudget']),
+        )
+        return {
+          entries: [{ uri: 'core://agent', title: 'agent', layer: 'core', content: '规则' }],
+          omitted: [],
+          [OMITTED_TITLES]: [],
+        }
+      })
       const summaries = vi.fn<RecallScope['summaries']>(async () => [
         { content: '上次聊了部署', createdAt: '2026-11-06T08:00:00.000Z' },
       ])
@@ -322,20 +332,19 @@ describe('每轮输入的召回', () => {
         recent,
         recall,
       }
-      return { scope, boot, summaries, recent, recall }
+      return { scope, budgets, summaries, recent, recall }
     }
 
     it('字数预算取设置与宿主上限里更小的；宿主没有上限时就是设置', async () => {
       const small = scopeFor({ space: { 'boot.charBudget': 3000 } })
       await handleLifecycle(small.scope, 'claudecode', { event: 'session.start' })
-      expect(small.boot).toHaveBeenCalledWith(3000)
+      expect(small.budgets).toEqual([3000])
       const large = scopeFor({ space: { 'boot.charBudget': 40000 } })
       await handleLifecycle(large.scope, 'claudecode', { event: 'session.start' })
-      const budget = large.boot.mock.calls[0]![0]!
-      expect(budget).toBeLessThan(9_500)
+      expect(large.budgets[0]).toBeLessThan(9_500)
       const unlimited = scopeFor({ app: { 'boot.charBudget': 2500 } })
       await handleLifecycle(unlimited.scope, 'mcp', { event: 'session.start' })
-      expect(unlimited.boot).toHaveBeenCalledWith(2500)
+      expect(unlimited.budgets).toEqual([2500])
     })
 
     it('三块附带内容按设置的开关与条数取；关掉的不取', async () => {
@@ -388,7 +397,7 @@ describe('每轮输入的召回', () => {
       )
     })
 
-    it('每轮召回的条数与最低分、群聊附带的正文字数按设置', async () => {
+    it('群聊附带的正文字数按设置；条数与最低分交给 scope 按设置取', async () => {
       const recall = vi.fn<RecallScope['recall']>(async () => [candidate])
       const res = await handleLifecycle(
         {
@@ -406,7 +415,9 @@ describe('每轮输入的召回', () => {
         'astrbot',
         { event: 'prompt.submit', prompt: '规则' },
       )
-      expect(recall.mock.calls[0]![1]).toMatchObject({ limit: 3, minScore: 0.35 })
+      // 条数与最低分不由这里给：scope 在召回自己的事务里按设置取（memory/context.ts）
+      expect(recall.mock.calls[0]![1]).not.toHaveProperty('limit')
+      expect(recall.mock.calls[0]![1]).not.toHaveProperty('minScore')
       const line = contextOf(res.hostOutput.value).split('\n')[1]!
       expect(line.split(' | ')[2]).toBe(`${'长'.repeat(50)}…`)
     })
