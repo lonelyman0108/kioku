@@ -1,5 +1,5 @@
 {
-  "id": "b45f41bf-75ff-46e5-96c5-9f9c274eef9d",
+  "id": "bac6dbf6-2de1-4a66-a0ea-ff659fa54d0c",
   "prevId": "6e29c681-91ff-4b6c-a8cf-7b85f9e73149",
   "version": "7",
   "dialect": "postgresql",
@@ -3450,6 +3450,12 @@
           "type": "boolean",
           "primaryKey": false,
           "notNull": true
+        },
+        "purge_started_at": {
+          "name": "purge_started_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         }
       },
       "indexes": {

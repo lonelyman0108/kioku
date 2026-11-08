@@ -130,6 +130,8 @@ export const spaceDepartures = pgTable(
     leftAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     // 离开时的成员设置，重新加入时照旧：关掉了 Dream 整理本人记忆的，回来之后还是关着
     dreamPrivate: boolean().notNull(),
+    // 保留期的清理开始删他的数据的时间：第一批在同一个事务里写上。开始之后到清理完成、这一行删掉之前不能重新加入
+    purgeStartedAt: timestamp({ withTimezone: true }),
   },
   (t) => [primaryKey({ columns: [t.spaceId, t.accountId] }), index().on(t.leftAt)],
 )

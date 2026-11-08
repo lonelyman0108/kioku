@@ -187,7 +187,8 @@ const addMemberRoute = createRoute({
   method: 'post',
   path: '/spaces/{spaceId}/members',
   tags: ['console'],
-  summary: `按用户名添加成员（只有空间所有者，精确匹配）。离开不满 ${DEPARTURE_RETENTION_DAYS} 天的成员重新加入后，本人记忆与凭据照旧可见；满 ${DEPARTURE_RETENTION_DAYS} 天的要等清除完成才能重新加入`,
+  summary:
+    '按用户名添加成员（只有空间所有者，精确匹配）。离开的成员在清除开始之前重新加入，本人记忆与凭据照旧可见；清除开始后要等完成才能重新加入',
   request: { params, body: jsonBody(AddMemberRequest) },
   responses: {
     201: jsonResponse('已添加', SpaceMember),
@@ -438,18 +439,19 @@ function memberError(c: Context<AppEnv>, reason: MemberFailure, ownerOnly: strin
     case 'already-member':
       return c.json({ error: '已是此空间的成员' }, 409)
     case 'last-owner':
-      return c.json({ error: '空间至少要有一个所有者，请先转让所有者' }, 409)
+      return c.json(
+        {
+          error:
+            '空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者',
+        },
+        409,
+      )
     case 'self':
       return c.json({ error: '不能转让给自己' }, 400)
     case 'disabled':
       return c.json({ error: '账号已停用' }, 409)
-    case 'departure-expired':
-      return c.json(
-        {
-          error: `离开已满 ${DEPARTURE_RETENTION_DAYS} 天，本人记忆与凭据待清除，清除完成后才能重新加入`,
-        },
-        409,
-      )
+    case 'departure-purging':
+      return c.json({ error: '离开后的本人记忆与凭据已开始清除，清除完成后才能重新加入' }, 409)
   }
 }
 

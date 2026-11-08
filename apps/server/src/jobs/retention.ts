@@ -295,9 +295,13 @@ export function retentionRules(now: Date, days: number) {
       cutoff,
     ),
     // 离开空间满 DEPARTURE_RETENTION_DAYS 天、没有重新加入的成员：天数固定，不跟着保留天数变。
+    // 满期只在这里按任务的时钟判断；已经开始清理的接着清，不再看时间。
     // 重新加入时离开记录就删掉了，这里再确认一次他不是成员，绝不删现在的成员的数据
     departedMembers: and(
-      lt(spaceDepartures.leftAt, at(new Date(now.getTime() - DEPARTURE_RETENTION_DAYS * DAY))),
+      or(
+        isNotNull(spaceDepartures.purgeStartedAt),
+        lt(spaceDepartures.leftAt, at(new Date(now.getTime() - DEPARTURE_RETENTION_DAYS * DAY))),
+      ),
       sql`not exists (select 1 from ${spaceMembers}
         where ${spaceMembers.spaceId} = ${spaceDepartures.spaceId}
           and ${spaceMembers.accountId} = ${spaceDepartures.accountId})`,
@@ -438,8 +442,9 @@ async function departureBatch(
   rules: Rules,
   spaceId: string,
 ): Promise<{ picked: number; counts: Partial<RetentionCounts> }> {
+  // 每一批都锁住离开记录：重新加入（addMember）也先锁它，两边一个接一个做
   const [departure] = await tx
-    .select({ accountId: spaceDepartures.accountId })
+    .select({ accountId: spaceDepartures.accountId, started: spaceDepartures.purgeStartedAt })
     .from(spaceDepartures)
     .where(and(eq(spaceDepartures.spaceId, spaceId), rules.departedMembers))
     .orderBy(asc(spaceDepartures.accountId))
@@ -447,6 +452,11 @@ async function departureBatch(
     .for('update', { skipLocked: true })
   if (!departure) return { picked: 0, counts: {} }
   const owner = departure.accountId
+  const ofDeparture = and(eq(spaceDepartures.spaceId, spaceId), eq(spaceDepartures.accountId, owner))
+  // 第一批在同一个事务里记下清理开始：之后到这一行删掉之前，重新加入一律拒绝
+  if (!departure.started) {
+    await tx.update(spaceDepartures).set({ purgeStartedAt: sql`now()` }).where(ofDeparture)
+  }
   // 召回明细里有他的提示语与他的本人记忆的命中，只给他看；次数先并入累计统计
   await dropRecallEvents(tx, eq(recallEvents.ownerAccountId, owner))
   const removed = await memoryBatch(tx, eq(memories.ownerAccountId, owner))
@@ -481,9 +491,7 @@ async function departureBatch(
     .returning({ id: memoryEvents.id })
   // 联系人上「这是哪个成员」的标记：他不在了，标记指不到人，重新加入时也不该凭它认出他
   await tx.update(subjects).set({ accountId: null }).where(eq(subjects.accountId, owner))
-  await tx
-    .delete(spaceDepartures)
-    .where(and(eq(spaceDepartures.spaceId, spaceId), eq(spaceDepartures.accountId, owner)))
+  await tx.delete(spaceDepartures).where(ofDeparture)
   // 一个人做完了，接着看下一个
   return {
     picked: RETENTION_BATCH,

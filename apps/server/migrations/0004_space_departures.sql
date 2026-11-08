@@ -5,6 +5,7 @@ CREATE TABLE "space_departures" (
 	"account_id" uuid NOT NULL,
 	"left_at" timestamp with time zone DEFAULT now() NOT NULL,
 	"dream_private" boolean NOT NULL,
+	"purge_started_at" timestamp with time zone,
 	CONSTRAINT "space_departures_space_id_account_id_pk" PRIMARY KEY("space_id","account_id")
 );
 --> statement-breakpoint
