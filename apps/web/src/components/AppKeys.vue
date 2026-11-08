@@ -23,7 +23,6 @@ import {
 } from './keyPresets'
 import EmptyState from './strata/EmptyState.vue'
 import FlagTag from './strata/FlagTag.vue'
-import { flagIcon } from './strata/flags'
 import NoteLine from './strata/NoteLine.vue'
 import ScopeTags from './strata/ScopeTags.vue'
 import SectionHeading from './strata/SectionHeading.vue'
@@ -209,7 +208,7 @@ async function revoke() {
               <b>{{ key.name }}</b>
               <code>{{ key.prefix }}</code>
               <span :title="formatTime(key.revokedAt!)">
-                <FlagTag :icon="flagIcon('已吊销')">已吊销</FlagTag>
+                <FlagTag status="revoked" />
                 {{ formatShort(key.revokedAt!) }}
               </span>
               <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
@@ -244,7 +243,11 @@ async function revoke() {
             />
           </div>
         </div>
-        <form v-else id="issue-key" class="issue" @submit.prevent="issue">
+        <!--
+          不用表单元素：卡片、分段按钮是单选，读写是勾选框，在它们上面按回车会隐式提交，
+          方向键选到一半就签出访问密钥、明文马上显示。名称框里按回车同样不签发，只有点「签发」才签发
+        -->
+        <div v-else class="issue">
           <UFormField label="名称" help="用于辨认，例如设备加工具">
             <UInput v-model="form.name" class="w-full" :placeholder="defaultName" />
           </UFormField>
@@ -253,7 +256,7 @@ async function revoke() {
             v-model:preset="form.preset"
             :is-space-owner="isSpaceOwner"
           />
-        </form>
+        </div>
       </template>
       <template #footer>
         <div v-if="issued" class="flex w-full justify-end gap-2">
@@ -269,7 +272,7 @@ async function revoke() {
           </div>
           <div class="issue-actions">
             <UButton color="neutral" variant="ghost" @click="closeIssue">取消</UButton>
-            <UButton type="submit" form="issue-key" :loading="issuing">签发</UButton>
+            <UButton :loading="issuing" @click="issue">签发</UButton>
           </div>
         </div>
       </template>
