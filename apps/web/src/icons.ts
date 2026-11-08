@@ -4,7 +4,6 @@ export const icons = {
   overview: 'i-lucide-layout-dashboard',
   info: 'i-lucide-info',
   activity: 'i-lucide-history',
-  spaceSettings: 'i-lucide-sliders-horizontal',
   memories: 'i-lucide-brain',
   conversations: 'i-lucide-message-square-text',
   review: 'i-lucide-inbox',
