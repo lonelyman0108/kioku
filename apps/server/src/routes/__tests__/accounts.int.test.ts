@@ -83,7 +83,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
     ok<CreatedAccount>(
       await send(
         'POST',
-        '/v1/admin/accounts',
+        '/v1/instance/accounts',
         { username, displayName: username.toUpperCase(), isAdmin },
         as(ws.cookie),
       ),
@@ -99,19 +99,19 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
     return { id: created.account.id, cookie: `kioku_session=${cookiesOf(res).kioku_session}` }
   }
   const patchAccount = (cookie: string, id: string, body: unknown) =>
-    send('PATCH', `/v1/admin/accounts/${id}`, body, as(cookie))
+    send('PATCH', `/v1/instance/accounts/${id}`, body, as(cookie))
 
   describe('实例管理员的接口', () => {
     it('非管理员一律 403', async () => {
       const member = await addMember(database.db, ws.spaceId, 'bob', 'owner')
-      expect((await send('GET', '/v1/admin/accounts', undefined, as(member.cookie))).status).toBe(
-        403,
-      )
+      expect(
+        (await send('GET', '/v1/instance/accounts', undefined, as(member.cookie))).status,
+      ).toBe(403)
       expect(
         (
           await send(
             'POST',
-            '/v1/admin/accounts',
+            '/v1/instance/accounts',
             { username: 'carol', displayName: 'Carol' },
             as(member.cookie),
           )
@@ -121,14 +121,14 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         (
           await send(
             'POST',
-            `/v1/admin/accounts/${ws.accountId}/link`,
+            `/v1/instance/accounts/${ws.accountId}/link`,
             undefined,
             as(member.cookie),
           )
         ).status,
       ).toBe(403)
       expect((await patchAccount(member.cookie, ws.accountId, { disabled: true })).status).toBe(403)
-      expect((await send('GET', '/v1/admin/accounts')).status).toBe(401)
+      expect((await send('GET', '/v1/instance/accounts')).status).toBe(401)
     })
 
     it('新建账号：个人空间、本人是所有者，返回设置密码的链接；用户名沿用规则、不能重复', async () => {
@@ -157,14 +157,14 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
 
       const dup = await send(
         'POST',
-        '/v1/admin/accounts',
+        '/v1/instance/accounts',
         { username: 'bob', displayName: 'x' },
         as(ws.cookie),
       )
       expect(dup.status).toBe(409)
       const bad = await send(
         'POST',
-        '/v1/admin/accounts',
+        '/v1/instance/accounts',
         { username: 'Bob!', displayName: 'x' },
         as(ws.cookie),
       )
@@ -181,7 +181,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         .insert(spaceMembers)
         .values({ spaceId: ws.spaceId, accountId: created.account.id, role: 'viewer' })
       const list = await ok<AdminAccountList>(
-        await send('GET', '/v1/admin/accounts', undefined, as(ws.cookie)),
+        await send('GET', '/v1/instance/accounts', undefined, as(ws.cookie)),
       )
       expect(list.accounts.map((a) => a.username)).toEqual(['alice', 'bob'])
       const [alice, bob] = list.accounts as [AdminAccount, AdminAccount]
@@ -294,7 +294,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       const next = await ok<AccountLink>(
         await send(
           'POST',
-          `/v1/admin/accounts/${created.account.id}/link`,
+          `/v1/instance/accounts/${created.account.id}/link`,
           undefined,
           as(ws.cookie),
         ),
@@ -322,7 +322,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       const bob = await activeAccount('bob')
       const other = cookiesOf(await login('bob', PASSWORD)).kioku_session
       const link = await ok<AccountLink>(
-        await send('POST', `/v1/admin/accounts/${bob.id}/link`, undefined, as(ws.cookie)),
+        await send('POST', `/v1/instance/accounts/${bob.id}/link`, undefined, as(ws.cookie)),
         201,
       )
       expect(link.purpose).toBe('reset')
@@ -354,7 +354,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
   describe('停用', () => {
     it('停用后会话与链接清掉、登录和密码错误一样被拒且照常计数；启用后恢复', async () => {
       const bob = await activeAccount('bob')
-      await send('POST', `/v1/admin/accounts/${bob.id}/link`, undefined, as(ws.cookie))
+      await send('POST', `/v1/instance/accounts/${bob.id}/link`, undefined, as(ws.cookie))
       const disabled = await ok<AdminAccount>(
         await patchAccount(ws.cookie, bob.id, { disabled: true }),
       )
@@ -368,7 +368,8 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         await database.db.select().from(accountLinks).where(eq(accountLinks.accountId, bob.id)),
       ).toEqual([])
       expect(
-        (await send('POST', `/v1/admin/accounts/${bob.id}/link`, undefined, as(ws.cookie))).status,
+        (await send('POST', `/v1/instance/accounts/${bob.id}/link`, undefined, as(ws.cookie)))
+          .status,
       ).toBe(409)
 
       const right = await login('bob', PASSWORD)
@@ -515,7 +516,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       const other = `kioku_session=${cookiesOf(await login('alice', PASSWORD)).kioku_session}`
       // 改密码时没用过的重置链接一起作废
       const link = await ok<AccountLink>(
-        await send('POST', `/v1/admin/accounts/${ws.accountId}/link`, undefined, as(ws.cookie)),
+        await send('POST', `/v1/instance/accounts/${ws.accountId}/link`, undefined, as(ws.cookie)),
         201,
       )
 
@@ -619,7 +620,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
     const created = await ok<CreatedAccount>(
       await send(
         'POST',
-        '/v1/admin/accounts',
+        '/v1/instance/accounts',
         { username: 'long', displayName: '😀'.repeat(64) },
         as(ws.cookie),
       ),

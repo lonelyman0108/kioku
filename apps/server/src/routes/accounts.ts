@@ -124,7 +124,7 @@ async function issueLink(
 
 const listAccounts = createRoute({
   method: 'get',
-  path: '/admin/accounts',
+  path: '/instance/accounts',
   tags: ['accounts'],
   summary: '实例里的全部账号：所在空间与角色、最近活动、停用状态与待用的链接',
   responses: { 200: jsonResponse('账号列表', AdminAccountList), 403: forbidden },
@@ -132,7 +132,7 @@ const listAccounts = createRoute({
 
 const createAccount = createRoute({
   method: 'post',
-  path: '/admin/accounts',
+  path: '/instance/accounts',
   tags: ['accounts'],
   summary:
     '新建账号：同时建一个个人空间、本人是所有者；返回设置密码的一次性链接令牌（只返回这一次）',
@@ -146,7 +146,7 @@ const createAccount = createRoute({
 
 const regenerateLink = createRoute({
   method: 'post',
-  path: '/admin/accounts/{accountId}/link',
+  path: '/instance/accounts/{accountId}/link',
   tags: ['accounts'],
   summary:
     '重新生成一次性链接（重置密码也用它）：作废没用过的旧链接；不改现在的密码，链接用掉时才改',
@@ -161,7 +161,7 @@ const regenerateLink = createRoute({
 
 const updateAccount = createRoute({
   method: 'patch',
-  path: '/admin/accounts/{accountId}',
+  path: '/instance/accounts/{accountId}',
   tags: ['accounts'],
   summary:
     '修改账号：显示名、管理员身份、停用与启用。不能改自己的管理员身份与停用状态，至少保留一个可用的管理员；停用时清掉会话与链接',
@@ -177,7 +177,7 @@ const updateAccount = createRoute({
 
 export function accountRoutes(deps: Deps) {
   const app = router()
-  for (const path of ['/admin/accounts', '/admin/accounts/*']) {
+  for (const path of ['/instance/accounts', '/instance/accounts/*']) {
     app.use(path, requireConsole(deps), requireInstanceAdmin(deps))
   }
   return app
