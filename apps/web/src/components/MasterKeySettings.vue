@@ -77,6 +77,10 @@ const rows = computed(() =>
                   <span v-if="row.count === 0" class="state done">
                     <UIcon :name="icons.check" class="state-icon" />完成
                   </span>
+                  <!-- 轮换出了错就停下、不再刷新：不写成还在进行，原因在上面 -->
+                  <span v-else-if="masterKey.data.value.lastError" class="state stopped">
+                    <UIcon :name="icons.warning" class="state-icon" />已停止
+                  </span>
                   <span v-else class="state">
                     <UIcon :name="icons.refresh" class="state-icon" />轮换中
                   </span>
@@ -100,6 +104,9 @@ const rows = computed(() =>
   gap: 4px;
   font-size: 12px;
   color: var(--ui-text-toned);
+}
+.state.stopped {
+  color: var(--ui-error);
 }
 .state.done {
   color: var(--ui-success);
