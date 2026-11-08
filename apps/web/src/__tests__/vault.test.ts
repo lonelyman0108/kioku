@@ -332,6 +332,11 @@ describe('界面用上了这些规则', () => {
     const extra = { memories: 1, credentials: 0, vaultConnections: 0, settings: 0, other: 100 }
     expect(remainingTotal(extra)).toBe(1)
     expect(settingsPage.match(/remainingTotal\(/g)).toHaveLength(2)
+    // 轮换出了错就停下：各行不再写「轮换中」
+    expect(settingsPage).toContain(
+      'v-else-if="masterKey.data.value.lastError" class="state stopped"',
+    )
+    expect(settingsPage.indexOf('已停止')).toBeLessThan(settingsPage.indexOf('轮换中'))
     expect(settingsPage).not.toContain('.memories +')
   })
 

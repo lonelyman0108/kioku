@@ -1,7 +1,7 @@
 import { SetupRequest } from '@kioku/contracts'
-import { QueryClient } from '@tanstack/vue-query'
+import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { describe, expect, it } from 'vitest'
-import { createSSRApp, h, type Component } from 'vue'
+import { createSSRApp, defineComponent, h, nextTick, ref, type Component } from 'vue'
 import { parse } from 'vue/compiler-sfc'
 import { renderToString } from 'vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
@@ -40,6 +40,13 @@ import settingsPage from '../pages/SettingsPage.vue?raw'
 import setupPage from '../pages/SetupPage.vue?raw'
 import unavailablePage from '../pages/UnavailablePage.vue?raw'
 import { routes } from '../routes'
+import useSessionSource from '../composables/useSession.ts?raw'
+import { useSavedField } from '../composables/useSavedField'
+import { ME_KEY, pickSpace, rememberSpace, useSession } from '../composables/useSession'
+import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
+import accountSettingsPage from '../pages/AccountSettingsPage.vue?raw'
+import instanceSettingsPage from '../pages/InstanceSettingsPage.vue?raw'
+import spaceSettingsPage from '../pages/SpaceSettingsPage.vue?raw'
 import routesSource from '../routes.ts?raw'
 import settingsSectionsSource from '../settingsSections.ts?raw'
 import {
@@ -51,7 +58,6 @@ import {
   legacySpaceSettingsRedirect,
   SETTINGS_GROUPS,
   SETTINGS_SECTIONS,
-  settingsPageKey,
   spaceSettingsRoute,
   visibleGroups,
   visibleSections,
@@ -200,22 +206,28 @@ describe('设置的地址', () => {
   const children = routes.find((r) => r.path === '/')!.children!
   const record = (name: string) => children.find((r) => r.name === name)!
 
-  it('三组各一个地址，共用一个页面，组记在 meta 里', () => {
+  it('三组各一个地址，各是一个路由组件：换组时换掉整页，离开前的确认各组自己注册', () => {
     expect(record('account-settings').path).toBe('settings/account/:section?')
     expect(record('space-settings').path).toBe('spaces/:spaceId/settings/:section?')
     expect(record('instance-settings').path).toBe('settings/instance/:section?')
-    for (const name of ['account-settings', 'space-settings', 'instance-settings']) {
-      expect(record(name).component, name).toBe(record('account-settings').component)
+    const components = ['account-settings', 'space-settings', 'instance-settings'].map(
+      (name) => record(name).component,
+    )
+    expect(new Set(components).size).toBe(3)
+    for (const [name, page] of [
+      ['account', accountSettingsPage],
+      ['space', spaceSettingsPage],
+      ['instance', instanceSettingsPage],
+    ] as const) {
+      expect(page, name).toContain(`<SettingsPage group="${name}" />`)
+      expect(routesSource).toContain(
+        `import('./pages/${name[0]!.toUpperCase()}${name.slice(1)}SettingsPage.vue')`,
+      )
     }
-    expect(record('account-settings').meta).toEqual({ settingsGroup: 'account' })
-    expect(record('space-settings').meta).toEqual({ settingsGroup: 'space' })
   })
 
   it('实例组只给管理员', () => {
-    expect(record('instance-settings').meta).toEqual({
-      settingsGroup: 'instance',
-      requiresAdmin: true,
-    })
+    expect(record('instance-settings').meta).toEqual({ requiresAdmin: true })
     expect(routesSource).toContain('if (to.meta.requiresAdmin && !me.isAdmin)')
   })
 
@@ -278,29 +290,77 @@ describe('设置的地址', () => {
     expect(benchAgent).toContain("to: instanceSettingsRoute('models')")
   })
 
-  it('外壳按组与空间换掉设置页，别的页面照旧复用', () => {
-    const at = (group: string | undefined, spaceId?: string) => ({
-      meta: group ? { settingsGroup: group } : {},
-      params: (spaceId ? { spaceId } : {}) as Record<string, string>,
-    })
-    expect(settingsPageKey(at('account'))).toBe('account:')
-    expect(settingsPageKey(at('space', 's1'))).toBe('space:s1')
-    expect(settingsPageKey(at(undefined, 's1'))).toBeUndefined()
-  })
-
-  it('换组、换空间算离开设置页，组内换小节不算', () => {
-    const at = (group: string, section: string, spaceId?: string) => ({
-      meta: { settingsGroup: group },
+  it('同一组里换空间算离开，换小节不算；换组是换路由组件，由离开路由的确认处理', () => {
+    const at = (section: string, spaceId?: string) => ({
       params: { section, ...(spaceId ? { spaceId } : {}) },
     })
-    expect(leavesSettingsPage(at('instance', 'data'), at('instance', 'models'))).toBe(false)
-    expect(leavesSettingsPage(at('space', 'transfer', 's1'), at('space', 'extraction', 's1'))).toBe(
-      false,
+    expect(leavesSettingsPage(at('data'), at('models'))).toBe(false)
+    expect(leavesSettingsPage(at('transfer', 's1'), at('extraction', 's1'))).toBe(false)
+    expect(leavesSettingsPage(at('extraction', 's2'), at('extraction', 's1'))).toBe(true)
+    // 外壳不再给页面加 key
+    expect(consoleLayout).toContain('<RouterView v-else />')
+    expect(consoleLayout).not.toContain('settingsPageKey')
+  })
+
+  it('换空间之后小节按新空间重新挂上，旧空间的改动标记清掉', () => {
+    const component = elementsOf(template(settingsPage)).find((el) => el.tag === 'component')!
+    expect(bound(component, 'key')).toBe('`${section}:${spaceKey}`')
+    expect(scriptOf(settingsPage)).toMatch(
+      /watch\(spaceKey, \(\) => \{\s*for \(const key of Object\.keys\(dirty\)\) delete dirty\[key\]/,
     )
-    expect(leavesSettingsPage(at('account', 'appearance'), at('instance', 'data'))).toBe(true)
-    expect(
-      leavesSettingsPage(at('space', 'extraction', 's2'), at('space', 'extraction', 's1')),
-    ).toBe(true)
+  })
+
+  it('个人与实例页面上的空间组是最近访问的空间，不是第一个', () => {
+    const a = { id: 'a', name: 'A', role: 'owner' as const }
+    const b = { id: 'b', name: 'B', role: 'editor' as const }
+    // 地址里有空间时只认它，不是成员就是 null
+    expect(pickSpace([a, b], 'b', 'a')).toBe(b)
+    expect(pickSpace([a, b], 'c', 'a')).toBeNull()
+    // 地址里没有时取最近访问的；它已不在成员的空间里时退回第一个
+    expect(pickSpace([a, b], undefined, 'b')).toBe(b)
+    expect(pickSpace([a, b], undefined, 'gone')).toBe(a)
+    expect(pickSpace([a, b], undefined, null)).toBe(a)
+    expect(pickSpace([], undefined, 'b')).toBeNull()
+    // 进入带空间的地址（导航成功）时记下，sessionStorage 读写出错时只在内存里记
+    expect(routesSource).toContain(
+      "if (!failure && typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)",
+    )
+    expect(useSessionSource).toMatch(/try \{\s*return sessionStorage\.getItem/)
+    expect(useSessionSource).toMatch(/try \{\s*sessionStorage\.setItem/)
+  })
+
+  it('在空间 B 里打开过设置，到个人页面时空间组还是 B', async () => {
+    const client = new QueryClient()
+    client.setQueryData(ME_KEY, {
+      id: 'u',
+      username: 'u',
+      displayName: 'U',
+      isAdmin: false,
+      spaces: [
+        { id: 'a', name: '空间甲', role: 'owner' },
+        { id: 'b', name: '空间乙', role: 'editor' },
+      ],
+    })
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/spaces/:spaceId', component: { render: () => null } },
+        { path: '/settings/account', component: { render: () => null } },
+      ],
+    })
+    router.afterEach((to) => {
+      if (typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)
+    })
+    await router.push('/spaces/b')
+    await router.push('/settings/account')
+    const Probe = defineComponent(() => {
+      const { space } = useSession()
+      return () => space.value?.name ?? ''
+    })
+    const app = createSSRApp(Probe)
+    app.use(router)
+    app.use(VueQueryPlugin, { queryClient: client })
+    expect(await renderToString(app)).toBe('空间乙')
   })
 })
 
@@ -432,6 +492,12 @@ describe('设置行与保存条', () => {
     expect(bare).not.toContain('<label')
   })
 
+  it('有填得不对的项时保存条写出原因', async () => {
+    const html = await render(SaveBar, { count: 1, problem: '保留天数超出范围' })
+    expect(html).toContain('保留天数超出范围')
+    expect(await render(SaveBar, { count: 1 })).not.toContain('save-problem')
+  })
+
   it('保存条：写改了几项，没有改动时不显示', async () => {
     expect(await render(SaveBar, { count: 2 })).toContain('2 项未保存')
     expect(await render(SaveBar, { count: 0 })).not.toContain('未保存')
@@ -444,7 +510,7 @@ describe('设置行与保存条', () => {
     const save = buttons.find((b) => textOf(b) === '保存')!
     expect(attr(save, 'type')).toBe('submit')
     expect(bound(save, 'loading')).toBe('props.saving')
-    expect(bound(save, 'disabled')).toBe('props.saving')
+    expect(bound(save, 'disabled')).toBe('props.saving || Boolean(props.problem)')
     const discard = buttons.find((b) => textOf(b) === '放弃')!
     expect(bound(discard, 'disabled')).toBe('props.saving')
     expect(attr(discard, 'color')).toBe('neutral')
@@ -467,8 +533,13 @@ describe('设置行与保存条', () => {
 
   it('保留期的两项只存改了的：分别调各自的接口，失败用 toast', () => {
     const save = /async function save\(\)[^]*?\n\}/.exec(scriptOf(retentionSettings))![0]
-    expect(save).toContain('const retention = daysChanged.value ? days.value : undefined')
-    expect(save).toContain('const recall = recallChanged.value ? recallDays.value : undefined')
+    expect(save).toContain('if (saving.value || changedCount.value === 0 || problem.value) return')
+    expect(save).toContain('const retention = days.changed.value ? days.value.value : null')
+    expect(save).toContain(
+      'const recall = recallDays.changed.value ? recallDays.value.value : null',
+    )
+    expect(save).toContain('days.commit(saved.days)')
+    expect(save).toContain('recallDays.commit(saved.retentionDays)')
     expect(save).toContain('api.saveRetentionDays({ days: retention })')
     expect(save).toContain('api.saveRecallSettings({ retentionDays: recall })')
     expect(save).toContain('Promise.allSettled(')
@@ -476,6 +547,77 @@ describe('设置行与保存条', () => {
     // 召回分析与概览的「从未被召回」都按召回明细的保留天数算
     expect(save).toContain("invalidateQueries({ queryKey: ['recall-stats'] })")
     expect(save).toContain("invalidateQueries({ queryKey: ['overview'] })")
+  })
+})
+
+describe('保留天数的表单值', () => {
+  const setup = () => {
+    const saved = ref<number | undefined>(undefined)
+    const field = useSavedField(() => saved.value, { min: 1, max: 3650 })
+    return { saved, field }
+  }
+
+  it('读到之前不算改动，读到后表单跟上', async () => {
+    const { saved, field } = setup()
+    expect(field.changed.value).toBe(false)
+    saved.value = 30
+    await nextTick()
+    expect(field.value.value).toBe(30)
+    expect(field.changed.value).toBe(false)
+  })
+
+  it('别处改了、本地没动：表单与基准一起跟上，不算未保存', async () => {
+    const { saved, field } = setup()
+    saved.value = 30
+    await nextTick()
+    saved.value = 45
+    await nextTick()
+    expect(field.value.value).toBe(45)
+    expect(field.changed.value).toBe(false)
+  })
+
+  it('本地改过：后台重取不冲掉输入，仍和载入时的基准比', async () => {
+    const { saved, field } = setup()
+    saved.value = 30
+    await nextTick()
+    field.value.value = 60
+    saved.value = 45
+    await nextTick()
+    expect(field.value.value).toBe(60)
+    expect(field.changed.value).toBe(true)
+    field.reset()
+    expect(field.value.value).toBe(30)
+  })
+
+  it('保存之后以存下的值为基准', async () => {
+    const { saved, field } = setup()
+    saved.value = 30
+    await nextTick()
+    field.value.value = 60
+    field.commit(60)
+    expect(field.changed.value).toBe(false)
+    saved.value = 60
+    await nextTick()
+    expect(field.value.value).toBe(60)
+  })
+
+  it('清空或超出范围算不合法：不能静默跳过，要拦下并说明', async () => {
+    const { saved, field } = setup()
+    saved.value = 30
+    await nextTick()
+    for (const bad of [null, undefined, 0, 3651, 1.5]) {
+      field.value.value = bad
+      expect(field.invalid.value, String(bad)).toBe(true)
+    }
+    field.value.value = 3650
+    expect(field.invalid.value).toBe(false)
+    const elements = elementsOf(template(retentionSettings))
+    const bar = elements.find((el) => el.tag === 'SaveBar')!
+    expect(bound(bar, 'problem')).toBe('problem')
+    expect(
+      elements.filter((el) => el.tag === 'p' && attr(el, 'class') === 'invalid').map(condition),
+    ).toEqual(['days.invalid.value', 'recallDays.invalid.value'])
+    expect(retentionSettings).toContain("'保留天数超出范围'")
   })
 })
 
@@ -530,7 +672,9 @@ describe('设置页', () => {
           )?.exp?.content,
       ),
     ).toEqual(['dirty.embedding', 'dirty.extraction'])
-    expect(modelSettings).toContain('() => dirty.embedding || dirty.extraction')
+    expect(modelSettings).toContain(
+      "const dirty = useDirtyParts(dirtyModel, ['embedding', 'extraction'])",
+    )
     const data = elementsOf(template(dataSettings))
     expect(
       ['RetentionSettings', 'BackupSettings'].map(
@@ -541,12 +685,15 @@ describe('设置页', () => {
           )?.exp?.content,
       ),
     ).toEqual(['dirty.retention', 'dirty.backup'])
-    expect(dataSettings).toContain('() => dirty.retention || dirty.backup')
+    expect(dataSettings).toContain(
+      "const dirty = useDirtyParts(dirtyModel, ['retention', 'backup'])",
+    )
     const budget = elementsOf(template(spaceExtractionSettings)).find(
       (el) => el.tag === 'ExtractionBudget',
     )!
     expect(directive(budget, 'model')?.exp?.content).toBe('dirty')
     expect(extractionBudget).toContain('watch(dirty, (d) => (dirtyModel.value = d)')
+    expect(extractionBudget).toContain('const dirty = computed(() => changedCount.value > 0)')
     expect(scriptOf(embeddingSettings).match(/\[activeDirty, nextDirty\]/g)).toHaveLength(1)
     expect(embeddingSettings).toContain('dirtyModel.value = a || n')
     expect(extractionSettings).toContain('dirtyModel.value = changed')
@@ -925,9 +1072,7 @@ describe('没有权限时', () => {
   })
 
   it('实例设置只给管理员', () => {
-    expect(routesSource).toMatch(
-      /name: 'instance-settings',[^}]*meta: \{ settingsGroup: 'instance', requiresAdmin: true \}/,
-    )
+    expect(routesSource).toMatch(/name: 'instance-settings',[^}]*meta: \{ requiresAdmin: true \}/)
   })
 })
 
