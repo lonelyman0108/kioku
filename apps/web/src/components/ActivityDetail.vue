@@ -22,50 +22,56 @@ import PropertyList from './strata/PropertyList.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 
-// 变更记录里一条改动的详情：谁、什么时候、经由哪里、各字段的前后值。正文的差异按记忆取历史，
-// 用这个事件的前后快照对比（和历史里的「查看改动」同一份数据）
-const props = defineProps<{ item: ActivityItem; spaceId: string }>()
+// 变更记录里一条改动的详情：谁、什么时候、经由哪里、各字段的前后值。按事件 id 读这一条改动（带前后快照），
+// 不在已加载的列表里（打开带 event 的地址、或者更早的改动）也能显示；列表里有的先用列表的那一项占位。
+// 正文的差异用这一条的前后快照对比
+const props = defineProps<{ eventId: number; spaceId: string; initial?: ActivityItem | null }>()
 const emit = defineEmits<{ close: [] }>()
 
-const actor = computed(() => activityActor(props.item))
-const op = computed(() => eventLabel(props.item.type))
+const event = useQuery({
+  queryKey: computed(() => ['activity-event', props.spaceId, props.eventId]),
+  queryFn: () => api.activityEvent(props.spaceId, props.eventId),
+})
+const item = computed(() => event.data.value?.item ?? props.initial ?? null)
+
+const actor = computed(() => (item.value ? activityActor(item.value) : null))
+const op = computed(() => eventLabel(item.value?.type ?? ''))
 const via = computed(() => {
-  const item = props.item
-  if (item.bench) return `测试台，运行标记 ${item.bench.run}`
+  const i = item.value
+  if (!i || !actor.value) return null
+  if (i.bench) return `测试台，运行标记 ${i.bench.run}`
   if (actor.value.kind === 'app') {
-    return item.actor.keyName ? `访问密钥「${item.actor.keyName}」` : '访问密钥'
+    return i.actor.keyName ? `访问密钥「${i.actor.keyName}」` : '访问密钥'
   }
   return actor.value.kind === 'account' ? '管理界面' : null
 })
 const time = computed(() =>
-  new Date(props.item.createdAt).toLocaleString('zh-CN', { hour12: false }),
+  item.value ? new Date(item.value.createdAt).toLocaleString('zh-CN', { hour12: false }) : '',
 )
 const version = computed(() => {
-  const { versionBefore: b, versionAfter: a } = props.item
+  if (!item.value) return null
+  const { versionBefore: b, versionAfter: a } = item.value
   if (b === null && a === null) return null
   if (b === null) return `${a}`
   return a === null || a === b ? `${b}` : `${b} → ${a}`
 })
 
-const contentChange = computed(() => props.item.fieldChanges.find((c) => c.field === 'content'))
-// 正文改了、能对比时才取历史
-const wantsDiff = computed(
-  () =>
-    !!contentChange.value &&
-    contentChange.value.field === 'content' &&
-    contentChange.value.added !== null,
-)
-const history = useQuery({
-  queryKey: computed(() => ['memory-history', props.spaceId, props.item.memoryId]),
-  queryFn: () => api.memoryHistory(props.spaceId, props.item.memoryId),
-  enabled: wantsDiff,
+// 正文按行对比；两边都有正文时才对比得出来
+const diff = computed(() => {
+  const before = event.data.value?.before?.content
+  const after = event.data.value?.after?.content
+  if (typeof before !== 'string' || typeof after !== 'string' || before === after) return null
+  const lines = diffLines(before, after)
+  return {
+    rows: collapseUnchanged(lines) as DiffRow[],
+    added: lines.filter((l) => l.kind === 'add').length,
+    removed: lines.filter((l) => l.kind === 'remove').length,
+  }
 })
-const diffRows = computed<DiffRow[] | null>(() => {
-  const event = history.data.value?.events.find((e) => e.id === props.item.id)
-  if (!event || event.left || !event.before || !event.after) return null
-  if (event.before.content === null || event.after.content === null) return null
-  return collapseUnchanged(diffLines(event.before.content, event.after.content))
-})
+// 增删的行数：有对比时用画出来的这份，和下面的差异对得上；没有时才用列表给的近似值（按行做集合的差）
+function lineCounts(change: { added: number | null; removed: number | null }) {
+  return diff.value ?? change
+}
 
 type Scalar = Exclude<ActivityFieldChange, { field: 'content' | 'glossary' }>
 const scalarText = (change: Scalar, side: 'before' | 'after'): string => {
@@ -79,10 +85,11 @@ const scalarText = (change: Scalar, side: 'before' | 'after'): string => {
   return value === null || value === '' ? '（无）' : String(value)
 }
 const emptyText = computed(() => {
-  const item = props.item
-  if (item.left) return '此次改动后，这条记忆超出当前账号的可见范围，只显示改动之前的记录。'
-  if (item.type === 'create' || item.type === 'import') return '新建时的全部字段，见记忆详情。'
-  if (item.type === 'delete') return '记忆移入「已删除」，保留期内可以恢复。'
+  const i = item.value
+  if (!i) return ''
+  if (i.left) return '此次改动后，这条记忆超出当前账号的可见范围，只显示改动之前的记录。'
+  if (i.type === 'create' || i.type === 'import') return '新建时的全部字段，见记忆详情。'
+  if (i.type === 'delete') return '记忆移入「已删除」，保留期内可以恢复。'
   return '无字段变化。'
 })
 const historyOpen = ref(false)
@@ -101,7 +108,12 @@ const historyOpen = ref(false)
         @click="emit('close')"
       />
     </header>
-    <div class="detail-body">
+    <div v-if="!item" class="detail-body">
+      <ReadFailureNote v-if="event.isError.value" :query="event" />
+      <USkeleton v-else class="h-24 w-full" />
+    </div>
+    <div v-else class="detail-body">
+      <ReadFailureNote v-if="event.isError.value" class="mb-3" :query="event" />
       <h2 class="detail-title">
         <StrataSwatch :layer="item.layer" :sensitivity="item.sensitivity" />
         <span class="min-w-0 wrap-anywhere" :title="item.uri">{{ item.title || item.uri }}</span>
@@ -131,7 +143,7 @@ const historyOpen = ref(false)
         </template>
         <template #actor>
           <span class="inline-flex items-center gap-1.5">
-            <UIcon :name="activityActorIcons[actor.kind]" class="text-dimmed" />{{ actor.name }}
+            <UIcon :name="activityActorIcons[actor!.kind]" class="text-dimmed" />{{ actor!.name }}
           </span>
           <span v-if="via" class="block text-xs/5 text-muted">{{ via }}</span>
         </template>
@@ -148,18 +160,14 @@ const historyOpen = ref(false)
           <template v-if="change.field === 'content'">
             <p v-if="change.added === null" class="detail-note">机密的正文不进变更记录。</p>
             <template v-else>
-              <p class="detail-note">增加 {{ change.added }} 行，删除 {{ change.removed }} 行</p>
-              <ReadFailureNote
-                v-if="history.isError.value"
-                :query="history"
-                size="xs"
-                fallback="正文对比读取失败"
-              />
-              <USkeleton v-else-if="history.isPending.value" class="mt-1 h-16 w-full" />
+              <p class="detail-note">
+                增加 {{ lineCounts(change).added }} 行，删除 {{ lineCounts(change).removed }} 行
+              </p>
+              <USkeleton v-if="event.isPending.value" class="mt-1 h-16 w-full" />
               <pre
-                v-else-if="diffRows"
+                v-else-if="diff"
                 class="diff"
-              ><template v-for="(row, index) in diffRows" :key="index"><span
+              ><template v-for="(row, index) in diff.rows" :key="index"><span
                 v-if="row.kind === 'skip'"
                 class="diff-skip"
               >… 省略未改动的 {{ row.count }} 行</span><span
@@ -204,7 +212,7 @@ const historyOpen = ref(false)
         </UButton>
       </div>
     </div>
-    <USlideover v-model:open="historyOpen" :title="`历史：${item.title || item.uri}`">
+    <USlideover v-if="item" v-model:open="historyOpen" :title="`历史：${item.title || item.uri}`">
       <template #body>
         <MemoryHistory :space-id="spaceId" :memory-id="item.memoryId" :can-restore="false" />
       </template>
@@ -254,7 +262,7 @@ const historyOpen = ref(false)
 }
 .detail-note {
   margin-top: 4px;
-  font-size: 13px;
+  font-size: 14px;
   color: var(--ui-text-muted);
 }
 .field-change {
@@ -289,7 +297,7 @@ const historyOpen = ref(false)
   overflow: auto;
   border: 1px solid var(--ui-border);
   font-family: var(--font-sans);
-  font-size: 13px;
+  font-size: 14px;
   line-height: 1.7;
   white-space: pre-wrap;
   overflow-wrap: anywhere;
