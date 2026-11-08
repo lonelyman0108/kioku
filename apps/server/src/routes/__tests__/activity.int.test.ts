@@ -2,6 +2,7 @@ import { randomBytes } from 'node:crypto'
 
 import type {
   ActivityDays,
+  ActivityEvent,
   ActivityFacets,
   ActivityItem,
   ActivityList,
@@ -422,6 +423,69 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     ])
   })
 
+  it('单条改动：和列表同样的可见性，带前后快照；看不到的 404，离开的只给改前，机密没有正文', async () => {
+    const eve = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const event = (cookie: string, id: number) => get(cookie, `/activity/${id}`)
+    const shared = await create(ws.cookie, { uri: 'core://kb/one', content: '一\n二' })
+    await patch(ws.cookie, { uri: shared.uri, content: '一\n三' })
+    const [edit] = await list(ws.cookie, { q: 'kb/one' })
+    const body = await ok<ActivityEvent>(await event(ws.cookie, edit!.id))
+    expect(body.item).toEqual(edit)
+    expect(body.before?.content).toBe('一\n二')
+    expect(body.after?.content).toBe('一\n三')
+
+    // 别的成员的本人记忆：和不存在一样
+    const theirs = await create(eve.cookie, { uri: 'user://notes/eve', content: 'eve 的' })
+    const [theirEvent] = await list(eve.cookie, { q: 'notes/eve' })
+    expect(theirEvent!.memoryId).toBe(theirs.id)
+    expect((await event(ws.cookie, theirEvent!.id)).status).toBe(404)
+    expect((await event(eve.cookie, theirEvent!.id)).status).toBe(200)
+    expect((await event(ws.cookie, 999_999_999)).status).toBe(404)
+
+    // 机密：快照里没有正文
+    const vault = await create(ws.cookie, {
+      uri: 'core://kb/vault',
+      content: '机密正文',
+      sensitivity: 'secret',
+    })
+    await patch(ws.cookie, { uri: vault.uri, content: '新的机密正文' })
+    const [secretEdit] = await list(ws.cookie, { q: 'kb/vault' })
+    const secretBody = await ok<ActivityEvent>(await event(ws.cookie, secretEdit!.id))
+    expect(secretBody.before?.content).toBeNull()
+    expect(secretBody.after?.content).toBeNull()
+    expect((await event(eve.cookie, secretEdit!.id)).status).toBe(404)
+
+    // 离开：eve 把共享的移进自己的本人，对 alice 只给改前
+    const taken = await create(ws.cookie, {
+      uri: 'core://kb/taken',
+      content: '会被移走',
+      sensitivity: 'internal',
+    })
+    await move(eve.cookie, taken.uri, 'user://notes/taken')
+    const [leftItem] = (await list(ws.cookie, { q: 'kb/taken' })).filter((i) => i.left)
+    const leftBody = await ok<ActivityEvent>(await event(ws.cookie, leftItem!.id))
+    expect(leftBody.item.left).toBe(true)
+    expect(leftBody.before?.uri).toBe('core://kb/taken')
+    expect(leftBody.after).toBeNull()
+
+    // 访问事件不进变更记录
+    const [access] = await withSpace(database.db, ws.spaceId, (tx) =>
+      tx
+        .insert(memoryEvents)
+        .values({
+          spaceId: ws.spaceId,
+          memoryId: shared.id,
+          eventType: 'access',
+          provenance: 'owner',
+          before: null,
+          after: null,
+        })
+        .returning(),
+    )
+    expect((await event(ws.cookie, access!.id)).status).toBe(404)
+    expect((await get(ws.cookie, '/activity/abc')).status).toBe(400)
+  })
+
   it('查看者也能看；访问密钥的名字只给应用所有者与空间所有者，计数按应用分组', async () => {
     const eve = await addMember(database.db, ws.spaceId, 'eve', 'editor')
     const vic = await addMember(database.db, ws.spaceId, 'vic', 'viewer')
@@ -459,8 +523,28 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
       expect((await get(ws.cookie, '/activity/facets', query)).status).toBe(400)
     }
     expect((await get(ws.cookie, '/activity/days', {})).status).toBe(400)
-    expect((await get(ws.cookie, '/activity/days', { tz: 'Mars/Base' })).status).toBe(400)
-    expect((await get(ws.cookie, '/activity/days', { tz: "UTC'; select 1" })).status).toBe(400)
+    // 时区以 PostgreSQL 的时区库为准：库里没有的名字回 400，不落到 at time zone 报错成 500；
+    // 偏移写法与 Etc/GMT±N 在 PostgreSQL 里正负号相反，一律不收
+    for (const tz of [
+      'Mars/Base',
+      'America/Nowhere',
+      "UTC'; select 1",
+      '+08',
+      'Etc/GMT-8',
+      'UTC+8',
+    ]) {
+      const res = await get(ws.cookie, '/activity/days', { tz })
+      expect(res.status, tz).toBe(400)
+    }
+    for (const tz of ['UTC', 'Asia/Shanghai', 'America/Argentina/Buenos_Aires']) {
+      expect((await get(ws.cookie, '/activity/days', { tz })).status, tz).toBe(200)
+    }
+    // 跨过夏令时回拨的 400 个本地日比 400×24 小时多一个小时，照样收
+    const berlin = { from: '2025-09-30T22:00:00Z', to: '2026-11-04T23:00:00Z' }
+    expect((await get(ws.cookie, '/activity', berlin)).status).toBe(200)
+    expect(
+      (await get(ws.cookie, '/activity/days', { ...berlin, tz: 'Europe/Berlin' })).status,
+    ).toBe(200)
     // q 里的 % 与 _ 照字面找
     await create(ws.cookie, { uri: 'core://kb/a_b', content: '一' })
     await create(ws.cookie, { uri: 'core://kb/axb', content: '一' })

@@ -76,35 +76,22 @@ export const ACTOR_KEY = sql<string>`(case
   else 'unknown'
 end)`
 
-// 正文按行对比时，公共前后缀以外的部分超过这么多「行 × 行」就不再对齐，整段算删掉再加上（和界面的 diff.ts 一样）
-const MAX_CELLS = 1_000_000
-
-// 两版正文之间增删了几行：去掉公共前后缀，中间部分按最长公共子序列对齐，和界面上的对比一致
+// 两版正文之间大约增删了几行，表格里的「正文 +a −r」用。按行做多重集合的差：新增是改后比改前多出来的行，
+// 删除反过来，不管行的先后。只是近似：行挪了位置不算改动，同一行删掉又在别处加回来也不算；准确的按行对比
+// 在详情里由界面对这一条做（diff.ts）。不做最长公共子序列：那是 O(n·m)，列表一页最多 200 条、概览也算，
+// 任何成员写一段很长的正文就能把整个进程（登录、召回、MCP）卡住；这里是 O(n + m)
 export function lineChanges(before: string, after: string): { added: number; removed: number } {
-  const a = before.split('\n')
-  const b = after.split('\n')
-  let start = 0
-  while (start < a.length && start < b.length && a[start] === b[start]) start++
-  let endA = a.length
-  let endB = b.length
-  while (endA > start && endB > start && a[endA - 1] === b[endB - 1]) {
-    endA--
-    endB--
+  const counts = new Map<string, number>()
+  for (const line of before.split('\n')) counts.set(line, (counts.get(line) ?? 0) + 1)
+  let added = 0
+  for (const line of after.split('\n')) {
+    const left = counts.get(line) ?? 0
+    if (left > 0) counts.set(line, left - 1)
+    else added++
   }
-  const n = endA - start
-  const m = endB - start
-  if (!n || !m || n * m > MAX_CELLS) return { added: m, removed: n }
-  // 只要长度，按行滚动两行数组
-  let prev = new Uint32Array(m + 1)
-  let next = new Uint32Array(m + 1)
-  for (let i = n - 1; i >= 0; i--) {
-    for (let j = m - 1; j >= 0; j--) {
-      next[j] = a[start + i] === b[start + j] ? prev[j + 1]! + 1 : Math.max(prev[j]!, next[j + 1]!)
-    }
-    ;[prev, next] = [next, prev]
-  }
-  const common = prev[0]!
-  return { added: m - common, removed: n - common }
+  let removed = 0
+  for (const left of counts.values()) removed += left
+  return { added, removed }
 }
 
 // 各字段的前后值，按 fields 的顺序。正文只给增删的行数，有一边没有正文（机密）时不给；关键词给增删的词

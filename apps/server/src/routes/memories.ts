@@ -2,6 +2,8 @@ import { createRoute, z } from '@hono/zod-openapi'
 import {
   ActivityDays,
   ActivityDaysQuery,
+  ActivityEvent,
+  ActivityEventParams,
   ActivityFacets,
   ActivityFilter,
   ActivityList,
@@ -345,6 +347,16 @@ function consoleOnlyRoutes(deps: Deps) {
     request: { params, query: ActivityFilter },
     responses: { 200: jsonResponse('筛选计数', ActivityFacets), ...errors },
   })
+  // 挂在 days、facets 后面：那两个路径也能被 {eventId} 匹配上
+  const activityEvent = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/activity/{eventId}',
+    tags: ['console'],
+    summary:
+      '变更记录里的一条改动连同前后快照，可见性和列表相同：看不到的是 404，超出可见范围的只给改前的快照',
+    request: { params: ActivityEventParams },
+    responses: { 200: jsonResponse('一条改动', ActivityEvent), ...errors },
+  })
   return router()
     .openapi(history, async (c) => {
       const { service } = await consoleMember(deps, c)
@@ -450,6 +462,10 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(activityFacets, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.activityFacets(c.req.valid('query')), 200)
+    })
+    .openapi(activityEvent, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.activityEvent(c.req.valid('param').eventId), 200)
     })
     .openapi(list, async (c) => {
       const { service } = await consoleMember(deps, c)

@@ -53,7 +53,10 @@ describe('变更记录的筛选', () => {
     expect(ok('2026-11-01T00:00:00+08:00', '2026-11-01T00:00:00+08:00')).toBe(true)
     expect(ok('2026-11-02T00:00:00Z', '2026-11-01T00:00:00Z')).toBe(false)
     expect(ok('2025-10-04T00:00:00Z', '2026-11-08T00:00:00Z')).toBe(true)
-    expect(ok('2025-10-03T00:00:00Z', '2026-11-08T00:00:00Z')).toBe(false)
+    // 多留一天给夏令时：跨过回拨的 400 个本地日比 400×24 小时多一个小时
+    expect(ok('2025-09-30T22:00:00Z', '2026-11-04T23:00:00Z')).toBe(true)
+    expect(ok('2025-10-03T00:00:00Z', '2026-11-08T00:00:00Z')).toBe(true)
+    expect(ok('2025-10-02T00:00:00Z', '2026-11-08T00:00:00Z')).toBe(false)
     expect(ActivityFilter.safeParse({ from: '2026-11-01' }).success).toBe(false)
   })
 
@@ -69,7 +72,17 @@ describe('变更记录的筛选', () => {
     expect(ActivityDaysQuery.safeParse({}).success).toBe(false)
     expect(ActivityDaysQuery.parse({ tz: 'Asia/Shanghai' }).tz).toBe('Asia/Shanghai')
     expect(ActivityDaysQuery.parse({ tz: 'UTC' }).tz).toBe('UTC')
-    for (const tz of ['Mars/Base', "UTC'; --", 'Asia/Shanghai '.repeat(10)]) {
+    expect(ActivityDaysQuery.parse({ tz: 'America/Argentina/Buenos_Aires' }).tz).toBeTruthy()
+    // 名字认不认得由服务端按 PostgreSQL 的时区库查；这里只挡偏移写法与 Etc/GMT±N
+    for (const tz of [
+      "UTC'; --",
+      'Asia/Shanghai '.repeat(10),
+      '+08',
+      'UTC+8',
+      'Etc/GMT-8',
+      'GMT',
+      'EST',
+    ]) {
       expect(ActivityDaysQuery.safeParse({ tz }).success, tz).toBe(false)
     }
   })
