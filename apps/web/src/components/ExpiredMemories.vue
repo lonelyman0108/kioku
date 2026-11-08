@@ -70,6 +70,8 @@ async function reactivate(item: ExpiredMemory, version = item.version) {
     // 写进这条记忆的缓存：这个 URI 上之前缓存的可能是别的记录、或者过期之前的版本
     queryClient.setQueryData(['memory', spaceId, memory.uri], memory)
     void queryClient.invalidateQueries({ queryKey: ['memory-history', spaceId, memory.id] })
+    // 变更记录详情里的前后快照也可能带着刚抹掉的正文
+    void queryClient.invalidateQueries({ queryKey: ['activity-event', spaceId] })
     toast.add({ title: `已恢复生效 ${memory.uri}`, color: 'success' })
     if (viewing.value?.id === item.id) viewing.value = null
     if (props.spaceId === spaceId) emit('reactivated', memory.uri)

@@ -3,53 +3,49 @@ import type { ActivityItem } from '@kioku/contracts'
 import { computed } from 'vue'
 
 import {
+  activityActor,
+  activityActorIcons,
   activityLinkable,
-  actorLabel,
-  benchAccountLabel,
   changeLabels,
   eventLabel,
 } from '../labels'
 import { memoryRoute } from '../routes'
 import { formatRelative, formatTime } from '../time'
-import Hint from './Hint.vue'
-import ActorName from './strata/ActorName.vue'
+import ActivityFlags from './ActivityFlags.vue'
 import MemoryName from './strata/MemoryName.vue'
+import StrataSwatch from './strata/StrataSwatch.vue'
 
-// 概览里最近变更的一行：URI 一行，谁改了什么一行。完整的版本是变更记录页的 ActivityEntry
+// 概览里最近变更的一行：记忆一行，谁做了什么一行，操作者与操作带和变更记录同样的图标。
+// 完整的版本是变更记录页的表格（ActivityEntry）
 const props = defineProps<{ item: ActivityItem; spaceId: string }>()
 
-const change = computed(() => {
-  const fields = props.item.changes.map((c) => changeLabels[c] ?? c).join('、')
-  return [eventLabel(props.item.type).label, fields].filter(Boolean).join(' ')
-})
+const actor = computed(() => activityActor(props.item))
+const op = computed(() => eventLabel(props.item.type))
+const fields = computed(() => props.item.changes.map((c) => changeLabels[c] ?? c).join('、'))
 </script>
 
 <template>
   <li class="recent-change">
-    <RouterLink
-      v-if="activityLinkable(item)"
-      :to="memoryRoute(spaceId, item.uri)"
-      class="change-uri change-link"
-    >
-      <MemoryName :uri="item.uri" :title="item.title" />
-    </RouterLink>
-    <MemoryName v-else class="change-uri" :uri="item.uri" :title="item.title" />
-    <span class="change-meta" :title="`${actorLabel(item.actor).name} ${change}`">
-      <span class="truncate"><ActorName :actor="item.actor" /> {{ change }}</span>
-      <span v-if="item.expired && !item.deleted" class="shrink-0">已过期</span>
-      <span
-        v-if="item.bench"
-        class="shrink-0"
-        :title="`运行标记 ${item.bench.run}，操作账号：${benchAccountLabel(item.bench)}`"
+    <span class="change-uri">
+      <StrataSwatch :layer="item.layer" :sensitivity="item.sensitivity" :width="14" :height="10" />
+      <RouterLink
+        v-if="activityLinkable(item)"
+        :to="memoryRoute(spaceId, item.uri)"
+        class="change-link"
       >
-        测试台
+        <MemoryName :uri="item.uri" :title="item.title" />
+      </RouterLink>
+      <MemoryName v-else :uri="item.uri" :title="item.title" />
+    </span>
+    <span class="change-meta" :title="`${actor.hint} ${op.label} ${fields}`">
+      <span class="meta-part truncate">
+        <UIcon :name="activityActorIcons[actor.kind]" class="meta-icon" />{{ actor.name }}
       </span>
-      <span v-if="item.left" class="inline-flex shrink-0 items-center gap-1">
-        超出可见范围
-        <Hint>
-          此次改动后，这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆，或改为机密）。
-        </Hint>
+      <span class="meta-part shrink-0">
+        <UIcon :name="op.icon" class="meta-icon" />{{ op.label }}
       </span>
+      <span v-if="fields" class="truncate">{{ fields }}</span>
+      <ActivityFlags :item="item" />
     </span>
     <time class="change-time" :datetime="item.createdAt" :title="formatTime(item.createdAt)">
       {{ formatRelative(item.createdAt) }}
@@ -68,11 +64,16 @@ const change = computed(() => {
 }
 .change-uri {
   grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 0;
   font-size: 14px;
   line-height: 1.5;
 }
 .change-link {
   min-width: 0;
+  overflow: hidden;
 }
 .change-link:hover {
   text-decoration: underline;
@@ -80,12 +81,23 @@ const change = computed(() => {
 }
 .change-meta {
   display: flex;
-  gap: 6px;
+  align-items: center;
+  gap: 8px;
   min-width: 0;
   font-size: 14px;
   line-height: 1.5;
   color: var(--ui-text-muted);
   white-space: nowrap;
+}
+.meta-part {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  min-width: 0;
+}
+.meta-icon {
+  flex-shrink: 0;
+  color: var(--ui-text-dimmed);
 }
 .change-time {
   font-size: 12px;

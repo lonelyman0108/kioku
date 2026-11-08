@@ -12,7 +12,8 @@ export function refreshAfterPlaintext(
   spaceId: string,
   memory?: ConsoleMemoryView,
 ) {
-  for (const key of ['inbox-counts', 'memory-list', 'overview', 'activity']) {
+  // activity-event：变更记录详情里的前后快照可能带着刚转存走的值
+  for (const key of ['inbox-counts', 'memory-list', 'overview', 'activity', 'activity-event']) {
     void queryClient.invalidateQueries({ queryKey: [key, spaceId] })
   }
   if (!memory) return

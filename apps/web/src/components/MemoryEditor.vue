@@ -387,6 +387,8 @@ async function onMoved(next: ConsoleMemoryView, from: string) {
   // 只改了层时还停在这一条上：先载入结果，否则监听会把它当成别处的新版本，再通知页面一次
   if (next.uri === props.uri) load(next)
   void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
+  // 变更记录详情里的前后快照也可能带着刚抹掉的正文
+  void queryClient.invalidateQueries({ queryKey: ['activity-event', props.spaceId] })
   emit('moved', next, from)
 }
 
@@ -546,6 +548,8 @@ async function save(flags: SaveFlags = {}) {
     // 保存期间没有再改，就回到阅读状态
     if (!dirty.value) mode.value = 'read'
     void queryClient.invalidateQueries({ queryKey: ['memory-history', props.spaceId, next.id] })
+    // 变更记录详情里的前后快照也可能带着刚抹掉的正文
+    void queryClient.invalidateQueries({ queryKey: ['activity-event', props.spaceId] })
     emit('changed', next, m)
   } catch (err) {
     // 服务端检出了新增的疑似明文（两边判断有出入时）：照样逐处处理

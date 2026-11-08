@@ -1,4 +1,7 @@
 import {
+  ActivityDays,
+  ActivityEvent,
+  ActivityFacets,
   ActivityList,
   AppAdvancedView,
   AppInfo,
@@ -433,8 +436,24 @@ export const api = {
       body,
       schema: GroupPersonaRuleList,
     }),
-  activity: (spaceId: string, cursor?: string) =>
-    request('GET', `/spaces/${spaceId}/activity`, { query: { cursor }, schema: ActivityList }),
+  // 变更记录：列表、按天计数与筛选计数用同一套筛选（多个值用逗号连起来，见 activity.ts 的 filterQuery）
+  activity: (spaceId: string, filter: Record<string, string | undefined>, cursor?: string) =>
+    request('GET', `/spaces/${spaceId}/activity`, {
+      query: { ...filter, cursor },
+      schema: ActivityList,
+    }),
+  activityDays: (spaceId: string, filter: Record<string, string | undefined>, tz: string) =>
+    request('GET', `/spaces/${spaceId}/activity/days`, {
+      query: { ...filter, tz },
+      schema: ActivityDays,
+    }),
+  activityFacets: (spaceId: string, filter: Record<string, string | undefined>) =>
+    request('GET', `/spaces/${spaceId}/activity/facets`, {
+      query: filter,
+      schema: ActivityFacets,
+    }),
+  activityEvent: (spaceId: string, eventId: number) =>
+    request('GET', `/spaces/${spaceId}/activity/${eventId}`, { schema: ActivityEvent }),
   // 高级设置：实例默认（实例管理员）、空间的覆盖（成员可看，所有者可改）、应用的覆盖（应用所有者可改）
   instanceAdvanced: () => request('GET', '/settings/advanced', { schema: InstanceAdvancedView }),
   saveInstanceAdvanced: (body: UpdateInstanceAdvanced) =>
