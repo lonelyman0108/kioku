@@ -138,6 +138,18 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
         )
       ).status,
     ).toBe(200)
+    // 离开了空间的成员：离开记录要跟着恢复，满期的清理才知道从什么时候算
+    const dave = await addMember(database.db, ws.spaceId, 'dave', 'viewer')
+    expect(
+      (
+        await send(
+          'DELETE',
+          `/v1/spaces/${ws.spaceId}/members/${dave.accountId}`,
+          undefined,
+          cookie,
+        )
+      ).status,
+    ).toBe(204)
     // 被继承的排在后面：按标识排序、按存放的位置（改过之后新版本的行落在 child 后面）都是 child 在前，
     // 导出时仍要把 base 排在前面
     const base = await ws.createPersona('zeta-base')
@@ -583,7 +595,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     expect(await embeddings()).toBe(vectors)
 
     // 已经初始化的实例拒绝再恢复
-    await expect(restore(file)).rejects.toThrow('这个实例已经初始化过（2 个账号、1 个空间）')
+    await expect(restore(file)).rejects.toThrow('这个实例已经初始化过（3 个账号、1 个空间）')
   })
 
   it('实例级的表在备份里是空的：新库里迁移写下的默认值也以备份为准清掉', async () => {

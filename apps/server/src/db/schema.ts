@@ -116,6 +116,24 @@ export const spaceMembers = pgTable(
   (t) => [primaryKey({ columns: [t.spaceId, t.accountId] })],
 )
 
+// 离开空间的成员（被移除或自己离开）：他在这个空间的本人记忆、凭据与密码库连接留着、谁也看不到，
+// 期间重新加入就删掉这一行、照旧可见；满 DEPARTURE_RETENTION_DAYS 天由保留期的清理删掉这些数据和这一行（jobs/retention.ts）
+export const spaceDepartures = pgTable(
+  'space_departures',
+  {
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    accountId: uuid()
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    leftAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    // 离开时的成员设置，重新加入时照旧：关掉了 Dream 整理本人记忆的，回来之后还是关着
+    dreamPrivate: boolean().notNull(),
+  },
+  (t) => [primaryKey({ columns: [t.spaceId, t.accountId] }), index().on(t.leftAt)],
+)
+
 // 管理界面的登录会话；Cookie 里是随机令牌，库里只存它的 SHA-256
 export const sessions = pgTable(
   'sessions',

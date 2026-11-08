@@ -28,7 +28,7 @@ import { reviewRoutes } from './routes/review'
 import { MemoryError } from './memory/service'
 import { settingsRoutes } from './routes/settings'
 import { setupRoutes } from './routes/setup'
-import { spaceRoutes } from './routes/spaces'
+import { instanceSpaceRoutes, spaceRoutes } from './routes/spaces'
 import { subjectRoutes } from './routes/subjects'
 import { conversationRoutes } from './routes/conversations'
 import { whoamiRoutes } from './routes/whoami'
@@ -103,6 +103,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', bindingRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
+  app.route('/v1', instanceSpaceRoutes(deps))
   // 放在接入方的路由后面：OpenAPI 的组件按第一次用到的顺序排，Python SDK 的比对对顺序敏感，
   // 测试台的响应用到了 TurnEndEvent 这些接入方的组件
   app.route('/v1', benchRoutes(deps))
