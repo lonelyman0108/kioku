@@ -81,6 +81,9 @@ export type SetPasswordRequest = z.infer<typeof SetPasswordRequest>
 export const UpdateProfileRequest = z.object({ displayName: DisplayName })
 export type UpdateProfileRequest = z.infer<typeof UpdateProfileRequest>
 
+// 改密码时当前密码不对：服务端回 400 带这句，界面据此和新密码不合规分开说
+export const WRONG_CURRENT_PASSWORD = '当前密码错误'
+
 export const ChangePasswordRequest = z.object({
   currentPassword: z.string().max(256),
   newPassword: Password,

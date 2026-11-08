@@ -11,6 +11,7 @@ import {
   PasswordLinkRequest,
   SetPasswordRequest,
   UpdateProfileRequest,
+  WRONG_CURRENT_PASSWORD,
 } from '@kioku/contracts'
 import { and, desc, eq, gt, isNull, ne } from 'drizzle-orm'
 import type { Context } from 'hono'
@@ -350,7 +351,7 @@ export function authRoutes(deps: Deps) {
         async (verified) => ({ verified, next: await hashPassword(newPassword) }),
       )
       if (result.kind === 'limited') return c.json({ error: result.message }, 429)
-      if (result.kind === 'wrong') return c.json({ error: '当前密码错误' }, 400)
+      if (result.kind === 'wrong') return c.json({ error: WRONG_CURRENT_PASSWORD }, 400)
       const { verified, next } = result.value
       const changed = await deps.db.transaction(async (tx) => {
         // 加锁的顺序和用链接设置密码、管理员停用一致：先链接、再账号

@@ -7,6 +7,7 @@ import { computed, reactive, ref } from 'vue'
 import {
   accountStates,
   accountStateText,
+  latestRequest,
   SELF_LOCKED_REASON,
   SOLE_OWNER_TEXT,
   soleOwnerSpaces,
@@ -38,17 +39,29 @@ const selfId = computed(() => me.data.value?.id)
 const initial = (account: AdminAccount) => Array.from(account.displayName)[0] ?? '?'
 
 async function refresh(account?: AdminAccount) {
-  await queryClient.invalidateQueries({ queryKey: QUERY_KEY })
+  // 新建账号会自动建个人空间：实例 › 空间那一节的列表一起刷新
+  await Promise.all([
+    queryClient.invalidateQueries({ queryKey: QUERY_KEY }),
+    queryClient.invalidateQueries({ queryKey: ['instance-spaces'] }),
+  ])
   // 改的是当前账号（显示名）时，顶栏与个人设置里的也跟着变
   if (account?.id === selfId.value) await queryClient.invalidateQueries({ queryKey: ME_KEY })
 }
 
-// 新建账号：同一个弹窗，建好之后换成链接页。链接显示期间不能点遮罩、Esc 或右上角关掉，只能点「完成」
+// 链接页显示的账号名一律取结果本身对应的账号，不取弹窗当前的目标
+interface ShownLink {
+  link: AccountLink
+  displayName: string
+}
+
+// 新建账号：同一个弹窗，建好之后换成链接页。链接显示期间不能点遮罩、Esc 或右上角关掉，只能点「完成」。
+// 请求期间可以取消：取消之后才回来的结果丢弃（latestRequest），不留到下一次打开
 const createOpen = ref(false)
 const form = reactive({ username: '', displayName: '', isAdmin: false })
 const createError = ref<string | null>(null)
 const creating = ref(false)
-const created = ref<{ link: AccountLink; displayName: string } | null>(null)
+const created = ref<ShownLink | null>(null)
+const createRequest = latestRequest()
 const usernameProblem = computed(() => {
   if (!form.username) return null
   const parsed = Username.safeParse(form.username)
@@ -57,13 +70,19 @@ const usernameProblem = computed(() => {
 const canCreate = computed(
   () => Boolean(form.username) && !usernameProblem.value && Boolean(form.displayName.trim()),
 )
+function resetCreate() {
+  createRequest.reset()
+  creating.value = false
+  created.value = null
+  createError.value = null
+}
 function openCreate() {
+  resetCreate()
   createOpen.value = true
 }
 function closeCreate() {
   createOpen.value = false
-  created.value = null
-  createError.value = null
+  resetCreate()
   form.username = ''
   form.displayName = ''
   form.isAdmin = false
@@ -71,6 +90,7 @@ function closeCreate() {
 // 不用表单元素：建好之后同一个弹窗里显示链接，回车的隐式提交不能再建一个
 async function create() {
   if (creating.value || !canCreate.value) return
+  const ticket = createRequest.begin()
   creating.value = true
   createError.value = null
   try {
@@ -79,35 +99,55 @@ async function create() {
       displayName: form.displayName.trim(),
       isAdmin: form.isAdmin,
     })
-    created.value = { link: result.link, displayName: result.account.displayName }
+    if (createRequest.isCurrent(ticket)) {
+      created.value = { link: result.link, displayName: result.account.displayName }
+    }
     await refresh()
   } catch (err) {
-    createError.value = err instanceof ApiError ? err.message : '新建失败'
+    if (createRequest.isCurrent(ticket)) {
+      createError.value = err instanceof ApiError ? err.message : '新建失败'
+    }
   } finally {
-    creating.value = false
+    if (createRequest.isCurrent(ticket)) creating.value = false
   }
 }
 
-// 重新生成链接（重置密码也走它）：先确认，结果在同一个弹窗里显示一次
+// 重新生成链接（重置密码也走它）：先确认，结果在同一个弹窗里显示一次。
+// 请求期间关掉弹窗或换了账号，回来的结果丢弃：否则 A 的链接会在下一次打开时显示在 B 的名下
 const linkTarget = ref<AdminAccount | null>(null)
-const regenerated = ref<AccountLink | null>(null)
+const regenerated = ref<ShownLink | null>(null)
 const regenerating = ref(false)
+const linkRequest = latestRequest()
+function openLink(account: AdminAccount) {
+  linkRequest.reset()
+  regenerating.value = false
+  regenerated.value = null
+  linkTarget.value = account
+}
 function closeLink() {
+  linkRequest.reset()
+  regenerating.value = false
   linkTarget.value = null
   regenerated.value = null
 }
 async function regenerate() {
   const target = linkTarget.value
   if (!target || regenerating.value) return
+  const ticket = linkRequest.begin()
   regenerating.value = true
   try {
-    regenerated.value = await api.regenerateAccountLink(target.id)
+    const link = await api.regenerateAccountLink(target.id)
+    if (linkRequest.isCurrent(ticket) && linkTarget.value?.id === target.id) {
+      regenerated.value = { link, displayName: target.displayName }
+    }
     await refresh()
   } catch (err) {
-    toast.add({ title: err instanceof ApiError ? err.message : '生成失败', color: 'error' })
-    linkTarget.value = null
+    if (linkRequest.isCurrent(ticket)) {
+      toast.add({ title: err instanceof ApiError ? err.message : '生成失败', color: 'error' })
+      closeLink()
+    }
   } finally {
-    regenerating.value = false
+    if (linkRequest.isCurrent(ticket)) regenerating.value = false
   }
 }
 
@@ -217,11 +257,8 @@ async function apply() {
             </span>
           </td>
           <td>
-            <span v-if="account.isAdmin"
-              ><UIcon :name="icons.check" class="align-[-2px]" aria-hidden="true" /><span
-                class="sr-only"
-                >是</span
-              ></span
+            <span v-if="account.isAdmin" class="admin" data-admin
+              ><UIcon :name="icons.check" aria-hidden="true" />是</span
             >
             <span v-else class="dim">—</span>
           </td>
@@ -259,7 +296,7 @@ async function apply() {
                   color="neutral"
                   variant="ghost"
                   :icon="icons.passwordLink"
-                  @click="linkTarget = account"
+                  @click="openLink(account)"
                   >{{ account.passwordSet ? '重置密码' : '重新生成链接' }}</UButton
                 >
                 <UButton
@@ -343,9 +380,9 @@ async function apply() {
     >
       <template #body>
         <PasswordLinkOnce
-          v-if="regenerated && linkTarget"
-          :link="regenerated"
-          :display-name="linkTarget.displayName"
+          v-if="regenerated"
+          :link="regenerated.link"
+          :display-name="regenerated.displayName"
         />
         <p v-else class="text-sm">
           生成新的设置密码链接后：之前的链接失效{{
@@ -416,6 +453,12 @@ async function apply() {
 }
 .dim {
   color: var(--ui-text-muted);
+}
+.admin {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  white-space: nowrap;
 }
 /* 窄屏时一个空间名不拆开，表格横向滚动 */
 .space-item {
