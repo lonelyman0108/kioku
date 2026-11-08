@@ -524,21 +524,32 @@ describe.skipIf(!testDatabaseUrl)('变更记录的筛选、按天计数与筛选
     }
     expect((await get(ws.cookie, '/activity/days', {})).status).toBe(400)
     // 时区以 PostgreSQL 的时区库为准：库里没有的名字回 400，不落到 at time zone 报错成 500；
-    // 偏移写法与 Etc/GMT±N 在 PostgreSQL 里正负号相反，一律不收
-    for (const tz of [
-      'Mars/Base',
-      'America/Nowhere',
-      "UTC'; select 1",
-      '+08',
-      'Etc/GMT-8',
-      'UTC+8',
-    ]) {
+    // 库里没有的名字带上 code，界面只在这种 400 时退回 UTC
+    for (const tz of ['Mars/Base', 'America/Nowhere']) {
       const res = await get(ws.cookie, '/activity/days', { tz })
       expect(res.status, tz).toBe(400)
+      expect(((await res.json()) as { code?: string }).code).toBe('unknown_time_zone')
     }
-    for (const tz of ['UTC', 'Asia/Shanghai', 'America/Argentina/Buenos_Aires']) {
-      expect((await get(ws.cookie, '/activity/days', { tz })).status, tz).toBe(200)
+    // 裸偏移写法在 PostgreSQL 里正负号相反，写法本身就不收，这种 400 不带 code
+    for (const tz of ["UTC'; select 1", '+08', 'UTC+8']) {
+      const res = await get(ws.cookie, '/activity/days', { tz })
+      expect(res.status, tz).toBe(400)
+      expect(((await res.json()) as { code?: string }).code, tz).toBeUndefined()
     }
+    const window = { from: '2026-11-01T00:00:00Z', to: '2026-11-03T00:00:00Z' }
+    for (const tz of ['UTC', 'Asia/Shanghai', 'America/Argentina/Buenos_Aires', 'Etc/UTC']) {
+      expect((await get(ws.cookie, '/activity/days', { ...window, tz })).status, tz).toBe(200)
+    }
+    // IANA 的 Etc/GMT-8 在 PostgreSQL 里就是 UTC+8，和浏览器一样：UTC 16:30 分到第二天
+    await create(ws.cookie, { uri: 'core://kb/etc', content: '一' })
+    const etc = await list(ws.cookie, { q: 'kb/etc' })
+    await setTimes(
+      etc.map((i) => i.id),
+      '2026-11-01T16:30:00Z',
+    )
+    expect(await days(ws.cookie, { ...window, q: 'kb/etc', tz: 'Etc/GMT-8' })).toEqual([
+      { day: '2026-11-02', count: 1 },
+    ])
     // 跨过夏令时回拨的 400 个本地日比 400×24 小时多一个小时，照样收
     const berlin = { from: '2025-09-30T22:00:00Z', to: '2026-11-04T23:00:00Z' }
     expect((await get(ws.cookie, '/activity', berlin)).status).toBe(200)

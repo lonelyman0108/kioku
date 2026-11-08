@@ -1,5 +1,6 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  ACTIVITY_UNKNOWN_TIME_ZONE,
   ActivityDays,
   ActivityDaysQuery,
   ActivityEvent,
@@ -46,7 +47,12 @@ import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { withDeletionRetention } from '../jobs/retention'
 import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
-import type { CreateInput, MemoryService, UpdateInput } from '../memory/service'
+import {
+  UnknownTimeZoneError,
+  type CreateInput,
+  type MemoryService,
+  type UpdateInput,
+} from '../memory/service'
 
 // 快速跳转最多列出的直接命中数
 const MATCH_LIMIT = 10
@@ -457,7 +463,15 @@ function consoleOnlyRoutes(deps: Deps) {
     })
     .openapi(activityDays, async (c) => {
       const { service } = await consoleMember(deps, c)
-      return c.json(await service.activityDays(c.req.valid('query')), 200)
+      try {
+        return c.json(await service.activityDays(c.req.valid('query')), 200)
+      } catch (err) {
+        // 时区认不出带上 code，界面只在这种 400 时退回 UTC
+        if (err instanceof UnknownTimeZoneError) {
+          return c.json({ error: err.message, code: ACTIVITY_UNKNOWN_TIME_ZONE }, 400)
+        }
+        throw err
+      }
     })
     .openapi(activityFacets, async (c) => {
       const { service } = await consoleMember(deps, c)

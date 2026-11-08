@@ -161,6 +161,7 @@ import {
   changedFields,
   changedFieldsSql,
   fieldChanges,
+  knownTimeZone,
   text as snapshotText,
   uriOf as snapshotUri,
 } from './activity'
@@ -192,6 +193,14 @@ export class MemoryError extends Error {
 }
 
 // 读到之后被别的请求改过：错误体带上 reason: version，界面据此提示重新读取
+// 按天计数时 PostgreSQL 的时区库里没有这个名字：路由回 400 并带上 code，界面据此退回 UTC，
+// 不把别的 400 也当成时区的问题
+export class UnknownTimeZoneError extends MemoryError {
+  constructor(tz: string) {
+    super(400, `无法识别时区 ${tz}`)
+  }
+}
+
 export const versionConflict = (message: string) =>
   new MemoryError(409, message, undefined, { reason: 'version' })
 
@@ -3255,9 +3264,7 @@ export class MemoryService {
   async activityDays(query: ActivityDaysQuery): Promise<ActivityDays> {
     return this.run(async (tx) => {
       // 按 PostgreSQL 的时区库认名字：浏览器认得、库里还没有的名字在 at time zone 那里会报错
-      if (!(await knownTimeZone(tx, query.tz))) {
-        throw new MemoryError(400, `无法识别时区 ${query.tz}`)
-      }
+      if (!(await knownTimeZone(tx, query.tz))) throw new UnknownTimeZoneError(query.tz)
       const { sub, conditions } = this.activityEvents(tx, query)
       const day = sql`((${sub.createdAt} at time zone ${query.tz}::text)::date)`
       const rows = await tx
@@ -3604,20 +3611,6 @@ const GLOSSARY_INDEX_LIMIT = 5000
 const DELETED_MICROS = microsOf(memories.deletedAt)
 // 事件 id 不超过 JS 能精确表示的整数
 const EVENT_ID = /^\d{1,15}$/
-
-// PostgreSQL 认得的时区名，进程里查一次留着（时区库随数据库升级才变）
-let timeZones: Promise<Set<string>> | null = null
-async function knownTimeZone(tx: Tx, tz: string): Promise<boolean> {
-  timeZones ??= tx
-    .execute(sql`select name from pg_timezone_names`)
-    .then((rows) => new Set((rows as unknown as { name: string }[]).map((r) => r.name)))
-  try {
-    return (await timeZones).has(tz)
-  } catch (err) {
-    timeZones = null
-    throw err
-  }
-}
 
 // 变更记录子查询的一行换成列表项
 type ActivityRow = {

@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { lineChanges } from '../activity'
+import { knownTimeZone, lineChanges } from '../activity'
 
 describe('正文增删的行数', () => {
   it('按行做多重集合的差：改了一行算加一删一，加在末尾只算加', () => {
@@ -20,5 +20,23 @@ describe('正文增删的行数', () => {
     const start = performance.now()
     expect(lineChanges(before, after)).toEqual({ added: 20_000, removed: 20_000 })
     expect(performance.now() - start).toBeLessThan(200)
+  })
+})
+
+describe('认得的时区', () => {
+  it('查询失败只让这一次失败，不把失败留给别的请求；查成功之后不再查', async () => {
+    const failing = { execute: () => Promise.reject(new Error('连接断开')) }
+    let calls = 0
+    const working = {
+      execute: async () => {
+        calls++
+        return [{ name: 'Asia/Shanghai' }, { name: 'UTC' }]
+      },
+    }
+    await expect(knownTimeZone(failing, 'UTC')).rejects.toThrow('连接断开')
+    expect(await knownTimeZone(working, 'Asia/Shanghai')).toBe(true)
+    expect(await knownTimeZone(working, 'Mars/Base')).toBe(false)
+    expect(await knownTimeZone(failing, 'UTC')).toBe(true)
+    expect(calls).toBe(1)
   })
 })

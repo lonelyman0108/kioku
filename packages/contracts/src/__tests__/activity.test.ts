@@ -73,16 +73,12 @@ describe('变更记录的筛选', () => {
     expect(ActivityDaysQuery.parse({ tz: 'Asia/Shanghai' }).tz).toBe('Asia/Shanghai')
     expect(ActivityDaysQuery.parse({ tz: 'UTC' }).tz).toBe('UTC')
     expect(ActivityDaysQuery.parse({ tz: 'America/Argentina/Buenos_Aires' }).tz).toBeTruthy()
-    // 名字认不认得由服务端按 PostgreSQL 的时区库查；这里只挡偏移写法与 Etc/GMT±N
-    for (const tz of [
-      "UTC'; --",
-      'Asia/Shanghai '.repeat(10),
-      '+08',
-      'UTC+8',
-      'Etc/GMT-8',
-      'GMT',
-      'EST',
-    ]) {
+    // IANA 的 Etc 下的名字在浏览器与 PostgreSQL 里是同一个意思，照收
+    for (const tz of ['Etc/GMT-8', 'Etc/GMT+8', 'Etc/UTC']) {
+      expect(ActivityDaysQuery.parse({ tz }).tz).toBe(tz)
+    }
+    // 名字认不认得由服务端按 PostgreSQL 的时区库查；这里只挡裸偏移写法
+    for (const tz of ["UTC'; --", 'Asia/Shanghai '.repeat(10), '+08', 'UTC+8', 'GMT', 'EST']) {
       expect(ActivityDaysQuery.safeParse({ tz }).success, tz).toBe(false)
     }
   })

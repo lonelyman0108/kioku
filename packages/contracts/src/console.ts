@@ -349,18 +349,19 @@ const commaList = <T extends z.ZodType<unknown, string>>(item: T, max: number) =
 // 变更记录的跨度最多这么多天（按天计数要一天一行）
 export const ACTIVITY_MAX_SPAN_DAYS = 400
 
-// IANA 时区名，例如 Asia/Shanghai。浏览器给的名字，服务端按它把时间分到天里。只收地区名与 UTC：
-// 「+08」这类偏移写法和 Etc/GMT±N 在 PostgreSQL 里按 POSIX 的正负号读，和浏览器的意思相反。
-// 名字认不认得以 PostgreSQL 的时区库为准（pg_timezone_names），由服务端再查一次，不认识的回 400
-const TIME_ZONE_REGION = /^[A-Za-z]+(?:\/[A-Za-z0-9_-]+)+$/
+// IANA 时区名，例如 Asia/Shanghai、Etc/GMT-8。浏览器给的名字，服务端按它把时间分到天里。
+// 只拒绝「+08」「UTC+8」这类裸偏移写法：PostgreSQL 按 POSIX 读它们，正负号和浏览器的意思相反。
+// IANA 的 Etc/GMT±N 在浏览器和 PostgreSQL 里是同一个意思（Etc/GMT+8 都是 UTC−8），照收。
+// 名字认不认得以 PostgreSQL 的时区库为准（pg_timezone_names），由服务端再查一次，不认识的回 400，
+// 错误体带 code（ACTIVITY_UNKNOWN_TIME_ZONE），界面据此退回 UTC
+const TIME_ZONE_REGION = /^[A-Za-z]+(?:\/[A-Za-z0-9_+-]+)+$/
 export const TimeZoneName = z
   .string()
   .min(1)
   .max(64)
-  .refine(
-    (tz) => tz === 'UTC' || (TIME_ZONE_REGION.test(tz) && !/^Etc\//.test(tz)),
-    '时区只收地区名，例如 Asia/Shanghai',
-  )
+  .refine((tz) => tz === 'UTC' || TIME_ZONE_REGION.test(tz), '时区只收地区名，例如 Asia/Shanghai')
+export const ACTIVITY_UNKNOWN_TIME_ZONE = 'unknown_time_zone'
+
 // 变更记录的筛选，列表、按天计数与筛选计数共用。时间是不早于 from、早于 to；
 // 多个值的参数之间是「或」，各个参数之间是「且」。q 在列表显示的标题与坐标里按子串查找，不区分大小写
 const ACTIVITY_FILTER = {
