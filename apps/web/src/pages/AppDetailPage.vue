@@ -7,6 +7,7 @@ import { useRoute, useRouter } from 'vue-router'
 
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
+import AppAdvancedSettings from '../components/AppAdvancedSettings.vue'
 import AppGroupPersonas from '../components/AppGroupPersonas.vue'
 import AppKeys from '../components/AppKeys.vue'
 import AppRecallEvents from '../components/AppRecallEvents.vue'
@@ -391,6 +392,13 @@ watch([spaceId, appId], () => {
           />
           <AppRecallEvents class="app-events-area" :space-id="spaceId" :app-id="app.id" />
         </div>
+        <!-- 高级设置的覆盖只给应用所有者与空间所有者看 -->
+        <AppAdvancedSettings
+          v-if="canSeeKeys"
+          class="app-advanced-area"
+          :space-id="spaceId"
+          :app-id="app.id"
+        />
       </div>
     </template>
   </div>
@@ -587,6 +595,12 @@ watch([spaceId, appId], () => {
   min-width: 0;
 }
 /* 没有权限范围可看时（看不到 Key，或者暂无有效 Key）右栏从顶上开始 */
+.app-advanced-area {
+  grid-column: 1 / -1;
+  grid-row: 3;
+  max-width: 60rem;
+  margin-top: 30px;
+}
 .app-grid.solo .app-side-area {
   grid-row: 1 / span 2;
   margin-top: 0;
@@ -673,8 +687,13 @@ watch([spaceId, appId], () => {
   .app-settings-area {
     order: 4;
   }
-  .app-events-area {
+  .app-advanced-area {
+    grid-column: 1;
+    grid-row: auto;
     order: 5;
+  }
+  .app-events-area {
+    order: 6;
   }
 }
 @media (max-width: 1023.98px) {

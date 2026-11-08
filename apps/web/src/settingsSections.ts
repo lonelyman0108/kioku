@@ -45,6 +45,13 @@ export const SETTINGS_SECTIONS = [
   },
   {
     group: 'space',
+    key: 'recall',
+    label: '召回与启动加载',
+    icon: icons.tuning,
+    component: lazy(() => import('./components/SpaceRecallSettings.vue')),
+  },
+  {
+    group: 'space',
     key: 'extraction',
     label: '抽取与整理',
     icon: icons.extraction,
@@ -84,6 +91,13 @@ export const SETTINGS_SECTIONS = [
     label: '数据与保留',
     icon: icons.data,
     component: lazy(() => import('./components/DataSettings.vue')),
+  },
+  {
+    group: 'instance',
+    key: 'prompts',
+    label: '提示词与默认值',
+    icon: icons.prompts,
+    component: lazy(() => import('./components/InstancePromptSettings.vue')),
   },
 ] as const satisfies readonly SettingsSection[]
 

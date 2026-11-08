@@ -163,16 +163,18 @@ describe('小节的注册', () => {
       ['instance', '实例'],
     ])
     expect(keysOf('account')).toEqual(['appearance'])
-    expect(keysOf('space')).toEqual(['extraction', 'transfer'])
-    expect(keysOf('instance')).toEqual(['spaces', 'models', 'security', 'data'])
+    expect(keysOf('space')).toEqual(['recall', 'extraction', 'transfer'])
+    expect(keysOf('instance')).toEqual(['spaces', 'models', 'security', 'data', 'prompts'])
     expect(SETTINGS_SECTIONS.map((s) => s.label)).toEqual([
       '外观',
+      '召回与启动加载',
       '抽取与整理',
       '导入与导出',
       '空间',
       '模型',
       '安全',
       '数据与保留',
+      '提示词与默认值',
     ])
   })
 
@@ -196,7 +198,11 @@ describe('小节的注册', () => {
     expect(visibleGroups({ ...admin, hasSpace: true })).toEqual(['account', 'space', 'instance'])
     expect(visibleGroups({ ...member, hasSpace: true })).toEqual(['account', 'space'])
     expect(visibleGroups({ ...member, hasSpace: false })).toEqual(['account'])
-    expect(visibleSections('space', member).map((s) => s.key)).toEqual(['extraction', 'transfer'])
+    expect(visibleSections('space', member).map((s) => s.key)).toEqual([
+      'recall',
+      'extraction',
+      'transfer',
+    ])
   })
 
   it('地址里的小节不存在或看不到时看第一个看得到的', () => {
@@ -803,10 +809,19 @@ describe('设置页', () => {
     expect(dataSettings).toContain(
       "const dirty = useDirtyParts(dirtyModel, ['retention', 'backup'])",
     )
-    const budget = elementsOf(template(spaceExtractionSettings)).find(
-      (el) => el.tag === 'ExtractionBudget',
-    )!
-    expect(directive(budget, 'model')?.exp?.content).toBe('dirty')
+    const extraction = elementsOf(template(spaceExtractionSettings))
+    expect(
+      ['ExtractionBudget', 'SpaceAdvancedExtraction'].map(
+        (tag) =>
+          directive(
+            extraction.find((e) => e.tag === tag)!,
+            'model',
+          )?.exp?.content,
+      ),
+    ).toEqual(['dirty.budget', 'dirty.advanced'])
+    expect(spaceExtractionSettings).toContain(
+      "const dirty = useDirtyParts(dirtyModel, ['budget', 'advanced'])",
+    )
     expect(extractionBudget).toContain('watch(dirty, (d) => (dirtyModel.value = d)')
     expect(extractionBudget).toContain('const dirty = computed(() => changedCount.value > 0)')
     expect(scriptOf(embeddingSettings).match(/\[activeDirty, nextDirty\]/g)).toHaveLength(1)
