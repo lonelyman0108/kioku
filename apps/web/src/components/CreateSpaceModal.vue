@@ -15,7 +15,7 @@ const emit = defineEmits<{ close: []; created: [space: CreatedSpace] }>()
 
 const accounts = useQuery({
   queryKey: ['instance-accounts'],
-  queryFn: api.instanceAccounts,
+  queryFn: api.accounts,
   enabled: computed(() => props.open && props.chooseOwner),
 })
 const ownerItems = computed(() =>

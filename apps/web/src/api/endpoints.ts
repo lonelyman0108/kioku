@@ -115,7 +115,6 @@ import {
   type ConsoleUpdateMemoryRequest,
   type UpdatePersonaRequest,
   type UpdateSubjectRequest,
-  AdminAccountList,
   CreatedSpace,
   InstanceSpace,
   SpaceCreationView,
@@ -195,7 +194,6 @@ export const api = {
       schema: SpaceCreationView,
     }),
   // 新建空间时选所有者用
-  instanceAccounts: () => request('GET', '/instance/accounts', { schema: AdminAccountList }),
 
   apps: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),
