@@ -1,13 +1,21 @@
 <script setup lang="ts">
+import { computed } from 'vue'
+
+import { FLAGS, type FlagStatus } from './flags'
+
 // 带细框的小标记：凭据的快到期、已到期、需要轮换，测试台写下的记录，已过期、已吊销这类状态。
-// 只有文字和一圈线，不用彩色徽章。icon 取 icons.ts 里的名字（状态的对应见 flags.ts），只作辅助，文字照样写全
-defineProps<{ icon?: string | undefined }>()
+// 只有文字和一圈线，不用彩色徽章。传 status 时文字与图标都按状态取（flags.ts），图标只作辅助；
+// 不传就只显示插槽里的文字，和以前一样
+const props = defineProps<{ status?: FlagStatus | undefined }>()
+const flag = computed(() => (props.status ? FLAGS[props.status] : null))
 </script>
 
 <template>
   <span class="flag-tag"
-    ><UIcon v-if="icon" :name="icon" class="flag-icon" aria-hidden="true" /><slot
-  /></span>
+    ><UIcon v-if="flag" :name="flag.icon" class="flag-icon" aria-hidden="true" /><slot>{{
+      flag?.label
+    }}</slot></span
+  >
 </template>
 
 <style scoped>

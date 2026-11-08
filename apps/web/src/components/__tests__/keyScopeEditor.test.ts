@@ -160,6 +160,18 @@ describe('签发弹窗的权限表', () => {
     expect(await render(scopesOf('agent'), 'agent')).not.toContain('凭据能力实际为')
   })
 
+  // 在勾选框、单选上按回车，只有它们属于某个表单时才会隐式提交。编辑器自己不带表单，
+  // 每个输入也不借 form 属性挂到别处的表单上；签发弹窗不用表单见 accessPages.test.ts
+  it('在勾选框与单选上按回车不签发：输入不属于任何表单，也不接回车', async () => {
+    const html = await render(scopesOf('agent'), 'agent')
+    const inputs = [...html.matchAll(/<input\b[^>]*>/g)].map((m) => m[0])
+    expect(inputs.filter((i) => /type="checkbox"/.test(i))).toHaveLength(LAYERS.length * 2)
+    expect(inputs.filter((i) => /type="radio"/.test(i)).length).toBeGreaterThan(0)
+    for (const input of inputs) expect(input).not.toMatch(/\sform=/)
+    expect(html).not.toContain('<form')
+    expect(keyScopeEditorSource).not.toMatch(/<form|@submit|@key(down|up|press)\.enter/)
+  })
+
   it('格子的判断只用共享的规则，不另写一份', () => {
     expect(keyScopeEditorSource).toContain('issuedScopeRows(scopes.value)')
     expect(keyScopeEditorSource).toContain('accessKind(row.layer, cell)')

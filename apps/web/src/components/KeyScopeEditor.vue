@@ -48,6 +48,7 @@ import {
   sensitivityHints,
   type AccessKind,
   type AccessRow,
+  type PaintRect,
 } from './strata/strata'
 
 // 签发访问密钥时编辑签发范围：上面四张模板卡片，下面一张权限表直接勾选。
@@ -88,17 +89,40 @@ function toggle(field: 'readLayers' | 'writeLayers', layer: Layer, on: boolean) 
 }
 const checkedOf = (event: Event) => (event.target as HTMLInputElement).checked
 
-const rows = computed(() => orderRows(issuedScopeRows(scopes.value)))
+const accessRows = computed(() => orderRows(issuedScopeRows(scopes.value)))
 // 边界线画在最高敏感级那一列的右侧
 const edge = computed(() => SENSITIVITIES.indexOf(scopes.value.maxSensitivity))
-const kindOf = (row: AccessRow, sensitivity: Sensitivity): AccessKind => {
-  const cell = row.cells.find((c) => c.sensitivity === sensitivity)
-  return cell ? accessKind(row.layer, cell) : 'none'
+
+// 每一格的种类、能不能有这一级（本人不设公开）、画法与说明，跟着签发范围一次算好，模板只读结果
+interface EditorCell {
+  sensitivity: Sensitivity
+  kind: AccessKind
+  allowed: boolean
+  title: string
+  paint: PaintRect[]
 }
-const allowed = (row: AccessRow, sensitivity: Sensitivity) =>
-  sensitivityAllowed(row.layer, sensitivity)
 const FULL = { x: 0, y: 0, width: '100%', height: '100%' }
-const legendKinds = computed(() => presentKinds(rows.value))
+const rows = computed(() =>
+  accessRows.value.map((row: AccessRow) => ({
+    layer: row.layer,
+    cells: SENSITIVITIES.map((sensitivity): EditorCell => {
+      const cell = row.cells.find((c) => c.sensitivity === sensitivity)
+      const kind: AccessKind = cell ? accessKind(row.layer, cell) : 'none'
+      const allowed = sensitivityAllowed(row.layer, sensitivity)
+      return {
+        sensitivity,
+        kind,
+        allowed,
+        title: accessCellText(row.layer, sensitivity, kind),
+        paint:
+          allowed && kind !== 'none'
+            ? paintAccess(row.layer, sensitivity, kind, FULL, ACCESS_BAR_PERCENT, 'lg')
+            : [],
+      }
+    }),
+  })),
+)
+const legendKinds = computed(() => presentKinds(accessRows.value))
 
 // 机密级与跨人格写入只给空间所有者，编辑者签不出来，选项禁用
 const maxItems = computed(() =>
@@ -223,25 +247,18 @@ const credentialShortfall = computed(() => {
                 />
               </td>
               <td
-                v-for="(s, i) in SENSITIVITIES"
-                :key="s"
+                v-for="(cell, i) in row.cells"
+                :key="cell.sensitivity"
                 class="c"
-                :class="[kindOf(row, s), { edge: i === edge, na: !allowed(row, s) }]"
+                :class="[cell.kind, { edge: i === edge, na: !cell.allowed }]"
                 :style="{ '--c': accessFill(row.layer) }"
-                :title="accessCellText(row.layer, s, kindOf(row, s))"
+                :title="cell.title"
               >
-                <span v-if="!allowed(row, s)" class="c-na">不适用</span>
-                <template v-else-if="kindOf(row, s) !== 'none'">
+                <span v-if="!cell.allowed" class="c-na">不适用</span>
+                <template v-else-if="cell.kind !== 'none'">
                   <svg width="100%" height="100%" aria-hidden="true">
                     <rect
-                      v-for="(r, k) in paintAccess(
-                        row.layer,
-                        s,
-                        kindOf(row, s),
-                        FULL,
-                        ACCESS_BAR_PERCENT,
-                        'lg',
-                      )"
+                      v-for="(r, k) in cell.paint"
                       :key="k"
                       :x="r.x"
                       :y="r.y"
@@ -252,9 +269,9 @@ const credentialShortfall = computed(() => {
                     />
                   </svg>
                   <span class="c-label" aria-hidden="true">{{
-                    accessKindShortLabels[kindOf(row, s)]
+                    accessKindShortLabels[cell.kind]
                   }}</span>
-                  <span class="sr-only">{{ accessKindLabels[kindOf(row, s)] }}</span>
+                  <span class="sr-only">{{ accessKindLabels[cell.kind] }}</span>
                 </template>
                 <template v-else>
                   <span class="c-none" aria-hidden="true">{{ accessKindShortLabels.none }}</span>
