@@ -158,7 +158,12 @@ const label = (cell: { key: string; count: number }) => {
   color: var(--strata-on-selected);
 }
 .day.selected .count {
-  color: var(--strata-on-selected-muted);
+  color: var(--strata-on-selected);
+  font-weight: 600;
+}
+/* 选中范围里上个月、下个月的那几格不再调淡：反白底上调淡之后条数看不清 */
+.day.out.selected {
+  opacity: 0.8;
 }
 .day.today.selected {
   border-color: var(--strata-selected-frame);
