@@ -121,7 +121,7 @@ export function parseSpaceExport(plain: Buffer): ParsedSpaceExport {
   if (!header) {
     throw new MemoryError(
       400,
-      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+      `导出文件的格式版本是 ${String(first.version)}，当前 Kioku 只支持 ${SPACE_EXPORT_VERSION}。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，版本 5 没有高级设置，都无法导入；更新的版本请升级 Kioku 后再导入。`,
     )
   }
   const result: ParsedSpaceExport = {

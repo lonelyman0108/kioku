@@ -541,6 +541,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         name: '家',
         extractionMonthlyTokens: 123_456,
         extractionDailyWrites: 7,
+        advanced: {},
       })
       const uris = parsed.memories.map((m) => m.uri).filter(Boolean)
       expect(uris.sort()).toEqual(
@@ -1236,7 +1237,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
   })
 
   it(
-    '导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 5，之前的 1 到 4 与更新的格式都拒收',
+    '导出人关掉的整理本人记忆跟着文件走：导入人在新空间里也关着；文件格式是 6，之前的 1 到 5 与更新的格式都拒收',
     { timeout: 30_000 },
     async () => {
       const alice = await bootstrap(source, 'alice')
@@ -1292,7 +1293,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       expect(await mine(again.spaceId)).toEqual({ includePrivate: true })
 
       // 文件里必须有这一项
-      expect((await contents(file)).header.version).toBe(5)
+      expect((await contents(file)).header.version).toBe(6)
       const missing = await importRequest(
         source,
         alice.cookie,
@@ -1306,7 +1307,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
       // 记忆架构改版之前的格式（层、坐标与本人都不一样）、凭据改版之前的（凭据源）和认不得的更新的格式都拒收，
       // 不悄悄丢掉或猜测内容
       const before = await spaceCount()
-      for (const version of [1, 2, 3, 4, 6]) {
+      for (const version of [1, 2, 3, 4, 5, 7]) {
         const res = await inspectRequest(
           source,
           alice.cookie,
@@ -1314,7 +1315,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         )
         expect(res.status).toBe(400)
         expect(((await res.json()) as { error: string }).error).toBe(
-          `导出文件的格式版本是 ${version}，当前 Kioku 只支持 5。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，都无法导入；更新的版本请升级 Kioku 后再导入。`,
+          `导出文件的格式版本是 ${version}，当前 Kioku 只支持 6。版本 1、2 是记忆架构改版之前的格式，版本 3 带着凭据改版之前的凭据源，版本 4 没有凭据的到期与去处，版本 5 没有高级设置，都无法导入；更新的版本请升级 Kioku 后再导入。`,
         )
       }
       expect(await spaceCount()).toBe(before)
