@@ -59,16 +59,14 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
     : { key: clientKey(address), identified: true }
 }
 
-// IPv4 映射地址（::ffff:a.b.c.d）还原成 IPv4
+// IPv4 映射地址（::ffff:a.b.c.d）还原成 IPv4。还原只在这一处，clientAddress 返回的都还原过
 function unmapped(address: string): string {
   return /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1] ?? address
 }
 
 // 限流按客户端分桶：IPv4 用完整地址；IPv6 一个用户通常拿到整个 /64，按前 64 位分桶，
-// 否则换一下地址后缀就是一个新客户端。IPv4 映射地址（::ffff:a.b.c.d）还原成 IPv4
+// 否则换一下地址后缀就是一个新客户端。传进来的地址已经由 clientAddress 还原了 IPv4 映射地址
 export function clientKey(address: string): string {
-  const mapped = /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)
-  if (mapped) return mapped[1]!
   if (!isIPv6(address)) return address
   const [head = '', tail = ''] = address.split('%')[0]!.split('::')
   const left = head ? head.split(':') : []

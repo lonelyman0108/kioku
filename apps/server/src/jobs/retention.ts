@@ -455,8 +455,10 @@ async function departureBatch(
     .from(memories)
     .where(eq(memories.ownerAccountId, owner))
     .limit(1)
+  // 删掉的记忆算进「已删除的记忆」
+  const memoryCounts = { deletedMemories: removed }
   // 还有没删的记忆：一批删满了接着删；被锁着跳过的（picked 不满一批）等下一次清理
-  if (left) return { picked: removed, counts: {} }
+  if (left) return { picked: removed, counts: memoryCounts }
   // 不带会话上下文的会话与还没抽取的几轮（他的应用的 Key 已经吊销，本来也不会再抽取）
   await tx.delete(conversationTurns).where(eq(conversationTurns.ownerAccountId, owner))
   await tx.delete(conversations).where(eq(conversations.ownerAccountId, owner))
@@ -467,7 +469,7 @@ async function departureBatch(
   await tx.delete(vaultConnections).where(eq(vaultConnections.ownerAccountId, owner))
   // 共享记忆的历史里，他的本人记忆移出来之前的快照：抹掉正文、标题、disclosure 与关键词，和删账号时一样
   const { before, after } = memoryEvents
-  await tx
+  const trimmed = await tx
     .update(memoryEvents)
     .set({ before: scrubbedFor(before, owner), after: scrubbedFor(after, owner) })
     .where(
@@ -476,13 +478,17 @@ async function departureBatch(
         and(sql`${after} ?| ${TEXT_KEYS}`, ownedBy(after, owner)),
       ),
     )
+    .returning({ id: memoryEvents.id })
   // 联系人上「这是哪个成员」的标记：他不在了，标记指不到人，重新加入时也不该凭它认出他
   await tx.update(subjects).set({ accountId: null }).where(eq(subjects.accountId, owner))
   await tx
     .delete(spaceDepartures)
     .where(and(eq(spaceDepartures.spaceId, spaceId), eq(spaceDepartures.accountId, owner)))
   // 一个人做完了，接着看下一个
-  return { picked: RETENTION_BATCH, counts: { departedMembers: 1 } }
+  return {
+    picked: RETENTION_BATCH,
+    counts: { ...memoryCounts, scrubbedSnapshots: trimmed.length, departedMembers: 1 },
+  }
 }
 
 interface Step {

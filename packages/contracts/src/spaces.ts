@@ -6,7 +6,13 @@ import { MemberRole } from './memory'
 // 离开空间（被移除或自己离开）之后，本人记忆、凭据与密码库连接还留这么多天：期间重新加入就恢复，到期由保留期的清理删掉
 export const DEPARTURE_RETENTION_DAYS = 30
 
-export const SpaceName = z.string().trim().min(1, '请填写空间名').max(64, '空间名不超过 64 个字符')
+// zod 的长度按码点算
+export const SPACE_NAME_MAX = 64
+export const SpaceName = z
+  .string()
+  .trim()
+  .min(1, '请填写空间名')
+  .max(SPACE_NAME_MAX, `空间名不超过 ${SPACE_NAME_MAX} 个字符`)
 
 export const SpaceInfo = z.object({
   id: z.uuid(),
@@ -67,8 +73,9 @@ export const SpaceMember = MemberInfo.extend({
 export type SpaceMember = z.infer<typeof SpaceMember>
 
 // 按用户名添加成员：精确匹配，不提供账号的列表与搜索
+// 用户名只有小写（Username），输入先去首尾空白、转小写再精确匹配
 export const AddMemberRequest = z.object({
-  username: z.string().trim().min(1, '请填写用户名').max(64),
+  username: z.string().trim().toLowerCase().min(1, '请填写用户名').max(64),
   role: MemberRole,
 })
 export type AddMemberRequest = z.infer<typeof AddMemberRequest>

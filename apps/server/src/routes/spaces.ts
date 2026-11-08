@@ -5,6 +5,7 @@ import {
   CreatedSpace,
   CreateSpaceRequest,
   DeleteSpaceRequest,
+  DEPARTURE_RETENTION_DAYS,
   ErrorResponse,
   ExtractionBudget,
   ExtractionUsage,
@@ -186,8 +187,7 @@ const addMemberRoute = createRoute({
   method: 'post',
   path: '/spaces/{spaceId}/members',
   tags: ['console'],
-  summary:
-    '按用户名添加成员（只有空间所有者，精确匹配）。离开不满 30 天的成员重新加入后，本人记忆与凭据照旧可见',
+  summary: `按用户名添加成员（只有空间所有者，精确匹配）。离开不满 ${DEPARTURE_RETENTION_DAYS} 天的成员重新加入后，本人记忆与凭据照旧可见；满 ${DEPARTURE_RETENTION_DAYS} 天的要等清除完成才能重新加入`,
   request: { params, body: jsonBody(AddMemberRequest) },
   responses: {
     201: jsonResponse('已添加', SpaceMember),
@@ -211,8 +211,7 @@ const removeMemberRoute = createRoute({
   method: 'delete',
   path: '/spaces/{spaceId}/members/{accountId}',
   tags: ['console'],
-  summary:
-    '移除成员（空间所有者移除别人），或离开空间（成员移除自己）。他的应用的访问密钥立即吊销；本人记忆、凭据与密码库连接保留 30 天，期间重新加入就恢复，到期删除。最后一个所有者要先转让',
+  summary: `移除成员（空间所有者移除别人），或离开空间（成员移除自己）。他的应用的访问密钥立即吊销；本人记忆、凭据与密码库连接保留 ${DEPARTURE_RETENTION_DAYS} 天，期间重新加入就恢复，到期删除。最后一个所有者要先转让`,
   request: { params: memberParams },
   responses: {
     204: { description: '已移除' },
@@ -444,6 +443,13 @@ function memberError(c: Context<AppEnv>, reason: MemberFailure, ownerOnly: strin
       return c.json({ error: '不能转让给自己' }, 400)
     case 'disabled':
       return c.json({ error: '账号已停用' }, 409)
+    case 'departure-expired':
+      return c.json(
+        {
+          error: `离开已满 ${DEPARTURE_RETENTION_DAYS} 天，本人记忆与凭据待清除，清除完成后才能重新加入`,
+        },
+        409,
+      )
   }
 }
 

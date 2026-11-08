@@ -46,12 +46,23 @@ describe('客户端地址', () => {
     })
   })
 
-  it('IPv6 按 /64 分桶，IPv4 映射地址还原成 IPv4', () => {
+  it('IPv6 按 /64 分桶，IPv4 用完整地址', () => {
     expect(clientKey('2001:db8:1:2:aaaa::1')).toBe('2001:db8:1:2::/64')
     expect(clientKey('2001:db8:1:2:bbbb:cccc:dddd:eeee')).toBe('2001:db8:1:2::/64')
     expect(clientKey('2001:db8::1')).toBe('2001:db8:0:0::/64')
-    expect(clientKey('::ffff:192.0.2.5')).toBe('192.0.2.5')
     expect(clientKey('192.0.2.5')).toBe('192.0.2.5')
+  })
+
+  it('IPv4 映射地址在取地址时还原成 IPv4，转发头与连接对端都一样', async () => {
+    expect(await identify(1, '::ffff:192.0.2.5')).toEqual({ key: '192.0.2.5', identified: true })
+    expect(await identify(1, '[::FFFF:192.0.2.5]:443')).toEqual({
+      key: '192.0.2.5',
+      identified: true,
+    })
+    expect(await identify(0, undefined, '::ffff:192.0.2.5')).toEqual({
+      key: '192.0.2.5',
+      identified: true,
+    })
   })
 
   it('受信代理写的 ip:port 去掉端口；不是合法地址时归入未知客户端，不记到代理的地址上', async () => {

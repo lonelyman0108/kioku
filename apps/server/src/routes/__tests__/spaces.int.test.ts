@@ -1,12 +1,13 @@
 import { randomBytes, randomUUID } from 'node:crypto'
 
-import type {
-  CreatedSpace,
-  InstanceSpace,
-  MemoryView,
-  SpaceCreationView,
-  SpaceDetail,
-  SpaceMember,
+import {
+  DEPARTURE_RETENTION_DAYS,
+  type CreatedSpace,
+  type InstanceSpace,
+  type MemoryView,
+  type SpaceCreationView,
+  type SpaceDetail,
+  type SpaceMember,
 } from '@kioku/contracts'
 import { and, eq, inArray, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
@@ -25,6 +26,7 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import { dreamSpace } from '../../extraction/dream'
 import { processSession } from '../../extraction/worker'
+import { purgeExpired } from '../../jobs/retention'
 import {
   openTestDatabase,
   resetDatabase,
@@ -463,11 +465,10 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       const missing = await add(ws.cookie, 'nobody')
       expect(missing.status).toBe(404)
       expect(await errorOf(missing)).toBe('账号不存在')
-      // 精确匹配：大小写、前缀都不算
-      expect((await add(ws.cookie, 'DAVE')).status).toBe(404)
+      // 前缀不算；大小写不论，先转小写再精确匹配
       expect((await add(ws.cookie, 'dav')).status).toBe(404)
       expect((await add(ws.cookie, 'dave', 'admin')).status).toBe(400)
-      const added = await ok<SpaceMember>(await add(ws.cookie, ' dave ', 'viewer'), 201)
+      const added = await ok<SpaceMember>(await add(ws.cookie, ' DaVe ', 'viewer'), 201)
       expect(added).toMatchObject({ accountId: dave.accountId, role: 'viewer', appCount: 0 })
       const again = await add(ws.cookie, 'dave')
       expect(again.status).toBe(409)
@@ -592,6 +593,28 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       expect(departed.map((d) => d.accountId).sort()).toEqual(
         [viewer.accountId, editor.accountId, bob2.accountId].sort(),
       )
+    })
+
+    it('停用的所有者不算：只剩停用的所有者时，最后一个没停用的不能降级、离开', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+      await database.db
+        .update(accounts)
+        .set({ disabledAt: new Date() })
+        .where(eq(accounts.id, bob.accountId))
+      const demote = await send('PATCH', inSpace(`/members/${ws.accountId}`), ws.cookie, {
+        role: 'editor',
+      })
+      expect(demote.status).toBe(409)
+      expect(await errorOf(demote)).toBe('空间至少要有一个所有者，请先转让所有者')
+      const leave = await send('DELETE', inSpace(`/members/${ws.accountId}`), ws.cookie)
+      expect(leave.status).toBe(409)
+      expect(await errorOf(leave)).toBe('空间至少要有一个所有者，请先转让所有者')
+      // 停用的所有者照样能降级、移除：还剩 alice
+      await ok(
+        await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, { role: 'editor' }),
+      )
+      await ok(await send('DELETE', inSpace(`/members/${bob.accountId}`), ws.cookie), 204)
+      expect(await roles()).toEqual({ alice: 'owner' })
     })
 
     it('转让所有者：对方成为所有者、自己改为编辑者；对方必须是别的成员，失败时什么都不变', async () => {
@@ -726,6 +749,73 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
         201,
       )
       expect((await app.request('/v1/whoami', { headers: bearer(fresh.key) })).status).toBe(200)
+    })
+
+    it('离开不满 30 天能加回并恢复；满 30 天的清除完成之前不能加回，之后作为新成员加入', async () => {
+      const DAY = 86_400_000
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      const note = await ok<MemoryView>(
+        await send('POST', inSpace('/memories'), bob.cookie, {
+          uri: 'user://notes/bob',
+          content: 'bob 的笔记',
+        }),
+        201,
+      )
+      await ok(await send('PUT', inSpace('/me/dream'), bob.cookie, { includePrivate: false }))
+      const readNote = () =>
+        send('GET', inSpace(`/memories?uri=${encodeURIComponent('user://notes/bob')}`), bob.cookie)
+      const add = () =>
+        send('POST', inSpace('/members'), ws.cookie, { username: 'bob', role: 'editor' })
+      const leaveDaysAgo = async (days: number) => {
+        await ok(await send('DELETE', inSpace(`/members/${bob.accountId}`), bob.cookie), 204)
+        await database.db
+          .update(spaceDepartures)
+          .set({ leftAt: new Date(Date.now() - days * DAY) })
+          .where(eq(spaceDepartures.accountId, bob.accountId))
+      }
+      const dreamPrivate = async () => {
+        const [member] = await database.db
+          .select({ dreamPrivate: spaceMembers.dreamPrivate })
+          .from(spaceMembers)
+          .where(
+            and(eq(spaceMembers.spaceId, ws.spaceId), eq(spaceMembers.accountId, bob.accountId)),
+          )
+        return member?.dreamPrivate
+      }
+
+      // 不满 30 天：加回来，本人记忆与设置照旧
+      await leaveDaysAgo(29)
+      await ok(await add(), 201)
+      expect((await readNote()).status).toBe(200)
+      expect(await dreamPrivate()).toBe(false)
+
+      // 满 30 天、还没清除：不能加回，离开记录和数据都不动
+      await leaveDaysAgo(31)
+      const refused = await add()
+      expect(refused.status).toBe(409)
+      expect(await errorOf(refused)).toBe(
+        `离开已满 ${DEPARTURE_RETENTION_DAYS} 天，本人记忆与凭据待清除，清除完成后才能重新加入`,
+      )
+      expect(
+        await database.db
+          .select({ id: spaceDepartures.accountId })
+          .from(spaceDepartures)
+          .where(eq(spaceDepartures.accountId, bob.accountId)),
+      ).toHaveLength(1)
+      expect(await dreamPrivate()).toBeUndefined()
+
+      // 清除完成之后作为新成员加入：本人记忆没有了，设置是默认的
+      const { counts } = await purgeExpired(database.db, { days: 30, now: new Date() })
+      expect(counts.departedMembers).toBe(1)
+      await ok(await add(), 201)
+      expect((await readNote()).status).toBe(404)
+      const gone = await withSpace(database.db, ws.spaceId, (tx) =>
+        tx.execute<{ n: number }>(
+          sql`select count(*)::int as n from memories where id = ${note.id}`,
+        ),
+      )
+      expect(gone[0]!.n).toBe(0)
+      expect(await dreamPrivate()).toBe(true)
     })
 
     it('再次离开时离开时间换成这一次的', async () => {
