@@ -8,7 +8,7 @@ import type {
   SpaceDetail,
   SpaceMember,
 } from '@kioku/contracts'
-import { and, eq, sql } from 'drizzle-orm'
+import { and, eq, inArray, sql } from 'drizzle-orm'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -474,6 +474,44 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       expect(await errorOf(again)).toBe('已是此空间的成员')
       expect((await add(ws.cookie, 'bob')).status).toBe(409)
       expect((await send('GET', inSpace('/members'), dave.cookie)).status).toBe(200)
+    })
+
+    it('停用的账号不能加为成员、做新空间的所有者，也不能转让给他或把他升为所有者', async () => {
+      const dave = await loner('dave')
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+      await database.db
+        .update(accounts)
+        .set({ disabledAt: new Date() })
+        .where(inArray(accounts.id, [dave.accountId, bob.accountId]))
+      const added = await send('POST', inSpace('/members'), ws.cookie, {
+        username: 'dave',
+        role: 'editor',
+      })
+      expect(added.status).toBe(409)
+      expect(await errorOf(added)).toBe('账号已停用')
+      const created = await send('POST', '/spaces', ws.cookie, {
+        name: '给停用的账号',
+        ownerAccountId: dave.accountId,
+      })
+      expect(created.status).toBe(409)
+      expect(await errorOf(created)).toBe('账号已停用')
+      const promoted = await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, {
+        role: 'owner',
+      })
+      expect(promoted.status).toBe(409)
+      const transferred = await send('POST', inSpace('/transfer-ownership'), ws.cookie, {
+        accountId: bob.accountId,
+      })
+      expect(transferred.status).toBe(409)
+      expect(await roles()).toMatchObject({ alice: 'owner', bob: 'editor' })
+      // 降级、移除不受影响：管理员停用一个成员之后，空间所有者照样能收回他的角色
+      const demoted = await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, {
+        role: 'viewer',
+      })
+      expect(demoted.status).toBe(200)
+      expect((await send('DELETE', inSpace(`/members/${bob.accountId}`), ws.cookie)).status).toBe(
+        204,
+      )
     })
 
     it('改角色只有空间所有者，任何时候至少一个所有者', async () => {

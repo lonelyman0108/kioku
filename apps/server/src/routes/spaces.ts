@@ -106,6 +106,7 @@ const createSpaceRoute = createRoute({
     400: badRequest,
     403: forbidden,
     404: jsonResponse('账号不存在', ErrorResponse),
+    409: jsonResponse('账号已停用', ErrorResponse),
   },
 })
 
@@ -441,6 +442,8 @@ function memberError(c: Context<AppEnv>, reason: MemberFailure, ownerOnly: strin
       return c.json({ error: '空间至少要有一个所有者，请先转让所有者' }, 409)
     case 'self':
       return c.json({ error: '不能转让给自己' }, 400)
+    case 'disabled':
+      return c.json({ error: '账号已停用' }, 409)
   }
 }
 
@@ -596,8 +599,12 @@ export function spaceRoutes(deps: Deps) {
         }
       }
       const space = await createSpace(deps.db, { name: body.name, ownerAccountId: owner })
-      if (!space) return c.json({ error: '账号不存在' }, 404)
-      return c.json({ ...space, ownerAccountId: owner }, 201)
+      if (!space.ok) {
+        return space.reason === 'disabled'
+          ? c.json({ error: '账号已停用' }, 409)
+          : c.json({ error: '账号不存在' }, 404)
+      }
+      return c.json({ ...space.value, ownerAccountId: owner }, 201)
     })
     .openapi(spaceView, async (c) => {
       const { spaceId } = c.req.valid('param')

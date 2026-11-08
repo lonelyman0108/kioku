@@ -35,6 +35,8 @@ export type MemberFailure =
   | 'no-target'
   | 'last-owner'
   | 'self'
+  // 账号已停用：不能加为成员、转让给他或升为所有者
+  | 'disabled'
 
 export type MemberResult<T> = { ok: true; value: T } | { ok: false; reason: MemberFailure }
 const fail = (reason: MemberFailure): { ok: false; reason: MemberFailure } => ({
@@ -75,23 +77,34 @@ export async function accountExists(db: Db | Tx, accountId: string): Promise<boo
   return Boolean(row)
 }
 
-// 新建空间，owner 成为唯一的所有者。账号不存在时返回 null
+// 新建空间，owner 成为唯一的所有者。账号不存在、已停用时不建
 export async function createSpace(
   db: Db,
   input: { name: string; ownerAccountId: string },
-): Promise<SpaceInfo | null> {
+): Promise<MemberResult<SpaceInfo>> {
   return db.transaction(async (tx) => {
-    // 锁住账号那一行再建，建的同时账号不会被删掉
+    // 锁住账号那一行再建，建的同时账号不会被删掉、停用
     const [owner] = await tx
-      .select({ id: accounts.id })
+      .select({ id: accounts.id, disabledAt: accounts.disabledAt })
       .from(accounts)
       .where(eq(accounts.id, input.ownerAccountId))
       .for('share')
-    if (!owner) return null
+    if (!owner) return fail('no-account')
+    if (owner.disabledAt) return fail('disabled')
     const [space] = await tx.insert(spaces).values({ name: input.name }).returning()
     await tx.insert(spaceMembers).values({ spaceId: space!.id, accountId: owner.id, role: 'owner' })
-    return toInfo(space!)
+    return { ok: true, value: toInfo(space!) }
   })
+}
+
+// 账号停用了没有：锁住账号那一行再看，判断之后到事务结束不会被停用
+async function disabled(tx: Tx, accountId: string): Promise<boolean> {
+  const [row] = await tx
+    .select({ disabledAt: accounts.disabledAt })
+    .from(accounts)
+    .where(eq(accounts.id, accountId))
+    .for('share')
+  return Boolean(row?.disabledAt)
 }
 
 // 锁住空间那一行，返回它；空间不存在时为 undefined
@@ -275,12 +288,13 @@ export async function addMember(
     const denied = await asOwner(tx, input.spaceId, input.actor)
     if (denied) return fail(denied)
     const [account] = await tx
-      .select({ id: accounts.id })
+      .select({ id: accounts.id, disabledAt: accounts.disabledAt })
       .from(accounts)
       .where(eq(accounts.username, input.username))
       .for('share')
     if (!account) return fail('no-account')
     if (await roleIn(tx, input.spaceId, account.id)) return fail('already-member')
+    if (account.disabledAt) return fail('disabled')
     const [departed] = await tx
       .delete(spaceDepartures)
       .where(
@@ -307,6 +321,9 @@ export async function updateMemberRole(
     if (denied) return fail(denied)
     const current = await roleIn(tx, input.spaceId, input.target)
     if (!current) return fail('no-target')
+    if (input.role === 'owner' && current !== 'owner' && (await disabled(tx, input.target))) {
+      return fail('disabled')
+    }
     if (
       current === 'owner' &&
       input.role !== 'owner' &&
@@ -381,6 +398,7 @@ export async function transferOwnership(
     if (denied) return fail(denied)
     if (input.target === input.actor) return fail('self')
     if (!(await roleIn(tx, input.spaceId, input.target))) return fail('no-target')
+    if (await disabled(tx, input.target)) return fail('disabled')
     const set = (accountId: string, role: MemberRole) =>
       tx
         .update(spaceMembers)
