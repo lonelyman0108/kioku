@@ -76,7 +76,7 @@ describe('顶部导航', () => {
 
   it('账号菜单：账号设置人人都有，实例设置只给管理员', () => {
     expect(script).toContain("label: '账号设置'")
-    expect(script).toContain('to: accountSettingsRoute()')
+    expect(script).toContain("to: accountSettingsRoute('account')")
     expect(script).toMatch(/me\.data\.value\?\.isAdmin\s*\? \[\s*\{\s*label: '实例设置'/)
     expect(script).toContain('to: instanceSettingsRoute()')
     expect(script).toContain('accountNav.value.map(')

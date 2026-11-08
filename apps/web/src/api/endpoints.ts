@@ -117,6 +117,17 @@ import {
   type UpdatePersonaRequest,
   type UpdateSubjectRequest,
 } from '@kioku/contracts'
+import {
+  AccountLink,
+  AdminAccount,
+  AdminAccountList,
+  CreatedAccount,
+  LoginSessionList,
+  PasswordLinkInfo,
+  type ChangePasswordRequest,
+  type CreateAccountRequest,
+  type UpdateAccountRequest,
+} from '@kioku/contracts'
 import { z } from 'zod'
 
 import { download, request } from './client'
@@ -495,4 +506,23 @@ export const api = {
   backupRun: (runId: string) =>
     request('GET', `/settings/backup/runs/${runId}`, { schema: BackupRunStatus }),
   backupObjects: () => request('GET', '/settings/backup/objects', { schema: BackupObjectList }),
+
+  // 账号：个人的资料、密码与登录设备；设置密码链接（不用登录）；实例管理员管理账号
+  updateProfile: (displayName: string) =>
+    request('PATCH', '/auth/profile', { body: { displayName }, schema: Me }),
+  changePassword: (body: ChangePasswordRequest) => request('POST', '/auth/password', { body }),
+  loginSessions: () => request('GET', '/auth/sessions', { schema: LoginSessionList }),
+  signOutSession: (sessionId: string) => request('DELETE', `/auth/sessions/${sessionId}`),
+  signOutOtherSessions: () => request('POST', '/auth/sessions/sign-out-others'),
+  inspectPasswordLink: (token: string) =>
+    request('POST', '/auth/password-link/inspect', { body: { token }, schema: PasswordLinkInfo }),
+  usePasswordLink: (token: string, password: string) =>
+    request('POST', '/auth/password-link', { body: { token, password }, schema: Me }),
+  accounts: () => request('GET', '/instance/accounts', { schema: AdminAccountList }),
+  createAccount: (body: CreateAccountRequest) =>
+    request('POST', '/instance/accounts', { body, schema: CreatedAccount }),
+  regenerateAccountLink: (accountId: string) =>
+    request('POST', `/instance/accounts/${accountId}/link`, { schema: AccountLink }),
+  updateAccount: (accountId: string, body: UpdateAccountRequest) =>
+    request('PATCH', `/instance/accounts/${accountId}`, { body, schema: AdminAccount }),
 }
