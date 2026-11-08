@@ -325,7 +325,12 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       const otherKey = await ok<{ key: string }>(
         await send('POST', `/spaces/${other.id}/apps/${otherApp.id}/keys`, ws.cookie, {
           name: 'k',
-          scopes: { readLayers: ['core'], writeLayers: ['core'], maxSensitivity: 'internal', admin: false },
+          scopes: {
+            readLayers: ['core'],
+            writeLayers: ['core'],
+            maxSensitivity: 'internal',
+            admin: false,
+          },
         }),
         201,
       )
@@ -607,7 +612,12 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       const issued = await ok<{ id: string; key: string }>(
         await send('POST', inSpace(`/apps/${bobApp.id}/keys`), bob.cookie, {
           name: 'k',
-          scopes: { readLayers: ['user'], writeLayers: ['user'], maxSensitivity: 'private', admin: false },
+          scopes: {
+            readLayers: ['user'],
+            writeLayers: ['user'],
+            maxSensitivity: 'private',
+            admin: false,
+          },
         }),
         201,
       )
@@ -668,7 +678,12 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       const fresh = await ok<{ key: string }>(
         await send('POST', inSpace(`/apps/${bobApp.id}/keys`), bob.cookie, {
           name: 'k2',
-          scopes: { readLayers: ['user'], writeLayers: ['user'], maxSensitivity: 'private', admin: false },
+          scopes: {
+            readLayers: ['user'],
+            writeLayers: ['user'],
+            maxSensitivity: 'private',
+            admin: false,
+          },
         }),
         201,
       )
