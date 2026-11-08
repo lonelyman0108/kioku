@@ -53,12 +53,17 @@ export function requireKey(deps: Deps) {
 }
 
 // 一把 Key 现在的身份：所属应用与有效上限。Key 的权限按应用主人计算：主人已经不在空间里
-// （或离开后又被重新加入、Key 签发在那之前），Key 作废，返回 null；主人被降级，Key 的上限随之收紧
+// （或离开后又被重新加入、Key 签发在那之前）、主人的账号被停用，Key 作废，返回 null；主人被降级，Key 的上限随之收紧
 async function principalOf(db: Db, key: typeof apiKeys.$inferSelect): Promise<KeyPrincipal | null> {
   // 应用与主人当前的角色一次查出来
   const [found] = await withSpace(db, key.spaceId, (tx) =>
     tx
-      .select({ app: apps, ownerRole: spaceMembers.role, memberSince: spaceMembers.createdAt })
+      .select({
+        app: apps,
+        ownerRole: spaceMembers.role,
+        memberSince: spaceMembers.createdAt,
+        disabledAt: accounts.disabledAt,
+      })
       .from(apps)
       .leftJoin(
         spaceMembers,
@@ -67,13 +72,14 @@ async function principalOf(db: Db, key: typeof apiKeys.$inferSelect): Promise<Ke
           eq(spaceMembers.accountId, apps.ownerAccountId),
         ),
       )
+      .leftJoin(accounts, eq(accounts.id, apps.ownerAccountId))
       .where(eq(apps.id, key.appId))
       .limit(1),
   )
   const scopes = found
     ? keyEffectiveScopes(
         { ...key, scopes: KeyScopes.parse(key.scopes) },
-        { role: found.ownerRole, memberSince: found.memberSince },
+        { role: found.ownerRole, memberSince: found.memberSince, disabledAt: found.disabledAt },
       )
     : null
   return found && scopes ? keyPrincipal(key, found.app, scopes) : null
@@ -115,10 +121,10 @@ export function keyPrincipal(
 // 是不是实例管理员：实例设置、备份与模型接口的原始报错只给他们
 export async function isInstanceAdmin(db: Db, accountId: string): Promise<boolean> {
   const [account] = await db
-    .select({ isAdmin: accounts.isAdmin })
+    .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
     .from(accounts)
     .where(eq(accounts.id, accountId))
-  return Boolean(account?.isAdmin)
+  return Boolean(account?.isAdmin && !account.disabledAt)
 }
 
 // 只给实例管理员的接口，放在 requireConsole 之后

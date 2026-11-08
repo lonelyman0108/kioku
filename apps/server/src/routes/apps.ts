@@ -21,6 +21,7 @@ import { generateApiKey } from '../auth/keys'
 import { memberRole } from '../auth/middleware'
 import { withSpace } from '../db/client'
 import {
+  accounts,
   apiKeys,
   appGroupPersonas,
   apps,
@@ -51,8 +52,8 @@ const toAppInfo = (row: typeof apps.$inferSelect) => ({
   config: AppConfig.parse(row.config),
 })
 
-// 应用主人现在在空间里的角色与加入时间；不在空间里时为 undefined。Key 的当前有效上限按它算
-type OwnerMembership = { role: MemberRole; memberSince: Date } | undefined
+// 应用主人现在在空间里的角色、加入时间与账号的停用时间；不在空间里时为 undefined。Key 的当前有效上限按它算
+type OwnerMembership = { role: MemberRole; memberSince: Date; disabledAt: Date | null } | undefined
 
 const toKeyInfo = (row: typeof apiKeys.$inferSelect, owner: OwnerMembership) => {
   const scopes = KeyScopes.parse(row.scopes)
@@ -74,8 +75,13 @@ async function ownerMembership(
   accountId: string,
 ): Promise<OwnerMembership> {
   const [row] = await deps.db
-    .select({ role: spaceMembers.role, memberSince: spaceMembers.createdAt })
+    .select({
+      role: spaceMembers.role,
+      memberSince: spaceMembers.createdAt,
+      disabledAt: accounts.disabledAt,
+    })
     .from(spaceMembers)
+    .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
     .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.accountId, accountId)))
     .limit(1)
   return row

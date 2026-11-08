@@ -1,4 +1,5 @@
 import {
+  ACCOUNT_LINK_PURPOSES,
   CONVERSATION_KINDS,
   CURATED_LAYERS,
   DEFAULT_EXTRACTION_DAILY_WRITES,
@@ -41,7 +42,7 @@ import {
   type AnyPgColumn,
 } from 'drizzle-orm/pg-core'
 
-// 表分两类：身份表（accounts、sessions、login_attempts、spaces、space_members、api_keys）与实例设置（settings）在鉴权阶段就要跨空间查询，不开行级安全；
+// 表分两类：身份表（accounts、sessions、account_links、login_attempts、spaces、space_members、api_keys）与实例设置（settings）在鉴权阶段就要跨空间查询，不开行级安全；
 // 其余内容表都带 space_id，由迁移里的 RLS 策略按会话变量 app.space_id 强制隔离。
 // 外键检查不受 RLS 约束，所以指向内容表的外键都带上 space_id（复合外键），保证不会关联到别的空间。
 
@@ -72,9 +73,12 @@ export const accounts = pgTable('accounts', {
   id: uuid().primaryKey().defaultRandom(),
   username: text().notNull().unique(),
   displayName: text().notNull(),
-  passwordHash: text().notNull(),
+  // 管理员新建的账号在用一次性链接设置密码之前为空，这时登录不了
+  passwordHash: text(),
   // 实例管理员：能改嵌入模型等全实例设置；首次初始化创建的账号是管理员
   isAdmin: boolean().notNull().default(false),
+  // 停用：登录被拒（和密码错误一样的回应）、会话失效，应用的访问密钥作废
+  disabledAt: timestamp({ withTimezone: true }),
   createdAt: createdAt(),
 })
 
@@ -114,6 +118,26 @@ export const spaceMembers = pgTable(
   (t) => [primaryKey({ columns: [t.spaceId, t.accountId] })],
 )
 
+// 离开空间的成员（被移除或自己离开）：他在这个空间的本人记忆、凭据与密码库连接留着、谁也看不到，
+// 期间重新加入就删掉这一行、照旧可见；满 DEPARTURE_RETENTION_DAYS 天由保留期的清理删掉这些数据和这一行（jobs/retention.ts）
+export const spaceDepartures = pgTable(
+  'space_departures',
+  {
+    spaceId: uuid()
+      .notNull()
+      .references(() => spaces.id, { onDelete: 'cascade' }),
+    accountId: uuid()
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    leftAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
+    // 离开时的成员设置，重新加入时照旧：关掉了 Dream 整理本人记忆的，回来之后还是关着
+    dreamPrivate: boolean().notNull(),
+    // 保留期的清理开始删他的数据的时间：第一批在同一个事务里写上。开始之后到清理完成、这一行删掉之前不能重新加入
+    purgeStartedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [primaryKey({ columns: [t.spaceId, t.accountId] }), index().on(t.leftAt)],
+)
+
 // 管理界面的登录会话；Cookie 里是随机令牌，库里只存它的 SHA-256
 export const sessions = pgTable(
   'sessions',
@@ -123,10 +147,36 @@ export const sessions = pgTable(
       .notNull()
       .references(() => accounts.id, { onDelete: 'cascade' }),
     tokenHash: text().notNull().unique(),
+    // 登录时的客户端地址（按 KIOKU_TRUSTED_PROXIES 取）与 User-Agent（截断），只用于登录设备列表
+    clientAddress: text(),
+    userAgent: text(),
     createdAt: createdAt(),
+    // 最近活动：比上次晚 5 分钟以上才更新（见 auth/session.ts）
+    lastActiveAt: timestamp({ withTimezone: true }).notNull().defaultNow(),
     expiresAt: timestamp({ withTimezone: true }).notNull(),
   },
   (t) => [index().on(t.accountId)],
+)
+
+export const accountLinkPurpose = pgEnum('account_link_purpose', ACCOUNT_LINK_PURPOSES)
+
+// 一次性链接：设置或重置密码。令牌只在生成时返回一次，库里只存它的 SHA-256；
+// 只能用一次，同一账号再生成时作废之前没用过的。过期与用过的由定时任务清理（jobs/cleanup.ts）
+export const accountLinks = pgTable(
+  'account_links',
+  {
+    id: uuid().primaryKey().defaultRandom(),
+    accountId: uuid()
+      .notNull()
+      .references(() => accounts.id, { onDelete: 'cascade' }),
+    purpose: accountLinkPurpose().notNull(),
+    tokenHash: text().notNull().unique(),
+    createdBy: uuid().references(() => accounts.id, { onDelete: 'set null' }),
+    createdAt: createdAt(),
+    expiresAt: timestamp({ withTimezone: true }).notNull(),
+    usedAt: timestamp({ withTimezone: true }),
+  },
+  (t) => [index().on(t.accountId), index().on(t.expiresAt)],
 )
 
 // 登录失败计数，一个计数键一行（「用户名」或「用户名 + 客户端」，见 auth/rateLimit.ts）；放在数据库里而不是进程内存：

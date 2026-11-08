@@ -1,9 +1,129 @@
 {
-  "id": "48228b0a-018a-40c9-9b9d-211aa171ee2c",
+  "id": "6e29c681-91ff-4b6c-a8cf-7b85f9e73149",
   "prevId": "f91c52e3-c508-48d7-938b-5ef155c61dd3",
   "version": "7",
   "dialect": "postgresql",
   "tables": {
+    "public.account_links": {
+      "name": "account_links",
+      "schema": "",
+      "columns": {
+        "id": {
+          "name": "id",
+          "type": "uuid",
+          "primaryKey": true,
+          "notNull": true,
+          "default": "gen_random_uuid()"
+        },
+        "account_id": {
+          "name": "account_id",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "purpose": {
+          "name": "purpose",
+          "type": "account_link_purpose",
+          "typeSchema": "public",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "token_hash": {
+          "name": "token_hash",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "created_by": {
+          "name": "created_by",
+          "type": "uuid",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "created_at": {
+          "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "expires_at": {
+          "name": "expires_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true
+        },
+        "used_at": {
+          "name": "used_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
+        }
+      },
+      "indexes": {
+        "account_links_account_id_index": {
+          "name": "account_links_account_id_index",
+          "columns": [
+            {
+              "expression": "account_id",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        },
+        "account_links_expires_at_index": {
+          "name": "account_links_expires_at_index",
+          "columns": [
+            {
+              "expression": "expires_at",
+              "isExpression": false,
+              "asc": true,
+              "nulls": "last"
+            }
+          ],
+          "isUnique": false,
+          "concurrently": false,
+          "method": "btree",
+          "with": {}
+        }
+      },
+      "foreignKeys": {
+        "account_links_account_id_accounts_id_fk": {
+          "name": "account_links_account_id_accounts_id_fk",
+          "tableFrom": "account_links",
+          "tableTo": "accounts",
+          "columnsFrom": ["account_id"],
+          "columnsTo": ["id"],
+          "onDelete": "cascade",
+          "onUpdate": "no action"
+        },
+        "account_links_created_by_accounts_id_fk": {
+          "name": "account_links_created_by_accounts_id_fk",
+          "tableFrom": "account_links",
+          "tableTo": "accounts",
+          "columnsFrom": ["created_by"],
+          "columnsTo": ["id"],
+          "onDelete": "set null",
+          "onUpdate": "no action"
+        }
+      },
+      "compositePrimaryKeys": {},
+      "uniqueConstraints": {
+        "account_links_tokenHash_unique": {
+          "name": "account_links_tokenHash_unique",
+          "nullsNotDistinct": false,
+          "columns": ["token_hash"]
+        }
+      },
+      "policies": {},
+      "checkConstraints": {},
+      "isRLSEnabled": false
+    },
     "public.accounts": {
       "name": "accounts",
       "schema": "",
@@ -31,7 +151,7 @@
           "name": "password_hash",
           "type": "text",
           "primaryKey": false,
-          "notNull": true
+          "notNull": false
         },
         "is_admin": {
           "name": "is_admin",
@@ -39,6 +159,12 @@
           "primaryKey": false,
           "notNull": true,
           "default": false
+        },
+        "disabled_at": {
+          "name": "disabled_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": false
         },
         "created_at": {
           "name": "created_at",
@@ -3191,8 +3317,27 @@
           "primaryKey": false,
           "notNull": true
         },
+        "client_address": {
+          "name": "client_address",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
+        "user_agent": {
+          "name": "user_agent",
+          "type": "text",
+          "primaryKey": false,
+          "notNull": false
+        },
         "created_at": {
           "name": "created_at",
+          "type": "timestamp with time zone",
+          "primaryKey": false,
+          "notNull": true,
+          "default": "now()"
+        },
+        "last_active_at": {
+          "name": "last_active_at",
           "type": "timestamp with time zone",
           "primaryKey": false,
           "notNull": true,
@@ -3377,13 +3522,6 @@
           "primaryKey": false,
           "notNull": true,
           "default": 20
-        },
-        "advanced": {
-          "name": "advanced",
-          "type": "jsonb",
-          "primaryKey": false,
-          "notNull": true,
-          "default": "'{}'::jsonb"
         },
         "created_at": {
           "name": "created_at",
@@ -4433,6 +4571,11 @@
     }
   },
   "enums": {
+    "public.account_link_purpose": {
+      "name": "account_link_purpose",
+      "schema": "public",
+      "values": ["setup", "reset"]
+    },
     "public.conversation_kind": {
       "name": "conversation_kind",
       "schema": "public",

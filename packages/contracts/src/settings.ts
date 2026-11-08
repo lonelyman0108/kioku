@@ -173,6 +173,8 @@ export const RetentionCounts = z.object({
   accessEvents: z.number().int().default(0),
   // 断开超过保留期、也没有凭据（含已删除的）指着的密码库连接
   vaultConnections: z.number().int().default(0),
+  // 离开空间满 30 天的成员：这个空间里他的本人记忆、凭据与密码库连接一起删掉，一个成员算一个
+  departedMembers: z.number().int().default(0),
 })
 export type RetentionCounts = z.infer<typeof RetentionCounts>
 

@@ -195,6 +195,12 @@ export async function dreamSpace(
   options: DreamOptions,
 ): Promise<DreamOutcome> {
   const progress: Progress = { summarized: false, scope: null }
+  // 排着的任务等到执行时空间已经删掉了：什么都不做，也不记运行记录（外键也不让记）
+  const [space] = await db
+    .select({ id: spaces.id })
+    .from(spaces)
+    .where(eq(spaces.id, options.spaceId))
+  if (!space) return { outcome: 'skipped', reason: null }
   try {
     return await dreamOnce(db, masterKey, options, progress)
   } catch (err) {

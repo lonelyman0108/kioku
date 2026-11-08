@@ -26,8 +26,22 @@
     {
       "idx": 3,
       "version": "7",
-      "when": 1794115703916,
-      "tag": "0003_advanced_settings",
+      "when": 1794115412674,
+      "tag": "0003_accounts",
+      "breakpoints": true
+    },
+    {
+      "idx": 4,
+      "version": "7",
+      "when": 1794123367727,
+      "tag": "0004_space_departures",
+      "breakpoints": true
+    },
+    {
+      "idx": 5,
+      "version": "7",
+      "when": 1794125249523,
+      "tag": "0005_advanced_settings",
       "breakpoints": true
     }
   ]
