@@ -34,7 +34,8 @@ async function secret(db: Db): Promise<Buffer> {
 
 export interface DeviceAccount {
   id: string
-  passwordHash: string
+  // 还没设过密码的账号没有设备 Cookie
+  passwordHash: string | null
 }
 
 // 签名里带上当前密码哈希的指纹：改了密码，之前发出的设备 Cookie 全部失效，
@@ -46,7 +47,7 @@ function sign(key: Buffer, payload: string, passwordHash: string): string {
 
 export async function issueDeviceToken(
   db: Db,
-  account: DeviceAccount,
+  account: DeviceAccount & { passwordHash: string },
   now = Date.now(),
 ): Promise<string> {
   const payload = `${account.id}.${Math.floor(now / 1000)}`
@@ -61,7 +62,7 @@ export async function isTrustedDevice(
   now = Date.now(),
 ): Promise<boolean> {
   const parts = token?.split('.')
-  if (!account || !parts || parts.length !== 3) return false
+  if (!account?.passwordHash || !parts || parts.length !== 3) return false
   const [accountId, issued, signature] = parts as [string, string, string]
   const issuedAt = Number(issued)
   if (accountId !== account.id) return false

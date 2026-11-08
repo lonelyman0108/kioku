@@ -22,6 +22,13 @@
       "when": 1794069192079,
       "tag": "0002_credential_rotation",
       "breakpoints": true
+    },
+    {
+      "idx": 3,
+      "version": "7",
+      "when": 1794115412674,
+      "tag": "0003_accounts",
+      "breakpoints": true
     }
   ]
 }

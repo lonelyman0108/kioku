@@ -173,13 +173,14 @@ export function clampScopesToRole(scopes: KeyScopes, role: MemberRole): KeyScope
   }
 }
 
-// Key 现在的有效上限：签发上限按应用主人当前的角色收紧。Key 已吊销、主人已经不在空间里，
-// 或主人离开后又被重新加入、而 Key 签发在重新加入之前，Key 都作废，返回 null。鉴权与 Key 列表都按这里算
+// Key 现在的有效上限：签发上限按应用主人当前的角色收紧。Key 已吊销、主人已经不在空间里、主人的账号被停用，
+// 或主人离开后又被重新加入、而 Key 签发在重新加入之前，Key 都作废，返回 null。鉴权与 Key 列表都按这里算。
+// 停用之后再启用，Key 恢复：停用不吊销，只是期间用不了
 export function keyEffectiveScopes(
   key: { scopes: KeyScopes; createdAt: Date; revokedAt: Date | null },
-  owner: { role: MemberRole | null; memberSince: Date | null } | undefined,
+  owner: { role: MemberRole | null; memberSince: Date | null; disabledAt: Date | null } | undefined,
 ): KeyScopes | null {
-  if (key.revokedAt || !owner?.role) return null
+  if (key.revokedAt || !owner?.role || owner.disabledAt) return null
   if (owner.memberSince && key.createdAt < owner.memberSince) return null
   return clampScopesToRole(key.scopes, owner.role)
 }
