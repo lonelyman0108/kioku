@@ -463,10 +463,10 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       const missing = await add(ws.cookie, 'nobody')
       expect(missing.status).toBe(404)
       expect(await errorOf(missing)).toBe('账号不存在')
-      // 前缀不算
+      // 前缀不算；大小写不论，先转小写再精确匹配
       expect((await add(ws.cookie, 'dav')).status).toBe(404)
       expect((await add(ws.cookie, 'dave', 'admin')).status).toBe(400)
-      const added = await ok<SpaceMember>(await add(ws.cookie, ' dave ', 'viewer'), 201)
+      const added = await ok<SpaceMember>(await add(ws.cookie, ' DaVe ', 'viewer'), 201)
       expect(added).toMatchObject({ accountId: dave.accountId, role: 'viewer', appCount: 0 })
       const again = await add(ws.cookie, 'dave')
       expect(again.status).toBe(409)

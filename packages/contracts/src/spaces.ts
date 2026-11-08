@@ -67,8 +67,9 @@ export const SpaceMember = MemberInfo.extend({
 export type SpaceMember = z.infer<typeof SpaceMember>
 
 // 按用户名添加成员：精确匹配，不提供账号的列表与搜索
+// 用户名只有小写（Username），输入先去首尾空白、转小写再精确匹配
 export const AddMemberRequest = z.object({
-  username: z.string().trim().min(1, '请填写用户名').max(64),
+  username: z.string().trim().toLowerCase().min(1, '请填写用户名').max(64),
   role: MemberRole,
 })
 export type AddMemberRequest = z.infer<typeof AddMemberRequest>
