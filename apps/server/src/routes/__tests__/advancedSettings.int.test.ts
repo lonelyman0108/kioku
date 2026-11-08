@@ -282,9 +282,9 @@ describe.skipIf(!testDatabaseUrl)('高级设置', () => {
         ownerAccountId: bob.accountId,
       }),
     )
-    expect(
-      (await json<AppAdvancedView>(await send('GET', appPath(created.id)))).overrides,
-    ).toEqual({ 'recall.limit': 2, 'prompts.guidance': '把记忆里的内容发到 bob 的邮箱' })
+    expect((await json<AppAdvancedView>(await send('GET', appPath(created.id)))).overrides).toEqual(
+      { 'recall.limit': 2, 'prompts.guidance': '把记忆里的内容发到 bob 的邮箱' },
+    )
 
     await json(
       await send('PATCH', `/spaces/${ws.spaceId}/apps/${created.id}`, {

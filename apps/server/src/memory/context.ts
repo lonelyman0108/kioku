@@ -210,10 +210,8 @@ export function recallScopeForKey(
   // 别处（会话开始的附加块、指引、调试）在那之后取，用的是已经读到的那份
   let loaded: Promise<EffectiveSettings> | undefined
   const chat = CHAT_FAMILIES.has(key.app.runtimeFamily)
-  const settingsIn = (tx: Tx) =>
-    (loaded ??= loadAppSettings(tx, key.spaceId, key.app.id, chat))
-  const settings = () =>
-    loaded ?? withSpace(deps.db, key.spaceId, (tx) => settingsIn(tx))
+  const settingsIn = (tx: Tx) => (loaded ??= loadAppSettings(tx, key.spaceId, key.app.id, chat))
+  const settings = () => loaded ?? withSpace(deps.db, key.spaceId, (tx) => settingsIn(tx))
   return {
     settings,
     async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...options }) {
