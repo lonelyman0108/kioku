@@ -31,6 +31,7 @@ const bound = (el: TemplateNode, name: string) =>
   el.props?.find((p) => p.name === 'bind' && p.arg?.content === name)?.exp?.content
 const labelled = (label: string) => elements.find((el) => attr(el, 'aria-label') === label)!
 const classes = (el: TemplateNode) => (attr(el, 'class') ?? '').split(/\s+/)
+const condition = (el: TemplateNode) => el.props?.find((p) => p.name === 'if')?.exp?.content
 
 describe('顶部导航', () => {
   it('按用途分组，入口的名字按术语表', () => {
@@ -56,10 +57,42 @@ describe('顶部导航', () => {
     expect(script).toContain("link('apps', icons.apps, ['apps', 'app'])")
   })
 
-  it('实例设置只给管理员，放在账号菜单里', () => {
-    expect(script).toMatch(/me\.data\.value\?\.isAdmin\s*\? \[\{ label: '实例设置'/)
-    expect(script).toContain('...(instanceNav.value.length')
+  it('每个入口都有图标，图标旁一定有文字；放不下时先收组标题、再收图标', () => {
+    const link = elements.find((el) => el.tag === 'RouterLink' && bound(el, 'to') === 'item.to')!
+    const icon = link.children!.find((c) => c.tag === 'UIcon')!
+    expect(bound(icon, 'name')).toBe('item.icon')
+    expect(classes(icon)).toContain('max-[1180px]:hidden')
+    const title = elements.find((el) => el.tag === 'span' && condition(el) === 'group.title')!
+    expect(classes(title)).toContain('max-[1320px]:hidden')
+    expect(template).toContain('{{ item.label }}')
+  })
+
+  it('「设置」进空间组，三组设置页都点亮它', () => {
+    expect(script).toContain("link('space-settings', icons.settings, SETTINGS_ROUTES)")
+    expect(script).toContain(
+      "const SETTINGS_ROUTES = ['space-settings', 'account-settings', 'instance-settings']",
+    )
+  })
+
+  it('账号菜单：账号设置人人都有，实例设置只给管理员', () => {
+    expect(script).toContain("label: '账号设置'")
+    expect(script).toContain('to: accountSettingsRoute()')
+    expect(script).toMatch(/me\.data\.value\?\.isAdmin\s*\? \[\s*\{\s*label: '实例设置'/)
+    expect(script).toContain('to: instanceSettingsRoute()')
+    expect(script).toContain('accountNav.value.map(')
     expect(script).not.toMatch(/\{ label: '实例设置', \.\.\.link\(/)
+  })
+
+  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是成员与设置', () => {
+    const switcher = elements.find(
+      (el) => el.tag === 'UDropdownMenu' && bound(el, 'items') === 'spaceMenu',
+    )!
+    expect(condition(switcher)).toBe('spaces.length')
+    expect(script).toContain('role: roleName(s.role)')
+    expect(script).toContain('checked: s.id === space.value?.id')
+    expect(script).toContain("label: '成员与设置'")
+    expect(script).toContain('to: spaceSettingsRoute(space.value.id)')
+    expect(template).toContain('#space-trailing="{ item }"')
   })
 
   it('窄屏把导航收进抽屉，宽屏和窄屏的分界一致', () => {
@@ -92,8 +125,6 @@ describe('顶栏放不下时', () => {
       expect(classes(button), label).toEqual(expect.arrayContaining(['min-w-0', 'max-w-48']))
       expect(bound(button, 'title'), label).toBe(name)
     }
-    const single = elements.find((el) => el.tag === 'span' && bound(el, 'title') === 'space.name')!
-    expect(classes(single)).toEqual(expect.arrayContaining(['min-w-0', 'truncate']))
   })
 
   it('菜单和抽屉里的长名字也不撑破', () => {
@@ -135,7 +166,9 @@ describe('抽屉', () => {
   it('切换空间时关上抽屉，点当前空间地址不变也要关', () => {
     const body = /function switchSpace\(id: string\) \{[^}]*\}/.exec(script)![0]
     expect(body).toContain('navOpen.value = false')
-    const spaceButton = walk(slideover).find((n) => bound(n, 'title') === 's.name')!
+    const spaceButton = walk(slideover).find(
+      (n) => n.tag === 'button' && n.children?.some((c) => bound(c, 'title') === 's.name'),
+    )!
     expect(spaceButton.props?.find((p) => p.name === 'on')?.exp?.content).toBe('switchSpace(s.id)')
   })
 })
@@ -154,7 +187,28 @@ describe('保留的逻辑', () => {
 
   it('地址里的空间不是自己的时只给说明，不渲染页面', () => {
     expect(template).toContain('v-if="me.data.value && route.params.spaceId && !space"')
-    expect(template).toMatch(/<RouterView v-else \/>/)
+    expect(template).toMatch(/<RouterView v-else v-slot="\{ Component, route: current \}">/)
+  })
+
+  it('设置页按组与空间换掉：同一个页面在组之间复用时，离开前的确认登记在先进的那一组上', () => {
+    expect(template).toContain('<component :is="Component" :key="settingsPageKey(current)" />')
+  })
+
+  it('窄屏抽屉里的入口同步：图标、各空间与角色、成员与设置、账号设置与实例设置', () => {
+    const drawer = walk(elements.find((el) => el.tag === 'USlideover')!)
+    expect(drawer.some((n) => n.tag === 'UIcon' && bound(n, 'name') === 'item.icon')).toBe(true)
+    expect(
+      drawer.some(
+        (n) => n.tag === 'RouterLink' && bound(n, 'to') === 'spaceSettingsRoute(space.id)',
+      ),
+    ).toBe(true)
+    const accountLinks = drawer.find(
+      (n) =>
+        n.tag === 'RouterLink' &&
+        n.props?.some((p) => p.name === 'for' && p.exp?.content.includes('accountNav')),
+    )
+    expect(accountLinks).toBeDefined()
+    expect(template).toContain('roleName(s.role)')
   })
 
   it('搜索沿用 useConsoleSearch 和 UDashboardSearch', () => {

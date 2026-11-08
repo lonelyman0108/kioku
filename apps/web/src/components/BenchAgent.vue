@@ -86,7 +86,7 @@ const unavailableActions = computed(() =>
         {
           label: '去实例设置',
           color: 'neutral' as const,
-          to: instanceSettingsRoute('extraction'),
+          to: instanceSettingsRoute('models'),
         },
       ],
 )

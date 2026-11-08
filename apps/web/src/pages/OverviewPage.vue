@@ -237,7 +237,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             value="–"
             note="未配置嵌入模型，召回仅使用全文与关键词"
             :action="me.data.value?.isAdmin ? '去配置' : null"
-            :to="{ name: 'settings' }"
+            :to="instanceSettingsRoute('models')"
             zero
           />
         </section>
@@ -257,7 +257,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
               <span>{{ budget.note.first }}</span>
               <RouterLink
                 v-if="canAdjustBudget"
-                :to="spaceSettingsRoute(spaceId, 'budget')"
+                :to="spaceSettingsRoute(spaceId, 'extraction')"
                 class="notice-link"
               >
                 调整预算
@@ -276,7 +276,7 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
             </p>
             <p class="notice-body">
               <span>{{ backup.note.first }}</span>
-              <RouterLink :to="instanceSettingsRoute('backup')" class="notice-link"
+              <RouterLink :to="instanceSettingsRoute('data')" class="notice-link"
                 >去实例设置</RouterLink
               >
             </p>
