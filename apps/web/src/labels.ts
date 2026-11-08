@@ -240,3 +240,49 @@ export const plaintextChoiceLabels = {
   convert: '转存为凭据',
   ignore: '不是凭据',
 } as const satisfies Record<'convert' | 'ignore', string>
+
+// 变更记录里的操作者是哪一类：成员、应用（经访问密钥）、测试台；访问密钥连同应用删掉的、没有操作者的是未知
+export type ActivityActorKind = 'account' | 'app' | 'bench' | 'unknown'
+export function activityActorKind(key: string): ActivityActorKind {
+  if (key.startsWith('account:')) return 'account'
+  if (key.startsWith('app:')) return 'app'
+  return key === 'bench' ? 'bench' : 'unknown'
+}
+
+export const activityActorIcons: Record<ActivityActorKind, string> = {
+  account: icons.user,
+  app: icons.bot,
+  bench: icons.bench,
+  unknown: icons.unknownActor,
+}
+
+// 筛选里操作者的名字：名字为空说明那个账号或应用已经删掉了
+export function activityActorName(kind: ActivityActorKind, name: string | null): string {
+  if (kind === 'bench') return '测试台'
+  if (kind === 'unknown') return '未知'
+  return name ?? (kind === 'account' ? '已删除的账号' : '已删除的应用')
+}
+
+// 表格里一行的操作者：名字，悬停里写访问密钥的名字（只给应用所有者与空间所有者）
+export function activityActor(item: Pick<ActivityItem, 'actor' | 'actorKey' | 'bench'>): {
+  kind: ActivityActorKind
+  name: string
+  hint: string
+} {
+  const kind = activityActorKind(item.actorKey)
+  if (kind === 'bench') {
+    const account = item.bench ? benchAccountLabel(item.bench) : '未知'
+    return { kind, name: `测试台 · ${account}`, hint: `测试台，操作账号：${account}` }
+  }
+  const name =
+    kind === 'account'
+      ? (item.actor.accountName ?? '已删除的账号')
+      : kind === 'app'
+        ? (item.actor.appName ?? '已删除的应用')
+        : '未知'
+  return {
+    kind,
+    name,
+    hint: item.actor.keyName ? `${name}，访问密钥：${item.actor.keyName}` : name,
+  }
+}
