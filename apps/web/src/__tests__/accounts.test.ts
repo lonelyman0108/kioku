@@ -1,4 +1,4 @@
-import type { AdminAccount } from '@kioku/contracts'
+import { Password, WRONG_CURRENT_PASSWORD, type AdminAccount } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 import { parse } from 'vue/compiler-sfc'
 
@@ -8,6 +8,7 @@ import {
   changePasswordError,
   deviceName,
   expiresIn,
+  latestRequest,
   linkLoadState,
   newPasswordProblem,
   newPasswordReady,
@@ -86,8 +87,52 @@ describe('设置密码链接只显示一次', () => {
     expect(bound(regenerate, 'dismissible')).toBe('!regenerated')
     expect(bound(regenerate, 'close')).toBe('!regenerated')
     // 关掉之后明文就清了，再打开看不到
-    expect(instanceAccounts).toMatch(/function closeCreate\(\) \{[^}]*created\.value = null/)
+    expect(instanceAccounts).toMatch(/function resetCreate\(\) \{[^}]*created\.value = null/)
+    expect(instanceAccounts).toMatch(/function closeCreate\(\) \{[^}]*resetCreate\(\)/)
     expect(instanceAccounts).toMatch(/function closeLink\(\) \{[^}]*regenerated\.value = null/)
+  })
+
+  // 请求期间取消、再对别的账号打开时，上一次的令牌不能显示在新目标的名下：拿到它的人能设别人的密码
+  it('只认最近一次请求：关掉或重新打开之后回来的结果丢弃', () => {
+    const request = latestRequest()
+    const forA = request.begin()
+    request.reset() // 取消关掉
+    request.reset() // 对 B 打开
+    expect(request.isCurrent(forA)).toBe(false)
+    const forB = request.begin()
+    expect(request.isCurrent(forB)).toBe(true)
+    expect(request.isCurrent(forA)).toBe(false)
+  })
+
+  it('重置密码：打开时清掉上一次的结果，回来的结果只在还是同一次、同一个账号时显示', () => {
+    expect(instanceAccounts).toMatch(
+      /function openLink\(account: AdminAccount\) \{\s*linkRequest\.reset\(\)[^}]*regenerated\.value = null/,
+    )
+    expect(instanceAccounts).toMatch(/function closeLink\(\) \{\s*linkRequest\.reset\(\)/)
+    expect(instanceAccounts).toContain(
+      'if (linkRequest.isCurrent(ticket) && linkTarget.value?.id === target.id) {',
+    )
+    expect(instanceAccounts).toContain(
+      'regenerated.value = { link, displayName: target.displayName }',
+    )
+    // 链接页的账号名取结果本身对应的账号
+    const once = elementsOf(instanceAccounts).filter((el) => el.tag === 'PasswordLinkOnce')
+    expect(once.map((el) => bound(el, 'display-name'))).toEqual([
+      'created.displayName',
+      'regenerated.displayName',
+    ])
+    const button = elementsOf(instanceAccounts).find(
+      (el) => el.tag === 'UButton' && handler(el, 'click') === 'openLink(account)',
+    )
+    expect(button).toBeDefined()
+  })
+
+  it('新建账号：打开与关掉都作废进行中的请求，取消之后回来的链接不显示', () => {
+    expect(instanceAccounts).toMatch(/function resetCreate\(\) \{\s*createRequest\.reset\(\)/)
+    expect(instanceAccounts).toMatch(/function openCreate\(\) \{\s*resetCreate\(\)/)
+    expect(instanceAccounts).toMatch(
+      /if \(createRequest\.isCurrent\(ticket\)\) \{\s*created\.value = \{ link: result\.link, displayName: result\.account\.displayName \}/,
+    )
   })
 
   it('链接页写明只显示这一次与有效期，可以复制', () => {
@@ -155,6 +200,21 @@ describe('账号列表', () => {
     expect(soleOwnerSpaces(account({ spaces: [space('工作', 3, false)] }))).toEqual([])
   })
 
+  it('新建账号后实例的空间列表一起刷新', () => {
+    expect(instanceAccounts).toContain(
+      "queryClient.invalidateQueries({ queryKey: ['instance-spaces'] })",
+    )
+  })
+
+  it('管理员一列写看得见的文字，不只有图标', () => {
+    const cell = elementsOf(instanceAccounts).find((el) =>
+      el.props?.some((p) => p.name === 'data-admin'),
+    )!
+    const texts = (cell.children ?? []) as unknown as { type: number; content?: string }[]
+    expect(texts.filter((c) => c.type === 2).map((c) => c.content?.trim())).toContain('是')
+    expect((cell.children ?? []).some((el) => attr(el, 'class') === 'sr-only')).toBe(false)
+  })
+
   it('修改失败按服务端的说明显示（保留最后一个管理员等）', () => {
     expect(instanceAccounts).toContain("err instanceof ApiError ? err.message : '修改失败'")
   })
@@ -162,7 +222,11 @@ describe('账号列表', () => {
 
 describe('账号与登录', () => {
   it('改密码的错误分开说明', () => {
-    expect(changePasswordError(new ApiError(400, '当前密码错误'))).toBe('当前密码错误')
+    expect(changePasswordError(new ApiError(400, WRONG_CURRENT_PASSWORD))).toBe('当前密码错误')
+    // 新密码不合规也是 400，照服务端的说明，不说成当前密码错误
+    expect(changePasswordError(new ApiError(400, 'newPassword：密码至少 10 位'))).toBe(
+      'newPassword：密码至少 10 位',
+    )
     expect(changePasswordError(new ApiError(429, '失败次数过多，请稍后重试'))).toBe(
       '尝试次数过多，请稍后重试',
     )
@@ -172,6 +236,12 @@ describe('账号与登录', () => {
 
   it('新密码至少 10 位、两次一致才能提交', () => {
     expect(newPasswordProblem('short', '')).toBe('密码至少 10 位')
+    // 长度按契约的 Password 算，和服务端一致；有上限
+    const emoji = '😀'.repeat(5)
+    expect(newPasswordProblem(emoji, '') === null).toBe(Password.safeParse(emoji).success)
+    expect(newPasswordReady(emoji, emoji)).toBe(Password.safeParse(emoji).success)
+    expect(newPasswordProblem('x'.repeat(257), '')).toBe('密码最多 256 位')
+    expect(newPasswordProblem('x'.repeat(256), '')).toBeNull()
     expect(newPasswordProblem('long enough!', 'long enough?')).toBe('两次输入的密码不一致')
     expect(newPasswordReady('long enough!', 'long enough!')).toBe(true)
     expect(newPasswordReady('long enough!', '')).toBe(false)

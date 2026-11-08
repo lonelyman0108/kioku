@@ -1,4 +1,4 @@
-import type { AdminAccount } from '@kioku/contracts'
+import { Password, WRONG_CURRENT_PASSWORD, type AdminAccount } from '@kioku/contracts'
 
 import { ApiError } from './api/client'
 import { FLAGS, type FlagStatus } from './components/strata/flags'
@@ -72,20 +72,21 @@ export const accountStateText = (state: AccountState) =>
 // 当前账号这一行：停用与管理员身份都不能改，写出原因
 export const SELF_LOCKED_REASON = '无法修改当前账号的停用状态与管理员身份'
 
-// 改密码失败的说明：当前密码不对、尝试太多、别处刚改过分开说
+// 改密码失败的说明：当前密码不对、新密码不合规、尝试太多、别处刚改过分开说。
+// 400 有两种：当前密码不对（WRONG_CURRENT_PASSWORD），其余是请求校验没过，照服务端的说明
 export function changePasswordError(err: unknown): string {
   if (!(err instanceof ApiError)) return '修改失败'
-  if (err.status === 400) return '当前密码错误'
+  if (err.status === 400 && err.message === WRONG_CURRENT_PASSWORD) return WRONG_CURRENT_PASSWORD
   if (err.status === 429) return '尝试次数过多，请稍后重试'
   if (err.status === 409) return '密码刚在别处修改过，请刷新页面后重试'
   return err.message
 }
 
-// 新密码与再输一次：服务端的规则是至少 10 位（契约的 Password），这里先拦下，说明更直接
-export const PASSWORD_MIN = 10
+// 新密码与再输一次：规则只用契约的 Password（长度的算法、上限都和服务端一致），这里先拦下，说明更直接
 export function newPasswordProblem(password: string, repeat: string): string | null {
   if (!password) return null
-  if (password.length < PASSWORD_MIN) return `密码至少 ${PASSWORD_MIN} 位`
+  const parsed = Password.safeParse(password)
+  if (!parsed.success) return parsed.error.issues[0]?.message ?? '密码不符合要求'
   if (repeat && repeat !== password) return '两次输入的密码不一致'
   return null
 }
@@ -113,3 +114,18 @@ export function soleOwnerSpaces(account: AdminAccount): string[] {
 }
 export const SOLE_OWNER_TEXT =
   '停用后这些空间没有可用的所有者，无法管理成员与设置；重新启用后恢复。'
+
+// 只认最近一次请求的结果：弹窗关掉、重新打开或换了目标之后，之前发出的请求回来时丢弃。
+// 设置密码链接靠它：取消之后才回来的令牌不能留到下一次、显示在别的账号名下
+export function latestRequest() {
+  let current = 0
+  return {
+    // 发请求时取一个序号
+    begin: () => ++current,
+    // 关掉、打开弹窗或换目标时调用：之前的序号都作废
+    reset: () => {
+      current++
+    },
+    isCurrent: (ticket: number) => ticket === current,
+  }
+}
