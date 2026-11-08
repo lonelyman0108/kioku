@@ -526,7 +526,9 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       expect((await setRole(ws.cookie, editor.accountId, 'boss')).status).toBe(400)
       const last = await setRole(ws.cookie, ws.accountId, 'editor')
       expect(last.status).toBe(409)
-      expect(await errorOf(last)).toBe('空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者')
+      expect(await errorOf(last)).toBe(
+        '空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者',
+      )
       // 所有者改自己为所有者不算降级
       expect((await setRole(ws.cookie, ws.accountId, 'owner')).status).toBe(200)
       expect(
@@ -605,10 +607,14 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
         role: 'editor',
       })
       expect(demote.status).toBe(409)
-      expect(await errorOf(demote)).toBe('空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者')
+      expect(await errorOf(demote)).toBe(
+        '空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者',
+      )
       const leave = await send('DELETE', inSpace(`/members/${ws.accountId}`), ws.cookie)
       expect(leave.status).toBe(409)
-      expect(await errorOf(leave)).toBe('空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者')
+      expect(await errorOf(leave)).toBe(
+        '空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者',
+      )
       // 停用的所有者照样能降级、移除：还剩 alice
       await ok(
         await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, { role: 'editor' }),

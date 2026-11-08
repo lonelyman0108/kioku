@@ -452,10 +452,16 @@ async function departureBatch(
     .for('update', { skipLocked: true })
   if (!departure) return { picked: 0, counts: {} }
   const owner = departure.accountId
-  const ofDeparture = and(eq(spaceDepartures.spaceId, spaceId), eq(spaceDepartures.accountId, owner))
+  const ofDeparture = and(
+    eq(spaceDepartures.spaceId, spaceId),
+    eq(spaceDepartures.accountId, owner),
+  )
   // 第一批在同一个事务里记下清理开始：之后到这一行删掉之前，重新加入一律拒绝
   if (!departure.started) {
-    await tx.update(spaceDepartures).set({ purgeStartedAt: sql`now()` }).where(ofDeparture)
+    await tx
+      .update(spaceDepartures)
+      .set({ purgeStartedAt: sql`now()` })
+      .where(ofDeparture)
   }
   // 召回明细里有他的提示语与他的本人记忆的命中，只给他看；次数先并入累计统计
   await dropRecallEvents(tx, eq(recallEvents.ownerAccountId, owner))
