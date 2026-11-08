@@ -83,14 +83,14 @@ describe('顶部导航', () => {
     expect(script).not.toMatch(/\{ label: '实例设置', \.\.\.link\(/)
   })
 
-  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是成员与设置', () => {
+  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是空间设置', () => {
     const switcher = elements.find(
       (el) => el.tag === 'UDropdownMenu' && bound(el, 'items') === 'spaceMenu',
     )!
     expect(condition(switcher)).toBe('spaces.length')
     expect(script).toContain('role: roleName(s.role)')
     expect(script).toContain('checked: s.id === space.value?.id')
-    expect(script).toContain("label: '成员与设置'")
+    expect(script).toContain("label: '空间设置'")
     expect(script).toContain('to: spaceSettingsRoute(space.value.id)')
     expect(template).toContain('#space-trailing="{ item }"')
   })
@@ -187,14 +187,10 @@ describe('保留的逻辑', () => {
 
   it('地址里的空间不是自己的时只给说明，不渲染页面', () => {
     expect(template).toContain('v-if="me.data.value && route.params.spaceId && !space"')
-    expect(template).toMatch(/<RouterView v-else v-slot="\{ Component, route: current \}">/)
+    expect(template).toMatch(/<RouterView v-else \/>/)
   })
 
-  it('设置页按组与空间换掉：同一个页面在组之间复用时，离开前的确认登记在先进的那一组上', () => {
-    expect(template).toContain('<component :is="Component" :key="settingsPageKey(current)" />')
-  })
-
-  it('窄屏抽屉里的入口同步：图标、各空间与角色、成员与设置、账号设置与实例设置', () => {
+  it('窄屏抽屉里的入口同步：图标、各空间与角色、空间设置、账号设置与实例设置', () => {
     const drawer = walk(elements.find((el) => el.tag === 'USlideover')!)
     expect(drawer.some((n) => n.tag === 'UIcon' && bound(n, 'name') === 'item.icon')).toBe(true)
     expect(

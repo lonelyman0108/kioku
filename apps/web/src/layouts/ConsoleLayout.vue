@@ -23,7 +23,6 @@ import {
   accountSettingsRoute,
   instanceSettingsRoute,
   roleName,
-  settingsPageKey,
   spaceSettingsRoute,
 } from '../settingsSections'
 
@@ -202,7 +201,7 @@ const userMenu = computed<DropdownMenuItem[][]>(() => [
 ])
 // 菜单项上额外带的角色名：组件库的插槽不知道这个字段
 const roleOf = (item: unknown) => (item as { role?: string }).role
-// 空间切换器：各空间与当前账号在里面的角色（当前空间打勾），下面是当前空间的成员与设置
+// 空间切换器：各空间与当前账号在里面的角色（当前空间打勾），下面是当前空间的设置
 const spaceMenu = computed<DropdownMenuItem[][]>(() => [
   [
     { type: 'label', label: '空间' },
@@ -219,8 +218,8 @@ const spaceMenu = computed<DropdownMenuItem[][]>(() => [
     ? [
         [
           {
-            label: '成员与设置',
-            icon: icons.members,
+            label: '空间设置',
+            icon: icons.settings,
             to: spaceSettingsRoute(space.value.id),
           },
         ],
@@ -410,7 +409,7 @@ async function logout() {
                   class="block py-1.5 text-sm/6"
                   @click="navOpen = false"
                 >
-                  成员与设置
+                  空间设置
                 </RouterLink>
               </div>
               <div>
@@ -475,9 +474,7 @@ async function logout() {
           </template>
         </NoteLine>
       </div>
-      <RouterView v-else v-slot="{ Component, route: current }">
-        <component :is="Component" :key="settingsPageKey(current)" />
-      </RouterView>
+      <RouterView v-else />
     </main>
   </UDashboardGroup>
 </template>

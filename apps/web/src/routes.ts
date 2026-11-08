@@ -1,13 +1,10 @@
 import type { RouteRecordRaw, Router } from 'vue-router'
 
 import { api } from './api/endpoints'
-import { loadMe } from './composables/useSession'
+import { loadMe, rememberSpace } from './composables/useSession'
 import { legacyReviewTab } from './inbox'
 import UnavailablePage from './pages/UnavailablePage.vue'
 import { legacySettingsRedirect, legacySpaceSettingsRedirect } from './settingsSections'
-
-// 三组设置共用同一个异步组件
-const SettingsPage = () => import('./pages/SettingsPage.vue')
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
@@ -106,12 +103,11 @@ export const routes: RouteRecordRaw[] = [
         name: 'bench',
         component: () => import('./pages/BenchPage.vue'),
       },
-      // 设置的三组共用一个页面。组记在 meta 里，外壳按组与空间换掉页面，离开一组时由页面先确认未保存的改动
+      // 设置的三组：每组一个路由组件，都包着 SettingsPage。换组时换掉整页，离开前由页面确认未保存的改动
       {
         path: 'spaces/:spaceId/settings/:section?',
         name: 'space-settings',
-        component: SettingsPage,
-        meta: { settingsGroup: 'space' },
+        component: () => import('./pages/SpaceSettingsPage.vue'),
         // 旧地址 ?section=：换成合并后的小节
         beforeEnter: (to) =>
           to.params.section
@@ -121,14 +117,13 @@ export const routes: RouteRecordRaw[] = [
       {
         path: 'settings/account/:section?',
         name: 'account-settings',
-        component: SettingsPage,
-        meta: { settingsGroup: 'account' },
+        component: () => import('./pages/AccountSettingsPage.vue'),
       },
       {
         path: 'settings/instance/:section?',
         name: 'instance-settings',
-        component: SettingsPage,
-        meta: { settingsGroup: 'instance', requiresAdmin: true },
+        component: () => import('./pages/InstanceSettingsPage.vue'),
+        meta: { requiresAdmin: true },
       },
       // 旧地址：实例设置的小节合并之后在实例组，不带小节的去个人组
       {
@@ -158,6 +153,10 @@ export const memoryNodeRoute = (spaceId: string, node: string) => ({
 let setupDone = false
 
 export function installGuards(router: Router): void {
+  // 记下最近访问的空间：个人与实例设置这些不带空间的页面沿用它
+  router.afterEach((to, _from, failure) => {
+    if (!failure && typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)
+  })
   router.beforeEach(async (to) => {
     if (to.name === 'unavailable') return true
     try {

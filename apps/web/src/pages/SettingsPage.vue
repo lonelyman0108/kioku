@@ -1,5 +1,5 @@
 <script setup lang="ts">
-import { computed, reactive } from 'vue'
+import { computed, reactive, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import type { SettingsFrameGroup } from '../components/strata/SettingsFrame.vue'
@@ -8,7 +8,6 @@ import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
 import { useSession } from '../composables/useSession'
 import {
   currentSection,
-  isSettingsGroup,
   leavesSettingsPage,
   roleName,
   SETTINGS_GROUPS,
@@ -17,14 +16,12 @@ import {
   type SettingsGroupKey,
 } from '../settingsSections'
 
-// 三组设置共用这一页：组从路由的 meta 里取，地址里的 :section 是当前小节。
-// 外壳按组与空间换掉这一页（settingsPageKey），所以一页里只有一组的小节、只注册一份未保存确认
+// 三组设置共用的页面，由每组一个的路由组件（AccountSettingsPage 等）包一层，地址里的 :section 是当前小节。
+// 各组是不同的路由组件：换组时换掉整页，离开前的确认各组自己注册，一页里只有一份
+const props = defineProps<{ group: SettingsGroupKey }>()
+const group = computed(() => props.group)
 const route = useRoute()
 const { me, space } = useSession()
-
-const group = computed<SettingsGroupKey>(() =>
-  isSettingsGroup(route.meta.settingsGroup) ? route.meta.settingsGroup : 'account',
-)
 
 // 空间组用地址里的空间；个人与实例页面上用会话里当前的空间
 const viewer = computed(() => ({
@@ -39,6 +36,12 @@ const current = computed(() => currentSection(sections.value, route.params.secti
 const dirty = reactive<Record<string, boolean>>({})
 const anyDirty = computed(() => Object.values(dirty).some(Boolean))
 useUnsavedChangesGuard(anyDirty, { leavesOn: leavesSettingsPage })
+
+// 空间组里换空间：确认过之后小节按新空间重新挂上（下面的 key），旧空间的改动标记一起清掉
+const spaceKey = computed(() => String(route.params.spaceId ?? ''))
+watch(spaceKey, () => {
+  for (const key of Object.keys(dirty)) delete dirty[key]
+})
 
 function asideOf(key: SettingsGroupKey): string | undefined {
   if (key === 'account') return me.data.value?.displayName
@@ -84,7 +87,11 @@ const componentOf = (key: string) => sections.value.find((s) => s.key === key)?.
 <template>
   <SettingsFrame :groups="groups" :group="group" :current="current?.key ?? ''">
     <template #default="{ section }">
-      <component :is="componentOf(section)" v-model:dirty="dirty[section]" />
+      <component
+        :is="componentOf(section)"
+        :key="`${section}:${spaceKey}`"
+        v-model:dirty="dirty[section]"
+      />
     </template>
   </SettingsFrame>
 </template>

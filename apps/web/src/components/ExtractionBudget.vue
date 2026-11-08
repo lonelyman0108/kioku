@@ -24,12 +24,14 @@ const usage = useQuery({ queryKey, queryFn: () => api.extractionBudget(props.spa
 // 表单从哪一版预算载入；用量隔一会儿就刷新，只有预算本身变了、而且没有改动时才跟上，免得冲掉没保存的输入
 const form = reactive<{ monthlyTokens?: number; dailyWritesPerSubject?: number }>({})
 const baseline = ref<{ monthlyTokens: number; dailyWritesPerSubject: number } | null>(null)
-const dirty = computed(
-  () =>
-    baseline.value !== null &&
-    (form.monthlyTokens !== baseline.value.monthlyTokens ||
-      form.dailyWritesPerSubject !== baseline.value.dailyWritesPerSubject),
+// 改了几项：保存条上写，有改动就报给页面
+const changedCount = computed(() =>
+  baseline.value
+    ? Number(form.monthlyTokens !== baseline.value.monthlyTokens) +
+      Number(form.dailyWritesPerSubject !== baseline.value.dailyWritesPerSubject)
+    : 0,
 )
+const dirty = computed(() => changedCount.value > 0)
 watch(
   () => usage.data.value,
   (u) => {
@@ -55,13 +57,6 @@ const progress = computed(() => {
   } as const
 })
 
-// 改了几项：保存条上写
-const changedCount = computed(() =>
-  baseline.value
-    ? Number(form.monthlyTokens !== baseline.value.monthlyTokens) +
-      Number(form.dailyWritesPerSubject !== baseline.value.dailyWritesPerSubject)
-    : 0,
-)
 function discard() {
   if (!baseline.value) return
   form.monthlyTokens = baseline.value.monthlyTokens
