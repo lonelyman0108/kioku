@@ -1,6 +1,14 @@
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  ACTIVITY_UNKNOWN_TIME_ZONE,
+  ActivityDays,
+  ActivityDaysQuery,
+  ActivityEvent,
+  ActivityEventParams,
+  ActivityFacets,
+  ActivityFilter,
   ActivityList,
+  ActivityQuery,
   ConsoleCreateMemoryRequest,
   ConsoleMemoryChildren,
   ConsoleMemoryView,
@@ -39,7 +47,12 @@ import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
 import { withDeletionRetention } from '../jobs/retention'
 import { consoleMemberFor, memoryServiceForKey, recallForConsole } from '../memory/context'
-import type { CreateInput, MemoryService, UpdateInput } from '../memory/service'
+import {
+  UnknownTimeZoneError,
+  type CreateInput,
+  type MemoryService,
+  type UpdateInput,
+} from '../memory/service'
 
 // 快速跳转最多列出的直接命中数
 const MATCH_LIMIT = 10
@@ -319,9 +332,36 @@ function consoleOnlyRoutes(deps: Deps) {
     method: 'get',
     path: '/spaces/{spaceId}/activity',
     tags: ['console'],
-    summary: '空间里记忆的改动，最新的在前',
-    request: { params, query: PageQuery },
-    responses: { 200: jsonResponse('活动', ActivityList), ...errors },
+    summary: '空间里记忆的改动，最新的在前，可以按时间、操作者、操作、归属、改动的字段与关键字筛选',
+    request: { params, query: ActivityQuery },
+    responses: { 200: jsonResponse('变更记录', ActivityList), ...errors },
+  })
+  const activityDays = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/activity/days',
+    tags: ['console'],
+    summary: '变更记录按天的条数：筛选与可见性和列表相同，按给的时区分天',
+    request: { params, query: ActivityDaysQuery },
+    responses: { 200: jsonResponse('按天的条数', ActivityDays), ...errors },
+  })
+  const activityFacets = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/activity/facets',
+    tags: ['console'],
+    summary:
+      '变更记录的筛选计数：操作者、操作、归属、改动的字段各自的条数，每一组在除了它自己以外的全部筛选下计算',
+    request: { params, query: ActivityFilter },
+    responses: { 200: jsonResponse('筛选计数', ActivityFacets), ...errors },
+  })
+  // 挂在 days、facets 后面：那两个路径也能被 {eventId} 匹配上
+  const activityEvent = createRoute({
+    method: 'get',
+    path: '/spaces/{spaceId}/activity/{eventId}',
+    tags: ['console'],
+    summary:
+      '变更记录里的一条改动连同前后快照，可见性和列表相同：看不到的是 404，超出可见范围的只给改前的快照',
+    request: { params: ActivityEventParams },
+    responses: { 200: jsonResponse('一条改动', ActivityEvent), ...errors },
   })
   return router()
     .openapi(history, async (c) => {
@@ -420,6 +460,26 @@ function consoleOnlyRoutes(deps: Deps) {
     .openapi(activity, async (c) => {
       const { service } = await consoleMember(deps, c)
       return c.json(await service.activity(c.req.valid('query')), 200)
+    })
+    .openapi(activityDays, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      try {
+        return c.json(await service.activityDays(c.req.valid('query')), 200)
+      } catch (err) {
+        // 时区认不出带上 code，界面只在这种 400 时退回 UTC
+        if (err instanceof UnknownTimeZoneError) {
+          return c.json({ error: err.message, code: ACTIVITY_UNKNOWN_TIME_ZONE }, 400)
+        }
+        throw err
+      }
+    })
+    .openapi(activityFacets, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.activityFacets(c.req.valid('query')), 200)
+    })
+    .openapi(activityEvent, async (c) => {
+      const { service } = await consoleMember(deps, c)
+      return c.json(await service.activityEvent(c.req.valid('param').eventId), 200)
     })
     .openapi(list, async (c) => {
       const { service } = await consoleMember(deps, c)
