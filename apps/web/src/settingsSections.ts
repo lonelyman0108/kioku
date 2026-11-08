@@ -95,9 +95,6 @@ export type AccountSectionKey = SectionOf<'account'>
 export type SpaceSectionKey = SectionOf<'space'>
 export type InstanceSectionKey = SectionOf<'instance'>
 
-export const isSettingsGroup = (value: unknown): value is SettingsGroupKey =>
-  SETTINGS_GROUPS.some((group) => group.key === value)
-
 // 这一组里给当前账号看的小节
 export function visibleSections(
   group: SettingsGroupKey,
@@ -116,18 +113,12 @@ export function visibleGroups(viewer: SettingsViewer & { hasSpace: boolean }): S
   ).map((group) => group.key)
 }
 
-type RouteLike = Pick<RouteLocationNormalized, 'meta' | 'params'>
-
-// 外壳给设置页的 key：按组与空间换掉页面。三组用同一个页面组件，不换的话在组之间复用同一个实例，
-// 离开前的确认还登记在先进的那一组的路由上，换组之后就不再生效。别的页面为 undefined，照旧复用
-export const settingsPageKey = (route: RouteLike): string | undefined =>
-  isSettingsGroup(route.meta.settingsGroup)
-    ? `${route.meta.settingsGroup}:${String(route.params.spaceId ?? '')}`
-    : undefined
-
-// 在设置页里导航算不算离开：换组、换空间算，组内换小节不算（各小节都还挂着）
-export const leavesSettingsPage = (to: RouteLike, from: RouteLike): boolean =>
-  settingsPageKey(to) !== settingsPageKey(from)
+// 设置页里的导航算不算离开：同一组里换空间算，换小节不算（各小节都还挂着）。
+// 换组是换路由组件，由离开路由的确认处理，不经过这里
+export const leavesSettingsPage = (
+  to: Pick<RouteLocationNormalized, 'params'>,
+  from: Pick<RouteLocationNormalized, 'params'>,
+): boolean => to.params.spaceId !== from.params.spaceId
 
 // 当前看哪一节：地址里的小节不存在、看不到（链接过期、手写、权限变了）时看第一个看得到的
 export function currentSection(
