@@ -27,6 +27,7 @@ const zero: RetentionCounts = {
   deletedCredentials: 0,
   vaultConnections: 0,
   subjectBindings: 0,
+  departedMembers: 0,
 }
 
 describe('保留期清理的结果', () => {
