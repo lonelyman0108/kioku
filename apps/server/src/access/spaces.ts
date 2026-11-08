@@ -69,14 +69,6 @@ export async function saveSpaceCreationPolicy(db: Db, value: SpaceCreationPolicy
 
 // ---- 空间 ----
 
-export async function accountExists(db: Db | Tx, accountId: string): Promise<boolean> {
-  const [row] = await db
-    .select({ id: accounts.id })
-    .from(accounts)
-    .where(eq(accounts.id, accountId))
-  return Boolean(row)
-}
-
 // 新建空间，owner 成为唯一的所有者。账号不存在、已停用时不建
 export async function createSpace(
   db: Db,
