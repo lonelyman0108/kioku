@@ -212,7 +212,12 @@ describe('列表读取失败', () => {
   ])('%s：错误和读到过的列表可以同时显示，没读到时不说是空的', (_, source, query) => {
     expect(source).toContain(`v-if="${query}.isError.value"`)
     expect(source).toContain(`v-if="${query}.isPending.value"`)
-    expect(source).toMatch(new RegExp(`v-else-if="${query}\\.data\\.value" class="[\\w-]*empty"`))
+    // 读到空才显示「暂无」：空状态挂在 data 上，不挂在 v-else 上
+    expect(source).toMatch(
+      new RegExp(
+        `(<EmptyState\\s+v-else-if="${query}\\.data\\.value"|v-else-if="${query}\\.data\\.value" class="[\\w-]*empty")`,
+      ),
+    )
   })
 
   it('凭据详情的引用和记录读取失败时能重试，不显示成空', () => {

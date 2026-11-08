@@ -359,7 +359,7 @@ const disclosureCut = computed(
 </script>
 
 <template>
-  <SettingsBlock title="Lore" :level="3" :wide="Boolean(plan)">
+  <SettingsBlock title="Lore" :level="4" :wide="Boolean(plan)">
     <template #note>
       导入 Lore 的节点，确认计划后才写入。
       <Hint>

@@ -137,8 +137,8 @@ watch(tab, () => {
 }
 .inbox-total {
   margin-left: auto;
-  font-family: var(--font-mono);
   font-size: 28px;
+  font-variant-numeric: tabular-nums;
   font-weight: 300;
   line-height: 1.3;
 }
@@ -159,8 +159,8 @@ watch(tab, () => {
   background: var(--ui-bg-muted);
 }
 .inbox-tab b {
-  font-family: var(--font-mono);
   font-size: 22px;
+  font-variant-numeric: tabular-nums;
   font-weight: 300;
   line-height: 1;
 }

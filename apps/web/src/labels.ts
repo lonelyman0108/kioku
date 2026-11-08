@@ -31,9 +31,38 @@ export const ADMIN_SCOPE_LABEL = '跨人格 / 应用写入'
 // 访问密钥的凭据能力：不可用、取用、管理
 export const credentialCapabilityLabels = CREDENTIAL_CAPABILITY_NAMES
 
-// 一个 Key 的权限，一句话说完
-export const scopesSummary = (s: KeyScopes) =>
-  `可读 ${s.readLayers.length} 类归属，可写 ${s.writeLayers.length} 类，最高${sensitivityLabels[s.maxSensitivity]}${s.admin ? `，${ADMIN_SCOPE_LABEL}` : ''}${s.credentials !== 'none' ? `，凭据${credentialCapabilityLabels[s.credentials]}` : ''}`
+// 一个 Key 的签发范围拆成几个标签：读几类、写几类、最高到哪一级，凭据能力（不可用时不写）与跨人格写入。
+// 界面上一个标签一块、整块换行（ScopeTags.vue），读屏与悬停用 scopesSummary 连成一句。
+// credentials 传进来时写它（签发时按范围算出的实际能力），不传写签发时选的
+export interface ScopeTag {
+  key: 'read' | 'write' | 'max' | 'credentials' | 'admin'
+  prefix: string
+  value: string
+  suffix: string
+}
+
+export function scopeTags(s: KeyScopes, credentials = s.credentials): ScopeTag[] {
+  const tags: ScopeTag[] = [
+    { key: 'read', prefix: '读 ', value: String(s.readLayers.length), suffix: ' 类' },
+    { key: 'write', prefix: '写 ', value: String(s.writeLayers.length), suffix: ' 类' },
+    { key: 'max', prefix: '至', value: sensitivityLabels[s.maxSensitivity], suffix: '' },
+  ]
+  if (credentials !== 'none') {
+    tags.push({
+      key: 'credentials',
+      prefix: '凭据',
+      value: credentialCapabilityLabels[credentials],
+      suffix: '',
+    })
+  }
+  if (s.admin) tags.push({ key: 'admin', prefix: ADMIN_SCOPE_LABEL, value: '', suffix: '' })
+  return tags
+}
+
+export const scopeTagText = (tag: ScopeTag) => `${tag.prefix}${tag.value}${tag.suffix}`
+
+export const scopesSummary = (s: KeyScopes, credentials = s.credentials) =>
+  scopeTags(s, credentials).map(scopeTagText).join('，')
 
 export const accessContextLabels: Record<AccessContext, string> = {
   none: '无上下文（本机 Agent）',

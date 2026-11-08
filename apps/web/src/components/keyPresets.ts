@@ -9,18 +9,23 @@ import {
 export interface KeyPreset {
   id: string
   label: string
+  // 卡片上的一句适用说明
   help: string
   scopes: KeyScopes
 }
 
+// 不和任何模板一样时选中的卡片
+export const CUSTOM_PRESET = 'custom'
+export const CUSTOM_PRESET_HELP = '逐项勾选下面的表格'
+
 const shared: Layer[] = ['core', 'persona', 'app', 'subject', 'episode']
 
-// 签发 Key 时的常用组合，与设计里的授权表对应；高级模式可以逐项调整
+// 签发 Key 时的常用组合，与设计里的授权表对应；表格里改了任何一格就按 matchPreset 重新对
 export const keyPresets: KeyPreset[] = [
   {
     id: 'agent',
     label: '本机编码 Agent',
-    help: '读写全部归属，最高至私密级，可取用凭据。适用于 Claude Code、Codex 等仅本人使用的 Agent',
+    help: 'Claude Code、Codex 等仅本人使用',
     scopes: {
       readLayers: [...LAYERS],
       writeLayers: [...LAYERS],
@@ -32,7 +37,7 @@ export const keyPresets: KeyPreset[] = [
   {
     id: 'bot',
     label: '群聊机器人',
-    help: '读取通用、人格、应用、联系人与会话，仅写入联系人与会话，最高至公开级。不含所有者的本人记忆',
+    help: '面向他人，不含所有者的本人记忆',
     scopes: {
       readLayers: shared,
       writeLayers: ['subject', 'episode'],
@@ -44,7 +49,7 @@ export const keyPresets: KeyPreset[] = [
   {
     id: 'readonly',
     label: '只读',
-    help: '读取全部归属，最高至私密级，不可写入',
+    help: '检索与预览，不可写入',
     scopes: {
       readLayers: [...LAYERS],
       writeLayers: [],
@@ -85,4 +90,21 @@ export function issuedCredentialCapability(scopes: KeyScopes): CredentialCapabil
   if (!readsUser) return 'none'
   if (scopes.credentials === 'manage' && !scopes.writeLayers.includes('user')) return 'use'
   return scopes.credentials
+}
+
+// 模板按签发人收紧之后的权限：不是空间所有者时凭据能力只能是不可用，卡片上和选中后都是这一份
+export function presetScopes(preset: KeyPreset, isSpaceOwner: boolean): KeyScopes {
+  return {
+    ...preset.scopes,
+    readLayers: [...preset.scopes.readLayers],
+    writeLayers: [...preset.scopes.writeLayers],
+    credentials: allowedCredentialCapability(preset.scopes.credentials, isSpaceOwner),
+  }
+}
+
+// 当前的签发范围和哪个模板完全一样（按签发人收紧之后比），都不一样时是自定义
+export function matchPreset(scopes: KeyScopes, isSpaceOwner: boolean): string {
+  return (
+    keyPresets.find((p) => sameScopes(scopes, presetScopes(p, isSpaceOwner)))?.id ?? CUSTOM_PRESET
+  )
 }

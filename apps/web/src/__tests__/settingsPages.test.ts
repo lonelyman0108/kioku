@@ -1,45 +1,75 @@
 import { SetupRequest } from '@kioku/contracts'
-import { QueryClient } from '@tanstack/vue-query'
+import { QueryClient, VueQueryPlugin } from '@tanstack/vue-query'
 import { describe, expect, it } from 'vitest'
-import { createSSRApp, h, type Component } from 'vue'
+import { createSSRApp, defineComponent, h, nextTick, ref, type Component } from 'vue'
 import { parse } from 'vue/compiler-sfc'
 import { renderToString } from 'vue/server-renderer'
 import { createMemoryHistory, createRouter } from 'vue-router'
 
+import appearanceSettings from '../components/AppearanceSettings.vue?raw'
 import backupSettings from '../components/BackupSettings.vue?raw'
+import dataSettings from '../components/DataSettings.vue?raw'
 import dreamSuggestions from '../components/DreamSuggestions.vue?raw'
 import embeddingChannelRow from '../components/EmbeddingChannelRow.vue?raw'
 import embeddingSettings from '../components/EmbeddingSettings.vue?raw'
 import extractionBudget from '../components/ExtractionBudget.vue?raw'
 import extractionSettings from '../components/ExtractionSettings.vue?raw'
 import loreImport from '../components/LoreImport.vue?raw'
+import masterKeySettings from '../components/MasterKeySettings.vue?raw'
+import modelSettings from '../components/ModelSettings.vue?raw'
 import myDreamSettings from '../components/MyDreamSettings.vue?raw'
 import retentionSettings from '../components/RetentionSettings.vue?raw'
 import spaceExport from '../components/SpaceExport.vue?raw'
+import spaceExtractionSettings from '../components/SpaceExtractionSettings.vue?raw'
 import spaceImport from '../components/SpaceImport.vue?raw'
+import spaceTransferSettings from '../components/SpaceTransferSettings.vue?raw'
+import benchAgent from '../components/BenchAgent.vue?raw'
 import EntryFrame from '../components/strata/EntryFrame.vue'
 import entryFrame from '../components/strata/EntryFrame.vue?raw'
+import SaveBar from '../components/strata/SaveBar.vue'
+import saveBar from '../components/strata/SaveBar.vue?raw'
 import SettingsBlock from '../components/strata/SettingsBlock.vue'
-import SettingsFrame from '../components/strata/SettingsFrame.vue'
+import SettingsFrame, { type SettingsFrameGroup } from '../components/strata/SettingsFrame.vue'
 import settingsFrame from '../components/strata/SettingsFrame.vue?raw'
+import SettingsRow from '../components/strata/SettingsRow.vue'
 import { STACK } from '../components/strata/strata'
 import homePage from '../pages/HomePage.vue?raw'
 import loginPage from '../pages/LoginPage.vue?raw'
 import overviewPage from '../pages/OverviewPage.vue?raw'
 import settingsPage from '../pages/SettingsPage.vue?raw'
 import setupPage from '../pages/SetupPage.vue?raw'
-import spaceSettingsPage from '../pages/SpaceSettingsPage.vue?raw'
 import unavailablePage from '../pages/UnavailablePage.vue?raw'
-import routesSource from '../routes.ts?raw'
-import { retryNavigation, retryTarget } from '../unavailable'
+import { routes } from '../routes'
+import useSessionSource from '../composables/useSession.ts?raw'
+import { fieldProblems, useSavedField } from '../composables/useSavedField'
 import {
+  forgetSpace,
+  ME_KEY,
+  pickSpace,
+  rememberSpace,
+  useSession,
+} from '../composables/useSession'
+import { queryClient as sharedClient } from '../query'
+import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
+import accountSettingsPage from '../pages/AccountSettingsPage.vue?raw'
+import instanceSettingsPage from '../pages/InstanceSettingsPage.vue?raw'
+import spaceSettingsPage from '../pages/SpaceSettingsPage.vue?raw'
+import routesSource from '../routes.ts?raw'
+import settingsSectionsSource from '../settingsSections.ts?raw'
+import {
+  accountSettingsRoute,
   currentSection,
-  INSTANCE_SECTIONS,
   instanceSettingsRoute,
-  sectionQuery,
-  SPACE_SECTIONS,
+  leavesSettingsPage,
+  legacySettingsRedirect,
+  legacySpaceSettingsRedirect,
+  SETTINGS_GROUPS,
+  SETTINGS_SECTIONS,
   spaceSettingsRoute,
+  visibleGroups,
+  visibleSections,
 } from '../settingsSections'
+import { retryNavigation, retryTarget } from '../unavailable'
 
 // 设置、登录、初始化、连接失败。长相改过，表单状态、权限、后果提示这些不能跟着丢
 
@@ -88,7 +118,7 @@ function buttonsOutsideModals(node: TemplateNode): TemplateNode[] {
 const render = async (
   component: Component,
   props: Record<string, unknown>,
-  slots: Record<string, () => unknown> = {},
+  slots: Record<string, (...args: never[]) => unknown> = {},
   url = '/',
 ) => {
   const router = createRouter({
@@ -111,83 +141,330 @@ const settingsSources = {
   SpaceImport: spaceImport,
   SpaceExport: spaceExport,
   LoreImport: loreImport,
+  AppearanceSettings: appearanceSettings,
+  SpaceExtractionSettings: spaceExtractionSettings,
+  SpaceTransferSettings: spaceTransferSettings,
+  ModelSettings: modelSettings,
+  MasterKeySettings: masterKeySettings,
+  DataSettings: dataSettings,
   SettingsPage: settingsPage,
-  SpaceSettingsPage: spaceSettingsPage,
 }
 
-describe('小节记在地址里', () => {
-  it('地址里写了存在的小节就看它，其余看第一节', () => {
-    expect(currentSection(SPACE_SECTIONS, 'import')).toBe('import')
-    expect(currentSection(SPACE_SECTIONS, undefined)).toBe('budget')
-    expect(currentSection(SPACE_SECTIONS, 'nonsense')).toBe('budget')
-    expect(currentSection(SPACE_SECTIONS, ['import'])).toBe('budget')
-    // 分区默认层这一节去掉了：旧地址落到第一节
-    expect(currentSection(SPACE_SECTIONS, 'layers')).toBe('budget')
-    expect(currentSection(INSTANCE_SECTIONS, 'master-key')).toBe('master-key')
+const keysOf = (group: string) =>
+  SETTINGS_SECTIONS.filter((s) => s.group === group).map((s) => s.key)
+const admin = { isAdmin: true, role: 'owner' as const }
+const member = { isAdmin: false, role: 'viewer' as const }
+
+describe('小节的注册', () => {
+  it('三组按左栏的顺序，组内顺序和 demo 一致', () => {
+    expect(SETTINGS_GROUPS.map((g) => [g.key, g.label])).toEqual([
+      ['account', '个人'],
+      ['space', '空间'],
+      ['instance', '实例'],
+    ])
+    expect(keysOf('account')).toEqual(['appearance'])
+    expect(keysOf('space')).toEqual(['extraction', 'transfer'])
+    expect(keysOf('instance')).toEqual(['spaces', 'models', 'security', 'data'])
+    expect(SETTINGS_SECTIONS.map((s) => s.label)).toEqual([
+      '外观',
+      '抽取与整理',
+      '导入与导出',
+      '空间',
+      '模型',
+      '安全',
+      '数据与保留',
+    ])
   })
 
-  it('导入按来源分块，小节名和子导航上不写来源', () => {
-    for (const section of [...SPACE_SECTIONS, ...INSTANCE_SECTIONS]) {
+  it('每个小节都有图标，图标都登记过；小节名不写来源', () => {
+    for (const section of SETTINGS_SECTIONS) {
+      expect(section.icon, section.key).toMatch(/^i-lucide-/)
       expect(section.label).not.toContain('Lore')
     }
-    expect(SPACE_SECTIONS.find((s) => s.key === 'import')?.label).toBe('导入')
-    const importSlot = elementsOf(template(spaceSettingsPage)).find(
-      (el) => el.tag === 'template' && directive(el, 'slot')?.arg?.content === 'import',
-    )!
-    const block = elementsOf(importSlot).find((el) => el.tag === 'SettingsBlock')!
-    expect(attr(block, 'title')).toBe('导入')
-    expect(elementsOf(block).some((el) => el.tag === 'LoreImport')).toBe(true)
-    const lore = elementsOf(template(loreImport)).find((el) => el.tag === 'SettingsBlock')!
-    expect(attr(lore, 'title')).toBe('Lore')
-    expect(bound(lore, 'level')).toBe('3')
   })
 
-  it('改过名的小节：旧地址落到改名后的那一节，只在原来那个设置页里认', () => {
-    expect(currentSection(SPACE_SECTIONS, 'lore')).toBe('import')
-    expect(currentSection(SPACE_SECTIONS, ['lore'])).toBe('budget')
-    expect(currentSection(INSTANCE_SECTIONS, 'lore')).toBe('embedding')
+  it('小节的组件按需加载', () => {
+    const registry = /export const SETTINGS_SECTIONS = \[[^]*?\] as const/.exec(
+      settingsSectionsSource,
+    )![0]
+    expect(registry.match(/component: lazy\(\(\) => import\(/g)).toHaveLength(
+      SETTINGS_SECTIONS.length,
+    )
   })
 
-  it('第一节是默认的，不写进地址', () => {
-    expect(sectionQuery(INSTANCE_SECTIONS, 'embedding')).toEqual({})
-    expect(sectionQuery(INSTANCE_SECTIONS, 'backup')).toEqual({ section: 'backup' })
+  it('个人组一直有；空间组要有空间；实例组只给实例管理员', () => {
+    expect(visibleGroups({ ...admin, hasSpace: true })).toEqual(['account', 'space', 'instance'])
+    expect(visibleGroups({ ...member, hasSpace: true })).toEqual(['account', 'space'])
+    expect(visibleGroups({ ...member, hasSpace: false })).toEqual(['account'])
+    expect(visibleSections('space', member).map((s) => s.key)).toEqual(['extraction', 'transfer'])
   })
 
-  it('别的页面链到具体的小节：调整预算不用再自己找', () => {
-    expect(spaceSettingsRoute('s1', 'budget')).toEqual({
+  it('地址里的小节不存在或看不到时看第一个看得到的', () => {
+    const sections = visibleSections('instance', admin)
+    expect(currentSection(sections, 'data')?.key).toBe('data')
+    expect(currentSection(sections, undefined)?.key).toBe('spaces')
+    expect(currentSection(sections, 'nonsense')?.key).toBe('spaces')
+    expect(currentSection(sections, ['data'])?.key).toBe('spaces')
+    expect(currentSection([], 'data')).toBeUndefined()
+  })
+})
+
+describe('设置的地址', () => {
+  const children = routes.find((r) => r.path === '/')!.children!
+  const record = (name: string) => children.find((r) => r.name === name)!
+
+  it('三组各一个地址，各是一个路由组件：换组时换掉整页，离开前的确认各组自己注册', () => {
+    expect(record('account-settings').path).toBe('settings/account/:section?')
+    expect(record('space-settings').path).toBe('spaces/:spaceId/settings/:section?')
+    expect(record('instance-settings').path).toBe('settings/instance/:section?')
+    const components = ['account-settings', 'space-settings', 'instance-settings'].map(
+      (name) => record(name).component,
+    )
+    expect(new Set(components).size).toBe(3)
+    for (const [name, page] of [
+      ['account', accountSettingsPage],
+      ['space', spaceSettingsPage],
+      ['instance', instanceSettingsPage],
+    ] as const) {
+      expect(page, name).toContain(`<SettingsPage group="${name}" />`)
+      expect(routesSource).toContain(
+        `import('./pages/${name[0]!.toUpperCase()}${name.slice(1)}SettingsPage.vue')`,
+      )
+    }
+  })
+
+  it('实例组只给管理员', () => {
+    expect(record('instance-settings').meta).toEqual({ requiresAdmin: true })
+    expect(routesSource).toContain('if (to.meta.requiresAdmin && !me.isAdmin)')
+  })
+
+  it('旧的实例设置地址跳到合并后的小节，不带小节的去个人组', () => {
+    const redirect = record('settings').redirect as (to: unknown) => unknown
+    const go = (query: Record<string, string>) => redirect({ query })
+    const to = (section: string) => ({
+      name: 'instance-settings',
+      params: { section },
+      query: {},
+    })
+    expect(go({ section: 'embedding' })).toEqual(to('models'))
+    expect(go({ section: 'extraction' })).toEqual(to('models'))
+    expect(go({ section: 'master-key' })).toEqual(to('security'))
+    for (const section of ['backup', 'retention', 'recall']) {
+      expect(go({ section })).toEqual(to('data'))
+    }
+    expect(go({ section: 'import' })).toEqual(to('spaces'))
+    expect(go({})).toEqual({ name: 'account-settings', params: {}, query: {} })
+    expect(go({ section: 'constructor' })).toEqual(accountSettingsRoute())
+    expect(legacySettingsRedirect({ section: ['backup'] })).toEqual(accountSettingsRoute())
+  })
+
+  it('旧的空间设置地址跳到合并后的小节', () => {
+    const enter = record('space-settings').beforeEnter as (to: unknown) => unknown
+    const go = (section: string | undefined, query: Record<string, string>) =>
+      enter({ params: { spaceId: 's1', ...(section ? { section } : {}) }, query })
+    const to = (section?: string) => ({
       name: 'space-settings',
-      params: { spaceId: 's1' },
-      query: { section: 'budget' },
+      params: section ? { spaceId: 's1', section } : { spaceId: 's1' },
+      query: {},
     })
-    expect(instanceSettingsRoute('backup')).toEqual({
-      name: 'settings',
-      query: { section: 'backup' },
+    expect(go(undefined, { section: 'budget' })).toEqual(to('extraction'))
+    expect(go(undefined, { section: 'dream' })).toEqual(to('extraction'))
+    for (const section of ['export', 'import', 'lore']) {
+      expect(go(undefined, { section })).toEqual(to('transfer'))
+    }
+    expect(go(undefined, { section: 'layers' })).toEqual(to())
+    expect(go(undefined, {})).toBe(true)
+    expect(go('transfer', { section: 'budget' })).toBe(true)
+    expect(legacySpaceSettingsRedirect('s1', {})).toBeNull()
+  })
+
+  it('别的页面链到合并后的小节', () => {
+    expect(spaceSettingsRoute('s1', 'extraction')).toEqual({
+      name: 'space-settings',
+      params: { spaceId: 's1', section: 'extraction' },
+      query: {},
     })
-    expect(overviewPage).toContain(`:to="spaceSettingsRoute(spaceId, 'budget')"`)
-    expect(overviewPage).toContain(`:to="instanceSettingsRoute('backup')"`)
-    expect(dreamSuggestions).toContain(`:to="spaceSettingsRoute(spaceId, 'dream')"`)
+    expect(instanceSettingsRoute('data')).toEqual({
+      name: 'instance-settings',
+      params: { section: 'data' },
+      query: {},
+    })
+    expect(overviewPage).toContain(`:to="spaceSettingsRoute(spaceId, 'extraction')"`)
+    expect(overviewPage).toContain(`:to="instanceSettingsRoute('data')"`)
+    expect(overviewPage).toContain(`:to="instanceSettingsRoute('models')"`)
+    expect(overviewPage).not.toContain("name: 'settings'")
+    expect(dreamSuggestions).toContain(`:to="spaceSettingsRoute(spaceId, 'extraction')"`)
+    expect(benchAgent).toContain("to: instanceSettingsRoute('models')")
+  })
+
+  it('同一组里换空间算离开，换小节不算；换组是换路由组件，由离开路由的确认处理', () => {
+    const at = (section: string, spaceId?: string) => ({
+      params: { section, ...(spaceId ? { spaceId } : {}) },
+    })
+    expect(leavesSettingsPage(at('data'), at('models'))).toBe(false)
+    expect(leavesSettingsPage(at('transfer', 's1'), at('extraction', 's1'))).toBe(false)
+    expect(leavesSettingsPage(at('extraction', 's2'), at('extraction', 's1'))).toBe(true)
+    // 外壳不再给页面加 key
+    expect(consoleLayout).toContain('<RouterView v-else />')
+    expect(consoleLayout).not.toContain('settingsPageKey')
+  })
+
+  it('换空间之后小节按新空间重新挂上，旧空间的改动标记清掉', () => {
+    const component = elementsOf(template(settingsPage)).find((el) => el.tag === 'component')!
+    expect(bound(component, 'key')).toBe('`${section}:${spaceKey}`')
+    expect(scriptOf(settingsPage)).toMatch(
+      /watch\(spaceKey, \(\) => \{\s*for \(const key of Object\.keys\(dirty\)\) delete dirty\[key\]/,
+    )
+  })
+
+  it('个人与实例页面上的空间组是最近访问的空间，不是第一个', () => {
+    const a = { id: 'a', name: 'A', role: 'owner' as const }
+    const b = { id: 'b', name: 'B', role: 'editor' as const }
+    // 地址里有空间时只认它，不是成员就是 null
+    expect(pickSpace([a, b], 'b', 'a')).toBe(b)
+    expect(pickSpace([a, b], 'c', 'a')).toBeNull()
+    // 地址里没有时取最近访问的；它已不在成员的空间里时退回第一个
+    expect(pickSpace([a, b], undefined, 'b')).toBe(b)
+    expect(pickSpace([a, b], undefined, 'gone')).toBe(a)
+    expect(pickSpace([a, b], undefined, null)).toBe(a)
+    expect(pickSpace([], undefined, 'b')).toBeNull()
+    // 进入带空间的地址（导航成功）时记下，sessionStorage 读写出错时只在内存里记
+    expect(routesSource).toContain(
+      "if (!failure && typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)",
+    )
+    expect(useSessionSource).toMatch(/try \{\s*return sessionStorage\.getItem/)
+    expect(useSessionSource).toMatch(/try \{\s*sessionStorage\.setItem/)
+  })
+
+  const me = {
+    id: 'u',
+    username: 'u',
+    displayName: 'U',
+    isAdmin: false,
+    spaces: [
+      { id: 'a', name: '空间甲', role: 'owner' as const },
+      { id: 'b', name: '空间乙', role: 'editor' as const },
+    ],
+  }
+  // 不带空间的地址上 useSession 给的空间名
+  const spaceOnAccountPage = async () => {
+    const client = new QueryClient()
+    client.setQueryData(ME_KEY, me)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/settings/account', component: { render: () => null } }],
+    })
+    await router.push('/settings/account')
+    const Probe = defineComponent(() => {
+      const { space } = useSession()
+      return () => space.value?.name ?? ''
+    })
+    const app = createSSRApp(Probe)
+    app.use(router)
+    app.use(VueQueryPlugin, { queryClient: client })
+    return renderToString(app)
+  }
+
+  it('只记当前账号是成员的空间；退出登录、会话失效时清掉', async () => {
+    sharedClient.setQueryData(ME_KEY, me)
+    forgetSpace()
+    rememberSpace('b')
+    expect(await spaceOnAccountPage()).toBe('空间乙')
+    // 不是成员的地址不顶掉上一次的空间
+    rememberSpace('not-a-member')
+    expect(await spaceOnAccountPage()).toBe('空间乙')
+    forgetSpace()
+    expect(await spaceOnAccountPage()).toBe('空间甲')
+    // 没登录时不记
+    sharedClient.setQueryData(ME_KEY, null)
+    rememberSpace('b')
+    sharedClient.setQueryData(ME_KEY, me)
+    expect(await spaceOnAccountPage()).toBe('空间甲')
+    expect(consoleLayout).toContain('if (m === null) forgetSpace()')
+    const logout = consoleLayout.slice(consoleLayout.indexOf('async function logout'))
+    expect(logout.indexOf('forgetSpace()')).toBeLessThan(logout.indexOf('queryClient.clear()'))
+    sharedClient.clear()
+  })
+
+  it('在空间 B 里打开过设置，到个人页面时空间组还是 B', async () => {
+    const client = new QueryClient()
+    client.setQueryData(ME_KEY, me)
+    sharedClient.setQueryData(ME_KEY, me)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [
+        { path: '/spaces/:spaceId', component: { render: () => null } },
+        { path: '/settings/account', component: { render: () => null } },
+      ],
+    })
+    router.afterEach((to) => {
+      if (typeof to.params.spaceId === 'string') rememberSpace(to.params.spaceId)
+    })
+    await router.push('/spaces/b')
+    await router.push('/settings/account')
+    const Probe = defineComponent(() => {
+      const { space } = useSession()
+      return () => space.value?.name ?? ''
+    })
+    const app = createSSRApp(Probe)
+    app.use(router)
+    app.use(VueQueryPlugin, { queryClient: client })
+    expect(await renderToString(app)).toBe('空间乙')
   })
 })
 
 describe('设置页的骨架', () => {
-  const frame = (url: string, unsaved: string[] = []) =>
+  const groups: SettingsFrameGroup[] = [
+    {
+      key: 'account',
+      label: '个人',
+      icon: 'i-lucide-user',
+      aside: '审阅者',
+      sections: [{ key: 'appearance', label: '外观', icon: 'i-lucide-sun-moon', to: '/a' }],
+    },
+    {
+      key: 'instance',
+      label: '实例',
+      icon: 'i-lucide-server',
+      aside: '仅管理员',
+      sections: [
+        { key: 'models', label: '模型', icon: 'i-lucide-cpu', to: '/i/models' },
+        { key: 'data', label: '数据与保留', icon: 'i-lucide-database', to: '/i/data' },
+      ],
+    },
+  ]
+  const frame = (current: string, unsavedKey?: string) =>
     render(
       SettingsFrame,
-      { title: '空间设置', sections: SPACE_SECTIONS, unsaved },
-      Object.fromEntries(SPACE_SECTIONS.map((s) => [s.key, () => `内容 ${s.key}`])),
-      url,
+      {
+        group: 'instance',
+        current,
+        groups: groups.map((g) => ({
+          ...g,
+          sections: g.sections.map((s) => ({ ...s, unsaved: s.key === unsavedKey })),
+        })),
+      },
+      { default: ({ section }: { section: string }) => `内容 ${section}` },
     )
   // 渲染结果里一个小节的 section 标签
   const sectionTag = (html: string, label: string) =>
     new RegExp(`<section[^>]*aria-label="${label}"[^>]*>`).exec(html)![0]
   const currentLinks = (html: string) => [...html.matchAll(/<a[^>]*aria-current="page"[^>]*>/g)]
 
-  it('所有小节一直挂着，只显示当前这一节', async () => {
-    const html = await frame('/?section=dream')
-    for (const section of SPACE_SECTIONS) expect(html).toContain(`内容 ${section.key}`)
-    expect(sectionTag(html, '整理')).not.toContain('display:none')
-    expect(sectionTag(html, '抽取预算')).toContain('display:none')
-    expect(sectionTag(html, '导入')).toContain('display:none')
+  it('左栏列出所有组和组标题右边的一句', async () => {
+    const html = await frame('data')
+    for (const text of ['个人', '审阅者', '外观', '实例', '仅管理员', '模型', '数据与保留']) {
+      expect(html).toContain(text)
+    }
+  })
+
+  it('当前这一组的小节一直挂着，只显示当前这一节；别的组不挂', async () => {
+    const html = await frame('data')
+    expect(html).toContain('内容 models')
+    expect(html).toContain('内容 data')
+    expect(html).not.toContain('内容 appearance')
+    expect(sectionTag(html, '数据与保留')).not.toContain('display:none')
+    expect(sectionTag(html, '模型')).toContain('display:none')
   })
 
   it('模板里用 v-show 不用 v-if：切走再回来，填了一半的表单还在', () => {
@@ -196,39 +473,27 @@ describe('设置页的骨架', () => {
     expect(directive(section, 'if')).toBeUndefined()
   })
 
-  it('旧地址 section=lore 显示导入，子导航标出的也是导入', async () => {
-    const html = await frame('/?section=lore')
-    expect(sectionTag(html, '导入')).not.toContain('display:none')
-    expect(sectionTag(html, '抽取预算')).toContain('display:none')
-    const current = currentLinks(html)
+  it('只标出当前组里的当前小节', async () => {
+    const current = currentLinks(await frame('data'))
     expect(current).toHaveLength(1)
-    expect(current[0]![0]).toContain('section=import')
+    expect(current[0]![0]).toContain('href="/i/data"')
   })
 
-  it('子导航标出当前小节，地址不对时是第一节', async () => {
-    const dream = currentLinks(await frame('/?section=dream'))
-    expect(dream).toHaveLength(1)
-    expect(dream[0]![0]).toContain('section=dream')
-    const fallback = currentLinks(await frame('/?section=nonsense'))
-    expect(fallback).toHaveLength(1)
-    expect(fallback[0]![0]).not.toContain('section=')
-  })
-
-  it('切小节不留历史记录，返回键直接离开设置页', () => {
+  it('组内切小节不留历史记录，换组照常留', () => {
     const link = elementsOf(template(settingsFrame)).find((el) => el.tag === 'RouterLink')!
-    expect(link.props?.some((p) => p.name === 'replace')).toBe(true)
-    expect(bound(link, 'to')).toBe('{ query: sectionQuery(sections, section.key) }')
+    expect(bound(link, 'replace')).toBe('g.key === group')
+    expect(bound(link, 'to')).toBe('section.to')
   })
 
-  it('有未保存改动的小节在子导航上标出来', async () => {
-    const html = await frame('/', ['budget'])
+  it('有未保存改动的小节在左栏标出来', async () => {
+    const html = await frame('models', 'data')
     const tabs = [...html.matchAll(/<a[^>]*>.*?<\/a>/g)].map((m) => m[0])
     expect(
-      tabs.filter((tab) => tab.includes('未保存')).map((tab) => tab.includes('抽取预算')),
+      tabs.filter((tab) => tab.includes('未保存')).map((tab) => tab.includes('数据与保留')),
     ).toEqual([true])
   })
 
-  it('切换时记下滚动位置，当前小节滚进子导航的可见范围', () => {
+  it('切换时记下滚动位置，当前小节滚进左栏的可见范围', () => {
     const script = scriptOf(settingsFrame)
     expect(script).toContain('positions.set(previous, area.scrollTop)')
     expect(script).toContain('area.scrollTop = positions.get(next) ?? 0')
@@ -244,6 +509,7 @@ describe('一块设置', () => {
       { note: () => '每天备份', default: () => '表单' },
     )
     expect(withNote).toContain('备份')
+    expect(withNote).toContain('<h3')
     expect(withNote).toContain('block-note')
     expect(withNote).toContain('表单')
     expect(withNote).not.toContain('under-heading')
@@ -258,27 +524,236 @@ describe('一块设置', () => {
   })
 })
 
-describe('两个设置页', () => {
-  const slotsOf = (source: string) =>
-    (template(source).children ?? [])
-      .flatMap((n) => n.children ?? [])
-      .filter((n) => n.type === ELEMENT && n.tag === 'template')
-      .map((n) => directive(n, 'slot')?.arg?.content)
-
-  it('每个小节都有内容，顺序和子导航一样', () => {
-    expect(slotsOf(settingsPage)).toEqual(INSTANCE_SECTIONS.map((s) => s.key))
-    expect(slotsOf(spaceSettingsPage)).toEqual(SPACE_SECTIONS.map((s) => s.key))
+describe('设置行与保存条', () => {
+  it('设置行：名称、说明、控件、取值来源', async () => {
+    const html = await render(
+      SettingsRow,
+      { label: '最低分', description: '低于它的不注入', for: 'min-score' },
+      { default: () => '控件', source: () => '沿用实例' },
+    )
+    expect(html).toContain('<label for="min-score"')
+    for (const text of ['最低分', '低于它的不注入', '控件', '沿用实例']) {
+      expect(html).toContain(text)
+    }
+    const bare = await render(SettingsRow, { label: '主题' }, { default: () => '控件' })
+    expect(bare).not.toContain('row-source')
+    expect(bare).not.toContain('row-description')
+    expect(bare).not.toContain('<label')
   })
 
-  it('页面都换成了新骨架', () => {
+  it('有填得不对的项时保存条写出原因', async () => {
+    const html = await render(SaveBar, { count: 1, problem: '保留天数超出范围' })
+    expect(html).toContain('保留天数超出范围')
+    expect(await render(SaveBar, { count: 1 })).not.toContain('save-problem')
+  })
+
+  it('保存条：写改了几项，没有改动时不显示', async () => {
+    expect(await render(SaveBar, { count: 2 })).toContain('2 项未保存')
+    expect(await render(SaveBar, { count: 0 })).not.toContain('未保存')
+    // 保存刚发出去、改动已经算不出时，条还在，按钮都不能点
+    expect(await render(SaveBar, { count: 0, saving: true })).toContain('save-bar')
+  })
+
+  it('保存是提交按钮，保存中两个按钮都不能点', () => {
+    const buttons = elementsOf(template(saveBar)).filter((el) => el.tag === 'UButton')
+    const save = buttons.find((b) => textOf(b) === '保存')!
+    expect(attr(save, 'type')).toBe('submit')
+    expect(bound(save, 'loading')).toBe('props.saving')
+    expect(bound(save, 'disabled')).toBe('props.saving || Boolean(props.problem)')
+    const discard = buttons.find((b) => textOf(b) === '放弃')!
+    expect(bound(discard, 'disabled')).toBe('props.saving')
+    expect(attr(discard, 'color')).toBe('neutral')
+    expect(handler(discard, 'click')).toBe("emit('discard')")
+  })
+
+  it('用保存条的表单：保存条在表单里，放弃回到读到的值', () => {
+    for (const [name, source] of [
+      ['ExtractionBudget', extractionBudget],
+      ['RetentionSettings', retentionSettings],
+    ] as const) {
+      const form = elementsOf(template(source)).find((el) => el.tag === 'form')!
+      const bar = elementsOf(form).find((el) => el.tag === 'SaveBar')!
+      expect(bar, name).toBeDefined()
+      expect(handler(bar, 'discard'), name).toBe('discard')
+      expect(bound(bar, 'count'), name).toBe('changedCount')
+      expect(bound(bar, 'saving'), name).toBe('saving')
+    }
+  })
+
+  it('保留期的两项只存改了的：分别调各自的接口，失败用 toast', () => {
+    const save = /async function save\(\)[^]*?\n\}/.exec(scriptOf(retentionSettings))![0]
+    expect(save).toContain('if (saving.value || changedCount.value === 0 || problem.value) return')
+    expect(save).toContain('const retention = days.changed.value ? days.value.value : null')
+    expect(save).toContain(
+      'const recall = recallDays.changed.value ? recallDays.value.value : null',
+    )
+    expect(save).toContain('days.commit(retention, saved.days)')
+    expect(save).toContain('recallDays.commit(recall, saved.retentionDays)')
+    expect(save).toContain('api.saveRetentionDays({ days: retention })')
+    expect(save).toContain('api.saveRecallSettings({ retentionDays: recall })')
+    expect(save).toContain('Promise.allSettled(')
+    expect(save).toContain("color: 'error'")
+    // 召回分析与概览的「从未被召回」都按召回明细的保留天数算
+    expect(save).toContain("invalidateQueries({ queryKey: ['recall-stats'] })")
+    expect(save).toContain("invalidateQueries({ queryKey: ['overview'] })")
+  })
+})
+
+describe('数值设置的表单值', () => {
+  const setup = () => {
+    const saved = ref<number | undefined>(undefined)
+    const field = useSavedField(() => saved.value, { min: 1, max: 3650 })
+    return { saved, field }
+  }
+  const loaded = async (initial = 30) => {
+    const it = setup()
+    it.saved.value = initial
+    await nextTick()
+    return it
+  }
+
+  it('读到之前不算改动，读到后表单跟上', async () => {
+    const { saved, field } = setup()
+    expect(field.changed.value).toBe(false)
+    saved.value = 30
+    await nextTick()
+    expect(field.value.value).toBe(30)
+    expect(field.baseline.value).toBe(30)
+    expect(field.changed.value).toBe(false)
+  })
+
+  it('别处改了、本地没动：表单与基准一起跟上，不算未保存', async () => {
+    const { saved, field } = await loaded()
+    saved.value = 45
+    await nextTick()
+    expect(field.value.value).toBe(45)
+    expect(field.changed.value).toBe(false)
+  })
+
+  it('本地改过：输入留着，基准跟着服务端最新的值；放弃回到最新的值', async () => {
+    const { saved, field } = await loaded()
+    field.value.value = 45
+    saved.value = 60
+    await nextTick()
+    expect(field.value.value).toBe(45)
+    expect(field.baseline.value).toBe(60)
+    expect(field.changed.value).toBe(true)
+    field.reset()
+    expect(field.value.value).toBe(60)
+    expect(field.changed.value).toBe(false)
+  })
+
+  it('本地改成和服务端新值一样：不算改动', async () => {
+    const { saved, field } = await loaded()
+    field.value.value = 60
+    saved.value = 60
+    await nextTick()
+    expect(field.changed.value).toBe(false)
+  })
+
+  it('保存之后以存下的值为基准；保存期间又改了输入时留着新输入', async () => {
+    const done = await loaded()
+    done.field.value.value = 60
+    done.field.commit(60, 60)
+    expect(done.field.value.value).toBe(60)
+    expect(done.field.changed.value).toBe(false)
+
+    const typing = await loaded()
+    typing.field.value.value = 60
+    // 请求发出之后又输入了 70
+    typing.field.value.value = 70
+    typing.field.commit(60, 60)
+    expect(typing.field.value.value).toBe(70)
+    expect(typing.field.baseline.value).toBe(60)
+    expect(typing.field.changed.value).toBe(true)
+  })
+
+  it('清空、小数、超出范围都算不合法，并说出是哪一种', async () => {
+    const { field } = await loaded()
+    const cases: [number | null | undefined, string][] = [
+      [null, 'empty'],
+      [undefined, 'empty'],
+      [1.5, 'fraction'],
+      [0, 'range'],
+      [3651, 'range'],
+    ]
+    for (const [bad, issue] of cases) {
+      field.value.value = bad
+      expect(field.issue.value, String(bad)).toBe(issue)
+      expect(field.invalid.value, String(bad)).toBe(true)
+    }
+    field.value.value = 3650
+    expect(field.issue.value).toBeNull()
+  })
+
+  it('保存条上写出是哪一项、怎么不对', () => {
+    expect(
+      fieldProblems([
+        { label: '已删除的记忆', issue: 'empty' },
+        { label: '召回明细', issue: 'fraction' },
+      ]),
+    ).toBe('已删除的记忆：未填写；召回明细：需为整数')
+    expect(fieldProblems([{ label: '召回明细', issue: null }])).toBeNull()
+  })
+
+  it('保留期与抽取预算都用它：不合法时禁用保存，那一行写出范围（完整的句子带句号）', () => {
+    for (const [name, source, fields] of [
+      ['RetentionSettings', retentionSettings, ['days', 'recallDays']],
+      ['ExtractionBudget', extractionBudget, ['monthly', 'daily']],
+    ] as const) {
+      const elements = elementsOf(template(source))
+      expect(
+        bound(
+          elements.find((el) => el.tag === 'SaveBar')!,
+          'problem',
+        ),
+        name,
+      ).toBe('problem')
+      expect(source, name).toContain('fieldProblems([')
+      const notes = elements.filter(
+        (el) => el.tag === 'p' && condition(el)?.endsWith('.invalid.value'),
+      )
+      expect(notes.map(condition), name).toEqual(fields.map((f) => `${f}.invalid.value`))
+      for (const note of notes) expect(textOf(note), name).toMatch(/^请填写 .+ 之间的整数。$/)
+      const save = /async function save\(\)[^]*?\n\}/.exec(scriptOf(source))![0]
+      expect(save, name).toContain(
+        'if (saving.value || changedCount.value === 0 || problem.value) return',
+      )
+    }
+    expect(extractionBudget).toContain('monthly.commit(monthlyTokens, saved.monthlyTokens)')
+    expect(extractionBudget).toContain(
+      'daily.commit(dailyWritesPerSubject, saved.dailyWritesPerSubject)',
+    )
+    expect(extractionBudget).not.toContain('form.monthlyTokens')
+  })
+
+  it('缩短保留期的警告和改动、保存一样拿基准比', () => {
+    const shortened = /const shortened = computed\(\(\) => \{[^]*?\n\}\)/.exec(
+      scriptOf(retentionSettings),
+    )![0]
+    expect(shortened).toContain('const base = days.baseline.value')
+    expect(shortened).not.toContain('view.value.days')
+  })
+})
+
+describe('设置页', () => {
+  it('页面换成了新骨架，没有老外壳', () => {
     for (const [name, source] of Object.entries(settingsSources)) {
       for (const old of ['UDashboardPanel', 'UDashboardNavbar', '<UCard', '<UAlert', '<UBadge']) {
         expect(source, `${name} ${old}`).not.toContain(old)
       }
     }
     expect(settingsPage).toContain('<SettingsFrame')
-    expect(spaceSettingsPage).toContain('<SettingsFrame')
     expect(homePage).not.toContain('UDashboardPanel')
+  })
+
+  it('小节的组件经 v-model:dirty 把改动报给页面', () => {
+    const component = elementsOf(template(settingsPage)).find((el) => el.tag === 'component')!
+    expect(directive(component, 'model')?.arg?.content).toBe('dirty')
+    expect(directive(component, 'model')?.exp?.content).toBe('dirty[section]')
+    expect(scriptOf(settingsPage)).toContain(
+      'unsaved: key === group.value && Boolean(dirty[section.key])',
+    )
   })
 
   it('敏感级不再用彩色徽章', () => {
@@ -291,55 +766,63 @@ describe('两个设置页', () => {
     ).toBe('sensitivityOf(node, target)')
   })
 
-  it('空间设置只注册一份未保存确认，切小节不算离开，换空间算', () => {
-    const script = scriptOf(spaceSettingsPage)
+  it('只注册一份未保存确认，组内切小节不算离开，换组、换空间算', () => {
+    const script = scriptOf(settingsPage)
     expect(script.match(/useUnsavedChangesGuard\(/g)).toHaveLength(1)
-    expect(script).toContain('useUnsavedChangesGuard(budgetDirty')
-    expect(script).toContain('leavesOn: (to, from) => to.params.spaceId !== from.params.spaceId')
+    expect(script).toContain('useUnsavedChangesGuard(anyDirty, { leavesOn: leavesSettingsPage })')
     for (const [name, source] of Object.entries(settingsSources)) {
-      if (name === 'SpaceSettingsPage') continue
+      if (name === 'SettingsPage') continue
       expect(source, name).not.toContain('useUnsavedChangesGuard(')
     }
   })
 
-  it('预算的改动还报给页面', () => {
-    const budget = elementsOf(template(spaceSettingsPage)).find(
+  it('合在一页的小节把各自的改动合起来报给页面', () => {
+    const models = elementsOf(template(modelSettings))
+    expect(
+      ['EmbeddingSettings', 'ExtractionSettings'].map(
+        (tag) =>
+          directive(
+            models.find((e) => e.tag === tag)!,
+            'model',
+          )?.exp?.content,
+      ),
+    ).toEqual(['dirty.embedding', 'dirty.extraction'])
+    expect(modelSettings).toContain(
+      "const dirty = useDirtyParts(dirtyModel, ['embedding', 'extraction'])",
+    )
+    const data = elementsOf(template(dataSettings))
+    expect(
+      ['RetentionSettings', 'BackupSettings'].map(
+        (tag) =>
+          directive(
+            data.find((e) => e.tag === tag)!,
+            'model',
+          )?.exp?.content,
+      ),
+    ).toEqual(['dirty.retention', 'dirty.backup'])
+    expect(dataSettings).toContain(
+      "const dirty = useDirtyParts(dirtyModel, ['retention', 'backup'])",
+    )
+    const budget = elementsOf(template(spaceExtractionSettings)).find(
       (el) => el.tag === 'ExtractionBudget',
     )!
-    expect(directive(budget, 'model')?.arg?.content).toBe('dirty')
-    expect(directive(budget, 'model')?.exp?.content).toBe('budgetDirty')
+    expect(directive(budget, 'model')?.exp?.content).toBe('dirty')
     expect(extractionBudget).toContain('watch(dirty, (d) => (dirtyModel.value = d)')
-  })
-
-  it('实例设置的表单把改动报给页面，切走之后子导航上看得到', () => {
-    const elements = elementsOf(template(settingsPage))
-    for (const [tag, key] of [
-      ['EmbeddingSettings', 'embedding'],
-      ['ExtractionSettings', 'extraction'],
-      ['BackupSettings', 'backup'],
-      ['RetentionSettings', 'retention'],
-    ] as const) {
-      const el = elements.find((e) => e.tag === tag)!
-      expect(directive(el, 'model')?.exp?.content, tag).toBe(`dirty.${key}`)
-    }
+    expect(extractionBudget).toContain('const dirty = computed(() => changedCount.value > 0)')
     expect(scriptOf(embeddingSettings).match(/\[activeDirty, nextDirty\]/g)).toHaveLength(1)
     expect(embeddingSettings).toContain('dirtyModel.value = a || n')
     expect(extractionSettings).toContain('dirtyModel.value = changed')
     expect(backupSettings).toContain('dirtyModel.value = changed')
     expect(retentionSettings).toContain('(changed) => (dirtyModel.value = changed)')
-    expect(scriptOf(settingsPage)).toContain("...(recallDirty.value ? ['recall'] : [])")
   })
 
   it('回车提交还在：每个表单提交到原来的处理函数，都有提交按钮', () => {
     const forms: [string, string, string][] = [
-      ['SettingsPage', settingsPage, 'saveRetention'],
       ['EmbeddingSettings', embeddingSettings, 'saveActive'],
       ['EmbeddingSettings', embeddingSettings, 'saveNext'],
       ['EmbeddingSettings', embeddingSettings, 'askStart'],
       ['ExtractionSettings', extractionSettings, 'save'],
-      ['ExtractionBudget', extractionBudget, 'save'],
       ['BackupSettings', backupSettings, 'save'],
-      ['RetentionSettings', retentionSettings, 'save'],
       ['SpaceExport', spaceExport, 'exportSpace'],
       ['SpaceImport', spaceImport, 'preview ? importSpace() : inspect()'],
     ]
@@ -353,14 +836,29 @@ describe('两个设置页', () => {
         `${name} ${submit}`,
       ).toBe(true)
     }
+    // 保存条里的保存是提交按钮
+    for (const [name, source] of [
+      ['ExtractionBudget', extractionBudget],
+      ['RetentionSettings', retentionSettings],
+    ] as const) {
+      const form = elementsOf(template(source)).find(
+        (el) => el.tag === 'form' && handler(el, 'submit') === 'save',
+      )
+      expect(form, name).toBeDefined()
+      expect(
+        elementsOf(form!).some((el) => el.tag === 'SaveBar'),
+        name,
+      ).toBe(true)
+    }
   })
 
   it('一页只有一个实心按钮，砖红只给破坏性操作', () => {
-    for (const [name, source] of Object.entries(settingsSources)) {
+    for (const [name, source] of Object.entries({ ...settingsSources, SaveBar: saveBar })) {
       const buttons = buttonsOutsideModals(template(source))
-      const solid = buttons.filter((b) => !attr(b, 'variant'))
+      // 外观的主题按钮按当前选择切换样式，不算固定的实心按钮
+      const solid = buttons.filter((b) => !attr(b, 'variant') && !bound(b, 'variant'))
       expect(
-        solid.map(textOf).filter((t) => t !== '确认导入'),
+        solid.map(textOf).filter((t) => !['确认导入', '保存'].includes(t)),
         name,
       ).toEqual([])
       expect(solid.length, name).toBeLessThanOrEqual(1)
@@ -372,6 +870,14 @@ describe('两个设置页', () => {
     }
   })
 
+  it('外观：主题三个选项，用 useColorPreference，当前的标出来', () => {
+    expect(appearanceSettings).toContain('useColorPreference()')
+    const button = elementsOf(template(appearanceSettings)).find((el) => el.tag === 'UButton')!
+    expect(directive(button, 'for')?.exp?.content).toContain('COLOR_PREFERENCES')
+    expect(bound(button, 'aria-pressed')).toBe('colorPreference.current() === option.value')
+    expect(handler(button, 'click')).toBe('colorPreference.set(option.value)')
+  })
+
   it('渠道不再是圆角卡片，用线分开', () => {
     expect(embeddingChannelRow).not.toContain('rounded-md')
     expect(embeddingChannelRow).toContain('border-t border-default')
@@ -381,13 +887,14 @@ describe('两个设置页', () => {
 describe('读取失败', () => {
   // [文件, 查询, 错误后面紧跟的内容的显示条件：不和错误二选一]
   const reads: [string, string, string, string][] = [
-    ['SettingsPage', settingsPage, 'masterKey', 'masterKey.data.value'],
-    ['SettingsPage', settingsPage, 'recallSettings', 'recallSettings.isPending.value'],
+    ['MasterKeySettings', masterKeySettings, 'masterKey', 'masterKey.data.value'],
     ['EmbeddingSettings', embeddingSettings, 'settings', 'settings.isPending.value'],
     ['EmbeddingSettings', embeddingSettings, 'status', 'status.data.value'],
     ['ExtractionSettings', extractionSettings, 'settings', 'settings.isPending.value'],
     ['BackupSettings', backupSettings, 'settings', 'settings.isPending.value'],
-    ['RetentionSettings', retentionSettings, 'settings', 'pause'],
+    // 两样查询的错误挨着，后面才是内容
+    ['RetentionSettings', retentionSettings, 'settings', 'recallSettings.isError.value'],
+    ['RetentionSettings', retentionSettings, 'recallSettings', 'pause'],
     ['ExtractionBudget', extractionBudget, 'usage', 'usage.isPending.value'],
     ['MyDreamSettings', myDreamSettings, 'settings', 'settings.isPending.value'],
   ]
@@ -429,18 +936,39 @@ describe('读取失败', () => {
     await again
   })
 
-  // [文件, 提交的处理函数, 查询, 有数据的条件]
-  const forms: [string, string, string, string, string][] = [
-    ['EmbeddingSettings', embeddingSettings, 'saveActive', 'settings', 'settings.data.value'],
-    ['ExtractionSettings', extractionSettings, 'save', 'settings', 'settings.data.value'],
-    ['BackupSettings', backupSettings, 'save', 'settings', 'view'],
-    ['RetentionSettings', retentionSettings, 'save', 'settings', 'view'],
-    ['SettingsPage', settingsPage, 'saveRetention', 'recallSettings', 'recallSettings.data.value'],
+  // [文件, 提交的处理函数, 查询, 有数据的条件, 加载中的条件]
+  const forms: [string, string, string, string, string, string][] = [
+    [
+      'EmbeddingSettings',
+      embeddingSettings,
+      'saveActive',
+      'settings',
+      'settings.data.value',
+      'settings.isPending.value',
+    ],
+    [
+      'ExtractionSettings',
+      extractionSettings,
+      'save',
+      'settings',
+      'settings.data.value',
+      'settings.isPending.value',
+    ],
+    ['BackupSettings', backupSettings, 'save', 'settings', 'view', 'settings.isPending.value'],
+    // 两样设置一张表：哪一样读到了就给哪一行，两样都在读时显示骨架
+    [
+      'RetentionSettings',
+      retentionSettings,
+      'save',
+      'settings',
+      'view || recallSettings.data.value',
+      'settings.isPending.value || recallSettings.isPending.value',
+    ],
   ]
 
   it.each(forms)(
     '%s 的表单只在读到数据时给：空表单保存会盖掉读不到的那份，加载中显示骨架',
-    (name, source, submit, query, data) => {
+    (name, source, submit, query, data, pending) => {
       const parent = elementsOf(template(source)).find((el) =>
         (el.children ?? []).some((c) => c.tag === 'form' && handler(c, 'submit') === submit),
       )!
@@ -451,7 +979,7 @@ describe('读取失败', () => {
       expect(condition(form), name).toBeUndefined()
       const skeleton = siblings[index - 1]!
       expect(skeleton.tag, name).toBe('USkeleton')
-      expect(condition(skeleton), name).toBe(`${query}.isPending.value`)
+      expect(condition(skeleton), name).toBe(pending)
       expect(source, name).not.toContain(`!${query}.isError.value ||`)
     },
   )
@@ -464,8 +992,10 @@ describe('读取失败', () => {
     expect(script).not.toMatch(/const (dirty|form)\b/)
   })
 
-  it('保留期和备份的右栏也要等读到才有', () => {
-    for (const source of [retentionSettings, backupSettings]) {
+  it('保留期的每一行、备份的右栏也要等读到才有', () => {
+    const rows = elementsOf(template(retentionSettings)).filter((el) => el.tag === 'tr')
+    expect(rows.slice(1).map(condition)).toEqual(['view', 'recallSettings.data.value'])
+    for (const source of [backupSettings]) {
       const side = elementsOf(template(source)).find(
         (el) => el.tag === 'template' && directive(el, 'slot')?.arg?.content === 'side',
       )!
@@ -500,8 +1030,8 @@ describe('读取失败', () => {
     ['ExtractionSettings', extractionSettings, 'settings'],
     ['BackupSettings', backupSettings, 'settings'],
     ['RetentionSettings', retentionSettings, 'settings'],
-    ['SettingsPage', settingsPage, 'recallSettings'],
-    ['SettingsPage', settingsPage, 'masterKey'],
+    ['RetentionSettings', retentionSettings, 'recallSettings'],
+    ['MasterKeySettings', masterKeySettings, 'masterKey'],
     ['ExtractionBudget', extractionBudget, 'usage'],
     ['MyDreamSettings', myDreamSettings, 'settings'],
   ])('%s 的 %s 读取失败时有重试，重读的是这一样查询', (name, source, query) => {
@@ -590,15 +1120,14 @@ describe('标题和说明一直在', () => {
     ['抽取模型', extractionSettings, 'OpenAI 兼容的 /chat/completions 接口'],
     [
       '主密钥',
-      settingsPage,
+      masterKeySettings,
       '用于加密机密记忆、托管的凭据值，以及实例设置中保存的 API Key 与 Secret Access Key。',
     ],
     ['备份', backupSettings, '恢复时需配置同一主密钥。'],
     ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
-    ['召回记录', settingsPage, '明细到期后删除，仅保留每条记忆的累计召回次数。'],
     ['抽取预算', extractionBudget, '抽取事实与整理共用此 token 预算。'],
     ['整理', myDreamSettings, '已发送的内容无法撤回。'],
-    ['导入', spaceSettingsPage, '将其他工具的记忆导入当前空间，目前仅支持 Lore。'],
+    ['导入', spaceTransferSettings, '将其他工具的记忆导入当前空间，目前仅支持 Lore。'],
     ['Lore', loreImport, '导入 Lore 的节点，确认计划后才写入。'],
   ]
 
@@ -632,8 +1161,14 @@ describe('没有权限时', () => {
     expect(condition(budgetForm)).toBe('editable')
   })
 
-  it('空间设置把权限传给各小节', () => {
-    const elements = elementsOf(template(spaceSettingsPage))
+  it('空间组的小节把权限传给各块', () => {
+    const elements = [
+      ...elementsOf(template(spaceExtractionSettings)),
+      ...elementsOf(template(spaceTransferSettings)),
+    ]
+    for (const source of [spaceExtractionSettings, spaceTransferSettings]) {
+      expect(source).toContain("const isOwner = computed(() => space.value?.role === 'owner')")
+    }
     for (const tag of ['ExtractionBudget', 'SpaceExport', 'LoreImport']) {
       expect(
         bound(
@@ -652,7 +1187,7 @@ describe('没有权限时', () => {
   })
 
   it('实例设置只给管理员', () => {
-    expect(routesSource).toMatch(/name: 'settings',[^}]*meta: \{ requiresAdmin: true \}/)
+    expect(routesSource).toMatch(/name: 'instance-settings',[^}]*meta: \{ requiresAdmin: true \}/)
   })
 })
 
@@ -678,17 +1213,18 @@ describe('带后果的文字整句留着', () => {
     ['备份恢复', backupSettings, '恢复时需配置同一主密钥。'],
     ['保留期', retentionSettings, '超过保留期的内容将被永久删除，之后只能从备份恢复。'],
     ['缩短保留期', retentionSettings, '缩短后，下一次清理将按新的天数永久删除，不可撤销。'],
+    ['召回明细', retentionSettings, '召回明细到期后删除，仅保留每条记忆的累计召回次数'],
     [
       '整理',
       myDreamSettings,
       '开启后，当前账号的本人记忆（机密除外）将发送给抽取模型整理，已发送的内容无法撤回。',
     ],
     ['导出口令', spaceExport, 'Kioku不保存口令，丢失后无法打开文件。'],
-    ['导出的文件去哪导入', spaceExport, '实例管理员可在「实例设置 › 导入空间」中将它导入为新空间'],
+    ['导出的文件去哪导入', spaceExport, '实例管理员可在「设置 › 实例 › 空间」中将它导入为新空间'],
     [
       '空间文件不在这里导入',
-      spaceSettingsPage,
-      'Kioku 导出的空间文件由实例管理员在「实例设置 › 导入空间」中导入为新空间。',
+      spaceTransferSettings,
+      'Kioku 导出的空间文件由实例管理员在「设置 › 实例 › 空间」中导入为新空间。',
     ],
     ['导出的口令提示', spaceExport, '请另行保存口令。Kioku不保存口令，丢失后无法打开此文件。'],
     ['导入空间', spaceImport, '仅导入本人导出、或导出人同意移交的文件。'],
@@ -718,12 +1254,12 @@ describe('带后果的文字整句留着', () => {
     ['Lore 已导入的机密', loreImport, '此前已导入，当前仍为明文，本次标记的机密未生效。'],
     [
       '主密钥',
-      settingsPage,
+      masterKeySettings,
       '未配置主密钥，无法保存机密记忆、托管的凭据，以及实例设置中的 API Key 与 Secret Access Key。',
     ],
     [
       '轮换完成',
-      settingsPage,
+      masterKeySettings,
       '轮换完成。可以从配置中移除KIOKU_MASTER_KEY_PREVIOUS，然后重启服务。',
     ],
   ]

@@ -77,6 +77,7 @@ import PropertyList, { type Property } from './strata/PropertyList.vue'
 import StrataStrip from './strata/StrataStrip.vue'
 import StrataSwatch from './strata/StrataSwatch.vue'
 import StrataTag from './strata/StrataTag.vue'
+import FlagTag from './strata/FlagTag.vue'
 import SwatchOptions from './strata/SwatchOptions.vue'
 import MemoryName from './strata/MemoryName.vue'
 
@@ -766,7 +767,7 @@ const properties = computed<Property[][]>(() => {
             </UButton>
           </template>
           <template v-else>
-            <span v-if="dirty" class="dirty-flag">未保存</span>
+            <FlagTag v-if="dirty" class="dirty-flag" status="unsaved" />
             <UButton
               size="sm"
               :loading="saving"
@@ -1267,9 +1268,6 @@ const properties = computed<Property[][]>(() => {
 }
 .dirty-flag {
   margin-right: 4px;
-  font-size: 13px;
-  color: var(--ui-warning);
-  white-space: nowrap;
 }
 .memory-detail > .detail-main {
   flex: 1 0 auto;

@@ -2,10 +2,11 @@
 import SectionHeading from './SectionHeading.vue'
 
 // 设置里的一块：标题、一句说明，下面是表单或状态。块之间靠标题的墨线和留白分开。
-// 表单太宽不好读，默认限宽；要放长列表的用 wide。一块里还能再分块（例如导入的各个来源），里面那块用 level 3
-withDefaults(defineProps<{ title: string; wide?: boolean; level?: 2 | 3 }>(), {
+// 表单太宽不好读，默认限宽；要放长列表的用 wide。小节的标题是 h2，块是 h3；
+// 一块里还能再分块（例如导入的各个来源），里面那块用 level 4
+withDefaults(defineProps<{ title: string; wide?: boolean; level?: 3 | 4 }>(), {
   wide: false,
-  level: 2,
+  level: 3,
 })
 </script>
 
