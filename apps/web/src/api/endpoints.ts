@@ -52,7 +52,6 @@ import {
   LoreImportPlan,
   LoreImportResult,
   Me,
-  MemberInfo,
   MemoryHistory,
   MemoryList,
   MemoryRecallStat,
@@ -116,6 +115,16 @@ import {
   type ConsoleUpdateMemoryRequest,
   type UpdatePersonaRequest,
   type UpdateSubjectRequest,
+  AdminAccountList,
+  CreatedSpace,
+  InstanceSpace,
+  SpaceCreationView,
+  SpaceDetail,
+  SpaceInfo,
+  SpaceMember,
+  type AddMemberRequest,
+  type CreateSpaceRequest,
+  type MemberRole,
 } from '@kioku/contracts'
 import {
   AccountLink,
@@ -155,7 +164,38 @@ export const api = {
   deletePersona: (spaceId: string, personaId: string) =>
     request('DELETE', `/spaces/${spaceId}/personas/${personaId}`),
   members: (spaceId: string) =>
-    request('GET', `/spaces/${spaceId}/members`, { schema: z.array(MemberInfo) }),
+    request('GET', `/spaces/${spaceId}/members`, { schema: z.array(SpaceMember) }),
+  // 空间与成员
+  space: (spaceId: string) => request('GET', `/spaces/${spaceId}`, { schema: SpaceDetail }),
+  renameSpace: (spaceId: string, name: string) =>
+    request('PATCH', `/spaces/${spaceId}`, { body: { name }, schema: SpaceInfo }),
+  deleteSpace: (spaceId: string, confirmName: string) =>
+    request('DELETE', `/spaces/${spaceId}`, { body: { confirmName } }),
+  createSpace: (body: CreateSpaceRequest) =>
+    request('POST', '/spaces', { body, schema: CreatedSpace }),
+  addMember: (spaceId: string, body: AddMemberRequest) =>
+    request('POST', `/spaces/${spaceId}/members`, { body, schema: SpaceMember }),
+  updateMember: (spaceId: string, accountId: string, role: MemberRole) =>
+    request('PATCH', `/spaces/${spaceId}/members/${accountId}`, {
+      body: { role },
+      schema: SpaceMember,
+    }),
+  removeMember: (spaceId: string, accountId: string) =>
+    request('DELETE', `/spaces/${spaceId}/members/${accountId}`),
+  transferOwnership: (spaceId: string, accountId: string) =>
+    request('POST', `/spaces/${spaceId}/transfer-ownership`, {
+      body: { accountId },
+      schema: z.array(SpaceMember),
+    }),
+  instanceSpaces: () => request('GET', '/instance/spaces', { schema: z.array(InstanceSpace) }),
+  spaceCreation: () => request('GET', '/instance/space-creation', { schema: SpaceCreationView }),
+  saveSpaceCreation: (membersCanCreate: boolean) =>
+    request('PUT', '/instance/space-creation', {
+      body: { membersCanCreate },
+      schema: SpaceCreationView,
+    }),
+  // 新建空间时选所有者用
+  instanceAccounts: () => request('GET', '/instance/accounts', { schema: AdminAccountList }),
 
   apps: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/apps`, { schema: z.array(AppInfo) }),

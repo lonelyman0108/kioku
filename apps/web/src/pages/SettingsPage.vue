@@ -5,6 +5,7 @@ import { useRoute } from 'vue-router'
 import type { SettingsFrameGroup } from '../components/strata/SettingsFrame.vue'
 import SettingsFrame from '../components/strata/SettingsFrame.vue'
 import { useUnsavedChangesGuard } from '../composables/unsavedChanges'
+import { useSectionCounts } from '../composables/useSectionCounts'
 import { useSession } from '../composables/useSession'
 import {
   currentSection,
@@ -57,6 +58,9 @@ function linkTo(key: SettingsGroupKey, section: string) {
     : { name, params: { section } }
 }
 
+// 小节后面的条数（成员数）
+const counts = useSectionCounts(computed(() => space.value?.id ?? null))
+
 const groups = computed<SettingsFrameGroup[]>(() =>
   visibleGroups({ ...viewer.value, hasSpace: Boolean(space.value) }).flatMap((key) => {
     const meta = SETTINGS_GROUPS.find((g) => g.key === key)!
@@ -75,6 +79,7 @@ const groups = computed<SettingsFrameGroup[]>(() =>
           icon: section.icon,
           to: linkTo(key, section.key),
           unsaved: key === group.value && Boolean(dirty[section.key]),
+          count: counts.value[`${key}:${section.key}`],
         })),
       },
     ]

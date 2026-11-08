@@ -83,14 +83,18 @@ describe('顶部导航', () => {
     expect(script).not.toMatch(/\{ label: '实例设置', \.\.\.link\(/)
   })
 
-  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是空间设置', () => {
+  it('空间切换器一直显示：各空间与角色，当前空间打勾，下面是成员与设置；能新建空间时给新建空间', () => {
     const switcher = elements.find(
       (el) => el.tag === 'UDropdownMenu' && bound(el, 'items') === 'spaceMenu',
     )!
-    expect(condition(switcher)).toBe('spaces.length')
+    expect(condition(switcher)).toBe('spaces.length || newSpace.canCreate.value')
     expect(script).toContain('role: roleName(s.role)')
     expect(script).toContain('checked: s.id === space.value?.id')
-    expect(script).toContain("label: '空间设置'")
+    expect(script).toContain("label: '成员与设置'")
+    expect(script).not.toContain("label: '空间设置'")
+    expect(script).toContain('...(newSpace.canCreate.value')
+    expect(script).toContain("label: '新建空间'")
+    expect(template).toContain('<CreateSpaceModal')
     expect(script).toContain('to: spaceSettingsRoute(space.value.id)')
     expect(template).toContain('#space-trailing="{ item }"')
   })
