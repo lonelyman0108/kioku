@@ -7,8 +7,10 @@ import {
   FILTER_GROUPS,
   QUICK_RANGES,
   dayBounds,
+  dayKeyOf,
   facetOptions,
   toggleOff,
+  MAX_ACTOR_FILTER,
   filterQuery,
   gridDays,
   groupByDay,
@@ -23,6 +25,7 @@ import {
   type FilterGroup,
   type QuickRange,
 } from '../activity'
+import { ACTIVITY_UNKNOWN_TIME_ZONE } from '@kioku/contracts'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import ActivityCalendar from '../components/ActivityCalendar.vue'
@@ -43,19 +46,22 @@ import {
   eventLabel,
   layerLabels,
 } from '../labels'
-import { localDate } from '../time'
-
 const route = useRoute()
 const router = useRouter()
 const spaceId = computed(() => String(route.params.spaceId))
+// 浏览器的时区：按天计数按它分天，和表格里按本地日期分组一致。服务端按数据库的时区库认名字，
+// 不认识（库比浏览器旧）时回 400 并带上 code，只在这种错误时退回 UTC：日历、柱条、表格的分组与范围的边界
+// 一律按 UTC 分天，筛选那里写明
+const browserTz = Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC'
+const tz = ref(browserTz)
+const tzUnknown = (error: unknown) =>
+  error instanceof ApiError &&
+  error.status === 400 &&
+  (error.payload as { code?: unknown } | null)?.code === ACTIVITY_UNKNOWN_TIME_ZONE
+const utcFallback = computed(() => tz.value === 'UTC' && browserTz !== 'UTC')
 // 页面开过零点时「今天」跟着变
 const now = useNow()
-const today = computed(() => localDate(now.value))
-// 浏览器的时区：按天计数按它分天，和表格里按本地日期分组一致。服务端按数据库的时区库认名字，
-// 不认识（库比浏览器旧）时回 400，这时退回 UTC 再请求，日历旁写明按 UTC 分天
-const tz = ref(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
-const tzUnknown = (error: unknown) =>
-  error instanceof ApiError && error.status === 400 && tz.value !== 'UTC'
+const today = computed(() => dayKeyOf(now.value.toISOString(), utcFallback.value))
 
 // 日期范围、筛选、关键字与选中的事件都在地址里，后退前进能还原
 const state = computed(() => parseState(route.query, today.value))
@@ -79,7 +85,7 @@ watch(
 )
 
 const days = computed(() => selectedDays(state.value, today.value))
-const filter = computed(() => filterQuery(state.value, today.value))
+const filter = computed(() => filterQuery(state.value, today.value, utcFallback.value))
 
 // 筛选计数：每组的条数，以及合计
 const facets = useQuery({
@@ -97,7 +103,7 @@ const activity = useInfiniteQuery({
   getNextPageParam: (last) => last.nextCursor ?? undefined,
 })
 const items = computed(() => activity.data.value?.pages.flatMap((page) => page.items) ?? [])
-const groups = computed(() => groupByDay(items.value, today.value))
+const groups = computed(() => groupByDay(items.value, today.value, utcFallback.value))
 
 // 每天的条数：选中范围内的给柱条与每天的小标题，日历上那个月的给格子
 const rangeDays = useQuery({
@@ -108,7 +114,7 @@ const rangeDays = useQuery({
 const month = ref(monthOf(days.value?.to ?? today.value))
 const calendarFilter = computed(() => ({
   ...filter.value,
-  ...dayBounds(gridDays(month.value)),
+  ...dayBounds(gridDays(month.value), utcFallback.value),
 }))
 const calendarDays = useQuery({
   queryKey: computed(() => ['activity-days', spaceId.value, calendarFilter.value, tz.value]),
@@ -118,9 +124,6 @@ const calendarDays = useQuery({
 watch([() => rangeDays.error.value, () => calendarDays.error.value], (errors) => {
   if (errors.some(tzUnknown)) tz.value = 'UTC'
 })
-const utcFallback = computed(
-  () => tz.value === 'UTC' && Intl.DateTimeFormat().resolvedOptions().timeZone !== 'UTC',
-)
 const calendarCounts = computed(
   () => new Map(calendarDays.data.value?.days.map((d) => [d.day, d.count]) ?? []),
 )
@@ -155,7 +158,10 @@ function onQuick(range: QuickRange) {
 
 // 筛选：每组至少留一项勾选（见 toggleOff），否则列表一定是空的
 function onToggle(group: FilterGroup, key: string, on: boolean) {
-  const off = toggleOff(options.value[group], state.value.off[group], key, on)
+  const off = toggleOff(options.value[group], state.value.off[group], key, on, {
+    allowEmpty: group === 'field',
+    max: group === 'actor' ? MAX_ACTOR_FILTER : undefined,
+  })
   if (off) void update({ off: { ...state.value.off, [group]: off }, event: null })
 }
 function onReset(group: FilterGroup) {
@@ -268,7 +274,9 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
         </UButton>
       </div>
       <p class="rail-tip">点一天只看那天，按住 Shift 再点选一段。</p>
-      <p v-if="utcFallback" class="rail-tip">无法识别浏览器的时区，日历与柱条按 UTC 分天。</p>
+      <p v-if="utcFallback" class="rail-tip">
+        无法识别浏览器的时区，日历、柱条与表格的日期都按 UTC 分天。
+      </p>
       <ActivityFilters
         :options="options"
         :facets="facets.data.value"
@@ -424,6 +432,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
                 <ActivityEntry
                   :item="row.item"
                   :layout="layout"
+                  :utc="utcFallback"
                   :selected="state.event === row.item.id"
                   :folded="row.more.length"
                   :expanded="expanded.has(row.item.id)"
@@ -436,6 +445,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
                     :key="sub.id"
                     :item="sub"
                     :layout="layout"
+                    :utc="utcFallback"
                     sub
                     :selected="state.event === sub.id"
                     @select="select(sub.id)"

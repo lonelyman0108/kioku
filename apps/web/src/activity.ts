@@ -165,25 +165,33 @@ export function selectedDays(
 }
 
 // 本地日期范围换成接口要的时间：不早于第一天的零点，早于最后一天的下一个零点
-export function dayBounds(days: { from: string; to: string }): { from: string; to: string } {
-  return {
-    from: parseDay(days.from)!.toISOString(),
-    to: parseDay(addDays(days.to, 1))!.toISOString(),
-  }
+// utc 时按 UTC 的零点（服务端认不出浏览器的时区、退回按 UTC 分天时）
+export function dayBounds(
+  days: { from: string; to: string },
+  utc = false,
+): { from: string; to: string } {
+  const start = (key: string) =>
+    utc ? new Date(`${key}T00:00:00.000Z`).toISOString() : parseDay(key)!.toISOString()
+  return { from: start(days.from), to: start(addDays(days.to, 1)) }
 }
 
-// 交给接口的筛选（多个值用逗号连起来）。固定的三组全部取消勾选时（只会是手写的地址）当作没有筛选：界面上每组至少留一项
+// 一个时间落在哪一天：平时按本地日期，utc 时按 UTC 日期
+export const dayKeyOf = (iso: string, utc = false) =>
+  utc ? new Date(iso).toISOString().slice(0, 10) : localDate(new Date(iso))
+
+// 交给接口的筛选（多个值用逗号连起来）。操作与归属全部取消勾选时（只会是手写的地址）当作没有筛选：
+// 界面上这两组至少留一项。字段可以全部取消：没有改动字段的事件（新建、删除等）不受字段筛选影响，
+// 全部取消就只剩它们
 export type FilterQuery = Record<string, string | undefined>
-export function filterQuery(state: ActivityState, today: string): FilterQuery {
+export function filterQuery(state: ActivityState, today: string, utc = false): FilterQuery {
   const query: FilterQuery = {}
   const days = selectedDays(state, today)
-  if (days) Object.assign(query, dayBounds(days))
+  if (days) Object.assign(query, dayBounds(days, utc))
   for (const g of ['type', 'layer', 'field'] as const) {
     if (!state.off[g].length) continue
     const kept = FIXED_OPTIONS[g].filter((v) => !state.off[g].includes(v))
-    if (!kept.length) continue
-    // 没有改动字段的事件（新建、删除等）不受字段筛选影响，和取消勾选某个字段的意思一致
-    query[g] = (g === 'field' ? [...kept, 'none'] : kept).join(',')
+    if (g === 'field') query.field = [...kept, 'none'].join(',')
+    else if (kept.length) query[g] = kept.join(',')
   }
   if (state.off.actor.length) query.exceptActor = state.off.actor.join(',')
   if (state.q) query.q = state.q
@@ -214,10 +222,14 @@ const foldable = (a: ActivityItem, b: ActivityItem) =>
 
 // 按本地日期分组，同一天里同一个操作者接着修改同一条记忆折叠成一行。接口按时间倒序给，
 // 翻页时后面的页接在同一天后面，组的先后和里面的先后都不动
-export function groupByDay(items: readonly ActivityItem[], today: string): ActivityDay[] {
+export function groupByDay(
+  items: readonly ActivityItem[],
+  today: string,
+  utc = false,
+): ActivityDay[] {
   const days: ActivityDay[] = []
   for (const item of items) {
-    const key = localDate(new Date(item.createdAt))
+    const key = dayKeyOf(item.createdAt, utc)
     let day = days.at(-1)
     if (day?.key !== key) {
       day = { key, heading: dayHeading(key, today), rows: [], loaded: 0 }
@@ -358,18 +370,23 @@ export function facetOptions(
   }
 }
 
-// 勾选或取消一项之后这一组取消勾选的值。会把当前列出来的选项全部取消时不改，返回 null：
-// 操作只列出现过的，把看得到的几项全取消，列表注定是空的（归属、字段、操作者同理）
+// 勾选或取消一项之后这一组取消勾选的值；不改时返回 null：
+// - 会把当前列出来的选项全部取消（allowEmpty 为假）：操作只列出现过的，把看得到的几项全取消，列表注定是空的。
+//   操作、归属、操作者是这样；字段可以全部取消（只剩没有改动字段的事件），传 allowEmpty
+// - 取消勾选的个数超出 max：地址与接口都只收这么多（操作者的 MAX_ACTOR_FILTER），界面在筛选那里写明已达上限
 export function toggleOff(
   listed: readonly FacetOption[],
   off: readonly string[],
   key: string,
   on: boolean,
+  options: { allowEmpty?: boolean; max?: number } = {},
 ): string[] | null {
   const next = new Set(off)
   if (on) next.delete(key)
   else next.add(key)
-  if (!on && listed.length && listed.every((o) => next.has(o.key))) return null
+  if (on) return [...next]
+  if (options.max !== undefined && next.size > options.max) return null
+  if (!options.allowEmpty && listed.length && listed.every((o) => next.has(o.key))) return null
   return [...next]
 }
 

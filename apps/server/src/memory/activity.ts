@@ -126,3 +126,17 @@ export function fieldChanges(
     }
   })
 }
+
+// PostgreSQL 认得的时区名。只缓存查成功的结果：查询用调用方自己的事务，某个请求的事务出错（断连、超时）
+// 只让那个请求失败，不把失败的 promise 留给别的请求共用。时区库随数据库升级才变，进程里留着
+let timeZones: ReadonlySet<string> | null = null
+export async function knownTimeZone(
+  tx: { execute: (query: SQL) => PromiseLike<unknown> },
+  tz: string,
+): Promise<boolean> {
+  if (!timeZones) {
+    const rows = (await tx.execute(sql`select name from pg_timezone_names`)) as { name: string }[]
+    timeZones = new Set(rows.map((r) => r.name))
+  }
+  return timeZones.has(tz)
+}

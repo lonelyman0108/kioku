@@ -4,7 +4,7 @@ import { useQuery } from '@tanstack/vue-query'
 import { computed, ref } from 'vue'
 
 import { api } from '../api/endpoints'
-import { collapseUnchanged, diffLines, type DiffRow } from '../diff'
+import { collapseUnchanged, diffWithStatus, type DiffRow } from '../diff'
 import { icons } from '../icons'
 import {
   activityActor,
@@ -28,9 +28,14 @@ import StrataSwatch from './strata/StrataSwatch.vue'
 const props = defineProps<{ eventId: number; spaceId: string; initial?: ActivityItem | null }>()
 const emit = defineEmits<{ close: [] }>()
 
+// 前后快照里有正文：不留缓存、每次打开都重取（gcTime 0），和解密的正文一样。改成机密、转存为凭据、删除之后
+// 历史里的正文会被抹掉，留着缓存就会再显示旧的明文；凡是让 memory-history 失效的地方也让它失效
 const event = useQuery({
   queryKey: computed(() => ['activity-event', props.spaceId, props.eventId]),
   queryFn: () => api.activityEvent(props.spaceId, props.eventId),
+  gcTime: 0,
+  staleTime: 0,
+  refetchOnMount: 'always',
 })
 const item = computed(() => event.data.value?.item ?? props.initial ?? null)
 
@@ -61,16 +66,18 @@ const diff = computed(() => {
   const before = event.data.value?.before?.content
   const after = event.data.value?.after?.content
   if (typeof before !== 'string' || typeof after !== 'string' || before === after) return null
-  const lines = diffLines(before, after)
+  const { lines, complete } = diffWithStatus(before, after)
   return {
     rows: collapseUnchanged(lines) as DiffRow[],
+    complete,
     added: lines.filter((l) => l.kind === 'add').length,
     removed: lines.filter((l) => l.kind === 'remove').length,
   }
 })
-// 增删的行数：有对比时用画出来的这份，和下面的差异对得上；没有时才用列表给的近似值（按行做集合的差）
+// 增删的行数：逐行对齐算出了差异时用画出来的这份，和下面的差异对得上；正文太长没有逐行对齐（整段算删掉
+// 再加上）或者没有对比时，用列表给的近似值（按行做集合的差）
 function lineCounts(change: { added: number | null; removed: number | null }) {
-  return diff.value ?? change
+  return diff.value?.complete ? diff.value : change
 }
 
 type Scalar = Exclude<ActivityFieldChange, { field: 'content' | 'glossary' }>
@@ -164,10 +171,11 @@ const historyOpen = ref(false)
                 增加 {{ lineCounts(change).added }} 行，删除 {{ lineCounts(change).removed }} 行
               </p>
               <USkeleton v-if="event.isPending.value" class="mt-1 h-16 w-full" />
-              <pre
-                v-else-if="diff"
-                class="diff"
-              ><template v-for="(row, index) in diff.rows" :key="index"><span
+              <template v-else-if="diff">
+                <p v-if="!diff.complete" class="detail-note">
+                  正文太长，未逐行对齐，下面整段对比改前与改后；行数是近似值。
+                </p>
+                <pre class="diff"><template v-for="(row, index) in diff.rows" :key="index"><span
                 v-if="row.kind === 'skip'"
                 class="diff-skip"
               >… 省略未改动的 {{ row.count }} 行</span><span
@@ -175,6 +183,7 @@ const historyOpen = ref(false)
                 class="diff-line"
                 :class="row.kind"
               >{{ row.text }}</span></template></pre>
+              </template>
             </template>
           </template>
           <template v-else-if="change.field === 'glossary'">
