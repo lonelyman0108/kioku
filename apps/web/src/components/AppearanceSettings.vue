@@ -7,7 +7,7 @@ const colorPreference = useColorPreference()
 </script>
 
 <template>
-  <div>
+  <div class="max-w-[40rem]">
     <SettingsRow label="主题" description="保存在当前浏览器">
       <div class="flex gap-1" role="group" aria-label="主题">
         <UButton
