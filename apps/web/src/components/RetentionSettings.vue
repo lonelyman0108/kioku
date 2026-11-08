@@ -14,6 +14,7 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SaveBar from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsTable from './strata/SettingsTable.vue'
+import { useSavedField } from '../composables/useSavedField'
 
 // 两种保留天数一张表：已删除的记忆（保留期，每天清理）与召回明细（每小时清理）。两项共用一个保存条，
 // 保存时只调改了的那项的接口。有没有没保存的修改交给页面在左栏标出来
@@ -50,58 +51,49 @@ watch(view, (v) => {
   if (waiting.value && outcomeOf(v) !== seen) stopWaiting()
 })
 
-// 表单跟着读到的设置走；改过的那项不跟，免得后台刷新冲掉没保存的输入
-const days = ref<number | undefined>()
-const recallDays = ref<number | undefined>()
-const daysChanged = computed(() => Boolean(view.value) && days.value !== view.value?.days)
-const recallChanged = computed(
-  () =>
-    Boolean(recallSettings.data.value) &&
-    recallDays.value !== recallSettings.data.value?.retentionDays,
-)
-watch(
-  () => view.value?.days,
-  (saved) => {
-    if (!daysChanged.value || days.value === undefined) days.value = saved
-  },
-  { immediate: true },
-)
-watch(
-  () => recallSettings.data.value?.retentionDays,
-  (saved) => {
-    if (!recallChanged.value || recallDays.value === undefined) recallDays.value = saved
-  },
-  { immediate: true },
-)
-const changedCount = computed(() => Number(daysChanged.value) + Number(recallChanged.value))
+// 两项各和载入时的基准比；服务端的值在后台变了而本地没改时跟上，本地改过时不动（useSavedField）
+const days = useSavedField(() => view.value?.days, { min: 1, max: 3650 })
+const recallDays = useSavedField(() => recallSettings.data.value?.retentionDays, {
+  min: 1,
+  max: 365,
+})
+const changedCount = computed(() => Number(days.changed.value) + Number(recallDays.changed.value))
 watch(
   () => changedCount.value > 0,
   (changed) => (dirtyModel.value = changed),
   { immediate: true },
 )
+// 有一项填得不对时不保存，保存条和那一行都写出范围
+const problem = computed(() =>
+  days.invalid.value || recallDays.invalid.value ? '保留天数超出范围' : null,
+)
 // 改短了：下一次清理就按新的天数删
-const shortened = computed(() => Boolean(view.value && days.value && days.value < view.value.days))
+const shortened = computed(() => {
+  const next = days.value.value
+  return Boolean(view.value && typeof next === 'number' && next < view.value.days)
+})
 
 function discard() {
-  days.value = view.value?.days
-  recallDays.value = recallSettings.data.value?.retentionDays
+  days.reset()
+  recallDays.reset()
 }
 
 const saving = ref(false)
 async function save() {
-  if (saving.value || changedCount.value === 0) return
-  const retention = daysChanged.value ? days.value : undefined
-  const recall = recallChanged.value ? recallDays.value : undefined
-  if ((daysChanged.value && !retention) || (recallChanged.value && !recall)) return
+  if (saving.value || changedCount.value === 0 || problem.value) return
+  const retention = days.changed.value ? days.value.value : null
+  const recall = recallDays.changed.value ? recallDays.value.value : null
   saving.value = true
   const results = await Promise.allSettled([
-    retention
+    typeof retention === 'number'
       ? api.saveRetentionDays({ days: retention }).then((saved) => {
+          days.commit(saved.days)
           queryClient.setQueryData(queryKey, saved)
         })
       : null,
-    recall
+    typeof recall === 'number'
       ? api.saveRecallSettings({ retentionDays: recall }).then(async (saved) => {
+          recallDays.commit(saved.retentionDays)
           queryClient.setQueryData(recallKey, saved)
           // 召回分析与概览的「从未被召回」都按召回明细的保留天数算
           await Promise.all([
@@ -232,7 +224,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
             <td>
               <span class="days">
                 <UInputNumber
-                  v-model="days"
+                  v-model="days.value.value"
                   :min="1"
                   :max="3650"
                   size="sm"
@@ -241,6 +233,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
                 />
                 <span class="unit">天</span>
               </span>
+              <p v-if="days.invalid.value" class="invalid">请填写 1 到 3650 之间的整数</p>
             </td>
             <td>永久删除，只能从备份恢复</td>
             <td>
@@ -270,7 +263,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
             <td>
               <span class="days">
                 <UInputNumber
-                  v-model="recallDays"
+                  v-model="recallDays.value.value"
                   :min="1"
                   :max="365"
                   size="sm"
@@ -279,6 +272,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
                 />
                 <span class="unit">天</span>
               </span>
+              <p v-if="recallDays.invalid.value" class="invalid">请填写 1 到 365 之间的整数</p>
             </td>
             <td>并入每条记忆的累计召回次数</td>
             <td class="text-muted">每小时清理一次</td>
@@ -291,7 +285,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
       <p v-if="shortened" class="pt-2 text-warning">
         缩短后，下一次清理将按新的天数永久删除，不可撤销。
       </p>
-      <SaveBar :count="changedCount" :saving="saving" @discard="discard" />
+      <SaveBar :count="changedCount" :saving="saving" :problem="problem" @discard="discard" />
     </form>
   </SettingsBlock>
 
@@ -329,6 +323,11 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
   margin-left: 6px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.invalid {
+  padding-top: 2px;
+  font-size: 12px;
+  color: var(--ui-error);
 }
 .days .unit {
   margin-left: 0;
