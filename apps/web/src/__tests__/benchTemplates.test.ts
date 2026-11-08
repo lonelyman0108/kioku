@@ -9,7 +9,7 @@ import benchForm from '../benchForm?raw'
 import benchResult from '../benchResult?raw'
 import benchScenarios from '../benchScenarios?raw'
 import benchSession from '../benchSession?raw'
-import activityEntry from '../components/ActivityEntry.vue?raw'
+import activityFlags from '../components/ActivityFlags.vue?raw'
 import appSimulator from '../components/AppSimulator.vue?raw'
 import benchAbandoned from '../components/BenchAbandoned.vue?raw'
 import benchAgentView from '../components/BenchAgent.vue?raw'
@@ -1976,7 +1976,7 @@ describe('入口', () => {
 
 describe('活动与访问记录的徽章', () => {
   it.each([
-    ['活动', activityEntry, 'item.bench'],
+    ['活动', activityFlags, 'item.bench'],
     ['凭据的访问记录', credentialDetail, 'e.bench'],
   ])('%s显示测试台与操作账号', (_name, source, field) => {
     const { elements } = sfc(source)

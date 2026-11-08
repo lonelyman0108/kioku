@@ -6,6 +6,8 @@ import { renderToString } from 'vue/server-renderer'
 
 import ActivityEntry from '../components/ActivityEntry.vue'
 import activityEntry from '../components/ActivityEntry.vue?raw'
+import activityFlags from '../components/ActivityFlags.vue?raw'
+import RecentChange from '../components/RecentChange.vue'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
 import credentialFormModal from '../components/CredentialFormModal.vue?raw'
 import deletedMemories from '../components/DeletedMemories.vue?raw'
@@ -76,38 +78,68 @@ describe('变更记录的一行', () => {
     memoryId: '00000000-0000-4000-8000-000000000000',
     uri: 'user://projects/atlas/release',
     title: '发布步骤',
+    layer: 'user',
+    sensitivity: 'private',
     createdAt: new Date(2026, 9, 31, 7, 5).toISOString(),
     actor: { accountName: null, keyName: 'MacBook', appName: 'Claude Code' },
+    actorKey: 'app:00000000-0000-4000-8000-000000000001',
     changes: ['content', 'priority'],
+    fieldChanges: [
+      { field: 'content', added: 2, removed: 1 },
+      { field: 'priority', before: 1, after: 0 },
+    ],
+    versionBefore: 1,
+    versionAfter: 2,
     left: false,
     deleted: false,
     expired: false,
     bench: null,
     ...changes,
   })
-  const entry = (changes: Partial<ActivityItem> = {}) =>
-    render(ActivityEntry, { item: item(changes), spaceId: 'space' })
+  const entry = (changes: Partial<ActivityItem> = {}, props: Record<string, unknown> = {}) =>
+    render(ActivityEntry, { item: item(changes), ...props })
+  const recent = (changes: Partial<ActivityItem> = {}) =>
+    render(RecentChange, { item: item(changes), spaceId: 'space' })
 
-  it('谁、动作、标题、字段、时间都在一行里，坐标放在悬停里', async () => {
+  it('时间、操作者、操作、标题、改动各占一列，坐标与访问密钥放在悬停里', async () => {
     const html = await entry()
-    expect(html).toContain('Claude Code（MacBook）')
+    expect(html).toContain('Claude Code')
+    expect(html).toContain('title="Claude Code，访问密钥：MacBook"')
     expect(html).toContain('修改')
     expect(html).toContain('>发布步骤</span>')
     expect(html).toContain('title="发布步骤\nuser://projects/atlas/release"')
-    expect(html).toContain('正文、优先级')
+    expect(html).toMatch(/正文<em[^>]*>\+2 −1<\/em>/)
+    expect(html).toMatch(/优先级<em[^>]*>1 → 0<\/em>/)
     expect(html).toContain('07:05')
+    expect((html.match(/<td/g) ?? []).length).toBe(6)
   })
 
-  it('应用写下的改动标出来，成员的不标', async () => {
-    expect(await entry()).toContain('actor-app')
-    const member = { accountName: '林默', keyName: null, appName: null }
-    expect(await entry({ actor: member })).not.toContain('actor-app')
+  it('详情打开时没有状态列，状态并进记忆那一列；窄屏只有时间与记忆两列', async () => {
+    const compact = await entry({ deleted: true }, { layout: 'compact' })
+    expect((compact.match(/<td/g) ?? []).length).toBe(5)
+    expect(compact).toContain('已删除')
+    const narrow = await entry({}, { layout: 'narrow' })
+    expect((narrow.match(/<td/g) ?? []).length).toBe(2)
+    expect(narrow).toContain('正文 +2 −1、优先级 1 → 0')
   })
 
-  it('记忆还在才能点过去：已删除、已过期、超出可见范围的 URI 上可能是别的记忆', async () => {
-    expect(await entry()).toContain('<a')
+  it('折起来的几次修改写成 ×N，能展开', async () => {
+    expect(await entry({}, { folded: 2 })).toContain('×3')
+    expect(await entry({}, { folded: 2 })).toContain('aria-label="展开 3 次修改"')
+    expect(await entry()).not.toContain('×')
+  })
+
+  it('机密带锁；离开的没有改动', async () => {
+    expect(await entry({ sensitivity: 'secret' })).toContain('aria-label="机密"')
+    const left = await entry({ left: true, changes: [], fieldChanges: [] })
+    expect(left).toContain('超出可见范围')
+    expect(left).not.toContain('正文')
+  })
+
+  it('概览的最近变更：记忆还在才能点过去，已删除、已过期、超出可见范围的 URI 上可能是别的记忆', async () => {
+    expect(await recent()).toContain('<a')
     for (const state of [{ left: true }, { deleted: true }, { expired: true }]) {
-      expect(await entry(state)).not.toContain('<a')
+      expect(await recent(state)).not.toContain('<a')
     }
   })
 
@@ -117,19 +149,20 @@ describe('变更记录的一行', () => {
   })
 
   it('超出可见范围的后果留在提示层里', async () => {
-    expect(await entry({ left: true, changes: [] })).toContain('超出可见范围')
+    expect(await entry({ left: true, changes: [], fieldChanges: [] })).toContain('超出可见范围')
     expect(await entry()).not.toContain('超出可见范围')
-    expect(activityEntry).toContain('这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆')
+    expect(activityFlags).toContain('这条记忆超出当前账号的可见范围（例如移入其他成员的本人记忆')
   })
 
   it('测试台写下的事件标出测试台和操作账号', async () => {
-    const html = await entry({ bench: { accountName: '林默', run: 'abcd1234' } })
-    expect(html).toContain('测试台')
+    const bench = { bench: { accountName: '林默', run: 'abcd1234' }, actorKey: 'bench' }
+    const html = await entry(bench)
+    expect(html).toContain('测试台 · 林默')
     expect(html).toContain('操作账号：林默')
     expect(html).toContain('运行标记 abcd1234')
-    expect(await entry({ bench: { accountName: null, run: 'abcd1234' } })).toContain(
-      '操作账号：已删除的账号',
-    )
+    expect(
+      await entry({ bench: { accountName: null, run: 'abcd1234' }, actorKey: 'bench' }),
+    ).toContain('操作账号：已删除的账号')
     expect(await entry()).not.toContain('测试台')
   })
 })

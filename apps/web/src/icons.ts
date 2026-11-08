@@ -66,4 +66,10 @@ export const icons = {
   themeSystem: 'i-lucide-monitor',
   themeLight: 'i-lucide-sun',
   themeDark: 'i-lucide-moon',
+  // 变更记录：日历翻月、日期、筛选抽屉、不知道是谁的操作
+  previous: 'i-lucide-chevron-left',
+  next: 'i-lucide-chevron-right',
+  calendar: 'i-lucide-calendar',
+  filter: 'i-lucide-list-filter',
+  unknownActor: 'i-lucide-circle-help',
 } as const
