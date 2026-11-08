@@ -65,6 +65,10 @@
 - 零圆角，层次用线不用阴影：结构线是 1px 墨线，次级线浅灰；`main.css` 把 `--ui-radius` 设为 0、清空了整组 `--shadow-*`。原因：维护者选定的「地层」方向靠线条与色带分层次，圆角和阴影会打散它。
 - 只用系统字体栈，不打包字体、不向第三方请求字体；logo（`KiokuMark.vue`，`public/` 下的图标同款）只取 Shippori Mincho 的字形轮廓写成路径，来源与许可证登记在 `NOTICE`。原因：自托管服务不向第三方发请求，中文字体文件也太大。
 - 正文不小于 14px，标签不小于 12px；坐标、目录里的位置、访问密钥前缀、代码用等宽字。原因：更小的中文看不清；坐标是地址，要能逐字核对。
+- 图标只用 lucide 一套，登记在 `icons.ts`：导航、设置小节、操作类型、状态标签配图标，图标旁一定有文字；顶栏放不下时先收组标题、再收图标，不只留图标。状态标签的图标从 `components/strata/flags.ts` 取。大号数字用正文字体加 `tabular-nums`，不用等宽字。原因：图标帮着扫读，只剩图标时意思要靠猜；等宽字只留给要逐字核对的坐标、前缀与代码。
+- 三个以上并列的事实写成表格、属性列表或标签，不写成一整句：主密钥轮换按数据类别列条数；签发范围只经 `ScopeTags`（`scopeTags`）显示，`scopesSummary` 只是标签拼起来的文字，给读屏与 `title` 用。原因：长句在窄列里会断开（「最高内 / 部」），也不好扫读。
+- 列表的空状态用 `EmptyState`（品牌标记、一句结果、下一步），只在确实读到空时显示，读取失败照下面「读取失败」那条的写法。
+- 设置是一个入口：小节集中登记在 `settingsSections.ts` 的 `SETTINGS_SECTIONS`（组、key、名称、图标、组件、可见条件），加小节只加一项和一个组件。三组共用 `SettingsPage`，外壳按 `settingsPageKey`（组与空间）换页，未保存确认只在这一页注册一份；小节组件用 `v-model:dirty` 报改动，合并了几个表单的小节把各自的标记或起来。数值设置用 `SettingsRow` 加一个 `SaveBar`，放在 `<form>` 里（回车保存）；带测试按钮的表单保留自己的保存。旧的 `?section=` 由 `LEGACY_*` 两张表换到新小节。原因：三组共用一页时不按组换页，离开的确认会留在先进的那一组的路由上。
 - 记忆给人看的名字是标题：目录、列表、搜索、变更记录与启动加载预览都写标题（`MemoryName.vue`，`MemoryRow` 的 `title`），坐标放在悬停里；坐标只在记忆详情底部（`CoordinateLine.vue`，可以复制）、测试台与召回调试里显示，经 `UriPath.vue`（上一级退一级灰度）。人格、应用与四个根的详情底部写坐标的开头。原因：坐标是给 Agent 读写用的，弱化它在界面上的分量；标题才是人认得出的名字。
 - 记忆页的目录第一级是本人、应用、人格、通用四个根（`CURATED_STACK`，和地层柱同一个顺序），人格与应用的根下面先列出各个人格、应用，再往下是坐标的各级；选中根、人格、应用时右边是它的设置（地址参数 `node`），选中记忆时是 `uri`。会话与联系人在对话页，不进目录。新建与移动只选归属（人格、应用再选是哪个）、位置与标识，坐标随之拼出、可以折叠（`coordinates.ts`），不单独选归属以外的东西；本人不给公开（契约的 `sensitivityAllowed`）。原因：坐标的开头就是归属，目录、地层柱与坐标是同一个结构。
 - 文案不把代码逻辑翻成大白话：标题、标签、按钮、空状态用名词短语或短词（「暂无访问密钥」，不是「还没有访问密钥。」），完整的句子才加句号；默认一句话，只讲结果和下一步，原理、规则和例外放进提示层（`Hint.vue`）或展开，信息不能丢。原因：维护者定的文案方向，界面上的字要短，细节按需展开。
@@ -183,7 +187,7 @@
 - 模型代理返回的 `message.tool_calls` 不是严格原样：id 可能是生成的，不是对象的项会被去掉，`arguments` 只放合法的 JSON 对象（原文在 `rawArguments`，只给界面显示）。`tool` 消息的 `tool_call_id` 要用 `toolCalls[i].id`，两者一一对应。
 - 测试模型代理：测时限不能靠到点 abort 来结束用例，`requestAgentTurn` 的 catch 先看 `timeout.aborted`，这个信号不管有没有传给 `fetch` 都会按时到期，时限失效时用例照样通过，要和哨兵定时器 `Promise.race`。客户端断开的信号来自 Node 适配器（reason 是字符串，不是 AbortError，要看 `signal.aborted`），`app.request` 走不到，要测断开必须起真实端口。「请求模型期间不占连接」的用例依赖测试连接池只有 2 条。
 - 导航角标和待处理页的条数是同一个查询（`inbox-counts`，`staleTime` 60 秒，接口每次跑正则），不跟着换页重取。新增能改变四类条数的操作（包括改动记忆使疑似明文变化）要让它失效：`invalidateInboxCounts`，或者加进已有的刷新清单（`refreshSubjectCaches`、`refreshAfterPlaintext`、记忆页的 `refreshCounts`）。
-- 权限格子的满色是 `--access-*`，不是归属色：浅色主题下应用、本人、会话三类太淡，满色、淡色、空白分不开，岩芯上又没有文字。改归属色时要同步改它，`tokens.test.ts` 按明度核对。岩芯和权限范围一律用 `api.keyMatrix` 的结果，`issuedScopeRows` 只用于签发时的预览（不是实际权限，只按归属、敏感级与 `sensitivityAllowed` 换算）。
+- 权限格子的满色是 `--access-*`，不是归属色：浅色主题下应用、本人、会话三类太淡，满色、淡色、空白分不开，岩芯上又没有文字。改归属色时要同步改它，`tokens.test.ts` 按明度核对。岩芯和权限范围一律用 `api.keyMatrix` 的结果，`issuedScopeRows` 只用于签发时的预览（不是实际权限，只按归属、敏感级与 `sensitivityAllowed` 换算）。签发弹窗的权限表格同样只用 `issuedScopeRows` + `accessKind`（短名在 `accessKindShortLabels`），模板按 `matchPreset` 和签发人收紧之后的 `presetScopes` 比，改任意一格都重新匹配。
 - 测试台界面：`BenchStepResult.status` 在没带断言时一律是 `passed`，哪怕工具报错，显示调用结果要看 `isError` 与 `internalError`（`benchResult.ts` 的 `stepBadge`）。重放分叉的 `index` 是发出请求时那份日志的下标，结果回来时按当时的 session 记录，所以运行期间不能改 session，新加能动会话的操作都要判断 `running`；`BenchSession` 的 `replay` 与 `replayEntryIds` 下标一一对应，要一起改。新分页放进 `BenchPage` 里 `v-if="mounted" v-show="ready"` 那一层并用 `v-show` 切换：换应用时 Key 要重读，跟着卸载的话草稿与文本框里的场景会丢。
 - 测试台的地址会被写回成实际选择：同一页面上不带 `app`、`key` 参数的导航（侧栏入口）不算换选择，要换走 `selectApp`、`selectKey`；按列表判断地址里的选择时只认读取成功且不在刷新的结果（`isSuccess && !isFetching`），否则缓存里的旧列表会冤枉模拟器链接带来的 Key。`useQuery` 的选项在 pre 阶段才更新，按查询结果做判断并写回时要用 post flush（`watchPostEffect`），pre 下会把上一个应用的 Key 写进地址。`hasUnsavedChanges` 是全局一个，一个页面只能注册一份 `useUnsavedChangesGuard`，测试台由 `createBench` 注册，分页通过 `unsaved` 报上去。`abandoned` 不随 `generation` 清掉，新增调用 `execute` 的地方要传 `label` 与 `view`。`useUnsavedChangesGuard` 注册时就读一次 `dirty`，用到的状态要先建好，否则页面打开就抛 TDZ 错误。
 - 权限探测靠「capture 」开头认出 capture 没取到的断言（`benchResult.ts`），改 `runner.ts` 里这句说明要一起改，`runner.test.ts` 钉住了这个开头。
@@ -198,3 +202,4 @@
 - 整理任务按 `dream_marks`（记忆 id 对应整理过的版本）找要处理的记忆，不靠更新时间：导入的记忆保留原来的更新时间，按时间推进的游标会永远看不到它们。
 - 迁移文件合并之后不要再改（包括注释）：恢复备份时按最后一个迁移的哈希核对库的结构，改过的文件会让之前的备份恢复不了；服务启动时也核对库里执行过的每个迁移的哈希（`db/migrate.ts` 的 `runMigrations`），有这个版本没有的就拒绝启动，改过的文件会让已经迁移过的库起不来。迁移从 `0000_baseline`（记忆架构改版时重来的基线）起算，之前的备份不能恢复、之前的库不能迁移：启动与恢复按早于基线的迁移认出它们，报错说明是改版之前的结构，要清空数据库重建后从 Lore 重新导入。
 - 在 Mac 上用非交互会话（agent 的 shell）拉镜像会卡在钥匙串，需要用不带 credsStore 的 `DOCKER_CONFIG`。
+- 服务端启动时读一次管理界面的 `index.html`：本地重新构建管理界面之后要重启服务，否则页面引用的旧分块已经不在（白屏、404）。走查时把 `KIOKU_MASTER_KEY` 固定下来：换了主密钥重启，加密的设置与机密解不开。
