@@ -10,7 +10,7 @@ import {
   UpdateAccountRequest,
   type AccountLinkPurpose,
 } from '@kioku/contracts'
-import { and, asc, eq, gt, inArray, isNull, max, ne, sql } from 'drizzle-orm'
+import { and, asc, count, eq, gt, inArray, isNull, max, ne, sql } from 'drizzle-orm'
 
 import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import { hashToken, newToken } from '../auth/session'
@@ -49,6 +49,23 @@ async function describeAccounts(db: Db | Tx, rows: AccountRow[]): Promise<AdminA
     .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
     .where(inArray(spaceMembers.accountId, ids))
     .orderBy(asc(spaces.createdAt))
+  // 这些空间里各有几个没停用的所有者
+  const spaceIds = [...new Set(memberships.map((m) => m.id))]
+  const owners = spaceIds.length
+    ? await db
+        .select({ spaceId: spaceMembers.spaceId, n: count() })
+        .from(spaceMembers)
+        .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
+        .where(
+          and(
+            inArray(spaceMembers.spaceId, spaceIds),
+            eq(spaceMembers.role, 'owner'),
+            isNull(accounts.disabledAt),
+          ),
+        )
+        .groupBy(spaceMembers.spaceId)
+    : []
+  const activeOwners = new Map(owners.map((o) => [o.spaceId, o.n]))
   const activity = await db
     .select({ accountId: sessions.accountId, last: max(sessions.lastActiveAt) })
     .from(sessions)
@@ -86,7 +103,12 @@ async function describeAccounts(db: Db | Tx, rows: AccountRow[]): Promise<AdminA
       lastActiveAt: last ? new Date(last).toISOString() : null,
       spaces: memberships
         .filter((m) => m.accountId === row.id)
-        .map(({ id, name, role }) => ({ id, name, role })),
+        .map(({ id, name, role }) => ({
+          id,
+          name,
+          role,
+          soleActiveOwner: role === 'owner' && !row.disabledAt && activeOwners.get(id) === 1,
+        })),
       pendingLink: link ? { purpose: link.purpose, expiresAt: link.expiresAt.toISOString() } : null,
     }
   })

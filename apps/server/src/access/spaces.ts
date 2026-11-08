@@ -6,7 +6,7 @@ import type {
   SpaceInfo,
   SpaceMember,
 } from '@kioku/contracts'
-import { and, asc, count, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, asc, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
 
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
@@ -121,12 +121,23 @@ async function roleIn(tx: Tx | Db, spaceId: string, accountId: string) {
   return row?.role ?? null
 }
 
-async function ownerCount(tx: Tx, spaceId: string): Promise<number> {
-  const [row] = await tx
-    .select({ n: count() })
+// 除了 except 之外还有几个没停用的所有者。停用的账号管理不了空间，「至少一个所有者」只数没停用的；
+// 锁住这几个账号那一行，判断之后到事务结束不会被停用
+async function activeOwnersBesides(tx: Tx, spaceId: string, except: string): Promise<number> {
+  const rows = await tx
+    .select({ id: accounts.id })
     .from(spaceMembers)
-    .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.role, 'owner')))
-  return row?.n ?? 0
+    .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
+    .where(
+      and(
+        eq(spaceMembers.spaceId, spaceId),
+        eq(spaceMembers.role, 'owner'),
+        isNull(accounts.disabledAt),
+        ne(spaceMembers.accountId, except),
+      ),
+    )
+    .for('share', { of: accounts })
+  return rows.length
 }
 
 export async function spaceDetail(
@@ -311,7 +322,7 @@ export async function addMember(
   })
 }
 
-// 改角色：只有空间所有者；改完之后至少还有一个所有者
+// 改角色：只有空间所有者；改完之后至少还有一个没停用的所有者
 export async function updateMemberRole(
   db: Db,
   input: { spaceId: string; actor: string; target: string; role: MemberRole },
@@ -327,7 +338,7 @@ export async function updateMemberRole(
     if (
       current === 'owner' &&
       input.role !== 'owner' &&
-      (await ownerCount(tx, input.spaceId)) < 2
+      (await activeOwnersBesides(tx, input.spaceId, input.target)) === 0
     ) {
       return fail('last-owner')
     }
@@ -339,7 +350,7 @@ export async function updateMemberRole(
   })
 }
 
-// 移除成员（空间所有者移除别人）或离开（成员移除自己）。最后一个所有者不能离开、也不能被移除。
+// 移除成员（空间所有者移除别人）或离开（成员移除自己）。去掉他之后没有别的没停用的所有者时，不能离开、也不能被移除。
 // 记下离开的时间（之前的离开记录换成这一次的）；他拥有的应用的 Key 立即吊销：
 // 本来也按「所有者不在空间里」作废，吊销之后重新加入也不会再生效。他的本人记忆、凭据与密码库连接不删
 export async function removeMember(
@@ -356,7 +367,10 @@ export async function removeMember(
       .from(spaceMembers)
       .where(and(eq(spaceMembers.spaceId, input.spaceId), eq(spaceMembers.accountId, input.target)))
     if (!target) return fail('no-target')
-    if (target.role === 'owner' && (await ownerCount(tx, input.spaceId)) < 2) {
+    if (
+      target.role === 'owner' &&
+      (await activeOwnersBesides(tx, input.spaceId, input.target)) === 0
+    ) {
       return fail('last-owner')
     }
     await tx

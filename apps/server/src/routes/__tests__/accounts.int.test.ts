@@ -148,7 +148,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         pendingLink: { purpose: 'setup', expiresAt: created.link.expiresAt },
       })
       expect(created.account.spaces).toEqual([
-        { id: expect.any(String), name: 'BOB的空间', role: 'owner' },
+        { id: expect.any(String), name: 'BOB的空间', role: 'owner', soleActiveOwner: true },
       ])
       // 库里只存令牌的哈希
       const [row] = await database.db.select().from(accountLinks)
@@ -187,13 +187,47 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       const [alice, bob] = list.accounts as [AdminAccount, AdminAccount]
       expect(alice).toMatchObject({ isAdmin: true, passwordSet: true, pendingLink: null })
       expect(alice.lastActiveAt).not.toBeNull()
-      expect(alice.spaces).toEqual([{ id: ws.spaceId, name: '家', role: 'owner' }])
-      expect(bob.spaces.map((s) => [s.name, s.role])).toEqual([
-        ['家', 'viewer'],
-        ['BOB的空间', 'owner'],
+      expect(alice.spaces).toEqual([
+        { id: ws.spaceId, name: '家', role: 'owner', soleActiveOwner: true },
+      ])
+      expect(bob.spaces.map((s) => [s.name, s.role, s.soleActiveOwner])).toEqual([
+        ['家', 'viewer', false],
+        ['BOB的空间', 'owner', true],
       ])
       expect(bob.pendingLink?.purpose).toBe('setup')
       expect(JSON.stringify(list)).not.toContain(created.link.token)
+    })
+
+    it('账号列表标出唯一没停用的所有者：另有没停用的所有者时不标，停用的所有者不算', async () => {
+      const bob = await createAccount('bob')
+      const carol = await createAccount('carol')
+      await database.db.insert(spaceMembers).values([
+        { spaceId: ws.spaceId, accountId: bob.account.id, role: 'owner' },
+        { spaceId: ws.spaceId, accountId: carol.account.id, role: 'owner' },
+      ])
+      const home = async () => {
+        const list = await ok<AdminAccountList>(
+          await send('GET', '/v1/instance/accounts', undefined, as(ws.cookie)),
+        )
+        return Object.fromEntries(
+          list.accounts.map((a) => [
+            a.username,
+            a.spaces.find((s) => s.id === ws.spaceId)?.soleActiveOwner,
+          ]),
+        )
+      }
+      expect(await home()).toEqual({ alice: false, bob: false, carol: false })
+      await database.db
+        .update(accounts)
+        .set({ disabledAt: new Date() })
+        .where(eq(accounts.id, carol.account.id))
+      expect(await home()).toEqual({ alice: false, bob: false, carol: false })
+      await database.db
+        .update(spaceMembers)
+        .set({ role: 'editor' })
+        .where(eq(spaceMembers.accountId, ws.accountId))
+      // 只剩 bob 一个没停用的所有者；停用的 carol 不标
+      expect(await home()).toEqual({ alice: false, bob: true, carol: false })
     })
 
     it('改显示名、设为管理员；不能改自己的管理员身份与停用状态', async () => {

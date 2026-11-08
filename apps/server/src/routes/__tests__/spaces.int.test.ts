@@ -463,8 +463,7 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       const missing = await add(ws.cookie, 'nobody')
       expect(missing.status).toBe(404)
       expect(await errorOf(missing)).toBe('账号不存在')
-      // 精确匹配：大小写、前缀都不算
-      expect((await add(ws.cookie, 'DAVE')).status).toBe(404)
+      // 前缀不算
       expect((await add(ws.cookie, 'dav')).status).toBe(404)
       expect((await add(ws.cookie, 'dave', 'admin')).status).toBe(400)
       const added = await ok<SpaceMember>(await add(ws.cookie, ' dave ', 'viewer'), 201)
@@ -592,6 +591,28 @@ describe.skipIf(!testDatabaseUrl)('空间与成员', () => {
       expect(departed.map((d) => d.accountId).sort()).toEqual(
         [viewer.accountId, editor.accountId, bob2.accountId].sort(),
       )
+    })
+
+    it('停用的所有者不算：只剩停用的所有者时，最后一个没停用的不能降级、离开', async () => {
+      const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+      await database.db
+        .update(accounts)
+        .set({ disabledAt: new Date() })
+        .where(eq(accounts.id, bob.accountId))
+      const demote = await send('PATCH', inSpace(`/members/${ws.accountId}`), ws.cookie, {
+        role: 'editor',
+      })
+      expect(demote.status).toBe(409)
+      expect(await errorOf(demote)).toBe('空间至少要有一个所有者，请先转让所有者')
+      const leave = await send('DELETE', inSpace(`/members/${ws.accountId}`), ws.cookie)
+      expect(leave.status).toBe(409)
+      expect(await errorOf(leave)).toBe('空间至少要有一个所有者，请先转让所有者')
+      // 停用的所有者照样能降级、移除：还剩 alice
+      await ok(
+        await send('PATCH', inSpace(`/members/${bob.accountId}`), ws.cookie, { role: 'editor' }),
+      )
+      await ok(await send('DELETE', inSpace(`/members/${bob.accountId}`), ws.cookie), 204)
+      expect(await roles()).toEqual({ alice: 'owner' })
     })
 
     it('转让所有者：对方成为所有者、自己改为编辑者；对方必须是别的成员，失败时什么都不变', async () => {

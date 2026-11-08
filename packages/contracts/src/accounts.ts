@@ -32,7 +32,9 @@ export const AdminAccount = z.object({
   createdAt: z.string(),
   // 现有会话里最近的一次活动；没有会话时为 null
   lastActiveAt: z.string().nullable(),
-  spaces: z.array(SpaceSummary),
+  // soleActiveOwner：他是不是这个空间唯一没停用的所有者。停用他之后空间里没有能管理它的人，
+  // 停用前据此提醒（停用照样允许，重新启用后恢复）
+  spaces: z.array(SpaceSummary.extend({ soleActiveOwner: z.boolean() })),
   // 还没用过、没过期的链接（令牌不再给出）
   pendingLink: z.object({ purpose: AccountLinkPurpose, expiresAt: z.string() }).nullable(),
 })
