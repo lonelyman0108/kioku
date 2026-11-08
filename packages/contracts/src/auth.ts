@@ -21,7 +21,8 @@ export type SetupRequest = z.infer<typeof SetupRequest>
 
 // 长度上限挡住超长输入：用户名会作为失败计数表的主键写入
 export const LoginRequest = z.object({
-  username: z.string().min(1).max(64),
+  // 用户名只有小写（Username）：先去首尾空白、转小写，计数与匹配都用这个值
+  username: z.string().trim().toLowerCase().min(1).max(64),
   password: z.string().max(256),
 })
 export type LoginRequest = z.infer<typeof LoginRequest>
