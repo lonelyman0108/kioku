@@ -56,8 +56,10 @@ export async function recallRequest(
   scopeFor: ScopeFor,
 ): Promise<RecallResponse> {
   const scope = scopeFor(await resolveKeySession(deps, key, context))
+  // 请求里给了条数就按给的，否则和每轮召回一样按设置；最低分都按设置
+  const { values } = await scope.settings()
   const [candidates, subjects] = await Promise.all([
-    scope.recall(query, { limit }),
+    scope.recall(query, { limit: limit ?? values['recall.limit'] }),
     scope.subjects(),
   ])
   scope.record('rest.recall', query, candidates)

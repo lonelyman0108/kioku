@@ -44,6 +44,7 @@ import {
   snapshot as memorySnapshot,
 } from '../memory/service'
 import { APP_DOMAIN, PERSONA_DOMAIN, parseUri } from '../memory/uri'
+import { APP_ADVANCED_FIELD } from '../settings/advanced'
 import { openSpaceExport } from './spaceFormat'
 import {
   describeIssue,
@@ -453,6 +454,7 @@ async function writeSpace(
     name: ctx.name,
     extractionMonthlyTokens: x.header.space.extractionMonthlyTokens,
     extractionDailyWrites: x.header.space.extractionDailyWrites,
+    advanced: x.header.space.advanced,
   })
   derived('新空间的成员')
   // 导出人的本人记忆归了导入人，导出人关掉的 Dream 整理在导入人身上也关着，由导入人决定要不要打开
@@ -497,7 +499,9 @@ async function writeSpace(
         runtimeFamily: a.runtimeFamily,
         ownerAccountId: accountId,
         defaultPersonaId: mapped(personaIds, a.defaultPersonaId),
-        config: a.config,
+        config: Object.keys(a.advanced).length
+          ? { ...a.config, [APP_ADVANCED_FIELD]: a.advanced }
+          : a.config,
         createdAt: time(a.createdAt),
         updatedAt: time(a.updatedAt),
       })),

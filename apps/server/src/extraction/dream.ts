@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 
 import {
   REVIEW_LAYERS,
+  TUNING_DEFAULTS,
   URI_PATTERN,
   type DreamRunEntry,
   type DreamRunList,
@@ -37,6 +38,7 @@ import {
 } from '../memory/scopes'
 import { formatUri } from '../memory/uri'
 import { anyTermQuery, clipChars, inlineText, oneLine, searchTerms } from '../recall/recall'
+import { loadSpaceSettings } from '../settings/advanced'
 import type { EndpointConfig } from '../settings/endpoint'
 import { extractionUsage } from './budget'
 import {
@@ -65,9 +67,10 @@ import { loadExtractionConfig } from './settings'
 // 共享的范围先用，但最多用到上限减去固定留给本人记忆的（DREAM_PERSONAL_*）；本人的记忆用剩下的、至少是留量，
 // 没用完的也不还给共享的那一段（见 dreamOnce）。共享的内容积压很多时（例如刚导入一大批），本人的记忆不用等积压清完。
 // 留量是常量，不看有没有本人的记忆要整理：共享的那一段整理到哪里所有成员都看得到，跟着变就泄露了有没有私人内容。
-// 请求次数一共不超过 DREAM_MAX_CALLS；token 的上限是开始一次请求之前看的，每一段的最后一次都可能超出，
+// 请求次数一共不超过空间设置的上限；token 的上限是开始一次请求之前看的，每一段的最后一次都可能超出，
 // 共享的那一段超出的部分也不占留量，所以一次整理实际用掉的可能比 DREAM_MAX_TOKENS 多出两段各自最后一次请求的用量
-export const DREAM_MAX_CALLS = 8
+// 请求次数的上限按空间的高级设置（dream.maxCalls，至少 3 次，比留量多），DREAM_MAX_CALLS 是内置值
+export const DREAM_MAX_CALLS = TUNING_DEFAULTS['dream.maxCalls']
 export const DREAM_MAX_TOKENS = 60_000
 export const DREAM_PERSONAL_CALLS = 2
 export const DREAM_PERSONAL_TOKENS = 15_000
@@ -81,8 +84,7 @@ const FACT_CHARS = 300
 // 每条新增或改动的策展记忆找几条近邻；每个对象带几条别的事实
 const NEIGHBORS_EACH = 3
 const FACT_NEIGHBORS_EACH = 6
-// 模型的输出：一次最多收这么多条建议；理由的长度上限（要写进记忆的文字的规则见 dreamText.ts）
-const MAX_SUGGESTIONS = 20
+// 模型的输出：一次最多收几条建议按空间的高级设置（dream.maxSuggestions）；理由的长度上限（要写进记忆的文字的规则见 dreamText.ts）
 const REASON_CHARS = 200
 
 // 共享部分的汇总里的出错：共享的范围请求模型或写入出错，这一次就停下了
@@ -225,7 +227,7 @@ export async function dreamSpace(
 // 别的成员看到的列表与状态只按共享部分的汇总与他自己的本人记忆算（见 dreamRunOutcome），
 // 所以分两段整理，共享的那一段不受任何人的本人的记忆影响：
 // 1. 先把共享的范围整理完，没看完的接着看，都在本人的记忆之前；这一段最多用到每次整理的请求次数与用量上限
-//    减去留给本人记忆的（见 DREAM_PERSONAL_CALLS），上限是常量，不看后面有没有要整理的。
+//    减去留给本人记忆的（见 DREAM_PERSONAL_CALLS），上限按空间的设置、不看后面有没有要整理的。
 //    出错就停下：多半是接口或库的问题，别的范围也会一样；
 // 2. 接着记一条共享部分的汇总（范围为空）：出错了、整理过了（还有没看完的）、没有要整理的。
 //    整次没走到范围时（没配模型、预算用完、什么都没有要整理的）记的那一条也是汇总；
@@ -257,6 +259,13 @@ async function dreamOnce(
     return usage.usedTokens >= usage.monthlyTokens
   }
   if (await overBudget()) return skip('budget')
+  // 请求次数、建议条数与整理规则的补充按空间的设置，这次整理开始时读一次
+  const settings = await loadSpaceSettings(db, spaceId)
+  const maxCalls = settings.values['dream.maxCalls']
+  const tuning = {
+    maxSuggestions: settings.values['dream.maxSuggestions'],
+    rules: settings.prompts.dreamRules,
+  }
   const queue = await pendingScopes(db, spaceId)
   if (!queue.length) return skip('idle')
   const activeModel = (await loadEmbeddingModels(db)).active?.model ?? null
@@ -285,7 +294,7 @@ async function dreamOnce(
         break
       }
       pending.shift()
-      const result = await dreamScope(db, model, options, scope, { activeModel, now })
+      const result = await dreamScope(db, model, options, scope, { activeModel, now, ...tuning })
       progress.scope = null
       if (!result) continue
       calls++
@@ -309,7 +318,7 @@ async function dreamOnce(
   const shared = await runSegment(
     cut < 0 ? queue : queue.slice(0, cut),
     {
-      calls: DREAM_MAX_CALLS - DREAM_PERSONAL_CALLS,
+      calls: maxCalls - DREAM_PERSONAL_CALLS,
       tokens: DREAM_MAX_TOKENS - DREAM_PERSONAL_TOKENS,
     },
     true,
@@ -327,7 +336,7 @@ async function dreamOnce(
   const personal = await runSegment(
     cut < 0 ? [] : queue.slice(cut),
     {
-      calls: DREAM_MAX_CALLS - shared.calls,
+      calls: maxCalls - shared.calls,
       tokens: Math.max(DREAM_MAX_TOKENS - shared.tokens, DREAM_PERSONAL_TOKENS),
     },
     false,
@@ -564,7 +573,12 @@ async function dreamScope(
   model: ChatModel,
   options: DreamOptions,
   pending: PendingScope,
-  context: { activeModel: string | null; now: Date },
+  context: {
+    activeModel: string | null
+    now: Date
+    maxSuggestions: number
+    rules: readonly string[]
+  },
 ): Promise<ScopeResult | null> {
   const { spaceId } = options
   const owner = pending.owner
@@ -650,7 +664,7 @@ async function dreamScope(
   let completion
   try {
     completion = await model.complete(
-      dreamMessages(prompt, items, context.now.toISOString().slice(0, 10)),
+      dreamMessages(prompt, items, context.now.toISOString().slice(0, 10), context.rules),
     )
   } catch (err) {
     await withSpace(db, spaceId, (tx) =>
@@ -672,9 +686,9 @@ async function dreamScope(
     unparsed = (err as Error).message
   }
 
-  let dropped = Math.max(0, candidates.length - MAX_SUGGESTIONS)
+  let dropped = Math.max(0, candidates.length - context.maxSuggestions)
   const proposals = new Map<string, Proposal>()
-  for (const candidate of candidates.slice(0, MAX_SUGGESTIONS)) {
+  for (const candidate of candidates.slice(0, context.maxSuggestions)) {
     const proposal = validate(candidate, byHandle, prompt.talk)
     if (!proposal) dropped++
     else if (!proposals.has(proposal.fingerprint)) proposals.set(proposal.fingerprint, proposal)

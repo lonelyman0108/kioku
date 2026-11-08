@@ -32,6 +32,7 @@ import {
 import type { Tx } from '../db/client'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
+import { APP_ADVANCED_FIELD } from '../settings/advanced'
 
 const SpaceParams = z.object({ spaceId: z.uuid() })
 const AppParams = SpaceParams.extend({ appId: z.uuid() })
@@ -223,6 +224,9 @@ function groupPersonaRules(tx: Tx, appId: string) {
 // 所以只有应用主人能改配置、签发和查看 Key；空间 owner 可以吊销任何 Key（止损），但不能签发
 // lock 为 true 时锁住应用这一行直到事务结束：签发 Key 与转移所有权都先拿这把锁，
 // 保证「检查主人 → 写 Key」与「吊销 Key → 换主人」不会交错，转移之后不会冒出前任主人的新 Key
+const keepAdvanced = (config: AppConfig) =>
+  sql`${JSON.stringify(config)}::jsonb || jsonb_strip_nulls(jsonb_build_object(${APP_ADVANCED_FIELD}::text, ${apps.config} -> ${APP_ADVANCED_FIELD}::text))`
+
 async function appOwnerOf(tx: Tx, appId: string, lock = false): Promise<string | null> {
   const query = tx.select({ owner: apps.ownerAccountId }).from(apps).where(eq(apps.id, appId))
   const [row] = lock ? await query.for('update') : await query
@@ -305,9 +309,15 @@ export function appRoutes(deps: Deps) {
         }
         if (owner !== accountId) return null
         if (!(await personaVisible(tx, changes.defaultPersonaId))) return []
+        const { config, ...rest } = changes
         return tx
           .update(apps)
-          .set({ ...changes, updatedAt: new Date() })
+          .set({
+            ...rest,
+            // 配置整个替换，高级设置的覆盖（不在 AppConfig 里，见 settings/advanced.ts）原样留着
+            ...(config && { config: keepAdvanced(config) }),
+            updatedAt: new Date(),
+          })
           .where(eq(apps.id, appId))
           .returning()
       })

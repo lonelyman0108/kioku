@@ -37,6 +37,7 @@ import { keyIdOf } from '../../crypto/keyring'
 import { connect, withSpace, type Database } from '../../db/client'
 import { sealVaultSecrets } from '../../credential/vault'
 import {
+  apps,
   credentialEvents,
   credentials,
   memories,
@@ -49,6 +50,7 @@ import {
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Jobs } from '../../jobs/queue'
 import { settleRecallEvents } from '../../recall/events'
+import { loadSpaceAdvanced, saveAppAdvanced, saveSpaceAdvanced } from '../../settings/advanced'
 import {
   openTestDatabase,
   resetDatabase,
@@ -198,7 +200,7 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
     createdAt: new Date().toISOString(),
     kioku: 'test',
     exporter: { displayName: '拼文件的人', dreamPrivate: true },
-    space: { name, extractionMonthlyTokens: 1000, extractionDailyWrites: 5 },
+    space: { name, extractionMonthlyTokens: 1000, extractionDailyWrites: 5, advanced: {} },
   })
   // 文件头按原样写出，测别的格式版本、缺字段时传别的样子
   async function craft(records: SpaceExportRecord[], head: object = header()): Promise<Buffer> {
@@ -1069,6 +1071,37 @@ describe.skipIf(!testDatabaseUrl)('按空间导出与导入', () => {
         credentials: 0,
         vaultConnections: 0,
       },
+    })
+  })
+
+  it('空间与应用的高级设置随文件带过去', async () => {
+    const alice = await bootstrap(source, 'alice')
+    const appId = (await alice.createApp('codex')).id
+    await saveSpaceAdvanced(database.db, alice.spaceId, {
+      'recall.minScore': 0.3,
+      'prompts.dreamRules': '整理时保留原话',
+    })
+    await withSpace(database.db, alice.spaceId, (tx) =>
+      saveAppAdvanced(tx, appId, { 'boot.charBudget': 3000, 'prompts.guidance': '只回中文' }),
+    )
+    const file = await exportSpace(source, alice.spaceId, alice.cookie)
+    const parsed = await contents(file)
+    expect(parsed.header.space.advanced).toEqual({
+      'recall.minScore': 0.3,
+      'prompts.dreamRules': '整理时保留原话',
+    })
+    const result = await ok<SpaceImportResult>(
+      importRequest(source, alice.cookie, file, PASSPHRASE, '导入的'),
+      201,
+    )
+    expect(await loadSpaceAdvanced(database.db, result.spaceId)).toEqual(
+      parsed.header.space.advanced,
+    )
+    const [imported] = await withSpace(database.db, result.spaceId, (tx) =>
+      tx.select({ config: apps.config }).from(apps),
+    )
+    expect(imported!.config).toEqual({
+      advanced: { 'boot.charBudget': 3000, 'prompts.guidance': '只回中文' },
     })
   })
 

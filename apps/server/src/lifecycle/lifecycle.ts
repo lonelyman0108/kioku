@@ -20,14 +20,11 @@ import {
 } from '../recall/boot'
 import { CANDIDATE_ID, formatRecallBlock, type RecordableCandidate } from '../recall/recall'
 import { formatSubjectBlock } from '../recall/subjects'
+import { withSupplements, type EffectiveSettings } from '../settings/advanced'
 import type { RecallScope } from './scope'
 
-const RECENT_LIMIT = 5
-// 不带会话上下文的会话开始时附上同一会话最近几段会话摘要
-const SUMMARY_LIMIT = 3
-const PROJECT_RECALL_LIMIT = 5
-// 每轮召回注入几条；召回调试台照这个模拟
-export const PROMPT_RECALL_LIMIT = 8
+// 会话开始时附带的三块（同一会话的会话摘要、近期记忆、项目召回）各几条、开不开，每轮召回注入几条、最低分，
+// 都按高级设置（scope.settings()）；召回调试台与启动预览照同一份设置模拟
 // 每轮召回等嵌入接口的上限：插件的钩子 5 秒就放弃，要给全文与关键词留出时间
 export const PROMPT_SEMANTIC_TIMEOUT_MS = 2_000
 // 宿主能完整接收的上下文长度。Claude Code 的钩子输出超过 1 万字时只给模型看开头 2KB 的预览，
@@ -69,6 +66,13 @@ export const CHAT_GUIDANCE = [
   '- 记忆之间冲突时，以 priority 数字更小的为准，同时考虑适用范围、时间与对方当前说的话。',
   '- 正文里的 {{cred:<标识>#<字段>}} 是凭据占位符，你取不到它的值，不要在回复里提到它。',
 ].join('\n')
+
+// 使用指引：固定部分在前，实例的补充、应用的补充接在后面。固定部分是工具用法、凭据与防注入的规则，补充不能去掉它
+export function guidanceFor(chat: boolean, settings: EffectiveSettings): string {
+  return chat
+    ? withSupplements(CHAT_GUIDANCE, settings.prompts.chatGuidance)
+    : withSupplements(GUIDANCE, settings.prompts.agentGuidance)
+}
 
 // 每种宿主期望的输出形状不同，由服务端决定，插件原样转交
 function hostOutput(
@@ -120,21 +124,32 @@ export async function sessionStart(
 ): Promise<SessionStart> {
   const limit = HOST_CONTEXT_LIMIT[runtimeFamily]
   const chat = CHAT_FAMILIES.has(runtimeFamily)
-  const guidance = chat ? CHAT_GUIDANCE : GUIDANCE
-  const result = await scope.boot(
-    limit ? Math.max(limit - guidance.length - CONTEXT_RESERVE, 1_000) : undefined,
+  const settings = await scope.settings()
+  const { values } = settings
+  const guidance = guidanceFor(chat, settings)
+  // 字数预算取设置与宿主上限里更小的；宿主上限里先减去指引（含补充）与给附加块留的字数
+  const budget = Math.min(
+    values['boot.charBudget'],
+    limit ? Math.max(limit - guidance.length - CONTEXT_RESERVE, 1_000) : Infinity,
   )
+  const result = await scope.boot(budget)
+  // 三块附带内容各自的条数；关掉的、条数为 0 的不取
+  const count = (extra: 'summaries' | 'recent' | 'related') =>
+    values[`boot.${extra}.enabled`] ? values[`boot.${extra}.count`] : 0
+  const summaryLimit = count('summaries')
+  const recentLimit = chat ? 0 : count('recent')
+  const relatedLimit = count('related')
   // 已经在 boot 里展开的节点不再重复列出；多取几条，去掉它们之后仍能凑够
   const booted = new Set(result.entries.map((e) => e.uri))
-  const query = chat ? '' : projectQuery(input.project)
+  const query = chat || !relatedLimit ? '' : projectQuery(input.project)
   // 会话摘要、近期记忆与项目召回只是附加线索，各自失败都不影响 boot。项目召回不等嵌入接口（只走全文与关键词），
   // 过滤也和 boot 一样（受信来源、boot 的那几层）：它不需要用户提到任何东西就会注入
   const [summaries, recent, related] = await Promise.allSettled([
-    scope.summaries(SUMMARY_LIMIT),
-    chat ? Promise.resolve([]) : scope.recent(RECENT_LIMIT + booted.size),
+    summaryLimit ? scope.summaries(summaryLimit) : Promise.resolve([]),
+    recentLimit ? scope.recent(recentLimit + booted.size) : Promise.resolve([]),
     query
       ? scope.recall(query, {
-          limit: PROJECT_RECALL_LIMIT + booted.size,
+          limit: relatedLimit + booted.size,
           semantic: false,
           trustedOnly: true,
           layers: BOOT_LAYERS,
@@ -149,10 +164,10 @@ export async function sessionStart(
   const summaryList = summaries.status === 'fulfilled' ? summaries.value : []
   const recentList = (recent.status === 'fulfilled' ? recent.value : [])
     .filter((m) => !booted.has(m.uri))
-    .slice(0, RECENT_LIMIT)
+    .slice(0, recentLimit)
   const relatedList = (related.status === 'fulfilled' ? related.value : [])
     .filter((c) => !booted.has(c.uri))
-    .slice(0, PROJECT_RECALL_LIMIT)
+    .slice(0, relatedLimit)
   const relatedBlock = formatRecallBlock(relatedList, input.sessionId)
 
   // 群聊 bot 读不了未展开的节点，连 URI 也不列；启动预览照样列出，看得出哪些没注入
@@ -204,10 +219,13 @@ export async function handleLifecycle(
     }
   }
 
-  // 召回块之后跟着当前发言人与本群的事实（对象直连），只有带了会话上下文时才有
+  // 召回块之后跟着当前发言人与本群的事实（对象直连），只有带了会话上下文时才有。
+  // 先读设置：召回与对象直连并行时用同一份，不各读一次
+  const { values } = await scope.settings()
   const [candidates, subjects] = await Promise.all([
     scope.recall(input.prompt, {
-      limit: PROMPT_RECALL_LIMIT,
+      limit: values['recall.limit'],
+      minScore: values['recall.minScore'],
       semanticTimeoutMs: PROMPT_SEMANTIC_TIMEOUT_MS,
     }),
     scope.subjects(),
@@ -237,9 +255,10 @@ export async function recallBlock(
     return formatRecallBlock(candidates, sessionId)
   }
   try {
+    const { values } = await scope.settings()
     const byId = await scope.contents(candidates.map((c) => c[CANDIDATE_ID]))
     const contents = new Map(candidates.map((c) => [c.uri, byId.get(c[CANDIDATE_ID]) ?? '']))
-    return formatRecallBlock(candidates, sessionId, contents)
+    return formatRecallBlock(candidates, sessionId, contents, values['recall.chatInlineChars'])
   } catch (err) {
     console.warn('读取召回候选的正文失败，只给线索', loggableError(err))
     return formatRecallBlock(candidates, sessionId)

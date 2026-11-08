@@ -7,25 +7,16 @@ import { readDenial, type Access } from '../access/access'
 import type { Tx } from '../db/client'
 import { memories } from '../db/schema'
 import type { Deps, KeyPrincipal } from '../http/env'
-import {
-  PROMPT_RECALL_LIMIT,
-  PROMPT_SEMANTIC_TIMEOUT_MS,
-  recallBlock,
-  sessionStart,
-} from '../lifecycle/lifecycle'
+import { PROMPT_SEMANTIC_TIMEOUT_MS, recallBlock, sessionStart } from '../lifecycle/lifecycle'
 import { accessForKey, recallScopeForKey, semanticFor } from '../memory/context'
 import { personaOverride, runInSpace } from '../memory/personas'
 import { formatUri } from '../memory/uri'
 import { bootEntryChars, bootHeading, OMITTED_TITLES } from './boot'
-import {
-  DEFAULT_MIN_SCORE,
-  normalizeQuery,
-  publicCandidate,
-  scoreRecall,
-  type ScoredCandidate,
-} from './recall'
+import { weightsOf } from '../settings/advanced'
+import { normalizeQuery, publicCandidate, scoreRecall, type ScoredCandidate } from './recall'
 
-// 调试台多看一些候选：没注入的、以及管理界面搜得到这把 Key 却读不到的，都从这么多条里找
+// 调试台多看一些候选：没注入的（包括低于最低分的，界面拖动最低分与条数时就地重算）、
+// 以及管理界面搜得到这把 Key 却读不到的，都从这么多条里找。比每轮召回条数的上限多
 const DEBUG_LIMIT = 30
 
 // 启动预览：按一把 Key 走一遍会话开始，和生命周期端点用同一段代码，看到的就是宿主收到的
@@ -61,20 +52,32 @@ export async function bootPreview(
 }
 
 // 召回调试台：按一把 Key 模拟每轮输入时的召回，列出各路得分；再用管理界面的权限（member，查看者本人，
-// 也就是应用主人）搜一遍，列出搜得到、这把 Key 却读不到的记忆与原因
+// 也就是应用主人）搜一遍，列出搜得到、这把 Key 却读不到的记忆与原因。
+// 最低分、条数与权重按这把 Key 的应用生效的设置，和每轮输入读的是同一份；trial 给了最低分或条数时按给的试算
 export async function recallDebug(
   deps: Deps,
   key: KeyPrincipal,
   member: Access,
   rawQuery: string,
+  trial: { minScore?: number | undefined; limit?: number | undefined } = {},
 ): Promise<RecallDebug> {
   const query = normalizeQuery(rawQuery)
   const keyAccess = accessForKey(key)
+  const scope = recallScopeForKey(deps, key)
+  const { values } = await scope.settings()
+  const minScore = trial.minScore ?? values['recall.minScore']
+  const limit = trial.limit ?? values['recall.limit']
+  const weights = weightsOf(values)
   // 向量只算一次，两边共用；和每轮输入时一样有时限
   const semantic = await semanticFor(deps, query, PROMPT_SEMANTIC_TIMEOUT_MS)
   // 管理界面看得到全部人格，不按继承覆盖，和管理界面的搜索一样
   const visible = await runInSpace(deps.db, key.spaceId, 'all', (tx, personaIds) =>
-    scoreRecall(tx, member, semantic, query, { limit: DEBUG_LIMIT, minScore: 0, personaIds }),
+    scoreRecall(tx, member, semantic, query, {
+      limit: DEBUG_LIMIT,
+      minScore: 0,
+      personaIds,
+      weights,
+    }),
   )
   const { scored, filtered } = await runInSpace(
     deps.db,
@@ -86,6 +89,7 @@ export async function recallDebug(
         minScore: 0,
         personaIds: chain,
         inheritance: true,
+        weights,
       })
       // 按记忆 id 比对：同一个坐标上可能还有别的记录（例如别的成员的本人记忆），按坐标会找错
       const seen = new Set(scored.map((c) => c.id))
@@ -93,21 +97,16 @@ export async function recallDebug(
       return { scored, filtered: await explainHidden(tx, keyAccess, chain, missing) }
     },
   )
-  const injected = scored
-    .filter((c) => c.rawScore >= DEFAULT_MIN_SCORE)
-    .slice(0, PROMPT_RECALL_LIMIT)
+  const injected = scored.filter((c) => c.rawScore >= minScore).slice(0, limit)
   const shown = new Set(injected.map((c) => c.id))
   const toDebug = (c: ScoredCandidate) => ({ ...publicCandidate(c), breakdown: c.breakdown })
   return {
     injected: injected.map(toDebug),
     others: scored.filter((c) => !shown.has(c.id)).map(toDebug),
-    minScore: DEFAULT_MIN_SCORE,
+    minScore,
+    limit,
     // 和每轮输入用同一段代码，群聊 bot 的召回块同样带正文。调试台按无上下文模拟，也没有会话标识
-    block: await recallBlock(
-      recallScopeForKey(deps, key),
-      key.app.runtimeFamily,
-      injected.map(publicCandidate),
-    ),
+    block: await recallBlock(scope, key.app.runtimeFamily, injected.map(publicCandidate)),
     semantic: semantic !== null,
     filtered,
   }

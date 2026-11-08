@@ -9,6 +9,7 @@ import { loggableError, withSpace, type Tx } from '../db/client'
 import { apps, memories } from '../db/schema'
 import type { Embedder } from '../embedding/provider'
 import type { Deps, KeyPrincipal } from '../http/env'
+import { CHAT_FAMILIES } from '../lifecycle/lifecycle'
 import type { RecallScope } from '../lifecycle/scope'
 import { boot, recentMemories } from '../recall/boot'
 import { recordRecall } from '../recall/events'
@@ -21,6 +22,12 @@ import {
   scoreRecall,
   type QueryVector,
 } from '../recall/recall'
+import {
+  loadAppSettings,
+  loadInstanceSettings,
+  weightsOf,
+  type EffectiveSettings,
+} from '../settings/advanced'
 import { readableConditions } from './filter'
 import { runInSpace } from './personas'
 import { MemoryError, MemoryService, type MemoryContext } from './service'
@@ -180,9 +187,13 @@ export async function recallForConsole(
 ): Promise<RecallCandidate[]> {
   const query = normalizeQuery(rawQuery)
   if (!query) return []
-  const semantic = await semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS)
+  const [semantic, settings] = await Promise.all([
+    semanticFor(deps, query, CONSOLE_SEMANTIC_TIMEOUT_MS),
+    loadInstanceSettings(deps.db),
+  ])
+  const weights = weightsOf(settings.values)
   return runInSpace(deps.db, spaceId, 'all', (tx, personaIds) =>
-    recall(tx, access, semantic, query, { limit, minScore: 0, personaIds }),
+    recall(tx, access, semantic, query, { limit, minScore: 0, personaIds, weights }),
   )
 }
 
@@ -194,19 +205,37 @@ export function recallScopeForKey(
   const access = accessForKey(key, session)
   const run = <T>(fn: (tx: Tx, personaIds: string[]) => Promise<T>) =>
     runInSpace(deps.db, key.spaceId, session.personaId, fn)
+  // 经 deps 在 withSpace 里读：测试台的回滚模式下读的是同一个事务。第一次用到时读，之后用同一份
+  let loaded: Promise<EffectiveSettings> | undefined
+  const settings = () =>
+    (loaded ??= withSpace(deps.db, key.spaceId, (tx) =>
+      loadAppSettings(tx, key.spaceId, key.app.id, CHAT_FAMILIES.has(key.app.runtimeFamily)),
+    ))
   return {
+    settings,
     async recall(rawQuery, { semantic: useSemantic = true, semanticTimeoutMs, ...options }) {
       const query = normalizeQuery(rawQuery)
       if (!query) return []
+      const { values } = await settings()
       // 嵌入接口慢时不拖住整个召回：到时间就放弃向量这一路
       const semantic = useSemantic ? await semanticFor(deps, query, semanticTimeoutMs) : null
       const scored = await run((tx, personaIds) =>
-        scoreRecall(tx, access, semantic, query, { ...options, personaIds, inheritance: true }),
+        scoreRecall(tx, access, semantic, query, {
+          minScore: values['recall.minScore'],
+          ...options,
+          weights: weightsOf(values),
+          personaIds,
+          inheritance: true,
+        }),
       )
       return scored.map(publicCandidate)
     },
-    boot: (budget) =>
-      run((tx, personaIds) => boot(tx, access, { personaIds, inheritance: true }, budget)),
+    boot: async (budget) => {
+      const charBudget = budget ?? (await settings()).values['boot.charBudget']
+      return run((tx, personaIds) =>
+        boot(tx, access, { personaIds, inheritance: true }, charBudget),
+      )
+    },
     recent: (limit) =>
       run((tx, personaIds) => recentMemories(tx, access, { personaIds, inheritance: true }, limit)),
     summaries: async (limit) => {
@@ -220,8 +249,10 @@ export function recallScopeForKey(
     subjects: async () => {
       if (!session.subjects.length) return []
       try {
+        const perSubject = (await settings()).values['recall.subjectFacts']
+        if (!perSubject) return []
         return await withSpace(deps.db, key.spaceId, (tx) =>
-          subjectFacts(tx, access, session.subjects),
+          subjectFacts(tx, access, session.subjects, perSubject),
         )
       } catch (err) {
         console.warn('读取对象直连的事实失败', loggableError(err))

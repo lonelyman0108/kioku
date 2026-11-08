@@ -32,6 +32,7 @@ import {
   type SecretVia,
 } from '../memory/service'
 import { formatUri } from '../memory/uri'
+import { APP_ADVANCED_FIELD, parseAppAdvanced, parseSpaceAdvanced } from '../settings/advanced'
 import { VERSION } from '../version'
 import { deriveExportKey, ExportTooLarge, sealSpaceExport, type KdfParams } from './spaceFormat'
 import {
@@ -114,6 +115,7 @@ export async function exportSpace(
             name: space.name,
             extractionMonthlyTokens: space.extractionMonthlyTokens,
             extractionDailyWrites: space.extractionDailyWrites,
+            advanced: parseSpaceAdvanced(space.advanced),
           },
         })
         const source = lines(tx, {
@@ -275,6 +277,7 @@ async function* lines(tx: Tx, ctx: LinesContext): AsyncGenerator<string> {
         runtimeFamily: a.runtimeFamily as RuntimeFamily,
         defaultPersonaId: a.defaultPersonaId,
         config: AppConfig.parse(a.config),
+        advanced: parseAppAdvanced(a.config[APP_ADVANCED_FIELD]),
         createdAt: a.createdAt.toISOString(),
         updatedAt: a.updatedAt.toISOString(),
       }),

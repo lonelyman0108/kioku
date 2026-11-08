@@ -24,7 +24,9 @@ import { addMember, bearer, bootstrap, jsonRequest, type Workspace } from '../..
 import type { BufferedSession } from '../buffer'
 import { EPISODE_TTL_DAYS, NO_USABLE_KEY } from '../extract'
 import type { ChatMessage, ChatModel } from '../provider'
+import { SYSTEM } from '../prompt'
 import { saveExtractionConfig } from '../settings'
+import { saveInstanceAdvanced, saveSpaceAdvanced } from '../../settings/advanced'
 import { processSession } from '../worker'
 import { TOKEN_SAMPLES } from '../../testing/plaintext'
 
@@ -139,6 +141,27 @@ describe.skipIf(!testDatabaseUrl)('抽取', () => {
     )
     return (await res.json()) as RecallResponse
   }
+
+  it('会话摘要的有效天数与抽取规则的补充按空间的设置：补充接在固定规则后面，实例的在前', async () => {
+    await saveInstanceAdvanced(database.db, { 'prompts.extractionRules': '实例的抽取规则' })
+    await saveSpaceAdvanced(database.db, ws.spaceId, {
+      'extraction.episodeTtlDays': 3,
+      'prompts.extractionRules': '空间的抽取规则',
+    })
+    try {
+      await say(inGroup(), '我最近在学日语', '加油')
+      const { model, calls } = fakeModel(JSON.stringify({ facts: [], summary: '聊了学日语' }))
+      await extract(model)
+      const system = calls[0]![0]!.content
+      expect(system).toBe(`${SYSTEM}\n实例的抽取规则\n空间的抽取规则`)
+      const episode = (await extracted()).find((r) => r.layer === 'episode')!
+      const days = (episode.expiresAt!.getTime() - Date.now()) / 86_400_000
+      expect(days).toBeGreaterThan(2)
+      expect(days).toBeLessThanOrEqual(3)
+    } finally {
+      await database.db.delete(settings).where(eq(settings.key, 'advanced'))
+    }
+  })
 
   it('群聊一批：给发言人与本群记下事实、写会话摘要、记抽取记录，删掉用过的缓冲', async () => {
     await say(inGroup(), '我最近在学日语', '加油')

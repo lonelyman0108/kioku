@@ -32,7 +32,8 @@ const debug = createRoute({
   method: 'post',
   path: '/spaces/{spaceId}/apps/{appId}/keys/{keyId}/debug',
   tags: ['apps'],
-  summary: '召回调试：按这把 Key 模拟一句输入的召回，列出各路得分与被过滤掉的记忆（只给应用主人）',
+  summary:
+    '召回调试：按这把 Key 模拟一句输入的召回，列出各路得分与被过滤掉的记忆（只给应用主人）；可以带最低分与条数试算',
   request: { params: KeyParams, body: jsonBody(RecallDebugRequest) },
   responses: { 200: jsonResponse('召回调试', RecallDebug), ...errors },
 })
@@ -51,8 +52,9 @@ export function previewRoutes(deps: Deps) {
       if ('error' in found) return c.json({ error: found.error }, found.status)
       // 管理界面里搜得到的范围按查看者本人（就是应用主人）的权限
       const { service } = await consoleMemberFor(deps, params.spaceId, accountId)
+      const { query, minScore, limit } = c.req.valid('json')
       return c.json(
-        await recallDebug(deps, found.key, service.access, c.req.valid('json').query),
+        await recallDebug(deps, found.key, service.access, query, { minScore, limit }),
         200,
       )
     })

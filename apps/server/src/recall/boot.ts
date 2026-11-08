@@ -1,4 +1,9 @@
-import type { BootResponse, RecentMemory, SessionSummary } from '@kioku/contracts'
+import {
+  TUNING_DEFAULTS,
+  type BootResponse,
+  type RecentMemory,
+  type SessionSummary,
+} from '@kioku/contracts'
 import { and, asc, desc, eq, inArray, ne } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
@@ -15,7 +20,8 @@ import { inlineText, titleSuffix } from './text'
 // boot 会被宿主当作指令级上下文，所以只收受信来源写下的、记下的四类（BOOT_LAYERS、BOOT_ELIGIBLE，在 memory/filter.ts）：
 // 联系人的事实与会话摘要、以及 untrusted 写入的内容一律不进，否则群聊里的人可以把一条 priority 0 的「记忆」
 // 变成本人 agent 每次会话都读到的指令。
-export const BOOT_CHAR_BUDGET = 16_000
+// 字数预算的内置值，高级设置里可以改
+export const BOOT_CHAR_BUDGET = TUNING_DEFAULTS['boot.charBudget']
 
 // 超出预算、没有展开的节点的标题，和 omitted 一一对应，只给启动预览显示。放在 Symbol 键上：
 // JSON 序列化时不会带出去，接入方的 /boot 与 kioku_boot 仍然只有坐标

@@ -1,4 +1,4 @@
-import type { SubjectFacts } from '@kioku/contracts'
+import { TUNING_DEFAULTS, type SubjectFacts } from '@kioku/contracts'
 import { and, eq, inArray, lte, sql } from 'drizzle-orm'
 
 import type { Access } from '../access/access'
@@ -8,8 +8,8 @@ import { memories } from '../db/schema'
 import { readableConditions } from '../memory/filter'
 import { clipChars, inlineText } from './recall'
 
-// 对象直连每个对象最多带几条事实；注入时每条事实、每个名字最多这么多字
-export const SUBJECT_FACT_LIMIT = 8
+// 对象直连每个对象默认最多带几条事实（高级设置里可以改）；注入时每条事实、每个名字最多这么多字
+export const SUBJECT_FACT_LIMIT = TUNING_DEFAULTS['recall.subjectFacts']
 const SUBJECT_FACT_CHARS = 200
 const SUBJECT_NAME_CHARS = 40
 
@@ -63,12 +63,13 @@ export async function subjectFacts(
   tx: Tx,
   access: Access,
   subjects: readonly SessionSubject[],
+  perSubject = SUBJECT_FACT_LIMIT,
 ): Promise<SubjectFacts[]> {
   const rows = await readableSubjectFacts(
     tx,
     access,
     subjects.map((s) => s.id),
-    SUBJECT_FACT_LIMIT,
+    perSubject,
   )
   return subjects.flatMap((subject) => {
     const facts = rows
