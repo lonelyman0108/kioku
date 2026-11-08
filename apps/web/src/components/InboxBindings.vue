@@ -5,6 +5,7 @@ import { computed } from 'vue'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import Hint from './Hint.vue'
+import EmptyState from './strata/EmptyState.vue'
 import SubjectBindings from './SubjectBindings.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
@@ -31,7 +32,7 @@ const total = computed(() => overview.data.value?.inbox.bindings ?? 0)
     </SectionHeading>
     <ReadFailureNote v-if="overview.isError.value" class="panel-note" :query="overview" />
     <USkeleton v-if="overview.isPending.value" class="mt-3 h-24 w-full" />
-    <p v-else-if="overview.data.value && !items.length" class="panel-empty">暂无账号绑定申请</p>
+    <EmptyState v-else-if="overview.data.value && !items.length" title="暂无账号绑定申请" />
     <template v-else-if="overview.data.value">
       <p class="panel-lead">
         确认后，该账号的私聊视为本人对话，此操作不可撤销。如无法辨认，请拒绝。
@@ -48,10 +49,6 @@ const total = computed(() => overview.data.value?.inbox.bindings ?? 0)
 .note-line.panel-note {
   margin: 10px 0 0;
   border-top: 0;
-}
-.panel-empty {
-  padding: 22px 0;
-  color: var(--ui-text-muted);
 }
 .panel-lead {
   padding-top: 12px;
