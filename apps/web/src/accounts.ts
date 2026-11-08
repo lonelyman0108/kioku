@@ -109,9 +109,7 @@ export function setPasswordError(err: unknown): { text: string; invalid: boolean
 
 // 停用之后没有可用所有者的空间：他是这些空间里唯一没停用的所有者。字段由服务端的账号列表给出
 export function soleOwnerSpaces(account: AdminAccount): string[] {
-  return account.spaces
-    .filter((s) => (s as { soleOwner?: boolean }).soleOwner === true)
-    .map((s) => s.name)
+  return account.spaces.filter((s) => s.soleActiveOwner).map((s) => s.name)
 }
 export const SOLE_OWNER_TEXT =
   '停用后这些空间没有可用的所有者，无法管理成员与设置；重新启用后恢复。'

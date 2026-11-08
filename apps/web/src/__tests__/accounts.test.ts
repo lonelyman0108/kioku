@@ -144,15 +144,15 @@ describe('账号列表', () => {
     expect(instanceAccounts).toContain(
       '停用后：无法登录，会话立即失效，其应用的访问密钥停止工作；重新启用后恢复。',
     )
-    const spaces = [
-      { id: '00000000-0000-4000-8000-000000000002', name: '家', role: 'owner' as const },
-      { id: '00000000-0000-4000-8000-000000000003', name: '工作', role: 'owner' as const },
-    ]
-    const flagged = account({
-      spaces: [{ ...spaces[0]!, soleOwner: true } as (typeof spaces)[number], spaces[1]!],
+    const space = (name: string, n: number, soleActiveOwner: boolean) => ({
+      id: `00000000-0000-4000-8000-00000000000${n}`,
+      name,
+      role: 'owner' as const,
+      soleActiveOwner,
     })
+    const flagged = account({ spaces: [space('家', 2, true), space('工作', 3, false)] })
     expect(soleOwnerSpaces(flagged)).toEqual(['家'])
-    expect(soleOwnerSpaces(account({ spaces }))).toEqual([])
+    expect(soleOwnerSpaces(account({ spaces: [space('工作', 3, false)] }))).toEqual([])
   })
 
   it('修改失败按服务端的说明显示（保留最后一个管理员等）', () => {
