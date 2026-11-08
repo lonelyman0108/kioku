@@ -1,12 +1,13 @@
 import { createRoute, z } from '@hono/zod-openapi'
-import { ErrorResponse, InboxCounts, SpaceOverview } from '@kioku/contracts'
+import { ErrorResponse, InboxCounts, KeyScopes, SpaceOverview } from '@kioku/contracts'
 import { and, eq, inArray, isNull } from 'drizzle-orm'
 
+import { keyEffectiveScopes } from '../access/access'
 import { pendingBindingsFor } from '../access/binding'
 import { isInstanceAdmin } from '../auth/middleware'
 import { backupSettingsView } from '../backup/settings'
 import { withSpace, type Db } from '../db/client'
-import { apiKeys, apps, spaceMembers } from '../db/schema'
+import { accounts, apiKeys, apps, spaceMembers } from '../db/schema'
 import { embeddingSettingsView } from '../embedding/settings'
 import { extractionUsage } from '../extraction/budget'
 import type { Deps } from '../http/env'
@@ -74,8 +75,14 @@ export function overviewRoutes(deps: Deps) {
         loadRecallWindow(deps.db, spaceId),
         withSpace(deps.db, spaceId, (tx) => tx.select().from(apps).orderBy(apps.createdAt)),
         deps.db
-          .select({ accountId: spaceMembers.accountId, since: spaceMembers.createdAt })
+          .select({
+            accountId: spaceMembers.accountId,
+            role: spaceMembers.role,
+            memberSince: spaceMembers.createdAt,
+            disabledAt: accounts.disabledAt,
+          })
           .from(spaceMembers)
+          .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
           .where(eq(spaceMembers.spaceId, spaceId)),
         extractionUsage(deps.db, spaceId),
         backupSummary(deps.db, accountId),
@@ -108,7 +115,9 @@ export function overviewRoutes(deps: Deps) {
       ? await deps.db
           .select({
             appId: apiKeys.appId,
+            scopes: apiKeys.scopes,
             createdAt: apiKeys.createdAt,
+            revokedAt: apiKeys.revokedAt,
             lastUsedAt: apiKeys.lastUsedAt,
           })
           .from(apiKeys)
@@ -120,13 +129,13 @@ export function overviewRoutes(deps: Deps) {
             ),
           )
       : []
-    // 有效的 Key 与鉴权的规则一致：没吊销、应用主人还在空间里、是主人这次加入之后签发的
-    const since = new Map(members.map((m) => [m.accountId, m.since]))
+    // 有效的 Key 按鉴权的同一份规则（keyEffectiveScopes）判断
+    const memberOf = new Map(members.map((m) => [m.accountId, m]))
     const ownerOf = new Map(appRows.map((a) => [a.id, a.ownerAccountId]))
     const keysByApp = new Map<string, { active: number; lastUsedAt: Date | null }>()
     for (const k of keyRows) {
-      const joined = since.get(ownerOf.get(k.appId) ?? '')
-      if (!joined || k.createdAt < joined) continue
+      const owner = memberOf.get(ownerOf.get(k.appId) ?? '')
+      if (!keyEffectiveScopes({ ...k, scopes: KeyScopes.parse(k.scopes) }, owner)) continue
       const agg = keysByApp.get(k.appId) ?? { active: 0, lastUsedAt: null }
       agg.active += 1
       if (k.lastUsedAt && (!agg.lastUsedAt || k.lastUsedAt > agg.lastUsedAt)) {

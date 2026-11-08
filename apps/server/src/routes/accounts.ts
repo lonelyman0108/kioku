@@ -7,10 +7,11 @@ import {
   CreateAccountRequest,
   CreatedAccount,
   ErrorResponse,
+  SPACE_NAME_MAX,
   UpdateAccountRequest,
   type AccountLinkPurpose,
 } from '@kioku/contracts'
-import { and, asc, eq, gt, inArray, isNull, max, ne, sql } from 'drizzle-orm'
+import { and, asc, count, eq, gt, inArray, isNull, max, ne, sql } from 'drizzle-orm'
 
 import { requireConsole, requireInstanceAdmin } from '../auth/middleware'
 import { hashToken, newToken } from '../auth/session'
@@ -24,12 +25,27 @@ const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 const notFound = jsonResponse('账号不存在', ErrorResponse)
 
 // 改管理员身份与停用状态的事务都先拿这把锁，再数还剩几个可用的管理员：
-// 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果
+// 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果。新建账号与发链接也拿它，
+// 和停用、降级操作者的事务排成先后
 const ADMIN_LOCK = 'kioku.instance-admins'
 
-// 新账号的个人空间叫「<显示名>的空间」，显示名按码点截到 60 个字，空间名不超过 64 个字
+// 取 ADMIN_LOCK，拿到锁之后确认操作者仍是没停用的管理员。中间件在事务之前查过一次，
+// 但等锁期间他可能被别的管理员停用或降级了：新建账号、发链接与改账号都要先过这一步
+async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
+  const [self] = await tx
+    .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
+    .from(accounts)
+    .where(eq(accounts.id, actor))
+  return Boolean(self?.isAdmin && !self.disabledAt)
+}
+
+// 新账号的个人空间叫「<显示名>的空间」，显示名截到放得下后缀。按码点截：zod 的长度上限按码点算
+// （SpaceName 的 max），也不会切开代理对
+const PERSONAL_SPACE_SUFFIX = '的空间'
 export function personalSpaceName(displayName: string): string {
-  return `${Array.from(displayName).slice(0, 60).join('')}的空间`
+  const head = Array.from(displayName).slice(0, SPACE_NAME_MAX - PERSONAL_SPACE_SUFFIX.length)
+  return `${head.join('')}${PERSONAL_SPACE_SUFFIX}`
 }
 
 type AccountRow = typeof accounts.$inferSelect
@@ -49,6 +65,23 @@ async function describeAccounts(db: Db | Tx, rows: AccountRow[]): Promise<AdminA
     .innerJoin(spaces, eq(spaces.id, spaceMembers.spaceId))
     .where(inArray(spaceMembers.accountId, ids))
     .orderBy(asc(spaces.createdAt))
+  // 这些空间里各有几个没停用的所有者
+  const spaceIds = [...new Set(memberships.map((m) => m.id))]
+  const owners = spaceIds.length
+    ? await db
+        .select({ spaceId: spaceMembers.spaceId, n: count() })
+        .from(spaceMembers)
+        .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
+        .where(
+          and(
+            inArray(spaceMembers.spaceId, spaceIds),
+            eq(spaceMembers.role, 'owner'),
+            isNull(accounts.disabledAt),
+          ),
+        )
+        .groupBy(spaceMembers.spaceId)
+    : []
+  const activeOwners = new Map(owners.map((o) => [o.spaceId, o.n]))
   const activity = await db
     .select({ accountId: sessions.accountId, last: max(sessions.lastActiveAt) })
     .from(sessions)
@@ -86,7 +119,12 @@ async function describeAccounts(db: Db | Tx, rows: AccountRow[]): Promise<AdminA
       lastActiveAt: last ? new Date(last).toISOString() : null,
       spaces: memberships
         .filter((m) => m.accountId === row.id)
-        .map(({ id, name, role }) => ({ id, name, role })),
+        .map(({ id, name, role }) => ({
+          id,
+          name,
+          role,
+          soleActiveOwner: role === 'owner' && !row.disabledAt && activeOwners.get(id) === 1,
+        })),
       pendingLink: link ? { purpose: link.purpose, expiresAt: link.expiresAt.toISOString() } : null,
     }
   })
@@ -189,6 +227,7 @@ export function accountRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const actor = c.get('console').accountId
       const created = await deps.db.transaction(async (tx) => {
+        if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
         const [account] = await tx
           .insert(accounts)
           .values({
@@ -210,6 +249,7 @@ export function accountRoutes(deps: Deps) {
         const link = await issueLink(tx, account, actor)
         return { account: (await describeAccount(tx, account.id))!, link }
       })
+      if (created === 'forbidden') return c.json({ error: '需要实例管理员' }, 403)
       if (!created) return c.json({ error: '用户名已被占用' }, 409)
       return c.json(created, 201)
     })
@@ -217,6 +257,7 @@ export function accountRoutes(deps: Deps) {
       const { accountId } = c.req.valid('param')
       const actor = c.get('console').accountId
       const result = await deps.db.transaction(async (tx) => {
+        if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
         // 锁住账号再判断停用：否则和停用并发时，停用删完链接之后这里又写进一个，启用之后它就能用了。
         // 加锁顺序和别处一致：先链接、再账号
         await tx
@@ -237,6 +278,7 @@ export function accountRoutes(deps: Deps) {
         if (account.disabledAt) return 'disabled' as const
         return issueLink(tx, account, actor)
       })
+      if (result === 'forbidden') return c.json({ error: '需要实例管理员' }, 403)
       if (result === 'missing') return c.json({ error: '账号不存在' }, 404)
       if (result === 'disabled') return c.json({ error: '账号已停用，先启用再生成链接' }, 409)
       return c.json(result, 201)
@@ -246,13 +288,7 @@ export function accountRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const actor = c.get('console').accountId
       const result = await deps.db.transaction(async (tx) => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
-        // 拿到锁之后再确认一次操作者：等锁期间他自己可能被别的管理员停用或降级了
-        const [self] = await tx
-          .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
-          .from(accounts)
-          .where(eq(accounts.id, actor))
-        if (!self?.isAdmin || self.disabledAt) return 'forbidden' as const
+        if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
         // 加锁顺序和用链接设置密码、改密码一致：先链接、再账号
         await tx
           .select({ id: accountLinks.id })

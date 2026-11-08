@@ -1,12 +1,13 @@
-import type {
-  InstanceSpace,
-  MemberRole,
-  SpaceCreationPolicy,
-  SpaceDetail,
-  SpaceInfo,
-  SpaceMember,
+import {
+  DEPARTURE_RETENTION_DAYS,
+  type InstanceSpace,
+  type MemberRole,
+  type SpaceCreationPolicy,
+  type SpaceDetail,
+  type SpaceInfo,
+  type SpaceMember,
 } from '@kioku/contracts'
-import { and, asc, count, eq, inArray, isNull, sql } from 'drizzle-orm'
+import { and, asc, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
 
 import { withSpace, type Db, type Tx } from '../db/client'
 import {
@@ -37,6 +38,8 @@ export type MemberFailure =
   | 'self'
   // 账号已停用：不能加为成员、转让给他或升为所有者
   | 'disabled'
+  // 离开已满 DEPARTURE_RETENTION_DAYS 天、数据还没清理完：清理完成、离开记录删掉之前不能重新加入
+  | 'departure-expired'
 
 export type MemberResult<T> = { ok: true; value: T } | { ok: false; reason: MemberFailure }
 const fail = (reason: MemberFailure): { ok: false; reason: MemberFailure } => ({
@@ -68,14 +71,6 @@ export async function saveSpaceCreationPolicy(db: Db, value: SpaceCreationPolicy
 }
 
 // ---- 空间 ----
-
-export async function accountExists(db: Db | Tx, accountId: string): Promise<boolean> {
-  const [row] = await db
-    .select({ id: accounts.id })
-    .from(accounts)
-    .where(eq(accounts.id, accountId))
-  return Boolean(row)
-}
 
 // 新建空间，owner 成为唯一的所有者。账号不存在、已停用时不建
 export async function createSpace(
@@ -121,12 +116,23 @@ async function roleIn(tx: Tx | Db, spaceId: string, accountId: string) {
   return row?.role ?? null
 }
 
-async function ownerCount(tx: Tx, spaceId: string): Promise<number> {
-  const [row] = await tx
-    .select({ n: count() })
+// 除了 except 之外还有几个没停用的所有者。停用的账号管理不了空间，「至少一个所有者」只数没停用的；
+// 锁住这几个账号那一行，判断之后到事务结束不会被停用
+async function activeOwnersBesides(tx: Tx, spaceId: string, except: string): Promise<number> {
+  const rows = await tx
+    .select({ id: accounts.id })
     .from(spaceMembers)
-    .where(and(eq(spaceMembers.spaceId, spaceId), eq(spaceMembers.role, 'owner')))
-  return row?.n ?? 0
+    .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
+    .where(
+      and(
+        eq(spaceMembers.spaceId, spaceId),
+        eq(spaceMembers.role, 'owner'),
+        isNull(accounts.disabledAt),
+        ne(spaceMembers.accountId, except),
+      ),
+    )
+    .for('share', { of: accounts })
+  return rows.length
 }
 
 export async function spaceDetail(
@@ -278,7 +284,8 @@ async function asOwner(tx: Tx, spaceId: string, actor: string): Promise<MemberFa
   return role === 'owner' ? null : 'forbidden'
 }
 
-// 按用户名添加成员（精确匹配）。之前离开过、离开记录还在的，删掉离开记录：他的本人记忆与凭据照旧可见。
+// 按用户名添加成员（精确匹配）。之前离开不满 DEPARTURE_RETENTION_DAYS 天的，删掉离开记录：他的本人记忆与凭据照旧可见；
+// 满期的要等清理删完、离开记录删掉之后才能作为新成员加入。
 // 加入时间是现在，离开之前签发的 Key 仍然作废（见 keyEffectiveScopes）
 export async function addMember(
   db: Db,
@@ -295,12 +302,22 @@ export async function addMember(
     if (!account) return fail('no-account')
     if (await roleIn(tx, input.spaceId, account.id)) return fail('already-member')
     if (account.disabledAt) return fail('disabled')
+    // 锁住离开记录再看：清理正在删他的数据时等它提交，之后离开记录还在就是没删完
+    const ofDeparture = and(
+      eq(spaceDepartures.spaceId, input.spaceId),
+      eq(spaceDepartures.accountId, account.id),
+    )
     const [departed] = await tx
-      .delete(spaceDepartures)
-      .where(
-        and(eq(spaceDepartures.spaceId, input.spaceId), eq(spaceDepartures.accountId, account.id)),
-      )
-      .returning({ dreamPrivate: spaceDepartures.dreamPrivate })
+      .select({
+        dreamPrivate: spaceDepartures.dreamPrivate,
+        expired: sql<boolean>`${spaceDepartures.leftAt} < now() - make_interval(days => ${DEPARTURE_RETENTION_DAYS})`,
+      })
+      .from(spaceDepartures)
+      .where(ofDeparture)
+      .for('update')
+    // 满期的由清理分几个事务删，删到一半时加回来会留下数据不全的现任成员
+    if (departed?.expired) return fail('departure-expired')
+    if (departed) await tx.delete(spaceDepartures).where(ofDeparture)
     await tx.insert(spaceMembers).values({
       spaceId: input.spaceId,
       accountId: account.id,
@@ -311,7 +328,7 @@ export async function addMember(
   })
 }
 
-// 改角色：只有空间所有者；改完之后至少还有一个所有者
+// 改角色：只有空间所有者；改完之后至少还有一个没停用的所有者
 export async function updateMemberRole(
   db: Db,
   input: { spaceId: string; actor: string; target: string; role: MemberRole },
@@ -327,7 +344,7 @@ export async function updateMemberRole(
     if (
       current === 'owner' &&
       input.role !== 'owner' &&
-      (await ownerCount(tx, input.spaceId)) < 2
+      (await activeOwnersBesides(tx, input.spaceId, input.target)) === 0
     ) {
       return fail('last-owner')
     }
@@ -339,7 +356,7 @@ export async function updateMemberRole(
   })
 }
 
-// 移除成员（空间所有者移除别人）或离开（成员移除自己）。最后一个所有者不能离开、也不能被移除。
+// 移除成员（空间所有者移除别人）或离开（成员移除自己）。去掉他之后没有别的没停用的所有者时，不能离开、也不能被移除。
 // 记下离开的时间（之前的离开记录换成这一次的）；他拥有的应用的 Key 立即吊销：
 // 本来也按「所有者不在空间里」作废，吊销之后重新加入也不会再生效。他的本人记忆、凭据与密码库连接不删
 export async function removeMember(
@@ -356,7 +373,10 @@ export async function removeMember(
       .from(spaceMembers)
       .where(and(eq(spaceMembers.spaceId, input.spaceId), eq(spaceMembers.accountId, input.target)))
     if (!target) return fail('no-target')
-    if (target.role === 'owner' && (await ownerCount(tx, input.spaceId)) < 2) {
+    if (
+      target.role === 'owner' &&
+      (await activeOwnersBesides(tx, input.spaceId, input.target)) === 0
+    ) {
       return fail('last-owner')
     }
     await tx
