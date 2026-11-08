@@ -4,6 +4,10 @@ import { api } from './api/endpoints'
 import { loadMe } from './composables/useSession'
 import { legacyReviewTab } from './inbox'
 import UnavailablePage from './pages/UnavailablePage.vue'
+import { legacySettingsRedirect, legacySpaceSettingsRedirect } from './settingsSections'
+
+// 三组设置共用同一个异步组件
+const SettingsPage = () => import('./pages/SettingsPage.vue')
 
 export const routes: RouteRecordRaw[] = [
   { path: '/setup', name: 'setup', component: () => import('./pages/SetupPage.vue') },
@@ -102,16 +106,35 @@ export const routes: RouteRecordRaw[] = [
         name: 'bench',
         component: () => import('./pages/BenchPage.vue'),
       },
+      // 设置的三组共用一个页面。组记在 meta 里，外壳按组与空间换掉页面，离开一组时由页面先确认未保存的改动
       {
-        path: 'spaces/:spaceId/settings',
+        path: 'spaces/:spaceId/settings/:section?',
         name: 'space-settings',
-        component: () => import('./pages/SpaceSettingsPage.vue'),
+        component: SettingsPage,
+        meta: { settingsGroup: 'space' },
+        // 旧地址 ?section=：换成合并后的小节
+        beforeEnter: (to) =>
+          to.params.section
+            ? true
+            : (legacySpaceSettingsRedirect(String(to.params.spaceId), to.query) ?? true),
       },
+      {
+        path: 'settings/account/:section?',
+        name: 'account-settings',
+        component: SettingsPage,
+        meta: { settingsGroup: 'account' },
+      },
+      {
+        path: 'settings/instance/:section?',
+        name: 'instance-settings',
+        component: SettingsPage,
+        meta: { settingsGroup: 'instance', requiresAdmin: true },
+      },
+      // 旧地址：实例设置的小节合并之后在实例组，不带小节的去个人组
       {
         path: 'settings',
         name: 'settings',
-        component: () => import('./pages/SettingsPage.vue'),
-        meta: { requiresAdmin: true },
+        redirect: (to) => legacySettingsRedirect(to.query),
       },
     ],
   },

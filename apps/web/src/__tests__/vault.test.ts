@@ -7,7 +7,7 @@ import credentialForm from '../components/CredentialFormModal.vue?raw'
 import keyMatrix from '../components/KeyMatrix.vue?raw'
 import vaultPanel from '../components/VaultConnectionPanel.vue?raw'
 import vaultLogin from '../components/VaultLoginModal.vue?raw'
-import settingsPage from '../pages/SettingsPage.vue?raw'
+import settingsPage from '../components/MasterKeySettings.vue?raw'
 import {
   allowedCredentialCapability,
   issuedCredentialCapability,

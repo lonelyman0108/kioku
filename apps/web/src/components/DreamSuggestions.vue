@@ -260,7 +260,7 @@ watch([() => run.data.value, () => run.isError.value], ([status, failed]) => {
           mine.data.value.includePrivate
             ? '当前账号的本人记忆（机密除外）也会发送给实例配置的抽取模型整理，'
             : '当前账号已关闭本人记忆的整理，目前仅整理共享内容，'
-        }}<RouterLink :to="spaceSettingsRoute(spaceId, 'dream')" class="text-primary"
+        }}<RouterLink :to="spaceSettingsRoute(spaceId, 'extraction')" class="text-primary"
           >可在空间设置中{{ mine.data.value.includePrivate ? '关闭' : '开启' }}</RouterLink
         >。
       </p>
