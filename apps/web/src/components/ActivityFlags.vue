@@ -41,6 +41,11 @@ defineProps<{ item: Pick<ActivityItem, 'deleted' | 'expired' | 'bench' | 'left'>
   flex-shrink: 0;
   white-space: nowrap;
 }
+/* 表格的格子很窄时，图标和文字不折成两行 */
+.flags :deep(.flag-tag) {
+  display: inline-flex;
+  align-items: center;
+}
 .left-flag {
   display: inline-flex;
   align-items: center;

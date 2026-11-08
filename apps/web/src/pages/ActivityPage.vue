@@ -383,7 +383,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
           <USkeleton v-for="n in 6" :key="n" class="h-8 w-full" />
         </div>
         <template v-else-if="activity.data.value">
-          <table class="table" :class="layout">
+          <table v-if="items.length" class="table" :class="layout">
             <colgroup v-if="layout === 'narrow'">
               <col class="c-time" />
               <col />
@@ -438,7 +438,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
             </tbody>
           </table>
           <EmptyState
-            v-if="!items.length"
+            v-else
             title="暂无改动"
             description="当前日期范围与筛选下没有记录。"
           />
