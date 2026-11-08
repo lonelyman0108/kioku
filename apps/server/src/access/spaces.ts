@@ -1,10 +1,11 @@
-import type {
-  InstanceSpace,
-  MemberRole,
-  SpaceCreationPolicy,
-  SpaceDetail,
-  SpaceInfo,
-  SpaceMember,
+import {
+  DEPARTURE_RETENTION_DAYS,
+  type InstanceSpace,
+  type MemberRole,
+  type SpaceCreationPolicy,
+  type SpaceDetail,
+  type SpaceInfo,
+  type SpaceMember,
 } from '@kioku/contracts'
 import { and, asc, count, eq, inArray, isNull, ne, sql } from 'drizzle-orm'
 
@@ -37,6 +38,8 @@ export type MemberFailure =
   | 'self'
   // 账号已停用：不能加为成员、转让给他或升为所有者
   | 'disabled'
+  // 离开已满 DEPARTURE_RETENTION_DAYS 天、数据还没清理完：清理完成、离开记录删掉之前不能重新加入
+  | 'departure-expired'
 
 export type MemberResult<T> = { ok: true; value: T } | { ok: false; reason: MemberFailure }
 const fail = (reason: MemberFailure): { ok: false; reason: MemberFailure } => ({
@@ -281,7 +284,8 @@ async function asOwner(tx: Tx, spaceId: string, actor: string): Promise<MemberFa
   return role === 'owner' ? null : 'forbidden'
 }
 
-// 按用户名添加成员（精确匹配）。之前离开过、离开记录还在的，删掉离开记录：他的本人记忆与凭据照旧可见。
+// 按用户名添加成员（精确匹配）。之前离开不满 DEPARTURE_RETENTION_DAYS 天的，删掉离开记录：他的本人记忆与凭据照旧可见；
+// 满期的要等清理删完、离开记录删掉之后才能作为新成员加入。
 // 加入时间是现在，离开之前签发的 Key 仍然作废（见 keyEffectiveScopes）
 export async function addMember(
   db: Db,
@@ -298,12 +302,22 @@ export async function addMember(
     if (!account) return fail('no-account')
     if (await roleIn(tx, input.spaceId, account.id)) return fail('already-member')
     if (account.disabledAt) return fail('disabled')
+    // 锁住离开记录再看：清理正在删他的数据时等它提交，之后离开记录还在就是没删完
+    const ofDeparture = and(
+      eq(spaceDepartures.spaceId, input.spaceId),
+      eq(spaceDepartures.accountId, account.id),
+    )
     const [departed] = await tx
-      .delete(spaceDepartures)
-      .where(
-        and(eq(spaceDepartures.spaceId, input.spaceId), eq(spaceDepartures.accountId, account.id)),
-      )
-      .returning({ dreamPrivate: spaceDepartures.dreamPrivate })
+      .select({
+        dreamPrivate: spaceDepartures.dreamPrivate,
+        expired: sql<boolean>`${spaceDepartures.leftAt} < now() - make_interval(days => ${DEPARTURE_RETENTION_DAYS})`,
+      })
+      .from(spaceDepartures)
+      .where(ofDeparture)
+      .for('update')
+    // 满期的由清理分几个事务删，删到一半时加回来会留下数据不全的现任成员
+    if (departed?.expired) return fail('departure-expired')
+    if (departed) await tx.delete(spaceDepartures).where(ofDeparture)
     await tx.insert(spaceMembers).values({
       spaceId: input.spaceId,
       accountId: account.id,
