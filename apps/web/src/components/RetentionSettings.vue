@@ -14,7 +14,7 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SaveBar from './strata/SaveBar.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsTable from './strata/SettingsTable.vue'
-import { useSavedField } from '../composables/useSavedField'
+import { fieldProblems, useSavedField } from '../composables/useSavedField'
 
 // 两种保留天数一张表：已删除的记忆（保留期，每天清理）与召回明细（每小时清理）。两项共用一个保存条，
 // 保存时只调改了的那项的接口。有没有没保存的修改交给页面在左栏标出来
@@ -63,14 +63,18 @@ watch(
   (changed) => (dirtyModel.value = changed),
   { immediate: true },
 )
-// 有一项填得不对时不保存，保存条和那一行都写出范围
+// 有一项填得不对时不保存：保存条写出是哪一项、怎么不对，那一行写出范围
 const problem = computed(() =>
-  days.invalid.value || recallDays.invalid.value ? '保留天数超出范围' : null,
+  fieldProblems([
+    { label: '已删除的记忆', issue: days.issue.value },
+    { label: '召回明细', issue: recallDays.issue.value },
+  ]),
 )
-// 改短了：下一次清理就按新的天数删
+// 改短了：下一次清理就按新的天数删。和改动、保存一样拿基准比
 const shortened = computed(() => {
   const next = days.value.value
-  return Boolean(view.value && typeof next === 'number' && next < view.value.days)
+  const base = days.baseline.value
+  return typeof next === 'number' && base !== undefined && next < base
 })
 
 function discard() {
@@ -87,13 +91,13 @@ async function save() {
   const results = await Promise.allSettled([
     typeof retention === 'number'
       ? api.saveRetentionDays({ days: retention }).then((saved) => {
-          days.commit(saved.days)
+          days.commit(retention, saved.days)
           queryClient.setQueryData(queryKey, saved)
         })
       : null,
     typeof recall === 'number'
       ? api.saveRecallSettings({ retentionDays: recall }).then(async (saved) => {
-          recallDays.commit(saved.retentionDays)
+          recallDays.commit(recall, saved.retentionDays)
           queryClient.setQueryData(recallKey, saved)
           // 召回分析与概览的「从未被召回」都按召回明细的保留天数算
           await Promise.all([
@@ -233,7 +237,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
                 />
                 <span class="unit">天</span>
               </span>
-              <p v-if="days.invalid.value" class="invalid">请填写 1 到 3650 之间的整数</p>
+              <p v-if="days.invalid.value" class="invalid">请填写 1 到 3650 之间的整数。</p>
             </td>
             <td>永久删除，只能从备份恢复</td>
             <td>
@@ -272,7 +276,7 @@ const attempt = computed(() => attemptNote(view.value?.status.lastAttempt ?? nul
                 />
                 <span class="unit">天</span>
               </span>
-              <p v-if="recallDays.invalid.value" class="invalid">请填写 1 到 365 之间的整数</p>
+              <p v-if="recallDays.invalid.value" class="invalid">请填写 1 到 365 之间的整数。</p>
             </td>
             <td>并入每条记忆的累计召回次数</td>
             <td class="text-muted">每小时清理一次</td>

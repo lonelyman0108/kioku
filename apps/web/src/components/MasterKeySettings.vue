@@ -12,13 +12,15 @@ import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SettingsBlock from './strata/SettingsBlock.vue'
 import SettingsTable from './strata/SettingsTable.vue'
 
-// 主密钥：轮换还没换完时每隔几秒刷新，看得到每一类还剩多少条是旧主密钥包装的；出了错就不再刷新（错误显示出来）
+// 主密钥：轮换还没换完时每隔几秒刷新，看得到每一类还剩多少条是旧主密钥包装的。
+// 出了错时后台任务照样重试（错误是整个实例的，不分类别），所以照常刷新，只放慢一些
 const masterKey = useQuery({
   queryKey: ['settings', 'master-key'],
   queryFn: api.masterKeyStatus,
   refetchInterval: (query) => {
     const data = query.state.data
-    return remainingTotal(data?.remaining) > 0 && !data?.lastError ? 5_000 : false
+    if (remainingTotal(data?.remaining) === 0) return false
+    return data?.lastError ? 15_000 : 5_000
   },
 })
 const remaining = computed(() => remainingTotal(masterKey.data.value?.remaining))
@@ -77,10 +79,6 @@ const rows = computed(() =>
                   <span v-if="row.count === 0" class="state done">
                     <UIcon :name="icons.check" class="state-icon" />完成
                   </span>
-                  <!-- 轮换出了错就停下、不再刷新：不写成还在进行，原因在上面 -->
-                  <span v-else-if="masterKey.data.value.lastError" class="state stopped">
-                    <UIcon :name="icons.warning" class="state-icon" />已停止
-                  </span>
                   <span v-else class="state">
                     <UIcon :name="icons.refresh" class="state-icon" />轮换中
                   </span>
@@ -104,9 +102,6 @@ const rows = computed(() =>
   gap: 4px;
   font-size: 12px;
   color: var(--ui-text-toned);
-}
-.state.stopped {
-  color: var(--ui-error);
 }
 .state.done {
   color: var(--ui-success);

@@ -15,7 +15,7 @@ import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPr
 import { useConsoleSearch } from '../composables/useConsoleSearch'
 import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
-import { ME_KEY, useSession } from '../composables/useSession'
+import { forgetSpace, ME_KEY, useSession } from '../composables/useSession'
 import { icons } from '../icons'
 import { actionableInboxCount } from '../inbox'
 import { queryClient } from '../query'
@@ -36,6 +36,7 @@ let loggingOut = false
 watch(
   () => me.data.value,
   (m) => {
+    if (m === null) forgetSpace()
     if (m === null && !loggingOut) {
       void router.replace({ name: 'login', query: { next: route.fullPath } })
     }
@@ -246,6 +247,7 @@ async function logout() {
     }
   }
   loggingOut = true
+  forgetSpace()
   // 清掉全部缓存：下一个在这个标签页登录的人不能看到上一个人的记忆
   queryClient.clear()
   queryClient.setQueryData(ME_KEY, null)

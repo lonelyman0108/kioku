@@ -35,14 +35,27 @@ function readLastSpace(): string | null {
 }
 const lastSpaceId = ref<string | null>(readLastSpace())
 
-// 进入带空间的地址时记下；由路由的 afterEach 调用
+// 进入带空间的地址时记下；由路由的 afterEach 调用。只记当前账号是成员的空间：
+// 不是成员的地址（旧链接、被移出）不顶掉上一次的空间
 export function rememberSpace(id: string): void {
+  const me = queryClient.getQueryData<Me | null>(ME_KEY)
+  if (!me || !pickSpace(me.spaces, id, null)) return
   if (lastSpaceId.value === id) return
   lastSpaceId.value = id
   try {
     sessionStorage.setItem(LAST_SPACE_KEY, id)
   } catch {
     // 存不下时只在内存里记
+  }
+}
+
+// 退出登录、会话失效时清掉：同一个标签页里换人登录，不沿用上一个人的空间
+export function forgetSpace(): void {
+  lastSpaceId.value = null
+  try {
+    sessionStorage.removeItem(LAST_SPACE_KEY)
+  } catch {
+    // 存储不可用时内存里已经清掉
   }
 }
 
