@@ -41,8 +41,15 @@ import setupPage from '../pages/SetupPage.vue?raw'
 import unavailablePage from '../pages/UnavailablePage.vue?raw'
 import { routes } from '../routes'
 import useSessionSource from '../composables/useSession.ts?raw'
-import { useSavedField } from '../composables/useSavedField'
-import { ME_KEY, pickSpace, rememberSpace, useSession } from '../composables/useSession'
+import { fieldProblems, useSavedField } from '../composables/useSavedField'
+import {
+  forgetSpace,
+  ME_KEY,
+  pickSpace,
+  rememberSpace,
+  useSession,
+} from '../composables/useSession'
+import { queryClient as sharedClient } from '../query'
 import consoleLayout from '../layouts/ConsoleLayout.vue?raw'
 import accountSettingsPage from '../pages/AccountSettingsPage.vue?raw'
 import instanceSettingsPage from '../pages/InstanceSettingsPage.vue?raw'
@@ -329,18 +336,60 @@ describe('设置的地址', () => {
     expect(useSessionSource).toMatch(/try \{\s*sessionStorage\.setItem/)
   })
 
+  const me = {
+    id: 'u',
+    username: 'u',
+    displayName: 'U',
+    isAdmin: false,
+    spaces: [
+      { id: 'a', name: '空间甲', role: 'owner' as const },
+      { id: 'b', name: '空间乙', role: 'editor' as const },
+    ],
+  }
+  // 不带空间的地址上 useSession 给的空间名
+  const spaceOnAccountPage = async () => {
+    const client = new QueryClient()
+    client.setQueryData(ME_KEY, me)
+    const router = createRouter({
+      history: createMemoryHistory(),
+      routes: [{ path: '/settings/account', component: { render: () => null } }],
+    })
+    await router.push('/settings/account')
+    const Probe = defineComponent(() => {
+      const { space } = useSession()
+      return () => space.value?.name ?? ''
+    })
+    const app = createSSRApp(Probe)
+    app.use(router)
+    app.use(VueQueryPlugin, { queryClient: client })
+    return renderToString(app)
+  }
+
+  it('只记当前账号是成员的空间；退出登录、会话失效时清掉', async () => {
+    sharedClient.setQueryData(ME_KEY, me)
+    forgetSpace()
+    rememberSpace('b')
+    expect(await spaceOnAccountPage()).toBe('空间乙')
+    // 不是成员的地址不顶掉上一次的空间
+    rememberSpace('not-a-member')
+    expect(await spaceOnAccountPage()).toBe('空间乙')
+    forgetSpace()
+    expect(await spaceOnAccountPage()).toBe('空间甲')
+    // 没登录时不记
+    sharedClient.setQueryData(ME_KEY, null)
+    rememberSpace('b')
+    sharedClient.setQueryData(ME_KEY, me)
+    expect(await spaceOnAccountPage()).toBe('空间甲')
+    expect(consoleLayout).toContain('if (m === null) forgetSpace()')
+    const logout = consoleLayout.slice(consoleLayout.indexOf('async function logout'))
+    expect(logout.indexOf('forgetSpace()')).toBeLessThan(logout.indexOf('queryClient.clear()'))
+    sharedClient.clear()
+  })
+
   it('在空间 B 里打开过设置，到个人页面时空间组还是 B', async () => {
     const client = new QueryClient()
-    client.setQueryData(ME_KEY, {
-      id: 'u',
-      username: 'u',
-      displayName: 'U',
-      isAdmin: false,
-      spaces: [
-        { id: 'a', name: '空间甲', role: 'owner' },
-        { id: 'b', name: '空间乙', role: 'editor' },
-      ],
-    })
+    client.setQueryData(ME_KEY, me)
+    sharedClient.setQueryData(ME_KEY, me)
     const router = createRouter({
       history: createMemoryHistory(),
       routes: [
@@ -538,8 +587,8 @@ describe('设置行与保存条', () => {
     expect(save).toContain(
       'const recall = recallDays.changed.value ? recallDays.value.value : null',
     )
-    expect(save).toContain('days.commit(saved.days)')
-    expect(save).toContain('recallDays.commit(saved.retentionDays)')
+    expect(save).toContain('days.commit(retention, saved.days)')
+    expect(save).toContain('recallDays.commit(recall, saved.retentionDays)')
     expect(save).toContain('api.saveRetentionDays({ days: retention })')
     expect(save).toContain('api.saveRecallSettings({ retentionDays: recall })')
     expect(save).toContain('Promise.allSettled(')
@@ -550,11 +599,17 @@ describe('设置行与保存条', () => {
   })
 })
 
-describe('保留天数的表单值', () => {
+describe('数值设置的表单值', () => {
   const setup = () => {
     const saved = ref<number | undefined>(undefined)
     const field = useSavedField(() => saved.value, { min: 1, max: 3650 })
     return { saved, field }
+  }
+  const loaded = async (initial = 30) => {
+    const it = setup()
+    it.saved.value = initial
+    await nextTick()
+    return it
   }
 
   it('读到之前不算改动，读到后表单跟上', async () => {
@@ -563,61 +618,121 @@ describe('保留天数的表单值', () => {
     saved.value = 30
     await nextTick()
     expect(field.value.value).toBe(30)
+    expect(field.baseline.value).toBe(30)
     expect(field.changed.value).toBe(false)
   })
 
   it('别处改了、本地没动：表单与基准一起跟上，不算未保存', async () => {
-    const { saved, field } = setup()
-    saved.value = 30
-    await nextTick()
+    const { saved, field } = await loaded()
     saved.value = 45
     await nextTick()
     expect(field.value.value).toBe(45)
     expect(field.changed.value).toBe(false)
   })
 
-  it('本地改过：后台重取不冲掉输入，仍和载入时的基准比', async () => {
-    const { saved, field } = setup()
-    saved.value = 30
-    await nextTick()
-    field.value.value = 60
-    saved.value = 45
-    await nextTick()
-    expect(field.value.value).toBe(60)
-    expect(field.changed.value).toBe(true)
-    field.reset()
-    expect(field.value.value).toBe(30)
-  })
-
-  it('保存之后以存下的值为基准', async () => {
-    const { saved, field } = setup()
-    saved.value = 30
-    await nextTick()
-    field.value.value = 60
-    field.commit(60)
-    expect(field.changed.value).toBe(false)
+  it('本地改过：输入留着，基准跟着服务端最新的值；放弃回到最新的值', async () => {
+    const { saved, field } = await loaded()
+    field.value.value = 45
     saved.value = 60
     await nextTick()
+    expect(field.value.value).toBe(45)
+    expect(field.baseline.value).toBe(60)
+    expect(field.changed.value).toBe(true)
+    field.reset()
     expect(field.value.value).toBe(60)
+    expect(field.changed.value).toBe(false)
   })
 
-  it('清空或超出范围算不合法：不能静默跳过，要拦下并说明', async () => {
-    const { saved, field } = setup()
-    saved.value = 30
+  it('本地改成和服务端新值一样：不算改动', async () => {
+    const { saved, field } = await loaded()
+    field.value.value = 60
+    saved.value = 60
     await nextTick()
-    for (const bad of [null, undefined, 0, 3651, 1.5]) {
+    expect(field.changed.value).toBe(false)
+  })
+
+  it('保存之后以存下的值为基准；保存期间又改了输入时留着新输入', async () => {
+    const done = await loaded()
+    done.field.value.value = 60
+    done.field.commit(60, 60)
+    expect(done.field.value.value).toBe(60)
+    expect(done.field.changed.value).toBe(false)
+
+    const typing = await loaded()
+    typing.field.value.value = 60
+    // 请求发出之后又输入了 70
+    typing.field.value.value = 70
+    typing.field.commit(60, 60)
+    expect(typing.field.value.value).toBe(70)
+    expect(typing.field.baseline.value).toBe(60)
+    expect(typing.field.changed.value).toBe(true)
+  })
+
+  it('清空、小数、超出范围都算不合法，并说出是哪一种', async () => {
+    const { field } = await loaded()
+    const cases: [number | null | undefined, string][] = [
+      [null, 'empty'],
+      [undefined, 'empty'],
+      [1.5, 'fraction'],
+      [0, 'range'],
+      [3651, 'range'],
+    ]
+    for (const [bad, issue] of cases) {
       field.value.value = bad
+      expect(field.issue.value, String(bad)).toBe(issue)
       expect(field.invalid.value, String(bad)).toBe(true)
     }
     field.value.value = 3650
-    expect(field.invalid.value).toBe(false)
-    const elements = elementsOf(template(retentionSettings))
-    const bar = elements.find((el) => el.tag === 'SaveBar')!
-    expect(bound(bar, 'problem')).toBe('problem')
+    expect(field.issue.value).toBeNull()
+  })
+
+  it('保存条上写出是哪一项、怎么不对', () => {
     expect(
-      elements.filter((el) => el.tag === 'p' && attr(el, 'class') === 'invalid').map(condition),
-    ).toEqual(['days.invalid.value', 'recallDays.invalid.value'])
-    expect(retentionSettings).toContain("'保留天数超出范围'")
+      fieldProblems([
+        { label: '已删除的记忆', issue: 'empty' },
+        { label: '召回明细', issue: 'fraction' },
+      ]),
+    ).toBe('已删除的记忆：未填写；召回明细：需为整数')
+    expect(fieldProblems([{ label: '召回明细', issue: null }])).toBeNull()
+  })
+
+  it('保留期与抽取预算都用它：不合法时禁用保存，那一行写出范围（完整的句子带句号）', () => {
+    for (const [name, source, fields] of [
+      ['RetentionSettings', retentionSettings, ['days', 'recallDays']],
+      ['ExtractionBudget', extractionBudget, ['monthly', 'daily']],
+    ] as const) {
+      const elements = elementsOf(template(source))
+      expect(
+        bound(
+          elements.find((el) => el.tag === 'SaveBar')!,
+          'problem',
+        ),
+        name,
+      ).toBe('problem')
+      expect(source, name).toContain('fieldProblems([')
+      const notes = elements.filter(
+        (el) => el.tag === 'p' && condition(el)?.endsWith('.invalid.value'),
+      )
+      expect(notes.map(condition), name).toEqual(fields.map((f) => `${f}.invalid.value`))
+      for (const note of notes) expect(textOf(note), name).toMatch(/^请填写 .+ 之间的整数。$/)
+      const save = /async function save\(\)[^]*?\n\}/.exec(scriptOf(source))![0]
+      expect(save, name).toContain(
+        'if (saving.value || changedCount.value === 0 || problem.value) return',
+      )
+    }
+    expect(extractionBudget).toContain('monthly.commit(monthlyTokens, saved.monthlyTokens)')
+    expect(extractionBudget).toContain(
+      'daily.commit(dailyWritesPerSubject, saved.dailyWritesPerSubject)',
+    )
+    expect(extractionBudget).not.toContain('form.monthlyTokens')
+  })
+
+  it('缩短保留期的警告和改动、保存一样拿基准比', () => {
+    const shortened = /const shortened = computed\(\(\) => \{[^]*?\n\}\)/.exec(
+      scriptOf(retentionSettings),
+    )![0]
+    expect(shortened).toContain('const base = days.baseline.value')
+    expect(shortened).not.toContain('view.value.days')
   })
 })
 

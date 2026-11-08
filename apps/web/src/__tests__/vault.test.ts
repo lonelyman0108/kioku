@@ -332,11 +332,12 @@ describe('界面用上了这些规则', () => {
     const extra = { memories: 1, credentials: 0, vaultConnections: 0, settings: 0, other: 100 }
     expect(remainingTotal(extra)).toBe(1)
     expect(settingsPage.match(/remainingTotal\(/g)).toHaveLength(2)
-    // 轮换出了错就停下：各行不再写「轮换中」
-    expect(settingsPage).toContain(
-      'v-else-if="masterKey.data.value.lastError" class="state stopped"',
-    )
-    expect(settingsPage.indexOf('已停止')).toBeLessThan(settingsPage.indexOf('轮换中'))
+    // 出了错时后台任务照样重试：各行照写「轮换中」，错误在上面，照常刷新只是放慢
+    expect(settingsPage).not.toContain('已停止')
+    expect(settingsPage).toContain('<UIcon :name="icons.refresh" class="state-icon" />轮换中')
+    expect(settingsPage).toContain('<NoteLine v-if="masterKey.data.value.lastError" tone="error">')
+    expect(settingsPage).toContain('if (remainingTotal(data?.remaining) === 0) return false')
+    expect(settingsPage).toContain('return data?.lastError ? 15_000 : 5_000')
     expect(settingsPage).not.toContain('.memories +')
   })
 
