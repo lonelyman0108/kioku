@@ -11,7 +11,7 @@ const flag = computed(() => (props.status ? FLAGS[props.status] : null))
 </script>
 
 <template>
-  <span class="flag-tag"
+  <span class="flag-tag" :class="{ warning: flag?.warning }"
     ><UIcon v-if="flag" :name="flag.icon" class="flag-icon" aria-hidden="true" /><slot>{{
       flag?.label
     }}</slot></span
@@ -28,6 +28,9 @@ const flag = computed(() => (props.status ? FLAGS[props.status] : null))
   line-height: 18px;
   white-space: nowrap;
   color: var(--ui-text-toned);
+}
+.flag-tag.warning {
+  color: var(--ui-warning);
 }
 .flag-icon {
   width: 12px;

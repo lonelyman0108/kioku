@@ -1,7 +1,6 @@
 import {
   CREDENTIAL_ACCESS_REASON_NAMES,
   CREDENTIAL_ACCESS_RESULT_NAMES,
-  CREDENTIAL_EXPIRY_NAMES,
   CREDENTIAL_HOSTED_NAME,
   CREDENTIAL_NAME_PATTERN,
   CREDENTIAL_ROTATION_NAME,
@@ -27,6 +26,7 @@ import {
 } from '@kioku/contracts'
 
 import { ApiError, readFailure } from './api/client'
+import { FLAGS, credentialFlagStatuses } from './components/strata/flags'
 import { accessContextLabels, credentialChangeLabels, credentialViaLabels } from './labels'
 import { clipText } from './text'
 import { formatShort, fromLocalInput, toLocalInput } from './time'
@@ -340,10 +340,7 @@ export const CREDENTIAL_URL_HINT =
 export function credentialFlags(
   c: Pick<ConsoleCredential, 'expiry' | 'rotationRequestedAt'>,
 ): string[] {
-  const flags: string[] = []
-  if (c.expiry) flags.push(CREDENTIAL_EXPIRY_NAMES[c.expiry])
-  if (c.rotationRequestedAt) flags.push(CREDENTIAL_ROTATION_NAME)
-  return flags
+  return credentialFlagStatuses(c).map((s) => FLAGS[s].label)
 }
 
 // 待处理里一条凭据的说明：什么时候到期、什么时候标了需要轮换

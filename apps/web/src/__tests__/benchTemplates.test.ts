@@ -1985,8 +1985,14 @@ describe('活动与访问记录的徽章', () => {
     )
     expect(block).toBeDefined()
     const nodes = walk(block!)
-    const texts = nodes.map((n) => n.content ?? '')
-    expect(texts.some((t) => t.includes('测试台'))).toBe(true)
+    const texts = nodes.map((n) => (typeof n.content === 'string' ? n.content : ''))
+    // 状态标签传 status="bench"，文字由 flags.ts 给
+    const benchTag = nodes.some(
+      (n) =>
+        n.tag === 'FlagTag' &&
+        n.props?.some((p) => p.name === 'status' && p.value?.content === 'bench'),
+    )
+    expect(texts.some((t) => t.includes('测试台')) || benchTag).toBe(true)
     expect(texts.some((t) => t.includes('操作账号'))).toBe(true)
     expect(JSON.stringify(nodes.map((n) => n.content))).toContain(`benchAccountLabel(${field})`)
   })

@@ -17,6 +17,8 @@ import vaultPanel from '../components/VaultConnectionPanel.vue?raw'
 import { icons } from '../icons'
 import { credentialChangeLabels } from '../labels'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
+import deletedMemories from '../components/DeletedMemories.vue?raw'
+import memoryEditor from '../components/MemoryEditor.vue?raw'
 import { toLocalInput } from '../time'
 import vaultSource from '../vault?raw'
 import {
@@ -221,6 +223,12 @@ describe('去处的几处共用一份', () => {
   })
 })
 
+const vueSources = import.meta.glob<string>('../**/*.vue', {
+  query: '?raw',
+  import: 'default',
+  eager: true,
+})
+
 describe('到期与轮换', () => {
   const credential = (over: Partial<ConsoleCredential> = {}) =>
     ({ expiresAt: null, expiry: null, rotationRequestedAt: null, ...over }) as ConsoleCredential
@@ -255,9 +263,31 @@ describe('到期与轮换', () => {
   })
 
   it('调用处传状态，不按文字查图标', () => {
-    for (const source of [credentialsPage, inboxCredentials]) {
+    for (const source of [credentialsPage, inboxCredentials, credentialDetail]) {
       expect(source).toContain(':status="status"')
       expect(source).toContain('credentialFlagStatuses(c)')
+    }
+    expect(credentialDetail).toContain('<FlagTag v-if="c.deletedAt" status="deleted" />')
+    expect(credentialDetail).toContain(':status="expiryStatus(c.expiry)"')
+    expect(credentialDetail).toContain('<FlagTag status="bench"')
+    expect(memoryEditor).toContain('<FlagTag v-if="dirty" class="dirty-flag" status="unsaved" />')
+    expect(deletedMemories).toContain('status="expired"')
+  })
+
+  it('凭据要处理的状态只判断一份：credentialFlags 由 credentialFlagStatuses 取文字', () => {
+    const body = /export function credentialFlags\([\s\S]*?\n\}/.exec(vaultSource)![0]
+    expect(body).toContain('credentialFlagStatuses(c).map((s) => FLAGS[s].label)')
+    expect(body).not.toContain('c.expiry')
+    expect(body).not.toContain('rotationRequestedAt)')
+  })
+
+  it('状态标签不再在插槽里写状态的文字，一律传 status', () => {
+    const names = Object.values(FLAGS)
+      .map((f) => f.label)
+      .join('|')
+    const literal = new RegExp(`<FlagTag[^>]*>\\s*(${names})\\s*</FlagTag>`)
+    for (const [path, source] of Object.entries(vueSources)) {
+      expect(source, path).not.toMatch(literal)
     }
   })
 
@@ -338,7 +368,7 @@ describe('到期与轮换', () => {
 
   it('详情列出到期时间、需要轮换与上次改值，记录可以只看上次改值以来的取用', () => {
     expect(credentialDetail).toContain("{ key: 'changed', label: '上次改值' }")
-    expect(credentialDetail).toContain('CREDENTIAL_EXPIRY_NAMES[c.expiry]')
+    expect(credentialDetail).toContain(':status="expiryStatus(c.expiry)"')
     expect(credentialDetail).toContain(
       "['credential-events', props.spaceId, c.value.id, { since: sinceChange.value }]",
     )
