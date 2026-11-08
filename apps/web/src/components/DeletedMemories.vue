@@ -12,6 +12,7 @@ import { useNow } from '../composables/useNow'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime, isExpired } from '../time'
 import Hint from './Hint.vue'
+import FlagTag from './strata/FlagTag.vue'
 import MemoryRow from './strata/MemoryRow.vue'
 import NoteLine from './strata/NoteLine.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
@@ -139,13 +140,11 @@ const TAKEN_HINT =
               </template>
             </span>
             <span v-if="isExpired(item.validTo, now) || item.uriTaken" class="row-marks">
-              <span
+              <FlagTag
                 v-if="isExpired(item.validTo, now)"
-                class="text-warning"
+                status="expired"
                 :title="`删除后已于 ${formatTime(item.validTo!)} 过期，恢复后回到「已过期」`"
-              >
-                已过期
-              </span>
+              />
               <span v-if="item.uriTaken" class="text-error" :title="TAKEN_HINT">坐标已被占用</span>
             </span>
             <template v-if="canWriteUri(item.uri)" #actions>
