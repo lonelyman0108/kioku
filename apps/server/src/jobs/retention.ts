@@ -1,5 +1,6 @@
 import {
   DEFAULT_RETENTION_DAYS,
+  DEPARTURE_RETENTION_DAYS,
   RETENTION_DAILY_TRIES,
   RetentionPauseReason,
   RetentionSettings,
@@ -27,6 +28,8 @@ import type { PgColumn, PgTable } from 'drizzle-orm/pg-core'
 import { errorText, withSpace, type Db, type Tx } from '../db/client'
 import {
   accounts,
+  conversations,
+  conversationTurns,
   credentialEvents,
   credentials,
   dreamRuns,
@@ -34,13 +37,18 @@ import {
   extractionRuns,
   memories,
   memoryEvents,
+  recallEvents,
   settings,
+  spaceDepartures,
+  spaceMembers,
   spaces,
   subjectBindings,
+  subjects,
   vaultConnections,
 } from '../db/schema'
 import { monthStart } from '../extraction/budget'
 import { ACCESS_EVENT, suggestionCurrent } from '../memory/service'
+import { dropRecallEvents } from '../recall/retention'
 
 // 保留期：删掉的、被推翻的、过期的内容与它们的历史，过了保留天数由每天一次的清理硬删除，删了就找不回来。
 // 天数与暂停存在实例设置的一项里；最近一次清理的结果单独存一项，清理任务记结果不会和管理员保存设置互相覆盖
@@ -286,6 +294,14 @@ export function retentionRules(now: Date, days: number) {
       sql`coalesce(${subjectBindings.decidedAt}, ${subjectBindings.expiresAt})`,
       cutoff,
     ),
+    // 离开空间满 DEPARTURE_RETENTION_DAYS 天、没有重新加入的成员：天数固定，不跟着保留天数变。
+    // 重新加入时离开记录就删掉了，这里再确认一次他不是成员，绝不删现在的成员的数据
+    departedMembers: and(
+      lt(spaceDepartures.leftAt, at(new Date(now.getTime() - DEPARTURE_RETENTION_DAYS * DAY))),
+      sql`not exists (select 1 from ${spaceMembers}
+        where ${spaceMembers.spaceId} = ${spaceDepartures.spaceId}
+          and ${spaceMembers.accountId} = ${spaceDepartures.accountId})`,
+    )!,
   }
 }
 
@@ -369,6 +385,11 @@ const goneOwner = (snapshot: SQLWrapper) => {
 const scrubbed = (snapshot: SQLWrapper) =>
   sql`case when ${goneOwner(snapshot)} then ${snapshot} - ${TEXT_KEYS} else ${snapshot} end`
 
+const ownedBy = (snapshot: SQLWrapper, owner: string) =>
+  sql`(${snapshot} ->> 'ownerAccountId') = ${owner}`
+const scrubbedFor = (snapshot: SQLWrapper, owner: string) =>
+  sql`case when ${ownedBy(snapshot, owner)} then ${snapshot} - ${TEXT_KEYS} else ${snapshot} end`
+
 async function scrubBatch(tx: Tx): Promise<number> {
   const { before, after } = memoryEvents
   const rows = await tx
@@ -408,12 +429,72 @@ async function tableBatch(tx: Tx, table: PgTable, id: PgColumn, where: SQL): Pro
   return gone.length
 }
 
+// 离开满期的成员：一次处理一个人。先分批删他在这个空间的记忆（本人的记忆与归他的会话摘要，历史照硬删除的规则），
+// 删完了再一次删掉别的只属于他的数据，最后删离开记录。被锁着、这次没删到的记忆留到下一次清理，离开记录也留着。
+// 留着的：他拥有的应用（Key 在离开时已吊销，由空间所有者转移或删除）、他写下的共享记忆与事件里的操作者、
+// 整理的运行记录（用量计入本月的预算，按抽取记录的规则清理）、绑定记录（按处理完的规则清理）
+async function departureBatch(
+  tx: Tx,
+  rules: Rules,
+  spaceId: string,
+): Promise<{ picked: number; counts: Partial<RetentionCounts> }> {
+  const [departure] = await tx
+    .select({ accountId: spaceDepartures.accountId })
+    .from(spaceDepartures)
+    .where(and(eq(spaceDepartures.spaceId, spaceId), rules.departedMembers))
+    .orderBy(asc(spaceDepartures.accountId))
+    .limit(1)
+    .for('update', { skipLocked: true })
+  if (!departure) return { picked: 0, counts: {} }
+  const owner = departure.accountId
+  // 召回明细里有他的提示语与他的本人记忆的命中，只给他看；次数先并入累计统计
+  await dropRecallEvents(tx, eq(recallEvents.ownerAccountId, owner))
+  const removed = await memoryBatch(tx, eq(memories.ownerAccountId, owner))
+  const [left] = await tx
+    .select({ id: memories.id })
+    .from(memories)
+    .where(eq(memories.ownerAccountId, owner))
+    .limit(1)
+  // 还有没删的记忆：一批删满了接着删；被锁着跳过的（picked 不满一批）等下一次清理
+  if (left) return { picked: removed, counts: {} }
+  // 不带会话上下文的会话与还没抽取的几轮（他的应用的 Key 已经吊销，本来也不会再抽取）
+  await tx.delete(conversationTurns).where(eq(conversationTurns.ownerAccountId, owner))
+  await tx.delete(conversations).where(eq(conversations.ownerAccountId, owner))
+  // 整理他的本人记忆提出的建议，只给他看
+  await tx.delete(dreamSuggestions).where(eq(dreamSuggestions.ownerAccountId, owner))
+  // 凭据连同事件（级联），之后才是密码库连接：凭据的外键指着连接
+  await tx.delete(credentials).where(eq(credentials.ownerAccountId, owner))
+  await tx.delete(vaultConnections).where(eq(vaultConnections.ownerAccountId, owner))
+  // 共享记忆的历史里，他的本人记忆移出来之前的快照：抹掉正文、标题、disclosure 与关键词，和删账号时一样
+  const { before, after } = memoryEvents
+  await tx
+    .update(memoryEvents)
+    .set({ before: scrubbedFor(before, owner), after: scrubbedFor(after, owner) })
+    .where(
+      or(
+        and(sql`${before} ?| ${TEXT_KEYS}`, ownedBy(before, owner)),
+        and(sql`${after} ?| ${TEXT_KEYS}`, ownedBy(after, owner)),
+      ),
+    )
+  // 联系人上「这是哪个成员」的标记：他不在了，标记指不到人，重新加入时也不该凭它认出他
+  await tx.update(subjects).set({ accountId: null }).where(eq(subjects.accountId, owner))
+  await tx
+    .delete(spaceDepartures)
+    .where(and(eq(spaceDepartures.spaceId, spaceId), eq(spaceDepartures.accountId, owner)))
+  // 一个人做完了，接着看下一个
+  return { picked: RETENTION_BATCH, counts: { departedMembers: 1 } }
+}
+
 interface Step {
   label: string
   // 删账号留下的历史：谁都看不到，不用给谁时间找回，暂停期间也照常做
   always?: true
   // 一批：取到了几行（不满一批就是做完了），各类算多少
-  batch: (tx: Tx, rules: Rules) => Promise<{ picked: number; counts: Partial<RetentionCounts> }>
+  batch: (
+    tx: Tx,
+    rules: Rules,
+    spaceId: string,
+  ) => Promise<{ picked: number; counts: Partial<RetentionCounts> }>
 }
 
 const single =
@@ -485,6 +566,10 @@ const STEPS: Step[] = [
     ),
   },
   {
+    label: '离开满期的成员',
+    batch: departureBatch,
+  },
+  {
     label: '已处理的绑定记录',
     batch: single('subjectBindings', (tx, r) =>
       tableBatch(tx, subjectBindings, subjectBindings.id, r.subjectBindings),
@@ -506,6 +591,7 @@ const emptyCounts = (): RetentionCounts => ({
   subjectBindings: 0,
   accessEvents: 0,
   vaultConnections: 0,
+  departedMembers: 0,
 })
 
 function addCounts(into: RetentionCounts, more: Partial<RetentionCounts>): RetentionCounts {
@@ -541,7 +627,7 @@ export async function purgeExpired(
         for (;;) {
           if (timeUp()) return { counts, errors, complete: false }
           started = true
-          const done = await withSpace(db, spaceId, (tx) => step.batch(tx, rules))
+          const done = await withSpace(db, spaceId, (tx) => step.batch(tx, rules, spaceId))
           addCounts(counts, done.counts)
           if (done.picked < RETENTION_BATCH) break
         }

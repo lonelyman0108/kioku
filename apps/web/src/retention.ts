@@ -77,6 +77,7 @@ export const retentionLabels: Record<keyof RetentionCounts, string> = {
   deletedCredentials: '已删除的凭据',
   vaultConnections: '已断开的密码库连接',
   subjectBindings: '已处理的绑定记录',
+  departedMembers: '离开满 30 天的成员',
 }
 
 // 删了东西的那几类，一条都没删的不列
