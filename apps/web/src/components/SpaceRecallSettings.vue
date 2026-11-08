@@ -1,6 +1,11 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { APP_TUNING_KEYS, type TuningKey, type UpdateSpaceAdvanced } from '@kioku/contracts'
+import {
+  APP_TUNING_KEYS,
+  WEIGHT_KEYS,
+  type TuningKey,
+  type UpdateSpaceAdvanced,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
@@ -8,6 +13,7 @@ import { useRoute } from 'vue-router'
 import {
   BOOT_EXTRAS,
   formatTuning,
+  overriddenAt,
   refreshAdvanced,
   runtimeName,
   spaceAdvancedKey,
@@ -54,6 +60,7 @@ const tuning = useTuningFields(
   APP_TUNING_KEYS,
   () => view.data.value?.effective,
   () => view.data.value?.instance,
+  () => overriddenAt(view.data.value?.sources, 'space'),
 )
 const { fields } = tuning
 const changedCount = computed(() => tuning.changedKeys.value.length)
@@ -91,15 +98,11 @@ const spaceValue = (overrides: Record<string, unknown>) =>
 const weights = computed(() => {
   const instance = view.data.value?.instance
   if (!instance) return []
-  return (
-    [
-      'recallWeights.semantic',
-      'recallWeights.fulltext',
-      'recallWeights.glossaryFirst',
-      'recallWeights.glossaryMore',
-      'recallWeights.priority',
-    ] as const
-  ).map((key) => ({ key, ...TUNING_META[key], value: formatTuning(key, instance[key]) }))
+  return WEIGHT_KEYS.map((key) => ({
+    key,
+    ...TUNING_META[key],
+    value: formatTuning(key, instance[key]),
+  }))
 })
 // 试算用表单里的值；不合法时用生效的值
 const trialMinScore = computed(() =>
@@ -169,7 +172,12 @@ async function save() {
           :editable="editable"
           @restore="tuning.restore('recall.minScore')"
         />
-        <RecallTrial :space-id="spaceId" :min-score="trialMinScore" :limit="trialLimit" />
+        <RecallTrial
+          :space-id="spaceId"
+          :min-score="trialMinScore"
+          :limit="trialLimit"
+          :app-overrides="overriddenApps"
+        />
         <TuningRow
           v-model="fields['recall.subjectFacts'].value.value"
           v-bind="row('recall.subjectFacts')"

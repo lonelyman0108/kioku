@@ -1,9 +1,13 @@
 import {
   PROMPT_SUPPLEMENT_MAX_CHARS,
+  TUNING_KEYS,
   TuningValues,
+  WEIGHT_KEYS,
+  type AppAdvancedSummary,
   type DebugCandidate,
   type SettingSource,
   type TuningKey,
+  type TuningSources,
 } from '@kioku/contracts'
 import type { QueryClient } from '@tanstack/vue-query'
 
@@ -82,27 +86,29 @@ export const BOOT_EXTRAS = [
 export type BootExtra = (typeof BOOT_EXTRAS)[number]['key']
 
 // 两位小数的项：最低分与权重
-const DECIMAL_KEYS = new Set<TuningKey>([
-  'recall.minScore',
-  'recallWeights.semantic',
-  'recallWeights.fulltext',
-  'recallWeights.glossaryFirst',
-  'recallWeights.glossaryMore',
-  'recallWeights.priority',
-])
-export const isDecimal = (key: TuningKey) => DECIMAL_KEYS.has(key)
+export const isDecimal = (key: TuningKey) =>
+  key === 'recall.minScore' || (WEIGHT_KEYS as readonly TuningKey[]).includes(key)
 export const isFlag = (key: TuningKey) => key.endsWith('.enabled')
 
-// 取值范围取自契约，和服务端的校验是同一份；开关按 0、1 记
-export function rangeOf(key: TuningKey): { min: number; max: number; decimals?: number } {
+// 取值范围与校验取自契约（TuningValues 里这一项的定义），和服务端是同一份；开关按 0、1 记
+export function rangeOf(key: TuningKey) {
   if (isFlag(key)) return { min: 0, max: 1 }
-  const schema = TuningValues.shape[key] as { minValue: number | null; maxValue: number | null }
+  const schema = TuningValues.shape[key] as unknown as {
+    minValue: number | null
+    maxValue: number | null
+    safeParse(value: unknown): { success: boolean }
+  }
   return {
     min: schema.minValue ?? 0,
     max: schema.maxValue ?? Number.MAX_SAFE_INTEGER,
-    ...(isDecimal(key) ? { decimals: 2 } : {}),
+    schema,
+    decimals: isDecimal(key),
   }
 }
+
+// 数字框的步长：小数的项 0.01，字数预算 1,000，其余 1
+export const stepOf = (key: TuningKey) =>
+  isDecimal(key) ? 0.01 : key === 'boot.charBudget' ? 1000 : 1
 
 // 表单里的值：开关按 0、1 记
 export const toFieldValue = (value: number | boolean): number =>
@@ -125,30 +131,15 @@ export const LEVEL_NAMES: Record<SettingSource, string> = {
   app: '应用',
 }
 
-// 一行的来源：表单里的值和上一级一样时是沿用，否则是本级覆盖
-export function rowSource(
-  key: TuningKey,
-  value: number | null | undefined,
-  inherited: number | boolean,
-): 'inherited' | 'overridden' {
-  return value === toFieldValue(inherited) || value === null || value === undefined
-    ? 'inherited'
-    : 'overridden'
-}
-
-// 修改请求：改过的项里，和上一级一样的写 null（恢复成沿用），其余写值
-export function buildPatch(
-  fields: readonly { key: TuningKey; changed: boolean; value: number | null | undefined }[],
-  inherited: TuningValues,
-): Record<string, number | boolean | null> {
-  const patch: Record<string, number | boolean | null> = {}
-  for (const f of fields) {
-    if (!f.changed || typeof f.value !== 'number') continue
-    patch[f.key] =
-      f.value === toFieldValue(inherited[f.key]) ? null : fromFieldValue(f.key, f.value)
-  }
-  return patch
-}
+// 这一级覆盖了哪几项，以服务端为准：空间、应用看生效值的来源，实例看存下的覆盖
+export const overriddenAt = (sources: TuningSources | undefined, level: SettingSource) =>
+  sources
+    ? new Set((Object.keys(sources) as TuningKey[]).filter((k) => sources[k] === level))
+    : undefined
+export const overriddenIn = (overrides: Partial<Record<string, unknown>> | undefined) =>
+  overrides
+    ? new Set((TUNING_KEYS as readonly TuningKey[]).filter((k) => overrides[k] !== undefined))
+    : undefined
 
 // 客户端名，宿主上限的表格用
 const RUNTIME_NAMES: Record<string, string> = { claudecode: 'Claude Code', codex: 'Codex' }
@@ -179,6 +170,30 @@ export function trialRows(
     passed++
     return { candidate, state: passed <= limit ? 'injected' : 'overLimit' }
   })
+}
+
+// 试算用的最低分与条数：默认是空间表单里的值；所选访问密钥的应用自己覆盖了哪一项，那一项按应用的值，
+// 并给一句说明（空间的设置对它不起作用）
+export function trialSettings(
+  form: { minScore: number; limit: number },
+  app: { id: string; name: string } | null,
+  appOverrides: readonly AppAdvancedSummary[] | undefined,
+): { minScore: number; limit: number; note: string | null } {
+  const overrides = app ? appOverrides?.find((a) => a.id === app.id)?.overrides : undefined
+  const minScore = overrides?.['recall.minScore']
+  const limit = overrides?.['recall.limit']
+  const parts = [
+    minScore !== undefined && `最低分 ${minScore.toFixed(2)}`,
+    limit !== undefined && `条数 ${limit}`,
+  ].filter(Boolean)
+  return {
+    minScore: minScore ?? form.minScore,
+    limit: limit ?? form.limit,
+    note:
+      app && parts.length
+        ? `应用「${app.name}」另有覆盖（${parts.join('、')}），按它的值试算，空间的设置对它不起作用。`
+        : null,
+  }
 }
 
 export function trialSummary(rows: readonly TrialRow[]): string {

@@ -1,9 +1,15 @@
 <script setup lang="ts">
-import type { DebugCandidate } from '@kioku/contracts'
+import type { AppAdvancedSummary, DebugCandidate } from '@kioku/contracts'
 import { useQueries, useQuery } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
-import { TRIAL_STATE_NAMES, trialRows, trialSummary, type TrialRow } from '../advancedSettings'
+import {
+  TRIAL_STATE_NAMES,
+  trialRows,
+  trialSettings,
+  trialSummary,
+  type TrialRow,
+} from '../advancedSettings'
 import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import { ownedApps } from '../benchSession'
@@ -13,7 +19,14 @@ import StrataSwatch from './strata/StrataSwatch.vue'
 
 // 试算：选一个访问密钥、填一句提示语，用召回调试取候选的分数，再按表单里的最低分与条数在本地重算，不保存。
 // 召回调试只给应用所有者（会读到所有者的本人记忆），所以只列当前账号是所有者的应用的有效访问密钥
-const props = defineProps<{ spaceId: string; minScore: number; limit: number }>()
+// minScore、limit 是空间表单里的值；appOverrides 是空间里覆盖了设置的应用：所选访问密钥的应用自己覆盖了
+// 最低分或条数时，按应用的值算（空间的滑块对它不起作用），并写明
+const props = defineProps<{
+  spaceId: string
+  minScore: number
+  limit: number
+  appOverrides?: readonly AppAdvancedSummary[]
+}>()
 const { me } = useSession()
 
 const apps = useQuery({
@@ -92,8 +105,23 @@ async function run() {
   }
 }
 
+// 所选访问密钥的应用自己覆盖了的最低分与条数
+const selectedApp = computed(
+  () => choices.value.options.find((o) => o.key.id === keyId.value)?.app ?? null,
+)
+const used = computed(() =>
+  trialSettings(
+    { minScore: props.minScore, limit: props.limit },
+    selectedApp.value,
+    props.appOverrides,
+  ),
+)
+const minScoreUsed = computed(() => used.value.minScore)
+const limitUsed = computed(() => used.value.limit)
+const appNote = computed(() => used.value.note)
+
 const rows = computed<TrialRow[]>(() =>
-  candidates.value ? trialRows(candidates.value, props.minScore, props.limit) : [],
+  candidates.value ? trialRows(candidates.value, minScoreUsed.value, limitUsed.value) : [],
 )
 const percent = (n: number) => `${Math.max(0, Math.min(1, n)) * 100}%`
 </script>
@@ -128,6 +156,7 @@ const percent = (n: number) => `${Math.max(0, Math.min(1, n)) * 100}%`
     <p v-if="keysPending" class="trial-note">正在读取访问密钥…</p>
     <p v-else-if="unavailable" class="trial-note">{{ unavailable }}</p>
     <p v-if="failure" class="trial-note text-error">{{ failure }}</p>
+    <p v-if="appNote" class="trial-note app-note">{{ appNote }}</p>
     <template v-if="candidates">
       <p v-if="!rows.length" class="trial-note">暂无候选</p>
       <div v-for="row in rows" :key="row.candidate.uri" class="cand" :class="row.state">
@@ -135,7 +164,7 @@ const percent = (n: number) => `${Math.max(0, Math.min(1, n)) * 100}%`
         <span class="cand-title" :title="row.candidate.uri">{{ row.candidate.title }}</span>
         <span class="bar" aria-hidden="true">
           <i :style="{ width: percent(row.candidate.rawScore) }" />
-          <b :style="{ left: percent(minScore) }" />
+          <b :style="{ left: percent(minScoreUsed) }" />
         </span>
         <span class="cand-score">{{ row.candidate.score.toFixed(2) }}</span>
         <span class="cand-state">{{ TRIAL_STATE_NAMES[row.state] }}</span>
@@ -171,6 +200,9 @@ const percent = (n: number) => `${Math.max(0, Math.min(1, n)) * 100}%`
   margin-top: 8px;
   font-size: 12px;
   color: var(--ui-text-muted);
+}
+.app-note {
+  color: var(--ui-text-toned);
 }
 .cand {
   display: grid;

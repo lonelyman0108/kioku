@@ -1,15 +1,25 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import type { UpdateSpaceAdvanced } from '@kioku/contracts'
+import {
+  DREAM_KEYS,
+  EXTRACTION_KEYS,
+  PromptSupplement,
+  type UpdateSpaceAdvanced,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
-import { refreshAdvanced, spaceAdvancedKey, SUPPLEMENT_MAX } from '../advancedSettings'
+import {
+  overriddenAt,
+  refreshAdvanced,
+  spaceAdvancedKey,
+  SUPPLEMENT_MAX,
+} from '../advancedSettings'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { fieldProblems, useSavedText } from '../composables/useSavedField'
 import { useTuningFields } from '../composables/useTuningFields'
-import PromptSupplement from './PromptSupplement.vue'
+import PromptSupplementEditor from './PromptSupplementEditor.vue'
 import TuningRow from './TuningRow.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SaveBar from './strata/SaveBar.vue'
@@ -28,27 +38,26 @@ const view = useQuery({
 })
 const editable = computed(() => view.data.value?.canEdit ?? false)
 
-const EXTRACTION = [
-  'extraction.batchTurns',
-  'extraction.idleMinutes',
-  'extraction.episodeTtlDays',
-] as const
-const DREAM = ['dream.maxCalls', 'dream.maxSuggestions'] as const
+const EXTRACTION = EXTRACTION_KEYS
+const DREAM = DREAM_KEYS
 const KEYS = [...EXTRACTION, ...DREAM] as const
 const tuning = useTuningFields(
   KEYS,
   () => view.data.value?.effective,
   () => view.data.value?.instance,
+  () => overriddenAt(view.data.value?.sources, 'space'),
 )
 const { fields } = tuning
 const rules = {
   extraction: useSavedText(
     () =>
       view.data.value ? (view.data.value.overrides['prompts.extractionRules'] ?? '') : undefined,
+    PromptSupplement,
     SUPPLEMENT_MAX,
   ),
   dream: useSavedText(
     () => (view.data.value ? (view.data.value.overrides['prompts.dreamRules'] ?? '') : undefined),
+    PromptSupplement,
     SUPPLEMENT_MAX,
   ),
 }
@@ -138,7 +147,7 @@ const fixedOf = (key: 'prompts.extractionRules' | 'prompts.dreamRules', titles: 
           @restore="tuning.restore(key)"
         />
         <h4 class="sub-heading">抽取规则的补充</h4>
-        <PromptSupplement
+        <PromptSupplementEditor
           v-model="rules.extraction.value.value"
           label="抽取规则的补充"
           :fixed="
@@ -165,7 +174,7 @@ const fixedOf = (key: 'prompts.extractionRules' | 'prompts.dreamRules', titles: 
           @restore="tuning.restore(key)"
         />
         <h4 class="sub-heading">整理规则的补充</h4>
-        <PromptSupplement
+        <PromptSupplementEditor
           v-model="rules.dream.value.value"
           label="整理规则的补充"
           :fixed="fixedOf('prompts.dreamRules', ['记下的记忆', '来自对话的事实与会话摘要'])"

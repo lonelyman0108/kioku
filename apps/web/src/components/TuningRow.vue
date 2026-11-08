@@ -2,7 +2,7 @@
 import type { TuningKey } from '@kioku/contracts'
 import { computed, useId } from 'vue'
 
-import { formatTuning, isDecimal, rangeOf, TUNING_META } from '../advancedSettings'
+import { formatTuning, isDecimal, rangeOf, stepOf, TUNING_META } from '../advancedSettings'
 import SourceTag from './SourceTag.vue'
 import SettingsRow from './strata/SettingsRow.vue'
 
@@ -24,9 +24,7 @@ const id = useId()
 const meta = computed(() => TUNING_META[props.setting])
 const range = computed(() => rangeOf(props.setting))
 const slider = computed(() => props.setting === 'recall.minScore')
-const step = computed(() =>
-  isDecimal(props.setting) ? 0.01 : props.setting === 'boot.charBudget' ? 1000 : 1,
-)
+const step = computed(() => stepOf(props.setting))
 const sliderValue = computed({
   get: () => model.value ?? 0,
   set: (v: number) => (model.value = Math.round(v * 100) / 100),

@@ -2,7 +2,9 @@
 import { useToast } from '@nuxt/ui/composables'
 import {
   INSTANCE_PROMPT_KEYS,
+  PromptSupplement,
   TUNING_KEYS,
+  WEIGHT_KEYS,
   type InstancePromptKey,
   type TuningKey,
   type UpdateInstanceAdvanced,
@@ -15,8 +17,10 @@ import {
   instanceAdvancedKey,
   isDecimal,
   isFlag,
+  overriddenIn,
   rangeOf,
   refreshAdvanced,
+  stepOf,
   SUPPLEMENT_MAX,
   TUNING_META,
 } from '../advancedSettings'
@@ -24,7 +28,7 @@ import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { fieldProblems, useSavedText } from '../composables/useSavedField'
 import { useTuningFields } from '../composables/useTuningFields'
-import PromptSupplement from './PromptSupplement.vue'
+import PromptSupplementEditor from './PromptSupplementEditor.vue'
 import SegmentedChoice from './SegmentedChoice.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SaveBar from './strata/SaveBar.vue'
@@ -67,6 +71,7 @@ const texts = Object.fromEntries(
     key,
     useSavedText(
       () => (view.data.value ? (view.data.value.overrides[key] ?? '') : undefined),
+      PromptSupplement,
       SUPPLEMENT_MAX,
     ),
   ]),
@@ -79,8 +84,7 @@ const fixed = computed(() =>
 )
 
 // 默认值表：召回权重之外的各项；权重放在折叠里
-const DEFAULT_KEYS = TUNING_KEYS.filter((k) => !k.startsWith('recallWeights.'))
-const WEIGHT_KEYS = TUNING_KEYS.filter((k) => k.startsWith('recallWeights.'))
+const DEFAULT_KEYS = TUNING_KEYS.filter((k) => !(WEIGHT_KEYS as readonly TuningKey[]).includes(k))
 const GROUPS: Record<string, string> = {
   recall: '每轮召回',
   boot: '启动加载',
@@ -94,6 +98,7 @@ const tuning = useTuningFields(
   TUNING_KEYS,
   () => view.data.value?.effective,
   () => view.data.value?.builtin,
+  () => overriddenIn(view.data.value?.overrides),
 )
 const { fields } = tuning
 const overriddenText = (key: TuningKey) => {
@@ -169,8 +174,6 @@ const flagModel = (key: TuningKey) =>
 const flags = Object.fromEntries(
   TUNING_KEYS.filter(isFlag).map((k) => [k, flagModel(k)]),
 ) as Record<string, ReturnType<typeof flagModel>>
-const stepOf = (key: TuningKey) =>
-  rangeOf(key).decimals ? 0.01 : key === 'boot.charBudget' ? 1000 : 1
 </script>
 
 <template>
@@ -182,7 +185,7 @@ const stepOf = (key: TuningKey) =>
       <SettingsBlock title="提示词" wide>
         <template #note>固定部分写死在代码里，只能在后面追加补充。</template>
         <SegmentedChoice v-model="tab" :items="tabs" label="提示词" class="mb-3" />
-        <PromptSupplement
+        <PromptSupplementEditor
           :key="tab"
           v-model="texts[tab].value.value"
           :label="`${PROMPTS[tab].label}的补充`"

@@ -1,12 +1,18 @@
 <script setup lang="ts">
 import { useToast } from '@nuxt/ui/composables'
-import { APP_TUNING_KEYS, type UpdateAppAdvanced } from '@kioku/contracts'
+import {
+  APP_TUNING_KEYS,
+  PromptSupplement,
+  RECALL_KEYS,
+  type UpdateAppAdvanced,
+} from '@kioku/contracts'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
 import { computed, ref, watch } from 'vue'
 
 import {
   appAdvancedKey,
   BOOT_EXTRAS,
+  overriddenAt,
   refreshAdvanced,
   SUPPLEMENT_MAX,
   type BootExtra,
@@ -16,7 +22,7 @@ import { api } from '../api/endpoints'
 import { fieldProblems, useSavedText } from '../composables/useSavedField'
 import { useTuningFields } from '../composables/useTuningFields'
 import BootExtrasRow from './BootExtrasRow.vue'
-import PromptSupplement from './PromptSupplement.vue'
+import PromptSupplementEditor from './PromptSupplementEditor.vue'
 import TuningRow from './TuningRow.vue'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SaveBar from './strata/SaveBar.vue'
@@ -34,20 +40,17 @@ const view = useQuery({
 })
 const editable = computed(() => view.data.value?.canEdit ?? false)
 
-const RECALL = [
-  'recall.limit',
-  'recall.minScore',
-  'recall.subjectFacts',
-  'recall.chatInlineChars',
-] as const
+const RECALL = RECALL_KEYS
 const tuning = useTuningFields(
   APP_TUNING_KEYS,
   () => view.data.value?.effective,
   () => view.data.value?.inherited,
+  () => overriddenAt(view.data.value?.sources, 'app'),
 )
 const { fields } = tuning
 const guidance = useSavedText(
   () => (view.data.value ? (view.data.value.overrides['prompts.guidance'] ?? '') : undefined),
+  PromptSupplement,
   SUPPLEMENT_MAX,
 )
 const changedCount = computed(
@@ -151,7 +154,7 @@ async function save() {
         使用指引的补充 ·
         {{ view.data.value.guidance.kind === 'chat' ? '群聊机器人' : '编码 Agent' }}
       </h3>
-      <PromptSupplement
+      <PromptSupplementEditor
         v-model="guidance.value.value"
         label="使用指引的补充"
         :fixed="[{ text: view.data.value.guidance.fixed }]"

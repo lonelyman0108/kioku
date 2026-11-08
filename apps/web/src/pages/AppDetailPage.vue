@@ -595,15 +595,16 @@ watch([spaceId, appId], () => {
   min-width: 0;
 }
 /* 没有权限范围可看时（看不到 Key，或者暂无有效 Key）右栏从顶上开始 */
+.app-grid.solo .app-side-area {
+  grid-row: 1 / span 2;
+  margin-top: 0;
+}
+/* 高级设置的覆盖：设置行有三栏，左栏放不下，占满下面一整行 */
 .app-advanced-area {
   grid-column: 1 / -1;
   grid-row: 3;
   max-width: 60rem;
   margin-top: 30px;
-}
-.app-grid.solo .app-side-area {
-  grid-row: 1 / span 2;
-  margin-top: 0;
 }
 .set {
   display: flex;
