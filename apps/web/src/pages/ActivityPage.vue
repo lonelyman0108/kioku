@@ -30,6 +30,7 @@ import ActivityDetail from '../components/ActivityDetail.vue'
 import ActivityEntry, { type EntryLayout } from '../components/ActivityEntry.vue'
 import ActivityFilters from '../components/ActivityFilters.vue'
 import Hint from '../components/Hint.vue'
+import EmptyState from '../components/strata/EmptyState.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import { useDebounced } from '../composables/useDebounced'
@@ -436,7 +437,11 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
               </template>
             </tbody>
           </table>
-          <p v-if="!items.length" class="empty">暂无符合筛选的改动</p>
+          <EmptyState
+            v-if="!items.length"
+            title="暂无改动"
+            description="当前日期范围与筛选下没有记录。"
+          />
           <div v-if="activity.isFetchNextPageError.value" class="table-note">
             <NoteLine tone="error">{{ readFailure(activity.error.value) }}</NoteLine>
           </div>
@@ -743,10 +748,6 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
 .day-count {
   margin-left: 8px;
   font-weight: 400;
-  color: var(--ui-text-muted);
-}
-.empty {
-  padding: 16px 24px;
   color: var(--ui-text-muted);
 }
 .detail-column {
