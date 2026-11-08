@@ -29,6 +29,11 @@ export const INSTANCE_ADVANCED_KEY = 'advanced'
 // 也随应用的修改整个替换（见 routes/apps.ts，修改应用时保留这一项）
 export const APP_ADVANCED_FIELD = 'advanced'
 
+// 应用转给别的成员时去掉使用指引的补充：它会作为指令级上下文注入新所有者的 agent，新所有者看不出是谁写的。
+// 数值覆盖留着：它们只调条数、阈值与开关，注入不了指令，应用的设置里标着「已覆盖」，新所有者看得到、改得了，
+// 和 AppConfig 里的其他项一样随应用走
+export const withoutAppGuidance = sql`${apps.config} #- ${sql.param([APP_ADVANCED_FIELD, 'prompts.guidance'])}::text[]`
+
 export interface AdvancedLayers {
   instance?: InstanceAdvanced
   space?: SpaceAdvanced

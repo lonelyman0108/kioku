@@ -33,7 +33,7 @@ import {
 import type { Tx } from '../db/client'
 import type { Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
-import { APP_ADVANCED_FIELD } from '../settings/advanced'
+import { APP_ADVANCED_FIELD, withoutAppGuidance } from '../settings/advanced'
 
 const SpaceParams = z.object({ spaceId: z.uuid() })
 const AppParams = SpaceParams.extend({ appId: z.uuid() })
@@ -309,7 +309,12 @@ export function appRoutes(deps: Deps) {
           }
           return tx
             .update(apps)
-            .set({ ownerAccountId, updatedAt: new Date() })
+            .set({
+              ownerAccountId,
+              // 前一位所有者写的使用指引补充不跟到新所有者的 agent 里（见 withoutAppGuidance）
+              ...(ownerAccountId !== owner && { config: withoutAppGuidance }),
+              updatedAt: new Date(),
+            })
             .where(eq(apps.id, appId))
             .returning()
         }
