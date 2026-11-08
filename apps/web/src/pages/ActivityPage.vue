@@ -5,10 +5,10 @@ import { useRoute, useRouter } from 'vue-router'
 
 import {
   FILTER_GROUPS,
-  FIXED_OPTIONS,
   QUICK_RANGES,
   dayBounds,
   facetOptions,
+  toggleOff,
   filterQuery,
   gridDays,
   groupByDay,
@@ -23,7 +23,7 @@ import {
   type FilterGroup,
   type QuickRange,
 } from '../activity'
-import { readFailure } from '../api/client'
+import { ApiError, readFailure } from '../api/client'
 import { api } from '../api/endpoints'
 import ActivityCalendar from '../components/ActivityCalendar.vue'
 import ActivityDetail from '../components/ActivityDetail.vue'
@@ -51,8 +51,11 @@ const spaceId = computed(() => String(route.params.spaceId))
 // 页面开过零点时「今天」跟着变
 const now = useNow()
 const today = computed(() => localDate(now.value))
-// 浏览器的时区：按天计数按它分天，和表格里按本地日期分组一致
-const tz = Intl.DateTimeFormat().resolvedOptions().timeZone
+// 浏览器的时区：按天计数按它分天，和表格里按本地日期分组一致。服务端按数据库的时区库认名字，
+// 不认识（库比浏览器旧）时回 400，这时退回 UTC 再请求，日历旁写明按 UTC 分天
+const tz = ref(Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC')
+const tzUnknown = (error: unknown) =>
+  error instanceof ApiError && error.status === 400 && tz.value !== 'UTC'
 
 // 日期范围、筛选、关键字与选中的事件都在地址里，后退前进能还原
 const state = computed(() => parseState(route.query, today.value))
@@ -66,7 +69,7 @@ function update(patch: Partial<ActivityState>, replace = false) {
 const qInput = ref(state.value.q)
 const qDebounced = useDebounced(qInput)
 watch(qDebounced, (q) => {
-  if (q !== state.value.q) void update({ q: q.slice(0, 100), event: null, memory: null }, true)
+  if (q !== state.value.q) void update({ q: q.slice(0, 100), event: null }, true)
 })
 watch(
   () => state.value.q,
@@ -98,8 +101,8 @@ const groups = computed(() => groupByDay(items.value, today.value))
 
 // 每天的条数：选中范围内的给柱条与每天的小标题，日历上那个月的给格子
 const rangeDays = useQuery({
-  queryKey: computed(() => ['activity-days', spaceId.value, filter.value, tz]),
-  queryFn: () => api.activityDays(spaceId.value, filter.value, tz),
+  queryKey: computed(() => ['activity-days', spaceId.value, filter.value, tz.value]),
+  queryFn: () => api.activityDays(spaceId.value, filter.value, tz.value),
   placeholderData: keepPreviousData,
 })
 const month = ref(monthOf(days.value?.to ?? today.value))
@@ -108,10 +111,16 @@ const calendarFilter = computed(() => ({
   ...dayBounds(gridDays(month.value)),
 }))
 const calendarDays = useQuery({
-  queryKey: computed(() => ['activity-days', spaceId.value, calendarFilter.value, tz]),
-  queryFn: () => api.activityDays(spaceId.value, calendarFilter.value, tz),
+  queryKey: computed(() => ['activity-days', spaceId.value, calendarFilter.value, tz.value]),
+  queryFn: () => api.activityDays(spaceId.value, calendarFilter.value, tz.value),
   placeholderData: keepPreviousData,
 })
+watch([() => rangeDays.error.value, () => calendarDays.error.value], (errors) => {
+  if (errors.some(tzUnknown)) tz.value = 'UTC'
+})
+const utcFallback = computed(
+  () => tz.value === 'UTC' && Intl.DateTimeFormat().resolvedOptions().timeZone !== 'UTC',
+)
 const calendarCounts = computed(
   () => new Map(calendarDays.data.value?.days.map((d) => [d.day, d.count]) ?? []),
 )
@@ -136,24 +145,21 @@ const anchor = ref<string | null>(null)
 function onPick(day: string, extend: boolean) {
   const picked = pickDay(day, anchor.value, extend)
   if (!extend) anchor.value = day
-  void update({ range: null, from: picked.from, to: picked.to, event: null, memory: null })
+  void update({ range: null, from: picked.from, to: picked.to, event: null })
 }
 function onQuick(range: QuickRange) {
   anchor.value = null
-  void update({ range, from: null, to: null, event: null, memory: null })
+  void update({ range, from: null, to: null, event: null })
   month.value = monthOf(today.value)
 }
 
-// 筛选：每组至少留一项勾选（固定的三组），否则列表一定是空的
+// 筛选：每组至少留一项勾选（见 toggleOff），否则列表一定是空的
 function onToggle(group: FilterGroup, key: string, on: boolean) {
-  const off = new Set(state.value.off[group])
-  if (on) off.delete(key)
-  else off.add(key)
-  if (group !== 'actor' && FIXED_OPTIONS[group].every((v) => off.has(v))) return
-  void update({ off: { ...state.value.off, [group]: [...off] }, event: null, memory: null })
+  const off = toggleOff(options.value[group], state.value.off[group], key, on)
+  if (off) void update({ off: { ...state.value.off, [group]: off }, event: null })
 }
 function onReset(group: FilterGroup) {
-  void update({ off: { ...state.value.off, [group]: [] }, event: null, memory: null })
+  void update({ off: { ...state.value.off, [group]: [] }, event: null })
 }
 
 // 生效的筛选标签，可以逐个清掉
@@ -192,11 +198,11 @@ const chips = computed(() =>
 const selected = computed(() =>
   state.value.event === null ? null : (items.value.find((i) => i.id === state.value.event) ?? null),
 )
-function select(id: number, memoryId: string) {
+function select(id: number) {
   if (state.value.event === id) return
-  void update({ event: id, memory: memoryId })
+  void update({ event: id })
 }
-const closeDetail = () => update({ event: null, memory: null })
+const closeDetail = () => update({ event: null })
 const detailOpen = computed(() => state.value.event !== null)
 
 // 折叠起来的几次修改：展开哪几行只是这一页上的事，不进地址
@@ -262,6 +268,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
         </UButton>
       </div>
       <p class="rail-tip">点一天只看那天，按住 Shift 再点选一段。</p>
+      <p v-if="utcFallback" class="rail-tip">无法识别浏览器的时区，日历与柱条按 UTC 分天。</p>
       <ActivityFilters
         :options="options"
         :facets="facets.data.value"
@@ -420,7 +427,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
                   :selected="state.event === row.item.id"
                   :folded="row.more.length"
                   :expanded="expanded.has(row.item.id)"
-                  @select="select(row.item.id, row.item.memoryId)"
+                  @select="select(row.item.id)"
                   @toggle="toggleFold(row.item.id)"
                 />
                 <template v-if="expanded.has(row.item.id)">
@@ -431,7 +438,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
                     :layout="layout"
                     sub
                     :selected="state.event === sub.id"
-                    @select="select(sub.id, sub.memoryId)"
+                    @select="select(sub.id)"
                   />
                 </template>
               </template>
@@ -457,17 +464,13 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
     </div>
 
     <aside v-if="detailOpen && !narrow" class="detail-column">
-      <ActivityDetail v-if="selected" :item="selected" :space-id="spaceId" @close="closeDetail" />
-      <div v-else class="detail-missing">
-        <NoteLine>
-          所选改动不在当前列表中
-          <template #actions>
-            <UButton size="xs" color="neutral" variant="outline" @click="closeDetail">
-              关闭
-            </UButton>
-          </template>
-        </NoteLine>
-      </div>
+      <ActivityDetail
+        :key="state.event!"
+        :event-id="state.event!"
+        :initial="selected"
+        :space-id="spaceId"
+        @close="closeDetail"
+      />
     </aside>
 
     <USlideover v-if="narrow" v-model:open="filtersOpen" side="left" title="日期与筛选">
@@ -509,15 +512,14 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
     >
       <template #content>
         <ActivityDetail
-          v-if="selected"
+          v-if="state.event !== null"
+          :key="state.event"
           class="overflow-y-auto"
-          :item="selected"
+          :event-id="state.event"
+          :initial="selected"
           :space-id="spaceId"
           @close="closeDetail"
         />
-        <div v-else class="detail-missing">
-          <NoteLine>所选改动不在当前列表中</NoteLine>
-        </div>
       </template>
     </USlideover>
   </div>
@@ -750,9 +752,6 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
   min-height: 0;
   overflow-y: auto;
   border-left: 1px solid var(--strata-rule);
-}
-.detail-missing {
-  padding: 16px 20px;
 }
 
 @media (max-width: 1279.98px) {

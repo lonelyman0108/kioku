@@ -1,5 +1,6 @@
 import {
   ActivityDays,
+  ActivityEvent,
   ActivityFacets,
   ActivityList,
   AppInfo,
@@ -445,6 +446,8 @@ export const api = {
       query: filter,
       schema: ActivityFacets,
     }),
+  activityEvent: (spaceId: string, eventId: number) =>
+    request('GET', `/spaces/${spaceId}/activity/${eventId}`, { schema: ActivityEvent }),
   extractionBudget: (spaceId: string) =>
     request('GET', `/spaces/${spaceId}/extraction-budget`, { schema: ExtractionUsage }),
   saveExtractionBudget: (spaceId: string, body: ExtractionBudget) =>

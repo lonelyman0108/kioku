@@ -349,21 +349,18 @@ const commaList = <T extends z.ZodType<unknown, string>>(item: T, max: number) =
 // 变更记录的跨度最多这么多天（按天计数要一天一行）
 export const ACTIVITY_MAX_SPAN_DAYS = 400
 
-// IANA 时区名，例如 Asia/Shanghai。浏览器给的名字，服务端按它把时间分到天里
+// IANA 时区名，例如 Asia/Shanghai。浏览器给的名字，服务端按它把时间分到天里。只收地区名与 UTC：
+// 「+08」这类偏移写法和 Etc/GMT±N 在 PostgreSQL 里按 POSIX 的正负号读，和浏览器的意思相反。
+// 名字认不认得以 PostgreSQL 的时区库为准（pg_timezone_names），由服务端再查一次，不认识的回 400
+const TIME_ZONE_REGION = /^[A-Za-z]+(?:\/[A-Za-z0-9_-]+)+$/
 export const TimeZoneName = z
   .string()
   .min(1)
   .max(64)
-  .regex(/^[A-Za-z0-9_+\-/]+$/, '时区的写法不对')
-  .refine((tz) => {
-    try {
-      new Intl.DateTimeFormat('en-US', { timeZone: tz })
-      return true
-    } catch {
-      return false
-    }
-  }, '无法识别这个时区')
-
+  .refine(
+    (tz) => tz === 'UTC' || (TIME_ZONE_REGION.test(tz) && !/^Etc\//.test(tz)),
+    '时区只收地区名，例如 Asia/Shanghai',
+  )
 // 变更记录的筛选，列表、按天计数与筛选计数共用。时间是不早于 from、早于 to；
 // 多个值的参数之间是「或」，各个参数之间是「且」。q 在列表显示的标题与坐标里按子串查找，不区分大小写
 const ACTIVITY_FILTER = {
@@ -385,7 +382,8 @@ function checkSpan(
   if (!v.from || !v.to) return
   const span = Date.parse(v.to) - Date.parse(v.from)
   if (span < 0) ctx.addIssue({ code: 'custom', path: ['to'], message: '结束时间不能早于开始时间' })
-  else if (span > ACTIVITY_MAX_SPAN_DAYS * 86_400_000) {
+  // 界面按本地日历截到 400 天，跨过夏令时回拨的 400 个本地日会多出一两个小时：服务端多留一天的余量
+  else if (span > (ACTIVITY_MAX_SPAN_DAYS + 1) * 86_400_000) {
     ctx.addIssue({
       code: 'custom',
       path: ['to'],
@@ -467,6 +465,20 @@ export const ActivityList = z.object({
   nextCursor: z.string().nullable(),
 })
 export type ActivityList = z.infer<typeof ActivityList>
+
+// 变更记录里的一条改动，带前后快照（详情里对比正文用）。可见性和列表、历史同一套规则：看不到的是 404，
+// 离开的没有改后的快照；机密的快照里没有正文
+export const ActivityEvent = z.object({
+  item: ActivityItem,
+  before: MemorySnapshot.nullable(),
+  after: MemorySnapshot.nullable(),
+})
+export type ActivityEvent = z.infer<typeof ActivityEvent>
+
+export const ActivityEventParams = z.object({
+  spaceId: z.uuid(),
+  eventId: z.coerce.number().int().positive().max(Number.MAX_SAFE_INTEGER),
+})
 
 // 恢复到某个事件之后的那一版：只改正文、标题、disclosure、priority 与关键词。
 // expectedVersion 是界面上看到的当前版本号，期间被改过就返回 409

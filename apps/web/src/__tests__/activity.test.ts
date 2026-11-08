@@ -9,6 +9,7 @@ import {
   filterQuery,
   gridDays,
   groupByDay,
+  MAX_ACTOR_FILTER,
   monthGrid,
   parseState,
   pickDay,
@@ -16,7 +17,10 @@ import {
   shiftMonth,
   sparkDays,
   stateQuery,
+  toggleOff,
 } from '../activity'
+import activityDetail from '../components/ActivityDetail.vue?raw'
+import activityPage from '../pages/ActivityPage.vue?raw'
 import { formatClock } from '../time'
 
 // 本地时间：测试机在哪个时区都要过，所以都用本地的年月日时分来造
@@ -115,7 +119,6 @@ describe('地址里的状态', () => {
       noField: 'content,glossary',
       q: '会话',
       event: '42',
-      memory: uuid,
     }
     const state = parseState(query, today)
     expect(state).toMatchObject({
@@ -130,7 +133,6 @@ describe('地址里的状态', () => {
       },
       q: '会话',
       event: 42,
-      memory: uuid,
     })
     expect(stateQuery(state)).toEqual(query)
   })
@@ -149,8 +151,21 @@ describe('地址里的状态', () => {
       type: ['update'],
       layer: [],
     })
-    // 只有事件、没有记忆的不算选中
-    expect(parseState({ event: '3' }, today).event).toBeNull()
+    expect(parseState({ event: '3' }, today).event).toBe(3)
+    expect(parseState({ event: '0' }, today).event).toBeNull()
+    expect(parseState({ event: 'x' }, today).event).toBeNull()
+  })
+
+  it('写法不对的操作者丢掉，超过上限的截掉：接口遇到一个就整个请求 400', () => {
+    const many = Array.from(
+      { length: 60 },
+      (_, i) => `account:${uuid.slice(0, -2)}${String(i).padStart(2, '0')}`,
+    )
+    const state = parseState({ noActor: ['bench', 'key:1', 'app:nope', ...many].join(',') }, today)
+    expect(state.off.actor[0]).toBe('bench')
+    expect(state.off.actor).not.toContain('key:1')
+    expect(state.off.actor).not.toContain('app:nope')
+    expect(state.off.actor).toHaveLength(MAX_ACTOR_FILTER)
   })
 })
 
@@ -211,6 +226,16 @@ describe('日历', () => {
     expect(monthGrid('2026-11', today, counts, null).filter((c) => c.selected).length).toBe(14)
   })
 
+  it('整行都是下个月的不画：2027 年 2 月从周一开始、只有 28 天，只有四行', () => {
+    const feb = monthGrid('2027-02', today, new Map(), null)
+    expect(feb).toHaveLength(28)
+    expect(feb[0]!.key).toBe('2027-02-01')
+    expect(feb.at(-1)!.key).toBe('2027-02-28')
+    expect(gridDays('2027-02')).toEqual({ from: '2027-02-01', to: '2027-02-28' })
+    // 2026 年 3 月从周日开始，要六行
+    expect(monthGrid('2026-03', today, new Map(), null)).toHaveLength(42)
+  })
+
   it('一个月的范围、翻月', () => {
     expect(gridDays('2026-11')).toEqual({ from: '2026-10-26', to: '2026-12-06' })
     expect(shiftMonth('2026-01', -1)).toBe('2025-12')
@@ -245,6 +270,10 @@ describe('日历', () => {
       { day: '2026-11-08', count: 1 },
     ])
     expect(sparkDays(null, counts, today).map((d) => d.day)[0]).toBe('2026-11-06')
+    // 历史很长时留最近的 800 天，右边是今天
+    const old = sparkDays(null, [{ day: '2015-01-01', count: 1 }], today)
+    expect(old).toHaveLength(800)
+    expect(old.at(-1)!.day).toBe(today)
   })
 })
 
@@ -320,5 +349,44 @@ describe('改动的标签', () => {
 describe('一行的时间', () => {
   it('补齐两位', () => {
     expect(formatClock(at(2026, 10, 31, 7, 5))).toBe('07:05')
+  })
+})
+
+describe('至少留一项勾选', () => {
+  const listed = [
+    { key: 'create', count: 3 },
+    { key: 'update', count: 1 },
+  ]
+  it('按当前列出来的选项判断：看得到的几项不能全取消，没列出来的操作不算数', () => {
+    expect(toggleOff(listed, [], 'create', false)).toEqual(['create'])
+    expect(toggleOff(listed, ['create'], 'update', false)).toBeNull()
+    expect(toggleOff(listed, ['create'], 'create', true)).toEqual([])
+    // 地址里取消勾选的、这次没列出来的照样留着
+    expect(toggleOff(listed, ['delete'], 'create', false)).toEqual(['delete', 'create'])
+  })
+})
+
+describe('详情与时区', () => {
+  it('详情按事件 id 读这一条改动，不再取整份历史；增删行数优先用画出来的差异', () => {
+    expect(activityDetail).toContain('api.activityEvent(props.spaceId, props.eventId)')
+    expect(activityDetail).not.toContain('memoryHistory(')
+    expect(activityDetail).toContain('lineCounts(change).added')
+    expect(activityDetail).toContain('return diff.value ?? change')
+  })
+
+  it('详情里的说明与差异是正文，不小于 14px', () => {
+    const sizes = [...activityDetail.matchAll(/font-size: (\d+)px/g)].map((m) => Number(m[1]))
+    const style = activityDetail.slice(activityDetail.indexOf('<style'))
+    for (const cls of ['.detail-note', '.diff']) {
+      const block = style.slice(style.indexOf(`${cls} {`))
+      expect(Number(/font-size: (\d+)px/.exec(block)![1]), cls).toBeGreaterThanOrEqual(14)
+    }
+    expect(sizes.length).toBeGreaterThan(0)
+  })
+
+  it('服务端不认识浏览器的时区（400）时退回 UTC，并写明按 UTC 分天', () => {
+    expect(activityPage).toContain("if (errors.some(tzUnknown)) tz.value = 'UTC'")
+    expect(activityPage).toContain('error.status === 400')
+    expect(activityPage).toContain('日历与柱条按 UTC 分天')
   })
 })

@@ -25,6 +25,7 @@ import {
 import type {
   ActivityDays,
   ActivityDaysQuery,
+  ActivityEvent,
   ActivityFacets,
   ActivityFilter,
   ActivityItem,
@@ -3217,34 +3218,7 @@ export class MemoryService {
         page.map((r) => r.context),
       )
       return {
-        items: page.map((r): ActivityItem => {
-          const left = r.vis === true
-          const before = toSnapshot(r.before)
-          const afterSnap = left ? null : toSnapshot(r.after)
-          const changes = left ? [] : changedFields(before, afterSnap)
-          return {
-            id: r.id,
-            type: r.type,
-            memoryId: r.memoryId!,
-            // 离开了可见范围的，只给改前的坐标、标题与归属：记忆现在的样子在别人那里
-            uri: left ? before!.uri : formatUri(r.domain!, r.path!),
-            title: (left ? before!.title : r.title) ?? '',
-            layer: left ? before!.layer : r.memLayer,
-            sensitivity: left ? before!.sensitivity : r.memSensitivity,
-            createdAt: r.createdAt.toISOString(),
-            actor: actorOf(r),
-            actorKey: r.actorKey,
-            changes,
-            fieldChanges: before && afterSnap ? fieldChanges(before, afterSnap, changes) : [],
-            versionBefore: before?.version ?? null,
-            versionAfter: afterSnap?.version ?? null,
-            left,
-            // 离开了可见范围的，不透露它在别人那里现在是什么状态
-            deleted: !left && r.memoryDeleted,
-            expired: !left && r.memoryExpired,
-            bench: benchMark(r.context),
-          }
-        }),
+        items: page.map((r) => activityItem(r, benchMark)),
         nextCursor:
           rows.length > query.limit && page.length
             ? encodeTimeCursor(page.at(-1)!.createdMicros, String(page.at(-1)!.id))
@@ -3253,9 +3227,37 @@ export class MemoryService {
     })
   }
 
+  // 变更记录里的一条改动连同前后快照，详情对比正文用。可见性和列表是同一个子查询：看不到的和不存在一样是 404，
+  // 离开的只给改前的快照；机密的快照里不留正文
+  async activityEvent(eventId: number): Promise<ActivityEvent> {
+    return this.run(async (tx) => {
+      const { sub, conditions } = this.activityEvents(
+        tx,
+        {},
+        { inner: eq(memoryEvents.id, eventId) },
+      )
+      const [row] = await tx.select().from(sub).where(conditions.visible)
+      if (!row) throw new MemoryError(404, '这条改动不存在')
+      const benchMark = await benchMarkReader(tx, [row.context])
+      const shown = (raw: unknown) => {
+        const snap = toSnapshot(raw)
+        return snap && snap.sensitivity === 'secret' ? { ...snap, content: null } : snap
+      }
+      return {
+        item: activityItem(row, benchMark),
+        before: shown(row.before),
+        after: row.vis === true ? null : shown(row.after),
+      }
+    })
+  }
+
   // 变更记录按天的条数（日历与每天的柱条用）：和列表同一套筛选与可见性，按调用方给的时区分天
   async activityDays(query: ActivityDaysQuery): Promise<ActivityDays> {
     return this.run(async (tx) => {
+      // 按 PostgreSQL 的时区库认名字：浏览器认得、库里还没有的名字在 at time zone 那里会报错
+      if (!(await knownTimeZone(tx, query.tz))) {
+        throw new MemoryError(400, `无法识别时区 ${query.tz}`)
+      }
       const { sub, conditions } = this.activityEvents(tx, query)
       const day = sql`((${sub.createdAt} at time zone ${query.tz}::text)::date)`
       const rows = await tx
@@ -3602,6 +3604,74 @@ const GLOSSARY_INDEX_LIMIT = 5000
 const DELETED_MICROS = microsOf(memories.deletedAt)
 // 事件 id 不超过 JS 能精确表示的整数
 const EVENT_ID = /^\d{1,15}$/
+
+// PostgreSQL 认得的时区名，进程里查一次留着（时区库随数据库升级才变）
+let timeZones: Promise<Set<string>> | null = null
+async function knownTimeZone(tx: Tx, tz: string): Promise<boolean> {
+  timeZones ??= tx
+    .execute(sql`select name from pg_timezone_names`)
+    .then((rows) => new Set((rows as unknown as { name: string }[]).map((r) => r.name)))
+  try {
+    return (await timeZones).has(tz)
+  } catch (err) {
+    timeZones = null
+    throw err
+  }
+}
+
+// 变更记录子查询的一行换成列表项
+type ActivityRow = {
+  id: number
+  type: string
+  memoryId: string | null
+  before: unknown
+  after: unknown
+  context: unknown
+  createdAt: Date
+  domain: string | null
+  path: string | null
+  title: string | null
+  memLayer: Layer
+  memSensitivity: Sensitivity
+  memoryDeleted: boolean
+  memoryExpired: boolean
+  actorKey: string
+  accountName: string | null
+  keyName: string | null
+  appName: string | null
+  vis: boolean | null
+}
+function activityItem(
+  r: ActivityRow,
+  benchMark: (context: unknown) => BenchMark | null,
+): ActivityItem {
+  const left = r.vis === true
+  const before = toSnapshot(r.before)
+  const after = left ? null : toSnapshot(r.after)
+  const changes = left ? [] : changedFields(before, after)
+  return {
+    id: r.id,
+    type: r.type,
+    memoryId: r.memoryId!,
+    // 离开了可见范围的，只给改前的坐标、标题与归属：记忆现在的样子在别人那里
+    uri: left ? before!.uri : formatUri(r.domain!, r.path!),
+    title: (left ? before!.title : r.title) ?? '',
+    layer: left ? before!.layer : r.memLayer,
+    sensitivity: left ? before!.sensitivity : r.memSensitivity,
+    createdAt: r.createdAt.toISOString(),
+    actor: actorOf(r),
+    actorKey: r.actorKey,
+    changes,
+    fieldChanges: before && after ? fieldChanges(before, after, changes) : [],
+    versionBefore: before?.version ?? null,
+    versionAfter: after?.version ?? null,
+    left,
+    // 离开了可见范围的，不透露它在别人那里现在是什么状态
+    deleted: !left && r.memoryDeleted,
+    expired: !left && r.memoryExpired,
+    bench: benchMark(r.context),
+  }
+}
 
 // 子查询带上 offset 0，PostgreSQL 就不把它展开到外层，里面算出的列在外层引用几次都只算一次。
 // drizzle 遇到数字 0 不写 offset，所以写成 SQL
