@@ -12,7 +12,9 @@ import { lastUsedAt } from '../apps'
 import { usableKeys } from '../benchSession'
 import Hint from '../components/Hint.vue'
 import AccessLegend from '../components/strata/AccessLegend.vue'
+import EmptyState from '../components/strata/EmptyState.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
+import ScopeTags from '../components/strata/ScopeTags.vue'
 import StrataCore from '../components/strata/StrataCore.vue'
 import StrataSwatch from '../components/strata/StrataSwatch.vue'
 import { presentKinds, type AccessRow } from '../components/strata/strata'
@@ -153,7 +155,13 @@ async function create() {
 
     <ReadFailureNote v-for="failure in failures" :key="failure.key" :query="failure.read" />
     <USkeleton v-if="apps.isPending.value" class="h-40 w-full" />
-    <p v-else-if="apps.data.value && !apps.data.value.length" class="apps-empty">暂无应用</p>
+    <EmptyState v-else-if="apps.data.value && !apps.data.value.length" title="暂无应用">
+      <template v-if="canCreate" #actions>
+        <UButton size="sm" color="primary" variant="outline" @click="open = true">
+          新建应用
+        </UButton>
+      </template>
+    </EmptyState>
     <template v-else-if="apps.data.value">
       <div class="apps-table">
         <table>
@@ -201,7 +209,11 @@ async function create() {
                         <span class="tray-text">
                           <b>{{ key.name }}</b>
                           <code>{{ key.prefix }}</code>
-                          <span>{{ scopesSummary(key.effectiveScopes ?? key.scopes) }}</span>
+                          <ScopeTags
+                            class="tray-tags"
+                            :scopes="key.effectiveScopes ?? key.scopes"
+                            :title="scopesSummary(key.effectiveScopes ?? key.scopes)"
+                          />
                           <span v-if="key.lastUsedAt" :title="formatTime(key.lastUsedAt)">
                             {{ formatRelative(key.lastUsedAt) }}
                           </span>
@@ -296,9 +308,8 @@ async function create() {
   font-size: 14px;
   color: var(--ui-text-muted);
 }
-.apps-empty {
-  padding: 16px 0;
-  color: var(--ui-text-muted);
+.tray-tags {
+  margin: 2px 0;
 }
 .apps-table {
   overflow-x: auto;
