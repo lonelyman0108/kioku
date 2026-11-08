@@ -6,11 +6,11 @@ import { computed } from 'vue'
 import { api } from '../api/endpoints'
 import { useActivated } from '../composables/useActivated'
 import { attentionCredentialsKey } from '../inbox'
-import { attentionNotes, credentialFlags } from '../vault'
+import { attentionNotes } from '../vault'
 import Hint from './Hint.vue'
 import FlagTag from './strata/FlagTag.vue'
 import EmptyState from './strata/EmptyState.vue'
-import { flagIcon } from './strata/flags'
+import { credentialFlagStatuses } from './strata/flags'
 import ReadFailureNote from './strata/ReadFailureNote.vue'
 import SectionHeading from './strata/SectionHeading.vue'
 
@@ -49,9 +49,7 @@ const items = computed(() => list.data.value?.items ?? [])
               c.name
             }}</RouterLink>
             <code class="cred-identifier">{{ c.identifier }}</code>
-            <FlagTag v-for="flag in credentialFlags(c)" :key="flag" :icon="flagIcon(flag)">{{
-              flag
-            }}</FlagTag>
+            <FlagTag v-for="status in credentialFlagStatuses(c)" :key="status" :status="status" />
           </div>
           <p class="cred-sub">
             <span v-for="note in attentionNotes(c)" :key="note">{{ note }}</span>

@@ -12,7 +12,9 @@ import credentialDetail from '../components/CredentialDetail.vue?raw'
 import credentialForm from '../components/CredentialFormModal.vue?raw'
 import inboxCredentials from '../components/InboxCredentials.vue?raw'
 import saveModal from '../components/PlaintextSaveModal.vue?raw'
+import { FLAGS, credentialFlagStatuses } from '../components/strata/flags'
 import vaultPanel from '../components/VaultConnectionPanel.vue?raw'
+import { icons } from '../icons'
 import { credentialChangeLabels } from '../labels'
 import credentialsPage from '../pages/CredentialsPage.vue?raw'
 import { toLocalInput } from '../time'
@@ -235,6 +237,28 @@ describe('到期与轮换', () => {
       ),
     ).toEqual(['快到期', '需要轮换'])
     expect(credentialFlags(credential({ expiry: 'expired' }))).toEqual(['已到期'])
+  })
+
+  it('标签按状态取文字与图标，和 credentialFlags 的说法一致', () => {
+    const cases = [
+      credential(),
+      credential({ expiry: 'expiring' }),
+      credential({ expiry: 'expired', rotationRequestedAt: '2026-11-01T00:00:00Z' }),
+      credential({ rotationRequestedAt: '2026-11-01T00:00:00Z' }),
+    ]
+    for (const c of cases) {
+      expect(credentialFlagStatuses(c).map((s) => FLAGS[s].label)).toEqual(credentialFlags(c))
+    }
+    // 未保存和保存条同一个图标
+    expect(FLAGS.unsaved.icon).toBe(icons.unsaved)
+    expect(FLAGS.revoked.label).toBe('已吊销')
+  })
+
+  it('调用处传状态，不按文字查图标', () => {
+    for (const source of [credentialsPage, inboxCredentials]) {
+      expect(source).toContain(':status="status"')
+      expect(source).toContain('credentialFlagStatuses(c)')
+    }
   })
 
   it('待处理里说什么时候到期、什么时候标的', () => {

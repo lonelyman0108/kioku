@@ -14,7 +14,7 @@ import VaultConnectionPanel from '../components/VaultConnectionPanel.vue'
 import VaultLoginModal from '../components/VaultLoginModal.vue'
 import ReadFailureNote from '../components/strata/ReadFailureNote.vue'
 import FlagTag from '../components/strata/FlagTag.vue'
-import { flagIcon } from '../components/strata/flags'
+import { credentialFlagStatuses } from '../components/strata/flags'
 import EmptyState from '../components/strata/EmptyState.vue'
 import PageHead from '../components/strata/PageHead.vue'
 import { useNow } from '../composables/useNow'
@@ -23,7 +23,7 @@ import { invalidateInboxCounts } from '../inbox'
 import { credentialSourceLabels, restrictedAppsLabel } from '../labels'
 import { deletionNotice, purgeAt, purgeNote } from '../retention'
 import { formatRelative, formatTime } from '../time'
-import { canManageCredentials, credentialFlags } from '../vault'
+import { canManageCredentials } from '../vault'
 
 const route = useRoute()
 const router = useRouter()
@@ -288,12 +288,11 @@ async function undelete(c: ConsoleCredential) {
                   <span class="row-name">
                     {{ c.name }}
                     <FlagTag
-                      v-for="flag in credentialFlags(c)"
-                      :key="flag"
+                      v-for="status in credentialFlagStatuses(c)"
+                      :key="status"
                       class="ml-1.5"
-                      :icon="flagIcon(flag)"
-                      >{{ flag }}</FlagTag
-                    >
+                      :status="status"
+                    />
                   </span>
                   <span class="row-code">{{ c.identifier }}</span>
                   <span class="row-source" data-label="来源">{{ sourceOf(c) }}</span>
