@@ -47,20 +47,35 @@ describe('Key 当前的有效上限', () => {
   const joined = new Date('2026-09-01T00:00:00Z')
 
   it('按主人当前的角色收紧', () => {
-    expect(keyEffectiveScopes(key, { role: 'owner', memberSince: joined })).toEqual(full)
-    expect(keyEffectiveScopes(key, { role: 'editor', memberSince: joined })).toEqual(
-      clampScopesToRole(full, 'editor'),
-    )
+    expect(
+      keyEffectiveScopes(key, { role: 'owner', memberSince: joined, disabledAt: null }),
+    ).toEqual(full)
+    expect(
+      keyEffectiveScopes(key, { role: 'editor', memberSince: joined, disabledAt: null }),
+    ).toEqual(clampScopesToRole(full, 'editor'))
   })
 
   it('吊销、主人不在空间里、或主人重新加入之前签发的 Key 作废', () => {
     expect(
-      keyEffectiveScopes({ ...key, revokedAt: new Date() }, { role: 'owner', memberSince: joined }),
+      keyEffectiveScopes(
+        { ...key, revokedAt: new Date() },
+        { role: 'owner', memberSince: joined, disabledAt: null },
+      ),
     ).toBeNull()
     expect(keyEffectiveScopes(key, undefined)).toBeNull()
-    expect(keyEffectiveScopes(key, { role: null, memberSince: null })).toBeNull()
+    expect(keyEffectiveScopes(key, { role: null, memberSince: null, disabledAt: null })).toBeNull()
     expect(
-      keyEffectiveScopes(key, { role: 'owner', memberSince: new Date('2026-10-02T00:00:00Z') }),
+      keyEffectiveScopes(key, {
+        role: 'owner',
+        memberSince: new Date('2026-10-02T00:00:00Z'),
+        disabledAt: null,
+      }),
+    ).toBeNull()
+  })
+
+  it('主人的账号停用时 Key 作废', () => {
+    expect(
+      keyEffectiveScopes(key, { role: 'owner', memberSince: joined, disabledAt: new Date() }),
     ).toBeNull()
   })
 })

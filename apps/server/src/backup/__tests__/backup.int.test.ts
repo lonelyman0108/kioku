@@ -17,6 +17,7 @@ import { prepareMasterKey } from '../../crypto/rotation'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import { lastMigration, pendingMigrations, runMigrations } from '../../db/migrate'
 import {
+  accountLinks,
   conversations,
   credentials,
   dreamMarks,
@@ -119,6 +120,13 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
   async function seed() {
     const cookie = { cookie: ws.cookie }
     const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    // 一次性链接不进备份
+    await database.db.insert(accountLinks).values({
+      accountId: bob.accountId,
+      purpose: 'reset',
+      tokenHash: 'link',
+      expiresAt: new Date(Date.now() + 3600_000),
+    })
     // bob 关掉了 Dream 整理他的本人记忆：成员的设置也要跟着恢复
     expect(
       (
@@ -477,6 +485,7 @@ describe.skipIf(!testDatabaseUrl)('备份与恢复', () => {
     for (const table of BACKUP_TABLES)
       expect(summary.rows[table.name], table.name).toBeGreaterThan(0)
     expect(summary.rows).not.toHaveProperty('sessions')
+    expect(summary.rows).not.toHaveProperty('account_links')
     expect(summary.rows).not.toHaveProperty('memory_embeddings')
 
     // 人格按继承关系排：表里 child 在 base 前面，备份里 base 在前

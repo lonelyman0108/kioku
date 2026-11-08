@@ -1,18 +1,19 @@
-import { lte, sql } from 'drizzle-orm'
+import { isNotNull, lte, or, sql } from 'drizzle-orm'
 
 import { pruneBindingData } from '../access/binding'
 import { pruneAttempts } from '../auth/rateLimit'
 import type { Db } from '../db/client'
-import { sessions } from '../db/schema'
+import { accountLinks, sessions } from '../db/schema'
 import { dropIneligibleEmbeddings } from '../embedding/worker'
 import { pruneConversationTurns } from '../extraction/buffer'
 import { loadRecallSettings, pruneRecallEvents } from '../recall/retention'
 
-// 定时清理已经过期的数据，由后台任务每小时执行一次，不再在登录时顺带清理：会话、登录失败计数、
+// 定时清理已经过期的数据，由后台任务每小时执行一次，不再在登录时顺带清理：会话、过期与用过的一次性链接、登录失败计数、
 // 超过保留天数的召回事件明细、空闲超过一天的会话缓冲、过期的绑定码与过了窗口的输错绑定码计数，
 // 以及过期记忆（时间到了，没有写入，不会触发向量任务）留下的向量
 export async function cleanupExpired(db: Db): Promise<{
   sessions: number
+  links: number
   attempts: number
   recallEvents: number
   turns: number
@@ -24,6 +25,10 @@ export async function cleanupExpired(db: Db): Promise<{
     .delete(sessions)
     .where(lte(sessions.expiresAt, sql`now()`))
     .returning({ id: sessions.id })
+  const links = await db
+    .delete(accountLinks)
+    .where(or(lte(accountLinks.expiresAt, sql`now()`), isNotNull(accountLinks.usedAt)))
+    .returning({ id: accountLinks.id })
   const { retentionDays } = await loadRecallSettings(db)
   const attempts = await pruneAttempts(db)
   const recallEvents = await pruneRecallEvents(db, retentionDays)
@@ -32,6 +37,7 @@ export async function cleanupExpired(db: Db): Promise<{
   const embeddings = await dropIneligibleEmbeddings(db)
   return {
     sessions: gone.length,
+    links: links.length,
     attempts,
     recallEvents,
     turns,

@@ -15,7 +15,8 @@ let warnedUntrustedForward = false
 // 客户端地址。trustedProxies 是前面受信任的反向代理层数（KIOKU_TRUSTED_PROXIES）：
 // X-Forwarded-For 是逐跳追加的，最左边的项由请求方自己填写、可以伪造，
 // 所以从右往左数，跳过受信代理追加的项，取最后一个由受信代理写入的地址。
-export function clientIdentity(c: Context, trustedProxies: number): ClientIdentity {
+// 分不清是谁时返回 null。登录设备列表显示它，限流按它分桶（clientIdentity）
+export function clientAddress(c: Context, trustedProxies: number): string | null {
   const forwarded = c.req.header('x-forwarded-for')
   if (trustedProxies > 0) {
     const hops = (forwarded ?? '')
@@ -29,9 +30,7 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
     const hop = hops[hops.length - trustedProxies]
     if (hop !== undefined) {
       const picked = stripPort(hop)
-      return isIP(picked)
-        ? { key: clientKey(picked), identified: true }
-        : { key: 'unknown', identified: false }
+      return isIP(picked) ? unmapped(picked) : null
     }
   }
   let remote: string | undefined
@@ -40,7 +39,7 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
   } catch {
     // 测试里直接调用 app.request，没有底层连接
   }
-  if (!remote) return { key: 'unknown', identified: false }
+  if (!remote) return null
   // 没配置受信代理却收到了转发头：要么部署在代理后面但没配置，要么是请求方伪造的。
   // 两种情况都只按连接对端区分客户端，不让请求头改变限流行为（否则伪造一个头就能把限流降级）；
   // 前一种情况所有人会共用代理的地址，只打一次警告提醒配置
@@ -50,7 +49,19 @@ export function clientIdentity(c: Context, trustedProxies: number): ClientIdenti
       '收到 X-Forwarded-For 但没有设置 KIOKU_TRUSTED_PROXIES：如果部署在反向代理后面，请设置它，否则所有客户端会共用代理的地址',
     )
   }
-  return { key: clientKey(remote), identified: true }
+  return unmapped(remote)
+}
+
+export function clientIdentity(c: Context, trustedProxies: number): ClientIdentity {
+  const address = clientAddress(c, trustedProxies)
+  return address === null
+    ? { key: 'unknown', identified: false }
+    : { key: clientKey(address), identified: true }
+}
+
+// IPv4 映射地址（::ffff:a.b.c.d）还原成 IPv4
+function unmapped(address: string): string {
+  return /^::ffff:(\d+\.\d+\.\d+\.\d+)$/i.exec(address)?.[1] ?? address
 }
 
 // 限流按客户端分桶：IPv4 用完整地址；IPv6 一个用户通常拿到整个 /64，按前 64 位分桶，
