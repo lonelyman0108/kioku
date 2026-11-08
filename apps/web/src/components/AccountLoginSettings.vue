@@ -190,10 +190,12 @@ async function signOutOthers() {
         <tbody>
           <tr v-for="session in rows" :key="session.id" :data-session="session.id">
             <td>
-              <span :title="session.userAgent ?? undefined">{{
-                deviceName(session.userAgent)
-              }}</span>
-              <FlagTag v-if="session.current" status="currentDevice" class="ml-2" />
+              <span class="device">
+                <span :title="session.userAgent ?? undefined">{{
+                  deviceName(session.userAgent)
+                }}</span>
+                <FlagTag v-if="session.current" status="currentDevice" />
+              </span>
             </td>
             <td class="mono">{{ session.clientAddress ?? '—' }}</td>
             <td>{{ formatShort(session.createdAt) }}</td>
@@ -204,6 +206,9 @@ async function signOutOthers() {
                 color="neutral"
                 variant="ghost"
                 :loading="busy === session.id"
+                :aria-label="
+                  session.current ? '退出当前设备' : `退出 ${deviceName(session.userAgent)}`
+                "
                 @click="signOut(session)"
                 >退出</UButton
               >
@@ -271,6 +276,12 @@ async function signOutOthers() {
 </template>
 
 <style scoped>
+.device {
+  display: inline-flex;
+  align-items: center;
+  gap: 8px;
+  white-space: nowrap;
+}
 .mono {
   font-family: var(--font-mono);
   font-size: 13px;

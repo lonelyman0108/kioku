@@ -188,7 +188,7 @@ async function apply() {
 </script>
 
 <template>
-  <SettingsBlock title="账号" wide>
+  <SettingsBlock title="全部账号" wide>
     <template #note>新账号获得一次性的设置密码链接，管理员不经手密码。</template>
     <template #actions>
       <UButton size="sm" :icon="icons.userPlus" @click="openCreate">新建账号</UButton>
@@ -227,7 +227,7 @@ async function apply() {
           </td>
           <td>
             <span v-if="!account.spaces.length" class="dim">—</span>
-            <span v-for="(s, i) in account.spaces" :key="s.id"
+            <span v-for="(s, i) in account.spaces" :key="s.id" class="space-item"
               >{{ i ? '、' : '' }}{{ s.name }} <span class="dim">{{ roleName(s.role) }}</span></span
             >
           </td>
@@ -416,6 +416,10 @@ async function apply() {
 }
 .dim {
   color: var(--ui-text-muted);
+}
+/* 窄屏时一个空间名不拆开，表格横向滚动 */
+.space-item {
+  white-space: nowrap;
 }
 .states {
   display: inline-flex;

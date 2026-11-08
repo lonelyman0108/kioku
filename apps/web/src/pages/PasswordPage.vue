@@ -92,7 +92,9 @@ async function submit() {
     <template v-else>
       <SectionHeading :title="title" :level="1" />
       <p v-if="info" class="mt-2 text-muted text-sm" data-state="ready">
-        链接 {{ expiresIn(info.expiresAt) }}，只能用一次。设好之后其他设备上的登录全部退出。
+        链接 {{ expiresIn(info.expiresAt) }}，只能用一次。{{
+          info.purpose === 'reset' ? '设好之后其他设备上的登录全部退出。' : ''
+        }}
       </p>
       <form class="mt-4 space-y-4" @submit.prevent="submit">
         <input
