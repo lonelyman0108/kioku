@@ -54,7 +54,8 @@ const name = ref(savedName.value ?? '')
 const baseline = ref(savedName.value)
 watch(savedName, (next) => {
   if (next === undefined) return
-  if (name.value === baseline.value) name.value = next
+  // 第一次读到时表单跟上；之后本地没改过才跟上
+  if (baseline.value === undefined || name.value === baseline.value) name.value = next
   baseline.value = next
 })
 const changed = computed(() => baseline.value !== undefined && name.value.trim() !== baseline.value)

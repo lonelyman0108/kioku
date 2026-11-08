@@ -2,7 +2,7 @@
 import { MEMBER_ROLES, type MemberRole, type SpaceMember } from '@kioku/contracts'
 import { useToast } from '@nuxt/ui/composables'
 import { useQuery, useQueryClient } from '@tanstack/vue-query'
-import { computed, ref } from 'vue'
+import { computed, ref, watch } from 'vue'
 import { useRoute } from 'vue-router'
 
 import { ApiError } from '../api/client'
@@ -56,6 +56,8 @@ const username = ref('')
 const newRole = ref<MemberRole>('editor')
 const adding = ref(false)
 const addError = ref<string | null>(null)
+// 改了用户名或角色，上一次的原因就不再适用
+watch([username, newRole], () => (addError.value = null))
 async function add() {
   const name = username.value.trim()
   if (!name || adding.value) return
@@ -133,7 +135,7 @@ const CAPABILITIES: { label: string; owner: string; editor: string; viewer: stri
 
 <template>
   <div>
-    <SettingsBlock title="成员" wide>
+    <SettingsBlock title="成员列表" wide>
       <template #note>本人记忆按成员各自存放，其他成员不可见。</template>
 
       <div v-if="isOwner" class="add-member">

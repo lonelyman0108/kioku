@@ -39,7 +39,8 @@ const allow = ref(saved.value ?? false)
 const baseline = ref(saved.value)
 watch(saved, (next) => {
   if (next === undefined) return
-  if (allow.value === baseline.value) allow.value = next
+  // 第一次读到时表单跟上；之后本地没改过才跟上
+  if (baseline.value === undefined || allow.value === baseline.value) allow.value = next
   baseline.value = next
 })
 const changed = computed(() => baseline.value !== undefined && allow.value !== baseline.value)
