@@ -1835,7 +1835,7 @@ describe('运行标记那一行', () => {
     const html = await renderToString(app)
     expect(html).toContain('abc12345')
     expect(html).toContain('测试应用')
-    expect(html).toContain('可读 1 类归属，可写 0 类，最高内部')
+    expect(html).toContain('读 1 类，写 0 类，至内部')
   })
 })
 

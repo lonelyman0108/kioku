@@ -287,6 +287,19 @@ export const accessKindLabels: Record<AccessKind, string> = {
   none: '无权限',
 }
 
+// 签发弹窗的表格里格子窄，写短的；完整的说法（accessKindLabels、accessCellText）放在悬停与读屏里
+export const accessKindShortLabels: Record<AccessKind, string> = {
+  'read-write': '读写',
+  'read-extract': '读 · 抽取',
+  read: '只读',
+  'explicit-write': '按坐标读写',
+  'explicit-extract': '按坐标读 · 抽取',
+  explicit: '按坐标读',
+  write: '只写',
+  extract: '仅抽取',
+  none: '—',
+}
+
 // 一格的说明：岩芯与权限范围共用。这一类归属没有这一级（本人不设公开）时写明不适用，不说成无权限
 export function accessCellText(layer: Layer, sensitivity: Sensitivity, kind: AccessKind): string {
   const place = `${layerLabels[layer]} ${sensitivityLabels[sensitivity]}`

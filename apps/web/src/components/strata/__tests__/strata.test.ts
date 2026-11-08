@@ -785,8 +785,8 @@ describe('岩芯', () => {
 
   it('读屏和悬停读到的是签发范围，不说成实际权限', async () => {
     const html = await render(StrataCore, { scopes })
-    expect(html).toContain('aria-label="签发范围：可读 6 类归属，可写 1 类，最高私密"')
-    expect(html).toContain('<title>签发范围：可读 6 类归属，可写 1 类，最高私密</title>')
+    expect(html).toContain('aria-label="签发范围：读 6 类，写 1 类，至私密"')
+    expect(html).toContain('<title>签发范围：读 6 类，写 1 类，至私密</title>')
   })
 
   it('传了服务端算的 rows 就说是当前上下文的范围，哪怕也传了 scopes', async () => {
@@ -798,7 +798,7 @@ describe('岩芯', () => {
 
   it('带 label 时说清是谁的，也说清是签发范围', async () => {
     const html = await render(StrataCore, { scopes, label: 'MacBook' })
-    expect(html).toContain('aria-label="MacBook，签发范围：可读 6 类归属，可写 1 类，最高私密"')
+    expect(html).toContain('aria-label="MacBook，签发范围：读 6 类，写 1 类，至私密"')
     const rows = issuedScopeRows(scopes)
     expect(await render(StrataCore, { rows, label: '群聊' })).toContain(
       'aria-label="群聊的权限范围"',
@@ -843,7 +843,7 @@ describe('岩芯', () => {
     const html = await render(StrataCore, { scopes, revoked: true })
     expect(html).toContain('aria-label="已吊销，没有权限"')
     expect(html).toContain('<title>已吊销，没有权限</title>')
-    expect(html).not.toContain('可读')
+    expect(html).not.toContain('签发范围')
     expect(html).not.toContain('--layer-')
     expect(await render(StrataCore, { scopes, revoked: true, label: '旧笔记本' })).toContain(
       'aria-label="旧笔记本，已吊销，没有权限"',

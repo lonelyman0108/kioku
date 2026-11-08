@@ -66,4 +66,7 @@ export const icons = {
   themeSystem: 'i-lucide-monitor',
   themeLight: 'i-lucide-sun',
   themeDark: 'i-lucide-moon',
+  // 状态标签：已吊销的访问密钥、已到期的凭据
+  revoked: 'i-lucide-ban',
+  credentialExpired: 'i-lucide-calendar-x',
 } as const
