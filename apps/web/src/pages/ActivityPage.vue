@@ -437,11 +437,7 @@ const columns = computed(() => ({ narrow: 2, compact: 5, full: 6 })[layout.value
               </template>
             </tbody>
           </table>
-          <EmptyState
-            v-else
-            title="暂无改动"
-            description="当前日期范围与筛选下没有记录。"
-          />
+          <EmptyState v-else title="暂无改动" description="当前日期范围与筛选下没有记录。" />
           <div v-if="activity.isFetchNextPageError.value" class="table-note">
             <NoteLine tone="error">{{ readFailure(activity.error.value) }}</NoteLine>
           </div>
