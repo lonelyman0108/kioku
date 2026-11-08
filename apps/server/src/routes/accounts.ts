@@ -40,13 +40,12 @@ async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
   return Boolean(self?.isAdmin && !self.disabledAt)
 }
 
-// 新账号的个人空间叫「<显示名>的空间」。空间名的上限按 UTF-16 码元算，显示名截到放得下后缀，
-// 截断处落在代理对中间时退一个码元，不留落单的代理项
+// 新账号的个人空间叫「<显示名>的空间」，显示名截到放得下后缀。按码点截：zod 的长度上限按码点算
+// （SpaceName 的 max），也不会切开代理对
 const PERSONAL_SPACE_SUFFIX = '的空间'
 export function personalSpaceName(displayName: string): string {
-  let head = displayName.slice(0, SPACE_NAME_MAX - PERSONAL_SPACE_SUFFIX.length)
-  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1)
-  return `${head}${PERSONAL_SPACE_SUFFIX}`
+  const head = Array.from(displayName).slice(0, SPACE_NAME_MAX - PERSONAL_SPACE_SUFFIX.length)
+  return `${head.join('')}${PERSONAL_SPACE_SUFFIX}`
 }
 
 type AccountRow = typeof accounts.$inferSelect

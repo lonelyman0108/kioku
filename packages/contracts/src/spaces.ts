@@ -6,7 +6,7 @@ import { MemberRole } from './memory'
 // 离开空间（被移除或自己离开）之后，本人记忆、凭据与密码库连接还留这么多天：期间重新加入就恢复，到期由保留期的清理删掉
 export const DEPARTURE_RETENTION_DAYS = 30
 
-// 按 UTF-16 码元算（zod 的 max）
+// zod 的长度按码点算
 export const SPACE_NAME_MAX = 64
 export const SpaceName = z
   .string()

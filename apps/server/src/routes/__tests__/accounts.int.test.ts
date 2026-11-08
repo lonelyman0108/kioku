@@ -1,14 +1,15 @@
 import { randomBytes } from 'node:crypto'
 
-import type {
-  AccountLink,
-  AdminAccount,
-  AdminAccountList,
-  CreatedAccount,
-  KeyInfo,
-  LoginSessionList,
-  Me,
-  PasswordLinkInfo,
+import {
+  SpaceName,
+  type AccountLink,
+  type AdminAccount,
+  type AdminAccountList,
+  type CreatedAccount,
+  type KeyInfo,
+  type LoginSessionList,
+  type Me,
+  type PasswordLinkInfo,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
 import postgres from 'postgres'
@@ -731,6 +732,7 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
       .select()
       .from(spaces)
       .where(eq(spaces.id, created.account.spaces[0]!.id))
-    expect(space!.name).toBe(`${'😀'.repeat(60)}的空间`)
+    expect(space!.name).toBe(`${'😀'.repeat(61)}的空间`)
+    expect(SpaceName.safeParse(space!.name).success).toBe(true)
   })
 })
