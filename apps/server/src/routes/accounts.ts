@@ -7,6 +7,7 @@ import {
   CreateAccountRequest,
   CreatedAccount,
   ErrorResponse,
+  SPACE_NAME_MAX,
   UpdateAccountRequest,
   type AccountLinkPurpose,
 } from '@kioku/contracts'
@@ -27,9 +28,13 @@ const notFound = jsonResponse('账号不存在', ErrorResponse)
 // 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果
 const ADMIN_LOCK = 'kioku.instance-admins'
 
-// 新账号的个人空间叫「<显示名>的空间」，显示名按码点截到 60 个字，空间名不超过 64 个字
+// 新账号的个人空间叫「<显示名>的空间」。空间名的上限按 UTF-16 码元算，显示名截到放得下后缀，
+// 截断处落在代理对中间时退一个码元，不留落单的代理项
+const PERSONAL_SPACE_SUFFIX = '的空间'
 export function personalSpaceName(displayName: string): string {
-  return `${Array.from(displayName).slice(0, 60).join('')}的空间`
+  let head = displayName.slice(0, SPACE_NAME_MAX - PERSONAL_SPACE_SUFFIX.length)
+  if (/[\uD800-\uDBFF]$/.test(head)) head = head.slice(0, -1)
+  return `${head}${PERSONAL_SPACE_SUFFIX}`
 }
 
 type AccountRow = typeof accounts.$inferSelect
