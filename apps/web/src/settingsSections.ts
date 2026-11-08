@@ -45,6 +45,20 @@ export const SETTINGS_SECTIONS = [
   },
   {
     group: 'space',
+    key: 'general',
+    label: '概况',
+    icon: icons.general,
+    component: lazy(() => import('./components/SpaceGeneralSettings.vue')),
+  },
+  {
+    group: 'space',
+    key: 'members',
+    label: '成员',
+    icon: icons.members,
+    component: lazy(() => import('./components/SpaceMembers.vue')),
+  },
+  {
+    group: 'space',
     key: 'extraction',
     label: '抽取与整理',
     icon: icons.extraction,
@@ -62,7 +76,7 @@ export const SETTINGS_SECTIONS = [
     key: 'spaces',
     label: '空间',
     icon: icons.spaces,
-    component: lazy(() => import('./components/SpaceImport.vue')),
+    component: lazy(() => import('./components/InstanceSpaces.vue')),
   },
   {
     group: 'instance',

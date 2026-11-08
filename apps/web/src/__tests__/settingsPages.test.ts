@@ -163,10 +163,12 @@ describe('小节的注册', () => {
       ['instance', '实例'],
     ])
     expect(keysOf('account')).toEqual(['appearance'])
-    expect(keysOf('space')).toEqual(['extraction', 'transfer'])
+    expect(keysOf('space')).toEqual(['general', 'members', 'extraction', 'transfer'])
     expect(keysOf('instance')).toEqual(['spaces', 'models', 'security', 'data'])
     expect(SETTINGS_SECTIONS.map((s) => s.label)).toEqual([
       '外观',
+      '概况',
+      '成员',
       '抽取与整理',
       '导入与导出',
       '空间',
@@ -196,7 +198,12 @@ describe('小节的注册', () => {
     expect(visibleGroups({ ...admin, hasSpace: true })).toEqual(['account', 'space', 'instance'])
     expect(visibleGroups({ ...member, hasSpace: true })).toEqual(['account', 'space'])
     expect(visibleGroups({ ...member, hasSpace: false })).toEqual(['account'])
-    expect(visibleSections('space', member).map((s) => s.key)).toEqual(['extraction', 'transfer'])
+    expect(visibleSections('space', member).map((s) => s.key)).toEqual([
+      'general',
+      'members',
+      'extraction',
+      'transfer',
+    ])
   })
 
   it('地址里的小节不存在或看不到时看第一个看得到的', () => {

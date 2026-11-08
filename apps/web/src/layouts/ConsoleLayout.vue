@@ -8,11 +8,13 @@ import { useRoute, useRouter, type RouteLocationRaw } from 'vue-router'
 import { ApiError } from '../api/client'
 import { api } from '../api/endpoints'
 import { ownedApps } from '../benchSession'
+import CreateSpaceModal from '../components/CreateSpaceModal.vue'
 import KiokuMark from '../components/KiokuMark.vue'
 import StrataPatterns from '../components/strata/StrataPatterns.vue'
 import NoteLine from '../components/strata/NoteLine.vue'
 import { COLOR_PREFERENCES, useColorPreference } from '../composables/useColorPreference'
 import { useConsoleSearch } from '../composables/useConsoleSearch'
+import { useCreateSpace } from '../composables/useCreateSpace'
 import { useInboxCounts } from '../composables/useInboxCounts'
 import { confirmDiscard, hasUnsavedChanges } from '../composables/unsavedChanges'
 import { forgetSpace, ME_KEY, useSession } from '../composables/useSession'
@@ -44,6 +46,8 @@ watch(
 )
 
 const spaces = computed(() => me.data.value?.spaces ?? [])
+// 新建空间：实例管理员，或实例允许成员自建空间时才有
+const newSpace = useCreateSpace(computed(() => Boolean(me.data.value)))
 
 // 窄屏的导航收进抽屉，换页就关上
 const navOpen = ref(false)
@@ -215,17 +219,20 @@ const spaceMenu = computed<DropdownMenuItem[][]>(() => [
       onSelect: () => switchSpace(s.id),
     })),
   ],
-  ...(space.value
-    ? [
-        [
+  [
+    ...(space.value
+      ? [
           {
-            label: '空间设置',
+            label: '成员与设置',
             icon: icons.settings,
             to: spaceSettingsRoute(space.value.id),
           },
-        ],
-      ]
-    : []),
+        ]
+      : []),
+    ...(newSpace.canCreate.value
+      ? [{ label: '新建空间', icon: icons.add, onSelect: () => (newSpace.open.value = true) }]
+      : []),
+  ],
 ])
 
 async function logout() {
@@ -313,7 +320,7 @@ async function logout() {
         />
         <div class="flex min-w-0 items-center gap-1.5 max-[1024px]:hidden">
           <UDropdownMenu
-            v-if="spaces.length"
+            v-if="spaces.length || newSpace.canCreate.value"
             :items="spaceMenu"
             :content="{ align: 'end' }"
             :ui="{ content: 'min-w-60 max-w-80' }"
@@ -411,9 +418,17 @@ async function logout() {
                   class="block py-1.5 text-sm/6"
                   @click="navOpen = false"
                 >
-                  空间设置
+                  成员与设置
                 </RouterLink>
               </div>
+              <button
+                v-if="newSpace.canCreate.value"
+                type="button"
+                class="block py-1.5 text-left text-sm/6"
+                @click="((navOpen = false), (newSpace.open.value = true))"
+              >
+                新建空间
+              </button>
               <div>
                 <p class="pb-1 text-xs text-muted">主题</p>
                 <div class="flex gap-1">
@@ -478,6 +493,12 @@ async function logout() {
       </div>
       <RouterView v-else />
     </main>
+    <CreateSpaceModal
+      :open="newSpace.open.value"
+      :current-account-id="me.data.value?.id ?? ''"
+      @close="newSpace.open.value = false"
+      @created="newSpace.created"
+    />
   </UDashboardGroup>
 </template>
 

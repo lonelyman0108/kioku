@@ -77,6 +77,7 @@ export const icons = {
   data: 'i-lucide-database',
   spaces: 'i-lucide-boxes',
   members: 'i-lucide-users',
+  general: 'i-lucide-info',
   check: 'i-lucide-check',
   unsaved: 'i-lucide-circle-alert',
   chevronRight: 'i-lucide-chevron-right',
