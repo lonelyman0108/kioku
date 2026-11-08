@@ -1,7 +1,7 @@
 import { DEFAULT_RECALL_RETENTION_DAYS, RecallSettings } from '@kioku/contracts'
-import { eq, inArray, sql } from 'drizzle-orm'
+import { eq, inArray, sql, type SQL } from 'drizzle-orm'
 
-import { withSpace, type Db } from '../db/client'
+import { withSpace, type Db, type Tx } from '../db/client'
 import { recallEvents, settings, spaces } from '../db/schema'
 
 const KEY = 'recall'
@@ -51,28 +51,35 @@ export async function pruneRecallEvents(db: Db, retentionDays: number): Promise<
   const all = await db.select({ id: spaces.id }).from(spaces)
   let removed = 0
   for (const space of all) {
-    removed += await withSpace(db, space.id, async (tx) => {
-      const cutoff = sql`now() - make_interval(days => ${retentionDays}::int)`
-      // 删除与并入在同一条语句里：两次清理同时跑时，后一条要等前一条删掉的行，删不到也就不会再并入一次。
-      // 命中随事件级联删除，同一条语句里还读得到它们
-      const [row] = await tx.execute<{ removed: number }>(sql`
-        with gone as (
-          delete from ${recallEvents} where ${recallEvents.createdAt} < ${cutoff}
-          returning id, created_at
-        ),
-        merged as (
-          insert into memory_recall_stats (memory_id, space_id, count, last_recalled_at)
-          select h.memory_id, h.space_id, count(*)::int, max(g.created_at)
-          from recall_event_hits h join gone g on g.id = h.event_id
-          group by h.memory_id, h.space_id
-          on conflict (memory_id) do update
-            set count = memory_recall_stats.count + excluded.count,
-              last_recalled_at = greatest(memory_recall_stats.last_recalled_at, excluded.last_recalled_at)
-          returning 1
-        )
-        select count(*)::int as removed from gone`)
-      return row?.removed ?? 0
-    })
+    removed += await withSpace(db, space.id, (tx) =>
+      dropRecallEvents(
+        tx,
+        sql`${recallEvents.createdAt} < now() - make_interval(days => ${retentionDays}::int)`,
+      ),
+    )
   }
   return removed
+}
+
+// 删掉符合条件的召回事件明细，命中的次数与最后一次的时间先并入累计统计。返回删掉了几条。
+// 删除与并入在同一条语句里：两次清理同时跑时，后一条要等前一条删掉的行，删不到也就不会再并入一次。
+// 命中随事件级联删除，同一条语句里还读得到它们
+export async function dropRecallEvents(tx: Tx, where: SQL): Promise<number> {
+  const [row] = await tx.execute<{ removed: number }>(sql`
+    with gone as (
+      delete from ${recallEvents} where ${where}
+      returning id, created_at
+    ),
+    merged as (
+      insert into memory_recall_stats (memory_id, space_id, count, last_recalled_at)
+      select h.memory_id, h.space_id, count(*)::int, max(g.created_at)
+      from recall_event_hits h join gone g on g.id = h.event_id
+      group by h.memory_id, h.space_id
+      on conflict (memory_id) do update
+        set count = memory_recall_stats.count + excluded.count,
+          last_recalled_at = greatest(memory_recall_stats.last_recalled_at, excluded.last_recalled_at)
+      returning 1
+    )
+    select count(*)::int as removed from gone`)
+  return row?.removed ?? 0
 }

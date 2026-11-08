@@ -18,7 +18,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../app'
 import { withSpace, type Database } from '../../db/client'
 import * as schema from '../../db/schema'
-import { apps, memories, settings, spaceMembers } from '../../db/schema'
+import { accounts, apps, memories, settings, spaceMembers } from '../../db/schema'
 import { staticEmbedderSource } from '../../embedding/source'
 import { backfillEmbeddings, embedMemories } from '../../embedding/worker'
 import { memoryServiceForConsole } from '../../memory/context'
@@ -562,6 +562,45 @@ describe.skipIf(!testDatabaseUrl)('管理界面的列表、搜索与概览', () 
       .values({ spaceId: ws.spaceId, accountId: editor.accountId, role: 'editor' })
     expect(keysOf(await get<SpaceOverview>(ws.cookie, '/overview'), 'eve-bot')?.active).toBe(0)
     expect(keysOf(await get<SpaceOverview>(ws.cookie, '/overview'), 'owner-bot')?.active).toBe(2)
+  })
+
+  it('概览里应用主人停用后 Key 不算有效，重新启用后恢复', async () => {
+    const editor = await addMember(database.db, ws.spaceId, 'eve', 'editor')
+    const created = await app.request(
+      `${space()}/apps`,
+      jsonRequest(
+        'POST',
+        { slug: 'eve-bot', name: 'eve-bot', runtimeFamily: 'mcp' },
+        { cookie: editor.cookie },
+      ),
+    )
+    const eveApp = (await created.json()) as { id: string }
+    for (const name of ['k1', 'k2']) {
+      const issued = await app.request(
+        `${space()}/apps/${eveApp.id}/keys`,
+        jsonRequest('POST', { name, scopes: EDITOR_SCOPES }, { cookie: editor.cookie }),
+      )
+      expect(issued.status).toBe(201)
+    }
+    await database.db.execute(
+      sql`update api_keys set last_used_at = now() where app_id = ${eveApp.id}`,
+    )
+    const keysOf = async () =>
+      (await get<SpaceOverview>(ws.cookie, '/overview')).apps.find((a) => a.slug === 'eve-bot')
+        ?.keys
+    expect((await keysOf())?.active).toBe(2)
+
+    await database.db
+      .update(accounts)
+      .set({ disabledAt: sql`now()` })
+      .where(eq(accounts.id, editor.accountId))
+    expect(await keysOf()).toEqual({ active: 0, lastUsedAt: null })
+
+    await database.db
+      .update(accounts)
+      .set({ disabledAt: null })
+      .where(eq(accounts.id, editor.accountId))
+    expect((await keysOf())?.active).toBe(2)
   })
 
   it('editor 打开概览时应用表只读一次；能写哪些应用的应用层照旧只看自己是不是主人', async () => {
