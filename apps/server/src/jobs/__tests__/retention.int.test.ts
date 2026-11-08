@@ -1574,7 +1574,13 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect((await purgeExpired(database.db, { days: 30, now, paused: true })).counts).toEqual(ZERO)
     const { counts, errors } = await purge(30, now)
     expect(errors).toEqual([])
-    expect(counts).toEqual({ ...ZERO, departedMembers: 1 })
+    // bob 的两条本人记忆（日记与删掉的那条）算进已删除的记忆，草稿在本人时的三个快照算进抹掉正文的快照
+    expect(counts).toEqual({
+      ...ZERO,
+      deletedMemories: 2,
+      scrubbedSnapshots: 3,
+      departedMembers: 1,
+    })
 
     const left = await inSpace(async (tx) => ({
       memories: (await tx.select({ id: memories.id }).from(memories)).map((r) => r.id),
