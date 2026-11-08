@@ -25,8 +25,20 @@ const forbidden = jsonResponse('需要实例管理员', ErrorResponse)
 const notFound = jsonResponse('账号不存在', ErrorResponse)
 
 // 改管理员身份与停用状态的事务都先拿这把锁，再数还剩几个可用的管理员：
-// 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果
+// 两个请求同时降掉最后两个管理员时，后一个看得到前一个的结果。新建账号与发链接也拿它，
+// 和停用、降级操作者的事务排成先后
 const ADMIN_LOCK = 'kioku.instance-admins'
+
+// 取 ADMIN_LOCK，拿到锁之后确认操作者仍是没停用的管理员。中间件在事务之前查过一次，
+// 但等锁期间他可能被别的管理员停用或降级了：新建账号、发链接与改账号都要先过这一步
+async function lockAsAdmin(tx: Tx, actor: string): Promise<boolean> {
+  await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
+  const [self] = await tx
+    .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
+    .from(accounts)
+    .where(eq(accounts.id, actor))
+  return Boolean(self?.isAdmin && !self.disabledAt)
+}
 
 // 新账号的个人空间叫「<显示名>的空间」。空间名的上限按 UTF-16 码元算，显示名截到放得下后缀，
 // 截断处落在代理对中间时退一个码元，不留落单的代理项
@@ -216,6 +228,7 @@ export function accountRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const actor = c.get('console').accountId
       const created = await deps.db.transaction(async (tx) => {
+        if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
         const [account] = await tx
           .insert(accounts)
           .values({
@@ -237,6 +250,7 @@ export function accountRoutes(deps: Deps) {
         const link = await issueLink(tx, account, actor)
         return { account: (await describeAccount(tx, account.id))!, link }
       })
+      if (created === 'forbidden') return c.json({ error: '需要实例管理员' }, 403)
       if (!created) return c.json({ error: '用户名已被占用' }, 409)
       return c.json(created, 201)
     })
@@ -244,6 +258,7 @@ export function accountRoutes(deps: Deps) {
       const { accountId } = c.req.valid('param')
       const actor = c.get('console').accountId
       const result = await deps.db.transaction(async (tx) => {
+        if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
         // 锁住账号再判断停用：否则和停用并发时，停用删完链接之后这里又写进一个，启用之后它就能用了。
         // 加锁顺序和别处一致：先链接、再账号
         await tx
@@ -264,6 +279,7 @@ export function accountRoutes(deps: Deps) {
         if (account.disabledAt) return 'disabled' as const
         return issueLink(tx, account, actor)
       })
+      if (result === 'forbidden') return c.json({ error: '需要实例管理员' }, 403)
       if (result === 'missing') return c.json({ error: '账号不存在' }, 404)
       if (result === 'disabled') return c.json({ error: '账号已停用，先启用再生成链接' }, 409)
       return c.json(result, 201)
@@ -273,13 +289,7 @@ export function accountRoutes(deps: Deps) {
       const body = c.req.valid('json')
       const actor = c.get('console').accountId
       const result = await deps.db.transaction(async (tx) => {
-        await tx.execute(sql`select pg_advisory_xact_lock(hashtext(${ADMIN_LOCK}))`)
-        // 拿到锁之后再确认一次操作者：等锁期间他自己可能被别的管理员停用或降级了
-        const [self] = await tx
-          .select({ isAdmin: accounts.isAdmin, disabledAt: accounts.disabledAt })
-          .from(accounts)
-          .where(eq(accounts.id, actor))
-        if (!self?.isAdmin || self.disabledAt) return 'forbidden' as const
+        if (!(await lockAsAdmin(tx, actor))) return 'forbidden' as const
         // 加锁顺序和用链接设置密码、改密码一致：先链接、再账号
         await tx
           .select({ id: accountLinks.id })

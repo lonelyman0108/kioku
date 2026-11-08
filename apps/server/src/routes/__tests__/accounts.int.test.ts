@@ -11,6 +11,7 @@ import type {
   PasswordLinkInfo,
 } from '@kioku/contracts'
 import { eq, sql } from 'drizzle-orm'
+import postgres from 'postgres'
 import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 
 import { createApp } from '../../app'
@@ -270,6 +271,72 @@ describe.skipIf(!testDatabaseUrl)('账号、一次性链接与登录设备', () 
         expect(usable).toHaveLength(1)
       }
     }, 60_000)
+  })
+
+  describe('管理员被停用的同时发出的请求', () => {
+    // 另开一条连接，在事务里拿住 ADMIN_LOCK（模拟别的管理员正在停用他），发出请求；
+    // 等请求确实等在这把锁上之后停用操作者、提交，返回请求的结果
+    async function whileDisabling(
+      actorId: string,
+      request: () => Response | Promise<Response>,
+    ): Promise<Response> {
+      const side = postgres(testDatabaseUrl!, { max: 2, onnotice: () => {} })
+      let pending: Promise<Response> | undefined
+      try {
+        await side.begin(async (tx) => {
+          await tx`select pg_advisory_xact_lock(hashtext('kioku.instance-admins'))`
+          const [{ pid }] = (await tx`select pg_backend_pid() as pid`) as unknown as [
+            { pid: number },
+          ]
+          pending = Promise.resolve(request())
+          for (let i = 0; ; i++) {
+            const [row] = await side<{ n: number }[]>`
+              select count(*)::int as n from pg_stat_activity
+              where ${pid}::int = any(pg_blocking_pids(pid))`
+            if (row!.n > 0) break
+            if (i >= 200) throw new Error('请求没有等在这把锁上')
+            await new Promise((r) => setTimeout(r, 25))
+          }
+          await tx`update accounts set disabled_at = now() where id = ${actorId}`
+          await tx`delete from sessions where account_id = ${actorId}`
+        })
+        return await pending!
+      } finally {
+        await pending?.catch(() => {})
+        await side.end()
+      }
+    }
+
+    it('新建账号：拿到锁之后再确认操作者，已经停用就 403，什么都不建', async () => {
+      const bob = await activeAccount('bob', true)
+      const res = await whileDisabling(bob.id, () =>
+        send(
+          'POST',
+          '/v1/instance/accounts',
+          { username: 'mallory', displayName: 'M', isAdmin: true },
+          as(bob.cookie),
+        ),
+      )
+      expect(res.status).toBe(403)
+      expect(
+        await database.db.select().from(accounts).where(eq(accounts.username, 'mallory')),
+      ).toEqual([])
+    })
+
+    it('重新生成链接：拿到锁之后再确认操作者，已经停用就 403，不发链接', async () => {
+      const bob = await activeAccount('bob', true)
+      const carol = await activeAccount('carol')
+      const res = await whileDisabling(bob.id, () =>
+        send('POST', `/v1/instance/accounts/${carol.id}/link`, undefined, as(bob.cookie)),
+      )
+      expect(res.status).toBe(403)
+      // 只有设置密码时用掉的那一个
+      const links = await database.db
+        .select()
+        .from(accountLinks)
+        .where(eq(accountLinks.accountId, carol.id))
+      expect(links.map((l) => l.usedAt !== null)).toEqual([true])
+    })
   })
 
   describe('一次性链接', () => {
