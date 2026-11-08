@@ -1,4 +1,4 @@
-import type { RetentionCounts } from '@kioku/contracts'
+import { DEPARTURE_RETENTION_DAYS, type RetentionCounts } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
@@ -27,6 +27,7 @@ const zero: RetentionCounts = {
   deletedCredentials: 0,
   vaultConnections: 0,
   subjectBindings: 0,
+  departedMembers: 0,
 }
 
 describe('保留期清理的结果', () => {
@@ -43,6 +44,12 @@ describe('保留期清理的结果', () => {
       { label: '已断开的密码库连接', count: 1 },
     ])
     expect(retentionTotal(counts)).toBe(16)
+  })
+
+  it('离开的成员按契约的天数说', () => {
+    expect(retentionSummary({ ...zero, departedMembers: 2 })).toEqual([
+      { label: `离开满 ${DEPARTURE_RETENTION_DAYS} 天的成员`, count: 2 },
+    ])
   })
 })
 

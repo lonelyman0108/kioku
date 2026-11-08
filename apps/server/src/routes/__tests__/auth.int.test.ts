@@ -4,6 +4,7 @@ import { afterAll, beforeAll, beforeEach, describe, expect, it } from 'vitest'
 import { createApp } from '../../app'
 import { staticEmbedderSource } from '../../embedding/source'
 import type { Database } from '../../db/client'
+import { loginAttempts } from '../../db/schema'
 import { openTestDatabase, resetDatabase, testDatabaseUrl } from '../../testing/db'
 
 const setupBody = {
@@ -79,6 +80,20 @@ describe.skipIf(!testDatabaseUrl)('初始化、登录与 API Key', () => {
       json('POST', { username: 'alice', password: setupBody.password }),
     )
     expect(locked.status).toBe(429)
+  })
+
+  it('登录的用户名先去首尾空白、转小写再计数与匹配，不同大小写算同一个计数', async () => {
+    await setup()
+    const login = (username: string, password: string) =>
+      app.request('/v1/auth/login', json('POST', { username, password }))
+    expect((await login(' Alice ', setupBody.password)).status).toBe(200)
+    for (const username of ['ALICE', 'Alice', 'alice ', 'aLiCe', 'alice']) {
+      expect((await login(username, 'wrong')).status).toBe(401)
+    }
+    const keys = (await database.db.select().from(loginAttempts)).map((r) => r.username)
+    expect(keys.every((k) => k.includes('alice') && !/[A-Z ]/.test(k))).toBe(true)
+    // 五次失败都记在 alice 上：换个大小写也锁着
+    expect((await login('ALICE', setupBody.password)).status).toBe(429)
   })
 
   it('退出后 Cookie 失效', async () => {

@@ -17,6 +17,8 @@ import { createApp } from '../../app'
 import { withSpace, type Database, type Tx } from '../../db/client'
 import {
   accounts,
+  apps,
+  conversations,
   credentialEvents,
   credentials,
   dreamRuns,
@@ -31,6 +33,7 @@ import {
   recallEventHits,
   recallEvents,
   settings,
+  spaceDepartures,
   spaces,
   subjectBindings,
   subjects,
@@ -64,6 +67,7 @@ const ZERO: RetentionCounts = {
   deletedCredentials: 0,
   subjectBindings: 0,
   vaultConnections: 0,
+  departedMembers: 0,
 }
 
 describe.skipIf(!testDatabaseUrl)('保留期', () => {
@@ -1414,5 +1418,227 @@ describe.skipIf(!testDatabaseUrl)('保留期', () => {
     expect(cleanups).toBe(1)
     expect((await retentionJob(database.db))?.counts.deletedMemories).toBe(1)
     expect(await memoryIds()).not.toContain(again)
+  })
+
+  it('离开满 30 天的成员：这个空间里他的本人记忆、凭据、密码库连接与只属于他的数据删掉；没满的、别人的与共享的不动', async () => {
+    const now = new Date()
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'owner')
+    const carol = await addMember(database.db, ws.spaceId, 'carol', 'editor')
+    const { id: bobApp } = await ok<{ id: string }>(
+      await send(
+        'POST',
+        '/apps',
+        { slug: 'bob-bot', name: 'bob-bot', runtimeFamily: 'mcp' },
+        bob.cookie,
+      ),
+      201,
+    )
+    const diary = await createMemory(
+      { uri: 'user://notes/diary', content: '鲍勃的日记', disclosure: '写日记时' },
+      bob.cookie,
+    )
+    await updateMemory({ uri: 'user://notes/diary', content: '鲍勃的日记，第二天' }, bob.cookie)
+    const trash = await createMemory({ uri: 'user://notes/trash', content: '删掉的' }, bob.cookie)
+    await deleteMemory('user://notes/trash', bob.cookie)
+    // bob 在本人里写的草稿后来移进了共享的通用：记忆留着，本人时的快照抹掉正文
+    const draft = await createMemory(
+      { uri: 'user://notes/draft', content: '鲍勃私下的草稿', disclosure: '草稿' },
+      bob.cookie,
+    )
+    await updateMemory(
+      { uri: 'user://notes/draft', content: '公开的版本', sensitivity: 'internal' },
+      bob.cookie,
+    )
+    await moveMemory('user://notes/draft', 'core://notes/draft', bob.cookie)
+    // bob 写的共享记忆：照旧留着
+    const sharedByBob = await createMemory(
+      { uri: 'core://notes/bob', content: '鲍勃写的共享笔记', sensitivity: 'internal' },
+      bob.cookie,
+    )
+    await ok<ConsoleCredential>(
+      await send(
+        'POST',
+        '/credentials',
+        { identifier: 'bob-nas', name: 'NAS', source: { kind: 'new', values: { password: 'pw' } } },
+        bob.cookie,
+      ),
+      201,
+    )
+    await ok<ConsoleCredential>(
+      await send('POST', '/credentials', {
+        identifier: 'alice-nas',
+        name: 'NAS',
+        source: { kind: 'new', values: { password: 'pw' } },
+      }),
+      201,
+    )
+    const aliceDiary = await createMemory({ uri: 'user://notes/diary', content: 'alice 的日记' })
+    const carolNote = await createMemory(
+      { uri: 'user://notes/carol', content: 'carol 的笔记' },
+      carol.cookie,
+    )
+    const extra = await inSpace(async (tx) => {
+      // 从 Lore 导进来的本人记忆：硬删除时导入事件削成 URI 留下
+      await tx.insert(memoryEvents).values({
+        spaceId: ws.spaceId,
+        memoryId: diary.id,
+        eventType: 'import',
+        provenance: 'system',
+        after: { domain: 'user', path: 'notes/diary', content: '鲍勃的日记（导入）' },
+        context: { source: 'lore', loreNodeUuid: 'node-bob' },
+      })
+      const [connection] = await tx
+        .insert(vaultConnections)
+        .values({
+          spaceId: ws.spaceId,
+          ownerAccountId: bob.accountId,
+          serverUrl: 'https://vault.example.com',
+          email: 'bob@example.com',
+          vaultUserId: 'bob',
+          deviceId: randomUUID(),
+          ciphertext: Buffer.from('c'),
+          wrappedKey: Buffer.from('k'),
+        })
+        .returning({ id: vaultConnections.id })
+      await tx.insert(credentials).values({
+        spaceId: ws.spaceId,
+        ownerAccountId: bob.accountId,
+        identifier: 'bob-router',
+        name: 'router',
+        source: 'vault',
+        vaultConnectionId: connection!.id,
+        vaultItemId: randomUUID(),
+        fields: [{ name: 'password', itemField: 'login.password' }],
+      })
+      const recall = (owner: string, query: string) =>
+        tx
+          .insert(recallEvents)
+          .values({
+            spaceId: ws.spaceId,
+            appId: bobApp,
+            ownerAccountId: owner,
+            source: 'recall',
+            query,
+          })
+          .returning({ id: recallEvents.id })
+      const [bobRecall] = await recall(bob.accountId, 'bob 的提示语')
+      await tx.insert(recallEventHits).values({
+        eventId: bobRecall!.id,
+        spaceId: ws.spaceId,
+        memoryId: sharedByBob.id,
+        rank: 1,
+        score: 1,
+        via: ['bm25'],
+      })
+      const [aliceRecall] = await recall(ws.accountId, 'alice 的提示语')
+      const [conversation] = await tx
+        .insert(conversations)
+        .values({ spaceId: ws.spaceId, appId: bobApp, kind: 'none', ownerAccountId: bob.accountId })
+        .returning({ id: conversations.id })
+      const suggestion = (owner: string | null, n: number) => ({
+        spaceId: ws.spaceId,
+        scope: owner ? `user:${owner}` : 'base',
+        ownerAccountId: owner,
+        kind: 'stale',
+        memoryIds: [sharedByBob.id],
+        versions: [1],
+        reason: `第 ${n} 条`,
+        fingerprint: `fp-${n}`,
+      })
+      await tx.insert(dreamSuggestions).values([suggestion(bob.accountId, 1), suggestion(null, 2)])
+      const [marked] = await tx
+        .insert(subjects)
+        .values({
+          spaceId: ws.spaceId,
+          kind: 'person',
+          displayName: '鲍勃',
+          accountId: bob.accountId,
+        })
+        .returning({ id: subjects.id })
+      return { aliceRecall: aliceRecall!.id, conversation: conversation!.id, subject: marked!.id }
+    })
+
+    for (const member of [bob, carol]) {
+      await ok(await send('DELETE', `/members/${member.accountId}`), 204)
+    }
+    // bob 离开超过 30 天；carol 正好 30 天，还在保留期里
+    const leftAt = (accountId: string, at: Date) =>
+      database.db
+        .update(spaceDepartures)
+        .set({ leftAt: at })
+        .where(eq(spaceDepartures.accountId, accountId))
+    await leftAt(bob.accountId, new Date(now.getTime() - 30 * DAY - 60_000))
+    await leftAt(carol.accountId, new Date(now.getTime() - 30 * DAY))
+
+    // 暂停中不删
+    expect((await purgeExpired(database.db, { days: 30, now, paused: true })).counts).toEqual(ZERO)
+    const { counts, errors } = await purge(30, now)
+    expect(errors).toEqual([])
+    // bob 的两条本人记忆（日记与删掉的那条）算进已删除的记忆，草稿在本人时的三个快照算进抹掉正文的快照
+    expect(counts).toEqual({
+      ...ZERO,
+      deletedMemories: 2,
+      scrubbedSnapshots: 3,
+      departedMembers: 1,
+    })
+
+    const left = await inSpace(async (tx) => ({
+      memories: (await tx.select({ id: memories.id }).from(memories)).map((r) => r.id),
+      credentials: (await tx.select({ id: credentials.ownerAccountId }).from(credentials)).map(
+        (r) => r.id,
+      ),
+      connections: await tx.select().from(vaultConnections),
+      recalls: (await tx.select({ id: recallEvents.id }).from(recallEvents)).map((r) => r.id),
+      conversations: await tx.select().from(conversations),
+      suggestions: (await tx.select().from(dreamSuggestions)).map((r) => r.ownerAccountId),
+      subject: (await tx.select().from(subjects).where(eq(subjects.id, extra.subject)))[0],
+      events: await tx.select().from(memoryEvents),
+      stats: await tx.select().from(memoryRecallStats),
+      apps: (await tx.select({ id: apps.id }).from(apps)).map((r) => r.id),
+    }))
+    expect(left.memories.sort()).toEqual(
+      [draft.id, sharedByBob.id, aliceDiary.id, carolNote.id].sort(),
+    )
+    expect(left.memories).not.toContain(trash.id)
+    expect(left.credentials).toEqual([ws.accountId])
+    expect(left.connections).toEqual([])
+    expect(left.recalls).toEqual([extra.aliceRecall])
+    // 召回的次数并入累计统计
+    expect(left.stats).toEqual([expect.objectContaining({ memoryId: sharedByBob.id, count: 1 })])
+    expect(left.conversations).toEqual([])
+    expect(left.suggestions).toEqual([null])
+    expect(left.subject?.accountId).toBeNull()
+    // 他拥有的应用留着，由空间所有者转移或删除
+    expect(left.apps).toEqual([bobApp])
+    const text = JSON.stringify(left.events)
+    for (const secret of ['鲍勃的日记', '鲍勃私下的草稿', '写日记时']) {
+      expect(text).not.toContain(secret)
+    }
+    expect(text).toContain('鲍勃写的共享笔记')
+    expect(left.events.filter((e) => e.memoryId === null)).toEqual([
+      expect.objectContaining({
+        eventType: 'import',
+        after: { domain: 'user', path: 'notes/diary' },
+        context: { source: 'lore', loreNodeUuid: 'node-bob' },
+      }),
+    ])
+    // 离开记录：bob 的删掉，carol 的留着
+    const departures = await database.db.select().from(spaceDepartures)
+    expect(departures.map((d) => d.accountId)).toEqual([carol.accountId])
+    // 再清一次什么都不删
+    expect((await purge(30, now)).counts).toEqual(ZERO)
+  })
+
+  it('离开记录还在、人却已经是成员（重新加入）时不删他的数据', async () => {
+    const bob = await addMember(database.db, ws.spaceId, 'bob', 'editor')
+    const note = await createMemory({ uri: 'user://notes/bob', content: 'bob 的笔记' }, bob.cookie)
+    await database.db.insert(spaceDepartures).values({
+      spaceId: ws.spaceId,
+      accountId: bob.accountId,
+      leftAt: ago(40),
+      dreamPrivate: true,
+    })
+    expect((await purge()).counts).toEqual(ZERO)
+    expect(await memoryIds()).toContain(note.id)
   })
 })

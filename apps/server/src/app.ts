@@ -8,6 +8,7 @@ import { logInternalError } from './db/client'
 import type { Deps } from './http/env'
 import { router } from './http/openapi'
 import { isApiPath, mountWeb } from './http/web'
+import { accountRoutes } from './routes/accounts'
 import { appRoutes } from './routes/apps'
 import { authRoutes } from './routes/auth'
 import { benchRoutes } from './routes/bench'
@@ -27,7 +28,7 @@ import { reviewRoutes } from './routes/review'
 import { MemoryError } from './memory/service'
 import { settingsRoutes } from './routes/settings'
 import { setupRoutes } from './routes/setup'
-import { spaceRoutes } from './routes/spaces'
+import { instanceSpaceRoutes, spaceRoutes } from './routes/spaces'
 import { subjectRoutes } from './routes/subjects'
 import { conversationRoutes } from './routes/conversations'
 import { whoamiRoutes } from './routes/whoami'
@@ -81,6 +82,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', health)
   app.route('/v1', setupRoutes(deps))
   app.route('/v1', authRoutes(deps))
+  app.route('/v1', accountRoutes(deps))
   // 应用与人格路由共用 /spaces/*，会话鉴权在这里注册一次；各自注册会让每个请求查两次会话
   app.use('/v1/spaces/*', requireConsole(deps))
   app.route('/v1', appRoutes(deps))
@@ -101,6 +103,7 @@ export function createApp(deps: Deps) {
   app.route('/v1', bindingRoutes(deps))
   app.route('/v1', mcpRoutes(deps))
   app.route('/v1', settingsRoutes(deps))
+  app.route('/v1', instanceSpaceRoutes(deps))
   // 放在接入方的路由后面：OpenAPI 的组件按第一次用到的顺序排，Python SDK 的比对对顺序敏感，
   // 测试台的响应用到了 TurnEndEvent 这些接入方的组件
   app.route('/v1', benchRoutes(deps))

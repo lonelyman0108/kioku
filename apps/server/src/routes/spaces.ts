@@ -1,26 +1,57 @@
 import type { HttpBindings } from '@hono/node-server'
 import { createRoute, z } from '@hono/zod-openapi'
 import {
+  AddMemberRequest,
+  CreatedSpace,
+  CreateSpaceRequest,
+  DeleteSpaceRequest,
+  DEPARTURE_RETENTION_DAYS,
   ErrorResponse,
   ExtractionBudget,
   ExtractionUsage,
-  MemberInfo,
+  InstanceSpace,
+  RenameSpaceRequest,
   SPACE_EXPORT_MAX_BYTES,
+  SpaceCreationPolicy,
+  SpaceCreationView,
+  SpaceDetail,
+  SpaceInfo,
+  SpaceMember,
+  TransferOwnershipRequest,
+  UpdateMemberRequest,
   SpaceExportRequest,
   SpaceImportForm,
   SpaceImportInspectForm,
   SpaceImportPreview,
   SpaceImportResult,
 } from '@kioku/contracts'
-import { asc, eq } from 'drizzle-orm'
 import { bodyLimit } from 'hono/body-limit'
-import type { MiddlewareHandler } from 'hono'
+import type { Context, MiddlewareHandler } from 'hono'
 
-import { memberRole, requireInstanceAdmin } from '../auth/middleware'
+import {
+  addMember,
+  createSpace,
+  deleteSpace,
+  instanceSpaces,
+  listMembers,
+  loadSpaceCreationPolicy,
+  removeMember,
+  renameSpace,
+  saveSpaceCreationPolicy,
+  spaceDetail,
+  transferOwnership,
+  updateMemberRole,
+  type MemberFailure,
+} from '../access/spaces'
+import {
+  isInstanceAdmin,
+  memberRole,
+  requireConsole,
+  requireInstanceAdmin,
+} from '../auth/middleware'
 import { exportSpace, type SpaceExport } from '../backup/spaceExport'
 import { importSpace, inspectSpaceImport } from '../backup/spaceImport'
 import { acquireTransferSlot, withTransferSlot } from '../backup/transferGate'
-import { accounts, spaceMembers } from '../db/schema'
 import { extractionUsage, saveExtractionBudget } from '../extraction/budget'
 import type { AppEnv, Deps } from '../http/env'
 import { jsonBody, jsonResponse, router } from '../http/openapi'
@@ -52,13 +83,153 @@ const saveBudget = createRoute({
   },
 })
 
+const notMember = { error: '无权访问此空间' }
+const badRequest = jsonResponse('请求不合法', ErrorResponse)
+const conflict = jsonResponse('冲突（已是成员、空间至少要有一个所有者）', ErrorResponse)
+const memberParams = z.object({ spaceId: z.uuid(), accountId: z.uuid() })
+// memberError 会给出的几种回应
+const memberErrors = {
+  400: badRequest,
+  403: forbidden,
+  404: jsonResponse('账号或成员不存在', ErrorResponse),
+  409: conflict,
+}
+
+const createSpaceRoute = createRoute({
+  method: 'post',
+  path: '/spaces',
+  tags: ['console'],
+  summary:
+    '新建空间：实例管理员随时可以，并且可以指定所有者；别的账号只在实例开关打开时可以，所有者是自己',
+  request: { body: jsonBody(CreateSpaceRequest) },
+  responses: {
+    201: jsonResponse('已新建', CreatedSpace),
+    400: badRequest,
+    403: forbidden,
+    404: jsonResponse('账号不存在', ErrorResponse),
+    409: jsonResponse('账号已停用', ErrorResponse),
+  },
+})
+
+const spaceView = createRoute({
+  method: 'get',
+  path: '/spaces/{spaceId}',
+  tags: ['console'],
+  summary: '空间概况：名字、建立时间、当前账号的角色与成员数（成员都能看）',
+  request: { params },
+  responses: { 200: jsonResponse('空间', SpaceDetail), 403: forbidden },
+})
+
+const renameRoute = createRoute({
+  method: 'patch',
+  path: '/spaces/{spaceId}',
+  tags: ['console'],
+  summary: '改空间名（只有空间所有者）',
+  request: { params, body: jsonBody(RenameSpaceRequest) },
+  responses: { 200: jsonResponse('空间', SpaceInfo), ...memberErrors },
+})
+
+const deleteRoute = createRoute({
+  method: 'delete',
+  path: '/spaces/{spaceId}',
+  tags: ['console'],
+  summary:
+    '删除空间（空间所有者或实例管理员）：请求里带上现在的空间名确认，空间里的全部内容一起删除，无法恢复',
+  request: { params, body: jsonBody(DeleteSpaceRequest) },
+  responses: { 204: { description: '已删除' }, ...memberErrors },
+})
+
+// 实例级的接口不在 /spaces/* 下，会话鉴权挂在每个路由上
+function instanceListRoute(deps: Deps) {
+  return createRoute({
+    method: 'get',
+    path: '/instance/spaces',
+    tags: ['settings'],
+    summary: '实例里的全部空间（只有实例管理员）：名字、建立时间、所有者与成员数，不含内容',
+    middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
+    responses: { 200: jsonResponse('空间列表', z.array(InstanceSpace)), 403: forbidden },
+  })
+}
+
+function creationViewRoute(deps: Deps) {
+  return createRoute({
+    method: 'get',
+    path: '/instance/space-creation',
+    tags: ['settings'],
+    summary: '实例开关「允许成员自建空间」，以及当前账号能不能新建空间',
+    middleware: [requireConsole(deps)],
+    responses: { 200: jsonResponse('开关', SpaceCreationView) },
+  })
+}
+
+function creationUpdateRoute(deps: Deps) {
+  return createRoute({
+    method: 'put',
+    path: '/instance/space-creation',
+    tags: ['settings'],
+    summary: '修改「允许成员自建空间」（只有实例管理员，默认关）',
+    middleware: [requireConsole(deps), requireInstanceAdmin(deps)],
+    request: { body: jsonBody(SpaceCreationPolicy) },
+    responses: { 200: jsonResponse('开关', SpaceCreationView), 400: badRequest, 403: forbidden },
+  })
+}
+
 const members = createRoute({
   method: 'get',
   path: '/spaces/{spaceId}/members',
   tags: ['console'],
-  summary: '空间成员：名字与角色（转移应用时选新主人用）',
+  summary: '空间成员：账号、角色、加入时间与拥有的应用数（成员都能看）',
   request: { params },
-  responses: { 200: jsonResponse('成员列表', z.array(MemberInfo)), 403: forbidden },
+  responses: { 200: jsonResponse('成员列表', z.array(SpaceMember)), 403: forbidden },
+})
+
+const addMemberRoute = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/members',
+  tags: ['console'],
+  summary:
+    '按用户名添加成员（只有空间所有者，精确匹配）。离开的成员在清除开始之前重新加入，本人记忆与凭据照旧可见；清除开始后要等完成才能重新加入',
+  request: { params, body: jsonBody(AddMemberRequest) },
+  responses: {
+    201: jsonResponse('已添加', SpaceMember),
+    ...memberErrors,
+  },
+})
+
+const updateMemberRoute = createRoute({
+  method: 'patch',
+  path: '/spaces/{spaceId}/members/{accountId}',
+  tags: ['console'],
+  summary: '改成员的角色（只有空间所有者）：空间至少要有一个所有者',
+  request: { params: memberParams, body: jsonBody(UpdateMemberRequest) },
+  responses: {
+    200: jsonResponse('成员', SpaceMember),
+    ...memberErrors,
+  },
+})
+
+const removeMemberRoute = createRoute({
+  method: 'delete',
+  path: '/spaces/{spaceId}/members/{accountId}',
+  tags: ['console'],
+  summary: `移除成员（空间所有者移除别人），或离开空间（成员移除自己）。他的应用的访问密钥立即吊销；本人记忆、凭据与密码库连接保留 ${DEPARTURE_RETENTION_DAYS} 天，期间重新加入就恢复，到期删除。最后一个所有者要先转让`,
+  request: { params: memberParams },
+  responses: {
+    204: { description: '已移除' },
+    ...memberErrors,
+  },
+})
+
+const transferRoute = createRoute({
+  method: 'post',
+  path: '/spaces/{spaceId}/transfer-ownership',
+  tags: ['console'],
+  summary: '转让所有者（只有空间所有者）：对方成为所有者，当前账号改为编辑者',
+  request: { params, body: jsonBody(TransferOwnershipRequest) },
+  responses: {
+    200: jsonResponse('对方与当前账号转让之后的成员信息', z.array(SpaceMember)),
+    ...memberErrors,
+  },
 })
 
 const exportRoute = createRoute({
@@ -253,6 +424,55 @@ function attachment(spaceName: string, createdAt: string): string {
   return `attachment; filename="${fallback}"; filename*=UTF-8''${encodeURIComponent(`${safe}-${stamp}.kioku-space`)}`
 }
 
+// 成员与空间操作被拒的回应。不是成员（包括空间不存在）一律和别的空间接口一样回 403；ownerOnly 是不是所有者时的说明
+function memberError(c: Context<AppEnv>, reason: MemberFailure, ownerOnly: string) {
+  switch (reason) {
+    case 'no-space':
+    case 'not-member':
+      return c.json(notMember, 403)
+    case 'forbidden':
+      return c.json({ error: ownerOnly }, 403)
+    case 'no-account':
+      return c.json({ error: '账号不存在' }, 404)
+    case 'no-target':
+      return c.json({ error: '成员不存在' }, 404)
+    case 'already-member':
+      return c.json({ error: '已是此空间的成员' }, 409)
+    case 'last-owner':
+      return c.json(
+        {
+          error:
+            '空间至少要有一个未停用的所有者：先把所有者转让给未停用的成员，或请实例管理员启用另一个所有者',
+        },
+        409,
+      )
+    case 'self':
+      return c.json({ error: '不能转让给自己' }, 400)
+    case 'disabled':
+      return c.json({ error: '账号已停用' }, 409)
+    case 'departure-purging':
+      return c.json({ error: '离开后的本人记忆与凭据已开始清除，清除完成后才能重新加入' }, 409)
+  }
+}
+
+// 实例级的空间管理：空间列表与「允许成员自建空间」
+export function instanceSpaceRoutes(deps: Deps) {
+  const view = async (accountId: string) => {
+    const policy = await loadSpaceCreationPolicy(deps.db)
+    const admin = await isInstanceAdmin(deps.db, accountId)
+    return { ...policy, canCreate: admin || policy.membersCanCreate }
+  }
+  return router()
+    .openapi(instanceListRoute(deps), async (c) => c.json(await instanceSpaces(deps.db), 200))
+    .openapi(creationViewRoute(deps), async (c) =>
+      c.json(await view(c.get('console').accountId), 200),
+    )
+    .openapi(creationUpdateRoute(deps), async (c) => {
+      await saveSpaceCreationPolicy(deps.db, c.req.valid('json'))
+      return c.json(await view(c.get('console').accountId), 200)
+    })
+}
+
 // 空间级的设置。spaces 是身份表，不在 RLS 里，按成员关系自己检查权限
 export function spaceRoutes(deps: Deps) {
   return router()
@@ -260,7 +480,7 @@ export function spaceRoutes(deps: Deps) {
       const { spaceId } = c.req.valid('param')
       const accountId = c.get('console').accountId
       const role = await memberRole(deps, spaceId, accountId)
-      if (!role) return c.json({ error: '无权访问此空间' }, 403)
+      if (!role) return c.json(notMember, 403)
       // 文件里有 secret 与托管的凭据值，和读写它们一样只给空间 owner
       if (role !== 'owner') return c.json({ error: '仅空间所有者可导出空间' }, 403)
       const signal = c.req.raw.signal
@@ -328,25 +548,110 @@ export function spaceRoutes(deps: Deps) {
     .openapi(members, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '无权访问此空间' }, 403)
+        return c.json(notMember, 403)
       }
-      const rows = await deps.db
-        .select({
-          accountId: accounts.id,
-          username: accounts.username,
-          displayName: accounts.displayName,
-          role: spaceMembers.role,
-        })
-        .from(spaceMembers)
-        .innerJoin(accounts, eq(accounts.id, spaceMembers.accountId))
-        .where(eq(spaceMembers.spaceId, spaceId))
-        .orderBy(asc(spaceMembers.createdAt))
-      return c.json(rows, 200)
+      return c.json(await listMembers(deps.db, spaceId), 200)
+    })
+    .openapi(addMemberRoute, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const body = c.req.valid('json')
+      const result = await addMember(deps.db, {
+        spaceId,
+        actor: c.get('console').accountId,
+        username: body.username,
+        role: body.role,
+      })
+      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可添加成员')
+      return c.json(result.value, 201)
+    })
+    .openapi(updateMemberRoute, async (c) => {
+      const { spaceId, accountId } = c.req.valid('param')
+      const result = await updateMemberRole(deps.db, {
+        spaceId,
+        actor: c.get('console').accountId,
+        target: accountId,
+        role: c.req.valid('json').role,
+      })
+      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可修改成员角色')
+      return c.json(result.value, 200)
+    })
+    .openapi(removeMemberRoute, async (c) => {
+      const { spaceId, accountId } = c.req.valid('param')
+      const result = await removeMember(deps.db, {
+        spaceId,
+        actor: c.get('console').accountId,
+        target: accountId,
+      })
+      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可移除其他成员')
+      return c.body(null, 204)
+    })
+    .openapi(transferRoute, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const result = await transferOwnership(deps.db, {
+        spaceId,
+        actor: c.get('console').accountId,
+        target: c.req.valid('json').accountId,
+      })
+      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可转让所有者')
+      return c.json(result.value, 200)
+    })
+    .openapi(createSpaceRoute, async (c) => {
+      const accountId = c.get('console').accountId
+      const body = c.req.valid('json')
+      const admin = await isInstanceAdmin(deps.db, accountId)
+      const owner = body.ownerAccountId ?? accountId
+      if (!admin) {
+        if (owner !== accountId) return c.json({ error: '仅实例管理员可为其他账号新建空间' }, 403)
+        if (!(await loadSpaceCreationPolicy(deps.db)).membersCanCreate) {
+          return c.json({ error: '实例未允许成员自建空间' }, 403)
+        }
+      }
+      const space = await createSpace(deps.db, { name: body.name, ownerAccountId: owner })
+      if (!space.ok) {
+        return space.reason === 'disabled'
+          ? c.json({ error: '账号已停用' }, 409)
+          : c.json({ error: '账号不存在' }, 404)
+      }
+      return c.json({ ...space.value, ownerAccountId: owner }, 201)
+    })
+    .openapi(spaceView, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const detail = await spaceDetail(deps.db, spaceId, c.get('console').accountId)
+      if (!detail) return c.json(notMember, 403)
+      return c.json(detail, 200)
+    })
+    .openapi(renameRoute, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const result = await renameSpace(deps.db, {
+        spaceId,
+        actor: c.get('console').accountId,
+        name: c.req.valid('json').name,
+      })
+      if (!result.ok) return memberError(c, result.reason, '仅空间所有者可修改空间名')
+      return c.json(result.value, 200)
+    })
+    .openapi(deleteRoute, async (c) => {
+      const { spaceId } = c.req.valid('param')
+      const accountId = c.get('console').accountId
+      const admin = await isInstanceAdmin(deps.db, accountId)
+      const result = await deleteSpace(deps.db, {
+        spaceId,
+        actor: accountId,
+        admin,
+        confirmName: c.req.valid('json').confirmName,
+      })
+      if (!result.ok) {
+        if (result.reason === 'name-mismatch') return c.json({ error: '空间名不一致' }, 400)
+        // 别人探不出空间在不在：不存在与不是成员一样回 403，只有实例管理员看得到 404
+        if (result.reason === 'no-space' && admin) return c.json({ error: '空间不存在' }, 404)
+        return memberError(c, result.reason, '仅空间所有者或实例管理员可删除空间')
+      }
+      return c.body(null, 204)
     })
     .openapi(budget, async (c) => {
       const { spaceId } = c.req.valid('param')
       if (!(await memberRole(deps, spaceId, c.get('console').accountId))) {
-        return c.json({ error: '无权访问此空间' }, 403)
+        return c.json(notMember, 403)
       }
       return c.json(await extractionUsage(deps.db, spaceId), 200)
     })
