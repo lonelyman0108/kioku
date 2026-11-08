@@ -23,8 +23,10 @@ const props = withDefaults(
     folded?: number
     expanded?: boolean
     sub?: boolean
+    // 退回按 UTC 分天时，时间也写 UTC 的时和分，和所在的那一天对得上
+    utc?: boolean
   }>(),
-  { layout: 'full', selected: false, folded: 0, expanded: false, sub: false },
+  { layout: 'full', selected: false, folded: 0, expanded: false, sub: false, utc: false },
 )
 const emit = defineEmits<{ select: []; toggle: [] }>()
 
@@ -54,7 +56,7 @@ const changeText = computed(() =>
   >
     <td>
       <time :datetime="item.createdAt" :title="formatTime(item.createdAt)">
-        {{ formatClock(item.createdAt) }}
+        {{ utc ? `${item.createdAt.slice(11, 16)} UTC` : formatClock(item.createdAt) }}
       </time>
     </td>
     <template v-if="layout !== 'narrow'">

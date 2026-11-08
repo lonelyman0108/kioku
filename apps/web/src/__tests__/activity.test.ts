@@ -1,9 +1,10 @@
-import type { ActivityFacets, ActivityItem } from '@kioku/contracts'
+import { ACTIVITY_FIELDS, type ActivityFacets, type ActivityItem } from '@kioku/contracts'
 import { describe, expect, it } from 'vitest'
 
 import {
   changeSummary,
   dayBounds,
+  dayKeyOf,
   dayHeading,
   facetOptions,
   filterQuery,
@@ -364,6 +365,46 @@ describe('至少留一项勾选', () => {
     // 地址里取消勾选的、这次没列出来的照样留着
     expect(toggleOff(listed, ['delete'], 'create', false)).toEqual(['delete', 'create'])
   })
+
+  it('字段可以全部取消：只剩没有改动字段的事件', () => {
+    const fields = [
+      { key: 'content', count: 2 },
+      { key: 'title', count: 1 },
+    ]
+    expect(toggleOff(fields, ['content'], 'title', false, { allowEmpty: true })).toEqual([
+      'content',
+      'title',
+    ])
+    const all = parseState({ range: 'all', noField: ACTIVITY_FIELDS.join(',') }, today)
+    expect(filterQuery(all, today).field).toBe('none')
+  })
+
+  it('操作者最多排除 50 个：再取消一个不改，取消勾选的照样能勾回来', () => {
+    const many = Array.from(
+      { length: MAX_ACTOR_FILTER },
+      (_, i) => `account:${uuid.slice(0, -2)}${String(i).padStart(2, '0')}`,
+    )
+    const actors = [...many, 'bench'].map((key) => ({ key, count: 1 }))
+    expect(toggleOff(actors, many, 'bench', false, { max: MAX_ACTOR_FILTER })).toBeNull()
+    expect(toggleOff(actors, many, many[0]!, true, { max: MAX_ACTOR_FILTER })).toHaveLength(
+      MAX_ACTOR_FILTER - 1,
+    )
+  })
+})
+
+describe('退回按 UTC 分天', () => {
+  it('分组、范围边界都按 UTC', () => {
+    // 2026-11-08 00:30 UTC：本地在 UTC 以西时是 11-07，按 UTC 是 11-08
+    const iso = '2026-11-08T00:30:00.000Z'
+    expect(dayKeyOf(iso, true)).toBe('2026-11-08')
+    expect(groupByDay([item(1, iso)], today, true)[0]!.key).toBe('2026-11-08')
+    expect(dayBounds({ from: '2026-11-01', to: '2026-11-02' }, true)).toEqual({
+      from: '2026-11-01T00:00:00.000Z',
+      to: '2026-11-03T00:00:00.000Z',
+    })
+    const q = filterQuery(parseState({ from: '2026-11-01', to: '2026-11-02' }, today), today, true)
+    expect(q.from).toBe('2026-11-01T00:00:00.000Z')
+  })
 })
 
 describe('详情与时区', () => {
@@ -371,7 +412,24 @@ describe('详情与时区', () => {
     expect(activityDetail).toContain('api.activityEvent(props.spaceId, props.eventId)')
     expect(activityDetail).not.toContain('memoryHistory(')
     expect(activityDetail).toContain('lineCounts(change).added')
-    expect(activityDetail).toContain('return diff.value ?? change')
+    // 逐行对齐算出了差异才用它的行数；正文太长整段对比时用列表的近似值，并写明
+    expect(activityDetail).toContain('return diff.value?.complete ? diff.value : change')
+    expect(activityDetail).toContain('正文太长，未逐行对齐')
+  })
+
+  it('前后快照有正文：不留缓存、每次打开都重取，抹掉历史的地方让它失效', () => {
+    expect(activityDetail).toContain('gcTime: 0')
+    expect(activityDetail).toContain("refetchOnMount: 'always'")
+    const sources = import.meta.glob<string>('../**/*.{vue,ts}', {
+      query: '?raw',
+      import: 'default',
+      eager: true,
+    })
+    for (const [path, source] of Object.entries(sources)) {
+      if (path.includes('__tests__') || path.endsWith('MemoryHistory.vue')) continue
+      if (!source.includes("'memory-history'")) continue
+      expect(source.includes("'activity-event'"), path).toBe(true)
+    }
   })
 
   it('详情里的说明与差异是正文，不小于 14px', () => {
@@ -387,6 +445,8 @@ describe('详情与时区', () => {
   it('服务端不认识浏览器的时区（400）时退回 UTC，并写明按 UTC 分天', () => {
     expect(activityPage).toContain("if (errors.some(tzUnknown)) tz.value = 'UTC'")
     expect(activityPage).toContain('error.status === 400')
-    expect(activityPage).toContain('日历与柱条按 UTC 分天')
+    // 只认时区那种 400：别的 400 不退回
+    expect(activityPage).toContain('?.code === ACTIVITY_UNKNOWN_TIME_ZONE')
+    expect(activityPage).toContain('日历、柱条与表格的日期都按 UTC 分天')
   })
 })

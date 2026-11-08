@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest'
 
-import { collapseUnchanged, diffLines } from '../diff'
+import { collapseUnchanged, diffLines, diffWithStatus } from '../diff'
 
 describe('按行对比', () => {
   it('找出删掉与加上的行，没变的行保留', () => {
@@ -49,5 +49,16 @@ describe('按行对比', () => {
       'same',
     ])
     expect(rows.at(-1)).toEqual({ kind: 'skip', count: 7 })
+  })
+})
+
+describe('对比算没算完', () => {
+  it('中间那段太长时整段算删掉再加上，标出没有逐行对齐', () => {
+    expect(diffWithStatus('甲\n乙', '甲\n丙').complete).toBe(true)
+    const before = Array.from({ length: 2000 }, (_, i) => `a${i}`).join('\n')
+    const after = Array.from({ length: 2000 }, (_, i) => `b${i}`).join('\n')
+    const { lines, complete } = diffWithStatus(before, after)
+    expect(complete).toBe(false)
+    expect(lines.filter((l) => l.kind === 'add')).toHaveLength(2000)
   })
 })

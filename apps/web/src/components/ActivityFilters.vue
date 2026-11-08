@@ -1,8 +1,8 @@
 <script setup lang="ts">
 import type { ActivityFacets, Layer } from '@kioku/contracts'
-import { computed } from 'vue'
+import { computed, nextTick } from 'vue'
 
-import type { FacetOption, FilterGroup } from '../activity'
+import { MAX_ACTOR_FILTER, type FacetOption, type FilterGroup } from '../activity'
 import {
   activityActorIcons,
   activityActorKind,
@@ -52,6 +52,14 @@ function iconOf(group: FilterGroup, key: string): string | null {
   if (group === 'type') return eventLabel(key).icon
   return null
 }
+// 页面可能不接受这次勾选（每组至少留一项、操作者最多排除 MAX_ACTOR_FILTER 个），这时状态没变、
+// 视图不会重画，勾选框要自己改回状态里的样子
+function onChange(group: FilterGroup, key: string, event: Event) {
+  const box = event.target as HTMLInputElement
+  emit('toggle', group, key, box.checked)
+  void nextTick(() => (box.checked = !props.off[group].includes(key)))
+}
+
 const groups = computed(() =>
   (Object.keys(titles) as FilterGroup[]).map((group) => ({
     group,
@@ -81,6 +89,9 @@ const groups = computed(() =>
         </button>
       </legend>
       <p v-if="!g.items.length" class="none">暂无</p>
+      <p v-if="g.group === 'actor' && off.actor.length >= MAX_ACTOR_FILTER" class="none">
+        最多排除 {{ MAX_ACTOR_FILTER }} 个操作者
+      </p>
       <label
         v-for="item in g.items"
         :key="item.key"
@@ -88,11 +99,7 @@ const groups = computed(() =>
         :class="{ zero: !item.count }"
         :title="`${item.label}，${item.count} 条`"
       >
-        <input
-          type="checkbox"
-          :checked="item.on"
-          @change="(e) => emit('toggle', g.group, item.key, (e.target as HTMLInputElement).checked)"
-        />
+        <input type="checkbox" :checked="item.on" @change="(e) => onChange(g.group, item.key, e)" />
         <span class="option-label">
           <StrataSwatch
             v-if="g.group === 'layer'"

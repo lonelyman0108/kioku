@@ -137,6 +137,7 @@ function refresh(spaceId: string) {
     'memory-deleted',
     'memory-expired',
     'memory-history',
+    'activity-event',
     'subjects',
     'subject',
     'activity',

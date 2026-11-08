@@ -7,6 +7,15 @@ export type DiffRow = DiffLine | { kind: 'skip'; count: number }
 const MAX_CELLS = 2_000_000
 
 export function diffLines(before: string, after: string): DiffLine[] {
+  return diffWithStatus(before, after).lines
+}
+
+// 同 diffLines，另外说明是不是逐行对齐算出来的：complete 为 false 时中间那段超出 MAX_CELLS，
+// 整段算删掉再加上，增删的行数不准
+export function diffWithStatus(
+  before: string,
+  after: string,
+): { lines: DiffLine[]; complete: boolean } {
   const a = before.split('\n')
   const b = after.split('\n')
   let start = 0
@@ -21,7 +30,10 @@ export function diffLines(before: string, after: string): DiffLine[] {
   const tail = a.slice(endA).map((text): DiffLine => ({ kind: 'same', text }))
   const midA = a.slice(start, endA)
   const midB = b.slice(start, endB)
-  return [...head, ...diffMiddle(midA, midB), ...tail]
+  return {
+    lines: [...head, ...diffMiddle(midA, midB), ...tail],
+    complete: midA.length * midB.length <= MAX_CELLS,
+  }
 }
 
 function diffMiddle(a: string[], b: string[]): DiffLine[] {
