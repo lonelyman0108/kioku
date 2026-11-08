@@ -105,6 +105,11 @@ const pending = computed(() => {
   ]
 })
 
+// 五类都是 0 时收成一行，不列五行「暂无」
+const nothingPending = computed(
+  () => !!data.value && !data.value.inbox.bindings && pending.value.every((row) => !row.count),
+)
+
 const coverage = computed(() => {
   const e = data.value?.embedding
   return e && e.eligible ? Math.round((e.embedded / e.eligible) * 100) : null
@@ -165,26 +170,29 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
       <div class="overview-col middle">
         <section>
           <SectionHeading title="待处理" />
-          <OverviewRow
-            title="账号绑定申请"
-            :value="data.inbox.bindings"
-            :note="bindingNote(data.pendingBindings, data.inbox.bindings) ?? '暂无'"
-            :action="data.inbox.bindings ? '查看' : null"
-            :to="{ name: 'inbox', params: { spaceId }, query: { tab: 'binding' } }"
-            :hot="data.inbox.bindings > 0"
-            :zero="!data.inbox.bindings"
-          />
-          <OverviewRow
-            v-for="row in pending"
-            :key="row.title"
-            :title="row.title"
-            :value="row.count"
-            :note="row.count ? row.note : '暂无'"
-            :action="row.count ? row.action : null"
-            :to="row.to"
-            :hot="row.hot && row.count > 0"
-            :zero="!row.count"
-          />
+          <p v-if="nothingPending" class="all-clear">暂无待处理</p>
+          <template v-else>
+            <OverviewRow
+              title="账号绑定申请"
+              :value="data.inbox.bindings"
+              :note="bindingNote(data.pendingBindings, data.inbox.bindings) ?? '暂无'"
+              :action="data.inbox.bindings ? '查看' : null"
+              :to="{ name: 'inbox', params: { spaceId }, query: { tab: 'binding' } }"
+              :hot="data.inbox.bindings > 0"
+              :zero="!data.inbox.bindings"
+            />
+            <OverviewRow
+              v-for="row in pending"
+              :key="row.title"
+              :title="row.title"
+              :value="row.count"
+              :note="row.count ? row.note : '暂无'"
+              :action="row.count ? row.action : null"
+              :to="row.to"
+              :hot="row.hot && row.count > 0"
+              :zero="!row.count"
+            />
+          </template>
         </section>
 
         <section>
@@ -443,6 +451,13 @@ const canAdjustBudget = computed(() => space.value?.role === 'owner')
   color: var(--ui-text-highlighted);
   text-decoration: underline;
   text-underline-offset: 3px;
+}
+.all-clear {
+  padding: 16px 0 14px;
+  border-bottom: 1px solid var(--ui-border);
+  font-size: 14px;
+  line-height: 1.5;
+  color: var(--ui-text-muted);
 }
 .empty {
   padding: 10px 0;

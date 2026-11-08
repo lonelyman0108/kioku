@@ -2,6 +2,7 @@ import type { CredentialEvent, KeyScopes, VaultConnection } from '@kioku/contrac
 import { describe, expect, it } from 'vitest'
 
 import appKeys from '../components/AppKeys.vue?raw'
+import keyScopeEditor from '../components/KeyScopeEditor.vue?raw'
 import credentialDetail from '../components/CredentialDetail.vue?raw'
 import credentialForm from '../components/CredentialFormModal.vue?raw'
 import keyMatrix from '../components/KeyMatrix.vue?raw'
@@ -12,6 +13,7 @@ import {
   allowedCredentialCapability,
   issuedCredentialCapability,
   keyPresets,
+  presetScopes,
   sameScopes,
 } from '../components/keyPresets'
 import { scopesSummary } from '../labels'
@@ -277,11 +279,13 @@ describe('凭据能力', () => {
 
 describe('界面用上了这些规则', () => {
   it('签发访问密钥：选项与预设都按空间所有者收紧', () => {
-    expect(appKeys).toContain('disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c')
-    expect(appKeys).toContain(
-      'credentials: allowedCredentialCapability(credentials, props.isSpaceOwner)',
+    expect(keyScopeEditor).toContain(
+      'disabled: allowedCredentialCapability(c, props.isSpaceOwner) !== c',
     )
-    expect(appKeys).toContain('<URadioGroup v-model="form.scopes.credentials"')
+    expect(keyScopeEditor).toContain(':items="credentialItems"')
+    expect(keyScopeEditor).toContain('presetScopes(found, props.isSpaceOwner)')
+    expect(appKeys).toContain('credentials: allowedCredentialCapability(s.credentials, owner)')
+    expect(presetScopes(keyPresets[0]!, false).credentials).toBe('none')
   })
 
   it('权限范围按接口给的会话上下文显示凭据能力', () => {

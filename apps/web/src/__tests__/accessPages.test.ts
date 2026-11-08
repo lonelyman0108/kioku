@@ -396,13 +396,17 @@ describe('应用', () => {
   it('签发上限和当前有效上限不同时要说，Key 那一行和权限范围都说', () => {
     expect(apps).toContain('已按所有者当前角色收紧')
     expect(appKeys).toContain('effectiveNote(key)')
-    expect(appKeys).toContain('签发范围：{{ scopesSummary(key.scopes) }}')
+    // 签发范围拆成标签，不再是一句会在窄列里断开的话
+    expect(appKeys).toMatch(/<ScopeTags\s+class="key-tags"\s+:scopes="key\.scopes"/)
+    expect(appKeys).not.toContain('签发范围：{{ scopesSummary')
+    expect(appsPage).toContain('<ScopeTags')
     expect(keyMatrix).toContain('v-if="isNarrowed(keyInfo)"')
   })
 
   it('已吊销的单独列，岩芯不上色', () => {
     expect(appKeys).toContain('<StrataCore :scopes="key.scopes" revoked')
-    expect(appKeys).toContain('已吊销 {{ formatShort(key.revokedAt!) }}')
+    expect(appKeys).toContain(`<FlagTag :icon="flagIcon('已吊销')">已吊销</FlagTag>`)
+    expect(appKeys).toContain('{{ formatShort(key.revokedAt!) }}')
   })
 
   it('已作废的 Key 不能选，也不去查矩阵：接口返回 404', () => {
